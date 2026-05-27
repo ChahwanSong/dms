@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+from fastapi.testclient import TestClient
+
+from dms.adapters import (
+    StubFilesystemBackendAdapter,
+    StubKubernetesNamespaceQuotaAdapter,
+    StubVolcanoAdapter,
+)
+from dms.api import create_app
+from dms.config import Settings
+from dms.db import Database
+from dms.domain import (
+    DataJobState,
+    FilesystemResourceKey,
+    LifecycleState,
+    StorageMappingInput,
+)
+from dms.migrations import migrate_all
+from dms.planner import Planner
+from dms.repositories import DmsRepository, ObservabilityRepository
+from dms.workers import DMWorkerRuntime, RMWorkerRuntime, confirm_data_job
+
+
+@pytest.fixture()
+def harness(tmp_path):
+    operational_url = f"sqlite:///{tmp_path / 'operational.db'}"
+    observability_url = f"sqlite:///{tmp_path / 'observability.db'}"
+    settings = Settings(
+        database_url=operational_url,
+        observability_database_url=observability_url,
+        worker_lease_seconds=300,
+    )
+    operational = Database(operational_url)
+    observability_db = Database(observability_url)
+    migrate_all(operational, observability_db)
+    repository = DmsRepository(operational)
+    observability = ObservabilityRepository(observability_db)
+    app = create_app(settings, repository, observability)
+    return {
+        "settings": settings,
+        "repository": repository,
+        "observability": observability,
+        "client": TestClient(app),
+        "operational_path": tmp_path / "operational.db",
+        "observability_path": tmp_path / "observability.db",
+    }
+
+
+def filesystem_body(directory_name: str = "alpha") -> dict:
+    return {
+        "requester_id": "user-1",
+        "payload": {
+            "storage_name": "weka-a",
+            "directory_name": directory_name,
+            "resource_type": "user",
+            "quota": {"capacity_bytes": 10**12, "file_count": 5_000_000},
+        },
+    }
+
+
+def ready_storage_sanity(storage_name: str = "weka-a") -> dict:
+    return {
+        "storage_name": storage_name,
+        "status": "Ready",
+        "checked_at": "2026-05-27T00:00:00+00:00",
+        "kubernetes_observed": {
+            "cluster_name": "cluster-a",
+            "storage_class_name": "weka-sc",
+            "storage_class_exists": True,
+            "provisioner": "weka.csi.dms.test",
+        },
+        "agent_observed": {
+            "fresh_reports": 2,
+            "stale_reports": 0,
+            "rm_readiness": "Ready",
+            "dm_readiness": "Ready",
+            "rm_candidates": [{"cluster_name": "cluster-a", "node_name": "rm-1"}],
+            "dm_candidates": [{"cluster_name": "cluster-a", "node_name": "dm-1"}],
+        },
+        "readiness": {
+            "resource_management": "Ready",
+            "data_management": "Ready",
+            "inventory": "Ready",
+        },
+        "checks": [],
+        "warnings": [],
+        "errors": [],
+    }
+
+
+def register_ready_storage_mapping(repository: DmsRepository) -> None:
+    sanity = ready_storage_sanity()
+    repository.upsert_storage_mapping(
+        StorageMappingInput(
+            storage_name="weka-a",
+            backend_template={"backend_type": "weka"},
+            cluster_name="cluster-a",
+            storage_class_name="weka-sc",
+        ),
+        actor="admin",
+        sanity_result=sanity,
+        readiness=sanity["readiness"],
+    )
+
+
+def submit_filesystem(client: TestClient, directory_name: str = "alpha"):
+    return client.post(
+        "/api/v1/resource-management/filesystems",
+        json=filesystem_body(directory_name),
+        headers={"x-dms-actor": "api-client"},
+    )
+
+
+def test_authentication_failure_only_writes_observability_event(harness):
+    response = harness["client"].post(
+        "/api/v1/resource-management/filesystems",
+        json=filesystem_body(),
+    )
+
+    assert response.status_code == 401
+    assert harness["repository"].list_requests() == []
+    events = harness["observability"].list_events()
+    assert events[0]["event_type"] == "authentication_rejected"
+
+
+def test_authorization_failure_is_operational_terminal_without_plan(harness):
+    response = harness["client"].post(
+        "/api/v1/resource-management/filesystems",
+        json=filesystem_body(),
+        headers={"x-dms-actor": "blocked"},
+    )
+
+    assert response.status_code == 403
+    [request] = harness["repository"].list_requests()
+    assert request["status"] == LifecycleState.AUTHORIZATION_FAILED.value
+    assert harness["repository"].get_plan_by_request(request["request_id"]) is None
+    [result] = harness["repository"].get_results(request["request_id"])
+    assert result["terminal_status"] == LifecycleState.AUTHORIZATION_FAILED.value
+    assert result["verification_summary"]["backend_side_effect"] is False
+
+
+def test_request_and_plan_are_persisted_before_backend_side_effect(harness):
+    register_ready_storage_mapping(harness["repository"])
+    response = submit_filesystem(harness["client"])
+    request_id = response.json()["request_id"]
+    fs_adapter = StubFilesystemBackendAdapter()
+    worker = RMWorkerRuntime(
+        repository=harness["repository"],
+        observability=harness["observability"],
+        filesystem_adapter=fs_adapter,
+        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
+        worker_id="rm-c1",
+    )
+
+    request = harness["repository"].get_request(request_id)
+    assert request["status"] == LifecycleState.PERSISTED.value
+    assert fs_adapter.calls == []
+
+    assert Planner(harness["repository"]).run_once() == 1
+    assert harness["repository"].get_plan_by_request(request_id)["status"] == "Planned"
+    assert fs_adapter.calls == []
+
+    assert worker.run_once() == 1
+    assert fs_adapter.calls == [("create", harness["repository"].get_plan_by_request(request_id)["plan_id"])]
+    assert harness["repository"].get_request(request_id)["status"] == "Succeeded"
+
+
+def test_planner_rejects_later_same_resource_request_until_prior_terminal(harness):
+    register_ready_storage_mapping(harness["repository"])
+    first = submit_filesystem(harness["client"], "same").json()["request_id"]
+    second = submit_filesystem(harness["client"], "same").json()["request_id"]
+
+    assert Planner(harness["repository"]).run_once(limit=10) == 2
+
+    assert harness["repository"].get_plan_by_request(first)["status"] == "Planned"
+    second_results = harness["repository"].get_results(second)
+    assert second_results[0]["terminal_status"] == LifecycleState.CONFLICT.value
+    assert second_results[0]["verification_summary"]["backend_side_effect"] is False
+
+
+def test_expired_worker_claim_becomes_stale_claim(harness):
+    register_ready_storage_mapping(harness["repository"])
+    request_id = submit_filesystem(harness["client"], "stale").json()["request_id"]
+    Planner(harness["repository"]).run_once()
+    plan = harness["repository"].get_plan_by_request(request_id)
+    run_id = harness["repository"].claim_plan(
+        plan_id=plan["plan_id"],
+        worker_id="rm-c1",
+        executor_id="rm-c1",
+        lease_seconds=-1,
+    )
+
+    assert harness["repository"].mark_stale_runs() == 1
+    [run] = harness["repository"].list_runs()
+    assert run["run_id"] == run_id
+    assert run["state"] == LifecycleState.STALE_CLAIM.value
+    assert harness["repository"].get_request(request_id)["status"] == "StaleClaim"
+
+
+def test_observability_database_can_be_separate_from_operational_database(harness):
+    harness["observability"].record_event(
+        component="test",
+        severity="INFO",
+        event_type="separation_check",
+        message="ok",
+    )
+
+    operational_tables = _sqlite_tables(harness["operational_path"])
+    observability_tables = _sqlite_tables(harness["observability_path"])
+    assert "requests" in operational_tables
+    assert "diagnostic_events" not in operational_tables
+    assert "diagnostic_events" in observability_tables
+    assert "operational-0001-phase1" in _migration_versions(harness["operational_path"])
+    assert "observability-0001-phase1" in _migration_versions(harness["observability_path"])
+
+
+def test_resource_key_and_storage_mapping_uniqueness(harness):
+    with pytest.raises(ValueError):
+        FilesystemResourceKey("weka-a", "../escape")
+
+    repository = harness["repository"]
+    repository.upsert_storage_mapping(
+        StorageMappingInput(
+            storage_name="weka-a",
+            backend_template={"backend_type": "weka"},
+            cluster_name="c1",
+            storage_class_name="weka-sc",
+        ),
+        actor="admin",
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.upsert_storage_mapping(
+            StorageMappingInput(
+                storage_name="weka-b",
+                backend_template={"backend_type": "weka"},
+                cluster_name="c1",
+                storage_class_name="weka-sc",
+            ),
+            actor="admin",
+        )
+
+
+def test_data_job_confirm_state_stays_out_of_common_lifecycle(harness):
+    register_ready_storage_mapping(harness["repository"])
+    response = harness["client"].post(
+        "/api/v1/data-management/sync",
+        json={
+            "requester_id": "user-1",
+            "storage_name": "weka-a",
+            "source_path": "src",
+            "destination_path": "dst",
+        },
+        headers={"x-dms-actor": "api-client"},
+    )
+    request_id = response.json()["request_id"]
+    Planner(harness["repository"]).run_once()
+    worker = DMWorkerRuntime(
+        repository=harness["repository"],
+        observability=harness["observability"],
+        volcano_adapter=StubVolcanoAdapter(),
+        worker_id="dm-c1",
+    )
+
+    assert worker.run_once() == 1
+    job = harness["repository"].get_data_job_by_request(request_id)
+    assert job["state"] == DataJobState.CONFIRM_PENDING.value
+    assert harness["repository"].get_request(request_id)["status"] == LifecycleState.BLOCKED.value
+    assert DataJobState.CONFIRM_PENDING.value not in {state.value for state in LifecycleState}
+    transitions = harness["repository"].list_state_transitions(request_id)
+    assert DataJobState.CONFIRM_PENDING.value not in {
+        transition["to_state"] for transition in transitions
+    }
+
+    confirm_data_job(harness["repository"], job["job_id"], actor="api-client")
+    assert harness["repository"].get_request(request_id)["status"] == LifecycleState.PLANNED.value
+    assert worker.run_once() == 1
+    assert harness["repository"].get_data_job(job["job_id"])["state"] == DataJobState.SUCCEEDED.value
+    assert harness["repository"].get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+
+
+def test_data_management_rejects_raw_options_and_path_traversal(harness):
+    raw_response = harness["client"].post(
+        "/api/v1/data-management/rm",
+        json={
+            "requester_id": "user-1",
+            "storage_name": "weka-a",
+            "target_path": "target",
+            "options": {"raw_options": "--danger"},
+        },
+        headers={"x-dms-actor": "api-client"},
+    )
+    traversal_response = harness["client"].post(
+        "/api/v1/data-management/scan",
+        json={
+            "requester_id": "user-1",
+            "storage_name": "weka-a",
+            "target_path": "../target",
+        },
+        headers={"x-dms-actor": "api-client"},
+    )
+
+    assert raw_response.status_code == 422
+    assert traversal_response.status_code == 422
+
+
+def _sqlite_tables(path) -> set[str]:
+    connection = sqlite3.connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    finally:
+        connection.close()
+    return {row[0] for row in rows}
+
+
+def _migration_versions(path) -> set[str]:
+    connection = sqlite3.connect(path)
+    try:
+        rows = connection.execute("SELECT version FROM schema_migrations").fetchall()
+    finally:
+        connection.close()
+    return {row[0] for row in rows}

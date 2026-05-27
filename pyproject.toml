@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dms"
+version = "0.1.0"
+description = "Data Management Service phase 1 skeleton"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "pydantic>=2.0",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+ldap = ["ldap3>=2.9"]
+kubernetes = ["kubernetes>=30.0"]
+postgres = ["psycopg[binary]>=3.2"]
+test = ["httpx>=0.27", "pytest>=8.0"]
+
+[project.scripts]
+dms = "dms.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
