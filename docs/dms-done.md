@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-05-28 15:59 +0900
+Last updated: 2026-05-28 21:18 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -11,7 +11,7 @@ Last updated: 2026-05-28 15:59 +0900
 - `Done`은 실제 테스트베드 또는 실제 외부 시스템에 연결해 확인된 기능만 의미한다.
 - local pytest, stub adapter, synthetic data는 보조 회귀 검증으로만 기록한다.
 - 아직 실제 backend side effect가 구현되지 않은 기능은 성공처럼 적지 않고 명확히 미구현으로 남긴다.
-- Phase 5까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle이다.
+- Phase 6까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle이다.
 
 ## Testbed Architecture
 
@@ -36,6 +36,7 @@ Last updated: 2026-05-28 15:59 +0900
 - `cluster-b`
   - managed cluster 역할
   - Longhorn `StorageClass/testbed-longhorn`
+  - Longhorn `StorageClass/longhorn-static`
 - OpenLDAP
   - `ldap://192.168.56.31`
   - DMS Identity Mapping은 LDAP direct read-only lookup만 성공 기준으로 사용
@@ -102,7 +103,7 @@ longhorn-csi-plugin-pddq5                           3/3     Running   0         
 longhorn-driver-deployer-6f94cb9fd9-4pxv7           1/1     Running   0          8h
 ```
 
-## Implemented Through Phase 5
+## Implemented Through Phase 6
 
 ### Phase 1: Core Lifecycle Skeleton
 
@@ -280,7 +281,42 @@ Live 검증 대상:
 - DMS lifecycle delete는 namespace delete가 아니다. Phase 5의 delete 성공 기준은 `ResourceQuota/dms-storage-quota` 삭제다.
 - namespace/PVC cleanup은 verification script cleanup으로만 수행했다.
 - DMS Agent DaemonSet은 아직 없으므로 Agent report는 Phase 3과 동일하게 API로 제출한 synthetic evidence다.
-- Phase 5는 multi StorageClass quota entry 전체 운영 검증이나 non-DMS ResourceQuota effective quota warning/query를 완료 범위로 보지 않는다.
+- Phase 5는 multi StorageClass quota entry 전체 운영 검증이나 non-DMS ResourceQuota effective quota warning/query를 완료 범위로 보지 않는다. 해당 항목은 Phase 6에서 별도 검증했다.
+
+### Phase 6: Kubernetes Multi-StorageClass Quota + Effective Warning
+
+확실히 구현된 범위:
+
+- 하나의 Kubernetes namespace quota resource에 여러 `storage_class_quotas[]` entry 허용
+- 각 `storage_name` mapping에서 `storage_class_name`, `cluster_name` derive
+- namespace-wide quota와 StorageClass-specific quota key를 하나의 `ResourceQuota/dms-storage-quota`에 렌더링
+  - `requests.storage`
+  - `persistentvolumeclaims`
+  - `<storageclass>.storageclass.storage.k8s.io/requests.storage`
+  - `<storageclass>.storageclass.storage.k8s.io/persistentvolumeclaims`
+- multi-entry create/update lifecycle
+- update에서 `storage_class_quotas[]` full replacement semantics
+- duplicate `storage_name`, cross-cluster mapping, storage class mismatch validation
+- StorageClass-specific `status.used`까지 포함한 decrease guard
+- block/unblock이 모든 hard key를 0/restore 처리
+- check가 key별 drift issue 기록
+- sync가 live hard를 `quota`와 각 `storage_class_quotas[]` entry로 역산해 DB desired state 갱신
+- namespace 안의 non-DMS ResourceQuota를 read-only 조회해 effective quota warning 기록
+- non-DMS ResourceQuota는 DMS delete에서 보존
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 Kubernetes mutation/read: `cluster-a`, `cluster-b`
+- 실제 Longhorn multi-StorageClass target: `cluster-b/testbed-longhorn`, `cluster-b/longhorn-static`
+- 실제 CephFS single-entry regression target: `cluster-a/testbed-cephfs`
+
+주의:
+
+- DMS lifecycle delete는 여전히 namespace delete가 아니다.
+- namespace/PVC cleanup은 verification script cleanup으로만 수행했다.
+- DMS Agent DaemonSet은 아직 없으므로 Agent report는 API로 제출한 synthetic evidence다.
+- Phase 6 effective quota warning은 check/sync result evidence로 검증했다. 별도 namespace quota query endpoint나 action-required aggregation은 아직 완료 범위가 아니다.
 
 ## Live Verification Results
 
@@ -587,6 +623,72 @@ Output summary:
 
 - `docs/dms-phase5-verification.md`
 
+### Phase 6 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+PATH="/tmp/dms-phase3-venv/bin:$PATH" ./scripts/verify-phase6-testbed.sh
+```
+
+Output summary:
+
+```json
+{
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase6_obs_20260528211617",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase6_20260528211617",
+  "status": "ok",
+  "targets": [
+    {
+      "target": "longhorn-multi-storageclass",
+      "cluster_name": "cluster-b",
+      "storage_names": ["longhorn-b", "longhorn-static-b"],
+      "storage_class_names": ["testbed-longhorn", "longhorn-static"],
+      "decrease_guard_status": "Rejected",
+      "blocked_pvc_rejected": true,
+      "drift_check_status": "Drifted",
+      "effective_warning_types": ["non_dms_quota_more_restrictive"],
+      "delete_resource_status": "Deleted",
+      "non_dms_quota_preserved": true,
+      "synced_resource_quota_hard": {
+        "longhorn-static.storageclass.storage.k8s.io/persistentvolumeclaims": "4",
+        "longhorn-static.storageclass.storage.k8s.io/requests.storage": "256Mi",
+        "persistentvolumeclaims": "8",
+        "requests.storage": "768Mi",
+        "testbed-longhorn.storageclass.storage.k8s.io/persistentvolumeclaims": "4",
+        "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "512Mi"
+      }
+    },
+    {
+      "target": "cephfs-single-storageclass-regression",
+      "cluster_name": "cluster-a",
+      "storage_name": "cephfs-a",
+      "storage_class_name": "testbed-cephfs",
+      "check_status": "Consistent",
+      "delete_resource_status": "Deleted"
+    }
+  ]
+}
+```
+
+검증 의미:
+
+- 실제 `cluster-b` Kubernetes API에서 하나의 namespace에 `testbed-longhorn`과 `longhorn-static` StorageClass별 quota를 함께 적용했다.
+- StorageClass-specific storage/PVC count hard key가 모두 렌더링되고 live `status.used`로 반영됐다.
+- `longhorn-static` quota만 초과하는 PVC admission reject를 확인했다.
+- StorageClass-specific decrease guard가 backend side effect 없이 `Rejected` 됐다.
+- block/unblock이 namespace-wide 및 StorageClass-specific hard key 전체에 적용됐다.
+- manual drift check가 key별 issue를 기록했다.
+- non-DMS ResourceQuota가 DMS보다 더 restrictive한 effective quota warning으로 기록됐다.
+- sync from live 후 operational PostgreSQL desired state에 multi-entry hard limit이 보존됐다.
+- DMS delete는 `dms-storage-quota`만 삭제했고 non-DMS ResourceQuota는 보존했다.
+- `cluster-a/testbed-cephfs` single-entry lifecycle regression도 통과했다.
+
+상세 검증 기록:
+
+- `docs/dms-phase6-verification.md`
+
 ### PostgreSQL Evidence Query
 
 위 live verification이 만든 DB를 직접 조회한 결과다. DB 이름은 실행마다 바뀌므로 재검증 시에는 직전 output의 DB 이름으로 바꿔 실행한다.
@@ -784,6 +886,80 @@ Phase 5 DB evidence:
 }
 ```
 
+Phase 6 DB evidence:
+
+```json
+{
+  "operational_database": "dms_phase6_20260528211617",
+  "observability_database": "dms_phase6_obs_20260528211617",
+  "request_status_counts": {
+    "Rejected": 1,
+    "Succeeded": 12
+  },
+  "result_status_counts": {
+    "Rejected": 1,
+    "Succeeded": 12
+  },
+  "resources": [
+    {
+      "resource_key": "cluster-a:dms-phase6-cephfs-regression-12f4436d",
+      "status": "Deleted",
+      "version": 4,
+      "desired_hard": {
+        "persistentvolumeclaims": "4",
+        "requests.storage": "256Mi",
+        "testbed-cephfs.storageclass.storage.k8s.io/requests.storage": "256Mi"
+      }
+    },
+    {
+      "resource_key": "cluster-b:dms-phase6-longhorn-multi-12f4436d",
+      "status": "Deleted",
+      "version": 8,
+      "desired_hard": {
+        "longhorn-static.storageclass.storage.k8s.io/persistentvolumeclaims": "4",
+        "longhorn-static.storageclass.storage.k8s.io/requests.storage": "256Mi",
+        "persistentvolumeclaims": "8",
+        "requests.storage": "768Mi",
+        "testbed-longhorn.storageclass.storage.k8s.io/persistentvolumeclaims": "4",
+        "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "512Mi"
+      }
+    }
+  ],
+  "effective_quota_warning_result": {
+    "request_id": "req_828b47254e1f4e9788c971cba363bb98",
+    "consistency_status": "Drifted",
+    "issues": [
+      {
+        "field": "spec.hard",
+        "key": "testbed-longhorn.storageclass.storage.k8s.io/requests.storage",
+        "reason": "hard_limit_drifted",
+        "desired": "384Mi",
+        "live": "512Mi"
+      }
+    ],
+    "effective_quota_warnings": [
+      {
+        "type": "non_dms_quota_more_restrictive",
+        "resource_quota_name": "phase6-non-dms-quota",
+        "key": "testbed-longhorn.storageclass.storage.k8s.io/requests.storage",
+        "dms_hard": "384Mi",
+        "non_dms_hard": "128Mi"
+      }
+    ]
+  },
+  "event_counts": {
+    "kubernetes_resourcequota_apply_completed": 2,
+    "kubernetes_resourcequota_update_completed": 2,
+    "kubernetes_resourcequota_block_completed": 1,
+    "kubernetes_resourcequota_unblock_completed": 1,
+    "kubernetes_resourcequota_consistency_check_completed": 2,
+    "kubernetes_resourcequota_sync_completed": 2,
+    "kubernetes_resourcequota_delete_completed": 2,
+    "rm_plan_completed": 12
+  }
+}
+```
+
 ## Re-run From Scratch
 
 ### 1. Prepare Python Environment
@@ -879,7 +1055,30 @@ ssh c1-control "kubectl delete namespace <cephfs_namespace_from_output> --ignore
 ssh c2-control "kubectl delete namespace <longhorn_namespace_from_output> --ignore-not-found"
 ```
 
-### 8. Optional Local Regression
+### 8. Re-run Phase 6 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+PATH="/tmp/dms-phase3-venv/bin:$PATH" ./scripts/verify-phase6-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE6_OPERATIONAL_DB` and `DMS_PHASE6_OBSERVABILITY_DB` are set.
+
+To inspect namespaces manually after the script, keep cleanup disabled:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE6_CLEANUP=false PATH="/tmp/dms-phase3-venv/bin:$PATH" ./scripts/verify-phase6-testbed.sh
+ssh c2-control "kubectl -n <longhorn_multi_namespace_from_output> get resourcequota,pvc"
+ssh c1-control "kubectl -n <cephfs_namespace_from_output> get resourcequota,pvc"
+ssh c2-control "kubectl delete namespace <longhorn_multi_namespace_from_output> --ignore-not-found"
+ssh c1-control "kubectl delete namespace <cephfs_namespace_from_output> --ignore-not-found"
+```
+
+### 9. Optional Local Regression
 
 이 검증은 mock/stub도 포함하므로 `Done`의 단독 근거로 쓰지 않는다. 코드 회귀 확인 용도다.
 
@@ -893,12 +1092,12 @@ cd /home/mason/workspace/dms
 Output:
 
 ```text
-30 passed in 15.38s
+37 passed in 17.11s
 ```
 
 ## Not Implemented Yet
 
-다음 항목은 Phase 5까지 완료된 기능으로 보지 않는다.
+다음 항목은 Phase 6까지 완료된 기능으로 보지 않는다.
 
 - DMS API server, Planner, Worker, Agent의 Kubernetes Deployment/Helm/Kustomize 배포
 - 실제 DMS Agent DaemonSet
@@ -906,9 +1105,8 @@ Output:
 - 실제 filesystem directory create/update/block/delete
 - 실제 filesystem quota 적용
 - DMS lifecycle operation으로서의 Kubernetes namespace delete
-- Kubernetes namespace quota multi StorageClass entry의 전체 운영 검증
 - Kubernetes default quota policy 기반 reset workflow
-- Kubernetes effective quota warning/query across non-DMS ResourceQuota objects
+- Kubernetes effective quota dedicated query/action-required aggregation beyond check/sync result evidence
 - 실제 VolcanoJob create/watch/terminate
 - mpifileutils image build 또는 live execution
 - Data Management POSIX permission runtime preflight
@@ -918,8 +1116,9 @@ Output:
 
 ## Comments For Next Phases
 
-- 다음 phase는 DMS Agent DaemonSet, filesystem quota lifecycle, 또는 Kubernetes effective quota warning/query 중 하나로 좁혀서 진행하는 것이 적절하다.
-- `cluster-a/testbed-cephfs`는 Phase 5에서 self-managed RM target으로 검증했다.
+- 다음 phase는 DMS Agent DaemonSet, filesystem quota lifecycle, 또는 Kubernetes effective quota dedicated query/action-required aggregation 중 하나로 좁혀서 진행하는 것이 적절하다.
+- `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6에서 multi-StorageClass quota target으로 검증했다.
+- `cluster-a/testbed-cephfs`는 Phase 5/6에서 self-managed RM target 및 regression target으로 검증했다.
 - Phase 4부터는 mock/stub 결과와 real backend mutation 결과를 문서에서 반드시 분리한다.
 - 실제 backend mutation이 추가될 때마다 이 문서의 `Live Verification Results`와 `Not Implemented Yet`를 갱신한다.
 - live verification script 이름에 `smoke`가 남아 있더라도, 이 문서에서는 어떤 부분이 실제 외부 시스템 검증이고 어떤 부분이 stub/synthetic인지 명확히 구분한다.

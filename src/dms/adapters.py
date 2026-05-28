@@ -212,23 +212,35 @@ def render_kubernetes_resource_quota_hard(desired_state: dict[str, Any]) -> dict
         hard["requests.storage"] = kubernetes_quantity_from_bytes(storage_bytes)
     if pvc_count is not None:
         hard["persistentvolumeclaims"] = str(pvc_count)
-    for entry in desired_state.get("storage_class_quotas") or []:
+    storage_class_quotas = desired_state.get("storage_class_quotas") or []
+    for entry in storage_class_quotas:
         if not isinstance(entry, dict):
             raise ValueError("storage_class_quotas entries must be objects")
         storage_class_name = entry.get("storage_class_name")
         if not storage_class_name:
             raise ValueError("storage_class_quotas[].storage_class_name is required")
         entry_bytes = _positive_int(
-            entry.get("requests_storage_bytes")
-            or entry.get("capacity_bytes")
-            or storage_bytes,
+            _first_present(entry, "requests_storage_bytes", "capacity_bytes"),
             "storage_class_quotas[].requests_storage_bytes",
         )
-        if entry_bytes is None:
-            raise ValueError("storage class quota storage bytes are required")
-        hard[
-            f"{storage_class_name}.storageclass.storage.k8s.io/requests.storage"
-        ] = kubernetes_quantity_from_bytes(entry_bytes)
+        if entry_bytes is None and len(storage_class_quotas) == 1:
+            entry_bytes = storage_bytes
+        if entry_bytes is not None:
+            hard[
+                kubernetes_storage_class_quota_key(
+                    storage_class_name, "requests.storage"
+                )
+            ] = kubernetes_quantity_from_bytes(entry_bytes)
+        entry_pvc_count = _positive_int(
+            _first_present(entry, "pvc_count", "pvc_count_quota"),
+            "storage_class_quotas[].pvc_count",
+        )
+        if entry_pvc_count is not None:
+            hard[
+                kubernetes_storage_class_quota_key(
+                    storage_class_name, "persistentvolumeclaims"
+                )
+            ] = str(entry_pvc_count)
     if not hard:
         raise ValueError("at least one ResourceQuota hard limit is required")
     return hard
@@ -267,6 +279,28 @@ def kubernetes_quantity_to_bytes(value: Any) -> int:
         if text.endswith(suffix):
             return int(text[: -len(suffix)]) * multiplier
     return int(text)
+
+
+def kubernetes_storage_class_quota_key(
+    storage_class_name: str, resource_name: str
+) -> str:
+    return f"{storage_class_name}.storageclass.storage.k8s.io/{resource_name}"
+
+
+def parse_kubernetes_storage_class_quota_key(key: str) -> tuple[str, str] | None:
+    marker = ".storageclass.storage.k8s.io/"
+    if marker not in key:
+        return None
+    storage_class_name, resource_name = key.split(marker, 1)
+    if not storage_class_name or not resource_name:
+        return None
+    return storage_class_name, resource_name
+
+
+def kubernetes_resource_quota_value_to_base_units(key: str, value: Any) -> int:
+    if key == "persistentvolumeclaims" or key.endswith("/persistentvolumeclaims"):
+        return int(value)
+    return kubernetes_quantity_to_bytes(value)
 
 
 @dataclass(frozen=True)
@@ -439,10 +473,21 @@ class KubernetesNamespaceQuotaLiveAdapter:
         if not observed["exists"]:
             raise KubernetesMutationError(
                 f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
-            )
+        )
         _ensure_dms_managed(observed, resource_quota_name)
         synced_desired = dict(desired)
-        _sync_desired_from_resource_quota_hard(synced_desired, observed["spec_hard"])
+        sync_warnings = _sync_desired_from_resource_quota_hard(
+            synced_desired, observed["spec_hard"]
+        )
+        resource_quotas: list[dict[str, Any]] = []
+        effective_warnings: list[dict[str, Any]] = []
+        if desired.get("include_effective_quota"):
+            resource_quotas = self.list_resource_quotas(cluster_name, namespace_name)
+            effective_warnings = effective_resource_quota_warnings(
+                resource_quotas=resource_quotas,
+                dms_hard=synced_desired["resource_quota_hard"],
+                resource_quota_name=resource_quota_name,
+            )
         return AdapterResult(
             applied_state={
                 "adapter": "kubernetes-namespace-quota-live",
@@ -453,6 +498,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
                 "resource_quota_name": resource_quota_name,
                 "synced_desired_state": synced_desired,
                 "live_resource_quota": observed,
+                "sync_warnings": sync_warnings,
             },
             observed_state={
                 "adapter": "kubernetes-namespace-quota-live",
@@ -460,6 +506,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
                 "backend_side_effect": False,
                 "synced": True,
                 "resource_quota": observed,
+                "sync_warnings": sync_warnings,
+                "effective_quota_warnings": effective_warnings,
+                "resource_quotas": resource_quotas,
             },
             message="Kubernetes ResourceQuota live state synced to DB",
         )
@@ -483,16 +532,22 @@ class KubernetesNamespaceQuotaLiveAdapter:
             if labels.get("app.kubernetes.io/managed-by") != "dms":
                 status = "Drifted"
                 issues.append({"field": "metadata.labels", "reason": "not_dms_managed"})
-            if dict(observed.get("spec_hard") or {}) != dict(desired_hard):
+            hard_issues = kubernetes_resource_quota_hard_issues(
+                desired_hard=desired_hard,
+                live_hard=observed.get("spec_hard") or {},
+            )
+            if hard_issues:
                 status = "Drifted"
-                issues.append(
-                    {
-                        "field": "spec.hard",
-                        "reason": "hard_limits_drifted",
-                        "desired": desired_hard,
-                        "live": observed.get("spec_hard") or {},
-                    }
-                )
+                issues.extend(hard_issues)
+        resource_quotas: list[dict[str, Any]] = []
+        effective_warnings: list[dict[str, Any]] = []
+        if desired.get("include_effective_quota") and observed["exists"]:
+            resource_quotas = self.list_resource_quotas(cluster_name, namespace_name)
+            effective_warnings = effective_resource_quota_warnings(
+                resource_quotas=resource_quotas,
+                dms_hard=desired_hard,
+                resource_quota_name=resource_quota_name,
+            )
         return AdapterResult(
             applied_state={
                 "adapter": "kubernetes-namespace-quota-live",
@@ -511,6 +566,8 @@ class KubernetesNamespaceQuotaLiveAdapter:
                 "issues": issues,
                 "desired_hard": desired_hard,
                 "resource_quota": observed,
+                "effective_quota_warnings": effective_warnings,
+                "resource_quotas": resource_quotas,
             },
             message=f"Kubernetes ResourceQuota consistency check {status}",
         )
@@ -524,6 +581,19 @@ class KubernetesNamespaceQuotaLiveAdapter:
             resource_quota_name=resource_quota_name,
             allow_missing=True,
         )
+
+    def list_resource_quotas(
+        self, cluster_name: str, namespace_name: str
+    ) -> list[dict[str, Any]]:
+        completed = self._kubectl(
+            cluster_name,
+            ["-n", namespace_name, "get", "resourcequota", "-o", "json"],
+        )
+        payload = _json_stdout(completed.stdout, "resourcequota-list")
+        return [
+            _resource_quota_summary(item, cluster_name=cluster_name)
+            for item in payload.get("items", [])
+        ]
 
     def _ensure_namespace(
         self,
@@ -625,21 +695,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
                 f"{completed.stderr.strip()}"
             )
         payload = _json_stdout(completed.stdout, "resourcequota")
-        metadata = payload.get("metadata", {})
-        status = payload.get("status", {})
-        spec = payload.get("spec", {})
-        return {
-            "exists": True,
-            "name": metadata.get("name"),
-            "namespace": metadata.get("namespace"),
-            "uid": metadata.get("uid"),
-            "resource_version": metadata.get("resourceVersion"),
-            "labels": metadata.get("labels") or {},
-            "annotations": metadata.get("annotations") or {},
-            "spec_hard": spec.get("hard") or {},
-            "status_hard": status.get("hard") or {},
-            "status_used": status.get("used") or {},
-        }
+        summary = _resource_quota_summary(payload, cluster_name=cluster_name)
+        summary["exists"] = True
+        return summary
 
     def _kubectl(
         self,
@@ -883,6 +941,13 @@ def _positive_int(value: Any, label: str) -> int | None:
     return parsed
 
 
+def _first_present(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data and data[key] is not None:
+            return data[key]
+    return None
+
+
 def _json_stdout(stdout: str, kind: str) -> dict[str, Any]:
     try:
         return json.loads(stdout)
@@ -904,10 +969,133 @@ def _ensure_dms_managed(resource_quota: dict[str, Any], resource_quota_name: str
         )
 
 
+def _resource_quota_summary(
+    payload: dict[str, Any], *, cluster_name: str
+) -> dict[str, Any]:
+    metadata = payload.get("metadata", {})
+    status = payload.get("status", {})
+    spec = payload.get("spec", {})
+    return {
+        "exists": True,
+        "cluster_name": cluster_name,
+        "name": metadata.get("name"),
+        "namespace": metadata.get("namespace"),
+        "uid": metadata.get("uid"),
+        "resource_version": metadata.get("resourceVersion"),
+        "labels": metadata.get("labels") or {},
+        "annotations": metadata.get("annotations") or {},
+        "spec_hard": spec.get("hard") or {},
+        "status_hard": status.get("hard") or {},
+        "status_used": status.get("used") or {},
+    }
+
+
+def kubernetes_resource_quota_hard_issues(
+    *, desired_hard: dict[str, str], live_hard: dict[str, str]
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for key in sorted(set(desired_hard) | set(live_hard)):
+        if key not in desired_hard:
+            issues.append(
+                {
+                    "field": "spec.hard",
+                    "key": key,
+                    "reason": "hard_limit_unexpected_live",
+                    "desired": None,
+                    "live": live_hard[key],
+                }
+            )
+            continue
+        if key not in live_hard:
+            issues.append(
+                {
+                    "field": "spec.hard",
+                    "key": key,
+                    "reason": "hard_limit_missing_in_live",
+                    "desired": desired_hard[key],
+                    "live": None,
+                }
+            )
+            continue
+        if str(desired_hard[key]) != str(live_hard[key]):
+            issues.append(
+                {
+                    "field": "spec.hard",
+                    "key": key,
+                    "reason": "hard_limit_drifted",
+                    "desired": desired_hard[key],
+                    "live": live_hard[key],
+                }
+            )
+    return issues
+
+
+def effective_resource_quota_warnings(
+    *,
+    resource_quotas: list[dict[str, Any]],
+    dms_hard: dict[str, str],
+    resource_quota_name: str = "dms-storage-quota",
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    for resource_quota in resource_quotas:
+        if resource_quota.get("name") == resource_quota_name:
+            continue
+        hard = resource_quota.get("spec_hard") or {}
+        for key, value in sorted(hard.items()):
+            if key not in dms_hard:
+                warnings.append(
+                    {
+                        "type": "unknown_non_dms_quota_key",
+                        "resource_quota_name": resource_quota.get("name"),
+                        "key": key,
+                        "non_dms_hard": value,
+                    }
+                )
+                continue
+            try:
+                non_dms_value = kubernetes_resource_quota_value_to_base_units(key, value)
+                dms_value = kubernetes_resource_quota_value_to_base_units(
+                    key, dms_hard[key]
+                )
+            except (TypeError, ValueError):
+                warnings.append(
+                    {
+                        "type": "unparseable_non_dms_quota_value",
+                        "resource_quota_name": resource_quota.get("name"),
+                        "key": key,
+                        "dms_hard": dms_hard[key],
+                        "non_dms_hard": value,
+                    }
+                )
+                continue
+            if non_dms_value == 0:
+                warnings.append(
+                    {
+                        "type": "non_dms_quota_zero_limit",
+                        "resource_quota_name": resource_quota.get("name"),
+                        "key": key,
+                        "dms_hard": dms_hard[key],
+                        "non_dms_hard": value,
+                    }
+                )
+            elif non_dms_value < dms_value:
+                warnings.append(
+                    {
+                        "type": "non_dms_quota_more_restrictive",
+                        "resource_quota_name": resource_quota.get("name"),
+                        "key": key,
+                        "dms_hard": dms_hard[key],
+                        "non_dms_hard": value,
+                    }
+                )
+    return warnings
+
+
 def _sync_desired_from_resource_quota_hard(
     desired: dict[str, Any], hard: dict[str, str]
-) -> None:
+) -> list[dict[str, Any]]:
     desired["resource_quota_hard"] = dict(hard)
+    warnings: list[dict[str, Any]] = []
     quota = dict(desired.get("quota") or {})
     if "requests.storage" in hard:
         quota["requests_storage_bytes"] = kubernetes_quantity_to_bytes(
@@ -919,20 +1107,40 @@ def _sync_desired_from_resource_quota_hard(
         desired["quota"] = quota
 
     storage_class_quotas: list[dict[str, Any]] = []
+    matched_storage_class_keys: set[str] = set()
     for entry in desired.get("storage_class_quotas") or []:
         if not isinstance(entry, dict):
             continue
         synced_entry = dict(entry)
         storage_class_name = synced_entry.get("storage_class_name")
         if storage_class_name:
-            hard_key = f"{storage_class_name}.storageclass.storage.k8s.io/requests.storage"
+            hard_key = kubernetes_storage_class_quota_key(
+                storage_class_name, "requests.storage"
+            )
             if hard_key in hard:
                 synced_entry["requests_storage_bytes"] = kubernetes_quantity_to_bytes(
                     hard[hard_key]
                 )
+                matched_storage_class_keys.add(hard_key)
+            pvc_key = kubernetes_storage_class_quota_key(
+                storage_class_name, "persistentvolumeclaims"
+            )
+            if pvc_key in hard:
+                synced_entry["pvc_count"] = int(hard[pvc_key])
+                matched_storage_class_keys.add(pvc_key)
         storage_class_quotas.append(synced_entry)
     if storage_class_quotas:
         desired["storage_class_quotas"] = storage_class_quotas
+    for key in sorted(hard):
+        if parse_kubernetes_storage_class_quota_key(key) and key not in matched_storage_class_keys:
+            warnings.append(
+                {
+                    "type": "unknown_storageclass_quota_key",
+                    "key": key,
+                    "live": hard[key],
+                }
+            )
+    return warnings
 
 
 @dataclass

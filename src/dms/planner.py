@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .adapters import (
-    kubernetes_quantity_to_bytes,
+    kubernetes_resource_quota_value_to_base_units,
     render_kubernetes_resource_quota_hard,
     zero_kubernetes_resource_quota_hard,
 )
@@ -163,9 +163,9 @@ class Planner:
                 request["resource_kind"], request["resource_key"]
             )
             if existing and request["operation"] != OperationKind.K8S_QUOTA_CREATE.value:
-                base = dict(existing["desired_state"])
-                base.update(desired)
-                desired = base
+                desired = self._merge_kubernetes_quota_desired(
+                    existing["desired_state"], desired
+                )
         desired.update(
             {
                 "operation": request["operation"],
@@ -191,6 +191,9 @@ class Planner:
         }
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             metadata["planner"] = (
+                "phase6"
+                if len(desired_state.get("storage_class_quotas") or []) > 1
+                else
                 "phase4"
                 if request["operation"] == OperationKind.K8S_QUOTA_CREATE.value
                 else "phase5"
@@ -353,24 +356,58 @@ class Planner:
         existing = self.repository.get_resource(request["resource_kind"], request["resource_key"])
         if operation != OperationKind.K8S_QUOTA_CREATE.value and not existing:
             issues.append({"reason": "resource_missing", "resource_key": request["resource_key"]})
-        storage_class_quotas = payload.get("storage_class_quotas") or []
-        if operation == OperationKind.K8S_QUOTA_CREATE.value and len(storage_class_quotas) != 1:
-            issues.append(
-                {
-                    "reason": "unsupported_storage_class_quota_count",
-                    "count": len(storage_class_quotas),
-                }
-            )
-        if operation == OperationKind.K8S_QUOTA_UPDATE.value and len(storage_class_quotas) > 1:
-            issues.append(
-                {
-                    "reason": "unsupported_storage_class_quota_count",
-                    "count": len(storage_class_quotas),
-                }
-            )
+        raw_storage_class_quotas = payload.get("storage_class_quotas")
+        storage_class_quotas = raw_storage_class_quotas or []
+        if raw_storage_class_quotas is not None and not isinstance(raw_storage_class_quotas, list):
+            issues.append({"reason": "storage_class_quotas_must_be_list"})
+            storage_class_quotas = []
+        seen_storage_names: set[str] = set()
         for entry in storage_class_quotas:
             if not isinstance(entry, dict) or not entry.get("storage_name"):
                 issues.append({"reason": "storage_class_quota_storage_name_missing"})
+                continue
+            storage_name = entry["storage_name"]
+            if storage_name in seen_storage_names:
+                issues.append(
+                    {
+                        "reason": "duplicate_storage_name",
+                        "storage_name": storage_name,
+                    }
+                )
+            seen_storage_names.add(storage_name)
+            if operation in {
+                OperationKind.K8S_QUOTA_CREATE.value,
+                OperationKind.K8S_QUOTA_UPDATE.value,
+            } and len(storage_class_quotas) > 1:
+                if entry.get("requests_storage_bytes") is None and entry.get(
+                    "capacity_bytes"
+                ) is None:
+                    issues.append(
+                        {
+                            "reason": "storage_class_quota_requests_storage_bytes_required",
+                            "storage_name": storage_name,
+                        }
+                    )
+            for key in ("requests_storage_bytes", "capacity_bytes", "pvc_count"):
+                if entry.get(key) is None:
+                    continue
+                try:
+                    if int(entry[key]) <= 0:
+                        issues.append(
+                            {
+                                "reason": f"storage_class_quota_{key}_invalid",
+                                "storage_name": storage_name,
+                                "value": entry[key],
+                            }
+                        )
+                except (TypeError, ValueError):
+                    issues.append(
+                        {
+                            "reason": f"storage_class_quota_{key}_invalid",
+                            "storage_name": storage_name,
+                            "value": entry[key],
+                        }
+                    )
         quota = payload.get("quota") or {}
         if operation in {
             OperationKind.K8S_QUOTA_CREATE.value,
@@ -418,6 +455,7 @@ class Planner:
         payload = request["payload_summary"]
         cluster_name = payload.get("cluster_name")
         issues: list[dict[str, Any]] = []
+        seen_storage_classes: set[str] = set()
         for entry in payload.get("storage_class_quotas") or []:
             storage_name = entry.get("storage_name") if isinstance(entry, dict) else None
             if not storage_name:
@@ -447,6 +485,17 @@ class Planner:
                         "mapping_storage_class_name": mapping.get("storage_class_name"),
                     }
                 )
+            derived_storage_class = mapping.get("storage_class_name")
+            if derived_storage_class in seen_storage_classes:
+                issues.append(
+                    {
+                        "reason": "duplicate_storage_class_name",
+                        "storage_name": storage_name,
+                        "storage_class_name": derived_storage_class,
+                    }
+                )
+            if derived_storage_class:
+                seen_storage_classes.add(derived_storage_class)
         if not issues:
             return False
         return self._reject_planner_issue(
@@ -525,6 +574,19 @@ class Planner:
         desired["resource_quota_hard"] = render_kubernetes_resource_quota_hard(desired)
 
     @staticmethod
+    def _merge_kubernetes_quota_desired(
+        existing_desired: dict[str, Any], request_payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        desired = dict(existing_desired)
+        desired.update(request_payload)
+        if isinstance(existing_desired.get("quota"), dict):
+            quota = dict(existing_desired["quota"])
+            if isinstance(request_payload.get("quota"), dict):
+                quota.update(request_payload["quota"])
+            desired["quota"] = quota
+        return desired
+
+    @staticmethod
     def _should_preserve_kubernetes_quota_hard(request: dict[str, Any]) -> bool:
         if request["resource_kind"] != ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             return False
@@ -578,12 +640,8 @@ class Planner:
         for key, used_value in used.items():
             if key not in hard:
                 continue
-            if key == "persistentvolumeclaims":
-                desired_value = int(hard[key])
-                parsed_used = int(used_value)
-            else:
-                desired_value = kubernetes_quantity_to_bytes(hard[key])
-                parsed_used = kubernetes_quantity_to_bytes(used_value)
+            desired_value = kubernetes_resource_quota_value_to_base_units(key, hard[key])
+            parsed_used = kubernetes_resource_quota_value_to_base_units(key, used_value)
             if desired_value < parsed_used:
                 issues.append(
                     {

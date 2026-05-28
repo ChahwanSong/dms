@@ -157,8 +157,10 @@ def test_rm_worker_persists_resourcequota_observed_state(repository_pair):
     assert "kubernetes_resourcequota_apply_completed" in event_types
 
 
-def test_planner_rejects_unsupported_multiple_storage_class_quotas(repository_pair):
+def test_planner_accepts_multiple_storage_class_quotas(repository_pair):
     repository, _ = repository_pair
+    register_longhorn_mapping(repository)
+    register_longhorn_static_mapping(repository)
     request_id = repository.create_request(
         requester_id="alice",
         actor="api-client",
@@ -170,21 +172,33 @@ def test_planner_rejects_unsupported_multiple_storage_class_quotas(repository_pa
             "namespace_name": "phase4-quota",
             "quota": {"requests_storage_bytes": 128 * 1024**2, "pvc_count": 2},
             "storage_class_quotas": [
-                {"storage_name": "longhorn-b"},
-                {"storage_name": "cephfs-a"},
+                {
+                    "storage_name": "longhorn-b",
+                    "requests_storage_bytes": 64 * 1024**2,
+                    "pvc_count": 1,
+                },
+                {
+                    "storage_name": "longhorn-static-b",
+                    "requests_storage_bytes": 32 * 1024**2,
+                    "pvc_count": 1,
+                },
             ],
         },
     )
 
     assert Planner(repository).run_once() == 1
 
-    assert repository.get_plan_by_request(request_id) is None
-    [result] = repository.get_results(request_id)
-    assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert result["verification_summary"]["backend_side_effect"] is False
-    assert result["verification_summary"]["issues"][0]["reason"] == (
-        "unsupported_storage_class_quota_count"
-    )
+    plan = repository.get_plan_by_request(request_id)
+    assert plan is not None
+    assert plan["execution_metadata"]["planner"] == "phase6"
+    assert plan["desired_state"]["resource_quota_hard"] == {
+        "requests.storage": "128Mi",
+        "persistentvolumeclaims": "2",
+        "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "64Mi",
+        "testbed-longhorn.storageclass.storage.k8s.io/persistentvolumeclaims": "1",
+        "longhorn-static.storageclass.storage.k8s.io/requests.storage": "32Mi",
+        "longhorn-static.storageclass.storage.k8s.io/persistentvolumeclaims": "1",
+    }
 
 
 def register_longhorn_mapping(repository: DmsRepository) -> None:
@@ -212,6 +226,48 @@ def register_longhorn_mapping(repository: DmsRepository) -> None:
             "kubernetes_observed": {
                 "cluster_name": "cluster-b",
                 "storage_class_name": LONGHORN_STORAGE_CLASS,
+                "storage_class_exists": True,
+                "provisioner": "driver.longhorn.io",
+            },
+            "agent_observed": {
+                "rm_readiness": "Ready",
+                "dm_readiness": "Ready",
+                "rm_candidates": [{"cluster_name": "cluster-b", "node_name": "worker"}],
+                "dm_candidates": [{"cluster_name": "cluster-b", "node_name": "worker"}],
+            },
+            "checks": [],
+            "warnings": [],
+            "errors": [],
+        },
+        readiness=readiness,
+    )
+
+
+def register_longhorn_static_mapping(repository: DmsRepository) -> None:
+    readiness = {
+        "resource_management": "Ready",
+        "data_management": "Ready",
+        "inventory": "Ready",
+    }
+    repository.upsert_storage_mapping(
+        StorageMappingInput(
+            storage_name="longhorn-static-b",
+            backend_template={
+                "backend_type": "longhorn",
+                "csi_driver": "driver.longhorn.io",
+            },
+            cluster_name="cluster-b",
+            storage_class_name="longhorn-static",
+            sanity_status="Ready",
+        ),
+        actor="admin",
+        sanity_result={
+            "storage_name": "longhorn-static-b",
+            "status": "Ready",
+            "readiness": readiness,
+            "kubernetes_observed": {
+                "cluster_name": "cluster-b",
+                "storage_class_name": "longhorn-static",
                 "storage_class_exists": True,
                 "provisioner": "driver.longhorn.io",
             },
