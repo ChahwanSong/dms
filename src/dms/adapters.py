@@ -60,6 +60,10 @@ class KubernetesInventoryReadError(RuntimeError):
     pass
 
 
+class KubernetesMutationError(RuntimeError):
+    pass
+
+
 class KubernetesReadOnlyInventoryAdapter(Protocol):
     def read_inventory(self) -> dict[str, Any]: ...
 
@@ -184,6 +188,325 @@ class StubKubernetesNamespaceQuotaAdapter:
             observed_state={"verified": True, "synced": True},
             message="kubernetes namespace quota live sync stub completed",
         )
+
+
+def render_kubernetes_resource_quota_hard(desired_state: dict[str, Any]) -> dict[str, str]:
+    quota = desired_state.get("quota") or {}
+    hard: dict[str, str] = {}
+    storage_bytes = _positive_int(
+        quota.get("requests_storage_bytes") or quota.get("capacity_bytes"),
+        "quota.requests_storage_bytes",
+    )
+    pvc_count = _positive_int(quota.get("pvc_count"), "quota.pvc_count")
+    if storage_bytes is not None:
+        hard["requests.storage"] = kubernetes_quantity_from_bytes(storage_bytes)
+    if pvc_count is not None:
+        hard["persistentvolumeclaims"] = str(pvc_count)
+    for entry in desired_state.get("storage_class_quotas") or []:
+        if not isinstance(entry, dict):
+            raise ValueError("storage_class_quotas entries must be objects")
+        storage_class_name = entry.get("storage_class_name")
+        if not storage_class_name:
+            raise ValueError("storage_class_quotas[].storage_class_name is required")
+        entry_bytes = _positive_int(
+            entry.get("requests_storage_bytes")
+            or entry.get("capacity_bytes")
+            or storage_bytes,
+            "storage_class_quotas[].requests_storage_bytes",
+        )
+        if entry_bytes is None:
+            raise ValueError("storage class quota storage bytes are required")
+        hard[
+            f"{storage_class_name}.storageclass.storage.k8s.io/requests.storage"
+        ] = kubernetes_quantity_from_bytes(entry_bytes)
+    if not hard:
+        raise ValueError("at least one ResourceQuota hard limit is required")
+    return hard
+
+
+def kubernetes_quantity_from_bytes(value: int) -> str:
+    size = _positive_int(value, "bytes")
+    if size is None:
+        raise ValueError("bytes are required")
+    units = (("Gi", 1024**3), ("Mi", 1024**2), ("Ki", 1024))
+    for suffix, multiplier in units:
+        if size % multiplier == 0:
+            return f"{size // multiplier}{suffix}"
+    return str(size)
+
+
+@dataclass(frozen=True)
+class KubernetesNamespaceQuotaLiveAdapter:
+    cluster_kubeconfigs: dict[str, str] = field(default_factory=dict)
+    cluster_control_hosts: dict[str, str] = field(default_factory=dict)
+    mode: str = "ssh-kubectl"
+    timeout_seconds: int = 30
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "KubernetesNamespaceQuotaLiveAdapter":
+        return cls(
+            cluster_kubeconfigs=settings.cluster_kubeconfigs or {},
+            cluster_control_hosts=settings.cluster_control_hosts or {},
+            mode=settings.kubernetes_mutation_mode,
+            timeout_seconds=settings.kubernetes_mutation_timeout_seconds,
+        )
+
+    def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
+        completed = self._kubectl(
+            cluster_name,
+            ["get", "namespace", namespace_name, "-o", "json"],
+            check=False,
+        )
+        if completed.returncode != 0:
+            if _kubectl_not_found(completed.stderr):
+                return {
+                    "cluster_name": cluster_name,
+                    "namespace_name": namespace_name,
+                    "exists": False,
+                }
+            raise KubernetesMutationError(
+                f"failed to read namespace {cluster_name}/{namespace_name}: "
+                f"{completed.stderr.strip()}"
+            )
+        payload = _json_stdout(completed.stdout, "namespace")
+        return {
+            "cluster_name": cluster_name,
+            "namespace_name": namespace_name,
+            "exists": True,
+            "uid": payload.get("metadata", {}).get("uid"),
+            "labels": payload.get("metadata", {}).get("labels") or {},
+            "annotations": payload.get("metadata", {}).get("annotations") or {},
+        }
+
+    def create_namespace(self, plan: dict[str, Any]) -> AdapterResult:
+        desired = plan["desired_state"]
+        cluster_name = desired["cluster_name"]
+        namespace_name = desired["namespace_name"]
+        namespace = self._ensure_namespace(
+            cluster_name=cluster_name,
+            namespace_name=namespace_name,
+            plan=plan,
+            allow_create=bool(desired.get("allow_namespace_create")),
+        )
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "operation": "namespace.apply",
+                "backend_side_effect": namespace["created"],
+                "namespace": namespace,
+            },
+            observed_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "verified": namespace["exists"],
+                "namespace": namespace,
+            },
+            message="Kubernetes namespace ensured",
+        )
+
+    def apply_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        desired = plan["desired_state"]
+        cluster_name = desired["cluster_name"]
+        namespace_name = desired["namespace_name"]
+        resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
+        hard = desired.get("resource_quota_hard") or render_kubernetes_resource_quota_hard(
+            desired
+        )
+        namespace = self._ensure_namespace(
+            cluster_name=cluster_name,
+            namespace_name=namespace_name,
+            plan=plan,
+            allow_create=bool(desired.get("allow_namespace_create")),
+        )
+        manifest = self._resource_quota_manifest(
+            plan=plan,
+            namespace_name=namespace_name,
+            resource_quota_name=resource_quota_name,
+            hard=hard,
+        )
+        self._kubectl(
+            cluster_name,
+            ["apply", "-f", "-"],
+            input_text=json.dumps(manifest, sort_keys=True),
+        )
+        observed = self._read_resource_quota(
+            cluster_name=cluster_name,
+            namespace_name=namespace_name,
+            resource_quota_name=resource_quota_name,
+        )
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "operation": "resourcequota.apply",
+                "backend_side_effect": True,
+                "cluster_name": cluster_name,
+                "namespace_name": namespace_name,
+                "resource_quota_name": resource_quota_name,
+                "namespace": namespace,
+                "manifest": manifest,
+                "hard": hard,
+            },
+            observed_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "verified": observed["exists"],
+                "backend_side_effect": True,
+                "cluster_name": cluster_name,
+                "namespace_name": namespace_name,
+                "resource_quota_name": resource_quota_name,
+                "namespace": namespace,
+                "resource_quota": observed,
+            },
+            message="Kubernetes ResourceQuota live apply completed",
+        )
+
+    def delete_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        raise NotImplementedError("Phase 4 only implements ResourceQuota create/apply")
+
+    def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult:
+        raise NotImplementedError("Phase 4 only implements ResourceQuota create/apply")
+
+    def _ensure_namespace(
+        self,
+        *,
+        cluster_name: str,
+        namespace_name: str,
+        plan: dict[str, Any],
+        allow_create: bool,
+    ) -> dict[str, Any]:
+        existing = self.read_namespace(cluster_name, namespace_name)
+        if existing["exists"]:
+            existing["created"] = False
+            return existing
+        if not allow_create:
+            raise KubernetesMutationError(
+                f"namespace does not exist and allow_namespace_create is false: "
+                f"{cluster_name}/{namespace_name}"
+            )
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": namespace_name,
+                "labels": {
+                    "app.kubernetes.io/managed-by": "dms",
+                    "dms.io/resource-kind": "kubernetes-namespace-quota",
+                },
+                "annotations": {
+                    "dms.io/resource-key": plan["resource_key"],
+                    "dms.io/request-id": plan["request_id"],
+                },
+            },
+        }
+        self._kubectl(
+            cluster_name,
+            ["apply", "-f", "-"],
+            input_text=json.dumps(manifest, sort_keys=True),
+        )
+        namespace = self.read_namespace(cluster_name, namespace_name)
+        namespace["created"] = True
+        return namespace
+
+    def _resource_quota_manifest(
+        self,
+        *,
+        plan: dict[str, Any],
+        namespace_name: str,
+        resource_quota_name: str,
+        hard: dict[str, str],
+    ) -> dict[str, Any]:
+        desired = plan["desired_state"]
+        storage_names = [
+            entry["storage_name"]
+            for entry in desired.get("storage_class_quotas") or []
+            if isinstance(entry, dict) and entry.get("storage_name")
+        ]
+        return {
+            "apiVersion": "v1",
+            "kind": "ResourceQuota",
+            "metadata": {
+                "name": resource_quota_name,
+                "namespace": namespace_name,
+                "labels": {
+                    "app.kubernetes.io/managed-by": "dms",
+                    "dms.io/resource-kind": "kubernetes-namespace-quota",
+                },
+                "annotations": {
+                    "dms.io/resource-key": plan["resource_key"],
+                    "dms.io/request-id": plan["request_id"],
+                    "dms.io/storage-names": ",".join(storage_names),
+                },
+            },
+            "spec": {"hard": hard},
+        }
+
+    def _read_resource_quota(
+        self, *, cluster_name: str, namespace_name: str, resource_quota_name: str
+    ) -> dict[str, Any]:
+        completed = self._kubectl(
+            cluster_name,
+            ["-n", namespace_name, "get", "resourcequota", resource_quota_name, "-o", "json"],
+        )
+        payload = _json_stdout(completed.stdout, "resourcequota")
+        metadata = payload.get("metadata", {})
+        status = payload.get("status", {})
+        spec = payload.get("spec", {})
+        return {
+            "exists": True,
+            "name": metadata.get("name"),
+            "namespace": metadata.get("namespace"),
+            "uid": metadata.get("uid"),
+            "resource_version": metadata.get("resourceVersion"),
+            "labels": metadata.get("labels") or {},
+            "annotations": metadata.get("annotations") or {},
+            "spec_hard": spec.get("hard") or {},
+            "status_hard": status.get("hard") or {},
+            "status_used": status.get("used") or {},
+        }
+
+    def _kubectl(
+        self,
+        cluster_name: str,
+        args: list[str],
+        *,
+        input_text: str | None = None,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        command = self._command(cluster_name, args)
+        try:
+            completed = subprocess.run(
+                command,
+                input=input_text,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise KubernetesMutationError(
+                f"Kubernetes mutation timed out for {cluster_name}: {exc}"
+            ) from exc
+        if check and completed.returncode != 0:
+            raise KubernetesMutationError(
+                f"kubectl failed for {cluster_name}: {completed.stderr.strip()}"
+            )
+        return completed
+
+    def _command(self, cluster_name: str, args: list[str]) -> list[str]:
+        if self.mode == "ssh-kubectl":
+            host = self.cluster_control_hosts.get(cluster_name)
+            if not host:
+                raise KubernetesMutationError(
+                    f"missing control host for cluster {cluster_name}"
+                )
+            quoted = " ".join(_shell_quote(part) for part in ["kubectl", *args])
+            return ["ssh", host, quoted]
+        if self.mode == "kubectl":
+            command = ["kubectl"]
+            kubeconfig = self.cluster_kubeconfigs.get(cluster_name)
+            if kubeconfig:
+                command.extend(["--kubeconfig", kubeconfig])
+            command.extend(args)
+            return command
+        raise KubernetesMutationError(f"unsupported Kubernetes mutation mode: {self.mode}")
 
 
 @dataclass
@@ -367,6 +690,29 @@ def _shell_quote(value: str) -> str:
     if all(char in safe for char in value):
         return value
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _positive_int(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be an integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be greater than zero")
+    return parsed
+
+
+def _json_stdout(stdout: str, kind: str) -> dict[str, Any]:
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise KubernetesMutationError(f"kubectl returned non-JSON {kind}") from exc
+
+
+def _kubectl_not_found(stderr: str) -> bool:
+    return "NotFound" in stderr or "not found" in stderr.lower()
 
 
 @dataclass

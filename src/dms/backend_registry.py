@@ -65,12 +65,23 @@ class BackendAdapterRegistry:
         storage_name = desired.get("storage_name")
         if storage_name:
             return self.repository.get_storage_mapping(storage_name)
+        for entry in desired.get("storage_class_quotas") or []:
+            if isinstance(entry, dict) and entry.get("storage_name"):
+                return self.repository.get_storage_mapping(entry["storage_name"])
         cluster_name = desired.get("cluster_name")
         storage_class_name = desired.get("storage_class_name")
         if cluster_name and storage_class_name:
             return self.repository.get_storage_mapping_by_cluster_storage_class(
                 cluster_name, storage_class_name
             )
+        for entry in desired.get("storage_class_quotas") or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_storage_class = entry.get("storage_class_name")
+            if cluster_name and entry_storage_class:
+                return self.repository.get_storage_mapping_by_cluster_storage_class(
+                    cluster_name, entry_storage_class
+                )
         return None
 
     @staticmethod

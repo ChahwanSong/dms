@@ -137,7 +137,7 @@ def test_gpfs_kubernetes_namespace_quota_uses_gpfs_csi_mapping(repository_pair):
         payload={
             "cluster_name": "cluster-a",
             "namespace_name": "alice",
-            "storage_name": "gpfs-a",
+            "storage_class_quotas": [{"storage_name": "gpfs-a"}],
             "quota": {"requests_storage_bytes": 4 * 10**12, "pvc_count": 20},
         },
     )

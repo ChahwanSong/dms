@@ -29,6 +29,8 @@ class Settings:
     cluster_control_hosts: dict[str, str] | None = None
     kubernetes_inventory_mode: str = "ssh-kubectl"
     kubernetes_inventory_timeout_seconds: int = 10
+    kubernetes_mutation_mode: str = "ssh-kubectl"
+    kubernetes_mutation_timeout_seconds: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,6 +71,12 @@ class Settings:
             ),
             kubernetes_inventory_timeout_seconds=int(
                 os.getenv("DMS_KUBERNETES_INVENTORY_TIMEOUT_SECONDS", "10")
+            ),
+            kubernetes_mutation_mode=os.getenv(
+                "DMS_KUBERNETES_MUTATION_MODE", "ssh-kubectl"
+            ),
+            kubernetes_mutation_timeout_seconds=int(
+                os.getenv("DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS", "30")
             ),
         )
 

@@ -45,6 +45,23 @@ class RMWorkerRuntime:
             actor=self.worker_id,
         )
         try:
+            if self._is_kubernetes_quota_apply(plan):
+                self.observability.record_event(
+                    component="rm-worker",
+                    severity="INFO",
+                    event_type="kubernetes_resourcequota_apply_started",
+                    message="Kubernetes ResourceQuota live apply started",
+                    payload={
+                        "plan_id": plan["plan_id"],
+                        "run_id": run_id,
+                        "cluster_name": plan["desired_state"].get("cluster_name"),
+                        "namespace_name": plan["desired_state"].get("namespace_name"),
+                        "resource_quota_name": plan["desired_state"].get(
+                            "resource_quota_name", "dms-storage-quota"
+                        ),
+                    },
+                    correlation_id=plan["request_id"],
+                )
             adapter_result = self._apply(plan)
             self.repository.update_run_state(
                 run_id,
@@ -69,6 +86,19 @@ class RMWorkerRuntime:
                 verification_summary=adapter_result.observed_state,
                 actor=self.worker_id,
             )
+            if self._is_kubernetes_quota_apply(plan):
+                self.observability.record_event(
+                    component="rm-worker",
+                    severity="INFO",
+                    event_type="kubernetes_resourcequota_apply_completed",
+                    message="Kubernetes ResourceQuota live apply completed",
+                    payload={
+                        "plan_id": plan["plan_id"],
+                        "run_id": run_id,
+                        "observed_state": adapter_result.observed_state,
+                    },
+                    correlation_id=plan["request_id"],
+                )
             self.observability.record_event(
                 component="rm-worker",
                 severity="INFO",
@@ -88,6 +118,15 @@ class RMWorkerRuntime:
                 error_category="backend",
                 actor=self.worker_id,
             )
+            if self._is_kubernetes_quota_apply(plan):
+                self.observability.record_event(
+                    component="rm-worker",
+                    severity="ERROR",
+                    event_type="kubernetes_resourcequota_apply_failed",
+                    message=str(exc),
+                    payload={"plan_id": plan["plan_id"], "run_id": run_id},
+                    correlation_id=plan["request_id"],
+                )
             raise
         return 1
 
@@ -122,6 +161,10 @@ class RMWorkerRuntime:
         if operation == OperationKind.K8S_QUOTA_SYNC.value:
             return kubernetes_adapter.sync_live_state(plan)
         raise ValueError(f"unsupported RM operation: {operation}")
+
+    @staticmethod
+    def _is_kubernetes_quota_apply(plan: dict[str, Any]) -> bool:
+        return plan["operation_kind"] == OperationKind.K8S_QUOTA_CREATE.value
 
     def _filesystem_adapter(self, plan: dict[str, Any]) -> FilesystemBackendAdapter:
         if self.backend_registry:
