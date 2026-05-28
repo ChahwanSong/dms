@@ -93,6 +93,7 @@ class OperationKind(StrEnum):
     K8S_QUOTA_BLOCK = "kubernetes.namespace_quota.block"
     K8S_QUOTA_DELETE = "kubernetes.namespace_quota.delete"
     K8S_QUOTA_SYNC = "kubernetes.namespace_quota.sync"
+    K8S_QUOTA_CHECK = "kubernetes.namespace_quota.consistency_check"
     DATA_SYNC = "data.sync"
     DATA_RM = "data.rm"
     DATA_SCAN = "data.scan"

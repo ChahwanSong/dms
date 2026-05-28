@@ -430,6 +430,23 @@ def resource_management_router() -> APIRouter:
             OperationKind.K8S_QUOTA_SYNC,
         )
 
+    @router.post("/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}:check", status_code=202)
+    def k8s_quota_check(
+        cluster_name: str,
+        namespace_name: str,
+        body: MutatingBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        return _k8s_quota_keyed_request(
+            cluster_name,
+            namespace_name,
+            body,
+            request,
+            services,
+            OperationKind.K8S_QUOTA_CHECK,
+        )
+
     @router.post("/storage-mappings")
     def upsert_storage_mapping(
         data: StorageMappingInput,

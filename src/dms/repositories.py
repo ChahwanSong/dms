@@ -754,6 +754,23 @@ class DmsRepository:
             resource["observed_state"] = json_loads(resource["observed_state"]) or {}
         return resources
 
+    def get_resource(self, resource_kind: str, resource_key: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM resources
+                WHERE resource_kind = ? AND resource_key = ?
+                """,
+                (resource_kind, resource_key),
+            ).fetchone()
+        resource = row_to_dict(row) if row else None
+        if not resource:
+            return None
+        resource["desired_state"] = json_loads(resource["desired_state"]) or {}
+        resource["applied_state"] = json_loads(resource["applied_state"]) or {}
+        resource["observed_state"] = json_loads(resource["observed_state"]) or {}
+        return resource
+
     def upsert_storage_mapping(
         self,
         data: StorageMappingInput,

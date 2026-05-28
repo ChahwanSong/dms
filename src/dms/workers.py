@@ -45,12 +45,13 @@ class RMWorkerRuntime:
             actor=self.worker_id,
         )
         try:
-            if self._is_kubernetes_quota_apply(plan):
+            quota_action = self._kubernetes_quota_event_action(plan)
+            if quota_action:
                 self.observability.record_event(
                     component="rm-worker",
                     severity="INFO",
-                    event_type="kubernetes_resourcequota_apply_started",
-                    message="Kubernetes ResourceQuota live apply started",
+                    event_type=f"kubernetes_resourcequota_{quota_action}_started",
+                    message=f"Kubernetes ResourceQuota {quota_action} started",
                     payload={
                         "plan_id": plan["plan_id"],
                         "run_id": run_id,
@@ -69,13 +70,22 @@ class RMWorkerRuntime:
                 reason="rm worker verifying live backend state",
                 actor=self.worker_id,
             )
+            resource_desired_state = adapter_result.applied_state.get(
+                "synced_desired_state", plan["desired_state"]
+            )
+            resource_status = adapter_result.observed_state.get(
+                "resource_status",
+                "Deleted"
+                if plan["operation_kind"] == OperationKind.K8S_QUOTA_DELETE.value
+                else LifecycleState.SUCCEEDED.value,
+            )
             self.repository.upsert_resource(
                 resource_kind=plan["execution_metadata"]["resource_kind"],
                 resource_key=plan["resource_key"],
-                desired_state=plan["desired_state"],
+                desired_state=resource_desired_state,
                 applied_state=adapter_result.applied_state,
                 observed_state=adapter_result.observed_state,
-                status=LifecycleState.SUCCEEDED.value,
+                status=resource_status,
             )
             self.repository.complete_result(
                 request_id=plan["request_id"],
@@ -86,12 +96,12 @@ class RMWorkerRuntime:
                 verification_summary=adapter_result.observed_state,
                 actor=self.worker_id,
             )
-            if self._is_kubernetes_quota_apply(plan):
+            if quota_action:
                 self.observability.record_event(
                     component="rm-worker",
                     severity="INFO",
-                    event_type="kubernetes_resourcequota_apply_completed",
-                    message="Kubernetes ResourceQuota live apply completed",
+                    event_type=f"kubernetes_resourcequota_{quota_action}_completed",
+                    message=f"Kubernetes ResourceQuota {quota_action} completed",
                     payload={
                         "plan_id": plan["plan_id"],
                         "run_id": run_id,
@@ -118,11 +128,12 @@ class RMWorkerRuntime:
                 error_category="backend",
                 actor=self.worker_id,
             )
-            if self._is_kubernetes_quota_apply(plan):
+            quota_action = self._kubernetes_quota_event_action(plan)
+            if quota_action:
                 self.observability.record_event(
                     component="rm-worker",
                     severity="ERROR",
-                    event_type="kubernetes_resourcequota_apply_failed",
+                    event_type=f"kubernetes_resourcequota_{quota_action}_failed",
                     message=str(exc),
                     payload={"plan_id": plan["plan_id"], "run_id": run_id},
                     correlation_id=plan["request_id"],
@@ -160,11 +171,26 @@ class RMWorkerRuntime:
             return kubernetes_adapter.delete_resource_quota(plan)
         if operation == OperationKind.K8S_QUOTA_SYNC.value:
             return kubernetes_adapter.sync_live_state(plan)
+        if operation == OperationKind.K8S_QUOTA_CHECK.value:
+            return kubernetes_adapter.check_resource_quota(plan)
         raise ValueError(f"unsupported RM operation: {operation}")
 
     @staticmethod
-    def _is_kubernetes_quota_apply(plan: dict[str, Any]) -> bool:
-        return plan["operation_kind"] == OperationKind.K8S_QUOTA_CREATE.value
+    def _kubernetes_quota_event_action(plan: dict[str, Any]) -> str | None:
+        operation = plan["operation_kind"]
+        if operation == OperationKind.K8S_QUOTA_CREATE.value:
+            return "apply"
+        if operation == OperationKind.K8S_QUOTA_UPDATE.value:
+            return "update"
+        if operation == OperationKind.K8S_QUOTA_DELETE.value:
+            return "delete"
+        if operation == OperationKind.K8S_QUOTA_SYNC.value:
+            return "sync"
+        if operation == OperationKind.K8S_QUOTA_CHECK.value:
+            return "consistency_check"
+        if operation == OperationKind.K8S_QUOTA_BLOCK.value:
+            return "block" if plan["desired_state"].get("block") else "unblock"
+        return None
 
     def _filesystem_adapter(self, plan: dict[str, Any]) -> FilesystemBackendAdapter:
         if self.backend_registry:

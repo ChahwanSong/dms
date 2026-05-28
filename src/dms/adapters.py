@@ -51,6 +51,8 @@ class KubernetesNamespaceQuotaAdapter(Protocol):
 
     def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult: ...
 
+    def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
+
 
 class StorageInventoryAdapter(Protocol):
     def effective_inventory(self) -> dict[str, Any]: ...
@@ -189,6 +191,14 @@ class StubKubernetesNamespaceQuotaAdapter:
             message="kubernetes namespace quota live sync stub completed",
         )
 
+    def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        self.calls.append(("check_resource_quota", plan["plan_id"]))
+        return AdapterResult(
+            applied_state={"backend_side_effect": False},
+            observed_state={"verified": True, "consistency_status": "Consistent"},
+            message="kubernetes namespace quota consistency check stub completed",
+        )
+
 
 def render_kubernetes_resource_quota_hard(desired_state: dict[str, Any]) -> dict[str, str]:
     quota = desired_state.get("quota") or {}
@@ -224,6 +234,12 @@ def render_kubernetes_resource_quota_hard(desired_state: dict[str, Any]) -> dict
     return hard
 
 
+def zero_kubernetes_resource_quota_hard(hard: dict[str, str]) -> dict[str, str]:
+    if not hard:
+        raise ValueError("hard limits are required for ResourceQuota block")
+    return {key: "0" for key in hard}
+
+
 def kubernetes_quantity_from_bytes(value: int) -> str:
     size = _positive_int(value, "bytes")
     if size is None:
@@ -233,6 +249,24 @@ def kubernetes_quantity_from_bytes(value: int) -> str:
         if size % multiplier == 0:
             return f"{size // multiplier}{suffix}"
     return str(size)
+
+
+def kubernetes_quantity_to_bytes(value: Any) -> int:
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    units = {
+        "Ki": 1024,
+        "Mi": 1024**2,
+        "Gi": 1024**3,
+        "Ti": 1024**4,
+    }
+    for suffix, multiplier in units.items():
+        if text.endswith(suffix):
+            return int(text[: -len(suffix)]) * multiplier
+    return int(text)
 
 
 @dataclass(frozen=True)
@@ -359,10 +393,137 @@ class KubernetesNamespaceQuotaLiveAdapter:
         )
 
     def delete_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
-        raise NotImplementedError("Phase 4 only implements ResourceQuota create/apply")
+        desired = plan["desired_state"]
+        cluster_name = desired["cluster_name"]
+        namespace_name = desired["namespace_name"]
+        resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
+        before = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        if not before["exists"]:
+            raise KubernetesMutationError(
+                f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
+            )
+        _ensure_dms_managed(before, resource_quota_name)
+        self._kubectl(
+            cluster_name,
+            ["-n", namespace_name, "delete", "resourcequota", resource_quota_name],
+        )
+        after = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        namespace = self.read_namespace(cluster_name, namespace_name)
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "operation": "resourcequota.delete",
+                "backend_side_effect": True,
+                "cluster_name": cluster_name,
+                "namespace_name": namespace_name,
+                "resource_quota_name": resource_quota_name,
+                "before": before,
+            },
+            observed_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "verified": not after["exists"],
+                "backend_side_effect": True,
+                "deleted": not after["exists"],
+                "namespace": namespace,
+                "resource_quota": after,
+            },
+            message="Kubernetes ResourceQuota live delete completed",
+        )
 
     def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult:
-        raise NotImplementedError("Phase 4 only implements ResourceQuota create/apply")
+        desired = plan["desired_state"]
+        cluster_name = desired["cluster_name"]
+        namespace_name = desired["namespace_name"]
+        resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
+        observed = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        if not observed["exists"]:
+            raise KubernetesMutationError(
+                f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
+            )
+        _ensure_dms_managed(observed, resource_quota_name)
+        synced_desired = dict(desired)
+        _sync_desired_from_resource_quota_hard(synced_desired, observed["spec_hard"])
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "operation": "resourcequota.sync",
+                "backend_side_effect": False,
+                "cluster_name": cluster_name,
+                "namespace_name": namespace_name,
+                "resource_quota_name": resource_quota_name,
+                "synced_desired_state": synced_desired,
+                "live_resource_quota": observed,
+            },
+            observed_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "verified": True,
+                "backend_side_effect": False,
+                "synced": True,
+                "resource_quota": observed,
+            },
+            message="Kubernetes ResourceQuota live state synced to DB",
+        )
+
+    def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        desired = plan["desired_state"]
+        cluster_name = desired["cluster_name"]
+        namespace_name = desired["namespace_name"]
+        resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
+        observed = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        desired_hard = desired.get("resource_quota_hard") or render_kubernetes_resource_quota_hard(
+            desired
+        )
+        issues: list[dict[str, Any]] = []
+        status = "Consistent"
+        if not observed["exists"]:
+            status = "Missing"
+            issues.append({"field": "resource_quota", "reason": "missing"})
+        else:
+            labels = observed.get("labels") or {}
+            if labels.get("app.kubernetes.io/managed-by") != "dms":
+                status = "Drifted"
+                issues.append({"field": "metadata.labels", "reason": "not_dms_managed"})
+            if dict(observed.get("spec_hard") or {}) != dict(desired_hard):
+                status = "Drifted"
+                issues.append(
+                    {
+                        "field": "spec.hard",
+                        "reason": "hard_limits_drifted",
+                        "desired": desired_hard,
+                        "live": observed.get("spec_hard") or {},
+                    }
+                )
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "operation": "resourcequota.check",
+                "backend_side_effect": False,
+                "cluster_name": cluster_name,
+                "namespace_name": namespace_name,
+                "resource_quota_name": resource_quota_name,
+            },
+            observed_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "verified": status == "Consistent",
+                "backend_side_effect": False,
+                "resource_status": status,
+                "consistency_status": status,
+                "issues": issues,
+                "desired_hard": desired_hard,
+                "resource_quota": observed,
+            },
+            message=f"Kubernetes ResourceQuota consistency check {status}",
+        )
+
+    def read_resource_quota(
+        self, cluster_name: str, namespace_name: str, resource_quota_name: str = "dms-storage-quota"
+    ) -> dict[str, Any]:
+        return self._read_resource_quota(
+            cluster_name=cluster_name,
+            namespace_name=namespace_name,
+            resource_quota_name=resource_quota_name,
+            allow_missing=True,
+        )
 
     def _ensure_namespace(
         self,
@@ -439,12 +600,30 @@ class KubernetesNamespaceQuotaLiveAdapter:
         }
 
     def _read_resource_quota(
-        self, *, cluster_name: str, namespace_name: str, resource_quota_name: str
+        self,
+        *,
+        cluster_name: str,
+        namespace_name: str,
+        resource_quota_name: str,
+        allow_missing: bool = False,
     ) -> dict[str, Any]:
         completed = self._kubectl(
             cluster_name,
             ["-n", namespace_name, "get", "resourcequota", resource_quota_name, "-o", "json"],
+            check=not allow_missing,
         )
+        if completed.returncode != 0 and allow_missing and _kubectl_not_found(completed.stderr):
+            return {
+                "exists": False,
+                "name": resource_quota_name,
+                "namespace": namespace_name,
+                "cluster_name": cluster_name,
+            }
+        if completed.returncode != 0:
+            raise KubernetesMutationError(
+                f"failed to read ResourceQuota {cluster_name}/{namespace_name}/{resource_quota_name}: "
+                f"{completed.stderr.strip()}"
+            )
         payload = _json_stdout(completed.stdout, "resourcequota")
         metadata = payload.get("metadata", {})
         status = payload.get("status", {})
@@ -713,6 +892,47 @@ def _json_stdout(stdout: str, kind: str) -> dict[str, Any]:
 
 def _kubectl_not_found(stderr: str) -> bool:
     return "NotFound" in stderr or "not found" in stderr.lower()
+
+
+def _ensure_dms_managed(resource_quota: dict[str, Any], resource_quota_name: str) -> None:
+    labels = resource_quota.get("labels") or {}
+    if resource_quota.get("name") != resource_quota_name:
+        raise KubernetesMutationError("unexpected ResourceQuota name")
+    if labels.get("app.kubernetes.io/managed-by") != "dms":
+        raise KubernetesMutationError(
+            f"refusing to mutate non-DMS ResourceQuota: {resource_quota_name}"
+        )
+
+
+def _sync_desired_from_resource_quota_hard(
+    desired: dict[str, Any], hard: dict[str, str]
+) -> None:
+    desired["resource_quota_hard"] = dict(hard)
+    quota = dict(desired.get("quota") or {})
+    if "requests.storage" in hard:
+        quota["requests_storage_bytes"] = kubernetes_quantity_to_bytes(
+            hard["requests.storage"]
+        )
+    if "persistentvolumeclaims" in hard:
+        quota["pvc_count"] = int(hard["persistentvolumeclaims"])
+    if quota:
+        desired["quota"] = quota
+
+    storage_class_quotas: list[dict[str, Any]] = []
+    for entry in desired.get("storage_class_quotas") or []:
+        if not isinstance(entry, dict):
+            continue
+        synced_entry = dict(entry)
+        storage_class_name = synced_entry.get("storage_class_name")
+        if storage_class_name:
+            hard_key = f"{storage_class_name}.storageclass.storage.k8s.io/requests.storage"
+            if hard_key in hard:
+                synced_entry["requests_storage_bytes"] = kubernetes_quantity_to_bytes(
+                    hard[hard_key]
+                )
+        storage_class_quotas.append(synced_entry)
+    if storage_class_quotas:
+        desired["storage_class_quotas"] = storage_class_quotas
 
 
 @dataclass

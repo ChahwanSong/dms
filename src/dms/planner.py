@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .adapters import render_kubernetes_resource_quota_hard
+from .adapters import (
+    kubernetes_quantity_to_bytes,
+    render_kubernetes_resource_quota_hard,
+    zero_kubernetes_resource_quota_hard,
+)
 from .backend_registry import BackendAdapterRegistry
 from .domain import (
     LifecycleState,
@@ -29,6 +33,7 @@ RM_OPERATIONS = {
     OperationKind.K8S_QUOTA_BLOCK.value,
     OperationKind.K8S_QUOTA_DELETE.value,
     OperationKind.K8S_QUOTA_SYNC.value,
+    OperationKind.K8S_QUOTA_CHECK.value,
 }
 
 DM_OPERATIONS = {
@@ -88,6 +93,8 @@ class Planner:
             if self._reject_inconsistent_kubernetes_quota_mapping(request):
                 return
             desired_state = self._desired_state(request)
+            if self._reject_kubernetes_quota_decrease(request, desired_state):
+                return
             self.repository.create_plan(
                 request_id=request["request_id"],
                 worker_role=WorkerRole.RM,
@@ -151,6 +158,14 @@ class Planner:
 
     def _desired_state(self, request: dict[str, Any]) -> dict[str, Any]:
         desired = dict(request["payload_summary"])
+        if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
+            existing = self.repository.get_resource(
+                request["resource_kind"], request["resource_key"]
+            )
+            if existing and request["operation"] != OperationKind.K8S_QUOTA_CREATE.value:
+                base = dict(existing["desired_state"])
+                base.update(desired)
+                desired = base
         desired.update(
             {
                 "operation": request["operation"],
@@ -160,7 +175,9 @@ class Planner:
         )
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             desired.setdefault("resource_quota_name", "dms-storage-quota")
-            self._enrich_kubernetes_quota_desired(desired)
+            if not self._should_preserve_kubernetes_quota_hard(request):
+                self._enrich_kubernetes_quota_desired(desired)
+            self._apply_kubernetes_block_desired(request, desired)
         return desired
 
     def _rm_execution_metadata(
@@ -173,7 +190,11 @@ class Planner:
             "storage_backend": self._storage_backend(request),
         }
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
-            metadata["planner"] = "phase4"
+            metadata["planner"] = (
+                "phase4"
+                if request["operation"] == OperationKind.K8S_QUOTA_CREATE.value
+                else "phase5"
+            )
             metadata["kubernetes_backend"] = {
                 "cluster_name": desired_state.get("cluster_name"),
                 "namespace_name": desired_state.get("namespace_name"),
@@ -323,26 +344,24 @@ class Planner:
         if request["resource_kind"] != ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             return False
         operation = request["operation"]
-        if operation != OperationKind.K8S_QUOTA_CREATE.value:
-            return self._reject_planner_issue(
-                request,
-                message="Phase 4 only implements Kubernetes namespace quota create/apply",
-                issues=[
-                    {
-                        "reason": "not_implemented_phase4",
-                        "operation": operation,
-                    }
-                ],
-                error_category="not_implemented",
-            )
         payload = request["payload_summary"]
         issues: list[dict[str, Any]] = []
         if not payload.get("cluster_name"):
             issues.append({"reason": "cluster_name_missing"})
         if not payload.get("namespace_name"):
             issues.append({"reason": "namespace_name_missing"})
+        existing = self.repository.get_resource(request["resource_kind"], request["resource_key"])
+        if operation != OperationKind.K8S_QUOTA_CREATE.value and not existing:
+            issues.append({"reason": "resource_missing", "resource_key": request["resource_key"]})
         storage_class_quotas = payload.get("storage_class_quotas") or []
-        if len(storage_class_quotas) != 1:
+        if operation == OperationKind.K8S_QUOTA_CREATE.value and len(storage_class_quotas) != 1:
+            issues.append(
+                {
+                    "reason": "unsupported_storage_class_quota_count",
+                    "count": len(storage_class_quotas),
+                }
+            )
+        if operation == OperationKind.K8S_QUOTA_UPDATE.value and len(storage_class_quotas) > 1:
             issues.append(
                 {
                     "reason": "unsupported_storage_class_quota_count",
@@ -353,13 +372,35 @@ class Planner:
             if not isinstance(entry, dict) or not entry.get("storage_name"):
                 issues.append({"reason": "storage_class_quota_storage_name_missing"})
         quota = payload.get("quota") or {}
-        for key in ("requests_storage_bytes", "pvc_count"):
-            value = quota.get(key)
-            try:
-                if value is None or int(value) <= 0:
+        if operation in {
+            OperationKind.K8S_QUOTA_CREATE.value,
+            OperationKind.K8S_QUOTA_UPDATE.value,
+        }:
+            for key in ("requests_storage_bytes", "pvc_count"):
+                value = quota.get(key)
+                if operation == OperationKind.K8S_QUOTA_UPDATE.value and value is None:
+                    continue
+                try:
+                    if value is None or int(value) <= 0:
+                        issues.append({"reason": f"quota_{key}_invalid", "value": value})
+                except (TypeError, ValueError):
                     issues.append({"reason": f"quota_{key}_invalid", "value": value})
-            except (TypeError, ValueError):
-                issues.append({"reason": f"quota_{key}_invalid", "value": value})
+        if operation == OperationKind.K8S_QUOTA_BLOCK.value:
+            block = payload.get("block")
+            if not isinstance(block, bool):
+                issues.append({"reason": "block_boolean_required", "value": block})
+            if block is True and existing:
+                resource_type = existing["desired_state"].get("resource_type")
+                if resource_type in {"system", "admin"}:
+                    issues.append(
+                        {"reason": "resource_type_cannot_be_blocked", "resource_type": resource_type}
+                    )
+            if block is False and existing:
+                restore_hard = (
+                    existing["desired_state"].get("block_state", {}).get("restore_hard")
+                )
+                if not restore_hard:
+                    issues.append({"reason": "block_restore_state_missing"})
         if not issues:
             return False
         return self._reject_planner_issue(
@@ -435,8 +476,7 @@ class Planner:
         )
         return True
 
-    @staticmethod
-    def _required_storage_names(request: dict[str, Any]) -> set[str]:
+    def _required_storage_names(self, request: dict[str, Any]) -> set[str]:
         payload = request["payload_summary"]
         operation = request["operation"]
         if operation == OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value:
@@ -453,6 +493,16 @@ class Planner:
             }
             if payload.get("storage_name"):
                 storage_names.add(payload["storage_name"])
+            if not storage_names:
+                resource = self.repository.get_resource(
+                    request["resource_kind"], request["resource_key"]
+                )
+                desired = resource["desired_state"] if resource else {}
+                storage_names = {
+                    entry["storage_name"]
+                    for entry in desired.get("storage_class_quotas") or []
+                    if isinstance(entry, dict) and entry.get("storage_name")
+                }
             return storage_names
         return set()
 
@@ -473,3 +523,90 @@ class Planner:
             "resource_quota_name", "dms-storage-quota"
         )
         desired["resource_quota_hard"] = render_kubernetes_resource_quota_hard(desired)
+
+    @staticmethod
+    def _should_preserve_kubernetes_quota_hard(request: dict[str, Any]) -> bool:
+        if request["resource_kind"] != ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
+            return False
+        if request["operation"] not in {
+            OperationKind.K8S_QUOTA_CHECK.value,
+            OperationKind.K8S_QUOTA_DELETE.value,
+            OperationKind.K8S_QUOTA_SYNC.value,
+        }:
+            return False
+        payload = request["payload_summary"]
+        return not payload.get("quota") and not payload.get("storage_class_quotas")
+
+    def _apply_kubernetes_block_desired(
+        self, request: dict[str, Any], desired: dict[str, Any]
+    ) -> None:
+        if request["operation"] != OperationKind.K8S_QUOTA_BLOCK.value:
+            return
+        block = bool(request["payload_summary"].get("block"))
+        if block:
+            restore_hard = dict(desired["resource_quota_hard"])
+            desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(restore_hard)
+            desired["block"] = True
+            desired["block_state"] = {
+                "blocked": True,
+                "block_mode": request["payload_summary"].get("block_mode", "quota-zero"),
+                "restore_hard": restore_hard,
+                "reason": request["payload_summary"].get("reason"),
+            }
+            return
+        restore_hard = desired.get("block_state", {}).get("restore_hard")
+        if restore_hard:
+            desired["resource_quota_hard"] = dict(restore_hard)
+        desired["block"] = False
+        desired["block_state"] = {
+            "blocked": False,
+            "restored_hard": desired.get("resource_quota_hard", {}),
+            "reason": request["payload_summary"].get("reason"),
+        }
+
+    def _reject_kubernetes_quota_decrease(
+        self, request: dict[str, Any], desired_state: dict[str, Any]
+    ) -> bool:
+        if request["operation"] != OperationKind.K8S_QUOTA_UPDATE.value:
+            return False
+        resource = self.repository.get_resource(request["resource_kind"], request["resource_key"])
+        if not resource:
+            return False
+        used = _observed_quota_used(resource["observed_state"])
+        hard = desired_state.get("resource_quota_hard") or {}
+        issues: list[dict[str, Any]] = []
+        for key, used_value in used.items():
+            if key not in hard:
+                continue
+            if key == "persistentvolumeclaims":
+                desired_value = int(hard[key])
+                parsed_used = int(used_value)
+            else:
+                desired_value = kubernetes_quantity_to_bytes(hard[key])
+                parsed_used = kubernetes_quantity_to_bytes(used_value)
+            if desired_value < parsed_used:
+                issues.append(
+                    {
+                        "reason": "quota_decrease_below_live_used",
+                        "resource": key,
+                        "desired": hard[key],
+                        "used": used_value,
+                    }
+                )
+        if not issues:
+            return False
+        return self._reject_planner_issue(
+            request,
+            message="Kubernetes namespace quota decrease is below live used",
+            issues=issues,
+            error_category="quota_decrease_guard",
+        )
+
+
+def _observed_quota_used(observed_state: dict[str, Any]) -> dict[str, Any]:
+    resource_quota = observed_state.get("resource_quota") or {}
+    if resource_quota.get("status_used"):
+        return resource_quota["status_used"]
+    verification = observed_state.get("pvc_admission_verification") or {}
+    after_allowed = verification.get("resource_quota_status_after_allowed_pvc") or {}
+    return after_allowed.get("used") or {}
