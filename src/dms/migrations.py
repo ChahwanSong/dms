@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS requests (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_commit_order ON requests(commit_order);
 CREATE INDEX IF NOT EXISTS idx_requests_resource ON requests(resource_kind, resource_key, commit_order);
+CREATE INDEX IF NOT EXISTS idx_requests_requester_commit_order
+    ON requests(requester_id, commit_order DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_resource_operation_order
+    ON requests(resource_kind, resource_key, operation, commit_order DESC);
 
 CREATE TABLE IF NOT EXISTS plans (
     plan_id TEXT PRIMARY KEY,

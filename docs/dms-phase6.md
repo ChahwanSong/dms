@@ -377,7 +377,7 @@ GET /api/v1/operations/kubernetes/namespace-quotas/{cluster_name}/{namespace_nam
 - effective quota warnings
 - last check/sync request id
 
-단, 이 endpoint가 Phase 6 scope를 과하게 키우면 `:check` result와 `action-required` 노출까지만 Phase 6 완료 기준으로 삼고 dedicated query endpoint는 Phase 7로 넘긴다.
+단, 이 endpoint가 Phase 6 scope를 과하게 키우면 `:check` result와 `action-required` 노출까지만 Phase 6 완료 기준으로 삼고 dedicated query endpoint는 Phase 7로 넘긴다. Phase 6 완료 후에는 이 API를 별도 phase로 분리해, DMS DB에 기록된 quota state와 현재 Kubernetes cluster에 적용된 live DMS `ResourceQuota`를 한 응답에서 비교할 수 있게 한다.
 
 ## Live Verification Plan
 
@@ -516,6 +516,7 @@ dms_phase6_obs_<timestamp>
 - filesystem quota command 실행
 - Kubernetes namespace delete lifecycle
 - partial per-storage quota patch API
+- block 상태 Kubernetes quota update의 restore target 갱신 workflow
 - cross-cluster batch quota operation
 - default quota policy reset workflow
 - VolcanoJob live execution
@@ -528,7 +529,152 @@ dms_phase6_obs_<timestamp>
 
 Phase 6 완료 후에는 다음 중 하나를 선택한다.
 
-### Phase 7A: DMS Agent DaemonSet
+### Phase 7A: Kubernetes Quota Query API
+
+Phase 6에서 check/sync result evidence로만 확인한 quota 상태를 운영자가 직접 조회할 수 있는 read-only API로 승격한다.
+
+목표는 **DMS DB에 기록된 resource quota 정보**와 **현재 Kubernetes cluster에 실제 적용된 DMS-managed `ResourceQuota` 정보**를 같은 API 응답에서 동시에 보여주는 것이다. 이 API는 quota를 수정하지 않고, 운영자가 drift, stale DB state, live object missing, non-DMS quota interference를 빠르게 판단하는 용도다.
+
+권장 endpoint:
+
+```text
+GET /api/v1/operations/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}
+```
+
+권장 query parameter:
+
+- `source=both|db|live`: 기본값은 `both`다. `both`는 DMS DB와 Kubernetes live object를 모두 조회한다.
+- `include_non_dms=true|false`: namespace 안의 non-DMS `ResourceQuota` summary와 effective quota warning 포함 여부다.
+- `include_status_used=true|false`: live `ResourceQuota.status.used` 포함 여부다.
+
+응답에는 최소한 다음을 포함한다.
+
+- `cluster_name`, `namespace_name`, DMS-managed quota name
+- DMS DB resource row의 `resource_type`, `status`, `version`, `desired_state.quota`, rendered desired hard, `observed_state`, `created_at`, `updated_at`
+- DB에 기록된 마지막 create/update/check/sync/delete request id와 terminal status
+- live DMS-managed Kubernetes `ResourceQuota`의 `metadata`, `spec.hard`, `status.hard`, `status.used`, `resourceVersion`, `creationTimestamp`
+- DB desired hard와 live `spec.hard`의 structured diff
+- live `status.used`가 hard limit에 얼마나 근접했는지에 대한 usage summary
+- `include_non_dms=true`일 때 non-DMS `ResourceQuota` 목록, hard summary, effective quota warning
+- live object가 없거나 Kubernetes API 조회가 실패했을 때의 `live_status`와 diagnostic reason
+
+응답 예:
+
+```json
+{
+  "cluster_name": "cluster-b",
+  "namespace_name": "team-a",
+  "dms_resource_quota_name": "dms-storage-quota",
+  "source": "both",
+  "db": {
+    "resource_type": "kubernetes_namespace_quota",
+    "status": "Active",
+    "version": 7,
+    "desired_hard": {
+      "requests.storage": "768Mi",
+      "persistentvolumeclaims": "8",
+      "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "512Mi",
+      "testbed-longhorn.storageclass.storage.k8s.io/persistentvolumeclaims": "4",
+      "longhorn-static.storageclass.storage.k8s.io/requests.storage": "256Mi",
+      "longhorn-static.storageclass.storage.k8s.io/persistentvolumeclaims": "4"
+    },
+    "last_check_request_id": "req_...",
+    "last_sync_request_id": "req_..."
+  },
+  "live": {
+    "exists": true,
+    "spec_hard": {
+      "requests.storage": "768Mi",
+      "persistentvolumeclaims": "8",
+      "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "512Mi",
+      "testbed-longhorn.storageclass.storage.k8s.io/persistentvolumeclaims": "4",
+      "longhorn-static.storageclass.storage.k8s.io/requests.storage": "256Mi",
+      "longhorn-static.storageclass.storage.k8s.io/persistentvolumeclaims": "4"
+    },
+    "status_used": {
+      "requests.storage": "384Mi",
+      "persistentvolumeclaims": "3",
+      "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "256Mi",
+      "longhorn-static.storageclass.storage.k8s.io/requests.storage": "128Mi"
+    },
+    "resource_version": "123456"
+  },
+  "diff": {
+    "status": "Consistent",
+    "issues": []
+  },
+  "effective_quota_warnings": []
+}
+```
+
+구현 기준:
+
+- API는 read-only여야 하며 Kubernetes object나 DMS DB desired state를 변경하지 않는다.
+- live 조회는 `get resourcequotas`와 필요 시 `list resourcequotas` RBAC만 요구한다.
+- DB 조회가 성공하고 live 조회가 실패해도 DB section은 반환하고 live diagnostic을 남긴다.
+- live 조회가 성공하고 DB resource row가 없으면 unmanaged live quota 후보로 반환하되 DMS-owned label/annotation 여부를 명확히 표시한다.
+- check/sync와 동일한 hard key parser를 재사용해 quantity 비교 방식이 API마다 달라지지 않게 한다.
+- 응답은 운영자가 `kubectl get resourcequota dms-storage-quota -n <namespace> -o yaml` 결과와 대조할 수 있는 값을 포함한다.
+
+테스트베드 검증:
+
+- `cluster-a/testbed-cephfs` single StorageClass quota에서 DB desired hard와 live `spec.hard`가 일치하는지 API로 검증한다.
+- `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static` multi-StorageClass quota에서 namespace-wide key와 StorageClass-specific key가 모두 반환되는지 검증한다.
+- live `ResourceQuota`를 수동 patch해 drift를 만들고 API `diff.status=Drifted`와 issue key가 check 결과와 같은지 확인한다.
+- DMS DB state는 남아 있는데 live object를 삭제한 missing case를 검증한다.
+- non-DMS `ResourceQuota`를 추가하고 `include_non_dms=true`에서 effective quota warning이 반환되는지 확인한다.
+
+### Phase 7A-2: Block 상태 Kubernetes Quota Update Semantics
+
+Phase 6 구현에서는 block 상태의 Kubernetes namespace quota resource에 update 요청이 들어와도 별도로 거부하지 않는다. 이때 update가 `resource_quota_hard`를 다시 렌더링해 live `ResourceQuota`에 non-zero hard limit을 적용할 수 있고, `block_state.restore_hard`는 block 이전 값으로 남을 수 있다. 결과적으로 DMS state는 blocked인데 Kubernetes admission은 다시 열리거나, 이후 unblock 시 block 중 update한 quota가 아니라 오래된 restore hard로 복구될 위험이 있다.
+
+다음 phase에서는 block 상태 update를 금지하지 말고, **block 상태 update는 허용하되 live hard는 계속 `0`으로 유지**하는 정책을 구현한다.
+
+요구 동작:
+
+- 기존 DMS resource가 `block_state.blocked=true`인 상태에서 `update` 요청이 들어오면 planner는 update payload를 기존 desired state와 병합해 최신 restore target hard를 계산한다.
+- 계산된 최신 hard limit은 `block_state.restore_hard`에 저장한다.
+- live Kubernetes `ResourceQuota.spec.hard`에는 계속 모든 DMS-managed hard key를 `"0"`으로 적용한다.
+- DMS desired state에는 `block=true`, `block_state.blocked=true`를 유지해 운영자가 여전히 blocked 상태임을 볼 수 있게 한다.
+- 이후 `unblock` 요청은 block 이전 hard가 아니라 block 중 update로 갱신된 최신 `block_state.restore_hard`를 복구한다.
+- update가 quota decrease를 포함하면 기존 decrease guard를 최신 restore target hard에 대해 적용한다. live used보다 낮은 restore target은 blocked 상태에서도 reject한다.
+- `storage_class_quotas[]` full replacement semantics는 유지한다. block 중 update payload에 `storage_class_quotas[]`가 있으면 새 list 전체가 restore target이 된다.
+
+검증 항목:
+
+- block 후 live `ResourceQuota.spec.hard`의 namespace-wide key와 StorageClass-specific key가 모두 `"0"`인지 확인한다.
+- block 상태에서 quota increase update를 요청해 request가 성공하되 live `spec.hard`는 계속 `"0"`인지 확인한다.
+- 같은 상태에서 `GET /api/v1/operations/resources` 또는 dedicated query API가 `block_state.restore_hard`에 update된 quota를 보여주는지 확인한다.
+- unblock 후 live `ResourceQuota.spec.hard`가 block 이전 값이 아니라 block 중 update한 최신 quota로 복구되는지 확인한다.
+- block 상태에서 live used보다 낮은 decrease update가 rejected 되고 live `spec.hard`가 계속 `"0"`으로 유지되는지 확인한다.
+
+### Phase 7A-3: Requester-scoped Request History Query
+
+운영 request history 조회 API가 전체 request 목록을 넓게 반환하지 않도록, `GET /api/v1/operations/requests`에 필수 `requester_id` query parameter를 추가한다.
+
+권장 endpoint:
+
+```text
+GET /api/v1/operations/requests?requester_id={requester_id}&limit={limit}
+```
+
+요구 동작:
+
+- `requester_id`는 필수 query parameter다. 누락되면 request를 조회하지 않고 validation error를 반환한다.
+- 응답은 `requests.requester_id`가 query의 `requester_id`와 일치하는 request만 포함한다.
+- 정렬은 기존과 동일하게 `commit_order DESC` 최신순을 유지한다.
+- `limit`은 optional query parameter다. 없으면 API/repository 기본값을 사용한다.
+- `limit`이 주어지면 repository 조회에 전달해 해당 requester의 최신 request 중 지정한 개수만 반환한다.
+- `GET /api/v1/operations/requests/{request_id}`는 단건 lifecycle history 조회용으로 유지하되, 필요하면 requester 권한 검증은 별도 정책으로 다룬다.
+
+검증 항목:
+
+- 서로 다른 `requester_id`의 request를 섞어 생성하고, API가 지정한 requester의 request만 반환하는지 확인한다.
+- `limit` 없이 호출하면 repository/API 기본값이 적용되는지 확인한다.
+- `limit`을 지정하면 해당 requester 범위 안에서 `commit_order DESC` 최신순으로 제한되는지 확인한다.
+- `requester_id` 없이 호출하면 validation error가 반환되고 운영 DB 조회 부하를 만들지 않는지 확인한다.
+
+### Phase 7B: DMS Agent DaemonSet
 
 Phase 3부터 이어진 synthetic Agent report 한계를 제거한다.
 
@@ -541,7 +687,7 @@ Phase 3부터 이어진 synthetic Agent report 한계를 제거한다.
 
 이 phase는 Data Management live execution 전에 수행하는 것을 권장한다.
 
-### Phase 7B: Filesystem Resource Management Minimal Lifecycle
+### Phase 7C: Filesystem Resource Management Minimal Lifecycle
 
 Kubernetes ResourceQuota와 별개로 POSIX filesystem directory/quota lifecycle을 실제 backend에 붙인다.
 
@@ -550,7 +696,7 @@ Kubernetes ResourceQuota와 별개로 POSIX filesystem directory/quota lifecycle
 - CephFS mount 또는 GPFS template 중 하나로 시작
 - destructive delete는 테스트 namespace/path로 제한
 
-### Phase 7C: Data Management Read-only Scan Preflight
+### Phase 7D: Data Management Read-only Scan Preflight
 
 Agent DaemonSet 또는 충분히 신뢰 가능한 DM capability report가 준비된 뒤 진행한다.
 
@@ -559,4 +705,4 @@ Agent DaemonSet 또는 충분히 신뢰 가능한 DM capability report가 준비
 - VolcanoJob 또는 local controlled executor 중 하나를 실제 검증 대상으로 선택
 - scan report artifact persistence
 
-권장 순서는 `Phase 7A -> Phase 7C`다. Data Management는 실제 mount/tool/identity capability가 scheduler decision과 맞아야 하므로 Agent DaemonSet 없이 진행하면 검증 의미가 약해진다.
+권장 순서는 `Phase 7A -> Phase 7B -> Phase 7D`다. quota query API는 Phase 6에서 만든 Kubernetes quota lifecycle의 운영 가시성을 먼저 닫는 작은 read-only phase로 적합하다. Data Management는 실제 mount/tool/identity capability가 scheduler decision과 맞아야 하므로 Agent DaemonSet 없이 진행하면 검증 의미가 약해진다.

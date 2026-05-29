@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import sys
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 import uvicorn
 
 from .agent import AgentReportIngestionService
+from .agent_daemon import build_agent_report, config_from_env, post_report, run_loop
 from .adapters import (
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
@@ -53,7 +55,29 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--actor", required=True)
     agent.add_argument("--report-json", help="path to report JSON; stdin is used when omitted")
 
+    agent_probe = subcommands.add_parser("agent-probe")
+    agent_probe.add_argument("--once", action="store_true", help="run one probe and print JSON")
+    agent_probe.add_argument("--post", action="store_true", help="post the report to DMS API")
+
+    agent_loop = subcommands.add_parser("agent-loop")
+    agent_loop.add_argument("--interval", type=float)
+
     args = parser.parse_args(argv)
+
+    if args.command == "agent-probe":
+        config = config_from_env()
+        report = build_agent_report(config)
+        if args.post:
+            print(json.dumps(post_report(config, report)))
+        else:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    if args.command == "agent-loop":
+        config = config_from_env()
+        if args.interval is not None:
+            config = replace(config, report_interval_seconds=args.interval)
+        return run_loop(config)
+
     settings = Settings.from_env()
     operational = Database(settings.database_url)
     observability_db = Database(settings.observability_database_url)

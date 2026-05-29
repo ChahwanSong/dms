@@ -373,6 +373,7 @@ Phase 4에서 query가 보여야 하는 정보:
 
 필요하면 다음 endpoint를 보강한다.
 
+- `GET /api/v1/operations/requests`는 repository 기본값 기준 `commit_order DESC` 최근 1000개 request를 반환한다.
 - `GET /api/v1/operations/requests/{request_id}`
 - `GET /api/v1/operations/resources/kubernetes`
 - `GET /api/v1/operations/action-required`

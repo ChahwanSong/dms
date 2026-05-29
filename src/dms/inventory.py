@@ -39,6 +39,7 @@ class EffectiveInventoryService:
             WorkerRole.RM.value: {},
             WorkerRole.DM.value: {},
         }
+        seen_role_nodes: set[tuple[str, str, str]] = set()
         for report in reports:
             cluster_name = report["cluster_name"]
             clusters.setdefault(
@@ -57,6 +58,10 @@ class EffectiveInventoryService:
             if report["freshness_status"] != "Fresh":
                 continue
             role = report["worker_role"]
+            role_node_key = (role, cluster_name, report["node_name"])
+            if role_node_key in seen_role_nodes:
+                continue
+            seen_role_nodes.add(role_node_key)
             role_cluster = worker_roles.setdefault(role, {}).setdefault(
                 cluster_name,
                 {
@@ -78,13 +83,13 @@ class EffectiveInventoryService:
             payload = report["report"]
             for mount in payload.get("mounts", []):
                 storage_name = mount.get("storage_name")
-                if storage_name:
+                if storage_name and _evidence_is_ready(mount):
                     role_cluster["mounts_by_storage_name"].setdefault(
                         storage_name, []
                     ).append({"node_name": report["node_name"], **mount})
             for csi in payload.get("csi", []):
                 driver = csi.get("driver")
-                if driver:
+                if driver and _evidence_is_ready(csi):
                     role_cluster["csi_by_driver"].setdefault(driver, []).append(
                         {"node_name": report["node_name"], **csi}
                     )
@@ -97,6 +102,17 @@ class EffectiveInventoryService:
             "worker_roles": worker_roles,
             "control_cluster_name": self.settings.control_cluster_name,
         }
+
+
+def _evidence_is_ready(evidence: dict[str, Any]) -> bool:
+    status = evidence.get("status")
+    if status is not None and str(status).lower() != "ready":
+        return False
+    if evidence.get("healthy") is False:
+        return False
+    if evidence.get("node_plugin_ready") is False:
+        return False
+    return True
 
 
 @dataclass

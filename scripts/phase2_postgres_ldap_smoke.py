@@ -38,14 +38,16 @@ def main() -> int:
         "observability diagnostic_events table",
     )
 
-    before_requests = len(services.repository.list_requests(limit=1000))
+    before_requests = len(
+        services.repository.list_requests(requester_id="portal:alice", limit=1000)
+    )
     auth_failure = client.post(
         "/api/v1/resource-management/filesystems",
         json=_filesystem_body(token, "auth"),
     )
     assert_equal(auth_failure.status_code, 401, "auth failure status")
     assert_equal(
-        len(services.repository.list_requests(limit=1000)),
+        len(services.repository.list_requests(requester_id="portal:alice", limit=1000)),
         before_requests,
         "auth failure must not create operational request",
     )

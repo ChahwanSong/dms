@@ -178,6 +178,7 @@ class Planner:
             if not self._should_preserve_kubernetes_quota_hard(request):
                 self._enrich_kubernetes_quota_desired(desired)
             self._apply_kubernetes_block_desired(request, desired)
+            self._apply_kubernetes_blocked_update_desired(request, desired)
         return desired
 
     def _rm_execution_metadata(
@@ -626,6 +627,24 @@ class Planner:
             "reason": request["payload_summary"].get("reason"),
         }
 
+    def _apply_kubernetes_blocked_update_desired(
+        self, request: dict[str, Any], desired: dict[str, Any]
+    ) -> None:
+        if request["operation"] != OperationKind.K8S_QUOTA_UPDATE.value:
+            return
+        block_state = desired.get("block_state") or {}
+        if not block_state.get("blocked"):
+            return
+        restore_hard = dict(desired.get("resource_quota_hard") or {})
+        if not restore_hard:
+            return
+        updated_block_state = dict(block_state)
+        updated_block_state["restore_hard"] = restore_hard
+        updated_block_state["updated_while_blocked"] = True
+        desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(restore_hard)
+        desired["block"] = True
+        desired["block_state"] = updated_block_state
+
     def _reject_kubernetes_quota_decrease(
         self, request: dict[str, Any], desired_state: dict[str, Any]
     ) -> bool:
@@ -636,6 +655,9 @@ class Planner:
             return False
         used = _observed_quota_used(resource["observed_state"])
         hard = desired_state.get("resource_quota_hard") or {}
+        block_state = desired_state.get("block_state") or {}
+        if block_state.get("blocked") and block_state.get("restore_hard"):
+            hard = block_state["restore_hard"]
         issues: list[dict[str, Any]] = []
         for key, used_value in used.items():
             if key not in hard:

@@ -43,6 +43,17 @@ class FilesystemQuotaStrategy(Protocol):
 class KubernetesNamespaceQuotaAdapter(Protocol):
     def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]: ...
 
+    def read_resource_quota(
+        self,
+        cluster_name: str,
+        namespace_name: str,
+        resource_quota_name: str = "dms-storage-quota",
+    ) -> dict[str, Any]: ...
+
+    def list_resource_quotas(
+        self, cluster_name: str, namespace_name: str
+    ) -> list[dict[str, Any]]: ...
+
     def create_namespace(self, plan: dict[str, Any]) -> AdapterResult: ...
 
     def apply_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
@@ -151,9 +162,34 @@ class StubFilesystemBackendAdapter:
 @dataclass
 class StubKubernetesNamespaceQuotaAdapter:
     calls: list[tuple[str, str]] = field(default_factory=list)
+    resource_quotas: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
+    resource_quota_lists: dict[tuple[str, str], list[dict[str, Any]]] = field(
+        default_factory=dict
+    )
 
     def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
         return {"cluster_name": cluster_name, "namespace_name": namespace_name, "exists": True}
+
+    def read_resource_quota(
+        self,
+        cluster_name: str,
+        namespace_name: str,
+        resource_quota_name: str = "dms-storage-quota",
+    ) -> dict[str, Any]:
+        return self.resource_quotas.get(
+            (cluster_name, namespace_name, resource_quota_name),
+            {
+                "exists": False,
+                "cluster_name": cluster_name,
+                "namespace": namespace_name,
+                "name": resource_quota_name,
+            },
+        )
+
+    def list_resource_quotas(
+        self, cluster_name: str, namespace_name: str
+    ) -> list[dict[str, Any]]:
+        return self.resource_quota_lists.get((cluster_name, namespace_name), [])
 
     def create_namespace(self, plan: dict[str, Any]) -> AdapterResult:
         return self.apply_resource_quota(plan)

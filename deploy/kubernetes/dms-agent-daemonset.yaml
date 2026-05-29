@@ -1,0 +1,198 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dms
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dms-agent
+  namespace: dms
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dms-agent-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csidrivers"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dms-agent-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dms-agent-readonly
+subjects:
+  - kind: ServiceAccount
+    name: dms-agent
+    namespace: dms
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-agent-runtime-config
+  namespace: dms
+data:
+  DMS_AGENT_API_URL: "http://192.168.56.11:30088"
+  DMS_AGENT_CLUSTER_NAME: "cluster-a"
+  DMS_AGENT_REPORT_INTERVAL_SECONDS: "60"
+  DMS_AGENT_REPORT_TIMEOUT_SECONDS: "5"
+  DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan,kubectl"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-agent-storages
+  namespace: dms
+data:
+  storages.json: |
+    {
+      "storages": [
+        {
+          "storage_name": "cephfs-a",
+          "backend_type": "cephfs",
+          "cluster_name": "cluster-a",
+          "storage_class_name": "testbed-cephfs",
+          "csi_driver": "rook-ceph.cephfs.csi.ceph.com",
+          "mount_paths": [],
+          "network_endpoints": []
+        },
+        {
+          "storage_name": "longhorn-b",
+          "backend_type": "longhorn",
+          "cluster_name": "cluster-b",
+          "storage_class_name": "testbed-longhorn",
+          "csi_driver": "driver.longhorn.io",
+          "mount_paths": [],
+          "network_endpoints": []
+        },
+        {
+          "storage_name": "longhorn-static-b",
+          "backend_type": "longhorn",
+          "cluster_name": "cluster-b",
+          "storage_class_name": "longhorn-static",
+          "csi_driver": "driver.longhorn.io",
+          "mount_paths": [],
+          "network_endpoints": []
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dms-rm-agent
+  namespace: dms
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-rm-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-rm-agent
+        app.kubernetes.io/part-of: dms
+        dms.io/worker-role: rm
+    spec:
+      serviceAccountName: dms-agent
+      containers:
+        - name: agent
+          image: testbed-registry:5000/dms:phase8
+          imagePullPolicy: Always
+          command: ["dms", "agent-loop"]
+          envFrom:
+            - configMapRef:
+                name: dms-agent-runtime-config
+          env:
+            - name: DMS_AGENT_WORKER_ROLE
+              value: RM
+            - name: DMS_AGENT_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DMS_AGENT_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DMS_AGENT_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: storages
+              mountPath: /etc/dms/agent
+              readOnly: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: storages
+          configMap:
+            name: dms-agent-storages
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dms-dm-agent
+  namespace: dms
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-dm-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-dm-agent
+        app.kubernetes.io/part-of: dms
+        dms.io/worker-role: dm
+    spec:
+      serviceAccountName: dms-agent
+      containers:
+        - name: agent
+          image: testbed-registry:5000/dms:phase8
+          imagePullPolicy: Always
+          command: ["dms", "agent-loop"]
+          envFrom:
+            - configMapRef:
+                name: dms-agent-runtime-config
+          env:
+            - name: DMS_AGENT_WORKER_ROLE
+              value: DM
+            - name: DMS_AGENT_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DMS_AGENT_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DMS_AGENT_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: storages
+              mountPath: /etc/dms/agent
+              readOnly: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: storages
+          configMap:
+            name: dms-agent-storages

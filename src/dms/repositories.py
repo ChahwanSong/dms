@@ -55,6 +55,8 @@ TERMINAL_DATA_JOB_STATES = {
     DataJobState.TIMED_OUT.value,
 }
 
+DEFAULT_REQUEST_LIST_LIMIT = 1000
+
 
 def row_to_dict(row: Any) -> dict[str, Any]:
     if row is None:
@@ -254,11 +256,47 @@ class DmsRepository:
             request = self._get_request(connection, request_id)
         return self._decode_request(request)
 
-    def list_requests(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_requests(
+        self, *, requester_id: str, limit: int = DEFAULT_REQUEST_LIST_LIMIT
+    ) -> list[dict[str, Any]]:
+        if not requester_id.strip():
+            raise ValueError("requester_id is required")
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM requests ORDER BY commit_order DESC LIMIT ?",
-                (limit,),
+                """
+                SELECT * FROM requests
+                WHERE requester_id = ?
+                ORDER BY commit_order DESC
+                LIMIT ?
+                """,
+                (requester_id, limit),
+            ).fetchall()
+        return [self._decode_request(row_to_dict(row)) for row in rows]
+
+    def list_requests_for_resource(
+        self,
+        *,
+        resource_kind: str,
+        resource_key: str,
+        operations: tuple[str, ...] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        where = ["resource_kind = ?", "resource_key = ?"]
+        params: list[Any] = [resource_kind, resource_key]
+        if operations:
+            placeholders = ",".join(["?"] * len(operations))
+            where.append(f"operation IN ({placeholders})")
+            params.extend(operations)
+        params.append(limit)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM requests
+                WHERE {' AND '.join(where)}
+                ORDER BY commit_order DESC
+                LIMIT ?
+                """,
+                tuple(params),
             ).fetchall()
         return [self._decode_request(row_to_dict(row)) for row in rows]
 

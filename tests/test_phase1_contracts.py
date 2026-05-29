@@ -122,7 +122,7 @@ def test_authentication_failure_only_writes_observability_event(harness):
     )
 
     assert response.status_code == 401
-    assert harness["repository"].list_requests() == []
+    assert harness["repository"].list_requests(requester_id="user-1") == []
     events = harness["observability"].list_events()
     assert events[0]["event_type"] == "authentication_rejected"
 
@@ -135,12 +135,77 @@ def test_authorization_failure_is_operational_terminal_without_plan(harness):
     )
 
     assert response.status_code == 403
-    [request] = harness["repository"].list_requests()
+    [request] = harness["repository"].list_requests(requester_id="user-1")
     assert request["status"] == LifecycleState.AUTHORIZATION_FAILED.value
     assert harness["repository"].get_plan_by_request(request["request_id"]) is None
     [result] = harness["repository"].get_results(request["request_id"])
     assert result["terminal_status"] == LifecycleState.AUTHORIZATION_FAILED.value
     assert result["verification_summary"]["backend_side_effect"] is False
+
+
+def test_operations_requests_default_returns_latest_1000(harness):
+    for index in range(1001):
+        harness["repository"].create_request(
+            requester_id="user-1",
+            actor="api-client",
+            operation="create",
+            resource_kind="filesystem",
+            resource_key=f"weka-a:request-{index}",
+            payload={"index": index},
+        )
+
+    response = harness["client"].get(
+        "/api/v1/operations/requests?requester_id=user-1",
+        headers={"x-dms-actor": "api-client"},
+    )
+
+    assert response.status_code == 200
+    requests = response.json()
+    assert len(requests) == 1000
+    assert requests[0]["resource_key"] == "weka-a:request-1000"
+    assert requests[-1]["resource_key"] == "weka-a:request-1"
+
+
+def test_operations_requests_requires_requester_id(harness):
+    response = harness["client"].get(
+        "/api/v1/operations/requests",
+        headers={"x-dms-actor": "api-client"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_operations_requests_filters_by_requester_and_limit(harness):
+    for index in range(3):
+        harness["repository"].create_request(
+            requester_id="alice",
+            actor="api-client",
+            operation="create",
+            resource_kind="filesystem",
+            resource_key=f"weka-a:alice-{index}",
+            payload={"index": index},
+        )
+        harness["repository"].create_request(
+            requester_id="bob",
+            actor="api-client",
+            operation="create",
+            resource_kind="filesystem",
+            resource_key=f"weka-a:bob-{index}",
+            payload={"index": index},
+        )
+
+    response = harness["client"].get(
+        "/api/v1/operations/requests?requester_id=alice&limit=2",
+        headers={"x-dms-actor": "api-client"},
+    )
+
+    assert response.status_code == 200
+    requests = response.json()
+    assert [item["requester_id"] for item in requests] == ["alice", "alice"]
+    assert [item["resource_key"] for item in requests] == [
+        "weka-a:alice-2",
+        "weka-a:alice-1",
+    ]
 
 
 def test_request_and_plan_are_persisted_before_backend_side_effect(harness):

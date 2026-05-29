@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-05-28 21:18 +0900
+Last updated: 2026-05-29 06:41 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -11,7 +11,7 @@ Last updated: 2026-05-28 21:18 +0900
 - `Done`은 실제 테스트베드 또는 실제 외부 시스템에 연결해 확인된 기능만 의미한다.
 - local pytest, stub adapter, synthetic data는 보조 회귀 검증으로만 기록한다.
 - 아직 실제 backend side effect가 구현되지 않은 기능은 성공처럼 적지 않고 명확히 미구현으로 남긴다.
-- Phase 6까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle이다.
+- Phase 8까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity이다.
 
 ## Testbed Architecture
 
@@ -103,7 +103,7 @@ longhorn-csi-plugin-pddq5                           3/3     Running   0         
 longhorn-driver-deployer-6f94cb9fd9-4pxv7           1/1     Running   0          8h
 ```
 
-## Implemented Through Phase 6
+## Implemented Through Phase 8
 
 ### Phase 1: Core Lifecycle Skeleton
 
@@ -316,7 +316,106 @@ Live 검증 대상:
 - DMS lifecycle delete는 여전히 namespace delete가 아니다.
 - namespace/PVC cleanup은 verification script cleanup으로만 수행했다.
 - DMS Agent DaemonSet은 아직 없으므로 Agent report는 API로 제출한 synthetic evidence다.
-- Phase 6 effective quota warning은 check/sync result evidence로 검증했다. 별도 namespace quota query endpoint나 action-required aggregation은 아직 완료 범위가 아니다.
+- Phase 6 effective quota warning은 check/sync result evidence로 검증했다. Phase 7에서 별도 namespace quota query endpoint로 DB/live/effective warning 조회까지 검증했다.
+
+### Phase 7: Operational Query + Blocked Quota Update Semantics
+
+확실히 구현된 범위:
+
+- `GET /api/v1/operations/requests`에 필수 `requester_id` query parameter 추가
+- requester별 request list를 `commit_order DESC` 최신순으로 조회
+- optional `limit` query parameter 지원
+- repository request list 기본 limit은 1000개
+- requester query용 index 추가
+  - `idx_requests_requester_commit_order`
+- Kubernetes namespace quota dedicated read-only query API 추가
+  - `GET /api/v1/operations/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}`
+- quota query API가 operational DB resource state와 live Kubernetes `ResourceQuota` state를 함께 반환
+- quota query API가 DB desired hard와 live `spec.hard` diff를 `Consistent`, `Drifted`, `Missing`, `LiveOnly`, `DbOnly`, `QueryFailed` 등으로 구조화
+- quota query API가 live `status.used` usage summary를 반환
+- `include_non_dms=true`일 때 non-DMS `ResourceQuota`와 effective quota warning 반환
+- blocked 상태 Kubernetes namespace quota update semantics 보강
+  - blocked 상태 update는 허용
+  - live hard limit은 계속 `0` 유지
+  - unblock 복구 대상인 `block_state.restore_hard`만 최신 quota로 갱신
+  - blocked 상태 decrease guard는 zero hard가 아니라 restore target hard를 기준으로 적용
+- live verification script 추가
+  - `scripts/phase7_operational_query_and_block_update.py`
+  - `scripts/verify-phase7-testbed.sh`
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 Kubernetes mutation/read: `cluster-a`, `cluster-b`
+- 실제 Longhorn multi-StorageClass target: `cluster-b/testbed-longhorn`, `cluster-b/longhorn-static`
+- 실제 CephFS single-entry query target: `cluster-a/testbed-cephfs`
+
+주의:
+
+- DMS Agent DaemonSet은 아직 없으므로 Agent report는 API로 제출한 synthetic evidence다.
+- Phase 7 quota query API는 read-only다. Kubernetes object나 DMS DB desired state를 변경하지 않는다.
+- `GET /api/v1/operations/requests/{request_id}` 단건 lifecycle history endpoint는 유지된다.
+
+### Phase 8: DMS Agent DaemonSet + Real Agent Evidence
+
+확실히 구현된 범위:
+
+- DMS Agent runtime/prober 추가
+  - `src/dms/agent_daemon.py`
+  - one-shot report generation
+  - loop mode report posting
+- CLI 추가
+  - `dms agent-probe --once`
+  - `dms agent-probe --post`
+  - `dms agent-loop`
+- Agent가 DB 직접 접근 없이 DMS API로 report 제출
+  - `POST /api/v1/agent/reports`
+  - `x-dms-actor: node:{cluster_name}:{node_name}`
+  - optional `Authorization: Bearer {DMS_AUTH_SHARED_TOKEN}`
+- Agent node-local/read-only probe
+  - node identity and node UID lookup
+  - mount evidence from `/proc/self/mountinfo`
+  - Kubernetes `StorageClass`/`CSIDriver`/`Node` read-only evidence
+  - tool existence evidence
+  - credential file presence evidence without secret content
+  - network reachability evidence
+  - optional POSIX identity lookup evidence
+- Phase 8 Agent report schema
+  - `schema_version=phase8.v1`
+  - existing Phase 3 ingestion schema와 backward-compatible
+  - evidence별 `status`, `reason`, `source`, `checked_at` 기록
+- effective inventory normalization 보강
+  - `status=Ready` evidence만 readiness candidate로 사용
+  - 같은 `(worker_role, cluster_name, node_name)`의 최신 fresh report만 worker role candidate로 사용
+  - non-ready Phase 8 evidence는 raw report로는 보존하지만 mapping readiness를 Ready로 만들지 않음
+- Kubernetes 배포 산출물 추가
+  - `deploy/Dockerfile`
+  - `deploy/kubernetes/dms-agent-daemonset.yaml`
+  - 기존 placeholder synthetic Agent CronJob 제거
+- Phase 8 live verification scripts 추가
+  - `scripts/phase8_agent_daemonset_live.py`
+  - `scripts/verify-phase8-testbed.sh`
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 DMS API Deployment on `cluster-a`
+- 실제 DMS Agent DaemonSet
+  - `cluster-a`: RM Agent, DM Agent
+  - `cluster-b`: RM Agent
+- 실제 Kubernetes read-only probe
+  - `cluster-a/testbed-cephfs`
+  - `cluster-b/testbed-longhorn`
+  - `cluster-b/longhorn-static`
+- 실제 Kubernetes quota lifecycle subset
+  - CephFS quota create/check/delete
+  - Longhorn multi-StorageClass quota create/check/delete
+
+주의:
+
+- Phase 8은 filesystem directory/quota mutation을 구현하지 않는다.
+- Phase 8은 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
+- Longhorn 계열 storage는 control cluster DM Agent가 실제로 볼 수 없으므로 DM readiness가 `Missing`으로 남는다. 이 상태를 synthetic evidence로 보완하지 않고 action-required에 노출하는 것이 Phase 8의 기대 동작이다.
 
 ## Live Verification Results
 
@@ -688,6 +787,177 @@ Output summary:
 상세 검증 기록:
 
 - `docs/dms-phase6-verification.md`
+
+### Phase 7 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+PATH="/tmp/dms-phase3-venv/bin:$PATH" ./scripts/verify-phase7-testbed.sh
+```
+
+Output summary:
+
+```json
+{
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase7_obs_20260528223441",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase7_20260528223441",
+  "request_query": {
+    "requester_id": "portal:phase7-a",
+    "limited_resource_keys": [
+      "phase7-a:cf012d71:2",
+      "phase7-a:cf012d71:1"
+    ],
+    "missing_requester_status": 422
+  },
+  "status": "ok",
+  "targets": [
+    {
+      "target": "longhorn-query-blocked-update",
+      "cluster_name": "cluster-b",
+      "namespace_name": "dms-phase7-longhorn-cf012d71",
+      "initial_query_status": "Consistent",
+      "blocked_decrease_status": "Rejected",
+      "drift_query_status": "Drifted",
+      "effective_warning_types": ["non_dms_quota_more_restrictive"],
+      "missing_query_status": "Missing",
+      "non_dms_quota_preserved": true,
+      "blocked_query_restore_hard": {
+        "longhorn-static.storageclass.storage.k8s.io/persistentvolumeclaims": "5",
+        "longhorn-static.storageclass.storage.k8s.io/requests.storage": "384Mi",
+        "persistentvolumeclaims": "10",
+        "requests.storage": "1Gi",
+        "testbed-longhorn.storageclass.storage.k8s.io/persistentvolumeclaims": "5",
+        "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "512Mi"
+      }
+    },
+    {
+      "target": "cephfs-quota-query",
+      "cluster_name": "cluster-a",
+      "namespace_name": "dms-phase7-cephfs-cf012d71",
+      "query_status": "Consistent"
+    }
+  ]
+}
+```
+
+검증 의미:
+
+- `GET /api/v1/operations/requests`가 필수 `requester_id`를 요구하고, 지정 requester의 최신 request만 반환했다.
+- `cluster-b` Longhorn multi-StorageClass quota에 대해 dedicated quota query API가 DB/live `Consistent`를 반환했다.
+- blocked 상태 update가 live hard를 계속 `0`으로 유지하면서 `block_state.restore_hard`를 최신 quota로 갱신했다.
+- blocked 상태 decrease guard가 restore target 기준으로 backend side effect 없이 `Rejected` 됐다.
+- unblock 후 live `ResourceQuota.spec.hard`가 block 중 update한 최신 restore target으로 복구됐다.
+- manual drift가 quota query API에서 `Drifted`로 노출됐다.
+- non-DMS ResourceQuota가 DMS보다 더 restrictive한 effective quota warning으로 노출됐다.
+- DMS delete 이후 quota query API가 `Missing`을 반환했고 non-DMS ResourceQuota는 보존됐다.
+- `cluster-a/testbed-cephfs` single StorageClass quota query도 `Consistent`로 통과했다.
+
+상세 검증 기록:
+
+- `docs/dms-phase7-verification.md`
+
+### Phase 8 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE8_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase8-testbed.sh
+```
+
+Image build/push was verified with the same script before the final run. The host Docker daemon used the script's `docker save` + `skopeo copy` fallback for the testbed HTTP registry.
+
+Output summary:
+
+```json
+{
+  "status": "ok",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase8_20260529064715",
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase8_obs_20260529064715",
+  "phase8_reports": {
+    "cluster-a:DM": {
+      "node_name": "c1-worker",
+      "report_id": "agent_d7eba85f5bff4c76a5c667d330f1e70e"
+    },
+    "cluster-a:RM": {
+      "node_name": "c1-worker",
+      "report_id": "agent_3dda47cfbd2f4d95ada039cda1ca654d"
+    },
+    "cluster-b:RM": {
+      "node_name": "c2-worker",
+      "report_id": "agent_96cccd7d417e4881bc66eb9af2b495bc"
+    }
+  },
+  "identity_mismatch": {"status_code": 403},
+  "storage_mappings": [
+    {
+      "storage_name": "cephfs-a",
+      "storage_class_name": "testbed-cephfs",
+      "status": "Ready",
+      "readiness": {
+        "resource_management": "Ready",
+        "data_management": "Ready",
+        "inventory": "Ready"
+      }
+    },
+    {
+      "storage_name": "longhorn-b",
+      "storage_class_name": "testbed-longhorn",
+      "status": "Degraded",
+      "readiness": {
+        "resource_management": "Ready",
+        "data_management": "Missing",
+        "inventory": "Ready"
+      }
+    },
+    {
+      "storage_name": "longhorn-static-b",
+      "storage_class_name": "longhorn-static",
+      "status": "Degraded",
+      "readiness": {
+        "resource_management": "Ready",
+        "data_management": "Missing",
+        "inventory": "Ready"
+      }
+    }
+  ],
+  "quota_subset": [
+    {
+      "target": "cephfs",
+      "namespace": "dms-phase8-cephfs-30271240",
+      "create_request_id": "req_110fce7e43044356988731cdca596250"
+    },
+    {
+      "target": "longhorn",
+      "namespace": "dms-phase8-longhorn-30271240",
+      "create_request_id": "req_41a6484b3d2b4d6a9f5f5d9d75b5178c"
+    }
+  ],
+  "stale_handling": {
+    "marked_stale": 6,
+    "stale_report_count": 6
+  },
+  "action_required_issue_types": ["agent_report_stale", "missing_dm_readiness"]
+}
+```
+
+검증 의미:
+
+- 테스트베드 local registry에 `dms:phase8` image를 push했다. host Docker가 HTTP registry를 HTTPS로 push하려 해 실패한 경우 verifier가 `docker save`와 `c1-control`의 `skopeo copy --dest-tls-verify=false` fallback으로 registry push를 완료했다.
+- 실제 `cluster-a`에 DMS API Deployment와 NodePort service를 배포했다.
+- 실제 `cluster-a`에 RM/DM Agent DaemonSet을, `cluster-b`에 RM Agent DaemonSet을 배포했다.
+- Agent Pod가 `schema_version=phase8.v1` report를 DMS API에 제출했고 operational PostgreSQL에 Fresh report로 저장됐다.
+- Agent actor mismatch가 `403`으로 거부되고 observability event가 기록됐다.
+- `cluster-a/testbed-cephfs`, `cluster-b/testbed-longhorn`, `cluster-b/longhorn-static` mapping의 RM readiness가 실제 Agent report 기반으로 `Ready`가 됐다.
+- synthetic Agent report 없이 CephFS quota create/check/delete와 Longhorn multi-StorageClass quota create/check/delete subset을 실제 Kubernetes API에서 검증했다.
+- Longhorn 계열 DM readiness `Missing`은 control cluster DM Agent가 Longhorn StorageClass를 실제로 볼 수 없다는 의미이며, action-required에 노출됐다.
+- 실제 Phase 8 Agent reports 6개를 stale 처리하고 action-required에서 `agent_report_stale` 노출을 확인했다.
+
+상세 검증 기록:
+
+- `docs/dms-phase8-verification.md`
 
 ### PostgreSQL Evidence Query
 
@@ -1078,7 +1348,51 @@ ssh c2-control "kubectl delete namespace <longhorn_multi_namespace_from_output> 
 ssh c1-control "kubectl delete namespace <cephfs_namespace_from_output> --ignore-not-found"
 ```
 
-### 9. Optional Local Regression
+### 9. Re-run Phase 7 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+PATH="/tmp/dms-phase3-venv/bin:$PATH" ./scripts/verify-phase7-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE7_OPERATIONAL_DB` and `DMS_PHASE7_OBSERVABILITY_DB` are set.
+
+To inspect namespaces manually after the script, keep cleanup disabled:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE7_CLEANUP=false PATH="/tmp/dms-phase3-venv/bin:$PATH" ./scripts/verify-phase7-testbed.sh
+ssh c2-control "kubectl -n <longhorn_namespace_from_output> get resourcequota,pvc"
+ssh c1-control "kubectl -n <cephfs_namespace_from_output> get resourcequota,pvc"
+ssh c2-control "kubectl delete namespace <longhorn_namespace_from_output> --ignore-not-found"
+ssh c1-control "kubectl delete namespace <cephfs_namespace_from_output> --ignore-not-found"
+```
+
+### 10. Re-run Phase 8 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+./scripts/verify-phase8-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE8_OPERATIONAL_DB` and `DMS_PHASE8_OBSERVABILITY_DB` are set.
+
+To skip rebuilding the image when the registry already has the current image:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE8_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase8-testbed.sh
+```
+
+The script cleans up the temporary `dms-phase8` namespace in both clusters by default.
+
+### 11. Optional Local Regression
 
 이 검증은 mock/stub도 포함하므로 `Done`의 단독 근거로 쓰지 않는다. 코드 회귀 확인 용도다.
 
@@ -1086,27 +1400,25 @@ Command:
 
 ```bash
 cd /home/mason/workspace/dms
-/tmp/dms-phase3-venv/bin/python -m pytest -q
+python3 -m pytest -q
 ```
 
 Output:
 
 ```text
-37 passed in 17.11s
+49 passed in 35.48s
 ```
 
 ## Not Implemented Yet
 
-다음 항목은 Phase 6까지 완료된 기능으로 보지 않는다.
+다음 항목은 Phase 8까지 완료된 기능으로 보지 않는다.
 
-- DMS API server, Planner, Worker, Agent의 Kubernetes Deployment/Helm/Kustomize 배포
-- 실제 DMS Agent DaemonSet
-- Agent의 node-local mount/tool/credential/network probe 구현
+- DMS API server, Planner, Worker, Agent의 production Helm/Kustomize 배포
 - 실제 filesystem directory create/update/block/delete
 - 실제 filesystem quota 적용
 - DMS lifecycle operation으로서의 Kubernetes namespace delete
 - Kubernetes default quota policy 기반 reset workflow
-- Kubernetes effective quota dedicated query/action-required aggregation beyond check/sync result evidence
+- Kubernetes effective quota action-required aggregation
 - 실제 VolcanoJob create/watch/terminate
 - mpifileutils image build 또는 live execution
 - Data Management POSIX permission runtime preflight
@@ -1116,9 +1428,10 @@ Output:
 
 ## Comments For Next Phases
 
-- 다음 phase는 DMS Agent DaemonSet, filesystem quota lifecycle, 또는 Kubernetes effective quota dedicated query/action-required aggregation 중 하나로 좁혀서 진행하는 것이 적절하다.
-- `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6에서 multi-StorageClass quota target으로 검증했다.
-- `cluster-a/testbed-cephfs`는 Phase 5/6에서 self-managed RM target 및 regression target으로 검증했다.
+- 다음 phase는 filesystem quota lifecycle 또는 Data Management read-only scan preflight 중 하나로 좁혀서 진행하는 것이 적절하다.
+- `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8에서 multi-StorageClass quota target으로 검증했다.
+- `cluster-a/testbed-cephfs`는 Phase 5/6/7/8에서 self-managed RM target 및 regression target으로 검증했다.
+- Phase 8에서 실제 Agent DaemonSet report를 검증했으므로 이후 Data Management preflight나 filesystem lifecycle은 synthetic Agent report 없이 진행해야 한다.
 - Phase 4부터는 mock/stub 결과와 real backend mutation 결과를 문서에서 반드시 분리한다.
 - 실제 backend mutation이 추가될 때마다 이 문서의 `Live Verification Results`와 `Not Implemented Yet`를 갱신한다.
 - live verification script 이름에 `smoke`가 남아 있더라도, 이 문서에서는 어떤 부분이 실제 외부 시스템 검증이고 어떤 부분이 stub/synthetic인지 명확히 구분한다.

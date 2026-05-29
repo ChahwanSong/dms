@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel
 
 from .agent import AgentReportIngestionService
@@ -12,6 +12,8 @@ from .adapters import (
     IdentityLookupConfigurationError,
     IdentityLookupReadError,
     IdentityLookupResult,
+    KubernetesNamespaceQuotaAdapter,
+    KubernetesNamespaceQuotaLiveAdapter,
     KubernetesReadOnlyInventoryAdapter,
     KubectlReadOnlyInventoryAdapter,
     LdapIdentityLookupAdapter,
@@ -61,6 +63,7 @@ class AppServices:
     volcano_adapter: StubVolcanoAdapter
     identity_lookup: IdentityLookupAdapter | None = None
     kubernetes_inventory: KubernetesReadOnlyInventoryAdapter | None = None
+    kubernetes_quota: KubernetesNamespaceQuotaAdapter | None = None
 
 
 def create_app(
@@ -69,6 +72,7 @@ def create_app(
     observability: ObservabilityRepository | None = None,
     identity_lookup: IdentityLookupAdapter | None = None,
     kubernetes_inventory: KubernetesReadOnlyInventoryAdapter | None = None,
+    kubernetes_quota: KubernetesNamespaceQuotaAdapter | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     if repository is None or observability is None:
@@ -88,6 +92,8 @@ def create_app(
         identity_lookup=identity_lookup or _identity_lookup_from_settings(settings),
         kubernetes_inventory=kubernetes_inventory
         or KubectlReadOnlyInventoryAdapter.from_settings(settings),
+        kubernetes_quota=kubernetes_quota
+        or KubernetesNamespaceQuotaLiveAdapter.from_settings(settings),
     )
 
     app = FastAPI(title="DMS", version="0.1.0")
@@ -996,10 +1002,14 @@ def operational_query_router() -> APIRouter:
     @router.get("/requests")
     def requests(
         request: Request,
+        requester_id: str = Query(..., min_length=1),
+        limit: int | None = Query(default=None, gt=0),
         services: AppServices = Depends(get_services),
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
-        return services.repository.list_requests()
+        if limit is None:
+            return services.repository.list_requests(requester_id=requester_id)
+        return services.repository.list_requests(requester_id=requester_id, limit=limit)
 
     @router.get("/requests/{request_id}")
     def request_history(
@@ -1017,6 +1027,29 @@ def operational_query_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
         return services.repository.list_resources()
+
+    @router.get("/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}")
+    def kubernetes_namespace_quota(
+        cluster_name: str,
+        namespace_name: str,
+        request: Request,
+        source: str = "both",
+        include_non_dms: bool = False,
+        include_status_used: bool = True,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        try:
+            return services.query.kubernetes_namespace_quota(
+                cluster_name=cluster_name,
+                namespace_name=namespace_name,
+                source=source,
+                include_non_dms=include_non_dms,
+                include_status_used=include_status_used,
+                kubernetes_adapter=services.kubernetes_quota,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.get("/runs/stale")
     def stale_runs(
