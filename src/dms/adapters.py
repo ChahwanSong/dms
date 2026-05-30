@@ -29,6 +29,8 @@ class FilesystemBackendAdapter(Protocol):
 
     def consistency_check(self, plan: dict[str, Any]) -> AdapterResult: ...
 
+    def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult: ...
+
     def import_directory(self, plan: dict[str, Any]) -> AdapterResult: ...
 
     def assign_quota_only(self, plan: dict[str, Any]) -> AdapterResult: ...
@@ -169,6 +171,9 @@ class StubFilesystemBackendAdapter:
 
     def consistency_check(self, plan: dict[str, Any]) -> AdapterResult:
         return self._result("consistency_check", plan)
+
+    def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult:
+        return self._result("sync_live_state", plan)
 
     def import_directory(self, plan: dict[str, Any]) -> AdapterResult:
         return self._result("import_directory", plan)

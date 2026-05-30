@@ -87,6 +87,7 @@ class OperationKind(StrEnum):
     FILESYSTEM_ASSIGN_QUOTA = "filesystem.assign_quota"
     FILESYSTEM_IMPORT = "filesystem.import"
     FILESYSTEM_CHECK = "filesystem.consistency_check"
+    FILESYSTEM_SYNC = "filesystem.sync"
     FILESYSTEM_EXPIRATION_SWEEP = "filesystem.expiration_sweep"
     K8S_QUOTA_CREATE = "kubernetes.namespace_quota.create"
     K8S_QUOTA_UPDATE = "kubernetes.namespace_quota.update"

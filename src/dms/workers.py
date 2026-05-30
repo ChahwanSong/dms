@@ -124,6 +124,7 @@ class RMWorkerRuntime:
                 correlation_id=plan["request_id"],
             )
         except BackendPreconditionError as exc:
+            precondition_issue = _rm_precondition_issue(plan["operation_kind"], str(exc))
             self.repository.complete_result(
                 request_id=plan["request_id"],
                 plan_id=plan["plan_id"],
@@ -133,6 +134,7 @@ class RMWorkerRuntime:
                 verification_summary={
                     "backend_side_effect": False,
                     "precondition_failed": True,
+                    "issues": [precondition_issue] if precondition_issue else [],
                 },
                 error_category="backend_precondition",
                 actor=self.worker_id,
@@ -191,6 +193,8 @@ class RMWorkerRuntime:
             return filesystem_adapter.import_directory(plan)
         if operation == OperationKind.FILESYSTEM_CHECK.value:
             return filesystem_adapter.consistency_check(plan)
+        if operation == OperationKind.FILESYSTEM_SYNC.value:
+            return filesystem_adapter.sync_live_state(plan)
         if operation in {
             OperationKind.K8S_QUOTA_CREATE.value,
             OperationKind.K8S_QUOTA_UPDATE.value,
@@ -372,6 +376,25 @@ def _filesystem_sweep_failure_reason(message: str) -> str:
     if "group" in lowered:
         return "filesystem_access_group_missing"
     return "filesystem_block_failed"
+
+
+def _rm_precondition_issue(operation: str, message: str) -> dict[str, Any] | None:
+    if not operation.startswith("filesystem."):
+        return None
+    lowered = message.lower()
+    if operation == OperationKind.FILESYSTEM_IMPORT.value:
+        issue_type = "filesystem_import_preflight_failed"
+    elif operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
+        issue_type = "filesystem_assign_quota_failed"
+    elif "quota" in lowered:
+        issue_type = "filesystem_quota_apply_failed"
+    elif "marker" in lowered:
+        issue_type = "filesystem_marker_mismatch"
+    elif "group" in lowered:
+        issue_type = "filesystem_access_group_unresolved"
+    else:
+        issue_type = "filesystem_block_failed"
+    return {"issue_type": issue_type, "reason": issue_type, "message": message}
 
 
 @dataclass

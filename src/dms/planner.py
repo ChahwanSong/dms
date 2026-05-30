@@ -29,6 +29,7 @@ RM_OPERATIONS = {
     OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
     OperationKind.FILESYSTEM_IMPORT.value,
     OperationKind.FILESYSTEM_CHECK.value,
+    OperationKind.FILESYSTEM_SYNC.value,
     OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
     OperationKind.K8S_QUOTA_CREATE.value,
     OperationKind.K8S_QUOTA_UPDATE.value,
@@ -39,18 +40,22 @@ RM_OPERATIONS = {
     OperationKind.K8S_QUOTA_AUDIT.value,
 }
 
-PHASE11_FILESYSTEM_OPERATIONS = {
+PHASE12_FILESYSTEM_OPERATIONS = {
     OperationKind.FILESYSTEM_CREATE.value,
+    OperationKind.FILESYSTEM_UPDATE.value,
     OperationKind.FILESYSTEM_BLOCK.value,
     OperationKind.FILESYSTEM_DELETE.value,
+    OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
+    OperationKind.FILESYSTEM_IMPORT.value,
+    OperationKind.FILESYSTEM_CHECK.value,
+    OperationKind.FILESYSTEM_SYNC.value,
     OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
 }
 
-PHASE11_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS = {
+PHASE12_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS = {
     "acl",
     "capacity_bytes",
     "file_count",
-    "quota",
     "rename",
     "block",
     "check",
@@ -60,7 +65,7 @@ PHASE11_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS = {
     "reset_quota_to_default",
 }
 
-PHASE11_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS = {
+PHASE12_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS = {
     "acl",
     "capacity_bytes",
     "file_count",
@@ -72,6 +77,36 @@ PHASE11_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS = {
     "resource_quota_hard",
     "reset_quota_to_default",
 }
+
+PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS = {
+    "storage_name",
+    "directory_name",
+    "quota",
+    "reason",
+}
+
+PHASE12_FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS = {
+    "storage_name",
+    "directory_name",
+    "include_usage",
+    "include_quota",
+    "include_permission",
+    "usage_thresholds",
+    "record_action_required",
+    "reason",
+}
+
+PHASE12_FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS = {
+    "storage_name",
+    "directory_name",
+    "source",
+    "include_usage",
+    "include_quota",
+    "reason",
+}
+
+MAX_FILESYSTEM_QUOTA_CAPACITY_BYTES = 1024**4
+MAX_FILESYSTEM_QUOTA_FILE_COUNT = 10_000_000
 
 DM_OPERATIONS = {
     OperationKind.DATA_SYNC.value,
@@ -125,7 +160,7 @@ class Planner:
         if operation in RM_OPERATIONS:
             if self._reject_invalid_kubernetes_quota_request(request):
                 return
-            if self._reject_invalid_filesystem_phase11_request(request):
+            if self._reject_invalid_filesystem_phase12_request(request):
                 return
             if self._reject_unsafe_storage_mapping(request, WorkerRole.RM):
                 return
@@ -253,7 +288,15 @@ class Planner:
         )
         if (
             request["operation"]
-            in {OperationKind.FILESYSTEM_DELETE.value, OperationKind.FILESYSTEM_BLOCK.value}
+            in {
+                OperationKind.FILESYSTEM_UPDATE.value,
+                OperationKind.FILESYSTEM_BLOCK.value,
+                OperationKind.FILESYSTEM_DELETE.value,
+                OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
+                OperationKind.FILESYSTEM_IMPORT.value,
+                OperationKind.FILESYSTEM_CHECK.value,
+                OperationKind.FILESYSTEM_SYNC.value,
+            }
             and existing
             and existing.get("status") != "Deleted"
         ):
@@ -266,6 +309,39 @@ class Planner:
                 desired["access_group"] = f"dms-phase10-{directory_name}"
             desired.setdefault("mode", "0770")
             desired.setdefault("resource_type", "user")
+            if "quota" in desired:
+                desired["quota"] = _normalized_filesystem_quota(desired["quota"])
+        if request["operation"] == OperationKind.FILESYSTEM_UPDATE.value and "quota" in request["payload_summary"]:
+            desired["quota"] = _normalized_filesystem_quota(request["payload_summary"]["quota"])
+        if request["operation"] == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
+            desired.setdefault("management_mode", "quota_only")
+            desired["quota"] = _normalized_filesystem_quota(request["payload_summary"]["quota"])
+            desired.setdefault("initialize_marker", True)
+            desired.setdefault("resource_type", "user")
+        if request["operation"] == OperationKind.FILESYSTEM_IMPORT.value:
+            desired.setdefault("import_mode", "full")
+            desired.setdefault("management_mode", "full")
+            desired.setdefault("initialize_marker", True)
+            access_policy = desired.get("access_policy") or {}
+            if access_policy.get("users") is not None:
+                desired["users"] = list(access_policy["users"])
+            if access_policy.get("denied_users") is not None:
+                desired["validation_denied_users"] = list(access_policy["denied_users"])
+            if access_policy.get("expected_group") and not desired.get("access_group"):
+                desired["access_group"] = access_policy["expected_group"]
+            if access_policy.get("expected_mode") and not desired.get("mode"):
+                desired["mode"] = access_policy["expected_mode"]
+            desired.setdefault("resource_type", "user")
+            if "quota" in request["payload_summary"]:
+                desired["quota"] = _normalized_filesystem_quota(request["payload_summary"]["quota"])
+        if request["operation"] == OperationKind.FILESYSTEM_CHECK.value:
+            desired.setdefault("include_usage", True)
+            desired.setdefault("include_quota", True)
+            desired.setdefault("include_permission", True)
+        if request["operation"] == OperationKind.FILESYSTEM_SYNC.value:
+            desired.setdefault("source", "live")
+            desired.setdefault("include_usage", True)
+            desired.setdefault("include_quota", True)
         if request["operation"] == OperationKind.FILESYSTEM_BLOCK.value:
             self._apply_filesystem_block_desired(request, existing, desired)
         return desired
@@ -368,6 +444,16 @@ class Planner:
             }
         elif request["resource_kind"] == ResourceKind.FILESYSTEM.value:
             metadata["planner"] = (
+                "phase12"
+                if request["operation"]
+                in {
+                    OperationKind.FILESYSTEM_UPDATE.value,
+                    OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
+                    OperationKind.FILESYSTEM_IMPORT.value,
+                    OperationKind.FILESYSTEM_CHECK.value,
+                    OperationKind.FILESYSTEM_SYNC.value,
+                }
+                else
                 "phase11"
                 if request["operation"]
                 in {
@@ -632,7 +718,7 @@ class Planner:
             error_category="validation",
         )
 
-    def _reject_invalid_filesystem_phase11_request(
+    def _reject_invalid_filesystem_phase12_request(
         self, request: dict[str, Any]
     ) -> bool:
         if request["resource_kind"] != ResourceKind.FILESYSTEM.value:
@@ -641,13 +727,13 @@ class Planner:
         payload = request["payload_summary"]
         issues: list[dict[str, Any]] = []
 
-        if operation not in PHASE11_FILESYSTEM_OPERATIONS:
+        if operation not in PHASE12_FILESYSTEM_OPERATIONS:
             return self._reject_planner_issue(
                 request,
-                message="filesystem operation is unsupported in Phase 11",
+                message="filesystem operation is unsupported in Phase 12",
                 issues=[
                     {
-                        "reason": "filesystem_operation_unsupported_phase11",
+                        "reason": "filesystem_operation_unsupported_phase12",
                         "operation": operation,
                     }
                 ],
@@ -667,16 +753,18 @@ class Planner:
         if operation == OperationKind.FILESYSTEM_CREATE.value:
             unsupported = sorted(
                 field
-                for field in PHASE11_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS
+                for field in PHASE12_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS
                 if field in payload
             )
             if unsupported:
                 issues.append(
                     {
-                        "reason": "filesystem_payload_fields_unsupported_phase11",
+                        "reason": "filesystem_payload_fields_unsupported_phase12",
                         "fields": unsupported,
                     }
                 )
+            if "quota" in payload:
+                issues.extend(_filesystem_quota_issues(payload.get("quota")))
             resource_type = payload.get("resource_type")
             if resource_type is not None and str(resource_type) not in {
                 "user",
@@ -747,13 +835,13 @@ class Planner:
         if operation == OperationKind.FILESYSTEM_BLOCK.value:
             unsupported = sorted(
                 field
-                for field in PHASE11_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS
+                for field in PHASE12_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS
                 if field in payload
             )
             if unsupported:
                 issues.append(
                     {
-                        "reason": "filesystem_payload_fields_unsupported_phase11",
+                        "reason": "filesystem_payload_fields_unsupported_phase12",
                         "fields": unsupported,
                     }
                 )
@@ -803,12 +891,210 @@ class Planner:
                         "resource_key": request["resource_key"],
                     }
                 )
+            elif existing["desired_state"].get("management_mode") == "quota_only":
+                issues.append(
+                    {
+                        "reason": "filesystem_quota_only_delete_refused",
+                        "resource_key": request["resource_key"],
+                    }
+                )
+
+        if operation == OperationKind.FILESYSTEM_UPDATE.value:
+            existing = self.repository.get_resource(
+                request["resource_kind"], request["resource_key"]
+            )
+            issues.extend(
+                _unsupported_payload_issues(
+                    payload,
+                    PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS,
+                    "filesystem_payload_fields_unsupported_phase12",
+                )
+            )
+            if not existing or existing.get("status") == "Deleted":
+                issues.append(
+                    {
+                        "reason": "filesystem_resource_missing",
+                        "resource_key": request["resource_key"],
+                    }
+                )
+            if "quota" not in payload:
+                issues.append({"reason": "filesystem_quota_required"})
+            else:
+                quota_issues = _filesystem_quota_issues(payload.get("quota"))
+                issues.extend(quota_issues)
+                if existing and not quota_issues:
+                    issues.extend(
+                        _filesystem_quota_decrease_issues(
+                            existing, _normalized_filesystem_quota(payload["quota"])
+                        )
+                    )
+
+        if operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
+            existing = self.repository.get_resource(
+                request["resource_kind"], request["resource_key"]
+            )
+            if existing and existing.get("status") != "Deleted":
+                mode = existing["desired_state"].get("management_mode", "full")
+                if mode != "quota_only":
+                    issues.append(
+                        {
+                            "reason": "filesystem_resource_already_exists",
+                            "resource_key": request["resource_key"],
+                            "status": existing.get("status"),
+                        }
+                    )
+            management_mode = payload.get("management_mode", "quota_only")
+            if management_mode != "quota_only":
+                issues.append(
+                    {
+                        "reason": "filesystem_management_mode_unsupported",
+                        "management_mode": management_mode,
+                    }
+                )
+            if "quota" not in payload:
+                issues.append({"reason": "filesystem_quota_required"})
+            else:
+                issues.extend(_filesystem_quota_issues(payload.get("quota")))
+            initialize_marker = payload.get("initialize_marker", True)
+            if not isinstance(initialize_marker, bool):
+                issues.append(
+                    {
+                        "reason": "initialize_marker_boolean_required",
+                        "value": initialize_marker,
+                    }
+                )
+
+        if operation == OperationKind.FILESYSTEM_IMPORT.value:
+            existing = self.repository.get_resource(
+                request["resource_kind"], request["resource_key"]
+            )
+            if existing and existing.get("status") != "Deleted":
+                mode = existing["desired_state"].get("management_mode", "full")
+                if mode != "quota_only":
+                    issues.append(
+                        {
+                            "reason": "filesystem_resource_already_exists",
+                            "resource_key": request["resource_key"],
+                            "status": existing.get("status"),
+                        }
+                    )
+            import_mode = payload.get("import_mode", "full")
+            if import_mode != "full":
+                issues.append(
+                    {
+                        "reason": "filesystem_import_mode_unsupported",
+                        "import_mode": import_mode,
+                    }
+                )
+            initialize_marker = payload.get("initialize_marker", True)
+            if not isinstance(initialize_marker, bool):
+                issues.append(
+                    {
+                        "reason": "initialize_marker_boolean_required",
+                        "value": initialize_marker,
+                    }
+                )
+            access_policy = payload.get("access_policy")
+            if not isinstance(access_policy, dict):
+                issues.append({"reason": "filesystem_access_policy_required"})
+                access_policy = {}
+            elif access_policy.get("mode", "adopt_existing_group") != "adopt_existing_group":
+                issues.append(
+                    {
+                        "reason": "filesystem_access_policy_mode_unsupported",
+                        "mode": access_policy.get("mode"),
+                    }
+                )
+            expected_group = access_policy.get("expected_group")
+            if expected_group is not None:
+                _append_basename_issue(issues, "expected_group", expected_group)
+            else:
+                issues.append({"reason": "filesystem_access_group_required"})
+            expected_mode = access_policy.get("expected_mode", "0770")
+            if str(expected_mode) not in {"0750", "0770"}:
+                issues.append(
+                    {
+                        "reason": "filesystem_mode_unsupported_phase12",
+                        "mode": expected_mode,
+                    }
+                )
+            users = _validate_string_list(
+                issues, "access_policy.users", access_policy.get("users"), required=True
+            )
+            if users is not None and len(users) < 2:
+                issues.append({"reason": "filesystem_users_minimum_two_required"})
+            denied_users = access_policy.get("denied_users")
+            if denied_users is not None:
+                _validate_string_list(
+                    issues,
+                    "access_policy.denied_users",
+                    denied_users,
+                    required=False,
+                )
+            if "quota" in payload:
+                issues.extend(_filesystem_quota_issues(payload.get("quota")))
+
+        if operation == OperationKind.FILESYSTEM_CHECK.value:
+            existing = self.repository.get_resource(
+                request["resource_kind"], request["resource_key"]
+            )
+            issues.extend(
+                _unsupported_payload_issues(
+                    payload,
+                    PHASE12_FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS,
+                    "filesystem_payload_fields_unsupported_phase12",
+                )
+            )
+            if not existing or existing.get("status") == "Deleted":
+                issues.append(
+                    {
+                        "reason": "filesystem_resource_missing",
+                        "resource_key": request["resource_key"],
+                    }
+                )
+            _append_boolean_payload_issues(
+                issues,
+                payload,
+                ("include_usage", "include_quota", "include_permission", "record_action_required"),
+            )
+            issues.extend(_usage_threshold_issues(payload.get("usage_thresholds")))
+
+        if operation == OperationKind.FILESYSTEM_SYNC.value:
+            existing = self.repository.get_resource(
+                request["resource_kind"], request["resource_key"]
+            )
+            issues.extend(
+                _unsupported_payload_issues(
+                    payload,
+                    PHASE12_FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS,
+                    "filesystem_payload_fields_unsupported_phase12",
+                )
+            )
+            if not existing or existing.get("status") == "Deleted":
+                issues.append(
+                    {
+                        "reason": "filesystem_resource_missing",
+                        "resource_key": request["resource_key"],
+                    }
+                )
+            if payload.get("source", "live") != "live":
+                issues.append(
+                    {
+                        "reason": "filesystem_sync_source_unsupported",
+                        "source": payload.get("source"),
+                    }
+                )
+            _append_boolean_payload_issues(
+                issues,
+                payload,
+                ("include_usage", "include_quota"),
+            )
 
         if not issues:
             return False
         return self._reject_planner_issue(
             request,
-            message="invalid filesystem Phase 11 request",
+            message="invalid filesystem Phase 12 request",
             issues=issues,
             error_category="validation",
         )
@@ -1387,3 +1673,146 @@ def _validate_string_list(
         issues.append({"reason": f"{field_name}_entries_must_be_unique"})
         return None
     return normalized
+
+
+def _unsupported_payload_issues(
+    payload: dict[str, Any],
+    allowed_fields: set[str],
+    reason: str,
+) -> list[dict[str, Any]]:
+    unsupported = sorted(field for field in payload if field not in allowed_fields)
+    return [{"reason": reason, "fields": unsupported}] if unsupported else []
+
+
+def _append_boolean_payload_issues(
+    issues: list[dict[str, Any]],
+    payload: dict[str, Any],
+    fields: tuple[str, ...],
+) -> None:
+    for field in fields:
+        if field in payload and not isinstance(payload[field], bool):
+            issues.append({"reason": f"{field}_boolean_required", "value": payload[field]})
+
+
+def _filesystem_quota_issues(quota: Any) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    if not isinstance(quota, dict):
+        return [{"reason": "filesystem_quota_must_be_object"}]
+    allowed = {"capacity_bytes", "file_count"}
+    unsupported = sorted(field for field in quota if field not in allowed)
+    if unsupported:
+        issues.append(
+            {
+                "reason": "filesystem_quota_fields_unsupported_phase12",
+                "fields": unsupported,
+            }
+        )
+    if not any(field in quota for field in allowed):
+        issues.append({"reason": "filesystem_quota_required"})
+    for field in sorted(allowed):
+        if field not in quota:
+            continue
+        value = quota[field]
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            issues.append({"reason": f"filesystem_quota_{field}_invalid", "value": value})
+            continue
+        if parsed <= 0:
+            issues.append({"reason": f"filesystem_quota_{field}_invalid", "value": value})
+            continue
+        if field == "capacity_bytes" and parsed > MAX_FILESYSTEM_QUOTA_CAPACITY_BYTES:
+            issues.append(
+                {
+                    "reason": "filesystem_quota_capacity_bytes_too_large",
+                    "value": value,
+                    "max": MAX_FILESYSTEM_QUOTA_CAPACITY_BYTES,
+                }
+            )
+        if field == "file_count" and parsed > MAX_FILESYSTEM_QUOTA_FILE_COUNT:
+            issues.append(
+                {
+                    "reason": "filesystem_quota_file_count_too_large",
+                    "value": value,
+                    "max": MAX_FILESYSTEM_QUOTA_FILE_COUNT,
+                }
+            )
+    return issues
+
+
+def _normalized_filesystem_quota(quota: dict[str, Any]) -> dict[str, int]:
+    normalized: dict[str, int] = {}
+    for field in ("capacity_bytes", "file_count"):
+        if field in quota:
+            normalized[field] = int(quota[field])
+    return normalized
+
+
+def _filesystem_quota_decrease_issues(
+    resource: dict[str, Any], requested_quota: dict[str, int]
+) -> list[dict[str, Any]]:
+    usage = _filesystem_observed_usage(resource.get("observed_state") or {})
+    issues: list[dict[str, Any]] = []
+    if "capacity_bytes" in requested_quota:
+        used_bytes = usage.get("used_bytes")
+        if isinstance(used_bytes, int) and requested_quota["capacity_bytes"] < used_bytes:
+            issues.append(
+                {
+                    "reason": "filesystem_quota_decrease_below_live_used",
+                    "resource": "capacity_bytes",
+                    "desired": requested_quota["capacity_bytes"],
+                    "used": used_bytes,
+                }
+            )
+    if "file_count" in requested_quota:
+        used_files = usage.get("used_files")
+        if isinstance(used_files, int) and requested_quota["file_count"] < used_files:
+            issues.append(
+                {
+                    "reason": "filesystem_quota_decrease_below_live_used",
+                    "resource": "file_count",
+                    "desired": requested_quota["file_count"],
+                    "used": used_files,
+                }
+            )
+    return issues
+
+
+def _filesystem_observed_usage(observed_state: dict[str, Any]) -> dict[str, int]:
+    quota_state = observed_state.get("quota_state") or {}
+    usage = quota_state.get("usage") or observed_state.get("usage") or {}
+    parsed: dict[str, int] = {}
+    for source_key, target_key in (
+        ("used_bytes", "used_bytes"),
+        ("used_files", "used_files"),
+        ("bytes", "used_bytes"),
+        ("files", "used_files"),
+    ):
+        if source_key not in usage:
+            continue
+        try:
+            parsed[target_key] = int(usage[source_key])
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
+def _usage_threshold_issues(thresholds: Any) -> list[dict[str, Any]]:
+    if thresholds is None:
+        return []
+    if not isinstance(thresholds, dict):
+        return [{"reason": "usage_thresholds_invalid", "value": thresholds}]
+    try:
+        warning = float(thresholds.get("warning_percent", 80))
+        critical = float(thresholds.get("critical_percent", 95))
+    except (TypeError, ValueError):
+        return [{"reason": "usage_thresholds_invalid", "value": thresholds}]
+    if warning <= 0 or critical <= 0 or critical <= warning:
+        return [
+            {
+                "reason": "usage_thresholds_invalid",
+                "warning_percent": warning,
+                "critical_percent": critical,
+            }
+        ]
+    return []

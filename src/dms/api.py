@@ -327,6 +327,23 @@ def resource_management_router() -> APIRouter:
             OperationKind.FILESYSTEM_CHECK,
         )
 
+    @router.post("/filesystems/{storage_name}/{directory_name}:sync", status_code=202)
+    def filesystem_sync(
+        storage_name: str,
+        directory_name: str,
+        body: MutatingBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        return _filesystem_keyed_request(
+            storage_name,
+            directory_name,
+            body,
+            request,
+            services,
+            OperationKind.FILESYSTEM_SYNC,
+        )
+
     @router.post("/filesystems:expiration-sweep", status_code=202)
     def filesystem_expiration_sweep(
         body: MutatingBody,

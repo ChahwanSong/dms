@@ -355,8 +355,13 @@ class OperationalQueryService:
 
         rows = self.repository.list_results_for_operations(
             operations=(
+                OperationKind.FILESYSTEM_UPDATE.value,
                 OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
                 OperationKind.FILESYSTEM_BLOCK.value,
+                OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
+                OperationKind.FILESYSTEM_IMPORT.value,
+                OperationKind.FILESYSTEM_CHECK.value,
+                OperationKind.FILESYSTEM_SYNC.value,
             ),
             limit=1000,
         )
@@ -390,23 +395,54 @@ class OperationalQueryService:
                         )
                 continue
             resource_key = row["resource_key"]
-            issue_key = ("block", resource_key)
+            quota_operations = {
+                OperationKind.FILESYSTEM_UPDATE.value,
+                OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
+                OperationKind.FILESYSTEM_IMPORT.value,
+                OperationKind.FILESYSTEM_CHECK.value,
+                OperationKind.FILESYSTEM_SYNC.value,
+            }
+            issue_key = (
+                "quota" if row["operation"] in quota_operations else "block",
+                resource_key,
+            )
             if issue_key in seen_targets:
                 continue
             seen_targets.add(issue_key)
             summary = row["verification_summary"]
-            if row["terminal_status"] == LifecycleState.SUCCEEDED.value and not summary.get("issues"):
+            summary_issues = list(summary.get("issues") or [])
+            summary_issues.extend(summary.get("usage_pressure") or [])
+            if row["terminal_status"] == LifecycleState.SUCCEEDED.value and not summary_issues:
                 continue
-            issue_type = _filesystem_issue_type(summary)
+            if summary_issues:
+                for detail in summary_issues:
+                    issue_type = detail.get("issue_type") or _filesystem_issue_type(
+                        {"issues": [detail]}
+                    )
+                    issues.append(
+                        _filesystem_action_issue(
+                            issue_type=issue_type,
+                            target={
+                                "resource_key": resource_key,
+                                "storage_name": row["payload_summary"].get("storage_name"),
+                                "directory_name": row["payload_summary"].get("directory_name"),
+                                "reason": detail.get("reason") or summary.get("reason"),
+                                "issues": [detail],
+                                **detail,
+                            },
+                            source=row,
+                        )
+                    )
+                continue
             issues.append(
                 _filesystem_action_issue(
-                    issue_type=issue_type,
+                    issue_type=_filesystem_issue_type(summary),
                     target={
                         "resource_key": resource_key,
                         "storage_name": row["payload_summary"].get("storage_name"),
                         "directory_name": row["payload_summary"].get("directory_name"),
                         "reason": summary.get("reason") or row.get("message"),
-                        "issues": summary.get("issues") or [],
+                        "issues": [],
                     },
                     source=row,
                 )
@@ -457,6 +493,11 @@ FILESYSTEM_OPERATIONS = {
     OperationKind.FILESYSTEM_CREATE,
     OperationKind.FILESYSTEM_BLOCK,
     OperationKind.FILESYSTEM_DELETE,
+    OperationKind.FILESYSTEM_UPDATE,
+    OperationKind.FILESYSTEM_ASSIGN_QUOTA,
+    OperationKind.FILESYSTEM_IMPORT,
+    OperationKind.FILESYSTEM_CHECK,
+    OperationKind.FILESYSTEM_SYNC,
     OperationKind.FILESYSTEM_EXPIRATION_SWEEP,
 }
 
@@ -555,7 +596,11 @@ def _issue_type_from_reason(issue: dict[str, Any]) -> str | None:
 
 
 def _issue_severity(issue_type: str) -> str:
-    if issue_type in {"quota_usage_critical", "kubernetes_quota_query_failed"}:
+    if issue_type in {
+        "quota_usage_critical",
+        "kubernetes_quota_query_failed",
+        "filesystem_quota_usage_critical",
+    }:
         return "CRITICAL"
     return "WARN"
 
@@ -612,6 +657,14 @@ def _filesystem_issue_type(summary: dict[str, Any]) -> str:
             return "filesystem_unblock_restore_missing"
         if reason == "filesystem_access_group_missing":
             return "filesystem_access_group_missing"
+        if reason == "quota_drifted":
+            return "filesystem_quota_drifted"
+        if reason == "missing":
+            return issue.get("issue_type") or "filesystem_quota_missing"
+        if reason == "filesystem_quota_decrease_below_live_used":
+            return "filesystem_quota_decrease_blocked"
+        if reason == "filesystem_unsafe_existing_directory":
+            return "filesystem_unsafe_existing_directory"
     if summary.get("precondition_failed"):
         return "filesystem_block_failed"
     return "filesystem_block_verification_failed"
@@ -634,7 +687,20 @@ def _filesystem_action_issue(
         "last_seen": source["created_at"],
         "recommended_action": _recommended_filesystem_action(issue_type),
     }
-    for key in ("reason", "resource_type", "message", "result", "expires_at"):
+    for key in (
+        "reason",
+        "resource_type",
+        "message",
+        "result",
+        "expires_at",
+        "field",
+        "desired",
+        "live",
+        "used",
+        "hard",
+        "used_percent",
+        "management_mode",
+    ):
         if target.get(key) is not None:
             issue[key] = target[key]
     target_issues = target.get("issues") or []
@@ -654,6 +720,16 @@ def _recommended_filesystem_action(issue_type: str) -> str:
         return "restore DMS-managed LDAP access group and rerun unblock"
     if issue_type == "filesystem_marker_mismatch":
         return "inspect filesystem marker before any manual mutation"
+    if issue_type == "filesystem_quota_drifted":
+        return "run filesystem sync to accept live state or update quota to reapply desired state"
+    if issue_type in {"filesystem_quota_usage_warning", "filesystem_quota_usage_critical"}:
+        return "increase quota or remove data from the filesystem resource"
+    if issue_type == "filesystem_quota_missing":
+        return "reapply filesystem quota or sync DB state after review"
+    if issue_type == "filesystem_import_preflight_failed":
+        return "repair existing directory ownership, group, marker, or access policy and retry import"
+    if issue_type == "filesystem_assign_quota_failed":
+        return "inspect existing directory safety and retry assign-quota"
     return "inspect filesystem block/unblock result and rerun after remediation"
 
 

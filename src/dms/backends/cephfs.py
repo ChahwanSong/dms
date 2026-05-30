@@ -71,6 +71,47 @@ class FilesystemHostExecutor(Protocol):
         denied_users: list[str],
     ) -> dict[str, Any]: ...
 
+    def apply_quota(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        resource_key: str,
+        quota: dict[str, int],
+    ) -> dict[str, Any]: ...
+
+    def read_directory_state(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        resource_key: str,
+        require_marker: bool,
+        include_quota: bool,
+        include_usage: bool,
+    ) -> dict[str, Any]: ...
+
+    def assign_quota_directory(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        marker: dict[str, Any],
+        quota: dict[str, int],
+    ) -> dict[str, Any]: ...
+
+    def import_directory(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        marker: dict[str, Any],
+        access_policy: dict[str, Any],
+        quota: dict[str, int] | None,
+        allowed_users: list[str],
+        denied_users: list[str],
+    ) -> dict[str, Any]: ...
+
 
 @dataclass(frozen=True)
 class CephFsBackendTemplate:
@@ -197,6 +238,88 @@ class PythonHostExecutor:
             ],
         )
 
+    def apply_quota(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        resource_key: str,
+        quota: dict[str, int],
+    ) -> dict[str, Any]:
+        return self._run_script(
+            _APPLY_QUOTA_SCRIPT,
+            [
+                managed_root,
+                directory_name,
+                resource_key,
+                json.dumps(quota, sort_keys=True),
+            ],
+        )
+
+    def read_directory_state(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        resource_key: str,
+        require_marker: bool,
+        include_quota: bool,
+        include_usage: bool,
+    ) -> dict[str, Any]:
+        return self._run_script(
+            _READ_DIRECTORY_STATE_SCRIPT,
+            [
+                managed_root,
+                directory_name,
+                resource_key,
+                "true" if require_marker else "false",
+                "true" if include_quota else "false",
+                "true" if include_usage else "false",
+            ],
+        )
+
+    def assign_quota_directory(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        marker: dict[str, Any],
+        quota: dict[str, int],
+    ) -> dict[str, Any]:
+        return self._run_script(
+            _ASSIGN_QUOTA_DIRECTORY_SCRIPT,
+            [
+                managed_root,
+                directory_name,
+                json.dumps(marker, sort_keys=True),
+                json.dumps(quota, sort_keys=True),
+            ],
+        )
+
+    def import_directory(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        marker: dict[str, Any],
+        access_policy: dict[str, Any],
+        quota: dict[str, int] | None,
+        allowed_users: list[str],
+        denied_users: list[str],
+    ) -> dict[str, Any]:
+        return self._run_script(
+            _IMPORT_DIRECTORY_SCRIPT,
+            [
+                managed_root,
+                directory_name,
+                json.dumps(marker, sort_keys=True),
+                json.dumps(access_policy, sort_keys=True),
+                json.dumps(quota or {}, sort_keys=True),
+                json.dumps(allowed_users),
+                json.dumps(denied_users),
+            ],
+        )
+
     def _run_script(self, script: str, args: list[str]) -> dict[str, Any]:
         command = self._command(script, args)
         try:
@@ -301,6 +424,18 @@ class CephFsHostMountedFilesystemBackendAdapter:
             allowed_users=users,
             denied_users=denied_users,
         )
+        quota_state: dict[str, Any] | None = None
+        quota = _normalize_quota(desired.get("quota"))
+        if quota:
+            quota_observed = self.executor.apply_quota(
+                managed_root=self.template.managed_root,
+                directory_name=directory_name,
+                resource_key=plan["resource_key"],
+                quota=quota,
+            )
+            quota_state = quota_observed.get("quota_state")
+            observed["quota_apply"] = quota_observed
+            observed["quota_state"] = quota_state
         observed.update(
             {
                 "adapter": "cephfs-host-mounted",
@@ -328,6 +463,9 @@ class CephFsHostMountedFilesystemBackendAdapter:
             },
             "expires_at": desired.get("expires_at"),
         }
+        if quota:
+            applied["quota"] = quota
+            applied["quota_state"] = quota_state
         return AdapterResult(
             applied_state=applied,
             observed_state=observed,
@@ -369,7 +507,46 @@ class CephFsHostMountedFilesystemBackendAdapter:
         )
 
     def update(self, plan: dict[str, Any]) -> AdapterResult:
-        raise ValueError("filesystem update is unsupported in Phase 10")
+        self._validate_template()
+        desired = plan["desired_state"]
+        directory_name = desired["directory_name"]
+        validate_storage_root_basename("directory_name", directory_name)
+        quota = _normalize_quota(desired.get("quota"))
+        if not quota:
+            raise BackendPreconditionError("filesystem quota is required for Phase 12 update")
+        observed = self.executor.apply_quota(
+            managed_root=self.template.managed_root,
+            directory_name=directory_name,
+            resource_key=plan["resource_key"],
+            quota=quota,
+        )
+        observed.update(
+            {
+                "adapter": "cephfs-host-mounted",
+                "operation": "update",
+                "backend": self.template.metadata(),
+                "resource_key": plan["resource_key"],
+                "resource_status": desired.get("resource_status", "Blocked")
+                if desired.get("block_state", {}).get("blocked")
+                else "Succeeded",
+            }
+        )
+        synced_desired = dict(desired)
+        synced_desired["quota"] = quota
+        return AdapterResult(
+            applied_state={
+                "adapter": "cephfs-host-mounted",
+                "operation": "update",
+                "backend": self.template.metadata(),
+                "directory_name": directory_name,
+                "path": observed.get("path"),
+                "quota": quota,
+                "quota_state": observed.get("quota_state"),
+                "synced_desired_state": synced_desired,
+            },
+            observed_state=observed,
+            message="CephFS host-mounted filesystem quota update completed",
+        )
 
     def block(self, plan: dict[str, Any]) -> AdapterResult:
         self._validate_template()
@@ -382,16 +559,194 @@ class CephFsHostMountedFilesystemBackendAdapter:
         return self._unblock(plan)
 
     def initialize(self, plan: dict[str, Any]) -> AdapterResult:
-        raise ValueError("filesystem initialize is unsupported in Phase 10")
+        raise ValueError("filesystem initialize is unsupported in Phase 12")
 
     def consistency_check(self, plan: dict[str, Any]) -> AdapterResult:
-        raise ValueError("filesystem consistency check is unsupported in Phase 10")
+        self._validate_template()
+        desired = plan["desired_state"]
+        directory_name = desired["directory_name"]
+        observed = self.executor.read_directory_state(
+            managed_root=self.template.managed_root,
+            directory_name=directory_name,
+            resource_key=plan["resource_key"],
+            require_marker=True,
+            include_quota=bool(desired.get("include_quota", True)),
+            include_usage=bool(desired.get("include_usage", True)),
+        )
+        issues = _quota_check_issues(desired, observed)
+        usage_pressure = _quota_usage_pressure(
+            observed.get("quota_state") or {},
+            desired.get("usage_thresholds") or {},
+        )
+        status = "ActionRequired" if issues or usage_pressure else "Consistent"
+        observed.update(
+            {
+                "adapter": "cephfs-host-mounted",
+                "operation": "consistency_check",
+                "backend": self.template.metadata(),
+                "resource_key": plan["resource_key"],
+                "quota_status": status,
+                "issues": issues,
+                "usage_pressure": usage_pressure,
+                "resource_status": desired.get("resource_status", "Succeeded"),
+            }
+        )
+        return AdapterResult(
+            applied_state={
+                "adapter": "cephfs-host-mounted",
+                "operation": "consistency_check",
+                "backend": self.template.metadata(),
+                "directory_name": directory_name,
+            },
+            observed_state=observed,
+            message="CephFS host-mounted filesystem consistency check completed",
+        )
+
+    def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult:
+        self._validate_template()
+        desired = plan["desired_state"]
+        directory_name = desired["directory_name"]
+        observed = self.executor.read_directory_state(
+            managed_root=self.template.managed_root,
+            directory_name=directory_name,
+            resource_key=plan["resource_key"],
+            require_marker=True,
+            include_quota=bool(desired.get("include_quota", True)),
+            include_usage=bool(desired.get("include_usage", True)),
+        )
+        synced_desired = dict(desired)
+        synced_quota = _quota_from_state(observed.get("quota_state") or {})
+        if synced_quota:
+            synced_desired["quota"] = synced_quota
+        observed.update(
+            {
+                "adapter": "cephfs-host-mounted",
+                "operation": "sync_live_state",
+                "backend": self.template.metadata(),
+                "resource_key": plan["resource_key"],
+                "quota_status": "Synced",
+                "issues": [],
+                "resource_status": desired.get("resource_status", "Succeeded"),
+            }
+        )
+        return AdapterResult(
+            applied_state={
+                "adapter": "cephfs-host-mounted",
+                "operation": "sync_live_state",
+                "backend": self.template.metadata(),
+                "directory_name": directory_name,
+                "quota": synced_quota,
+                "quota_state": observed.get("quota_state"),
+                "synced_desired_state": synced_desired,
+            },
+            observed_state=observed,
+            message="CephFS host-mounted filesystem sync completed",
+        )
 
     def import_directory(self, plan: dict[str, Any]) -> AdapterResult:
-        raise ValueError("filesystem import is unsupported in Phase 10")
+        self._validate_template()
+        desired = plan["desired_state"]
+        directory_name = desired["directory_name"]
+        validate_storage_root_basename("directory_name", directory_name)
+        access_policy = desired.get("access_policy") or {}
+        users = _string_list(access_policy.get("users") or desired.get("users"), "users")
+        denied_users = _string_list(
+            access_policy.get("denied_users")
+            or desired.get("denied_users")
+            or desired.get("validation_denied_users")
+            or [],
+            "denied_users",
+            required=False,
+        )
+        quota = _normalize_quota(desired.get("quota"))
+        marker = self._marker(plan, desired.get("access_group") or access_policy.get("expected_group"))
+        marker["management_mode"] = "full"
+        observed = self.executor.import_directory(
+            managed_root=self.template.managed_root,
+            directory_name=directory_name,
+            marker=marker,
+            access_policy=access_policy,
+            quota=quota or None,
+            allowed_users=users,
+            denied_users=denied_users,
+        )
+        observed.update(
+            {
+                "adapter": "cephfs-host-mounted",
+                "operation": "import",
+                "backend": self.template.metadata(),
+                "resource_key": plan["resource_key"],
+                "management_mode": "full",
+                "resource_status": "Succeeded",
+            }
+        )
+        synced_desired = dict(desired)
+        synced_desired["management_mode"] = "full"
+        synced_desired["users"] = users
+        if denied_users:
+            synced_desired["validation_denied_users"] = denied_users
+        if quota:
+            synced_desired["quota"] = quota
+        return AdapterResult(
+            applied_state={
+                "adapter": "cephfs-host-mounted",
+                "operation": "import",
+                "backend": self.template.metadata(),
+                "directory_name": directory_name,
+                "path": observed.get("path"),
+                "marker": marker,
+                "quota": quota,
+                "quota_state": observed.get("quota_state"),
+                "synced_desired_state": synced_desired,
+            },
+            observed_state=observed,
+            message="CephFS host-mounted filesystem import completed",
+        )
 
     def assign_quota_only(self, plan: dict[str, Any]) -> AdapterResult:
-        raise ValueError("filesystem quota assignment is unsupported in Phase 10")
+        self._validate_template()
+        desired = plan["desired_state"]
+        directory_name = desired["directory_name"]
+        validate_storage_root_basename("directory_name", directory_name)
+        quota = _normalize_quota(desired.get("quota"))
+        if not quota:
+            raise BackendPreconditionError("filesystem quota is required")
+        marker = self._marker(plan, desired.get("access_group") or "")
+        marker["management_mode"] = "quota_only"
+        observed = self.executor.assign_quota_directory(
+            managed_root=self.template.managed_root,
+            directory_name=directory_name,
+            marker=marker,
+            quota=quota,
+        )
+        observed.update(
+            {
+                "adapter": "cephfs-host-mounted",
+                "operation": "assign_quota_only",
+                "backend": self.template.metadata(),
+                "resource_key": plan["resource_key"],
+                "management_mode": "quota_only",
+                "resource_status": "Succeeded",
+            }
+        )
+        synced_desired = dict(desired)
+        synced_desired["management_mode"] = "quota_only"
+        synced_desired["quota"] = quota
+        return AdapterResult(
+            applied_state={
+                "adapter": "cephfs-host-mounted",
+                "operation": "assign_quota_only",
+                "backend": self.template.metadata(),
+                "directory_name": directory_name,
+                "path": observed.get("path"),
+                "marker": marker,
+                "quota": quota,
+                "quota_state": observed.get("quota_state"),
+                "synced_desired_state": synced_desired,
+            },
+            observed_state=observed,
+            message="CephFS host-mounted filesystem quota assignment completed",
+        )
 
     def _marker(self, plan: dict[str, Any], group_name: str) -> dict[str, Any]:
         desired = plan["desired_state"]
@@ -403,6 +758,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
             "directory_name": desired["directory_name"],
             "request_id": plan["request_id"],
             "access_group": group_name,
+            "management_mode": "full",
         }
 
     def _validate_template(self) -> None:
@@ -527,6 +883,112 @@ def _validate_mode(mode: str) -> None:
         raise BackendPreconditionError("Phase 10 filesystem mode must be 0750 or 0770")
 
 
+def _normalize_quota(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    quota: dict[str, int] = {}
+    for key in ("capacity_bytes", "file_count"):
+        if value.get(key) is not None:
+            quota[key] = int(value[key])
+    return quota
+
+
+def _quota_from_state(quota_state: dict[str, Any]) -> dict[str, int]:
+    quota: dict[str, int] = {}
+    capacity = quota_state.get("capacity") or {}
+    file_count = quota_state.get("file_count") or {}
+    if capacity.get("observed_bytes") is not None:
+        quota["capacity_bytes"] = int(capacity["observed_bytes"])
+    if file_count.get("observed_count") is not None:
+        quota["file_count"] = int(file_count["observed_count"])
+    return quota
+
+
+def _quota_check_issues(
+    desired: dict[str, Any], observed: dict[str, Any]
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    if not observed.get("exists", True):
+        return [
+            {
+                "issue_type": "filesystem_quota_missing",
+                "field": "directory",
+                "reason": "missing",
+            }
+        ]
+    desired_quota = _normalize_quota(desired.get("quota"))
+    quota_state = observed.get("quota_state") or {}
+    live_quota = _quota_from_state(quota_state)
+    for key, desired_value in desired_quota.items():
+        live_value = live_quota.get(key)
+        if live_value is None:
+            issues.append(
+                {
+                    "issue_type": "filesystem_quota_missing",
+                    "field": f"quota.{key}",
+                    "reason": "missing",
+                    "desired": desired_value,
+                }
+            )
+            continue
+        if int(live_value) != int(desired_value):
+            issues.append(
+                {
+                    "issue_type": "filesystem_quota_drifted",
+                    "field": f"quota.{key}",
+                    "reason": "quota_drifted",
+                    "desired": desired_value,
+                    "live": live_value,
+                }
+            )
+    return issues
+
+
+def _quota_usage_pressure(
+    quota_state: dict[str, Any], thresholds: dict[str, Any]
+) -> list[dict[str, Any]]:
+    warning = float(thresholds.get("warning_percent", 80))
+    critical = float(thresholds.get("critical_percent", 95))
+    usage = quota_state.get("usage") or {}
+    pressure: list[dict[str, Any]] = []
+    checks = (
+        ("capacity_bytes", "used_bytes", (quota_state.get("capacity") or {}).get("observed_bytes")),
+        ("file_count", "used_files", (quota_state.get("file_count") or {}).get("observed_count")),
+    )
+    for field, used_key, hard_value in checks:
+        used_value = usage.get(used_key)
+        if used_value is None or hard_value in {None, 0, "0"}:
+            continue
+        used = int(used_value)
+        hard = int(hard_value)
+        if hard <= 0:
+            continue
+        percent = used * 100 / hard
+        if percent >= critical:
+            pressure.append(
+                {
+                    "issue_type": "filesystem_quota_usage_critical",
+                    "severity": "CRITICAL",
+                    "field": field,
+                    "used": used,
+                    "hard": hard,
+                    "used_percent": round(percent, 2),
+                }
+            )
+        elif percent >= warning:
+            pressure.append(
+                {
+                    "issue_type": "filesystem_quota_usage_warning",
+                    "severity": "WARN",
+                    "field": field,
+                    "used": used,
+                    "hard": hard,
+                    "used_percent": round(percent, 2),
+                }
+            )
+    return pressure
+
+
 _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(
     r"""
     import grp
@@ -624,6 +1086,8 @@ _DELETE_DIRECTORY_SCRIPT = textwrap.dedent(
         marker = json.load(handle)
     if marker.get("resource_key") != resource_key:
         raise SystemExit("target directory marker resource key mismatch")
+    if marker.get("management_mode") == "quota_only":
+        raise SystemExit("quota-only filesystem resource refuses backend directory delete")
     allowed_files = {".dms-resource.json"}
     for dirpath, dirnames, filenames in os.walk(target):
         if dirnames:
@@ -791,6 +1255,415 @@ _UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(
         "block_state": restored_block_state,
         "blocked": False,
         "access_validation": access,
+        "verified": True,
+        "backend_side_effect": True,
+    }, sort_keys=True))
+    """
+)
+
+
+_APPLY_QUOTA_SCRIPT = textwrap.dedent(
+    r"""
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    root, directory_name, resource_key, quota_json = sys.argv[1:]
+    quota = json.loads(quota_json or "{}")
+
+    def fail(message):
+        raise SystemExit(message)
+
+    def run(command):
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            fail(completed.stderr.strip() or completed.stdout.strip() or "command failed")
+        return completed.stdout.strip()
+
+    def getx(path, name):
+        completed = subprocess.run(["getfattr", "--only-values", "-n", name, path], check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return int(value) if value else None
+
+    def usage(path):
+        du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
+        used_bytes = int(du.stdout.split()[0]) if du.returncode == 0 and du.stdout.split() else 0
+        used_files = 0
+        for _, _, filenames in os.walk(path):
+            used_files += len(filenames)
+        return {"used_bytes": used_bytes, "used_files": used_files, "usage_source": "du-find-fallback"}
+
+    def getx(path, name):
+        completed = subprocess.run(
+            ["getfattr", "--only-values", "-n", name, path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return int(value) if value else None
+
+    def usage(path):
+        used_bytes = getx(path, "ceph.dir.rbytes")
+        used_files = getx(path, "ceph.dir.rfiles")
+        source = "cephfs-xattr"
+        if used_bytes is None:
+            du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
+            if du.returncode == 0 and du.stdout.split():
+                used_bytes = int(du.stdout.split()[0])
+                source = "du-find-fallback"
+        if used_files is None:
+            count = 0
+            for _, _, filenames in os.walk(path):
+                count += len(filenames)
+            used_files = count
+            source = "du-find-fallback" if source != "cephfs-xattr" else "cephfs-xattr-find-fallback"
+        return {"used_bytes": used_bytes or 0, "used_files": used_files or 0, "usage_source": source}
+
+    if not shutil.which("setfattr") or not shutil.which("getfattr"):
+        fail("filesystem quota capability missing: setfattr/getfattr")
+    root_real = os.path.realpath(root)
+    target_joined = os.path.join(root_real, directory_name)
+    if os.path.islink(target_joined):
+        fail("target directory is symlink")
+    target = os.path.realpath(target_joined)
+    if os.path.commonpath([root_real, target]) != root_real:
+        fail("target escaped managed root")
+    marker_path = os.path.join(target, ".dms-resource.json")
+    if not os.path.isdir(target):
+        fail("target directory missing")
+    if not os.path.exists(marker_path):
+        fail("target directory exists without DMS marker")
+    with open(marker_path, encoding="utf-8") as handle:
+        marker = json.load(handle)
+    if marker.get("resource_key") != resource_key:
+        fail("target directory marker resource key mismatch")
+    if quota.get("capacity_bytes") is not None:
+        run(["setfattr", "-n", "ceph.quota.max_bytes", "-v", str(int(quota["capacity_bytes"])), target])
+    if quota.get("file_count") is not None:
+        run(["setfattr", "-n", "ceph.quota.max_files", "-v", str(int(quota["file_count"])), target])
+    observed_capacity = getx(target, "ceph.quota.max_bytes")
+    observed_files = getx(target, "ceph.quota.max_files")
+    if quota.get("capacity_bytes") is not None and observed_capacity != int(quota["capacity_bytes"]):
+        fail("quota capacity read-back mismatch")
+    if quota.get("file_count") is not None and observed_files != int(quota["file_count"]):
+        fail("quota file-count read-back mismatch")
+    quota_state = {
+        "backend_type": "cephfs",
+        "capacity": {
+            "desired_bytes": quota.get("capacity_bytes"),
+            "applied_bytes": quota.get("capacity_bytes"),
+            "observed_bytes": observed_capacity,
+            "backend_key": "ceph.quota.max_bytes",
+        },
+        "file_count": {
+            "desired_count": quota.get("file_count"),
+            "applied_count": quota.get("file_count"),
+            "observed_count": observed_files,
+            "backend_key": "ceph.quota.max_files",
+        },
+        "usage": usage(target),
+    }
+    print(json.dumps({
+        "path": target,
+        "exists": True,
+        "marker": marker,
+        "quota_state": quota_state,
+        "quota_capability": {
+            "supports_capacity_quota": True,
+            "supports_file_count_quota": True,
+            "supports_usage_bytes": True,
+            "supports_file_count_usage": True,
+            "quota_backend": "cephfs-xattr",
+        },
+        "backend_side_effect": True,
+        "verified": True,
+    }, sort_keys=True))
+    """
+)
+
+
+_READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(
+    r"""
+    import grp
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    root, directory_name, resource_key, require_marker_text, include_quota_text, include_usage_text = sys.argv[1:]
+    require_marker = require_marker_text == "true"
+    include_quota = include_quota_text == "true"
+    include_usage = include_usage_text == "true"
+
+    def getx(path, name):
+        if not shutil.which("getfattr"):
+            return None
+        completed = subprocess.run(
+            ["getfattr", "--only-values", "-n", name, path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return int(value) if value else None
+
+    def usage(path):
+        used_bytes = getx(path, "ceph.dir.rbytes")
+        used_files = getx(path, "ceph.dir.rfiles")
+        source = "cephfs-xattr"
+        if used_bytes is None:
+            du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
+            if du.returncode == 0 and du.stdout.split():
+                used_bytes = int(du.stdout.split()[0])
+                source = "du-find-fallback"
+        if used_files is None:
+            count = 0
+            for _, _, filenames in os.walk(path):
+                count += len(filenames)
+            used_files = count
+            source = "du-find-fallback" if source != "cephfs-xattr" else "cephfs-xattr-find-fallback"
+        return {"used_bytes": used_bytes or 0, "used_files": used_files or 0, "usage_source": source}
+
+    root_real = os.path.realpath(root)
+    target_joined = os.path.join(root_real, directory_name)
+    if os.path.islink(target_joined):
+        raise SystemExit("target directory is symlink")
+    target = os.path.realpath(target_joined)
+    if os.path.commonpath([root_real, target]) != root_real:
+        raise SystemExit("target escaped managed root")
+    if not os.path.isdir(target):
+        print(json.dumps({"path": target, "exists": False, "verified": False}, sort_keys=True))
+        raise SystemExit(0)
+    marker_path = os.path.join(target, ".dms-resource.json")
+    marker = None
+    if os.path.exists(marker_path):
+        with open(marker_path, encoding="utf-8") as handle:
+            marker = json.load(handle)
+        if resource_key and marker.get("resource_key") != resource_key:
+            raise SystemExit("target directory marker resource key mismatch")
+    elif require_marker:
+        raise SystemExit("target directory exists without DMS marker")
+    stat_result = os.stat(target)
+    try:
+        group_name = grp.getgrgid(stat_result.st_gid).gr_name
+    except KeyError:
+        group_name = str(stat_result.st_gid)
+    quota_state = {}
+    if include_quota or include_usage:
+        quota_state = {
+            "backend_type": "cephfs",
+            "capacity": {
+                "observed_bytes": getx(target, "ceph.quota.max_bytes") if include_quota else None,
+                "backend_key": "ceph.quota.max_bytes",
+            },
+            "file_count": {
+                "observed_count": getx(target, "ceph.quota.max_files") if include_quota else None,
+                "backend_key": "ceph.quota.max_files",
+            },
+            "usage": usage(target) if include_usage else {},
+        }
+    print(json.dumps({
+        "path": target,
+        "exists": True,
+        "marker": marker,
+        "owner_uid": stat_result.st_uid,
+        "group_gid": stat_result.st_gid,
+        "group_name": group_name,
+        "mode": oct(stat_result.st_mode & 0o777)[2:].zfill(4),
+        "quota_state": quota_state,
+        "verified": True,
+        "backend_side_effect": False,
+    }, sort_keys=True))
+    """
+)
+
+
+_ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(
+    r"""
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    root, directory_name, marker_json, quota_json = sys.argv[1:]
+    marker = json.loads(marker_json)
+    quota = json.loads(quota_json or "{}")
+
+    def fail(message):
+        raise SystemExit(message)
+
+    def run(command):
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            fail(completed.stderr.strip() or completed.stdout.strip() or "command failed")
+        return completed.stdout.strip()
+
+    if not shutil.which("setfattr") or not shutil.which("getfattr"):
+        fail("filesystem quota capability missing: setfattr/getfattr")
+    root_real = os.path.realpath(root)
+    target_joined = os.path.join(root_real, directory_name)
+    if os.path.islink(target_joined):
+        fail("target directory is symlink")
+    target = os.path.realpath(target_joined)
+    if os.path.commonpath([root_real, target]) != root_real:
+        fail("target escaped managed root")
+    if not os.path.isdir(target):
+        fail("target directory missing")
+    marker_path = os.path.join(target, ".dms-resource.json")
+    if os.path.exists(marker_path):
+        with open(marker_path, encoding="utf-8") as handle:
+            existing = json.load(handle)
+        if existing.get("management_mode") != "quota_only" or existing.get("resource_key") != marker.get("resource_key"):
+            fail("target directory marker resource key mismatch")
+    with open(marker_path, "w", encoding="utf-8") as handle:
+        json.dump(marker, handle, sort_keys=True)
+    if quota.get("capacity_bytes") is not None:
+        run(["setfattr", "-n", "ceph.quota.max_bytes", "-v", str(int(quota["capacity_bytes"])), target])
+    if quota.get("file_count") is not None:
+        run(["setfattr", "-n", "ceph.quota.max_files", "-v", str(int(quota["file_count"])), target])
+    quota_state = {
+        "backend_type": "cephfs",
+        "capacity": {
+            "desired_bytes": quota.get("capacity_bytes"),
+            "applied_bytes": quota.get("capacity_bytes"),
+            "observed_bytes": getx(target, "ceph.quota.max_bytes"),
+            "backend_key": "ceph.quota.max_bytes",
+        },
+        "file_count": {
+            "desired_count": quota.get("file_count"),
+            "applied_count": quota.get("file_count"),
+            "observed_count": getx(target, "ceph.quota.max_files"),
+            "backend_key": "ceph.quota.max_files",
+        },
+        "usage": usage(target),
+    }
+    print(json.dumps({
+        "path": target,
+        "exists": True,
+        "marker": marker,
+        "management_mode": "quota_only",
+        "quota_state": quota_state,
+        "backend_side_effect": True,
+        "verified": True,
+    }, sort_keys=True))
+    """
+)
+
+
+_IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
+    r"""
+    import grp
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    root, directory_name, marker_json, access_policy_json, quota_json, allowed_json, denied_json = sys.argv[1:]
+    marker = json.loads(marker_json)
+    access_policy = json.loads(access_policy_json or "{}")
+    quota = json.loads(quota_json or "{}")
+    allowed = json.loads(allowed_json)
+    denied = json.loads(denied_json)
+
+    def fail(message):
+        raise SystemExit(message)
+
+    def run(command):
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            fail(completed.stderr.strip() or completed.stdout.strip() or "command failed")
+        return completed.stdout.strip()
+
+    def getx(path, name):
+        if not shutil.which("getfattr"):
+            return None
+        completed = subprocess.run(["getfattr", "--only-values", "-n", name, path], check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return int(value) if value else None
+
+    def usage(path):
+        du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
+        used_bytes = int(du.stdout.split()[0]) if du.returncode == 0 and du.stdout.split() else 0
+        used_files = 0
+        for _, _, filenames in os.walk(path):
+            used_files += len(filenames)
+        return {"used_bytes": used_bytes, "used_files": used_files, "usage_source": "du-find-fallback"}
+
+    root_real = os.path.realpath(root)
+    target_joined = os.path.join(root_real, directory_name)
+    if os.path.islink(target_joined):
+        fail("target directory is symlink")
+    target = os.path.realpath(target_joined)
+    if os.path.commonpath([root_real, target]) != root_real:
+        fail("target escaped managed root")
+    if not os.path.isdir(target):
+        fail("target directory missing")
+    marker_path = os.path.join(target, ".dms-resource.json")
+    if os.path.exists(marker_path):
+        with open(marker_path, encoding="utf-8") as handle:
+            existing = json.load(handle)
+        if existing.get("resource_key") != marker.get("resource_key") and existing.get("management_mode") != "quota_only":
+            fail("target directory marker resource key mismatch")
+    expected_group = access_policy.get("expected_group")
+    expected_mode = str(access_policy.get("expected_mode") or "0770")
+    group = grp.getgrnam(expected_group)
+    stat_before = os.stat(target)
+    mode_before = oct(stat_before.st_mode & 0o777)[2:].zfill(4)
+    if stat_before.st_gid != group.gr_gid:
+        fail("filesystem access group unresolved")
+    if mode_before != expected_mode:
+        fail("filesystem import mode mismatch")
+    access = {"allowed_users": {}, "denied_users": {}}
+    for user in allowed:
+        probe = os.path.join(target, f".import-access-{user}")
+        completed = subprocess.run(["sudo", "-u", user, "sh", "-c", "touch \"$1\" && rm \"$1\"", "sh", probe], check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            fail(f"allowed user access failed for {user}: {completed.stderr.strip()}")
+        access["allowed_users"][user] = "ok"
+    for user in denied:
+        completed = subprocess.run(["sudo", "-u", user, "sh", "-c", "test ! -x \"$1\" && test ! -w \"$1\"", "sh", target], check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            fail(f"denied user unexpectedly has access: {user}")
+        access["denied_users"][user] = "denied"
+    with open(marker_path, "w", encoding="utf-8") as handle:
+        json.dump(marker, handle, sort_keys=True)
+    if quota:
+        if not shutil.which("setfattr") or not shutil.which("getfattr"):
+            fail("filesystem quota capability missing: setfattr/getfattr")
+        if quota.get("capacity_bytes") is not None:
+            run(["setfattr", "-n", "ceph.quota.max_bytes", "-v", str(int(quota["capacity_bytes"])), target])
+        if quota.get("file_count") is not None:
+            run(["setfattr", "-n", "ceph.quota.max_files", "-v", str(int(quota["file_count"])), target])
+    quota_state = {
+        "backend_type": "cephfs",
+        "capacity": {"observed_bytes": getx(target, "ceph.quota.max_bytes"), "backend_key": "ceph.quota.max_bytes"},
+        "file_count": {"observed_count": getx(target, "ceph.quota.max_files"), "backend_key": "ceph.quota.max_files"},
+        "usage": usage(target),
+    }
+    print(json.dumps({
+        "path": target,
+        "exists": True,
+        "marker": marker,
+        "group_name": expected_group,
+        "group_gid": group.gr_gid,
+        "mode": mode_before,
+        "quota_state": quota_state,
+        "access_validation": access,
+        "management_mode": "full",
         "verified": True,
         "backend_side_effect": True,
     }, sort_keys=True))
