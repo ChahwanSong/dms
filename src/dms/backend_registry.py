@@ -16,6 +16,11 @@ from .backends.gpfs import (
     GpfsFilesystemBackendAdapter,
     GpfsKubernetesNamespaceQuotaAdapter,
 )
+from .backends.cephfs import (
+    CEPHFS_BACKEND_TYPE,
+    CephFsHostMountedFilesystemBackendAdapter,
+)
+from .config import Settings
 from .repositories import DmsRepository
 
 
@@ -24,13 +29,17 @@ class BackendAdapterRegistry:
     repository: DmsRepository
     default_filesystem_adapter: FilesystemBackendAdapter
     default_kubernetes_adapter: KubernetesNamespaceQuotaAdapter
+    settings: Settings | None = None
 
     @classmethod
-    def with_phase1_defaults(cls, repository: DmsRepository) -> "BackendAdapterRegistry":
+    def with_phase1_defaults(
+        cls, repository: DmsRepository, settings: Settings | None = None
+    ) -> "BackendAdapterRegistry":
         return cls(
             repository=repository,
             default_filesystem_adapter=StubFilesystemBackendAdapter(),
             default_kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
+            settings=settings,
         )
 
     def filesystem_for_plan(self, plan: dict[str, Any]) -> FilesystemBackendAdapter:
@@ -38,6 +47,11 @@ class BackendAdapterRegistry:
         if self._backend_type(mapping) == GPFS_BACKEND_TYPE:
             return GpfsFilesystemBackendAdapter(
                 GpfsBackendTemplate.from_storage_mapping(mapping)
+            )
+        if self._backend_type(mapping) == CEPHFS_BACKEND_TYPE:
+            return CephFsHostMountedFilesystemBackendAdapter.from_storage_mapping(
+                mapping,
+                self.settings or Settings.from_env(),
             )
         return self.default_filesystem_adapter
 

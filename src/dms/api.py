@@ -190,9 +190,7 @@ def resource_management_router() -> APIRouter:
         request: Request,
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
-        key = FilesystemResourceKey(
-            body.payload["storage_name"], body.payload["directory_name"]
-        )
+        key = _filesystem_key_from_payload(body.payload)
         return submit_request(
             services=services,
             request=request,
@@ -453,6 +451,31 @@ def resource_management_router() -> APIRouter:
             OperationKind.K8S_QUOTA_CHECK,
         )
 
+    @router.post("/kubernetes/namespace-quotas:audit", status_code=202)
+    def k8s_quota_audit(
+        body: MutatingBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        scope = body.payload.get("scope") or {}
+        if scope.get("cluster_name") and scope.get("namespace_name"):
+            resource_key = KubernetesNamespaceQuotaKey(
+                scope["cluster_name"], scope["namespace_name"]
+            ).as_string()
+        else:
+            resource_key = "kubernetes-namespace-quota-audit"
+        return submit_request(
+            services=services,
+            request=request,
+            envelope=RequestEnvelope(
+                requester_id=body.requester_id,
+                operation=OperationKind.K8S_QUOTA_AUDIT,
+                resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA,
+                resource_key=resource_key,
+                payload=body.payload,
+            ),
+        )
+
     @router.post("/storage-mappings")
     def upsert_storage_mapping(
         data: StorageMappingInput,
@@ -546,7 +569,7 @@ def _filesystem_keyed_request(
     services: AppServices,
     operation: OperationKind,
 ) -> dict[str, Any]:
-    key = FilesystemResourceKey(storage_name, directory_name)
+    key = _filesystem_key(storage_name, directory_name)
     payload = {"storage_name": storage_name, "directory_name": directory_name, **body.payload}
     return submit_request(
         services=services,
@@ -559,6 +582,28 @@ def _filesystem_keyed_request(
             payload=payload,
         ),
     )
+
+
+def _filesystem_key_from_payload(payload: dict[str, Any]) -> FilesystemResourceKey:
+    missing = [
+        field for field in ("storage_name", "directory_name") if not payload.get(field)
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"missing": missing},
+        )
+    return _filesystem_key(str(payload["storage_name"]), str(payload["directory_name"]))
+
+
+def _filesystem_key(storage_name: str, directory_name: str) -> FilesystemResourceKey:
+    try:
+        return FilesystemResourceKey(storage_name, directory_name)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
 
 def _k8s_quota_keyed_request(
@@ -1027,6 +1072,30 @@ def operational_query_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
         return services.repository.list_resources()
+
+    @router.get("/filesystems/expiring")
+    def filesystem_expiring(
+        request: Request,
+        storage_name: str | None = None,
+        status: str = "expired",
+        before: str | None = None,
+        within_seconds: int | None = Query(default=None, gt=0),
+        include_blocked: bool = False,
+        limit: int | None = Query(default=None, gt=0),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        try:
+            return services.query.filesystem_expiring(
+                storage_name=storage_name,
+                status=status,
+                before=before,
+                within_seconds=within_seconds,
+                include_blocked=include_blocked,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.get("/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}")
     def kubernetes_namespace_quota(

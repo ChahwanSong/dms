@@ -31,6 +31,11 @@ class Settings:
     kubernetes_inventory_timeout_seconds: int = 10
     kubernetes_mutation_mode: str = "ssh-kubectl"
     kubernetes_mutation_timeout_seconds: int = 30
+    filesystem_mutation_mode: str = "ssh-host-exec"
+    filesystem_exec_timeout_seconds: int = 30
+    filesystem_exec_use_sudo: bool = True
+    ldap_group_gid_start: int = 24000
+    ldap_group_gid_end: int = 24999
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,6 +83,18 @@ class Settings:
             kubernetes_mutation_timeout_seconds=int(
                 os.getenv("DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS", "30")
             ),
+            filesystem_mutation_mode=os.getenv(
+                "DMS_FILESYSTEM_MUTATION_MODE", "ssh-host-exec"
+            ),
+            filesystem_exec_timeout_seconds=int(
+                os.getenv("DMS_FILESYSTEM_EXEC_TIMEOUT_SECONDS", "30")
+            ),
+            filesystem_exec_use_sudo=os.getenv(
+                "DMS_FILESYSTEM_EXEC_USE_SUDO", "true"
+            ).lower()
+            not in {"0", "false", "no"},
+            ldap_group_gid_start=int(os.getenv("DMS_LDAP_GROUP_GID_START", "24000")),
+            ldap_group_gid_end=int(os.getenv("DMS_LDAP_GROUP_GID_END", "24999")),
         )
 
     @property

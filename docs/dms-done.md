@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-05-29 06:41 +0900
+Last updated: 2026-05-30 22:57 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -11,7 +11,7 @@ Last updated: 2026-05-29 06:41 +0900
 - `Done`은 실제 테스트베드 또는 실제 외부 시스템에 연결해 확인된 기능만 의미한다.
 - local pytest, stub adapter, synthetic data는 보조 회귀 검증으로만 기록한다.
 - 아직 실제 backend side effect가 구현되지 않은 기능은 성공처럼 적지 않고 명확히 미구현으로 남긴다.
-- Phase 8까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity이다.
+- Phase 11까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP/SSSD, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity, Kubernetes default quota reset, on-demand quota audit, drift/usage pressure/effective quota action-required aggregation, DMS-managed ResourceQuota metadata drift detection, `cluster-a/c1-worker` 및 `cluster-b/c2-worker` host-mounted CephFS filesystem create/delete lifecycle, filesystem expiry query, API-driven expiration sweep, filesystem block/unblock lifecycle, LDAP access group membership, POSIX permission boundary이다.
 
 ## Testbed Architecture
 
@@ -37,6 +37,7 @@ Last updated: 2026-05-29 06:41 +0900
   - managed cluster 역할
   - Longhorn `StorageClass/testbed-longhorn`
   - Longhorn `StorageClass/longhorn-static`
+  - VM-packaged CephFS host mount `/mnt/testbed-cephfs-c2`
 - OpenLDAP
   - `ldap://192.168.56.31`
   - DMS Identity Mapping은 LDAP direct read-only lookup만 성공 기준으로 사용
@@ -103,7 +104,7 @@ longhorn-csi-plugin-pddq5                           3/3     Running   0         
 longhorn-driver-deployer-6f94cb9fd9-4pxv7           1/1     Running   0          8h
 ```
 
-## Implemented Through Phase 8
+## Implemented Through Phase 11
 
 ### Phase 1: Core Lifecycle Skeleton
 
@@ -416,6 +417,164 @@ Live 검증 대상:
 - Phase 8은 filesystem directory/quota mutation을 구현하지 않는다.
 - Phase 8은 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
 - Longhorn 계열 storage는 control cluster DM Agent가 실제로 볼 수 없으므로 DM readiness가 `Missing`으로 남는다. 이 상태를 synthetic evidence로 보완하지 않고 action-required에 노출하는 것이 Phase 8의 기대 동작이다.
+
+### Phase 9: Kubernetes Quota Operational Hardening
+
+확실히 구현된 범위:
+
+- Kubernetes namespace quota update에서 `reset_quota_to_default=true` 지원
+- `resource_kind=kubernetes_namespace_quota`와 `resource_type` 기준 default quota policy 조회
+- default policy가 없거나 policy의 `storage_name` mapping이 target cluster와 맞지 않으면 backend side effect 없이 reject
+- reset 결과를 DMS DB desired/applied/observed state와 live `ResourceQuota.spec.hard`에 반영
+- blocked resource reset semantics 보강
+  - live hard limit은 계속 `0` 유지
+  - unblock 시 복구할 `block_state.restore_hard`를 default hard로 갱신
+- on-demand audit API 추가
+  - `POST /api/v1/resource-management/kubernetes/namespace-quotas:audit`
+  - operation kind: `kubernetes.namespace_quota.audit`
+  - Kubernetes object를 변경하지 않는 read-only audit
+- audit 결과에 DB desired state와 live `ResourceQuota.spec.hard` drift 구조화
+- live `ResourceQuota.status.used` 기반 usage pressure 계산
+- namespace 내 non-DMS `ResourceQuota`가 effective quota에 미치는 warning 계산
+- latest audit/check result 기반 Kubernetes quota action-required aggregation
+  - drift/missing/metadata drift/query failed
+  - usage warning/critical
+  - non-DMS restrictive quota warning
+  - 최신 clean audit/check 이후 resolved issue 제거
+- DMS-managed `ResourceQuota/dms-storage-quota` metadata hardening
+  - `app.kubernetes.io/managed-by=dms`
+  - `dms.io/resource-kind=kubernetes_namespace_quota`
+  - `dms.io/resource-key=<cluster>:<namespace>`
+  - mutation 전에 name, label, annotation ownership 확인
+- Phase 9 live verification scripts 추가
+  - `scripts/phase9_kubernetes_quota_operational_hardening.py`
+  - `scripts/verify-phase9-testbed.sh`
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 DMS API Deployment on `cluster-a`
+- 실제 DMS Agent DaemonSet
+  - `cluster-a`: RM Agent, DM Agent
+  - `cluster-b`: RM Agent
+- 실제 Kubernetes mutation/read
+  - `cluster-a/testbed-cephfs`
+  - `cluster-b/testbed-longhorn`
+  - `cluster-b/longhorn-static`
+- 실제 Longhorn PVC 생성으로 usage pressure 계산 검증
+
+주의:
+
+- Phase 9의 quota audit은 cron/scheduler/controller가 자동 실행하지 않는다. 운영자 또는 외부 포털이 API로 요청한 경우에만 실행한다.
+- Phase 9는 filesystem directory/quota mutation을 구현하지 않는다.
+- Phase 9는 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
+- Phase 9는 Kubernetes CPU/memory/pod/service/object quota, `LimitRange`, tenant provisioning을 구현하지 않는다.
+
+### Phase 10: Host-Mounted CephFS Filesystem Create/Delete
+
+확실히 구현된 범위:
+
+- filesystem Resource Management create/delete 최소 lifecycle
+  - `POST /api/v1/resource-management/filesystems`
+  - `DELETE /api/v1/resource-management/filesystems/{storage_name}/{directory_name}`
+- Phase 10 filesystem planner validation
+  - create/delete만 허용
+  - update/block/initialize/check/import/assign-quota/expiration-sweep는 명시적으로 reject
+  - `quota`, `capacity_bytes`, `file_count`, `acl`, `rename`, `block`, `check`, `sync` payload field는 backend side effect 전에 reject
+  - `storage_name`, `directory_name`, `access_group` safe basename guard
+  - create 요청은 최소 2명 이상의 unique user 필요
+  - active resource가 이미 있으면 create reject
+  - delete는 DMS DB에 존재하는 non-Deleted resource만 plan 생성
+- host-mounted CephFS backend adapter
+  - `src/dms/backends/cephfs.py`
+  - `backend_type=cephfs` storage mapping을 backend registry에서 live adapter로 연결
+  - target worker node에서 SSH + structured Python wrapper로 directory create/delete 수행
+  - managed root boundary, realpath escape guard, `.dms-resource.json` marker guard
+  - DMS marker가 없거나 resource key가 다른 directory는 mutate/delete 거부
+- OpenLDAP access group management
+  - DMS-managed `posixGroup` 생성
+  - requested LDAP users를 `memberUid`로 추가
+  - access group name은 `dms-` prefix와 safe basename 필요
+  - LDAP user가 없거나 LDAP group precondition이 실패하면 filesystem side effect 전에 `BackendApplyFailed`
+- POSIX access boundary
+  - directory owner `root`, group DMS access group
+  - Phase 10 default mode `0770`
+  - 허용 user 2명 이상 write/execute 확인
+  - 비허용 LDAP user execute/write 거부 확인
+- Phase 10 live verification scripts 추가
+  - `scripts/phase10_ceph_host_filesystem_rm.py`
+  - `scripts/verify-phase10-testbed.sh`
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 OpenLDAP: `ldap://192.168.56.31`
+- 실제 SSSD/NSS on `c1-worker`, `c2-worker`
+- 실제 DMS API Deployment on `cluster-a`
+- 실제 DMS Agent DaemonSet on Ceph host-mounted worker nodes
+  - `cluster-a/c1-worker`: `cephfs-a`, `/mnt/testbed-cephfs`
+  - `cluster-b/c2-worker`: `cephfs-b`, `/mnt/testbed-cephfs-c2`
+- 실제 worker-node host-mounted CephFS directory create/delete
+
+주의:
+
+- Phase 10은 filesystem quota, update, block/unblock, consistency check/sync를 구현하지 않는다.
+- Phase 10은 long-running RM Worker Deployment를 검증하지 않는다. Verification script가 기존 phase와 동일하게 `RMWorkerRuntime.run_once()`를 호출한다.
+- Phase 10은 일반 운영 LDAP user account를 create/delete하지 않는다. 단, 검증용 LDAP fixture user가 부족하면 DMS phase-scoped test user를 OpenLDAP에 만들고 검증 후 삭제한다.
+- Phase 10은 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
+
+### Phase 11: Filesystem Expiry Sweep and Block/Unblock
+
+확실히 구현된 범위:
+
+- expired/expiring filesystem resource dedicated query API
+  - `GET /api/v1/operations/filesystems/expiring`
+  - `expires_at` 기준 `expired`, `expiring`, `all` 조회
+  - `storage_name`, `before`, `within_seconds`, `include_blocked`, `limit` filter
+- API-driven filesystem expiration sweep
+  - `POST /api/v1/resource-management/filesystems:expiration-sweep`
+  - Phase 11 action은 `block`만 지원
+  - `dry_run=true`는 backend side effect 없이 target/skip reason만 result에 기록
+  - sweep은 운영자가 API로 요청한 경우에만 실행되고 cron/controller 자동 실행은 없음
+- filesystem block/unblock 최소 lifecycle
+  - `POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:block`
+  - `permission-zero` block mode로 DMS-managed directory mode를 `0000`으로 변경
+  - block 전에 restore 가능한 group/mode state를 DB `block_state`에 저장
+  - unblock은 저장된 restore state를 기준으로 group/mode를 복구
+  - DMS marker mismatch 또는 restore state missing은 fail-closed
+- expiration/block action-required aggregation
+  - expired but unblocked filesystem resource
+  - sweep skipped/partial failure
+  - block/unblock failure
+  - LDAP access group missing
+  - DMS marker mismatch
+- sweep safety guard
+  - `resource_type=user` 또는 기본 일반 resource만 자동 block
+  - `resource_type=system`, `resource_type=admin`은 자동 block하지 않고 skip reason 기록
+  - already blocked target은 중복 block하지 않음
+  - same resource active work가 있으면 skip
+- Phase 11 live verification scripts 추가
+  - `scripts/phase11_ceph_host_filesystem_expiry.py`
+  - `scripts/verify-phase11-testbed.sh`
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 OpenLDAP: `ldap://192.168.56.31`
+- 실제 SSSD/NSS on `c1-worker`, `c2-worker`
+- 실제 DMS API Deployment on `cluster-a`
+- 실제 DMS Agent DaemonSet on Ceph host-mounted worker nodes
+  - `cluster-a/c1-worker`: `cephfs-a`, `/mnt/testbed-cephfs`
+  - `cluster-b/c2-worker`: `cephfs-b`, `/mnt/testbed-cephfs-c2`
+- 실제 worker-node host-mounted CephFS directory create, block, unblock, delete
+
+주의:
+
+- Phase 11은 filesystem quota, update, check/sync, import, assign-quota, usage pressure를 구현하지 않는다.
+- Phase 11은 automatic cron/controller expiration sweep을 구현하지 않는다. Sweep은 API 요청으로만 수행한다.
+- Phase 11은 long-running RM Worker Deployment를 검증하지 않는다. Verification script가 기존 phase와 동일하게 `RMWorkerRuntime.run_once()`를 호출한다.
+- Phase 11은 일반 운영 LDAP user account를 create/delete하지 않는다. 단, 검증용 LDAP fixture user가 부족하면 DMS phase-scoped test user를 OpenLDAP에 만들고 검증 후 삭제한다.
+- Phase 11은 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
 
 ## Live Verification Results
 
@@ -959,6 +1118,225 @@ Output summary:
 
 - `docs/dms-phase8-verification.md`
 
+### Phase 9 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE9_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase9-testbed.sh
+```
+
+Output:
+
+```json
+{
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase9_obs_20260529115152",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase9_20260529115152",
+  "phase8_reports": {
+    "cluster-a:DM": {
+      "node_name": "c1-worker",
+      "report_id": "agent_dc8d5b05c56b4044a35b0b717d533268",
+      "reported_at": "2026-05-29T02:51:58.364946+00:00"
+    },
+    "cluster-a:RM": {
+      "node_name": "c1-control",
+      "report_id": "agent_2bab07d2b82c4b43a15f8476f63b58ab",
+      "reported_at": "2026-05-29T02:51:58.286588+00:00"
+    },
+    "cluster-b:RM": {
+      "node_name": "c2-worker",
+      "report_id": "agent_e55b355e42124f298edfc5faa125ac7c",
+      "reported_at": "2026-05-29T02:51:59.036383+00:00"
+    }
+  },
+  "status": "ok",
+  "targets": [
+    {
+      "audit_request_ids": [
+        "req_c08bde6af3d1477eb2756713e99ca14b",
+        "req_c0a9b19c99c3407e9596c8e6adef1ded",
+        "req_c9ea90ff189540499889651ac6e8c3fb"
+      ],
+      "create_request_id": "req_a3ff1a07d5184f2d90a1ae4f748f5a6b",
+      "default_policy_id": "kubernetes_namespace_quota:user",
+      "namespace": "dms-phase9-longhorn-e2326416",
+      "reset_request_id": "req_8c25437a0737469082d604c83edc2aad",
+      "target": "longhorn-multi"
+    },
+    {
+      "audit_request_id": "req_6d909a6192d14e76a0189d747966f837",
+      "create_request_id": "req_17b6e2de4b0145298cf92db720db6a77",
+      "default_policy_id": "kubernetes_namespace_quota:ceph-user",
+      "namespace": "dms-phase9-cephfs-e2326416",
+      "reset_request_id": "req_a6ff77d2042942248940528e9444a28c",
+      "target": "cephfs"
+    }
+  ]
+}
+```
+
+검증 의미:
+
+- 실제 `cluster-a`에 DMS API Deployment와 NodePort service를 배포했다.
+- 실제 `cluster-a`에 RM/DM Agent DaemonSet을, `cluster-b`에 RM Agent DaemonSet을 배포했다.
+- synthetic Agent report 없이 Phase 8 Agent DaemonSet report를 storage mapping readiness evidence로 사용했다.
+- `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static` multi-StorageClass quota에서 default reset, block 중 reset, unblock restore, drift audit/action-required, clean audit issue resolution, usage pressure, non-DMS effective warning, metadata drift를 검증했다.
+- `cluster-a/testbed-cephfs` single StorageClass quota에서 default reset과 clean audit regression을 검증했다.
+- quota audit은 API 요청으로만 수행했고 자동 cron/sweep은 사용하지 않았다.
+
+상세 검증 기록:
+
+- `docs/dms-phase9-verification.md`
+
+### Phase 10 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE10_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase10-testbed.sh
+```
+
+Output:
+
+```json
+{
+  "status": "ok",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase10_20260530213231",
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase10_obs_20260530213231",
+  "agent_reports": {
+    "cluster-a:c1-worker:cephfs-a": {
+      "report_id": "agent_fd9ba665c8034cdf9627b374d1703295",
+      "mount_path": "/mnt/testbed-cephfs",
+      "filesystem_type": "ceph"
+    },
+    "cluster-b:c2-worker:cephfs-b": {
+      "report_id": "agent_29b2f203817947d79d56e4e5abb54d36",
+      "mount_path": "/mnt/testbed-cephfs-c2",
+      "filesystem_type": "ceph"
+    }
+  },
+  "targets": [
+    {
+      "storage_name": "cephfs-a",
+      "cluster_name": "cluster-a",
+      "node_name": "c1-worker",
+      "directory_path": "/mnt/testbed-cephfs/dms-phase10/phase10-a-9ee3124c",
+      "group_name": "dms-phase10-phase10-a-9ee3124c",
+      "create_request_id": "req_a8e0e0cebae94ff0a9b741ee08f788d3",
+      "delete_request_id": "req_41a7690943bc457abdc2f6e2b0be3937",
+      "stat": "root dms-phase10-phase10-a-9ee3124c 770 /mnt/testbed-cephfs/dms-phase10/phase10-a-9ee3124c"
+    },
+    {
+      "storage_name": "cephfs-b",
+      "cluster_name": "cluster-b",
+      "node_name": "c2-worker",
+      "directory_path": "/mnt/testbed-cephfs-c2/dms-phase10/phase10-b-9ee3124c",
+      "group_name": "dms-phase10-phase10-b-9ee3124c",
+      "create_request_id": "req_271604ce9a8a4aea97fa58d2af4bb86f",
+      "delete_request_id": "req_5e53b852b3cf44f1ae6ab5946fe6c3c3",
+      "stat": "root dms-phase10-phase10-b-9ee3124c 770 /mnt/testbed-cephfs-c2/dms-phase10/phase10-b-9ee3124c"
+    }
+  ]
+}
+```
+
+검증 의미:
+
+- 실제 `cluster-a`에 DMS API Deployment와 NodePort service를 배포했다.
+- 실제 `cluster-a/c1-worker`와 `cluster-b/c2-worker`에 hostPath mount를 가진 RM Agent DaemonSet을 배포했다.
+- storage mapping RM readiness는 synthetic report 없이 실제 Agent report의 host-mounted CephFS evidence로 `Ready`가 됐다.
+- DMS API Pod local filesystem이나 Kubernetes application PVC 내부 directory를 filesystem RM target으로 사용하지 않았다.
+- `cephfs-a`는 `/mnt/testbed-cephfs`, `cephfs-b`는 `/mnt/testbed-cephfs-c2`에서 directory create/delete side effect를 검증했다.
+- DMS create flow가 OpenLDAP `posixGroup`을 만들고 allowed user 2명만 `memberUid`로 추가했다.
+- worker node SSSD/NSS에서 LDAP user와 group propagation을 확인했다.
+- allowed users는 tiny file create/remove가 가능했고 denied user는 execute/write 접근이 거부됐다.
+- delete 후 DMS resource status가 `Deleted`가 되고 host directory가 제거됐다.
+- 검증용 LDAP fixture user, DMS access group, host test directory, Kubernetes namespace는 cleanup됐다.
+
+상세 검증 기록:
+
+- `docs/dms-phase10-verification.md`
+
+### Phase 11 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE11_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase11-testbed.sh
+```
+
+Output:
+
+```json
+{
+  "status": "ok",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase11_20260530225127",
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase11_obs_20260530225127",
+  "agent_reports": {
+    "cluster-a:c1-worker:cephfs-a": {
+      "report_id": "agent_fdfd23d0fd40428e95f1d31c5999a864",
+      "mount_path": "/mnt/testbed-cephfs",
+      "filesystem_type": "ceph"
+    },
+    "cluster-b:c2-worker:cephfs-b": {
+      "report_id": "agent_98bdf39e633c43aeac18b2b9706567a3",
+      "mount_path": "/mnt/testbed-cephfs-c2",
+      "filesystem_type": "ceph"
+    }
+  },
+  "targets": [
+    {
+      "storage_name": "cephfs-a",
+      "cluster_name": "cluster-a",
+      "node_name": "c1-worker",
+      "directory_path": "/mnt/testbed-cephfs/dms-phase10/phase11-expired-a-f06c4928",
+      "create_request_id": "req_10f55309be7c497b9ffe5d7b132bc25e",
+      "dry_run_sweep_request_id": "req_70888f43958b4220a8dd9ae19135f767",
+      "sweep_request_id": "req_cc32d55fa65f4d988bbccd611eb9bc1a",
+      "unblock_request_id": "req_271b8a35540043959d42ec8e587d0da3",
+      "delete_request_id": "req_00093123d2224f08b9978c922ec30850",
+      "blocked_stat": "root dms-phase11-phase11-expired-a-f06c4928 0 /mnt/testbed-cephfs/dms-phase10/phase11-expired-a-f06c4928"
+    },
+    {
+      "storage_name": "cephfs-b",
+      "cluster_name": "cluster-b",
+      "node_name": "c2-worker",
+      "directory_path": "/mnt/testbed-cephfs-c2/dms-phase10/phase11-expired-b-f06c4928",
+      "create_request_id": "req_42803cd1dc4944a8afcbc42f026b9c5f",
+      "dry_run_sweep_request_id": "req_a8400c9bbe884205a136255fa1d467c5",
+      "sweep_request_id": "req_935c29f982e54b7ca25889548c09424b",
+      "unblock_request_id": "req_a8ef587e8039448c9f1be9ec17684923",
+      "delete_request_id": "req_e30918709aa6479a8b9ed3deecb44a70",
+      "blocked_stat": "root dms-phase11-phase11-expired-b-f06c4928 0 /mnt/testbed-cephfs-c2/dms-phase10/phase11-expired-b-f06c4928"
+    }
+  ],
+  "system_skip": {
+    "storage_name": "cephfs-a",
+    "directory_name": "phase11-system-f06c4928",
+    "sweep_request_id": "req_7eaa21e1efe3439fa5e54fc760eb2708",
+    "skip_reason": "resource_type_not_auto_blocked"
+  }
+}
+```
+
+검증 의미:
+
+- `GET /api/v1/operations/filesystems/expiring`이 `expires_at=2000-01-01T00:00:00Z`로 생성한 expired filesystem resource를 반환했다.
+- `GET /api/v1/operations/action-required`가 sweep 전 `filesystem_expired_unblocked`를 반환했다.
+- `dry_run=true` expiration sweep은 POSIX access를 바꾸지 않고 target만 기록했다.
+- 실제 sweep은 `cluster-a/c1-worker`와 `cluster-b/c2-worker`의 host-mounted CephFS directory를 모두 `0000`으로 block했다.
+- block 중에는 허용 LDAP user `alice`, `bob`과 비허용 fixture user가 모두 directory에 접근하지 못했다.
+- manual unblock 후 `alice`, `bob`은 `0770` 접근을 회복했고 비허용 fixture user는 계속 거부됐다.
+- `resource_type=system` expired resource는 자동 block하지 않고 `resource_type_not_auto_blocked`로 skip됐으며 action-required에 남았다.
+- delete 후 DMS resource status가 `Deleted`가 되고 host directory, DMS access group, 검증용 LDAP fixture user가 cleanup됐다.
+
+상세 검증 기록:
+
+- `docs/dms-phase11-verification.md`
+
 ### PostgreSQL Evidence Query
 
 위 live verification이 만든 DB를 직접 조회한 결과다. DB 이름은 실행마다 바뀌므로 재검증 시에는 직전 output의 DB 이름으로 바꿔 실행한다.
@@ -1392,7 +1770,70 @@ DMS_PHASE8_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase8-testbed.sh
 
 The script cleans up the temporary `dms-phase8` namespace in both clusters by default.
 
-### 11. Optional Local Regression
+### 11. Re-run Phase 9 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+./scripts/verify-phase9-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE9_OPERATIONAL_DB` and `DMS_PHASE9_OBSERVABILITY_DB` are set.
+
+To skip rebuilding the image when the registry already has the current image:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE9_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase9-testbed.sh
+```
+
+The script cleans up the temporary `dms-phase9` namespace in both clusters by default.
+
+### 12. Re-run Phase 10 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+./scripts/verify-phase10-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE10_OPERATIONAL_DB` and `DMS_PHASE10_OBSERVABILITY_DB` are set.
+
+To skip rebuilding the image when the registry already has the current image:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE10_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase10-testbed.sh
+```
+
+The script cleans up the temporary `dms-phase10` namespace in both clusters, DMS phase-scoped LDAP fixture users, DMS access groups, and host test directories by default.
+
+### 13. Re-run Phase 11 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+./scripts/verify-phase11-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE11_OPERATIONAL_DB` and `DMS_PHASE11_OBSERVABILITY_DB` are set.
+
+To skip rebuilding the image when the registry already has the current image:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE11_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase11-testbed.sh
+```
+
+The script runs the Phase 10 deployment/smoke setup first, then verifies Phase 11 expiry query, dry-run sweep, block, unblock, system-resource skip, and cleanup. It cleans up the temporary `dms-phase11` namespace in both clusters, DMS phase-scoped LDAP fixture users, DMS access groups, and host test directories by default.
+
+### 14. Optional Local Regression
 
 이 검증은 mock/stub도 포함하므로 `Done`의 단독 근거로 쓰지 않는다. 코드 회귀 확인 용도다.
 
@@ -1400,25 +1841,29 @@ Command:
 
 ```bash
 cd /home/mason/workspace/dms
+python3 -m pytest -q tests/test_phase10_filesystem_rm.py tests/test_phase11_filesystem_expiry.py
 python3 -m pytest -q
 ```
 
 Output:
 
 ```text
-49 passed in 35.48s
+13 passed in 6.51s
+67 passed in 44.10s
 ```
 
 ## Not Implemented Yet
 
-다음 항목은 Phase 8까지 완료된 기능으로 보지 않는다.
+다음 항목은 Phase 11까지 완료된 기능으로 보지 않는다.
 
 - DMS API server, Planner, Worker, Agent의 production Helm/Kustomize 배포
-- 실제 filesystem directory create/update/block/delete
+- 실제 filesystem update/check/sync/import/assign-quota
 - 실제 filesystem quota 적용
+- filesystem usage pressure 계산 및 quota pressure action-required
+- filesystem expiry 자동 cron/scheduler/controller
+- filesystem expiry delete/archive 정책
 - DMS lifecycle operation으로서의 Kubernetes namespace delete
-- Kubernetes default quota policy 기반 reset workflow
-- Kubernetes effective quota action-required aggregation
+- Kubernetes quota drift/usage pressure 자동 cron/scheduler/controller
 - 실제 VolcanoJob create/watch/terminate
 - mpifileutils image build 또는 live execution
 - Data Management POSIX permission runtime preflight
@@ -1428,9 +1873,10 @@ Output:
 
 ## Comments For Next Phases
 
-- 다음 phase는 filesystem quota lifecycle 또는 Data Management read-only scan preflight 중 하나로 좁혀서 진행하는 것이 적절하다.
-- `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8에서 multi-StorageClass quota target으로 검증했다.
-- `cluster-a/testbed-cephfs`는 Phase 5/6/7/8에서 self-managed RM target 및 regression target으로 검증했다.
+- 다음 phase는 filesystem quota lifecycle, filesystem check/sync/import, 또는 Data Management read-only scan preflight 중 하나로 좁혀서 진행하는 것이 적절하다.
+- `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8/9에서 multi-StorageClass quota target으로 검증했다.
+- `cluster-a/testbed-cephfs`는 Phase 5/6/7/8/9에서 self-managed RM target 및 regression target으로 검증했다.
+- `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock target으로 검증했다.
 - Phase 8에서 실제 Agent DaemonSet report를 검증했으므로 이후 Data Management preflight나 filesystem lifecycle은 synthetic Agent report 없이 진행해야 한다.
 - Phase 4부터는 mock/stub 결과와 real backend mutation 결과를 문서에서 반드시 분리한다.
 - 실제 backend mutation이 추가될 때마다 이 문서의 `Live Verification Results`와 `Not Implemented Yet`를 갱신한다.

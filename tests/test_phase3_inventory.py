@@ -227,7 +227,7 @@ def test_storage_mapping_upsert_conflicts_with_active_work(harness):
                 "storage_name": "cephfs-a",
                 "directory_name": "alpha",
                 "resource_type": "user",
-                "quota": {"capacity_bytes": 1000},
+                "users": ["alice", "bob"],
             },
         },
         headers=API_HEADERS,

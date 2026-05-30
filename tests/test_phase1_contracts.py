@@ -57,7 +57,7 @@ def filesystem_body(directory_name: str = "alpha") -> dict:
             "storage_name": "weka-a",
             "directory_name": directory_name,
             "resource_type": "user",
-            "quota": {"capacity_bytes": 10**12, "file_count": 5_000_000},
+            "users": ["alice", "bob"],
         },
     }
 

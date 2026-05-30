@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .adapters import (
+    AdapterResult,
+    BackendPreconditionError,
     FilesystemBackendAdapter,
     KubernetesNamespaceQuotaAdapter,
     StubFilesystemBackendAdapter,
@@ -79,14 +81,18 @@ class RMWorkerRuntime:
                 if plan["operation_kind"] == OperationKind.K8S_QUOTA_DELETE.value
                 else LifecycleState.SUCCEEDED.value,
             )
-            self.repository.upsert_resource(
-                resource_kind=plan["execution_metadata"]["resource_kind"],
-                resource_key=plan["resource_key"],
-                desired_state=resource_desired_state,
-                applied_state=adapter_result.applied_state,
-                observed_state=adapter_result.observed_state,
-                status=resource_status,
-            )
+            if plan["operation_kind"] not in {
+                OperationKind.K8S_QUOTA_AUDIT.value,
+                OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
+            }:
+                self.repository.upsert_resource(
+                    resource_kind=plan["execution_metadata"]["resource_kind"],
+                    resource_key=plan["resource_key"],
+                    desired_state=resource_desired_state,
+                    applied_state=adapter_result.applied_state,
+                    observed_state=adapter_result.observed_state,
+                    status=resource_status,
+                )
             self.repository.complete_result(
                 request_id=plan["request_id"],
                 plan_id=plan["plan_id"],
@@ -117,6 +123,28 @@ class RMWorkerRuntime:
                 payload={"plan_id": plan["plan_id"], "run_id": run_id},
                 correlation_id=plan["request_id"],
             )
+        except BackendPreconditionError as exc:
+            self.repository.complete_result(
+                request_id=plan["request_id"],
+                plan_id=plan["plan_id"],
+                run_id=run_id,
+                terminal_status=LifecycleState.BACKEND_APPLY_FAILED,
+                message=str(exc),
+                verification_summary={
+                    "backend_side_effect": False,
+                    "precondition_failed": True,
+                },
+                error_category="backend_precondition",
+                actor=self.worker_id,
+            )
+            self.observability.record_event(
+                component="rm-worker",
+                severity="WARN",
+                event_type="rm_plan_backend_precondition_failed",
+                message=str(exc),
+                payload={"plan_id": plan["plan_id"], "run_id": run_id},
+                correlation_id=plan["request_id"],
+            )
         except Exception as exc:
             self.repository.complete_result(
                 request_id=plan["request_id"],
@@ -143,6 +171,8 @@ class RMWorkerRuntime:
 
     def _apply(self, plan: dict[str, Any]) -> Any:
         operation = plan["operation_kind"]
+        if operation == OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value:
+            return self._apply_filesystem_expiration_sweep(plan)
         filesystem_adapter = self._filesystem_adapter(plan)
         kubernetes_adapter = self._kubernetes_adapter(plan)
         if operation == OperationKind.FILESYSTEM_CREATE.value:
@@ -173,7 +203,135 @@ class RMWorkerRuntime:
             return kubernetes_adapter.sync_live_state(plan)
         if operation == OperationKind.K8S_QUOTA_CHECK.value:
             return kubernetes_adapter.check_resource_quota(plan)
+        if operation == OperationKind.K8S_QUOTA_AUDIT.value:
+            return kubernetes_adapter.audit_resource_quotas(plan)
         raise ValueError(f"unsupported RM operation: {operation}")
+
+    def _apply_filesystem_expiration_sweep(self, plan: dict[str, Any]) -> AdapterResult:
+        desired = plan["desired_state"]
+        dry_run = bool(desired.get("dry_run", False))
+        targets = desired.get("targets") or []
+        results: list[dict[str, Any]] = []
+        blocked_count = 0
+        skipped_count = 0
+        failed_count = 0
+        for target in targets:
+            target_result = dict(target)
+            skip_reason = self._filesystem_sweep_skip_reason(target)
+            if skip_reason:
+                target_result.update({"result": "skipped", "reason": skip_reason})
+                skipped_count += 1
+                results.append(target_result)
+                continue
+            if dry_run:
+                target_result.update({"result": "would_block", "backend_side_effect": False})
+                results.append(target_result)
+                continue
+            try:
+                block_result = self._block_filesystem_sweep_target(plan, target)
+            except Exception as exc:  # noqa: BLE001 - sweep keeps per-target failure evidence.
+                target_result.update(
+                    {
+                        "result": "failed",
+                        "reason": _filesystem_sweep_failure_reason(str(exc)),
+                        "message": str(exc),
+                    }
+                )
+                failed_count += 1
+                results.append(target_result)
+                continue
+            blocked_count += 1
+            target_result.update(
+                {
+                    "result": "blocked",
+                    "backend_side_effect": True,
+                    "observed_state": block_result.observed_state,
+                }
+            )
+            results.append(target_result)
+        summary = {
+            "adapter": "filesystem-expiration-sweep",
+            "operation": OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
+            "backend_side_effect": not dry_run and blocked_count > 0,
+            "dry_run": dry_run,
+            "action": desired.get("action", "block"),
+            "expired_before": desired.get("expired_before"),
+            "target_count": len(targets),
+            "blocked_count": blocked_count,
+            "skipped_count": skipped_count,
+            "failed_count": failed_count,
+            "targets": results,
+            "verified": failed_count == 0,
+        }
+        return AdapterResult(
+            applied_state={"backend_side_effect": summary["backend_side_effect"]},
+            observed_state=summary,
+            message="Filesystem expiration sweep completed",
+        )
+
+    def _filesystem_sweep_skip_reason(self, target: dict[str, Any]) -> str | None:
+        resource_key = target.get("resource_key")
+        resource_type = target.get("resource_type") or "user"
+        if resource_type in {"system", "admin"}:
+            return "resource_type_not_auto_blocked"
+        block_state = target.get("block_state") or {}
+        if target.get("resource_status") == LifecycleState.BLOCKED.value or block_state.get(
+            "blocked"
+        ):
+            return "already_blocked"
+        storage_name = target.get("storage_name")
+        if not storage_name:
+            return "storage_name_missing"
+        mapping = self.repository.get_storage_mapping(storage_name)
+        if not mapping:
+            return "storage_mapping_missing"
+        if (mapping.get("readiness") or {}).get("resource_management") != "Ready":
+            return "rm_readiness_not_ready"
+        if resource_key:
+            active = self.repository.active_work_for_resource(
+                resource_kind=ResourceKind.FILESYSTEM.value,
+                resource_key=resource_key,
+            )
+            if active:
+                return "resource_has_active_work"
+        return None
+
+    def _block_filesystem_sweep_target(
+        self, sweep_plan: dict[str, Any], target: dict[str, Any]
+    ) -> AdapterResult:
+        desired = dict(target.get("desired_state") or {})
+        desired["block"] = True
+        desired["block_state"] = {
+            "blocked": True,
+            "block_mode": "permission-zero",
+            "reason": sweep_plan["desired_state"].get("reason"),
+        }
+        desired["operation"] = OperationKind.FILESYSTEM_BLOCK.value
+        desired["resource_kind"] = ResourceKind.FILESYSTEM.value
+        desired["resource_key"] = target["resource_key"]
+        block_plan = dict(sweep_plan)
+        block_plan["operation_kind"] = OperationKind.FILESYSTEM_BLOCK.value
+        block_plan["resource_key"] = target["resource_key"]
+        block_plan["desired_state"] = desired
+        block_plan["execution_metadata"] = {
+            **sweep_plan.get("execution_metadata", {}),
+            "resource_kind": ResourceKind.FILESYSTEM.value,
+            "filesystem_backend": {
+                "storage_name": desired.get("storage_name"),
+                "directory_name": desired.get("directory_name"),
+            },
+        }
+        adapter = self._filesystem_adapter(block_plan)
+        result = adapter.block(block_plan)
+        self.repository.upsert_resource(
+            resource_kind=ResourceKind.FILESYSTEM.value,
+            resource_key=target["resource_key"],
+            desired_state=result.applied_state.get("synced_desired_state", desired),
+            applied_state=result.applied_state,
+            observed_state=result.observed_state,
+            status=result.observed_state.get("resource_status", LifecycleState.BLOCKED.value),
+        )
+        return result
 
     @staticmethod
     def _kubernetes_quota_event_action(plan: dict[str, Any]) -> str | None:
@@ -188,6 +346,8 @@ class RMWorkerRuntime:
             return "sync"
         if operation == OperationKind.K8S_QUOTA_CHECK.value:
             return "consistency_check"
+        if operation == OperationKind.K8S_QUOTA_AUDIT.value:
+            return "audit"
         if operation == OperationKind.K8S_QUOTA_BLOCK.value:
             return "block" if plan["desired_state"].get("block") else "unblock"
         return None
@@ -201,6 +361,17 @@ class RMWorkerRuntime:
         if self.backend_registry:
             return self.backend_registry.kubernetes_for_plan(plan)
         return self.kubernetes_adapter
+
+
+def _filesystem_sweep_failure_reason(message: str) -> str:
+    lowered = message.lower()
+    if "marker" in lowered and "mismatch" in lowered:
+        return "filesystem_marker_mismatch"
+    if "restore" in lowered:
+        return "filesystem_block_restore_missing"
+    if "group" in lowered:
+        return "filesystem_access_group_missing"
+    return "filesystem_block_failed"
 
 
 @dataclass

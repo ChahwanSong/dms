@@ -717,6 +717,41 @@ class DmsRepository:
             result["verification_summary"] = json_loads(result["verification_summary"]) or {}
         return results
 
+    def list_results_for_operations(
+        self, *, operations: tuple[str, ...], limit: int = 1000
+    ) -> list[dict[str, Any]]:
+        if not operations:
+            return []
+        placeholders = ",".join(["?"] * len(operations))
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    results.*,
+                    requests.operation,
+                    requests.resource_kind,
+                    requests.resource_key,
+                    requests.requester_id,
+                    requests.actor,
+                    requests.payload_summary,
+                    requests.commit_order,
+                    requests.status AS request_status
+                FROM results
+                JOIN requests ON requests.request_id = results.request_id
+                WHERE requests.operation IN ({placeholders})
+                ORDER BY requests.commit_order DESC, results.created_at DESC
+                LIMIT ?
+                """,
+                (*operations, limit),
+            ).fetchall()
+        results = rows_to_dicts(rows)
+        for result in results:
+            result["verification_summary"] = (
+                json_loads(result["verification_summary"]) or {}
+            )
+            result["payload_summary"] = json_loads(result["payload_summary"]) or {}
+        return results
+
     def upsert_resource(
         self,
         *,
@@ -791,6 +826,155 @@ class DmsRepository:
             resource["applied_state"] = json_loads(resource["applied_state"]) or {}
             resource["observed_state"] = json_loads(resource["observed_state"]) or {}
         return resources
+
+    def list_filesystem_resources(
+        self,
+        *,
+        storage_name: str | None = None,
+        requester_id: str | None = None,
+        resource_type: str | None = None,
+        status: list[str] | tuple[str, ...] | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM resources
+                WHERE resource_kind = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (ResourceKind.FILESYSTEM.value, limit),
+            ).fetchall()
+        resources = rows_to_dicts(rows)
+        filtered: list[dict[str, Any]] = []
+        allowed_status = set(status or [])
+        for resource in resources:
+            resource["desired_state"] = json_loads(resource["desired_state"]) or {}
+            resource["applied_state"] = json_loads(resource["applied_state"]) or {}
+            resource["observed_state"] = json_loads(resource["observed_state"]) or {}
+            desired = resource["desired_state"]
+            if storage_name and desired.get("storage_name") != storage_name:
+                continue
+            if requester_id and desired.get("requester_id") != requester_id:
+                continue
+            if resource_type and desired.get("resource_type") != resource_type:
+                continue
+            if allowed_status and resource.get("status") not in allowed_status:
+                continue
+            filtered.append(resource)
+        return filtered
+
+    def list_filesystem_resources_expiring(
+        self,
+        *,
+        storage_name: str | None = None,
+        status: str = "expired",
+        before: str | None = None,
+        within_seconds: int | None = None,
+        include_blocked: bool = False,
+        resource_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if status not in {"expired", "expiring", "all"}:
+            raise ValueError("status must be one of: expired, expiring, all")
+        basis = _parse_iso(before) if before else utcnow()
+        window_end = (
+            basis + timedelta(seconds=within_seconds)
+            if within_seconds is not None
+            else None
+        )
+        rows = self.list_filesystem_resources(
+            storage_name=storage_name,
+            resource_type=resource_type,
+            limit=max(limit * 4, limit),
+        )
+        matches: list[dict[str, Any]] = []
+        for resource in rows:
+            if resource.get("status") == "Deleted":
+                continue
+            desired = resource["desired_state"]
+            applied = resource["applied_state"]
+            expires_at = desired.get("expires_at") or applied.get("expires_at")
+            if not expires_at:
+                continue
+            expires = _parse_iso(str(expires_at))
+            expired = expires <= basis
+            expiring = bool(window_end and basis < expires <= window_end)
+            if status == "expired" and not expired:
+                continue
+            if status == "expiring" and not expiring:
+                continue
+            if status == "all" and not (expired or expiring):
+                continue
+            block_state = _filesystem_block_state(resource)
+            if block_state.get("blocked") and not include_blocked:
+                continue
+            seconds_overdue = int((basis - expires).total_seconds()) if expired else None
+            matches.append(
+                {
+                    **resource,
+                    "storage_name": desired.get("storage_name"),
+                    "directory_name": desired.get("directory_name"),
+                    "resource_type": desired.get("resource_type") or "user",
+                    "expires_at": expires.isoformat(),
+                    "expired": expired,
+                    "expiring": expiring,
+                    "seconds_overdue": seconds_overdue,
+                    "block_state": block_state or {"blocked": False},
+                }
+            )
+        return matches[:limit]
+
+    def list_kubernetes_namespace_quota_resources(
+        self,
+        *,
+        cluster_name: str | None = None,
+        namespace_name: str | None = None,
+        requester_id: str | None = None,
+        resource_type: str | None = None,
+        status: list[str] | tuple[str, ...] | None = None,
+        storage_name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM resources
+                WHERE resource_kind = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, limit),
+            ).fetchall()
+        resources = rows_to_dicts(rows)
+        filtered: list[dict[str, Any]] = []
+        allowed_status = set(status or [])
+        for resource in resources:
+            resource["desired_state"] = json_loads(resource["desired_state"]) or {}
+            resource["applied_state"] = json_loads(resource["applied_state"]) or {}
+            resource["observed_state"] = json_loads(resource["observed_state"]) or {}
+            desired = resource["desired_state"]
+            if cluster_name and desired.get("cluster_name") != cluster_name:
+                continue
+            if namespace_name and desired.get("namespace_name") != namespace_name:
+                continue
+            if requester_id and desired.get("requester_id") != requester_id:
+                continue
+            if resource_type and desired.get("resource_type") != resource_type:
+                continue
+            if allowed_status and resource.get("status") not in allowed_status:
+                continue
+            if storage_name:
+                entry_storage_names = {
+                    entry.get("storage_name")
+                    for entry in desired.get("storage_class_quotas") or []
+                    if isinstance(entry, dict)
+                }
+                if storage_name not in entry_storage_names:
+                    continue
+            filtered.append(resource)
+        return filtered
 
     def get_resource(self, resource_kind: str, resource_key: str) -> dict[str, Any] | None:
         with self.database.connect() as connection:
@@ -1052,6 +1236,23 @@ class DmsRepository:
                 created_at=now,
             )
         return policy_id
+
+    def get_default_quota_policy(
+        self, *, resource_kind: str, resource_type: str
+    ) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM default_quota_policies
+                WHERE resource_kind = ? AND resource_type = ?
+                """,
+                (resource_kind, resource_type),
+            ).fetchone()
+        policy = row_to_dict(row) if row else None
+        if not policy:
+            return None
+        policy["quota"] = json_loads(policy["quota"]) or {}
+        return policy
 
     def upsert_identity_mapping(
         self,
@@ -1417,6 +1618,29 @@ class DmsRepository:
                     }
         return None
 
+    def active_work_for_resource(
+        self, *, resource_kind: str, resource_key: str
+    ) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM requests
+                WHERE resource_kind = ? AND resource_key = ?
+                ORDER BY commit_order ASC
+                """,
+                (resource_kind, resource_key),
+            ).fetchall()
+        for row in rows:
+            request = self._decode_request(row_to_dict(row))
+            if request["status"] in TERMINAL_LIFECYCLE_STATES:
+                continue
+            return {
+                "kind": "request",
+                "id": request["request_id"],
+                "status": request["status"],
+            }
+        return None
+
     def ingest_agent_report(self, report: dict[str, Any]) -> str:
         report_id = new_id("agent")
         now = iso_now()
@@ -1753,6 +1977,15 @@ def _parse_iso(value: str | None) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _filesystem_block_state(resource: dict[str, Any]) -> dict[str, Any]:
+    for section in ("desired_state", "applied_state", "observed_state"):
+        state = resource.get(section) or {}
+        block_state = state.get("block_state")
+        if isinstance(block_state, dict) and block_state:
+            return dict(block_state)
+    return {"blocked": resource.get("status") == LifecycleState.BLOCKED.value}
 
 
 def _agent_capability_summary(report: dict[str, Any]) -> dict[str, Any]:

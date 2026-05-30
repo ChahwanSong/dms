@@ -94,6 +94,7 @@ class OperationKind(StrEnum):
     K8S_QUOTA_DELETE = "kubernetes.namespace_quota.delete"
     K8S_QUOTA_SYNC = "kubernetes.namespace_quota.sync"
     K8S_QUOTA_CHECK = "kubernetes.namespace_quota.consistency_check"
+    K8S_QUOTA_AUDIT = "kubernetes.namespace_quota.audit"
     DATA_SYNC = "data.sync"
     DATA_RM = "data.rm"
     DATA_SCAN = "data.scan"
@@ -201,6 +202,18 @@ class DefaultQuotaPolicyInput(BaseModel):
 _BASENAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def validate_storage_root_basename(field_name: str, value: str) -> None:
+    if (
+        value in {"", ".", ".."}
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+        or value.startswith("-")
+        or not _BASENAME.match(value)
+    ):
+        raise ValueError(f"{field_name} must be a storage-root basename")
+
+
 @dataclass(frozen=True)
 class FilesystemResourceKey:
     storage_name: str
@@ -211,8 +224,7 @@ class FilesystemResourceKey:
             "storage_name": self.storage_name,
             "directory_name": self.directory_name,
         }.items():
-            if value in {"", ".", ".."} or "/" in value or not _BASENAME.match(value):
-                raise ValueError(f"{field_name} must be a storage-root basename")
+            validate_storage_root_basename(field_name, value)
 
     def as_string(self) -> str:
         return f"{self.storage_name}:{self.directory_name}"

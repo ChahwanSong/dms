@@ -103,7 +103,7 @@ def test_gpfs_filesystem_resource_management_uses_gpfs_adapter(repository_pair):
         payload={
             "storage_name": "gpfs-a",
             "directory_name": "project-alpha",
-            "quota": {"capacity_bytes": 10**12, "file_count": 5_000_000},
+            "users": ["alice", "bob"],
         },
     )
     registry = BackendAdapterRegistry.with_phase1_defaults(repository)
