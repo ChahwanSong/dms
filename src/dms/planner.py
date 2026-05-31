@@ -445,14 +445,20 @@ class Planner:
         elif request["resource_kind"] == ResourceKind.FILESYSTEM.value:
             metadata["planner"] = (
                 "phase12"
-                if request["operation"]
-                in {
-                    OperationKind.FILESYSTEM_UPDATE.value,
-                    OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
-                    OperationKind.FILESYSTEM_IMPORT.value,
-                    OperationKind.FILESYSTEM_CHECK.value,
-                    OperationKind.FILESYSTEM_SYNC.value,
-                }
+                if (
+                    request["operation"]
+                    in {
+                        OperationKind.FILESYSTEM_UPDATE.value,
+                        OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
+                        OperationKind.FILESYSTEM_IMPORT.value,
+                        OperationKind.FILESYSTEM_CHECK.value,
+                        OperationKind.FILESYSTEM_SYNC.value,
+                    }
+                    or (
+                        request["operation"] == OperationKind.FILESYSTEM_CREATE.value
+                        and "quota" in desired_state
+                    )
+                )
                 else
                 "phase11"
                 if request["operation"]
@@ -1759,7 +1765,7 @@ def _filesystem_quota_decrease_issues(
             issues.append(
                 {
                     "reason": "filesystem_quota_decrease_below_live_used",
-                    "resource": "capacity_bytes",
+                    "field": "quota.capacity_bytes",
                     "desired": requested_quota["capacity_bytes"],
                     "used": used_bytes,
                 }
@@ -1770,7 +1776,7 @@ def _filesystem_quota_decrease_issues(
             issues.append(
                 {
                     "reason": "filesystem_quota_decrease_below_live_used",
-                    "resource": "file_count",
+                    "field": "quota.file_count",
                     "desired": requested_quota["file_count"],
                     "used": used_files,
                 }

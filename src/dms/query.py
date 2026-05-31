@@ -355,6 +355,7 @@ class OperationalQueryService:
 
         rows = self.repository.list_results_for_operations(
             operations=(
+                OperationKind.FILESYSTEM_CREATE.value,
                 OperationKind.FILESYSTEM_UPDATE.value,
                 OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
                 OperationKind.FILESYSTEM_BLOCK.value,
@@ -396,6 +397,7 @@ class OperationalQueryService:
                 continue
             resource_key = row["resource_key"]
             quota_operations = {
+                OperationKind.FILESYSTEM_CREATE.value,
                 OperationKind.FILESYSTEM_UPDATE.value,
                 OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
                 OperationKind.FILESYSTEM_IMPORT.value,

@@ -43,7 +43,7 @@ def test_phase10_filesystem_create_plans_access_group_and_no_quota(tmp_path):
     assert plan["execution_metadata"]["planner"] == "phase10"
 
 
-def test_phase10_filesystem_create_rejects_unsupported_quota_payload(tmp_path):
+def test_phase12_filesystem_create_plans_quota_payload(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_filesystem_request(
@@ -59,16 +59,13 @@ def test_phase10_filesystem_create_rejects_unsupported_quota_payload(tmp_path):
 
     assert Planner(repository).run_once() == 1
 
-    assert repository.get_plan_by_request(request_id) is None
-    [result] = repository.get_results(request_id)
-    assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert result["verification_summary"]["backend_side_effect"] is False
-    assert result["verification_summary"]["issues"] == [
-        {
-            "reason": "filesystem_payload_fields_unsupported_phase11",
-            "fields": ["quota"],
-        }
-    ]
+    plan = repository.get_plan_by_request(request_id)
+    assert plan is not None
+    assert plan["desired_state"]["quota"] == {
+        "capacity_bytes": 1024,
+        "file_count": 100,
+    }
+    assert plan["execution_metadata"]["planner"] == "phase12"
 
 
 def test_phase10_filesystem_create_requires_two_unique_users(tmp_path):
@@ -129,7 +126,7 @@ def test_phase10_filesystem_create_rejects_existing_resource(tmp_path):
     ]
 
 
-def test_phase10_filesystem_update_is_rejected_until_future_phase(tmp_path):
+def test_phase12_filesystem_update_requires_existing_quota_only_payload(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_filesystem_request(
@@ -146,12 +143,13 @@ def test_phase10_filesystem_update_is_rejected_until_future_phase(tmp_path):
 
     [result] = repository.get_results(request_id)
     assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert result["verification_summary"]["issues"] == [
-        {
-            "reason": "filesystem_operation_unsupported_phase11",
-            "operation": OperationKind.FILESYSTEM_UPDATE.value,
-        }
-    ]
+    assert {
+        issue["reason"] for issue in result["verification_summary"]["issues"]
+    } == {
+        "filesystem_payload_fields_unsupported_phase12",
+        "filesystem_resource_missing",
+        "filesystem_quota_required",
+    }
 
 
 def test_phase10_filesystem_delete_reuses_existing_desired_state(tmp_path):

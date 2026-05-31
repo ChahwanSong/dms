@@ -514,6 +514,17 @@ class CephFsHostMountedFilesystemBackendAdapter:
         quota = _normalize_quota(desired.get("quota"))
         if not quota:
             raise BackendPreconditionError("filesystem quota is required for Phase 12 update")
+        live_state = self._read_directory_state(
+            managed_root=self.template.managed_root,
+            directory_name=directory_name,
+            resource_key=plan["resource_key"],
+            require_marker=True,
+            include_quota=True,
+            include_usage=True,
+        )
+        decrease_issue = _quota_decrease_issue(quota, live_state.get("quota_state") or {})
+        if decrease_issue:
+            raise BackendPreconditionError(decrease_issue)
         observed = self.executor.apply_quota(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
@@ -565,7 +576,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
         self._validate_template()
         desired = plan["desired_state"]
         directory_name = desired["directory_name"]
-        observed = self.executor.read_directory_state(
+        observed = self._read_directory_state(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
             resource_key=plan["resource_key"],
@@ -606,7 +617,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
         self._validate_template()
         desired = plan["desired_state"]
         directory_name = desired["directory_name"]
-        observed = self.executor.read_directory_state(
+        observed = self._read_directory_state(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
             resource_key=plan["resource_key"],
@@ -768,6 +779,12 @@ class CephFsHostMountedFilesystemBackendAdapter:
             raise BackendPreconditionError("CephFS storage mapping requires mount_path")
         if not self.template.rm_worker_node and self.executor is None:
             raise BackendPreconditionError("CephFS storage mapping requires an RM worker node")
+
+    def _read_directory_state(self, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return self.executor.read_directory_state(**kwargs)
+        except HostExecutionError as exc:
+            raise BackendPreconditionError(str(exc)) from exc
 
     def _block(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
@@ -989,6 +1006,19 @@ def _quota_usage_pressure(
     return pressure
 
 
+def _quota_decrease_issue(quota: dict[str, int], quota_state: dict[str, Any]) -> str | None:
+    usage = quota_state.get("usage") or {}
+    capacity_limit = quota.get("capacity_bytes")
+    used_bytes = usage.get("used_bytes")
+    if capacity_limit is not None and used_bytes is not None and int(capacity_limit) < int(used_bytes):
+        return "filesystem quota decrease below live used bytes"
+    file_limit = quota.get("file_count")
+    used_files = usage.get("used_files")
+    if file_limit is not None and used_files is not None and int(file_limit) < int(used_files):
+        return "filesystem quota decrease below live used files"
+    return None
+
+
 _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(
     r"""
     import grp
@@ -996,11 +1026,37 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(
     import os
     import subprocess
     import sys
+    import time
 
     root, directory_name, marker_json, group_name, mode_text, allowed_json, denied_json = sys.argv[1:]
     marker = json.loads(marker_json)
     allowed = json.loads(allowed_json)
     denied = json.loads(denied_json)
+
+    def wait_command(command, message, timeout_seconds=60):
+        deadline = time.monotonic() + timeout_seconds
+        last_error = ""
+        while time.monotonic() < deadline:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0:
+                return
+            last_error = completed.stderr.strip() or completed.stdout.strip()
+            time.sleep(3)
+        raise SystemExit(f"{message}: {last_error}")
+
+    def refresh_sssd_cache():
+        for command in (["sss_cache", "-E"], ["/usr/sbin/sss_cache", "-E"]):
+            try:
+                subprocess.run(command, check=False, capture_output=True, text=True)
+                return
+            except FileNotFoundError:
+                continue
+
     os.makedirs(root, exist_ok=True)
     root_real = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root_real, directory_name))
@@ -1026,27 +1082,20 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(
     os.chown(target, -1, group.gr_gid)
     os.chown(marker_path, -1, group.gr_gid)
     os.chmod(target, int(mode_text, 8))
+    refresh_sssd_cache()
     access = {"allowed_users": {}, "denied_users": {}}
     for user in allowed:
         probe = os.path.join(target, f".access-allowed-{user}")
-        completed = subprocess.run(
+        wait_command(
             ["sudo", "-u", user, "sh", "-c", "touch \"$1\" && rm \"$1\"", "sh", probe],
-            check=False,
-            capture_output=True,
-            text=True,
+            f"allowed user access failed for {user}",
         )
-        if completed.returncode != 0:
-            raise SystemExit(f"allowed user access failed for {user}: {completed.stderr.strip()}")
         access["allowed_users"][user] = "ok"
     for user in denied:
-        completed = subprocess.run(
+        wait_command(
             ["sudo", "-u", user, "sh", "-c", "test ! -x \"$1\" && test ! -w \"$1\"", "sh", target],
-            check=False,
-            capture_output=True,
-            text=True,
+            f"denied user unexpectedly has access: {user}",
         )
-        if completed.returncode != 0:
-            raise SystemExit(f"denied user unexpectedly has access: {user}")
         access["denied_users"][user] = "denied"
     stat_result = os.stat(target)
     print(json.dumps({
@@ -1186,12 +1235,38 @@ _UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(
     import os
     import subprocess
     import sys
+    import time
 
     root, directory_name, resource_key, block_state_json, allowed_json, denied_json = sys.argv[1:]
     block_state = json.loads(block_state_json or "{}")
     allowed = json.loads(allowed_json)
     denied = json.loads(denied_json)
     restore = block_state.get("restore") or block_state.get("restore_state") or {}
+
+    def wait_command(command, message, timeout_seconds=60):
+        deadline = time.monotonic() + timeout_seconds
+        last_error = ""
+        while time.monotonic() < deadline:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0:
+                return
+            last_error = completed.stderr.strip() or completed.stdout.strip()
+            time.sleep(3)
+        raise SystemExit(f"{message}: {last_error}")
+
+    def refresh_sssd_cache():
+        for command in (["sss_cache", "-E"], ["/usr/sbin/sss_cache", "-E"]):
+            try:
+                subprocess.run(command, check=False, capture_output=True, text=True)
+                return
+            except FileNotFoundError:
+                continue
+
     if not restore:
         raise SystemExit("filesystem block restore state missing")
     group_name = restore.get("group_name")
@@ -1217,27 +1292,20 @@ _UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(
     os.chown(target, -1, group.gr_gid)
     os.chown(marker_path, -1, group.gr_gid)
     os.chmod(target, int(mode_text, 8))
+    refresh_sssd_cache()
     access = {"allowed_users": {}, "denied_users": {}}
     for user in allowed:
         probe = os.path.join(target, f".access-unblocked-{user}")
-        completed = subprocess.run(
+        wait_command(
             ["sudo", "-u", user, "sh", "-c", "touch \"$1\" && rm \"$1\"", "sh", probe],
-            check=False,
-            capture_output=True,
-            text=True,
+            f"allowed user access failed for {user}",
         )
-        if completed.returncode != 0:
-            raise SystemExit(f"allowed user access failed for {user}: {completed.stderr.strip()}")
         access["allowed_users"][user] = "ok"
     for user in denied:
-        completed = subprocess.run(
+        wait_command(
             ["sudo", "-u", user, "sh", "-c", "test ! -x \"$1\" && test ! -w \"$1\"", "sh", target],
-            check=False,
-            capture_output=True,
-            text=True,
+            f"denied user unexpectedly has access: {user}",
         )
-        if completed.returncode != 0:
-            raise SystemExit(f"denied user unexpectedly has access: {user}")
         access["denied_users"][user] = "denied"
     stat_after = os.stat(target)
     restored_block_state = {
@@ -1269,6 +1337,7 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(
     import shutil
     import subprocess
     import sys
+    import time
 
     root, directory_name, resource_key, quota_json = sys.argv[1:]
     quota = json.loads(quota_json or "{}")
@@ -1509,6 +1578,30 @@ _ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(
             fail(completed.stderr.strip() or completed.stdout.strip() or "command failed")
         return completed.stdout.strip()
 
+    def getx(path, name):
+        completed = subprocess.run(["getfattr", "--only-values", "-n", name, path], check=False, capture_output=True, text=True)
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return int(value) if value else None
+
+    def usage(path):
+        used_bytes = getx(path, "ceph.dir.rbytes")
+        used_files = getx(path, "ceph.dir.rfiles")
+        source = "cephfs-xattr"
+        if used_bytes is None:
+            du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
+            if du.returncode == 0 and du.stdout.split():
+                used_bytes = int(du.stdout.split()[0])
+                source = "du-find-fallback"
+        if used_files is None:
+            count = 0
+            for _, _, filenames in os.walk(path):
+                count += len(filenames)
+            used_files = count
+            source = "du-find-fallback" if source != "cephfs-xattr" else "cephfs-xattr-find-fallback"
+        return {"used_bytes": used_bytes or 0, "used_files": used_files or 0, "usage_source": source}
+
     if not shutil.which("setfattr") or not shutil.which("getfattr"):
         fail("filesystem quota capability missing: setfattr/getfattr")
     root_real = os.path.realpath(root)
@@ -1569,6 +1662,7 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
     import shutil
     import subprocess
     import sys
+    import time
 
     root, directory_name, marker_json, access_policy_json, quota_json, allowed_json, denied_json = sys.argv[1:]
     marker = json.loads(marker_json)
@@ -1579,6 +1673,30 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
 
     def fail(message):
         raise SystemExit(message)
+
+    def wait_command(command, message, timeout_seconds=60):
+        deadline = time.monotonic() + timeout_seconds
+        last_error = ""
+        while time.monotonic() < deadline:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0:
+                return
+            last_error = completed.stderr.strip() or completed.stdout.strip()
+            time.sleep(3)
+        fail(f"{message}: {last_error}")
+
+    def refresh_sssd_cache():
+        for command in (["sss_cache", "-E"], ["/usr/sbin/sss_cache", "-E"]):
+            try:
+                subprocess.run(command, check=False, capture_output=True, text=True)
+                return
+            except FileNotFoundError:
+                continue
 
     def run(command):
         completed = subprocess.run(command, check=False, capture_output=True, text=True)
@@ -1616,7 +1734,7 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
     if os.path.exists(marker_path):
         with open(marker_path, encoding="utf-8") as handle:
             existing = json.load(handle)
-        if existing.get("resource_key") != marker.get("resource_key") and existing.get("management_mode") != "quota_only":
+        if existing.get("resource_key") != marker.get("resource_key") or existing.get("management_mode") != "quota_only":
             fail("target directory marker resource key mismatch")
     expected_group = access_policy.get("expected_group")
     expected_mode = str(access_policy.get("expected_mode") or "0770")
@@ -1627,17 +1745,20 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
         fail("filesystem access group unresolved")
     if mode_before != expected_mode:
         fail("filesystem import mode mismatch")
+    refresh_sssd_cache()
     access = {"allowed_users": {}, "denied_users": {}}
     for user in allowed:
         probe = os.path.join(target, f".import-access-{user}")
-        completed = subprocess.run(["sudo", "-u", user, "sh", "-c", "touch \"$1\" && rm \"$1\"", "sh", probe], check=False, capture_output=True, text=True)
-        if completed.returncode != 0:
-            fail(f"allowed user access failed for {user}: {completed.stderr.strip()}")
+        wait_command(
+            ["sudo", "-u", user, "sh", "-c", "touch \"$1\" && rm \"$1\"", "sh", probe],
+            f"allowed user access failed for {user}",
+        )
         access["allowed_users"][user] = "ok"
     for user in denied:
-        completed = subprocess.run(["sudo", "-u", user, "sh", "-c", "test ! -x \"$1\" && test ! -w \"$1\"", "sh", target], check=False, capture_output=True, text=True)
-        if completed.returncode != 0:
-            fail(f"denied user unexpectedly has access: {user}")
+        wait_command(
+            ["sudo", "-u", user, "sh", "-c", "test ! -x \"$1\" && test ! -w \"$1\"", "sh", target],
+            f"denied user unexpectedly has access: {user}",
+        )
         access["denied_users"][user] = "denied"
     with open(marker_path, "w", encoding="utf-8") as handle:
         json.dump(marker, handle, sort_keys=True)
