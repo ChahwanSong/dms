@@ -651,7 +651,7 @@ Live 검증 대상:
   - `dms planner --loop` Deployment
   - `dms rm-worker --loop` Deployment
   - RM Worker Pod별 `worker_id`를 Pod name으로 설정
-  - RM Worker loop가 settings-aware `BackendAdapterRegistry.with_phase1_defaults(repository, settings)`를 사용
+  - RM Worker loop가 settings-aware `BackendAdapterRegistry.with_live_defaults(repository, settings)`를 사용
   - loop iteration exception은 JSON stderr logging 후 다음 iteration으로 계속 진행
 - 실제 RM Worker Deployment 경유 Phase 12 filesystem 기능 처리
   - API request만 제출하고 verifier는 `Planner.run_once()` 또는 `RMWorkerRuntime.run_once()`를 호출하지 않음

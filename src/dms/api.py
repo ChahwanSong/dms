@@ -127,7 +127,7 @@ def _identity_lookup_from_settings(settings: Settings) -> IdentityLookupAdapter 
 def authenticated_actor(request: Request, services: AppServices) -> str:
     result = services.auth.verify(request)
     if not result.authenticated or not result.actor:
-        services.observability.record_event(
+        services.observability.safe_record_event(
             component="api-auth",
             severity="WARN",
             event_type="authentication_rejected",
@@ -514,7 +514,7 @@ def resource_management_router() -> APIRouter:
             sanity_result=sanity,
             readiness=sanity["readiness"],
         )
-        services.observability.record_event(
+        services.observability.safe_record_event(
             component="storage-mapping",
             severity="INFO" if sanity["status"] != "Failed" else "WARN",
             event_type="storage_mapping_sanity_check_completed",
@@ -546,7 +546,7 @@ def resource_management_router() -> APIRouter:
             readiness=sanity["readiness"],
             actor=actor,
         )
-        services.observability.record_event(
+        services.observability.safe_record_event(
             component="storage-mapping",
             severity="INFO" if sanity["status"] != "Failed" else "WARN",
             event_type="storage_mapping_sanity_check_completed",

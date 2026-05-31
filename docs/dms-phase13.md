@@ -34,7 +34,7 @@ Phase 13의 핵심 범위는 다음 두 묶음이다.
 - Phase 13 live verifier는 DMS API, DMS Agent DaemonSet, Planner Deployment, RM Worker Deployment를 Kubernetes에 배포한다.
 - verifier는 RM Worker를 직접 호출하지 않는다. API request를 제출하고 PostgreSQL request/plan/run/result state와 backend state를 polling해 검증한다.
 - Planner loop가 request를 planned state로 전환하고, RM Worker loop가 plan을 claim해 실행한다.
-- RM Worker loop는 `BackendAdapterRegistry.with_phase1_defaults(repository, settings)` 또는 동등한 settings-aware registry를 사용해 CephFS live adapter를 선택한다.
+- RM Worker loop는 `BackendAdapterRegistry.with_live_defaults(repository, settings)` 또는 동등한 settings-aware registry를 사용해 CephFS live adapter를 선택한다.
 - Phase 12 quota lifecycle, import/assign-quota, check/sync, delete cleanup flow가 long-running RM Worker Deployment 경유로 c1/c2 host-mounted CephFS에서 성공한다.
 - RM Worker Pod restart 또는 stale lease 상황에서 duplicate side effect 없이 recovery/action-required evidence가 남는다.
 - `GET /api/v1/operations/runs/stale`, `GET /api/v1/operations/worker-agent-health`, `GET /api/v1/operations/action-required`가 long-running RM Worker 상태를 운영자가 이해할 수 있게 반환한다.
@@ -143,8 +143,8 @@ args: ["--worker-id", "$(POD_NAME)", "--loop", "--interval", "2"]
 요구사항:
 
 - CLI worker construction은 settings-aware backend registry를 사용해야 한다.
-  - 현재 코드가 `BackendAdapterRegistry.with_phase1_defaults(repository)`만 호출하면 CephFS live adapter가 env/settings를 충분히 받지 못할 수 있다.
-  - Phase 13에서는 `BackendAdapterRegistry.with_phase1_defaults(repository, settings)`로 통일한다.
+  - 현재 코드가 test stub registry만 호출하면 CephFS live adapter가 env/settings를 충분히 받지 못할 수 있다.
+  - Phase 13 이후 live runtime에서는 `BackendAdapterRegistry.with_live_defaults(repository, settings)`로 통일한다.
 - RM Worker Pod는 PostgreSQL operational/observability DB 접속 정보를 Secret/Env로 받아야 한다.
 - CephFS host executor를 위해 SSH private key, known_hosts 또는 host alias config를 Secret/ConfigMap으로 mount한다.
 - worker id는 Pod마다 고유해야 한다.

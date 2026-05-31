@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
             worker_id=args.worker_id,
             lease_seconds=settings.worker_lease_seconds,
-            backend_registry=BackendAdapterRegistry.with_phase1_defaults(
+            backend_registry=BackendAdapterRegistry.with_live_defaults(
                 repository, settings
             ),
         )

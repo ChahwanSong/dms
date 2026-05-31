@@ -14,7 +14,7 @@ class AgentReportIngestionService:
     def ingest(self, report: AgentReport, *, actor: str) -> str:
         expected_actor = f"node:{report.cluster_name}:{report.node_name}"
         if actor != expected_actor:
-            self.observability.record_event(
+            self.observability.safe_record_event(
                 component="agent-ingest",
                 severity="WARN",
                 event_type="agent_node_identity_mismatch",
@@ -28,7 +28,7 @@ class AgentReportIngestionService:
             )
             raise PermissionError("node identity mismatch")
         report_id = self.repository.ingest_agent_report(report.model_dump(mode="json"))
-        self.observability.record_event(
+        self.observability.safe_record_event(
             component="agent-ingest",
             severity="INFO",
             event_type="agent_report_accepted",

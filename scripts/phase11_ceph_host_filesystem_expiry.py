@@ -101,7 +101,7 @@ def main() -> int:
             kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
             worker_id=f"phase11-rm-{token}",
             lease_seconds=settings.worker_lease_seconds,
-            backend_registry=BackendAdapterRegistry.with_phase1_defaults(
+            backend_registry=BackendAdapterRegistry.with_live_defaults(
                 services.repository, settings
             ),
         )

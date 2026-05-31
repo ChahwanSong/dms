@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .adapters import (
+    BackendPreconditionError,
     FilesystemBackendAdapter,
     KubernetesNamespaceQuotaAdapter,
+    KubernetesNamespaceQuotaLiveAdapter,
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
 )
@@ -23,16 +25,33 @@ from .backends.cephfs import (
 from .config import Settings
 from .repositories import DmsRepository
 
+GENERIC_KUBERNETES_QUOTA_BACKENDS = {CEPHFS_BACKEND_TYPE, "longhorn"}
+
 
 @dataclass
 class BackendAdapterRegistry:
     repository: DmsRepository
-    default_filesystem_adapter: FilesystemBackendAdapter
-    default_kubernetes_adapter: KubernetesNamespaceQuotaAdapter
+    default_filesystem_adapter: FilesystemBackendAdapter | None = None
+    default_kubernetes_adapter: KubernetesNamespaceQuotaAdapter | None = None
     settings: Settings | None = None
+    enforce_supported_backends: bool = True
 
     @classmethod
-    def with_phase1_defaults(
+    def with_live_defaults(
+        cls, repository: DmsRepository, settings: Settings
+    ) -> "BackendAdapterRegistry":
+        return cls(
+            repository=repository,
+            default_filesystem_adapter=None,
+            default_kubernetes_adapter=KubernetesNamespaceQuotaLiveAdapter.from_settings(
+                settings
+            ),
+            settings=settings,
+            enforce_supported_backends=True,
+        )
+
+    @classmethod
+    def with_test_stubs(
         cls, repository: DmsRepository, settings: Settings | None = None
     ) -> "BackendAdapterRegistry":
         return cls(
@@ -40,26 +59,59 @@ class BackendAdapterRegistry:
             default_filesystem_adapter=StubFilesystemBackendAdapter(),
             default_kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
             settings=settings,
+            enforce_supported_backends=False,
         )
+
+    @classmethod
+    def with_phase1_defaults(
+        cls, repository: DmsRepository, settings: Settings | None = None
+    ) -> "BackendAdapterRegistry":
+        if settings is not None:
+            return cls.with_live_defaults(repository, settings)
+        return cls.with_test_stubs(repository, settings)
 
     def filesystem_for_plan(self, plan: dict[str, Any]) -> FilesystemBackendAdapter:
         mapping = self._mapping_for_plan(plan)
-        if self._backend_type(mapping) == GPFS_BACKEND_TYPE:
+        backend_type = self._backend_type(mapping)
+        if backend_type == GPFS_BACKEND_TYPE:
             return GpfsFilesystemBackendAdapter.from_storage_mapping(mapping)
-        if self._backend_type(mapping) == CEPHFS_BACKEND_TYPE:
+        if backend_type == CEPHFS_BACKEND_TYPE:
             return CephFsHostMountedFilesystemBackendAdapter.from_storage_mapping(
                 mapping,
                 self.settings or Settings.from_env(),
             )
-        return self.default_filesystem_adapter
+        if not self.enforce_supported_backends and self.default_filesystem_adapter:
+            return self.default_filesystem_adapter
+        raise BackendPreconditionError(
+            self._unsupported_backend_message("filesystem", backend_type, plan)
+        )
 
     def kubernetes_for_plan(self, plan: dict[str, Any]) -> KubernetesNamespaceQuotaAdapter:
         mapping = self._mapping_for_plan(plan)
-        if self._backend_type(mapping) == GPFS_BACKEND_TYPE:
+        backend_type = self._backend_type(mapping)
+        if backend_type == GPFS_BACKEND_TYPE:
             return GpfsKubernetesNamespaceQuotaAdapter(
                 GpfsBackendTemplate.from_storage_mapping(mapping)
             )
-        return self.default_kubernetes_adapter
+        if self.enforce_supported_backends:
+            unsupported = [
+                self._backend_type(item)
+                for item in self._mappings_for_plan(plan)
+                if self._backend_type(item) not in GENERIC_KUBERNETES_QUOTA_BACKENDS
+            ]
+            if unsupported or not mapping:
+                raise BackendPreconditionError(
+                    self._unsupported_backend_message(
+                        "kubernetes namespace quota", backend_type, plan
+                    )
+                )
+        if self.default_kubernetes_adapter:
+            return self.default_kubernetes_adapter
+        raise BackendPreconditionError(
+            self._unsupported_backend_message(
+                "kubernetes namespace quota", backend_type, plan
+            )
+        )
 
     def data_worker_pool(self, storage_name: str) -> dict[str, Any]:
         mapping = self.repository.get_storage_mapping(storage_name)
@@ -73,31 +125,64 @@ class BackendAdapterRegistry:
         }
 
     def _mapping_for_plan(self, plan: dict[str, Any]) -> dict[str, Any] | None:
+        mappings = self._mappings_for_plan(plan)
+        if mappings:
+            return mappings[0]
+        return None
+
+    def _mappings_for_plan(self, plan: dict[str, Any]) -> list[dict[str, Any]]:
         desired = plan.get("desired_state", {})
+        mappings: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_mapping(mapping: dict[str, Any] | None) -> None:
+            if not mapping:
+                return
+            key = mapping.get("storage_name") or (
+                f"{mapping.get('cluster_name')}:{mapping.get('storage_class_name')}"
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            mappings.append(mapping)
+
         storage_name = desired.get("storage_name")
         if storage_name:
-            return self.repository.get_storage_mapping(storage_name)
+            add_mapping(self.repository.get_storage_mapping(storage_name))
         for entry in desired.get("storage_class_quotas") or []:
             if isinstance(entry, dict) and entry.get("storage_name"):
-                return self.repository.get_storage_mapping(entry["storage_name"])
+                add_mapping(self.repository.get_storage_mapping(entry["storage_name"]))
         cluster_name = desired.get("cluster_name")
         storage_class_name = desired.get("storage_class_name")
         if cluster_name and storage_class_name:
-            return self.repository.get_storage_mapping_by_cluster_storage_class(
-                cluster_name, storage_class_name
+            add_mapping(
+                self.repository.get_storage_mapping_by_cluster_storage_class(
+                    cluster_name, storage_class_name
+                )
             )
         for entry in desired.get("storage_class_quotas") or []:
             if not isinstance(entry, dict):
                 continue
             entry_storage_class = entry.get("storage_class_name")
             if cluster_name and entry_storage_class:
-                return self.repository.get_storage_mapping_by_cluster_storage_class(
-                    cluster_name, entry_storage_class
+                add_mapping(
+                    self.repository.get_storage_mapping_by_cluster_storage_class(
+                        cluster_name, entry_storage_class
+                    )
                 )
-        return None
+        return mappings
 
     @staticmethod
     def _backend_type(mapping: dict[str, Any] | None) -> str | None:
         if not mapping:
             return None
         return mapping["backend_template"].get("backend_type")
+
+    @staticmethod
+    def _unsupported_backend_message(
+        backend_kind: str, backend_type: str | None, plan: dict[str, Any]
+    ) -> str:
+        return (
+            f"unsupported {backend_kind} backend type for {plan.get('resource_key')}: "
+            f"{backend_type or 'unmapped'}"
+        )

@@ -103,6 +103,8 @@ export DMS_OBSERVABILITY_DATABASE_URL="postgresql://${postgres_user}:${encoded_p
 export DMS_CONTROL_CLUSTER_NAME="${DMS_CONTROL_CLUSTER_NAME:-cluster-a}"
 export DMS_AGENT_REPORT_STALE_SECONDS="${DMS_AGENT_REPORT_STALE_SECONDS:-300}"
 export DMS_KUBERNETES_INVENTORY_MODE="${DMS_KUBERNETES_INVENTORY_MODE:-ssh-kubectl}"
+export DMS_KUBERNETES_MUTATION_MODE="${DMS_KUBERNETES_MUTATION_MODE:-ssh-kubectl}"
+export DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS="${DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS:-30}"
 export DMS_CLUSTER_CONTROL_HOSTS_JSON="${DMS_CLUSTER_CONTROL_HOSTS_JSON:-{\"cluster-a\":\"c1-control\",\"cluster-b\":\"c2-control\"}}"
 export DMS_AUTH_SHARED_TOKEN="${auth_token}"
 export DMS_LDAP_URI="${DMS_LDAP_URI:-ldap://192.168.56.31}"
@@ -235,6 +237,10 @@ spec:
               value: "${DMS_AGENT_REPORT_STALE_SECONDS}"
             - name: DMS_KUBERNETES_INVENTORY_MODE
               value: "ssh-kubectl"
+            - name: DMS_KUBERNETES_MUTATION_MODE
+              value: "${DMS_KUBERNETES_MUTATION_MODE}"
+            - name: DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS
+              value: "${DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS}"
             - name: DMS_CLUSTER_CONTROL_HOSTS_JSON
               value: '${DMS_CLUSTER_CONTROL_HOSTS_JSON}'
           ports:
@@ -535,6 +541,12 @@ spec:
               value: "${DMS_DATABASE_URL}"
             - name: DMS_OBSERVABILITY_DATABASE_URL
               value: "${DMS_OBSERVABILITY_DATABASE_URL}"
+            - name: DMS_KUBERNETES_MUTATION_MODE
+              value: "${DMS_KUBERNETES_MUTATION_MODE}"
+            - name: DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS
+              value: "${DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS}"
+            - name: DMS_CLUSTER_CONTROL_HOSTS_JSON
+              value: '${DMS_CLUSTER_CONTROL_HOSTS_JSON}'
             - name: DMS_LDAP_URI
               value: "${DMS_LDAP_URI}"
             - name: DMS_LDAP_BASE_DN

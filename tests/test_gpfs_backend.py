@@ -422,7 +422,7 @@ def test_gpfs_kubernetes_namespace_quota_uses_gpfs_csi_mapping(repository_pair):
             "quota": {"requests_storage_bytes": 4 * 10**12, "pvc_count": 20},
         },
     )
-    registry = BackendAdapterRegistry.with_phase1_defaults(repository)
+    registry = BackendAdapterRegistry.with_test_stubs(repository)
     Planner(repository, backend_registry=registry).run_once()
     worker = RMWorkerRuntime(
         repository=repository,
@@ -460,7 +460,7 @@ def test_gpfs_data_management_planning_records_gpfs_worker_pool(repository_pair)
 
     Planner(
         repository,
-        backend_registry=BackendAdapterRegistry.with_phase1_defaults(repository),
+        backend_registry=BackendAdapterRegistry.with_test_stubs(repository),
     ).run_once()
 
     job = repository.get_data_job_by_request(request_id)

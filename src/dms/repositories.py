@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -57,6 +58,8 @@ TERMINAL_DATA_JOB_STATES = {
 
 DEFAULT_REQUEST_LIST_LIMIT = 1000
 
+LOGGER = logging.getLogger(__name__)
+
 
 def row_to_dict(row: Any) -> dict[str, Any]:
     if row is None:
@@ -105,6 +108,34 @@ class ObservabilityRepository:
                 ),
             )
         return event_id
+
+    def safe_record_event(
+        self,
+        *,
+        component: str,
+        severity: str,
+        event_type: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+    ) -> str | None:
+        try:
+            return self.record_event(
+                component=component,
+                severity=severity,
+                event_type=event_type,
+                message=message,
+                payload=payload,
+                correlation_id=correlation_id,
+            )
+        except Exception:  # noqa: BLE001 - diagnostic writes must not alter lifecycle.
+            LOGGER.warning(
+                "observability event write failed: component=%s event_type=%s",
+                component,
+                event_type,
+                exc_info=True,
+            )
+            return None
 
     def list_events(
         self, *, correlation_id: str | None = None, limit: int = 100
@@ -1747,6 +1778,7 @@ class DmsRepository:
             LifecycleState.RECOVERY_NEEDED.value,
             LifecycleState.VERIFICATION_FAILED.value,
             LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+            LifecycleState.BACKEND_APPLY_FAILED.value,
         )
         placeholders = ",".join(["?"] * len(actionable))
         with self.database.connect() as connection:

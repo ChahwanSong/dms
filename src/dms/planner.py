@@ -493,7 +493,7 @@ class Planner:
                 "candidates": agent_observed.get("dm_candidates", []),
                 "sanity_status": mapping.get("sanity_status"),
             }
-        registry = self.backend_registry or BackendAdapterRegistry.with_phase1_defaults(
+        registry = self.backend_registry or BackendAdapterRegistry.with_test_stubs(
             self.repository
         )
         return registry.data_worker_pool(storage_name)

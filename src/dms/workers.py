@@ -49,7 +49,7 @@ class RMWorkerRuntime:
         try:
             quota_action = self._kubernetes_quota_event_action(plan)
             if quota_action:
-                self.observability.record_event(
+                self.observability.safe_record_event(
                     component="rm-worker",
                     severity="INFO",
                     event_type=f"kubernetes_resourcequota_{quota_action}_started",
@@ -103,7 +103,7 @@ class RMWorkerRuntime:
                 actor=self.worker_id,
             )
             if quota_action:
-                self.observability.record_event(
+                self.observability.safe_record_event(
                     component="rm-worker",
                     severity="INFO",
                     event_type=f"kubernetes_resourcequota_{quota_action}_completed",
@@ -115,7 +115,7 @@ class RMWorkerRuntime:
                     },
                     correlation_id=plan["request_id"],
                 )
-            self.observability.record_event(
+            self.observability.safe_record_event(
                 component="rm-worker",
                 severity="INFO",
                 event_type="rm_plan_completed",
@@ -139,7 +139,7 @@ class RMWorkerRuntime:
                 error_category="backend_precondition",
                 actor=self.worker_id,
             )
-            self.observability.record_event(
+            self.observability.safe_record_event(
                 component="rm-worker",
                 severity="WARN",
                 event_type="rm_plan_backend_precondition_failed",
@@ -160,7 +160,7 @@ class RMWorkerRuntime:
             )
             quota_action = self._kubernetes_quota_event_action(plan)
             if quota_action:
-                self.observability.record_event(
+                self.observability.safe_record_event(
                     component="rm-worker",
                     severity="ERROR",
                     event_type=f"kubernetes_resourcequota_{quota_action}_failed",
@@ -175,39 +175,51 @@ class RMWorkerRuntime:
         operation = plan["operation_kind"]
         if operation == OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value:
             return self._apply_filesystem_expiration_sweep(plan)
-        filesystem_adapter = self._filesystem_adapter(plan)
-        kubernetes_adapter = self._kubernetes_adapter(plan)
         if operation == OperationKind.FILESYSTEM_CREATE.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.create(plan)
         if operation == OperationKind.FILESYSTEM_UPDATE.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.update(plan)
         if operation == OperationKind.FILESYSTEM_BLOCK.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.block(plan)
         if operation == OperationKind.FILESYSTEM_INITIALIZE.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.initialize(plan)
         if operation == OperationKind.FILESYSTEM_DELETE.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.delete(plan)
         if operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.assign_quota_only(plan)
         if operation == OperationKind.FILESYSTEM_IMPORT.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.import_directory(plan)
         if operation == OperationKind.FILESYSTEM_CHECK.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.consistency_check(plan)
         if operation == OperationKind.FILESYSTEM_SYNC.value:
+            filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.sync_live_state(plan)
         if operation in {
             OperationKind.K8S_QUOTA_CREATE.value,
             OperationKind.K8S_QUOTA_UPDATE.value,
             OperationKind.K8S_QUOTA_BLOCK.value,
         }:
+            kubernetes_adapter = self._kubernetes_adapter(plan)
             return kubernetes_adapter.apply_resource_quota(plan)
         if operation == OperationKind.K8S_QUOTA_DELETE.value:
+            kubernetes_adapter = self._kubernetes_adapter(plan)
             return kubernetes_adapter.delete_resource_quota(plan)
         if operation == OperationKind.K8S_QUOTA_SYNC.value:
+            kubernetes_adapter = self._kubernetes_adapter(plan)
             return kubernetes_adapter.sync_live_state(plan)
         if operation == OperationKind.K8S_QUOTA_CHECK.value:
+            kubernetes_adapter = self._kubernetes_adapter(plan)
             return kubernetes_adapter.check_resource_quota(plan)
         if operation == OperationKind.K8S_QUOTA_AUDIT.value:
+            kubernetes_adapter = self._kubernetes_adapter(plan)
             return kubernetes_adapter.audit_resource_quotas(plan)
         raise ValueError(f"unsupported RM operation: {operation}")
 
@@ -379,9 +391,15 @@ def _filesystem_sweep_failure_reason(message: str) -> str:
 
 
 def _rm_precondition_issue(operation: str, message: str) -> dict[str, Any] | None:
+    lowered = message.lower()
+    if "unsupported" in lowered and "backend" in lowered:
+        return {
+            "issue_type": "unsupported_backend",
+            "reason": "unsupported_backend",
+            "message": message,
+        }
     if not operation.startswith("filesystem."):
         return None
-    lowered = message.lower()
     if operation == OperationKind.FILESYSTEM_IMPORT.value:
         issue_type = "filesystem_import_preflight_failed"
     elif operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
@@ -461,7 +479,7 @@ class DMWorkerRuntime:
             reason="preview succeeded; waiting for user confirm in data_jobs",
             actor=self.worker_id,
         )
-        self.observability.record_event(
+        self.observability.safe_record_event(
             component="dm-worker",
             severity="INFO",
             event_type="data_job_preview_ready",
@@ -510,7 +528,7 @@ class DMWorkerRuntime:
             verification_summary=adapter_result.observed_state,
             actor=self.worker_id,
         )
-        self.observability.record_event(
+        self.observability.safe_record_event(
             component="dm-worker",
             severity="INFO",
             event_type="data_job_completed",
