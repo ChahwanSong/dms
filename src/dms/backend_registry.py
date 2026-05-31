@@ -45,9 +45,7 @@ class BackendAdapterRegistry:
     def filesystem_for_plan(self, plan: dict[str, Any]) -> FilesystemBackendAdapter:
         mapping = self._mapping_for_plan(plan)
         if self._backend_type(mapping) == GPFS_BACKEND_TYPE:
-            return GpfsFilesystemBackendAdapter(
-                GpfsBackendTemplate.from_storage_mapping(mapping)
-            )
+            return GpfsFilesystemBackendAdapter.from_storage_mapping(mapping)
         if self._backend_type(mapping) == CEPHFS_BACKEND_TYPE:
             return CephFsHostMountedFilesystemBackendAdapter.from_storage_mapping(
                 mapping,

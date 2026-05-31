@@ -88,7 +88,6 @@ class FilesystemHostExecutor(Protocol):
         resource_key: str,
         require_marker: bool,
         include_quota: bool,
-        include_usage: bool,
     ) -> dict[str, Any]: ...
 
     def assign_quota_directory(
@@ -264,7 +263,6 @@ class PythonHostExecutor:
         resource_key: str,
         require_marker: bool,
         include_quota: bool,
-        include_usage: bool,
     ) -> dict[str, Any]:
         return self._run_script(
             _READ_DIRECTORY_STATE_SCRIPT,
@@ -274,7 +272,6 @@ class PythonHostExecutor:
                 resource_key,
                 "true" if require_marker else "false",
                 "true" if include_quota else "false",
-                "true" if include_usage else "false",
             ],
         )
 
@@ -514,17 +511,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
         quota = _normalize_quota(desired.get("quota"))
         if not quota:
             raise BackendPreconditionError("filesystem quota is required for Phase 12 update")
-        live_state = self._read_directory_state(
-            managed_root=self.template.managed_root,
-            directory_name=directory_name,
-            resource_key=plan["resource_key"],
-            require_marker=True,
-            include_quota=True,
-            include_usage=True,
-        )
-        decrease_issue = _quota_decrease_issue(quota, live_state.get("quota_state") or {})
-        if decrease_issue:
-            raise BackendPreconditionError(decrease_issue)
         observed = self.executor.apply_quota(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
@@ -582,14 +568,9 @@ class CephFsHostMountedFilesystemBackendAdapter:
             resource_key=plan["resource_key"],
             require_marker=True,
             include_quota=bool(desired.get("include_quota", True)),
-            include_usage=bool(desired.get("include_usage", True)),
         )
         issues = _quota_check_issues(desired, observed)
-        usage_pressure = _quota_usage_pressure(
-            observed.get("quota_state") or {},
-            desired.get("usage_thresholds") or {},
-        )
-        status = "ActionRequired" if issues or usage_pressure else "Consistent"
+        status = "ActionRequired" if issues else "Consistent"
         observed.update(
             {
                 "adapter": "cephfs-host-mounted",
@@ -598,7 +579,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "resource_key": plan["resource_key"],
                 "quota_status": status,
                 "issues": issues,
-                "usage_pressure": usage_pressure,
                 "resource_status": desired.get("resource_status", "Succeeded"),
             }
         )
@@ -623,7 +603,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
             resource_key=plan["resource_key"],
             require_marker=True,
             include_quota=bool(desired.get("include_quota", True)),
-            include_usage=bool(desired.get("include_usage", True)),
         )
         synced_desired = dict(desired)
         synced_quota = _quota_from_state(observed.get("quota_state") or {})
@@ -959,64 +938,6 @@ def _quota_check_issues(
                 }
             )
     return issues
-
-
-def _quota_usage_pressure(
-    quota_state: dict[str, Any], thresholds: dict[str, Any]
-) -> list[dict[str, Any]]:
-    warning = float(thresholds.get("warning_percent", 80))
-    critical = float(thresholds.get("critical_percent", 95))
-    usage = quota_state.get("usage") or {}
-    pressure: list[dict[str, Any]] = []
-    checks = (
-        ("capacity_bytes", "used_bytes", (quota_state.get("capacity") or {}).get("observed_bytes")),
-        ("file_count", "used_files", (quota_state.get("file_count") or {}).get("observed_count")),
-    )
-    for field, used_key, hard_value in checks:
-        used_value = usage.get(used_key)
-        if used_value is None or hard_value in {None, 0, "0"}:
-            continue
-        used = int(used_value)
-        hard = int(hard_value)
-        if hard <= 0:
-            continue
-        percent = used * 100 / hard
-        if percent >= critical:
-            pressure.append(
-                {
-                    "issue_type": "filesystem_quota_usage_critical",
-                    "severity": "CRITICAL",
-                    "field": field,
-                    "used": used,
-                    "hard": hard,
-                    "used_percent": round(percent, 2),
-                }
-            )
-        elif percent >= warning:
-            pressure.append(
-                {
-                    "issue_type": "filesystem_quota_usage_warning",
-                    "severity": "WARN",
-                    "field": field,
-                    "used": used,
-                    "hard": hard,
-                    "used_percent": round(percent, 2),
-                }
-            )
-    return pressure
-
-
-def _quota_decrease_issue(quota: dict[str, int], quota_state: dict[str, Any]) -> str | None:
-    usage = quota_state.get("usage") or {}
-    capacity_limit = quota.get("capacity_bytes")
-    used_bytes = usage.get("used_bytes")
-    if capacity_limit is not None and used_bytes is not None and int(capacity_limit) < int(used_bytes):
-        return "filesystem quota decrease below live used bytes"
-    file_limit = quota.get("file_count")
-    used_files = usage.get("used_files")
-    if file_limit is not None and used_files is not None and int(file_limit) < int(used_files):
-        return "filesystem quota decrease below live used files"
-    return None
 
 
 _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(
@@ -1358,43 +1279,6 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(
         value = completed.stdout.strip()
         return int(value) if value else None
 
-    def usage(path):
-        du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
-        used_bytes = int(du.stdout.split()[0]) if du.returncode == 0 and du.stdout.split() else 0
-        used_files = 0
-        for _, _, filenames in os.walk(path):
-            used_files += len(filenames)
-        return {"used_bytes": used_bytes, "used_files": used_files, "usage_source": "du-find-fallback"}
-
-    def getx(path, name):
-        completed = subprocess.run(
-            ["getfattr", "--only-values", "-n", name, path],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            return None
-        value = completed.stdout.strip()
-        return int(value) if value else None
-
-    def usage(path):
-        used_bytes = getx(path, "ceph.dir.rbytes")
-        used_files = getx(path, "ceph.dir.rfiles")
-        source = "cephfs-xattr"
-        if used_bytes is None:
-            du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
-            if du.returncode == 0 and du.stdout.split():
-                used_bytes = int(du.stdout.split()[0])
-                source = "du-find-fallback"
-        if used_files is None:
-            count = 0
-            for _, _, filenames in os.walk(path):
-                count += len(filenames)
-            used_files = count
-            source = "du-find-fallback" if source != "cephfs-xattr" else "cephfs-xattr-find-fallback"
-        return {"used_bytes": used_bytes or 0, "used_files": used_files or 0, "usage_source": source}
-
     if not shutil.which("setfattr") or not shutil.which("getfattr"):
         fail("filesystem quota capability missing: setfattr/getfattr")
     root_real = os.path.realpath(root)
@@ -1437,7 +1321,6 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(
             "observed_count": observed_files,
             "backend_key": "ceph.quota.max_files",
         },
-        "usage": usage(target),
     }
     print(json.dumps({
         "path": target,
@@ -1447,8 +1330,8 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(
         "quota_capability": {
             "supports_capacity_quota": True,
             "supports_file_count_quota": True,
-            "supports_usage_bytes": True,
-            "supports_file_count_usage": True,
+            "supports_usage_bytes": False,
+            "supports_file_count_usage": False,
             "quota_backend": "cephfs-xattr",
         },
         "backend_side_effect": True,
@@ -1467,10 +1350,9 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(
     import subprocess
     import sys
 
-    root, directory_name, resource_key, require_marker_text, include_quota_text, include_usage_text = sys.argv[1:]
+    root, directory_name, resource_key, require_marker_text, include_quota_text = sys.argv[1:]
     require_marker = require_marker_text == "true"
     include_quota = include_quota_text == "true"
-    include_usage = include_usage_text == "true"
 
     def getx(path, name):
         if not shutil.which("getfattr"):
@@ -1485,23 +1367,6 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(
             return None
         value = completed.stdout.strip()
         return int(value) if value else None
-
-    def usage(path):
-        used_bytes = getx(path, "ceph.dir.rbytes")
-        used_files = getx(path, "ceph.dir.rfiles")
-        source = "cephfs-xattr"
-        if used_bytes is None:
-            du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
-            if du.returncode == 0 and du.stdout.split():
-                used_bytes = int(du.stdout.split()[0])
-                source = "du-find-fallback"
-        if used_files is None:
-            count = 0
-            for _, _, filenames in os.walk(path):
-                count += len(filenames)
-            used_files = count
-            source = "du-find-fallback" if source != "cephfs-xattr" else "cephfs-xattr-find-fallback"
-        return {"used_bytes": used_bytes or 0, "used_files": used_files or 0, "usage_source": source}
 
     root_real = os.path.realpath(root)
     target_joined = os.path.join(root_real, directory_name)
@@ -1528,18 +1393,17 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(
     except KeyError:
         group_name = str(stat_result.st_gid)
     quota_state = {}
-    if include_quota or include_usage:
+    if include_quota:
         quota_state = {
             "backend_type": "cephfs",
             "capacity": {
-                "observed_bytes": getx(target, "ceph.quota.max_bytes") if include_quota else None,
+                "observed_bytes": getx(target, "ceph.quota.max_bytes"),
                 "backend_key": "ceph.quota.max_bytes",
             },
             "file_count": {
-                "observed_count": getx(target, "ceph.quota.max_files") if include_quota else None,
+                "observed_count": getx(target, "ceph.quota.max_files"),
                 "backend_key": "ceph.quota.max_files",
             },
-            "usage": usage(target) if include_usage else {},
         }
     print(json.dumps({
         "path": target,
@@ -1585,23 +1449,6 @@ _ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(
         value = completed.stdout.strip()
         return int(value) if value else None
 
-    def usage(path):
-        used_bytes = getx(path, "ceph.dir.rbytes")
-        used_files = getx(path, "ceph.dir.rfiles")
-        source = "cephfs-xattr"
-        if used_bytes is None:
-            du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
-            if du.returncode == 0 and du.stdout.split():
-                used_bytes = int(du.stdout.split()[0])
-                source = "du-find-fallback"
-        if used_files is None:
-            count = 0
-            for _, _, filenames in os.walk(path):
-                count += len(filenames)
-            used_files = count
-            source = "du-find-fallback" if source != "cephfs-xattr" else "cephfs-xattr-find-fallback"
-        return {"used_bytes": used_bytes or 0, "used_files": used_files or 0, "usage_source": source}
-
     if not shutil.which("setfattr") or not shutil.which("getfattr"):
         fail("filesystem quota capability missing: setfattr/getfattr")
     root_real = os.path.realpath(root)
@@ -1639,7 +1486,6 @@ _ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(
             "observed_count": getx(target, "ceph.quota.max_files"),
             "backend_key": "ceph.quota.max_files",
         },
-        "usage": usage(target),
     }
     print(json.dumps({
         "path": target,
@@ -1713,14 +1559,6 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
         value = completed.stdout.strip()
         return int(value) if value else None
 
-    def usage(path):
-        du = subprocess.run(["du", "-sb", path], check=False, capture_output=True, text=True)
-        used_bytes = int(du.stdout.split()[0]) if du.returncode == 0 and du.stdout.split() else 0
-        used_files = 0
-        for _, _, filenames in os.walk(path):
-            used_files += len(filenames)
-        return {"used_bytes": used_bytes, "used_files": used_files, "usage_source": "du-find-fallback"}
-
     root_real = os.path.realpath(root)
     target_joined = os.path.join(root_real, directory_name)
     if os.path.islink(target_joined):
@@ -1773,7 +1611,6 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
         "backend_type": "cephfs",
         "capacity": {"observed_bytes": getx(target, "ceph.quota.max_bytes"), "backend_key": "ceph.quota.max_bytes"},
         "file_count": {"observed_count": getx(target, "ceph.quota.max_files"), "backend_key": "ceph.quota.max_files"},
-        "usage": usage(target),
     }
     print(json.dumps({
         "path": target,

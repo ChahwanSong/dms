@@ -88,10 +88,8 @@ PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS = {
 PHASE12_FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS = {
     "storage_name",
     "directory_name",
-    "include_usage",
     "include_quota",
     "include_permission",
-    "usage_thresholds",
     "record_action_required",
     "reason",
 }
@@ -100,7 +98,6 @@ PHASE12_FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS = {
     "storage_name",
     "directory_name",
     "source",
-    "include_usage",
     "include_quota",
     "reason",
 }
@@ -335,12 +332,10 @@ class Planner:
             if "quota" in request["payload_summary"]:
                 desired["quota"] = _normalized_filesystem_quota(request["payload_summary"]["quota"])
         if request["operation"] == OperationKind.FILESYSTEM_CHECK.value:
-            desired.setdefault("include_usage", True)
             desired.setdefault("include_quota", True)
             desired.setdefault("include_permission", True)
         if request["operation"] == OperationKind.FILESYSTEM_SYNC.value:
             desired.setdefault("source", "live")
-            desired.setdefault("include_usage", True)
             desired.setdefault("include_quota", True)
         if request["operation"] == OperationKind.FILESYSTEM_BLOCK.value:
             self._apply_filesystem_block_desired(request, existing, desired)
@@ -926,14 +921,7 @@ class Planner:
             if "quota" not in payload:
                 issues.append({"reason": "filesystem_quota_required"})
             else:
-                quota_issues = _filesystem_quota_issues(payload.get("quota"))
-                issues.extend(quota_issues)
-                if existing and not quota_issues:
-                    issues.extend(
-                        _filesystem_quota_decrease_issues(
-                            existing, _normalized_filesystem_quota(payload["quota"])
-                        )
-                    )
+                issues.extend(_filesystem_quota_issues(payload.get("quota")))
 
         if operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
             existing = self.repository.get_resource(
@@ -1061,9 +1049,8 @@ class Planner:
             _append_boolean_payload_issues(
                 issues,
                 payload,
-                ("include_usage", "include_quota", "include_permission", "record_action_required"),
+                ("include_quota", "include_permission", "record_action_required"),
             )
-            issues.extend(_usage_threshold_issues(payload.get("usage_thresholds")))
 
         if operation == OperationKind.FILESYSTEM_SYNC.value:
             existing = self.repository.get_resource(
@@ -1093,7 +1080,7 @@ class Planner:
             _append_boolean_payload_issues(
                 issues,
                 payload,
-                ("include_usage", "include_quota"),
+                ("include_quota",),
             )
 
         if not issues:
@@ -1752,73 +1739,3 @@ def _normalized_filesystem_quota(quota: dict[str, Any]) -> dict[str, int]:
         if field in quota:
             normalized[field] = int(quota[field])
     return normalized
-
-
-def _filesystem_quota_decrease_issues(
-    resource: dict[str, Any], requested_quota: dict[str, int]
-) -> list[dict[str, Any]]:
-    usage = _filesystem_observed_usage(resource.get("observed_state") or {})
-    issues: list[dict[str, Any]] = []
-    if "capacity_bytes" in requested_quota:
-        used_bytes = usage.get("used_bytes")
-        if isinstance(used_bytes, int) and requested_quota["capacity_bytes"] < used_bytes:
-            issues.append(
-                {
-                    "reason": "filesystem_quota_decrease_below_live_used",
-                    "field": "quota.capacity_bytes",
-                    "desired": requested_quota["capacity_bytes"],
-                    "used": used_bytes,
-                }
-            )
-    if "file_count" in requested_quota:
-        used_files = usage.get("used_files")
-        if isinstance(used_files, int) and requested_quota["file_count"] < used_files:
-            issues.append(
-                {
-                    "reason": "filesystem_quota_decrease_below_live_used",
-                    "field": "quota.file_count",
-                    "desired": requested_quota["file_count"],
-                    "used": used_files,
-                }
-            )
-    return issues
-
-
-def _filesystem_observed_usage(observed_state: dict[str, Any]) -> dict[str, int]:
-    quota_state = observed_state.get("quota_state") or {}
-    usage = quota_state.get("usage") or observed_state.get("usage") or {}
-    parsed: dict[str, int] = {}
-    for source_key, target_key in (
-        ("used_bytes", "used_bytes"),
-        ("used_files", "used_files"),
-        ("bytes", "used_bytes"),
-        ("files", "used_files"),
-    ):
-        if source_key not in usage:
-            continue
-        try:
-            parsed[target_key] = int(usage[source_key])
-        except (TypeError, ValueError):
-            continue
-    return parsed
-
-
-def _usage_threshold_issues(thresholds: Any) -> list[dict[str, Any]]:
-    if thresholds is None:
-        return []
-    if not isinstance(thresholds, dict):
-        return [{"reason": "usage_thresholds_invalid", "value": thresholds}]
-    try:
-        warning = float(thresholds.get("warning_percent", 80))
-        critical = float(thresholds.get("critical_percent", 95))
-    except (TypeError, ValueError):
-        return [{"reason": "usage_thresholds_invalid", "value": thresholds}]
-    if warning <= 0 or critical <= 0 or critical <= warning:
-        return [
-            {
-                "reason": "usage_thresholds_invalid",
-                "warning_percent": warning,
-                "critical_percent": critical,
-            }
-        ]
-    return []

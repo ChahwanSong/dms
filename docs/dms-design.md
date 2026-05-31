@@ -403,7 +403,7 @@ Resource Management capability contract:
 | filesystem update | `storage_name + directory_name` | yes | required | RM Worker runtime | quota, metadata, access control update | before/after desired state, observed state |
 | filesystem block | `storage_name + directory_name` | yes | required | RM Worker runtime | readonly chmod or root-owned chmod access block | block mode, preserved restore mode, verification |
 | filesystem initialize | `storage_name + directory_name` | yes | required | RM Worker runtime | quota reset only | default policy used, new quota, observed state |
-| existing directory quota assignment | `storage_name + directory_name` | yes | required | RM Worker runtime | quota apply only | quota-only managed state, observed usage |
+| existing directory quota assignment | `storage_name + directory_name` | yes | required | RM Worker runtime | quota apply only | quota-only managed state, observed quota |
 | import existing filesystem directory | `storage_name + directory_name` | yes | required | RM Worker runtime | normally read/record, optional verification commands | imported state, access control interpretation, final verification |
 | resource consistency check | single resource key or explicit scope such as `storage_name` | yes for DMS verification state, no backend mutation | required | RM Worker runtime or control-plane live reader | read-only live backend check only | existence result, DB/live diff, observed state snapshot |
 | resource lifecycle delete | resource-specific | yes | required | RM Worker runtime | filesystem directory delete or DMS-managed Kubernetes ResourceQuota delete | deletion evidence, lifecycle state `Deleted`, namespace preservation evidence for Kubernetes |
@@ -780,7 +780,7 @@ Resource consistency check 처리 원칙:
 - 이 operation은 단순 query와 다르다. Query는 저장 상태 조회가 기본이고 선택적으로 live 조회를 수행할 수 있지만, consistency check는 명시적으로 live backend 조회와 DB/live 비교를 수행하고 그 결과를 request lifecycle과 verification history로 기록한다.
 - Frontend는 consistency check request와 requested scope를 운영용 PostgreSQL에 저장하고, Planner는 scope를 구체적인 target resource set으로 해석한 뒤 각 대상 resource가 운영용 PostgreSQL에 등록되어 있는지와 대상 resource kind별 check plan을 생성한다.
 - RM Worker runtime 또는 구현상 동등한 control-plane live reader는 check plan을 claim하고 backend live state를 read-only로 조회한다.
-- Filesystem resource check는 storage mapping, RM Worker mount visibility, directory existence, storage root boundary, owner, group, permission, ACL 사용 여부, quota limit, quota usage, capacity usage, file-count usage, block mode, backend quota capability를 live 조회하고 DB state와 비교해야 한다.
+- Filesystem resource check는 storage mapping, RM Worker mount visibility, directory existence, storage root boundary, owner, group, permission, ACL 사용 여부, quota limit, block mode, backend quota capability를 live 조회하고 DB state와 비교해야 한다. Phase 12 filesystem check/sync API는 대용량 directory에서 IO overhead가 큰 recursive usage scan을 수행하지 않으며 usage collection payload field를 제공하지 않는다.
 - Kubernetes namespace storage quota check는 target cluster, namespace existence, DMS-managed ResourceQuota existence, ResourceQuota name, labels/annotations, `spec.hard`, `status.used`, namespace-wide quota, optional StorageClass-specific quota keys, derived StorageClass existence, CSI driver/storage mapping consistency를 live 조회하고 DB state와 비교해야 한다.
 - Check result는 최소한 `Consistent`, `Drifted`, `Missing`, `CheckFailed` 같은 결과 범주를 구분할 수 있어야 한다. 구체적인 enum 이름은 구현 단계에서 정할 수 있다.
 - `Consistent`는 live backend resource가 존재하고, DB desired/applied state와 정책상 비교해야 하는 live state가 일치함을 의미한다.
@@ -818,10 +818,10 @@ Import existing filesystem directory 처리 원칙:
 - 대상 directory가 quota-only managed resource이면 import를 통해 full DMS-managed filesystem resource로 승격할 수 있다. 이 경우 기존 quota-only 상태와 import 전환 이력을 운영용 PostgreSQL에 기록해야 한다.
 - 대상 directory가 운영용 PostgreSQL에 등록되어 있지 않은 unmanaged directory이면 import 성공 시 새 DMS-managed filesystem resource로 기록한다.
 - Planner와 RM Worker runtime은 import 전 directory의 현재 filesystem 상태를 live 조회해야 한다.
-- 조회해야 하는 상태에는 owner, group, permission, ACL 사용 여부, quota 설정, quota 사용량, capacity usage, file-count usage, filesystem type, storage backend capability가 포함된다.
+- 조회해야 하는 상태에는 owner, group, permission, ACL 사용 여부, quota 설정, filesystem type, storage backend capability가 포함된다.
 - Access control import는 명시적으로 해석 가능해야 한다. 요청이 사용자 리스트 또는 DMS-managed group 정책을 제공하거나, DMS가 기존 Linux group membership을 중앙 identity system에서 해석할 수 있어야 한다. 둘 다 불가능하면 import는 실패해야 한다.
 - Import 성공 시 현재 filesystem 상태를 초기 desired state, applied state, observed state로 기록한다. Import 자체는 요청에 명시된 전환 정책이 없는 한 기존 permission, ownership, group membership, quota를 조용히 덮어쓰지 않는다.
-- Import는 final verification을 반드시 수행해야 한다. RM Worker runtime은 import plan 생성 시점에 읽은 filesystem state와 import 완료 직전 또는 직후 다시 조회한 filesystem state를 비교하고, 소유권 전환의 기준이 된 owner, group, permission, ACL, quota, usage, backend capability가 정책상 허용되지 않게 변경된 경우 import를 success로 처리하지 않아야 한다.
+- Import는 final verification을 반드시 수행해야 한다. RM Worker runtime은 import plan 생성 시점에 읽은 filesystem state와 import 완료 직전 또는 직후 다시 조회한 filesystem state를 비교하고, 소유권 전환의 기준이 된 owner, group, permission, ACL, quota, backend capability가 정책상 허용되지 않게 변경된 경우 import를 success로 처리하지 않아야 한다.
 - Import 대상 directory는 가능하면 운영 maintenance window 또는 외부 변경이 제한된 상태에서 처리해야 한다. 외부 변경 가능성이 높아 final verification 기준을 만족하지 못하면 DMS는 conflict, retryable failure, 또는 failed 상태로 기록해야 한다.
 - Import 전후의 관리 모드 전환, requester id, request id, requested_at, imported filesystem state, 검증 결과는 critical lifecycle state로 운영용 PostgreSQL에 기록해야 한다.
 - Import plan/run/result를 실제 실행한 RM Worker runtime 또는 recovery flow의 실행 주체는 `worker_id` 또는 `executor_id`로 추적해야 한다. Diagnostic observability event에서는 해당 실행 주체를 actor로 기록할 수 있다.
@@ -1296,9 +1296,7 @@ Filesystem resource update로 변경 가능한 항목:
 - `memo`
 - `type`
 
-Filesystem resource update 추가 입력:
-
-- `force`: optional boolean. quota 감소 요청에서 기존 DMS desired quota보다 작은 finite quota를 요청하거나 기존 unlimited quota를 finite quota로 전환할 때 필요하다.
+Filesystem resource update는 quota 감소 요청에 `force`를 요구하지 않는다. Filesystem quota 감소는 사용량 admission 없이 backend adapter 적용과 read-back 검증으로 처리한다.
 
 Filesystem resource update 시 검증해야 하는 항목:
 
@@ -1310,10 +1308,10 @@ Filesystem resource update 시 검증해야 하는 항목:
 - `reset_quota_to_default=true` 요청일 경우 대상 resource type에 해당하는 기본 quota policy가 존재하는지 확인한다.
 - quota 변경 요청일 경우 현재 운영용 PostgreSQL의 DMS desired quota와 비교해 증가 요청인지 감소 요청인지 확인한다. 이 admission check는 filesystem 사용량을 조회하지 않는다.
 - 기존 finite quota보다 큰 finite quota, 또는 finite quota를 unlimited로 푸는 요청은 `force` 없이 backend adapter 실행을 시도한다. Backend adapter 실패는 일반 apply failure로 기록될 수 있다.
-- 기존 finite quota보다 작은 finite quota, 또는 기존 unlimited quota를 finite quota로 바꾸는 요청은 capacity와 count 각각 감소로 본다. 두 field 중 하나라도 감소하면 `force=true`가 있어야 실행한다.
-- `force=true`는 감소 요청 admission만 통과시킨다. 실제 filesystem quota command가 실패할 수 있으며, 실패 시 request/result에 backend 오류를 기록한다.
+- 기존 finite quota보다 작은 finite quota, 또는 기존 unlimited quota를 finite quota로 바꾸는 요청도 사용량 admission이나 `force=true` 없이 backend adapter 실행을 시도한다.
+- 실제 filesystem quota command가 실패할 수 있으며, 실패 시 request/result에 backend 오류를 기록한다.
 - 만료 시간 변경이 정책상 허용되는지 확인한다.
-- update 후에는 filesystem별 observed usage, quota, permission 상태를 다시 조회하여 운영용 PostgreSQL의 observed state를 갱신한다.
+- update 후에는 filesystem별 quota와 permission 상태를 다시 조회하여 운영용 PostgreSQL의 observed state를 갱신한다.
 
 Filesystem resource block 동작:
 
@@ -1339,7 +1337,7 @@ Existing directory quota assignment:
 - quota-only managed resource는 directory 생성, 삭제, 사용자 리스트 기반 access control을 기본적으로 소유하지 않는다.
 - quota-only managed resource에서 DMS가 소유하는 범위는 quota desired state, quota observed state, memo, request/result tracking이다.
 - quota 적용 전 대상 storage backend가 directory quota capability를 제공하는지 확인해야 한다.
-- quota 적용 후 filesystem별 observed usage와 quota 상태를 다시 조회하여 운영용 PostgreSQL의 observed state를 갱신한다.
+- quota 적용 후 filesystem별 quota 상태를 다시 조회하여 운영용 PostgreSQL의 observed state를 갱신한다.
 
 Import existing filesystem directory:
 
@@ -1350,7 +1348,7 @@ Import existing filesystem directory:
 - Import 성공 후 해당 resource는 일반 filesystem resource update, block, initialize, expiration 처리 대상이 된다.
 - Delete는 dummy operation으로 처리하지 않는다. Import된 resource도 일반 filesystem resource와 동일하게 명시 확인 후 실제 directory delete 대상이 될 수 있다.
 - Import 시 DMS는 filesystem에서 현재 directory 상태를 조회하고 이를 초기 state로 기록해야 한다.
-- 조회해야 하는 상태에는 directory owner, group, permission, ACL 여부, Linux group membership 해석 결과, capacity quota, count quota, capacity usage, file-count usage, filesystem type, backend quota capability가 포함된다.
+- 조회해야 하는 상태에는 directory owner, group, permission, ACL 여부, Linux group membership 해석 결과, capacity quota, count quota, filesystem type, backend quota capability가 포함된다.
 - 사용자 리스트 또는 DMS-managed group 정책이 요청에 명시되지 않은 경우, DMS는 기존 directory group과 중앙 identity/group system을 통해 사용자 리스트를 해석해야 한다.
 - 기존 access control을 해석할 수 없거나 DMS가 이후 lifecycle을 안정적으로 소유할 수 없는 상태이면 import는 실패해야 한다.
 - Import는 기존 permission, ownership, group membership, quota를 기본적으로 보존한다. Import와 동시에 변경이 필요한 경우에는 import 이후 별도 update로 처리하거나, 구현 단계에서 명시적 import option으로만 허용한다.
@@ -1780,7 +1778,7 @@ StorageClass는 cluster 내부에서만 unique하므로, 운영용 PostgreSQL에
 | Storage mapping runtime change | `storage_name` mapping 추가/수정/비활성화는 version, 영향 범위, sanity result를 남긴다. | mapping history, version, affected resource check |
 | Identity mapping | 중앙 identity system은 read-only로 조회되고 DMS mapping state만 갱신된다. | LDAP/SSSD read evidence, no central write credential/use |
 | Filesystem path safety | path separator, traversal, symlink escape, storage root outside path는 거부된다. | rejected request or preflight failure reason |
-| Filesystem create/update/block | RM Worker runtime은 적용 후 quota, permission, ownership, observed usage를 재조회한다. | desired/applied/observed/result history |
+| Filesystem create/update/block | RM Worker runtime은 적용 후 quota, permission, ownership을 재조회한다. Phase 12 quota apply 경로는 recursive usage scan을 수행하지 않는다. | desired/applied/observed/result history |
 | Existing directory quota assignment | 기존 directory는 생성/삭제/access control ownership 없이 quota-only managed state로 추적된다. | quota-only resource state, quota adapter evidence |
 | Import existing directory | import는 현재 filesystem state를 읽고 final verification 후 full managed state로 전환한다. | imported state, transition history, verification result |
 | Resource consistency check | 명시한 단일 resource, `storage_name` scope, 또는 filter scope 안에서 DB에 등록된 filesystem/Kubernetes resource의 live 존재 여부와 DB/live state 차이를 read-only로 비교한다. | requested scope, `Consistent`/`Drifted`/`Missing`/`CheckFailed` result, DB snapshot, live snapshot, diff summary |
@@ -1971,7 +1969,7 @@ Kubernetes namespace storage quota resource initialize는 `cluster_name + namesp
 
 Resource initialize는 의미상 `reset_quota_to_default=true` update와 같다. API surface를 별도 `initialize`로 제공하더라도 Planner와 RM Worker runtime은 동일한 quota reset 검증과 실행 원칙을 따라야 한다.
 
-Planner는 대상 resource의 현재 type, 현재 desired state, 기본 quota policy를 조회하여 reset plan을 만든다. 대상 resource type에 기본 quota policy가 없으면 요청을 실패 처리한다. 기본 quota가 `{unlimited:true}`이면 quota 제한 없음 상태를 명시적으로 기록한다. Filesystem quota reset은 update와 마찬가지로 사용량 기반 admission check를 하지 않고, backend adapter 적용 후 observed usage와 quota evidence를 기록한다. Kubernetes quota reset은 ResourceQuota `status.used`와 `force=true` 정책을 따른다.
+Planner는 대상 resource의 현재 type, 현재 desired state, 기본 quota policy를 조회하여 reset plan을 만든다. 대상 resource type에 기본 quota policy가 없으면 요청을 실패 처리한다. 기본 quota가 `{unlimited:true}`이면 quota 제한 없음 상태를 명시적으로 기록한다. Filesystem quota reset은 update와 마찬가지로 사용량 기반 admission check를 하지 않고, backend adapter 적용 후 quota evidence를 기록한다. Kubernetes quota reset은 ResourceQuota `status.used`와 `force=true` 정책을 따른다.
 
 Filesystem resource initialize는 capacity quota와 count quota만 기본 policy 기준으로 재설정한다. Directory 이름, 사용자 리스트, access control, memo, 만료 시간, type은 변경하지 않는다.
 
@@ -2019,7 +2017,7 @@ Query API는 응답 payload를 최소화하거나 특정 client view에 맞게 �
 
 DMS는 운영용 PostgreSQL에 기록된 lifecycle 상태를 기준으로 request가 `request`, `plan`, `run`, `result` 중 어느 단계에 있는지 반환한다.
 
-Filesystem query는 운영용 PostgreSQL에 저장된 resource 상태, quota 설정, memo, agent-reported observed state를 함께 반환해야 한다. 필요한 경우 filesystem live 조회를 통해 usage, quota, permission 상태를 갱신하고 반환할 수 있다.
+Filesystem query는 운영용 PostgreSQL에 저장된 resource 상태, quota 설정, memo, agent-reported observed state를 함께 반환해야 한다. 필요한 경우 filesystem live 조회를 통해 quota, permission 상태를 갱신하고 반환할 수 있다.
 
 Kubernetes quota query는 DMS가 관리하는 ResourceQuota뿐 아니라 namespace에 존재하는 전체 ResourceQuota에 대해 운영용 PostgreSQL에 저장된 inventory, observed state, effective quota 관련 경고 정보를 함께 반환해야 한다. 필요한 경우 Kubernetes API를 live 조회하여 namespace의 전체 ResourceQuota와 effective quota 경고를 계산하고 반환할 수 있다.
 
@@ -2033,7 +2031,7 @@ Resource consistency check 요청은 반드시 check scope를 포함한다. Scop
 
 `storage_name` 단위 check는 해당 storage를 참조하는 DMS-managed resource들을 batch 대상으로 삼는다. Filesystem resource에서는 동일한 `storage_name` 아래 등록된 모든 filesystem resource를 확인한다. Kubernetes namespace storage quota resource에서는 `storage_class_quotas[].storage_name`이 해당 `storage_name`을 참조하는 namespace quota resource를 확인한다. StorageClass별 quota 없이 namespace-wide quota만 가진 Kubernetes resource는 `storage_name` scope의 대상이 아니며, cluster/namespace 또는 별도 Kubernetes scope로 지정해야 한다.
 
-Filesystem resource check는 `storage_name + directory_name`으로 대상을 식별한다. RM Worker runtime은 해당 storage mapping과 mount를 기준으로 directory가 실제로 존재하는지 확인하고, owner, group, permission, ACL, quota limit, quota usage, capacity usage, file-count usage, block mode, backend capability를 read-only로 조회한다. 조회 결과는 운영용 PostgreSQL의 desired/applied/observed state와 비교한다.
+Filesystem resource check는 `storage_name + directory_name`으로 대상을 식별한다. RM Worker runtime은 해당 storage mapping과 mount를 기준으로 directory가 실제로 존재하는지 확인하고, owner, group, permission, ACL, quota limit, block mode, backend capability를 read-only로 조회한다. 조회 결과는 운영용 PostgreSQL의 desired/applied/observed state와 비교한다. 대용량 storage에서 비용이 큰 recursive usage scan은 이 단계의 filesystem check 대상이 아니며, Phase 12 filesystem check/sync API에는 usage collection payload field를 두지 않는다.
 
 Kubernetes namespace storage quota check는 `cluster_name + namespace_name`으로 대상을 식별한다. RM Worker runtime은 target cluster에서 namespace와 DMS-managed ResourceQuota가 실제로 존재하는지 확인하고, ResourceQuota name, labels/annotations, `spec.hard`, `status.used`, namespace-wide quota, StorageClass-specific quota key, derived StorageClass 존재 여부를 read-only로 조회한다. 조회 결과는 운영용 PostgreSQL의 desired/applied/observed state와 비교한다.
 
@@ -2087,7 +2085,7 @@ Observability query도 가능한 많은 정보를 반환하고, 호출 주체가
 - `/v1/ops/resources/kubernetes`: `cluster_name`, `namespace_name`, `requester_id`, `status`, `block_state`, `resource_type`, `expired` 기준 Kubernetes namespace quota resource 조회
 - `/v1/policies/default-quotas`: type별 default quota policy 조회 및 갱신
 
-현재 구현 기준 Resource Management runtime은 Kubernetes namespace quota에 대해 in-cluster Kubernetes API로 namespace와 `ResourceQuota/dms-storage-quota`를 실제 생성/patch/delete한다. Filesystem quota는 simulated success를 사용하지 않고, 실제 quota backend가 필요한 경우 `external-command` adapter를 통해 운영자가 등록한 filesystem/storage CLI를 호출한다. GPFS/IBM Storage Scale fileset quota는 native template인 `quota_capability.mode=gpfs-fileset`을 제공하며, IBM Storage Scale `mmsetquota Device:Fileset --block Soft:Hard --files Soft:Hard`로 quota를 적용하고 `mmlsquota -j Fileset -v -Y Device`로 read evidence를 남긴다. quota backend가 없는 mapping에 명시 quota가 들어오면 planner 단계에서 실패하여 directory side effect를 만들지 않는다.
+현재 구현 기준 Resource Management runtime은 Kubernetes namespace quota에 대해 in-cluster Kubernetes API로 namespace와 `ResourceQuota/dms-storage-quota`를 실제 생성/patch/delete한다. Filesystem resource는 simulated success를 사용하지 않고 storage mapping의 `backend_type`별 adapter를 선택한다. CephFS는 host-mounted worker node에서 SSH 기반 executor로 directory, POSIX permission, CephFS quota xattr을 적용한다. GPFS/IBM Storage Scale은 fileset-backed directory model을 사용하며 `mmcrfileset`, `mmsetquota Device:Fileset --block Soft:Hard --files Soft:Hard`, `mmlinkfileset`, `mmlsfileset -Y`, `mmlsquota -j Fileset -v -Y Device`, `mmunlinkfileset`, `mmdelfileset` command evidence를 남긴다. quota backend capability가 없거나 command probe가 실패하는 mapping은 fail-closed하여 directory/fileset side effect를 만들지 않는다.
 
 현재 구현 기준 storage mapping sanity는 `sanity_result.api_observed`와 `sanity_result.agent_observed`를 분리한다. `api_observed`는 API pod filesystem에서 보이는 `mount_path` 상태를 참고용으로 남기지만 `authoritative=false`이며 top-level `sanity_status`를 실패로 만들지 않는다. Authoritative inventory는 fresh Agent report를 worker role별로 병합해 계산하며, `readiness.resource_management`, `readiness.data_management`, `readiness.inventory`에 role별 상태를 기록한다. 아직 Agent inventory가 없으면 `Unknown`으로 남기고, `cluster_name`이 지정된 mapping에서 해당 cluster의 fresh Agent report가 storage mount를 보고하지 않으면 그 role readiness를 `Failed`로 둔다.
 
@@ -2227,13 +2225,13 @@ Update plan은 quota 변경, 기본 quota policy 기준 quota reset, directory �
 
 Quota 필드가 생략된 update는 기존 quota를 유지한다. 기존 quota가 없는 resource 상태라면 Planner는 quota 입력 해석 원칙에 따라 기본 quota policy를 사용하거나 실패 처리한다.
 
-Filesystem quota update admission은 현재 DMS desired quota를 기준으로 한다. 사용량은 quota 감소 허용 여부를 판단하는 입력으로 쓰지 않는다. 증가 요청은 `force` 없이 backend adapter 실행을 시도하고, 감소 요청은 `force=true`가 있어야 plan을 만든다. 기존 quota가 unlimited인 상태에서 finite quota를 새로 거는 요청은 감소로 취급한다.
+Filesystem quota update admission은 현재 DMS desired quota를 기준으로 한다. 사용량은 quota 감소 허용 여부를 판단하는 입력으로 쓰지 않는다. 증가와 감소 모두 `force` 없이 backend adapter 실행을 시도한다. 기존 quota가 unlimited인 상태에서 finite quota를 새로 거는 요청도 사용량 admission 없이 backend apply 결과와 read-back 검증으로 판단한다.
 
 RM Worker runtime은 Backend를 통해 필요한 변경을 적용한다. 사용자 리스트 변경은 Linux group 기반 access control desired state 변경과 filesystem metadata 변경으로 실행되며, 중앙 identity/group system의 group membership은 변경하지 않는다. quota 변경은 filesystem별 quota adapter를 통해 실행된다.
 
 `reset_quota_to_default=true` update는 대상 filesystem resource의 type에 해당하는 기본 capacity quota와 count quota를 desired state로 설정한다. 이 동작은 directory 이름, 사용자 리스트, memo, 만료 시간, type을 변경하지 않는다.
 
-RM Worker runtime은 적용 후 directory, permission, read-only로 조회한 group membership, quota, usage를 다시 조회하고 observed state와 result를 운영용 PostgreSQL에 기록한다.
+RM Worker runtime은 적용 후 directory, permission, read-only로 조회한 group membership, quota를 다시 조회하고 observed state와 result를 운영용 PostgreSQL에 기록한다. Phase 12 filesystem quota apply 경로는 recursive usage scan을 수행하지 않는다.
 
 ### Filesystem Resource Block
 
@@ -2266,7 +2264,7 @@ Quota가 요청에 명시되지 않으면 Planner는 대상 directory에 기존 
 
 이 flow는 directory 생성, 삭제, 사용자 리스트 기반 access control을 기본적으로 수행하지 않는다. 목적은 기존 directory에 대해 capacity quota와 count quota를 적용하고 추적하는 것이다.
 
-RM Worker runtime은 Backend를 통해 filesystem별 quota adapter를 실행하고, 적용 후 observed usage와 quota 상태를 다시 조회하여 result를 운영용 PostgreSQL에 기록한다.
+RM Worker runtime은 Backend를 통해 filesystem별 quota adapter를 실행하고, 적용 후 quota 상태를 다시 조회하여 result를 운영용 PostgreSQL에 기록한다.
 
 Kubernetes namespace에서 DMS를 거치지 않고 생성된 PVC backend directory라도, 해당 directory가 storage root 바로 아래의 basename으로 안전하게 식별될 수 있고 quota capability가 있으면 이 flow의 대상이 될 수 있다.
 
@@ -2278,7 +2276,7 @@ CSI driver가 내부적으로 `volumes/csi/csi-vol-xxxx`, `.csi/pvc-xxxx` 같은
 
 Planner는 대상 `storage_name`이 존재하는지, `directory_name`이 안전한 basename인지, directory가 storage root 바로 아래에 실제로 존재하는지, 이미 DMS-managed resource인지, quota-only managed resource인지, filesystem backend가 DMS lifecycle ownership에 필요한 capability를 제공하는지 검증한다.
 
-RM Worker runtime은 Backend를 통해 directory의 현재 owner, group, permission, ACL 여부, quota 설정, capacity usage, file-count usage, filesystem type, backend capability를 live 조회한다.
+RM Worker runtime은 Backend를 통해 directory의 현재 owner, group, permission, ACL 여부, quota 설정, filesystem type, backend capability를 live 조회한다.
 
 Access control은 요청에 명시된 사용자 리스트, DMS identity mapping, 또는 기존 directory group을 중앙 identity/group system에서 read-only로 조회하여 해석한다. DMS가 사용자 리스트와 기존 group membership을 안정적으로 해석할 수 없으면 import는 실패한다.
 

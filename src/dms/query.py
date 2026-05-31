@@ -413,7 +413,6 @@ class OperationalQueryService:
             seen_targets.add(issue_key)
             summary = row["verification_summary"]
             summary_issues = list(summary.get("issues") or [])
-            summary_issues.extend(summary.get("usage_pressure") or [])
             if row["terminal_status"] == LifecycleState.SUCCEEDED.value and not summary_issues:
                 continue
             if summary_issues:
@@ -601,7 +600,6 @@ def _issue_severity(issue_type: str) -> str:
     if issue_type in {
         "quota_usage_critical",
         "kubernetes_quota_query_failed",
-        "filesystem_quota_usage_critical",
     }:
         return "CRITICAL"
     return "WARN"
@@ -663,8 +661,6 @@ def _filesystem_issue_type(summary: dict[str, Any]) -> str:
             return "filesystem_quota_drifted"
         if reason == "missing":
             return issue.get("issue_type") or "filesystem_quota_missing"
-        if reason == "filesystem_quota_decrease_below_live_used":
-            return "filesystem_quota_decrease_blocked"
         if reason == "filesystem_unsafe_existing_directory":
             return "filesystem_unsafe_existing_directory"
     if summary.get("precondition_failed"):
@@ -724,8 +720,6 @@ def _recommended_filesystem_action(issue_type: str) -> str:
         return "inspect filesystem marker before any manual mutation"
     if issue_type == "filesystem_quota_drifted":
         return "run filesystem sync to accept live state or update quota to reapply desired state"
-    if issue_type in {"filesystem_quota_usage_warning", "filesystem_quota_usage_critical"}:
-        return "increase quota or remove data from the filesystem resource"
     if issue_type == "filesystem_quota_missing":
         return "reapply filesystem quota or sync DB state after review"
     if issue_type == "filesystem_import_preflight_failed":

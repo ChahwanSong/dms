@@ -116,14 +116,11 @@ def test_phase12_update_increases_quota_and_records_live_state(tmp_path):
         "file_count": 128,
     }
     assert resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"] == 32 * 1024**2
-    assert [call["operation"] for call in executor.calls] == [
-        "read_directory_state",
-        "apply_quota",
-    ]
+    assert [call["operation"] for call in executor.calls] == ["apply_quota"]
 
 
-def test_phase12_planner_rejects_quota_decrease_below_observed_usage(tmp_path):
-    repository, _ = repository_pair(tmp_path)
+def test_phase12_planner_allows_quota_decrease_without_usage_guard(tmp_path):
+    repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
         repository,
@@ -140,23 +137,24 @@ def test_phase12_planner_rejects_quota_decrease_below_observed_usage(tmp_path):
             "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 128},
         },
     )
+    executor = FakePhase12FilesystemExecutor()
+    executor.seed_directory(
+        "quota-decrease",
+        resource_key="cephfs-a:quota-decrease",
+        quota={"capacity_bytes": 32 * 1024**2, "file_count": 128},
+        usage={"used_bytes": 10 * 1024**2, "used_files": 9},
+    )
 
-    Planner(repository).run_once()
+    assert Planner(repository).run_once() == 1
+    run_worker(repository, observability, executor)
 
-    assert repository.get_plan_by_request(request_id) is None
-    [result] = repository.get_results(request_id)
-    assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert result["verification_summary"]["issues"] == [
-            {
-                "reason": "filesystem_quota_decrease_below_live_used",
-                "field": "quota.capacity_bytes",
-                "desired": 8 * 1024**2,
-                "used": 10 * 1024**2,
-            }
-        ]
+    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:quota-decrease")
+    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert resource["desired_state"]["quota"]["capacity_bytes"] == 8 * 1024**2
+    assert resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"] == 8 * 1024**2
 
 
-def test_phase12_backend_rejects_decrease_below_live_usage_before_apply(tmp_path):
+def test_phase12_backend_applies_decrease_without_live_usage_read(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
@@ -185,10 +183,10 @@ def test_phase12_backend_rejects_decrease_below_live_usage_before_apply(tmp_path
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    [result] = repository.get_results(request_id)
-    assert result["terminal_status"] == LifecycleState.BACKEND_APPLY_FAILED.value
-    assert result["verification_summary"]["backend_side_effect"] is False
-    assert [call["operation"] for call in executor.calls] == ["read_directory_state"]
+    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:quota-live-guard")
+    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"] == 8 * 1024**2
+    assert [call["operation"] for call in executor.calls] == ["apply_quota"]
 
 
 def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
@@ -213,7 +211,6 @@ def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
         payload={
             "storage_name": "cephfs-a",
             "directory_name": "quota-drift",
-            "usage_thresholds": {"warning_percent": 80, "critical_percent": 95},
         },
     )
 
@@ -225,7 +222,7 @@ def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
     issues = OperationalQueryService(repository, observability).action_required()
     issue_types = {issue["issue_type"] for issue in issues}
     assert "filesystem_quota_drifted" in issue_types
-    assert "filesystem_quota_usage_warning" in issue_types
+    assert "filesystem_quota_usage_warning" not in issue_types
 
     sync_id = create_request(
         repository,
@@ -274,6 +271,53 @@ def test_phase12_check_reports_missing_directory(tmp_path):
             "issue_type": "filesystem_quota_missing",
             "field": "directory",
             "reason": "missing",
+        }
+    ]
+
+
+def test_phase12_rejects_filesystem_usage_payload_fields(tmp_path):
+    repository, _ = repository_pair(tmp_path)
+    register_cephfs_mapping(repository)
+    seed_resource(
+        repository,
+        directory_name="usage-scan",
+        quota={"capacity_bytes": 8 * 1024**2, "file_count": 32},
+        usage={"used_bytes": 0, "used_files": 0},
+    )
+    check_id = create_request(
+        repository,
+        OperationKind.FILESYSTEM_CHECK,
+        payload={
+            "storage_name": "cephfs-a",
+            "directory_name": "usage-scan",
+            "include_usage": True,
+            "usage_thresholds": {"warning_percent": 80, "critical_percent": 95},
+        },
+    )
+    sync_id = create_request(
+        repository,
+        OperationKind.FILESYSTEM_SYNC,
+        payload={
+            "storage_name": "cephfs-a",
+            "directory_name": "usage-scan",
+            "include_usage": True,
+        },
+    )
+
+    assert Planner(repository).run_once() == 2
+
+    [check_result] = repository.get_results(check_id)
+    [sync_result] = repository.get_results(sync_id)
+    assert check_result["verification_summary"]["issues"] == [
+        {
+            "reason": "filesystem_payload_fields_unsupported_phase12",
+            "fields": ["include_usage", "usage_thresholds"],
+        }
+    ]
+    assert sync_result["verification_summary"]["issues"] == [
+        {
+            "reason": "filesystem_payload_fields_unsupported_phase12",
+            "fields": ["include_usage"],
         }
     ]
 
@@ -526,11 +570,7 @@ class FakePhase12FilesystemExecutor:
         marker = directory.get("marker") or {}
         if marker.get("resource_key") != resource_key:
             raise RuntimeError("target directory marker resource key mismatch")
-        usage = (directory.get("quota_state") or {}).get("usage") or {
-            "used_bytes": 0,
-            "used_files": 0,
-        }
-        directory["quota_state"] = quota_state(quota, usage)
+        directory["quota_state"] = quota_state(quota, None)
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
@@ -549,14 +589,12 @@ class FakePhase12FilesystemExecutor:
         resource_key: str,
         require_marker: bool,
         include_quota: bool,
-        include_usage: bool,
     ) -> dict[str, Any]:
         self.calls.append(
             {
                 "operation": "read_directory_state",
                 "directory_name": directory_name,
                 "include_quota": include_quota,
-                "include_usage": include_usage,
             }
         )
         directory = self.directories.get(directory_name)
@@ -581,8 +619,13 @@ class FakePhase12FilesystemExecutor:
             "verified": True,
             "backend_side_effect": False,
         }
-        if include_quota or include_usage:
-            state["quota_state"] = directory["quota_state"]
+        if include_quota:
+            current = directory["quota_state"]
+            state["quota_state"] = {
+                "backend_type": current.get("backend_type"),
+                "capacity": current.get("capacity"),
+                "file_count": current.get("file_count"),
+            }
         return state
 
     def assign_quota_directory(
@@ -596,7 +639,7 @@ class FakePhase12FilesystemExecutor:
         self.calls.append({"operation": "assign_quota", "directory_name": directory_name})
         directory = self.directories[directory_name]
         directory["marker"] = marker
-        directory["quota_state"] = quota_state(quota, {"used_bytes": 0, "used_files": 0})
+        directory["quota_state"] = quota_state(quota, None)
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
@@ -626,7 +669,7 @@ class FakePhase12FilesystemExecutor:
             raise RuntimeError("filesystem import mode mismatch")
         directory["marker"] = marker
         if quota:
-            directory["quota_state"] = quota_state(quota, {"used_bytes": 0, "used_files": 0})
+            directory["quota_state"] = quota_state(quota, None)
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
@@ -654,8 +697,8 @@ class FakePhase12FilesystemExecutor:
         raise AssertionError("Phase 12 tests do not unblock through fake executor")
 
 
-def quota_state(quota: dict[str, int], usage: dict[str, int]) -> dict[str, Any]:
-    return {
+def quota_state(quota: dict[str, int], usage: dict[str, int] | None) -> dict[str, Any]:
+    state = {
         "backend_type": "cephfs",
         "capacity": {
             "desired_bytes": quota.get("capacity_bytes"),
@@ -669,12 +712,14 @@ def quota_state(quota: dict[str, int], usage: dict[str, int]) -> dict[str, Any]:
             "observed_count": quota.get("file_count"),
             "backend_key": "ceph.quota.max_files",
         },
-        "usage": {
+    }
+    if usage is not None:
+        state["usage"] = {
             "used_bytes": usage.get("used_bytes", 0),
             "used_files": usage.get("used_files", 0),
             "usage_source": "fake",
-        },
-    }
+        }
+    return state
 
 
 def repository_pair(tmp_path) -> tuple[DmsRepository, ObservabilityRepository]:

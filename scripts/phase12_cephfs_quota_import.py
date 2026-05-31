@@ -330,12 +330,13 @@ def verify_quota_lifecycle(
         file_count=128,
         headers=headers,
     )
-    run_planner_rejected(
+    run_success(
         repository,
+        rm_worker,
         decrease_id,
-        f"{target.base.storage_name} decrease below usage rejected",
+        f"{target.base.storage_name} quota decrease applied without usage guard",
     )
-    assert_quota_xattrs(target, INCREASED_QUOTA_BYTES, 128)
+    assert_quota_xattrs(target, 1024 * 1024, 128)
 
     phase10.run_ssh(
         target.base.node_name,
@@ -376,24 +377,6 @@ def verify_quota_lifecycle(
         f"{target.base.storage_name} drift resolved after sync",
     )
 
-    warning_id = check_quota(
-        client=client,
-        target=target,
-        headers=headers,
-        warning_percent=70,
-        critical_percent=98,
-    )
-    run_success(repository, rm_worker, warning_id, f"{target.base.storage_name} usage warning")
-    action_usage = client.get("/api/v1/operations/action-required", headers=headers).json()
-    assert_true(
-        any(
-            issue["issue_type"] == "filesystem_quota_usage_warning"
-            and issue["resource_key"] == target.resource_key
-            for issue in action_usage
-        ),
-        f"{target.base.storage_name} usage warning action-required",
-    )
-
     cleanup_data_files(target)
     delete_id = delete_filesystem(client=client, target=target, headers=headers)
     run_success(repository, rm_worker, delete_id, f"{target.base.storage_name} quota delete")
@@ -409,7 +392,6 @@ def verify_quota_lifecycle(
         "decrease_request_id": decrease_id,
         "drift_check_request_id": drift_id,
         "sync_request_id": sync_id,
-        "usage_warning_request_id": warning_id,
         "delete_request_id": delete_id,
         "capacity_failure": capacity_failure,
         "file_count_failure": file_count_failure,
@@ -635,21 +617,14 @@ def check_quota(
     client: TestClient,
     target: Phase12Target,
     headers: dict[str, str],
-    warning_percent: int = 80,
-    critical_percent: int = 95,
 ) -> str:
     return keyed_request(
         client,
         target,
         OperationKind.FILESYSTEM_CHECK,
         {
-            "include_usage": True,
             "include_quota": True,
             "include_permission": True,
-            "usage_thresholds": {
-                "warning_percent": warning_percent,
-                "critical_percent": critical_percent,
-            },
             "record_action_required": True,
         },
         headers,
@@ -661,7 +636,7 @@ def sync_quota(*, client: TestClient, target: Phase12Target, headers: dict[str, 
         client,
         target,
         OperationKind.FILESYSTEM_SYNC,
-        {"source": "live", "include_quota": True, "include_usage": True},
+        {"source": "live", "include_quota": True},
         headers,
     )
 

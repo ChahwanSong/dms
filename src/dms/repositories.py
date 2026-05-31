@@ -492,14 +492,22 @@ class DmsRepository:
             plan = self._get_plan(connection, plan_id)
             if plan["status"] != LifecycleState.PLANNED.value:
                 raise RuntimeError(f"plan is not claimable: {plan_id}")
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE plans
                 SET status = ?, attempt_count = attempt_count + 1, updated_at = ?
                 WHERE plan_id = ?
+                  AND status = ?
                 """,
-                (LifecycleState.CLAIMED.value, now, plan_id),
+                (
+                    LifecycleState.CLAIMED.value,
+                    now,
+                    plan_id,
+                    LifecycleState.PLANNED.value,
+                ),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"plan is not claimable: {plan_id}")
             connection.execute(
                 "UPDATE requests SET status = ? WHERE request_id = ?",
                 (LifecycleState.CLAIMED.value, plan["request_id"]),

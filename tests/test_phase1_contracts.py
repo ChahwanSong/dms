@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -264,6 +265,41 @@ def test_expired_worker_claim_becomes_stale_claim(harness):
     assert run["run_id"] == run_id
     assert run["state"] == LifecycleState.STALE_CLAIM.value
     assert harness["repository"].get_request(request_id)["status"] == "StaleClaim"
+
+
+def test_plan_claim_is_atomic_under_competing_workers(harness):
+    register_ready_storage_mapping(harness["repository"])
+    request_id = submit_filesystem(harness["client"], "atomic-claim").json()["request_id"]
+    Planner(harness["repository"]).run_once()
+    plan = harness["repository"].get_plan_by_request(request_id)
+    barrier = threading.Barrier(8)
+    successes: list[str] = []
+    failures: list[str] = []
+
+    def claim(worker_id: str) -> None:
+        barrier.wait()
+        try:
+            successes.append(
+                harness["repository"].claim_plan(
+                    plan_id=plan["plan_id"],
+                    worker_id=worker_id,
+                    executor_id=worker_id,
+                    lease_seconds=300,
+                )
+            )
+        except RuntimeError as exc:
+            failures.append(str(exc))
+
+    threads = [threading.Thread(target=claim, args=(f"rm-{idx}",)) for idx in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(successes) == 1
+    assert len(failures) == 7
+    assert len(harness["repository"].list_runs()) == 1
+    assert harness["repository"].get_plan(plan["plan_id"])["attempt_count"] == 1
 
 
 def test_observability_database_can_be_separate_from_operational_database(harness):

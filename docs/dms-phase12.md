@@ -18,9 +18,9 @@ Phase 12의 핵심 기능은 다음 두 묶음이다.
 1. **Filesystem quota capability probe**
 2. **CephFS directory quota xattr apply**
 3. **Finite quota create/update**
-4. **Quota decrease guard**
+4. **Quota decrease apply without usage admission**
 5. **Quota check/sync**
-6. **Quota drift/usage pressure action-required**
+6. **Quota drift/check-failure action-required**
 
 ### Phase 12B: Existing Directory Import / Assign Quota
 
@@ -35,10 +35,10 @@ Phase 12의 핵심 기능은 다음 두 묶음이다.
 
 - filesystem create에서 명시 finite quota가 있으면 directory create 후 CephFS quota xattr가 실제 적용된다.
 - filesystem update에서 quota 증가가 실제 CephFS quota xattr에 반영된다.
-- filesystem update에서 quota 감소 요청이 live usage보다 작으면 backend side effect 없이 reject된다.
-- quota check가 DB desired/applied quota와 live CephFS quota/usage를 read-only 비교하고 `Consistent`, `Drifted`, `Missing`, `CheckFailed`를 기록한다.
+- filesystem update에서 quota 감소 요청도 사용량 조회 없이 적용되며, 적용 후 live quota read-back이 requested quota와 일치해야 한다.
+- quota check가 DB desired/applied quota와 live CephFS quota를 read-only 비교하고 `Consistent`, `Drifted`, `Missing`, `CheckFailed`를 기록한다.
 - quota sync가 live CephFS quota state를 DMS DB desired/applied/observed state로 수용한다. sync는 filesystem xattr를 변경하지 않는다.
-- latest check/sync result 기준으로 quota drift, missing, check failure, usage pressure가 `GET /api/v1/operations/action-required`에 집계된다.
+- latest check/sync result 기준으로 quota drift, missing, check failure가 `GET /api/v1/operations/action-required`에 집계된다.
 - 기존 unmanaged directory에 quota-only assignment를 수행할 수 있다.
 - quota-only assignment는 directory lifecycle과 access control 전체를 DMS가 소유하지 않으며, quota state만 DMS DB와 marker에 기록한다.
 - 기존 directory full import는 directory 존재, storage root boundary, symlink/bind escape, marker conflict, owner/group/mode, LDAP group 해석, quota capability를 preflight한 뒤 DMS-managed resource로 전환한다.
@@ -77,7 +77,7 @@ Phase 11 완료 후 전제:
 
 ## 왜 Phase 12A와 12B를 함께 하는가
 
-Filesystem quota lifecycle만 구현하면 DMS가 직접 만든 새 directory에는 quota를 걸 수 있지만, 운영 환경에 이미 존재하는 directory를 DMS 관리 대상으로 편입할 수 없다. 반대로 import/assign-quota만 구현하고 quota lifecycle을 닫지 않으면 import 후 실제 quota 운영, drift 확인, usage pressure 대응이 불가능하다.
+Filesystem quota lifecycle만 구현하면 DMS가 직접 만든 새 directory에는 quota를 걸 수 있지만, 운영 환경에 이미 존재하는 directory를 DMS 관리 대상으로 편입할 수 없다. 반대로 import/assign-quota만 구현하고 quota lifecycle을 닫지 않으면 import 후 실제 quota 운영과 drift 확인이 불가능하다.
 
 Phase 12에서 두 축을 함께 묶는 이유:
 
@@ -156,8 +156,8 @@ PATCH /api/v1/resource-management/filesystems/{storage_name}/{directory_name}
 - `Deleted` resource는 update할 수 없다.
 - `Blocked` resource의 quota update는 허용한다. 단 live permission block은 유지하고 quota desired/applied state만 갱신한다.
 - quota field가 생략되면 기존 quota를 유지한다.
-- quota 감소 요청은 live usage보다 작은 값이면 backend side effect 없이 reject한다.
-- quota 증가 요청은 capability가 `Ready`일 때만 CephFS xattr를 변경한다.
+- quota 감소 요청은 live usage를 보지 않고 증가 요청과 동일하게 capability가 `Ready`일 때 CephFS xattr 변경을 시도한다.
+- update는 quota xattr 적용 후 반드시 read-back으로 requested quota와 live quota가 일치하는지 검증한다.
 - update는 access group, users, permission, rename을 Phase 12에서 함께 변경하지 않는다. quota 외 변경은 명시적으로 unsupported로 reject한다.
 
 ### Filesystem Quota Check
@@ -174,13 +174,8 @@ POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:che
 {
   "requester_id": "portal:ops",
   "payload": {
-    "include_usage": true,
     "include_quota": true,
     "include_permission": true,
-    "usage_thresholds": {
-      "warning_percent": 80,
-      "critical_percent": 95
-    },
     "record_action_required": true
   }
 }
@@ -189,9 +184,11 @@ POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:che
 규칙:
 
 - check는 read-only다. CephFS xattr, directory permission, LDAP group, DB desired state를 변경하지 않는다.
-- check는 DB resource state와 live backend state를 비교한다.
+- check는 DB resource state와 live backend quota state를 비교한다.
+- Phase 12 filesystem check는 대용량 directory에서 IO overhead가 큰 recursive usage scan을 수행하지 않는다.
+- filesystem check API는 usage collection 필드를 제공하지 않는다. usage 관련 payload field는 unsupported로 reject한다.
 - check result는 request/result lifecycle에 저장한다.
-- latest clean check 이후 이전 drift/usage action-required issue는 해소되어야 한다.
+- latest clean check 이후 이전 drift action-required issue는 해소되어야 한다.
 
 ### Filesystem Quota Sync
 
@@ -209,7 +206,6 @@ POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:syn
   "payload": {
     "source": "live",
     "include_quota": true,
-    "include_usage": true,
     "reason": "accept manually adjusted CephFS quota"
   }
 }
@@ -219,6 +215,7 @@ POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:syn
 
 - sync는 live CephFS quota xattr를 읽어 DMS DB desired/applied/observed state로 수용한다.
 - sync는 CephFS xattr나 directory permission을 변경하지 않는다.
+- filesystem sync API는 usage collection 필드를 제공하지 않는다. usage 관련 payload field는 unsupported로 reject한다.
 - sync는 marker mismatch, missing directory, unsafe path, capability missing이면 fail-closed 한다.
 - sync 후 동일 target에 대한 quota drift action-required issue는 해소되어야 한다.
 - sync는 quota-only assigned resource와 full imported resource 모두 지원한다.
@@ -300,7 +297,7 @@ POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:imp
 - import는 storage root 밖으로 escape하는 symlink, bind mount, path traversal, unsafe ownership 상태를 reject한다.
 - 대상이 이미 full DMS-managed resource이면 conflict 또는 no-op success 정책을 명확히 한다.
 - 대상이 quota-only managed resource이면 import를 통해 full DMS-managed resource로 승격할 수 있다.
-- import 전 live 상태를 읽어 owner, group, mode, ACL 여부, quota limit, quota usage, capacity usage, file-count usage, filesystem type, marker 상태를 기록한다.
+- import 전 live 상태를 읽어 owner, group, mode, ACL 여부, quota limit, filesystem type, marker 상태를 기록한다.
 - access control 해석은 명시적이어야 한다.
   - `adopt_existing_group`: 기존 Linux group이 OpenLDAP/SSSD로 해석되고 요청 users와 membership이 일치해야 한다.
   - `set_dms_group`: 요청이 DMS-managed access group 생성을 명시해야 하며 기존 permission 변경을 result에 기록해야 한다.
@@ -332,11 +329,6 @@ DMS filesystem quota model은 backend-neutral field를 우선 사용한다.
       "applied_count": 32,
       "observed_count": 32,
       "backend_key": "ceph.quota.max_files"
-    },
-    "usage": {
-      "used_bytes": 1048576,
-      "used_files": 4,
-      "usage_source": "cephfs-xattr"
     }
   }
 }
@@ -346,9 +338,9 @@ DMS filesystem quota model은 backend-neutral field를 우선 사용한다.
 
 - DB desired state는 사용자가 요청한 backend-neutral quota를 저장한다.
 - DB applied state는 adapter가 실제 적용했다고 확인한 quota를 저장한다.
-- DB observed state는 live backend read-back quota와 usage를 저장한다.
+- DB observed state는 live backend read-back quota를 저장한다.
 - backend-specific xattr 이름은 CephFS adapter 내부 또는 `backend_details`에만 둔다.
-- core planner/query/action-required는 `capacity_bytes`, `file_count`, `used_bytes`, `used_files`, `used_percent` 같은 backend-neutral field를 사용한다.
+- core planner/query/action-required는 `capacity_bytes`, `file_count` 같은 backend-neutral quota field를 사용한다.
 - quota 값을 string 단위(`8Mi`)로 받을지 integer byte로 받을지 API에서 명확히 정한다. Phase 12 권장은 integer byte/count만 허용해 모호성을 줄이는 것이다.
 
 ## CephFS Adapter Requirements
@@ -359,7 +351,6 @@ CephFS host-mounted adapter는 Phase 12에서 다음 live capability를 구현�
 probe_quota_capability(storage_mapping) -> capability
 apply_quota(resource, quota_plan) -> observed_quota
 read_quota_state(resource) -> observed_quota
-read_usage(resource) -> observed_usage
 check_quota(resource, desired_state) -> check_result
 sync_quota_from_live(resource) -> synced_state
 assign_quota_only(resource, quota_plan) -> observed_state
@@ -370,8 +361,8 @@ CephFS quota primitive:
 
 - capacity quota는 CephFS directory xattr `ceph.quota.max_bytes`로 적용한다.
 - file-count quota는 CephFS directory xattr `ceph.quota.max_files`로 적용한다.
-- usage는 CephFS가 제공하는 recursive usage xattr가 사용 가능하면 그것을 사용한다.
-- testbed verifier는 작은 fixture에 대해 `du`/`find` fallback으로 usage sanity를 교차 확인할 수 있다. 단 production adapter가 fallback source를 쓰면 `usage_source`에 명확히 기록해야 한다.
+- Phase 12 quota apply/update/import/assign path는 usage를 조회하지 않는다.
+- Production adapter는 quota apply 검증을 위해 `du`/`find` 같은 recursive usage scan fallback을 실행하지 않는다.
 - xattr apply/read를 위해 worker node에 `setfattr`/`getfattr`가 필요하면 verification script가 패키지를 확인하고, 설치한 경우 testbed 문서에 남긴다.
 
 Capability probe는 최소 다음을 반환한다.
@@ -381,8 +372,8 @@ Capability probe는 최소 다음을 반환한다.
   "supports_directory_create": true,
   "supports_capacity_quota": true,
   "supports_file_count_quota": true,
-  "supports_usage_bytes": true,
-  "supports_file_count_usage": true,
+  "supports_usage_bytes": false,
+  "supports_file_count_usage": false,
   "supports_permission_mode": true,
   "supports_marker": true,
   "quota_backend": "cephfs-xattr",
@@ -419,8 +410,8 @@ Quota validation:
 - 둘 다 없으면 quota operation은 reject.
 - configured minimum/maximum quota boundary를 벗어나면 reject.
 - `capacity_bytes`와 `file_count`를 동시에 지원하지 않는 backend이면 unsupported field를 reject.
-- quota decrease는 live usage를 read-only 조회한 뒤 usage보다 작은 target이면 reject.
-- live usage 조회가 실패하면 decrease는 fail-closed.
+- quota decrease는 live usage를 조회하지 않고 reject 없이 plan을 생성한다.
+- filesystem quota apply/update/import/assign은 적용 후 read-back quota가 requested quota와 일치하지 않으면 `VerificationFailed` 또는 backend failure로 처리한다.
 
 Import/assign validation:
 
@@ -440,7 +431,7 @@ Operation별 behavior:
 | Operation | Worker behavior |
 | --- | --- |
 | `filesystem.create` with quota | create directory/access marker 후 quota apply/read-back |
-| `filesystem.update` quota | decrease guard 후 quota xattr update/read-back |
+| `filesystem.update` quota | usage admission 없이 quota xattr update/read-back |
 | `filesystem.assign_quota` | existing directory preflight, quota-only marker, quota apply/read-back |
 | `filesystem.import` | existing directory preflight, marker initialize, state capture, optional quota apply/read-back |
 | `filesystem.consistency_check` | read-only live state compare, result 저장 |
@@ -450,7 +441,6 @@ Worker result에는 최소 다음을 포함한다.
 
 - `quota_status`: `Applied`, `Consistent`, `Drifted`, `Missing`, `Unsupported`, `CheckFailed`
 - `quota_state`
-- `usage`
 - `capability`
 - `preflight`
 - `marker`
@@ -470,10 +460,7 @@ filesystem_quota_apply_failed
 filesystem_quota_verification_failed
 filesystem_quota_drifted
 filesystem_quota_missing
-filesystem_quota_usage_warning
-filesystem_quota_usage_critical
 filesystem_quota_check_failed
-filesystem_quota_decrease_blocked
 filesystem_import_preflight_failed
 filesystem_assign_quota_failed
 filesystem_marker_missing
@@ -485,7 +472,6 @@ filesystem_access_group_unresolved
 생성 기준:
 
 - latest check result에서 quota drift/missing/check failure가 있으면 action-required에 표시한다.
-- latest check result에서 usage threshold를 넘으면 warning/critical issue를 표시한다.
 - quota apply/update/import/assign failure는 target별 issue로 표시한다.
 - latest clean check 또는 successful sync 이후 같은 target의 drift issue는 해소되어야 한다.
 - successful quota update 이후 같은 target의 quota apply failure issue는 해소되어야 한다.
@@ -555,13 +541,12 @@ Identity 검증 원칙:
 11. file-count quota가 지원되면 allowed user가 file-count quota 초과 시 실패하는지 확인한다.
 12. quota increase update를 수행하고 xattr read-back이 증가한 quota와 일치하는지 확인한다.
 13. 증가된 quota 안에서 이전에 실패하던 write가 성공하는지 확인한다.
-14. live usage보다 작은 quota decrease request가 backend side effect 없이 `Rejected` 되는지 확인한다.
+14. 현재 사용량보다 작은 quota decrease request도 reject 없이 적용되고 xattr read-back이 requested quota와 일치하는지 확인한다.
 15. check request가 `Consistent`를 반환하는지 확인한다.
 16. verifier가 수동으로 CephFS quota xattr를 변경해 drift를 만든다.
 17. check request가 `Drifted`를 반환하고 action-required에 `filesystem_quota_drifted`가 표시되는지 확인한다.
 18. sync request가 live quota를 DB에 수용하고 action-required drift issue가 해소되는지 확인한다.
-19. usage threshold를 넘는 작은 quota/fixture를 만들어 `filesystem_quota_usage_warning` 또는 `filesystem_quota_usage_critical`이 표시되는지 확인한다.
-20. cleanup delete를 실행하고 directory, quota marker, DMS-managed LDAP group이 정리됐는지 확인한다.
+19. cleanup delete를 실행하고 directory, quota marker, DMS-managed LDAP group이 정리됐는지 확인한다.
 
 ### Phase 12B 권장 검증 Flow
 
@@ -575,7 +560,7 @@ Identity 검증 원칙:
 8. c2 worker SSSD/NSS에서 group membership이 보이는지 확인한다.
 9. existing directory owner/group/mode를 import policy와 맞춘다.
 10. import request를 `adopt_existing_group` 정책으로 보낸다.
-11. import result가 owner/group/mode/quota/usage/marker state를 DB desired/applied/observed state에 기록하는지 확인한다.
+11. import result가 owner/group/mode/quota/marker state를 DB desired/applied/observed state에 기록하는지 확인한다.
 12. import 후 allowed users는 write 가능하고 denied user는 접근 불가인지 확인한다.
 13. import 후 quota assignment 또는 quota update를 수행한다.
 14. quota enforcement, check, drift, sync가 imported resource에서도 동일하게 동작하는지 확인한다.
@@ -592,8 +577,6 @@ Identity 검증 원칙:
 initial capacity quota: 8Mi
 increased capacity quota: 32Mi
 file count quota: 16 or 32
-warning threshold: 80%
-critical threshold: 95%
 ```
 
 테스트베드는 CPU/Memory/Disk가 제한되어 있으므로 verifier는 큰 파일을 만들지 않는다. capacity enforcement는 sparse file이 아닌 실제 small file write로 검증하되 총 사용량은 수십 MiB 이하로 유지한다.
@@ -609,19 +592,20 @@ critical threshold: 95%
 - CephFS adapter applies `ceph.quota.max_bytes` and `ceph.quota.max_files`.
 - CephFS adapter verifies xattr read-back.
 - update quota increase updates desired/applied/observed state.
-- update quota decrease below observed usage is rejected before backend side effect.
+- update quota decrease is applied without usage admission and verified by live quota read-back.
 - check returns `Consistent` for matching DB/live quota.
 - check returns `Drifted` for manually changed live quota.
 - check returns `Missing` for missing directory.
+- check/sync reject unsupported filesystem usage payload fields.
 - sync accepts live quota into DB without filesystem mutation.
-- action-required includes quota drift and usage pressure.
+- action-required includes quota drift and check failures.
 - action-required resolves drift after successful sync or clean check.
 - assign-quota requires existing directory.
 - assign-quota rejects symlink/path escape.
 - assign-quota writes quota-only marker and does not change owner/group/mode.
 - import requires existing directory.
 - import rejects unresolved LDAP group.
-- import records current owner/group/mode/quota/usage.
+- import records current owner/group/mode/quota.
 - import can promote quota-only resource to full managed resource.
 - imported full resource supports quota update/check/sync.
 - unsupported GPFS/WekaFS skeleton path fails closed for live quota side effect.
@@ -651,10 +635,10 @@ Phase 12 완료 시 `docs/dms-phase12-verification.md`를 작성한다.
 - CephFS quota xattr read-back output
 - quota enforcement write success/failure output
 - quota update increase request/result
-- quota decrease guard rejected request/result
+- quota decrease applied request/result and xattr read-back
 - check consistent output
 - manual drift command와 drift check output
-- action-required quota drift/usage output
+- action-required quota drift output
 - sync request/result와 action-required resolution output
 - assign-quota request/result와 quota-only marker output
 - import request/result와 imported state output
@@ -672,7 +656,7 @@ Phase 12 완료 시 `docs/dms-phase12-verification.md`를 작성한다.
 - filesystem ACL 기반 access-control update
 - rename/move operation
 - imported production directory backend delete 정책 일반화
-- automatic quota drift/usage cron/controller
+- automatic quota drift cron/controller
 - automatic expiration sweep cron/controller
 - trash/quarantine workflow
 - Data Management `scan/sync/rm` live execution

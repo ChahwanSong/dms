@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-05-31 09:07 +0900
+Last updated: 2026-05-31 14:19 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -11,7 +11,7 @@ Last updated: 2026-05-31 09:07 +0900
 - `Done`은 실제 테스트베드 또는 실제 외부 시스템에 연결해 확인된 기능만 의미한다.
 - local pytest, stub adapter, synthetic data는 보조 회귀 검증으로만 기록한다.
 - 아직 실제 backend side effect가 구현되지 않은 기능은 성공처럼 적지 않고 명확히 미구현으로 남긴다.
-- Phase 12까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP/SSSD, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity, Kubernetes default quota reset, on-demand quota audit, drift/usage pressure/effective quota action-required aggregation, DMS-managed ResourceQuota metadata drift detection, `cluster-a/c1-worker` 및 `cluster-b/c2-worker` host-mounted CephFS filesystem create/delete lifecycle, filesystem expiry query, API-driven expiration sweep, filesystem block/unblock lifecycle, LDAP access group membership, POSIX permission boundary, CephFS directory capacity/file-count quota apply/enforcement, quota update/decrease guard/check/sync/action-required, existing directory quota-only assignment, existing directory full import이다.
+- Phase 13까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP/SSSD, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity, Kubernetes default quota reset, on-demand quota audit, drift/usage pressure/effective quota action-required aggregation, DMS-managed ResourceQuota metadata drift detection, `cluster-a/c1-worker` 및 `cluster-b/c2-worker` host-mounted CephFS filesystem create/delete lifecycle, filesystem expiry query, API-driven expiration sweep, filesystem block/unblock lifecycle, LDAP access group membership, POSIX permission boundary, CephFS directory capacity/file-count quota apply/enforcement, quota update/decrease apply/check/sync/action-required, existing directory quota-only assignment, existing directory full import, Kubernetes long-running Planner/RM Worker Deployment 기반 RM 처리, RM Worker scale/restart/stale-claim recovery evidence이다. GPFS는 IBM Storage Scale command adapter 구현과 fake executor regression까지 완료했고, live GPFS 검증은 테스트베드에 GPFS cluster가 없어 skip evidence로 남겼다.
 
 ## Testbed Architecture
 
@@ -104,7 +104,7 @@ longhorn-csi-plugin-pddq5                           3/3     Running   0         
 longhorn-driver-deployer-6f94cb9fd9-4pxv7           1/1     Running   0          8h
 ```
 
-## Implemented Through Phase 12
+## Implemented Through Phase 13
 
 ### Phase 1: Core Lifecycle Skeleton
 
@@ -589,18 +589,17 @@ Live 검증 대상:
 - filesystem quota update
   - quota 증가 apply
   - blocked resource quota update는 desired/applied quota만 갱신하고 block state를 유지
-  - DB-observed usage 및 backend live usage 기반 decrease guard
-  - live usage보다 작은 decrease는 backend side effect 없이 reject
+  - quota 감소도 filesystem usage 조회 없이 apply
+  - quota apply 후 live xattr read-back으로 requested quota 일치 여부 검증
 - filesystem quota check/sync
   - `POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:check`
   - `POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:sync`
-  - check는 read-only로 desired/applied quota와 live xattr/usage를 비교
+  - check는 read-only로 desired/applied quota와 live xattr quota를 비교
   - sync는 live xattr quota를 DB desired/applied/observed state로 수용하고 xattr를 변경하지 않음
+  - filesystem check/sync API는 usage collection payload field를 제공하지 않고 해당 field를 unsupported로 reject
 - filesystem quota action-required aggregation
   - `filesystem_quota_drifted`
   - `filesystem_quota_missing`
-  - `filesystem_quota_usage_warning`
-  - `filesystem_quota_usage_critical`
   - quota/import/assign precondition failure issue
   - successful sync 또는 clean latest check 후 같은 target의 drift issue 해소
 - existing directory quota-only assignment
@@ -611,7 +610,7 @@ Live 검증 대상:
 - existing directory full import
   - `POST /api/v1/resource-management/filesystems/{storage_name}/{directory_name}:import`
   - `adopt_existing_group` access policy 지원
-  - OpenLDAP/SSSD group membership, group/mode, marker, quota, usage state 기록
+  - OpenLDAP/SSSD group membership, group/mode, marker, quota state 기록
   - import 후 quota update, check/sync 대상이 됨
 - non-DMS directory safety guard
   - safe basename validation
@@ -638,10 +637,68 @@ Live 검증 대상:
 주의:
 
 - Phase 12는 filesystem expiry 자동 cron/scheduler/controller를 구현하지 않는다.
+- Phase 12는 filesystem usage pressure 계산 또는 대용량 directory recursive usage scan을 구현하지 않는다.
 - Phase 12는 long-running RM Worker Deployment loop를 검증하지 않는다. Verification script가 기존 phase와 동일하게 `RMWorkerRuntime.run_once()`를 호출한다.
 - Phase 12는 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
 - Phase 12는 GPFS/WekaFS/Lustre live adapter를 구현하지 않는다. Backend-neutral quota/import 모델과 CephFS live adapter만 검증했다.
 - Phase 12 verifier 첫 시도에서 `c1-worker`에 Debian `attr` 패키지를 설치했고 `/home/mason/workspace/testbed/dms-phase12-testbed-notes.md`에 기록했다. 최종 성공 run에서는 `setfattr`/`getfattr`가 양 worker node에 이미 존재했다.
+
+### Phase 13: Long-Running RM Worker Runtime and GPFS Command Adapter
+
+확실히 구현된 범위:
+
+- Kubernetes long-running Resource Management runtime
+  - `dms planner --loop` Deployment
+  - `dms rm-worker --loop` Deployment
+  - RM Worker Pod별 `worker_id`를 Pod name으로 설정
+  - RM Worker loop가 settings-aware `BackendAdapterRegistry.with_phase1_defaults(repository, settings)`를 사용
+  - loop iteration exception은 JSON stderr logging 후 다음 iteration으로 계속 진행
+- 실제 RM Worker Deployment 경유 Phase 12 filesystem 기능 처리
+  - API request만 제출하고 verifier는 `Planner.run_once()` 또는 `RMWorkerRuntime.run_once()`를 호출하지 않음
+  - CephFS quota create/update/decrease/check/sync/action-required
+  - existing directory quota-only assign
+  - existing directory full import
+  - unsafe path planning reject
+- worker scale/restart/stale claim safety
+  - 2 replica RM Worker Deployment에서 서로 다른 Pod가 check request를 처리
+  - `plans.status='Planned'` 조건부 atomic update로 동일 plan 중복 claim 방지
+  - Pod delete 후 replacement Pod가 올라오고 state가 유지됨
+  - 수동 expired lease fixture가 `StaleClaim`과 stale run query로 노출됨
+- deploy image/runtime 보강
+  - RM Worker image에 `openssh-client` 포함
+  - Docker image install extra가 PostgreSQL/LDAP dependency를 포함하도록 보강
+  - Phase 13 verifier가 API, Agent, Planner, RM Worker manifest를 직접 배포
+- IBM GPFS / IBM Storage Scale fileset command adapter
+  - `backend_type=gpfs` filesystem mapping이 더 이상 성공 stub로 처리되지 않음
+  - `mmcrfileset`, `mmlinkfileset`, `mmlsfileset`, `mmsetquota`, `mmlsquota`, `mmunlinkfileset`, `mmdelfileset` command runner abstraction
+  - local/SSH/fake executor 구조
+  - fileset-backed create/link/quota/read-back/check/sync/import/assign-quota/delete flow
+  - parseable `-Y` output parser
+  - quota disabled, per-fileset quota disabled, command missing, unsafe fileset/path, read-back mismatch fail-closed
+  - GPFS Kubernetes namespace quota CSI mapping skeleton 유지
+- Phase 13 live verification scripts 추가
+  - `scripts/phase13_long_running_rm_worker.py`
+  - `scripts/verify-phase13-testbed.sh`
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 OpenLDAP: `ldap://192.168.56.31`
+- 실제 SSSD/NSS on `c1-worker`, `c2-worker`
+- 실제 DMS API Deployment on `cluster-a`
+- 실제 DMS Agent DaemonSet on Ceph host-mounted worker nodes
+  - `cluster-a/c1-worker`: `cephfs-a`, `/mnt/testbed-cephfs`
+  - `cluster-b/c2-worker`: `cephfs-b`, `/mnt/testbed-cephfs-c2`
+- 실제 Planner Deployment and RM Worker Deployment on Kubernetes
+- 실제 worker-node host-mounted CephFS quota/import/check/sync side effects
+
+주의:
+
+- Phase 13은 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
+- Phase 13은 automatic cron/controller expiration sweep 또는 quota drift sweep을 구현하지 않는다.
+- Phase 13은 production Helm/Kustomize chart를 완성하지 않는다. 검증용 manifest를 verifier script가 생성한다.
+- Phase 13은 GPFS live backend를 테스트베드에서 검증하지 않는다. 테스트베드에 IBM GPFS / IBM Storage Scale cluster가 없으므로 fake executor unit tests와 skip evidence로 문서화했다.
+- Phase 13은 GPFS user/group quota를 DMS filesystem quota로 일반화하지 않는다. Fileset quota만 지원한다.
 
 ## Live Verification Results
 
@@ -1411,10 +1468,6 @@ Command:
 ```bash
 cd /home/mason/workspace/dms
 DMS_PHASE12_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase12-testbed.sh
-
-# Final Phase 12 verifier rerun against the fresh DB after tightening
-# file-count quota assertion:
-/tmp/dms-phase3-venv/bin/python3 scripts/phase12_cephfs_quota_import.py
 ```
 
 Final Phase 12 output summary:
@@ -1422,8 +1475,8 @@ Final Phase 12 output summary:
 ```json
 {
   "status": "ok",
-  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase12_20260531090258",
-  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase12_obs_20260531090258",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase12_20260531131324",
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase12_obs_20260531131324",
   "quota_probe": [
     {
       "storage_name": "cephfs-a",
@@ -1445,38 +1498,36 @@ Final Phase 12 output summary:
       "storage_name": "cephfs-a",
       "cluster_name": "cluster-a",
       "node_name": "c1-worker",
-      "directory_name": "phase12-quota-a-c16c1d2b",
-      "capacity_failure": "Disk quota exceeded",
-      "file_count_failure": "file-29: Disk quota exceeded",
-      "sync_request_id": "req_641548ee07f74d6685c101a96ceb9b45",
+      "directory_name": "phase12-quota-a-21c0bace",
+      "decrease_request_id": "req_8c6380a107524f1a8ddeebdc8d59d346",
+      "sync_request_id": "req_64c7e7ee43bf4477bc4cc838b806d5f1",
       "synced_capacity_bytes": 14680064
     },
     {
       "storage_name": "cephfs-b",
       "cluster_name": "cluster-b",
       "node_name": "c2-worker",
-      "directory_name": "phase12-quota-b-c16c1d2b",
-      "capacity_failure": "Disk quota exceeded",
-      "file_count_failure": "file-29: Disk quota exceeded",
-      "sync_request_id": "req_3e96c526fb0b49b78501c4487247a7ba",
+      "directory_name": "phase12-quota-b-21c0bace",
+      "decrease_request_id": "req_bf1110d21dfa4cea9101e61c6468e7d9",
+      "sync_request_id": "req_3a43473c6b7c42aa8379e7e3106ad5b9",
       "synced_capacity_bytes": 14680064
     }
   ],
   "assign_quota": {
     "storage_name": "cephfs-a",
-    "directory_name": "phase12-assign-c16c1d2b",
+    "directory_name": "phase12-assign-21c0bace",
     "marker_management_mode": "quota_only",
-    "delete_rejected_request_id": "req_751da0086e314ef1a63f6ea4c581a3ba"
+    "delete_rejected_request_id": "req_1d4dcd54b3704902ac6428d0bd0dc4ef"
   },
   "full_import": {
     "storage_name": "cephfs-b",
-    "directory_name": "phase12-import-c16c1d2b",
-    "group_name": "dms-phase12-import-c16c1d2b",
-    "import_request_id": "req_3a8c3969ba424a2aa21453916869cc35",
-    "quota_update_request_id": "req_71a9fd738b5d4b2fbc140eceacf7ff84"
+    "directory_name": "phase12-import-21c0bace",
+    "group_name": "dms-phase12-import-21c0bace",
+    "import_request_id": "req_237ba2f4ecfe48b3913528d801dca29c",
+    "quota_update_request_id": "req_50f19aafa8b24b90a727825815fe240f"
   },
   "unsafe_case": {
-    "request_id": "req_b0eb9201ad7a451ab46f54954fea89e0",
+    "request_id": "req_1313e29ba3ef415cada7dd313f74b558",
     "reasons": [
       "access_policy.users_required",
       "directory_name_invalid",
@@ -1492,7 +1543,8 @@ Final Phase 12 output summary:
 - `cluster-a/c1-worker`와 `cluster-b/c2-worker`의 host-mounted CephFS에서 capacity quota와 file-count quota xattr apply/read-back이 성공했다.
 - allowed LDAP user는 quota 이내 write가 가능했고 denied LDAP fixture user는 접근이 거부됐다.
 - capacity quota와 file-count quota 초과가 모두 실제 CephFS에서 `Disk quota exceeded`로 실패했다.
-- quota update 증가, decrease guard reject, consistency check, manual drift detection, sync, usage warning action-required를 검증했다.
+- quota update 증가와 감소 apply, consistency check, manual drift detection, sync를 검증했다.
+- filesystem check/sync verifier payload에서 usage collection field를 보내지 않는 경로를 검증했다.
 - `assign-quota`는 existing unmanaged directory에 `quota_only` marker와 quota xattr를 적용했고 DMS delete는 reject됐다.
 - full import는 OpenLDAP/SSSD group membership을 가진 existing directory를 DMS full-managed resource로 전환하고 import 후 quota update를 검증했다.
 - unsafe nested path import는 planning 단계에서 reject됐다.
@@ -1500,6 +1552,100 @@ Final Phase 12 output summary:
 상세 검증 기록:
 
 - `docs/dms-phase12-verification.md`
+
+### Phase 13 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE13_SKIP_IMAGE_BUILD=1 scripts/verify-phase13-testbed.sh
+```
+
+Final Phase 13 output summary:
+
+```json
+{
+  "status": "ok",
+  "api_url": "http://192.168.56.11:30093",
+  "operational_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase13_20260531141310",
+  "observability_database_url": "postgresql://appuser:***@192.168.56.11:30432/dms_phase13_obs_20260531141310",
+  "quota_lifecycle": [
+    {
+      "storage_name": "cephfs-a",
+      "directory_name": "phase13-quota-a-6f00efe2",
+      "create_request_id": "req_7e4ebfa3bbc44e98a00e896c9188ddfd",
+      "decrease_request_id": "req_5fa04d66a6d04c4a8255ab32f3e22790",
+      "sync_request_id": "req_514ed778fc7c4121afe398225b677230",
+      "delete_request_id": "req_64ce5e60814e4619a5a2689dbb9d771d"
+    },
+    {
+      "storage_name": "cephfs-b",
+      "directory_name": "phase13-quota-b-6f00efe2",
+      "create_request_id": "req_e50e5a8c3f8843f680b9ac84826ba5b0",
+      "decrease_request_id": "req_81ed84fcefba4366b70d97e925acabf9",
+      "sync_request_id": "req_f0cdf46159cc4ca3b5e4399b6073f73f",
+      "delete_request_id": "req_90ff44b83d48483dabbc17b062a673c7"
+    }
+  ],
+  "worker_scale": {
+    "check_request_ids": [
+      "req_5d197915eace4862ba31cc59993635d9",
+      "req_37c65a11348f40569309813ef2113824"
+    ],
+    "worker_ids": [
+      "dms-rm-worker-756cf7ffcf-2tsqm",
+      "dms-rm-worker-756cf7ffcf-6tqpv"
+    ]
+  },
+  "worker_restart": {
+    "deleted_pod": "pod/dms-rm-worker-756cf7ffcf-6tqpv",
+    "pods_after": [
+      "pod/dms-rm-worker-756cf7ffcf-6lljw"
+    ]
+  },
+  "stale_query": {
+    "fixture_request_id": "req_4b4805519ef74dbd8a843773847f6038",
+    "request_status": "StaleClaim",
+    "query_count": 1,
+    "run_id": "run_17f0b015dcf14ef086a26ddae8155c60"
+  },
+  "gpfs_live_verification": {
+    "status": "skipped",
+    "reason": "testbed has no IBM GPFS / IBM Storage Scale cluster"
+  }
+}
+```
+
+검증 의미:
+
+- 실제 Kubernetes `dms-planner` Deployment와 `dms-rm-worker` Deployment가 PostgreSQL-backed request/plan/run lifecycle을 처리했다.
+- Phase 13 verifier는 RM work 처리를 위해 `Planner.run_once()` 또는 `RMWorkerRuntime.run_once()`를 호출하지 않았다.
+- `cluster-a/c1-worker`와 `cluster-b/c2-worker`의 host-mounted CephFS에서 Phase 12 quota/import/check/sync flow가 long-running RM Worker Pod 경유로 성공했다.
+- RM Worker 2 replica scale-out에서 두 check request가 서로 다른 Pod worker id로 처리됐고, 최종 DB에는 request별 중복 run이 없었다.
+- RM Worker Pod restart와 expired lease fixture가 각각 replacement Pod와 `StaleClaim` stale run query로 확인됐다.
+- GPFS live verification은 테스트베드에 IBM GPFS / IBM Storage Scale cluster가 없어 skip됐고, command adapter는 local regression에서 fake executor로 검증했다.
+
+중복 claim DB 확인:
+
+```text
+ request_id | run_count | states
+------------+-----------+--------
+(0 rows)
+
+ total_runs | distinct_requests
+------------+-------------------
+         22 |                22
+
+   status   | count
+------------+-------
+ StaleClaim |     1
+ Succeeded  |    21
+```
+
+상세 검증 기록:
+
+- `docs/dms-phase13-verification.md`
 
 ### PostgreSQL Evidence Query
 
@@ -2016,9 +2162,30 @@ cd /home/mason/workspace/dms
 DMS_PHASE12_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase12-testbed.sh
 ```
 
-The script runs the Phase 10 deployment/smoke setup first, then verifies Phase 12 CephFS quota probe, create/update/decrease guard/check/sync/action-required, quota-only assign, full import, unsafe path rejection, and cleanup. It cleans up the temporary `dms-phase12` namespace in both clusters, DMS phase-scoped LDAP fixture users, DMS access groups, and host test directories by default.
+The script runs the Phase 10 deployment/smoke setup first, then verifies Phase 12 CephFS quota probe, create/update/decrease apply/check/sync/action-required, quota-only assign, full import, unsafe path rejection, and cleanup. It cleans up the temporary `dms-phase12` namespace in both clusters, DMS phase-scoped LDAP fixture users, DMS access groups, and host test directories by default.
 
-### 15. Optional Local Regression
+### 15. Re-run Phase 13 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+./scripts/verify-phase13-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE13_OPERATIONAL_DB` and `DMS_PHASE13_OBSERVABILITY_DB` are set.
+
+To skip rebuilding the image when the registry already has the current image:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE13_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase13-testbed.sh
+```
+
+The script deploys the DMS API, RM Agent DaemonSets, long-running Planner Deployment, and long-running RM Worker Deployment, then verifies Phase 12 CephFS quota/import/check/sync flows through API-only request submission. It also verifies RM Worker 2-replica scale-out, Pod restart, stale claim query, duplicate claim absence, and GPFS live skip evidence. It cleans up the temporary `dms-phase13` namespace in both clusters, DMS phase-scoped LDAP fixture users, DMS access groups, and host test directories by default.
+
+### 16. Optional Local Regression
 
 이 검증은 mock/stub도 포함하므로 `Done`의 단독 근거로 쓰지 않는다. 코드 회귀 확인 용도다.
 
@@ -2026,20 +2193,20 @@ Command:
 
 ```bash
 cd /home/mason/workspace/dms
-python3 -m pytest -q tests/test_phase10_filesystem_rm.py tests/test_phase11_filesystem_expiry.py tests/test_phase12_filesystem_quota_import.py
+python3 -m pytest -q tests/test_phase1_contracts.py::test_plan_claim_is_atomic_under_competing_workers tests/test_gpfs_backend.py tests/test_phase12_filesystem_quota_import.py
 python3 -m pytest -q
 ```
 
 Output:
 
 ```text
-25 passed in 13.12s
-79 passed in 51.76s
+27 passed in 13.78s
+90 passed in 56.51s
 ```
 
 ## Not Implemented Yet
 
-다음 항목은 Phase 12까지 완료된 기능으로 보지 않는다.
+다음 항목은 Phase 13까지 완료된 기능으로 보지 않는다.
 
 - DMS API server, Planner, Worker, Agent의 production Helm/Kustomize 배포
 - filesystem expiry 자동 cron/scheduler/controller
@@ -2047,20 +2214,27 @@ Output:
 - filesystem quota 자동 cron/scheduler/controller
 - DMS lifecycle operation으로서의 Kubernetes namespace delete
 - Kubernetes quota drift/usage pressure 자동 cron/scheduler/controller
-- GPFS/WekaFS/Lustre filesystem quota/import live adapter
+- GPFS live staging/testbed verification on an actual IBM GPFS / IBM Storage Scale cluster
+- WekaFS/Lustre filesystem quota/import live adapter
 - 실제 VolcanoJob create/watch/terminate
 - mpifileutils image build 또는 live execution
 - Data Management POSIX permission runtime preflight
 - trusted ingress mTLS live validation
 - maintenance/drain mode의 full operational workflow
 - planned shutdown/startup recovery runbook 자동화
+- long-running worker lease heartbeat renewal과 stale recovery guard
+- observability DB write failure에 대한 best-effort safe boundary
+- live runtime backend registry의 unknown backend fail-closed 보장과 test-only stub 분리
 
 ## Comments For Next Phases
 
-- 다음 phase는 filesystem quota lifecycle, filesystem check/sync/import, 또는 Data Management read-only scan preflight 중 하나로 좁혀서 진행하는 것이 적절하다.
+- 다음 phase는 Data Management 구현 전에 `Runtime Hardening Before Data Management`로 좁혀 진행한다. 구현 대상은 observability safe write boundary, backend registry fail-closed와 Kubernetes quota live adapter wiring이다.
+- long-running worker lease heartbeat renewal과 maintenance/drain enforcement는 아직 미구현으로 남기지만 Phase 14 범위에서는 제외한다.
+- 그 다음 작업 리스트는 `docs/dms-phase13.md`의 Data Management 후보를 유지하되 Phase 15로 밀어 진행한다. 권장 순서는 Phase 15A Data Management read-only scan preflight, Phase 15B DM Worker Runtime and VolcanoJob Skeleton, Phase 15C Filesystem Policy and Initialize 순서다.
 - `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8/9에서 multi-StorageClass quota target으로 검증했다.
 - `cluster-a/testbed-cephfs`는 Phase 5/6/7/8/9에서 self-managed RM target 및 regression target으로 검증했다.
-- `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock target으로 검증했다.
+- `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11/12/13에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock, quota apply/enforcement, check/sync, import/assign, long-running RM Worker target으로 검증했다.
+- GPFS backend는 Phase 13에서 IBM Storage Scale fileset command adapter와 fake executor regression까지 구현됐다. 실제 IBM Storage Scale cluster에서의 staging/live 검증은 별도 phase 또는 운영 staging 작업으로 남아 있다.
 - Phase 8에서 실제 Agent DaemonSet report를 검증했으므로 이후 Data Management preflight나 filesystem lifecycle은 synthetic Agent report 없이 진행해야 한다.
 - Phase 4부터는 mock/stub 결과와 real backend mutation 결과를 문서에서 반드시 분리한다.
 - 실제 backend mutation이 추가될 때마다 이 문서의 `Live Verification Results`와 `Not Implemented Yet`를 갱신한다.

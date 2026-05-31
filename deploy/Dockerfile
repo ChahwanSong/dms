@@ -6,7 +6,11 @@ WORKDIR /app
 COPY pyproject.toml /app/
 COPY src /app/src
 
-RUN pip install --no-cache-dir '.[postgres]'
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir '.[postgres,ldap]'
 
 USER 65532:65532
 ENTRYPOINT ["dms"]

@@ -102,7 +102,9 @@ def main(argv: list[str] | None = None) -> int:
             kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
             worker_id=args.worker_id,
             lease_seconds=settings.worker_lease_seconds,
-            backend_registry=BackendAdapterRegistry.with_phase1_defaults(repository),
+            backend_registry=BackendAdapterRegistry.with_phase1_defaults(
+                repository, settings
+            ),
         )
         return _run_once_or_loop(worker.run_once, loop=args.loop, interval=args.interval)
     if args.command == "dm-worker":
@@ -133,9 +135,22 @@ def _run_once_or_loop(callable_once, *, loop: bool, interval: float) -> int:
         print(json.dumps({"processed": count}))
         return 0
     while True:
-        count = callable_once()
-        if count:
-            print(json.dumps({"processed": count}), flush=True)
+        try:
+            count = callable_once()
+            if count:
+                print(json.dumps({"processed": count}), flush=True)
+        except Exception as exc:  # noqa: BLE001 - long-running loops must survive one failed unit.
+            print(
+                json.dumps(
+                    {
+                        "processed": 0,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
         time.sleep(interval)
 
 

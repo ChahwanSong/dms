@@ -152,7 +152,7 @@ Filesystem adapter 자체는 LDAP에 직접 write하지 않는다. LDAP group �
 apply_quota(resource, quota_plan) -> observed_quota
 clear_or_set_unlimited_quota(resource) -> observed_quota
 set_block_state(resource, block_plan) -> observed_permission
-read_state(resource, include_usage, include_quota) -> observed_state
+read_state(resource, include_quota) -> observed_state
 ```
 
 Phase 10에서는 CephFS adapter만 live create/delete side effect를 검증하더라도, unit test는 adapter registry와 unsupported backend fail-closed path를 포함해야 한다. GPFS skeleton은 이 contract를 만족하는 mock 또는 dry-run adapter 수준으로 유지해 추후 IBM GPFS/Storage Scale 구현 시 core lifecycle 재작업 없이 확장할 수 있어야 한다.
