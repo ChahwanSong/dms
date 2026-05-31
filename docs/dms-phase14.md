@@ -99,27 +99,42 @@ Phase 14 live verification은 기존 Vagrant multi-cluster testbed를 사용한�
 
 ## Phase 14 이후 다음 작업 리스트
 
-`docs/dms-phase13.md`에 있던 Data Management 후보는 Phase 14 hardening 이후 다음 작업으로 유지한다. Phase 번호는 새 hardening phase를 끼워 넣었으므로 Phase 15로 밀어 쓴다.
+Phase 14 완료 후 다음 작업은 filesystem resource와 Kubernetes namespace quota resource의 existing resource expiry update/import semantics를 닫고, Kubernetes namespace quota resource에도 filesystem resource와 같은 expiry lifecycle을 추가하는 Phase 15로 진행한다. Data Management 후보는 Phase 15 이후 Phase 16으로 미룬다.
 
-### Phase 15A: Data Management Read-only Scan Preflight
+### Phase 15: Resource Expiry Update, Import Defaults, and Kubernetes Namespace Quota Expiry Lifecycle
+
+- filesystem resource update payload에서 `expires_at`/`expiry_at`/`clear_expires_at`으로 expiry timestamp 설정/변경/해제
+- Kubernetes namespace quota create/update/default-reset payload에서 expiry timestamp 설정/변경/해제
+- filesystem import와 Kubernetes namespace quota import/adoption에서 expiry timestamp가 있으면 요청값 사용, 없으면 server-side now + 365일 default 설정
+- `expiry_at` alias를 API에서 받아 canonical `expires_at`으로 normalize
+- write request의 과거/current expiry timestamp, timezone 없는 timestamp, alias conflict를 backend side effect 없이 reject
+- import request의 `clear_expires_at=true`를 backend side effect 없이 reject
+- expired/expiring Kubernetes namespace quota query API
+- expired but unblocked quota action-required aggregation
+- on-demand expiration sweep으로 DMS-managed `ResourceQuota/dms-storage-quota` block 처리
+- long-running Planner/RM Worker Deployment 기반 live verification
+
+구체 구현 프롬프트는 `docs/dms-phase15.md`를 따른다.
+
+### Phase 16A: Data Management Read-only Scan Preflight
 
 - filesystem resource boundary를 read-only scan target으로 사용
 - DM Agent report 기반 candidate pool
 - POSIX identity/mount/tool preflight
 - VolcanoJob 이전 local scan preflight 검증
 
-### Phase 15B: DM Worker Runtime and VolcanoJob Skeleton
+### Phase 16B: DM Worker Runtime and VolcanoJob Skeleton
 
 - `dms dm-worker --loop` Deployment
 - VolcanoJob create/watch/delete skeleton
 - job lease/recovery
 - artifact URI and preview lifecycle
 
-### Phase 15C: Filesystem Policy and Initialize
+### Phase 16C: Filesystem Policy and Initialize
 
 - filesystem default quota policy
 - `filesystem.initialize`
 - `reset_quota_to_default=true`
 - quota clear/unlimited lifecycle
 
-권장 순서는 Phase 14 hardening을 먼저 닫고, 그 다음 Phase 15A로 Data Management read-only scan preflight를 구현한 뒤, Phase 15B로 DM Worker/VolcanoJob live execution을 여는 것이다. Phase 15C는 filesystem lifecycle 정책 확장이므로 Data Management preflight와 분리해도 된다.
+권장 순서는 Phase 14 hardening을 먼저 닫고, Phase 15로 resource expiry update/import default와 Kubernetes namespace quota expiry lifecycle을 구현한 뒤, Phase 16A로 Data Management read-only scan preflight를 구현하는 것이다. Phase 16C는 filesystem lifecycle 정책 확장이므로 Data Management preflight와 분리해도 된다.

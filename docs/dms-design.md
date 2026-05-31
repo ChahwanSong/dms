@@ -650,6 +650,7 @@ Resource Management API는 리소스 관련 요청을 API로 받고 처리한다
 - observability query
 - existing directory quota assignment
 - import existing filesystem directory
+- Kubernetes namespace quota import/adoption
 - resource consistency check
 - Kubernetes namespace storage quota DB sync from live state
 - storage backend template and `storage_name` mapping management
@@ -671,6 +672,7 @@ Operation 의미:
 | expiration sweep | 만료된 resource 집합 | `expires_at` 기준으로 만료된 resource를 찾아 `block=ON` 처리 대상으로 전환한다. |
 | existing directory quota assignment | 기존 filesystem directory | DMS가 생성하지 않은 directory를 quota-only managed resource로 등록하고 quota를 적용한다. |
 | import existing filesystem directory | 기존 filesystem directory | DMS가 생성하지 않은 기존 directory를 검증 후 full DMS-managed filesystem resource로 전환하고, 현재 filesystem 상태를 초기 desired/applied/observed state로 기록한다. |
+| Kubernetes namespace quota import/adoption | 기존 DMS 전용 Kubernetes ResourceQuota | 운영용 PostgreSQL에 등록되지 않았거나 복구가 필요한 DMS 전용 `ResourceQuota/dms-storage-quota`를 검증 후 Kubernetes namespace quota resource로 편입하고, live hard와 import expiry를 초기 desired/applied/observed state로 기록한다. |
 | resource consistency check | DMS DB에 등록된 Filesystem resource, Kubernetes namespace storage quota resource | 운영용 PostgreSQL의 desired/applied/observed state와 실제 storage backend 또는 Kubernetes backend live state를 read-only로 조회해 resource 실재 여부와 상태 일치 여부를 비교하고 검증 결과를 기록한다. |
 | Kubernetes namespace storage quota DB sync from live state | DMS-managed Kubernetes ResourceQuota | effective quota 경고 또는 DB 손실/불일치 상황에서 실제 Kubernetes의 DMS-managed ResourceQuota 상태를 검증하고 운영용 PostgreSQL의 quota state를 live state 기준으로 갱신한다. |
 | storage backend template and `storage_name` mapping management | storage backend template, `storage_name` mapping | 운영 중(runtime)에 새 storage mapping을 추가하거나 기존 mapping을 수정, 비활성화하고, Kubernetes API inventory와 DMS Agent report를 기준으로 sanity check를 수행한다. 이 capability도 다른 DMS API와 동일한 인증 및 operation authorization policy를 따른다. |
@@ -817,6 +819,10 @@ Import existing filesystem directory 처리 원칙:
 - 대상 directory가 이미 full DMS-managed filesystem resource이면 import를 수행하지 않고 conflict 또는 no-op success로 처리해야 한다.
 - 대상 directory가 quota-only managed resource이면 import를 통해 full DMS-managed filesystem resource로 승격할 수 있다. 이 경우 기존 quota-only 상태와 import 전환 이력을 운영용 PostgreSQL에 기록해야 한다.
 - 대상 directory가 운영용 PostgreSQL에 등록되어 있지 않은 unmanaged directory이면 import 성공 시 새 DMS-managed filesystem resource로 기록한다.
+- Import 요청은 optional `expires_at` 또는 alias `expiry_at`을 받을 수 있다. 값이 주어지면 timezone-aware ISO-8601 timestamp로 검증하고 현재 시각보다 과거이거나 같으면 실패해야 한다.
+- Import 요청에 expiry timestamp가 없으면 Planner 기준 server-side now부터 365일 뒤 값을 canonical `expires_at`으로 설정한다.
+- Import는 full managed lifecycle 편입 지점이므로 `clear_expires_at=true`는 허용하지 않는다.
+- 기존 filesystem marker에 expiry metadata가 있더라도 source of truth는 import request 값 또는 import default 값이다. 기존 marker 값은 observed evidence로 기록할 수 있지만 운영용 PostgreSQL desired state를 자동으로 덮어쓰면 안 된다.
 - Planner와 RM Worker runtime은 import 전 directory의 현재 filesystem 상태를 live 조회해야 한다.
 - 조회해야 하는 상태에는 owner, group, permission, ACL 사용 여부, quota 설정, filesystem type, storage backend capability가 포함된다.
 - Access control import는 명시적으로 해석 가능해야 한다. 요청이 사용자 리스트 또는 DMS-managed group 정책을 제공하거나, DMS가 기존 Linux group membership을 중앙 identity system에서 해석할 수 있어야 한다. 둘 다 불가능하면 import는 실패해야 한다.
@@ -1428,7 +1434,9 @@ Effective quota 경고가 발생했을 때 운영자는 두 방향 중 하나를
 
 Kubernetes namespace storage quota DB sync from live state API는 Kubernetes namespace에 존재하는 DMS 전용 ResourceQuota를 authoritative live state로 보고 운영용 PostgreSQL을 갱신하는 명시적 복구 operation이다. 이 API는 Kubernetes object를 수정하지 않으며, DB desired/applied/observed state와 recovery 이력만 갱신한다.
 
-DMS는 이 API를 실행하기 전에 다음을 검증해야 한다.
+Kubernetes namespace quota import/adoption API는 DB에 resource가 없거나 복구가 필요한 상태에서 live DMS 전용 `ResourceQuota/dms-storage-quota`를 DMS-managed namespace quota resource로 편입하는 명시적 operation이다. Import 요청은 optional `expires_at` 또는 alias `expiry_at`을 받을 수 있다. 값이 주어지면 timezone-aware ISO-8601 timestamp로 검증하고 현재 시각보다 과거이거나 같으면 실패해야 한다. 값이 없으면 Planner 기준 server-side now부터 365일 뒤 값을 canonical `expires_at`으로 설정한다. Import에서 `clear_expires_at=true`는 허용하지 않는다. Live annotation의 expiry 값은 observed evidence일 뿐이며, 운영용 PostgreSQL desired state의 source of truth는 import request 값 또는 import default 값이다.
+
+DMS는 Kubernetes namespace quota import/adoption 또는 sync-from-live API를 실행하기 전에 다음을 검증해야 한다.
 
 - 대상 `cluster_name + namespace_name`이 요청에서 명확히 지정되었는지 확인한다.
 - 대상 namespace에 DMS 전용 ResourceQuota인 `dms-storage-quota`가 존재하는지 확인한다.
@@ -1658,7 +1666,7 @@ StorageClass는 cluster 내부에서만 unique하므로, 운영용 PostgreSQL에
 - Data Management API job은 warning threshold, timeout, cancel 처리를 지원해야 한다.
 - Data Management API의 별도 메타데이터 수정 operation은 현재 범위에서 제외해야 한다.
 - DMS는 filesystem resource와 Kubernetes namespace storage quota resource를 관리해야 한다.
-- DMS는 Resource Management API로 `create`, `update`, `block`, `initialize`, `query`, `delete`, `expiration sweep`, `default quota policy update`, `existing directory quota assignment`, `import existing filesystem directory`, `resource consistency check`, `Kubernetes namespace storage quota DB sync from live state` API를 제공해야 한다.
+- DMS는 Resource Management API로 `create`, `update`, `block`, `initialize`, `query`, `delete`, `expiration sweep`, `default quota policy update`, `existing directory quota assignment`, `import existing filesystem directory`, `Kubernetes namespace quota import/adoption`, `resource consistency check`, `Kubernetes namespace storage quota DB sync from live state` API를 제공해야 한다.
 - DMS는 Operational Query API로 현재 review/action이 필요한 unresolved issue list, resource history, requester별 request history, expired/expiring resource list, `block=ON` resource list, failed/recovery-needed request/run list, long-running request/run list, quota usage pressure, DB/live drift 후보, worker/agent health, identity mapping 상태, Data Management Job/preview 상태, diagnostic event correlation을 조회할 수 있어야 한다.
 - DMS는 `storage_name + directory_name`을 기준으로 DMS에 등록되지 않은 filesystem directory의 quota를 설정하는 요청을 지원해야 한다.
 - DMS는 기존 filesystem directory를 명시적으로 import하여 full DMS-managed filesystem resource로 전환하는 요청을 지원해야 한다.
@@ -2445,6 +2453,7 @@ RM Worker runtime은 block 적용 또는 해제 결과와 observed state를 운�
 - Data Management Job은 selected mpifileutils tool, tool selection reason, priority, worker pool summary, preflight result, confirm status, warning, timeout, final status를 추적 가능해야 한다.
 - Data Management Job의 상세 stdout/stderr, mpifileutils report, scan report는 artifact URI로 추적 가능해야 하며, 운영용 PostgreSQL에는 상태와 요약을 저장해야 한다.
 - DMS가 관리하는 resource는 만료 처리를 위해 `expires_at`을 추적할 수 있어야 한다.
+- Filesystem import와 Kubernetes namespace quota import/adoption은 request에 `expires_at` 또는 `expiry_at`이 있으면 그 값을 검증해 사용하고, 없으면 server-side now + 365일을 default `expires_at`으로 설정해야 한다.
 - Expiration sweep 결과와 sweep으로 생성된 `block=ON` request 또는 plan은 추적 가능해야 한다.
 - 사용자 입력의 `TB`는 decimal terabyte로 해석하며, `1TB = 10^12 bytes`다.
 - 용량 quota는 운영용 PostgreSQL 내부에서 byte 단위 정수로 저장한다.

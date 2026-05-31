@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-05-31 21:24 +0900
+Last updated: 2026-05-31 22:41 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -2332,6 +2332,7 @@ Output:
 - filesystem expiry delete/archive 정책
 - filesystem quota 자동 cron/scheduler/controller
 - DMS lifecycle operation으로서의 Kubernetes namespace delete
+- filesystem/Kubernetes existing resource expiry update/import default validation과 Kubernetes namespace quota expiry query/action-required/on-demand sweep lifecycle
 - Kubernetes quota drift/usage pressure 자동 cron/scheduler/controller
 - GPFS live staging/testbed verification on an actual IBM GPFS / IBM Storage Scale cluster
 - WekaFS/Lustre filesystem quota/import live adapter
@@ -2345,9 +2346,9 @@ Output:
 
 ## Comments For Next Phases
 
-- 다음 phase는 Phase 15A `Data Management Read-only Scan Preflight`로 진행한다.
+- 다음 phase는 Phase 15 `Resource Expiry Update, Import Defaults, and Kubernetes Namespace Quota Expiry Lifecycle`로 진행한다. 구현 프롬프트는 `docs/dms-phase15.md`다.
 - long-running worker lease heartbeat renewal과 maintenance/drain enforcement는 아직 미구현으로 남기지만 Phase 14 범위에서는 제외한다.
-- Data Management 작업 순서는 Phase 15A Data Management read-only scan preflight, Phase 15B DM Worker Runtime and VolcanoJob Skeleton, Phase 15C Filesystem Policy and Initialize 순서다.
+- Data Management 작업 순서는 Phase 15 이후 Phase 16A Data Management read-only scan preflight, Phase 16B DM Worker Runtime and VolcanoJob Skeleton, Phase 16C Filesystem Policy and Initialize 순서다.
 - `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8/9에서 multi-StorageClass quota target으로 검증했다.
 - `cluster-a/testbed-cephfs`는 Phase 5/6/7/8/9에서 self-managed RM target 및 regression target으로 검증했다.
 - `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11/12/13에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock, quota apply/enforcement, check/sync, import/assign, long-running RM Worker target으로 검증했다.
