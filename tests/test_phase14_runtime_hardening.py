@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -33,17 +34,19 @@ class FailingObservabilityRepository(ObservabilityRepository):
         raise RuntimeError("observability database unavailable")
 
 
-def test_auth_rejection_survives_observability_write_failure(tmp_path):
+def test_auth_rejection_survives_observability_write_failure(tmp_path, caplog):
     settings, repository, observability = _repositories(tmp_path)
     client = TestClient(create_app(settings, repository, observability))
 
-    response = client.post(
-        "/api/v1/resource-management/filesystems",
-        json=_filesystem_body("auth-failure"),
-    )
+    with caplog.at_level(logging.WARNING, logger="dms.repositories"):
+        response = client.post(
+            "/api/v1/resource-management/filesystems",
+            json=_filesystem_body("auth-failure"),
+        )
 
     assert response.status_code == 401
     assert repository.list_requests(requester_id="user-1") == []
+    assert "observability event write failed" in caplog.text
 
 
 def test_worker_success_survives_observability_write_failure(tmp_path):

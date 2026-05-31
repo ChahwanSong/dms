@@ -158,7 +158,7 @@ def main() -> int:
         },
     }
     persist_pvc_verification(services.repository, request_id, pvc_verification)
-    services.observability.record_event(
+    services.observability.safe_record_event(
         component="phase4-verification",
         severity="INFO",
         event_type="pvc_admission_verification_completed",

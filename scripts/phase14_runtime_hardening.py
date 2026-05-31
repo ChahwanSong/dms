@@ -81,14 +81,23 @@ def main() -> int:
     repository = DmsRepository(Database(settings.database_url))
     client = HttpClient(os.environ["DMS_PHASE13_API_URL"].rstrip("/"))
     token = uuid4().hex[:8]
+    control_namespace = os.environ["DMS_PHASE13_NAMESPACE"]
     headers = {"x-dms-actor": "api-client"}
     if settings.auth_shared_token:
         headers["authorization"] = f"Bearer {settings.auth_shared_token}"
 
     namespace_name = f"dms-phase14-quota-{token}"
     unknown_directory = f"dms-phase14-unknown-{token}"
-    summary: dict[str, object] = {"token": token}
+    summary: dict[str, object] = {"status": "ok", "token": token}
     try:
+        inject_observability_write_failure(settings)
+        auth_failure = verify_auth_rejection_with_broken_observability(
+            repository,
+            client,
+            namespace=control_namespace,
+        )
+        summary["observability_failure"] = auth_failure
+
         _register_mapping(
             repository,
             storage_name="phase14-longhorn-b",
@@ -153,7 +162,7 @@ def main() -> int:
                 "managed_root": "/mnt/testbed-cephfs/dms-phase14",
             },
             cluster_name="cluster-a",
-            storage_class_name="testbed-cephfs",
+            storage_class_name=f"phase14-unknown-sc-{token}",
         )
         unknown_mapping = repository.get_storage_mapping("phase14-unknown-a")
         assert_equal("unknown mapping status", unknown_mapping["sanity_status"], "Ready")
@@ -182,16 +191,118 @@ def main() -> int:
         )
         summary["unknown_backend_request"] = unknown_terminal
         summary["action_required_match_count"] = sum(
-            1 for issue in action_issues if issue.get("request_id") == unknown_request["request_id"]
+            1
+            for issue in action_issues
+            if issue.get("request_id") == unknown_request["request_id"]
+        )
+        summary["rm_worker_observability_log_seen"] = wait_log_contains(
+            control_namespace,
+            "deploy/dms-rm-worker",
+            "observability event write failed",
+        )
+        assert_true(
+            "rm-worker observability failure warning logged",
+            bool(summary["rm_worker_observability_log_seen"]),
         )
 
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
     finally:
         run(
-            ["ssh", "c2-control", "kubectl", "delete", "namespace", namespace_name, "--ignore-not-found=true"],
+            [
+                "ssh",
+                "c2-control",
+                "kubectl",
+                "delete",
+                "namespace",
+                namespace_name,
+                "--ignore-not-found=true",
+            ],
             check=False,
         )
+
+
+def inject_observability_write_failure(settings: Settings) -> None:
+    with Database(settings.observability_database_url).connect() as connection:
+        connection.execute("DROP TABLE IF EXISTS diagnostic_events")
+
+
+def verify_auth_rejection_with_broken_observability(
+    repository: DmsRepository,
+    client: HttpClient,
+    *,
+    namespace: str,
+) -> dict[str, object]:
+    requester_id = "phase14-auth-failure"
+    response = client.post(
+        "/api/v1/resource-management/filesystems",
+        headers={"x-dms-actor": "api-client"},
+        json_body={
+            "requester_id": requester_id,
+            "payload": {
+                "storage_name": "cephfs-a",
+                "directory_name": "phase14-auth-failure",
+                "resource_type": "user",
+                "users": ["alice"],
+            },
+        },
+    )
+    assert_equal(
+        "auth rejection status under observability failure",
+        response.status_code,
+        401,
+    )
+    assert_equal(
+        "auth rejection did not persist operational request",
+        repository.list_requests(requester_id=requester_id),
+        [],
+    )
+    api_log_seen = wait_log_contains(
+        namespace,
+        "deploy/dms-api",
+        "observability event write failed",
+    )
+    assert_true("api observability failure warning logged", bool(api_log_seen))
+    return {
+        "diagnostic_events_table": "dropped",
+        "auth_failure_status": response.status_code,
+        "auth_request_persisted": False,
+        "api_observability_log_seen": api_log_seen,
+    }
+
+
+def wait_log_contains(
+    namespace: str,
+    resource: str,
+    needle: str,
+    *,
+    timeout_seconds: int = 30,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if log_contains(namespace, resource, needle):
+            return True
+        time.sleep(2)
+    return False
+
+
+def log_contains(namespace: str, resource: str, needle: str) -> bool:
+    completed = run(
+        [
+            "ssh",
+            "c1-control",
+            "kubectl",
+            "-n",
+            namespace,
+            "logs",
+            resource,
+            "--since=15m",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return needle in completed.stdout or needle in completed.stderr
 
 
 def _register_mapping(
