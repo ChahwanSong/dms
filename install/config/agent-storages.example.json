@@ -1,0 +1,31 @@
+{
+  "storages": [
+    {
+      "storage_name": "cephfs-a",
+      "backend_type": "cephfs",
+      "cluster_name": "cluster-a",
+      "storage_class_name": "cephfs-rwx",
+      "csi_driver": "rook-ceph.cephfs.csi.ceph.com",
+      "mount_paths": ["/mnt/cephfs-rwx"],
+      "network_endpoints": []
+    },
+    {
+      "storage_name": "longhorn-a",
+      "backend_type": "longhorn",
+      "cluster_name": "cluster-a",
+      "storage_class_name": "longhorn",
+      "csi_driver": "driver.longhorn.io",
+      "mount_paths": [],
+      "network_endpoints": []
+    },
+    {
+      "storage_name": "gpfs-a",
+      "backend_type": "gpfs",
+      "cluster_name": "cluster-a",
+      "storage_class_name": "gpfs-csi",
+      "csi_driver": "spectrumscale.csi.ibm.com",
+      "mount_paths": ["/gpfs/gpfs0"],
+      "network_endpoints": []
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dms-api
+  namespace: dms
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - dms.example.internal
+      secretName: dms-api-tls
+  rules:
+    - host: dms.example.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dms-api
+                port:
+                  name: http
