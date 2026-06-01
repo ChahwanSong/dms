@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-api_url="${DMS_API_URL:?DMS_API_URL is required}"
+api_url="${DMS_API_URL:?DMS_API_URL 값이 필요합니다}"
 actor="${DMS_ACTOR:-operator}"
 token="${DMS_TOKEN:-}"
 
@@ -18,10 +18,10 @@ check() {
   echo
 }
 
-check "health" "/healthz"
-check "inventory" "/api/v1/operations/inventory"
-check "storage mappings" "/api/v1/operations/storage-mappings"
-check "agent health" "/api/v1/operations/worker-agent-health"
-check "action required" "/api/v1/operations/action-required"
+check "health 확인" "/healthz"
+check "inventory 확인" "/api/v1/operations/inventory"
+check "storage mapping 확인" "/api/v1/operations/storage-mappings"
+check "agent health 확인" "/api/v1/operations/worker-agent-health"
+check "action required 확인" "/api/v1/operations/action-required"
 
-echo "install verification queries completed"
+echo "설치 검증 query가 완료되었습니다"

@@ -3,16 +3,16 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage:
+사용법:
   create-serviceaccount-kubeconfig.sh <cluster-name> <output-kubeconfig>
 
-Run this while kubectl is pointed at the target cluster after applying:
+다음을 적용한 뒤 kubectl이 target cluster를 가리키는 상태에서 실행한다.
   install/kubernetes/target-cluster-rbac.yaml
 
-Environment:
-  DMS_REMOTE_NAMESPACE       default: dms
-  DMS_REMOTE_SERVICE_ACCOUNT default: dms-remote
-  DMS_TOKEN_DURATION         default: 8760h
+환경변수:
+  DMS_REMOTE_NAMESPACE       기본값: dms
+  DMS_REMOTE_SERVICE_ACCOUNT 기본값: dms-remote
+  DMS_TOKEN_DURATION         기본값: 8760h
 USAGE
 }
 
@@ -42,4 +42,4 @@ kubectl config --kubeconfig "$output" set-context "$cluster_name" \
 kubectl config --kubeconfig "$output" use-context "$cluster_name" >/dev/null
 
 chmod 0600 "$output"
-echo "wrote $output for cluster $cluster_name"
+echo "$cluster_name cluster용 kubeconfig를 $output 경로에 작성했습니다"

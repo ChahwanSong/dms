@@ -1,6 +1,6 @@
--- DMS PostgreSQL bootstrap template.
--- Run as a PostgreSQL superuser or database owner after replacing passwords.
--- The DMS application still runs its own schema migration through `dms migrate`.
+-- DMS PostgreSQL 초기화 템플릿.
+-- 비밀번호를 교체한 뒤 PostgreSQL superuser 또는 database owner로 실행한다.
+-- DMS 애플리케이션은 여전히 `dms migrate`를 통해 자체 schema migration을 실행한다.
 
 CREATE ROLE dms_app LOGIN PASSWORD 'CHANGE_ME_DMS_APP_PASSWORD';
 CREATE ROLE dms_obs LOGIN PASSWORD 'CHANGE_ME_DMS_OBS_PASSWORD';

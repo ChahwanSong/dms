@@ -3,16 +3,16 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage:
+사용법:
   register-identity-mappings.sh <identity-mappings.json>
 
-The JSON file can be:
+JSON file 형식:
   {"identity_mappings": [ ... ]}
 
-Environment:
-  DMS_API_URL  required
-  DMS_TOKEN    required when DMS_AUTH_SHARED_TOKEN is configured
-  DMS_ACTOR    default: installer
+환경변수:
+  DMS_API_URL  필수
+  DMS_TOKEN    DMS_AUTH_SHARED_TOKEN이 설정되어 있으면 필수
+  DMS_ACTOR    기본값: installer
 USAGE
 }
 
@@ -21,11 +21,11 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
-command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
-command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
+command -v jq >/dev/null || { echo "jq가 필요합니다" >&2; exit 1; }
+command -v curl >/dev/null || { echo "curl이 필요합니다" >&2; exit 1; }
 
 file="$1"
-api_url="${DMS_API_URL:?DMS_API_URL is required}"
+api_url="${DMS_API_URL:?DMS_API_URL 값이 필요합니다}"
 actor="${DMS_ACTOR:-installer}"
 token="${DMS_TOKEN:-}"
 
@@ -38,7 +38,7 @@ jq -c '.identity_mappings[]' "$file" | while IFS= read -r item; do
   provider="$(jq -r '.identity_provider | @uri' <<<"$item")"
   requester_id="$(jq -r '.requester_id | @uri' <<<"$item")"
   label="$(jq -r '.identity_provider + ":" + .requester_id' <<<"$item")"
-  echo "registering identity mapping: $label"
+  echo "identity mapping 등록 중: $label"
   curl -fsS -X PUT "${api_url%/}/api/v1/identity-mappings/${provider}/${requester_id}" \
     "${headers[@]}" \
     --data "$item"

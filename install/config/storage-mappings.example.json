@@ -46,7 +46,7 @@
   "unsupported_examples": [
     {
       "storage_name": "weka-a",
-      "reason": "WEKA filesystem backend is not implemented yet. Keep this out of storage_mappings until backend_type=weka is implemented.",
+      "reason": "WEKA filesystem backend는 아직 구현되지 않았다. backend_type=weka가 구현될 때까지 storage_mappings에 넣지 않는다.",
       "backend_template": {
         "backend_type": "weka",
         "filesystem_name": "default",
