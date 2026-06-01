@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-05-31 22:41 +0900
+Last updated: 2026-06-01 00:04 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -11,7 +11,7 @@ Last updated: 2026-05-31 22:41 +0900
 - `Done`은 실제 테스트베드 또는 실제 외부 시스템에 연결해 확인된 기능만 의미한다.
 - local pytest, stub adapter, synthetic data는 보조 회귀 검증으로만 기록한다.
 - 아직 실제 backend side effect가 구현되지 않은 기능은 성공처럼 적지 않고 명확히 미구현으로 남긴다.
-- Phase 14까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP/SSSD, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity, Kubernetes default quota reset, on-demand quota audit, drift/usage pressure/effective quota action-required aggregation, DMS-managed ResourceQuota metadata drift detection, `cluster-a/c1-worker` 및 `cluster-b/c2-worker` host-mounted CephFS filesystem create/delete lifecycle, filesystem expiry query, API-driven expiration sweep, filesystem block/unblock lifecycle, LDAP access group membership, POSIX permission boundary, CephFS directory capacity/file-count quota apply/enforcement, quota update/decrease apply/check/sync/action-required, existing directory quota-only assignment, existing directory full import, Kubernetes long-running Planner/RM Worker Deployment 기반 RM 처리, RM Worker scale/restart/stale-claim recovery evidence, observability DB write failure safe boundary, live RM Worker의 Longhorn Kubernetes ResourceQuota apply, unknown backend fail-closed/action-required이다. GPFS는 IBM Storage Scale command adapter 구현과 fake executor regression까지 완료했고, live GPFS 검증은 테스트베드에 GPFS cluster가 없어 skip evidence로 남겼다.
+- Phase 15까지의 실제 live 검증 대상은 PostgreSQL, OpenLDAP/SSSD, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity, Kubernetes default quota reset, on-demand quota audit, drift/usage pressure/effective quota action-required aggregation, DMS-managed ResourceQuota metadata drift detection, `cluster-a/c1-worker` 및 `cluster-b/c2-worker` host-mounted CephFS filesystem create/delete lifecycle, filesystem expiry query, API-driven filesystem expiration sweep, filesystem block/unblock lifecycle, filesystem expiry update/import default, LDAP access group membership, POSIX permission boundary, CephFS directory capacity/file-count quota apply/enforcement, quota update/decrease apply/check/sync/action-required, existing directory quota-only assignment, existing directory full import, Kubernetes long-running Planner/RM Worker Deployment 기반 RM 처리, RM Worker scale/restart/stale-claim recovery evidence, observability DB write failure safe boundary, live RM Worker의 Longhorn Kubernetes ResourceQuota apply, unknown backend fail-closed/action-required, Kubernetes namespace quota `expires_at` create/update/import, expired query/action-required, on-demand expiration sweep block이다. GPFS는 IBM Storage Scale command adapter 구현과 fake executor regression까지 완료했고, live GPFS 검증은 테스트베드에 GPFS cluster가 없어 skip evidence로 남겼다.
 
 ## Testbed Architecture
 
@@ -104,7 +104,7 @@ longhorn-csi-plugin-pddq5                           3/3     Running   0         
 longhorn-driver-deployer-6f94cb9fd9-4pxv7           1/1     Running   0          8h
 ```
 
-## Implemented Through Phase 14
+## Implemented Through Phase 15
 
 ### Phase 1: Core Lifecycle Skeleton
 
@@ -740,6 +740,54 @@ Live 검증 대상:
 - Phase 14는 worker lease heartbeat renewal 또는 maintenance/drain enforcement를 구현하지 않는다.
 - Phase 14는 production Helm/Kustomize chart를 완성하지 않는다. 검증용 manifest는 verifier script가 생성한다.
 - Phase 14는 GPFS live backend를 테스트베드에서 검증하지 않는다.
+
+### Phase 15: Resource Expiry Update, Import Defaults, and Kubernetes Namespace Quota Expiry Lifecycle
+
+확실히 구현된 범위:
+
+- Shared expiry field policy
+  - public API/DB/query response field를 `expires_at`으로 통일
+  - `expiry_at`과 `clear_expires_at` payload는 unsupported field로 reject
+  - timezone-aware ISO-8601과 future timestamp validation 적용
+- Filesystem expiry semantics
+  - create request의 `expires_at` 필수화
+  - update request의 optional `expires_at` 변경 지원
+  - update에서 `expires_at` 생략 시 기존 desired expiry 보존
+  - import request의 optional `expires_at` 지원
+  - import에서 `expires_at` 생략 시 Planner 기준 server-side now + 365일 default 설정
+- Kubernetes namespace quota expiry semantics
+  - create request의 `expires_at` 필수화
+  - update/default-reset request의 optional `expires_at` 변경 및 생략 시 보존 지원
+  - DMS-owned `ResourceQuota/dms-storage-quota` import/adoption operation 추가
+  - import에서 `expires_at` 생략 시 Planner 기준 server-side now + 365일 default 설정
+  - live `ResourceQuota` manifest annotation `dms.io/expires-at` 반영
+- Kubernetes namespace quota expiry operations
+  - `GET /api/v1/operations/kubernetes/namespace-quotas/expiring`
+  - expired but unblocked quota의 `action-required` issue `kubernetes_quota_expired_unblocked`
+  - `POST /api/v1/resource-management/kubernetes/namespace-quotas:expiration-sweep`
+  - sweep은 live `ResourceQuota.spec.hard`를 zero hard로 변경하고 기존 hard를 `block_state.restore_hard`로 보존
+  - `resource_type=system/admin`, already blocked, active work target skip 처리
+- Phase 15 verification scripts 추가
+  - `scripts/phase15_resource_expiry.py`
+  - `scripts/verify-phase15-testbed.sh`
+
+Live 검증 대상:
+
+- 실제 PostgreSQL: `192.168.56.11:30432`
+- 실제 OpenLDAP/SSSD on `c1-worker`
+- 실제 DMS API Deployment on `cluster-a`
+- 실제 DMS Agent DaemonSet on Ceph host-mounted worker nodes
+- 실제 Planner Deployment and RM Worker Deployment on Kubernetes
+- 실제 `cluster-a/c1-worker` host-mounted CephFS filesystem create/update side effect
+- 실제 `cluster-b/testbed-longhorn` Kubernetes `ResourceQuota/dms-storage-quota` create/update/import/sweep side effect
+
+주의:
+
+- Phase 15는 filesystem/Kubernetes expiry 자동 cron/scheduler/controller를 구현하지 않는다.
+- Phase 15는 filesystem expiry delete/archive 정책을 구현하지 않는다.
+- Phase 15는 Data Management `scan/sync/rm` live execution이나 VolcanoJob execution을 구현하지 않는다.
+- Phase 15는 production Helm/Kustomize chart를 완성하지 않는다. 검증용 manifest는 verifier script가 생성한다.
+- Phase 15는 GPFS live backend를 테스트베드에서 검증하지 않는다.
 
 ## Live Verification Results
 
@@ -1743,6 +1791,58 @@ Final Phase 14 output summary:
 
 - `docs/dms-phase14-verification.md`
 
+### Phase 15 Live Verification
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE13_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase15-testbed.sh
+```
+
+Final Phase 15 output summary:
+
+```json
+{
+  "status": "ok",
+  "operational_database": "dms_phase13_phase15_20260531235816",
+  "observability_database": "dms_phase13_obs_phase15_20260531235816",
+  "filesystem": {
+    "resource_key": "cephfs-a:phase15-fs-a8b28b83",
+    "create_request": "req_f1c63bad8b454d06acf214cd9e3fb744",
+    "update_request": "req_b8f978d428c749e098c0e7c4f3e08e30",
+    "expires_at": "2026-09-28T15:01:46.763311+00:00"
+  },
+  "kubernetes": {
+    "create_request": "req_792231dec1504117a8cd063f5bde8bfd",
+    "update_request": "req_1d99495af84543b68b58573bcf10faba",
+    "import_request": "req_9f15a8f3f5224b62a7902a3f65e89214",
+    "sweep_request": "req_12cdbc2afbb54cc4a9e570768e2704c8",
+    "expired_query_count": 1,
+    "sweep_hard": {
+      "persistentvolumeclaims": "0",
+      "requests.storage": "0",
+      "testbed-longhorn.storageclass.storage.k8s.io/persistentvolumeclaims": "0",
+      "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "0"
+    }
+  }
+}
+```
+
+검증 의미:
+
+- Phase 15 verifier는 Phase 13 long-running runtime smoke를 먼저 재실행했고, testbed live flow에서 `Planner.run_once()` 또는 `RMWorkerRuntime.run_once()`를 직접 호출하지 않았다.
+- Filesystem resource는 future `expires_at`으로 create된 뒤 update request로 DB desired expiry가 갱신됐다.
+- Kubernetes namespace quota create는 live `ResourceQuota/dms-storage-quota`에 `dms.io/expires-at` annotation을 반영했다.
+- Kubernetes namespace quota update에서 `expires_at`을 생략하면 기존 expiry가 보존됐다.
+- DMS-owned live `ResourceQuota/dms-storage-quota` import/adoption에서 `expires_at` 생략 시 default expiry가 기록됐다.
+- expired Kubernetes namespace quota는 expiring query와 action-required에 노출됐다.
+- on-demand expiration sweep은 live `ResourceQuota.spec.hard`를 모두 `0`으로 설정했다.
+
+상세 검증 기록:
+
+- `docs/dms-phase15-verification.md`
+
 ### PostgreSQL Evidence Query
 
 위 live verification이 만든 DB를 직접 조회한 결과다. DB 이름은 실행마다 바뀌므로 재검증 시에는 직전 output의 DB 이름으로 바꿔 실행한다.
@@ -2301,7 +2401,34 @@ verifies unknown backend fail-closed/action-required behavior. It cleans up the
 temporary `dms-phase14` namespace in both clusters and the Phase 14 quota
 namespace on `cluster-b` by default.
 
-### 17. Optional Local Regression
+### 17. Re-run Phase 15 Live Verification With Fresh DBs
+
+Command:
+
+```bash
+cd /home/mason/workspace/dms
+./scripts/verify-phase15-testbed.sh
+```
+
+The script creates new PostgreSQL DB names using the current timestamp unless
+`DMS_PHASE15_DB_SUFFIX`, `DMS_PHASE13_OPERATIONAL_DB`, or
+`DMS_PHASE13_OBSERVABILITY_DB` are set.
+
+The script reuses the Phase 13 long-running runtime verifier first, then verifies
+filesystem expiry update, Kubernetes namespace quota expiry create/update/import,
+expiring query, action-required aggregation, and on-demand expiration sweep. It
+cleans up the temporary `dms-phase15` namespace in both clusters and Phase 15
+quota namespaces on `cluster-b` by default.
+
+To skip rebuilding the image when `testbed-registry:5000/dms:phase15` is already
+available:
+
+```bash
+cd /home/mason/workspace/dms
+DMS_PHASE13_SKIP_IMAGE_BUILD=1 ./scripts/verify-phase15-testbed.sh
+```
+
+### 18. Optional Local Regression
 
 이 검증은 mock/stub도 포함하므로 `Done`의 단독 근거로 쓰지 않는다. 코드 회귀 확인 용도다.
 
@@ -2309,30 +2436,28 @@ Command:
 
 ```bash
 cd /home/mason/workspace/dms
-python3 -m py_compile scripts/phase14_runtime_hardening.py scripts/phase4_kubernetes_quota_live.py src/dms/backend_registry.py src/dms/repositories.py src/dms/api.py src/dms/workers.py src/dms/agent.py tests/test_phase14_runtime_hardening.py
-python3 -m pytest -q tests/test_phase14_runtime_hardening.py tests/test_phase1_contracts.py tests/test_gpfs_backend.py
+python3 -m py_compile scripts/phase13_long_running_rm_worker.py scripts/phase14_runtime_hardening.py scripts/phase15_resource_expiry.py
 python3 -m pytest -q
-bash -n scripts/verify-phase14-testbed.sh scripts/verify-phase13-testbed.sh
+bash -n scripts/verify-phase15-testbed.sh scripts/verify-phase14-testbed.sh scripts/verify-phase13-testbed.sh
 git diff --check
 ```
 
 Output:
 
 ```text
-33 passed in 27.76s
-97 passed in 59.17s
+102 passed in 62.42s
 ```
 
 ## Not Implemented Yet
 
-다음 항목은 Phase 14까지 완료된 기능으로 보지 않는다.
+다음 항목은 Phase 15까지 완료된 기능으로 보지 않는다.
 
 - DMS API server, Planner, Worker, Agent의 production Helm/Kustomize 배포
 - filesystem expiry 자동 cron/scheduler/controller
 - filesystem expiry delete/archive 정책
+- Kubernetes namespace quota expiry 자동 cron/scheduler/controller
 - filesystem quota 자동 cron/scheduler/controller
 - DMS lifecycle operation으로서의 Kubernetes namespace delete
-- filesystem/Kubernetes existing resource expiry update/import default validation과 Kubernetes namespace quota expiry query/action-required/on-demand sweep lifecycle
 - Kubernetes quota drift/usage pressure 자동 cron/scheduler/controller
 - GPFS live staging/testbed verification on an actual IBM GPFS / IBM Storage Scale cluster
 - WekaFS/Lustre filesystem quota/import live adapter
@@ -2346,12 +2471,12 @@ Output:
 
 ## Comments For Next Phases
 
-- 다음 phase는 Phase 15 `Resource Expiry Update, Import Defaults, and Kubernetes Namespace Quota Expiry Lifecycle`로 진행한다. 구현 프롬프트는 `docs/dms-phase15.md`다.
-- long-running worker lease heartbeat renewal과 maintenance/drain enforcement는 아직 미구현으로 남기지만 Phase 14 범위에서는 제외한다.
-- Data Management 작업 순서는 Phase 15 이후 Phase 16A Data Management read-only scan preflight, Phase 16B DM Worker Runtime and VolcanoJob Skeleton, Phase 16C Filesystem Policy and Initialize 순서다.
+- 다음 phase는 Phase 16A Data Management read-only scan preflight로 진행한다. Phase 16B는 DM Worker Runtime and VolcanoJob Skeleton, Phase 16C는 Filesystem Policy and Initialize 순서다.
+- long-running worker lease heartbeat renewal과 maintenance/drain enforcement는 아직 미구현으로 남기지만 Phase 15 범위에서는 제외한다.
 - `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8/9에서 multi-StorageClass quota target으로 검증했다.
 - `cluster-a/testbed-cephfs`는 Phase 5/6/7/8/9에서 self-managed RM target 및 regression target으로 검증했다.
-- `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11/12/13에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock, quota apply/enforcement, check/sync, import/assign, long-running RM Worker target으로 검증했다.
+- `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11/12/13/15에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock, expiry update/import default, quota apply/enforcement, check/sync, import/assign, long-running RM Worker target으로 검증했다.
+- `cluster-b/testbed-longhorn` Kubernetes namespace quota expiry create/update/import, expiring query, action-required, and on-demand expiration sweep은 Phase 15에서 검증했다.
 - GPFS backend는 Phase 13에서 IBM Storage Scale fileset command adapter와 fake executor regression까지 구현됐다. 실제 IBM Storage Scale cluster에서의 staging/live 검증은 별도 phase 또는 운영 staging 작업으로 남아 있다.
 - Phase 14에서 observability safe write boundary와 live backend registry fail-closed는 완료됐으므로, 이후 live runtime에서 stub fallback을 기대하는 테스트는 `BackendAdapterRegistry.with_test_stubs(...)`를 명시해야 한다.
 - Phase 8에서 실제 Agent DaemonSet report를 검증했으므로 이후 Data Management preflight나 filesystem lifecycle은 synthetic Agent report 없이 진행해야 한다.

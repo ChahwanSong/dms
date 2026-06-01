@@ -370,6 +370,7 @@ def create_namespace_quota(
                 "cluster_name": "cluster-b",
                 "namespace_name": namespace_name,
                 "allow_namespace_create": True,
+                "expires_at": "2099-01-01T00:00:00Z",
                 "storage_class_quotas": [
                     {
                         "storage_name": storage_name,
@@ -405,6 +406,7 @@ def create_filesystem(
                 "directory_name": directory_name,
                 "resource_type": "user",
                 "users": ["alice", "bob"],
+                "expires_at": "2099-01-01T00:00:00Z",
             },
         },
     )

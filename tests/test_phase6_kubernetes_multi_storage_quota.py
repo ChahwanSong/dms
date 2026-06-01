@@ -310,6 +310,7 @@ def seed_multi_resource(
         "resource_key": RESOURCE_KEY,
         "resource_quota_name": "dms-storage-quota",
         "resource_quota_hard": multi_hard(),
+        "expires_at": "2099-01-01T00:00:00Z",
     }
     repository.upsert_resource(
         resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
@@ -338,6 +339,8 @@ def create_request(
         "quota": {"requests_storage_bytes": 1024**3, "pvc_count": 20},
         **payload,
     }
+    if operation == OperationKind.K8S_QUOTA_CREATE:
+        merged.setdefault("expires_at", "2099-01-01T00:00:00Z")
     return repository.create_request(
         requester_id="alice",
         actor="api-client",

@@ -152,6 +152,7 @@ def test_rm_worker_does_not_select_filesystem_adapter_for_kubernetes_quota(tmp_p
             "namespace_name": "alice",
             "storage_class_quotas": [{"storage_name": "longhorn-b"}],
             "quota": {"requests_storage_bytes": 1024**3, "pvc_count": 2},
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
     Planner(repository).run_once()
@@ -243,6 +244,7 @@ def _filesystem_payload(storage_name: str, directory_name: str) -> dict[str, Any
         "directory_name": directory_name,
         "resource_type": "user",
         "users": ["alice", "bob"],
+        "expires_at": "2099-01-01T00:00:00Z",
     }
 
 

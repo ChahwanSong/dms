@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .adapters import (
@@ -17,7 +17,7 @@ from .domain import (
     WorkerRole,
     validate_storage_root_basename,
 )
-from .repositories import DmsRepository
+from .repositories import DmsRepository, utcnow
 
 
 RM_OPERATIONS = {
@@ -38,6 +38,8 @@ RM_OPERATIONS = {
     OperationKind.K8S_QUOTA_SYNC.value,
     OperationKind.K8S_QUOTA_CHECK.value,
     OperationKind.K8S_QUOTA_AUDIT.value,
+    OperationKind.K8S_QUOTA_IMPORT.value,
+    OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
 }
 
 PHASE12_FILESYSTEM_OPERATIONS = {
@@ -82,6 +84,7 @@ PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS = {
     "storage_name",
     "directory_name",
     "quota",
+    "expires_at",
     "reason",
 }
 
@@ -104,6 +107,8 @@ PHASE12_FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS = {
 
 MAX_FILESYSTEM_QUOTA_CAPACITY_BYTES = 1024**4
 MAX_FILESYSTEM_QUOTA_FILE_COUNT = 10_000_000
+EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS = {"expiry_at", "clear_expires_at"}
+EXPIRY_IMPORT_DEFAULT_DAYS = 365
 
 DM_OPERATIONS = {
     OperationKind.DATA_SYNC.value,
@@ -242,6 +247,16 @@ class Planner:
                     }
                 )
                 return desired
+            if request["operation"] == OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value:
+                desired.update(
+                    {
+                        "operation": request["operation"],
+                        "resource_kind": request["resource_kind"],
+                        "resource_key": request["resource_key"],
+                        "targets": self._resolve_kubernetes_expiration_targets(request),
+                    }
+                )
+                return desired
             existing = self.repository.get_resource(
                 request["resource_kind"], request["resource_key"]
             )
@@ -249,6 +264,11 @@ class Planner:
                 desired = self._merge_kubernetes_quota_desired(
                     existing["desired_state"], desired
                 )
+            self._apply_expiry_desired(
+                request=request,
+                desired=desired,
+                existing_desired=(existing or {}).get("desired_state") or {},
+            )
         desired.update(
             {
                 "operation": request["operation"],
@@ -259,8 +279,18 @@ class Planner:
         )
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             desired.setdefault("resource_quota_name", "dms-storage-quota")
+            desired.setdefault("resource_type", "user")
+            if request["operation"] == OperationKind.K8S_QUOTA_IMPORT.value:
+                self._enrich_kubernetes_storage_class_entries(desired)
+                desired.setdefault("import_mode", "dms_resourcequota")
+                desired.setdefault("storage_mapping_candidates", self._storage_mapping_candidates(desired))
             if self._is_kubernetes_default_reset(request):
                 self._apply_kubernetes_default_quota_reset(request, desired)
+                self._apply_expiry_desired(
+                    request=request,
+                    desired=desired,
+                    existing_desired=(existing or {}).get("desired_state") or {},
+                )
             if not self._should_preserve_kubernetes_quota_hard(request):
                 self._enrich_kubernetes_quota_desired(desired)
             self._apply_kubernetes_block_desired(request, desired)
@@ -300,6 +330,11 @@ class Planner:
             merged = dict(existing["desired_state"])
             merged.update(desired)
             desired = merged
+        self._apply_expiry_desired(
+            request=request,
+            desired=desired,
+            existing_desired=(existing or {}).get("desired_state") or {},
+        )
         if request["operation"] == OperationKind.FILESYSTEM_CREATE.value:
             directory_name = desired.get("directory_name")
             if directory_name and not desired.get("access_group"):
@@ -340,6 +375,30 @@ class Planner:
         if request["operation"] == OperationKind.FILESYSTEM_BLOCK.value:
             self._apply_filesystem_block_desired(request, existing, desired)
         return desired
+
+    def _apply_expiry_desired(
+        self,
+        *,
+        request: dict[str, Any],
+        desired: dict[str, Any],
+        existing_desired: dict[str, Any],
+    ) -> None:
+        payload = request["payload_summary"]
+        operation = request["operation"]
+        if operation in {
+            OperationKind.FILESYSTEM_IMPORT.value,
+            OperationKind.K8S_QUOTA_IMPORT.value,
+        } and "expires_at" not in payload:
+            desired["expires_at"] = _default_expires_at()
+            return
+        if "expires_at" in payload:
+            desired["expires_at"] = _normalize_expires_at_or_none(payload.get("expires_at")) or ""
+            return
+        if operation in {
+            OperationKind.FILESYSTEM_UPDATE.value,
+            OperationKind.K8S_QUOTA_UPDATE.value,
+        } and existing_desired.get("expires_at"):
+            desired["expires_at"] = existing_desired["expires_at"]
 
     def _apply_filesystem_block_desired(
         self,
@@ -413,6 +472,11 @@ class Planner:
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             if request["operation"] == OperationKind.K8S_QUOTA_AUDIT.value:
                 metadata["planner"] = "phase9"
+            elif request["operation"] in {
+                OperationKind.K8S_QUOTA_IMPORT.value,
+                OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
+            }:
+                metadata["planner"] = "phase15"
             else:
                 metadata["planner"] = (
                     "phase6"
@@ -609,13 +673,31 @@ class Planner:
         issues: list[dict[str, Any]] = []
         if operation == OperationKind.K8S_QUOTA_AUDIT.value:
             return self._reject_invalid_kubernetes_quota_audit_request(request)
+        if operation == OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value:
+            return self._reject_invalid_kubernetes_expiration_sweep_request(request)
         if not payload.get("cluster_name"):
             issues.append({"reason": "cluster_name_missing"})
         if not payload.get("namespace_name"):
             issues.append({"reason": "namespace_name_missing"})
         existing = self.repository.get_resource(request["resource_kind"], request["resource_key"])
-        if operation != OperationKind.K8S_QUOTA_CREATE.value and not existing:
+        if operation == OperationKind.K8S_QUOTA_IMPORT.value:
+            if existing and existing.get("status") != "Deleted":
+                issues.append(
+                    {
+                        "reason": "kubernetes_namespace_quota_resource_already_exists",
+                        "resource_key": request["resource_key"],
+                        "status": existing.get("status"),
+                    }
+                )
+        elif operation != OperationKind.K8S_QUOTA_CREATE.value and not existing:
             issues.append({"reason": "resource_missing", "resource_key": request["resource_key"]})
+        _append_expiry_issues(
+            issues,
+            payload,
+            operation=operation,
+            existing_desired=(existing or {}).get("desired_state") or {},
+            resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
+        )
         raw_storage_class_quotas = payload.get("storage_class_quotas")
         storage_class_quotas = raw_storage_class_quotas or []
         if raw_storage_class_quotas is not None and not isinstance(raw_storage_class_quotas, list):
@@ -710,6 +792,23 @@ class Planner:
                 )
                 if not restore_hard:
                     issues.append({"reason": "block_restore_state_missing"})
+        if operation == OperationKind.K8S_QUOTA_IMPORT.value:
+            resource_quota_name = payload.get("resource_quota_name", "dms-storage-quota")
+            if resource_quota_name != "dms-storage-quota":
+                issues.append(
+                    {
+                        "reason": "kubernetes_resource_quota_name_unsupported",
+                        "resource_quota_name": resource_quota_name,
+                    }
+                )
+            resource_type = payload.get("resource_type", "user")
+            if resource_type not in {"user", "system", "admin"}:
+                issues.append(
+                    {
+                        "reason": "kubernetes_resource_type_unsupported",
+                        "resource_type": resource_type,
+                    }
+                )
         if not issues:
             return False
         return self._reject_planner_issue(
@@ -752,6 +851,13 @@ class Planner:
         _append_basename_issue(issues, "directory_name", directory_name)
 
         if operation == OperationKind.FILESYSTEM_CREATE.value:
+            _append_expiry_issues(
+                issues,
+                payload,
+                operation=operation,
+                existing_desired={},
+                resource_kind=ResourceKind.FILESYSTEM.value,
+            )
             unsupported = sorted(
                 field
                 for field in PHASE12_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS
@@ -821,18 +927,6 @@ class Planner:
                     denied_users,
                     required=False,
                 )
-            expires_at = payload.get("expires_at")
-            if expires_at is not None:
-                try:
-                    datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
-                except ValueError:
-                    issues.append(
-                        {
-                            "reason": "filesystem_expires_at_invalid",
-                            "expires_at": expires_at,
-                        }
-                    )
-
         if operation == OperationKind.FILESYSTEM_BLOCK.value:
             unsupported = sorted(
                 field
@@ -904,10 +998,18 @@ class Planner:
             existing = self.repository.get_resource(
                 request["resource_kind"], request["resource_key"]
             )
+            _append_expiry_issues(
+                issues,
+                payload,
+                operation=operation,
+                existing_desired=(existing or {}).get("desired_state") or {},
+                resource_kind=ResourceKind.FILESYSTEM.value,
+            )
             issues.extend(
                 _unsupported_payload_issues(
                     payload,
-                    PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS,
+                    PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS
+                    | EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS,
                     "filesystem_payload_fields_unsupported_phase12",
                 )
             )
@@ -918,10 +1020,10 @@ class Planner:
                         "resource_key": request["resource_key"],
                     }
                 )
-            if "quota" not in payload:
-                issues.append({"reason": "filesystem_quota_required"})
-            else:
+            if "quota" in payload:
                 issues.extend(_filesystem_quota_issues(payload.get("quota")))
+            elif "expires_at" not in payload:
+                issues.append({"reason": "filesystem_update_payload_empty"})
 
         if operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
             existing = self.repository.get_resource(
@@ -961,6 +1063,13 @@ class Planner:
         if operation == OperationKind.FILESYSTEM_IMPORT.value:
             existing = self.repository.get_resource(
                 request["resource_kind"], request["resource_key"]
+            )
+            _append_expiry_issues(
+                issues,
+                payload,
+                operation=operation,
+                existing_desired=(existing or {}).get("desired_state") or {},
+                resource_kind=ResourceKind.FILESYSTEM.value,
             )
             if existing and existing.get("status") != "Deleted":
                 mode = existing["desired_state"].get("management_mode", "full")
@@ -1157,6 +1266,122 @@ class Planner:
             error_category="validation",
         )
 
+    def _reject_invalid_kubernetes_expiration_sweep_request(
+        self, request: dict[str, Any]
+    ) -> bool:
+        payload = request["payload_summary"]
+        issues: list[dict[str, Any]] = []
+        action = payload.get("action", "block")
+        if action != "block":
+            issues.append({"reason": "kubernetes_sweep_action_unsupported", "action": action})
+        dry_run = payload.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            issues.append({"reason": "dry_run_boolean_required", "value": dry_run})
+        max_targets = payload.get("max_targets", 100)
+        try:
+            if int(max_targets) <= 0 or int(max_targets) > 1000:
+                issues.append({"reason": "max_targets_invalid", "value": max_targets})
+        except (TypeError, ValueError):
+            issues.append({"reason": "max_targets_invalid", "value": max_targets})
+        expired_before = payload.get("expired_before")
+        if expired_before is not None:
+            try:
+                datetime.fromisoformat(str(expired_before).replace("Z", "+00:00"))
+            except ValueError:
+                issues.append(
+                    {
+                        "reason": "kubernetes_expired_before_invalid",
+                        "expired_before": expired_before,
+                    }
+                )
+        scope = payload.get("scope") or {}
+        if scope and not isinstance(scope, dict):
+            issues.append({"reason": "kubernetes_sweep_scope_invalid"})
+            scope = {}
+        if scope.get("namespace_name") and not scope.get("cluster_name"):
+            issues.append({"reason": "cluster_name_required_with_namespace_name"})
+        resource_type = scope.get("resource_type")
+        if resource_type is not None and str(resource_type) not in {
+            "user",
+            "system",
+            "admin",
+        }:
+            issues.append(
+                {
+                    "reason": "kubernetes_resource_type_unsupported",
+                    "resource_type": resource_type,
+                }
+            )
+        if not issues:
+            targets = self._resolve_kubernetes_expiration_targets(request)
+            if len(targets) > int(max_targets):
+                issues.append(
+                    {
+                        "reason": "kubernetes_sweep_targets_exceed_max",
+                        "target_count": len(targets),
+                        "max_targets": int(max_targets),
+                    }
+                )
+        if not issues:
+            return False
+        return self._reject_planner_issue(
+            request,
+            message="invalid Kubernetes namespace quota expiration sweep request",
+            issues=issues,
+            error_category="validation",
+        )
+
+    def _resolve_kubernetes_expiration_targets(
+        self, request: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        payload = request["payload_summary"]
+        scope = payload.get("scope") or {}
+        max_targets = int(payload.get("max_targets", 100))
+        resources = self.repository.list_kubernetes_namespace_quota_resources_expiring(
+            cluster_name=scope.get("cluster_name"),
+            namespace_name=scope.get("namespace_name"),
+            resource_type=scope.get("resource_type"),
+            status="expired",
+            before=payload.get("expired_before"),
+            include_blocked=True,
+            limit=max_targets + 1,
+        )
+        targets: list[dict[str, Any]] = []
+        for resource in resources[:max_targets]:
+            desired = resource["desired_state"]
+            targets.append(
+                {
+                    "cluster_name": desired.get("cluster_name"),
+                    "namespace_name": desired.get("namespace_name"),
+                    "resource_key": resource["resource_key"],
+                    "resource_id": resource["resource_id"],
+                    "resource_status": resource["status"],
+                    "resource_type": desired.get("resource_type") or "user",
+                    "expires_at": resource.get("expires_at"),
+                    "block_state": resource.get("block_state") or {},
+                    "desired_hard": desired.get("resource_quota_hard") or {},
+                    "desired_state": desired,
+                }
+            )
+        return targets
+
+    def _storage_mapping_candidates(self, desired: dict[str, Any]) -> list[dict[str, Any]]:
+        cluster_name = desired.get("cluster_name")
+        candidates: list[dict[str, Any]] = []
+        for mapping in self.repository.list_storage_mappings():
+            if cluster_name and mapping.get("cluster_name") != cluster_name:
+                continue
+            candidates.append(
+                {
+                    "storage_name": mapping["storage_name"],
+                    "cluster_name": mapping.get("cluster_name"),
+                    "storage_class_name": mapping.get("storage_class_name"),
+                    "sanity_status": mapping.get("sanity_status"),
+                    "readiness": mapping.get("readiness") or {},
+                }
+            )
+        return candidates
+
     def _reject_inconsistent_kubernetes_quota_mapping(
         self, request: dict[str, Any]
     ) -> bool:
@@ -1285,6 +1510,13 @@ class Planner:
     def _enrich_kubernetes_quota_desired(self, desired: dict[str, Any]) -> None:
         if desired.get("resource_kind") != ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             return
+        self._enrich_kubernetes_storage_class_entries(desired)
+        desired["resource_quota_name"] = desired.get(
+            "resource_quota_name", "dms-storage-quota"
+        )
+        desired["resource_quota_hard"] = render_kubernetes_resource_quota_hard(desired)
+
+    def _enrich_kubernetes_storage_class_entries(self, desired: dict[str, Any]) -> None:
         storage_class_quotas: list[dict[str, Any]] = []
         for entry in desired.get("storage_class_quotas") or []:
             enriched = dict(entry)
@@ -1295,10 +1527,6 @@ class Planner:
                 enriched["cluster_name"] = mapping.get("cluster_name")
             storage_class_quotas.append(enriched)
         desired["storage_class_quotas"] = storage_class_quotas
-        desired["resource_quota_name"] = desired.get(
-            "resource_quota_name", "dms-storage-quota"
-        )
-        desired["resource_quota_hard"] = render_kubernetes_resource_quota_hard(desired)
 
     def _apply_kubernetes_default_quota_reset(
         self, request: dict[str, Any], desired: dict[str, Any]
@@ -1331,6 +1559,8 @@ class Planner:
     def _should_preserve_kubernetes_quota_hard(request: dict[str, Any]) -> bool:
         if request["resource_kind"] != ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             return False
+        if request["operation"] == OperationKind.K8S_QUOTA_IMPORT.value:
+            return True
         if request["operation"] not in {
             OperationKind.K8S_QUOTA_CHECK.value,
             OperationKind.K8S_QUOTA_DELETE.value,
@@ -1685,6 +1915,80 @@ def _append_boolean_payload_issues(
     for field in fields:
         if field in payload and not isinstance(payload[field], bool):
             issues.append({"reason": f"{field}_boolean_required", "value": payload[field]})
+
+
+def _append_expiry_issues(
+    issues: list[dict[str, Any]],
+    payload: dict[str, Any],
+    *,
+    operation: str,
+    existing_desired: dict[str, Any],
+    resource_kind: str,
+) -> None:
+    supported_operations = {
+        OperationKind.FILESYSTEM_CREATE.value,
+        OperationKind.FILESYSTEM_UPDATE.value,
+        OperationKind.FILESYSTEM_IMPORT.value,
+        OperationKind.K8S_QUOTA_CREATE.value,
+        OperationKind.K8S_QUOTA_UPDATE.value,
+        OperationKind.K8S_QUOTA_IMPORT.value,
+    }
+    if operation not in supported_operations:
+        return
+    unsupported = sorted(field for field in EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS if field in payload)
+    if unsupported:
+        issues.append({"reason": "expires_at_field_unsupported", "fields": unsupported})
+    create_operations = {
+        OperationKind.FILESYSTEM_CREATE.value,
+        OperationKind.K8S_QUOTA_CREATE.value,
+    }
+    import_operations = {
+        OperationKind.FILESYSTEM_IMPORT.value,
+        OperationKind.K8S_QUOTA_IMPORT.value,
+    }
+    if "expires_at" not in payload:
+        if operation in create_operations:
+            issues.append({"reason": "expires_at_required"})
+        elif operation not in import_operations and not existing_desired.get("expires_at"):
+            issues.append({"reason": "expires_at_required"})
+        return
+    expires_at = payload.get("expires_at")
+    if expires_at is None:
+        issues.append({"reason": "expires_at_required"})
+        return
+    normalized, reason = _normalize_future_expires_at(expires_at)
+    if normalized is None:
+        issues.append(
+            {
+                "reason": reason or "expires_at_invalid",
+                "expires_at": expires_at,
+                "resource_kind": resource_kind,
+            }
+        )
+
+
+def _default_expires_at() -> str:
+    return (utcnow() + timedelta(days=EXPIRY_IMPORT_DEFAULT_DAYS)).isoformat()
+
+
+def _normalize_expires_at_or_none(value: Any) -> str | None:
+    normalized, _ = _normalize_future_expires_at(value)
+    return normalized
+
+
+def _normalize_future_expires_at(value: Any) -> tuple[str | None, str | None]:
+    if not isinstance(value, str) or not value.strip():
+        return None, "expires_at_invalid"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None, "expires_at_invalid"
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None, "expires_at_timezone_required"
+    expires = parsed.astimezone(UTC)
+    if expires <= utcnow():
+        return None, "expires_at_not_future"
+    return expires.isoformat(), None
 
 
 def _filesystem_quota_issues(quota: Any) -> list[dict[str, Any]]:

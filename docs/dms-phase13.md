@@ -757,12 +757,13 @@ Data Management 구현 전에 Resource Management와 DMS runtime 기본 구현�
 
 Phase 14 hardening 이후 filesystem resource와 Kubernetes namespace quota resource의 existing resource expiry update/import semantics를 닫고, Kubernetes namespace quota resource에도 filesystem resource와 같은 expiry lifecycle을 추가한다.
 
-- filesystem resource update payload에서 `expires_at`/`expiry_at`/`clear_expires_at`으로 expiry timestamp 설정/변경/해제
-- Kubernetes namespace quota create/update/default-reset payload에서 expiry timestamp 설정/변경/해제
-- filesystem import와 Kubernetes namespace quota import/adoption에서 expiry timestamp가 있으면 요청값 사용, 없으면 server-side now + 365일 default 설정
-- `expiry_at` alias를 API에서 받아 canonical `expires_at`으로 normalize
-- write request의 과거/current expiry timestamp, timezone 없는 timestamp, alias conflict를 backend side effect 없이 reject
-- import request의 `clear_expires_at=true`를 backend side effect 없이 reject
+- filesystem resource create payload에서 `expires_at` 필수 설정
+- filesystem resource update payload에서 optional `expires_at`으로 expiry timestamp 변경, 생략 시 기존 값 보존
+- Kubernetes namespace quota create payload에서 `expires_at` 필수 설정
+- Kubernetes namespace quota update/default-reset payload에서 optional `expires_at`으로 expiry timestamp 변경, 생략 시 기존 값 보존
+- filesystem import와 Kubernetes namespace quota import/adoption에서 `expires_at`이 있으면 요청값 사용, 없으면 server-side now + 365일 default 설정
+- API request와 DB/response field를 `expires_at`으로 통일하고 `expiry_at`/`clear_expires_at`은 unsupported field로 reject
+- write request의 과거/current expiry timestamp와 timezone 없는 timestamp를 backend side effect 없이 reject
 - expired/expiring Kubernetes namespace quota query API
 - expired but unblocked quota action-required aggregation
 - on-demand expiration sweep으로 DMS-managed `ResourceQuota/dms-storage-quota` block 처리

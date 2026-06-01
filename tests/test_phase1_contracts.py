@@ -59,6 +59,7 @@ def filesystem_body(directory_name: str = "alpha") -> dict:
             "directory_name": directory_name,
             "resource_type": "user",
             "users": ["alice", "bob"],
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     }
 

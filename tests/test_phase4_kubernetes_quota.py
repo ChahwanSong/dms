@@ -170,6 +170,7 @@ def test_planner_accepts_multiple_storage_class_quotas(repository_pair):
         payload={
             "cluster_name": "cluster-b",
             "namespace_name": "phase4-quota",
+            "expires_at": "2099-01-01T00:00:00Z",
             "quota": {"requests_storage_bytes": 128 * 1024**2, "pvc_count": 2},
             "storage_class_quotas": [
                 {
@@ -296,6 +297,7 @@ def create_quota_request(repository: DmsRepository) -> str:
             "cluster_name": "cluster-b",
             "namespace_name": "phase4-quota",
             "allow_namespace_create": True,
+            "expires_at": "2099-01-01T00:00:00Z",
             "quota": {"requests_storage_bytes": 128 * 1024**2, "pvc_count": 2},
             "storage_class_quotas": [{"storage_name": LONGHORN_STORAGE_NAME}],
         },

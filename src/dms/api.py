@@ -451,6 +451,23 @@ def resource_management_router() -> APIRouter:
             OperationKind.K8S_QUOTA_SYNC,
         )
 
+    @router.post("/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}:import", status_code=202)
+    def k8s_quota_import(
+        cluster_name: str,
+        namespace_name: str,
+        body: MutatingBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        return _k8s_quota_keyed_request(
+            cluster_name,
+            namespace_name,
+            body,
+            request,
+            services,
+            OperationKind.K8S_QUOTA_IMPORT,
+        )
+
     @router.post("/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}:check", status_code=202)
     def k8s_quota_check(
         cluster_name: str,
@@ -466,6 +483,24 @@ def resource_management_router() -> APIRouter:
             request,
             services,
             OperationKind.K8S_QUOTA_CHECK,
+        )
+
+    @router.post("/kubernetes/namespace-quotas:expiration-sweep", status_code=202)
+    def k8s_quota_expiration_sweep(
+        body: MutatingBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        return submit_request(
+            services=services,
+            request=request,
+            envelope=RequestEnvelope(
+                requester_id=body.requester_id,
+                operation=OperationKind.K8S_QUOTA_EXPIRATION_SWEEP,
+                resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA,
+                resource_key="kubernetes-namespace-quota-expiration-sweep",
+                payload=body.payload,
+            ),
         )
 
     @router.post("/kubernetes/namespace-quotas:audit", status_code=202)
@@ -1133,6 +1168,34 @@ def operational_query_router() -> APIRouter:
                 include_non_dms=include_non_dms,
                 include_status_used=include_status_used,
                 kubernetes_adapter=services.kubernetes_quota,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/kubernetes/namespace-quotas/expiring")
+    def kubernetes_namespace_quota_expiring(
+        request: Request,
+        cluster_name: str | None = None,
+        namespace_name: str | None = None,
+        resource_type: str | None = None,
+        status: str = "expired",
+        before: str | None = None,
+        within_seconds: int | None = Query(default=None, gt=0),
+        include_blocked: bool = False,
+        limit: int | None = Query(default=None, gt=0),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        try:
+            return services.query.kubernetes_namespace_quota_expiring(
+                cluster_name=cluster_name,
+                namespace_name=namespace_name,
+                resource_type=resource_type,
+                status=status,
+                before=before,
+                within_seconds=within_seconds,
+                include_blocked=include_blocked,
+                limit=limit,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

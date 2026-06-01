@@ -819,9 +819,9 @@ Import existing filesystem directory 처리 원칙:
 - 대상 directory가 이미 full DMS-managed filesystem resource이면 import를 수행하지 않고 conflict 또는 no-op success로 처리해야 한다.
 - 대상 directory가 quota-only managed resource이면 import를 통해 full DMS-managed filesystem resource로 승격할 수 있다. 이 경우 기존 quota-only 상태와 import 전환 이력을 운영용 PostgreSQL에 기록해야 한다.
 - 대상 directory가 운영용 PostgreSQL에 등록되어 있지 않은 unmanaged directory이면 import 성공 시 새 DMS-managed filesystem resource로 기록한다.
-- Import 요청은 optional `expires_at` 또는 alias `expiry_at`을 받을 수 있다. 값이 주어지면 timezone-aware ISO-8601 timestamp로 검증하고 현재 시각보다 과거이거나 같으면 실패해야 한다.
+- Import 요청은 optional `expires_at`을 받을 수 있다. 값이 주어지면 timezone-aware ISO-8601 timestamp로 검증하고 현재 시각보다 과거이거나 같으면 실패해야 한다.
 - Import 요청에 expiry timestamp가 없으면 Planner 기준 server-side now부터 365일 뒤 값을 canonical `expires_at`으로 설정한다.
-- Import는 full managed lifecycle 편입 지점이므로 `clear_expires_at=true`는 허용하지 않는다.
+- `expiry_at`과 `clear_expires_at`은 import payload에서 지원하지 않는 field로 reject한다.
 - 기존 filesystem marker에 expiry metadata가 있더라도 source of truth는 import request 값 또는 import default 값이다. 기존 marker 값은 observed evidence로 기록할 수 있지만 운영용 PostgreSQL desired state를 자동으로 덮어쓰면 안 된다.
 - Planner와 RM Worker runtime은 import 전 directory의 현재 filesystem 상태를 live 조회해야 한다.
 - 조회해야 하는 상태에는 owner, group, permission, ACL 사용 여부, quota 설정, filesystem type, storage backend capability가 포함된다.
@@ -1434,7 +1434,7 @@ Effective quota 경고가 발생했을 때 운영자는 두 방향 중 하나를
 
 Kubernetes namespace storage quota DB sync from live state API는 Kubernetes namespace에 존재하는 DMS 전용 ResourceQuota를 authoritative live state로 보고 운영용 PostgreSQL을 갱신하는 명시적 복구 operation이다. 이 API는 Kubernetes object를 수정하지 않으며, DB desired/applied/observed state와 recovery 이력만 갱신한다.
 
-Kubernetes namespace quota import/adoption API는 DB에 resource가 없거나 복구가 필요한 상태에서 live DMS 전용 `ResourceQuota/dms-storage-quota`를 DMS-managed namespace quota resource로 편입하는 명시적 operation이다. Import 요청은 optional `expires_at` 또는 alias `expiry_at`을 받을 수 있다. 값이 주어지면 timezone-aware ISO-8601 timestamp로 검증하고 현재 시각보다 과거이거나 같으면 실패해야 한다. 값이 없으면 Planner 기준 server-side now부터 365일 뒤 값을 canonical `expires_at`으로 설정한다. Import에서 `clear_expires_at=true`는 허용하지 않는다. Live annotation의 expiry 값은 observed evidence일 뿐이며, 운영용 PostgreSQL desired state의 source of truth는 import request 값 또는 import default 값이다.
+Kubernetes namespace quota import/adoption API는 DB에 resource가 없거나 복구가 필요한 상태에서 live DMS 전용 `ResourceQuota/dms-storage-quota`를 DMS-managed namespace quota resource로 편입하는 명시적 operation이다. Import 요청은 optional `expires_at`을 받을 수 있다. 값이 주어지면 timezone-aware ISO-8601 timestamp로 검증하고 현재 시각보다 과거이거나 같으면 실패해야 한다. 값이 없으면 Planner 기준 server-side now부터 365일 뒤 값을 canonical `expires_at`으로 설정한다. `expiry_at`과 `clear_expires_at`은 import payload에서 지원하지 않는 field로 reject한다. Live annotation의 expiry 값은 observed evidence일 뿐이며, 운영용 PostgreSQL desired state의 source of truth는 import request 값 또는 import default 값이다.
 
 DMS는 Kubernetes namespace quota import/adoption 또는 sync-from-live API를 실행하기 전에 다음을 검증해야 한다.
 
@@ -2453,7 +2453,10 @@ RM Worker runtime은 block 적용 또는 해제 결과와 observed state를 운�
 - Data Management Job은 selected mpifileutils tool, tool selection reason, priority, worker pool summary, preflight result, confirm status, warning, timeout, final status를 추적 가능해야 한다.
 - Data Management Job의 상세 stdout/stderr, mpifileutils report, scan report는 artifact URI로 추적 가능해야 하며, 운영용 PostgreSQL에는 상태와 요약을 저장해야 한다.
 - DMS가 관리하는 resource는 만료 처리를 위해 `expires_at`을 추적할 수 있어야 한다.
-- Filesystem import와 Kubernetes namespace quota import/adoption은 request에 `expires_at` 또는 `expiry_at`이 있으면 그 값을 검증해 사용하고, 없으면 server-side now + 365일을 default `expires_at`으로 설정해야 한다.
+- Resource create request는 future `expires_at`을 필수로 받아야 한다.
+- Resource update/default-reset request는 optional `expires_at`을 받을 수 있고, 생략하면 기존 `expires_at`을 보존해야 한다.
+- Filesystem import와 Kubernetes namespace quota import/adoption은 request에 `expires_at`이 있으면 그 값을 검증해 사용하고, 없으면 server-side now + 365일을 default `expires_at`으로 설정해야 한다.
+- API request, DB, response의 expiry field는 `expires_at`으로 통일하고 `expiry_at`과 `clear_expires_at`은 지원하지 않는 field로 reject해야 한다.
 - Expiration sweep 결과와 sweep으로 생성된 `block=ON` request 또는 plan은 추적 가능해야 한다.
 - 사용자 입력의 `TB`는 decimal terabyte로 해석하며, `1TB = 10^12 bytes`다.
 - 용량 quota는 운영용 PostgreSQL 내부에서 byte 단위 정수로 저장한다.

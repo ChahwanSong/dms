@@ -335,6 +335,7 @@ def seed_multi_resource(
         "resource_key": RESOURCE_KEY,
         "resource_quota_name": "dms-storage-quota",
         "resource_quota_hard": hard,
+        "expires_at": "2099-01-01T00:00:00Z",
     }
     if blocked:
         desired["block"] = True
@@ -369,6 +370,8 @@ def create_request(
         resource_key = RESOURCE_KEY
     else:
         merged = {"cluster_name": "cluster-b", "namespace_name": "phase9-quota", **payload}
+        if operation == OperationKind.K8S_QUOTA_CREATE:
+            merged.setdefault("expires_at", "2099-01-01T00:00:00Z")
         resource_key = RESOURCE_KEY
     return repository.create_request(
         requester_id="alice",

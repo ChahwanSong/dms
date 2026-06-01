@@ -11,6 +11,7 @@ from .adapters import (
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
     StubVolcanoAdapter,
+    zero_kubernetes_resource_quota_hard,
 )
 from .backend_registry import BackendAdapterRegistry
 from .domain import DataJobState, LifecycleState, OperationKind, ResourceKind, WorkerRole
@@ -84,6 +85,7 @@ class RMWorkerRuntime:
             if plan["operation_kind"] not in {
                 OperationKind.K8S_QUOTA_AUDIT.value,
                 OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
+                OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
             }:
                 self.repository.upsert_resource(
                     resource_kind=plan["execution_metadata"]["resource_kind"],
@@ -175,6 +177,8 @@ class RMWorkerRuntime:
         operation = plan["operation_kind"]
         if operation == OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value:
             return self._apply_filesystem_expiration_sweep(plan)
+        if operation == OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value:
+            return self._apply_kubernetes_expiration_sweep(plan)
         if operation == OperationKind.FILESYSTEM_CREATE.value:
             filesystem_adapter = self._filesystem_adapter(plan)
             return filesystem_adapter.create(plan)
@@ -215,6 +219,9 @@ class RMWorkerRuntime:
         if operation == OperationKind.K8S_QUOTA_SYNC.value:
             kubernetes_adapter = self._kubernetes_adapter(plan)
             return kubernetes_adapter.sync_live_state(plan)
+        if operation == OperationKind.K8S_QUOTA_IMPORT.value:
+            kubernetes_adapter = self._kubernetes_adapter(plan)
+            return kubernetes_adapter.import_resource_quota(plan)
         if operation == OperationKind.K8S_QUOTA_CHECK.value:
             kubernetes_adapter = self._kubernetes_adapter(plan)
             return kubernetes_adapter.check_resource_quota(plan)
@@ -349,6 +356,142 @@ class RMWorkerRuntime:
         )
         return result
 
+    def _apply_kubernetes_expiration_sweep(self, plan: dict[str, Any]) -> AdapterResult:
+        desired = plan["desired_state"]
+        dry_run = bool(desired.get("dry_run", False))
+        targets = desired.get("targets") or []
+        results: list[dict[str, Any]] = []
+        blocked_count = 0
+        skipped_count = 0
+        failed_count = 0
+        for target in targets:
+            target_result = dict(target)
+            skip_reason = self._kubernetes_sweep_skip_reason(target)
+            if skip_reason:
+                target_result.update({"result": "skipped", "reason": skip_reason})
+                skipped_count += 1
+                results.append(target_result)
+                continue
+            if dry_run:
+                target_result.update({"result": "would_block", "backend_side_effect": False})
+                results.append(target_result)
+                continue
+            try:
+                block_result = self._block_kubernetes_sweep_target(plan, target)
+            except Exception as exc:  # noqa: BLE001 - sweep keeps per-target failure evidence.
+                target_result.update(
+                    {
+                        "result": "failed",
+                        "reason": _kubernetes_sweep_failure_reason(str(exc)),
+                        "message": str(exc),
+                    }
+                )
+                failed_count += 1
+                results.append(target_result)
+                continue
+            blocked_count += 1
+            target_result.update(
+                {
+                    "result": "blocked",
+                    "backend_side_effect": True,
+                    "observed_state": block_result.observed_state,
+                }
+            )
+            results.append(target_result)
+        summary = {
+            "adapter": "kubernetes-namespace-quota-expiration-sweep",
+            "operation": OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
+            "backend_side_effect": not dry_run and blocked_count > 0,
+            "dry_run": dry_run,
+            "action": desired.get("action", "block"),
+            "expired_before": desired.get("expired_before"),
+            "target_count": len(targets),
+            "blocked_count": blocked_count,
+            "skipped_count": skipped_count,
+            "failed_count": failed_count,
+            "targets": results,
+            "verified": failed_count == 0,
+        }
+        return AdapterResult(
+            applied_state={"backend_side_effect": summary["backend_side_effect"]},
+            observed_state=summary,
+            message="Kubernetes namespace quota expiration sweep completed",
+        )
+
+    def _kubernetes_sweep_skip_reason(self, target: dict[str, Any]) -> str | None:
+        resource_key = target.get("resource_key")
+        resource_type = target.get("resource_type") or "user"
+        if resource_type in {"system", "admin"}:
+            return "resource_type_not_auto_blocked"
+        block_state = target.get("block_state") or {}
+        if target.get("resource_status") == LifecycleState.BLOCKED.value or block_state.get(
+            "blocked"
+        ):
+            return "already_blocked"
+        desired = target.get("desired_state") or {}
+        for entry in desired.get("storage_class_quotas") or []:
+            storage_name = entry.get("storage_name") if isinstance(entry, dict) else None
+            if not storage_name:
+                return "storage_name_missing"
+            mapping = self.repository.get_storage_mapping(storage_name)
+            if not mapping:
+                return "storage_mapping_missing"
+            if (mapping.get("readiness") or {}).get("resource_management") != "Ready":
+                return "rm_readiness_not_ready"
+        if resource_key:
+            active = self.repository.active_work_for_resource(
+                resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
+                resource_key=resource_key,
+            )
+            if active:
+                return "resource_has_active_work"
+        return None
+
+    def _block_kubernetes_sweep_target(
+        self, sweep_plan: dict[str, Any], target: dict[str, Any]
+    ) -> AdapterResult:
+        desired = dict(target.get("desired_state") or {})
+        restore_hard = dict(
+            desired.get("resource_quota_hard") or target.get("desired_hard") or {}
+        )
+        desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(restore_hard)
+        desired["block"] = True
+        desired["block_state"] = {
+            "blocked": True,
+            "block_mode": "quota-zero",
+            "restore_hard": restore_hard,
+            "reason": sweep_plan["desired_state"].get("reason"),
+        }
+        desired["operation"] = OperationKind.K8S_QUOTA_BLOCK.value
+        desired["resource_kind"] = ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value
+        desired["resource_key"] = target["resource_key"]
+        block_plan = dict(sweep_plan)
+        block_plan["operation_kind"] = OperationKind.K8S_QUOTA_BLOCK.value
+        block_plan["resource_key"] = target["resource_key"]
+        block_plan["desired_state"] = desired
+        block_plan["execution_metadata"] = {
+            **sweep_plan.get("execution_metadata", {}),
+            "resource_kind": ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
+            "kubernetes_backend": {
+                "cluster_name": desired.get("cluster_name"),
+                "namespace_name": desired.get("namespace_name"),
+                "resource_quota_name": desired.get(
+                    "resource_quota_name", "dms-storage-quota"
+                ),
+            },
+        }
+        adapter = self._kubernetes_adapter(block_plan)
+        result = adapter.apply_resource_quota(block_plan)
+        self.repository.upsert_resource(
+            resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
+            resource_key=target["resource_key"],
+            desired_state=result.applied_state.get("synced_desired_state", desired),
+            applied_state=result.applied_state,
+            observed_state=result.observed_state,
+            status=result.observed_state.get("resource_status", LifecycleState.BLOCKED.value),
+        )
+        return result
+
     @staticmethod
     def _kubernetes_quota_event_action(plan: dict[str, Any]) -> str | None:
         operation = plan["operation_kind"]
@@ -364,6 +507,10 @@ class RMWorkerRuntime:
             return "consistency_check"
         if operation == OperationKind.K8S_QUOTA_AUDIT.value:
             return "audit"
+        if operation == OperationKind.K8S_QUOTA_IMPORT.value:
+            return "import"
+        if operation == OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value:
+            return "expiration_sweep"
         if operation == OperationKind.K8S_QUOTA_BLOCK.value:
             return "block" if plan["desired_state"].get("block") else "unblock"
         return None
@@ -388,6 +535,17 @@ def _filesystem_sweep_failure_reason(message: str) -> str:
     if "group" in lowered:
         return "filesystem_access_group_missing"
     return "filesystem_block_failed"
+
+
+def _kubernetes_sweep_failure_reason(message: str) -> str:
+    lowered = message.lower()
+    if "resourcequota" in lowered and ("does not exist" in lowered or "not found" in lowered):
+        return "kubernetes_quota_missing"
+    if "non-dms" in lowered or "managed" in lowered:
+        return "kubernetes_quota_metadata_drift"
+    if "restore" in lowered:
+        return "kubernetes_quota_block_restore_missing"
+    return "kubernetes_quota_block_failed"
 
 
 def _rm_precondition_issue(operation: str, message: str) -> dict[str, Any] | None:

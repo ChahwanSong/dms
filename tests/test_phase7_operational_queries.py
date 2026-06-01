@@ -389,6 +389,7 @@ def seed_multi_resource(
         "resource_key": RESOURCE_KEY,
         "resource_quota_name": "dms-storage-quota",
         "resource_quota_hard": hard,
+        "expires_at": "2099-01-01T00:00:00Z",
     }
     if blocked:
         desired["block"] = True
@@ -424,6 +425,8 @@ def create_request(
         "namespace_name": "phase7-quota",
         **payload,
     }
+    if operation == OperationKind.K8S_QUOTA_CREATE:
+        merged.setdefault("expires_at", "2099-01-01T00:00:00Z")
     return repository.create_request(
         requester_id="alice",
         actor="api-client",

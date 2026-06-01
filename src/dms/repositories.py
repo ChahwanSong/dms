@@ -1015,6 +1015,73 @@ class DmsRepository:
             filtered.append(resource)
         return filtered
 
+    def list_kubernetes_namespace_quota_resources_expiring(
+        self,
+        *,
+        cluster_name: str | None = None,
+        namespace_name: str | None = None,
+        status: str = "expired",
+        before: str | None = None,
+        within_seconds: int | None = None,
+        include_blocked: bool = False,
+        resource_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if status not in {"expired", "expiring", "all"}:
+            raise ValueError("status must be one of: expired, expiring, all")
+        basis = _parse_iso(before) if before else utcnow()
+        window_end = (
+            basis + timedelta(seconds=within_seconds)
+            if within_seconds is not None
+            else None
+        )
+        rows = self.list_kubernetes_namespace_quota_resources(
+            cluster_name=cluster_name,
+            namespace_name=namespace_name,
+            resource_type=resource_type,
+            limit=max(limit * 4, limit),
+        )
+        matches: list[dict[str, Any]] = []
+        for resource in rows:
+            if resource.get("status") == "Deleted":
+                continue
+            desired = resource["desired_state"]
+            applied = resource["applied_state"]
+            expires_at = desired.get("expires_at") or applied.get("expires_at")
+            if not expires_at:
+                continue
+            expires = _parse_iso(str(expires_at))
+            expired = expires <= basis
+            expiring = bool(window_end and basis < expires <= window_end)
+            if status == "expired" and not expired:
+                continue
+            if status == "expiring" and not expiring:
+                continue
+            if status == "all" and not (expired or expiring):
+                continue
+            block_state = _kubernetes_quota_block_state(resource)
+            if block_state.get("blocked") and not include_blocked:
+                continue
+            seconds_overdue = int((basis - expires).total_seconds()) if expired else None
+            matches.append(
+                {
+                    **resource,
+                    "cluster_name": desired.get("cluster_name"),
+                    "namespace_name": desired.get("namespace_name"),
+                    "resource_type": desired.get("resource_type") or "user",
+                    "resource_quota_name": desired.get(
+                        "resource_quota_name", "dms-storage-quota"
+                    ),
+                    "desired_hard": desired.get("resource_quota_hard") or {},
+                    "expires_at": expires.isoformat(),
+                    "expired": expired,
+                    "expiring": expiring,
+                    "seconds_overdue": seconds_overdue,
+                    "block_state": block_state or {"blocked": False},
+                }
+            )
+        return matches[:limit]
+
     def get_resource(self, resource_kind: str, resource_key: str) -> dict[str, Any] | None:
         with self.database.connect() as connection:
             row = connection.execute(
@@ -2020,6 +2087,15 @@ def _parse_iso(value: str | None) -> datetime:
 
 
 def _filesystem_block_state(resource: dict[str, Any]) -> dict[str, Any]:
+    for section in ("desired_state", "applied_state", "observed_state"):
+        state = resource.get(section) or {}
+        block_state = state.get("block_state")
+        if isinstance(block_state, dict) and block_state:
+            return dict(block_state)
+    return {"blocked": resource.get("status") == LifecycleState.BLOCKED.value}
+
+
+def _kubernetes_quota_block_state(resource: dict[str, Any]) -> dict[str, Any]:
     for section in ("desired_state", "applied_state", "observed_state"):
         state = resource.get(section) or {}
         block_state = state.get("block_state")

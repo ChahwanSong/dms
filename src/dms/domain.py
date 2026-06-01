@@ -96,6 +96,8 @@ class OperationKind(StrEnum):
     K8S_QUOTA_SYNC = "kubernetes.namespace_quota.sync"
     K8S_QUOTA_CHECK = "kubernetes.namespace_quota.consistency_check"
     K8S_QUOTA_AUDIT = "kubernetes.namespace_quota.audit"
+    K8S_QUOTA_IMPORT = "kubernetes.namespace_quota.import"
+    K8S_QUOTA_EXPIRATION_SWEEP = "kubernetes.namespace_quota.expiration_sweep"
     DATA_SYNC = "data.sync"
     DATA_RM = "data.rm"
     DATA_SCAN = "data.scan"

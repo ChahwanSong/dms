@@ -146,9 +146,10 @@ def test_phase12_filesystem_update_requires_existing_quota_only_payload(tmp_path
     assert {
         issue["reason"] for issue in result["verification_summary"]["issues"]
     } == {
+        "expires_at_required",
         "filesystem_payload_fields_unsupported_phase12",
         "filesystem_resource_missing",
-        "filesystem_quota_required",
+        "filesystem_update_payload_empty",
     }
 
 
@@ -382,6 +383,9 @@ def create_filesystem_request(
     *,
     payload: dict[str, Any],
 ) -> str:
+    payload = dict(payload)
+    if operation == OperationKind.FILESYSTEM_CREATE:
+        payload.setdefault("expires_at", "2099-01-01T00:00:00Z")
     return repository.create_request(
         requester_id="portal:phase10",
         actor="api-client",

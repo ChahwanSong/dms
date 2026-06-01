@@ -350,12 +350,44 @@ def verify_worker_scale(
 
 
 def restart_worker(namespace: str) -> dict:
-    before = kubectl("cluster-a", f"kubectl -n {namespace} get pods -l app.kubernetes.io/name=dms-rm-worker -o name")
-    first = before.splitlines()[0].strip()
-    kubectl("cluster-a", f"kubectl -n {namespace} delete {first}")
+    before = kubectl(
+        "cluster-a",
+        f"kubectl -n {namespace} get pods -l app.kubernetes.io/name=dms-rm-worker -o name",
+    )
+    deleted = ""
+    last_error = ""
+    for _ in range(3):
+        pods = [line.strip() for line in before.splitlines() if line.strip()]
+        if not pods:
+            time.sleep(2)
+            before = kubectl(
+                "cluster-a",
+                f"kubectl -n {namespace} get pods -l app.kubernetes.io/name=dms-rm-worker -o name",
+            )
+            continue
+        candidate = pods[0]
+        completed = subprocess.run(
+            ["ssh", "c1-control", f"kubectl -n {namespace} delete {candidate}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            deleted = candidate
+            break
+        last_error = completed.stderr.strip() or completed.stdout.strip()
+        if "NotFound" not in last_error:
+            raise AssertionError(last_error)
+        time.sleep(2)
+        before = kubectl(
+            "cluster-a",
+            f"kubectl -n {namespace} get pods -l app.kubernetes.io/name=dms-rm-worker -o name",
+        )
+    if not deleted:
+        raise AssertionError(f"unable to delete rm-worker pod for restart check: {last_error}")
     kubectl("cluster-a", f"kubectl -n {namespace} rollout status deployment/dms-rm-worker --timeout=180s")
     after = kubectl("cluster-a", f"kubectl -n {namespace} get pods -l app.kubernetes.io/name=dms-rm-worker -o name")
-    return {"deleted_pod": first, "pods_after": after.splitlines()}
+    return {"deleted_pod": deleted, "pods_after": after.splitlines()}
 
 
 def verify_stale_query(

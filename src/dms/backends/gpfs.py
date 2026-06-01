@@ -737,6 +737,28 @@ class GpfsKubernetesNamespaceQuotaAdapter:
             message="GPFS Kubernetes namespace quota sync skeleton completed",
         )
 
+    def import_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        desired = dict(plan["desired_state"])
+        backend = self.template.metadata()
+        desired.setdefault("resource_quota_hard", self._hard_limits(desired))
+        return AdapterResult(
+            applied_state={
+                "adapter": "gpfs-kubernetes-quota-stub",
+                "operation": "resourcequota.import",
+                "backend": backend,
+                "backend_side_effect": False,
+                "synced_desired_state": desired,
+            },
+            observed_state={
+                "adapter": "gpfs-kubernetes-quota-stub",
+                "verified": True,
+                "backend": backend,
+                "backend_side_effect": False,
+                "imported": True,
+            },
+            message="GPFS Kubernetes namespace quota import skeleton completed",
+        )
+
     def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         backend = self.template.metadata()
         return AdapterResult(

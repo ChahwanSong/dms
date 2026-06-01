@@ -64,6 +64,8 @@ class KubernetesNamespaceQuotaAdapter(Protocol):
 
     def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult: ...
 
+    def import_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
+
     def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
 
     def audit_resource_quotas(self, plan: dict[str, Any]) -> AdapterResult: ...
@@ -248,6 +250,26 @@ class StubKubernetesNamespaceQuotaAdapter:
             applied_state=plan["desired_state"],
             observed_state={"verified": True, "synced": True},
             message="kubernetes namespace quota live sync stub completed",
+        )
+
+    def import_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        self.calls.append(("import_resource_quota", plan["plan_id"]))
+        desired = dict(plan["desired_state"])
+        desired.setdefault("resource_quota_hard", {})
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-quota-stub",
+                "operation": "resourcequota.import",
+                "backend_side_effect": False,
+                "synced_desired_state": desired,
+            },
+            observed_state={
+                "adapter": "kubernetes-quota-stub",
+                "verified": True,
+                "backend_side_effect": False,
+                "imported": True,
+            },
+            message="kubernetes namespace quota import stub completed",
         )
 
     def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
@@ -592,6 +614,60 @@ class KubernetesNamespaceQuotaLiveAdapter:
             message="Kubernetes ResourceQuota live state synced to DB",
         )
 
+    def import_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        desired = plan["desired_state"]
+        cluster_name = desired["cluster_name"]
+        namespace_name = desired["namespace_name"]
+        resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
+        observed = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        if not observed["exists"]:
+            raise KubernetesMutationError(
+                f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
+            )
+        _ensure_dms_managed(
+            observed,
+            resource_quota_name,
+            resource_key=desired.get("resource_key"),
+        )
+        synced_desired = dict(desired)
+        if not synced_desired.get("storage_class_quotas"):
+            synced_desired["storage_class_quotas"] = _infer_storage_class_quotas(
+                hard=observed.get("spec_hard") or {},
+                candidates=desired.get("storage_mapping_candidates") or [],
+            )
+        sync_warnings = _sync_desired_from_resource_quota_hard(
+            synced_desired, observed["spec_hard"]
+        )
+        if sync_warnings:
+            raise KubernetesMutationError(
+                f"failed to infer all StorageClass quota keys: {sync_warnings}"
+            )
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "operation": "resourcequota.import",
+                "backend_side_effect": False,
+                "cluster_name": cluster_name,
+                "namespace_name": namespace_name,
+                "resource_quota_name": resource_quota_name,
+                "synced_desired_state": synced_desired,
+                "live_resource_quota": observed,
+                "annotation_update_unsupported": True,
+            },
+            observed_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "verified": True,
+                "backend_side_effect": False,
+                "imported": True,
+                "resource_quota": observed,
+                "annotation_update_unsupported": True,
+                "previous_annotation_expires_at": (observed.get("annotations") or {}).get(
+                    "dms.io/expires-at"
+                ),
+            },
+            message="Kubernetes ResourceQuota live state imported to DB",
+        )
+
     def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
         cluster_name = desired["cluster_name"]
@@ -742,6 +818,13 @@ class KubernetesNamespaceQuotaLiveAdapter:
             for entry in desired.get("storage_class_quotas") or []
             if isinstance(entry, dict) and entry.get("storage_name")
         ]
+        annotations = {
+            "dms.io/resource-key": plan["resource_key"],
+            "dms.io/request-id": plan["request_id"],
+            "dms.io/storage-names": ",".join(storage_names),
+        }
+        if desired.get("expires_at"):
+            annotations["dms.io/expires-at"] = str(desired["expires_at"])
         return {
             "apiVersion": "v1",
             "kind": "ResourceQuota",
@@ -752,11 +835,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
                     "app.kubernetes.io/managed-by": "dms",
                     "dms.io/resource-kind": "kubernetes-namespace-quota",
                 },
-                "annotations": {
-                    "dms.io/resource-key": plan["resource_key"],
-                    "dms.io/request-id": plan["request_id"],
-                    "dms.io/storage-names": ",".join(storage_names),
-                },
+                "annotations": annotations,
             },
             "spec": {"hard": hard},
         }
@@ -1490,6 +1569,37 @@ def _audit_kubernetes_resource_quota_target(
         ]
         result["diagnostics"] = [{"reason": "query_failed", "message": str(exc)}]
         return result
+
+
+def _infer_storage_class_quotas(
+    *, hard: dict[str, str], candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    by_storage_class: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        storage_class_name = candidate.get("storage_class_name")
+        if not storage_class_name:
+            continue
+        by_storage_class.setdefault(storage_class_name, []).append(candidate)
+    entries: dict[str, dict[str, Any]] = {}
+    for key in sorted(hard):
+        parsed = parse_kubernetes_storage_class_quota_key(key)
+        if not parsed:
+            continue
+        storage_class_name, _ = parsed
+        matches = by_storage_class.get(storage_class_name) or []
+        if len(matches) != 1:
+            raise KubernetesMutationError(
+                f"cannot map StorageClass quota key {key!r} to one DMS storage mapping"
+            )
+        match = matches[0]
+        entries.setdefault(
+            storage_class_name,
+            {
+                "storage_name": match["storage_name"],
+                "storage_class_name": storage_class_name,
+            },
+        )
+    return list(entries.values())
 
 
 def _sync_desired_from_resource_quota_hard(

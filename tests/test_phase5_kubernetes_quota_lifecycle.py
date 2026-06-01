@@ -316,6 +316,7 @@ def seed_resource(
         "resource_key": RESOURCE_KEY,
         "resource_quota_name": "dms-storage-quota",
         "resource_quota_hard": hard,
+        "expires_at": "2099-01-01T00:00:00Z",
     }
     repository.upsert_resource(
         resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
@@ -339,6 +340,8 @@ def create_request(
     repository: DmsRepository, operation: OperationKind, payload: dict[str, Any]
 ) -> str:
     merged = {"cluster_name": "cluster-b", "namespace_name": "phase5-quota", **payload}
+    if operation == OperationKind.K8S_QUOTA_CREATE:
+        merged.setdefault("expires_at", "2099-01-01T00:00:00Z")
     return repository.create_request(
         requester_id="alice",
         actor="api-client",

@@ -787,6 +787,7 @@ def seed_resource(
         "requester_id": "portal:phase12",
         "management_mode": management_mode,
         "quota": quota,
+        "expires_at": "2099-01-01T00:00:00Z",
     }
     observed = {
         "path": f"/mnt/testbed-cephfs/dms-phase10/{directory_name}",
@@ -810,6 +811,9 @@ def create_request(
     *,
     payload: dict[str, Any],
 ) -> str:
+    payload = dict(payload)
+    if operation == OperationKind.FILESYSTEM_CREATE:
+        payload.setdefault("expires_at", "2099-01-01T00:00:00Z")
     return repository.create_request(
         requester_id="portal:phase12",
         actor="api-client",

@@ -145,6 +145,7 @@ def test_gpfs_filesystem_create_uses_storage_scale_commands(repository_pair):
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
             "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 32},
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
     Planner(repository).run_once()
@@ -309,6 +310,7 @@ def test_gpfs_missing_command_fails_closed(repository_pair):
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
             "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 32},
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
     Planner(repository).run_once()
@@ -334,6 +336,7 @@ def test_gpfs_quota_disabled_fails_before_side_effect(repository_pair):
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
             "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 32},
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
     Planner(repository).run_once()
@@ -360,6 +363,7 @@ def test_gpfs_perfileset_quota_disabled_fails_before_side_effect(repository_pair
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
             "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 32},
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
     Planner(repository).run_once()
@@ -390,6 +394,7 @@ def test_gpfs_quota_readback_mismatch_records_unknown_after_side_effect(reposito
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
             "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 32},
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
     Planner(repository).run_once()
@@ -420,6 +425,7 @@ def test_gpfs_kubernetes_namespace_quota_uses_gpfs_csi_mapping(repository_pair):
             "namespace_name": "alice",
             "storage_class_quotas": [{"storage_name": "gpfs-a"}],
             "quota": {"requests_storage_bytes": 4 * 10**12, "pvc_count": 20},
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
     registry = BackendAdapterRegistry.with_test_stubs(repository)
@@ -502,6 +508,7 @@ def seed_gpfs_resource(
         "resource_key": f"gpfs-a:{directory_name}",
         "management_mode": management_mode,
         "quota": quota,
+        "expires_at": "2099-01-01T00:00:00Z",
     }
     observed = {
         "adapter": "gpfs-fileset-command",

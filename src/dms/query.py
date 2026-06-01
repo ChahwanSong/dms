@@ -271,6 +271,57 @@ class OperationalQueryService:
             )
         return items
 
+    def kubernetes_namespace_quota_expiring(
+        self,
+        *,
+        cluster_name: str | None = None,
+        namespace_name: str | None = None,
+        resource_type: str | None = None,
+        status: str = "expired",
+        before: str | None = None,
+        within_seconds: int | None = None,
+        include_blocked: bool = False,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        resources = self.repository.list_kubernetes_namespace_quota_resources_expiring(
+            cluster_name=cluster_name,
+            namespace_name=namespace_name,
+            resource_type=resource_type,
+            status=status,
+            before=before,
+            within_seconds=within_seconds,
+            include_blocked=include_blocked,
+            limit=limit or 1000,
+        )
+        items: list[dict[str, Any]] = []
+        for resource in resources:
+            request_summary = self._resource_request_summary(resource["resource_key"])
+            items.append(
+                {
+                    "resource_kind": ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
+                    "resource_key": resource["resource_key"],
+                    "cluster_name": resource.get("cluster_name"),
+                    "namespace_name": resource.get("namespace_name"),
+                    "resource_type": resource.get("resource_type"),
+                    "status": resource["status"],
+                    "version": resource["version"],
+                    "expires_at": resource.get("expires_at"),
+                    "expired": resource.get("expired"),
+                    "expiring": resource.get("expiring"),
+                    "seconds_overdue": resource.get("seconds_overdue"),
+                    "block_state": resource.get("block_state"),
+                    "resource_quota_name": resource.get("resource_quota_name"),
+                    "desired_hard": resource.get("desired_hard") or {},
+                    "updated_at": resource["updated_at"],
+                    "recent_requests": request_summary["recent_requests"],
+                    "last_check_request_id": request_summary["last_check_request_id"],
+                    "last_check_status": request_summary["last_check_status"],
+                    "last_sync_request_id": request_summary["last_sync_request_id"],
+                    "last_sync_status": request_summary["last_sync_status"],
+                }
+            )
+        return items
+
     def _resource_request_summary(self, resource_key: str) -> dict[str, Any]:
         operations = tuple(operation.value for operation in KUBERNETES_QUOTA_OPERATIONS)
         recent = self.repository.list_requests_for_resource(
@@ -307,16 +358,69 @@ class OperationalQueryService:
         }
 
     def _kubernetes_quota_action_required(self) -> list[dict[str, Any]]:
+        issues: list[dict[str, Any]] = []
+        for resource in self.repository.list_kubernetes_namespace_quota_resources_expiring(
+            status="expired",
+            include_blocked=False,
+            limit=1000,
+        ):
+            issues.append(
+                {
+                    "issue_type": "kubernetes_quota_expired_unblocked",
+                    "severity": "WARN",
+                    "resource_kind": ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
+                    "resource_key": resource["resource_key"],
+                    "cluster_name": resource.get("cluster_name"),
+                    "namespace_name": resource.get("namespace_name"),
+                    "resource_type": resource.get("resource_type"),
+                    "expires_at": resource.get("expires_at"),
+                    "seconds_overdue": resource.get("seconds_overdue"),
+                    "updated_at": resource.get("updated_at"),
+                    "recommended_action": (
+                        "run Kubernetes namespace quota expiration sweep or manually block the resource"
+                    ),
+                }
+            )
         rows = self.repository.list_results_for_operations(
             operations=(
                 OperationKind.K8S_QUOTA_AUDIT.value,
                 OperationKind.K8S_QUOTA_CHECK.value,
+                OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
             ),
             limit=1000,
         )
         seen_resources: set[str] = set()
-        issues: list[dict[str, Any]] = []
         for row in rows:
+            if row["operation"] == OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value:
+                targets = row["verification_summary"].get("targets") or []
+                for target in targets:
+                    if target.get("result") == "failed":
+                        issues.append(
+                            _action_issue(
+                                issue_type="kubernetes_quota_expiration_sweep_failed",
+                                severity="WARN",
+                                resource_key=target.get("resource_key") or row["resource_key"],
+                                cluster_name=target.get("cluster_name"),
+                                namespace_name=target.get("namespace_name"),
+                                source=row,
+                                detail=target,
+                            )
+                        )
+                    elif target.get("result") == "skipped" and target.get("reason") not in {
+                        "already_blocked",
+                    }:
+                        issues.append(
+                            _action_issue(
+                                issue_type="kubernetes_quota_expiration_sweep_skipped",
+                                severity="WARN",
+                                resource_key=target.get("resource_key") or row["resource_key"],
+                                cluster_name=target.get("cluster_name"),
+                                namespace_name=target.get("namespace_name"),
+                                source=row,
+                                detail=target,
+                            )
+                        )
+                continue
             summary = row["verification_summary"]
             targets = summary.get("targets") or [_target_from_check_result(row)]
             for target in targets:
@@ -488,6 +592,8 @@ KUBERNETES_QUOTA_OPERATIONS = {
     OperationKind.K8S_QUOTA_SYNC,
     OperationKind.K8S_QUOTA_CHECK,
     OperationKind.K8S_QUOTA_AUDIT,
+    OperationKind.K8S_QUOTA_IMPORT,
+    OperationKind.K8S_QUOTA_EXPIRATION_SWEEP,
 }
 
 FILESYSTEM_OPERATIONS = {
@@ -639,6 +745,9 @@ def _action_issue(
         "dms_hard",
         "non_dms_hard",
         "message",
+        "result",
+        "expires_at",
+        "resource_type",
     ):
         if key in detail:
             issue[key] = detail[key]
@@ -742,6 +851,12 @@ def _recommended_action(issue_type: str) -> str:
         return "repair DMS metadata with an update/reset apply or investigate manual changes"
     if issue_type == "kubernetes_quota_query_failed":
         return "check Kubernetes API access and rerun audit"
+    if issue_type == "kubernetes_quota_expired_unblocked":
+        return "run Kubernetes namespace quota expiration sweep or manually block the resource"
+    if issue_type == "kubernetes_quota_expiration_sweep_failed":
+        return "inspect failed target and rerun sweep or manually block"
+    if issue_type == "kubernetes_quota_expiration_sweep_skipped":
+        return "review skipped Kubernetes namespace quota expiration target"
     return "review Kubernetes quota state"
 
 
