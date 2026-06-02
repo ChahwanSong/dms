@@ -45,6 +45,9 @@ data:
   DMS_FILESYSTEM_MUTATION_MODE: "ssh-host-exec"
   DMS_FILESYSTEM_EXEC_TIMEOUT_SECONDS: "300"
   DMS_FILESYSTEM_EXEC_USE_SUDO: "true"
+  DMS_REQUIRE_MTLS_HEADER: "true"
+  DMS_REQUIRE_MTLS_VERIFIED_HEADER: "true"
+  DMS_MTLS_ACTOR_PREFIX: "mtls:"
   DMS_LDAP_URI: "ldap://ldap.example.internal:389"
   DMS_LDAP_BASE_DN: "dc=example,dc=internal"
   DMS_LDAP_USER_SEARCH_BASE: "ou=people,dc=example,dc=internal"
@@ -66,6 +69,16 @@ stringData:
   DMS_AUTH_SHARED_TOKEN: "CHANGE_ME_LONG_RANDOM_TOKEN"
   DMS_LDAP_BIND_DN: "cn=dms,ou=service-accounts,dc=example,dc=internal"
   DMS_LDAP_BIND_PASSWORD: "CHANGE_ME"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dms-client-ca
+  namespace: dms
+type: Opaque
+stringData:
+  ca.crt: |
+    # DMS API client certificate CA bundle for ingress mTLS validation.
 ---
 apiVersion: v1
 kind: Secret
@@ -202,6 +215,26 @@ spec:
     - name: http
       port: 80
       targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dms-api-from-ingress-only
+  namespace: dms
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dms-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: http
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -1012,7 +1012,7 @@ DMS API는 Kubernetes Ingress를 통해 외부 client에 노출된다.
 
 운영자는 이 정보를 사용해 외부 client가 mTLS와 token을 통해 DMS API를 호출할 수 있도록 구성한다.
 
-Ingress 또는 edge proxy는 API upstream으로 client certificate subject와 verification result를 전달하고, API server는 `DMS_REQUIRE_MTLS_HEADER=true` 및 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 설정에서 이를 요구한다. DMS edge proxy는 `X-DMS-Client-Cert-Subject`와 `X-DMS-Client-Cert-Verify: SUCCESS`를 전달하고, ingress-nginx는 `auth-tls-*` annotation으로 `ssl-client-subject-dn`과 `ssl-client-verify: SUCCESS`를 전달한다. API Service 직접 접근은 header spoof를 막기 위해 NetworkPolicy 또는 동등한 네트워크 제어로 차단해야 한다. 테스트베드에서는 ingress-nginx controller v1.15.1을 NodePort `31443`으로 설치하고 실제 Ingress mTLS termination을 검증한다. 별도로 mTLS 검증 proxy와 NetworkPolicy도 임시 배포해 edge-proxy 경로의 client certificate handshake와 direct NodePort spoof 차단을 검증한다.
+Ingress 또는 edge proxy는 API upstream으로 client certificate subject와 verification result를 전달하고, API server는 `DMS_REQUIRE_MTLS_HEADER=true` 및 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 설정에서 이를 요구한다. DMS edge proxy는 `X-DMS-Client-Cert-Subject`와 `X-DMS-Client-Cert-Verify: SUCCESS`를 전달하고, ingress-nginx는 `auth-tls-*` annotation으로 `ssl-client-subject-dn`과 `ssl-client-verify: SUCCESS`를 전달한다. API Service 직접 접근은 header spoof를 막기 위해 NetworkPolicy 또는 동등한 네트워크 제어로 차단해야 한다. 현재 테스트베드 검증은 ingress-nginx namespace/IngressClass가 없는 환경에서 short-lived mTLS edge proxy와 NetworkPolicy를 임시 배포해 client certificate handshake, trusted evidence injection, direct spoof 차단을 확인했다. `install/kubernetes/ingress.example.yaml`은 ingress-nginx 운영 예시이며, production ingress-nginx controller의 live termination 검증은 별도 staging 검증 항목이다.
 
 ### PostgreSQL
 

@@ -678,7 +678,7 @@ Phase 11 완료 시 `docs/dms-phase11-verification.md`를 작성한다.
 - VolcanoJob create/watch/terminate
 - long-running RM Worker Kubernetes Deployment/loop 운영 검증
 - production Helm/Kustomize packaging 완성
-- trusted ingress mTLS live validation
+- trusted edge mTLS validation은 Phase 16에서 완료. production ingress-nginx-specific live validation은 별도 staging 항목으로 유지
 
 ## Phase 11 완료 후 다음 Phase 후보
 

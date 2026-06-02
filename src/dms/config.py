@@ -13,6 +13,9 @@ class Settings:
     observability_database_url: str
     auth_shared_token: str | None = None
     default_actor: str | None = None
+    require_mtls_header: bool = False
+    require_mtls_verified_header: bool = False
+    mtls_actor_prefix: str = "mtls:"
     worker_lease_seconds: int = 300
     preview_ttl_seconds: int = 24 * 60 * 60
     ldap_uri: str | None = None
@@ -44,11 +47,29 @@ class Settings:
         lease = int(os.getenv("DMS_WORKER_LEASE_SECONDS", "300"))
         preview_ttl = int(os.getenv("DMS_PREVIEW_TTL_SECONDS", str(24 * 60 * 60)))
         ldap_base_dn = os.getenv("DMS_LDAP_BASE_DN")
+        require_mtls_header = _bool_env("DMS_REQUIRE_MTLS_HEADER", False)
+        require_mtls_verified_header = _bool_env(
+            "DMS_REQUIRE_MTLS_VERIFIED_HEADER", False
+        )
+        if require_mtls_verified_header and not require_mtls_header:
+            raise ValueError(
+                "DMS_REQUIRE_MTLS_VERIFIED_HEADER=true requires "
+                "DMS_REQUIRE_MTLS_HEADER=true"
+            )
+        default_actor = os.getenv("DMS_DEFAULT_ACTOR")
+        if require_mtls_header and default_actor:
+            raise ValueError(
+                "DMS_DEFAULT_ACTOR must not be set when "
+                "DMS_REQUIRE_MTLS_HEADER=true"
+            )
         return cls(
             database_url=database_url,
             observability_database_url=observability_url,
             auth_shared_token=os.getenv("DMS_AUTH_SHARED_TOKEN"),
-            default_actor=os.getenv("DMS_DEFAULT_ACTOR"),
+            default_actor=default_actor,
+            require_mtls_header=require_mtls_header,
+            require_mtls_verified_header=require_mtls_verified_header,
+            mtls_actor_prefix=os.getenv("DMS_MTLS_ACTOR_PREFIX", "mtls:"),
             worker_lease_seconds=lease,
             preview_ttl_seconds=preview_ttl,
             ldap_uri=os.getenv("DMS_LDAP_URI"),
@@ -110,3 +131,15 @@ def _json_env(name: str) -> dict[str, str] | None:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be a JSON object")
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")

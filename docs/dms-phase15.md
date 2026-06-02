@@ -868,27 +868,42 @@ Phase 15 live verification은 기존 Vagrant multi-cluster testbed를 사용한�
 
 ## Phase 15 이후 다음 작업 리스트
 
-Data Management 후보는 resource expiry update/import default와 Kubernetes namespace quota expiry lifecycle 이후 Phase 16으로 미룬다.
+Data Management 후보는 resource expiry update/import default와 Kubernetes namespace quota expiry lifecycle 이후로 미뤘지만, 현재 DMS API 인증 경계는 아직 shared token과 trusted actor header skeleton 수준이다. 따라서 다음 phase는 Data Management 구현 전에 external API mTLS validation과 auth boundary hardening을 먼저 닫는 Phase 16으로 진행한다.
 
-### Phase 16A: Data Management Read-only Scan Preflight
+### Phase 16: External API mTLS Validation and Auth Boundary Hardening
+
+- `DMS_REQUIRE_MTLS_HEADER`와 `DMS_REQUIRE_MTLS_VERIFIED_HEADER` 설정 추가
+- DMS edge proxy header family(`X-DMS-Client-Cert-*`) validation
+- ingress-nginx header family(`ssl-client-*`) validation
+- verify result `SUCCESS` 요구와 missing/failed/conflicting evidence reject
+- mTLS subject 기반 actor derivation
+- mTLS-required mode에서 `x-dms-actor` spoofing/conflict reject
+- mTLS-required mode에서 `DMS_DEFAULT_ACTOR` fallback 비활성화
+- shared bearer token과 mTLS evidence를 함께 요구하는 production install profile
+- mTLS ingress example, client CA Secret, NetworkPolicy 또는 동등한 direct access 차단 문서화
+- testbed에서 valid/invalid client certificate, missing/wrong token, direct spoof 차단 검증
+
+구체 구현 프롬프트는 `docs/dms-phase16.md`를 따른다.
+
+### Phase 17A: Data Management Read-only Scan Preflight
 
 - filesystem resource boundary를 read-only scan target으로 사용
 - DM Agent report 기반 candidate pool
 - POSIX identity/mount/tool preflight
 - VolcanoJob 이전 local scan preflight 검증
 
-### Phase 16B: DM Worker Runtime and VolcanoJob Skeleton
+### Phase 17B: DM Worker Runtime and VolcanoJob Skeleton
 
 - `dms dm-worker --loop` Deployment
 - VolcanoJob create/watch/delete skeleton
 - job lease/recovery
 - artifact URI and preview lifecycle
 
-### Phase 16C: Filesystem Policy and Initialize
+### Phase 17C: Filesystem Policy and Initialize
 
 - filesystem default quota policy
 - `filesystem.initialize`
 - `reset_quota_to_default=true`
 - quota clear/unlimited lifecycle
 
-권장 순서는 Phase 15로 resource expiry update/import default와 Kubernetes namespace quota expiry lifecycle을 먼저 닫고, 그 다음 Phase 16A로 Data Management read-only scan preflight를 구현한 뒤, Phase 16B로 DM Worker/VolcanoJob live execution을 여는 것이다.
+권장 순서는 Phase 16으로 external API mTLS validation과 auth boundary hardening을 먼저 닫고, 그 다음 Phase 17A로 Data Management read-only scan preflight를 구현한 뒤, Phase 17B로 DM Worker/VolcanoJob live execution을 여는 것이다.

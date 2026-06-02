@@ -658,7 +658,7 @@ Live tests:
 - Data Management `scan/sync/rm` live execution
 - VolcanoJob create/watch/terminate
 - production Helm/Kustomize packaging 완성
-- trusted ingress mTLS live validation
+- trusted edge mTLS validation은 Phase 16에서 완료. production ingress-nginx-specific live validation은 별도 staging 항목으로 유지
 
 ## Phase 9 완료 후 다음 Phase 후보
 

@@ -5,6 +5,10 @@ metadata:
   namespace: dms
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+    nginx.ingress.kubernetes.io/auth-tls-secret: "dms/dms-client-ca"
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
+    nginx.ingress.kubernetes.io/auth-tls-verify-depth: "2"
+    nginx.ingress.kubernetes.io/auth-tls-pass-certificate-to-upstream: "true"
 spec:
   ingressClassName: nginx
   tls:

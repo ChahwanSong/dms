@@ -2,19 +2,34 @@
 set -euo pipefail
 
 api_url="${DMS_API_URL:?DMS_API_URL 값이 필요합니다}"
-actor="${DMS_ACTOR:-operator}"
+actor="${DMS_ACTOR:-}"
 token="${DMS_TOKEN:-}"
 
-headers=(-H "x-dms-actor: $actor")
+# 운영 mTLS profile에서는 DMS_CLIENT_CERT, DMS_CLIENT_KEY, DMS_CA_CERT,
+# DMS_TOKEN을 설정하고 DMS_ACTOR는 unset 상태로 둔다.
+headers=()
+curl_args=()
+if [[ -n "$actor" ]]; then
+  headers+=(-H "x-dms-actor: $actor")
+fi
 if [[ -n "$token" ]]; then
   headers+=(-H "authorization: Bearer $token")
+fi
+if [[ -n "${DMS_CLIENT_CERT:-}" ]]; then
+  curl_args+=(--cert "$DMS_CLIENT_CERT")
+fi
+if [[ -n "${DMS_CLIENT_KEY:-}" ]]; then
+  curl_args+=(--key "$DMS_CLIENT_KEY")
+fi
+if [[ -n "${DMS_CA_CERT:-}" ]]; then
+  curl_args+=(--cacert "$DMS_CA_CERT")
 fi
 
 check() {
   local name="$1"
   local path="$2"
   echo "== $name =="
-  curl -fsS "${api_url%/}${path}" "${headers[@]}"
+  curl -fsS "${api_url%/}${path}" "${curl_args[@]}" "${headers[@]}"
   echo
 }
 
