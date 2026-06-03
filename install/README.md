@@ -50,6 +50,9 @@ install/
   scripts/register-default-quota-policies.sh
   scripts/register-identity-mappings.sh
   scripts/verify-install.sh
+  scripts/dms-planned-shutdown.sh
+  scripts/dms-startup-recovery-check.sh
+  scripts/dms-resume.sh
 ```
 
 ## 0. 설치 전에 정할 값
@@ -711,7 +714,11 @@ GPFS 예시:
 }
 ```
 
-WEKA는 아직 구현되지 않았으므로 active mapping에 넣지 않는다.
+WEKA filesystem backend는 아직 구현되지 않았으므로 filesystem create/update/import
+요청에는 사용할 수 없다. 다만 Kubernetes namespace quota는 backend type과 무관한
+live `ResourceQuota` 경로를 사용하므로, WEKA CSI StorageClass의 provisioner가
+`csi_driver`와 일치하고 storage mapping sanity/readiness가 `Ready`이면
+`storage_class_quotas[].storage_name` 대상으로 사용할 수 있다.
 
 ### 10.2 등록 명령
 
@@ -855,14 +862,23 @@ install/scripts/verify-install.sh
 확인하는 항목:
 
 - `/healthz`
+- control state query
 - inventory query
 - storage mapping query
+- work summary query
+- active plan/run query
+- drain status query
+- stale/recovery run query
 - worker/agent health query
 - action-required query
 
 ### 13.2 Kubernetes namespace quota smoke test
 
 운영에 영향 없는 namespace 이름을 사용한다.
+이 요청은 CephFS, Longhorn, GPFS CSI, WEKA CSI 같은 모든 CSI StorageClass
+backend에서 같은 Kubernetes `ResourceQuota/dms-storage-quota` live adapter를
+사용한다. GPFS namespace quota smoke test에서도 IBM Storage Scale `mm*` command는
+실행되지 않는다.
 
 ```bash
 curl -fsS -X POST "$DMS_API_URL/api/v1/resource-management/kubernetes/namespace-quotas" \
@@ -979,7 +995,134 @@ curl -fsS "$DMS_API_URL/api/v1/operations/action-required" \
 
 정상 steady state에서는 action-required가 비어 있어야 한다.
 
-## 15. 자주 발생하는 문제
+## 15. Planned shutdown, startup recovery, resume
+
+운영자가 DMS image update, DB migration, control cluster reboot, node drain을 수행하기 전에는 DMS API의 drain mode를 먼저 켠다. Phase 18 이후에는 DB의 `dms_control_state`가 source of truth이며, maintenance/drain 중 새 Resource Management/Data Management 요청과 control/config mutation은 409로 거부된다. 조회 endpoint는 계속 사용할 수 있다.
+
+### 15.1 planned shutdown
+
+환경변수를 설정한다.
+
+```bash
+export DMS_API_URL="https://dms.example.internal"
+export DMS_TOKEN="REPLACE_WITH_RANDOM_TOKEN"
+export DMS_CLIENT_CERT="/tmp/dms-certs/operator.crt"
+export DMS_CLIENT_KEY="/tmp/dms-certs/operator.key"
+export DMS_CA_CERT="/path/to/dms-api-server-ca.crt"
+export DMS_NAMESPACE="dms"
+export DMS_KUBECTL_CONTEXT="dms-control"
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"
+unset DMS_ACTOR
+```
+
+먼저 Kubernetes scale down 없이 API drain 동작과 readiness만 확인한다.
+
+```bash
+install/scripts/dms-planned-shutdown.sh \
+  --reason "source update dry-run $(date -Iseconds)" \
+  --timeout-seconds 120 \
+  --poll-seconds 5 \
+  --dry-run
+```
+
+실제 planned shutdown에서는 dry-run을 빼고 실행한다.
+
+```bash
+install/scripts/dms-planned-shutdown.sh \
+  --reason "source update $(date -Iseconds)" \
+  --timeout-seconds 900 \
+  --poll-seconds 10
+```
+
+이 script가 하는 일:
+
+- `POST /api/v1/operations/control-state:begin-drain`
+- `GET /api/v1/operations/drain-status`를 반복 조회
+- `GET /api/v1/operations/work-summary` 출력
+- `deploy/dms-rm-worker`, `deploy/dms-dm-worker`를 0 replica로 scale down
+
+이 script가 하지 않는 일:
+
+- Kubernetes node `cordon/drain/reboot`
+- PostgreSQL backup
+- DMS image 변경
+
+### 15.2 startup recovery check
+
+API Pod와 DB가 올라온 뒤 worker를 다시 열기 전에 recovery 상태를 확인한다.
+
+```bash
+install/scripts/dms-startup-recovery-check.sh
+```
+
+이 script는 다음을 수행한다.
+
+- `POST /api/v1/operations/runs:mark-stale`
+- `GET /api/v1/operations/control-state`
+- `GET /api/v1/operations/drain-status`
+- `GET /api/v1/operations/work-summary`
+- `GET /api/v1/operations/runs/stale`
+- `GET /api/v1/operations/action-required`
+- `GET /api/v1/operations/worker-agent-health`
+
+`RecoveryNeeded`, `UnknownAfterSideEffect`, `BackendApplyFailed`가 있으면 resume하지 말고 backend live state와 `action-required`를 먼저 확인한다. action-required 항목을 운영자가 확인했고 resume이 필요하면 다음처럼 명시한다.
+
+```bash
+install/scripts/dms-startup-recovery-check.sh --allow-action-required
+```
+
+### 15.3 resume
+
+recovery check가 통과하면 control state를 normal로 되돌리고 worker를 다시 scale up한다.
+
+```bash
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+install/scripts/dms-resume.sh \
+  --reason "source update completed $(date -Iseconds)" \
+  --replicas 1
+```
+
+recovery blocker가 남아 있으면 기본적으로 API가 409를 반환한다. 운영자가 live state를 확인했고 강제 resume이 필요하면 `--force`를 사용한다.
+
+```bash
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+install/scripts/dms-resume.sh \
+  --reason "operator accepted recovery items $(date -Iseconds)" \
+  --force \
+  --replicas 1
+```
+
+Data Management live execution을 열기 전까지는 `dms-dm-worker`를 0 replica로 유지한다. 이 경우 resume 후 직접 scale을 조정한다.
+
+```bash
+kubectl --context dms-control -n dms scale deploy/dms-dm-worker --replicas=0
+```
+
+### 15.4 수동 API 확인
+
+script를 쓰지 않고 직접 확인하려면 다음 endpoint를 사용한다.
+
+```bash
+curl -fsS "$DMS_API_URL/api/v1/operations/control-state" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq
+
+curl -fsS "$DMS_API_URL/api/v1/operations/work-summary" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq
+
+curl -fsS "$DMS_API_URL/api/v1/operations/runs/active" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq
+```
+
+## 16. 자주 발생하는 문제
 
 ### API Pod가 시작하지 않음
 
@@ -1059,7 +1202,7 @@ curl -fsS "$DMS_API_URL/api/v1/operations/action-required" \
 - LDAP/SSSD group membership 전파 지연
 - quota 감소 precondition 실패
 
-## 16. 운영 안전 주의사항
+## 17. 운영 안전 주의사항
 
 - 예시 password나 token을 사용하지 않는다.
 - Secret 값이 들어간 파일을 git commit하지 않는다.
@@ -1069,11 +1212,13 @@ curl -fsS "$DMS_API_URL/api/v1/operations/action-required" \
 - 운영 script 호출 시에는 `DMS_CLIENT_CERT`, `DMS_CLIENT_KEY`, `DMS_CA_CERT`, `DMS_TOKEN`을 설정하고 `DMS_ACTOR`는 unset 상태로 둔다.
 - Target cluster kubeconfig가 `target-cluster-rbac.yaml`의 RBAC 범위로 제한되어 있는지 확인한다.
 - 하나의 storage mapping과 하나의 non-production namespace부터 시작한다.
+- source update, control cluster reboot, planned node drain 전에는 `dms-planned-shutdown.sh`로 drain mode에 진입한다.
+- startup 후에는 `dms-startup-recovery-check.sh`를 통과한 다음 `dms-resume.sh`를 실행한다.
 - `dms-dm-worker`는 0 replica로 유지한다.
 - `UnknownAfterSideEffect`, `BackendApplyFailed`, action-required 항목은 운영 사고로 취급한다.
 - 업그레이드 전 operational DB와 observability DB를 모두 백업한다.
 
-## 17. 다음 문서
+## 18. 다음 문서
 
 - 설정 변수와 API 예시는 `install/CONFIGURATION.md`.
 - 일일 점검, 장애 대응, 업그레이드는 `install/RUNBOOK.md`.

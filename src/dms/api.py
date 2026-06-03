@@ -43,9 +43,18 @@ from .repositories import DmsRepository, ObservabilityRepository
 from .workers import cancel_data_job, confirm_data_job
 
 
+MAINTENANCE_REJECT_DETAIL = "DMS is in maintenance/drain mode; mutating requests are temporarily rejected"
+
+
 class MutatingBody(BaseModel):
     requester_id: str
     payload: dict[str, Any] = {}
+
+
+class ControlStateBody(BaseModel):
+    reason: str | None = None
+    block_scheduling: bool = True
+    force: bool = False
 
 
 class DisableIdentityMappingBody(BaseModel):
@@ -148,6 +157,7 @@ def submit_request(
     envelope: RequestEnvelope,
 ) -> dict[str, Any]:
     actor = authenticated_actor(request, services)
+    _reject_if_maintenance_blocked(services)
     request_id = services.repository.create_request(
         requester_id=envelope.requester_id,
         actor=actor,
@@ -171,6 +181,14 @@ def submit_request(
             detail={"request_id": request_id, "reason": reason},
         )
     return {"request_id": request_id, "status": "Persisted"}
+
+
+def _reject_if_maintenance_blocked(services: AppServices) -> None:
+    if services.repository.scheduling_blocked():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=MAINTENANCE_REJECT_DETAIL,
+        )
 
 
 def resource_management_router() -> APIRouter:
@@ -535,6 +553,7 @@ def resource_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         conflict = services.repository.active_work_for_storage(data.storage_name)
         if conflict:
             services.repository.record_storage_mapping_conflict(
@@ -571,6 +590,7 @@ def resource_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         mapping = services.repository.get_storage_mapping(storage_name)
         if not mapping:
             raise HTTPException(status_code=404, detail="storage mapping not found")
@@ -602,6 +622,7 @@ def resource_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         policy_id = services.repository.upsert_default_quota_policy(
             resource_kind=data.resource_kind.value,
             resource_type=data.resource_type,
@@ -734,6 +755,7 @@ def data_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         try:
             confirm_data_job(services.repository, job_id, actor=actor)
         except ValueError as exc:
@@ -747,6 +769,7 @@ def data_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         cancel_data_job(services.repository, services.volcano_adapter, job_id, actor=actor)
         return {"job_id": job_id, "status": "Cancelled"}
 
@@ -816,6 +839,7 @@ def identity_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         if body.identity_provider != identity_provider or body.requester_id != requester_id:
             raise HTTPException(status_code=400, detail="path and body identity mismatch")
         lookup = _require_identity_lookup(services)
@@ -855,6 +879,7 @@ def identity_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         lookup = _require_identity_lookup(services)
         mapping = services.repository.get_identity_mapping(requester_id, identity_provider)
         if not mapping:
@@ -916,6 +941,7 @@ def identity_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         services.repository.disable_identity_mapping(
             requester_id,
             identity_provider,
@@ -1034,6 +1060,7 @@ def agent_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
         service = AgentReportIngestionService(services.repository, services.observability)
         try:
             report_id = service.ingest(report, actor=actor)
@@ -1046,6 +1073,157 @@ def agent_router() -> APIRouter:
 
 def operational_query_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/operations", tags=["operational-query"])
+
+    @router.get("/control-state")
+    def control_state(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.repository.control_state()
+
+    @router.post("/control-state:enter-maintenance")
+    def enter_maintenance(
+        body: ControlStateBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        actor = authenticated_actor(request, services)
+        if not body.block_scheduling:
+            raise HTTPException(
+                status_code=422,
+                detail="Phase 18 maintenance always blocks scheduling",
+            )
+        state = services.repository.update_control_state(
+            maintenance_mode=True,
+            drain_mode=False,
+            scheduling_blocked=True,
+            reason=body.reason or "maintenance",
+            actor=actor,
+            mutation_kind="control.enter_maintenance",
+            payload=body.model_dump(),
+        )
+        return {"control_state": state}
+
+    @router.post("/control-state:begin-drain")
+    def begin_drain(
+        body: ControlStateBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        actor = authenticated_actor(request, services)
+        state = services.repository.update_control_state(
+            maintenance_mode=True,
+            drain_mode=True,
+            scheduling_blocked=True,
+            reason=body.reason or "drain",
+            actor=actor,
+            mutation_kind="control.begin_drain",
+            payload=body.model_dump(),
+        )
+        drain = services.query.drain_status()
+        return {
+            "control_state": state,
+            "active_runs": drain["active_runs"],
+            "ready_for_shutdown": drain["ready_for_shutdown"],
+        }
+
+    @router.get("/drain-status")
+    def drain_status(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.query.drain_status()
+
+    @router.post("/control-state:resume")
+    def resume(
+        body: ControlStateBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        actor = authenticated_actor(request, services)
+        blockers = services.query.resume_blockers()
+        if blockers and not body.force:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "reason": "recovery blockers require operator review before resume",
+                    "blockers": blockers,
+                },
+            )
+        state = services.repository.update_control_state(
+            maintenance_mode=False,
+            drain_mode=False,
+            scheduling_blocked=False,
+            reason=body.reason or "resume",
+            actor=actor,
+            mutation_kind="control.resume",
+            payload=body.model_dump(),
+            result_summary={"blockers": blockers, "forced": body.force},
+        )
+        return {"control_state": state, "forced": body.force, "blockers": blockers}
+
+    @router.post("/runs:mark-stale")
+    def mark_stale_runs(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        actor = authenticated_actor(request, services)
+        count = services.repository.mark_stale_runs(actor=actor)
+        stale = services.query.stale_or_recovery_runs()
+        services.repository.record_control_mutation(
+            actor=actor,
+            mutation_kind="runs.mark_stale",
+            payload={"count": count},
+            result_summary={"stale_or_recovery_count": len(stale)},
+        )
+        return {"marked": count, "stale_or_recovery_runs": stale}
+
+    @router.get("/work-summary")
+    def work_summary(
+        request: Request,
+        lease_expiring_within_seconds: int = Query(default=60, ge=0),
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.query.work_summary(
+            lease_expiring_within_seconds=lease_expiring_within_seconds
+        )
+
+    @router.get("/plans/active")
+    def active_plans(
+        request: Request,
+        status: list[str] | None = Query(default=None),
+        worker_role: str | None = None,
+        limit: int = Query(default=100, gt=0, le=1000),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        return services.query.active_plans(
+            statuses=tuple(status) if status else None,
+            worker_role=worker_role,
+            limit=limit,
+        )
+
+    @router.get("/runs/active")
+    def active_runs(
+        request: Request,
+        state: list[str] | None = Query(default=None),
+        worker_role: str | None = None,
+        worker_id: str | None = None,
+        lease_expiring_within_seconds: int = Query(default=60, ge=0),
+        limit: int = Query(default=100, gt=0, le=1000),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        return services.query.active_runs(
+            states=tuple(state) if state else None,
+            worker_role=worker_role,
+            worker_id=worker_id,
+            lease_expiring_within_seconds=lease_expiring_within_seconds,
+            limit=limit,
+        )
 
     @router.get("/action-required")
     def action_required(

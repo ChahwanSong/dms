@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 
-from dms.adapters import StubFilesystemBackendAdapter, StubKubernetesNamespaceQuotaAdapter
+from dms.adapters import (
+    AdapterResult,
+    StubFilesystemBackendAdapter,
+    StubKubernetesNamespaceQuotaAdapter,
+)
 from dms.backend_registry import BackendAdapterRegistry
 from dms.backends.gpfs import (
     GPFS_BACKEND_TYPE,
@@ -32,6 +36,69 @@ def repository_pair(tmp_path):
     observability_db = Database(f"sqlite:///{tmp_path / 'observability.db'}")
     migrate_all(operational, observability_db)
     return DmsRepository(operational), ObservabilityRepository(observability_db)
+
+
+@dataclass
+class RecordingKubernetesQuotaAdapter:
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
+        return {"cluster_name": cluster_name, "namespace_name": namespace_name, "exists": True}
+
+    def apply_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        self.calls.append(("apply_resource_quota", plan["plan_id"]))
+        desired = plan["desired_state"]
+        hard = desired["resource_quota_hard"]
+        resource_quota = {
+            "exists": True,
+            "cluster_name": desired["cluster_name"],
+            "name": "dms-storage-quota",
+            "namespace": desired["namespace_name"],
+            "uid": "rq-gpfs-csi",
+            "resource_version": "42",
+            "labels": {"app.kubernetes.io/managed-by": "dms"},
+            "annotations": {
+                "dms.io/resource-key": plan["resource_key"],
+                "dms.io/storage-names": "gpfs-a",
+                "dms.io/expires-at": desired["expires_at"],
+            },
+            "spec_hard": hard,
+            "status_hard": hard,
+            "status_used": {"requests.storage": "0", "persistentvolumeclaims": "0"},
+        }
+        return AdapterResult(
+            applied_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "operation": "resourcequota.apply",
+                "backend_side_effect": True,
+                "hard": hard,
+            },
+            observed_state={
+                "adapter": "kubernetes-namespace-quota-live",
+                "verified": True,
+                "backend_side_effect": True,
+                "resource_quota": resource_quota,
+            },
+            message="Kubernetes ResourceQuota live apply completed",
+        )
+
+    def create_namespace(self, plan: dict[str, Any]) -> AdapterResult:
+        return self.apply_resource_quota(plan)
+
+    def delete_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        raise NotImplementedError
+
+    def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult:
+        raise NotImplementedError
+
+    def import_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        raise NotImplementedError
+
+    def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
+        raise NotImplementedError
+
+    def audit_resource_quotas(self, plan: dict[str, Any]) -> AdapterResult:
+        raise NotImplementedError
 
 
 def gpfs_mapping() -> StorageMappingInput:
@@ -414,6 +481,7 @@ def test_gpfs_quota_readback_mismatch_records_unknown_after_side_effect(reposito
 def test_gpfs_kubernetes_namespace_quota_uses_gpfs_csi_mapping(repository_pair):
     repository, observability = repository_pair
     register_gpfs_mapping(repository)
+    kubernetes_adapter = RecordingKubernetesQuotaAdapter()
     request_id = repository.create_request(
         requester_id="alice",
         actor="api-client",
@@ -423,12 +491,16 @@ def test_gpfs_kubernetes_namespace_quota_uses_gpfs_csi_mapping(repository_pair):
         payload={
             "cluster_name": "cluster-a",
             "namespace_name": "alice",
-            "storage_class_quotas": [{"storage_name": "gpfs-a"}],
-            "quota": {"requests_storage_bytes": 4 * 10**12, "pvc_count": 20},
+            "storage_class_quotas": [{"storage_name": "gpfs-a", "pvc_count": 20}],
+            "quota": {"requests_storage_bytes": 4 * 1024**4, "pvc_count": 20},
             "expires_at": "2099-01-01T00:00:00Z",
         },
     )
-    registry = BackendAdapterRegistry.with_test_stubs(repository)
+    registry = BackendAdapterRegistry(
+        repository=repository,
+        default_kubernetes_adapter=kubernetes_adapter,
+        enforce_supported_backends=True,
+    )
     Planner(repository, backend_registry=registry).run_once()
     worker = RMWorkerRuntime(
         repository=repository,
@@ -442,10 +514,17 @@ def test_gpfs_kubernetes_namespace_quota_uses_gpfs_csi_mapping(repository_pair):
     assert worker.run_once() == 1
     [resource] = repository.list_resources()
     assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
-    assert resource["observed_state"]["adapter"] == "gpfs-kubernetes-quota-stub"
-    assert resource["observed_state"]["backend"]["csi_driver"] == GPFS_CSI_DRIVER
-    assert resource["observed_state"]["backend"]["storage_class_name"] == "gpfs-csi"
-    assert resource["observed_state"]["hard"]["requests.storage"] == 4 * 10**12
+    assert kubernetes_adapter.calls == [
+        ("apply_resource_quota", repository.get_plan_by_request(request_id)["plan_id"])
+    ]
+    assert resource["observed_state"]["adapter"] == "kubernetes-namespace-quota-live"
+    assert resource["observed_state"]["resource_quota"]["spec_hard"] == {
+        "requests.storage": "4096Gi",
+        "persistentvolumeclaims": "20",
+        "gpfs-csi.storageclass.storage.k8s.io/requests.storage": "4096Gi",
+        "gpfs-csi.storageclass.storage.k8s.io/persistentvolumeclaims": "20",
+    }
+    assert "gpfs-kubernetes-quota-stub" not in str(resource["observed_state"])
 
 
 def test_gpfs_data_management_planning_records_gpfs_worker_pool(repository_pair):

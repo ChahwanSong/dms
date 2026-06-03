@@ -408,12 +408,36 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
         ("GET", "/api/v1/operations/filesystems/expiring?status=expired", None, {200}),
         ("GET", "/api/v1/operations/kubernetes/namespace-quotas/cluster-a/phase16-create", None, {200}),
         ("GET", "/api/v1/operations/kubernetes/namespace-quotas/expiring?status=expired", None, {200}),
+        ("GET", "/api/v1/operations/control-state", None, {200}),
+        ("GET", "/api/v1/operations/work-summary", None, {200}),
+        ("GET", "/api/v1/operations/plans/active", None, {200}),
+        ("GET", "/api/v1/operations/runs/active", None, {200}),
+        ("GET", "/api/v1/operations/drain-status", None, {200}),
         ("GET", "/api/v1/operations/runs/stale", None, {200}),
         ("GET", "/api/v1/operations/worker-agent-health", None, {200}),
         ("GET", "/api/v1/operations/identity-issues", None, {200}),
         ("GET", "/api/v1/operations/data-jobs", None, {200}),
         ("GET", f"/api/v1/operations/data-jobs/{cancel_job_id}", None, {200}),
         ("GET", f"/api/v1/operations/diagnostics/{seeded_request_id}", None, {200}),
+        (
+            "POST",
+            "/api/v1/operations/control-state:enter-maintenance",
+            {"reason": "phase16 endpoint coverage"},
+            {200},
+        ),
+        (
+            "POST",
+            "/api/v1/operations/control-state:begin-drain",
+            {"reason": "phase16 endpoint coverage"},
+            {200},
+        ),
+        ("POST", "/api/v1/operations/runs:mark-stale", None, {200}),
+        (
+            "POST",
+            "/api/v1/operations/control-state:resume",
+            {"reason": "phase16 endpoint coverage"},
+            {200},
+        ),
     ]
 
     for method, path, body, expected_statuses in cases:

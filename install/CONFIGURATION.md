@@ -76,11 +76,19 @@ export DMS_CA_CERT="/tmp/dms-certs/dms-api-server-ca.crt"
 unset DMS_ACTOR
 ```
 
+Planned shutdown/startup/resume helper에서 추가로 사용하는 변수:
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `DMS_NAMESPACE` | `dms` | DMS Deployment가 있는 namespace. |
+| `DMS_KUBECTL_CONTEXT` | 설정 안 됨 | worker Deployment scale 조작에 사용할 kubectl context. |
+| `DMS_WORKER_DEPLOYMENTS` | script별 기본값 | `dms-planned-shutdown.sh` 기본값은 `dms-rm-worker dms-dm-worker`, `dms-resume.sh` 기본값은 `dms-rm-worker`. DM live execution 전에는 resume 대상에 `dms-dm-worker`를 넣지 않는다. |
+
 Worker runtime:
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `DMS_WORKER_LEASE_SECONDS` | `300` | Planner/RM/DM worker lifecycle에서 사용하는 claim lease. |
+| `DMS_WORKER_LEASE_SECONDS` | `300` | Planner/RM/DM worker lifecycle에서 사용하는 claim lease. RM/DM worker는 backend call 중 heartbeat로 이 lease를 주기적으로 갱신한다. |
 | `DMS_PREVIEW_TTL_SECONDS` | `86400` | Data Management preview TTL. DM live execution은 아직 production-enabled가 아니다. |
 | `DMS_AGENT_REPORT_STALE_SECONDS` | `300` | Storage mapping readiness에 사용하는 agent report freshness window. |
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | DM readiness와 inventory aggregation에 사용하는 cluster name. |
@@ -157,6 +165,12 @@ Kubernetes namespace quota request 요구사항:
 - `payload.quota.pvc_count`
 - `payload.storage_class_quotas[].storage_name`
 - 같은 `cluster_name`에 있는 모든 참조 storage mapping
+
+Kubernetes namespace quota는 모든 CSI StorageClass backend에서 공통 live
+`ResourceQuota/dms-storage-quota` adapter를 사용한다. GPFS나 WEKA 같은 backend의
+filesystem quota command/API는 이 경로에서 실행되지 않는다. Filesystem adapter가
+없는 backend라도 `csi_driver`, `storage_class_name`, sanity/readiness가 맞으면
+Kubernetes quota mapping으로는 사용할 수 있다.
 
 `expiry_at`이 아니라 `expires_at`을 사용한다. `expiry_at`과 `clear_expires_at`은 지원하지 않는 field다.
 
@@ -293,6 +307,21 @@ curl_dms "$DMS_API_URL/api/v1/operations/requests?requester_id=alice&limit=20" \
 
 curl_dms "$DMS_API_URL/api/v1/operations/action-required" \
   -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/operations/control-state" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/operations/work-summary" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/operations/plans/active" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/operations/runs/active" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/operations/drain-status" \
+  -H "authorization: Bearer $DMS_TOKEN"
 ```
 
 일괄 설정 helper:
@@ -308,6 +337,7 @@ unset DMS_ACTOR
 install/scripts/register-storage-mappings.sh install/config/storage-mappings.example.json
 install/scripts/register-default-quota-policies.sh install/config/default-quota-policies.example.json
 install/scripts/register-identity-mappings.sh install/config/identity-mappings.example.json
+install/scripts/verify-install.sh
 ```
 
 운영 mTLS profile에서는 helper가 `DMS_CLIENT_CERT`, `DMS_CLIENT_KEY`,

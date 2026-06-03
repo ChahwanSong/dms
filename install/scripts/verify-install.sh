@@ -34,8 +34,14 @@ check() {
 }
 
 check "health 확인" "/healthz"
+check "control state 확인" "/api/v1/operations/control-state"
 check "inventory 확인" "/api/v1/operations/inventory"
 check "storage mapping 확인" "/api/v1/operations/storage-mappings"
+check "work summary 확인" "/api/v1/operations/work-summary"
+check "active plan 확인" "/api/v1/operations/plans/active"
+check "active run 확인" "/api/v1/operations/runs/active"
+check "drain status 확인" "/api/v1/operations/drain-status"
+check "stale/recovery run 확인" "/api/v1/operations/runs/stale"
 check "agent health 확인" "/api/v1/operations/worker-agent-health"
 check "action required 확인" "/api/v1/operations/action-required"
 

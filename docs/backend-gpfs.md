@@ -89,8 +89,22 @@ removed and is not reintroduced for GPFS.
 
 ## Kubernetes and Data Management
 
-`GpfsKubernetesNamespaceQuotaAdapter` still models Kubernetes `ResourceQuota`
-for GPFS CSI StorageClasses. It does not run Storage Scale commands.
+Kubernetes namespace quota for GPFS CSI StorageClasses is a Kubernetes
+`ResourceQuota` concern, not an IBM Storage Scale fileset-quota concern. Phase
+17 routes GPFS CSI namespace quota requests through the same live
+`KubernetesNamespaceQuotaLiveAdapter` used by CephFS, Longhorn, and future CSI
+StorageClass backends. The previous `gpfs-kubernetes-quota-stub` path has been
+removed from production/live registry selection.
+
+This separation is intentional:
+
+- GPFS filesystem resources use IBM Storage Scale commands such as
+  `mmcrfileset`, `mmsetquota`, `mmlinkfileset`, `mmlsfileset`, and `mmlsquota`.
+- GPFS CSI namespace quotas use Kubernetes `ResourceQuota/dms-storage-quota`
+  with StorageClass-specific hard keys such as
+  `gpfs-csi.storageclass.storage.k8s.io/requests.storage`.
+- No Storage Scale `mm*` command should run for a Kubernetes namespace quota
+  create/update/block/delete/check/sync/import/audit operation.
 
 `GpfsDataManagementAdapter` contributes worker-pool metadata for future DM
 phases: GPFS mount path, filesystem name, data network, POSIX identity
@@ -115,8 +129,11 @@ Current coverage includes:
 - check drift and sync from live quota
 - import requiring a linked fileset
 - quota-only delete refusal
-- GPFS CSI ResourceQuota mapping
+- GPFS CSI namespace quota routing through the live Kubernetes ResourceQuota
+  adapter
 - GPFS DM worker-pool metadata
 
 Live GPFS validation still requires a staging or production IBM Storage Scale
-cluster with the documented commands available to the RM worker.
+cluster with the documented commands available to the RM worker. GPFS CSI
+`ResourceQuota` behavior can be verified independently with a Kubernetes
+StorageClass using `spectrumscale.csi.ibm.com`.

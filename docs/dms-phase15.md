@@ -885,25 +885,33 @@ Data Management 후보는 resource expiry update/import default와 Kubernetes na
 
 구체 구현 프롬프트는 `docs/dms-phase16.md`를 따른다.
 
-### Phase 17A: Data Management Read-only Scan Preflight
+### Phase 17: Kubernetes ResourceQuota Live Adapter Unification
+
+- Phase 17에서 GPFS CSI namespace quota가 live Kubernetes `ResourceQuota` adapter를 타도록 수정 완료
+- CephFS, GPFS, Longhorn, WEKA 등 모든 CSI StorageClass namespace quota 경로를 backend-neutral live adapter로 통합 완료
+- filesystem backend-specific adapter selection과 Kubernetes ResourceQuota adapter selection 분리 완료
+
+구체 구현 프롬프트는 `docs/dms-phase17.md`를 따른다.
+
+### Phase 18A: Data Management Read-only Scan Preflight
 
 - filesystem resource boundary를 read-only scan target으로 사용
 - DM Agent report 기반 candidate pool
 - POSIX identity/mount/tool preflight
 - VolcanoJob 이전 local scan preflight 검증
 
-### Phase 17B: DM Worker Runtime and VolcanoJob Skeleton
+### Phase 18B: DM Worker Runtime and VolcanoJob Skeleton
 
 - `dms dm-worker --loop` Deployment
 - VolcanoJob create/watch/delete skeleton
 - job lease/recovery
 - artifact URI and preview lifecycle
 
-### Phase 17C: Filesystem Policy and Initialize
+### Phase 18C: Filesystem Policy and Initialize
 
 - filesystem default quota policy
 - `filesystem.initialize`
 - `reset_quota_to_default=true`
 - quota clear/unlimited lifecycle
 
-권장 순서는 Phase 16으로 external API mTLS validation과 auth boundary hardening을 먼저 닫고, 그 다음 Phase 17A로 Data Management read-only scan preflight를 구현한 뒤, Phase 17B로 DM Worker/VolcanoJob live execution을 여는 것이다.
+권장 순서는 Phase 16 external API mTLS validation과 Phase 17 Kubernetes ResourceQuota live adapter 통합 완료 이후, Phase 18A로 Data Management read-only scan preflight를 구현하는 것이다.

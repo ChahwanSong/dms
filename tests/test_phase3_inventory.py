@@ -14,6 +14,7 @@ from dms.repositories import DmsRepository, ObservabilityRepository
 
 
 CEPHFS_DRIVER = "rook-ceph.cephfs.csi.ceph.com"
+GPFS_DRIVER = "spectrumscale.csi.ibm.com"
 LONGHORN_DRIVER = "driver.longhorn.io"
 API_HEADERS = {"x-dms-actor": "api-client"}
 
@@ -152,6 +153,51 @@ def test_stale_reports_are_excluded_from_effective_inventory(harness):
         "/api/v1/operations/action-required", headers=API_HEADERS
     ).json()
     assert "agent_report_stale" in {issue["issue_type"] for issue in action_required}
+
+
+def test_gpfs_storage_mapping_uses_default_csi_driver(harness):
+    client: TestClient = harness["client"]
+    reports = [
+        agent_report(
+            cluster_name="cluster-a",
+            node_name="c1-rm-gpfs",
+            node_uid="uid-c1-rm-gpfs",
+            worker_role="RM",
+            mounts=[],
+            csi=[csi(GPFS_DRIVER, "gpfs-csi")],
+        ),
+        agent_report(
+            cluster_name="cluster-a",
+            node_name="c1-dm-gpfs",
+            node_uid="uid-c1-dm-gpfs",
+            worker_role="DM",
+            mounts=[],
+            csi=[csi(GPFS_DRIVER, "gpfs-csi")],
+        ),
+    ]
+    for report in reports:
+        response = client.post(
+            "/api/v1/agent/reports",
+            json=report,
+            headers={
+                "x-dms-actor": f"node:{report['cluster_name']}:{report['node_name']}"
+            },
+        )
+        assert response.status_code == 200
+
+    gpfs = upsert_mapping(
+        client,
+        storage_name="gpfs-a",
+        backend_type="gpfs",
+        cluster_name="cluster-a",
+        storage_class_name="gpfs-csi",
+    )
+
+    assert gpfs["status"] == "Ready"
+    sanity = gpfs["mapping"]["sanity_result"]
+    assert "csi_driver_mismatch" not in issue_codes(sanity["errors"])
+    assert sanity["readiness"]["resource_management"] == "Ready"
+    assert sanity["readiness"]["data_management"] == "Ready"
 
 
 def test_planner_rejects_failed_mapping_and_uses_ready_agent_pool(harness):
@@ -375,9 +421,14 @@ def static_inventory() -> dict:
                         "name": "testbed-cephfs",
                         "provisioner": CEPHFS_DRIVER,
                         "parameters": {},
+                    },
+                    {
+                        "name": "gpfs-csi",
+                        "provisioner": GPFS_DRIVER,
+                        "parameters": {},
                     }
                 ],
-                "csi_drivers": [{"name": CEPHFS_DRIVER}],
+                "csi_drivers": [{"name": CEPHFS_DRIVER}, {"name": GPFS_DRIVER}],
             },
             "cluster-b": {
                 "nodes": [{"name": "c2-rm", "uid": "uid-c2-rm"}],

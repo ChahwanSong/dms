@@ -21,6 +21,12 @@ LONGHORN = "longhorn-b"
 LONGHORN_CLASS = "testbed-longhorn"
 STATIC = "longhorn-static-b"
 STATIC_CLASS = "longhorn-static"
+CEPHFS = "cephfs-b"
+CEPHFS_CLASS = "testbed-cephfs"
+GPFS = "gpfs-b"
+GPFS_CLASS = "gpfs-csi"
+WEKA = "weka-b"
+WEKA_CLASS = "weka-csi"
 RESOURCE_KEY = "cluster-b:phase6-quota"
 
 
@@ -54,6 +60,93 @@ def test_phase6_renderer_creates_multi_storageclass_hard_keys():
     )
 
     assert hard == multi_hard(storage="1Gi", pvc_count="20")
+
+
+def test_phase17_planner_renders_mixed_backend_storageclass_quota(repository):
+    register_mapping(
+        repository,
+        CEPHFS,
+        CEPHFS_CLASS,
+        backend_type="cephfs",
+        csi_driver="rook-ceph.cephfs.csi.ceph.com",
+    )
+    register_mapping(
+        repository,
+        GPFS,
+        GPFS_CLASS,
+        backend_type="gpfs",
+        csi_driver="spectrumscale.csi.ibm.com",
+    )
+    register_mapping(
+        repository,
+        WEKA,
+        WEKA_CLASS,
+        backend_type="weka",
+        csi_driver="csi.weka.io",
+    )
+    request_id = create_request(
+        repository,
+        OperationKind.K8S_QUOTA_CREATE,
+        {
+            "quota": {"requests_storage_bytes": 4 * 1024**4, "pvc_count": 60},
+            "storage_class_quotas": [
+                {
+                    "storage_name": CEPHFS,
+                    "requests_storage_bytes": 512 * 1024**3,
+                    "pvc_count": 10,
+                },
+                {
+                    "storage_name": GPFS,
+                    "requests_storage_bytes": 1024**4,
+                    "pvc_count": 20,
+                },
+                {
+                    "storage_name": WEKA,
+                    "requests_storage_bytes": 2 * 1024**4,
+                    "pvc_count": 30,
+                },
+            ],
+        },
+    )
+
+    assert Planner(repository).run_once() == 1
+
+    plan = repository.get_plan_by_request(request_id)
+    assert plan is not None
+    assert plan["execution_metadata"]["planner"] == "phase6"
+    assert plan["desired_state"]["storage_class_quotas"] == [
+        {
+            "storage_name": CEPHFS,
+            "requests_storage_bytes": 512 * 1024**3,
+            "pvc_count": 10,
+            "storage_class_name": CEPHFS_CLASS,
+            "cluster_name": "cluster-b",
+        },
+        {
+            "storage_name": GPFS,
+            "requests_storage_bytes": 1024**4,
+            "pvc_count": 20,
+            "storage_class_name": GPFS_CLASS,
+            "cluster_name": "cluster-b",
+        },
+        {
+            "storage_name": WEKA,
+            "requests_storage_bytes": 2 * 1024**4,
+            "pvc_count": 30,
+            "storage_class_name": WEKA_CLASS,
+            "cluster_name": "cluster-b",
+        },
+    ]
+    assert plan["desired_state"]["resource_quota_hard"] == {
+        "requests.storage": "4096Gi",
+        "persistentvolumeclaims": "60",
+        sc_key(CEPHFS_CLASS, "requests.storage"): "512Gi",
+        sc_key(CEPHFS_CLASS, "persistentvolumeclaims"): "10",
+        sc_key(GPFS_CLASS, "requests.storage"): "1024Gi",
+        sc_key(GPFS_CLASS, "persistentvolumeclaims"): "20",
+        sc_key(WEKA_CLASS, "requests.storage"): "2048Gi",
+        sc_key(WEKA_CLASS, "persistentvolumeclaims"): "30",
+    }
 
 
 def test_phase6_planner_rejects_duplicate_storage_name(repository):
@@ -243,6 +336,8 @@ def register_mapping(
     storage_class_name: str,
     *,
     cluster_name: str = "cluster-b",
+    backend_type: str = "longhorn",
+    csi_driver: str = "driver.longhorn.io",
 ) -> None:
     readiness = {
         "resource_management": "Ready",
@@ -252,7 +347,7 @@ def register_mapping(
     repository.upsert_storage_mapping(
         StorageMappingInput(
             storage_name=storage_name,
-            backend_template={"backend_type": "longhorn", "csi_driver": "driver.longhorn.io"},
+            backend_template={"backend_type": backend_type, "csi_driver": csi_driver},
             cluster_name=cluster_name,
             storage_class_name=storage_class_name,
             sanity_status="Ready",
@@ -266,7 +361,7 @@ def register_mapping(
                 "cluster_name": cluster_name,
                 "storage_class_name": storage_class_name,
                 "storage_class_exists": True,
-                "provisioner": "driver.longhorn.io",
+                "provisioner": csi_driver,
             },
             "agent_observed": {
                 "rm_readiness": "Ready",

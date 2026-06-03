@@ -68,7 +68,7 @@ DMS backend 확장은 세 경로로 나뉜다.
 
 Template field guidance:
 
-- `backend_type`: registry dispatch key. 새 backend 추가 시 반드시 live registry에 등록한다.
+- `backend_type`: filesystem/Data Management adapter dispatch key. 새 backend의 filesystem 또는 DM adapter를 추가할 때 live registry에 등록한다. Kubernetes namespace quota만 사용할 CSI backend는 Phase 17 이후 별도 adapter registry 등록이 필요 없다.
 - `filesystem_name`: backend filesystem, device, namespace, tenant, 또는 cluster-specific filesystem identifier.
 - `mount_path`: command runner에서 보이는 mounted filesystem root.
 - `managed_root`: DMS가 직접 생성하는 filesystem resource의 parent directory. 반드시 `mount_path` 아래여야 한다.
@@ -132,8 +132,9 @@ if backend_type == WEKA_BACKEND_TYPE:
 
 Kubernetes namespace quota path:
 
-- WEKA CSI StorageClass에 generic Kubernetes `ResourceQuota`만 적용하면 `GENERIC_KUBERNETES_QUOTA_BACKENDS`에 `WEKA_BACKEND_TYPE`을 추가한다.
-- backend-specific Kubernetes namespace quota adapter가 필요할 때만 별도 `WekaKubernetesNamespaceQuotaAdapter`를 만든다.
+- 새 CSI backend를 추가해도 Kubernetes namespace quota adapter allowlist에는 등록하지 않는다.
+- Phase 17 이후 Kubernetes namespace quota는 backend type과 무관하게 공통 `KubernetesNamespaceQuotaLiveAdapter`를 사용한다.
+- backend-specific filesystem quota adapter를 Kubernetes namespace quota path에서 호출하면 안 된다.
 
 Data Management path:
 
@@ -143,7 +144,7 @@ if self._backend_type(mapping) == WEKA_BACKEND_TYPE:
     return WekaDataManagementAdapter(template).worker_pool(storage_name)
 ```
 
-Live registry는 unknown backend를 stub으로 fallback하지 않는다. registry 등록 누락은 `unsupported_backend`로 실패해야 한다.
+Live filesystem registry는 unknown backend를 stub으로 fallback하지 않는다. filesystem adapter registry 등록 누락은 `unsupported_backend`로 실패해야 한다. Kubernetes namespace quota path는 backend type과 무관하게 공통 live ResourceQuota adapter를 사용한다.
 
 ## Inventory, Sanity, and Agent Updates
 
@@ -249,7 +250,7 @@ Minimum unit coverage:
 - post-side-effect read-back mismatch becomes recovery/action-required, not success.
 - registry selects the backend for filesystem plans.
 - registry does not select filesystem adapter for Kubernetes namespace quota plans.
-- Kubernetes namespace quota path uses generic live adapter or backend-specific adapter intentionally.
+- Kubernetes namespace quota path uses the generic live adapter for every CSI backend.
 - Data Management planning records backend worker pool metadata.
 
 Recommended command:

@@ -60,6 +60,32 @@ DEFAULT_REQUEST_LIST_LIMIT = 1000
 
 LOGGER = logging.getLogger(__name__)
 
+ACTIVE_PLAN_STATES = (
+    LifecycleState.PLANNED.value,
+    LifecycleState.CLAIMED.value,
+    LifecycleState.RUNNING.value,
+    LifecycleState.APPLYING.value,
+    LifecycleState.VERIFYING.value,
+    LifecycleState.BLOCKED.value,
+)
+ACTIVE_RUN_STATES = (
+    LifecycleState.CLAIMED.value,
+    LifecycleState.RUNNING.value,
+    LifecycleState.APPLYING.value,
+    LifecycleState.VERIFYING.value,
+)
+ATTENTION_RUN_STATES = (
+    LifecycleState.BLOCKED.value,
+    LifecycleState.STALE_CLAIM.value,
+    LifecycleState.RECOVERY_NEEDED.value,
+    LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+    LifecycleState.BACKEND_APPLY_FAILED.value,
+)
+
+
+class SchedulingBlocked(RuntimeError):
+    pass
+
 
 def row_to_dict(row: Any) -> dict[str, Any]:
     if row is None:
@@ -453,6 +479,40 @@ class DmsRepository:
             ).fetchall()
         return [self._decode_plan(row_to_dict(row)) for row in rows]
 
+    def list_active_plans(
+        self,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        worker_role: str | WorkerRole | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        selected_statuses = statuses or ACTIVE_PLAN_STATES
+        where = [f"plans.status IN ({','.join(['?'] * len(selected_statuses))})"]
+        params: list[Any] = list(selected_statuses)
+        if worker_role:
+            role = worker_role.value if isinstance(worker_role, WorkerRole) else worker_role
+            where.append("plans.worker_role = ?")
+            params.append(role)
+        params.append(limit)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    plans.*,
+                    requests.requester_id,
+                    requests.actor AS request_actor,
+                    requests.resource_kind,
+                    requests.status AS request_status
+                FROM plans
+                JOIN requests ON requests.request_id = plans.request_id
+                WHERE {' AND '.join(where)}
+                ORDER BY plans.created_at ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._decode_plan(row_to_dict(row)) for row in rows]
+
     def get_plan(self, plan_id: str) -> dict[str, Any]:
         with self.database.connect() as connection:
             row = connection.execute(
@@ -520,6 +580,9 @@ class DmsRepository:
         run_id = new_id("run")
         now = iso_now()
         with self.database.connect() as connection:
+            control_state = row_to_dict(self._ensure_control_state(connection))
+            if self._control_state_blocks_scheduling(control_state):
+                raise SchedulingBlocked("DMS scheduling is blocked")
             plan = self._get_plan(connection, plan_id)
             if plan["status"] != LifecycleState.PLANNED.value:
                 raise RuntimeError(f"plan is not claimable: {plan_id}")
@@ -653,17 +716,22 @@ class DmsRepository:
             ).fetchall()
             for row in rows:
                 run = row_to_dict(row)
+                target_state = (
+                    LifecycleState.STALE_CLAIM.value
+                    if run["state"] == LifecycleState.CLAIMED.value
+                    else LifecycleState.RECOVERY_NEEDED.value
+                )
                 connection.execute(
                     "UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ?",
-                    (LifecycleState.STALE_CLAIM.value, now, run["run_id"]),
+                    (target_state, now, run["run_id"]),
                 )
                 connection.execute(
                     "UPDATE plans SET status = ?, updated_at = ? WHERE plan_id = ?",
-                    (LifecycleState.STALE_CLAIM.value, now, run["plan_id"]),
+                    (target_state, now, run["plan_id"]),
                 )
                 connection.execute(
                     "UPDATE requests SET status = ? WHERE request_id = ?",
-                    (LifecycleState.STALE_CLAIM.value, run["request_id"]),
+                    (target_state, run["request_id"]),
                 )
                 self._insert_transition(
                     connection,
@@ -671,7 +739,7 @@ class DmsRepository:
                     plan_id=run["plan_id"],
                     run_id=run["run_id"],
                     from_state=run["state"],
-                    to_state=LifecycleState.STALE_CLAIM.value,
+                    to_state=target_state,
                     reason="worker lease expired",
                     actor=actor,
                     created_at=now,
@@ -1882,6 +1950,51 @@ class DmsRepository:
                 ).fetchall()
         return rows_to_dicts(rows)
 
+    def list_active_runs(
+        self,
+        *,
+        states: tuple[str, ...] | None = None,
+        worker_role: str | WorkerRole | None = None,
+        worker_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        selected_states = states or ACTIVE_RUN_STATES
+        where = [f"runs.state IN ({','.join(['?'] * len(selected_states))})"]
+        params: list[Any] = list(selected_states)
+        if worker_role:
+            role = worker_role.value if isinstance(worker_role, WorkerRole) else worker_role
+            where.append("runs.worker_role = ?")
+            params.append(role)
+        if worker_id:
+            where.append("runs.worker_id = ?")
+            params.append(worker_id)
+        params.append(limit)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    runs.*,
+                    plans.status AS plan_status,
+                    plans.operation_kind,
+                    plans.resource_key,
+                    plans.execution_metadata,
+                    requests.resource_kind,
+                    requests.requester_id,
+                    requests.status AS request_status
+                FROM runs
+                JOIN plans ON plans.plan_id = runs.plan_id
+                JOIN requests ON requests.request_id = runs.request_id
+                WHERE {' AND '.join(where)}
+                ORDER BY runs.updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        decoded = rows_to_dicts(rows)
+        for run in decoded:
+            run["execution_metadata"] = json_loads(run.get("execution_metadata")) or {}
+        return decoded
+
     def list_state_transitions(self, request_id: str) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -1896,24 +2009,89 @@ class DmsRepository:
 
     def control_state(self) -> dict[str, Any]:
         with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM dms_control_state WHERE singleton_id = 'default'",
-            ).fetchone()
-            if not row:
-                now = iso_now()
-                connection.execute(
-                    """
-                    INSERT INTO dms_control_state (
-                        singleton_id, maintenance_mode, drain_mode,
-                        scheduling_blocked, reason, changed_by, changed_at
-                    ) VALUES ('default', 0, 0, 0, '', 'system', ?)
-                    """,
-                    (now,),
-                )
-                row = connection.execute(
-                    "SELECT * FROM dms_control_state WHERE singleton_id = 'default'",
-                ).fetchone()
-        return row_to_dict(row)
+            row = self._ensure_control_state(connection)
+        return self._decode_control_state(row_to_dict(row))
+
+    def scheduling_blocked(self) -> bool:
+        return self._control_state_blocks_scheduling(self.control_state())
+
+    def update_control_state(
+        self,
+        *,
+        maintenance_mode: bool,
+        drain_mode: bool,
+        scheduling_blocked: bool,
+        reason: str,
+        actor: str,
+        mutation_kind: str,
+        payload: dict[str, Any] | None = None,
+        result_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = iso_now()
+        with self.database.connect() as connection:
+            before = self._decode_control_state(
+                row_to_dict(self._ensure_control_state(connection))
+            )
+            connection.execute(
+                """
+                UPDATE dms_control_state
+                SET maintenance_mode = ?, drain_mode = ?, scheduling_blocked = ?,
+                    reason = ?, changed_by = ?, changed_at = ?
+                WHERE singleton_id = 'default'
+                """,
+                (
+                    1 if maintenance_mode else 0,
+                    1 if drain_mode else 0,
+                    1 if scheduling_blocked else 0,
+                    reason,
+                    actor,
+                    now,
+                ),
+            )
+            after = self._decode_control_state(
+                row_to_dict(self._ensure_control_state(connection))
+            )
+            self._insert_control_mutation(
+                connection,
+                actor=actor,
+                mutation_kind=mutation_kind,
+                payload=payload or {"reason": reason},
+                mutation_class="control_state",
+                operation=mutation_kind.split(".")[-1],
+                target_key="default",
+                status="Succeeded",
+                result_summary=result_summary or {},
+                before_state=before,
+                after_state=after,
+                created_at=now,
+            )
+        return after
+
+    def record_control_mutation(
+        self,
+        *,
+        actor: str,
+        mutation_kind: str,
+        payload: dict[str, Any],
+        status: str = "Succeeded",
+        result_summary: dict[str, Any] | None = None,
+    ) -> str:
+        now = iso_now()
+        with self.database.connect() as connection:
+            return self._insert_control_mutation(
+                connection,
+                actor=actor,
+                mutation_kind=mutation_kind,
+                payload=payload,
+                mutation_class="control",
+                operation=mutation_kind.split(".")[-1],
+                target_key="default",
+                status=status,
+                result_summary=result_summary or {},
+                before_state={},
+                after_state={},
+                created_at=now,
+            )
 
     def list_control_mutations(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
@@ -1959,6 +2137,43 @@ class DmsRepository:
         if not row:
             raise KeyError(f"run not found: {run_id}")
         return row_to_dict(row)
+
+    def _ensure_control_state(self, connection: Any) -> Any:
+        row = connection.execute(
+            "SELECT * FROM dms_control_state WHERE singleton_id = 'default'",
+        ).fetchone()
+        if not row:
+            now = iso_now()
+            connection.execute(
+                """
+                INSERT INTO dms_control_state (
+                    singleton_id, maintenance_mode, drain_mode,
+                    scheduling_blocked, reason, changed_by, changed_at
+                ) VALUES ('default', 0, 0, 0, '', 'system', ?)
+                """,
+                (now,),
+            )
+            row = connection.execute(
+                "SELECT * FROM dms_control_state WHERE singleton_id = 'default'",
+            ).fetchone()
+        return row
+
+    @staticmethod
+    def _decode_control_state(state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **state,
+            "maintenance_mode": bool(state.get("maintenance_mode")),
+            "drain_mode": bool(state.get("drain_mode")),
+            "scheduling_blocked": bool(state.get("scheduling_blocked")),
+        }
+
+    @staticmethod
+    def _control_state_blocks_scheduling(state: dict[str, Any]) -> bool:
+        return bool(
+            state.get("maintenance_mode")
+            or state.get("drain_mode")
+            or state.get("scheduling_blocked")
+        )
 
     def _insert_transition(
         self,

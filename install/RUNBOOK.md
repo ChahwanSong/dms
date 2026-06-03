@@ -279,26 +279,46 @@ curl_dms -X POST "$DMS_API_URL/api/v1/resource-management/filesystems:expiration
 
 ## Worker Recovery
 
-Stale run을 확인한다.
+운영 조회를 먼저 확인한다.
 
 ```bash
+curl_dms "$DMS_API_URL/api/v1/operations/work-summary" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq
+
+curl_dms "$DMS_API_URL/api/v1/operations/runs/active" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq
+
 curl_dms "$DMS_API_URL/api/v1/operations/runs/stale" \
   -H "authorization: Bearer $DMS_TOKEN"
 ```
 
-현재 RM worker는 stale run을 표시해서 다른 worker가 planning/execution을 계속할 수 있게 한다. 다만 long-running backend call은 side effect가 발생했을 수 있으므로 operator 검토가 여전히 필요하다. 요청을 다시 제출하기 전에 `action-required`와 backend live state를 확인한다.
-
-Worker를 안전하게 재시작하는 기본 순서:
+Phase 18 이후 RM/DM worker는 장시간 backend call 중 run heartbeat로 `lease_expires_at`을 갱신한다. 그래도 worker process가 죽었거나 DB heartbeat가 끊겨 expired lease가 생길 수 있으므로 startup 또는 planned shutdown 전후에 stale guard를 실행한다.
 
 ```bash
-kubectl --context dms-control -n dms scale deploy/dms-rm-worker --replicas=0
-curl_dms "$DMS_API_URL/api/v1/operations/runs/stale" \
-  -H "authorization: Bearer $DMS_TOKEN"
-kubectl --context dms-control -n dms scale deploy/dms-rm-worker --replicas=1
-kubectl --context dms-control -n dms rollout status deploy/dms-rm-worker --timeout=180s
+install/scripts/dms-startup-recovery-check.sh
 ```
 
-Active backend mutation 중에는 무작정 scale-down하지 않는다. 먼저 action-required, target live state, 최근 logs를 확인한다.
+이 script는 `POST /api/v1/operations/runs:mark-stale`을 호출한다. `Claimed` 상태에서 만료된 run은 `StaleClaim`으로 표시되고, `Running`/`Applying`/`Verifying` 상태에서 만료된 run은 `RecoveryNeeded`로 표시된다. DMS는 이런 run을 자동 재실행하지 않는다.
+
+Worker를 안전하게 재시작하거나 control cluster 작업을 시작하는 기본 순서:
+
+```bash
+install/scripts/dms-planned-shutdown.sh \
+  --reason "worker restart $(date -Iseconds)" \
+  --timeout-seconds 900 \
+  --poll-seconds 10
+
+# 필요한 Kubernetes/host 작업을 수행한다.
+
+install/scripts/dms-startup-recovery-check.sh
+
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+install/scripts/dms-resume.sh \
+  --reason "worker restart completed $(date -Iseconds)" \
+  --replicas 1
+```
+
+Active backend mutation 중에는 무작정 scale-down하지 않는다. `dms-planned-shutdown.sh`가 `ready_for_shutdown=true`를 확인할 때까지 기다리고, `RecoveryNeeded`, `UnknownAfterSideEffect`, `BackendApplyFailed`가 있으면 target live state와 최근 logs를 먼저 확인한다.
 
 ## PostgreSQL Backup
 
@@ -313,21 +333,22 @@ pg_dump "$DMS_OBSERVABILITY_DATABASE_URL" > dms-observability-$(date +%Y%m%d%H%M
 
 ## 업그레이드 절차
 
-1. 가능하면 ingress에서 새 external write를 중지한다.
-2. `dms-planner`와 `dms-rm-worker`를 0으로 scale한다.
-3. Active RM run이 완료되거나 stale/action-required가 될 때까지 기다린다.
-4. PostgreSQL을 backup한다.
-5. 새 image를 `dms-migrate` Job에 적용하고 실행한다.
-6. `dms-api`를 roll한다.
-7. `dms-planner`와 `dms-rm-worker`를 roll한다.
+1. `dms-planned-shutdown.sh`로 drain mode에 진입한다.
+2. Script가 `ready_for_shutdown=true`를 확인하고 worker Deployment를 0으로 scale할 때까지 기다린다.
+3. PostgreSQL을 backup한다.
+4. 새 image를 `dms-migrate` Job에 적용하고 실행한다.
+5. `dms-api`, `dms-planner`, `dms-rm-worker` image를 교체하고 rollout한다.
+6. API가 올라오면 `dms-startup-recovery-check.sh`를 실행한다.
+7. `dms-resume.sh`로 control state를 normal로 되돌리고 RM worker를 scale up한다.
 8. `install/scripts/verify-install.sh`를 실행한다.
-9. External write를 다시 활성화한다.
 
 명령 예시:
 
 ```bash
-kubectl --context dms-control -n dms scale deploy/dms-planner --replicas=0
-kubectl --context dms-control -n dms scale deploy/dms-rm-worker --replicas=0
+install/scripts/dms-planned-shutdown.sh \
+  --reason "DMS upgrade to $NEW_DMS_IMAGE" \
+  --timeout-seconds 900 \
+  --poll-seconds 10
 
 pg_dump "$DMS_DATABASE_URL" > dms-operational-$(date +%Y%m%d%H%M%S).sql
 pg_dump "$DMS_OBSERVABILITY_DATABASE_URL" > dms-observability-$(date +%Y%m%d%H%M%S).sql
@@ -341,8 +362,16 @@ kubectl --context dms-control -n dms set image deploy/dms-api api="$NEW_DMS_IMAG
 kubectl --context dms-control -n dms set image deploy/dms-planner planner="$NEW_DMS_IMAGE"
 kubectl --context dms-control -n dms set image deploy/dms-rm-worker rm-worker="$NEW_DMS_IMAGE"
 
-kubectl --context dms-control -n dms scale deploy/dms-planner --replicas=1
-kubectl --context dms-control -n dms scale deploy/dms-rm-worker --replicas=1
+kubectl --context dms-control -n dms rollout status deploy/dms-api --timeout=180s
+kubectl --context dms-control -n dms rollout status deploy/dms-planner --timeout=180s
+
+install/scripts/dms-startup-recovery-check.sh
+
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+install/scripts/dms-resume.sh \
+  --reason "DMS upgrade completed $(date -Iseconds)" \
+  --replicas 1
+
 install/scripts/verify-install.sh
 ```
 
@@ -363,12 +392,11 @@ kubectl --context dms-control -n dms rollout status deploy/dms-rm-worker --timeo
 
 Schema migration이 이미 실행된 뒤라면 image rollback만으로 충분하지 않을 수 있다. schema-changing release는 staging DB restore로 먼저 검증한다.
 
-Maintenance/drain control state는 DB model에 존재하지만 full runtime enforcement는 최신 design보다 늦을 수 있다. 운영 drain mechanism으로 Kubernetes scaling과 ingress control을 사용한다.
+Rollback 전에도 가능하면 `dms-planned-shutdown.sh`로 drain mode에 진입한다. Rollback 후에는 `dms-startup-recovery-check.sh`와 `dms-resume.sh`를 같은 순서로 실행한다.
 
 ## 알려진 운영 공백
 
 - Non-stub Volcano adapter가 설치되고 검증될 때까지 Data Management live execution은 disabled 상태로 유지해야 한다.
 - 운영 Helm/Kustomize packaging은 아직 완성되지 않았다. 여기 있는 manifest는 명시적 YAML template이다.
-- `DMS_WORKER_LEASE_SECONDS`를 초과할 것으로 예상되는 operation을 실행하기 전에 매우 긴 backend call에 대한 worker lease renewal을 검토해야 한다.
 - 서로 다른 mount를 가진 multiple local filesystem RM worker는 storage-aware worker claiming 없이는 안전하지 않다.
-- WEKA filesystem backend는 아직 구현되지 않았다.
+- WEKA filesystem backend는 아직 구현되지 않았다. Kubernetes namespace quota만 필요한 WEKA CSI StorageClass는 공통 live ResourceQuota adapter로 사용할 수 있지만, filesystem resource 요청은 fail-closed된다.

@@ -394,27 +394,35 @@ scripts/phase16_mtls_auth.py
 
 ## Phase 16 이후 다음 작업 리스트
 
-Phase 16으로 external API authentication boundary를 production deployment에 맞게 닫은 뒤, Data Management 후보는 Phase 17로 진행한다.
+Phase 16으로 external API authentication boundary를 production deployment에 맞게 닫은 뒤, Resource Management 정합성을 먼저 닫는 `docs/dms-phase17.md`가 진행됐다. Phase 17의 목표는 Kubernetes namespace quota Resource Management 경로를 모든 CSI StorageClass backend에 대해 하나의 live `ResourceQuota` adapter로 통합하는 것이다.
 
-### Phase 17A: Data Management Read-only Scan Preflight
+### Phase 17: Kubernetes ResourceQuota Live Adapter Unification
+
+- GPFS CSI namespace quota가 `KubernetesNamespaceQuotaLiveAdapter`를 타도록 수정 완료
+- CephFS, GPFS, Longhorn, WEKA 등 모든 CSI StorageClass namespace quota를 backend-neutral live ResourceQuota path로 통합 완료
+- `BackendAdapterRegistry.kubernetes_for_plan()`에서 backend type 기반 Kubernetes quota adapter 분기 제거 완료
+- mixed backend multi-StorageClass quota가 하나의 DMS-managed `ResourceQuota/dms-storage-quota`로 렌더링되는지 회귀 검증 완료
+- filesystem backend adapter selection은 기존처럼 backend-specific/fail-closed로 유지
+
+### Phase 18A: Data Management Read-only Scan Preflight
 
 - filesystem resource boundary를 read-only scan target으로 사용
 - DM Agent report 기반 candidate pool
 - POSIX identity/mount/tool preflight
 - VolcanoJob 이전 local scan preflight 검증
 
-### Phase 17B: DM Worker Runtime and VolcanoJob Skeleton
+### Phase 18B: DM Worker Runtime and VolcanoJob Skeleton
 
 - `dms dm-worker --loop` Deployment
 - VolcanoJob create/watch/delete skeleton
 - job lease/recovery
 - artifact URI and preview lifecycle
 
-### Phase 17C: Filesystem Policy and Initialize
+### Phase 18C: Filesystem Policy and Initialize
 
 - filesystem default quota policy
 - `filesystem.initialize`
 - `reset_quota_to_default=true`
 - quota clear/unlimited lifecycle
 
-권장 순서는 Phase 16으로 mTLS validation과 auth boundary hardening을 먼저 닫고, 그 다음 Phase 17A로 Data Management read-only scan preflight를 구현한 뒤, Phase 17B로 DM Worker/VolcanoJob live execution을 여는 것이다.
+권장 순서는 Phase 17 Kubernetes ResourceQuota live adapter 통합 완료 이후, Phase 18A로 Data Management read-only scan preflight를 구현한 뒤 Phase 18B로 DM Worker/VolcanoJob live execution을 여는 것이다.

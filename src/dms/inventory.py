@@ -295,6 +295,7 @@ def _role_readiness(
 def _default_csi_driver(backend_type: str | None) -> str | None:
     return {
         "cephfs": "rook-ceph.cephfs.csi.ceph.com",
+        "gpfs": "spectrumscale.csi.ibm.com",
         "longhorn": "driver.longhorn.io",
     }.get(backend_type or "")
 

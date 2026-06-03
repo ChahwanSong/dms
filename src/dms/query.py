@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from .adapters import (
@@ -11,7 +12,11 @@ from .adapters import (
     render_kubernetes_resource_quota_hard,
 )
 from .domain import KubernetesNamespaceQuotaKey, LifecycleState, OperationKind, ResourceKind
-from .repositories import DmsRepository, ObservabilityRepository
+from .repositories import (
+    ATTENTION_RUN_STATES,
+    DmsRepository,
+    ObservabilityRepository,
+)
 
 
 @dataclass
@@ -564,6 +569,125 @@ class OperationalQueryService:
             )
         )
 
+    def active_plans(
+        self,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        worker_role: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return [
+            _plan_summary(plan)
+            for plan in self.repository.list_active_plans(
+                statuses=statuses,
+                worker_role=worker_role,
+                limit=limit,
+            )
+        ]
+
+    def active_runs(
+        self,
+        *,
+        states: tuple[str, ...] | None = None,
+        worker_role: str | None = None,
+        worker_id: str | None = None,
+        lease_expiring_within_seconds: int = 60,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        runs = self.repository.list_active_runs(
+            states=states,
+            worker_role=worker_role,
+            worker_id=worker_id,
+            limit=limit,
+        )
+        summaries = [
+            _run_summary(
+                run,
+                lease_expiring_within_seconds=lease_expiring_within_seconds,
+            )
+            for run in runs
+        ]
+        return summaries
+
+    def work_summary(self, *, lease_expiring_within_seconds: int = 60) -> dict[str, Any]:
+        plans = self.active_plans(limit=1000)
+        active_runs = self.active_runs(
+            lease_expiring_within_seconds=lease_expiring_within_seconds,
+            limit=1000,
+        )
+        attention_runs = self.repository.list_runs(states=ATTENTION_RUN_STATES, limit=1000)
+        action_required = self.action_required()
+        return {
+            "plans": {
+                "total_active": len(plans),
+                "by_status": _count_by(plans, "status"),
+                "by_worker_role": _count_by(plans, "worker_role"),
+            },
+            "runs": {
+                "total_active": len(active_runs),
+                "by_state": _count_by(active_runs, "state"),
+                "by_worker_role": _count_by(active_runs, "worker_role"),
+                "by_worker_id": _count_by(active_runs, "worker_id"),
+                "lease_expiring_soon": sum(
+                    1 for run in active_runs if run["lease_expiring_soon"]
+                ),
+                "stale_or_recovery": len(attention_runs),
+            },
+            "requests": {"action_required": len(action_required)},
+        }
+
+    def drain_status(self) -> dict[str, Any]:
+        control_state = self.repository.control_state()
+        active_runs = self.active_runs(limit=1000)
+        blocked_or_recovery = self.repository.list_runs(
+            states=ATTENTION_RUN_STATES,
+            limit=1000,
+        )
+        action_required = self.action_required()
+        hard_blockers = [
+            run
+            for run in blocked_or_recovery
+            if run.get("state")
+            in {
+                LifecycleState.RECOVERY_NEEDED.value,
+                LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+                LifecycleState.BACKEND_APPLY_FAILED.value,
+            }
+        ]
+        ready_for_shutdown = (
+            bool(control_state.get("scheduling_blocked"))
+            and not active_runs
+            and not hard_blockers
+        )
+        return {
+            "control_state": control_state,
+            "active_runs": {
+                "count": len(active_runs),
+                "states": _count_by(active_runs, "state"),
+                "runs": active_runs,
+            },
+            "blocked_or_recovery_runs": {
+                "count": len(blocked_or_recovery),
+                "states": _count_by(blocked_or_recovery, "state"),
+                "runs": blocked_or_recovery,
+            },
+            "action_required": {"count": len(action_required)},
+            "ready_for_shutdown": ready_for_shutdown,
+        }
+
+    def resume_blockers(self) -> list[dict[str, Any]]:
+        return [
+            run
+            for run in self.repository.list_runs(
+                states=(
+                    LifecycleState.RECOVERY_NEEDED.value,
+                    LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+                    LifecycleState.BACKEND_APPLY_FAILED.value,
+                ),
+                limit=1000,
+            )
+        ]
+
     def worker_agent_health(self) -> dict:
         return {
             "runs": self.repository.list_runs(limit=50),
@@ -582,6 +706,72 @@ class OperationalQueryService:
 
     def diagnostic_correlation(self, correlation_id: str) -> list[dict]:
         return self.observability.list_events(correlation_id=correlation_id)
+
+
+def _plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "plan_id": plan["plan_id"],
+        "request_id": plan["request_id"],
+        "requester_id": plan.get("requester_id"),
+        "worker_role": plan["worker_role"],
+        "status": plan["status"],
+        "operation_kind": plan["operation_kind"],
+        "resource_kind": plan.get("resource_kind"),
+        "resource_key": plan["resource_key"],
+        "attempt_count": plan["attempt_count"],
+        "created_at": plan["created_at"],
+        "updated_at": plan["updated_at"],
+        "request_status": plan.get("request_status"),
+    }
+
+
+def _run_summary(
+    run: dict[str, Any], *, lease_expiring_within_seconds: int
+) -> dict[str, Any]:
+    remaining = _seconds_until(run.get("lease_expires_at"))
+    return {
+        "run_id": run["run_id"],
+        "plan_id": run["plan_id"],
+        "request_id": run["request_id"],
+        "requester_id": run.get("requester_id"),
+        "worker_id": run["worker_id"],
+        "executor_id": run["executor_id"],
+        "worker_role": run["worker_role"],
+        "state": run["state"],
+        "lease_expires_at": run["lease_expires_at"],
+        "heartbeat_at": run["heartbeat_at"],
+        "lease_seconds_remaining": remaining,
+        "lease_expiring_soon": remaining <= lease_expiring_within_seconds,
+        "operation_kind": run.get("operation_kind"),
+        "resource_kind": run.get("resource_kind"),
+        "resource_key": run.get("resource_key"),
+        "plan_status": run.get("plan_status"),
+        "request_status": run.get("request_status"),
+        "started_at": run.get("started_at"),
+        "updated_at": run.get("updated_at"),
+    }
+
+
+def _count_by(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _seconds_until(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        remaining = (parsed.astimezone(UTC) - datetime.now(UTC)).total_seconds()
+        return int(remaining)
+    except ValueError:
+        return 0
 
 
 KUBERNETES_QUOTA_OPERATIONS = {

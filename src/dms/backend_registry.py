@@ -16,7 +16,6 @@ from .backends.gpfs import (
     GpfsBackendTemplate,
     GpfsDataManagementAdapter,
     GpfsFilesystemBackendAdapter,
-    GpfsKubernetesNamespaceQuotaAdapter,
 )
 from .backends.cephfs import (
     CEPHFS_BACKEND_TYPE,
@@ -24,8 +23,6 @@ from .backends.cephfs import (
 )
 from .config import Settings
 from .repositories import DmsRepository
-
-GENERIC_KUBERNETES_QUOTA_BACKENDS = {CEPHFS_BACKEND_TYPE, "longhorn"}
 
 
 @dataclass
@@ -87,30 +84,11 @@ class BackendAdapterRegistry:
         )
 
     def kubernetes_for_plan(self, plan: dict[str, Any]) -> KubernetesNamespaceQuotaAdapter:
-        mapping = self._mapping_for_plan(plan)
-        backend_type = self._backend_type(mapping)
-        if backend_type == GPFS_BACKEND_TYPE:
-            return GpfsKubernetesNamespaceQuotaAdapter(
-                GpfsBackendTemplate.from_storage_mapping(mapping)
-            )
-        if self.enforce_supported_backends:
-            unsupported = [
-                self._backend_type(item)
-                for item in self._mappings_for_plan(plan)
-                if self._backend_type(item) not in GENERIC_KUBERNETES_QUOTA_BACKENDS
-            ]
-            if unsupported or not mapping:
-                raise BackendPreconditionError(
-                    self._unsupported_backend_message(
-                        "kubernetes namespace quota", backend_type, plan
-                    )
-                )
         if self.default_kubernetes_adapter:
             return self.default_kubernetes_adapter
         raise BackendPreconditionError(
-            self._unsupported_backend_message(
-                "kubernetes namespace quota", backend_type, plan
-            )
+            "Kubernetes namespace quota live adapter is not configured for "
+            f"{plan.get('resource_key')}"
         )
 
     def data_worker_pool(self, storage_name: str) -> dict[str, Any]:

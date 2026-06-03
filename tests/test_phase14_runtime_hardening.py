@@ -6,7 +6,6 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from dms.adapters import (
-    BackendPreconditionError,
     KubernetesNamespaceQuotaLiveAdapter,
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
@@ -16,7 +15,6 @@ from dms.backends.gpfs import (
     GPFS_BACKEND_TYPE,
     GPFS_CSI_DRIVER,
     GpfsFilesystemBackendAdapter,
-    GpfsKubernetesNamespaceQuotaAdapter,
 )
 from dms.api import create_app
 from dms.config import Settings
@@ -193,11 +191,11 @@ def test_live_registry_keeps_gpfs_filesystem_and_kubernetes_paths_separate(tmp_p
     assert isinstance(registry.filesystem_for_plan(filesystem_plan), GpfsFilesystemBackendAdapter)
     assert isinstance(
         registry.kubernetes_for_plan(kubernetes_plan),
-        GpfsKubernetesNamespaceQuotaAdapter,
+        KubernetesNamespaceQuotaLiveAdapter,
     )
 
 
-def test_live_registry_rejects_unknown_kubernetes_quota_backend(tmp_path):
+def test_live_registry_uses_live_kubernetes_adapter_for_unknown_csi_backend(tmp_path):
     settings, repository, _ = _repositories(tmp_path)
     _register_mapping(
         repository,
@@ -208,12 +206,10 @@ def test_live_registry_rejects_unknown_kubernetes_quota_backend(tmp_path):
     )
     registry = BackendAdapterRegistry.with_live_defaults(repository, settings)
 
-    try:
-        registry.kubernetes_for_plan(_kubernetes_quota_plan("mystery-b", "mystery-sc"))
-    except BackendPreconditionError as exc:
-        assert "unsupported kubernetes namespace quota backend type" in str(exc)
-    else:
-        raise AssertionError("unknown Kubernetes quota backend did not fail closed")
+    assert isinstance(
+        registry.kubernetes_for_plan(_kubernetes_quota_plan("mystery-b", "mystery-sc")),
+        KubernetesNamespaceQuotaLiveAdapter,
+    )
 
 
 def _repositories(tmp_path):
