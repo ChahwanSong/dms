@@ -7,7 +7,8 @@
 - Kubernetes namespace quota Resource Management: live Kubernetes `ResourceQuota/dms-storage-quota` create/update/block/delete/check/sync/import/audit 가능.
 - Filesystem Resource Management: CephFS host-mounted adapter와 GPFS command adapter 가능. GPFS live 검증은 별도 staging 필요.
 - Agent inventory: Kubernetes DaemonSet 기반 report 가능.
-- Data Management `scan/sync/rm`: 현재 CLI `dm-worker`는 `StubVolcanoAdapter`를 사용하므로 production에서 실행하지 않는다. API는 배포되더라도 DM worker replica는 0으로 둔다.
+- Data Management `scan`: `DMS_DM_JOB_IMAGE`, Volcano scheduler, active identity mapping, fresh DM Agent report, artifact base URI가 준비된 경우 read-only scan을 실행할 수 있다.
+- Data Management `sync/rm`: Phase 20 기준으로 preview/confirm guard가 있는 `dsync`/`drm` live 경로를 운영할 수 있다. active identity mapping, fresh DM Agent report, POSIX preflight, writable artifact base, Volcano scheduler가 필수다. `nsync` separated-role live execution은 아직 운영 Done이 아니므로 열지 않는다.
 
 ## 문서 사용 방법
 
@@ -34,6 +35,7 @@ install/
   RUNBOOK.md                             # 운영 점검과 장애 대응
   postgresql/init.sql                    # PostgreSQL DB/user 생성 템플릿
   docker/Dockerfile                      # 운영 image build 템플릿
+  docker/Dockerfile.mpifileutils         # Data Management mpifileutils job image build 템플릿
   config/dms-runtime.env.example         # 런타임 env 예시
   config/cluster-kubeconfigs.example.json
   config/agent-storages.example.json
@@ -73,6 +75,14 @@ install/
 | LDAP URI/base DN | `ldap://ldap.example.internal:389`, `dc=example,dc=internal` | identity lookup/group |
 | Target kubeconfig path inside Pod | `/etc/dms/kubeconfigs/cluster-a.kubeconfig` | `DMS_CLUSTER_KUBECONFIGS_JSON` |
 | CephFS/GPFS RM SSH host | `cephfs-rm-1`, `gpfs-rm-1` | filesystem backend command |
+| DM job image/artifacts | `registry.example.internal/dms-mpifileutils:<git-ref>`, `file:///artifacts/dms` | `DMS_DM_JOB_IMAGE`, `DMS_DM_ARTIFACT_BASE_URI` |
+
+For `file://` Data Management artifacts, `scan` result files are written under
+`<DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/`. `sync` and `rm` write phase-scoped
+artifacts under `<job_id>/preview/` and `<job_id>/execution/`. Keep this artifact
+base on a DMS-managed path that the Volcano Pod can write and the DM Worker can
+read. Do not place it under a requester-private target/source/destination
+directory unless the DM Worker has explicit traverse/read access.
 
 관리 workstation에 필요한 도구도 확인한다.
 
@@ -185,6 +195,44 @@ kubectl --context dms-control delete pod dms-image-check
 ```
 
 Private registry를 쓴다면 imagePullSecret을 별도로 만들고 manifest에 추가해야 한다. 현재 template에는 imagePullSecret이 들어 있지 않다.
+
+### 2.4 Data Management job image build
+
+Data Management는 DMS API/worker image에 우연히 존재하는 tool을 쓰지 않고
+별도의 승인된 mpifileutils job image를 사용한다. Phase 20 live 경로는
+`dscan`, `dsync`, `drm`을 사용한다. `nsync` binary도 image에 포함하지만,
+separated-role live execution은 아직 운영 Done으로 열지 않는다.
+
+수정할 파일:
+
+- 필요 시 `install/docker/Dockerfile.mpifileutils`
+
+기본 Dockerfile은 `chahwansong/mpifileutils` pinned ref를 빌드하고 `dscan`,
+`dsync`, `nsync`, `drm` binary를 포함한다.
+
+```bash
+export DMS_DM_JOB_IMAGE="registry.example.internal/dms-mpifileutils:$(git rev-parse --short HEAD)"
+docker build -f install/docker/Dockerfile.mpifileutils -t "$DMS_DM_JOB_IMAGE" .
+docker push "$DMS_DM_JOB_IMAGE"
+```
+
+빌드한 image와 upstream ref를 control-plane manifest 또는 runtime env에 기록한다.
+
+```bash
+export DMS_DM_JOB_IMAGE_REF="chahwansong/mpifileutils@e3bfee10970bb4e24204d28689e3337e9741cca4"
+```
+
+Control cluster node에서 pull과 mpifileutils binary 실행이 가능한지 확인한다.
+
+```bash
+kubectl --context dms-control run dms-dm-image-check \
+  --image="$DMS_DM_JOB_IMAGE" \
+  --restart=Never \
+  --command -- dscan --help
+
+kubectl --context dms-control logs pod/dms-dm-image-check
+kubectl --context dms-control delete pod dms-dm-image-check
+```
 
 ## 3. Target cluster RBAC와 kubeconfig 생성
 
@@ -640,7 +688,9 @@ kubectl --context cluster-a -n dms rollout status daemonset/dms-rm-agent --timeo
 kubectl --context cluster-a -n dms get pods -l app.kubernetes.io/name=dms-rm-agent -o wide
 ```
 
-DM Agent는 Data Management live execution이 열릴 때까지 운영에서 꼭 배포하지 않아도 된다. 배포한다면 `dms-dm-agent`도 확인한다.
+Data Management live execution을 운영하려면 DM Agent report가 Fresh여야 한다.
+`scan`/`sync`/`rm`을 열지 않는 환경에서는 배포하지 않을 수 있지만, 열 경우
+`dms-dm-agent`도 rollout과 report freshness를 확인한다.
 
 ## 10. Storage mapping 등록
 
@@ -934,7 +984,98 @@ DMS delete는 `ResourceQuota/dms-storage-quota`를 삭제하고 namespace 자체
 kubectl --context cluster-a delete namespace dms-smoke-quota
 ```
 
-### 13.3 Filesystem smoke test
+### 13.3 Data Management smoke test
+
+Data Management live execution을 열기 전에 다음 조건을 먼저 확인한다.
+
+- target/source/destination storage mapping의 `readiness.data_management=Ready`
+- requester의 Identity Mapping이 `Active`
+- DM Agent report에 mount, required tool(`dscan`, `dsync`, `drm`), credential, network, POSIX user evidence가 Fresh
+- `DMS_DM_JOB_IMAGE`, `DMS_DM_JOB_IMAGE_REF`, `DMS_DM_ARTIFACT_BASE_URI`가 운영 값으로 설정됨
+- Volcano CRD/scheduler가 control 또는 managed cluster에서 동작 중
+
+조건이 맞으면 DM Worker를 1 replica로 올린다.
+
+```bash
+kubectl --context dms-control -n dms scale deploy/dms-dm-worker --replicas=1
+kubectl --context dms-control -n dms rollout status deploy/dms-dm-worker --timeout=180s
+```
+
+작은 directory로 scan을 제출한다.
+
+```bash
+curl -fsS -X POST "$DMS_API_URL/api/v1/data-management/scan" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" \
+  -H "content-type: application/json" \
+  --data '{
+    "requester_id": "alice",
+    "target": {"storage_name": "cephfs-a", "path": "dms-smoke-fs"},
+    "priority": "Mid",
+    "options": {"summary_only": true}
+  }' | jq
+```
+
+상태와 artifact URI를 조회한다.
+
+```bash
+curl -fsS "$DMS_API_URL/api/v1/operations/data-jobs?requester_id=alice&operation=data.scan&limit=5" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq
+```
+
+`result_summary.report_uri`, `stdout_uri`, `stderr_uri`, `summary_uri`가
+`DMS_DM_ARTIFACT_BASE_URI/<job_id>/...` 형태로 기록돼야 한다.
+
+`sync`/`rm` smoke는 반드시 작은 테스트 directory에서 preview와 confirm을
+분리해서 수행한다. 예시는 same-storage `dsync` 경로다.
+
+```bash
+curl -fsS -X POST "$DMS_API_URL/api/v1/data-management/sync" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" \
+  -H "content-type: application/json" \
+  --data '{
+    "requester_id": "alice",
+    "source": {"storage_name": "cephfs-a", "path": "dms-smoke-src"},
+    "destination": {"storage_name": "cephfs-a", "path": "dms-smoke-dst"},
+    "options": {"contents": true}
+  }' | jq
+
+curl -fsS "$DMS_API_URL/api/v1/operations/data-jobs?requester_id=alice&operation=data.sync&limit=5" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq
+```
+
+detail의 `state`가 `ConfirmPending`이고 `result_summary.preview.summary.dry_run=true`
+이면 preview artifact를 검토한 뒤 confirm한다.
+
+```bash
+curl -fsS -X POST "$DMS_API_URL/api/v1/data-management/jobs/<job_id>:confirm" \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" \
+  -H "content-type: application/json" \
+  --data '{
+    "requester_id": "alice",
+    "confirm": true,
+    "preview_observed_hash": "sha256:<preview-fingerprint>"
+  }' | jq
+```
+
+`rm` smoke도 같은 confirm 절차를 사용한다. `target`은 storage root가 아닌 작은
+테스트 directory여야 하며 `options.recursive=true`를 명시한다.
+
+### 13.4 Filesystem smoke test
 
 CephFS/GPFS RM을 활성화했다면 작은 테스트 directory로 시작한다.
 
@@ -979,7 +1120,7 @@ kubectl --context dms-control -n dms get pods,jobs,svc,ingress
 - `deploy/dms-api` Ready
 - `deploy/dms-planner` Ready
 - `deploy/dms-rm-worker` Ready
-- `deploy/dms-dm-worker` replicas 0
+- `deploy/dms-dm-worker` replicas 0, 또는 Data Management live execution을 활성화한 환경에서는 Ready 1
 - `svc/dms-api` 존재
 - `ingress/dms-api` 존재
 
@@ -1092,7 +1233,7 @@ install/scripts/dms-resume.sh \
   --replicas 1
 ```
 
-Data Management live execution을 열기 전까지는 `dms-dm-worker`를 0 replica로 유지한다. 이 경우 resume 후 직접 scale을 조정한다.
+Data Management live execution 전제조건이 준비되지 않은 환경에서는 `dms-dm-worker`를 0 replica로 유지한다. 이 경우 resume 후 직접 scale을 조정한다.
 
 ```bash
 kubectl --context dms-control -n dms scale deploy/dms-dm-worker --replicas=0

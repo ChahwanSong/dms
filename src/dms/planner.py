@@ -111,9 +111,9 @@ EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS = {"expiry_at", "clear_expires_at"}
 EXPIRY_IMPORT_DEFAULT_DAYS = 365
 
 DM_OPERATIONS = {
+    OperationKind.DATA_SCAN.value,
     OperationKind.DATA_SYNC.value,
     OperationKind.DATA_RM.value,
-    OperationKind.DATA_SCAN.value,
 }
 
 
@@ -183,19 +183,44 @@ class Planner:
             return
 
         if operation in DM_OPERATIONS:
-            storage_name = request["payload_summary"]["storage_name"]
+            payload = request["payload_summary"]
+            source = payload.get("source") or {}
+            destination = payload.get("destination") or {}
+            target = payload.get("target") or {}
+            if operation == OperationKind.DATA_SYNC.value:
+                storage_name = source["storage_name"]
+                source_path = source["path"]
+                destination_path = destination["path"]
+                target_path = None
+                normalized_target = {
+                    "source": source,
+                    "destination": destination,
+                    "options": payload.get("options") or {},
+                    "option_fingerprint": payload.get("option_fingerprint"),
+                }
+            else:
+                storage_name = target.get("storage_name") or payload["storage_name"]
+                target_path = target.get("path") or payload.get("target_path")
+                source_path = payload.get("source_path")
+                destination_path = payload.get("destination_path")
+                normalized_target = {"storage_name": storage_name, "path": target_path}
             if self._reject_unsafe_storage_mapping(request, WorkerRole.DM):
                 return
             job_id = self.repository.create_data_job(
                 request_id=request["request_id"],
                 operation=operation,
                 storage_name=storage_name,
-                source=request["payload_summary"].get("source_path"),
-                destination=request["payload_summary"].get("destination_path"),
-                target=request["payload_summary"].get("target_path"),
-                priority=int(request["payload_summary"].get("priority", 100)),
-                worker_pool=self._worker_pool(storage_name),
+                source=source_path,
+                destination=destination_path,
+                target=target_path,
+                priority=int(payload.get("priority", 100)),
+                worker_pool=self._data_worker_pool(request),
+                normalized_target=normalized_target,
             )
+            preview_required = operation in {
+                OperationKind.DATA_SYNC.value,
+                OperationKind.DATA_RM.value,
+            }
             self.repository.create_plan(
                 request_id=request["request_id"],
                 worker_role=WorkerRole.DM,
@@ -205,16 +230,14 @@ class Planner:
                 precondition={
                     "job_id": job_id,
                     "safe_paths_only": True,
-                    "preview_required": operation
-                    in {OperationKind.DATA_SYNC.value, OperationKind.DATA_RM.value},
+                    "preview_required": preview_required,
+                    "normalized_target": normalized_target,
+                    "requester_id": request["requester_id"],
                 },
                 execution_metadata={
                     "resource_kind": ResourceKind.DATA_JOB.value,
                     "job_id": job_id,
-                    "phase": "preview"
-                    if operation
-                    in {OperationKind.DATA_SYNC.value, OperationKind.DATA_RM.value}
-                    else "execution",
+                    "phase": "preview" if preview_required else "execution",
                     "backend_side_effect_owner": "dm-worker",
                     "storage_backend": self._storage_backend(request),
                 },
@@ -562,6 +585,49 @@ class Planner:
         )
         return registry.data_worker_pool(storage_name)
 
+    def _data_worker_pool(self, request: dict[str, Any]) -> dict[str, Any]:
+        payload = request["payload_summary"]
+        operation = request["operation"]
+        storage_names = sorted(self._required_storage_names(request))
+        if operation != OperationKind.DATA_SYNC.value and len(storage_names) == 1:
+            pool = dict(self._worker_pool(storage_names[0]))
+            pool.setdefault("operation", operation)
+            return pool
+        pools = {
+            storage_name: self._worker_pool(storage_name)
+            for storage_name in storage_names
+        }
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[str | None, str | None, str | None]] = set()
+        for storage_name, pool in pools.items():
+            for candidate in pool.get("candidates") or []:
+                key = (
+                    candidate.get("cluster_name"),
+                    candidate.get("node_name"),
+                    storage_name,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append({**candidate, "storage_name": storage_name})
+        if operation == OperationKind.DATA_SYNC.value:
+            return {
+                "selection": "agent-inventory",
+                "operation": operation,
+                "required_mounts": storage_names,
+                "source": payload.get("source"),
+                "destination": payload.get("destination"),
+                "storage_pools": pools,
+                "candidates": candidates,
+            }
+        return {
+            "selection": "agent-inventory",
+            "operation": operation,
+            "required_mounts": storage_names,
+            "storage_pools": pools,
+            "candidates": candidates,
+        }
+
     def _storage_backend(self, request: dict[str, Any]) -> dict[str, Any]:
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             mappings = []
@@ -582,6 +648,25 @@ class Planner:
                         }
                     )
             return {"backend_type": "kubernetes", "storage_mappings": mappings}
+        if request["resource_kind"] == ResourceKind.DATA_JOB.value:
+            mappings = []
+            for storage_name in sorted(self._required_storage_names(request)):
+                mapping = self.repository.get_storage_mapping(storage_name)
+                if mapping:
+                    mappings.append(
+                        {
+                            "backend_type": mapping["backend_template"].get(
+                                "backend_type", "unknown"
+                            ),
+                            "storage_name": mapping["storage_name"],
+                            "cluster_name": mapping.get("cluster_name"),
+                            "storage_class_name": mapping.get("storage_class_name"),
+                            "sanity_status": mapping["sanity_status"],
+                            "version": mapping["version"],
+                            "readiness": mapping.get("readiness", {}),
+                        }
+                    )
+            return {"backend_type": "data-management", "storage_mappings": mappings}
         storage_name = request["payload_summary"].get("storage_name")
         if not storage_name:
             return {"backend_type": "unmapped"}
@@ -1472,7 +1557,15 @@ class Planner:
         if operation == OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value:
             return set()
         if operation in DM_OPERATIONS:
-            return {payload["storage_name"]} if payload.get("storage_name") else set()
+            names: set[str] = set()
+            for key in ("target", "source", "destination"):
+                value = payload.get(key)
+                if isinstance(value, dict) and value.get("storage_name"):
+                    names.add(value["storage_name"])
+            for key in ("storage_name", "source_storage_name", "destination_storage_name"):
+                if payload.get(key):
+                    names.add(payload[key])
+            return names
         if request["resource_kind"] == ResourceKind.FILESYSTEM.value:
             return {payload["storage_name"]} if payload.get("storage_name") else set()
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:

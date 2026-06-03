@@ -17,7 +17,7 @@ from .adapters import (
     KubernetesReadOnlyInventoryAdapter,
     KubectlReadOnlyInventoryAdapter,
     LdapIdentityLookupAdapter,
-    StubVolcanoAdapter,
+    volcano_adapter_from_settings,
 )
 from .auth import AuthVerifier, AuthorizationPolicy
 from .config import Settings
@@ -34,6 +34,8 @@ from .domain import (
     RequestEnvelope,
     ResourceKind,
     StorageMappingInput,
+    data_job_option_fingerprint,
+    normalized_data_job_payload,
     validate_data_job_paths,
 )
 from .inventory import EffectiveInventoryService, StorageMappingSanityService
@@ -61,6 +63,13 @@ class DisableIdentityMappingBody(BaseModel):
     reason: str | None = None
 
 
+class ConfirmDataJobBody(BaseModel):
+    requester_id: str | None = None
+    confirm: bool = False
+    preview_observed_hash: str | None = None
+    memo: str | None = None
+
+
 @dataclass
 class AppServices:
     settings: Settings
@@ -69,7 +78,7 @@ class AppServices:
     auth: AuthVerifier
     authorization: AuthorizationPolicy
     query: OperationalQueryService
-    volcano_adapter: StubVolcanoAdapter
+    volcano_adapter: Any
     identity_lookup: IdentityLookupAdapter | None = None
     kubernetes_inventory: KubernetesReadOnlyInventoryAdapter | None = None
     kubernetes_quota: KubernetesNamespaceQuotaAdapter | None = None
@@ -97,7 +106,7 @@ def create_app(
         auth=AuthVerifier(settings),
         authorization=AuthorizationPolicy(),
         query=OperationalQueryService(repository, observability),
-        volcano_adapter=StubVolcanoAdapter(),
+        volcano_adapter=volcano_adapter_from_settings(settings),
         identity_lookup=identity_lookup or _identity_lookup_from_settings(settings),
         kubernetes_inventory=kubernetes_inventory
         or KubectlReadOnlyInventoryAdapter.from_settings(settings),
@@ -728,6 +737,7 @@ def data_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         _validate_data_job_or_422(body, OperationKind.DATA_SYNC)
+        _validate_phase20_data_options_or_422(body, OperationKind.DATA_SYNC, services)
         return _data_job_request(body, OperationKind.DATA_SYNC, request, services)
 
     @router.post("/rm", status_code=202)
@@ -737,6 +747,7 @@ def data_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         _validate_data_job_or_422(body, OperationKind.DATA_RM)
+        _validate_phase20_data_options_or_422(body, OperationKind.DATA_RM, services)
         return _data_job_request(body, OperationKind.DATA_RM, request, services)
 
     @router.post("/scan", status_code=202)
@@ -748,16 +759,106 @@ def data_management_router() -> APIRouter:
         _validate_data_job_or_422(body, OperationKind.DATA_SCAN)
         return _data_job_request(body, OperationKind.DATA_SCAN, request, services)
 
+    @router.get("/scan")
+    def list_scan_jobs(
+        request: Request,
+        requester_id: str | None = None,
+        storage_name: str | None = None,
+        state: str | None = None,
+        limit: int = Query(default=100, gt=0, le=1000),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        return services.repository.list_data_jobs(
+            limit=limit,
+            requester_id=requester_id,
+            operation=OperationKind.DATA_SCAN.value,
+            storage_name=storage_name,
+            state=state,
+        )
+
+    @router.get("/scan/jobs/{job_id}")
+    def scan_job_status(
+        job_id: str,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.query.data_job_status(job_id)
+
+    @router.get("/sync")
+    def list_sync_jobs(
+        request: Request,
+        requester_id: str | None = None,
+        storage_name: str | None = None,
+        state: str | None = None,
+        limit: int = Query(default=100, gt=0, le=1000),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        return services.repository.list_data_jobs(
+            limit=limit,
+            requester_id=requester_id,
+            operation=OperationKind.DATA_SYNC.value,
+            storage_name=storage_name,
+            state=state,
+        )
+
+    @router.get("/sync/jobs/{job_id}")
+    def sync_job_status(
+        job_id: str,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.query.data_job_status(job_id)
+
+    @router.get("/rm")
+    def list_rm_jobs(
+        request: Request,
+        requester_id: str | None = None,
+        storage_name: str | None = None,
+        state: str | None = None,
+        limit: int = Query(default=100, gt=0, le=1000),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        return services.repository.list_data_jobs(
+            limit=limit,
+            requester_id=requester_id,
+            operation=OperationKind.DATA_RM.value,
+            storage_name=storage_name,
+            state=state,
+        )
+
+    @router.get("/rm/jobs/{job_id}")
+    def rm_job_status(
+        job_id: str,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.query.data_job_status(job_id)
+
     @router.post("/jobs/{job_id}:confirm")
     def confirm_job(
         job_id: str,
         request: Request,
+        body: ConfirmDataJobBody | None = None,
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
         _reject_if_maintenance_blocked(services)
         try:
-            confirm_data_job(services.repository, job_id, actor=actor)
+            confirm_data_job(
+                services.repository,
+                job_id,
+                actor=actor,
+                requester_id=body.requester_id if body else None,
+                confirm=body.confirm if body else False,
+                preview_observed_hash=body.preview_observed_hash if body else None,
+                require_preview_fingerprint=services.settings.dm_confirm_require_preview_fingerprint,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"job_id": job_id, "status": "Confirmed"}
@@ -778,19 +879,24 @@ def data_management_router() -> APIRouter:
         return {
             "operations": {
                 "sync": {
+                    "status": "enabled_phase20",
                     "requires_preview_confirm": True,
                     "tool_selection": ["dsync", "nsync"],
-                    "path_model": "registered storage_name plus storage-relative paths",
+                    "path_model": "structured source/destination storage-relative paths",
+                    "legacy_path_model": "storage_name plus source_path/destination_path is accepted for same-storage sync",
                 },
                 "rm": {
+                    "status": "enabled_phase20",
                     "requires_preview_confirm": True,
                     "tool": "drm",
-                    "path_model": "registered storage_name plus storage-relative target_path",
+                    "path_model": "structured target.storage_name plus storage-relative target.path",
+                    "legacy_path_model": "storage_name plus target_path is accepted during migration",
                 },
                 "scan": {
                     "requires_preview_confirm": False,
                     "tool": "dscan",
-                    "path_model": "registered storage_name plus storage-relative target_path",
+                    "path_model": "structured target.storage_name plus storage-relative target.path",
+                    "legacy_path_model": "storage_name plus target_path is accepted during migration",
                 },
             },
             "raw_command_line_options": "rejected",
@@ -805,20 +911,63 @@ def _data_job_request(
     request: Request,
     services: AppServices,
 ) -> dict[str, Any]:
-    key_parts = [body.storage_name, operation.value]
-    key_parts.extend([body.source_path or "", body.destination_path or "", body.target_path or ""])
-    return submit_request(
+    payload = normalized_data_job_payload(body, operation)
+    resource_key = _data_job_resource_key(payload, operation)
+    response = submit_request(
         services=services,
         request=request,
         envelope=RequestEnvelope(
             requester_id=body.requester_id,
             operation=operation,
             resource_kind=ResourceKind.DATA_JOB,
-            resource_key=":".join(key_parts),
-            payload=body.model_dump(),
+            resource_key=resource_key,
+            payload=payload,
         ),
     )
+    response.update(
+        {
+            "resource_key": resource_key,
+            "operation": operation.value,
+            "source": payload.get("source"),
+            "destination": payload.get("destination"),
+            "target": payload.get("target"),
+            "priority": payload.get("priority_label"),
+            "status_query": "/api/v1/operations/data-jobs",
+        }
+    )
+    return response
 
+
+def _data_job_resource_key(payload: dict[str, Any], operation: OperationKind) -> str:
+    if operation == OperationKind.DATA_SYNC:
+        source = payload["source"]
+        destination = payload["destination"]
+        fingerprint = payload.get("option_fingerprint") or data_job_option_fingerprint(
+            payload.get("options") or {}
+        )
+        return (
+            f"data.sync:{source['storage_name']}:{source['path']}:"
+            f"{destination['storage_name']}:{destination['path']}:{fingerprint}"
+        )
+    if operation == OperationKind.DATA_RM:
+        target = payload["target"]
+        fingerprint = payload.get("option_fingerprint") or data_job_option_fingerprint(
+            payload.get("options") or {}
+        )
+        return f"data.rm:{target['storage_name']}:{target['path']}:{fingerprint}"
+    target = payload["target"]
+    return f"data.scan:{target['storage_name']}:{target['path']}"
+
+
+def _validate_phase20_data_options_or_422(
+    body: DataJobRequest, operation: OperationKind, services: AppServices
+) -> None:
+    if operation == OperationKind.DATA_SYNC and body.options.get("delete"):
+        if not services.settings.dm_sync_allow_delete:
+            raise HTTPException(
+                status_code=422,
+                detail="sync option delete is disabled by DMS_DM_SYNC_ALLOW_DELETE",
+            )
 
 def _validate_data_job_or_422(body: DataJobRequest, operation: OperationKind) -> None:
     try:
@@ -1405,10 +1554,21 @@ def operational_query_router() -> APIRouter:
     @router.get("/data-jobs")
     def list_data_jobs(
         request: Request,
+        requester_id: str | None = None,
+        operation: str | None = None,
+        storage_name: str | None = None,
+        state: str | None = None,
+        limit: int = Query(default=100, gt=0, le=1000),
         services: AppServices = Depends(get_services),
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
-        return services.repository.list_data_jobs()
+        return services.repository.list_data_jobs(
+            limit=limit,
+            requester_id=requester_id,
+            operation=operation,
+            storage_name=storage_name,
+            state=state,
+        )
 
     @router.get("/data-jobs/{job_id}")
     def data_job_status(

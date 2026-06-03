@@ -392,9 +392,9 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
         ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas:expiration-sweep", _mutating_body({"dry_run": True}), {202}),
         ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas:audit", _mutating_body({"scope": {"cluster_name": "cluster-a"}}), {202}),
         ("POST", "/api/v1/data-management/sync", _data_job_body(source_path="src", destination_path="dst"), {202}),
-        ("POST", "/api/v1/data-management/rm", _data_job_body(target_path="target"), {202}),
+        ("POST", "/api/v1/data-management/rm", _data_job_body(target_path="target", options={"recursive": True}), {202}),
         ("POST", "/api/v1/data-management/scan", _data_job_body(target_path="target"), {202}),
-        ("POST", f"/api/v1/data-management/jobs/{confirm_job_id}:confirm", None, {200}),
+        ("POST", f"/api/v1/data-management/jobs/{confirm_job_id}:confirm", None, {409}),
         ("POST", f"/api/v1/data-management/jobs/{cancel_job_id}:cancel", None, {200}),
         ("POST", "/api/v1/agent/reports", _agent_report(), {403}),
         ("GET", "/api/v1/operations/action-required", None, {200}),
@@ -598,6 +598,7 @@ def _data_job_body(
     source_path: str | None = None,
     destination_path: str | None = None,
     target_path: str | None = None,
+    options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "requester_id": "phase16-all",
@@ -609,6 +610,8 @@ def _data_job_body(
         body["destination_path"] = destination_path
     if target_path is not None:
         body["target_path"] = target_path
+    if options is not None:
+        body["options"] = options
     return body
 
 

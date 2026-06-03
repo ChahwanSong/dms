@@ -858,23 +858,27 @@ Phase 18 does not implement:
 
 ## Phase 18 이후 다음 작업 리스트
 
-Phase 18로 maintenance/drain/recovery guard를 닫은 뒤, Data Management 후보는 다시 Phase 19로 진행한다.
+Phase 18로 maintenance/drain/recovery guard를 닫은 뒤, Data Management 후보는 다시 Phase 19로 진행한다. 구체 구현 프롬프트는 `docs/dms-phase19.md`에 정리한다.
 
-### Phase 19A: Data Management Read-only Scan Preflight
+### Phase 19: Data Management Scan and Volcano Runtime Foundation
 
 - filesystem resource boundary를 read-only scan target으로 사용
 - DM Agent report 기반 candidate pool
 - POSIX identity/mount/tool preflight
-- VolcanoJob 이전 local scan preflight 검증
+- pinned mpifileutils image/tool metadata
+- VolcanoJob live adapter skeleton
+- read-only `scan` live `dscan` execution
+- `sync`/`rm` preflight and preview-safe lifecycle
+- `sync`/`rm` confirmed destructive execution은 다음 phase로 defer
 
-### Phase 19B: DM Worker Runtime and VolcanoJob Skeleton
+### Phase 20A: Sync/Rm Confirmed Execution
 
-- `dms dm-worker --loop` Deployment
-- VolcanoJob create/watch/delete skeleton
-- job lease/recovery는 Phase 18 heartbeat/recovery utility 재사용
-- artifact URI and preview lifecycle
+- `sync` confirmed `dsync`/`nsync` execution
+- `rm` confirmed `drm` execution
+- dry-run/preview result hash validation
+- destructive operation recovery policy
 
-### Phase 19C: Filesystem Policy and Initialize
+### Phase 20B: Filesystem Policy and Initialize
 
 - filesystem default quota policy
 - `filesystem.initialize`

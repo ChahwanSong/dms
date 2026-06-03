@@ -39,6 +39,28 @@ class Settings:
     filesystem_exec_use_sudo: bool = True
     ldap_group_gid_start: int = 24000
     ldap_group_gid_end: int = 24999
+    dm_namespace: str = "dms"
+    dm_job_image: str | None = None
+    dm_job_image_ref: str | None = None
+    dm_service_account: str = "dms-dm-worker"
+    dm_artifact_base_uri: str = "file:///var/lib/dms/artifacts"
+    dm_default_priority: str = "Mid"
+    dm_default_max_nodes: int = 1
+    dm_max_nodes: int = 4
+    dm_scan_timeout_seconds: int = 3600
+    dm_sync_preview_timeout_seconds: int = 1800
+    dm_sync_execution_timeout_seconds: int = 3600
+    dm_rm_preview_timeout_seconds: int = 1800
+    dm_rm_execution_timeout_seconds: int = 3600
+    dm_confirm_require_preview_fingerprint: bool = True
+    dm_sync_allow_delete: bool = False
+    dm_max_sync_nodes: int = 2
+    dm_max_rm_nodes: int = 1
+    dm_nsync_enabled: bool = True
+    dm_nsync_service_prefix: str = "dms-nsync"
+    dm_monitor_poll_seconds: int = 5
+    dm_job_delete_on_terminal: bool = False
+    dm_kubernetes_mode: str = "cluster"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -116,6 +138,42 @@ class Settings:
             not in {"0", "false", "no"},
             ldap_group_gid_start=int(os.getenv("DMS_LDAP_GROUP_GID_START", "24000")),
             ldap_group_gid_end=int(os.getenv("DMS_LDAP_GROUP_GID_END", "24999")),
+            dm_namespace=os.getenv("DMS_DM_NAMESPACE", "dms"),
+            dm_job_image=os.getenv("DMS_DM_JOB_IMAGE"),
+            dm_job_image_ref=os.getenv("DMS_DM_JOB_IMAGE_REF"),
+            dm_service_account=os.getenv("DMS_DM_SERVICE_ACCOUNT", "dms-dm-worker"),
+            dm_artifact_base_uri=os.getenv(
+                "DMS_DM_ARTIFACT_BASE_URI", "file:///var/lib/dms/artifacts"
+            ),
+            dm_default_priority=os.getenv("DMS_DM_DEFAULT_PRIORITY", "Mid"),
+            dm_default_max_nodes=int(os.getenv("DMS_DM_DEFAULT_MAX_NODES", "1")),
+            dm_max_nodes=int(os.getenv("DMS_DM_MAX_NODES", "4")),
+            dm_scan_timeout_seconds=int(os.getenv("DMS_DM_SCAN_TIMEOUT_SECONDS", "3600")),
+            dm_sync_preview_timeout_seconds=int(
+                os.getenv("DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS", "1800")
+            ),
+            dm_sync_execution_timeout_seconds=int(
+                os.getenv("DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS", "3600")
+            ),
+            dm_rm_preview_timeout_seconds=int(
+                os.getenv("DMS_DM_RM_PREVIEW_TIMEOUT_SECONDS", "1800")
+            ),
+            dm_rm_execution_timeout_seconds=int(
+                os.getenv("DMS_DM_RM_EXECUTION_TIMEOUT_SECONDS", "3600")
+            ),
+            dm_confirm_require_preview_fingerprint=_bool_env(
+                "DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT", True
+            ),
+            dm_sync_allow_delete=_bool_env("DMS_DM_SYNC_ALLOW_DELETE", False),
+            dm_max_sync_nodes=int(os.getenv("DMS_DM_MAX_SYNC_NODES", "2")),
+            dm_max_rm_nodes=int(os.getenv("DMS_DM_MAX_RM_NODES", "1")),
+            dm_nsync_enabled=_bool_env("DMS_DM_NSYNC_ENABLED", True),
+            dm_nsync_service_prefix=os.getenv(
+                "DMS_DM_NSYNC_SERVICE_PREFIX", "dms-nsync"
+            ),
+            dm_monitor_poll_seconds=int(os.getenv("DMS_DM_MONITOR_POLL_SECONDS", "5")),
+            dm_job_delete_on_terminal=_bool_env("DMS_DM_JOB_DELETE_ON_TERMINAL", False),
+            dm_kubernetes_mode=os.getenv("DMS_DM_KUBERNETES_MODE", "cluster"),
         )
 
     @property

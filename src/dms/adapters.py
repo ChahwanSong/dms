@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
+import shlex
 import subprocess
+import time
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from .config import Settings
 
@@ -83,6 +87,10 @@ class KubernetesMutationError(RuntimeError):
     pass
 
 
+class DataManagementRuntimeError(RuntimeError):
+    pass
+
+
 class KubernetesReadOnlyInventoryAdapter(Protocol):
     def read_inventory(self) -> dict[str, Any]: ...
 
@@ -131,6 +139,19 @@ class BackendPreconditionError(RuntimeError):
 
 
 class VolcanoAdapter(Protocol):
+    def verify_scan_preflight(
+        self, plan: dict[str, Any], data_job: dict[str, Any], preflight: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def verify_data_preflight(
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        preflight: dict[str, Any],
+        *,
+        phase: str,
+    ) -> dict[str, Any]: ...
+
     def create_job(self, plan: dict[str, Any], data_job: dict[str, Any]) -> AdapterResult: ...
 
     def get_job(self, job_ref: str) -> dict[str, Any]: ...
@@ -2074,20 +2095,60 @@ def _single_int(attributes: dict[str, Any], name: str) -> int:
 class StubVolcanoAdapter:
     calls: list[tuple[str, str]] = field(default_factory=list)
 
+    def verify_scan_preflight(
+        self, plan: dict[str, Any], data_job: dict[str, Any], preflight: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.calls.append(("verify_scan_preflight", data_job["job_id"]))
+        return {
+            "status": "Ready",
+            "source": "volcano-stub",
+            "reason": "stub_preflight_ready",
+        }
+
+    def verify_data_preflight(
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        preflight: dict[str, Any],
+        *,
+        phase: str,
+    ) -> dict[str, Any]:
+        self.calls.append((f"verify_data_preflight:{phase}", data_job["job_id"]))
+        return {
+            "status": "Ready",
+            "source": "volcano-stub",
+            "reason": f"stub_{phase}_preflight_ready",
+        }
+
     def create_job(self, plan: dict[str, Any], data_job: dict[str, Any]) -> AdapterResult:
         self.calls.append(("create_job", data_job["job_id"]))
         tool = data_job["selected_tool"] or _default_tool_for_operation(data_job["operation"])
+        phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
+        summary = {
+            "operation": data_job["operation"],
+            "selected_tool": tool,
+            "phase": phase,
+            "dry_run": phase == "preview",
+            "file_count": 0,
+            "directory_count": 1,
+            "total_bytes": 0,
+            "error_count": 0,
+        }
+        if data_job["operation"] == "data.rm" and phase == "execution":
+            summary["target_absent"] = True
         return AdapterResult(
             applied_state={
                 "adapter": "volcano-stub",
                 "job_ref": f"volcano/{data_job['job_id']}",
                 "selected_tool": tool,
                 "priority": data_job["priority"],
+                "phase": phase,
             },
             observed_state={
                 "adapter": "volcano-stub",
                 "job_ref": f"volcano/{data_job['job_id']}",
                 "phase": "Succeeded",
+                "summary": summary,
             },
             message="volcano job stub completed",
             artifact_uri=f"stub://artifacts/{data_job['job_id']}",
@@ -2105,9 +2166,972 @@ class StubVolcanoAdapter:
         )
 
 
+@dataclass
+class KubernetesVolcanoAdapter:
+    settings: Settings
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "KubernetesVolcanoAdapter":
+        return cls(settings=settings)
+
+    def verify_scan_preflight(
+        self, plan: dict[str, Any], data_job: dict[str, Any], preflight: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not self.settings.dm_job_image:
+            return {
+                "status": "Rejected",
+                "source": "kubernetes-preflight-pod",
+                "reason": "missing_dm_job_image",
+            }
+        manifest = self._preflight_pod_manifest(plan, data_job, preflight)
+        name = manifest["metadata"]["name"]
+        namespace = manifest["metadata"]["namespace"]
+        apply_result = subprocess.run(
+            ["kubectl", "-n", namespace, "apply", "-f", "-"],
+            input=json.dumps(manifest),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_mutation_timeout_seconds,
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            return {
+                "status": "Rejected",
+                "source": "kubernetes-preflight-pod",
+                "reason": "preflight_pod_apply_failed",
+                "message": apply_result.stderr.strip() or apply_result.stdout.strip(),
+            }
+        observed = self._wait_for_pod_terminal(namespace, name)
+        logs = self._pod_logs(namespace, name)
+        delete_result = subprocess.run(
+            ["kubectl", "-n", namespace, "delete", "pod", name, "--ignore-not-found"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_mutation_timeout_seconds,
+            check=False,
+        )
+        cleanup = {
+            "attempted": True,
+            "returncode": delete_result.returncode,
+            "message": delete_result.stderr.strip() or delete_result.stdout.strip(),
+        }
+        if observed.get("phase") == "Succeeded":
+            return {
+                "status": "Ready",
+                "source": "kubernetes-preflight-pod",
+                "reason": "posix_permission_check_passed",
+                "pod_ref": f"pod://{namespace}/{name}",
+                "observed_state": observed,
+                "logs": logs,
+                "cleanup": cleanup,
+            }
+        reason = (
+            "posix_permission_denied"
+            if observed.get("phase") == "Failed"
+            else "preflight_pod_not_succeeded"
+        )
+        return {
+            "status": "Rejected",
+            "source": "kubernetes-preflight-pod",
+            "reason": reason,
+            "pod_ref": f"pod://{namespace}/{name}",
+            "observed_state": observed,
+            "logs": logs,
+            "cleanup": cleanup,
+        }
+
+    def verify_data_preflight(
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        preflight: dict[str, Any],
+        *,
+        phase: str,
+    ) -> dict[str, Any]:
+        if data_job["operation"] == "data.scan":
+            return self.verify_scan_preflight(plan, data_job, preflight)
+        if not self.settings.dm_job_image:
+            return {
+                "status": "Rejected",
+                "source": "kubernetes-preflight-pod",
+                "reason": "missing_dm_job_image",
+            }
+        manifest = self._data_preflight_pod_manifest(plan, data_job, preflight, phase)
+        name = manifest["metadata"]["name"]
+        namespace = manifest["metadata"]["namespace"]
+        apply_result = subprocess.run(
+            ["kubectl", "-n", namespace, "apply", "-f", "-"],
+            input=json.dumps(manifest),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_mutation_timeout_seconds,
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            return {
+                "status": "Rejected",
+                "source": "kubernetes-preflight-pod",
+                "reason": "preflight_pod_apply_failed",
+                "message": apply_result.stderr.strip() or apply_result.stdout.strip(),
+            }
+        observed = self._wait_for_pod_terminal(namespace, name)
+        logs = self._pod_logs(namespace, name)
+        delete_result = subprocess.run(
+            ["kubectl", "-n", namespace, "delete", "pod", name, "--ignore-not-found"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_mutation_timeout_seconds,
+            check=False,
+        )
+        cleanup = {
+            "attempted": True,
+            "returncode": delete_result.returncode,
+            "message": delete_result.stderr.strip() or delete_result.stdout.strip(),
+        }
+        if observed.get("phase") == "Succeeded":
+            return {
+                "status": "Ready",
+                "source": "kubernetes-preflight-pod",
+                "reason": f"{phase}_posix_permission_check_passed",
+                "pod_ref": f"pod://{namespace}/{name}",
+                "observed_state": observed,
+                "logs": logs,
+                "cleanup": cleanup,
+            }
+        return {
+            "status": "Rejected",
+            "source": "kubernetes-preflight-pod",
+            "reason": "posix_permission_denied"
+            if observed.get("phase") == "Failed"
+            else "preflight_pod_not_succeeded",
+            "pod_ref": f"pod://{namespace}/{name}",
+            "observed_state": observed,
+            "logs": logs,
+            "cleanup": cleanup,
+        }
+
+    def create_job(self, plan: dict[str, Any], data_job: dict[str, Any]) -> AdapterResult:
+        if not self.settings.dm_job_image:
+            raise DataManagementRuntimeError("DMS_DM_JOB_IMAGE is required for live data jobs")
+        manifest = self._manifest(plan, data_job)
+        job_name = manifest["metadata"]["name"]
+        namespace = manifest["metadata"]["namespace"]
+        completed = subprocess.run(
+            ["kubectl", "-n", namespace, "apply", "-f", "-"],
+            input=json.dumps(manifest),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_mutation_timeout_seconds,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise DataManagementRuntimeError(
+                "VolcanoJob apply failed: "
+                f"{completed.stderr.strip() or completed.stdout.strip()}"
+            )
+        job_ref = f"volcano://{namespace}/{job_name}"
+        phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
+        observed = self._wait_for_terminal(
+            job_ref, timeout_seconds=self._timeout_seconds(data_job["operation"], phase)
+        )
+        artifact_uri = _artifact_job_uri(self.settings.dm_artifact_base_uri, data_job["job_id"])
+        return AdapterResult(
+            applied_state={
+                "adapter": "volcano-kubectl",
+                "job_ref": job_ref,
+                "namespace": namespace,
+                "name": job_name,
+                "selected_tool": data_job["selected_tool"] or _default_tool_for_operation(data_job["operation"]),
+                "priority": data_job["priority"],
+                "phase": phase,
+                "image_ref": self.settings.dm_job_image_ref,
+                "artifact_uri": artifact_uri,
+            },
+            observed_state=observed,
+            message="volcano data job completed",
+            artifact_uri=artifact_uri,
+        )
+
+    def get_job(self, job_ref: str) -> dict[str, Any]:
+        namespace, name = _parse_volcano_ref(job_ref)
+        completed = subprocess.run(
+            ["kubectl", "-n", namespace, "get", "job.batch.volcano.sh", name, "-o", "json"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_inventory_timeout_seconds,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise DataManagementRuntimeError(
+                "VolcanoJob read failed: "
+                f"{completed.stderr.strip() or completed.stdout.strip()}"
+            )
+        payload = json.loads(completed.stdout)
+        state = payload.get("status", {}).get("state") or {}
+        phase = state.get("phase") or payload.get("status", {}).get("phase") or "Unknown"
+        return {
+            "adapter": "volcano-kubectl",
+            "job_ref": job_ref,
+            "phase": phase,
+            "state": state,
+            "status": payload.get("status", {}),
+        }
+
+    def terminate_job(self, job_ref: str) -> AdapterResult:
+        namespace, name = _parse_volcano_ref(job_ref)
+        completed = subprocess.run(
+            ["kubectl", "-n", namespace, "delete", "job.batch.volcano.sh", name, "--ignore-not-found"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_mutation_timeout_seconds,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise DataManagementRuntimeError(
+                "VolcanoJob delete failed: "
+                f"{completed.stderr.strip() or completed.stdout.strip()}"
+            )
+        return AdapterResult(
+            applied_state={"job_ref": job_ref, "terminated": True},
+            observed_state={"job_ref": job_ref, "phase": "Cancelled"},
+            message="volcano scan job terminated",
+        )
+
+    def _wait_for_terminal(
+        self, job_ref: str, *, timeout_seconds: int | None = None
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + (timeout_seconds or self.settings.dm_scan_timeout_seconds)
+        last: dict[str, Any] = {"job_ref": job_ref, "phase": "Unknown"}
+        while time.monotonic() < deadline:
+            last = self.get_job(job_ref)
+            if last.get("phase") in {"Completed", "Succeeded"}:
+                last["phase"] = "Succeeded"
+                return last
+            if last.get("phase") in {"Failed", "Terminated", "Aborted"}:
+                return last
+            time.sleep(max(self.settings.dm_monitor_poll_seconds, 1))
+        self.terminate_job(job_ref)
+        return {**last, "phase": "TimedOut", "reason": "dm_job_timeout"}
+
+    def _wait_for_pod_terminal(self, namespace: str, name: str) -> dict[str, Any]:
+        timeout = max(self.settings.kubernetes_mutation_timeout_seconds, 30)
+        deadline = time.monotonic() + timeout
+        last: dict[str, Any] = {
+            "adapter": "kubernetes-preflight-pod",
+            "namespace": namespace,
+            "name": name,
+            "phase": "Unknown",
+        }
+        while time.monotonic() < deadline:
+            completed = subprocess.run(
+                ["kubectl", "-n", namespace, "get", "pod", name, "-o", "json"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.settings.kubernetes_inventory_timeout_seconds,
+                check=False,
+            )
+            if completed.returncode != 0:
+                last = {
+                    **last,
+                    "phase": "Unknown",
+                    "reason": "preflight_pod_read_failed",
+                    "message": completed.stderr.strip() or completed.stdout.strip(),
+                }
+            else:
+                payload = json.loads(completed.stdout)
+                status = payload.get("status", {})
+                phase = status.get("phase") or "Unknown"
+                container_statuses = status.get("containerStatuses") or []
+                last = {
+                    "adapter": "kubernetes-preflight-pod",
+                    "namespace": namespace,
+                    "name": name,
+                    "phase": phase,
+                    "reason": status.get("reason"),
+                    "message": status.get("message"),
+                    "container_statuses": container_statuses,
+                }
+                if phase in {"Succeeded", "Failed"}:
+                    return last
+            time.sleep(max(min(self.settings.dm_monitor_poll_seconds, 5), 1))
+        return {**last, "phase": "TimedOut", "reason": "preflight_pod_timeout"}
+
+    def _pod_logs(self, namespace: str, name: str) -> dict[str, Any]:
+        completed = subprocess.run(
+            ["kubectl", "-n", namespace, "logs", name],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.settings.kubernetes_inventory_timeout_seconds,
+            check=False,
+        )
+        return {
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-4000:],
+            "stderr": completed.stderr[-4000:],
+        }
+
+    def _preflight_pod_manifest(
+        self, plan: dict[str, Any], data_job: dict[str, Any], preflight: dict[str, Any]
+    ) -> dict[str, Any]:
+        name = _kubernetes_name(f"dms-scan-preflight-{data_job['job_id']}")
+        scan = self._scan_context(plan, data_job)
+        command = [
+            "/bin/sh",
+            "-c",
+            "\n".join(
+                [
+                    "set -eu",
+                    "target=/dms/target/${DMS_SCAN_PATH}",
+                    "test -d \"$target\"",
+                    "test -r \"$target\"",
+                    "test -x \"$target\"",
+                    "printf 'scan preflight ok: %s\\n' \"$target\"",
+                ]
+            ),
+        ]
+        spec = {
+            "restartPolicy": "Never",
+            "serviceAccountName": self.settings.dm_service_account,
+            "nodeSelector": scan["node_selector"],
+            "securityContext": _pod_security_context(preflight),
+            "volumes": scan["volumes"],
+            "containers": [
+                {
+                    "name": "scan-preflight",
+                    "image": self.settings.dm_job_image,
+                    "command": command,
+                    "env": scan["env"],
+                    "volumeMounts": scan["volume_mounts"],
+                    "securityContext": _container_security_context(preflight),
+                }
+            ],
+        }
+        if scan["affinity"]:
+            spec["affinity"] = scan["affinity"]
+        return {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": name,
+                "namespace": self.settings.dm_namespace,
+                "labels": {
+                    "app.kubernetes.io/name": "dms-data-management-preflight",
+                    "dms.openai.com/data-job-id": data_job["job_id"],
+                    "dms.openai.com/request-id": data_job["request_id"],
+                },
+            },
+            "spec": spec,
+        }
+
+    def _data_preflight_pod_manifest(
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        preflight: dict[str, Any],
+        phase: str,
+    ) -> dict[str, Any]:
+        name = _kubernetes_name(
+            f"dms-{_operation_suffix(data_job['operation'])}-{phase}-preflight-{data_job['job_id']}"
+        )
+        context = self._mutation_context(plan, data_job)
+        if data_job["operation"] == "data.sync":
+            command_text = "\n".join(
+                [
+                    "set -eu",
+                    "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
+                    "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
+                    "destination_parent=$(dirname \"$destination\")",
+                    "test -e \"$source\"",
+                    "test -r \"$source\"",
+                    "if [ -d \"$source\" ]; then test -x \"$source\"; fi",
+                    "test -d \"$destination_parent\"",
+                    "test -w \"$destination_parent\"",
+                    "test -x \"$destination_parent\"",
+                    "if [ -e \"$destination\" ]; then test -w \"$destination\"; fi",
+                    "printf 'sync %s preflight ok: %s -> %s\\n' \"$DMS_DM_PHASE\" \"$source\" \"$destination\"",
+                ]
+            )
+            container_name = "sync-preflight"
+        elif data_job["operation"] == "data.rm":
+            command_text = "\n".join(
+                [
+                    "set -eu",
+                    "target=/dms/target/${DMS_RM_TARGET_PATH}",
+                    "parent=$(dirname \"$target\")",
+                    "test -d \"$target\"",
+                    "test -r \"$target\"",
+                    "test -x \"$target\"",
+                    "test -w \"$parent\"",
+                    "test -x \"$parent\"",
+                    "printf 'rm %s preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$target\"",
+                ]
+            )
+            container_name = "rm-preflight"
+        else:
+            raise DataManagementRuntimeError(
+                f"unsupported data preflight operation: {data_job['operation']}"
+            )
+        spec = {
+            "restartPolicy": "Never",
+            "serviceAccountName": self.settings.dm_service_account,
+            "nodeSelector": context["node_selector"],
+            "securityContext": _pod_security_context(preflight),
+            "volumes": context["volumes"],
+            "containers": [
+                {
+                    "name": container_name,
+                    "image": self.settings.dm_job_image,
+                    "command": ["/bin/sh", "-c", command_text],
+                    "env": [*context["env"], {"name": "DMS_DM_PHASE", "value": phase}],
+                    "volumeMounts": context["volume_mounts"],
+                    "securityContext": _container_security_context(preflight),
+                }
+            ],
+        }
+        if context["affinity"]:
+            spec["affinity"] = context["affinity"]
+        return {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": name,
+                "namespace": self.settings.dm_namespace,
+                "labels": {
+                    "app.kubernetes.io/name": "dms-data-management-preflight",
+                    "dms.openai.com/data-job-id": data_job["job_id"],
+                    "dms.openai.com/request-id": data_job["request_id"],
+                    "dms.openai.com/data-phase": phase,
+                },
+            },
+            "spec": spec,
+        }
+
+    def _manifest(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+        if data_job["operation"] != "data.scan":
+            return self._mutation_manifest(plan, data_job)
+        job_name = _kubernetes_name(f"dms-scan-{data_job['job_id']}")
+        scan = self._scan_context(plan, data_job)
+        command = [
+            "/bin/sh",
+            "-c",
+            "\n".join(
+                [
+                    "set -eu",
+                    "mkdir -p /dms/artifacts/${DMS_DATA_JOB_ID}",
+                    "target=/dms/target/${DMS_SCAN_PATH}",
+                    "test -d \"$target\"",
+                    "test -r \"$target\"",
+                    "test -x \"$target\"",
+                    "report=/dms/artifacts/${DMS_DATA_JOB_ID}/dscan-report.json",
+                    "summary=/dms/artifacts/${DMS_DATA_JOB_ID}/summary.json",
+                    "find_errors=/dms/artifacts/${DMS_DATA_JOB_ID}/find-errors.log",
+                    "dscan --directory \"$target\" --output \"$report\" --print > /dms/artifacts/${DMS_DATA_JOB_ID}/stdout.log 2> /dms/artifacts/${DMS_DATA_JOB_ID}/stderr.log",
+                    "test -f \"$report\"",
+                    ": > \"$find_errors\"",
+                    "file_count=$(find \"$target\" -type f -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    "directory_count=$(find \"$target\" -type d -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    "total_bytes=$(find \"$target\" -type f -printf '%s\\n' 2>> \"$find_errors\" | awk '{sum += $1} END {print sum + 0}')",
+                    "error_count=$(wc -l < \"$find_errors\" | awk '{print $1}')",
+                    "printf '{\"summary\":{\"file_count\":%s,\"directory_count\":%s,\"total_bytes\":%s,\"error_count\":%s}}\\n' \"$file_count\" \"$directory_count\" \"$total_bytes\" \"$error_count\" > \"$summary\"",
+                    "test -f \"$summary\"",
+                ]
+            ),
+        ]
+        task_pod_spec = {
+            "restartPolicy": "Never",
+            "serviceAccountName": self.settings.dm_service_account,
+            "nodeSelector": scan["node_selector"],
+            "securityContext": _pod_security_context(data_job.get("preflight_result") or {}),
+            "volumes": scan["volumes"],
+            "containers": [
+                {
+                    "name": "dscan",
+                    "image": self.settings.dm_job_image,
+                    "command": command,
+                    "env": scan["env"],
+                    "volumeMounts": scan["volume_mounts"],
+                    "securityContext": _container_security_context(data_job.get("preflight_result") or {}),
+                }
+            ],
+        }
+        if scan["affinity"]:
+            task_pod_spec["affinity"] = scan["affinity"]
+        return {
+            "apiVersion": "batch.volcano.sh/v1alpha1",
+            "kind": "Job",
+            "metadata": {
+                "name": job_name,
+                "namespace": self.settings.dm_namespace,
+                "labels": {
+                    "app.kubernetes.io/name": "dms-data-management",
+                    "dms.openai.com/data-job-id": data_job["job_id"],
+                    "dms.openai.com/request-id": data_job["request_id"],
+                },
+            },
+            "spec": {
+                "schedulerName": "volcano",
+                "minAvailable": 1,
+                "tasks": [
+                    {
+                        "name": "dscan",
+                        "replicas": max(
+                            1,
+                            min(len(scan["selected"]) or 1, self.settings.dm_max_nodes),
+                        ),
+                        "template": {
+                            "spec": task_pod_spec
+                        },
+                    }
+                ],
+            },
+        }
+
+    def _mutation_manifest(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+        phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
+        tool = data_job.get("selected_tool") or _default_tool_for_operation(data_job["operation"])
+        if tool == "nsync":
+            raise DataManagementRuntimeError("nsync live execution is not enabled in this adapter path")
+        context = self._mutation_context(plan, data_job)
+        job_name = _kubernetes_name(
+            f"dms-{_operation_suffix(data_job['operation'])}-{phase}-{data_job['job_id']}"
+        )
+        command = self._mutation_command(plan, data_job, phase=phase, tool=tool)
+        task_pod_spec = {
+            "restartPolicy": "Never",
+            "serviceAccountName": self.settings.dm_service_account,
+            "nodeSelector": context["node_selector"],
+            "securityContext": _pod_security_context(data_job.get("preflight_result") or {}),
+            "volumes": context["volumes"],
+            "containers": [
+                {
+                    "name": tool,
+                    "image": self.settings.dm_job_image,
+                    "command": ["/bin/sh", "-c", command],
+                    "env": [*context["env"], {"name": "DMS_DM_PHASE", "value": phase}],
+                    "volumeMounts": context["volume_mounts"],
+                    "securityContext": _container_security_context(data_job.get("preflight_result") or {}),
+                }
+            ],
+        }
+        if context["affinity"]:
+            task_pod_spec["affinity"] = context["affinity"]
+        return {
+            "apiVersion": "batch.volcano.sh/v1alpha1",
+            "kind": "Job",
+            "metadata": {
+                "name": job_name,
+                "namespace": self.settings.dm_namespace,
+                "labels": {
+                    "app.kubernetes.io/name": "dms-data-management",
+                    "dms.openai.com/data-job-id": data_job["job_id"],
+                    "dms.openai.com/request-id": data_job["request_id"],
+                    "dms.openai.com/data-phase": phase,
+                    "dms.openai.com/data-tool": tool,
+                },
+            },
+            "spec": {
+                "schedulerName": "volcano",
+                "minAvailable": 1,
+                "tasks": [
+                    {
+                        "name": tool,
+                        "replicas": 1,
+                        "template": {"spec": task_pod_spec},
+                    }
+                ],
+            },
+        }
+
+    def _mutation_command(
+        self, plan: dict[str, Any], data_job: dict[str, Any], *, phase: str, tool: str
+    ) -> str:
+        options = (plan.get("desired_state") or {}).get("options") or {}
+        dryrun = "--dryrun " if phase == "preview" else ""
+        if data_job["operation"] == "data.sync":
+            flags = _sync_flags(options)
+            return "\n".join(
+                [
+                    "set -eu",
+                    "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
+                    "mkdir -p \"$artifact\"",
+                    "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
+                    "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
+                    "find_errors=\"$artifact/find-errors.log\"",
+                    ": > \"$find_errors\"",
+                    f"printf '{{\"tool\":\"{tool}\",\"phase\":\"%s\",\"dry_run\":%s}}\\n' \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" > \"$artifact/command.json\"",
+                    f"{tool} {dryrun}{flags}\"$source\" \"$destination\" > \"$artifact/stdout.log\" 2> \"$artifact/stderr.log\"",
+                    "summary_root=\"$destination\"",
+                    "if [ \"$DMS_DM_PHASE\" = preview ]; then summary_root=\"$source\"; fi",
+                    "file_count=$(find \"$summary_root\" -type f -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    "directory_count=$(find \"$summary_root\" -type d -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    "total_bytes=$(find \"$summary_root\" -type f -printf '%s\\n' 2>> \"$find_errors\" | awk '{sum += $1} END {print sum + 0}')",
+                    "error_count=$(wc -l < \"$find_errors\" | awk '{print $1}')",
+                    "printf '{\"summary\":{\"operation\":\"data.sync\",\"selected_tool\":\"%s\",\"phase\":\"%s\",\"dry_run\":%s,\"file_count\":%s,\"directory_count\":%s,\"total_bytes\":%s,\"error_count\":%s}}\\n' \"$DMS_SELECTED_TOOL\" \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" \"$file_count\" \"$directory_count\" \"$total_bytes\" \"$error_count\" > \"$artifact/summary.json\"",
+                ]
+            )
+        if data_job["operation"] == "data.rm":
+            flags = _rm_flags(options, phase=phase)
+            return "\n".join(
+                [
+                    "set -eu",
+                    "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
+                    "mkdir -p \"$artifact\"",
+                    "target=/dms/target/${DMS_RM_TARGET_PATH}",
+                    "find_errors=\"$artifact/find-errors.log\"",
+                    ": > \"$find_errors\"",
+                    "file_count=$(find \"$target\" -type f -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    "directory_count=$(find \"$target\" -type d -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    "total_bytes=$(find \"$target\" -type f -printf '%s\\n' 2>> \"$find_errors\" | awk '{sum += $1} END {print sum + 0}')",
+                    f"printf '{{\"tool\":\"{tool}\",\"phase\":\"%s\",\"dry_run\":%s}}\\n' \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" > \"$artifact/command.json\"",
+                    f"{tool} {dryrun}{flags}\"$target\" > \"$artifact/stdout.log\" 2> \"$artifact/stderr.log\"",
+                    "target_absent=false",
+                    "if [ ! -e \"$target\" ]; then target_absent=true; fi",
+                    "error_count=$(wc -l < \"$find_errors\" | awk '{print $1}')",
+                    "printf '{\"summary\":{\"operation\":\"data.rm\",\"selected_tool\":\"%s\",\"phase\":\"%s\",\"dry_run\":%s,\"file_count\":%s,\"directory_count\":%s,\"total_bytes\":%s,\"error_count\":%s,\"target_absent\":%s}}\\n' \"$DMS_SELECTED_TOOL\" \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" \"$file_count\" \"$directory_count\" \"$total_bytes\" \"$error_count\" \"$target_absent\" > \"$artifact/summary.json\"",
+                ]
+            )
+        raise DataManagementRuntimeError(f"unsupported mutation operation: {data_job['operation']}")
+
+    def _mutation_context(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+        artifact_uri = _artifact_job_uri(self.settings.dm_artifact_base_uri, data_job["job_id"])
+        normalized = data_job.get("normalized_target") or plan.get("desired_state") or {}
+        selected = _unique_selected_candidates(
+            (data_job.get("worker_pool") or {}).get("selected_candidates") or []
+        )
+        node_selector: dict[str, str] = {}
+        affinity: dict[str, Any] = {}
+        node_names = [item["node_name"] for item in selected if item.get("node_name")]
+        if len(node_names) == 1:
+            node_selector["kubernetes.io/hostname"] = node_names[0]
+        elif node_names:
+            affinity = _node_name_affinity(node_names)
+
+        artifact_path = _file_uri_parent_path(artifact_uri)
+        volumes: list[dict[str, Any]] = []
+        volume_mounts: list[dict[str, Any]] = []
+        env: list[dict[str, str]] = [
+            {"name": "DMS_DATA_JOB_ID", "value": data_job["job_id"]},
+            {"name": "DMS_ARTIFACT_URI", "value": artifact_uri},
+            {
+                "name": "DMS_SELECTED_TOOL",
+                "value": data_job.get("selected_tool") or _default_tool_for_operation(data_job["operation"]),
+            },
+        ]
+
+        if data_job["operation"] == "data.sync":
+            source = normalized.get("source") or plan.get("desired_state", {}).get("source") or {}
+            destination = (
+                normalized.get("destination")
+                or plan.get("desired_state", {}).get("destination")
+                or {}
+            )
+            candidate = selected[0] if selected else {}
+            source_mount = candidate.get("source_mount_path") or candidate.get("mount_path")
+            destination_mount = candidate.get("destination_mount_path") or candidate.get("mount_path")
+            if source_mount:
+                volumes.append(
+                    {
+                        "name": "sync-source",
+                        "hostPath": {"path": source_mount, "type": "Directory"},
+                    }
+                )
+                volume_mounts.append(
+                    {
+                        "name": "sync-source",
+                        "mountPath": "/dms/source",
+                        "readOnly": True,
+                    }
+                )
+            if destination_mount:
+                volumes.append(
+                    {
+                        "name": "sync-destination",
+                        "hostPath": {"path": destination_mount, "type": "Directory"},
+                    }
+                )
+                volume_mounts.append(
+                    {"name": "sync-destination", "mountPath": "/dms/destination"}
+                )
+            env.extend(
+                [
+                    {
+                        "name": "DMS_SYNC_SOURCE_STORAGE",
+                        "value": source.get("storage_name", data_job.get("storage_name") or ""),
+                    },
+                    {
+                        "name": "DMS_SYNC_DESTINATION_STORAGE",
+                        "value": destination.get("storage_name", ""),
+                    },
+                    {"name": "DMS_SYNC_SOURCE_PATH", "value": source.get("path") or "."},
+                    {
+                        "name": "DMS_SYNC_DESTINATION_PATH",
+                        "value": destination.get("path") or ".",
+                    },
+                ]
+            )
+        elif data_job["operation"] == "data.rm":
+            target = normalized.get("target") or normalized
+            candidate = selected[0] if selected else {}
+            target_mount = candidate.get("mount_path")
+            if target_mount:
+                volumes.append(
+                    {
+                        "name": "rm-target",
+                        "hostPath": {"path": target_mount, "type": "Directory"},
+                    }
+                )
+                volume_mounts.append({"name": "rm-target", "mountPath": "/dms/target"})
+            env.extend(
+                [
+                    {
+                        "name": "DMS_RM_STORAGE",
+                        "value": target.get("storage_name", data_job.get("storage_name") or ""),
+                    },
+                    {"name": "DMS_RM_TARGET_PATH", "value": target.get("path") or "."},
+                ]
+            )
+        else:
+            raise DataManagementRuntimeError(
+                f"unsupported mutation context operation: {data_job['operation']}"
+            )
+
+        if artifact_path:
+            volumes.append(
+                {
+                    "name": "mutation-artifacts",
+                    "hostPath": {"path": artifact_path, "type": "DirectoryOrCreate"},
+                }
+            )
+            volume_mounts.append(
+                {"name": "mutation-artifacts", "mountPath": "/dms/artifacts"}
+            )
+        return {
+            "artifact_uri": artifact_uri,
+            "selected": selected,
+            "node_selector": node_selector,
+            "affinity": affinity,
+            "volumes": volumes,
+            "volume_mounts": volume_mounts,
+            "env": env,
+        }
+
+    def _timeout_seconds(self, operation: str, phase: str) -> int:
+        if operation == "data.sync":
+            if phase == "preview":
+                return self.settings.dm_sync_preview_timeout_seconds
+            return self.settings.dm_sync_execution_timeout_seconds
+        if operation == "data.rm":
+            if phase == "preview":
+                return self.settings.dm_rm_preview_timeout_seconds
+            return self.settings.dm_rm_execution_timeout_seconds
+        return self.settings.dm_scan_timeout_seconds
+
+    def _scan_context(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+        artifact_uri = _artifact_job_uri(self.settings.dm_artifact_base_uri, data_job["job_id"])
+        target = data_job.get("normalized_target") or plan.get("desired_state", {}).get("target") or {}
+        selected = _unique_selected_candidates(
+            (data_job.get("worker_pool") or {}).get("selected_candidates") or []
+        )
+        node_selector = {}
+        affinity = {}
+        node_names = [
+            item["node_name"] for item in selected if item.get("node_name")
+        ]
+        if len(node_names) == 1:
+            node_selector["kubernetes.io/hostname"] = node_names[0]
+        elif node_names:
+            affinity = _node_name_affinity(node_names)
+        target_mount = selected[0].get("mount_path") if selected else None
+        artifact_path = _file_uri_parent_path(artifact_uri)
+        volumes: list[dict[str, Any]] = []
+        volume_mounts: list[dict[str, Any]] = []
+        if target_mount:
+            volumes.append(
+                {
+                    "name": "scan-target",
+                    "hostPath": {"path": target_mount, "type": "Directory"},
+                }
+            )
+            volume_mounts.append(
+                {"name": "scan-target", "mountPath": "/dms/target", "readOnly": True}
+            )
+        if artifact_path:
+            volumes.append(
+                {
+                    "name": "scan-artifacts",
+                    "hostPath": {"path": artifact_path, "type": "DirectoryOrCreate"},
+                }
+            )
+            volume_mounts.append(
+                {"name": "scan-artifacts", "mountPath": "/dms/artifacts"}
+            )
+        return {
+            "artifact_uri": artifact_uri,
+            "target": target,
+            "selected": selected,
+            "node_selector": node_selector,
+            "affinity": affinity,
+            "volumes": volumes,
+            "volume_mounts": volume_mounts,
+            "env": [
+                {"name": "DMS_DATA_JOB_ID", "value": data_job["job_id"]},
+                {
+                    "name": "DMS_SCAN_STORAGE",
+                    "value": target.get("storage_name", data_job["storage_name"]),
+                },
+                {
+                    "name": "DMS_SCAN_PATH",
+                    "value": target.get("path", data_job.get("target") or "."),
+                },
+                {"name": "DMS_ARTIFACT_URI", "value": artifact_uri},
+            ],
+        }
+
+
+def volcano_adapter_from_settings(settings: Settings) -> StubVolcanoAdapter | KubernetesVolcanoAdapter:
+    if settings.dm_kubernetes_mode == "stub":
+        return StubVolcanoAdapter()
+    return KubernetesVolcanoAdapter.from_settings(settings)
+
+
+def _parse_volcano_ref(job_ref: str) -> tuple[str, str]:
+    if not job_ref.startswith("volcano://"):
+        raise DataManagementRuntimeError(f"invalid Volcano job ref: {job_ref}")
+    namespace, name = job_ref.removeprefix("volcano://").split("/", 1)
+    return namespace, name
+
+
+def _artifact_job_uri(base_uri: str, job_id: str) -> str:
+    return f"{base_uri.rstrip('/')}/{job_id}"
+
+
+def _file_uri_parent_path(uri: str) -> str | None:
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    return str(Path(parsed.path).parent)
+
+
+def _unique_selected_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None]] = set()
+    for candidate in candidates:
+        key = (candidate.get("node_name"), candidate.get("mount_path"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _node_name_affinity(node_names: list[str]) -> dict[str, Any]:
+    return {
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [
+                    {
+                        "matchExpressions": [
+                            {
+                                "key": "kubernetes.io/hostname",
+                                "operator": "In",
+                                "values": node_names,
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+
+
+def _pod_security_context(preflight: dict[str, Any]) -> dict[str, Any]:
+    mapping = preflight.get("identity_mapping") or {}
+    gid = mapping.get("gid")
+    if gid is None:
+        return {}
+    return {"fsGroup": int(gid), "runAsNonRoot": True}
+
+
+def _container_security_context(preflight: dict[str, Any]) -> dict[str, Any]:
+    mapping = preflight.get("identity_mapping") or {}
+    uid = mapping.get("uid")
+    gid = mapping.get("gid")
+    if uid is None or gid is None:
+        return {}
+    return {
+        "allowPrivilegeEscalation": False,
+        "runAsNonRoot": True,
+        "runAsUser": int(uid),
+        "runAsGroup": int(gid),
+    }
+
+
+def _kubernetes_name(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "-" for ch in value)
+    normalized = normalized.strip("-") or "dms-scan"
+    return normalized[:63].rstrip("-")
+
+
+def _operation_suffix(operation: str) -> str:
+    return {
+        "data.scan": "scan",
+        "data.sync": "sync",
+        "data.rm": "rm",
+    }.get(operation, "data")
+
+
 def _default_tool_for_operation(operation: str) -> str:
     return {
         "data.sync": "dsync",
         "data.rm": "drm",
         "data.scan": "dscan",
     }.get(operation, "mpifileutils")
+
+
+def _sync_flags(options: dict[str, Any]) -> str:
+    flag_specs = {
+        "delete": ("--delete", None),
+        "contents": ("--contents", None),
+        "direct": ("--direct", None),
+        "open_noatime": ("--open-noatime", None),
+        "quiet": ("--quiet", None),
+        "batch_files": ("--batch-files", "value"),
+        "bufsize": ("--bufsize", "value"),
+    }
+    return _render_option_flags(options, flag_specs)
+
+
+def _rm_flags(options: dict[str, Any], *, phase: str) -> str:
+    del phase
+    flag_specs = {
+        "stat": ("--stat", None),
+        "lite": ("--lite", None),
+        "quiet": ("--quiet", None),
+    }
+    return _render_option_flags(options, flag_specs)
+
+
+def _render_option_flags(
+    options: dict[str, Any], flag_specs: dict[str, tuple[str, str | None]]
+) -> str:
+    flags: list[str] = []
+    for key, (flag, mode) in flag_specs.items():
+        value = options.get(key)
+        if value is None or value is False:
+            continue
+        if mode == "value":
+            flags.extend([flag, shlex.quote(str(value))])
+        else:
+            flags.append(flag)
+    if not flags:
+        return ""
+    return " ".join(flags) + " "

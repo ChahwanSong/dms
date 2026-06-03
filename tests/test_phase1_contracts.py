@@ -9,13 +9,11 @@ from fastapi.testclient import TestClient
 from dms.adapters import (
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
-    StubVolcanoAdapter,
 )
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
 from dms.domain import (
-    DataJobState,
     FilesystemResourceKey,
     LifecycleState,
     StorageMappingInput,
@@ -23,7 +21,7 @@ from dms.domain import (
 from dms.migrations import migrate_all
 from dms.planner import Planner
 from dms.repositories import DmsRepository, ObservabilityRepository
-from dms.workers import DMWorkerRuntime, RMWorkerRuntime, confirm_data_job
+from dms.workers import RMWorkerRuntime
 
 
 @pytest.fixture()
@@ -346,9 +344,9 @@ def test_resource_key_and_storage_mapping_uniqueness(harness):
         )
 
 
-def test_data_job_confirm_state_stays_out_of_common_lifecycle(harness):
+def test_data_sync_rm_accept_phase20_preview_guarded_requests(harness):
     register_ready_storage_mapping(harness["repository"])
-    response = harness["client"].post(
+    sync_response = harness["client"].post(
         "/api/v1/data-management/sync",
         json={
             "requester_id": "user-1",
@@ -358,34 +356,32 @@ def test_data_job_confirm_state_stays_out_of_common_lifecycle(harness):
         },
         headers={"x-dms-actor": "api-client"},
     )
-    request_id = response.json()["request_id"]
-    Planner(harness["repository"]).run_once()
-    worker = DMWorkerRuntime(
-        repository=harness["repository"],
-        observability=harness["observability"],
-        volcano_adapter=StubVolcanoAdapter(),
-        worker_id="dm-c1",
+    rm_response = harness["client"].post(
+        "/api/v1/data-management/rm",
+        json={
+            "requester_id": "user-1",
+            "storage_name": "weka-a",
+            "target_path": "target",
+            "options": {"recursive": True},
+        },
+        headers={"x-dms-actor": "api-client"},
     )
 
-    assert worker.run_once() == 1
-    job = harness["repository"].get_data_job_by_request(request_id)
-    assert job["state"] == DataJobState.CONFIRM_PENDING.value
-    assert harness["repository"].get_request(request_id)["status"] == LifecycleState.BLOCKED.value
-    assert DataJobState.CONFIRM_PENDING.value not in {state.value for state in LifecycleState}
-    transitions = harness["repository"].list_state_transitions(request_id)
-    assert DataJobState.CONFIRM_PENDING.value not in {
-        transition["to_state"] for transition in transitions
+    assert sync_response.status_code == 202
+    assert sync_response.json()["operation"] == "data.sync"
+    assert sync_response.json()["source"] == {"storage_name": "weka-a", "path": "src"}
+    assert sync_response.json()["destination"] == {
+        "storage_name": "weka-a",
+        "path": "dst",
     }
-
-    confirm_data_job(harness["repository"], job["job_id"], actor="api-client")
-    assert harness["repository"].get_request(request_id)["status"] == LifecycleState.PLANNED.value
-    assert worker.run_once() == 1
-    assert harness["repository"].get_data_job(job["job_id"])["state"] == DataJobState.SUCCEEDED.value
-    assert harness["repository"].get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert rm_response.status_code == 202
+    assert rm_response.json()["operation"] == "data.rm"
+    assert rm_response.json()["target"] == {"storage_name": "weka-a", "path": "target"}
+    assert len(harness["repository"].list_requests(requester_id="user-1")) == 2
 
 
 def test_data_management_rejects_raw_options_and_path_traversal(harness):
-    raw_response = harness["client"].post(
+    rm_response = harness["client"].post(
         "/api/v1/data-management/rm",
         json={
             "requester_id": "user-1",
@@ -405,7 +401,7 @@ def test_data_management_rejects_raw_options_and_path_traversal(harness):
         headers={"x-dms-actor": "api-client"},
     )
 
-    assert raw_response.status_code == 422
+    assert rm_response.status_code == 422
     assert traversal_response.status_code == 422
 
 

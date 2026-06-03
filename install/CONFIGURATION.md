@@ -89,9 +89,53 @@ Worker runtime:
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
 | `DMS_WORKER_LEASE_SECONDS` | `300` | Planner/RM/DM worker lifecycle에서 사용하는 claim lease. RM/DM worker는 backend call 중 heartbeat로 이 lease를 주기적으로 갱신한다. |
-| `DMS_PREVIEW_TTL_SECONDS` | `86400` | Data Management preview TTL. DM live execution은 아직 production-enabled가 아니다. |
+| `DMS_PREVIEW_TTL_SECONDS` | `86400` | `sync`/`rm` preview가 `ConfirmPending`으로 유지되는 TTL. `scan`은 confirm 없이 read-only로 실행한다. |
 | `DMS_AGENT_REPORT_STALE_SECONDS` | `300` | Storage mapping readiness에 사용하는 agent report freshness window. |
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | DM readiness와 inventory aggregation에 사용하는 cluster name. |
+
+Data Management runtime:
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `DMS_DM_NAMESPACE` | `dms` | DM Worker가 VolcanoJob을 생성하고 조회할 namespace. |
+| `DMS_DM_JOB_IMAGE` | 설정 안 됨 | 승인된 mpifileutils image. live `scan`/`sync`/`rm`에는 필수이며 없으면 DM Worker가 fail-closed한다. |
+| `DMS_DM_JOB_IMAGE_REF` | 설정 안 됨 | mpifileutils repo tag/commit. data job result evidence에 남긴다. |
+| `DMS_DM_SERVICE_ACCOUNT` | `dms-dm-worker` | Volcano worker pod에 지정할 ServiceAccount. |
+| `DMS_DM_ARTIFACT_BASE_URI` | `file:///var/lib/dms/artifacts` | job별 stdout/stderr/report/summary URI의 base. 예: `file:///artifacts/dms/<job_id>/summary.json`. |
+| `DMS_DM_DEFAULT_PRIORITY` | `Mid` | public priority label 기본값. |
+| `DMS_DM_DEFAULT_MAX_NODES` | `1` | scan 기본 node 수. 운영 smoke는 tiny scan을 권장한다. |
+| `DMS_DM_MAX_NODES` | `4` | scan VolcanoJob이 사용할 수 있는 최대 node 수. |
+| `DMS_DM_SCAN_TIMEOUT_SECONDS` | `3600` | scan timeout. 초과하면 DM Worker가 VolcanoJob terminate 후 실패로 기록한다. |
+| `DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS` | `1800` | `sync` dry-run preview VolcanoJob timeout. |
+| `DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS` | `3600` | confirmed `sync` execution VolcanoJob timeout. |
+| `DMS_DM_RM_PREVIEW_TIMEOUT_SECONDS` | `1800` | `rm` dry-run preview VolcanoJob timeout. |
+| `DMS_DM_RM_EXECUTION_TIMEOUT_SECONDS` | `3600` | confirmed `rm` execution VolcanoJob timeout. |
+| `DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT` | `true` | confirm 시 preview fingerprint evidence를 요구할지 여부. |
+| `DMS_DM_SYNC_ALLOW_DELETE` | `false` | `sync` request의 `delete=true` 옵션을 운영 정책상 허용할지 여부. `false`이면 request validation에서 막는다. |
+| `DMS_DM_MAX_SYNC_NODES` | `2` | `sync` node/rank planning 상한. 현재 live `dsync` 경로는 same-node tiny job을 검증했다. |
+| `DMS_DM_MAX_RM_NODES` | `1` | `rm` node/rank planning 상한. |
+| `DMS_DM_NSYNC_ENABLED` | `true` | separated-role `nsync` 후보 selection 허용 여부. 현재 Kubernetes live adapter는 `nsync` execution을 fail-closed한다. |
+| `DMS_DM_NSYNC_SERVICE_PREFIX` | `dms-nsync` | 향후 `nsync` role Service 이름 prefix. |
+| `DMS_DM_MONITOR_POLL_SECONDS` | `5` | VolcanoJob 상태 polling interval. |
+| `DMS_DM_JOB_DELETE_ON_TERMINAL` | `false` | terminal VolcanoJob cleanup 정책. |
+| `DMS_DM_KUBERNETES_MODE` | `cluster` | `cluster`는 live Volcano adapter, `stub`은 로컬 테스트/dev 전용. 운영에서 `stub`을 사용하지 않는다. |
+
+Phase 20 기준 live Data Management operation은 read-only `scan`과 preview/confirm
+guard가 있는 `sync`/`rm`이다. `sync`와 `rm`은 반드시 dry-run preview를 먼저
+생성하고, explicit confirm과 TTL/fingerprint guard를 통과한 뒤에만 실제
+VolcanoJob을 실행한다. `nsync` separated-role live execution은 아직 운영 Done으로
+열지 않는다.
+
+`file://` artifact backend를 사용할 때 실제 결과 파일은
+`<DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/` 아래에 생성된다. `scan`은 job base
+아래에 `summary.json`, `dscan-report.json`, `stdout.log`, `stderr.log`를 쓴다.
+`sync`와 `rm`은 `<job_id>/preview/`와 `<job_id>/execution/` 아래에 각각
+`summary.json`, `stdout.log`, `stderr.log`, `command.json`을 쓴다. DB에는
+`data_jobs.artifact_uri`, phase별 artifact URI, fingerprint, 그리고 파싱된
+summary만 저장된다. 이 경로는 Volcano Pod가 mapped POSIX UID/GID로 쓸 수 있고
+DM Worker가 읽고 traverse할 수 있어야 한다. 사용자 target/source/destination
+directory가 `0750`처럼 private이면 artifact base를 그 하위에 두지 말고 별도
+DMS-managed mount/PVC/object prefix로 분리한다.
 
 Kubernetes 접근:
 

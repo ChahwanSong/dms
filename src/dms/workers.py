@@ -1,21 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
+import hashlib
+import json
+from pathlib import Path
 import threading
 from typing import Any
+from urllib.parse import urlparse
 
 from .adapters import (
     AdapterResult,
     BackendPreconditionError,
+    DataManagementRuntimeError,
     FilesystemBackendAdapter,
     KubernetesNamespaceQuotaAdapter,
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
-    StubVolcanoAdapter,
     zero_kubernetes_resource_quota_hard,
 )
 from .backend_registry import BackendAdapterRegistry
-from .domain import DataJobState, LifecycleState, OperationKind, ResourceKind, WorkerRole
+from .domain import (
+    DataJobState,
+    IdentityMappingStatus,
+    LifecycleState,
+    OperationKind,
+    ResourceKind,
+    WorkerRole,
+)
 from .repositories import DmsRepository, ObservabilityRepository, SchedulingBlocked, iso_at
 
 
@@ -644,7 +656,7 @@ def _rm_precondition_issue(operation: str, message: str) -> dict[str, Any] | Non
 class DMWorkerRuntime:
     repository: DmsRepository
     observability: ObservabilityRepository
-    volcano_adapter: StubVolcanoAdapter
+    volcano_adapter: Any
     worker_id: str
     lease_seconds: int = 300
     preview_ttl_seconds: int = 24 * 60 * 60
@@ -693,17 +705,121 @@ class DMWorkerRuntime:
     def _run_preview_phase(
         self, plan: dict[str, Any], run_id: str, job: dict[str, Any]
     ) -> None:
-        selected_tool = self._select_tool(job["operation"])
+        preflight = self._mutation_preflight(plan, job)
+        selected_tool = preflight.get("selected_tool") or self._select_tool(job["operation"])
         self.repository.update_data_job(
             job["job_id"],
             state=DataJobState.PREFLIGHT_RUNNING,
             selected_tool=selected_tool,
         )
+        self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+        if preflight["status"] != "Ready":
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.PREFLIGHT_FAILED,
+                terminal_status=LifecycleState.REJECTED,
+                message="data mutation preflight rejected request",
+                error_category="data_management_preflight",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": preflight.get("reason"),
+                    "preflight_result": preflight,
+                },
+            )
+            return
+        self.repository.update_data_job(
+            job["job_id"],
+            worker_pool={
+                **(job.get("worker_pool") or {}),
+                **(preflight.get("worker_pool") or {}),
+            },
+        )
+        job = self.repository.get_data_job(job["job_id"])
+        runtime_preflight = _verify_data_runtime_preflight(
+            self.volcano_adapter, plan, job, preflight, phase="preview"
+        )
+        preflight = {**preflight, "runtime_permission_check": runtime_preflight}
+        if runtime_preflight.get("status") != "Ready":
+            preflight = {
+                **preflight,
+                "status": "Rejected",
+                "reason": runtime_preflight.get("reason") or "runtime_preflight_failed",
+            }
+            self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.PREFLIGHT_FAILED,
+                terminal_status=LifecycleState.REJECTED,
+                message="data mutation runtime preflight rejected request",
+                error_category="data_management_preflight",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": preflight.get("reason"),
+                    "preflight_result": preflight,
+                },
+            )
+            return
+        self.repository.update_data_job(job["job_id"], preflight_result=preflight)
         self.repository.update_data_job(job["job_id"], state=DataJobState.PREVIEW_RUNNING)
+        try:
+            adapter_result = self.volcano_adapter.create_job(
+                plan, self.repository.get_data_job(job["job_id"])
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.FAILED,
+                terminal_status=LifecycleState.FAILED,
+                message=f"data mutation preview Volcano submission failed: {exc}",
+                error_category="data_management_preview",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": "preview_volcano_submission_failed",
+                    "message": str(exc),
+                },
+            )
+            return
+        volcano_job_ref = _volcano_job_ref(adapter_result)
+        if volcano_job_ref:
+            self.repository.update_data_job(
+                job["job_id"], volcano_job_ref={"preview": volcano_job_ref}
+            )
+        if adapter_result.observed_state.get("phase") != "Succeeded":
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.FAILED,
+                terminal_status=LifecycleState.FAILED,
+                message=adapter_result.message,
+                error_category="data_management_preview",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": "data_job_preview_failed",
+                    "observed_state": adapter_result.observed_state,
+                    "volcano_job_ref": volcano_job_ref,
+                },
+            )
+            return
+        result_summary = _mutation_result_summary(
+            plan=plan,
+            job=self.repository.get_data_job(job["job_id"]),
+            adapter_result=adapter_result,
+            preflight=preflight,
+            phase="preview",
+        )
         self.repository.update_data_job(
             job["job_id"],
             state=DataJobState.PREVIEW_SUCCEEDED,
-            artifact_uri=f"stub://preview/{job['job_id']}",
+            artifact_uri=adapter_result.artifact_uri,
+            result_summary=result_summary,
+            log_uri=result_summary.get("preview", {}).get("stdout_uri"),
         )
         self.repository.update_data_job(
             job["job_id"],
@@ -731,32 +847,158 @@ class DMWorkerRuntime:
     def _run_execution_phase(
         self, plan: dict[str, Any], run_id: str, job: dict[str, Any]
     ) -> None:
+        if job["operation"] != OperationKind.DATA_SCAN.value:
+            self._run_mutation_execution_phase(plan, run_id, job)
+            return
         selected_tool = job["selected_tool"] or self._select_tool(job["operation"])
         self.repository.update_data_job(
             job["job_id"],
             state=DataJobState.PREFLIGHT_RUNNING,
             selected_tool=selected_tool,
         )
+        job = self.repository.get_data_job(job["job_id"])
+        preflight = self._scan_preflight(plan, job)
+        self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+        if preflight["status"] != "Ready":
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.PREFLIGHT_FAILED,
+                terminal_status=LifecycleState.REJECTED,
+                message="data scan preflight rejected request",
+                error_category="data_management_preflight",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": preflight.get("reason"),
+                    "preflight_result": preflight,
+                },
+            )
+            return
+        self.repository.update_data_job(
+            job["job_id"],
+            worker_pool={
+                **(job.get("worker_pool") or {}),
+                "selected_candidates": preflight.get("selected_candidates", []),
+            },
+        )
+        job = self.repository.get_data_job(job["job_id"])
+        runtime_preflight = _verify_scan_runtime_preflight(
+            self.volcano_adapter, plan, job, preflight
+        )
+        preflight = {**preflight, "runtime_permission_check": runtime_preflight}
+        if runtime_preflight.get("status") != "Ready":
+            preflight = {
+                **preflight,
+                "status": "Rejected",
+                "reason": runtime_preflight.get("reason") or "runtime_preflight_failed",
+            }
+            self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.PREFLIGHT_FAILED,
+                terminal_status=LifecycleState.REJECTED,
+                message="data scan runtime preflight rejected request",
+                error_category="data_management_preflight",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": preflight.get("reason"),
+                    "preflight_result": preflight,
+                },
+            )
+            return
+        self.repository.update_data_job(job["job_id"], preflight_result=preflight)
         self.repository.update_data_job(job["job_id"], state=DataJobState.SCHEDULED)
         self.repository.update_data_job(job["job_id"], state=DataJobState.RUNNING)
-        adapter_result = self.volcano_adapter.create_job(plan, self.repository.get_data_job(job["job_id"]))
+        try:
+            adapter_result = self.volcano_adapter.create_job(
+                plan, self.repository.get_data_job(job["job_id"])
+            )
+        except Exception as exc:  # noqa: BLE001 - runtime failure must close the data job.
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.FAILED,
+                terminal_status=LifecycleState.FAILED,
+                message=f"data scan Volcano submission failed: {exc}",
+                error_category="data_management_volcano",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": "volcano_submission_failed",
+                    "message": str(exc),
+                },
+            )
+            return
+        volcano_job_ref = _volcano_job_ref(adapter_result)
+        if volcano_job_ref:
+            self.repository.update_data_job(job["job_id"], volcano_job_ref=volcano_job_ref)
         self.repository.update_run_state(
             run_id,
             LifecycleState.VERIFYING,
             reason="dm worker verifying Volcano job result",
             actor=self.worker_id,
         )
+        observed_phase = adapter_result.observed_state.get("phase")
+        if observed_phase != "Succeeded":
+            timed_out = observed_phase == "TimedOut"
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.TIMED_OUT if timed_out else DataJobState.FAILED,
+                terminal_status=LifecycleState.TIMED_OUT if timed_out else LifecycleState.FAILED,
+                message=adapter_result.message,
+                error_category="data_management_volcano",
+                summary={
+                    "backend_side_effect": True,
+                    "reason": "volcano_job_timed_out" if timed_out else "volcano_job_not_succeeded",
+                    "observed_state": adapter_result.observed_state,
+                    "volcano_job_ref": volcano_job_ref or {},
+                },
+            )
+            return
+        try:
+            result_summary = _scan_result_summary(
+                plan=plan,
+                job=self.repository.get_data_job(job["job_id"]),
+                adapter_result=adapter_result,
+                preflight=preflight,
+            )
+        except DataManagementRuntimeError as exc:
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.FAILED,
+                terminal_status=LifecycleState.FAILED,
+                message=f"data scan artifact parsing failed: {exc}",
+                error_category="data_management_artifact",
+                summary={
+                    "backend_side_effect": True,
+                    "reason": "data_job_artifact_parse_failed",
+                    "message": str(exc),
+                    "artifact_uri": adapter_result.artifact_uri,
+                    "observed_state": adapter_result.observed_state,
+                    "volcano_job_ref": volcano_job_ref or {},
+                },
+            )
+            return
         self.repository.update_data_job(
             job["job_id"],
             state=DataJobState.SUCCEEDED,
             artifact_uri=adapter_result.artifact_uri,
+            result_summary=result_summary,
+            log_uri=result_summary.get("stdout_uri"),
         )
         self.repository.upsert_resource(
             resource_kind=ResourceKind.DATA_JOB.value,
             resource_key=job["job_id"],
             desired_state=plan["desired_state"],
             applied_state=adapter_result.applied_state,
-            observed_state=adapter_result.observed_state,
+            observed_state={**adapter_result.observed_state, "result_summary": result_summary},
             status=LifecycleState.SUCCEEDED.value,
         )
         self.repository.complete_result(
@@ -765,7 +1007,11 @@ class DMWorkerRuntime:
             run_id=run_id,
             terminal_status=LifecycleState.SUCCEEDED,
             message=adapter_result.message,
-            verification_summary=adapter_result.observed_state,
+            verification_summary={
+                **adapter_result.observed_state,
+                "preflight_result": preflight,
+                "result_summary": result_summary,
+            },
             actor=self.worker_id,
         )
         self.observability.safe_record_event(
@@ -776,6 +1022,514 @@ class DMWorkerRuntime:
             payload={"job_id": job["job_id"], "plan_id": plan["plan_id"]},
             correlation_id=plan["request_id"],
         )
+
+    def _run_mutation_execution_phase(
+        self, plan: dict[str, Any], run_id: str, job: dict[str, Any]
+    ) -> None:
+        selected_tool = job["selected_tool"] or self._select_tool(job["operation"])
+        self.repository.update_data_job(
+            job["job_id"], state=DataJobState.CONFIRMED, selected_tool=selected_tool
+        )
+        preflight = self._mutation_preflight(plan, job)
+        preflight = {**preflight, "execution_recheck": True}
+        if preflight["status"] != "Ready":
+            self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.PREFLIGHT_FAILED,
+                terminal_status=LifecycleState.REJECTED,
+                message="confirmed data mutation preflight rejected request",
+                error_category="data_management_preflight",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": preflight.get("reason"),
+                    "preflight_result": preflight,
+                },
+            )
+            return
+        self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+        job = self.repository.get_data_job(job["job_id"])
+        runtime_preflight = _verify_data_runtime_preflight(
+            self.volcano_adapter, plan, job, preflight, phase="execution"
+        )
+        preflight = {**preflight, "runtime_permission_check_execution": runtime_preflight}
+        if runtime_preflight.get("status") != "Ready":
+            self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.PREFLIGHT_FAILED,
+                terminal_status=LifecycleState.REJECTED,
+                message="confirmed data mutation runtime preflight rejected request",
+                error_category="data_management_preflight",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": runtime_preflight.get("reason"),
+                    "preflight_result": preflight,
+                },
+            )
+            return
+        self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+        self.repository.update_data_job(job["job_id"], state=DataJobState.SCHEDULED)
+        self.repository.update_data_job(job["job_id"], state=DataJobState.RUNNING)
+        try:
+            adapter_result = self.volcano_adapter.create_job(
+                plan, self.repository.get_data_job(job["job_id"])
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.FAILED,
+                terminal_status=LifecycleState.FAILED,
+                message=f"data mutation Volcano submission failed: {exc}",
+                error_category="data_management_mutation",
+                summary={
+                    "backend_side_effect": False,
+                    "reason": "mutation_volcano_submission_failed",
+                    "message": str(exc),
+                },
+            )
+            return
+        volcano_job_ref = _volcano_job_ref(adapter_result)
+        existing_refs = (job.get("volcano_job_ref") or {}) if isinstance(job.get("volcano_job_ref"), dict) else {}
+        if volcano_job_ref:
+            self.repository.update_data_job(
+                job["job_id"],
+                volcano_job_ref={**existing_refs, "execution": volcano_job_ref},
+            )
+        observed_phase = adapter_result.observed_state.get("phase")
+        if observed_phase != "Succeeded":
+            timed_out = observed_phase == "TimedOut"
+            self._fail_data_job(
+                plan,
+                run_id,
+                job,
+                state=DataJobState.TIMED_OUT if timed_out else DataJobState.FAILED,
+                terminal_status=LifecycleState.TIMED_OUT if timed_out else LifecycleState.FAILED,
+                message=adapter_result.message,
+                error_category="data_management_mutation",
+                summary={
+                    "backend_side_effect": True,
+                    "reason": "data_job_mutation_timed_out" if timed_out else "data_job_mutation_failed",
+                    "observed_state": adapter_result.observed_state,
+                    "volcano_job_ref": volcano_job_ref,
+                },
+            )
+            return
+        result_summary = _mutation_result_summary(
+            plan=plan,
+            job=self.repository.get_data_job(job["job_id"]),
+            adapter_result=adapter_result,
+            preflight=preflight,
+            phase="execution",
+        )
+        self.repository.update_data_job(
+            job["job_id"],
+            state=DataJobState.SUCCEEDED,
+            artifact_uri=adapter_result.artifact_uri,
+            result_summary=result_summary,
+            log_uri=result_summary.get("execution", {}).get("stdout_uri"),
+        )
+        self.repository.upsert_resource(
+            resource_kind=ResourceKind.DATA_JOB.value,
+            resource_key=job["job_id"],
+            desired_state=plan["desired_state"],
+            applied_state=adapter_result.applied_state,
+            observed_state={**adapter_result.observed_state, "result_summary": result_summary},
+            status=LifecycleState.SUCCEEDED.value,
+        )
+        self.repository.complete_result(
+            request_id=plan["request_id"],
+            plan_id=plan["plan_id"],
+            run_id=run_id,
+            terminal_status=LifecycleState.SUCCEEDED,
+            message=adapter_result.message,
+            verification_summary={
+                **adapter_result.observed_state,
+                "preflight_result": preflight,
+                "result_summary": result_summary,
+            },
+            actor=self.worker_id,
+        )
+        self.observability.safe_record_event(
+            component="dm-worker",
+            severity="INFO",
+            event_type="data_job_mutation_completed",
+            message=adapter_result.message,
+            payload={"job_id": job["job_id"], "plan_id": plan["plan_id"]},
+            correlation_id=plan["request_id"],
+        )
+
+    def _fail_data_job(
+        self,
+        plan: dict[str, Any],
+        run_id: str,
+        job: dict[str, Any],
+        *,
+        state: DataJobState,
+        terminal_status: LifecycleState,
+        message: str,
+        error_category: str,
+        summary: dict[str, Any],
+    ) -> None:
+        self.repository.update_data_job(
+            job["job_id"],
+            state=state,
+            result_summary=summary,
+        )
+        self.repository.upsert_resource(
+            resource_kind=ResourceKind.DATA_JOB.value,
+            resource_key=job["job_id"],
+            desired_state=plan["desired_state"],
+            applied_state={"backend_side_effect": summary.get("backend_side_effect", False)},
+            observed_state=summary,
+            status=terminal_status.value,
+        )
+        self.repository.complete_result(
+            request_id=plan["request_id"],
+            plan_id=plan["plan_id"],
+            run_id=run_id,
+            terminal_status=terminal_status,
+            message=message,
+            verification_summary=summary,
+            error_category=error_category,
+            actor=self.worker_id,
+        )
+        self.observability.safe_record_event(
+            component="dm-worker",
+            severity="WARN",
+            event_type="data_job_failed",
+            message=message,
+            payload={"job_id": job["job_id"], "plan_id": plan["plan_id"], **summary},
+            correlation_id=plan["request_id"],
+        )
+
+    def _scan_preflight(self, plan: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+        request = self.repository.get_request(job["request_id"])
+        mappings = self.repository.list_identity_mappings(
+            requester_id=request["requester_id"],
+            status=IdentityMappingStatus.ACTIVE.value,
+            limit=1,
+        )
+        if not mappings:
+            return {
+                "status": "Rejected",
+                "reason": "missing_active_identity_mapping",
+                "requester_id": request["requester_id"],
+                "selected_candidates": [],
+            }
+        mapping = mappings[0]
+        target = job.get("normalized_target") or {
+            "storage_name": job["storage_name"],
+            "path": job.get("target"),
+        }
+        reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
+        selected: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        candidate_keys = {
+            (candidate.get("cluster_name"), candidate.get("node_name"))
+            for candidate in (job.get("worker_pool") or {}).get("candidates", [])
+            if candidate.get("cluster_name") and candidate.get("node_name")
+        }
+        for report in reports:
+            if report["worker_role"] != WorkerRole.DM.value:
+                continue
+            key = (report["cluster_name"], report["node_name"])
+            if candidate_keys and key not in candidate_keys:
+                continue
+            report_evidence = report.get("report") or {}
+            reason = _scan_candidate_rejection_reason(
+                report_evidence,
+                storage_name=job["storage_name"],
+                tool="dscan",
+                posix_username=mapping["posix_username"],
+            )
+            candidate = {
+                "cluster_name": report["cluster_name"],
+                "node_name": report["node_name"],
+                "report_id": report["report_id"],
+                "reported_at": report["reported_at"],
+            }
+            ready_mount = _ready_mount(report_evidence.get("mounts") or [], job["storage_name"])
+            if ready_mount:
+                candidate["mount_path"] = ready_mount.get("mount_path") or ready_mount.get("path")
+            if reason:
+                rejected.append({**candidate, "reason": reason})
+                continue
+            selected.append(candidate)
+        if not selected:
+            return {
+                "status": "Rejected",
+                "reason": "no_ready_dm_candidate",
+                "requester_id": request["requester_id"],
+                "identity_mapping": _identity_mapping_summary(mapping),
+                "target": target,
+                "rejected_candidates": rejected,
+                "selected_candidates": [],
+            }
+        return {
+            "status": "Ready",
+            "reason": "scan_preflight_passed",
+            "requester_id": request["requester_id"],
+            "identity_mapping": _identity_mapping_summary(mapping),
+            "target": target,
+            "selected_candidates": selected,
+            "rejected_candidates": rejected,
+            "posix_permission_check": {
+                "source": "agent-inventory",
+                "uid": mapping["uid"],
+                "gid": mapping["gid"],
+                "groups": mapping["groups"],
+                "required": ["execute_ancestors", "read_target", "execute_target"],
+                "result": "agent_evidence_ready",
+            },
+        }
+
+    def _mutation_preflight(self, plan: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+        request = self.repository.get_request(job["request_id"])
+        mappings = self.repository.list_identity_mappings(
+            requester_id=request["requester_id"],
+            status=IdentityMappingStatus.ACTIVE.value,
+            limit=1,
+        )
+        if not mappings:
+            return {
+                "status": "Rejected",
+                "reason": "missing_active_identity_mapping",
+                "requester_id": request["requester_id"],
+                "selected_candidates": [],
+            }
+        mapping = mappings[0]
+        if job["operation"] == OperationKind.DATA_SYNC.value:
+            return self._sync_preflight(plan, job, request, mapping)
+        if job["operation"] == OperationKind.DATA_RM.value:
+            return self._rm_preflight(plan, job, request, mapping)
+        return {
+            "status": "Rejected",
+            "reason": "unsupported_data_mutation_operation",
+            "operation": job["operation"],
+        }
+
+    def _sync_preflight(
+        self,
+        plan: dict[str, Any],
+        job: dict[str, Any],
+        request: dict[str, Any],
+        mapping: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = job.get("normalized_target") or plan["desired_state"]
+        source = normalized.get("source") or plan["desired_state"].get("source") or {}
+        destination = (
+            normalized.get("destination") or plan["desired_state"].get("destination") or {}
+        )
+        reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
+        dsync_candidates: list[dict[str, Any]] = []
+        source_candidates: list[dict[str, Any]] = []
+        destination_candidates: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for report in reports:
+            if report["worker_role"] != WorkerRole.DM.value:
+                continue
+            evidence = report.get("report") or {}
+            candidate = {
+                "cluster_name": report["cluster_name"],
+                "node_name": report["node_name"],
+                "report_id": report["report_id"],
+                "reported_at": report["reported_at"],
+            }
+            source_mount = _ready_mount(
+                evidence.get("mounts") or [], source.get("storage_name")
+            )
+            destination_mount = _ready_mount(
+                evidence.get("mounts") or [], destination.get("storage_name")
+            )
+            identity_ready = _identity_ready(
+                evidence.get("identity_evidence") or {}, mapping["posix_username"]
+            )
+            credentials_ready = _any_ready(
+                evidence.get("credentials") or [], ready_keys=("status", "healthy")
+            )
+            network_ready = _any_ready(
+                evidence.get("networks") or [], ready_keys=("status", "reachable")
+            )
+            if source_mount and _tool_ready(evidence.get("tools") or [], "nsync") and identity_ready:
+                source_candidates.append(
+                    {
+                        **candidate,
+                        "mount_path": source_mount.get("mount_path") or source_mount.get("path"),
+                    }
+                )
+            if (
+                destination_mount
+                and _tool_ready(evidence.get("tools") or [], "nsync")
+                and identity_ready
+            ):
+                destination_candidates.append(
+                    {
+                        **candidate,
+                        "mount_path": destination_mount.get("mount_path")
+                        or destination_mount.get("path"),
+                    }
+                )
+            reason = _sync_dsync_candidate_rejection_reason(
+                evidence,
+                source_storage=source.get("storage_name"),
+                destination_storage=destination.get("storage_name"),
+                posix_username=mapping["posix_username"],
+            )
+            if reason:
+                rejected.append({**candidate, "reason": reason})
+                continue
+            if not credentials_ready:
+                rejected.append({**candidate, "reason": "credential_not_ready"})
+                continue
+            if not network_ready:
+                rejected.append({**candidate, "reason": "network_not_ready"})
+                continue
+            dsync_candidates.append(
+                {
+                    **candidate,
+                    "source_mount_path": source_mount.get("mount_path") or source_mount.get("path"),
+                    "destination_mount_path": destination_mount.get("mount_path")
+                    or destination_mount.get("path"),
+                }
+            )
+        if dsync_candidates:
+            selected = dsync_candidates[:1]
+            return {
+                "status": "Ready",
+                "reason": "sync_preflight_passed",
+                "requester_id": request["requester_id"],
+                "identity_mapping": _identity_mapping_summary(mapping),
+                "source": source,
+                "destination": destination,
+                "selected_tool": "dsync",
+                "tool_selection_reason": "same_node_source_destination_mount",
+                "selected_candidates": selected,
+                "rejected_candidates": rejected,
+                "worker_pool": {"selected_candidates": selected},
+                "posix_permission_check": {
+                    "source": "agent-inventory",
+                    "uid": mapping["uid"],
+                    "gid": mapping["gid"],
+                    "groups": mapping["groups"],
+                    "required": [
+                        "read_source",
+                        "execute_source",
+                        "write_destination_parent",
+                        "execute_destination_parent",
+                    ],
+                    "result": "agent_evidence_ready",
+                },
+            }
+        if source_candidates and destination_candidates:
+            return {
+                "status": "Ready",
+                "reason": "sync_preflight_passed",
+                "requester_id": request["requester_id"],
+                "identity_mapping": _identity_mapping_summary(mapping),
+                "source": source,
+                "destination": destination,
+                "selected_tool": "nsync",
+                "tool_selection_reason": "separated_role_source_destination_mounts",
+                "source_candidates": source_candidates,
+                "destination_candidates": destination_candidates,
+                "selected_candidates": [source_candidates[0], destination_candidates[0]],
+                "rejected_candidates": rejected,
+                "worker_pool": {
+                    "source_candidates": source_candidates,
+                    "destination_candidates": destination_candidates,
+                    "selected_candidates": [source_candidates[0], destination_candidates[0]],
+                },
+            }
+        return {
+            "status": "Rejected",
+            "reason": "no_ready_sync_candidate",
+            "requester_id": request["requester_id"],
+            "identity_mapping": _identity_mapping_summary(mapping),
+            "source": source,
+            "destination": destination,
+            "selected_candidates": [],
+            "rejected_candidates": rejected,
+        }
+
+    def _rm_preflight(
+        self,
+        plan: dict[str, Any],
+        job: dict[str, Any],
+        request: dict[str, Any],
+        mapping: dict[str, Any],
+    ) -> dict[str, Any]:
+        target = job.get("normalized_target") or plan["desired_state"].get("target") or {}
+        reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
+        selected: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for report in reports:
+            if report["worker_role"] != WorkerRole.DM.value:
+                continue
+            evidence = report.get("report") or {}
+            reason = _scan_candidate_rejection_reason(
+                evidence,
+                storage_name=target.get("storage_name") or job["storage_name"],
+                tool="drm",
+                posix_username=mapping["posix_username"],
+            )
+            candidate = {
+                "cluster_name": report["cluster_name"],
+                "node_name": report["node_name"],
+                "report_id": report["report_id"],
+                "reported_at": report["reported_at"],
+            }
+            ready_mount = _ready_mount(
+                evidence.get("mounts") or [], target.get("storage_name") or job["storage_name"]
+            )
+            if ready_mount:
+                candidate["mount_path"] = ready_mount.get("mount_path") or ready_mount.get("path")
+            if reason:
+                rejected.append({**candidate, "reason": reason})
+                continue
+            selected.append(candidate)
+        if not selected:
+            return {
+                "status": "Rejected",
+                "reason": "no_ready_rm_candidate",
+                "requester_id": request["requester_id"],
+                "identity_mapping": _identity_mapping_summary(mapping),
+                "target": target,
+                "selected_candidates": [],
+                "rejected_candidates": rejected,
+            }
+        selected = selected[:1]
+        return {
+            "status": "Ready",
+            "reason": "rm_preflight_passed",
+            "requester_id": request["requester_id"],
+            "identity_mapping": _identity_mapping_summary(mapping),
+            "target": target,
+            "selected_tool": "drm",
+            "tool_selection_reason": "target_mount_with_drm",
+            "selected_candidates": selected,
+            "rejected_candidates": rejected,
+            "worker_pool": {"selected_candidates": selected},
+            "posix_permission_check": {
+                "source": "agent-inventory",
+                "uid": mapping["uid"],
+                "gid": mapping["gid"],
+                "groups": mapping["groups"],
+                "required": [
+                    "read_target",
+                    "execute_target",
+                    "write_parent",
+                    "execute_parent",
+                ],
+                "result": "agent_evidence_ready",
+            },
+        }
 
     @staticmethod
     def _requires_preview(plan: dict[str, Any]) -> bool:
@@ -793,13 +1547,399 @@ class DMWorkerRuntime:
         }[operation]
 
 
-def confirm_data_job(repository: DmsRepository, job_id: str, actor: str) -> None:
+def _scan_candidate_rejection_reason(
+    report: dict[str, Any],
+    *,
+    storage_name: str,
+    tool: str,
+    posix_username: str,
+) -> str | None:
+    if not _mount_ready(report.get("mounts") or [], storage_name):
+        return "missing_target_mount"
+    if not _tool_ready(report.get("tools") or [], tool):
+        return f"missing_{tool}_tool"
+    if not _any_ready(report.get("credentials") or [], ready_keys=("status", "healthy")):
+        return "credential_not_ready"
+    if not _any_ready(report.get("networks") or [], ready_keys=("status", "reachable")):
+        return "network_not_ready"
+    if not _identity_ready(report.get("identity_evidence") or {}, posix_username):
+        return "identity_not_ready_on_node"
+    return None
+
+
+def _sync_dsync_candidate_rejection_reason(
+    report: dict[str, Any],
+    *,
+    source_storage: str,
+    destination_storage: str,
+    posix_username: str,
+) -> str | None:
+    if not _mount_ready(report.get("mounts") or [], source_storage):
+        return "missing_source_mount"
+    if not _mount_ready(report.get("mounts") or [], destination_storage):
+        return "missing_destination_mount"
+    if not _tool_ready(report.get("tools") or [], "dsync"):
+        return "missing_dsync_tool"
+    if not _any_ready(report.get("credentials") or [], ready_keys=("status", "healthy")):
+        return "credential_not_ready"
+    if not _any_ready(report.get("networks") or [], ready_keys=("status", "reachable")):
+        return "network_not_ready"
+    if not _identity_ready(report.get("identity_evidence") or {}, posix_username):
+        return "identity_not_ready_on_node"
+    return None
+
+
+def _mount_ready(mounts: list[dict[str, Any]], storage_name: str) -> bool:
+    return _ready_mount(mounts, storage_name) is not None
+
+
+def _ready_mount(mounts: list[dict[str, Any]], storage_name: str) -> dict[str, Any] | None:
+    for mount in mounts:
+        if mount.get("storage_name") != storage_name:
+            continue
+        if mount.get("status") == "Ready":
+            return mount
+        if mount.get("readable") is True:
+            return mount
+    return None
+
+
+def _tool_ready(tools: list[Any], tool_name: str) -> bool:
+    for tool in tools:
+        if isinstance(tool, str):
+            if tool == tool_name:
+                return True
+            continue
+        if not isinstance(tool, dict) or tool.get("name") != tool_name:
+            continue
+        if tool.get("status") == "Ready" or tool.get("healthy") is True or tool.get("path"):
+            return True
+    return False
+
+
+def _any_ready(items: list[dict[str, Any]], *, ready_keys: tuple[str, ...]) -> bool:
+    for item in items:
+        for key in ready_keys:
+            value = item.get(key)
+            if value == "Ready" or value is True:
+                return True
+    return False
+
+
+def _identity_ready(identity_evidence: dict[str, Any], posix_username: str) -> bool:
+    for user in identity_evidence.get("users") or []:
+        if user.get("username") != posix_username:
+            continue
+        return user.get("status") == "Ready" or user.get("uid") is not None
+    return False
+
+
+def _identity_mapping_summary(mapping: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "requester_id": mapping["requester_id"],
+        "identity_provider": mapping["identity_provider"],
+        "posix_username": mapping["posix_username"],
+        "uid": mapping["uid"],
+        "gid": mapping["gid"],
+        "groups": mapping["groups"],
+        "status": mapping["status"],
+        "verified_at": mapping.get("verified_at"),
+    }
+
+
+def _volcano_job_ref(adapter_result: AdapterResult) -> dict[str, Any]:
+    ref = adapter_result.applied_state.get("job_ref") or adapter_result.observed_state.get("job_ref")
+    if not ref:
+        return {}
+    return {
+        "job_ref": ref,
+        "adapter": adapter_result.applied_state.get("adapter")
+        or adapter_result.observed_state.get("adapter"),
+    }
+
+
+def _verify_scan_runtime_preflight(
+    volcano_adapter: Any,
+    plan: dict[str, Any],
+    job: dict[str, Any],
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    verifier = getattr(volcano_adapter, "verify_scan_preflight", None)
+    if verifier is None:
+        return {
+            "status": "Ready",
+            "source": "adapter-unavailable",
+            "reason": "runtime_preflight_not_supported",
+        }
+    try:
+        result = verifier(plan, job, preflight)
+    except Exception as exc:  # noqa: BLE001 - preflight must fail closed.
+        return {
+            "status": "Rejected",
+            "source": type(volcano_adapter).__name__,
+            "reason": "runtime_preflight_failed",
+            "message": str(exc),
+        }
+    if not isinstance(result, dict):
+        return {
+            "status": "Rejected",
+            "source": type(volcano_adapter).__name__,
+            "reason": "runtime_preflight_invalid_result",
+        }
+    return result
+
+
+def _verify_data_runtime_preflight(
+    volcano_adapter: Any,
+    plan: dict[str, Any],
+    job: dict[str, Any],
+    preflight: dict[str, Any],
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    verifier = getattr(volcano_adapter, "verify_data_preflight", None)
+    if verifier is None:
+        if job["operation"] == OperationKind.DATA_SCAN.value:
+            return _verify_scan_runtime_preflight(volcano_adapter, plan, job, preflight)
+        return {
+            "status": "Ready",
+            "source": "adapter-unavailable",
+            "reason": "runtime_preflight_not_supported",
+        }
+    try:
+        result = verifier(plan, job, preflight, phase=phase)
+    except Exception as exc:  # noqa: BLE001 - preflight must fail closed.
+        return {
+            "status": "Rejected",
+            "source": type(volcano_adapter).__name__,
+            "reason": "runtime_preflight_failed",
+            "message": str(exc),
+        }
+    if not isinstance(result, dict):
+        return {
+            "status": "Rejected",
+            "source": type(volcano_adapter).__name__,
+            "reason": "runtime_preflight_invalid_result",
+        }
+    return result
+
+
+def _scan_result_summary(
+    *,
+    plan: dict[str, Any],
+    job: dict[str, Any],
+    adapter_result: AdapterResult,
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    artifact_uri = adapter_result.artifact_uri
+    try:
+        parsed_summary = _scan_artifact_summary(artifact_uri)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise DataManagementRuntimeError(
+            f"summary artifact is missing or invalid for {artifact_uri}: {exc}"
+        ) from exc
+    if _artifact_requires_local_parse(artifact_uri) and parsed_summary is None:
+        raise DataManagementRuntimeError(
+            f"summary artifact is missing or invalid for {artifact_uri}"
+        )
+    observed_summary = parsed_summary or adapter_result.observed_state.get("summary") or {}
+    target = job.get("normalized_target") or plan["desired_state"].get("target") or {}
+    return {
+        "status": "Succeeded",
+        "tool": job.get("selected_tool") or "dscan",
+        "target": target,
+        "artifact_base_uri": artifact_uri,
+        "stdout_uri": _artifact_child_uri(artifact_uri, "stdout.log"),
+        "stderr_uri": _artifact_child_uri(artifact_uri, "stderr.log"),
+        "report_uri": _artifact_child_uri(artifact_uri, "dscan-report.json"),
+        "summary_uri": _artifact_child_uri(artifact_uri, "summary.json"),
+        "summary": {
+            "file_count": int(observed_summary.get("file_count", 0)),
+            "directory_count": int(observed_summary.get("directory_count", 0)),
+            "total_bytes": int(observed_summary.get("total_bytes", 0)),
+            "error_count": int(observed_summary.get("error_count", 0)),
+            "scan_root": target.get("path") or job.get("target"),
+        },
+        "summary_source": "artifact" if parsed_summary else "adapter_observed_state",
+        "preflight_status": preflight.get("status"),
+        "volcano_job_ref": _volcano_job_ref(adapter_result),
+    }
+
+
+def _mutation_result_summary(
+    *,
+    plan: dict[str, Any],
+    job: dict[str, Any],
+    adapter_result: AdapterResult,
+    preflight: dict[str, Any],
+    phase: str,
+) -> dict[str, Any]:
+    previous = job.get("result_summary") or {}
+    artifact_uri = adapter_result.artifact_uri
+    parsed_summary = _mutation_artifact_summary(artifact_uri, phase)
+    observed_summary = parsed_summary or adapter_result.observed_state.get("summary") or {}
+    phase_base_uri = _artifact_child_uri(artifact_uri, phase)
+    phase_entry = {
+        "state": "Succeeded",
+        "artifact_uri": phase_base_uri,
+        "summary_uri": _artifact_child_uri(phase_base_uri, "summary.json"),
+        "stdout_uri": _artifact_child_uri(phase_base_uri, "stdout.log"),
+        "stderr_uri": _artifact_child_uri(phase_base_uri, "stderr.log"),
+        "command_uri": _artifact_child_uri(phase_base_uri, "command.json"),
+        "fingerprint": _summary_fingerprint(observed_summary),
+        "summary": observed_summary,
+    }
+    selected_tool = job.get("selected_tool") or preflight.get("selected_tool")
+    result = {
+        **previous,
+        "operation": job["operation"],
+        "selected_tool": selected_tool,
+        "phase": phase,
+        "artifact_base_uri": artifact_uri,
+        "preflight_status": preflight.get("status"),
+        phase: phase_entry,
+    }
+    if phase == "execution":
+        result["summary"] = {
+            "file_count": int(observed_summary.get("file_count", 0)),
+            "directory_count": int(observed_summary.get("directory_count", 0)),
+            "total_bytes": int(observed_summary.get("total_bytes", 0)),
+            "error_count": int(observed_summary.get("error_count", 0)),
+            "target_absent": observed_summary.get("target_absent"),
+        }
+    if job["operation"] == OperationKind.DATA_SYNC.value:
+        normalized = job.get("normalized_target") or plan["desired_state"]
+        result["source"] = normalized.get("source")
+        result["destination"] = normalized.get("destination")
+    if job["operation"] == OperationKind.DATA_RM.value:
+        result["target"] = job.get("normalized_target") or plan["desired_state"].get("target")
+    return result
+
+
+def _artifact_child_uri(base_uri: str | None, name: str) -> str | None:
+    if not base_uri:
+        return None
+    return f"{base_uri.rstrip('/')}/{name}"
+
+
+def _mutation_artifact_summary(artifact_uri: str | None, phase: str) -> dict[str, Any] | None:
+    if not artifact_uri:
+        return None
+    parsed = urlparse(artifact_uri)
+    if parsed.scheme != "file":
+        return None
+    summary_path = Path(parsed.path) / phase / "summary.json"
+    if not summary_path.exists():
+        return None
+    with summary_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    summary = payload.get("summary") if isinstance(payload, dict) else None
+    return summary if isinstance(summary, dict) else payload
+
+
+def _scan_artifact_summary(artifact_uri: str | None) -> dict[str, Any] | None:
+    if not artifact_uri:
+        return None
+    parsed = urlparse(artifact_uri)
+    if parsed.scheme != "file":
+        return None
+    artifact_path = Path(parsed.path)
+    summary_path = artifact_path / "summary.json"
+    report_path = artifact_path / "dscan-report.json"
+    source_path = summary_path if summary_path.exists() else report_path
+    if not source_path.exists():
+        return None
+    with source_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return _normalize_scan_summary(payload)
+
+
+def _normalize_scan_summary(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    summary = payload.get("summary") if isinstance(payload, dict) else None
+    if not isinstance(summary, dict):
+        return payload
+    if "file_count" in summary or "directory_count" in summary:
+        return summary
+    broken_paths = payload.get("broken_paths")
+    return {
+        "file_count": int(summary.get("total_files", 0)),
+        "directory_count": int(summary.get("total_directories", 0)),
+        "total_bytes": int(
+            summary.get("total_bytes")
+            or summary.get("total_size_bytes")
+            or summary.get("total_file_bytes")
+            or 0
+        ),
+        "error_count": len(broken_paths) if isinstance(broken_paths, list) else 0,
+    }
+
+
+def _artifact_requires_local_parse(artifact_uri: str | None) -> bool:
+    if not artifact_uri:
+        return False
+    return urlparse(artifact_uri).scheme == "file"
+
+
+def _summary_fingerprint(summary: dict[str, Any]) -> str:
+    payload = json.dumps(summary or {}, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _is_expired(iso_value: str | None) -> bool:
+    if not iso_value:
+        return True
+    parsed = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed <= datetime.now(UTC)
+
+
+def confirm_data_job(
+    repository: DmsRepository,
+    job_id: str,
+    actor: str,
+    *,
+    requester_id: str | None = None,
+    confirm: bool = False,
+    preview_observed_hash: str | None = None,
+    require_preview_fingerprint: bool = False,
+) -> None:
     job = repository.get_data_job(job_id)
     if job["state"] != DataJobState.CONFIRM_PENDING.value:
         raise ValueError("data job is not waiting for confirm")
     plan = repository.get_plan_by_request(job["request_id"])
     if not plan:
         raise ValueError("data job has no plan")
+    if job["operation"] in {OperationKind.DATA_SYNC.value, OperationKind.DATA_RM.value}:
+        if not confirm:
+            raise ValueError("confirm=true is required")
+        request = repository.get_request(job["request_id"])
+        if requester_id is not None and requester_id != request["requester_id"]:
+            raise ValueError("confirm requester_id does not match data job requester")
+        if _is_expired(job.get("preview_expires_at")):
+            repository.update_data_job(job_id, state=DataJobState.PREVIEW_EXPIRED)
+            repository.complete_result(
+                request_id=job["request_id"],
+                plan_id=plan["plan_id"],
+                run_id=None,
+                terminal_status=LifecycleState.REJECTED,
+                message="data job preview expired before confirm",
+                verification_summary={
+                    "backend_side_effect": False,
+                    "reason": "data_job_preview_expired",
+                },
+                error_category="data_management_confirm",
+                actor=actor,
+            )
+            raise ValueError("data job preview has expired")
+        preview = (job.get("result_summary") or {}).get("preview") or {}
+        expected_hash = preview.get("fingerprint")
+        if require_preview_fingerprint and not preview_observed_hash:
+            raise ValueError("preview_observed_hash is required")
+        if preview_observed_hash and expected_hash and preview_observed_hash != expected_hash:
+            raise ValueError("preview_observed_hash does not match preview evidence")
     repository.update_data_job(job_id, state=DataJobState.CONFIRMED)
     metadata = dict(plan["execution_metadata"])
     metadata["phase"] = "execution"
@@ -820,7 +1960,7 @@ def confirm_data_job(repository: DmsRepository, job_id: str, actor: str) -> None
 
 def cancel_data_job(
     repository: DmsRepository,
-    volcano_adapter: StubVolcanoAdapter,
+    volcano_adapter: Any,
     job_id: str,
     actor: str,
 ) -> None:
@@ -837,5 +1977,13 @@ def cancel_data_job(
             verification_summary={"backend_side_effect": False},
             actor=actor,
         )
-    if job["artifact_uri"] and job["artifact_uri"].startswith("volcano/"):
-        volcano_adapter.terminate_job(job["artifact_uri"])
+    refs = job.get("volcano_job_ref") or {}
+    job_refs: list[str] = []
+    if isinstance(refs, dict):
+        if refs.get("job_ref"):
+            job_refs.append(refs["job_ref"])
+        for value in refs.values():
+            if isinstance(value, dict) and value.get("job_ref"):
+                job_refs.append(value["job_ref"])
+    for job_ref in sorted(set(job_refs)):
+        volcano_adapter.terminate_job(job_ref)

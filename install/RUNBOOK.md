@@ -84,7 +84,7 @@ curl_dms "$DMS_API_URL/api/v1/operations/action-required" \
 - `dms-api` 사용 가능.
 - `dms-planner` 실행 중.
 - `dms-rm-worker` 실행 중.
-- Live DM execution이 구현될 때까지 `dms-dm-worker`는 0으로 scale되어 있다.
+- `dms-dm-worker`는 Data Management 전제조건을 확인하기 전에는 0 replica로 둘 수 있다. `DMS_DM_JOB_IMAGE`, Volcano, artifact path, identity mapping, fresh DM Agent report가 준비된 환경에서는 1 replica로 운영할 수 있다.
 - Storage-capable RM/DM node마다 agent report가 fresh 상태다.
 - 운영 request가 사용하는 storage mapping은 `readiness.resource_management=Ready`를 표시한다.
 - 해결되지 않은 action-required 항목이 없다.
@@ -207,6 +207,102 @@ curl_dms "$DMS_API_URL/api/v1/operations/requests?requester_id=<requester>&limit
 kubectl --context dms-control -n dms logs deploy/dms-planner --tail=200
 kubectl --context dms-control -n dms logs deploy/dms-rm-worker --tail=200
 ```
+
+## Data Management Incident
+
+Phase 20에서 live Data Management는 read-only `scan`과 preview/confirm guard가
+있는 `sync`/`rm`을 지원한다. `sync`와 `rm`은 preview 없이 실행되면 안 되며,
+`ConfirmPending` 상태에서 explicit confirm을 받은 뒤에만 mutation VolcanoJob을
+생성해야 한다. `nsync` separated-role live execution은 아직 운영 Done으로 열지
+않는다.
+
+data job 목록과 상세를 확인한다.
+
+```bash
+curl_dms "$DMS_API_URL/api/v1/operations/data-jobs?limit=20" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/data-management/scan/jobs/<job_id>" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/data-management/sync/jobs/<job_id>" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+curl_dms "$DMS_API_URL/api/v1/data-management/rm/jobs/<job_id>" \
+  -H "authorization: Bearer $DMS_TOKEN"
+```
+
+confirm 대기 job을 확인한다.
+
+```bash
+curl_dms "$DMS_API_URL/api/v1/operations/data-jobs?state=ConfirmPending&limit=20" \
+  -H "authorization: Bearer $DMS_TOKEN"
+```
+
+Preflight failure에서 먼저 확인할 것:
+
+- requester Identity Mapping이 `Active`인지 확인한다.
+- target/source/destination storage mapping의 `readiness.data_management`가 `Ready`인지 확인한다.
+- DM Agent report가 Fresh이고 mount, required tool(`dscan`, `dsync`, `drm`), credential, network, POSIX user evidence를 포함하는지 확인한다.
+- target/source/destination path가 storage-relative이고 traversal/absolute path가 아닌지 확인한다.
+- `sync`는 source read/traverse와 destination parent write/execute 권한을 확인한다.
+- `rm`은 parent write/execute delete 권한과 target traverse/read 권한을 확인한다.
+
+Volcano/runtime failure에서 먼저 확인할 것:
+
+```bash
+kubectl --context dms-control -n dms get job.batch.volcano.sh
+kubectl --context dms-control -n dms describe job.batch.volcano.sh <volcano-job-name>
+kubectl --context dms-control -n dms logs deploy/dms-dm-worker --tail=200
+```
+
+성공한 data job은 `data_jobs.artifact_uri`와 phase별
+`result_summary.*_uri`를 기록한다. DB에는 파일 내용이 아니라 URI와 요약만
+저장된다. `file://` backend의 실제 결과 파일은 다음 위치에 있다.
+
+```text
+scan:
+  <DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/
+    summary.json
+    dscan-report.json
+    stdout.log
+    stderr.log
+
+sync/rm:
+  <DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/preview/
+    summary.json
+    command.json
+    stdout.log
+    stderr.log
+  <DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/execution/
+    summary.json
+    command.json
+    stdout.log
+    stderr.log
+```
+
+artifact parse failure가 나면 먼저 DM Worker가 artifact base를 traverse/read할 수
+있는지 확인한다. 사용자 target directory가 `0750`이고 artifact base가 그 하위에
+있으면 Volcano pod는 쓸 수 있어도 DM Worker가 읽지 못할 수 있다. 운영에서는 별도
+DMS-managed artifact mount/PVC/object prefix를 사용한다.
+
+preview를 검토한 뒤 confirm한다.
+
+```bash
+curl_dms -X POST "$DMS_API_URL/api/v1/data-management/jobs/<job_id>:confirm" \
+  -H "authorization: Bearer $DMS_TOKEN" \
+  -H "content-type: application/json" \
+  --data '{
+    "requester_id": "alice",
+    "confirm": true,
+    "preview_observed_hash": "sha256:<preview-fingerprint>",
+    "memo": "reviewed preview artifacts"
+  }'
+```
+
+`PreviewExpired`가 되면 같은 job을 재사용하지 말고 새 request를 제출한다.
+`sync`/`rm`이 `Failed`, `TimedOut`, partial mutation risk action-required로 닫히면
+artifact와 live filesystem 상태를 확인한 뒤 새 request로 재시도한다.
 
 ## Expiry 처리
 
@@ -396,7 +492,8 @@ Rollback 전에도 가능하면 `dms-planned-shutdown.sh`로 drain mode에 진�
 
 ## 알려진 운영 공백
 
-- Non-stub Volcano adapter가 설치되고 검증될 때까지 Data Management live execution은 disabled 상태로 유지해야 한다.
+- Data Management `scan`/`sync`/`rm` live execution은 Volcano/mpifileutils image/artifact path/identity evidence가 준비된 환경에서만 DM Worker replica를 올린다. `sync`/`rm`은 preview/confirm guard 없이 실행되면 안 된다.
+- `nsync` separated-role live execution은 아직 운영 Done이 아니다. `DMS_DM_KUBERNETES_MODE=stub`은 로컬 테스트/dev 전용이다.
 - 운영 Helm/Kustomize packaging은 아직 완성되지 않았다. 여기 있는 manifest는 명시적 YAML template이다.
 - 서로 다른 mount를 가진 multiple local filesystem RM worker는 storage-aware worker claiming 없이는 안전하지 않다.
 - WEKA filesystem backend는 아직 구현되지 않았다. Kubernetes namespace quota만 필요한 WEKA CSI StorageClass는 공통 live ResourceQuota adapter로 사용할 수 있지만, filesystem resource 요청은 fail-closed된다.

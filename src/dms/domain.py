@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -140,14 +142,73 @@ class RequestEnvelope(BaseModel):
         return value
 
 
+class DataPathTarget(BaseModel):
+    storage_name: str
+    path: str
+
+    @field_validator("storage_name", "path")
+    @classmethod
+    def value_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value is required")
+        return value
+
+
 class DataJobRequest(BaseModel):
     requester_id: str
-    storage_name: str
+    storage_name: str | None = None
+    target: DataPathTarget | None = None
+    source: DataPathTarget | None = None
+    destination: DataPathTarget | None = None
     target_path: str | None = None
     source_path: str | None = None
     destination_path: str | None = None
-    priority: int = 100
+    priority: int | str = 100
     options: dict[str, Any] = Field(default_factory=dict)
+    memo: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_compatibility_fields(self) -> "DataJobRequest":
+        if (
+            self.target is not None
+            and self.storage_name is not None
+            and self.storage_name != self.target.storage_name
+        ):
+            raise ValueError("storage_name does not match target.storage_name")
+        if (
+            self.target is not None
+            and self.target_path is not None
+            and self.target_path != self.target.path
+        ):
+            raise ValueError("target_path does not match target.path")
+        if self.target is not None:
+            self.storage_name = self.target.storage_name
+            self.target_path = self.target.path
+        if self.source is not None:
+            if self.source_path is not None and self.source_path != self.source.path:
+                raise ValueError("source_path does not match source.path")
+            self.source_path = self.source.path
+        if self.destination is not None:
+            if self.destination_path is not None and self.destination_path != self.destination.path:
+                raise ValueError("destination_path does not match destination.path")
+            self.destination_path = self.destination.path
+        if self.storage_name is not None:
+            if self.source is not None and self.source.storage_name != self.storage_name:
+                raise ValueError("storage_name does not match source.storage_name")
+            if (
+                self.destination is not None
+                and self.destination.storage_name != self.storage_name
+            ):
+                raise ValueError("storage_name does not match destination.storage_name")
+            if self.source is None and self.source_path is not None:
+                self.source = DataPathTarget(
+                    storage_name=self.storage_name, path=self.source_path
+                )
+            if self.destination is None and self.destination_path is not None:
+                self.destination = DataPathTarget(
+                    storage_name=self.storage_name, path=self.destination_path
+                )
+        return self
 
 
 class AgentReport(BaseModel):
@@ -258,15 +319,229 @@ def reject_unsafe_relative_path(path: str) -> None:
         raise ValueError("path traversal is not allowed")
 
 
+DATA_SCAN_OPTION_TYPES: dict[str, type | tuple[type, ...]] = {
+    "summary_only": bool,
+    "max_depth": int,
+    "follow_symlinks": bool,
+    "one_file_system": bool,
+}
+
+DATA_SYNC_OPTION_TYPES: dict[str, type | tuple[type, ...]] = {
+    "delete": bool,
+    "batch_files": int,
+    "contents": bool,
+    "direct": bool,
+    "open_noatime": bool,
+    "bufsize": int,
+    "quiet": bool,
+}
+
+DATA_RM_OPTION_TYPES: dict[str, type | tuple[type, ...]] = {
+    "recursive": bool,
+    "stat": bool,
+    "lite": bool,
+    "quiet": bool,
+}
+
+DATA_PRIORITY_LABELS = {"High": 200, "Mid": 100, "Low": 50}
+
+
+def normalized_data_job_priority(priority: int | str) -> dict[str, Any]:
+    if isinstance(priority, int):
+        return {
+            "input": priority,
+            "label": _priority_label_for_value(priority),
+            "value": priority,
+        }
+    label = priority.strip()
+    for known_label, value in DATA_PRIORITY_LABELS.items():
+        if label.lower() == known_label.lower():
+            return {"input": priority, "label": known_label, "value": value}
+    raise ValueError("priority must be High, Mid, Low, or an integer")
+
+
+def normalized_data_job_target(request: DataJobRequest) -> dict[str, str]:
+    storage_name = request.storage_name
+    path = request.target_path
+    if request.target is not None:
+        storage_name = request.target.storage_name
+        path = request.target.path
+    if storage_name is None or not storage_name.strip():
+        raise ValueError("storage_name is required")
+    if path is None or not path.strip():
+        raise ValueError("required storage-relative path is missing")
+    reject_unsafe_relative_path(path)
+    return {"storage_name": storage_name, "path": _canonical_relative_path(path)}
+
+
+def normalized_data_job_sync_paths(
+    request: DataJobRequest,
+) -> tuple[dict[str, str], dict[str, str]]:
+    source = request.source
+    destination = request.destination
+    if source is None and request.storage_name and request.source_path:
+        source = DataPathTarget(storage_name=request.storage_name, path=request.source_path)
+    if destination is None and request.storage_name and request.destination_path:
+        destination = DataPathTarget(
+            storage_name=request.storage_name, path=request.destination_path
+        )
+    if source is None or destination is None:
+        raise ValueError("source and destination are required")
+    reject_unsafe_relative_path(source.path)
+    reject_unsafe_relative_path(destination.path)
+    normalized_source = {
+        "storage_name": source.storage_name,
+        "path": _canonical_relative_path(source.path),
+    }
+    normalized_destination = {
+        "storage_name": destination.storage_name,
+        "path": _canonical_relative_path(destination.path),
+    }
+    if normalized_source == normalized_destination:
+        raise ValueError("sync destination must differ from source")
+    if (
+        normalized_source["storage_name"] == normalized_destination["storage_name"]
+        and _path_is_descendant_or_self(
+            normalized_destination["path"], normalized_source["path"]
+        )
+    ):
+        raise ValueError("sync destination must not be the source or under the source")
+    return normalized_source, normalized_destination
+
+
+def normalized_data_job_payload(
+    request: DataJobRequest, operation: OperationKind
+) -> dict[str, Any]:
+    priority = normalized_data_job_priority(request.priority)
+    payload = request.model_dump(mode="json", exclude_none=True)
+    payload["priority"] = priority["value"]
+    payload["priority_label"] = priority["label"]
+    payload["priority_input"] = priority["input"]
+    if operation == OperationKind.DATA_SCAN:
+        target = normalized_data_job_target(request)
+        payload["storage_name"] = target["storage_name"]
+        payload["target_path"] = target["path"]
+        payload["target"] = target
+    if operation == OperationKind.DATA_RM:
+        target = normalized_data_job_target(request)
+        if target["path"] in {"", "."}:
+            raise ValueError("rm target must not be the storage root")
+        payload["storage_name"] = target["storage_name"]
+        payload["target_path"] = target["path"]
+        payload["target"] = target
+    if operation == OperationKind.DATA_SYNC:
+        source, destination = normalized_data_job_sync_paths(request)
+        payload["source"] = source
+        payload["destination"] = destination
+        payload["source_path"] = source["path"]
+        payload["destination_path"] = destination["path"]
+        payload["source_storage_name"] = source["storage_name"]
+        payload["destination_storage_name"] = destination["storage_name"]
+        payload["storage_name"] = source["storage_name"]
+    if operation in {OperationKind.DATA_SYNC, OperationKind.DATA_RM}:
+        payload["option_fingerprint"] = data_job_option_fingerprint(payload.get("options") or {})
+    return payload
+
+
 def validate_data_job_paths(request: DataJobRequest, operation: OperationKind) -> None:
     raw_options = request.options.get("raw_options") or request.options.get("command_line")
     if raw_options:
         raise ValueError("raw command-line option strings are not accepted")
+    normalized_data_job_priority(request.priority)
+    if operation == OperationKind.DATA_SCAN:
+        normalized_data_job_target(request)
+        _validate_data_scan_options(request.options)
+        return
     if operation == OperationKind.DATA_SYNC:
-        required = [request.source_path, request.destination_path]
-    else:
-        required = [request.target_path]
-    for path in required:
-        if path is None:
-            raise ValueError("required storage-relative path is missing")
-        reject_unsafe_relative_path(path)
+        normalized_data_job_sync_paths(request)
+        _validate_data_sync_options(request.options)
+        return
+    if operation == OperationKind.DATA_RM:
+        target = normalized_data_job_target(request)
+        if target["path"] in {"", "."}:
+            raise ValueError("rm target must not be the storage root")
+        _validate_data_rm_options(request.options)
+        return
+    raise ValueError(f"unsupported data operation: {operation}")
+
+
+def _validate_data_scan_options(options: dict[str, Any]) -> None:
+    for key, value in options.items():
+        if key not in DATA_SCAN_OPTION_TYPES:
+            raise ValueError(f"unsupported scan option: {key}")
+        expected = DATA_SCAN_OPTION_TYPES[key]
+        if expected is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"scan option {key} must be an integer")
+            if value < 0:
+                raise ValueError(f"scan option {key} must be non-negative")
+            continue
+        if not isinstance(value, expected):
+            raise ValueError(f"scan option {key} has invalid type")
+
+
+def _validate_data_sync_options(options: dict[str, Any]) -> None:
+    _validate_typed_options(options, DATA_SYNC_OPTION_TYPES, "sync")
+    _validate_positive_bounded_int(options, "batch_files", minimum=1, maximum=1_000_000)
+    _validate_positive_bounded_int(options, "bufsize", minimum=4096, maximum=1024**3)
+
+
+def _validate_data_rm_options(options: dict[str, Any]) -> None:
+    _validate_typed_options(options, DATA_RM_OPTION_TYPES, "rm")
+    if options.get("recursive") is not True:
+        raise ValueError("rm directory requests require recursive=true")
+    if options.get("stat") and options.get("lite"):
+        raise ValueError("rm options stat and lite are mutually exclusive")
+
+
+def _validate_typed_options(
+    options: dict[str, Any],
+    allowed: dict[str, type | tuple[type, ...]],
+    operation: str,
+) -> None:
+    for key, value in options.items():
+        if key not in allowed:
+            raise ValueError(f"unsupported {operation} option: {key}")
+        expected = allowed[key]
+        if expected is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{operation} option {key} must be an integer")
+            continue
+        if not isinstance(value, expected):
+            raise ValueError(f"{operation} option {key} has invalid type")
+
+
+def _validate_positive_bounded_int(
+    options: dict[str, Any], key: str, *, minimum: int, maximum: int
+) -> None:
+    if key not in options:
+        return
+    value = options[key]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"option {key} must be an integer")
+    if value < minimum or value > maximum:
+        raise ValueError(f"option {key} must be between {minimum} and {maximum}")
+
+
+def data_job_option_fingerprint(options: dict[str, Any]) -> str:
+    payload = json.dumps(options or {}, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _canonical_relative_path(path: str) -> str:
+    parts = [part for part in path.split("/") if part not in {"", "."}]
+    return "/".join(parts) or "."
+
+
+def _path_is_descendant_or_self(candidate: str, parent: str) -> bool:
+    candidate = _canonical_relative_path(candidate)
+    parent = _canonical_relative_path(parent)
+    return candidate == parent or candidate.startswith(f"{parent}/")
+
+
+def _priority_label_for_value(value: int) -> str:
+    if value >= DATA_PRIORITY_LABELS["High"]:
+        return "High"
+    if value <= DATA_PRIORITY_LABELS["Low"]:
+        return "Low"
+    return "Mid"

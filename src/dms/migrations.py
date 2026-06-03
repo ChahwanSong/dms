@@ -186,6 +186,11 @@ CREATE TABLE IF NOT EXISTS data_jobs (
     worker_pool TEXT NOT NULL,
     state TEXT NOT NULL,
     artifact_uri TEXT,
+    normalized_target TEXT,
+    preflight_result TEXT,
+    volcano_job_ref TEXT,
+    result_summary TEXT,
+    log_uri TEXT,
     preview_expires_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -246,9 +251,11 @@ def migrate_operational(database: Database) -> None:
         connection.executescript(OPERATIONAL_SCHEMA)
         _ensure_operational_phase2_columns(connection, database)
         _ensure_operational_phase3_columns(connection, database)
+        _ensure_operational_phase19_columns(connection, database)
         _record_migration(connection, "operational-0001-phase1")
         _record_migration(connection, "operational-0002-phase2-identity")
         _record_migration(connection, "operational-0003-phase3-inventory")
+        _record_migration(connection, "operational-0019-data-management-scan")
 
 
 def migrate_observability(database: Database) -> None:
@@ -318,6 +325,18 @@ def _ensure_operational_phase3_columns(connection, database: Database) -> None:
         for column, definition in columns.items():
             if not _column_exists(connection, database, table, column):
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _ensure_operational_phase19_columns(connection, database: Database) -> None:
+    for column, definition in {
+        "normalized_target": "TEXT",
+        "preflight_result": "TEXT",
+        "volcano_job_ref": "TEXT",
+        "result_summary": "TEXT",
+        "log_uri": "TEXT",
+    }.items():
+        if not _column_exists(connection, database, "data_jobs", column):
+            connection.execute(f"ALTER TABLE data_jobs ADD COLUMN {column} {definition}")
 
 
 def _column_exists(connection, database: Database, table: str, column: str) -> bool:

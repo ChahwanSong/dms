@@ -14,7 +14,7 @@ from .agent_daemon import build_agent_report, config_from_env, post_report, run_
 from .adapters import (
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
-    StubVolcanoAdapter,
+    volcano_adapter_from_settings,
 )
 from .backend_registry import BackendAdapterRegistry
 from .config import Settings
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         worker = DMWorkerRuntime(
             repository=repository,
             observability=observability,
-            volcano_adapter=StubVolcanoAdapter(),
+            volcano_adapter=volcano_adapter_from_settings(settings),
             worker_id=args.worker_id,
             lease_seconds=settings.worker_lease_seconds,
             preview_ttl_seconds=settings.preview_ttl_seconds,

@@ -83,6 +83,7 @@ class OperationalQueryService:
             )
         issues.extend(self._kubernetes_quota_action_required())
         issues.extend(self._filesystem_action_required())
+        issues.extend(self._data_management_action_required())
         return issues
 
     def request_history(self, request_id: str) -> dict:
@@ -559,6 +560,46 @@ class OperationalQueryService:
             )
         return issues
 
+    def _data_management_action_required(self) -> list[dict[str, Any]]:
+        issues: list[dict[str, Any]] = []
+        for job in self.repository.list_data_jobs(limit=1000):
+            if job["operation"] not in {
+                OperationKind.DATA_SCAN.value,
+                OperationKind.DATA_SYNC.value,
+                OperationKind.DATA_RM.value,
+            }:
+                continue
+            if job["state"] not in {"PreflightFailed", "Failed", "TimedOut", "Cancelled"}:
+                continue
+            preflight = job.get("preflight_result") or {}
+            result_summary = job.get("result_summary") or {}
+            if job["state"] == "PreflightFailed":
+                reason = preflight.get("reason") or result_summary.get("reason")
+            else:
+                reason = result_summary.get("reason") or preflight.get("reason")
+            reason = reason or result_summary.get("status") or job["state"]
+            issue_type = _data_job_issue_type(job, reason)
+            issues.append(
+                {
+                    "issue_type": issue_type,
+                    "severity": "WARN" if job["state"] == "Cancelled" else "ERROR",
+                    "resource_kind": ResourceKind.DATA_JOB.value,
+                    "job_id": job["job_id"],
+                    "request_id": job["request_id"],
+                    "requester_id": job.get("requester_id"),
+                    "operation": job["operation"],
+                    "storage_name": job["storage_name"],
+                    "target": job.get("normalized_target") or {},
+                    "state": job["state"],
+                    "reason": reason,
+                    "preflight_result": preflight,
+                    "result_summary": result_summary,
+                    "updated_at": job["updated_at"],
+                    "recommended_action": "inspect data job detail and remediate data-management preflight/runtime issue",
+                }
+            )
+        return issues
+
     def stale_or_recovery_runs(self) -> list[dict]:
         return self.repository.list_runs(
             states=(
@@ -702,7 +743,19 @@ class OperationalQueryService:
         ]
 
     def data_job_status(self, job_id: str) -> dict:
-        return self.repository.get_data_job(job_id)
+        job = self.repository.get_data_job(job_id)
+        request = self.repository.get_request(job["request_id"])
+        plan = self.repository.get_plan_by_request(job["request_id"])
+        return {
+            **job,
+            "requester_id": request["requester_id"],
+            "request_actor": request["actor"],
+            "request_status": request["status"],
+            "resource_key": request["resource_key"],
+            "request_payload": request["payload_summary"],
+            "plan": plan,
+            "results": self.repository.get_results(job["request_id"]),
+        }
 
     def diagnostic_correlation(self, correlation_id: str) -> list[dict]:
         return self.observability.list_events(correlation_id=correlation_id)
@@ -965,6 +1018,27 @@ def _filesystem_issue_type(summary: dict[str, Any]) -> str:
     if summary.get("precondition_failed"):
         return "filesystem_block_failed"
     return "filesystem_block_verification_failed"
+
+
+def _data_job_issue_type(job: dict[str, Any], reason: Any) -> str:
+    reason_text = str(reason or "").lower()
+    if job["state"] == "PreflightFailed":
+        if "identity" in reason_text:
+            return "data_job_missing_identity_mapping"
+        if "permission" in reason_text or "posix" in reason_text:
+            return "data_job_permission_denied"
+        if "candidate" in reason_text or "node" in reason_text:
+            return "data_job_no_ready_candidate"
+        return "data_job_preflight_failed"
+    if job["state"] == "TimedOut":
+        return "data_job_volcano_timeout"
+    if "artifact" in reason_text:
+        return "data_job_artifact_parse_failed"
+    if "volcano" in reason_text:
+        return "data_job_volcano_failed"
+    if job["state"] == "Cancelled":
+        return "data_job_cancelled"
+    return "data_job_failed"
 
 
 def _filesystem_action_issue(

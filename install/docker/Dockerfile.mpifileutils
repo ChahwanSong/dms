@@ -1,0 +1,71 @@
+FROM debian:bookworm AS build
+
+ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
+ARG MPIFILEUTILS_REF=e3bfee10970bb4e24204d28689e3337e9741cca4
+ARG LWGRP_REF=v1.0.6
+ARG DTCMP_REF=v1.1.5
+ARG LIBCIRCLE_REF=v0.3
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    cmake \
+    g++ \
+    gcc \
+    git \
+    libbz2-dev \
+    libmpich-dev \
+    libssl-dev \
+    make \
+    mpich \
+    uuid-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch "${LWGRP_REF}" https://github.com/llnl/lwgrp.git \
+    && git clone --depth 1 --branch "${DTCMP_REF}" https://github.com/llnl/dtcmp.git \
+    && git clone --depth 1 --branch "${LIBCIRCLE_REF}" https://github.com/hpc/libcircle.git \
+    && git clone "${MPIFILEUTILS_REPO}" mpifileutils \
+    && cd mpifileutils \
+    && git checkout "${MPIFILEUTILS_REF}" \
+    && sed -i 's@#include "../config/config.h"@@g' /src/lwgrp/src/lwgrp_internal.h \
+    && sed -i 's@#include <config.h>@@g' /src/libcircle/libcircle/lib.h \
+    && sed -i 's@ADD_SUBDIRECTORY(common)@#ADD_SUBDIRECTORY(common)@g' /src/mpifileutils/src/CMakeLists.txt \
+    && mkdir /release \
+    && cp -a /src/lwgrp /src/dtcmp /src/libcircle /src/mpifileutils /release/ \
+    && cp -a /src/mpifileutils/dist/CMakeLists.txt /release/CMakeLists.txt \
+    && cp -a /src/mpifileutils/cmake /release/cmake \
+    && sed -i 's@ADD_SUBDIRECTORY(mpifileutils/test)@#ADD_SUBDIRECTORY(mpifileutils/test)@g' /release/CMakeLists.txt \
+    && sed -i '/mpifileutils\/src\/common\/mfu_pred.h/a\  mpifileutils/src/common/mfu_proc.h' /release/CMakeLists.txt \
+    && sed -i '/mpifileutils\/src\/common\/mfu_pred.c/a\  mpifileutils/src/common/mfu_proc.c' /release/CMakeLists.txt
+
+WORKDIR /src/build
+
+RUN cmake /release \
+      -DCMAKE_INSTALL_PREFIX=/opt/mpifileutils \
+      -DENABLE_LIBARCHIVE=OFF \
+      -DENABLE_XATTRS=OFF \
+      -DENABLE_LUSTRE=OFF \
+      -DENABLE_GPFS=OFF \
+      -DENABLE_HPSS=OFF \
+      -DENABLE_DAOS=OFF \
+    && make -j2 \
+    && make install
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgomp1 \
+    mpich \
+    && groupadd --gid 10000 developers \
+    && useradd --uid 10000 --gid 10000 --no-create-home --shell /usr/sbin/nologin alice \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /opt/mpifileutils /opt/mpifileutils
+
+ENV PATH=/opt/mpifileutils/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/mpifileutils/lib
+
+CMD ["dsync", "--help"]

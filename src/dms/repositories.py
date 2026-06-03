@@ -1672,6 +1672,12 @@ class DmsRepository:
         worker_pool: dict[str, Any],
         selected_tool: str | None = None,
         state: DataJobState = DataJobState.PENDING,
+        normalized_target: dict[str, Any] | None = None,
+        preflight_result: dict[str, Any] | None = None,
+        volcano_job_ref: dict[str, Any] | None = None,
+        result_summary: dict[str, Any] | None = None,
+        artifact_uri: str | None = None,
+        log_uri: str | None = None,
     ) -> str:
         job_id = new_id("job")
         now = iso_now()
@@ -1681,8 +1687,10 @@ class DmsRepository:
                 INSERT INTO data_jobs (
                     job_id, request_id, operation, storage_name, source,
                     destination, target, priority, selected_tool, worker_pool,
-                    state, artifact_uri, preview_expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    state, artifact_uri, normalized_target, preflight_result,
+                    volcano_job_ref, result_summary, log_uri, preview_expires_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -1696,7 +1704,12 @@ class DmsRepository:
                     selected_tool,
                     json_dumps(worker_pool),
                     state.value,
-                    None,
+                    artifact_uri,
+                    json_dumps(normalized_target or {}),
+                    json_dumps(preflight_result or {}),
+                    json_dumps(volcano_job_ref or {}),
+                    json_dumps(result_summary or {}),
+                    log_uri,
                     None,
                     now,
                     now,
@@ -1728,6 +1741,11 @@ class DmsRepository:
         selected_tool: str | None = None,
         worker_pool: dict[str, Any] | None = None,
         artifact_uri: str | None = None,
+        normalized_target: dict[str, Any] | None = None,
+        preflight_result: dict[str, Any] | None = None,
+        volcano_job_ref: dict[str, Any] | None = None,
+        result_summary: dict[str, Any] | None = None,
+        log_uri: str | None = None,
         preview_expires_at: str | None = None,
     ) -> None:
         job = self.get_data_job(job_id)
@@ -1737,7 +1755,8 @@ class DmsRepository:
                 """
                 UPDATE data_jobs
                 SET state = ?, selected_tool = ?, worker_pool = ?, artifact_uri = ?,
-                    preview_expires_at = ?, updated_at = ?
+                    normalized_target = ?, preflight_result = ?, volcano_job_ref = ?,
+                    result_summary = ?, log_uri = ?, preview_expires_at = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
                 (
@@ -1746,6 +1765,27 @@ class DmsRepository:
                     selected_tool if selected_tool is not None else job["selected_tool"],
                     json_dumps(worker_pool if worker_pool is not None else job["worker_pool"]),
                     artifact_uri if artifact_uri is not None else job["artifact_uri"],
+                    json_dumps(
+                        normalized_target
+                        if normalized_target is not None
+                        else job.get("normalized_target") or {}
+                    ),
+                    json_dumps(
+                        preflight_result
+                        if preflight_result is not None
+                        else job.get("preflight_result") or {}
+                    ),
+                    json_dumps(
+                        volcano_job_ref
+                        if volcano_job_ref is not None
+                        else job.get("volcano_job_ref") or {}
+                    ),
+                    json_dumps(
+                        result_summary
+                        if result_summary is not None
+                        else job.get("result_summary") or {}
+                    ),
+                    log_uri if log_uri is not None else job.get("log_uri"),
                     (
                         preview_expires_at
                         if preview_expires_at is not None
@@ -1756,11 +1796,47 @@ class DmsRepository:
                 ),
             )
 
-    def list_data_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_data_jobs(
+        self,
+        limit: int = 100,
+        *,
+        requester_id: str | None = None,
+        operation: str | None = None,
+        storage_name: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        filters: list[str] = []
+        params: list[Any] = []
+        if requester_id:
+            filters.append("requests.requester_id = ?")
+            params.append(requester_id)
+        if operation:
+            filters.append("data_jobs.operation = ?")
+            params.append(operation)
+        if storage_name:
+            filters.append("data_jobs.storage_name = ?")
+            params.append(storage_name)
+        if state:
+            filters.append("data_jobs.state = ?")
+            params.append(state)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        params.append(limit)
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM data_jobs ORDER BY updated_at DESC LIMIT ?",
-                (limit,),
+                f"""
+                SELECT
+                    data_jobs.*,
+                    requests.requester_id,
+                    requests.actor AS request_actor,
+                    requests.resource_key,
+                    requests.payload_summary
+                FROM data_jobs
+                JOIN requests ON requests.request_id = data_jobs.request_id
+                {where}
+                ORDER BY data_jobs.updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
             ).fetchall()
         return [self._decode_data_job(row_to_dict(row)) for row in rows]
 
@@ -2288,6 +2364,21 @@ class DmsRepository:
     def _decode_data_job(self, job: dict[str, Any]) -> dict[str, Any]:
         if job:
             job["worker_pool"] = json_loads(job["worker_pool"]) or {}
+            for key in (
+                "normalized_target",
+                "preflight_result",
+                "volcano_job_ref",
+                "result_summary",
+            ):
+                if key in job:
+                    job[key] = json_loads(job.get(key)) or {}
+            if "payload_summary" in job:
+                job["payload_summary"] = json_loads(job.get("payload_summary")) or {}
+            if not job.get("normalized_target") and job.get("storage_name") and job.get("target"):
+                job["normalized_target"] = {
+                    "storage_name": job["storage_name"],
+                    "path": job["target"],
+                }
         return job
 
 
@@ -2345,6 +2436,10 @@ def _storage_names_in_payload(payload: dict[str, Any]) -> set[str]:
     names: set[str] = set()
     if payload.get("storage_name"):
         names.add(str(payload["storage_name"]))
+    for key in ("target", "source", "destination"):
+        value = payload.get(key)
+        if isinstance(value, dict) and value.get("storage_name"):
+            names.add(str(value["storage_name"]))
     for quota in payload.get("storage_class_quotas") or []:
         if isinstance(quota, dict) and quota.get("storage_name"):
             names.add(str(quota["storage_name"]))

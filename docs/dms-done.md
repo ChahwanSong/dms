@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-06-03 00:34 +0900
+Last updated: 2026-06-03 23:59 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -12,6 +12,8 @@ Last updated: 2026-06-03 00:34 +0900
 - local pytest, stub adapter, synthetic data는 보조 회귀 검증으로만 기록한다.
 - 아직 실제 backend side effect가 구현되지 않은 기능은 성공처럼 적지 않고 명확히 미구현으로 남긴다.
 - Phase 18까지의 실제 live/테스트베드 검증 대상은 PostgreSQL, OpenLDAP/SSSD, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity, Kubernetes default quota reset, on-demand quota audit, drift/usage pressure/effective quota action-required aggregation, DMS-managed ResourceQuota metadata drift detection, `cluster-a/c1-worker` 및 `cluster-b/c2-worker` host-mounted CephFS filesystem create/delete lifecycle, filesystem expiry query, API-driven filesystem expiration sweep, filesystem block/unblock lifecycle, filesystem expiry update/import default, LDAP access group membership, POSIX permission boundary, CephFS directory capacity/file-count quota apply/enforcement, quota update/decrease apply/check/sync/action-required, existing directory quota-only assignment, existing directory full import, Kubernetes long-running Planner/RM Worker Deployment 기반 RM 처리, RM Worker scale/restart/stale-claim recovery evidence, observability DB write failure safe boundary, live RM Worker의 Longhorn Kubernetes ResourceQuota apply, unknown backend fail-closed/action-required, Kubernetes namespace quota `expires_at` create/update/import, expired query/action-required, on-demand expiration sweep block, DMS API trusted edge mTLS evidence validation, token+mTLS combined authentication, certificate subject actor derivation, direct spoof NetworkPolicy 차단, synthetic GPFS CSI StorageClass 기반 Kubernetes ResourceQuota live adapter apply/read-back, testbed PostgreSQL 기반 maintenance/drain/heartbeat/stale-recovery guard이다. GPFS는 IBM Storage Scale command adapter 구현과 fake executor regression까지 완료했고, live GPFS filesystem 검증은 테스트베드에 GPFS cluster가 없어 skip evidence로 남겼다.
+- Phase 19의 실제 live/테스트베드 검증 대상은 read-only Data Management `scan`이다. API intake, Identity Mapping/POSIX preflight, DM Agent node selection, runtime preflight Pod, VolcanoJob, pinned real mpifileutils `dscan`, artifact file write, DB summary parsing/query/action-required가 검증됐다.
+- Phase 20의 실제 live/테스트베드 검증 대상은 Data Management `sync`/`rm`이다. `dsync` preview/execution, `drm` preview/execution, explicit confirm, preview expiry, missing identity, raw option/path guard, VolcanoJob monitoring, artifact parsing/query/action-required, standalone multi-node MPI `dscan` smoke가 검증됐다. `nsync` separated-role live execution은 아직 Done으로 보지 않는다.
 
 ## Testbed Architecture
 
@@ -2571,7 +2573,202 @@ side effects.
 
 Evidence is recorded in `docs/dms-phase18-verification.md`.
 
-### 21. Optional Local Regression
+### 21. Phase 19 Data Management Scan Live Path
+
+Phase 19 read-only Data Management `scan` is verified in the testbed with both
+the deterministic `dscan` fixture and a pinned real mpifileutils job image. The
+verified path covers API intake, identity/POSIX preflight, DM Agent based node
+selection, runtime preflight Pod, VolcanoJob submission/monitoring, artifact
+write, parser, DB summary persistence, query, and action-required behavior.
+An additional standalone Volcano/MPI smoke test verified the mpifileutils image
+family can run `dscan` with two MPI ranks across both cluster-a nodes on a
+shared CephFS RWX PVC; that smoke test is separate from the current DMS API/DM
+Worker execution path.
+
+Implemented so far:
+
+- structured `scan` target request model with flat `storage_name`/`target_path`
+  compatibility normalization
+- `High`/`Mid`/`Low` public priority normalization
+- `scan` option allowlist and raw command-line rejection
+- `sync`/`rm` endpoint fail-closed behavior with no request/plan/job side effect
+- destructive `sync`/`rm` confirm guard
+- `data_jobs` Phase 19 evidence fields:
+  `normalized_target`, `preflight_result`, `volcano_job_ref`,
+  `result_summary`, `log_uri`
+- requester-filterable Data Job list/detail queries and scan-specific query aliases
+- scan preflight based on active Identity Mapping and fresh DM Agent
+  mount/tool/credential/network/identity evidence
+- runtime POSIX preflight Pod before Volcano submission, scheduled on the
+  selected node and run as the mapped UID/GID
+- live VolcanoJob submission/monitoring for read-only `scan`
+- file artifact URI contract:
+  `data_jobs.artifact_uri` stores the job base URI and
+  `result_summary.report_uri/stdout_uri/stderr_uri/summary_uri` point at files
+  under that base
+- `summary.json` and `dscan-report.json` parsing into stable
+  file/directory/byte/error summary
+- pinned real mpifileutils job image build template at
+  `install/docker/Dockerfile.mpifileutils`
+- Data Management action-required entries for scan preflight/runtime failures
+- settings-aware live Volcano adapter selection and explicit `stub` test/dev mode
+- install ConfigMap/env docs for `DMS_DM_*` runtime settings and namespace RBAC for
+  preflight Pod and VolcanoJob create/get/list/watch/delete
+
+Verification evidence:
+
+- `docs/dms-phase19-verification.md`
+- local full regression: `143 passed in 86.93s`
+- testbed readiness check: all five VMs running, cluster-a nodes Ready, Volcano
+  deployments Ready, SSSD lookup for `alice`, and CephFS host mount present
+- live testbed verifier: `scripts/verify-phase19-testbed.sh`, exit status 0
+- live artifact base:
+  `file:///mnt/testbed-cephfs/dms-phase19-artifacts-20260603220451/job_5ca2e30ba2054911aadb3db49b17da3e`
+- live report URI:
+  `file:///mnt/testbed-cephfs/dms-phase19-artifacts-20260603220451/job_5ca2e30ba2054911aadb3db49b17da3e/dscan-report.json`
+- live Volcano ref:
+  `volcano://dms-phase19/dms-scan-job-5ca2e30ba2054911aadb3db49b17da3e`
+- parsed summary:
+  `file_count=3`, `directory_count=2`, `total_bytes=31`, `error_count=0`
+- real mpifileutils image source:
+  `chahwansong/mpifileutils@e3bfee10970bb4e24204d28689e3337e9741cca4`
+- testbed real mpifileutils image:
+  `testbed-registry:5000/dms-mpifileutils:e3bfee1`
+- real-image verifier: `scripts/verify-phase19-testbed.sh`, exit status 0 with
+  `DMS_PHASE19_DM_JOB_IMAGE` and `DMS_PHASE19_DM_JOB_IMAGE_REF` set
+- real-image artifact base:
+  `file:///mnt/testbed-cephfs/dms-phase19-artifacts-20260603222132/job_3a55ca8ca77b433b9505ec50c38f8186`
+- real-image report URI:
+  `file:///mnt/testbed-cephfs/dms-phase19-artifacts-20260603222132/job_3a55ca8ca77b433b9505ec50c38f8186/dscan-report.json`
+- real-image normalized summary URI:
+  `file:///mnt/testbed-cephfs/dms-phase19-artifacts-20260603222132/job_3a55ca8ca77b433b9505ec50c38f8186/summary.json`
+- real-image Volcano ref:
+  `volcano://dms-phase19/dms-scan-job-3a55ca8ca77b433b9505ec50c38f8186`
+- real-image parsed summary:
+  `file_count=3`, `directory_count=2`, `total_bytes=31`, `error_count=0`
+- standalone two-node MPI smoke:
+  `dms-mpi-dscan-smoke` in namespace `dms-mpi-verify`, using
+  `testbed-registry:5000/dms-mpifileutils-mpi:ssh`
+- standalone MPI pod placement:
+  launcher completed on `c1-control`, worker-0 ran on `c1-control`, worker-1 ran
+  on `c1-worker`
+- standalone MPI hostfile:
+  `10.244.0.92`, `10.244.1.69`
+- standalone MPI dscan summary:
+  `total_entries=5`, `total_files=3`, `total_directories=2`,
+  `total_symlinks=0`, `total_other=0`, `broken_paths=[]`
+
+### 22. Phase 20 Data Management Sync/Rm Live Path
+
+Phase 20 Data Management `sync`/`rm` is verified in the testbed with the pinned
+real mpifileutils image and real VolcanoJob execution. The verified path covers
+canonical request parsing, compatibility normalization, option allowlist,
+Identity Mapping/POSIX preflight, DM Agent node selection, `dsync`/`drm` preview
+VolcanoJobs, explicit confirm, confirmed execution VolcanoJobs, artifact parsing,
+DB summary/query, action-required negative paths, and filesystem effects.
+
+Implemented so far:
+
+- structured `sync` source/destination request model with flat same-storage
+  compatibility normalization
+- structured `rm` target request model with flat compatibility normalization
+- operation-specific option allowlists and raw command-line rejection
+- destination/source overlap, storage-root rm, artifact-path, absolute path, and
+  traversal guards
+- `sync` source read/traverse and destination write/create POSIX preflight
+- `rm` target/parent traverse/delete POSIX preflight
+- DM Agent mount/tool/credential/network/identity evidence based node selection
+- same-node `dsync` selection for source/destination mounted on one candidate
+- `drm` selection for target-mounted candidate
+- dry-run preview VolcanoJob before any mutation
+- explicit confirm with TTL/fingerprint guard before execution
+- confirmed `dsync` and `drm` execution VolcanoJobs
+- preview/execution artifact layout:
+  `<artifact_base>/<job_id>/preview/` and
+  `<artifact_base>/<job_id>/execution/`
+- phase-specific `summary.json`, `command.json`, `stdout.log`, `stderr.log`
+  parsing into `result_summary`
+- action-required query coverage for `data.scan`, `data.sync`, and `data.rm`
+- install/runtime docs and env examples for Phase 20 `DMS_DM_*` settings
+
+Live verification evidence:
+
+- `docs/dms-phase20-verification.md`
+- testbed verifier: `scripts/verify-phase20-testbed.sh`, exit status 0
+- DMS image:
+  `testbed-registry:5000/dms:phase20-20260603234227`
+- mpifileutils source:
+  `chahwansong/mpifileutils@e3bfee10970bb4e24204d28689e3337e9741cca4`
+- MPI ssh image:
+  `testbed-registry:5000/dms-mpifileutils-mpi:phase20-20260603234227`
+- live DB suffix:
+  `20260603235548`
+- live operational DB:
+  `dms_phase20_20260603235548`
+- live observability DB:
+  `dms_phase20_obs_20260603235548`
+- sync Data Job:
+  `job_aa4972c3cc304d82bab972ddaa5c8a9e`
+- sync request:
+  `req_7cab18ce63194c31a143e67661b64f01`
+- sync selected tool:
+  `dsync`
+- sync artifact base:
+  `file:///mnt/testbed-cephfs/dms-phase20-artifacts-20260603235548/job_aa4972c3cc304d82bab972ddaa5c8a9e`
+- sync preview ref:
+  `volcano://dms-phase20/dms-sync-preview-job-aa4972c3cc304d82bab972ddaa5c8a9e`
+- sync execution ref:
+  `volcano://dms-phase20/dms-sync-execution-job-aa4972c3cc304d82bab972ddaa5c8a9e`
+- sync preview summary:
+  `dry_run=true`, `file_count=3`, `directory_count=2`, `total_bytes=38`,
+  `error_count=0`
+- sync execution summary:
+  `dry_run=false`, `file_count=3`, `directory_count=2`, `total_bytes=38`,
+  `error_count=0`
+- sync filesystem effect:
+  destination contained `alpha.txt`, `beta.txt`, `nested/gamma.txt`
+- rm Data Job:
+  `job_01a760e616e845eb86a03ee1b9c7ae92`
+- rm request:
+  `req_764a6cc88299416fac61add69fc4dc04`
+- rm selected tool:
+  `drm`
+- rm artifact base:
+  `file:///mnt/testbed-cephfs/dms-phase20-artifacts-20260603235548/job_01a760e616e845eb86a03ee1b9c7ae92`
+- rm preview ref:
+  `volcano://dms-phase20/dms-rm-preview-job-01a760e616e845eb86a03ee1b9c7ae92`
+- rm execution ref:
+  `volcano://dms-phase20/dms-rm-execution-job-01a760e616e845eb86a03ee1b9c7ae92`
+- rm preview summary:
+  `dry_run=true`, `file_count=1`, `directory_count=1`, `total_bytes=6`,
+  `target_absent=false`, `error_count=0`
+- rm execution summary:
+  `dry_run=false`, `file_count=1`, `directory_count=1`, `total_bytes=6`,
+  `target_absent=true`, `error_count=0`
+- expired preview negative case:
+  `job_f0e04c42bb564bdca5797d910bfa83ce` -> `PreviewExpired`
+- missing identity negative case:
+  `job_a40ce4ad154e4ee3a27326bf72b2edbc` -> `PreflightFailed`
+- standalone integrated MPI smoke namespace:
+  `dms-phase20-mpi-20260603235548`
+- standalone MPI hostfile:
+  `10.244.0.203`, `10.244.1.166`
+- standalone MPI dscan summary:
+  `total_entries=5`, `total_files=3`, `total_directories=2`,
+  `total_symlinks=0`, `total_other=0`, `broken_paths=[]`
+- cleanup:
+  `dms-phase20-mpi-20260603235548` and `dms-phase20` namespaces deleted by the
+  verifier.
+
+Not live Done:
+
+- `nsync` separated-role live execution. The current worker can identify `nsync`
+  candidate pools, but the Kubernetes adapter fails closed for live `nsync`
+  execution until Service/role orchestration is implemented and verified.
+- large-scale data movement performance, partial mutation repair automation, WAN
+  policy, and production object-store artifact backend.
+
+### 23. Optional Local Regression
 
 이 검증은 mock/stub도 포함하므로 `Done`의 단독 근거로 쓰지 않는다. 코드 회귀 확인 용도다.
 
@@ -2580,17 +2777,19 @@ Command:
 ```bash
 cd /home/mason/workspace/dms
 python3 -m py_compile scripts/phase13_long_running_rm_worker.py scripts/phase14_runtime_hardening.py scripts/phase15_resource_expiry.py scripts/phase16_mtls_auth.py
+python3 -m py_compile scripts/phase19_data_management_scan.py scripts/phase19_dscan_fixture.py scripts/phase20_data_management_sync_rm.py
 python3 -m py_compile src/dms/api.py src/dms/workers.py src/dms/repositories.py src/dms/query.py tests/test_phase18_operational_controls.py tests/test_phase16_mtls_auth.py
 python3 -m pytest -q
+python3 -m pytest -q tests/test_phase20_data_management_sync_rm.py tests/test_phase19_data_management_scan.py tests/test_phase1_contracts.py tests/test_phase16_mtls_auth.py
 python3 -m pytest -q tests/test_phase18_operational_controls.py tests/test_phase16_mtls_auth.py tests/test_phase14_runtime_hardening.py tests/test_gpfs_backend.py tests/test_phase6_kubernetes_multi_storage_quota.py tests/test_phase3_inventory.py
-bash -n scripts/verify-phase18-testbed.sh scripts/verify-phase16-testbed.sh scripts/verify-phase15-testbed.sh scripts/verify-phase14-testbed.sh scripts/verify-phase13-testbed.sh install/scripts/*.sh
+bash -n scripts/verify-phase20-testbed.sh scripts/verify-phase19-testbed.sh scripts/verify-phase18-testbed.sh scripts/verify-phase16-testbed.sh scripts/verify-phase15-testbed.sh scripts/verify-phase14-testbed.sh scripts/verify-phase13-testbed.sh install/scripts/*.sh
 git diff --check
 ```
 
 Output:
 
 ```text
-136 passed in 81.99s
+149 passed in 91.01s
 ```
 
 ## Not Implemented Yet
@@ -2606,9 +2805,10 @@ Output:
 - Kubernetes quota drift/usage pressure 자동 cron/scheduler/controller
 - GPFS live staging/testbed verification on an actual IBM GPFS / IBM Storage Scale cluster
 - WekaFS/Lustre filesystem quota/import live adapter
-- 실제 VolcanoJob create/watch/terminate
-- mpifileutils image build 또는 live execution
-- Data Management POSIX permission runtime preflight
+- Data Management `nsync` separated-role live execution
+- Data Management large-scale performance verification
+- Data Management partial mutation repair automation
+- Data Management production object-store artifact backend
 - JWT/OIDC provider integration
 - token issuer/audience/scope validation
 - full RBAC/authorization policy schema
@@ -2619,7 +2819,7 @@ Output:
 
 ## Comments For Next Phases
 
-- 다음 phase는 Phase 19 Data Management read-only scan preflight로 진행한다. Phase 17에서 GPFS CSI를 포함한 모든 CSI StorageClass namespace quota가 backend-specific stub이 아니라 live Kubernetes `ResourceQuota` adapter를 타도록 통합됐고, Phase 18에서 maintenance/drain/heartbeat/recovery guard가 닫혔다.
+- 다음 Data Management 작업은 `nsync` separated-role live execution, large-scale performance, partial mutation repair, production object-store artifact backend다. Phase 19 read-only `scan`과 Phase 20 `dsync`/`drm` preview-confirm path는 real pinned mpifileutils image와 VolcanoJob으로 검증됐다.
 - `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8/9에서 multi-StorageClass quota target으로 검증했다.
 - `cluster-a/testbed-cephfs`는 Phase 5/6/7/8/9에서 self-managed RM target 및 regression target으로 검증했다.
 - `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11/12/13/15에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock, expiry update/import default, quota apply/enforcement, check/sync, import/assign, long-running RM Worker target으로 검증했다.
