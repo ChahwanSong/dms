@@ -46,7 +46,7 @@ class Settings:
     dm_artifact_base_uri: str = "file:///var/lib/dms/artifacts"
     dm_default_priority: str = "Mid"
     dm_default_max_nodes: int = 1
-    dm_max_nodes: int = 4
+    dm_max_nodes: int = 1
     dm_scan_timeout_seconds: int = 3600
     dm_sync_preview_timeout_seconds: int = 1800
     dm_sync_execution_timeout_seconds: int = 3600
@@ -54,13 +54,20 @@ class Settings:
     dm_rm_execution_timeout_seconds: int = 3600
     dm_confirm_require_preview_fingerprint: bool = True
     dm_sync_allow_delete: bool = False
-    dm_max_sync_nodes: int = 2
+    dm_max_sync_nodes: int = 1
     dm_max_rm_nodes: int = 1
     dm_nsync_enabled: bool = True
     dm_nsync_service_prefix: str = "dms-nsync"
     dm_monitor_poll_seconds: int = 5
     dm_job_delete_on_terminal: bool = False
     dm_kubernetes_mode: str = "cluster"
+    dm_policy_default_worker_nodes: int = 3
+    dm_policy_max_worker_nodes: int = 3
+    dm_policy_default_processes_per_node: int = 3
+    dm_policy_max_processes_per_node: int = 10
+    dm_policy_default_queue: str | None = "dms-data"
+    dm_policy_default_priority_class: str | None = "dms-normal"
+    dm_scheduler_backend: str = "auto"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -147,7 +154,7 @@ class Settings:
             ),
             dm_default_priority=os.getenv("DMS_DM_DEFAULT_PRIORITY", "Mid"),
             dm_default_max_nodes=int(os.getenv("DMS_DM_DEFAULT_MAX_NODES", "1")),
-            dm_max_nodes=int(os.getenv("DMS_DM_MAX_NODES", "4")),
+            dm_max_nodes=int(os.getenv("DMS_DM_MAX_NODES", "1")),
             dm_scan_timeout_seconds=int(os.getenv("DMS_DM_SCAN_TIMEOUT_SECONDS", "3600")),
             dm_sync_preview_timeout_seconds=int(
                 os.getenv("DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS", "1800")
@@ -165,7 +172,7 @@ class Settings:
                 "DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT", True
             ),
             dm_sync_allow_delete=_bool_env("DMS_DM_SYNC_ALLOW_DELETE", False),
-            dm_max_sync_nodes=int(os.getenv("DMS_DM_MAX_SYNC_NODES", "2")),
+            dm_max_sync_nodes=int(os.getenv("DMS_DM_MAX_SYNC_NODES", "1")),
             dm_max_rm_nodes=int(os.getenv("DMS_DM_MAX_RM_NODES", "1")),
             dm_nsync_enabled=_bool_env("DMS_DM_NSYNC_ENABLED", True),
             dm_nsync_service_prefix=os.getenv(
@@ -174,11 +181,69 @@ class Settings:
             dm_monitor_poll_seconds=int(os.getenv("DMS_DM_MONITOR_POLL_SECONDS", "5")),
             dm_job_delete_on_terminal=_bool_env("DMS_DM_JOB_DELETE_ON_TERMINAL", False),
             dm_kubernetes_mode=os.getenv("DMS_DM_KUBERNETES_MODE", "cluster"),
+            dm_policy_default_worker_nodes=int(
+                os.getenv("DMS_DM_POLICY_DEFAULT_WORKER_NODES", "3")
+            ),
+            dm_policy_max_worker_nodes=int(
+                os.getenv("DMS_DM_POLICY_MAX_WORKER_NODES", "3")
+            ),
+            dm_policy_default_processes_per_node=int(
+                os.getenv("DMS_DM_POLICY_DEFAULT_PROCESSES_PER_NODE", "3")
+            ),
+            dm_policy_max_processes_per_node=int(
+                os.getenv("DMS_DM_POLICY_MAX_PROCESSES_PER_NODE", "10")
+            ),
+            dm_policy_default_queue=os.getenv("DMS_DM_POLICY_DEFAULT_QUEUE", "dms-data"),
+            dm_policy_default_priority_class=os.getenv(
+                "DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS", "dms-normal"
+            ),
+            dm_scheduler_backend=os.getenv("DMS_DM_SCHEDULER_BACKEND", "auto"),
         )
 
     @property
     def observability_is_separate(self) -> bool:
         return self.observability_database_url != self.database_url
+
+    def data_management_policy_defaults(self) -> list[dict[str, object]]:
+        default_nodes = self.dm_policy_default_worker_nodes
+        max_nodes = self.dm_policy_max_worker_nodes
+        default_processes = self.dm_policy_default_processes_per_node
+        max_processes = self.dm_policy_max_processes_per_node
+        common = {
+            "default_processes_per_node": default_processes,
+            "max_processes_per_node": max_processes,
+            "default_queue": self.dm_policy_default_queue,
+            "default_priority_class": self.dm_policy_default_priority_class,
+            "enabled": True,
+        }
+        return [
+            {
+                "operation": "scan",
+                "default_worker_nodes": default_nodes,
+                "max_worker_nodes": max_nodes,
+                **common,
+            },
+            {
+                "operation": "rm",
+                "default_worker_nodes": default_nodes,
+                "max_worker_nodes": max_nodes,
+                **common,
+            },
+            {
+                "operation": "dsync",
+                "default_worker_nodes": default_nodes,
+                "max_worker_nodes": max_nodes,
+                **common,
+            },
+            {
+                "operation": "nsync",
+                "default_source_nodes": default_nodes,
+                "default_destination_nodes": default_nodes,
+                "max_source_nodes": max_nodes,
+                "max_destination_nodes": max_nodes,
+                **common,
+            },
+        ]
 
 
 def _json_env(name: str) -> dict[str, str] | None:

@@ -1022,7 +1022,11 @@ def _filesystem_issue_type(summary: dict[str, Any]) -> str:
 
 def _data_job_issue_type(job: dict[str, Any], reason: Any) -> str:
     reason_text = str(reason or "").lower()
+    if "deferred" in reason_text:
+        return "data_job_nsync_deferred"
     if job["state"] == "PreflightFailed":
+        if "policy" in reason_text or reason_text == "nsync_disabled":
+            return "data_job_policy_failed"
         if "identity" in reason_text:
             return "data_job_missing_identity_mapping"
         if "permission" in reason_text or "posix" in reason_text:
@@ -1034,7 +1038,7 @@ def _data_job_issue_type(job: dict[str, Any], reason: Any) -> str:
         return "data_job_volcano_timeout"
     if "artifact" in reason_text:
         return "data_job_artifact_parse_failed"
-    if "volcano" in reason_text:
+    if "volcano" in reason_text or "mpi" in reason_text or "scheduler" in reason_text:
         return "data_job_volcano_failed"
     if job["state"] == "Cancelled":
         return "data_job_cancelled"

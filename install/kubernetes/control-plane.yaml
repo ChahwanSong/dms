@@ -63,7 +63,14 @@ data:
   DMS_DM_ARTIFACT_BASE_URI: "file:///artifacts/dms"
   DMS_DM_DEFAULT_PRIORITY: "Mid"
   DMS_DM_DEFAULT_MAX_NODES: "1"
-  DMS_DM_MAX_NODES: "4"
+  DMS_DM_MAX_NODES: "1"
+  DMS_DM_POLICY_DEFAULT_WORKER_NODES: "3"
+  DMS_DM_POLICY_MAX_WORKER_NODES: "3"
+  DMS_DM_POLICY_DEFAULT_PROCESSES_PER_NODE: "3"
+  DMS_DM_POLICY_MAX_PROCESSES_PER_NODE: "10"
+  DMS_DM_POLICY_DEFAULT_QUEUE: "dms-data"
+  DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS: "dms-normal"
+  DMS_DM_SCHEDULER_BACKEND: "auto"
   DMS_DM_SCAN_TIMEOUT_SECONDS: "3600"
   DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS: "1800"
   DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS: "3600"
@@ -71,7 +78,7 @@ data:
   DMS_DM_RM_EXECUTION_TIMEOUT_SECONDS: "3600"
   DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT: "true"
   DMS_DM_SYNC_ALLOW_DELETE: "false"
-  DMS_DM_MAX_SYNC_NODES: "2"
+  DMS_DM_MAX_SYNC_NODES: "1"
   DMS_DM_MAX_RM_NODES: "1"
   DMS_DM_NSYNC_ENABLED: "true"
   DMS_DM_NSYNC_SERVICE_PREFIX: "dms-nsync"
@@ -145,8 +152,17 @@ rules:
   - apiGroups: ["batch.volcano.sh"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["mpijobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]

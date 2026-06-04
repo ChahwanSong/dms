@@ -198,6 +198,24 @@ CREATE TABLE IF NOT EXISTS data_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_data_jobs_request ON data_jobs(request_id);
 
+CREATE TABLE IF NOT EXISTS data_management_policies (
+    operation TEXT PRIMARY KEY,
+    default_worker_nodes INTEGER,
+    default_source_nodes INTEGER,
+    default_destination_nodes INTEGER,
+    max_worker_nodes INTEGER,
+    max_source_nodes INTEGER,
+    max_destination_nodes INTEGER,
+    default_processes_per_node INTEGER NOT NULL,
+    max_processes_per_node INTEGER NOT NULL,
+    default_queue TEXT,
+    default_priority_class TEXT,
+    default_timeout_seconds INTEGER,
+    enabled INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+);
+
 CREATE TABLE IF NOT EXISTS control_mutations (
     mutation_id TEXT PRIMARY KEY,
     actor TEXT NOT NULL,
@@ -256,6 +274,7 @@ def migrate_operational(database: Database) -> None:
         _record_migration(connection, "operational-0002-phase2-identity")
         _record_migration(connection, "operational-0003-phase3-inventory")
         _record_migration(connection, "operational-0019-data-management-scan")
+        _record_migration(connection, "operational-0022-data-management-policies")
 
 
 def migrate_observability(database: Database) -> None:

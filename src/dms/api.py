@@ -24,6 +24,7 @@ from .config import Settings
 from .db import Database
 from .domain import (
     AgentReport,
+    DataManagementPolicyInput,
     DataJobRequest,
     DefaultQuotaPolicyInput,
     FilesystemResourceKey,
@@ -99,6 +100,9 @@ def create_app(
         migrate_all(operational_db, observability_db)
         repository = repository or DmsRepository(operational_db)
         observability = observability or ObservabilityRepository(observability_db)
+    repository.bootstrap_data_management_policies(
+        settings.data_management_policy_defaults()
+    )
     services = AppServices(
         settings=settings,
         repository=repository,
@@ -730,6 +734,42 @@ def _sanity_service(services: AppServices) -> StorageMappingSanityService:
 def data_management_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/data-management", tags=["data-management"])
 
+    @router.get("/policies")
+    def list_policies(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        return services.repository.list_data_management_policies()
+
+    @router.get("/policies/{operation}")
+    def get_policy(
+        operation: str,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        policy = services.repository.get_data_management_policy(_policy_operation_or_422(operation))
+        if not policy:
+            raise HTTPException(status_code=404, detail="data management policy not found")
+        return policy
+
+    @router.put("/policies/{operation}")
+    def put_policy(
+        operation: str,
+        body: DataManagementPolicyInput,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
+        path_operation = _policy_operation_or_422(operation)
+        if body.operation != path_operation:
+            raise HTTPException(status_code=400, detail="path and body operation mismatch")
+        services.repository.upsert_data_management_policy(body, actor=actor)
+        policy = services.repository.get_data_management_policy(path_operation)
+        return {"operation": path_operation, "status": "stored", "policy": policy}
+
     @router.post("/sync", status_code=202)
     def data_sync(
         body: DataJobRequest,
@@ -903,6 +943,16 @@ def data_management_router() -> APIRouter:
         }
 
     return router
+
+
+def _policy_operation_or_422(operation: str) -> str:
+    normalized = operation.strip().lower()
+    if normalized not in {"scan", "rm", "dsync", "nsync"}:
+        raise HTTPException(
+            status_code=422,
+            detail="operation must be one of: scan, rm, dsync, nsync",
+        )
+    return normalized
 
 
 def _data_job_request(

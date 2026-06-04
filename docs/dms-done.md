@@ -1,6 +1,6 @@
 # DMS Done / Verified Status
 
-Last updated: 2026-06-03 23:59 +0900
+Last updated: 2026-06-04 13:07 +0900
 
 이 문서는 DMS 구현이 진행될 때마다 계속 갱신하는 완료/검증 기록이다.
 새 phase가 끝나면 같은 구조로 `Implemented`, `Live Verification`,
@@ -14,6 +14,7 @@ Last updated: 2026-06-03 23:59 +0900
 - Phase 18까지의 실제 live/테스트베드 검증 대상은 PostgreSQL, OpenLDAP/SSSD, Kubernetes read-only inventory, `cluster-b` Kubernetes ResourceQuota/PVC admission, `cluster-a/testbed-cephfs`와 `cluster-b/testbed-longhorn` Kubernetes ResourceQuota lifecycle, `cluster-b` multi-StorageClass quota lifecycle, requester-scoped request query, Kubernetes namespace quota dedicated query API, blocked quota update semantics, 실제 DMS Agent DaemonSet report, Agent 기반 storage mapping sanity, Kubernetes default quota reset, on-demand quota audit, drift/usage pressure/effective quota action-required aggregation, DMS-managed ResourceQuota metadata drift detection, `cluster-a/c1-worker` 및 `cluster-b/c2-worker` host-mounted CephFS filesystem create/delete lifecycle, filesystem expiry query, API-driven filesystem expiration sweep, filesystem block/unblock lifecycle, filesystem expiry update/import default, LDAP access group membership, POSIX permission boundary, CephFS directory capacity/file-count quota apply/enforcement, quota update/decrease apply/check/sync/action-required, existing directory quota-only assignment, existing directory full import, Kubernetes long-running Planner/RM Worker Deployment 기반 RM 처리, RM Worker scale/restart/stale-claim recovery evidence, observability DB write failure safe boundary, live RM Worker의 Longhorn Kubernetes ResourceQuota apply, unknown backend fail-closed/action-required, Kubernetes namespace quota `expires_at` create/update/import, expired query/action-required, on-demand expiration sweep block, DMS API trusted edge mTLS evidence validation, token+mTLS combined authentication, certificate subject actor derivation, direct spoof NetworkPolicy 차단, synthetic GPFS CSI StorageClass 기반 Kubernetes ResourceQuota live adapter apply/read-back, testbed PostgreSQL 기반 maintenance/drain/heartbeat/stale-recovery guard이다. GPFS는 IBM Storage Scale command adapter 구현과 fake executor regression까지 완료했고, live GPFS filesystem 검증은 테스트베드에 GPFS cluster가 없어 skip evidence로 남겼다.
 - Phase 19의 실제 live/테스트베드 검증 대상은 read-only Data Management `scan`이다. API intake, Identity Mapping/POSIX preflight, DM Agent node selection, runtime preflight Pod, VolcanoJob, pinned real mpifileutils `dscan`, artifact file write, DB summary parsing/query/action-required가 검증됐다.
 - Phase 20의 실제 live/테스트베드 검증 대상은 Data Management `sync`/`rm`이다. `dsync` preview/execution, `drm` preview/execution, explicit confirm, preview expiry, missing identity, raw option/path guard, VolcanoJob monitoring, artifact parsing/query/action-required, standalone multi-node MPI `dscan` smoke가 검증됐다. `nsync` separated-role live execution은 아직 Done으로 보지 않는다.
+- Phase 21의 실제 live/테스트베드 검증 대상은 Data Management minimal functional execution이다. `scan`, same-node `sync`, `rm`은 1 selected node, 1 Volcano worker pod, 1 tool process로 실행되며 result/artifact evidence에 기록된다. separated-role `nsync`는 live execution 없이 fail-closed/deferred action-required evidence로 검증됐다.
 
 ## Testbed Architecture
 
@@ -2768,7 +2769,189 @@ Not live Done:
 - large-scale data movement performance, partial mutation repair automation, WAN
   policy, and production object-store artifact backend.
 
-### 23. Optional Local Regression
+### 23. Phase 21 Data Management Minimal Functional Execution
+
+Phase 21 aligns Data Management live execution to a minimal resource model before
+the next resource-model phase. The verified live path runs `scan`, same-node
+`sync`, and `rm` with one selected node, one Volcano worker pod, and one
+mpifileutils process per job phase. Separated-role `nsync` is not live-executed;
+it is rejected before mutation with explicit deferred evidence.
+
+Implemented so far:
+
+- `scan` worker pool selection collapses to one selected candidate.
+- same-node `sync`/`dsync` preview and execution collapse to one selected
+  candidate.
+- `rm`/`drm` preview and execution collapse to one selected candidate.
+- Volcano manifests use `replicas: 1` and pin the worker pod to the selected
+  node.
+- result summaries record `selected_node`, `selected_node_count`,
+  `worker_pod_count`, `process_count`, and pod placement summary.
+- request models reject top-level node/process/rank resource fields and raw
+  rank options.
+- separated-role source/destination pools select `nsync` but fail closed with
+  `reason=nsync_live_execution_deferred`, `deferred_phase=phase22`, and
+  `backend_side_effect=false`.
+- `data_job_nsync_deferred` appears in action-required for the deferred case.
+- install/runtime defaults now keep `DMS_DM_MAX_NODES`,
+  `DMS_DM_MAX_SYNC_NODES`, and `DMS_DM_MAX_RM_NODES` at `1`; Phase 21 does not
+  expose fan-out controls.
+
+Live verification evidence:
+
+- testbed verifier: `scripts/verify-phase21-testbed.sh`, exit status 0
+- live DB suffix: `20260604130312`
+- namespace: `dms-phase21` (deleted by verifier cleanup)
+- DMS image: `testbed-registry:5000/dms:phase21-20260604130312`
+- mpifileutils source:
+  `chahwansong/mpifileutils@e3bfee10970bb4e24204d28689e3337e9741cca4`
+- scan Data Job:
+  `job_363f64a8ec804ff4a5bbfb294ec49c75`
+- scan request:
+  `req_9a7d7b63eece49d7b9928f01fd8faa90`
+- scan Volcano ref:
+  `volcano://dms-phase21/dms-scan-job-363f64a8ec804ff4a5bbfb294ec49c75`
+- scan artifact base:
+  `file:///mnt/testbed-cephfs/dms-phase20-artifacts-20260604130312/job_363f64a8ec804ff4a5bbfb294ec49c75`
+- scan normalized summary:
+  `file_count=3`, `directory_count=2`, `total_bytes=38`, `error_count=0`,
+  `selected_node=c1-worker`, `worker_pod_count=1`, `process_count=1`
+- scan `dscan-report.json` summary:
+  `total_entries=5`, `total_files=3`, `total_directories=2`,
+  `total_symlinks=0`, `total_other=0`
+- sync Data Job:
+  `job_4df1c1a247cc4389b1e11df440cd4703`
+- sync request:
+  `req_b942b8465ccf442490d6703546c24dd4`
+- sync selected tool:
+  `dsync`
+- sync preview ref:
+  `volcano://dms-phase21/dms-sync-preview-job-4df1c1a247cc4389b1e11df440cd4703`
+- sync execution ref:
+  `volcano://dms-phase21/dms-sync-execution-job-4df1c1a247cc4389b1e11df440cd4703`
+- sync execution summary:
+  `dry_run=false`, `file_count=3`, `directory_count=2`, `total_bytes=38`,
+  `error_count=0`, `selected_node=c1-worker`, `worker_pod_count=1`,
+  `process_count=1`
+- sync filesystem effect:
+  `dms-phase21-20260604130312/sync-dest` contained `alpha.txt`, `beta.txt`,
+  `nested/gamma.txt`
+- rm Data Job:
+  `job_d79882c0b2624c268ceabeb01e3397bc`
+- rm request:
+  `req_b514a4cbc2f44644ba1e1a665e1d4221`
+- rm selected tool:
+  `drm`
+- rm preview ref:
+  `volcano://dms-phase21/dms-rm-preview-job-d79882c0b2624c268ceabeb01e3397bc`
+- rm execution ref:
+  `volcano://dms-phase21/dms-rm-execution-job-d79882c0b2624c268ceabeb01e3397bc`
+- rm execution summary:
+  `dry_run=false`, `file_count=1`, `directory_count=1`, `total_bytes=14`,
+  `target_absent=true`, `error_count=0`, `selected_node=c1-worker`,
+  `worker_pod_count=1`, `process_count=1`
+- nsync deferred Data Job:
+  `job_c4270f9026dc4f05be4ddee46d0c4a46`
+- nsync deferred request:
+  `req_c90ddd53d7b8423a8577393141eaf4fa`
+- nsync deferred result:
+  `state=PreflightFailed`, `reason=nsync_live_execution_deferred`,
+  `selected_source_node=phase21-src`, `selected_destination_node=phase21-dst`
+- negative regression:
+  top-level `node_count` and `options.rank_count` rejected with HTTP 422
+- cleanup:
+  `dms-phase21` namespace was deleted by the verifier. The synthetic split
+  StorageClass aliases were deleted after the run; the verifier script now also
+  includes this alias cleanup.
+
+Not live Done:
+
+- configurable job node/process/rank resource model
+- multi-node `scan`, `drm`, or `dsync` fan-out
+- pod-local multiple MPI ranks/processes
+- separated-role `nsync` live execution
+- `nsync` role Service, hostfile, role-map, launcher pod, and cleanup/recovery
+  evidence
+- large-scale data movement performance, partial mutation repair automation, WAN
+  policy, and production object-store artifact backend
+
+### 24. Phase 22 Data Management MPI Resource Model and Volcano Scheduling
+
+Phase 22 promotes Data Management from the Phase 21 minimal single-worker model to a
+scheduler-integrated MPI resource model. The production defaults are 3 worker nodes and 3
+processes per worker for `scan`, `rm`, and same-node `dsync`, and source 3 + destination 3
+worker nodes for separated-role `nsync`. The testbed run used 2 worker nodes and 1 process
+per worker as a resource-efficient override because cluster-a has two Kubernetes nodes.
+
+Implemented so far:
+
+- DB-backed Data Management policy rows for `scan`, `rm`, `dsync`, and `nsync`.
+- API endpoints for policy list/get/update and runtime policy update for new jobs.
+- request `resources` hints with max-policy clamping and no raw MPI/scheduler flag surface.
+- effective resource summary with `worker_pod_count`, `processes_per_node`,
+  `process_count`, scheduler queue, priority class, and clamp evidence.
+- eligible node-set scheduling constraints instead of selecting only the first ready node.
+- one worker pod per selected worker node, with Open MPI slots/processes per worker pod.
+- `scan` submission through `MPIJob` with Volcano scheduling metadata.
+- native VolcanoJob fallback for same-node `dsync`, `drm`, and separated-role `nsync`.
+- Open MPI mpifileutils job image with `dscan`, `dsync`, `drm`, `nsync`, `mpirun`,
+  `ompi_info`, and TCP transport.
+- mandatory artifacts for every Data Management job: submitted CR YAML, launch metadata,
+  worker pod metadata, scheduler metadata, `mpirun` metadata, stdout/stderr, and parsed
+  operation summaries.
+- `nsync` separated-role live execution using generated source/destination hostfiles and
+  role-map metadata.
+- Phase 22 failure/negative testbed matrix documented in `docs/dms-phase22.md`, including
+  identity mapping, POSIX permission, mount/tool evidence, and pre-mpifileutils fail-closed
+  expectations.
+
+Live verification evidence:
+
+- testbed verifier: `scripts/verify-phase22-testbed.sh`, exit status 0
+- live suffix: `20260604232855`
+- namespace: `dms-phase22-20260604232855` (deleted by verifier cleanup)
+- artifact root:
+  `file:///mnt/testbed-cephfs/dms-phase22-artifacts-20260604232855`
+- mpifileutils image:
+  `testbed-registry:5000/dms-mpifileutils:phase22-20260604231136`
+- MPI runtime: Open MPI (`mpirun`, `ompi_info`) over TCP
+- scan ref:
+  `mpijob://dms-phase22-20260604232855/dms-scan-execution-mpi-260604232855`
+- scan scheduler backend:
+  `mpi-operator`
+- scan placement:
+  `c1-control`, `c1-worker`; `worker_pod_count=2`, `process_count=2`
+- scan artifact:
+  `file:///mnt/testbed-cephfs/dms-phase22-artifacts-20260604232855/job-phase22-scan-20260604232855`
+- scan report:
+  `dscan-report.json` plus mandatory `mpi/submitted.yaml`, `mpi/launch.json`,
+  `mpi/workers.json`, `mpi/scheduler.json`, `mpi/mpirun.json`
+- dsync preview/execution backend:
+  native `volcano-job`; placement `c1-control`, `c1-worker`; `worker_pod_count=2`,
+  `process_count=2`
+- dsync filesystem effect:
+  destination contained `alpha.txt`, `beta.txt`, `nested/gamma.txt`
+- nsync execution backend:
+  native `volcano-job`; placement `c1-worker`, `c1-control`; `worker_pod_count=2`,
+  `process_count=2`
+- nsync filesystem effect:
+  destination contained `alpha.txt`, `nested/gamma.txt`
+- rm preview/execution backend:
+  native `volcano-job`; `target_absent=true` after execution
+- cleanup:
+  namespace, queue, priority class, and clusterrolebinding were removed by the verifier.
+
+Not live Done:
+
+- execution of every Phase 22 negative/failure matrix case in the testbed. The cases are now
+  documented and must be automated or manually exercised in the next hardening pass.
+- production-scale performance validation.
+- artifact retention/cleanup automation.
+- production object-store artifact backend.
+- partial mutation repair/resume automation.
+- automatic MPI interface override from DM Agent TCP interface evidence.
+
+### 25. Optional Local Regression
 
 이 검증은 mock/stub도 포함하므로 `Done`의 단독 근거로 쓰지 않는다. 코드 회귀 확인 용도다.
 
@@ -2777,24 +2960,25 @@ Command:
 ```bash
 cd /home/mason/workspace/dms
 python3 -m py_compile scripts/phase13_long_running_rm_worker.py scripts/phase14_runtime_hardening.py scripts/phase15_resource_expiry.py scripts/phase16_mtls_auth.py
-python3 -m py_compile scripts/phase19_data_management_scan.py scripts/phase19_dscan_fixture.py scripts/phase20_data_management_sync_rm.py
+python3 -m py_compile scripts/phase19_data_management_scan.py scripts/phase19_dscan_fixture.py scripts/phase20_data_management_sync_rm.py scripts/phase21_data_management_minimal.py scripts/phase22_data_management_mpi.py
 python3 -m py_compile src/dms/api.py src/dms/workers.py src/dms/repositories.py src/dms/query.py tests/test_phase18_operational_controls.py tests/test_phase16_mtls_auth.py
+python3 -m py_compile src/dms/adapters.py scripts/phase22_data_management_mpi.py
 python3 -m pytest -q
 python3 -m pytest -q tests/test_phase20_data_management_sync_rm.py tests/test_phase19_data_management_scan.py tests/test_phase1_contracts.py tests/test_phase16_mtls_auth.py
 python3 -m pytest -q tests/test_phase18_operational_controls.py tests/test_phase16_mtls_auth.py tests/test_phase14_runtime_hardening.py tests/test_gpfs_backend.py tests/test_phase6_kubernetes_multi_storage_quota.py tests/test_phase3_inventory.py
-bash -n scripts/verify-phase20-testbed.sh scripts/verify-phase19-testbed.sh scripts/verify-phase18-testbed.sh scripts/verify-phase16-testbed.sh scripts/verify-phase15-testbed.sh scripts/verify-phase14-testbed.sh scripts/verify-phase13-testbed.sh install/scripts/*.sh
+bash -n scripts/verify-phase22-testbed.sh scripts/verify-phase21-testbed.sh scripts/verify-phase20-testbed.sh scripts/verify-phase19-testbed.sh scripts/verify-phase18-testbed.sh scripts/verify-phase16-testbed.sh scripts/verify-phase15-testbed.sh scripts/verify-phase14-testbed.sh scripts/verify-phase13-testbed.sh install/scripts/*.sh
 git diff --check
 ```
 
 Output:
 
 ```text
-149 passed in 91.01s
+160 passed in 102.65s
 ```
 
 ## Not Implemented Yet
 
-다음 항목은 Phase 18까지 완료된 기능으로 보지 않는다.
+다음 항목은 Phase 22까지 완료된 기능으로 보지 않는다.
 
 - DMS API server, Planner, Worker, Agent의 production Helm/Kustomize 배포
 - filesystem expiry 자동 cron/scheduler/controller
@@ -2805,8 +2989,8 @@ Output:
 - Kubernetes quota drift/usage pressure 자동 cron/scheduler/controller
 - GPFS live staging/testbed verification on an actual IBM GPFS / IBM Storage Scale cluster
 - WekaFS/Lustre filesystem quota/import live adapter
-- Data Management `nsync` separated-role live execution
 - Data Management large-scale performance verification
+- Data Management Phase 22 negative/failure matrix live verification automation
 - Data Management partial mutation repair automation
 - Data Management production object-store artifact backend
 - JWT/OIDC provider integration
@@ -2819,7 +3003,10 @@ Output:
 
 ## Comments For Next Phases
 
-- 다음 Data Management 작업은 `nsync` separated-role live execution, large-scale performance, partial mutation repair, production object-store artifact backend다. Phase 19 read-only `scan`과 Phase 20 `dsync`/`drm` preview-confirm path는 real pinned mpifileutils image와 VolcanoJob으로 검증됐다.
+- 다음 Data Management 작업은 Phase 22 negative/failure matrix를 실제 테스트베드에서
+  자동화하거나 수동 검증하고, production 배포/운영 범위의 artifact retention,
+  object-store backend, partial mutation repair/resume, MPI interface override 정책을
+  구체화하는 것이다.
 - `cluster-b/testbed-longhorn` + `cluster-b/longhorn-static`은 Phase 6/7/8/9에서 multi-StorageClass quota target으로 검증했다.
 - `cluster-a/testbed-cephfs`는 Phase 5/6/7/8/9에서 self-managed RM target 및 regression target으로 검증했다.
 - `cluster-a/c1-worker`와 `cluster-b/c2-worker` host-mounted CephFS는 Phase 10/11/12/13/15에서 filesystem create/delete, expiry query, API-driven sweep, block/unblock, expiry update/import default, quota apply/enforcement, check/sync, import/assign, long-running RM Worker target으로 검증했다.

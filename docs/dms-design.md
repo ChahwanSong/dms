@@ -1,4 +1,15 @@
-# DMS Design
+# DMS Design (Archived)
+
+> Status: archived on 2026-06-04.
+>
+> This document is no longer an active design or implementation reference for DMS.
+> It is kept only as historical context for early phase decisions. For current
+> implementation work, use `docs/dms-done.md`, the latest `docs/dms-phase*.md`
+> files, `src/`, `install/`, and live testbed evidence. If this file conflicts
+> with the current implementation, `docs/dms-done.md`, current phase documents,
+> code, and install/runbook files are authoritative.
+>
+> New DMS work must not use this document as the source of truth.
 
 이 문서는 코드 에이전트가 DMS(Data Management Service)를 구현하고 테스트베드에서 기능 검증까지 수행하기 위해 참조하는 설계 및 구현 가이드 문서다.
 

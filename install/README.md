@@ -7,8 +7,7 @@
 - Kubernetes namespace quota Resource Management: live Kubernetes `ResourceQuota/dms-storage-quota` create/update/block/delete/check/sync/import/audit 가능.
 - Filesystem Resource Management: CephFS host-mounted adapter와 GPFS command adapter 가능. GPFS live 검증은 별도 staging 필요.
 - Agent inventory: Kubernetes DaemonSet 기반 report 가능.
-- Data Management `scan`: `DMS_DM_JOB_IMAGE`, Volcano scheduler, active identity mapping, fresh DM Agent report, artifact base URI가 준비된 경우 read-only scan을 실행할 수 있다.
-- Data Management `sync/rm`: Phase 20 기준으로 preview/confirm guard가 있는 `dsync`/`drm` live 경로를 운영할 수 있다. active identity mapping, fresh DM Agent report, POSIX preflight, writable artifact base, Volcano scheduler가 필수다. `nsync` separated-role live execution은 아직 운영 Done이 아니므로 열지 않는다.
+- Data Management `scan/sync/rm`: Phase 22 기준으로 DB policy/API 기반 node/process resource model, MPIJob+Volcano scheduling, native VolcanoJob fallback, active identity mapping, fresh DM Agent report, POSIX preflight, writable shared artifact base가 준비된 경우 live execution을 운영할 수 있다. `sync`와 `rm`은 preview/confirm guard가 필수이고, separated-role `nsync`는 MPI/Volcano backend gate를 통과해야 한다.
 
 ## 문서 사용 방법
 
@@ -76,6 +75,7 @@ install/
 | Target kubeconfig path inside Pod | `/etc/dms/kubeconfigs/cluster-a.kubeconfig` | `DMS_CLUSTER_KUBECONFIGS_JSON` |
 | CephFS/GPFS RM SSH host | `cephfs-rm-1`, `gpfs-rm-1` | filesystem backend command |
 | DM job image/artifacts | `registry.example.internal/dms-mpifileutils:<git-ref>`, `file:///artifacts/dms` | `DMS_DM_JOB_IMAGE`, `DMS_DM_ARTIFACT_BASE_URI` |
+| DM MPI scheduling | Volcano scheduler, MPI Operator with Volcano gang scheduling | Phase 22 multi-node Data Management prerequisite |
 
 For `file://` Data Management artifacts, `scan` result files are written under
 `<DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/`. `sync` and `rm` write phase-scoped
@@ -199,16 +199,20 @@ Private registry를 쓴다면 imagePullSecret을 별도로 만들고 manifest에
 ### 2.4 Data Management job image build
 
 Data Management는 DMS API/worker image에 우연히 존재하는 tool을 쓰지 않고
-별도의 승인된 mpifileutils job image를 사용한다. Phase 20 live 경로는
-`dscan`, `dsync`, `drm`을 사용한다. `nsync` binary도 image에 포함하지만,
-separated-role live execution은 아직 운영 Done으로 열지 않는다.
+별도의 승인된 mpifileutils job image를 사용한다. Phase 22 live 경로는
+`dscan`, `dsync`, `drm`, `nsync`, Open MPI `mpirun`, `ssh`, `sshd`를 포함한 image가
+필요하다. Phase 22 검증/운영 기준 MPI runtime은 Open MPI이며, DMS가 생성하는
+launcher command는 Open MPI TCP transport를 사용한다. MPI transport는 container 내부
+SSH/launcher 구현을 사용할 수 있지만,
+요청 payload가 SSH key, hostfile, NIC, raw mpirun option을 직접 지정하면 안 된다.
 
 수정할 파일:
 
 - 필요 시 `install/docker/Dockerfile.mpifileutils`
 
-기본 Dockerfile은 `chahwansong/mpifileutils` pinned ref를 빌드하고 `dscan`,
-`dsync`, `nsync`, `drm` binary를 포함한다.
+기본 Dockerfile은 `chahwansong/mpifileutils` pinned ref를 Open MPI로 빌드하고
+`dscan`, `dsync`, `nsync`, `drm`, `mpirun`, `ompi_info`, OpenSSH client/server를
+포함한다.
 
 ```bash
 export DMS_DM_JOB_IMAGE="registry.example.internal/dms-mpifileutils:$(git rev-parse --short HEAD)"
@@ -233,6 +237,28 @@ kubectl --context dms-control run dms-dm-image-check \
 kubectl --context dms-control logs pod/dms-dm-image-check
 kubectl --context dms-control delete pod dms-dm-image-check
 ```
+
+### 2.5 Data Management MPI scheduling prerequisites
+
+Phase 21 live Data Management는 단일 VolcanoJob worker pod 모델이다. Phase 22에서
+multi-node MPI execution을 열려면 control/managed execution cluster에 Volcano와 MPI
+Operator를 함께 설치하고, MPI Operator가 Volcano gang scheduling을 사용하도록 설정해야
+한다.
+
+Phase 22 prerequisite:
+
+- Volcano scheduler and CRDs
+- MPI Operator with Volcano gang scheduling enabled
+- `MPIJob` CRD
+- DMS Data Management queue and priority classes
+- RBAC for DM Worker to create/read/watch/delete MPIJob, VolcanoJob, PodGroup, Pods,
+  Events, and logs in the DMS namespace
+- shared RWX artifact path for `DMS_DM_ARTIFACT_BASE_URI=file://...`
+
+Phase 22 implementation must first verify that an `MPIJob` can create Volcano PodGroup
+queue/gang/priority scheduling and preserve DMS worker node affinity/anti-affinity. If this
+cannot be verified, DMS must use native VolcanoJob launcher/worker orchestration for the
+affected Data Management jobs rather than weakening scheduling constraints.
 
 ## 3. Target cluster RBAC와 kubeconfig 생성
 
@@ -993,6 +1019,8 @@ Data Management live execution을 열기 전에 다음 조건을 먼저 확인�
 - DM Agent report에 mount, required tool(`dscan`, `dsync`, `drm`), credential, network, POSIX user evidence가 Fresh
 - `DMS_DM_JOB_IMAGE`, `DMS_DM_JOB_IMAGE_REF`, `DMS_DM_ARTIFACT_BASE_URI`가 운영 값으로 설정됨
 - Volcano CRD/scheduler가 control 또는 managed cluster에서 동작 중
+- Phase 22 multi-node MPI execution을 열 경우 MPI Operator가 Volcano gang scheduling으로
+  설치되어 있고 `MPIJob` CRD가 동작 중
 
 조건이 맞으면 DM Worker를 1 replica로 올린다.
 
@@ -1033,6 +1061,16 @@ curl -fsS "$DMS_API_URL/api/v1/operations/data-jobs?requester_id=alice&operation
 
 `sync`/`rm` smoke는 반드시 작은 테스트 directory에서 preview와 confirm을
 분리해서 수행한다. 예시는 same-storage `dsync` 경로다.
+
+Phase 21의 live Data Management는 resource fan-out을 아직 열지 않는다.
+`scan`, same-node `sync`, `rm`은 각각 1 selected node, 1 worker pod, 1 process로
+실행되며, `result_summary.selected_node`, `worker_pod_count`, `process_count`로
+evidence를 확인한다. separated-role `nsync`가 필요한 topology는 mutation 없이
+`data_job_nsync_deferred` action-required로 남아야 정상이다.
+
+Phase 22 이후 multi-node MPI Data Management는 DMS가 ready mounted node set을
+eligible set으로 제출하고, Volcano/Kubernetes scheduler가 그중 실제 feasible nodes를
+선택한다. 모든 job은 submitted CR YAML과 MPI metadata artifact를 남겨야 한다.
 
 ```bash
 curl -fsS -X POST "$DMS_API_URL/api/v1/data-management/sync" \

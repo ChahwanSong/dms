@@ -13,10 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     git \
     libbz2-dev \
-    libmpich-dev \
+    libopenmpi-dev \
     libssl-dev \
     make \
-    mpich \
+    openmpi-bin \
     uuid-dev \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -58,13 +58,21 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgomp1 \
-    mpich \
+    libopenmpi3 \
+    openmpi-bin \
+    openssh-client \
+    openssh-server \
     && groupadd --gid 10000 developers \
-    && useradd --uid 10000 --gid 10000 --no-create-home --shell /usr/sbin/nologin alice \
+    && useradd --uid 10000 --gid 10000 --create-home --shell /bin/sh alice \
+    && mkdir -p /run/sshd \
+    && sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/mpifileutils /opt/mpifileutils
 
+ENV OMPI_ALLOW_RUN_AS_ROOT=1
+ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 ENV PATH=/opt/mpifileutils/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/mpifileutils/lib
 

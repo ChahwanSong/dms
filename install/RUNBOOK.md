@@ -210,11 +210,10 @@ kubectl --context dms-control -n dms logs deploy/dms-rm-worker --tail=200
 
 ## Data Management Incident
 
-Phase 20에서 live Data Management는 read-only `scan`과 preview/confirm guard가
-있는 `sync`/`rm`을 지원한다. `sync`와 `rm`은 preview 없이 실행되면 안 되며,
-`ConfirmPending` 상태에서 explicit confirm을 받은 뒤에만 mutation VolcanoJob을
-생성해야 한다. `nsync` separated-role live execution은 아직 운영 Done으로 열지
-않는다.
+Phase 22에서 live Data Management는 read-only `scan`, same-node `dsync`,
+separated-role `nsync`, `drm`을 DB policy/API 기반 node/process resource model로
+실행한다. `sync`와 `rm`은 preview 없이 실행되면 안 되며, `ConfirmPending` 상태에서
+explicit confirm을 받은 뒤에만 execution job을 생성해야 한다.
 
 data job 목록과 상세를 확인한다.
 
@@ -243,15 +242,21 @@ Preflight failure에서 먼저 확인할 것:
 
 - requester Identity Mapping이 `Active`인지 확인한다.
 - target/source/destination storage mapping의 `readiness.data_management`가 `Ready`인지 확인한다.
-- DM Agent report가 Fresh이고 mount, required tool(`dscan`, `dsync`, `drm`), credential, network, POSIX user evidence를 포함하는지 확인한다.
+- DM Agent report가 Fresh이고 mount, required tool(`dscan`, `dsync`, `drm`, `nsync`), credential, network, POSIX user evidence를 포함하는지 확인한다.
+- `GET /api/v1/data-management/policies/<operation>` 결과가 enabled이고 필요한 node/process 수가 현재 eligible node 수와 맞는지 확인한다.
 - target/source/destination path가 storage-relative이고 traversal/absolute path가 아닌지 확인한다.
 - `sync`는 source read/traverse와 destination parent write/execute 권한을 확인한다.
 - `rm`은 parent write/execute delete 권한과 target traverse/read 권한을 확인한다.
+- `preflight_result.effective_resource_model`의 `eligible_nodes`, `worker_pod_count`,
+  `processes_per_node`, `process_count`, `queue`, `priority_class`가 의도한 policy와
+  일치하는지 확인한다.
 
 Volcano/runtime failure에서 먼저 확인할 것:
 
 ```bash
 kubectl --context dms-control -n dms get job.batch.volcano.sh
+kubectl --context dms-control -n dms get mpijob
+kubectl --context dms-control -n dms get podgroup
 kubectl --context dms-control -n dms describe job.batch.volcano.sh <volcano-job-name>
 kubectl --context dms-control -n dms logs deploy/dms-dm-worker --tail=200
 ```
@@ -267,6 +272,12 @@ scan:
     dscan-report.json
     stdout.log
     stderr.log
+  <DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/mpi/
+    submitted.yaml
+    launch.json
+    workers.json
+    scheduler.json
+    mpirun.json
 
 sync/rm:
   <DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/preview/
@@ -279,6 +290,28 @@ sync/rm:
     command.json
     stdout.log
     stderr.log
+  <DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/mpi/
+    submitted.yaml
+    launch.json
+    workers.json
+    scheduler.json
+    mpirun.json
+```
+
+Phase 22 multi-node MPI Data Management 환경에서는 추가로 다음을 확인한다.
+
+- MPI Operator가 Volcano gang scheduling으로 설치되어 있고 `MPIJob` CRD가 존재한다.
+- mpifileutils job image가 Open MPI 기반이며 `mpirun`, `ompi_info`, `dscan`, `dsync`,
+  `drm`, `nsync`를 포함한다.
+- submitted CR YAML이 artifact `mpi/submitted.yaml`에 기록된다.
+- `mpi/workers.json`, `mpi/scheduler.json`, `mpi/mpirun.json`이 모든 job에 존재한다.
+- DMS가 eligible mounted node set을 제출했고, 실제 scheduled worker nodes는 scheduler
+  결과에서 기록됐다.
+- worker node당 worker pod 1개가 affinity/anti-affinity로 유지된다.
+
+```bash
+curl_dms "$DMS_API_URL/api/v1/operations/action-required" \
+  -H "authorization: Bearer $DMS_TOKEN"
 ```
 
 artifact parse failure가 나면 먼저 DM Worker가 artifact base를 traverse/read할 수
@@ -492,8 +525,8 @@ Rollback 전에도 가능하면 `dms-planned-shutdown.sh`로 drain mode에 진�
 
 ## 알려진 운영 공백
 
-- Data Management `scan`/`sync`/`rm` live execution은 Volcano/mpifileutils image/artifact path/identity evidence가 준비된 환경에서만 DM Worker replica를 올린다. `sync`/`rm`은 preview/confirm guard 없이 실행되면 안 된다.
-- `nsync` separated-role live execution은 아직 운영 Done이 아니다. `DMS_DM_KUBERNETES_MODE=stub`은 로컬 테스트/dev 전용이다.
+- Data Management `scan`/`sync`/`rm` live execution은 Volcano/MPI Operator/mpifileutils image/artifact path/identity evidence가 준비된 환경에서만 DM Worker replica를 올린다. `sync`/`rm`은 preview/confirm guard 없이 실행되면 안 된다.
+- `DMS_DM_KUBERNETES_MODE=stub`은 로컬 테스트/dev 전용이다.
 - 운영 Helm/Kustomize packaging은 아직 완성되지 않았다. 여기 있는 manifest는 명시적 YAML template이다.
 - 서로 다른 mount를 가진 multiple local filesystem RM worker는 storage-aware worker claiming 없이는 안전하지 않다.
 - WEKA filesystem backend는 아직 구현되지 않았다. Kubernetes namespace quota만 필요한 WEKA CSI StorageClass는 공통 live ResourceQuota adapter로 사용할 수 있지만, filesystem resource 요청은 fail-closed된다.

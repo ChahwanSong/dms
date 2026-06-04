@@ -879,7 +879,7 @@ class DMWorkerRuntime:
             job["job_id"],
             worker_pool={
                 **(job.get("worker_pool") or {}),
-                "selected_candidates": preflight.get("selected_candidates", []),
+                **(preflight.get("worker_pool") or {}),
             },
         )
         job = self.repository.get_data_job(job["job_id"])
@@ -1050,6 +1050,13 @@ class DMWorkerRuntime:
             )
             return
         self.repository.update_data_job(job["job_id"], preflight_result=preflight)
+        self.repository.update_data_job(
+            job["job_id"],
+            worker_pool={
+                **(job.get("worker_pool") or {}),
+                **(preflight.get("worker_pool") or {}),
+            },
+        )
         job = self.repository.get_data_job(job["job_id"])
         runtime_preflight = _verify_data_runtime_preflight(
             self.volcano_adapter, plan, job, preflight, phase="execution"
@@ -1231,16 +1238,8 @@ class DMWorkerRuntime:
         reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
         selected: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
-        candidate_keys = {
-            (candidate.get("cluster_name"), candidate.get("node_name"))
-            for candidate in (job.get("worker_pool") or {}).get("candidates", [])
-            if candidate.get("cluster_name") and candidate.get("node_name")
-        }
         for report in reports:
             if report["worker_role"] != WorkerRole.DM.value:
-                continue
-            key = (report["cluster_name"], report["node_name"])
-            if candidate_keys and key not in candidate_keys:
                 continue
             report_evidence = report.get("report") or {}
             reason = _scan_candidate_rejection_reason(
@@ -1272,6 +1271,24 @@ class DMWorkerRuntime:
                 "rejected_candidates": rejected,
                 "selected_candidates": [],
             }
+        resource_model = _resolve_data_job_resource_model(
+            repository=self.repository,
+            plan=plan,
+            tool="scan",
+            eligible_candidates=selected,
+        )
+        if resource_model.get("status") != "Ready":
+            return {
+                "status": "Rejected",
+                "reason": resource_model.get("reason"),
+                "requester_id": request["requester_id"],
+                "identity_mapping": _identity_mapping_summary(mapping),
+                "target": target,
+                "rejected_candidates": rejected,
+                "selected_candidates": [],
+                "eligible_candidates": selected,
+                "effective_resource_model": resource_model,
+            }
         return {
             "status": "Ready",
             "reason": "scan_preflight_passed",
@@ -1279,7 +1296,10 @@ class DMWorkerRuntime:
             "identity_mapping": _identity_mapping_summary(mapping),
             "target": target,
             "selected_candidates": selected,
+            "eligible_candidates": selected,
             "rejected_candidates": rejected,
+            "worker_pool": {"selected_candidates": selected, "eligible_candidates": selected},
+            "effective_resource_model": resource_model,
             "posix_permission_check": {
                 "source": "agent-inventory",
                 "uid": mapping["uid"],
@@ -1400,7 +1420,27 @@ class DMWorkerRuntime:
                 }
             )
         if dsync_candidates:
-            selected = dsync_candidates[:1]
+            resource_model = _resolve_data_job_resource_model(
+                repository=self.repository,
+                plan=plan,
+                tool="dsync",
+                eligible_candidates=dsync_candidates,
+            )
+            if resource_model.get("status") != "Ready":
+                return {
+                    "status": "Rejected",
+                    "reason": resource_model.get("reason"),
+                    "requester_id": request["requester_id"],
+                    "identity_mapping": _identity_mapping_summary(mapping),
+                    "source": source,
+                    "destination": destination,
+                    "selected_tool": "dsync",
+                    "tool_selection_reason": "same_node_source_destination_mount",
+                    "selected_candidates": [],
+                    "eligible_candidates": dsync_candidates,
+                    "rejected_candidates": rejected,
+                    "effective_resource_model": resource_model,
+                }
             return {
                 "status": "Ready",
                 "reason": "sync_preflight_passed",
@@ -1410,9 +1450,14 @@ class DMWorkerRuntime:
                 "destination": destination,
                 "selected_tool": "dsync",
                 "tool_selection_reason": "same_node_source_destination_mount",
-                "selected_candidates": selected,
+                "selected_candidates": dsync_candidates,
+                "eligible_candidates": dsync_candidates,
                 "rejected_candidates": rejected,
-                "worker_pool": {"selected_candidates": selected},
+                "worker_pool": {
+                    "selected_candidates": dsync_candidates,
+                    "eligible_candidates": dsync_candidates,
+                },
+                "effective_resource_model": resource_model,
                 "posix_permission_check": {
                     "source": "agent-inventory",
                     "uid": mapping["uid"],
@@ -1428,6 +1473,43 @@ class DMWorkerRuntime:
                 },
             }
         if source_candidates and destination_candidates:
+            nsync_enabled = _adapter_nsync_enabled(self.volcano_adapter)
+            resource_model = _resolve_data_job_resource_model(
+                repository=self.repository,
+                plan=plan,
+                tool="nsync",
+                eligible_candidates=[*source_candidates, *destination_candidates],
+                source_candidates=source_candidates,
+                destination_candidates=destination_candidates,
+            )
+            if not nsync_enabled:
+                resource_model = {**resource_model, "status": "Rejected", "reason": "nsync_disabled"}
+            if resource_model.get("status") != "Ready":
+                return {
+                    "status": "Rejected",
+                    "reason": resource_model.get("reason"),
+                    "requester_id": request["requester_id"],
+                    "identity_mapping": _identity_mapping_summary(mapping),
+                    "source": source,
+                    "destination": destination,
+                    "selected_tool": "nsync",
+                    "tool_selection_reason": "separated_role_source_destination_mounts",
+                    "backend_side_effect": False,
+                    "nsync_enabled": nsync_enabled,
+                    "source_candidates": source_candidates,
+                    "destination_candidates": destination_candidates,
+                    "selected_source_candidates": [],
+                    "selected_destination_candidates": [],
+                    "selected_candidates": [],
+                    "eligible_candidates": [*source_candidates, *destination_candidates],
+                    "rejected_candidates": rejected,
+                    "worker_pool": {
+                        "source_candidates": source_candidates,
+                        "destination_candidates": destination_candidates,
+                        "eligible_candidates": [*source_candidates, *destination_candidates],
+                    },
+                    "effective_resource_model": resource_model,
+                }
             return {
                 "status": "Ready",
                 "reason": "sync_preflight_passed",
@@ -1437,15 +1519,23 @@ class DMWorkerRuntime:
                 "destination": destination,
                 "selected_tool": "nsync",
                 "tool_selection_reason": "separated_role_source_destination_mounts",
+                "nsync_enabled": nsync_enabled,
                 "source_candidates": source_candidates,
                 "destination_candidates": destination_candidates,
-                "selected_candidates": [source_candidates[0], destination_candidates[0]],
+                "selected_source_candidates": source_candidates,
+                "selected_destination_candidates": destination_candidates,
+                "selected_candidates": [*source_candidates, *destination_candidates],
+                "eligible_candidates": [*source_candidates, *destination_candidates],
                 "rejected_candidates": rejected,
                 "worker_pool": {
                     "source_candidates": source_candidates,
                     "destination_candidates": destination_candidates,
-                    "selected_candidates": [source_candidates[0], destination_candidates[0]],
+                    "selected_source_candidates": source_candidates,
+                    "selected_destination_candidates": destination_candidates,
+                    "selected_candidates": [*source_candidates, *destination_candidates],
+                    "eligible_candidates": [*source_candidates, *destination_candidates],
                 },
+                "effective_resource_model": resource_model,
             }
         return {
             "status": "Rejected",
@@ -1504,7 +1594,26 @@ class DMWorkerRuntime:
                 "selected_candidates": [],
                 "rejected_candidates": rejected,
             }
-        selected = selected[:1]
+        resource_model = _resolve_data_job_resource_model(
+            repository=self.repository,
+            plan=plan,
+            tool="rm",
+            eligible_candidates=selected,
+        )
+        if resource_model.get("status") != "Ready":
+            return {
+                "status": "Rejected",
+                "reason": resource_model.get("reason"),
+                "requester_id": request["requester_id"],
+                "identity_mapping": _identity_mapping_summary(mapping),
+                "target": target,
+                "selected_tool": "drm",
+                "tool_selection_reason": "target_mount_with_drm",
+                "selected_candidates": [],
+                "eligible_candidates": selected,
+                "rejected_candidates": rejected,
+                "effective_resource_model": resource_model,
+            }
         return {
             "status": "Ready",
             "reason": "rm_preflight_passed",
@@ -1514,8 +1623,10 @@ class DMWorkerRuntime:
             "selected_tool": "drm",
             "tool_selection_reason": "target_mount_with_drm",
             "selected_candidates": selected,
+            "eligible_candidates": selected,
             "rejected_candidates": rejected,
-            "worker_pool": {"selected_candidates": selected},
+            "worker_pool": {"selected_candidates": selected, "eligible_candidates": selected},
+            "effective_resource_model": resource_model,
             "posix_permission_check": {
                 "source": "agent-inventory",
                 "uid": mapping["uid"],
@@ -1565,6 +1676,233 @@ def _scan_candidate_rejection_reason(
     if not _identity_ready(report.get("identity_evidence") or {}, posix_username):
         return "identity_not_ready_on_node"
     return None
+
+
+def _adapter_nsync_enabled(volcano_adapter: Any) -> bool:
+    settings = getattr(volcano_adapter, "settings", None)
+    if settings is None:
+        return True
+    return bool(getattr(settings, "dm_nsync_enabled", True))
+
+
+def _first_selected_node(selected_candidates: list[dict[str, Any]]) -> str | None:
+    for candidate in selected_candidates:
+        node_name = candidate.get("node_name")
+        if node_name:
+            return str(node_name)
+    return None
+
+
+def _phase21_minimal_resource_model(
+    selected_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    selected_node = _first_selected_node(selected_candidates)
+    return {
+        "selected_node": selected_node,
+        "selected_node_count": 1 if selected_node else 0,
+        "worker_pod_count": 1 if selected_node else 0,
+        "process_count": 1 if selected_node else 0,
+    }
+
+
+def _resolve_data_job_resource_model(
+    *,
+    repository: DmsRepository,
+    plan: dict[str, Any],
+    tool: str,
+    eligible_candidates: list[dict[str, Any]],
+    source_candidates: list[dict[str, Any]] | None = None,
+    destination_candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    policy_operation = {
+        "dscan": "scan",
+        "scan": "scan",
+        "drm": "rm",
+        "rm": "rm",
+        "dsync": "dsync",
+        "nsync": "nsync",
+    }.get(tool, tool)
+    policy = repository.get_data_management_policy(policy_operation)
+    if not policy:
+        return {
+            "status": "Rejected",
+            "reason": "missing_data_management_policy",
+            "policy_operation": policy_operation,
+            "eligible_node_count": len(_unique_candidate_nodes(eligible_candidates)),
+        }
+    if not policy.get("enabled", True):
+        return {
+            "status": "Rejected",
+            "reason": "data_management_policy_disabled",
+            "policy_operation": policy_operation,
+            "policy": policy,
+        }
+    resources = (plan.get("desired_state") or {}).get("resources") or {}
+    processes_requested = resources.get("processes_per_node")
+    processes_per_node, process_clamp = _clamp_policy_count(
+        requested=processes_requested,
+        default=int(policy["default_processes_per_node"]),
+        maximum=int(policy["max_processes_per_node"]),
+        field="processes_per_node",
+    )
+    clamp_reasons = [process_clamp] if process_clamp else []
+    if policy_operation == "nsync":
+        source_hint = resources.get("source_node_count") or resources.get("node_count")
+        destination_hint = resources.get("destination_node_count") or resources.get("node_count")
+        source_required, source_clamp = _clamp_policy_count(
+            requested=source_hint,
+            default=int(policy["default_source_nodes"]),
+            maximum=int(policy["max_source_nodes"]),
+            field="source_node_count",
+        )
+        destination_required, destination_clamp = _clamp_policy_count(
+            requested=destination_hint,
+            default=int(policy["default_destination_nodes"]),
+            maximum=int(policy["max_destination_nodes"]),
+            field="destination_node_count",
+        )
+        clamp_reasons.extend(item for item in (source_clamp, destination_clamp) if item)
+        source_nodes = _unique_candidate_nodes(source_candidates or [])
+        destination_nodes = _unique_candidate_nodes(destination_candidates or [])
+        if len(source_nodes) < source_required:
+            return _resource_shortage_model(
+                policy=policy,
+                resources=resources,
+                reason="insufficient_source_eligible_nodes",
+                eligible_node_count=len(source_nodes),
+                required_node_count=source_required,
+                processes_per_node=processes_per_node,
+                clamp_reasons=clamp_reasons,
+            )
+        if len(destination_nodes) < destination_required:
+            return _resource_shortage_model(
+                policy=policy,
+                resources=resources,
+                reason="insufficient_destination_eligible_nodes",
+                eligible_node_count=len(destination_nodes),
+                required_node_count=destination_required,
+                processes_per_node=processes_per_node,
+                clamp_reasons=clamp_reasons,
+            )
+        worker_pod_count = source_required + destination_required
+        return {
+            "status": "Ready",
+            "policy_operation": policy_operation,
+            "policy": policy,
+            "requested_resources": resources,
+            "clamp_reasons": clamp_reasons,
+            "scheduler_selection": "eligible_node_set",
+            "source_node_count": source_required,
+            "destination_node_count": destination_required,
+            "selected_node_count": worker_pod_count,
+            "worker_pod_count": worker_pod_count,
+            "launcher_pod_count": 1,
+            "processes_per_node": processes_per_node,
+            "process_count": worker_pod_count * processes_per_node,
+            "eligible_source_nodes": source_nodes,
+            "eligible_destination_nodes": destination_nodes,
+            "eligible_node_count": len(set(source_nodes + destination_nodes)),
+            "queue": policy.get("default_queue"),
+            "priority_class": policy.get("default_priority_class"),
+        }
+    node_hint = resources.get("node_count")
+    required_nodes, node_clamp = _clamp_policy_count(
+        requested=node_hint,
+        default=int(policy["default_worker_nodes"]),
+        maximum=int(policy["max_worker_nodes"]),
+        field="node_count",
+    )
+    if node_clamp:
+        clamp_reasons.append(node_clamp)
+    eligible_nodes = _unique_candidate_nodes(eligible_candidates)
+    if len(eligible_nodes) < required_nodes:
+        return _resource_shortage_model(
+            policy=policy,
+            resources=resources,
+            reason="insufficient_eligible_nodes",
+            eligible_node_count=len(eligible_nodes),
+            required_node_count=required_nodes,
+            processes_per_node=processes_per_node,
+            clamp_reasons=clamp_reasons,
+        )
+    return {
+        "status": "Ready",
+        "policy_operation": policy_operation,
+        "policy": policy,
+        "requested_resources": resources,
+        "clamp_reasons": clamp_reasons,
+        "scheduler_selection": "eligible_node_set",
+        "selected_node": None,
+        "selected_node_count": required_nodes,
+        "worker_pod_count": required_nodes,
+        "launcher_pod_count": 1,
+        "processes_per_node": processes_per_node,
+        "process_count": required_nodes * processes_per_node,
+        "eligible_nodes": eligible_nodes,
+        "eligible_node_count": len(eligible_nodes),
+        "queue": policy.get("default_queue"),
+        "priority_class": policy.get("default_priority_class"),
+    }
+
+
+def _clamp_policy_count(
+    *,
+    requested: Any,
+    default: int,
+    maximum: int,
+    field: str,
+) -> tuple[int, dict[str, Any] | None]:
+    if requested is None:
+        return default, None
+    value = int(requested)
+    if value > maximum:
+        return maximum, {
+            "field": field,
+            "requested": value,
+            "effective": maximum,
+            "reason": "resource_hint_clamped_to_policy_max",
+        }
+    return value, None
+
+
+def _resource_shortage_model(
+    *,
+    policy: dict[str, Any],
+    resources: dict[str, Any],
+    reason: str,
+    eligible_node_count: int,
+    required_node_count: int,
+    processes_per_node: int,
+    clamp_reasons: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "status": "Rejected",
+        "reason": reason,
+        "policy": policy,
+        "requested_resources": resources,
+        "clamp_reasons": clamp_reasons,
+        "eligible_node_count": eligible_node_count,
+        "required_node_count": required_node_count,
+        "worker_pod_count": required_node_count,
+        "launcher_pod_count": 1,
+        "processes_per_node": processes_per_node,
+        "process_count": required_node_count * processes_per_node,
+    }
+
+
+def _unique_candidate_nodes(candidates: list[dict[str, Any]]) -> list[str]:
+    nodes: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        node = candidate.get("node_name")
+        if not node:
+            continue
+        node_name = str(node)
+        if node_name in seen:
+            continue
+        seen.add(node_name)
+        nodes.append(node_name)
+    return nodes
 
 
 def _sync_dsync_candidate_rejection_reason(
@@ -1744,6 +2082,10 @@ def _scan_result_summary(
         )
     observed_summary = parsed_summary or adapter_result.observed_state.get("summary") or {}
     target = job.get("normalized_target") or plan["desired_state"].get("target") or {}
+    resource_evidence = _phase21_result_resource_evidence(
+        job=job, preflight=preflight, adapter_result=adapter_result
+    )
+    report_uri = _artifact_child_uri(artifact_uri, "dscan-report.json")
     return {
         "status": "Succeeded",
         "tool": job.get("selected_tool") or "dscan",
@@ -1751,7 +2093,8 @@ def _scan_result_summary(
         "artifact_base_uri": artifact_uri,
         "stdout_uri": _artifact_child_uri(artifact_uri, "stdout.log"),
         "stderr_uri": _artifact_child_uri(artifact_uri, "stderr.log"),
-        "report_uri": _artifact_child_uri(artifact_uri, "dscan-report.json"),
+        "report_uri": report_uri,
+        "scan_report_uri": report_uri,
         "summary_uri": _artifact_child_uri(artifact_uri, "summary.json"),
         "summary": {
             "file_count": int(observed_summary.get("file_count", 0)),
@@ -1763,6 +2106,7 @@ def _scan_result_summary(
         "summary_source": "artifact" if parsed_summary else "adapter_observed_state",
         "preflight_status": preflight.get("status"),
         "volcano_job_ref": _volcano_job_ref(adapter_result),
+        **resource_evidence,
     }
 
 
@@ -1779,6 +2123,9 @@ def _mutation_result_summary(
     parsed_summary = _mutation_artifact_summary(artifact_uri, phase)
     observed_summary = parsed_summary or adapter_result.observed_state.get("summary") or {}
     phase_base_uri = _artifact_child_uri(artifact_uri, phase)
+    resource_evidence = _phase21_result_resource_evidence(
+        job=job, preflight=preflight, adapter_result=adapter_result
+    )
     phase_entry = {
         "state": "Succeeded",
         "artifact_uri": phase_base_uri,
@@ -1797,6 +2144,7 @@ def _mutation_result_summary(
         "phase": phase,
         "artifact_base_uri": artifact_uri,
         "preflight_status": preflight.get("status"),
+        **resource_evidence,
         phase: phase_entry,
     }
     if phase == "execution":
@@ -1814,6 +2162,96 @@ def _mutation_result_summary(
     if job["operation"] == OperationKind.DATA_RM.value:
         result["target"] = job.get("normalized_target") or plan["desired_state"].get("target")
     return result
+
+
+def _phase21_result_resource_evidence(
+    *,
+    job: dict[str, Any],
+    preflight: dict[str, Any],
+    adapter_result: AdapterResult,
+) -> dict[str, Any]:
+    selected = (
+        preflight.get("selected_candidates")
+        or (preflight.get("worker_pool") or {}).get("selected_candidates")
+        or (job.get("worker_pool") or {}).get("selected_candidates")
+        or []
+    )
+    if not isinstance(selected, list):
+        selected = []
+    resource_model = preflight.get("effective_resource_model")
+    if not isinstance(resource_model, dict):
+        resource_model = {}
+    pod_summary = adapter_result.observed_state.get("pod_summary")
+    if not isinstance(pod_summary, dict):
+        pod_summary = {}
+    observed_pod_count = pod_summary.get("worker_pod_count")
+    if observed_pod_count is None:
+        pods = pod_summary.get("pods")
+        if isinstance(pods, list):
+            observed_pod_count = len(pods)
+    selected_node = (
+        resource_model.get("selected_node")
+        or adapter_result.observed_state.get("selected_node")
+    )
+    scheduled_nodes = _scheduled_nodes_from_pod_summary(pod_summary)
+    if selected_node is None and resource_model.get("scheduler_selection") != "eligible_node_set":
+        selected_node = _first_selected_node(selected)
+    if selected_node is None and len(scheduled_nodes) == 1:
+        selected_node = scheduled_nodes[0]
+    worker_pod_count = observed_pod_count
+    if worker_pod_count is None:
+        worker_pod_count = resource_model.get("worker_pod_count")
+    if worker_pod_count is None:
+        worker_pod_count = 1 if selected_node else 0
+    process_count = resource_model.get("process_count")
+    if process_count is None:
+        process_count = 1 if worker_pod_count else 0
+    selected_node_count = resource_model.get("selected_node_count")
+    if selected_node_count is None:
+        selected_node_count = len(scheduled_nodes) or (1 if selected_node else 0)
+    mpi_metadata = adapter_result.observed_state.get("mpi_metadata")
+    if not isinstance(mpi_metadata, dict):
+        mpi_metadata = _default_mpi_metadata_uris(adapter_result.artifact_uri)
+    return {
+        "selected_node": selected_node,
+        "selected_node_count": int(selected_node_count or 0),
+        "worker_pod_count": int(worker_pod_count or 0),
+        "launcher_pod_count": int(resource_model.get("launcher_pod_count") or 0),
+        "processes_per_node": int(resource_model.get("processes_per_node") or 1),
+        "process_count": int(process_count or 0),
+        "eligible_nodes": resource_model.get("eligible_nodes"),
+        "eligible_source_nodes": resource_model.get("eligible_source_nodes"),
+        "eligible_destination_nodes": resource_model.get("eligible_destination_nodes"),
+        "scheduled_nodes": scheduled_nodes,
+        "scheduler_selection": resource_model.get("scheduler_selection"),
+        "effective_resource_model": resource_model,
+        "mpi_metadata": mpi_metadata,
+        "pod_summary": pod_summary,
+    }
+
+
+def _scheduled_nodes_from_pod_summary(pod_summary: dict[str, Any]) -> list[str]:
+    nodes: list[str] = []
+    seen: set[str] = set()
+    for pod in pod_summary.get("pods") or []:
+        if pod.get("role") == "launcher":
+            continue
+        node = pod.get("node_name")
+        if not node or node in seen:
+            continue
+        seen.add(str(node))
+        nodes.append(str(node))
+    return nodes
+
+
+def _default_mpi_metadata_uris(artifact_uri: str | None) -> dict[str, str | None]:
+    return {
+        "submitted_uri": _artifact_child_uri(artifact_uri, "mpi/submitted.yaml"),
+        "launch_uri": _artifact_child_uri(artifact_uri, "mpi/launch.json"),
+        "workers_uri": _artifact_child_uri(artifact_uri, "mpi/workers.json"),
+        "scheduler_uri": _artifact_child_uri(artifact_uri, "mpi/scheduler.json"),
+        "mpirun_uri": _artifact_child_uri(artifact_uri, "mpi/mpirun.json"),
+    }
 
 
 def _artifact_child_uri(base_uri: str | None, name: str) -> str | None:

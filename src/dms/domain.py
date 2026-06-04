@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LifecycleState(StrEnum):
@@ -154,7 +154,41 @@ class DataPathTarget(BaseModel):
         return value
 
 
+class DataJobResources(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_count: int | None = None
+    source_node_count: int | None = None
+    destination_node_count: int | None = None
+    processes_per_node: int | None = None
+
+    @field_validator(
+        "node_count",
+        "source_node_count",
+        "destination_node_count",
+        "processes_per_node",
+    )
+    @classmethod
+    def positive_int_or_none(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or value < 1:
+            raise ValueError("resource counts must be positive integers")
+        return value
+
+    @model_validator(mode="after")
+    def validate_role_shape(self) -> "DataJobResources":
+        role_fields = self.source_node_count is not None or self.destination_node_count is not None
+        if role_fields and self.node_count is not None:
+            raise ValueError("node_count is mutually exclusive with source/destination node counts")
+        if (self.source_node_count is None) != (self.destination_node_count is None):
+            raise ValueError("source_node_count and destination_node_count must be provided together")
+        return self
+
+
 class DataJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     requester_id: str
     storage_name: str | None = None
     target: DataPathTarget | None = None
@@ -165,6 +199,7 @@ class DataJobRequest(BaseModel):
     destination_path: str | None = None
     priority: int | str = 100
     options: dict[str, Any] = Field(default_factory=dict)
+    resources: DataJobResources | None = None
     memo: str | None = None
 
     @model_validator(mode="after")
@@ -261,6 +296,79 @@ class DefaultQuotaPolicyInput(BaseModel):
     resource_kind: ResourceKind
     resource_type: str
     quota: dict[str, Any]
+
+
+class DataManagementPolicyInput(BaseModel):
+    operation: str
+    default_worker_nodes: int | None = None
+    default_source_nodes: int | None = None
+    default_destination_nodes: int | None = None
+    max_worker_nodes: int | None = None
+    max_source_nodes: int | None = None
+    max_destination_nodes: int | None = None
+    default_processes_per_node: int = 3
+    max_processes_per_node: int = 10
+    default_queue: str | None = None
+    default_priority_class: str | None = None
+    default_timeout_seconds: int | None = None
+    enabled: bool = True
+
+    @field_validator(
+        "default_worker_nodes",
+        "default_source_nodes",
+        "default_destination_nodes",
+        "max_worker_nodes",
+        "max_source_nodes",
+        "max_destination_nodes",
+        "default_processes_per_node",
+        "max_processes_per_node",
+        "default_timeout_seconds",
+    )
+    @classmethod
+    def positive_int_or_none(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or value < 1:
+            raise ValueError("policy numeric values must be positive integers")
+        return value
+
+    @field_validator("operation")
+    @classmethod
+    def supported_operation(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"scan", "rm", "dsync", "nsync"}:
+            raise ValueError("operation must be one of: scan, rm, dsync, nsync")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_policy_shape(self) -> "DataManagementPolicyInput":
+        if self.max_processes_per_node < self.default_processes_per_node:
+            raise ValueError("max_processes_per_node must be >= default_processes_per_node")
+        if self.operation == "nsync":
+            for name in (
+                "default_source_nodes",
+                "default_destination_nodes",
+                "max_source_nodes",
+                "max_destination_nodes",
+            ):
+                if getattr(self, name) is None:
+                    raise ValueError(f"{name} is required for nsync policy")
+            if self.default_worker_nodes is not None or self.max_worker_nodes is not None:
+                raise ValueError("nsync policy uses source/destination node counts")
+            if self.max_source_nodes < self.default_source_nodes:
+                raise ValueError("max_source_nodes must be >= default_source_nodes")
+            if self.max_destination_nodes < self.default_destination_nodes:
+                raise ValueError("max_destination_nodes must be >= default_destination_nodes")
+            return self
+        if self.default_worker_nodes is None or self.max_worker_nodes is None:
+            raise ValueError("default_worker_nodes and max_worker_nodes are required")
+        if self.default_source_nodes is not None or self.default_destination_nodes is not None:
+            raise ValueError("source/destination node counts are only valid for nsync")
+        if self.max_source_nodes is not None or self.max_destination_nodes is not None:
+            raise ValueError("source/destination max counts are only valid for nsync")
+        if self.max_worker_nodes < self.default_worker_nodes:
+            raise ValueError("max_worker_nodes must be >= default_worker_nodes")
+        return self
 
 
 _BASENAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -447,6 +555,7 @@ def validate_data_job_paths(request: DataJobRequest, operation: OperationKind) -
     raw_options = request.options.get("raw_options") or request.options.get("command_line")
     if raw_options:
         raise ValueError("raw command-line option strings are not accepted")
+    _validate_data_job_resources(request.resources, operation)
     normalized_data_job_priority(request.priority)
     if operation == OperationKind.DATA_SCAN:
         normalized_data_job_target(request)
@@ -463,6 +572,18 @@ def validate_data_job_paths(request: DataJobRequest, operation: OperationKind) -
         _validate_data_rm_options(request.options)
         return
     raise ValueError(f"unsupported data operation: {operation}")
+
+
+def _validate_data_job_resources(
+    resources: DataJobResources | None, operation: OperationKind
+) -> None:
+    if resources is None:
+        return
+    if operation in {OperationKind.DATA_SCAN, OperationKind.DATA_RM}:
+        if resources.source_node_count is not None or resources.destination_node_count is not None:
+            raise ValueError("source/destination resource counts are only valid for sync")
+    if operation == OperationKind.DATA_SYNC:
+        return
 
 
 def _validate_data_scan_options(options: dict[str, Any]) -> None:

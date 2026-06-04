@@ -83,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     observability_db = Database(settings.observability_database_url)
     migrate_all(operational, observability_db)
     repository = DmsRepository(operational)
+    repository.bootstrap_data_management_policies(settings.data_management_policy_defaults())
     observability = ObservabilityRepository(observability_db)
 
     if args.command == "migrate":
