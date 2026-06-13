@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -47,7 +48,9 @@ class FilesystemQuotaStrategy(Protocol):
 
 
 class KubernetesNamespaceQuotaAdapter(Protocol):
-    def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]: ...
+    def read_namespace(
+        self, cluster_name: str, namespace_name: str
+    ) -> dict[str, Any]: ...
 
     def read_resource_quota(
         self,
@@ -111,7 +114,9 @@ class IdentityLookupResult:
 
 
 class IdentityLookupAdapter(Protocol):
-    def lookup(self, provider: str, posix_username: str) -> IdentityLookupResult | None: ...
+    def lookup(
+        self, provider: str, posix_username: str
+    ) -> IdentityLookupResult | None: ...
 
 
 class IdentityGroupManager(Protocol):
@@ -125,6 +130,12 @@ class IdentityGroupManager(Protocol):
 
     def delete_group(self, *, group_name: str) -> dict[str, Any]: ...
 
+    def list_group_members(self, *, group_name: str) -> list[str]: ...
+
+    def lookup_group_gid(self, *, group_name: str) -> int | None: ...
+
+    def lookup_group_name_by_gid(self, *, gid: int) -> str | None: ...
+
 
 class IdentityLookupConfigurationError(RuntimeError):
     pass
@@ -136,6 +147,85 @@ class IdentityLookupReadError(RuntimeError):
 
 class BackendPreconditionError(RuntimeError):
     pass
+
+
+def probe_filesystem_access(
+    *,
+    run_cmd: Callable[[list[str]], int],
+    run_cmd_out: Callable[[list[str]], tuple[int, str]] | None = None,
+    path: str,
+    allowed_users: list[str],
+    denied_users: list[str],
+    group_gid: int | None = None,
+) -> dict[str, Any]:
+    """Verify filesystem access for allowed and denied users.
+
+    When group_gid is provided, verifies access via stat(directory gid) and
+    LDAP group membership lookup (getent group <gid>), which works regardless
+    of whether SSSD is synced with the local LDAP. This is the preferred mode
+    for environments where the OS SSSD does not know about DMS-managed groups.
+
+    Falls back to sudo -u user touch/rm probe when group_gid is not given.
+    """
+    allowed: dict[str, str] = {}
+
+    if group_gid is not None and run_cmd_out is not None:
+        # Stat-based check: verify directory GID matches, then check getent group membership
+        rc_stat, stat_out = run_cmd_out(["sh", "-c", f"stat -c '%g %a' {path}"])
+        if rc_stat == 0:
+            parts = stat_out.strip().split()
+            dir_gid = int(parts[0]) if parts else -1
+            dir_mode = parts[1] if len(parts) > 1 else ""
+            gid_ok = dir_gid == group_gid
+            group_writable = len(dir_mode) >= 3 and int(dir_mode[-2]) in (2, 3, 6, 7)
+            # Check group membership via getent (reads /etc/group or SSSD if available)
+            _, members_out = run_cmd_out(
+                ["sh", "-c", f"getent group {group_gid} 2>/dev/null || true"]
+            )
+            # Format: name:passwd:gid:members (comma separated)
+            known_members: set[str] = set()
+            if ":" in members_out:
+                parts_g = members_out.strip().split(":")
+                if len(parts_g) >= 4:
+                    known_members = {
+                        m.strip() for m in parts_g[3].split(",") if m.strip()
+                    }
+            for user in allowed_users:
+                if not gid_ok:
+                    allowed[user] = "gid_mismatch"
+                elif not group_writable:
+                    allowed[user] = "mode_not_writable"
+                elif known_members and user not in known_members:
+                    allowed[user] = "not_in_group"
+                else:
+                    allowed[user] = "ok"
+        else:
+            for user in allowed_users:
+                allowed[user] = "stat_failed"
+    else:
+        for user in allowed_users:
+            probe = f"{path}/.access-probe-{user}"
+            rc = run_cmd(
+                ["sudo", "-u", user, "sh", "-c", 'touch "$1" && rm "$1"', "sh", probe]
+            )
+            allowed[user] = "ok" if rc == 0 else "probe_failed"
+
+    denied: dict[str, str] = {}
+    for user in denied_users:
+        rc = run_cmd(
+            [
+                "sudo",
+                "-u",
+                user,
+                "sh",
+                "-c",
+                'test ! -x "$1" && test ! -w "$1"',
+                "sh",
+                path,
+            ]
+        )
+        denied[user] = "denied" if rc == 0 else "unexpected_access"
+    return {"allowed_users": allowed, "denied_users": denied}
 
 
 class VolcanoAdapter(Protocol):
@@ -152,7 +242,9 @@ class VolcanoAdapter(Protocol):
         phase: str,
     ) -> dict[str, Any]: ...
 
-    def create_job(self, plan: dict[str, Any], data_job: dict[str, Any]) -> AdapterResult: ...
+    def create_job(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> AdapterResult: ...
 
     def get_job(self, job_ref: str) -> dict[str, Any]: ...
 
@@ -167,7 +259,11 @@ class StubFilesystemBackendAdapter:
         self.calls.append((operation, plan["plan_id"]))
         desired = plan["desired_state"]
         return AdapterResult(
-            applied_state={"adapter": "filesystem-stub", "operation": operation, **desired},
+            applied_state={
+                "adapter": "filesystem-stub",
+                "operation": operation,
+                **desired,
+            },
             observed_state={
                 "adapter": "filesystem-stub",
                 "verified": True,
@@ -208,13 +304,19 @@ class StubFilesystemBackendAdapter:
 @dataclass
 class StubKubernetesNamespaceQuotaAdapter:
     calls: list[tuple[str, str]] = field(default_factory=list)
-    resource_quotas: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
+    resource_quotas: dict[tuple[str, str, str], dict[str, Any]] = field(
+        default_factory=dict
+    )
     resource_quota_lists: dict[tuple[str, str], list[dict[str, Any]]] = field(
         default_factory=dict
     )
 
     def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
-        return {"cluster_name": cluster_name, "namespace_name": namespace_name, "exists": True}
+        return {
+            "cluster_name": cluster_name,
+            "namespace_name": namespace_name,
+            "exists": True,
+        }
 
     def read_resource_quota(
         self,
@@ -306,7 +408,9 @@ class StubKubernetesNamespaceQuotaAdapter:
         return _audit_kubernetes_resource_quotas(self, plan)
 
 
-def render_kubernetes_resource_quota_hard(desired_state: dict[str, Any]) -> dict[str, str]:
+def render_kubernetes_resource_quota_hard(
+    desired_state: dict[str, Any],
+) -> dict[str, str]:
     quota = desired_state.get("quota") or {}
     hard: dict[str, str] = {}
     storage_bytes = _positive_int(
@@ -482,16 +586,18 @@ class KubernetesNamespaceQuotaLiveAdapter:
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
-        hard = desired.get("resource_quota_hard") or render_kubernetes_resource_quota_hard(
-            desired
-        )
+        hard = desired.get(
+            "resource_quota_hard"
+        ) or render_kubernetes_resource_quota_hard(desired)
         namespace = self._ensure_namespace(
             cluster_name=cluster_name,
             namespace_name=namespace_name,
             plan=plan,
             allow_create=bool(desired.get("allow_namespace_create")),
         )
-        before = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        before = self.read_resource_quota(
+            cluster_name, namespace_name, resource_quota_name
+        )
         if before["exists"]:
             _ensure_dms_managed(
                 before,
@@ -545,7 +651,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
-        before = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        before = self.read_resource_quota(
+            cluster_name, namespace_name, resource_quota_name
+        )
         if not before["exists"]:
             raise KubernetesMutationError(
                 f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
@@ -559,7 +667,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
             cluster_name,
             ["-n", namespace_name, "delete", "resourcequota", resource_quota_name],
         )
-        after = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        after = self.read_resource_quota(
+            cluster_name, namespace_name, resource_quota_name
+        )
         namespace = self.read_namespace(cluster_name, namespace_name)
         return AdapterResult(
             applied_state={
@@ -587,7 +697,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
-        observed = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        observed = self.read_resource_quota(
+            cluster_name, namespace_name, resource_quota_name
+        )
         if not observed["exists"]:
             raise KubernetesMutationError(
                 f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
@@ -640,7 +752,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
-        observed = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
+        observed = self.read_resource_quota(
+            cluster_name, namespace_name, resource_quota_name
+        )
         if not observed["exists"]:
             raise KubernetesMutationError(
                 f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
@@ -682,9 +796,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
                 "imported": True,
                 "resource_quota": observed,
                 "annotation_update_unsupported": True,
-                "previous_annotation_expires_at": (observed.get("annotations") or {}).get(
-                    "dms.io/expires-at"
-                ),
+                "previous_annotation_expires_at": (
+                    observed.get("annotations") or {}
+                ).get("dms.io/expires-at"),
             },
             message="Kubernetes ResourceQuota live state imported to DB",
         )
@@ -694,10 +808,12 @@ class KubernetesNamespaceQuotaLiveAdapter:
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
-        observed = self.read_resource_quota(cluster_name, namespace_name, resource_quota_name)
-        desired_hard = desired.get("resource_quota_hard") or render_kubernetes_resource_quota_hard(
-            desired
+        observed = self.read_resource_quota(
+            cluster_name, namespace_name, resource_quota_name
         )
+        desired_hard = desired.get(
+            "resource_quota_hard"
+        ) or render_kubernetes_resource_quota_hard(desired)
         issues: list[dict[str, Any]] = []
         status = "Consistent"
         if not observed["exists"]:
@@ -762,7 +878,10 @@ class KubernetesNamespaceQuotaLiveAdapter:
         return _audit_kubernetes_resource_quotas(self, plan)
 
     def read_resource_quota(
-        self, cluster_name: str, namespace_name: str, resource_quota_name: str = "dms-storage-quota"
+        self,
+        cluster_name: str,
+        namespace_name: str,
+        resource_quota_name: str = "dms-storage-quota",
     ) -> dict[str, Any]:
         return self._read_resource_quota(
             cluster_name=cluster_name,
@@ -871,10 +990,22 @@ class KubernetesNamespaceQuotaLiveAdapter:
     ) -> dict[str, Any]:
         completed = self._kubectl(
             cluster_name,
-            ["-n", namespace_name, "get", "resourcequota", resource_quota_name, "-o", "json"],
+            [
+                "-n",
+                namespace_name,
+                "get",
+                "resourcequota",
+                resource_quota_name,
+                "-o",
+                "json",
+            ],
             check=not allow_missing,
         )
-        if completed.returncode != 0 and allow_missing and _kubectl_not_found(completed.stderr):
+        if (
+            completed.returncode != 0
+            and allow_missing
+            and _kubectl_not_found(completed.stderr)
+        ):
             return {
                 "exists": False,
                 "name": resource_quota_name,
@@ -935,7 +1066,9 @@ class KubernetesNamespaceQuotaLiveAdapter:
                 command.extend(["--kubeconfig", kubeconfig])
             command.extend(args)
             return command
-        raise KubernetesMutationError(f"unsupported Kubernetes mutation mode: {self.mode}")
+        raise KubernetesMutationError(
+            f"unsupported Kubernetes mutation mode: {self.mode}"
+        )
 
 
 @dataclass
@@ -944,7 +1077,11 @@ class StubStorageInventoryAdapter:
 
     def effective_inventory(self) -> dict[str, Any]:
         return {
-            "rm": {"storage_classes": [], "quota_capabilities": [], "reports": self.reports},
+            "rm": {
+                "storage_classes": [],
+                "quota_capabilities": [],
+                "reports": self.reports,
+            },
             "dm": {"worker_pool": [], "tools": [], "reports": self.reports},
         }
 
@@ -976,7 +1113,8 @@ class KubectlReadOnlyInventoryAdapter:
     def read_inventory(self) -> dict[str, Any]:
         clusters: dict[str, Any] = {}
         cluster_names = sorted(
-            set(self.cluster_kubeconfigs.keys()) | set(self.cluster_control_hosts.keys())
+            set(self.cluster_kubeconfigs.keys())
+            | set(self.cluster_control_hosts.keys())
         )
         for cluster_name in cluster_names:
             clusters[cluster_name] = self._read_cluster(cluster_name)
@@ -998,7 +1136,8 @@ class KubectlReadOnlyInventoryAdapter:
         return {
             "nodes": [_node_summary(item) for item in nodes.get("items", [])],
             "storage_classes": [
-                _storage_class_summary(item) for item in storage_classes.get("items", [])
+                _storage_class_summary(item)
+                for item in storage_classes.get("items", [])
             ],
             "csi_drivers": [
                 {"name": item.get("metadata", {}).get("name")}
@@ -1042,7 +1181,8 @@ class KubectlReadOnlyInventoryAdapter:
         return {
             "nodes": [_node_summary(item) for item in nodes.get("items", [])],
             "storage_classes": [
-                _storage_class_summary(item) for item in storage_classes.get("items", [])
+                _storage_class_summary(item)
+                for item in storage_classes.get("items", [])
             ],
             "csi_drivers": [
                 {"name": item.get("metadata", {}).get("name")}
@@ -1087,7 +1227,9 @@ class KubectlReadOnlyInventoryAdapter:
                 command.extend(["--kubeconfig", kubeconfig])
             command.extend(args)
             return command
-        raise KubernetesInventoryReadError(f"unsupported Kubernetes inventory mode: {self.mode}")
+        raise KubernetesInventoryReadError(
+            f"unsupported Kubernetes inventory mode: {self.mode}"
+        )
 
 
 def _node_summary(item: dict[str, Any]) -> dict[str, Any]:
@@ -1391,7 +1533,9 @@ def effective_resource_quota_warnings(
                 )
                 continue
             try:
-                non_dms_value = kubernetes_resource_quota_value_to_base_units(key, value)
+                non_dms_value = kubernetes_resource_quota_value_to_base_units(
+                    key, value
+                )
                 dms_value = kubernetes_resource_quota_value_to_base_units(
                     key, dms_hard[key]
                 )
@@ -1460,12 +1604,13 @@ def _audit_kubernetes_resource_quotas(
             partial_failure = True
     audit_status = (
         "Failed"
-        if targets and all(target.get("resource_status") == "QueryFailed" for target in targets)
-        else "PartialFailure"
-        if partial_failure
-        else "ActionRequired"
-        if issue_count
-        else "Consistent"
+        if targets
+        and all(target.get("resource_status") == "QueryFailed" for target in targets)
+        else (
+            "PartialFailure"
+            if partial_failure
+            else "ActionRequired" if issue_count else "Consistent"
+        )
     )
     observed = {
         "adapter": "kubernetes-namespace-quota-live",
@@ -1502,7 +1647,8 @@ def _audit_kubernetes_resource_quota_target(
     namespace_name = target.get("namespace_name")
     resource_key = target.get("resource_key")
     resource_quota_name = (
-        target.get("desired_state", {}).get("resource_quota_name") or "dms-storage-quota"
+        target.get("desired_state", {}).get("resource_quota_name")
+        or "dms-storage-quota"
     )
     desired_hard = target.get("desired_hard") or {}
     result = {
@@ -1563,7 +1709,9 @@ def _audit_kubernetes_resource_quota_target(
                     ),
                 )
             if include_non_dms:
-                resource_quotas = adapter.list_resource_quotas(cluster_name, namespace_name)
+                resource_quotas = adapter.list_resource_quotas(
+                    cluster_name, namespace_name
+                )
                 result["resource_quotas"] = resource_quotas
                 result["effective_quota_warnings"] = effective_resource_quota_warnings(
                     resource_quotas=resource_quotas,
@@ -1571,9 +1719,8 @@ def _audit_kubernetes_resource_quota_target(
                     resource_quota_name=resource_quota_name,
                 )
         result["issues"] = issues
-        if (
-            resource_status == "Consistent"
-            and (result["usage_pressure"] or result["effective_quota_warnings"])
+        if resource_status == "Consistent" and (
+            result["usage_pressure"] or result["effective_quota_warnings"]
         ):
             resource_status = "ActionRequired"
         result["resource_status"] = resource_status
@@ -1664,7 +1811,10 @@ def _sync_desired_from_resource_quota_hard(
     if storage_class_quotas:
         desired["storage_class_quotas"] = storage_class_quotas
     for key in sorted(hard):
-        if parse_kubernetes_storage_class_quota_key(key) and key not in matched_storage_class_keys:
+        if (
+            parse_kubernetes_storage_class_quota_key(key)
+            and key not in matched_storage_class_keys
+        ):
             warnings.append(
                 {
                     "type": "unknown_storageclass_quota_key",
@@ -1727,7 +1877,29 @@ class StubIdentityGroupManager:
         existed = group_name in self.groups
         if existed:
             del self.groups[group_name]
-        return {"group_name": group_name, "deleted": existed, "identity_source": "stub-ldap"}
+        return {
+            "group_name": group_name,
+            "deleted": existed,
+            "identity_source": "stub-ldap",
+        }
+
+    def list_group_members(self, *, group_name: str) -> list[str]:
+        group = self.groups.get(group_name)
+        if not group:
+            return []
+        return list(group.get("members") or [])
+
+    def lookup_group_gid(self, *, group_name: str) -> int | None:
+        group = self.groups.get(group_name)
+        if not group:
+            return None
+        return int(group.get("gid")) if group.get("gid") is not None else None
+
+    def lookup_group_name_by_gid(self, *, gid: int) -> str | None:
+        for name, group in self.groups.items():
+            if group.get("gid") == gid:
+                return name
+        return None
 
 
 @dataclass(frozen=True)
@@ -1780,6 +1952,7 @@ class LdapIdentityLookupAdapter:
                 password=self.bind_password,
                 auto_bind=True,
                 receive_timeout=self.timeout_seconds,
+                auto_referrals=False,
             ) as connection:
                 connection.search(
                     search_base=user_base,
@@ -1809,7 +1982,9 @@ class LdapIdentityLookupAdapter:
         except IdentityLookupReadError:
             raise
         except Exception as exc:
-            raise IdentityLookupReadError(f"LDAP identity lookup failed: {exc}") from exc
+            raise IdentityLookupReadError(
+                f"LDAP identity lookup failed: {exc}"
+            ) from exc
 
         return IdentityLookupResult(
             provider=provider,
@@ -1841,12 +2016,12 @@ class LdapIdentityLookupAdapter:
     ) -> list[str]:
         from ldap3 import SUBTREE
 
-        group_filter = f"(|(memberUid={username})(member={user_dn})(gidNumber={primary_gid}))"
+        group_filter = f"(|(memberUid={username})(member={user_dn})(uniqueMember={user_dn})(gidNumber={primary_gid}))"
         connection.search(
             search_base=group_base,
             search_filter=group_filter,
             search_scope=SUBTREE,
-            attributes=["cn", "gidNumber", "memberUid", "member"],
+            attributes=["cn", "gidNumber", "memberUid", "member", "uniqueMember"],
         )
         names: set[str] = set()
         for entry in connection.entries:
@@ -1855,6 +2030,178 @@ class LdapIdentityLookupAdapter:
             if cn_values:
                 names.add(str(cn_values[0]))
         return sorted(names)
+
+    def bulk_lookup_all(
+        self,
+        provider: str,
+        posix_usernames: list[str],
+        *,
+        batch_size: int = 200,
+        max_workers: int = 8,
+    ) -> tuple[dict[str, IdentityLookupResult], list[str]]:
+        """LDAP 연결 1개로 전체 유저 uid/gid/groups를 일괄 조회.
+
+        Returns:
+            (results, errors): 성공한 username→result 매핑, 실패한 username 목록
+        """
+        try:
+            from ldap3 import Connection, Server, SUBTREE
+            from ldap3.utils.conv import escape_filter_chars
+        except ImportError as exc:
+            raise IdentityLookupConfigurationError(
+                "LDAP identity lookup requires installing the ldap extra"
+            ) from exc
+
+        import concurrent.futures
+
+        user_base = self.user_search_base or self.base_dn
+        group_base = self.group_search_base or self.base_dn
+        server = Server(self.uri, connect_timeout=self.timeout_seconds)
+
+        # 1단계: 전체 그룹을 한 번에 fetch해 역인덱스 빌드
+        # memberUid(username), member/uniqueMember(DN) 모두 수집
+        try:
+            with Connection(
+                server,
+                user=self.bind_dn,
+                password=self.bind_password,
+                auto_bind=True,
+                receive_timeout=max(self.timeout_seconds * 4, 60),
+                auto_referrals=False,
+            ) as conn:
+                conn.search(
+                    search_base=group_base,
+                    search_filter="(|(objectClass=posixGroup)(objectClass=groupOfNames)(objectClass=groupOfUniqueNames))",
+                    search_scope=SUBTREE,
+                    attributes=[
+                        "cn",
+                        "gidNumber",
+                        "memberUid",
+                        "member",
+                        "uniqueMember",
+                    ],
+                    paged_size=1000,
+                )
+                # username → set of group names
+                uid_to_groups: dict[str, set[str]] = {}
+                # dn(lowercase) → set of group names
+                dn_to_groups: dict[str, set[str]] = {}
+                # primary gid → group name
+                gid_to_group: dict[int, str] = {}
+
+                for entry in conn.entries:
+                    attrs = entry.entry_attributes_as_dict
+                    cn_list = attrs.get("cn") or []
+                    if not cn_list:
+                        continue
+                    group_name = str(cn_list[0])
+                    gid_list = attrs.get("gidNumber") or []
+                    if gid_list:
+                        try:
+                            gid_to_group[int(gid_list[0])] = group_name
+                        except (ValueError, TypeError):
+                            pass
+                    for uid in attrs.get("memberUid") or []:
+                        uid_to_groups.setdefault(str(uid), set()).add(group_name)
+                    for dn in (attrs.get("member") or []) + (
+                        attrs.get("uniqueMember") or []
+                    ):
+                        dn_to_groups.setdefault(str(dn).lower(), set()).add(group_name)
+        except IdentityLookupReadError:
+            raise
+        except Exception as exc:
+            raise IdentityLookupReadError(
+                f"LDAP bulk group fetch failed: {exc}"
+            ) from exc
+
+        # 2단계: 유저 배치 fetch (200명씩 OR 필터)
+        def fetch_batch(
+            batch: list[str],
+        ) -> list[tuple[str, IdentityLookupResult | None, str | None]]:
+            results: list[tuple[str, IdentityLookupResult | None, str | None]] = []
+            try:
+                with Connection(
+                    server,
+                    user=self.bind_dn,
+                    password=self.bind_password,
+                    auto_bind=True,
+                    receive_timeout=max(self.timeout_seconds * 2, 30),
+                    auto_referrals=False,
+                ) as conn:
+                    escaped = [escape_filter_chars(u) for u in batch]
+                    batch_filter = "(|" + "".join(f"(uid={e})" for e in escaped) + ")"
+                    conn.search(
+                        search_base=user_base,
+                        search_filter=batch_filter,
+                        search_scope=SUBTREE,
+                        attributes=["uid", "uidNumber", "gidNumber"],
+                    )
+                    found: dict[str, Any] = {}
+                    for entry in conn.entries:
+                        attrs = entry.entry_attributes_as_dict
+                        uid_vals = attrs.get("uid") or []
+                        if uid_vals:
+                            found[str(uid_vals[0])] = (entry.entry_dn, attrs)
+
+                    for username in batch:
+                        if username not in found:
+                            results.append((username, None, "not found in LDAP"))
+                            continue
+                        user_dn, attrs = found[username]
+                        try:
+                            uid_number = _single_int(attrs, "uidNumber")
+                            gid_number = _single_int(attrs, "gidNumber")
+                        except Exception as exc:
+                            results.append((username, None, str(exc)))
+                            continue
+                        # groups: uid index + dn index + primary gid
+                        groups: set[str] = set()
+                        groups.update(uid_to_groups.get(username, set()))
+                        groups.update(dn_to_groups.get(user_dn.lower(), set()))
+                        if gid_number in gid_to_group:
+                            groups.add(gid_to_group[gid_number])
+                        result = IdentityLookupResult(
+                            provider=provider,
+                            posix_username=username,
+                            uid=uid_number,
+                            primary_gid=gid_number,
+                            groups=sorted(groups),
+                            user_dn=user_dn,
+                            source_metadata={
+                                "adapter": "ldap3-direct",
+                                "read_only": True,
+                                "uri": self.uri,
+                                "base_dn": self.base_dn,
+                                "user_search_base": user_base,
+                                "group_search_base": group_base,
+                                "user_filter": f"(uid={username})",
+                                "user_dn": user_dn,
+                            },
+                        )
+                        results.append((username, result, None))
+            except Exception as exc:
+                for username in batch:
+                    results.append((username, None, str(exc)))
+            return results
+
+        batches = [
+            posix_usernames[i : i + batch_size]
+            for i in range(0, len(posix_usernames), batch_size)
+        ]
+
+        all_results: dict[str, IdentityLookupResult] = {}
+        errors: list[str] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(fetch_batch, b): b for b in batches}
+            for future in concurrent.futures.as_completed(futures):
+                for username, result, error in future.result():
+                    if result is not None:
+                        all_results[username] = result
+                    else:
+                        errors.append(f"{username}: {error}")
+
+        return all_results, errors
 
 
 @dataclass(frozen=True)
@@ -1866,8 +2213,8 @@ class LdapIdentityGroupManager:
     user_search_base: str
     group_search_base: str
     timeout_seconds: int = 5
-    gid_start: int = 24000
-    gid_end: int = 24999
+    gid_start: int = 9000000
+    gid_end: int = 9999999
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "LdapIdentityGroupManager":
@@ -1919,6 +2266,7 @@ class LdapIdentityGroupManager:
                 password=self.bind_password,
                 auto_bind=True,
                 receive_timeout=self.timeout_seconds,
+                auto_referrals=False,
             ) as connection:
                 missing = [
                     user
@@ -1980,12 +2328,16 @@ class LdapIdentityGroupManager:
                     attributes=["cn", "gidNumber", "memberUid", "description"],
                 )
                 if not connection.entries:
-                    raise IdentityLookupReadError(f"LDAP group read-back failed: {group_dn}")
+                    raise IdentityLookupReadError(
+                        f"LDAP group read-back failed: {group_dn}"
+                    )
                 attrs = connection.entries[0].entry_attributes_as_dict
         except IdentityLookupReadError:
             raise
         except Exception as exc:
-            raise IdentityLookupReadError(f"LDAP group management failed: {exc}") from exc
+            raise IdentityLookupReadError(
+                f"LDAP group management failed: {exc}"
+            ) from exc
         return {
             "identity_source": "openldap-sssd",
             "group_name": group_name,
@@ -2014,6 +2366,7 @@ class LdapIdentityGroupManager:
                 password=self.bind_password,
                 auto_bind=True,
                 receive_timeout=self.timeout_seconds,
+                auto_referrals=False,
             ) as connection:
                 connection.search(
                     search_base=self.group_search_base,
@@ -2038,6 +2391,113 @@ class LdapIdentityGroupManager:
             "group_name": group_name,
             "deleted": deleted,
         }
+
+    def list_group_members(self, *, group_name: str) -> list[str]:
+        try:
+            from ldap3 import Connection, Server, SUBTREE
+            from ldap3.utils.conv import escape_filter_chars
+        except ImportError as exc:
+            raise IdentityLookupConfigurationError(
+                "LDAP group management requires installing the ldap extra"
+            ) from exc
+        server = Server(self.uri, connect_timeout=self.timeout_seconds)
+        try:
+            with Connection(
+                server,
+                user=self.bind_dn,
+                password=self.bind_password,
+                auto_bind=True,
+                receive_timeout=self.timeout_seconds,
+                auto_referrals=False,
+            ) as connection:
+                connection.search(
+                    search_base=self.group_search_base,
+                    search_filter=f"(cn={escape_filter_chars(group_name)})",
+                    search_scope=SUBTREE,
+                    attributes=["memberUid"],
+                    size_limit=2,
+                )
+                if not connection.entries:
+                    return []
+                attrs = connection.entries[0].entry_attributes_as_dict
+                return [str(uid) for uid in (attrs.get("memberUid") or [])]
+        except Exception as exc:
+            raise IdentityLookupReadError(
+                f"LDAP group member lookup failed: {exc}"
+            ) from exc
+
+    def lookup_group_gid(self, *, group_name: str) -> int | None:
+        try:
+            from ldap3 import Connection, Server, SUBTREE
+            from ldap3.utils.conv import escape_filter_chars
+        except ImportError as exc:
+            raise IdentityLookupConfigurationError(
+                "LDAP group management requires installing the ldap extra"
+            ) from exc
+        server = Server(self.uri, connect_timeout=self.timeout_seconds)
+        try:
+            with Connection(
+                server,
+                user=self.bind_dn,
+                password=self.bind_password,
+                auto_bind=True,
+                receive_timeout=self.timeout_seconds,
+                auto_referrals=False,
+            ) as connection:
+                connection.search(
+                    search_base=self.group_search_base,
+                    search_filter=f"(cn={escape_filter_chars(group_name)})",
+                    search_scope=SUBTREE,
+                    attributes=["gidNumber"],
+                    size_limit=2,
+                )
+                if not connection.entries:
+                    return None
+                attrs = connection.entries[0].entry_attributes_as_dict
+                values = attrs.get("gidNumber") or []
+                if not values:
+                    return None
+                return int(values[0])
+        except Exception as exc:
+            raise IdentityLookupReadError(
+                f"LDAP group gid lookup failed: {exc}"
+            ) from exc
+
+    def lookup_group_name_by_gid(self, *, gid: int) -> str | None:
+        try:
+            from ldap3 import Connection, Server, SUBTREE
+        except ImportError as exc:
+            raise IdentityLookupConfigurationError(
+                "LDAP group management requires installing the ldap extra"
+            ) from exc
+        server = Server(self.uri, connect_timeout=self.timeout_seconds)
+        try:
+            with Connection(
+                server,
+                user=self.bind_dn,
+                password=self.bind_password,
+                auto_bind=True,
+                receive_timeout=self.timeout_seconds,
+                auto_referrals=False,
+            ) as connection:
+                connection.search(
+                    search_base=self.group_search_base,
+                    search_filter=f"(gidNumber={int(gid)})",
+                    search_scope=SUBTREE,
+                    attributes=["cn"],
+                    size_limit=2,
+                )
+                if not connection.entries:
+                    return None
+                attrs = connection.entries[0].entry_attributes_as_dict
+                values = attrs.get("cn") or []
+                if not values:
+                    return None
+                return str(values[0])
+        except Exception as exc:
+            raise IdentityLookupReadError(
+                f"LDAP group name-by-gid lookup failed: {exc}"
+            ) from exc
 
     def _ldap_user_exists(self, connection: Any, escaped_username: str) -> bool:
         from ldap3 import SUBTREE
@@ -2120,18 +2580,28 @@ class StubVolcanoAdapter:
             "reason": f"stub_{phase}_preflight_ready",
         }
 
-    def create_job(self, plan: dict[str, Any], data_job: dict[str, Any]) -> AdapterResult:
+    def create_job(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> AdapterResult:
         self.calls.append(("create_job", data_job["job_id"]))
-        tool = data_job["selected_tool"] or _default_tool_for_operation(data_job["operation"])
+        tool = data_job["selected_tool"] or _default_tool_for_operation(
+            data_job["operation"]
+        )
         phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
-        resource_model = (data_job.get("preflight_result") or {}).get("effective_resource_model") or {}
+        resource_model = (data_job.get("preflight_result") or {}).get(
+            "effective_resource_model"
+        ) or {}
         selected = _unique_selected_candidates(
             (data_job.get("worker_pool") or {}).get("selected_candidates") or []
         )
-        worker_pod_count = int(resource_model.get("worker_pod_count") or (1 if selected else 0))
+        worker_pod_count = int(
+            resource_model.get("worker_pod_count") or (1 if selected else 0)
+        )
         processes_per_node = int(resource_model.get("processes_per_node") or 1)
         scheduled = selected[:worker_pod_count]
-        selected_nodes = [item.get("node_name") for item in scheduled if item.get("node_name")]
+        selected_nodes = [
+            item.get("node_name") for item in scheduled if item.get("node_name")
+        ]
         selected_node = selected_nodes[0] if len(selected_nodes) == 1 else None
         process_count = worker_pod_count * processes_per_node
         artifact_uri = f"stub://artifacts/{data_job['job_id']}"
@@ -2179,25 +2649,27 @@ class StubVolcanoAdapter:
                 "mpi_metadata": mpi_metadata,
                 "pod_summary": {
                     "worker_pod_count": worker_pod_count,
-                    "pods": [
-                        {
-                            "name": f"{tool}-{index}-{data_job['job_id']}",
-                            "node_name": candidate.get("node_name"),
-                            "phase": "Succeeded",
-                            "role": "worker",
-                        }
-                        for index, candidate in enumerate(scheduled)
-                    ]
-                    + [
-                        {
-                            "name": f"launcher-{data_job['job_id']}",
-                            "node_name": "stub-launcher",
-                            "phase": "Succeeded",
-                            "role": "launcher",
-                        }
-                    ]
-                    if worker_pod_count
-                    else [],
+                    "pods": (
+                        [
+                            {
+                                "name": f"{tool}-{index}-{data_job['job_id']}",
+                                "node_name": candidate.get("node_name"),
+                                "phase": "Succeeded",
+                                "role": "worker",
+                            }
+                            for index, candidate in enumerate(scheduled)
+                        ]
+                        + [
+                            {
+                                "name": f"launcher-{data_job['job_id']}",
+                                "node_name": "stub-launcher",
+                                "phase": "Succeeded",
+                                "role": "launcher",
+                            }
+                        ]
+                        if worker_pod_count
+                        else []
+                    ),
                 },
             },
             message="volcano job stub completed",
@@ -2355,18 +2827,24 @@ class KubernetesVolcanoAdapter:
         return {
             "status": "Rejected",
             "source": "kubernetes-preflight-pod",
-            "reason": "posix_permission_denied"
-            if observed.get("phase") == "Failed"
-            else "preflight_pod_not_succeeded",
+            "reason": (
+                "posix_permission_denied"
+                if observed.get("phase") == "Failed"
+                else "preflight_pod_not_succeeded"
+            ),
             "pod_ref": f"pod://{namespace}/{name}",
             "observed_state": observed,
             "logs": logs,
             "cleanup": cleanup,
         }
 
-    def create_job(self, plan: dict[str, Any], data_job: dict[str, Any]) -> AdapterResult:
+    def create_job(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> AdapterResult:
         if not self.settings.dm_job_image:
-            raise DataManagementRuntimeError("DMS_DM_JOB_IMAGE is required for live data jobs")
+            raise DataManagementRuntimeError(
+                "DMS_DM_JOB_IMAGE is required for live data jobs"
+            )
         last_error = ""
         manifest: dict[str, Any] | None = None
         completed: subprocess.CompletedProcess[str] | None = None
@@ -2385,12 +2863,13 @@ class KubernetesVolcanoAdapter:
                 manifest = candidate
                 break
             last_error = completed.stderr.strip() or completed.stdout.strip()
-            if not _can_fallback_from_manifest_apply(candidate, last_error, self.settings.dm_scheduler_backend):
+            if not _can_fallback_from_manifest_apply(
+                candidate, last_error, self.settings.dm_scheduler_backend
+            ):
                 break
         if manifest is None or completed is None or completed.returncode != 0:
             raise DataManagementRuntimeError(
-                "data management job apply failed: "
-                f"{last_error}"
+                "data management job apply failed: " f"{last_error}"
             )
         job_name = manifest["metadata"]["name"]
         namespace = manifest["metadata"]["namespace"]
@@ -2399,7 +2878,9 @@ class KubernetesVolcanoAdapter:
         observed = self._wait_for_terminal(
             job_ref, timeout_seconds=self._timeout_seconds(data_job["operation"], phase)
         )
-        artifact_uri = _artifact_job_uri(self.settings.dm_artifact_base_uri, data_job["job_id"])
+        artifact_uri = _artifact_job_uri(
+            self.settings.dm_artifact_base_uri, data_job["job_id"]
+        )
         _write_mpi_metadata_artifacts(
             artifact_uri=artifact_uri,
             manifest=manifest,
@@ -2430,12 +2911,15 @@ class KubernetesVolcanoAdapter:
                 "name": job_name,
                 "submitted_kind": manifest["kind"],
                 "scheduler_backend": _scheduler_backend_for_manifest(manifest),
-                "selected_tool": data_job["selected_tool"] or _default_tool_for_operation(data_job["operation"]),
+                "selected_tool": data_job["selected_tool"]
+                or _default_tool_for_operation(data_job["operation"]),
                 "priority": data_job["priority"],
                 "phase": phase,
                 "image_ref": self.settings.dm_job_image_ref,
                 "artifact_uri": artifact_uri,
-                "eligible_nodes": [item.get("node_name") for item in selected if item.get("node_name")],
+                "eligible_nodes": [
+                    item.get("node_name") for item in selected if item.get("node_name")
+                ],
                 "selected_node": selected_node,
                 "selected_node_count": len(scheduled_nodes),
                 "worker_pod_count": worker_pod_count,
@@ -2486,7 +2970,16 @@ class KubernetesVolcanoAdapter:
             }
         namespace, name = _parse_volcano_ref(job_ref)
         completed = subprocess.run(
-            ["kubectl", "-n", namespace, "get", "job.batch.volcano.sh", name, "-o", "json"],
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "get",
+                "job.batch.volcano.sh",
+                name,
+                "-o",
+                "json",
+            ],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2500,7 +2993,9 @@ class KubernetesVolcanoAdapter:
             )
         payload = json.loads(completed.stdout)
         state = payload.get("status", {}).get("state") or {}
-        phase = state.get("phase") or payload.get("status", {}).get("phase") or "Unknown"
+        phase = (
+            state.get("phase") or payload.get("status", {}).get("phase") or "Unknown"
+        )
         labels = payload.get("metadata", {}).get("labels") or {}
         pod_summary = self._job_pod_summary(namespace, labels)
         return {
@@ -2512,7 +3007,9 @@ class KubernetesVolcanoAdapter:
             "pod_summary": pod_summary,
         }
 
-    def _job_pod_summary(self, namespace: str, job_labels: dict[str, Any]) -> dict[str, Any]:
+    def _job_pod_summary(
+        self, namespace: str, job_labels: dict[str, Any]
+    ) -> dict[str, Any]:
         data_job_id = job_labels.get("dms.openai.com/data-job-id")
         if not data_job_id:
             return {"worker_pod_count": 0, "pods": []}
@@ -2576,7 +3073,15 @@ class KubernetesVolcanoAdapter:
             resource = "job.batch.volcano.sh"
             message = "VolcanoJob delete failed: "
         completed = subprocess.run(
-            ["kubectl", "-n", namespace, "delete", resource, name, "--ignore-not-found"],
+            [
+                "kubectl",
+                "-n",
+                namespace,
+                "delete",
+                resource,
+                name,
+                "--ignore-not-found",
+            ],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2596,7 +3101,9 @@ class KubernetesVolcanoAdapter:
     def _wait_for_terminal(
         self, job_ref: str, *, timeout_seconds: int | None = None
     ) -> dict[str, Any]:
-        deadline = time.monotonic() + (timeout_seconds or self.settings.dm_scan_timeout_seconds)
+        deadline = time.monotonic() + (
+            timeout_seconds or self.settings.dm_scan_timeout_seconds
+        )
         last: dict[str, Any] = {"job_ref": job_ref, "phase": "Unknown"}
         last_with_workers: dict[str, Any] | None = None
         while time.monotonic() < deadline:
@@ -2604,12 +3111,16 @@ class KubernetesVolcanoAdapter:
             if _observed_has_worker_pods(last):
                 last_with_workers = last
             if last.get("phase") in {"Completed", "Succeeded"}:
-                if last_with_workers is not None and not _observed_has_worker_pods(last):
+                if last_with_workers is not None and not _observed_has_worker_pods(
+                    last
+                ):
                     last = {**last, "pod_summary": last_with_workers.get("pod_summary")}
                 last["phase"] = "Succeeded"
                 return last
             if last.get("phase") in {"Failed", "Terminated", "Aborted"}:
-                if last_with_workers is not None and not _observed_has_worker_pods(last):
+                if last_with_workers is not None and not _observed_has_worker_pods(
+                    last
+                ):
                     last = {**last, "pod_summary": last_with_workers.get("pod_summary")}
                 return last
             time.sleep(max(self.settings.dm_monitor_poll_seconds, 1))
@@ -2689,9 +3200,9 @@ class KubernetesVolcanoAdapter:
                 [
                     "set -eu",
                     "target=/dms/target/${DMS_SCAN_PATH}",
-                    "test -d \"$target\"",
-                    "test -r \"$target\"",
-                    "test -x \"$target\"",
+                    'test -d "$target"',
+                    'test -r "$target"',
+                    'test -x "$target"',
                     "printf 'scan preflight ok: %s\\n' \"$target\"",
                 ]
             ),
@@ -2747,15 +3258,15 @@ class KubernetesVolcanoAdapter:
                     "set -eu",
                     "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
                     "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
-                    "destination_parent=$(dirname \"$destination\")",
-                    "test -e \"$source\"",
-                    "test -r \"$source\"",
-                    "if [ -d \"$source\" ]; then test -x \"$source\"; fi",
-                    "test -d \"$destination_parent\"",
-                    "test -w \"$destination_parent\"",
-                    "test -x \"$destination_parent\"",
-                    "if [ -e \"$destination\" ]; then test -w \"$destination\"; fi",
-                    "printf 'sync %s preflight ok: %s -> %s\\n' \"$DMS_DM_PHASE\" \"$source\" \"$destination\"",
+                    'destination_parent=$(dirname "$destination")',
+                    'test -e "$source"',
+                    'test -r "$source"',
+                    'if [ -d "$source" ]; then test -x "$source"; fi',
+                    'test -d "$destination_parent"',
+                    'test -w "$destination_parent"',
+                    'test -x "$destination_parent"',
+                    'if [ -e "$destination" ]; then test -w "$destination"; fi',
+                    'printf \'sync %s preflight ok: %s -> %s\\n\' "$DMS_DM_PHASE" "$source" "$destination"',
                 ]
             )
             container_name = "sync-preflight"
@@ -2764,13 +3275,13 @@ class KubernetesVolcanoAdapter:
                 [
                     "set -eu",
                     "target=/dms/target/${DMS_RM_TARGET_PATH}",
-                    "parent=$(dirname \"$target\")",
-                    "test -d \"$target\"",
-                    "test -r \"$target\"",
-                    "test -x \"$target\"",
-                    "test -w \"$parent\"",
-                    "test -x \"$parent\"",
-                    "printf 'rm %s preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$target\"",
+                    'parent=$(dirname "$target")',
+                    'test -d "$target"',
+                    'test -r "$target"',
+                    'test -x "$target"',
+                    'test -w "$parent"',
+                    'test -x "$parent"',
+                    'printf \'rm %s preflight ok: %s\\n\' "$DMS_DM_PHASE" "$target"',
                 ]
             )
             container_name = "rm-preflight"
@@ -2817,7 +3328,9 @@ class KubernetesVolcanoAdapter:
         self, plan: dict[str, Any], data_job: dict[str, Any]
     ) -> list[dict[str, Any]]:
         backend = (self.settings.dm_scheduler_backend or "auto").strip().lower()
-        tool = data_job.get("selected_tool") or _default_tool_for_operation(data_job["operation"])
+        tool = data_job.get("selected_tool") or _default_tool_for_operation(
+            data_job["operation"]
+        )
         native = self._manifest(plan, data_job)
         if tool == "nsync":
             return [native]
@@ -2828,9 +3341,13 @@ class KubernetesVolcanoAdapter:
             return [native]
         return [mpi, native]
 
-    def _mpijob_manifest(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+    def _mpijob_manifest(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> dict[str, Any]:
         phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
-        tool = data_job.get("selected_tool") or _default_tool_for_operation(data_job["operation"])
+        tool = data_job.get("selected_tool") or _default_tool_for_operation(
+            data_job["operation"]
+        )
         job_name = _data_job_kubernetes_name(
             f"dms-{_operation_suffix(data_job['operation'])}-{phase}-mpi",
             data_job["job_id"],
@@ -2846,7 +3363,9 @@ class KubernetesVolcanoAdapter:
         launcher_command = (
             self._scan_mpi_launcher_command()
             if data_job["operation"] == "data.scan"
-            else self._mutation_command(plan, data_job, phase=phase, tool=tool, mpi=True)
+            else self._mutation_command(
+                plan, data_job, phase=phase, tool=tool, mpi=True
+            )
         )
         worker_spec = {
             "restartPolicy": "OnFailure",
@@ -2956,7 +3475,9 @@ class KubernetesVolcanoAdapter:
             },
         }
 
-    def _manifest(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+    def _manifest(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> dict[str, Any]:
         if data_job["operation"] != "data.scan":
             return self._mutation_manifest(plan, data_job)
         job_name = _data_job_kubernetes_name("dms-scan", data_job["job_id"])
@@ -2994,7 +3515,10 @@ class KubernetesVolcanoAdapter:
                     "command": ["/bin/sh", "-c", self._scan_mpi_launcher_command()],
                     "env": [
                         *scan["env"],
-                        {"name": "DMS_MPI_HOSTFILE", "value": "/etc/volcano/worker.host"},
+                        {
+                            "name": "DMS_MPI_HOSTFILE",
+                            "value": "/etc/volcano/worker.host",
+                        },
                     ],
                     "volumeMounts": scan["volume_mounts"],
                     "securityContext": {},
@@ -3060,16 +3584,20 @@ class KubernetesVolcanoAdapter:
                                     "dms.openai.com/data-role": "worker",
                                 }
                             },
-                            "spec": worker_pod_spec
+                            "spec": worker_pod_spec,
                         },
-                    }
+                    },
                 ],
             },
         }
 
-    def _mutation_manifest(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+    def _mutation_manifest(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> dict[str, Any]:
         phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
-        tool = data_job.get("selected_tool") or _default_tool_for_operation(data_job["operation"])
+        tool = data_job.get("selected_tool") or _default_tool_for_operation(
+            data_job["operation"]
+        )
         if tool == "nsync":
             return self._nsync_manifest(plan, data_job)
         context = self._mutation_context(plan, data_job)
@@ -3079,7 +3607,9 @@ class KubernetesVolcanoAdapter:
             f"dms-{_operation_suffix(data_job['operation'])}-{phase}",
             data_job["job_id"],
         )
-        launcher_command = self._mutation_command(plan, data_job, phase=phase, tool=tool, mpi=True)
+        launcher_command = self._mutation_command(
+            plan, data_job, phase=phase, tool=tool, mpi=True
+        )
         worker_pod_spec = {
             "restartPolicy": "Never",
             "serviceAccountName": self.settings.dm_service_account,
@@ -3112,7 +3642,10 @@ class KubernetesVolcanoAdapter:
                     "env": [
                         *context["env"],
                         {"name": "DMS_DM_PHASE", "value": phase},
-                        {"name": "DMS_MPI_HOSTFILE", "value": "/etc/volcano/worker.host"},
+                        {
+                            "name": "DMS_MPI_HOSTFILE",
+                            "value": "/etc/volcano/worker.host",
+                        },
                     ],
                     "volumeMounts": context["volume_mounts"],
                     "securityContext": _mpi_worker_container_security_context(),
@@ -3184,23 +3717,29 @@ class KubernetesVolcanoAdapter:
                             },
                             "spec": worker_pod_spec,
                         },
-                    }
+                    },
                 ],
             },
         }
 
-    def _nsync_manifest(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
+    def _nsync_manifest(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> dict[str, Any]:
         phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
         resource_model = _resource_model(data_job)
         source_replicas = int(resource_model.get("source_node_count") or 1)
         destination_replicas = int(resource_model.get("destination_node_count") or 1)
         context = self._nsync_context(plan, data_job)
-        job_name = _data_job_kubernetes_name(f"dms-sync-{phase}-nsync", data_job["job_id"])
-        launcher_command = self._nsync_launcher_command(plan, data_job, phase=phase)
-        source_candidates = (data_job.get("worker_pool") or {}).get("source_candidates") or []
-        destination_candidates = (
-            (data_job.get("worker_pool") or {}).get("destination_candidates") or []
+        job_name = _data_job_kubernetes_name(
+            f"dms-sync-{phase}-nsync", data_job["job_id"]
         )
+        launcher_command = self._nsync_launcher_command(plan, data_job, phase=phase)
+        source_candidates = (data_job.get("worker_pool") or {}).get(
+            "source_candidates"
+        ) or []
+        destination_candidates = (data_job.get("worker_pool") or {}).get(
+            "destination_candidates"
+        ) or []
         base_spec = {
             "restartPolicy": "Never",
             "serviceAccountName": self.settings.dm_service_account,
@@ -3231,7 +3770,9 @@ class KubernetesVolcanoAdapter:
                 }
             ],
         }
-        launcher_node_names = _candidate_node_names(source_candidates + destination_candidates)
+        launcher_node_names = _candidate_node_names(
+            source_candidates + destination_candidates
+        )
         if launcher_node_names:
             launcher_spec["affinity"] = _node_name_affinity(launcher_node_names)
         source_spec = {
@@ -3366,114 +3907,114 @@ class KubernetesVolcanoAdapter:
                 "umask 000",
                 "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
                 "mpi_dir=/dms/artifacts/${DMS_DATA_JOB_ID}/mpi",
-                "mkdir -p \"$artifact\" \"$mpi_dir\"",
+                'mkdir -p "$artifact" "$mpi_dir"',
                 _chown_artifact_line("$artifact"),
                 "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
                 "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
-                "rank_script=\"$mpi_dir/run-${DMS_DM_PHASE}-nsync-rank.sh\"",
-                "rank_hostfile=\"$mpi_dir/nsync-hostfile\"",
-                "role_map_file=\"$mpi_dir/nsync-role-map.txt\"",
-                "source_raw_hostfile=\"$mpi_dir/nsync-source-hosts\"",
-                "destination_raw_hostfile=\"$mpi_dir/nsync-destination-hosts\"",
-                ": > \"$rank_hostfile\"",
-                ": > \"$role_map_file\"",
-                ": > \"$source_raw_hostfile\"",
-                ": > \"$destination_raw_hostfile\"",
+                'rank_script="$mpi_dir/run-${DMS_DM_PHASE}-nsync-rank.sh"',
+                'rank_hostfile="$mpi_dir/nsync-hostfile"',
+                'role_map_file="$mpi_dir/nsync-role-map.txt"',
+                'source_raw_hostfile="$mpi_dir/nsync-source-hosts"',
+                'destination_raw_hostfile="$mpi_dir/nsync-destination-hosts"',
+                ': > "$rank_hostfile"',
+                ': > "$role_map_file"',
+                ': > "$source_raw_hostfile"',
+                ': > "$destination_raw_hostfile"',
                 "rank=0",
-                "if [ ! -f \"$DMS_MPI_SOURCE_HOSTFILE\" ]; then echo \"missing source hostfile: $DMS_MPI_SOURCE_HOSTFILE\" >&2; exit 1; fi",
-                "if [ ! -f \"$DMS_MPI_DESTINATION_HOSTFILE\" ]; then echo \"missing destination hostfile: $DMS_MPI_DESTINATION_HOSTFILE\" >&2; exit 1; fi",
-                "cat \"$DMS_MPI_SOURCE_HOSTFILE\" > \"$source_raw_hostfile\"",
-                "cat \"$DMS_MPI_DESTINATION_HOSTFILE\" > \"$destination_raw_hostfile\"",
+                'if [ ! -f "$DMS_MPI_SOURCE_HOSTFILE" ]; then echo "missing source hostfile: $DMS_MPI_SOURCE_HOSTFILE" >&2; exit 1; fi',
+                'if [ ! -f "$DMS_MPI_DESTINATION_HOSTFILE" ]; then echo "missing destination hostfile: $DMS_MPI_DESTINATION_HOSTFILE" >&2; exit 1; fi',
+                'cat "$DMS_MPI_SOURCE_HOSTFILE" > "$source_raw_hostfile"',
+                'cat "$DMS_MPI_DESTINATION_HOSTFILE" > "$destination_raw_hostfile"',
                 "attempts=0",
-                "while [ \"$attempts\" -lt 60 ]; do",
+                'while [ "$attempts" -lt 60 ]; do',
                 "  source_host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$source_raw_hostfile\")",
-                "  [ \"$source_host_count\" -ge \"$DMS_NSYNC_SOURCE_NODE_COUNT\" ] && break",
-                "  cat \"$DMS_MPI_SOURCE_HOSTFILE\" > \"$source_raw_hostfile\"",
+                '  [ "$source_host_count" -ge "$DMS_NSYNC_SOURCE_NODE_COUNT" ] && break',
+                '  cat "$DMS_MPI_SOURCE_HOSTFILE" > "$source_raw_hostfile"',
                 "  source_host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$source_raw_hostfile\")",
-                "  [ \"$source_host_count\" -ge \"$DMS_NSYNC_SOURCE_NODE_COUNT\" ] && break",
+                '  [ "$source_host_count" -ge "$DMS_NSYNC_SOURCE_NODE_COUNT" ] && break',
                 "  if [ -n \"${VC_SOURCE_WORKER_HOSTS:-}\" ]; then printf '%s\\n' \"$VC_SOURCE_WORKER_HOSTS\" | tr ',' '\\n' > \"$source_raw_hostfile\"; fi",
                 "  source_host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$source_raw_hostfile\")",
-                "  [ \"$source_host_count\" -ge \"$DMS_NSYNC_SOURCE_NODE_COUNT\" ] && break",
+                '  [ "$source_host_count" -ge "$DMS_NSYNC_SOURCE_NODE_COUNT" ] && break',
                 "  attempts=$((attempts + 1))",
                 "  sleep 1",
                 "done",
                 "attempts=0",
-                "while [ \"$attempts\" -lt 60 ]; do",
+                'while [ "$attempts" -lt 60 ]; do',
                 "  destination_host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$destination_raw_hostfile\")",
-                "  [ \"$destination_host_count\" -ge \"$DMS_NSYNC_DESTINATION_NODE_COUNT\" ] && break",
-                "  cat \"$DMS_MPI_DESTINATION_HOSTFILE\" > \"$destination_raw_hostfile\"",
+                '  [ "$destination_host_count" -ge "$DMS_NSYNC_DESTINATION_NODE_COUNT" ] && break',
+                '  cat "$DMS_MPI_DESTINATION_HOSTFILE" > "$destination_raw_hostfile"',
                 "  destination_host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$destination_raw_hostfile\")",
-                "  [ \"$destination_host_count\" -ge \"$DMS_NSYNC_DESTINATION_NODE_COUNT\" ] && break",
+                '  [ "$destination_host_count" -ge "$DMS_NSYNC_DESTINATION_NODE_COUNT" ] && break',
                 "  if [ -n \"${VC_DESTINATION_WORKER_HOSTS:-}\" ]; then printf '%s\\n' \"$VC_DESTINATION_WORKER_HOSTS\" | tr ',' '\\n' > \"$destination_raw_hostfile\"; fi",
                 "  destination_host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$destination_raw_hostfile\")",
-                "  [ \"$destination_host_count\" -ge \"$DMS_NSYNC_DESTINATION_NODE_COUNT\" ] && break",
+                '  [ "$destination_host_count" -ge "$DMS_NSYNC_DESTINATION_NODE_COUNT" ] && break',
                 "  attempts=$((attempts + 1))",
                 "  sleep 1",
                 "done",
-                "while IFS= read -r host_line || [ -n \"$host_line\" ]; do",
+                'while IFS= read -r host_line || [ -n "$host_line" ]; do',
                 "  host=$(printf '%s\\n' \"$host_line\" | awk '{print $1}')",
-                "  [ -n \"$host\" ] || continue",
-                "  resolved=\"\"",
+                '  [ -n "$host" ] || continue',
+                '  resolved=""',
                 "  attempts=0",
-                "  while [ \"$attempts\" -lt 30 ]; do",
+                '  while [ "$attempts" -lt 30 ]; do',
                 "    resolved=$(getent hosts \"$host\" 2>/dev/null | awk 'NR == 1 {print $1}')",
-                "    [ -n \"$resolved\" ] && break",
+                '    [ -n "$resolved" ] && break',
                 "    attempts=$((attempts + 1))",
                 "    sleep 1",
                 "  done",
-                "  if [ -n \"$resolved\" ]; then host=\"$resolved\"; fi",
-                "  printf '%s slots=%s\\n' \"$host\" \"$DMS_MPI_PROCESSES_PER_NODE\" >> \"$rank_hostfile\"",
+                '  if [ -n "$resolved" ]; then host="$resolved"; fi',
+                '  printf \'%s slots=%s\\n\' "$host" "$DMS_MPI_PROCESSES_PER_NODE" >> "$rank_hostfile"',
                 "  i=0",
-                "  while [ \"$i\" -lt \"$DMS_MPI_PROCESSES_PER_NODE\" ]; do",
-                "    printf '%s:src\\n' \"$rank\" >> \"$role_map_file\"",
+                '  while [ "$i" -lt "$DMS_MPI_PROCESSES_PER_NODE" ]; do',
+                '    printf \'%s:src\\n\' "$rank" >> "$role_map_file"',
                 "    rank=$((rank + 1))",
                 "    i=$((i + 1))",
                 "  done",
-                "done < \"$source_raw_hostfile\"",
-                "while IFS= read -r host_line || [ -n \"$host_line\" ]; do",
+                'done < "$source_raw_hostfile"',
+                'while IFS= read -r host_line || [ -n "$host_line" ]; do',
                 "  host=$(printf '%s\\n' \"$host_line\" | awk '{print $1}')",
-                "  [ -n \"$host\" ] || continue",
-                "  resolved=\"\"",
+                '  [ -n "$host" ] || continue',
+                '  resolved=""',
                 "  attempts=0",
-                "  while [ \"$attempts\" -lt 30 ]; do",
+                '  while [ "$attempts" -lt 30 ]; do',
                 "    resolved=$(getent hosts \"$host\" 2>/dev/null | awk 'NR == 1 {print $1}')",
-                "    [ -n \"$resolved\" ] && break",
+                '    [ -n "$resolved" ] && break',
                 "    attempts=$((attempts + 1))",
                 "    sleep 1",
                 "  done",
-                "  if [ -n \"$resolved\" ]; then host=\"$resolved\"; fi",
-                "  printf '%s slots=%s\\n' \"$host\" \"$DMS_MPI_PROCESSES_PER_NODE\" >> \"$rank_hostfile\"",
+                '  if [ -n "$resolved" ]; then host="$resolved"; fi',
+                '  printf \'%s slots=%s\\n\' "$host" "$DMS_MPI_PROCESSES_PER_NODE" >> "$rank_hostfile"',
                 "  i=0",
-                "  while [ \"$i\" -lt \"$DMS_MPI_PROCESSES_PER_NODE\" ]; do",
-                "    printf '%s:dst\\n' \"$rank\" >> \"$role_map_file\"",
+                '  while [ "$i" -lt "$DMS_MPI_PROCESSES_PER_NODE" ]; do',
+                '    printf \'%s:dst\\n\' "$rank" >> "$role_map_file"',
                 "    rank=$((rank + 1))",
                 "    i=$((i + 1))",
                 "  done",
-                "done < \"$destination_raw_hostfile\"",
-                "role_map=$(paste -sd, \"$role_map_file\")",
-                "test -n \"$role_map\"",
+                'done < "$destination_raw_hostfile"',
+                'role_map=$(paste -sd, "$role_map_file")',
+                'test -n "$role_map"',
                 "cat > \"$rank_script\" <<'DMS_MPI_RANK'",
                 "#!/bin/sh",
                 "set -eu",
-                "if [ \"$(id -u)\" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n \"${DMS_POSIX_USERNAME:-}\" ]; then",
-                f"  exec runuser -u \"$DMS_POSIX_USERNAME\" --preserve-environment -- nsync --role-mode map --role-map \"$DMS_NSYNC_ROLE_MAP\" {dryrun}{flags}\"$DMS_MPI_SYNC_SOURCE\" \"$DMS_MPI_SYNC_DESTINATION\"",
+                'if [ "$(id -u)" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n "${DMS_POSIX_USERNAME:-}" ]; then',
+                f'  exec runuser -u "$DMS_POSIX_USERNAME" --preserve-environment -- nsync --role-mode map --role-map "$DMS_NSYNC_ROLE_MAP" {dryrun}{flags}"$DMS_MPI_SYNC_SOURCE" "$DMS_MPI_SYNC_DESTINATION"',
                 "fi",
-                f"exec nsync --role-mode map --role-map \"$DMS_NSYNC_ROLE_MAP\" {dryrun}{flags}\"$DMS_MPI_SYNC_SOURCE\" \"$DMS_MPI_SYNC_DESTINATION\"",
+                f'exec nsync --role-mode map --role-map "$DMS_NSYNC_ROLE_MAP" {dryrun}{flags}"$DMS_MPI_SYNC_SOURCE" "$DMS_MPI_SYNC_DESTINATION"',
                 "DMS_MPI_RANK",
-                "chmod 0755 \"$rank_script\"",
-                "export DMS_NSYNC_ROLE_MAP=\"$role_map\"",
-                "export DMS_MPI_SYNC_SOURCE=\"$source\"",
-                "export DMS_MPI_SYNC_DESTINATION=\"$destination\"",
-                "mpi_hostfile=\"$rank_hostfile\"",
-                "hostfile_arg=\"--hostfile $mpi_hostfile\"",
+                'chmod 0755 "$rank_script"',
+                'export DMS_NSYNC_ROLE_MAP="$role_map"',
+                'export DMS_MPI_SYNC_SOURCE="$source"',
+                'export DMS_MPI_SYNC_DESTINATION="$destination"',
+                'mpi_hostfile="$rank_hostfile"',
+                'hostfile_arg="--hostfile $mpi_hostfile"',
                 _mpiexec_line(
-                    stdout="\"$artifact/stdout.log\"",
-                    stderr="\"$artifact/stderr.log\"",
+                    stdout='"$artifact/stdout.log"',
+                    stderr='"$artifact/stderr.log"',
                 ),
-                f"printf '{{\"tool\":\"nsync\",\"phase\":\"%s\",\"dry_run\":%s,\"role_map\":\"%s\"}}\\n' \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" \"$role_map\" > \"$artifact/command.json\"",
-                "printf '{\"summary\":{\"operation\":\"data.sync\",\"selected_tool\":\"nsync\",\"phase\":\"%s\",\"dry_run\":%s,\"source_node_count\":%s,\"destination_node_count\":%s,\"worker_pod_count\":%s,\"processes_per_node\":%s,\"process_count\":%s,\"error_count\":0}}\\n' \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" \"$DMS_NSYNC_SOURCE_NODE_COUNT\" \"$DMS_NSYNC_DESTINATION_NODE_COUNT\" \"$DMS_WORKER_POD_COUNT\" \"$DMS_MPI_PROCESSES_PER_NODE\" \"$DMS_MPI_PROCESS_COUNT\" > \"$artifact/summary.json\"",
-                "printf '{\"process_count\":%s,\"processes_per_node\":%s,\"interface_mode\":\"auto\",\"role_map\":\"%s\"}\\n' \"$DMS_MPI_PROCESS_COUNT\" \"$DMS_MPI_PROCESSES_PER_NODE\" \"$role_map\" > \"$mpi_dir/mpirun.json\"",
-                "touch \"$artifact/.done\"",
+                f'printf \'{{"tool":"nsync","phase":"%s","dry_run":%s,"role_map":"%s"}}\\n\' "$DMS_DM_PHASE" "$( [ "$DMS_DM_PHASE" = preview ] && echo true || echo false )" "$role_map" > "$artifact/command.json"',
+                'printf \'{"summary":{"operation":"data.sync","selected_tool":"nsync","phase":"%s","dry_run":%s,"source_node_count":%s,"destination_node_count":%s,"worker_pod_count":%s,"processes_per_node":%s,"process_count":%s,"error_count":0}}\\n\' "$DMS_DM_PHASE" "$( [ "$DMS_DM_PHASE" = preview ] && echo true || echo false )" "$DMS_NSYNC_SOURCE_NODE_COUNT" "$DMS_NSYNC_DESTINATION_NODE_COUNT" "$DMS_WORKER_POD_COUNT" "$DMS_MPI_PROCESSES_PER_NODE" "$DMS_MPI_PROCESS_COUNT" > "$artifact/summary.json"',
+                'printf \'{"process_count":%s,"processes_per_node":%s,"interface_mode":"auto","role_map":"%s"}\\n\' "$DMS_MPI_PROCESS_COUNT" "$DMS_MPI_PROCESSES_PER_NODE" "$role_map" > "$mpi_dir/mpirun.json"',
+                'touch "$artifact/.done"',
             ]
         )
 
@@ -3485,9 +4026,9 @@ class KubernetesVolcanoAdapter:
                 "mkdir -p /dms/artifacts/${DMS_DATA_JOB_ID}/mpi",
                 _chown_artifact_line("/dms/artifacts/${DMS_DATA_JOB_ID}"),
                 "target=/dms/target/${DMS_SCAN_PATH}",
-                "test -d \"$target\"",
-                "test -r \"$target\"",
-                "test -x \"$target\"",
+                'test -d "$target"',
+                'test -r "$target"',
+                'test -x "$target"',
                 "report=/dms/artifacts/${DMS_DATA_JOB_ID}/dscan-report.json",
                 "summary=/dms/artifacts/${DMS_DATA_JOB_ID}/summary.json",
                 "find_errors=/dms/artifacts/${DMS_DATA_JOB_ID}/find-errors.log",
@@ -3495,27 +4036,27 @@ class KubernetesVolcanoAdapter:
                 "cat > \"$rank_script\" <<'DMS_MPI_RANK'",
                 "#!/bin/sh",
                 "set -eu",
-                "if [ \"$(id -u)\" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n \"${DMS_POSIX_USERNAME:-}\" ]; then",
-                "  exec runuser -u \"$DMS_POSIX_USERNAME\" --preserve-environment -- dscan --directory \"$DMS_MPI_SCAN_TARGET\" --output \"$DMS_MPI_SCAN_REPORT\" --print",
+                'if [ "$(id -u)" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n "${DMS_POSIX_USERNAME:-}" ]; then',
+                '  exec runuser -u "$DMS_POSIX_USERNAME" --preserve-environment -- dscan --directory "$DMS_MPI_SCAN_TARGET" --output "$DMS_MPI_SCAN_REPORT" --print',
                 "fi",
-                "exec dscan --directory \"$DMS_MPI_SCAN_TARGET\" --output \"$DMS_MPI_SCAN_REPORT\" --print",
+                'exec dscan --directory "$DMS_MPI_SCAN_TARGET" --output "$DMS_MPI_SCAN_REPORT" --print',
                 "DMS_MPI_RANK",
-                "chmod 0755 \"$rank_script\"",
-                "export DMS_MPI_SCAN_TARGET=\"$target\"",
-                "export DMS_MPI_SCAN_REPORT=\"$report\"",
+                'chmod 0755 "$rank_script"',
+                'export DMS_MPI_SCAN_TARGET="$target"',
+                'export DMS_MPI_SCAN_REPORT="$report"',
                 *_mpi_hostfile_lines("/dms/artifacts/${DMS_DATA_JOB_ID}/mpi/hostfile"),
                 _mpiexec_line(
                     stdout="/dms/artifacts/${DMS_DATA_JOB_ID}/stdout.log",
                     stderr="/dms/artifacts/${DMS_DATA_JOB_ID}/stderr.log",
                 ),
-                "test -f \"$report\"",
-                ": > \"$find_errors\"",
-                "file_count=$(find \"$target\" -type f -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
-                "directory_count=$(find \"$target\" -type d -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                'test -f "$report"',
+                ': > "$find_errors"',
+                'file_count=$(find "$target" -type f -print 2>> "$find_errors" | wc -l | awk \'{print $1}\')',
+                'directory_count=$(find "$target" -type d -print 2>> "$find_errors" | wc -l | awk \'{print $1}\')',
                 "total_bytes=$(find \"$target\" -type f -printf '%s\\n' 2>> \"$find_errors\" | awk '{sum += $1} END {print sum + 0}')",
                 "error_count=$(wc -l < \"$find_errors\" | awk '{print $1}')",
-                "printf '{\"summary\":{\"file_count\":%s,\"directory_count\":%s,\"total_bytes\":%s,\"error_count\":%s,\"selected_node\":\"%s\",\"worker_pod_count\":%s,\"processes_per_node\":%s,\"process_count\":%s}}\\n' \"$file_count\" \"$directory_count\" \"$total_bytes\" \"$error_count\" \"$DMS_SELECTED_NODE\" \"$DMS_WORKER_POD_COUNT\" \"$DMS_MPI_PROCESSES_PER_NODE\" \"$DMS_MPI_PROCESS_COUNT\" > \"$summary\"",
-                "printf '{\"process_count\":%s,\"processes_per_node\":%s,\"interface_mode\":\"auto\"}\\n' \"$DMS_MPI_PROCESS_COUNT\" \"$DMS_MPI_PROCESSES_PER_NODE\" > /dms/artifacts/${DMS_DATA_JOB_ID}/mpi/mpirun.json",
+                'printf \'{"summary":{"file_count":%s,"directory_count":%s,"total_bytes":%s,"error_count":%s,"selected_node":"%s","worker_pod_count":%s,"processes_per_node":%s,"process_count":%s}}\\n\' "$file_count" "$directory_count" "$total_bytes" "$error_count" "$DMS_SELECTED_NODE" "$DMS_WORKER_POD_COUNT" "$DMS_MPI_PROCESSES_PER_NODE" "$DMS_MPI_PROCESS_COUNT" > "$summary"',
+                'printf \'{"process_count":%s,"processes_per_node":%s,"interface_mode":"auto"}\\n\' "$DMS_MPI_PROCESS_COUNT" "$DMS_MPI_PROCESSES_PER_NODE" > /dms/artifacts/${DMS_DATA_JOB_ID}/mpi/mpirun.json',
                 "touch /dms/artifacts/${DMS_DATA_JOB_ID}/.done",
             ]
         )
@@ -3537,50 +4078,50 @@ class KubernetesVolcanoAdapter:
                 "\n".join(
                     [
                         "mpi_dir=/dms/artifacts/${DMS_DATA_JOB_ID}/mpi",
-                        "mkdir -p \"$mpi_dir\"",
+                        'mkdir -p "$mpi_dir"',
                         _chown_artifact_line("$artifact"),
-                        "rank_script=\"$mpi_dir/run-${DMS_DM_PHASE}-sync-rank.sh\"",
+                        'rank_script="$mpi_dir/run-${DMS_DM_PHASE}-sync-rank.sh"',
                         "cat > \"$rank_script\" <<'DMS_MPI_RANK'",
                         "#!/bin/sh",
                         "set -eu",
-                        "if [ \"$(id -u)\" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n \"${DMS_POSIX_USERNAME:-}\" ]; then",
-                        f"  exec runuser -u \"$DMS_POSIX_USERNAME\" --preserve-environment -- {tool} {dryrun}{flags}\"$DMS_MPI_SYNC_SOURCE\" \"$DMS_MPI_SYNC_DESTINATION\"",
+                        'if [ "$(id -u)" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n "${DMS_POSIX_USERNAME:-}" ]; then',
+                        f'  exec runuser -u "$DMS_POSIX_USERNAME" --preserve-environment -- {tool} {dryrun}{flags}"$DMS_MPI_SYNC_SOURCE" "$DMS_MPI_SYNC_DESTINATION"',
                         "fi",
-                        f"exec {tool} {dryrun}{flags}\"$DMS_MPI_SYNC_SOURCE\" \"$DMS_MPI_SYNC_DESTINATION\"",
+                        f'exec {tool} {dryrun}{flags}"$DMS_MPI_SYNC_SOURCE" "$DMS_MPI_SYNC_DESTINATION"',
                         "DMS_MPI_RANK",
-                        "chmod 0755 \"$rank_script\"",
-                        "export DMS_MPI_SYNC_SOURCE=\"$source\"",
-                        "export DMS_MPI_SYNC_DESTINATION=\"$destination\"",
+                        'chmod 0755 "$rank_script"',
+                        'export DMS_MPI_SYNC_SOURCE="$source"',
+                        'export DMS_MPI_SYNC_DESTINATION="$destination"',
                         *_mpi_hostfile_lines("$mpi_dir/hostfile"),
                         _mpiexec_line(
-                            stdout="\"$artifact/stdout.log\"",
-                            stderr="\"$artifact/stderr.log\"",
+                            stdout='"$artifact/stdout.log"',
+                            stderr='"$artifact/stderr.log"',
                         ),
                     ]
                 )
                 if mpi
-                else f"{tool} {dryrun}{flags}\"$source\" \"$destination\" > \"$artifact/stdout.log\" 2> \"$artifact/stderr.log\""
+                else f'{tool} {dryrun}{flags}"$source" "$destination" > "$artifact/stdout.log" 2> "$artifact/stderr.log"'
             )
             return "\n".join(
                 [
                     "set -eu",
                     "umask 000",
                     "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
-                    "mkdir -p \"$artifact\"",
+                    'mkdir -p "$artifact"',
                     "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
                     "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
-                    "find_errors=\"$artifact/find-errors.log\"",
-                    ": > \"$find_errors\"",
-                    f"printf '{{\"tool\":\"{tool}\",\"phase\":\"%s\",\"dry_run\":%s}}\\n' \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" > \"$artifact/command.json\"",
+                    'find_errors="$artifact/find-errors.log"',
+                    ': > "$find_errors"',
+                    f'printf \'{{"tool":"{tool}","phase":"%s","dry_run":%s}}\\n\' "$DMS_DM_PHASE" "$( [ "$DMS_DM_PHASE" = preview ] && echo true || echo false )" > "$artifact/command.json"',
                     run_command,
-                    "summary_root=\"$destination\"",
-                    "if [ \"$DMS_DM_PHASE\" = preview ]; then summary_root=\"$source\"; fi",
-                    "file_count=$(find \"$summary_root\" -type f -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
-                    "directory_count=$(find \"$summary_root\" -type d -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    'summary_root="$destination"',
+                    'if [ "$DMS_DM_PHASE" = preview ]; then summary_root="$source"; fi',
+                    'file_count=$(find "$summary_root" -type f -print 2>> "$find_errors" | wc -l | awk \'{print $1}\')',
+                    'directory_count=$(find "$summary_root" -type d -print 2>> "$find_errors" | wc -l | awk \'{print $1}\')',
                     "total_bytes=$(find \"$summary_root\" -type f -printf '%s\\n' 2>> \"$find_errors\" | awk '{sum += $1} END {print sum + 0}')",
                     "error_count=$(wc -l < \"$find_errors\" | awk '{print $1}')",
-                    "printf '{\"summary\":{\"operation\":\"data.sync\",\"selected_tool\":\"%s\",\"phase\":\"%s\",\"dry_run\":%s,\"file_count\":%s,\"directory_count\":%s,\"total_bytes\":%s,\"error_count\":%s,\"selected_node\":\"%s\",\"worker_pod_count\":%s,\"processes_per_node\":%s,\"process_count\":%s}}\\n' \"$DMS_SELECTED_TOOL\" \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" \"$file_count\" \"$directory_count\" \"$total_bytes\" \"$error_count\" \"$DMS_SELECTED_NODE\" \"$DMS_WORKER_POD_COUNT\" \"$DMS_MPI_PROCESSES_PER_NODE\" \"$DMS_MPI_PROCESS_COUNT\" > \"$artifact/summary.json\"",
-                    "touch \"$artifact/.done\"",
+                    'printf \'{"summary":{"operation":"data.sync","selected_tool":"%s","phase":"%s","dry_run":%s,"file_count":%s,"directory_count":%s,"total_bytes":%s,"error_count":%s,"selected_node":"%s","worker_pod_count":%s,"processes_per_node":%s,"process_count":%s}}\\n\' "$DMS_SELECTED_TOOL" "$DMS_DM_PHASE" "$( [ "$DMS_DM_PHASE" = preview ] && echo true || echo false )" "$file_count" "$directory_count" "$total_bytes" "$error_count" "$DMS_SELECTED_NODE" "$DMS_WORKER_POD_COUNT" "$DMS_MPI_PROCESSES_PER_NODE" "$DMS_MPI_PROCESS_COUNT" > "$artifact/summary.json"',
+                    'touch "$artifact/.done"',
                 ]
             )
         if data_job["operation"] == "data.rm":
@@ -3589,55 +4130,63 @@ class KubernetesVolcanoAdapter:
                 "\n".join(
                     [
                         "mpi_dir=/dms/artifacts/${DMS_DATA_JOB_ID}/mpi",
-                        "mkdir -p \"$mpi_dir\"",
+                        'mkdir -p "$mpi_dir"',
                         _chown_artifact_line("$artifact"),
-                        "rank_script=\"$mpi_dir/run-${DMS_DM_PHASE}-rm-rank.sh\"",
+                        'rank_script="$mpi_dir/run-${DMS_DM_PHASE}-rm-rank.sh"',
                         "cat > \"$rank_script\" <<'DMS_MPI_RANK'",
                         "#!/bin/sh",
                         "set -eu",
-                        "if [ \"$(id -u)\" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n \"${DMS_POSIX_USERNAME:-}\" ]; then",
-                        f"  exec runuser -u \"$DMS_POSIX_USERNAME\" --preserve-environment -- {tool} {dryrun}{flags}\"$DMS_MPI_RM_TARGET\"",
+                        'if [ "$(id -u)" = 0 ] && command -v runuser >/dev/null 2>&1 && [ -n "${DMS_POSIX_USERNAME:-}" ]; then',
+                        f'  exec runuser -u "$DMS_POSIX_USERNAME" --preserve-environment -- {tool} {dryrun}{flags}"$DMS_MPI_RM_TARGET"',
                         "fi",
-                        f"exec {tool} {dryrun}{flags}\"$DMS_MPI_RM_TARGET\"",
+                        f'exec {tool} {dryrun}{flags}"$DMS_MPI_RM_TARGET"',
                         "DMS_MPI_RANK",
-                        "chmod 0755 \"$rank_script\"",
-                        "export DMS_MPI_RM_TARGET=\"$target\"",
+                        'chmod 0755 "$rank_script"',
+                        'export DMS_MPI_RM_TARGET="$target"',
                         *_mpi_hostfile_lines("$mpi_dir/hostfile"),
                         _mpiexec_line(
-                            stdout="\"$artifact/stdout.log\"",
-                            stderr="\"$artifact/stderr.log\"",
+                            stdout='"$artifact/stdout.log"',
+                            stderr='"$artifact/stderr.log"',
                         ),
                     ]
                 )
                 if mpi
-                else f"{tool} {dryrun}{flags}\"$target\" > \"$artifact/stdout.log\" 2> \"$artifact/stderr.log\""
+                else f'{tool} {dryrun}{flags}"$target" > "$artifact/stdout.log" 2> "$artifact/stderr.log"'
             )
             return "\n".join(
                 [
                     "set -eu",
                     "umask 000",
                     "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
-                    "mkdir -p \"$artifact\"",
+                    'mkdir -p "$artifact"',
                     "target=/dms/target/${DMS_RM_TARGET_PATH}",
-                    "find_errors=\"$artifact/find-errors.log\"",
-                    ": > \"$find_errors\"",
-                    "file_count=$(find \"$target\" -type f -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
-                    "directory_count=$(find \"$target\" -type d -print 2>> \"$find_errors\" | wc -l | awk '{print $1}')",
+                    'find_errors="$artifact/find-errors.log"',
+                    ': > "$find_errors"',
+                    'file_count=$(find "$target" -type f -print 2>> "$find_errors" | wc -l | awk \'{print $1}\')',
+                    'directory_count=$(find "$target" -type d -print 2>> "$find_errors" | wc -l | awk \'{print $1}\')',
                     "total_bytes=$(find \"$target\" -type f -printf '%s\\n' 2>> \"$find_errors\" | awk '{sum += $1} END {print sum + 0}')",
-                    f"printf '{{\"tool\":\"{tool}\",\"phase\":\"%s\",\"dry_run\":%s}}\\n' \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" > \"$artifact/command.json\"",
+                    f'printf \'{{"tool":"{tool}","phase":"%s","dry_run":%s}}\\n\' "$DMS_DM_PHASE" "$( [ "$DMS_DM_PHASE" = preview ] && echo true || echo false )" > "$artifact/command.json"',
                     run_command,
                     "target_absent=false",
-                    "if [ ! -e \"$target\" ]; then target_absent=true; fi",
+                    'if [ ! -e "$target" ]; then target_absent=true; fi',
                     "error_count=$(wc -l < \"$find_errors\" | awk '{print $1}')",
-                    "printf '{\"summary\":{\"operation\":\"data.rm\",\"selected_tool\":\"%s\",\"phase\":\"%s\",\"dry_run\":%s,\"file_count\":%s,\"directory_count\":%s,\"total_bytes\":%s,\"error_count\":%s,\"target_absent\":%s,\"selected_node\":\"%s\",\"worker_pod_count\":%s,\"processes_per_node\":%s,\"process_count\":%s}}\\n' \"$DMS_SELECTED_TOOL\" \"$DMS_DM_PHASE\" \"$( [ \"$DMS_DM_PHASE\" = preview ] && echo true || echo false )\" \"$file_count\" \"$directory_count\" \"$total_bytes\" \"$error_count\" \"$target_absent\" \"$DMS_SELECTED_NODE\" \"$DMS_WORKER_POD_COUNT\" \"$DMS_MPI_PROCESSES_PER_NODE\" \"$DMS_MPI_PROCESS_COUNT\" > \"$artifact/summary.json\"",
-                    "touch \"$artifact/.done\"",
+                    'printf \'{"summary":{"operation":"data.rm","selected_tool":"%s","phase":"%s","dry_run":%s,"file_count":%s,"directory_count":%s,"total_bytes":%s,"error_count":%s,"target_absent":%s,"selected_node":"%s","worker_pod_count":%s,"processes_per_node":%s,"process_count":%s}}\\n\' "$DMS_SELECTED_TOOL" "$DMS_DM_PHASE" "$( [ "$DMS_DM_PHASE" = preview ] && echo true || echo false )" "$file_count" "$directory_count" "$total_bytes" "$error_count" "$target_absent" "$DMS_SELECTED_NODE" "$DMS_WORKER_POD_COUNT" "$DMS_MPI_PROCESSES_PER_NODE" "$DMS_MPI_PROCESS_COUNT" > "$artifact/summary.json"',
+                    'touch "$artifact/.done"',
                 ]
             )
-        raise DataManagementRuntimeError(f"unsupported mutation operation: {data_job['operation']}")
+        raise DataManagementRuntimeError(
+            f"unsupported mutation operation: {data_job['operation']}"
+        )
 
-    def _mutation_context(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
-        artifact_uri = _artifact_job_uri(self.settings.dm_artifact_base_uri, data_job["job_id"])
-        normalized = data_job.get("normalized_target") or plan.get("desired_state") or {}
+    def _mutation_context(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> dict[str, Any]:
+        artifact_uri = _artifact_job_uri(
+            self.settings.dm_artifact_base_uri, data_job["job_id"]
+        )
+        normalized = (
+            data_job.get("normalized_target") or plan.get("desired_state") or {}
+        )
         selected = _unique_selected_candidates(
             (data_job.get("worker_pool") or {}).get("selected_candidates") or []
         )
@@ -3665,7 +4214,8 @@ class KubernetesVolcanoAdapter:
             },
             {
                 "name": "DMS_SELECTED_TOOL",
-                "value": data_job.get("selected_tool") or _default_tool_for_operation(data_job["operation"]),
+                "value": data_job.get("selected_tool")
+                or _default_tool_for_operation(data_job["operation"]),
             },
             {
                 "name": "DMS_SELECTED_NODE",
@@ -3686,15 +4236,23 @@ class KubernetesVolcanoAdapter:
         ]
 
         if data_job["operation"] == "data.sync":
-            source = normalized.get("source") or plan.get("desired_state", {}).get("source") or {}
+            source = (
+                normalized.get("source")
+                or plan.get("desired_state", {}).get("source")
+                or {}
+            )
             destination = (
                 normalized.get("destination")
                 or plan.get("desired_state", {}).get("destination")
                 or {}
             )
             candidate = selected[0] if selected else {}
-            source_mount = candidate.get("source_mount_path") or candidate.get("mount_path")
-            destination_mount = candidate.get("destination_mount_path") or candidate.get("mount_path")
+            source_mount = candidate.get("source_mount_path") or candidate.get(
+                "mount_path"
+            )
+            destination_mount = candidate.get(
+                "destination_mount_path"
+            ) or candidate.get("mount_path")
             if source_mount:
                 volumes.append(
                     {
@@ -3723,13 +4281,18 @@ class KubernetesVolcanoAdapter:
                 [
                     {
                         "name": "DMS_SYNC_SOURCE_STORAGE",
-                        "value": source.get("storage_name", data_job.get("storage_name") or ""),
+                        "value": source.get(
+                            "storage_name", data_job.get("storage_name") or ""
+                        ),
                     },
                     {
                         "name": "DMS_SYNC_DESTINATION_STORAGE",
                         "value": destination.get("storage_name", ""),
                     },
-                    {"name": "DMS_SYNC_SOURCE_PATH", "value": source.get("path") or "."},
+                    {
+                        "name": "DMS_SYNC_SOURCE_PATH",
+                        "value": source.get("path") or ".",
+                    },
                     {
                         "name": "DMS_SYNC_DESTINATION_PATH",
                         "value": destination.get("path") or ".",
@@ -3752,7 +4315,9 @@ class KubernetesVolcanoAdapter:
                 [
                     {
                         "name": "DMS_RM_STORAGE",
-                        "value": target.get("storage_name", data_job.get("storage_name") or ""),
+                        "value": target.get(
+                            "storage_name", data_job.get("storage_name") or ""
+                        ),
                     },
                     {"name": "DMS_RM_TARGET_PATH", "value": target.get("path") or "."},
                 ]
@@ -3793,17 +4358,23 @@ class KubernetesVolcanoAdapter:
             return self.settings.dm_rm_execution_timeout_seconds
         return self.settings.dm_scan_timeout_seconds
 
-    def _scan_context(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
-        artifact_uri = _artifact_job_uri(self.settings.dm_artifact_base_uri, data_job["job_id"])
-        target = data_job.get("normalized_target") or plan.get("desired_state", {}).get("target") or {}
+    def _scan_context(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> dict[str, Any]:
+        artifact_uri = _artifact_job_uri(
+            self.settings.dm_artifact_base_uri, data_job["job_id"]
+        )
+        target = (
+            data_job.get("normalized_target")
+            or plan.get("desired_state", {}).get("target")
+            or {}
+        )
         selected = _unique_selected_candidates(
             (data_job.get("worker_pool") or {}).get("selected_candidates") or []
         )
         node_selector = {}
         affinity = {}
-        node_names = [
-            item["node_name"] for item in selected if item.get("node_name")
-        ]
+        node_names = [item["node_name"] for item in selected if item.get("node_name")]
         if len(node_names) == 1:
             node_selector["kubernetes.io/hostname"] = node_names[0]
         elif node_names:
@@ -3865,7 +4436,9 @@ class KubernetesVolcanoAdapter:
                 },
                 {
                     "name": "DMS_MPI_PROCESSES_PER_NODE",
-                    "value": str(_resource_model(data_job).get("processes_per_node") or 1),
+                    "value": str(
+                        _resource_model(data_job).get("processes_per_node") or 1
+                    ),
                 },
                 {
                     "name": "DMS_MPI_PROCESS_COUNT",
@@ -3873,28 +4446,46 @@ class KubernetesVolcanoAdapter:
                 },
                 {
                     "name": "DMS_WORKER_POD_COUNT",
-                    "value": str(_resource_model(data_job).get("worker_pod_count") or 1),
+                    "value": str(
+                        _resource_model(data_job).get("worker_pod_count") or 1
+                    ),
                 },
             ],
         }
 
-    def _nsync_context(self, plan: dict[str, Any], data_job: dict[str, Any]) -> dict[str, Any]:
-        artifact_uri = _artifact_job_uri(self.settings.dm_artifact_base_uri, data_job["job_id"])
-        normalized = data_job.get("normalized_target") or plan.get("desired_state") or {}
-        source = normalized.get("source") or plan.get("desired_state", {}).get("source") or {}
+    def _nsync_context(
+        self, plan: dict[str, Any], data_job: dict[str, Any]
+    ) -> dict[str, Any]:
+        artifact_uri = _artifact_job_uri(
+            self.settings.dm_artifact_base_uri, data_job["job_id"]
+        )
+        normalized = (
+            data_job.get("normalized_target") or plan.get("desired_state") or {}
+        )
+        source = (
+            normalized.get("source")
+            or plan.get("desired_state", {}).get("source")
+            or {}
+        )
         destination = (
             normalized.get("destination")
             or plan.get("desired_state", {}).get("destination")
             or {}
         )
         worker_pool = data_job.get("worker_pool") or {}
-        source_candidates = _unique_selected_candidates(worker_pool.get("source_candidates") or [])
+        source_candidates = _unique_selected_candidates(
+            worker_pool.get("source_candidates") or []
+        )
         destination_candidates = _unique_selected_candidates(
             worker_pool.get("destination_candidates") or []
         )
-        source_mount = source_candidates[0].get("mount_path") if source_candidates else None
+        source_mount = (
+            source_candidates[0].get("mount_path") if source_candidates else None
+        )
         destination_mount = (
-            destination_candidates[0].get("mount_path") if destination_candidates else None
+            destination_candidates[0].get("mount_path")
+            if destination_candidates
+            else None
         )
         artifact_path = _file_uri_parent_path(artifact_uri)
         artifact_volumes: list[dict[str, Any]] = []
@@ -3998,14 +4589,14 @@ def _mpi_worker_command() -> str:
             "set -eu",
             "mkdir -p /run/sshd",
             "ssh-keygen -A >/dev/null 2>&1 || true",
-            "if [ -n \"${DMS_POSIX_USERNAME:-}\" ] && id \"$DMS_POSIX_USERNAME\" >/dev/null 2>&1; then",
+            'if [ -n "${DMS_POSIX_USERNAME:-}" ] && id "$DMS_POSIX_USERNAME" >/dev/null 2>&1; then',
             "  user_home=$(getent passwd \"$DMS_POSIX_USERNAME\" | awk -F: '{print $6}')",
-            "  if [ -n \"$user_home\" ]; then",
-            "    mkdir -p \"$user_home/.ssh\"",
-            "    if [ -f /root/.ssh/authorized_keys ]; then cp /root/.ssh/authorized_keys \"$user_home/.ssh/authorized_keys\"; fi",
-            "    chown -R \"$DMS_POSIX_USERNAME\" \"$user_home/.ssh\"",
-            "    chmod 0700 \"$user_home/.ssh\"",
-            "    chmod 0600 \"$user_home/.ssh\"/* 2>/dev/null || true",
+            '  if [ -n "$user_home" ]; then',
+            '    mkdir -p "$user_home/.ssh"',
+            '    if [ -f /root/.ssh/authorized_keys ]; then cp /root/.ssh/authorized_keys "$user_home/.ssh/authorized_keys"; fi',
+            '    chown -R "$DMS_POSIX_USERNAME" "$user_home/.ssh"',
+            '    chmod 0700 "$user_home/.ssh"',
+            '    chmod 0600 "$user_home/.ssh"/* 2>/dev/null || true',
             "  fi",
             "fi",
             "exec /usr/sbin/sshd -D -e -o StrictModes=no",
@@ -4017,47 +4608,49 @@ def _mpi_worker_container_security_context() -> dict[str, Any]:
     return {"capabilities": {"add": ["SYS_CHROOT"]}}
 
 
-def _mpi_hostfile_lines(output_path: str, *, env_name: str = "DMS_MPI_HOSTFILE") -> list[str]:
+def _mpi_hostfile_lines(
+    output_path: str, *, env_name: str = "DMS_MPI_HOSTFILE"
+) -> list[str]:
     return [
-        f"mpi_hostfile=\"{output_path}\"",
-        ": > \"$mpi_hostfile\"",
-        "raw_hostfile=\"$mpi_hostfile.raw\"",
-        ": > \"$raw_hostfile\"",
+        f'mpi_hostfile="{output_path}"',
+        ': > "$mpi_hostfile"',
+        'raw_hostfile="$mpi_hostfile.raw"',
+        ': > "$raw_hostfile"',
         "expected_hosts=${DMS_WORKER_POD_COUNT:-0}",
-        f"if [ -n \"${{{env_name}:-}}\" ] && [ -f \"${env_name}\" ]; then cat \"${env_name}\" > \"$raw_hostfile\"; fi",
-        "if [ \"$expected_hosts\" -gt 0 ]; then",
+        f'if [ -n "${{{env_name}:-}}" ] && [ -f "${env_name}" ]; then cat "${env_name}" > "$raw_hostfile"; fi',
+        'if [ "$expected_hosts" -gt 0 ]; then',
         "  attempts=0",
-        "  while [ \"$attempts\" -lt 60 ]; do",
+        '  while [ "$attempts" -lt 60 ]; do',
         "    host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$raw_hostfile\")",
-        "    [ \"$host_count\" -ge \"$expected_hosts\" ] && break",
-        f"    if [ -n \"${{{env_name}:-}}\" ] && [ -f \"${env_name}\" ]; then cat \"${env_name}\" > \"$raw_hostfile\"; fi",
+        '    [ "$host_count" -ge "$expected_hosts" ] && break',
+        f'    if [ -n "${{{env_name}:-}}" ] && [ -f "${env_name}" ]; then cat "${env_name}" > "$raw_hostfile"; fi',
         "    host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$raw_hostfile\")",
-        "    [ \"$host_count\" -ge \"$expected_hosts\" ] && break",
+        '    [ "$host_count" -ge "$expected_hosts" ] && break',
         "    if [ -n \"${VC_WORKER_HOSTS:-}\" ]; then printf '%s\\n' \"$VC_WORKER_HOSTS\" | tr ',' '\\n' > \"$raw_hostfile\"; fi",
         "    host_count=$(awk 'NF { count++ } END { print count + 0 }' \"$raw_hostfile\")",
-        "    [ \"$host_count\" -ge \"$expected_hosts\" ] && break",
+        '    [ "$host_count" -ge "$expected_hosts" ] && break',
         "    attempts=$((attempts + 1))",
         "    sleep 1",
         "  done",
         "fi",
-        "if [ -s \"$raw_hostfile\" ]; then",
-        f"  while IFS= read -r host_line || [ -n \"$host_line\" ]; do",
+        'if [ -s "$raw_hostfile" ]; then',
+        f'  while IFS= read -r host_line || [ -n "$host_line" ]; do',
         "    host=$(printf '%s\\n' \"$host_line\" | awk '{print $1}')",
-        "    [ -n \"$host\" ] || continue",
-        "    resolved=\"\"",
+        '    [ -n "$host" ] || continue',
+        '    resolved=""',
         "    attempts=0",
-        "    while [ \"$attempts\" -lt 30 ]; do",
+        '    while [ "$attempts" -lt 30 ]; do',
         "      resolved=$(getent hosts \"$host\" 2>/dev/null | awk 'NR == 1 {print $1}')",
-        "      [ -n \"$resolved\" ] && break",
+        '      [ -n "$resolved" ] && break',
         "      attempts=$((attempts + 1))",
         "      sleep 1",
         "    done",
-        "    if [ -n \"$resolved\" ]; then host=\"$resolved\"; fi",
-        "    printf '%s slots=%s\\n' \"$host\" \"$DMS_MPI_PROCESSES_PER_NODE\" >> \"$mpi_hostfile\"",
-        f"  done < \"$raw_hostfile\"",
+        '    if [ -n "$resolved" ]; then host="$resolved"; fi',
+        '    printf \'%s slots=%s\\n\' "$host" "$DMS_MPI_PROCESSES_PER_NODE" >> "$mpi_hostfile"',
+        f'  done < "$raw_hostfile"',
         "fi",
-        "hostfile_arg=\"\"",
-        "if [ -s \"$mpi_hostfile\" ]; then hostfile_arg=\"--hostfile $mpi_hostfile\"; fi",
+        'hostfile_arg=""',
+        'if [ -s "$mpi_hostfile" ]; then hostfile_arg="--hostfile $mpi_hostfile"; fi',
     ]
 
 
@@ -4066,46 +4659,48 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
         "export OMPI_ALLOW_RUN_AS_ROOT=1 OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1; "
         "export OMPI_MCA_plm_rsh_agent='ssh -o StrictHostKeyChecking=no "
         "-o UserKnownHostsFile=/dev/null'; "
-        "export DMS_POSIX_USERNAME=\"${DMS_POSIX_USERNAME:-}\" "
-        "DMS_MPI_SCAN_TARGET=\"${DMS_MPI_SCAN_TARGET:-}\" "
-        "DMS_MPI_SCAN_REPORT=\"${DMS_MPI_SCAN_REPORT:-}\" "
-        "DMS_MPI_SYNC_SOURCE=\"${DMS_MPI_SYNC_SOURCE:-}\" "
-        "DMS_MPI_SYNC_DESTINATION=\"${DMS_MPI_SYNC_DESTINATION:-}\" "
-        "DMS_MPI_RM_TARGET=\"${DMS_MPI_RM_TARGET:-}\" "
-        "DMS_NSYNC_ROLE_MAP=\"${DMS_NSYNC_ROLE_MAP:-}\"; "
+        'export DMS_POSIX_USERNAME="${DMS_POSIX_USERNAME:-}" '
+        'DMS_MPI_SCAN_TARGET="${DMS_MPI_SCAN_TARGET:-}" '
+        'DMS_MPI_SCAN_REPORT="${DMS_MPI_SCAN_REPORT:-}" '
+        'DMS_MPI_SYNC_SOURCE="${DMS_MPI_SYNC_SOURCE:-}" '
+        'DMS_MPI_SYNC_DESTINATION="${DMS_MPI_SYNC_DESTINATION:-}" '
+        'DMS_MPI_RM_TARGET="${DMS_MPI_RM_TARGET:-}" '
+        'DMS_NSYNC_ROLE_MAP="${DMS_NSYNC_ROLE_MAP:-}"; '
         "env_exports='-x PATH -x LD_LIBRARY_PATH -x DMS_POSIX_USERNAME "
         "-x DMS_MPI_SCAN_TARGET -x DMS_MPI_SCAN_REPORT -x DMS_MPI_SYNC_SOURCE "
         "-x DMS_MPI_SYNC_DESTINATION -x DMS_MPI_RM_TARGET -x DMS_NSYNC_ROLE_MAP'; "
-        "mpi_run_prefix=\"\"; "
-        "if [ \"$(id -u)\" = 0 ] && [ -n \"${DMS_POSIX_USERNAME:-}\" ] "
-        "&& id \"$DMS_POSIX_USERNAME\" >/dev/null 2>&1 "
+        'mpi_run_prefix=""; '
+        'if [ "$(id -u)" = 0 ] && [ -n "${DMS_POSIX_USERNAME:-}" ] '
+        '&& id "$DMS_POSIX_USERNAME" >/dev/null 2>&1 '
         "&& command -v runuser >/dev/null 2>&1; then "
         "user_home=$(getent passwd \"$DMS_POSIX_USERNAME\" | awk -F: '{print $6}'); "
-        "if [ -n \"$user_home\" ]; then "
-        "mkdir -p \"$user_home/.ssh\"; "
-        "cp -a /root/.ssh/. \"$user_home/.ssh/\" 2>/dev/null || true; "
-        "chown -R \"$DMS_POSIX_USERNAME\" \"$user_home/.ssh\"; "
-        "chmod 0700 \"$user_home/.ssh\"; "
-        "chmod 0600 \"$user_home/.ssh\"/* 2>/dev/null || true; "
+        'if [ -n "$user_home" ]; then '
+        'mkdir -p "$user_home/.ssh"; '
+        'cp -a /root/.ssh/. "$user_home/.ssh/" 2>/dev/null || true; '
+        'chown -R "$DMS_POSIX_USERNAME" "$user_home/.ssh"; '
+        'chmod 0700 "$user_home/.ssh"; '
+        'chmod 0600 "$user_home/.ssh"/* 2>/dev/null || true; '
         "fi; "
-        "mpi_run_prefix=\"runuser -u $DMS_POSIX_USERNAME --preserve-environment --\"; "
+        'mpi_run_prefix="runuser -u $DMS_POSIX_USERNAME --preserve-environment --"; '
         "fi; "
         "$mpi_run_prefix mpirun --allow-run-as-root --mca pml ob1 --mca btl tcp,self "
         "--mca oob_tcp_if_exclude lo --mca btl_tcp_if_exclude lo "
-        "$hostfile_arg $env_exports -np \"$DMS_MPI_PROCESS_COUNT\" "
-        f"\"$rank_script\" > {stdout} 2> {stderr}"
+        '$hostfile_arg $env_exports -np "$DMS_MPI_PROCESS_COUNT" '
+        f'"$rank_script" > {stdout} 2> {stderr}'
     )
 
 
 def _chown_artifact_line(path: str) -> str:
     return (
-        "if [ \"$(id -u)\" = 0 ] && [ -n \"${DMS_POSIX_USERNAME:-}\" ]; then "
-        f"chown -R \"$DMS_POSIX_USERNAME\" \"{path}\" || true; "
-        f"chmod -R a+rwX \"{path}\" || true; fi"
+        'if [ "$(id -u)" = 0 ] && [ -n "${DMS_POSIX_USERNAME:-}" ]; then '
+        f'chown -R "$DMS_POSIX_USERNAME" "{path}" || true; '
+        f'chmod -R a+rwX "{path}" || true; fi'
     )
 
 
-def volcano_adapter_from_settings(settings: Settings) -> StubVolcanoAdapter | KubernetesVolcanoAdapter:
+def volcano_adapter_from_settings(
+    settings: Settings,
+) -> StubVolcanoAdapter | KubernetesVolcanoAdapter:
     if settings.dm_kubernetes_mode == "stub":
         return StubVolcanoAdapter()
     return KubernetesVolcanoAdapter.from_settings(settings)
@@ -4151,7 +4746,8 @@ def _can_fallback_from_manifest_apply(
         "no matches for kind" in lowered
         or "could not find the requested resource" in lowered
         or "the server doesn't have a resource type" in lowered
-        or "mpijobs" in lowered and "not found" in lowered
+        or "mpijobs" in lowered
+        and "not found" in lowered
     )
 
 
@@ -4178,9 +4774,7 @@ def _mpijob_phase(payload: dict[str, Any]) -> str:
 def _drop_none(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: _drop_none(item)
-            for key, item in value.items()
-            if item is not None
+            key: _drop_none(item) for key, item in value.items() if item is not None
         }
     if isinstance(value, list):
         return [_drop_none(item) for item in value]
@@ -4264,7 +4858,8 @@ def _write_mpi_metadata_artifacts(
         {
             "backend": _scheduler_backend_for_manifest(manifest),
             "phase": phase,
-            "tool": data_job.get("selected_tool") or _default_tool_for_operation(data_job["operation"]),
+            "tool": data_job.get("selected_tool")
+            or _default_tool_for_operation(data_job["operation"]),
             "launcher_pods": launcher_pods,
             "image": data_job.get("image_ref"),
             "queue": resource_model.get("queue"),
@@ -4278,7 +4873,9 @@ def _write_mpi_metadata_artifacts(
             "workers": worker_pods,
             "eligible_nodes": resource_model.get("eligible_nodes"),
             "eligible_source_nodes": resource_model.get("eligible_source_nodes"),
-            "eligible_destination_nodes": resource_model.get("eligible_destination_nodes"),
+            "eligible_destination_nodes": resource_model.get(
+                "eligible_destination_nodes"
+            ),
         },
     )
     _write_json(
@@ -4364,7 +4961,9 @@ def _yaml_scalar(value: Any) -> str:
 def _manifest_min_available(manifest: dict[str, Any]) -> int | None:
     spec = manifest.get("spec") or {}
     if manifest.get("kind") == "MPIJob":
-        return ((spec.get("runPolicy") or {}).get("schedulingPolicy") or {}).get("minAvailable")
+        return ((spec.get("runPolicy") or {}).get("schedulingPolicy") or {}).get(
+            "minAvailable"
+        )
     return spec.get("minAvailable")
 
 
@@ -4375,7 +4974,9 @@ def _file_uri_parent_path(uri: str) -> str | None:
     return str(Path(parsed.path).parent)
 
 
-def _unique_selected_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _unique_selected_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str | None, str | None]] = set()
     for candidate in candidates:
@@ -4449,7 +5050,9 @@ def _merge_affinity(*items: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resource_model(data_job: dict[str, Any]) -> dict[str, Any]:
-    model = (data_job.get("preflight_result") or {}).get("effective_resource_model") or {}
+    model = (data_job.get("preflight_result") or {}).get(
+        "effective_resource_model"
+    ) or {}
     return model if isinstance(model, dict) else {}
 
 
@@ -4488,7 +5091,9 @@ def _data_job_kubernetes_name(prefix: str, job_id: str, *, max_length: int = 42)
     if len(candidate) <= max_length:
         return candidate
     prefix_budget = max(max_length - len(token) - 1, 1)
-    return f"{normalized_prefix[:prefix_budget].rstrip('-')}-{token}"[:max_length].rstrip("-")
+    return f"{normalized_prefix[:prefix_budget].rstrip('-')}-{token}"[
+        :max_length
+    ].rstrip("-")
 
 
 def _operation_suffix(operation: str) -> str:

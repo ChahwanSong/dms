@@ -19,7 +19,6 @@ from .domain import (
 )
 from .repositories import DmsRepository, utcnow
 
-
 RM_OPERATIONS = {
     OperationKind.FILESYSTEM_CREATE.value,
     OperationKind.FILESYSTEM_UPDATE.value,
@@ -42,10 +41,11 @@ RM_OPERATIONS = {
     OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
 }
 
-PHASE12_FILESYSTEM_OPERATIONS = {
+FILESYSTEM_RM_OPERATIONS = {
     OperationKind.FILESYSTEM_CREATE.value,
     OperationKind.FILESYSTEM_UPDATE.value,
     OperationKind.FILESYSTEM_BLOCK.value,
+    OperationKind.FILESYSTEM_INITIALIZE.value,
     OperationKind.FILESYSTEM_DELETE.value,
     OperationKind.FILESYSTEM_ASSIGN_QUOTA.value,
     OperationKind.FILESYSTEM_IMPORT.value,
@@ -54,7 +54,7 @@ PHASE12_FILESYSTEM_OPERATIONS = {
     OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
 }
 
-PHASE12_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS = {
+FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS = {
     "acl",
     "capacity_bytes",
     "file_count",
@@ -67,7 +67,7 @@ PHASE12_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS = {
     "reset_quota_to_default",
 }
 
-PHASE12_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS = {
+FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS = {
     "acl",
     "capacity_bytes",
     "file_count",
@@ -80,15 +80,17 @@ PHASE12_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS = {
     "reset_quota_to_default",
 }
 
-PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS = {
+FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS = {
     "storage_name",
     "directory_name",
     "quota",
     "expires_at",
+    "resource_type",
+    "owner_username",
     "reason",
 }
 
-PHASE12_FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS = {
+FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS = {
     "storage_name",
     "directory_name",
     "include_quota",
@@ -97,7 +99,7 @@ PHASE12_FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS = {
     "reason",
 }
 
-PHASE12_FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS = {
+FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS = {
     "storage_name",
     "directory_name",
     "source",
@@ -162,7 +164,7 @@ class Planner:
         if operation in RM_OPERATIONS:
             if self._reject_invalid_kubernetes_quota_request(request):
                 return
-            if self._reject_invalid_filesystem_phase12_request(request):
+            if self._reject_invalid_filesystem_request(request):
                 return
             if self._reject_unsafe_storage_mapping(request, WorkerRole.RM):
                 return
@@ -266,7 +268,9 @@ class Planner:
                         "operation": request["operation"],
                         "resource_kind": request["resource_kind"],
                         "resource_key": request["resource_key"],
-                        "targets": self._resolve_kubernetes_quota_audit_targets(request),
+                        "targets": self._resolve_kubernetes_quota_audit_targets(
+                            request
+                        ),
                     }
                 )
                 return desired
@@ -283,7 +287,10 @@ class Planner:
             existing = self.repository.get_resource(
                 request["resource_kind"], request["resource_key"]
             )
-            if existing and request["operation"] != OperationKind.K8S_QUOTA_CREATE.value:
+            if (
+                existing
+                and request["operation"] != OperationKind.K8S_QUOTA_CREATE.value
+            ):
                 desired = self._merge_kubernetes_quota_desired(
                     existing["desired_state"], desired
                 )
@@ -306,7 +313,10 @@ class Planner:
             if request["operation"] == OperationKind.K8S_QUOTA_IMPORT.value:
                 self._enrich_kubernetes_storage_class_entries(desired)
                 desired.setdefault("import_mode", "dms_resourcequota")
-                desired.setdefault("storage_mapping_candidates", self._storage_mapping_candidates(desired))
+                desired.setdefault(
+                    "storage_mapping_candidates",
+                    self._storage_mapping_candidates(desired),
+                )
             if self._is_kubernetes_default_reset(request):
                 self._apply_kubernetes_default_quota_reset(request, desired)
                 self._apply_expiry_desired(
@@ -361,16 +371,35 @@ class Planner:
         if request["operation"] == OperationKind.FILESYSTEM_CREATE.value:
             directory_name = desired.get("directory_name")
             if directory_name and not desired.get("access_group"):
-                desired["access_group"] = f"dms-phase10-{directory_name}"
-            desired.setdefault("mode", "0770")
+                desired["access_group"] = f"dms-grp-{directory_name}"
+            desired.setdefault("mode", "0750")
             desired.setdefault("resource_type", "user")
+            # Default the directory owner to requester_id; payload may override
+            # via owner_username for create-on-behalf flows.
+            if not desired.get("owner_username"):
+                desired["owner_username"] = request["payload_summary"].get(
+                    "owner_username"
+                ) or request.get("requester_id")
             if "quota" in desired:
                 desired["quota"] = _normalized_filesystem_quota(desired["quota"])
-        if request["operation"] == OperationKind.FILESYSTEM_UPDATE.value and "quota" in request["payload_summary"]:
-            desired["quota"] = _normalized_filesystem_quota(request["payload_summary"]["quota"])
+        if request["operation"] == OperationKind.FILESYSTEM_UPDATE.value:
+            payload = request["payload_summary"]
+            if "quota" in payload:
+                desired["quota"] = _normalized_filesystem_quota(payload["quota"])
+                desired["update_apply_quota"] = True
+            else:
+                desired["update_apply_quota"] = False
+            if "owner_username" in payload:
+                desired["update_owner_username"] = payload["owner_username"]
+                desired["owner_username"] = payload["owner_username"]
+                desired["update_apply_owner"] = True
+            else:
+                desired["update_apply_owner"] = False
         if request["operation"] == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
             desired.setdefault("management_mode", "quota_only")
-            desired["quota"] = _normalized_filesystem_quota(request["payload_summary"]["quota"])
+            desired["quota"] = _normalized_filesystem_quota(
+                request["payload_summary"]["quota"]
+            )
             desired.setdefault("initialize_marker", True)
             desired.setdefault("resource_type", "user")
         if request["operation"] == OperationKind.FILESYSTEM_IMPORT.value:
@@ -388,7 +417,9 @@ class Planner:
                 desired["mode"] = access_policy["expected_mode"]
             desired.setdefault("resource_type", "user")
             if "quota" in request["payload_summary"]:
-                desired["quota"] = _normalized_filesystem_quota(request["payload_summary"]["quota"])
+                desired["quota"] = _normalized_filesystem_quota(
+                    request["payload_summary"]["quota"]
+                )
         if request["operation"] == OperationKind.FILESYSTEM_CHECK.value:
             desired.setdefault("include_quota", True)
             desired.setdefault("include_permission", True)
@@ -408,14 +439,20 @@ class Planner:
     ) -> None:
         payload = request["payload_summary"]
         operation = request["operation"]
-        if operation in {
-            OperationKind.FILESYSTEM_IMPORT.value,
-            OperationKind.K8S_QUOTA_IMPORT.value,
-        } and "expires_at" not in payload:
+        if (
+            operation
+            in {
+                OperationKind.FILESYSTEM_IMPORT.value,
+                OperationKind.K8S_QUOTA_IMPORT.value,
+            }
+            and "expires_at" not in payload
+        ):
             desired["expires_at"] = _default_expires_at()
             return
         if "expires_at" in payload:
-            desired["expires_at"] = _normalize_expires_at_or_none(payload.get("expires_at")) or ""
+            desired["expires_at"] = (
+                _normalize_expires_at_or_none(payload.get("expires_at")) or ""
+            )
             return
         if operation in {
             OperationKind.FILESYSTEM_UPDATE.value,
@@ -432,7 +469,9 @@ class Planner:
         block = bool(request["payload_summary"].get("block"))
         desired["block"] = block
         if block:
-            prior_block_state = dict((existing or {}).get("desired_state", {}).get("block_state") or {})
+            prior_block_state = dict(
+                (existing or {}).get("desired_state", {}).get("block_state") or {}
+            )
             if prior_block_state.get("blocked"):
                 desired["block_state"] = prior_block_state
                 return
@@ -444,11 +483,20 @@ class Planner:
                 "reason": request["payload_summary"].get("reason"),
             }
             return
-        block_state = dict((existing or {}).get("desired_state", {}).get("block_state") or {})
+        block_state = dict(
+            (existing or {}).get("desired_state", {}).get("block_state") or {}
+        )
         if not block_state:
-            block_state = dict((existing or {}).get("observed_state", {}).get("block_state") or {})
+            block_state = dict(
+                (existing or {}).get("observed_state", {}).get("block_state") or {}
+            )
         block_state["blocked"] = False
         block_state["reason"] = request["payload_summary"].get("reason")
+        # previous_mode 없으면 desired_state.mode 또는 기본값 0750으로 fallback
+        if not block_state.get("previous_mode"):
+            block_state["previous_mode"] = (existing or {}).get(
+                "desired_state", {}
+            ).get("mode") or "0750"
         desired["block_state"] = block_state
 
     def _resolve_filesystem_expiration_targets(
@@ -488,26 +536,27 @@ class Planner:
     ) -> dict[str, Any]:
         metadata = {
             "resource_kind": request["resource_kind"],
-            "planner": "phase1",
+            "planner": "rm",
             "backend_side_effect_owner": "rm-worker",
             "storage_backend": self._storage_backend(request),
         }
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             if request["operation"] == OperationKind.K8S_QUOTA_AUDIT.value:
-                metadata["planner"] = "phase9"
+                metadata["planner"] = "k8s-quota-audit"
             elif request["operation"] in {
                 OperationKind.K8S_QUOTA_IMPORT.value,
                 OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
             }:
-                metadata["planner"] = "phase15"
+                metadata["planner"] = "k8s-quota-lifecycle"
             else:
                 metadata["planner"] = (
-                    "phase6"
+                    "k8s-multi-storage-quota"
                     if len(desired_state.get("storage_class_quotas") or []) > 1
-                    else
-                    "phase4"
-                    if request["operation"] == OperationKind.K8S_QUOTA_CREATE.value
-                    else "phase5"
+                    else (
+                        "k8s-quota-create"
+                        if request["operation"] == OperationKind.K8S_QUOTA_CREATE.value
+                        else "k8s-quota"
+                    )
                 )
             metadata["kubernetes_backend"] = {
                 "cluster_name": desired_state.get("cluster_name"),
@@ -526,7 +575,7 @@ class Planner:
             }
         elif request["resource_kind"] == ResourceKind.FILESYSTEM.value:
             metadata["planner"] = (
-                "phase12"
+                "filesystem-quota"
                 if (
                     request["operation"]
                     in {
@@ -541,14 +590,15 @@ class Planner:
                         and "quota" in desired_state
                     )
                 )
-                else
-                "phase11"
-                if request["operation"]
-                in {
-                    OperationKind.FILESYSTEM_BLOCK.value,
-                    OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
-                }
-                else "phase10"
+                else (
+                    "filesystem-lifecycle"
+                    if request["operation"]
+                    in {
+                        OperationKind.FILESYSTEM_BLOCK.value,
+                        OperationKind.FILESYSTEM_EXPIRATION_SWEEP.value,
+                    }
+                    else "filesystem"
+                )
             )
             metadata["filesystem_backend"] = {
                 "storage_name": desired_state.get("storage_name"),
@@ -764,7 +814,9 @@ class Planner:
             issues.append({"reason": "cluster_name_missing"})
         if not payload.get("namespace_name"):
             issues.append({"reason": "namespace_name_missing"})
-        existing = self.repository.get_resource(request["resource_kind"], request["resource_key"])
+        existing = self.repository.get_resource(
+            request["resource_kind"], request["resource_key"]
+        )
         if operation == OperationKind.K8S_QUOTA_IMPORT.value:
             if existing and existing.get("status") != "Deleted":
                 issues.append(
@@ -775,7 +827,9 @@ class Planner:
                     }
                 )
         elif operation != OperationKind.K8S_QUOTA_CREATE.value and not existing:
-            issues.append({"reason": "resource_missing", "resource_key": request["resource_key"]})
+            issues.append(
+                {"reason": "resource_missing", "resource_key": request["resource_key"]}
+            )
         _append_expiry_issues(
             issues,
             payload,
@@ -785,7 +839,9 @@ class Planner:
         )
         raw_storage_class_quotas = payload.get("storage_class_quotas")
         storage_class_quotas = raw_storage_class_quotas or []
-        if raw_storage_class_quotas is not None and not isinstance(raw_storage_class_quotas, list):
+        if raw_storage_class_quotas is not None and not isinstance(
+            raw_storage_class_quotas, list
+        ):
             issues.append({"reason": "storage_class_quotas_must_be_list"})
             storage_class_quotas = []
         seen_storage_names: set[str] = set()
@@ -802,13 +858,18 @@ class Planner:
                     }
                 )
             seen_storage_names.add(storage_name)
-            if operation in {
-                OperationKind.K8S_QUOTA_CREATE.value,
-                OperationKind.K8S_QUOTA_UPDATE.value,
-            } and len(storage_class_quotas) > 1:
-                if entry.get("requests_storage_bytes") is None and entry.get(
-                    "capacity_bytes"
-                ) is None:
+            if (
+                operation
+                in {
+                    OperationKind.K8S_QUOTA_CREATE.value,
+                    OperationKind.K8S_QUOTA_UPDATE.value,
+                }
+                and len(storage_class_quotas) > 1
+            ):
+                if (
+                    entry.get("requests_storage_bytes") is None
+                    and entry.get("capacity_bytes") is None
+                ):
                     issues.append(
                         {
                             "reason": "storage_class_quota_requests_storage_bytes_required",
@@ -843,18 +904,21 @@ class Planner:
             reset_to_default = self._is_kubernetes_default_reset(request)
             for key in ("requests_storage_bytes", "pvc_count"):
                 value = quota.get(key)
-                if (
-                    operation == OperationKind.K8S_QUOTA_UPDATE.value
-                    and (value is None or reset_to_default)
+                if operation == OperationKind.K8S_QUOTA_UPDATE.value and (
+                    value is None or reset_to_default
                 ):
                     continue
                 try:
                     if value is None or int(value) <= 0:
-                        issues.append({"reason": f"quota_{key}_invalid", "value": value})
+                        issues.append(
+                            {"reason": f"quota_{key}_invalid", "value": value}
+                        )
                 except (TypeError, ValueError):
                     issues.append({"reason": f"quota_{key}_invalid", "value": value})
             if reset_to_default:
-                policy, policy_issues = self._kubernetes_default_policy_for_request(request)
+                policy, policy_issues = self._kubernetes_default_policy_for_request(
+                    request
+                )
                 issues.extend(policy_issues)
                 if policy:
                     for issue in self._validate_default_policy_storage_entries(
@@ -869,7 +933,10 @@ class Planner:
                 resource_type = existing["desired_state"].get("resource_type")
                 if resource_type in {"system", "admin"}:
                     issues.append(
-                        {"reason": "resource_type_cannot_be_blocked", "resource_type": resource_type}
+                        {
+                            "reason": "resource_type_cannot_be_blocked",
+                            "resource_type": resource_type,
+                        }
                     )
             if block is False and existing:
                 restore_hard = (
@@ -878,7 +945,9 @@ class Planner:
                 if not restore_hard:
                     issues.append({"reason": "block_restore_state_missing"})
         if operation == OperationKind.K8S_QUOTA_IMPORT.value:
-            resource_quota_name = payload.get("resource_quota_name", "dms-storage-quota")
+            resource_quota_name = payload.get(
+                "resource_quota_name", "dms-storage-quota"
+            )
             if resource_quota_name != "dms-storage-quota":
                 issues.append(
                     {
@@ -887,7 +956,7 @@ class Planner:
                     }
                 )
             resource_type = payload.get("resource_type", "user")
-            if resource_type not in {"user", "system", "admin"}:
+            if resource_type not in {"user", "project", "system", "admin"}:
                 issues.append(
                     {
                         "reason": "kubernetes_resource_type_unsupported",
@@ -903,22 +972,20 @@ class Planner:
             error_category="validation",
         )
 
-    def _reject_invalid_filesystem_phase12_request(
-        self, request: dict[str, Any]
-    ) -> bool:
+    def _reject_invalid_filesystem_request(self, request: dict[str, Any]) -> bool:
         if request["resource_kind"] != ResourceKind.FILESYSTEM.value:
             return False
         operation = request["operation"]
         payload = request["payload_summary"]
         issues: list[dict[str, Any]] = []
 
-        if operation not in PHASE12_FILESYSTEM_OPERATIONS:
+        if operation not in FILESYSTEM_RM_OPERATIONS:
             return self._reject_planner_issue(
                 request,
                 message="filesystem operation is unsupported in Phase 12",
                 issues=[
                     {
-                        "reason": "filesystem_operation_unsupported_phase12",
+                        "reason": "filesystem_operation_unsupported",
                         "operation": operation,
                     }
                 ],
@@ -945,13 +1012,13 @@ class Planner:
             )
             unsupported = sorted(
                 field
-                for field in PHASE12_FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS
+                for field in FILESYSTEM_CREATE_UNSUPPORTED_PAYLOAD_FIELDS
                 if field in payload
             )
             if unsupported:
                 issues.append(
                     {
-                        "reason": "filesystem_payload_fields_unsupported_phase12",
+                        "reason": "filesystem_payload_fields_unsupported",
                         "fields": unsupported,
                     }
                 )
@@ -960,6 +1027,7 @@ class Planner:
             resource_type = payload.get("resource_type")
             if resource_type is not None and str(resource_type) not in {
                 "user",
+                "project",
                 "system",
                 "admin",
             }:
@@ -982,12 +1050,14 @@ class Planner:
                 )
             users = payload.get("users")
             users_list = _validate_string_list(issues, "users", users, required=True)
-            if users_list is not None and len(users_list) < 2:
-                issues.append({"reason": "filesystem_users_minimum_two_required"})
+            if users_list is not None and len(users_list) < 1:
+                issues.append({"reason": "filesystem_users_minimum_one_required"})
             access_group = payload.get("access_group")
             if access_group is not None:
                 _append_basename_issue(issues, "access_group", access_group)
-                if isinstance(access_group, str) and not access_group.startswith("dms-"):
+                if isinstance(access_group, str) and not access_group.startswith(
+                    "dms-"
+                ):
                     issues.append(
                         {
                             "reason": "filesystem_access_group_must_be_dms_managed",
@@ -998,7 +1068,7 @@ class Planner:
             if mode is not None and str(mode) not in {"0750", "0770"}:
                 issues.append(
                     {
-                        "reason": "filesystem_mode_unsupported_phase10",
+                        "reason": "filesystem_mode_unsupported",
                         "mode": mode,
                     }
                 )
@@ -1015,13 +1085,13 @@ class Planner:
         if operation == OperationKind.FILESYSTEM_BLOCK.value:
             unsupported = sorted(
                 field
-                for field in PHASE12_FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS
+                for field in FILESYSTEM_BLOCK_UNSUPPORTED_PAYLOAD_FIELDS
                 if field in payload
             )
             if unsupported:
                 issues.append(
                     {
-                        "reason": "filesystem_payload_fields_unsupported_phase12",
+                        "reason": "filesystem_payload_fields_unsupported",
                         "fields": unsupported,
                     }
                 )
@@ -1056,9 +1126,7 @@ class Planner:
                         }
                     )
             if block is False and existing:
-                restore = _filesystem_restore_state(existing)
-                if not restore:
-                    issues.append({"reason": "filesystem_block_restore_missing"})
+                pass  # restore_state 없어도 desired_state.mode fallback으로 복원
 
         if operation == OperationKind.FILESYSTEM_DELETE.value:
             existing = self.repository.get_resource(
@@ -1093,9 +1161,9 @@ class Planner:
             issues.extend(
                 _unsupported_payload_issues(
                     payload,
-                    PHASE12_FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS
+                    FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS
                     | EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS,
-                    "filesystem_payload_fields_unsupported_phase12",
+                    "filesystem_payload_fields_unsupported",
                 )
             )
             if not existing or existing.get("status") == "Deleted":
@@ -1107,8 +1175,25 @@ class Planner:
                 )
             if "quota" in payload:
                 issues.extend(_filesystem_quota_issues(payload.get("quota")))
-            elif "expires_at" not in payload:
+            elif (
+                "expires_at" not in payload
+                and "resource_type" not in payload
+                and "owner_username" not in payload
+            ):
                 issues.append({"reason": "filesystem_update_payload_empty"})
+            update_resource_type = payload.get("resource_type")
+            if update_resource_type is not None and str(update_resource_type) not in {
+                "user",
+                "project",
+                "system",
+                "admin",
+            }:
+                issues.append(
+                    {
+                        "reason": "filesystem_resource_type_unsupported",
+                        "resource_type": update_resource_type,
+                    }
+                )
 
         if operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
             existing = self.repository.get_resource(
@@ -1182,11 +1267,20 @@ class Planner:
                         "value": initialize_marker,
                     }
                 )
+            # access_policy is now optional — the backend discovers the live
+            # group via stat()+LDAP and either adopts it (if dms-grp-*) or
+            # creates a new dms-grp-{dir} carrying the external members. Hints
+            # are still validated when provided.
             access_policy = payload.get("access_policy")
-            if not isinstance(access_policy, dict):
-                issues.append({"reason": "filesystem_access_policy_required"})
+            if access_policy is not None and not isinstance(access_policy, dict):
+                issues.append({"reason": "filesystem_access_policy_invalid"})
                 access_policy = {}
-            elif access_policy.get("mode", "adopt_existing_group") != "adopt_existing_group":
+            access_policy = access_policy or {}
+            if (
+                access_policy
+                and access_policy.get("mode", "adopt_existing_group")
+                != "adopt_existing_group"
+            ):
                 issues.append(
                     {
                         "reason": "filesystem_access_policy_mode_unsupported",
@@ -1196,21 +1290,22 @@ class Planner:
             expected_group = access_policy.get("expected_group")
             if expected_group is not None:
                 _append_basename_issue(issues, "expected_group", expected_group)
-            else:
-                issues.append({"reason": "filesystem_access_group_required"})
-            expected_mode = access_policy.get("expected_mode", "0770")
+            expected_mode = access_policy.get("expected_mode", "0750")
             if str(expected_mode) not in {"0750", "0770"}:
                 issues.append(
                     {
-                        "reason": "filesystem_mode_unsupported_phase12",
+                        "reason": "filesystem_mode_unsupported",
                         "mode": expected_mode,
                     }
                 )
             users = _validate_string_list(
-                issues, "access_policy.users", access_policy.get("users"), required=True
+                issues,
+                "access_policy.users",
+                access_policy.get("users"),
+                required=False,
             )
-            if users is not None and len(users) < 2:
-                issues.append({"reason": "filesystem_users_minimum_two_required"})
+            if users is not None and len(users) < 1:
+                issues.append({"reason": "filesystem_users_minimum_one_required"})
             denied_users = access_policy.get("denied_users")
             if denied_users is not None:
                 _validate_string_list(
@@ -1229,8 +1324,8 @@ class Planner:
             issues.extend(
                 _unsupported_payload_issues(
                     payload,
-                    PHASE12_FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS,
-                    "filesystem_payload_fields_unsupported_phase12",
+                    FILESYSTEM_CHECK_ALLOWED_PAYLOAD_FIELDS,
+                    "filesystem_payload_fields_unsupported",
                 )
             )
             if not existing or existing.get("status") == "Deleted":
@@ -1253,8 +1348,8 @@ class Planner:
             issues.extend(
                 _unsupported_payload_issues(
                     payload,
-                    PHASE12_FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS,
-                    "filesystem_payload_fields_unsupported_phase12",
+                    FILESYSTEM_SYNC_ALLOWED_PAYLOAD_FIELDS,
+                    "filesystem_payload_fields_unsupported",
                 )
             )
             if not existing or existing.get("status") == "Deleted":
@@ -1281,7 +1376,7 @@ class Planner:
             return False
         return self._reject_planner_issue(
             request,
-            message="invalid filesystem Phase 12 request",
+            message="invalid filesystem request",
             issues=issues,
             error_category="validation",
         )
@@ -1292,7 +1387,9 @@ class Planner:
         payload = request["payload_summary"]
         action = payload.get("action", "block")
         if action != "block":
-            issues.append({"reason": "filesystem_sweep_action_unsupported", "action": action})
+            issues.append(
+                {"reason": "filesystem_sweep_action_unsupported", "action": action}
+            )
         dry_run = payload.get("dry_run", False)
         if not isinstance(dry_run, bool):
             issues.append({"reason": "dry_run_boolean_required", "value": dry_run})
@@ -1323,6 +1420,7 @@ class Planner:
         resource_type = scope.get("resource_type")
         if resource_type is not None and str(resource_type) not in {
             "user",
+            "project",
             "system",
             "admin",
         }:
@@ -1358,7 +1456,9 @@ class Planner:
         issues: list[dict[str, Any]] = []
         action = payload.get("action", "block")
         if action != "block":
-            issues.append({"reason": "kubernetes_sweep_action_unsupported", "action": action})
+            issues.append(
+                {"reason": "kubernetes_sweep_action_unsupported", "action": action}
+            )
         dry_run = payload.get("dry_run", False)
         if not isinstance(dry_run, bool):
             issues.append({"reason": "dry_run_boolean_required", "value": dry_run})
@@ -1388,6 +1488,7 @@ class Planner:
         resource_type = scope.get("resource_type")
         if resource_type is not None and str(resource_type) not in {
             "user",
+            "project",
             "system",
             "admin",
         }:
@@ -1450,7 +1551,9 @@ class Planner:
             )
         return targets
 
-    def _storage_mapping_candidates(self, desired: dict[str, Any]) -> list[dict[str, Any]]:
+    def _storage_mapping_candidates(
+        self, desired: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         cluster_name = desired.get("cluster_name")
         candidates: list[dict[str, Any]] = []
         for mapping in self.repository.list_storage_mappings():
@@ -1483,7 +1586,9 @@ class Planner:
             policy, _ = self._kubernetes_default_policy_for_request(request)
             entries = (policy or {}).get("quota", {}).get("storage_class_quotas") or []
         for entry in entries:
-            storage_name = entry.get("storage_name") if isinstance(entry, dict) else None
+            storage_name = (
+                entry.get("storage_name") if isinstance(entry, dict) else None
+            )
             if not storage_name:
                 continue
             mapping = self.repository.get_storage_mapping(storage_name)
@@ -1499,9 +1604,8 @@ class Planner:
                     }
                 )
             requested_storage_class = entry.get("storage_class_name")
-            if (
-                requested_storage_class
-                and requested_storage_class != mapping.get("storage_class_name")
+            if requested_storage_class and requested_storage_class != mapping.get(
+                "storage_class_name"
             ):
                 issues.append(
                     {
@@ -1562,7 +1666,11 @@ class Planner:
                 value = payload.get(key)
                 if isinstance(value, dict) and value.get("storage_name"):
                     names.add(value["storage_name"])
-            for key in ("storage_name", "source_storage_name", "destination_storage_name"):
+            for key in (
+                "storage_name",
+                "source_storage_name",
+                "destination_storage_name",
+            ):
                 if payload.get(key):
                     names.add(payload[key])
             return names
@@ -1601,7 +1709,10 @@ class Planner:
         return set()
 
     def _enrich_kubernetes_quota_desired(self, desired: dict[str, Any]) -> None:
-        if desired.get("resource_kind") != ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
+        if (
+            desired.get("resource_kind")
+            != ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value
+        ):
             return
         self._enrich_kubernetes_storage_class_entries(desired)
         desired["resource_quota_name"] = desired.get(
@@ -1614,7 +1725,11 @@ class Planner:
         for entry in desired.get("storage_class_quotas") or []:
             enriched = dict(entry)
             storage_name = enriched.get("storage_name")
-            mapping = self.repository.get_storage_mapping(storage_name) if storage_name else None
+            mapping = (
+                self.repository.get_storage_mapping(storage_name)
+                if storage_name
+                else None
+            )
             if mapping:
                 enriched["storage_class_name"] = mapping.get("storage_class_name")
                 enriched["cluster_name"] = mapping.get("cluster_name")
@@ -1672,11 +1787,15 @@ class Planner:
         block = bool(request["payload_summary"].get("block"))
         if block:
             restore_hard = dict(desired["resource_quota_hard"])
-            desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(restore_hard)
+            desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(
+                restore_hard
+            )
             desired["block"] = True
             desired["block_state"] = {
                 "blocked": True,
-                "block_mode": request["payload_summary"].get("block_mode", "quota-zero"),
+                "block_mode": request["payload_summary"].get(
+                    "block_mode", "quota-zero"
+                ),
                 "restore_hard": restore_hard,
                 "reason": request["payload_summary"].get("reason"),
             }
@@ -1705,7 +1824,9 @@ class Planner:
         updated_block_state = dict(block_state)
         updated_block_state["restore_hard"] = restore_hard
         updated_block_state["updated_while_blocked"] = True
-        desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(restore_hard)
+        desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(
+            restore_hard
+        )
         desired["block"] = True
         desired["block_state"] = updated_block_state
 
@@ -1714,7 +1835,9 @@ class Planner:
     ) -> bool:
         if request["operation"] != OperationKind.K8S_QUOTA_UPDATE.value:
             return False
-        resource = self.repository.get_resource(request["resource_kind"], request["resource_key"])
+        resource = self.repository.get_resource(
+            request["resource_kind"], request["resource_key"]
+        )
         if not resource:
             return False
         used = _observed_quota_used(resource["observed_state"])
@@ -1726,7 +1849,9 @@ class Planner:
         for key, used_value in used.items():
             if key not in hard:
                 continue
-            desired_value = kubernetes_resource_quota_value_to_base_units(key, hard[key])
+            desired_value = kubernetes_resource_quota_value_to_base_units(
+                key, hard[key]
+            )
             parsed_used = kubernetes_resource_quota_value_to_base_units(key, used_value)
             if desired_value < parsed_used:
                 issues.append(
@@ -1756,11 +1881,12 @@ class Planner:
     def _kubernetes_default_policy_for_request(
         self, request: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-        existing = self.repository.get_resource(request["resource_kind"], request["resource_key"])
-        resource_type = (
-            request["payload_summary"].get("resource_type")
-            or (existing or {}).get("desired_state", {}).get("resource_type")
+        existing = self.repository.get_resource(
+            request["resource_kind"], request["resource_key"]
         )
+        resource_type = request["payload_summary"].get("resource_type") or (
+            existing or {}
+        ).get("desired_state", {}).get("resource_type")
         if not resource_type:
             return None, [{"reason": "resource_type_required_for_default_quota_reset"}]
         policy = self.repository.get_default_quota_policy(
@@ -1787,7 +1913,11 @@ class Planner:
                 issues.append({"reason": "default_policy_storage_name_missing"})
                 continue
             mapping = self.repository.get_storage_mapping(entry["storage_name"])
-            if mapping and target_cluster and mapping.get("cluster_name") != target_cluster:
+            if (
+                mapping
+                and target_cluster
+                and mapping.get("cluster_name") != target_cluster
+            ):
                 issues.append(
                     {
                         "reason": "default_policy_storage_mapping_cluster_mismatch",
@@ -2007,7 +2137,9 @@ def _append_boolean_payload_issues(
 ) -> None:
     for field in fields:
         if field in payload and not isinstance(payload[field], bool):
-            issues.append({"reason": f"{field}_boolean_required", "value": payload[field]})
+            issues.append(
+                {"reason": f"{field}_boolean_required", "value": payload[field]}
+            )
 
 
 def _append_expiry_issues(
@@ -2028,7 +2160,9 @@ def _append_expiry_issues(
     }
     if operation not in supported_operations:
         return
-    unsupported = sorted(field for field in EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS if field in payload)
+    unsupported = sorted(
+        field for field in EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS if field in payload
+    )
     if unsupported:
         issues.append({"reason": "expires_at_field_unsupported", "fields": unsupported})
     create_operations = {
@@ -2042,7 +2176,9 @@ def _append_expiry_issues(
     if "expires_at" not in payload:
         if operation in create_operations:
             issues.append({"reason": "expires_at_required"})
-        elif operation not in import_operations and not existing_desired.get("expires_at"):
+        elif operation not in import_operations and not existing_desired.get(
+            "expires_at"
+        ):
             issues.append({"reason": "expires_at_required"})
         return
     expires_at = payload.get("expires_at")
@@ -2093,7 +2229,7 @@ def _filesystem_quota_issues(quota: Any) -> list[dict[str, Any]]:
     if unsupported:
         issues.append(
             {
-                "reason": "filesystem_quota_fields_unsupported_phase12",
+                "reason": "filesystem_quota_fields_unsupported",
                 "fields": unsupported,
             }
         )
@@ -2106,10 +2242,14 @@ def _filesystem_quota_issues(quota: Any) -> list[dict[str, Any]]:
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            issues.append({"reason": f"filesystem_quota_{field}_invalid", "value": value})
+            issues.append(
+                {"reason": f"filesystem_quota_{field}_invalid", "value": value}
+            )
             continue
         if parsed <= 0:
-            issues.append({"reason": f"filesystem_quota_{field}_invalid", "value": value})
+            issues.append(
+                {"reason": f"filesystem_quota_{field}_invalid", "value": value}
+            )
             continue
         if field == "capacity_bytes" and parsed > MAX_FILESYSTEM_QUOTA_CAPACITY_BYTES:
             issues.append(

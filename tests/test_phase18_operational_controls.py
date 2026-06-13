@@ -6,7 +6,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from dms.adapters import StubFilesystemBackendAdapter, StubKubernetesNamespaceQuotaAdapter
+from dms.adapters import (
+    StubFilesystemBackendAdapter,
+    StubKubernetesNamespaceQuotaAdapter,
+)
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
@@ -15,7 +18,6 @@ from dms.migrations import migrate_all
 from dms.planner import Planner
 from dms.repositories import DmsRepository, ObservabilityRepository, SchedulingBlocked
 from dms.workers import RMWorkerRuntime, RunHeartbeat
-
 
 AUTH_HEADERS = {"x-dms-actor": "api-client"}
 
@@ -62,7 +64,10 @@ def test_maintenance_blocks_mutating_requests_but_allows_queries(harness):
     assert blocked.status_code == 409
     assert repository.list_requests(requester_id="user-1") == []
 
-    assert client.get("/api/v1/operations/control-state", headers=AUTH_HEADERS).status_code == 200
+    assert (
+        client.get("/api/v1/operations/control-state", headers=AUTH_HEADERS).status_code
+        == 200
+    )
     summary = client.get("/api/v1/operations/work-summary", headers=AUTH_HEADERS)
     assert summary.status_code == 200
     assert summary.json()["plans"]["total_active"] == 0
@@ -87,7 +92,9 @@ def test_drain_blocks_worker_claim_until_resume(harness):
     worker = _rm_worker(repository, observability)
 
     assert worker.run_once() == 0
-    assert repository.get_plan(plan["plan_id"])["status"] == LifecycleState.PLANNED.value
+    assert (
+        repository.get_plan(plan["plan_id"])["status"] == LifecycleState.PLANNED.value
+    )
 
     resume = client.post(
         "/api/v1/operations/control-state:resume",
@@ -96,7 +103,9 @@ def test_drain_blocks_worker_claim_until_resume(harness):
     )
     assert resume.status_code == 200
     assert worker.run_once() == 1
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
 
 
 def test_claim_plan_transaction_refuses_when_scheduling_blocked(harness):
@@ -183,7 +192,10 @@ def test_mark_stale_runs_classifies_claimed_and_active_side_effect_states(harnes
     runs = {run["run_id"]: run for run in repository.list_runs(limit=10)}
     assert runs[claimed_run_id]["state"] == LifecycleState.STALE_CLAIM.value
     assert runs[applying_run_id]["state"] == LifecycleState.RECOVERY_NEEDED.value
-    assert repository.get_request(claimed_request_id)["status"] == LifecycleState.STALE_CLAIM.value
+    assert (
+        repository.get_request(claimed_request_id)["status"]
+        == LifecycleState.STALE_CLAIM.value
+    )
     assert (
         repository.get_request(applying_request_id)["status"]
         == LifecycleState.RECOVERY_NEEDED.value
@@ -218,9 +230,12 @@ def test_operational_queries_and_resume_blockers(harness):
     assert drain_status.json()["ready_for_shutdown"] is False
 
     _expire_runs(repository, run_id)
-    assert client.post("/api/v1/operations/runs:mark-stale", headers=AUTH_HEADERS).json()[
-        "marked"
-    ] == 1
+    assert (
+        client.post("/api/v1/operations/runs:mark-stale", headers=AUTH_HEADERS).json()[
+            "marked"
+        ]
+        == 1
+    )
     client.post(
         "/api/v1/operations/control-state:begin-drain",
         json={"reason": "resume blocked"},
@@ -310,6 +325,62 @@ def _rm_worker(
         worker_id="rm-worker",
         lease_seconds=2,
     )
+
+
+def test_list_requests_filters_by_date_range(harness):
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    rid_old = _create_filesystem_request(repository, "fs-old")
+    rid_mid = _create_filesystem_request(repository, "fs-mid")
+    rid_new = _create_filesystem_request(repository, "fs-new")
+    _stamp_requested_at(repository, rid_old, "2025-04-30T23:59:59+00:00")
+    _stamp_requested_at(repository, rid_mid, "2025-05-15T12:00:00+00:00")
+    _stamp_requested_at(repository, rid_new, "2025-06-01T00:00:00+00:00")
+
+    client: TestClient = harness["client"]
+
+    full = client.get(
+        "/api/v1/operations/requests",
+        params={"requester_id": "user-1"},
+        headers=AUTH_HEADERS,
+    ).json()
+    assert {r["request_id"] for r in full} == {rid_old, rid_mid, rid_new}
+
+    # Date-only `until` widens to next-day 00:00 so the boundary day is inclusive.
+    ranged = client.get(
+        "/api/v1/operations/requests",
+        params={"requester_id": "user-1", "since": "2025-05-01", "until": "2025-05-31"},
+        headers=AUTH_HEADERS,
+    ).json()
+    assert [r["request_id"] for r in ranged] == [rid_mid]
+
+    iso_filtered = client.get(
+        "/api/v1/operations/requests",
+        params={
+            "requester_id": "user-1",
+            "since": "2025-05-15T00:00:00Z",
+            "until": "2025-05-15T13:00:00Z",
+        },
+        headers=AUTH_HEADERS,
+    ).json()
+    assert [r["request_id"] for r in iso_filtered] == [rid_mid]
+
+    bad = client.get(
+        "/api/v1/operations/requests",
+        params={"requester_id": "user-1", "since": "garbage"},
+        headers=AUTH_HEADERS,
+    )
+    assert bad.status_code == 422
+
+
+def _stamp_requested_at(
+    repository: DmsRepository, request_id: str, requested_at: str
+) -> None:
+    with repository.database.connect() as connection:
+        connection.execute(
+            "UPDATE requests SET requested_at = ? WHERE request_id = ?",
+            (requested_at, request_id),
+        )
 
 
 def _expire_runs(repository: DmsRepository, *run_ids: str) -> None:

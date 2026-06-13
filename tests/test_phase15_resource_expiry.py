@@ -4,7 +4,10 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from dms.adapters import StubFilesystemBackendAdapter, StubKubernetesNamespaceQuotaAdapter
+from dms.adapters import (
+    StubFilesystemBackendAdapter,
+    StubKubernetesNamespaceQuotaAdapter,
+)
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
@@ -14,7 +17,6 @@ from dms.planner import Planner
 from dms.query import OperationalQueryService
 from dms.repositories import DmsRepository, ObservabilityRepository
 from dms.workers import RMWorkerRuntime
-
 
 API_HEADERS = {"x-dms-actor": "api-client"}
 
@@ -61,7 +63,9 @@ def test_phase15_filesystem_update_preserves_or_changes_expiry(tmp_path):
     assert Planner(repository).run_once() == 1
     assert run_rm_worker(repository, observability) == 1
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha")
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
+    )
     assert repository.get_request(update_id)["status"] == LifecycleState.SUCCEEDED.value
     assert resource["desired_state"]["expires_at"] == "2099-02-01T00:00:00+00:00"
 
@@ -80,12 +84,19 @@ def test_phase15_filesystem_update_preserves_or_changes_expiry(tmp_path):
     assert Planner(repository).run_once() == 1
     assert run_rm_worker(repository, observability) == 1
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha")
-    assert repository.get_request(quota_update_id)["status"] == LifecycleState.SUCCEEDED.value
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
+    )
+    assert (
+        repository.get_request(quota_update_id)["status"]
+        == LifecycleState.SUCCEEDED.value
+    )
     assert resource["desired_state"]["expires_at"] == "2099-02-01T00:00:00+00:00"
 
 
-def test_phase15_filesystem_import_defaults_and_rejects_unsupported_expiry_fields(tmp_path):
+def test_phase15_filesystem_import_defaults_and_rejects_unsupported_expiry_fields(
+    tmp_path,
+):
     repository, _ = repository_pair(tmp_path)
     register_filesystem_mapping(repository)
     request_id = create_request(
@@ -155,7 +166,9 @@ def test_phase15_kubernetes_create_update_import_and_expiring_lifecycle(tmp_path
         operation=OperationKind.K8S_QUOTA_CREATE,
         resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA,
         resource_key="cluster-b:team-a",
-        payload=kubernetes_payload(namespace_name="team-a", expires_at="2099-01-01T00:00:00Z"),
+        payload=kubernetes_payload(
+            namespace_name="team-a", expires_at="2099-01-01T00:00:00Z"
+        ),
     )
     assert Planner(repository).run_once() == 1
     assert run_rm_worker(repository, observability) == 1
@@ -198,7 +211,9 @@ def test_phase15_kubernetes_create_update_import_and_expiring_lifecycle(tmp_path
     assert import_plan is not None
     assert import_plan["desired_state"]["expires_at"]
 
-    seed_kubernetes_quota(repository, namespace_name="expired", expires_at="2000-01-01T00:00:00Z")
+    seed_kubernetes_quota(
+        repository, namespace_name="expired", expires_at="2000-01-01T00:00:00Z"
+    )
     client = client_for(tmp_path, repository, observability)
     response = client.get(
         "/api/v1/operations/kubernetes/namespace-quotas/expiring",
@@ -209,13 +224,17 @@ def test_phase15_kubernetes_create_update_import_and_expiring_lifecycle(tmp_path
     assert {item["resource_key"] for item in response.json()} >= {"cluster-b:expired"}
 
     issues = OperationalQueryService(repository, observability).action_required()
-    assert "kubernetes_quota_expired_unblocked" in {issue["issue_type"] for issue in issues}
+    assert "kubernetes_quota_expired_unblocked" in {
+        issue["issue_type"] for issue in issues
+    }
 
 
 def test_phase15_kubernetes_expiration_sweep_blocks_user_and_skips_system(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_kubernetes_mapping(repository)
-    seed_kubernetes_quota(repository, namespace_name="expired", expires_at="2000-01-01T00:00:00Z")
+    seed_kubernetes_quota(
+        repository, namespace_name="expired", expires_at="2000-01-01T00:00:00Z"
+    )
     seed_kubernetes_quota(
         repository,
         namespace_name="system-expired",
@@ -255,7 +274,10 @@ def test_phase15_kubernetes_expiration_sweep_blocks_user_and_skips_system(tmp_pa
         ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, "cluster-b:expired"
     )
     assert blocked["status"] == LifecycleState.BLOCKED.value
-    assert blocked["desired_state"]["block_state"]["restore_hard"]["requests.storage"] == "1Gi"
+    assert (
+        blocked["desired_state"]["block_state"]["restore_hard"]["requests.storage"]
+        == "1Gi"
+    )
 
 
 def repository_pair(tmp_path) -> tuple[DmsRepository, ObservabilityRepository]:
@@ -311,7 +333,10 @@ def _register_mapping(
     repository.upsert_storage_mapping(
         StorageMappingInput(
             storage_name=storage_name,
-            backend_template={"backend_type": backend_type, "csi_driver": "driver.test"},
+            backend_template={
+                "backend_type": backend_type,
+                "csi_driver": "driver.test",
+            },
             cluster_name=cluster_name,
             storage_class_name=storage_class_name,
             sanity_status="Ready",
@@ -340,7 +365,9 @@ def create_request(
     )
 
 
-def run_rm_worker(repository: DmsRepository, observability: ObservabilityRepository) -> int:
+def run_rm_worker(
+    repository: DmsRepository, observability: ObservabilityRepository
+) -> int:
     worker = RMWorkerRuntime(
         repository=repository,
         observability=observability,
@@ -356,7 +383,7 @@ def seed_filesystem(repository: DmsRepository, *, expires_at: str) -> None:
         "storage_name": "cephfs-a",
         "directory_name": "project-alpha",
         "users": ["alice", "bob"],
-        "access_group": "dms-phase15-project-alpha",
+        "access_group": "dms-grp-project-alpha",
         "mode": "0770",
         "resource_type": "user",
         "expires_at": expires_at,
@@ -412,7 +439,10 @@ def seed_kubernetes_quota(
         "resource_kind": ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
         "resource_key": f"cluster-b:{namespace_name}",
         "resource_quota_name": "dms-storage-quota",
-        "resource_quota_hard": {"requests.storage": "1Gi", "persistentvolumeclaims": "2"},
+        "resource_quota_hard": {
+            "requests.storage": "1Gi",
+            "persistentvolumeclaims": "2",
+        },
         "expires_at": expires_at,
     }
     repository.upsert_resource(
@@ -420,7 +450,12 @@ def seed_kubernetes_quota(
         resource_key=f"cluster-b:{namespace_name}",
         desired_state=desired,
         applied_state={"expires_at": expires_at},
-        observed_state={"resource_quota": {"exists": True, "spec_hard": desired["resource_quota_hard"]}},
+        observed_state={
+            "resource_quota": {
+                "exists": True,
+                "spec_hard": desired["resource_quota_hard"],
+            }
+        },
         status=LifecycleState.SUCCEEDED.value,
     )
 

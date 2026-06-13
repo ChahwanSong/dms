@@ -31,9 +31,13 @@ server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server
 ca_data="$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
 token="$(kubectl -n "$namespace" create token "$service_account" --duration="$duration")"
 
+ca_tmp="$(mktemp)"
+echo "$ca_data" | base64 -d > "$ca_tmp"
 kubectl config --kubeconfig "$output" set-cluster "$cluster_name" \
   --server="$server" \
-  --certificate-authority-data="$ca_data" >/dev/null
+  --certificate-authority="$ca_tmp" \
+  --embed-certs=true >/dev/null
+rm -f "$ca_tmp"
 kubectl config --kubeconfig "$output" set-credentials "dms-${cluster_name}" \
   --token="$token" >/dev/null
 kubectl config --kubeconfig "$output" set-context "$cluster_name" \

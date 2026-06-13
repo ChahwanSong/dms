@@ -16,7 +16,6 @@ from dms.migrations import migrate_all
 from dms.planner import Planner
 from dms.repositories import DmsRepository
 
-
 LONGHORN = "longhorn-b"
 LONGHORN_CLASS = "testbed-longhorn"
 STATIC = "longhorn-static-b"
@@ -113,7 +112,7 @@ def test_phase17_planner_renders_mixed_backend_storageclass_quota(repository):
 
     plan = repository.get_plan_by_request(request_id)
     assert plan is not None
-    assert plan["execution_metadata"]["planner"] == "phase6"
+    assert plan["execution_metadata"]["planner"] == "k8s-multi-storage-quota"
     assert plan["desired_state"]["storage_class_quotas"] == [
         {
             "storage_name": CEPHFS,
@@ -173,7 +172,10 @@ def test_phase6_planner_rejects_duplicate_storage_name(repository):
     assert repository.get_plan_by_request(request_id) is None
     [result] = repository.get_results(request_id)
     assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert result["verification_summary"]["issues"][0]["reason"] == "duplicate_storage_name"
+    assert (
+        result["verification_summary"]["issues"][0]["reason"]
+        == "duplicate_storage_name"
+    )
 
 
 def test_phase6_planner_rejects_cross_cluster_mapping(repository):
@@ -366,8 +368,12 @@ def register_mapping(
             "agent_observed": {
                 "rm_readiness": "Ready",
                 "dm_readiness": "Ready",
-                "rm_candidates": [{"cluster_name": cluster_name, "node_name": "worker"}],
-                "dm_candidates": [{"cluster_name": cluster_name, "node_name": "worker"}],
+                "rm_candidates": [
+                    {"cluster_name": cluster_name, "node_name": "worker"}
+                ],
+                "dm_candidates": [
+                    {"cluster_name": cluster_name, "node_name": "worker"}
+                ],
             },
             "checks": [],
             "warnings": [],

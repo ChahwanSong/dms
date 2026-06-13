@@ -20,7 +20,6 @@ from dms.query import OperationalQueryService
 from dms.repositories import DmsRepository, ObservabilityRepository
 from dms.workers import RMWorkerRuntime
 
-
 API_HEADERS = {"x-dms-actor": "api-client"}
 
 
@@ -43,13 +42,20 @@ def test_phase12_create_with_quota_applies_cephfs_quota(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:quota-create")
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:quota-create"
+    )
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert resource["desired_state"]["quota"] == {
         "capacity_bytes": 8 * 1024**2,
         "file_count": 32,
     }
-    assert resource["applied_state"]["quota_state"]["capacity"]["observed_bytes"] == 8 * 1024**2
+    assert (
+        resource["applied_state"]["quota_state"]["capacity"]["observed_bytes"]
+        == 8 * 1024**2
+    )
     assert resource["observed_state"]["access_validation"]["denied_users"] == {
         "mallory": "denied"
     }
@@ -109,13 +115,20 @@ def test_phase12_update_increases_quota_and_records_live_state(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:quota-update")
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:quota-update"
+    )
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert resource["desired_state"]["quota"] == {
         "capacity_bytes": 32 * 1024**2,
         "file_count": 128,
     }
-    assert resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"] == 32 * 1024**2
+    assert (
+        resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"]
+        == 32 * 1024**2
+    )
     assert [call["operation"] for call in executor.calls] == ["apply_quota"]
 
 
@@ -148,10 +161,17 @@ def test_phase12_planner_allows_quota_decrease_without_usage_guard(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:quota-decrease")
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:quota-decrease"
+    )
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert resource["desired_state"]["quota"]["capacity_bytes"] == 8 * 1024**2
-    assert resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"] == 8 * 1024**2
+    assert (
+        resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"]
+        == 8 * 1024**2
+    )
 
 
 def test_phase12_backend_applies_decrease_without_live_usage_read(tmp_path):
@@ -183,15 +203,23 @@ def test_phase12_backend_applies_decrease_without_live_usage_read(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:quota-live-guard")
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
-    assert resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"] == 8 * 1024**2
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:quota-live-guard"
+    )
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
+    assert (
+        resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"]
+        == 8 * 1024**2
+    )
     assert [call["operation"] for call in executor.calls] == ["apply_quota"]
 
 
 def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
+    # desired 8 MiB; live 200 MiB ⇒ 192 MiB diff exceeds 100 MiB capacity tolerance.
     seed_resource(
         repository,
         directory_name="quota-drift",
@@ -202,7 +230,7 @@ def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
     executor.seed_directory(
         "quota-drift",
         resource_key="cephfs-a:quota-drift",
-        quota={"capacity_bytes": 16 * 1024**2, "file_count": 32},
+        quota={"capacity_bytes": 200 * 1024**2, "file_count": 32},
         usage={"used_bytes": 14 * 1024**2, "used_files": 2},
     )
     check_id = create_request(
@@ -236,12 +264,16 @@ def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:quota-drift")
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:quota-drift"
+    )
     assert repository.get_request(sync_id)["status"] == LifecycleState.SUCCEEDED.value
-    assert resource["desired_state"]["quota"]["capacity_bytes"] == 16 * 1024**2
+    assert resource["desired_state"]["quota"]["capacity_bytes"] == 200 * 1024**2
     issue_types_after_sync = {
         issue["issue_type"]
-        for issue in OperationalQueryService(repository, observability).action_required()
+        for issue in OperationalQueryService(
+            repository, observability
+        ).action_required()
     }
     assert "filesystem_quota_drifted" not in issue_types_after_sync
 
@@ -310,13 +342,13 @@ def test_phase12_rejects_filesystem_usage_payload_fields(tmp_path):
     [sync_result] = repository.get_results(sync_id)
     assert check_result["verification_summary"]["issues"] == [
         {
-            "reason": "filesystem_payload_fields_unsupported_phase12",
+            "reason": "filesystem_payload_fields_unsupported",
             "fields": ["include_usage", "usage_thresholds"],
         }
     ]
     assert sync_result["verification_summary"]["issues"] == [
         {
-            "reason": "filesystem_payload_fields_unsupported_phase12",
+            "reason": "filesystem_payload_fields_unsupported",
             "fields": ["include_usage"],
         }
     ]
@@ -351,10 +383,15 @@ def test_phase12_assign_quota_writes_quota_only_marker(tmp_path):
     resource = repository.get_resource(
         ResourceKind.FILESYSTEM.value, "cephfs-a:existing-quota-only"
     )
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert resource["desired_state"]["management_mode"] == "quota_only"
     assert resource["applied_state"]["marker"]["management_mode"] == "quota_only"
-    assert executor.directories["existing-quota-only"]["marker"]["management_mode"] == "quota_only"
+    assert (
+        executor.directories["existing-quota-only"]["marker"]["management_mode"]
+        == "quota_only"
+    )
 
 
 def test_phase12_delete_rejects_quota_only_resource(tmp_path):
@@ -423,8 +460,12 @@ def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:existing-import")
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:existing-import"
+    )
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert resource["desired_state"]["management_mode"] == "full"
     assert resource["desired_state"]["users"] == ["alice", "bob"]
     assert resource["observed_state"]["access_validation"]["allowed_users"] == {
@@ -434,7 +475,9 @@ def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
     assert resource["observed_state"]["access_validation"]["denied_users"] == {
         "mallory": "denied"
     }
-    assert resource["observed_state"]["quota_state"]["file_count"]["observed_count"] == 64
+    assert (
+        resource["observed_state"]["quota_state"]["file_count"]["observed_count"] == 64
+    )
 
 
 def test_phase12_import_rejects_missing_access_policy_and_unsafe_name(tmp_path):
@@ -456,12 +499,10 @@ def test_phase12_import_rejects_missing_access_policy_and_unsafe_name(tmp_path):
 
     [result] = repository.get_results(request_id)
     assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert {
-        issue["reason"] for issue in result["verification_summary"]["issues"]
-    } >= {
-        "directory_name_invalid",
-        "filesystem_access_policy_required",
-        "filesystem_access_group_required",
+    # access_policy is now optional (backend auto-discovers live group); only
+    # the unsafe directory_name is rejected here.
+    assert {issue["reason"] for issue in result["verification_summary"]["issues"]} >= {
+        "directory_name_invalid"
     }
 
 
@@ -501,7 +542,7 @@ class FakePhase12FilesystemExecutor:
         usage: dict[str, int] | None = None,
         marker: dict[str, Any] | None = None,
         management_mode: str | None = "full",
-        group_name: str = "dms-phase10-project",
+        group_name: str = "dms-grp-project",
         mode: str = "0770",
     ) -> None:
         if marker is None and resource_key:
@@ -519,7 +560,9 @@ class FakePhase12FilesystemExecutor:
             "group_name": group_name,
             "group_gid": 24000,
             "mode": mode,
-            "quota_state": quota_state(quota or {}, usage or {"used_bytes": 0, "used_files": 0}),
+            "quota_state": quota_state(
+                quota or {}, usage or {"used_bytes": 0, "used_files": 0}
+            ),
         }
 
     def create_directory(
@@ -565,7 +608,9 @@ class FakePhase12FilesystemExecutor:
         resource_key: str,
         quota: dict[str, int],
     ) -> dict[str, Any]:
-        self.calls.append({"operation": "apply_quota", "directory_name": directory_name})
+        self.calls.append(
+            {"operation": "apply_quota", "directory_name": directory_name}
+        )
         directory = self.directories[directory_name]
         marker = directory.get("marker") or {}
         if marker.get("resource_key") != resource_key:
@@ -636,7 +681,9 @@ class FakePhase12FilesystemExecutor:
         marker: dict[str, Any],
         quota: dict[str, int],
     ) -> dict[str, Any]:
-        self.calls.append({"operation": "assign_quota", "directory_name": directory_name})
+        self.calls.append(
+            {"operation": "assign_quota", "directory_name": directory_name}
+        )
         directory = self.directories[directory_name]
         directory["marker"] = marker
         directory["quota_state"] = quota_state(quota, None)
@@ -760,7 +807,12 @@ def register_cephfs_mapping(repository: DmsRepository) -> None:
             sanity_status="Ready",
         ),
         actor="admin",
-        sanity_result={"status": "Ready", "readiness": readiness, "errors": [], "warnings": []},
+        sanity_result={
+            "status": "Ready",
+            "readiness": readiness,
+            "errors": [],
+            "warnings": [],
+        },
         readiness=readiness,
     )
 
@@ -779,7 +831,7 @@ def seed_resource(
         "directory_name": directory_name,
         "users": ["alice", "bob"],
         "validation_denied_users": ["mallory"],
-        "access_group": f"dms-phase10-{directory_name}",
+        "access_group": f"dms-grp-{directory_name}",
         "mode": "0770",
         "resource_type": "user",
         "resource_kind": ResourceKind.FILESYSTEM.value,

@@ -426,7 +426,7 @@ spec:
         - name: ssh-client-source
           secret:
             secretName: dms-ssh-client
-            defaultMode: 0400
+            defaultMode: 0444
 ---
 apiVersion: apps/v1
 kind: Deployment

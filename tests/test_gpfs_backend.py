@@ -8,6 +8,7 @@ import pytest
 from dms.adapters import (
     AdapterResult,
     StubFilesystemBackendAdapter,
+    StubIdentityGroupManager,
     StubKubernetesNamespaceQuotaAdapter,
 )
 from dms.backend_registry import BackendAdapterRegistry
@@ -43,7 +44,11 @@ class RecordingKubernetesQuotaAdapter:
     calls: list[tuple[str, str]] = field(default_factory=list)
 
     def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
-        return {"cluster_name": cluster_name, "namespace_name": namespace_name, "exists": True}
+        return {
+            "cluster_name": cluster_name,
+            "namespace_name": namespace_name,
+            "exists": True,
+        }
 
     def apply_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         self.calls.append(("apply_resource_quota", plan["plan_id"]))
@@ -108,7 +113,7 @@ def gpfs_mapping() -> StorageMappingInput:
             "backend_type": GPFS_BACKEND_TYPE,
             "filesystem_name": "gpfs0",
             "mount_path": "/gpfs/gpfs0",
-            "fileset_root": "/gpfs/gpfs0/dms",
+            "managed_root": "/gpfs/gpfs0/dms",
             "quota_scope": "fileset",
             "fileset_name_template": "dms-{directory_name}",
             "csi_driver": GPFS_CSI_DRIVER,
@@ -222,7 +227,9 @@ def test_gpfs_filesystem_create_uses_storage_scale_commands(repository_pair):
     [resource] = repository.list_resources()
     commands = resource["observed_state"]["command_evidence"]
     argv = [entry["argv"] for entry in commands]
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert resource["observed_state"]["adapter"] == "gpfs-fileset-command"
     assert ["mmcrfileset", "gpfs0", "dms-project-alpha", "--inode-space", "new"] in argv
     assert [
@@ -240,8 +247,13 @@ def test_gpfs_filesystem_create_uses_storage_scale_commands(repository_pair):
         "-J",
         "/gpfs/gpfs0/dms/project-alpha",
     ] in argv
-    assert resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"] == 8 * 1024**2
-    assert resource["observed_state"]["quota_state"]["file_count"]["observed_count"] == 32
+    assert (
+        resource["observed_state"]["quota_state"]["capacity"]["observed_bytes"]
+        == 8 * 1024**2
+    )
+    assert (
+        resource["observed_state"]["quota_state"]["file_count"]["observed_count"] == 32
+    )
 
 
 def test_gpfs_check_reports_quota_drift(repository_pair):
@@ -249,7 +261,8 @@ def test_gpfs_check_reports_quota_drift(repository_pair):
     register_gpfs_mapping(repository)
     executor = FakeGpfsExecutor()
     executor.filesets["dms-project-alpha"] = "/gpfs/gpfs0/dms/project-alpha"
-    executor.quotas["dms-project-alpha"] = {"block_kib": 16384, "files": 32}
+    # desired 8 MiB; live 200 MiB ⇒ 192 MiB diff exceeds 100 MiB capacity tolerance.
+    executor.quotas["dms-project-alpha"] = {"block_kib": 200 * 1024, "files": 32}
     seed_gpfs_resource(
         repository,
         directory_name="project-alpha",
@@ -270,7 +283,10 @@ def test_gpfs_check_reports_quota_drift(repository_pair):
     [result] = repository.get_results(request_id)
     assert result["terminal_status"] == LifecycleState.SUCCEEDED.value
     assert result["verification_summary"]["quota_status"] == "Drifted"
-    assert result["verification_summary"]["issues"][0]["issue_type"] == "filesystem_quota_drifted"
+    assert (
+        result["verification_summary"]["issues"][0]["issue_type"]
+        == "filesystem_quota_drifted"
+    )
 
 
 def test_gpfs_sync_accepts_live_quota(repository_pair):
@@ -296,7 +312,9 @@ def test_gpfs_sync_accepts_live_quota(repository_pair):
     worker = gpfs_worker(repository, observability, executor)
 
     assert worker.run_once() == 1
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "gpfs-a:project-alpha")
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "gpfs-a:project-alpha"
+    )
     assert resource["desired_state"]["quota"] == {
         "capacity_bytes": 16 * 1024**2,
         "file_count": 64,
@@ -381,7 +399,9 @@ def test_gpfs_missing_command_fails_closed(repository_pair):
         },
     )
     Planner(repository).run_once()
-    worker = gpfs_worker(repository, observability, FakeGpfsExecutor(missing={"mmsetquota"}))
+    worker = gpfs_worker(
+        repository, observability, FakeGpfsExecutor(missing={"mmsetquota"})
+    )
 
     assert worker.run_once() == 1
     [result] = repository.get_results(request_id)
@@ -407,7 +427,9 @@ def test_gpfs_quota_disabled_fails_before_side_effect(repository_pair):
         },
     )
     Planner(repository).run_once()
-    worker = gpfs_worker(repository, observability, FakeGpfsExecutor(quota_enabled=False))
+    worker = gpfs_worker(
+        repository, observability, FakeGpfsExecutor(quota_enabled=False)
+    )
 
     assert worker.run_once() == 1
     [result] = repository.get_results(request_id)
@@ -447,7 +469,9 @@ def test_gpfs_perfileset_quota_disabled_fails_before_side_effect(repository_pair
     assert result["verification_summary"]["backend_side_effect"] is False
 
 
-def test_gpfs_quota_readback_mismatch_records_unknown_after_side_effect(repository_pair):
+def test_gpfs_quota_readback_mismatch_records_unknown_after_side_effect(
+    repository_pair,
+):
     repository, observability = repository_pair
     register_gpfs_mapping(repository)
     request_id = repository.create_request(
@@ -465,10 +489,11 @@ def test_gpfs_quota_readback_mismatch_records_unknown_after_side_effect(reposito
         },
     )
     Planner(repository).run_once()
+    # 200 MiB delta exceeds the 100 MiB capacity tolerance.
     worker = gpfs_worker(
         repository,
         observability,
-        FakeGpfsExecutor(quota_readback_block_kib_delta=1),
+        FakeGpfsExecutor(quota_readback_block_kib_delta=200 * 1024),
     )
 
     with pytest.raises(RuntimeError, match="GPFS quota capacity read-back mismatch"):
@@ -513,7 +538,9 @@ def test_gpfs_kubernetes_namespace_quota_uses_gpfs_csi_mapping(repository_pair):
 
     assert worker.run_once() == 1
     [resource] = repository.list_resources()
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert kubernetes_adapter.calls == [
         ("apply_resource_quota", repository.get_plan_by_request(request_id)["plan_id"])
     ]
@@ -561,11 +588,15 @@ def gpfs_worker(
     observability: ObservabilityRepository,
     executor: GpfsCommandExecutor,
 ) -> RMWorkerRuntime:
-    template = GpfsBackendTemplate.from_storage_mapping(repository.get_storage_mapping("gpfs-a"))
+    template = GpfsBackendTemplate.from_storage_mapping(
+        repository.get_storage_mapping("gpfs-a")
+    )
     return RMWorkerRuntime(
         repository=repository,
         observability=observability,
-        filesystem_adapter=GpfsFilesystemBackendAdapter(template=template, executor=executor),
+        filesystem_adapter=GpfsFilesystemBackendAdapter(
+            template=template, executor=executor
+        ),
         kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
         worker_id="rm-gpfs",
     )
@@ -581,7 +612,7 @@ def seed_gpfs_resource(
     desired = {
         "storage_name": "gpfs-a",
         "directory_name": directory_name,
-        "access_group": f"dms-phase10-{directory_name}",
+        "access_group": f"dms-grp-{directory_name}",
         "mode": "0770",
         "resource_kind": ResourceKind.FILESYSTEM.value,
         "resource_key": f"gpfs-a:{directory_name}",
@@ -623,16 +654,32 @@ class FakeGpfsExecutor:
     def run(self, argv: list[str], *, timeout_seconds: int) -> CommandResult:
         self.commands.append(argv)
         if argv[:2] == ["sh", "-c"]:
-            command = argv[2].split()[-1]
-            return result(argv, 1 if command in self.missing else 0, stdout=f"/usr/lpp/mmfs/bin/{command}\n")
+            script = argv[2]
+            # Batch command-check: "command -v X >/dev/null || echo MISSING:X && ..."
+            if "MISSING:" in script:
+                missing_lines = [f"MISSING:{c}" for c in self.missing if c in script]
+                return result(argv, 0, stdout="\n".join(missing_lines))
+            # stat-based access probe
+            if script.startswith("stat -c"):
+                return result(argv, 0, stdout="9000000 770\n")
+            # getent group probe
+            if script.startswith("getent group"):
+                return result(argv, 0, stdout="")
+            # Legacy single command -v fallback
+            command = script.split()[-1]
+            return result(
+                argv,
+                1 if command in self.missing else 0,
+                stdout=f"/usr/lpp/mmfs/bin/{command}\n",
+            )
         command = argv[0]
         if command in self.missing:
             return result(argv, 127, stderr=f"{command}: not found")
         if command == "mmlsfs":
+            # Combined -Q --perfileset-quota call or individual
             enabled = self.quota_enabled
-            if "--perfileset-quota" in argv:
-                enabled = self.perfileset_quota_enabled
-            return result(argv, 0, stdout=mmlsfs_y(argv[1], enabled))
+            pf_enabled = self.perfileset_quota_enabled
+            return result(argv, 0, stdout=mmlsfs_y(argv[1], enabled, pf_enabled))
         if command == "mmlsfileset":
             return self._mmlsfileset(argv)
         if command == "mmcrfileset":
@@ -658,7 +705,16 @@ class FakeGpfsExecutor:
                 "block_kib": quota["block_kib"] + self.quota_readback_block_kib_delta,
             }
             return result(argv, 0, stdout=mmlsquota_y(argv[-1], fileset_name, quota))
-        if command in {"chgrp", "chmod", "python3", "mmunlinkfileset", "mmdelfileset"}:
+        if command in {
+            "chgrp",
+            "chown",
+            "chmod",
+            "python3",
+            "mmunlinkfileset",
+            "mmdelfileset",
+            "sss_cache",
+            "sudo",
+        }:
             if command == "mmunlinkfileset":
                 self.filesets[argv[2]] = ""
             if command == "mmdelfileset":
@@ -673,22 +729,32 @@ class FakeGpfsExecutor:
                 if path == junction:
                     return result(argv, 0, stdout=mmlsfileset_y(name, path))
             return result(argv, 1, stderr="No filesets found")
-        fileset_name = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
+        fileset_name = (
+            argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
+        )
         if fileset_name in self.filesets:
-            return result(argv, 0, stdout=mmlsfileset_y(fileset_name, self.filesets[fileset_name]))
+            return result(
+                argv, 0, stdout=mmlsfileset_y(fileset_name, self.filesets[fileset_name])
+            )
         return result(argv, 1, stderr="No filesets found")
 
 
-def result(argv: list[str], returncode: int, *, stdout: str = "", stderr: str = "") -> CommandResult:
+def result(
+    argv: list[str], returncode: int, *, stdout: str = "", stderr: str = ""
+) -> CommandResult:
     return CommandResult(argv=argv, returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-def mmlsfs_y(filesystem_name: str, enabled: bool) -> str:
+def mmlsfs_y(
+    filesystem_name: str, enabled: bool, perfileset_enabled: bool = True
+) -> str:
     value = "yes" if enabled else "no"
+    pf_value = "yes" if perfileset_enabled else "no"
     return "\n".join(
         [
-            "mmlsfs::HEADER:version:reserved:reserved:deviceName:fieldName:data",
-            f"mmlsfs::0:1:::{filesystem_name}:quota:{value}",
+            "mmlsfs::HEADER:version:reserved:reserved:deviceName:fieldName:data:remarks:",
+            f"mmlsfs::0:1:::{filesystem_name}:quotasEnforced:{value}::",
+            f"mmlsfs::0:1:::{filesystem_name}:perfilesetQuotas:{pf_value}::",
         ]
     )
 
@@ -709,3 +775,221 @@ def mmlsquota_y(filesystem_name: str, fileset_name: str, quota: dict[str, int]) 
             f"mmlsquota::0:1:::{filesystem_name}:{fileset_name}:FILESET:0:{quota['block_kib']}:{quota['block_kib']}:0:{quota['files']}:{quota['files']}",
         ]
     )
+
+
+def gpfs_adapter_with_groups(
+    repository: DmsRepository,
+    executor: GpfsCommandExecutor,
+    *,
+    users: dict[str, Any],
+) -> GpfsFilesystemBackendAdapter:
+    template = GpfsBackendTemplate.from_storage_mapping(
+        repository.get_storage_mapping("gpfs-a")
+    )
+    return GpfsFilesystemBackendAdapter(
+        template=template,
+        executor=executor,
+        identity_groups=StubIdentityGroupManager(users=users),
+    )
+
+
+def test_gpfs_create_calls_ensure_group_members_and_chown_by_gid(repository_pair):
+    repository, observability = repository_pair
+    register_gpfs_mapping(repository)
+    executor = FakeGpfsExecutor()
+    adapter = gpfs_adapter_with_groups(
+        repository, executor, users={"alice": {}, "bob": {}}
+    )
+    plan = {
+        "plan_id": "p1",
+        "request_id": "r1",
+        "resource_key": "gpfs-a:project-alpha",
+        "operation_kind": OperationKind.FILESYSTEM_CREATE.value,
+        "desired_state": {
+            "storage_name": "gpfs-a",
+            "directory_name": "project-alpha",
+            "users": ["alice", "bob"],
+            "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 32},
+            "expires_at": "2099-01-01T00:00:00Z",
+        },
+    }
+
+    result_adapter = adapter.create(plan)
+
+    argv = [cmd for cmd in executor.commands]
+    chown_cmds = [a for a in argv if a[0] == "chown"]
+    chgrp_cmds = [a for a in argv if a[0] == "chgrp"]
+    assert chown_cmds, "chown should be called when identity_groups is configured"
+    assert not chgrp_cmds, "chgrp should not be called when chown by gid is used"
+    assert any(
+        ":24000" in " ".join(a) for a in chown_cmds
+    ), "chown should use gid 24000"
+    assert result_adapter.applied_state["access_group"]["gid"] == 24000
+    assert (
+        result_adapter.applied_state["access_group"]["group_name"]
+        == "dms-grp-project-alpha"
+    )
+    assert set(result_adapter.applied_state["access_group"]["members"]) == {
+        "alice",
+        "bob",
+    }
+
+
+def test_gpfs_create_access_probe_in_observed_state(repository_pair):
+    repository, observability = repository_pair
+    register_gpfs_mapping(repository)
+    executor = FakeGpfsExecutor()
+    adapter = gpfs_adapter_with_groups(
+        repository, executor, users={"alice": {}, "bob": {}}
+    )
+    plan = {
+        "plan_id": "p2",
+        "request_id": "r2",
+        "resource_key": "gpfs-a:project-beta",
+        "operation_kind": OperationKind.FILESYSTEM_CREATE.value,
+        "desired_state": {
+            "storage_name": "gpfs-a",
+            "directory_name": "project-beta",
+            "users": ["alice", "bob"],
+        },
+    }
+
+    result_adapter = adapter.create(plan)
+
+    assert "access_validation" in result_adapter.observed_state
+    av = result_adapter.observed_state["access_validation"]
+    assert "alice" in av["allowed_users"]
+    assert "bob" in av["allowed_users"]
+
+
+def test_gpfs_create_denied_users_probe(repository_pair):
+    repository, observability = repository_pair
+    register_gpfs_mapping(repository)
+    executor = FakeGpfsExecutor()
+    adapter = gpfs_adapter_with_groups(
+        repository, executor, users={"alice": {}, "bob": {}}
+    )
+    plan = {
+        "plan_id": "p3",
+        "request_id": "r3",
+        "resource_key": "gpfs-a:project-gamma",
+        "operation_kind": OperationKind.FILESYSTEM_CREATE.value,
+        "desired_state": {
+            "storage_name": "gpfs-a",
+            "directory_name": "project-gamma",
+            "users": ["alice", "bob"],
+            "denied_users": ["eve"],
+        },
+    }
+
+    result_adapter = adapter.create(plan)
+
+    av = result_adapter.observed_state["access_validation"]
+    assert "eve" in av["denied_users"]
+
+
+def test_gpfs_delete_calls_delete_group_when_identity_groups_configured(
+    repository_pair,
+):
+    repository, observability = repository_pair
+    register_gpfs_mapping(repository)
+    executor = FakeGpfsExecutor()
+    executor.filesets["dms-project-alpha"] = "/gpfs/gpfs0/dms/project-alpha"
+    seed_gpfs_resource(
+        repository,
+        directory_name="project-alpha",
+        quota={"capacity_bytes": 8 * 1024**2, "file_count": 32},
+    )
+    identity = StubIdentityGroupManager(users={"alice": {}, "bob": {}})
+    identity.groups["dms-grp-project-alpha"] = {
+        "group_name": "dms-grp-project-alpha",
+        "gid": 24000,
+        "members": ["alice", "bob"],
+    }
+    template = GpfsBackendTemplate.from_storage_mapping(
+        repository.get_storage_mapping("gpfs-a")
+    )
+    adapter = GpfsFilesystemBackendAdapter(
+        template=template, executor=executor, identity_groups=identity
+    )
+
+    request_id = repository.create_request(
+        requester_id="alice",
+        actor="api-client",
+        operation=OperationKind.FILESYSTEM_DELETE.value,
+        resource_kind=ResourceKind.FILESYSTEM.value,
+        resource_key="gpfs-a:project-alpha",
+        payload={"storage_name": "gpfs-a", "directory_name": "project-alpha"},
+    )
+    Planner(repository).run_once()
+    from dms.workers import RMWorkerRuntime
+
+    worker = RMWorkerRuntime(
+        repository=repository,
+        observability=observability,
+        filesystem_adapter=adapter,
+        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
+        worker_id="rm-gpfs",
+    )
+    assert worker.run_once() == 1
+
+    assert "dms-grp-project-alpha" not in identity.groups
+    [result_item] = repository.get_results(request_id)
+    assert result_item["terminal_status"] == LifecycleState.SUCCEEDED.value
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "gpfs-a:project-alpha"
+    )
+    assert "access_group_cleanup" in resource["applied_state"]
+
+
+def test_gpfs_create_without_identity_groups_falls_back_to_chgrp(repository_pair):
+    repository, observability = repository_pair
+    register_gpfs_mapping(repository)
+    executor = FakeGpfsExecutor()
+    # identity_groups=None → legacy chgrp behavior
+    adapter = gpfs_worker(repository, observability, executor).filesystem_adapter
+    plan = {
+        "plan_id": "p5",
+        "request_id": "r5",
+        "resource_key": "gpfs-a:project-delta",
+        "operation_kind": OperationKind.FILESYSTEM_CREATE.value,
+        "desired_state": {
+            "storage_name": "gpfs-a",
+            "directory_name": "project-delta",
+            "access_group": "dms-grp-project-delta",
+            "users": ["alice", "bob"],
+            "quota": {"capacity_bytes": 8 * 1024**2, "file_count": 32},
+            "expires_at": "2099-01-01T00:00:00Z",
+        },
+    }
+
+    adapter.create(plan)
+
+    chgrp_cmds = [a for a in executor.commands if a[0] == "chgrp"]
+    chown_cmds = [a for a in executor.commands if a[0] == "chown"]
+    assert chgrp_cmds, "chgrp should be called when identity_groups is None"
+    assert not chown_cmds, "chown should not be called when identity_groups is None"
+
+
+def test_gpfs_filesystem_create_with_single_user_succeeds(repository_pair):
+    repository, observability = repository_pair
+    register_gpfs_mapping(repository)
+    request_id = repository.create_request(
+        requester_id="portal",
+        actor="api-client",
+        operation=OperationKind.FILESYSTEM_CREATE.value,
+        resource_kind=ResourceKind.FILESYSTEM.value,
+        resource_key="gpfs-a:solo-project",
+        payload={
+            "storage_name": "gpfs-a",
+            "directory_name": "solo-project",
+            "users": ["alice"],
+            "expires_at": "2099-01-01T00:00:00Z",
+        },
+    )
+
+    assert Planner(repository).run_once() == 1
+
+    plan = repository.get_plan_by_request(request_id)
+    assert plan is not None
+    assert plan["desired_state"]["users"] == ["alice"]

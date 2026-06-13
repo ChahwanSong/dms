@@ -16,7 +16,6 @@ import time
 from typing import Any
 from urllib import error, parse, request
 
-
 DEFAULT_AGENT_CONFIG_PATH = "/etc/dms/agent/storages.json"
 DEFAULT_TOOL_NAMES = ("dsync", "nsync", "drm", "dscan", "kubectl")
 SERVICE_ACCOUNT_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -96,11 +95,15 @@ class InClusterKubernetesClient:
             headers["authorization"] = f"Bearer {token}"
         req = request.Request(f"{self.base_url}{path}", headers=headers)
         try:
-            with request.urlopen(req, timeout=self.timeout_seconds, context=self.context) as response:
+            with request.urlopen(
+                req, timeout=self.timeout_seconds, context=self.context
+            ) as response:
                 return json.loads(response.read().decode("utf-8")), None
         except error.HTTPError as exc:
             return None, f"kubernetes API HTTP {exc.code}"
-        except Exception as exc:  # pragma: no cover - exact stdlib errors vary by runtime
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - exact stdlib errors vary by runtime
             return None, str(exc)
 
 
@@ -119,7 +122,9 @@ def config_from_env(environ: dict[str, str] | None = None) -> AgentDaemonConfig:
         report_interval_seconds=float(
             environ.get("DMS_AGENT_REPORT_INTERVAL_SECONDS", "60")
         ),
-        report_timeout_seconds=float(environ.get("DMS_AGENT_REPORT_TIMEOUT_SECONDS", "5")),
+        report_timeout_seconds=float(
+            environ.get("DMS_AGENT_REPORT_TIMEOUT_SECONDS", "5")
+        ),
         storages=storages,
         tool_names=_csv(environ.get("DMS_AGENT_TOOLS")) or list(DEFAULT_TOOL_NAMES),
         credential_files=_csv(environ.get("DMS_AGENT_CREDENTIAL_FILES")),
@@ -127,7 +132,8 @@ def config_from_env(environ: dict[str, str] | None = None) -> AgentDaemonConfig:
         identity_users=_csv(environ.get("DMS_AGENT_IDENTITY_USERS")),
         auth_shared_token=environ.get("DMS_AUTH_SHARED_TOKEN"),
         pod_name=environ.get("DMS_AGENT_POD_NAME") or environ.get("POD_NAME"),
-        pod_namespace=environ.get("DMS_AGENT_POD_NAMESPACE") or environ.get("POD_NAMESPACE"),
+        pod_namespace=environ.get("DMS_AGENT_POD_NAMESPACE")
+        or environ.get("POD_NAMESPACE"),
         mountinfo_path=environ.get("DMS_AGENT_MOUNTINFO_PATH", "/proc/self/mountinfo"),
     )
 
@@ -149,10 +155,16 @@ def build_agent_report(
         kubernetes_client=kubernetes_client,
         checked_at=checked_at,
     )
-    tools = probe_tools(config.tool_names, timeout_seconds=config.report_timeout_seconds)
+    tools = probe_tools(
+        config.tool_names, timeout_seconds=config.report_timeout_seconds
+    )
     credentials = probe_credentials(config.credential_files, checked_at=checked_at)
     networks = probe_networks(
-        [endpoint for endpoint in [config.api_url, *config.network_endpoints] if endpoint],
+        [
+            endpoint
+            for endpoint in [config.api_url, *config.network_endpoints]
+            if endpoint
+        ],
         timeout_seconds=config.report_timeout_seconds,
         checked_at=checked_at,
     )
@@ -191,20 +203,36 @@ def probe_mounts(
     checked_at: str | None = None,
 ) -> list[dict[str, Any]]:
     checked_at = checked_at or datetime.now(UTC).isoformat()
+    # host mountinfo 모드: /proc/self/mountinfo 외 경로는 호스트 마운트 네임스페이스로 간주
+    host_mountinfo_mode = mountinfo_path != "/proc/self/mountinfo"
     mountinfo = parse_mountinfo(_read_text_if_exists(mountinfo_path) or "")
     evidence: list[dict[str, Any]] = []
     for storage in storages:
         for mount_path in storage.get("mount_paths") or []:
             path = str(mount_path)
             mount = _mount_for_path(path, mountinfo)
-            exists = Path(path).exists()
-            is_mountpoint = mount is not None and _norm_path(path) == mount["mount_point"]
+            is_mountpoint = (
+                mount is not None and _norm_path(path) == mount["mount_point"]
+            )
+            # host mountinfo 모드에서는 mountinfo 기반으로 존재 여부 판단 (컨테이너 내 경로 없어도 됨)
+            exists = is_mountpoint if host_mountinfo_mode else Path(path).exists()
             status = "Ready" if exists and is_mountpoint else "Missing"
             reason = None
             if not exists:
                 reason = "configured mount path does not exist"
             elif not is_mountpoint:
                 reason = "configured path exists but is not a mount point"
+            # host mountinfo 모드: os.access()/statvfs()는 컨테이너 내 경로가 실제 존재할 때만 호출
+            local_exists = Path(path).exists() if host_mountinfo_mode else exists
+            mount_options = mount.get("options", []) if mount else []
+            if host_mountinfo_mode and exists:
+                # mountinfo rw/ro 옵션으로 readable/writable 추론
+                is_rw = "rw" in mount_options
+                readable = is_rw or "ro" in mount_options  # ro도 읽기는 가능
+                writable = is_rw
+            else:
+                readable = os.access(path, os.R_OK) if local_exists else False
+                writable = os.access(path, os.W_OK) if local_exists else False
             item = {
                 "storage_name": storage.get("storage_name"),
                 "path": path,
@@ -213,8 +241,8 @@ def probe_mounts(
                 "reason": reason,
                 "exists": exists,
                 "is_mountpoint": is_mountpoint,
-                "readable": os.access(path, os.R_OK) if exists else False,
-                "writable": os.access(path, os.W_OK) if exists else False,
+                "readable": readable,
+                "writable": writable,
                 "source": "agent-prober",
                 "checked_at": checked_at,
             }
@@ -223,11 +251,11 @@ def probe_mounts(
                     {
                         "filesystem_type": mount.get("filesystem_type"),
                         "mount_source": mount.get("source"),
-                        "mount_options": mount.get("options", []),
+                        "mount_options": mount_options,
                         "super_options": mount.get("super_options", []),
                     }
                 )
-            if exists:
+            if local_exists:
                 try:
                     stat = os.statvfs(path)
                     item["statvfs"] = {
@@ -254,7 +282,9 @@ def parse_mountinfo(text: str) -> list[dict[str, Any]]:
         mounts.append(
             {
                 "mount_point": _decode_mountinfo_path(before_fields[4]),
-                "options": before_fields[5].split(",") if len(before_fields) > 5 else [],
+                "options": (
+                    before_fields[5].split(",") if len(before_fields) > 5 else []
+                ),
                 "filesystem_type": after_fields[0],
                 "source": _decode_mountinfo_path(after_fields[1]),
                 "super_options": after_fields[2].split(","),
@@ -287,16 +317,31 @@ def probe_csi(
         status = "Ready"
         if kubernetes_client is None:
             status = "Unknown"
-            checks.append({"kind": "kubernetes-api", "status": "Unknown", "reason": "not in cluster"})
+            checks.append(
+                {
+                    "kind": "kubernetes-api",
+                    "status": "Unknown",
+                    "reason": "not in cluster",
+                }
+            )
         else:
             csi_driver, reason = kubernetes_client.csi_driver(driver)
             if csi_driver is None:
                 status = "Missing" if reason and "HTTP 404" in reason else "Unknown"
-                checks.append({"kind": "CSIDriver", "name": driver, "status": status, "reason": reason})
+                checks.append(
+                    {
+                        "kind": "CSIDriver",
+                        "name": driver,
+                        "status": status,
+                        "reason": reason,
+                    }
+                )
             else:
                 checks.append({"kind": "CSIDriver", "name": driver, "status": "Ready"})
             for storage_class_name in configured_storage_classes:
-                storage_class, reason = kubernetes_client.storage_class(storage_class_name)
+                storage_class, reason = kubernetes_client.storage_class(
+                    storage_class_name
+                )
                 if storage_class is None:
                     status = "Missing" if reason and "HTTP 404" in reason else "Unknown"
                     checks.append(
@@ -337,20 +382,28 @@ def probe_csi(
         evidence.append(
             {
                 "driver": driver,
-                "storage_classes": ready_storage_classes
-                if status == "Ready"
-                else configured_storage_classes,
+                "storage_classes": (
+                    ready_storage_classes
+                    if status == "Ready"
+                    else configured_storage_classes
+                ),
                 "configured_storage_classes": configured_storage_classes,
                 "status": status,
                 "checks": checks,
-                "source": "kubernetes-api" if kubernetes_client is not None else "agent-prober",
+                "source": (
+                    "kubernetes-api"
+                    if kubernetes_client is not None
+                    else "agent-prober"
+                ),
                 "checked_at": checked_at,
             }
         )
     return evidence
 
 
-def probe_tools(tool_names: list[str], *, timeout_seconds: float = 2.0) -> list[dict[str, Any]]:
+def probe_tools(
+    tool_names: list[str], *, timeout_seconds: float = 2.0
+) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for name in tool_names:
         path = shutil.which(name)
@@ -375,7 +428,11 @@ def probe_credentials(
         file_path = Path(path)
         exists = file_path.exists()
         item = {
-            "name": "kubernetes-service-account" if path == SERVICE_ACCOUNT_TOKEN_PATH else path,
+            "name": (
+                "kubernetes-service-account"
+                if path == SERVICE_ACCOUNT_TOKEN_PATH
+                else path
+            ),
             "path": path,
             "status": "Ready" if exists else "Missing",
             "source": "agent-prober",
@@ -502,7 +559,13 @@ def run_loop(config: AgentDaemonConfig) -> int:
             result = post_report(config, report)
             _log({"event": "agent_report_posted", "started_at": started, **result})
         except Exception as exc:
-            _log({"event": "agent_report_failed", "started_at": started, "error": str(exc)})
+            _log(
+                {
+                    "event": "agent_report_failed",
+                    "started_at": started,
+                    "error": str(exc),
+                }
+            )
         time.sleep(config.report_interval_seconds)
 
 
@@ -529,7 +592,9 @@ def _load_storages(config_path: str) -> list[dict[str, Any]]:
     raise ValueError(f"unsupported agent storage config: {config_path}")
 
 
-def _mount_for_path(path: str, mountinfo: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _mount_for_path(
+    path: str, mountinfo: list[dict[str, Any]]
+) -> dict[str, Any] | None:
     normalized = _norm_path(path)
     candidates = [
         mount

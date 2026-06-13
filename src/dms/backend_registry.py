@@ -21,6 +21,12 @@ from .backends.cephfs import (
     CEPHFS_BACKEND_TYPE,
     CephFsHostMountedFilesystemBackendAdapter,
 )
+from .backends.weka import (
+    WEKAFS_BACKEND_TYPE,
+    WekaFsBackendTemplate,
+    WekaFsDataManagementAdapter,
+    WekaFsHostMountedFilesystemBackendAdapter,
+)
 from .config import Settings
 from .repositories import DmsRepository
 
@@ -71,9 +77,17 @@ class BackendAdapterRegistry:
         mapping = self._mapping_for_plan(plan)
         backend_type = self._backend_type(mapping)
         if backend_type == GPFS_BACKEND_TYPE:
-            return GpfsFilesystemBackendAdapter.from_storage_mapping(mapping)
+            return GpfsFilesystemBackendAdapter.from_storage_mapping(
+                mapping,
+                self.settings,
+            )
         if backend_type == CEPHFS_BACKEND_TYPE:
             return CephFsHostMountedFilesystemBackendAdapter.from_storage_mapping(
+                mapping,
+                self.settings or Settings.from_env(),
+            )
+        if backend_type == WEKAFS_BACKEND_TYPE:
+            return WekaFsHostMountedFilesystemBackendAdapter.from_storage_mapping(
                 mapping,
                 self.settings or Settings.from_env(),
             )
@@ -83,7 +97,9 @@ class BackendAdapterRegistry:
             self._unsupported_backend_message("filesystem", backend_type, plan)
         )
 
-    def kubernetes_for_plan(self, plan: dict[str, Any]) -> KubernetesNamespaceQuotaAdapter:
+    def kubernetes_for_plan(
+        self, plan: dict[str, Any]
+    ) -> KubernetesNamespaceQuotaAdapter:
         if self.default_kubernetes_adapter:
             return self.default_kubernetes_adapter
         raise BackendPreconditionError(
@@ -93,9 +109,13 @@ class BackendAdapterRegistry:
 
     def data_worker_pool(self, storage_name: str) -> dict[str, Any]:
         mapping = self.repository.get_storage_mapping(storage_name)
-        if self._backend_type(mapping) == GPFS_BACKEND_TYPE:
+        backend_type = self._backend_type(mapping)
+        if backend_type == GPFS_BACKEND_TYPE:
             template = GpfsBackendTemplate.from_storage_mapping(mapping)
             return GpfsDataManagementAdapter(template).worker_pool(storage_name)
+        if backend_type == WEKAFS_BACKEND_TYPE:
+            template = WekaFsBackendTemplate.from_storage_mapping(mapping)
+            return WekaFsDataManagementAdapter(template).worker_pool(storage_name)
         return {
             "selection": "agent-inventory",
             "required_mounts": [storage_name],

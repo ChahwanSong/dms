@@ -11,7 +11,12 @@ from .adapters import (
     kubernetes_resource_quota_value_to_base_units,
     render_kubernetes_resource_quota_hard,
 )
-from .domain import KubernetesNamespaceQuotaKey, LifecycleState, OperationKind, ResourceKind
+from .domain import (
+    KubernetesNamespaceQuotaKey,
+    LifecycleState,
+    OperationKind,
+    ResourceKind,
+)
 from .repositories import (
     ATTENTION_RUN_STATES,
     DmsRepository,
@@ -48,7 +53,10 @@ class OperationalQueryService:
                     }
                 )
             for error in mapping["sanity_result"].get("errors", []):
-                if error.get("code") in {"storage_class_missing", "csi_driver_mismatch"}:
+                if error.get("code") in {
+                    "storage_class_missing",
+                    "csi_driver_mismatch",
+                }:
                     issues.append(
                         {
                             "issue_type": error["code"],
@@ -71,7 +79,20 @@ class OperationalQueryService:
                         "storage_name": mapping["storage_name"],
                     }
                 )
-        for report in self.repository.list_agent_reports(freshness="Stale", limit=100):
+        # Fresh reports: same (node, role, cluster) means the stale is resolved
+        fresh_keys: set[tuple[str, str, str]] = {
+            (r["node_name"], r["worker_role"], r["cluster_name"])
+            for r in self.repository.list_agent_reports(freshness="Fresh", limit=500)
+        }
+        # Deduplicate stale reports: keep only the latest per (node, role, cluster)
+        seen_stale: set[tuple[str, str, str]] = set()
+        for report in self.repository.list_agent_reports(freshness="Stale", limit=500):
+            key = (report["node_name"], report["worker_role"], report["cluster_name"])
+            if key in fresh_keys:
+                continue  # resolved — fresh report exists for this node/role
+            if key in seen_stale:
+                continue  # deduplicate — already added latest for this key
+            seen_stale.add(key)
             issues.append(
                 {
                     "issue_type": "agent_report_stale",
@@ -79,6 +100,7 @@ class OperationalQueryService:
                     "cluster_name": report["cluster_name"],
                     "node_name": report["node_name"],
                     "worker_role": report["worker_role"],
+                    "reported_at": report.get("reported_at"),
                 }
             )
         issues.extend(self._kubernetes_quota_action_required())
@@ -108,11 +130,16 @@ class OperationalQueryService:
         if source not in {"both", "db", "live"}:
             raise ValueError("source must be one of: both, db, live")
 
-        resource_key = KubernetesNamespaceQuotaKey(cluster_name, namespace_name).as_string()
+        resource_key = KubernetesNamespaceQuotaKey(
+            cluster_name, namespace_name
+        ).as_string()
         resource_quota_name = "dms-storage-quota"
         diagnostics: list[dict[str, Any]] = []
 
-        db_section: dict[str, Any] = {"queried": source in {"both", "db"}, "exists": False}
+        db_section: dict[str, Any] = {
+            "queried": source in {"both", "db"},
+            "exists": False,
+        }
         desired_hard: dict[str, str] = {}
         if source in {"both", "db"}:
             resource = self.repository.get_resource(
@@ -168,10 +195,14 @@ class OperationalQueryService:
                         live_section.pop("status_used", None)
                     elif live_section.get("exists"):
                         live_section["usage_summary"] = _quota_usage_summary(
-                            live_section.get("status_hard") or live_section.get("spec_hard") or {},
+                            live_section.get("status_hard")
+                            or live_section.get("spec_hard")
+                            or {},
                             live_section.get("status_used") or {},
                         )
-                except Exception as exc:  # noqa: BLE001 - query API should return partial diagnostics.
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001 - query API should return partial diagnostics.
                     diagnostics.append(
                         {
                             "source": "live",
@@ -243,6 +274,7 @@ class OperationalQueryService:
         within_seconds: int | None = None,
         include_blocked: bool = False,
         limit: int | None = None,
+        brief: bool = False,
     ) -> list[dict[str, Any]]:
         resources = self.repository.list_filesystem_resources_expiring(
             storage_name=storage_name,
@@ -254,27 +286,29 @@ class OperationalQueryService:
         )
         items: list[dict[str, Any]] = []
         for resource in resources:
-            request_summary = self._filesystem_request_summary(resource["resource_key"])
-            items.append(
-                {
-                    "resource_kind": ResourceKind.FILESYSTEM.value,
-                    "resource_key": resource["resource_key"],
-                    "storage_name": resource.get("storage_name"),
-                    "directory_name": resource.get("directory_name"),
-                    "resource_type": resource.get("resource_type"),
-                    "status": resource["status"],
-                    "version": resource["version"],
-                    "expires_at": resource.get("expires_at"),
-                    "expired": resource.get("expired"),
-                    "expiring": resource.get("expiring"),
-                    "seconds_overdue": resource.get("seconds_overdue"),
-                    "block_state": resource.get("block_state"),
-                    "updated_at": resource["updated_at"],
-                    "recent_requests": request_summary["recent_requests"],
-                    "last_block_request_id": request_summary["last_block_request_id"],
-                    "last_block_status": request_summary["last_block_status"],
-                }
-            )
+            item: dict[str, Any] = {
+                "resource_kind": ResourceKind.FILESYSTEM.value,
+                "resource_key": resource["resource_key"],
+                "storage_name": resource.get("storage_name"),
+                "directory_name": resource.get("directory_name"),
+                "resource_type": resource.get("resource_type"),
+                "status": resource["status"],
+                "version": resource["version"],
+                "expires_at": resource.get("expires_at"),
+                "expired": resource.get("expired"),
+                "expiring": resource.get("expiring"),
+                "seconds_overdue": resource.get("seconds_overdue"),
+                "block_state": resource.get("block_state"),
+                "updated_at": resource["updated_at"],
+            }
+            if not brief:
+                request_summary = self._filesystem_request_summary(
+                    resource["resource_key"]
+                )
+                item["recent_requests"] = request_summary["recent_requests"]
+                item["last_block_request_id"] = request_summary["last_block_request_id"]
+                item["last_block_status"] = request_summary["last_block_status"]
+            items.append(item)
         return items
 
     def kubernetes_namespace_quota_expiring(
@@ -336,13 +370,13 @@ class OperationalQueryService:
             operations=operations,
             limit=20,
         )
-        last_check = _first_request(
-            recent, OperationKind.K8S_QUOTA_CHECK.value
-        )
+        last_check = _first_request(recent, OperationKind.K8S_QUOTA_CHECK.value)
         last_sync = _first_request(recent, OperationKind.K8S_QUOTA_SYNC.value)
         return {
             "recent_requests": recent,
-            "last_check_request_id": last_check.get("request_id") if last_check else None,
+            "last_check_request_id": (
+                last_check.get("request_id") if last_check else None
+            ),
             "last_check_status": last_check.get("status") if last_check else None,
             "last_sync_request_id": last_sync.get("request_id") if last_sync else None,
             "last_sync_status": last_sync.get("status") if last_sync else None,
@@ -359,13 +393,17 @@ class OperationalQueryService:
         last_block = _first_request(recent, OperationKind.FILESYSTEM_BLOCK.value)
         return {
             "recent_requests": recent,
-            "last_block_request_id": last_block.get("request_id") if last_block else None,
+            "last_block_request_id": (
+                last_block.get("request_id") if last_block else None
+            ),
             "last_block_status": last_block.get("status") if last_block else None,
         }
 
     def _kubernetes_quota_action_required(self) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
-        for resource in self.repository.list_kubernetes_namespace_quota_resources_expiring(
+        for (
+            resource
+        ) in self.repository.list_kubernetes_namespace_quota_resources_expiring(
             status="expired",
             include_blocked=False,
             limit=1000,
@@ -405,21 +443,25 @@ class OperationalQueryService:
                             _action_issue(
                                 issue_type="kubernetes_quota_expiration_sweep_failed",
                                 severity="WARN",
-                                resource_key=target.get("resource_key") or row["resource_key"],
+                                resource_key=target.get("resource_key")
+                                or row["resource_key"],
                                 cluster_name=target.get("cluster_name"),
                                 namespace_name=target.get("namespace_name"),
                                 source=row,
                                 detail=target,
                             )
                         )
-                    elif target.get("result") == "skipped" and target.get("reason") not in {
+                    elif target.get("result") == "skipped" and target.get(
+                        "reason"
+                    ) not in {
                         "already_blocked",
                     }:
                         issues.append(
                             _action_issue(
                                 issue_type="kubernetes_quota_expiration_sweep_skipped",
                                 severity="WARN",
-                                resource_key=target.get("resource_key") or row["resource_key"],
+                                resource_key=target.get("resource_key")
+                                or row["resource_key"],
                                 cluster_name=target.get("cluster_name"),
                                 namespace_name=target.get("namespace_name"),
                                 source=row,
@@ -439,6 +481,33 @@ class OperationalQueryService:
 
     def _filesystem_action_required(self) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
+
+        # Soft-deleted GPFS filesystems: unlinked + locked, awaiting manual mmdelfileset
+        for resource in self.repository.list_filesystem_resources(
+            status=["Deleted"],
+            limit=1000,
+        ):
+            desired = resource.get("desired_state") or {}
+            observed = resource.get("observed_state") or {}
+            if not observed.get("soft_delete"):
+                continue
+            issues.append(
+                {
+                    "issue_type": "filesystem_soft_deleted",
+                    "severity": "INFO",
+                    "resource_kind": ResourceKind.FILESYSTEM.value,
+                    "resource_key": resource["resource_key"],
+                    "storage_name": desired.get("storage_name"),
+                    "directory_name": desired.get("directory_name"),
+                    "fileset_name": observed.get("fileset_name"),
+                    "updated_at": resource.get("updated_at"),
+                    "recommended_action": (
+                        "GPFS fileset is locked (chown root:root + chmod 000, data preserved, fileset remains linked). "
+                        "To permanently remove: mmunlinkfileset {fs} {fileset} then mmdelfileset {fs} {fileset}."
+                    ),
+                }
+            )
+
         for resource in self.repository.list_filesystem_resources_expiring(
             status="expired",
             include_blocked=False,
@@ -494,7 +563,9 @@ class OperationalQueryService:
                                 source=row,
                             )
                         )
-                    elif target.get("result") == "skipped" and target.get("reason") not in {
+                    elif target.get("result") == "skipped" and target.get(
+                        "reason"
+                    ) not in {
                         "already_blocked",
                     }:
                         issues.append(
@@ -523,7 +594,10 @@ class OperationalQueryService:
             seen_targets.add(issue_key)
             summary = row["verification_summary"]
             summary_issues = list(summary.get("issues") or [])
-            if row["terminal_status"] == LifecycleState.SUCCEEDED.value and not summary_issues:
+            if (
+                row["terminal_status"] == LifecycleState.SUCCEEDED.value
+                and not summary_issues
+            ):
                 continue
             if summary_issues:
                 for detail in summary_issues:
@@ -535,8 +609,12 @@ class OperationalQueryService:
                             issue_type=issue_type,
                             target={
                                 "resource_key": resource_key,
-                                "storage_name": row["payload_summary"].get("storage_name"),
-                                "directory_name": row["payload_summary"].get("directory_name"),
+                                "storage_name": row["payload_summary"].get(
+                                    "storage_name"
+                                ),
+                                "directory_name": row["payload_summary"].get(
+                                    "directory_name"
+                                ),
                                 "reason": detail.get("reason") or summary.get("reason"),
                                 "issues": [detail],
                                 **detail,
@@ -569,7 +647,12 @@ class OperationalQueryService:
                 OperationKind.DATA_RM.value,
             }:
                 continue
-            if job["state"] not in {"PreflightFailed", "Failed", "TimedOut", "Cancelled"}:
+            if job["state"] not in {
+                "PreflightFailed",
+                "Failed",
+                "TimedOut",
+                "Cancelled",
+            }:
                 continue
             preflight = job.get("preflight_result") or {}
             result_summary = job.get("result_summary") or {}
@@ -650,13 +733,17 @@ class OperationalQueryService:
         ]
         return summaries
 
-    def work_summary(self, *, lease_expiring_within_seconds: int = 60) -> dict[str, Any]:
+    def work_summary(
+        self, *, lease_expiring_within_seconds: int = 60
+    ) -> dict[str, Any]:
         plans = self.active_plans(limit=1000)
         active_runs = self.active_runs(
             lease_expiring_within_seconds=lease_expiring_within_seconds,
             limit=1000,
         )
-        attention_runs = self.repository.list_runs(states=ATTENTION_RUN_STATES, limit=1000)
+        attention_runs = self.repository.list_runs(
+            states=ATTENTION_RUN_STATES, limit=1000
+        )
         action_required = self.action_required()
         return {
             "plans": {
@@ -1108,7 +1195,9 @@ def _recommended_filesystem_action(issue_type: str) -> str:
 
 def _recommended_action(issue_type: str) -> str:
     if issue_type == "kubernetes_quota_drifted":
-        return "run update to re-apply DB desired state or run sync to accept live state"
+        return (
+            "run update to re-apply DB desired state or run sync to accept live state"
+        )
     if issue_type in {"kubernetes_quota_missing", "kubernetes_quota_db_only"}:
         return "recreate DMS-managed ResourceQuota or delete DMS resource record after review"
     if issue_type in {"quota_usage_warning", "quota_usage_critical"}:
@@ -1137,7 +1226,9 @@ def _desired_quota_hard(desired_state: dict[str, Any]) -> dict[str, str]:
         return {}
 
 
-def _first_request(requests: list[dict[str, Any]], operation: str) -> dict[str, Any] | None:
+def _first_request(
+    requests: list[dict[str, Any]], operation: str
+) -> dict[str, Any] | None:
     for request in requests:
         if request.get("operation") == operation:
             return request
@@ -1160,9 +1251,15 @@ def _quota_diff(
     if source == "live" and live_exists:
         return {"status": "LiveOnly", "issues": []}
     if source == "live":
-        return {"status": "Missing", "issues": [{"field": "resource_quota", "reason": "missing"}]}
+        return {
+            "status": "Missing",
+            "issues": [{"field": "resource_quota", "reason": "missing"}],
+        }
     if db_exists and not live_exists:
-        return {"status": "Missing", "issues": [{"field": "resource_quota", "reason": "missing"}]}
+        return {
+            "status": "Missing",
+            "issues": [{"field": "resource_quota", "reason": "missing"}],
+        }
     if not db_exists and live_exists:
         return {
             "status": "LiveOnly",
@@ -1200,7 +1297,9 @@ def _quota_usage_summary(
             used_units = kubernetes_resource_quota_value_to_base_units(key, used_value)
             item["hard_base_units"] = hard_units
             item["used_base_units"] = used_units
-            item["percent_used"] = round((used_units / hard_units) * 100, 2) if hard_units else None
+            item["percent_used"] = (
+                round((used_units / hard_units) * 100, 2) if hard_units else None
+            )
         except (TypeError, ValueError, ZeroDivisionError):
             item["parse_error"] = True
         summary[key] = item

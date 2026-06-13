@@ -17,7 +17,6 @@ from dms.planner import Planner
 from dms.repositories import DmsRepository, ObservabilityRepository
 from dms.workers import RMWorkerRuntime
 
-
 STORAGE_NAME = "longhorn-b"
 STORAGE_CLASS = "testbed-longhorn"
 RESOURCE_KEY = "cluster-b:phase5-quota"
@@ -43,7 +42,11 @@ class Phase5RecordingKubernetesAdapter:
     )
 
     def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
-        return {"cluster_name": cluster_name, "namespace_name": namespace_name, "exists": True}
+        return {
+            "cluster_name": cluster_name,
+            "namespace_name": namespace_name,
+            "exists": True,
+        }
 
     def create_namespace(self, plan: dict[str, Any]) -> AdapterResult:
         return self.apply_resource_quota(plan)
@@ -64,7 +67,10 @@ class Phase5RecordingKubernetesAdapter:
                     "exists": True,
                     "spec_hard": hard,
                     "status_hard": hard,
-                    "status_used": {"requests.storage": "64Mi", "persistentvolumeclaims": "1"},
+                    "status_used": {
+                        "requests.storage": "64Mi",
+                        "persistentvolumeclaims": "1",
+                    },
                 },
             },
             message="recorded apply",
@@ -99,7 +105,10 @@ class Phase5RecordingKubernetesAdapter:
                     "exists": True,
                     "spec_hard": self.synced_hard,
                     "status_hard": self.synced_hard,
-                    "status_used": {"requests.storage": "256Mi", "persistentvolumeclaims": "2"},
+                    "status_used": {
+                        "requests.storage": "256Mi",
+                        "persistentvolumeclaims": "2",
+                    },
                 },
             },
             message="recorded sync",
@@ -108,7 +117,10 @@ class Phase5RecordingKubernetesAdapter:
     def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         self.calls.append(("check_resource_quota", plan["plan_id"]))
         return AdapterResult(
-            applied_state={"operation": "resourcequota.check", "backend_side_effect": False},
+            applied_state={
+                "operation": "resourcequota.check",
+                "backend_side_effect": False,
+            },
             observed_state={
                 "verified": False,
                 "backend_side_effect": False,
@@ -142,7 +154,7 @@ def test_phase5_planner_allows_quota_increase(repository_pair):
         "persistentvolumeclaims": "4",
         f"{STORAGE_CLASS}.storageclass.storage.k8s.io/requests.storage": "256Mi",
     }
-    assert plan["execution_metadata"]["planner"] == "phase5"
+    assert plan["execution_metadata"]["planner"] == "k8s-quota"
 
 
 def test_phase5_planner_rejects_decrease_below_observed_used(repository_pair):
@@ -194,9 +206,10 @@ def test_phase5_block_and_unblock_restore_hard_limits(repository_pair):
         "persistentvolumeclaims": "0",
         f"{STORAGE_CLASS}.storageclass.storage.k8s.io/requests.storage": "0",
     }
-    assert block_plan["desired_state"]["block_state"]["restore_hard"][
-        "requests.storage"
-    ] == "128Mi"
+    assert (
+        block_plan["desired_state"]["block_state"]["restore_hard"]["requests.storage"]
+        == "128Mi"
+    )
     run_worker(repository, observability, adapter)
 
     unblock_request_id = create_request(
@@ -206,7 +219,10 @@ def test_phase5_block_and_unblock_restore_hard_limits(repository_pair):
     )
     Planner(repository).run_once()
     unblock_plan = repository.get_plan_by_request(unblock_request_id)
-    assert unblock_plan["desired_state"]["resource_quota_hard"]["requests.storage"] == "128Mi"
+    assert (
+        unblock_plan["desired_state"]["resource_quota_hard"]["requests.storage"]
+        == "128Mi"
+    )
     assert unblock_plan["desired_state"]["block_state"]["blocked"] is False
 
 
@@ -219,14 +235,19 @@ def test_phase5_worker_dispatches_check_sync_and_delete(repository_pair):
     check_id = create_request(repository, OperationKind.K8S_QUOTA_CHECK, {})
     Planner(repository).run_once()
     run_worker(repository, observability, adapter)
-    assert repository.get_resource(
-        ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, RESOURCE_KEY
-    )["status"] == "Drifted"
+    assert (
+        repository.get_resource(
+            ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, RESOURCE_KEY
+        )["status"]
+        == "Drifted"
+    )
 
     sync_id = create_request(repository, OperationKind.K8S_QUOTA_SYNC, {})
     Planner(repository).run_once()
     run_worker(repository, observability, adapter)
-    synced = repository.get_resource(ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, RESOURCE_KEY)
+    synced = repository.get_resource(
+        ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, RESOURCE_KEY
+    )
     assert synced["desired_state"]["resource_quota_hard"]["requests.storage"] == "384Mi"
     assert synced["desired_state"]["quota"]["requests_storage_bytes"] == 384 * 1024**2
     assert synced["desired_state"]["quota"]["pvc_count"] == 5
@@ -236,11 +257,18 @@ def test_phase5_worker_dispatches_check_sync_and_delete(repository_pair):
     delete_id = create_request(repository, OperationKind.K8S_QUOTA_DELETE, {})
     Planner(repository).run_once()
     delete_plan = repository.get_plan_by_request(delete_id)
-    assert delete_plan["desired_state"]["resource_quota_hard"]["requests.storage"] == "384Mi"
+    assert (
+        delete_plan["desired_state"]["resource_quota_hard"]["requests.storage"]
+        == "384Mi"
+    )
     run_worker(repository, observability, adapter)
-    deleted = repository.get_resource(ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, RESOURCE_KEY)
+    deleted = repository.get_resource(
+        ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value, RESOURCE_KEY
+    )
     assert deleted["status"] == "Deleted"
-    assert deleted["desired_state"]["resource_quota_hard"]["requests.storage"] == "384Mi"
+    assert (
+        deleted["desired_state"]["resource_quota_hard"]["requests.storage"] == "384Mi"
+    )
 
     assert adapter.calls == [
         ("check_resource_quota", repository.get_plan_by_request(check_id)["plan_id"]),
@@ -262,7 +290,10 @@ def register_mapping(repository: DmsRepository) -> None:
     repository.upsert_storage_mapping(
         StorageMappingInput(
             storage_name=STORAGE_NAME,
-            backend_template={"backend_type": "longhorn", "csi_driver": "driver.longhorn.io"},
+            backend_template={
+                "backend_type": "longhorn",
+                "csi_driver": "driver.longhorn.io",
+            },
             cluster_name="cluster-b",
             storage_class_name=STORAGE_CLASS,
             sanity_status="Ready",

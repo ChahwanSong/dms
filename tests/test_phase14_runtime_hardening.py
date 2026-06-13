@@ -68,7 +68,9 @@ def test_worker_success_survives_observability_write_failure(tmp_path):
     )
 
     assert worker.run_once() == 1
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     results = repository.get_results(request_id)
     assert [result["terminal_status"] for result in results] == [
         LifecycleState.SUCCEEDED.value
@@ -93,7 +95,9 @@ def test_unsupported_filesystem_backend_fails_closed_and_is_action_required(tmp_
         filesystem_adapter=StubFilesystemBackendAdapter(),
         kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
         worker_id="rm-phase14",
-        backend_registry=BackendAdapterRegistry.with_live_defaults(repository, settings),
+        backend_registry=BackendAdapterRegistry.with_live_defaults(
+            repository, settings
+        ),
     )
 
     assert worker.run_once() == 1
@@ -103,7 +107,10 @@ def test_unsupported_filesystem_backend_fails_closed_and_is_action_required(tmp_
     assert result["terminal_status"] == LifecycleState.BACKEND_APPLY_FAILED.value
     assert result["error_category"] == "backend_precondition"
     assert result["verification_summary"]["backend_side_effect"] is False
-    assert result["verification_summary"]["issues"][0]["issue_type"] == "unsupported_backend"
+    assert (
+        result["verification_summary"]["issues"][0]["issue_type"]
+        == "unsupported_backend"
+    )
     issues = OperationalQueryService(repository, observability).action_required()
     assert any(
         issue["issue_type"] == "request_attention"
@@ -171,7 +178,9 @@ def test_rm_worker_does_not_select_filesystem_adapter_for_kubernetes_quota(tmp_p
     )
 
     assert worker.run_once() == 1
-    assert repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert kubernetes_adapter.calls == [
         ("apply_resource_quota", repository.get_plan_by_request(request_id)["plan_id"])
     ]
@@ -188,7 +197,9 @@ def test_live_registry_keeps_gpfs_filesystem_and_kubernetes_paths_separate(tmp_p
     }
     kubernetes_plan = _kubernetes_quota_plan("gpfs-a", "gpfs-csi")
 
-    assert isinstance(registry.filesystem_for_plan(filesystem_plan), GpfsFilesystemBackendAdapter)
+    assert isinstance(
+        registry.filesystem_for_plan(filesystem_plan), GpfsFilesystemBackendAdapter
+    )
     assert isinstance(
         registry.kubernetes_for_plan(kubernetes_plan),
         KubernetesNamespaceQuotaLiveAdapter,
@@ -231,7 +242,10 @@ def _repositories(tmp_path):
 
 
 def _filesystem_body(directory_name: str) -> dict[str, Any]:
-    return {"requester_id": "user-1", "payload": _filesystem_payload("cephfs-a", directory_name)}
+    return {
+        "requester_id": "user-1",
+        "payload": _filesystem_payload("cephfs-a", directory_name),
+    }
 
 
 def _filesystem_payload(storage_name: str, directory_name: str) -> dict[str, Any]:
@@ -310,7 +324,7 @@ def _register_gpfs_mapping(repository: DmsRepository) -> None:
         **mapping["backend_template"],
         "filesystem_name": "gpfs0",
         "mount_path": "/gpfs/gpfs0",
-        "fileset_root": "/gpfs/gpfs0/dms",
+        "managed_root": "/gpfs/gpfs0/dms",
         "quota_scope": "fileset",
         "fileset_name_template": "dms-{directory_name}",
         "csi_driver": GPFS_CSI_DRIVER,
@@ -330,7 +344,9 @@ def _register_gpfs_mapping(repository: DmsRepository) -> None:
     )
 
 
-def _kubernetes_quota_plan(storage_name: str, storage_class_name: str) -> dict[str, Any]:
+def _kubernetes_quota_plan(
+    storage_name: str, storage_class_name: str
+) -> dict[str, Any]:
     return {
         "plan_id": f"plan-{storage_name}",
         "resource_key": "cluster-b:alice",

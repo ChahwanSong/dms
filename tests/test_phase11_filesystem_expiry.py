@@ -19,7 +19,6 @@ from dms.planner import Planner
 from dms.repositories import DmsRepository, ObservabilityRepository
 from dms.workers import RMWorkerRuntime
 
-
 API_HEADERS = {"x-dms-actor": "api-client"}
 
 
@@ -44,9 +43,35 @@ def test_phase11_expired_filesystem_query_and_action_required(tmp_path):
     action_required = client.get(
         "/api/v1/operations/action-required", headers=API_HEADERS
     ).json()
-    assert {
-        issue["issue_type"] for issue in action_required
-    } >= {"filesystem_expired_unblocked"}
+    assert {issue["issue_type"] for issue in action_required} >= {
+        "filesystem_expired_unblocked"
+    }
+
+
+def test_phase11_expired_filesystem_query_brief_skips_recent_requests(tmp_path):
+    repository, observability = repository_pair(tmp_path)
+    register_cephfs_mapping(repository)
+    seed_filesystem_resource(repository, expires_at="2026-05-30T00:00:00Z")
+    client = client_for(tmp_path, repository, observability)
+
+    full = client.get(
+        "/api/v1/operations/filesystems/expiring",
+        headers=API_HEADERS,
+        params={"before": "2026-05-30T01:00:00Z"},
+    ).json()
+    [full_item] = full
+    assert "recent_requests" in full_item
+    assert "last_block_request_id" in full_item
+
+    brief = client.get(
+        "/api/v1/operations/filesystems/expiring",
+        headers=API_HEADERS,
+        params={"before": "2026-05-30T01:00:00Z", "brief": "true"},
+    ).json()
+    [brief_item] = brief
+    assert brief_item["resource_key"] == full_item["resource_key"]
+    assert "recent_requests" not in brief_item
+    assert "last_block_request_id" not in brief_item
 
 
 def test_phase11_filesystem_expiration_sweep_dry_run_records_targets(tmp_path):
@@ -76,12 +101,17 @@ def test_phase11_filesystem_expiration_sweep_dry_run_records_targets(tmp_path):
     summary = result["verification_summary"]
     assert summary["dry_run"] is True
     assert summary["target_count"] == 2
-    target_results = {target["resource_key"]: target["result"] for target in summary["targets"]}
+    target_results = {
+        target["resource_key"]: target["result"] for target in summary["targets"]
+    }
     assert target_results["cephfs-a:project-alpha"] == "would_block"
     assert target_results["cephfs-a:project-system"] == "skipped"
-    assert repository.get_resource(
-        ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
-    )["status"] == LifecycleState.SUCCEEDED.value
+    assert (
+        repository.get_resource(
+            ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
+        )["status"]
+        == LifecycleState.SUCCEEDED.value
+    )
 
 
 def test_phase11_filesystem_block_and_unblock_restore_state(tmp_path):
@@ -94,7 +124,9 @@ def test_phase11_filesystem_block_and_unblock_restore_state(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha")
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
+    )
     assert repository.get_request(block_id)["status"] == LifecycleState.SUCCEEDED.value
     assert resource["status"] == LifecycleState.BLOCKED.value
     assert resource["desired_state"]["expires_at"] == "2026-05-30T00:00:00Z"
@@ -106,8 +138,12 @@ def test_phase11_filesystem_block_and_unblock_restore_state(tmp_path):
     assert Planner(repository).run_once() == 1
     run_worker(repository, observability, executor)
 
-    resource = repository.get_resource(ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha")
-    assert repository.get_request(unblock_id)["status"] == LifecycleState.SUCCEEDED.value
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
+    )
+    assert (
+        repository.get_request(unblock_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
     assert resource["status"] == LifecycleState.SUCCEEDED.value
     assert resource["desired_state"]["expires_at"] == "2026-05-30T00:00:00Z"
     assert resource["desired_state"]["block_state"]["blocked"] is False
@@ -154,12 +190,18 @@ def test_phase11_expiration_sweep_blocks_user_and_skips_system(tmp_path):
             "resource_type_not_auto_blocked",
         ),
     }
-    assert repository.get_resource(
-        ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
-    )["status"] == LifecycleState.BLOCKED.value
+    assert (
+        repository.get_resource(
+            ResourceKind.FILESYSTEM.value, "cephfs-a:project-alpha"
+        )["status"]
+        == LifecycleState.BLOCKED.value
+    )
 
 
-def test_phase11_filesystem_unblock_rejects_missing_restore_state(tmp_path):
+def test_phase11_filesystem_unblock_falls_back_to_mode_when_restore_state_missing(
+    tmp_path,
+):
+    # block_state에 previous_mode가 없으면 desired_state.mode(기본 0770)로 fallback해서 Planned 상태로 진행해야 한다.
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_filesystem_resource(repository, status=LifecycleState.BLOCKED.value)
@@ -167,11 +209,11 @@ def test_phase11_filesystem_unblock_rejects_missing_restore_state(tmp_path):
 
     Planner(repository).run_once()
 
-    [result] = repository.get_results(request_id)
-    assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert result["verification_summary"]["issues"] == [
-        {"reason": "filesystem_block_restore_missing"}
-    ]
+    request = repository.get_request(request_id)
+    assert request["status"] == LifecycleState.PLANNED.value
+    plan = repository.get_plan_by_request(request_id)
+    assert plan is not None
+    assert plan["desired_state"]["block_state"]["previous_mode"] == "0770"
 
 
 @dataclass
@@ -184,7 +226,7 @@ class FakeFilesystemExecutor:
             "project-alpha",
             {
                 "mode": "0770",
-                "group_name": "dms-phase10-project-alpha",
+                "group_name": "dms-grp-project-alpha",
                 "group_gid": 24000,
                 "marker": {"resource_key": "cephfs-a:project-alpha"},
             },
@@ -212,7 +254,7 @@ class FakeFilesystemExecutor:
             directory_name,
             {
                 "mode": "0770",
-                "group_name": f"dms-phase10-{directory_name}",
+                "group_name": f"dms-grp-{directory_name}",
                 "group_gid": 24000,
                 "marker": {"resource_key": resource_key},
             },
@@ -320,7 +362,12 @@ def register_cephfs_mapping(repository: DmsRepository) -> None:
             sanity_status="Ready",
         ),
         actor="admin",
-        sanity_result={"status": "Ready", "readiness": readiness, "errors": [], "warnings": []},
+        sanity_result={
+            "status": "Ready",
+            "readiness": readiness,
+            "errors": [],
+            "warnings": [],
+        },
         readiness=readiness,
     )
 
@@ -338,7 +385,7 @@ def seed_filesystem_resource(
         "directory_name": directory_name,
         "users": ["alice", "bob"],
         "validation_denied_users": ["mallory"],
-        "access_group": f"dms-phase10-{directory_name}",
+        "access_group": f"dms-grp-{directory_name}",
         "mode": "0770",
         "resource_type": resource_type,
         "expires_at": expires_at,

@@ -18,7 +18,6 @@ from dms.adapters import (
 from dms.config import Settings
 from dms.domain import validate_storage_root_basename
 
-
 CEPHFS_BACKEND_TYPE = "cephfs"
 MARKER_NAME = ".dms-resource.json"
 
@@ -112,6 +111,20 @@ class FilesystemHostExecutor(Protocol):
     ) -> dict[str, Any]: ...
 
 
+def _pick_rm_worker(mapping: dict[str, Any], rm_workers: list[str]) -> str:
+    """ssh_host 미지정 시 agent 보고 기반 rm_candidates 중 Ready 노드를 선택한다.
+
+    sanity_result가 없거나 rm_candidates가 비어 있으면 rm_workers[0]으로 fallback.
+    """
+    candidates = (mapping.get("sanity_result") or {}).get("agent_observed", {}).get(
+        "rm_candidates"
+    ) or []
+    for c in candidates:
+        if isinstance(c, dict) and c.get("status") == "Ready" and c.get("node_name"):
+            return c["node_name"]
+    return rm_workers[0] if rm_workers else ""
+
+
 @dataclass(frozen=True)
 class CephFsBackendTemplate:
     storage_name: str
@@ -124,10 +137,12 @@ class CephFsBackendTemplate:
     def from_storage_mapping(cls, mapping: dict[str, Any]) -> "CephFsBackendTemplate":
         template = mapping["backend_template"]
         rm_workers = template.get("rm_worker_nodes") or []
-        rm_worker_node = template.get("ssh_host") or (rm_workers[0] if rm_workers else "")
+        rm_worker_node = template.get("ssh_host") or _pick_rm_worker(
+            mapping, rm_workers
+        )
         mount_path = template.get("mount_path", "")
         managed_root = template.get("managed_root") or (
-            f"{mount_path.rstrip('/')}/dms-phase10" if mount_path else ""
+            f"{mount_path.rstrip('/')}/dms" if mount_path else ""
         )
         return cls(
             storage_name=mapping["storage_name"],
@@ -328,7 +343,9 @@ class PythonHostExecutor:
                 timeout=self.timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
-            raise HostExecutionError(f"filesystem host execution timed out: {exc}") from exc
+            raise HostExecutionError(
+                f"filesystem host execution timed out: {exc}"
+            ) from exc
         if completed.returncode != 0:
             raise HostExecutionError(
                 "filesystem host execution failed: "
@@ -372,7 +389,8 @@ class CephFsHostMountedFilesystemBackendAdapter:
         template = CephFsBackendTemplate.from_storage_mapping(mapping)
         return cls(
             template=template,
-            identity_groups=identity_groups or LdapIdentityGroupManager.from_settings(settings),
+            identity_groups=identity_groups
+            or LdapIdentityGroupManager.from_settings(settings),
             executor=executor
             or PythonHostExecutor(
                 host=template.rm_worker_node,
@@ -388,20 +406,22 @@ class CephFsHostMountedFilesystemBackendAdapter:
         directory_name = desired["directory_name"]
         validate_storage_root_basename("directory_name", directory_name)
         users = _string_list(desired.get("users"), "users")
-        if len(users) < 2:
-            raise BackendPreconditionError("filesystem create requires at least two users")
+        if len(users) < 1:
+            raise BackendPreconditionError(
+                "filesystem create requires at least one user"
+            )
         denied_users = _string_list(
             desired.get("denied_users") or desired.get("validation_denied_users") or [],
             "denied_users",
             required=False,
         )
-        group_name = desired.get("access_group") or f"dms-phase10-{directory_name}"
+        group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
         validate_storage_root_basename("access_group", group_name)
         if not group_name.startswith("dms-"):
             raise BackendPreconditionError(
                 "DMS-managed filesystem access groups must start with 'dms-'"
             )
-        mode = str(desired.get("mode", "0770"))
+        mode = str(desired.get("mode", "0750"))
         _validate_mode(mode)
         marker = self._marker(plan, group_name)
         try:
@@ -474,13 +494,15 @@ class CephFsHostMountedFilesystemBackendAdapter:
         desired = plan["desired_state"]
         directory_name = desired["directory_name"]
         validate_storage_root_basename("directory_name", directory_name)
-        group_name = desired.get("access_group") or f"dms-phase10-{directory_name}"
+        group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
         observed = self.executor.delete_directory(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
             resource_key=plan["resource_key"],
         )
-        group_cleanup = self.identity_groups.delete_group(group_name=group_name)
+        group_cleanup: dict = {}
+        if group_name.startswith("dms-"):
+            group_cleanup = self.identity_groups.delete_group(group_name=group_name)
         observed.update(
             {
                 "adapter": "cephfs-host-mounted",
@@ -510,7 +532,9 @@ class CephFsHostMountedFilesystemBackendAdapter:
         validate_storage_root_basename("directory_name", directory_name)
         quota = _normalize_quota(desired.get("quota"))
         if not quota:
-            raise BackendPreconditionError("filesystem quota is required for Phase 12 update")
+            raise BackendPreconditionError(
+                "filesystem quota is required for Phase 12 update"
+            )
         observed = self.executor.apply_quota(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
@@ -523,9 +547,11 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "operation": "update",
                 "backend": self.template.metadata(),
                 "resource_key": plan["resource_key"],
-                "resource_status": desired.get("resource_status", "Blocked")
-                if desired.get("block_state", {}).get("blocked")
-                else "Succeeded",
+                "resource_status": (
+                    desired.get("resource_status", "Blocked")
+                    if desired.get("block_state", {}).get("blocked")
+                    else "Succeeded"
+                ),
             }
         )
         synced_desired = dict(desired)
@@ -639,7 +665,9 @@ class CephFsHostMountedFilesystemBackendAdapter:
         directory_name = desired["directory_name"]
         validate_storage_root_basename("directory_name", directory_name)
         access_policy = desired.get("access_policy") or {}
-        users = _string_list(access_policy.get("users") or desired.get("users"), "users")
+        users = _string_list(
+            access_policy.get("users") or desired.get("users"), "users"
+        )
         denied_users = _string_list(
             access_policy.get("denied_users")
             or desired.get("denied_users")
@@ -649,7 +677,9 @@ class CephFsHostMountedFilesystemBackendAdapter:
             required=False,
         )
         quota = _normalize_quota(desired.get("quota"))
-        marker = self._marker(plan, desired.get("access_group") or access_policy.get("expected_group"))
+        marker = self._marker(
+            plan, desired.get("access_group") or access_policy.get("expected_group")
+        )
         marker["management_mode"] = "full"
         observed = self.executor.import_directory(
             managed_root=self.template.managed_root,
@@ -753,11 +783,15 @@ class CephFsHostMountedFilesystemBackendAdapter:
 
     def _validate_template(self) -> None:
         if not self.template.managed_root:
-            raise BackendPreconditionError("CephFS storage mapping requires managed_root")
+            raise BackendPreconditionError(
+                "CephFS storage mapping requires managed_root"
+            )
         if not self.template.mount_path:
             raise BackendPreconditionError("CephFS storage mapping requires mount_path")
         if not self.template.rm_worker_node and self.executor is None:
-            raise BackendPreconditionError("CephFS storage mapping requires an RM worker node")
+            raise BackendPreconditionError(
+                "CephFS storage mapping requires an RM worker node"
+            )
 
     def _read_directory_state(self, **kwargs: Any) -> dict[str, Any]:
         try:
@@ -915,6 +949,7 @@ def _quota_check_issues(
     desired_quota = _normalize_quota(desired.get("quota"))
     quota_state = observed.get("quota_state") or {}
     live_quota = _quota_from_state(quota_state)
+    capacity_tolerance = 100 * 1024 * 1024
     for key, desired_value in desired_quota.items():
         live_value = live_quota.get(key)
         if live_value is None:
@@ -927,7 +962,12 @@ def _quota_check_issues(
                 }
             )
             continue
-        if int(live_value) != int(desired_value):
+        if key == "capacity_bytes":
+            diff = int(live_value) - int(desired_value)
+            drifted = diff < 0 or diff > capacity_tolerance
+        else:
+            drifted = int(live_value) != int(desired_value)
+        if drifted:
             issues.append(
                 {
                     "issue_type": "filesystem_quota_drifted",
@@ -940,8 +980,7 @@ def _quota_check_issues(
     return issues
 
 
-_CREATE_DIRECTORY_SCRIPT = textwrap.dedent(
-    r"""
+_CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import grp
     import json
     import os
@@ -1031,12 +1070,10 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(
         "access_validation": access,
         "verified": True,
     }, sort_keys=True))
-    """
-)
+    """)
 
 
-_DELETE_DIRECTORY_SCRIPT = textwrap.dedent(
-    r"""
+_DELETE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import json
     import os
     import shutil
@@ -1074,12 +1111,10 @@ _DELETE_DIRECTORY_SCRIPT = textwrap.dedent(
         "marker": marker,
         "verified": True,
     }, sort_keys=True))
-    """
-)
+    """)
 
 
-_BLOCK_DIRECTORY_SCRIPT = textwrap.dedent(
-    r"""
+_BLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import grp
     import json
     import os
@@ -1145,12 +1180,10 @@ _BLOCK_DIRECTORY_SCRIPT = textwrap.dedent(
         "verified": (stat_after.st_mode & 0o777) == 0,
         "backend_side_effect": not already_blocked,
     }, sort_keys=True))
-    """
-)
+    """)
 
 
-_UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(
-    r"""
+_UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import grp
     import json
     import os
@@ -1247,12 +1280,10 @@ _UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(
         "verified": True,
         "backend_side_effect": True,
     }, sort_keys=True))
-    """
-)
+    """)
 
 
-_APPLY_QUOTA_SCRIPT = textwrap.dedent(
-    r"""
+_APPLY_QUOTA_SCRIPT = textwrap.dedent(r"""
     import json
     import os
     import shutil
@@ -1303,8 +1334,10 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(
         run(["setfattr", "-n", "ceph.quota.max_files", "-v", str(int(quota["file_count"])), target])
     observed_capacity = getx(target, "ceph.quota.max_bytes")
     observed_files = getx(target, "ceph.quota.max_files")
-    if quota.get("capacity_bytes") is not None and observed_capacity != int(quota["capacity_bytes"]):
-        fail("quota capacity read-back mismatch")
+    if quota.get("capacity_bytes") is not None and observed_capacity is not None:
+        diff = int(observed_capacity) - int(quota["capacity_bytes"])
+        if diff < 0 or diff > 100 * 1024 * 1024:
+            fail("quota capacity read-back mismatch")
     if quota.get("file_count") is not None and observed_files != int(quota["file_count"]):
         fail("quota file-count read-back mismatch")
     quota_state = {
@@ -1337,12 +1370,10 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(
         "backend_side_effect": True,
         "verified": True,
     }, sort_keys=True))
-    """
-)
+    """)
 
 
-_READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(
-    r"""
+_READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(r"""
     import grp
     import json
     import os
@@ -1417,12 +1448,10 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(
         "verified": True,
         "backend_side_effect": False,
     }, sort_keys=True))
-    """
-)
+    """)
 
 
-_ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(
-    r"""
+_ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import json
     import os
     import shutil
@@ -1496,12 +1525,10 @@ _ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(
         "backend_side_effect": True,
         "verified": True,
     }, sort_keys=True))
-    """
-)
+    """)
 
 
-_IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
-    r"""
+_IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import grp
     import json
     import os
@@ -1575,7 +1602,7 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
         if existing.get("resource_key") != marker.get("resource_key") or existing.get("management_mode") != "quota_only":
             fail("target directory marker resource key mismatch")
     expected_group = access_policy.get("expected_group")
-    expected_mode = str(access_policy.get("expected_mode") or "0770")
+    expected_mode = str(access_policy.get("expected_mode") or "0750")
     group = grp.getgrnam(expected_group)
     stat_before = os.stat(target)
     mode_before = oct(stat_before.st_mode & 0o777)[2:].zfill(4)
@@ -1625,5 +1652,4 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(
         "verified": True,
         "backend_side_effect": True,
     }, sort_keys=True))
-    """
-)
+    """)

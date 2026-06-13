@@ -315,19 +315,33 @@ class DmsRepository:
         return self._decode_request(request)
 
     def list_requests(
-        self, *, requester_id: str, limit: int = DEFAULT_REQUEST_LIST_LIMIT
+        self,
+        *,
+        requester_id: str,
+        limit: int = DEFAULT_REQUEST_LIST_LIMIT,
+        since: str | None = None,
+        until: str | None = None,
     ) -> list[dict[str, Any]]:
         if not requester_id.strip():
             raise ValueError("requester_id is required")
+        where = ["requester_id = ?"]
+        params: list[Any] = [requester_id]
+        if since is not None:
+            where.append("requested_at >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("requested_at < ?")
+            params.append(until)
+        params.append(limit)
         with self.database.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM requests
-                WHERE requester_id = ?
+                WHERE {' AND '.join(where)}
                 ORDER BY commit_order DESC
                 LIMIT ?
                 """,
-                (requester_id, limit),
+                tuple(params),
             ).fetchall()
         return [self._decode_request(row_to_dict(row)) for row in rows]
 
@@ -386,7 +400,9 @@ class DmsRepository:
                 created_at=now,
             )
 
-    def find_prior_active_request(self, request: dict[str, Any]) -> dict[str, Any] | None:
+    def find_prior_active_request(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any] | None:
         terminal = tuple(TERMINAL_LIFECYCLE_STATES)
         placeholders = ",".join(["?"] * len(terminal))
         with self.database.connect() as connection:
@@ -491,7 +507,11 @@ class DmsRepository:
         where = [f"plans.status IN ({','.join(['?'] * len(selected_statuses))})"]
         params: list[Any] = list(selected_statuses)
         if worker_role:
-            role = worker_role.value if isinstance(worker_role, WorkerRole) else worker_role
+            role = (
+                worker_role.value
+                if isinstance(worker_role, WorkerRole)
+                else worker_role
+            )
             where.append("plans.worker_role = ?")
             params.append(role)
         params.append(limit)
@@ -822,7 +842,9 @@ class DmsRepository:
             ).fetchall()
         results = rows_to_dicts(rows)
         for result in results:
-            result["verification_summary"] = json_loads(result["verification_summary"]) or {}
+            result["verification_summary"] = (
+                json_loads(result["verification_summary"]) or {}
+            )
         return results
 
     def list_results_for_operations(
@@ -1018,7 +1040,9 @@ class DmsRepository:
             block_state = _filesystem_block_state(resource)
             if block_state.get("blocked") and not include_blocked:
                 continue
-            seconds_overdue = int((basis - expires).total_seconds()) if expired else None
+            seconds_overdue = (
+                int((basis - expires).total_seconds()) if expired else None
+            )
             matches.append(
                 {
                     **resource,
@@ -1131,7 +1155,9 @@ class DmsRepository:
             block_state = _kubernetes_quota_block_state(resource)
             if block_state.get("blocked") and not include_blocked:
                 continue
-            seconds_overdue = int((basis - expires).total_seconds()) if expired else None
+            seconds_overdue = (
+                int((basis - expires).total_seconds()) if expired else None
+            )
             matches.append(
                 {
                     **resource,
@@ -1151,7 +1177,9 @@ class DmsRepository:
             )
         return matches[:limit]
 
-    def get_resource(self, resource_kind: str, resource_key: str) -> dict[str, Any] | None:
+    def get_resource(
+        self, resource_kind: str, resource_key: str
+    ) -> dict[str, Any] | None:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
@@ -1183,13 +1211,17 @@ class DmsRepository:
                 "SELECT * FROM storage_mappings WHERE storage_name = ?",
                 (data.storage_name,),
             ).fetchone()
-            before = self._decode_storage_mapping(row_to_dict(existing)) if existing else None
-            sanity_status = (
-                sanity_result.get("status")
-                if sanity_result
-                else data.sanity_status
+            before = (
+                self._decode_storage_mapping(row_to_dict(existing))
+                if existing
+                else None
             )
-            sanity_checked_at = sanity_result.get("checked_at") if sanity_result else None
+            sanity_status = (
+                sanity_result.get("status") if sanity_result else data.sanity_status
+            )
+            sanity_checked_at = (
+                sanity_result.get("checked_at") if sanity_result else None
+            )
             if existing:
                 connection.execute(
                     """
@@ -1360,16 +1392,61 @@ class DmsRepository:
             ).fetchone()
         return self._decode_storage_mapping(row_to_dict(row)) if row else None
 
-    def list_storage_mappings(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_storage_mappings(
+        self,
+        limit: int = 100,
+        *,
+        cluster_name: str | None = None,
+    ) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM storage_mappings ORDER BY updated_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if cluster_name is not None:
+                rows = connection.execute(
+                    "SELECT * FROM storage_mappings WHERE cluster_name = ? ORDER BY updated_at DESC LIMIT ?",
+                    (cluster_name, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM storage_mappings ORDER BY updated_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
         return [self._decode_storage_mapping(row_to_dict(row)) for row in rows]
 
+    def delete_storage_mapping(self, storage_name: str, actor: str) -> dict[str, Any]:
+        with self.database.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM storage_mappings WHERE storage_name = ?",
+                (storage_name,),
+            ).fetchone()
+            if not existing:
+                raise KeyError(f"storage mapping not found: {storage_name}")
+            before = self._decode_storage_mapping(row_to_dict(existing))
+            connection.execute(
+                "DELETE FROM storage_mappings WHERE storage_name = ?",
+                (storage_name,),
+            )
+            self._insert_control_mutation(
+                connection,
+                actor=actor,
+                mutation_kind="storage_mapping.delete",
+                payload={"storage_name": storage_name},
+                mutation_class="storage_mapping",
+                operation="delete",
+                target_key=storage_name,
+                status="Succeeded",
+                result_summary={"storage_name": storage_name},
+                before_state=before,
+                after_state=None,
+                created_at=iso_now(),
+            )
+        return before
+
     def upsert_default_quota_policy(
-        self, *, resource_kind: str, resource_type: str, quota: dict[str, Any], actor: str
+        self,
+        *,
+        resource_kind: str,
+        resource_type: str,
+        quota: dict[str, Any],
+        actor: str,
     ) -> str:
         policy_id = f"{resource_kind}:{resource_type}"
         now = iso_now()
@@ -1437,7 +1514,9 @@ class DmsRepository:
             if self.get_data_management_policy(operation):
                 continue
             self.upsert_data_management_policy(
-                DataManagementPolicyInput.model_validate({**policy, "operation": operation}),
+                DataManagementPolicyInput.model_validate(
+                    {**policy, "operation": operation}
+                ),
                 actor=actor,
                 mutation_kind="data_management_policy.bootstrap",
             )
@@ -1614,7 +1693,9 @@ class DmsRepository:
                 )
         return mapping_id
 
-    def get_identity_mapping(self, requester_id: str, provider: str) -> dict[str, Any] | None:
+    def get_identity_mapping(
+        self, requester_id: str, provider: str
+    ) -> dict[str, Any] | None:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
@@ -1715,6 +1796,73 @@ class DmsRepository:
                     provider,
                 ),
             )
+
+    def list_all_identity_mappings_for_sync(
+        self,
+        *,
+        identity_provider: str | None = None,
+        exclude_status: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """sync 용: limit 없이 전체 조회, Disabled 제외 옵션."""
+        filters: list[str] = []
+        params: list[Any] = []
+        if identity_provider:
+            filters.append("identity_provider = ?")
+            params.append(identity_provider)
+        if exclude_status:
+            placeholders = ",".join("?" for _ in exclude_status)
+            filters.append(f"status NOT IN ({placeholders})")
+            params.extend(exclude_status)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM identity_mappings {where} ORDER BY requester_id",
+                params,
+            ).fetchall()
+        return [self._decode_identity_mapping(row_to_dict(row)) for row in rows]
+
+    def bulk_update_ldap_sync(
+        self,
+        updates: list[dict[str, Any]],
+    ) -> int:
+        """uid/gid/groups/status를 단일 트랜잭션으로 일괄 업데이트.
+
+        updates: list of {requester_id, identity_provider, uid, gid, groups,
+                          status, verification_result, mismatch_reason, source_metadata}
+        Returns: 업데이트된 row 수
+        """
+        now = iso_now()
+        rows = [
+            (
+                u["uid"],
+                u["gid"],
+                json_dumps(u["groups"]),
+                u["status"],
+                now,
+                now if u["status"] == IdentityMappingStatus.ACTIVE.value else None,
+                now if u["status"] == IdentityMappingStatus.STALE.value else None,
+                u.get("verification_result", "matched"),
+                u.get("mismatch_reason"),
+                json_dumps(u.get("source_metadata") or {}),
+                now,
+                u["requester_id"],
+                u["identity_provider"],
+            )
+            for u in updates
+        ]
+        with self.database.connect() as connection:
+            connection.executemany(
+                """
+                UPDATE identity_mappings
+                SET uid = ?, gid = ?, groups_json = ?, status = ?,
+                    ldap_lookup_at = ?, verified_at = ?, stale_at = ?,
+                    verification_result = ?, mismatch_reason = ?,
+                    ldap_source_metadata = ?, updated_at = ?
+                WHERE requester_id = ? AND identity_provider = ?
+                """,
+                rows,
+            )
+        return len(rows)
 
     def list_identity_mappings(
         self,
@@ -1856,8 +2004,14 @@ class DmsRepository:
                 (
                     (state.value if isinstance(state, DataJobState) else state)
                     or job["state"],
-                    selected_tool if selected_tool is not None else job["selected_tool"],
-                    json_dumps(worker_pool if worker_pool is not None else job["worker_pool"]),
+                    (
+                        selected_tool
+                        if selected_tool is not None
+                        else job["selected_tool"]
+                    ),
+                    json_dumps(
+                        worker_pool if worker_pool is not None else job["worker_pool"]
+                    ),
                     artifact_uri if artifact_uri is not None else job["artifact_uri"],
                     json_dumps(
                         normalized_target
@@ -1943,13 +2097,17 @@ class DmsRepository:
                 request = self._decode_request(row_to_dict(row))
                 if request["status"] in TERMINAL_LIFECYCLE_STATES:
                     continue
-                if storage_name in _storage_names_in_payload(request["payload_summary"]):
+                if storage_name in _storage_names_in_payload(
+                    request["payload_summary"]
+                ):
                     return {
                         "kind": "request",
                         "id": request["request_id"],
                         "status": request["status"],
                     }
-            rows = connection.execute("SELECT * FROM data_jobs ORDER BY updated_at ASC").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM data_jobs ORDER BY updated_at ASC"
+            ).fetchall()
             for row in rows:
                 job = self._decode_data_job(row_to_dict(row))
                 if job["state"] in TERMINAL_DATA_JOB_STATES:
@@ -2053,16 +2211,16 @@ class DmsRepository:
         now_iso = now.isoformat()
         count = 0
         with self.database.connect() as connection:
-            rows = connection.execute(
-                """
+            rows = connection.execute("""
                 SELECT report_id, reported_at, received_at
                 FROM agent_reports
                 WHERE freshness_status = 'Fresh'
-                """
-            ).fetchall()
+                """).fetchall()
             for row in rows:
                 report = row_to_dict(row)
-                basis = _parse_iso(report.get("reported_at") or report.get("received_at"))
+                basis = _parse_iso(
+                    report.get("reported_at") or report.get("received_at")
+                )
                 if (now - basis).total_seconds() <= stale_seconds:
                     continue
                 connection.execute(
@@ -2132,7 +2290,11 @@ class DmsRepository:
         where = [f"runs.state IN ({','.join(['?'] * len(selected_states))})"]
         params: list[Any] = list(selected_states)
         if worker_role:
-            role = worker_role.value if isinstance(worker_role, WorkerRole) else worker_role
+            role = (
+                worker_role.value
+                if isinstance(worker_role, WorkerRole)
+                else worker_role
+            )
             where.append("runs.worker_role = ?")
             params.append(role)
         if worker_id:
@@ -2272,13 +2434,17 @@ class DmsRepository:
         mutations = rows_to_dicts(rows)
         for mutation in mutations:
             mutation["payload"] = json_loads(mutation["payload"]) or {}
-            mutation["result_summary"] = json_loads(mutation.get("result_summary")) or {}
+            mutation["result_summary"] = (
+                json_loads(mutation.get("result_summary")) or {}
+            )
             mutation["before_state"] = json_loads(mutation.get("before_state")) or {}
             mutation["after_state"] = json_loads(mutation.get("after_state")) or {}
         return mutations
 
     def _next_commit_order(self, connection: Any) -> int:
-        row = connection.execute("SELECT COALESCE(MAX(commit_order), 0) + 1 AS n FROM requests").fetchone()
+        row = connection.execute(
+            "SELECT COALESCE(MAX(commit_order), 0) + 1 AS n FROM requests"
+        ).fetchone()
         return int(row["n"])
 
     def _get_request(self, connection: Any, request_id: str) -> dict[str, Any]:
@@ -2468,7 +2634,11 @@ class DmsRepository:
                     job[key] = json_loads(job.get(key)) or {}
             if "payload_summary" in job:
                 job["payload_summary"] = json_loads(job.get("payload_summary")) or {}
-            if not job.get("normalized_target") and job.get("storage_name") and job.get("target"):
+            if (
+                not job.get("normalized_target")
+                and job.get("storage_name")
+                and job.get("target")
+            ):
                 job["normalized_target"] = {
                     "storage_name": job["storage_name"],
                     "path": job["target"],

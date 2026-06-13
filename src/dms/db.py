@@ -88,6 +88,12 @@ class PostgresConnection:
     def execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> Any:
         return self._connection.execute(sql.replace("?", "%s"), parameters)
 
+    def executemany(self, sql: str, parameters_seq: list[Any]) -> Any:
+        translated = sql.replace("?", "%s")
+        with self._connection.cursor() as cur:
+            cur.executemany(translated, parameters_seq)
+            return cur
+
     def executescript(self, script: str) -> None:
         statements = [statement.strip() for statement in script.split(";")]
         for statement in statements:

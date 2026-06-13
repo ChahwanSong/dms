@@ -10,9 +10,19 @@ import subprocess
 import time
 from typing import Any, Protocol
 
-from dms.adapters import AdapterResult, BackendPreconditionError
+from dms.adapters import (
+    AdapterResult,
+    BackendPreconditionError,
+    IdentityGroupManager,
+    IdentityLookupAdapter,
+    IdentityLookupConfigurationError,
+    IdentityLookupReadError,
+    LdapIdentityGroupManager,
+    LdapIdentityLookupAdapter,
+    probe_filesystem_access,
+)
+from dms.config import Settings
 from dms.domain import OperationKind, validate_storage_root_basename
-
 
 GPFS_BACKEND_TYPE = "gpfs"
 GPFS_CSI_DRIVER = "spectrumscale.csi.ibm.com"
@@ -74,10 +84,22 @@ class SshGpfsCommandExecutor:
     local: LocalGpfsCommandExecutor = LocalGpfsCommandExecutor()
 
     def run(self, argv: list[str], *, timeout_seconds: int) -> CommandResult:
+        cmd = f"PATH=/usr/lpp/mmfs/bin:$PATH {shlex.join(argv)}"
         return self.local.run(
-            ["ssh", self.host, shlex.join(argv)],
+            ["ssh", self.host, cmd],
             timeout_seconds=timeout_seconds,
         )
+
+
+def _pick_rm_worker(mapping: dict[str, Any], rm_workers: list[str]) -> str | None:
+    """ssh_host 미지정 시 agent 보고 기반 rm_candidates 중 Ready 노드를 선택한다."""
+    candidates = (mapping.get("sanity_result") or {}).get("agent_observed", {}).get(
+        "rm_candidates"
+    ) or []
+    for c in candidates:
+        if isinstance(c, dict) and c.get("status") == "Ready" and c.get("node_name"):
+            return c["node_name"]
+    return rm_workers[0] if rm_workers else None
 
 
 @dataclass(frozen=True)
@@ -85,7 +107,7 @@ class GpfsBackendTemplate:
     storage_name: str
     filesystem_name: str
     mount_path: str
-    fileset_root: str | None
+    managed_root: str | None
     quota_scope: str
     csi_driver: str
     storage_class_name: str | None
@@ -99,12 +121,14 @@ class GpfsBackendTemplate:
     def from_storage_mapping(cls, mapping: dict[str, Any]) -> "GpfsBackendTemplate":
         template = mapping["backend_template"]
         rm_workers = template.get("rm_worker_nodes") or []
-        rm_worker_node = template.get("ssh_host") or (rm_workers[0] if rm_workers else None)
+        rm_worker_node = template.get("ssh_host") or _pick_rm_worker(
+            mapping, rm_workers
+        )
         return cls(
             storage_name=mapping["storage_name"],
             filesystem_name=template.get("filesystem_name", mapping["storage_name"]),
             mount_path=template.get("mount_path", ""),
-            fileset_root=template.get("fileset_root"),
+            managed_root=template.get("managed_root"),
             quota_scope=template.get("quota_scope", "fileset"),
             csi_driver=template.get("csi_driver", GPFS_CSI_DRIVER),
             storage_class_name=(
@@ -125,7 +149,7 @@ class GpfsBackendTemplate:
             "storage_name": self.storage_name,
             "filesystem_name": self.filesystem_name,
             "mount_path": self.mount_path,
-            "fileset_root": self.fileset_root,
+            "managed_root": self.managed_root,
             "quota_scope": self.quota_scope,
             "csi_driver": self.csi_driver,
             "storage_class_name": self.storage_class_name,
@@ -177,16 +201,42 @@ class GpfsFilesystemBackendAdapter:
     template: GpfsBackendTemplate
     quota_strategy: GpfsQuotaStrategy = GpfsQuotaStrategy()
     executor: GpfsCommandExecutor | None = None
+    identity_groups: IdentityGroupManager | None = None
+    identity_lookup: IdentityLookupAdapter | None = None
 
     @classmethod
     def from_storage_mapping(
         cls,
         mapping: dict[str, Any],
+        settings: Settings | None = None,
         *,
         executor: GpfsCommandExecutor | None = None,
+        identity_groups: IdentityGroupManager | None = None,
+        identity_lookup: IdentityLookupAdapter | None = None,
     ) -> "GpfsFilesystemBackendAdapter":
         template = GpfsBackendTemplate.from_storage_mapping(mapping)
-        return cls(template=template, executor=executor or template.executor())
+        resolved_identity_groups = identity_groups
+        if resolved_identity_groups is None and settings is not None:
+            try:
+                resolved_identity_groups = LdapIdentityGroupManager.from_settings(
+                    settings
+                )
+            except IdentityLookupConfigurationError:
+                resolved_identity_groups = None
+        resolved_identity_lookup = identity_lookup
+        if resolved_identity_lookup is None and settings is not None:
+            try:
+                resolved_identity_lookup = LdapIdentityLookupAdapter.from_settings(
+                    settings
+                )
+            except IdentityLookupConfigurationError:
+                resolved_identity_lookup = None
+        return cls(
+            template=template,
+            executor=executor or template.executor(),
+            identity_groups=resolved_identity_groups,
+            identity_lookup=resolved_identity_lookup,
+        )
 
     def create(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
@@ -199,18 +249,41 @@ class GpfsFilesystemBackendAdapter:
         if existing.get("exists"):
             raise BackendPreconditionError("GPFS fileset already exists")
 
+        group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
+        users = list(desired.get("users") or [])
         quota = desired.get("quota") or {}
+
+        # LDAP group creation before any side effects so failure is clean rollback
+        group: dict[str, Any] = {}
+        if self.identity_groups is not None:
+            try:
+                group = self.identity_groups.ensure_group_members(
+                    group_name=group_name,
+                    users=users,
+                    resource_key=plan["resource_key"],
+                )
+            except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+                raise BackendPreconditionError(str(exc)) from exc
+
         side_effect_started = False
         try:
             self._run(
-                ["mmcrfileset", self.template.filesystem_name, fileset_name, "--inode-space", "new"],
+                [
+                    "mmcrfileset",
+                    self.template.filesystem_name,
+                    fileset_name,
+                    "--inode-space",
+                    "new",
+                ],
                 evidence,
                 side_effect=True,
             )
             side_effect_started = True
             quota_state = {}
             if quota:
-                quota_state = self._apply_quota(fileset_name, junction_path, quota, evidence)
+                quota_state = self._apply_quota(
+                    fileset_name, junction_path, quota, evidence
+                )
             self._run(
                 [
                     "mmlinkfileset",
@@ -222,12 +295,33 @@ class GpfsFilesystemBackendAdapter:
                 evidence,
                 side_effect=True,
             )
-            group_name = desired.get("access_group")
-            if group_name:
-                self._run(["chgrp", group_name, junction_path], evidence, side_effect=True)
-            mode = str(desired.get("mode") or "0770")
+            # Refresh SSSD cache so chown/probe can resolve the new group
+            self._run(["sss_cache", "-E"], evidence, fail=False, side_effect=False)
+            owner_uid = self._resolve_owner_uid(plan, desired)
+            gid = group.get("gid")
+            if owner_uid is not None and gid is not None:
+                self._run(
+                    ["chown", f"{owner_uid}:{gid}", junction_path],
+                    evidence,
+                    side_effect=True,
+                )
+            elif owner_uid is not None:
+                self._run(
+                    ["chown", str(owner_uid), junction_path], evidence, side_effect=True
+                )
+            elif gid is not None:
+                self._run(
+                    ["chown", f":{gid}", junction_path], evidence, side_effect=True
+                )
+            elif group_name:
+                self._run(
+                    ["chgrp", group_name, junction_path], evidence, side_effect=True
+                )
+            mode = str(desired.get("mode") or "0750")
             self._run(["chmod", mode, junction_path], evidence, side_effect=True)
-            marker = _marker(plan, desired, fileset_name, junction_path, management_mode="full")
+            marker = _marker(
+                plan, desired, fileset_name, junction_path, management_mode="full"
+            )
             self._write_marker(junction_path, marker, evidence, side_effect=True)
             fileset_state = self._read_fileset(fileset_name, evidence)
         except BackendPreconditionError as exc:
@@ -235,6 +329,33 @@ class GpfsFilesystemBackendAdapter:
                 raise GpfsSideEffectError(str(exc)) from exc
             raise
 
+        # Access verification (non-fatal, recorded in observed state)
+        access_validation: dict[str, Any] = {}
+        if self.identity_groups is not None and users:
+            denied_users = list(
+                desired.get("denied_users")
+                or desired.get("validation_denied_users")
+                or []
+            )
+            access_validation = probe_filesystem_access(
+                run_cmd=lambda argv: self._run(
+                    argv, evidence, fail=False, side_effect=False
+                ).returncode,
+                run_cmd_out=lambda argv: (lambda r: (r.returncode, r.stdout))(
+                    self._run(argv, evidence, fail=False, side_effect=False)
+                ),
+                path=junction_path,
+                allowed_users=users,
+                denied_users=denied_users,
+                group_gid=group.get("gid"),
+            )
+
+        access_group_info: dict[str, Any] = {
+            "group_name": group_name,
+            "gid": group.get("gid"),
+            "dn": group.get("dn"),
+            "members": group.get("members", users),
+        }
         applied = {
             "adapter": "gpfs-fileset-command",
             "operation": OperationKind.FILESYSTEM_CREATE.value,
@@ -242,6 +363,7 @@ class GpfsFilesystemBackendAdapter:
             "directory_name": directory_name,
             "fileset_name": fileset_name,
             "junction_path": junction_path,
+            "access_group": access_group_info,
             "quota": quota,
             "quota_state": quota_state,
             "fileset_state": fileset_state,
@@ -256,6 +378,8 @@ class GpfsFilesystemBackendAdapter:
             "verified": True,
             "management_mode": "full",
         }
+        if access_validation:
+            observed["access_validation"] = access_validation
         return AdapterResult(
             applied_state=applied,
             observed_state=observed,
@@ -267,23 +391,55 @@ class GpfsFilesystemBackendAdapter:
         directory_name = _directory_name(desired)
         fileset_name = self._fileset_name(directory_name)
         junction_path = self._junction_path(directory_name)
-        quota = desired.get("quota")
-        if not quota:
-            raise BackendPreconditionError("GPFS quota is required for update")
+        quota = desired.get("quota") if desired.get("update_apply_quota") else None
+        owner_username = (
+            desired.get("update_owner_username")
+            if desired.get("update_apply_owner")
+            else None
+        )
         evidence: list[dict[str, Any]] = []
-        self._capability(evidence, require_quota=True)
+        owner_change: dict[str, Any] = {}
+        quota_state: dict[str, Any] = {}
         self._read_fileset(fileset_name, evidence)
-        quota_state = self._apply_quota(fileset_name, junction_path, quota, evidence)
+        if quota:
+            self._capability(evidence, require_quota=True)
+            quota_state = self._apply_quota(
+                fileset_name, junction_path, quota, evidence
+            )
+        if owner_username:
+            if self.identity_lookup is None:
+                raise BackendPreconditionError(
+                    "GPFS owner update requires LDAP identity lookup"
+                )
+            try:
+                result = self.identity_lookup.lookup("ldap", str(owner_username))
+            except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+                raise BackendPreconditionError(str(exc)) from exc
+            if not result or result.uid is None:
+                raise BackendPreconditionError(
+                    f"LDAP user not found for owner update: {owner_username}"
+                )
+            self._run(["sss_cache", "-E"], evidence, fail=False, side_effect=False)
+            self._run(
+                ["chown", str(result.uid), junction_path],
+                evidence,
+                side_effect=True,
+            )
+            owner_change = {
+                "owner_username": owner_username,
+                "uid": int(result.uid),
+            }
         applied = {
             "adapter": "gpfs-fileset-command",
             "operation": OperationKind.FILESYSTEM_UPDATE.value,
             "backend": self.template.metadata(),
-            "quota": quota,
+            "quota": quota or {},
             "quota_state": quota_state,
+            "owner_change": owner_change,
             "fileset_name": fileset_name,
             "junction_path": junction_path,
             "command_evidence": evidence,
-            "backend_side_effect": True,
+            "backend_side_effect": bool(quota or owner_change),
         }
         observed = {
             **applied,
@@ -292,7 +448,7 @@ class GpfsFilesystemBackendAdapter:
             "exists": True,
             "verified": True,
         }
-        return AdapterResult(applied, observed, "GPFS fileset quota update completed")
+        return AdapterResult(applied, observed, "GPFS fileset update completed")
 
     def block(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
@@ -302,10 +458,20 @@ class GpfsFilesystemBackendAdapter:
         evidence: list[dict[str, Any]] = []
         self._read_fileset(fileset_name, evidence)
         block = bool(desired.get("block"))
-        mode = "0000" if block else str((desired.get("block_state") or {}).get("previous_mode") or desired.get("mode") or "0770")
+        mode = (
+            "0000"
+            if block
+            else str(
+                (desired.get("block_state") or {}).get("previous_mode")
+                or desired.get("mode")
+                or "0750"
+            )
+        )
         self._run(["chmod", mode, junction_path], evidence, side_effect=True)
         block_state = dict(desired.get("block_state") or {})
-        block_state.update({"blocked": block, "block_mode": "chmod-0000" if block else "restored"})
+        block_state.update(
+            {"blocked": block, "block_mode": "chmod-0000" if block else "restored"}
+        )
         applied = {
             "adapter": "gpfs-fileset-command",
             "operation": OperationKind.FILESYSTEM_BLOCK.value,
@@ -325,14 +491,33 @@ class GpfsFilesystemBackendAdapter:
     def delete(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
         if desired.get("management_mode") == "quota_only" or desired.get("import_mode"):
-            raise BackendPreconditionError("GPFS delete refused for imported/quota-only fileset")
+            raise BackendPreconditionError(
+                "GPFS delete refused for imported/quota-only fileset"
+            )
         directory_name = _directory_name(desired)
         fileset_name = self._fileset_name(directory_name)
         junction_path = self._junction_path(directory_name)
         evidence: list[dict[str, Any]] = []
-        self._read_fileset(fileset_name, evidence)
-        self._run(["mmunlinkfileset", self.template.filesystem_name, fileset_name], evidence, side_effect=True)
-        self._run(["mmdelfileset", self.template.filesystem_name, fileset_name], evidence, side_effect=True)
+        self._read_fileset(fileset_name, evidence, fail_on_error=False)
+
+        # Lock down the junction path: chown root:root + chmod 000
+        # Fileset stays linked; data is preserved and accessible only by root.
+        self._run(
+            ["chown", "root:root", junction_path],
+            evidence,
+            fail=False,
+            side_effect=True,
+        )
+        self._run(
+            ["chmod", "000", junction_path], evidence, fail=False, side_effect=True
+        )
+
+        group_cleanup: dict[str, Any] = {}
+        if self.identity_groups is not None:
+            group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
+            if group_name.startswith("dms-"):
+                group_cleanup = self.identity_groups.delete_group(group_name=group_name)
+
         applied = {
             "adapter": "gpfs-fileset-command",
             "operation": OperationKind.FILESYSTEM_DELETE.value,
@@ -340,17 +525,24 @@ class GpfsFilesystemBackendAdapter:
             "fileset_name": fileset_name,
             "junction_path": junction_path,
             "deleted": True,
+            "soft_delete": True,
             "command_evidence": evidence,
             "backend_side_effect": True,
         }
+        if group_cleanup:
+            applied["access_group_cleanup"] = group_cleanup
         observed = {
             **applied,
             "resource_key": plan["resource_key"],
-            "exists": False,
+            "exists": True,
             "verified": True,
             "resource_status": "Deleted",
         }
-        return AdapterResult(applied, observed, "GPFS fileset deleted")
+        return AdapterResult(
+            applied,
+            observed,
+            "GPFS fileset locked (data preserved, fileset remains linked)",
+        )
 
     def consistency_check(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
@@ -359,13 +551,32 @@ class GpfsFilesystemBackendAdapter:
         junction_path = self._junction_path(directory_name)
         evidence: list[dict[str, Any]] = []
         fileset_state = self._read_fileset(fileset_name, evidence, fail_on_error=False)
+        ownership_state: dict[str, Any] = {}
+        permission_state: dict[str, Any] = {}
+        group_membership_state: dict[str, Any] = {}
         if not fileset_state.get("exists"):
-            issues = [{"issue_type": "filesystem_quota_missing", "field": "fileset", "reason": "missing"}]
+            issues = [
+                {
+                    "issue_type": "filesystem_quota_missing",
+                    "field": "fileset",
+                    "reason": "missing",
+                }
+            ]
             status = "Missing"
             quota_state = {}
         else:
-            quota_state = self._read_quota(fileset_name, junction_path, desired.get("quota") or {}, evidence)
+            quota_state = self._read_quota(
+                fileset_name, junction_path, desired.get("quota") or {}, evidence
+            )
             issues = _quota_check_issues(desired.get("quota") or {}, quota_state)
+            ownership_state, permission_state, ownership_issues = (
+                self._read_directory_attrs(junction_path, desired, evidence)
+            )
+            issues.extend(ownership_issues)
+            group_membership_state, membership_issues = self._read_group_membership(
+                desired, evidence
+            )
+            issues.extend(membership_issues)
             status = "Drifted" if issues else "Consistent"
         applied = {
             "adapter": "gpfs-fileset-command",
@@ -381,11 +592,16 @@ class GpfsFilesystemBackendAdapter:
             "junction_path": junction_path,
             "fileset_state": fileset_state,
             "quota_state": quota_state,
+            "ownership_state": ownership_state,
+            "permission_state": permission_state,
+            "group_membership_state": group_membership_state,
             "quota_status": status,
             "issues": issues,
             "verified": status != "CheckFailed",
         }
-        return AdapterResult(applied, observed, "GPFS fileset consistency check completed")
+        return AdapterResult(
+            applied, observed, "GPFS fileset consistency check completed"
+        )
 
     def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
@@ -424,22 +640,39 @@ class GpfsFilesystemBackendAdapter:
     def assign_quota_only(self, plan: dict[str, Any]) -> AdapterResult:
         return self._adopt_existing(plan, management_mode="quota_only")
 
-    def _adopt_existing(self, plan: dict[str, Any], *, management_mode: str) -> AdapterResult:
+    def _adopt_existing(
+        self, plan: dict[str, Any], *, management_mode: str
+    ) -> AdapterResult:
         desired = plan["desired_state"]
         directory_name = _directory_name(desired)
-        fileset_name = self._fileset_name(directory_name)
         junction_path = self._junction_path(directory_name)
         evidence: list[dict[str, Any]] = []
         fileset_state = self._read_fileset_by_junction(junction_path, evidence)
-        if fileset_state.get("fileset_name") not in {None, fileset_name}:
-            raise BackendPreconditionError("GPFS fileset name mismatch")
+        fileset_name = fileset_state.get("fileset_name") or self._fileset_name(
+            directory_name
+        )
+
+        adoption_summary: dict[str, Any] = {}
+        if management_mode == "full":
+            adoption_summary = self._adopt_full_group(
+                plan, desired, junction_path, evidence
+            )
+
         quota = desired.get("quota") or {}
         quota_state = {}
         if quota:
             self._capability(evidence, require_quota=True)
-            quota_state = self._apply_quota(fileset_name, junction_path, quota, evidence)
+            quota_state = self._apply_quota(
+                fileset_name, junction_path, quota, evidence
+            )
         if desired.get("initialize_marker", True):
-            marker = _marker(plan, desired, fileset_name, junction_path, management_mode=management_mode)
+            marker = _marker(
+                plan,
+                desired,
+                fileset_name,
+                junction_path,
+                management_mode=management_mode,
+            )
             self._write_marker(junction_path, marker, evidence, side_effect=True)
         applied = {
             "adapter": "gpfs-fileset-command",
@@ -451,7 +684,12 @@ class GpfsFilesystemBackendAdapter:
             "quota": quota,
             "quota_state": quota_state,
             "management_mode": management_mode,
-            "backend_side_effect": bool(quota or desired.get("initialize_marker", True)),
+            "group_adoption": adoption_summary,
+            "backend_side_effect": bool(
+                quota
+                or desired.get("initialize_marker", True)
+                or adoption_summary.get("changed_group")
+            ),
             "command_evidence": evidence,
         }
         observed = {
@@ -460,10 +698,286 @@ class GpfsFilesystemBackendAdapter:
             "exists": True,
             "verified": True,
         }
-        return AdapterResult(applied, observed, f"GPFS fileset {management_mode} adoption completed")
+        return AdapterResult(
+            applied, observed, f"GPFS fileset {management_mode} adoption completed"
+        )
 
-    def _capability(self, evidence: list[dict[str, Any]], *, require_quota: bool) -> dict[str, Any]:
-        for command in (
+    def _adopt_full_group(
+        self,
+        plan: dict[str, Any],
+        desired: dict[str, Any],
+        path: str,
+        evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Import-time access-group adoption.
+
+        Path is already linked. Discover live group via stat:
+          - if the live group is `dms-grp-*` → adopt it (pull members from LDAP).
+          - else → create `dms-grp-{directory_name}`, copy the live external
+            group's members into it, chown the path to the new gid.
+        """
+        if self.identity_groups is None:
+            return {"reason": "identity_groups_unavailable"}
+        directory_name = _directory_name(desired)
+        # 1. stat -> gid
+        stat_result = self._run(["stat", "-c", "%g", path], evidence, fail=False)
+        if stat_result.returncode != 0:
+            raise BackendPreconditionError(
+                f"GPFS import stat failed: {(stat_result.stderr or stat_result.stdout).strip()}"
+            )
+        try:
+            live_gid = int(stat_result.stdout.strip())
+        except ValueError as exc:
+            raise BackendPreconditionError(
+                f"GPFS import: could not parse live gid: {stat_result.stdout!r}"
+            ) from exc
+        # 2. live group name from getent (sssd / files)
+        getent_result = self._run(
+            ["getent", "group", str(live_gid)], evidence, fail=False
+        )
+        live_group_name: str | None = None
+        if getent_result.returncode == 0 and ":" in getent_result.stdout:
+            live_group_name = getent_result.stdout.split(":")[0]
+        # 3. fall back to LDAP gid lookup
+        if not live_group_name:
+            try:
+                live_group_name = self.identity_groups.lookup_group_name_by_gid(
+                    gid=live_gid
+                )
+            except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+                raise BackendPreconditionError(str(exc)) from exc
+            except AttributeError:
+                live_group_name = None
+        if not live_group_name:
+            raise BackendPreconditionError(
+                f"GPFS import: live group (gid={live_gid}) not found in NSS or LDAP"
+            )
+        is_dms_managed = live_group_name.startswith("dms-grp-")
+        # 4. members from LDAP
+        try:
+            live_members = self.identity_groups.list_group_members(
+                group_name=live_group_name
+            )
+        except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+            raise BackendPreconditionError(str(exc)) from exc
+        live_members = sorted(set(live_members or []))
+        if is_dms_managed:
+            # Adopt as-is
+            desired["access_group"] = live_group_name
+            desired["users"] = live_members
+            desired["access_group_gid"] = live_gid
+            return {
+                "live_group": live_group_name,
+                "live_gid": live_gid,
+                "adopted_members": live_members,
+                "changed_group": False,
+                "mode": "adopt_existing_dms_group",
+            }
+        # External group: create new dms-grp-, migrate members, chown
+        new_group_name = f"dms-grp-{directory_name}"
+        try:
+            new_group = self.identity_groups.ensure_group_members(
+                group_name=new_group_name,
+                users=live_members,
+                resource_key=plan["resource_key"],
+            )
+        except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+            raise BackendPreconditionError(str(exc)) from exc
+        new_gid = new_group.get("gid")
+        # SSSD cache refresh + chown to new gid
+        self._run(["sss_cache", "-E"], evidence, fail=False, side_effect=False)
+        if new_gid is not None:
+            self._run(["chown", f":{new_gid}", path], evidence, side_effect=True)
+        else:
+            self._run(["chgrp", new_group_name, path], evidence, side_effect=True)
+        desired["access_group"] = new_group_name
+        desired["users"] = live_members
+        if new_gid is not None:
+            desired["access_group_gid"] = int(new_gid)
+        return {
+            "live_group": live_group_name,
+            "live_gid": live_gid,
+            "new_group": new_group_name,
+            "new_gid": new_gid,
+            "adopted_members": live_members,
+            "changed_group": True,
+            "mode": "create_dms_group_from_external",
+        }
+
+    def _read_directory_attrs(
+        self,
+        path: str,
+        desired: dict[str, Any],
+        evidence: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        """`stat` 결과로 ownership(uid/gid)와 mode를 desired와 대조."""
+        result = self._run(["stat", "-c", "%u %g %a", path], evidence, fail=False)
+        ownership: dict[str, Any] = {}
+        permission: dict[str, Any] = {}
+        issues: list[dict[str, Any]] = []
+        if result.returncode != 0:
+            issues.append(
+                {
+                    "issue_type": "filesystem_directory_stat_failed",
+                    "field": "directory",
+                    "reason": (result.stderr or result.stdout).strip()[:200],
+                }
+            )
+            return ownership, permission, issues
+        parts = result.stdout.strip().split()
+        if len(parts) != 3:
+            issues.append(
+                {
+                    "issue_type": "filesystem_directory_stat_failed",
+                    "reason": "unexpected stat output",
+                }
+            )
+            return ownership, permission, issues
+        observed_uid, observed_gid, observed_mode_octal = parts
+        observed_mode = observed_mode_octal.zfill(4)
+        ownership = {
+            "observed_uid": int(observed_uid),
+            "observed_gid": int(observed_gid),
+        }
+        desired_uid = self._lookup_desired_uid(desired)
+        if desired_uid is not None:
+            ownership["desired_uid"] = desired_uid
+            if int(observed_uid) != int(desired_uid):
+                issues.append(
+                    {
+                        "issue_type": "filesystem_owner_drifted",
+                        "field": "ownership.uid",
+                        "desired": desired_uid,
+                        "observed": int(observed_uid),
+                    }
+                )
+        desired_gid = self._lookup_desired_gid(desired)
+        if desired_gid is not None:
+            ownership["desired_gid"] = desired_gid
+            if int(observed_gid) != int(desired_gid):
+                issues.append(
+                    {
+                        "issue_type": "filesystem_owner_drifted",
+                        "field": "ownership.gid",
+                        "desired": desired_gid,
+                        "observed": int(observed_gid),
+                    }
+                )
+        desired_mode = str(desired.get("mode") or "0750")
+        permission = {"observed_mode": observed_mode, "desired_mode": desired_mode}
+        if observed_mode != desired_mode:
+            issues.append(
+                {
+                    "issue_type": "filesystem_mode_drifted",
+                    "field": "permission.mode",
+                    "desired": desired_mode,
+                    "observed": observed_mode,
+                }
+            )
+        return ownership, permission, issues
+
+    def _read_group_membership(
+        self, desired: dict[str, Any], evidence: list[dict[str, Any]]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """desired_state.users 가 access_group LDAP 그룹에 모두 포함됐는지 확인."""
+        group_name = desired.get("access_group")
+        users = list(desired.get("users") or [])
+        if not group_name or not users:
+            return {}, []
+        if self.identity_groups is None:
+            return {"reason": "identity_groups_unavailable"}, []
+        try:
+            members = self.identity_groups.list_group_members(group_name=group_name)
+        except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+            return {"reason": str(exc)}, [
+                {
+                    "issue_type": "filesystem_group_membership_unverified",
+                    "field": "access_group.members",
+                    "reason": str(exc)[:200],
+                }
+            ]
+        except AttributeError:
+            return {"reason": "list_group_members_unsupported"}, []
+        member_set = set(members or [])
+        missing = sorted([u for u in users if u not in member_set])
+        state = {
+            "group_name": group_name,
+            "expected_members": sorted(users),
+            "observed_members": sorted(member_set),
+            "missing_members": missing,
+        }
+        issues: list[dict[str, Any]] = []
+        if missing:
+            issues.append(
+                {
+                    "issue_type": "filesystem_group_membership_drifted",
+                    "field": "access_group.members",
+                    "missing": missing,
+                }
+            )
+        return state, issues
+
+    def _lookup_desired_gid(self, desired: dict[str, Any]) -> int | None:
+        gid_hint = desired.get("access_group_gid")
+        if gid_hint is not None:
+            try:
+                return int(gid_hint)
+            except (TypeError, ValueError):
+                pass
+        group_name = desired.get("access_group")
+        if not group_name or self.identity_groups is None:
+            return None
+        try:
+            return self.identity_groups.lookup_group_gid(group_name=group_name)
+        except (IdentityLookupConfigurationError, IdentityLookupReadError):
+            return None
+        except AttributeError:
+            return None
+
+    def _lookup_desired_uid(self, desired: dict[str, Any]) -> int | None:
+        if self.identity_lookup is None:
+            return None
+        username = desired.get("owner_username") or desired.get("requester_id")
+        if not username:
+            return None
+        try:
+            result = self.identity_lookup.lookup("ldap", str(username))
+        except (IdentityLookupConfigurationError, IdentityLookupReadError):
+            return None
+        if not result or result.uid is None:
+            return None
+        return int(result.uid)
+
+    def _resolve_owner_uid(
+        self, plan: dict[str, Any], desired: dict[str, Any]
+    ) -> int | None:
+        """LDAP에서 directory owner의 uidNumber를 조회한다.
+
+        우선순위: desired.owner_username -> desired.requester_id -> plan.requester_id.
+        조회 실패/미설정이면 None 반환 (호출자가 group-only chown으로 fallback).
+        """
+        if self.identity_lookup is None:
+            return None
+        username = (
+            desired.get("owner_username")
+            or desired.get("requester_id")
+            or (plan.get("desired_state") or {}).get("requester_id")
+        )
+        if not username:
+            return None
+        try:
+            result = self.identity_lookup.lookup("ldap", str(username))
+        except (IdentityLookupConfigurationError, IdentityLookupReadError):
+            return None
+        if not result or result.uid is None:
+            return None
+        return int(result.uid)
+
+    def _capability(
+        self, evidence: list[dict[str, Any]], *, require_quota: bool
+    ) -> dict[str, Any]:
+        # Check all required commands in a single SSH call
+        cmds = [
             "mmcrfileset",
             "mmlinkfileset",
             "mmlsfileset",
@@ -471,22 +985,46 @@ class GpfsFilesystemBackendAdapter:
             "mmlsquota",
             "mmunlinkfileset",
             "mmdelfileset",
-        ):
-            result = self._run(["sh", "-c", f"command -v {command}"], evidence, fail=False)
-            if result.returncode != 0:
-                raise BackendPreconditionError(f"GPFS command missing: {command}")
+        ]
+        check_script = " && ".join(
+            f"command -v {c} >/dev/null 2>&1 || echo MISSING:{c}" for c in cmds
+        )
+        result = self._run(["sh", "-c", check_script], evidence, fail=False)
+        for line in result.stdout.splitlines():
+            if line.startswith("MISSING:"):
+                raise BackendPreconditionError(
+                    f"GPFS command missing: {line[len('MISSING:'):]}"
+                )
         if require_quota:
-            quota = self._run(["mmlsfs", self.template.filesystem_name, "-Q", "-Y"], evidence)
-            quota_rows = parse_gpfs_y(quota.stdout)
-            if not _rows_contain_enabled(quota_rows):
-                raise BackendPreconditionError("GPFS filesystem quota disabled or unknown")
-            perfileset = self._run(
-                ["mmlsfs", self.template.filesystem_name, "--perfileset-quota", "-Y"],
+            # Single SSH call to get both quota and perfileset-quota status
+            combined = self._run(
+                [
+                    "mmlsfs",
+                    self.template.filesystem_name,
+                    "-Q",
+                    "--perfileset-quota",
+                    "-Y",
+                ],
                 evidence,
             )
-            perfileset_rows = parse_gpfs_y(perfileset.stdout)
-            if not _rows_contain_enabled(perfileset_rows):
-                raise BackendPreconditionError("GPFS per-fileset quota disabled or unknown")
+            rows = parse_gpfs_y(combined.stdout)
+            quota_rows = [
+                r
+                for r in rows
+                if "quota" in r.get("fieldName", "").lower()
+                and "perfileset" not in r.get("fieldName", "").lower()
+            ]
+            if not _rows_contain_enabled(quota_rows):
+                raise BackendPreconditionError(
+                    "GPFS filesystem quota disabled or unknown"
+                )
+            perfileset_rows = [
+                r for r in rows if r.get("fieldName") == "perfilesetQuotas"
+            ]
+            if not perfileset_rows or not _rows_contain_enabled(perfileset_rows):
+                raise BackendPreconditionError(
+                    "GPFS per-fileset quota disabled or unknown"
+                )
         return {
             "backend_type": GPFS_BACKEND_TYPE,
             "quota_backend": GPFS_QUOTA_BACKEND,
@@ -501,7 +1039,7 @@ class GpfsFilesystemBackendAdapter:
             "supports_permission_mode": True,
             "supports_marker": True,
             "filesystem_name": self.template.filesystem_name,
-            "fileset_root": self.template.fileset_root,
+            "managed_root": self.template.managed_root,
         }
 
     def _apply_quota(
@@ -518,7 +1056,9 @@ class GpfsFilesystemBackendAdapter:
         if rendered.get("files_limit"):
             argv.extend(["--files", rendered["files_limit"]])
         self._run(argv, evidence, side_effect=True)
-        quota_state = self._read_quota(fileset_name, junction_path, quota, evidence, rendered=rendered)
+        quota_state = self._read_quota(
+            fileset_name, junction_path, quota, evidence, rendered=rendered
+        )
         issue = _quota_readback_issue(quota, quota_state)
         if issue:
             raise GpfsSideEffectError(issue)
@@ -534,12 +1074,23 @@ class GpfsFilesystemBackendAdapter:
         rendered: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result = self._run(
-            ["mmlsquota", "-j", fileset_name, "-v", "-Y", self.template.filesystem_name],
+            [
+                "mmlsquota",
+                "-j",
+                fileset_name,
+                "-v",
+                "-Y",
+                self.template.filesystem_name,
+            ],
             evidence,
         )
         row = _select_quota_row(parse_gpfs_y(result.stdout), fileset_name)
-        observed_bytes = _quota_kb_to_bytes(_first_int(row, ("blockLimit", "block_limit", "limit", "BlockLimit")))
-        observed_files = _first_int(row, ("filesLimit", "files_limit", "fileLimit", "FilesLimit"))
+        observed_bytes = _quota_kb_to_bytes(
+            _first_int(row, ("blockLimit", "block_limit", "limit", "BlockLimit"))
+        )
+        observed_files = _first_int(
+            row, ("filesLimit", "files_limit", "fileLimit", "FilesLimit")
+        )
         rendered = rendered or self.quota_strategy.render_quota(desired_quota)
         state = {
             "backend_type": GPFS_BACKEND_TYPE,
@@ -568,7 +1119,9 @@ class GpfsFilesystemBackendAdapter:
                 ),
             },
         }
-        used_bytes = _quota_kb_to_bytes(_first_int(row, ("blockUsage", "usage", "KB", "kb")))
+        used_bytes = _quota_kb_to_bytes(
+            _first_int(row, ("blockUsage", "usage", "KB", "kb"))
+        )
         used_files = _first_int(row, ("filesUsage", "files", "fileUsage"))
         if used_bytes is not None or used_files is not None:
             state["usage_evidence"] = {
@@ -599,7 +1152,14 @@ class GpfsFilesystemBackendAdapter:
         self, junction_path: str, evidence: list[dict[str, Any]]
     ) -> dict[str, Any]:
         result = self._run(
-            ["mmlsfileset", self.template.filesystem_name, "-J", junction_path, "-L", "-Y"],
+            [
+                "mmlsfileset",
+                self.template.filesystem_name,
+                "-J",
+                junction_path,
+                "-L",
+                "-Y",
+            ],
             evidence,
         )
         state = _fileset_state_from_rows(parse_gpfs_y(result.stdout), None)
@@ -621,7 +1181,17 @@ class GpfsFilesystemBackendAdapter:
             "os.makedirs(path, exist_ok=True); "
             "open(os.path.join(path, '.dms-resource.json'), 'w', encoding='utf-8').write(json.dumps(marker, sort_keys=True))"
         )
-        self._run(["python3", "-c", script, junction_path, json.dumps(marker, sort_keys=True)], evidence, side_effect=side_effect)
+        self._run(
+            [
+                "python3",
+                "-c",
+                script,
+                junction_path,
+                json.dumps(marker, sort_keys=True),
+            ],
+            evidence,
+            side_effect=side_effect,
+        )
 
     def _run(
         self,
@@ -632,10 +1202,14 @@ class GpfsFilesystemBackendAdapter:
         side_effect: bool = False,
     ) -> CommandResult:
         executor = self.executor or self.template.executor()
-        result = executor.run(argv, timeout_seconds=self.template.command_timeout_seconds)
+        result = executor.run(
+            argv, timeout_seconds=self.template.command_timeout_seconds
+        )
         evidence.append(_command_evidence(result, side_effect=side_effect))
         if fail and result.returncode != 0:
-            message = result.stderr.strip() or result.stdout.strip() or "GPFS command failed"
+            message = (
+                result.stderr.strip() or result.stdout.strip() or "GPFS command failed"
+            )
             raise BackendPreconditionError(message)
         return result
 
@@ -650,21 +1224,24 @@ class GpfsFilesystemBackendAdapter:
 
     def _junction_path(self, directory_name: str) -> str:
         if self.template.quota_scope != "fileset":
-            raise BackendPreconditionError("GPFS filesystem operations require fileset quota_scope")
+            raise BackendPreconditionError(
+                "GPFS filesystem operations require fileset quota_scope"
+            )
         if not self.template.filesystem_name:
             raise BackendPreconditionError("GPFS filesystem_name is required")
         if not self.template.mount_path:
             raise BackendPreconditionError("GPFS mount_path is required")
-        if not self.template.fileset_root:
-            raise BackendPreconditionError("GPFS fileset_root is required")
+        if not self.template.managed_root:
+            raise BackendPreconditionError("GPFS managed_root is required")
         mount_path = os.path.normpath(self.template.mount_path)
-        root = os.path.normpath(self.template.fileset_root)
+        root = os.path.normpath(self.template.managed_root)
         if os.path.commonpath([mount_path, root]) != mount_path:
-            raise BackendPreconditionError("GPFS fileset_root must be under mount_path")
+            raise BackendPreconditionError("GPFS managed_root must be under mount_path")
         path = os.path.normpath(os.path.join(root, directory_name))
         if os.path.commonpath([root, path]) != root:
-            raise BackendPreconditionError("GPFS junction path escaped fileset root")
+            raise BackendPreconditionError("GPFS junction path escaped managed_root")
         return path
+
 
 @dataclass(frozen=True)
 class GpfsDataManagementAdapter:
@@ -685,7 +1262,11 @@ class GpfsDataManagementAdapter:
 
 
 def render_gpfs_block_limit(capacity_bytes: int) -> str:
-    kib = max(1, math.ceil(capacity_bytes / 1024))
+    # GPFS rounds block quotas up to 8 MiB (8192 KiB) boundaries internally.
+    # Pre-align to avoid read-back mismatch after mmsetquota.
+    _8mib_kib = 8 * 1024
+    kib = max(_8mib_kib, math.ceil(capacity_bytes / 1024))
+    kib = math.ceil(kib / _8mib_kib) * _8mib_kib
     return f"{kib}K:{kib}K"
 
 
@@ -763,9 +1344,7 @@ def _rows_contain_enabled(rows: list[dict[str, str]]) -> bool:
     )
     for row in rows:
         values = [
-            row[field].strip().lower()
-            for field in enabled_fields
-            if row.get(field)
+            row[field].strip().lower() for field in enabled_fields if row.get(field)
         ]
         if any(value and value not in disabled for value in values):
             return True
@@ -783,7 +1362,9 @@ def _fileset_state_from_rows(
         "exists": True,
         "fileset_name": name,
         "status": _first_str(row, ("status", "Status")),
-        "junction_path": _first_str(row, ("path", "Path", "junctionPath", "JunctionPath")),
+        "junction_path": _first_str(
+            row, ("path", "Path", "junctionPath", "JunctionPath")
+        ),
         "inode_space": _first_str(row, ("inodeSpace", "InodeSpace")),
         "raw": row,
     }
@@ -804,7 +1385,10 @@ def _select_fileset_row(
 
 def _select_quota_row(rows: list[dict[str, str]], fileset_name: str) -> dict[str, str]:
     for row in rows:
-        if _first_str(row, ("filesetName", "fileset", "objectName", "name")) == fileset_name:
+        if (
+            _first_str(row, ("filesetName", "fileset", "objectName", "name"))
+            == fileset_name
+        ):
             return row
     return rows[0] if rows else {}
 
@@ -863,14 +1447,22 @@ def _quota_check_issues(
     return issues
 
 
+QUOTA_CAPACITY_TOLERANCE_BYTES = 100 * 1024 * 1024
+
+
 def _quota_readback_issue(
     desired_quota: dict[str, Any], quota_state: dict[str, Any]
 ) -> str | None:
     desired_bytes = desired_quota.get("capacity_bytes")
     observed_bytes = (quota_state.get("capacity") or {}).get("observed_bytes")
     if desired_bytes is not None and observed_bytes is not None:
-        rounded = math.ceil(int(desired_bytes) / 1024) * 1024
-        if int(observed_bytes) != rounded:
+        # GPFS rounds block quota up to 8 MiB; compare against the rounded value
+        # and tolerate up to QUOTA_CAPACITY_TOLERANCE_BYTES extra (observed must
+        # not be below desired — that would mean the quota under-applied).
+        _8mib = 8 * 1024 * 1024
+        rounded = math.ceil(int(desired_bytes) / _8mib) * _8mib
+        diff = int(observed_bytes) - rounded
+        if diff < 0 or diff > QUOTA_CAPACITY_TOLERANCE_BYTES:
             return "GPFS quota capacity read-back mismatch"
     desired_files = desired_quota.get("file_count")
     observed_files = (quota_state.get("file_count") or {}).get("observed_count")

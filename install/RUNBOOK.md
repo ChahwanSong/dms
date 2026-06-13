@@ -121,21 +121,186 @@ API direct access가 열려 있으면 mTLS evidence header spoofing 위험이 �
 kubectl --context dms-control -n dms get networkpolicy dms-api-from-ingress-only -o yaml
 ```
 
-## Storage Mapping Readiness
+## Storage Mapping 관리
 
-요청이 `storage_mapping_sanity`로 거절되면 mapping state를 확인한다.
+### 조회
 
-```bash
-curl_dms "$DMS_API_URL/api/v1/operations/storage-mappings" \
-  -H "authorization: Bearer $DMS_TOKEN"
-```
-
-Mapping 하나를 refresh한다.
+전체 목록:
 
 ```bash
-curl_dms -X POST "$DMS_API_URL/api/v1/resource-management/storage-mappings/<storage_name>:check" \
-  -H "authorization: Bearer $DMS_TOKEN"
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+curl -sS "${DMS_CURL_OPTS[@]}" "$DMS_API_URL/api/v1/operations/storage-mappings" | jq '.[].storage_name'
 ```
+
+클러스터별 필터:
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  "$DMS_API_URL/api/v1/operations/storage-mappings?cluster_name=pvs-dms" | jq '.[].storage_name'
+```
+
+단건 조회:
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  "$DMS_API_URL/api/v1/operations/storage-mappings/cephfs-pvs-dms" \
+  | jq '{storage_name, sanity_status, readiness}'
+```
+
+### 등록 (POST)
+
+`ssh_host`를 생략하면 agent 보고 기반 `rm_candidates` 중 Ready 노드가 자동 선택된다.
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X POST -H "content-type: application/json" \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings" \
+  -d '{
+    "storage_name": "cephfs-pvs-dms",
+    "backend_template": {
+      "backend_type": "cephfs",
+      "cluster_name": "pvs-dms",
+      "mount_path": "/mgmt_storage",
+      "managed_root": "/mgmt_storage/root",
+      "rm_worker_nodes": ["ion2401","ion2402","ion2403","ion2404","ion2405","ion2406"]
+    },
+    "cluster_name": "pvs-dms",
+    "storage_class_name": "rook-cephfs"
+  }' | jq '{storage_name, status}'
+```
+
+`ssh_host`를 고정하고 싶다면 `backend_template`에 명시한다:
+
+```json
+"ssh_host": "ion2401"
+```
+
+이미 존재하면 upsert(덮어쓰기)로 동작한다.
+
+**`ssh_host` 자동 선택 우선순위:**
+
+1. `ssh_host` 명시 → 해당 노드 사용
+2. 생략 시 → `sanity_result.agent_observed.rm_candidates` 중 `status: Ready` 첫 번째 노드
+3. rm_candidates 없음(최초 등록 직후 등) → `rm_worker_nodes[0]` fallback
+
+**Backend별 등록 예시:**
+
+CephFS:
+```json
+{"backend_type":"cephfs","cluster_name":"pvs-dms","mount_path":"/mgmt_storage",
+ "managed_root":"/mgmt_storage/root","csi_driver":"rook-ceph.cephfs.csi.ceph.com"}
+```
+
+GPFS:
+```json
+{"backend_type":"gpfs","cluster_name":"pvs-dms","filesystem_name":"pvs",
+ "mount_path":"/pvs","fileset_root":"/pvs/dms"}
+```
+
+WekaFS (CSI 미설치 환경에서는 csi_driver 생략):
+```json
+{"backend_type":"wekafs","cluster_name":"pvs-dms","filesystem_name":"pvs_weka",
+ "mount_path":"/pvs_weka","managed_root":"/pvs_weka/dms",
+ "rm_worker_nodes":["ion2402","ion2403"]}
+```
+
+**WekaFS 운영 주의:**
+- `weka fs quota set/list/reset` CLI는 cluster 인증 필요. RM worker가 ssh로 접속할 호스트에서 `weka user login` 또는 `WEKA_USERNAME`/`WEKA_PASSWORD`/`WEKA_ORG` 환경변수를 사전에 설정해야 quota 작업이 가능.
+- WEKA path quota는 capacity_bytes만 지원. `file_count`(inode quota)는 backend가 명시적으로 거절.
+- quota 작업이 필요하면 `weka_profile`로 별도 프로파일 지정 가능.
+
+### 수정 (PATCH)
+
+backend_template 또는 cluster_name/storage_class_name 변경 시:
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X PATCH -H "content-type: application/json" \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-pvs-dms" \
+  -d '{
+    "storage_name": "cephfs-pvs-dms",
+    "backend_template": { ... },
+    "cluster_name": "pvs-dms",
+    "storage_class_name": "rook-cephfs"
+  }' | jq '{storage_name, status}'
+```
+
+- body의 `storage_name`은 path와 반드시 일치해야 함 (불일치 시 400)
+- 진행 중인 request/data_job이 있으면 409 반환
+
+### 삭제 (DELETE)
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X DELETE \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-pvs-dms" \
+  | jq '{storage_name, deleted}'
+```
+
+- 존재하지 않으면 404
+- 진행 중인 작업이 있으면 409
+
+### Sanity check (수동 재실행)
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X POST \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-pvs-dms:check" \
+  | jq '{storage_name, status}'
+```
+
+### Agent ConfigMap 자동 동기화
+
+`dms:7585e7e` 이후부터 POST/PATCH/DELETE 시 `dms-agent-storages` ConfigMap이 자동으로 동기화된다.
+수동 편집 불필요. 동기화 후 Agent는 재시작해야 새 설정을 반영한다.
+
+ConfigMap 내용 확인:
+
+```bash
+ssh ion2401 "kubectl -n dms get configmap dms-agent-storages -o jsonpath='{.data.storages\.json}'" | jq '.storages[].storage_name'
+```
+
+변경 후 Agent rollout:
+
+```bash
+ssh ion2401 "kubectl -n dms rollout restart daemonset/dms-rm-agent && \
+  kubectl -n dms rollout status daemonset/dms-rm-agent --timeout=120s"
+```
+
+RBAC이 없는 경우(403 에러) 다음을 적용한다:
+
+```bash
+ssh ion2401 "kubectl -n dms apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dms-agent-storages-configmap
+  namespace: dms
+rules:
+- apiGroups: [\"\"]
+  resources: [\"configmaps\"]
+  resourceNames: [\"dms-agent-storages\"]
+  verbs: [\"get\", \"patch\", \"update\"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dms-remote-agent-storages-configmap
+  namespace: dms
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dms-agent-storages-configmap
+subjects:
+- kind: ServiceAccount
+  name: dms-remote
+  namespace: dms
+EOF"
+```
+
+### Readiness 문제 진단
+
+요청이 `storage_mapping_sanity`로 거절되면:
 
 흔한 원인:
 
@@ -143,23 +308,11 @@ curl_dms -X POST "$DMS_API_URL/api/v1/resource-management/storage-mappings/<stor
 - `DMS_AGENT_CLUSTER_NAME`이 storage mapping의 `cluster_name`과 일치하지 않는다.
 - `storage_class_name` 또는 `csi_driver`가 live StorageClass와 일치하지 않는다.
 - Agent report가 stale 상태다. `DMS_AGENT_REPORT_STALE_SECONDS`를 확인한다.
-- Kubernetes inventory mode가 target cluster를 읽을 수 없다.
 
-Mapping check를 수동으로 다시 실행한다.
-
-```bash
-curl_dms -X POST "$DMS_API_URL/api/v1/resource-management/storage-mappings/<storage_name>:check" \
-  -H "authorization: Bearer $DMS_TOKEN"
-```
-
-Agent report freshness도 같이 확인한다.
+Agent report freshness 확인:
 
 ```bash
-curl_dms "$DMS_API_URL/api/v1/operations/agent-reports" \
-  -H "authorization: Bearer $DMS_TOKEN"
-
-curl_dms "$DMS_API_URL/api/v1/operations/worker-agent-health" \
-  -H "authorization: Bearer $DMS_TOKEN"
+curl -sS "${DMS_CURL_OPTS[@]}" "$DMS_API_URL/api/v1/operations/agent-reports" | jq '.[0] | {node_name, freshness, updated_at}'
 ```
 
 ## Kubernetes Namespace Quota Incident
@@ -336,6 +489,106 @@ curl_dms -X POST "$DMS_API_URL/api/v1/data-management/jobs/<job_id>:confirm" \
 `PreviewExpired`가 되면 같은 job을 재사용하지 말고 새 request를 제출한다.
 `sync`/`rm`이 `Failed`, `TimedOut`, partial mutation risk action-required로 닫히면
 artifact와 live filesystem 상태를 확인한 뒤 새 request로 재시도한다.
+
+## Identity Mapping
+
+### 조회
+
+단일 사용자의 mapping 상태와 groups를 확인한다.
+
+```bash
+curl_dms "$DMS_API_URL/api/v1/identity-mappings?requester_id=<username>" \
+  -H "authorization: Bearer $DMS_TOKEN" | jq '.[0] | {uid,gid,groups,status,ldap_lookup_at}'
+```
+
+상태별 필터링:
+
+```bash
+# Active 전체 (최근 100건)
+curl_dms "$DMS_API_URL/api/v1/identity-mappings?status=Active" \
+  -H "authorization: Bearer $DMS_TOKEN"
+
+# Stale/failed 항목
+curl_dms "$DMS_API_URL/api/v1/identity-mappings?failed=true" \
+  -H "authorization: Bearer $DMS_TOKEN"
+```
+
+DNS 미설정 서버 또는 프록시 환경에서는 `/mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh`를 사용한다.
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+curl -sS "${DMS_CURL_OPTS[@]}" "$DMS_API_URL/api/v1/identity-mappings?requester_id=cocoa.song" | jq
+```
+
+`DMS_CURL_OPTS` 배열은 `--resolve`, `--noproxy`, mTLS 인증서, Bearer token, `x-dms-actor` 헤더를 포함한다.
+
+### LDAP 전체 동기화 (sync-all)
+
+DB의 모든 identity mapping에 대해 LDAP에서 uid/gid/groups를 일괄 재조회하여 갱신한다.
+Disabled 상태인 mapping은 건너뛴다.
+
+**dry-run (실제 DB 변경 없음):**
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X POST \
+  "$DMS_API_URL/api/v1/identity-mappings/sync-all?identity_provider=ldap&dry_run=true" | jq
+```
+
+응답 예시:
+
+```json
+{
+  "synced": 11158,
+  "not_found": 0,
+  "errors": 0,
+  "updated": 0,
+  "dry_run": true,
+  "elapsed_seconds": 3.55,
+  "total": 11158
+}
+```
+
+**실제 실행:**
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X POST \
+  "$DMS_API_URL/api/v1/identity-mappings/sync-all?identity_provider=ldap" | jq
+```
+
+`not_found`가 0이 아니면 해당 username 목록이 `not_found_usernames` 필드에 반환된다.
+LDAP에서 찾을 수 없는 사용자는 `Stale` 상태로 표시된다.
+
+**성능:** LDAP 연결 1개로 전체 그룹을 bulk fetch한 뒤 user 쿼리를 200명 배치 × 8 threads 병렬로 실행한다. ~11,000명 기준 4초 내외.
+
+### 단일 사용자 refresh
+
+LDAP를 재조회해 drift 감지(uid/gid/groups 변경 여부)만 수행한다. groups가 변경됐으면 `Stale`로 표시하며, 실제 DB 업데이트는 하지 않는다. 업데이트까지 하려면 `sync-all`을 사용한다.
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X POST \
+  "$DMS_API_URL/api/v1/identity-mappings/ldap/<username>:refresh" | jq
+```
+
+### 신규/갱신 등록
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X PUT \
+  -H "content-type: application/json" \
+  "$DMS_API_URL/api/v1/identity-mappings/ldap/<username>" \
+  --data '{
+    "requester_id": "<username>",
+    "identity_provider": "ldap",
+    "posix_username": "<linux_account>"
+  }' | jq
+```
 
 ## Expiry 처리
 

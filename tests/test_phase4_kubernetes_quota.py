@@ -18,7 +18,6 @@ from dms.planner import Planner
 from dms.repositories import DmsRepository, ObservabilityRepository
 from dms.workers import RMWorkerRuntime
 
-
 LONGHORN_STORAGE_NAME = "longhorn-b"
 LONGHORN_STORAGE_CLASS = "testbed-longhorn"
 
@@ -119,8 +118,10 @@ def test_planner_derives_storage_class_and_resource_quota_hard(repository_pair):
         "persistentvolumeclaims": "2",
         "testbed-longhorn.storageclass.storage.k8s.io/requests.storage": "128Mi",
     }
-    assert plan["execution_metadata"]["planner"] == "phase4"
-    assert plan["execution_metadata"]["kubernetes_backend"]["cluster_name"] == "cluster-b"
+    assert plan["execution_metadata"]["planner"] == "k8s-quota-create"
+    assert (
+        plan["execution_metadata"]["kubernetes_backend"]["cluster_name"] == "cluster-b"
+    )
 
 
 def test_rm_worker_persists_resourcequota_observed_state(repository_pair):
@@ -144,14 +145,18 @@ def test_rm_worker_persists_resourcequota_observed_state(repository_pair):
     [resource] = repository.list_resources()
     assert resource["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value
     assert resource["observed_state"]["resource_quota"]["uid"] == "rq-test-uid"
-    assert resource["observed_state"]["resource_quota"]["status_hard"][
-        "requests.storage"
-    ] == "128Mi"
+    assert (
+        resource["observed_state"]["resource_quota"]["status_hard"]["requests.storage"]
+        == "128Mi"
+    )
     [result] = repository.get_results(request_id)
     assert result["terminal_status"] == LifecycleState.SUCCEEDED.value
-    assert result["verification_summary"]["resource_quota"]["spec_hard"][
-        "persistentvolumeclaims"
-    ] == "2"
+    assert (
+        result["verification_summary"]["resource_quota"]["spec_hard"][
+            "persistentvolumeclaims"
+        ]
+        == "2"
+    )
     event_types = {event["event_type"] for event in observability.list_events()}
     assert "kubernetes_resourcequota_apply_started" in event_types
     assert "kubernetes_resourcequota_apply_completed" in event_types
@@ -191,7 +196,7 @@ def test_planner_accepts_multiple_storage_class_quotas(repository_pair):
 
     plan = repository.get_plan_by_request(request_id)
     assert plan is not None
-    assert plan["execution_metadata"]["planner"] == "phase6"
+    assert plan["execution_metadata"]["planner"] == "k8s-multi-storage-quota"
     assert plan["desired_state"]["resource_quota_hard"] == {
         "requests.storage": "128Mi",
         "persistentvolumeclaims": "2",

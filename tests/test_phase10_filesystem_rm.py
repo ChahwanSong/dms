@@ -37,10 +37,10 @@ def test_phase10_filesystem_create_plans_access_group_and_no_quota(tmp_path):
 
     plan = repository.get_plan_by_request(request_id)
     assert plan is not None
-    assert plan["desired_state"]["access_group"] == "dms-phase10-project-alpha"
-    assert plan["desired_state"]["mode"] == "0770"
+    assert plan["desired_state"]["access_group"] == "dms-grp-project-alpha"
+    assert plan["desired_state"]["mode"] == "0750"
     assert "quota" not in plan["desired_state"]
-    assert plan["execution_metadata"]["planner"] == "phase10"
+    assert plan["execution_metadata"]["planner"] == "filesystem"
 
 
 def test_phase12_filesystem_create_plans_quota_payload(tmp_path):
@@ -65,10 +65,31 @@ def test_phase12_filesystem_create_plans_quota_payload(tmp_path):
         "capacity_bytes": 1024,
         "file_count": 100,
     }
-    assert plan["execution_metadata"]["planner"] == "phase12"
+    assert plan["execution_metadata"]["planner"] == "filesystem-quota"
 
 
-def test_phase10_filesystem_create_requires_two_unique_users(tmp_path):
+def test_filesystem_create_requires_at_least_one_user(tmp_path):
+    repository, _ = repository_pair(tmp_path)
+    register_cephfs_mapping(repository)
+    request_id = create_filesystem_request(
+        repository,
+        OperationKind.FILESYSTEM_CREATE,
+        payload={
+            "storage_name": "cephfs-a",
+            "directory_name": "project-alpha",
+            "users": [],
+        },
+    )
+
+    Planner(repository).run_once()
+
+    [result] = repository.get_results(request_id)
+    assert {issue["reason"] for issue in result["verification_summary"]["issues"]} == {
+        "filesystem_users_minimum_one_required"
+    }
+
+
+def test_filesystem_create_with_single_user_succeeds(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_filesystem_request(
@@ -81,12 +102,11 @@ def test_phase10_filesystem_create_requires_two_unique_users(tmp_path):
         },
     )
 
-    Planner(repository).run_once()
+    assert Planner(repository).run_once() == 1
 
-    [result] = repository.get_results(request_id)
-    assert {
-        issue["reason"] for issue in result["verification_summary"]["issues"]
-    } == {"filesystem_users_minimum_two_required"}
+    plan = repository.get_plan_by_request(request_id)
+    assert plan is not None
+    assert plan["desired_state"]["users"] == ["alice"]
 
 
 def test_phase10_filesystem_create_rejects_existing_resource(tmp_path):
@@ -143,11 +163,9 @@ def test_phase12_filesystem_update_requires_existing_quota_only_payload(tmp_path
 
     [result] = repository.get_results(request_id)
     assert result["terminal_status"] == LifecycleState.REJECTED.value
-    assert {
-        issue["reason"] for issue in result["verification_summary"]["issues"]
-    } == {
+    assert {issue["reason"] for issue in result["verification_summary"]["issues"]} == {
         "expires_at_required",
-        "filesystem_payload_fields_unsupported_phase12",
+        "filesystem_payload_fields_unsupported",
         "filesystem_resource_missing",
         "filesystem_update_payload_empty",
     }
@@ -163,7 +181,7 @@ def test_phase10_filesystem_delete_reuses_existing_desired_state(tmp_path):
             "storage_name": "cephfs-a",
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
-            "access_group": "dms-phase10-project-alpha",
+            "access_group": "dms-grp-project-alpha",
         },
         applied_state={},
         observed_state={},
@@ -183,7 +201,7 @@ def test_phase10_filesystem_delete_reuses_existing_desired_state(tmp_path):
 
     plan = repository.get_plan_by_request(request_id)
     assert plan is not None
-    assert plan["desired_state"]["access_group"] == "dms-phase10-project-alpha"
+    assert plan["desired_state"]["access_group"] == "dms-grp-project-alpha"
     assert plan["desired_state"]["users"] == ["alice", "bob"]
     assert plan["desired_state"]["reason"] == "cleanup"
 
@@ -209,7 +227,7 @@ def test_phase10_cephfs_adapter_creates_group_then_host_directory():
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
             "validation_denied_users": ["mallory"],
-            "access_group": "dms-phase10-project-alpha",
+            "access_group": "dms-grp-project-alpha",
         },
     )
 
@@ -221,10 +239,12 @@ def test_phase10_cephfs_adapter_creates_group_then_host_directory():
         "denied_users": {"mallory": "denied"},
     }
     assert executor.calls[0]["operation"] == "create"
-    assert executor.calls[0]["group_name"] == "dms-phase10-project-alpha"
+    assert executor.calls[0]["group_name"] == "dms-grp-project-alpha"
 
 
-def test_phase10_worker_records_missing_ldap_user_before_filesystem_side_effect(tmp_path):
+def test_phase10_worker_records_missing_ldap_user_before_filesystem_side_effect(
+    tmp_path,
+):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_filesystem_request(

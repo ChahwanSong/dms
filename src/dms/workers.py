@@ -28,7 +28,12 @@ from .domain import (
     ResourceKind,
     WorkerRole,
 )
-from .repositories import DmsRepository, ObservabilityRepository, SchedulingBlocked, iso_at
+from .repositories import (
+    DmsRepository,
+    ObservabilityRepository,
+    SchedulingBlocked,
+    iso_at,
+)
 
 
 class RunHeartbeat:
@@ -75,7 +80,9 @@ class RunHeartbeat:
         while not self._stop.wait(self.interval_seconds):
             try:
                 self.repository.heartbeat_run(self.run_id, self.lease_seconds)
-            except Exception as exc:  # noqa: BLE001 - heartbeat must not fail backend work.
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - heartbeat must not fail backend work.
                 self.observability.safe_record_event(
                     component="worker-heartbeat",
                     severity="WARN",
@@ -157,9 +164,15 @@ class RMWorkerRuntime:
             )
             resource_status = adapter_result.observed_state.get(
                 "resource_status",
-                "Deleted"
-                if plan["operation_kind"] == OperationKind.K8S_QUOTA_DELETE.value
-                else LifecycleState.SUCCEEDED.value,
+                (
+                    "Deleted"
+                    if plan["operation_kind"]
+                    in {
+                        OperationKind.K8S_QUOTA_DELETE.value,
+                        OperationKind.FILESYSTEM_DELETE.value,
+                    }
+                    else LifecycleState.SUCCEEDED.value
+                ),
             )
             if plan["operation_kind"] not in {
                 OperationKind.K8S_QUOTA_AUDIT.value,
@@ -205,7 +218,9 @@ class RMWorkerRuntime:
                 correlation_id=plan["request_id"],
             )
         except BackendPreconditionError as exc:
-            precondition_issue = _rm_precondition_issue(plan["operation_kind"], str(exc))
+            precondition_issue = _rm_precondition_issue(
+                plan["operation_kind"], str(exc)
+            )
             self.repository.complete_result(
                 request_id=plan["request_id"],
                 plan_id=plan["plan_id"],
@@ -326,12 +341,16 @@ class RMWorkerRuntime:
                 results.append(target_result)
                 continue
             if dry_run:
-                target_result.update({"result": "would_block", "backend_side_effect": False})
+                target_result.update(
+                    {"result": "would_block", "backend_side_effect": False}
+                )
                 results.append(target_result)
                 continue
             try:
                 block_result = self._block_filesystem_sweep_target(plan, target)
-            except Exception as exc:  # noqa: BLE001 - sweep keeps per-target failure evidence.
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - sweep keeps per-target failure evidence.
                 target_result.update(
                     {
                         "result": "failed",
@@ -377,9 +396,9 @@ class RMWorkerRuntime:
         if resource_type in {"system", "admin"}:
             return "resource_type_not_auto_blocked"
         block_state = target.get("block_state") or {}
-        if target.get("resource_status") == LifecycleState.BLOCKED.value or block_state.get(
-            "blocked"
-        ):
+        if target.get(
+            "resource_status"
+        ) == LifecycleState.BLOCKED.value or block_state.get("blocked"):
             return "already_blocked"
         storage_name = target.get("storage_name")
         if not storage_name:
@@ -431,7 +450,9 @@ class RMWorkerRuntime:
             desired_state=result.applied_state.get("synced_desired_state", desired),
             applied_state=result.applied_state,
             observed_state=result.observed_state,
-            status=result.observed_state.get("resource_status", LifecycleState.BLOCKED.value),
+            status=result.observed_state.get(
+                "resource_status", LifecycleState.BLOCKED.value
+            ),
         )
         return result
 
@@ -452,12 +473,16 @@ class RMWorkerRuntime:
                 results.append(target_result)
                 continue
             if dry_run:
-                target_result.update({"result": "would_block", "backend_side_effect": False})
+                target_result.update(
+                    {"result": "would_block", "backend_side_effect": False}
+                )
                 results.append(target_result)
                 continue
             try:
                 block_result = self._block_kubernetes_sweep_target(plan, target)
-            except Exception as exc:  # noqa: BLE001 - sweep keeps per-target failure evidence.
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - sweep keeps per-target failure evidence.
                 target_result.update(
                     {
                         "result": "failed",
@@ -503,13 +528,15 @@ class RMWorkerRuntime:
         if resource_type in {"system", "admin"}:
             return "resource_type_not_auto_blocked"
         block_state = target.get("block_state") or {}
-        if target.get("resource_status") == LifecycleState.BLOCKED.value or block_state.get(
-            "blocked"
-        ):
+        if target.get(
+            "resource_status"
+        ) == LifecycleState.BLOCKED.value or block_state.get("blocked"):
             return "already_blocked"
         desired = target.get("desired_state") or {}
         for entry in desired.get("storage_class_quotas") or []:
-            storage_name = entry.get("storage_name") if isinstance(entry, dict) else None
+            storage_name = (
+                entry.get("storage_name") if isinstance(entry, dict) else None
+            )
             if not storage_name:
                 return "storage_name_missing"
             mapping = self.repository.get_storage_mapping(storage_name)
@@ -533,7 +560,9 @@ class RMWorkerRuntime:
         restore_hard = dict(
             desired.get("resource_quota_hard") or target.get("desired_hard") or {}
         )
-        desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(restore_hard)
+        desired["resource_quota_hard"] = zero_kubernetes_resource_quota_hard(
+            restore_hard
+        )
         desired["block"] = True
         desired["block_state"] = {
             "blocked": True,
@@ -567,7 +596,9 @@ class RMWorkerRuntime:
             desired_state=result.applied_state.get("synced_desired_state", desired),
             applied_state=result.applied_state,
             observed_state=result.observed_state,
-            status=result.observed_state.get("resource_status", LifecycleState.BLOCKED.value),
+            status=result.observed_state.get(
+                "resource_status", LifecycleState.BLOCKED.value
+            ),
         )
         return result
 
@@ -599,7 +630,9 @@ class RMWorkerRuntime:
             return self.backend_registry.filesystem_for_plan(plan)
         return self.filesystem_adapter
 
-    def _kubernetes_adapter(self, plan: dict[str, Any]) -> KubernetesNamespaceQuotaAdapter:
+    def _kubernetes_adapter(
+        self, plan: dict[str, Any]
+    ) -> KubernetesNamespaceQuotaAdapter:
         if self.backend_registry:
             return self.backend_registry.kubernetes_for_plan(plan)
         return self.kubernetes_adapter
@@ -618,7 +651,9 @@ def _filesystem_sweep_failure_reason(message: str) -> str:
 
 def _kubernetes_sweep_failure_reason(message: str) -> str:
     lowered = message.lower()
-    if "resourcequota" in lowered and ("does not exist" in lowered or "not found" in lowered):
+    if "resourcequota" in lowered and (
+        "does not exist" in lowered or "not found" in lowered
+    ):
         return "kubernetes_quota_missing"
     if "non-dms" in lowered or "managed" in lowered:
         return "kubernetes_quota_metadata_drift"
@@ -706,7 +741,9 @@ class DMWorkerRuntime:
         self, plan: dict[str, Any], run_id: str, job: dict[str, Any]
     ) -> None:
         preflight = self._mutation_preflight(plan, job)
-        selected_tool = preflight.get("selected_tool") or self._select_tool(job["operation"])
+        selected_tool = preflight.get("selected_tool") or self._select_tool(
+            job["operation"]
+        )
         self.repository.update_data_job(
             job["job_id"],
             state=DataJobState.PREFLIGHT_RUNNING,
@@ -764,7 +801,9 @@ class DMWorkerRuntime:
             )
             return
         self.repository.update_data_job(job["job_id"], preflight_result=preflight)
-        self.repository.update_data_job(job["job_id"], state=DataJobState.PREVIEW_RUNNING)
+        self.repository.update_data_job(
+            job["job_id"], state=DataJobState.PREVIEW_RUNNING
+        )
         try:
             adapter_result = self.volcano_adapter.create_job(
                 plan, self.repository.get_data_job(job["job_id"])
@@ -916,7 +955,9 @@ class DMWorkerRuntime:
             adapter_result = self.volcano_adapter.create_job(
                 plan, self.repository.get_data_job(job["job_id"])
             )
-        except Exception as exc:  # noqa: BLE001 - runtime failure must close the data job.
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - runtime failure must close the data job.
             self._fail_data_job(
                 plan,
                 run_id,
@@ -934,7 +975,9 @@ class DMWorkerRuntime:
             return
         volcano_job_ref = _volcano_job_ref(adapter_result)
         if volcano_job_ref:
-            self.repository.update_data_job(job["job_id"], volcano_job_ref=volcano_job_ref)
+            self.repository.update_data_job(
+                job["job_id"], volcano_job_ref=volcano_job_ref
+            )
         self.repository.update_run_state(
             run_id,
             LifecycleState.VERIFYING,
@@ -949,12 +992,18 @@ class DMWorkerRuntime:
                 run_id,
                 job,
                 state=DataJobState.TIMED_OUT if timed_out else DataJobState.FAILED,
-                terminal_status=LifecycleState.TIMED_OUT if timed_out else LifecycleState.FAILED,
+                terminal_status=(
+                    LifecycleState.TIMED_OUT if timed_out else LifecycleState.FAILED
+                ),
                 message=adapter_result.message,
                 error_category="data_management_volcano",
                 summary={
                     "backend_side_effect": True,
-                    "reason": "volcano_job_timed_out" if timed_out else "volcano_job_not_succeeded",
+                    "reason": (
+                        "volcano_job_timed_out"
+                        if timed_out
+                        else "volcano_job_not_succeeded"
+                    ),
                     "observed_state": adapter_result.observed_state,
                     "volcano_job_ref": volcano_job_ref or {},
                 },
@@ -998,7 +1047,10 @@ class DMWorkerRuntime:
             resource_key=job["job_id"],
             desired_state=plan["desired_state"],
             applied_state=adapter_result.applied_state,
-            observed_state={**adapter_result.observed_state, "result_summary": result_summary},
+            observed_state={
+                **adapter_result.observed_state,
+                "result_summary": result_summary,
+            },
             status=LifecycleState.SUCCEEDED.value,
         )
         self.repository.complete_result(
@@ -1061,7 +1113,10 @@ class DMWorkerRuntime:
         runtime_preflight = _verify_data_runtime_preflight(
             self.volcano_adapter, plan, job, preflight, phase="execution"
         )
-        preflight = {**preflight, "runtime_permission_check_execution": runtime_preflight}
+        preflight = {
+            **preflight,
+            "runtime_permission_check_execution": runtime_preflight,
+        }
         if runtime_preflight.get("status") != "Ready":
             self.repository.update_data_job(job["job_id"], preflight_result=preflight)
             self._fail_data_job(
@@ -1103,7 +1158,11 @@ class DMWorkerRuntime:
             )
             return
         volcano_job_ref = _volcano_job_ref(adapter_result)
-        existing_refs = (job.get("volcano_job_ref") or {}) if isinstance(job.get("volcano_job_ref"), dict) else {}
+        existing_refs = (
+            (job.get("volcano_job_ref") or {})
+            if isinstance(job.get("volcano_job_ref"), dict)
+            else {}
+        )
         if volcano_job_ref:
             self.repository.update_data_job(
                 job["job_id"],
@@ -1117,12 +1176,18 @@ class DMWorkerRuntime:
                 run_id,
                 job,
                 state=DataJobState.TIMED_OUT if timed_out else DataJobState.FAILED,
-                terminal_status=LifecycleState.TIMED_OUT if timed_out else LifecycleState.FAILED,
+                terminal_status=(
+                    LifecycleState.TIMED_OUT if timed_out else LifecycleState.FAILED
+                ),
                 message=adapter_result.message,
                 error_category="data_management_mutation",
                 summary={
                     "backend_side_effect": True,
-                    "reason": "data_job_mutation_timed_out" if timed_out else "data_job_mutation_failed",
+                    "reason": (
+                        "data_job_mutation_timed_out"
+                        if timed_out
+                        else "data_job_mutation_failed"
+                    ),
                     "observed_state": adapter_result.observed_state,
                     "volcano_job_ref": volcano_job_ref,
                 },
@@ -1147,7 +1212,10 @@ class DMWorkerRuntime:
             resource_key=job["job_id"],
             desired_state=plan["desired_state"],
             applied_state=adapter_result.applied_state,
-            observed_state={**adapter_result.observed_state, "result_summary": result_summary},
+            observed_state={
+                **adapter_result.observed_state,
+                "result_summary": result_summary,
+            },
             status=LifecycleState.SUCCEEDED.value,
         )
         self.repository.complete_result(
@@ -1193,7 +1261,9 @@ class DMWorkerRuntime:
             resource_kind=ResourceKind.DATA_JOB.value,
             resource_key=job["job_id"],
             desired_state=plan["desired_state"],
-            applied_state={"backend_side_effect": summary.get("backend_side_effect", False)},
+            applied_state={
+                "backend_side_effect": summary.get("backend_side_effect", False)
+            },
             observed_state=summary,
             status=terminal_status.value,
         )
@@ -1216,7 +1286,9 @@ class DMWorkerRuntime:
             correlation_id=plan["request_id"],
         )
 
-    def _scan_preflight(self, plan: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    def _scan_preflight(
+        self, plan: dict[str, Any], job: dict[str, Any]
+    ) -> dict[str, Any]:
         request = self.repository.get_request(job["request_id"])
         mappings = self.repository.list_identity_mappings(
             requester_id=request["requester_id"],
@@ -1254,9 +1326,13 @@ class DMWorkerRuntime:
                 "report_id": report["report_id"],
                 "reported_at": report["reported_at"],
             }
-            ready_mount = _ready_mount(report_evidence.get("mounts") or [], job["storage_name"])
+            ready_mount = _ready_mount(
+                report_evidence.get("mounts") or [], job["storage_name"]
+            )
             if ready_mount:
-                candidate["mount_path"] = ready_mount.get("mount_path") or ready_mount.get("path")
+                candidate["mount_path"] = ready_mount.get(
+                    "mount_path"
+                ) or ready_mount.get("path")
             if reason:
                 rejected.append({**candidate, "reason": reason})
                 continue
@@ -1298,7 +1374,10 @@ class DMWorkerRuntime:
             "selected_candidates": selected,
             "eligible_candidates": selected,
             "rejected_candidates": rejected,
-            "worker_pool": {"selected_candidates": selected, "eligible_candidates": selected},
+            "worker_pool": {
+                "selected_candidates": selected,
+                "eligible_candidates": selected,
+            },
             "effective_resource_model": resource_model,
             "posix_permission_check": {
                 "source": "agent-inventory",
@@ -1310,7 +1389,9 @@ class DMWorkerRuntime:
             },
         }
 
-    def _mutation_preflight(self, plan: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    def _mutation_preflight(
+        self, plan: dict[str, Any], job: dict[str, Any]
+    ) -> dict[str, Any]:
         request = self.repository.get_request(job["request_id"])
         mappings = self.repository.list_identity_mappings(
             requester_id=request["requester_id"],
@@ -1345,7 +1426,9 @@ class DMWorkerRuntime:
         normalized = job.get("normalized_target") or plan["desired_state"]
         source = normalized.get("source") or plan["desired_state"].get("source") or {}
         destination = (
-            normalized.get("destination") or plan["desired_state"].get("destination") or {}
+            normalized.get("destination")
+            or plan["desired_state"].get("destination")
+            or {}
         )
         reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
         dsync_candidates: list[dict[str, Any]] = []
@@ -1377,11 +1460,16 @@ class DMWorkerRuntime:
             network_ready = _any_ready(
                 evidence.get("networks") or [], ready_keys=("status", "reachable")
             )
-            if source_mount and _tool_ready(evidence.get("tools") or [], "nsync") and identity_ready:
+            if (
+                source_mount
+                and _tool_ready(evidence.get("tools") or [], "nsync")
+                and identity_ready
+            ):
                 source_candidates.append(
                     {
                         **candidate,
-                        "mount_path": source_mount.get("mount_path") or source_mount.get("path"),
+                        "mount_path": source_mount.get("mount_path")
+                        or source_mount.get("path"),
                     }
                 )
             if (
@@ -1414,7 +1502,8 @@ class DMWorkerRuntime:
             dsync_candidates.append(
                 {
                     **candidate,
-                    "source_mount_path": source_mount.get("mount_path") or source_mount.get("path"),
+                    "source_mount_path": source_mount.get("mount_path")
+                    or source_mount.get("path"),
                     "destination_mount_path": destination_mount.get("mount_path")
                     or destination_mount.get("path"),
                 }
@@ -1483,7 +1572,11 @@ class DMWorkerRuntime:
                 destination_candidates=destination_candidates,
             )
             if not nsync_enabled:
-                resource_model = {**resource_model, "status": "Rejected", "reason": "nsync_disabled"}
+                resource_model = {
+                    **resource_model,
+                    "status": "Rejected",
+                    "reason": "nsync_disabled",
+                }
             if resource_model.get("status") != "Ready":
                 return {
                     "status": "Rejected",
@@ -1501,12 +1594,18 @@ class DMWorkerRuntime:
                     "selected_source_candidates": [],
                     "selected_destination_candidates": [],
                     "selected_candidates": [],
-                    "eligible_candidates": [*source_candidates, *destination_candidates],
+                    "eligible_candidates": [
+                        *source_candidates,
+                        *destination_candidates,
+                    ],
                     "rejected_candidates": rejected,
                     "worker_pool": {
                         "source_candidates": source_candidates,
                         "destination_candidates": destination_candidates,
-                        "eligible_candidates": [*source_candidates, *destination_candidates],
+                        "eligible_candidates": [
+                            *source_candidates,
+                            *destination_candidates,
+                        ],
                     },
                     "effective_resource_model": resource_model,
                 }
@@ -1532,8 +1631,14 @@ class DMWorkerRuntime:
                     "destination_candidates": destination_candidates,
                     "selected_source_candidates": source_candidates,
                     "selected_destination_candidates": destination_candidates,
-                    "selected_candidates": [*source_candidates, *destination_candidates],
-                    "eligible_candidates": [*source_candidates, *destination_candidates],
+                    "selected_candidates": [
+                        *source_candidates,
+                        *destination_candidates,
+                    ],
+                    "eligible_candidates": [
+                        *source_candidates,
+                        *destination_candidates,
+                    ],
                 },
                 "effective_resource_model": resource_model,
             }
@@ -1555,7 +1660,9 @@ class DMWorkerRuntime:
         request: dict[str, Any],
         mapping: dict[str, Any],
     ) -> dict[str, Any]:
-        target = job.get("normalized_target") or plan["desired_state"].get("target") or {}
+        target = (
+            job.get("normalized_target") or plan["desired_state"].get("target") or {}
+        )
         reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
         selected: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
@@ -1576,10 +1683,13 @@ class DMWorkerRuntime:
                 "reported_at": report["reported_at"],
             }
             ready_mount = _ready_mount(
-                evidence.get("mounts") or [], target.get("storage_name") or job["storage_name"]
+                evidence.get("mounts") or [],
+                target.get("storage_name") or job["storage_name"],
             )
             if ready_mount:
-                candidate["mount_path"] = ready_mount.get("mount_path") or ready_mount.get("path")
+                candidate["mount_path"] = ready_mount.get(
+                    "mount_path"
+                ) or ready_mount.get("path")
             if reason:
                 rejected.append({**candidate, "reason": reason})
                 continue
@@ -1625,7 +1735,10 @@ class DMWorkerRuntime:
             "selected_candidates": selected,
             "eligible_candidates": selected,
             "rejected_candidates": rejected,
-            "worker_pool": {"selected_candidates": selected, "eligible_candidates": selected},
+            "worker_pool": {
+                "selected_candidates": selected,
+                "eligible_candidates": selected,
+            },
             "effective_resource_model": resource_model,
             "posix_permission_check": {
                 "source": "agent-inventory",
@@ -1669,7 +1782,9 @@ def _scan_candidate_rejection_reason(
         return "missing_target_mount"
     if not _tool_ready(report.get("tools") or [], tool):
         return f"missing_{tool}_tool"
-    if not _any_ready(report.get("credentials") or [], ready_keys=("status", "healthy")):
+    if not _any_ready(
+        report.get("credentials") or [], ready_keys=("status", "healthy")
+    ):
         return "credential_not_ready"
     if not _any_ready(report.get("networks") or [], ready_keys=("status", "reachable")):
         return "network_not_ready"
@@ -1748,7 +1863,9 @@ def _resolve_data_job_resource_model(
     clamp_reasons = [process_clamp] if process_clamp else []
     if policy_operation == "nsync":
         source_hint = resources.get("source_node_count") or resources.get("node_count")
-        destination_hint = resources.get("destination_node_count") or resources.get("node_count")
+        destination_hint = resources.get("destination_node_count") or resources.get(
+            "node_count"
+        )
         source_required, source_clamp = _clamp_policy_count(
             requested=source_hint,
             default=int(policy["default_source_nodes"]),
@@ -1918,7 +2035,9 @@ def _sync_dsync_candidate_rejection_reason(
         return "missing_destination_mount"
     if not _tool_ready(report.get("tools") or [], "dsync"):
         return "missing_dsync_tool"
-    if not _any_ready(report.get("credentials") or [], ready_keys=("status", "healthy")):
+    if not _any_ready(
+        report.get("credentials") or [], ready_keys=("status", "healthy")
+    ):
         return "credential_not_ready"
     if not _any_ready(report.get("networks") or [], ready_keys=("status", "reachable")):
         return "network_not_ready"
@@ -1931,7 +2050,9 @@ def _mount_ready(mounts: list[dict[str, Any]], storage_name: str) -> bool:
     return _ready_mount(mounts, storage_name) is not None
 
 
-def _ready_mount(mounts: list[dict[str, Any]], storage_name: str) -> dict[str, Any] | None:
+def _ready_mount(
+    mounts: list[dict[str, Any]], storage_name: str
+) -> dict[str, Any] | None:
     for mount in mounts:
         if mount.get("storage_name") != storage_name:
             continue
@@ -1950,7 +2071,11 @@ def _tool_ready(tools: list[Any], tool_name: str) -> bool:
             continue
         if not isinstance(tool, dict) or tool.get("name") != tool_name:
             continue
-        if tool.get("status") == "Ready" or tool.get("healthy") is True or tool.get("path"):
+        if (
+            tool.get("status") == "Ready"
+            or tool.get("healthy") is True
+            or tool.get("path")
+        ):
             return True
     return False
 
@@ -1986,7 +2111,9 @@ def _identity_mapping_summary(mapping: dict[str, Any]) -> dict[str, Any]:
 
 
 def _volcano_job_ref(adapter_result: AdapterResult) -> dict[str, Any]:
-    ref = adapter_result.applied_state.get("job_ref") or adapter_result.observed_state.get("job_ref")
+    ref = adapter_result.applied_state.get(
+        "job_ref"
+    ) or adapter_result.observed_state.get("job_ref")
     if not ref:
         return {}
     return {
@@ -2080,7 +2207,9 @@ def _scan_result_summary(
         raise DataManagementRuntimeError(
             f"summary artifact is missing or invalid for {artifact_uri}"
         )
-    observed_summary = parsed_summary or adapter_result.observed_state.get("summary") or {}
+    observed_summary = (
+        parsed_summary or adapter_result.observed_state.get("summary") or {}
+    )
     target = job.get("normalized_target") or plan["desired_state"].get("target") or {}
     resource_evidence = _phase21_result_resource_evidence(
         job=job, preflight=preflight, adapter_result=adapter_result
@@ -2121,7 +2250,9 @@ def _mutation_result_summary(
     previous = job.get("result_summary") or {}
     artifact_uri = adapter_result.artifact_uri
     parsed_summary = _mutation_artifact_summary(artifact_uri, phase)
-    observed_summary = parsed_summary or adapter_result.observed_state.get("summary") or {}
+    observed_summary = (
+        parsed_summary or adapter_result.observed_state.get("summary") or {}
+    )
     phase_base_uri = _artifact_child_uri(artifact_uri, phase)
     resource_evidence = _phase21_result_resource_evidence(
         job=job, preflight=preflight, adapter_result=adapter_result
@@ -2160,7 +2291,9 @@ def _mutation_result_summary(
         result["source"] = normalized.get("source")
         result["destination"] = normalized.get("destination")
     if job["operation"] == OperationKind.DATA_RM.value:
-        result["target"] = job.get("normalized_target") or plan["desired_state"].get("target")
+        result["target"] = job.get("normalized_target") or plan["desired_state"].get(
+            "target"
+        )
     return result
 
 
@@ -2189,12 +2322,14 @@ def _phase21_result_resource_evidence(
         pods = pod_summary.get("pods")
         if isinstance(pods, list):
             observed_pod_count = len(pods)
-    selected_node = (
-        resource_model.get("selected_node")
-        or adapter_result.observed_state.get("selected_node")
-    )
+    selected_node = resource_model.get(
+        "selected_node"
+    ) or adapter_result.observed_state.get("selected_node")
     scheduled_nodes = _scheduled_nodes_from_pod_summary(pod_summary)
-    if selected_node is None and resource_model.get("scheduler_selection") != "eligible_node_set":
+    if (
+        selected_node is None
+        and resource_model.get("scheduler_selection") != "eligible_node_set"
+    ):
         selected_node = _first_selected_node(selected)
     if selected_node is None and len(scheduled_nodes) == 1:
         selected_node = scheduled_nodes[0]
@@ -2260,7 +2395,9 @@ def _artifact_child_uri(base_uri: str | None, name: str) -> str | None:
     return f"{base_uri.rstrip('/')}/{name}"
 
 
-def _mutation_artifact_summary(artifact_uri: str | None, phase: str) -> dict[str, Any] | None:
+def _mutation_artifact_summary(
+    artifact_uri: str | None, phase: str
+) -> dict[str, Any] | None:
     if not artifact_uri:
         return None
     parsed = urlparse(artifact_uri)
@@ -2376,7 +2513,11 @@ def confirm_data_job(
         expected_hash = preview.get("fingerprint")
         if require_preview_fingerprint and not preview_observed_hash:
             raise ValueError("preview_observed_hash is required")
-        if preview_observed_hash and expected_hash and preview_observed_hash != expected_hash:
+        if (
+            preview_observed_hash
+            and expected_hash
+            and preview_observed_hash != expected_hash
+        ):
             raise ValueError("preview_observed_hash does not match preview evidence")
     repository.update_data_job(job_id, state=DataJobState.CONFIRMED)
     metadata = dict(plan["execution_metadata"])

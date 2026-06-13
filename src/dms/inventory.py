@@ -51,9 +51,7 @@ class EffectiveInventoryService:
                     "agent_reports": {"fresh": [], "stale": []},
                 },
             )
-            bucket = (
-                "fresh" if report["freshness_status"] == "Fresh" else "stale"
-            )
+            bucket = "fresh" if report["freshness_status"] == "Fresh" else "stale"
             clusters[cluster_name]["agent_reports"][bucket].append(report)
             if report["freshness_status"] != "Fresh":
                 continue
@@ -157,12 +155,18 @@ class StorageMappingSanityService:
         )
         storage_class: dict[str, Any] | None = None
         if not backend_template.get("backend_type"):
-            errors.append(_issue("backend_type_missing", "backend_template.backend_type is required"))
+            errors.append(
+                _issue(
+                    "backend_type_missing", "backend_template.backend_type is required"
+                )
+            )
         else:
             checks.append(_passed("backend_type_present"))
         if cluster_name:
             if not cluster_inventory:
-                errors.append(_issue("cluster_missing", f"cluster not found: {cluster_name}"))
+                errors.append(
+                    _issue("cluster_missing", f"cluster not found: {cluster_name}")
+                )
             else:
                 checks.append(_passed("cluster_exists"))
         if storage_class_name:
@@ -186,6 +190,7 @@ class StorageMappingSanityService:
                     )
                 else:
                     checks.append(_passed("csi_driver_matches"))
+        rm_worker_nodes = backend_template.get("rm_worker_nodes") or []
         rm_readiness, rm_candidates = _role_readiness(
             inventory=inventory,
             role=WorkerRole.RM.value,
@@ -193,6 +198,7 @@ class StorageMappingSanityService:
             storage_name=storage_name,
             csi_driver=expected_driver,
             storage_class_name=storage_class_name,
+            allowed_nodes=set(rm_worker_nodes) if rm_worker_nodes else None,
         )
         dm_readiness, dm_candidates = _role_readiness(
             inventory=inventory,
@@ -211,13 +217,23 @@ class StorageMappingSanityService:
             for cluster in inventory.get("clusters", {}).values()
         )
         if fresh_reports == 0 and stale_reports > 0:
-            errors.append(_issue("stale_only_inventory", "only stale Agent reports are available"))
+            errors.append(
+                _issue("stale_only_inventory", "only stale Agent reports are available")
+            )
         elif fresh_reports == 0:
-            warnings.append(_issue("agent_inventory_missing", "no fresh Agent reports are available"))
+            warnings.append(
+                _issue(
+                    "agent_inventory_missing", "no fresh Agent reports are available"
+                )
+            )
         if rm_readiness != "Ready":
-            warnings.append(_issue("missing_rm_readiness", "no fresh RM evidence for storage"))
+            warnings.append(
+                _issue("missing_rm_readiness", "no fresh RM evidence for storage")
+            )
         if dm_readiness != "Ready":
-            warnings.append(_issue("missing_dm_readiness", "no fresh DM evidence for storage"))
+            warnings.append(
+                _issue("missing_dm_readiness", "no fresh DM evidence for storage")
+            )
         status = _status_from(errors, warnings, fresh_reports)
         readiness = {
             "resource_management": rm_readiness,
@@ -232,7 +248,9 @@ class StorageMappingSanityService:
                 "cluster_name": cluster_name,
                 "storage_class_name": storage_class_name,
                 "storage_class_exists": storage_class is not None,
-                "provisioner": storage_class.get("provisioner") if storage_class else None,
+                "provisioner": (
+                    storage_class.get("provisioner") if storage_class else None
+                ),
             },
             "agent_observed": {
                 "fresh_reports": fresh_reports,
@@ -276,6 +294,7 @@ def _role_readiness(
     storage_name: str,
     csi_driver: str | None,
     storage_class_name: str | None,
+    allowed_nodes: set[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     if not cluster_name:
         return "Unknown", []
@@ -283,9 +302,13 @@ def _role_readiness(
         inventory.get("worker_roles", {}).get(role, {}).get(cluster_name) or {}
     )
     candidates: list[dict[str, Any]] = []
-    candidates.extend(role_cluster.get("mounts_by_storage_name", {}).get(storage_name, []))
+    for entry in role_cluster.get("mounts_by_storage_name", {}).get(storage_name, []):
+        if allowed_nodes is None or entry.get("node_name") in allowed_nodes:
+            candidates.append(entry)
     if csi_driver:
         for csi in role_cluster.get("csi_by_driver", {}).get(csi_driver, []):
+            if allowed_nodes is not None and csi.get("node_name") not in allowed_nodes:
+                continue
             storage_classes = csi.get("storage_classes") or []
             if not storage_class_name or storage_class_name in storage_classes:
                 candidates.append(csi)
@@ -297,6 +320,7 @@ def _default_csi_driver(backend_type: str | None) -> str | None:
         "cephfs": "rook-ceph.cephfs.csi.ceph.com",
         "gpfs": "spectrumscale.csi.ibm.com",
         "longhorn": "driver.longhorn.io",
+        "wekafs": "csi.weka.io",
     }.get(backend_type or "")
 
 
