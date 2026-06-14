@@ -523,18 +523,22 @@ def test_weka_delete_soft_locks_directory(repository_pair):
 
     assert worker.run_once() == 1
     argv = executor.commands
-    # Soft-delete (parity with GPFS/CephFS): chown root:root -> chmod 000 -> group
-    # delete. No quota reset, no rm -rf; directory + data preserved.
-    assert not any(a[:4] == ["weka", "fs", "quota", "reset"] for a in argv)
+    # Soft-delete: quota reset first, then lock down (chown root:root -> chmod 000),
+    # then free the LDAP group. No rm -rf; directory + data preserved.
+    quota_reset = [a for a in argv if a[:4] == ["weka", "fs", "quota", "reset"]]
+    assert quota_reset and quota_reset[0][4] == target
     assert ["chown", "root:root", target] in argv
     assert ["chmod", "000", target] in argv
     assert not any(a[:2] == ["rm", "-rf"] for a in argv)
     assert target in executor.directories
     assert "dms-grp-project-alpha" in identity.deletions
-    # Lock (chown -> chmod) must run before the LDAP group is freed.
+    # Order: quota reset -> chown -> chmod.
+    reset_idx = next(
+        i for i, a in enumerate(argv) if a[:4] == ["weka", "fs", "quota", "reset"]
+    )
     chown_idx = argv.index(["chown", "root:root", target])
     chmod_idx = argv.index(["chmod", "000", target])
-    assert chown_idx < chmod_idx
+    assert reset_idx < chown_idx < chmod_idx
 
 
 def test_weka_delete_refuses_quota_only_resource(repository_pair):

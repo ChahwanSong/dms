@@ -493,9 +493,10 @@ class WekaFsHostMountedFilesystemBackendAdapter:
         group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
         evidence: list[dict[str, Any]] = []
 
-        # Soft-delete (parity with GPFS/CephFS): lock down the directory
-        # (chown root:root -> chmod 000) preserving data, then remove the LDAP
-        # group. No quota reset; permanent removal is a manual operator step.
+        # Soft-delete: reset quota first, then lock down the directory
+        # (chown root:root -> chmod 000) preserving data, and finally remove the
+        # LDAP group. Permanent removal is a manual operator step.
+        self._reset_quota(target, evidence)
         self._run(
             ["chown", "root:root", target], evidence, fail=False, side_effect=True
         )
@@ -1061,6 +1062,12 @@ class WekaFsHostMountedFilesystemBackendAdapter:
                 else {}
             ),
         }
+
+    def _reset_quota(self, target: str, evidence: list[dict[str, Any]]) -> None:
+        argv = ["weka", "fs", "quota", "reset", target]
+        if self.template.weka_profile:
+            argv.extend(["--profile", self.template.weka_profile])
+        self._run(argv, evidence, fail=False, side_effect=True)
 
     def _write_marker(
         self,
