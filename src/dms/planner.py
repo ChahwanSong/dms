@@ -400,12 +400,10 @@ class Planner:
             desired["quota"] = _normalized_filesystem_quota(
                 request["payload_summary"]["quota"]
             )
-            desired.setdefault("initialize_marker", True)
             desired.setdefault("resource_type", "user")
         if request["operation"] == OperationKind.FILESYSTEM_IMPORT.value:
             desired.setdefault("import_mode", "full")
             desired.setdefault("management_mode", "full")
-            desired.setdefault("initialize_marker", True)
             access_policy = desired.get("access_policy") or {}
             if access_policy.get("users") is not None:
                 desired["users"] = list(access_policy["users"])
@@ -1221,14 +1219,6 @@ class Planner:
                 issues.append({"reason": "filesystem_quota_required"})
             else:
                 issues.extend(_filesystem_quota_issues(payload.get("quota")))
-            initialize_marker = payload.get("initialize_marker", True)
-            if not isinstance(initialize_marker, bool):
-                issues.append(
-                    {
-                        "reason": "initialize_marker_boolean_required",
-                        "value": initialize_marker,
-                    }
-                )
 
         if operation == OperationKind.FILESYSTEM_IMPORT.value:
             existing = self.repository.get_resource(
@@ -1257,14 +1247,6 @@ class Planner:
                     {
                         "reason": "filesystem_import_mode_unsupported",
                         "import_mode": import_mode,
-                    }
-                )
-            initialize_marker = payload.get("initialize_marker", True)
-            if not isinstance(initialize_marker, bool):
-                issues.append(
-                    {
-                        "reason": "initialize_marker_boolean_required",
-                        "value": initialize_marker,
                     }
                 )
             # access_policy is now optional — the backend discovers the live

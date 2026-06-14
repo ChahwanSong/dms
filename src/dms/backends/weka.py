@@ -339,8 +339,6 @@ class WekaFsHostMountedFilesystemBackendAdapter:
             else:
                 self._run(["chgrp", group_name, target], evidence, side_effect=True)
             self._run(["chmod", mode, target], evidence, side_effect=True)
-            marker = _marker(plan, desired, target, group_name, management_mode="full")
-            self._write_marker(target, marker, evidence, side_effect=True)
             quota_state: dict[str, Any] = {}
             if quota:
                 quota_state = self._apply_quota(target, quota, evidence)
@@ -644,11 +642,6 @@ class WekaFsHostMountedFilesystemBackendAdapter:
         if quota:
             self._capability(evidence, require_quota=True)
             quota_state = self._apply_quota(target, quota, evidence)
-        if desired.get("initialize_marker", True):
-            marker = _marker(
-                plan, desired, target, group_name, management_mode=management_mode
-            )
-            self._write_marker(target, marker, evidence, side_effect=True)
         applied = {
             "adapter": "wekafs-host-mounted",
             "operation": plan["operation_kind"],
@@ -660,9 +653,7 @@ class WekaFsHostMountedFilesystemBackendAdapter:
             "management_mode": management_mode,
             "group_adoption": adoption_summary,
             "backend_side_effect": bool(
-                quota
-                or desired.get("initialize_marker", True)
-                or adoption_summary.get("changed_group")
+                quota or adoption_summary.get("changed_group")
             ),
             "command_evidence": evidence,
         }
@@ -967,7 +958,6 @@ class WekaFsHostMountedFilesystemBackendAdapter:
             "supports_usage_bytes": True,
             "supports_file_count_usage": False,
             "supports_permission_mode": True,
-            "supports_marker": True,
             "filesystem_name": self.template.filesystem_name,
             "managed_root": self.template.managed_root,
         }
@@ -1069,25 +1059,6 @@ class WekaFsHostMountedFilesystemBackendAdapter:
             argv.extend(["--profile", self.template.weka_profile])
         self._run(argv, evidence, fail=False, side_effect=True)
 
-    def _write_marker(
-        self,
-        target: str,
-        marker: dict[str, Any],
-        evidence: list[dict[str, Any]],
-        *,
-        side_effect: bool,
-    ) -> None:
-        script = (
-            "import json, os, sys; "
-            "path=sys.argv[1]; marker=json.loads(sys.argv[2]); "
-            "os.makedirs(path, exist_ok=True); "
-            "open(os.path.join(path, '.dms-resource.json'), 'w', encoding='utf-8').write(json.dumps(marker, sort_keys=True))"
-        )
-        self._run(
-            ["python3", "-c", script, target, json.dumps(marker, sort_keys=True)],
-            evidence,
-            side_effect=side_effect,
-        )
 
     def _run(
         self,
@@ -1201,25 +1172,6 @@ def _reject_unsupported_quota_fields(quota: dict[str, Any]) -> None:
         )
 
 
-def _marker(
-    plan: dict[str, Any],
-    desired: dict[str, Any],
-    target: str,
-    group_name: str,
-    *,
-    management_mode: str,
-) -> dict[str, Any]:
-    return {
-        "managed_by": "dms",
-        "resource_kind": "filesystem",
-        "resource_key": plan["resource_key"],
-        "storage_name": desired.get("storage_name"),
-        "directory_name": desired.get("directory_name"),
-        "management_mode": management_mode,
-        "backend_type": WEKAFS_BACKEND_TYPE,
-        "path": target,
-        "access_group": group_name,
-    }
 
 
 def _command_evidence(result: CommandResult, *, side_effect: bool) -> dict[str, Any]:

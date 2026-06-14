@@ -319,10 +319,6 @@ class GpfsFilesystemBackendAdapter:
                 )
             mode = str(desired.get("mode") or "0750")
             self._run(["chmod", mode, junction_path], evidence, side_effect=True)
-            marker = _marker(
-                plan, desired, fileset_name, junction_path, management_mode="full"
-            )
-            self._write_marker(junction_path, marker, evidence, side_effect=True)
             fileset_state = self._read_fileset(fileset_name, evidence)
         except BackendPreconditionError as exc:
             if side_effect_started:
@@ -665,15 +661,6 @@ class GpfsFilesystemBackendAdapter:
             quota_state = self._apply_quota(
                 fileset_name, junction_path, quota, evidence
             )
-        if desired.get("initialize_marker", True):
-            marker = _marker(
-                plan,
-                desired,
-                fileset_name,
-                junction_path,
-                management_mode=management_mode,
-            )
-            self._write_marker(junction_path, marker, evidence, side_effect=True)
         applied = {
             "adapter": "gpfs-fileset-command",
             "operation": plan["operation_kind"],
@@ -686,9 +673,7 @@ class GpfsFilesystemBackendAdapter:
             "management_mode": management_mode,
             "group_adoption": adoption_summary,
             "backend_side_effect": bool(
-                quota
-                or desired.get("initialize_marker", True)
-                or adoption_summary.get("changed_group")
+                quota or adoption_summary.get("changed_group")
             ),
             "command_evidence": evidence,
         }
@@ -1037,7 +1022,6 @@ class GpfsFilesystemBackendAdapter:
             "supports_fileset_link": True,
             "supports_fileset_delete": True,
             "supports_permission_mode": True,
-            "supports_marker": True,
             "filesystem_name": self.template.filesystem_name,
             "managed_root": self.template.managed_root,
         }
@@ -1167,32 +1151,6 @@ class GpfsFilesystemBackendAdapter:
             raise BackendPreconditionError("GPFS linked fileset missing")
         return state
 
-    def _write_marker(
-        self,
-        junction_path: str,
-        marker: dict[str, Any],
-        evidence: list[dict[str, Any]],
-        *,
-        side_effect: bool,
-    ) -> None:
-        script = (
-            "import json, os, sys; "
-            "path=sys.argv[1]; marker=json.loads(sys.argv[2]); "
-            "os.makedirs(path, exist_ok=True); "
-            "open(os.path.join(path, '.dms-resource.json'), 'w', encoding='utf-8').write(json.dumps(marker, sort_keys=True))"
-        )
-        self._run(
-            [
-                "python3",
-                "-c",
-                script,
-                junction_path,
-                json.dumps(marker, sort_keys=True),
-            ],
-            evidence,
-            side_effect=side_effect,
-        )
-
     def _run(
         self,
         argv: list[str],
@@ -1294,27 +1252,6 @@ def _directory_name(desired: dict[str, Any]) -> str:
     directory_name = str(desired.get("directory_name") or "")
     validate_storage_root_basename("directory_name", directory_name)
     return directory_name
-
-
-def _marker(
-    plan: dict[str, Any],
-    desired: dict[str, Any],
-    fileset_name: str,
-    junction_path: str,
-    *,
-    management_mode: str,
-) -> dict[str, Any]:
-    return {
-        "managed_by": "dms",
-        "resource_kind": "filesystem",
-        "resource_key": plan["resource_key"],
-        "storage_name": desired.get("storage_name"),
-        "directory_name": desired.get("directory_name"),
-        "management_mode": management_mode,
-        "backend_type": GPFS_BACKEND_TYPE,
-        "fileset_name": fileset_name,
-        "junction_path": junction_path,
-    }
 
 
 def _command_evidence(result: CommandResult, *, side_effect: bool) -> dict[str, Any]:
