@@ -37,8 +37,8 @@ class Settings:
     filesystem_mutation_mode: str = "ssh-host-exec"
     filesystem_exec_timeout_seconds: int = 30
     filesystem_exec_use_sudo: bool = True
-    ldap_group_gid_start: int = 24000
-    ldap_group_gid_end: int = 24999
+    ldap_group_gid_start: int = 9000000
+    ldap_group_gid_end: int = 9999999
     dm_namespace: str = "dms"
     dm_job_image: str | None = None
     dm_job_image_ref: str | None = None
@@ -143,8 +143,8 @@ class Settings:
                 "DMS_FILESYSTEM_EXEC_USE_SUDO", "true"
             ).lower()
             not in {"0", "false", "no"},
-            ldap_group_gid_start=int(os.getenv("DMS_LDAP_GROUP_GID_START", "24000")),
-            ldap_group_gid_end=int(os.getenv("DMS_LDAP_GROUP_GID_END", "24999")),
+            ldap_group_gid_start=int(os.getenv("DMS_LDAP_GROUP_GID_START", "9000000")),
+            ldap_group_gid_end=int(os.getenv("DMS_LDAP_GROUP_GID_END", "9999999")),
             dm_namespace=os.getenv("DMS_DM_NAMESPACE", "dms"),
             dm_job_image=os.getenv("DMS_DM_JOB_IMAGE"),
             dm_job_image_ref=os.getenv("DMS_DM_JOB_IMAGE_REF"),
