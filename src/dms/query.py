@@ -482,7 +482,7 @@ class OperationalQueryService:
     def _filesystem_action_required(self) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
 
-        # Soft-deleted GPFS filesystems: unlinked + locked, awaiting manual mmdelfileset
+        # Soft-deleted filesystems: locked + data preserved, awaiting manual removal.
         for resource in self.repository.list_filesystem_resources(
             status=["Deleted"],
             limit=1000,
@@ -491,6 +491,17 @@ class OperationalQueryService:
             observed = resource.get("observed_state") or {}
             if not observed.get("soft_delete"):
                 continue
+            backend_type = (observed.get("backend") or {}).get("backend_type")
+            if backend_type == "cephfs":
+                recommended_action = (
+                    "CephFS directory is locked (chown root:root + chmod 000, data preserved). "
+                    "To permanently remove: rm -rf the managed directory on a backend node."
+                )
+            else:
+                recommended_action = (
+                    "GPFS fileset is locked (chown root:root + chmod 000, data preserved, fileset remains linked). "
+                    "To permanently remove: mmunlinkfileset {fs} {fileset} then mmdelfileset {fs} {fileset}."
+                )
             issues.append(
                 {
                     "issue_type": "filesystem_soft_deleted",
@@ -501,10 +512,7 @@ class OperationalQueryService:
                     "directory_name": desired.get("directory_name"),
                     "fileset_name": observed.get("fileset_name"),
                     "updated_at": resource.get("updated_at"),
-                    "recommended_action": (
-                        "GPFS fileset is locked (chown root:root + chmod 000, data preserved, fileset remains linked). "
-                        "To permanently remove: mmunlinkfileset {fs} {fileset} then mmdelfileset {fs} {fileset}."
-                    ),
+                    "recommended_action": recommended_action,
                 }
             )
 

@@ -347,9 +347,18 @@ class PythonHostExecutor:
                 f"filesystem host execution timed out: {exc}"
             ) from exc
         if completed.returncode != 0:
+            error_text = completed.stderr.strip() or completed.stdout.strip()
+            sentinel = "PRECONDITION:"
+            if sentinel in error_text:
+                # Pre-side-effect refusal from the host script: classify as a
+                # precondition failure (-> BackendApplyFailed) instead of letting it
+                # fall through to the worker's generic UnknownAfterSideEffect handler.
+                message = error_text.split(sentinel, 1)[1].strip()
+                raise BackendPreconditionError(
+                    message or "filesystem host precondition failed"
+                )
             raise HostExecutionError(
-                "filesystem host execution failed: "
-                f"{completed.stderr.strip() or completed.stdout.strip()}"
+                "filesystem host execution failed: " + error_text
             )
         try:
             return json.loads(completed.stdout)
@@ -492,9 +501,16 @@ class CephFsHostMountedFilesystemBackendAdapter:
     def delete(self, plan: dict[str, Any]) -> AdapterResult:
         self._validate_template()
         desired = plan["desired_state"]
+        if desired.get("management_mode") == "quota_only" or desired.get("import_mode"):
+            raise BackendPreconditionError(
+                "CephFS delete refused for imported/quota-only directory"
+            )
         directory_name = desired["directory_name"]
         validate_storage_root_basename("directory_name", directory_name)
         group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
+        # Soft delete (parity with GPFS): lock the directory (chown root:root +
+        # chmod 000) and preserve data. The directory/data stays on the filesystem,
+        # accessible only by root; permanent removal is a manual operator step.
         observed = self.executor.delete_directory(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
@@ -509,6 +525,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "backend": self.template.metadata(),
                 "resource_key": plan["resource_key"],
                 "resource_status": "Deleted",
+                "soft_delete": True,
                 "access_group_cleanup": group_cleanup,
             }
         )
@@ -519,10 +536,12 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "backend": self.template.metadata(),
                 "directory_name": directory_name,
                 "deleted": observed.get("deleted", False),
+                "soft_delete": True,
+                "data_preserved": observed.get("data_preserved", True),
                 "access_group_cleanup": group_cleanup,
             },
             observed_state=observed,
-            message="CephFS host-mounted filesystem delete completed",
+            message="CephFS host-mounted filesystem soft-deleted (data preserved, directory locked)",
         )
 
     def update(self, plan: dict[str, Any]) -> AdapterResult:
@@ -592,7 +611,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
             managed_root=self.template.managed_root,
             directory_name=directory_name,
             resource_key=plan["resource_key"],
-            require_marker=True,
+            require_marker=False,
             include_quota=bool(desired.get("include_quota", True)),
         )
         issues = _quota_check_issues(desired, observed)
@@ -627,7 +646,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
             managed_root=self.template.managed_root,
             directory_name=directory_name,
             resource_key=plan["resource_key"],
-            require_marker=True,
+            require_marker=False,
             include_quota=bool(desired.get("include_quota", True)),
         )
         synced_desired = dict(desired)
@@ -1021,26 +1040,18 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     root_real = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root_real, directory_name))
     if os.path.commonpath([root_real, target]) != root_real:
-        raise SystemExit("target escaped managed root")
-    marker_path = os.path.join(target, ".dms-resource.json")
+        raise SystemExit("PRECONDITION: target escaped managed root")
     created = False
     if os.path.exists(target):
         if not os.path.isdir(target):
-            raise SystemExit("target exists but is not a directory")
-        if not os.path.exists(marker_path):
-            raise SystemExit("target directory exists without DMS marker")
-        with open(marker_path, encoding="utf-8") as handle:
-            existing = json.load(handle)
-        if existing.get("resource_key") != marker.get("resource_key"):
-            raise SystemExit("target directory marker resource key mismatch")
+            raise SystemExit("PRECONDITION: target exists but is not a directory")
     else:
         os.mkdir(target)
         created = True
-    with open(marker_path, "w", encoding="utf-8") as handle:
-        json.dump(marker, handle, sort_keys=True)
+    # No on-disk marker is written: DMS tracks ownership via its database, not a
+    # .dms-resource.json file inside the managed directory.
     group = grp.getgrnam(group_name)
     os.chown(target, -1, group.gr_gid)
-    os.chown(marker_path, -1, group.gr_gid)
     os.chmod(target, int(mode_text, 8))
     refresh_sssd_cache()
     access = {"allowed_users": {}, "denied_users": {}}
@@ -1074,42 +1085,58 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
 
 
 _DELETE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
+    import grp
     import json
     import os
-    import shutil
+    import pwd
     import sys
 
     root, directory_name, resource_key = sys.argv[1:]
     root_real = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root_real, directory_name))
     if os.path.commonpath([root_real, target]) != root_real:
-        raise SystemExit("target escaped managed root")
-    marker_path = os.path.join(target, ".dms-resource.json")
+        raise SystemExit("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
-        raise SystemExit("target directory missing")
-    if not os.path.exists(marker_path):
-        raise SystemExit("target directory exists without DMS marker")
-    with open(marker_path, encoding="utf-8") as handle:
-        marker = json.load(handle)
-    if marker.get("resource_key") != resource_key:
-        raise SystemExit("target directory marker resource key mismatch")
-    if marker.get("management_mode") == "quota_only":
-        raise SystemExit("quota-only filesystem resource refuses backend directory delete")
-    allowed_files = {".dms-resource.json"}
-    for dirpath, dirnames, filenames in os.walk(target):
-        if dirnames:
-            raise SystemExit("safe delete refuses nested directories")
-        for filename in filenames:
-            if filename in allowed_files or filename.startswith(".access-allowed-"):
-                continue
-            raise SystemExit(f"safe delete refuses unexpected file: {filename}")
-    shutil.rmtree(target)
+        # Idempotent: nothing to lock (already removed); report success.
+        print(json.dumps({
+            "path": target,
+            "exists": False,
+            "deleted": True,
+            "soft_delete": True,
+            "data_preserved": False,
+            "verified": True,
+        }, sort_keys=True))
+        raise SystemExit(0)
+    stat_before = os.stat(target)
+    try:
+        owner = pwd.getpwuid(stat_before.st_uid).pw_name
+    except KeyError:
+        owner = str(stat_before.st_uid)
+    try:
+        group_name = grp.getgrgid(stat_before.st_gid).gr_name
+    except KeyError:
+        group_name = str(stat_before.st_gid)
+    prior_state = {
+        "owner": owner,
+        "uid": stat_before.st_uid,
+        "group_name": group_name,
+        "gid": stat_before.st_gid,
+        "mode": oct(stat_before.st_mode & 0o777)[2:].zfill(4),
+    }
+    # Soft delete: lock down (chown root:root + chmod 000), preserve data.
+    # No rmtree; permanent removal is a manual operator step.
+    os.chown(target, 0, 0)
+    os.chmod(target, 0)
+    stat_after = os.stat(target)
     print(json.dumps({
         "path": target,
-        "exists": False,
+        "exists": True,
         "deleted": True,
-        "marker": marker,
-        "verified": True,
+        "soft_delete": True,
+        "data_preserved": True,
+        "prior_state": prior_state,
+        "mode": oct(stat_after.st_mode & 0o777)[2:].zfill(4),
+        "verified": (stat_after.st_mode & 0o777) == 0,
     }, sort_keys=True))
     """)
 
@@ -1128,16 +1155,14 @@ _BLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     root_real = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root_real, directory_name))
     if os.path.commonpath([root_real, target]) != root_real:
-        raise SystemExit("target escaped managed root")
-    marker_path = os.path.join(target, ".dms-resource.json")
+        raise SystemExit("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
-        raise SystemExit("target directory missing")
-    if not os.path.exists(marker_path):
-        raise SystemExit("target directory exists without DMS marker")
-    with open(marker_path, encoding="utf-8") as handle:
-        marker = json.load(handle)
-    if marker.get("resource_key") != resource_key:
-        raise SystemExit("target directory marker resource key mismatch")
+        raise SystemExit("PRECONDITION: target directory missing")
+    marker = None
+    marker_path = os.path.join(target, ".dms-resource.json")
+    if os.path.exists(marker_path):
+        with open(marker_path, encoding="utf-8") as handle:
+            marker = json.load(handle)
     stat_before = os.stat(target)
     mode_before = oct(stat_before.st_mode & 0o777)[2:].zfill(4)
     already_blocked = mode_before == "0000" and prior_block_state.get("blocked")
@@ -1232,16 +1257,14 @@ _UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     root_real = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root_real, directory_name))
     if os.path.commonpath([root_real, target]) != root_real:
-        raise SystemExit("target escaped managed root")
-    marker_path = os.path.join(target, ".dms-resource.json")
+        raise SystemExit("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
-        raise SystemExit("target directory missing")
-    if not os.path.exists(marker_path):
-        raise SystemExit("target directory exists without DMS marker")
-    with open(marker_path, encoding="utf-8") as handle:
-        marker = json.load(handle)
-    if marker.get("resource_key") != resource_key:
-        raise SystemExit("target directory marker resource key mismatch")
+        raise SystemExit("PRECONDITION: target directory missing")
+    marker = None
+    marker_path = os.path.join(target, ".dms-resource.json")
+    if os.path.exists(marker_path):
+        with open(marker_path, encoding="utf-8") as handle:
+            marker = json.load(handle)
     group = grp.getgrnam(group_name)
     os.chown(target, -1, group.gr_gid)
     os.chown(marker_path, -1, group.gr_gid)
@@ -1318,16 +1341,14 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(r"""
         fail("target directory is symlink")
     target = os.path.realpath(target_joined)
     if os.path.commonpath([root_real, target]) != root_real:
-        fail("target escaped managed root")
-    marker_path = os.path.join(target, ".dms-resource.json")
+        fail("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
-        fail("target directory missing")
-    if not os.path.exists(marker_path):
-        fail("target directory exists without DMS marker")
-    with open(marker_path, encoding="utf-8") as handle:
-        marker = json.load(handle)
-    if marker.get("resource_key") != resource_key:
-        fail("target directory marker resource key mismatch")
+        fail("PRECONDITION: target directory missing")
+    marker = None
+    marker_path = os.path.join(target, ".dms-resource.json")
+    if os.path.exists(marker_path):
+        with open(marker_path, encoding="utf-8") as handle:
+            marker = json.load(handle)
     if quota.get("capacity_bytes") is not None:
         run(["setfattr", "-n", "ceph.quota.max_bytes", "-v", str(int(quota["capacity_bytes"])), target])
     if quota.get("file_count") is not None:
@@ -1405,7 +1426,7 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(r"""
         raise SystemExit("target directory is symlink")
     target = os.path.realpath(target_joined)
     if os.path.commonpath([root_real, target]) != root_real:
-        raise SystemExit("target escaped managed root")
+        raise SystemExit("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
         print(json.dumps({"path": target, "exists": False, "verified": False}, sort_keys=True))
         raise SystemExit(0)
@@ -1486,17 +1507,10 @@ _ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(r"""
         fail("target directory is symlink")
     target = os.path.realpath(target_joined)
     if os.path.commonpath([root_real, target]) != root_real:
-        fail("target escaped managed root")
+        fail("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
-        fail("target directory missing")
-    marker_path = os.path.join(target, ".dms-resource.json")
-    if os.path.exists(marker_path):
-        with open(marker_path, encoding="utf-8") as handle:
-            existing = json.load(handle)
-        if existing.get("management_mode") != "quota_only" or existing.get("resource_key") != marker.get("resource_key"):
-            fail("target directory marker resource key mismatch")
-    with open(marker_path, "w", encoding="utf-8") as handle:
-        json.dump(marker, handle, sort_keys=True)
+        fail("PRECONDITION: target directory missing")
+    # No on-disk marker is written; DMS tracks quota_only management in its database.
     if quota.get("capacity_bytes") is not None:
         run(["setfattr", "-n", "ceph.quota.max_bytes", "-v", str(int(quota["capacity_bytes"])), target])
     if quota.get("file_count") is not None:
@@ -1592,15 +1606,9 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
         fail("target directory is symlink")
     target = os.path.realpath(target_joined)
     if os.path.commonpath([root_real, target]) != root_real:
-        fail("target escaped managed root")
+        fail("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
-        fail("target directory missing")
-    marker_path = os.path.join(target, ".dms-resource.json")
-    if os.path.exists(marker_path):
-        with open(marker_path, encoding="utf-8") as handle:
-            existing = json.load(handle)
-        if existing.get("resource_key") != marker.get("resource_key") or existing.get("management_mode") != "quota_only":
-            fail("target directory marker resource key mismatch")
+        fail("PRECONDITION: target directory missing")
     expected_group = access_policy.get("expected_group")
     expected_mode = str(access_policy.get("expected_mode") or "0750")
     group = grp.getgrnam(expected_group)
@@ -1625,8 +1633,7 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
             f"denied user unexpectedly has access: {user}",
         )
         access["denied_users"][user] = "denied"
-    with open(marker_path, "w", encoding="utf-8") as handle:
-        json.dump(marker, handle, sort_keys=True)
+    # No on-disk marker is written; DMS tracks ownership via its database.
     if quota:
         if not shutil.which("setfattr") or not shutil.which("getfattr"):
             fail("filesystem quota capability missing: setfattr/getfattr")
