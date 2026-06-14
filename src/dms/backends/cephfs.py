@@ -99,10 +99,8 @@ class FilesystemHostExecutor(Protocol):
         *,
         managed_root: str,
         directory_name: str,
-        access_policy: dict[str, Any],
+        chown_gid: int | None,
         quota: dict[str, int] | None,
-        allowed_users: list[str],
-        denied_users: list[str],
     ) -> dict[str, Any]: ...
 
 
@@ -302,20 +300,16 @@ class PythonHostExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        access_policy: dict[str, Any],
+        chown_gid: int | None,
         quota: dict[str, int] | None,
-        allowed_users: list[str],
-        denied_users: list[str],
     ) -> dict[str, Any]:
         return self._run_script(
             _IMPORT_DIRECTORY_SCRIPT,
             [
                 managed_root,
                 directory_name,
-                json.dumps(access_policy, sort_keys=True),
+                "" if chown_gid is None else str(int(chown_gid)),
                 json.dumps(quota or {}, sort_keys=True),
-                json.dumps(allowed_users),
-                json.dumps(denied_users),
             ],
         )
 
@@ -666,9 +660,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
         directory_name = desired["directory_name"]
         validate_storage_root_basename("directory_name", directory_name)
         access_policy = desired.get("access_policy") or {}
-        users = _string_list(
-            access_policy.get("users") or desired.get("users"), "users"
-        )
         denied_users = _string_list(
             access_policy.get("denied_users")
             or desired.get("denied_users")
@@ -678,13 +669,47 @@ class CephFsHostMountedFilesystemBackendAdapter:
             required=False,
         )
         quota = _normalize_quota(desired.get("quota"))
+
+        # Discover the live directory + its group via stat (parity with GPFS/WekaFS):
+        # access_policy is optional — the group is auto-discovered, not required.
+        live = self._read_directory_state(
+            managed_root=self.template.managed_root,
+            directory_name=directory_name,
+            resource_key="",
+            include_quota=False,
+        )
+        if not live.get("exists"):
+            raise BackendPreconditionError(
+                "CephFS import: target directory does not exist"
+            )
+        # Optional hints are validated only when provided.
+        expected_group = access_policy.get("expected_group")
+        if expected_group and live.get("group_name") != expected_group:
+            raise BackendPreconditionError(
+                f"CephFS import: live group {live.get('group_name')!r} does not "
+                f"match expected_group {expected_group!r}"
+            )
+        expected_mode = access_policy.get("expected_mode")
+        if expected_mode and live.get("mode") != str(expected_mode):
+            raise BackendPreconditionError(
+                f"CephFS import: live mode {live.get('mode')!r} does not match "
+                f"expected_mode {expected_mode!r}"
+            )
+
+        adoption = self._adopt_full_group(plan, directory_name, live)
+        users = _string_list(
+            access_policy.get("users")
+            or desired.get("users")
+            or adoption.get("members")
+            or [],
+            "users",
+        )
+
         observed = self.executor.import_directory(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
-            access_policy=access_policy,
+            chown_gid=adoption.get("chown_gid"),
             quota=quota or None,
-            allowed_users=users,
-            denied_users=denied_users,
         )
         observed.update(
             {
@@ -694,11 +719,16 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "resource_key": plan["resource_key"],
                 "management_mode": "full",
                 "resource_status": "Succeeded",
+                "group_name": adoption.get("group_name"),
+                "group_gid": adoption.get("gid"),
+                "group_adoption": adoption.get("summary", {}),
             }
         )
         synced_desired = dict(desired)
         synced_desired["management_mode"] = "full"
         synced_desired["users"] = users
+        if adoption.get("group_name"):
+            synced_desired["access_group"] = adoption["group_name"]
         if denied_users:
             synced_desired["validation_denied_users"] = denied_users
         if quota:
@@ -712,11 +742,90 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "path": observed.get("path"),
                 "quota": quota,
                 "quota_state": observed.get("quota_state"),
+                "group_adoption": adoption.get("summary", {}),
                 "synced_desired_state": synced_desired,
             },
             observed_state=observed,
             message="CephFS host-mounted filesystem import completed",
         )
+
+    def _adopt_full_group(
+        self, plan: dict[str, Any], directory_name: str, live: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Discover the imported directory's live group and adopt or recreate it.
+
+        Mirrors GPFS/WekaFS import adoption:
+          - live group `dms-grp-*`  -> adopt as-is (pull members from LDAP).
+          - external (other) group -> create `dms-grp-{dir}`, copy the external
+            group's members into it, and chown the directory to the new gid.
+        """
+        if self.identity_groups is None:
+            return {"changed_group": False, "chown_gid": None, "summary": {}}
+        live_gid = live.get("group_gid")
+        live_group_name = live.get("group_name")
+        # If NSS could not resolve the gid to a name, fall back to LDAP by gid.
+        if not live_group_name or live_group_name == str(live_gid):
+            try:
+                resolved = self.identity_groups.lookup_group_name_by_gid(gid=live_gid)
+            except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+                raise BackendPreconditionError(str(exc)) from exc
+            live_group_name = resolved or live_group_name
+        if not live_group_name or live_group_name == str(live_gid):
+            raise BackendPreconditionError(
+                f"CephFS import: live group (gid={live_gid}) not found in NSS or LDAP"
+            )
+        try:
+            members = sorted(
+                set(
+                    self.identity_groups.list_group_members(
+                        group_name=live_group_name
+                    )
+                    or []
+                )
+            )
+        except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+            raise BackendPreconditionError(str(exc)) from exc
+        if live_group_name.startswith("dms-grp-"):
+            return {
+                "group_name": live_group_name,
+                "gid": live_gid,
+                "members": members,
+                "changed_group": False,
+                "chown_gid": None,
+                "summary": {
+                    "live_group": live_group_name,
+                    "live_gid": live_gid,
+                    "adopted_members": members,
+                    "changed_group": False,
+                    "mode": "adopt_existing_dms_group",
+                },
+            }
+        new_group_name = f"dms-grp-{directory_name}"
+        try:
+            new_group = self.identity_groups.ensure_group_members(
+                group_name=new_group_name,
+                users=members,
+                resource_key=plan["resource_key"],
+            )
+        except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+            raise BackendPreconditionError(str(exc)) from exc
+        new_gid = new_group.get("gid")
+        return {
+            "group_name": new_group_name,
+            "gid": new_gid,
+            "members": members,
+            "changed_group": True,
+            "chown_gid": new_gid,
+            "summary": {
+                "live_group": live_group_name,
+                "live_gid": live_gid,
+                "new_group": new_group_name,
+                "new_gid": new_gid,
+                "adopted_members": members,
+                "changed_group": True,
+                "mode": "create_dms_group_from_external",
+            },
+        }
 
     def assign_quota_only(self, plan: dict[str, Any]) -> AdapterResult:
         self._validate_template()
@@ -1474,32 +1583,12 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import shutil
     import subprocess
     import sys
-    import time
 
-    root, directory_name, access_policy_json, quota_json, allowed_json, denied_json = sys.argv[1:]
-    access_policy = json.loads(access_policy_json or "{}")
+    root, directory_name, chown_gid, quota_json = sys.argv[1:]
     quota = json.loads(quota_json or "{}")
-    allowed = json.loads(allowed_json)
-    denied = json.loads(denied_json)
 
     def fail(message):
         raise SystemExit(message)
-
-    def wait_command(command, message, timeout_seconds=60):
-        deadline = time.monotonic() + timeout_seconds
-        last_error = ""
-        while time.monotonic() < deadline:
-            completed = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if completed.returncode == 0:
-                return
-            last_error = completed.stderr.strip() or completed.stdout.strip()
-            time.sleep(3)
-        fail(f"{message}: {last_error}")
 
     def refresh_sssd_cache():
         for command in (["sss_cache", "-E"], ["/usr/sbin/sss_cache", "-E"]):
@@ -1527,37 +1616,17 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     root_real = os.path.realpath(root)
     target_joined = os.path.join(root_real, directory_name)
     if os.path.islink(target_joined):
-        fail("target directory is symlink")
+        fail("PRECONDITION: target directory is symlink")
     target = os.path.realpath(target_joined)
     if os.path.commonpath([root_real, target]) != root_real:
         fail("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
         fail("PRECONDITION: target directory missing")
-    expected_group = access_policy.get("expected_group")
-    expected_mode = str(access_policy.get("expected_mode") or "0750")
-    group = grp.getgrnam(expected_group)
-    stat_before = os.stat(target)
-    mode_before = oct(stat_before.st_mode & 0o777)[2:].zfill(4)
-    if stat_before.st_gid != group.gr_gid:
-        fail("filesystem access group unresolved")
-    if mode_before != expected_mode:
-        fail("filesystem import mode mismatch")
-    refresh_sssd_cache()
-    access = {"allowed_users": {}, "denied_users": {}}
-    for user in allowed:
-        probe = os.path.join(target, f".import-access-{user}")
-        wait_command(
-            ["sudo", "-u", user, "sh", "-c", "touch \"$1\" && rm \"$1\"", "sh", probe],
-            f"allowed user access failed for {user}",
-        )
-        access["allowed_users"][user] = "ok"
-    for user in denied:
-        wait_command(
-            ["sudo", "-u", user, "sh", "-c", "test ! -x \"$1\" && test ! -w \"$1\"", "sh", target],
-            f"denied user unexpectedly has access: {user}",
-        )
-        access["denied_users"][user] = "denied"
-    # No on-disk marker is written; DMS tracks ownership via its database.
+    # External-group adoption: chown the directory to the new DMS group when asked.
+    # (dms-grp-* directories are adopted as-is and need no chown.)
+    if chown_gid:
+        os.chown(target, -1, int(chown_gid))
+        refresh_sssd_cache()
     if quota:
         if not shutil.which("setfattr") or not shutil.which("getfattr"):
             fail("filesystem quota capability missing: setfattr/getfattr")
@@ -1565,6 +1634,11 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
             run(["setfattr", "-n", "ceph.quota.max_bytes", "-v", str(int(quota["capacity_bytes"])), target])
         if quota.get("file_count") is not None:
             run(["setfattr", "-n", "ceph.quota.max_files", "-v", str(int(quota["file_count"])), target])
+    stat_result = os.stat(target)
+    try:
+        group_name = grp.getgrgid(stat_result.st_gid).gr_name
+    except KeyError:
+        group_name = str(stat_result.st_gid)
     quota_state = {
         "backend_type": "cephfs",
         "capacity": {"observed_bytes": getx(target, "ceph.quota.max_bytes"), "backend_key": "ceph.quota.max_bytes"},
@@ -1573,13 +1647,12 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     print(json.dumps({
         "path": target,
         "exists": True,
-        "group_name": expected_group,
-        "group_gid": group.gr_gid,
-        "mode": mode_before,
+        "group_name": group_name,
+        "group_gid": stat_result.st_gid,
+        "mode": oct(stat_result.st_mode & 0o777)[2:].zfill(4),
         "quota_state": quota_state,
-        "access_validation": access,
         "management_mode": "full",
         "verified": True,
-        "backend_side_effect": True,
+        "backend_side_effect": bool(chown_gid or quota),
     }, sort_keys=True))
     """)

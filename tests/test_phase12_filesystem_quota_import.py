@@ -424,13 +424,25 @@ def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     executor = FakePhase12FilesystemExecutor()
+    # Live dir already carries a dms-grp-* group (gid 9000001). access_policy is
+    # omitted entirely: the backend auto-discovers the group via stat (GPFS/WEKA parity).
     executor.seed_directory(
         "existing-import",
         resource_key=None,
         quota=None,
-        marker=None,
-        group_name="dms-phase12-existing",
+        group_name="dms-grp-existing-import",
+        group_gid=9000001,
         mode="0770",
+    )
+    identity = StubIdentityGroupManager(
+        users={"alice": {}, "bob": {}},
+        groups={
+            "dms-grp-existing-import": {
+                "group_name": "dms-grp-existing-import",
+                "gid": 9000001,
+                "members": ["alice", "bob"],
+            }
+        },
     )
     request_id = create_request(
         repository,
@@ -439,20 +451,13 @@ def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
             "storage_name": "cephfs-a",
             "directory_name": "existing-import",
             "import_mode": "full",
-            "access_policy": {
-                "mode": "adopt_existing_group",
-                "expected_group": "dms-phase12-existing",
-                "expected_mode": "0770",
-                "users": ["alice", "bob"],
-                "denied_users": ["mallory"],
-            },
             "quota": {"capacity_bytes": 16 * 1024**2, "file_count": 64},
             "preserve_existing_data": True,
         },
     )
 
     assert Planner(repository).run_once() == 1
-    run_worker(repository, observability, executor)
+    run_worker(repository, observability, executor, identity=identity)
 
     resource = repository.get_resource(
         ResourceKind.FILESYSTEM.value, "cephfs-a:existing-import"
@@ -461,17 +466,73 @@ def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
         repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
     )
     assert resource["desired_state"]["management_mode"] == "full"
+    # members auto-adopted from the live dms-grp-* group via LDAP
     assert resource["desired_state"]["users"] == ["alice", "bob"]
-    assert resource["observed_state"]["access_validation"]["allowed_users"] == {
-        "alice": "ok",
-        "bob": "ok",
-    }
-    assert resource["observed_state"]["access_validation"]["denied_users"] == {
-        "mallory": "denied"
-    }
+    adoption = resource["observed_state"]["group_adoption"]
+    assert adoption["mode"] == "adopt_existing_dms_group"
+    assert adoption["changed_group"] is False
+    assert adoption["live_group"] == "dms-grp-existing-import"
     assert (
         resource["observed_state"]["quota_state"]["file_count"]["observed_count"] == 64
     )
+
+
+def test_phase12_import_external_group_creates_dms_group(tmp_path):
+    repository, observability = repository_pair(tmp_path)
+    register_cephfs_mapping(repository)
+    executor = FakePhase12FilesystemExecutor()
+    # Live dir carries an EXTERNAL (non dms-grp-*) group → import creates a new
+    # dms-grp-{dir}, copies members, and chowns the dir to the new gid.
+    executor.seed_directory(
+        "ext-import",
+        resource_key=None,
+        quota=None,
+        group_name="ext-team",
+        group_gid=8500001,
+        mode="0770",
+    )
+    identity = StubIdentityGroupManager(
+        users={"alice": {}, "bob": {}},
+        groups={
+            "ext-team": {
+                "group_name": "ext-team",
+                "gid": 8500001,
+                "members": ["alice", "bob"],
+            }
+        },
+    )
+    request_id = create_request(
+        repository,
+        OperationKind.FILESYSTEM_IMPORT,
+        payload={
+            "storage_name": "cephfs-a",
+            "directory_name": "ext-import",
+            "import_mode": "full",
+            "quota": {"capacity_bytes": 16 * 1024**2},
+        },
+    )
+
+    assert Planner(repository).run_once() == 1
+    run_worker(repository, observability, executor, identity=identity)
+
+    resource = repository.get_resource(
+        ResourceKind.FILESYSTEM.value, "cephfs-a:ext-import"
+    )
+    assert (
+        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
+    adoption = resource["observed_state"]["group_adoption"]
+    assert adoption["mode"] == "create_dms_group_from_external"
+    assert adoption["changed_group"] is True
+    assert adoption["live_group"] == "ext-team"
+    assert adoption["new_group"] == "dms-grp-ext-import"
+    # external members copied into the new DMS group
+    assert resource["desired_state"]["users"] == ["alice", "bob"]
+    assert "dms-grp-ext-import" in identity.groups
+    # directory was chowned to the new group's gid
+    assert executor.directories["ext-import"]["group_gid"] == identity.groups[
+        "dms-grp-ext-import"
+    ]["gid"]
 
 
 def test_phase12_import_rejects_missing_access_policy_and_unsafe_name(tmp_path):
@@ -537,12 +598,13 @@ class FakePhase12FilesystemExecutor:
         marker: dict[str, Any] | None = None,
         management_mode: str | None = "full",
         group_name: str = "dms-grp-project",
+        group_gid: int = 24000,
         mode: str = "0770",
     ) -> None:
         self.directories[directory_name] = {
             "path": f"/mnt/testbed-cephfs/dms-phase10/{directory_name}",
             "group_name": group_name,
-            "group_gid": 24000,
+            "group_gid": group_gid,
             "mode": mode,
             "quota_state": quota_state(
                 quota or {}, usage or {"used_bytes": 0, "used_files": 0}
@@ -669,32 +731,24 @@ class FakePhase12FilesystemExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        access_policy: dict[str, Any],
+        chown_gid: int | None,
         quota: dict[str, int] | None,
-        allowed_users: list[str],
-        denied_users: list[str],
     ) -> dict[str, Any]:
         self.calls.append({"operation": "import", "directory_name": directory_name})
         directory = self.directories[directory_name]
-        if directory["group_name"] != access_policy["expected_group"]:
-            raise RuntimeError("filesystem access group unresolved")
-        if directory["mode"] != access_policy.get("expected_mode", "0770"):
-            raise RuntimeError("filesystem import mode mismatch")
+        if chown_gid is not None:
+            # External-group adoption: directory chowned to the new DMS group.
+            directory["group_gid"] = chown_gid
         if quota:
             directory["quota_state"] = quota_state(quota, None)
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
-            "group_name": directory["group_name"],
             "group_gid": directory["group_gid"],
             "mode": directory["mode"],
             "quota_state": directory["quota_state"],
-            "access_validation": {
-                "allowed_users": {user: "ok" for user in allowed_users},
-                "denied_users": {user: "denied" for user in denied_users},
-            },
             "management_mode": "full",
-            "backend_side_effect": True,
+            "backend_side_effect": bool(chown_gid is not None or quota),
             "verified": True,
         }
 
@@ -844,6 +898,7 @@ def run_worker(
     repository: DmsRepository,
     observability: ObservabilityRepository,
     executor: FakePhase12FilesystemExecutor,
+    identity: StubIdentityGroupManager | None = None,
 ) -> None:
     adapter = CephFsHostMountedFilesystemBackendAdapter(
         template=CephFsBackendTemplate(
@@ -853,7 +908,8 @@ def run_worker(
             managed_root="/mnt/testbed-cephfs/dms-phase10",
             rm_worker_node="c1-worker",
         ),
-        identity_groups=StubIdentityGroupManager(users={"alice": {}, "bob": {}}),
+        identity_groups=identity
+        or StubIdentityGroupManager(users={"alice": {}, "bob": {}}),
         executor=executor,
     )
     worker = RMWorkerRuntime(
