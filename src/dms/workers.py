@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -14,6 +16,7 @@ from .adapters import (
     BackendPreconditionError,
     DataManagementRuntimeError,
     FilesystemBackendAdapter,
+    IdentityLookupConfigurationError,
     KubernetesNamespaceQuotaAdapter,
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
@@ -626,16 +629,31 @@ class RMWorkerRuntime:
         return None
 
     def _filesystem_adapter(self, plan: dict[str, Any]) -> FilesystemBackendAdapter:
-        if self.backend_registry:
-            return self.backend_registry.filesystem_for_plan(plan)
-        return self.filesystem_adapter
+        with self._adapter_build_preconditions():
+            if self.backend_registry:
+                return self.backend_registry.filesystem_for_plan(plan)
+            return self.filesystem_adapter
 
     def _kubernetes_adapter(
         self, plan: dict[str, Any]
     ) -> KubernetesNamespaceQuotaAdapter:
-        if self.backend_registry:
-            return self.backend_registry.kubernetes_for_plan(plan)
-        return self.kubernetes_adapter
+        with self._adapter_build_preconditions():
+            if self.backend_registry:
+                return self.backend_registry.kubernetes_for_plan(plan)
+            return self.kubernetes_adapter
+
+    @contextmanager
+    def _adapter_build_preconditions(self) -> Iterator[None]:
+        # Building a backend adapter validates configuration/identity prerequisites
+        # (e.g. LDAP bind credentials for group management). Such failures occur before
+        # any backend side effect, so surface them as BackendPreconditionError -> the
+        # request is classified BackendApplyFailed(precondition) instead of falling
+        # through to the generic handler, which would mark it UnknownAfterSideEffect and
+        # trigger an unnecessary manual recovery flow.
+        try:
+            yield
+        except IdentityLookupConfigurationError as exc:
+            raise BackendPreconditionError(str(exc)) from exc
 
 
 def _filesystem_sweep_failure_reason(message: str) -> str:

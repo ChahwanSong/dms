@@ -120,6 +120,45 @@ def test_unsupported_filesystem_backend_fails_closed_and_is_action_required(tmp_
     )
 
 
+def test_identity_config_error_during_adapter_build_is_precondition(tmp_path):
+    # A cephfs mapping is valid, but the live registry builds an LdapIdentityGroupManager
+    # at adapter-construction time, which raises IdentityLookupConfigurationError when no
+    # LDAP bind credentials are configured. This is a precondition failure with no backend
+    # side effect, so it must be classified BackendApplyFailed(precondition) rather than
+    # UnknownAfterSideEffect (which would trigger an unnecessary manual recovery flow).
+    settings, repository, observability = _repositories(tmp_path)
+    assert settings.ldap_bind_dn is None  # no LDAP group-management credentials
+    _register_mapping(repository, storage_name="cephfs-a", backend_type="cephfs")
+    request_id = repository.create_request(
+        requester_id="user-1",
+        actor="api-client",
+        operation=OperationKind.FILESYSTEM_CREATE.value,
+        resource_kind=ResourceKind.FILESYSTEM.value,
+        resource_key="cephfs-a:phase14-identity-config",
+        payload=_filesystem_payload("cephfs-a", "phase14-identity-config"),
+    )
+    Planner(repository).run_once()
+    worker = RMWorkerRuntime(
+        repository=repository,
+        observability=observability,
+        filesystem_adapter=StubFilesystemBackendAdapter(),
+        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
+        worker_id="rm-phase14",
+        backend_registry=BackendAdapterRegistry.with_live_defaults(
+            repository, settings
+        ),
+    )
+
+    assert worker.run_once() == 1
+    request = repository.get_request(request_id)
+    assert request["status"] == LifecycleState.BACKEND_APPLY_FAILED.value
+    [result] = repository.get_results(request_id)
+    assert result["terminal_status"] == LifecycleState.BACKEND_APPLY_FAILED.value
+    assert result["error_category"] == "backend_precondition"
+    assert result["verification_summary"]["backend_side_effect"] is False
+    assert result["verification_summary"]["precondition_failed"] is True
+
+
 def test_live_registry_uses_live_kubernetes_adapter_for_generic_csi_backend(tmp_path):
     settings, repository, _ = _repositories(tmp_path)
     _register_mapping(
