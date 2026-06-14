@@ -372,7 +372,6 @@ def test_phase12_assign_quota_writes_quota_only_marker(tmp_path):
             "storage_name": "cephfs-a",
             "directory_name": "existing-quota-only",
             "management_mode": "quota_only",
-            "initialize_marker": True,
             "quota": {"capacity_bytes": 16 * 1024**2, "file_count": 64},
         },
     )
@@ -440,7 +439,6 @@ def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
             "storage_name": "cephfs-a",
             "directory_name": "existing-import",
             "import_mode": "full",
-            "initialize_marker": True,
             "access_policy": {
                 "mode": "adopt_existing_group",
                 "expected_group": "dms-phase12-existing",

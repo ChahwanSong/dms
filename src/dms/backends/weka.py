@@ -635,7 +635,6 @@ class WekaFsHostMountedFilesystemBackendAdapter:
         adoption_summary: dict[str, Any] = {}
         if management_mode == "full":
             adoption_summary = self._adopt_full_group(plan, desired, target, evidence)
-        group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
         quota = desired.get("quota") or {}
         _reject_unsupported_quota_fields(quota)
         quota_state: dict[str, Any] = {}
