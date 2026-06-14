@@ -19,7 +19,6 @@ from dms.config import Settings
 from dms.domain import validate_storage_root_basename
 
 CEPHFS_BACKEND_TYPE = "cephfs"
-MARKER_NAME = ".dms-resource.json"
 
 
 class HostExecutionError(RuntimeError):
@@ -32,7 +31,6 @@ class FilesystemHostExecutor(Protocol):
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         group_name: str,
         mode: str,
         allowed_users: list[str],
@@ -85,7 +83,6 @@ class FilesystemHostExecutor(Protocol):
         managed_root: str,
         directory_name: str,
         resource_key: str,
-        require_marker: bool,
         include_quota: bool,
     ) -> dict[str, Any]: ...
 
@@ -94,7 +91,6 @@ class FilesystemHostExecutor(Protocol):
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         quota: dict[str, int],
     ) -> dict[str, Any]: ...
 
@@ -103,7 +99,6 @@ class FilesystemHostExecutor(Protocol):
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         access_policy: dict[str, Any],
         quota: dict[str, int] | None,
         allowed_users: list[str],
@@ -175,7 +170,6 @@ class PythonHostExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         group_name: str,
         mode: str,
         allowed_users: list[str],
@@ -186,7 +180,6 @@ class PythonHostExecutor:
             [
                 managed_root,
                 directory_name,
-                json.dumps(marker, sort_keys=True),
                 group_name,
                 mode,
                 json.dumps(allowed_users),
@@ -276,7 +269,6 @@ class PythonHostExecutor:
         managed_root: str,
         directory_name: str,
         resource_key: str,
-        require_marker: bool,
         include_quota: bool,
     ) -> dict[str, Any]:
         return self._run_script(
@@ -285,7 +277,6 @@ class PythonHostExecutor:
                 managed_root,
                 directory_name,
                 resource_key,
-                "true" if require_marker else "false",
                 "true" if include_quota else "false",
             ],
         )
@@ -295,7 +286,6 @@ class PythonHostExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         quota: dict[str, int],
     ) -> dict[str, Any]:
         return self._run_script(
@@ -303,7 +293,6 @@ class PythonHostExecutor:
             [
                 managed_root,
                 directory_name,
-                json.dumps(marker, sort_keys=True),
                 json.dumps(quota, sort_keys=True),
             ],
         )
@@ -313,7 +302,6 @@ class PythonHostExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         access_policy: dict[str, Any],
         quota: dict[str, int] | None,
         allowed_users: list[str],
@@ -324,7 +312,6 @@ class PythonHostExecutor:
             [
                 managed_root,
                 directory_name,
-                json.dumps(marker, sort_keys=True),
                 json.dumps(access_policy, sort_keys=True),
                 json.dumps(quota or {}, sort_keys=True),
                 json.dumps(allowed_users),
@@ -432,7 +419,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
             )
         mode = str(desired.get("mode", "0750"))
         _validate_mode(mode)
-        marker = self._marker(plan, group_name)
         try:
             group = self.identity_groups.ensure_group_members(
                 group_name=group_name,
@@ -444,7 +430,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
         observed = self.executor.create_directory(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
-            marker=marker,
             group_name=group_name,
             mode=mode,
             allowed_users=users,
@@ -480,7 +465,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
             "backend": self.template.metadata(),
             "directory_name": directory_name,
             "path": observed.get("path"),
-            "marker": marker,
             "access_group": {
                 "group_name": group_name,
                 "gid": group.get("gid"),
@@ -611,7 +595,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
             managed_root=self.template.managed_root,
             directory_name=directory_name,
             resource_key=plan["resource_key"],
-            require_marker=False,
             include_quota=bool(desired.get("include_quota", True)),
         )
         issues = _quota_check_issues(desired, observed)
@@ -646,7 +629,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
             managed_root=self.template.managed_root,
             directory_name=directory_name,
             resource_key=plan["resource_key"],
-            require_marker=False,
             include_quota=bool(desired.get("include_quota", True)),
         )
         synced_desired = dict(desired)
@@ -696,14 +678,9 @@ class CephFsHostMountedFilesystemBackendAdapter:
             required=False,
         )
         quota = _normalize_quota(desired.get("quota"))
-        marker = self._marker(
-            plan, desired.get("access_group") or access_policy.get("expected_group")
-        )
-        marker["management_mode"] = "full"
         observed = self.executor.import_directory(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
-            marker=marker,
             access_policy=access_policy,
             quota=quota or None,
             allowed_users=users,
@@ -733,7 +710,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "backend": self.template.metadata(),
                 "directory_name": directory_name,
                 "path": observed.get("path"),
-                "marker": marker,
                 "quota": quota,
                 "quota_state": observed.get("quota_state"),
                 "synced_desired_state": synced_desired,
@@ -750,12 +726,9 @@ class CephFsHostMountedFilesystemBackendAdapter:
         quota = _normalize_quota(desired.get("quota"))
         if not quota:
             raise BackendPreconditionError("filesystem quota is required")
-        marker = self._marker(plan, desired.get("access_group") or "")
-        marker["management_mode"] = "quota_only"
         observed = self.executor.assign_quota_directory(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
-            marker=marker,
             quota=quota,
         )
         observed.update(
@@ -778,7 +751,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
                 "backend": self.template.metadata(),
                 "directory_name": directory_name,
                 "path": observed.get("path"),
-                "marker": marker,
                 "quota": quota,
                 "quota_state": observed.get("quota_state"),
                 "synced_desired_state": synced_desired,
@@ -786,19 +758,6 @@ class CephFsHostMountedFilesystemBackendAdapter:
             observed_state=observed,
             message="CephFS host-mounted filesystem quota assignment completed",
         )
-
-    def _marker(self, plan: dict[str, Any], group_name: str) -> dict[str, Any]:
-        desired = plan["desired_state"]
-        return {
-            "managed_by": "dms",
-            "resource_kind": "filesystem",
-            "resource_key": plan["resource_key"],
-            "storage_name": desired["storage_name"],
-            "directory_name": desired["directory_name"],
-            "request_id": plan["request_id"],
-            "access_group": group_name,
-            "management_mode": "full",
-        }
 
     def _validate_template(self) -> None:
         if not self.template.managed_root:
@@ -1007,8 +966,7 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import sys
     import time
 
-    root, directory_name, marker_json, group_name, mode_text, allowed_json, denied_json = sys.argv[1:]
-    marker = json.loads(marker_json)
+    root, directory_name, group_name, mode_text, allowed_json, denied_json = sys.argv[1:]
     allowed = json.loads(allowed_json)
     denied = json.loads(denied_json)
 
@@ -1077,7 +1035,6 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
         "group_gid": stat_result.st_gid,
         "group_name": group_name,
         "mode": oct(stat_result.st_mode & 0o777)[2:].zfill(4),
-        "marker": marker,
         "access_validation": access,
         "verified": True,
     }, sort_keys=True))
@@ -1158,11 +1115,6 @@ _BLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
         raise SystemExit("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
         raise SystemExit("PRECONDITION: target directory missing")
-    marker = None
-    marker_path = os.path.join(target, ".dms-resource.json")
-    if os.path.exists(marker_path):
-        with open(marker_path, encoding="utf-8") as handle:
-            marker = json.load(handle)
     stat_before = os.stat(target)
     mode_before = oct(stat_before.st_mode & 0o777)[2:].zfill(4)
     already_blocked = mode_before == "0000" and prior_block_state.get("blocked")
@@ -1196,7 +1148,6 @@ _BLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     print(json.dumps({
         "path": target,
         "exists": True,
-        "marker": marker,
         "mode_before": mode_before,
         "mode": oct(stat_after.st_mode & 0o777)[2:].zfill(4),
         "already_blocked": bool(already_blocked),
@@ -1260,14 +1211,8 @@ _UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
         raise SystemExit("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
         raise SystemExit("PRECONDITION: target directory missing")
-    marker = None
-    marker_path = os.path.join(target, ".dms-resource.json")
-    if os.path.exists(marker_path):
-        with open(marker_path, encoding="utf-8") as handle:
-            marker = json.load(handle)
     group = grp.getgrnam(group_name)
     os.chown(target, -1, group.gr_gid)
-    os.chown(marker_path, -1, group.gr_gid)
     os.chmod(target, int(mode_text, 8))
     refresh_sssd_cache()
     access = {"allowed_users": {}, "denied_users": {}}
@@ -1293,7 +1238,6 @@ _UNBLOCK_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     print(json.dumps({
         "path": target,
         "exists": True,
-        "marker": marker,
         "group_name": group_name,
         "group_gid": group.gr_gid,
         "mode": oct(stat_after.st_mode & 0o777)[2:].zfill(4),
@@ -1344,11 +1288,6 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(r"""
         fail("PRECONDITION: target escaped managed root")
     if not os.path.isdir(target):
         fail("PRECONDITION: target directory missing")
-    marker = None
-    marker_path = os.path.join(target, ".dms-resource.json")
-    if os.path.exists(marker_path):
-        with open(marker_path, encoding="utf-8") as handle:
-            marker = json.load(handle)
     if quota.get("capacity_bytes") is not None:
         run(["setfattr", "-n", "ceph.quota.max_bytes", "-v", str(int(quota["capacity_bytes"])), target])
     if quota.get("file_count") is not None:
@@ -1379,7 +1318,6 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(r"""
     print(json.dumps({
         "path": target,
         "exists": True,
-        "marker": marker,
         "quota_state": quota_state,
         "quota_capability": {
             "supports_capacity_quota": True,
@@ -1402,8 +1340,7 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(r"""
     import subprocess
     import sys
 
-    root, directory_name, resource_key, require_marker_text, include_quota_text = sys.argv[1:]
-    require_marker = require_marker_text == "true"
+    root, directory_name, resource_key, include_quota_text = sys.argv[1:]
     include_quota = include_quota_text == "true"
 
     def getx(path, name):
@@ -1430,15 +1367,6 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(r"""
     if not os.path.isdir(target):
         print(json.dumps({"path": target, "exists": False, "verified": False}, sort_keys=True))
         raise SystemExit(0)
-    marker_path = os.path.join(target, ".dms-resource.json")
-    marker = None
-    if os.path.exists(marker_path):
-        with open(marker_path, encoding="utf-8") as handle:
-            marker = json.load(handle)
-        if resource_key and marker.get("resource_key") != resource_key:
-            raise SystemExit("target directory marker resource key mismatch")
-    elif require_marker:
-        raise SystemExit("target directory exists without DMS marker")
     stat_result = os.stat(target)
     try:
         group_name = grp.getgrgid(stat_result.st_gid).gr_name
@@ -1460,7 +1388,6 @@ _READ_DIRECTORY_STATE_SCRIPT = textwrap.dedent(r"""
     print(json.dumps({
         "path": target,
         "exists": True,
-        "marker": marker,
         "owner_uid": stat_result.st_uid,
         "group_gid": stat_result.st_gid,
         "group_name": group_name,
@@ -1479,8 +1406,7 @@ _ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import subprocess
     import sys
 
-    root, directory_name, marker_json, quota_json = sys.argv[1:]
-    marker = json.loads(marker_json)
+    root, directory_name, quota_json = sys.argv[1:]
     quota = json.loads(quota_json or "{}")
 
     def fail(message):
@@ -1533,7 +1459,6 @@ _ASSIGN_QUOTA_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     print(json.dumps({
         "path": target,
         "exists": True,
-        "marker": marker,
         "management_mode": "quota_only",
         "quota_state": quota_state,
         "backend_side_effect": True,
@@ -1551,8 +1476,7 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import sys
     import time
 
-    root, directory_name, marker_json, access_policy_json, quota_json, allowed_json, denied_json = sys.argv[1:]
-    marker = json.loads(marker_json)
+    root, directory_name, access_policy_json, quota_json, allowed_json, denied_json = sys.argv[1:]
     access_policy = json.loads(access_policy_json or "{}")
     quota = json.loads(quota_json or "{}")
     allowed = json.loads(allowed_json)
@@ -1649,7 +1573,6 @@ _IMPORT_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     print(json.dumps({
         "path": target,
         "exists": True,
-        "marker": marker,
         "group_name": expected_group,
         "group_gid": group.gr_gid,
         "mode": mode_before,

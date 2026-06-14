@@ -387,11 +387,7 @@ def test_phase12_assign_quota_writes_quota_only_marker(tmp_path):
         repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
     )
     assert resource["desired_state"]["management_mode"] == "quota_only"
-    assert resource["applied_state"]["marker"]["management_mode"] == "quota_only"
-    assert (
-        executor.directories["existing-quota-only"]["marker"]["management_mode"]
-        == "quota_only"
-    )
+    assert resource["observed_state"]["management_mode"] == "quota_only"
 
 
 def test_phase12_delete_rejects_quota_only_resource(tmp_path):
@@ -545,18 +541,8 @@ class FakePhase12FilesystemExecutor:
         group_name: str = "dms-grp-project",
         mode: str = "0770",
     ) -> None:
-        if marker is None and resource_key:
-            marker = {
-                "managed_by": "dms",
-                "resource_kind": "filesystem",
-                "resource_key": resource_key,
-                "storage_name": "cephfs-a",
-                "directory_name": directory_name,
-                "management_mode": management_mode or "full",
-            }
         self.directories[directory_name] = {
             "path": f"/mnt/testbed-cephfs/dms-phase10/{directory_name}",
-            "marker": marker,
             "group_name": group_name,
             "group_gid": 24000,
             "mode": mode,
@@ -570,7 +556,6 @@ class FakePhase12FilesystemExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         group_name: str,
         mode: str,
         allowed_users: list[str],
@@ -579,7 +564,6 @@ class FakePhase12FilesystemExecutor:
         self.calls.append({"operation": "create", "directory_name": directory_name})
         self.directories[directory_name] = {
             "path": f"{managed_root}/{directory_name}",
-            "marker": marker,
             "group_name": group_name,
             "group_gid": 24000,
             "mode": mode,
@@ -592,7 +576,6 @@ class FakePhase12FilesystemExecutor:
             "group_name": group_name,
             "group_gid": 24000,
             "mode": mode,
-            "marker": marker,
             "access_validation": {
                 "allowed_users": {user: "ok" for user in allowed_users},
                 "denied_users": {user: "denied" for user in denied_users},
@@ -612,14 +595,10 @@ class FakePhase12FilesystemExecutor:
             {"operation": "apply_quota", "directory_name": directory_name}
         )
         directory = self.directories[directory_name]
-        marker = directory.get("marker") or {}
-        if marker.get("resource_key") != resource_key:
-            raise RuntimeError("target directory marker resource key mismatch")
         directory["quota_state"] = quota_state(quota, None)
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
-            "marker": marker,
             "quota_state": directory["quota_state"],
             "quota_capability": {"quota_backend": "cephfs-xattr"},
             "backend_side_effect": True,
@@ -632,7 +611,6 @@ class FakePhase12FilesystemExecutor:
         managed_root: str,
         directory_name: str,
         resource_key: str,
-        require_marker: bool,
         include_quota: bool,
     ) -> dict[str, Any]:
         self.calls.append(
@@ -649,15 +627,9 @@ class FakePhase12FilesystemExecutor:
                 "exists": False,
                 "verified": False,
             }
-        marker = directory.get("marker")
-        if require_marker and not marker:
-            raise RuntimeError("target directory exists without DMS marker")
-        if marker and marker.get("resource_key") != resource_key:
-            raise RuntimeError("target directory marker resource key mismatch")
         state = {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
-            "marker": marker,
             "group_name": directory["group_name"],
             "group_gid": directory["group_gid"],
             "mode": directory["mode"],
@@ -678,19 +650,16 @@ class FakePhase12FilesystemExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         quota: dict[str, int],
     ) -> dict[str, Any]:
         self.calls.append(
             {"operation": "assign_quota", "directory_name": directory_name}
         )
         directory = self.directories[directory_name]
-        directory["marker"] = marker
         directory["quota_state"] = quota_state(quota, None)
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
-            "marker": marker,
             "management_mode": "quota_only",
             "quota_state": directory["quota_state"],
             "backend_side_effect": True,
@@ -702,7 +671,6 @@ class FakePhase12FilesystemExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         access_policy: dict[str, Any],
         quota: dict[str, int] | None,
         allowed_users: list[str],
@@ -714,13 +682,11 @@ class FakePhase12FilesystemExecutor:
             raise RuntimeError("filesystem access group unresolved")
         if directory["mode"] != access_policy.get("expected_mode", "0770"):
             raise RuntimeError("filesystem import mode mismatch")
-        directory["marker"] = marker
         if quota:
             directory["quota_state"] = quota_state(quota, None)
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
-            "marker": marker,
             "group_name": directory["group_name"],
             "group_gid": directory["group_gid"],
             "mode": directory["mode"],

@@ -297,7 +297,6 @@ class FakeFilesystemExecutor:
         *,
         managed_root: str,
         directory_name: str,
-        marker: dict[str, Any],
         group_name: str,
         mode: str,
         allowed_users: list[str],
@@ -308,7 +307,6 @@ class FakeFilesystemExecutor:
                 "operation": "create",
                 "managed_root": managed_root,
                 "directory_name": directory_name,
-                "marker": marker,
                 "group_name": group_name,
                 "mode": mode,
                 "allowed_users": allowed_users,
@@ -322,7 +320,6 @@ class FakeFilesystemExecutor:
             "group_name": group_name,
             "group_gid": 24000,
             "mode": mode,
-            "marker": marker,
             "access_validation": {
                 "allowed_users": {user: "ok" for user in allowed_users},
                 "denied_users": {user: "denied" for user in denied_users},
