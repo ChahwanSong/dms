@@ -493,16 +493,16 @@ class WekaFsHostMountedFilesystemBackendAdapter:
         group_name = desired.get("access_group") or f"dms-grp-{directory_name}"
         evidence: list[dict[str, Any]] = []
 
-        # Soft-delete: reset quota + remove LDAP group, then lock down the directory
-        # (chown root:root + chmod 000). Data is preserved and accessible only by root.
-        self._reset_quota(target, evidence)
-        group_cleanup: dict = {}
-        if group_name.startswith("dms-"):
-            group_cleanup = self.identity_groups.delete_group(group_name=group_name)
+        # Soft-delete (parity with GPFS/CephFS): lock down the directory
+        # (chown root:root -> chmod 000) preserving data, then remove the LDAP
+        # group. No quota reset; permanent removal is a manual operator step.
         self._run(
             ["chown", "root:root", target], evidence, fail=False, side_effect=True
         )
         self._run(["chmod", "000", target], evidence, fail=False, side_effect=True)
+        group_cleanup: dict = {}
+        if group_name.startswith("dms-"):
+            group_cleanup = self.identity_groups.delete_group(group_name=group_name)
 
         applied = {
             "adapter": "wekafs-host-mounted",
@@ -1061,12 +1061,6 @@ class WekaFsHostMountedFilesystemBackendAdapter:
                 else {}
             ),
         }
-
-    def _reset_quota(self, target: str, evidence: list[dict[str, Any]]) -> None:
-        argv = ["weka", "fs", "quota", "reset", target]
-        if self.template.weka_profile:
-            argv.extend(["--profile", self.template.weka_profile])
-        self._run(argv, evidence, fail=False, side_effect=True)
 
     def _write_marker(
         self,
