@@ -18,9 +18,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dms.adapters import (
+    BackendPreconditionError,
     KubernetesNamespaceQuotaLiveAdapter,
     StubKubernetesNamespaceQuotaAdapter,
 )
+from dms.workers import _rm_precondition_issue
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
@@ -293,3 +295,56 @@ def test_k1_unblock_sets_resource_status_succeeded():
 def test_k1_normal_apply_status_succeeded():
     result = _FakeK8sLiveAdapter().apply_resource_quota(_apply_plan(None))
     assert result.observed_state["resource_status"] == "Succeeded"
+
+
+# --------------------------------------------------------------------------- #
+# K3 — :import precondition refusals raise BackendPreconditionError (not the
+#      generic error that the worker would classify as UnknownAfterSideEffect).
+# --------------------------------------------------------------------------- #
+def _import_plan() -> dict[str, Any]:
+    return {
+        "plan_id": "p",
+        "request_id": "r",
+        "resource_key": RKEY,
+        "desired_state": {
+            "cluster_name": CLUSTER,
+            "namespace_name": NS,
+            "resource_quota_name": "dms-storage-quota",
+        },
+    }
+
+
+class _NonDmsImportAdapter(KubernetesNamespaceQuotaLiveAdapter):
+    def read_resource_quota(self, *_args, **_kwargs):
+        # live RQ exists but lacks DMS markers (external / non-DMS).
+        return {
+            "exists": True,
+            "name": "dms-storage-quota",
+            "labels": {},
+            "annotations": {},
+            "spec_hard": {"requests.storage": "1Gi"},
+        }
+
+
+class _MissingImportAdapter(KubernetesNamespaceQuotaLiveAdapter):
+    def read_resource_quota(self, *_args, **_kwargs):
+        return {"exists": False}
+
+
+def test_k3_import_non_dms_raises_precondition():
+    with pytest.raises(BackendPreconditionError, match="non-DMS"):
+        _NonDmsImportAdapter().import_resource_quota(_import_plan())
+
+
+def test_k3_import_missing_rq_raises_precondition():
+    with pytest.raises(BackendPreconditionError, match="does not exist"):
+        _MissingImportAdapter().import_resource_quota(_import_plan())
+
+
+def test_k3_precondition_issue_labels_import():
+    issue = _rm_precondition_issue(
+        "kubernetes.namespace_quota.import",
+        "refusing to mutate non-DMS ResourceQuota: dms-storage-quota",
+    )
+    assert issue is not None
+    assert issue["issue_type"] == "kubernetes_quota_import_preflight_failed"

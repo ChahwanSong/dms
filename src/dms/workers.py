@@ -688,6 +688,14 @@ def _rm_precondition_issue(operation: str, message: str) -> dict[str, Any] | Non
             "reason": "unsupported_backend",
             "message": message,
         }
+    if operation == OperationKind.K8S_QUOTA_IMPORT.value:
+        # Import is DB-only; a precondition refusal (non-DMS ResourceQuota, missing
+        # RQ, unmappable StorageClass keys) carries no side effect.
+        return {
+            "issue_type": "kubernetes_quota_import_preflight_failed",
+            "reason": "kubernetes_quota_import_preflight_failed",
+            "message": message,
+        }
     if not operation.startswith("filesystem."):
         return None
     if operation == OperationKind.FILESYSTEM_IMPORT.value:

@@ -763,15 +763,22 @@ class KubernetesNamespaceQuotaLiveAdapter:
         observed = self.read_resource_quota(
             cluster_name, namespace_name, resource_quota_name
         )
+        # Import is DB-only (it never mutates the live ResourceQuota), so every
+        # failure below is a pre-side-effect precondition. Raise
+        # BackendPreconditionError so the worker reports BackendApplyFailed (no side
+        # effect) instead of UnknownAfterSideEffect (which would leave a stuck request).
         if not observed["exists"]:
-            raise KubernetesMutationError(
+            raise BackendPreconditionError(
                 f"ResourceQuota does not exist: {cluster_name}/{namespace_name}/{resource_quota_name}"
             )
-        _ensure_dms_managed(
-            observed,
-            resource_quota_name,
-            resource_key=desired.get("resource_key"),
-        )
+        try:
+            _ensure_dms_managed(
+                observed,
+                resource_quota_name,
+                resource_key=desired.get("resource_key"),
+            )
+        except KubernetesMutationError as exc:
+            raise BackendPreconditionError(str(exc)) from exc
         synced_desired = dict(desired)
         if not synced_desired.get("storage_class_quotas"):
             synced_desired["storage_class_quotas"] = _infer_storage_class_quotas(
@@ -782,7 +789,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
             synced_desired, observed["spec_hard"]
         )
         if sync_warnings:
-            raise KubernetesMutationError(
+            raise BackendPreconditionError(
                 f"failed to infer all StorageClass quota keys: {sync_warnings}"
             )
         return AdapterResult(
