@@ -735,6 +735,19 @@ class Planner:
         storage_names = self._required_storage_names(request)
         if not storage_names:
             return False
+        # Kubernetes namespace quota is applied directly to the target cluster's
+        # API server (kubectl + kubeconfig) and does NOT run on an RM/DM agent.
+        # Its storage mapping therefore only needs the live StorageClass / cluster /
+        # csi_driver checks to pass (those surface as sanity "Failed"); fresh
+        # RM-agent mount/CSI evidence is irrelevant. Filesystem RM still requires
+        # RM-agent readiness because it SSHes into the storage node to mutate the
+        # filesystem. "Unknown" (no fresh Agent reports at all) is likewise harmless
+        # for the agentless quota path, so only "Failed" blocks it.
+        is_kubernetes_quota = (
+            request["resource_kind"]
+            == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value
+        )
+        unsafe_sanity = {"Failed"} if is_kubernetes_quota else {"Failed", "Unknown"}
         issues: list[dict[str, Any]] = []
         for storage_name in sorted(storage_names):
             mapping = self.repository.get_storage_mapping(storage_name)
@@ -755,7 +768,7 @@ class Planner:
                     }
                 )
                 continue
-            if mapping["sanity_status"] in {"Failed", "Unknown"}:
+            if mapping["sanity_status"] in unsafe_sanity:
                 issues.append(
                     {
                         "storage_name": storage_name,
@@ -764,6 +777,11 @@ class Planner:
                         "sanity_result": mapping.get("sanity_result", {}),
                     }
                 )
+                continue
+            if is_kubernetes_quota:
+                # Agentless: namespace quota needs no RM/DM mount or CSI-node
+                # readiness — the API-server apply only depends on the StorageClass
+                # existing (already verified above via sanity).
                 continue
             readiness_key = (
                 "resource_management"
