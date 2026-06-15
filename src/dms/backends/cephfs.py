@@ -77,6 +77,15 @@ class FilesystemHostExecutor(Protocol):
         quota: dict[str, int],
     ) -> dict[str, Any]: ...
 
+    def apply_owner(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        resource_key: str,
+        owner_username: str,
+    ) -> dict[str, Any]: ...
+
     def read_directory_state(
         self,
         *,
@@ -260,6 +269,24 @@ class PythonHostExecutor:
                 directory_name,
                 resource_key,
                 json.dumps(quota, sort_keys=True),
+            ],
+        )
+
+    def apply_owner(
+        self,
+        *,
+        managed_root: str,
+        directory_name: str,
+        resource_key: str,
+        owner_username: str,
+    ) -> dict[str, Any]:
+        return self._run_script(
+            _APPLY_OWNER_SCRIPT,
+            [
+                managed_root,
+                directory_name,
+                resource_key,
+                owner_username,
             ],
         )
 
@@ -533,23 +560,71 @@ class CephFsHostMountedFilesystemBackendAdapter:
         desired = plan["desired_state"]
         directory_name = desired["directory_name"]
         validate_storage_root_basename("directory_name", directory_name)
-        quota = _normalize_quota(desired.get("quota"))
-        if not quota:
-            raise BackendPreconditionError(
-                "filesystem quota is required for Phase 12 update"
-            )
-        observed = self.executor.apply_quota(
-            managed_root=self.template.managed_root,
-            directory_name=directory_name,
-            resource_key=plan["resource_key"],
-            quota=quota,
+        # Honor the planner's per-field flags so a PATCH applies exactly what the
+        # caller changed (quota, owner, or both). Legacy plans (pre-flag) carried a
+        # quota with no flags; preserve the old quota-only behavior for those.
+        has_flags = (
+            "update_apply_quota" in desired or "update_apply_owner" in desired
         )
+        apply_quota = (
+            bool(desired.get("update_apply_quota")) if has_flags else True
+        )
+        apply_owner = bool(desired.get("update_apply_owner"))
+        if not apply_quota and not apply_owner:
+            raise BackendPreconditionError(
+                "filesystem update requires a quota or owner change"
+            )
+
+        quota = _normalize_quota(desired.get("quota"))
+        observed: dict[str, Any] = {}
+        quota_state: dict[str, Any] | None = None
+        if apply_quota:
+            if not quota:
+                raise BackendPreconditionError(
+                    "filesystem quota is required for Phase 12 update"
+                )
+            observed = self.executor.apply_quota(
+                managed_root=self.template.managed_root,
+                directory_name=directory_name,
+                resource_key=plan["resource_key"],
+                quota=quota,
+            )
+            quota_state = observed.get("quota_state")
+
+        # Owner change. CephFS resolves the owner on the backend node via NSS/SSSD
+        # (pwd.getpwnam) — the same path as create — not via the LDAP adapter. The
+        # host script refuses an unresolvable owner BEFORE chown (-> precondition),
+        # so this is fail-closed (BackendApplyFailed -> filesystem_owner_unresolved).
+        owner_change: dict[str, Any] = {}
+        if apply_owner:
+            owner_username = desired.get("update_owner_username")
+            if not owner_username:
+                raise BackendPreconditionError("update_owner_username missing")
+            owner_observed = self.executor.apply_owner(
+                managed_root=self.template.managed_root,
+                directory_name=directory_name,
+                resource_key=plan["resource_key"],
+                owner_username=str(owner_username),
+            )
+            owner_change = {
+                "owner_username": owner_username,
+                "uid": owner_observed.get("owner_uid"),
+            }
+            # When quota was not (re)applied, the owner script's directory state is
+            # the only observed snapshot we have for this update.
+            if not observed:
+                observed = dict(owner_observed)
+            else:
+                observed["owner_state"] = owner_observed
+
         observed.update(
             {
                 "adapter": "cephfs-host-mounted",
                 "operation": "update",
                 "backend": self.template.metadata(),
                 "resource_key": plan["resource_key"],
+                "owner_change": owner_change,
+                "backend_side_effect": True,
                 "resource_status": (
                     desired.get("resource_status", "Blocked")
                     if desired.get("block_state", {}).get("blocked")
@@ -558,20 +633,30 @@ class CephFsHostMountedFilesystemBackendAdapter:
             }
         )
         synced_desired = dict(desired)
-        synced_desired["quota"] = quota
+        if apply_quota and quota:
+            synced_desired["quota"] = quota
+        applied: dict[str, Any] = {
+            "adapter": "cephfs-host-mounted",
+            "operation": "update",
+            "backend": self.template.metadata(),
+            "directory_name": directory_name,
+            "path": observed.get("path"),
+            "owner_change": owner_change,
+            "synced_desired_state": synced_desired,
+        }
+        if apply_quota and quota:
+            applied["quota"] = quota
+            applied["quota_state"] = quota_state
+        if apply_owner and apply_quota:
+            message = "CephFS host-mounted filesystem quota + owner update completed"
+        elif apply_owner:
+            message = "CephFS host-mounted filesystem owner update completed"
+        else:
+            message = "CephFS host-mounted filesystem quota update completed"
         return AdapterResult(
-            applied_state={
-                "adapter": "cephfs-host-mounted",
-                "operation": "update",
-                "backend": self.template.metadata(),
-                "directory_name": directory_name,
-                "path": observed.get("path"),
-                "quota": quota,
-                "quota_state": observed.get("quota_state"),
-                "synced_desired_state": synced_desired,
-            },
+            applied_state=applied,
             observed_state=observed,
-            message="CephFS host-mounted filesystem quota update completed",
+            message=message,
         )
 
     def block(self, plan: dict[str, Any]) -> AdapterResult:
@@ -1458,6 +1543,67 @@ _APPLY_QUOTA_SCRIPT = textwrap.dedent(r"""
             "supports_file_count_usage": False,
             "quota_backend": "cephfs-xattr",
         },
+        "backend_side_effect": True,
+        "verified": True,
+    }, sort_keys=True))
+    """)
+
+
+_APPLY_OWNER_SCRIPT = textwrap.dedent(r"""
+    import grp
+    import json
+    import os
+    import pwd
+    import subprocess
+    import sys
+
+    root, directory_name, resource_key, owner_username = sys.argv[1:]
+
+    def refresh_sssd_cache():
+        for command in (["sss_cache", "-E"], ["/usr/sbin/sss_cache", "-E"]):
+            try:
+                subprocess.run(command, check=False, capture_output=True, text=True)
+                return
+            except FileNotFoundError:
+                continue
+
+    if not owner_username:
+        raise SystemExit("PRECONDITION: owner_username is required for owner update")
+    # Resolve the new owner's POSIX identity BEFORE any side effect; an unresolvable
+    # owner is refused as a precondition (no chown). No uid-range restriction.
+    refresh_sssd_cache()
+    try:
+        owner_entry = pwd.getpwnam(owner_username)
+    except KeyError:
+        raise SystemExit(
+            f"PRECONDITION: owner '{owner_username}' is not a resolvable POSIX user on the backend node"
+        )
+    owner_uid = owner_entry.pw_uid
+
+    root_real = os.path.realpath(root)
+    target_joined = os.path.join(root_real, directory_name)
+    if os.path.islink(target_joined):
+        raise SystemExit("PRECONDITION: target directory is symlink")
+    target = os.path.realpath(target_joined)
+    if os.path.commonpath([root_real, target]) != root_real:
+        raise SystemExit("PRECONDITION: target escaped managed root")
+    if not os.path.isdir(target):
+        raise SystemExit("PRECONDITION: target directory missing")
+    # Change owner only; preserve the existing DMS access group (gid -1).
+    os.chown(target, owner_uid, -1)
+    stat_result = os.stat(target)
+    try:
+        group_name = grp.getgrgid(stat_result.st_gid).gr_name
+    except KeyError:
+        group_name = str(stat_result.st_gid)
+    print(json.dumps({
+        "path": target,
+        "exists": True,
+        "owner_uid": stat_result.st_uid,
+        "owner_username": owner_username,
+        "group_gid": stat_result.st_gid,
+        "group_name": group_name,
+        "mode": oct(stat_result.st_mode & 0o777)[2:].zfill(4),
         "backend_side_effect": True,
         "verified": True,
     }, sort_keys=True))

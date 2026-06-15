@@ -481,7 +481,12 @@ class GpfsFilesystemBackendAdapter:
             "command_evidence": evidence,
             "backend_side_effect": True,
         }
-        observed = {**applied, "resource_key": plan["resource_key"], "verified": True}
+        observed = {
+            **applied,
+            "resource_key": plan["resource_key"],
+            "resource_status": "Blocked" if block else "Succeeded",
+            "verified": True,
+        }
         return AdapterResult(applied, observed, "GPFS fileset block state updated")
 
     def initialize(self, plan: dict[str, Any]) -> AdapterResult:
