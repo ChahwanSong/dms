@@ -642,6 +642,14 @@ class KubernetesNamespaceQuotaLiveAdapter:
                 "resource_quota_name": resource_quota_name,
                 "namespace": namespace,
                 "resource_quota": observed,
+                # Reflect block state in the persisted lifecycle status so a manual
+                # :block shows "Blocked" (not "Succeeded") — matches the sweep path
+                # and the filesystem backends.
+                "resource_status": (
+                    "Blocked"
+                    if (desired.get("block_state") or {}).get("blocked")
+                    else "Succeeded"
+                ),
             },
             message="Kubernetes ResourceQuota live apply completed",
         )

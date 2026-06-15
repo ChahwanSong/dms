@@ -833,7 +833,10 @@ class Planner:
         existing = self.repository.get_resource(
             request["resource_kind"], request["resource_key"]
         )
-        if operation == OperationKind.K8S_QUOTA_IMPORT.value:
+        if operation in {
+            OperationKind.K8S_QUOTA_IMPORT.value,
+            OperationKind.K8S_QUOTA_CREATE.value,
+        }:
             if existing and existing.get("status") != "Deleted":
                 issues.append(
                     {
@@ -842,7 +845,7 @@ class Planner:
                         "status": existing.get("status"),
                     }
                 )
-        elif operation != OperationKind.K8S_QUOTA_CREATE.value and not existing:
+        elif not existing:
             issues.append(
                 {"reason": "resource_missing", "resource_key": request["resource_key"]}
             )
@@ -918,19 +921,36 @@ class Planner:
             OperationKind.K8S_QUOTA_UPDATE.value,
         }:
             reset_to_default = self._is_kubernetes_default_reset(request)
+            # quota is no longer mandatory on create/update — storage_class_quotas[]
+            # may supply the hard keys instead (§1 model: at least one hard key from
+            # quota OR storage_class_quotas). Validate quota fields only when present.
             for key in ("requests_storage_bytes", "pvc_count"):
                 value = quota.get(key)
-                if operation == OperationKind.K8S_QUOTA_UPDATE.value and (
-                    value is None or reset_to_default
-                ):
+                if value is None or reset_to_default:
                     continue
                 try:
-                    if value is None or int(value) <= 0:
+                    if int(value) <= 0:
                         issues.append(
                             {"reason": f"quota_{key}_invalid", "value": value}
                         )
                 except (TypeError, ValueError):
                     issues.append({"reason": f"quota_{key}_invalid", "value": value})
+            if (
+                operation == OperationKind.K8S_QUOTA_CREATE.value
+                and not reset_to_default
+                and quota.get("requests_storage_bytes") is None
+                and quota.get("pvc_count") is None
+                and not any(
+                    isinstance(entry, dict)
+                    and (
+                        entry.get("requests_storage_bytes") is not None
+                        or entry.get("capacity_bytes") is not None
+                        or entry.get("pvc_count") is not None
+                    )
+                    for entry in storage_class_quotas
+                )
+            ):
+                issues.append({"reason": "kubernetes_quota_hard_key_required"})
             if reset_to_default:
                 policy, policy_issues = self._kubernetes_default_policy_for_request(
                     request

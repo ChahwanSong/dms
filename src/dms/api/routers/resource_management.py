@@ -245,9 +245,14 @@ def resource_management_router() -> APIRouter:
         request: Request,
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
-        key = KubernetesNamespaceQuotaKey(
-            body.payload["cluster_name"], body.payload["namespace_name"]
-        )
+        cluster_name = body.payload.get("cluster_name")
+        namespace_name = body.payload.get("namespace_name")
+        if not cluster_name or not namespace_name:
+            raise HTTPException(
+                status_code=422,
+                detail="cluster_name and namespace_name are required",
+            )
+        key = KubernetesNamespaceQuotaKey(cluster_name, namespace_name)
         return submit_request(
             services=services,
             request=request,
