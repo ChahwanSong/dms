@@ -1172,14 +1172,13 @@ class Planner:
                 existing_desired=(existing or {}).get("desired_state") or {},
                 resource_kind=ResourceKind.FILESYSTEM.value,
             )
-            issues.extend(
-                _unsupported_payload_issues(
-                    payload,
-                    FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS
-                    | EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS,
-                    "filesystem_payload_fields_unsupported",
-                )
+            unsupported_field_issues = _unsupported_payload_issues(
+                payload,
+                FILESYSTEM_UPDATE_ALLOWED_PAYLOAD_FIELDS
+                | EXPIRY_UNSUPPORTED_PAYLOAD_FIELDS,
+                "filesystem_payload_fields_unsupported",
             )
+            issues.extend(unsupported_field_issues)
             if not existing or existing.get("status") == "Deleted":
                 issues.append(
                     {
@@ -1190,10 +1189,14 @@ class Planner:
             if "quota" in payload:
                 issues.extend(_filesystem_quota_issues(payload.get("quota")))
             elif (
-                "expires_at" not in payload
+                not unsupported_field_issues
+                and "expires_at" not in payload
                 and "resource_type" not in payload
                 and "owner_username" not in payload
             ):
+                # Only flag "empty" when the payload carries no recognized update field
+                # AND no unsupported field — an unsupported-field-only PATCH is reported
+                # as unsupported, not as empty.
                 issues.append({"reason": "filesystem_update_payload_empty"})
             update_resource_type = payload.get("resource_type")
             if update_resource_type is not None and str(update_resource_type) not in {
@@ -2174,9 +2177,14 @@ def _append_expiry_issues(
     if "expires_at" not in payload:
         if operation in create_operations:
             issues.append({"reason": "expires_at_required"})
-        elif operation not in import_operations and not existing_desired.get(
-            "expires_at"
+        elif (
+            operation not in import_operations
+            and existing_desired
+            and not existing_desired.get("expires_at")
         ):
+            # Only an EXISTING resource that genuinely lacks expires_at requires one on
+            # update. A missing resource (existing_desired == {}) must not emit a
+            # spurious expires_at_required — resource_missing already covers it.
             issues.append({"reason": "expires_at_required"})
         return
     expires_at = payload.get("expires_at")

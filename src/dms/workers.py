@@ -694,14 +694,25 @@ def _rm_precondition_issue(operation: str, message: str) -> dict[str, Any] | Non
         issue_type = "filesystem_import_preflight_failed"
     elif operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
         issue_type = "filesystem_assign_quota_failed"
+    elif "resolvable" in lowered and "user" in lowered:
+        # owner resolution precondition (e.g. create: requester not a resolvable
+        # POSIX/LDAP user). Not a block — label by the actual failure.
+        issue_type = "filesystem_owner_unresolved"
     elif "quota" in lowered:
         issue_type = "filesystem_quota_apply_failed"
     elif "marker" in lowered:
         issue_type = "filesystem_marker_mismatch"
     elif "group" in lowered:
         issue_type = "filesystem_access_group_unresolved"
-    else:
+    elif operation == OperationKind.FILESYSTEM_CREATE.value:
+        issue_type = "filesystem_create_failed"
+    elif operation in {
+        OperationKind.FILESYSTEM_BLOCK.value,
+        OperationKind.FILESYSTEM_INITIALIZE.value,
+    }:
         issue_type = "filesystem_block_failed"
+    else:
+        issue_type = "filesystem_operation_failed"
     return {"issue_type": issue_type, "reason": issue_type, "message": message}
 
 

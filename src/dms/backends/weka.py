@@ -709,6 +709,28 @@ class WekaFsHostMountedFilesystemBackendAdapter:
             raise BackendPreconditionError(
                 f"WekaFS import: live group (gid={live_gid}) not found in NSS or LDAP"
             )
+        # Optional import hints — fail closed on mismatch BEFORE any side effect
+        # (parity with CephFS).
+        access_policy = desired.get("access_policy") or {}
+        expected_group = access_policy.get("expected_group")
+        if expected_group and live_group_name != expected_group:
+            raise BackendPreconditionError(
+                f"WekaFS import: live group {live_group_name!r} does not match "
+                f"expected_group {expected_group!r}"
+            )
+        expected_mode = access_policy.get("expected_mode")
+        if expected_mode:
+            mode_result = self._run(["stat", "-c", "%a", path], evidence, fail=False)
+            live_mode = (
+                mode_result.stdout.strip().zfill(4)
+                if mode_result.returncode == 0
+                else ""
+            )
+            if live_mode != str(expected_mode):
+                raise BackendPreconditionError(
+                    f"WekaFS import: live mode {live_mode!r} does not match "
+                    f"expected_mode {expected_mode!r}"
+                )
         is_dms_managed = live_group_name.startswith("dms-grp-")
         try:
             live_members = self.identity_groups.list_group_members(

@@ -1100,3 +1100,107 @@ def test_gpfs_create_fails_closed_when_owner_unresolvable(repository_pair):
     assert not any(
         a and a[0] == "mmcrfileset" for a in executor.commands
     ), "no fileset should be created when the owner cannot be resolved"
+
+
+# --- import access_policy.expected_mode / expected_group: fail-closed (GPFS) ---
+
+
+class _ImportProbeExecutor:
+    """Minimal GPFS executor: answers stat/getent for _adopt_full_group preflight."""
+
+    def __init__(self, gid: int, group_name: str, mode: str) -> None:
+        self.gid = gid
+        self.group_name = group_name
+        self.mode = mode
+        self.commands: list[list[str]] = []
+
+    def run(self, argv: list[str], *, timeout_seconds: int) -> CommandResult:
+        self.commands.append(argv)
+        if argv[:3] == ["stat", "-c", "%g"]:
+            return CommandResult(argv=argv, returncode=0, stdout=f"{self.gid}\n", stderr="")
+        if argv[:3] == ["stat", "-c", "%a"]:
+            return CommandResult(argv=argv, returncode=0, stdout=f"{self.mode}\n", stderr="")
+        if argv[0] == "getent":
+            return CommandResult(
+                argv=argv,
+                returncode=0,
+                stdout=f"{self.group_name}:x:{self.gid}:alice\n",
+                stderr="",
+            )
+        return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
+
+
+class _AdoptGroupMgr:
+    def list_group_members(self, *, group_name):
+        return ["alice"]
+
+    def lookup_group_name_by_gid(self, *, gid):
+        return None
+
+    def ensure_group_members(self, *, group_name, users, resource_key):
+        return {"gid": 9009999, "members": list(users), "dn": "", "identity_source": "ldap"}
+
+    def delete_group(self, *, group_name):
+        return {"deleted": True, "group_name": group_name}
+
+
+def _gpfs_import_plan(*, expected_mode=None, expected_group=None) -> dict[str, Any]:
+    ap: dict[str, Any] = {}
+    if expected_mode is not None:
+        ap["expected_mode"] = expected_mode
+    if expected_group is not None:
+        ap["expected_group"] = expected_group
+    return {
+        "plan_id": "p-imp",
+        "request_id": "r-imp",
+        "resource_key": "gpfs-a:imp",
+        "operation_kind": OperationKind.FILESYSTEM_IMPORT.value,
+        "desired_state": {
+            "storage_name": "gpfs-a",
+            "directory_name": "imp",
+            "access_policy": ap,
+        },
+    }
+
+
+def _gpfs_adopt(repository, executor):
+    template = GpfsBackendTemplate.from_storage_mapping(
+        repository.get_storage_mapping("gpfs-a")
+    )
+    return GpfsFilesystemBackendAdapter(
+        template=template, executor=executor, identity_groups=_AdoptGroupMgr()
+    )
+
+
+def test_gpfs_import_expected_mode_mismatch_fails_closed(repository_pair):
+    repository, _ = repository_pair
+    register_gpfs_mapping(repository)
+    ex = _ImportProbeExecutor(gid=9001234, group_name="dms-grp-existing", mode="750")
+    adapter = _gpfs_adopt(repository, ex)
+    plan = _gpfs_import_plan(expected_mode="0770")  # live 0750 != 0770
+    with pytest.raises(BackendPreconditionError, match="expected_mode"):
+        adapter._adopt_full_group(plan, plan["desired_state"], "/gpfs/gpfs0/dms/imp", [])
+    assert not any(a and a[0] == "chown" for a in ex.commands), "no side effect on mismatch"
+
+
+def test_gpfs_import_expected_group_mismatch_fails_closed(repository_pair):
+    repository, _ = repository_pair
+    register_gpfs_mapping(repository)
+    ex = _ImportProbeExecutor(gid=9001234, group_name="dms-grp-existing", mode="750")
+    adapter = _gpfs_adopt(repository, ex)
+    plan = _gpfs_import_plan(expected_mode="0750", expected_group="dms-grp-wanted")
+    with pytest.raises(BackendPreconditionError, match="expected_group"):
+        adapter._adopt_full_group(plan, plan["desired_state"], "/gpfs/gpfs0/dms/imp", [])
+
+
+def test_gpfs_import_hints_match_adopts(repository_pair):
+    repository, _ = repository_pair
+    register_gpfs_mapping(repository)
+    ex = _ImportProbeExecutor(gid=9001234, group_name="dms-grp-existing", mode="750")
+    adapter = _gpfs_adopt(repository, ex)
+    plan = _gpfs_import_plan(expected_mode="0750", expected_group="dms-grp-existing")
+    summary = adapter._adopt_full_group(
+        plan, plan["desired_state"], "/gpfs/gpfs0/dms/imp", []
+    )
+    assert summary["live_group"] == "dms-grp-existing"
+    assert summary["changed_group"] is False

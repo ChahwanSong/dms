@@ -163,11 +163,13 @@ def test_phase12_filesystem_update_requires_existing_quota_only_payload(tmp_path
 
     [result] = repository.get_results(request_id)
     assert result["terminal_status"] == LifecycleState.REJECTED.value
+    # An unsupported-field-only PATCH on a missing resource reports exactly the real
+    # problems: the unsupported field and the missing resource. It must NOT also emit a
+    # spurious `expires_at_required` (update never requires it) nor
+    # `filesystem_update_payload_empty` (the payload is unsupported, not empty).
     assert {issue["reason"] for issue in result["verification_summary"]["issues"]} == {
-        "expires_at_required",
         "filesystem_payload_fields_unsupported",
         "filesystem_resource_missing",
-        "filesystem_update_payload_empty",
     }
 
 
