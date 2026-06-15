@@ -321,12 +321,15 @@ class WekaFsHostMountedFilesystemBackendAdapter:
         except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
             raise BackendPreconditionError(str(exc)) from exc
 
+        # Resolve the directory owner BEFORE any side effect so an unresolvable owner
+        # fails closed (no mkdir), in parity with CephFS.
+        owner_uid = self._resolve_owner_uid(plan, desired)
+
         side_effect_started = False
         try:
             self._run(["mkdir", "-p", target], evidence, side_effect=True)
             side_effect_started = True
             self._run(["sss_cache", "-E"], evidence, fail=False, side_effect=False)
-            owner_uid = self._resolve_owner_uid(plan, desired)
             gid = group.get("gid")
             if owner_uid is not None and gid is not None:
                 self._run(
@@ -757,8 +760,13 @@ class WekaFsHostMountedFilesystemBackendAdapter:
     def _resolve_owner_uid(
         self, plan: dict[str, Any], desired: dict[str, Any]
     ) -> int | None:
-        if self.identity_lookup is None:
-            return None
+        """Resolve the directory owner's uid via LDAP (strict / fail-closed).
+
+        Returns None ONLY when no owner is specified (group-only chown). When an owner
+        IS specified but cannot be resolved to an LDAP uid, raises
+        BackendPreconditionError so the create fails closed instead of silently leaving
+        the directory owned by root (parity with CephFS). No uid-range restriction.
+        """
         username = (
             desired.get("owner_username")
             or desired.get("requester_id")
@@ -766,12 +774,21 @@ class WekaFsHostMountedFilesystemBackendAdapter:
         )
         if not username:
             return None
+        if self.identity_lookup is None:
+            # No LDAP resolver configured at all -> cannot enforce owner; fall back to
+            # group-only chown. In production the resolver is always configured, so the
+            # strict (fail-closed) branches below apply.
+            return None
         try:
             result = self.identity_lookup.lookup("ldap", str(username))
-        except (IdentityLookupConfigurationError, IdentityLookupReadError):
-            return None
+        except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+            raise BackendPreconditionError(
+                f"WekaFS owner '{username}' is not a resolvable LDAP user: {exc}"
+            ) from exc
         if not result or result.uid is None:
-            return None
+            raise BackendPreconditionError(
+                f"WekaFS owner '{username}' is not a resolvable LDAP user"
+            )
         return int(result.uid)
 
     def _read_directory_attrs(

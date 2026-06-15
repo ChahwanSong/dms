@@ -2288,15 +2288,23 @@ class LdapIdentityGroupManager:
                 created = False
                 if not connection.entries:
                     gid_number = self._next_gid(connection)
+                    add_attributes: dict[str, Any] = {
+                        "cn": group_name,
+                        "gidNumber": gid_number,
+                        "description": f"DMS managed access group for {resource_key}",
+                    }
+                    # memberUid is OPTIONAL (MAY) in the RFC2307 posixGroup schema,
+                    # but including the attribute with zero values is rejected by
+                    # OpenLDAP as a protocol error ("no values for attribute type").
+                    # Omit it entirely when there are no members so an empty access
+                    # group can still be created -- e.g. importing a directory whose
+                    # live group has no LDAP members (root-owned / empty posixGroup).
+                    if users:
+                        add_attributes["memberUid"] = list(users)
                     if not connection.add(
                         group_dn,
                         object_class=["top", "posixGroup"],
-                        attributes={
-                            "cn": group_name,
-                            "gidNumber": gid_number,
-                            "memberUid": list(users),
-                            "description": f"DMS managed access group for {resource_key}",
-                        },
+                        attributes=add_attributes,
                     ):
                         raise IdentityLookupReadError(
                             f"LDAP group create failed: {connection.result}"

@@ -301,6 +301,7 @@ class FakeFilesystemExecutor:
         mode: str,
         allowed_users: list[str],
         denied_users: list[str],
+        owner_username: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -311,12 +312,15 @@ class FakeFilesystemExecutor:
                 "mode": mode,
                 "allowed_users": allowed_users,
                 "denied_users": denied_users,
+                "owner_username": owner_username,
             }
         )
         return {
             "path": f"{managed_root}/{directory_name}",
             "exists": True,
             "created": True,
+            "owner_username": owner_username,
+            "owner_uid": 10001 if owner_username else 0,
             "group_name": group_name,
             "group_gid": 24000,
             "mode": mode,

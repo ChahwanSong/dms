@@ -620,6 +620,7 @@ class FakePhase12FilesystemExecutor:
         mode: str,
         allowed_users: list[str],
         denied_users: list[str],
+        owner_username: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append({"operation": "create", "directory_name": directory_name})
         self.directories[directory_name] = {

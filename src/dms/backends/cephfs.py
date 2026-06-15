@@ -172,6 +172,7 @@ class PythonHostExecutor:
         mode: str,
         allowed_users: list[str],
         denied_users: list[str],
+        owner_username: str | None = None,
     ) -> dict[str, Any]:
         return self._run_script(
             _CREATE_DIRECTORY_SCRIPT,
@@ -182,6 +183,7 @@ class PythonHostExecutor:
                 mode,
                 json.dumps(allowed_users),
                 json.dumps(denied_users),
+                owner_username or "",
             ],
         )
 
@@ -421,6 +423,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
             )
         except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
             raise BackendPreconditionError(str(exc)) from exc
+        owner_username = desired.get("owner_username")
         observed = self.executor.create_directory(
             managed_root=self.template.managed_root,
             directory_name=directory_name,
@@ -428,6 +431,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
             mode=mode,
             allowed_users=users,
             denied_users=denied_users,
+            owner_username=owner_username,
         )
         quota_state: dict[str, Any] | None = None
         quota = _normalize_quota(desired.get("quota"))
@@ -459,6 +463,8 @@ class CephFsHostMountedFilesystemBackendAdapter:
             "backend": self.template.metadata(),
             "directory_name": directory_name,
             "path": observed.get("path"),
+            "owner_username": owner_username,
+            "owner_uid": observed.get("owner_uid"),
             "access_group": {
                 "group_name": group_name,
                 "gid": group.get("gid"),
@@ -1071,11 +1077,12 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     import grp
     import json
     import os
+    import pwd
     import subprocess
     import sys
     import time
 
-    root, directory_name, group_name, mode_text, allowed_json, denied_json = sys.argv[1:]
+    root, directory_name, group_name, mode_text, allowed_json, denied_json, owner_username = sys.argv[1:]
     allowed = json.loads(allowed_json)
     denied = json.loads(denied_json)
 
@@ -1103,6 +1110,19 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
             except FileNotFoundError:
                 continue
 
+    # Resolve the requesting owner's POSIX identity BEFORE any side effect so an
+    # unresolvable requester is refused as a precondition (no mkdir). The owner must
+    # exist as a POSIX user on the backend node; no uid-range restriction is imposed.
+    owner_uid = -1
+    if owner_username:
+        try:
+            owner_entry = pwd.getpwnam(owner_username)
+        except KeyError:
+            raise SystemExit(
+                f"PRECONDITION: requester '{owner_username}' is not a resolvable POSIX user on the backend node"
+            )
+        owner_uid = owner_entry.pw_uid
+
     os.makedirs(root, exist_ok=True)
     root_real = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root_real, directory_name))
@@ -1118,7 +1138,9 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
     # No on-disk marker is written: DMS tracks ownership via its database, not a
     # .dms-resource.json file inside the managed directory.
     group = grp.getgrnam(group_name)
-    os.chown(target, -1, group.gr_gid)
+    # Owner = the requesting user (owner_uid resolved above); -1 leaves the owner as
+    # the creating root when no requester was supplied. Group = DMS access group.
+    os.chown(target, owner_uid, group.gr_gid)
     os.chmod(target, int(mode_text, 8))
     refresh_sssd_cache()
     access = {"allowed_users": {}, "denied_users": {}}
@@ -1141,6 +1163,7 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
         "exists": True,
         "created": created,
         "owner_uid": stat_result.st_uid,
+        "owner_username": owner_username or None,
         "group_gid": stat_result.st_gid,
         "group_name": group_name,
         "mode": oct(stat_result.st_mode & 0o777)[2:].zfill(4),

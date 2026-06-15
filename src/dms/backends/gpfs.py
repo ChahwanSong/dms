@@ -265,6 +265,10 @@ class GpfsFilesystemBackendAdapter:
             except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
                 raise BackendPreconditionError(str(exc)) from exc
 
+        # Resolve the directory owner BEFORE any side effect so an unresolvable owner
+        # fails closed (no fileset created), in parity with CephFS.
+        owner_uid = self._resolve_owner_uid(plan, desired)
+
         side_effect_started = False
         try:
             self._run(
@@ -297,7 +301,6 @@ class GpfsFilesystemBackendAdapter:
             )
             # Refresh SSSD cache so chown/probe can resolve the new group
             self._run(["sss_cache", "-E"], evidence, fail=False, side_effect=False)
-            owner_uid = self._resolve_owner_uid(plan, desired)
             gid = group.get("gid")
             if owner_uid is not None and gid is not None:
                 self._run(
@@ -936,13 +939,13 @@ class GpfsFilesystemBackendAdapter:
     def _resolve_owner_uid(
         self, plan: dict[str, Any], desired: dict[str, Any]
     ) -> int | None:
-        """LDAP에서 directory owner의 uidNumber를 조회한다.
+        """LDAP에서 directory owner의 uidNumber를 조회한다 (strict / fail-closed).
 
         우선순위: desired.owner_username -> desired.requester_id -> plan.requester_id.
-        조회 실패/미설정이면 None 반환 (호출자가 group-only chown으로 fallback).
+        owner가 지정되지 않은 경우에만 None을 반환한다(group-only chown). owner가
+        지정됐는데 LDAP uid로 해석되지 않으면, 디렉토리를 조용히 root 소유로 두지 않고
+        BackendPreconditionError로 fail-closed한다(CephFS와 패리티). uid 범위 제한은 없다.
         """
-        if self.identity_lookup is None:
-            return None
         username = (
             desired.get("owner_username")
             or desired.get("requester_id")
@@ -950,12 +953,21 @@ class GpfsFilesystemBackendAdapter:
         )
         if not username:
             return None
+        if self.identity_lookup is None:
+            # No LDAP resolver configured at all -> cannot enforce owner; fall back to
+            # group-only chown. In production the resolver is always configured, so the
+            # strict (fail-closed) branches below apply.
+            return None
         try:
             result = self.identity_lookup.lookup("ldap", str(username))
-        except (IdentityLookupConfigurationError, IdentityLookupReadError):
-            return None
+        except (IdentityLookupConfigurationError, IdentityLookupReadError) as exc:
+            raise BackendPreconditionError(
+                f"GPFS owner '{username}' is not a resolvable LDAP user: {exc}"
+            ) from exc
         if not result or result.uid is None:
-            return None
+            raise BackendPreconditionError(
+                f"GPFS owner '{username}' is not a resolvable LDAP user"
+            )
         return int(result.uid)
 
     def _capability(

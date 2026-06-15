@@ -95,7 +95,7 @@ Adapter method contract:
 
 | Method | Required behavior |
 | --- | --- |
-| `create(plan)` | DMS-managed directory/fileset/project를 만들고 optional quota, access group/mode, marker를 적용한다. |
+| `create(plan)` | DMS-managed directory/fileset/project를 만들고 optional quota, access group/mode, marker를 적용한다. **directory owner**는 `desired.owner_username`(planner가 `requester_id`로 기본 설정, payload override 가능)로 설정한다 — backend는 owner를 POSIX/LDAP uid로 해석하고, **해석 불가면 side effect 이전에 fail-closed**(strict)한다(uid 범위 제한 없음). CephFS/GPFS/WEKA 모두 strict이며, GPFS/WEKA는 LDAP resolver가 미구성인 경우에 한해 group-only로 폴백한다. group은 DMS access group으로 설정한다. |
 | `update(plan)` | quota 또는 metadata update를 적용한다. expiry-only update를 지원하지 않으면 side effect 없이 명확히 fail-closed한다. |
 | `block(plan)` | block=true이면 access 차단 또는 quota-zero 등 backend별 block policy를 적용하고, block=false이면 restore state로 복구한다. |
 | `delete(plan)` | DMS-created full-managed resource만 삭제한다. imported/quota-only resource는 기본적으로 fail-closed한다. |
@@ -243,6 +243,11 @@ Minimum unit coverage:
 - check reports `Consistent`, `Drifted`, and `Missing`.
 - sync copies live quota into `synced_desired_state` without backend side effect.
 - import requires existing backend target and validates marker/access policy.
+  - import이 live 디렉토리 그룹에서 access group을 자동 채택/재생성할 때, 그 그룹의
+    LDAP member가 0명이면(예: root 소유/빈 그룹) 공유 identity 계층
+    (`ensure_group_members`)이 **빈 `memberUid` 없이** 빈 DMS access group을 생성한다
+    (RFC2307상 `memberUid`는 OPTIONAL — 값 0개 속성은 OpenLDAP이 거부). fix A, 2026-06-15.
+    빈 그룹 생성만 합법화하며 멤버를 자동으로 채우지는 않는다.
 - assign-quota-only applies quota without taking delete ownership.
 - delete refuses imported/quota-only resources.
 - missing command/API capability fails closed before side effect.

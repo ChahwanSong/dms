@@ -2976,6 +2976,72 @@ Output:
 160 passed in 102.65s
 ```
 
+## Post-Phase-22 Fix: LDAP empty-member access group (fix A) — 2026-06-15
+
+테스트베드 재구축 후 filesystem Resource Management API 10종(create / consistency-check /
+update / sync / block / initialize(unblock) / delete / assign-quota / import /
+expiration-sweep)을 라이브 검증하던 중 발견한 결함을 수정하고 라이브로 재검증했다.
+
+- **증상:** `filesystem.import` 대상 디렉토리의 live 그룹에 **LDAP member가 없을 때**
+  (root 소유 / 빈 `posixGroup`) import가 `BackendApplyFailed`로 실패했다:
+  `LDAP group create failed: … 'result': 2, 'description': 'protocolError',
+  'message': 'no values for attribute type'`.
+- **원인:** `LdapIdentityGroupManager.ensure_group_members`(`src/dms/adapters.py`)가
+  신규 그룹 `add` 시 항상 `memberUid: list(users)`를 넣었다. `users == []`이면 값이 없는
+  `memberUid` 속성이 전송되는데, RFC2307 `posixGroup`에서 `memberUid`는 OPTIONAL이므로
+  값 0개짜리 속성은 OpenLDAP이 protocolError로 거부한다. (`create`는 planner가 user ≥ 1을
+  강제해 발생하지 않음. import는 새 `dms-grp-{dir}` 멤버를 live 디렉토리 그룹에서만
+  시드하므로 빈 목록이 가능하다.)
+- **Fix A:** `users`가 비면 `add`에서 `memberUid`를 **생략** → 빈 access group을 정상 생성.
+  단위 테스트 `tests/test_ldap_group_empty_members.py`(3 케이스). 전체 스위트 192 passed.
+  주의: fix A는 빈 그룹 생성만 합법화하며, `access_policy.users`로 그룹 멤버를 채우지는
+  않는다(그건 "fix B" 범위로 미적용).
+- **라이브 재검증(dms 클러스터, 이미지 `pkg-01:5000/dms:f5de481-fixa`):** root 소유 `0750`
+  디렉토리 import가 `Succeeded`에 도달하고 빈 `dms-grp-<dir>`(memberUid 0개)가 생성되며
+  디렉토리가 그 그룹으로 chown됐다. 회귀(멤버 보유 create + soft-delete)도 정상.
+- **이미지 빌드 주의:** 배포 이미지는 `install/docker/Dockerfile`로 빌드해야 한다(65532
+  user/group 생성 + kubectl + `kubernetes` extra + `HOME=/home/dms`). `deploy/Dockerfile`은
+  최소 변형이라 rm-worker `prepare-ssh-client` init의 `chown 65532:65532`가 실패한다.
+
+> 참고: 현재 CephFS 백엔드는 `.dms-resource.json` 마커 파일을 쓰지 않고 소유권/관리모드를
+> DB로 추적한다(`src/dms/backends/cephfs.py` 주석). 본 문서 Phase 10/12의 "marker" 서술은
+> 그 점에서 stale하다.
+
+## Post-Phase-22 Fix: filesystem create owner = requester (CephFS parity) — 2026-06-15
+
+RM API 명세(`install/2.dms-resource-management-api.md`)는 create의 디렉토리 owner를
+`owner_username`(선택, **생략 시 `requester_id`**)로 정의하고 **GPFS/WEKA는 이미 구현**했으나,
+**CephFS create 호스트 스크립트는 디렉토리를 group-only로만 chown(owner=root)** 하여 명세/
+타 백엔드와 어긋나 있었다. 이를 수정하고 라이브 검증했다.
+
+- **변경:** `cephfs.py`의 `_CREATE_DIRECTORY_SCRIPT`가 워커에서 `pwd.getpwnam`으로 owner를
+  해석해 디렉토리를 **requester의 uid로 chown**한다(group은 그대로 DMS access group). 흐름:
+  planner가 `desired.owner_username`을 `payload.owner_username or requester_id`로 채움(기존
+  존재) → adapter `create` → executor `create_directory(owner_username=...)` → 호스트 스크립트.
+- **전제조건(부작용 이전, `PRECONDITION:` → BackendApplyFailed, mkdir 없음):** owner가
+  백엔드 노드에서 POSIX 사용자로 해석되어야 한다(`getpwnam`). **uid 범위 제한은 없다**
+  (요청에 따라 초기의 `uid ≥ 1000` 가드는 제거됨). planner는 추가로 **명시적 `owner_username`
+  override**에 대해 basename/예약어(root, nobody) 검사를 한다(requester_id는 자유형식 유지).
+- **GPFS/WEKA strict 통일(2026-06-15):** 두 백엔드는 owner=requester를 이미 적용했으나
+  **best-effort**(LDAP lookup 실패 시 조용히 group-only/owner=root로 fallback)였다. 이제
+  `_resolve_owner_uid`를 **fail-closed**로 통일했다 — owner가 지정됐는데 해석 불가면
+  `BackendPreconditionError`를 부작용(`mmcrfileset`/`mkdir`) 이전에 던진다(해석을 생성 앞으로
+  이동). 단, **LDAP resolver 자체가 미구성**이면 enforce 불가라 group-only로 폴백한다(운영은
+  항상 resolver를 구성하므로 운영은 strict). uid 제한 없음.
+- **라이브/단위 검증:** CephFS 라이브(이미지 `pkg-01:5000/dms:f5de481-strict`):
+  create(requester=`alice`) → `alice:dms-grp-…`; 명시적 `owner_username:"bob"` → `bob:…`;
+  requester `daemon`(uid 1) → **Succeeded, owner=daemon**(uid 가드 제거 확인);
+  requester `ghostuser` → BackendApplyFailed "not a resolvable POSIX user"(미생성).
+  GPFS/WEKA는 단위 테스트로 검증(테스트베드 부재): owner 해석 → `chown uid:gid`,
+  미해석 → precondition·부작용 없음. 단위 테스트 `tests/test_filesystem_owner_requester.py`(6)
+  + GPFS/WEKA strict(각 3); 전체 스위트 **204 passed**.
+- **Phase 10 정정:** Phase 10 "directory owner `root`" 서술은 더 이상 유효하지 않다(이제
+  owner = requester). 0750/0770 접근 다이내믹은 **비-owner 허용 사용자**에 대해 그대로 유지된다
+  (owner는 owner 비트로 0750에서도 쓰기 가능).
+- **알려진 minor 이슈:** owner 전제조건이 LDAP access group 생성 **이후**에 실행되므로(세 백엔드
+  공통), 미해결 owner create는 LDAP에 **고아 `dms-grp-<dir>`**를 남긴다. 정정 재시도 시
+  idempotent하게 재사용(무해)하며, 필요 시 `ldapdelete`로 수동 정리한다.
+
 ## Not Implemented Yet
 
 다음 항목은 Phase 22까지 완료된 기능으로 보지 않는다.

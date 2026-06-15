@@ -6,7 +6,12 @@ from typing import Any
 
 import pytest
 
-from dms.adapters import StubKubernetesNamespaceQuotaAdapter
+from dms.adapters import (
+    BackendPreconditionError,
+    IdentityLookupResult,
+    StubIdentityLookupAdapter,
+    StubKubernetesNamespaceQuotaAdapter,
+)
 from dms.backend_registry import BackendAdapterRegistry
 from dms.backends.weka import (
     WEKAFS_BACKEND_TYPE,
@@ -619,3 +624,97 @@ def test_weka_data_management_planning_records_weka_worker_pool(repository_pair)
     assert job["worker_pool"]["required_mounts"] == ["weka-a"]
     assert job["worker_pool"]["mount_path"] == "/pvs_weka"
     assert "dscan" in job["worker_pool"]["tool_candidates"]
+
+
+# --- owner = requester: strict resolution (fail-closed), no uid-range restriction ---
+
+
+def _ldap_lookup(username: str, uid: int) -> StubIdentityLookupAdapter:
+    return StubIdentityLookupAdapter(
+        mappings={
+            ("ldap", username): IdentityLookupResult(
+                provider="ldap",
+                posix_username=username,
+                uid=uid,
+                primary_gid=10000,
+                groups=[],
+                user_dn=f"uid={username},ou=people,dc=dms,dc=local",
+                source_metadata={},
+            )
+        }
+    )
+
+
+def _weka_adapter_with_identity(repository, executor, *, identity_lookup):
+    template = WekaFsBackendTemplate.from_storage_mapping(
+        repository.get_storage_mapping("weka-a")
+    )
+    return WekaFsHostMountedFilesystemBackendAdapter(
+        template=template,
+        identity_groups=FakeIdentityGroupManager(),
+        executor=executor,
+        identity_lookup=identity_lookup,
+    )
+
+
+def _weka_owner_plan(owner_username: str) -> dict[str, Any]:
+    return {
+        "plan_id": "p-own",
+        "request_id": "r-own",
+        "resource_key": "weka-a:owned-dir",
+        "operation_kind": OperationKind.FILESYSTEM_CREATE.value,
+        "desired_state": {
+            "storage_name": "weka-a",
+            "directory_name": "owned-dir",
+            "users": ["alice", "bob"],
+            "owner_username": owner_username,
+            "mode": "0770",
+            "expires_at": "2099-01-01T00:00:00Z",
+        },
+    }
+
+
+def test_weka_create_sets_owner_when_requester_resolves(repository_pair):
+    repository, _ = repository_pair
+    register_weka_mapping(repository)
+    executor = FakeWekaExecutor()
+    adapter = _weka_adapter_with_identity(
+        repository, executor, identity_lookup=_ldap_lookup("alice", 10001)
+    )
+
+    adapter.create(_weka_owner_plan("alice"))
+
+    chown_cmds = [a for a in executor.commands if a and a[0] == "chown"]
+    assert any(
+        a[1].startswith("10001:") for a in chown_cmds
+    ), "owner uid must be chowned together with the access group gid"
+
+
+def test_weka_create_allows_low_uid_owner_no_uid_restriction(repository_pair):
+    repository, _ = repository_pair
+    register_weka_mapping(repository)
+    executor = FakeWekaExecutor()
+    adapter = _weka_adapter_with_identity(
+        repository, executor, identity_lookup=_ldap_lookup("svc", 200)
+    )
+
+    adapter.create(_weka_owner_plan("svc"))
+
+    chown_cmds = [a for a in executor.commands if a and a[0] == "chown"]
+    assert any(a[1].startswith("200:") for a in chown_cmds)
+
+
+def test_weka_create_fails_closed_when_owner_unresolvable(repository_pair):
+    repository, _ = repository_pair
+    register_weka_mapping(repository)
+    executor = FakeWekaExecutor()
+    adapter = _weka_adapter_with_identity(
+        repository, executor, identity_lookup=_ldap_lookup("alice", 10001)
+    )
+
+    with pytest.raises(BackendPreconditionError, match="not a resolvable LDAP user"):
+        adapter.create(_weka_owner_plan("ghostuser"))
+
+    assert not any(
+        a and a[0] == "mkdir" for a in executor.commands
+    ), "no directory should be created when the owner cannot be resolved"

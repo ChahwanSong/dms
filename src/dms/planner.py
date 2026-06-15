@@ -1080,6 +1080,22 @@ class Planner:
                     denied_users,
                     required=False,
                 )
+            # The directory owner defaults to the requester (requester_id); a create
+            # may override it with an explicit owner_username. requester_id is a
+            # free-form logical id, so only an EXPLICIT owner_username is sanity-checked
+            # here (safe POSIX basename, not a reserved/privileged account). The backend
+            # additionally enforces that the effective owner resolves to a real,
+            # non-system POSIX user before any side effect.
+            owner_override = payload.get("owner_username")
+            if owner_override is not None:
+                _append_basename_issue(issues, "owner_username", owner_override)
+                if str(owner_override) in {"root", "nobody"}:
+                    issues.append(
+                        {
+                            "reason": "filesystem_owner_username_unsupported",
+                            "owner_username": owner_override,
+                        }
+                    )
         if operation == OperationKind.FILESYSTEM_BLOCK.value:
             unsupported = sorted(
                 field
