@@ -3009,7 +3009,7 @@ expiration-sweep)을 라이브 검증하던 중 발견한 결함을 수정하고
 
 ## Post-Phase-22 Fix: filesystem create owner = requester (CephFS parity) — 2026-06-15
 
-RM API 명세(`install/2.dms-resource-management-api.md`)는 create의 디렉토리 owner를
+RM API 명세(`install/2.dms-rm-api-fs.md`)는 create의 디렉토리 owner를
 `owner_username`(선택, **생략 시 `requester_id`**)로 정의하고 **GPFS/WEKA는 이미 구현**했으나,
 **CephFS create 호스트 스크립트는 디렉토리를 group-only로만 chown(owner=root)** 하여 명세/
 타 백엔드와 어긋나 있었다. 이를 수정하고 라이브 검증했다.
