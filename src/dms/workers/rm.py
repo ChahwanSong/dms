@@ -11,41 +11,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ._base import *  # noqa: F401,F403
-from ._base import (  # noqa: F401
-    _adapter_nsync_enabled,
-    _any_ready,
-    _artifact_child_uri,
-    _artifact_requires_local_parse,
-    _clamp_policy_count,
-    _default_mpi_metadata_uris,
-    _filesystem_sweep_failure_reason,
-    _first_selected_node,
-    _identity_mapping_summary,
-    _identity_ready,
-    _is_expired,
-    _kubernetes_sweep_failure_reason,
-    _mount_ready,
-    _mutation_artifact_summary,
-    _mutation_result_summary,
-    _normalize_scan_summary,
-    _phase21_minimal_resource_model,
-    _phase21_result_resource_evidence,
-    _ready_mount,
-    _resolve_data_job_resource_model,
-    _resource_shortage_model,
-    _rm_precondition_issue,
-    _scan_artifact_summary,
-    _scan_candidate_rejection_reason,
-    _scan_result_summary,
-    _scheduled_nodes_from_pod_summary,
-    _summary_fingerprint,
-    _sync_dsync_candidate_rejection_reason,
-    _tool_ready,
-    _unique_candidate_nodes,
-    _verify_data_runtime_preflight,
-    _verify_scan_runtime_preflight,
-    _volcano_job_ref,
-)
 
 
 @dataclass
@@ -607,3 +572,72 @@ class RMWorkerRuntime:
             yield
         except IdentityLookupConfigurationError as exc:
             raise BackendPreconditionError(str(exc)) from exc
+
+
+def _filesystem_sweep_failure_reason(message: str) -> str:
+    lowered = message.lower()
+    if "marker" in lowered and "mismatch" in lowered:
+        return "filesystem_marker_mismatch"
+    if "restore" in lowered:
+        return "filesystem_block_restore_missing"
+    if "group" in lowered:
+        return "filesystem_access_group_missing"
+    return "filesystem_block_failed"
+
+
+def _kubernetes_sweep_failure_reason(message: str) -> str:
+    lowered = message.lower()
+    if "resourcequota" in lowered and (
+        "does not exist" in lowered or "not found" in lowered
+    ):
+        return "kubernetes_quota_missing"
+    if "non-dms" in lowered or "managed" in lowered:
+        return "kubernetes_quota_metadata_drift"
+    if "restore" in lowered:
+        return "kubernetes_quota_block_restore_missing"
+    return "kubernetes_quota_block_failed"
+
+
+def _rm_precondition_issue(operation: str, message: str) -> dict[str, Any] | None:
+    lowered = message.lower()
+    if "unsupported" in lowered and "backend" in lowered:
+        return {
+            "issue_type": "unsupported_backend",
+            "reason": "unsupported_backend",
+            "message": message,
+        }
+    if operation == OperationKind.K8S_QUOTA_IMPORT.value:
+        # Import is DB-only; a precondition refusal (non-DMS ResourceQuota, missing
+        # RQ, unmappable StorageClass keys) carries no side effect.
+        return {
+            "issue_type": "kubernetes_quota_import_preflight_failed",
+            "reason": "kubernetes_quota_import_preflight_failed",
+            "message": message,
+        }
+    if not operation.startswith("filesystem."):
+        return None
+    if operation == OperationKind.FILESYSTEM_IMPORT.value:
+        issue_type = "filesystem_import_preflight_failed"
+    elif operation == OperationKind.FILESYSTEM_ASSIGN_QUOTA.value:
+        issue_type = "filesystem_assign_quota_failed"
+    elif "resolvable" in lowered and "user" in lowered:
+        # owner resolution precondition (e.g. create: requester not a resolvable
+        # POSIX/LDAP user). Not a block — label by the actual failure.
+        issue_type = "filesystem_owner_unresolved"
+    elif "quota" in lowered:
+        issue_type = "filesystem_quota_apply_failed"
+    elif "marker" in lowered:
+        issue_type = "filesystem_marker_mismatch"
+    elif "group" in lowered:
+        issue_type = "filesystem_access_group_unresolved"
+    elif operation == OperationKind.FILESYSTEM_CREATE.value:
+        issue_type = "filesystem_create_failed"
+    elif operation in {
+        OperationKind.FILESYSTEM_BLOCK.value,
+        OperationKind.FILESYSTEM_INITIALIZE.value,
+    }:
+        issue_type = "filesystem_block_failed"
+    else:
+        issue_type = "filesystem_operation_failed"
+    return {"issue_type": issue_type, "reason": issue_type, "message": message}
+
