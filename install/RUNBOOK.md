@@ -251,7 +251,7 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 
 ### Agent ConfigMap 자동 동기화
 
-`dms:7585e7e` 이후부터 POST/PATCH/DELETE 시 `dms-agent-storages` ConfigMap이 자동으로 동기화된다.
+POST/PATCH/DELETE 시 `dms-agent-storages` ConfigMap이 자동으로 동기화된다.
 수동 편집 불필요. 동기화 후 Agent는 재시작해야 새 설정을 반영한다.
 
 ConfigMap 내용 확인:
@@ -363,7 +363,7 @@ kubectl --context dms-control -n dms logs deploy/dms-rm-worker --tail=200
 
 ## Data Management Incident
 
-Phase 22에서 live Data Management는 read-only `scan`, same-node `dsync`,
+Live Data Management는 read-only `scan`, same-node `dsync`,
 separated-role `nsync`, `drm`을 DB policy/API 기반 node/process resource model로
 실행한다. `sync`와 `rm`은 preview 없이 실행되면 안 되며, `ConfirmPending` 상태에서
 explicit confirm을 받은 뒤에만 execution job을 생성해야 한다.
@@ -451,7 +451,7 @@ sync/rm:
     mpirun.json
 ```
 
-Phase 22 multi-node MPI Data Management 환경에서는 추가로 다음을 확인한다.
+Multi-node MPI Data Management 환경에서는 추가로 다음을 확인한다.
 
 - MPI Operator가 Volcano gang scheduling으로 설치되어 있고 `MPIJob` CRD가 존재한다.
 - mpifileutils job image가 Open MPI 기반이며 `mpirun`, `ompi_info`, `dscan`, `dsync`,
@@ -674,7 +674,7 @@ curl_dms "$DMS_API_URL/api/v1/operations/runs/stale" \
   -H "authorization: Bearer $DMS_TOKEN"
 ```
 
-Phase 18 이후 RM/DM worker는 장시간 backend call 중 run heartbeat로 `lease_expires_at`을 갱신한다. 그래도 worker process가 죽었거나 DB heartbeat가 끊겨 expired lease가 생길 수 있으므로 startup 또는 planned shutdown 전후에 stale guard를 실행한다.
+RM/DM worker는 장시간 backend call 중 run heartbeat로 `lease_expires_at`을 갱신한다. 그래도 worker process가 죽었거나 DB heartbeat가 끊겨 expired lease가 생길 수 있으므로 startup 또는 planned shutdown 전후에 stale guard를 실행한다.
 
 ```bash
 install/scripts/dms-startup-recovery-check.sh

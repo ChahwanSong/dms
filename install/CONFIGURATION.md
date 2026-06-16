@@ -103,7 +103,7 @@ Data Management runtime:
 | `DMS_DM_SERVICE_ACCOUNT` | `dms-dm-worker` | Volcano worker pod에 지정할 ServiceAccount. |
 | `DMS_DM_ARTIFACT_BASE_URI` | `file:///var/lib/dms/artifacts` | job별 stdout/stderr/report/summary URI의 base. 예: `file:///artifacts/dms/<job_id>/summary.json`. |
 | `DMS_DM_DEFAULT_PRIORITY` | `Mid` | public priority label 기본값. |
-| `DMS_DM_DEFAULT_MAX_NODES` | `1` | legacy compatibility setting. Phase 22 fan-out 정책의 source of truth는 DB `data_management_policies`다. |
+| `DMS_DM_DEFAULT_MAX_NODES` | `1` | legacy compatibility setting. fan-out 정책의 source of truth는 DB `data_management_policies`다. |
 | `DMS_DM_MAX_NODES` | `1` | legacy compatibility setting. 새 Data Management job resource model에는 사용하지 않는다. |
 | `DMS_DM_POLICY_DEFAULT_WORKER_NODES` | `3` | `scan`, `rm`, same-node `dsync` DB policy bootstrap 기본 worker node 수. |
 | `DMS_DM_POLICY_MAX_WORKER_NODES` | `3` | `scan`, `rm`, same-node `dsync` DB policy bootstrap max worker node 수. |
@@ -119,15 +119,15 @@ Data Management runtime:
 | `DMS_DM_RM_EXECUTION_TIMEOUT_SECONDS` | `3600` | confirmed `rm` execution VolcanoJob timeout. |
 | `DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT` | `true` | confirm 시 preview fingerprint evidence를 요구할지 여부. |
 | `DMS_DM_SYNC_ALLOW_DELETE` | `false` | `sync` request의 `delete=true` 옵션을 운영 정책상 허용할지 여부. `false`이면 request validation에서 막는다. |
-| `DMS_DM_MAX_SYNC_NODES` | `1` | legacy compatibility setting. Phase 22 `dsync`/`nsync` node counts는 DB policy/API로 관리한다. |
-| `DMS_DM_MAX_RM_NODES` | `1` | legacy compatibility setting. Phase 22 `rm` node counts는 DB policy/API로 관리한다. |
+| `DMS_DM_MAX_SYNC_NODES` | `1` | legacy compatibility setting. `dsync`/`nsync` node counts는 DB policy/API로 관리한다. |
+| `DMS_DM_MAX_RM_NODES` | `1` | legacy compatibility setting. `rm` node counts는 DB policy/API로 관리한다. |
 | `DMS_DM_NSYNC_ENABLED` | `true` | separated-role `nsync` 후보 selection 및 live execution 허용 여부. `false`이면 fail-closed한다. |
 | `DMS_DM_NSYNC_SERVICE_PREFIX` | `dms-nsync` | native VolcanoJob fallback에서 role service/metadata 이름 prefix로 사용할 수 있는 prefix. |
 | `DMS_DM_MONITOR_POLL_SECONDS` | `5` | VolcanoJob 상태 polling interval. |
 | `DMS_DM_JOB_DELETE_ON_TERMINAL` | `false` | terminal VolcanoJob cleanup 정책. |
 | `DMS_DM_KUBERNETES_MODE` | `cluster` | `cluster`는 live Volcano adapter, `stub`은 로컬 테스트/dev 전용. 운영에서 `stub`을 사용하지 않는다. |
 
-Phase 22 기준 live Data Management operation은 read-only `scan`, same-node
+Live Data Management operation은 read-only `scan`, same-node
 `dsync`, separated-role `nsync`, `drm`이다. 각 job은 DB policy/API에서 결정된
 worker node 수만큼 worker pod를 만들고, worker pod 하나 안에서 policy의
 `processes_per_node`만큼 MPI ranks/processes를 실행한다. `sync`와 `rm`은 반드시
@@ -147,9 +147,9 @@ DM Worker가 읽고 traverse할 수 있어야 한다. 사용자 target/source/de
 directory가 `0750`처럼 private이면 artifact base를 그 하위에 두지 말고 별도
 DMS-managed mount/PVC/object prefix로 분리한다.
 
-Phase 22 multi-node MPI Data Management에서는 operation별 node/process default와 max가
+Multi-node MPI Data Management에서는 operation별 node/process default와 max가
 DB policy table/API의 source of truth가 된다. Env/runtime config는 bootstrap default로만
-사용한다. Phase 22 prerequisite로 Volcano scheduler/CRD, MPI Operator with Volcano gang
+사용한다. Prerequisite로 Volcano scheduler/CRD, MPI Operator with Volcano gang
 scheduling, `MPIJob` CRD, Open MPI 기반 mpifileutils job image, DMS queue/priority
 class, PodGroup/MPIJob/VolcanoJob RBAC, 그리고 shared RWX artifact path가 필요하다.
 DMS는 mounted eligible node set을 CR
