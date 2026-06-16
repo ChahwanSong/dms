@@ -1370,7 +1370,7 @@ class KubernetesVolcanoAdapter:
         return "\n".join(
             [
                 "set -eu",
-                "umask 000",
+                "umask 077",
                 "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
                 "mpi_dir=/dms/artifacts/${DMS_DATA_JOB_ID}/mpi",
                 'mkdir -p "$artifact" "$mpi_dir"',
@@ -1467,7 +1467,7 @@ class KubernetesVolcanoAdapter:
                 "fi",
                 f'exec nsync --role-mode map --role-map "$DMS_NSYNC_ROLE_MAP" {dryrun}{flags}"$DMS_MPI_SYNC_SOURCE" "$DMS_MPI_SYNC_DESTINATION"',
                 "DMS_MPI_RANK",
-                'chmod 0755 "$rank_script"',
+                'chmod 0700 "$rank_script"',
                 'export DMS_NSYNC_ROLE_MAP="$role_map"',
                 'export DMS_MPI_SYNC_SOURCE="$source"',
                 'export DMS_MPI_SYNC_DESTINATION="$destination"',
@@ -1488,7 +1488,7 @@ class KubernetesVolcanoAdapter:
         return "\n".join(
             [
                 "set -eu",
-                "umask 000",
+                "umask 077",
                 "mkdir -p /dms/artifacts/${DMS_DATA_JOB_ID}/mpi",
                 _chown_artifact_line("/dms/artifacts/${DMS_DATA_JOB_ID}"),
                 "target=/dms/target/${DMS_SCAN_PATH}",
@@ -1507,7 +1507,7 @@ class KubernetesVolcanoAdapter:
                 "fi",
                 'exec dscan --directory "$DMS_MPI_SCAN_TARGET" --output "$DMS_MPI_SCAN_REPORT" --print',
                 "DMS_MPI_RANK",
-                'chmod 0755 "$rank_script"',
+                'chmod 0700 "$rank_script"',
                 'export DMS_MPI_SCAN_TARGET="$target"',
                 'export DMS_MPI_SCAN_REPORT="$report"',
                 *_mpi_hostfile_lines("/dms/artifacts/${DMS_DATA_JOB_ID}/mpi/hostfile"),
@@ -1555,7 +1555,7 @@ class KubernetesVolcanoAdapter:
                         "fi",
                         f'exec {tool} {dryrun}{flags}"$DMS_MPI_SYNC_SOURCE" "$DMS_MPI_SYNC_DESTINATION"',
                         "DMS_MPI_RANK",
-                        'chmod 0755 "$rank_script"',
+                        'chmod 0700 "$rank_script"',
                         'export DMS_MPI_SYNC_SOURCE="$source"',
                         'export DMS_MPI_SYNC_DESTINATION="$destination"',
                         *_mpi_hostfile_lines("$mpi_dir/hostfile"),
@@ -1571,7 +1571,7 @@ class KubernetesVolcanoAdapter:
             return "\n".join(
                 [
                     "set -eu",
-                    "umask 000",
+                    "umask 077",
                     "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
                     'mkdir -p "$artifact"',
                     "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
@@ -1607,7 +1607,7 @@ class KubernetesVolcanoAdapter:
                         "fi",
                         f'exec {tool} {dryrun}{flags}"$DMS_MPI_RM_TARGET"',
                         "DMS_MPI_RANK",
-                        'chmod 0755 "$rank_script"',
+                        'chmod 0700 "$rank_script"',
                         'export DMS_MPI_RM_TARGET="$target"',
                         *_mpi_hostfile_lines("$mpi_dir/hostfile"),
                         _mpiexec_line(
@@ -1622,7 +1622,7 @@ class KubernetesVolcanoAdapter:
             return "\n".join(
                 [
                     "set -eu",
-                    "umask 000",
+                    "umask 077",
                     "artifact=/dms/artifacts/${DMS_DATA_JOB_ID}/${DMS_DM_PHASE}",
                     'mkdir -p "$artifact"',
                     "target=/dms/target/${DMS_RM_TARGET_PATH}",
@@ -2060,6 +2060,7 @@ def _mpi_worker_command() -> str:
             "  user_home=$(getent passwd \"$DMS_POSIX_USERNAME\" | awk -F: '{print $6}')",
             '  if [ -n "$user_home" ]; then',
             '    mkdir -p "$user_home/.ssh"',
+            '    chown "$DMS_POSIX_USERNAME" "$user_home" 2>/dev/null || true',
             '    if [ -f /root/.ssh/authorized_keys ]; then cp /root/.ssh/authorized_keys "$user_home/.ssh/authorized_keys"; fi',
             '    chown -R "$DMS_POSIX_USERNAME" "$user_home/.ssh"',
             '    chmod 0700 "$user_home/.ssh"',
@@ -2146,11 +2147,17 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
         "user_home=$(getent passwd \"$DMS_POSIX_USERNAME\" | awk -F: '{print $6}'); "
         'if [ -n "$user_home" ]; then '
         'mkdir -p "$user_home/.ssh"; '
+        'chown "$DMS_POSIX_USERNAME" "$user_home" 2>/dev/null || true; '
         'cp -a /root/.ssh/. "$user_home/.ssh/" 2>/dev/null || true; '
         'chown -R "$DMS_POSIX_USERNAME" "$user_home/.ssh"; '
         'chmod 0700 "$user_home/.ssh"; '
         'chmod 0600 "$user_home/.ssh"/* 2>/dev/null || true; '
         "fi; "
+        # mpirun runs as the requester (runuser); with `umask 077` the root-created
+        # coordination files (hostfile, rank script) are root-only, so hand the mpi
+        # directory to the requester right before launch. Output (summary/logs) stays
+        # root-owned and the dm-worker (root) reads it.
+        'chown -R "$DMS_POSIX_USERNAME" "$(dirname "$(dirname "$rank_script")")" 2>/dev/null || true; '
         'mpi_run_prefix="runuser -u $DMS_POSIX_USERNAME --preserve-environment --"; '
         "fi; "
         "$mpi_run_prefix mpirun --allow-run-as-root --mca pml ob1 --mca btl tcp,self "
@@ -2162,10 +2169,13 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
 
 
 def _chown_artifact_line(path: str) -> str:
+    # Requester-owned only (no world bits). With `umask 077` in the launcher this keeps
+    # per-job artifacts unreadable by other tenants' job pods on the shared FS; the
+    # dm-worker reads them as root (deployment securityContext runAsUser:0).
     return (
         'if [ "$(id -u)" = 0 ] && [ -n "${DMS_POSIX_USERNAME:-}" ]; then '
         f'chown -R "$DMS_POSIX_USERNAME" "{path}" || true; '
-        f'chmod -R a+rwX "{path}" || true; fi'
+        f'chmod -R u+rwX,go-rwx "{path}" || true; fi'
     )
 
 

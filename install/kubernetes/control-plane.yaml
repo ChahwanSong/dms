@@ -451,6 +451,16 @@ spec:
           image: registry.example.internal/dms:CHANGE_ME
           imagePullPolicy: IfNotPresent
           command: ["dms", "dm-worker", "--worker-id", "$(POD_NAME)", "--loop", "--interval", "5"]
+          # dm-worker runs as root so it can read requester-owned, locked-down artifact
+          # files (summary.json) on the shared FS (job artifacts are `umask 077` +
+          # requester-only, unreadable by other tenants' job pods). It is a read-only
+          # orchestrator -- no filesystem writes, only `kubectl` with the ServiceAccount
+          # token and reading summary.json behind a symlink-containment guard -- so root
+          # grants no privilege beyond that cross-uid read. (api/planner/rm-worker stay
+          # non-root uid 65532.)
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
           envFrom:
             - configMapRef:
                 name: dms-runtime-config

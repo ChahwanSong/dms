@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -132,6 +133,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return _run_once_or_loop(worker.run_once, loop=args.loop, interval=args.interval)
     if args.command == "dm-worker":
+        # dm-worker runs as root and writes job metadata into the shared artifact FS;
+        # restrict its umask so those files are owner-only (the locked-down artifact
+        # must not be world-readable by other tenants' job pods).
+        os.umask(0o077)
         worker = DMWorkerRuntime(
             repository=repository,
             observability=observability,

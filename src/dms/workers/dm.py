@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import threading
 from typing import Any
@@ -1721,6 +1722,21 @@ def _artifact_child_uri(base_uri: str | None, name: str) -> str | None:
     return f"{base_uri.rstrip('/')}/{name}"
 
 
+def _artifact_path_within(base: Path, *parts: str) -> Path | None:
+    """Join ``base/parts`` and return it only when the resolved real path stays inside
+    ``base``. Defends the root dm-worker against a requester-planted symlink in their own
+    (writable) artifact dir redirecting the read out of the job's directory."""
+    candidate = base.joinpath(*parts)
+    try:
+        base_real = os.path.realpath(base)
+        candidate_real = os.path.realpath(candidate)
+    except OSError:
+        return None
+    if os.path.commonpath([base_real, candidate_real]) != base_real:
+        return None
+    return candidate
+
+
 def _mutation_artifact_summary(
     artifact_uri: str | None, phase: str
 ) -> dict[str, Any] | None:
@@ -1729,8 +1745,8 @@ def _mutation_artifact_summary(
     parsed = urlparse(artifact_uri)
     if parsed.scheme != "file":
         return None
-    summary_path = Path(parsed.path) / phase / "summary.json"
-    if not summary_path.exists():
+    summary_path = _artifact_path_within(Path(parsed.path), phase, "summary.json")
+    if summary_path is None or not summary_path.exists():
         return None
     with summary_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -1745,10 +1761,14 @@ def _scan_artifact_summary(artifact_uri: str | None) -> dict[str, Any] | None:
     if parsed.scheme != "file":
         return None
     artifact_path = Path(parsed.path)
-    summary_path = artifact_path / "summary.json"
-    report_path = artifact_path / "dscan-report.json"
-    source_path = summary_path if summary_path.exists() else report_path
-    if not source_path.exists():
+    summary_path = _artifact_path_within(artifact_path, "summary.json")
+    report_path = _artifact_path_within(artifact_path, "dscan-report.json")
+    source_path = (
+        summary_path
+        if summary_path is not None and summary_path.exists()
+        else report_path
+    )
+    if source_path is None or not source_path.exists():
         return None
     with source_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
