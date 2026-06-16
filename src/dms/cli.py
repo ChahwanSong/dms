@@ -59,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
     agent_probe.add_argument("--once", action="store_true", help="run one probe and print JSON")
     agent_probe.add_argument("--post", action="store_true", help="post the report to DMS API")
 
+    sanity_reconciler = subcommands.add_parser("sanity-reconciler")
+    sanity_reconciler.add_argument("--loop", action="store_true")
+    sanity_reconciler.add_argument("--interval", type=float, default=30.0)
+
     agent_loop = subcommands.add_parser("agent-loop")
     agent_loop.add_argument("--interval", type=float)
 
@@ -93,7 +97,26 @@ def main(argv: list[str] | None = None) -> int:
         uvicorn.run("dms.api:create_app", host=args.host, port=args.port, factory=True)
         return 0
     if args.command == "planner":
-        runner = lambda: Planner(repository).run_once(limit=args.limit)
+        planner = Planner(
+            repository,
+            sanity_ttl_seconds=(
+                settings.sanity_ttl_seconds
+                if settings.sanity_planner_gate_enabled
+                else None
+            ),
+        )
+        runner = lambda: planner.run_once(limit=args.limit)
+        return _run_once_or_loop(runner, loop=args.loop, interval=args.interval)
+    if args.command == "sanity-reconciler":
+        from .sanity_reconciler import build_sanity_service, reconcile_once
+
+        sanity_service = build_sanity_service(repository, settings)
+        runner = lambda: reconcile_once(
+            repository,
+            sanity_service,
+            observability=observability,
+            heartbeat_path=settings.sanity_reconcile_heartbeat_path,
+        )
         return _run_once_or_loop(runner, loop=args.loop, interval=args.interval)
     if args.command == "rm-worker":
         worker = RMWorkerRuntime(

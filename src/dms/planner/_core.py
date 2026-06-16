@@ -468,6 +468,17 @@ class _PlannerCoreMixin:
         }
 
 
+    def _dm_readiness_is_stale(
+        self, worker_role: WorkerRole, mapping: dict[str, Any]
+    ) -> bool:
+        ttl = getattr(self, "sanity_ttl_seconds", None)
+        if worker_role != WorkerRole.DM or ttl is None:
+            return False
+        from ..sanity_reconciler import readiness_is_stale
+
+        return readiness_is_stale(mapping, ttl_seconds=ttl)
+
+
     def _reject_unsafe_storage_mapping(
         self, request: dict[str, Any], worker_role: WorkerRole
     ) -> bool:
@@ -534,6 +545,19 @@ class _PlannerCoreMixin:
                         "storage_name": storage_name,
                         "reason": f"missing_{worker_role.value.lower()}_readiness",
                         "sanity_status": mapping["sanity_status"],
+                        "readiness": mapping.get("readiness", {}),
+                    }
+                )
+            elif self._dm_readiness_is_stale(worker_role, mapping):
+                # DM-only fail-safe: readiness reads "Ready" but its sanity is older than
+                # the configured TTL (the reconciler stopped refreshing it), so we cannot
+                # trust it. RM is unaffected (the gate only applies to DM).
+                issues.append(
+                    {
+                        "storage_name": storage_name,
+                        "reason": "dm_readiness_stale",
+                        "sanity_status": mapping["sanity_status"],
+                        "sanity_checked_at": mapping.get("sanity_checked_at"),
                         "readiness": mapping.get("readiness", {}),
                     }
                 )

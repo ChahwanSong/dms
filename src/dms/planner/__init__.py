@@ -24,3 +24,7 @@ class Planner(
 
     repository: DmsRepository
     backend_registry: BackendAdapterRegistry | None = None
+    # DM-only readiness staleness gate. None disables it (default), preserving existing
+    # behaviour. When set, DM requests are fail-closed if a storage mapping's sanity is
+    # older than this many seconds (the sanity reconciler keeps it fresh).
+    sanity_ttl_seconds: float | None = None

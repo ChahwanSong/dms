@@ -68,6 +68,20 @@ class Settings:
     dm_policy_default_queue: str | None = "dms-data"
     dm_policy_default_priority_class: str | None = "dms-normal"
     dm_scheduler_backend: str = "auto"
+    # Storage-mapping readiness auto-refresh (sanity reconciler). readiness is a cached
+    # projection of agent evidence; without periodic refresh it drifts stale in BOTH
+    # directions (stale "Missing" blocks valid work, stale "Ready" admits work after the
+    # evidence is gone). These knobs power the reconciler (cli `sanity-reconciler`), the
+    # planner staleness gate (DM only), and the optional on-ingest recompute.
+    sanity_reconcile_enabled: bool = True
+    sanity_reconcile_interval_seconds: float = 30.0
+    sanity_reconcile_heartbeat_path: str | None = None
+    sanity_ttl_seconds: float = 120.0
+    sanity_event_recompute_enabled: bool = False
+    # Planner staleness gate (DM only). OFF by default so enabling it is a deliberate,
+    # post-reconciler-deploy step: turning it on without a running reconciler would
+    # fail-close DM requests once sanity_checked_at ages past sanity_ttl_seconds.
+    sanity_planner_gate_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -198,6 +212,20 @@ class Settings:
                 "DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS", "dms-normal"
             ),
             dm_scheduler_backend=os.getenv("DMS_DM_SCHEDULER_BACKEND", "auto"),
+            sanity_reconcile_enabled=_bool_env("DMS_SANITY_RECONCILE_ENABLED", True),
+            sanity_reconcile_interval_seconds=float(
+                os.getenv("DMS_SANITY_RECONCILE_INTERVAL_SECONDS", "30")
+            ),
+            sanity_reconcile_heartbeat_path=os.getenv(
+                "DMS_SANITY_RECONCILE_HEARTBEAT_PATH"
+            ),
+            sanity_ttl_seconds=float(os.getenv("DMS_SANITY_TTL_SECONDS", "120")),
+            sanity_event_recompute_enabled=_bool_env(
+                "DMS_SANITY_EVENT_RECOMPUTE_ENABLED", False
+            ),
+            sanity_planner_gate_enabled=_bool_env(
+                "DMS_SANITY_PLANNER_GATE_ENABLED", False
+            ),
         )
 
     @property
