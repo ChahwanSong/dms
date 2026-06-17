@@ -25,7 +25,6 @@ from ..adapters import (
 from ..backend_registry import BackendAdapterRegistry
 from ..domain import (
     DataJobState,
-    IdentityMappingStatus,
     LifecycleState,
     OperationKind,
     ResourceKind,

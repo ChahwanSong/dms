@@ -132,27 +132,19 @@ CREATE TABLE IF NOT EXISTS default_quota_policies (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_default_quota_policies
     ON default_quota_policies(resource_kind, resource_type);
 
-CREATE TABLE IF NOT EXISTS identity_mappings (
-    mapping_id TEXT PRIMARY KEY,
-    requester_id TEXT NOT NULL,
-    identity_provider TEXT NOT NULL,
-    posix_username TEXT NOT NULL,
-    uid INTEGER NOT NULL,
-    gid INTEGER NOT NULL,
-    groups_json TEXT NOT NULL,
-    status TEXT NOT NULL,
-    ldap_lookup_at TEXT,
-    verified_at TEXT,
-    stale_at TEXT,
-    disabled_at TEXT,
-    verification_result TEXT,
-    mismatch_reason TEXT,
-    disabled_reason TEXT,
-    ldap_source_metadata TEXT,
-    updated_at TEXT NOT NULL
+-- identity_mappings was removed: DM resolves POSIX identity by READ-ONLY LDAP lookup
+-- at preflight time (no cached/admission-gated mapping table). The only DM-side
+-- identity state is the denylist below (per-user/group instant kill-switch + block).
+DROP INDEX IF EXISTS uq_identity_mapping;
+DROP TABLE IF EXISTS identity_mappings;
+CREATE TABLE IF NOT EXISTS dm_identity_denylist (
+    subject_type TEXT NOT NULL,   -- requester | owner | group
+    subject TEXT NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT,
+    PRIMARY KEY (subject_type, subject)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_identity_mapping
-    ON identity_mappings(requester_id, identity_provider);
 
 CREATE TABLE IF NOT EXISTS agent_reports (
     report_id TEXT PRIMARY KEY,
@@ -267,7 +259,6 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_events_correlation
 def migrate_operational(database: Database) -> None:
     with database.connect() as connection:
         connection.executescript(OPERATIONAL_SCHEMA)
-        _ensure_operational_phase2_columns(connection, database)
         _ensure_operational_phase3_columns(connection, database)
         _ensure_operational_phase19_columns(connection, database)
         _record_migration(connection, "operational-0001-phase1")
@@ -299,18 +290,6 @@ def _record_migration(connection, version: str) -> None:
         "INSERT INTO schema_migrations (version, applied_at) VALUES (?, CURRENT_TIMESTAMP)",
         (version,),
     )
-
-
-def _ensure_operational_phase2_columns(connection, database: Database) -> None:
-    for column, definition in {
-        "ldap_lookup_at": "TEXT",
-        "verification_result": "TEXT",
-        "mismatch_reason": "TEXT",
-        "disabled_reason": "TEXT",
-        "ldap_source_metadata": "TEXT",
-    }.items():
-        if not _column_exists(connection, database, "identity_mappings", column):
-            connection.execute(f"ALTER TABLE identity_mappings ADD COLUMN {column} {definition}")
 
 
 def _ensure_operational_phase3_columns(connection, database: Database) -> None:

@@ -830,13 +830,6 @@ class OperationalQueryService:
             "agent_reports": self.repository.list_agent_reports(limit=50),
         }
 
-    def identity_issues(self) -> list[dict]:
-        return [
-            mapping
-            for mapping in self.repository.list_identity_mappings()
-            if mapping["status"] in {"Disabled", "NeedsReview", "Stale"}
-        ]
-
     def data_job_status(self, job_id: str) -> dict:
         job = self.repository.get_data_job(job_id)
         request = self.repository.get_request(job["request_id"])
@@ -1122,8 +1115,8 @@ def _data_job_issue_type(job: dict[str, Any], reason: Any) -> str:
     if job["state"] == "PreflightFailed":
         if "policy" in reason_text or reason_text == "nsync_disabled":
             return "data_job_policy_failed"
-        if "identity" in reason_text:
-            return "data_job_missing_identity_mapping"
+        if "identity" in reason_text or "ldap" in reason_text:
+            return "data_job_identity_unresolved"
         if "permission" in reason_text or "posix" in reason_text:
             return "data_job_permission_denied"
         if "candidate" in reason_text or "node" in reason_text:

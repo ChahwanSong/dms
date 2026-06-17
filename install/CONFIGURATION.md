@@ -14,7 +14,7 @@
 | `install/config/storage-mappings.example.json` | `/tmp/dms-storage-mappings.json` | `storage_name`, backend type, StorageClass, mount path, SSH host |
 | `install/config/agent-storages.example.json` | `/tmp/dms-agent-storages.json` | agent가 report할 storage, mount path, CSI driver |
 | `install/config/default-quota-policies.example.json` | `/tmp/dms-default-quota-policies.json` | 기본 capacity/file/PVC quota |
-| `install/config/identity-mappings.example.json` | `/tmp/dms-identity-mappings.json` | requester, POSIX username, expected UID/GID/groups |
+| `install/config/identity-denylist.example.json` | `/tmp/dms-identity-denylist.json` | `subject_type` (requester\|owner\|group), `subject`, `reason` (kill-switch/admission block 대상) |
 | `install/postgresql/init.sql` | `/tmp/dms-init.sql` | PostgreSQL role password |
 
 `registry.example.internal/dms:CHANGE_ME`, `CHANGE_ME`, `dms.example.internal`, `postgres.example.internal`, `ldap.example.internal`, `cluster-a` 같은 placeholder가 남아 있으면 운영 배포 전에 반드시 교체한다.
@@ -189,6 +189,9 @@ LDAP/identity:
 | `DMS_LDAP_TIMEOUT_SECONDS` | 선택 | 기본값은 `5`. |
 | `DMS_LDAP_GROUP_GID_START` | 선택 | DMS가 생성한 group의 GID allocation lower bound. |
 | `DMS_LDAP_GROUP_GID_END` | 선택 | DMS가 생성한 group의 GID allocation upper bound. |
+| `DMS_DM_IDENTITY_PROVIDER` | 선택 | DM이 identity를 resolve하는 provider. 기본값은 `ldap`. |
+
+DM identity는 별도의 mapping 등록 없이 preflight(dm-worker) 시점에 위의 `DMS_LDAP_*` 설정을 그대로 사용해 read-only LDAP lookup으로 해석한다. Lookup key는 `owner_username`(기본값은 `requester_id`이며 실제 POSIX username으로 override될 수 있다)이고 user filter는 `DMS_LDAP_USER_FILTER`(기본값 `(uid={username})`)를 따른다. **Fail closed**: LDAP가 응답하지 않으면 TTL cache 없이 해당 job preflight가 `ldap_unavailable`로 실패한다.
 
 ## Agent 환경변수
 
@@ -399,7 +402,9 @@ unset DMS_ACTOR
 
 install/scripts/register-storage-mappings.sh install/config/storage-mappings.example.json
 install/scripts/register-default-quota-policies.sh install/config/default-quota-policies.example.json
-install/scripts/register-identity-mappings.sh install/config/identity-mappings.example.json
+# (선택) DM identity denylist 적용. denylist는 보통 비어 있고,
+# DM identity 자체는 등록이 필요 없다(preflight에서 직접 LDAP 조회).
+install/scripts/apply-identity-denylist.sh install/config/identity-denylist.example.json
 install/scripts/verify-install.sh
 ```
 

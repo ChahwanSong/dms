@@ -13,6 +13,7 @@ import uvicorn
 from .agent import AgentReportIngestionService
 from .agent_daemon import build_agent_report, config_from_env, post_report, run_loop
 from .adapters import (
+    LdapIdentityLookupAdapter,
     StubFilesystemBackendAdapter,
     StubKubernetesNamespaceQuotaAdapter,
     volcano_adapter_from_settings,
@@ -137,6 +138,15 @@ def main(argv: list[str] | None = None) -> int:
         # restrict its umask so those files are owner-only (the locked-down artifact
         # must not be world-readable by other tenants' job pods).
         os.umask(0o077)
+        # Require BOTH URI and base DN: a half-configured adapter raises in from_settings,
+        # which would crash the worker at startup. Gate on both so partial config falls
+        # back to None -> clean per-request `ldap_not_configured` rejection (fail closed,
+        # worker stays up) instead of a boot crash.
+        identity_lookup = (
+            LdapIdentityLookupAdapter.from_settings(settings)
+            if (settings.ldap_uri and settings.ldap_base_dn)
+            else None
+        )
         worker = DMWorkerRuntime(
             repository=repository,
             observability=observability,
@@ -144,6 +154,10 @@ def main(argv: list[str] | None = None) -> int:
             worker_id=args.worker_id,
             lease_seconds=settings.worker_lease_seconds,
             preview_ttl_seconds=settings.preview_ttl_seconds,
+            identity_lookup=identity_lookup,
+            identity_provider=settings.dm_identity_provider,
+            min_uid=settings.dm_min_uid,
+            min_gid=settings.dm_min_gid,
         )
         return _run_once_or_loop(worker.run_once, loop=args.loop, interval=args.interval)
     if args.command == "agent-submit":

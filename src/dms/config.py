@@ -68,6 +68,14 @@ class Settings:
     dm_policy_default_queue: str | None = "dms-data"
     dm_policy_default_priority_class: str | None = "dms-normal"
     dm_scheduler_backend: str = "auto"
+    dm_identity_provider: str = "ldap"
+    # Lowest acceptable POSIX uid/gid for a DM-resolved identity. Data jobs run as the
+    # resolved user via `runuser` inside a ROOT MPI worker pod; an LDAP entry that maps to
+    # uid 0 (or any system account) would run the data operation AS ROOT and defeat the
+    # POSIX-identity isolation. Resolved identities below these floors (or uid/gid 0) are
+    # rejected with `uid_below_floor`.
+    dm_min_uid: int = 1000
+    dm_min_gid: int = 1000
     # Storage-mapping readiness auto-refresh (sanity reconciler). readiness is a cached
     # projection of agent evidence; without periodic refresh it drifts stale in BOTH
     # directions (stale "Missing" blocks valid work, stale "Ready" admits work after the
@@ -212,6 +220,9 @@ class Settings:
                 "DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS", "dms-normal"
             ),
             dm_scheduler_backend=os.getenv("DMS_DM_SCHEDULER_BACKEND", "auto"),
+            dm_identity_provider=os.getenv("DMS_DM_IDENTITY_PROVIDER", "ldap"),
+            dm_min_uid=int(os.getenv("DMS_DM_MIN_UID", "1000")),
+            dm_min_gid=int(os.getenv("DMS_DM_MIN_GID", "1000")),
             sanity_reconcile_enabled=_bool_env("DMS_SANITY_RECONCILE_ENABLED", True),
             sanity_reconcile_interval_seconds=float(
                 os.getenv("DMS_SANITY_RECONCILE_INTERVAL_SECONDS", "30")

@@ -18,9 +18,6 @@ class ControlStateBody(BaseModel):
     force: bool = False
 
 
-class DisableIdentityMappingBody(BaseModel):
-    reason: str | None = None
-
 
 class ConfirmDataJobBody(BaseModel):
     requester_id: str | None = None

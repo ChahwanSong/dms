@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 
 from dms.adapters import (
     AdapterResult,
+    IdentityLookupResult,
+    StubIdentityLookupAdapter,
     KubernetesVolcanoAdapter,
     StubVolcanoAdapter,
     _write_mpi_metadata_artifacts,
@@ -17,7 +19,6 @@ from dms.db import Database
 from dms.domain import (
     DataManagementPolicyInput,
     DataJobState,
-    IdentityMappingInput,
     LifecycleState,
     OperationKind,
     StorageMappingInput,
@@ -118,9 +119,11 @@ def test_scan_rejects_conflicting_target_fields(harness):
 def test_scan_preflight_requires_active_identity_before_volcano(harness):
     request_id = _submit_and_plan_scan(harness["client"], harness["repository"])
     adapter = StubVolcanoAdapter()
+    # No identity_lookup configured -> DM fails closed (no LDAP) before touching Volcano.
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=None,
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -128,25 +131,25 @@ def test_scan_preflight_requires_active_identity_before_volcano(harness):
     assert worker.run_once() == 1
     job = harness["repository"].get_data_job_by_request(request_id)
     assert job["state"] == DataJobState.PREFLIGHT_FAILED.value
-    assert job["preflight_result"]["reason"] == "missing_active_identity_mapping"
+    assert job["preflight_result"]["reason"] == "ldap_not_configured"
     assert adapter.calls == []
     action_required = harness["client"].get(
         "/api/v1/operations/action-required", headers=HEADERS
     )
     assert any(
-        issue["issue_type"] == "data_job_missing_identity_mapping"
+        issue["issue_type"] == "data_job_identity_unresolved"
         for issue in action_required.json()
     )
 
 
 def test_scan_worker_records_preflight_volcano_artifacts_and_summary(harness):
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"])
     request_id = _submit_and_plan_scan(harness["client"], harness["repository"])
     adapter = StubVolcanoAdapter()
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -169,7 +172,6 @@ def test_scan_worker_records_preflight_volcano_artifacts_and_summary(harness):
 
 
 def test_phase22_scan_keeps_eligible_candidates_with_single_worker_policy(harness):
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"], node_name="dm-1")
     _ingest_ready_dm_report(harness["repository"], node_name="dm-2")
     request_id = _submit_and_plan_scan(harness["client"], harness["repository"])
@@ -177,6 +179,7 @@ def test_phase22_scan_keeps_eligible_candidates_with_single_worker_policy(harnes
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -207,7 +210,6 @@ def test_phase22_scan_keeps_eligible_candidates_with_single_worker_policy(harnes
 
 
 def test_phase22_policy_api_and_resource_hint_clamp(harness):
-    _register_identity_mapping(harness["repository"])
     for node_name in ("dm-1", "dm-2", "dm-3"):
         _ingest_ready_dm_report(harness["repository"], node_name=node_name)
 
@@ -246,6 +248,7 @@ def test_phase22_policy_api_and_resource_hint_clamp(harness):
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -271,7 +274,6 @@ def test_phase22_policy_api_and_resource_hint_clamp(harness):
 
 
 def test_phase22_scan_policy_shortage_fails_closed(harness):
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"], node_name="dm-1")
     harness["repository"].upsert_data_management_policy(
         DataManagementPolicyInput(
@@ -290,6 +292,7 @@ def test_phase22_scan_policy_shortage_fails_closed(harness):
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -303,13 +306,13 @@ def test_phase22_scan_policy_shortage_fails_closed(harness):
 
 
 def test_scan_file_artifact_parse_failure_fails_job(harness, tmp_path):
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"])
     request_id = _submit_and_plan_scan(harness["client"], harness["repository"])
     adapter = MissingSummaryFileAdapter(tmp_path)
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -329,13 +332,13 @@ def test_scan_file_artifact_parse_failure_fails_job(harness, tmp_path):
 
 
 def test_scan_parses_mpifileutils_dscan_report_artifact(harness, tmp_path):
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"])
     request_id = _submit_and_plan_scan(harness["client"], harness["repository"])
     adapter = DscanReportFileAdapter(tmp_path)
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -819,18 +822,17 @@ def _register_ready_storage_mapping(repository: DmsRepository) -> None:
     )
 
 
-def _register_identity_mapping(repository: DmsRepository) -> None:
-    repository.upsert_identity_mapping(
-        IdentityMappingInput(
-            requester_id="portal:alice",
-            identity_provider="ldap-main",
-            posix_username="alice",
-            uid=10000,
-            gid=10000,
-            groups=["dms-users"],
-        ),
-        verification_result="matched",
+def _identity_lookup() -> StubIdentityLookupAdapter:
+    result = IdentityLookupResult(
+        provider="ldap",
+        posix_username="alice",
+        uid=10000,
+        primary_gid=10000,
+        groups=["dms-users"],
+        user_dn="uid=alice,ou=people,dc=test",
+        source_metadata={"adapter": "stub"},
     )
+    return StubIdentityLookupAdapter(mappings={("ldap", "portal:alice"): result})
 
 
 def _ingest_ready_dm_report(

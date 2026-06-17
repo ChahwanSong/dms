@@ -1,0 +1,20 @@
+{
+  "_comment": "DM identity denylist (kill-switch + admission block). identity_mappings was REMOVED: DM resolves the requester's POSIX identity by a READ-ONLY LDAP lookup at preflight time (no registration, no cached mapping table). The ONLY persisted DM identity state is this denylist, and it is normally EMPTY (default = allow all). Apply one entry with: PUT /api/v1/data-management/identity-denylist/{subject_type}/{subject} with body {\"reason\": \"...\"}; remove with DELETE on the same path. subject_type is one of requester|owner|group. 'requester' and 'owner' are matched BEFORE the LDAP lookup (instant block); 'group' is matched against the resolved LDAP groups AFTER the lookup.",
+  "entries": [
+    {
+      "subject_type": "requester",
+      "subject": "portal:offboarded-user",
+      "reason": "offboarded 2026-06-01 (admission block)"
+    },
+    {
+      "subject_type": "owner",
+      "subject": "compromised-account",
+      "reason": "security incident INC-1234 kill-switch"
+    },
+    {
+      "subject_type": "group",
+      "subject": "quarantined-team",
+      "reason": "temporary block during audit"
+    }
+  ]
+}

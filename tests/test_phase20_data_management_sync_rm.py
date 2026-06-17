@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from dms.adapters import KubernetesVolcanoAdapter, StubVolcanoAdapter
+from dms.adapters import (
+    IdentityLookupResult,
+    KubernetesVolcanoAdapter,
+    StubIdentityLookupAdapter,
+    StubVolcanoAdapter,
+)
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
 from dms.domain import (
     DataJobState,
-    IdentityMappingInput,
     LifecycleState,
     OperationKind,
     StorageMappingInput,
@@ -24,7 +28,6 @@ HEADERS = {"x-dms-actor": "api-client"}
 
 def test_sync_preview_confirm_execution_state_machine(tmp_path):
     harness = _harness(tmp_path)
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"])
 
     response = harness["client"].post(
@@ -66,6 +69,7 @@ def test_sync_preview_confirm_execution_state_machine(tmp_path):
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -141,7 +145,6 @@ def test_sync_preview_confirm_execution_state_machine(tmp_path):
 
 def test_rm_preview_confirm_execution_requires_recursive_and_removes_target(tmp_path):
     harness = _harness(tmp_path)
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"])
 
     invalid = harness["client"].post(
@@ -180,6 +183,7 @@ def test_rm_preview_confirm_execution_requires_recursive_and_removes_target(tmp_
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -263,12 +267,12 @@ def test_sync_rejects_unsafe_options_and_destination_under_source(tmp_path):
 
 def test_confirm_after_preview_ttl_marks_preview_expired(tmp_path):
     harness = _harness(tmp_path)
-    _register_identity_mapping(harness["repository"])
     _ingest_ready_dm_report(harness["repository"])
     request_id = _submit_and_plan_sync(harness)
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=StubVolcanoAdapter(),
         worker_id="dm-worker-1",
         preview_ttl_seconds=-1,
@@ -297,9 +301,11 @@ def test_sync_preflight_requires_identity_before_volcano(tmp_path):
     _ingest_ready_dm_report(harness["repository"])
     request_id = _submit_and_plan_sync(harness)
     adapter = StubVolcanoAdapter()
+    # No identity_lookup configured -> DM fails closed (no LDAP) before touching Volcano.
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=None,
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -307,13 +313,13 @@ def test_sync_preflight_requires_identity_before_volcano(tmp_path):
     assert worker.run_once() == 1
     job = harness["repository"].get_data_job_by_request(request_id)
     assert job["state"] == DataJobState.PREFLIGHT_FAILED.value
-    assert job["preflight_result"]["reason"] == "missing_active_identity_mapping"
+    assert job["preflight_result"]["reason"] == "ldap_not_configured"
     assert adapter.calls == []
     action_required = harness["client"].get(
         "/api/v1/operations/action-required", headers=HEADERS
     )
     assert any(
-        issue["issue_type"] == "data_job_missing_identity_mapping"
+        issue["issue_type"] == "data_job_identity_unresolved"
         and issue["operation"] == OperationKind.DATA_SYNC.value
         for issue in action_required.json()
     )
@@ -321,7 +327,6 @@ def test_sync_preflight_requires_identity_before_volcano(tmp_path):
 
 def test_phase22_split_role_nsync_preview_reaches_confirm_pending(tmp_path):
     harness = _harness(tmp_path)
-    _register_identity_mapping(harness["repository"])
     _ingest_split_role_dm_reports(harness["repository"])
     response = harness["client"].post(
         "/api/v1/data-management/sync",
@@ -338,6 +343,7 @@ def test_phase22_split_role_nsync_preview_reaches_confirm_pending(tmp_path):
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -366,7 +372,6 @@ def test_phase22_split_role_nsync_preview_reaches_confirm_pending(tmp_path):
 
 def test_phase21_nsync_disabled_fails_closed(tmp_path):
     harness = _harness(tmp_path)
-    _register_identity_mapping(harness["repository"])
     _ingest_split_role_dm_reports(harness["repository"])
     request_id = _submit_and_plan_cross_storage_sync(harness)
     adapter = KubernetesVolcanoAdapter(
@@ -380,6 +385,7 @@ def test_phase21_nsync_disabled_fails_closed(tmp_path):
     worker = DMWorkerRuntime(
         repository=harness["repository"],
         observability=harness["observability"],
+        identity_lookup=_identity_lookup(),
         volcano_adapter=adapter,
         worker_id="dm-worker-1",
     )
@@ -704,18 +710,19 @@ def _register_ready_storage_mapping(
     )
 
 
-def _register_identity_mapping(repository: DmsRepository) -> None:
-    repository.upsert_identity_mapping(
-        IdentityMappingInput(
-            requester_id="portal:alice",
-            identity_provider="ldap-main",
-            posix_username="alice",
-            uid=10000,
-            gid=10000,
-            groups=["dms-users"],
-        ),
-        verification_result="matched",
+def _identity_lookup() -> StubIdentityLookupAdapter:
+    # DM resolves the requester's POSIX identity by READ-ONLY LDAP lookup. The worker
+    # looks up owner_username (defaults to requester_id) under the configured provider.
+    result = IdentityLookupResult(
+        provider="ldap",
+        posix_username="alice",
+        uid=10000,
+        primary_gid=10000,
+        groups=["dms-users"],
+        user_dn="uid=alice,ou=people,dc=test",
+        source_metadata={"adapter": "stub"},
     )
+    return StubIdentityLookupAdapter(mappings={("ldap", "portal:alice"): result})
 
 
 def _ingest_ready_dm_report(repository: DmsRepository) -> None:

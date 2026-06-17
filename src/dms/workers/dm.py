@@ -22,6 +22,15 @@ class DMWorkerRuntime:
     worker_id: str
     lease_seconds: int = 300
     preview_ttl_seconds: int = 24 * 60 * 60
+    # Read-only LDAP identity lookup (replaces the identity_mappings table). None when
+    # LDAP is unconfigured -> DM fails closed with `ldap_not_configured`.
+    identity_lookup: Any = None
+    identity_provider: str = "ldap"
+    # Data jobs run as the resolved user via `runuser` inside a ROOT MPI pod; reject any
+    # resolved identity whose uid/gid is a system/privileged account (uid 0 == root would
+    # run the data operation as root and defeat POSIX isolation).
+    min_uid: int = 1000
+    min_gid: int = 1000
 
     def run_once(self) -> int:
         self.repository.mark_stale_runs(actor=self.worker_id)
@@ -613,23 +622,106 @@ class DMWorkerRuntime:
             correlation_id=plan["request_id"],
         )
 
+    def _resolve_identity(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Resolve the requester's POSIX identity by a READ-ONLY LDAP lookup at preflight
+        time (no cache: LDAP down -> fail closed). Returns either a Rejected dict (which
+        the caller propagates as the preflight result) or the resolved identity dict.
+        owner_username defaults to requester_id, mirroring RM's filesystem owner model.
+        """
+        requester_id = request["requester_id"]
+        payload = request.get("payload_summary") or {}
+        # Strip so a trailing/leading space can't both resolve the same LDAP user AND slip
+        # past the (case-insensitive) denylist kill-switch.
+        owner_username = (payload.get("owner_username") or requester_id or "").strip()
+        provider = self.identity_provider
+
+        def _reject(reason: str, **extra: Any) -> dict[str, Any]:
+            return {
+                "status": "Rejected",
+                "reason": reason,
+                "requester_id": requester_id,
+                "owner_username": owner_username,
+                "selected_candidates": [],
+                **extra,
+            }
+
+        denied = self.repository.dm_identity_denied(
+            requester_id=requester_id, owner_username=owner_username
+        )
+        if denied:
+            self._record_identity_event("data_job_identity_denied", "WARN", requester_id, owner_username, {"denylist": denied})
+            return _reject("identity_denied", denylist=denied)
+
+        if self.identity_lookup is None:
+            return _reject("ldap_not_configured", detail="DM identity LDAP lookup is not configured (set DMS_LDAP_URI/DMS_LDAP_BASE_DN)")
+
+        try:
+            result = self.identity_lookup.lookup(provider, owner_username)
+        except Exception as exc:  # noqa: BLE001 - any LDAP/transport failure -> fail closed (no cache)
+            # Truncate the raw LDAP/transport error so bind DN / server / filter detail is
+            # not dumped wholesale into the diagnostic event table.
+            self._record_identity_event("data_job_identity_lookup_failed", "WARN", requester_id, owner_username, {"error": str(exc)[:200]})
+            return _reject("ldap_unavailable", error=str(exc)[:500], detail=f"LDAP identity lookup failed for '{owner_username}' (fail-closed; no cache)")
+
+        if result is None:
+            self._record_identity_event("data_job_identity_not_found", "WARN", requester_id, owner_username, {})
+            return _reject("ldap_identity_not_found", detail=f"LDAP user '{owner_username}' not found")
+
+        denied = self.repository.dm_identity_denied(requester_id=None, owner_username=None, groups=list(result.groups))
+        if denied:
+            self._record_identity_event("data_job_identity_denied", "WARN", requester_id, owner_username, {"denylist": denied})
+            return _reject("identity_denied", denylist=denied)
+
+        # uid/gid floor: data ops run as this user via runuser in a root MPI pod, so a
+        # system/privileged identity (uid 0 == root) must never be accepted -- it would run
+        # the file operation as root and defeat the POSIX isolation. Fail closed.
+        if (
+            result.uid is None
+            or result.primary_gid is None
+            or result.uid < self.min_uid
+            or result.primary_gid < self.min_gid
+        ):
+            self._record_identity_event("data_job_identity_below_floor", "WARN", requester_id, owner_username, {"uid": result.uid, "gid": result.primary_gid})
+            return _reject(
+                "uid_below_floor",
+                uid=result.uid,
+                gid=result.primary_gid,
+                detail=(
+                    f"resolved POSIX identity uid={result.uid}/gid={result.primary_gid} is a system/privileged "
+                    f"account (floor uid>={self.min_uid}, gid>={self.min_gid}); refusing to run a data job as it"
+                ),
+            )
+
+        self._record_identity_event("data_job_identity_resolved", "INFO", requester_id, owner_username, {"uid": result.uid, "gid": result.primary_gid})
+        return {
+            "requester_id": requester_id,
+            "owner_username": owner_username,
+            "identity_provider": provider,
+            "posix_username": result.posix_username,
+            "uid": result.uid,
+            "gid": result.primary_gid,
+            "groups": list(result.groups),
+            "status": "Resolved",
+            "verified_at": datetime.now(UTC).isoformat(),
+            "user_dn": result.user_dn,
+        }
+
+    def _record_identity_event(self, event_type, severity, requester_id, owner_username, payload):
+        self.observability.safe_record_event(
+            component="dm-worker",
+            severity=severity,
+            event_type=event_type,
+            message=f"DM identity {event_type}: requester={requester_id} owner={owner_username}",
+            payload={"requester_id": requester_id, "owner_username": owner_username, **payload},
+        )
+
     def _scan_preflight(
         self, plan: dict[str, Any], job: dict[str, Any]
     ) -> dict[str, Any]:
         request = self.repository.get_request(job["request_id"])
-        mappings = self.repository.list_identity_mappings(
-            requester_id=request["requester_id"],
-            status=IdentityMappingStatus.ACTIVE.value,
-            limit=1,
-        )
-        if not mappings:
-            return {
-                "status": "Rejected",
-                "reason": "missing_active_identity_mapping",
-                "requester_id": request["requester_id"],
-                "selected_candidates": [],
-            }
-        mapping = mappings[0]
+        mapping = self._resolve_identity(request)
+        if mapping.get("status") == "Rejected":
+            return mapping
         target = job.get("normalized_target") or {
             "storage_name": job["storage_name"],
             "path": job.get("target"),
@@ -720,19 +812,9 @@ class DMWorkerRuntime:
         self, plan: dict[str, Any], job: dict[str, Any]
     ) -> dict[str, Any]:
         request = self.repository.get_request(job["request_id"])
-        mappings = self.repository.list_identity_mappings(
-            requester_id=request["requester_id"],
-            status=IdentityMappingStatus.ACTIVE.value,
-            limit=1,
-        )
-        if not mappings:
-            return {
-                "status": "Rejected",
-                "reason": "missing_active_identity_mapping",
-                "requester_id": request["requester_id"],
-                "selected_candidates": [],
-            }
-        mapping = mappings[0]
+        mapping = self._resolve_identity(request)
+        if mapping.get("status") == "Rejected":
+            return mapping
         if job["operation"] == OperationKind.DATA_SYNC.value:
             return self._sync_preflight(plan, job, request, mapping)
         if job["operation"] == OperationKind.DATA_RM.value:
@@ -1427,6 +1509,7 @@ def _identity_ready(identity_evidence: dict[str, Any], posix_username: str) -> b
 def _identity_mapping_summary(mapping: dict[str, Any]) -> dict[str, Any]:
     return {
         "requester_id": mapping["requester_id"],
+        "owner_username": mapping.get("owner_username"),
         "identity_provider": mapping["identity_provider"],
         "posix_username": mapping["posix_username"],
         "uid": mapping["uid"],

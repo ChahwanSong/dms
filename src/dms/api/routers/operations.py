@@ -459,14 +459,6 @@ def operational_query_router() -> APIRouter:
         authenticated_actor(request, services)
         return services.query.worker_agent_health()
 
-    @router.get("/identity-issues")
-    def identity_issues(
-        request: Request,
-        services: AppServices = Depends(get_services),
-    ) -> list[dict[str, Any]]:
-        authenticated_actor(request, services)
-        return services.query.identity_issues()
-
     @router.get("/data-jobs")
     def list_data_jobs(
         request: Request,

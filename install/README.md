@@ -7,7 +7,7 @@
 - Kubernetes namespace quota Resource Management: live Kubernetes `ResourceQuota/dms-storage-quota` create/update/block/delete/check/sync/import/audit 가능.
 - Filesystem Resource Management: CephFS host-mounted adapter와 GPFS command adapter 가능. GPFS live 검증은 별도 staging 필요.
 - Agent inventory: Kubernetes DaemonSet 기반 report 가능.
-- Data Management `scan/sync/rm`: DB policy/API 기반 node/process resource model, MPIJob+Volcano scheduling, native VolcanoJob fallback, active identity mapping, fresh DM Agent report, POSIX preflight, writable shared artifact base가 준비된 경우 live execution을 운영할 수 있다. `sync`와 `rm`은 preview/confirm guard가 필수이고, separated-role `nsync`는 MPI/Volcano backend gate를 통과해야 한다.
+- Data Management `scan/sync/rm`: DB policy/API 기반 node/process resource model, MPIJob+Volcano scheduling, native VolcanoJob fallback, preflight 시 owner_username에 대한 read-only LDAP 신원 조회(직접) 통과 (+ DM denylist admission), fresh DM Agent report, POSIX preflight, writable shared artifact base가 준비된 경우 live execution을 운영할 수 있다. `sync`와 `rm`은 preview/confirm guard가 필수이고, separated-role `nsync`는 MPI/Volcano backend gate를 통과해야 한다.
 
 ## 문서 사용 방법
 
@@ -40,7 +40,7 @@ install/
   config/agent-storages.example.json
   config/storage-mappings.example.json
   config/default-quota-policies.example.json
-  config/identity-mappings.example.json
+  config/identity-denylist.example.json
   kubernetes/control-plane.yaml          # API, Planner, RM Worker, Secret/ConfigMap
   kubernetes/agent-daemonset.yaml        # RM/DM Agent DaemonSet
   kubernetes/target-cluster-rbac.yaml    # Target cluster용 ServiceAccount/RBAC
@@ -49,7 +49,7 @@ install/
   scripts/create-serviceaccount-kubeconfig.sh
   scripts/register-storage-mappings.sh
   scripts/register-default-quota-policies.sh
-  scripts/register-identity-mappings.sh
+  scripts/apply-identity-denylist.sh
   scripts/verify-install.sh
   scripts/dms-planned-shutdown.sh
   scripts/dms-startup-recovery-check.sh
@@ -871,53 +871,73 @@ cp install/config/default-quota-policies.example.json /tmp/dms-default-quota-pol
 install/scripts/register-default-quota-policies.sh /tmp/dms-default-quota-policies.json
 ```
 
-## 12. Identity mapping 등록
+## 12. DM 신원 처리 (LDAP preflight + denylist)
 
-LDAP identity lookup을 사용할 경우 requester와 POSIX user를 연결한다.
+이전의 `identity_mappings` 테이블과 `/api/v1/identity-mappings*` API는 제거됐다(대체됨). 더 이상 requester와 POSIX user를 사전 등록/sync하지 않는다. 대신 DM은 preflight 시점에 dm-worker에서 owner_username에 대한 read-only LDAP 조회(search-only)로 POSIX 신원을 직접 resolve한다. owner_username은 requester_id(자유 형식 logical id)를 기본값으로 하고, 실제 POSIX username으로 override할 수 있다(RM owner model과 동일).
 
-수정할 파일:
+이 방식은 FAIL CLOSED다. TTL 캐시가 없으므로 LDAP가 끊기면 stale 신원으로 통과시키지 않고 preflight를 중단한다.
 
-- `install/config/identity-mappings.example.json`
+- LDAP 미설정: `ldap_not_configured`
+- LDAP 응답 불가: `ldap_unavailable`
+- 사용자 없음: `ldap_identity_not_found`
+- denylist에 의해 차단: `identity_denied`
 
-```bash
-cp install/config/identity-mappings.example.json /tmp/dms-identity-mappings.json
+### 12.1 dm-worker LDAP 설정
+
+preflight가 신원을 직접 조회할 수 있도록 dm-worker에 `DMS_LDAP_*` env가 채워져 있어야 한다(6.2/6.3에서 설정한 값과 동일). provider는 `DMS_DM_IDENTITY_PROVIDER`로 고른다(기본값 `ldap`).
+
+```yaml
+DMS_DM_IDENTITY_PROVIDER: "ldap"
+DMS_LDAP_URI: "ldap://ldap.example.internal:389"
+DMS_LDAP_BASE_DN: "dc=example,dc=internal"
+DMS_LDAP_USER_SEARCH_BASE: "ou=people,dc=example,dc=internal"
+DMS_LDAP_GROUP_SEARCH_BASE: "ou=groups,dc=example,dc=internal"
+DMS_LDAP_BIND_DN: "cn=dms,ou=service-accounts,dc=example,dc=internal"
+DMS_LDAP_BIND_PASSWORD: "REPLACE_WITH_LDAP_PASSWORD"
 ```
 
-예시:
+upstream LDAP을 local OpenLDAP으로 복제해서 쓰는 환경이라면 별도 관심사인 `install/scripts/sync-ldap-to-local.py`를 계속 사용한다.
 
-```json
-{
-  "identity_mappings": [
-    {
-      "identity_provider": "ldap",
-      "requester_id": "alice",
-      "posix_username": "alice",
-      "expected_uid": 10001,
-      "expected_primary_gid": 10001,
-      "expected_groups": ["research-a"]
-    }
-  ]
-}
-```
+### 12.2 DM identity denylist (선택)
 
-등록:
+denylist는 DM 측에 유일하게 persist되는 신원 상태다. requester/owner/group 단위의 즉시 kill-switch이자 admission block이며, 기본값은 비어 있어 모두 allow한다. 등록은 선택이고, 평소에는 비워 둔다.
+
+특정 주체를 차단/해제/조회하려면 `identity-denylist` API를 쓴다. `{subject_type}`은 `requester`, `owner`, `group` 중 하나다.
 
 ```bash
-install/scripts/register-identity-mappings.sh /tmp/dms-identity-mappings.json
-```
+# 차단 추가
+curl -fsS -X PUT \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" \
+  "$DMS_API_URL/api/v1/data-management/identity-denylist/requester/alice"
 
-조회:
+# 차단 해제
+curl -fsS -X DELETE \
+  --cert "$DMS_CLIENT_CERT" \
+  --key "$DMS_CLIENT_KEY" \
+  --cacert "$DMS_CA_CERT" \
+  -H "authorization: Bearer $DMS_TOKEN" \
+  "$DMS_API_URL/api/v1/data-management/identity-denylist/requester/alice"
 
-```bash
+# 차단 조회
 curl -fsS \
   --cert "$DMS_CLIENT_CERT" \
   --key "$DMS_CLIENT_KEY" \
   --cacert "$DMS_CA_CERT" \
   -H "authorization: Bearer $DMS_TOKEN" \
-  "$DMS_API_URL/api/v1/identity-mappings" | jq
+  "$DMS_API_URL/api/v1/data-management/identity-denylist/requester/alice" | jq
 ```
 
-`NeedsReview`가 나오면 LDAP 실제 UID/GID/groups와 기대값이 다르다는 뜻이다.
+차단 목록을 한 번에 seed하려면 예시 파일과 bulk-seed script를 쓴다.
+
+```bash
+cp install/config/identity-denylist.example.json /tmp/dms-identity-denylist.json
+install/scripts/apply-identity-denylist.sh /tmp/dms-identity-denylist.json
+```
+
+denylist에 올라간 주체의 요청은 preflight에서 `identity_denied`로 중단된다.
 
 ## 13. 설치 검증
 

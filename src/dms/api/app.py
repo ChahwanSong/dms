@@ -24,7 +24,7 @@ from ._services import AppServices
 from .deps import identity_lookup_from_settings
 from .routers.agent import agent_router
 from .routers.data_management import data_management_router
-from .routers.identity import identity_router
+from .routers.identity import identity_denylist_router
 from .routers.operations import operational_query_router
 from .routers.resource_management import resource_management_router
 
@@ -66,7 +66,7 @@ def create_app(
     app.state.services = services
     app.include_router(resource_management_router())
     app.include_router(data_management_router())
-    app.include_router(identity_router())
+    app.include_router(identity_denylist_router())
     app.include_router(agent_router())
     app.include_router(operational_query_router())
 

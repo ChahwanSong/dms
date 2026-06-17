@@ -84,7 +84,7 @@ curl_dms "$DMS_API_URL/api/v1/operations/action-required" \
 - `dms-api` 사용 가능.
 - `dms-planner` 실행 중.
 - `dms-rm-worker` 실행 중.
-- `dms-dm-worker`는 Data Management 전제조건을 확인하기 전에는 0 replica로 둘 수 있다. `DMS_DM_JOB_IMAGE`, Volcano, artifact path, identity mapping, fresh DM Agent report가 준비된 환경에서는 1 replica로 운영할 수 있다.
+- `dms-dm-worker`는 Data Management 전제조건을 확인하기 전에는 0 replica로 둘 수 있다. `DMS_DM_JOB_IMAGE`, Volcano, artifact path, DM identity LDAP(DMS_LDAP_*) 설정 (preflight 직접 조회), fresh DM Agent report가 준비된 환경에서는 1 replica로 운영할 수 있다.
 - Storage-capable RM/DM node마다 agent report가 fresh 상태다.
 - 운영 request가 사용하는 storage mapping은 `readiness.resource_management=Ready`를 표시한다.
 - 해결되지 않은 action-required 항목이 없다.
@@ -490,105 +490,99 @@ curl_dms -X POST "$DMS_API_URL/api/v1/data-management/jobs/<job_id>:confirm" \
 `sync`/`rm`이 `Failed`, `TimedOut`, partial mutation risk action-required로 닫히면
 artifact와 live filesystem 상태를 확인한 뒤 새 request로 재시도한다.
 
-## Identity Mapping
+## DM Identity
 
-### 조회
+DM은 더 이상 identity를 DB에 저장하지 않는다. 데이터 job의 preflight(dm-worker) 단계에서 owner_username(기본값은 requester_id, 실제 POSIX username으로 override 가능)을 키로 LDAP를 read-only로 직접 조회해 uid/gid/groups를 해석한다. 조회 설정은 `DMS_LDAP_*` + `DMS_DM_IDENTITY_PROVIDER`로 관리한다.
 
-단일 사용자의 mapping 상태와 groups를 확인한다.
+DM 측에서 영속화되는 유일한 identity 상태는 **denylist**다. denylist는 requester/owner/group 단위의 즉시 kill-switch이자 admission block이며, 비어 있는 것이 기본값으로 이 경우 모두 허용한다.
 
-```bash
-curl_dms "$DMS_API_URL/api/v1/identity-mappings?requester_id=<username>" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq '.[0] | {uid,gid,groups,status,ldap_lookup_at}'
-```
+DNS 미설정 서버 또는 프록시 환경에서는 `/mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh`를 사용한다. `DMS_CURL_OPTS` 배열은 `--resolve`, `--noproxy`, mTLS 인증서, Bearer token, `x-dms-actor` 헤더를 포함한다.
 
-상태별 필터링:
+### 사용자/그룹 즉시 차단 (denylist 등록)
 
-```bash
-# Active 전체 (최근 100건)
-curl_dms "$DMS_API_URL/api/v1/identity-mappings?status=Active" \
-  -H "authorization: Bearer $DMS_TOKEN"
-
-# Stale/failed 항목
-curl_dms "$DMS_API_URL/api/v1/identity-mappings?failed=true" \
-  -H "authorization: Bearer $DMS_TOKEN"
-```
-
-DNS 미설정 서버 또는 프록시 환경에서는 `/mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh`를 사용한다.
+특정 requester, owner, group을 즉시 차단한다. 차단되면 해당 subject의 데이터 job은 preflight에서 `identity_denied`로 Rejected된다.
+`subject_type`은 `requester`, `owner`, `group` 중 하나다. 성공 시 `200 {"status":"Denied"}`를 반환한다.
 
 ```bash
 source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
-curl -sS "${DMS_CURL_OPTS[@]}" "$DMS_API_URL/api/v1/identity-mappings?requester_id=cocoa.song" | jq
-```
 
-`DMS_CURL_OPTS` 배열은 `--resolve`, `--noproxy`, mTLS 인증서, Bearer token, `x-dms-actor` 헤더를 포함한다.
-
-### LDAP 전체 동기화 (sync-all)
-
-DB의 모든 identity mapping에 대해 LDAP에서 uid/gid/groups를 일괄 재조회하여 갱신한다.
-Disabled 상태인 mapping은 건너뛴다.
-
-**dry-run (실제 DB 변경 없음):**
-
-```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
-curl -sS "${DMS_CURL_OPTS[@]}" \
-  -X POST \
-  "$DMS_API_URL/api/v1/identity-mappings/sync-all?identity_provider=ldap&dry_run=true" | jq
-```
-
-응답 예시:
-
-```json
-{
-  "synced": 11158,
-  "not_found": 0,
-  "errors": 0,
-  "updated": 0,
-  "dry_run": true,
-  "elapsed_seconds": 3.55,
-  "total": 11158
-}
-```
-
-**실제 실행:**
-
-```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
-curl -sS "${DMS_CURL_OPTS[@]}" \
-  -X POST \
-  "$DMS_API_URL/api/v1/identity-mappings/sync-all?identity_provider=ldap" | jq
-```
-
-`not_found`가 0이 아니면 해당 username 목록이 `not_found_usernames` 필드에 반환된다.
-LDAP에서 찾을 수 없는 사용자는 `Stale` 상태로 표시된다.
-
-**성능:** LDAP 연결 1개로 전체 그룹을 bulk fetch한 뒤 user 쿼리를 200명 배치 × 8 threads 병렬로 실행한다. ~11,000명 기준 4초 내외.
-
-### 단일 사용자 refresh
-
-LDAP를 재조회해 drift 감지(uid/gid/groups 변경 여부)만 수행한다. groups가 변경됐으면 `Stale`로 표시하며, 실제 DB 업데이트는 하지 않는다. 업데이트까지 하려면 `sync-all`을 사용한다.
-
-```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
-curl -sS "${DMS_CURL_OPTS[@]}" \
-  -X POST \
-  "$DMS_API_URL/api/v1/identity-mappings/ldap/<username>:refresh" | jq
-```
-
-### 신규/갱신 등록
-
-```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+# requester 차단
 curl -sS "${DMS_CURL_OPTS[@]}" \
   -X PUT \
   -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/identity-mappings/ldap/<username>" \
-  --data '{
-    "requester_id": "<username>",
-    "identity_provider": "ldap",
-    "posix_username": "<linux_account>"
-  }' | jq
+  "$DMS_API_URL/api/v1/data-management/identity-denylist/requester/<username>" \
+  --data '{"reason": "incident-1234 격리"}' | jq
+
+# owner 차단
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X PUT \
+  -H "content-type: application/json" \
+  "$DMS_API_URL/api/v1/data-management/identity-denylist/owner/<username>" \
+  --data '{"reason": "compromised account"}' | jq
+
+# group 차단
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X PUT \
+  -H "content-type: application/json" \
+  "$DMS_API_URL/api/v1/data-management/identity-denylist/group/<groupname>" \
+  --data '{"reason": "그룹 전체 작업 일시 중단"}' | jq
 ```
+
+### 차단 해제 (denylist 제거)
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+
+# subject_type ∈ {requester, owner, group}
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  -X DELETE \
+  "$DMS_API_URL/api/v1/data-management/identity-denylist/<subject_type>/<subject>" | jq
+```
+
+성공 시 `200 {"status":"Allowed"}`를 반환한다. 항목이 없으면 `404`를 반환한다.
+
+### denylist 조회
+
+현재 차단된 모든 항목을 나열한다.
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  "$DMS_API_URL/api/v1/data-management/identity-denylist" | jq
+```
+
+### Identity 실패 트러블슈팅
+
+데이터 job의 identity 해석이 실패하면 해당 data-job의 `preflight_result.reason`을 확인한다. 다음 네 가지 중 하나다 (과거의 `missing_active_identity_mapping`을 대체한다).
+
+| reason | 의미 | 조치 |
+| --- | --- | --- |
+| `ldap_unavailable` | LDAP 연결 불가 (fail closed) | LDAP / `DMS_LDAP_*` 복구 후 job 재시도 (아래 참고) |
+| `ldap_not_configured` | DM identity LDAP 미설정 | `DMS_LDAP_*` + `DMS_DM_IDENTITY_PROVIDER` 설정 |
+| `ldap_identity_not_found` | LDAP에 해당 사용자 없음 | username/owner_username, POSIX username override 확인 |
+| `identity_denied` | denylist에 의해 차단됨 | 필요 시 denylist에서 해제 (위 참고) |
+
+dm-worker observability 이벤트로도 동일 상황을 추적할 수 있다.
+
+- `data_job_identity_not_found` — `ldap_identity_not_found`에 대응
+- `data_job_identity_lookup_failed` — `ldap_unavailable`에 대응
+- `data_job_identity_denied` — `identity_denied`에 대응
+
+사용자가 실제로 LDAP에서 해석되는지 직접 확인하려면 LDAP를 직접 조회한다.
+
+```bash
+source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+ldapsearch -x -H "$DMS_LDAP_URI" -b "$DMS_LDAP_BASE_DN" "(uid=<user>)" uidNumber gidNumber
+```
+
+### LDAP 장애 시 (ldap_unavailable)
+
+DM은 TTL 캐시를 두지 않으며 LDAP 장애 시 **fail closed**한다. LDAP가 다운되면 preflight는 stale identity를 사용하지 않고 `ldap_unavailable`로 Rejected되고 job이 멈춘다(명확한 에러로 표시됨).
+
+조치:
+
+1. LDAP 서비스와 `DMS_LDAP_*` 설정을 복구한다. (위 `ldapsearch`로 연결을 확인할 수 있다.)
+2. flush할 캐시는 없다. LDAP가 정상화되면 해당 데이터 job을 그대로 재시도하면 된다.
 
 ## Expiry 처리
 

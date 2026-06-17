@@ -15,7 +15,7 @@ from .execution import ExecutionMixin
 from .resources import ResourcesMixin
 from .storage_mappings import StorageMappingsMixin
 from .policies import PoliciesMixin
-from .identity import IdentityMixin
+from .identity import DmIdentityDenylistMixin
 from .data_jobs import DataJobsMixin
 from .operational import OperationalMixin
 
@@ -27,7 +27,7 @@ class DmsRepository(
     ResourcesMixin,
     StorageMappingsMixin,
     PoliciesMixin,
-    IdentityMixin,
+    DmIdentityDenylistMixin,
     DataJobsMixin,
     OperationalMixin,
 ):

@@ -11,8 +11,6 @@ from ..db import Database
 from ..domain import (
     DataJobState,
     DataManagementPolicyInput,
-    IdentityMappingInput,
-    IdentityMappingStatus,
     LifecycleState,
     ResourceKind,
     StorageMappingInput,

@@ -77,7 +77,6 @@ class ResourceKind(StrEnum):
     DATA_JOB = "data_job"
     STORAGE_MAPPING = "storage_mapping"
     DEFAULT_QUOTA_POLICY = "default_quota_policy"
-    IDENTITY_MAPPING = "identity_mapping"
 
 
 class OperationKind(StrEnum):
@@ -107,13 +106,6 @@ class OperationKind(StrEnum):
     IDENTITY_UPSERT = "identity.upsert"
     IDENTITY_REFRESH = "identity.refresh"
     IDENTITY_DISABLE = "identity.disable"
-
-
-class IdentityMappingStatus(StrEnum):
-    ACTIVE = "Active"
-    DISABLED = "Disabled"
-    NEEDS_REVIEW = "NeedsReview"
-    STALE = "Stale"
 
 
 class StorageMappingSanityStatus(StrEnum):
@@ -190,6 +182,9 @@ class DataJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     requester_id: str
+    # Actual POSIX identity the job runs as. Mirrors RM's filesystem owner_username:
+    # requester_id is a free-form logical id and is the DEFAULT for owner_username.
+    owner_username: str | None = None
     storage_name: str | None = None
     target: DataPathTarget | None = None
     source: DataPathTarget | None = None
@@ -201,6 +196,26 @@ class DataJobRequest(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
     resources: DataJobResources | None = None
     memo: str | None = None
+
+    @field_validator("owner_username")
+    @classmethod
+    def _validate_owner_username(cls, value: str | None) -> str | None:
+        # owner_username is the real POSIX identity the data job runs as (via runuser).
+        # Validate it as a POSIX username at the API boundary -- like RM does for filesystem
+        # owner overrides -- so whitespace/shell-metachar/control values can never flow into
+        # the worker's runuser/chown invocations. (When omitted, it defaults to requester_id,
+        # which may be a free-form logical id; an invalid default simply fails closed at the
+        # LDAP lookup with `ldap_identity_not_found`.)
+        if value is None:
+            return None
+        candidate = value.strip()
+        if not candidate:
+            raise ValueError("owner_username must not be blank when provided")
+        if len(candidate) > 64 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]*", candidate):
+            raise ValueError(
+                "owner_username must be a POSIX username matching [A-Za-z_][A-Za-z0-9._-]* (max 64 chars)"
+            )
+        return candidate
 
     @model_validator(mode="after")
     def normalize_compatibility_fields(self) -> "DataJobRequest":
@@ -261,26 +276,14 @@ class AgentReport(BaseModel):
     identity_evidence: dict[str, Any] = Field(default_factory=dict)
 
 
-class IdentityMappingInput(BaseModel):
-    requester_id: str
-    identity_provider: str
-    posix_username: str
-    expected_uid: int | None = None
-    expected_primary_gid: int | None = None
-    expected_groups: list[str] = Field(default_factory=list)
-    uid: int | None = None
-    gid: int | None = None
-    groups: list[str] = Field(default_factory=list)
+class DmIdentityDenylistBody(BaseModel):
+    """Body for adding a DM identity denylist entry. The subject + subject_type come
+    from the path; only the reason is in the body."""
 
-    @model_validator(mode="after")
-    def normalize_phase1_identity_fields(self) -> "IdentityMappingInput":
-        if self.expected_uid is None and self.uid is not None:
-            self.expected_uid = self.uid
-        if self.expected_primary_gid is None and self.gid is not None:
-            self.expected_primary_gid = self.gid
-        if not self.expected_groups and self.groups:
-            self.expected_groups = list(self.groups)
-        return self
+    reason: str | None = None
+
+
+DM_DENYLIST_SUBJECT_TYPES = ("requester", "owner", "group")
 
 
 class StorageMappingInput(BaseModel):
@@ -525,6 +528,8 @@ def normalized_data_job_payload(
     payload["priority"] = priority["value"]
     payload["priority_label"] = priority["label"]
     payload["priority_input"] = priority["input"]
+    # POSIX identity the job runs as: explicit owner_username, else the requester_id.
+    payload["owner_username"] = request.owner_username or request.requester_id
     if operation == OperationKind.DATA_SCAN:
         target = normalized_data_job_target(request)
         payload["storage_name"] = target["storage_name"]

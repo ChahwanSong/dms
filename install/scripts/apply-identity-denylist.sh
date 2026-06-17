@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DM identity denylist (kill-switch + admission block) bulk-apply helper.
+#
+# identity_mappings was REMOVED. DM resolves the requester's POSIX identity by a
+# READ-ONLY LDAP lookup at preflight time; there is NO mapping registration step.
+# The denylist is normally EMPTY (default = allow all) and is operated per entry as
+# an instant kill-switch. This script is only for seeding a known block list (e.g.
+# offboarded accounts) from a JSON file -- it is optional.
+
 usage() {
   cat >&2 <<'USAGE'
 사용법:
-  register-identity-mappings.sh <identity-mappings.json>
+  apply-identity-denylist.sh <identity-denylist.json>
 
 JSON file 형식:
-  {"identity_mappings": [ ... ]}
+  {"entries": [ {"subject_type": "requester|owner|group", "subject": "...", "reason": "..."} ]}
 
 환경변수:
   DMS_API_URL  필수
@@ -50,14 +58,15 @@ if [[ -n "${DMS_CA_CERT:-}" ]]; then
   curl_args+=(--cacert "$DMS_CA_CERT")
 fi
 
-jq -c '.identity_mappings[]' "$file" | while IFS= read -r item; do
-  provider="$(jq -r '.identity_provider | @uri' <<<"$item")"
-  requester_id="$(jq -r '.requester_id | @uri' <<<"$item")"
-  label="$(jq -r '.identity_provider + ":" + .requester_id' <<<"$item")"
-  echo "identity mapping 등록 중: $label"
-  curl -fsS -X PUT "${api_url%/}/api/v1/identity-mappings/${provider}/${requester_id}" \
+jq -c '.entries[]' "$file" | while IFS= read -r item; do
+  subject_type="$(jq -r '.subject_type | @uri' <<<"$item")"
+  subject="$(jq -r '.subject | @uri' <<<"$item")"
+  label="$(jq -r '.subject_type + "/" + .subject' <<<"$item")"
+  reason="$(jq -c '{reason}' <<<"$item")"
+  echo "identity denylist 적용 중: $label"
+  curl -fsS -X PUT "${api_url%/}/api/v1/data-management/identity-denylist/${subject_type}/${subject}" \
     "${curl_args[@]}" \
     "${headers[@]}" \
-    --data "$item"
+    --data "$reason"
   echo
 done
