@@ -817,3 +817,120 @@ def _ingest_split_role_dm_reports(repository: DmsRepository) -> None:
                 "csi": [],
             }
         )
+
+
+def _preflight_adapter() -> KubernetesVolcanoAdapter:
+    return KubernetesVolcanoAdapter(
+        Settings(
+            database_url="sqlite:///:memory:",
+            observability_database_url="sqlite:///:memory:",
+            dm_job_image="registry.local/dms-mpifileutils:test",
+            dm_artifact_base_uri="file:///artifacts/dms",
+            dm_kubernetes_mode="cluster",
+        )
+    )
+
+
+def _sync_plan_job(tool: str, worker_pool: dict) -> tuple[dict, dict, dict]:
+    plan = {
+        "desired_state": {
+            "source": {"storage_name": "cephfs-dms", "path": "dms/src"},
+            "destination": {"storage_name": "cephfs-dms-secondary", "path": "dms/dst"},
+            "options": {},
+        },
+        "execution_metadata": {"phase": "preview"},
+    }
+    data_job = {
+        "job_id": "job-pf",
+        "request_id": "req-pf",
+        "operation": OperationKind.DATA_SYNC.value,
+        "storage_name": "cephfs-dms",
+        "normalized_target": {
+            "source": {"storage_name": "cephfs-dms", "path": "dms/src"},
+            "destination": {"storage_name": "cephfs-dms-secondary", "path": "dms/dst"},
+        },
+        "selected_tool": tool,
+        "worker_pool": worker_pool,
+    }
+    preflight = {
+        "identity_mapping": {"uid": 10003, "gid": 10000, "posix_username": "cocoa.song"}
+    }
+    return plan, data_job, preflight
+
+
+def _container(manifest: dict) -> dict:
+    return manifest["spec"]["containers"][0]
+
+
+def _mount_names(manifest: dict) -> set:
+    return {m["name"] for m in _container(manifest)["volumeMounts"]}
+
+
+def test_nsync_preflight_splits_into_source_and_destination_role_pods():
+    # nsync's source and destination are on DISJOINT node sets, so the POSIX preflight
+    # must run one pod per role (each pinned to a node of its own role, mounting only its
+    # own storage) -- not a single both-mounts pod (which would land on one node where the
+    # other role's mount is absent and always fail posix_permission_denied).
+    adapter = _preflight_adapter()
+    worker_pool = {
+        "source_candidates": [
+            {"node_name": "dms-w1", "mount_path": "/cephfs"},
+            {"node_name": "dms-w2", "mount_path": "/cephfs"},
+        ],
+        "destination_candidates": [
+            {"node_name": "dms-w4", "mount_path": "/cephfs-secondary"},
+            {"node_name": "dms-w5", "mount_path": "/cephfs-secondary"},
+        ],
+        "selected_candidates": [
+            {"node_name": "dms-w1", "mount_path": "/cephfs"},
+            {"node_name": "dms-w4", "mount_path": "/cephfs-secondary"},
+        ],
+    }
+    plan, data_job, preflight = _sync_plan_job("nsync", worker_pool)
+
+    manifests = adapter._data_preflight_manifests(plan, data_job, preflight, "preview")
+    roles = [role for role, _ in manifests]
+    assert roles == ["source", "destination"]
+    by_role = {role: m for role, m in manifests}
+
+    src = by_role["source"]
+    assert src["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "dms-w1"}
+    assert _mount_names(src) == {"sync-source"}  # source pod must NOT mount destination
+    assert src["spec"]["volumes"][0]["hostPath"]["path"] == "/cephfs"
+    assert "/dms/source/${DMS_SYNC_SOURCE_PATH}" in _container(src)["command"][2]
+    assert "/dms/destination" not in _container(src)["command"][2]
+
+    dst = by_role["destination"]
+    assert dst["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "dms-w4"}
+    assert _mount_names(dst) == {"sync-destination"}  # destination pod must NOT mount source
+    assert dst["spec"]["volumes"][0]["hostPath"]["path"] == "/cephfs-secondary"
+    cmd = _container(dst)["command"][2]
+    assert "destination_parent" in cmd and 'test -w "$destination_parent"' in cmd
+
+    # both role pods run as the resolved POSIX identity
+    for m in (src, dst):
+        assert _container(m)["securityContext"]["runAsUser"] == 10003
+        assert m["metadata"]["labels"]["dms.openai.com/preflight-role"] in (
+            "source",
+            "destination",
+        )
+
+
+def test_dsync_preflight_stays_single_both_mounts_pod():
+    # Co-located dsync keeps the single-pod check that mounts BOTH source and destination
+    # from the one node that has them.
+    adapter = _preflight_adapter()
+    worker_pool = {
+        "selected_candidates": [
+            {
+                "node_name": "dms-w1",
+                "source_mount_path": "/cephfs",
+                "destination_mount_path": "/cephfs",
+            }
+        ]
+    }
+    plan, data_job, preflight = _sync_plan_job("dsync", worker_pool)
+    manifests = adapter._data_preflight_manifests(plan, data_job, preflight, "preview")
+    assert [role for role, _ in manifests] == ["both"]
+    both = manifests[0][1]
+    assert _mount_names(both) >= {"sync-source", "sync-destination"}

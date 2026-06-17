@@ -246,7 +246,79 @@ class KubernetesVolcanoAdapter:
                 "source": "kubernetes-preflight-pod",
                 "reason": "missing_dm_job_image",
             }
-        manifest = self._data_preflight_pod_manifest(plan, data_job, preflight, phase)
+        # The POSIX permission preflight runs as the resolved POSIX user inside a pod that
+        # hostPath-mounts the relevant storage. For a co-located tool (dsync/drm) one pod
+        # mounts everything it needs. For nsync the source and destination live on DISJOINT
+        # node sets, so no single node can mount both -- we run one preflight per role, each
+        # pinned to a representative node of that role, and require every role to pass.
+        role_manifests = self._data_preflight_manifests(plan, data_job, preflight, phase)
+        results = [
+            (role, self._run_preflight_pod(manifest, phase))
+            for role, manifest in role_manifests
+        ]
+        if len(results) == 1:
+            return results[0][1]
+        role_checks = {role: result for role, result in results}
+        failed = [
+            (role, result)
+            for role, result in results
+            if result.get("status") != "Ready"
+        ]
+        if not failed:
+            return {
+                "status": "Ready",
+                "source": "kubernetes-preflight-pod",
+                "reason": f"{phase}_posix_permission_check_passed",
+                "role_checks": role_checks,
+            }
+        failed_role, failed_result = failed[0]
+        return {
+            **failed_result,
+            "status": "Rejected",
+            "source": "kubernetes-preflight-pod",
+            "reason": failed_result.get("reason") or "posix_permission_denied",
+            "failed_role": failed_role,
+            "role_checks": role_checks,
+        }
+
+    def _data_preflight_manifests(
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        preflight: dict[str, Any],
+        phase: str,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Preflight pod manifests tagged by role.
+
+        nsync (separated source/destination node sets) -> one ``source`` + one
+        ``destination`` pod; every co-located tool (dsync/drm) -> a single ``both`` pod.
+        """
+        if (
+            data_job["operation"] == "data.sync"
+            and data_job.get("selected_tool") == "nsync"
+        ):
+            return [
+                (
+                    "source",
+                    self._sync_role_preflight_manifest(
+                        plan, data_job, preflight, phase, "source"
+                    ),
+                ),
+                (
+                    "destination",
+                    self._sync_role_preflight_manifest(
+                        plan, data_job, preflight, phase, "destination"
+                    ),
+                ),
+            ]
+        return [
+            ("both", self._data_preflight_pod_manifest(plan, data_job, preflight, phase))
+        ]
+
+    def _run_preflight_pod(
+        self, manifest: dict[str, Any], phase: str
+    ) -> dict[str, Any]:
+        """Apply one preflight pod, wait for it to terminate, judge it, and clean it up."""
         name = manifest["metadata"]["name"]
         namespace = manifest["metadata"]["namespace"]
         apply_result = subprocess.run(
@@ -785,6 +857,155 @@ class KubernetesVolcanoAdapter:
                     "dms.openai.com/data-job-id": data_job["job_id"],
                     "dms.openai.com/request-id": data_job["request_id"],
                     "dms.openai.com/data-phase": phase,
+                },
+            },
+            "spec": spec,
+        }
+
+    def _sync_role_preflight_manifest(
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        preflight: dict[str, Any],
+        phase: str,
+        role: str,
+    ) -> dict[str, Any]:
+        """Single-role POSIX preflight pod for nsync.
+
+        ``role`` is ``source`` or ``destination``. The pod is pinned to a representative
+        node of that role (all nodes mounting the same storage share the same POSIX view,
+        so one node per role is sufficient) and mounts only that role's storage. This is
+        what makes nsync -- whose source and destination are on disjoint node sets -- pass
+        preflight, where a single both-mounts pod (used by dsync) cannot.
+        """
+        normalized = (
+            data_job.get("normalized_target") or plan.get("desired_state") or {}
+        )
+        source = (
+            normalized.get("source") or plan.get("desired_state", {}).get("source") or {}
+        )
+        destination = (
+            normalized.get("destination")
+            or plan.get("desired_state", {}).get("destination")
+            or {}
+        )
+        worker_pool = data_job.get("worker_pool") or {}
+        identity = preflight.get("identity_mapping") or {}
+
+        if role == "source":
+            candidates = _unique_selected_candidates(
+                worker_pool.get("source_candidates") or []
+            )
+            mount = candidates[0].get("mount_path") if candidates else None
+            node = candidates[0].get("node_name") if candidates else None
+            volumes = (
+                [{"name": "sync-source", "hostPath": {"path": mount, "type": "Directory"}}]
+                if mount
+                else []
+            )
+            volume_mounts = (
+                [{"name": "sync-source", "mountPath": "/dms/source", "readOnly": True}]
+                if mount
+                else []
+            )
+            command_text = "\n".join(
+                [
+                    "set -eu",
+                    "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
+                    'test -e "$source"',
+                    'test -r "$source"',
+                    'if [ -d "$source" ]; then test -x "$source"; fi',
+                    "printf 'sync %s source preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$source\"",
+                ]
+            )
+        elif role == "destination":
+            candidates = _unique_selected_candidates(
+                worker_pool.get("destination_candidates") or []
+            )
+            mount = candidates[0].get("mount_path") if candidates else None
+            node = candidates[0].get("node_name") if candidates else None
+            volumes = (
+                [
+                    {
+                        "name": "sync-destination",
+                        "hostPath": {"path": mount, "type": "Directory"},
+                    }
+                ]
+                if mount
+                else []
+            )
+            volume_mounts = (
+                [{"name": "sync-destination", "mountPath": "/dms/destination"}]
+                if mount
+                else []
+            )
+            command_text = "\n".join(
+                [
+                    "set -eu",
+                    "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
+                    'destination_parent=$(dirname "$destination")',
+                    'test -d "$destination_parent"',
+                    'test -w "$destination_parent"',
+                    'test -x "$destination_parent"',
+                    'if [ -e "$destination" ]; then test -w "$destination"; fi',
+                    "printf 'sync %s destination preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$destination\"",
+                ]
+            )
+        else:
+            raise DataManagementRuntimeError(
+                f"unsupported sync preflight role: {role}"
+            )
+
+        env = [
+            {
+                "name": "DMS_POSIX_USERNAME",
+                "value": str(identity.get("posix_username") or ""),
+            },
+            {
+                "name": "DMS_SYNC_SOURCE_STORAGE",
+                "value": source.get("storage_name", data_job.get("storage_name") or ""),
+            },
+            {
+                "name": "DMS_SYNC_DESTINATION_STORAGE",
+                "value": destination.get("storage_name", ""),
+            },
+            {"name": "DMS_SYNC_SOURCE_PATH", "value": source.get("path") or "."},
+            {"name": "DMS_SYNC_DESTINATION_PATH", "value": destination.get("path") or "."},
+            {"name": "DMS_DM_PHASE", "value": phase},
+        ]
+        node_selector = {"kubernetes.io/hostname": node} if node else {}
+        spec = {
+            "restartPolicy": "Never",
+            "serviceAccountName": self.settings.dm_service_account,
+            "nodeSelector": node_selector,
+            "securityContext": _pod_security_context(preflight),
+            "volumes": volumes,
+            "containers": [
+                {
+                    "name": f"sync-preflight-{role}",
+                    "image": self.settings.dm_job_image,
+                    "command": ["/bin/sh", "-c", command_text],
+                    "env": env,
+                    "volumeMounts": volume_mounts,
+                    "securityContext": _container_security_context(preflight),
+                }
+            ],
+        }
+        name = _kubernetes_name(
+            f"dms-sync-{phase}-preflight-{role}-{data_job['job_id']}"
+        )
+        return {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": name,
+                "namespace": self.settings.dm_namespace,
+                "labels": {
+                    "app.kubernetes.io/name": "dms-data-management-preflight",
+                    "dms.openai.com/data-job-id": data_job["job_id"],
+                    "dms.openai.com/request-id": data_job["request_id"],
+                    "dms.openai.com/data-phase": phase,
+                    "dms.openai.com/preflight-role": role,
                 },
             },
             "spec": spec,
