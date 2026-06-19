@@ -2,6 +2,13 @@
 
 다음 세션이 현재 작업의 연장선에서 이어갈 수 있도록 핵심 정보 + 테스트베드 아키텍처를 정리.
 
+> **2026-06-19 UPDATE**: bind-mount stale fix(`1483345`) + DM path base managed_root(`53f81d6`) **커밋·push 완료**
+> (브랜치 `dms-dm-dev`, HEAD `53f81d6`). 현재 **`DMS_DM_PATH_BASE=managed_root` 운영 중** — 검증 완료: managed_root
+> 모드 scan/dsync/rm(path를 managed_root 기준으로, 예 `scan-test`→`/cephfs/dms/scan-test`) + RM filesystem
+> create+quota·mandatory-422 모두 PASS. 제어플레인 이미지 `pkg-01:5000/dms:bd2f4fb-pathbase`. 아래 본문의 일부
+> "미커밋"/"mount_path로 복원" 표현은 이 UPDATE 기준으로 읽을 것. 잔존 미커밋: `install/docker/kubectl`(빌드
+> 아티팩트, 커밋 금지) + testbed repo(`docs/ARCHITECTURE.md` 등 — 별도 repo, 미커밋).
+
 ---
 
 ## 0. 지금 어디까지 왔나 (한눈에)
