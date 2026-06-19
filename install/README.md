@@ -748,6 +748,11 @@ cp install/config/storage-mappings.example.json /tmp/dms-storage-mappings.json
 > 거부된다(암묵 기본값 없음). `managed_root`는 `mount_path` 아래의 절대경로여야 하며,
 > RM 디렉토리 연산과 DM `DMS_DM_PATH_BASE=managed_root` 모드의 경계/기준점이 된다. (CSI-only/namespace-quota용
 > mapping은 filesystem backend가 아니므로 managed_root가 필요 없다.)
+>
+> **managed_root 권한은 `0711`로 둔다** — 리소스 디렉토리는 각각 `0750`/`0770`(소유자/그룹만)로 만들어지지만,
+> 그 부모인 managed_root가 `0755`(기본 umask)면 누구나 `ls`로 **리소스 이름 목록**을 볼 수 있다. `0711`은
+> 임의 uid 소유자의 traverse(`cd`)는 허용하되 list(`ls`)는 막는다. CephFS는 DMS 자동 생성 시 `0711`로
+> 만들고(사전 생성 시 그 권한 유지), GPFS/WEKA는 운영자가 `mkdir -p {managed_root} && chmod 0711 {managed_root}`로 만든다.
 
 CephFS 예시:
 
@@ -952,6 +957,19 @@ install/scripts/apply-identity-denylist.sh /tmp/dms-identity-denylist.json
 ```
 
 개별 주체의 차단 추가/해제/조회(`identity-denylist` API) 사용법은 `4.dms-dm-api.md`를 참고한다.
+
+### 12.3 운영자 root 실행 (privileged requester, 선택)
+
+운영자가 임의 사용자 데이터를 이관·정리하기 위해 root(uid 0)로 Data Management를 실행해야 하는 경우를 위한 **기본 비활성** 기능이다. 켜면 `requester_id`(또는 `owner_username`)가 `DMS_DM_PRIVILEGED_REQUESTERS`(기본 `root`)에 속한 요청을 uid/gid 0으로 합성 실행한다(LDAP 조회·uid floor 우회, job pod `runAsUser:0`).
+
+```yaml
+DMS_DM_ALLOW_ROOT_REQUESTER: "true"     # 기본 false
+DMS_DM_PRIVILEGED_REQUESTERS: "root"
+DMS_DM_PRIVILEGED_SCOPES: ""            # 비우면 전체 storage. "storage" 또는 "storage:prefix"로 제한
+DMS_DM_PRIVILEGED_OPERATORS: ""         # 비우면 mTLS-verified operator 전체 허용
+```
+
+권한 부여는 API edge에서 인증된 operator에 묶인다. **반드시 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 경로에서만 사용**한다 — `requester_id`는 클라이언트가 채우는 필드라, 평문 `x-dms-actor` 채널로 root가 닿으면 권한상승 구멍이 된다. root 요청도 mTLS-verified operator가 아니면 `403`, denylist 등재 시 `identity_denied`로 거부되며, preview/confirm 게이트도 우회되지 않는다. 상세는 `4.dms-dm-api.md` §10.4를 참고한다.
 
 ## 13. 설치 검증
 
@@ -1261,6 +1279,7 @@ kubectl --context dms-control -n dms logs deploy/dms-rm-worker --tail=200
 - source update, control cluster reboot, planned node drain 전에는 `dms-planned-shutdown.sh`로 drain mode에 진입한다.
 - startup 후에는 `dms-startup-recovery-check.sh`를 통과한 다음 `dms-resume.sh`를 실행한다.
 - `dms-dm-worker`는 0 replica로 유지한다.
+- `DMS_DM_ALLOW_ROOT_REQUESTER`(운영자 root 실행, §12.3)는 기본 비활성이며, 켤 경우 반드시 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 경로로만 노출한다(평문 actor 채널 금지). 필요 시 `DMS_DM_PRIVILEGED_SCOPES`로 storage/경로를 제한한다.
 - `UnknownAfterSideEffect`, `BackendApplyFailed`, action-required 항목은 운영 사고로 취급한다.
 - 업그레이드 전 operational DB와 observability DB를 모두 백업한다.
 

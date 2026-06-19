@@ -2298,7 +2298,9 @@ def _mpi_worker_command() -> str:
             "ssh-keygen -A >/dev/null 2>&1 || true",
             'if [ -n "${DMS_POSIX_USERNAME:-}" ] && id "$DMS_POSIX_USERNAME" >/dev/null 2>&1; then',
             "  user_home=$(getent passwd \"$DMS_POSIX_USERNAME\" | awk -F: '{print $6}')",
-            '  if [ -n "$user_home" ]; then',
+            "  # Skip for root: user_home=/root already holds the read-only Volcano SSH keys",
+            "  # (sshd reads them directly); copying/chowning would fail on the RO mount.",
+            '  if [ -n "$user_home" ] && [ "$user_home" != /root ]; then',
             '    mkdir -p "$user_home/.ssh"',
             '    chown "$DMS_POSIX_USERNAME" "$user_home" 2>/dev/null || true',
             '    if [ -f /root/.ssh/authorized_keys ]; then cp /root/.ssh/authorized_keys "$user_home/.ssh/authorized_keys"; fi',
@@ -2385,7 +2387,10 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
         '&& id "$DMS_POSIX_USERNAME" >/dev/null 2>&1 '
         "&& command -v runuser >/dev/null 2>&1; then "
         "user_home=$(getent passwd \"$DMS_POSIX_USERNAME\" | awk -F: '{print $6}'); "
-        'if [ -n "$user_home" ]; then '
+        # Skip for a root requester: user_home is /root, where Volcano already mounts the
+        # MPI SSH keys READ-ONLY. root reads them directly, so copying/chowning them would
+        # fail on the read-only mount. (Non-root users get the keys copied into their home.)
+        'if [ -n "$user_home" ] && [ "$user_home" != /root ]; then '
         'mkdir -p "$user_home/.ssh"; '
         'chown "$DMS_POSIX_USERNAME" "$user_home" 2>/dev/null || true; '
         'cp -a /root/.ssh/. "$user_home/.ssh/" 2>/dev/null || true; '
@@ -2809,6 +2814,11 @@ def _pod_security_context(preflight: dict[str, Any]) -> dict[str, Any]:
     gid = mapping.get("gid")
     if gid is None:
         return {}
+    uid = mapping.get("uid")
+    if uid is not None and int(uid) == 0:
+        # Privileged (root) data job: the pod runs as root, so runAsNonRoot must NOT be set
+        # (kubelet would refuse to start the container). Authorized upstream at the API edge.
+        return {"fsGroup": 0}
     return {"fsGroup": int(gid), "runAsNonRoot": True}
 
 
@@ -2819,6 +2829,15 @@ def _container_security_context(preflight: dict[str, Any]) -> dict[str, Any]:
     gid = mapping.get("gid")
     if uid is None or gid is None:
         return {}
+    if int(uid) == 0:
+        # Privileged (root) data job: run as root (no runAsNonRoot), still no privilege
+        # escalation. Gated by the API mTLS-operator check; the floor is bypassed only for
+        # synthesized privileged identities.
+        return {
+            "allowPrivilegeEscalation": False,
+            "runAsUser": 0,
+            "runAsGroup": int(gid),
+        }
     return {
         "allowPrivilegeEscalation": False,
         "runAsNonRoot": True,

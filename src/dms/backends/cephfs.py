@@ -1209,7 +1209,14 @@ _CREATE_DIRECTORY_SCRIPT = textwrap.dedent(r"""
             )
         owner_uid = owner_entry.pw_uid
 
+    root_existed = os.path.isdir(root)
     os.makedirs(root, exist_ok=True)
+    if not root_existed:
+        # DMS-created managed root: world-traversable (0711) so arbitrary-uid resource
+        # owners can reach their own 0750/0770 dirs, but NOT world-listable -- so the set
+        # of resource directory names is not exposed. A pre-existing managed root keeps the
+        # operator-chosen mode (provision it 0711; see install docs).
+        os.chmod(root, 0o711)
     root_real = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root_real, directory_name))
     if os.path.commonpath([root_real, target]) != root_real:

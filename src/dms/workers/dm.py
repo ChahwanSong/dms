@@ -31,6 +31,15 @@ class DMWorkerRuntime:
     # run the data operation as root and defeat POSIX isolation).
     min_uid: int = 1000
     min_gid: int = 1000
+    # Privileged (root) DM execution (default OFF). When ON, a request whose effective
+    # owner_username is in `privileged_requesters` resolves to a SYNTHESIZED root identity
+    # (uid/gid 0), skipping LDAP and the uid floor. The CALLER is authorized at the API edge
+    # (mTLS operator gate) before such a request is ever persisted; this branch only
+    # synthesizes the identity. The denylist (checked first) still applies as a kill-switch.
+    allow_root_requester: bool = False
+    privileged_requesters: frozenset[str] = frozenset({"root"})
+    privileged_uid: int = 0
+    privileged_gid: int = 0
 
     def run_once(self) -> int:
         self.repository.mark_stale_runs(actor=self.worker_id)
@@ -652,6 +661,28 @@ class DMWorkerRuntime:
             self._record_identity_event("data_job_identity_denied", "WARN", requester_id, owner_username, {"denylist": denied})
             return _reject("identity_denied", denylist=denied)
 
+        # Privileged (root) execution: synthesize uid/gid 0 WITHOUT LDAP or the uid floor.
+        # The caller was authorized at the API edge (mTLS operator gate) before this request
+        # was persisted; the denylist above is still honored as a kill-switch.
+        if self.allow_root_requester and owner_username in self.privileged_requesters:
+            self._record_identity_event(
+                "data_job_privileged_identity_resolved", "WARN", requester_id,
+                owner_username, {"uid": self.privileged_uid, "gid": self.privileged_gid},
+            )
+            return {
+                "requester_id": requester_id,
+                "owner_username": owner_username,
+                "identity_provider": "privileged",
+                "posix_username": owner_username,
+                "uid": self.privileged_uid,
+                "gid": self.privileged_gid,
+                "groups": [],
+                "status": "Resolved",
+                "privileged": True,
+                "verified_at": datetime.now(UTC).isoformat(),
+                "user_dn": None,
+            }
+
         if self.identity_lookup is None:
             return _reject("ldap_not_configured", detail="DM identity LDAP lookup is not configured (set DMS_LDAP_URI/DMS_LDAP_BASE_DN)")
 
@@ -738,6 +769,7 @@ class DMWorkerRuntime:
                 storage_name=job["storage_name"],
                 tool="dscan",
                 posix_username=mapping["posix_username"],
+                privileged=bool(mapping.get("privileged")),
             )
             candidate = {
                 "cluster_name": report["cluster_name"],
@@ -861,7 +893,9 @@ class DMWorkerRuntime:
                 evidence.get("mounts") or [], destination.get("storage_name")
             )
             identity_ready = _identity_ready(
-                evidence.get("identity_evidence") or {}, mapping["posix_username"]
+                evidence.get("identity_evidence") or {},
+                mapping["posix_username"],
+                privileged=bool(mapping.get("privileged")),
             )
             credentials_ready = _any_ready(
                 evidence.get("credentials") or [], ready_keys=("status", "healthy")
@@ -898,6 +932,7 @@ class DMWorkerRuntime:
                 source_storage=source.get("storage_name"),
                 destination_storage=destination.get("storage_name"),
                 posix_username=mapping["posix_username"],
+                privileged=bool(mapping.get("privileged")),
             )
             if reason:
                 rejected.append({**candidate, "reason": reason})
@@ -1084,6 +1119,7 @@ class DMWorkerRuntime:
                 storage_name=target.get("storage_name") or job["storage_name"],
                 tool="drm",
                 posix_username=mapping["posix_username"],
+                privileged=bool(mapping.get("privileged")),
             )
             candidate = {
                 "cluster_name": report["cluster_name"],
@@ -1186,6 +1222,7 @@ def _scan_candidate_rejection_reason(
     storage_name: str,
     tool: str,
     posix_username: str,
+    privileged: bool = False,
 ) -> str | None:
     if not _mount_ready(report.get("mounts") or [], storage_name):
         return "missing_target_mount"
@@ -1197,7 +1234,9 @@ def _scan_candidate_rejection_reason(
         return "credential_not_ready"
     if not _any_ready(report.get("networks") or [], ready_keys=("status", "reachable")):
         return "network_not_ready"
-    if not _identity_ready(report.get("identity_evidence") or {}, posix_username):
+    if not _identity_ready(
+        report.get("identity_evidence") or {}, posix_username, privileged=privileged
+    ):
         return "identity_not_ready_on_node"
     return None
 
@@ -1437,6 +1476,7 @@ def _sync_dsync_candidate_rejection_reason(
     source_storage: str,
     destination_storage: str,
     posix_username: str,
+    privileged: bool = False,
 ) -> str | None:
     if not _mount_ready(report.get("mounts") or [], source_storage):
         return "missing_source_mount"
@@ -1450,7 +1490,9 @@ def _sync_dsync_candidate_rejection_reason(
         return "credential_not_ready"
     if not _any_ready(report.get("networks") or [], ready_keys=("status", "reachable")):
         return "network_not_ready"
-    if not _identity_ready(report.get("identity_evidence") or {}, posix_username):
+    if not _identity_ready(
+        report.get("identity_evidence") or {}, posix_username, privileged=privileged
+    ):
         return "identity_not_ready_on_node"
     return None
 
@@ -1498,7 +1540,13 @@ def _any_ready(items: list[dict[str, Any]], *, ready_keys: tuple[str, ...]) -> b
     return False
 
 
-def _identity_ready(identity_evidence: dict[str, Any], posix_username: str) -> bool:
+def _identity_ready(
+    identity_evidence: dict[str, Any], posix_username: str, *, privileged: bool = False
+) -> bool:
+    # A synthesized privileged identity (root, uid 0) resolves on every node/image
+    # (getpwnam always succeeds), so it needs no agent identity evidence to run.
+    if privileged:
+        return True
     for user in identity_evidence.get("users") or []:
         if user.get("username") != posix_username:
             continue

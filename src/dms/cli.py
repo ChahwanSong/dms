@@ -159,6 +159,10 @@ def main(argv: list[str] | None = None) -> int:
             identity_provider=settings.dm_identity_provider,
             min_uid=settings.dm_min_uid,
             min_gid=settings.dm_min_gid,
+            allow_root_requester=settings.dm_allow_root_requester,
+            privileged_requesters=settings.dm_privileged_requesters,
+            privileged_uid=settings.dm_privileged_uid,
+            privileged_gid=settings.dm_privileged_gid,
         )
         return _run_once_or_loop(worker.run_once, loop=args.loop, interval=args.interval)
     if args.command == "agent-submit":

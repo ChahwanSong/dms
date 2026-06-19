@@ -80,6 +80,20 @@ class Settings:
     # rejected with `uid_below_floor`.
     dm_min_uid: int = 1000
     dm_min_gid: int = 1000
+    # Privileged (root) DM execution (default OFF -> identical to no-feature behavior).
+    # When ON, a DM request whose effective owner_username/requester_id is in
+    # `dm_privileged_requesters` resolves to a SYNTHESIZED root identity (uid/gid 0),
+    # bypassing the LDAP lookup and the uid/gid floor. The API edge
+    # (authorize_privileged_requester_or_403) authorizes the CALLER first: feature flag on,
+    # mTLS-verified operator (actor with `mtls_actor_prefix`), optional operator allowlist,
+    # and `dm_privileged_scopes` (empty = all storages). The denylist still applies as a
+    # kill-switch. See install/4.dms-dm-api.md.
+    dm_allow_root_requester: bool = False
+    dm_privileged_requesters: frozenset[str] = frozenset({"root"})
+    dm_privileged_uid: int = 0
+    dm_privileged_gid: int = 0
+    dm_privileged_operators: frozenset[str] = frozenset()
+    dm_privileged_scopes: frozenset[str] = frozenset()
     # Storage-mapping readiness auto-refresh (sanity reconciler). readiness is a cached
     # projection of agent evidence; without periodic refresh it drifts stale in BOTH
     # directions (stale "Missing" blocks valid work, stale "Ready" admits work after the
@@ -230,6 +244,14 @@ class Settings:
             dm_identity_provider=os.getenv("DMS_DM_IDENTITY_PROVIDER", "ldap"),
             dm_min_uid=int(os.getenv("DMS_DM_MIN_UID", "1000")),
             dm_min_gid=int(os.getenv("DMS_DM_MIN_GID", "1000")),
+            dm_allow_root_requester=_bool_env("DMS_DM_ALLOW_ROOT_REQUESTER", False),
+            dm_privileged_requesters=_csv_set_env(
+                "DMS_DM_PRIVILEGED_REQUESTERS", "root"
+            ),
+            dm_privileged_uid=int(os.getenv("DMS_DM_PRIVILEGED_UID", "0")),
+            dm_privileged_gid=int(os.getenv("DMS_DM_PRIVILEGED_GID", "0")),
+            dm_privileged_operators=_csv_set_env("DMS_DM_PRIVILEGED_OPERATORS", ""),
+            dm_privileged_scopes=_csv_set_env("DMS_DM_PRIVILEGED_SCOPES", ""),
             sanity_reconcile_enabled=_bool_env("DMS_SANITY_RECONCILE_ENABLED", True),
             sanity_reconcile_interval_seconds=float(
                 os.getenv("DMS_SANITY_RECONCILE_INTERVAL_SECONDS", "30")
@@ -319,3 +341,10 @@ def _bool_env(name: str, default: bool) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean")
+
+
+def _csv_set_env(name: str, default: str) -> frozenset[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    return frozenset(item.strip() for item in raw.split(",") if item.strip())

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ...domain import DataJobRequest, DataManagementPolicyInput, OperationKind
 from ...workers import cancel_data_job, confirm_data_job
 from .._helpers.data_job import (
+    authorize_privileged_requester_or_403,
     data_job_request,
     policy_operation_or_422,
     validate_data_job_or_422,
@@ -76,6 +77,9 @@ def data_management_router() -> APIRouter:
     ) -> dict[str, Any]:
         validate_data_job_or_422(body, OperationKind.DATA_SYNC)
         validate_data_options_or_422(body, OperationKind.DATA_SYNC, services)
+        authorize_privileged_requester_or_403(
+            body, OperationKind.DATA_SYNC, request, services
+        )
         return data_job_request(body, OperationKind.DATA_SYNC, request, services)
 
     @router.post("/rm", status_code=202)
@@ -86,6 +90,9 @@ def data_management_router() -> APIRouter:
     ) -> dict[str, Any]:
         validate_data_job_or_422(body, OperationKind.DATA_RM)
         validate_data_options_or_422(body, OperationKind.DATA_RM, services)
+        authorize_privileged_requester_or_403(
+            body, OperationKind.DATA_RM, request, services
+        )
         return data_job_request(body, OperationKind.DATA_RM, request, services)
 
     @router.post("/scan", status_code=202)
@@ -95,6 +102,9 @@ def data_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         validate_data_job_or_422(body, OperationKind.DATA_SCAN)
+        authorize_privileged_requester_or_403(
+            body, OperationKind.DATA_SCAN, request, services
+        )
         return data_job_request(body, OperationKind.DATA_SCAN, request, services)
 
     @router.get("/scan")
