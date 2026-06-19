@@ -19,7 +19,7 @@ from dms.repositories import DmsRepository, ObservabilityRepository
 from dms.workers import RMWorkerRuntime
 
 
-def test_phase10_filesystem_create_plans_access_group_and_no_quota(tmp_path):
+def test_filesystem_create_plans_access_group_and_no_quota(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_filesystem_request(
@@ -43,7 +43,7 @@ def test_phase10_filesystem_create_plans_access_group_and_no_quota(tmp_path):
     assert plan["execution_metadata"]["planner"] == "filesystem"
 
 
-def test_phase12_filesystem_create_plans_quota_payload(tmp_path):
+def test_filesystem_create_plans_quota_payload(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_filesystem_request(
@@ -109,7 +109,7 @@ def test_filesystem_create_with_single_user_succeeds(tmp_path):
     assert plan["desired_state"]["users"] == ["alice"]
 
 
-def test_phase10_filesystem_create_rejects_existing_resource(tmp_path):
+def test_filesystem_create_rejects_existing_resource(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     repository.upsert_resource(
@@ -146,7 +146,7 @@ def test_phase10_filesystem_create_rejects_existing_resource(tmp_path):
     ]
 
 
-def test_phase12_filesystem_update_requires_existing_quota_only_payload(tmp_path):
+def test_filesystem_update_requires_existing_quota_only_payload(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_filesystem_request(
@@ -173,7 +173,7 @@ def test_phase12_filesystem_update_requires_existing_quota_only_payload(tmp_path
     }
 
 
-def test_phase10_filesystem_delete_reuses_existing_desired_state(tmp_path):
+def test_filesystem_delete_reuses_existing_desired_state(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     repository.upsert_resource(
@@ -208,7 +208,7 @@ def test_phase10_filesystem_delete_reuses_existing_desired_state(tmp_path):
     assert plan["desired_state"]["reason"] == "cleanup"
 
 
-def test_phase10_cephfs_adapter_creates_group_then_host_directory():
+def test_cephfs_adapter_creates_group_then_host_directory():
     executor = FakeFilesystemExecutor()
     identity_groups = StubIdentityGroupManager(users={"alice": {}, "bob": {}})
     adapter = CephFsHostMountedFilesystemBackendAdapter(
@@ -244,7 +244,7 @@ def test_phase10_cephfs_adapter_creates_group_then_host_directory():
     assert executor.calls[0]["group_name"] == "dms-grp-project-alpha"
 
 
-def test_phase10_worker_records_missing_ldap_user_before_filesystem_side_effect(
+def test_worker_records_missing_ldap_user_before_filesystem_side_effect(
     tmp_path,
 ):
     repository, observability = repository_pair(tmp_path)

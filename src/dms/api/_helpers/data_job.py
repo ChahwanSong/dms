@@ -83,7 +83,7 @@ def data_job_resource_key(payload: dict[str, Any], operation: OperationKind) -> 
     return f"data.scan:{target['storage_name']}:{target['path']}"
 
 
-def validate_phase20_data_options_or_422(
+def validate_data_options_or_422(
     body: DataJobRequest, operation: OperationKind, services: AppServices
 ) -> None:
     if operation == OperationKind.DATA_SYNC and body.options.get("delete"):

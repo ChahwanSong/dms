@@ -325,7 +325,7 @@ def test_sync_preflight_requires_identity_before_volcano(tmp_path):
     )
 
 
-def test_phase22_split_role_nsync_preview_reaches_confirm_pending(tmp_path):
+def test_split_role_nsync_preview_reaches_confirm_pending(tmp_path):
     harness = _harness(tmp_path)
     _ingest_split_role_dm_reports(harness["repository"])
     response = harness["client"].post(
@@ -370,7 +370,7 @@ def test_phase22_split_role_nsync_preview_reaches_confirm_pending(tmp_path):
     ]
 
 
-def test_phase21_nsync_disabled_fails_closed(tmp_path):
+def test_nsync_disabled_fails_closed(tmp_path):
     harness = _harness(tmp_path)
     _ingest_split_role_dm_reports(harness["repository"])
     request_id = _submit_and_plan_cross_storage_sync(harness)
@@ -541,7 +541,7 @@ def test_kubernetes_sync_and_rm_manifests_use_dry_run_and_identity_context():
     assert {"name": "DMS_SELECTED_NODE", "value": ""} in rm_worker_container["env"]
 
 
-def test_phase22_nsync_native_volcano_manifest_has_launcher_and_role_workers():
+def test_nsync_native_volcano_manifest_has_launcher_and_role_workers():
     settings = Settings(
         database_url="sqlite:///:memory:",
         observability_database_url="sqlite:///:memory:",

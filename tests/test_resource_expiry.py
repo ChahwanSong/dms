@@ -21,7 +21,7 @@ from dms.workers import RMWorkerRuntime
 API_HEADERS = {"x-dms-actor": "api-client"}
 
 
-def test_phase15_filesystem_create_requires_expires_at(tmp_path):
+def test_filesystem_create_requires_expires_at(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_filesystem_mapping(repository)
     request_id = create_request(
@@ -43,7 +43,7 @@ def test_phase15_filesystem_create_requires_expires_at(tmp_path):
     assert _reasons(result) == {"expires_at_required"}
 
 
-def test_phase15_filesystem_update_preserves_or_changes_expiry(tmp_path):
+def test_filesystem_update_preserves_or_changes_expiry(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_filesystem_mapping(repository)
     seed_filesystem(repository, expires_at="2099-01-01T00:00:00+00:00")
@@ -94,7 +94,7 @@ def test_phase15_filesystem_update_preserves_or_changes_expiry(tmp_path):
     assert resource["desired_state"]["expires_at"] == "2099-02-01T00:00:00+00:00"
 
 
-def test_phase15_filesystem_import_defaults_and_rejects_unsupported_expiry_fields(
+def test_filesystem_import_defaults_and_rejects_unsupported_expiry_fields(
     tmp_path,
 ):
     repository, _ = repository_pair(tmp_path)
@@ -146,7 +146,7 @@ def test_phase15_filesystem_import_defaults_and_rejects_unsupported_expiry_field
     assert "expires_at_field_unsupported" in _reasons(result)
 
 
-def test_phase15_kubernetes_create_update_import_and_expiring_lifecycle(tmp_path):
+def test_kubernetes_create_update_import_and_expiring_lifecycle(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_kubernetes_mapping(repository)
 
@@ -229,7 +229,7 @@ def test_phase15_kubernetes_create_update_import_and_expiring_lifecycle(tmp_path
     }
 
 
-def test_phase15_kubernetes_expiration_sweep_blocks_user_and_skips_system(tmp_path):
+def test_kubernetes_expiration_sweep_blocks_user_and_skips_system(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_kubernetes_mapping(repository)
     seed_kubernetes_quota(

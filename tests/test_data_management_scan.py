@@ -171,7 +171,7 @@ def test_scan_worker_records_preflight_volcano_artifacts_and_summary(harness):
     assert harness["repository"].get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
 
 
-def test_phase22_scan_keeps_eligible_candidates_with_single_worker_policy(harness):
+def test_scan_keeps_eligible_candidates_with_single_worker_policy(harness):
     _ingest_ready_dm_report(harness["repository"], node_name="dm-1")
     _ingest_ready_dm_report(harness["repository"], node_name="dm-2")
     request_id = _submit_and_plan_scan(harness["client"], harness["repository"])
@@ -209,7 +209,7 @@ def test_phase22_scan_keeps_eligible_candidates_with_single_worker_policy(harnes
     assert job["result_summary"]["scheduled_nodes"] == ["dm-1"]
 
 
-def test_phase22_policy_api_and_resource_hint_clamp(harness):
+def test_policy_api_and_resource_hint_clamp(harness):
     for node_name in ("dm-1", "dm-2", "dm-3"):
         _ingest_ready_dm_report(harness["repository"], node_name=node_name)
 
@@ -273,7 +273,7 @@ def test_phase22_policy_api_and_resource_hint_clamp(harness):
     assert job["result_summary"]["process_count"] == 12
 
 
-def test_phase22_scan_policy_shortage_fails_closed(harness):
+def test_scan_policy_shortage_fails_closed(harness):
     _ingest_ready_dm_report(harness["repository"], node_name="dm-1")
     harness["repository"].upsert_data_management_policy(
         DataManagementPolicyInput(
@@ -425,7 +425,7 @@ def test_kubernetes_scan_manifest_uses_identity_security_context():
     assert "test -x \"$target\"" in preflight_container["command"][2]
 
 
-def test_phase22_kubernetes_scan_manifest_uses_scheduler_eligible_set():
+def test_kubernetes_scan_manifest_uses_scheduler_eligible_set():
     settings = Settings(
         database_url="sqlite:///:memory:",
         observability_database_url="sqlite:///:memory:",
@@ -504,7 +504,7 @@ def test_phase22_kubernetes_scan_manifest_uses_scheduler_eligible_set():
     assert {"name": "DMS_MPI_PROCESS_COUNT", "value": "1"} in worker_container["env"]
 
 
-def test_phase22_mpijob_manifest_uses_volcano_policy_and_worker_slots():
+def test_mpijob_manifest_uses_volcano_policy_and_worker_slots():
     settings = Settings(
         database_url="sqlite:///:memory:",
         observability_database_url="sqlite:///:memory:",
@@ -582,7 +582,7 @@ def test_phase22_mpijob_manifest_uses_volcano_policy_and_worker_slots():
     ][0]["topologyKey"] == "kubernetes.io/hostname"
 
 
-def test_phase22_mpijob_name_stays_short_for_mpi_dns():
+def test_mpijob_name_stays_short_for_mpi_dns():
     settings = Settings(
         database_url="sqlite:///:memory:",
         observability_database_url="sqlite:///:memory:",
@@ -627,7 +627,7 @@ def test_phase22_mpijob_name_stays_short_for_mpi_dns():
     assert len(f"{name}-worker-0") <= 63
 
 
-def test_phase22_mpi_metadata_artifacts_preserve_runtime_mpirun_fields(tmp_path):
+def test_mpi_metadata_artifacts_preserve_runtime_mpirun_fields(tmp_path):
     artifact_dir = tmp_path / "job-metadata"
     mpi_dir = artifact_dir / "mpi"
     mpi_dir.mkdir(parents=True)
@@ -690,7 +690,7 @@ def test_phase22_mpi_metadata_artifacts_preserve_runtime_mpirun_fields(tmp_path)
     assert mpirun["exit_phase"] == "Succeeded"
 
 
-def test_phase22_terminate_job_supports_mpijob_refs(monkeypatch):
+def test_terminate_job_supports_mpijob_refs(monkeypatch):
     settings = Settings(
         database_url="sqlite:///:memory:",
         observability_database_url="sqlite:///:memory:",

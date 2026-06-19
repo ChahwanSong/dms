@@ -23,7 +23,7 @@ from dms.workers import RMWorkerRuntime
 API_HEADERS = {"x-dms-actor": "api-client"}
 
 
-def test_phase12_create_with_quota_applies_cephfs_quota(tmp_path):
+def test_create_with_quota_applies_cephfs_quota(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_request(
@@ -62,7 +62,7 @@ def test_phase12_create_with_quota_applies_cephfs_quota(tmp_path):
     assert [call["operation"] for call in executor.calls] == ["create", "apply_quota"]
 
 
-def test_phase12_create_rejects_invalid_quota_values(tmp_path):
+def test_create_rejects_invalid_quota_values(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = create_request(
@@ -86,7 +86,7 @@ def test_phase12_create_rejects_invalid_quota_values(tmp_path):
     }
 
 
-def test_phase12_update_increases_quota_and_records_live_state(tmp_path):
+def test_update_increases_quota_and_records_live_state(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
@@ -132,7 +132,7 @@ def test_phase12_update_increases_quota_and_records_live_state(tmp_path):
     assert [call["operation"] for call in executor.calls] == ["apply_quota"]
 
 
-def test_phase12_planner_allows_quota_decrease_without_usage_guard(tmp_path):
+def test_planner_allows_quota_decrease_without_usage_guard(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
@@ -174,7 +174,7 @@ def test_phase12_planner_allows_quota_decrease_without_usage_guard(tmp_path):
     )
 
 
-def test_phase12_backend_applies_decrease_without_live_usage_read(tmp_path):
+def test_backend_applies_decrease_without_live_usage_read(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
@@ -216,7 +216,7 @@ def test_phase12_backend_applies_decrease_without_live_usage_read(tmp_path):
     assert [call["operation"] for call in executor.calls] == ["apply_quota"]
 
 
-def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
+def test_check_drift_action_required_and_sync_resolution(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     # desired 8 MiB; live 200 MiB ⇒ 192 MiB diff exceeds 100 MiB capacity tolerance.
@@ -278,7 +278,7 @@ def test_phase12_check_drift_action_required_and_sync_resolution(tmp_path):
     assert "filesystem_quota_drifted" not in issue_types_after_sync
 
 
-def test_phase12_check_reports_missing_directory(tmp_path):
+def test_check_reports_missing_directory(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
@@ -307,7 +307,7 @@ def test_phase12_check_reports_missing_directory(tmp_path):
     ]
 
 
-def test_phase12_rejects_filesystem_usage_payload_fields(tmp_path):
+def test_rejects_filesystem_usage_payload_fields(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
@@ -354,7 +354,7 @@ def test_phase12_rejects_filesystem_usage_payload_fields(tmp_path):
     ]
 
 
-def test_phase12_assign_quota_writes_quota_only_marker(tmp_path):
+def test_assign_quota_writes_quota_only_marker(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     executor = FakePhase12FilesystemExecutor()
@@ -389,7 +389,7 @@ def test_phase12_assign_quota_writes_quota_only_marker(tmp_path):
     assert resource["observed_state"]["management_mode"] == "quota_only"
 
 
-def test_phase12_delete_rejects_quota_only_resource(tmp_path):
+def test_delete_rejects_quota_only_resource(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_resource(
@@ -420,7 +420,7 @@ def test_phase12_delete_rejects_quota_only_resource(tmp_path):
     ]
 
 
-def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
+def test_import_existing_directory_records_access_quota_state(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     executor = FakePhase12FilesystemExecutor()
@@ -477,7 +477,7 @@ def test_phase12_import_existing_directory_records_access_quota_state(tmp_path):
     )
 
 
-def test_phase12_import_external_group_creates_dms_group(tmp_path):
+def test_import_external_group_creates_dms_group(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     executor = FakePhase12FilesystemExecutor()
@@ -535,7 +535,7 @@ def test_phase12_import_external_group_creates_dms_group(tmp_path):
     ]["gid"]
 
 
-def test_phase12_import_rejects_missing_access_policy_and_unsafe_name(tmp_path):
+def test_import_rejects_missing_access_policy_and_unsafe_name(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     request_id = repository.create_request(
@@ -561,7 +561,7 @@ def test_phase12_import_rejects_missing_access_policy_and_unsafe_name(tmp_path):
     }
 
 
-def test_phase12_sync_endpoint_persists_filesystem_sync_request(tmp_path):
+def test_sync_endpoint_persists_filesystem_sync_request(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     client = client_for(tmp_path, repository, observability)
@@ -754,13 +754,13 @@ class FakePhase12FilesystemExecutor:
         }
 
     def delete_directory(self, **kwargs) -> dict[str, Any]:
-        raise AssertionError("Phase 12 tests do not delete through fake executor")
+        raise AssertionError("tests do not delete through fake executor")
 
     def block_directory(self, **kwargs) -> dict[str, Any]:
-        raise AssertionError("Phase 12 tests do not block through fake executor")
+        raise AssertionError("tests do not block through fake executor")
 
     def unblock_directory(self, **kwargs) -> dict[str, Any]:
-        raise AssertionError("Phase 12 tests do not unblock through fake executor")
+        raise AssertionError("tests do not unblock through fake executor")
 
 
 def quota_state(quota: dict[str, int], usage: dict[str, int] | None) -> dict[str, Any]:

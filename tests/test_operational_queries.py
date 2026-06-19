@@ -85,7 +85,7 @@ class FakeQuotaAdapter:
         return self.resource_quota_lists.get((cluster_name, namespace_name), [])
 
 
-def test_phase7_quota_query_returns_db_live_diff_and_effective_warning(harness):
+def test_quota_query_returns_db_live_diff_and_effective_warning(harness):
     repository = harness["repository"]
     adapter = harness["adapter"]
     seed_multi_resource(repository)
@@ -127,7 +127,7 @@ def test_phase7_quota_query_returns_db_live_diff_and_effective_warning(harness):
     assert body["live"]["usage_summary"]["requests.storage"]["percent_used"] == 25.0
 
 
-def test_phase7_quota_query_reports_drift_and_missing(harness):
+def test_quota_query_reports_drift_and_missing(harness):
     repository = harness["repository"]
     adapter = harness["adapter"]
     seed_multi_resource(repository)
@@ -162,7 +162,7 @@ def test_phase7_quota_query_reports_drift_and_missing(harness):
     assert missing_response.json()["diff"]["status"] == "Missing"
 
 
-def test_phase7_quota_query_db_source_does_not_require_live_adapter(harness):
+def test_quota_query_db_source_does_not_require_live_adapter(harness):
     seed_multi_resource(harness["repository"])
 
     response = harness["client"].get(
@@ -178,7 +178,7 @@ def test_phase7_quota_query_db_source_does_not_require_live_adapter(harness):
     assert body["diff"] == {"status": "DbOnly", "issues": []}
 
 
-def test_phase7_blocked_update_updates_restore_hard_but_keeps_live_hard_zero(harness):
+def test_blocked_update_updates_restore_hard_but_keeps_live_hard_zero(harness):
     repository = harness["repository"]
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     register_mapping(repository, STATIC, STATIC_CLASS)
@@ -213,7 +213,7 @@ def test_phase7_blocked_update_updates_restore_hard_but_keeps_live_hard_zero(har
     assert plan["desired_state"]["block_state"]["updated_while_blocked"] is True
 
 
-def test_phase7_blocked_update_decrease_guard_uses_restore_hard(harness):
+def test_blocked_update_decrease_guard_uses_restore_hard(harness):
     repository = harness["repository"]
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     register_mapping(repository, STATIC, STATIC_CLASS)
@@ -252,7 +252,7 @@ def test_phase7_blocked_update_decrease_guard_uses_restore_hard(harness):
     )
 
 
-def test_phase7_unblock_restores_latest_blocked_update_target(harness):
+def test_unblock_restores_latest_blocked_update_target(harness):
     repository = harness["repository"]
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     register_mapping(repository, STATIC, STATIC_CLASS)

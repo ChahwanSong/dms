@@ -20,7 +20,7 @@ class UnsupportedDatabaseUrl(DatabaseError):
 class Database:
     """Small DB-API wrapper.
 
-    Phase 1 keeps SQL portable enough for SQLite tests and PostgreSQL
+    Keeps SQL portable enough for SQLite tests and PostgreSQL
     deployments. PostgreSQL connections use psycopg when that optional extra is
     installed.
     """

@@ -206,7 +206,7 @@ class FilesystemPlannerMixin:
         if operation not in FILESYSTEM_RM_OPERATIONS:
             return self._reject_planner_issue(
                 request,
-                message="filesystem operation is unsupported in Phase 12",
+                message="filesystem operation is unsupported",
                 issues=[
                     {
                         "reason": "filesystem_operation_unsupported",
@@ -672,7 +672,7 @@ class FilesystemPlannerMixin:
             return False
         return self._reject_planner_issue(
             request,
-            message="invalid filesystem Phase 11 request",
+            message="invalid filesystem request",
             issues=issues,
             error_category="validation",
         )

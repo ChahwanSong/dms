@@ -582,7 +582,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
         if apply_quota:
             if not quota:
                 raise BackendPreconditionError(
-                    "filesystem quota is required for Phase 12 update"
+                    "filesystem quota is required for update"
                 )
             observed = self.executor.apply_quota(
                 managed_root=self.template.managed_root,
@@ -671,7 +671,7 @@ class CephFsHostMountedFilesystemBackendAdapter:
         return self._unblock(plan)
 
     def initialize(self, plan: dict[str, Any]) -> AdapterResult:
-        raise ValueError("filesystem initialize is unsupported in Phase 12")
+        raise ValueError("filesystem initialize is unsupported")
 
     def consistency_check(self, plan: dict[str, Any]) -> AdapterResult:
         self._validate_template()
@@ -1089,7 +1089,7 @@ def _string_list(value: Any, field_name: str, *, required: bool = True) -> list[
 
 def _validate_mode(mode: str) -> None:
     if mode not in {"0750", "0770"}:
-        raise BackendPreconditionError("Phase 10 filesystem mode must be 0750 or 0770")
+        raise BackendPreconditionError("filesystem mode must be 0750 or 0770")
 
 
 def _normalize_quota(value: Any) -> dict[str, int]:

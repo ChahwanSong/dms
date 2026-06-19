@@ -1217,7 +1217,7 @@ def _first_selected_node(selected_candidates: list[dict[str, Any]]) -> str | Non
     return None
 
 
-def _phase21_minimal_resource_model(
+def _minimal_resource_model(
     selected_candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
     selected_node = _first_selected_node(selected_candidates)
@@ -1621,7 +1621,7 @@ def _scan_result_summary(
         parsed_summary or adapter_result.observed_state.get("summary") or {}
     )
     target = job.get("normalized_target") or plan["desired_state"].get("target") or {}
-    resource_evidence = _phase21_result_resource_evidence(
+    resource_evidence = _result_resource_evidence(
         job=job, preflight=preflight, adapter_result=adapter_result
     )
     report_uri = _artifact_child_uri(artifact_uri, "dscan-report.json")
@@ -1664,7 +1664,7 @@ def _mutation_result_summary(
         parsed_summary or adapter_result.observed_state.get("summary") or {}
     )
     phase_base_uri = _artifact_child_uri(artifact_uri, phase)
-    resource_evidence = _phase21_result_resource_evidence(
+    resource_evidence = _result_resource_evidence(
         job=job, preflight=preflight, adapter_result=adapter_result
     )
     phase_entry = {
@@ -1707,7 +1707,7 @@ def _mutation_result_summary(
     return result
 
 
-def _phase21_result_resource_evidence(
+def _result_resource_evidence(
     *,
     job: dict[str, Any],
     preflight: dict[str, Any],

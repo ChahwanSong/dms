@@ -92,7 +92,7 @@ def test_mountinfo_parser_decodes_mount_paths():
     assert mount["filesystem_type"] == "ceph"
 
 
-def test_phase8_non_ready_evidence_is_not_used_as_readiness_candidate(harness):
+def test_non_ready_evidence_is_not_used_as_readiness_candidate(harness):
     client: TestClient = harness["client"]
     base_time = datetime.now(UTC)
     missing = phase8_report(

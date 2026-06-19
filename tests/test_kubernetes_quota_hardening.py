@@ -23,7 +23,7 @@ RESOURCE_KEY = "cluster-b:phase9-quota"
 API_HEADERS = {"x-dms-actor": "api-client"}
 
 
-def test_phase9_default_quota_reset_renders_policy_hard(tmp_path):
+def test_default_quota_reset_renders_policy_hard(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     register_mapping(repository, STATIC, STATIC_CLASS)
@@ -55,7 +55,7 @@ def test_phase9_default_quota_reset_renders_policy_hard(tmp_path):
     assert plan["desired_state"]["resource_quota_hard"] == default_hard()
 
 
-def test_phase9_default_quota_reset_rejects_missing_policy(tmp_path):
+def test_default_quota_reset_rejects_missing_policy(tmp_path):
     repository, _ = repository_pair(tmp_path)
     seed_multi_resource(repository)
 
@@ -79,7 +79,7 @@ def test_phase9_default_quota_reset_rejects_missing_policy(tmp_path):
     ]
 
 
-def test_phase9_blocked_default_reset_updates_restore_target(tmp_path):
+def test_blocked_default_reset_updates_restore_target(tmp_path):
     repository, _ = repository_pair(tmp_path)
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     register_mapping(repository, STATIC, STATIC_CLASS)
@@ -107,7 +107,7 @@ def test_phase9_blocked_default_reset_updates_restore_target(tmp_path):
     assert plan["desired_state"]["block_state"]["updated_while_blocked"] is True
 
 
-def test_phase9_audit_records_action_required_and_clean_audit_resolves(tmp_path):
+def test_audit_records_action_required_and_clean_audit_resolves(tmp_path):
     repository, observability = repository_pair(tmp_path)
     seed_multi_resource(repository)
     adapter = StubKubernetesNamespaceQuotaAdapter()
@@ -202,7 +202,7 @@ def test_phase9_audit_records_action_required_and_clean_audit_resolves(tmp_path)
     assert "non_dms_quota_more_restrictive" not in resolved_types
 
 
-def test_phase9_audit_detects_metadata_drift(tmp_path):
+def test_audit_detects_metadata_drift(tmp_path):
     repository, observability = repository_pair(tmp_path)
     seed_multi_resource(repository)
     adapter = StubKubernetesNamespaceQuotaAdapter()

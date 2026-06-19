@@ -127,7 +127,7 @@ sanity-reconciler/rm-worker 모두 Ready). 이전: `bd2f4fb-mntprop`(stale fix�
   worker.yaml`도 동일. **방안 C(liveness 자가수복)는 미적용**(사용자 결정).
 - **변경 파일**(미커밋, §5): `src/dms/adapters/volcano.py`(헬퍼+11개 마운트), `install/kubernetes/control-plane.yaml`
   (dm-worker 마운트포인트+rslave, hostPath `type: Directory`), `install/kubernetes/managed-rm-worker.yaml`,
-  `tests/{test_phase19_data_management_scan,test_phase20_data_management_sync_rm,test_install_manifest_mount_propagation}.py`
+  `tests/{test_data_management_scan,test_data_management_sync_rm,test_install_manifest_mount_propagation}.py`
   (3 신규/갱신). 전체 264 passed.
 - **라이브 배포**: 이미지 `pkg-01:5000/dms:bd2f4fb-mntprop`. dm-worker는 **JSON patch**로 마운트포인트+rslave+이미지,
   나머지는 `set image`. ⚠ 레포 `control-plane.yaml`은 example placeholder 템플릿(`*.example.internal`,
@@ -149,11 +149,11 @@ sanity-reconciler/rm-worker 모두 Ready). 이전: `bd2f4fb-mntprop`(stale fix�
 
 - **dms repo**(`dms-dm-dev`, HEAD bd2f4fb): 미커밋 = **[이번 stale fix]** `src/dms/adapters/volcano.py`,
   `install/kubernetes/control-plane.yaml`, `install/kubernetes/managed-rm-worker.yaml`,
-  `tests/test_phase19_data_management_scan.py`, `tests/test_phase20_data_management_sync_rm.py`,
+  `tests/test_data_management_scan.py`, `tests/test_data_management_sync_rm.py`,
   `tests/test_install_manifest_mount_propagation.py`(신규), `handoff.md`(이 파일) **+ [path-base]** `src/dms/config.py`,
   `src/dms/domain.py`, `src/dms/planner/{_base,__init__,_core}.py`, `src/dms/cli.py`, `src/dms/backends/{cephfs,weka}.py`,
   `src/dms/migrations.py`, `src/dms/api/routers/resource_management.py`, `tests/test_dm_managed_root_path.py`(신규),
-  `tests/test_phase3_inventory.py`, `tests/test_phase16_mtls_auth.py`, `install/4.dms-dm-api.md`(§7·§10·§14.9·path설명)
+  `tests/test_inventory.py`, `tests/test_mtls_auth.py`, `install/4.dms-dm-api.md`(§7·§10·§14.9·path설명)
   + `install/docker/kubectl`(빌드아티팩트, **커밋 금지**), `nsync-topology-verify-report.md`(보존용). 272 tests passed.
   커밋은 사용자 요청 시.
 - **testbed repo**(`master`, **미커밋**): `docs/ARCHITECTURE.md`(§13.1 마운트 propagation 추가) + `Makefile`,

@@ -37,7 +37,7 @@ def repository(tmp_path):
     return DmsRepository(operational)
 
 
-def test_phase6_renderer_creates_multi_storageclass_hard_keys():
+def test_renderer_creates_multi_storageclass_hard_keys():
     hard = render_kubernetes_resource_quota_hard(
         {
             "quota": {"requests_storage_bytes": 1024**3, "pvc_count": 20},
@@ -61,7 +61,7 @@ def test_phase6_renderer_creates_multi_storageclass_hard_keys():
     assert hard == multi_hard(storage="1Gi", pvc_count="20")
 
 
-def test_phase17_planner_renders_mixed_backend_storageclass_quota(repository):
+def test_planner_renders_mixed_backend_storageclass_quota(repository):
     register_mapping(
         repository,
         CEPHFS,
@@ -148,7 +148,7 @@ def test_phase17_planner_renders_mixed_backend_storageclass_quota(repository):
     }
 
 
-def test_phase6_planner_rejects_duplicate_storage_name(repository):
+def test_planner_rejects_duplicate_storage_name(repository):
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     request_id = create_request(
         repository,
@@ -178,7 +178,7 @@ def test_phase6_planner_rejects_duplicate_storage_name(repository):
     )
 
 
-def test_phase6_planner_rejects_cross_cluster_mapping(repository):
+def test_planner_rejects_cross_cluster_mapping(repository):
     register_mapping(repository, "cephfs-a", "testbed-cephfs", cluster_name="cluster-a")
     request_id = create_request(
         repository,
@@ -203,7 +203,7 @@ def test_phase6_planner_rejects_cross_cluster_mapping(repository):
     )
 
 
-def test_phase6_decrease_guard_checks_storageclass_pvc_count(repository):
+def test_decrease_guard_checks_storageclass_pvc_count(repository):
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     register_mapping(repository, STATIC, STATIC_CLASS)
     seed_multi_resource(
@@ -244,7 +244,7 @@ def test_phase6_decrease_guard_checks_storageclass_pvc_count(repository):
     )
 
 
-def test_phase6_block_zeros_all_storageclass_keys(repository):
+def test_block_zeros_all_storageclass_keys(repository):
     register_mapping(repository, LONGHORN, LONGHORN_CLASS)
     register_mapping(repository, STATIC, STATIC_CLASS)
     seed_multi_resource(repository)
@@ -263,7 +263,7 @@ def test_phase6_block_zeros_all_storageclass_keys(repository):
     assert plan["desired_state"]["block_state"]["restore_hard"] == multi_hard()
 
 
-def test_phase6_sync_updates_each_storageclass_entry_from_live_hard():
+def test_sync_updates_each_storageclass_entry_from_live_hard():
     desired = {
         "quota": {"requests_storage_bytes": 1024**3, "pvc_count": 20},
         "storage_class_quotas": [
@@ -293,7 +293,7 @@ def test_phase6_sync_updates_each_storageclass_entry_from_live_hard():
     ]
 
 
-def test_phase6_check_diff_and_effective_quota_warning_are_keyed():
+def test_check_diff_and_effective_quota_warning_are_keyed():
     issues = kubernetes_resource_quota_hard_issues(
         desired_hard=multi_hard(),
         live_hard={**multi_hard(), sc_key(LONGHORN_CLASS, "requests.storage"): "768Mi"},

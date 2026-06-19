@@ -69,7 +69,7 @@ def operational_query_router() -> APIRouter:
         if not body.block_scheduling:
             raise HTTPException(
                 status_code=422,
-                detail="Phase 18 maintenance always blocks scheduling",
+                detail="maintenance always blocks scheduling",
             )
         state = services.repository.update_control_state(
             maintenance_mode=True,

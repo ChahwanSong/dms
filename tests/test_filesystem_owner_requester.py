@@ -19,7 +19,7 @@ from dms.backends.cephfs import (
 from dms.domain import LifecycleState, OperationKind, ResourceKind
 from dms.planner import Planner
 
-from test_phase10_filesystem_rm import (
+from test_filesystem_rm import (
     FakeFilesystemExecutor,
     filesystem_plan,
     register_cephfs_mapping,

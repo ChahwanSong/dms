@@ -119,6 +119,7 @@ Data Management runtime:
 | `DMS_DM_RM_EXECUTION_TIMEOUT_SECONDS` | `3600` | confirmed `rm` execution VolcanoJob timeout. |
 | `DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT` | `true` | confirm 시 preview fingerprint evidence를 요구할지 여부. |
 | `DMS_DM_SYNC_ALLOW_DELETE` | `false` | `sync` request의 `delete=true` 옵션을 운영 정책상 허용할지 여부. `false`이면 request validation에서 막는다. |
+| `DMS_DM_PATH_BASE` | `mount_path` | DM 요청 path의 기준점(글로벌). `mount_path`(현행: path가 storage mount_path 기준) 또는 `managed_root`(planner가 storage별 `managed_root` suffix를 prepend해 managed_root 기준으로 해석). `managed_root` 모드는 filesystem mapping에 `managed_root`가 명시돼 있어야 하며, 산출 불가 시 잡을 fail-closed로 거부한다. |
 | `DMS_DM_MAX_SYNC_NODES` | `1` | legacy compatibility setting. `dsync`/`nsync` node counts는 DB policy/API로 관리한다. |
 | `DMS_DM_MAX_RM_NODES` | `1` | legacy compatibility setting. `rm` node counts는 DB policy/API로 관리한다. |
 | `DMS_DM_NSYNC_ENABLED` | `true` | separated-role `nsync` 후보 selection 및 live execution 허용 여부. `false`이면 fail-closed한다. |

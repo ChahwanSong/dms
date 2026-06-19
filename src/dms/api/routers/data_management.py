@@ -12,7 +12,7 @@ from .._helpers.data_job import (
     data_job_request,
     policy_operation_or_422,
     validate_data_job_or_422,
-    validate_phase20_data_options_or_422,
+    validate_data_options_or_422,
 )
 from .._models import ConfirmDataJobBody
 from .._services import AppServices
@@ -75,7 +75,7 @@ def data_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         validate_data_job_or_422(body, OperationKind.DATA_SYNC)
-        validate_phase20_data_options_or_422(body, OperationKind.DATA_SYNC, services)
+        validate_data_options_or_422(body, OperationKind.DATA_SYNC, services)
         return data_job_request(body, OperationKind.DATA_SYNC, request, services)
 
     @router.post("/rm", status_code=202)
@@ -85,7 +85,7 @@ def data_management_router() -> APIRouter:
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         validate_data_job_or_422(body, OperationKind.DATA_RM)
-        validate_phase20_data_options_or_422(body, OperationKind.DATA_RM, services)
+        validate_data_options_or_422(body, OperationKind.DATA_RM, services)
         return data_job_request(body, OperationKind.DATA_RM, request, services)
 
     @router.post("/scan", status_code=202)
@@ -219,14 +219,14 @@ def data_management_router() -> APIRouter:
         return {
             "operations": {
                 "sync": {
-                    "status": "enabled_phase20",
+                    "status": "enabled",
                     "requires_preview_confirm": True,
                     "tool_selection": ["dsync", "nsync"],
                     "path_model": "structured source/destination storage-relative paths",
                     "legacy_path_model": "storage_name plus source_path/destination_path is accepted for same-storage sync",
                 },
                 "rm": {
-                    "status": "enabled_phase20",
+                    "status": "enabled",
                     "requires_preview_confirm": True,
                     "tool": "drm",
                     "path_model": "structured target.storage_name plus storage-relative target.path",

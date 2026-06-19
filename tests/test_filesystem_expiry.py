@@ -22,7 +22,7 @@ from dms.workers import RMWorkerRuntime
 API_HEADERS = {"x-dms-actor": "api-client"}
 
 
-def test_phase11_expired_filesystem_query_and_action_required(tmp_path):
+def test_expired_filesystem_query_and_action_required(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_filesystem_resource(repository, expires_at="2026-05-30T00:00:00Z")
@@ -48,7 +48,7 @@ def test_phase11_expired_filesystem_query_and_action_required(tmp_path):
     }
 
 
-def test_phase11_expired_filesystem_query_brief_skips_recent_requests(tmp_path):
+def test_expired_filesystem_query_brief_skips_recent_requests(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_filesystem_resource(repository, expires_at="2026-05-30T00:00:00Z")
@@ -74,7 +74,7 @@ def test_phase11_expired_filesystem_query_brief_skips_recent_requests(tmp_path):
     assert "last_block_request_id" not in brief_item
 
 
-def test_phase11_filesystem_expiration_sweep_dry_run_records_targets(tmp_path):
+def test_filesystem_expiration_sweep_dry_run_records_targets(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_filesystem_resource(repository, expires_at="2026-05-30T00:00:00Z")
@@ -114,7 +114,7 @@ def test_phase11_filesystem_expiration_sweep_dry_run_records_targets(tmp_path):
     )
 
 
-def test_phase11_filesystem_block_and_unblock_restore_state(tmp_path):
+def test_filesystem_block_and_unblock_restore_state(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_filesystem_resource(repository, expires_at="2026-05-30T00:00:00Z")
@@ -150,7 +150,7 @@ def test_phase11_filesystem_block_and_unblock_restore_state(tmp_path):
     assert executor.directories["project-alpha"]["mode"] == "0770"
 
 
-def test_phase11_expiration_sweep_blocks_user_and_skips_system(tmp_path):
+def test_expiration_sweep_blocks_user_and_skips_system(tmp_path):
     repository, observability = repository_pair(tmp_path)
     register_cephfs_mapping(repository)
     seed_filesystem_resource(repository, expires_at="2026-05-30T00:00:00Z")
@@ -198,7 +198,7 @@ def test_phase11_expiration_sweep_blocks_user_and_skips_system(tmp_path):
     )
 
 
-def test_phase11_filesystem_unblock_falls_back_to_mode_when_restore_state_missing(
+def test_filesystem_unblock_falls_back_to_mode_when_restore_state_missing(
     tmp_path,
 ):
     # block_state에 previous_mode가 없으면 desired_state.mode(기본 0770)로 fallback해서 Planned 상태로 진행해야 한다.
@@ -233,10 +233,10 @@ class FakeFilesystemExecutor:
         )
 
     def create_directory(self, **kwargs) -> dict[str, Any]:
-        raise AssertionError("Phase 11 tests seed filesystem DB resources directly")
+        raise AssertionError("tests seed filesystem DB resources directly")
 
     def delete_directory(self, **kwargs) -> dict[str, Any]:
-        raise AssertionError("Phase 11 tests do not delete through fake executor")
+        raise AssertionError("tests do not delete through fake executor")
 
     def block_directory(
         self,

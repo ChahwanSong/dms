@@ -66,7 +66,7 @@ class BackendAdapterRegistry:
         )
 
     @classmethod
-    def with_phase1_defaults(
+    def with_defaults(
         cls, repository: DmsRepository, settings: Settings | None = None
     ) -> "BackendAdapterRegistry":
         if settings is not None:

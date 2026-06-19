@@ -132,7 +132,7 @@ class Phase5RecordingKubernetesAdapter:
         )
 
 
-def test_phase5_planner_allows_quota_increase(repository_pair):
+def test_planner_allows_quota_increase(repository_pair):
     repository, _ = repository_pair
     register_mapping(repository)
     seed_resource(repository)
@@ -157,7 +157,7 @@ def test_phase5_planner_allows_quota_increase(repository_pair):
     assert plan["execution_metadata"]["planner"] == "k8s-quota"
 
 
-def test_phase5_planner_rejects_decrease_below_observed_used(repository_pair):
+def test_planner_rejects_decrease_below_observed_used(repository_pair):
     repository, _ = repository_pair
     register_mapping(repository)
     seed_resource(
@@ -188,7 +188,7 @@ def test_phase5_planner_rejects_decrease_below_observed_used(repository_pair):
     )
 
 
-def test_phase5_block_and_unblock_restore_hard_limits(repository_pair):
+def test_block_and_unblock_restore_hard_limits(repository_pair):
     repository, observability = repository_pair
     register_mapping(repository)
     seed_resource(repository)
@@ -226,7 +226,7 @@ def test_phase5_block_and_unblock_restore_hard_limits(repository_pair):
     assert unblock_plan["desired_state"]["block_state"]["blocked"] is False
 
 
-def test_phase5_worker_dispatches_check_sync_and_delete(repository_pair):
+def test_worker_dispatches_check_sync_and_delete(repository_pair):
     repository, observability = repository_pair
     register_mapping(repository)
     seed_resource(repository)
