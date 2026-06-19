@@ -20,7 +20,7 @@
 명령은 DMS repository root에서 실행한다고 가정한다.
 
 ```bash
-cd /home/mason/workspace/dms
+cd <dms-repo-root>
 ```
 
 실제 경로가 다르면 repository root로 이동한 뒤 실행한다.
@@ -83,6 +83,11 @@ artifacts under `<job_id>/preview/` and `<job_id>/execution/`. Keep this artifac
 base on a DMS-managed path that the Volcano Pod can write and the DM Worker can
 read. Do not place it under a requester-private target/source/destination
 directory unless the DM Worker has explicit traverse/read access.
+
+> dm-worker와 DM job pod는 공유 FS의 *마운트포인트*를 `mountPropagation: HostToContainer`(rslave)로 마운트해,
+> host가 세션 중 FS를 언/재마운트해도 컨테이너 bind가 stale되지 않고 새 마운트가 전파되도록 한다(서브경로를 기본
+> `None` propagation으로 bind하면 dm-worker가 다른 노드 job artifact를 못 보게 된다). `control-plane.yaml`의
+> dm-worker와 `managed-rm-worker.yaml`에 반영돼 있다.
 
 관리 workstation에 필요한 도구도 확인한다.
 
@@ -733,6 +738,11 @@ cp install/config/storage-mappings.example.json /tmp/dms-storage-mappings.json
 
 실제 backend만 남기고 값들을 바꾼다.
 
+> **filesystem backend(cephfs/wekafs/gpfs)는 `managed_root`를 반드시 명시**해야 한다 — 생략하면 등록이 `422`로
+> 거부된다(과거의 `mount_path/dms` 암묵 기본값은 제거됨). `managed_root`는 `mount_path` 아래의 절대경로여야 하며,
+> RM 디렉토리 연산과 DM `DMS_DM_PATH_BASE=managed_root` 모드의 경계/기준점이 된다. (CSI-only/namespace-quota용
+> mapping은 filesystem backend가 아니므로 managed_root가 필요 없다.)
+
 CephFS 예시:
 
 ```json
@@ -789,11 +799,35 @@ GPFS 예시:
 }
 ```
 
-WEKA filesystem backend는 아직 구현되지 않았으므로 filesystem create/update/import
-요청에는 사용할 수 없다. 다만 Kubernetes namespace quota는 backend type과 무관한
-live `ResourceQuota` 경로를 사용하므로, WEKA CSI StorageClass의 provisioner가
-`csi_driver`와 일치하고 storage mapping sanity/readiness가 `Ready`이면
-`storage_class_quotas[].storage_name` 대상으로 사용할 수 있다.
+WEKA 예시:
+
+```json
+{
+  "storage_name": "weka-a",
+  "backend_template": {
+    "backend_type": "wekafs",
+    "filesystem_name": "default",
+    "mount_path": "/weka/default",
+    "managed_root": "/weka/default/dms",
+    "quota_scope": "directory",
+    "rm_worker_nodes": ["weka-rm-1"],
+    "ssh_host": "weka-rm-1",
+    "command_runner": "ssh-host-exec",
+    "csi_driver": "csi.weka.io"
+  },
+  "cluster_name": "cluster-a",
+  "storage_class_name": "weka-sc"
+}
+```
+
+WEKA filesystem backend(`backend_type: wekafs`)도 CephFS/GPFS와 함께 host-mounted
+filesystem create/update/block/delete/check/sync/import 경로를 지원한다
+(`WekaFsHostMountedFilesystemBackendAdapter`). 단 WEKA는 inode(`file_count`) quota를
+지원하지 않으므로 `quota`에는 `capacity_bytes`만 보낸다(`file_count`를 주면 조용히 무시하지
+않고 `BackendApplyFailed`로 실패). Kubernetes namespace quota는 backend type과 무관한 live
+`ResourceQuota` 경로를 사용하므로, 어떤 CSI StorageClass든 provisioner가 `csi_driver`와
+일치하고 storage mapping sanity/readiness가 `Ready`이면 `storage_class_quotas[].storage_name`
+대상으로 사용할 수 있다.
 
 ### 10.2 등록 명령
 
@@ -1034,9 +1068,10 @@ kubectl --context cluster-a delete namespace dms-smoke-quota
 Data Management live execution을 열기 전에 다음 조건을 먼저 확인한다.
 
 - target/source/destination storage mapping의 `readiness.data_management=Ready`
-- requester의 Identity Mapping이 `Active`
+- requester의 `owner_username`이 dm-worker preflight의 read-only LDAP 조회로 POSIX 신원으로 해석됨 (§12 — `identity_mappings` 사전 등록 계층은 제거됨) + DM denylist에 차단 항목 없음
 - DM Agent report에 mount, required tool(`dscan`, `dsync`, `drm`), credential, network, POSIX user evidence가 Fresh
 - `DMS_DM_JOB_IMAGE`, `DMS_DM_JOB_IMAGE_REF`, `DMS_DM_ARTIFACT_BASE_URI`가 운영 값으로 설정됨
+- (선택) `DMS_DM_PATH_BASE` — 요청 path 기준점. 기본 `mount_path`(현행), `managed_root`면 planner가 storage별 `managed_root` suffix를 prepend(filesystem mapping에 `managed_root` 명시 필수). 켜면 요청 path를 managed_root 기준으로 적는다(아래 smoke 예시 path도 그에 맞춰 조정)
 - Volcano CRD/scheduler가 control 또는 managed cluster에서 동작 중
 - multi-node MPI execution을 열 경우 MPI Operator가 Volcano gang scheduling으로
   설치되어 있고 `MPIJob` CRD가 동작 중
