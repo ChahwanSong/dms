@@ -729,7 +729,7 @@ class MissingSummaryFileAdapter:
         self.calls.append(("verify_scan_preflight", data_job["job_id"]))
         return {"status": "Ready", "source": "missing-summary-test"}
 
-    def create_job(self, plan: dict, data_job: dict) -> AdapterResult:
+    def create_job(self, plan: dict, data_job: dict, *, on_submit=None) -> AdapterResult:
         self.calls.append(("create_job", data_job["job_id"]))
         artifact_dir = self.artifact_root / data_job["job_id"]
         artifact_dir.mkdir()
@@ -744,7 +744,7 @@ class MissingSummaryFileAdapter:
 
 
 class DscanReportFileAdapter(MissingSummaryFileAdapter):
-    def create_job(self, plan: dict, data_job: dict) -> AdapterResult:
+    def create_job(self, plan: dict, data_job: dict, *, on_submit=None) -> AdapterResult:
         self.calls.append(("create_job", data_job["job_id"]))
         artifact_dir = self.artifact_root / data_job["job_id"]
         artifact_dir.mkdir()

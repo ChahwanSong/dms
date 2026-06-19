@@ -182,6 +182,37 @@ subjects:
     name: dms-dm-worker
     namespace: dms
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dms-api-dm-terminate
+  namespace: dms
+# The data-job cancel endpoint runs in the dms-api process and calls `kubectl delete` on the
+# VolcanoJob/MPIJob so an in-flight data job (the MPI run) is actually stopped -- not just
+# marked Cancelled in the DB. Without these verbs the terminate fails (Forbidden) and the MPI
+# keeps running to completion despite the cancel.
+rules:
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["mpijobs"]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dms-api-dm-terminate
+  namespace: dms
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dms-api-dm-terminate
+subjects:
+  - kind: ServiceAccount
+    name: dms-api
+    namespace: dms
+---
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -46,9 +46,15 @@ class StubVolcanoAdapter:
         }
 
     def create_job(
-        self, plan: dict[str, Any], data_job: dict[str, Any]
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        *,
+        on_submit: Callable[[str], None] | None = None,
     ) -> AdapterResult:
         self.calls.append(("create_job", data_job["job_id"]))
+        if on_submit is not None:
+            on_submit(f"volcano/{data_job['job_id']}")
         tool = data_job["selected_tool"] or _default_tool_for_operation(
             data_job["operation"]
         )
@@ -377,7 +383,11 @@ class KubernetesVolcanoAdapter:
         }
 
     def create_job(
-        self, plan: dict[str, Any], data_job: dict[str, Any]
+        self,
+        plan: dict[str, Any],
+        data_job: dict[str, Any],
+        *,
+        on_submit: Callable[[str], None] | None = None,
     ) -> AdapterResult:
         if not self.settings.dm_job_image:
             raise DataManagementRuntimeError(
@@ -412,6 +422,10 @@ class KubernetesVolcanoAdapter:
         job_name = manifest["metadata"]["name"]
         namespace = manifest["metadata"]["namespace"]
         job_ref = _job_ref_for_manifest(manifest)
+        # Hand the ref back to the caller BEFORE blocking on the run so a concurrent cancel
+        # can find and terminate this job (otherwise the ref is only recorded once it ends).
+        if on_submit is not None:
+            on_submit(job_ref)
         phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
         observed = self._wait_for_terminal(
             job_ref, timeout_seconds=self._timeout_seconds(data_job["operation"], phase)

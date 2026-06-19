@@ -82,6 +82,19 @@ class DMWorkerRuntime:
             self._run_execution_phase(plan, run_id, job)
         return 1
 
+    def _persist_submitted_ref(
+        self, job_id: str, plan: dict[str, Any], job_ref: str
+    ) -> None:
+        # Record the Volcano/MPI job_ref AS SOON AS it is submitted (before the worker
+        # blocks on the run) so a concurrent cancel can find and terminate the running
+        # job. Keyed by phase and merged so a preview ref is not lost by the execution ref.
+        phase = (plan.get("execution_metadata") or {}).get("phase", "execution")
+        current = self.repository.get_data_job(job_id).get("volcano_job_ref")
+        current = current if isinstance(current, dict) else {}
+        self.repository.update_data_job(
+            job_id, volcano_job_ref={**current, phase: {"job_ref": job_ref}}
+        )
+
     def _run_preview_phase(
         self, plan: dict[str, Any], run_id: str, job: dict[str, Any]
     ) -> None:
@@ -151,7 +164,11 @@ class DMWorkerRuntime:
         )
         try:
             adapter_result = self.volcano_adapter.create_job(
-                plan, self.repository.get_data_job(job["job_id"])
+                plan,
+                self.repository.get_data_job(job["job_id"]),
+                on_submit=lambda ref: self._persist_submitted_ref(
+                    job["job_id"], plan, ref
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             self._fail_data_job(
@@ -298,7 +315,11 @@ class DMWorkerRuntime:
         self.repository.update_data_job(job["job_id"], state=DataJobState.RUNNING)
         try:
             adapter_result = self.volcano_adapter.create_job(
-                plan, self.repository.get_data_job(job["job_id"])
+                plan,
+                self.repository.get_data_job(job["job_id"]),
+                on_submit=lambda ref: self._persist_submitted_ref(
+                    job["job_id"], plan, ref
+                ),
             )
         except (
             Exception
@@ -484,7 +505,11 @@ class DMWorkerRuntime:
         self.repository.update_data_job(job["job_id"], state=DataJobState.RUNNING)
         try:
             adapter_result = self.volcano_adapter.create_job(
-                plan, self.repository.get_data_job(job["job_id"])
+                plan,
+                self.repository.get_data_job(job["job_id"]),
+                on_submit=lambda ref: self._persist_submitted_ref(
+                    job["job_id"], plan, ref
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             self._fail_data_job(
@@ -2021,6 +2046,29 @@ def cancel_data_job(
     actor: str,
 ) -> None:
     job = repository.get_data_job(job_id)
+    # Terminate the running Volcano/MPI job(s) FIRST: never report Cancelled while the MPI
+    # keeps running, so the DB transition happens only after every known job_ref is deleted
+    # (terminate_job uses --ignore-not-found, so an already-gone preview ref is a no-op).
+    # Collect refs from both the flat and the phase-keyed (preview/execution) shapes.
+    refs = job.get("volcano_job_ref") or {}
+    job_refs: list[str] = []
+    if isinstance(refs, dict):
+        if refs.get("job_ref"):
+            job_refs.append(refs["job_ref"])
+        for value in refs.values():
+            if isinstance(value, dict) and value.get("job_ref"):
+                job_refs.append(value["job_ref"])
+    errors: list[str] = []
+    for job_ref in sorted(set(job_refs)):
+        try:
+            volcano_adapter.terminate_job(job_ref)
+        except Exception as exc:  # noqa: BLE001 - surface so we never claim a false cancel
+            errors.append(f"{job_ref}: {exc}")
+    if errors:
+        raise DataManagementRuntimeError(
+            "data job cancel could not terminate the running job(s); the MPI job may still "
+            "be running -- retry cancel or terminate manually. " + "; ".join(errors)
+        )
     repository.update_data_job(job_id, state=DataJobState.CANCELLED)
     plan = repository.get_plan_by_request(job["request_id"])
     if plan:
@@ -2033,14 +2081,4 @@ def cancel_data_job(
             verification_summary={"backend_side_effect": False},
             actor=actor,
         )
-    refs = job.get("volcano_job_ref") or {}
-    job_refs: list[str] = []
-    if isinstance(refs, dict):
-        if refs.get("job_ref"):
-            job_refs.append(refs["job_ref"])
-        for value in refs.values():
-            if isinstance(value, dict) and value.get("job_ref"):
-                job_refs.append(value["job_ref"])
-    for job_ref in sorted(set(job_refs)):
-        volcano_adapter.terminate_job(job_ref)
 
