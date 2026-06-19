@@ -1,21 +1,28 @@
-# DMS 운영 설치 가이드
+# DMS 구성·셋업 가이드
 
-이 디렉토리는 실제 Kubernetes 클러스터에 DMS를 설치하고 운영하기 위한 문서, 설정 예시, Kubernetes manifest, helper script를 모은다. 운영 설치 기준은 이 `install/` 디렉토리를 우선한다.
+이 디렉토리는 실제 Kubernetes 클러스터에 DMS를 설치·구성하기 위한 문서, 설정 예시, Kubernetes manifest, helper script를 모은다. 운영 설치 기준은 이 `install/` 디렉토리를 우선한다.
 
-현재 구현 기준으로 운영 환경에서 열어도 되는 범위와 아직 열면 안 되는 범위가 다르다.
+이 문서는 설치·구성·셋업에 필요한 **설정값, 셋업 절차, 주의사항**을 다룬다. 운영 중 데이터 잡·리소스 요청/조회 API 사용법은 별도 문서가 전담한다.
 
-- Kubernetes namespace quota Resource Management: live Kubernetes `ResourceQuota/dms-storage-quota` create/update/block/delete/check/sync/import/audit 가능.
-- Filesystem Resource Management: CephFS host-mounted adapter와 GPFS command adapter 가능. GPFS live 검증은 별도 staging 필요.
-- Agent inventory: Kubernetes DaemonSet 기반 report 가능.
-- Data Management `scan/sync/rm`: DB policy/API 기반 node/process resource model, MPIJob+Volcano scheduling, native VolcanoJob fallback, preflight 시 owner_username에 대한 read-only LDAP 신원 조회(직접) 통과 (+ DM denylist admission), fresh DM Agent report, POSIX preflight, writable shared artifact base가 준비된 경우 live execution을 운영할 수 있다. `sync`와 `rm`은 preview/confirm guard가 필수이고, separated-role `nsync`는 MPI/Volcano backend gate를 통과해야 한다.
+- `2.dms-rm-api-fs.md`: filesystem Resource Management API
+- `3.dms-rm-api-k8s.md`: Kubernetes namespace quota API
+- `4.dms-dm-api.md`: Data Management `scan`/`sync`/`rm` API (operations 조회 포함)
+
+구성 대상 컴포넌트:
+
+- Kubernetes namespace quota Resource Management: live Kubernetes `ResourceQuota/dms-storage-quota` create/update/block/delete/check/sync/import/audit.
+- Filesystem Resource Management: CephFS / WEKA host-mounted adapter와 GPFS command adapter.
+- Agent inventory: Kubernetes DaemonSet 기반 report.
+- Data Management `scan/sync/rm`: DB policy/API 기반 node/process resource model, MPIJob+Volcano scheduling, native VolcanoJob fallback, preflight 시 owner_username에 대한 read-only LDAP 신원 조회(직접) + DM denylist admission, DM Agent report freshness, POSIX preflight, writable shared artifact base를 사용한다. `sync`와 `rm`은 preview/confirm guard가 필수이고, separated-role `nsync`는 MPI/Volcano backend gate를 통과해야 한다.
 
 ## 문서 사용 방법
 
 처음 설치한다면 아래 순서대로 읽고 실행한다.
 
-1. 이 `README.md`의 순서대로 설치한다.
+1. 이 `README.md`의 순서대로 설치·구성한다.
 2. 설정값 의미가 헷갈리면 `CONFIGURATION.md`를 확인한다.
 3. 설치 후 운영 점검, 장애 확인, 업그레이드는 `RUNBOOK.md`를 따른다.
+4. 데이터 잡·리소스 요청/조회 API 사용법은 `2.dms-rm-api-fs.md` / `3.dms-rm-api-k8s.md` / `4.dms-dm-api.md`를 참고한다.
 
 명령은 DMS repository root에서 실행한다고 가정한다.
 
@@ -606,15 +613,14 @@ kubectl --context dms-control -n dms get ingress dms-api
 kubectl --context dms-control -n dms describe ingress dms-api
 ```
 
-DNS가 아직 준비되지 않았다면 operator workstation의 `/etc/hosts` 또는 curl `--resolve`를 사용한다.
+DNS가 아직 준비되지 않았다면 operator workstation의 `/etc/hosts` 또는 curl `--resolve`를 사용한다. ingress mTLS 동작은 `/healthz`로 점검한다. client certificate을 제시하면 통과해야 한다.
 
 ```bash
 curl --resolve dms.example.internal:443:INGRESS_IP \
   --cert /tmp/dms-certs/operator.crt \
   --key /tmp/dms-certs/operator.key \
   --cacert /path/to/dms-api-server-ca.crt \
-  -H "authorization: Bearer REPLACE_WITH_RANDOM_TOKEN" \
-  https://dms.example.internal/api/v1/operations/action-required
+  https://dms.example.internal/healthz
 ```
 
 Client certificate 없이 호출하면 실패해야 한다.
@@ -622,7 +628,7 @@ Client certificate 없이 호출하면 실패해야 한다.
 ```bash
 curl --resolve dms.example.internal:443:INGRESS_IP \
   --cacert /path/to/dms-api-server-ca.crt \
-  https://dms.example.internal/api/v1/operations/action-required
+  https://dms.example.internal/healthz
 ```
 
 정상 운영 profile에서는 위 명령이 401 또는 TLS client certificate error로 실패해야 한다.
@@ -708,7 +714,7 @@ DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan,kubectl"
 - agent 전용 client certificate Secret을 만들고 DaemonSet에 mount한 뒤 agent HTTP client가 그 certificate을 사용하도록 구현/설정한다.
 - 또는 운영자가 문서화한 내부 authentication boundary를 사용하고, direct spoof를 막는 네트워크 제어를 둔다.
 
-현재 코드 기준으로 `POST /api/v1/agent/reports`는 mTLS actor가 `node:{cluster}:{node}`와 일치해야 Fresh report로 저장된다. mTLS subject-to-node actor mapping은 아직 별도 구현이 필요하다.
+`POST /api/v1/agent/reports`는 mTLS actor가 `node:{cluster}:{node}`와 일치해야 Fresh report로 저장된다. 따라서 agent certificate subject를 node actor로 매핑하는 운영자 측 설정이 필요하다.
 
 ### 9.3 apply 및 확인
 
@@ -739,7 +745,7 @@ cp install/config/storage-mappings.example.json /tmp/dms-storage-mappings.json
 실제 backend만 남기고 값들을 바꾼다.
 
 > **filesystem backend(cephfs/wekafs/gpfs)는 `managed_root`를 반드시 명시**해야 한다 — 생략하면 등록이 `422`로
-> 거부된다(과거의 `mount_path/dms` 암묵 기본값은 제거됨). `managed_root`는 `mount_path` 아래의 절대경로여야 하며,
+> 거부된다(암묵 기본값 없음). `managed_root`는 `mount_path` 아래의 절대경로여야 하며,
 > RM 디렉토리 연산과 DM `DMS_DM_PATH_BASE=managed_root` 모드의 경계/기준점이 된다. (CSI-only/namespace-quota용
 > mapping은 filesystem backend가 아니므로 managed_root가 필요 없다.)
 
@@ -846,6 +852,8 @@ install/scripts/register-storage-mappings.sh /tmp/dms-storage-mappings.json
 
 ### 10.3 readiness 확인
 
+등록 직후 storage mapping readiness를 확인한다(`verify-install.sh`도 같은 query를 포함한다).
+
 ```bash
 curl -fsS \
   --cert "$DMS_CLIENT_CERT" \
@@ -907,7 +915,7 @@ install/scripts/register-default-quota-policies.sh /tmp/dms-default-quota-polici
 
 ## 12. DM 신원 처리 (LDAP preflight + denylist)
 
-이전의 `identity_mappings` 테이블과 `/api/v1/identity-mappings*` API는 제거됐다(대체됨). 더 이상 requester와 POSIX user를 사전 등록/sync하지 않는다. 대신 DM은 preflight 시점에 dm-worker에서 owner_username에 대한 read-only LDAP 조회(search-only)로 POSIX 신원을 직접 resolve한다. owner_username은 requester_id(자유 형식 logical id)를 기본값으로 하고, 실제 POSIX username으로 override할 수 있다(RM owner model과 동일).
+DM은 requester와 POSIX user를 사전 등록/sync하지 않는다. preflight 시점에 dm-worker에서 owner_username에 대한 read-only LDAP 조회(search-only)로 POSIX 신원을 직접 resolve한다. owner_username은 requester_id(자유 형식 logical id)를 기본값으로 하고, 실제 POSIX username으로 override할 수 있다(RM owner model과 동일).
 
 이 방식은 FAIL CLOSED다. TTL 캐시가 없으므로 LDAP가 끊기면 stale 신원으로 통과시키지 않고 preflight를 중단한다.
 
@@ -934,44 +942,16 @@ upstream LDAP을 local OpenLDAP으로 복제해서 쓰는 환경이라면 별도
 
 ### 12.2 DM identity denylist (선택)
 
-denylist는 DM 측에 유일하게 persist되는 신원 상태다. requester/owner/group 단위의 즉시 kill-switch이자 admission block이며, 기본값은 비어 있어 모두 allow한다. 등록은 선택이고, 평소에는 비워 둔다.
+denylist는 DM 측에 유일하게 persist되는 신원 상태다. requester/owner/group(`subject_type`은 이 셋 중 하나) 단위의 즉시 kill-switch이자 admission block이며, 기본값은 비어 있어 모두 allow한다. 등록은 선택이고, 평소에는 비워 둔다. denylist에 올라간 주체의 요청은 preflight에서 `identity_denied`로 중단된다.
 
-특정 주체를 차단/해제/조회하려면 `identity-denylist` API를 쓴다. `{subject_type}`은 `requester`, `owner`, `group` 중 하나다.
-
-```bash
-# 차단 추가
-curl -fsS -X PUT \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  "$DMS_API_URL/api/v1/data-management/identity-denylist/requester/alice"
-
-# 차단 해제
-curl -fsS -X DELETE \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  "$DMS_API_URL/api/v1/data-management/identity-denylist/requester/alice"
-
-# 차단 조회
-curl -fsS \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  "$DMS_API_URL/api/v1/data-management/identity-denylist/requester/alice" | jq
-```
-
-차단 목록을 한 번에 seed하려면 예시 파일과 bulk-seed script를 쓴다.
+초기 차단 목록은 예시 파일과 bulk-seed script로 한 번에 seed한다.
 
 ```bash
 cp install/config/identity-denylist.example.json /tmp/dms-identity-denylist.json
 install/scripts/apply-identity-denylist.sh /tmp/dms-identity-denylist.json
 ```
 
-denylist에 올라간 주체의 요청은 preflight에서 `identity_denied`로 중단된다.
+개별 주체의 차단 추가/해제/조회(`identity-denylist` API) 사용법은 `4.dms-dm-api.md`를 참고한다.
 
 ## 13. 설치 검증
 
@@ -1003,61 +983,23 @@ install/scripts/verify-install.sh
 
 ### 13.2 Kubernetes namespace quota smoke test
 
-운영에 영향 없는 namespace 이름을 사용한다.
-이 요청은 CephFS, Longhorn, GPFS CSI, WEKA CSI 같은 모든 CSI StorageClass
-backend에서 같은 Kubernetes `ResourceQuota/dms-storage-quota` live adapter를
-사용한다. GPFS namespace quota smoke test에서도 IBM Storage Scale `mm*` command는
-실행되지 않는다.
+전제조건:
 
-```bash
-curl -fsS -X POST "$DMS_API_URL/api/v1/resource-management/kubernetes/namespace-quotas" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  -H "content-type: application/json" \
-  --data '{
-    "requester_id": "operator",
-    "payload": {
-      "cluster_name": "cluster-a",
-      "namespace_name": "dms-smoke-quota",
-      "storage_class_quotas": [{"storage_name": "longhorn-a"}],
-      "quota": {"requests_storage_bytes": 1073741824, "pvc_count": 2},
-      "expires_at": "2099-01-01T00:00:00Z",
-      "allow_namespace_create": true
-    }
-  }' | jq
-```
+- 대상 storage mapping의 `readiness.resource_management=Ready` (§10.3)
+- 운영에 영향 없는 namespace 이름 사용 (예: `dms-smoke-quota`)
 
-request id를 얻은 뒤 상태를 확인한다.
+이 경로는 CephFS, Longhorn, GPFS CSI, WEKA CSI 같은 모든 CSI StorageClass backend에서
+backend type과 무관하게 같은 Kubernetes `ResourceQuota/dms-storage-quota` live adapter를
+사용한다(GPFS namespace quota에서도 IBM Storage Scale `mm*` command는 실행되지 않는다).
 
-```bash
-curl -fsS "$DMS_API_URL/api/v1/operations/requests?requester_id=operator&limit=10" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-```
-
-Target cluster에서 ResourceQuota가 생겼는지 확인한다.
+namespace quota create/조회/delete API 사용법은 `3.dms-rm-api-k8s.md`(operations 조회 포함)를
+참고한다. create 후 target cluster에서 직접 확인하려면:
 
 ```bash
 kubectl --context cluster-a -n dms-smoke-quota get resourcequota dms-storage-quota -o yaml
 ```
 
-정리하려면 DMS delete request를 사용한다.
-
-```bash
-curl -fsS -X DELETE "$DMS_API_URL/api/v1/resource-management/kubernetes/namespace-quotas/cluster-a/dms-smoke-quota" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  -H "content-type: application/json" \
-  --data '{"requester_id":"operator","payload":{}}' | jq
-```
-
-DMS delete는 `ResourceQuota/dms-storage-quota`를 삭제하고 namespace 자체는 삭제하지 않는다. 필요하면 운영자가 namespace를 별도로 삭제한다.
+DMS delete는 `ResourceQuota/dms-storage-quota`만 삭제하고 namespace 자체는 남긴다. 필요하면 운영자가 namespace를 별도로 삭제한다.
 
 ```bash
 kubectl --context cluster-a delete namespace dms-smoke-quota
@@ -1068,10 +1010,10 @@ kubectl --context cluster-a delete namespace dms-smoke-quota
 Data Management live execution을 열기 전에 다음 조건을 먼저 확인한다.
 
 - target/source/destination storage mapping의 `readiness.data_management=Ready`
-- requester의 `owner_username`이 dm-worker preflight의 read-only LDAP 조회로 POSIX 신원으로 해석됨 (§12 — `identity_mappings` 사전 등록 계층은 제거됨) + DM denylist에 차단 항목 없음
+- requester의 `owner_username`이 dm-worker preflight의 read-only LDAP 조회로 POSIX 신원으로 해석됨 (§12) + DM denylist에 차단 항목 없음
 - DM Agent report에 mount, required tool(`dscan`, `dsync`, `drm`), credential, network, POSIX user evidence가 Fresh
 - `DMS_DM_JOB_IMAGE`, `DMS_DM_JOB_IMAGE_REF`, `DMS_DM_ARTIFACT_BASE_URI`가 운영 값으로 설정됨
-- (선택) `DMS_DM_PATH_BASE` — 요청 path 기준점. 기본 `mount_path`(현행), `managed_root`면 planner가 storage별 `managed_root` suffix를 prepend(filesystem mapping에 `managed_root` 명시 필수). 켜면 요청 path를 managed_root 기준으로 적는다(아래 smoke 예시 path도 그에 맞춰 조정)
+- (선택) `DMS_DM_PATH_BASE` — 요청 path 기준점. 기본 `mount_path`, `managed_root`면 planner가 storage별 `managed_root` suffix를 prepend(filesystem mapping에 `managed_root` 명시 필수). 켜면 요청 path를 managed_root 기준으로 적는다
 - Volcano CRD/scheduler가 control 또는 managed cluster에서 동작 중
 - multi-node MPI execution을 열 경우 MPI Operator가 Volcano gang scheduling으로
   설치되어 있고 `MPIJob` CRD가 동작 중
@@ -1083,115 +1025,32 @@ kubectl --context dms-control -n dms scale deploy/dms-dm-worker --replicas=1
 kubectl --context dms-control -n dms rollout status deploy/dms-dm-worker --timeout=180s
 ```
 
-작은 directory로 scan을 제출한다.
+`scan`/`sync`/`rm` 제출, operations 조회, preview/confirm API 사용법은 `4.dms-dm-api.md`를
+참고한다. smoke는 항상 작은 테스트 directory에서 수행하고, `sync`/`rm`은 preview와 confirm을
+분리한다(`rm`의 `target`은 storage root가 아닌 작은 directory여야 하며 `options.recursive=true`를
+명시).
 
-```bash
-curl -fsS -X POST "$DMS_API_URL/api/v1/data-management/scan" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  -H "content-type: application/json" \
-  --data '{
-    "requester_id": "alice",
-    "target": {"storage_name": "cephfs-a", "path": "dms-smoke-fs"},
-    "priority": "Mid",
-    "options": {"summary_only": true}
-  }' | jq
-```
+확인할 동작:
 
-상태와 artifact URI를 조회한다.
-
-```bash
-curl -fsS "$DMS_API_URL/api/v1/operations/data-jobs?requester_id=alice&operation=data.scan&limit=5" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-```
-
-`result_summary.report_uri`, `stdout_uri`, `stderr_uri`, `summary_uri`가
-`DMS_DM_ARTIFACT_BASE_URI/<job_id>/...` 형태로 기록돼야 한다.
-
-`sync`/`rm` smoke는 반드시 작은 테스트 directory에서 preview와 confirm을
-분리해서 수행한다. 예시는 same-storage `dsync` 경로다.
-
-Single-node live Data Management는 resource fan-out 없이 실행된다.
-`scan`, same-node `sync`, `rm`은 각각 1 selected node, 1 worker pod, 1 process로
-실행되며, `result_summary.selected_node`, `worker_pod_count`, `process_count`로
-evidence를 확인한다. separated-role `nsync`가 필요한 topology는 mutation 없이
-`data_job_nsync_deferred` action-required로 남아야 정상이다.
-
-Multi-node MPI Data Management는 DMS가 ready mounted node set을
-eligible set으로 제출하고, Volcano/Kubernetes scheduler가 그중 실제 feasible nodes를
-선택한다. 모든 job은 submitted CR YAML과 MPI metadata artifact를 남겨야 한다.
-
-```bash
-curl -fsS -X POST "$DMS_API_URL/api/v1/data-management/sync" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  -H "content-type: application/json" \
-  --data '{
-    "requester_id": "alice",
-    "source": {"storage_name": "cephfs-a", "path": "dms-smoke-src"},
-    "destination": {"storage_name": "cephfs-a", "path": "dms-smoke-dst"},
-    "options": {"contents": true}
-  }' | jq
-
-curl -fsS "$DMS_API_URL/api/v1/operations/data-jobs?requester_id=alice&operation=data.sync&limit=5" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-```
-
-detail의 `state`가 `ConfirmPending`이고 `result_summary.preview.summary.dry_run=true`
-이면 preview artifact를 검토한 뒤 confirm한다.
-
-```bash
-curl -fsS -X POST "$DMS_API_URL/api/v1/data-management/jobs/<job_id>:confirm" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  -H "content-type: application/json" \
-  --data '{
-    "requester_id": "alice",
-    "confirm": true,
-    "preview_observed_hash": "sha256:<preview-fingerprint>"
-  }' | jq
-```
-
-`rm` smoke도 같은 confirm 절차를 사용한다. `target`은 storage root가 아닌 작은
-테스트 directory여야 하며 `options.recursive=true`를 명시한다.
+- artifact URI(`result_summary.report_uri`, `stdout_uri`, `stderr_uri`, `summary_uri`)가
+  `DMS_DM_ARTIFACT_BASE_URI/<job_id>/...` 형태로 기록된다.
+- Single-node live Data Management는 resource fan-out 없이 실행된다. `scan`, same-node `sync`,
+  `rm`은 각각 1 selected node, 1 worker pod, 1 process이며 `result_summary.selected_node`,
+  `worker_pod_count`, `process_count`로 확인한다. separated-role `nsync`가 필요한 topology는
+  mutation 없이 `data_job_nsync_deferred` action-required로 남아야 정상이다.
+- Multi-node MPI Data Management는 DMS가 ready mounted node set을 eligible set으로 제출하고
+  Volcano/Kubernetes scheduler가 그중 실제 feasible nodes를 선택한다. 모든 job은 submitted CR
+  YAML과 MPI metadata artifact를 남긴다.
 
 ### 13.4 Filesystem smoke test
 
-CephFS/GPFS RM을 활성화했다면 작은 테스트 directory로 시작한다.
+전제조건:
 
-```bash
-curl -fsS -X POST "$DMS_API_URL/api/v1/resource-management/filesystems" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  -H "content-type: application/json" \
-  --data '{
-    "requester_id": "operator",
-    "payload": {
-      "storage_name": "cephfs-a",
-      "directory_name": "dms-smoke-fs",
-      "resource_type": "user",
-      "users": ["alice", "bob"],
-      "quota": {"capacity_bytes": 1073741824, "file_count": 10000},
-      "expires_at": "2099-01-01T00:00:00Z"
-    }
-  }' | jq
-```
+- 대상 storage mapping의 `readiness.resource_management=Ready` (§10.3)
+- 작은 테스트 directory(예: `dms-smoke-fs`)로 시작
 
-성공 후 backend host에서 directory, ownership, quota xattr 또는 GPFS fileset/quota를 확인한다. CephFS 예시:
+filesystem create/조회/delete API 사용법은 `2.dms-rm-api-fs.md`(operations 조회 포함)를 참고한다.
+create 성공 후 backend host에서 directory, ownership, quota xattr 또는 GPFS fileset/quota를 직접 확인한다. CephFS 예시:
 
 ```bash
 ssh cephfs-rm-1 'ls -ld /mnt/cephfs-rwx/dms/dms-smoke-fs'
@@ -1216,17 +1075,7 @@ kubectl --context dms-control -n dms get pods,jobs,svc,ingress
 - `svc/dms-api` 존재
 - `ingress/dms-api` 존재
 
-DMS API:
-
-```bash
-curl -fsS "$DMS_API_URL/api/v1/operations/action-required" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-```
-
-정상 steady state에서는 action-required가 비어 있어야 한다.
+DMS API: `verify-install.sh`(§13.1)가 통과하고, action-required query가 비어 있으면 정상 steady state다. operations 조회 API 사용법은 `4.dms-dm-api.md`를 참고한다.
 
 ## 15. Planned shutdown, startup recovery, resume
 
@@ -1333,27 +1182,7 @@ kubectl --context dms-control -n dms scale deploy/dms-dm-worker --replicas=0
 
 ### 15.4 수동 API 확인
 
-script를 쓰지 않고 직접 확인하려면 다음 endpoint를 사용한다.
-
-```bash
-curl -fsS "$DMS_API_URL/api/v1/operations/control-state" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-
-curl -fsS "$DMS_API_URL/api/v1/operations/work-summary" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-
-curl -fsS "$DMS_API_URL/api/v1/operations/runs/active" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-```
+script를 쓰지 않고 직접 확인하려면 `control-state`, `work-summary`, `runs/active` 등 operations 조회 endpoint를 사용한다. API 사용법은 `4.dms-dm-api.md`를 참고한다.
 
 ## 16. 자주 발생하는 문제
 
@@ -1375,15 +1204,14 @@ kubectl --context dms-control -n dms logs deploy/dms-api
 
 ### mTLS 요청이 401 또는 TLS error
 
-확인:
+`/healthz`로 TLS 핸드셰이크와 client certificate 검증을 확인한다.
 
 ```bash
 curl -v \
   --cert "$DMS_CLIENT_CERT" \
   --key "$DMS_CLIENT_KEY" \
   --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" \
-  "$DMS_API_URL/api/v1/operations/action-required"
+  "$DMS_API_URL/healthz"
 ```
 
 흔한 원인:
@@ -1396,17 +1224,7 @@ curl -v \
 
 ### Storage mapping이 `Failed` 또는 `Degraded`
 
-확인:
-
-```bash
-curl -fsS "$DMS_API_URL/api/v1/operations/storage-mappings" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
-```
-
-흔한 원인:
+storage-mappings 조회 API(§10.3, `operations/storage-mappings`)로 readiness 상세를 확인한다. 흔한 원인:
 
 - `storage_class_name`이 target cluster에 없음
 - `csi_driver`가 StorageClass provisioner와 다름
@@ -1416,15 +1234,10 @@ curl -fsS "$DMS_API_URL/api/v1/operations/storage-mappings" \
 
 ### RM Worker가 backend mutation 실패
 
-확인:
+worker log를 확인하고, action-required 조회 API(`4.dms-dm-api.md`)로 실패 항목을 본다.
 
 ```bash
 kubectl --context dms-control -n dms logs deploy/dms-rm-worker --tail=200
-curl -fsS "$DMS_API_URL/api/v1/operations/action-required" \
-  --cert "$DMS_CLIENT_CERT" \
-  --key "$DMS_CLIENT_KEY" \
-  --cacert "$DMS_CA_CERT" \
-  -H "authorization: Bearer $DMS_TOKEN" | jq
 ```
 
 흔한 원인:
