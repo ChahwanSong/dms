@@ -325,7 +325,11 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
             "/api/v1/resource-management/storage-mappings",
             {
                 "storage_name": "phase16-mtls-storage",
-                "backend_template": {"backend_type": "cephfs"},
+                "backend_template": {
+                    "backend_type": "cephfs",
+                    "mount_path": "/mnt/phase16",
+                    "managed_root": "/mnt/phase16/dms",
+                },
             },
             {200},
         ),

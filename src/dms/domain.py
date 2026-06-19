@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
 import json
+import os
 import re
 from typing import Any
 
@@ -284,6 +285,70 @@ class DmIdentityDenylistBody(BaseModel):
 
 
 DM_DENYLIST_SUBJECT_TYPES = ("requester", "owner", "group")
+
+
+# Filesystem backends that manage a directory subtree under their mount point.
+# Values mirror backends/{cephfs,weka,gpfs}.py *_BACKEND_TYPE; kept as literals here
+# to avoid a domain -> backends import dependency.
+_FILESYSTEM_BACKEND_TYPES = ("cephfs", "wekafs", "gpfs")
+
+
+def managed_root_path_suffix(mount_path: str, managed_root: str) -> str:
+    """``managed_root`` expressed relative to ``mount_path`` (e.g. ``/cephfs`` +
+    ``/cephfs/dms`` -> ``"dms"``). Empty string when they are equal. Raises ValueError
+    if managed_root is not under mount_path."""
+    mount_norm = os.path.normpath(mount_path)
+    root_norm = os.path.normpath(managed_root)
+    if os.path.commonpath([mount_norm, root_norm]) != mount_norm:
+        raise ValueError("managed_root must be under mount_path")
+    suffix = os.path.relpath(root_norm, mount_norm)
+    return "" if suffix == "." else suffix
+
+
+def validate_filesystem_managed_root(backend_template: dict[str, Any]) -> None:
+    """Filesystem storage mappings must declare an explicit ``managed_root`` under
+    ``mount_path``.
+
+    ``managed_root`` is the security/isolation boundary (and the DM path base when
+    ``DMS_DM_PATH_BASE=managed_root``), so it must be explicit -- the historical
+    implicit ``{mount_path}/dms`` default is no longer accepted. Non-filesystem
+    backends (CSI, kubernetes namespace quota) have no managed_root and are skipped.
+    """
+    backend_type = backend_template.get("backend_type")
+    if backend_type not in _FILESYSTEM_BACKEND_TYPES:
+        return
+    mount_path = backend_template.get("mount_path")
+    managed_root = backend_template.get("managed_root")
+    if not mount_path:
+        raise ValueError(f"{backend_type} storage mapping requires mount_path")
+    if not managed_root:
+        raise ValueError(
+            f"{backend_type} storage mapping requires an explicit managed_root"
+        )
+    managed_root_path_suffix(mount_path, managed_root)  # validates under mount_path
+
+
+def managed_root_for_mapping(mapping: dict[str, Any]) -> tuple[str, str] | None:
+    """``(mount_path, managed_root)`` for a filesystem storage mapping, or ``None`` if it
+    cannot be determined (non-filesystem backend, or missing mount_path/managed_root).
+    managed_root is mandatory at registration, so ``None`` here is a fail-closed signal
+    for the caller (planner rejects the job)."""
+    template = mapping.get("backend_template") or {}
+    if template.get("backend_type") not in _FILESYSTEM_BACKEND_TYPES:
+        return None
+    mount_path = template.get("mount_path")
+    managed_root = template.get("managed_root")
+    if not mount_path or not managed_root:
+        return None
+    return str(mount_path), str(managed_root)
+
+
+def apply_managed_root_suffix(path: str, suffix: str) -> str:
+    """Prepend the managed_root ``suffix`` to a storage-relative ``path`` and
+    re-canonicalize. Empty suffix returns the canonicalized path unchanged."""
+    if not suffix:
+        return _canonical_relative_path(path)
+    return _canonical_relative_path(f"{suffix}/{path}")
 
 
 class StorageMappingInput(BaseModel):

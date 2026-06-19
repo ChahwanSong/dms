@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from urllib.parse import urlparse
 
 from .db import Database
@@ -261,11 +262,13 @@ def migrate_operational(database: Database) -> None:
         connection.executescript(OPERATIONAL_SCHEMA)
         _ensure_operational_phase3_columns(connection, database)
         _ensure_operational_phase19_columns(connection, database)
+        _backfill_filesystem_managed_root(connection)
         _record_migration(connection, "operational-0001-phase1")
         _record_migration(connection, "operational-0002-phase2-identity")
         _record_migration(connection, "operational-0003-phase3-inventory")
         _record_migration(connection, "operational-0019-data-management-scan")
         _record_migration(connection, "operational-0022-data-management-policies")
+        _record_migration(connection, "operational-0023-managed-root-backfill")
 
 
 def migrate_observability(database: Database) -> None:
@@ -335,6 +338,42 @@ def _ensure_operational_phase19_columns(connection, database: Database) -> None:
     }.items():
         if not _column_exists(connection, database, "data_jobs", column):
             connection.execute(f"ALTER TABLE data_jobs ADD COLUMN {column} {definition}")
+
+
+def _backfill_filesystem_managed_root(connection) -> None:
+    """Promote the historical implicit ``{mount_path}/dms`` default to an explicit
+    ``managed_root`` on filesystem storage mappings registered before managed_root
+    became mandatory.
+
+    Idempotent: rows that already declare ``managed_root``, are non-filesystem, or
+    lack a ``mount_path`` (cannot derive) are left untouched -- the latter fall to the
+    registration validator / runtime guard on next write.
+    """
+    rows = connection.execute(
+        "SELECT storage_name, backend_template FROM storage_mappings"
+    ).fetchall()
+    for row in rows:
+        raw = row["backend_template"]
+        if not raw:
+            continue
+        try:
+            template = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(template, dict):
+            continue
+        if template.get("backend_type") not in ("cephfs", "wekafs", "gpfs"):
+            continue
+        if template.get("managed_root"):
+            continue
+        mount_path = template.get("mount_path")
+        if not mount_path:
+            continue
+        template["managed_root"] = f"{mount_path.rstrip('/')}/dms"
+        connection.execute(
+            "UPDATE storage_mappings SET backend_template = ? WHERE storage_name = ?",
+            (json.dumps(template), row["storage_name"]),
+        )
 
 
 def _column_exists(connection, database: Database, table: str, column: str) -> bool:

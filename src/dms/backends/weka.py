@@ -170,9 +170,8 @@ class WekaFsBackendTemplate:
             mapping, rm_workers
         )
         mount_path = template.get("mount_path", "")
-        managed_root = template.get("managed_root") or (
-            f"{mount_path.rstrip('/')}/dms" if mount_path else ""
-        )
+        # managed_root is mandatory at registration; no implicit {mount_path}/dms fallback.
+        managed_root = template.get("managed_root") or ""
         cred_dict = template.get("weka_credentials") or {}
         credentials: WekaCredentials | None = None
         if cred_dict.get("username") and cred_dict.get("password") is not None:

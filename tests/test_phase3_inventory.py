@@ -67,6 +67,7 @@ def test_agent_inventory_and_storage_mapping_sanity(harness):
         backend_template={
             "backend_type": "cephfs",
             "mount_path": "/this/path/is/not-observed-by-api-pod",
+            "managed_root": "/this/path/is/not-observed-by-api-pod/dms",
         },
     )
     assert ready["status"] == "Ready"
@@ -310,7 +311,16 @@ def upsert_mapping(
         "/api/v1/resource-management/storage-mappings",
         json={
             "storage_name": storage_name,
-            "backend_template": backend_template or {"backend_type": backend_type},
+            "backend_template": backend_template
+            or (
+                {
+                    "backend_type": backend_type,
+                    "mount_path": f"/mnt/{storage_name}",
+                    "managed_root": f"/mnt/{storage_name}/dms",
+                }
+                if backend_type in ("cephfs", "wekafs", "gpfs")
+                else {"backend_type": backend_type}
+            ),
             "cluster_name": cluster_name,
             "storage_class_name": storage_class_name,
         },
@@ -471,3 +481,19 @@ def harness(tmp_path):
         "observability": observability,
         "client": TestClient(app),
     }
+
+
+def test_filesystem_mapping_requires_explicit_managed_root(harness):
+    """Filesystem storage mappings must declare managed_root at registration (no implicit
+    {mount_path}/dms default). Non-filesystem (CSI) backends are exempt."""
+    client: TestClient = harness["client"]
+    detail = upsert_mapping(
+        client,
+        storage_name="needs-managed-root",
+        backend_type="cephfs",
+        cluster_name="cluster-a",
+        storage_class_name="testbed-cephfs",
+        backend_template={"backend_type": "cephfs", "mount_path": "/mnt/needs-root"},
+        expected_status=422,
+    )
+    assert "managed_root" in str(detail)

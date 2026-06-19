@@ -10,11 +10,15 @@ from ..adapters import (
     zero_kubernetes_resource_quota_hard,
 )
 from ..backend_registry import BackendAdapterRegistry
+from ..config import Settings
 from ..domain import (
     LifecycleState,
     OperationKind,
     ResourceKind,
     WorkerRole,
+    apply_managed_root_suffix,
+    managed_root_for_mapping,
+    managed_root_path_suffix,
     validate_storage_root_basename,
 )
 from ..repositories import DmsRepository, utcnow

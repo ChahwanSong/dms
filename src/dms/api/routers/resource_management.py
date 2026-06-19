@@ -16,6 +16,7 @@ from ...domain import (
     ResourceKind,
     StorageMappingInput,
     TERMINAL_LIFECYCLE_STATES,
+    validate_filesystem_managed_root,
 )
 from .._helpers.configmap import sync_agent_storages_configmap
 from .._helpers.filesystem import (
@@ -442,6 +443,10 @@ def resource_management_router() -> APIRouter:
             raise HTTPException(status_code=409, detail=conflict)
         existing = services.repository.get_storage_mapping(data.storage_name)
         merge_storage_mapping_secrets(data.backend_template, existing)
+        try:
+            validate_filesystem_managed_root(data.backend_template)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         sanity = sanity_service(services).check_input(data)
         data.sanity_status = sanity["status"]
         services.repository.upsert_storage_mapping(
@@ -529,6 +534,10 @@ def resource_management_router() -> APIRouter:
             )
             raise HTTPException(status_code=409, detail=conflict)
         merge_storage_mapping_secrets(data.backend_template, existing)
+        try:
+            validate_filesystem_managed_root(data.backend_template)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         sanity = sanity_service(services).check_input(data)
         data.sanity_status = sanity["status"]
         services.repository.upsert_storage_mapping(

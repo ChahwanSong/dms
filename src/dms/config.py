@@ -45,6 +45,10 @@ class Settings:
     dm_service_account: str = "dms-dm-worker"
     dm_artifact_base_uri: str = "file:///var/lib/dms/artifacts"
     dm_default_priority: str = "Mid"
+    # DM request path base. "mount_path" (default, current): paths relative to mount_path.
+    # "managed_root": planner prepends the managed_root-relative suffix (volcano/preflight
+    # unchanged). See domain.apply_managed_root_suffix.
+    dm_path_base: str = "mount_path"
     dm_default_max_nodes: int = 1
     dm_max_nodes: int = 1
     dm_scan_timeout_seconds: int = 3600
@@ -175,6 +179,9 @@ class Settings:
                 "DMS_DM_ARTIFACT_BASE_URI", "file:///var/lib/dms/artifacts"
             ),
             dm_default_priority=os.getenv("DMS_DM_DEFAULT_PRIORITY", "Mid"),
+            dm_path_base=_choice_env(
+                "DMS_DM_PATH_BASE", "mount_path", {"mount_path", "managed_root"}
+            ),
             dm_default_max_nodes=int(os.getenv("DMS_DM_DEFAULT_MAX_NODES", "1")),
             dm_max_nodes=int(os.getenv("DMS_DM_MAX_NODES", "1")),
             dm_scan_timeout_seconds=int(os.getenv("DMS_DM_SCAN_TIMEOUT_SECONDS", "3600")),
@@ -293,6 +300,13 @@ def _json_env(name: str) -> dict[str, str] | None:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be a JSON object")
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _choice_env(name: str, default: str, allowed: set[str]) -> str:
+    value = os.getenv(name, default)
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {sorted(allowed)}")
+    return value
 
 
 def _bool_env(name: str, default: bool) -> bool:

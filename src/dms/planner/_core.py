@@ -108,6 +108,19 @@ class _PlannerCoreMixin:
                 normalized_target = {"storage_name": storage_name, "path": target_path}
             if self._reject_unsafe_storage_mapping(request, WorkerRole.DM):
                 return
+            if self.settings is not None and self.settings.dm_path_base == "managed_root":
+                normalized_target = self._rebase_paths_for_managed_root(
+                    request, operation, normalized_target
+                )
+                if normalized_target is None:
+                    return
+                if operation == OperationKind.DATA_SYNC.value:
+                    source = normalized_target["source"]
+                    destination = normalized_target["destination"]
+                    source_path = source["path"]
+                    destination_path = destination["path"]
+                else:
+                    target_path = normalized_target["path"]
             job_id = self.repository.create_data_job(
                 request_id=request["request_id"],
                 operation=operation,
@@ -619,6 +632,76 @@ class _PlannerCoreMixin:
             actor="planner",
         )
         return True
+
+    def _rebase_paths_for_managed_root(
+        self, request: dict[str, Any], operation: str, normalized_target: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """``DMS_DM_PATH_BASE=managed_root``: prepend each storage's managed_root suffix
+        (``relpath(managed_root, mount_path)``) to its request path, so the job operates
+        under managed_root while volcano/preflight stay mount_path-relative. Returns the
+        rebased ``normalized_target``, or ``None`` if the job was rejected (managed_root
+        unavailable, or escapes mount_path). storage-keyed suffix cache handles nsync's
+        distinct source/destination storages."""
+        suffix_cache: dict[str, str] = {}
+
+        def _suffix_for(name: str) -> str | None:
+            if name not in suffix_cache:
+                mapping = self.repository.get_storage_mapping(name)
+                pair = managed_root_for_mapping(mapping) if mapping else None
+                if pair is None:
+                    self._reject_planner_issue(
+                        request,
+                        message=f"managed_root unavailable for storage {name}",
+                        issues=[
+                            {"storage_name": name, "reason": "managed_root_unavailable"}
+                        ],
+                        error_category="planner",
+                    )
+                    return None
+                try:
+                    suffix_cache[name] = managed_root_path_suffix(*pair)
+                except ValueError:
+                    self._reject_planner_issue(
+                        request,
+                        message=f"managed_root escapes mount_path for storage {name}",
+                        issues=[
+                            {
+                                "storage_name": name,
+                                "reason": "managed_root_outside_mount_path",
+                            }
+                        ],
+                        error_category="planner",
+                    )
+                    return None
+            return suffix_cache[name]
+
+        if operation == OperationKind.DATA_SYNC.value:
+            source = normalized_target["source"]
+            destination = normalized_target["destination"]
+            s_suffix = _suffix_for(source["storage_name"])
+            if s_suffix is None:
+                return None
+            d_suffix = _suffix_for(destination["storage_name"])
+            if d_suffix is None:
+                return None
+            return {
+                **normalized_target,
+                "source": {
+                    **source,
+                    "path": apply_managed_root_suffix(source["path"], s_suffix),
+                },
+                "destination": {
+                    **destination,
+                    "path": apply_managed_root_suffix(destination["path"], d_suffix),
+                },
+            }
+        suffix = _suffix_for(normalized_target["storage_name"])
+        if suffix is None:
+            return None
+        return {
+            **normalized_target,
+            "path": apply_managed_root_suffix(normalized_target["path"], suffix),
+        }
 
 
     def _required_storage_names(self, request: dict[str, Any]) -> set[str]:

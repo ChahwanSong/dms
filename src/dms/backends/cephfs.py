@@ -143,9 +143,10 @@ class CephFsBackendTemplate:
             mapping, rm_workers
         )
         mount_path = template.get("mount_path", "")
-        managed_root = template.get("managed_root") or (
-            f"{mount_path.rstrip('/')}/dms" if mount_path else ""
-        )
+        # managed_root is mandatory at registration (validate_filesystem_managed_root);
+        # there is no implicit {mount_path}/dms fallback. Empty only if a pre-migration
+        # row slips through -- the runtime managed_root guard then rejects it.
+        managed_root = template.get("managed_root") or ""
         return cls(
             storage_name=mapping["storage_name"],
             cluster_name=template.get("cluster_name") or mapping.get("cluster_name"),

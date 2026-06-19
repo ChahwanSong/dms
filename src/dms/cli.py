@@ -101,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "planner":
         planner = Planner(
             repository,
+            settings=settings,
             sanity_ttl_seconds=(
                 settings.sanity_ttl_seconds
                 if settings.sanity_planner_gate_enabled
