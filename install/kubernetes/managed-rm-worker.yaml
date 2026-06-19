@@ -73,8 +73,12 @@ spec:
           securityContext:
             runAsUser: 0
           volumeMounts:
+            # HostToContainer (rslave) so a host re-mount of the shared FS
+            # propagates into this long-lived worker instead of going stale under
+            # the default (None) propagation. path below must be the mount point.
             - name: cephfs-a
               mountPath: /mnt/cephfs-rwx
+              mountPropagation: HostToContainer
           resources:
             requests:
               cpu: 100m

@@ -472,8 +472,17 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
           volumeMounts:
+            # Mount the shared-filesystem *mount point* (not the artifact
+            # subdirectory) with HostToContainer (rslave) propagation. dm-worker
+            # is a long-lived orchestrator that reads other nodes' job artifacts
+            # off the shared FS. With the default (None) propagation a bind of a
+            # subdirectory under the FS goes stale if the host re-mounts the FS
+            # mid-session, so the worker stops seeing fresh artifacts until it is
+            # restarted. rslave lets host (re-)mounts propagate into the
+            # container live. Requires the host mount point and / to be `shared`.
             - name: dm-artifacts
               mountPath: /artifacts
+              mountPropagation: HostToContainer
           resources:
             requests:
               cpu: 100m
@@ -484,5 +493,12 @@ spec:
       volumes:
         - name: dm-artifacts
           hostPath:
+            # MUST be the shared-FS mount point itself (the artifact tree lives
+            # under <mountPath>/dms, see DMS_DM_ARTIFACT_BASE_URI), never a
+            # subdirectory under it -- a subdir bind cannot receive the host
+            # re-mount even with HostToContainer. Deployments substitute the real
+            # mount point (the testbed uses the CephFS mount /cephfs). `Directory`
+            # (not DirectoryOrCreate) so the pod fails fast if the FS is unmounted
+            # rather than silently binding an empty local dir.
             path: /artifacts
-            type: DirectoryOrCreate
+            type: Directory

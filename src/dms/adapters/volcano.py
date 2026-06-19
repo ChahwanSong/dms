@@ -904,7 +904,7 @@ class KubernetesVolcanoAdapter:
                 else []
             )
             volume_mounts = (
-                [{"name": "sync-source", "mountPath": "/dms/source", "readOnly": True}]
+                [_host_volume_mount("sync-source", "/dms/source", read_only=True)]
                 if mount
                 else []
             )
@@ -935,7 +935,7 @@ class KubernetesVolcanoAdapter:
                 else []
             )
             volume_mounts = (
-                [{"name": "sync-destination", "mountPath": "/dms/destination"}]
+                [_host_volume_mount("sync-destination", "/dms/destination")]
                 if mount
                 else []
             )
@@ -1948,11 +1948,7 @@ class KubernetesVolcanoAdapter:
                     }
                 )
                 volume_mounts.append(
-                    {
-                        "name": "sync-source",
-                        "mountPath": "/dms/source",
-                        "readOnly": True,
-                    }
+                    _host_volume_mount("sync-source", "/dms/source", read_only=True)
                 )
             if destination_mount:
                 volumes.append(
@@ -1962,7 +1958,7 @@ class KubernetesVolcanoAdapter:
                     }
                 )
                 volume_mounts.append(
-                    {"name": "sync-destination", "mountPath": "/dms/destination"}
+                    _host_volume_mount("sync-destination", "/dms/destination")
                 )
             env.extend(
                 [
@@ -1997,7 +1993,7 @@ class KubernetesVolcanoAdapter:
                         "hostPath": {"path": target_mount, "type": "Directory"},
                     }
                 )
-                volume_mounts.append({"name": "rm-target", "mountPath": "/dms/target"})
+                volume_mounts.append(_host_volume_mount("rm-target", "/dms/target"))
             env.extend(
                 [
                     {
@@ -2022,7 +2018,7 @@ class KubernetesVolcanoAdapter:
                 }
             )
             volume_mounts.append(
-                {"name": "mutation-artifacts", "mountPath": "/dms/artifacts"}
+                _host_volume_mount("mutation-artifacts", "/dms/artifacts")
             )
         return {
             "artifact_uri": artifact_uri,
@@ -2082,7 +2078,7 @@ class KubernetesVolcanoAdapter:
                 }
             )
             volume_mounts.append(
-                {"name": "scan-target", "mountPath": "/dms/target", "readOnly": True}
+                _host_volume_mount("scan-target", "/dms/target", read_only=True)
             )
         if artifact_path:
             volumes.append(
@@ -2092,7 +2088,7 @@ class KubernetesVolcanoAdapter:
                 }
             )
             volume_mounts.append(
-                {"name": "scan-artifacts", "mountPath": "/dms/artifacts"}
+                _host_volume_mount("scan-artifacts", "/dms/artifacts")
             )
         return {
             "artifact_uri": artifact_uri,
@@ -2185,7 +2181,7 @@ class KubernetesVolcanoAdapter:
                 }
             )
             artifact_mounts.append(
-                {"name": "mutation-artifacts", "mountPath": "/dms/artifacts"}
+                _host_volume_mount("mutation-artifacts", "/dms/artifacts")
             )
 
         source_volumes = [*artifact_volumes]
@@ -2198,7 +2194,7 @@ class KubernetesVolcanoAdapter:
                 }
             )
             source_mounts.append(
-                {"name": "sync-source", "mountPath": "/dms/source", "readOnly": True}
+                _host_volume_mount("sync-source", "/dms/source", read_only=True)
             )
         destination_volumes = [*artifact_volumes]
         destination_mounts = [*artifact_mounts]
@@ -2210,7 +2206,7 @@ class KubernetesVolcanoAdapter:
                 }
             )
             destination_mounts.append(
-                {"name": "sync-destination", "mountPath": "/dms/destination"}
+                _host_volume_mount("sync-destination", "/dms/destination")
             )
 
         identity = data_job.get("preflight_result", {}).get("identity_mapping") or {}
@@ -2269,6 +2265,29 @@ class KubernetesVolcanoAdapter:
             "destination_volume_mounts": destination_mounts,
         }
 
+
+
+def _host_volume_mount(
+    name: str, mount_path: str, *, read_only: bool = False
+) -> dict[str, Any]:
+    """Build a volumeMount for a hostPath backed by the shared filesystem.
+
+    Uses ``HostToContainer`` (rslave) propagation so that re-mounts of the shared
+    FS on the host propagate into the job pod. Without it the kubelet bind mount
+    is private and goes stale if the host unmounts/remounts the FS while the pod
+    is alive, leaving the pod with a detached view (see the dm-worker Deployment
+    and the ARCHITECTURE bind-mount-stale note). source/target mounts are the
+    storage mount points themselves; the artifact subdir mount also opts in for
+    consistency (job pods are short-lived so the residual subdir-bind risk is low).
+    """
+    mount: dict[str, Any] = {
+        "name": name,
+        "mountPath": mount_path,
+        "mountPropagation": "HostToContainer",
+    }
+    if read_only:
+        mount["readOnly"] = True
+    return mount
 
 
 def _mpi_worker_command() -> str:

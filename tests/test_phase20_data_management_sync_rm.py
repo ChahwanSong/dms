@@ -934,3 +934,102 @@ def test_dsync_preflight_stays_single_both_mounts_pod():
     assert [role for role, _ in manifests] == ["both"]
     both = manifests[0][1]
     assert _mount_names(both) >= {"sync-source", "sync-destination"}
+
+
+def _assert_hostpath_mounts_use_host_propagation(spec: dict) -> set:
+    """Every volumeMount backed by a hostPath volume in ``spec`` must use
+    HostToContainer (rslave) propagation.
+
+    Regression guard for the bind-mount-stale fix: shared-FS hostPath volumes
+    need rslave propagation so a host re-mount propagates into the pod instead of
+    leaving it with a stale, detached view (see the dm-worker Deployment).
+    """
+    hostpath_names = {v["name"] for v in spec.get("volumes", []) if "hostPath" in v}
+    assert hostpath_names, "expected at least one hostPath-backed volume"
+    mounts = {m["name"]: m for m in spec["containers"][0]["volumeMounts"]}
+    for name in hostpath_names:
+        assert name in mounts, f"hostPath volume {name!r} has no volumeMount"
+        assert mounts[name].get("mountPropagation") == "HostToContainer", (
+            f"hostPath volumeMount {name!r} must set mountPropagation="
+            f"HostToContainer (got {mounts[name].get('mountPropagation')!r})"
+        )
+    return hostpath_names
+
+
+def test_job_and_preflight_pods_use_host_propagation_for_shared_fs_hostpaths():
+    """sync/rm/nsync job pods and POSIX preflight pods must mount shared-FS
+    hostPath volumes with HostToContainer propagation (bind-mount-stale fix)."""
+    adapter = _preflight_adapter()
+
+    dsync_plan, dsync_job, preflight = _sync_plan_job(
+        "dsync",
+        {
+            "selected_candidates": [
+                {
+                    "node_name": "dms-w1",
+                    "source_mount_path": "/cephfs",
+                    "destination_mount_path": "/cephfs",
+                }
+            ]
+        },
+    )
+    nsync_plan, nsync_job, _ = _sync_plan_job(
+        "nsync",
+        {
+            "source_candidates": [{"node_name": "dms-w1", "mount_path": "/cephfs"}],
+            "destination_candidates": [
+                {"node_name": "dms-w4", "mount_path": "/cephfs-secondary"}
+            ],
+            "selected_candidates": [
+                {"node_name": "dms-w1", "mount_path": "/cephfs"},
+                {"node_name": "dms-w4", "mount_path": "/cephfs-secondary"},
+            ],
+        },
+    )
+    rm_plan = {
+        "desired_state": {
+            "target": {"storage_name": "cephfs-dms", "path": "dms/remove-me"},
+            "options": {"recursive": True},
+        },
+        "execution_metadata": {"phase": "execution"},
+    }
+    rm_job = {
+        "job_id": "job-rm-prop",
+        "request_id": "req-rm-prop",
+        "operation": OperationKind.DATA_RM.value,
+        "storage_name": "cephfs-dms",
+        "target": "dms/remove-me",
+        "normalized_target": {"storage_name": "cephfs-dms", "path": "dms/remove-me"},
+        "selected_tool": "drm",
+        "worker_pool": {
+            "selected_candidates": [{"node_name": "dms-w1", "mount_path": "/cephfs"}]
+        },
+        "preflight_result": preflight,
+    }
+
+    checked = 0
+    for plan, job in (
+        (dsync_plan, dsync_job),
+        (nsync_plan, nsync_job),
+        (rm_plan, rm_job),
+    ):
+        manifest = adapter._manifest(plan, job)
+        hostpath_specs = [
+            task["template"]["spec"]
+            for task in manifest["spec"]["tasks"]
+            if any(
+                "hostPath" in v
+                for v in task["template"]["spec"].get("volumes", [])
+            )
+        ]
+        assert hostpath_specs, f"no hostPath pod spec in {job['selected_tool']} manifest"
+        for spec in hostpath_specs:
+            checked += len(_assert_hostpath_mounts_use_host_propagation(spec))
+
+    for plan, job in ((nsync_plan, nsync_job), (dsync_plan, dsync_job)):
+        for _role, pod in adapter._data_preflight_manifests(
+            plan, job, preflight, "preview"
+        ):
+            checked += len(_assert_hostpath_mounts_use_host_propagation(pod["spec"]))
+
+    assert checked, "expected shared-FS hostPath mounts to be verified"

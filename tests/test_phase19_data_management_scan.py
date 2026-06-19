@@ -872,3 +872,65 @@ def _ingest_ready_dm_report(
             "csi": [],
         }
     )
+
+
+def test_scan_job_and_preflight_use_host_propagation_for_hostpaths():
+    """scan job pods and the scan preflight pod must mount shared-FS hostPath
+    volumes (scan-target, scan-artifacts) with HostToContainer propagation, so a
+    host re-mount propagates in rather than going stale (bind-mount-stale fix)."""
+    settings = Settings(
+        database_url="sqlite:///:memory:",
+        observability_database_url="sqlite:///:memory:",
+        dm_job_image="registry.local/dms-mpifileutils:test",
+        dm_artifact_base_uri="file:///artifacts/dms",
+        dm_kubernetes_mode="cluster",
+    )
+    adapter = KubernetesVolcanoAdapter(settings)
+    plan = {
+        "desired_state": {
+            "target": {"storage_name": "cephfs-a", "path": "project/input"}
+        }
+    }
+    data_job = {
+        "job_id": "job-scan-prop",
+        "request_id": "req-scan-prop",
+        "operation": OperationKind.DATA_SCAN.value,
+        "storage_name": "cephfs-a",
+        "target": "project/input",
+        "normalized_target": {"storage_name": "cephfs-a", "path": "project/input"},
+        "selected_tool": "dscan",
+        "priority": 100,
+        "worker_pool": {
+            "selected_candidates": [
+                {"node_name": "c1-worker", "mount_path": "/mnt/testbed-cephfs"}
+            ]
+        },
+        "preflight_result": {
+            "identity_mapping": {"uid": 10000, "gid": 10000, "posix_username": "alice"}
+        },
+    }
+
+    def _check(spec: dict) -> set:
+        hostpath_names = {
+            v["name"] for v in spec.get("volumes", []) if "hostPath" in v
+        }
+        assert hostpath_names, "expected a hostPath-backed volume"
+        mounts = {m["name"]: m for m in spec["containers"][0]["volumeMounts"]}
+        for name in hostpath_names:
+            assert mounts[name].get("mountPropagation") == "HostToContainer", (
+                f"hostPath volumeMount {name!r} must use HostToContainer"
+            )
+        return hostpath_names
+
+    manifest = adapter._manifest(plan, data_job)
+    checked: set = set()
+    for task in manifest["spec"]["tasks"]:
+        spec = task["template"]["spec"]
+        if any("hostPath" in v for v in spec.get("volumes", [])):
+            checked |= _check(spec)
+    assert "scan-artifacts" in checked
+
+    preflight_pod = adapter._preflight_pod_manifest(
+        plan, data_job, data_job["preflight_result"]
+    )
+    _check(preflight_pod["spec"])
