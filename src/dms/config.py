@@ -52,12 +52,12 @@ class Settings:
     dm_default_max_nodes: int = 1
     dm_max_nodes: int = 1
     dm_scan_timeout_seconds: int = 3600
-    dm_sync_preview_timeout_seconds: int = 1800
-    dm_sync_execution_timeout_seconds: int = 3600
+    dm_sync_preview_timeout_seconds: int = 3600
+    dm_sync_execution_timeout_seconds: int = 259200
     dm_rm_preview_timeout_seconds: int = 1800
     dm_rm_execution_timeout_seconds: int = 3600
     dm_confirm_require_preview_fingerprint: bool = True
-    dm_sync_allow_delete: bool = False
+    dm_sync_allow_delete: bool = True
     dm_max_sync_nodes: int = 1
     dm_max_rm_nodes: int = 1
     dm_nsync_enabled: bool = True
@@ -88,7 +88,7 @@ class Settings:
     # mTLS-verified operator (actor with `mtls_actor_prefix`), optional operator allowlist,
     # and `dm_privileged_scopes` (empty = all storages). The denylist still applies as a
     # kill-switch. See install/4.dms-dm-api.md.
-    dm_allow_root_requester: bool = False
+    dm_allow_root_requester: bool = True
     dm_privileged_requesters: frozenset[str] = frozenset({"root"})
     dm_privileged_uid: int = 0
     dm_privileged_gid: int = 0
@@ -200,10 +200,10 @@ class Settings:
             dm_max_nodes=int(os.getenv("DMS_DM_MAX_NODES", "1")),
             dm_scan_timeout_seconds=int(os.getenv("DMS_DM_SCAN_TIMEOUT_SECONDS", "3600")),
             dm_sync_preview_timeout_seconds=int(
-                os.getenv("DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS", "1800")
+                os.getenv("DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS", "3600")
             ),
             dm_sync_execution_timeout_seconds=int(
-                os.getenv("DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS", "3600")
+                os.getenv("DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS", "259200")
             ),
             dm_rm_preview_timeout_seconds=int(
                 os.getenv("DMS_DM_RM_PREVIEW_TIMEOUT_SECONDS", "1800")
@@ -214,7 +214,7 @@ class Settings:
             dm_confirm_require_preview_fingerprint=_bool_env(
                 "DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT", True
             ),
-            dm_sync_allow_delete=_bool_env("DMS_DM_SYNC_ALLOW_DELETE", False),
+            dm_sync_allow_delete=_bool_env("DMS_DM_SYNC_ALLOW_DELETE", True),
             dm_max_sync_nodes=int(os.getenv("DMS_DM_MAX_SYNC_NODES", "1")),
             dm_max_rm_nodes=int(os.getenv("DMS_DM_MAX_RM_NODES", "1")),
             dm_nsync_enabled=_bool_env("DMS_DM_NSYNC_ENABLED", True),
@@ -244,7 +244,7 @@ class Settings:
             dm_identity_provider=os.getenv("DMS_DM_IDENTITY_PROVIDER", "ldap"),
             dm_min_uid=int(os.getenv("DMS_DM_MIN_UID", "1000")),
             dm_min_gid=int(os.getenv("DMS_DM_MIN_GID", "1000")),
-            dm_allow_root_requester=_bool_env("DMS_DM_ALLOW_ROOT_REQUESTER", False),
+            dm_allow_root_requester=_bool_env("DMS_DM_ALLOW_ROOT_REQUESTER", True),
             dm_privileged_requesters=_csv_set_env(
                 "DMS_DM_PRIVILEGED_REQUESTERS", "root"
             ),

@@ -213,7 +213,9 @@ def test_rm_preview_confirm_execution_requires_recursive_and_removes_target(tmp_
 
 
 def test_sync_rejects_unsafe_options_and_destination_under_source(tmp_path):
-    harness = _harness(tmp_path)
+    # Pin the delete gate closed so this test still exercises the rejection path
+    # (DMS_DM_SYNC_ALLOW_DELETE now defaults to True).
+    harness = _harness(tmp_path, dm_sync_allow_delete=False)
 
     delete_disabled = harness["client"].post(
         "/api/v1/data-management/sync",
@@ -630,7 +632,7 @@ def test_nsync_native_volcano_manifest_has_launcher_and_role_workers():
     assert destination_values == ["dst-1", "dst-2"]
 
 
-def _harness(tmp_path) -> dict:
+def _harness(tmp_path, **settings_overrides) -> dict:
     operational_url = f"sqlite:///{tmp_path / 'operational.db'}"
     observability_url = f"sqlite:///{tmp_path / 'observability.db'}"
     settings = Settings(
@@ -640,6 +642,7 @@ def _harness(tmp_path) -> dict:
         dm_kubernetes_mode="stub",
         dm_policy_default_worker_nodes=1,
         dm_policy_default_processes_per_node=1,
+        **settings_overrides,
     )
     operational = Database(operational_url)
     observability_db = Database(observability_url)

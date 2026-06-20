@@ -113,12 +113,13 @@ Data Management runtime:
 | `DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS` | `dms-normal` | DB policy bootstrap PriorityClass. |
 | `DMS_DM_SCHEDULER_BACKEND` | `auto` | `auto`는 MPIJob을 먼저 적용하고 불가능하면 native VolcanoJob fallback을 사용한다. `mpi-operator` 또는 `volcano-job`으로 고정할 수 있다. |
 | `DMS_DM_SCAN_TIMEOUT_SECONDS` | `3600` | scan timeout. 초과하면 DM Worker가 VolcanoJob terminate 후 실패로 기록한다. |
-| `DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS` | `1800` | `sync` dry-run preview VolcanoJob timeout. |
-| `DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS` | `3600` | confirmed `sync` execution VolcanoJob timeout. |
+| `DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS` | `3600` | `sync` dry-run preview VolcanoJob timeout. |
+| `DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS` | `259200` | confirmed `sync` execution VolcanoJob timeout (기본 3일). |
 | `DMS_DM_RM_PREVIEW_TIMEOUT_SECONDS` | `1800` | `rm` dry-run preview VolcanoJob timeout. |
 | `DMS_DM_RM_EXECUTION_TIMEOUT_SECONDS` | `3600` | confirmed `rm` execution VolcanoJob timeout. |
 | `DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT` | `true` | confirm 시 preview fingerprint evidence를 요구할지 여부. |
-| `DMS_DM_SYNC_ALLOW_DELETE` | `false` | `sync` request의 `delete=true` 옵션을 운영 정책상 허용할지 여부. `false`이면 request validation에서 막는다. |
+| `DMS_DM_SYNC_ALLOW_DELETE` | `true` | `sync` request의 `delete=true` 옵션을 운영 정책상 허용할지 여부. `false`이면 request validation에서 막는다. |
+| `DMS_DM_ALLOW_ROOT_REQUESTER` | `true` | 운영자 root(privileged) 실행 허용. requester_id/owner_username이 `DMS_DM_PRIVILEGED_REQUESTERS`(기본 `root`)에 속하면 uid/gid 0으로 합성 실행한다(LDAP·uid floor 우회). API edge에서 **mTLS-verified operator만 허용**(평문 actor의 root 요청은 403), denylist는 kill-switch로 유지. `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 경로에서만 실제 동작한다. |
 | `DMS_DM_PATH_BASE` | `mount_path` | DM 요청 path의 기준점(글로벌). `mount_path`(현행: path가 storage mount_path 기준) 또는 `managed_root`(planner가 storage별 `managed_root` suffix를 prepend해 managed_root 기준으로 해석). `managed_root` 모드는 filesystem mapping에 `managed_root`가 명시돼 있어야 하며, 산출 불가 시 잡을 fail-closed로 거부한다. |
 | `DMS_DM_MAX_SYNC_NODES` | `1` | legacy compatibility setting. `dsync`/`nsync` node counts는 DB policy/API로 관리한다. |
 | `DMS_DM_MAX_RM_NODES` | `1` | legacy compatibility setting. `rm` node counts는 DB policy/API로 관리한다. |
