@@ -2908,6 +2908,8 @@ def _sync_flags(options: dict[str, Any]) -> str:
         "quiet": ("--quiet", None),
         "batch_files": ("--batch-files", "value"),
         "bufsize": ("--bufsize", "value"),
+        "chmod": ("--chmod", "value"),
+        "chown": ("--chown", "value"),
     }
     return _render_option_flags(options, flag_specs)
 

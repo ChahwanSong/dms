@@ -510,7 +510,15 @@ DATA_SYNC_OPTION_TYPES: dict[str, type | tuple[type, ...]] = {
     "open_noatime": bool,
     "bufsize": int,
     "quiet": bool,
+    "chmod": str,
+    "chown": str,
 }
+
+# --chmod token: optional D (directories) / F (files) prefix + 1-4 octal digits
+# (value <= 07777). A bare token (no prefix) sets both dirs and files.
+_SYNC_CHMOD_TOKEN_RE = re.compile(r"^[DF]?[0-7]{1,4}$")
+# --chown USER / GROUP component: POSIX name or numeric id.
+_SYNC_CHOWN_PART_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 DATA_RM_OPTION_TYPES: dict[str, type | tuple[type, ...]] = {
     "recursive": bool,
@@ -675,6 +683,67 @@ def _validate_data_sync_options(options: dict[str, Any]) -> None:
     _validate_typed_options(options, DATA_SYNC_OPTION_TYPES, "sync")
     _validate_positive_bounded_int(options, "batch_files", minimum=1, maximum=1_000_000)
     _validate_positive_bounded_int(options, "bufsize", minimum=4096, maximum=1024**3)
+    if "chmod" in options:
+        _validate_sync_chmod_spec(options["chmod"])
+    if "chown" in options:
+        _validate_sync_chown_spec(options["chown"])
+
+
+def _validate_sync_chmod_spec(spec: str) -> None:
+    """Mirror the mpifileutils dsync/nsync ``--chmod`` grammar.
+
+    Comma-separated octal tokens, each optionally prefixed ``D`` (directories)
+    or ``F`` (files); a bare token applies to both. At most one of each kind,
+    and a bare token cannot be combined with ``D``/``F`` tokens. The tool
+    applies these bits to the *destination*; ownership/permission semantics
+    still depend on the POSIX identity the job runs as (see install/4.dms-dm-api.md).
+    """
+    if not spec:
+        raise ValueError("sync option chmod must not be empty")
+    n_bare = n_dir = n_file = 0
+    for tok in spec.split(","):
+        if not _SYNC_CHMOD_TOKEN_RE.match(tok):
+            raise ValueError(
+                f"sync option chmod has invalid token '{tok}' "
+                "(expected [D|F]<1-4 octal digits>)"
+            )
+        if tok[0] == "D":
+            n_dir += 1
+        elif tok[0] == "F":
+            n_file += 1
+        else:
+            n_bare += 1
+    if n_bare > 1 or n_dir > 1 or n_file > 1 or (n_bare and (n_dir or n_file)):
+        raise ValueError(f"sync option chmod has conflicting/duplicate tokens: '{spec}'")
+
+
+def _validate_sync_chown_spec(spec: str) -> None:
+    """Mirror the mpifileutils dsync/nsync ``--chown`` grammar.
+
+    ``USER``, ``:GROUP``, or ``USER:GROUP`` (names or numeric ids). No
+    whitespace, at most one ``:``, and a trailing empty group (``USER:``) is
+    rejected. Names are resolved by the tool at run time; here we only enforce
+    structure. Setting an arbitrary owner needs privilege at run time, so a
+    non-privileged requester's ``--chown`` will fail mid-job (see docs).
+    """
+    if not spec or spec == ":":
+        raise ValueError("sync option chown must not be empty")
+    if any(ch.isspace() for ch in spec):
+        raise ValueError("sync option chown must not contain whitespace")
+    if spec.count(":") > 1:
+        raise ValueError("sync option chown must contain at most one ':'")
+    if ":" in spec:
+        user, group = spec.split(":", 1)
+        if not group:
+            raise ValueError(
+                "sync option chown has an empty group (use ':GROUP' or 'USER:GROUP')"
+            )
+        if user and not _SYNC_CHOWN_PART_RE.match(user):
+            raise ValueError(f"sync option chown has invalid user '{user}'")
+        if not _SYNC_CHOWN_PART_RE.match(group):
+            raise ValueError(f"sync option chown has invalid group '{group}'")
+    elif not _SYNC_CHOWN_PART_RE.match(spec):
+        raise ValueError(f"sync option chown has invalid user '{spec}'")
 
 
 def _validate_data_rm_options(options: dict[str, Any]) -> None:
