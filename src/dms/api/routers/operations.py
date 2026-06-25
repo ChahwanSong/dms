@@ -478,6 +478,19 @@ def operational_query_router() -> APIRouter:
             state=state,
         )
 
+    @router.get("/data-jobs/summary")
+    def data_job_summary(
+        request: Request,
+        storage_name: str | None = None,
+        operation: str | None = None,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.repository.data_job_summary(
+            storage_name=storage_name,
+            operation=operation,
+        )
+
     @router.get("/data-jobs/{job_id}")
     def data_job_status(
         job_id: str,

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
 
+from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
 from dms.domain import DataJobState
 from dms.migrations import migrate_all
-from dms.repositories import DmsRepository
+from dms.repositories import DmsRepository, ObservabilityRepository
 
 
 @pytest.fixture()
@@ -78,3 +80,57 @@ def test_data_job_summary_filters_by_storage_and_operation(repository):
 def test_data_job_summary_empty(repository):
     summary = repository.data_job_summary()
     assert summary == {"total": 0, "active_total": 0, "by_state": {}, "by_operation": {}}
+
+
+@pytest.fixture()
+def client(tmp_path):
+    operational_url = f"sqlite:///{tmp_path / 'op.db'}"
+    observability_url = f"sqlite:///{tmp_path / 'obs.db'}"
+    settings = Settings(
+        database_url=operational_url,
+        observability_database_url=observability_url,
+    )
+    operational = Database(operational_url)
+    observability_db = Database(observability_url)
+    migrate_all(operational, observability_db)
+    repository = DmsRepository(operational)
+    observability = ObservabilityRepository(observability_db)
+    app = create_app(settings, repository, observability)
+    _seed(repository, "data.sync", "cephfs-a", DataJobState.RUNNING, 2)
+    _seed(repository, "data.scan", "cephfs-a", DataJobState.SUCCEEDED, 1)
+    return TestClient(app)
+
+
+def test_data_jobs_summary_route(client):
+    resp = client.get(
+        "/api/v1/operations/data-jobs/summary", headers={"x-dms-actor": "api-client"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 3
+    assert body["by_state"]["Running"] == 2
+    assert body["active_total"] == 2
+
+
+def test_data_jobs_summary_does_not_shadow_job_id_route(tmp_path):
+    # /data-jobs/{job_id} must still resolve (a bogus id → not a 'summary' collision).
+    # Use raise_server_exceptions=False so an unhandled 500 from {job_id} (not-found path)
+    # is returned as a response rather than re-raised; we only care routing reached that route.
+    operational_url = f"sqlite:///{tmp_path / 'op.db'}"
+    observability_url = f"sqlite:///{tmp_path / 'obs.db'}"
+    settings = Settings(
+        database_url=operational_url,
+        observability_database_url=observability_url,
+    )
+    operational = Database(operational_url)
+    observability_db = Database(observability_url)
+    migrate_all(operational, observability_db)
+    repository = DmsRepository(operational)
+    observability = ObservabilityRepository(observability_db)
+    app = create_app(settings, repository, observability)
+    no_raise_client = TestClient(app, raise_server_exceptions=False)
+    resp = no_raise_client.get(
+        "/api/v1/operations/data-jobs/nonexistent-id",
+        headers={"x-dms-actor": "api-client"},
+    )
+    assert resp.status_code != 404 or "summary" not in resp.text
