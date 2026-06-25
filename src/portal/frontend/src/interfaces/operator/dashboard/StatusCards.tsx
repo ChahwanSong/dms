@@ -34,7 +34,7 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
           <li>활성 run <b>{ws?.runs.total_active ?? "—"}</b></li>
           <li>lease 임박 <b className="err-num">{ws?.runs.lease_expiring_soon ?? "—"}</b></li>
           <li>stale/recovery <b className="err-num">{ws?.runs.stale_or_recovery ?? "—"}</b></li>
-          <li>주의 필요 <b className="err-num">{ws?.requests.action_required ?? "—"}</b></li>
+          <li>조치 필요 <b className="err-num">{ws?.requests.action_required ?? "—"}</b></li>
         </ul>
       </Card>
       <Card title="노드">
