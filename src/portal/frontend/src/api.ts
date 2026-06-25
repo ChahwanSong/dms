@@ -212,6 +212,56 @@ export interface BatchCreateInput {
   jobs?: BackupJobInput[];
 }
 
+// --- dashboard ---------------------------------------------------------
+
+export interface Section<T> { data: T | null; error: string | null; }
+
+export interface DashboardSummary {
+  control_state: Section<{
+    maintenance_mode: boolean; drain_mode: boolean;
+    scheduling_blocked: boolean; reason: string; changed_at?: string;
+  }>;
+  work_summary: Section<{
+    plans: { total_active: number; by_status: Record<string, number> };
+    runs: {
+      total_active: number; by_state: Record<string, number>;
+      by_worker_id: Record<string, number>;
+      lease_expiring_soon: number; stale_or_recovery: number;
+    };
+    requests: { action_required: number };
+  }>;
+  data_jobs: Section<{
+    total: number; active_total: number;
+    by_state: Record<string, number>; by_operation: Record<string, number>;
+  }>;
+  nodes: Section<{
+    fresh: number; stale: number;
+    by_role: Record<string, { fresh: number; stale: number }>;
+  }>;
+}
+
+export interface AgentReport {
+  report_id: string; cluster_name: string; node_name: string;
+  worker_role: string; freshness_status: string; reported_at?: string;
+  capability_summary?: {
+    mounts?: string[]; tools?: string[]; csi_drivers?: string[];
+    credential_count?: number;
+  };
+}
+
+export interface RunRow {
+  run_id: string; worker_id?: string; worker_role?: string; state: string;
+  lease_seconds_remaining?: number; lease_expiring_soon?: boolean;
+  resource_key?: string;
+}
+
+export interface DashJob {
+  job_id: string; operation: string; storage_name: string; state: string;
+  selected_tool?: string | null; updated_at?: string;
+}
+
+export interface AttentionItem { issue_type: string; [k: string]: unknown; }
+
 const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 
@@ -288,5 +338,27 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}:cancel`,
         { method: "POST" },
       ),
+  },
+  dashboard: {
+    summary: () => request<DashboardSummary>("/api/operator/dashboard/summary"),
+    nodes: (freshness?: string) =>
+      request<AgentReport[]>(
+        `/api/operator/dashboard/nodes${freshness ? `?freshness=${encodeURIComponent(freshness)}` : ""}`,
+      ),
+    runs: () =>
+      request<{ active: Section<RunRow[]>; stale: Section<RunRow[]> }>(
+        "/api/operator/dashboard/runs",
+      ),
+    jobs: (opts?: { state?: string; operation?: string; storage_name?: string; limit?: number }) => {
+      const q = new URLSearchParams();
+      if (opts?.state) q.set("state", opts.state);
+      if (opts?.operation) q.set("operation", opts.operation);
+      if (opts?.storage_name) q.set("storage_name", opts.storage_name);
+      if (opts?.limit != null) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      return request<DashJob[]>(`/api/operator/dashboard/jobs${qs ? `?${qs}` : ""}`);
+    },
+    attention: () =>
+      request<AttentionItem[]>("/api/operator/dashboard/attention"),
   },
 };
