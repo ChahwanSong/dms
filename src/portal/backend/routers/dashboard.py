@@ -30,6 +30,31 @@ async def _section(coro) -> dict[str, Any]:
         return {"data": None, "error": str(exc.detail)}
 
 
+def _latest_per_node(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse agent reports to the most recent one per (cluster, node, role).
+
+    The DMS agent-reports endpoint returns recent reports including historical
+    ones, so a single node-role agent appears many times (older ones eventually
+    marked Stale). The dashboard shows CURRENT node health, so we keep only each
+    agent's latest report by reported_at — otherwise stale history inflates the
+    row count and the Fresh/Stale tallies.
+    """
+    latest: dict[tuple, dict[str, Any]] = {}
+    for r in reports or []:
+        key = (r.get("cluster_name"), r.get("node_name"), r.get("worker_role"))
+        cur = latest.get(key)
+        if cur is None or (r.get("reported_at") or "") > (cur.get("reported_at") or ""):
+            latest[key] = r
+    return sorted(
+        latest.values(),
+        key=lambda r: (
+            r.get("cluster_name") or "",
+            r.get("node_name") or "",
+            r.get("worker_role") or "",
+        ),
+    )
+
+
 def dashboard_router(settings: Settings) -> APIRouter:
     router = APIRouter(
         prefix="/api/operator/dashboard",
@@ -49,10 +74,10 @@ def dashboard_router(settings: Settings) -> APIRouter:
             _section(dms.get_data_job_summary(actor=actor)),
             _section(dms.list_agent_reports(actor=actor)),
         )
-        # node counts derived from agent reports (Fresh/Stale by role)
+        # node counts derived from each agent's LATEST report (Fresh/Stale by role)
         nodes = {"fresh": 0, "stale": 0, "by_role": {}}
         if reports["data"]:
-            for r in reports["data"]:
+            for r in _latest_per_node(reports["data"]):
                 fresh = r.get("freshness_status") == "Fresh"
                 nodes["fresh"] += 1 if fresh else 0
                 nodes["stale"] += 0 if fresh else 1
@@ -72,9 +97,14 @@ def dashboard_router(settings: Settings) -> APIRouter:
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> list[dict[str, Any]]:
-        return await dms.list_agent_reports(
-            actor=_actor(user, settings), freshness=freshness
-        )
+        # Fetch all reports, collapse to each agent's latest, then filter by the
+        # latest report's freshness — so the filter reflects current node state,
+        # not historical reports.
+        reports = await dms.list_agent_reports(actor=_actor(user, settings))
+        latest = _latest_per_node(reports)
+        if freshness:
+            latest = [r for r in latest if r.get("freshness_status") == freshness]
+        return latest
 
     @router.get("/runs")
     async def runs(
