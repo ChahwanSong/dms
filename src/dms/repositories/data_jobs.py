@@ -167,6 +167,46 @@ class DataJobsMixin:
             )
 
 
+    def data_job_summary(
+        self,
+        *,
+        storage_name: str | None = None,
+        operation: str | None = None,
+    ) -> dict[str, Any]:
+        filters: list[str] = []
+        params: list[Any] = []
+        if storage_name:
+            filters.append("storage_name = ?")
+            params.append(storage_name)
+        if operation:
+            filters.append("operation = ?")
+            params.append(operation)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        with self.database.connect() as connection:
+            state_rows = connection.execute(
+                f"SELECT state, COUNT(*) AS n FROM data_jobs {where} GROUP BY state",
+                tuple(params),
+            ).fetchall()
+            op_rows = connection.execute(
+                f"SELECT operation, COUNT(*) AS n FROM data_jobs {where} GROUP BY operation",
+                tuple(params),
+            ).fetchall()
+        by_state = {row_to_dict(r)["state"]: row_to_dict(r)["n"] for r in state_rows}
+        by_operation = {
+            row_to_dict(r)["operation"]: row_to_dict(r)["n"] for r in op_rows
+        }
+        active_total = sum(
+            n for state, n in by_state.items()
+            if state not in TERMINAL_DATA_JOB_STATES
+        )
+        return {
+            "total": sum(by_state.values()),
+            "active_total": active_total,
+            "by_state": by_state,
+            "by_operation": by_operation,
+        }
+
+
     def list_data_jobs(
         self,
         limit: int = 100,

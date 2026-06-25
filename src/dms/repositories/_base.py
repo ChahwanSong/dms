@@ -14,6 +14,7 @@ from ..domain import (
     LifecycleState,
     ResourceKind,
     StorageMappingInput,
+    TERMINAL_DATA_JOB_STATES,
     TERMINAL_LIFECYCLE_STATES,
     WorkerRole,
 )
@@ -44,16 +45,6 @@ def json_loads(value: str | None) -> Any:
         return None
     return json.loads(value)
 
-
-TERMINAL_DATA_JOB_STATES = {
-    DataJobState.AUTHORIZATION_FAILED.value,
-    DataJobState.PREFLIGHT_FAILED.value,
-    DataJobState.PREVIEW_EXPIRED.value,
-    DataJobState.SUCCEEDED.value,
-    DataJobState.FAILED.value,
-    DataJobState.CANCELLED.value,
-    DataJobState.TIMED_OUT.value,
-}
 
 DEFAULT_REQUEST_LIST_LIMIT = 1000
 

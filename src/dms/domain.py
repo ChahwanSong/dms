@@ -67,6 +67,19 @@ class DataJobState(StrEnum):
     TIMED_OUT = "TimedOut"
 
 
+TERMINAL_DATA_JOB_STATES: frozenset[DataJobState] = frozenset(
+    {
+        DataJobState.SUCCEEDED,
+        DataJobState.FAILED,
+        DataJobState.CANCELLED,
+        DataJobState.TIMED_OUT,
+        DataJobState.AUTHORIZATION_FAILED,
+        DataJobState.PREFLIGHT_FAILED,
+        DataJobState.PREVIEW_EXPIRED,
+    }
+)
+
+
 class WorkerRole(StrEnum):
     RM = "RM"
     DM = "DM"
