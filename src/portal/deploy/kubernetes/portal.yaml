@@ -49,7 +49,7 @@ spec:
     spec:
       containers:
         - name: portal
-          image: pkg-01:5000/dms-portal:v26
+          image: pkg-01:5000/dms-portal:v27
           imagePullPolicy: Always
           ports:
             - name: http
