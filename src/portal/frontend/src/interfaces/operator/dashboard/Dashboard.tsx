@@ -3,6 +3,7 @@ import { operatorApi, type DashboardSummary } from "../../../api";
 import { fmtTime } from "./helpers";
 import StatusCards from "./StatusCards";
 import NodesTable from "./NodesTable";
+import ControlHostsTable from "./ControlHostsTable";
 import RunsTable from "./RunsTable";
 import RequestsTable from "./RequestsTable";
 import AttentionPanel from "./AttentionPanel";
@@ -48,6 +49,7 @@ export default function Dashboard() {
       <StatusCards summary={summary} />
       <AttentionPanel />
       <NodesTable />
+      <ControlHostsTable />
       <RunsTable />
       <RequestsTable />
     </div>

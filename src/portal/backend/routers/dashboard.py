@@ -30,6 +30,41 @@ async def _section(coro) -> dict[str, Any]:
         return {"data": None, "error": str(exc.detail)}
 
 
+_FS_BACKENDS = {"cephfs", "gpfs", "wekafs"}
+
+
+def _control_hosts(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """CSI (non-fs) storage mappings + their ResourceQuota mutation transport.
+
+    fs mappings (cephfs/gpfs/wekafs) run node agents and belong in the worker-node
+    panel; CSI/free-form mappings are agentless and instead reach their cluster via
+    (ssh-)kubectl from a control host. Surface that host + reachability/can-i from
+    the sanity `mutation_observed` block (already returned by storage-mappings).
+    """
+    rows: list[dict[str, Any]] = []
+    for m in mappings or []:
+        bt = (m.get("backend_template") or {}).get("backend_type") or ""
+        if bt in _FS_BACKENDS:
+            continue
+        mo = (m.get("sanity_result") or {}).get("mutation_observed") or {}
+        rows.append(
+            {
+                "storage_name": m.get("storage_name"),
+                "cluster_name": m.get("cluster_name"),
+                "backend_type": bt,
+                "sanity_status": m.get("sanity_status"),
+                "mode": mo.get("mode"),
+                "control_host": mo.get("control_host"),
+                "reachable": mo.get("reachable"),
+                "can_mutate": mo.get("can_mutate"),
+                "permissions": mo.get("permissions") or {},
+                "detail": mo.get("detail"),
+            }
+        )
+    rows.sort(key=lambda r: (r.get("cluster_name") or "", r.get("storage_name") or ""))
+    return rows
+
+
 def _latest_per_node(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse agent reports to the most recent one per (cluster, node, role).
 
@@ -105,6 +140,14 @@ def dashboard_router(settings: Settings) -> APIRouter:
         if freshness:
             latest = [r for r in latest if r.get("freshness_status") == freshness]
         return latest
+
+    @router.get("/control-hosts")
+    async def control_hosts(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> list[dict[str, Any]]:
+        mappings = await dms.list_storage_mappings(actor=_actor(user, settings))
+        return _control_hosts(mappings)
 
     @router.get("/runs")
     async def runs(

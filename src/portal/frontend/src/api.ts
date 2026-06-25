@@ -262,6 +262,19 @@ export interface DashRequest {
 
 export interface AttentionItem { issue_type: string; [k: string]: unknown; }
 
+export interface ControlHost {
+  storage_name: string;
+  cluster_name: string | null;
+  backend_type: string;
+  sanity_status?: string;
+  mode?: string | null;
+  control_host?: string | null;
+  reachable?: boolean;
+  can_mutate?: boolean;
+  permissions?: { create?: boolean | null; patch?: boolean | null; delete?: boolean | null };
+  detail?: string | null;
+}
+
 const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 
@@ -360,5 +373,7 @@ export const operatorApi = {
     },
     attention: () =>
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
+    controlHosts: () =>
+      request<ControlHost[]>("/api/operator/dashboard/control-hosts"),
   },
 };
