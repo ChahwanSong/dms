@@ -1,0 +1,115 @@
+"""Operator dashboard API (role: operator).
+
+Read-only aggregation over DMS operations endpoints. The summary endpoint
+fans in several DMS calls in parallel and tolerates partial failure (a failed
+section is returned as null + error so one bad panel never breaks the page).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+from fastapi import APIRouter, Depends, Query
+
+from ..config import Settings
+from ..deps import get_dms_client
+from ..dms_client import DmsApiError, DmsClient
+from ..security import ROLE_OPERATOR, require_role
+
+
+def _actor(user: dict[str, Any], settings: Settings) -> str:
+    return str(user.get("username") or settings.dms_actor)
+
+
+async def _section(coro) -> dict[str, Any]:
+    """Wrap a DMS call so a failure becomes {data:null, error:...} not a 500."""
+    try:
+        return {"data": await coro, "error": None}
+    except DmsApiError as exc:
+        return {"data": None, "error": str(exc.detail)}
+
+
+def dashboard_router(settings: Settings) -> APIRouter:
+    router = APIRouter(
+        prefix="/api/operator/dashboard",
+        tags=["operator-dashboard"],
+        dependencies=[Depends(require_role(ROLE_OPERATOR))],
+    )
+
+    @router.get("/summary")
+    async def summary(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        actor = _actor(user, settings)
+        control, work, jobs, reports = await asyncio.gather(
+            _section(dms.get_control_state(actor=actor)),
+            _section(dms.get_work_summary(actor=actor)),
+            _section(dms.get_data_job_summary(actor=actor)),
+            _section(dms.list_agent_reports(actor=actor)),
+        )
+        # node counts derived from agent reports (Fresh/Stale by role)
+        nodes = {"fresh": 0, "stale": 0, "by_role": {}}
+        if reports["data"]:
+            for r in reports["data"]:
+                fresh = r.get("freshness_status") == "Fresh"
+                nodes["fresh"] += 1 if fresh else 0
+                nodes["stale"] += 0 if fresh else 1
+                role = r.get("worker_role") or "?"
+                slot = nodes["by_role"].setdefault(role, {"fresh": 0, "stale": 0})
+                slot["fresh" if fresh else "stale"] += 1
+        return {
+            "control_state": control,
+            "work_summary": work,
+            "data_jobs": jobs,
+            "nodes": {"data": nodes, "error": reports["error"]},
+        }
+
+    @router.get("/nodes")
+    async def nodes(
+        freshness: str | None = Query(default=None),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> list[dict[str, Any]]:
+        return await dms.list_agent_reports(
+            actor=_actor(user, settings), freshness=freshness
+        )
+
+    @router.get("/runs")
+    async def runs(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        actor = _actor(user, settings)
+        active, stale = await asyncio.gather(
+            _section(dms.list_active_runs(actor=actor)),
+            _section(dms.list_stale_runs(actor=actor)),
+        )
+        return {"active": active, "stale": stale}
+
+    @router.get("/jobs")
+    async def jobs(
+        state: str | None = Query(default=None),
+        operation: str | None = Query(default=None),
+        storage_name: str | None = Query(default=None),
+        limit: int = Query(default=100, le=1000),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> list[dict[str, Any]]:
+        return await dms.list_data_jobs(
+            actor=_actor(user, settings),
+            limit=limit,
+            state=state,
+            operation=operation,
+            storage_name=storage_name,
+        )
+
+    @router.get("/attention")
+    async def attention(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> list[dict[str, Any]]:
+        return await dms.list_action_required(actor=_actor(user, settings))
+
+    return router

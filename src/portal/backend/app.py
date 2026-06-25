@@ -22,6 +22,7 @@ from .dms_client import DmsClient
 from .orchestrator import BackupOrchestrator
 from .routers import operator_router, user_router
 from .routers.backup import backup_router
+from .routers.dashboard import dashboard_router
 
 
 def _static_dir() -> Path | None:
@@ -101,6 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(user_router())
     app.include_router(operator_router())
     app.include_router(backup_router(settings))
+    app.include_router(dashboard_router(settings))
 
     # Mount the SPA last so the API routes above take precedence. html=True
     # serves index.html for "/" and 404s fall through to it for client routing.

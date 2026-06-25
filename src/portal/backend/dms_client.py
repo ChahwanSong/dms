@@ -24,6 +24,7 @@ import httpx
 from .config import Settings
 
 _OPS = "/api/v1/operations/storage-mappings"
+_OPS_BASE = "/api/v1/operations"
 _RM = "/api/v1/resource-management/storage-mappings"
 _DM = "/api/v1/data-management"
 _DATA_JOBS = "/api/v1/operations/data-jobs"
@@ -159,12 +160,65 @@ class DmsClient:
         )
 
     async def list_data_jobs(
-        self, *, actor: str, limit: int = 500
+        self,
+        *,
+        actor: str,
+        limit: int = 500,
+        state: str | None = None,
+        operation: str | None = None,
+        storage_name: str | None = None,
     ) -> list[dict[str, Any]]:
         # Newest-first; used to resolve a freshly-submitted request_id -> job_id
         # (DMS ignores a request_id query filter, so we match client-side).
+        params: dict[str, Any] = {"limit": limit}
+        if state:
+            params["state"] = state
+        if operation:
+            params["operation"] = operation
+        if storage_name:
+            params["storage_name"] = storage_name
         return await self._request(
-            "GET", _DATA_JOBS, actor=actor, params={"limit": limit}
+            "GET", _DATA_JOBS, actor=actor, params=params
+        )
+
+    async def get_control_state(self, *, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "GET", f"{_OPS_BASE}/control-state", actor=actor
+        )
+
+    async def get_work_summary(self, *, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "GET", f"{_OPS_BASE}/work-summary", actor=actor
+        )
+
+    async def list_agent_reports(
+        self, *, actor: str, freshness: str | None = None
+    ) -> list[dict[str, Any]]:
+        params = {"freshness": freshness} if freshness else None
+        return await self._request(
+            "GET", f"{_OPS_BASE}/agent-reports", actor=actor, params=params
+        )
+
+    async def get_data_job_summary(self, *, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "GET", f"{_OPS_BASE}/data-jobs/summary", actor=actor
+        )
+
+    async def list_active_runs(
+        self, *, actor: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET", f"{_OPS_BASE}/runs/active", actor=actor, params={"limit": limit}
+        )
+
+    async def list_stale_runs(self, *, actor: str) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET", f"{_OPS_BASE}/runs/stale", actor=actor
+        )
+
+    async def list_action_required(self, *, actor: str) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET", f"{_OPS_BASE}/action-required", actor=actor
         )
 
 
