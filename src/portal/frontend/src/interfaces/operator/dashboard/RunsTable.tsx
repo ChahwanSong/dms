@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { operatorApi, type RunRow } from "../../../api";
 import { stateCls, RUN_STATE } from "./helpers";
+import Section from "./Section";
 
 export default function RunsTable() {
   const [active, setActive] = useState<RunRow[]>([]);
@@ -12,9 +13,11 @@ export default function RunsTable() {
     }).catch(() => { setActive([]); setStale([]); });
   }, []);
   const rows = [...stale, ...active];
+  const badge = stale.length > 0
+    ? <span className="err-num">(stale {stale.length})</span>
+    : <span className="muted small">({rows.length})</span>;
   return (
-    <div className="dash-section">
-      <h3>스케줄러 활동 {stale.length > 0 && <span className="err-num">(stale {stale.length})</span>}</h3>
+    <Section title="스케줄러 활동" badge={badge}>
       <table className="grid"><thead><tr>
         <th>run</th><th>worker</th><th>역할</th><th>상태</th><th>lease 남음</th><th>리소스</th>
       </tr></thead><tbody>
@@ -30,6 +33,6 @@ export default function RunsTable() {
             </tr>
           ))}
       </tbody></table>
-    </div>
+    </Section>
   );
 }

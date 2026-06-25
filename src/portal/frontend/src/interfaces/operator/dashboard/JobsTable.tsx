@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { operatorApi, type DashJob } from "../../../api";
 import { stateCls, JOB_STATE, fmtAgo } from "./helpers";
+import Section from "./Section";
 
 const STATES = ["", "Running", "Pending", "ConfirmPending", "Succeeded", "Failed"];
 const OPS = ["", "data.sync", "data.scan", "data.rm"];
@@ -14,16 +15,14 @@ export default function JobsTable() {
       .then(setRows).catch(() => setRows([]));
   }, [state, op]);
   return (
-    <div className="dash-section">
-      <div className="inv-head"><h3>데이터 잡</h3>
-        <div className="inv-actions">
-          <select value={state} onChange={(e) => setState(e.target.value)}>
-            {STATES.map((s) => <option key={s} value={s}>{s || "모든 상태"}</option>)}
-          </select>
-          <select value={op} onChange={(e) => setOp(e.target.value)}>
-            {OPS.map((o) => <option key={o} value={o}>{o || "모든 op"}</option>)}
-          </select>
-        </div>
+    <Section title="데이터 잡" badge={<span className="muted small">({rows.length})</span>}>
+      <div className="inv-actions dash-filters">
+        <select value={state} onChange={(e) => setState(e.target.value)}>
+          {STATES.map((s) => <option key={s} value={s}>{s || "모든 상태"}</option>)}
+        </select>
+        <select value={op} onChange={(e) => setOp(e.target.value)}>
+          {OPS.map((o) => <option key={o} value={o}>{o || "모든 op"}</option>)}
+        </select>
       </div>
       <table className="grid"><thead><tr>
         <th>job</th><th>op</th><th>storage</th><th>상태</th><th>tool</th><th>갱신</th>
@@ -40,6 +39,6 @@ export default function JobsTable() {
             </tr>
           ))}
       </tbody></table>
-    </div>
+    </Section>
   );
 }

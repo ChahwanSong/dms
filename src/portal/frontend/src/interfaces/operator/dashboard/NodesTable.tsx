@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { operatorApi, type AgentReport } from "../../../api";
 import { fmtAgo, summarize } from "./helpers";
+import Section from "./Section";
 
 export default function NodesTable() {
   const [rows, setRows] = useState<AgentReport[]>([]);
@@ -9,8 +10,8 @@ export default function NodesTable() {
     operatorApi.dashboard.nodes(fresh || undefined).then(setRows).catch(() => setRows([]));
   }, [fresh]);
   return (
-    <div className="dash-section">
-      <div className="inv-head"><h3>워커 노드</h3>
+    <Section title="워커 노드" badge={<span className="muted small">({rows.length})</span>}>
+      <div className="inv-actions dash-filters">
         <select value={fresh} onChange={(e) => setFresh(e.target.value)}>
           <option value="">전체</option><option value="Fresh">Fresh</option><option value="Stale">Stale</option>
         </select>
@@ -31,6 +32,6 @@ export default function NodesTable() {
             </tr>
           ))}
       </tbody></table>
-    </div>
+    </Section>
   );
 }
