@@ -138,6 +138,83 @@ def config_from_env(environ: dict[str, str] | None = None) -> AgentDaemonConfig:
     )
 
 
+def probe_os_metrics(
+    proc_path: str = "/proc", host_root: str | None = None
+) -> dict[str, Any]:
+    """Host OS metrics from the agent's own procfs.
+
+    cpu/memory/loadavg in procfs are node-wide (not namespaced), so the agent
+    container's own /proc reflects the host node — no host mount needed for those.
+    Disk usage needs statvfs on a real fs path, so it only runs when a host-root
+    mount is provided (DMS_AGENT_HOST_ROOT). Every metric is independently
+    fail-soft: a probe failure omits that metric and never breaks the report.
+    """
+    metrics: dict[str, Any] = {}
+    # load average
+    try:
+        a, b, c = open(f"{proc_path}/loadavg").read().split()[:3]
+        metrics["load"] = {"load1": float(a), "load5": float(b), "load15": float(c)}
+    except Exception:  # noqa: BLE001 - fail-soft
+        pass
+    # memory (kB)
+    try:
+        info: dict[str, int] = {}
+        with open(f"{proc_path}/meminfo") as fh:
+            for line in fh:
+                key, _, rest = line.partition(":")
+                if rest.strip():
+                    info[key.strip()] = int(rest.split()[0])
+        total = info.get("MemTotal", 0)
+        avail = info.get("MemAvailable", info.get("MemFree", 0))
+        metrics["memory"] = {
+            "total_kb": total,
+            "available_kb": avail,
+            "used_pct": round((total - avail) / total * 100, 1) if total else None,
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    # cpu % over two /proc/stat samples
+    try:
+
+        def _cpu_sample() -> tuple[int, int] | None:
+            with open(f"{proc_path}/stat") as fh:
+                for line in fh:
+                    if line.startswith("cpu "):
+                        vals = [int(x) for x in line.split()[1:]]
+                        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+                        return sum(vals), idle
+            return None
+
+        first = _cpu_sample()
+        time.sleep(0.4)
+        second = _cpu_sample()
+        if first and second and second[0] != first[0]:
+            busy = 1 - (second[1] - first[1]) / (second[0] - first[0])
+            metrics["cpu"] = {
+                "percent": round(max(0.0, busy) * 100, 1),
+                "cores": os.cpu_count(),
+            }
+    except Exception:  # noqa: BLE001
+        pass
+    # disk (OS root) — only with a host-root mount; fail-soft otherwise
+    root = host_root or os.environ.get("DMS_AGENT_HOST_ROOT")
+    if root:
+        try:
+            st = os.statvfs(root)
+            total_b = st.f_frsize * st.f_blocks
+            free_b = st.f_frsize * st.f_bavail
+            metrics["disk"] = {
+                "path": "/",
+                "total_gb": round(total_b / 1e9, 1),
+                "used_pct": round((total_b - free_b) / total_b * 100, 1)
+                if total_b
+                else None,
+            }
+        except Exception:  # noqa: BLE001
+            pass
+    return metrics
+
+
 def build_agent_report(
     config: AgentDaemonConfig,
     *,
@@ -169,6 +246,7 @@ def build_agent_report(
         checked_at=checked_at,
     )
     identities = probe_identities(config.identity_users)
+    os_metrics = probe_os_metrics()
     identity_evidence: dict[str, Any] = {
         "source": "agent-prober",
         "checked_at": checked_at,
@@ -181,7 +259,7 @@ def build_agent_report(
     if identities:
         identity_evidence["users"] = identities
     return {
-        "schema_version": "phase8.v1",
+        "schema_version": "phase9.v1",
         "reported_at": checked_at,
         "cluster_name": config.cluster_name,
         "node_name": config.node_name,
@@ -193,6 +271,7 @@ def build_agent_report(
         "credentials": credentials,
         "networks": networks,
         "identity_evidence": identity_evidence,
+        "os_metrics": os_metrics,
     }
 
 

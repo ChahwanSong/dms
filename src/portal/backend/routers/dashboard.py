@@ -137,6 +137,21 @@ def dashboard_router(settings: Settings) -> APIRouter:
         # not historical reports.
         reports = await dms.list_agent_reports(actor=_actor(user, settings))
         latest = _latest_per_node(reports)
+        # os_metrics (cpu/mem/load/disk) is host-level — lift it from the agent's
+        # full report and SHARE it across a node's role-rows, so a node shows
+        # metrics even if only one of its agents (RM/DM) reports them.
+        for r in latest:
+            r["os_metrics"] = (r.get("report") or {}).get("os_metrics") or {}
+        by_node: dict[tuple, dict[str, Any]] = {
+            (r.get("cluster_name"), r.get("node_name")): r["os_metrics"]
+            for r in latest
+            if r["os_metrics"]
+        }
+        for r in latest:
+            if not r["os_metrics"]:
+                r["os_metrics"] = by_node.get(
+                    (r.get("cluster_name"), r.get("node_name")), {}
+                )
         if freshness:
             latest = [r for r in latest if r.get("freshness_status") == freshness]
         return latest

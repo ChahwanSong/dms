@@ -288,6 +288,7 @@ class AgentReport(BaseModel):
     credentials: list[Any] = Field(default_factory=list)
     networks: list[dict[str, Any]] = Field(default_factory=list)
     identity_evidence: dict[str, Any] = Field(default_factory=dict)
+    os_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class DmIdentityDenylistBody(BaseModel):

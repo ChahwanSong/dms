@@ -247,6 +247,12 @@ export interface AgentReport {
     mounts?: string[]; tools?: string[]; csi_drivers?: string[];
     credential_count?: number;
   };
+  os_metrics?: {
+    cpu?: { percent?: number; cores?: number };
+    memory?: { total_kb?: number; available_kb?: number; used_pct?: number | null };
+    load?: { load1?: number; load5?: number; load15?: number };
+    disk?: { path?: string; total_gb?: number; used_pct?: number | null };
+  };
 }
 
 export interface RunRow {

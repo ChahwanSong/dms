@@ -70,7 +70,8 @@ def test_agent_probe_builds_phase8_report_from_real_observations(tmp_path):
         now=datetime(2026, 5, 29, 0, 0, tzinfo=UTC),
     )
 
-    assert report["schema_version"] == "phase8.v1"
+    assert report["schema_version"] == "phase9.v1"
+    assert "os_metrics" in report  # cpu/mem/load from the agent's own procfs
     assert report["node_uid"] == "uid-c1-worker"
     assert report["worker_role"] == "RM"
     assert report["mounts"][0]["status"] == "Ready"
