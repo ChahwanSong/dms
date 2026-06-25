@@ -193,6 +193,13 @@ def dashboard_router(settings: Settings) -> APIRouter:
             storage_name=storage_name,
         )
 
+    @router.get("/volcano")
+    async def volcano(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        return await dms.get_volcano_status(actor=_actor(user, settings))
+
     @router.get("/attention")
     async def attention(
         dms: DmsClient = Depends(get_dms_client),

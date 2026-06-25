@@ -967,6 +967,7 @@ textarea.json {
 .dash-kv b { font-variant-numeric: tabular-nums; }
 @media (max-width: 720px) { .dash-cards { grid-template-columns: 1fr 1fr; } }
 .dash-section { margin-top: 1.25rem; }
+.dash-sub { margin: 1rem 0 0.4rem; font-size: 0.85rem; color: #9aa4b2; font-weight: 600; }
 .dash-section-head { display: flex; align-items: center; gap: 0.5rem; width: 100%; padding: 0.35rem 0; background: none; border: none; border-bottom: 1px solid var(--border, #2a2f3a); cursor: pointer; color: inherit; text-align: left; }
 .dash-section-head:hover { color: #cdd5e0; }
 .dash-section-head h3 { margin: 0; font-size: 1rem; }

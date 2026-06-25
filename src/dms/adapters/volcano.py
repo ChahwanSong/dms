@@ -158,6 +158,14 @@ class StubVolcanoAdapter:
             message="volcano job termination stub completed",
         )
 
+    def volcano_status(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "queues": [],
+            "jobs": [],
+            "scheduler": [],
+            "errors": {"queues": None, "jobs": None, "scheduler": None},
+        }
+
 
 
 @dataclass
@@ -649,6 +657,90 @@ class KubernetesVolcanoAdapter:
             observed_state={"job_ref": job_ref, "phase": "Cancelled"},
             message="data management job terminated",
         )
+
+    def _kubectl_get_items(self, args: list[str], timeout: float = 10.0) -> list[dict]:
+        result = subprocess.run(
+            ["kubectl", *args, "-o", "json"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip()[:300])
+        return json.loads(result.stdout).get("items", [])
+
+    def volcano_status(
+        self,
+        *,
+        job_namespace: str = "dms",
+        scheduler_namespace: str = "volcano-system",
+    ) -> dict[str, Any]:
+        errors: dict[str, str | None] = {"queues": None, "jobs": None, "scheduler": None}
+
+        # Queues (cluster-scoped)
+        queues: list[dict[str, Any]] = []
+        try:
+            items = self._kubectl_get_items(["get", "queues.scheduling.volcano.sh"])
+            for it in items:
+                meta = it.get("metadata") or {}
+                st = it.get("status") or {}
+                queues.append({
+                    "name": meta.get("name"),
+                    "state": st.get("state"),
+                    "running": st.get("running") or 0,
+                    "pending": st.get("pending") or 0,
+                    "inqueue": st.get("inqueue") or 0,
+                })
+        except Exception as exc:
+            errors["queues"] = str(exc)
+
+        # Jobs (vcjob, namespaced)
+        jobs: list[dict[str, Any]] = []
+        try:
+            items = self._kubectl_get_items(["get", "vcjob", "-n", job_namespace])
+            for it in items:
+                meta = it.get("metadata") or {}
+                spec = it.get("spec") or {}
+                st = it.get("status") or {}
+                state = st.get("state") or {}
+                jobs.append({
+                    "name": meta.get("name"),
+                    "namespace": meta.get("namespace"),
+                    "queue": spec.get("queue"),
+                    "phase": state.get("phase"),
+                    "running": st.get("running") or 0,
+                    "pending": st.get("pending") or 0,
+                    "succeeded": st.get("succeeded") or 0,
+                    "failed": st.get("failed") or 0,
+                    "min_available": spec.get("minAvailable"),
+                })
+        except Exception as exc:
+            errors["jobs"] = str(exc)
+
+        # Scheduler pods
+        scheduler: list[dict[str, Any]] = []
+        try:
+            items = self._kubectl_get_items(["get", "pods", "-n", scheduler_namespace])
+            for it in items:
+                meta = it.get("metadata") or {}
+                st = it.get("status") or {}
+                container_statuses = st.get("containerStatuses") or []
+                ready = (
+                    all(cs.get("ready") for cs in container_statuses)
+                    if container_statuses
+                    else None
+                )
+                restarts = sum(cs.get("restartCount") or 0 for cs in container_statuses)
+                scheduler.append({
+                    "name": meta.get("name"),
+                    "phase": st.get("phase"),
+                    "ready": ready,
+                    "restarts": restarts,
+                })
+        except Exception as exc:
+            errors["scheduler"] = str(exc)
+
+        return {"queues": queues, "jobs": jobs, "scheduler": scheduler, "errors": errors}
 
     def _wait_for_terminal(
         self, job_ref: str, *, timeout_seconds: int | None = None

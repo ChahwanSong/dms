@@ -509,4 +509,12 @@ def operational_query_router() -> APIRouter:
         authenticated_actor(request, services)
         return services.query.diagnostic_correlation(correlation_id)
 
+    @router.get("/volcano")
+    def volcano_status(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        return services.volcano_adapter.volcano_status()
+
     return router

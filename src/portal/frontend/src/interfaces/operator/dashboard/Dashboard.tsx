@@ -5,6 +5,7 @@ import StatusCards from "./StatusCards";
 import NodesTable from "./NodesTable";
 import ControlHostsTable from "./ControlHostsTable";
 import RunsTable from "./RunsTable";
+import VolcanoPanel from "./VolcanoPanel";
 import RequestsTable from "./RequestsTable";
 import AttentionPanel from "./AttentionPanel";
 
@@ -51,6 +52,7 @@ export default function Dashboard() {
       <NodesTable />
       <ControlHostsTable />
       <RunsTable />
+      <VolcanoPanel />
       <RequestsTable />
     </div>
   );

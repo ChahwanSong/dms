@@ -221,6 +221,9 @@ class DmsClient:
             "GET", f"{_OPS_BASE}/action-required", actor=actor
         )
 
+    async def get_volcano_status(self, *, actor: str) -> dict[str, Any]:
+        return await self._request("GET", f"{_OPS_BASE}/volcano", actor=actor)
+
 
 def _seg(value: str) -> str:
     # Path segment; keep ':' (DMS action routes use it) but escape slashes etc.

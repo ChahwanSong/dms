@@ -268,6 +268,16 @@ export interface DashRequest {
 
 export interface AttentionItem { issue_type: string; [k: string]: unknown; }
 
+export interface VolcanoStatus {
+  queues: { name: string; state?: string; running?: number; pending?: number; inqueue?: number }[];
+  jobs: {
+    name: string; namespace?: string; queue?: string; phase?: string;
+    running?: number; pending?: number; succeeded?: number; failed?: number; min_available?: number;
+  }[];
+  scheduler: { name: string; phase?: string; ready?: boolean | null; restarts?: number }[];
+  errors: { queues?: string | null; jobs?: string | null; scheduler?: string | null };
+}
+
 export interface ControlHost {
   storage_name: string;
   cluster_name: string | null;
@@ -381,5 +391,7 @@ export const operatorApi = {
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
     controlHosts: () =>
       request<ControlHost[]>("/api/operator/dashboard/control-hosts"),
+    volcano: () =>
+      request<VolcanoStatus>("/api/operator/dashboard/volcano"),
   },
 };
