@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { operatorApi, type DashboardSummary } from "../../../api";
 import { fmtTime } from "./helpers";
 import StatusCards from "./StatusCards";
+import NodesTable from "./NodesTable";
+import RunsTable from "./RunsTable";
+import JobsTable from "./JobsTable";
+import AttentionPanel from "./AttentionPanel";
 
 const POLL_MS = 7000;
 
@@ -10,8 +14,6 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [auto, setAuto] = useState(true);
   const [updatedAt, setUpdatedAt] = useState<string>("");
-  const tick = useRef(0);
-
   const reload = useCallback(async () => {
     try {
       const s = await operatorApi.dashboard.summary();
@@ -28,7 +30,7 @@ export default function Dashboard() {
     if (!auto) return;
     const id = setInterval(reload, POLL_MS);
     return () => clearInterval(id);
-  }, [auto, reload, tick.current]);
+  }, [auto, reload]);
 
   return (
     <div className="inventory">
@@ -44,7 +46,10 @@ export default function Dashboard() {
       </div>
       {error && <div className="banner err">{error}</div>}
       <StatusCards summary={summary} />
-      {/* Task 6: NodesTable / RunsTable / JobsTable / AttentionPanel */}
+      <AttentionPanel />
+      <NodesTable />
+      <RunsTable />
+      <JobsTable />
     </div>
   );
 }

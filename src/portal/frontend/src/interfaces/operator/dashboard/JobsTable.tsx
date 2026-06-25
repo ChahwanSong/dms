@@ -1,0 +1,45 @@
+import { useEffect, useState } from "react";
+import { operatorApi, type DashJob } from "../../../api";
+import { stateCls, JOB_STATE, fmtAgo } from "./helpers";
+
+const STATES = ["", "Running", "Pending", "ConfirmPending", "Succeeded", "Failed"];
+const OPS = ["", "data.sync", "data.scan", "data.rm"];
+
+export default function JobsTable() {
+  const [rows, setRows] = useState<DashJob[]>([]);
+  const [state, setState] = useState("");
+  const [op, setOp] = useState("");
+  useEffect(() => {
+    operatorApi.dashboard.jobs({ state: state || undefined, operation: op || undefined, limit: 100 })
+      .then(setRows).catch(() => setRows([]));
+  }, [state, op]);
+  return (
+    <div className="dash-section">
+      <div className="inv-head"><h3>데이터 잡</h3>
+        <div className="inv-actions">
+          <select value={state} onChange={(e) => setState(e.target.value)}>
+            {STATES.map((s) => <option key={s} value={s}>{s || "모든 상태"}</option>)}
+          </select>
+          <select value={op} onChange={(e) => setOp(e.target.value)}>
+            {OPS.map((o) => <option key={o} value={o}>{o || "모든 op"}</option>)}
+          </select>
+        </div>
+      </div>
+      <table className="grid"><thead><tr>
+        <th>job</th><th>op</th><th>storage</th><th>상태</th><th>tool</th><th>갱신</th>
+      </tr></thead><tbody>
+        {rows.length === 0 ? <tr><td colSpan={6} className="muted">없음</td></tr> :
+          rows.map((j) => (
+            <tr key={j.job_id}>
+              <td data-label="job" className="mono small">{j.job_id.slice(0, 12)}…</td>
+              <td data-label="op">{j.operation}</td>
+              <td data-label="storage" className="small">{j.storage_name}</td>
+              <td data-label="상태"><span className={`san ${stateCls(JOB_STATE, j.state)}`}>{j.state}</span></td>
+              <td data-label="tool" className="small">{j.selected_tool || "—"}</td>
+              <td data-label="갱신" className="muted small">{fmtAgo(j.updated_at)}</td>
+            </tr>
+          ))}
+      </tbody></table>
+    </div>
+  );
+}
