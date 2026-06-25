@@ -162,12 +162,27 @@ Kubernetes 접근:
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `DMS_KUBERNETES_INVENTORY_MODE` | `ssh-kubectl` | 읽기 전용 inventory 모드. `kubectl`, `ssh-kubectl`, `python-client` 중 하나. |
-| `DMS_KUBERNETES_MUTATION_MODE` | `ssh-kubectl` | Namespace/ResourceQuota mutation mode. `kubectl` 또는 `ssh-kubectl`. |
+| `DMS_KUBERNETES_INVENTORY_MODE` | `kubectl` | 읽기 전용 inventory 모드. `kubectl`, `ssh-kubectl`, `python-client` 중 하나(전역 기본 `kubectl`; `DMS_CLUSTER_CONTROL_HOSTS_JSON`에 등록된 클러스터는 이 모드와 무관하게 ssh-kubectl로 읽음 — per-cluster transport). API 등록 sanity와 sanity-reconciler가 **공통으로** 이 모드로 클러스터(`DMS_CLUSTER_KUBECONFIGS_JSON`/`DMS_CLUSTER_CONTROL_HOSTS_JSON`에 등록된)를 읽어 agent 없는 managed 클러스터의 k8s/CSI mapping을 검증한다. 클러스터별로 격리되어 한 클러스터 읽기 실패가 전체 inventory를 무력화하지 않는다. |
+| `DMS_KUBERNETES_MUTATION_MODE` | `kubectl` | Namespace/ResourceQuota mutation mode (전역 기본값). `kubectl`(로컬 kubectl — in-cluster/kubeconfig로 직접 도달) 또는 `ssh-kubectl`. **storage mapping의 `backend_template.mutation_mode`로 클러스터별 override 가능**(아래 노트). |
 | `DMS_CLUSTER_KUBECONFIGS_JSON` | 설정 안 됨 | DMS cluster name에서 kubeconfig path로 가는 JSON object. Current context를 쓰지 않는 `kubectl` mode에서는 필요하다. |
-| `DMS_CLUSTER_CONTROL_HOSTS_JSON` | 설정 안 됨 | DMS cluster name에서 SSH host로 가는 JSON object. `ssh-kubectl` mode에서는 필요하다. |
+| `DMS_CLUSTER_CONTROL_HOSTS_JSON` | 설정 안 됨 | DMS cluster name에서 SSH host로 가는 JSON object. `ssh-kubectl` mode의 전역 기본값. mapping의 `backend_template.control_host`가 있으면 그게 우선. **mapping에 `control_host`만 있고 `mutation_mode`가 없으면 등록 시 422 거부** — 전역 기본이 `kubectl`이라 control_host가 무시되므로 `mutation_mode:"ssh-kubectl"`을 명시해야 한다. |
 | `DMS_KUBERNETES_INVENTORY_TIMEOUT_SECONDS` | `10` | Inventory read timeout. |
 | `DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS` | `30` | ResourceQuota mutation timeout. |
+
+> **클러스터별 mutation 경로 (per-mapping override).** `DMS_KUBERNETES_MUTATION_MODE`는 전역 기본값이고,
+> storage mapping의 `backend_template`에 `mutation_mode`(`kubectl`|`ssh-kubectl`)와 `control_host`를 넣으면
+> **그 클러스터의 ResourceQuota mutation만** 해당 방식으로 라우팅된다(없으면 전역값으로 fallback). 예: 전역은
+> `kubectl`(직접 도달 가능한 클러스터들)로 두고, 직접 도달 불가한 managed 클러스터 매핑만 `mutation_mode:"ssh-kubectl"`
+> + `control_host:"<bastion>"`으로 지정 → DMS는 그 클러스터에 한해 `ssh <bastion> kubectl ...`로 적용한다. 한 클러스터에
+> 매핑이 여러 개면 **`storage_name` 사전순 첫 매핑**의 `mutation_mode`/`control_host`가 결정한다(결정적).
+> `control_host`만 주면 전역 mode는 유지하고 control host만 override한다. AUDIT/EXPIRATION-SWEEP는 멀티클러스터라 타깃별로
+> 각 클러스터 전송경로를 적용한다. **이 동일한 per-mapping mode/control_host는 CSI mapping sanity 검증에도
+> 그대로 쓰여서**, sanity가 그 경로로 `kubectl auth can-i ... resourcequota`를 실행한다(아래 "Storage Mapping 규칙" 참고).
+>
+> **보안 경계.** `control_host`는 bare hostname/IPv4만 허용(검증 `422`)되고, 실제 도달은 rm-worker의 SSH 신뢰로 제한된다
+> — `ssh-kubectl`은 `StrictHostKeyChecking=yes` + `dms-ssh-client` Secret의 `known_hosts`에 등록된 호스트로만 접속되고
+> 그 호스트 `root`에 rm-worker 공개키가 있어야 한다. 즉 storage mapping 등록 권한만으로 임의 호스트로 mutation을 보낼 수
+> 없다(known_hosts/authorized_keys는 별도 cluster-admin 작업). 자세한 등록은 `3.dms-rm-api-k8s.md` §2.2.
 
 Filesystem backend 실행:
 
@@ -239,6 +254,40 @@ Kubernetes namespace quota는 모든 CSI StorageClass backend에서 공통 live
 filesystem quota command/API는 이 경로에서 실행되지 않는다. Filesystem adapter가
 없는 backend라도 `csi_driver`, `storage_class_name`, sanity/readiness가 맞으면
 Kubernetes quota mapping으로는 사용할 수 있다.
+
+CSI/k8s mapping의 sanity 검증 축(2026-06 이후):
+
+- `backend_template.backend_type`이 filesystem backend(`cephfs`/`wekafs`/`gpfs`)가
+  **아닌** mapping(예: `ceph-csi`, `longhorn`, 기타 CSI provisioner)은 **CSI/k8s
+  mapping**으로 분류된다. 이런 mapping은 DMS node agent를 두지 않는 managed
+  cluster일 수 있으므로, RM/DM agent evidence 대신 **ResourceQuota mutation
+  transport**를 검증한다. 즉 RM agent가 없어도 `missing_rm_readiness`/
+  `missing_dm_readiness`로 Degraded되지 않고, agent report 부재만으로 Failed/
+  Unknown이 되지도 않는다.
+- Mutation transport 검증은 sanity-reconciler(및 API 등록 sanity)가 그 mapping에
+  대해 RM worker가 실제로 쓰게 될 경로 — `DMS_KUBERNETES_MUTATION_MODE`(또는
+  per-mapping `backend_template.mutation_mode`)와 `control_host` — 로
+  `kubectl auth can-i <verb> resourcequota -A`를 `create`/`patch`/`delete` 세
+  verb에 대해 실행해서 판정한다(전송 경로 도달성 + RBAC 권한을 한 번에 확인).
+- 판정 규약: `can-i` returncode `0` = 권한 있음, `1` = **도달은 했으나 권한 없음**,
+  그 외 returncode나 전송 오류(SSH 실패 등) = **도달 실패**. 결과는 sanity 결과의
+  `readiness.kubernetes_mutation`(`Ready`/`Failed`/`Unknown`)과
+  `mutation_observed`(`mode`/`control_host`/`reachable`/`permissions{create,patch,
+  delete}`/`can_mutate`/`detail`)로 노출된다.
+  - 도달 실패 → error `mutation_transport_unreachable` + `kubernetes_mutation=Failed`
+    → sanity `Failed`.
+  - 도달했으나 세 verb 중 하나라도 권한 없음 → error `mutation_no_permission`
+    (`kubectl auth can-i = no`) + `Failed` → sanity `Failed`.
+  - 세 verb 모두 허용 → check `kubernetes_mutation_transport` Passed +
+    `kubernetes_mutation=Ready`.
+  - mutation 어댑터가 wiring되지 않은 환경(클러스터 미등록 등)에서는
+    `kubernetes_mutation=Unknown`으로 두고 CSI sanity는 error/warning이 없으면
+    `Ready`로 유지한다(agent freshness gate를 적용하지 않음).
+- 그 결과 mutation 경로(SSH host/known_hosts, RBAC `create/patch/delete
+  resourcequota`)가 깨진 CSI mapping은 sanity가 `Failed`가 되고, planner의
+  `_reject_unsafe_storage_mapping` guard가 해당 cluster의 namespace quota request를
+  자동으로 차단한다. mutation 경로를 사전 검증하려면 `3.dms-rm-api-k8s.md`의
+  `kubectl auth can-i create resourcequota` 점검 절차를 참고한다.
 
 `expiry_at`이 아니라 `expires_at`을 사용한다. `expiry_at`과 `clear_expires_at`은 지원하지 않는 field다.
 

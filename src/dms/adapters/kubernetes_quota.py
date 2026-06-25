@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 import shlex
@@ -16,6 +16,7 @@ from ._util import (  # noqa: F401
     _first_present,
     _json_stdout,
     _kubectl_not_found,
+    _kubectl_transport_error,
     _positive_int,
     _shell_quote,
 )
@@ -32,6 +33,42 @@ class StubKubernetesNamespaceQuotaAdapter:
     resource_quota_lists: dict[tuple[str, str], list[dict[str, Any]]] = field(
         default_factory=dict
     )
+    # Mutation-transport probe knobs (sanity service consumes check_mutation_transport).
+    # Defaults model a reachable cluster with full ResourceQuota mutation rights so the
+    # stub keeps CSI mappings Ready in tests / default CLI wiring without touching ssh.
+    transport_reachable: bool = True
+    transport_can_mutate: bool = True
+    transport_mode: str = "kubectl"
+    transport_detail: str = "stub mutation transport"
+    transport_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def check_mutation_transport(
+        self,
+        cluster_name: str,
+        *,
+        mutation_mode: str | None = None,
+        control_host: str | None = None,
+    ) -> dict[str, Any]:
+        self.transport_calls.append(
+            {
+                "cluster_name": cluster_name,
+                "mutation_mode": mutation_mode,
+                "control_host": control_host,
+            }
+        )
+        perm = self.transport_reachable and self.transport_can_mutate
+        return {
+            "mode": mutation_mode or self.transport_mode,
+            "control_host": control_host,
+            "reachable": self.transport_reachable,
+            "permissions": {
+                "create": perm if self.transport_reachable else None,
+                "patch": perm if self.transport_reachable else None,
+                "delete": perm if self.transport_reachable else None,
+            },
+            "can_mutate": self.transport_reachable and self.transport_can_mutate,
+            "detail": self.transport_detail,
+        }
 
     def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
         return {
@@ -259,6 +296,124 @@ class KubernetesNamespaceQuotaLiveAdapter:
             timeout_seconds=settings.kubernetes_mutation_timeout_seconds,
         )
 
+    def _bind(self, desired: dict[str, Any]) -> "KubernetesNamespaceQuotaLiveAdapter":
+        """Return an adapter whose mutation transport reflects the per-mapping override
+        carried in ``desired`` (planner-resolved from the target cluster's storage
+        mapping), falling back to the global settings when absent.
+
+        Single-cluster operations rebind ``self`` to this so every kubectl/ssh call --
+        including the pre/post reads they make -- uses the cluster's pinned mode and
+        control host. ``mutation_mode``/``control_host`` are absent for clusters that do
+        not override the global ``DMS_KUBERNETES_MUTATION_MODE``, in which case the
+        adapter is returned unchanged.
+        """
+        mode = desired.get("mutation_mode")
+        control_host = desired.get("control_host")
+        if not mode and not control_host:
+            return self
+        control_hosts = self.cluster_control_hosts
+        cluster_name = desired.get("cluster_name")
+        if control_host and cluster_name:
+            control_hosts = {**self.cluster_control_hosts, cluster_name: control_host}
+        return replace(self, mode=mode or self.mode, cluster_control_hosts=control_hosts)
+
+    def check_mutation_transport(
+        self,
+        cluster_name: str,
+        *,
+        mutation_mode: str | None = None,
+        control_host: str | None = None,
+    ) -> dict[str, Any]:
+        """Probe whether this cluster's quota mutation transport (kubectl / ssh-kubectl
+        via control_host) actually REACHES the cluster and is allowed to mutate
+        ResourceQuotas there.
+
+        Unlike the agent-evidence readiness axis, this verifies the exact path the RM
+        worker would take to apply a quota: it rebinds per call to the per-mapping
+        ``mutation_mode``/``control_host`` (same logic as ``_bind``) and runs
+        ``kubectl auth can-i <verb> resourcequota -A`` for create/patch/delete.
+
+        can-i convention: returncode 0 => permitted; returncode 1 => reachable but not
+        permitted; any other returncode or transport error => unreachable. This method
+        never raises — every failure is folded into ``reachable=False`` + ``detail`` so a
+        sweep over many mappings is never aborted by one bad cluster.
+
+        Caveat handled here: kubectl (verified on v1.34) also exits with returncode 1 — not
+        a distinct transport code — when it cannot reach the API server (connection
+        refused / unable to connect / i/o timeout), emitting the diagnostic on stderr. A
+        naive "rc==1 => no permission" reading would mislabel an *unreachable* cluster as a
+        clean RBAC "no", reporting reachable=True / permissions=False to operators. So on
+        rc==1 we inspect stderr for transport-error markers and, when present, classify the
+        cluster as unreachable instead of permission-denied.
+        """
+        bound = self._bind(
+            {
+                "cluster_name": cluster_name,
+                "mutation_mode": mutation_mode,
+                "control_host": control_host,
+            }
+        )
+        effective_mode = mutation_mode or self.mode
+        permissions: dict[str, bool | None] = {
+            "create": None,
+            "patch": None,
+            "delete": None,
+        }
+        verbs = ("create", "patch", "delete")
+        reachable = True
+        detail = "ResourceQuota mutation transport reachable"
+        for verb in verbs:
+            try:
+                completed = bound._kubectl(
+                    cluster_name,
+                    ["auth", "can-i", verb, "resourcequota", "-A"],
+                    check=False,
+                )
+            except (
+                KubernetesMutationError,
+                OSError,
+                subprocess.TimeoutExpired,
+            ) as exc:
+                reachable = False
+                detail = f"transport unreachable: {exc}"
+                break
+            if completed.returncode == 0:
+                permissions[verb] = True
+            elif completed.returncode == 1 and _kubectl_transport_error(
+                completed.stderr or ""
+            ):
+                # rc==1 + a connection/transport marker on stderr is kubectl failing to
+                # reach the API server, NOT a clean RBAC "no" (which is also rc==1 but with
+                # a bare "no" on stdout). Treat as unreachable so we don't report
+                # reachable=True/permissions=False for a cluster we never actually touched.
+                reachable = False
+                detail = f"transport unreachable: {(completed.stderr or '').strip()}"
+                break
+            elif completed.returncode == 1:
+                permissions[verb] = False
+            else:
+                # Any other return code is a transport/auth error, not a clean
+                # yes/no answer -> the cluster is effectively unreachable for us.
+                reachable = False
+                detail = (
+                    f"can-i {verb} returned {completed.returncode}: "
+                    f"{(completed.stderr or '').strip()}"
+                )
+                break
+        if not reachable:
+            permissions = {"create": None, "patch": None, "delete": None}
+        can_mutate = reachable and all(permissions[v] for v in verbs)
+        if reachable and not can_mutate:
+            detail = "ResourceQuota create/patch/delete not permitted (can-i = no)"
+        return {
+            "mode": effective_mode,
+            "control_host": control_host,
+            "reachable": reachable,
+            "permissions": permissions,
+            "can_mutate": can_mutate,
+            "detail": detail,
+        }
+
     def read_namespace(self, cluster_name: str, namespace_name: str) -> dict[str, Any]:
         completed = self._kubectl(
             cluster_name,
@@ -288,6 +443,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
 
     def create_namespace(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
+        self = self._bind(desired)
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         namespace = self._ensure_namespace(
@@ -313,6 +469,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
 
     def apply_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
+        self = self._bind(desired)
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
@@ -386,6 +543,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
 
     def delete_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
+        self = self._bind(desired)
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
@@ -432,6 +590,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
 
     def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
+        self = self._bind(desired)
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
@@ -487,6 +646,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
 
     def import_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
+        self = self._bind(desired)
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
@@ -550,6 +710,7 @@ class KubernetesNamespaceQuotaLiveAdapter:
 
     def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult:
         desired = plan["desired_state"]
+        self = self._bind(desired)
         cluster_name = desired["cluster_name"]
         namespace_name = desired["namespace_name"]
         resource_quota_name = desired.get("resource_quota_name") or "dms-storage-quota"
@@ -1117,8 +1278,12 @@ def _audit_kubernetes_resource_quotas(
     issue_count = 0
     partial_failure = False
     for target in desired.get("targets") or []:
+        # Each audit target may be a different cluster; rebind to its per-mapping
+        # transport (planner-resolved into the target) so ssh-kubectl clusters are read
+        # via their control host, not the global default. Stub adapters lack _bind.
+        bound = adapter._bind(target) if hasattr(adapter, "_bind") else adapter
         target_result = _audit_kubernetes_resource_quota_target(
-            adapter=adapter,
+            adapter=bound,
             target=target,
             include_non_dms=include_non_dms,
             include_usage_pressure=include_usage_pressure,

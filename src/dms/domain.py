@@ -306,13 +306,15 @@ def managed_root_path_suffix(mount_path: str, managed_root: str) -> str:
 
 
 def validate_filesystem_managed_root(backend_template: dict[str, Any]) -> None:
-    """Filesystem storage mappings must declare an explicit ``managed_root`` under
-    ``mount_path``.
+    """Validate a filesystem storage mapping's backend_template at registration.
 
-    ``managed_root`` is the security/isolation boundary (and the DM path base when
-    ``DMS_DM_PATH_BASE=managed_root``), so it must be explicit -- the historical
-    implicit ``{mount_path}/dms`` default is no longer accepted. Non-filesystem
-    backends (CSI, kubernetes namespace quota) have no managed_root and are skipped.
+    Filesystem mappings must declare ``mount_path`` and an explicit ``managed_root``
+    under it. ``managed_root`` is the security/isolation boundary (and the DM path base
+    when ``DMS_DM_PATH_BASE=managed_root``), so it must be explicit -- the historical
+    implicit ``{mount_path}/dms`` default is no longer accepted. GPFS additionally
+    requires an explicit ``filesystem_name`` (the GPFS device its mm* fileset/quota
+    commands target). Non-filesystem backends (CSI, kubernetes namespace quota) have no
+    managed_root and are skipped.
     """
     backend_type = backend_template.get("backend_type")
     if backend_type not in _FILESYSTEM_BACKEND_TYPES:
@@ -326,6 +328,66 @@ def validate_filesystem_managed_root(backend_template: dict[str, Any]) -> None:
             f"{backend_type} storage mapping requires an explicit managed_root"
         )
     managed_root_path_suffix(mount_path, managed_root)  # validates under mount_path
+    # GPFS mm* commands target a named filesystem (the GPFS device), so filesystem_name
+    # is required and is not silently defaulted to storage_name.
+    if backend_type == "gpfs" and not backend_template.get("filesystem_name"):
+        raise ValueError("gpfs storage mapping requires filesystem_name")
+
+
+# Per-mapping Kubernetes ResourceQuota mutation transport. Mirrors how filesystem
+# mappings carry command_runner/ssh_host: a k8s/CSI mapping may pin HOW DMS applies
+# quota mutations to its cluster, overriding the global DMS_KUBERNETES_MUTATION_MODE.
+_KUBERNETES_MUTATION_MODES = ("kubectl", "ssh-kubectl")
+# control_host is interpolated into ``ssh <host> kubectl ...``. Restrict it to a bare
+# hostname/IPv4 with an alphanumeric first character so it cannot be parsed by ssh as an
+# option (e.g. a leading '-' -> '-oProxyCommand=...' injection) or carry a user@/metachar.
+_CONTROL_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_kubernetes_mutation_template(backend_template: dict[str, Any]) -> None:
+    """Validate the optional per-mapping Kubernetes mutation settings on a mapping.
+
+    A storage mapping may carry, in its ``backend_template``:
+      - ``mutation_mode``: ``"kubectl"`` (run kubectl locally with the cluster's
+        kubeconfig) or ``"ssh-kubectl"`` (ssh to ``control_host`` then run kubectl there).
+      - ``control_host``: the SSH host the rm-worker connects to; **required** when
+        ``mutation_mode == "ssh-kubectl"``, and conversely **rejected when set without an
+        explicit mutation_mode** (it is ignored under the default ``kubectl`` mode). A bare
+        host, no whitespace.
+    Both are optional and, when absent, fall back to the global settings
+    (``DMS_KUBERNETES_MUTATION_MODE`` -- which now defaults to ``kubectl`` --
+    / ``DMS_CLUSTER_CONTROL_HOSTS_JSON``). They are validated whenever present so a typo
+    fails closed at registration (422) rather than at quota-apply time.
+    """
+    mode = backend_template.get("mutation_mode")
+    control_host = backend_template.get("control_host")
+    if mode is None and control_host is None:
+        return
+    if mode is not None and (
+        not isinstance(mode, str) or mode not in _KUBERNETES_MUTATION_MODES
+    ):
+        raise ValueError(
+            "mutation_mode must be one of " + ", ".join(_KUBERNETES_MUTATION_MODES)
+        )
+    if control_host is not None and (
+        not isinstance(control_host, str) or not _CONTROL_HOST_RE.match(control_host)
+    ):
+        raise ValueError(
+            "control_host must be a bare hostname or IPv4 address "
+            "(alphanumeric start; letters, digits, '.', '_', '-' only) -- "
+            f"got {control_host!r}"
+        )
+    if mode == "ssh-kubectl" and not control_host:
+        raise ValueError("mutation_mode 'ssh-kubectl' requires control_host")
+    # control_host is only consumed by ssh-kubectl. With the default mutation mode now
+    # 'kubectl' (which ignores control_host), a control_host pinned WITHOUT an explicit
+    # mutation_mode would be a silent no-op -- reject it so the mapping's intent is
+    # unambiguous regardless of the global default.
+    if control_host is not None and mode is None:
+        raise ValueError(
+            "control_host requires an explicit mutation_mode='ssh-kubectl' "
+            "(it is ignored under the default 'kubectl' mutation mode)"
+        )
 
 
 def managed_root_for_mapping(mapping: dict[str, Any]) -> tuple[str, str] | None:

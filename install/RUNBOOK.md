@@ -194,7 +194,7 @@ CephFS:
 GPFS:
 ```json
 {"backend_type":"gpfs","cluster_name":"pvs-dms","filesystem_name":"pvs",
- "mount_path":"/pvs","fileset_root":"/pvs/dms"}
+ "mount_path":"/pvs","managed_root":"/pvs/dms"}
 ```
 
 WekaFS (CSI 미설치 환경에서는 csi_driver 생략):
@@ -308,12 +308,110 @@ EOF"
 - `DMS_AGENT_CLUSTER_NAME`이 storage mapping의 `cluster_name`과 일치하지 않는다.
 - `storage_class_name` 또는 `csi_driver`가 live StorageClass와 일치하지 않는다.
 - Agent report가 stale 상태다. `DMS_AGENT_REPORT_STALE_SECONDS`를 확인한다.
+- (k8s/CSI, agent 없는 managed 클러스터) 해당 클러스터가 `DMS_CLUSTER_KUBECONFIGS_JSON`(또는
+  `DMS_CLUSTER_CONTROL_HOSTS_JSON`)에 없거나, API/sanity-reconciler가 kubectl/ssh-kubectl inventory로
+  클러스터를 못 읽는다 → `cluster_missing`/`storage_class_missing`으로 `Failed`. 클러스터 등록과
+  reconciler의 kubeconfig secret 마운트(`/etc/dms/kubeconfigs`)를 확인한다. namespace quota는 RM agent
+  없이 `Degraded`만으로 사용 가능하다(§ k8s RM 가이드).
 
 Agent report freshness 확인:
 
 ```bash
 curl -sS "${DMS_CURL_OPTS[@]}" "$DMS_API_URL/api/v1/operations/agent-reports" | jq '.[0] | {node_name, freshness, updated_at}'
 ```
+
+### CSI/k8s 매핑 sanity `Failed` 진단 (mutation transport)
+
+CSI/k8s namespace-quota 매핑(`backend_type`이 `cephfs`/`wekafs`/`gpfs`가 **아닌** 매핑, 예: `ceph-csi`,
+`gpfs-csi`, `weka-csi`)은 RM/DM Agent evidence가 아니라 **ResourceQuota mutation transport**로 판정한다.
+즉 RM worker가 실제로 quota를 적용할 때 쓰는 경로(`kubectl` 또는 `ssh-kubectl`)로 대상 클러스터에 도달해
+ResourceQuota를 생성/수정/삭제할 권한이 있는지를 sanity가 직접 검사한다. sanity service는 대상 클러스터에서
+`kubectl auth can-i create|patch|delete resourcequota -A`를 실행한다.
+
+결과는 매핑 단건 조회의 `sanity_result.readiness.kubernetes_mutation`(Ready/Failed/Unknown)과
+`sanity_result.mutation_observed`에 노출된다.
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  "$DMS_API_URL/api/v1/operations/storage-mappings/<storage_name>" \
+  | jq '{status: .sanity_status, kubernetes_mutation: .sanity_result.readiness.kubernetes_mutation,
+         errors: .sanity_result.errors, mutation_observed: .sanity_result.mutation_observed}'
+```
+
+CSI 매핑이 `Failed`이면 `sanity_result.errors[].code`가 다음 둘 중 하나다. 둘은 원인과 조치가 다르다.
+
+| error code | 의미 | 원인 | 조치 |
+| --- | --- | --- | --- |
+| `mutation_transport_unreachable` | `reachable: false` — transport 자체가 대상 클러스터에 도달 못 함 | ssh-kubectl: `control_host` 미설정/오타/SSH 불가, 원격 호스트에 `kubectl` 없음, kubeconfig 미설정, 연결 timeout, `can-i`가 yes/no(rc 0/1)가 아닌 다른 rc로 실패 | transport 경로를 직접 점검 (아래) |
+| `mutation_no_permission` | `reachable: true, can_mutate: false` — 도달은 하지만 `can-i`가 no | 대상 클러스터에서 ResourceQuota create/patch/delete RBAC 부족 | RBAC 부여 (아래) |
+
+`mutation_observed`로 어느 transport/호스트로 무엇이 실패했는지 구분한다.
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" \
+  "$DMS_API_URL/api/v1/operations/storage-mappings/<storage_name>" \
+  | jq '.sanity_result.mutation_observed
+        | {mode, control_host, reachable, can_mutate, permissions, detail}'
+```
+
+- `mode`: `kubectl`(기본, 로컬) 또는 `ssh-kubectl`. 매핑별 override는 `backend_template.mutation_mode`로 지정한다(`control_host`만 단독 지정은 등록 422 거부 — `mutation_mode:"ssh-kubectl"` 명시 필요).
+- `control_host`: ssh-kubectl일 때 ssh 대상 호스트. 매핑별 override는 `backend_template.control_host`.
+- `reachable`/`can_mutate`/`permissions{create,patch,delete}`: `permissions` 값은 `true`(허용)/`false`(거절)/`null`(미확인). unreachable이면 셋 다 `null`.
+- `detail`: 실패 원인 메시지 (ssh stderr, can-i 비정상 rc 등).
+
+수정 후 sanity를 재실행해 `kubernetes_mutation`이 `Ready`로 돌아오는지 확인한다.
+
+```bash
+curl -sS "${DMS_CURL_OPTS[@]}" -X POST \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings/<storage_name>:check" \
+  | jq '{status, kubernetes_mutation: .mapping.readiness.kubernetes_mutation}'
+```
+
+**`mutation_transport_unreachable` 조치**
+
+매핑의 transport 설정은 전역 mode(`DMS_KUBERNETES_MUTATION_MODE`, 기본 `kubectl`)와 클러스터별
+`DMS_CLUSTER_CONTROL_HOSTS_JSON`(ssh-kubectl) / `DMS_CLUSTER_KUBECONFIGS_JSON`(kubectl)에서 오며,
+매핑별로 `backend_template`의 `mutation_mode`/`control_host`가 우선한다.
+
+- ssh-kubectl 모드: `control_host`가 매핑의 `cluster_name`에 대해 등록돼 있는지, 해당 호스트로 SSH가 되는지,
+  그 호스트에서 `kubectl`이 대상 클러스터를 가리키는지 확인한다.
+
+  ```bash
+  # control_host 후보를 그대로 사용해 sanity가 내부적으로 하는 것과 동일한 명령을 재현
+  ssh <control_host> "kubectl auth can-i create resourcequota -A"
+  ssh <control_host> "kubectl auth can-i patch resourcequota -A"
+  ssh <control_host> "kubectl auth can-i delete resourcequota -A"
+  ```
+
+  `DMS_CLUSTER_CONTROL_HOSTS_JSON`에 cluster 항목이 없으면 sanity는 `missing control host for cluster ...`
+  detail과 함께 unreachable로 본다. API/sanity-reconciler Deployment의 해당 env와 매핑 `cluster_name`이
+  일치하는지 확인한다. (reconciler는 kubeconfig를 `/etc/dms/kubeconfigs`에 마운트한다.)
+
+- kubectl 모드: 해당 클러스터 kubeconfig가 `DMS_CLUSTER_KUBECONFIGS_JSON`에 있고 유효한지 확인한다.
+
+  ```bash
+  KUBECONFIG=<kubeconfig> kubectl auth can-i create resourcequota -A
+  ```
+
+설정 변경(env/Secret) 후에는 `dms-api`와 `dms-sanity-reconciler`를 rollout restart해야 새 값이 반영된다.
+
+**`mutation_no_permission` 조치**
+
+transport는 정상이고 RBAC만 부족한 경우다. 대상 클러스터에서 ResourceQuota를 모든 namespace 범위로
+생성/수정/삭제할 권한을 부여한다. 첫 점검의 target cluster RBAC(`install/kubernetes/target-cluster-rbac.yaml`)와
+ServiceAccount token이 동일한 ID로 적용됐는지 확인한다.
+
+```bash
+# 부여 후 사용 중인 자격으로 직접 확인 (셋 다 yes 여야 can_mutate=true)
+ssh <control_host> "kubectl auth can-i create resourcequota -A"   # ssh-kubectl
+KUBECONFIG=<kubeconfig> kubectl auth can-i delete resourcequota -A  # kubectl
+```
+
+> CSI 매핑이 sanity `Failed`이면 planner의 `_reject_unsafe_storage_mapping` 가드가 해당 클러스터/namespace의
+> namespace-quota 요청을 `storage_mapping_sanity`로 차단한다. transport/RBAC를 고쳐 `kubernetes_mutation`이
+> `Ready`(또는 최소 non-`Failed`)가 되면 요청이 다시 진행된다. (참고: probe가 미설정이면 — 클러스터가
+> `DMS_CLUSTER_*_JSON`에 없을 때 — `kubernetes_mutation`은 `Unknown`이며 namespace-quota는 `Unknown`을
+> 차단하지 않는다.)
 
 ## Kubernetes Namespace Quota Incident
 

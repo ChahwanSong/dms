@@ -5,7 +5,12 @@ from typing import Any
 
 from .adapters import KubernetesReadOnlyInventoryAdapter
 from .config import Settings
-from .domain import StorageMappingInput, StorageMappingSanityStatus, WorkerRole
+from .domain import (
+    _FILESYSTEM_BACKEND_TYPES,
+    StorageMappingInput,
+    StorageMappingSanityStatus,
+    WorkerRole,
+)
 from .repositories import DmsRepository, iso_now
 
 
@@ -118,6 +123,12 @@ class StorageMappingSanityService:
     repository: DmsRepository
     inventory_service: EffectiveInventoryService
     settings: Settings
+    # Optional ResourceQuota mutation-transport probe (any adapter exposing
+    # ``check_mutation_transport``). When None, the kubernetes_mutation axis is left
+    # "Unknown" (no probe runs); CSI mappings still skip the RM/DM agent-evidence
+    # warnings and use the CSI status rule. In practice both wirings (API + reconciler)
+    # always inject a stub/live probe, so None only occurs on direct construction.
+    kubernetes_quota_probe: Any | None = None
 
     def check_input(self, data: StorageMappingInput) -> dict[str, Any]:
         return self._check(
@@ -216,31 +227,98 @@ class StorageMappingSanityService:
             len(cluster.get("agent_reports", {}).get("stale", []))
             for cluster in inventory.get("clusters", {}).values()
         )
-        if fresh_reports == 0 and stale_reports > 0:
-            errors.append(
-                _issue("stale_only_inventory", "only stale Agent reports are available")
-            )
-        elif fresh_reports == 0:
-            warnings.append(
-                _issue(
-                    "agent_inventory_missing", "no fresh Agent reports are available"
+        backend_type = backend_template.get("backend_type")
+        is_csi = bool(backend_type) and backend_type not in _FILESYSTEM_BACKEND_TYPES
+        # Agent-report aggregate signals only gate filesystem mappings (which depend on
+        # node-agent evidence). CSI/k8s mappings may target agentless managed clusters, so
+        # the absence/staleness of agent reports must not degrade or fail them -- their
+        # readiness comes from the ResourceQuota mutation transport axis below.
+        if not is_csi:
+            if fresh_reports == 0 and stale_reports > 0:
+                errors.append(
+                    _issue(
+                        "stale_only_inventory",
+                        "only stale Agent reports are available",
+                    )
                 )
-            )
-        if rm_readiness != "Ready":
-            warnings.append(
-                _issue("missing_rm_readiness", "no fresh RM evidence for storage")
-            )
-        if dm_readiness != "Ready":
-            warnings.append(
-                _issue("missing_dm_readiness", "no fresh DM evidence for storage")
-            )
-        status = _status_from(errors, warnings, fresh_reports)
+            elif fresh_reports == 0:
+                warnings.append(
+                    _issue(
+                        "agent_inventory_missing",
+                        "no fresh Agent reports are available",
+                    )
+                )
         readiness = {
             "resource_management": rm_readiness,
             "data_management": dm_readiness,
             "inventory": "Ready" if fresh_reports else "Unknown",
         }
-        return {
+        # CSI/k8s mappings are validated by their ResourceQuota MUTATION TRANSPORT (the
+        # path the RM worker actually takes to apply a quota), not by RM/DM agent evidence
+        # -- agentless managed clusters legitimately run no DMS node agent. So we skip the
+        # missing_rm/dm_readiness warnings for them and, when a probe is wired, replace the
+        # agent-evidence axis with a kubernetes_mutation transport+permission check.
+        mutation_observed: dict[str, Any] | None = None
+        if is_csi:
+            if self.kubernetes_quota_probe is not None:
+                try:
+                    mutation_observed = (
+                        self.kubernetes_quota_probe.check_mutation_transport(
+                            cluster_name,
+                            mutation_mode=backend_template.get("mutation_mode"),
+                            control_host=backend_template.get("control_host"),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - probe must never break the sweep
+                    mutation_observed = {
+                        "mode": backend_template.get("mutation_mode"),
+                        "control_host": backend_template.get("control_host"),
+                        "reachable": False,
+                        "permissions": {
+                            "create": None,
+                            "patch": None,
+                            "delete": None,
+                        },
+                        "can_mutate": False,
+                        "detail": f"mutation transport probe failed: {exc}",
+                    }
+                if not mutation_observed.get("reachable"):
+                    via = mutation_observed.get("control_host")
+                    mode = mutation_observed.get("mode") or "kubectl"
+                    target = f"{mode} via {via}" if via else mode
+                    errors.append(
+                        _issue(
+                            "mutation_transport_unreachable",
+                            f"{target}로 대상 클러스터 도달 실패: "
+                            f"{mutation_observed.get('detail')}",
+                        )
+                    )
+                    readiness["kubernetes_mutation"] = "Failed"
+                elif not mutation_observed.get("can_mutate"):
+                    errors.append(
+                        _issue(
+                            "mutation_no_permission",
+                            "ResourceQuota create/patch/delete 권한 없음 "
+                            "(kubectl auth can-i = no)",
+                        )
+                    )
+                    readiness["kubernetes_mutation"] = "Failed"
+                else:
+                    checks.append(_passed("kubernetes_mutation_transport"))
+                    readiness["kubernetes_mutation"] = "Ready"
+            else:
+                readiness["kubernetes_mutation"] = "Unknown"
+        else:
+            if rm_readiness != "Ready":
+                warnings.append(
+                    _issue("missing_rm_readiness", "no fresh RM evidence for storage")
+                )
+            if dm_readiness != "Ready":
+                warnings.append(
+                    _issue("missing_dm_readiness", "no fresh DM evidence for storage")
+                )
+        status = _status_from(errors, warnings, fresh_reports, is_csi=is_csi)
+        result: dict[str, Any] = {
             "storage_name": storage_name,
             "status": status,
             "checked_at": iso_now(),
@@ -265,6 +343,11 @@ class StorageMappingSanityService:
             "warnings": warnings,
             "errors": errors,
         }
+        if mutation_observed is not None:
+            # Expose the probe result so the portal / docs can render mode, control_host,
+            # reachable, permissions and can_mutate for CSI mappings.
+            result["mutation_observed"] = mutation_observed
+        return result
 
 
 def _normalize_tool(tool: Any, node_name: str) -> dict[str, Any]:
@@ -325,10 +408,21 @@ def _default_csi_driver(backend_type: str | None) -> str | None:
 
 
 def _status_from(
-    errors: list[dict[str, str]], warnings: list[dict[str, str]], fresh_reports: int
+    errors: list[dict[str, str]],
+    warnings: list[dict[str, str]],
+    fresh_reports: int,
+    *,
+    is_csi: bool = False,
 ) -> str:
     if errors:
         return StorageMappingSanityStatus.FAILED.value
+    if is_csi:
+        # CSI/k8s mappings are validated by the ResourceQuota mutation transport, not by
+        # agent reports -- so a healthy transport must not be downgraded to Unknown just
+        # because no DMS node agent reports for the (possibly agentless) cluster.
+        if warnings:
+            return StorageMappingSanityStatus.DEGRADED.value
+        return StorageMappingSanityStatus.READY.value
     if not fresh_reports:
         return StorageMappingSanityStatus.UNKNOWN.value
     if warnings:

@@ -417,6 +417,75 @@ class KubernetesPlannerMixin:
         desired["storage_class_quotas"] = storage_class_quotas
 
 
+    def _resolve_cluster_mutation_config(
+        self, cluster_name: str | None
+    ) -> dict[str, str]:
+        """The per-mapping ResourceQuota mutation transport pinned for ``cluster_name``.
+
+        A k8s/CSI storage mapping may pin ``mutation_mode`` (``kubectl`` /
+        ``ssh-kubectl``) and/or ``control_host`` in its ``backend_template`` (see
+        domain.validate_kubernetes_mutation_template). DMS applies quota mutations to a
+        single cluster per operation, so the **first** mapping of that cluster (ordered
+        by ``storage_name`` for determinism) carrying either field wins; the adapter
+        falls back to the global ``DMS_KUBERNETES_MUTATION_MODE`` /
+        ``DMS_CLUSTER_CONTROL_HOSTS_JSON`` when nothing is pinned. ``control_host`` alone
+        (no ``mutation_mode``) is honoured -- it overrides the global control host while
+        keeping the global mode.
+        """
+        if not cluster_name:
+            return {}
+        mappings = sorted(
+            self.repository.list_storage_mappings(cluster_name=cluster_name),
+            key=lambda m: m.get("storage_name") or "",
+        )
+        for mapping in mappings:
+            template = mapping.get("backend_template") or {}
+            mode = template.get("mutation_mode")
+            control_host = template.get("control_host")
+            if mode or control_host:
+                config: dict[str, str] = {}
+                if mode:
+                    config["mutation_mode"] = mode
+                if control_host:
+                    config["control_host"] = control_host
+                return config
+        return {}
+
+    def _apply_kubernetes_mutation_config(self, desired: dict[str, Any]) -> None:
+        """Embed the target cluster's per-mapping mutation transport in ``desired_state``.
+
+        Re-resolved on every plan (stale keys cleared first) so removing the override on
+        the mapping reverts to the global default.
+        """
+        desired.pop("mutation_mode", None)
+        desired.pop("control_host", None)
+        desired.update(self._resolve_cluster_mutation_config(desired.get("cluster_name")))
+
+    def _apply_kubernetes_mutation_config_to_targets(
+        self, targets: list[dict[str, Any]] | None
+    ) -> None:
+        """Per-target variant for multi-cluster AUDIT / EXPIRATION_SWEEP plans.
+
+        Each target may address a different cluster, so the transport is resolved per
+        target. The config is written to both the target dict (read by the audit adapter
+        via ``_bind(target)``) and its nested ``desired_state`` (which the sweep turns
+        into the block's desired, applied via the rebinding ``apply_resource_quota``).
+        """
+        for target in targets or []:
+            if not isinstance(target, dict):
+                continue
+            inner = target.get("desired_state")
+            cluster_name = target.get("cluster_name") or (
+                inner.get("cluster_name") if isinstance(inner, dict) else None
+            )
+            config = self._resolve_cluster_mutation_config(cluster_name)
+            for sink in (target, inner):
+                if isinstance(sink, dict):
+                    sink.pop("mutation_mode", None)
+                    sink.pop("control_host", None)
+                    sink.update(config)
+
+
     def _apply_kubernetes_default_quota_reset(
         self, request: dict[str, Any], desired: dict[str, Any]
     ) -> None:

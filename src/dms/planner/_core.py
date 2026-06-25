@@ -177,24 +177,29 @@ class _PlannerCoreMixin:
             desired = self._filesystem_desired_state(request, desired)
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             if request["operation"] == OperationKind.K8S_QUOTA_AUDIT.value:
+                audit_targets = self._resolve_kubernetes_quota_audit_targets(request)
+                # AUDIT/SWEEP are multi-cluster: resolve the per-mapping mutation
+                # transport per target so each cluster's reads/blocks use its pinned
+                # mode/control_host (not just the global default).
+                self._apply_kubernetes_mutation_config_to_targets(audit_targets)
                 desired.update(
                     {
                         "operation": request["operation"],
                         "resource_kind": request["resource_kind"],
                         "resource_key": request["resource_key"],
-                        "targets": self._resolve_kubernetes_quota_audit_targets(
-                            request
-                        ),
+                        "targets": audit_targets,
                     }
                 )
                 return desired
             if request["operation"] == OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value:
+                sweep_targets = self._resolve_kubernetes_expiration_targets(request)
+                self._apply_kubernetes_mutation_config_to_targets(sweep_targets)
                 desired.update(
                     {
                         "operation": request["operation"],
                         "resource_kind": request["resource_kind"],
                         "resource_key": request["resource_key"],
-                        "targets": self._resolve_kubernetes_expiration_targets(request),
+                        "targets": sweep_targets,
                     }
                 )
                 return desired
@@ -224,6 +229,7 @@ class _PlannerCoreMixin:
         if request["resource_kind"] == ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value:
             desired.setdefault("resource_quota_name", "dms-storage-quota")
             desired.setdefault("resource_type", "user")
+            self._apply_kubernetes_mutation_config(desired)
             if request["operation"] == OperationKind.K8S_QUOTA_IMPORT.value:
                 self._enrich_kubernetes_storage_class_entries(desired)
                 desired.setdefault("import_mode", "dms_resourcequota")

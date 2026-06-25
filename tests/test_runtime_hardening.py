@@ -368,6 +368,9 @@ def _register_gpfs_mapping(repository: DmsRepository) -> None:
         "fileset_name_template": "dms-{directory_name}",
         "csi_driver": GPFS_CSI_DRIVER,
         "data_network": "storage-net-a",
+        # command_runner default changed to ssh-host-exec; this local-execution test
+        # pins "local" explicitly (no ssh_host needed).
+        "command_runner": "local",
     }
     repository.upsert_storage_mapping(
         StorageMappingInput(

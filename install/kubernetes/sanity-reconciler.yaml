@@ -49,6 +49,14 @@ spec:
               value: "30"
             - name: DMS_SANITY_TTL_SECONDS
               value: "120"
+          # Read-only cluster kubeconfigs: the reconciler now mirrors the API's
+          # KubectlReadOnlyInventoryAdapter so it can validate k8s/CSI mappings on
+          # agentless managed clusters (kubectl inventory mode). For ssh-kubectl
+          # inventory mode, mount the dms-ssh-client secret here too (as rm-worker does).
+          volumeMounts:
+            - name: kubeconfigs
+              mountPath: /etc/dms/kubeconfigs
+              readOnly: true
           livenessProbe:
             # Heartbeat freshness: fail (→ restart) if no cycle completed in ~4 intervals.
             exec:
@@ -63,3 +71,7 @@ spec:
             requests:
               cpu: 10m
               memory: 64Mi
+      volumes:
+        - name: kubeconfigs
+          secret:
+            secretName: dms-cluster-kubeconfigs

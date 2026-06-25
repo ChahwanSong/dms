@@ -17,6 +17,7 @@ from ...domain import (
     StorageMappingInput,
     TERMINAL_LIFECYCLE_STATES,
     validate_filesystem_managed_root,
+    validate_kubernetes_mutation_template,
 )
 from .._helpers.configmap import sync_agent_storages_configmap
 from .._helpers.filesystem import (
@@ -445,6 +446,7 @@ def resource_management_router() -> APIRouter:
         merge_storage_mapping_secrets(data.backend_template, existing)
         try:
             validate_filesystem_managed_root(data.backend_template)
+            validate_kubernetes_mutation_template(data.backend_template)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         sanity = sanity_service(services).check_input(data)
@@ -536,6 +538,7 @@ def resource_management_router() -> APIRouter:
         merge_storage_mapping_secrets(data.backend_template, existing)
         try:
             validate_filesystem_managed_root(data.backend_template)
+            validate_kubernetes_mutation_template(data.backend_template)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         sanity = sanity_service(services).check_input(data)

@@ -71,7 +71,15 @@ class KubectlReadOnlyInventoryAdapter:
             | set(self.cluster_control_hosts.keys())
         )
         for cluster_name in cluster_names:
-            clusters[cluster_name] = self._read_cluster(cluster_name)
+            # Per-cluster fail isolation: one unreachable/misconfigured cluster must not
+            # blank out the whole inventory (which would flip EVERY storage mapping —
+            # including filesystem mappings that don't even need k8s inventory — to a
+            # spurious Failed). The unreadable cluster is simply omitted, so only its own
+            # mappings surface `cluster_missing`; all others are evaluated normally.
+            try:
+                clusters[cluster_name] = self._read_cluster(cluster_name)
+            except KubernetesInventoryReadError:
+                continue
         return {"clusters": clusters}
 
     def _read_cluster(self, cluster_name: str) -> dict[str, Any]:
@@ -154,7 +162,15 @@ class KubectlReadOnlyInventoryAdapter:
                 text=True,
                 timeout=self.timeout_seconds,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            OSError,
+        ) as exc:
+            # OSError covers a missing/non-executable kubectl|ssh binary
+            # (FileNotFoundError) and the like — normalized to KubernetesInventoryReadError
+            # so per-cluster fail isolation in read_inventory() catches it instead of
+            # crashing the whole sweep.
             raise KubernetesInventoryReadError(
                 f"read-only Kubernetes inventory failed for {cluster_name}: {exc}"
             ) from exc
@@ -166,14 +182,18 @@ class KubectlReadOnlyInventoryAdapter:
             ) from exc
 
     def _command(self, cluster_name: str, args: list[str]) -> list[str]:
-        if self.mode == "ssh-kubectl":
-            host = self.cluster_control_hosts.get(cluster_name)
-            if not host:
-                raise KubernetesInventoryReadError(
-                    f"missing control host for cluster {cluster_name}"
-                )
+        # Per-cluster transport: a pinned control_host means reach THIS cluster via
+        # ssh-kubectl regardless of the global inventory mode (mirrors the per-mapping
+        # mutation transport, so e.g. ddz26 is read over ssh-kubectl while the in-cluster
+        # `dms` cluster is read with a local kubectl/kubeconfig in the same sweep).
+        host = self.cluster_control_hosts.get(cluster_name)
+        if host:
             quoted = " ".join(_shell_quote(part) for part in ["kubectl", *args])
             return ["ssh", host, quoted]
+        if self.mode == "ssh-kubectl":
+            raise KubernetesInventoryReadError(
+                f"missing control host for cluster {cluster_name}"
+            )
         if self.mode == "kubectl":
             command = ["kubectl"]
             kubeconfig = self.cluster_kubeconfigs.get(cluster_name)

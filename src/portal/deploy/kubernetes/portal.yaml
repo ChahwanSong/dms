@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dms-portal
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: portal-secrets
+  namespace: dms-portal
+type: Opaque
+stringData:
+  # All values here are PLACEHOLDERS. Never commit working credentials — inject
+  # the real values into the LIVE Secret out-of-band, e.g.:
+  #   kubectl -n dms-portal patch secret portal-secrets --type merge -p \
+  #     '{"stringData":{"PORTAL_SESSION_SECRET":"<rand>","PORTAL_OPERATOR_USERS":"admin:<pw>","PORTAL_DMS_TOKEN":"<tok>","PORTAL_DB_URL":"<dms-db-url>"}}'
+  #   kubectl -n dms-portal rollout restart deploy/dms-portal
+  # (kubectl apply overwrites these back to placeholders, so re-patch after apply.)
+  #
+  # Signs the session cookie (cookie-forgery key) — use a strong random value.
+  PORTAL_SESSION_SECRET: "REPLACE_WITH_SESSION_SECRET"
+  # Operator credential store (operator-only id/pw login). Format: user:pw,user2:pw2
+  # Once PORTAL_DB_URL is set the operator store is seeded into the DB on first
+  # boot (when empty); thereafter the DB is the source of truth for logins.
+  PORTAL_OPERATOR_USERS: "REPLACE_WITH_OPERATOR_CREDS"
+  # DMS API bearer token (testbed auth profile).
+  PORTAL_DMS_TOKEN: "REPLACE_WITH_DMS_TOKEN"
+  # Portal's OWN Postgres (operator logins + data-backup batches/jobs). On the
+  # testbed this is the DMS Postgres with a dedicated `portal` schema, so the
+  # value equals dms-secrets/DMS_DATABASE_URL. Empty => no DB: login falls back to
+  # the env store above and the data-backup tab is disabled (routes 503).
+  PORTAL_DB_URL: "REPLACE_WITH_DB_URL"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-portal
+  namespace: dms-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-portal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-portal
+        app.kubernetes.io/part-of: dms-portal
+    spec:
+      containers:
+        - name: portal
+          image: pkg-01:5000/dms-portal:v26
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8090
+          env:
+            # Testbed is served over a plain-HTTP NodePort, so the session cookie
+            # must NOT be Secure-only (default is true / fail-closed). Set true
+            # once the portal is fronted by TLS.
+            - name: PORTAL_SESSION_HTTPS_ONLY
+              value: "false"
+            # In-cluster DMS API (service DNS; no node-IP dependency).
+            - name: PORTAL_DMS_API_URL
+              value: "http://dms-api.dms.svc.cluster.local"
+            # Default DMS audit actor; the BFF overrides per-request with the
+            # logged-in operator's username.
+            - name: PORTAL_DMS_ACTOR
+              value: "operator"
+          envFrom:
+            - secretRef:
+                name: portal-secrets
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dms-portal
+  namespace: dms-portal
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: dms-portal
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # Desktop access: http://10.10.10.10:30090
+      nodePort: 30090

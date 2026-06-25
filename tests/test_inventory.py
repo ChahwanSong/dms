@@ -317,6 +317,8 @@ def upsert_mapping(
                     "backend_type": backend_type,
                     "mount_path": f"/mnt/{storage_name}",
                     "managed_root": f"/mnt/{storage_name}/dms",
+                    # GPFS requires an explicit filesystem_name at registration.
+                    **({"filesystem_name": storage_name} if backend_type == "gpfs" else {}),
                 }
                 if backend_type in ("cephfs", "wekafs", "gpfs")
                 else {"backend_type": backend_type}

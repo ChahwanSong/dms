@@ -29,7 +29,7 @@
         "backend_type": "gpfs",
         "filesystem_name": "gpfs0",
         "mount_path": "/gpfs/gpfs0",
-        "fileset_root": "/gpfs/gpfs0/dms",
+        "managed_root": "/gpfs/gpfs0/dms",
         "quota_scope": "fileset",
         "fileset_name_template": "dms-{directory_name}",
         "rm_worker_nodes": ["gpfs-rm-1"],

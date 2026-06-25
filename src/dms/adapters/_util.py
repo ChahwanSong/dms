@@ -54,3 +54,26 @@ def _json_stdout(stdout: str, kind: str) -> dict[str, Any]:
 
 def _kubectl_not_found(stderr: str) -> bool:
     return "NotFound" in stderr or "not found" in stderr.lower()
+
+
+
+# kubectl exits with returncode 1 both for a clean RBAC "no" AND for a failure to reach
+# the API server (the latter is NOT a distinct exit code). These stderr substrings mark the
+# unreachable case so callers can tell the two apart (verified against kubectl v1.34).
+_KUBECTL_TRANSPORT_ERROR_MARKERS = (
+    "connection to the server",
+    "unable to connect to the server",
+    "was refused",
+    "connection refused",
+    "couldn't get current server api group list",
+    "i/o timeout",
+    "no such host",
+    "tls handshake timeout",
+    "eof",
+    "dial tcp",
+)
+
+
+def _kubectl_transport_error(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _KUBECTL_TRANSPORT_ERROR_MARKERS)

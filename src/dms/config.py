@@ -30,9 +30,9 @@ class Settings:
     control_cluster_name: str = "cluster-a"
     cluster_kubeconfigs: dict[str, str] | None = None
     cluster_control_hosts: dict[str, str] | None = None
-    kubernetes_inventory_mode: str = "ssh-kubectl"
+    kubernetes_inventory_mode: str = "kubectl"
     kubernetes_inventory_timeout_seconds: int = 10
-    kubernetes_mutation_mode: str = "ssh-kubectl"
+    kubernetes_mutation_mode: str = "kubectl"
     kubernetes_mutation_timeout_seconds: int = 30
     filesystem_mutation_mode: str = "ssh-host-exec"
     filesystem_exec_timeout_seconds: int = 30
@@ -162,13 +162,13 @@ class Settings:
             cluster_kubeconfigs=_json_env("DMS_CLUSTER_KUBECONFIGS_JSON"),
             cluster_control_hosts=_json_env("DMS_CLUSTER_CONTROL_HOSTS_JSON"),
             kubernetes_inventory_mode=os.getenv(
-                "DMS_KUBERNETES_INVENTORY_MODE", "ssh-kubectl"
+                "DMS_KUBERNETES_INVENTORY_MODE", "kubectl"
             ),
             kubernetes_inventory_timeout_seconds=int(
                 os.getenv("DMS_KUBERNETES_INVENTORY_TIMEOUT_SECONDS", "10")
             ),
             kubernetes_mutation_mode=os.getenv(
-                "DMS_KUBERNETES_MUTATION_MODE", "ssh-kubectl"
+                "DMS_KUBERNETES_MUTATION_MODE", "kubectl"
             ),
             kubernetes_mutation_timeout_seconds=int(
                 os.getenv("DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS", "30")

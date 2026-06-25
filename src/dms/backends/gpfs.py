@@ -126,7 +126,10 @@ class GpfsBackendTemplate:
         )
         return cls(
             storage_name=mapping["storage_name"],
-            filesystem_name=template.get("filesystem_name", mapping["storage_name"]),
+            # filesystem_name is required at registration (validate_filesystem_managed_root);
+            # no implicit storage_name fallback. Empty only if a pre-validation row slips
+            # through -- the runtime guard (_junction_path) then rejects it.
+            filesystem_name=template.get("filesystem_name", ""),
             mount_path=template.get("mount_path", ""),
             managed_root=template.get("managed_root"),
             quota_scope=template.get("quota_scope", "fileset"),
@@ -139,7 +142,7 @@ class GpfsBackendTemplate:
                 "fileset_name_template", "dms-{directory_name}"
             ),
             rm_worker_node=rm_worker_node,
-            command_runner=template.get("command_runner", "local"),
+            command_runner=template.get("command_runner", "ssh-host-exec"),
             command_timeout_seconds=int(template.get("command_timeout_seconds", 60)),
         )
 

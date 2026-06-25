@@ -72,6 +72,24 @@ def test_validate_filesystem_managed_root():
         validate_filesystem_managed_root(
             {"backend_type": "cephfs", "mount_path": "/cephfs", "managed_root": "/other"}
         )
+    # GPFS requires an explicit filesystem_name (no storage_name fallback at registration)
+    with pytest.raises(ValueError, match="filesystem_name"):
+        validate_filesystem_managed_root(
+            {"backend_type": "gpfs", "mount_path": "/gpfs/gpfs0", "managed_root": "/gpfs/gpfs0/dms"}
+        )
+    # valid GPFS mapping with filesystem_name passes
+    validate_filesystem_managed_root(
+        {
+            "backend_type": "gpfs",
+            "mount_path": "/gpfs/gpfs0",
+            "managed_root": "/gpfs/gpfs0/dms",
+            "filesystem_name": "gpfs0",
+        }
+    )
+    # cephfs/wekafs do NOT require filesystem_name
+    validate_filesystem_managed_root(
+        {"backend_type": "cephfs", "mount_path": "/cephfs", "managed_root": "/cephfs/dms"}
+    )
 
 
 # --- planner rebasing (_rebase_paths_for_managed_root is settings-independent) ----

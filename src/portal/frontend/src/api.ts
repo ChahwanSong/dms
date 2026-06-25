@@ -1,0 +1,292 @@
+// Thin fetch wrapper for the BFF. credentials:"include" so the session cookie
+// rides along (same-origin in prod; proxied same-origin in dev).
+
+export type Role = "user" | "operator";
+
+export interface User {
+  username: string;
+  role: Role;
+  method: "local" | "ad";
+  dummy?: boolean;
+}
+
+export interface OverviewSection {
+  key: string;
+  title: string;
+  status: string;
+}
+
+export interface Overview {
+  role: Role;
+  username: string;
+  sections: OverviewSection[];
+}
+
+// --- storage mapping (storage inventory) -------------------------------
+
+export interface Readiness {
+  resource_management?: string;
+  data_management?: string;
+  inventory?: string;
+  // CSI (k8s namespace-quota) mappings: ResourceQuota mutation transport+permission
+  // axis (Ready/Failed/Unknown), replacing RM/DM agent evidence for those mappings.
+  kubernetes_mutation?: string;
+}
+
+// CSI mutation transport probe result (kubectl/ssh-kubectl reachability + can-i).
+export interface MutationObserved {
+  mode?: string | null;
+  control_host?: string | null;
+  reachable?: boolean;
+  permissions?: {
+    create?: boolean | null;
+    patch?: boolean | null;
+    delete?: boolean | null;
+  };
+  can_mutate?: boolean;
+  detail?: string | null;
+}
+
+export interface SanityCheck {
+  name: string;
+  status: string;
+}
+export interface SanityCode {
+  code: string;
+  message: string;
+}
+
+export interface SanityResult {
+  status?: string;
+  checked_at?: string;
+  checks?: SanityCheck[];
+  errors?: SanityCode[];
+  warnings?: SanityCode[];
+  readiness?: Readiness;
+  kubernetes_observed?: {
+    cluster_name?: string | null;
+    provisioner?: string | null;
+    storage_class_exists?: boolean;
+    storage_class_name?: string | null;
+  };
+  agent_observed?: {
+    fresh_reports?: number;
+    stale_reports?: number;
+    rm_readiness?: string;
+    dm_readiness?: string;
+    rm_candidates?: unknown[];
+    dm_candidates?: unknown[];
+  };
+  mutation_observed?: MutationObserved;
+  [k: string]: unknown;
+}
+
+export type SanityStatus = "Ready" | "Degraded" | "Unknown" | "Failed" | string;
+
+export interface StorageMapping {
+  storage_name: string;
+  backend_template: Record<string, unknown>;
+  cluster_name: string | null;
+  storage_class_name: string | null;
+  version: number;
+  sanity_status: SanityStatus;
+  sanity_result?: SanityResult;
+  sanity_checked_at?: string | null;
+  readiness?: Readiness;
+  disabled_at?: string | null;
+  disabled_reason?: string | null;
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+// Writable subset (mirrors DMS StorageMappingInput minus server-computed fields).
+export interface StorageMappingPayload {
+  storage_name: string;
+  backend_template: Record<string, unknown>;
+  cluster_name: string | null;
+  storage_class_name: string | null;
+  version: number;
+}
+
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, detail: unknown) {
+    super(typeof detail === "string" ? detail : JSON.stringify(detail));
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  if (!res.ok) {
+    let detail: unknown = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body?.detail ?? body;
+    } catch {
+      /* ignore non-JSON bodies */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+export const auth = {
+  me: () => request<{ user: User }>("/api/auth/me"),
+  login: (username: string, password: string) =>
+    request<{ user: User }>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  loginAd: () =>
+    request<{ user: User }>("/api/auth/login/ad", { method: "POST" }),
+  logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
+};
+
+export const userApi = {
+  overview: () => request<Overview>("/api/user/overview"),
+};
+
+// --- data backup (DM sync batches) -------------------------------------
+
+export interface BackupBatch {
+  id: string;
+  name: string;
+  status: string; // draft|previewing|previewed|running|done|cancelled
+  delete_enabled: boolean;
+  options: Record<string, unknown>;
+  requester_id: string;
+  created_by?: string | null;
+  note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  job_count?: number;
+  succeeded_count?: number;
+  failed_count?: number;
+  state_counts?: Record<string, number>;
+  preview_totals?: { files: number; bytes: number };
+}
+
+export interface BackupPreview {
+  files?: number | null;
+  dirs?: number | null;
+  bytes?: number | null;
+  errors?: number | null;
+  tool?: string | null;
+}
+
+export interface BackupJob {
+  id: number;
+  batch_id: string;
+  src_storage: string;
+  src_path: string;
+  dst_storage: string;
+  dst_path: string;
+  state: string;
+  dms_job_id?: string | null;
+  fingerprint?: string | null;
+  preview?: BackupPreview | null;
+  error?: string | null;
+  updated_at?: string;
+}
+
+export interface BackupJobInput {
+  src_storage: string;
+  src_path: string;
+  dst_storage: string;
+  dst_path: string;
+}
+
+export interface BatchCreateInput {
+  name: string;
+  delete_enabled: boolean;
+  options?: Record<string, unknown>;
+  note?: string | null;
+  jobs?: BackupJobInput[];
+}
+
+const SM = "/api/operator/storage-mappings";
+const BK = "/api/operator/backup/batches";
+
+export const operatorApi = {
+  overview: () => request<Overview>("/api/operator/overview"),
+  storage: {
+    list: (clusterName?: string) =>
+      request<StorageMapping[]>(
+        clusterName ? `${SM}?cluster_name=${encodeURIComponent(clusterName)}` : SM,
+      ),
+    get: (name: string) =>
+      request<StorageMapping>(`${SM}/${encodeURIComponent(name)}`),
+    create: (payload: StorageMappingPayload) =>
+      request<{ storage_name: string; status: string; mapping: StorageMapping }>(
+        SM,
+        { method: "POST", body: JSON.stringify(payload) },
+      ),
+    update: (name: string, payload: StorageMappingPayload) =>
+      request<{ storage_name: string; status: string; mapping: StorageMapping }>(
+        `${SM}/${encodeURIComponent(name)}`,
+        { method: "PATCH", body: JSON.stringify(payload) },
+      ),
+    check: (name: string) =>
+      request<{ storage_name: string; status: string; mapping: StorageMapping }>(
+        `${SM}/${encodeURIComponent(name)}/check`,
+        { method: "POST" },
+      ),
+    remove: (name: string) =>
+      request<{ storage_name: string; deleted: boolean }>(
+        `${SM}/${encodeURIComponent(name)}`,
+        { method: "DELETE" },
+      ),
+  },
+  backup: {
+    list: () => request<BackupBatch[]>(BK),
+    get: (id: string) => request<BackupBatch>(`${BK}/${encodeURIComponent(id)}`),
+    create: (payload: BatchCreateInput) =>
+      request<{ id: string; added: number }>(BK, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    remove: (id: string) =>
+      request<{ id: string; deleted: boolean }>(
+        `${BK}/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      ),
+    addJobs: (id: string, jobs: BackupJobInput[]) =>
+      request<{ id: string; added: number }>(
+        `${BK}/${encodeURIComponent(id)}/jobs`,
+        { method: "POST", body: JSON.stringify(jobs) },
+      ),
+    jobs: (id: string, opts?: { state?: string; limit?: number; offset?: number }) => {
+      const q = new URLSearchParams();
+      if (opts?.state) q.set("state", opts.state);
+      if (opts?.limit != null) q.set("limit", String(opts.limit));
+      if (opts?.offset != null) q.set("offset", String(opts.offset));
+      const qs = q.toString();
+      return request<BackupJob[]>(
+        `${BK}/${encodeURIComponent(id)}/jobs${qs ? `?${qs}` : ""}`,
+      );
+    },
+    preview: (id: string) =>
+      request<{ id: string; status: string }>(
+        `${BK}/${encodeURIComponent(id)}:preview`,
+        { method: "POST" },
+      ),
+    approve: (id: string) =>
+      request<{ id: string; status: string; to_run: number }>(
+        `${BK}/${encodeURIComponent(id)}:approve`,
+        { method: "POST" },
+      ),
+    cancel: (id: string) =>
+      request<{ id: string; status: string; dms_cancelled: number }>(
+        `${BK}/${encodeURIComponent(id)}:cancel`,
+        { method: "POST" },
+      ),
+  },
+};

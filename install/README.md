@@ -7,6 +7,8 @@
 - `2.dms-rm-api-fs.md`: filesystem Resource Management API
 - `3.dms-rm-api-k8s.md`: Kubernetes namespace quota API
 - `4.dms-dm-api.md`: Data Management `scan`/`sync`/`rm` API (operations 조회 포함)
+- `5.dms-portal-setup.md`: DMS Portal(운영자/사용자 웹 UI) 설치·구성. DMS API만 소비하는 별도 앱이며 DMS 설치(아래) 이후 진행한다.
+- `6.dms-portal-data-backup.md`: Portal 데이터 백업(DM `sync` 미러 백업) 운영. 포탈 DB(`PORTAL_DB_URL`)·배치 미리보기/승인/실행·경로 규칙을 다룬다.
 
 구성 대상 컴포넌트:
 
@@ -635,7 +637,7 @@ curl --resolve dms.example.internal:443:INGRESS_IP \
 
 ## 9. Agent DaemonSet 배포
 
-Agent는 StorageClass, CSI, mount, tool, credential, network, identity evidence를 DMS API로 report한다. Storage mapping readiness에 필요하다.
+Agent는 StorageClass, CSI, mount, tool, credential, network, identity evidence를 DMS API로 report한다. **filesystem backend(cephfs/wekafs/gpfs) mapping의 readiness**(RM/DM/INV 축)에 필요하다. k8s/CSI(namespace-quota) mapping은 node agent가 없는 managed cluster를 대상으로 할 수 있어 agent report로 readiness를 판정하지 않고 QUOTA(`ResourceQuota` mutation transport) 축으로 판정하므로(§10.3 참고) agent가 없어도 Degraded/Failed가 되지 않는다.
 
 수정할 파일:
 
@@ -749,6 +751,10 @@ cp install/config/storage-mappings.example.json /tmp/dms-storage-mappings.json
 > RM 디렉토리 연산과 DM `DMS_DM_PATH_BASE=managed_root` 모드의 경계/기준점이 된다. (CSI-only/namespace-quota용
 > mapping은 filesystem backend가 아니므로 managed_root가 필요 없다.)
 >
+> **GPFS는 추가로 `filesystem_name`(대상 GPFS 파일시스템/device 이름)을 명시 필수**다 — GPFS의
+> `mm*`(fileset/quota) 명령이 이 이름을 대상으로 하기 때문이며, 생략하면 등록이 `422`로 거부된다(과거의
+> `storage_name` 암묵 기본값은 제거됨). cephfs/wekafs는 filesystem_name이 필수가 아니다.
+>
 > **managed_root 권한은 `0711`로 둔다** — 리소스 디렉토리는 각각 `0750`/`0770`(소유자/그룹만)로 만들어지지만,
 > 그 부모인 managed_root가 `0755`(기본 umask)면 누구나 `ls`로 **리소스 이름 목록**을 볼 수 있다. `0711`은
 > 임의 uid 소유자의 traverse(`cd`)는 허용하되 list(`ls`)는 막는다. CephFS는 DMS 자동 생성 시 `0711`로
@@ -796,7 +802,7 @@ GPFS 예시:
     "backend_type": "gpfs",
     "filesystem_name": "gpfs0",
     "mount_path": "/gpfs/gpfs0",
-    "fileset_root": "/gpfs/gpfs0/dms",
+    "managed_root": "/gpfs/gpfs0/dms",
     "quota_scope": "fileset",
     "fileset_name_template": "dms-{directory_name}",
     "rm_worker_nodes": ["gpfs-rm-1"],
@@ -868,7 +874,26 @@ curl -fsS \
   "$DMS_API_URL/api/v1/operations/storage-mappings" | jq
 ```
 
-`readiness.resource_management`가 `Ready`여야 Resource Management request가 진행된다. DM readiness는 Data Management 단계 전까지 `Missing` 또는 `Degraded`일 수 있다.
+filesystem backend(cephfs/wekafs/gpfs) mapping은 `readiness.resource_management`가 `Ready`여야 Resource Management request가 진행된다. DM readiness는 Data Management 단계 전까지 `Missing` 또는 `Degraded`일 수 있다.
+
+### 10.4 sanity/readiness 판정 축 (filesystem vs k8s/CSI)
+
+storage mapping sanity는 backend type에 따라 **다른 readiness 축**으로 판정된다. `backend_type`은 두 부류로 나뉜다(이 부류 판정으로 어떤 축을 쓸지 결정된다).
+
+- **filesystem backend**: `backend_type`이 `cephfs`/`wekafs`/`gpfs` 중 하나. host-mounted/command RM 경로를 쓴다.
+- **k8s/CSI(namespace-quota) backend**: `backend_type`이 위 셋이 아닌 값(예: `longhorn`, `ceph-csi`, `gpfs-csi`, `weka-csi` 등 CSI StorageClass용 free-form 이름). live `ResourceQuota` 경로만 쓴다. (`backend_type`이 비어 있으면 `backend_type_missing`으로 거부된다.)
+
+판정 축:
+
+- **filesystem mapping** — node Agent evidence 기반. `readiness`에 `resource_management`(RM), `data_management`(DM), `inventory`(INV) 축이 채워지고, 이 셋과 Agent report fresh/stale 신호로 status가 결정된다(fresh report가 전혀 없으면 `Unknown`, warning이 있으면 `Degraded`).
+- **k8s/CSI mapping** — **QUOTA 축**, 즉 `ResourceQuota` **mutation transport** 검증으로 판정한다. DMS가 RM worker가 실제로 quota를 적용하는 경로(per-mapping `mutation_mode`/`control_host`를 반영한 `kubectl`/`ssh-kubectl`)로 대상 cluster에 **도달 가능한지**와 `ResourceQuota`에 대한 **create/patch/delete 권한이 있는지**(`kubectl auth can-i`)를 확인한다. 결과는 `readiness.kubernetes_mutation`(`Ready`/`Failed`/`Unknown`)과 상세 필드 `sanity_result.mutation_observed`(`mode`, `control_host`, `reachable`, `permissions.{create,patch,delete}`, `can_mutate`, `detail`)로 노출된다.
+  - 도달 가능 + 세 권한 모두 있음 → `kubernetes_mutation=Ready`, status `Ready`.
+  - 도달 불가 → error `mutation_transport_unreachable`, `kubernetes_mutation=Failed`, status `Failed`.
+  - 도달 가능하나 권한 없음 → error `mutation_no_permission`, `kubernetes_mutation=Failed`, status `Failed`.
+  - transport probe가 wiring되지 않은 환경(관리 cluster의 `DMS_CLUSTER_CONTROL_HOSTS_JSON`/`DMS_CLUSTER_KUBECONFIGS_JSON` 미설정 등) → `kubernetes_mutation=Unknown`(검증 생략).
+  - k8s/CSI mapping은 node agent가 없는 managed cluster를 대상으로 할 수 있으므로, agent report의 부재/stale로 인한 `missing_rm/dm_readiness` warning과 fresh/stale 집계 신호를 **건너뛴다**. 즉 agent가 없어도 transport가 정상이면 `Ready`다.
+
+planner guard는 이 판정을 사용한다. filesystem RM/DM request는 sanity가 `Failed` 또는 `Unknown`이면 차단되지만, **k8s namespace-quota request는 `Failed`만 차단**한다(`Unknown`/`Degraded`는 통과). 따라서 transport 검증 실패가 sanity `Failed`로 표면화되면 해당 quota request도 자동으로 막힌다.
 
 ## 11. 기본 quota policy 등록
 
@@ -1003,7 +1028,7 @@ install/scripts/verify-install.sh
 
 전제조건:
 
-- 대상 storage mapping의 `readiness.resource_management=Ready` (§10.3)
+- 대상 storage mapping(k8s/CSI namespace-quota mapping)의 sanity `status=Ready`. 이 mapping은 QUOTA 축으로 판정되므로 `readiness.kubernetes_mutation=Ready`(transport probe가 wiring된 경우) 또는 최소한 `Failed`가 아님을 §10.3/§10.4로 확인한다(planner는 quota request를 sanity `Failed`일 때만 차단).
 - 운영에 영향 없는 namespace 이름 사용 (예: `dms-smoke-quota`)
 
 이 경로는 CephFS, Longhorn, GPFS CSI, WEKA CSI 같은 모든 CSI StorageClass backend에서
@@ -1242,13 +1267,24 @@ curl -v \
 
 ### Storage mapping이 `Failed` 또는 `Degraded`
 
-storage-mappings 조회 API(§10.3, `operations/storage-mappings`)로 readiness 상세를 확인한다. 흔한 원인:
+storage-mappings 조회 API(§10.3, `operations/storage-mappings`)로 readiness 상세를 확인한다. readiness 판정 축은 backend type에 따라 다르다(§10.4).
+
+공통 원인:
 
 - `storage_class_name`이 target cluster에 없음
 - `csi_driver`가 StorageClass provisioner와 다름
+- `backend_template.backend_type` 누락(`backend_type_missing`)
+
+filesystem mapping(cephfs/wekafs/gpfs, RM/DM/INV 축):
+
 - Agent report가 Fresh가 아님
 - filesystem mount path를 agent가 볼 수 없음
-- `backend_template.backend_type` 누락
+
+k8s/CSI(namespace-quota) mapping(QUOTA 축 = `ResourceQuota` mutation transport, `readiness.kubernetes_mutation`/`sanity_result.mutation_observed`로 확인):
+
+- `mutation_transport_unreachable`: mutation 경로(`mutation_mode`/`control_host`에 따른 `kubectl`/`ssh-kubectl`)로 대상 cluster에 도달 불가 — kubeconfig 경로, `DMS_CLUSTER_CONTROL_HOSTS_JSON`의 control host, SSH 도달성을 확인한다.
+- `mutation_no_permission`: 대상 namespace에서 `ResourceQuota` create/patch/delete 권한 없음(`kubectl auth can-i = no`) — target cluster RBAC(`target-cluster-rbac.yaml`)를 확인한다.
+- 참고: k8s/CSI mapping은 agent 부재/stale로는 Failed/Degraded가 되지 않는다(QUOTA 축으로만 판정).
 
 ### RM Worker가 backend mutation 실패
 
