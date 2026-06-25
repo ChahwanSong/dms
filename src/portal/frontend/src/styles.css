@@ -957,3 +957,12 @@ textarea.json {
     font-size: 1.3rem;
   }
 }
+
+/* ---- dashboard ---- */
+.dash-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin: 0.5rem 0 1rem; }
+.dash-card { border: 1px solid var(--border, #2a2f3a); border-radius: 8px; padding: 0.75rem 0.9rem; background: var(--panel, #161a22); }
+.dash-card-title { font-size: 0.8rem; color: #9aa4b2; margin-bottom: 0.4rem; }
+.dash-kv { list-style: none; margin: 0.3rem 0 0; padding: 0; font-size: 0.85rem; }
+.dash-kv li { display: flex; justify-content: space-between; padding: 0.1rem 0; }
+.dash-kv b { font-variant-numeric: tabular-nums; }
+@media (max-width: 720px) { .dash-cards { grid-template-columns: 1fr 1fr; } }

@@ -3,12 +3,14 @@ import { type User } from "../../api";
 import TopBar from "../../components/TopBar";
 import StorageInventory from "./storage/StorageInventory";
 import BackupBatches from "./backup/BackupBatches";
+import Dashboard from "./dashboard/Dashboard";
 
 // Operator/admin interface. A simple left-nav shell; each section is a separate
 // feature module.
-type Section = "storage" | "backup";
+type Section = "dashboard" | "storage" | "backup";
 
 const NAV: { key: Section; label: string; enabled: boolean }[] = [
+  { key: "dashboard", label: "종합 대시보드", enabled: true },
   { key: "storage", label: "스토리지 인벤토리", enabled: true },
   { key: "backup", label: "데이터 백업", enabled: true },
 ];
@@ -20,7 +22,7 @@ export default function OperatorApp({
   user: User;
   onLogout: () => void;
 }) {
-  const [section, setSection] = useState<Section>("storage");
+  const [section, setSection] = useState<Section>("dashboard");
 
   return (
     <div className="app">
@@ -43,6 +45,7 @@ export default function OperatorApp({
           ))}
         </nav>
         <main className="content content-wide">
+          {section === "dashboard" && <Dashboard />}
           {section === "storage" && <StorageInventory />}
           {section === "backup" && <BackupBatches />}
         </main>
