@@ -4,7 +4,7 @@ export const RUN_STATE: Record<string, string> = {
   Verifying: "san-degraded", Blocked: "san-failed", StaleClaim: "san-failed",
   RecoveryNeeded: "san-failed", Succeeded: "san-ready", Failed: "san-failed",
 };
-export const JOB_STATE: Record<string, string> = {
+export const REQUEST_STATE: Record<string, string> = {
   Pending: "san-unknown", PreflightRunning: "san-degraded",
   PreviewRunning: "san-degraded", ConfirmPending: "san-degraded",
   Confirmed: "san-degraded", Scheduled: "san-degraded", Running: "san-degraded",

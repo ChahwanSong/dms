@@ -131,17 +131,17 @@ class BackupOrchestrator:
     async def _drive_preview(self, batch: dict[str, Any]) -> None:
         bid = batch["id"]
         actor = self._actor(batch)
-        pending = await self._db.jobs_in_states(bid, ["preview_pending"])
+        pending = await self._db.requests_in_states(bid, ["preview_pending"])
 
         # 1) submit registered jobs up to the concurrency cap.
         slots = max(0, self._settings.backup_concurrency - len(pending))
         if slots:
-            registered = await self._db.list_jobs(
+            registered = await self._db.list_requests(
                 bid, state="registered", limit=slots
             )
             for job in registered:
                 await self._submit_one(batch, job, actor)
-            pending = await self._db.jobs_in_states(bid, ["preview_pending"])
+            pending = await self._db.requests_in_states(bid, ["preview_pending"])
 
         # 2) resolve freshly-submitted request_ids -> job_ids (DMS ignores the
         #    request_id filter, so match newest-first list client-side).
@@ -151,7 +151,7 @@ class BackupOrchestrator:
             for job in unresolved:
                 dj = by_req.get(job["dms_request_id"])
                 if dj:
-                    await self._db.update_job(job["id"], dms_job_id=dj["job_id"])
+                    await self._db.update_request(job["id"], dms_job_id=dj["job_id"])
                     job["dms_job_id"] = dj["job_id"]
         # re-submit any pending that never got a request_id (crash mid-submit)
         for job in pending:
@@ -170,14 +170,14 @@ class BackupOrchestrator:
             state = dj.get("state")
             if state in _PREVIEW_READY:
                 metrics, fp = _preview_metrics(dj)
-                await self._db.update_job(
+                await self._db.update_request(
                     job["id"],
                     state="preview_ready",
                     fingerprint=fp,
                     preview=metrics,
                 )
             elif state in _PREVIEW_FAILED:
-                await self._db.update_job(
+                await self._db.update_request(
                     job["id"], state="preview_failed", error=_reason(dj)
                 )
 
@@ -195,15 +195,15 @@ class BackupOrchestrator:
         resubmit: bool = False,
     ) -> None:
         if not resubmit:
-            await self._db.update_job(job["id"], state="preview_pending")
+            await self._db.update_request(job["id"], state="preview_pending")
         try:
             resp = await self._dms.submit_sync(sync_body(batch, job), actor=actor)
         except DmsApiError as exc:
-            await self._db.update_job(
+            await self._db.update_request(
                 job["id"], state="preview_failed", error=str(exc.detail)
             )
             return
-        await self._db.update_job(
+        await self._db.update_request(
             job["id"], dms_request_id=resp.get("request_id"), state="preview_pending"
         )
 
@@ -212,15 +212,15 @@ class BackupOrchestrator:
     async def _drive_execute(self, batch: dict[str, Any]) -> None:
         bid = batch["id"]
         actor = self._actor(batch)
-        running = await self._db.jobs_in_states(bid, ["running"])
+        running = await self._db.requests_in_states(bid, ["running"])
 
         # 1) confirm preview_ready jobs up to the cap.
         slots = max(0, self._settings.backup_concurrency - len(running))
         if slots:
-            ready = await self._db.list_jobs(bid, state="preview_ready", limit=slots)
+            ready = await self._db.list_requests(bid, state="preview_ready", limit=slots)
             for job in ready:
                 await self._confirm_one(job, actor)
-            running = await self._db.jobs_in_states(bid, ["running"])
+            running = await self._db.requests_in_states(bid, ["running"])
 
         # 2) poll running jobs to terminal.
         for job in running:
@@ -234,11 +234,11 @@ class BackupOrchestrator:
             state = dj.get("state")
             if state in _EXEC_SUCCEEDED:
                 rs = dj.get("result_summary") or {}
-                await self._db.update_job(
+                await self._db.update_request(
                     job["id"], state="succeeded", result=rs.get("execution") or rs
                 )
             elif state in _EXEC_FAILED:
-                await self._db.update_job(
+                await self._db.update_request(
                     job["id"], state="failed", error=_reason(dj)
                 )
 
@@ -249,11 +249,11 @@ class BackupOrchestrator:
 
     async def _confirm_one(self, job: dict[str, Any], actor: str) -> None:
         if not job.get("dms_job_id") or not job.get("fingerprint"):
-            await self._db.update_job(
+            await self._db.update_request(
                 job["id"], state="failed", error="missing job_id/fingerprint"
             )
             return
-        await self._db.update_job(job["id"], state="running")
+        await self._db.update_request(job["id"], state="running")
         try:
             await self._dms.confirm_job(
                 job["dms_job_id"],
@@ -265,7 +265,7 @@ class BackupOrchestrator:
                 actor=actor,
             )
         except DmsApiError as exc:
-            await self._db.update_job(
+            await self._db.update_request(
                 job["id"], state="failed", error=f"confirm: {exc.detail}"
             )
 

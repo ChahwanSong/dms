@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { operatorApi, type BackupBatch, type BackupJob } from "../../../api";
-import { batchStatus, jobState, fmtBytes } from "./helpers";
+import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
+import { batchStatus, requestState, fmtBytes } from "./helpers";
 import { errMsg } from "./BackupBatches";
 
 const PAGE = 200;
@@ -23,7 +23,7 @@ export default function BackupBatchDetail({
   onBack: () => void;
 }) {
   const [batch, setBatch] = useState<BackupBatch | null>(null);
-  const [jobs, setJobs] = useState<BackupJob[]>([]);
+  const [jobs, setJobs] = useState<BackupRequest[]>([]);
   const [stateFilter, setStateFilter] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -34,7 +34,7 @@ export default function BackupBatchDetail({
   const loadJobs = useCallback(
     async (reset: boolean) => {
       const offset = reset ? 0 : offsetRef.current;
-      const page = await operatorApi.backup.jobs(batchId, {
+      const page = await operatorApi.backup.requests(batchId, {
         state: stateFilter || undefined,
         limit: PAGE,
         offset,
@@ -145,7 +145,7 @@ export default function BackupBatchDetail({
               className="ghost danger"
               disabled={busy}
               onClick={() => {
-                if (!window.confirm("배치를 취소합니다. 진행 중인 잡도 취소됩니다.")) return;
+                if (!window.confirm("배치를 취소합니다. 진행 중인 요청도 취소됩니다.")) return;
                 act(() => operatorApi.backup.cancel(batchId), "배치를 취소했습니다.");
               }}
             >
@@ -164,7 +164,7 @@ export default function BackupBatchDetail({
       {/* progress / aggregate summary */}
       <div className="inv-summary">
         {STATE_ORDER.filter((s) => counts[s]).map((s) => {
-          const j = jobState(s);
+          const j = requestState(s);
           return (
             <button
               key={s}
@@ -201,12 +201,12 @@ export default function BackupBatchDetail({
           {jobs.length === 0 ? (
             <tr>
               <td colSpan={5} className="muted">
-                {stateFilter ? "해당 상태의 잡이 없습니다." : "잡이 없습니다."}
+                {stateFilter ? "해당 상태의 요청이 없습니다." : "요청이 없습니다."}
               </td>
             </tr>
           ) : (
             jobs.map((j) => {
-              const s = jobState(j.state);
+              const s = requestState(j.state);
               return (
                 <tr key={j.id}>
                   <td data-label="출발" className="mono small">

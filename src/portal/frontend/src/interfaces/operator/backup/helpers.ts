@@ -1,6 +1,6 @@
-import type { BackupJobInput } from "../../../api";
+import type { BackupRequestInput } from "../../../api";
 
-// Batch / job status -> Korean label + a sanity-style color class (reuses .san-*).
+// Batch / request status -> Korean label + a sanity-style color class (reuses .san-*).
 export const BATCH_STATUS: Record<string, { label: string; cls: string }> = {
   draft: { label: "초안", cls: "san-unknown" },
   previewing: { label: "미리보기 중", cls: "san-degraded" },
@@ -10,7 +10,7 @@ export const BATCH_STATUS: Record<string, { label: string; cls: string }> = {
   cancelled: { label: "취소됨", cls: "san-failed" },
 };
 
-export const JOB_STATE: Record<string, { label: string; cls: string }> = {
+export const REQUEST_STATE: Record<string, { label: string; cls: string }> = {
   registered: { label: "등록됨", cls: "san-unknown" },
   preview_pending: { label: "미리보기 대기", cls: "san-degraded" },
   preview_ready: { label: "미리보기 완료", cls: "san-ready" },
@@ -24,8 +24,8 @@ export const JOB_STATE: Record<string, { label: string; cls: string }> = {
 export function batchStatus(s?: string) {
   return BATCH_STATUS[s || ""] || { label: s || "—", cls: "san-unknown" };
 }
-export function jobState(s?: string) {
-  return JOB_STATE[s || ""] || { label: s || "—", cls: "san-unknown" };
+export function requestState(s?: string) {
+  return REQUEST_STATE[s || ""] || { label: s || "—", cls: "san-unknown" };
 }
 
 export function fmtBytes(n?: number | null): string {
@@ -53,15 +53,15 @@ const HEADER_TOKENS = new Set([
 ]);
 
 export interface ParseResult {
-  jobs: BackupJobInput[];
+  requests: BackupRequestInput[];
   errors: string[];
 }
 
 // Parse pasted CSV/TSV: 4 columns `src_storage, src_path, dst_storage, dst_path`.
 // Comma or tab delimited; blank lines and `#` comments skipped; a header row
 // (first field looks like a column name) is ignored.
-export function parseJobsCsv(text: string): ParseResult {
-  const jobs: BackupJobInput[] = [];
+export function parseRequestsCsv(text: string): ParseResult {
+  const requests: BackupRequestInput[] = [];
   const errors: string[] = [];
   const lines = text.split(/\r?\n/);
   lines.forEach((raw, idx) => {
@@ -73,12 +73,12 @@ export function parseJobsCsv(text: string): ParseResult {
       errors.push(`${idx + 1}행: 4개 컬럼 필요 (src_storage,src_path,dst_storage,dst_path)`);
       return;
     }
-    jobs.push({
+    requests.push({
       src_storage: parts[0],
       src_path: parts[1],
       dst_storage: parts[2],
       dst_path: parts[3],
     });
   });
-  return { jobs, errors };
+  return { requests, errors };
 }

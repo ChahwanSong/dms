@@ -4,7 +4,7 @@ import { fmtTime } from "./helpers";
 import StatusCards from "./StatusCards";
 import NodesTable from "./NodesTable";
 import RunsTable from "./RunsTable";
-import JobsTable from "./JobsTable";
+import RequestsTable from "./RequestsTable";
 import AttentionPanel from "./AttentionPanel";
 
 const POLL_MS = 7000;
@@ -49,7 +49,7 @@ export default function Dashboard() {
       <AttentionPanel />
       <NodesTable />
       <RunsTable />
-      <JobsTable />
+      <RequestsTable />
     </div>
   );
 }

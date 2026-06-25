@@ -46,7 +46,7 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
           ))}
         </ul>
       </Card>
-      <Card title="데이터 잡">
+      <Card title="요청">
         <ul className="dash-kv">
           <li>실행 <b>{dj?.by_state?.Running ?? 0}</b></li>
           <li>대기 <b>{dj?.by_state?.Pending ?? 0}</b></li>

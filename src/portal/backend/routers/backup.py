@@ -27,7 +27,7 @@ from ..dms_client import DmsApiError, DmsClient
 from ..security import ROLE_OPERATOR, require_role
 
 
-class BackupJobIn(BaseModel):
+class BackupRequestIn(BaseModel):
     src_storage: str
     src_path: str
     dst_storage: str
@@ -39,7 +39,7 @@ class BatchCreate(BaseModel):
     delete_enabled: bool = False
     options: dict[str, Any] = Field(default_factory=dict)
     note: str | None = None
-    jobs: list[BackupJobIn] = Field(default_factory=list)
+    requests: list[BackupRequestIn] = Field(default_factory=list)
 
 
 def _actor(user: dict[str, Any]) -> str:
@@ -54,9 +54,9 @@ def _clean_rel(path: str) -> str:
     return p
 
 
-def _normalize_jobs(jobs: list[BackupJobIn]) -> list[dict[str, str]]:
+def _normalize_requests(requests: list[BackupRequestIn]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    for i, j in enumerate(jobs):
+    for i, j in enumerate(requests):
         try:
             rows.append(
                 {
@@ -67,10 +67,10 @@ def _normalize_jobs(jobs: list[BackupJobIn]) -> list[dict[str, str]]:
                 }
             )
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"job {i + 1}: {exc}") from exc
+            raise HTTPException(status_code=422, detail=f"request {i + 1}: {exc}") from exc
         if not rows[-1]["src_storage"] or not rows[-1]["dst_storage"]:
             raise HTTPException(
-                status_code=422, detail=f"job {i + 1}: storage name required"
+                status_code=422, detail=f"request {i + 1}: storage name required"
             )
     return rows
 
@@ -90,7 +90,7 @@ def backup_router(settings: Settings) -> APIRouter:
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         batch_id = uuid.uuid4().hex
-        rows = _normalize_jobs(payload.jobs)
+        rows = _normalize_requests(payload.requests)
         await db.create_batch(
             batch_id=batch_id,
             name=payload.name.strip(),
@@ -100,7 +100,7 @@ def backup_router(settings: Settings) -> APIRouter:
             created_by=_actor(user),
             note=payload.note,
         )
-        added = await db.add_jobs(batch_id, rows)
+        added = await db.add_requests(batch_id, rows)
         return {"id": batch_id, "added": added}
 
     @router.get("/batches")
@@ -132,10 +132,10 @@ def backup_router(settings: Settings) -> APIRouter:
         await db.delete_batch(batch_id)
         return {"id": batch_id, "deleted": True}
 
-    @router.post("/batches/{batch_id}/jobs")
-    async def add_jobs(
+    @router.post("/batches/{batch_id}/requests")
+    async def add_requests(
         batch_id: str,
-        jobs: list[BackupJobIn],
+        requests: list[BackupRequestIn],
         db: Database = Depends(get_db),
     ) -> dict[str, Any]:
         batch = await db.get_batch(batch_id)
@@ -143,21 +143,21 @@ def backup_router(settings: Settings) -> APIRouter:
             raise HTTPException(status_code=404, detail="batch_not_found")
         if batch["status"] != "draft":
             raise HTTPException(
-                status_code=409, detail="jobs can only be added to a draft batch"
+                status_code=409, detail="requests can only be added to a draft batch"
             )
-        rows = _normalize_jobs(jobs)
-        added = await db.add_jobs(batch_id, rows)
+        rows = _normalize_requests(requests)
+        added = await db.add_requests(batch_id, rows)
         return {"id": batch_id, "added": added}
 
-    @router.get("/batches/{batch_id}/jobs")
-    async def list_jobs(
+    @router.get("/batches/{batch_id}/requests")
+    async def list_requests(
         batch_id: str,
         state: str | None = Query(default=None),
         limit: int = Query(default=200, le=2000),
         offset: int = Query(default=0, ge=0),
         db: Database = Depends(get_db),
     ) -> list[dict[str, Any]]:
-        return await db.list_jobs(batch_id, state=state, limit=limit, offset=offset)
+        return await db.list_requests(batch_id, state=state, limit=limit, offset=offset)
 
     @router.post("/batches/{batch_id}:preview")
     async def preview(
@@ -172,7 +172,7 @@ def backup_router(settings: Settings) -> APIRouter:
             )
         counts = await db.batch_state_counts(batch_id)
         if not counts.get("registered"):
-            raise HTTPException(status_code=422, detail="no registered jobs to preview")
+            raise HTTPException(status_code=422, detail="no registered requests to preview")
         await db.set_batch_status(batch_id, "previewing")
         return {"id": batch_id, "status": "previewing"}
 
@@ -190,7 +190,7 @@ def backup_router(settings: Settings) -> APIRouter:
         counts = await db.batch_state_counts(batch_id)
         if not counts.get("preview_ready"):
             raise HTTPException(
-                status_code=422, detail="no preview_ready jobs to run"
+                status_code=422, detail="no preview_ready requests to run"
             )
         await db.set_batch_status(batch_id, "running")
         return {"id": batch_id, "status": "running", "to_run": counts["preview_ready"]}
@@ -206,7 +206,7 @@ def backup_router(settings: Settings) -> APIRouter:
         if not batch:
             raise HTTPException(status_code=404, detail="batch_not_found")
         await db.set_batch_status(batch_id, "cancelled")
-        live = await db.cancel_jobs(batch_id)
+        live = await db.cancel_requests(batch_id)
         actor = f"{settings.backup_actor_prefix}{_actor(user)}"
         cancelled = 0
         for job_id in live:

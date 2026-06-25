@@ -9,7 +9,7 @@
 - `4.dms-dm-api.md`: Data Management `scan`/`sync`/`rm` API (operations 조회 포함)
 - `5.dms-portal-setup.md`: DMS Portal(운영자/사용자 웹 UI) 설치·구성. DMS API만 소비하는 별도 앱이며 DMS 설치(아래) 이후 진행한다.
 - `6.dms-portal-data-backup.md`: Portal 데이터 백업(DM `sync` 미러 백업) 운영. 포탈 DB(`PORTAL_DB_URL`)·배치 미리보기/승인/실행·경로 규칙을 다룬다.
-- `7.dms-portal-dashboard.md`: Portal 종합 운영 대시보드(읽기 전용). 스케줄러·큐/작업·worker node·데이터 잡·조치 필요 패널, 신규 `operations/data-jobs/summary` 엔드포인트.
+- `7.dms-portal-dashboard.md`: Portal 종합 운영 대시보드(읽기 전용). 스케줄러·큐/작업·worker node·요청·조치 필요 패널, 신규 `operations/data-jobs/summary` 엔드포인트.
 
 구성 대상 컴포넌트:
 

@@ -28,7 +28,7 @@ export default function UserApp({
         <div className="card">
           <h2>환영합니다, {user.username} 님</h2>
           <p className="muted">
-            사용자 인터페이스입니다. 본인 스토리지·요청·데이터 잡에 대한 셀프서비스
+            사용자 인터페이스입니다. 본인 스토리지·요청에 대한 셀프서비스
             기능이 이후 단계에서 추가됩니다.
           </p>
           {error && <p className="error">{error}</p>}

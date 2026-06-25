@@ -118,8 +118,8 @@ def dashboard_router(settings: Settings) -> APIRouter:
         )
         return {"active": active, "stale": stale}
 
-    @router.get("/jobs")
-    async def jobs(
+    @router.get("/requests")
+    async def requests(
         state: str | None = Query(default=None),
         operation: str | None = Query(default=None),
         storage_name: str | None = Query(default=None),

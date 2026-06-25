@@ -75,7 +75,7 @@ class Settings:
 
     # --- portal DB (Postgres) -------------------------------------------
     # The portal's OWN persistence (PORTAL_DB_URL, e.g. the DMS Postgres with a
-    # dedicated `db_schema`). Holds operator logins + data-backup batches/jobs.
+    # dedicated `db_schema`). Holds operator logins + data-backup batches/requests.
     # None => no DB: login falls back to the env store and the data-backup
     # feature is disabled (its routes 503).
     db_url: str | None = None

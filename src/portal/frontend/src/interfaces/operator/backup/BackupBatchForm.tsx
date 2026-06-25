@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { operatorApi } from "../../../api";
-import { parseJobsCsv } from "./helpers";
+import { parseRequestsCsv } from "./helpers";
 import { errMsg } from "./BackupBatches";
 
 const SAMPLE =
-  "# src_storage, src_path, dst_storage, dst_path  (한 줄에 한 잡, 쉼표 또는 탭)\n" +
+  "# src_storage, src_path, dst_storage, dst_path  (한 줄에 한 요청, 쉼표 또는 탭)\n" +
   "cephfs-dms, project/alpha, cephfs-secondary, backup/alpha\n" +
   "cephfs-dms, project/beta, cephfs-secondary, backup/beta";
 
@@ -24,7 +24,7 @@ export default function BackupBatchForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const parsed = useMemo(() => parseJobsCsv(csv), [csv]);
+  const parsed = useMemo(() => parseRequestsCsv(csv), [csv]);
 
   async function submit() {
     setError(null);
@@ -32,8 +32,8 @@ export default function BackupBatchForm({
       setError("배치 이름은 필수입니다.");
       return;
     }
-    if (parsed.jobs.length === 0) {
-      setError("잡을 하나 이상 입력하세요 (CSV).");
+    if (parsed.requests.length === 0) {
+      setError("요청을 하나 이상 입력하세요 (CSV).");
       return;
     }
     if (parsed.errors.length > 0) {
@@ -54,7 +54,7 @@ export default function BackupBatchForm({
         name: name.trim(),
         delete_enabled: deleteEnabled,
         note: note.trim() || null,
-        jobs: parsed.jobs,
+        requests: parsed.requests,
       });
       onCreated(res.id, res.added);
     } catch (e) {
@@ -101,7 +101,7 @@ export default function BackupBatchForm({
 
           <div className="tmpl-bar">
             <span className="muted small">
-              잡 목록 (CSV/TSV): <code>src_storage, src_path, dst_storage, dst_path</code> — 한 줄에 한 잡
+              요청 목록 (CSV/TSV): <code>src_storage, src_path, dst_storage, dst_path</code> — 한 줄에 한 요청
             </span>
             <span className="spacer" />
             <button
@@ -122,7 +122,7 @@ export default function BackupBatchForm({
           />
           <div className="form-hints muted small">
             <span>
-              인식된 잡: <strong>{parsed.jobs.length.toLocaleString()}</strong>개
+              인식된 요청: <strong>{parsed.requests.length.toLocaleString()}</strong>개
               {parsed.errors.length > 0 && (
                 <span className="err-num"> · 오류 {parsed.errors.length}건</span>
               )}
@@ -144,7 +144,7 @@ export default function BackupBatchForm({
               취소
             </button>
             <button className="primary" onClick={submit} disabled={busy}>
-              {busy ? "생성 중…" : `배치 생성 (${parsed.jobs.length}개 잡)`}
+              {busy ? "생성 중…" : `배치 생성 (${parsed.requests.length}개 요청)`}
             </button>
           </div>
         </div>

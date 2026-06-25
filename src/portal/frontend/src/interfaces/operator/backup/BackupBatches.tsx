@@ -71,7 +71,7 @@ export default function BackupBatches() {
       <p className="muted small">
         DMS DM sync로 스토리지 간 미러 백업을 수행합니다(선택적 --delete). 배치를 등록 →
         <strong> 미리보기</strong>(비파괴 dry-run)로 영향 확인 → <strong>승인</strong> 후 실행됩니다.
-        잡은 root로 실행되어 원본 소유권을 보존합니다.
+        요청은 root로 실행되어 원본 소유권을 보존합니다.
       </p>
 
       {notice && <div className="banner ok">{notice}</div>}
@@ -87,7 +87,7 @@ export default function BackupBatches() {
             <tr>
               <th>이름</th>
               <th>상태</th>
-              <th>잡</th>
+              <th>요청</th>
               <th>성공 / 실패</th>
               <th>--delete</th>
               <th>생성</th>
@@ -107,7 +107,7 @@ export default function BackupBatches() {
                   <td data-label="상태">
                     <span className={`san ${st.cls}`}>{st.label}</span>
                   </td>
-                  <td data-label="잡">{b.job_count ?? 0}</td>
+                  <td data-label="요청">{b.request_count ?? 0}</td>
                   <td data-label="성공 / 실패">
                     <span className="ok-num">{b.succeeded_count ?? 0}</span> /{" "}
                     <span className="err-num">{b.failed_count ?? 0}</span>
@@ -140,7 +140,7 @@ export default function BackupBatches() {
           onClose={() => setShowForm(false)}
           onCreated={(id, added) => {
             setShowForm(false);
-            setNotice(`배치 생성됨 (잡 ${added}개). 미리보기를 시작하세요.`);
+            setNotice(`배치 생성됨 (요청 ${added}개). 미리보기를 시작하세요.`);
             setOpenId(id);
           }}
         />

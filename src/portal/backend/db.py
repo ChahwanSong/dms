@@ -6,8 +6,8 @@ default ``portal``) of PORTAL_DB_URL. On the testbed this is the DMS Postgres
 schema is used; switch PORTAL_DB_URL to a dedicated ``dms_portal`` db once an
 admin creates one. Holds:
   - operator_users : id/password login store (seeded from PORTAL_OPERATOR_USERS)
-  - backup_batches : a registered list of sync jobs (data-backup feature)
-  - backup_jobs    : the individual sync jobs of a batch (up to a few thousand)
+  - backup_batches  : a registered list of sync requests (data-backup feature)
+  - backup_requests : the individual sync requests of a batch (up to a few thousand)
 
 Schema + tables are created on startup (idempotent). Passwords are salted PBKDF2
 hashes (stdlib), never plaintext.
@@ -52,8 +52,8 @@ def verify_password(password: str, stored: str) -> bool:
 
 # --- terminal / phase state sets --------------------------------------------
 
-JOB_TERMINAL = {"succeeded", "failed", "cancelled"}
-JOB_PREVIEW_DONE = {"preview_ready", "preview_failed", "cancelled"}
+REQUEST_TERMINAL = {"succeeded", "failed", "cancelled"}
+REQUEST_PREVIEW_DONE = {"preview_ready", "preview_failed", "cancelled"}
 
 
 def _ddl(schema: str) -> list[str]:
@@ -77,7 +77,7 @@ def _ddl(schema: str) -> list[str]:
             created_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now()
         )""",
-        f"""CREATE TABLE IF NOT EXISTS {s}.backup_jobs (
+        f"""CREATE TABLE IF NOT EXISTS {s}.backup_requests (
             id bigserial PRIMARY KEY,
             batch_id text NOT NULL REFERENCES {s}.backup_batches(id) ON DELETE CASCADE,
             src_storage text NOT NULL,
@@ -94,8 +94,8 @@ def _ddl(schema: str) -> list[str]:
             created_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now()
         )""",
-        f"CREATE INDEX IF NOT EXISTS backup_jobs_batch_state "
-        f"ON {s}.backup_jobs(batch_id, state)",
+        f"CREATE INDEX IF NOT EXISTS backup_requests_batch_state "
+        f"ON {s}.backup_requests(batch_id, state)",
     ]
 
 
@@ -195,10 +195,10 @@ class Database:
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT b.*,
-                    (SELECT count(*) FROM backup_jobs j WHERE j.batch_id=b.id) AS job_count,
-                    (SELECT count(*) FROM backup_jobs j WHERE j.batch_id=b.id
+                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id) AS request_count,
+                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
                         AND j.state='succeeded') AS succeeded_count,
-                    (SELECT count(*) FROM backup_jobs j WHERE j.batch_id=b.id
+                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
                         AND j.state IN ('failed','preview_failed')) AS failed_count
                    FROM backup_batches b ORDER BY b.created_at DESC"""
             )
@@ -214,7 +214,7 @@ class Database:
     async def batch_state_counts(self, batch_id: str) -> dict[str, int]:
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT state, count(*) AS n FROM backup_jobs WHERE batch_id=%s "
+                "SELECT state, count(*) AS n FROM backup_requests WHERE batch_id=%s "
                 "GROUP BY state",
                 (batch_id,),
             )
@@ -226,7 +226,7 @@ class Database:
             cur = await conn.execute(
                 "SELECT coalesce(sum((preview->>'files')::bigint),0) AS files, "
                 "coalesce(sum((preview->>'bytes')::bigint),0) AS bytes "
-                "FROM backup_jobs WHERE batch_id=%s AND state='preview_ready'",
+                "FROM backup_requests WHERE batch_id=%s AND state='preview_ready'",
                 (batch_id,),
             )
             row = await cur.fetchone()
@@ -251,16 +251,16 @@ class Database:
             )
             return await cur.fetchall()
 
-    # --- backup jobs ----------------------------------------------------
+    # --- backup requests ------------------------------------------------
 
-    async def add_jobs(self, batch_id: str, rows: list[dict[str, str]]) -> int:
-        """Bulk-insert registered jobs. rows: src_storage/src_path/dst_storage/dst_path."""
+    async def add_requests(self, batch_id: str, rows: list[dict[str, str]]) -> int:
+        """Bulk-insert registered requests. rows: src_storage/src_path/dst_storage/dst_path."""
         if not rows:
             return 0
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(
-                    "INSERT INTO backup_jobs"
+                    "INSERT INTO backup_requests"
                     "(batch_id,src_storage,src_path,dst_storage,dst_path,state) "
                     "VALUES (%s,%s,%s,%s,%s,'registered')",
                     [
@@ -276,7 +276,7 @@ class Database:
                 )
         return len(rows)
 
-    async def list_jobs(
+    async def list_requests(
         self,
         batch_id: str,
         *,
@@ -288,41 +288,41 @@ class Database:
         params: list[Any] = [batch_id] + ([state] if state else []) + [limit, offset]
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                f"SELECT * FROM backup_jobs {clause} ORDER BY id LIMIT %s OFFSET %s",
+                f"SELECT * FROM backup_requests {clause} ORDER BY id LIMIT %s OFFSET %s",
                 params,
             )
             return await cur.fetchall()
 
-    async def claim_jobs(
+    async def claim_requests(
         self, batch_id: str, from_state: str, to_state: str, limit: int
     ) -> list[dict[str, Any]]:
-        """Atomically move up to `limit` jobs from from_state -> to_state, returning them."""
+        """Atomically move up to `limit` requests from from_state -> to_state, returning them."""
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "UPDATE backup_jobs SET state=%s, updated_at=now() WHERE id IN "
-                "(SELECT id FROM backup_jobs WHERE batch_id=%s AND state=%s "
+                "UPDATE backup_requests SET state=%s, updated_at=now() WHERE id IN "
+                "(SELECT id FROM backup_requests WHERE batch_id=%s AND state=%s "
                 " ORDER BY id FOR UPDATE SKIP LOCKED LIMIT %s) RETURNING *",
                 (to_state, batch_id, from_state, limit),
             )
             return await cur.fetchall()
 
-    async def jobs_in_states(
+    async def requests_in_states(
         self, batch_id: str, states: list[str]
     ) -> list[dict[str, Any]]:
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT * FROM backup_jobs WHERE batch_id=%s AND state = ANY(%s) "
+                "SELECT * FROM backup_requests WHERE batch_id=%s AND state = ANY(%s) "
                 "ORDER BY id",
                 (batch_id, states),
             )
             return await cur.fetchall()
 
-    async def cancel_jobs(self, batch_id: str) -> list[str]:
-        """Cancel all non-terminal jobs of a batch; return the dms_job_ids that
+    async def cancel_requests(self, batch_id: str) -> list[str]:
+        """Cancel all non-terminal requests of a batch; return the dms_job_ids that
         were in flight (so the caller can cancel them in DMS too)."""
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "UPDATE backup_jobs SET state='cancelled', updated_at=now() "
+                "UPDATE backup_requests SET state='cancelled', updated_at=now() "
                 "WHERE batch_id=%s AND state NOT IN "
                 "('succeeded','failed','cancelled','preview_failed') "
                 "RETURNING dms_job_id",
@@ -330,7 +330,7 @@ class Database:
             )
             return [r["dms_job_id"] for r in await cur.fetchall() if r["dms_job_id"]]
 
-    async def update_job(self, job_id: int, **fields: Any) -> None:
+    async def update_request(self, job_id: int, **fields: Any) -> None:
         if not fields:
             return
         cols = []
@@ -341,6 +341,6 @@ class Database:
         params.append(job_id)
         async with self.pool.connection() as conn:
             await conn.execute(
-                f"UPDATE backup_jobs SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
+                f"UPDATE backup_requests SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
                 params,
             )

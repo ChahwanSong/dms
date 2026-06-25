@@ -1,21 +1,21 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type DashJob } from "../../../api";
-import { stateCls, JOB_STATE, fmtAgo } from "./helpers";
+import { operatorApi, type DashRequest } from "../../../api";
+import { stateCls, REQUEST_STATE, fmtAgo } from "./helpers";
 import Section from "./Section";
 
 const STATES = ["", "Running", "Pending", "ConfirmPending", "Succeeded", "Failed"];
 const OPS = ["", "data.sync", "data.scan", "data.rm"];
 
-export default function JobsTable() {
-  const [rows, setRows] = useState<DashJob[]>([]);
+export default function RequestsTable() {
+  const [rows, setRows] = useState<DashRequest[]>([]);
   const [state, setState] = useState("");
   const [op, setOp] = useState("");
   useEffect(() => {
-    operatorApi.dashboard.jobs({ state: state || undefined, operation: op || undefined, limit: 100 })
+    operatorApi.dashboard.requests({ state: state || undefined, operation: op || undefined, limit: 100 })
       .then(setRows).catch(() => setRows([]));
   }, [state, op]);
   return (
-    <Section title="데이터 잡" badge={<span className="muted small">({rows.length})</span>}>
+    <Section title="요청" badge={<span className="muted small">({rows.length})</span>}>
       <div className="inv-actions dash-filters">
         <select value={state} onChange={(e) => setState(e.target.value)}>
           {STATES.map((s) => <option key={s} value={s}>{s || "모든 상태"}</option>)}
@@ -33,7 +33,7 @@ export default function JobsTable() {
               <td data-label="job" className="mono small">{j.job_id.slice(0, 12)}…</td>
               <td data-label="op">{j.operation}</td>
               <td data-label="storage" className="small">{j.storage_name}</td>
-              <td data-label="상태"><span className={`san ${stateCls(JOB_STATE, j.state)}`}>{j.state}</span></td>
+              <td data-label="상태"><span className={`san ${stateCls(REQUEST_STATE, j.state)}`}>{j.state}</span></td>
               <td data-label="tool" className="small">{j.selected_tool || "—"}</td>
               <td data-label="갱신" className="muted small">{fmtAgo(j.updated_at)}</td>
             </tr>

@@ -167,7 +167,7 @@ export interface BackupBatch {
   note?: string | null;
   created_at?: string;
   updated_at?: string;
-  job_count?: number;
+  request_count?: number;
   succeeded_count?: number;
   failed_count?: number;
   state_counts?: Record<string, number>;
@@ -182,7 +182,7 @@ export interface BackupPreview {
   tool?: string | null;
 }
 
-export interface BackupJob {
+export interface BackupRequest {
   id: number;
   batch_id: string;
   src_storage: string;
@@ -197,7 +197,7 @@ export interface BackupJob {
   updated_at?: string;
 }
 
-export interface BackupJobInput {
+export interface BackupRequestInput {
   src_storage: string;
   src_path: string;
   dst_storage: string;
@@ -209,7 +209,7 @@ export interface BatchCreateInput {
   delete_enabled: boolean;
   options?: Record<string, unknown>;
   note?: string | null;
-  jobs?: BackupJobInput[];
+  requests?: BackupRequestInput[];
 }
 
 // --- dashboard ---------------------------------------------------------
@@ -255,7 +255,7 @@ export interface RunRow {
   resource_key?: string;
 }
 
-export interface DashJob {
+export interface DashRequest {
   job_id: string; operation: string; storage_name: string; state: string;
   selected_tool?: string | null; updated_at?: string;
 }
@@ -308,19 +308,19 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}`,
         { method: "DELETE" },
       ),
-    addJobs: (id: string, jobs: BackupJobInput[]) =>
+    addRequests: (id: string, requests: BackupRequestInput[]) =>
       request<{ id: string; added: number }>(
-        `${BK}/${encodeURIComponent(id)}/jobs`,
-        { method: "POST", body: JSON.stringify(jobs) },
+        `${BK}/${encodeURIComponent(id)}/requests`,
+        { method: "POST", body: JSON.stringify(requests) },
       ),
-    jobs: (id: string, opts?: { state?: string; limit?: number; offset?: number }) => {
+    requests: (id: string, opts?: { state?: string; limit?: number; offset?: number }) => {
       const q = new URLSearchParams();
       if (opts?.state) q.set("state", opts.state);
       if (opts?.limit != null) q.set("limit", String(opts.limit));
       if (opts?.offset != null) q.set("offset", String(opts.offset));
       const qs = q.toString();
-      return request<BackupJob[]>(
-        `${BK}/${encodeURIComponent(id)}/jobs${qs ? `?${qs}` : ""}`,
+      return request<BackupRequest[]>(
+        `${BK}/${encodeURIComponent(id)}/requests${qs ? `?${qs}` : ""}`,
       );
     },
     preview: (id: string) =>
@@ -349,14 +349,14 @@ export const operatorApi = {
       request<{ active: Section<RunRow[]>; stale: Section<RunRow[]> }>(
         "/api/operator/dashboard/runs",
       ),
-    jobs: (opts?: { state?: string; operation?: string; storage_name?: string; limit?: number }) => {
+    requests: (opts?: { state?: string; operation?: string; storage_name?: string; limit?: number }) => {
       const q = new URLSearchParams();
       if (opts?.state) q.set("state", opts.state);
       if (opts?.operation) q.set("operation", opts.operation);
       if (opts?.storage_name) q.set("storage_name", opts.storage_name);
       if (opts?.limit != null) q.set("limit", String(opts.limit));
       const qs = q.toString();
-      return request<DashJob[]>(`/api/operator/dashboard/jobs${qs ? `?${qs}` : ""}`);
+      return request<DashRequest[]>(`/api/operator/dashboard/requests${qs ? `?${qs}` : ""}`);
     },
     attention: () =>
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
