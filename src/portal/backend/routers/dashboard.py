@@ -104,6 +104,13 @@ def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
     jobs = v.get("jobs") or []
     sched = v.get("scheduler") or []
     active = [j for j in jobs if (j.get("phase") or "") not in _VOLCANO_TERMINAL]
+
+    def _ok(p: dict[str, Any]) -> bool:
+        # A one-shot init Job pod (e.g. volcano-admission-init) ends Succeeded and
+        # is not "ready" yet is perfectly healthy — count it as ok, matching the
+        # detail panel, so a completed init never reads as a degraded component.
+        return bool(p.get("ready")) or p.get("phase") == "Succeeded"
+
     components: dict[str, dict[str, int]] = {}
     for p in sched:
         name = p.get("name") or ""
@@ -117,7 +124,7 @@ def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
             role = "other"
         slot = components.setdefault(role, {"ready": 0, "total": 0})
         slot["total"] += 1
-        if p.get("ready"):
+        if _ok(p):
             slot["ready"] += 1
     errors = v.get("errors") or {}
     return {
@@ -125,7 +132,7 @@ def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
         "queues_open": sum(1 for q in queues if q.get("state") == "Open"),
         "jobs_active": len(active),
         "jobs_total": len(jobs),
-        "ready": sum(1 for p in sched if p.get("ready")),
+        "ready": sum(1 for p in sched if _ok(p)),
         "total": len(sched),
         "components": components,
         "has_errors": any(errors.get(k) for k in ("queues", "jobs", "scheduler")),
