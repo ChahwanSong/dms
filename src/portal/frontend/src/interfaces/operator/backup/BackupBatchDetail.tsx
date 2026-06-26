@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { operatorApi, type BackupBatch, type BackupPreview, type BackupRequest } from "../../../api";
 import { batchStatus, requestState, fmtBytes } from "./helpers";
 import { errMsg } from "./BackupBatches";
 import BackupBatchForm from "./BackupBatchForm";
@@ -10,12 +10,24 @@ const STATE_ORDER = [
   "registered",
   "preview_pending",
   "preview_ready",
+  "approved",
   "preview_failed",
   "running",
   "succeeded",
   "failed",
   "cancelled",
 ];
+const TERMINAL = ["succeeded", "failed", "cancelled", "preview_failed"];
+
+function previewDetail(p: BackupPreview): string {
+  const parts: string[] = [];
+  if (p.files != null) parts.push(`파일 ${p.files.toLocaleString()}`);
+  if (p.dirs != null) parts.push(`디렉터리 ${p.dirs.toLocaleString()}`);
+  if (p.bytes != null) parts.push(`크기 ${fmtBytes(p.bytes)}`);
+  if (p.errors != null) parts.push(`에러 ${p.errors}`);
+  if (p.tool) parts.push(`도구 ${p.tool}`);
+  return parts.join(" · ") || "상세 없음";
+}
 
 export default function BackupBatchDetail({
   batchId,
@@ -35,6 +47,8 @@ export default function BackupBatchDetail({
   const [showEdit, setShowEdit] = useState(false);
   const [focusReq, setFocusReq] = useState(false);
   const [editingReq, setEditingReq] = useState<BackupRequest | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   const loadJobs = useCallback(
     async (reset: boolean) => {
@@ -87,6 +101,21 @@ export default function BackupBatchDetail({
     }
   }
 
+  function toggleSelect(id: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+  function toggleExpand(id: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
   async function removeRequest(j: BackupRequest) {
     if (
       !window.confirm(
@@ -95,6 +124,16 @@ export default function BackupBatchDetail({
     )
       return;
     await act(() => operatorApi.backup.deleteRequest(batchId, j.id), "요청을 삭제했습니다.");
+  }
+
+  async function cancelRow(j: BackupRequest) {
+    if (
+      !window.confirm(
+        `요청을 취소합니다.\n${j.src_storage}:${j.src_path} → ${j.dst_storage}:${j.dst_path}`,
+      )
+    )
+      return;
+    await act(() => operatorApi.backup.cancelRequest(batchId, j.id), "요청을 취소했습니다.");
   }
 
   if (!batch) {
@@ -112,6 +151,34 @@ export default function BackupBatchDetail({
   const counts = batch.state_counts || {};
   const totals = batch.preview_totals;
   const status = batch.status;
+  const deleteConfirm = "--delete 배치입니다. 승인 항목은 dst에서 src에 없는 파일을 삭제합니다. 실행할까요?";
+
+  // selective approval is available while a batch is previewed or running and
+  // still has undecided preview_ready requests.
+  const canSelect = (status === "previewed" || status === "running") && (counts.preview_ready ?? 0) > 0;
+  const selectedReady = jobs.filter((j) => j.state === "preview_ready" && selected.has(j.id));
+  const cols = 5 + (canSelect ? 1 : 0) + 1;
+
+  function approveSelected() {
+    const ids = selectedReady.map((j) => j.id);
+    if (ids.length === 0) return;
+    if (batch!.delete_enabled && !window.confirm(deleteConfirm)) return;
+    act(async () => {
+      await operatorApi.backup.approve(batchId, { request_ids: ids });
+      setSelected(new Set());
+    }, `${ids.length}개 승인 — 실행을 시작합니다.`);
+  }
+  function approveAll() {
+    if (batch!.delete_enabled && !window.confirm(deleteConfirm)) return;
+    act(async () => {
+      await operatorApi.backup.approve(batchId);
+      setSelected(new Set());
+    }, "전체 승인 — 실행을 시작합니다.");
+  }
+  function closeBatch() {
+    if (!window.confirm("배치를 마감합니다. 승인하지 않은 '미리보기 완료' 항목은 제외됩니다.")) return;
+    act(() => operatorApi.backup.close(batchId), "배치를 마감했습니다.");
+  }
 
   return (
     <div className="inventory">
@@ -148,36 +215,29 @@ export default function BackupBatchDetail({
               >
                 + 요청
               </button>
+              <button
+                className="primary"
+                disabled={busy}
+                onClick={() =>
+                  act(() => operatorApi.backup.preview(batchId), "미리보기를 시작했습니다.")
+                }
+              >
+                미리보기 시작
+              </button>
             </>
           )}
-          {(status === "draft" || status === "previewed") && (
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={() =>
-                act(() => operatorApi.backup.preview(batchId), "미리보기를 시작했습니다.")
-              }
-            >
-              {status === "previewed" ? "다시 미리보기" : "미리보기 시작"}
-            </button>
-          )}
-          {status === "previewed" && (
-            <button
-              className="primary"
-              disabled={busy || !counts.preview_ready}
-              onClick={() => {
-                if (
-                  batch.delete_enabled &&
-                  !window.confirm(
-                    "--delete 배치입니다. 승인하면 dst에서 src에 없는 파일이 삭제됩니다. 실행할까요?",
-                  )
-                )
-                  return;
-                act(() => operatorApi.backup.approve(batchId), "승인 — 실행을 시작합니다.");
-              }}
-            >
-              승인 후 실행
-            </button>
+          {canSelect && (
+            <>
+              <button className="primary" disabled={busy || selectedReady.length === 0} onClick={approveSelected}>
+                선택 승인 ({selectedReady.length})
+              </button>
+              <button className="ghost" disabled={busy} onClick={approveAll}>
+                전체 승인
+              </button>
+              <button className="ghost" disabled={busy} onClick={closeBatch}>
+                마감
+              </button>
+            </>
           )}
           {(status === "previewing" || status === "running" || status === "previewed") && (
             <button
@@ -188,7 +248,7 @@ export default function BackupBatchDetail({
                 act(() => operatorApi.backup.cancel(batchId), "배치를 취소했습니다.");
               }}
             >
-              취소
+              배치 취소
             </button>
           )}
         </div>
@@ -229,58 +289,95 @@ export default function BackupBatchDetail({
       <table className="grid">
         <thead>
           <tr>
+            {canSelect && <th></th>}
             <th>출발 (src)</th>
             <th>대상 (dst)</th>
             <th>상태</th>
             <th>미리보기 (파일 · 크기)</th>
             <th>비고</th>
-            {status === "draft" && <th></th>}
+            <th></th>
           </tr>
         </thead>
         <tbody>
           {jobs.length === 0 ? (
             <tr>
-              <td colSpan={status === "draft" ? 6 : 5} className="muted">
+              <td colSpan={cols} className="muted">
                 {stateFilter ? "해당 상태의 요청이 없습니다." : "요청이 없습니다."}
               </td>
             </tr>
           ) : (
             jobs.map((j) => {
               const s = requestState(j.state);
+              const cancellable =
+                status !== "draft" && j.state !== "registered" && !TERMINAL.includes(j.state);
               return (
-                <tr key={j.id}>
-                  <td data-label="출발" className="mono small">
-                    {j.src_storage}:{j.src_path}
-                  </td>
-                  <td data-label="대상" className="mono small">
-                    {j.dst_storage}:{j.dst_path}
-                  </td>
-                  <td data-label="상태">
-                    <span className={`san ${s.cls}`}>{s.label}</span>
-                  </td>
-                  <td data-label="미리보기" className="muted small">
-                    {j.preview
-                      ? `${(j.preview.files ?? 0).toLocaleString()} · ${fmtBytes(j.preview.bytes)}`
-                      : "—"}
-                  </td>
-                  <td data-label="비고" className="muted small">
-                    {j.error || (j.dms_job_id ? j.dms_job_id.slice(0, 14) + "…" : "—")}
-                  </td>
-                  {status === "draft" && (
-                    <td className="row-actions">
-                      <button className="mini" onClick={() => setEditingReq(j)}>
-                        수정
-                      </button>
-                      <button
-                        className="mini danger"
-                        onClick={() => removeRequest(j)}
-                        disabled={busy}
-                      >
-                        삭제
-                      </button>
+                <Fragment key={j.id}>
+                  <tr>
+                    {canSelect && (
+                      <td>
+                        {j.state === "preview_ready" && (
+                          <input
+                            type="checkbox"
+                            checked={selected.has(j.id)}
+                            onChange={() => toggleSelect(j.id)}
+                            aria-label="승인 선택"
+                          />
+                        )}
+                      </td>
+                    )}
+                    <td data-label="출발" className="mono small">
+                      {j.src_storage}:{j.src_path}
                     </td>
+                    <td data-label="대상" className="mono small">
+                      {j.dst_storage}:{j.dst_path}
+                    </td>
+                    <td data-label="상태">
+                      <span className={`san ${s.cls}`}>{s.label}</span>
+                    </td>
+                    <td data-label="미리보기" className="muted small">
+                      {j.preview
+                        ? `${(j.preview.files ?? 0).toLocaleString()} · ${fmtBytes(j.preview.bytes)}`
+                        : "—"}
+                    </td>
+                    <td data-label="비고" className="muted small">
+                      {j.error || (j.dms_job_id ? j.dms_job_id.slice(0, 14) + "…" : "—")}
+                    </td>
+                    <td className="row-actions">
+                      {status === "draft" ? (
+                        <>
+                          <button className="mini" onClick={() => setEditingReq(j)}>
+                            수정
+                          </button>
+                          <button className="mini danger" onClick={() => removeRequest(j)} disabled={busy}>
+                            삭제
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          {j.preview && (
+                            <button className="mini" onClick={() => toggleExpand(j.id)}>
+                              {expanded.has(j.id) ? "접기" : "상세"}
+                            </button>
+                          )}
+                          {cancellable && (
+                            <button className="mini danger" onClick={() => cancelRow(j)} disabled={busy}>
+                              취소
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                  {expanded.has(j.id) && j.preview && (
+                    <tr className="detail-row">
+                      <td colSpan={cols} className="muted small">
+                        {previewDetail(j.preview)}
+                        {j.dms_job_id ? ` · job ${j.dms_job_id}` : ""}
+                        {j.error ? ` · ${j.error}` : ""}
+                      </td>
+                    </tr>
                   )}
-                </tr>
+                </Fragment>
               );
             })
           )}

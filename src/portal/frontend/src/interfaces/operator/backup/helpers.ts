@@ -14,6 +14,7 @@ export const REQUEST_STATE: Record<string, { label: string; cls: string }> = {
   registered: { label: "등록됨", cls: "san-unknown" },
   preview_pending: { label: "미리보기 대기", cls: "san-degraded" },
   preview_ready: { label: "미리보기 완료", cls: "san-ready" },
+  approved: { label: "승인됨", cls: "san-degraded" },
   preview_failed: { label: "미리보기 실패", cls: "san-failed" },
   running: { label: "실행 중", cls: "san-degraded" },
   succeeded: { label: "성공", cls: "san-ready" },

@@ -214,10 +214,11 @@ class BackupOrchestrator:
         actor = self._actor(batch)
         running = await self._db.requests_in_states(bid, ["running"])
 
-        # 1) confirm preview_ready jobs up to the cap.
+        # 1) confirm operator-approved jobs up to the cap (selective approval:
+        #    preview_ready awaits a decision, only 'approved' gets executed).
         slots = max(0, self._settings.backup_concurrency - len(running))
         if slots:
-            ready = await self._db.list_requests(bid, state="preview_ready", limit=slots)
+            ready = await self._db.list_requests(bid, state="approved", limit=slots)
             for job in ready:
                 await self._confirm_one(job, actor)
             running = await self._db.requests_in_states(bid, ["running"])
@@ -242,10 +243,15 @@ class BackupOrchestrator:
                     job["id"], state="failed", error=_reason(dj)
                 )
 
-        # 3) advance the batch once nothing is left to confirm/run.
+        # 3) advance once nothing is approved/running: return to 'previewed' if
+        #    undecided preview_ready remain (operator may approve more in stages),
+        #    otherwise the batch is done.
         counts = await self._db.batch_state_counts(bid)
-        if not counts.get("preview_ready") and not counts.get("running"):
-            await self._db.set_batch_status(bid, "done")
+        if not counts.get("approved") and not counts.get("running"):
+            if counts.get("preview_ready"):
+                await self._db.set_batch_status(bid, "previewed")
+            else:
+                await self._db.set_batch_status(bid, "done")
 
     async def _confirm_one(self, job: dict[str, Any], actor: str) -> None:
         if not job.get("dms_job_id") or not job.get("fingerprint"):

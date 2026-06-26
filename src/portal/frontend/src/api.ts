@@ -393,14 +393,27 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}:preview`,
         { method: "POST" },
       ),
-    approve: (id: string) =>
-      request<{ id: string; status: string; to_run: number }>(
+    // Selective approval: pass request_ids to approve a subset (staged); omit to
+    // approve all preview_ready. Approves only preview_ready among the given ids.
+    approve: (id: string, opts?: { request_ids?: number[] }) =>
+      request<{ id: string; status: string; approved: number }>(
         `${BK}/${encodeURIComponent(id)}:approve`,
+        { method: "POST", body: opts ? JSON.stringify(opts) : undefined },
+      ),
+    // Finish a batch: drop undecided preview_ready, complete when nothing pending.
+    close: (id: string) =>
+      request<{ id: string; status: string; excluded: number }>(
+        `${BK}/${encodeURIComponent(id)}:close`,
         { method: "POST" },
       ),
     cancel: (id: string) =>
       request<{ id: string; status: string; dms_cancelled: number }>(
         `${BK}/${encodeURIComponent(id)}:cancel`,
+        { method: "POST" },
+      ),
+    cancelRequest: (id: string, rid: number) =>
+      request<{ id: string; request_id: number; cancelled: boolean; dms_cancelled: number }>(
+        `${BK}/${encodeURIComponent(id)}/requests/${rid}:cancel`,
         { method: "POST" },
       ),
   },

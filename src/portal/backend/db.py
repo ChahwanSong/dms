@@ -365,6 +365,48 @@ class Database:
             )
             return [r["dms_job_id"] for r in await cur.fetchall() if r["dms_job_id"]]
 
+    async def approve_requests(
+        self, batch_id: str, request_ids: list[int] | None
+    ) -> int:
+        """Mark preview_ready requests as 'approved' (orchestrator confirms only
+        approved). request_ids=None approves all preview_ready; otherwise just the
+        given ids that are still preview_ready. Returns how many were approved."""
+        clause = "" if request_ids is None else " AND id = ANY(%s)"
+        params: list[Any] = [batch_id] + ([] if request_ids is None else [request_ids])
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE backup_requests SET state='approved', updated_at=now() "
+                f"WHERE batch_id=%s AND state='preview_ready'{clause}",
+                params,
+            )
+            return cur.rowcount
+
+    async def exclude_preview_ready(self, batch_id: str) -> int:
+        """Close a batch: drop still-undecided preview_ready requests to cancelled."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE backup_requests SET state='cancelled', updated_at=now() "
+                "WHERE batch_id=%s AND state='preview_ready'",
+                (batch_id,),
+            )
+            return cur.rowcount
+
+    async def cancel_request(
+        self, batch_id: str, request_id: int
+    ) -> tuple[bool, str | None]:
+        """Cancel a single non-terminal request. Returns (changed, dms_job_id) so
+        the caller can best-effort cancel the live DMS job."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE backup_requests SET state='cancelled', updated_at=now() "
+                "WHERE id=%s AND batch_id=%s AND state NOT IN "
+                "('succeeded','failed','cancelled','preview_failed') "
+                "RETURNING dms_job_id",
+                (request_id, batch_id),
+            )
+            row = await cur.fetchone()
+            return (False, None) if row is None else (True, row["dms_job_id"])
+
     async def update_request(self, job_id: int, **fields: Any) -> None:
         if not fields:
             return

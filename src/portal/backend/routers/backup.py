@@ -52,6 +52,16 @@ class BatchUpdate(BaseModel):
     note: str | None = None
 
 
+class ApproveIn(BaseModel):
+    """Selective approval: the preview_ready request ids to run. None / no body =
+    approve all preview_ready (backward-compatible whole-batch approval)."""
+
+    request_ids: list[int] | None = None
+
+
+_TERMINAL_REQUEST_STATES = {"succeeded", "failed", "cancelled", "preview_failed"}
+
+
 def _actor(user: dict[str, Any]) -> str:
     return str(user.get("username") or ROLE_OPERATOR)
 
@@ -233,6 +243,37 @@ def backup_router(settings: Settings) -> APIRouter:
         await db.delete_request(batch_id, request_id)
         return {"id": batch_id, "request_id": request_id, "deleted": True}
 
+    @router.post("/batches/{batch_id}/requests/{request_id}:cancel")
+    async def cancel_one_request(
+        batch_id: str,
+        request_id: int,
+        db: Database = Depends(get_db),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        """Cancel a single non-terminal request without cancelling the batch.
+        Best-effort cancels the live DMS job if one is in flight."""
+        if not await db.get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        req = await _require_request(db, batch_id, request_id)
+        if req["state"] in _TERMINAL_REQUEST_STATES:
+            raise HTTPException(status_code=409, detail=f"request already {req['state']}")
+        _changed, job_id = await db.cancel_request(batch_id, request_id)
+        dms_cancelled = 0
+        if job_id:
+            actor = f"{settings.backup_actor_prefix}{_actor(user)}"
+            try:
+                await dms.cancel_job(job_id, actor=actor)
+                dms_cancelled = 1
+            except DmsApiError:
+                pass
+        return {
+            "id": batch_id,
+            "request_id": request_id,
+            "cancelled": True,
+            "dms_cancelled": dms_cancelled,
+        }
+
     @router.post("/batches/{batch_id}:preview")
     async def preview(
         batch_id: str, db: Database = Depends(get_db)
@@ -252,22 +293,46 @@ def backup_router(settings: Settings) -> APIRouter:
 
     @router.post("/batches/{batch_id}:approve")
     async def approve(
-        batch_id: str, db: Database = Depends(get_db)
+        batch_id: str,
+        payload: ApproveIn | None = None,
+        db: Database = Depends(get_db),
     ) -> dict[str, Any]:
         batch = await db.get_batch(batch_id)
         if not batch:
             raise HTTPException(status_code=404, detail="batch_not_found")
-        if batch["status"] != "previewed":
+        # previewed = first decision; running = approve more in stages.
+        if batch["status"] not in ("previewed", "running"):
             raise HTTPException(
-                status_code=409, detail="batch must be 'previewed' to approve"
+                status_code=409, detail=f"cannot approve a '{batch['status']}' batch"
             )
-        counts = await db.batch_state_counts(batch_id)
-        if not counts.get("preview_ready"):
+        request_ids = payload.request_ids if payload else None
+        approved = await db.approve_requests(batch_id, request_ids)
+        if not approved:
             raise HTTPException(
-                status_code=422, detail="no preview_ready requests to run"
+                status_code=422, detail="no preview_ready requests to approve"
             )
         await db.set_batch_status(batch_id, "running")
-        return {"id": batch_id, "status": "running", "to_run": counts["preview_ready"]}
+        return {"id": batch_id, "status": "running", "approved": approved}
+
+    @router.post("/batches/{batch_id}:close")
+    async def close(
+        batch_id: str, db: Database = Depends(get_db)
+    ) -> dict[str, Any]:
+        """Finish a batch: drop still-undecided preview_ready requests, then
+        complete if nothing is approved/running."""
+        batch = await db.get_batch(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        if batch["status"] not in ("previewed", "running"):
+            raise HTTPException(
+                status_code=409, detail=f"cannot close a '{batch['status']}' batch"
+            )
+        excluded = await db.exclude_preview_ready(batch_id)
+        counts = await db.batch_state_counts(batch_id)
+        if not counts.get("approved") and not counts.get("running"):
+            await db.set_batch_status(batch_id, "done")
+        batch = await db.get_batch(batch_id)
+        return {"id": batch_id, "status": batch["status"], "excluded": excluded}
 
     @router.post("/batches/{batch_id}:cancel")
     async def cancel(
