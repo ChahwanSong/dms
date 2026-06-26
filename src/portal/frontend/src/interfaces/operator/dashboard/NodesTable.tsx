@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { operatorApi, type AgentReport } from "../../../api";
-import { fmtAgo, summarize } from "./helpers";
+import { fmtAgo } from "./helpers";
+
+// full list, comma-joined; "—" when empty. (No "+N" truncation — operators want
+// to see every mount/tool a node has.)
+function joinAll(list?: string[]): string {
+  return list && list.length ? list.join(", ") : "—";
+}
 import Section from "./Section";
 
 // usage %: color amber/red as it climbs; "—" when the metric is absent.
@@ -41,8 +47,8 @@ export default function NodesTable() {
               <td data-label="메모리">{pctCell(os.memory?.used_pct)}</td>
               <td data-label="load" className="small">{os.load?.load1 != null ? os.load.load1 : "—"}</td>
               <td data-label="디스크">{pctCell(os.disk?.used_pct)}{os.disk?.total_gb ? <span className="muted small"> /{os.disk.total_gb}G</span> : null}</td>
-              <td data-label="마운트" className="small">{summarize(r.capability_summary?.mounts)}</td>
-              <td data-label="툴" className="small">{summarize(r.capability_summary?.tools)}</td>
+              <td data-label="마운트" className="small">{joinAll(r.capability_summary?.mounts)}</td>
+              <td data-label="툴" className="small">{joinAll(r.capability_summary?.tools)}</td>
               <td data-label="보고" className="muted small">{fmtAgo(r.reported_at)}</td>
             </tr>
             );
