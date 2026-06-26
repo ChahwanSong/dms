@@ -62,6 +62,24 @@ class ApproveIn(BaseModel):
 _TERMINAL_REQUEST_STATES = {"succeeded", "failed", "cancelled", "preview_failed"}
 
 
+class ResetIn(BaseModel):
+    """Reset fixable requests to 'registered' for re-preview (retry)."""
+
+    request_ids: list[int] | None = None
+    failed_only: bool = False
+
+
+# A request can be edited (and is reset to 'registered') only in these states —
+# never while in-flight (preview_pending/approved/running) or succeeded.
+_EDITABLE_REQUEST_STATES = {
+    "registered",
+    "preview_ready",
+    "preview_failed",
+    "failed",
+    "cancelled",
+}
+
+
 def _actor(user: dict[str, Any]) -> str:
     return str(user.get("username") or ROLE_OPERATOR)
 
@@ -226,10 +244,15 @@ def backup_router(settings: Settings) -> APIRouter:
         payload: BackupRequestIn,
         db: Database = Depends(get_db),
     ) -> dict[str, Any]:
-        await _require_draft_batch(db, batch_id)
+        if not await db.get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        req = await _require_request(db, batch_id, request_id)
+        if req["state"] not in _EDITABLE_REQUEST_STATES:
+            raise HTTPException(
+                status_code=409, detail=f"cannot edit a '{req['state']}' request"
+            )
         row = _normalize_requests([payload])[0]
-        await _require_request(db, batch_id, request_id)
-        await db.update_request(request_id, **row)
+        await db.edit_request_paths(request_id, row)
         return await db.get_request(request_id)
 
     @router.delete("/batches/{batch_id}/requests/{request_id}")
@@ -274,6 +297,29 @@ def backup_router(settings: Settings) -> APIRouter:
             "dms_cancelled": dms_cancelled,
         }
 
+    @router.post("/batches/{batch_id}/requests:reset")
+    async def reset_requests(
+        batch_id: str,
+        payload: ResetIn | None = None,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Reset fixable requests to 'registered' so a re-preview re-runs them
+        (retry). Then the operator triggers :preview again."""
+        batch = await db.get_batch(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        if batch["status"] == "previewing":
+            raise HTTPException(status_code=409, detail="cannot reset while previewing")
+        p = payload or ResetIn()
+        if not p.failed_only and not p.request_ids:
+            raise HTTPException(
+                status_code=422, detail="specify request_ids or failed_only"
+            )
+        n = await db.reset_requests(
+            batch_id, request_ids=p.request_ids, failed_only=p.failed_only
+        )
+        return {"id": batch_id, "reset": n}
+
     @router.post("/batches/{batch_id}:preview")
     async def preview(
         batch_id: str, db: Database = Depends(get_db)
@@ -281,7 +327,7 @@ def backup_router(settings: Settings) -> APIRouter:
         batch = await db.get_batch(batch_id)
         if not batch:
             raise HTTPException(status_code=404, detail="batch_not_found")
-        if batch["status"] not in ("draft", "previewed"):
+        if batch["status"] not in ("draft", "previewed", "done"):
             raise HTTPException(
                 status_code=409, detail=f"cannot preview from {batch['status']}"
             )

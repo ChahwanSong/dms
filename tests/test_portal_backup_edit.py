@@ -54,7 +54,7 @@ class FakeDB:
         self.requests[rid] = {
             "id": rid,
             "batch_id": batch_id,
-            "state": "registered",
+            "state": paths.get("state", "registered"),
             "src_storage": paths.get("src_storage", "src-st"),
             "src_path": paths.get("src_path", "a"),
             "dst_storage": paths.get("dst_storage", "dst-st"),
@@ -79,6 +79,11 @@ class FakeDB:
 
     async def update_request(self, request_id: int, **fields: Any) -> None:
         self.requests[request_id].update(fields)
+
+    async def edit_request_paths(self, request_id: int, row: dict[str, str]) -> None:
+        r = self.requests[request_id]
+        r.update(row)
+        r.update({"state": "registered", "dms_job_id": None, "preview": None, "error": None})
 
     async def delete_request(self, batch_id: str, request_id: int) -> bool:
         r = self.requests.get(request_id)
@@ -200,9 +205,11 @@ def test_patch_request_rejects_traversal_422(client, db):
     assert resp.status_code == 422
 
 
-def test_patch_request_non_draft_409(client, db):
+def test_patch_request_inflight_409(client, db):
+    # Phase 3: editability is per-item state, not batch=draft. An in-flight
+    # (running) request cannot be edited.
     db.seed_batch("b1", status="running")
-    rid = db.seed_request("b1")
+    rid = db.seed_request("b1", state="running")
     resp = client.patch(
         f"{BASE}/batches/b1/requests/{rid}",
         json={"src_storage": "s", "src_path": "a", "dst_storage": "d", "dst_path": "b"},

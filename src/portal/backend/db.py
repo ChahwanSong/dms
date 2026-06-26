@@ -421,3 +421,44 @@ class Database:
                 f"UPDATE backup_requests SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
                 params,
             )
+
+    async def edit_request_paths(self, request_id: int, row: dict[str, str]) -> None:
+        """Edit a request's paths and reset it to 'registered', clearing preview/
+        job state so the orchestrator re-previews it (used by post-preview edit)."""
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE backup_requests SET src_storage=%s, src_path=%s, dst_storage=%s, "
+                "dst_path=%s, state='registered', dms_job_id=NULL, dms_request_id=NULL, "
+                "fingerprint=NULL, preview=NULL, result=NULL, error=NULL, updated_at=now() "
+                "WHERE id=%s",
+                (row["src_storage"], row["src_path"], row["dst_storage"], row["dst_path"], request_id),
+            )
+
+    async def reset_requests(
+        self,
+        batch_id: str,
+        *,
+        request_ids: list[int] | None = None,
+        failed_only: bool = False,
+    ) -> int:
+        """Reset fixable requests to 'registered' (clearing preview/job state) for
+        re-preview. failed_only targets failed/preview_failed; otherwise the given
+        ids, skipping in-flight/succeeded. Returns how many were reset."""
+        where = ["batch_id=%s"]
+        params: list[Any] = [batch_id]
+        if failed_only:
+            where.append("state IN ('failed','preview_failed')")
+        else:
+            where.append("id = ANY(%s)")
+            params.append(request_ids or [])
+            where.append(
+                "state IN ('registered','preview_ready','preview_failed','failed','cancelled')"
+            )
+        sql = (
+            "UPDATE backup_requests SET state='registered', dms_job_id=NULL, "
+            "dms_request_id=NULL, fingerprint=NULL, preview=NULL, result=NULL, "
+            "error=NULL, updated_at=now() WHERE " + " AND ".join(where)
+        )
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(sql, params)
+            return cur.rowcount

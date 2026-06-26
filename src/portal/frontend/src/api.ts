@@ -416,6 +416,13 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}/requests/${rid}:cancel`,
         { method: "POST" },
       ),
+    // Reset fixable requests to 'registered' for re-preview (retry). Pass
+    // failed_only to reset all failed/preview_failed, or request_ids for specific ones.
+    resetRequests: (id: string, opts: { request_ids?: number[]; failed_only?: boolean }) =>
+      request<{ id: string; reset: number }>(
+        `${BK}/${encodeURIComponent(id)}/requests:reset`,
+        { method: "POST", body: JSON.stringify(opts) },
+      ),
   },
   dashboard: {
     summary: () => request<DashboardSummary>("/api/operator/dashboard/summary"),

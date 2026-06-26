@@ -18,6 +18,8 @@ const STATE_ORDER = [
   "cancelled",
 ];
 const TERMINAL = ["succeeded", "failed", "cancelled", "preview_failed"];
+const EDITABLE = ["registered", "preview_ready", "preview_failed", "failed", "cancelled"];
+const RETRYABLE = ["preview_failed", "failed"];
 
 function previewDetail(p: BackupPreview): string {
   const parts: string[] = [];
@@ -179,6 +181,22 @@ export default function BackupBatchDetail({
     if (!window.confirm("배치를 마감합니다. 승인하지 않은 '미리보기 완료' 항목은 제외됩니다.")) return;
     act(() => operatorApi.backup.close(batchId), "배치를 마감했습니다.");
   }
+  async function resetOne(j: BackupRequest) {
+    await act(
+      () => operatorApi.backup.resetRequests(batchId, { request_ids: [j.id] }),
+      "재시도 대기로 되돌렸습니다. '재미리보기'를 누르세요.",
+    );
+  }
+  function retryFailed() {
+    const n = (counts.preview_failed ?? 0) + (counts.failed ?? 0);
+    if (!window.confirm(`실패 항목 ${n}개를 재시도 대기로 되돌립니다. 이후 '재미리보기'를 누르세요.`)) return;
+    act(
+      () => operatorApi.backup.resetRequests(batchId, { failed_only: true }),
+      "실패 항목을 재시도 대기로 되돌렸습니다.",
+    );
+  }
+  const failedCount = (counts.preview_failed ?? 0) + (counts.failed ?? 0);
+  const canRepreview = (status === "previewed" || status === "done") && (counts.registered ?? 0) > 0;
 
   return (
     <div className="inventory">
@@ -238,6 +256,22 @@ export default function BackupBatchDetail({
                 마감
               </button>
             </>
+          )}
+          {canRepreview && (
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={() =>
+                act(() => operatorApi.backup.preview(batchId), "재미리보기를 시작했습니다.")
+              }
+            >
+              재미리보기
+            </button>
+          )}
+          {status !== "draft" && status !== "previewing" && failedCount > 0 && (
+            <button className="ghost" disabled={busy} onClick={retryFailed}>
+              실패 재시도 ({failedCount})
+            </button>
           )}
           {(status === "previewing" || status === "running" || status === "previewed") && (
             <button
@@ -357,6 +391,16 @@ export default function BackupBatchDetail({
                           {j.preview && (
                             <button className="mini" onClick={() => toggleExpand(j.id)}>
                               {expanded.has(j.id) ? "접기" : "상세"}
+                            </button>
+                          )}
+                          {EDITABLE.includes(j.state) && (
+                            <button className="mini" onClick={() => setEditingReq(j)}>
+                              재편집
+                            </button>
+                          )}
+                          {RETRYABLE.includes(j.state) && (
+                            <button className="mini" onClick={() => resetOne(j)} disabled={busy}>
+                              재시도
                             </button>
                           )}
                           {cancellable && (
