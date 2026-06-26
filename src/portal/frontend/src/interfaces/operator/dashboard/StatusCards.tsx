@@ -75,8 +75,8 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
           {!vol ? "—" : vol.total === 0 ? "없음" : volOk ? "정상" : "점검"}
         </div>
         <ul className="dash-kv">
-          <li>큐 <b>{vol?.queues ?? "—"}</b>{vol?.queues_open ? <span className="muted small"> ({vol.queues_open} open)</span> : null}</li>
-          <li>활성 잡 <b>{vol?.jobs_active ?? "—"}</b>{vol ? <span className="muted small"> / {vol.jobs_total}</span> : null}</li>
+          <li>큐 (open) <b>{vol ? `${vol.queues_open}/${vol.queues}` : "—"}</b></li>
+          <li>활성 잡 <b>{vol ? `${vol.jobs_active}/${vol.jobs_total}` : "—"}</b></li>
           {vol && Object.entries(vol.components).map(([role, c]) => (
             <li key={role}>
               {VOL_ROLE[role] || role}{" "}
