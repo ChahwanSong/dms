@@ -10,12 +10,20 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+// volcano-system component (pod) role → label for the compact card.
+const VOL_ROLE: Record<string, string> = {
+  scheduler: "스케줄러", controllers: "컨트롤러", admission: "admission",
+};
+
 export default function StatusCards({ summary }: { summary: DashboardSummary | null }) {
   const cs = summary?.control_state.data;
   const ws = summary?.work_summary.data;
   const dj = summary?.data_jobs.data;
   const nd = summary?.nodes.data;
+  const ch = summary?.control_hosts.data;
+  const vol = summary?.volcano.data;
   const schedOk = cs && !cs.maintenance_mode && !cs.drain_mode && !cs.scheduling_blocked;
+  const volOk = vol && !vol.has_errors && vol.total > 0 && vol.ready === vol.total;
   return (
     <div className="dash-cards">
       <Card title="스케줄러">
@@ -43,6 +51,37 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
           <li>Stale <b className="err-num">{nd?.stale ?? "—"}</b></li>
           {nd && Object.entries(nd.by_role).map(([role, c]) => (
             <li key={role}>{role} <b>{c.fresh}/{c.fresh + c.stale}</b></li>
+          ))}
+          {ch && ch.total > 0 && (
+            <>
+              <li className="dash-kv-sep">
+                CSI 호스트 도달{" "}
+                <b className={ch.reachable === ch.total ? "ok-num" : "err-num"}>
+                  {ch.reachable}/{ch.total}
+                </b>
+              </li>
+              <li>
+                변경권한{" "}
+                <b className={ch.can_mutate === ch.total ? "ok-num" : "err-num"}>
+                  {ch.can_mutate}/{ch.total}
+                </b>
+              </li>
+            </>
+          )}
+        </ul>
+      </Card>
+      <Card title="Volcano">
+        <div className={`san ${volOk ? "san-ready" : !vol || vol.total === 0 ? "san-unknown" : "san-degraded"}`}>
+          {!vol ? "—" : vol.total === 0 ? "없음" : volOk ? "정상" : "점검"}
+        </div>
+        <ul className="dash-kv">
+          <li>큐 <b>{vol?.queues ?? "—"}</b>{vol?.queues_open ? <span className="muted small"> ({vol.queues_open} open)</span> : null}</li>
+          <li>활성 잡 <b>{vol?.jobs_active ?? "—"}</b>{vol ? <span className="muted small"> / {vol.jobs_total}</span> : null}</li>
+          {vol && Object.entries(vol.components).map(([role, c]) => (
+            <li key={role}>
+              {VOL_ROLE[role] || role}{" "}
+              <b className={c.ready === c.total ? "ok-num" : "err-num"}>{c.ready}/{c.total}</b>
+            </li>
           ))}
         </ul>
       </Card>

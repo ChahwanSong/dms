@@ -32,6 +32,9 @@ async def _section(coro) -> dict[str, Any]:
 
 _FS_BACKENDS = {"cephfs", "gpfs", "wekafs"}
 
+# Volcano job phases that are finished — anything else counts as "active".
+_VOLCANO_TERMINAL = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated"}
+
 
 def _control_hosts(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """CSI (non-fs) storage mappings + their ResourceQuota mutation transport.
@@ -90,6 +93,45 @@ def _latest_per_node(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
+    """Card-level rollup of Volcano status: queue/job counts + component health.
+
+    The detail panel renders the full queue/job/scheduler tables; the dashboard
+    card only needs counts. volcano-system pods are grouped into the three
+    Volcano components by name prefix (scheduler/controllers/admission).
+    """
+    queues = v.get("queues") or []
+    jobs = v.get("jobs") or []
+    sched = v.get("scheduler") or []
+    active = [j for j in jobs if (j.get("phase") or "") not in _VOLCANO_TERMINAL]
+    components: dict[str, dict[str, int]] = {}
+    for p in sched:
+        name = p.get("name") or ""
+        if "scheduler" in name:
+            role = "scheduler"
+        elif "controller" in name:
+            role = "controllers"
+        elif "admission" in name:
+            role = "admission"
+        else:
+            role = "other"
+        slot = components.setdefault(role, {"ready": 0, "total": 0})
+        slot["total"] += 1
+        if p.get("ready"):
+            slot["ready"] += 1
+    errors = v.get("errors") or {}
+    return {
+        "queues": len(queues),
+        "queues_open": sum(1 for q in queues if q.get("state") == "Open"),
+        "jobs_active": len(active),
+        "jobs_total": len(jobs),
+        "ready": sum(1 for p in sched if p.get("ready")),
+        "total": len(sched),
+        "components": components,
+        "has_errors": any(errors.get(k) for k in ("queues", "jobs", "scheduler")),
+    }
+
+
 def dashboard_router(settings: Settings) -> APIRouter:
     router = APIRouter(
         prefix="/api/operator/dashboard",
@@ -103,11 +145,13 @@ def dashboard_router(settings: Settings) -> APIRouter:
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         actor = _actor(user, settings)
-        control, work, jobs, reports = await asyncio.gather(
+        control, work, jobs, reports, mappings, volcano = await asyncio.gather(
             _section(dms.get_control_state(actor=actor)),
             _section(dms.get_work_summary(actor=actor)),
             _section(dms.get_data_job_summary(actor=actor)),
             _section(dms.list_agent_reports(actor=actor)),
+            _section(dms.list_storage_mappings(actor=actor)),
+            _section(dms.get_volcano_status(actor=actor)),
         )
         # node counts derived from each agent's LATEST report (Fresh/Stale by role)
         nodes = {"fresh": 0, "stale": 0, "by_role": {}}
@@ -119,11 +163,23 @@ def dashboard_router(settings: Settings) -> APIRouter:
                 role = r.get("worker_role") or "?"
                 slot = nodes["by_role"].setdefault(role, {"fresh": 0, "stale": 0})
                 slot["fresh" if fresh else "stale"] += 1
+        # CSI control host rollup (reachable / can-i) folded into the node card.
+        ch = {"total": 0, "reachable": 0, "can_mutate": 0}
+        if mappings["data"]:
+            hosts = _control_hosts(mappings["data"])
+            ch = {
+                "total": len(hosts),
+                "reachable": sum(1 for h in hosts if h.get("reachable")),
+                "can_mutate": sum(1 for h in hosts if h.get("can_mutate")),
+            }
+        vol = _volcano_summary(volcano["data"]) if volcano["data"] else None
         return {
             "control_state": control,
             "work_summary": work,
             "data_jobs": jobs,
             "nodes": {"data": nodes, "error": reports["error"]},
+            "control_hosts": {"data": ch, "error": mappings["error"]},
+            "volcano": {"data": vol, "error": volcano["error"]},
         }
 
     @router.get("/nodes")

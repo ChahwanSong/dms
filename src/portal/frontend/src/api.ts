@@ -238,6 +238,14 @@ export interface DashboardSummary {
     fresh: number; stale: number;
     by_role: Record<string, { fresh: number; stale: number }>;
   }>;
+  control_hosts: Section<{ total: number; reachable: number; can_mutate: number }>;
+  volcano: Section<{
+    queues: number; queues_open: number;
+    jobs_active: number; jobs_total: number;
+    ready: number; total: number;
+    components: Record<string, { ready: number; total: number }>;
+    has_errors: boolean;
+  } | null>;
 }
 
 export interface AgentReport {
