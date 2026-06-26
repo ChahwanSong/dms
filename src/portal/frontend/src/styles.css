@@ -988,3 +988,9 @@ textarea.json {
 .attn-chip.sev-ERROR.on { border-color: #e5484d; color: #ff6b6b; }
 .attn-chip.sev-WARN.on { border-color: #d9822b; color: #f0a050; }
 .attn-chip.sev-INFO.on { border-color: #5a6472; color: #c7ccd4; }
+@media (max-width: 720px) {
+  /* phones: stack the issue_type badge over its detail so the JSON detail uses the
+     full width instead of being crushed into a narrow column beside the badge */
+  .dash-attention li { flex-direction: column; align-items: flex-start; gap: 0.2rem; }
+  .dash-attention li .mono { overflow-wrap: anywhere; }
+}
