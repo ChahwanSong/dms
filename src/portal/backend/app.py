@@ -37,6 +37,22 @@ def _static_dir() -> Path | None:
     return None
 
 
+class SpaStaticFiles(StaticFiles):
+    """Serve the SPA so redeploys take effect immediately: index.html is
+    revalidated on every load (``no-cache``) while content-hashed assets are
+    cached long-term (``immutable``). Without this, browsers heuristically cache
+    index.html and keep loading a stale (old-hash) bundle after a new deploy."""
+
+    async def get_response(self, path, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        content_type = response.headers.get("content-type", "")
+        if content_type.startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache"
+        elif path.startswith("assets"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
 
@@ -108,7 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # serves index.html for "/" and 404s fall through to it for client routing.
     static_dir = _static_dir()
     if static_dir is not None:
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="spa")
+        app.mount("/", SpaStaticFiles(directory=static_dir, html=True), name="spa")
     else:
 
         @app.get("/")
