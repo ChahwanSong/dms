@@ -120,6 +120,41 @@ def test_unsupported_filesystem_backend_fails_closed_and_is_action_required(tmp_
     )
 
 
+def test_action_required_readiness_only_for_agent_backed_mappings(tmp_path):
+    """Agentless CSI mappings legitimately have Missing RM/DM readiness (they run
+    no node agent); only filesystem (agent-backed) mappings should surface
+    missing_rm/dm_readiness as an action item."""
+    _, repository, observability = _repositories(tmp_path)
+    missing = {
+        "resource_management": "Missing",
+        "data_management": "Missing",
+        "inventory": "Ready",
+    }
+    _register_mapping(
+        repository, storage_name="cephfs-fs", backend_type="cephfs",
+        storage_class_name="sc-fs",
+    )
+    _register_mapping(
+        repository, storage_name="ceph-csi-x", backend_type="ceph-csi",
+        storage_class_name="sc-csi",
+    )
+    for name in ("cephfs-fs", "ceph-csi-x"):
+        repository.update_storage_mapping_sanity(
+            name,
+            sanity_result={"status": "Ready"},
+            readiness=missing,
+            actor="test",
+        )
+    issues = OperationalQueryService(repository, observability).action_required()
+    codes = {(i["issue_type"], i.get("storage_name")) for i in issues}
+    # filesystem (agent-backed) mapping surfaces both readiness warnings
+    assert ("missing_rm_readiness", "cephfs-fs") in codes
+    assert ("missing_dm_readiness", "cephfs-fs") in codes
+    # agentless CSI mapping does NOT (its Missing readiness is expected)
+    assert ("missing_rm_readiness", "ceph-csi-x") not in codes
+    assert ("missing_dm_readiness", "ceph-csi-x") not in codes
+
+
 def test_identity_config_error_during_adapter_build_is_precondition(tmp_path):
     # A cephfs mapping is valid, but the live registry builds an LdapIdentityGroupManager
     # at adapter-construction time, which raises IdentityLookupConfigurationError when no

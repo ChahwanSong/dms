@@ -11,6 +11,9 @@ from .adapters import (
     kubernetes_resource_quota_value_to_base_units,
     render_kubernetes_resource_quota_hard,
 )
+from .backends.cephfs import CEPHFS_BACKEND_TYPE
+from .backends.gpfs import GPFS_BACKEND_TYPE
+from .backends.weka import WEKAFS_BACKEND_TYPE
 from .domain import (
     KubernetesNamespaceQuotaKey,
     LifecycleState,
@@ -21,6 +24,14 @@ from .repositories import (
     ATTENTION_RUN_STATES,
     DmsRepository,
     ObservabilityRepository,
+)
+
+# Filesystem backends run RM/DM node agents (they SSH into the storage node to
+# mutate the filesystem); agentless mappings (k8s CSI / namespace-quota) apply via
+# the cluster API server and run no node agent — so a "Missing" RM/DM readiness on
+# them is expected, not an action item.
+_AGENT_BACKED_BACKENDS = frozenset(
+    {CEPHFS_BACKEND_TYPE, GPFS_BACKEND_TYPE, WEKAFS_BACKEND_TYPE}
 )
 
 
@@ -64,21 +75,26 @@ class OperationalQueryService:
                             "message": error.get("message"),
                         }
                     )
+            # RM/DM readiness only applies to agent-backed (filesystem) mappings;
+            # agentless CSI / namespace-quota mappings legitimately have none, so
+            # their Missing readiness must not surface as an action item.
+            backend_type = (mapping.get("backend_template") or {}).get("backend_type")
             readiness = mapping.get("readiness") or {}
-            if readiness.get("resource_management") == "Missing":
-                issues.append(
-                    {
-                        "issue_type": "missing_rm_readiness",
-                        "storage_name": mapping["storage_name"],
-                    }
-                )
-            if readiness.get("data_management") == "Missing":
-                issues.append(
-                    {
-                        "issue_type": "missing_dm_readiness",
-                        "storage_name": mapping["storage_name"],
-                    }
-                )
+            if backend_type in _AGENT_BACKED_BACKENDS:
+                if readiness.get("resource_management") == "Missing":
+                    issues.append(
+                        {
+                            "issue_type": "missing_rm_readiness",
+                            "storage_name": mapping["storage_name"],
+                        }
+                    )
+                if readiness.get("data_management") == "Missing":
+                    issues.append(
+                        {
+                            "issue_type": "missing_dm_readiness",
+                            "storage_name": mapping["storage_name"],
+                        }
+                    )
         # Fresh reports: same (node, role, cluster) means the stale is resolved
         fresh_keys: set[tuple[str, str, str]] = {
             (r["node_name"], r["worker_role"], r["cluster_name"])
