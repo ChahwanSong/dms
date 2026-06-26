@@ -982,3 +982,9 @@ textarea.json {
 .dash-filters { margin-bottom: 0.5rem; }
 .dash-attention { list-style: none; margin: 0.5rem 0; padding: 0; }
 .dash-attention li { padding: 0.25rem 0; display: flex; gap: 0.5rem; align-items: baseline; }
+.attn-filters { display: flex; gap: 0.4rem; margin: 0.2rem 0 0.6rem; flex-wrap: wrap; }
+.attn-chip { font-size: 0.78rem; padding: 0.16rem 0.6rem; border-radius: 999px; border: 1px solid var(--border, #2a2f3a); background: transparent; color: #9aa4b2; cursor: pointer; font-variant-numeric: tabular-nums; }
+.attn-chip:not(.on) { opacity: 0.45; }
+.attn-chip.sev-ERROR.on { border-color: #e5484d; color: #ff6b6b; }
+.attn-chip.sev-WARN.on { border-color: #d9822b; color: #f0a050; }
+.attn-chip.sev-INFO.on { border-color: #5a6472; color: #c7ccd4; }

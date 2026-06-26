@@ -274,7 +274,12 @@ export interface DashRequest {
   selected_tool?: string | null; updated_at?: string;
 }
 
-export interface AttentionItem { issue_type: string; [k: string]: unknown; }
+export interface AttentionItem {
+  issue_type: string;
+  severity?: string;
+  category?: "live" | "history";
+  [k: string]: unknown;
+}
 
 export interface VolcanoStatus {
   queues: { name: string; state?: string; running?: number; pending?: number; inqueue?: number }[];

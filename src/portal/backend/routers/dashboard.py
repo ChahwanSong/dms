@@ -139,6 +139,71 @@ def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---- attention (action-required) refinement ----
+# Some DMS issues carry no severity (request/readiness/mapping state) — give them
+# a sensible default so the UI can filter by severity uniformly.
+_ATTENTION_SEVERITY_DEFAULT = {
+    "request_attention": "WARN",
+    "missing_rm_readiness": "WARN",
+    "missing_dm_readiness": "WARN",
+    "storage_mapping_unknown": "WARN",
+    "storage_mapping_failed": "ERROR",
+    "agent_report_stale": "WARN",
+}
+# CSI (agentless) mappings legitimately have no RM/DM worker readiness; these two
+# issue types are false positives for them and are dropped.
+_READINESS_ISSUES = {"missing_rm_readiness", "missing_dm_readiness"}
+_SEVERITY_RANK = {"ERROR": 0, "WARN": 1, "INFO": 2}
+
+
+def _attention_category(issue_type: str, resource_kind: str | None) -> str:
+    """live  = current request/mapping/agent/resource state — actionable now.
+    history = a terminated data job or a past operation result that failed."""
+    if resource_kind == "data_job":
+        return "history"
+    if issue_type in {"filesystem_soft_deleted", "filesystem_expired_unblocked"}:
+        return "live"
+    if issue_type.startswith("filesystem_") or "sweep" in issue_type:
+        return "history"
+    return "live"
+
+
+def _refine_attention(
+    items: list[dict[str, Any]], mappings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Drop CSI false-positive readiness warnings, backfill severity, and tag each
+    item live/history so the panel can filter and group."""
+    csi_names = {
+        m.get("storage_name")
+        for m in mappings or []
+        if ((m.get("backend_template") or {}).get("backend_type") or "")
+        not in _FS_BACKENDS
+    }
+    refined: list[dict[str, Any]] = []
+    for it in items or []:
+        issue_type = it.get("issue_type") or ""
+        if issue_type in _READINESS_ISSUES and it.get("storage_name") in csi_names:
+            continue  # agentless CSI: Missing RM/DM readiness is expected
+        severity = it.get("severity") or _ATTENTION_SEVERITY_DEFAULT.get(
+            issue_type, "WARN"
+        )
+        refined.append(
+            {
+                **it,
+                "severity": severity,
+                "category": _attention_category(issue_type, it.get("resource_kind")),
+            }
+        )
+    refined.sort(
+        key=lambda x: (
+            0 if x["category"] == "live" else 1,
+            _SEVERITY_RANK.get(x["severity"], 1),
+            x.get("issue_type") or "",
+        )
+    )
+    return refined
+
+
 def dashboard_router(settings: Settings) -> APIRouter:
     router = APIRouter(
         prefix="/api/operator/dashboard",
@@ -268,6 +333,11 @@ def dashboard_router(settings: Settings) -> APIRouter:
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> list[dict[str, Any]]:
-        return await dms.list_action_required(actor=_actor(user, settings))
+        actor = _actor(user, settings)
+        items, mappings = await asyncio.gather(
+            dms.list_action_required(actor=actor),
+            dms.list_storage_mappings(actor=actor),
+        )
+        return _refine_attention(items, mappings)
 
     return router
