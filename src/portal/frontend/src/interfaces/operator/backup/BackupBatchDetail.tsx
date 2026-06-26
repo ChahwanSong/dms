@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
 import { batchStatus, requestState, fmtBytes } from "./helpers";
 import { errMsg } from "./BackupBatches";
+import BackupBatchForm from "./BackupBatchForm";
+import BackupRequestEdit from "./BackupRequestEdit";
 
 const PAGE = 200;
 const STATE_ORDER = [
@@ -30,6 +32,9 @@ export default function BackupBatchDetail({
   const [busy, setBusy] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const offsetRef = useRef(0);
+  const [showEdit, setShowEdit] = useState(false);
+  const [focusReq, setFocusReq] = useState(false);
+  const [editingReq, setEditingReq] = useState<BackupRequest | null>(null);
 
   const loadJobs = useCallback(
     async (reset: boolean) => {
@@ -82,6 +87,16 @@ export default function BackupBatchDetail({
     }
   }
 
+  async function removeRequest(j: BackupRequest) {
+    if (
+      !window.confirm(
+        `요청을 삭제합니다.\n${j.src_storage}:${j.src_path} → ${j.dst_storage}:${j.dst_path}`,
+      )
+    )
+      return;
+    await act(() => operatorApi.backup.deleteRequest(batchId, j.id), "요청을 삭제했습니다.");
+  }
+
   if (!batch) {
     return (
       <div className="inventory">
@@ -111,6 +126,30 @@ export default function BackupBatchDetail({
           <button className="ghost" onClick={reload} disabled={busy}>
             새로고침
           </button>
+          {status === "draft" && (
+            <>
+              <button
+                className="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setFocusReq(false);
+                  setShowEdit(true);
+                }}
+              >
+                ✎ 편집
+              </button>
+              <button
+                className="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setFocusReq(true);
+                  setShowEdit(true);
+                }}
+              >
+                + 요청
+              </button>
+            </>
+          )}
           {(status === "draft" || status === "previewed") && (
             <button
               className="primary"
@@ -195,12 +234,13 @@ export default function BackupBatchDetail({
             <th>상태</th>
             <th>미리보기 (파일 · 크기)</th>
             <th>비고</th>
+            {status === "draft" && <th></th>}
           </tr>
         </thead>
         <tbody>
           {jobs.length === 0 ? (
             <tr>
-              <td colSpan={5} className="muted">
+              <td colSpan={status === "draft" ? 6 : 5} className="muted">
                 {stateFilter ? "해당 상태의 요청이 없습니다." : "요청이 없습니다."}
               </td>
             </tr>
@@ -226,6 +266,20 @@ export default function BackupBatchDetail({
                   <td data-label="비고" className="muted small">
                     {j.error || (j.dms_job_id ? j.dms_job_id.slice(0, 14) + "…" : "—")}
                   </td>
+                  {status === "draft" && (
+                    <td className="row-actions">
+                      <button className="mini" onClick={() => setEditingReq(j)}>
+                        수정
+                      </button>
+                      <button
+                        className="mini danger"
+                        onClick={() => removeRequest(j)}
+                        disabled={busy}
+                      >
+                        삭제
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })
@@ -236,6 +290,32 @@ export default function BackupBatchDetail({
         <button className="ghost" onClick={() => loadJobs(false)} disabled={busy}>
           더 보기
         </button>
+      )}
+
+      {showEdit && (
+        <BackupBatchForm
+          mode="edit"
+          initial={batch}
+          focusRequests={focusReq}
+          onClose={() => setShowEdit(false)}
+          onSaved={({ added }) => {
+            setShowEdit(false);
+            setNotice(added > 0 ? `저장됨 (요청 ${added}개 추가).` : "저장됨.");
+            reload();
+          }}
+        />
+      )}
+      {editingReq && (
+        <BackupRequestEdit
+          batchId={batchId}
+          request={editingReq}
+          onClose={() => setEditingReq(null)}
+          onSaved={() => {
+            setEditingReq(null);
+            setNotice("요청 경로를 수정했습니다.");
+            reload();
+          }}
+        />
       )}
     </div>
   );

@@ -42,6 +42,16 @@ class BatchCreate(BaseModel):
     requests: list[BackupRequestIn] = Field(default_factory=list)
 
 
+class BatchUpdate(BaseModel):
+    """Partial edit of a draft batch's metadata/options. Only the fields actually
+    sent are changed (``model_dump(exclude_unset=True)``)."""
+
+    name: str | None = Field(default=None, max_length=200)
+    delete_enabled: bool | None = None
+    options: dict[str, Any] | None = None
+    note: str | None = None
+
+
 def _actor(user: dict[str, Any]) -> str:
     return str(user.get("username") or ROLE_OPERATOR)
 
@@ -73,6 +83,28 @@ def _normalize_requests(requests: list[BackupRequestIn]) -> list[dict[str, str]]
                 status_code=422, detail=f"request {i + 1}: storage name required"
             )
     return rows
+
+
+async def _require_draft_batch(db: Database, batch_id: str) -> dict[str, Any]:
+    """Fetch a batch and assert it is editable (exists + still a draft)."""
+    batch = await db.get_batch(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    if batch["status"] != "draft":
+        raise HTTPException(
+            status_code=409, detail=f"cannot edit a '{batch['status']}' batch"
+        )
+    return batch
+
+
+async def _require_request(
+    db: Database, batch_id: str, request_id: int
+) -> dict[str, Any]:
+    """Fetch a request and assert it belongs to the given batch."""
+    req = await db.get_request(request_id)
+    if not req or req["batch_id"] != batch_id:
+        raise HTTPException(status_code=404, detail="request_not_found")
+    return req
 
 
 def backup_router(settings: Settings) -> APIRouter:
@@ -132,6 +164,24 @@ def backup_router(settings: Settings) -> APIRouter:
         await db.delete_batch(batch_id)
         return {"id": batch_id, "deleted": True}
 
+    @router.patch("/batches/{batch_id}")
+    async def update_batch(
+        batch_id: str,
+        payload: BatchUpdate,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        await _require_draft_batch(db, batch_id)
+        fields = payload.model_dump(exclude_unset=True)
+        if not fields:
+            raise HTTPException(status_code=422, detail="no fields to update")
+        if "name" in fields:
+            name = (fields["name"] or "").strip()
+            if not name:
+                raise HTTPException(status_code=422, detail="name must not be empty")
+            fields["name"] = name
+        await db.update_batch(batch_id, **fields)
+        return await db.get_batch(batch_id)
+
     @router.post("/batches/{batch_id}/requests")
     async def add_requests(
         batch_id: str,
@@ -158,6 +208,30 @@ def backup_router(settings: Settings) -> APIRouter:
         db: Database = Depends(get_db),
     ) -> list[dict[str, Any]]:
         return await db.list_requests(batch_id, state=state, limit=limit, offset=offset)
+
+    @router.patch("/batches/{batch_id}/requests/{request_id}")
+    async def update_request(
+        batch_id: str,
+        request_id: int,
+        payload: BackupRequestIn,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        await _require_draft_batch(db, batch_id)
+        row = _normalize_requests([payload])[0]
+        await _require_request(db, batch_id, request_id)
+        await db.update_request(request_id, **row)
+        return await db.get_request(request_id)
+
+    @router.delete("/batches/{batch_id}/requests/{request_id}")
+    async def delete_request(
+        batch_id: str,
+        request_id: int,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        await _require_draft_batch(db, batch_id)
+        await _require_request(db, batch_id, request_id)
+        await db.delete_request(batch_id, request_id)
+        return {"id": batch_id, "request_id": request_id, "deleted": True}
 
     @router.post("/batches/{batch_id}:preview")
     async def preview(

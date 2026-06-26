@@ -138,7 +138,7 @@ export default function BackupBatches() {
       {showForm && (
         <BackupBatchForm
           onClose={() => setShowForm(false)}
-          onCreated={(id, added) => {
+          onSaved={({ id, added }) => {
             setShowForm(false);
             setNotice(`배치 생성됨 (요청 ${added}개). 미리보기를 시작하세요.`);
             setOpenId(id);

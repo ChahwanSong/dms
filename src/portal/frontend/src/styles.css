@@ -682,6 +682,29 @@ button.linklike {
   border-radius: 4px;
 }
 
+/* collapsible section toggles + batch-wide sync-options editor (data backup) */
+.section-toggle {
+  align-self: flex-start;
+  margin-top: 0.25rem;
+}
+.sync-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.sync-options-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.2rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--border);
+}
+
 textarea.json {
   width: 100%;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;

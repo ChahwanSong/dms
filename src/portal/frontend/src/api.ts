@@ -212,6 +212,14 @@ export interface BatchCreateInput {
   requests?: BackupRequestInput[];
 }
 
+// Partial edit of a draft batch (only the provided fields change).
+export interface BatchUpdateInput {
+  name?: string;
+  delete_enabled?: boolean;
+  options?: Record<string, unknown>;
+  note?: string | null;
+}
+
 // --- dashboard ---------------------------------------------------------
 
 export interface Section<T> { data: T | null; error: string | null; }
@@ -345,6 +353,11 @@ export const operatorApi = {
         method: "POST",
         body: JSON.stringify(payload),
       }),
+    update: (id: string, payload: BatchUpdateInput) =>
+      request<BackupBatch>(`${BK}/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }),
     remove: (id: string) =>
       request<{ id: string; deleted: boolean }>(
         `${BK}/${encodeURIComponent(id)}`,
@@ -354,6 +367,16 @@ export const operatorApi = {
       request<{ id: string; added: number }>(
         `${BK}/${encodeURIComponent(id)}/requests`,
         { method: "POST", body: JSON.stringify(requests) },
+      ),
+    updateRequest: (id: string, rid: number, req: BackupRequestInput) =>
+      request<BackupRequest>(
+        `${BK}/${encodeURIComponent(id)}/requests/${rid}`,
+        { method: "PATCH", body: JSON.stringify(req) },
+      ),
+    deleteRequest: (id: string, rid: number) =>
+      request<{ id: string; request_id: number; deleted: boolean }>(
+        `${BK}/${encodeURIComponent(id)}/requests/${rid}`,
+        { method: "DELETE" },
       ),
     requests: (id: string, opts?: { state?: string; limit?: number; offset?: number }) => {
       const q = new URLSearchParams();

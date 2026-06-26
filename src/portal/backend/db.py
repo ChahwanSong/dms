@@ -239,6 +239,25 @@ class Database:
                 (status, batch_id),
             )
 
+    async def update_batch(self, batch_id: str, **fields: Any) -> None:
+        """Update whitelisted draft-batch columns (name/note/delete_enabled/options).
+        Only the keys present in `fields` are changed; `options` is stored as jsonb."""
+        allowed = ("name", "note", "delete_enabled", "options")
+        cols: list[str] = []
+        params: list[Any] = []
+        for key in allowed:
+            if key in fields:
+                cols.append(f"{key}=%s")
+                params.append(Jsonb(fields[key]) if key == "options" else fields[key])
+        if not cols:
+            return
+        params.append(batch_id)
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                f"UPDATE backup_batches SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
+                params,
+            )
+
     async def delete_batch(self, batch_id: str) -> None:
         async with self.pool.connection() as conn:
             await conn.execute("DELETE FROM backup_batches WHERE id=%s", (batch_id,))
@@ -292,6 +311,22 @@ class Database:
                 params,
             )
             return await cur.fetchall()
+
+    async def get_request(self, request_id: int) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM backup_requests WHERE id=%s", (request_id,)
+            )
+            return await cur.fetchone()
+
+    async def delete_request(self, batch_id: str, request_id: int) -> bool:
+        """Delete one request of a batch; returns True if a row was removed."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM backup_requests WHERE id=%s AND batch_id=%s",
+                (request_id, batch_id),
+            )
+            return cur.rowcount > 0
 
     async def claim_requests(
         self, batch_id: str, from_state: str, to_state: str, limit: int
