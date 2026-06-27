@@ -197,7 +197,8 @@ class BackupOrchestrator:
         if not resubmit:
             await self._db.update_request(job["id"], state="preview_pending")
         body = sync_body(batch, job)
-        body["priority"] = self._settings.backup_priority  # Volcano scheduling priority (Low)
+        # Per-batch Volcano scheduling priority (operator-selected; default Low).
+        body["priority"] = batch.get("priority") or self._settings.backup_priority
         try:
             resp = await self._dms.submit_sync(body, actor=actor)
         except DmsApiError as exc:

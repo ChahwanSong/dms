@@ -163,6 +163,7 @@ export interface BackupBatch {
   delete_enabled: boolean;
   options: Record<string, unknown>;
   requester_id: string;
+  priority?: string; // High | Mid | Low (Volcano scheduling)
   created_by?: string | null;
   note?: string | null;
   created_at?: string;
@@ -209,6 +210,7 @@ export interface BatchCreateInput {
   delete_enabled: boolean;
   options?: Record<string, unknown>;
   note?: string | null;
+  priority?: string;
   requests?: BackupRequestInput[];
 }
 
@@ -218,6 +220,7 @@ export interface BatchUpdateInput {
   delete_enabled?: boolean;
   options?: Record<string, unknown>;
   note?: string | null;
+  priority?: string;
 }
 
 // --- dashboard ---------------------------------------------------------

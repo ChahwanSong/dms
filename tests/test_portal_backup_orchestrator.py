@@ -20,9 +20,9 @@ class OrchDB:
         self.requests: dict[int, dict[str, Any]] = {}
         self._n = 1
 
-    def add_batch(self, bid: str, status: str) -> dict[str, Any]:
+    def add_batch(self, bid: str, status: str, priority: str = "Low") -> dict[str, Any]:
         b = {"id": bid, "status": status, "options": {}, "delete_enabled": False,
-             "requester_id": "root", "created_by": "op"}
+             "requester_id": "root", "created_by": "op", "priority": priority}
         self.batches[bid] = b
         return b
 
@@ -85,6 +85,18 @@ def test_submit_sets_low_priority():
         await orch._submit_one(batch, db.requests[rid], "mtls:op")
         assert dms.submitted, "submit_sync was not called"
         assert dms.submitted[0]["priority"] == "Low"
+    asyncio.run(go())
+
+
+def test_submit_uses_per_batch_priority():
+    async def go():
+        db = OrchDB()
+        batch = db.add_batch("b1", "previewing", priority="High")
+        rid = db.add_request("b1", "registered")
+        dms = OrchDms({})
+        orch = BackupOrchestrator(db, dms, Settings())
+        await orch._submit_one(batch, db.requests[rid], "mtls:op")
+        assert dms.submitted[0]["priority"] == "High"  # batch value, not settings default
     asyncio.run(go())
 
 

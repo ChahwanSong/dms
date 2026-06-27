@@ -33,6 +33,7 @@ export default function BackupBatchForm({
   const isEdit = mode === "edit";
   const [name, setName] = useState(initial?.name ?? "");
   const [note, setNote] = useState(initial?.note ?? "");
+  const [priority, setPriority] = useState(initial?.priority ?? "Low");
   // New batches default to a destructive mirror (--delete) + open_noatime ON
   // (operator request). direct (O_DIRECT) is left OFF — it can fail on
   // filesystems without O_DIRECT support. Editing preserves existing values.
@@ -100,6 +101,7 @@ export default function BackupBatchForm({
           note: note.trim() || null,
           delete_enabled: deleteEnabled,
           options,
+          priority,
         });
         let added = 0;
         if (parsed.requests.length > 0) {
@@ -113,6 +115,7 @@ export default function BackupBatchForm({
           delete_enabled: deleteEnabled,
           note: note.trim() || null,
           options,
+          priority,
           requests: parsed.requests,
         });
         onSaved({ id: res.id, added: res.added, mode });
@@ -190,6 +193,14 @@ export default function BackupBatchForm({
           <label>
             <span>메모 (선택)</span>
             <input value={note} onChange={(e) => setNote(e.target.value)} />
+          </label>
+          <label>
+            <span>스케줄러 우선순위</span>
+            <select value={priority} onChange={(e) => setPriority(e.target.value)}>
+              <option value="Low">Low (기본 · 대화형/운영 작업 방해 없음)</option>
+              <option value="Mid">Mid</option>
+              <option value="High">High</option>
+            </select>
           </label>
           <button
             type="button"

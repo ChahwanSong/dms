@@ -39,6 +39,7 @@ class BatchCreate(BaseModel):
     delete_enabled: bool = False
     options: dict[str, Any] = Field(default_factory=dict)
     note: str | None = None
+    priority: str = "Low"
     requests: list[BackupRequestIn] = Field(default_factory=list)
 
 
@@ -50,6 +51,7 @@ class BatchUpdate(BaseModel):
     delete_enabled: bool | None = None
     options: dict[str, Any] | None = None
     note: str | None = None
+    priority: str | None = None
 
 
 class ApproveIn(BaseModel):
@@ -78,6 +80,9 @@ _EDITABLE_REQUEST_STATES = {
     "failed",
     "cancelled",
 }
+
+# Selectable Volcano scheduling priorities for a batch (DMS maps to 200/100/50).
+_PRIORITIES = {"High", "Mid", "Low"}
 
 
 def _actor(user: dict[str, Any]) -> str:
@@ -149,6 +154,8 @@ def backup_router(settings: Settings) -> APIRouter:
         db: Database = Depends(get_db),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
+        if payload.priority not in _PRIORITIES:
+            raise HTTPException(status_code=422, detail="priority must be High, Mid, or Low")
         batch_id = uuid.uuid4().hex
         rows = _normalize_requests(payload.requests)
         await db.create_batch(
@@ -159,6 +166,7 @@ def backup_router(settings: Settings) -> APIRouter:
             requester_id=requester,
             created_by=_actor(user),
             note=payload.note,
+            priority=payload.priority,
         )
         added = await db.add_requests(batch_id, rows)
         return {"id": batch_id, "added": added}
@@ -207,6 +215,8 @@ def backup_router(settings: Settings) -> APIRouter:
             if not name:
                 raise HTTPException(status_code=422, detail="name must not be empty")
             fields["name"] = name
+        if "priority" in fields and fields["priority"] not in _PRIORITIES:
+            raise HTTPException(status_code=422, detail="priority must be High, Mid, or Low")
         await db.update_batch(batch_id, **fields)
         return await db.get_batch(batch_id)
 

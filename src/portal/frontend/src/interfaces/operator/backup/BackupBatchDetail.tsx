@@ -291,6 +291,8 @@ export default function BackupBatchDetail({
       <p className="muted small">
         requester=<code>{batch.requester_id}</code> · owner=원본 소유권 보존 ·{" "}
         {batch.delete_enabled ? <strong className="err-num">--delete 켜짐</strong> : "--delete 꺼짐"}
+        {" · 우선순위 "}
+        <code>{batch.priority ?? "Low"}</code>
         {batch.note ? ` · ${batch.note}` : ""}
       </p>
 
