@@ -33,13 +33,14 @@ export default function BackupBatchForm({
   const isEdit = mode === "edit";
   const [name, setName] = useState(initial?.name ?? "");
   const [note, setNote] = useState(initial?.note ?? "");
-  // New batches default to a destructive mirror (--delete) + direct/open_noatime
-  // ON (operator request); editing preserves the batch's existing values.
+  // New batches default to a destructive mirror (--delete) + open_noatime ON
+  // (operator request). direct (O_DIRECT) is left OFF — it can fail on
+  // filesystems without O_DIRECT support. Editing preserves existing values.
   const [deleteEnabled, setDeleteEnabled] = useState(
     isEdit ? initial?.delete_enabled ?? false : true,
   );
   const [options, setOptions] = useState<Record<string, unknown>>(
-    isEdit ? optionsWithoutDelete(initial?.options) : { direct: true, open_noatime: true },
+    isEdit ? optionsWithoutDelete(initial?.options) : { open_noatime: true },
   );
   const [csv, setCsv] = useState("");
   const [showSync, setShowSync] = useState(true);
