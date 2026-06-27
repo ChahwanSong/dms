@@ -91,33 +91,38 @@ export function parseRequestsCsv(text: string): ParseResult {
 // checks below are a light client-side mirror for early feedback.
 
 export type SyncOptionKind = "text" | "bool" | "int";
+export type SyncOptionGroup = "sync" | "ownership";
 
 export interface SyncOptionField {
   key: string;
   label: string;
   kind: SyncOptionKind;
+  group: SyncOptionGroup;
   placeholder?: string;
   hint?: string;
   warn?: boolean; // render hint as a warning (e.g. chown overrides ownership)
-  advanced?: boolean;
 }
 
+// Two collapsible groups in the form: "sync 옵션" (transfer behavior; --delete is
+// rendered alongside these but is its own field = delete_enabled) and "소유권 옵션"
+// (chmod/chown). `delete` itself is NOT here — handled via the delete_enabled flag.
 export const SYNC_OPTION_FIELDS: SyncOptionField[] = [
-  { key: "chmod", label: "chmod", kind: "text", placeholder: "0750 또는 D0750,F0640", hint: "대상 권한 강제" },
+  { key: "contents", label: "contents", kind: "bool", group: "sync", hint: "내용(체크섬) 기반 비교" },
+  { key: "direct", label: "direct", kind: "bool", group: "sync", hint: "O_DIRECT I/O (일부 FS 미지원)" },
+  { key: "open_noatime", label: "open_noatime", kind: "bool", group: "sync", hint: "atime 미갱신" },
+  { key: "quiet", label: "quiet", kind: "bool", group: "sync", hint: "로그 최소화" },
+  { key: "batch_files", label: "batch_files", kind: "int", group: "sync", hint: "배치당 파일 수" },
+  { key: "bufsize", label: "bufsize", kind: "int", group: "sync", hint: "전송 버퍼 크기(byte)" },
+  { key: "chmod", label: "chmod", kind: "text", group: "ownership", placeholder: "0750 또는 D0750,F0640", hint: "대상 권한 강제" },
   {
     key: "chown",
     label: "chown",
     kind: "text",
+    group: "ownership",
     placeholder: "user:group",
-    hint: "대상 소유자 강제 — 백업 기본인 원본 소유권 보존을 덮어씁니다",
+    hint: "대상 소유자 강제 — 원본 소유권 보존을 덮어씀",
     warn: true,
   },
-  { key: "contents", label: "contents", kind: "bool", hint: "내용(체크섬) 기반 비교" },
-  { key: "batch_files", label: "batch_files", kind: "int", hint: "배치당 파일 수", advanced: true },
-  { key: "bufsize", label: "bufsize", kind: "int", hint: "전송 버퍼 크기(byte)", advanced: true },
-  { key: "direct", label: "direct", kind: "bool", hint: "O_DIRECT I/O", advanced: true },
-  { key: "open_noatime", label: "open_noatime", kind: "bool", hint: "atime 미갱신", advanced: true },
-  { key: "quiet", label: "quiet", kind: "bool", hint: "로그 최소화", advanced: true },
 ];
 
 const CHMOD_TOKEN = /^[DF]?[0-7]{1,4}$/;

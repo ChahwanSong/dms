@@ -1,21 +1,19 @@
-import { useState } from "react";
-import { SYNC_OPTION_FIELDS, type SyncOptionField } from "./helpers";
+import { SYNC_OPTION_FIELDS, type SyncOptionField, type SyncOptionGroup } from "./helpers";
 
-// Controlled editor for batch-wide DMS sync options. `value` is the canonical
-// options object (typed: text->string, bool->true, int->number); empty/false
-// entries are omitted so the stored object stays minimal. `delete` is handled
-// elsewhere (the --delete checkbox) and is not rendered here.
+// Controlled editor for one group of batch-wide DMS sync options. `value` is the
+// canonical options object (text->string, bool->true, int->number); empty/false
+// entries are omitted so the stored object stays minimal. The parent wraps this
+// in a collapsible ".sync-options" section. `delete` is handled separately
+// (delete_enabled checkbox) and is not in SYNC_OPTION_FIELDS.
 export default function SyncOptionsFields({
+  group,
   value,
   onChange,
 }: {
+  group: SyncOptionGroup;
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
 }) {
-  const [showAdvanced, setShowAdvanced] = useState(
-    SYNC_OPTION_FIELDS.some((f) => f.advanced && value[f.key] !== undefined),
-  );
-
   function setKey(key: string, v: unknown) {
     const next = { ...value };
     if (v === undefined || v === "" || v === false) delete next[key];
@@ -67,20 +65,5 @@ export default function SyncOptionsFields({
     );
   }
 
-  const common = SYNC_OPTION_FIELDS.filter((f) => !f.advanced);
-  const advanced = SYNC_OPTION_FIELDS.filter((f) => f.advanced);
-
-  return (
-    <div className="sync-options">
-      {common.map(renderField)}
-      <button
-        type="button"
-        className="ghost mini"
-        onClick={() => setShowAdvanced((v) => !v)}
-      >
-        {showAdvanced ? "고급 옵션 숨기기" : "고급 옵션 보기"}
-      </button>
-      {showAdvanced && <div className="sync-options-advanced">{advanced.map(renderField)}</div>}
-    </div>
-  );
+  return <>{SYNC_OPTION_FIELDS.filter((f) => f.group === group).map(renderField)}</>;
 }

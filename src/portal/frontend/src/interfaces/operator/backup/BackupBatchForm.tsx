@@ -33,13 +33,18 @@ export default function BackupBatchForm({
   const isEdit = mode === "edit";
   const [name, setName] = useState(initial?.name ?? "");
   const [note, setNote] = useState(initial?.note ?? "");
-  const [deleteEnabled, setDeleteEnabled] = useState(initial?.delete_enabled ?? false);
+  // New batches default to a destructive mirror (--delete) + direct/open_noatime
+  // ON (operator request); editing preserves the batch's existing values.
+  const [deleteEnabled, setDeleteEnabled] = useState(
+    isEdit ? initial?.delete_enabled ?? false : true,
+  );
   const [options, setOptions] = useState<Record<string, unknown>>(
-    optionsWithoutDelete(initial?.options),
+    isEdit ? optionsWithoutDelete(initial?.options) : { direct: true, open_noatime: true },
   );
   const [csv, setCsv] = useState("");
-  const [showOptions, setShowOptions] = useState(
-    Object.keys(optionsWithoutDelete(initial?.options)).length > 0,
+  const [showSync, setShowSync] = useState(true);
+  const [showOwnership, setShowOwnership] = useState(
+    !!(initial?.options && (initial.options.chmod != null || initial.options.chown != null)),
   );
   const [showRequests, setShowRequests] = useState(!isEdit || focusRequests);
   const [busy, setBusy] = useState(false);
@@ -175,26 +180,43 @@ export default function BackupBatchForm({
             <span>메모 (선택)</span>
             <input value={note} onChange={(e) => setNote(e.target.value)} />
           </label>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={deleteEnabled}
-              onChange={(e) => setDeleteEnabled(e.target.checked)}
-            />
-            <span>
-              <strong>--delete</strong> (미러): dst에서 src에 없는 파일을 삭제 — 파괴적,
-              미리보기로 확인 후 실행
-            </span>
-          </label>
+          <button
+            type="button"
+            className="ghost mini section-toggle"
+            onClick={() => setShowSync((v) => !v)}
+          >
+            {showSync ? "▾" : "▸"} sync 옵션
+            {!showSync && deleteEnabled && <span className="err-num small"> · --delete 켜짐</span>}
+          </button>
+          {showSync && (
+            <div className="sync-options">
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={deleteEnabled}
+                  onChange={(e) => setDeleteEnabled(e.target.checked)}
+                />
+                <span>
+                  <strong className={deleteEnabled ? "err-num" : undefined}>--delete</strong> (미러):
+                  dst에서 src에 없는 파일을 삭제 — 파괴적, 미리보기로 확인 후 실행
+                </span>
+              </label>
+              <SyncOptionsFields group="sync" value={options} onChange={setOptions} />
+            </div>
+          )}
 
           <button
             type="button"
             className="ghost mini section-toggle"
-            onClick={() => setShowOptions((v) => !v)}
+            onClick={() => setShowOwnership((v) => !v)}
           >
-            {showOptions ? "▾ sync 옵션" : "▸ sync 옵션"}
+            {showOwnership ? "▾" : "▸"} 소유권 옵션 (chmod · chown)
           </button>
-          {showOptions && <SyncOptionsFields value={options} onChange={setOptions} />}
+          {showOwnership && (
+            <div className="sync-options">
+              <SyncOptionsFields group="ownership" value={options} onChange={setOptions} />
+            </div>
+          )}
 
           {isEdit ? (
             <>
