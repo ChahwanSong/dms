@@ -195,19 +195,19 @@ export default function StorageMappingDetail({
                           ),
                         },
                         {
-                          label: "신선 리포트",
+                          label: "Fresh 리포트",
                           value: (
                             <span className={(agent.fresh_reports ?? 0) > 0 ? "ok-num" : "err-num"}>
                               {agent.fresh_reports ?? 0}
                             </span>
                           ),
                         },
-                        { label: "만료 리포트", value: <span className="muted">{agent.stale_reports ?? 0}</span> },
+                        { label: "Stale 리포트", value: <span className="muted">{agent.stale_reports ?? 0}</span> },
                       ]}
                     />
                     <p className="obs-note">
-                      에이전트가 <b>최근에 보고</b>한 스토리지 노드가 RM/DM 작업 대상입니다. 신선
-                      리포트가 0이면 해당 노드의 에이전트가 동작하지 않는 상태이며, 만료 리포트는
+                      에이전트가 <b>최근에 보고</b>한 스토리지 노드가 RM/DM 작업 대상입니다. Fresh
+                      리포트가 0이면 해당 노드의 에이전트가 동작하지 않는 상태이며, Stale 리포트는
                       신선도 기준을 지난 과거 보고 누계(정상적으로 쌓임)입니다.
                     </p>
                   </section>
