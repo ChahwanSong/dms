@@ -260,7 +260,8 @@ export default function BackupBatchDetail({
   // still has undecided preview_ready requests.
   const canSelect = (status === "previewed" || status === "running") && (counts.preview_ready ?? 0) > 0;
   const selectedReady = jobs.filter((j) => j.state === "preview_ready" && selected.has(j.id));
-  const cols = 5 + (canSelect ? 1 : 0) + 1;
+  // columns: chevron + (checkbox?) + 출발/대상/상태/미리보기/비고(5) + actions
+  const cols = 5 + (canSelect ? 1 : 0) + 2;
 
   function approveSelected() {
     const ids = selectedReady.map((j) => j.id);
@@ -444,6 +445,7 @@ export default function BackupBatchDetail({
       <table className="grid">
         <thead>
           <tr>
+            <th className="col-toggle"></th>
             {canSelect && <th></th>}
             <th>출발 (src)</th>
             <th>대상 (dst)</th>
@@ -467,9 +469,38 @@ export default function BackupBatchDetail({
                 status !== "draft" && j.state !== "registered" && !TERMINAL.includes(j.state);
               return (
                 <Fragment key={j.id}>
-                  <tr>
+                  <tr
+                    className={
+                      hasDetail(j)
+                        ? `expandable-row${expanded.has(j.id) ? " row-open" : ""}`
+                        : undefined
+                    }
+                    onClick={hasDetail(j) ? () => toggleExpand(j.id) : undefined}
+                    tabIndex={hasDetail(j) ? 0 : undefined}
+                    aria-expanded={hasDetail(j) ? expanded.has(j.id) : undefined}
+                    onKeyDown={
+                      hasDetail(j)
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              toggleExpand(j.id);
+                            }
+                          }
+                        : undefined
+                    }
+                  >
+                    <td className="col-toggle">
+                      {hasDetail(j) && (
+                        <span
+                          className={`expand-toggle${expanded.has(j.id) ? " open" : ""}`}
+                          aria-hidden="true"
+                        >
+                          ▸
+                        </span>
+                      )}
+                    </td>
                     {canSelect && (
-                      <td>
+                      <td onClick={(e) => e.stopPropagation()}>
                         {j.state === "preview_ready" && (
                           <input
                             type="checkbox"
@@ -505,14 +536,9 @@ export default function BackupBatchDetail({
                         </span>
                       )}
                     </td>
-                    <td className="row-actions">
+                    <td className="row-actions" onClick={(e) => e.stopPropagation()}>
                       {status !== "draft" && (
                         <>
-                          {hasDetail(j) && (
-                            <button className="mini" onClick={() => toggleExpand(j.id)}>
-                              {expanded.has(j.id) ? "접기" : "상세"}
-                            </button>
-                          )}
                           {EDITABLE.includes(j.state) && (
                             <button className="mini" onClick={() => setEditingReq(j)}>
                               재편집

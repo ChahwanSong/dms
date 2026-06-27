@@ -134,19 +134,31 @@ export default function BackupBatches() {
               const open = expanded.has(b.id);
               return (
                 <Fragment key={b.id}>
-                  <tr className={open ? "row-open" : undefined}>
+                  <tr
+                    className={`expandable-row${open ? " row-open" : ""}`}
+                    onClick={() => toggle(b.id)}
+                    tabIndex={0}
+                    aria-expanded={open}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggle(b.id);
+                      }
+                    }}
+                  >
                     <td className="col-toggle">
-                      <button
-                        className={`expand-toggle${open ? " open" : ""}`}
-                        onClick={() => toggle(b.id)}
-                        aria-label={open ? "접기" : "펴기"}
-                        aria-expanded={open}
-                      >
+                      <span className={`expand-toggle${open ? " open" : ""}`} aria-hidden="true">
                         ▸
-                      </button>
+                      </span>
                     </td>
                     <td data-label="이름">
-                      <button className="linklike" onClick={() => setOpenId(b.id)}>
+                      <button
+                        className="linklike"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenId(b.id);
+                        }}
+                      >
                         {b.name}
                       </button>
                     </td>
@@ -166,7 +178,7 @@ export default function BackupBatches() {
                     <td data-label="생성" className="muted small">
                       {fmtTime(b.created_at)}
                     </td>
-                    <td className="row-actions">
+                    <td className="row-actions" onClick={(e) => e.stopPropagation()}>
                       <button className="mini" onClick={() => setOpenId(b.id)}>
                         열기
                       </button>
