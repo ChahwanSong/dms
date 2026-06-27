@@ -90,6 +90,9 @@ class Settings:
     # client certificate).
     backup_requester: str = "root"
     backup_actor_prefix: str = "mtls:"
+    # Volcano scheduling priority for backup jobs (High/Mid/Low or int). Default
+    # Low so background backups don't preempt interactive/operator work.
+    backup_priority: str = "Low"
     # Orchestrator: max DMS jobs in flight per batch per cycle, and poll cadence.
     backup_concurrency: int = 8
     backup_poll_seconds: float = 5.0
@@ -142,6 +145,7 @@ class Settings:
             backup_actor_prefix=env.get(
                 "PORTAL_BACKUP_ACTOR_PREFIX", defaults.backup_actor_prefix
             ),
+            backup_priority=env.get("PORTAL_BACKUP_PRIORITY", defaults.backup_priority),
             backup_concurrency=int(
                 env.get("PORTAL_BACKUP_CONCURRENCY", defaults.backup_concurrency)
             ),

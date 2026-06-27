@@ -40,10 +40,20 @@ export default function BackupBatchForm({
     isEdit ? initial?.delete_enabled ?? false : true,
   );
   const [options, setOptions] = useState<Record<string, unknown>>(
-    isEdit ? optionsWithoutDelete(initial?.options) : { open_noatime: true },
+    isEdit
+      ? optionsWithoutDelete(initial?.options)
+      : { open_noatime: true, bufsize: 4 * 1024 * 1024, batch_files: 100000 },
   );
   const [csv, setCsv] = useState("");
-  const [showSync, setShowSync] = useState(true);
+  // Option sections are collapsed by default; on edit, auto-open a section that
+  // already has settings. The collapsed "sync 옵션" header still flags --delete.
+  const [showSync, setShowSync] = useState(
+    isEdit &&
+      (!!initial?.delete_enabled ||
+        ["contents", "direct", "open_noatime", "quiet", "batch_files", "bufsize"].some(
+          (k) => initial?.options?.[k] != null,
+        )),
+  );
   const [showOwnership, setShowOwnership] = useState(
     !!(initial?.options && (initial.options.chmod != null || initial.options.chown != null)),
   );

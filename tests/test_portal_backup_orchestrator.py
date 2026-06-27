@@ -61,6 +61,11 @@ class OrchDms:
     def __init__(self, jobs: dict[str, dict[str, Any]]) -> None:
         self.jobs = jobs
         self.confirmed: list[str] = []
+        self.submitted: list[dict[str, Any]] = []
+
+    async def submit_sync(self, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        self.submitted.append(body)
+        return {"request_id": "req-1"}
 
     async def confirm_job(self, job_id: str, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
         self.confirmed.append(job_id)
@@ -68,6 +73,19 @@ class OrchDms:
 
     async def get_sync_job(self, job_id: str, *, actor: str) -> dict[str, Any]:
         return self.jobs.get(job_id, {"state": "Running"})
+
+
+def test_submit_sets_low_priority():
+    async def go():
+        db = OrchDB()
+        batch = db.add_batch("b1", "previewing")
+        rid = db.add_request("b1", "registered")
+        dms = OrchDms({})
+        orch = BackupOrchestrator(db, dms, Settings())
+        await orch._submit_one(batch, db.requests[rid], "mtls:op")
+        assert dms.submitted, "submit_sync was not called"
+        assert dms.submitted[0]["priority"] == "Low"
+    asyncio.run(go())
 
 
 def test_execute_confirms_only_approved_then_done():
