@@ -353,6 +353,20 @@ textarea,
   border-color: var(--error);
   background: rgba(248, 113, 113, 0.1);
 }
+.banner.info {
+  color: #bcd3f5;
+  border-color: rgba(59, 130, 246, 0.5);
+  background: rgba(59, 130, 246, 0.1);
+  line-height: 1.5;
+}
+.banner.info strong { color: #e2e8f0; }
+.banner.info ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
+.banner.info li { margin: 0.15rem 0; }
+.banner.info code {
+  background: #0b1220;
+  padding: 0.02rem 0.3rem;
+  border-radius: 4px;
+}
 
 table.grid {
   width: 100%;

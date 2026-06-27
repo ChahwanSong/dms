@@ -158,8 +158,30 @@ export default function StorageMappingForm({
         </div>
 
         <form className="form" onSubmit={submit}>
+          {mode === "edit" && (
+            <div className="banner info">
+              <strong>저장하면 변경사항이 즉시 적용됩니다.</strong> 전체 설정을 다시 보내
+              교체하고(부분 수정 아님) sanity를 재검사합니다.
+              <ul>
+                <li>
+                  <code>storage_name</code>은 식별자라 변경할 수 없습니다.
+                </li>
+                <li>
+                  아래 <strong>필드 설명</strong>의 <code>{currentBackend}</code> 필드만 실제
+                  효과가 있습니다 — 표에 없는 키는 저장돼도 무시됩니다.
+                </li>
+                <li>
+                  해당 스토리지에 <strong>진행 중인 작업</strong>이 있으면 수정이 거부됩니다(409).
+                  작업이 끝난 뒤 다시 시도하세요.
+                </li>
+                <li>
+                  비밀번호가 <code>***</code>로 보이면 그대로 두세요 — 기존 값이 유지됩니다.
+                </li>
+              </ul>
+            </div>
+          )}
           <label>
-            storage_name *
+            {mode === "edit" ? "storage_name (변경 불가)" : "storage_name *"}
             <input
               value={storageName}
               onChange={(e) => setStorageName(e.target.value)}
