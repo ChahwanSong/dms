@@ -51,21 +51,6 @@ def operator_router() -> APIRouter:
         dependencies=[Depends(require_role(ROLE_OPERATOR))],
     )
 
-    @router.get("/overview")
-    def overview(
-        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
-    ) -> dict[str, Any]:
-        return {
-            "role": ROLE_OPERATOR,
-            "username": user["username"],
-            "sections": [
-                {"key": "storage-inventory", "title": "스토리지 인벤토리 / 매핑", "status": "사용 가능"},
-                {"key": "resources", "title": "리소스 관리 (filesystem · k8s quota)", "status": "예정"},
-                {"key": "data-jobs", "title": "데이터 잡 (scan · sync · rm)", "status": "예정"},
-                {"key": "denylist", "title": "DM denylist", "status": "예정"},
-            ],
-        }
-
     # --- storage inventory (storage_mapping) ------------------------------
 
     @router.get("/storage-mappings")

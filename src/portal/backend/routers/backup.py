@@ -220,22 +220,17 @@ def backup_router(settings: Settings) -> APIRouter:
         await db.update_batch(batch_id, **fields)
         return await db.get_batch(batch_id)
 
-    @router.post("/batches/{batch_id}/requests")
-    async def add_requests(
+    @router.put("/batches/{batch_id}/requests")
+    async def replace_requests(
         batch_id: str,
         requests: list[BackupRequestIn],
         db: Database = Depends(get_db),
     ) -> dict[str, Any]:
-        batch = await db.get_batch(batch_id)
-        if not batch:
-            raise HTTPException(status_code=404, detail="batch_not_found")
-        if batch["status"] != "draft":
-            raise HTTPException(
-                status_code=409, detail="requests can only be added to a draft batch"
-            )
+        """Replace the entire request set of a draft batch (inline-table editor)."""
+        await _require_draft_batch(db, batch_id)
         rows = _normalize_requests(requests)
-        added = await db.add_requests(batch_id, rows)
-        return {"id": batch_id, "added": added}
+        count = await db.replace_requests(batch_id, rows)
+        return {"id": batch_id, "count": count}
 
     @router.get("/batches/{batch_id}/requests")
     async def list_requests(
@@ -264,17 +259,6 @@ def backup_router(settings: Settings) -> APIRouter:
         row = _normalize_requests([payload])[0]
         await db.edit_request_paths(request_id, row)
         return await db.get_request(request_id)
-
-    @router.delete("/batches/{batch_id}/requests/{request_id}")
-    async def delete_request(
-        batch_id: str,
-        request_id: int,
-        db: Database = Depends(get_db),
-    ) -> dict[str, Any]:
-        await _require_draft_batch(db, batch_id)
-        await _require_request(db, batch_id, request_id)
-        await db.delete_request(batch_id, request_id)
-        return {"id": batch_id, "request_id": request_id, "deleted": True}
 
     @router.post("/batches/{batch_id}/requests/{request_id}:cancel")
     async def cancel_one_request(

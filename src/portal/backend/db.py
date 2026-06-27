@@ -50,12 +50,6 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(dk.hex(), hash_hex)
 
 
-# --- terminal / phase state sets --------------------------------------------
-
-REQUEST_TERMINAL = {"succeeded", "failed", "cancelled"}
-REQUEST_PREVIEW_DONE = {"preview_ready", "preview_failed", "cancelled"}
-
-
 def _ddl(schema: str) -> list[str]:
     s = f'"{schema}"'
     return [
@@ -301,6 +295,33 @@ class Database:
                 )
         return len(rows)
 
+    async def replace_requests(self, batch_id: str, rows: list[dict[str, str]]) -> int:
+        """Atomically replace ALL of a (draft) batch's requests with `rows`. Backs
+        the inline request-table editor, where the table is the full desired set."""
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM backup_requests WHERE batch_id=%s", (batch_id,)
+                )
+                if rows:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(
+                            "INSERT INTO backup_requests"
+                            "(batch_id,src_storage,src_path,dst_storage,dst_path,state) "
+                            "VALUES (%s,%s,%s,%s,%s,'registered')",
+                            [
+                                (
+                                    batch_id,
+                                    r["src_storage"],
+                                    r["src_path"],
+                                    r["dst_storage"],
+                                    r["dst_path"],
+                                )
+                                for r in rows
+                            ],
+                        )
+        return len(rows)
+
     async def list_requests(
         self,
         batch_id: str,
@@ -324,28 +345,6 @@ class Database:
                 "SELECT * FROM backup_requests WHERE id=%s", (request_id,)
             )
             return await cur.fetchone()
-
-    async def delete_request(self, batch_id: str, request_id: int) -> bool:
-        """Delete one request of a batch; returns True if a row was removed."""
-        async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "DELETE FROM backup_requests WHERE id=%s AND batch_id=%s",
-                (request_id, batch_id),
-            )
-            return cur.rowcount > 0
-
-    async def claim_requests(
-        self, batch_id: str, from_state: str, to_state: str, limit: int
-    ) -> list[dict[str, Any]]:
-        """Atomically move up to `limit` requests from from_state -> to_state, returning them."""
-        async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "UPDATE backup_requests SET state=%s, updated_at=now() WHERE id IN "
-                "(SELECT id FROM backup_requests WHERE batch_id=%s AND state=%s "
-                " ORDER BY id FOR UPDATE SKIP LOCKED LIMIT %s) RETURNING *",
-                (to_state, batch_id, from_state, limit),
-            )
-            return await cur.fetchall()
 
     async def requests_in_states(
         self, batch_id: str, states: list[str]

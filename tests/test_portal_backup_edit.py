@@ -85,13 +85,6 @@ class FakeDB:
         r.update(row)
         r.update({"state": "registered", "dms_job_id": None, "preview": None, "error": None})
 
-    async def delete_request(self, batch_id: str, request_id: int) -> bool:
-        r = self.requests.get(request_id)
-        if r and r["batch_id"] == batch_id:
-            del self.requests[request_id]
-            return True
-        return False
-
 
 def make_client(db: FakeDB) -> TestClient:
     app = FastAPI()
@@ -226,31 +219,3 @@ def test_patch_request_wrong_batch_404(client, db):
         json={"src_storage": "s", "src_path": "a", "dst_storage": "d", "dst_path": "b"},
     )
     assert resp.status_code == 404
-
-
-# --- DELETE /batches/{id}/requests/{rid} ------------------------------------
-
-def test_delete_request_removes_row(client, db):
-    db.seed_batch("b1")
-    rid = db.seed_request("b1")
-    resp = client.delete(f"{BASE}/batches/b1/requests/{rid}")
-    assert resp.status_code == 200, resp.text
-    assert resp.json().get("deleted") is True
-    assert rid not in db.requests
-
-
-def test_delete_request_non_draft_409(client, db):
-    db.seed_batch("b1", status="previewing")
-    rid = db.seed_request("b1")
-    resp = client.delete(f"{BASE}/batches/b1/requests/{rid}")
-    assert resp.status_code == 409
-    assert rid in db.requests
-
-
-def test_delete_request_wrong_batch_404(client, db):
-    db.seed_batch("b1")
-    db.seed_batch("b2")
-    rid = db.seed_request("b2")
-    resp = client.delete(f"{BASE}/batches/b1/requests/{rid}")
-    assert resp.status_code == 404
-    assert rid in db.requests

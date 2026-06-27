@@ -47,7 +47,6 @@ export default function BackupBatchDetail({
   const [hasMore, setHasMore] = useState(false);
   const offsetRef = useRef(0);
   const [showEdit, setShowEdit] = useState(false);
-  const [focusReq, setFocusReq] = useState(false);
   const [editingReq, setEditingReq] = useState<BackupRequest | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -118,16 +117,6 @@ export default function BackupBatchDetail({
     });
   }
 
-  async function removeRequest(j: BackupRequest) {
-    if (
-      !window.confirm(
-        `요청을 삭제합니다.\n${j.src_storage}:${j.src_path} → ${j.dst_storage}:${j.dst_path}`,
-      )
-    )
-      return;
-    await act(() => operatorApi.backup.deleteRequest(batchId, j.id), "요청을 삭제했습니다.");
-  }
-
   async function cancelRow(j: BackupRequest) {
     if (
       !window.confirm(
@@ -153,6 +142,9 @@ export default function BackupBatchDetail({
   const counts = batch.state_counts || {};
   const totals = batch.preview_totals;
   const status = batch.status;
+  // Storage is batch-level (uniform across rows); derive from the loaded requests.
+  const batchSrc = jobs[0]?.src_storage;
+  const batchDst = jobs[0]?.dst_storage;
   const deleteConfirm = "--delete 배치입니다. 승인 항목은 dst에서 src에 없는 파일을 삭제합니다. 실행할까요?";
 
   // selective approval is available while a batch is previewed or running and
@@ -213,25 +205,8 @@ export default function BackupBatchDetail({
           </button>
           {status === "draft" && (
             <>
-              <button
-                className="ghost"
-                disabled={busy}
-                onClick={() => {
-                  setFocusReq(false);
-                  setShowEdit(true);
-                }}
-              >
+              <button className="ghost" disabled={busy} onClick={() => setShowEdit(true)}>
                 ✎ 편집
-              </button>
-              <button
-                className="ghost"
-                disabled={busy}
-                onClick={() => {
-                  setFocusReq(true);
-                  setShowEdit(true);
-                }}
-              >
-                + 요청
               </button>
               <button
                 className="primary"
@@ -295,6 +270,11 @@ export default function BackupBatchDetail({
         <code>{batch.priority ?? "Low"}</code>
         {batch.note ? ` · ${batch.note}` : ""}
       </p>
+      {batchSrc && (
+        <p className="muted small">
+          출발 스토리지 <code>{batchSrc}</code> → 대상 스토리지 <code>{batchDst}</code>
+        </p>
+      )}
 
       {/* progress / aggregate summary */}
       <div className="inv-summary">
@@ -362,10 +342,10 @@ export default function BackupBatchDetail({
                       </td>
                     )}
                     <td data-label="출발" className="mono small">
-                      {j.src_storage}:{j.src_path}
+                      {j.src_storage === batchSrc ? j.src_path : `${j.src_storage}:${j.src_path}`}
                     </td>
                     <td data-label="대상" className="mono small">
-                      {j.dst_storage}:{j.dst_path}
+                      {j.dst_storage === batchDst ? j.dst_path : `${j.dst_storage}:${j.dst_path}`}
                     </td>
                     <td data-label="상태">
                       <span className={`san ${s.cls}`}>{s.label}</span>
@@ -379,16 +359,7 @@ export default function BackupBatchDetail({
                       {j.error || (j.dms_job_id ? j.dms_job_id.slice(0, 14) + "…" : "—")}
                     </td>
                     <td className="row-actions">
-                      {status === "draft" ? (
-                        <>
-                          <button className="mini" onClick={() => setEditingReq(j)}>
-                            수정
-                          </button>
-                          <button className="mini danger" onClick={() => removeRequest(j)} disabled={busy}>
-                            삭제
-                          </button>
-                        </>
-                      ) : (
+                      {status !== "draft" && (
                         <>
                           {j.preview && (
                             <button className="mini" onClick={() => toggleExpand(j.id)}>
@@ -439,11 +410,10 @@ export default function BackupBatchDetail({
         <BackupBatchForm
           mode="edit"
           initial={batch}
-          focusRequests={focusReq}
           onClose={() => setShowEdit(false)}
           onSaved={({ added }) => {
             setShowEdit(false);
-            setNotice(added > 0 ? `저장됨 (요청 ${added}개 추가).` : "저장됨.");
+            setNotice(`저장됨 (요청 ${added}개).`);
             reload();
           }}
         />

@@ -319,7 +319,6 @@ const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 
 export const operatorApi = {
-  overview: () => request<Overview>("/api/operator/overview"),
   storage: {
     list: (clusterName?: string) =>
       request<StorageMapping[]>(
@@ -366,20 +365,16 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}`,
         { method: "DELETE" },
       ),
-    addRequests: (id: string, requests: BackupRequestInput[]) =>
-      request<{ id: string; added: number }>(
+    // Replace the whole request set of a draft batch (inline-table editor).
+    replaceRequests: (id: string, requests: BackupRequestInput[]) =>
+      request<{ id: string; count: number }>(
         `${BK}/${encodeURIComponent(id)}/requests`,
-        { method: "POST", body: JSON.stringify(requests) },
+        { method: "PUT", body: JSON.stringify(requests) },
       ),
     updateRequest: (id: string, rid: number, req: BackupRequestInput) =>
       request<BackupRequest>(
         `${BK}/${encodeURIComponent(id)}/requests/${rid}`,
         { method: "PATCH", body: JSON.stringify(req) },
-      ),
-    deleteRequest: (id: string, rid: number) =>
-      request<{ id: string; request_id: number; deleted: boolean }>(
-        `${BK}/${encodeURIComponent(id)}/requests/${rid}`,
-        { method: "DELETE" },
       ),
     requests: (id: string, opts?: { state?: string; limit?: number; offset?: number }) => {
       const q = new URLSearchParams();

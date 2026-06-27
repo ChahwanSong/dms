@@ -2,9 +2,9 @@ import { useState } from "react";
 import { operatorApi, type BackupRequest } from "../../../api";
 import { errMsg } from "./BackupBatches";
 
-// Per-row path editor for a single draft request (storage-relative paths; the
-// server re-normalizes and rejects traversal). Draft-only; the caller only
-// renders this while the batch is a draft.
+// Per-row PATH editor for a single request. Storage is batch-level (shown
+// read-only); editing a path resets the request to 'registered' server-side so a
+// re-preview re-runs it. Used for post-preview re-edit of fixable items.
 export default function BackupRequestEdit({
   batchId,
   request,
@@ -16,25 +16,19 @@ export default function BackupRequestEdit({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [srcStorage, setSrcStorage] = useState(request.src_storage);
   const [srcPath, setSrcPath] = useState(request.src_path);
-  const [dstStorage, setDstStorage] = useState(request.dst_storage);
   const [dstPath, setDstPath] = useState(request.dst_path);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function save() {
     setError(null);
-    if (!srcStorage.trim() || !dstStorage.trim()) {
-      setError("출발/대상 스토리지 이름은 필수입니다.");
-      return;
-    }
     setBusy(true);
     try {
       await operatorApi.backup.updateRequest(batchId, request.id, {
-        src_storage: srcStorage.trim(),
+        src_storage: request.src_storage,
         src_path: srcPath.trim(),
-        dst_storage: dstStorage.trim(),
+        dst_storage: request.dst_storage,
         dst_path: dstPath.trim(),
       });
       onSaved();
@@ -55,21 +49,16 @@ export default function BackupRequestEdit({
           </button>
         </div>
         <div className="form">
+          <p className="muted small">
+            출발 <code>{request.src_storage}</code> → 대상 <code>{request.dst_storage}</code> (스토리지는 배치 레벨)
+          </p>
           <label>
-            <span>출발 스토리지 (src) *</span>
-            <input value={srcStorage} onChange={(e) => setSrcStorage(e.target.value)} />
+            <span>출발 경로 (src_path)</span>
+            <input className="mono" value={srcPath} onChange={(e) => setSrcPath(e.target.value)} />
           </label>
           <label>
-            <span>출발 경로 (managed_root 상대)</span>
-            <input value={srcPath} onChange={(e) => setSrcPath(e.target.value)} />
-          </label>
-          <label>
-            <span>대상 스토리지 (dst) *</span>
-            <input value={dstStorage} onChange={(e) => setDstStorage(e.target.value)} />
-          </label>
-          <label>
-            <span>대상 경로 (managed_root 상대)</span>
-            <input value={dstPath} onChange={(e) => setDstPath(e.target.value)} />
+            <span>대상 경로 (dst_path)</span>
+            <input className="mono" value={dstPath} onChange={(e) => setDstPath(e.target.value)} />
           </label>
 
           {error && <div className="banner err">{error}</div>}

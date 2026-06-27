@@ -18,7 +18,6 @@ from fastapi import Depends, HTTPException, Request
 
 ROLE_USER = "user"
 ROLE_OPERATOR = "operator"
-ALL_ROLES = (ROLE_USER, ROLE_OPERATOR)
 
 
 def session_user(username: str, role: str, method: str, **extra: Any) -> dict[str, Any]:

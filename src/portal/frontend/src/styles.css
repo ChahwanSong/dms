@@ -290,11 +290,6 @@ button.ghost {
   border-color: var(--accent);
 }
 
-.nav-item.disabled {
-  color: var(--muted);
-  cursor: default;
-}
-
 .content-wide {
   flex: 1;
   padding: 1.5rem 2rem;
@@ -644,11 +639,6 @@ button.linklike {
 }
 
 /* ---- form ---- */
-.grid2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.85rem;
-}
 .tmpl-bar {
   display: flex;
   align-items: center;
@@ -696,14 +686,6 @@ button.linklike {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.02);
 }
-.sync-options-advanced {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  margin-top: 0.2rem;
-  padding-top: 0.6rem;
-  border-top: 1px dashed var(--border);
-}
 
 /* expanded per-request preview detail row (data backup) */
 .grid tr.detail-row td {
@@ -711,6 +693,43 @@ button.linklike {
   border-top: none;
   padding-top: 0.2rem;
   padding-bottom: 0.55rem;
+}
+
+/* batch-level source/destination storage inputs (data backup form) */
+.storage-row {
+  display: flex;
+  gap: 0.75rem;
+}
+.storage-row > label {
+  flex: 1;
+  min-width: 0;
+}
+
+/* inline request-row editor (src_path / dst_path) */
+.req-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+.req-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.4rem;
+  align-items: center;
+}
+.req-row.req-head {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.req-row input {
+  width: 100%;
+  margin: 0;
+}
+@media (max-width: 720px) {
+  .storage-row {
+    flex-direction: column;
+  }
 }
 
 textarea.json {
@@ -926,10 +945,6 @@ textarea.json {
     gap: 1rem;
   }
 
-  /* forms collapse to one column */
-  .grid2 {
-    grid-template-columns: 1fr;
-  }
   .tmpl-bar {
     flex-wrap: wrap;
   }

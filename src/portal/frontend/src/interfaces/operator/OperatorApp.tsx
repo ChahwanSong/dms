@@ -9,10 +9,10 @@ import Dashboard from "./dashboard/Dashboard";
 // feature module.
 type Section = "dashboard" | "storage" | "backup";
 
-const NAV: { key: Section; label: string; enabled: boolean }[] = [
-  { key: "dashboard", label: "종합 대시보드", enabled: true },
-  { key: "storage", label: "스토리지 인벤토리", enabled: true },
-  { key: "backup", label: "데이터 백업", enabled: true },
+const NAV: { key: Section; label: string }[] = [
+  { key: "dashboard", label: "종합 대시보드" },
+  { key: "storage", label: "스토리지 인벤토리" },
+  { key: "backup", label: "데이터 백업" },
 ];
 
 export default function OperatorApp({
@@ -32,13 +32,8 @@ export default function OperatorApp({
           {NAV.map((item) => (
             <button
               key={item.key}
-              className={
-                "nav-item" +
-                (section === item.key ? " active" : "") +
-                (item.enabled ? "" : " disabled")
-              }
-              disabled={!item.enabled}
-              onClick={() => item.enabled && setSection(item.key)}
+              className={"nav-item" + (section === item.key ? " active" : "")}
+              onClick={() => setSection(item.key)}
             >
               {item.label}
             </button>

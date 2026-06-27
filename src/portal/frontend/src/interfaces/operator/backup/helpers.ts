@@ -1,5 +1,3 @@
-import type { BackupRequestInput } from "../../../api";
-
 // Batch / request status -> Korean label + a sanity-style color class (reuses .san-*).
 export const BATCH_STATUS: Record<string, { label: string; cls: string }> = {
   draft: { label: "초안", cls: "san-unknown" },
@@ -42,7 +40,24 @@ export function fmtBytes(n?: number | null): string {
   return `${v.toFixed(v >= 100 || Number.isInteger(v) ? 0 : 1)} ${units[i]}`;
 }
 
+// One request row in the inline editor (storage is batch-level, not per row).
+export interface BackupRow {
+  src_path: string;
+  dst_path: string;
+}
+
+export interface ParsedRequests {
+  rows: BackupRow[];
+  srcStorage?: string;
+  dstStorage?: string;
+  errors: string[];
+}
+
 const HEADER_TOKENS = new Set([
+  "src_path",
+  "source_path",
+  "dst_path",
+  "destination_path",
   "src_storage",
   "source_storage",
   "src",
@@ -53,35 +68,56 @@ const HEADER_TOKENS = new Set([
   "destination",
 ]);
 
-export interface ParseResult {
-  requests: BackupRequestInput[];
-  errors: string[];
-}
-
-// Parse pasted CSV/TSV: 4 columns `src_storage, src_path, dst_storage, dst_path`.
-// Comma or tab delimited; blank lines and `#` comments skipped; a header row
-// (first field looks like a column name) is ignored.
-export function parseRequestsCsv(text: string): ParseResult {
-  const requests: BackupRequestInput[] = [];
+// Parse pasted/uploaded CSV/TSV. Primary format is 2 columns: `src_path, dst_path`
+// (storage is batch-level). A legacy 4-column file
+// (`src_storage, src_path, dst_storage, dst_path`) is also accepted — the storages
+// are lifted into srcStorage/dstStorage when the file uses a single pair (mixed
+// storages are reported as an error). Comma or tab delimited; blank lines and `#`
+// comments skipped; a header row is ignored.
+export function parseRequestsCsv(text: string): ParsedRequests {
+  const rows: BackupRow[] = [];
   const errors: string[] = [];
-  const lines = text.split(/\r?\n/);
-  lines.forEach((raw, idx) => {
+  const srcSet = new Set<string>();
+  const dstSet = new Set<string>();
+  text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return;
     const parts = line.split(line.includes("\t") ? "\t" : ",").map((p) => p.trim());
     if (idx === 0 && HEADER_TOKENS.has((parts[0] || "").toLowerCase())) return; // header
-    if (parts.length < 4 || parts.some((p, i) => i < 4 && !p)) {
-      errors.push(`${idx + 1}행: 4개 컬럼 필요 (src_storage,src_path,dst_storage,dst_path)`);
-      return;
+    if (parts.length >= 4) {
+      const [ss, sp, ds, dp] = parts;
+      if (!sp || !dp) {
+        errors.push(`${idx + 1}행: 경로가 비어 있습니다`);
+        return;
+      }
+      if (ss) srcSet.add(ss);
+      if (ds) dstSet.add(ds);
+      rows.push({ src_path: sp, dst_path: dp });
+    } else if (parts.length >= 2 && parts[0] && parts[1]) {
+      rows.push({ src_path: parts[0], dst_path: parts[1] });
+    } else {
+      errors.push(`${idx + 1}행: 2개 컬럼 필요 (src_path, dst_path)`);
     }
-    requests.push({
-      src_storage: parts[0],
-      src_path: parts[1],
-      dst_storage: parts[2],
-      dst_path: parts[3],
-    });
   });
-  return { requests, errors };
+  if (srcSet.size > 1 || dstSet.size > 1) {
+    errors.push("여러 스토리지가 섞여 있습니다 — 배치는 단일 출발/대상 스토리지만 지원합니다");
+  }
+  return {
+    rows,
+    srcStorage: srcSet.size === 1 ? [...srcSet][0] : undefined,
+    dstStorage: dstSet.size === 1 ? [...dstSet][0] : undefined,
+    errors,
+  };
+}
+
+// Serialize rows to a 2-column CSV (with header) for download.
+export function rowsToCsv(rows: BackupRow[]): string {
+  const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  return (
+    "src_path,dst_path\n" +
+    rows.map((r) => `${esc(r.src_path)},${esc(r.dst_path)}`).join("\n") +
+    "\n"
+  );
 }
 
 // --- batch-wide DMS sync options --------------------------------------------
