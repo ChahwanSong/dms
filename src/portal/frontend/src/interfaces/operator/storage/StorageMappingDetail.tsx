@@ -206,9 +206,10 @@ export default function StorageMappingDetail({
                       ]}
                     />
                     <p className="obs-note">
-                      에이전트가 <b>최근에 보고</b>한 스토리지 노드가 RM/DM 작업 대상입니다. Fresh
-                      리포트가 0이면 해당 노드의 에이전트가 동작하지 않는 상태이며, Stale 리포트는
-                      신선도 기준을 지난 과거 보고 누계(정상적으로 쌓임)입니다.
+                      에이전트가 최근에 보고한 노드가 RM/DM 작업 대상입니다. <b>Fresh</b>는 최신
+                      보고, <b>Stale</b>은 보고 시한이 지난 과거 기록을 뜻합니다. Fresh 리포트가
+                      0이면 해당 노드의 에이전트가 동작하지 않는 상태이며, Stale 리포트는 시간이
+                      지나면 자연히 쌓이므로 많아도 정상입니다.
                     </p>
                   </section>
                 )}
