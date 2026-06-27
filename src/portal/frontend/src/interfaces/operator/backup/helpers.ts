@@ -27,6 +27,39 @@ export function requestState(s?: string) {
   return REQUEST_STATE[s || ""] || { label: s || "—", cls: "san-unknown" };
 }
 
+// DMS preflight/preview failure reason code -> Korean explanation. The DM worker
+// now returns a precise reason (e.g. source_not_found) instead of a generic
+// posix_permission_denied; map the known codes and pass unknown ones through.
+const ERROR_REASONS: Record<string, string> = {
+  source_not_found: "출발 경로가 존재하지 않음",
+  source_not_readable: "출발 경로 읽기 권한 없음",
+  source_not_traversable: "출발 디렉터리 접근(x) 권한 없음",
+  destination_parent_missing: "대상 상위 디렉터리가 없음",
+  destination_parent_not_writable: "대상 상위 디렉터리 쓰기 권한 없음",
+  destination_parent_not_traversable: "대상 상위 디렉터리 접근(x) 권한 없음",
+  destination_not_writable: "기존 대상 쓰기 권한 없음",
+  target_not_found: "대상 경로가 존재하지 않음",
+  target_not_directory: "대상이 디렉터리가 아님",
+  target_not_readable: "대상 읽기 권한 없음",
+  target_not_traversable: "대상 디렉터리 접근(x) 권한 없음",
+  parent_not_writable: "상위 디렉터리 쓰기 권한 없음",
+  parent_not_traversable: "상위 디렉터리 접근(x) 권한 없음",
+  posix_permission_denied: "권한/경로 검사 실패",
+  // common non-preflight reasons, surfaced for completeness
+  no_ready_dm_candidate: "실행 가능한 DM 노드 없음",
+  insufficient_eligible_nodes: "적격 노드 수 부족",
+  insufficient_source_eligible_nodes: "출발측 적격 노드 수 부족",
+  insufficient_destination_eligible_nodes: "대상측 적격 노드 수 부족",
+  ldap_not_configured: "LDAP 미설정",
+};
+
+// Friendly Korean label for an error/reason code. Returns null for empty input
+// and passes through codes/messages we don't have a mapping for.
+export function friendlyError(code?: string | null): string | null {
+  if (!code) return null;
+  return ERROR_REASONS[code] ?? code;
+}
+
 export function fmtBytes(n?: number | null): string {
   if (n == null) return "—";
   if (n < 1024) return `${n} B`;

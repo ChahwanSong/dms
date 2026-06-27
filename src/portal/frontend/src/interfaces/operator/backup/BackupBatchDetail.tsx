@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
-import { batchStatus, requestState, fmtBytes } from "./helpers";
+import { batchStatus, requestState, fmtBytes, friendlyError } from "./helpers";
 import { errMsg, fmtTime } from "./BackupBatches";
 import { SpecGrid, type KV } from "./ui";
 import BackupBatchForm from "./BackupBatchForm";
@@ -23,6 +23,7 @@ const EDITABLE = ["registered", "preview_ready", "preview_failed", "failed", "ca
 const RETRYABLE = ["preview_failed", "failed"];
 
 const num = (n?: number | null) => (n == null ? "—" : n.toLocaleString());
+const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s);
 
 // storage-relative path -> absolute, by prefixing the storage managed_root.
 function absPath(root: string | undefined, path: string): string {
@@ -113,7 +114,14 @@ function RequestDetail({ j, roots }: { j: BackupRequest; roots: Record<string, s
         <SpecGrid items={ids} />
       </section>
 
-      {j.error && <div className="req-error">{j.error}</div>}
+      {j.error && (
+        <div className="req-error">
+          {friendlyError(j.error)}
+          {friendlyError(j.error) !== j.error && (
+            <span className="req-error-code"> ({j.error})</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -527,8 +535,8 @@ export default function BackupBatchDetail({
                     </td>
                     <td data-label="비고" className="small">
                       {j.error ? (
-                        <span className="err-num">
-                          {j.error.length > 40 ? j.error.slice(0, 40) + "…" : j.error}
+                        <span className="err-num" title={j.error}>
+                          {truncate(friendlyError(j.error) || j.error, 30)}
                         </span>
                       ) : (
                         <span className="muted">

@@ -1174,6 +1174,7 @@ tr.row-open .expand-toggle { color: var(--accent); }
 .req-sec { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: 10px; padding: 0.65rem 0.8rem; }
 .req-sec h4 { margin: 0 0 0.55rem; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 700; }
 .req-error { color: var(--error); background: rgba(248, 113, 113, 0.08); border: 1px solid rgba(248, 113, 113, 0.4); border-radius: 8px; padding: 0.5rem 0.7rem; font-size: 0.82rem; overflow-wrap: anywhere; }
+.req-error-code { color: var(--muted); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.74rem; }
 
 @media (prefers-reduced-motion: reduce) {
   .expand-toggle { transition: none; }
