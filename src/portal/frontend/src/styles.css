@@ -379,6 +379,7 @@ table.grid td {
   text-align: left;
   padding: 0.55rem 0.6rem;
   border-bottom: 1px solid var(--border);
+  vertical-align: middle; /* center cell content so action-button rows align with text rows */
 }
 table.grid th {
   color: var(--muted);
@@ -415,16 +416,23 @@ table.grid th {
   display: flex;
   gap: 0.35rem;
   justify-content: flex-end;
+  flex-wrap: nowrap; /* keep action buttons on one line so row heights stay uniform */
+  white-space: nowrap;
+}
+.row-actions button {
+  flex: 0 0 auto; /* don't shrink the buttons (which would wrap their text to a 2nd line) */
 }
 
 button.mini {
   font-size: 0.78rem;
-  padding: 0.3rem 0.55rem;
+  padding: 0.2rem 0.55rem;
+  line-height: 1.2; /* default 'normal' (~1.45) made action rows taller than text rows */
   background: transparent;
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
+  white-space: nowrap;
 }
 button.mini.danger,
 button.danger {
