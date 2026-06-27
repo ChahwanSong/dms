@@ -95,7 +95,7 @@ function RequestDetail({ j, roots }: { j: BackupRequest; roots: Record<string, s
         <div className="req-secs">
           {prev.length > 0 && (
             <section className="req-sec">
-              <h4>미리보기 (dry-run)</h4>
+              <h4>Preview (dry-run)</h4>
               <SpecGrid items={prev} />
             </section>
           )}
@@ -260,7 +260,7 @@ export default function BackupBatchDetail({
   // still has undecided preview_ready requests.
   const canSelect = (status === "previewed" || status === "running") && (counts.preview_ready ?? 0) > 0;
   const selectedReady = jobs.filter((j) => j.state === "preview_ready" && selected.has(j.id));
-  // columns: chevron + (checkbox?) + 출발/대상/상태/미리보기/비고(5) + actions
+  // columns: chevron + (checkbox?) + 출발/대상/상태/Preview/비고(5) + actions
   const cols = 5 + (canSelect ? 1 : 0) + 2;
 
   function approveSelected() {
@@ -280,18 +280,18 @@ export default function BackupBatchDetail({
     }, "전체 승인 — 실행을 시작합니다.");
   }
   function closeBatch() {
-    if (!window.confirm("배치를 마감합니다. 승인하지 않은 '미리보기 완료' 항목은 제외됩니다.")) return;
+    if (!window.confirm("배치를 마감합니다. 승인하지 않은 'Preview 완료' 항목은 제외됩니다.")) return;
     act(() => operatorApi.backup.close(batchId), "배치를 마감했습니다.");
   }
   async function resetOne(j: BackupRequest) {
     await act(
       () => operatorApi.backup.resetRequests(batchId, { request_ids: [j.id] }),
-      "재시도 대기로 되돌렸습니다. '재미리보기'를 누르세요.",
+      "재시도 대기로 되돌렸습니다. 'Re-preview'를 누르세요.",
     );
   }
   function retryFailed() {
     const n = (counts.preview_failed ?? 0) + (counts.failed ?? 0);
-    if (!window.confirm(`실패 항목 ${n}개를 재시도 대기로 되돌립니다. 이후 '재미리보기'를 누르세요.`)) return;
+    if (!window.confirm(`실패 항목 ${n}개를 재시도 대기로 되돌립니다. 이후 'Re-preview'를 누르세요.`)) return;
     act(
       () => operatorApi.backup.resetRequests(batchId, { failed_only: true }),
       "실패 항목을 재시도 대기로 되돌렸습니다.",
@@ -322,10 +322,10 @@ export default function BackupBatchDetail({
                 className="primary"
                 disabled={busy}
                 onClick={() =>
-                  act(() => operatorApi.backup.preview(batchId), "미리보기를 시작했습니다.")
+                  act(() => operatorApi.backup.preview(batchId), "Preview를 시작했습니다.")
                 }
               >
-                미리보기 시작
+                Preview
               </button>
             </>
           )}
@@ -347,10 +347,10 @@ export default function BackupBatchDetail({
               className="primary"
               disabled={busy}
               onClick={() =>
-                act(() => operatorApi.backup.preview(batchId), "재미리보기를 시작했습니다.")
+                act(() => operatorApi.backup.preview(batchId), "Re-preview를 시작했습니다.")
               }
             >
-              재미리보기
+              Re-preview
             </button>
           )}
           {status !== "draft" && status !== "previewing" && failedCount > 0 && (
@@ -450,7 +450,7 @@ export default function BackupBatchDetail({
             <th>출발 (src)</th>
             <th>대상 (dst)</th>
             <th>상태</th>
-            <th>미리보기 (파일 · 크기)</th>
+            <th>Preview (파일 · 크기)</th>
             <th>비고</th>
             <th></th>
           </tr>
@@ -520,7 +520,7 @@ export default function BackupBatchDetail({
                     <td data-label="상태">
                       <span className={`san ${s.cls}`}>{s.label}</span>
                     </td>
-                    <td data-label="미리보기" className="muted small">
+                    <td data-label="Preview" className="muted small">
                       {j.preview
                         ? `${(j.preview.files ?? 0).toLocaleString()} · ${fmtBytes(j.preview.bytes)}`
                         : "—"}

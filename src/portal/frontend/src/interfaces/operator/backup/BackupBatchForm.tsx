@@ -128,7 +128,7 @@ export default function BackupBatchForm({
   }
 
   const deleteConfirm =
-    "--delete가 켜져 있습니다. 대상(dst)에서 원본(src)에 없는 파일이 삭제됩니다. 미리보기로 확인 후 실행됩니다. 계속할까요?";
+    "--delete가 켜져 있습니다. 대상(dst)에서 원본(src)에 없는 파일이 삭제됩니다. Preview로 확인 후 실행됩니다. 계속할까요?";
 
   async function submit() {
     setError(null);
@@ -248,7 +248,7 @@ export default function BackupBatchForm({
               </select>
               <small className="muted">
                 자동이 기본. 출발·도착 스토리지가 걸친 노드 수가 정책 요구치보다
-                적어 미리보기가 거부될 때(insufficient_eligible_nodes) 노드 수를 그
+                적어 Preview가 거부될 때(insufficient_eligible_nodes) 노드 수를 그
                 노드 수에 맞춰 낮추면 통과한다.
               </small>
             </label>
@@ -276,7 +276,7 @@ export default function BackupBatchForm({
                   />
                   <span>
                     <strong className={deleteEnabled ? "err-num" : undefined}>--delete</strong> (미러):
-                    dst에서 src에 없는 파일을 삭제 — 파괴적, 미리보기로 확인 후 실행
+                    dst에서 src에 없는 파일을 삭제 — 파괴적, Preview로 확인 후 실행
                   </span>
                 </label>
                 <SyncOptionsFields group="sync" value={options} onChange={setOptions} />
@@ -355,7 +355,7 @@ export default function BackupBatchForm({
             <div className="form-hints muted small">
               <span>
                 요청 <strong>{rows.filter((r) => r.src_path.trim() && r.dst_path.trim()).length}</strong>개
-                {" "}· 대상의 부모 디렉터리는 미리 존재해야 합니다(미리보기에서 검증).
+                {" "}· 대상의 부모 디렉터리는 미리 존재해야 합니다(Preview에서 검증).
               </span>
             </div>
 

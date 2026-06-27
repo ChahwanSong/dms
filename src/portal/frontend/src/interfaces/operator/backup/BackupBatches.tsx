@@ -76,7 +76,7 @@ export default function BackupBatches() {
             <div className="hint-flow">
               <span>등록</span>
               <i className="flow-arrow">→</i>
-              <span>미리보기</span>
+              <span>Preview</span>
               <i className="flow-arrow">→</i>
               <span>승인</span>
               <i className="flow-arrow">→</i>
@@ -84,7 +84,7 @@ export default function BackupBatches() {
             </div>
             <ul className="hint-list">
               <li>
-                <b>미리보기</b> — 비파괴 dry-run으로 영향(파일·용량·삭제 수)을 먼저 확인합니다.
+                <b>Preview</b> — 비파괴 dry-run으로 영향(파일·용량·삭제 수)을 먼저 확인합니다.
               </li>
               <li>
                 <b>승인</b> — 운영자가 확인한 항목만 실행합니다(선택·단계 승인 가능).
@@ -210,7 +210,7 @@ export default function BackupBatches() {
           onClose={() => setShowForm(false)}
           onSaved={({ id, added }) => {
             setShowForm(false);
-            setNotice(`배치 생성됨 (요청 ${added}개). 미리보기를 시작하세요.`);
+            setNotice(`배치 생성됨 (요청 ${added}개). Preview를 시작하세요.`);
             setOpenId(id);
           }}
         />

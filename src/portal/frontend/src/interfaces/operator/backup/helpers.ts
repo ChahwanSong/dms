@@ -1,8 +1,8 @@
 // Batch / request status -> Korean label + a sanity-style color class (reuses .san-*).
 export const BATCH_STATUS: Record<string, { label: string; cls: string }> = {
   draft: { label: "초안", cls: "san-unknown" },
-  previewing: { label: "미리보기 중", cls: "san-degraded" },
-  previewed: { label: "미리보기 완료", cls: "san-ready" },
+  previewing: { label: "Preview 중", cls: "san-degraded" },
+  previewed: { label: "Preview 완료", cls: "san-ready" },
   running: { label: "실행 중", cls: "san-degraded" },
   done: { label: "완료", cls: "san-ready" },
   cancelled: { label: "취소됨", cls: "san-failed" },
@@ -10,10 +10,10 @@ export const BATCH_STATUS: Record<string, { label: string; cls: string }> = {
 
 export const REQUEST_STATE: Record<string, { label: string; cls: string }> = {
   registered: { label: "등록됨", cls: "san-unknown" },
-  preview_pending: { label: "미리보기 대기", cls: "san-degraded" },
-  preview_ready: { label: "미리보기 완료", cls: "san-ready" },
+  preview_pending: { label: "Preview 대기", cls: "san-degraded" },
+  preview_ready: { label: "Preview 완료", cls: "san-ready" },
   approved: { label: "승인됨", cls: "san-degraded" },
-  preview_failed: { label: "미리보기 실패", cls: "san-failed" },
+  preview_failed: { label: "Preview 실패", cls: "san-failed" },
   running: { label: "실행 중", cls: "san-degraded" },
   succeeded: { label: "성공", cls: "san-ready" },
   failed: { label: "실패", cls: "san-failed" },
