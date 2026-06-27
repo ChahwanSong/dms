@@ -268,6 +268,8 @@ export default function BackupBatchDetail({
         {batch.delete_enabled ? <strong className="err-num">--delete 켜짐</strong> : "--delete 꺼짐"}
         {" · 우선순위 "}
         <code>{batch.priority ?? "Low"}</code>
+        {" · 병렬 노드 "}
+        <code>{batch.node_count != null ? batch.node_count : "자동"}</code>
         {batch.note ? ` · ${batch.note}` : ""}
       </p>
       {batchSrc && (

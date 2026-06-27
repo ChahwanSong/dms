@@ -35,6 +35,11 @@ export default function BackupBatchForm({
   const [name, setName] = useState(initial?.name ?? "");
   const [note, setNote] = useState(initial?.note ?? "");
   const [priority, setPriority] = useState(initial?.priority ?? "Low");
+  // "" = 자동 (DMS 정책 기본값). 교차 스토리지(노드 < 정책 요구치)에서 노드 수를
+  // 낮춰 잡으면 dsync/nsync 전처리 거부를 피할 수 있다.
+  const [nodeCount, setNodeCount] = useState<string>(
+    initial?.node_count != null ? String(initial.node_count) : "",
+  );
   const [deleteEnabled, setDeleteEnabled] = useState(
     isEdit ? initial?.delete_enabled ?? false : true,
   );
@@ -146,6 +151,7 @@ export default function BackupBatchForm({
       dst_storage: dstStorage.trim(),
       dst_path: r.dst_path,
     }));
+    const node_count = nodeCount ? Number(nodeCount) : null;
     setBusy(true);
     try {
       if (isEdit && initial) {
@@ -155,6 +161,7 @@ export default function BackupBatchForm({
           delete_enabled: deleteEnabled,
           options,
           priority,
+          node_count,
         });
         await operatorApi.backup.replaceRequests(initial.id, requests);
         onSaved({ id: initial.id, added: requests.length, mode });
@@ -165,6 +172,7 @@ export default function BackupBatchForm({
           note: note.trim() || null,
           options,
           priority,
+          node_count,
           requests,
         });
         onSaved({ id: res.id, added: res.added, mode });
@@ -228,6 +236,21 @@ export default function BackupBatchForm({
                 <option value="Mid">Mid</option>
                 <option value="High">High</option>
               </select>
+            </label>
+            <label>
+              <span>병렬 노드 수</span>
+              <select value={nodeCount} onChange={(e) => setNodeCount(e.target.value)}>
+                <option value="">자동 (정책 기본값)</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+              </select>
+              <small className="muted">
+                자동이 기본. 출발·도착 스토리지가 걸친 노드 수가 정책 요구치보다
+                적어 미리보기가 거부될 때(insufficient_eligible_nodes) 노드 수를 그
+                노드 수에 맞춰 낮추면 통과한다.
+              </small>
             </label>
 
             <div className="storage-row">

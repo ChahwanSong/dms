@@ -20,9 +20,12 @@ class OrchDB:
         self.requests: dict[int, dict[str, Any]] = {}
         self._n = 1
 
-    def add_batch(self, bid: str, status: str, priority: str = "Low") -> dict[str, Any]:
+    def add_batch(
+        self, bid: str, status: str, priority: str = "Low", node_count=None
+    ) -> dict[str, Any]:
         b = {"id": bid, "status": status, "options": {}, "delete_enabled": False,
-             "requester_id": "root", "created_by": "op", "priority": priority}
+             "requester_id": "root", "created_by": "op", "priority": priority,
+             "node_count": node_count}
         self.batches[bid] = b
         return b
 
@@ -97,6 +100,30 @@ def test_submit_uses_per_batch_priority():
         orch = BackupOrchestrator(db, dms, Settings())
         await orch._submit_one(batch, db.requests[rid], "mtls:op")
         assert dms.submitted[0]["priority"] == "High"  # batch value, not settings default
+    asyncio.run(go())
+
+
+def test_submit_includes_node_count_resources():
+    async def go():
+        db = OrchDB()
+        batch = db.add_batch("b1", "previewing", node_count=2)
+        rid = db.add_request("b1", "registered")
+        dms = OrchDms({})
+        orch = BackupOrchestrator(db, dms, Settings())
+        await orch._submit_one(batch, db.requests[rid], "mtls:op")
+        assert dms.submitted[0].get("resources") == {"node_count": 2}
+    asyncio.run(go())
+
+
+def test_submit_omits_resources_when_node_count_auto():
+    async def go():
+        db = OrchDB()
+        batch = db.add_batch("b1", "previewing")  # node_count None -> 자동/policy default
+        rid = db.add_request("b1", "registered")
+        dms = OrchDms({})
+        orch = BackupOrchestrator(db, dms, Settings())
+        await orch._submit_one(batch, db.requests[rid], "mtls:op")
+        assert "resources" not in dms.submitted[0]
     asyncio.run(go())
 
 

@@ -40,6 +40,7 @@ class BatchCreate(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
     note: str | None = None
     priority: str = "Low"
+    node_count: int | None = Field(default=None, ge=1)  # None = use DMS policy default
     requests: list[BackupRequestIn] = Field(default_factory=list)
 
 
@@ -52,6 +53,7 @@ class BatchUpdate(BaseModel):
     options: dict[str, Any] | None = None
     note: str | None = None
     priority: str | None = None
+    node_count: int | None = Field(default=None, ge=1)  # None = use DMS policy default
 
 
 class ApproveIn(BaseModel):
@@ -167,6 +169,7 @@ def backup_router(settings: Settings) -> APIRouter:
             created_by=_actor(user),
             note=payload.note,
             priority=payload.priority,
+            node_count=payload.node_count,
         )
         added = await db.add_requests(batch_id, rows)
         return {"id": batch_id, "added": added}

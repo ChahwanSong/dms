@@ -164,6 +164,7 @@ export interface BackupBatch {
   options: Record<string, unknown>;
   requester_id: string;
   priority?: string; // High | Mid | Low (Volcano scheduling)
+  node_count?: number | null; // null = 자동 (DMS policy default)
   created_by?: string | null;
   note?: string | null;
   created_at?: string;
@@ -211,6 +212,7 @@ export interface BatchCreateInput {
   options?: Record<string, unknown>;
   note?: string | null;
   priority?: string;
+  node_count?: number | null; // null = 자동 (DMS policy default)
   requests?: BackupRequestInput[];
 }
 
@@ -221,6 +223,7 @@ export interface BatchUpdateInput {
   options?: Record<string, unknown>;
   note?: string | null;
   priority?: string;
+  node_count?: number | null; // null = 자동 (DMS policy default)
 }
 
 // --- dashboard ---------------------------------------------------------

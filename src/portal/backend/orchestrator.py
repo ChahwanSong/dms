@@ -199,6 +199,10 @@ class BackupOrchestrator:
         body = sync_body(batch, job)
         # Per-batch Volcano scheduling priority (operator-selected; default Low).
         body["priority"] = batch.get("priority") or self._settings.backup_priority
+        # Per-batch worker parallelism. None = use the DMS policy default; a single
+        # node_count covers dsync and nsync (nsync source/dest hints fall back to it).
+        if batch.get("node_count"):
+            body["resources"] = {"node_count": batch["node_count"]}
         try:
             resp = await self._dms.submit_sync(body, actor=actor)
         except DmsApiError as exc:

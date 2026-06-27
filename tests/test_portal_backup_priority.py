@@ -24,12 +24,15 @@ class FakeDB:
         self.updated: dict[str, Any] | None = None
 
     async def create_batch(self, *, batch_id, name, delete_enabled, options,
-                           requester_id, created_by, note, priority) -> None:
+                           requester_id, created_by, note, priority,
+                           node_count=None) -> None:
         self.created = {"batch_id": batch_id, "name": name, "priority": priority,
-                        "delete_enabled": delete_enabled, "options": options}
+                        "delete_enabled": delete_enabled, "options": options,
+                        "node_count": node_count}
         self.batches[batch_id] = {"id": batch_id, "status": "draft", "name": name,
                                   "priority": priority, "delete_enabled": delete_enabled,
-                                  "options": options, "requester_id": "root"}
+                                  "options": options, "requester_id": "root",
+                                  "node_count": node_count}
 
     async def add_requests(self, batch_id, rows) -> int:
         return len(rows)
@@ -92,3 +95,27 @@ def test_patch_rejects_bad_priority(client, db):
     db.batches["b1"] = {"id": "b1", "status": "draft", "priority": "Low"}
     r = client.patch(f"{BASE}/batches/b1", json={"priority": "Bogus"})
     assert r.status_code == 422
+
+
+def test_create_stores_node_count(client, db):
+    r = client.post(f"{BASE}/batches", json={"name": "b", "node_count": 2, "requests": []})
+    assert r.status_code == 201, r.text
+    assert db.created["node_count"] == 2
+
+
+def test_create_defaults_node_count_auto(client, db):
+    r = client.post(f"{BASE}/batches", json={"name": "b", "requests": []})
+    assert r.status_code == 201, r.text
+    assert db.created["node_count"] is None  # 자동: use DMS policy default
+
+
+def test_create_rejects_zero_node_count(client, db):
+    r = client.post(f"{BASE}/batches", json={"name": "b", "node_count": 0, "requests": []})
+    assert r.status_code == 422
+
+
+def test_patch_updates_node_count(client, db):
+    db.batches["b1"] = {"id": "b1", "status": "draft", "priority": "Low", "node_count": None}
+    r = client.patch(f"{BASE}/batches/b1", json={"node_count": 3})
+    assert r.status_code == 200, r.text
+    assert db.batches["b1"]["node_count"] == 3

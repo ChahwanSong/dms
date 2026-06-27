@@ -67,6 +67,7 @@ def _ddl(schema: str) -> list[str]:
             options jsonb NOT NULL DEFAULT '{{}}'::jsonb,
             requester_id text NOT NULL DEFAULT 'root',
             priority text NOT NULL DEFAULT 'Low',
+            node_count int,
             created_by text,
             note text,
             created_at timestamptz NOT NULL DEFAULT now(),
@@ -94,6 +95,7 @@ def _ddl(schema: str) -> list[str]:
         # migration for pre-existing DBs: add the per-batch priority column.
         f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS priority text "
         f"NOT NULL DEFAULT 'Low'",
+        f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS node_count int",
     ]
 
 
@@ -173,12 +175,13 @@ class Database:
         created_by: str | None,
         note: str | None,
         priority: str = "Low",
+        node_count: int | None = None,
     ) -> None:
         async with self.pool.connection() as conn:
             await conn.execute(
                 "INSERT INTO backup_batches"
-                "(id,name,status,delete_enabled,options,requester_id,priority,created_by,note) "
-                "VALUES (%s,%s,'draft',%s,%s,%s,%s,%s,%s)",
+                "(id,name,status,delete_enabled,options,requester_id,priority,node_count,created_by,note) "
+                "VALUES (%s,%s,'draft',%s,%s,%s,%s,%s,%s,%s)",
                 (
                     batch_id,
                     name,
@@ -186,6 +189,7 @@ class Database:
                     Jsonb(options),
                     requester_id,
                     priority,
+                    node_count,
                     created_by,
                     note,
                 ),
@@ -242,7 +246,7 @@ class Database:
     async def update_batch(self, batch_id: str, **fields: Any) -> None:
         """Update whitelisted draft-batch columns (name/note/delete_enabled/options).
         Only the keys present in `fields` are changed; `options` is stored as jsonb."""
-        allowed = ("name", "note", "delete_enabled", "options", "priority")
+        allowed = ("name", "note", "delete_enabled", "options", "priority", "node_count")
         cols: list[str] = []
         params: list[Any] = []
         for key in allowed:
