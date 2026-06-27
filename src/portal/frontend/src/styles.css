@@ -1068,24 +1068,26 @@ textarea.json {
 }
 .info-hint-btn:hover, .info-hint-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
 .info-hint-pop {
-  position: absolute; top: calc(100% + 0.5rem); z-index: 60; width: min(22rem, 80vw);
-  padding: 0.9rem 1.05rem; background: #0b1220; border: 1px solid var(--border);
+  position: absolute; top: calc(100% + 0.5rem); z-index: 60; width: min(23rem, 86vw);
+  display: block; padding: 0.85rem 1rem; background: #0b1220; border: 1px solid var(--border);
   border-radius: 12px; box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
-  font: 400 0.82rem/1.55 inherit; color: var(--fg); cursor: default;
-  text-transform: none; letter-spacing: 0;
+  /* reset everything inherited from the enclosing .inv-head h2 (large, bold, nowrap) */
+  font-size: 0.82rem; font-weight: 400; line-height: 1.5; white-space: normal;
+  text-align: left; text-transform: none; letter-spacing: 0;
+  color: var(--fg); cursor: default;
 }
 .info-hint-pop.start { left: 0; }
 .info-hint-pop.end { right: 0; }
-.info-hint-pop .hint-title { display: block; font-size: 0.92rem; font-weight: 700; margin-bottom: 0.1rem; }
-.info-hint-pop .hint-lead { margin: 0 0 0.65rem; color: var(--muted); }
+.info-hint-pop .hint-title { display: block; font-size: 0.9rem; font-weight: 700; margin-bottom: 0.2rem; }
+.info-hint-pop .hint-lead { margin: 0 0 0.7rem; font-size: 0.82rem; font-weight: 400; color: var(--muted); }
 .hint-flow { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; margin-bottom: 0.7rem; }
 .hint-flow span {
   background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.4);
   color: #93c5fd; border-radius: 6px; padding: 0.12rem 0.5rem; font-size: 0.74rem; font-weight: 600;
 }
 .hint-flow .flow-arrow { color: var(--muted); font-style: normal; font-size: 0.74rem; }
-.info-hint-pop .hint-list { margin: 0; padding-left: 1.05rem; display: flex; flex-direction: column; gap: 0.32rem; }
-.info-hint-pop .hint-list li { color: var(--muted); }
+.info-hint-pop .hint-list { margin: 0; padding-left: 1.05rem; display: flex; flex-direction: column; gap: 0.38rem; }
+.info-hint-pop .hint-list li { font-size: 0.82rem; line-height: 1.5; color: var(--muted); }
 .info-hint-pop .hint-list b { color: var(--fg); font-weight: 600; }
 
 /* option chips */
