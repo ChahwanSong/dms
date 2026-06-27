@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { operatorApi, type StorageMapping } from "../../../api";
 import { SanityBadge } from "../components/SanityBadge";
+import { SpecGrid, BoolChip, type KV } from "../../../components/SpecGrid";
 import { backendType, formatApiError, isFsBackend, quotaTitle } from "./helpers";
 
 export default function StorageMappingDetail({
@@ -64,41 +65,17 @@ export default function StorageMappingDetail({
 
         {m && (
           <div className="detail-body">
-            <dl className="kv">
-              <dt>클러스터</dt><dd>{m.cluster_name || "—"}</dd>
-              <dt>backend_type</dt><dd>{backendType(m)}</dd>
-              <dt>storage class</dt><dd>{m.storage_class_name || "—"}</dd>
-              <dt>version</dt><dd>{m.version}</dd>
-              <dt>readiness</dt>
-              <dd>
-                <span className="axes">
-                  {isFs ? (
-                    <>
-                      <span>RM: <SanityBadge status={readiness?.resource_management} /></span>
-                      <span>DM: <SanityBadge status={readiness?.data_management} /></span>
-                      <span>INV: <SanityBadge status={readiness?.inventory} /></span>
-                    </>
-                  ) : (
-                    <span title={m ? quotaTitle(m) : undefined}>
-                      QUOTA: <SanityBadge status={readiness?.kubernetes_mutation} />
-                    </span>
-                  )}
-                </span>
-              </dd>
-              <dt>마지막 검사</dt><dd className="muted">{m.sanity_checked_at || "—"}</dd>
-              <dt>갱신</dt>
-              <dd className="muted">
-                {m.updated_by || "—"} · {m.updated_at || "—"}
-              </dd>
-              {m.disabled_at && (
-                <>
-                  <dt>비활성</dt>
-                  <dd className="san-failed">
-                    {m.disabled_at} ({m.disabled_reason || "—"})
-                  </dd>
-                </>
-              )}
-            </dl>
+            <SpecGrid items={overviewItems(m, readiness, isFs)} />
+
+            {(() => {
+              const cfg = configItems(m);
+              return cfg.length > 0 ? (
+                <section className="obs-card">
+                  <h4>경로 · 구성</h4>
+                  <SpecGrid items={cfg} />
+                </section>
+              ) : null;
+            })()}
 
             {sr && (
               <div className="sanity-block">
@@ -141,42 +118,79 @@ export default function StorageMappingDetail({
               </div>
             )}
 
-            {(k8s || agent || mutation) && (
-              <div className="observed">
+            {(k8s || (isFs && agent) || (!isFs && mutation)) && (
+              <div className="obs-cards">
                 {k8s && (
-                  <div>
+                  <section className="obs-card">
                     <h4>Kubernetes 관측</h4>
-                    <div className="muted small">
-                      cluster={k8s.cluster_name ?? "—"} · sc={k8s.storage_class_name ?? "—"} ·
-                      exists={String(k8s.storage_class_exists ?? "—")} · provisioner=
-                      {k8s.provisioner ?? "—"}
-                    </div>
-                  </div>
+                    <SpecGrid
+                      items={[
+                        { label: "클러스터", value: k8s.cluster_name ?? "—" },
+                        {
+                          label: "storage class",
+                          value: k8s.storage_class_name ?? "—",
+                          mono: !!k8s.storage_class_name,
+                        },
+                        { label: "SC 존재", value: <BoolChip value={k8s.storage_class_exists} /> },
+                        {
+                          label: "provisioner",
+                          value: k8s.provisioner ?? "—",
+                          mono: !!k8s.provisioner,
+                          span: true,
+                        },
+                      ]}
+                    />
+                  </section>
                 )}
                 {!isFs && mutation && (
-                  <div>
+                  <section className="obs-card">
                     <h4>Quota mutation transport</h4>
-                    <div className="muted small">
-                      mode={mutation.mode ?? "kubectl"}
-                      {mutation.control_host ? ` · control_host=${mutation.control_host}` : ""} ·
-                      reachable={String(mutation.reachable ?? "—")} · can_mutate=
-                      {String(mutation.can_mutate ?? "—")} · can-i(create/patch/delete)=
-                      {fmtPerm(mutation.permissions?.create)}/
-                      {fmtPerm(mutation.permissions?.patch)}/
-                      {fmtPerm(mutation.permissions?.delete)}
-                      {mutation.detail ? ` · ${mutation.detail}` : ""}
-                    </div>
-                  </div>
+                    <SpecGrid
+                      items={[
+                        { label: "모드", value: mutation.mode ?? "kubectl" },
+                        ...(mutation.control_host
+                          ? [{ label: "control host", value: mutation.control_host, mono: true } as KV]
+                          : []),
+                        { label: "도달", value: <BoolChip value={mutation.reachable} /> },
+                        { label: "변경 가능", value: <BoolChip value={mutation.can_mutate} /> },
+                        { label: "can-i · create", value: <BoolChip value={mutation.permissions?.create} /> },
+                        { label: "can-i · patch", value: <BoolChip value={mutation.permissions?.patch} /> },
+                        { label: "can-i · delete", value: <BoolChip value={mutation.permissions?.delete} /> },
+                        ...(mutation.detail
+                          ? [{ label: "detail", value: mutation.detail, span: true } as KV]
+                          : []),
+                      ]}
+                    />
+                  </section>
                 )}
                 {isFs && agent && (
-                  <div>
+                  <section className="obs-card">
                     <h4>Agent 관측</h4>
-                    <div className="muted small">
-                      fresh={agent.fresh_reports ?? 0} · stale={agent.stale_reports ?? 0} ·
-                      rm={agent.rm_readiness ?? "—"} ({agent.rm_candidates?.length ?? 0}) ·
-                      dm={agent.dm_readiness ?? "—"} ({agent.dm_candidates?.length ?? 0})
-                    </div>
-                  </div>
+                    <SpecGrid
+                      items={[
+                        { label: "fresh reports", value: String(agent.fresh_reports ?? 0) },
+                        { label: "stale reports", value: String(agent.stale_reports ?? 0) },
+                        {
+                          label: "RM",
+                          value: (
+                            <span className="axes">
+                              <SanityBadge status={agent.rm_readiness} />
+                              <span className="muted small">후보 {agent.rm_candidates?.length ?? 0}</span>
+                            </span>
+                          ),
+                        },
+                        {
+                          label: "DM",
+                          value: (
+                            <span className="axes">
+                              <SanityBadge status={agent.dm_readiness} />
+                              <span className="muted small">후보 {agent.dm_candidates?.length ?? 0}</span>
+                            </span>
+                          ),
+                        },
+                      ]}
+                    />
+                  </section>
                 )}
               </div>
             )}
@@ -204,8 +218,86 @@ export default function StorageMappingDetail({
   );
 }
 
-// can-i permission tri-state: true -> yes, false -> no, null/undefined -> ? (unknown).
-function fmtPerm(v?: boolean | null): string {
-  if (v == null) return "?";
-  return v ? "yes" : "no";
+function fmtTime(iso?: string | null): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+// Top-level identity/status of a mapping.
+function overviewItems(
+  m: StorageMapping,
+  readiness: StorageMapping["readiness"],
+  isFs: boolean,
+): KV[] {
+  const axes: ReactNode = isFs ? (
+    <span className="axes">
+      <span>RM: <SanityBadge status={readiness?.resource_management} /></span>
+      <span>DM: <SanityBadge status={readiness?.data_management} /></span>
+      <span>INV: <SanityBadge status={readiness?.inventory} /></span>
+    </span>
+  ) : (
+    <span className="axes" title={quotaTitle(m)}>
+      QUOTA: <SanityBadge status={readiness?.kubernetes_mutation} />
+    </span>
+  );
+  const items: KV[] = [
+    { label: "클러스터", value: m.cluster_name || "—" },
+    { label: "backend", value: backendType(m) },
+    { label: "storage class", value: m.storage_class_name || "—", mono: !!m.storage_class_name },
+    { label: "version", value: String(m.version) },
+    { label: "readiness", value: axes, span: true },
+    { label: "마지막 검사", value: fmtTime(m.sanity_checked_at) },
+    { label: "갱신", value: `${m.updated_by || "—"} · ${fmtTime(m.updated_at)}`, span: true },
+  ];
+  if (m.disabled_at)
+    items.push({
+      label: "비활성",
+      value: `${m.disabled_at} (${m.disabled_reason || "—"})`,
+      tone: "tone-danger-text",
+      span: true,
+    });
+  return items;
+}
+
+// Path/config fields lifted out of backend_template so they aren't buried in raw JSON.
+function configItems(m: StorageMapping): KV[] {
+  const tpl = (m.backend_template || {}) as Record<string, unknown>;
+  const str = (k: string): string | null => {
+    const v = tpl[k];
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  };
+  const nodes = Array.isArray(tpl.rm_worker_nodes)
+    ? (tpl.rm_worker_nodes as unknown[]).map(String)
+    : [];
+  const items: KV[] = [];
+  const mr = str("managed_root");
+  if (mr) items.push({ label: "경로 (managed_root)", value: mr, mono: true, span: true });
+  const mp = str("mount_path");
+  if (mp) items.push({ label: "마운트 (mount_path)", value: mp, mono: true, span: true });
+  const fsName = str("filesystem_name");
+  if (fsName) items.push({ label: "파일시스템", value: fsName, mono: true });
+  if (nodes.length)
+    items.push({
+      label: "RM 노드",
+      value: (
+        <span className="opt-chips">
+          {nodes.map((n) => (
+            <span className="chip" key={n}>
+              {n}
+            </span>
+          ))}
+        </span>
+      ),
+    });
+  const runner = str("command_runner");
+  if (runner) items.push({ label: "실행 방식", value: runner });
+  const tmpl = str("fileset_name_template");
+  if (tmpl) items.push({ label: "fileset 템플릿", value: tmpl, mono: true });
+  const drv = str("csi_driver");
+  if (drv) items.push({ label: "csi driver", value: drv, mono: true });
+  return items;
 }

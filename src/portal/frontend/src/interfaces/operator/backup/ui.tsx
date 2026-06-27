@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 import type { BackupBatch } from "../../../api";
 
+// Definition grid is shared across the operator console.
+export { SpecGrid, type KV } from "../../../components/SpecGrid";
+
 // Scheduling priority -> chip tone (Low is the quiet default).
 export function priorityTone(p?: string): string {
   if (p === "High") return "tone-high";
@@ -43,29 +46,6 @@ export function OptionChips({ batch }: { batch: BackupBatch }) {
       </span>,
     );
   return <span className="opt-chips">{chips}</span>;
-}
-
-export interface KV {
-  label: string;
-  value: ReactNode;
-  mono?: boolean;
-  tone?: string;
-  span?: boolean; // span the full grid width (e.g. long paths / notes)
-}
-
-// Aligned definition grid: eyebrow label above a value. Replaces run-on
-// "·"-separated metadata sentences with something scannable.
-export function SpecGrid({ items }: { items: KV[] }) {
-  return (
-    <dl className="spec-grid">
-      {items.map((it, i) => (
-        <div className={`spec-kv${it.span ? " span" : ""}`} key={i}>
-          <dt>{it.label}</dt>
-          <dd className={[it.mono ? "mono" : "", it.tone || ""].join(" ").trim()}>{it.value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
 }
 
 // Human-friendly entries of the sync options object (for expanded views).

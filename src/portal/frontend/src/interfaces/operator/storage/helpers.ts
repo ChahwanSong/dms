@@ -5,6 +5,13 @@ export function backendType(m: StorageMapping): string {
   return typeof bt === "string" && bt ? bt : "—";
 }
 
+// The managed root path (fs backends) — surfaced in the list/detail so the
+// storage path isn't only visible in the raw backend_template JSON.
+export function managedRoot(m: StorageMapping): string | null {
+  const v = m.backend_template?.["managed_root"];
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
 // DMS storage backend categories:
 // - filesystem (fs): host-mounted directory/quota operations (cephfs/gpfs/wekafs).
 //   These REQUIRE mount_path + managed_root (managed_root under mount_path).

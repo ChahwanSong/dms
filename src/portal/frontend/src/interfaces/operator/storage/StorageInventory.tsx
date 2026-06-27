@@ -3,7 +3,7 @@ import { ApiError, operatorApi, type StorageMapping } from "../../../api";
 import { SanityBadge, ReadinessDots } from "../components/SanityBadge";
 import StorageMappingDetail from "./StorageMappingDetail";
 import StorageMappingForm from "./StorageMappingForm";
-import { backendType, isFsBackend, quotaTitle } from "./helpers";
+import { backendType, isFsBackend, managedRoot, quotaTitle } from "./helpers";
 
 type FormState =
   | { mode: "create" }
@@ -298,6 +298,7 @@ export default function StorageInventory() {
                   <button className="linklike" onClick={() => setDetailName(m.storage_name)}>
                     {m.storage_name}
                   </button>
+                  {managedRoot(m) && <div className="cell-sub mono">{managedRoot(m)}</div>}
                 </td>
                 <td data-label="클러스터">{m.cluster_name || "—"}</td>
                 <td data-label="backend">{backendType(m)}</td>
