@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { ApiError, operatorApi, type BackupBatch } from "../../../api";
 import { batchStatus } from "./helpers";
+import { OptionChips, SpecGrid, optionEntries } from "./ui";
+import InfoHint from "../../../components/InfoHint";
 import BackupBatchForm from "./BackupBatchForm";
 import BackupBatchDetail from "./BackupBatchDetail";
 
@@ -14,6 +16,7 @@ export default function BackupBatches() {
   const [notice, setNotice] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   async function load() {
     setLoading(true);
@@ -30,6 +33,14 @@ export default function BackupBatches() {
   useEffect(() => {
     load();
   }, []);
+
+  function toggle(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
 
   async function remove(b: BackupBatch) {
     if (!window.confirm(`배치 '${b.name}'을(를) 삭제합니다. 계속할까요?`)) return;
@@ -57,7 +68,36 @@ export default function BackupBatches() {
   return (
     <div className="inventory">
       <div className="inv-head">
-        <h2>데이터 백업</h2>
+        <h2 className="title-with-hint">
+          데이터 백업
+          <InfoHint label="데이터 백업 설명">
+            <strong className="hint-title">데이터 백업</strong>
+            <p className="hint-lead">DMS DM sync로 스토리지 간 데이터를 미러 복사합니다.</p>
+            <div className="hint-flow">
+              <span>등록</span>
+              <i className="flow-arrow">→</i>
+              <span>미리보기</span>
+              <i className="flow-arrow">→</i>
+              <span>승인</span>
+              <i className="flow-arrow">→</i>
+              <span>실행</span>
+            </div>
+            <ul className="hint-list">
+              <li>
+                <b>미리보기</b> — 비파괴 dry-run으로 영향(파일·용량·삭제 수)을 먼저 확인합니다.
+              </li>
+              <li>
+                <b>승인</b> — 운영자가 확인한 항목만 실행합니다(선택·단계 승인 가능).
+              </li>
+              <li>
+                <b>소유권 보존</b> — root로 실행해 원본 uid/gid·권한·시각을 그대로 유지합니다.
+              </li>
+              <li>
+                <b>--delete</b> — 원본에 없는 파일을 대상에서도 삭제하는 완전 미러입니다.
+              </li>
+            </ul>
+          </InfoHint>
+        </h2>
         <div className="inv-actions">
           <button className="ghost" onClick={load} disabled={loading}>
             새로고침
@@ -68,12 +108,6 @@ export default function BackupBatches() {
         </div>
       </div>
 
-      <p className="muted small">
-        DMS DM sync로 스토리지 간 미러 백업을 수행합니다(선택적 --delete). 배치를 등록 →
-        <strong> 미리보기</strong>(비파괴 dry-run)로 영향 확인 → <strong>승인</strong> 후 실행됩니다.
-        요청은 root로 실행되어 원본 소유권을 보존합니다.
-      </p>
-
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
 
@@ -82,14 +116,14 @@ export default function BackupBatches() {
       ) : batches.length === 0 ? (
         <div className="muted">등록된 백업 배치가 없습니다. “+ 새 배치”로 시작하세요.</div>
       ) : (
-        <table className="grid">
+        <table className="grid batch-list">
           <thead>
             <tr>
+              <th className="col-toggle"></th>
               <th>이름</th>
               <th>상태</th>
-              <th>요청</th>
               <th>성공 / 실패</th>
-              <th>--delete</th>
+              <th>옵션</th>
               <th>생성</th>
               <th></th>
             </tr>
@@ -97,38 +131,64 @@ export default function BackupBatches() {
           <tbody>
             {batches.map((b) => {
               const st = batchStatus(b.status);
+              const open = expanded.has(b.id);
               return (
-                <tr key={b.id}>
-                  <td data-label="이름">
-                    <button className="linklike" onClick={() => setOpenId(b.id)}>
-                      {b.name}
-                    </button>
-                  </td>
-                  <td data-label="상태">
-                    <span className={`san ${st.cls}`}>{st.label}</span>
-                  </td>
-                  <td data-label="요청">{b.request_count ?? 0}</td>
-                  <td data-label="성공 / 실패">
-                    <span className="ok-num">{b.succeeded_count ?? 0}</span> /{" "}
-                    <span className="err-num">{b.failed_count ?? 0}</span>
-                  </td>
-                  <td data-label="--delete">{b.delete_enabled ? "🗑️ 켜짐" : "—"}</td>
-                  <td data-label="생성" className="muted small">
-                    {fmtTime(b.created_at)}
-                  </td>
-                  <td className="row-actions">
-                    <button className="mini" onClick={() => setOpenId(b.id)}>
-                      열기
-                    </button>
-                    <button
-                      className="mini danger"
-                      onClick={() => remove(b)}
-                      disabled={b.status === "previewing" || b.status === "running"}
-                    >
-                      삭제
-                    </button>
-                  </td>
-                </tr>
+                <Fragment key={b.id}>
+                  <tr className={open ? "row-open" : undefined}>
+                    <td className="col-toggle">
+                      <button
+                        className={`expand-toggle${open ? " open" : ""}`}
+                        onClick={() => toggle(b.id)}
+                        aria-label={open ? "접기" : "펴기"}
+                        aria-expanded={open}
+                      >
+                        ▸
+                      </button>
+                    </td>
+                    <td data-label="이름">
+                      <button className="linklike" onClick={() => setOpenId(b.id)}>
+                        {b.name}
+                      </button>
+                    </td>
+                    <td data-label="상태">
+                      <span className={`san ${st.cls}`}>{st.label}</span>
+                    </td>
+                    <td data-label="성공 / 실패">
+                      <span className="ok-num">{b.succeeded_count ?? 0}</span>
+                      <span className="muted"> / </span>
+                      <span className="err-num">{b.failed_count ?? 0}</span>
+                      <span className="muted small">
+                        {" "}
+                        / {b.request_count ?? 0}
+                      </span>
+                    </td>
+                    <td data-label="옵션">
+                      <OptionChips batch={b} />
+                    </td>
+                    <td data-label="생성" className="muted small">
+                      {fmtTime(b.created_at)}
+                    </td>
+                    <td className="row-actions">
+                      <button className="mini" onClick={() => setOpenId(b.id)}>
+                        열기
+                      </button>
+                      <button
+                        className="mini danger"
+                        onClick={() => remove(b)}
+                        disabled={b.status === "previewing" || b.status === "running"}
+                      >
+                        삭제
+                      </button>
+                    </td>
+                  </tr>
+                  {open && (
+                    <tr className="detail-row">
+                      <td colSpan={7}>
+                        <BatchExpand batch={b} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               );
             })}
           </tbody>
@@ -144,6 +204,55 @@ export default function BackupBatches() {
             setOpenId(id);
           }}
         />
+      )}
+    </div>
+  );
+}
+
+function BatchExpand({ batch }: { batch: BackupBatch }) {
+  const opts = optionEntries(batch.options);
+  const total = batch.request_count ?? 0;
+  const ok = batch.succeeded_count ?? 0;
+  const fail = batch.failed_count ?? 0;
+  const pct = total ? Math.round((ok / total) * 100) : 0;
+  return (
+    <div className="batch-expand">
+      <SpecGrid
+        items={[
+          { label: "요청 수", value: total.toLocaleString() },
+          { label: "우선순위", value: batch.priority ?? "Low" },
+          { label: "병렬 노드", value: batch.node_count != null ? String(batch.node_count) : "자동" },
+          {
+            label: "--delete",
+            value: batch.delete_enabled ? "켜짐 (완전 미러)" : "꺼짐",
+            tone: batch.delete_enabled ? "tone-danger-text" : "",
+          },
+          { label: "requester", value: batch.requester_id, mono: true },
+          { label: "생성", value: fmtTime(batch.created_at) },
+          { label: "수정", value: fmtTime(batch.updated_at) },
+          ...(batch.note ? [{ label: "메모", value: batch.note, span: true }] : []),
+        ]}
+      />
+      {total > 0 && (
+        <div className="mini-progress" title={`성공 ${ok} / 실패 ${fail} / 전체 ${total}`}>
+          <div className="mini-progress-bar">
+            <span className="seg ok" style={{ width: `${pct}%` }} />
+            <span className="seg fail" style={{ width: `${total ? (fail / total) * 100 : 0}%` }} />
+          </div>
+          <span className="muted small">
+            성공 {ok} · 실패 {fail} · 전체 {total}
+          </span>
+        </div>
+      )}
+      {opts.length > 0 && (
+        <div className="opt-list">
+          <span className="opt-list-label">sync 옵션</span>
+          {opts.map((o) => (
+            <span className="chip ghost-chip" key={o.k}>
+              {o.k} <b>{o.v}</b>
+            </span>
+          ))}
+        </div>
       )}
     </div>
   );

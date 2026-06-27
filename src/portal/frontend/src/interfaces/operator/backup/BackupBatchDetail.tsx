@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { operatorApi, type BackupBatch, type BackupPreview, type BackupRequest } from "../../../api";
+import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
 import { batchStatus, requestState, fmtBytes } from "./helpers";
-import { errMsg } from "./BackupBatches";
+import { errMsg, fmtTime } from "./BackupBatches";
+import { SpecGrid, type KV } from "./ui";
 import BackupBatchForm from "./BackupBatchForm";
 import BackupRequestEdit from "./BackupRequestEdit";
 
@@ -21,14 +22,98 @@ const TERMINAL = ["succeeded", "failed", "cancelled", "preview_failed"];
 const EDITABLE = ["registered", "preview_ready", "preview_failed", "failed", "cancelled"];
 const RETRYABLE = ["preview_failed", "failed"];
 
-function previewDetail(p: BackupPreview): string {
-  const parts: string[] = [];
-  if (p.files != null) parts.push(`파일 ${p.files.toLocaleString()}`);
-  if (p.dirs != null) parts.push(`디렉터리 ${p.dirs.toLocaleString()}`);
-  if (p.bytes != null) parts.push(`크기 ${fmtBytes(p.bytes)}`);
-  if (p.errors != null) parts.push(`에러 ${p.errors}`);
-  if (p.tool) parts.push(`도구 ${p.tool}`);
-  return parts.join(" · ") || "상세 없음";
+const num = (n?: number | null) => (n == null ? "—" : n.toLocaleString());
+
+// True when a request carries anything worth expanding into the detail panel.
+function hasDetail(j: BackupRequest): boolean {
+  return Boolean(j.preview || j.result || j.error || j.dms_job_id);
+}
+
+// Rich, structured per-request detail: route, preview vs execution metrics,
+// identifiers, and any error. Only fields actually present are shown (dsync
+// reports file/byte counts; nsync reports process/pod/node counts).
+function RequestDetail({ j }: { j: BackupRequest }) {
+  const p = j.preview;
+  const rs = j.result?.summary;
+
+  const prev: KV[] = [];
+  if (p) {
+    if (p.files != null) prev.push({ label: "파일", value: p.files.toLocaleString() });
+    if (p.dirs != null) prev.push({ label: "디렉터리", value: p.dirs.toLocaleString() });
+    if (p.bytes != null) prev.push({ label: "크기", value: fmtBytes(p.bytes) });
+    if (p.errors != null)
+      prev.push({ label: "에러", value: num(p.errors), tone: p.errors ? "tone-danger-text" : "" });
+    if (p.tool) prev.push({ label: "도구", value: p.tool });
+  }
+
+  const exec: KV[] = [];
+  if (rs) {
+    const add = (label: string, v: number | null | undefined, tone?: string) => {
+      if (v != null) exec.push({ label, value: v.toLocaleString(), tone });
+    };
+    add("파일", rs.file_count);
+    add("디렉터리", rs.directory_count);
+    if (rs.total_bytes != null) exec.push({ label: "크기", value: fmtBytes(rs.total_bytes) });
+    add("에러", rs.error_count, rs.error_count ? "tone-danger-text" : "");
+    if (rs.selected_tool) exec.push({ label: "도구", value: rs.selected_tool });
+    add("프로세스", rs.process_count);
+    add("워커 파드", rs.worker_pod_count);
+    add("노드당 프로세스", rs.processes_per_node);
+    add("출발 노드", rs.source_node_count);
+    add("대상 노드", rs.destination_node_count);
+  }
+
+  const ids: KV[] = [];
+  if (j.dms_job_id) ids.push({ label: "job id", value: j.dms_job_id, mono: true, span: true });
+  if (j.dms_request_id)
+    ids.push({ label: "request id", value: j.dms_request_id, mono: true, span: true });
+  if (j.fingerprint)
+    ids.push({ label: "fingerprint", value: j.fingerprint, mono: true, span: true });
+  ids.push({ label: "수정", value: fmtTime(j.updated_at) });
+
+  return (
+    <div className="req-detail">
+      <div className="req-route">
+        <span className="route-end">
+          <span className="route-eyebrow">출발</span>
+          <code>
+            {j.src_storage}:{j.src_path}
+          </code>
+        </span>
+        <span className="route-arrow">→</span>
+        <span className="route-end">
+          <span className="route-eyebrow">대상</span>
+          <code>
+            {j.dst_storage}:{j.dst_path}
+          </code>
+        </span>
+      </div>
+
+      {(prev.length > 0 || exec.length > 0) && (
+        <div className="req-secs">
+          {prev.length > 0 && (
+            <section className="req-sec">
+              <h4>미리보기 (dry-run)</h4>
+              <SpecGrid items={prev} />
+            </section>
+          )}
+          {exec.length > 0 && (
+            <section className="req-sec">
+              <h4>실행 결과</h4>
+              <SpecGrid items={exec} />
+            </section>
+          )}
+        </div>
+      )}
+
+      <section className="req-sec">
+        <h4>식별자</h4>
+        <SpecGrid items={ids} />
+      </section>
+
+      {j.error && <div className="req-error">{j.error}</div>}
+    </div>
+  );
 }
 
 export default function BackupBatchDetail({
@@ -263,20 +348,38 @@ export default function BackupBatchDetail({
         </div>
       </div>
 
-      <p className="muted small">
-        requester=<code>{batch.requester_id}</code> · owner=원본 소유권 보존 ·{" "}
-        {batch.delete_enabled ? <strong className="err-num">--delete 켜짐</strong> : "--delete 꺼짐"}
-        {" · 우선순위 "}
-        <code>{batch.priority ?? "Low"}</code>
-        {" · 병렬 노드 "}
-        <code>{batch.node_count != null ? batch.node_count : "자동"}</code>
-        {batch.note ? ` · ${batch.note}` : ""}
-      </p>
-      {batchSrc && (
-        <p className="muted small">
-          출발 스토리지 <code>{batchSrc}</code> → 대상 스토리지 <code>{batchDst}</code>
-        </p>
-      )}
+      <div className="batch-meta">
+        {batchSrc && (
+          <div className="batch-route">
+            <span className="route-end">
+              <span className="route-eyebrow">출발 스토리지</span>
+              <code>{batchSrc}</code>
+            </span>
+            <span className="route-arrow">→</span>
+            <span className="route-end">
+              <span className="route-eyebrow">대상 스토리지</span>
+              <code>{batchDst}</code>
+            </span>
+          </div>
+        )}
+        <SpecGrid
+          items={[
+            { label: "requester", value: batch.requester_id, mono: true },
+            { label: "소유권", value: "원본 보존" },
+            {
+              label: "--delete",
+              value: batch.delete_enabled ? "켜짐 (완전 미러)" : "꺼짐",
+              tone: batch.delete_enabled ? "tone-danger-text" : "",
+            },
+            { label: "우선순위", value: batch.priority ?? "Low" },
+            {
+              label: "병렬 노드",
+              value: batch.node_count != null ? String(batch.node_count) : "자동",
+            },
+            ...(batch.note ? [{ label: "메모", value: batch.note, span: true } as KV] : []),
+          ]}
+        />
+      </div>
 
       {/* progress / aggregate summary */}
       <div className="inv-summary">
@@ -357,13 +460,21 @@ export default function BackupBatchDetail({
                         ? `${(j.preview.files ?? 0).toLocaleString()} · ${fmtBytes(j.preview.bytes)}`
                         : "—"}
                     </td>
-                    <td data-label="비고" className="muted small">
-                      {j.error || (j.dms_job_id ? j.dms_job_id.slice(0, 14) + "…" : "—")}
+                    <td data-label="비고" className="small">
+                      {j.error ? (
+                        <span className="err-num">
+                          {j.error.length > 40 ? j.error.slice(0, 40) + "…" : j.error}
+                        </span>
+                      ) : (
+                        <span className="muted">
+                          {j.result?.summary?.selected_tool || j.preview?.tool || "—"}
+                        </span>
+                      )}
                     </td>
                     <td className="row-actions">
                       {status !== "draft" && (
                         <>
-                          {j.preview && (
+                          {hasDetail(j) && (
                             <button className="mini" onClick={() => toggleExpand(j.id)}>
                               {expanded.has(j.id) ? "접기" : "상세"}
                             </button>
@@ -387,12 +498,10 @@ export default function BackupBatchDetail({
                       )}
                     </td>
                   </tr>
-                  {expanded.has(j.id) && j.preview && (
+                  {expanded.has(j.id) && hasDetail(j) && (
                     <tr className="detail-row">
-                      <td colSpan={cols} className="muted small">
-                        {previewDetail(j.preview)}
-                        {j.dms_job_id ? ` · job ${j.dms_job_id}` : ""}
-                        {j.error ? ` · ${j.error}` : ""}
+                      <td colSpan={cols}>
+                        <RequestDetail j={j} />
                       </td>
                     </tr>
                   )}

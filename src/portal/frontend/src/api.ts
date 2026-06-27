@@ -184,6 +184,32 @@ export interface BackupPreview {
   tool?: string | null;
 }
 
+// The metrics block of an execution (DMS result_summary.execution.summary).
+// dsync reports file/dir/byte counts; nsync reports process/pod/node counts.
+export interface BackupExecSummary {
+  file_count?: number | null;
+  directory_count?: number | null;
+  total_bytes?: number | null;
+  error_count?: number | null;
+  selected_tool?: string | null;
+  process_count?: number | null;
+  worker_pod_count?: number | null;
+  processes_per_node?: number | null;
+  source_node_count?: number | null;
+  destination_node_count?: number | null;
+  operation?: string | null;
+  dry_run?: boolean | null;
+  [k: string]: unknown;
+}
+
+// What the orchestrator stores on a succeeded request (the DMS
+// result_summary.execution block) — metrics are nested under `summary`.
+export interface BackupResult {
+  state?: string | null;
+  summary?: BackupExecSummary | null;
+  [k: string]: unknown;
+}
+
 export interface BackupRequest {
   id: number;
   batch_id: string;
@@ -192,9 +218,11 @@ export interface BackupRequest {
   dst_storage: string;
   dst_path: string;
   state: string;
+  dms_request_id?: string | null;
   dms_job_id?: string | null;
   fingerprint?: string | null;
   preview?: BackupPreview | null;
+  result?: BackupResult | null;
   error?: string | null;
   updated_at?: string;
 }
