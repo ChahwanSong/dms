@@ -168,6 +168,51 @@ class StubVolcanoAdapter:
 
 
 
+# Preflight pods print this marker (one line) when a POSIX check fails, so the DM
+# worker can surface a precise reason (e.g. source_not_found,
+# destination_parent_missing, destination_parent_not_writable) instead of a generic
+# posix_permission_denied.
+_PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
+
+
+def _parse_preflight_reason(logs: Any) -> str | None:
+    """Return the precise reason a preflight pod emitted (last marker line wins),
+    or None if the pod produced no marker (e.g. it crashed before the checks).
+
+    ``logs`` may be the dict returned by ``_pod_logs`` ({stdout, stderr, ...}) or a
+    raw string."""
+    if isinstance(logs, dict):
+        text = (logs.get("stdout") or "") + "\n" + (logs.get("stderr") or "")
+    else:
+        text = logs or ""
+    if not text:
+        return None
+    reason: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_PREFLIGHT_REASON_MARKER):
+            value = stripped[len(_PREFLIGHT_REASON_MARKER) :].strip()
+            if value:
+                reason = value
+    return reason
+
+
+def _preflight_script(setup: list[str], checks: list[str], ok_print: str) -> str:
+    """Build a POSIX-sh preflight script. Each entry in ``checks`` runs a ``[ ... ]``
+    test that, on failure, calls ``fail <reason>`` -- printing a
+    ``DMS_PREFLIGHT_REASON=<reason>`` marker and exiting non-zero. On success the
+    script prints ``ok_print`` and exits 0. The first failing check wins."""
+    return "\n".join(
+        [
+            "set -u",
+            "fail() { printf '" + _PREFLIGHT_REASON_MARKER + "%s\\n' \"$1\"; exit 1; }",
+            *setup,
+            *checks,
+            ok_print,
+        ]
+    )
+
+
 @dataclass
 class KubernetesVolcanoAdapter:
     settings: Settings
@@ -229,11 +274,10 @@ class KubernetesVolcanoAdapter:
                 "logs": logs,
                 "cleanup": cleanup,
             }
-        reason = (
-            "posix_permission_denied"
-            if observed.get("phase") == "Failed"
-            else "preflight_pod_not_succeeded"
-        )
+        if observed.get("phase") == "Failed":
+            reason = _parse_preflight_reason(logs) or "posix_permission_denied"
+        else:
+            reason = "preflight_pod_not_succeeded"
         return {
             "status": "Rejected",
             "source": "kubernetes-preflight-pod",
@@ -376,14 +420,14 @@ class KubernetesVolcanoAdapter:
                 "logs": logs,
                 "cleanup": cleanup,
             }
+        if observed.get("phase") == "Failed":
+            reason = _parse_preflight_reason(logs) or "posix_permission_denied"
+        else:
+            reason = "preflight_pod_not_succeeded"
         return {
             "status": "Rejected",
             "source": "kubernetes-preflight-pod",
-            "reason": (
-                "posix_permission_denied"
-                if observed.get("phase") == "Failed"
-                else "preflight_pod_not_succeeded"
-            ),
+            "reason": reason,
             "pod_ref": f"pod://{namespace}/{name}",
             "observed_state": observed,
             "logs": logs,
@@ -840,15 +884,15 @@ class KubernetesVolcanoAdapter:
         command = [
             "/bin/sh",
             "-c",
-            "\n".join(
-                [
-                    "set -eu",
-                    "target=/dms/target/${DMS_SCAN_PATH}",
-                    'test -d "$target"',
-                    'test -r "$target"',
-                    'test -x "$target"',
-                    "printf 'scan preflight ok: %s\\n' \"$target\"",
-                ]
+            _preflight_script(
+                setup=["target=/dms/target/${DMS_SCAN_PATH}"],
+                checks=[
+                    '[ -e "$target" ] || fail target_not_found',
+                    '[ -d "$target" ] || fail target_not_directory',
+                    '[ -r "$target" ] || fail target_not_readable',
+                    '[ -x "$target" ] || fail target_not_traversable',
+                ],
+                ok_print="printf 'scan preflight ok: %s\\n' \"$target\"",
             ),
         ]
         spec = {
@@ -897,36 +941,39 @@ class KubernetesVolcanoAdapter:
         )
         context = self._mutation_context(plan, data_job)
         if data_job["operation"] == "data.sync":
-            command_text = "\n".join(
-                [
-                    "set -eu",
+            command_text = _preflight_script(
+                setup=[
                     "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
                     "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
                     'destination_parent=$(dirname "$destination")',
-                    'test -e "$source"',
-                    'test -r "$source"',
-                    'if [ -d "$source" ]; then test -x "$source"; fi',
-                    'test -d "$destination_parent"',
-                    'test -w "$destination_parent"',
-                    'test -x "$destination_parent"',
-                    'if [ -e "$destination" ]; then test -w "$destination"; fi',
-                    'printf \'sync %s preflight ok: %s -> %s\\n\' "$DMS_DM_PHASE" "$source" "$destination"',
-                ]
+                ],
+                checks=[
+                    '[ -e "$source" ] || fail source_not_found',
+                    '[ -r "$source" ] || fail source_not_readable',
+                    'if [ -d "$source" ]; then [ -x "$source" ] || fail source_not_traversable; fi',
+                    '[ -d "$destination_parent" ] || fail destination_parent_missing',
+                    '[ -w "$destination_parent" ] || fail destination_parent_not_writable',
+                    '[ -x "$destination_parent" ] || fail destination_parent_not_traversable',
+                    'if [ -e "$destination" ]; then [ -w "$destination" ] || fail destination_not_writable; fi',
+                ],
+                ok_print='printf \'sync %s preflight ok: %s -> %s\\n\' "$DMS_DM_PHASE" "$source" "$destination"',
             )
             container_name = "sync-preflight"
         elif data_job["operation"] == "data.rm":
-            command_text = "\n".join(
-                [
-                    "set -eu",
+            command_text = _preflight_script(
+                setup=[
                     "target=/dms/target/${DMS_RM_TARGET_PATH}",
                     'parent=$(dirname "$target")',
-                    'test -d "$target"',
-                    'test -r "$target"',
-                    'test -x "$target"',
-                    'test -w "$parent"',
-                    'test -x "$parent"',
-                    'printf \'rm %s preflight ok: %s\\n\' "$DMS_DM_PHASE" "$target"',
-                ]
+                ],
+                checks=[
+                    '[ -e "$target" ] || fail target_not_found',
+                    '[ -d "$target" ] || fail target_not_directory',
+                    '[ -r "$target" ] || fail target_not_readable',
+                    '[ -x "$target" ] || fail target_not_traversable',
+                    '[ -w "$parent" ] || fail parent_not_writable',
+                    '[ -x "$parent" ] || fail parent_not_traversable',
+                ],
+                ok_print='printf \'rm %s preflight ok: %s\\n\' "$DMS_DM_PHASE" "$target"',
             )
             container_name = "rm-preflight"
         else:
@@ -1014,15 +1061,14 @@ class KubernetesVolcanoAdapter:
                 if mount
                 else []
             )
-            command_text = "\n".join(
-                [
-                    "set -eu",
-                    "source=/dms/source/${DMS_SYNC_SOURCE_PATH}",
-                    'test -e "$source"',
-                    'test -r "$source"',
-                    'if [ -d "$source" ]; then test -x "$source"; fi',
-                    "printf 'sync %s source preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$source\"",
-                ]
+            command_text = _preflight_script(
+                setup=["source=/dms/source/${DMS_SYNC_SOURCE_PATH}"],
+                checks=[
+                    '[ -e "$source" ] || fail source_not_found',
+                    '[ -r "$source" ] || fail source_not_readable',
+                    'if [ -d "$source" ]; then [ -x "$source" ] || fail source_not_traversable; fi',
+                ],
+                ok_print="printf 'sync %s source preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$source\"",
             )
         elif role == "destination":
             candidates = _unique_selected_candidates(
@@ -1045,17 +1091,18 @@ class KubernetesVolcanoAdapter:
                 if mount
                 else []
             )
-            command_text = "\n".join(
-                [
-                    "set -eu",
+            command_text = _preflight_script(
+                setup=[
                     "destination=/dms/destination/${DMS_SYNC_DESTINATION_PATH}",
                     'destination_parent=$(dirname "$destination")',
-                    'test -d "$destination_parent"',
-                    'test -w "$destination_parent"',
-                    'test -x "$destination_parent"',
-                    'if [ -e "$destination" ]; then test -w "$destination"; fi',
-                    "printf 'sync %s destination preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$destination\"",
-                ]
+                ],
+                checks=[
+                    '[ -d "$destination_parent" ] || fail destination_parent_missing',
+                    '[ -w "$destination_parent" ] || fail destination_parent_not_writable',
+                    '[ -x "$destination_parent" ] || fail destination_parent_not_traversable',
+                    'if [ -e "$destination" ]; then [ -w "$destination" ] || fail destination_not_writable; fi',
+                ],
+                ok_print="printf 'sync %s destination preflight ok: %s\\n' \"$DMS_DM_PHASE\" \"$destination\"",
             )
         else:
             raise DataManagementRuntimeError(

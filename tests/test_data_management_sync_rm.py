@@ -908,7 +908,8 @@ def test_nsync_preflight_splits_into_source_and_destination_role_pods():
     assert _mount_names(dst) == {"sync-destination"}  # destination pod must NOT mount source
     assert dst["spec"]["volumes"][0]["hostPath"]["path"] == "/cephfs-secondary"
     cmd = _container(dst)["command"][2]
-    assert "destination_parent" in cmd and 'test -w "$destination_parent"' in cmd
+    assert "destination_parent" in cmd
+    assert '[ -w "$destination_parent" ] || fail destination_parent_not_writable' in cmd
 
     # both role pods run as the resolved POSIX identity
     for m in (src, dst):

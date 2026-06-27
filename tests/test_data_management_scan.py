@@ -422,7 +422,7 @@ def test_kubernetes_scan_manifest_uses_identity_security_context():
         "kubernetes.io/hostname": "c1-worker"
     }
     assert preflight_container["securityContext"]["runAsUser"] == 10000
-    assert "test -x \"$target\"" in preflight_container["command"][2]
+    assert '[ -x "$target" ] || fail target_not_traversable' in preflight_container["command"][2]
 
 
 def test_kubernetes_scan_manifest_uses_scheduler_eligible_set():
