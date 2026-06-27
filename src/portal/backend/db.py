@@ -96,6 +96,22 @@ def _ddl(schema: str) -> list[str]:
         f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS priority text "
         f"NOT NULL DEFAULT 'Low'",
         f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS node_count int",
+        # migration: the FK was auto-named backup_jobs_batch_id_fkey when the table
+        # was first created as backup_jobs (before the backup_jobs->backup_requests
+        # rename, which doesn't rename constraints). Rename it to match the table.
+        f"""DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_schema = '{schema}'
+              AND table_name = 'backup_requests'
+              AND constraint_name = 'backup_jobs_batch_id_fkey'
+          ) THEN
+            ALTER TABLE {s}.backup_requests
+              RENAME CONSTRAINT backup_jobs_batch_id_fkey
+              TO backup_requests_batch_id_fkey;
+          END IF;
+        END $$;""",
     ]
 
 
