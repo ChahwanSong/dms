@@ -122,7 +122,7 @@ export default function BackupBatches() {
               <th className="col-toggle"></th>
               <th>이름</th>
               <th>상태</th>
-              <th>성공 / 실패</th>
+              <th>성공/실패/요청</th>
               <th>옵션</th>
               <th>생성</th>
               <th></th>
@@ -153,14 +153,12 @@ export default function BackupBatches() {
                     <td data-label="상태">
                       <span className={`san ${st.cls}`}>{st.label}</span>
                     </td>
-                    <td data-label="성공 / 실패">
+                    <td data-label="성공/실패/요청">
                       <span className="ok-num">{b.succeeded_count ?? 0}</span>
                       <span className="muted"> / </span>
                       <span className="err-num">{b.failed_count ?? 0}</span>
-                      <span className="muted small">
-                        {" "}
-                        / {b.request_count ?? 0}
-                      </span>
+                      <span className="muted"> / </span>
+                      <span>{b.request_count ?? 0}</span>
                     </td>
                     <td data-label="옵션">
                       <OptionChips batch={b} />

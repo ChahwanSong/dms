@@ -24,6 +24,12 @@ const RETRYABLE = ["preview_failed", "failed"];
 
 const num = (n?: number | null) => (n == null ? "—" : n.toLocaleString());
 
+// storage-relative path -> absolute, by prefixing the storage managed_root.
+function absPath(root: string | undefined, path: string): string {
+  if (!root) return path;
+  return `${root.replace(/\/+$/, "")}/${path}`;
+}
+
 // True when a request carries anything worth expanding into the detail panel.
 function hasDetail(j: BackupRequest): boolean {
   return Boolean(j.preview || j.result || j.error || j.dms_job_id);
@@ -32,7 +38,7 @@ function hasDetail(j: BackupRequest): boolean {
 // Rich, structured per-request detail: route, preview vs execution metrics,
 // identifiers, and any error. Only fields actually present are shown (dsync
 // reports file/byte counts; nsync reports process/pod/node counts).
-function RequestDetail({ j }: { j: BackupRequest }) {
+function RequestDetail({ j, roots }: { j: BackupRequest; roots: Record<string, string> }) {
   const p = j.preview;
   const rs = j.result?.summary;
 
@@ -75,17 +81,13 @@ function RequestDetail({ j }: { j: BackupRequest }) {
     <div className="req-detail">
       <div className="req-route">
         <span className="route-end">
-          <span className="route-eyebrow">출발</span>
-          <code>
-            {j.src_storage}:{j.src_path}
-          </code>
+          <span className="route-eyebrow">출발 · {j.src_storage}</span>
+          <code>{absPath(roots[j.src_storage], j.src_path)}</code>
         </span>
         <span className="route-arrow">→</span>
         <span className="route-end">
-          <span className="route-eyebrow">대상</span>
-          <code>
-            {j.dst_storage}:{j.dst_path}
-          </code>
+          <span className="route-eyebrow">대상 · {j.dst_storage}</span>
+          <code>{absPath(roots[j.dst_storage], j.dst_path)}</code>
         </span>
       </div>
 
@@ -135,6 +137,22 @@ export default function BackupBatchDetail({
   const [editingReq, setEditingReq] = useState<BackupRequest | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // storage_name -> managed_root, so the UI can show real absolute paths.
+  const [roots, setRoots] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    operatorApi.storage
+      .list()
+      .then((list) => {
+        const m: Record<string, string> = {};
+        for (const s of list) {
+          const mr = (s.backend_template as Record<string, unknown>)?.managed_root;
+          if (typeof mr === "string") m[s.storage_name] = mr;
+        }
+        setRoots(m);
+      })
+      .catch(() => {});
+  }, []);
 
   const loadJobs = useCallback(
     async (reset: boolean) => {
@@ -230,6 +248,12 @@ export default function BackupBatchDetail({
   // Storage is batch-level (uniform across rows); derive from the loaded requests.
   const batchSrc = jobs[0]?.src_storage;
   const batchDst = jobs[0]?.dst_storage;
+  // ownership/permission overrides (sync options) for the header summary.
+  const bopts = (batch.options || {}) as Record<string, unknown>;
+  const chownVal =
+    typeof bopts.chown === "string" && bopts.chown.trim() ? bopts.chown.trim() : null;
+  const chmodVal =
+    typeof bopts.chmod === "string" && bopts.chmod.trim() ? bopts.chmod.trim() : null;
   const deleteConfirm = "--delete 배치입니다. 승인 항목은 dst에서 src에 없는 파일을 삭제합니다. 실행할까요?";
 
   // selective approval is available while a batch is previewed or running and
@@ -354,18 +378,28 @@ export default function BackupBatchDetail({
             <span className="route-end">
               <span className="route-eyebrow">출발 스토리지</span>
               <code>{batchSrc}</code>
+              {roots[batchSrc] && <span className="route-path">{roots[batchSrc]}</span>}
             </span>
             <span className="route-arrow">→</span>
             <span className="route-end">
               <span className="route-eyebrow">대상 스토리지</span>
               <code>{batchDst}</code>
+              {batchDst && roots[batchDst] && (
+                <span className="route-path">{roots[batchDst]}</span>
+              )}
             </span>
           </div>
         )}
         <SpecGrid
           items={[
             { label: "requester", value: batch.requester_id, mono: true },
-            { label: "소유권", value: "원본 보존" },
+            {
+              label: "소유권",
+              value: chownVal ? `변경 → ${chownVal}` : "원본 보존",
+              tone: chownVal ? "tone-warn-text" : "",
+              mono: !!chownVal,
+            },
+            ...(chmodVal ? [{ label: "권한(chmod)", value: chmodVal, mono: true } as KV] : []),
             {
               label: "--delete",
               value: batch.delete_enabled ? "켜짐 (완전 미러)" : "꺼짐",
@@ -501,7 +535,7 @@ export default function BackupBatchDetail({
                   {expanded.has(j.id) && hasDetail(j) && (
                     <tr className="detail-row">
                       <td colSpan={cols}>
-                        <RequestDetail j={j} />
+                        <RequestDetail j={j} roots={roots} />
                       </td>
                     </tr>
                   )}

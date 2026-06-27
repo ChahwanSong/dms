@@ -1096,6 +1096,7 @@ textarea.json {
 .spec-kv dd { margin: 0; font-size: 0.85rem; color: var(--fg); overflow-wrap: anywhere; }
 .spec-kv dd.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; }
 .tone-danger-text { color: var(--error) !important; }
+.tone-warn-text { color: #fbbf24 !important; }
 
 /* batch list: expand toggle + expanded panel */
 .batch-list .col-toggle { width: 1.8rem; padding-right: 0; }
@@ -1126,6 +1127,7 @@ tr.row-open > td { border-bottom-color: transparent; }
 .route-eyebrow { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .route-end code { font-size: 0.9rem; color: var(--fg); background: #0b1220; border: 1px solid var(--border); border-radius: 6px; padding: 0.18rem 0.5rem; overflow-wrap: anywhere; }
 .route-arrow { color: var(--accent); font-size: 1.1rem; }
+.route-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.72rem; color: var(--muted); overflow-wrap: anywhere; }
 
 /* per-request detail panel */
 .req-detail { display: flex; flex-direction: column; gap: 0.85rem; padding: 0.4rem 0.2rem 0.6rem; }
