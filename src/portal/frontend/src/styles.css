@@ -1099,13 +1099,20 @@ textarea.json {
 /* secondary line under a table cell's primary value (e.g. storage managed_root) */
 .cell-sub { font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; overflow-wrap: anywhere; }
 
+/* storage detail: spacing for the top overview grid + section helpers */
+.detail-body > .spec-grid { margin-bottom: 1.1rem; }
+.check-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.obs-note { margin: 0.65rem 0 0; font-size: 0.72rem; line-height: 1.5; color: var(--muted); }
+
 /* definition grid (replaces run-on "·" metadata sentences) */
-.spec-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: 0.55rem 1.1rem; margin: 0; }
-.spec-kv { display: flex; flex-direction: column; gap: 0.12rem; min-width: 0; }
+/* auto-fit (not auto-fill) so a section with few items stretches to fill the row
+   instead of cramming values into a narrow track with empty tracks beside it. */
+.spec-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.7rem 1.4rem; margin: 0; }
+.spec-kv { display: flex; flex-direction: column; gap: 0.18rem; min-width: 0; }
 .spec-kv.span { grid-column: 1 / -1; }
 .spec-kv dt { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-.spec-kv dd { margin: 0; font-size: 0.85rem; color: var(--fg); overflow-wrap: anywhere; }
-.spec-kv dd.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; }
+.spec-kv dd { margin: 0; font-size: 0.85rem; color: var(--fg); overflow-wrap: break-word; }
+.spec-kv dd.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; overflow-wrap: anywhere; }
 .tone-danger-text { color: var(--error) !important; }
 .tone-warn-text { color: #fbbf24 !important; }
 

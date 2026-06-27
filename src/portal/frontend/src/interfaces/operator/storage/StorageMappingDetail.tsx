@@ -105,14 +105,18 @@ export default function StorageMappingDetail({
                 )}
                 {!!sr.checks?.length && (
                   <div className="codes ok">
-                    <h4>통과한 검사</h4>
-                    <ul>
+                    <h4>통과한 검사 ({sr.checks.length})</h4>
+                    <div className="check-chips">
                       {sr.checks.map((c, i) => (
-                        <li key={i}>
-                          <code>{c.name}</code> {c.status}
-                        </li>
+                        <span
+                          key={i}
+                          className={`chip ${c.status === "Passed" ? "tone-ok" : "tone-unknown"}`}
+                          title={`${c.name}: ${c.status}`}
+                        >
+                          {c.name}
+                        </span>
                       ))}
-                    </ul>
+                    </div>
                   </div>
                 )}
               </div>
@@ -165,31 +169,47 @@ export default function StorageMappingDetail({
                 )}
                 {isFs && agent && (
                   <section className="obs-card">
-                    <h4>Agent 관측</h4>
+                    <h4>Agent 관측 (RM/DM 작업 준비도)</h4>
                     <SpecGrid
                       items={[
-                        { label: "fresh reports", value: String(agent.fresh_reports ?? 0) },
-                        { label: "stale reports", value: String(agent.stale_reports ?? 0) },
                         {
-                          label: "RM",
+                          label: "RM 준비",
                           value: (
                             <span className="axes">
                               <SanityBadge status={agent.rm_readiness} />
-                              <span className="muted small">후보 {agent.rm_candidates?.length ?? 0}</span>
+                              <span className="muted small">
+                                준비 노드 {agent.rm_candidates?.length ?? 0}
+                              </span>
                             </span>
                           ),
                         },
                         {
-                          label: "DM",
+                          label: "DM 준비",
                           value: (
                             <span className="axes">
                               <SanityBadge status={agent.dm_readiness} />
-                              <span className="muted small">후보 {agent.dm_candidates?.length ?? 0}</span>
+                              <span className="muted small">
+                                준비 노드 {agent.dm_candidates?.length ?? 0}
+                              </span>
                             </span>
                           ),
                         },
+                        {
+                          label: "신선 리포트",
+                          value: (
+                            <span className={(agent.fresh_reports ?? 0) > 0 ? "ok-num" : "err-num"}>
+                              {agent.fresh_reports ?? 0}
+                            </span>
+                          ),
+                        },
+                        { label: "만료 리포트", value: <span className="muted">{agent.stale_reports ?? 0}</span> },
                       ]}
                     />
+                    <p className="obs-note">
+                      에이전트가 <b>최근에 보고</b>한 스토리지 노드가 RM/DM 작업 대상입니다. 신선
+                      리포트가 0이면 해당 노드의 에이전트가 동작하지 않는 상태이며, 만료 리포트는
+                      신선도 기준을 지난 과거 보고 누계(정상적으로 쌓임)입니다.
+                    </p>
                   </section>
                 )}
               </div>
@@ -250,7 +270,7 @@ function overviewItems(
     { label: "storage class", value: m.storage_class_name || "—", mono: !!m.storage_class_name },
     { label: "version", value: String(m.version) },
     { label: "readiness", value: axes, span: true },
-    { label: "마지막 검사", value: fmtTime(m.sanity_checked_at) },
+    { label: "마지막 검사", value: fmtTime(m.sanity_checked_at), span: true },
     { label: "갱신", value: `${m.updated_by || "—"} · ${fmtTime(m.updated_at)}`, span: true },
   ];
   if (m.disabled_at)
