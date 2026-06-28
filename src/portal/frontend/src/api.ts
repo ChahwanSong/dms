@@ -358,6 +358,31 @@ export interface ControlHost {
   detail?: string | null;
 }
 
+// Per-node OS-metric time-series for the worker-node workload graphs.
+export interface NodeMetricPoint {
+  t?: string;
+  v?: number | null;
+}
+export interface NodeMetrics {
+  cluster_name: string;
+  node_name: string;
+  current: {
+    cpu_percent?: number | null;
+    cpu_cores?: number | null;
+    mem_used_pct?: number | null;
+    mem_total_kb?: number | null;
+    load1?: number | null;
+    disk_used_pct?: number | null;
+    reported_at?: string;
+  };
+  cpu_series: NodeMetricPoint[];
+  mem_series: NodeMetricPoint[];
+}
+export interface NodeMetricsResp {
+  nodes: NodeMetrics[];
+  window_seconds: number;
+}
+
 const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 
@@ -496,6 +521,10 @@ export const operatorApi = {
     nodes: (freshness?: string) =>
       request<AgentReport[]>(
         `/api/operator/dashboard/nodes${freshness ? `?freshness=${encodeURIComponent(freshness)}` : ""}`,
+      ),
+    nodeMetrics: (sinceSeconds?: number) =>
+      request<NodeMetricsResp>(
+        `/api/operator/dashboard/node-metrics${sinceSeconds ? `?since_seconds=${sinceSeconds}` : ""}`,
       ),
     runs: () =>
       request<{ active: Section<RunRow[]>; stale: Section<RunRow[]> }>(

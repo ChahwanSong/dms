@@ -1,14 +1,16 @@
 import { useEffect, useState } from "react";
 import { operatorApi, type ControlHost } from "../../../api";
 import Section from "./Section";
+import InfoHint from "../../../components/InfoHint";
 
 function yn(v?: boolean | null): string {
   return v == null ? "?" : v ? "✓" : "✗";
 }
 
-// CSI (agentless) storage mappings + their ResourceQuota mutation transport:
-// the control host the RM worker reaches via (ssh-)kubectl, and whether it's
-// reachable / permitted. Data from DMS sanity (mutation_observed) — read-only.
+// CSI (agentless) storage mappings + their ResourceQuota mutation transport: the
+// control host the RM worker reaches via (ssh-)kubectl, and whether it's reachable /
+// permitted. Status-only (no resources). The transport explanation lives in the (i)
+// next to 도달; per-row detail is on hover. Data from DMS sanity (mutation_observed).
 export default function ControlHostsTable() {
   const [rows, setRows] = useState<ControlHost[]>([]);
   useEffect(() => {
@@ -20,12 +22,22 @@ export default function ControlHostsTable() {
         <thead>
           <tr>
             <th>스토리지</th><th>클러스터</th><th>backend</th><th>mode</th>
-            <th>control host</th><th>도달</th><th>변경권한 (can-i)</th><th>비고</th>
+            <th>control host</th>
+            <th>
+              도달{" "}
+              <InfoHint label="도달 설명">
+                <strong>ResourceQuota mutation transport</strong> — RM 워커가 (ssh-)kubectl로
+                control host에 도달해 네임스페이스 ResourceQuota를 적용할 수 있는지를 나타냅니다.
+                <br />도달(reachable)=경로 연결, 변경권한(can-i)=create/patch/delete 권한.
+                각 행의 상세 사유는 <em>도달</em> 상태에 마우스를 올리면 표시됩니다.
+              </InfoHint>
+            </th>
+            <th>변경권한 (can-i)</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
-            <tr><td colSpan={8} className="muted">CSI 매핑이 없습니다.</td></tr>
+            <tr><td colSpan={7} className="muted">CSI 매핑이 없습니다.</td></tr>
           ) : (
             rows.map((r) => {
               const p = r.permissions || {};
@@ -39,7 +51,10 @@ export default function ControlHostsTable() {
                     {r.control_host || "— (local)"}
                   </td>
                   <td data-label="도달">
-                    <span className={`san ${r.reachable ? "san-ready" : "san-failed"}`}>
+                    <span
+                      className={`san ${r.reachable ? "san-ready" : "san-failed"}`}
+                      title={r.detail || undefined}
+                    >
                       {r.reachable == null ? "?" : r.reachable ? "Ready" : "Failed"}
                     </span>
                   </td>
@@ -48,7 +63,6 @@ export default function ControlHostsTable() {
                       c{yn(p.create)} p{yn(p.patch)} d{yn(p.delete)}
                     </span>
                   </td>
-                  <td data-label="비고" className="muted small">{r.detail || "—"}</td>
                 </tr>
               );
             })

@@ -211,6 +211,18 @@ class DmsClient:
             "GET", f"{_OPS_BASE}/data-jobs/summary", actor=actor
         )
 
+    async def list_agent_metric_samples(
+        self, *, since_seconds: int = 21600, actor: str | None = None
+    ) -> list[dict[str, Any]]:
+        # Per-node OS-metric time-series (cpu/mem/load/disk) for the node-workload
+        # graphs. Read-only; serves the existing agent_reports history.
+        return await self._request(
+            "GET",
+            f"{_OPS_BASE}/agent-reports/metrics",
+            actor=actor,
+            params={"since_seconds": since_seconds},
+        )
+
     async def list_active_runs(
         self, *, actor: str, limit: int = 200
     ) -> list[dict[str, Any]]:

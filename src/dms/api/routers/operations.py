@@ -231,6 +231,20 @@ def operational_query_router() -> APIRouter:
             update_stale=True,
         )
 
+    @router.get("/agent-reports/metrics")
+    def agent_report_metrics(
+        request: Request,
+        since_seconds: int = 21600,
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        """Per-node OS-metric samples (cpu/mem/load/disk) over a time window, for the
+        dashboard node workload graphs. Read-only; serves the existing agent_reports
+        history (one row per report, ~1/min)."""
+        authenticated_actor(request, services)
+        window = max(60, min(int(since_seconds), 86400))  # clamp 1m..24h
+        since_iso = (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
+        return services.repository.list_agent_metric_samples(since_iso=since_iso)
+
     @router.get("/storage-mappings")
     def storage_mappings(
         request: Request,

@@ -44,9 +44,9 @@ export default function Dashboard() {
         </div>
       </div>
       {error && <div className="banner err">{error}</div>}
-      <StatusCards summary={summary} />
       <NodesTable />
       <ControlHostsTable />
+      <StatusCards summary={summary} />
       <VolcanoPanel />
     </div>
   );

@@ -93,6 +93,53 @@ def _latest_per_node(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _node_metrics(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group flat per-report metric samples (oldest→newest) into per-node time-series.
+
+    A node with both an RM and a DM agent emits ~2 samples/min for the same host, so we
+    bucket per minute and keep the latest sample in each bucket — one point per minute
+    per node. Each node gets cpu/mem series ({t, v}) + a `current` snapshot."""
+    nodes: dict[tuple, dict[str, Any]] = {}
+    for s in samples or []:
+        key = (s.get("cluster_name"), s.get("node_name"))
+        node = nodes.get(key)
+        if node is None:
+            node = {
+                "cluster_name": s.get("cluster_name"),
+                "node_name": s.get("node_name"),
+                "buckets": {},
+            }
+            nodes[key] = node
+        minute = (s.get("reported_at") or "")[:16]  # YYYY-MM-DDTHH:MM
+        cur = node["buckets"].get(minute)
+        if cur is None or (s.get("reported_at") or "") >= (cur.get("reported_at") or ""):
+            node["buckets"][minute] = s
+
+    out: list[dict[str, Any]] = []
+    for node in nodes.values():
+        ordered = [b for _, b in sorted(node["buckets"].items())]
+        last = ordered[-1] if ordered else {}
+        out.append(
+            {
+                "cluster_name": node["cluster_name"],
+                "node_name": node["node_name"],
+                "current": {
+                    "cpu_percent": last.get("cpu_percent"),
+                    "cpu_cores": last.get("cpu_cores"),
+                    "mem_used_pct": last.get("mem_used_pct"),
+                    "mem_total_kb": last.get("mem_total_kb"),
+                    "load1": last.get("load1"),
+                    "disk_used_pct": last.get("disk_used_pct"),
+                    "reported_at": last.get("reported_at"),
+                },
+                "cpu_series": [{"t": b.get("reported_at"), "v": b.get("cpu_percent")} for b in ordered],
+                "mem_series": [{"t": b.get("reported_at"), "v": b.get("mem_used_pct")} for b in ordered],
+            }
+        )
+    out.sort(key=lambda n: (n.get("cluster_name") or "", n.get("node_name") or ""))
+    return out
+
+
 def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
     """Card-level rollup of Volcano status: queue/job counts + component health.
 
@@ -271,6 +318,18 @@ def dashboard_router(settings: Settings) -> APIRouter:
         if freshness:
             latest = [r for r in latest if r.get("freshness_status") == freshness]
         return latest
+
+    @router.get("/node-metrics")
+    async def node_metrics(
+        since_seconds: int = Query(default=21600, ge=60, le=86400),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # Per-node CPU/mem/load/disk time-series for the worker-node workload graphs.
+        samples = await dms.list_agent_metric_samples(
+            since_seconds=since_seconds, actor=_actor(user, settings)
+        )
+        return {"nodes": _node_metrics(samples), "window_seconds": since_seconds}
 
     @router.get("/control-hosts")
     async def control_hosts(

@@ -142,6 +142,53 @@ class OperationalMixin:
         return [self._decode_agent_report(row_to_dict(row)) for row in rows]
 
 
+    def list_agent_metric_samples(
+        self, *, since_iso: str, limit: int = 20000
+    ) -> list[dict[str, Any]]:
+        """Flat per-report OS-metric samples (cpu/mem/load/disk) reported since
+        ``since_iso``, oldest→newest, for the node-metrics dashboard time-series.
+
+        Parses ``report_json`` in Python so it stays portable across SQLite/Postgres
+        (no JSON SQL functions). The newest ``limit`` rows in the window are kept; any
+        excess (oldest) is dropped."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT cluster_name, node_name, worker_role, reported_at, report_json
+                FROM agent_reports
+                WHERE reported_at >= ?
+                ORDER BY reported_at DESC
+                LIMIT ?
+                """,
+                (since_iso, limit),
+            ).fetchall()
+        samples: list[dict[str, Any]] = []
+        for row in rows:
+            record = row_to_dict(row)
+            report = json_loads(record.get("report_json")) or {}
+            os_metrics = report.get("os_metrics") or {}
+            cpu = os_metrics.get("cpu") or {}
+            memory = os_metrics.get("memory") or {}
+            load = os_metrics.get("load") or {}
+            disk = os_metrics.get("disk") or {}
+            samples.append(
+                {
+                    "cluster_name": record.get("cluster_name"),
+                    "node_name": record.get("node_name"),
+                    "worker_role": record.get("worker_role"),
+                    "reported_at": record.get("reported_at"),
+                    "cpu_percent": cpu.get("percent"),
+                    "cpu_cores": cpu.get("cores"),
+                    "mem_used_pct": memory.get("used_pct"),
+                    "mem_total_kb": memory.get("total_kb"),
+                    "load1": load.get("load1"),
+                    "disk_used_pct": disk.get("used_pct"),
+                }
+            )
+        samples.reverse()  # chronological order for the time-series
+        return samples
+
+
     def mark_stale_agent_reports(self, *, stale_seconds: int) -> int:
         now = utcnow()
         now_iso = now.isoformat()

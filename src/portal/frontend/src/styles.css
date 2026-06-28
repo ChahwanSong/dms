@@ -1177,6 +1177,29 @@ tr.row-open .expand-toggle { color: var(--accent); }
 .mini-progress-bar .seg.fail { background: var(--error); }
 .mini-progress-bar .seg.cancel { background: #6b7280; }
 
+/* worker-node dashboard: role badges + metric sparkline cells */
+table.grid.node-grid tbody tr { height: 3rem; }
+table.grid.node-grid td { vertical-align: middle; }
+.node-id { display: flex; flex-direction: column; line-height: 1.25; }
+.role-badge {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.8rem; font-weight: 600; padding: 0.1rem 0.45rem;
+  border-radius: 999px; border: 1px solid var(--border); white-space: nowrap;
+}
+.role-badge .role-dot { font-size: 0.7rem; line-height: 1; }
+.role-fresh { color: #34d399; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.08); }
+.role-stale { color: var(--error); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.08); }
+.role-off { color: #9aa4b2; }
+.metric-cell { display: flex; align-items: center; gap: 0.5rem; }
+.metric-now { white-space: nowrap; font-size: 0.85rem; }
+.spark { display: block; flex: 0 0 auto; border-radius: 3px; background: rgba(255, 255, 255, 0.02); }
+.spark-ok { color: #34d399; }
+.spark-warn { color: #fbbf24; }
+.spark-bad { color: var(--error); }
+.spark-line { stroke: currentColor; stroke-width: 1.5; fill: none; }
+.spark-area { fill: currentColor; opacity: 0.16; stroke: none; }
+.spark-dot { fill: currentColor; stroke: none; }
+
 /* sync option list (expanded) */
 .opt-list { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
 .opt-list-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-right: 0.2rem; }
