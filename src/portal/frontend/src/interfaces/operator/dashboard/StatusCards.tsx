@@ -10,6 +10,32 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+// A control-state chip that reads as health at a glance: green when normal, amber/red
+// (with a glyph) when the attention condition is true. `attention=null` → unknown.
+function CtrlChip({
+  label,
+  attention,
+  okText,
+  badText,
+  tone,
+}: {
+  label: string;
+  attention: boolean | null;
+  okText: string;
+  badText: string;
+  tone: "warn" | "bad";
+}) {
+  if (attention == null) return <span className="ctrl-chip ctrl-unknown">{label} —</span>;
+  const cls = attention ? `ctrl-${tone}` : "ctrl-ok";
+  const glyph = attention ? (tone === "bad" ? "✕" : "▲") : "●";
+  return (
+    <span className={`ctrl-chip ${cls}`} title={`${label}: ${attention ? badText : okText}`}>
+      <span className="ctrl-glyph" aria-hidden="true">{glyph}</span>
+      {label} {attention ? badText : okText}
+    </span>
+  );
+}
+
 // volcano-system component (pod) role → label for the compact card.
 const VOL_ROLE: Record<string, string> = {
   scheduler: "스케줄러", controllers: "컨트롤러", admission: "admission",
@@ -55,11 +81,12 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
         <div className={`san ${schedOk ? "san-ready" : "san-degraded"}`}>
           {cs ? (schedOk ? "정상" : "차단/점검") : "—"}
         </div>
+        <div className="ctrl-chips">
+          <CtrlChip label="점검" attention={cs ? cs.maintenance_mode : null} okText="꺼짐" badText="켜짐" tone="warn" />
+          <CtrlChip label="드레인" attention={cs ? cs.drain_mode : null} okText="꺼짐" badText="켜짐" tone="warn" />
+          <CtrlChip label="스케줄링" attention={cs ? cs.scheduling_blocked : null} okText="허용" badText="차단" tone="bad" />
+        </div>
         <ul className="dash-kv">
-          {/* 컨트롤 상태 */}
-          <li>maintenance <b>{cs ? String(cs.maintenance_mode) : "—"}</b></li>
-          <li>drain <b>{cs ? String(cs.drain_mode) : "—"}</b></li>
-          <li>scheduling <b>{cs ? (cs.scheduling_blocked ? "차단" : "허용") : "—"}</b></li>
           {/* Volcano (gang 스케줄러) */}
           <li className="dash-kv-sep">
             Volcano{" "}

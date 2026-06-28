@@ -1,20 +1,14 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type VolcanoStatus, type VolcanoMetrics, type VolWindow } from "../../../api";
+import { operatorApi, type VolcanoStatus, type VolcanoMetrics, type VolStageStat } from "../../../api";
 import Section from "./Section";
 
 const TERMINAL = new Set(["Completed", "Succeeded", "Failed", "Aborted", "Terminated"]);
 const WINDOWS = ["1h", "6h", "24h", "72h"];
-const STAGES: [keyof VolWindow["latency"], string][] = [
+const STAGES: [keyof VolcanoMetrics["windows"][string]["latency"], string][] = [
   ["job_to_pod_s", "Job→Pod 생성"],
   ["pod_to_sched_s", "Pod→Scheduled"],
-  ["run_s", "실행(시작→완료)"],
+  ["run_s", "실행 (시작→완료)"],
 ];
-
-function healthCls(ready?: boolean | null, phase?: string): string {
-  if (ready) return "san-ready";
-  if (phase === "Succeeded") return "san-ready";
-  return "san-failed";
-}
 
 // seconds → compact human duration.
 function fmtDur(s: number | null): string {
@@ -29,8 +23,95 @@ function fmtGB(b: number): string {
   return gb >= 1 ? `${gb.toFixed(1)}G` : `${Math.round(b / 1024 ** 2)}M`;
 }
 
+// Friendly identity for an opaque vcjob name like "dms-sync-execution-2377087d3d8a":
+// an operation label + a short id tail, instead of the raw name.
+function jobLabel(name: string): { type: string; short: string } {
+  const n = name || "";
+  const parts = n.split("-");
+  const short = (parts[parts.length - 1] || n).slice(0, 6);
+  let type: string;
+  if (n.includes("sync-execution")) type = "Sync 실행";
+  else if (n.includes("sync-preview")) type = "Sync Preview";
+  else if (n.includes("scan")) type = "Scan";
+  else if (n.includes("-rm-") || n.includes("remove")) type = "Remove";
+  else type = parts.slice(0, -1).join("-") || n;
+  return { type, short };
+}
+
+// One stage's latency distribution as a single bar (0→p50 solid, p50→p95 mid,
+// p95→p99 light), normalized to that stage's own p99 — so the bar shows the spread/
+// tail, while the numbers carry absolute time. Mean is in the tooltip.
+function LatBar({ label, s }: { label: string; s: VolStageStat }) {
+  if (!s || s.n === 0 || s.p99 == null) {
+    return (
+      <div className="lat-row">
+        <div className="lat-label">{label}</div>
+        <div className="lat-bar lat-empty" />
+        <div className="lat-vals muted small">데이터 없음</div>
+      </div>
+    );
+  }
+  const p50 = s.p50 ?? 0, p95 = s.p95 ?? 0, p99 = s.p99 ?? 0;
+  const denom = p99 > 0 ? p99 : 1;
+  const w = (a: number, b: number) => `${Math.max(0, ((b - a) / denom) * 100)}%`;
+  return (
+    <div className="lat-row">
+      <div className="lat-label">{label}</div>
+      <div
+        className="lat-bar"
+        title={`p50 ${fmtDur(p50)} · p95 ${fmtDur(p95)} · p99 ${fmtDur(p99)} · 평균 ${fmtDur(s.mean)} (n${s.n})`}
+      >
+        <span className="seg p50" style={{ width: w(0, p50) }} />
+        <span className="seg p95" style={{ width: w(p50, p95) }} />
+        <span className="seg p99" style={{ width: w(p95, p99) }} />
+      </div>
+      <div className="lat-vals">
+        <b>{fmtDur(p50)}</b>
+        <span className="muted small"> · {fmtDur(p95)} · {fmtDur(p99)}</span>
+      </div>
+    </div>
+  );
+}
+
+// A ranked top-offenders list: rank · job identity · magnitude bar · value.
+function Offenders({
+  title,
+  rows,
+  empty,
+}: {
+  title: string;
+  rows: { name: string; queue?: string; value: number; barTone: string; valueText: string }[];
+  empty: string;
+}) {
+  const max = Math.max(1, ...rows.map((r) => r.value));
+  return (
+    <div className="off-card">
+      <div className="off-title">{title}</div>
+      {rows.length ? rows.map((r, i) => {
+        const { type, short } = jobLabel(r.name);
+        return (
+          <div key={r.name} className="off-row">
+            <span className="off-rank">{i + 1}</span>
+            <div className="off-main">
+              <div className="off-job">
+                <span className="off-type">{type}</span>
+                <span className="off-id">·{short}</span>
+                {r.queue && <span className="off-q">{r.queue}</span>}
+              </div>
+              <div className="off-bar">
+                <span className={r.barTone} style={{ width: `${(r.value / max) * 100}%` }} />
+              </div>
+            </div>
+            <span className="off-val">{r.valueText}</span>
+          </div>
+        );
+      }) : <div className="muted small">{empty}</div>}
+    </div>
+  );
+}
+
 // Volcano scheduler view (DMS control cluster): throughput/latency/top-offenders +
-// queues, active VolcanoJobs, component health. Read-only via DMS /operations/volcano(+/metrics).
+// queues and active VolcanoJobs. Component (pod) health lives in the summary cards.
 export default function VolcanoPanel() {
   const [v, setV] = useState<VolcanoStatus | null>(null);
   const [m, setM] = useState<VolcanoMetrics | null>(null);
@@ -47,11 +128,22 @@ export default function VolcanoPanel() {
     );
   }
   const jobs = v.jobs || [];
-  const phaseCounts: Record<string, number> = {};
-  for (const j of jobs) phaseCounts[j.phase || "?"] = (phaseCounts[j.phase || "?"] || 0) + 1;
   const active = jobs.filter((j) => !TERMINAL.has(j.phase || ""));
   const badge = <span className="muted small">(큐 {v.queues?.length ?? 0} · 잡 {jobs.length})</span>;
   const wd = m?.windows?.[win];
+  const pendRows = (m?.top.longest_pending || []).map((j) => ({
+    name: j.name, queue: j.queue, value: j.pending_s, barTone: "warn",
+    valueText: fmtDur(j.pending_s),
+  }));
+  const anyCpu = (m?.top.most_resources || []).some((j) => (j.cpu_cores || 0) > 0);
+  const resRows = (m?.top.most_resources || []).map((j) => ({
+    name: j.name, value: anyCpu ? j.cpu_cores || 0 : j.pods || 0, barTone: "accent",
+    valueText: [
+      `${j.pods}p`,
+      j.cpu_cores ? `${j.cpu_cores}c` : null,
+      j.mem_bytes ? fmtGB(j.mem_bytes) : null,
+    ].filter(Boolean).join(" · "),
+  }));
   return (
     <Section title="Volcano 스케줄러" badge={badge}>
       {(v.errors?.queues || v.errors?.jobs || v.errors?.scheduler) && (
@@ -84,49 +176,22 @@ export default function VolcanoPanel() {
             최근 {win} 완료 <b>{wd.throughput.completed}</b> (성공 {wd.throughput.succeeded} · 실패{" "}
             <b className={wd.throughput.failed ? "err-num" : ""}>{wd.throughput.failed}</b>)
           </p>
-          <table className="grid"><thead><tr>
-            <th>단계</th><th>평균</th><th>p50</th><th>p95</th><th>p99</th><th>n</th>
-          </tr></thead><tbody>
-            {STAGES.map(([key, label]) => {
-              const s = wd.latency[key];
-              return (
-                <tr key={key}>
-                  <td data-label="단계">{label}</td>
-                  <td data-label="평균">{fmtDur(s.mean)}</td>
-                  <td data-label="p50">{fmtDur(s.p50)}</td>
-                  <td data-label="p95">{fmtDur(s.p95)}</td>
-                  <td data-label="p99">{fmtDur(s.p99)}</td>
-                  <td data-label="n" className="muted small">{s.n}</td>
-                </tr>
-              );
-            })}
-          </tbody></table>
+          <div className="lat-list">
+            {STAGES.map(([key, label]) => <LatBar key={key} label={label} s={wd.latency[key]} />)}
+          </div>
+          <div className="lat-legend muted small">
+            막대 = p50 → p95 → p99 분포 (단계별 자체 p99 기준) · 값 = p50 · p95 · p99 · 평균은 hover
+          </div>
         </>
       )}
 
-      {/* Top offenders */}
+      {/* Top offenders (랭킹) */}
       {m && (
         <>
           <h4 className="dash-sub">Top offenders</h4>
-          <div className="top-offenders">
-            <div>
-              <div className="to-title">최장 Pending</div>
-              {m.top.longest_pending.length ? m.top.longest_pending.map((j) => (
-                <div key={j.name} className="to-row">
-                  <span className="mono small">{j.name}</span>
-                  <span className="err-num small">{fmtDur(j.pending_s)}</span>
-                </div>
-              )) : <div className="muted small">없음</div>}
-            </div>
-            <div>
-              <div className="to-title">최대 리소스 요청</div>
-              {m.top.most_resources.length ? m.top.most_resources.map((j) => (
-                <div key={j.name} className="to-row">
-                  <span className="mono small">{j.name}</span>
-                  <span className="muted small">{j.cpu_cores}c · {fmtGB(j.mem_bytes)} · {j.pods}p</span>
-                </div>
-              )) : <div className="muted small">없음</div>}
-            </div>
+          <div className="off-grid">
+            <Offenders title="최장 Pending" rows={pendRows} empty="대기 잡 없음" />
+            <Offenders title="최대 리소스 요청" rows={resRows} empty="없음" />
           </div>
         </>
       )}
@@ -146,24 +211,7 @@ export default function VolcanoPanel() {
         )) : <tr><td colSpan={5} className="muted">큐 없음</td></tr>}
       </tbody></table>
 
-      <h4 className="dash-sub">스케줄러 컴포넌트</h4>
-      <table className="grid"><thead><tr>
-        <th>pod</th><th>phase</th><th>ready</th><th>재시작</th>
-      </tr></thead><tbody>
-        {v.scheduler?.length ? v.scheduler.map((p) => (
-          <tr key={p.name}>
-            <td data-label="pod" className="mono small">{p.name}</td>
-            <td data-label="phase"><span className={`san ${healthCls(p.ready, p.phase)}`}>{p.phase || "—"}</span></td>
-            <td data-label="ready">{p.ready == null ? "—" : p.ready ? "✓" : "✗"}</td>
-            <td data-label="재시작" className={p.restarts ? "err-num" : ""}>{p.restarts ?? 0}</td>
-          </tr>
-        )) : <tr><td colSpan={4} className="muted">없음</td></tr>}
-      </tbody></table>
-
-      <h4 className="dash-sub">
-        잡 (활성 {active.length} / 전체 {jobs.length})
-        <span className="muted small"> — {Object.entries(phaseCounts).map(([p, n]) => `${p}:${n}`).join(" · ") || "없음"}</span>
-      </h4>
+      <h4 className="dash-sub">활성 잡 ({active.length})</h4>
       <table className="grid"><thead><tr>
         <th>job</th><th>큐</th><th>phase</th><th>running</th><th>pending</th>
       </tr></thead><tbody>
