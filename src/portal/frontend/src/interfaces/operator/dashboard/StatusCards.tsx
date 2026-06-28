@@ -60,13 +60,7 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
           <li>maintenance <b>{cs ? String(cs.maintenance_mode) : "—"}</b></li>
           <li>drain <b>{cs ? String(cs.drain_mode) : "—"}</b></li>
           <li>scheduling <b>{cs ? (cs.scheduling_blocked ? "차단" : "허용") : "—"}</b></li>
-          {/* 큐 / 작업 */}
-          <li className="dash-kv-sep">활성 plan <b>{ws?.plans.total_active ?? "—"}</b></li>
-          <li>활성 run <b>{ws?.runs.total_active ?? "—"}</b></li>
-          <li>lease 임박 <b className="err-num">{ws?.runs.lease_expiring_soon ?? "—"}</b></li>
-          <li>stale/recovery <b className="err-num">{ws?.runs.stale_or_recovery ?? "—"}</b></li>
-          <li>조치 필요 <b className="err-num">{ws?.requests.action_required ?? "—"}</b></li>
-          {/* Volcano */}
+          {/* Volcano (gang 스케줄러) */}
           <li className="dash-kv-sep">
             Volcano{" "}
             <b className={volOk ? "ok-num" : !vol || vol.total === 0 ? "" : "err-num"}>
@@ -81,6 +75,15 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
               <b className={c.ready === c.total ? "ok-num" : "err-num"}>{c.ready}/{c.total}</b>
             </li>
           ))}
+        </ul>
+      </Card>
+      <Card title="작업">
+        <ul className="dash-kv">
+          <li>활성 plan <b>{ws?.plans.total_active ?? "—"}</b></li>
+          <li>활성 run <b>{ws?.runs.total_active ?? "—"}</b></li>
+          <li>lease 임박 <b className="err-num">{ws?.runs.lease_expiring_soon ?? "—"}</b></li>
+          <li>stale/recovery <b className="err-num">{ws?.runs.stale_or_recovery ?? "—"}</b></li>
+          <li>조치 필요 <b className="err-num">{ws?.requests.action_required ?? "—"}</b></li>
         </ul>
       </Card>
       <Card title="요청">
