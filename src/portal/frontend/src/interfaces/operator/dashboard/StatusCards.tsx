@@ -56,25 +56,23 @@ export default function StatusCards({ summary }: { summary: DashboardSummary | n
           {cs ? (schedOk ? "정상" : "차단/점검") : "—"}
         </div>
         <ul className="dash-kv">
+          {/* 컨트롤 상태 */}
           <li>maintenance <b>{cs ? String(cs.maintenance_mode) : "—"}</b></li>
           <li>drain <b>{cs ? String(cs.drain_mode) : "—"}</b></li>
           <li>scheduling <b>{cs ? (cs.scheduling_blocked ? "차단" : "허용") : "—"}</b></li>
-        </ul>
-      </Card>
-      <Card title="큐 / 작업">
-        <ul className="dash-kv">
-          <li>활성 plan <b>{ws?.plans.total_active ?? "—"}</b></li>
+          {/* 큐 / 작업 */}
+          <li className="dash-kv-sep">활성 plan <b>{ws?.plans.total_active ?? "—"}</b></li>
           <li>활성 run <b>{ws?.runs.total_active ?? "—"}</b></li>
           <li>lease 임박 <b className="err-num">{ws?.runs.lease_expiring_soon ?? "—"}</b></li>
           <li>stale/recovery <b className="err-num">{ws?.runs.stale_or_recovery ?? "—"}</b></li>
           <li>조치 필요 <b className="err-num">{ws?.requests.action_required ?? "—"}</b></li>
-        </ul>
-      </Card>
-      <Card title="Volcano">
-        <div className={`san ${volOk ? "san-ready" : !vol || vol.total === 0 ? "san-unknown" : "san-degraded"}`}>
-          {!vol ? "—" : vol.total === 0 ? "없음" : volOk ? "정상" : "점검"}
-        </div>
-        <ul className="dash-kv">
+          {/* Volcano */}
+          <li className="dash-kv-sep">
+            Volcano{" "}
+            <b className={volOk ? "ok-num" : !vol || vol.total === 0 ? "" : "err-num"}>
+              {!vol ? "—" : vol.total === 0 ? "없음" : volOk ? "정상" : "점검"}
+            </b>
+          </li>
           <li>큐 (open) <b>{vol ? `${vol.queues_open}/${vol.queues}` : "—"}</b></li>
           <li>활성 잡 <b>{vol ? `${vol.jobs_active}/${vol.jobs_total}` : "—"}</b></li>
           {vol && Object.entries(vol.components).map(([role, c]) => (
