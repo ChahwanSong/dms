@@ -345,6 +345,28 @@ export interface VolcanoStatus {
   errors: { queues?: string | null; jobs?: string | null; scheduler?: string | null };
 }
 
+// Volcano per-job metrics: windowed throughput/latency + top offenders.
+export interface VolStageStat {
+  mean: number | null;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  n: number;
+}
+export interface VolWindow {
+  throughput: { completed: number; succeeded: number; failed: number };
+  latency: { job_to_pod_s: VolStageStat; pod_to_sched_s: VolStageStat; run_s: VolStageStat };
+}
+export interface VolcanoMetrics {
+  windows: Record<string, VolWindow>;
+  top: {
+    longest_pending: { name: string; queue?: string; phase?: string; pending_s: number }[];
+    most_failed: { name: string; failed: number; phase?: string }[];
+    most_resources: { name: string; cpu_cores: number; mem_bytes: number; pods: number }[];
+  };
+  error?: string | null;
+}
+
 export interface ControlHost {
   storage_name: string;
   cluster_name: string | null;
@@ -545,5 +567,7 @@ export const operatorApi = {
       request<ControlHost[]>("/api/operator/dashboard/control-hosts"),
     volcano: () =>
       request<VolcanoStatus>("/api/operator/dashboard/volcano"),
+    volcanoMetrics: () =>
+      request<VolcanoMetrics>("/api/operator/dashboard/volcano-metrics"),
   },
 };

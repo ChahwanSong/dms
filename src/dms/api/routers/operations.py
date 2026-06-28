@@ -531,4 +531,16 @@ def operational_query_router() -> APIRouter:
         authenticated_actor(request, services)
         return services.volcano_adapter.volcano_status()
 
+    @router.get("/volcano/job-metrics")
+    def volcano_job_metrics(
+        request: Request,
+        limit: int = 300,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        """Per-job Volcano lifecycle metrics (timestamps, latencies, status counts,
+        requested resources) for the dashboard throughput/latency/top-offenders views.
+        Read-only live snapshot."""
+        authenticated_actor(request, services)
+        return services.volcano_adapter.volcano_job_metrics(limit=max(1, min(int(limit), 1000)))
+
     return router

@@ -1200,6 +1200,14 @@ table.grid.node-grid td { vertical-align: middle; }
 .spark-area { fill: currentColor; opacity: 0.16; stroke: none; }
 .spark-dot { fill: currentColor; stroke: none; }
 
+/* Volcano metrics: window toggle + top-offenders grid */
+.vol-metrics-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.win-toggle { display: flex; gap: 0.25rem; }
+.top-offenders { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin: 0.3rem 0 0.8rem; }
+.top-offenders .to-title { font-size: 0.8rem; font-weight: 600; color: #9aa4b2; margin-bottom: 0.3rem; }
+.top-offenders .to-row { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.18rem 0; border-bottom: 1px solid var(--border); }
+@media (max-width: 720px) { .top-offenders { grid-template-columns: 1fr; } }
+
 /* sync option list (expanded) */
 .opt-list { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
 .opt-list-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-right: 0.2rem; }

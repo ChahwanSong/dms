@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 import json
 from pathlib import Path
 import shlex
@@ -166,6 +167,9 @@ class StubVolcanoAdapter:
             "errors": {"queues": None, "jobs": None, "scheduler": None},
         }
 
+    def volcano_job_metrics(self, **kwargs: Any) -> dict[str, Any]:
+        return {"jobs": [], "error": None}
+
 
 
 # Preflight pods print this marker (one line) when a POSIX check fails, so the DM
@@ -211,6 +215,103 @@ def _preflight_script(setup: list[str], checks: list[str], ok_print: str) -> str
             ok_print,
         ]
     )
+
+
+# --- Volcano job-metric parsing helpers (pure, for volcano_job_metrics) ----------
+
+def _parse_k8s_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _secs_between(a: str | None, b: str | None) -> float | None:
+    da, db = _parse_k8s_ts(a), _parse_k8s_ts(b)
+    if da is None or db is None:
+        return None
+    delta = (db - da).total_seconds()
+    return round(delta, 3) if delta >= 0 else None
+
+
+def _min_iso(values: list[str | None]) -> str | None:
+    parsed = [(v, _parse_k8s_ts(v)) for v in values]
+    parsed = [(v, d) for v, d in parsed if d is not None]
+    return min(parsed, key=lambda x: x[1])[0] if parsed else None
+
+
+def _max_iso(values: list[str | None]) -> str | None:
+    parsed = [(v, _parse_k8s_ts(v)) for v in values]
+    parsed = [(v, d) for v, d in parsed if d is not None]
+    return max(parsed, key=lambda x: x[1])[0] if parsed else None
+
+
+def _parse_cpu_cores(value: Any) -> float:
+    s = str(value).strip() if value is not None else ""
+    if not s:
+        return 0.0
+    try:
+        if s.endswith("m"):
+            return int(s[:-1]) / 1000.0
+        if s.endswith("n"):
+            return int(s[:-1]) / 1_000_000_000.0
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+_MEM_UNITS = {
+    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5,
+    "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4, "P": 1000**5,
+}
+
+
+def _parse_mem_bytes(value: Any) -> int:
+    s = str(value).strip() if value is not None else ""
+    if not s:
+        return 0
+    for suffix, mult in _MEM_UNITS.items():
+        if s.endswith(suffix):
+            try:
+                return int(float(s[: -len(suffix)]) * mult)
+            except ValueError:
+                return 0
+    try:
+        return int(float(s))
+    except ValueError:
+        return 0
+
+
+def _pod_scheduled_iso(pod: dict) -> str | None:
+    for c in ((pod.get("status") or {}).get("conditions")) or []:
+        if c.get("type") == "PodScheduled":
+            return c.get("lastTransitionTime")
+    return None
+
+
+def _pod_finished_iso(pod: dict) -> str | None:
+    finishes: list[str | None] = []
+    for c in ((pod.get("status") or {}).get("containerStatuses")) or []:
+        term = (c.get("state") or {}).get("terminated") or {}
+        if term.get("finishedAt"):
+            finishes.append(term["finishedAt"])
+    return _max_iso(finishes)
+
+
+def _job_resource_requests(spec: dict) -> tuple[float, int, int]:
+    """Sum requested cpu cores / mem bytes / pods across a vcjob's tasks."""
+    cpu, mem, pods = 0.0, 0, 0
+    for task in spec.get("tasks") or []:
+        replicas = int(task.get("replicas") or 0)
+        pods += replicas
+        containers = (((task.get("template") or {}).get("spec")) or {}).get("containers") or []
+        per_cpu = sum(_parse_cpu_cores(((ct.get("resources") or {}).get("requests") or {}).get("cpu")) for ct in containers)
+        per_mem = sum(_parse_mem_bytes(((ct.get("resources") or {}).get("requests") or {}).get("memory")) for ct in containers)
+        cpu += replicas * per_cpu
+        mem += replicas * per_mem
+    return round(cpu, 3), mem, pods
 
 
 @dataclass
@@ -785,6 +886,68 @@ class KubernetesVolcanoAdapter:
             errors["scheduler"] = str(exc)
 
         return {"queues": queues, "jobs": jobs, "scheduler": scheduler, "errors": errors}
+
+    def volcano_job_metrics(
+        self, *, job_namespace: str = "dms", limit: int = 300
+    ) -> dict[str, Any]:
+        """Per-job Volcano lifecycle metrics (read-only live snapshot) for the dashboard:
+        timestamps, the three latencies, status counts, and requested resources. Pods are
+        correlated to their vcjob via the ``volcano.sh/job-name`` label. Newest jobs first,
+        capped at ``limit``."""
+        try:
+            vcjobs = self._kubectl_get_items(["get", "vcjob", "-n", job_namespace])
+            pods = self._kubectl_get_items(["get", "pods", "-n", job_namespace])
+        except Exception as exc:  # noqa: BLE001 - surface as a soft error, not a 500
+            return {"jobs": [], "error": str(exc)}
+
+        pods_by_job: dict[str, list[dict]] = {}
+        for p in pods:
+            jn = ((p.get("metadata") or {}).get("labels") or {}).get("volcano.sh/job-name")
+            if jn:
+                pods_by_job.setdefault(jn, []).append(p)
+
+        def _created(it: dict) -> str:
+            return (it.get("metadata") or {}).get("creationTimestamp") or ""
+
+        vcjobs.sort(key=_created, reverse=True)
+        jobs_out: list[dict[str, Any]] = []
+        for it in vcjobs[:limit]:
+            meta = it.get("metadata") or {}
+            spec = it.get("spec") or {}
+            st = it.get("status") or {}
+            state = st.get("state") or {}
+            name = meta.get("name")
+            created_at = meta.get("creationTimestamp")
+            jpods = pods_by_job.get(name, [])
+            pod_created = _min_iso([(p.get("metadata") or {}).get("creationTimestamp") for p in jpods])
+            scheduled = _max_iso([_pod_scheduled_iso(p) for p in jpods])
+            started = _min_iso([(p.get("status") or {}).get("startTime") for p in jpods])
+            finished = _max_iso([_pod_finished_iso(p) for p in jpods])
+            cpu, mem, req_pods = _job_resource_requests(spec)
+            jobs_out.append({
+                "name": name,
+                "queue": spec.get("queue"),
+                "phase": state.get("phase"),
+                "created_at": created_at,
+                "pod_created_at": pod_created,
+                "scheduled_at": scheduled,
+                "started_at": started,
+                "finished_at": finished,
+                "running": st.get("running") or 0,
+                "pending": st.get("pending") or 0,
+                "succeeded": st.get("succeeded") or 0,
+                "failed": st.get("failed") or 0,
+                "min_available": spec.get("minAvailable"),
+                "req_cpu_cores": cpu,
+                "req_mem_bytes": mem,
+                "req_pods": req_pods,
+                "latencies": {
+                    "job_to_pod_s": _secs_between(created_at, pod_created),
+                    "pod_to_sched_s": _secs_between(pod_created, scheduled),
+                    "run_s": _secs_between(started, finished),
+                },
+            })
+        return {"jobs": jobs_out, "error": None}
 
     def _wait_for_terminal(
         self, job_ref: str, *, timeout_seconds: int | None = None

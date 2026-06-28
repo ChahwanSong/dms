@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type VolcanoStatus } from "../../../api";
+import { operatorApi, type VolcanoStatus, type VolcanoMetrics, type VolWindow } from "../../../api";
 import Section from "./Section";
 
 const TERMINAL = new Set(["Completed", "Succeeded", "Failed", "Aborted", "Terminated"]);
+const WINDOWS = ["1h", "6h", "24h", "72h"];
+const STAGES: [keyof VolWindow["latency"], string][] = [
+  ["job_to_pod_s", "Job→Pod 생성"],
+  ["pod_to_sched_s", "Pod→Scheduled"],
+  ["run_s", "실행(시작→완료)"],
+];
 
 function healthCls(ready?: boolean | null, phase?: string): string {
   if (ready) return "san-ready";
@@ -10,12 +16,28 @@ function healthCls(ready?: boolean | null, phase?: string): string {
   return "san-failed";
 }
 
-// Volcano scheduler view (DMS control cluster): queues, active VolcanoJobs, and
-// the volcano-system component health. Read-only via DMS /operations/volcano.
+// seconds → compact human duration.
+function fmtDur(s: number | null): string {
+  if (s == null) return "—";
+  if (s < 90) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  if (s < 5400) return `${(s / 60).toFixed(1)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+function fmtGB(b: number): string {
+  if (!b) return "0";
+  const gb = b / 1024 ** 3;
+  return gb >= 1 ? `${gb.toFixed(1)}G` : `${Math.round(b / 1024 ** 2)}M`;
+}
+
+// Volcano scheduler view (DMS control cluster): throughput/latency/top-offenders +
+// queues, active VolcanoJobs, component health. Read-only via DMS /operations/volcano(+/metrics).
 export default function VolcanoPanel() {
   const [v, setV] = useState<VolcanoStatus | null>(null);
+  const [m, setM] = useState<VolcanoMetrics | null>(null);
+  const [win, setWin] = useState<string>("6h");
   useEffect(() => {
     operatorApi.dashboard.volcano().then(setV).catch(() => setV(null));
+    operatorApi.dashboard.volcanoMetrics().then(setM).catch(() => setM(null));
   }, []);
   if (!v) {
     return (
@@ -29,6 +51,7 @@ export default function VolcanoPanel() {
   for (const j of jobs) phaseCounts[j.phase || "?"] = (phaseCounts[j.phase || "?"] || 0) + 1;
   const active = jobs.filter((j) => !TERMINAL.has(j.phase || ""));
   const badge = <span className="muted small">(큐 {v.queues?.length ?? 0} · 잡 {jobs.length})</span>;
+  const wd = m?.windows?.[win];
   return (
     <Section title="Volcano 스케줄러" badge={badge}>
       {(v.errors?.queues || v.errors?.jobs || v.errors?.scheduler) && (
@@ -38,6 +61,83 @@ export default function VolcanoPanel() {
             .filter(Boolean)
             .join(" · ")}
         </div>
+      )}
+
+      {/* 처리량 · 지연 (윈도우 선택) */}
+      <div className="vol-metrics-head">
+        <h4 className="dash-sub">처리량 · 지연</h4>
+        <div className="win-toggle">
+          {WINDOWS.map((w) => (
+            <button key={w} className={`mini ${win === w ? "primary" : "ghost"}`} onClick={() => setWin(w)}>
+              {w}
+            </button>
+          ))}
+        </div>
+      </div>
+      {!m ? (
+        <p className="muted small">불러오는 중…</p>
+      ) : !wd ? (
+        <p className="muted small">데이터 없음</p>
+      ) : (
+        <>
+          <p className="muted small">
+            최근 {win} 완료 <b>{wd.throughput.completed}</b> (성공 {wd.throughput.succeeded} · 실패{" "}
+            <b className={wd.throughput.failed ? "err-num" : ""}>{wd.throughput.failed}</b>)
+          </p>
+          <table className="grid"><thead><tr>
+            <th>단계</th><th>평균</th><th>p50</th><th>p95</th><th>p99</th><th>n</th>
+          </tr></thead><tbody>
+            {STAGES.map(([key, label]) => {
+              const s = wd.latency[key];
+              return (
+                <tr key={key}>
+                  <td data-label="단계">{label}</td>
+                  <td data-label="평균">{fmtDur(s.mean)}</td>
+                  <td data-label="p50">{fmtDur(s.p50)}</td>
+                  <td data-label="p95">{fmtDur(s.p95)}</td>
+                  <td data-label="p99">{fmtDur(s.p99)}</td>
+                  <td data-label="n" className="muted small">{s.n}</td>
+                </tr>
+              );
+            })}
+          </tbody></table>
+        </>
+      )}
+
+      {/* Top offenders */}
+      {m && (
+        <>
+          <h4 className="dash-sub">Top offenders</h4>
+          <div className="top-offenders">
+            <div>
+              <div className="to-title">최장 Pending</div>
+              {m.top.longest_pending.length ? m.top.longest_pending.map((j) => (
+                <div key={j.name} className="to-row">
+                  <span className="mono small">{j.name}</span>
+                  <span className="err-num small">{fmtDur(j.pending_s)}</span>
+                </div>
+              )) : <div className="muted small">없음</div>}
+            </div>
+            <div>
+              <div className="to-title">최다 실패</div>
+              {m.top.most_failed.length ? m.top.most_failed.map((j) => (
+                <div key={j.name} className="to-row">
+                  <span className="mono small">{j.name}</span>
+                  <span className="err-num small">실패 {j.failed}</span>
+                </div>
+              )) : <div className="muted small">없음</div>}
+            </div>
+            <div>
+              <div className="to-title">최대 리소스 요청</div>
+              {m.top.most_resources.length ? m.top.most_resources.map((j) => (
+                <div key={j.name} className="to-row">
+                  <span className="mono small">{j.name}</span>
+                  <span className="muted small">{j.cpu_cores}c · {fmtGB(j.mem_bytes)} · {j.pods}p</span>
+                </div>
+              )) : <div className="muted small">없음</div>}
+            </div>
+          </div>
+        </>
       )}
 
       <h4 className="dash-sub">큐</h4>

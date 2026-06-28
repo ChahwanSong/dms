@@ -8,6 +8,7 @@ section is returned as null + error so one bad panel never breaks the page).
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -184,6 +185,109 @@ def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
         "components": components,
         "has_errors": any(errors.get(k) for k in ("queues", "jobs", "scheduler")),
     }
+
+
+# ---- Volcano job metrics (throughput / latency / top offenders) ----
+_VOL_WINDOWS = [("1h", 3600), ("6h", 21600), ("24h", 86400), ("72h", 259200)]
+_VOL_SUCCESS = {"Completed", "Succeeded"}
+_VOL_FAIL = {"Failed", "Aborted", "Terminated"}
+_VOL_STAGES = ["job_to_pod_s", "pod_to_sched_s", "run_s"]
+
+
+def _iso_ts(value: str | None) -> float | None:
+    """Parse a k8s/RFC3339 timestamp to an epoch float (None if absent/invalid)."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _pctile(sorted_vals: list[float], p: float) -> float | None:
+    if not sorted_vals:
+        return None
+    if len(sorted_vals) == 1:
+        return round(sorted_vals[0], 2)
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    f = int(k)
+    if f >= len(sorted_vals) - 1:
+        return round(sorted_vals[-1], 2)
+    return round(sorted_vals[f] + (sorted_vals[f + 1] - sorted_vals[f]) * (k - f), 2)
+
+
+def _stage_stats(vals: list[float]) -> dict[str, Any]:
+    if not vals:
+        return {"mean": None, "p50": None, "p95": None, "p99": None, "n": 0}
+    s = sorted(vals)
+    return {
+        "mean": round(sum(s) / len(s), 2),
+        "p50": _pctile(s, 50),
+        "p95": _pctile(s, 95),
+        "p99": _pctile(s, 99),
+        "n": len(s),
+    }
+
+
+def _volcano_metrics(jobs: list[dict[str, Any]], now_ts: float) -> dict[str, Any]:
+    """Windowed throughput + latency stats and current top-offenders from the per-job
+    Volcano snapshot. Window membership = finished_at within the window."""
+    windows: dict[str, Any] = {}
+    for label, secs in _VOL_WINDOWS:
+        cutoff = now_ts - secs
+        in_win = [j for j in jobs if (_iso_ts(j.get("finished_at")) or -1) >= cutoff]
+        latency = {
+            stage: _stage_stats(
+                [
+                    (j.get("latencies") or {}).get(stage)
+                    for j in in_win
+                    if (j.get("latencies") or {}).get(stage) is not None
+                ]
+            )
+            for stage in _VOL_STAGES
+        }
+        windows[label] = {
+            "throughput": {
+                "completed": len(in_win),
+                "succeeded": sum(1 for j in in_win if j.get("phase") in _VOL_SUCCESS),
+                "failed": sum(1 for j in in_win if j.get("phase") in _VOL_FAIL),
+            },
+            "latency": latency,
+        }
+
+    recent = [j for j in jobs if (_iso_ts(j.get("created_at")) or 0) >= now_ts - 259200]
+    pending = []
+    for j in jobs:
+        if j.get("finished_at") is None and j.get("started_at") is None:
+            created = _iso_ts(j.get("created_at"))
+            if created is None:
+                continue
+            pending.append({
+                "name": j.get("name"), "queue": j.get("queue"),
+                "phase": j.get("phase"), "pending_s": round(now_ts - created, 1),
+            })
+    pending.sort(key=lambda x: x["pending_s"], reverse=True)
+    most_failed = sorted(
+        (j for j in recent if (j.get("failed") or 0) > 0),
+        key=lambda j: j.get("failed") or 0, reverse=True,
+    )
+    most_res = sorted(
+        recent, key=lambda j: (j.get("req_cpu_cores") or 0, j.get("req_mem_bytes") or 0),
+        reverse=True,
+    )
+    top = {
+        "longest_pending": pending[:5],
+        "most_failed": [
+            {"name": j.get("name"), "failed": j.get("failed"), "phase": j.get("phase")}
+            for j in most_failed[:5]
+        ],
+        "most_resources": [
+            {"name": j.get("name"), "cpu_cores": j.get("req_cpu_cores"),
+             "mem_bytes": j.get("req_mem_bytes"), "pods": j.get("req_pods")}
+            for j in most_res[:5]
+        ],
+    }
+    return {"windows": windows, "top": top}
 
 
 # ---- attention (action-required) refinement ----
@@ -374,6 +478,21 @@ def dashboard_router(settings: Settings) -> APIRouter:
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         return await dms.get_volcano_status(actor=_actor(user, settings))
+
+    @router.get("/volcano-metrics")
+    async def volcano_metrics(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # Windowed throughput/latency + top offenders from the per-job Volcano snapshot.
+        try:
+            data = await dms.volcano_job_metrics(actor=_actor(user, settings))
+        except DmsApiError as exc:
+            return {"windows": {}, "top": {}, "error": str(exc.detail)}
+        now_ts = datetime.now(timezone.utc).timestamp()
+        result = _volcano_metrics(data.get("jobs") or [], now_ts)
+        result["error"] = data.get("error")
+        return result
 
     @router.get("/attention")
     async def attention(

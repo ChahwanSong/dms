@@ -243,6 +243,18 @@ class DmsClient:
     async def get_volcano_status(self, *, actor: str) -> dict[str, Any]:
         return await self._request("GET", f"{_OPS_BASE}/volcano", actor=actor)
 
+    async def volcano_job_metrics(
+        self, *, actor: str, limit: int = 300
+    ) -> dict[str, Any]:
+        # Per-job Volcano lifecycle metrics (timestamps/latencies/resources) for the
+        # dashboard throughput/latency/top-offenders views. Read-only.
+        return await self._request(
+            "GET",
+            f"{_OPS_BASE}/volcano/job-metrics",
+            actor=actor,
+            params={"limit": limit},
+        )
+
 
 def _seg(value: str) -> str:
     # Path segment; keep ':' (DMS action routes use it) but escape slashes etc.
