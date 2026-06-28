@@ -1175,6 +1175,7 @@ tr.row-open .expand-toggle { color: var(--accent); }
 .mini-progress-bar .seg { height: 100%; display: block; }
 .mini-progress-bar .seg.ok { background: #34d399; }
 .mini-progress-bar .seg.fail { background: var(--error); }
+.mini-progress-bar .seg.cancel { background: #6b7280; }
 
 /* sync option list (expanded) */
 .opt-list { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }

@@ -172,6 +172,7 @@ export interface BackupBatch {
   request_count?: number;
   succeeded_count?: number;
   failed_count?: number;
+  cancelled_count?: number;
   state_counts?: Record<string, number>;
   preview_totals?: { files: number; bytes: number };
 }

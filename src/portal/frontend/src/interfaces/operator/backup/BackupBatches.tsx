@@ -122,7 +122,7 @@ export default function BackupBatches() {
               <th className="col-toggle"></th>
               <th>이름</th>
               <th>상태</th>
-              <th>성공/실패/요청</th>
+              <th>성공/실패/취소/요청</th>
               <th>옵션</th>
               <th>생성</th>
               <th></th>
@@ -165,10 +165,12 @@ export default function BackupBatches() {
                     <td data-label="상태">
                       <span className={`san ${st.cls}`}>{st.label}</span>
                     </td>
-                    <td data-label="성공/실패/요청">
+                    <td data-label="성공/실패/취소/요청">
                       <span className="ok-num">{b.succeeded_count ?? 0}</span>
                       <span className="muted"> / </span>
                       <span className="err-num">{b.failed_count ?? 0}</span>
+                      <span className="muted"> / </span>
+                      <span className="muted">{b.cancelled_count ?? 0}</span>
                       <span className="muted"> / </span>
                       <span>{b.request_count ?? 0}</span>
                     </td>
@@ -224,6 +226,7 @@ function BatchExpand({ batch }: { batch: BackupBatch }) {
   const total = batch.request_count ?? 0;
   const ok = batch.succeeded_count ?? 0;
   const fail = batch.failed_count ?? 0;
+  const cancelled = batch.cancelled_count ?? 0;
   const pct = total ? Math.round((ok / total) * 100) : 0;
   return (
     <div className="batch-expand">
@@ -244,13 +247,14 @@ function BatchExpand({ batch }: { batch: BackupBatch }) {
         ]}
       />
       {total > 0 && (
-        <div className="mini-progress" title={`성공 ${ok} / 실패 ${fail} / 전체 ${total}`}>
+        <div className="mini-progress" title={`성공 ${ok} / 실패 ${fail} / 취소 ${cancelled} / 전체 ${total}`}>
           <div className="mini-progress-bar">
             <span className="seg ok" style={{ width: `${pct}%` }} />
             <span className="seg fail" style={{ width: `${total ? (fail / total) * 100 : 0}%` }} />
+            <span className="seg cancel" style={{ width: `${total ? (cancelled / total) * 100 : 0}%` }} />
           </div>
           <span className="muted small">
-            성공 {ok} · 실패 {fail} · 전체 {total}
+            성공 {ok} · 실패 {fail} · 취소 {cancelled} · 전체 {total}
           </span>
         </div>
       )}

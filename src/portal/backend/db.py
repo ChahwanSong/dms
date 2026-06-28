@@ -219,7 +219,9 @@ class Database:
                     (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
                         AND j.state='succeeded') AS succeeded_count,
                     (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
-                        AND j.state IN ('failed','preview_failed')) AS failed_count
+                        AND j.state IN ('failed','preview_failed')) AS failed_count,
+                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
+                        AND j.state='cancelled') AS cancelled_count
                    FROM backup_batches b ORDER BY b.created_at DESC"""
             )
             return await cur.fetchall()
