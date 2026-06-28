@@ -4,6 +4,7 @@ import { SanityBadge, ReadinessDots } from "../components/SanityBadge";
 import StorageMappingDetail from "./StorageMappingDetail";
 import StorageMappingForm from "./StorageMappingForm";
 import { backendType, isFsBackend, managedRoot, quotaTitle } from "./helpers";
+import Loading from "../../../components/Loading";
 
 type FormState =
   | { mode: "create" }
@@ -267,7 +268,7 @@ export default function StorageInventory() {
       {error && <div className="banner err">{error}</div>}
 
       {loading ? (
-        <div className="muted">불러오는 중…</div>
+        <Loading rows={5} />
       ) : mappings.length === 0 ? (
         <div className="muted">표시할 스토리지 매핑이 없습니다.</div>
       ) : (

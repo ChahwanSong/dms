@@ -3,6 +3,7 @@ import { auth, type User } from "./api";
 import Login from "./pages/Login";
 import OperatorApp from "./interfaces/operator/OperatorApp";
 import UserApp from "./interfaces/user/UserApp";
+import Loading from "./components/Loading";
 
 // Top-level role switch: the two interfaces are entirely separate trees so they
 // can evolve independently. Role comes from the session (single source of truth).
@@ -23,7 +24,7 @@ export default function App() {
   }
 
   if (loading) {
-    return <div className="centered muted">로딩 중…</div>;
+    return <Loading center />;
   }
 
   if (!user) {

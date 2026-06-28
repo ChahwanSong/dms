@@ -8,6 +8,7 @@ import {
 } from "../../../api";
 import { fmtTime } from "./helpers";
 import Section from "./Section";
+import Loading from "../../../components/Loading";
 
 const TERMINAL = new Set(["Completed", "Succeeded", "Failed", "Aborted", "Terminated"]);
 const WINDOWS = ["1h", "6h", "24h", "72h"];
@@ -177,7 +178,7 @@ export default function VolcanoPanel() {
   if (!v) {
     return (
       <Section title="Volcano 스케줄러">
-        <p className="muted">불러오는 중…</p>
+        <Loading rows={3} />
       </Section>
     );
   }
@@ -223,7 +224,7 @@ export default function VolcanoPanel() {
           </div>
         </div>
         {!m ? (
-          <p className="muted small">불러오는 중…</p>
+          <Loading />
         ) : (
           <>
             <div className="lat-legend2">

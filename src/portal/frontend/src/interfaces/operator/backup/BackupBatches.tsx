@@ -5,6 +5,7 @@ import { OptionChips, SpecGrid, optionEntries } from "./ui";
 import InfoHint from "../../../components/InfoHint";
 import BackupBatchForm from "./BackupBatchForm";
 import BackupBatchDetail from "./BackupBatchDetail";
+import Loading from "../../../components/Loading";
 
 // Data backup: register lists of DMS DM sync jobs and run them as mirror backups
 // (preview -> approve -> execute). This is the list of batches; click one to open
@@ -112,7 +113,7 @@ export default function BackupBatches() {
       {error && <div className="banner err">{error}</div>}
 
       {loading ? (
-        <div className="muted">불러오는 중…</div>
+        <Loading rows={5} />
       ) : batches.length === 0 ? (
         <div className="muted">등록된 백업 배치가 없습니다. “+ 새 배치”로 시작하세요.</div>
       ) : (

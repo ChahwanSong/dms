@@ -3,6 +3,7 @@ import { operatorApi, type StorageMapping } from "../../../api";
 import { SanityBadge } from "../components/SanityBadge";
 import { SpecGrid, BoolChip, type KV } from "../../../components/SpecGrid";
 import { backendType, formatApiError, isFsBackend, quotaTitle } from "./helpers";
+import Loading from "../../../components/Loading";
 
 export default function StorageMappingDetail({
   storageName,
@@ -61,7 +62,7 @@ export default function StorageMappingDetail({
         </div>
 
         {error && <div className="banner err">{error}</div>}
-        {!m && !error && <div className="muted">불러오는 중…</div>}
+        {!m && !error && <Loading rows={3} />}
 
         {m && (
           <div className="detail-body">

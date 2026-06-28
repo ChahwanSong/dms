@@ -13,6 +13,7 @@ import { errMsg, fmtTime } from "./BackupBatches";
 import { SpecGrid, type KV } from "./ui";
 import BackupBatchForm from "./BackupBatchForm";
 import BackupRequestEdit from "./BackupRequestEdit";
+import Loading from "../../../components/Loading";
 import BackupCsvModal from "./BackupCsvModal";
 
 const PAGE = 200;
@@ -280,7 +281,7 @@ export default function BackupBatchDetail({
         <button className="ghost mini" onClick={onBack}>
           ← 목록
         </button>
-        {error ? <div className="banner err">{error}</div> : <div className="muted">불러오는 중…</div>}
+        {error ? <div className="banner err">{error}</div> : <Loading rows={3} />}
       </div>
     );
   }

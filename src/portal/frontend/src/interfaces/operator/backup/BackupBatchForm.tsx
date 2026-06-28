@@ -12,6 +12,7 @@ import SyncOptionsFields from "./SyncOptionsFields";
 import BackupCsvModal from "./BackupCsvModal";
 import { errMsg } from "./BackupBatches";
 import { isFsBackend } from "../storage/helpers";
+import Loading from "../../../components/Loading";
 
 // Create or edit a backup batch. Source & destination STORAGE are batch-level
 // single inputs; each request is just a (src_path, dst_path) pair entered in an
@@ -247,9 +248,7 @@ export default function BackupBatchForm({
         </div>
 
         {loading ? (
-          <div className="muted" style={{ padding: "1rem" }}>
-            불러오는 중…
-          </div>
+          <Loading rows={3} />
         ) : (
           <div className="form">
             <label>
