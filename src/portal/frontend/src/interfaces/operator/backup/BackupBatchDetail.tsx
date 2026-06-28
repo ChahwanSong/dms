@@ -436,7 +436,7 @@ export default function BackupBatchDetail({
     }
     if (
       !window.confirm(
-        `${rows.length}개 항목으로 전체 교체합니다.\n기존 ${jobs.length}개는 모두 대체됩니다(등록됨 → 재미리보기 필요). 계속할까요?`,
+        `${rows.length}개 항목으로 전체 교체합니다.\n기존 ${jobs.length}개는 모두 대체됩니다(등록됨 → Re-preview 필요). 계속할까요?`,
       )
     )
       return;
