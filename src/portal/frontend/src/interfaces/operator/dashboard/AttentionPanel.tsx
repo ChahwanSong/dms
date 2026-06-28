@@ -40,49 +40,49 @@ const ISSUE_META: Record<string, { label: string; action?: string }> = {
   storage_mapping_unknown: { label: "스토리지 sanity 미검사", action: "스토리지 인벤토리에서 sanity 재검사 실행" },
   storage_class_missing: { label: "StorageClass 없음", action: "클러스터에 해당 StorageClass 생성" },
   csi_driver_mismatch: { label: "CSI 드라이버 불일치", action: "매핑의 CSI provisioner를 실제 드라이버에 맞게 정정" },
-  missing_rm_readiness: { label: "RM 에이전트 미준비", action: "해당 스토리지 노드의 RM 에이전트(DaemonSet) 동작 확인" },
-  missing_dm_readiness: { label: "DM 에이전트 미준비", action: "해당 스토리지 노드의 DM 에이전트(DaemonSet) 동작 확인" },
-  agent_report_stale: { label: "노드 에이전트 리포트 오래됨", action: "해당 노드의 agent 데몬 상태·시계·네트워크 확인 (DM 잡 실행 게이트)" },
+  missing_rm_readiness: { label: "RM agent 미준비", action: "해당 스토리지 노드의 RM agent(DaemonSet) 동작 확인" },
+  missing_dm_readiness: { label: "DM agent 미준비", action: "해당 스토리지 노드의 DM agent(DaemonSet) 동작 확인" },
+  agent_report_stale: { label: "노드 agent report 오래됨", action: "해당 노드의 agent 데몬 상태·시계·네트워크 확인 (DM job 실행 gate)" },
   // quota
-  kubernetes_quota_expired_unblocked: { label: "쿼터 만료 (미차단)" },
-  kubernetes_quota_drifted: { label: "쿼터 드리프트" },
-  kubernetes_quota_missing: { label: "쿼터 없음 (라이브)" },
-  kubernetes_quota_db_only: { label: "쿼터 DB만 존재" },
-  kubernetes_quota_metadata_drift: { label: "쿼터 메타데이터 드리프트" },
-  kubernetes_quota_query_failed: { label: "쿼터 조회 실패" },
-  quota_usage_warning: { label: "쿼터 사용량 경고" },
-  quota_usage_critical: { label: "쿼터 사용량 위험" },
-  non_dms_quota_more_restrictive: { label: "비-DMS 쿼터가 더 제한적" },
-  non_dms_quota_zero_limit: { label: "비-DMS 쿼터 0 제한" },
-  kubernetes_quota_expiration_sweep_failed: { label: "쿼터 만료 스윕 실패" },
-  kubernetes_quota_expiration_sweep_skipped: { label: "쿼터 만료 스윕 스킵" },
+  kubernetes_quota_expired_unblocked: { label: "Quota 만료 (미차단)", action: "namespace quota expiration sweep 실행, 또는 resource 수동 block" },
+  kubernetes_quota_drifted: { label: "Quota drift", action: "update로 DB desired state 재적용, 또는 sync로 live 상태 수용" },
+  kubernetes_quota_missing: { label: "Quota 없음 (live)", action: "DMS 관리 ResourceQuota 재생성, 또는 검토 후 DMS resource 레코드 삭제" },
+  kubernetes_quota_db_only: { label: "Quota DB만 존재", action: "live ResourceQuota 재생성, 또는 검토 후 DB resource 레코드 삭제" },
+  kubernetes_quota_metadata_drift: { label: "Quota metadata drift", action: "update/reset apply로 DMS metadata 복구, 또는 수동 변경 내역 확인" },
+  kubernetes_quota_query_failed: { label: "Quota 조회 실패", action: "Kubernetes API 접근 확인 후 audit 재실행" },
+  quota_usage_warning: { label: "Quota 사용량 경고", action: "quota 증설, storage 정리, 또는 namespace 소유자에게 연락" },
+  quota_usage_critical: { label: "Quota 사용량 위험", action: "즉시 quota 증설 또는 storage 정리" },
+  non_dms_quota_more_restrictive: { label: "non-DMS quota가 더 제한적", action: "non-DMS ResourceQuota 소유자 확인" },
+  non_dms_quota_zero_limit: { label: "non-DMS quota 0 제한", action: "non-DMS ResourceQuota 소유자 확인" },
+  kubernetes_quota_expiration_sweep_failed: { label: "Quota expiration sweep 실패", action: "실패한 target 점검 후 sweep 재실행, 또는 수동 block" },
+  kubernetes_quota_expiration_sweep_skipped: { label: "Quota expiration sweep skip", action: "skip된 namespace quota expiration target 검토" },
   // filesystem
-  filesystem_soft_deleted: { label: "파일시스템 소프트 삭제 (수동 제거 필요)" },
-  filesystem_expired_unblocked: { label: "파일시스템 만료 (미차단)" },
-  filesystem_quota_drifted: { label: "FS 쿼터 드리프트" },
-  filesystem_quota_missing: { label: "FS 쿼터 없음" },
-  filesystem_marker_mismatch: { label: "FS 마커 불일치" },
-  filesystem_unblock_restore_missing: { label: "FS 언블록 복원 누락" },
-  filesystem_access_group_missing: { label: "FS 접근그룹 없음" },
-  filesystem_unsafe_existing_directory: { label: "기존 디렉토리 안전성 문제" },
-  filesystem_import_preflight_failed: { label: "FS 임포트 프리플라이트 실패" },
-  filesystem_assign_quota_failed: { label: "FS 쿼터 할당 실패" },
-  filesystem_block_failed: { label: "FS 차단 실패" },
-  filesystem_block_verification_failed: { label: "FS 차단 검증 실패" },
-  filesystem_expiration_sweep_partial_failure: { label: "FS 만료 스윕 부분 실패" },
-  filesystem_expiration_sweep_skipped: { label: "FS 만료 스윕 스킵" },
+  filesystem_soft_deleted: { label: "Filesystem soft-delete (수동 제거 필요)", action: "backend 노드에서 디렉토리 수동 제거 (CephFS rm -rf / GPFS mmunlinkfileset+mmdelfileset)" },
+  filesystem_expired_unblocked: { label: "Filesystem 만료 (미차단)", action: "filesystem expiration sweep 실행, 또는 resource 수동 block" },
+  filesystem_quota_drifted: { label: "Filesystem quota drift", action: "filesystem sync로 live 수용, 또는 quota 재적용" },
+  filesystem_quota_missing: { label: "Filesystem quota 없음", action: "filesystem quota 재적용, 또는 검토 후 DB 상태 sync" },
+  filesystem_marker_mismatch: { label: "Filesystem marker 불일치", action: "수동 변경 전 filesystem marker 점검" },
+  filesystem_unblock_restore_missing: { label: "Filesystem unblock 복원 누락", action: "filesystem 접근 수동 복구, 또는 DB block_state 보정" },
+  filesystem_access_group_missing: { label: "Filesystem access group 없음", action: "DMS 관리 LDAP access group 복구 후 unblock 재실행" },
+  filesystem_unsafe_existing_directory: { label: "기존 디렉토리 안전성 문제", action: "기존 디렉토리 안전성(owner·group·marker) 점검" },
+  filesystem_import_preflight_failed: { label: "Filesystem import preflight 실패", action: "기존 디렉토리 owner·group·marker 보정 후 import 재시도" },
+  filesystem_assign_quota_failed: { label: "Filesystem assign-quota 실패", action: "디렉토리 안전성 점검 후 assign-quota 재시도" },
+  filesystem_block_failed: { label: "Filesystem block 실패", action: "block 결과 점검·조치 후 재실행" },
+  filesystem_block_verification_failed: { label: "Filesystem block 검증 실패", action: "block/unblock 결과 점검 후 재실행" },
+  filesystem_expiration_sweep_partial_failure: { label: "Filesystem expiration sweep 부분 실패", action: "실패한 target 점검 후 sweep 재실행" },
+  filesystem_expiration_sweep_skipped: { label: "Filesystem expiration sweep skip", action: "skip된 filesystem expiration target 검토" },
   // data jobs
-  data_job_policy_failed: { label: "데이터잡 정책 실패" },
-  data_job_identity_unresolved: { label: "데이터잡 identity 미해결" },
-  data_job_permission_denied: { label: "데이터잡 권한 거부" },
-  data_job_no_ready_candidate: { label: "데이터잡 가용 노드 없음" },
-  data_job_volcano_timeout: { label: "데이터잡 타임아웃" },
-  data_job_volcano_failed: { label: "데이터잡 스케줄러 실패" },
-  data_job_artifact_parse_failed: { label: "데이터잡 아티팩트 실패" },
-  data_job_nsync_deferred: { label: "데이터잡 nsync 보류" },
-  data_job_cancelled: { label: "데이터잡 취소됨" },
-  data_job_preflight_failed: { label: "데이터잡 프리플라이트 실패" },
-  data_job_failed: { label: "데이터잡 실패" },
+  data_job_policy_failed: { label: "Data job policy 실패", action: "data management policy 확인·수정 후 job 재시도" },
+  data_job_identity_unresolved: { label: "Data job identity 미해결", action: "LDAP identity 등록/해결 후 job 재시도" },
+  data_job_permission_denied: { label: "Data job 권한 거부", action: "POSIX 권한 수정 후 job 재시도" },
+  data_job_no_ready_candidate: { label: "Data job 가용 노드 없음", action: "ready한 DM 노드 확보 후 job 재시도" },
+  data_job_volcano_timeout: { label: "Data job timeout", action: "timeout 상향 또는 원인 해소 후 job 재시도" },
+  data_job_volcano_failed: { label: "Data job scheduler 실패", action: "Volcano/MPI scheduler 문제 디버그 후 job 재시도" },
+  data_job_artifact_parse_failed: { label: "Data job artifact 실패", action: "artifact 확인/재생성 후 job 재시도" },
+  data_job_nsync_deferred: { label: "Data job nsync 보류", action: "sync 완료 대기, 또는 deferred 원인 점검" },
+  data_job_cancelled: { label: "Data job 취소됨", action: "취소 사유 검토 후 필요시 재요청" },
+  data_job_preflight_failed: { label: "Data job preflight 실패", action: "preflight 조건 충족 후 job 재시도" },
+  data_job_failed: { label: "Data job 실패", action: "원인 수정 후 job 재시도" },
 };
 
 // request_attention carries the request's status — refine label/action by it.
@@ -109,12 +109,16 @@ function labelOf(item: AttentionItem): string {
   return ISSUE_META[item.issue_type]?.label || item.issue_type;
 }
 function actionOf(item: AttentionItem): string {
-  const rec = str(item.recommended_action);
-  if (rec) return rec;
+  // Korean action (ISSUE_META / request-status) first; DMS recommended_action (영문)
+  // is a fallback only for issue types we have not localized yet.
   if (item.issue_type === "request_attention") {
     return REQ_STATUS_ACTION[str(item.status) || ""] || "요청 상세에서 상태 확인 후 재처리/취소";
   }
-  return ISSUE_META[item.issue_type]?.action || "항목을 펼쳐 상세를 확인하세요";
+  return (
+    ISSUE_META[item.issue_type]?.action ||
+    str(item.recommended_action) ||
+    "항목을 펼쳐 상세를 확인하세요"
+  );
 }
 // short identifier shown on the collapsed row
 function identOf(item: AttentionItem): string | undefined {
@@ -205,7 +209,7 @@ function Item({ item, onNavigate }: { item: AttentionItem; onNavigate?: (s: stri
             <span className="attn2-label">{labelOf(item)}</span>
             {ident && <span className="attn2-ident mono">{ident}</span>}
           </span>
-          <span className="attn2-action">↳ {actionOf(item)}</span>
+          <span className="attn2-action"><span className="attn2-tag">권고</span>{actionOf(item)}</span>
         </span>
         {when && <span className="attn2-when muted small" title={fmtTime(when)}>{fmtAgo(when)}</span>}
         <span className="attn2-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
