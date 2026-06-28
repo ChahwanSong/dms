@@ -1236,6 +1236,7 @@ table.grid.node-grid td { vertical-align: middle; }
 
 .off-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin: 0.3rem 0 0.8rem; }
 .off-card .off-title { font-size: 0.8rem; font-weight: 600; color: #9aa4b2; margin-bottom: 0.35rem; }
+.off-card .off-title .off-hint { font-weight: 400; font-size: 0.72rem; color: #6b7280; }
 .off-row { display: grid; grid-template-columns: 1.2rem 1fr auto; align-items: center; gap: 0.5rem; padding: 0.22rem 0; }
 .off-rank { font-size: 0.75rem; color: #9aa4b2; text-align: center; font-variant-numeric: tabular-nums; }
 .off-main { min-width: 0; }
@@ -1247,11 +1248,44 @@ table.grid.node-grid td { vertical-align: middle; }
 .off-bar { height: 0.32rem; border-radius: 999px; background: var(--border); margin-top: 0.2rem; overflow: hidden; }
 .off-bar span { display: block; height: 100%; background: var(--accent); }
 .off-bar span.warn { background: #fbbf24; }
-.off-val { font-size: 0.78rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.off-val { font-size: 0.78rem; white-space: normal; text-align: right; max-width: 10rem; line-height: 1.35; font-variant-numeric: tabular-nums; }
+
+/* queue load: one combined running/pending/inqueue bar per queue (shared axis) */
+.q-legend { display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 0.2rem 0 0.5rem; font-size: 0.74rem; color: #9aa4b2; }
+.q-legend .leg { display: inline-flex; align-items: center; gap: 0.3rem; }
+.q-sw { width: 0.7rem; height: 0.7rem; border-radius: 2px; display: inline-block; }
+.q-sw.run { background: #34d399; }
+.q-sw.pend { background: #fbbf24; }
+.q-sw.inq { background: #22d3ee; }
+.q-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.q-row { display: grid; grid-template-columns: 10rem 1fr auto; align-items: center; gap: 0.7rem; }
+.q-head { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.q-name { font-size: 0.85rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-bar { display: flex; height: 0.85rem; border-radius: 999px; overflow: hidden; background: var(--border); }
+.q-seg { height: 100%; }
+.q-seg.run { background: #34d399; }
+.q-seg.pend { background: #fbbf24; }
+.q-seg.inq { background: #22d3ee; }
+.q-seg-empty { width: 100%; }
+.q-counts { display: flex; gap: 0.7rem; font-size: 0.76rem; color: #9aa4b2; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.q-c b { font-weight: 700; margin-right: 0.2rem; color: var(--fg); }
+.q-c.run b { color: #34d399; }
+.q-c.pend b { color: #fbbf24; }
+.q-c.inq b { color: #22d3ee; }
+
 @media (max-width: 720px) {
   .off-grid { grid-template-columns: 1fr; }
+  .off-val { max-width: none; }
   .lat-row2 { grid-template-columns: 2.6rem 1fr; }
   .lat-vals { grid-column: 2; text-align: left; }
+  /* node table is in stacked-card mode here; the desktop fixed row height (3rem)
+     would clip the 9 stacked cells and overlap rows — let cards size to content */
+  table.grid.node-grid tbody tr { height: auto; }
+  /* queue bars stack: name, bar, counts each on their own line */
+  .q-row { grid-template-columns: 1fr; gap: 0.3rem; }
+  .q-counts { flex-wrap: wrap; }
+  /* throughput/latency header: let the stat toggle wrap under the heading */
+  .vol-metrics-head { flex-wrap: wrap; }
 }
 
 /* sync option list (expanded) */

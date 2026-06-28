@@ -45,20 +45,22 @@ function jobLabel(name: string): { type: string; short: string } {
 }
 
 // A ranked top-offenders list: rank · job identity · magnitude bar · value. Each row
-// carries a detailed hover tooltip.
+// carries a detailed hover tooltip. `hint` clarifies what the value column means.
 function Offenders({
   title,
+  hint,
   rows,
   empty,
 }: {
   title: string;
+  hint?: string;
   rows: { name: string; sub?: string; tip?: string; value: number; barTone: string; valueText: string }[];
   empty: string;
 }) {
   const max = Math.max(1, ...rows.map((r) => r.value));
   return (
     <div className="off-card">
-      <div className="off-title">{title}</div>
+      <div className="off-title">{title}{hint && <span className="off-hint"> {hint}</span>}</div>
       {rows.length ? rows.map((r, i) => {
         const { type, short } = jobLabel(r.name);
         return (
@@ -103,6 +105,11 @@ export default function VolcanoPanel() {
   const active = jobs.filter((j) => !TERMINAL.has(j.phase || ""));
   const badge = <span className="muted small">(큐 {v.queues?.length ?? 0} · 잡 {jobs.length})</span>;
 
+  // queues: one combined running/pending/inqueue bar per queue (shared axis).
+  const queues = v.queues || [];
+  const qTotal = (q: (typeof queues)[number]) => (q.running || 0) + (q.pending || 0) + (q.inqueue || 0);
+  const qMax = Math.max(1, ...queues.map(qTotal));
+
   // latency: one stacked bar per window, segments = the 3 stages for the chosen stat.
   const winRows = WINDOWS.map((w) => {
     const wd = m?.windows?.[w];
@@ -143,11 +150,11 @@ export default function VolcanoPanel() {
     name: j.name, sub: route(j) || j.queue || undefined,
     value: anyCpu ? j.cpu_cores || 0 : j.pods || 0, barTone: "accent",
     valueText: [
-      `${j.pods}p`,
-      j.cpu_cores ? `${j.cpu_cores}c` : null,
-      j.mem_bytes ? fmtGB(j.mem_bytes) : null,
+      `파드 ${j.pods}`,
+      j.cpu_cores ? `vCPU ${j.cpu_cores}` : null,
+      j.mem_bytes ? `메모리 ${fmtGB(j.mem_bytes)}` : null,
     ].filter(Boolean).join(" · "),
-    tip: `${detailTip(j)}\n리소스 ${j.pods}p${j.cpu_cores ? ` · ${j.cpu_cores}c` : ""}${j.mem_bytes ? ` · ${fmtGB(j.mem_bytes)}` : ""}`,
+    tip: `${detailTip(j)}\n요청 리소스 — 파드 ${j.pods}${j.cpu_cores ? ` · vCPU ${j.cpu_cores}` : ""}${j.mem_bytes ? ` · 메모리 ${fmtGB(j.mem_bytes)}` : ""}`,
   }));
 
   return (
@@ -214,26 +221,46 @@ export default function VolcanoPanel() {
         <>
           <h4 className="dash-sub">Top offenders</h4>
           <div className="off-grid">
-            <Offenders title="최장 Pending" rows={pendRows} empty="대기 잡 없음" />
-            <Offenders title="최대 리소스 요청" rows={resRows} empty="없음" />
+            <Offenders title="최장 Pending" hint="(대기 시간)" rows={pendRows} empty="대기 잡 없음" />
+            <Offenders title="최대 리소스 요청" hint="(파드 · vCPU · 메모리)" rows={resRows} empty="없음" />
           </div>
         </>
       )}
 
+      {/* 큐 — running/pending/inqueue combined in one bar per queue */}
       <h4 className="dash-sub">큐</h4>
-      <table className="grid"><thead><tr>
-        <th>큐</th><th>상태</th><th>running</th><th>pending</th><th>inqueue</th>
-      </tr></thead><tbody>
-        {v.queues?.length ? v.queues.map((q) => (
-          <tr key={q.name}>
-            <td data-label="큐" className="mono small">{q.name}</td>
-            <td data-label="상태"><span className={`san ${q.state === "Open" ? "san-ready" : "san-degraded"}`}>{q.state || "—"}</span></td>
-            <td data-label="running">{q.running ?? 0}</td>
-            <td data-label="pending" className={q.pending ? "err-num" : ""}>{q.pending ?? 0}</td>
-            <td data-label="inqueue">{q.inqueue ?? 0}</td>
-          </tr>
-        )) : <tr><td colSpan={5} className="muted">큐 없음</td></tr>}
-      </tbody></table>
+      <div className="q-legend">
+        <span className="leg"><span className="q-sw run" />running (실행 중)</span>
+        <span className="leg"><span className="q-sw pend" />pending (대기)</span>
+        <span className="leg"><span className="q-sw inq" />inqueue (입큐)</span>
+      </div>
+      <div className="q-list">
+        {queues.length ? queues.map((q) => {
+          const r = q.running || 0, p = q.pending || 0, iq = q.inqueue || 0, tot = r + p + iq;
+          return (
+            <div key={q.name} className="q-row">
+              <div className="q-head">
+                <span className="q-name mono" title={q.name}>{q.name}</span>
+                <span className={`san ${q.state === "Open" ? "san-ready" : "san-degraded"}`}>{q.state || "—"}</span>
+              </div>
+              <div className="q-bar" title={`running ${r} · pending ${p} · inqueue ${iq}`}>
+                {tot > 0 ? (
+                  <>
+                    {r > 0 && <span className="q-seg run" style={{ width: `${(r / qMax) * 100}%` }} />}
+                    {p > 0 && <span className="q-seg pend" style={{ width: `${(p / qMax) * 100}%` }} />}
+                    {iq > 0 && <span className="q-seg inq" style={{ width: `${(iq / qMax) * 100}%` }} />}
+                  </>
+                ) : <span className="q-seg-empty" />}
+              </div>
+              <div className="q-counts">
+                <span className="q-c run"><b>{r}</b>running</span>
+                <span className="q-c pend"><b>{p}</b>pending</span>
+                <span className="q-c inq"><b>{iq}</b>inqueue</span>
+              </div>
+            </div>
+          );
+        }) : <div className="muted small">큐 없음</div>}
+      </div>
 
       <h4 className="dash-sub">활성 잡 ({active.length})</h4>
       <table className="grid"><thead><tr>
