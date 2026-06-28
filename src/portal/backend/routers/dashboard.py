@@ -191,7 +191,7 @@ def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
 _VOL_WINDOWS = [("1h", 3600), ("6h", 21600), ("24h", 86400), ("72h", 259200)]
 _VOL_SUCCESS = {"Completed", "Succeeded"}
 _VOL_FAIL = {"Failed", "Aborted", "Terminated"}
-_VOL_STAGES = ["job_to_pod_s", "pod_to_sched_s", "run_s"]
+_VOL_STAGES = ["job_to_pod_s", "pod_to_sched_s", "sched_to_start_s", "run_s"]
 
 
 def _iso_ts(value: str | None) -> float | None:

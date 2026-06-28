@@ -960,6 +960,9 @@ class KubernetesVolcanoAdapter:
                 "latencies": {
                     "job_to_pod_s": _secs_between(created_at, pod_created),
                     "pod_to_sched_s": _secs_between(pod_created, scheduled),
+                    # scheduled -> started captures image pull + container creation, the
+                    # gap the previous 3-stage breakdown silently dropped.
+                    "sched_to_start_s": _secs_between(scheduled, started),
                     "run_s": _secs_between(started, finished),
                 },
             })

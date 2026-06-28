@@ -21,7 +21,10 @@ def _job(name: str, **kw):
         "started_at": None, "finished_at": None,
         "running": 0, "pending": 0, "succeeded": 0, "failed": 0,
         "req_cpu_cores": 0.0, "req_mem_bytes": 0, "req_pods": 0,
-        "latencies": {"job_to_pod_s": None, "pod_to_sched_s": None, "run_s": None},
+        "latencies": {
+            "job_to_pod_s": None, "pod_to_sched_s": None,
+            "sched_to_start_s": None, "run_s": None,
+        },
     }
     base.update(kw)
     return base
@@ -30,9 +33,11 @@ def _job(name: str, **kw):
 def test_throughput_and_latency_windows():
     jobs = [
         _job("a", phase="Completed", finished_at=_iso(600), created_at=_iso(800),
-             latencies={"job_to_pod_s": 2.0, "pod_to_sched_s": 4.0, "run_s": 100.0}),
+             latencies={"job_to_pod_s": 2.0, "pod_to_sched_s": 4.0,
+                        "sched_to_start_s": 3.0, "run_s": 100.0}),
         _job("b", phase="Failed", finished_at=_iso(7200), created_at=_iso(7400),
-             latencies={"job_to_pod_s": 6.0, "pod_to_sched_s": 8.0, "run_s": 300.0}),
+             latencies={"job_to_pod_s": 6.0, "pod_to_sched_s": 8.0,
+                        "sched_to_start_s": 5.0, "run_s": 300.0}),
     ]
     out = _volcano_metrics(jobs, NOW)
 
@@ -46,6 +51,9 @@ def test_throughput_and_latency_windows():
     assert w6["latency"]["run_s"]["n"] == 2
     assert w6["latency"]["run_s"]["mean"] == 200.0   # (100+300)/2
     assert w6["latency"]["run_s"]["p50"] == 200.0    # interp([100,300], 50)
+    # the new scheduled->start stage (image pull/create) flows through aggregation
+    assert w6["latency"]["sched_to_start_s"]["n"] == 2
+    assert w6["latency"]["sched_to_start_s"]["mean"] == 4.0   # (3+5)/2
 
 
 def test_top_offenders():

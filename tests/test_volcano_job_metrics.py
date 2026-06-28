@@ -105,6 +105,7 @@ def test_volcano_job_metrics_correlation_and_latencies():
     assert j["req_pods"] == 2
     assert j["succeeded"] == 2
     lat = j["latencies"]
-    assert lat["job_to_pod_s"] == 2.0    # 00:00:00 -> min pod created 00:00:02
-    assert lat["pod_to_sched_s"] == 4.0  # min created 00:00:02 -> max scheduled 00:00:06
-    assert lat["run_s"] == 350.0         # min start 00:00:10 -> max finish 00:06:00
+    assert lat["job_to_pod_s"] == 2.0       # 00:00:00 -> min pod created 00:00:02
+    assert lat["pod_to_sched_s"] == 4.0     # min created 00:00:02 -> max scheduled 00:00:06
+    assert lat["sched_to_start_s"] == 4.0   # max scheduled 00:00:06 -> min start 00:00:10
+    assert lat["run_s"] == 350.0            # min start 00:00:10 -> max finish 00:06:00

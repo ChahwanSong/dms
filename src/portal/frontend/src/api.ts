@@ -355,7 +355,10 @@ export interface VolStageStat {
 }
 export interface VolWindow {
   throughput: { completed: number; succeeded: number; failed: number };
-  latency: { job_to_pod_s: VolStageStat; pod_to_sched_s: VolStageStat; run_s: VolStageStat };
+  latency: {
+    job_to_pod_s: VolStageStat; pod_to_sched_s: VolStageStat;
+    sched_to_start_s: VolStageStat; run_s: VolStageStat;
+  };
 }
 export interface VolcanoMetrics {
   windows: Record<string, VolWindow>;

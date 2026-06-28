@@ -8,6 +8,7 @@ type LatKey = keyof VolcanoMetrics["windows"][string]["latency"];
 const STAGES: [LatKey, string][] = [
   ["job_to_pod_s", "Job→Pod 생성"],
   ["pod_to_sched_s", "Pod→Scheduled"],
+  ["sched_to_start_s", "Scheduled→실행시작 (이미지풀)"],
   ["run_s", "실행 (시작→완료)"],
 ];
 const STATS: [keyof VolStageStat, string][] = [

@@ -1223,14 +1223,16 @@ table.grid.node-grid td { vertical-align: middle; }
 .lat-seg { height: 100%; }
 .lat-seg.s0 { background: #22d3ee; }
 .lat-seg.s1 { background: #fbbf24; }
-.lat-seg.s2 { background: #818cf8; }
+.lat-seg.s2 { background: #f472b6; }
+.lat-seg.s3 { background: #818cf8; }
 .lat-seg-empty { width: 100%; }
 .lat-legend2 { display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 0.2rem 0 0.45rem; font-size: 0.74rem; color: #9aa4b2; }
 .lat-legend2 .leg { display: inline-flex; align-items: center; gap: 0.3rem; }
 .lat-legend2 .leg-sw { width: 0.7rem; height: 0.7rem; border-radius: 2px; display: inline-block; }
 .lat-legend2 .leg-sw.s0 { background: #22d3ee; }
 .lat-legend2 .leg-sw.s1 { background: #fbbf24; }
-.lat-legend2 .leg-sw.s2 { background: #818cf8; }
+.lat-legend2 .leg-sw.s2 { background: #f472b6; }
+.lat-legend2 .leg-sw.s3 { background: #818cf8; }
 .lat-vals { font-size: 0.8rem; text-align: right; white-space: nowrap; }
 .lat-legend { margin-top: 0.2rem; }
 
