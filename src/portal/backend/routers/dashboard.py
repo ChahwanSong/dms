@@ -324,7 +324,8 @@ _ATTENTION_SEVERITY_DEFAULT = {
     "storage_mapping_failed": "ERROR",
     "agent_report_stale": "WARN",
 }
-_SEVERITY_RANK = {"ERROR": 0, "WARN": 1, "INFO": 2}
+# DMS emits CRITICAL for some quota issues (usage >=95%, query failed); rank it above ERROR.
+_SEVERITY_RANK = {"CRITICAL": 0, "ERROR": 1, "WARN": 2, "INFO": 3}
 
 
 def _attention_category(issue_type: str, resource_kind: str | None) -> str:

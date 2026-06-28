@@ -72,7 +72,9 @@ export default function OperatorApp({
         </nav>
         <main className="content content-wide">
           {section === "dashboard" && <Dashboard />}
-          {section === "dashboard-attention" && <DashboardAttention />}
+          {section === "dashboard-attention" && (
+            <DashboardAttention onNavigate={(s) => setSection(s as Section)} />
+          )}
           {section === "dashboard-activity" && <DashboardActivity />}
           {section === "storage" && <StorageInventory />}
           {section === "backup" && <BackupBatches />}

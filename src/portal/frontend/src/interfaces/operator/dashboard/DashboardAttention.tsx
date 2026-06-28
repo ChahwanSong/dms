@@ -1,10 +1,14 @@
 import { useState } from "react";
 import AttentionPanel from "./AttentionPanel";
 
-// "조치 필요" — sub-page under 종합 대시보드. Hosts the action-required panel that
-// used to sit on the main dashboard. Refresh re-mounts the panel (it fetches once
-// on mount), so a key bump forces a reload.
-export default function DashboardAttention() {
+// "조치 필요" — sub-page under 종합 대시보드. Hosts the action-required panel.
+// Refresh re-mounts the panel (it fetches once on mount), so a key bump forces a
+// reload. onNavigate lets per-issue shortcuts jump to the relevant operator section.
+export default function DashboardAttention({
+  onNavigate,
+}: {
+  onNavigate?: (section: string) => void;
+}) {
   const [reloadKey, setReloadKey] = useState(0);
   return (
     <div className="inventory">
@@ -16,7 +20,7 @@ export default function DashboardAttention() {
           </button>
         </div>
       </div>
-      <AttentionPanel key={reloadKey} defaultOpen />
+      <AttentionPanel key={reloadKey} onNavigate={onNavigate} />
     </div>
   );
 }
