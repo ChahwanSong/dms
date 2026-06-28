@@ -10,6 +10,7 @@ export const BATCH_STATUS: Record<string, { label: string; cls: string }> = {
 
 export const REQUEST_STATE: Record<string, { label: string; cls: string }> = {
   registered: { label: "등록됨", cls: "san-unknown" },
+  held: { label: "보류 (이번 Preview 제외)", cls: "san-unknown" },
   preview_pending: { label: "Preview 대기", cls: "san-degraded" },
   preview_ready: { label: "Preview 완료", cls: "san-ready" },
   approved: { label: "승인됨", cls: "san-degraded" },

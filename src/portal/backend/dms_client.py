@@ -139,6 +139,13 @@ class DmsClient:
     # `root` requester, which DMS gates behind an mTLS-verified operator, so the
     # orchestrator passes actor="mtls:<operator>" (see Settings.backup_actor_prefix).
 
+    async def list_data_management_policies(
+        self, *, actor: str | None = None
+    ) -> list[dict[str, Any]]:
+        # Read-only: per-operation policy (incl. default/max worker nodes). Used to
+        # show what "자동" (policy default) resolves to in the backup form.
+        return await self._request("GET", f"{_DM}/policies", actor=actor)
+
     async def submit_sync(self, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
         return await self._request("POST", f"{_DM}/sync", actor=actor, json=body)
 

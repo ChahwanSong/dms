@@ -259,6 +259,30 @@ class Database:
                 (status, batch_id),
             )
 
+    async def hold_unselected_registered(
+        self, batch_id: str, keep_ids: list[int]
+    ) -> int:
+        """Selective preview: park the registered requests NOT in keep_ids as 'held'
+        so the orchestrator previews only the selected ones. Returns rows held."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE backup_requests SET state='held', updated_at=now() "
+                "WHERE batch_id=%s AND state='registered' AND NOT (id = ANY(%s))",
+                (batch_id, keep_ids),
+            )
+            return cur.rowcount
+
+    async def release_held(self, batch_id: str) -> int:
+        """Return any 'held' requests to 'registered' (after a selective preview run,
+        or to self-heal a crashed one). Returns rows released."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE backup_requests SET state='registered', updated_at=now() "
+                "WHERE batch_id=%s AND state='held'",
+                (batch_id,),
+            )
+            return cur.rowcount
+
     async def update_batch(self, batch_id: str, **fields: Any) -> None:
         """Update whitelisted draft-batch columns (name/note/delete_enabled/options).
         Only the keys present in `fields` are changed; `options` is stored as jsonb."""

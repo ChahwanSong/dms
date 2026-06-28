@@ -50,6 +50,22 @@ class FakeDB:
     async def set_batch_status(self, bid: str, status: str) -> None:
         self.batches[bid]["status"] = status
 
+    async def release_held(self, bid: str) -> int:
+        n = 0
+        for r in self.requests.values():
+            if r["batch_id"] == bid and r["state"] == "held":
+                r["state"] = "registered"
+                n += 1
+        return n
+
+    async def hold_unselected_registered(self, bid: str, keep_ids: list[int]) -> int:
+        n = 0
+        for r in self.requests.values():
+            if r["batch_id"] == bid and r["state"] == "registered" and r["id"] not in keep_ids:
+                r["state"] = "held"
+                n += 1
+        return n
+
     async def batch_state_counts(self, bid: str) -> dict[str, int]:
         out: dict[str, int] = {}
         for r in self.requests.values():

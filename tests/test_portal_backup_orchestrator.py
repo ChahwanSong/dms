@@ -59,6 +59,14 @@ class OrchDB:
     async def set_batch_status(self, bid: str, status: str) -> None:
         self.batches[bid]["status"] = status
 
+    async def release_held(self, bid: str) -> int:
+        n = 0
+        for r in self.requests.values():
+            if r["batch_id"] == bid and r["state"] == "held":
+                r["state"] = "registered"
+                n += 1
+        return n
+
 
 class OrchDms:
     def __init__(self, jobs: dict[str, dict[str, Any]]) -> None:
@@ -138,6 +146,23 @@ def test_execute_confirms_only_approved_then_done():
         assert dms.confirmed == ["j1"]
         assert db.requests[r1]["state"] == "succeeded"
         assert db.batches["b1"]["status"] == "done"
+    asyncio.run(go())
+
+
+def test_preview_releases_held_on_advance():
+    """Selective preview: once the selected (registered) items finish, the batch
+    advances to previewed and the parked 'held' items return to 'registered'."""
+    async def go():
+        db = OrchDB()
+        batch = db.add_batch("b1", "previewing")
+        r_done = db.add_request("b1", "preview_ready")  # the selected one, finished
+        r_held = db.add_request("b1", "held")           # unselected, parked
+        dms = OrchDms({})
+        orch = BackupOrchestrator(db, dms, Settings())
+        await orch._drive_preview(batch)
+        assert db.batches["b1"]["status"] == "previewed"
+        assert db.requests[r_held]["state"] == "registered"  # released
+        assert db.requests[r_done]["state"] == "preview_ready"
     asyncio.run(go())
 
 

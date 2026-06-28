@@ -18,6 +18,7 @@ import BackupCsvModal from "./BackupCsvModal";
 const PAGE = 200;
 const STATE_ORDER = [
   "registered",
+  "held",
   "preview_pending",
   "preview_ready",
   "approved",
@@ -342,6 +343,9 @@ export default function BackupBatchDetail({
   const selResettable = selectedJobs.filter((j) => EDITABLE.includes(j.state));
   const selDeletable = selectedJobs.filter((j) => !INFLIGHT_STATES.includes(j.state));
   const selCancelable = selectedJobs.filter((j) => INFLIGHT_STATES.includes(j.state));
+  const selPreviewable = selectedJobs.filter((j) => j.state === "registered");
+  // Preview can only start from a settled batch (not while previewing/running).
+  const canPreviewSel = status === "draft" || status === "previewed" || status === "done";
   const allSelected = jobs.length > 0 && selected.size === jobs.length;
 
   function toggleSelectAll() {
@@ -351,6 +355,14 @@ export default function BackupBatchDetail({
   }
   function clearSelection() {
     setSelected(new Set());
+  }
+  function bulkPreview() {
+    const ids = selPreviewable.map((j) => j.id);
+    if (!ids.length) return;
+    act(async () => {
+      await operatorApi.backup.preview(batchId, { request_ids: ids });
+      clearSelection();
+    }, `${ids.length}개 항목 Preview를 시작합니다.`);
   }
   function bulkApprove() {
     const ids = selReady.map((j) => j.id);
@@ -647,6 +659,16 @@ export default function BackupBatchDetail({
       {selected.size > 0 && (
         <div className="bulk-bar">
           <span className="bulk-count">{selected.size}개 선택</span>
+          {canPreviewSel && (
+            <button
+              className="primary mini"
+              disabled={busy || selPreviewable.length === 0}
+              onClick={bulkPreview}
+              title="선택한 등록됨 항목만 Preview (나머지는 보류 후 복원)"
+            >
+              Preview ({selPreviewable.length})
+            </button>
+          )}
           <button className="primary mini" disabled={busy || selReady.length === 0} onClick={bulkApprove}>
             승인 ({selReady.length})
           </button>

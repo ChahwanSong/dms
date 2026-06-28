@@ -181,10 +181,14 @@ class BackupOrchestrator:
                     job["id"], state="preview_failed", error=_reason(dj)
                 )
 
-        # 4) advance the batch once nothing is registered/pending.
+        # 4) advance the batch once nothing is registered/pending. A selective
+        #    preview parks the unselected as 'held' (not counted here); once the
+        #    selected ones finish, advance and release the held back to 'registered'
+        #    so they stay available for a later preview.
         counts = await self._db.batch_state_counts(bid)
         if not counts.get("registered") and not counts.get("preview_pending"):
             await self._db.set_batch_status(bid, "previewed")
+            await self._db.release_held(bid)
 
     async def _submit_one(
         self,

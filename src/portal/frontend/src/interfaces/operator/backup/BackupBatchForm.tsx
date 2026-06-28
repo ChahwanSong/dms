@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type BackupBatch } from "../../../api";
+import { operatorApi, type BackupBatch, type NodePolicyResp } from "../../../api";
 import {
   optionsWithoutDelete,
   rowsToCsv,
@@ -11,6 +11,7 @@ import {
 import SyncOptionsFields from "./SyncOptionsFields";
 import BackupCsvModal from "./BackupCsvModal";
 import { errMsg } from "./BackupBatches";
+import { isFsBackend } from "../storage/helpers";
 
 // Create or edit a backup batch. Source & destination STORAGE are batch-level
 // single inputs; each request is just a (src_path, dst_path) pair entered in an
@@ -49,6 +50,7 @@ export default function BackupBatchForm({
   const [dstStorage, setDstStorage] = useState("");
   const [rows, setRows] = useState<BackupRow[]>(isEdit ? [] : [{ src_path: "", dst_path: "" }]);
   const [storages, setStorages] = useState<string[]>([]);
+  const [nodePolicy, setNodePolicy] = useState<NodePolicyResp | null>(null);
   const [showSync, setShowSync] = useState(
     isEdit &&
       (!!initial?.delete_enabled ||
@@ -76,7 +78,15 @@ export default function BackupBatchForm({
     let alive = true;
     operatorApi.storage
       .list()
-      .then((list) => alive && setStorages(list.map((m) => m.storage_name).sort()))
+      // Data backup runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI
+      // mappings (ceph-csi/weka-csi/gpfs-csi) are namespace-quota only and can't be
+      // a backup src/dst, so exclude them from the storage candidates.
+      .then((list) => alive && setStorages(list.filter(isFsBackend).map((m) => m.storage_name).sort()))
+      .catch(() => {});
+    // What "자동" (DMS policy default) resolves to, to surface the actual number.
+    operatorApi.backup
+      .nodePolicy()
+      .then((p) => alive && setNodePolicy(p))
       .catch(() => {});
     if (isEdit && initial) {
       operatorApi.backup
@@ -212,6 +222,20 @@ export default function BackupBatchForm({
     );
   }
 
+  // What "자동" resolves to: dsync default for same-storage backups, nsync for
+  // cross-storage. Before both storages are picked, show the shared value (or both
+  // if the policies differ). Null when the policy hasn't loaded yet.
+  const dsyncN = nodePolicy?.dsync?.default_worker_nodes ?? null;
+  const nsyncN = nodePolicy?.nsync?.default_worker_nodes ?? null;
+  const sameStorage = !!srcStorage && srcStorage === dstStorage;
+  const crossStorage = !!srcStorage && !!dstStorage && srcStorage !== dstStorage;
+  let autoLabel: string | null;
+  if (sameStorage) autoLabel = dsyncN != null ? String(dsyncN) : null;
+  else if (crossStorage) autoLabel = nsyncN != null ? String(nsyncN) : null;
+  else if (dsyncN != null && nsyncN != null)
+    autoLabel = dsyncN === nsyncN ? String(dsyncN) : `동일 ${dsyncN} · 교차 ${nsyncN}`;
+  else autoLabel = dsyncN != null ? String(dsyncN) : nsyncN != null ? String(nsyncN) : null;
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
@@ -251,7 +275,7 @@ export default function BackupBatchForm({
             <label>
               <span>병렬 노드 수</span>
               <select value={nodeCount} onChange={(e) => setNodeCount(e.target.value)}>
-                <option value="">자동 (정책 기본값)</option>
+                <option value="">자동 (정책 기본값{autoLabel ? `: ${autoLabel}` : ""})</option>
                 {Array.from({ length: 16 }, (_, i) => i + 1).map((n) => (
                   <option key={n} value={String(n)}>
                     {n}

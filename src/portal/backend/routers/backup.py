@@ -66,6 +66,13 @@ class ApproveIn(BaseModel):
 _TERMINAL_REQUEST_STATES = {"succeeded", "failed", "cancelled", "preview_failed"}
 
 
+class PreviewIn(BaseModel):
+    """Selective preview: only these registered request ids are previewed; the rest
+    are parked ('held') and restored to 'registered' afterwards. None = preview all."""
+
+    request_ids: list[int] | None = None
+
+
 class ResetIn(BaseModel):
     """Reset fixable requests to 'registered' for re-preview (retry)."""
 
@@ -205,6 +212,31 @@ def backup_router(settings: Settings) -> APIRouter:
         )
         added = await db.add_requests(batch_id, rows)
         return {"id": batch_id, "added": added}
+
+    @router.get("/node-policy")
+    async def node_policy(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        """DMS worker-node policy defaults for sync backups, so the UI can show what
+        "자동" resolves to. dsync = same-storage, nsync = cross-storage backup."""
+        actor = f"{settings.backup_actor_prefix}{_actor(user)}"
+        try:
+            policies = await dms.list_data_management_policies(actor=actor)
+        except DmsApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        by_op = {p.get("operation"): p for p in (policies or [])}
+
+        def pick(op: str) -> dict[str, Any] | None:
+            p = by_op.get(op)
+            if not p:
+                return None
+            return {
+                "default_worker_nodes": p.get("default_worker_nodes"),
+                "max_worker_nodes": p.get("max_worker_nodes"),
+            }
+
+        return {"dsync": pick("dsync"), "nsync": pick("nsync")}
 
     @router.get("/batches")
     async def list_batches(db: Database = Depends(get_db)) -> list[dict[str, Any]]:
@@ -404,7 +436,9 @@ def backup_router(settings: Settings) -> APIRouter:
 
     @router.post("/batches/{batch_id}:preview")
     async def preview(
-        batch_id: str, db: Database = Depends(get_db)
+        batch_id: str,
+        payload: PreviewIn | None = None,
+        db: Database = Depends(get_db),
     ) -> dict[str, Any]:
         batch = await db.get_batch(batch_id)
         if not batch:
@@ -413,11 +447,27 @@ def backup_router(settings: Settings) -> APIRouter:
             raise HTTPException(
                 status_code=409, detail=f"cannot preview from {batch['status']}"
             )
+        # Self-heal any held requests left by a crashed selective preview, so the
+        # 'registered' count below reflects everything previewable.
+        await db.release_held(batch_id)
         counts = await db.batch_state_counts(batch_id)
         if not counts.get("registered"):
             raise HTTPException(status_code=422, detail="no registered requests to preview")
+        ids = payload.request_ids if payload else None
+        scoped = False
+        if ids:
+            # Selective: park every registered request that isn't selected; only the
+            # selected ones get previewed (the rest are restored afterwards).
+            await db.hold_unselected_registered(batch_id, ids)
+            remaining = await db.batch_state_counts(batch_id)
+            if not remaining.get("registered"):
+                await db.release_held(batch_id)  # none selected were registered
+                raise HTTPException(
+                    status_code=422, detail="no registered requests among the selected"
+                )
+            scoped = True
         await db.set_batch_status(batch_id, "previewing")
-        return {"id": batch_id, "status": "previewing"}
+        return {"id": batch_id, "status": "previewing", "scoped": scoped}
 
     @router.post("/batches/{batch_id}:approve")
     async def approve(

@@ -234,6 +234,17 @@ export interface BackupRequestInput {
   dst_path: string;
 }
 
+// DMS worker-node policy defaults (what "자동" resolves to). dsync = same-storage
+// backup, nsync = cross-storage backup.
+export interface NodePolicy {
+  default_worker_nodes: number | null;
+  max_worker_nodes: number | null;
+}
+export interface NodePolicyResp {
+  dsync: NodePolicy | null;
+  nsync: NodePolicy | null;
+}
+
 export interface BatchCreateInput {
   name: string;
   delete_enabled: boolean;
@@ -380,6 +391,8 @@ export const operatorApi = {
   },
   backup: {
     list: () => request<BackupBatch[]>(BK),
+    // Worker-node policy defaults, to show what "자동" resolves to in the form.
+    nodePolicy: () => request<NodePolicyResp>("/api/operator/backup/node-policy"),
     get: (id: string) => request<BackupBatch>(`${BK}/${encodeURIComponent(id)}`),
     create: (payload: BatchCreateInput) =>
       request<{ id: string; added: number }>(BK, {
@@ -436,10 +449,15 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}/requests${qs ? `?${qs}` : ""}`,
       );
     },
-    preview: (id: string) =>
-      request<{ id: string; status: string }>(
+    // Preview registered requests. Pass request_ids to preview only those (the
+    // rest are parked and restored afterwards); omit to preview the whole batch.
+    preview: (id: string, opts?: { request_ids?: number[] }) =>
+      request<{ id: string; status: string; scoped?: boolean }>(
         `${BK}/${encodeURIComponent(id)}:preview`,
-        { method: "POST" },
+        {
+          method: "POST",
+          body: opts?.request_ids ? JSON.stringify({ request_ids: opts.request_ids }) : undefined,
+        },
       ),
     // Selective approval: pass request_ids to approve a subset (staged); omit to
     // approve all preview_ready. Approves only preview_ready among the given ids.
