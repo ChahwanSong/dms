@@ -6,7 +6,7 @@ import Section from "./Section";
 const STATES = ["", "Running", "Pending", "ConfirmPending", "Succeeded", "Failed"];
 const OPS = ["", "data.sync", "data.scan", "data.rm"];
 
-export default function RequestsTable() {
+export default function RequestsTable({ defaultOpen = false }: { defaultOpen?: boolean }) {
   const [rows, setRows] = useState<DashRequest[]>([]);
   const [state, setState] = useState("");
   const [op, setOp] = useState("");
@@ -15,7 +15,7 @@ export default function RequestsTable() {
       .then(setRows).catch(() => setRows([]));
   }, [state, op]);
   return (
-    <Section title="요청" badge={<span className="muted small">({rows.length})</span>}>
+    <Section title="요청" badge={<span className="muted small">({rows.length})</span>} defaultOpen={defaultOpen}>
       <div className="inv-actions dash-filters">
         <select value={state} onChange={(e) => setState(e.target.value)}>
           {STATES.map((s) => <option key={s} value={s}>{s || "모든 상태"}</option>)}

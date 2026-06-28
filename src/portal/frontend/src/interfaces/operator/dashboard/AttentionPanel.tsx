@@ -37,7 +37,7 @@ function Group({ title, items }: { title: string; items: AttentionItem[] }) {
   );
 }
 
-export default function AttentionPanel() {
+export default function AttentionPanel({ defaultOpen = false }: { defaultOpen?: boolean }) {
   const [rows, setRows] = useState<AttentionItem[]>([]);
   // INFO (e.g. soft-deleted, awaiting manual cleanup) is hidden by default
   const [active, setActive] = useState<Set<string>>(new Set(["ERROR", "WARN"]));
@@ -67,7 +67,7 @@ export default function AttentionPanel() {
   </span>;
 
   return (
-    <Section title="조치 필요" badge={badge}>
+    <Section title="조치 필요" badge={badge} defaultOpen={defaultOpen}>
       <div className="attn-filters">
         {SEVERITIES.map((s) => (
           <button

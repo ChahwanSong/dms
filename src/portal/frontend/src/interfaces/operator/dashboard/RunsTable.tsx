@@ -3,7 +3,7 @@ import { operatorApi, type RunRow } from "../../../api";
 import { stateCls, RUN_STATE } from "./helpers";
 import Section from "./Section";
 
-export default function RunsTable() {
+export default function RunsTable({ defaultOpen = false }: { defaultOpen?: boolean }) {
   const [active, setActive] = useState<RunRow[]>([]);
   const [stale, setStale] = useState<RunRow[]>([]);
   useEffect(() => {
@@ -17,7 +17,7 @@ export default function RunsTable() {
     ? <span className="err-num">(stale {stale.length})</span>
     : <span className="muted small">({rows.length})</span>;
   return (
-    <Section title="스케줄러 활동" badge={badge}>
+    <Section title="스케줄러 활동" badge={badge} defaultOpen={defaultOpen}>
       <table className="grid"><thead><tr>
         <th>run</th><th>worker</th><th>역할</th><th>상태</th><th>lease 남음</th><th>리소스</th>
       </tr></thead><tbody>

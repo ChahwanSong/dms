@@ -290,6 +290,19 @@ button.ghost {
   border-color: var(--accent);
 }
 
+/* sub-section under a parent nav item (e.g. 종합 대시보드 → 조치 필요 · 액티비티) */
+.nav-subitem {
+  margin-left: 0.7rem;
+  padding-left: 1rem;
+  font-size: 0.85rem;
+  color: var(--muted, #9aa4b2);
+  border-left: 1px solid var(--border);
+  border-radius: 0 8px 8px 0;
+}
+.nav-subitem.active {
+  color: var(--fg);
+}
+
 .content-wide {
   flex: 1;
   padding: 1.5rem 2rem;

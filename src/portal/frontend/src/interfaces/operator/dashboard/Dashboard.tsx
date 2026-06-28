@@ -4,10 +4,7 @@ import { fmtTime } from "./helpers";
 import StatusCards from "./StatusCards";
 import NodesTable from "./NodesTable";
 import ControlHostsTable from "./ControlHostsTable";
-import RunsTable from "./RunsTable";
 import VolcanoPanel from "./VolcanoPanel";
-import RequestsTable from "./RequestsTable";
-import AttentionPanel from "./AttentionPanel";
 
 const POLL_MS = 7000;
 
@@ -48,12 +45,9 @@ export default function Dashboard() {
       </div>
       {error && <div className="banner err">{error}</div>}
       <StatusCards summary={summary} />
-      <AttentionPanel />
       <NodesTable />
       <ControlHostsTable />
-      <RunsTable />
       <VolcanoPanel />
-      <RequestsTable />
     </div>
   );
 }
