@@ -1,6 +1,13 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
-import { batchStatus, requestState, fmtBytes, friendlyError } from "./helpers";
+import {
+  batchStatus,
+  requestState,
+  fmtBytes,
+  friendlyError,
+  parseRequestsCsv,
+  rowsToCsv,
+} from "./helpers";
 import { errMsg, fmtTime } from "./BackupBatches";
 import { SpecGrid, type KV } from "./ui";
 import BackupBatchForm from "./BackupBatchForm";
@@ -18,7 +25,6 @@ const STATE_ORDER = [
   "failed",
   "cancelled",
 ];
-const TERMINAL = ["succeeded", "failed", "cancelled", "preview_failed"];
 const EDITABLE = ["registered", "preview_ready", "preview_failed", "failed", "cancelled"];
 const RETRYABLE = ["preview_failed", "failed"];
 
@@ -147,6 +153,11 @@ export default function BackupBatchDetail({
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   // storage_name -> managed_root, so the UI can show real absolute paths.
   const [roots, setRoots] = useState<Record<string, string>>({});
+  // inline "add row" editor + CSV upload input
+  const [showAdd, setShowAdd] = useState(false);
+  const [addSrc, setAddSrc] = useState("");
+  const [addDst, setAddDst] = useState("");
+  const csvInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     operatorApi.storage
@@ -197,6 +208,23 @@ export default function BackupBatchDetail({
     const t = setInterval(reload, 4000);
     return () => clearInterval(t);
   }, [batch, reload]);
+
+  // Keep the selection limited to currently-visible rows. Rows can vanish after
+  // a delete / CSV replace / filter change; stale ids would otherwise leave the
+  // bulk bar showing a "N개 선택" count that no action can act on.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(jobs.map((j) => j.id));
+      let changed = false;
+      const next = new Set<number>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [jobs]);
 
   async function act(fn: () => Promise<unknown>, ok: string) {
     setBusy(true);
@@ -267,19 +295,9 @@ export default function BackupBatchDetail({
   // selective approval is available while a batch is previewed or running and
   // still has undecided preview_ready requests.
   const canSelect = (status === "previewed" || status === "running") && (counts.preview_ready ?? 0) > 0;
-  const selectedReady = jobs.filter((j) => j.state === "preview_ready" && selected.has(j.id));
-  // columns: chevron + (checkbox?) + 출발/대상/상태/Preview/비고(5) + actions
-  const cols = 5 + (canSelect ? 1 : 0) + 2;
+  // columns: chevron + checkbox + 출발/대상/상태/Preview/비고(5) + actions
+  const cols = 8;
 
-  function approveSelected() {
-    const ids = selectedReady.map((j) => j.id);
-    if (ids.length === 0) return;
-    if (batch!.delete_enabled && !window.confirm(deleteConfirm)) return;
-    act(async () => {
-      await operatorApi.backup.approve(batchId, { request_ids: ids });
-      setSelected(new Set());
-    }, `${ids.length}개 승인 — 실행을 시작합니다.`);
-  }
   function approveAll() {
     if (batch!.delete_enabled && !window.confirm(deleteConfirm)) return;
     act(async () => {
@@ -307,6 +325,127 @@ export default function BackupBatchDetail({
   }
   const failedCount = (counts.preview_failed ?? 0) + (counts.failed ?? 0);
   const canRepreview = (status === "previewed" || status === "done") && (counts.registered ?? 0) > 0;
+
+  // --- item management (add / delete / CSV) + general bulk selection -------
+  const INFLIGHT_STATES = ["preview_pending", "approved", "running"];
+  const mutable = status !== "previewing" && status !== "running"; // request set editable
+  const hasStorage = Boolean(batchSrc && batchDst);
+  const selectedJobs = jobs.filter((j) => selected.has(j.id));
+  const selReady = selectedJobs.filter((j) => j.state === "preview_ready");
+  const selResettable = selectedJobs.filter((j) => EDITABLE.includes(j.state));
+  const selDeletable = selectedJobs.filter((j) => !INFLIGHT_STATES.includes(j.state));
+  const selCancelable = selectedJobs.filter((j) => INFLIGHT_STATES.includes(j.state));
+  const allSelected = jobs.length > 0 && selected.size === jobs.length;
+
+  function toggleSelectAll() {
+    setSelected((prev) =>
+      prev.size === jobs.length ? new Set() : new Set(jobs.map((j) => j.id)),
+    );
+  }
+  function clearSelection() {
+    setSelected(new Set());
+  }
+  function bulkApprove() {
+    const ids = selReady.map((j) => j.id);
+    if (!ids.length) return;
+    if (batch!.delete_enabled && !window.confirm(deleteConfirm)) return;
+    act(async () => {
+      await operatorApi.backup.approve(batchId, { request_ids: ids });
+      clearSelection();
+    }, `${ids.length}개 승인 — 실행을 시작합니다.`);
+  }
+  function bulkRetry() {
+    const ids = selResettable.map((j) => j.id);
+    if (!ids.length) return;
+    act(async () => {
+      await operatorApi.backup.resetRequests(batchId, { request_ids: ids });
+      clearSelection();
+    }, `${ids.length}개를 재시도 대기로 되돌렸습니다. Re-preview를 누르세요.`);
+  }
+  function bulkDelete() {
+    const ids = selDeletable.map((j) => j.id);
+    if (!ids.length) return;
+    if (!window.confirm(`선택한 ${ids.length}개 항목을 삭제합니다. 계속할까요?`)) return;
+    act(async () => {
+      await operatorApi.backup.deleteRequests(batchId, ids);
+      clearSelection();
+    }, `${ids.length}개 항목을 삭제했습니다.`);
+  }
+  function bulkCancel() {
+    const ids = selCancelable.map((j) => j.id);
+    if (!ids.length) return;
+    if (!window.confirm(`선택한 ${ids.length}개 진행 중 항목을 취소합니다. 계속할까요?`)) return;
+    act(async () => {
+      await operatorApi.backup.cancelRequests(batchId, ids);
+      clearSelection();
+    }, `${ids.length}개 항목을 취소했습니다.`);
+  }
+  async function deleteRow(j: BackupRequest) {
+    if (!window.confirm(`항목을 삭제합니다.\n${j.src_path} → ${j.dst_path}`)) return;
+    await act(() => operatorApi.backup.deleteRequests(batchId, [j.id]), "항목을 삭제했습니다.");
+  }
+  async function addRow() {
+    if (!batchSrc || !batchDst) return;
+    if (!addSrc.trim() || !addDst.trim()) {
+      setError("출발/대상 경로를 모두 입력하세요.");
+      return;
+    }
+    await act(async () => {
+      await operatorApi.backup.addRequests(batchId, [
+        { src_storage: batchSrc, src_path: addSrc.trim(), dst_storage: batchDst, dst_path: addDst.trim() },
+      ]);
+      setAddSrc("");
+      setAddDst("");
+      setShowAdd(false);
+    }, "항목을 추가했습니다.");
+  }
+  function downloadText(text: string, filename: string) {
+    const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  function downloadCurrentCsv() {
+    const rows = jobs.map((j) => ({ src_path: j.src_path, dst_path: j.dst_path }));
+    downloadText(rowsToCsv(rows), `${batch!.name || "batch"}-requests.csv`);
+  }
+  function downloadTemplate() {
+    downloadText("src_path,dst_path\nexample/src,example/dst\n", "backup-template.csv");
+  }
+  async function onCsvFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!batchSrc || !batchDst) {
+      setError("기존 항목이 없어 스토리지를 알 수 없습니다 — '배치 편집' 폼을 사용하세요.");
+      return;
+    }
+    const parsed = parseRequestsCsv(await file.text());
+    if (parsed.errors.length) {
+      setError(`CSV 오류: ${parsed.errors.join("; ")}`);
+      return;
+    }
+    if (!parsed.rows.length) {
+      setError("CSV에 항목이 없습니다.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `CSV ${parsed.rows.length}개 항목으로 전체 교체합니다.\n기존 ${jobs.length}개는 모두 대체됩니다(등록됨 → 재미리보기 필요). 계속할까요?`,
+      )
+    )
+      return;
+    const reqs = parsed.rows.map((r) => ({
+      src_storage: batchSrc,
+      src_path: r.src_path,
+      dst_storage: batchDst,
+      dst_path: r.dst_path,
+    }));
+    await act(() => operatorApi.backup.replaceRequests(batchId, reqs), `CSV로 ${reqs.length}개 항목으로 교체했습니다.`);
+  }
 
   return (
     <div className="inventory">
@@ -339,9 +478,6 @@ export default function BackupBatchDetail({
           )}
           {canSelect && (
             <>
-              <button className="primary" disabled={busy || selectedReady.length === 0} onClick={approveSelected}>
-                선택 승인 ({selectedReady.length})
-              </button>
               <button className="ghost" disabled={busy} onClick={approveAll}>
                 전체 승인
               </button>
@@ -450,11 +586,108 @@ export default function BackupBatchDetail({
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
 
+      {mutable && (
+        <div className="item-toolbar">
+          <button
+            className="ghost mini"
+            disabled={busy || !hasStorage}
+            onClick={() => setShowAdd((v) => !v)}
+            title={hasStorage ? undefined : "기존 항목이 없어 스토리지를 알 수 없음 — '배치 편집' 사용"}
+          >
+            + 행 추가
+          </button>
+          <span className="tb-sep" aria-hidden="true" />
+          <span className="muted small">CSV</span>
+          <button className="ghost mini" onClick={downloadTemplate}>
+            템플릿
+          </button>
+          <button className="ghost mini" disabled={!jobs.length} onClick={downloadCurrentCsv}>
+            현재 항목 다운로드
+          </button>
+          <button
+            className="ghost mini"
+            disabled={busy || !hasStorage}
+            onClick={() => csvInputRef.current?.click()}
+          >
+            업로드 (전체 교체)
+          </button>
+          <input
+            ref={csvInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            hidden
+            onChange={onCsvFile}
+          />
+        </div>
+      )}
+      {showAdd && hasStorage && (
+        <div className="add-row">
+          <span className="muted small mono">{batchSrc}:</span>
+          <input
+            className="add-input"
+            placeholder="출발 경로 (예: e2e/src)"
+            value={addSrc}
+            onChange={(e) => setAddSrc(e.target.value)}
+          />
+          <span className="route-arrow">→</span>
+          <span className="muted small mono">{batchDst}:</span>
+          <input
+            className="add-input"
+            placeholder="대상 경로 (예: backup_x)"
+            value={addDst}
+            onChange={(e) => setAddDst(e.target.value)}
+          />
+          <button className="primary mini" disabled={busy} onClick={addRow}>
+            추가
+          </button>
+          <button
+            className="ghost mini"
+            onClick={() => {
+              setShowAdd(false);
+              setAddSrc("");
+              setAddDst("");
+            }}
+          >
+            취소
+          </button>
+        </div>
+      )}
+      {selected.size > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{selected.size}개 선택</span>
+          <button className="primary mini" disabled={busy || selReady.length === 0} onClick={bulkApprove}>
+            승인 ({selReady.length})
+          </button>
+          <button className="ghost mini" disabled={busy || selResettable.length === 0} onClick={bulkRetry}>
+            재시도 ({selResettable.length})
+          </button>
+          {mutable && (
+            <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={bulkDelete}>
+              삭제 ({selDeletable.length})
+            </button>
+          )}
+          <button className="mini danger" disabled={busy || selCancelable.length === 0} onClick={bulkCancel}>
+            취소 ({selCancelable.length})
+          </button>
+          <button className="ghost mini" onClick={clearSelection}>
+            선택 해제
+          </button>
+        </div>
+      )}
+
       <table className="grid">
         <thead>
           <tr>
             <th className="col-toggle"></th>
-            {canSelect && <th></th>}
+            <th className="col-check">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleSelectAll}
+                disabled={jobs.length === 0}
+                aria-label="전체 선택"
+              />
+            </th>
             <th>출발 (src)</th>
             <th>대상 (dst)</th>
             <th>상태</th>
@@ -473,8 +706,7 @@ export default function BackupBatchDetail({
           ) : (
             jobs.map((j) => {
               const s = requestState(j.state);
-              const cancellable =
-                status !== "draft" && j.state !== "registered" && !TERMINAL.includes(j.state);
+              const cancellable = INFLIGHT_STATES.includes(j.state); // in-flight only
               return (
                 <Fragment key={j.id}>
                   <tr
@@ -507,18 +739,14 @@ export default function BackupBatchDetail({
                         </span>
                       )}
                     </td>
-                    {canSelect && (
-                      <td onClick={(e) => e.stopPropagation()}>
-                        {j.state === "preview_ready" && (
-                          <input
-                            type="checkbox"
-                            checked={selected.has(j.id)}
-                            onChange={() => toggleSelect(j.id)}
-                            aria-label="승인 선택"
-                          />
-                        )}
-                      </td>
-                    )}
+                    <td className="col-check" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(j.id)}
+                        onChange={() => toggleSelect(j.id)}
+                        aria-label="항목 선택"
+                      />
+                    </td>
                     <td data-label="출발" className="mono small">
                       {j.src_storage === batchSrc ? j.src_path : `${j.src_storage}:${j.src_path}`}
                     </td>
@@ -545,24 +773,25 @@ export default function BackupBatchDetail({
                       )}
                     </td>
                     <td className="row-actions" onClick={(e) => e.stopPropagation()}>
-                      {status !== "draft" && (
-                        <>
-                          {EDITABLE.includes(j.state) && (
-                            <button className="mini" onClick={() => setEditingReq(j)}>
-                              재편집
-                            </button>
-                          )}
-                          {RETRYABLE.includes(j.state) && (
-                            <button className="mini" onClick={() => resetOne(j)} disabled={busy}>
-                              재시도
-                            </button>
-                          )}
-                          {cancellable && (
-                            <button className="mini danger" onClick={() => cancelRow(j)} disabled={busy}>
-                              취소
-                            </button>
-                          )}
-                        </>
+                      {EDITABLE.includes(j.state) && (
+                        <button className="mini" onClick={() => setEditingReq(j)} disabled={busy}>
+                          편집
+                        </button>
+                      )}
+                      {RETRYABLE.includes(j.state) && (
+                        <button className="mini" onClick={() => resetOne(j)} disabled={busy}>
+                          재시도
+                        </button>
+                      )}
+                      {mutable && !INFLIGHT_STATES.includes(j.state) && (
+                        <button className="mini danger" onClick={() => deleteRow(j)} disabled={busy}>
+                          삭제
+                        </button>
+                      )}
+                      {cancellable && (
+                        <button className="mini danger" onClick={() => cancelRow(j)} disabled={busy}>
+                          취소
+                        </button>
                       )}
                     </td>
                   </tr>

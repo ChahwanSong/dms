@@ -377,18 +377,36 @@ class Database:
             )
             return await cur.fetchall()
 
-    async def cancel_requests(self, batch_id: str) -> list[str]:
-        """Cancel all non-terminal requests of a batch; return the dms_job_ids that
-        were in flight (so the caller can cancel them in DMS too)."""
+    async def cancel_requests(
+        self, batch_id: str, request_ids: list[int] | None = None
+    ) -> list[str]:
+        """Cancel non-terminal requests of a batch; return the dms_job_ids that were
+        in flight (so the caller can cancel them in DMS too). request_ids=None cancels
+        all non-terminal; otherwise only the given ids."""
+        clause = "" if request_ids is None else " AND id = ANY(%s)"
+        params: list[Any] = [batch_id] + ([] if request_ids is None else [request_ids])
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "UPDATE backup_requests SET state='cancelled', updated_at=now() "
                 "WHERE batch_id=%s AND state NOT IN "
-                "('succeeded','failed','cancelled','preview_failed') "
-                "RETURNING dms_job_id",
-                (batch_id,),
+                "('succeeded','failed','cancelled','preview_failed')" + clause +
+                " RETURNING dms_job_id",
+                params,
             )
             return [r["dms_job_id"] for r in await cur.fetchall() if r["dms_job_id"]]
+
+    async def delete_requests(self, batch_id: str, request_ids: list[int]) -> int:
+        """Delete the given requests from a batch, skipping any that are in flight
+        (preview_pending/approved/running). Returns how many were deleted."""
+        if not request_ids:
+            return 0
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM backup_requests WHERE batch_id=%s AND id = ANY(%s) "
+                "AND state NOT IN ('preview_pending','approved','running')",
+                (batch_id, request_ids),
+            )
+            return cur.rowcount
 
     async def approve_requests(
         self, batch_id: str, request_ids: list[int] | None

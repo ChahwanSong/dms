@@ -73,6 +73,18 @@ class ResetIn(BaseModel):
     failed_only: bool = False
 
 
+class DeleteIn(BaseModel):
+    """Bulk delete the given request ids from a batch."""
+
+    request_ids: list[int] = Field(default_factory=list)
+
+
+class CancelIn(BaseModel):
+    """Bulk cancel the given (non-terminal) request ids."""
+
+    request_ids: list[int] = Field(default_factory=list)
+
+
 # A request can be edited (and is reset to 'registered') only in these states —
 # never while in-flight (preview_pending/approved/running) or succeeded.
 _EDITABLE_REQUEST_STATES = {
@@ -128,6 +140,26 @@ async def _require_draft_batch(db: Database, batch_id: str) -> dict[str, Any]:
     if batch["status"] != "draft":
         raise HTTPException(
             status_code=409, detail=f"cannot edit a '{batch['status']}' batch"
+        )
+    return batch
+
+
+# Batch item (request) edits — add/delete/replace — are allowed on any batch that
+# is NOT actively in flight; previewing/running are protected so we never mutate
+# the request set the orchestrator is driving.
+_INFLIGHT_BATCH_STATES = {"previewing", "running"}
+
+
+async def _require_mutable_batch(db: Database, batch_id: str) -> dict[str, Any]:
+    """Fetch a batch and assert its request set may be edited (exists + not in
+    flight). Edited/added items become 'registered' and need a (re-)preview."""
+    batch = await db.get_batch(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    if batch["status"] in _INFLIGHT_BATCH_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot edit items of a '{batch['status']}' batch — cancel or wait",
         )
     return batch
 
@@ -229,11 +261,39 @@ def backup_router(settings: Settings) -> APIRouter:
         requests: list[BackupRequestIn],
         db: Database = Depends(get_db),
     ) -> dict[str, Any]:
-        """Replace the entire request set of a draft batch (inline-table editor)."""
-        await _require_draft_batch(db, batch_id)
+        """Replace the entire request set (inline-table editor / CSV upload). Allowed
+        on any non-in-flight batch; the new set is all 'registered' (needs preview)."""
+        await _require_mutable_batch(db, batch_id)
         rows = _normalize_requests(requests)
         count = await db.replace_requests(batch_id, rows)
         return {"id": batch_id, "count": count}
+
+    @router.post("/batches/{batch_id}/requests:add")
+    async def add_requests(
+        batch_id: str,
+        requests: list[BackupRequestIn],
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Append requests (registered) to a non-in-flight batch."""
+        await _require_mutable_batch(db, batch_id)
+        if not requests:
+            raise HTTPException(status_code=422, detail="no requests to add")
+        rows = _normalize_requests(requests)
+        added = await db.add_requests(batch_id, rows)
+        return {"id": batch_id, "added": added}
+
+    @router.post("/batches/{batch_id}/requests:delete")
+    async def delete_requests(
+        batch_id: str,
+        payload: DeleteIn,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Delete the given requests from a non-in-flight batch (in-flight items skipped)."""
+        await _require_mutable_batch(db, batch_id)
+        if not payload.request_ids:
+            raise HTTPException(status_code=422, detail="request_ids required")
+        deleted = await db.delete_requests(batch_id, payload.request_ids)
+        return {"id": batch_id, "deleted": deleted}
 
     @router.get("/batches/{batch_id}/requests")
     async def list_requests(
@@ -293,6 +353,31 @@ def backup_router(settings: Settings) -> APIRouter:
             "cancelled": True,
             "dms_cancelled": dms_cancelled,
         }
+
+    @router.post("/batches/{batch_id}/requests:cancel")
+    async def cancel_requests_bulk(
+        batch_id: str,
+        payload: CancelIn,
+        db: Database = Depends(get_db),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        """Cancel the selected non-terminal requests (bulk); best-effort cancel any
+        live DMS jobs. Works even while running (it's the in-flight escape hatch)."""
+        if not await db.get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        if not payload.request_ids:
+            raise HTTPException(status_code=422, detail="request_ids required")
+        live = await db.cancel_requests(batch_id, request_ids=payload.request_ids)
+        actor = f"{settings.backup_actor_prefix}{_actor(user)}"
+        cancelled = 0
+        for job_id in live:
+            try:
+                await dms.cancel_job(job_id, actor=actor)
+                cancelled += 1
+            except DmsApiError:
+                pass
+        return {"id": batch_id, "cancelled": True, "dms_cancelled": cancelled}
 
     @router.post("/batches/{batch_id}/requests:reset")
     async def reset_requests(

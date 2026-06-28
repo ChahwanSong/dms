@@ -396,11 +396,30 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}`,
         { method: "DELETE" },
       ),
-    // Replace the whole request set of a draft batch (inline-table editor).
+    // Replace the whole request set (CSV upload / inline editor). Allowed on any
+    // non-in-flight batch; the new set is all 'registered' (needs preview).
     replaceRequests: (id: string, requests: BackupRequestInput[]) =>
       request<{ id: string; count: number }>(
         `${BK}/${encodeURIComponent(id)}/requests`,
         { method: "PUT", body: JSON.stringify(requests) },
+      ),
+    // Append requests (registered) to a non-in-flight batch.
+    addRequests: (id: string, requests: BackupRequestInput[]) =>
+      request<{ id: string; added: number }>(
+        `${BK}/${encodeURIComponent(id)}/requests:add`,
+        { method: "POST", body: JSON.stringify(requests) },
+      ),
+    // Bulk-delete the given requests from a non-in-flight batch (in-flight skipped).
+    deleteRequests: (id: string, request_ids: number[]) =>
+      request<{ id: string; deleted: number }>(
+        `${BK}/${encodeURIComponent(id)}/requests:delete`,
+        { method: "POST", body: JSON.stringify({ request_ids }) },
+      ),
+    // Bulk-cancel the given (non-terminal) requests.
+    cancelRequests: (id: string, request_ids: number[]) =>
+      request<{ id: string; cancelled: boolean; dms_cancelled: number }>(
+        `${BK}/${encodeURIComponent(id)}/requests:cancel`,
+        { method: "POST", body: JSON.stringify({ request_ids }) },
       ),
     updateRequest: (id: string, rid: number, req: BackupRequestInput) =>
       request<BackupRequest>(

@@ -1186,6 +1186,27 @@ tr.row-open .expand-toggle { color: var(--accent); }
 .req-error { color: var(--error); background: rgba(248, 113, 113, 0.08); border: 1px solid rgba(248, 113, 113, 0.4); border-radius: 8px; padding: 0.5rem 0.7rem; font-size: 0.82rem; overflow-wrap: anywhere; }
 .req-error-code { color: var(--muted); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.74rem; }
 
+/* batch-detail item management: toolbar, inline add-row, bulk-action bar */
+.item-toolbar { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin: 0.7rem 0 0; }
+.item-toolbar .tb-sep { width: 1px; height: 1.1rem; background: var(--border); margin: 0 0.2rem; }
+.add-row {
+  display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+  margin: 0.5rem 0 0; padding: 0.55rem 0.7rem;
+  border: 1px dashed var(--border); border-radius: 8px; background: rgba(255, 255, 255, 0.02);
+}
+.add-row .add-input {
+  flex: 1 1 11rem; min-width: 7rem; padding: 0.35rem 0.5rem; border-radius: 6px;
+  border: 1px solid var(--border); background: #0b1220; color: var(--fg);
+  font-size: 0.85rem; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.bulk-bar {
+  display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+  margin: 0.5rem 0 0; padding: 0.45rem 0.7rem;
+  border: 1px solid var(--accent); border-radius: 8px; background: rgba(59, 130, 246, 0.1);
+}
+.bulk-bar .bulk-count { font-weight: 700; font-size: 0.85rem; margin-right: 0.25rem; }
+table.grid th.col-check, table.grid td.col-check { width: 1.6rem; padding-right: 0; text-align: center; }
+
 @media (prefers-reduced-motion: reduce) {
   .expand-toggle { transition: none; }
 }
