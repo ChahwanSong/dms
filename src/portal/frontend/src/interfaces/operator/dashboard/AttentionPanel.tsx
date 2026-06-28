@@ -197,7 +197,8 @@ function Item({ item, onNavigate }: { item: AttentionItem; onNavigate?: (s: stri
   const dom = domainOf(item.issue_type);
   const sev = (str(item.severity) || "WARN").toUpperCase();
   const ident = identOf(item);
-  const when = str(item.updated_at) || str(item.reported_at) || str(item.last_seen) || str(item.expires_at);
+  const when = str(item.updated_at) || str(item.reported_at) || str(item.last_seen) ||
+    str(item.requested_at) || str(item.created_at) || str(item.expires_at);
   const nav = DOMAIN_NAV[dom];
   return (
     <div className={`attn2 attn2-${sev.toLowerCase()}`}>
@@ -239,13 +240,52 @@ function Group({ items, onNavigate, empty }: {
   );
 }
 
+// most relevant timestamp for an item (recency), epoch ms (0 if none).
+function timeOf(item: AttentionItem): number {
+  const t = str(item.updated_at) || str(item.reported_at) || str(item.last_seen) ||
+    str(item.requested_at) || str(item.created_at) || str(item.expires_at);
+  const ms = t ? new Date(t).getTime() : NaN;
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+// skeleton placeholder cards shown while the action-required feed loads, so a slow
+// fetch never looks like "no issues".
+function LoadingState() {
+  return (
+    <div className="attn-loading">
+      <div className="attn-loading-head"><span className="attn-spinner" aria-hidden="true" />불러오는 중…</div>
+      <div className="attn2-list" aria-hidden="true">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="attn2 attn2-skel">
+            <span className="skel skel-sev" />
+            <div className="attn2-skel-main">
+              <span className="skel" style={{ width: `${42 + (i % 3) * 12}%` }} />
+              <span className="skel" style={{ width: `${64 + (i % 2) * 14}%` }} />
+            </div>
+            <span className="skel skel-when" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string) => void }) {
   const [rows, setRows] = useState<AttentionItem[]>([]);
+  const [loading, setLoading] = useState(true);
   // INFO (e.g. soft-deleted awaiting manual cleanup) is hidden by default
   const [sev, setSev] = useState<Set<string>>(new Set(["CRITICAL", "ERROR", "WARN"]));
   const [doms, setDoms] = useState<Set<string>>(new Set());
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc"); // 최신순 기본
   useEffect(() => {
-    operatorApi.dashboard.attention().then(setRows).catch(() => setRows([]));
+    let alive = true;
+    setLoading(true);
+    operatorApi.dashboard
+      .attention()
+      .then((r) => { if (alive) setRows(r); })
+      .catch(() => { if (alive) setRows([]); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
   }, []);
 
   const sevCounts = useMemo(() => {
@@ -265,9 +305,15 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     if (doms.size && !doms.has(domainOf(r.issue_type))) return false;
     return true;
   });
-  const live = filtered.filter((r) => r.category !== "history")
-    .sort((a, b) => SEV_RANK[(str(a.severity) || "WARN").toUpperCase()] - SEV_RANK[(str(b.severity) || "WARN").toUpperCase()]);
-  const history = filtered.filter((r) => r.category === "history");
+  // sort by time (newest first by default), severity as tiebreaker
+  const sevRank = (r: AttentionItem) => SEV_RANK[(str(r.severity) || "WARN").toUpperCase()] ?? 2;
+  const bySort = (a: AttentionItem, b: AttentionItem) => {
+    const ta = timeOf(a), tb = timeOf(b);
+    if (ta !== tb) return sortDir === "desc" ? tb - ta : ta - tb;
+    return sevRank(a) - sevRank(b);
+  };
+  const live = filtered.filter((r) => r.category !== "history").sort(bySort);
+  const history = filtered.filter((r) => r.category === "history").sort(bySort);
 
   const toggle = (set: Set<string>, setter: (s: Set<string>) => void, v: string) => {
     const n = new Set(set);
@@ -283,6 +329,9 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     </span>
   );
   const histBadge = <span className="muted small">{history.length}건</span>;
+
+  if (loading) return <LoadingState />;
+  if (rows.length === 0) return <p className="muted">조치 필요한 항목이 없습니다. ✅</p>;
 
   return (
     <>
@@ -300,20 +349,18 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
             {DOMAIN_LABEL[d]} <b>{n}</b>
           </button>
         ))}
+        <button className="attn-sort" onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}
+          title="시간순 정렬 전환 (갱신·보고·요청 시각 기준)">
+          {sortDir === "desc" ? "최신순 ↓" : "오래된순 ↑"}
+        </button>
       </div>
 
-      {rows.length === 0 ? (
-        <p className="muted">조치 필요한 항목이 없습니다. ✅</p>
-      ) : (
-        <>
-          <Section title="현재 조치 필요" badge={liveBadge} defaultOpen>
-            <Group items={live} onNavigate={onNavigate} empty="현재 조치 필요한 항목이 없습니다. ✅" />
-          </Section>
-          <Section title="과거 작업 이력 (종료된 작업·결과)" badge={histBadge}>
-            <Group items={history} onNavigate={onNavigate} empty="이력 없음" />
-          </Section>
-        </>
-      )}
+      <Section title="현재 조치 필요" badge={liveBadge} defaultOpen>
+        <Group items={live} onNavigate={onNavigate} empty="현재 조치 필요한 항목이 없습니다. ✅" />
+      </Section>
+      <Section title="과거 작업 이력 (종료된 작업·결과)" badge={histBadge}>
+        <Group items={history} onNavigate={onNavigate} empty="이력 없음" />
+      </Section>
     </>
   );
 }
