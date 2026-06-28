@@ -1,6 +1,14 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
-import { batchStatus, requestState, fmtBytes, friendlyError, rowsToCsv } from "./helpers";
+import {
+  batchStatus,
+  requestState,
+  fmtBytes,
+  friendlyError,
+  rowsToCsv,
+  CSV_TEMPLATE_TEXT,
+  CSV_FORMAT_HINT,
+} from "./helpers";
 import { errMsg, fmtTime } from "./BackupBatches";
 import { SpecGrid, type KV } from "./ui";
 import BackupBatchForm from "./BackupBatchForm";
@@ -21,10 +29,6 @@ const STATE_ORDER = [
 ];
 const EDITABLE = ["registered", "preview_ready", "preview_failed", "failed", "cancelled"];
 const RETRYABLE = ["preview_failed", "failed"];
-
-// Example for the "템플릿" popup (header is ignored on parse → 2 sample rows).
-const TEMPLATE_TEXT = "src_path,dst_path\nexample/dir1,backup/dir1\nexample/dir2,backup/dir2\n";
-const CSV_HINT = '한 줄에 "출발경로,대상경로" (쉼표 구분). 헤더·빈 줄·# 주석은 무시됩니다.';
 
 const num = (n?: number | null) => (n == null ? "—" : n.toLocaleString());
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s);
@@ -414,11 +418,16 @@ export default function BackupBatchDetail({
   }
   // "템플릿" — example version of the current-items text.
   function openTemplate() {
-    setCsvModal({ mode: "view", title: "CSV / 텍스트 템플릿 (예시)", hint: CSV_HINT, text: TEMPLATE_TEXT });
+    setCsvModal({
+      mode: "view",
+      title: "CSV / 텍스트 템플릿 (예시)",
+      hint: CSV_FORMAT_HINT,
+      text: CSV_TEMPLATE_TEXT,
+    });
   }
   // "업로드 (전체 교체)" — paste text (or load a file) then replace-all.
   function openUpload() {
-    setCsvModal({ mode: "replace", title: "텍스트 붙여넣기 → 전체 교체", hint: CSV_HINT, text: "" });
+    setCsvModal({ mode: "replace", title: "텍스트 붙여넣기 → 전체 교체", hint: CSV_FORMAT_HINT, text: "" });
   }
   function replaceFromRows(rows: { src_path: string; dst_path: string }[]) {
     if (!batchSrc || !batchDst) {

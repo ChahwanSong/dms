@@ -150,6 +150,13 @@ export function parseRequestsCsv(text: string): ParsedRequests {
   };
 }
 
+// Shared copy/paste-popup text: an example template and the format hint. Kept
+// here so the batch-detail toolbar and the create/edit form stay in sync.
+export const CSV_TEMPLATE_TEXT =
+  "src_path,dst_path\nexample/dir1,backup/dir1\nexample/dir2,backup/dir2\n";
+export const CSV_FORMAT_HINT =
+  '한 줄에 "출발경로,대상경로" (쉼표 구분). 헤더·빈 줄·# 주석은 무시됩니다.';
+
 // Serialize rows to a 2-column CSV (with header) for download.
 export function rowsToCsv(rows: BackupRow[]): string {
   const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
