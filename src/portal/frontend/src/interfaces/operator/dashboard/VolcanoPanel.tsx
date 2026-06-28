@@ -119,15 +119,6 @@ export default function VolcanoPanel() {
               )) : <div className="muted small">없음</div>}
             </div>
             <div>
-              <div className="to-title">최다 실패</div>
-              {m.top.most_failed.length ? m.top.most_failed.map((j) => (
-                <div key={j.name} className="to-row">
-                  <span className="mono small">{j.name}</span>
-                  <span className="err-num small">실패 {j.failed}</span>
-                </div>
-              )) : <div className="muted small">없음</div>}
-            </div>
-            <div>
               <div className="to-title">최대 리소스 요청</div>
               {m.top.most_resources.length ? m.top.most_resources.map((j) => (
                 <div key={j.name} className="to-row">

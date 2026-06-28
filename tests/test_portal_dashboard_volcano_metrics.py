@@ -52,7 +52,6 @@ def test_top_offenders():
     jobs = [
         _job("pend-old", phase="Pending", created_at=_iso(3600)),
         _job("pend-new", phase="Pending", created_at=_iso(10)),
-        _job("failer", phase="Failed", finished_at=_iso(60), created_at=_iso(120), failed=3),
         _job("big", finished_at=_iso(60), created_at=_iso(120),
              req_cpu_cores=8.0, req_mem_bytes=999, req_pods=4),
         _job("small", finished_at=_iso(60), created_at=_iso(120),
@@ -61,7 +60,6 @@ def test_top_offenders():
     top = _volcano_metrics(jobs, NOW)["top"]
     assert [p["name"] for p in top["longest_pending"]][:2] == ["pend-old", "pend-new"]
     assert top["longest_pending"][0]["pending_s"] >= 3590
-    assert top["most_failed"][0]["name"] == "failer"
-    assert top["most_failed"][0]["failed"] == 3
+    assert "most_failed" not in top
     assert top["most_resources"][0]["name"] == "big"
     assert top["most_resources"][0]["cpu_cores"] == 8.0

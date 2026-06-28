@@ -361,7 +361,6 @@ export interface VolcanoMetrics {
   windows: Record<string, VolWindow>;
   top: {
     longest_pending: { name: string; queue?: string; phase?: string; pending_s: number }[];
-    most_failed: { name: string; failed: number; phase?: string }[];
     most_resources: { name: string; cpu_cores: number; mem_bytes: number; pods: number }[];
   };
   error?: string | null;

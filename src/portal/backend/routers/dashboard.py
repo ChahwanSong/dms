@@ -267,20 +267,12 @@ def _volcano_metrics(jobs: list[dict[str, Any]], now_ts: float) -> dict[str, Any
                 "phase": j.get("phase"), "pending_s": round(now_ts - created, 1),
             })
     pending.sort(key=lambda x: x["pending_s"], reverse=True)
-    most_failed = sorted(
-        (j for j in recent if (j.get("failed") or 0) > 0),
-        key=lambda j: j.get("failed") or 0, reverse=True,
-    )
     most_res = sorted(
         recent, key=lambda j: (j.get("req_cpu_cores") or 0, j.get("req_mem_bytes") or 0),
         reverse=True,
     )
     top = {
         "longest_pending": pending[:5],
-        "most_failed": [
-            {"name": j.get("name"), "failed": j.get("failed"), "phase": j.get("phase")}
-            for j in most_failed[:5]
-        ],
         "most_resources": [
             {"name": j.get("name"), "cpu_cores": j.get("req_cpu_cores"),
              "mem_bytes": j.get("req_mem_bytes"), "pods": j.get("req_pods")}
