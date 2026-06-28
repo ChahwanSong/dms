@@ -300,6 +300,16 @@ def _pod_finished_iso(pod: dict) -> str | None:
     return _max_iso(finishes)
 
 
+def _pod_env(pods: list[dict], name: str) -> str | None:
+    """First non-empty value of env var `name` across a job's pods' containers."""
+    for p in pods:
+        for c in ((p.get("spec") or {}).get("containers")) or []:
+            for e in c.get("env") or []:
+                if e.get("name") == name and e.get("value"):
+                    return e.get("value")
+    return None
+
+
 def _job_resource_requests(spec: dict) -> tuple[float, int, int]:
     """Sum requested cpu cores / mem bytes / pods across a vcjob's tasks."""
     cpu, mem, pods = 0.0, 0, 0
@@ -924,10 +934,16 @@ class KubernetesVolcanoAdapter:
             started = _min_iso([(p.get("status") or {}).get("startTime") for p in jpods])
             finished = _max_iso([_pod_finished_iso(p) for p in jpods])
             cpu, mem, req_pods = _job_resource_requests(spec)
+            labels = meta.get("labels") or {}
             jobs_out.append({
                 "name": name,
                 "queue": spec.get("queue"),
                 "phase": state.get("phase"),
+                "tool": labels.get("dms.openai.com/data-tool"),
+                "src_storage": _pod_env(jpods, "DMS_SYNC_SOURCE_STORAGE"),
+                "dst_storage": _pod_env(jpods, "DMS_SYNC_DESTINATION_STORAGE"),
+                "src_path": _pod_env(jpods, "DMS_SYNC_SOURCE_PATH"),
+                "dst_path": _pod_env(jpods, "DMS_SYNC_DESTINATION_PATH"),
                 "created_at": created_at,
                 "pod_created_at": pod_created,
                 "scheduled_at": scheduled,

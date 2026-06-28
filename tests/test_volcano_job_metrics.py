@@ -57,7 +57,8 @@ def test_volcano_job_metrics_correlation_and_latencies():
         )
     )
     vcjob = {
-        "metadata": {"name": "job-a", "creationTimestamp": "2026-06-28T00:00:00Z"},
+        "metadata": {"name": "job-a", "creationTimestamp": "2026-06-28T00:00:00Z",
+                     "labels": {"dms.openai.com/data-tool": "dsync"}},
         "spec": {"queue": "dms-data", "minAvailable": 2, "tasks": [
             {"replicas": 2, "template": {"spec": {"containers": [
                 {"resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}]}}}]},
@@ -66,6 +67,10 @@ def test_volcano_job_metrics_correlation_and_latencies():
     pod1 = {
         "metadata": {"name": "job-a-0", "creationTimestamp": "2026-06-28T00:00:02Z",
                      "labels": {"volcano.sh/job-name": "job-a"}},
+        "spec": {"containers": [{"env": [
+            {"name": "DMS_SYNC_SOURCE_STORAGE", "value": "cephfs-dms"},
+            {"name": "DMS_SYNC_DESTINATION_STORAGE", "value": "cephfs-third"},
+            {"name": "DMS_SYNC_SOURCE_PATH", "value": "e2e/src"}]}]},
         "status": {"startTime": "2026-06-28T00:00:10Z",
                    "conditions": [{"type": "PodScheduled", "lastTransitionTime": "2026-06-28T00:00:05Z"}],
                    "containerStatuses": [{"state": {"terminated": {"finishedAt": "2026-06-28T00:05:00Z"}}}]},
@@ -91,6 +96,10 @@ def test_volcano_job_metrics_correlation_and_latencies():
     assert len(out["jobs"]) == 1
     j = out["jobs"][0]
     assert (j["name"], j["queue"], j["phase"]) == ("job-a", "dms-data", "Completed")
+    assert j["tool"] == "dsync"
+    assert j["src_storage"] == "cephfs-dms"
+    assert j["dst_storage"] == "cephfs-third"
+    assert j["src_path"] == "e2e/src"
     assert j["req_cpu_cores"] == 2.0
     assert j["req_mem_bytes"] == 2 * 1024**3
     assert j["req_pods"] == 2

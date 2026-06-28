@@ -360,8 +360,17 @@ export interface VolWindow {
 export interface VolcanoMetrics {
   windows: Record<string, VolWindow>;
   top: {
-    longest_pending: { name: string; queue?: string; phase?: string; pending_s: number }[];
-    most_resources: { name: string; cpu_cores: number; mem_bytes: number; pods: number }[];
+    longest_pending: {
+      name: string; queue?: string; phase?: string; pending_s: number;
+      tool?: string | null; src_storage?: string | null; dst_storage?: string | null;
+      src_path?: string | null; dst_path?: string | null;
+    }[];
+    most_resources: {
+      name: string; cpu_cores: number; mem_bytes: number; pods: number;
+      phase?: string | null; queue?: string | null; tool?: string | null;
+      src_storage?: string | null; dst_storage?: string | null;
+      src_path?: string | null; dst_path?: string | null;
+    }[];
   };
   error?: string | null;
 }

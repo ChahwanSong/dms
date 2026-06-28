@@ -265,6 +265,9 @@ def _volcano_metrics(jobs: list[dict[str, Any]], now_ts: float) -> dict[str, Any
             pending.append({
                 "name": j.get("name"), "queue": j.get("queue"),
                 "phase": j.get("phase"), "pending_s": round(now_ts - created, 1),
+                "tool": j.get("tool"),
+                "src_storage": j.get("src_storage"), "dst_storage": j.get("dst_storage"),
+                "src_path": j.get("src_path"), "dst_path": j.get("dst_path"),
             })
     pending.sort(key=lambda x: x["pending_s"], reverse=True)
     most_res = sorted(
@@ -275,7 +278,10 @@ def _volcano_metrics(jobs: list[dict[str, Any]], now_ts: float) -> dict[str, Any
         "longest_pending": pending[:5],
         "most_resources": [
             {"name": j.get("name"), "cpu_cores": j.get("req_cpu_cores"),
-             "mem_bytes": j.get("req_mem_bytes"), "pods": j.get("req_pods")}
+             "mem_bytes": j.get("req_mem_bytes"), "pods": j.get("req_pods"),
+             "phase": j.get("phase"), "queue": j.get("queue"), "tool": j.get("tool"),
+             "src_storage": j.get("src_storage"), "dst_storage": j.get("dst_storage"),
+             "src_path": j.get("src_path"), "dst_path": j.get("dst_path")}
             for j in most_res[:5]
         ],
     }
