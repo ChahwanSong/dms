@@ -1236,21 +1236,37 @@ table.grid.node-grid td { vertical-align: middle; }
 .lat-vals { font-size: 0.8rem; text-align: right; white-space: nowrap; }
 .lat-legend { margin-top: 0.2rem; }
 
-.off-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin: 0.3rem 0 0.8rem; }
-.off-card .off-title { font-size: 0.8rem; font-weight: 600; color: #9aa4b2; margin-bottom: 0.35rem; }
-.off-card .off-title .off-hint { font-weight: 400; font-size: 0.72rem; color: #6b7280; }
-.off-row { display: grid; grid-template-columns: 1.2rem 1fr auto; align-items: center; gap: 0.5rem; padding: 0.22rem 0; }
-.off-rank { font-size: 0.75rem; color: #9aa4b2; text-align: center; font-variant-numeric: tabular-nums; }
-.off-main { min-width: 0; }
-.off-job { display: flex; align-items: baseline; gap: 0.35rem; font-size: 0.82rem; }
-.off-type { font-weight: 600; white-space: nowrap; }
-.off-id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.72rem; color: #9aa4b2; }
-.off-q { font-size: 0.68rem; color: #9aa4b2; margin-left: auto; white-space: nowrap; }
-.off-sub { font-size: 0.7rem; color: #9aa4b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.off-bar { height: 0.32rem; border-radius: 999px; background: var(--border); margin-top: 0.2rem; overflow: hidden; }
-.off-bar span { display: block; height: 100%; background: var(--accent); }
-.off-bar span.warn { background: #fbbf24; }
-.off-val { font-size: 0.78rem; white-space: normal; text-align: right; max-width: 10rem; line-height: 1.35; font-variant-numeric: tabular-nums; }
+/* dashboard width: bound the whole dashboard + each Volcano sub-block so charts/lists
+   read as components, not edge-to-edge stripes, on wide monitors (left-aligned). */
+.dashboard { max-width: 1320px; }
+.vol-block { max-width: 940px; margin-bottom: 1.2rem; }
+.vol-block:last-child { margin-bottom: 0; }
+
+/* offenders: stacked full-width lists; each row collapses to identity·route·value
+   and expands to the full job detail */
+.off2-wrap { display: flex; flex-direction: column; gap: 1.1rem; }
+.off2-title { font-size: 0.85rem; font-weight: 600; color: #cdd5e0; margin-bottom: 0.4rem; }
+.off2-title .off-hint { font-weight: 400; font-size: 0.72rem; color: #6b7280; }
+.off2-item { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 0.4rem; background: rgba(255, 255, 255, 0.015); overflow: hidden; }
+.off2-item:last-child { margin-bottom: 0; }
+.off2-item.open { border-color: rgba(59, 130, 246, 0.45); background: rgba(59, 130, 246, 0.05); }
+.off2-row { display: grid; grid-template-columns: 1.4rem 1fr auto 1rem; align-items: center; gap: 0.6rem; width: 100%; padding: 0.5rem 0.7rem; background: none; border: none; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.off2-row:hover { background: rgba(255, 255, 255, 0.03); }
+.off2-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.off2-rank { font-size: 0.78rem; color: #9aa4b2; text-align: center; font-variant-numeric: tabular-nums; }
+.off2-main { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.off2-head { display: flex; align-items: baseline; gap: 0.4rem; font-size: 0.85rem; }
+.off2-type { font-weight: 600; white-space: nowrap; }
+.off2-id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.72rem; color: #9aa4b2; }
+.off2-head .chip { align-self: center; }
+.off2-sub { font-size: 0.72rem; color: #9aa4b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.off2-bar { height: 0.3rem; border-radius: 999px; background: var(--border); overflow: hidden; margin-top: 0.1rem; max-width: 32rem; }
+.off2-bar span { display: block; height: 100%; background: var(--accent); }
+.off2-bar span.warn { background: #fbbf24; }
+.off2-bar span.live { background: #34d399; }
+.off2-val { font-size: 0.82rem; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+.off2-caret { color: #9aa4b2; font-size: 0.8rem; text-align: center; }
+.off2-detail { padding: 0.55rem 0.8rem 0.75rem 2rem; border-top: 1px solid var(--border); }
 
 /* queue load: one combined running/pending/inqueue bar per queue (shared axis) */
 .q-legend { display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 0.2rem 0 0.5rem; font-size: 0.74rem; color: #9aa4b2; }
@@ -1276,8 +1292,9 @@ table.grid.node-grid td { vertical-align: middle; }
 .q-c.inq b { color: #22d3ee; }
 
 @media (max-width: 720px) {
-  .off-grid { grid-template-columns: 1fr; }
-  .off-val { max-width: none; }
+  /* dashboard width caps relax to full width on phones */
+  .vol-block { max-width: none; }
+  .off2-detail { padding-left: 0.9rem; }
   .lat-row2 { grid-template-columns: 2.6rem 1fr; }
   .lat-vals { grid-column: 2; text-align: left; }
   /* node table is in stacked-card mode here; the desktop fixed row height (3rem)

@@ -56,18 +56,28 @@ def test_throughput_and_latency_windows():
     assert w6["latency"]["sched_to_start_s"]["mean"] == 4.0   # (3+5)/2
 
 
-def test_top_offenders():
+def test_offenders_pending_and_running():
     jobs = [
         _job("pend-old", phase="Pending", created_at=_iso(3600)),
         _job("pend-new", phase="Pending", created_at=_iso(10)),
-        _job("big", finished_at=_iso(60), created_at=_iso(120),
-             req_cpu_cores=8.0, req_mem_bytes=999, req_pods=4),
-        _job("small", finished_at=_iso(60), created_at=_iso(120),
-             req_cpu_cores=1.0, req_mem_bytes=1, req_pods=1),
+        _job("long-run", phase="Completed", created_at=_iso(420),
+             started_at=_iso(400), finished_at=_iso(100), requester="bob", tool="dsync"),
+        _job("short-run", phase="Completed", created_at=_iso(180),
+             started_at=_iso(160), finished_at=_iso(100)),
+        _job("active", phase="Running", created_at=_iso(60), started_at=_iso(50)),
     ]
     top = _volcano_metrics(jobs, NOW)["top"]
+
+    # longest pending = still-queued jobs by wait time
     assert [p["name"] for p in top["longest_pending"]][:2] == ["pend-old", "pend-new"]
     assert top["longest_pending"][0]["pending_s"] >= 3590
-    assert "most_failed" not in top
-    assert top["most_resources"][0]["name"] == "big"
-    assert top["most_resources"][0]["cpu_cores"] == 8.0
+
+    # longest running = run duration (completed) / elapsed (still running), desc
+    run = top["longest_running"]
+    assert [r["name"] for r in run] == ["long-run", "short-run", "active"]
+    assert run[0]["running_s"] == 300.0          # finished(-100) - started(-400)
+    assert run[0]["requester"] == "bob"          # detail field flows through
+    assert run[2]["active"] is True              # still-running job flagged
+    assert run[0]["active"] is False
+
+    assert "most_resources" not in top and "most_failed" not in top

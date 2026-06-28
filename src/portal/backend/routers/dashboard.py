@@ -229,6 +229,32 @@ def _stage_stats(vals: list[float]) -> dict[str, Any]:
     }
 
 
+_VOL_TERMINAL = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated"}
+
+
+def _job_card(j: dict[str, Any]) -> dict[str, Any]:
+    """Detail fields shown when an offender row is expanded (shared by the longest-
+    pending and longest-running lists). Requester + per-tool route + ids + timing."""
+    return {
+        "name": j.get("name"),
+        "queue": j.get("queue"),
+        "phase": j.get("phase"),
+        "phase_kind": j.get("phase_kind"),
+        "tool": j.get("tool"),
+        "requester": j.get("requester"),
+        "request_id": j.get("request_id"),
+        "data_job_id": j.get("data_job_id"),
+        "src_storage": j.get("src_storage"), "dst_storage": j.get("dst_storage"),
+        "src_path": j.get("src_path"), "dst_path": j.get("dst_path"),
+        "scan_storage": j.get("scan_storage"), "scan_path": j.get("scan_path"),
+        "rm_storage": j.get("rm_storage"), "rm_path": j.get("rm_path"),
+        "req_pods": j.get("req_pods"), "req_cpu_cores": j.get("req_cpu_cores"),
+        "req_mem_bytes": j.get("req_mem_bytes"),
+        "created_at": j.get("created_at"), "started_at": j.get("started_at"),
+        "finished_at": j.get("finished_at"),
+    }
+
+
 def _volcano_metrics(jobs: list[dict[str, Any]], now_ts: float) -> dict[str, Any]:
     """Windowed throughput + latency stats and current top-offenders from the per-job
     Volcano snapshot. Window membership = finished_at within the window."""
@@ -255,35 +281,34 @@ def _volcano_metrics(jobs: list[dict[str, Any]], now_ts: float) -> dict[str, Any
             "latency": latency,
         }
 
-    recent = [j for j in jobs if (_iso_ts(j.get("created_at")) or 0) >= now_ts - 259200]
+    # Offenders: longest-pending (still queued) and longest-running. For running we
+    # rank by elapsed/run duration — currently-running jobs (now − started, still
+    # growing) and completed runs within the 72h horizon; ancient completed runs drop.
+    recent_cut = now_ts - 259200
     pending = []
+    running = []
     for j in jobs:
-        if j.get("finished_at") is None and j.get("started_at") is None:
+        started = _iso_ts(j.get("started_at"))
+        finished = _iso_ts(j.get("finished_at"))
+        if finished is None and started is None:
             created = _iso_ts(j.get("created_at"))
             if created is None:
                 continue
-            pending.append({
-                "name": j.get("name"), "queue": j.get("queue"),
-                "phase": j.get("phase"), "pending_s": round(now_ts - created, 1),
-                "tool": j.get("tool"),
-                "src_storage": j.get("src_storage"), "dst_storage": j.get("dst_storage"),
-                "src_path": j.get("src_path"), "dst_path": j.get("dst_path"),
+            pending.append({**_job_card(j), "pending_s": round(now_ts - created, 1)})
+        elif started is not None:
+            active = finished is None and j.get("phase") not in _VOL_TERMINAL
+            created = _iso_ts(j.get("created_at")) or 0
+            if not active and created < recent_cut:
+                continue  # old completed run, outside the 72h horizon
+            end = finished if finished is not None else now_ts
+            running.append({
+                **_job_card(j), "running_s": round(end - started, 1), "active": active,
             })
     pending.sort(key=lambda x: x["pending_s"], reverse=True)
-    most_res = sorted(
-        recent, key=lambda j: (j.get("req_cpu_cores") or 0, j.get("req_mem_bytes") or 0),
-        reverse=True,
-    )
+    running.sort(key=lambda x: x["running_s"], reverse=True)
     top = {
         "longest_pending": pending[:5],
-        "most_resources": [
-            {"name": j.get("name"), "cpu_cores": j.get("req_cpu_cores"),
-             "mem_bytes": j.get("req_mem_bytes"), "pods": j.get("req_pods"),
-             "phase": j.get("phase"), "queue": j.get("queue"), "tool": j.get("tool"),
-             "src_storage": j.get("src_storage"), "dst_storage": j.get("dst_storage"),
-             "src_path": j.get("src_path"), "dst_path": j.get("dst_path")}
-            for j in most_res[:5]
-        ],
+        "longest_running": running[:5],
     }
     return {"windows": windows, "top": top}
 

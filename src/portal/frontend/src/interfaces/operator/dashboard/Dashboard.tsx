@@ -32,7 +32,7 @@ export default function Dashboard() {
   }, [auto, reload]);
 
   return (
-    <div className="inventory">
+    <div className="inventory dashboard">
       <div className="inv-head">
         <h2>종합 대시보드</h2>
         <div className="inv-actions">

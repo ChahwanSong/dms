@@ -58,7 +58,10 @@ def test_volcano_job_metrics_correlation_and_latencies():
     )
     vcjob = {
         "metadata": {"name": "job-a", "creationTimestamp": "2026-06-28T00:00:00Z",
-                     "labels": {"dms.openai.com/data-tool": "dsync"}},
+                     "labels": {"dms.openai.com/data-tool": "dsync",
+                                "dms.openai.com/data-phase": "execution",
+                                "dms.openai.com/request-id": "req_xyz",
+                                "dms.openai.com/data-job-id": "job_xyz"}},
         "spec": {"queue": "dms-data", "minAvailable": 2, "tasks": [
             {"replicas": 2, "template": {"spec": {"containers": [
                 {"resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}]}}}]},
@@ -68,9 +71,11 @@ def test_volcano_job_metrics_correlation_and_latencies():
         "metadata": {"name": "job-a-0", "creationTimestamp": "2026-06-28T00:00:02Z",
                      "labels": {"volcano.sh/job-name": "job-a"}},
         "spec": {"containers": [{"env": [
+            {"name": "DMS_POSIX_USERNAME", "value": "alice"},
             {"name": "DMS_SYNC_SOURCE_STORAGE", "value": "cephfs-dms"},
             {"name": "DMS_SYNC_DESTINATION_STORAGE", "value": "cephfs-third"},
-            {"name": "DMS_SYNC_SOURCE_PATH", "value": "e2e/src"}]}]},
+            {"name": "DMS_SYNC_SOURCE_PATH", "value": "e2e/src"},
+            {"name": "DMS_SYNC_DESTINATION_PATH", "value": "mix/dst"}]}]},
         "status": {"startTime": "2026-06-28T00:00:10Z",
                    "conditions": [{"type": "PodScheduled", "lastTransitionTime": "2026-06-28T00:00:05Z"}],
                    "containerStatuses": [{"state": {"terminated": {"finishedAt": "2026-06-28T00:05:00Z"}}}]},
@@ -97,9 +102,15 @@ def test_volcano_job_metrics_correlation_and_latencies():
     j = out["jobs"][0]
     assert (j["name"], j["queue"], j["phase"]) == ("job-a", "dms-data", "Completed")
     assert j["tool"] == "dsync"
+    assert j["phase_kind"] == "execution"
+    assert j["requester"] == "alice"
+    assert j["request_id"] == "req_xyz"
+    assert j["data_job_id"] == "job_xyz"
     assert j["src_storage"] == "cephfs-dms"
     assert j["dst_storage"] == "cephfs-third"
     assert j["src_path"] == "e2e/src"
+    assert j["dst_path"] == "mix/dst"
+    assert j["scan_path"] is None and j["rm_path"] is None  # sync job
     assert j["req_cpu_cores"] == 2.0
     assert j["req_mem_bytes"] == 2 * 1024**3
     assert j["req_pods"] == 2

@@ -360,20 +360,28 @@ export interface VolWindow {
     sched_to_start_s: VolStageStat; run_s: VolStageStat;
   };
 }
+// Shared detail for an offender job (shown when a row is expanded).
+export interface VolJobCard {
+  name: string;
+  queue?: string | null;
+  phase?: string | null;
+  phase_kind?: string | null;
+  tool?: string | null;
+  requester?: string | null;
+  request_id?: string | null;
+  data_job_id?: string | null;
+  src_storage?: string | null; dst_storage?: string | null;
+  src_path?: string | null; dst_path?: string | null;
+  scan_storage?: string | null; scan_path?: string | null;
+  rm_storage?: string | null; rm_path?: string | null;
+  req_pods?: number | null; req_cpu_cores?: number | null; req_mem_bytes?: number | null;
+  created_at?: string | null; started_at?: string | null; finished_at?: string | null;
+}
 export interface VolcanoMetrics {
   windows: Record<string, VolWindow>;
   top: {
-    longest_pending: {
-      name: string; queue?: string; phase?: string; pending_s: number;
-      tool?: string | null; src_storage?: string | null; dst_storage?: string | null;
-      src_path?: string | null; dst_path?: string | null;
-    }[];
-    most_resources: {
-      name: string; cpu_cores: number; mem_bytes: number; pods: number;
-      phase?: string | null; queue?: string | null; tool?: string | null;
-      src_storage?: string | null; dst_storage?: string | null;
-      src_path?: string | null; dst_path?: string | null;
-    }[];
+    longest_pending: (VolJobCard & { pending_s: number })[];
+    longest_running: (VolJobCard & { running_s: number; active: boolean })[];
   };
   error?: string | null;
 }
