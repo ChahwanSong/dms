@@ -1205,7 +1205,21 @@ tr.row-open .expand-toggle { color: var(--accent); }
   border: 1px solid var(--accent); border-radius: 8px; background: rgba(59, 130, 246, 0.1);
 }
 .bulk-bar .bulk-count { font-weight: 700; font-size: 0.85rem; margin-right: 0.25rem; }
-table.grid th.col-check, table.grid td.col-check { width: 1.6rem; padding-right: 0; text-align: center; }
+table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; text-align: center; }
+/* large, easy-to-hit checkbox target: the label fills the cell (padding grows
+   the click area; negative margin keeps row height), the box itself is bigger. */
+.check-cell {
+  display: flex; align-items: center; justify-content: center;
+  padding: 0.55rem 0.4rem; margin: -0.35rem 0; cursor: pointer;
+}
+.check-cell input[type="checkbox"] {
+  width: 1.15rem; height: 1.15rem; cursor: pointer; accent-color: var(--accent); margin: 0;
+}
+/* CSV/text copy-paste popup */
+.csv-text {
+  width: 100%; min-height: 15rem; resize: vertical;
+  font-size: 0.82rem; line-height: 1.55; white-space: pre;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .expand-toggle { transition: none; }

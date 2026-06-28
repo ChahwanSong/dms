@@ -112,11 +112,18 @@ export function parseRequestsCsv(text: string): ParsedRequests {
   const errors: string[] = [];
   const srcSet = new Set<string>();
   const dstSet = new Set<string>();
+  let firstContent = true;
   text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return;
     const parts = line.split(line.includes("\t") ? "\t" : ",").map((p) => p.trim());
-    if (idx === 0 && HEADER_TOKENS.has((parts[0] || "").toLowerCase())) return; // header
+    // A header row (src_path,dst_path) is ignored when it is the first non-blank,
+    // non-comment line — not only the literal first line, so a leading # comment
+    // doesn't push it into the data.
+    if (firstContent) {
+      firstContent = false;
+      if (HEADER_TOKENS.has((parts[0] || "").toLowerCase())) return; // header
+    }
     if (parts.length >= 4) {
       const [ss, sp, ds, dp] = parts;
       if (!sp || !dp) {

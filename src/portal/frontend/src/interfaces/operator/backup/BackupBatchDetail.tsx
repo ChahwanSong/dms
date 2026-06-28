@@ -1,17 +1,11 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
-import {
-  batchStatus,
-  requestState,
-  fmtBytes,
-  friendlyError,
-  parseRequestsCsv,
-  rowsToCsv,
-} from "./helpers";
+import { batchStatus, requestState, fmtBytes, friendlyError, rowsToCsv } from "./helpers";
 import { errMsg, fmtTime } from "./BackupBatches";
 import { SpecGrid, type KV } from "./ui";
 import BackupBatchForm from "./BackupBatchForm";
 import BackupRequestEdit from "./BackupRequestEdit";
+import BackupCsvModal from "./BackupCsvModal";
 
 const PAGE = 200;
 const STATE_ORDER = [
@@ -27,6 +21,10 @@ const STATE_ORDER = [
 ];
 const EDITABLE = ["registered", "preview_ready", "preview_failed", "failed", "cancelled"];
 const RETRYABLE = ["preview_failed", "failed"];
+
+// Example for the "템플릿" popup (header is ignored on parse → 2 sample rows).
+const TEMPLATE_TEXT = "src_path,dst_path\nexample/dir1,backup/dir1\nexample/dir2,backup/dir2\n";
+const CSV_HINT = '한 줄에 "출발경로,대상경로" (쉼표 구분). 헤더·빈 줄·# 주석은 무시됩니다.';
 
 const num = (n?: number | null) => (n == null ? "—" : n.toLocaleString());
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "…" : s);
@@ -153,11 +151,16 @@ export default function BackupBatchDetail({
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   // storage_name -> managed_root, so the UI can show real absolute paths.
   const [roots, setRoots] = useState<Record<string, string>>({});
-  // inline "add row" editor + CSV upload input
+  // inline "add row" editor + CSV/text popup
   const [showAdd, setShowAdd] = useState(false);
   const [addSrc, setAddSrc] = useState("");
   const [addDst, setAddDst] = useState("");
-  const csvInputRef = useRef<HTMLInputElement>(null);
+  const [csvModal, setCsvModal] = useState<{
+    mode: "view" | "replace";
+    title: string;
+    hint?: string;
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
     operatorApi.storage
@@ -399,52 +402,43 @@ export default function BackupBatchDetail({
       setShowAdd(false);
     }, "항목을 추가했습니다.");
   }
-  function downloadText(text: string, filename: string) {
-    const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-  function downloadCurrentCsv() {
+  // "현재 항목" — copyable CSV/text of the current request set (no download).
+  function openCurrent() {
     const rows = jobs.map((j) => ({ src_path: j.src_path, dst_path: j.dst_path }));
-    downloadText(rowsToCsv(rows), `${batch!.name || "batch"}-requests.csv`);
+    setCsvModal({
+      mode: "view",
+      title: "현재 항목 (CSV / 텍스트)",
+      hint: `${jobs.length}개 항목. 아래 텍스트를 복사해 다른 배치에 붙여넣을 수 있습니다.`,
+      text: rowsToCsv(rows),
+    });
   }
-  function downloadTemplate() {
-    downloadText("src_path,dst_path\nexample/src,example/dst\n", "backup-template.csv");
+  // "템플릿" — example version of the current-items text.
+  function openTemplate() {
+    setCsvModal({ mode: "view", title: "CSV / 텍스트 템플릿 (예시)", hint: CSV_HINT, text: TEMPLATE_TEXT });
   }
-  async function onCsvFile(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  // "업로드 (전체 교체)" — paste text (or load a file) then replace-all.
+  function openUpload() {
+    setCsvModal({ mode: "replace", title: "텍스트 붙여넣기 → 전체 교체", hint: CSV_HINT, text: "" });
+  }
+  function replaceFromRows(rows: { src_path: string; dst_path: string }[]) {
     if (!batchSrc || !batchDst) {
       setError("기존 항목이 없어 스토리지를 알 수 없습니다 — '배치 편집' 폼을 사용하세요.");
       return;
     }
-    const parsed = parseRequestsCsv(await file.text());
-    if (parsed.errors.length) {
-      setError(`CSV 오류: ${parsed.errors.join("; ")}`);
-      return;
-    }
-    if (!parsed.rows.length) {
-      setError("CSV에 항목이 없습니다.");
-      return;
-    }
     if (
       !window.confirm(
-        `CSV ${parsed.rows.length}개 항목으로 전체 교체합니다.\n기존 ${jobs.length}개는 모두 대체됩니다(등록됨 → 재미리보기 필요). 계속할까요?`,
+        `${rows.length}개 항목으로 전체 교체합니다.\n기존 ${jobs.length}개는 모두 대체됩니다(등록됨 → 재미리보기 필요). 계속할까요?`,
       )
     )
       return;
-    const reqs = parsed.rows.map((r) => ({
+    const reqs = rows.map((r) => ({
       src_storage: batchSrc,
       src_path: r.src_path,
       dst_storage: batchDst,
       dst_path: r.dst_path,
     }));
-    await act(() => operatorApi.backup.replaceRequests(batchId, reqs), `CSV로 ${reqs.length}개 항목으로 교체했습니다.`);
+    act(() => operatorApi.backup.replaceRequests(batchId, reqs), `${reqs.length}개 항목으로 교체했습니다.`);
+    setCsvModal(null);
   }
 
   return (
@@ -597,27 +591,16 @@ export default function BackupBatchDetail({
             + 행 추가
           </button>
           <span className="tb-sep" aria-hidden="true" />
-          <span className="muted small">CSV</span>
-          <button className="ghost mini" onClick={downloadTemplate}>
+          <span className="muted small">CSV / 텍스트</span>
+          <button className="ghost mini" onClick={openTemplate}>
             템플릿
           </button>
-          <button className="ghost mini" disabled={!jobs.length} onClick={downloadCurrentCsv}>
-            현재 항목 다운로드
+          <button className="ghost mini" disabled={!jobs.length} onClick={openCurrent}>
+            현재 항목
           </button>
-          <button
-            className="ghost mini"
-            disabled={busy || !hasStorage}
-            onClick={() => csvInputRef.current?.click()}
-          >
+          <button className="ghost mini" disabled={busy || !hasStorage} onClick={openUpload}>
             업로드 (전체 교체)
           </button>
-          <input
-            ref={csvInputRef}
-            type="file"
-            accept=".csv,text/csv"
-            hidden
-            onChange={onCsvFile}
-          />
         </div>
       )}
       {showAdd && hasStorage && (
@@ -680,13 +663,15 @@ export default function BackupBatchDetail({
           <tr>
             <th className="col-toggle"></th>
             <th className="col-check">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={toggleSelectAll}
-                disabled={jobs.length === 0}
-                aria-label="전체 선택"
-              />
+              <label className="check-cell">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={toggleSelectAll}
+                  disabled={jobs.length === 0}
+                  aria-label="전체 선택"
+                />
+              </label>
             </th>
             <th>출발 (src)</th>
             <th>대상 (dst)</th>
@@ -740,12 +725,14 @@ export default function BackupBatchDetail({
                       )}
                     </td>
                     <td className="col-check" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selected.has(j.id)}
-                        onChange={() => toggleSelect(j.id)}
-                        aria-label="항목 선택"
-                      />
+                      <label className="check-cell">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(j.id)}
+                          onChange={() => toggleSelect(j.id)}
+                          aria-label="항목 선택"
+                        />
+                      </label>
                     </td>
                     <td data-label="출발" className="mono small">
                       {j.src_storage === batchSrc ? j.src_path : `${j.src_storage}:${j.src_path}`}
@@ -836,6 +823,17 @@ export default function BackupBatchDetail({
             setNotice("요청 경로를 수정했습니다.");
             reload();
           }}
+        />
+      )}
+      {csvModal && (
+        <BackupCsvModal
+          title={csvModal.title}
+          hint={csvModal.hint}
+          initialText={csvModal.text}
+          mode={csvModal.mode}
+          busy={busy}
+          onReplace={replaceFromRows}
+          onClose={() => setCsvModal(null)}
         />
       )}
     </div>
