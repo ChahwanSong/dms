@@ -228,12 +228,12 @@ export default function VolcanoPanel() {
         </>
       )}
 
-      {/* 큐 — running/pending/inqueue combined in one bar per queue */}
-      <h4 className="dash-sub">큐</h4>
+      {/* Scheduler Queue — running/pending/in-queue combined in one bar per queue */}
+      <h4 className="dash-sub">Scheduler Queue</h4>
       <div className="q-legend">
-        <span className="leg"><span className="q-sw run" />running (실행 중)</span>
-        <span className="leg"><span className="q-sw pend" />pending (대기)</span>
-        <span className="leg"><span className="q-sw inq" />inqueue (입큐)</span>
+        <span className="leg"><span className="q-sw run" />running</span>
+        <span className="leg"><span className="q-sw pend" />pending</span>
+        <span className="leg"><span className="q-sw inq" />in-queue</span>
       </div>
       <div className="q-list">
         {queues.length ? queues.map((q) => {
@@ -256,7 +256,7 @@ export default function VolcanoPanel() {
               <div className="q-counts">
                 <span className="q-c run"><b>{r}</b>running</span>
                 <span className="q-c pend"><b>{p}</b>pending</span>
-                <span className="q-c inq"><b>{iq}</b>inqueue</span>
+                <span className="q-c inq"><b>{iq}</b>in-queue</span>
               </div>
             </div>
           );
