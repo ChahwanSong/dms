@@ -45,7 +45,7 @@ class OperationalQueryService:
             {"issue_type": "request_attention", **request}
             for request in self.repository.list_action_required()
         ]
-        for mapping in self.repository.list_storage_mappings():
+        for mapping in self.repository.list_storage_mappings(limit=10000):
             if mapping["sanity_status"] == "Failed":
                 issues.append(
                     {
@@ -95,20 +95,15 @@ class OperationalQueryService:
                             "storage_name": mapping["storage_name"],
                         }
                     )
-        # Fresh reports: same (node, role, cluster) means the stale is resolved
-        fresh_keys: set[tuple[str, str, str]] = {
-            (r["node_name"], r["worker_role"], r["cluster_name"])
-            for r in self.repository.list_agent_reports(freshness="Fresh", limit=500)
-        }
-        # Deduplicate stale reports: keep only the latest per (node, role, cluster)
-        seen_stale: set[tuple[str, str, str]] = set()
-        for report in self.repository.list_agent_reports(freshness="Stale", limit=500):
-            key = (report["node_name"], report["worker_role"], report["cluster_name"])
-            if key in fresh_keys:
-                continue  # resolved — fresh report exists for this node/role
-            if key in seen_stale:
-                continue  # deduplicate — already added latest for this key
-            seen_stale.add(key)
+        # Node agent freshness: look only at the LATEST report per (cluster, node,
+        # role). A node needs attention iff its most recent report is Stale — a
+        # newer Fresh report resolves it (timestamp-accurate, unlike comparing two
+        # separately-capped fresh/stale lists). latest_per_node returns ~#nodes
+        # rows via a server-side dedup, so this stays cheap on a polled path and
+        # considers every node without scanning report history.
+        for report in self.repository.list_agent_reports(latest_per_node=True):
+            if report.get("freshness_status") != "Stale":
+                continue
             issues.append(
                 {
                     "issue_type": "agent_report_stale",
@@ -422,7 +417,7 @@ class OperationalQueryService:
         ) in self.repository.list_kubernetes_namespace_quota_resources_expiring(
             status="expired",
             include_blocked=False,
-            limit=1000,
+            limit=5000,
         ):
             issues.append(
                 {
@@ -447,7 +442,7 @@ class OperationalQueryService:
                 OperationKind.K8S_QUOTA_CHECK.value,
                 OperationKind.K8S_QUOTA_EXPIRATION_SWEEP.value,
             ),
-            limit=1000,
+            limit=5000,
         )
         seen_resources: set[str] = set()
         for row in rows:
@@ -501,7 +496,7 @@ class OperationalQueryService:
         # Soft-deleted filesystems: locked + data preserved, awaiting manual removal.
         for resource in self.repository.list_filesystem_resources(
             status=["Deleted"],
-            limit=1000,
+            limit=5000,
         ):
             desired = resource.get("desired_state") or {}
             observed = resource.get("observed_state") or {}
@@ -535,7 +530,7 @@ class OperationalQueryService:
         for resource in self.repository.list_filesystem_resources_expiring(
             status="expired",
             include_blocked=False,
-            limit=1000,
+            limit=5000,
         ):
             resource_type = resource.get("resource_type") or "user"
             if resource_type in {"system", "admin"}:
@@ -567,7 +562,7 @@ class OperationalQueryService:
                 OperationKind.FILESYSTEM_CHECK.value,
                 OperationKind.FILESYSTEM_SYNC.value,
             ),
-            limit=1000,
+            limit=5000,
         )
         seen_targets: set[tuple[str, str]] = set()
         for row in rows:
@@ -664,7 +659,7 @@ class OperationalQueryService:
 
     def _data_management_action_required(self) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
-        for job in self.repository.list_data_jobs(limit=1000):
+        for job in self.repository.list_data_jobs(limit=5000):
             if job["operation"] not in {
                 OperationKind.DATA_SCAN.value,
                 OperationKind.DATA_SYNC.value,
@@ -707,14 +702,18 @@ class OperationalQueryService:
             )
         return issues
 
-    def stale_or_recovery_runs(self) -> list[dict]:
+    def stale_or_recovery_runs(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> list[dict]:
         return self.repository.list_runs(
             states=(
                 LifecycleState.STALE_CLAIM.value,
                 LifecycleState.RECOVERY_NEEDED.value,
                 LifecycleState.BLOCKED.value,
                 LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
-            )
+            ),
+            limit=limit,
+            offset=offset,
         )
 
     def active_plans(
@@ -741,12 +740,14 @@ class OperationalQueryService:
         worker_id: str | None = None,
         lease_expiring_within_seconds: int = 60,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         runs = self.repository.list_active_runs(
             states=states,
             worker_role=worker_role,
             worker_id=worker_id,
             limit=limit,
+            offset=offset,
         )
         summaries = [
             _run_summary(
@@ -760,30 +761,33 @@ class OperationalQueryService:
     def work_summary(
         self, *, lease_expiring_within_seconds: int = 60
     ) -> dict[str, Any]:
+        # Totals come from exact COUNT(*) so they never saturate at the list cap
+        # (production accumulates thousands of jobs/day). The capped lists below
+        # only feed the by_* breakdowns / lease-expiry derivation, which are
+        # naturally bounded by the in-flight (active) set.
         plans = self.active_plans(limit=1000)
         active_runs = self.active_runs(
             lease_expiring_within_seconds=lease_expiring_within_seconds,
             limit=1000,
         )
-        attention_runs = self.repository.list_runs(
-            states=ATTENTION_RUN_STATES, limit=1000
-        )
         action_required = self.action_required()
         return {
             "plans": {
-                "total_active": len(plans),
+                "total_active": self.repository.count_active_plans(),
                 "by_status": _count_by(plans, "status"),
                 "by_worker_role": _count_by(plans, "worker_role"),
             },
             "runs": {
-                "total_active": len(active_runs),
+                "total_active": self.repository.count_active_runs(),
                 "by_state": _count_by(active_runs, "state"),
                 "by_worker_role": _count_by(active_runs, "worker_role"),
                 "by_worker_id": _count_by(active_runs, "worker_id"),
                 "lease_expiring_soon": sum(
                     1 for run in active_runs if run["lease_expiring_soon"]
                 ),
-                "stale_or_recovery": len(attention_runs),
+                "stale_or_recovery": self.repository.count_runs(
+                    states=ATTENTION_RUN_STATES
+                ),
             },
             "requests": {"action_required": len(action_required)},
         }

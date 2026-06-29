@@ -259,6 +259,7 @@ class DataJobsMixin:
         operation: str | None = None,
         storage_name: str | None = None,
         state: str | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         filters: list[str] = []
         params: list[Any] = []
@@ -276,6 +277,7 @@ class DataJobsMixin:
             params.append(state)
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         params.append(limit)
+        params.append(offset)
         with self.database.connect() as connection:
             rows = connection.execute(
                 f"""
@@ -289,7 +291,7 @@ class DataJobsMixin:
                 JOIN requests ON requests.request_id = data_jobs.request_id
                 {where}
                 ORDER BY data_jobs.updated_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
                 tuple(params),
             ).fetchall()

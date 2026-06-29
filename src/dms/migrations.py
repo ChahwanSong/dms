@@ -165,6 +165,17 @@ CREATE TABLE IF NOT EXISTS agent_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_reports_node
     ON agent_reports(cluster_name, node_name, reported_at);
+-- Supports latest-per-node reads (one row per cluster/node/role): the node-health
+-- and action-required paths dedup to the newest report per node via a single
+-- ROW_NUMBER() window partitioned by (cluster, node, role) ordered by reported_at,
+-- NOT a per-row self/anti-join. This index matches that partition+order so the
+-- window runs as an index scan (no full sort) even when the table holds hundreds of
+-- thousands of rows. (Supersedes the earlier (node, role, reported_at) index — and
+-- a short-lived report_id variant — so drop both.)
+DROP INDEX IF EXISTS idx_agent_reports_latest;
+DROP INDEX IF EXISTS idx_agent_reports_latest_id;
+CREATE INDEX IF NOT EXISTS idx_agent_reports_latest_v2
+    ON agent_reports(cluster_name, node_name, worker_role, reported_at);
 
 CREATE TABLE IF NOT EXISTS data_jobs (
     job_id TEXT PRIMARY KEY,

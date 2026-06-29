@@ -226,17 +226,18 @@ class StorageMappingsMixin:
         limit: int = 100,
         *,
         cluster_name: str | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
             if cluster_name is not None:
                 rows = connection.execute(
-                    "SELECT * FROM storage_mappings WHERE cluster_name = ? ORDER BY updated_at DESC LIMIT ?",
-                    (cluster_name, limit),
+                    "SELECT * FROM storage_mappings WHERE cluster_name = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (cluster_name, limit, offset),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT * FROM storage_mappings ORDER BY updated_at DESC LIMIT ?",
-                    (limit,),
+                    "SELECT * FROM storage_mappings ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
                 ).fetchall()
         return [self._decode_storage_mapping(row_to_dict(row)) for row in rows]
 

@@ -119,10 +119,16 @@ class OperationalMixin:
         freshness: str | None = None,
         stale_seconds: int | None = None,
         update_stale: bool = False,
+        latest_per_node: bool = False,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         if stale_seconds is not None and update_stale:
             self.mark_stale_agent_reports(stale_seconds=stale_seconds)
+        if latest_per_node:
+            return self._list_latest_agent_reports_per_node(
+                freshness=freshness, limit=limit, offset=offset
+            )
         filters: list[str] = []
         params: list[Any] = []
         if freshness:
@@ -135,11 +141,76 @@ class OperationalMixin:
                 SELECT * FROM agent_reports
                 {where}
                 ORDER BY reported_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (*params, limit),
+                (*params, limit, offset),
             ).fetchall()
         return [self._decode_agent_report(row_to_dict(row)) for row in rows]
+
+
+    def _list_latest_agent_reports_per_node(
+        self,
+        *,
+        freshness: str | None,
+        limit: int,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        """Return the single most-recent report per (cluster_name, node_name,
+        worker_role) — by ``reported_at`` (``report_id`` is a random string PK, NOT
+        a monotonic serial, so it can't stand in for recency). Used for node-health
+        reads that must consider every node without scanning report history.
+
+        Two cheap steps instead of scanning/sorting the whole (wide, JSON-bearing)
+        table:
+          1. A NARROW ``GROUP BY (cluster, node, role) max(reported_at)`` — every
+             selected column is in idx_agent_reports_latest_v2(cluster, node, role,
+             reported_at), so this is an index-only scan that never touches the heap
+             or the report_json payload, even with hundreds of thousands of rows.
+          2. Join that ~#nodes-row result back to fetch only those few full rows.
+        (A windowed/sorted pass over all rows, or a per-row anti-join, instead drags
+        every wide row through a sort/self-join and is orders of magnitude slower on
+        a large table — measured 40-60s vs sub-second here.)
+
+        Identical-``reported_at`` ties (rare) are broken deterministically in Python
+        by the higher ``report_id``. A ``freshness`` filter, if given, is applied to
+        the resulting latest rows — i.e. "nodes whose CURRENT report has that
+        freshness" — which is exactly what node-health / stale-node callers want (a
+        newer Fresh report supersedes an older Stale one). Portable plain SQL."""
+        sql = """
+            SELECT ar.* FROM agent_reports ar
+            JOIN (
+                SELECT cluster_name, node_name, worker_role,
+                       max(reported_at) AS mx
+                FROM agent_reports
+                GROUP BY cluster_name, node_name, worker_role
+            ) g
+              ON g.cluster_name = ar.cluster_name
+             AND g.node_name = ar.node_name
+             AND g.worker_role = ar.worker_role
+             AND ar.reported_at = g.mx
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(sql).fetchall()
+        # Dedup identical-reported_at ties to ONE row per node/role (highest
+        # report_id wins). Only ~#nodes rows are materialized here.
+        latest: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+        for row in rows:
+            report = self._decode_agent_report(row_to_dict(row))
+            key = (
+                report.get("cluster_name"),
+                report.get("node_name"),
+                report.get("worker_role"),
+            )
+            current = latest.get(key)
+            if current is None or str(report.get("report_id")) > str(
+                current.get("report_id")
+            ):
+                latest[key] = report
+        out = list(latest.values())
+        if freshness:
+            out = [r for r in out if r.get("freshness_status") == freshness]
+        out.sort(key=lambda r: r.get("reported_at") or "", reverse=True)
+        return out[offset : offset + limit]
 
 
     def list_agent_metric_samples(

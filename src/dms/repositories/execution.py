@@ -132,6 +132,35 @@ class ExecutionMixin:
         return [self._decode_plan(row_to_dict(row)) for row in rows]
 
 
+    def count_active_plans(
+        self,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        worker_role: str | WorkerRole | None = None,
+    ) -> int:
+        """Exact COUNT(*) of active plans using the SAME WHERE clause as
+        ``list_active_plans`` (no row transfer, no list-limit saturation). The
+        plans→requests join in the list variant is 1:1 via FK, so counting the
+        ``plans`` table alone yields the identical cardinality far more cheaply."""
+        selected_statuses = statuses or ACTIVE_PLAN_STATES
+        where = [f"status IN ({','.join(['?'] * len(selected_statuses))})"]
+        params: list[Any] = list(selected_statuses)
+        if worker_role:
+            role = (
+                worker_role.value
+                if isinstance(worker_role, WorkerRole)
+                else worker_role
+            )
+            where.append("worker_role = ?")
+            params.append(role)
+        with self.database.connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS n FROM plans WHERE {' AND '.join(where)}",
+                tuple(params),
+            ).fetchone()
+        return int(row_to_dict(row)["n"])
+
+
     def get_plan(self, plan_id: str) -> dict[str, Any]:
         with self.database.connect() as connection:
             row = connection.execute(
@@ -492,7 +521,11 @@ class ExecutionMixin:
 
 
     def list_runs(
-        self, *, states: tuple[str, ...] | None = None, limit: int = 100
+        self,
+        *,
+        states: tuple[str, ...] | None = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
             if states:
@@ -502,16 +535,34 @@ class ExecutionMixin:
                     SELECT * FROM runs
                     WHERE state IN ({placeholders})
                     ORDER BY updated_at DESC
-                    LIMIT ?
+                    LIMIT ? OFFSET ?
                     """,
-                    (*states, limit),
+                    (*states, limit, offset),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT * FROM runs ORDER BY updated_at DESC LIMIT ?",
-                    (limit,),
+                    "SELECT * FROM runs ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
                 ).fetchall()
         return rows_to_dicts(rows)
+
+
+    def count_runs(self, *, states: tuple[str, ...] | None = None) -> int:
+        """Exact COUNT(*) of runs (optionally restricted to ``states``) using the
+        SAME WHERE clause as ``list_runs`` — so attention/stale totals never
+        saturate at a list limit. No rows are transferred."""
+        with self.database.connect() as connection:
+            if states:
+                placeholders = ",".join(["?"] * len(states))
+                row = connection.execute(
+                    f"SELECT COUNT(*) AS n FROM runs WHERE state IN ({placeholders})",
+                    tuple(states),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS n FROM runs"
+                ).fetchone()
+        return int(row_to_dict(row)["n"])
 
 
     def list_active_runs(
@@ -521,6 +572,7 @@ class ExecutionMixin:
         worker_role: str | WorkerRole | None = None,
         worker_id: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         selected_states = states or ACTIVE_RUN_STATES
         where = [f"runs.state IN ({','.join(['?'] * len(selected_states))})"]
@@ -537,6 +589,7 @@ class ExecutionMixin:
             where.append("runs.worker_id = ?")
             params.append(worker_id)
         params.append(limit)
+        params.append(offset)
         with self.database.connect() as connection:
             rows = connection.execute(
                 f"""
@@ -554,7 +607,7 @@ class ExecutionMixin:
                 JOIN requests ON requests.request_id = runs.request_id
                 WHERE {' AND '.join(where)}
                 ORDER BY runs.updated_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
                 tuple(params),
             ).fetchall()
@@ -562,6 +615,38 @@ class ExecutionMixin:
         for run in decoded:
             run["execution_metadata"] = json_loads(run.get("execution_metadata")) or {}
         return decoded
+
+
+    def count_active_runs(
+        self,
+        *,
+        states: tuple[str, ...] | None = None,
+        worker_role: str | WorkerRole | None = None,
+        worker_id: str | None = None,
+    ) -> int:
+        """Exact COUNT(*) of active runs using the SAME WHERE clause as
+        ``list_active_runs``. The plans/requests joins in the list variant are 1:1
+        via FK, so counting the ``runs`` table alone is equivalent and cheaper."""
+        selected_states = states or ACTIVE_RUN_STATES
+        where = [f"state IN ({','.join(['?'] * len(selected_states))})"]
+        params: list[Any] = list(selected_states)
+        if worker_role:
+            role = (
+                worker_role.value
+                if isinstance(worker_role, WorkerRole)
+                else worker_role
+            )
+            where.append("worker_role = ?")
+            params.append(role)
+        if worker_id:
+            where.append("worker_id = ?")
+            params.append(worker_id)
+        with self.database.connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS n FROM runs WHERE {' AND '.join(where)}",
+                tuple(params),
+            ).fetchone()
+        return int(row_to_dict(row)["n"])
 
 
     def _get_plan(self, connection: Any, plan_id: str) -> dict[str, Any]:

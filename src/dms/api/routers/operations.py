@@ -191,6 +191,7 @@ def operational_query_router() -> APIRouter:
         worker_id: str | None = None,
         lease_expiring_within_seconds: int = Query(default=60, ge=0),
         limit: int = Query(default=100, gt=0, le=1000),
+        offset: int = Query(default=0, ge=0),
         services: AppServices = Depends(get_services),
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
@@ -200,6 +201,7 @@ def operational_query_router() -> APIRouter:
             worker_id=worker_id,
             lease_expiring_within_seconds=lease_expiring_within_seconds,
             limit=limit,
+            offset=offset,
         )
 
     @router.get("/action-required")
@@ -222,6 +224,9 @@ def operational_query_router() -> APIRouter:
     def agent_reports(
         request: Request,
         freshness: str | None = None,
+        latest_per_node: bool = Query(default=False),
+        limit: int = Query(default=100, gt=0, le=10000),
+        offset: int = Query(default=0, ge=0),
         services: AppServices = Depends(get_services),
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
@@ -229,6 +234,9 @@ def operational_query_router() -> APIRouter:
             freshness=freshness.capitalize() if freshness else None,
             stale_seconds=services.settings.agent_report_stale_seconds,
             update_stale=True,
+            latest_per_node=latest_per_node,
+            limit=limit,
+            offset=offset,
         )
 
     @router.get("/agent-reports/metrics")
@@ -249,11 +257,15 @@ def operational_query_router() -> APIRouter:
     def storage_mappings(
         request: Request,
         cluster_name: str | None = None,
+        limit: int = Query(default=100, gt=0, le=10000),
+        offset: int = Query(default=0, ge=0),
         services: AppServices = Depends(get_services),
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
         return redact_storage_mappings(
-            services.repository.list_storage_mappings(cluster_name=cluster_name)
+            services.repository.list_storage_mappings(
+                limit=limit, cluster_name=cluster_name, offset=offset
+            )
         )
 
     @router.get("/storage-mappings/{storage_name}")
@@ -460,10 +472,12 @@ def operational_query_router() -> APIRouter:
     @router.get("/runs/stale")
     def stale_runs(
         request: Request,
+        limit: int = Query(default=100, gt=0, le=5000),
+        offset: int = Query(default=0, ge=0),
         services: AppServices = Depends(get_services),
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
-        return services.query.stale_or_recovery_runs()
+        return services.query.stale_or_recovery_runs(limit=limit, offset=offset)
 
     @router.get("/worker-agent-health")
     def worker_agent_health(
@@ -481,6 +495,7 @@ def operational_query_router() -> APIRouter:
         storage_name: str | None = None,
         state: str | None = None,
         limit: int = Query(default=100, gt=0, le=1000),
+        offset: int = Query(default=0, ge=0),
         services: AppServices = Depends(get_services),
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
@@ -490,6 +505,7 @@ def operational_query_router() -> APIRouter:
             operation=operation,
             storage_name=storage_name,
             state=state,
+            offset=offset,
         )
 
     @router.get("/data-jobs/summary")
@@ -534,13 +550,13 @@ def operational_query_router() -> APIRouter:
     @router.get("/volcano/job-metrics")
     def volcano_job_metrics(
         request: Request,
-        limit: int = 300,
+        limit: int = 1000,
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
         """Per-job Volcano lifecycle metrics (timestamps, latencies, status counts,
         requested resources) for the dashboard throughput/latency/top-offenders views.
         Read-only live snapshot."""
         authenticated_actor(request, services)
-        return services.volcano_adapter.volcano_job_metrics(limit=max(1, min(int(limit), 1000)))
+        return services.volcano_adapter.volcano_job_metrics(limit=max(1, min(int(limit), 2000)))
 
     return router
