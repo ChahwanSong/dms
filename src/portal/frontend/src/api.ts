@@ -580,6 +580,20 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}`,
         { method: "DELETE" },
       ),
+    // Bulk-delete batches (collection-level). The server skips active batches
+    // (previewing/running) and reports them in `skipped`.
+    deleteBatches: (ids: string[]) =>
+      request<{ deleted: string[]; skipped: { id: string; reason: string }[] }>(
+        `${BK}:delete`,
+        { method: "POST", body: JSON.stringify({ batch_ids: ids }) },
+      ),
+    // Bulk-cancel batches (collection-level). Cancels in-flight DMS requests too;
+    // non-cancelable batches are reported in `skipped`.
+    cancelBatches: (ids: string[]) =>
+      request<{ cancelled: string[]; dms_cancelled: number; skipped: { id: string; reason: string }[] }>(
+        `${BK}:cancel`,
+        { method: "POST", body: JSON.stringify({ batch_ids: ids }) },
+      ),
     // Replace the whole request set (CSV upload / inline editor). Allowed on any
     // non-in-flight batch; the new set is all 'registered' (needs preview).
     replaceRequests: (id: string, requests: BackupRequestInput[]) =>
@@ -683,6 +697,20 @@ export const operatorApi = {
       request<{ id: string; deleted: boolean }>(
         `${SC}/${encodeURIComponent(id)}`,
         { method: "DELETE" },
+      ),
+    // Bulk-delete batches (collection-level). The server skips active (scanning)
+    // batches and reports them in `skipped`.
+    deleteBatches: (ids: string[]) =>
+      request<{ deleted: string[]; skipped: { id: string; reason: string }[] }>(
+        `${SC}:delete`,
+        { method: "POST", body: JSON.stringify({ batch_ids: ids }) },
+      ),
+    // Bulk-cancel batches (collection-level). Cancels in-flight DMS scan requests
+    // too; non-cancelable batches are reported in `skipped`.
+    cancelBatches: (ids: string[]) =>
+      request<{ cancelled: string[]; dms_cancelled: number; skipped: { id: string; reason: string }[] }>(
+        `${SC}:cancel`,
+        { method: "POST", body: JSON.stringify({ batch_ids: ids }) },
       ),
     // Replace the whole request set (CSV upload / inline editor). Allowed on any
     // non-scanning batch; the new set is all 'registered'.

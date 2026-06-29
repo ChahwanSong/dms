@@ -92,6 +92,12 @@ class CancelIn(BaseModel):
     request_ids: list[int] = Field(default_factory=list)
 
 
+class BatchIdsIn(BaseModel):
+    """Bulk batch operation (delete / cancel) over the given batch ids."""
+
+    batch_ids: list[str] = Field(default_factory=list)
+
+
 # A request can be edited (and is reset to 'registered') only in these states —
 # never while in-flight (preview_pending/approved/running) or succeeded.
 _EDITABLE_REQUEST_STATES = {
@@ -241,6 +247,68 @@ def backup_router(settings: Settings) -> APIRouter:
     @router.get("/batches")
     async def list_batches(db: Database = Depends(get_db)) -> list[dict[str, Any]]:
         return await db.list_batches()
+
+    @router.post("/batches:delete")
+    async def delete_batches(
+        payload: BatchIdsIn,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Bulk-delete batches, skip-and-report (never 409). In-flight batches
+        (previewing/running) are skipped with reason 'active'; unknown ids with
+        reason 'not_found'. Distinct path from POST /batches and /batches/{id}."""
+        ids = payload.batch_ids
+        if not ids:
+            raise HTTPException(status_code=422, detail="batch_ids required")
+        statuses = await db.batch_statuses(ids)
+        skipped: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for bid in ids:
+            if bid in seen:
+                continue
+            seen.add(bid)
+            status = statuses.get(bid)
+            if status is None:
+                skipped.append({"id": bid, "reason": "not_found"})
+            elif status in _INFLIGHT_BATCH_STATES:
+                skipped.append({"id": bid, "reason": "active"})
+        deleted = await db.delete_batches(ids)
+        return {"deleted": deleted, "skipped": skipped}
+
+    @router.post("/batches:cancel")
+    async def cancel_batches(
+        payload: BatchIdsIn,
+        db: Database = Depends(get_db),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        """Bulk-cancel batches (same per-batch logic as the single :cancel): set
+        each to cancelled and best-effort cancel any live DMS jobs. Unknown ids are
+        skipped with reason 'not_found'."""
+        ids = payload.batch_ids
+        if not ids:
+            raise HTTPException(status_code=422, detail="batch_ids required")
+        actor = f"{settings.backup_actor_prefix}{_actor(user)}"
+        cancelled: list[str] = []
+        skipped: list[dict[str, str]] = []
+        dms_cancelled = 0
+        seen: set[str] = set()
+        for bid in ids:
+            if bid in seen:
+                continue
+            seen.add(bid)
+            if not await db.get_batch(bid):
+                skipped.append({"id": bid, "reason": "not_found"})
+                continue
+            await db.set_batch_status(bid, "cancelled")
+            live = await db.cancel_requests(bid)
+            for job_id in live:
+                try:
+                    await dms.cancel_job(job_id, actor=actor)
+                    dms_cancelled += 1
+                except DmsApiError:
+                    pass  # best-effort; terminal jobs simply ignore cancel
+            cancelled.append(bid)
+        return {"cancelled": cancelled, "dms_cancelled": dms_cancelled, "skipped": skipped}
 
     @router.get("/batches/{batch_id}")
     async def get_batch(

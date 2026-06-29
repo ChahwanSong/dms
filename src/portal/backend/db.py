@@ -94,6 +94,12 @@ def _ddl(schema: str) -> list[str]:
         )""",
         f"CREATE INDEX IF NOT EXISTS backup_requests_batch_state "
         f"ON {s}.backup_requests(batch_id, state)",
+        # speeds the LEFT JOIN + GROUP BY in list_batches (join on batch_id, id PK).
+        f"CREATE INDEX IF NOT EXISTS backup_requests_batch_id "
+        f"ON {s}.backup_requests(batch_id, id)",
+        # speeds list_batches' ORDER BY b.created_at DESC.
+        f"CREATE INDEX IF NOT EXISTS backup_batches_created_at "
+        f"ON {s}.backup_batches(created_at)",
         # data-scan feature: a scan batch is a SIMPLER backup batch — read-only DMS
         # scans have no preview/confirm, so a request carries a single storage+path
         # (no src/dst), no fingerprint and no preview column. Batch lifecycle is
@@ -126,6 +132,12 @@ def _ddl(schema: str) -> list[str]:
         )""",
         f"CREATE INDEX IF NOT EXISTS scan_requests_batch_state "
         f"ON {s}.scan_requests(batch_id, state)",
+        # speeds the LEFT JOIN + GROUP BY in list_scan_batches (join on batch_id, id PK).
+        f"CREATE INDEX IF NOT EXISTS scan_requests_batch_id "
+        f"ON {s}.scan_requests(batch_id, id)",
+        # speeds list_scan_batches' ORDER BY b.created_at DESC.
+        f"CREATE INDEX IF NOT EXISTS scan_batches_created_at "
+        f"ON {s}.scan_batches(created_at)",
         # action-required 숨김(acknowledge) layer: operator-side dismiss of obsolete
         # "조치 필요" items (DMS has no native ack). Keyed by a stable fingerprint.
         f"""CREATE TABLE IF NOT EXISTS {s}.attention_dismissals (
@@ -256,17 +268,18 @@ class Database:
             )
 
     async def list_batches(self) -> list[dict[str, Any]]:
+        # Single pass: LEFT JOIN + conditional aggregates instead of four
+        # correlated subqueries per row. GROUP BY b.id (PK) lets us SELECT b.*.
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT b.*,
-                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id) AS request_count,
-                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
-                        AND j.state='succeeded') AS succeeded_count,
-                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
-                        AND j.state IN ('failed','preview_failed')) AS failed_count,
-                    (SELECT count(*) FROM backup_requests j WHERE j.batch_id=b.id
-                        AND j.state='cancelled') AS cancelled_count
-                   FROM backup_batches b ORDER BY b.created_at DESC"""
+                    count(j.id) AS request_count,
+                    count(*) FILTER (WHERE j.state='succeeded') AS succeeded_count,
+                    count(*) FILTER (WHERE j.state IN ('failed','preview_failed')) AS failed_count,
+                    count(*) FILTER (WHERE j.state='cancelled') AS cancelled_count
+                   FROM backup_batches b
+                   LEFT JOIN backup_requests j ON j.batch_id=b.id
+                   GROUP BY b.id ORDER BY b.created_at DESC"""
             )
             return await cur.fetchall()
 
@@ -351,6 +364,32 @@ class Database:
     async def delete_batch(self, batch_id: str) -> None:
         async with self.pool.connection() as conn:
             await conn.execute("DELETE FROM backup_batches WHERE id=%s", (batch_id,))
+
+    async def batch_statuses(self, batch_ids: list[str]) -> dict[str, str]:
+        """Map the given batch ids -> status (missing ids are simply absent).
+        Lets a bulk caller partition ids into not_found / active / deletable."""
+        if not batch_ids:
+            return {}
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT id, status FROM backup_batches WHERE id = ANY(%s)",
+                (batch_ids,),
+            )
+            return {r["id"]: r["status"] for r in await cur.fetchall()}
+
+    async def delete_batches(self, batch_ids: list[str]) -> list[str]:
+        """Bulk-delete the given batches, skipping any still in flight
+        (previewing/running). Returns the ids actually deleted (RETURNING). FK
+        ON DELETE CASCADE removes each batch's requests."""
+        if not batch_ids:
+            return []
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM backup_batches WHERE id = ANY(%s) "
+                "AND status NOT IN ('previewing','running') RETURNING id",
+                (batch_ids,),
+            )
+            return [r["id"] for r in await cur.fetchall()]
 
     async def active_batches(self) -> list[dict[str, Any]]:
         """Batches the orchestrator must drive (previewing / running)."""
@@ -579,17 +618,18 @@ class Database:
             )
 
     async def list_scan_batches(self) -> list[dict[str, Any]]:
+        # Single pass: LEFT JOIN + conditional aggregates instead of four
+        # correlated subqueries per row. GROUP BY b.id (PK) lets us SELECT b.*.
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT b.*,
-                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id) AS request_count,
-                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id
-                        AND j.state='succeeded') AS succeeded_count,
-                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id
-                        AND j.state='failed') AS failed_count,
-                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id
-                        AND j.state='cancelled') AS cancelled_count
-                   FROM scan_batches b ORDER BY b.created_at DESC"""
+                    count(j.id) AS request_count,
+                    count(*) FILTER (WHERE j.state='succeeded') AS succeeded_count,
+                    count(*) FILTER (WHERE j.state='failed') AS failed_count,
+                    count(*) FILTER (WHERE j.state='cancelled') AS cancelled_count
+                   FROM scan_batches b
+                   LEFT JOIN scan_requests j ON j.batch_id=b.id
+                   GROUP BY b.id ORDER BY b.created_at DESC"""
             )
             return await cur.fetchall()
 
@@ -660,6 +700,32 @@ class Database:
     async def delete_scan_batch(self, batch_id: str) -> None:
         async with self.pool.connection() as conn:
             await conn.execute("DELETE FROM scan_batches WHERE id=%s", (batch_id,))
+
+    async def scan_batch_statuses(self, batch_ids: list[str]) -> dict[str, str]:
+        """Map the given scan-batch ids -> status (missing ids are simply absent).
+        Lets a bulk caller partition ids into not_found / active / deletable."""
+        if not batch_ids:
+            return {}
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT id, status FROM scan_batches WHERE id = ANY(%s)",
+                (batch_ids,),
+            )
+            return {r["id"]: r["status"] for r in await cur.fetchall()}
+
+    async def delete_scan_batches(self, batch_ids: list[str]) -> list[str]:
+        """Bulk-delete the given scan batches, skipping any still in flight
+        (scanning). Returns the ids actually deleted (RETURNING). FK ON DELETE
+        CASCADE removes each batch's requests."""
+        if not batch_ids:
+            return []
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM scan_batches WHERE id = ANY(%s) "
+                "AND status NOT IN ('scanning') RETURNING id",
+                (batch_ids,),
+            )
+            return [r["id"] for r in await cur.fetchall()]
 
     async def active_scan_batches(self) -> list[dict[str, Any]]:
         """Batches the scan orchestrator must drive (the single 'scanning' phase)."""

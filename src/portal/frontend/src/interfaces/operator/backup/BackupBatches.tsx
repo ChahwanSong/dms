@@ -10,6 +10,25 @@ import Loading from "../../../components/Loading";
 // Data backup: register lists of DMS DM sync jobs and run them as mirror backups
 // (preview -> approve -> execute). This is the list of batches; click one to open
 // its detail (jobs, preview summary, run/cancel).
+type SortKey = "name" | "status" | "created";
+type SortState = { key: SortKey; dir: "asc" | "desc" };
+
+const ts = (iso?: string | null): number => (iso ? new Date(iso).getTime() : 0);
+
+// Client-side ordering of the (fully-fetched) batch list. name: localeCompare;
+// status: by Korean status label; created: by created_at timestamp.
+function sortBatches(rows: BackupBatch[], sort: SortState): BackupBatch[] {
+  const sign = sort.dir === "asc" ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    let r = 0;
+    if (sort.key === "name") r = a.name.localeCompare(b.name);
+    else if (sort.key === "status")
+      r = batchStatus(a.status).label.localeCompare(batchStatus(b.status).label);
+    else r = ts(a.created_at) - ts(b.created_at);
+    return sign * r;
+  });
+}
+
 export default function BackupBatches() {
   const [batches, setBatches] = useState<BackupBatch[]>([]);
   const [loading, setLoading] = useState(true);
@@ -18,6 +37,9 @@ export default function BackupBatches() {
   const [showForm, setShowForm] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [sort, setSort] = useState<SortState>({ key: "created", dir: "desc" });
+  const [busy, setBusy] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -34,6 +56,22 @@ export default function BackupBatches() {
   useEffect(() => {
     load();
   }, []);
+
+  // Keep the selection limited to currently-loaded batches; rows can vanish after
+  // a bulk delete / refresh, and stale ids would leave the bulk bar miscounting.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(batches.map((b) => b.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [batches]);
 
   function toggle(id: string) {
     setExpanded((prev) => {
@@ -54,6 +92,71 @@ export default function BackupBatches() {
     }
   }
 
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+  function toggleSelectAll() {
+    setSelected((prev) =>
+      prev.size === batches.length ? new Set() : new Set(batches.map((b) => b.id)),
+    );
+  }
+  function clearSelection() {
+    setSelected(new Set());
+  }
+  function applySort(key: SortKey) {
+    setSort((prev) =>
+      prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" },
+    );
+  }
+
+  async function bulkDelete() {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!window.confirm(`선택한 ${ids.length}개 배치를 삭제합니다. 진행 중 배치는 건너뜁니다. 계속할까요?`))
+      return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await operatorApi.backup.deleteBatches(ids);
+      const skipped = res.skipped.length;
+      setNotice(`${res.deleted.length}개 삭제${skipped ? `, ${skipped}개 건너뜀(진행 중)` : ""}`);
+      setSelected(new Set());
+      await load();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function bulkCancel() {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!window.confirm(`선택한 ${ids.length}개 배치를 취소합니다. 진행 중인 요청도 취소됩니다. 계속할까요?`))
+      return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await operatorApi.backup.cancelBatches(ids);
+      const skipped = res.skipped.length;
+      setNotice(
+        `${res.cancelled.length}개 취소 (DMS ${res.dms_cancelled}건)${skipped ? `, ${skipped}개 건너뜀` : ""}`,
+      );
+      setSelected(new Set());
+      await load();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (openId) {
     return (
       <BackupBatchDetail
@@ -65,6 +168,22 @@ export default function BackupBatches() {
       />
     );
   }
+
+  const shown = sortBatches(batches, sort);
+  const allSelected = batches.length > 0 && selected.size === batches.length;
+  const sortTh = (key: SortKey, label: string) => {
+    const active = sort.key === key;
+    return (
+      <button
+        type="button"
+        className={"sort-th" + (active ? " active" : "")}
+        onClick={() => applySort(key)}
+      >
+        {label}
+        <span className="sort-ind">{active ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}</span>
+      </button>
+    );
+  };
 
   return (
     <div className="inventory">
@@ -112,6 +231,21 @@ export default function BackupBatches() {
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
 
+      {selected.size > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{selected.size}개 선택</span>
+          <button className="mini danger" disabled={busy} onClick={bulkCancel}>
+            선택 취소
+          </button>
+          <button className="mini danger" disabled={busy} onClick={bulkDelete}>
+            선택 삭제
+          </button>
+          <button className="ghost mini" onClick={clearSelection}>
+            선택 해제
+          </button>
+        </div>
+      )}
+
       {loading ? (
         <Loading rows={5} />
       ) : batches.length === 0 ? (
@@ -121,16 +255,27 @@ export default function BackupBatches() {
           <thead>
             <tr>
               <th className="col-toggle"></th>
-              <th>이름</th>
-              <th>상태</th>
+              <th className="col-check">
+                <label className="check-cell">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleSelectAll}
+                    disabled={batches.length === 0}
+                    aria-label="전체 선택"
+                  />
+                </label>
+              </th>
+              <th>{sortTh("name", "이름")}</th>
+              <th>{sortTh("status", "상태")}</th>
               <th>성공/실패/취소/요청</th>
               <th>옵션</th>
-              <th>생성</th>
+              <th>{sortTh("created", "생성")}</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {batches.map((b) => {
+            {shown.map((b) => {
               const st = batchStatus(b.status);
               const open = expanded.has(b.id);
               return (
@@ -152,7 +297,17 @@ export default function BackupBatches() {
                         ▸
                       </span>
                     </td>
-                    <td data-label="이름">
+                    <td className="col-check" onClick={(e) => e.stopPropagation()}>
+                      <label className="check-cell">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(b.id)}
+                          onChange={() => toggleSelect(b.id)}
+                          aria-label="배치 선택"
+                        />
+                      </label>
+                    </td>
+                    <td data-label="이름" className="col-name">
                       <button
                         className="linklike"
                         onClick={(e) => {
@@ -196,7 +351,7 @@ export default function BackupBatches() {
                   </tr>
                   {open && (
                     <tr className="detail-row">
-                      <td colSpan={7}>
+                      <td colSpan={8}>
                         <BatchExpand batch={b} />
                       </td>
                     </tr>
