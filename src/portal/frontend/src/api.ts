@@ -269,12 +269,13 @@ export interface BatchUpdateInput {
 // --- data scan (DM scan batches) ---------------------------------------
 
 // One bucket of the dscan atime time-histogram (data temperature). Buckets run
-// hot (recently accessed, [0d,1d]) → cold (long untouched, [3651d,INF]).
+// hot (recently accessed, [0d,1d]) → cold (long untouched, [3651d,INF]); each
+// carries the total file CAPACITY (bytes) of files in that access-age band.
 export interface AtimeBucket {
   bucket?: string | null; // e.g. "[31d,90d]"
   min_age_days?: number | null;
   max_age_days?: number | null; // null = open-ended (oldest bucket)
-  count?: number | null;
+  bytes?: number | null; // total file capacity in this band
 }
 
 // Flat scan result the orchestrator stores on a succeeded request (DMS scan is

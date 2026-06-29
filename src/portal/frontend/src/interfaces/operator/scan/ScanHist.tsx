@@ -1,7 +1,9 @@
 import type { AtimeBucket } from "../../../api";
+import { fmtBytes } from "./helpers";
 
-// dscan's atime histogram has 9 fixed buckets, oldest→ in report order index 0
-// (most recent / hot) … 8 (oldest / cold). Color them on a hot→cold ramp.
+// dscan's atime histogram has 9 fixed buckets in report order index 0
+// (most recent / hot) … 8 (oldest / cold). Each bucket carries the total file
+// CAPACITY (bytes) of files in that access-age band. Color them hot→cold.
 const HOT_COLD = [
   "#ef4444", // ≤1d   hot
   "#f97316", // ≤7d
@@ -30,24 +32,24 @@ function bucketLabel(b: AtimeBucket): string {
   return DAY_LABEL[b.max_age_days] ?? `≤${b.max_age_days}일`;
 }
 
-const nf = (n?: number | null) => (n ?? 0).toLocaleString();
-const total = (h: AtimeBucket[]) => h.reduce((s, b) => s + (b.count ?? 0), 0);
+const totalBytes = (h: AtimeBucket[]) => h.reduce((s, b) => s + (b.bytes ?? 0), 0);
 
-// Compact stacked hot→cold bar for a table row — segment widths ∝ file counts,
-// each segment a tooltip. Renders "—" when there's no histogram (older jobs).
+// Compact stacked hot→cold capacity bar for a table row — segment widths ∝ bytes
+// per access-age band, each a tooltip. "—" when there's no histogram (older jobs)
+// or no file capacity.
 export function ScanHistBar({ hist }: { hist?: AtimeBucket[] | null }) {
   if (!hist || hist.length === 0) return <span className="muted small">—</span>;
-  const sum = total(hist);
+  const sum = totalBytes(hist);
   if (!sum) return <span className="muted small">—</span>;
   return (
-    <div className="ahist-bar" title="atime 데이터 온도 — hot(최근 접근) → cold(오래 미접근)">
+    <div className="ahist-bar" title="atime 데이터 온도 (용량) — hot(최근 접근) → cold(오래 미접근)">
       {hist.map((b, i) =>
-        b.count ? (
+        b.bytes ? (
           <span
             key={i}
             className="ahist-seg"
-            style={{ width: `${((b.count ?? 0) / sum) * 100}%`, background: HOT_COLD[i] ?? "#64748b" }}
-            title={`${bucketLabel(b)}: ${nf(b.count)}개`}
+            style={{ width: `${((b.bytes ?? 0) / sum) * 100}%`, background: HOT_COLD[i] ?? "#64748b" }}
+            title={`${bucketLabel(b)}: ${fmtBytes(b.bytes)}`}
           />
         ) : null,
       )}
@@ -55,11 +57,11 @@ export function ScanHistBar({ hist }: { hist?: AtimeBucket[] | null }) {
   );
 }
 
-// Full labeled histogram for the expanded detail: one row per (non-empty-overall)
-// bucket with a hot→cold bar normalized to the largest bucket + the count.
+// Full labeled histogram for the expanded detail: one row per bucket with a
+// hot→cold bar normalized to the largest bucket + that band's capacity.
 export function ScanHistFull({ hist }: { hist?: AtimeBucket[] | null }) {
-  if (!hist || hist.length === 0 || !total(hist)) return null;
-  const max = Math.max(1, ...hist.map((b) => b.count ?? 0));
+  if (!hist || hist.length === 0 || !totalBytes(hist)) return null;
+  const max = Math.max(1, ...hist.map((b) => b.bytes ?? 0));
   return (
     <div className="ahist-full">
       {hist.map((b, i) => (
@@ -68,10 +70,10 @@ export function ScanHistFull({ hist }: { hist?: AtimeBucket[] | null }) {
           <span className="ahist-track">
             <span
               className="ahist-fill"
-              style={{ width: `${((b.count ?? 0) / max) * 100}%`, background: HOT_COLD[i] ?? "#64748b" }}
+              style={{ width: `${((b.bytes ?? 0) / max) * 100}%`, background: HOT_COLD[i] ?? "#64748b" }}
             />
           </span>
-          <span className={`ahist-count${b.count ? "" : " muted"}`}>{nf(b.count)}</span>
+          <span className={`ahist-count${b.bytes ? "" : " muted"}`}>{fmtBytes(b.bytes)}</span>
         </div>
       ))}
     </div>

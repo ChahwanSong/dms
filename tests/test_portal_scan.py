@@ -268,8 +268,8 @@ def test_scan_result_extracts_summary_fields():
 
 def test_scan_result_captures_atime_histogram():
     hist = [
-        {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "count": 3},
-        {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "count": 1},
+        {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "bytes": 30720},
+        {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "bytes": 512},
     ]
     dj = {"selected_tool": "dscan",
           "result_summary": {"summary": {"file_count": 4, "directory_count": 1,

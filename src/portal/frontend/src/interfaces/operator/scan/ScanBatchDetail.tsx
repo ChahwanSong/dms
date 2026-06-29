@@ -86,7 +86,7 @@ function RequestDetail({ j, roots }: { j: ScanRequest; roots: Record<string, str
 
       {r?.atime_histogram && r.atime_histogram.length > 0 && (
         <section className="req-sec">
-          <h4>atime 데이터 온도 (hot → cold)</h4>
+          <h4>atime 데이터 온도 · 용량 (hot → cold)</h4>
           <ScanHistFull hist={r.atime_histogram} />
         </section>
       )}
@@ -584,7 +584,7 @@ export default function ScanBatchDetail({
             <th>경로 (path)</th>
             <th>상태</th>
             <th>결과 (파일 · 크기)</th>
-            <th title="atime 데이터 온도 — hot(최근 접근) → cold(오래 미접근)">온도 (atime)</th>
+            <th title="atime 데이터 온도 (용량) — hot(최근 접근) → cold(오래 미접근)">온도 (atime·용량)</th>
             <th>비고</th>
             <th></th>
           </tr>
