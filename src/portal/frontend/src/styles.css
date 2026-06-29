@@ -1421,6 +1421,16 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
   .scan-stats { grid-template-columns: repeat(auto-fit, minmax(5rem, 1fr)); }
   .scan-bar-row { grid-template-columns: 1fr; gap: 0.3rem; }
   .scan-bar-path { font-size: 0.8rem; }
+  /* scan request card: keep the expand chevron + checkbox + path on ONE header
+     line (they no longer each consume a full row); status/result/remark/actions
+     stack below as labeled rows. */
+  table.grid.scan-grid tr { display: flex; flex-wrap: wrap; align-items: center; column-gap: 0.4rem; }
+  table.grid.scan-grid td.col-toggle,
+  table.grid.scan-grid td.col-check { width: auto; flex: 0 0 auto; padding: 0.2rem 0; }
+  table.grid.scan-grid td.col-path { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+  table.grid.scan-grid td.col-path::before { display: none; }
+  table.grid.scan-grid td[data-label]:not(.col-path) { flex: 1 1 100%; }
+  table.grid.scan-grid td.row-actions { flex: 1 1 100%; }
 }
 
 /* batch detail header: route + meta card */

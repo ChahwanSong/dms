@@ -558,7 +558,7 @@ export default function ScanBatchDetail({
         </div>
       )}
 
-      <table className="grid">
+      <table className="grid scan-grid">
         <thead>
           <tr>
             <th className="col-toggle"></th>
@@ -623,7 +623,7 @@ export default function ScanBatchDetail({
                         </span>
                       )}
                     </td>
-                    <td className="col-check" data-label="선택" onClick={(e) => e.stopPropagation()}>
+                    <td className="col-check" onClick={(e) => e.stopPropagation()}>
                       <label className="check-cell">
                         <input
                           type="checkbox"
@@ -633,7 +633,7 @@ export default function ScanBatchDetail({
                         />
                       </label>
                     </td>
-                    <td data-label="경로" className="mono small">
+                    <td data-label="경로" className="mono small col-path">
                       {j.path}
                     </td>
                     <td data-label="상태">
