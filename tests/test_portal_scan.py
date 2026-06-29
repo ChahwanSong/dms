@@ -262,7 +262,21 @@ def test_scan_result_extracts_summary_fields():
                                          "scan_root": "a/b"}}}
     out = _scan_result(dj)
     assert out == {"file_count": 5, "directory_count": 2, "total_bytes": 99,
-                   "error_count": 1, "scan_root": "a/b", "tool": "dscan"}
+                   "error_count": 1, "scan_root": "a/b", "tool": "dscan",
+                   "atime_histogram": None}
+
+
+def test_scan_result_captures_atime_histogram():
+    hist = [
+        {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "count": 3},
+        {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "count": 1},
+    ]
+    dj = {"selected_tool": "dscan",
+          "result_summary": {"summary": {"file_count": 4, "directory_count": 1,
+                                         "total_bytes": 10, "error_count": 0,
+                                         "scan_root": "a", "atime_histogram": hist}}}
+    out = _scan_result(dj)
+    assert out["atime_histogram"] == hist
 
 
 # --- router option validation ----------------------------------------------

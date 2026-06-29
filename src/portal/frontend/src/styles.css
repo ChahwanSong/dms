@@ -1417,8 +1417,22 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
 .sbfill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; min-width: 3px; }
 .scan-bar-v { flex: 0 0 auto; width: 6rem; text-align: right; font-size: 0.72rem; color: var(--fg); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .scan-bars-more { margin-top: 0.45rem; }
+
+/* data scan: per-path atime data-temperature histogram (hot→cold) */
+.col-hist { min-width: 8rem; }
+.ahist-bar { display: flex; height: 0.7rem; width: 100%; max-width: 12rem; border-radius: 4px; overflow: hidden; background: rgba(148, 163, 184, 0.16); }
+.ahist-seg { height: 100%; min-width: 2px; }
+.ahist-full { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.2rem; }
+.ahist-row { display: grid; grid-template-columns: 4.5rem 1fr 3rem; gap: 0.5rem; align-items: center; }
+.ahist-label { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+.ahist-track { position: relative; height: 0.62rem; background: rgba(148, 163, 184, 0.16); border-radius: 4px; overflow: hidden; }
+.ahist-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; min-width: 2px; }
+.ahist-count { font-size: 0.72rem; text-align: right; color: var(--fg); font-variant-numeric: tabular-nums; }
+.ahist-count.muted { color: var(--muted); }
+
 @media (max-width: 720px) {
   .scan-stats { grid-template-columns: repeat(auto-fit, minmax(5rem, 1fr)); }
+  .ahist-bar { max-width: none; }
   .scan-bar-row { grid-template-columns: 1fr; gap: 0.3rem; }
   .scan-bar-path { font-size: 0.8rem; }
   /* scan request card: keep the expand chevron + checkbox + path on ONE header

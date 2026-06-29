@@ -54,6 +54,9 @@ def _scan_result(dms_job: dict[str, Any]) -> dict[str, Any]:
         "error_count": s.get("error_count"),
         "scan_root": s.get("scan_root"),
         "tool": s.get("selected_tool") or rs.get("tool") or dms_job.get("selected_tool"),
+        # atime data-temperature histogram (hot=recent access → cold), surfaced by
+        # the DM worker from the dscan report; None on older jobs.
+        "atime_histogram": s.get("atime_histogram"),
     }
 
 

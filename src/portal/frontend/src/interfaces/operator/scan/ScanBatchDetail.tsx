@@ -15,6 +15,7 @@ import { SpecGrid, type KV } from "./ui";
 import ScanBatchForm from "./ScanBatchForm";
 import ScanRequestEdit from "./ScanRequestEdit";
 import ScanResults from "./ScanResults";
+import { ScanHistBar, ScanHistFull } from "./ScanHist";
 import Loading from "../../../components/Loading";
 import ScanCsvModal from "./ScanCsvModal";
 
@@ -81,6 +82,13 @@ function RequestDetail({ j, roots }: { j: ScanRequest; roots: Record<string, str
             <SpecGrid items={res} />
           </section>
         </div>
+      )}
+
+      {r?.atime_histogram && r.atime_histogram.length > 0 && (
+        <section className="req-sec">
+          <h4>atime 데이터 온도 (hot → cold)</h4>
+          <ScanHistFull hist={r.atime_histogram} />
+        </section>
       )}
 
       <section className="req-sec">
@@ -251,8 +259,8 @@ export default function ScanBatchDetail({
   // Storage is batch-level (uniform across rows); derive from the loaded requests.
   const batchStorage = jobs[0]?.storage;
 
-  // columns: chevron + checkbox + 경로/상태/결과/비고(4) + actions
-  const cols = 7;
+  // columns: chevron + checkbox + 경로/상태/결과/온도/비고(5) + actions
+  const cols = 8;
 
   const mutable = status !== "scanning"; // request set editable when not scanning
   const hasStorage = Boolean(batchStorage);
@@ -576,6 +584,7 @@ export default function ScanBatchDetail({
             <th>경로 (path)</th>
             <th>상태</th>
             <th>결과 (파일 · 크기)</th>
+            <th title="atime 데이터 온도 — hot(최근 접근) → cold(오래 미접근)">온도 (atime)</th>
             <th>비고</th>
             <th></th>
           </tr>
@@ -643,6 +652,9 @@ export default function ScanBatchDetail({
                       {j.result
                         ? `${(j.result.file_count ?? 0).toLocaleString()} · ${fmtBytes(j.result.total_bytes)}`
                         : "—"}
+                    </td>
+                    <td data-label="온도" className="col-hist">
+                      <ScanHistBar hist={j.result?.atime_histogram} />
                     </td>
                     <td data-label="비고" className="small">
                       {j.error ? (

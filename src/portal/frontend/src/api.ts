@@ -268,8 +268,18 @@ export interface BatchUpdateInput {
 
 // --- data scan (DM scan batches) ---------------------------------------
 
+// One bucket of the dscan atime time-histogram (data temperature). Buckets run
+// hot (recently accessed, [0d,1d]) → cold (long untouched, [3651d,INF]).
+export interface AtimeBucket {
+  bucket?: string | null; // e.g. "[31d,90d]"
+  min_age_days?: number | null;
+  max_age_days?: number | null; // null = open-ended (oldest bucket)
+  count?: number | null;
+}
+
 // Flat scan result the orchestrator stores on a succeeded request (DMS scan is
-// read-only: file/dir/byte/error counts + the resolved scan_root and tool).
+// read-only: file/dir/byte/error counts + the resolved scan_root and tool, plus
+// the atime data-temperature histogram lifted from the dscan report).
 export interface ScanResult {
   file_count?: number | null;
   directory_count?: number | null;
@@ -277,6 +287,7 @@ export interface ScanResult {
   error_count?: number | null;
   scan_root?: string | null;
   tool?: string | null;
+  atime_histogram?: AtimeBucket[] | null;
   [k: string]: unknown;
 }
 
