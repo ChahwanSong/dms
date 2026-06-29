@@ -180,3 +180,30 @@ def test_execute_returns_to_previewed_when_undecided_remain():
         assert db.requests[r2]["state"] == "preview_ready"
         assert db.batches["b1"]["status"] == "previewed"
     asyncio.run(go())
+
+
+class _ListDms:
+    """Captures the list_data_jobs kwargs so we can assert the operation scope."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def list_data_jobs(
+        self, *, actor: str, limit: int = 500, offset: int = 0,
+        operation: str | None = None, state: str | None = None,
+        storage_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.calls.append({"operation": operation, "limit": limit})
+        return [{"request_id": "r1", "job_id": "j1"}]
+
+
+def test_data_jobs_by_request_scopes_to_sync():
+    """Reconcile-by-request_id must filter to data.sync so a fresh sync request_id
+    never matches a concurrent scan/rm job (mirrors the scan orchestrator)."""
+    async def go():
+        dms = _ListDms()
+        orch = BackupOrchestrator(OrchDB(), dms, Settings())
+        out = await orch._data_jobs_by_request("mtls:op")
+        assert dms.calls[0]["operation"] == "data.sync"
+        assert out["r1"]["job_id"] == "j1"
+    asyncio.run(go())

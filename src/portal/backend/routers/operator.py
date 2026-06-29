@@ -59,8 +59,13 @@ def operator_router() -> APIRouter:
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> list[dict[str, Any]]:
+        # Single-fetch the full bounded set (limit=10000) so the inventory never
+        # silently truncates at the DMS default page size. Storage mappings number
+        # in the tens–hundreds, so this stays one cheap call.
         return await _forward(
-            dms.list_storage_mappings(actor=_actor(user), cluster_name=cluster_name)
+            dms.list_storage_mappings(
+                actor=_actor(user), cluster_name=cluster_name, limit=10000
+            )
         )
 
     @router.get("/storage-mappings/{storage_name}")

@@ -48,6 +48,49 @@ async def _section(coro) -> dict[str, Any]:
         return {"data": None, "error": str(exc.detail)}
 
 
+# Single-fetch caps for the bounded dashboard lists. Storage mappings and the
+# in-flight / attention-state runs are naturally bounded, so the portal fetches the
+# whole set in ONE call with a high cap and flags `truncated` only if the cap was
+# actually hit (DMS then had even more — should never happen at these sizes). Data
+# jobs are GROWING history, so that table stays capped and gets its true total from
+# the uncapped COUNT summary instead of fetching everything.
+_STORAGE_LIMIT = 10000
+_RUNS_ACTIVE_LIMIT = 1000
+_RUNS_STALE_LIMIT = 2000
+_DATA_JOBS_CAP = 500
+
+
+def _mark_truncated(section: dict[str, Any], limit: int) -> dict[str, Any]:
+    """Flag a single-fetch `_section` as truncated iff it returned the full cap."""
+    data = section.get("data")
+    section["truncated"] = bool(isinstance(data, list) and len(data) >= limit)
+    return section
+
+
+def _data_jobs_total(
+    summary: dict[str, Any] | None,
+    *,
+    state: str | None,
+    operation: str | None,
+    storage_name: str | None,
+) -> int | None:
+    """Exact filtered total from the uncapped data-job COUNT summary, used when the
+    capped data-jobs page is truncated. Returns None when the active filter combo
+    can't be derived from the marginal counts (storage_name, or state+operation
+    together) — the caller then reports the total as unknown rather than wrong."""
+    if not isinstance(summary, dict):
+        return None
+    if storage_name or (state and operation):
+        return None
+    if state:
+        val = (summary.get("by_state") or {}).get(state)
+    elif operation:
+        val = (summary.get("by_operation") or {}).get(operation)
+    else:
+        val = summary.get("total")
+    return val if isinstance(val, int) else None
+
+
 _FS_BACKENDS = {"cephfs", "gpfs", "wekafs"}
 
 # Volcano job phases that are finished — anything else counts as "active".
@@ -419,8 +462,10 @@ def dashboard_router(settings: Settings) -> APIRouter:
             _section(dms.get_control_state(actor=actor)),
             _section(dms.get_work_summary(actor=actor)),
             _section(dms.get_data_job_summary(actor=actor)),
-            _section(dms.list_agent_reports(actor=actor)),
-            _section(dms.list_storage_mappings(actor=actor)),
+            # latest_per_node => one row per node/role; node health stays complete
+            # AND cheap on this polled path (no agent-report history scan/transfer).
+            _section(dms.list_agent_reports(actor=actor, latest_per_node=True)),
+            _section(dms.list_storage_mappings(actor=actor, limit=_STORAGE_LIMIT)),
             _section(dms.get_volcano_status(actor=actor)),
         )
         # node counts derived from each agent's LATEST report (Fresh/Stale by role)
@@ -458,10 +503,12 @@ def dashboard_router(settings: Settings) -> APIRouter:
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> list[dict[str, Any]]:
-        # Fetch all reports, collapse to each agent's latest, then filter by the
-        # latest report's freshness — so the filter reflects current node state,
-        # not historical reports.
-        reports = await dms.list_agent_reports(actor=_actor(user, settings))
+        # latest_per_node => DMS already returns one row per node/role (newest);
+        # the dedup below is now a cheap safety net. Complete node health without
+        # transferring the accumulating report history.
+        reports = await dms.list_agent_reports(
+            actor=_actor(user, settings), latest_per_node=True
+        )
         latest = _latest_per_node(reports)
         # os_metrics (cpu/mem/load/disk) is host-level — lift it from the agent's
         # full report and SHARE it across a node's role-rows, so a node shows
@@ -498,9 +545,15 @@ def dashboard_router(settings: Settings) -> APIRouter:
     async def control_hosts(
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
-    ) -> list[dict[str, Any]]:
-        mappings = await dms.list_storage_mappings(actor=_actor(user, settings))
-        return _control_hosts(mappings)
+    ) -> dict[str, Any]:
+        # Single-fetch the bounded mapping set; CSI control hosts are a subset.
+        mappings = await dms.list_storage_mappings(
+            actor=_actor(user, settings), limit=_STORAGE_LIMIT
+        )
+        return {
+            "items": _control_hosts(mappings),
+            "truncated": len(mappings) >= _STORAGE_LIMIT,
+        }
 
     @router.get("/runs")
     async def runs(
@@ -509,9 +562,11 @@ def dashboard_router(settings: Settings) -> APIRouter:
     ) -> dict[str, Any]:
         actor = _actor(user, settings)
         active, stale = await asyncio.gather(
-            _section(dms.list_active_runs(actor=actor)),
-            _section(dms.list_stale_runs(actor=actor)),
+            _section(dms.list_active_runs(actor=actor, limit=_RUNS_ACTIVE_LIMIT)),
+            _section(dms.list_stale_runs(actor=actor, limit=_RUNS_STALE_LIMIT)),
         )
+        _mark_truncated(active, _RUNS_ACTIVE_LIMIT)
+        _mark_truncated(stale, _RUNS_STALE_LIMIT)
         return {"active": active, "stale": stale}
 
     @router.get("/requests")
@@ -519,17 +574,33 @@ def dashboard_router(settings: Settings) -> APIRouter:
         state: str | None = Query(default=None),
         operation: str | None = Query(default=None),
         storage_name: str | None = Query(default=None),
-        limit: int = Query(default=100, le=1000),
+        limit: int = Query(default=_DATA_JOBS_CAP, le=1000),
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
-    ) -> list[dict[str, Any]]:
-        return await dms.list_data_jobs(
-            actor=_actor(user, settings),
+    ) -> dict[str, Any]:
+        # Data jobs are GROWING history (~10k/day). Keep a CAPPED page (never
+        # fetch-all) and, only when that page is truncated, get the exact total from
+        # the uncapped COUNT summary (one cheap GROUP BY, not a row transfer).
+        actor = _actor(user, settings)
+        jobs = await dms.list_data_jobs(
+            actor=actor,
             limit=limit,
             state=state,
             operation=operation,
             storage_name=storage_name,
         )
+        truncated = len(jobs) >= limit
+        if not truncated:
+            total: int | None = len(jobs)  # we already have every matching row
+        else:
+            try:
+                summary = await dms.get_data_job_summary(actor=actor)
+            except DmsApiError:
+                summary = None
+            total = _data_jobs_total(
+                summary, state=state, operation=operation, storage_name=storage_name
+            )
+        return {"jobs": jobs, "total": total, "truncated": truncated}
 
     @router.get("/volcano")
     async def volcano(

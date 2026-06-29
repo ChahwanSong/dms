@@ -6,16 +6,21 @@ import Section from "./Section";
 export default function RunsTable({ defaultOpen = false }: { defaultOpen?: boolean }) {
   const [active, setActive] = useState<RunRow[]>([]);
   const [stale, setStale] = useState<RunRow[]>([]);
+  const [truncated, setTruncated] = useState(false);
   useEffect(() => {
     operatorApi.dashboard.runs().then((r) => {
       setActive(r.active.data || []);
       setStale(r.stale.data || []);
-    }).catch(() => { setActive([]); setStale([]); });
+      setTruncated(Boolean(r.active.truncated || r.stale.truncated));
+    }).catch(() => { setActive([]); setStale([]); setTruncated(false); });
   }, []);
   const rows = [...stale, ...active];
-  const badge = stale.length > 0
-    ? <span className="err-num">(stale {stale.length})</span>
-    : <span className="muted small">({rows.length})</span>;
+  const badge = (
+    <span className="muted small">
+      {stale.length > 0 ? <span className="err-num">(stale {stale.length})</span> : `(${rows.length})`}
+      {truncated && <>{" "}<span className="chip tone-warn">일부만 표시</span></>}
+    </span>
+  );
   return (
     <Section title="스케줄러 활동" badge={badge} defaultOpen={defaultOpen}>
       <table className="grid"><thead><tr>

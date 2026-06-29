@@ -417,9 +417,30 @@ export interface RunRow {
   resource_key?: string;
 }
 
+// Runs are single-fetched with a high cap; `truncated` is set only if that cap was
+// actually hit (in-flight/attention runs are bounded, so this should never trip).
+export interface RunsSection {
+  data: RunRow[] | null;
+  error: string | null;
+  truncated?: boolean;
+}
+export interface DashRunsResp {
+  active: RunsSection;
+  stale: RunsSection;
+}
+
 export interface DashRequest {
   job_id: string; operation: string; storage_name: string; state: string;
   selected_tool?: string | null; updated_at?: string;
+}
+
+// Data-jobs table payload. `jobs` is a CAPPED page (history grows ~10k/day);
+// `total` is the exact count from the uncapped COUNT summary (null when the active
+// filter combo can't be derived); `truncated` means more rows exist than shown.
+export interface DashRequestsResp {
+  jobs: DashRequest[];
+  total: number | null;
+  truncated: boolean;
 }
 
 export interface AttentionItem {
@@ -500,6 +521,12 @@ export interface ControlHost {
   can_mutate?: boolean;
   permissions?: { create?: boolean | null; patch?: boolean | null; delete?: boolean | null };
   detail?: string | null;
+}
+// CSI control hosts are derived from the bounded storage-mapping set; `truncated`
+// is set only if that single fetch hit the high cap.
+export interface ControlHostsResp {
+  items: ControlHost[];
+  truncated: boolean;
 }
 
 // Per-node OS-metric time-series for the worker-node workload graphs.
@@ -798,9 +825,7 @@ export const operatorApi = {
         `/api/operator/dashboard/node-metrics${sinceSeconds ? `?since_seconds=${sinceSeconds}` : ""}`,
       ),
     runs: () =>
-      request<{ active: Section<RunRow[]>; stale: Section<RunRow[]> }>(
-        "/api/operator/dashboard/runs",
-      ),
+      request<DashRunsResp>("/api/operator/dashboard/runs"),
     requests: (opts?: { state?: string; operation?: string; storage_name?: string; limit?: number }) => {
       const q = new URLSearchParams();
       if (opts?.state) q.set("state", opts.state);
@@ -808,7 +833,7 @@ export const operatorApi = {
       if (opts?.storage_name) q.set("storage_name", opts.storage_name);
       if (opts?.limit != null) q.set("limit", String(opts.limit));
       const qs = q.toString();
-      return request<DashRequest[]>(`/api/operator/dashboard/requests${qs ? `?${qs}` : ""}`);
+      return request<DashRequestsResp>(`/api/operator/dashboard/requests${qs ? `?${qs}` : ""}`);
     },
     attention: () =>
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
@@ -835,7 +860,7 @@ export const operatorApi = {
         { method: "DELETE" },
       ),
     controlHosts: () =>
-      request<ControlHost[]>("/api/operator/dashboard/control-hosts"),
+      request<ControlHostsResp>("/api/operator/dashboard/control-hosts"),
     volcano: () =>
       request<VolcanoStatus>("/api/operator/dashboard/volcano"),
     volcanoMetrics: () =>

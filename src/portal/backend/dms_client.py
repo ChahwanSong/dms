@@ -95,9 +95,21 @@ class DmsClient:
     # --- storage mappings -------------------------------------------------
 
     async def list_storage_mappings(
-        self, *, actor: str | None = None, cluster_name: str | None = None
+        self,
+        *,
+        actor: str | None = None,
+        cluster_name: str | None = None,
+        limit: int = 10000,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        params = {"cluster_name": cluster_name} if cluster_name else None
+        # Storage mappings are bounded (tens–hundreds), so single-fetch the whole
+        # set with a high limit — the DMS default page size would otherwise silently
+        # truncate the inventory / dashboard. (offset kept for symmetry; unused.)
+        params: dict[str, Any] = {"limit": limit}
+        if cluster_name:
+            params["cluster_name"] = cluster_name
+        if offset:
+            params["offset"] = offset
         return await self._request("GET", _OPS, actor=actor, params=params)
 
     async def get_storage_mapping(
@@ -199,13 +211,18 @@ class DmsClient:
         *,
         actor: str,
         limit: int = 500,
+        offset: int = 0,
         state: str | None = None,
         operation: str | None = None,
         storage_name: str | None = None,
     ) -> list[dict[str, Any]]:
         # Newest-first; used to resolve a freshly-submitted request_id -> job_id
-        # (DMS ignores a request_id query filter, so we match client-side).
+        # (DMS ignores a request_id query filter, so we match client-side). This is
+        # GROWING history (~10k/day) — callers MUST keep `limit` capped and never
+        # page through the whole table; use /data-jobs/summary for exact totals.
         params: dict[str, Any] = {"limit": limit}
+        if offset:
+            params["offset"] = offset
         if state:
             params["state"] = state
         if operation:
@@ -227,11 +244,28 @@ class DmsClient:
         )
 
     async def list_agent_reports(
-        self, *, actor: str, freshness: str | None = None
+        self,
+        *,
+        actor: str,
+        freshness: str | None = None,
+        latest_per_node: bool = False,
+        limit: int | None = None,
+        offset: int | None = None,
     ) -> list[dict[str, Any]]:
-        params = {"freshness": freshness} if freshness else None
+        # latest_per_node=true => DMS returns ONE row per (node, role) = its newest
+        # report, so node health is COMPLETE (all nodes) and CHEAP (~#nodes rows)
+        # even when polled — no scanning the accumulating report history.
+        params: dict[str, Any] = {}
+        if freshness:
+            params["freshness"] = freshness
+        if latest_per_node:
+            params["latest_per_node"] = True
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
         return await self._request(
-            "GET", f"{_OPS_BASE}/agent-reports", actor=actor, params=params
+            "GET", f"{_OPS_BASE}/agent-reports", actor=actor, params=params or None
         )
 
     async def get_data_job_summary(self, *, actor: str) -> dict[str, Any]:
@@ -252,15 +286,27 @@ class DmsClient:
         )
 
     async def list_active_runs(
-        self, *, actor: str, limit: int = 200
+        self, *, actor: str, limit: int = 1000, offset: int = 0
     ) -> list[dict[str, Any]]:
+        # In-flight runs are bounded; single-fetch a high limit (caller flags
+        # `truncated` only if the cap is actually hit).
+        params: dict[str, Any] = {"limit": limit}
+        if offset:
+            params["offset"] = offset
         return await self._request(
-            "GET", f"{_OPS_BASE}/runs/active", actor=actor, params={"limit": limit}
+            "GET", f"{_OPS_BASE}/runs/active", actor=actor, params=params
         )
 
-    async def list_stale_runs(self, *, actor: str) -> list[dict[str, Any]]:
+    async def list_stale_runs(
+        self, *, actor: str, limit: int = 2000, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        # Attention-state (stale/recovery) runs are a bounded problem subset; the
+        # DMS default is small (100), so send a high limit to fetch them all.
+        params: dict[str, Any] = {"limit": limit}
+        if offset:
+            params["offset"] = offset
         return await self._request(
-            "GET", f"{_OPS_BASE}/runs/stale", actor=actor
+            "GET", f"{_OPS_BASE}/runs/stale", actor=actor, params=params
         )
 
     async def list_action_required(self, *, actor: str) -> list[dict[str, Any]]:
@@ -272,7 +318,7 @@ class DmsClient:
         return await self._request("GET", f"{_OPS_BASE}/volcano", actor=actor)
 
     async def volcano_job_metrics(
-        self, *, actor: str, limit: int = 300
+        self, *, actor: str, limit: int = 2000
     ) -> dict[str, Any]:
         # Per-job Volcano lifecycle metrics (timestamps/latencies/resources) for the
         # dashboard throughput/latency/top-offenders views. Read-only.

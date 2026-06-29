@@ -13,11 +13,21 @@ function yn(v?: boolean | null): string {
 // next to 도달; per-row detail is on hover. Data from DMS sanity (mutation_observed).
 export default function ControlHostsTable() {
   const [rows, setRows] = useState<ControlHost[]>([]);
+  const [truncated, setTruncated] = useState(false);
   useEffect(() => {
-    operatorApi.dashboard.controlHosts().then(setRows).catch(() => setRows([]));
+    operatorApi.dashboard.controlHosts()
+      .then((r) => { setRows(r.items); setTruncated(r.truncated); })
+      .catch(() => { setRows([]); setTruncated(false); });
   }, []);
   return (
-    <Section title="CSI control host" badge={<span className="muted small">({rows.length})</span>}>
+    <Section
+      title="CSI control host"
+      badge={
+        <span className="muted small">
+          ({rows.length}){truncated && <>{" "}<span className="chip tone-warn">일부만 표시</span></>}
+        </span>
+      }
+    >
       <table className="grid">
         <thead>
           <tr>

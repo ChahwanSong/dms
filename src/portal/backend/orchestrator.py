@@ -290,7 +290,11 @@ class BackupOrchestrator:
 
     async def _data_jobs_by_request(self, actor: str) -> dict[str, dict[str, Any]]:
         try:
-            jobs = await self._dms.list_data_jobs(actor=actor, limit=500)
+            # Scope to sync jobs (mirrors the scan orchestrator's data.scan filter)
+            # so a freshly-submitted sync request_id never matches a scan/rm job.
+            jobs = await self._dms.list_data_jobs(
+                actor=actor, limit=500, operation="data.sync"
+            )
         except DmsApiError as exc:
             log.warning("list_data_jobs failed: %s", exc)
             return {}

@@ -5,17 +5,32 @@ import Section from "./Section";
 
 const STATES = ["", "Running", "Pending", "ConfirmPending", "Succeeded", "Failed"];
 const OPS = ["", "data.sync", "data.scan", "data.rm"];
+// Data jobs are growing history — fetch a capped page; the backend reports the
+// exact total + a truncated flag (never a fetch-all).
+const LIMIT = 500;
 
 export default function RequestsTable({ defaultOpen = false }: { defaultOpen?: boolean }) {
   const [rows, setRows] = useState<DashRequest[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const [state, setState] = useState("");
   const [op, setOp] = useState("");
   useEffect(() => {
-    operatorApi.dashboard.requests({ state: state || undefined, operation: op || undefined, limit: 100 })
-      .then(setRows).catch(() => setRows([]));
+    operatorApi.dashboard.requests({ state: state || undefined, operation: op || undefined, limit: LIMIT })
+      .then((r) => { setRows(r.jobs); setTotal(r.total); setTruncated(r.truncated); })
+      .catch(() => { setRows([]); setTotal(null); setTruncated(false); });
   }, [state, op]);
+  const countLabel = total != null ? `표시 ${rows.length} / 전체 ${total}` : `표시 ${rows.length}`;
   return (
-    <Section title="요청" badge={<span className="muted small">({rows.length})</span>} defaultOpen={defaultOpen}>
+    <Section
+      title="요청"
+      badge={
+        <span className="muted small">
+          ({countLabel}){truncated && <>{" "}<span className="chip tone-warn">일부만 표시</span></>}
+        </span>
+      }
+      defaultOpen={defaultOpen}
+    >
       <div className="inv-actions dash-filters">
         <select value={state} onChange={(e) => setState(e.target.value)}>
           {STATES.map((s) => <option key={s} value={s}>{s || "모든 상태"}</option>)}
@@ -24,6 +39,9 @@ export default function RequestsTable({ defaultOpen = false }: { defaultOpen?: b
           {OPS.map((o) => <option key={o} value={o}>{o || "모든 op"}</option>)}
         </select>
       </div>
+      {truncated && (
+        <div className="muted small">최신 {rows.length}건만 표시 — 상태/op 필터로 좁혀 보세요.</div>
+      )}
       <table className="grid"><thead><tr>
         <th>job</th><th>op</th><th>storage</th><th>상태</th><th>tool</th><th>갱신</th>
       </tr></thead><tbody>
