@@ -1698,6 +1698,17 @@ def _scan_result_summary(
         job=job, preflight=preflight, adapter_result=adapter_result
     )
     report_uri = _artifact_child_uri(artifact_uri, "dscan-report.json")
+    summary = {
+        "file_count": int(observed_summary.get("file_count", 0)),
+        "directory_count": int(observed_summary.get("directory_count", 0)),
+        "total_bytes": int(observed_summary.get("total_bytes", 0)),
+        "error_count": int(observed_summary.get("error_count", 0)),
+        "scan_root": target.get("path") or job.get("target"),
+    }
+    atime_histogram = _scan_atime_histogram(artifact_uri)
+    if atime_histogram is not None:
+        # data temperature (hot=recent access → cold) for the portal's per-path histogram
+        summary["atime_histogram"] = atime_histogram
     return {
         "status": "Succeeded",
         "tool": job.get("selected_tool") or "dscan",
@@ -1708,13 +1719,7 @@ def _scan_result_summary(
         "report_uri": report_uri,
         "scan_report_uri": report_uri,
         "summary_uri": _artifact_child_uri(artifact_uri, "summary.json"),
-        "summary": {
-            "file_count": int(observed_summary.get("file_count", 0)),
-            "directory_count": int(observed_summary.get("directory_count", 0)),
-            "total_bytes": int(observed_summary.get("total_bytes", 0)),
-            "error_count": int(observed_summary.get("error_count", 0)),
-            "scan_root": target.get("path") or job.get("target"),
-        },
+        "summary": summary,
         "summary_source": "artifact" if parsed_summary else "adapter_observed_state",
         "preflight_status": preflight.get("status"),
         "volcano_job_ref": _volcano_job_ref(adapter_result),
@@ -1951,6 +1956,46 @@ def _normalize_scan_summary(payload: Any) -> dict[str, Any] | None:
         ),
         "error_count": len(broken_paths) if isinstance(broken_paths, list) else 0,
     }
+
+
+def _scan_atime_histogram(artifact_uri: str | None) -> list[dict[str, Any]] | None:
+    """Surface the dscan report's atime time-histogram (data temperature: hot =
+    recently accessed → cold = long untouched). The scan launcher already writes
+    ``dscan-report.json``; we just lift its ``time_histograms.atime`` buckets into
+    the result summary so the portal can render a per-path hot/cold histogram.
+    Best-effort — returns None when the report is absent/invalid (older jobs)."""
+    if not artifact_uri:
+        return None
+    parsed = urlparse(artifact_uri)
+    if parsed.scheme != "file":
+        return None
+    report_path = _artifact_path_within(Path(parsed.path), "dscan-report.json")
+    if report_path is None or not report_path.exists():
+        return None
+    try:
+        with report_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    time_histograms = payload.get("time_histograms")
+    atime = time_histograms.get("atime") if isinstance(time_histograms, dict) else None
+    if not isinstance(atime, list):
+        return None
+    buckets: list[dict[str, Any]] = []
+    for entry in atime:
+        if not isinstance(entry, dict):
+            continue
+        buckets.append(
+            {
+                "bucket": entry.get("bucket"),
+                "min_age_days": entry.get("min_age_days"),
+                "max_age_days": entry.get("max_age_days"),
+                "count": int(entry.get("count", 0) or 0),
+            }
+        )
+    return buckets or None
 
 
 def _artifact_requires_local_parse(artifact_uri: str | None) -> bool:

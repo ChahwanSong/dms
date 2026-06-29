@@ -352,6 +352,11 @@ def test_scan_parses_mpifileutils_dscan_report_artifact(harness, tmp_path):
         "total_bytes": 0,
         "error_count": 1,
         "scan_root": "project/input",
+        "atime_histogram": [
+            {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "count": 1},
+            {"bucket": "[2d,7d]", "min_age_days": 2, "max_age_days": 7, "count": 0},
+            {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "count": 1},
+        ],
     }
     assert job["result_summary"]["report_uri"].endswith("/dscan-report.json")
     assert job["result_summary"]["summary_source"] == "artifact"
@@ -758,6 +763,13 @@ class DscanReportFileAdapter(MissingSummaryFileAdapter):
                 "total_directories": 1,
                 "total_symlinks": 0,
                 "total_other": 0
+              },
+              "time_histograms": {
+                "atime": [
+                  {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "count": 1},
+                  {"bucket": "[2d,7d]", "min_age_days": 2, "max_age_days": 7, "count": 0},
+                  {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "count": 1}
+                ]
               },
               "broken_paths": [
                 {"path": "/dms/target/project/input/unreadable", "reason": ["unreadable"]}
