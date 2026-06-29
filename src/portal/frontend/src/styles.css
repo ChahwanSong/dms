@@ -1522,3 +1522,61 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
   /* stacked-card mode: the toggle cell shouldn't reserve a label column */
   .col-toggle { width: auto; }
 }
+
+/* ===================== virtual-scroll request list (batch detail) =====================
+   The backup/scan batch-detail request lists use react-virtuoso so a batch with
+   thousands of requests renders smoothly: only on-screen rows mount and more load
+   on scroll. Rows are DIVs on a CSS grid (NOT a table) so an expanded row can grow
+   its own height and Virtuoso re-measures it. The header row and the data rows
+   share the same grid-template (.vgrid-bk for backup, .vgrid-sc for scan). */
+.vtable { margin-top: 1rem; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.vhead-wrap { background: #0b1220; border-bottom: 1px solid var(--border); }
+/* Virtuoso needs a concrete height on its scroller; it fills this bounded box. */
+.vscroll { height: min(70vh, 900px); }
+.vempty { padding: 1rem 0.7rem; color: var(--muted); font-size: 0.88rem; }
+.vfoot { padding: 0.6rem 0.7rem; }
+.vfoot .loading-head { margin: 0; }
+
+/* a row (header line or data line): grid via the per-screen template class */
+.vrow { display: grid; align-items: center; gap: 0.6rem; padding: 0.5rem 0.6rem; font-size: 0.88rem; }
+.vrow.vhead { padding-top: 0.55rem; padding-bottom: 0.55rem; color: var(--muted); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; }
+.vitem { border-bottom: 1px solid var(--border); }
+.vitem:last-child { border-bottom: none; }
+.vitem.open { background: rgba(255, 255, 255, 0.02); }
+.vrow.expandable { cursor: pointer; }
+.vrow.expandable:hover { background: rgba(255, 255, 255, 0.03); }
+.vrow.expandable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.vrow.expandable:hover .expand-toggle { color: var(--fg); }
+.vrow.row-open { border-bottom-color: transparent; }
+
+.vcell { min-width: 0; overflow-wrap: anywhere; }
+.vcell.vc-toggle { text-align: center; }
+.vcell.vc-check { display: flex; align-items: center; justify-content: center; }
+.vcell.row-actions { display: flex; gap: 0.35rem; justify-content: flex-end; flex-wrap: nowrap; white-space: nowrap; }
+.vcell.row-actions button { flex: 0 0 auto; }
+
+/* expanded per-request detail panel — sits below the summary line, same item */
+.vdetail { padding: 0 0.6rem 0.4rem 1.8rem; background: rgba(255, 255, 255, 0.02); }
+
+/* per-screen column templates (header + rows MUST match to stay aligned) */
+.vgrid-bk { grid-template-columns: 1.8rem 2.2rem minmax(0, 2fr) minmax(0, 2fr) 6rem minmax(0, 1fr) minmax(0, 1.3fr) auto; }
+.vgrid-sc { grid-template-columns: 1.8rem 2.2rem minmax(0, 2fr) 6rem minmax(0, 1fr) minmax(8rem, 1.2fr) minmax(0, 1fr) auto; }
+
+@media (max-width: 720px) {
+  .vscroll { height: min(78vh, 1000px); }
+  /* hide the column-header row on phones (cards carry their own field labels);
+     mirrors the old table thead{display:none}, so select-all stays desktop-only. */
+  .vrow.vhead { display: none; }
+  /* card layout: chevron + checkbox + primary path on ONE header line; the other
+     fields stack as full-width labeled rows; actions span the bottom. */
+  .vrow { display: flex; flex-wrap: wrap; align-items: center; column-gap: 0.4rem; row-gap: 0.15rem; padding: 0.55rem 0.75rem; }
+  .vcell.vc-toggle, .vcell.vc-check { flex: 0 0 auto; padding: 0; }
+  .vcell.vc-primary { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+  .vcell:not(.vc-toggle):not(.vc-check):not(.vc-primary) { flex: 1 1 100%; display: flex; align-items: baseline; gap: 0.5rem; }
+  .vcell[data-label]:not(.vc-primary)::before {
+    content: attr(data-label); flex: 0 0 5rem; color: var(--muted);
+    font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.02em; line-height: 1.5;
+  }
+  .vcell.row-actions { flex: 1 1 100%; justify-content: flex-end; padding-top: 0.45rem; margin-top: 0.25rem; border-top: 1px solid var(--border); }
+  .vdetail { padding-left: 0.6rem; }
+}

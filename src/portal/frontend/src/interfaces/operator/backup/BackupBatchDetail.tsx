@@ -1,5 +1,6 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { operatorApi, type BackupBatch, type BackupRequest } from "../../../api";
+import VirtualRows from "../../../components/VirtualRows";
 import {
   batchStatus,
   requestState,
@@ -149,8 +150,12 @@ export default function BackupBatchDetail({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
-  const offsetRef = useRef(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // guards overlapping page loads (endReached can fire repeatedly while scrolling)
+  const loadingRef = useRef(false);
+  // mirror of `jobs` so the load callbacks can read the loaded count without
+  // re-creating themselves on every append.
+  const jobsRef = useRef<BackupRequest[]>([]);
   const [showEdit, setShowEdit] = useState(false);
   const [editingReq, setEditingReq] = useState<BackupRequest | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -182,30 +187,70 @@ export default function BackupBatchDetail({
       .catch(() => {});
   }, []);
 
-  const loadJobs = useCallback(
-    async (reset: boolean) => {
-      const offset = reset ? 0 : offsetRef.current;
-      const page = await operatorApi.backup.requests(batchId, {
-        state: stateFilter || undefined,
-        limit: PAGE,
-        offset,
-      });
-      offsetRef.current = offset + page.length;
-      setHasMore(page.length === PAGE);
-      setJobs((prev) => (reset ? page : [...prev, ...page]));
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
+
+  // Load a page of requests. "reset" replaces the list (initial load, filter
+  // change, post-mutation reload); "append" adds the next PAGE for infinite
+  // scroll. The append path is guarded so overlapping endReached calls don't
+  // double-load the same page.
+  const loadPage = useCallback(
+    async (mode: "reset" | "append") => {
+      if (mode === "append" && loadingRef.current) return;
+      loadingRef.current = true;
+      if (mode === "append") setLoadingMore(true);
+      try {
+        const offset = mode === "reset" ? 0 : jobsRef.current.length;
+        const page = await operatorApi.backup.requests(batchId, {
+          state: stateFilter || undefined,
+          limit: PAGE,
+          offset,
+        });
+        setJobs((prev) => (mode === "reset" ? page : [...prev, ...page]));
+      } finally {
+        loadingRef.current = false;
+        if (mode === "append") setLoadingMore(false);
+      }
     },
     [batchId, stateFilter],
   );
 
+  // Re-fetch the currently-loaded rows in place (offset 0, same count) so live
+  // polling refreshes states/results WITHOUT collapsing the list back to page 1
+  // or jumping the scroll. Selection/expand are keyed by id, so they survive the
+  // replace. Skipped while a page load is in flight.
+  const refreshInPlace = useCallback(async () => {
+    if (loadingRef.current) return;
+    const limit = Math.min(Math.max(jobsRef.current.length, PAGE), 2000);
+    const page = await operatorApi.backup.requests(batchId, {
+      state: stateFilter || undefined,
+      limit,
+      offset: 0,
+    });
+    setJobs(page);
+  }, [batchId, stateFilter]);
+
   const reload = useCallback(async () => {
     try {
-      const [b] = await Promise.all([operatorApi.backup.get(batchId)]);
+      const b = await operatorApi.backup.get(batchId);
       setBatch(b);
-      await loadJobs(true);
+      await loadPage("reset");
     } catch (e) {
       setError(errMsg(e));
     }
-  }, [batchId, loadJobs]);
+  }, [batchId, loadPage]);
+
+  // Background poll tick: refresh batch aggregates + loaded rows in place.
+  const poll = useCallback(async () => {
+    try {
+      const b = await operatorApi.backup.get(batchId);
+      setBatch(b);
+      await refreshInPlace();
+    } catch {
+      /* ignore transient poll errors */
+    }
+  }, [batchId, refreshInPlace]);
 
   useEffect(() => {
     reload();
@@ -214,13 +259,14 @@ export default function BackupBatchDetail({
   // Live-poll while a batch is actively previewing or running.
   useEffect(() => {
     if (!batch || (batch.status !== "previewing" && batch.status !== "running")) return;
-    const t = setInterval(reload, 4000);
+    const t = setInterval(poll, 4000);
     return () => clearInterval(t);
-  }, [batch, reload]);
+  }, [batch, poll]);
 
-  // Keep the selection limited to currently-visible rows. Rows can vanish after
-  // a delete / CSV replace / filter change; stale ids would otherwise leave the
-  // bulk bar showing a "N개 선택" count that no action can act on.
+  // Keep the selection ⊆ the LOADED rows (`jobs` holds every loaded page, not
+  // just the on-screen virtual window — so selection survives scrolling and
+  // appends). Rows can still vanish after a delete / CSV replace / filter change;
+  // those stale ids are pruned so the bulk bar count stays actionable.
   useEffect(() => {
     setSelected((prev) => {
       if (prev.size === 0) return prev;
@@ -304,8 +350,11 @@ export default function BackupBatchDetail({
   // selective approval is available while a batch is previewed or running and
   // still has undecided preview_ready requests.
   const canSelect = (status === "previewed" || status === "running") && (counts.preview_ready ?? 0) > 0;
-  // columns: chevron + checkbox + 출발/대상/상태/Preview/비고(5) + actions
-  const cols = 8;
+  // total rows for the active view (state_counts is authoritative): drives the
+  // infinite-load stop condition + the "loaded / total" footer.
+  const total = stateFilter
+    ? counts[stateFilter] ?? 0
+    : Object.values(counts).reduce((a, b) => a + b, 0) || jobs.length;
 
   function approveAll() {
     if (batch!.delete_enabled && !window.confirm(deleteConfirm)) return;
@@ -690,11 +739,17 @@ export default function BackupBatchDetail({
         </div>
       )}
 
-      <table className="grid">
-        <thead>
-          <tr>
-            <th className="col-toggle"></th>
-            <th className="col-check">
+      <VirtualRows
+        items={jobs}
+        computeItemKey={(_i, j) => j.id}
+        endReached={() => {
+          if (!loadingRef.current && jobs.length < total) loadPage("append");
+        }}
+        empty={stateFilter ? "해당 상태의 요청이 없습니다." : "요청이 없습니다."}
+        header={
+          <div className="vrow vgrid-bk vhead">
+            <div className="vcell vc-toggle" />
+            <div className="vcell vc-check">
               <label className="check-cell">
                 <input
                   type="checkbox"
@@ -704,134 +759,126 @@ export default function BackupBatchDetail({
                   aria-label="전체 선택"
                 />
               </label>
-            </th>
-            <th>출발 (src)</th>
-            <th>대상 (dst)</th>
-            <th>상태</th>
-            <th>Preview (파일 · 크기)</th>
-            <th>비고</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {jobs.length === 0 ? (
-            <tr>
-              <td colSpan={cols} className="muted">
-                {stateFilter ? "해당 상태의 요청이 없습니다." : "요청이 없습니다."}
-              </td>
-            </tr>
-          ) : (
-            jobs.map((j) => {
-              const s = requestState(j.state);
-              const cancellable = INFLIGHT_STATES.includes(j.state); // in-flight only
-              return (
-                <Fragment key={j.id}>
-                  <tr
-                    className={
-                      hasDetail(j)
-                        ? `expandable-row${expanded.has(j.id) ? " row-open" : ""}`
-                        : undefined
-                    }
-                    onClick={hasDetail(j) ? () => toggleExpand(j.id) : undefined}
-                    tabIndex={hasDetail(j) ? 0 : undefined}
-                    aria-expanded={hasDetail(j) ? expanded.has(j.id) : undefined}
-                    onKeyDown={
-                      hasDetail(j)
-                        ? (e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              toggleExpand(j.id);
-                            }
-                          }
-                        : undefined
-                    }
-                  >
-                    <td className="col-toggle">
-                      {hasDetail(j) && (
-                        <span
-                          className={`expand-toggle${expanded.has(j.id) ? " open" : ""}`}
-                          aria-hidden="true"
-                        >
-                          ▸
-                        </span>
-                      )}
-                    </td>
-                    <td className="col-check" onClick={(e) => e.stopPropagation()}>
-                      <label className="check-cell">
-                        <input
-                          type="checkbox"
-                          checked={selected.has(j.id)}
-                          onChange={() => toggleSelect(j.id)}
-                          aria-label="항목 선택"
-                        />
-                      </label>
-                    </td>
-                    <td data-label="출발" className="mono small">
-                      {j.src_storage === batchSrc ? j.src_path : `${j.src_storage}:${j.src_path}`}
-                    </td>
-                    <td data-label="대상" className="mono small">
-                      {j.dst_storage === batchDst ? j.dst_path : `${j.dst_storage}:${j.dst_path}`}
-                    </td>
-                    <td data-label="상태">
-                      <span className={`san ${s.cls}`}>{s.label}</span>
-                    </td>
-                    <td data-label="Preview" className="muted small">
-                      {j.preview
-                        ? `${(j.preview.files ?? 0).toLocaleString()} · ${fmtBytes(j.preview.bytes)}`
-                        : "—"}
-                    </td>
-                    <td data-label="비고" className="small">
-                      {j.error ? (
-                        <span className="err-num" title={j.error}>
-                          {truncate(friendlyError(j.error) || j.error, 30)}
-                        </span>
-                      ) : (
-                        <span className="muted">
-                          {j.result?.summary?.selected_tool || j.preview?.tool || "—"}
-                        </span>
-                      )}
-                    </td>
-                    <td className="row-actions" onClick={(e) => e.stopPropagation()}>
-                      {EDITABLE.includes(j.state) && (
-                        <button className="mini" onClick={() => setEditingReq(j)} disabled={busy}>
-                          편집
-                        </button>
-                      )}
-                      {RETRYABLE.includes(j.state) && (
-                        <button className="mini" onClick={() => resetOne(j)} disabled={busy}>
-                          재시도
-                        </button>
-                      )}
-                      {mutable && !INFLIGHT_STATES.includes(j.state) && (
-                        <button className="mini danger" onClick={() => deleteRow(j)} disabled={busy}>
-                          삭제
-                        </button>
-                      )}
-                      {cancellable && (
-                        <button className="mini danger" onClick={() => cancelRow(j)} disabled={busy}>
-                          취소
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                  {expanded.has(j.id) && hasDetail(j) && (
-                    <tr className="detail-row">
-                      <td colSpan={cols}>
-                        <RequestDetail j={j} roots={roots} />
-                      </td>
-                    </tr>
+            </div>
+            <div className="vcell">출발 (src)</div>
+            <div className="vcell">대상 (dst)</div>
+            <div className="vcell">상태</div>
+            <div className="vcell">Preview (파일 · 크기)</div>
+            <div className="vcell">비고</div>
+            <div className="vcell" />
+          </div>
+        }
+        footer={
+          loadingMore ? (
+            <div className="vfoot">
+              <Loading label="불러오는 중…" />
+            </div>
+          ) : jobs.length < total ? (
+            <div className="vfoot muted small">
+              스크롤하면 더 불러옵니다… ({jobs.length.toLocaleString()} / {total.toLocaleString()})
+            </div>
+          ) : null
+        }
+        itemContent={(_i, j) => {
+          const s = requestState(j.state);
+          const expandable = hasDetail(j);
+          const isOpen = expanded.has(j.id);
+          const cancellable = INFLIGHT_STATES.includes(j.state); // in-flight only
+          return (
+            <div className={`vitem${isOpen ? " open" : ""}`}>
+              <div
+                className={`vrow vgrid-bk${expandable ? " expandable" : ""}${isOpen ? " row-open" : ""}`}
+                onClick={expandable ? () => toggleExpand(j.id) : undefined}
+                tabIndex={expandable ? 0 : undefined}
+                aria-expanded={expandable ? isOpen : undefined}
+                onKeyDown={
+                  expandable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          toggleExpand(j.id);
+                        }
+                      }
+                    : undefined
+                }
+              >
+                <div className="vcell vc-toggle">
+                  {expandable && (
+                    <span
+                      className={`expand-toggle${isOpen ? " open" : ""}`}
+                      aria-hidden="true"
+                    >
+                      ▸
+                    </span>
                   )}
-                </Fragment>
-              );
-            })
-          )}
-        </tbody>
-      </table>
-      {hasMore && (
-        <button className="ghost" onClick={() => loadJobs(false)} disabled={busy}>
-          더 보기
-        </button>
-      )}
+                </div>
+                <div className="vcell vc-check" onClick={(e) => e.stopPropagation()}>
+                  <label className="check-cell">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(j.id)}
+                      onChange={() => toggleSelect(j.id)}
+                      aria-label="항목 선택"
+                    />
+                  </label>
+                </div>
+                <div className="vcell vc-primary mono small" data-label="출발">
+                  {j.src_storage === batchSrc ? j.src_path : `${j.src_storage}:${j.src_path}`}
+                </div>
+                <div className="vcell mono small" data-label="대상">
+                  {j.dst_storage === batchDst ? j.dst_path : `${j.dst_storage}:${j.dst_path}`}
+                </div>
+                <div className="vcell" data-label="상태">
+                  <span className={`san ${s.cls}`}>{s.label}</span>
+                </div>
+                <div className="vcell muted small" data-label="Preview">
+                  {j.preview
+                    ? `${(j.preview.files ?? 0).toLocaleString()} · ${fmtBytes(j.preview.bytes)}`
+                    : "—"}
+                </div>
+                <div className="vcell small" data-label="비고">
+                  {j.error ? (
+                    <span className="err-num" title={j.error}>
+                      {truncate(friendlyError(j.error) || j.error, 30)}
+                    </span>
+                  ) : (
+                    <span className="muted">
+                      {j.result?.summary?.selected_tool || j.preview?.tool || "—"}
+                    </span>
+                  )}
+                </div>
+                <div className="vcell row-actions" onClick={(e) => e.stopPropagation()}>
+                  {EDITABLE.includes(j.state) && (
+                    <button className="mini" onClick={() => setEditingReq(j)} disabled={busy}>
+                      편집
+                    </button>
+                  )}
+                  {RETRYABLE.includes(j.state) && (
+                    <button className="mini" onClick={() => resetOne(j)} disabled={busy}>
+                      재시도
+                    </button>
+                  )}
+                  {mutable && !INFLIGHT_STATES.includes(j.state) && (
+                    <button className="mini danger" onClick={() => deleteRow(j)} disabled={busy}>
+                      삭제
+                    </button>
+                  )}
+                  {cancellable && (
+                    <button className="mini danger" onClick={() => cancelRow(j)} disabled={busy}>
+                      취소
+                    </button>
+                  )}
+                </div>
+              </div>
+              {isOpen && expandable && (
+                <div className="vdetail">
+                  <RequestDetail j={j} roots={roots} />
+                </div>
+              )}
+            </div>
+          );
+        }}
+      />
 
       {showEdit && (
         <BackupBatchForm
