@@ -23,6 +23,8 @@ from .orchestrator import BackupOrchestrator
 from .routers import operator_router, user_router
 from .routers.backup import backup_router
 from .routers.dashboard import dashboard_router
+from .routers.scan import scan_router
+from .scan_orchestrator import ScanOrchestrator
 
 
 def _static_dir() -> Path | None:
@@ -88,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # at startup (async); both are no-ops when PORTAL_DB_URL is unset.
     app.state.db = Database(settings)
     app.state.backup = None
+    app.state.scan = None
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -97,9 +100,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.db, app.state.dms_client, settings
             )
             app.state.backup.start()
+            app.state.scan = ScanOrchestrator(
+                app.state.db, app.state.dms_client, settings
+            )
+            app.state.scan.start()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        if app.state.scan is not None:
+            await app.state.scan.stop()
         if app.state.backup is not None:
             await app.state.backup.stop()
         await app.state.db.close()
@@ -118,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(user_router())
     app.include_router(operator_router())
     app.include_router(backup_router(settings))
+    app.include_router(scan_router(settings))
     app.include_router(dashboard_router(settings))
 
     # Mount the SPA last so the API routes above take precedence. html=True

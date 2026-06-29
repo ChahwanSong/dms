@@ -266,6 +266,88 @@ export interface BatchUpdateInput {
   node_count?: number | null; // null = 자동 (DMS policy default)
 }
 
+// --- data scan (DM scan batches) ---------------------------------------
+
+// Flat scan result the orchestrator stores on a succeeded request (DMS scan is
+// read-only: file/dir/byte/error counts + the resolved scan_root and tool).
+export interface ScanResult {
+  file_count?: number | null;
+  directory_count?: number | null;
+  total_bytes?: number | null;
+  error_count?: number | null;
+  scan_root?: string | null;
+  tool?: string | null;
+  [k: string]: unknown;
+}
+
+export interface ScanBatch {
+  id: string;
+  name: string;
+  status: string; // draft|scanning|done|cancelled
+  options: Record<string, unknown>;
+  requester_id: string;
+  priority?: string; // High | Mid | Low (Volcano scheduling)
+  node_count?: number | null; // null = 자동 (DMS policy default)
+  created_by?: string | null;
+  note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  request_count?: number;
+  succeeded_count?: number;
+  failed_count?: number;
+  cancelled_count?: number;
+  state_counts?: Record<string, number>;
+  // Sum of the succeeded requests' results (present on GET /batches/{id}).
+  result_totals?: {
+    file_count: number;
+    directory_count: number;
+    total_bytes: number;
+    error_count: number;
+  };
+}
+
+export interface ScanRequest {
+  id: number;
+  batch_id: string;
+  storage: string;
+  path: string;
+  state: string; // registered|held|running|succeeded|failed|cancelled
+  dms_request_id?: string | null;
+  dms_job_id?: string | null;
+  result?: ScanResult | null;
+  error?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ScanRequestInput {
+  storage: string;
+  path: string;
+}
+
+export interface ScanBatchCreateInput {
+  name: string;
+  options?: Record<string, unknown>;
+  note?: string | null;
+  priority?: string;
+  node_count?: number | null; // null = 자동 (DMS policy default)
+  requests?: ScanRequestInput[];
+}
+
+// Partial edit of a draft/done batch (only the provided fields change).
+export interface ScanBatchUpdateInput {
+  name?: string;
+  options?: Record<string, unknown>;
+  note?: string | null;
+  priority?: string;
+  node_count?: number | null; // null = 자동 (DMS policy default)
+}
+
+// Worker-node policy default for the scan tool (dscan). null = no dscan policy.
+export interface ScanNodePolicyResp {
+  dscan: NodePolicy | null;
+}
+
 // --- dashboard ---------------------------------------------------------
 
 export interface Section<T> { data: T | null; error: string | null; }
@@ -435,6 +517,7 @@ export interface NodeMetricsResp {
 
 const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
+const SC = "/api/operator/scan/batches";
 
 export const operatorApi = {
   storage: {
@@ -564,6 +647,104 @@ export const operatorApi = {
       request<{ id: string; reset: number }>(
         `${BK}/${encodeURIComponent(id)}/requests:reset`,
         { method: "POST", body: JSON.stringify(opts) },
+      ),
+  },
+  // Data scan (DMS DM scan). Scan is READ-ONLY: no preview/approve/confirm — a
+  // batch goes draft -> scanning -> done via a single :run (or :rescan to re-run
+  // everything). Otherwise this mirrors the backup namespace.
+  scan: {
+    list: () => request<ScanBatch[]>(SC),
+    // Worker-node policy default for dscan, to show what "자동" resolves to.
+    nodePolicy: () => request<ScanNodePolicyResp>("/api/operator/scan/node-policy"),
+    get: (id: string) => request<ScanBatch>(`${SC}/${encodeURIComponent(id)}`),
+    create: (payload: ScanBatchCreateInput) =>
+      request<{ id: string; added: number }>(SC, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    update: (id: string, payload: ScanBatchUpdateInput) =>
+      request<ScanBatch>(`${SC}/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }),
+    remove: (id: string) =>
+      request<{ id: string; deleted: boolean }>(
+        `${SC}/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      ),
+    // Replace the whole request set (CSV upload / inline editor). Allowed on any
+    // non-scanning batch; the new set is all 'registered'.
+    replaceRequests: (id: string, requests: ScanRequestInput[]) =>
+      request<{ id: string; count: number }>(
+        `${SC}/${encodeURIComponent(id)}/requests`,
+        { method: "PUT", body: JSON.stringify(requests) },
+      ),
+    // Append requests (registered) to a non-scanning batch.
+    addRequests: (id: string, requests: ScanRequestInput[]) =>
+      request<{ id: string; added: number }>(
+        `${SC}/${encodeURIComponent(id)}/requests:add`,
+        { method: "POST", body: JSON.stringify(requests) },
+      ),
+    // Bulk-delete the given requests from a non-scanning batch (in-flight skipped).
+    deleteRequests: (id: string, request_ids: number[]) =>
+      request<{ id: string; deleted: number }>(
+        `${SC}/${encodeURIComponent(id)}/requests:delete`,
+        { method: "POST", body: JSON.stringify({ request_ids }) },
+      ),
+    // Bulk-cancel the given (non-terminal) requests.
+    cancelRequests: (id: string, request_ids: number[]) =>
+      request<{ id: string; cancelled: boolean; dms_cancelled: number }>(
+        `${SC}/${encodeURIComponent(id)}/requests:cancel`,
+        { method: "POST", body: JSON.stringify({ request_ids }) },
+      ),
+    updateRequest: (id: string, rid: number, req: ScanRequestInput) =>
+      request<ScanRequest>(
+        `${SC}/${encodeURIComponent(id)}/requests/${rid}`,
+        { method: "PATCH", body: JSON.stringify(req) },
+      ),
+    requests: (id: string, opts?: { state?: string; limit?: number; offset?: number }) => {
+      const q = new URLSearchParams();
+      if (opts?.state) q.set("state", opts.state);
+      if (opts?.limit != null) q.set("limit", String(opts.limit));
+      if (opts?.offset != null) q.set("offset", String(opts.offset));
+      const qs = q.toString();
+      return request<ScanRequest[]>(
+        `${SC}/${encodeURIComponent(id)}/requests${qs ? `?${qs}` : ""}`,
+      );
+    },
+    cancelRequest: (id: string, rid: number) =>
+      request<{ id: string; request_id: number; cancelled: boolean; dms_cancelled: number }>(
+        `${SC}/${encodeURIComponent(id)}/requests/${rid}:cancel`,
+        { method: "POST" },
+      ),
+    // Reset fixable requests to 'registered' for re-run (retry). Pass failed_only
+    // to reset all failed, or request_ids for specific ones.
+    resetRequests: (id: string, opts: { request_ids?: number[]; failed_only?: boolean }) =>
+      request<{ id: string; reset: number }>(
+        `${SC}/${encodeURIComponent(id)}/requests:reset`,
+        { method: "POST", body: JSON.stringify(opts) },
+      ),
+    // Run the batch (draft|done -> scanning). Pass request_ids to run only those
+    // (the rest are parked as 'held'); omit to run the whole batch.
+    run: (id: string, opts?: { request_ids?: number[] }) =>
+      request<{ id: string; status: string; scoped: boolean }>(
+        `${SC}/${encodeURIComponent(id)}:run`,
+        {
+          method: "POST",
+          body: opts?.request_ids ? JSON.stringify({ request_ids: opts.request_ids }) : undefined,
+        },
+      ),
+    // Re-scan a completed batch: reset ALL terminal requests to 'registered' then
+    // run everything (monitoring-growth use case).
+    rescan: (id: string) =>
+      request<{ id: string; status: string; reset: number }>(
+        `${SC}/${encodeURIComponent(id)}:rescan`,
+        { method: "POST" },
+      ),
+    cancel: (id: string) =>
+      request<{ id: string; status: string; dms_cancelled: number }>(
+        `${SC}/${encodeURIComponent(id)}:cancel`,
+        { method: "POST" },
       ),
   },
   dashboard: {

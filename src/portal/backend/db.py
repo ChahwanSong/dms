@@ -8,6 +8,8 @@ admin creates one. Holds:
   - operator_users : id/password login store (seeded from PORTAL_OPERATOR_USERS)
   - backup_batches  : a registered list of sync requests (data-backup feature)
   - backup_requests : the individual sync requests of a batch (up to a few thousand)
+  - scan_batches    : a registered list of scan requests (data-scan feature)
+  - scan_requests   : the individual scan requests of a batch (up to a few thousand)
 
 Schema + tables are created on startup (idempotent). Passwords are salted PBKDF2
 hashes (stdlib), never plaintext.
@@ -92,6 +94,38 @@ def _ddl(schema: str) -> list[str]:
         )""",
         f"CREATE INDEX IF NOT EXISTS backup_requests_batch_state "
         f"ON {s}.backup_requests(batch_id, state)",
+        # data-scan feature: a scan batch is a SIMPLER backup batch — read-only DMS
+        # scans have no preview/confirm, so a request carries a single storage+path
+        # (no src/dst), no fingerprint and no preview column. Batch lifecycle is
+        # draft -> scanning -> done (or cancelled).
+        f"""CREATE TABLE IF NOT EXISTS {s}.scan_batches (
+            id text PRIMARY KEY,
+            name text NOT NULL,
+            status text NOT NULL DEFAULT 'draft',
+            options jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+            requester_id text NOT NULL DEFAULT 'root',
+            priority text NOT NULL DEFAULT 'Low',
+            node_count int,
+            created_by text,
+            note text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS {s}.scan_requests (
+            id bigserial PRIMARY KEY,
+            batch_id text NOT NULL REFERENCES {s}.scan_batches(id) ON DELETE CASCADE,
+            storage text NOT NULL,
+            path text NOT NULL,
+            state text NOT NULL DEFAULT 'registered',
+            dms_request_id text,
+            dms_job_id text,
+            result jsonb,
+            error text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"CREATE INDEX IF NOT EXISTS scan_requests_batch_state "
+        f"ON {s}.scan_requests(batch_id, state)",
         # action-required 숨김(acknowledge) layer: operator-side dismiss of obsolete
         # "조치 필요" items (DMS has no native ack). Keyed by a stable fingerprint.
         f"""CREATE TABLE IF NOT EXISTS {s}.attention_dismissals (
@@ -512,6 +546,325 @@ class Database:
                 "WHERE id=%s",
                 (row["src_storage"], row["src_path"], row["dst_storage"], row["dst_path"], request_id),
             )
+
+    # --- scan batches ---------------------------------------------------
+
+    async def create_scan_batch(
+        self,
+        *,
+        batch_id: str,
+        name: str,
+        options: dict[str, Any],
+        requester_id: str,
+        created_by: str | None,
+        note: str | None,
+        priority: str = "Low",
+        node_count: int | None = None,
+    ) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO scan_batches"
+                "(id,name,status,options,requester_id,priority,node_count,created_by,note) "
+                "VALUES (%s,%s,'draft',%s,%s,%s,%s,%s,%s)",
+                (
+                    batch_id,
+                    name,
+                    Jsonb(options),
+                    requester_id,
+                    priority,
+                    node_count,
+                    created_by,
+                    note,
+                ),
+            )
+
+    async def list_scan_batches(self) -> list[dict[str, Any]]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT b.*,
+                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id) AS request_count,
+                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id
+                        AND j.state='succeeded') AS succeeded_count,
+                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id
+                        AND j.state='failed') AS failed_count,
+                    (SELECT count(*) FROM scan_requests j WHERE j.batch_id=b.id
+                        AND j.state='cancelled') AS cancelled_count
+                   FROM scan_batches b ORDER BY b.created_at DESC"""
+            )
+            return await cur.fetchall()
+
+    async def get_scan_batch(self, batch_id: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM scan_batches WHERE id=%s", (batch_id,)
+            )
+            return await cur.fetchone()
+
+    async def scan_batch_state_counts(self, batch_id: str) -> dict[str, int]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT state, count(*) AS n FROM scan_requests WHERE batch_id=%s "
+                "GROUP BY state",
+                (batch_id,),
+            )
+            return {r["state"]: r["n"] for r in await cur.fetchall()}
+
+    async def scan_result_totals(self, batch_id: str) -> dict[str, int]:
+        """Aggregate scan outcomes across succeeded requests (for the batch summary):
+        files/dirs/bytes scanned and errors encountered."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT "
+                "coalesce(sum((result->>'file_count')::bigint),0) AS file_count, "
+                "coalesce(sum((result->>'directory_count')::bigint),0) AS directory_count, "
+                "coalesce(sum((result->>'total_bytes')::bigint),0) AS total_bytes, "
+                "coalesce(sum((result->>'error_count')::bigint),0) AS error_count "
+                "FROM scan_requests WHERE batch_id=%s AND state='succeeded'",
+                (batch_id,),
+            )
+            row = await cur.fetchone()
+            return {
+                "file_count": int(row["file_count"]),
+                "directory_count": int(row["directory_count"]),
+                "total_bytes": int(row["total_bytes"]),
+                "error_count": int(row["error_count"]),
+            }
+
+    async def set_scan_batch_status(self, batch_id: str, status: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE scan_batches SET status=%s, updated_at=now() WHERE id=%s",
+                (status, batch_id),
+            )
+
+    async def update_scan_batch(self, batch_id: str, **fields: Any) -> None:
+        """Update whitelisted scan-batch columns (name/note/options/priority/
+        node_count). Only the keys present in `fields` are changed; `options` is
+        stored as jsonb."""
+        allowed = ("name", "note", "options", "priority", "node_count")
+        cols: list[str] = []
+        params: list[Any] = []
+        for key in allowed:
+            if key in fields:
+                cols.append(f"{key}=%s")
+                params.append(Jsonb(fields[key]) if key == "options" else fields[key])
+        if not cols:
+            return
+        params.append(batch_id)
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                f"UPDATE scan_batches SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
+                params,
+            )
+
+    async def delete_scan_batch(self, batch_id: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute("DELETE FROM scan_batches WHERE id=%s", (batch_id,))
+
+    async def active_scan_batches(self) -> list[dict[str, Any]]:
+        """Batches the scan orchestrator must drive (the single 'scanning' phase)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM scan_batches WHERE status='scanning'"
+            )
+            return await cur.fetchall()
+
+    async def hold_unselected_registered_scan(
+        self, batch_id: str, keep_ids: list[int]
+    ) -> int:
+        """Selective run: park the registered requests NOT in keep_ids as 'held'
+        so the orchestrator scans only the selected ones. Returns rows held."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE scan_requests SET state='held', updated_at=now() "
+                "WHERE batch_id=%s AND state='registered' AND NOT (id = ANY(%s))",
+                (batch_id, keep_ids),
+            )
+            return cur.rowcount
+
+    async def release_held_scan(self, batch_id: str) -> int:
+        """Return any 'held' requests to 'registered' (after a selective run, or to
+        self-heal a crashed one). Returns rows released."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE scan_requests SET state='registered', updated_at=now() "
+                "WHERE batch_id=%s AND state='held'",
+                (batch_id,),
+            )
+            return cur.rowcount
+
+    # --- scan requests --------------------------------------------------
+
+    async def add_scan_requests(self, batch_id: str, rows: list[dict[str, str]]) -> int:
+        """Bulk-insert registered scan requests. rows: storage/path."""
+        if not rows:
+            return 0
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO scan_requests(batch_id,storage,path,state) "
+                    "VALUES (%s,%s,%s,'registered')",
+                    [(batch_id, r["storage"], r["path"]) for r in rows],
+                )
+        return len(rows)
+
+    async def replace_scan_requests(
+        self, batch_id: str, rows: list[dict[str, str]]
+    ) -> int:
+        """Atomically replace ALL of a batch's scan requests with `rows`. Backs the
+        inline request-table editor, where the table is the full desired set."""
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM scan_requests WHERE batch_id=%s", (batch_id,)
+                )
+                if rows:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(
+                            "INSERT INTO scan_requests(batch_id,storage,path,state) "
+                            "VALUES (%s,%s,%s,'registered')",
+                            [(batch_id, r["storage"], r["path"]) for r in rows],
+                        )
+        return len(rows)
+
+    async def list_scan_requests(
+        self,
+        batch_id: str,
+        *,
+        state: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clause = "WHERE batch_id=%s" + (" AND state=%s" if state else "")
+        params: list[Any] = [batch_id] + ([state] if state else []) + [limit, offset]
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                f"SELECT * FROM scan_requests {clause} ORDER BY id LIMIT %s OFFSET %s",
+                params,
+            )
+            return await cur.fetchall()
+
+    async def get_scan_request(self, request_id: int) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM scan_requests WHERE id=%s", (request_id,)
+            )
+            return await cur.fetchone()
+
+    async def scan_requests_in_states(
+        self, batch_id: str, states: list[str]
+    ) -> list[dict[str, Any]]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM scan_requests WHERE batch_id=%s AND state = ANY(%s) "
+                "ORDER BY id",
+                (batch_id, states),
+            )
+            return await cur.fetchall()
+
+    async def cancel_scan_requests(
+        self, batch_id: str, request_ids: list[int] | None = None
+    ) -> list[str]:
+        """Cancel non-terminal scan requests of a batch; return the dms_job_ids that
+        were in flight (so the caller can cancel them in DMS too). request_ids=None
+        cancels all non-terminal; otherwise only the given ids."""
+        clause = "" if request_ids is None else " AND id = ANY(%s)"
+        params: list[Any] = [batch_id] + ([] if request_ids is None else [request_ids])
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE scan_requests SET state='cancelled', updated_at=now() "
+                "WHERE batch_id=%s AND state NOT IN ('succeeded','failed','cancelled')"
+                + clause
+                + " RETURNING dms_job_id",
+                params,
+            )
+            return [r["dms_job_id"] for r in await cur.fetchall() if r["dms_job_id"]]
+
+    async def delete_scan_requests(self, batch_id: str, request_ids: list[int]) -> int:
+        """Delete the given scan requests from a batch, skipping any that are in
+        flight (running). Returns how many were deleted."""
+        if not request_ids:
+            return 0
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM scan_requests WHERE batch_id=%s AND id = ANY(%s) "
+                "AND state NOT IN ('running')",
+                (batch_id, request_ids),
+            )
+            return cur.rowcount
+
+    async def cancel_scan_request(
+        self, batch_id: str, request_id: int
+    ) -> tuple[bool, str | None]:
+        """Cancel a single non-terminal scan request. Returns (changed, dms_job_id)
+        so the caller can best-effort cancel the live DMS job."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE scan_requests SET state='cancelled', updated_at=now() "
+                "WHERE id=%s AND batch_id=%s AND state NOT IN "
+                "('succeeded','failed','cancelled') "
+                "RETURNING dms_job_id",
+                (request_id, batch_id),
+            )
+            row = await cur.fetchone()
+            return (False, None) if row is None else (True, row["dms_job_id"])
+
+    async def update_scan_request(self, request_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols: list[str] = []
+        params: list[Any] = []
+        for k, v in fields.items():
+            cols.append(f"{k}=%s")
+            params.append(Jsonb(v) if k == "result" else v)
+        params.append(request_id)
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                f"UPDATE scan_requests SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
+                params,
+            )
+
+    async def edit_scan_request_path(self, request_id: int, row: dict[str, str]) -> None:
+        """Edit a scan request's storage/path and reset it to 'registered', clearing
+        job state/result so the orchestrator re-scans it."""
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE scan_requests SET storage=%s, path=%s, state='registered', "
+                "dms_job_id=NULL, dms_request_id=NULL, result=NULL, error=NULL, "
+                "updated_at=now() WHERE id=%s",
+                (row["storage"], row["path"], request_id),
+            )
+
+    async def reset_scan_requests(
+        self,
+        batch_id: str,
+        *,
+        request_ids: list[int] | None = None,
+        failed_only: bool = False,
+        all_terminal: bool = False,
+    ) -> int:
+        """Reset fixable scan requests to 'registered' (clearing job state/result) for
+        a re-run. `all_terminal` (rescan) targets every terminal request; `failed_only`
+        targets failed ones; otherwise the given ids in a re-runnable state (scan can
+        re-run succeeded). Returns how many were reset."""
+        where = ["batch_id=%s"]
+        params: list[Any] = [batch_id]
+        if all_terminal:
+            where.append("state IN ('succeeded','failed','cancelled')")
+        elif failed_only:
+            where.append("state IN ('failed')")
+        else:
+            where.append("id = ANY(%s)")
+            params.append(request_ids or [])
+            where.append("state IN ('registered','failed','cancelled','succeeded')")
+        sql = (
+            "UPDATE scan_requests SET state='registered', dms_job_id=NULL, "
+            "dms_request_id=NULL, result=NULL, error=NULL, updated_at=now() "
+            "WHERE " + " AND ".join(where)
+        )
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(sql, params)
+            return cur.rowcount
 
     # --- attention dismissals (조치 필요 숨김/acknowledge) ----------------
 

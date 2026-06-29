@@ -757,6 +757,10 @@ button.linklike {
   color: var(--muted);
   font-size: 0.8rem;
 }
+/* single-column variant (data scan: one path per row + delete button) */
+.req-row.single {
+  grid-template-columns: 1fr auto;
+}
 .req-row input {
   width: 100%;
   margin: 0;
@@ -1384,6 +1388,11 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
 /* sync option list (expanded) */
 .opt-list { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
 .opt-list-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-right: 0.2rem; }
+
+/* data scan: aggregate result totals line (합계 — 파일·디렉터리·크기·오류) */
+.scan-totals { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 1rem; font-size: 0.82rem; color: var(--muted); }
+.scan-totals b { color: var(--fg); font-weight: 700; }
+.scan-totals b.err-num { color: var(--error); }
 
 /* batch detail header: route + meta card */
 .batch-meta { display: flex; flex-direction: column; gap: 0.9rem; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 0.95rem 1.1rem; margin: 0.4rem 0 1rem; }

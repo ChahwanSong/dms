@@ -154,6 +154,16 @@ class DmsClient:
             "GET", f"{_DM}/sync/jobs/{_seg(job_id)}", actor=actor
         )
 
+    async def submit_scan(self, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        # DMS scan is READ-ONLY (no preview/confirm): POST /scan runs directly
+        # (Pending -> Running -> Succeeded). Used by the data-scan orchestrator.
+        return await self._request("POST", f"{_DM}/scan", actor=actor, json=body)
+
+    async def get_scan_job(self, job_id: str, *, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "GET", f"{_DM}/scan/jobs/{_seg(job_id)}", actor=actor
+        )
+
     async def confirm_job(
         self, job_id: str, body: dict[str, Any], *, actor: str
     ) -> dict[str, Any]:
