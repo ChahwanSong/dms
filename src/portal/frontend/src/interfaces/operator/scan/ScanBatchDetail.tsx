@@ -14,6 +14,7 @@ import { errMsg, fmtTime } from "./ScanBatches";
 import { SpecGrid, type KV } from "./ui";
 import ScanBatchForm from "./ScanBatchForm";
 import ScanRequestEdit from "./ScanRequestEdit";
+import ScanResults from "./ScanResults";
 import Loading from "../../../components/Loading";
 import ScanCsvModal from "./ScanCsvModal";
 
@@ -457,24 +458,9 @@ export default function ScanBatchDetail({
             ...(batch.note ? [{ label: "메모", value: batch.note, span: true } as KV] : []),
           ]}
         />
-        {rt && (
-          <div className="scan-totals">
-            <span className="opt-list-label">합계</span>
-            <span>
-              파일 <b>{num(rt.file_count)}</b>
-            </span>
-            <span>
-              디렉터리 <b>{num(rt.directory_count)}</b>
-            </span>
-            <span>
-              크기 <b>{fmtBytes(rt.total_bytes)}</b>
-            </span>
-            <span>
-              오류 <b className={rt.error_count ? "err-num" : ""}>{num(rt.error_count)}</b>
-            </span>
-          </div>
-        )}
       </div>
+
+      {rt && (counts.succeeded ?? 0) > 0 && <ScanResults totals={rt} jobs={jobs} />}
 
       {/* progress / aggregate summary */}
       <div className="inv-summary">
@@ -637,7 +623,7 @@ export default function ScanBatchDetail({
                         </span>
                       )}
                     </td>
-                    <td className="col-check" onClick={(e) => e.stopPropagation()}>
+                    <td className="col-check" data-label="선택" onClick={(e) => e.stopPropagation()}>
                       <label className="check-cell">
                         <input
                           type="checkbox"
