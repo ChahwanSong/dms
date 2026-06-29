@@ -353,9 +353,9 @@ def test_scan_parses_mpifileutils_dscan_report_artifact(harness, tmp_path):
         "error_count": 1,
         "scan_root": "project/input",
         "atime_histogram": [
-            {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "count": 1},
-            {"bucket": "[2d,7d]", "min_age_days": 2, "max_age_days": 7, "count": 0},
-            {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "count": 1},
+            {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "bytes": 2048},
+            {"bucket": "[2d,7d]", "min_age_days": 2, "max_age_days": 7, "bytes": 0},
+            {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "bytes": 512},
         ],
     }
     assert job["result_summary"]["report_uri"].endswith("/dscan-report.json")
@@ -766,9 +766,9 @@ class DscanReportFileAdapter(MissingSummaryFileAdapter):
               },
               "time_histograms": {
                 "atime": [
-                  {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "count": 1},
-                  {"bucket": "[2d,7d]", "min_age_days": 2, "max_age_days": 7, "count": 0},
-                  {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "count": 1}
+                  {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "bytes": 2048},
+                  {"bucket": "[2d,7d]", "min_age_days": 2, "max_age_days": 7, "bytes": 0},
+                  {"bucket": "[31d,90d]", "min_age_days": 31, "max_age_days": 90, "bytes": 512}
                 ]
               },
               "broken_paths": [

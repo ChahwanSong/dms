@@ -1960,10 +1960,10 @@ def _normalize_scan_summary(payload: Any) -> dict[str, Any] | None:
 
 def _scan_atime_histogram(artifact_uri: str | None) -> list[dict[str, Any]] | None:
     """Surface the dscan report's atime time-histogram (data temperature: hot =
-    recently accessed → cold = long untouched). The scan launcher already writes
-    ``dscan-report.json``; we just lift its ``time_histograms.atime`` buckets into
-    the result summary so the portal can render a per-path hot/cold histogram.
-    Best-effort — returns None when the report is absent/invalid (older jobs)."""
+    recently accessed → cold = long untouched). dscan reports each age bucket's
+    **file capacity in bytes** (``time_histograms.atime[].bytes``); we lift those
+    into the result summary so the portal can render a per-path hot/cold capacity
+    histogram. Best-effort — returns None when the report is absent/invalid."""
     if not artifact_uri:
         return None
     parsed = urlparse(artifact_uri)
@@ -1992,7 +1992,7 @@ def _scan_atime_histogram(artifact_uri: str | None) -> list[dict[str, Any]] | No
                 "bucket": entry.get("bucket"),
                 "min_age_days": entry.get("min_age_days"),
                 "max_age_days": entry.get("max_age_days"),
-                "count": int(entry.get("count", 0) or 0),
+                "bytes": int(entry.get("bytes", 0) or 0),
             }
         )
     return buckets or None
