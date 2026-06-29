@@ -142,7 +142,7 @@ export default function NodesTable() {
                   </td>
                   <td data-label="load" className="small">{c.load1 != null ? c.load1 : "—"}</td>
                   <td data-label="디스크">{pct(c.disk_used_pct)}</td>
-                  <td data-label="마운트" className="small muted">{joinAll(n.mounts)}</td>
+                  <td data-label="마운트" className="small muted node-mounts" title={joinAll(n.mounts)}>{joinAll(n.mounts)}</td>
                   <td data-label="보고" className="muted small">{fmtAgo(c.reported_at || n.reported_at)}</td>
                 </tr>
               );

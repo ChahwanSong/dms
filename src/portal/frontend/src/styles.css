@@ -1237,9 +1237,14 @@ tr.row-open .expand-toggle { color: var(--accent); }
 .mini-progress-bar .seg.cancel { background: #6b7280; }
 
 /* worker-node dashboard: role badges + metric sparkline cells */
+table.grid.node-grid { width: 100%; }
 table.grid.node-grid tbody tr { height: 3rem; }
 table.grid.node-grid td { vertical-align: middle; }
 .node-id { display: flex; flex-direction: column; line-height: 1.25; }
+.node-id .mono { white-space: nowrap; }
+/* mounts column absorbs leftover width and ellipsizes (so the node name never wraps);
+   full list on hover via title. max-width:0 + width:100% is the truncate-in-table trick. */
+table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .role-badge {
   display: inline-flex; align-items: center; gap: 0.3rem;
   font-size: 0.8rem; font-weight: 600; padding: 0.1rem 0.45rem;
@@ -1359,6 +1364,8 @@ table.grid.node-grid td { vertical-align: middle; }
   /* node table is in stacked-card mode here; the desktop fixed row height (3rem)
      would clip the 9 stacked cells and overlap rows — let cards size to content */
   table.grid.node-grid tbody tr { height: auto; }
+  /* mounts: show full list (wrap) in the stacked card, not the desktop ellipsis */
+  table.grid.node-grid td.node-mounts { max-width: none; width: auto; white-space: normal; overflow: visible; overflow-wrap: anywhere; }
   /* queue bars stack: name, bar, counts each on their own line */
   .q-row { grid-template-columns: 1fr; gap: 0.3rem; }
   .q-counts { flex-wrap: wrap; }
