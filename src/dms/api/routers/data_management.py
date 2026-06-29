@@ -6,7 +6,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from ...domain import DataJobRequest, DataManagementPolicyInput, OperationKind
+from ...domain import (
+    DataJobRequest,
+    DataManagementPolicyInput,
+    OperationKind,
+    TERMINAL_DATA_JOB_STATES,
+)
 from ...workers import cancel_data_job, confirm_data_job
 from .._helpers.data_job import (
     authorize_privileged_requester_or_403,
@@ -223,6 +228,41 @@ def data_management_router() -> APIRouter:
             services.repository, services.volcano_adapter, job_id, actor=actor
         )
         return {"job_id": job_id, "status": "Cancelled"}
+
+    @router.delete("/jobs/{job_id}")
+    def delete_job(
+        job_id: str,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        actor = authenticated_actor(request, services)
+        _reject_if_maintenance_blocked(services)
+        job = services.repository.get_data_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="data job not found")
+        # Only TERMINAL jobs may be deleted; an in-flight job must be cancelled first so
+        # we never drop the DB record of a job whose MPI side effect is still running.
+        if job["state"] not in TERMINAL_DATA_JOB_STATES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"data job is not in a terminal state (state={job['state']}); "
+                    "cancel it before deleting"
+                ),
+            )
+        services.repository.delete_data_job(job_id, actor=actor)
+        services.observability.safe_record_event(
+            component="data-management",
+            severity="INFO",
+            event_type="data_job_deleted",
+            message="data job deleted",
+            payload={
+                "job_id": job_id,
+                "state": job["state"],
+                "operation": job["operation"],
+            },
+        )
+        return {"job_id": job_id, "status": "deleted"}
 
     @router.get("/help")
     def data_help() -> dict[str, Any]:

@@ -167,6 +167,50 @@ class DataJobsMixin:
             )
 
 
+    def delete_data_job(self, job_id: str, *, actor: str = "system") -> bool:
+        """Delete a single ``data_jobs`` row; return ``True`` if a row was removed.
+
+        Only the ``data_jobs`` row is deleted. ``data_jobs.request_id`` is an *outgoing*
+        FK to ``requests`` and no table references ``data_jobs``, so removing the child
+        row never violates referential integrity -- the parent request/plan/runs/results
+        audit history is intentionally preserved. The terminal-state guard lives at the
+        API boundary; this method itself is unconditional. The delete and its audit
+        control-mutation share one connection so they commit atomically (mirrors
+        ``delete_storage_mapping``).
+        """
+        with self.database.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM data_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not existing:
+                return False
+            before = self._decode_data_job(row_to_dict(existing))
+            connection.execute(
+                "DELETE FROM data_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            self._insert_control_mutation(
+                connection,
+                actor=actor,
+                mutation_kind="data_job.delete",
+                payload={"job_id": job_id},
+                mutation_class="data_job",
+                operation="delete",
+                target_key=job_id,
+                status="Succeeded",
+                result_summary={
+                    "job_id": job_id,
+                    "state": before.get("state"),
+                    "operation": before.get("operation"),
+                },
+                before_state=before,
+                after_state=None,
+                created_at=iso_now(),
+            )
+        return True
+
+
     def data_job_summary(
         self,
         *,
