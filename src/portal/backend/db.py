@@ -92,6 +92,16 @@ def _ddl(schema: str) -> list[str]:
         )""",
         f"CREATE INDEX IF NOT EXISTS backup_requests_batch_state "
         f"ON {s}.backup_requests(batch_id, state)",
+        # action-required 숨김(acknowledge) layer: operator-side dismiss of obsolete
+        # "조치 필요" items (DMS has no native ack). Keyed by a stable fingerprint.
+        f"""CREATE TABLE IF NOT EXISTS {s}.attention_dismissals (
+            fingerprint text PRIMARY KEY,
+            issue_type text,
+            label text,
+            reason text,
+            dismissed_by text,
+            dismissed_at timestamptz NOT NULL DEFAULT now()
+        )""",
         # migration for pre-existing DBs: add the per-batch priority column.
         f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS priority text "
         f"NOT NULL DEFAULT 'Low'",
@@ -502,6 +512,60 @@ class Database:
                 "WHERE id=%s",
                 (row["src_storage"], row["src_path"], row["dst_storage"], row["dst_path"], request_id),
             )
+
+    # --- attention dismissals (조치 필요 숨김/acknowledge) ----------------
+
+    async def dismissed_fingerprints(self) -> set[str]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT fingerprint FROM attention_dismissals")
+            return {r["fingerprint"] for r in await cur.fetchall()}
+
+    async def list_dismissals(self) -> list[dict[str, Any]]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM attention_dismissals ORDER BY dismissed_at DESC"
+            )
+            return await cur.fetchall()
+
+    async def add_dismissals(
+        self, items: list[dict[str, Any]], dismissed_by: str
+    ) -> int:
+        """Upsert dismissals (one row per fingerprint). Re-dismissing refreshes who/when/reason."""
+        if not items:
+            return 0
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO attention_dismissals"
+                    "(fingerprint,issue_type,label,reason,dismissed_by) "
+                    "VALUES (%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (fingerprint) DO UPDATE SET "
+                    "issue_type=excluded.issue_type, label=excluded.label, "
+                    "reason=excluded.reason, dismissed_by=excluded.dismissed_by, "
+                    "dismissed_at=now()",
+                    [
+                        (
+                            i["fingerprint"],
+                            i.get("issue_type"),
+                            i.get("label"),
+                            i.get("reason"),
+                            dismissed_by,
+                        )
+                        for i in items
+                    ],
+                )
+        return len(items)
+
+    async def remove_dismissals(self, fingerprints: list[str]) -> int:
+        """Un-dismiss (원위치): the items reappear in 조치 필요 on the next poll."""
+        if not fingerprints:
+            return 0
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM attention_dismissals WHERE fingerprint = ANY(%s)",
+                (fingerprints,),
+            )
+            return cur.rowcount
 
     async def reset_requests(
         self,

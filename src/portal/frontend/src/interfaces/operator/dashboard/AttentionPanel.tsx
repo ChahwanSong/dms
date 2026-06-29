@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { operatorApi, type AttentionItem } from "../../../api";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { operatorApi, type AttentionItem, type DismissedItem } from "../../../api";
 import { fmtAgo, fmtTime } from "./helpers";
 import Section from "./Section";
 import Loading from "../../../components/Loading";
@@ -98,6 +98,8 @@ const REQ_STATUS_ACTION: Record<string, string> = {
   UnknownAfterSideEffect: "실제 백엔드 상태를 직접 확인 후 DB와 동기화",
   BackendApplyFailed: "원인(권한/연결/백엔드) 수정 후 재요청",
 };
+// DMS only allows resolve/abandon for these stuck request states.
+const RESOLVABLE_REQUEST_STATES = new Set(["UnknownAfterSideEffect", "BackendApplyFailed"]);
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v ? v : undefined;
@@ -110,8 +112,6 @@ function labelOf(item: AttentionItem): string {
   return ISSUE_META[item.issue_type]?.label || item.issue_type;
 }
 function actionOf(item: AttentionItem): string {
-  // Korean action (ISSUE_META / request-status) first; DMS recommended_action (영문)
-  // is a fallback only for issue types we have not localized yet.
   if (item.issue_type === "request_attention") {
     return REQ_STATUS_ACTION[str(item.status) || ""] || "요청 상세에서 상태 확인 후 재처리/취소";
   }
@@ -121,7 +121,6 @@ function actionOf(item: AttentionItem): string {
     "항목을 펼쳐 상세를 확인하세요"
   );
 }
-// short identifier shown on the collapsed row
 function identOf(item: AttentionItem): string | undefined {
   const ns = str(item.namespace_name) || str(item.namespace);
   return (
@@ -132,6 +131,16 @@ function identOf(item: AttentionItem): string | undefined {
     str(item.target) ||
     (str(item.request_id) ? `req…${str(item.request_id)!.slice(-6)}` : undefined)
   );
+}
+// A request that DMS can resolve/abandon directly (real resolution, not just hide).
+function canResolve(item: AttentionItem): boolean {
+  return item.issue_type === "request_attention" &&
+    RESOLVABLE_REQUEST_STATES.has(str(item.status) || "") &&
+    !!str(item.request_id);
+}
+// A terminal data-job record that can be deleted from DMS (stops perpetual accrual).
+function canDelete(item: AttentionItem): boolean {
+  return item.issue_type.startsWith("data_job") && !!str(item.job_id);
 }
 
 // ---- detail grid ----
@@ -163,7 +172,7 @@ const DETAIL_ORDER = [
   "commit_order", "source_request_id", "request_id", "job_id", "report_id",
   "payload_summary", "result_summary", "preflight_result", "sanity_result",
 ];
-const DETAIL_SKIP = new Set(["issue_type", "severity", "category", "recommended_action"]);
+const DETAIL_SKIP = new Set(["issue_type", "severity", "category", "recommended_action", "fingerprint"]);
 
 function Kv({ label, children, span, mono }: {
   label: string; children: ReactNode; span?: boolean; mono?: boolean;
@@ -193,7 +202,14 @@ function detailRows(item: AttentionItem): ReactNode[] {
   });
 }
 
-function Item({ item, onNavigate }: { item: AttentionItem; onNavigate?: (s: string) => void }) {
+interface ItemActions {
+  onNavigate?: (s: string) => void;
+  onDismiss: (item: AttentionItem) => void;
+  onResolve: (item: AttentionItem) => void;
+  onDelete: (item: AttentionItem) => void;
+}
+
+function Item({ item, act }: { item: AttentionItem; act: ItemActions }) {
   const [open, setOpen] = useState(false);
   const dom = domainOf(item.issue_type);
   const sev = (str(item.severity) || "WARN").toUpperCase();
@@ -203,54 +219,105 @@ function Item({ item, onNavigate }: { item: AttentionItem; onNavigate?: (s: stri
   const nav = DOMAIN_NAV[dom];
   return (
     <div className={`attn2 attn2-${sev.toLowerCase()}`}>
-      <button type="button" className="attn2-row" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        <span className={`attn2-sev attn2-${sev.toLowerCase()}`}>{sev}</span>
-        <span className="attn2-main">
-          <span className="attn2-head">
-            <span className="attn2-dom">{DOMAIN_LABEL[dom]}</span>
-            <span className="attn2-label">{labelOf(item)}</span>
-            {ident && <span className="attn2-ident mono">{ident}</span>}
+      <div className="attn2-rowwrap">
+        <button type="button" className="attn2-row" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+          <span className={`attn2-sev attn2-${sev.toLowerCase()}`}>{sev}</span>
+          <span className="attn2-main">
+            <span className="attn2-head">
+              <span className="attn2-dom">{DOMAIN_LABEL[dom]}</span>
+              <span className="attn2-label">{labelOf(item)}</span>
+              {ident && <span className="attn2-ident mono">{ident}</span>}
+            </span>
+            <span className="attn2-action"><span className="attn2-tag">권고</span>{actionOf(item)}</span>
           </span>
-          <span className="attn2-action"><span className="attn2-tag">권고</span>{actionOf(item)}</span>
-        </span>
-        {when && <span className="attn2-when muted small" title={fmtTime(when)}>{fmtAgo(when)}</span>}
-        <span className="attn2-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
-      </button>
+          {when && <span className="attn2-when muted small" title={fmtTime(when)}>{fmtAgo(when)}</span>}
+          <span className="attn2-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
+        </button>
+        <button type="button" className="attn2-hide" title="이 항목 숨김 (해당없음/처리됨 — 숨김 항목에서 해제 가능)"
+          onClick={() => act.onDismiss(item)}>숨김</button>
+      </div>
       {open && (
         <div className="attn2-detail">
           <dl className="spec-grid">{detailRows(item)}</dl>
-          {nav && onNavigate && (
-            <div className="attn2-cta">
-              <button className="mini primary" onClick={() => onNavigate(nav.section)}>{nav.label} →</button>
-            </div>
-          )}
+          <div className="attn2-cta">
+            {nav && act.onNavigate && (
+              <button className="mini primary" onClick={() => act.onNavigate!(nav.section)}>{nav.label} →</button>
+            )}
+            {canResolve(item) && (
+              <button className="mini" onClick={() => act.onResolve(item)}>요청 중단(abandon)</button>
+            )}
+            {canDelete(item) && (
+              <button className="mini danger" onClick={() => act.onDelete(item)}>기록 삭제</button>
+            )}
+            <button className="mini ghost" onClick={() => act.onDismiss(item)}>숨김</button>
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-// One offender list with its own time-sort toggle (per-section). The toggle sits at
-// the top-right of the body (the section header is itself a collapse button, so a
-// nested button there would be invalid).
-function Group({ items, dir, onToggleSort, onNavigate, empty }: {
+// One offender list: per-section time-sort toggle + "보이는 N건 숨김" bulk action.
+function Group({ items, dir, onToggleSort, onDismissVisible, act, empty }: {
   items: AttentionItem[];
   dir: "desc" | "asc";
   onToggleSort: () => void;
-  onNavigate?: (s: string) => void;
+  onDismissVisible: (items: AttentionItem[]) => void;
+  act: ItemActions;
   empty: string;
 }) {
   if (items.length === 0) return <p className="muted small">{empty}</p>;
   return (
     <>
       <div className="attn-sec-tools">
+        <button className="attn-sort" onClick={() => onDismissVisible(items)}
+          title="현재 보이는(필터된) 항목을 모두 숨김 — 숨김 항목에서 해제 가능">
+          보이는 {items.length}건 숨김
+        </button>
         <button className="attn-sort" onClick={onToggleSort}
           title="시간순 정렬 전환 (갱신·보고·요청 시각 기준)">
           {dir === "desc" ? "최신순 ↓" : "오래된순 ↑"}
         </button>
       </div>
       <div className="attn2-list">
-        {items.map((r, i) => <Item key={`${r.issue_type}-${i}`} item={r} onNavigate={onNavigate} />)}
+        {items.map((r, i) => <Item key={r.fingerprint || `${r.issue_type}-${i}`} item={r} act={act} />)}
+      </div>
+    </>
+  );
+}
+
+function DismissedList({ rows, onUndismiss, onUndismissAll }: {
+  rows: DismissedItem[];
+  onUndismiss: (fingerprints: string[]) => void;
+  onUndismissAll: () => void;
+}) {
+  if (rows.length === 0) return <p className="muted small">숨긴 항목이 없습니다.</p>;
+  return (
+    <>
+      <div className="attn-sec-tools">
+        <button className="attn-sort" onClick={onUndismissAll}>모두 해제 (원위치)</button>
+      </div>
+      <div className="attn2-list">
+        {rows.map((d) => (
+          <div key={d.fingerprint} className="attn2 attn2-info">
+            <div className="attn2-rowwrap">
+              <div className="attn2-row dismissed">
+                <span className="attn2-main">
+                  <span className="attn2-head">
+                    <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
+                    <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
+                  </span>
+                  <span className="attn2-action muted small">
+                    {d.dismissed_by || "operator"} · {fmtAgo(d.dismissed_at)}
+                    {d.reason ? ` · ${d.reason}` : ""}
+                  </span>
+                </span>
+              </div>
+              <button type="button" className="attn2-hide" title="숨김 해제 — 다시 조치 필요에 표시"
+                onClick={() => onUndismiss([d.fingerprint])}>해제</button>
+            </div>
+          </div>
+        ))}
       </div>
     </>
   );
@@ -264,25 +331,85 @@ function timeOf(item: AttentionItem): number {
   return Number.isNaN(ms) ? 0 : ms;
 }
 
+const dismissPayload = (items: AttentionItem[]) =>
+  items
+    .filter((i) => i.fingerprint)
+    .map((i) => ({ fingerprint: i.fingerprint as string, issue_type: i.issue_type, label: labelOf(i) }));
+
 export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string) => void }) {
   const [rows, setRows] = useState<AttentionItem[]>([]);
+  const [dismissed, setDismissed] = useState<DismissedItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
   // INFO (e.g. soft-deleted awaiting manual cleanup) is hidden by default
   const [sev, setSev] = useState<Set<string>>(new Set(["CRITICAL", "ERROR", "WARN"]));
   const [doms, setDoms] = useState<Set<string>>(new Set());
-  // independent time-sort per section (both 최신순 기본)
   const [liveSort, setLiveSort] = useState<"desc" | "asc">("desc");
   const [histSort, setHistSort] = useState<"desc" | "asc">("desc");
+
+  const refetch = useCallback(async () => {
+    const [a, d] = await Promise.all([
+      operatorApi.dashboard.attention().catch(() => [] as AttentionItem[]),
+      operatorApi.dashboard.dismissedAttention().catch(() => [] as DismissedItem[]),
+    ]);
+    setRows(a);
+    setDismissed(d);
+  }, []);
+
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    operatorApi.dashboard
-      .attention()
-      .then((r) => { if (alive) setRows(r); })
-      .catch(() => { if (alive) setRows([]); })
-      .finally(() => { if (alive) setLoading(false); });
+    refetch().finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, []);
+  }, [refetch]);
+
+  // run a mutating action, then refresh; surface failures.
+  const run = useCallback(async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      await refetch();
+    } catch (e) {
+      window.alert(`작업 실패: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [refetch]);
+
+  const act: ItemActions = {
+    onNavigate,
+    onDismiss: (item) => {
+      const p = dismissPayload([item]);
+      if (p.length) run(() => operatorApi.dashboard.dismissAttention(p));
+    },
+    onResolve: (item) => {
+      const id = str(item.request_id);
+      if (!id) return;
+      const reason = window.prompt("요청 중단(abandon) 사유를 입력하세요 (감사 기록):", "obsolete — 정리");
+      if (!reason) return;
+      run(() => operatorApi.dashboard.resolveRequest(id, "abandon", reason));
+    },
+    onDelete: (item) => {
+      const id = str(item.job_id);
+      if (!id) return;
+      if (!window.confirm("이 data job 기록을 DMS에서 삭제할까요? (되돌릴 수 없음)")) return;
+      run(() => operatorApi.dashboard.deleteDataJob(id));
+    },
+  };
+
+  const dismissVisible = (items: AttentionItem[]) => {
+    const p = dismissPayload(items);
+    if (!p.length) return;
+    if (!window.confirm(`보이는 ${p.length}건을 숨길까요? (숨김 항목에서 언제든 해제 가능)`)) return;
+    run(() => operatorApi.dashboard.dismissAttention(p));
+  };
+  const undismiss = (fingerprints: string[]) =>
+    run(() => operatorApi.dashboard.undismissAttention(fingerprints));
+  const undismissAll = () => {
+    if (!dismissed.length) return;
+    if (!window.confirm(`숨김 ${dismissed.length}건을 모두 해제(원위치)할까요?`)) return;
+    undismiss(dismissed.map((d) => d.fingerprint));
+  };
 
   const sevCounts = useMemo(() => {
     const c: Record<string, number> = { CRITICAL: 0, ERROR: 0, WARN: 0, INFO: 0 };
@@ -301,7 +428,6 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     if (doms.size && !doms.has(domainOf(r.issue_type))) return false;
     return true;
   });
-  // sort by time (newest first by default), severity as tiebreaker — per section dir
   const sevRank = (r: AttentionItem) => SEV_RANK[(str(r.severity) || "WARN").toUpperCase()] ?? 2;
   const cmp = (dir: "desc" | "asc") => (a: AttentionItem, b: AttentionItem) => {
     const ta = timeOf(a), tb = timeOf(b);
@@ -325,12 +451,14 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     </span>
   );
   const histBadge = <span className="muted small">{history.length}건</span>;
+  const dismBadge = <span className="muted small">{dismissed.length}건</span>;
 
   if (loading) return <Loading rows={4} />;
-  if (rows.length === 0) return <p className="muted">조치 필요한 항목이 없습니다. ✅</p>;
+  if (rows.length === 0 && dismissed.length === 0)
+    return <p className="muted">조치 필요한 항목이 없습니다. ✅</p>;
 
   return (
-    <>
+    <div className={busy ? "attn-busy" : undefined}>
       <div className="attn-filters">
         {SEVERITIES.map((s) => (
           <button key={s} className={`attn-chip sev-${sevTone[s]} ${sev.has(s) ? "on" : ""}`}
@@ -350,13 +478,18 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
       <Section title="현재 조치 필요" badge={liveBadge} defaultOpen>
         <Group items={live} dir={liveSort}
           onToggleSort={() => setLiveSort((d) => (d === "desc" ? "asc" : "desc"))}
-          onNavigate={onNavigate} empty="현재 조치 필요한 항목이 없습니다. ✅" />
+          onDismissVisible={dismissVisible} act={act}
+          empty="현재 조치 필요한 항목이 없습니다. ✅" />
       </Section>
       <Section title="과거 작업 이력 (종료된 작업·결과)" badge={histBadge}>
         <Group items={history} dir={histSort}
           onToggleSort={() => setHistSort((d) => (d === "desc" ? "asc" : "desc"))}
-          onNavigate={onNavigate} empty="이력 없음" />
+          onDismissVisible={dismissVisible} act={act}
+          empty="이력 없음" />
       </Section>
-    </>
+      <Section title="숨김 항목 (acknowledge)" badge={dismBadge}>
+        <DismissedList rows={dismissed} onUndismiss={undismiss} onUndismissAll={undismissAll} />
+      </Section>
+    </div>
   );
 }

@@ -332,7 +332,16 @@ export interface AttentionItem {
   issue_type: string;
   severity?: string;
   category?: "live" | "history";
+  fingerprint?: string;
   [k: string]: unknown;
+}
+export interface DismissedItem {
+  fingerprint: string;
+  issue_type?: string;
+  label?: string;
+  reason?: string;
+  dismissed_by?: string;
+  dismissed_at?: string;
 }
 
 export interface VolcanoStatus {
@@ -582,6 +591,28 @@ export const operatorApi = {
     },
     attention: () =>
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
+    dismissedAttention: () =>
+      request<DismissedItem[]>("/api/operator/dashboard/attention/dismissed"),
+    dismissAttention: (items: { fingerprint: string; issue_type?: string; label?: string; reason?: string }[]) =>
+      request<{ dismissed: number }>("/api/operator/dashboard/attention/dismiss", {
+        method: "POST",
+        body: JSON.stringify({ items }),
+      }),
+    undismissAttention: (fingerprints: string[]) =>
+      request<{ undismissed: number }>("/api/operator/dashboard/attention/undismiss", {
+        method: "POST",
+        body: JSON.stringify({ fingerprints }),
+      }),
+    resolveRequest: (requestId: string, resolution: "abandon" | "succeeded", reason: string) =>
+      request<{ request_id: string; resolved_to: string }>(
+        `/api/operator/dashboard/requests/${encodeURIComponent(requestId)}/resolve`,
+        { method: "POST", body: JSON.stringify({ resolution, reason }) },
+      ),
+    deleteDataJob: (jobId: string) =>
+      request<{ job_id: string; status: string }>(
+        `/api/operator/dashboard/data-jobs/${encodeURIComponent(jobId)}`,
+        { method: "DELETE" },
+      ),
     controlHosts: () =>
       request<ControlHost[]>("/api/operator/dashboard/control-hosts"),
     volcano: () =>

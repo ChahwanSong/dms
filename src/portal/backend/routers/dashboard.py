@@ -11,12 +11,29 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from ..config import Settings
-from ..deps import get_dms_client
+from ..db import Database
+from ..deps import get_db, get_dms_client
 from ..dms_client import DmsApiError, DmsClient
 from ..security import ROLE_OPERATOR, require_role
+
+
+class DismissIn(BaseModel):
+    """Items to hide from 조치 필요 (portal-side acknowledge). Each carries its
+    stable fingerprint plus issue_type/label for the 숨김 항목 review list."""
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class FingerprintsIn(BaseModel):
+    fingerprints: list[str] = Field(default_factory=list)
+
+
+class ResolveIn(BaseModel):
+    resolution: str  # "abandon" | "succeeded"
+    reason: str = ""
 
 
 def _actor(user: dict[str, Any], settings: Settings) -> str:
@@ -340,6 +357,23 @@ def _attention_category(issue_type: str, resource_kind: str | None) -> str:
     return "live"
 
 
+def _fingerprint(it: dict[str, Any]) -> str:
+    """Stable key per issue for the portal dismiss layer: issue_type + best identifier.
+    Terminal items (data_job/request) key on their id; resource/storage on their key."""
+    ns = it.get("namespace_name") or it.get("namespace")
+    key = (
+        it.get("resource_key")
+        or it.get("request_id")
+        or it.get("job_id")
+        or it.get("report_id")
+        or it.get("storage_name")
+        or (f"{it.get('cluster_name')}:{ns}" if ns else None)
+        or it.get("node_name")
+        or ""
+    )
+    return f"{it.get('issue_type') or ''}|{key}"
+
+
 def _refine_attention(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Backfill severity and tag each item live/history so the panel can filter and
     group. CSI false-positive readiness warnings are suppressed upstream in DMS
@@ -355,6 +389,7 @@ def _refine_attention(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 **it,
                 "severity": severity,
                 "category": _attention_category(issue_type, it.get("resource_kind")),
+                "fingerprint": _fingerprint(it),
             }
         )
     refined.sort(
@@ -520,10 +555,72 @@ def dashboard_router(settings: Settings) -> APIRouter:
 
     @router.get("/attention")
     async def attention(
+        request: Request,
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> list[dict[str, Any]]:
-        items = await dms.list_action_required(actor=_actor(user, settings))
-        return _refine_attention(items)
+        items = _refine_attention(
+            await dms.list_action_required(actor=_actor(user, settings))
+        )
+        # filter portal-side dismissed items (graceful if no portal DB configured)
+        db: Database = request.app.state.db
+        if db.configured:
+            dismissed = await db.dismissed_fingerprints()
+            items = [it for it in items if it.get("fingerprint") not in dismissed]
+        return items
+
+    @router.get("/attention/dismissed")
+    async def attention_dismissed(
+        db: Database = Depends(get_db),
+    ) -> list[dict[str, Any]]:
+        return await db.list_dismissals()
+
+    @router.post("/attention/dismiss")
+    async def attention_dismiss(
+        body: DismissIn,
+        db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        items = [i for i in body.items if i.get("fingerprint")]
+        n = await db.add_dismissals(
+            items, dismissed_by=str(user.get("username") or "operator")
+        )
+        return {"dismissed": n}
+
+    @router.post("/attention/undismiss")
+    async def attention_undismiss(
+        body: FingerprintsIn,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        n = await db.remove_dismissals([f for f in body.fingerprints if f])
+        return {"undismissed": n}
+
+    @router.post("/requests/{request_id}/resolve")
+    async def resolve_request(
+        request_id: str,
+        body: ResolveIn,
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        try:
+            return await dms.resolve_request(
+                request_id,
+                resolution=body.resolution,
+                reason=body.reason,
+                actor=_actor(user, settings),
+            )
+        except DmsApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    @router.delete("/data-jobs/{job_id}")
+    async def delete_data_job(
+        job_id: str,
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        try:
+            return await dms.delete_data_job(job_id, actor=_actor(user, settings))
+        except DmsApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     return router

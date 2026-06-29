@@ -166,6 +166,24 @@ class DmsClient:
             "POST", f"{_DM}/jobs/{_seg(job_id)}:cancel", actor=actor
         )
 
+    async def delete_data_job(self, job_id: str, *, actor: str) -> dict[str, Any]:
+        """Delete a TERMINAL data-job record (DMS enforces terminal-only; 409 otherwise)."""
+        return await self._request(
+            "DELETE", f"{_DM}/jobs/{_seg(job_id)}", actor=actor
+        )
+
+    async def resolve_request(
+        self, request_id: str, *, resolution: str, reason: str, actor: str
+    ) -> dict[str, Any]:
+        """Resolve a stuck request (abandon→Failed / succeeded→Succeeded).
+        DMS only allows UnknownAfterSideEffect / BackendApplyFailed."""
+        return await self._request(
+            "POST",
+            f"/api/v1/resource-management/requests/{_seg(request_id)}:resolve",
+            actor=actor,
+            json={"resolution": resolution, "reason": reason},
+        )
+
     async def list_data_jobs(
         self,
         *,
