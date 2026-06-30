@@ -29,7 +29,10 @@ def test_filesystem_create_plans_access_group_and_no_quota(tmp_path):
             "storage_name": "cephfs-a",
             "directory_name": "project-alpha",
             "users": ["alice", "bob"],
-            "expires_at": "2026-06-30T00:00:00Z",
+            # far-future so the request is never treated as already-expired
+            # (was hardcoded "2026-06-30", which the planner expired once the system
+            # clock reached that date — a time-bomb flake).
+            "expires_at": "2099-01-01T00:00:00Z",
         },
     )
 
