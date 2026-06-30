@@ -381,6 +381,35 @@ textarea,
   border-radius: 4px;
 }
 
+/* Catch-all render-error card (ErrorBoundary). Centered, self-contained so it
+   reads even when it replaces the whole console. */
+.error-boundary {
+  max-width: 640px;
+  margin: 4rem auto;
+  padding: 1.5rem;
+  border: 1px solid var(--error);
+  border-radius: 10px;
+  background: rgba(248, 113, 113, 0.08);
+}
+.error-boundary h3 {
+  margin: 0 0 0.5rem;
+  color: var(--error);
+}
+.error-boundary-detail {
+  background: #0b1220;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  margin: 0.75rem 0;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+}
+.error-boundary-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 table.grid {
   width: 100%;
   border-collapse: collapse;

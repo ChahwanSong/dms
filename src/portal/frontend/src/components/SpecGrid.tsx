@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { isValidElement, type ReactNode } from "react";
 
 export interface KV {
   label: string;
@@ -6,6 +6,23 @@ export interface KV {
   mono?: boolean;
   tone?: string;
   span?: boolean; // span the full grid width (e.g. long paths / notes)
+}
+
+// Defense in depth: several callers feed `value` straight from open
+// `[k: string]: unknown` API records, so a field the contract types as a string
+// can arrive as an object/array at runtime. Rendering a plain object as a React
+// child throws (React #31) and — with no error boundary below the crash site —
+// unmounts the whole tree. Coerce anything that isn't a valid child to text so a
+// stray object degrades to readable JSON instead of a white screen.
+function renderable(v: ReactNode): ReactNode {
+  if (v != null && typeof v === "object" && !isValidElement(v) && !Array.isArray(v)) {
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  }
+  return v;
 }
 
 // Aligned definition grid: an eyebrow label above its value. Replaces run-on
@@ -17,7 +34,9 @@ export function SpecGrid({ items }: { items: KV[] }) {
       {items.map((it, i) => (
         <div className={`spec-kv${it.span ? " span" : ""}`} key={i}>
           <dt>{it.label}</dt>
-          <dd className={[it.mono ? "mono" : "", it.tone || ""].join(" ").trim()}>{it.value}</dd>
+          <dd className={[it.mono ? "mono" : "", it.tone || ""].join(" ").trim()}>
+            {renderable(it.value)}
+          </dd>
         </div>
       ))}
     </dl>

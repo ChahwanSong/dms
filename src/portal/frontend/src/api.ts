@@ -565,7 +565,9 @@ export interface JobDetail {
   note?: string;
   state?: string | null;
   selected_tool?: string | null;
-  volcano_job_ref?: string | null;
+  // DMS returns a STRUCTURED ref ({adapter, job_ref}), not a bare string. Keep
+  // the union so the modal coerces it instead of rendering an object (React #31).
+  volcano_job_ref?: string | { adapter?: string; job_ref?: string } | null;
   artifact_uri?: string | null;
   log_uri?: string | null;
   created_at?: string | null;

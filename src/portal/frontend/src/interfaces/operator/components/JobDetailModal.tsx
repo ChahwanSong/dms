@@ -78,6 +78,16 @@ function asRecord(v: unknown): Record<string, unknown> | null {
     : null;
 }
 
+// DMS volcano_job_ref is a STRUCTURED ref ({adapter, job_ref}), not a bare
+// string. Render the job_ref URI (the meaningful part); never the raw object.
+function volcanoRefStr(v: unknown): string | null {
+  if (v == null || v === "") return null;
+  if (typeof v === "string") return v;
+  const r = asRecord(v);
+  if (r) return typeof r.job_ref === "string" ? r.job_ref : JSON.stringify(r);
+  return String(v);
+}
+
 // result_summary nesting varies by tool: dscan/dsync nest scalar metrics under
 // `summary`; nsync executions nest under `execution.summary`. Fall back to the
 // top-level record so something is always shown.
@@ -195,10 +205,11 @@ export default function JobDetailModal(props: Props) {
       mono: true,
       span: true,
     });
-  if (detail?.volcano_job_ref)
+  const volcanoRef = volcanoRefStr(detail?.volcano_job_ref);
+  if (volcanoRef)
     live.push({
       label: "volcano_job_ref",
-      value: detail.volcano_job_ref,
+      value: volcanoRef,
       mono: true,
       span: true,
     });
