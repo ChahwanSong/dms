@@ -176,6 +176,22 @@ class DmsClient:
             "GET", f"{_DM}/scan/jobs/{_seg(job_id)}", actor=actor
         )
 
+    async def get_data_job_logs(
+        self, job_id: str, *, tail: int = 400, actor: str
+    ) -> dict[str, Any]:
+        """Tail the MPI launcher pod logs for a data-job (read-only). DMS resolves
+        the data_jobs row -> volcano_job_ref -> launcher pod(s) and returns
+        {job_id, available, pods:[{name,node_name,role,phase}], logs, note}.
+        ``available`` is false (with a human ``note``) when there is no pod yet
+        (pending), the pod was GC'd (terminal), or kubectl errored — DMS never 500s
+        on those, so this is a normal 200 the caller renders as 'no logs'."""
+        return await self._request(
+            "GET",
+            f"{_DATA_JOBS}/{_seg(job_id)}/logs",
+            actor=actor,
+            params={"tail": tail},
+        )
+
     async def confirm_job(
         self, job_id: str, body: dict[str, Any], *, actor: str
     ) -> dict[str, Any]:

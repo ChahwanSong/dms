@@ -19,6 +19,7 @@ import ScanResults from "./ScanResults";
 import { ScanHistBar, ScanHistFull } from "./ScanHist";
 import Loading from "../../../components/Loading";
 import ScanCsvModal from "./ScanCsvModal";
+import JobDetailModal from "../components/JobDetailModal";
 
 const PAGE = 200;
 const STATE_ORDER = ["registered", "held", "running", "succeeded", "failed", "cancelled"];
@@ -130,6 +131,7 @@ export default function ScanBatchDetail({
   const jobsRef = useRef<ScanRequest[]>([]);
   const [showEdit, setShowEdit] = useState(false);
   const [editingReq, setEditingReq] = useState<ScanRequest | null>(null);
+  const [detailReq, setDetailReq] = useState<ScanRequest | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   // storage_name -> managed_root, so the UI can show real absolute paths.
@@ -727,6 +729,9 @@ export default function ScanBatchDetail({
                   )}
                 </div>
                 <div className="vcell row-actions" onClick={(e) => e.stopPropagation()}>
+                  <button className="mini" onClick={() => setDetailReq(j)} disabled={busy}>
+                    상세/로그
+                  </button>
                   {mutable && EDITABLE.includes(j.state) && (
                     <button className="mini" onClick={() => setEditingReq(j)} disabled={busy}>
                       편집
@@ -792,6 +797,14 @@ export default function ScanBatchDetail({
           busy={busy}
           onReplace={replaceFromRows}
           onClose={() => setCsvModal(null)}
+        />
+      )}
+      {detailReq && (
+        <JobDetailModal
+          kind="scan"
+          batchId={batchId}
+          request={detailReq}
+          onClose={() => setDetailReq(null)}
         />
       )}
     </div>

@@ -554,6 +554,47 @@ export interface NodeMetricsResp {
   window_seconds: number;
 }
 
+// --- per-request live job detail + log tail (backup + scan) ------------
+
+// Live DMS data-job detail (fuller than the portal-stored subset). The BFF
+// returns the raw DMS job dict when a job exists, or {available:false, note}
+// when the request has no DMS job yet. result_summary nesting varies by tool, so
+// it stays an open record the modal renders defensively (incl file_size_histogram).
+export interface JobDetail {
+  available?: boolean; // false ONLY when there is no DMS job yet
+  note?: string;
+  state?: string | null;
+  selected_tool?: string | null;
+  volcano_job_ref?: string | null;
+  artifact_uri?: string | null;
+  log_uri?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  preflight_result?: Record<string, unknown> | null;
+  result_summary?: Record<string, unknown> | null;
+  [k: string]: unknown;
+}
+
+// One launcher/worker pod backing a data-job (for the log tail panel).
+export interface JobLogPod {
+  name?: string;
+  node_name?: string | null;
+  role?: string | null;
+  phase?: string | null;
+}
+
+// Tailed launcher-pod logs. available=false (with a note) when there is no pod
+// yet (pending), it was GC'd (terminal), or kubectl errored — never an error.
+export interface JobLogs {
+  job_id?: string;
+  available: boolean;
+  pods?: JobLogPod[];
+  logs?: string;
+  note?: string;
+}
+
 const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 const SC = "/api/operator/scan/batches";
@@ -701,6 +742,23 @@ export const operatorApi = {
         `${BK}/${encodeURIComponent(id)}/requests:reset`,
         { method: "POST", body: JSON.stringify(opts) },
       ),
+    // Re-run a finished batch from scratch: reset ALL terminal requests (incl
+    // succeeded) to 'registered' and move the batch to 'previewing'. Sync is
+    // destructive, so this re-previews (NOT auto-runs) — the operator re-approves.
+    rerun: (id: string) =>
+      request<{ id: string; status: string; reset: number }>(
+        `${BK}/${encodeURIComponent(id)}:rerun`,
+        { method: "POST" },
+      ),
+    // Live DMS sync-job detail for one request (read-only). {available:false} when
+    // the request has no DMS job yet.
+    job: (id: string, rid: number) =>
+      request<JobDetail>(`${BK}/${encodeURIComponent(id)}/requests/${rid}/job`),
+    // Tail the launcher pod logs of a request's DMS job (read-only).
+    logs: (id: string, rid: number, tail = 400) =>
+      request<JobLogs>(
+        `${BK}/${encodeURIComponent(id)}/requests/${rid}/logs?tail=${tail}`,
+      ),
   },
   // Data scan (DMS DM scan). Scan is READ-ONLY: no preview/approve/confirm — a
   // batch goes draft -> scanning -> done via a single :run (or :rescan to re-run
@@ -812,6 +870,15 @@ export const operatorApi = {
       request<{ id: string; status: string; dms_cancelled: number }>(
         `${SC}/${encodeURIComponent(id)}:cancel`,
         { method: "POST" },
+      ),
+    // Live DMS scan-job detail for one request (read-only). {available:false} when
+    // the request has no DMS job yet.
+    job: (id: string, rid: number) =>
+      request<JobDetail>(`${SC}/${encodeURIComponent(id)}/requests/${rid}/job`),
+    // Tail the launcher pod logs of a request's DMS job (read-only).
+    logs: (id: string, rid: number, tail = 400) =>
+      request<JobLogs>(
+        `${SC}/${encodeURIComponent(id)}/requests/${rid}/logs?tail=${tail}`,
       ),
   },
   dashboard: {

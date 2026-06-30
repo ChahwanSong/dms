@@ -454,6 +454,61 @@ def backup_router(settings: Settings) -> APIRouter:
             "dms_cancelled": dms_cancelled,
         }
 
+    @router.get("/batches/{batch_id}/requests/{request_id}/job")
+    async def request_job(
+        batch_id: str,
+        request_id: int,
+        db: Database = Depends(get_db),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        """Live DMS sync-job detail for a single request (read-only). Returns the
+        FULL DMS job dict (state, result_summary incl file_size_histogram,
+        preflight_result, selected_tool, volcano_job_ref, artifact_uri, log_uri,
+        timestamps) — fuller than the portal-stored subset. ``{available:false}``
+        when the request has no DMS job yet (still registered / never submitted)."""
+        if not await db.get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        req = await _require_request(db, batch_id, request_id)
+        job_id = req.get("dms_job_id")
+        if not job_id:
+            return {"available": False, "note": "아직 DMS 작업이 시작되지 않았습니다."}
+        actor = f"{settings.backup_actor_prefix}{_actor(user)}"
+        try:
+            return await dms.get_sync_job(job_id, actor=actor)
+        except DmsApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/batches/{batch_id}/requests/{request_id}/logs")
+    async def request_logs(
+        batch_id: str,
+        request_id: int,
+        tail: int = Query(default=400, ge=1, le=5000),
+        db: Database = Depends(get_db),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        """Tail the launcher pod logs of a request's DMS job (read-only). Proxies
+        DMS GET /operations/data-jobs/{job_id}/logs verbatim
+        ({job_id, available, pods, logs, note}); ``{available:false}`` when the
+        request has no DMS job yet."""
+        if not await db.get_batch(batch_id):
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        req = await _require_request(db, batch_id, request_id)
+        job_id = req.get("dms_job_id")
+        if not job_id:
+            return {
+                "available": False,
+                "note": "아직 DMS 작업이 시작되지 않았습니다.",
+                "pods": [],
+                "logs": "",
+            }
+        actor = f"{settings.backup_actor_prefix}{_actor(user)}"
+        try:
+            return await dms.get_data_job_logs(job_id, tail=tail, actor=actor)
+        except DmsApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
     @router.post("/batches/{batch_id}/requests:cancel")
     async def cancel_requests_bulk(
         batch_id: str,
@@ -579,6 +634,30 @@ def backup_router(settings: Settings) -> APIRouter:
             await db.set_batch_status(batch_id, "done")
         batch = await db.get_batch(batch_id)
         return {"id": batch_id, "status": batch["status"], "excluded": excluded}
+
+    @router.post("/batches/{batch_id}:rerun")
+    async def rerun(
+        batch_id: str, db: Database = Depends(get_db)
+    ) -> dict[str, Any]:
+        """Re-run a finished batch from scratch: reset ALL terminal requests
+        (succeeded/failed/preview_failed/cancelled) to 'registered', then move the
+        batch to 'previewing' so the orchestrator re-previews them. Sync is
+        DESTRUCTIVE, so unlike scan's :rescan this does NOT auto-execute — the
+        operator must review the fresh preview and re-approve."""
+        batch = await db.get_batch(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="batch_not_found")
+        if batch["status"] not in ("done", "previewed", "cancelled"):
+            raise HTTPException(
+                status_code=409, detail=f"cannot rerun a '{batch['status']}' batch"
+            )
+        reset = await db.reset_requests(batch_id, all_terminal=True)
+        await db.release_held(batch_id)  # self-heal any stragglers
+        counts = await db.batch_state_counts(batch_id)
+        if not counts.get("registered"):
+            raise HTTPException(status_code=422, detail="no requests to rerun")
+        await db.set_batch_status(batch_id, "previewing")
+        return {"id": batch_id, "status": "previewing", "reset": reset}
 
     @router.post("/batches/{batch_id}:cancel")
     async def cancel(

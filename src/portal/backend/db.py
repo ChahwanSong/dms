@@ -992,13 +992,18 @@ class Database:
         *,
         request_ids: list[int] | None = None,
         failed_only: bool = False,
+        all_terminal: bool = False,
     ) -> int:
         """Reset fixable requests to 'registered' (clearing preview/job state) for
-        re-preview. failed_only targets failed/preview_failed; otherwise the given
-        ids, skipping in-flight/succeeded. Returns how many were reset."""
+        re-preview. `all_terminal` (full re-run) targets EVERY terminal request
+        (succeeded/failed/preview_failed/cancelled); `failed_only` targets
+        failed/preview_failed; otherwise the given ids, skipping in-flight/succeeded.
+        Returns how many were reset."""
         where = ["batch_id=%s"]
         params: list[Any] = [batch_id]
-        if failed_only:
+        if all_terminal:
+            where.append("state IN ('succeeded','failed','preview_failed','cancelled')")
+        elif failed_only:
             where.append("state IN ('failed','preview_failed')")
         else:
             where.append("id = ANY(%s)")

@@ -16,6 +16,7 @@ import BackupBatchForm from "./BackupBatchForm";
 import BackupRequestEdit from "./BackupRequestEdit";
 import Loading from "../../../components/Loading";
 import BackupCsvModal from "./BackupCsvModal";
+import JobDetailModal from "../components/JobDetailModal";
 
 const PAGE = 200;
 const STATE_ORDER = [
@@ -158,6 +159,7 @@ export default function BackupBatchDetail({
   const jobsRef = useRef<BackupRequest[]>([]);
   const [showEdit, setShowEdit] = useState(false);
   const [editingReq, setEditingReq] = useState<BackupRequest | null>(null);
+  const [detailReq, setDetailReq] = useState<BackupRequest | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   // storage_name -> managed_root, so the UI can show real absolute paths.
@@ -381,8 +383,23 @@ export default function BackupBatchDetail({
       "실패 항목을 재시도 대기로 되돌렸습니다.",
     );
   }
+  function rerunAll() {
+    if (
+      !window.confirm(
+        "완료 항목을 포함한 모든 요청을 처음부터 다시 실행합니다.\n" +
+          "전체가 재-Preview 단계로 돌아가며(성공한 항목도 포함), 백업은 파괴적이므로 자동 실행되지 않습니다 — 다시 검토 후 승인해야 합니다. 계속할까요?",
+      )
+    )
+      return;
+    act(async () => {
+      await operatorApi.backup.rerun(batchId);
+      setSelected(new Set());
+    }, "전체 재실행 — 다시 Preview를 시작합니다.");
+  }
   const failedCount = (counts.preview_failed ?? 0) + (counts.failed ?? 0);
   const canRepreview = (status === "previewed" || status === "done") && (counts.registered ?? 0) > 0;
+  // Full re-run resets ALL terminal items (incl succeeded) -> re-preview.
+  const canRerun = status === "done" || status === "previewed" || status === "cancelled";
 
   // --- item management (add / delete / CSV) + general bulk selection -------
   const INFLIGHT_STATES = ["preview_pending", "approved", "running"];
@@ -565,6 +582,11 @@ export default function BackupBatchDetail({
           {status !== "draft" && status !== "previewing" && failedCount > 0 && (
             <button className="ghost" disabled={busy} onClick={retryFailed}>
               실패 재시도 ({failedCount})
+            </button>
+          )}
+          {canRerun && (
+            <button className="ghost" disabled={busy} onClick={rerunAll}>
+              전체 재실행
             </button>
           )}
           {(status === "previewing" || status === "running" || status === "previewed") && (
@@ -848,6 +870,9 @@ export default function BackupBatchDetail({
                   )}
                 </div>
                 <div className="vcell row-actions" onClick={(e) => e.stopPropagation()}>
+                  <button className="mini" onClick={() => setDetailReq(j)} disabled={busy}>
+                    상세/로그
+                  </button>
                   {EDITABLE.includes(j.state) && (
                     <button className="mini" onClick={() => setEditingReq(j)} disabled={busy}>
                       편집
@@ -913,6 +938,14 @@ export default function BackupBatchDetail({
           busy={busy}
           onReplace={replaceFromRows}
           onClose={() => setCsvModal(null)}
+        />
+      )}
+      {detailReq && (
+        <JobDetailModal
+          kind="backup"
+          batchId={batchId}
+          request={detailReq}
+          onClose={() => setDetailReq(null)}
         />
       )}
     </div>
