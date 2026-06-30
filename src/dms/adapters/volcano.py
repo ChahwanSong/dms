@@ -151,6 +151,17 @@ class StubVolcanoAdapter:
     def get_job(self, job_ref: str) -> dict[str, Any]:
         return {"job_ref": job_ref, "phase": "Succeeded"}
 
+    def tail_logs(self, job_ref: str, *, tail_lines: int = 400) -> dict[str, Any]:
+        # Read-only no-op: the stub never schedules real pods, so launcher logs
+        # are not available. Mirror the live adapter's graceful "unavailable" shape.
+        self.calls.append(("tail_logs", job_ref))
+        return {
+            "available": False,
+            "pods": [],
+            "logs": "",
+            "note": "volcano stub: launcher logs unavailable",
+        }
+
     def terminate_job(self, job_ref: str) -> AdapterResult:
         self.calls.append(("terminate_job", job_ref))
         return AdapterResult(
@@ -776,6 +787,138 @@ class KubernetesVolcanoAdapter:
             "worker_pod_count": len(worker_pods),
             "launcher_pod_count": len(launcher_pods),
             "pods": pods,
+        }
+
+    def tail_logs(self, job_ref: str, *, tail_lines: int = 400) -> dict[str, Any]:
+        """Read-only tail of the MPI launcher pod logs for a data job.
+
+        Resolves the volcano/mpijob ref -> the job's pods (via the existing
+        ``_job_pod_summary`` machinery) -> picks the MPI launcher/master pod
+        (where ``mpirun`` stdout lands) -> ``kubectl logs --tail=<n>``. Never
+        raises for the expected "not available" cases (ref not recognised, job
+        already garbage-collected, pod not yet scheduled, ``kubectl`` error):
+        returns ``available=False`` with a human ``note`` instead so the caller
+        can render a graceful state rather than a 500.
+        """
+        # Resolve the job object first so we can read its labels (data-job-id /
+        # phase / tool) -- those labels drive the pod selector in _job_pod_summary.
+        try:
+            if job_ref.startswith("mpijob://"):
+                namespace, name = _parse_kind_ref(job_ref, "mpijob://")
+                kind = "mpijob"
+            elif job_ref.startswith("volcano://"):
+                namespace, name = _parse_volcano_ref(job_ref)
+                kind = "job.batch.volcano.sh"
+            else:
+                return {
+                    "available": False,
+                    "pods": [],
+                    "logs": "",
+                    "note": f"unrecognized job ref: {job_ref}",
+                }
+        except DataManagementRuntimeError as exc:
+            return {"available": False, "pods": [], "logs": "", "note": str(exc)}
+
+        try:
+            completed = subprocess.run(
+                ["kubectl", "-n", namespace, "get", kind, name, "-o", "json"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.settings.kubernetes_inventory_timeout_seconds,
+                check=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - never crash the read path
+            return {
+                "available": False,
+                "pods": [],
+                "logs": "",
+                "note": f"job read error: {exc}",
+            }
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            return {
+                "available": False,
+                "pods": [],
+                "logs": "",
+                "note": (
+                    "job no longer present (likely completed and "
+                    f"garbage-collected): {detail}"
+                ),
+            }
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            return {
+                "available": False,
+                "pods": [],
+                "logs": "",
+                "note": f"job read parse error: {exc}",
+            }
+
+        labels = payload.get("metadata", {}).get("labels") or {}
+        summary = self._job_pod_summary(namespace, labels)
+        pods = summary.get("pods") or []
+        pod_views = [
+            {
+                "name": pod.get("name"),
+                "node_name": pod.get("node_name"),
+                "role": pod.get("role"),
+                "phase": pod.get("phase"),
+            }
+            for pod in pods
+        ]
+        if not pods:
+            note = summary.get("message") or (
+                "no pods found for the job (not yet scheduled or already cleaned up)"
+            )
+            return {"available": False, "pods": pod_views, "logs": "", "note": note}
+
+        # mpirun stdout lands on the launcher/master pod; fall back to the first
+        # pod when the role label is absent (single-pod tools).
+        launchers = [pod for pod in pods if pod.get("role") == "launcher"]
+        target = launchers[0] if launchers else pods[0]
+        pod_name = target.get("name")
+        if not pod_name:
+            return {
+                "available": False,
+                "pods": pod_views,
+                "logs": "",
+                "note": "selected pod has no name",
+            }
+
+        tail_arg = max(1, int(tail_lines))
+        try:
+            logs_completed = subprocess.run(
+                ["kubectl", "-n", namespace, "logs", f"--tail={tail_arg}", pod_name],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.settings.kubernetes_inventory_timeout_seconds,
+                check=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - never crash the read path
+            return {
+                "available": False,
+                "pods": pod_views,
+                "logs": "",
+                "note": f"log read error: {exc}",
+            }
+        if logs_completed.returncode != 0:
+            detail = logs_completed.stderr.strip() or logs_completed.stdout.strip()
+            return {
+                "available": False,
+                "pods": pod_views,
+                "logs": "",
+                "note": f"kubectl logs failed: {detail}",
+            }
+        return {
+            "available": True,
+            "pods": pod_views,
+            "logs": logs_completed.stdout,
+            "note": (
+                f"launcher pod {pod_name}" if launchers else f"pod {pod_name}"
+            ),
         }
 
     def terminate_job(self, job_ref: str) -> AdapterResult:
@@ -2750,10 +2893,19 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
         'chown -R "$DMS_POSIX_USERNAME" "$(dirname "$(dirname "$rank_script")")" 2>/dev/null || true; '
         'mpi_run_prefix="runuser -u $DMS_POSIX_USERNAME --preserve-environment --"; '
         "fi; "
-        "$mpi_run_prefix mpirun --allow-run-as-root --mca pml ob1 --mca btl tcp,self "
+        "_dms_rc=0; $mpi_run_prefix mpirun --allow-run-as-root --mca pml ob1 --mca btl tcp,self "
         "--mca oob_tcp_if_exclude lo --mca btl_tcp_if_exclude lo "
         '$hostfile_arg $env_exports -np "$DMS_MPI_PROCESS_COUNT" '
-        f'"$rank_script" > {stdout} 2> {stderr}'
+        f'"$rank_script" > {stdout} 2> {stderr} || _dms_rc=$?; '
+        # The tool's stdout/stderr are captured to the artifact files (source of
+        # truth). ALSO echo them onto the launcher pod's OWN stdout/stderr so the
+        # live log-tail endpoint (GET /operations/data-jobs/{id}/logs -> kubectl logs
+        # on this pod) surfaces the real tool output — on success AND failure. Plain
+        # tail (sh-portable, no FIFO/background), and `_dms_rc` + the final test
+        # preserve mpirun's exit status so `set -e` still fails the job correctly.
+        f'tail -c 200000 {stdout} 2>/dev/null || true; '
+        f'tail -c 50000 {stderr} 1>&2 2>/dev/null || true; '
+        '[ "$_dms_rc" -eq 0 ]'
     )
 
 

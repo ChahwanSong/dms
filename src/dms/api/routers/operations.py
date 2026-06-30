@@ -48,6 +48,39 @@ def _normalize_request_date(
     return parsed.isoformat()
 
 
+def _select_data_job_log_ref(volcano_job_ref: Any) -> str | None:
+    """Pick the most relevant Volcano/MPI job ref to tail launcher logs from.
+
+    ``volcano_job_ref`` (data_jobs column) is either flat (``{"job_ref": ...}``)
+    or phase-keyed (``{"preview": {"job_ref": ...}, "execution": {"job_ref": ...}}``;
+    written early by the DM worker at submit time, so present mid-RUNNING). Prefer
+    the execution phase (the live run an operator most wants to watch), then a scan
+    ref, then preview, then any remaining ref. Returns ``None`` when nothing has
+    been scheduled yet.
+    """
+    if not isinstance(volcano_job_ref, dict):
+        return None
+    flat = volcano_job_ref.get("job_ref")
+    if isinstance(flat, str) and flat:
+        return flat
+    for phase in ("execution", "scan", "preview"):
+        entry = volcano_job_ref.get(phase)
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("job_ref"), str)
+            and entry["job_ref"]
+        ):
+            return entry["job_ref"]
+    for entry in volcano_job_ref.values():
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("job_ref"), str)
+            and entry["job_ref"]
+        ):
+            return entry["job_ref"]
+    return None
+
+
 def operational_query_router() -> APIRouter:
     router = APIRouter(prefix="/api/v1/operations", tags=["operational-query"])
 
@@ -529,6 +562,40 @@ def operational_query_router() -> APIRouter:
     ) -> dict[str, Any]:
         authenticated_actor(request, services)
         return services.query.data_job_status(job_id)
+
+    @router.get("/data-jobs/{job_id}/logs")
+    def data_job_logs(
+        job_id: str,
+        request: Request,
+        tail: int = Query(default=400, gt=0, le=5000),
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        """Read-only tail of the MPI launcher pod logs for a data job.
+
+        Resolves the data_jobs row -> its ``volcano_job_ref`` (written early at
+        submit, so present mid-RUNNING) -> tails the launcher pod via the volcano
+        adapter. Never 500s for the expected unavailable cases (not yet scheduled,
+        pod garbage-collected, kubectl error): returns ``available=False`` with a
+        human ``note`` instead.
+        """
+        authenticated_actor(request, services)
+        job = services.repository.get_data_job(job_id)
+        if not job or not job.get("job_id"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"data job not found: {job_id}",
+            )
+        job_ref = _select_data_job_log_ref(job.get("volcano_job_ref"))
+        if not job_ref:
+            return {
+                "job_id": job_id,
+                "available": False,
+                "pods": [],
+                "logs": "",
+                "note": "job not yet scheduled (no Volcano/MPI job ref recorded yet)",
+            }
+        result = services.volcano_adapter.tail_logs(job_ref, tail_lines=tail)
+        return {"job_id": job_id, **result}
 
     @router.get("/diagnostics/{correlation_id}")
     def diagnostics(

@@ -5,6 +5,7 @@
 #   - queues.scheduling.volcano.sh   (cluster-scoped)
 #   - jobs.batch.volcano.sh / vcjob  (namespaced)
 #   - pods                           (for scheduler health in volcano-system)
+#   - pods/log                       (tail MPI launcher logs for GET /operations/data-jobs/{id}/logs)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -20,6 +21,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # pods/log: read launcher-pod logs for the data-job log-tail endpoint (read-only).
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
