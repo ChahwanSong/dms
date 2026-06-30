@@ -222,11 +222,68 @@ def test_reset_while_previewing_409(client, db):
     assert resp.status_code == 409
 
 
-# --- :preview re-allowed from done ------------------------------------------
+# --- (1) reset on a TERMINAL batch promotes it so Re-preview opens -----------
+
+def test_reset_from_cancelled_promotes_to_previewed(client, db):
+    """A cancelled batch's reset items would otherwise be stranded (orchestrator only
+    drives previewing/running). Promote to 'previewed' so Re-preview is available."""
+    db.seed_batch("b1", status="cancelled")
+    rid = db.seed_request("b1", state="preview_failed")
+    resp = client.post(f"{BASE}/batches/b1/requests:reset", json={"request_ids": [rid]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["reset"] == 1
+    assert resp.json()["status"] == "previewed"
+    assert db.requests[rid]["state"] == "registered"
+    assert db.batches["b1"]["status"] == "previewed"
+
+
+def test_reset_from_done_promotes_to_previewed(client, db):
+    db.seed_batch("b1", status="done")
+    rid = db.seed_request("b1", state="failed")
+    resp = client.post(f"{BASE}/batches/b1/requests:reset", json={"failed_only": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "previewed"
+    assert db.batches["b1"]["status"] == "previewed"
+
+
+def test_reset_from_running_does_not_promote(client, db):
+    """A running batch keeps its status — its execute-advance handles the leftover
+    registered item; we must not yank it out of the execute phase."""
+    db.seed_batch("b1", status="running")
+    rfail = db.seed_request("b1", state="failed")
+    db.seed_request("b1", state="running")  # keeps the batch genuinely running
+    resp = client.post(f"{BASE}/batches/b1/requests:reset", json={"request_ids": [rfail]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "running"
+    assert db.batches["b1"]["status"] == "running"
+
+
+def test_reset_matching_nothing_does_not_promote(client, db):
+    """Reset that matches no rows (e.g. failed_only on a batch with no failures) must
+    not revive a terminal batch."""
+    db.seed_batch("b1", status="cancelled")
+    db.seed_request("b1", state="cancelled")  # not failed/preview_failed
+    resp = client.post(f"{BASE}/batches/b1/requests:reset", json={"failed_only": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["reset"] == 0
+    assert db.batches["b1"]["status"] == "cancelled"
+
+
+# --- :preview re-allowed from done / cancelled ------------------------------
 
 def test_preview_from_done_allowed(client, db):
     db.seed_batch("b1", status="done")
     db.seed_request("b1", state="registered")  # a reset item awaiting re-preview
+    resp = client.post(f"{BASE}/batches/b1:preview")
+    assert resp.status_code == 200, resp.text
+    assert db.batches["b1"]["status"] == "previewing"
+
+
+def test_preview_from_cancelled_allowed(client, db):
+    """Re-preview must work from 'cancelled' too — registered items reset after a
+    cancel need a path to preview."""
+    db.seed_batch("b1", status="cancelled")
+    db.seed_request("b1", state="registered")
     resp = client.post(f"{BASE}/batches/b1:preview")
     assert resp.status_code == 200, resp.text
     assert db.batches["b1"]["status"] == "previewing"

@@ -576,7 +576,18 @@ def backup_router(settings: Settings) -> APIRouter:
         cancelled = await _cancel_jobs(
             dms, [j for j in cleared if j], f"{settings.backup_actor_prefix}{_actor(user)}"
         )
-        return {"id": batch_id, "reset": len(cleared), "dms_cancelled": cancelled}
+        # (1) A reset on a TERMINAL batch (done/cancelled) leaves 'registered' items
+        # the orchestrator would never preview (it only drives previewing/running).
+        # Promote to 'previewed' so the operator can Re-preview just those items
+        # (selective) instead of being forced into a whole-batch 전체 재실행.
+        status = batch["status"]
+        if cleared and status in ("done", "cancelled"):
+            await db.set_batch_status(batch_id, "previewed")
+            status = "previewed"
+        return {
+            "id": batch_id, "reset": len(cleared),
+            "dms_cancelled": cancelled, "status": status,
+        }
 
     @router.post("/batches/{batch_id}:preview")
     async def preview(
@@ -587,7 +598,10 @@ def backup_router(settings: Settings) -> APIRouter:
         batch = await db.get_batch(batch_id)
         if not batch:
             raise HTTPException(status_code=404, detail="batch_not_found")
-        if batch["status"] not in ("draft", "previewed", "done"):
+        # Allow re-preview from any settled state — incl. 'cancelled' — so registered
+        # items (e.g. reset after a cancel) always have a path to preview. Only
+        # 'previewing'/'running' (actively in flight) are rejected.
+        if batch["status"] not in ("draft", "previewed", "done", "cancelled"):
             raise HTTPException(
                 status_code=409, detail=f"cannot preview from {batch['status']}"
             )

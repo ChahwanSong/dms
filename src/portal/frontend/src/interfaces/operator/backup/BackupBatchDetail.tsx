@@ -401,7 +401,14 @@ export default function BackupBatchDetail({
     }, "전체 재실행 — 다시 Preview를 시작합니다.");
   }
   const failedCount = (counts.preview_failed ?? 0) + (counts.failed ?? 0);
-  const canRepreview = (status === "previewed" || status === "done") && (counts.registered ?? 0) > 0;
+  // Re-preview is available from any settled state with registered items — incl.
+  // 'cancelled', so items reset after a cancel aren't stranded (the orchestrator
+  // only previews a 'previewing' batch; without this the registered items would
+  // sit forever). The backend also promotes a reset done/cancelled batch to
+  // 'previewed', so this mainly covers batches stuck before that fix + clarity.
+  const canRepreview =
+    (status === "previewed" || status === "done" || status === "cancelled") &&
+    (counts.registered ?? 0) > 0;
   // Full re-run resets ALL terminal items (incl succeeded) -> re-preview.
   const canRerun = status === "done" || status === "previewed" || status === "cancelled";
 
