@@ -269,7 +269,9 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_events_correlation
 
 
 def migrate_operational(database: Database) -> None:
-    with database.connect() as connection:
+    # pooled=False: schema/index DDL on large tables must NOT be killed by the
+    # pooled statement_timeout, and migrations run once at startup (no pool needed).
+    with database.connect(pooled=False) as connection:
         connection.executescript(OPERATIONAL_SCHEMA)
         _ensure_operational_phase3_columns(connection, database)
         _ensure_operational_phase19_columns(connection, database)
@@ -283,7 +285,8 @@ def migrate_operational(database: Database) -> None:
 
 
 def migrate_observability(database: Database) -> None:
-    with database.connect() as connection:
+    # pooled=False: see migrate_operational.
+    with database.connect(pooled=False) as connection:
         connection.executescript(OBSERVABILITY_SCHEMA)
         _record_migration(connection, "observability-0001-phase1")
 

@@ -36,6 +36,26 @@ Core database와 인증:
 | `DMS_DATABASE_URL` | 예 | 운영용 PostgreSQL URL. Request, plan, run, resource, storage mapping, agent report, data job을 저장한다. |
 | `DMS_OBSERVABILITY_DATABASE_URL` | 예 | Observability PostgreSQL URL. Diagnostic event를 저장한다. 운영 환경에서는 별도 DB를 사용한다. |
 | `DMS_AUTH_SHARED_TOKEN` | 운영에서는 예 | API가 허용하고 agent/script가 사용하는 shared bearer token. 운영 환경에서는 mTLS evidence validation과 함께 사용한다. |
+
+PostgreSQL connection pool (프로세스당 URL 단위 bounded pool; SQLite 에는 적용되지 않음):
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `DMS_DB_POOL_MIN_SIZE` | `1` | pool 이 미리 열어두는 최소 connection 수(운영 DB·관측 DB 공통; 관측 pool 은 max 보다 클 수 없어 자동 clamp). |
+| `DMS_DB_POOL_MAX_SIZE` | `4` | **loop 프로세스(planner/rm-worker/dm-worker/sanity/retention)** 의 운영 DB pool 최대 connection 수. 이들은 단일 스레드라 한 번에 ~1개만 점유 → 작게 둔다. |
+| `DMS_DB_API_POOL_MAX_SIZE` | `16` | **API 프로세스** 의 운영 DB pool 최대 connection 수(동시 요청 처리). API 의 sync-handler 스레드풀이 이 값으로 cap 되어 pool 을 oversubscribe 하지 않는다. 100+ 노드로 동시성을 키울 땐 이 값과 `max_connections` 를 함께 올린다. |
+| `DMS_DB_OBSERVABILITY_POOL_MAX_SIZE` | `3` | **관측(observability) DB** pool 의 최대 connection 수(쓰기 부하가 가벼워 더 작게 둔다). |
+| `DMS_DB_POOL_TIMEOUT_SECONDS` | `35` | pool 이 가득 찼을 때 connection checkout 을 기다리는 최대 시간(초). **반드시 `DMS_DB_STATEMENT_TIMEOUT_MS`(초 환산) 이상**이어야 한다 — 그래야 대기자가 느리지만 합법적인(타임아웃 이내) 쿼리가 끝날 때까지 기다린다. |
+| `DMS_DB_STATEMENT_TIMEOUT_MS` | `30000` | pooled connection 의 `statement_timeout`(ms). runaway 쿼리를 강제 종료한다. |
+| `DMS_DB_IDLE_IN_TXN_TIMEOUT_MS` | `60000` | pooled connection 의 `idle_in_transaction_session_timeout`(ms). 누수된 열린 트랜잭션을 강제 종료한다. |
+
+사이징 공식(최악 천장): `서버 전체 PG connection ≤ Σ프로세스 (op_max + obs_max)`. 기본값 기준
+API×2 = 2×(16+3), loop 5개(planner/rm-worker/dm-worker/sanity/retention) = 5×(4+3) →
+38 + 35 = **73 < 100**(stock `max_connections` − superuser_reserved 3). loop 은 단일 스레드라
+실제로는 ~1개씩만 점유하고, API 는 스레드풀이 `DMS_DB_API_POOL_MAX_SIZE` 로 cap 되어 그 이상
+열지 않는다. 동시성을 키울 땐 **`DMS_DB_API_POOL_MAX_SIZE` 와 PostgreSQL `max_connections` 를 함께**
+올린다(자세한 내용은 `install/1.install-dms-on-pvs.md` §1.4). migration 과 대량 유지보수는 pool 을
+거치지 않는 unpooled connection(`pooled=False`)으로 실행되어 위 timeout 의 영향을 받지 않는다.
 | `DMS_DEFAULT_ACTOR` | 아니오 | `x-dms-actor` header가 없을 때 사용할 fallback actor. 운영 환경과 mTLS-required mode에서는 사용하지 않는다. |
 | `DMS_REQUIRE_MTLS_HEADER` | 운영에서는 예 | `true`이면 trusted ingress/edge proxy가 전달한 client certificate subject evidence header를 요구한다. |
 | `DMS_REQUIRE_MTLS_VERIFIED_HEADER` | 운영에서는 예 | `true`이면 trusted ingress/edge proxy가 전달한 client certificate verify result가 `SUCCESS`여야 한다. |

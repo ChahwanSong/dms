@@ -11,6 +11,24 @@ class Settings:
 
     database_url: str
     observability_database_url: str
+    # PostgreSQL connection-pool sizing + per-session safety timeouts. Defaults are
+    # chosen so a typical deployment stays comfortably under the stock
+    # max_connections=100; see operational_pool_config / observability_pool_config.
+    db_pool_min_size: int = 1
+    # Loop processes (planner / rm-worker / dm-worker / sanity / retention) are
+    # single-threaded — each holds at most ~1 connection at a time, so a small pool
+    # suffices. The API is concurrent (sync handlers in the anyio threadpool), so it
+    # gets a larger pool AND its threadpool is capped to db_api_pool_max_size (see
+    # api/app.py) so it can never oversubscribe the pool nor wait on checkout.
+    db_pool_max_size: int = 4
+    db_api_pool_max_size: int = 16
+    db_observability_pool_max_size: int = 3
+    # Checkout wait MUST be >= statement_timeout: a waiter has to outlast one
+    # legitimately-slow (but bounded) query holding a connection, else waiters fail
+    # with PoolTimeout before the busy backend is freed.
+    db_pool_timeout_seconds: float = 35.0
+    db_statement_timeout_ms: int = 30000
+    db_idle_in_txn_timeout_ms: int = 60000
     auth_shared_token: str | None = None
     default_actor: str | None = None
     require_mtls_header: bool = False
@@ -134,6 +152,21 @@ class Settings:
         return cls(
             database_url=database_url,
             observability_database_url=observability_url,
+            db_pool_min_size=int(os.getenv("DMS_DB_POOL_MIN_SIZE", "1")),
+            db_pool_max_size=int(os.getenv("DMS_DB_POOL_MAX_SIZE", "4")),
+            db_api_pool_max_size=int(os.getenv("DMS_DB_API_POOL_MAX_SIZE", "16")),
+            db_observability_pool_max_size=int(
+                os.getenv("DMS_DB_OBSERVABILITY_POOL_MAX_SIZE", "3")
+            ),
+            db_pool_timeout_seconds=float(
+                os.getenv("DMS_DB_POOL_TIMEOUT_SECONDS", "35")
+            ),
+            db_statement_timeout_ms=int(
+                os.getenv("DMS_DB_STATEMENT_TIMEOUT_MS", "30000")
+            ),
+            db_idle_in_txn_timeout_ms=int(
+                os.getenv("DMS_DB_IDLE_IN_TXN_TIMEOUT_MS", "60000")
+            ),
             auth_shared_token=os.getenv("DMS_AUTH_SHARED_TOKEN"),
             default_actor=default_actor,
             require_mtls_header=require_mtls_header,
@@ -271,6 +304,52 @@ class Settings:
     @property
     def observability_is_separate(self) -> bool:
         return self.observability_database_url != self.database_url
+
+    def operational_pool_config(self, *, role: str = "worker") -> "PoolConfig":
+        """Pool config for the operational DB (request/plan/run/resource writes).
+
+        ``role="api"`` uses the larger ``db_api_pool_max_size`` (the API is
+        concurrent); ``role="worker"`` (default, for the single-threaded loop
+        processes + one-shot CLI) uses the small ``db_pool_max_size``.
+        """
+        from .db import PoolConfig
+
+        max_size = (
+            self.db_api_pool_max_size if role == "api" else self.db_pool_max_size
+        )
+        return PoolConfig(
+            min_size=min(self.db_pool_min_size, max_size),
+            max_size=max_size,
+            timeout=self.db_pool_timeout_seconds,
+            statement_timeout_ms=self.db_statement_timeout_ms,
+            idle_in_txn_timeout_ms=self.db_idle_in_txn_timeout_ms,
+        )
+
+    def observability_pool_config(self) -> "PoolConfig":
+        """Pool config for the observability DB.
+
+        The observability DB sees far lighter write traffic (diagnostic events) than
+        the operational DB, so it gets a smaller max_size. SIZING MATH (worst-case
+        ceiling): total PG connections per server <= sum over processes of
+        (op_max_size + obs_max_size). With defaults — API*2 at (16+3) and the 5
+        single-threaded loops (planner/rm-worker/dm-worker/sanity/retention) at
+        (4+3) — that is 2*19 + 5*7 = 38 + 35 = 73, plus a transient migrate Job,
+        comfortably under the stock max_connections=100 (minus superuser_reserved=3).
+        Loops are single-threaded so they realistically hold ~1 each; the API is
+        capped to db_api_pool_max_size concurrent handlers (api/app.py) so it cannot
+        exceed its op pool. To scale concurrency for 100+ nodes raise db_api_pool_max_size
+        AND PostgreSQL max_connections together (e.g. postgres -c max_connections=300),
+        re-checking the ceiling stays under max_connections - superuser_reserved.
+        """
+        from .db import PoolConfig
+
+        return PoolConfig(
+            min_size=min(self.db_pool_min_size, self.db_observability_pool_max_size),
+            max_size=self.db_observability_pool_max_size,
+            timeout=self.db_pool_timeout_seconds,
+            statement_timeout_ms=self.db_statement_timeout_ms,
+            idle_in_txn_timeout_ms=self.db_idle_in_txn_timeout_ms,
+        )
 
     def data_management_policy_defaults(self) -> list[dict[str, object]]:
         default_nodes = self.dm_policy_default_worker_nodes

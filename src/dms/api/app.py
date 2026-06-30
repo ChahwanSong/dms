@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -16,7 +17,7 @@ from ..adapters import (
 )
 from ..auth import AuthVerifier, AuthorizationPolicy
 from ..config import Settings
-from ..db import Database
+from ..db import Database, close_all_pools
 from ..migrations import migrate_all
 from ..query import OperationalQueryService
 from ..repositories import DmsRepository, ObservabilityRepository
@@ -39,8 +40,14 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     if repository is None or observability is None:
-        operational_db = Database(settings.database_url)
-        observability_db = Database(settings.observability_database_url)
+        operational_db = Database(
+            settings.database_url,
+            pool_config=settings.operational_pool_config(role="api"),
+        )
+        observability_db = Database(
+            settings.observability_database_url,
+            pool_config=settings.observability_pool_config(),
+        )
         migrate_all(operational_db, observability_db)
         repository = repository or DmsRepository(operational_db)
         observability = observability or ObservabilityRepository(observability_db)
@@ -62,7 +69,27 @@ def create_app(
         or KubernetesNamespaceQuotaLiveAdapter.from_settings(settings),
     )
 
-    app = FastAPI(title="DMS", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Cap the sync-handler threadpool to the operational pool size so the API
+        # can never oversubscribe its DB pool: excess concurrent requests queue for
+        # a worker thread (bounded latency) instead of piling onto pool checkout and
+        # failing with PoolTimeout. (Each request holds at most one operational
+        # connection at a time, so threads == op pool size is the right alignment.)
+        import anyio
+
+        try:
+            anyio.to_thread.current_default_thread_limiter().total_tokens = max(
+                settings.db_api_pool_max_size, 1
+            )
+        except Exception:  # noqa: BLE001 - best effort; never block startup
+            pass
+        yield
+        # Best-effort: return all pooled PG backends on graceful shutdown so a
+        # rolling restart does not transiently double the connection count.
+        close_all_pools()
+
+    app = FastAPI(title="DMS", version="0.1.0", lifespan=lifespan)
     app.state.services = services
     app.include_router(resource_management_router())
     app.include_router(data_management_router())

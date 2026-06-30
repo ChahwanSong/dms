@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from dataclasses import replace
 import json
 import os
@@ -20,7 +21,7 @@ from .adapters import (
 )
 from .backend_registry import BackendAdapterRegistry
 from .config import Settings
-from .db import Database
+from .db import Database, close_all_pools
 from .domain import AgentReport
 from .migrations import migrate_all
 from .planner import Planner
@@ -85,8 +86,17 @@ def main(argv: list[str] | None = None) -> int:
         return run_loop(config)
 
     settings = Settings.from_env()
-    operational = Database(settings.database_url)
-    observability_db = Database(settings.observability_database_url)
+    operational = Database(
+        settings.database_url, pool_config=settings.operational_pool_config()
+    )
+    observability_db = Database(
+        settings.observability_database_url,
+        pool_config=settings.observability_pool_config(),
+    )
+    # Long-running CLI processes (planner / rm-worker / dm-worker / sanity-reconciler)
+    # create pools lazily on first connect; return them on clean exit. (Loops run
+    # forever, so this mainly covers the one-shot commands.)
+    atexit.register(close_all_pools)
     migrate_all(operational, observability_db)
     repository = DmsRepository(operational)
     repository.bootstrap_data_management_policies(settings.data_management_policy_defaults())

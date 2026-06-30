@@ -16,7 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 ldap = ["ldap3>=2.9"]
 kubernetes = ["kubernetes>=30.0"]
-postgres = ["psycopg[binary]>=3.2"]
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 test = ["httpx>=0.27", "pytest>=8.0"]
 # Portal BFF (src/portal/backend). httpx is the DMS HTTP client; itsdangerous
 # backs Starlette's signed session cookie; psycopg[+pool] is the portal's own
