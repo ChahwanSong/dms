@@ -110,8 +110,20 @@ Worker runtime:
 | --- | --- | --- |
 | `DMS_WORKER_LEASE_SECONDS` | `300` | Planner/RM/DM worker lifecycle에서 사용하는 claim lease. RM/DM worker는 backend call 중 heartbeat로 이 lease를 주기적으로 갱신한다. |
 | `DMS_PREVIEW_TTL_SECONDS` | `86400` | `sync`/`rm` preview가 `ConfirmPending`으로 유지되는 TTL. `scan`은 confirm 없이 read-only로 실행한다. |
-| `DMS_AGENT_REPORT_STALE_SECONDS` | `300` | Storage mapping readiness에 사용하는 agent report freshness window. |
+| `DMS_AGENT_REPORT_STALE_SECONDS` | `300` | Storage mapping readiness에 사용하는 agent report freshness window. node-health(latest-per-node) 읽기는 `agent_node_current`에서 reported_at 기준으로 freshness를 **읽는 시점에 계산**한다. |
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | DM readiness와 inventory aggregation에 사용하는 cluster name. |
+
+`agent_reports` history 보존(`dms retention --loop` 프로세스). 100+ node가 분당 1회 보고하면
+`agent_reports`는 하루 수십만 행씩 수백만 행으로 자란다. node-health는 `agent_node_current`(node별
+최신 보고 1행, 매 ingest마다 같은 트랜잭션에서 갱신)에서 읽으므로 history는 node-metrics 시계열
+window용으로만 필요하다 → 나이 기준 prune이 안전하다. retention loop는 cutoff보다 오래된 행을
+batch(각 batch가 독립 트랜잭션)로 삭제한다.
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `DMS_AGENT_REPORT_RETENTION_SECONDS` | `2592000` (30일) | 이보다 오래된 `agent_reports` 행을 prune한다. **parse 시 7일(604800) 이상으로 floor** — 72h node-metrics sparkline window 아래로 내려가 시계열 데이터를 지우는 일을 막는다. |
+| `DMS_AGENT_REPORT_RETENTION_INTERVAL_SECONDS` | `3600` | retention loop 주기. (`dms retention --loop --interval` 기본과 동일) |
+| `DMS_AGENT_REPORT_RETENTION_HEARTBEAT_PATH` | 설정 안 됨 | 설정하면 매 cycle heartbeat 파일을 써서 k8s livenessProbe가 loop hang을 감지/재시작한다. |
 
 Data Management runtime:
 

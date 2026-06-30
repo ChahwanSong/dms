@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import json
 from urllib.parse import urlparse
 
@@ -64,6 +65,9 @@ CREATE TABLE IF NOT EXISTS runs (
     FOREIGN KEY(plan_id) REFERENCES plans(plan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_runs_state_lease ON runs(state, lease_expires_at);
+-- Dashboard run lists / history scans order by updated_at DESC, so index it for an
+-- index scan instead of a full sort once runs accumulate (thousands/day).
+CREATE INDEX IF NOT EXISTS idx_runs_updated_at ON runs(updated_at);
 
 CREATE TABLE IF NOT EXISTS results (
     result_id TEXT PRIMARY KEY,
@@ -176,6 +180,33 @@ DROP INDEX IF EXISTS idx_agent_reports_latest;
 DROP INDEX IF EXISTS idx_agent_reports_latest_id;
 CREATE INDEX IF NOT EXISTS idx_agent_reports_latest_v2
     ON agent_reports(cluster_name, node_name, worker_role, reported_at);
+-- reported_at range scans: the node-metrics dashboard window query and the age-based
+-- retention prune both filter/order on reported_at alone. The composite indexes above
+-- are NOT usable for a bare reported_at predicate, so add a dedicated single-column
+-- index (the table grows to millions of rows at 100+ nodes reporting ~1/min).
+CREATE INDEX IF NOT EXISTS idx_agent_reports_reported_at
+    ON agent_reports(reported_at);
+
+-- Denormalized current-state row per node identity (cluster_name, node_name,
+-- worker_role): exactly ONE row per node, holding its LATEST agent report. Node-health
+-- reads (latest-per-node listing, stale-node detection) hit only THIS table, so they are
+-- O(#nodes) regardless of how deep agent_reports history grows (millions of rows, age-
+-- pruned by `dms retention`). It is written transactionally alongside every agent_reports
+-- INSERT (see ingest_agent_report) and backfilled from existing history at migrate time.
+CREATE TABLE IF NOT EXISTS agent_node_current (
+    cluster_name TEXT NOT NULL,
+    node_name TEXT NOT NULL,
+    worker_role TEXT NOT NULL,
+    node_uid TEXT,
+    report_id TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    capability_summary TEXT,
+    reported_at TEXT NOT NULL,
+    received_at TEXT,
+    schema_version TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (cluster_name, node_name, worker_role)
+);
 
 CREATE TABLE IF NOT EXISTS data_jobs (
     job_id TEXT PRIMARY KEY,
@@ -201,6 +232,12 @@ CREATE TABLE IF NOT EXISTS data_jobs (
     FOREIGN KEY(request_id) REFERENCES requests(request_id)
 );
 CREATE INDEX IF NOT EXISTS idx_data_jobs_request ON data_jobs(request_id);
+-- Dashboard job list orders by updated_at DESC, so index it for an index scan
+-- instead of a full sort once jobs accumulate (~10k/day).
+CREATE INDEX IF NOT EXISTS idx_data_jobs_updated_at ON data_jobs(updated_at);
+-- Scoped action-required counts/filters select jobs by (operation, state) — backs the
+-- cheap COUNT(*) / filtered list that the work-summary "action required" tile uses.
+CREATE INDEX IF NOT EXISTS idx_data_jobs_operation_state ON data_jobs(operation, state);
 
 CREATE TABLE IF NOT EXISTS data_management_policies (
     operation TEXT PRIMARY KEY,
@@ -276,12 +313,15 @@ def migrate_operational(database: Database) -> None:
         _ensure_operational_phase3_columns(connection, database)
         _ensure_operational_phase19_columns(connection, database)
         _backfill_filesystem_managed_root(connection)
+        _backfill_agent_node_current(connection)
         _record_migration(connection, "operational-0001-phase1")
         _record_migration(connection, "operational-0002-phase2-identity")
         _record_migration(connection, "operational-0003-phase3-inventory")
         _record_migration(connection, "operational-0019-data-management-scan")
         _record_migration(connection, "operational-0022-data-management-policies")
         _record_migration(connection, "operational-0023-managed-root-backfill")
+        _record_migration(connection, "operational-0024-agent-node-current")
+        _record_migration(connection, "operational-0025-scale-indexes")
 
 
 def migrate_observability(database: Database) -> None:
@@ -387,6 +427,82 @@ def _backfill_filesystem_managed_root(connection) -> None:
         connection.execute(
             "UPDATE storage_mappings SET backend_template = ? WHERE storage_name = ?",
             (json.dumps(template), row["storage_name"]),
+        )
+
+
+def _backfill_agent_node_current(connection) -> None:
+    """Seed ``agent_node_current`` with the latest report per (cluster, node, role) from
+    the existing ``agent_reports`` history, so node-health reads work the instant the
+    denormalized table exists (before any new report is ingested).
+
+    Idempotent: the UPSERT updates an existing current row ONLY when the backfilled
+    report is newer (``excluded.reported_at >= agent_node_current.reported_at``), so
+    re-running migrate — or running it after live ingest has already written fresher
+    current rows — never regresses a row. Runs unpooled (see ``migrate_operational``) so
+    it is not statement-timeout-killed even over millions of history rows.
+
+    GATED on an EMPTY current table: the heavy ``GROUP BY`` over (potentially millions of)
+    agent_reports rows runs ONLY on the first migrate or after a manual truncate
+    (self-healing). On every normal boot — every API pod, every CLI — the table is already
+    populated (kept current transactionally by the ingest UPSERT), so this O(1) probe
+    short-circuits the backfill to a no-op instead of re-scanning the whole history table.
+    """
+    probe = connection.execute(
+        "SELECT 1 FROM agent_node_current LIMIT 1"
+    ).fetchone()
+    if probe is not None:
+        return
+    rows = connection.execute(
+        """
+        SELECT ar.cluster_name, ar.node_name, ar.worker_role, ar.node_uid,
+               ar.report_id, ar.report_json, ar.capability_summary,
+               ar.reported_at, ar.received_at, ar.schema_version
+        FROM agent_reports ar
+        JOIN (
+            SELECT cluster_name, node_name, worker_role, max(reported_at) AS mx
+            FROM agent_reports
+            GROUP BY cluster_name, node_name, worker_role
+        ) g
+          ON g.cluster_name = ar.cluster_name
+         AND g.node_name = ar.node_name
+         AND g.worker_role = ar.worker_role
+         AND ar.reported_at = g.mx
+        """
+    ).fetchall()
+    now = datetime.now(UTC).isoformat()
+    for row in rows:
+        record = {key: row[key] for key in row.keys()}
+        connection.execute(
+            """
+            INSERT INTO agent_node_current (
+                cluster_name, node_name, worker_role, node_uid, report_id,
+                report_json, capability_summary, reported_at, received_at,
+                schema_version, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_name, node_name, worker_role) DO UPDATE SET
+                node_uid = excluded.node_uid,
+                report_id = excluded.report_id,
+                report_json = excluded.report_json,
+                capability_summary = excluded.capability_summary,
+                reported_at = excluded.reported_at,
+                received_at = excluded.received_at,
+                schema_version = excluded.schema_version,
+                updated_at = excluded.updated_at
+            WHERE excluded.reported_at >= agent_node_current.reported_at
+            """,
+            (
+                record["cluster_name"],
+                record["node_name"],
+                record["worker_role"],
+                record["node_uid"],
+                record["report_id"],
+                record["report_json"],
+                record["capability_summary"],
+                record["reported_at"],
+                record["received_at"],
+                record["schema_version"],
+                now,
+            ),
         )
 
 

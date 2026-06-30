@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 
 from dms.adapters import (
@@ -732,7 +734,9 @@ def _ingest_ready_dm_report(repository: DmsRepository) -> None:
     repository.ingest_agent_report(
         {
             "schema_version": "phase20.v1",
-            "reported_at": "2026-06-03T00:00:00+00:00",
+            # Freshness is computed ON READ against the staleness window (default 300s),
+            # so a "ready" node must have reported recently — use now, not a fixed past.
+            "reported_at": datetime.now(timezone.utc).isoformat(),
             "cluster_name": "cluster-a",
             "node_name": "dm-1",
             "node_uid": "uid-dm-1",
@@ -784,7 +788,8 @@ def _ingest_split_role_dm_reports(repository: DmsRepository) -> None:
         repository.ingest_agent_report(
             {
                 "schema_version": "phase21.v1",
-                "reported_at": "2026-06-03T00:00:00+00:00",
+                # Freshness computed ON READ; a "ready" node must have reported recently.
+                "reported_at": datetime.now(timezone.utc).isoformat(),
                 "cluster_name": "cluster-a",
                 "node_name": node_name,
                 "node_uid": f"uid-{node_name}",

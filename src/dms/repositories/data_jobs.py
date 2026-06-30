@@ -259,6 +259,8 @@ class DataJobsMixin:
         operation: str | None = None,
         storage_name: str | None = None,
         state: str | None = None,
+        operations: tuple[str, ...] | None = None,
+        states: tuple[str, ...] | None = None,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         filters: list[str] = []
@@ -275,6 +277,19 @@ class DataJobsMixin:
         if state:
             filters.append("data_jobs.state = ?")
             params.append(state)
+        # Set filters (operations/states) scope the action-required scan to matching
+        # rows at the SQL level (backed by idx_data_jobs_operation_state) so the listed
+        # items align with count_data_jobs — instead of scanning the newest N jobs of any
+        # kind and filtering in Python (which silently drops matches once the table grows
+        # past the window).
+        if operations:
+            placeholders = ",".join(["?"] * len(operations))
+            filters.append(f"data_jobs.operation IN ({placeholders})")
+            params.extend(operations)
+        if states:
+            placeholders = ",".join(["?"] * len(states))
+            filters.append(f"data_jobs.state IN ({placeholders})")
+            params.extend(states)
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         params.append(limit)
         params.append(offset)
@@ -297,6 +312,44 @@ class DataJobsMixin:
             ).fetchall()
         return [self._decode_data_job(row_to_dict(row)) for row in rows]
 
+
+    def count_data_jobs(
+        self,
+        *,
+        states: tuple[str, ...] | None = None,
+        operations: tuple[str, ...] | None = None,
+    ) -> int:
+        """Exact COUNT(*) of data jobs, optionally restricted to state/operation sets.
+        Uses the SAME predicate as the action-required data-job scan (and the same
+        idx_data_jobs_operation_state index), so the work-summary count matches the
+        listed items without decoding thousands of job rows per dashboard poll.
+
+        Mirrors ``list_data_jobs``' ``FROM data_jobs JOIN requests`` exactly: the listed
+        scan INNER JOINs requests (so a data_job whose request row is missing is silently
+        dropped from the list), and this count applies the identical join so it can never
+        drift ABOVE the listed items even if an orphan data_job ever existed."""
+        filters: list[str] = []
+        params: list[Any] = []
+        if states:
+            placeholders = ",".join(["?"] * len(states))
+            filters.append(f"data_jobs.state IN ({placeholders})")
+            params.extend(states)
+        if operations:
+            placeholders = ",".join(["?"] * len(operations))
+            filters.append(f"data_jobs.operation IN ({placeholders})")
+            params.extend(operations)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(*) AS n
+                FROM data_jobs
+                JOIN requests ON requests.request_id = data_jobs.request_id
+                {where}
+                """,
+                tuple(params),
+            ).fetchone()
+        return int(row_to_dict(row)["n"])
 
     def _decode_data_job(self, job: dict[str, Any]) -> dict[str, Any]:
         if job:

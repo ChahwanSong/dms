@@ -45,6 +45,14 @@ class Settings:
     ldap_user_filter: str = "(uid={username})"
     ldap_timeout_seconds: int = 5
     agent_report_stale_seconds: int = 300
+    # agent_reports history retention (the `dms retention` loop). The table grows to
+    # millions of rows at 100+ nodes reporting ~1/min; node-health reads agent_node_current
+    # (current state preserved independently), so pruning old history is safe. The
+    # retention window is FLOORED well above the 72h node-metrics sparkline window
+    # (clamped to >= 7 days at parse time) so dashboards never lose their lookback.
+    agent_report_retention_seconds: int = 30 * 24 * 60 * 60  # 30 days
+    agent_report_retention_interval_seconds: int = 3600
+    agent_report_retention_heartbeat_path: str | None = None
     control_cluster_name: str = "cluster-a"
     cluster_kubeconfigs: dict[str, str] | None = None
     cluster_control_hosts: dict[str, str] | None = None
@@ -190,6 +198,22 @@ class Settings:
             ldap_timeout_seconds=int(os.getenv("DMS_LDAP_TIMEOUT_SECONDS", "5")),
             agent_report_stale_seconds=int(
                 os.getenv("DMS_AGENT_REPORT_STALE_SECONDS", "300")
+            ),
+            # Floor the retention window to >= 7 days so it can never be set below the
+            # 72h metrics window (which would prune data the sparklines still read).
+            agent_report_retention_seconds=max(
+                7 * 24 * 60 * 60,
+                int(
+                    os.getenv(
+                        "DMS_AGENT_REPORT_RETENTION_SECONDS", str(30 * 24 * 60 * 60)
+                    )
+                ),
+            ),
+            agent_report_retention_interval_seconds=int(
+                os.getenv("DMS_AGENT_REPORT_RETENTION_INTERVAL_SECONDS", "3600")
+            ),
+            agent_report_retention_heartbeat_path=os.getenv(
+                "DMS_AGENT_REPORT_RETENTION_HEARTBEAT_PATH"
             ),
             control_cluster_name=os.getenv("DMS_CONTROL_CLUSTER_NAME", "cluster-a"),
             cluster_kubeconfigs=_json_env("DMS_CLUSTER_KUBECONFIGS_JSON"),

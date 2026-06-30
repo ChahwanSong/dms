@@ -66,6 +66,12 @@ def main(argv: list[str] | None = None) -> int:
     sanity_reconciler.add_argument("--loop", action="store_true")
     sanity_reconciler.add_argument("--interval", type=float, default=30.0)
 
+    retention = subcommands.add_parser("retention")
+    retention.add_argument("--loop", action="store_true")
+    # Default None so an un-passed --interval falls back to the setting
+    # (DMS_AGENT_REPORT_RETENTION_INTERVAL_SECONDS) in dispatch below.
+    retention.add_argument("--interval", type=float, default=None)
+
     agent_loop = subcommands.add_parser("agent-loop")
     agent_loop.add_argument("--interval", type=float)
 
@@ -131,6 +137,21 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat_path=settings.sanity_reconcile_heartbeat_path,
         )
         return _run_once_or_loop(runner, loop=args.loop, interval=args.interval)
+    if args.command == "retention":
+        from .retention import prune_agent_reports_once
+
+        runner = lambda: prune_agent_reports_once(
+            repository,
+            retention_seconds=settings.agent_report_retention_seconds,
+            heartbeat_path=settings.agent_report_retention_heartbeat_path,
+            observability=observability,
+        )
+        interval = (
+            args.interval
+            if args.interval is not None
+            else settings.agent_report_retention_interval_seconds
+        )
+        return _run_once_or_loop(runner, loop=args.loop, interval=interval)
     if args.command == "rm-worker":
         worker = RMWorkerRuntime(
             repository=repository,
@@ -165,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             worker_id=args.worker_id,
             lease_seconds=settings.worker_lease_seconds,
             preview_ttl_seconds=settings.preview_ttl_seconds,
+            agent_report_stale_seconds=settings.agent_report_stale_seconds,
             identity_lookup=identity_lookup,
             identity_provider=settings.dm_identity_provider,
             min_uid=settings.dm_min_uid,

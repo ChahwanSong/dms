@@ -60,7 +60,11 @@ def create_app(
         observability=observability,
         auth=AuthVerifier(settings),
         authorization=AuthorizationPolicy(),
-        query=OperationalQueryService(repository, observability),
+        query=OperationalQueryService(
+            repository,
+            observability,
+            agent_report_stale_seconds=settings.agent_report_stale_seconds,
+        ),
         volcano_adapter=volcano_adapter_from_settings(settings),
         identity_lookup=identity_lookup or identity_lookup_from_settings(settings),
         kubernetes_inventory=kubernetes_inventory

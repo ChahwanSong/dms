@@ -22,6 +22,11 @@ class DMWorkerRuntime:
     worker_id: str
     lease_seconds: int = 300
     preview_ttl_seconds: int = 24 * 60 * 60
+    # Node-agent freshness window for candidate selection. Candidates come from the
+    # current-state table (latest report per node) with freshness computed ON READ
+    # against this threshold (O(#nodes)) — never from a stored Fresh->Stale column sweep
+    # or a dead node. Injected from settings.agent_report_stale_seconds in cli.py.
+    agent_report_stale_seconds: int = 300
     # Read-only LDAP identity lookup (replaces the identity_mappings table). None when
     # LDAP is unconfigured -> DM fails closed with `ldap_not_configured`.
     identity_lookup: Any = None
@@ -782,7 +787,7 @@ class DMWorkerRuntime:
             "storage_name": job["storage_name"],
             "path": job.get("target"),
         }
-        reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
+        reports = _fresh_dm_reports(self.repository, self.agent_report_stale_seconds)
         selected: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         for report in reports:
@@ -896,7 +901,7 @@ class DMWorkerRuntime:
             or plan["desired_state"].get("destination")
             or {}
         )
-        reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
+        reports = _fresh_dm_reports(self.repository, self.agent_report_stale_seconds)
         dsync_candidates: list[dict[str, Any]] = []
         source_candidates: list[dict[str, Any]] = []
         destination_candidates: list[dict[str, Any]] = []
@@ -1132,7 +1137,7 @@ class DMWorkerRuntime:
         target = (
             job.get("normalized_target") or plan["desired_state"].get("target") or {}
         )
-        reports = self.repository.list_agent_reports(freshness="Fresh", limit=1000)
+        reports = _fresh_dm_reports(self.repository, self.agent_report_stale_seconds)
         selected: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         for report in reports:
@@ -1239,6 +1244,31 @@ class DMWorkerRuntime:
             OperationKind.DATA_RM.value: "drm",
             OperationKind.DATA_SCAN.value: "dscan",
         }[operation]
+
+
+def _fresh_dm_reports(
+    repository: DmsRepository, stale_seconds: int
+) -> list[dict[str, Any]]:
+    """Fresh node-agent reports for DM candidate selection, read from the current-state
+    table (latest report per node) with freshness computed ON READ against
+    ``stale_seconds`` — O(#nodes), independent of agent_reports history depth, and never
+    served from a stale stored column or a dead node.
+
+    The current-state read returns rows ordered by reported_at DESC, which leaves
+    same-timestamp nodes in an arbitrary (and not-necessarily-stable) order. Re-sort by
+    (cluster_name, node_name) ascending so candidate selection — and the
+    selected_candidates ordering that callers/tests assert — is deterministic regardless
+    of report timing or DB row order."""
+    reports = repository.list_agent_reports(
+        latest_per_node=True,
+        freshness="Fresh",
+        stale_seconds=stale_seconds,
+        limit=1000,
+    )
+    return sorted(
+        reports,
+        key=lambda r: (r.get("cluster_name") or "", r.get("node_name") or ""),
+    )
 
 
 def _scan_candidate_rejection_reason(

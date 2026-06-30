@@ -275,3 +275,30 @@ def test_observability_min_size_clamped_below_max(monkeypatch):
     obs = settings.observability_pool_config()
     assert obs.min_size == 3  # clamped from 5 down to max_size
     assert obs.max_size == 3
+
+
+def test_postgres_executescript_ignores_semicolons_in_comments():
+    """A ';' inside a SQL line comment must NOT split a statement (the PostgreSQL
+    executescript path). Regression: a `-- ...; ...` comment in the migration schema
+    previously executed the comment tail as bogus SQL and broke `dms migrate` on
+    PostgreSQL (SQLite's native executescript is comment-aware, so the test suite
+    missed it). This exercises the PG path directly with a fake connection."""
+    from dms.db import PostgresConnection
+
+    executed: list[str] = []
+
+    class FakeConn:
+        def execute(self, sql, parameters=()):
+            executed.append(sql)
+            return None
+
+    PostgresConnection(FakeConn()).executescript(
+        "-- a comment with a semicolon; index it so that this must NOT run\n"
+        "CREATE TABLE t (a TEXT);\n"
+        "CREATE INDEX idx ON t(a);  -- trailing comment; also ignored\n"
+    )
+    assert any("CREATE TABLE t" in s for s in executed)
+    assert any("CREATE INDEX idx" in s for s in executed)
+    # the comment tails must never reach the DB
+    assert not any("index it so that" in s for s in executed)
+    assert not any("also ignored" in s for s in executed)

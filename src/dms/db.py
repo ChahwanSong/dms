@@ -209,7 +209,17 @@ class PostgresConnection:
             return cur
 
     def executescript(self, script: str) -> None:
-        statements = [statement.strip() for statement in script.split(";")]
+        # Strip SQL line comments BEFORE splitting on ';'. A ';' inside a `-- ...`
+        # comment would otherwise split a statement and the comment tail would be
+        # executed as bogus SQL (this is the PostgreSQL path only — SQLite uses the
+        # native, comment-aware sqlite3 executescript). The schema is plain DDL with
+        # no '--' inside string literals, so cutting each line at its first '--' is
+        # safe and keeps multi-statement migrations robust to commentary.
+        cleaned = "\n".join(
+            (line if (i := line.find("--")) == -1 else line[:i])
+            for line in script.splitlines()
+        )
+        statements = [statement.strip() for statement in cleaned.split(";")]
         for statement in statements:
             if statement:
                 self.execute(statement)

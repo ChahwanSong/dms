@@ -15,6 +15,7 @@ from .backends.cephfs import CEPHFS_BACKEND_TYPE
 from .backends.gpfs import GPFS_BACKEND_TYPE
 from .backends.weka import WEKAFS_BACKEND_TYPE
 from .domain import (
+    DataJobState,
     KubernetesNamespaceQuotaKey,
     LifecycleState,
     OperationKind,
@@ -34,17 +35,104 @@ _AGENT_BACKED_BACKENDS = frozenset(
     {CEPHFS_BACKEND_TYPE, GPFS_BACKEND_TYPE, WEKAFS_BACKEND_TYPE}
 )
 
+# request_attention is capped at this many items in the composite list (matches
+# DmsRepository.list_action_required default limit); the count is clamped to match.
+_ACTION_REQUIRED_REQUEST_LIMIT = 100
+# Data jobs in these (operation, state) combinations each surface as exactly one
+# action-required item. The scan/count share this predicate AND this cap so the count
+# never drifts from the listed items.
+_DATA_JOB_ATTENTION_SCAN_LIMIT = 5000
+_DATA_JOB_ATTENTION_OPERATIONS = (
+    OperationKind.DATA_SCAN.value,
+    OperationKind.DATA_SYNC.value,
+    OperationKind.DATA_RM.value,
+)
+_DATA_JOB_ATTENTION_STATES = (
+    DataJobState.PREFLIGHT_FAILED.value,
+    DataJobState.FAILED.value,
+    DataJobState.TIMED_OUT.value,
+    DataJobState.CANCELLED.value,
+)
+
 
 @dataclass
 class OperationalQueryService:
     repository: DmsRepository
     observability: ObservabilityRepository
+    # Freshness window for latest-per-node staleness (defaults to the Settings default;
+    # create_app injects settings.agent_report_stale_seconds). Freshness is computed on
+    # read from agent_node_current, so this threshold decides which CURRENT node reports
+    # count as Stale action items.
+    agent_report_stale_seconds: int = 300
 
     def action_required(self) -> list[dict]:
-        issues: list[dict] = [
+        # Order preserved (request → storage → agent → kubernetes → filesystem → data) so
+        # the composite list is byte-for-byte what consumers already render. Each source
+        # is a discrete helper so action_required_count() can size them with cheap counts
+        # (or their own bounded len) WITHOUT building the full composite list.
+        issues: list[dict] = list(self._request_attention_issues())
+        issues.extend(self._storage_mapping_action_required())
+        issues.extend(self._agent_stale_action_required())
+        issues.extend(self._kubernetes_quota_action_required())
+        issues.extend(self._filesystem_action_required())
+        issues.extend(self._data_management_action_required())
+        return issues
+
+    def action_required_count(self) -> int:
+        """Exact count of action_required() items via cheap per-source COUNT(*) (plus the
+        bounded len of the small complex sources) instead of materializing the full
+        composite list. INVARIANT: equals len(action_required()) for the same DB state —
+        each term mirrors its list source's cardinality (and its cap), so the dashboard
+        tile never drifts from the panel."""
+        return (
+            min(
+                self.repository.count_action_required_requests(),
+                _ACTION_REQUIRED_REQUEST_LIMIT,
+            )
+            + len(self._storage_mapping_action_required())
+            + len(self._agent_stale_action_required())
+            + len(self._kubernetes_quota_action_required())
+            + len(self._filesystem_action_required())
+            + min(
+                self.repository.count_data_jobs(
+                    states=_DATA_JOB_ATTENTION_STATES,
+                    operations=_DATA_JOB_ATTENTION_OPERATIONS,
+                ),
+                _DATA_JOB_ATTENTION_SCAN_LIMIT,
+            )
+        )
+
+    def _request_attention_issues(self) -> list[dict]:
+        return [
             {"issue_type": "request_attention", **request}
             for request in self.repository.list_action_required()
         ]
+
+    def _agent_stale_action_required(self) -> list[dict]:
+        # Node agent freshness: look only at the LATEST report per (cluster, node, role)
+        # via agent_node_current — O(#nodes), independent of history depth. A node needs
+        # attention iff its CURRENT report is Stale (computed on read against the
+        # configured staleness window); a newer Fresh report resolves it.
+        issues: list[dict] = []
+        for report in self.repository.list_agent_reports(
+            latest_per_node=True, stale_seconds=self.agent_report_stale_seconds
+        ):
+            if report.get("freshness_status") != "Stale":
+                continue
+            issues.append(
+                {
+                    "issue_type": "agent_report_stale",
+                    "report_id": report["report_id"],
+                    "cluster_name": report["cluster_name"],
+                    "node_name": report["node_name"],
+                    "worker_role": report["worker_role"],
+                    "reported_at": report.get("reported_at"),
+                }
+            )
+        return issues
+
+    def _storage_mapping_action_required(self) -> list[dict]:
+        issues: list[dict] = []
         for mapping in self.repository.list_storage_mappings(limit=10000):
             if mapping["sanity_status"] == "Failed":
                 issues.append(
@@ -95,28 +183,6 @@ class OperationalQueryService:
                             "storage_name": mapping["storage_name"],
                         }
                     )
-        # Node agent freshness: look only at the LATEST report per (cluster, node,
-        # role). A node needs attention iff its most recent report is Stale — a
-        # newer Fresh report resolves it (timestamp-accurate, unlike comparing two
-        # separately-capped fresh/stale lists). latest_per_node returns ~#nodes
-        # rows via a server-side dedup, so this stays cheap on a polled path and
-        # considers every node without scanning report history.
-        for report in self.repository.list_agent_reports(latest_per_node=True):
-            if report.get("freshness_status") != "Stale":
-                continue
-            issues.append(
-                {
-                    "issue_type": "agent_report_stale",
-                    "report_id": report["report_id"],
-                    "cluster_name": report["cluster_name"],
-                    "node_name": report["node_name"],
-                    "worker_role": report["worker_role"],
-                    "reported_at": report.get("reported_at"),
-                }
-            )
-        issues.extend(self._kubernetes_quota_action_required())
-        issues.extend(self._filesystem_action_required())
-        issues.extend(self._data_management_action_required())
         return issues
 
     def request_history(self, request_id: str) -> dict:
@@ -659,20 +725,16 @@ class OperationalQueryService:
 
     def _data_management_action_required(self) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
-        for job in self.repository.list_data_jobs(limit=5000):
-            if job["operation"] not in {
-                OperationKind.DATA_SCAN.value,
-                OperationKind.DATA_SYNC.value,
-                OperationKind.DATA_RM.value,
-            }:
-                continue
-            if job["state"] not in {
-                "PreflightFailed",
-                "Failed",
-                "TimedOut",
-                "Cancelled",
-            }:
-                continue
+        # SQL-filter to the matching (operation, state) jobs directly (via
+        # idx_data_jobs_operation_state) rather than scanning the newest N jobs of any
+        # kind and filtering in Python — the latter silently drops attention items once
+        # total jobs outgrow the window (~10k/day). One issue per job; the cap matches
+        # count_data_jobs so action_required_count() stays exact.
+        for job in self.repository.list_data_jobs(
+            limit=_DATA_JOB_ATTENTION_SCAN_LIMIT,
+            operations=_DATA_JOB_ATTENTION_OPERATIONS,
+            states=_DATA_JOB_ATTENTION_STATES,
+        ):
             preflight = job.get("preflight_result") or {}
             result_summary = job.get("result_summary") or {}
             if job["state"] == "PreflightFailed":
@@ -770,7 +832,6 @@ class OperationalQueryService:
             lease_expiring_within_seconds=lease_expiring_within_seconds,
             limit=1000,
         )
-        action_required = self.action_required()
         return {
             "plans": {
                 "total_active": self.repository.count_active_plans(),
@@ -789,7 +850,7 @@ class OperationalQueryService:
                     states=ATTENTION_RUN_STATES
                 ),
             },
-            "requests": {"action_required": len(action_required)},
+            "requests": {"action_required": self.action_required_count()},
         }
 
     def drain_status(self) -> dict[str, Any]:
@@ -799,7 +860,6 @@ class OperationalQueryService:
             states=ATTENTION_RUN_STATES,
             limit=1000,
         )
-        action_required = self.action_required()
         hard_blockers = [
             run
             for run in blocked_or_recovery
@@ -827,7 +887,7 @@ class OperationalQueryService:
                 "states": _count_by(blocked_or_recovery, "state"),
                 "runs": blocked_or_recovery,
             },
-            "action_required": {"count": len(action_required)},
+            "action_required": {"count": self.action_required_count()},
             "ready_for_shutdown": ready_for_shutdown,
         }
 

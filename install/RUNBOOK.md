@@ -413,6 +413,30 @@ KUBECONFIG=<kubeconfig> kubectl auth can-i delete resourcequota -A  # kubectl
 > `DMS_CLUSTER_*_JSON`에 없을 때 — `kubernetes_mutation`은 `Unknown`이며 namespace-quota는 `Unknown`을
 > 차단하지 않는다.)
 
+## Background loops (sanity-reconciler / retention)
+
+운영 백그라운드 loop는 모두 singleton(`replicas: 1`) Deployment이고 heartbeat 기반
+livenessProbe로 자가 치유한다.
+
+- `dms-sanity-reconciler` — storage-mapping readiness 재계산. (위 Readiness 진단 참고)
+- `dms-retention` — `agent_reports` history 나이 기준 prune (`dms retention --loop`).
+  100+ node가 분당 1회 보고하면 `agent_reports`가 수백만 행으로 자란다. node-health 읽기는
+  `agent_node_current`(node별 최신 보고 1행, 매 ingest마다 같은 트랜잭션에서 UPSERT)에서
+  하므로 history prune은 **안전하다** — 침묵한 node도 마지막 보고가 계속 보인다. retention은
+  순수 나이 기준이며 batch(각 독립 트랜잭션)로 삭제해 긴 lock을 잡지 않는다.
+
+```bash
+# 동작 확인 (manifest: install/kubernetes/retention.yaml)
+kubectl -n dms logs deploy/dms-retention --tail=50      # {"processed": N} = 삭제 행 수
+kubectl -n dms exec deploy/dms-retention -- cat /tmp/dms-retention.heartbeat
+# 1회만 실행 (디버그)
+kubectl -n dms exec deploy/dms-retention -- dms retention
+```
+
+retention window는 `DMS_AGENT_REPORT_RETENTION_SECONDS`(기본 30일)이며 **parse 시 7일 이상으로
+floor**되어 72h node-metrics window 아래로 내려갈 수 없다. loop가 멈춰도 읽기는 (더 큰 table 위에서)
+계속 동작하므로 correctness 의존성이 아니다.
+
 ## Kubernetes Namespace Quota Incident
 
 Namespace quota 하나를 check한다.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 
 import pytest
@@ -853,7 +854,9 @@ def _ingest_ready_dm_report(
     repository.ingest_agent_report(
         {
             "schema_version": "phase19.v1",
-            "reported_at": "2026-06-03T00:00:00+00:00",
+            # Freshness is computed ON READ against the staleness window (default 300s),
+            # so a "ready" node must have reported recently — use now, not a fixed past.
+            "reported_at": datetime.now(timezone.utc).isoformat(),
             "cluster_name": "cluster-a",
             "node_name": node_name,
             "node_uid": f"uid-{node_name}",
