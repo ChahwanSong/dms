@@ -329,11 +329,22 @@ function dCanResolve(d: DismissedItem): boolean {
   return !!d.request_id && RESOLVABLE_REQUEST_STATES.has(d.status || "");
 }
 
+// the resource identifier an acknowledged record was about — the key part of the
+// fingerprint ("{issue_type}|{key}"), falling back to the captured job/request id.
+function dKey(d: DismissedItem): string {
+  const fp = d.fingerprint || "";
+  const i = fp.indexOf("|");
+  const key = i >= 0 ? fp.slice(i + 1) : "";
+  return key || str(d.job_id) || str(d.request_id) || "";
+}
+
 function DismissedList({
-  rows, selected, onToggleSel, onToggleSelAll, onClearSel,
+  rows, dir, onToggleSort, selected, onToggleSel, onToggleSelAll, onClearSel,
   onUndismiss, onUndismissAll, onAck, onDelete, onResolve, busy,
 }: {
   rows: DismissedItem[];
+  dir: "desc" | "asc";
+  onToggleSort: () => void;
   selected: Set<string>;
   onToggleSel: (fp: string) => void;
   onToggleSelAll: (rows: DismissedItem[], select: boolean) => void;
@@ -345,24 +356,51 @@ function DismissedList({
   onResolve: (rows: DismissedItem[]) => void;
   busy: boolean;
 }) {
+  const [purgeAt, setPurgeAt] = useState("");
   if (rows.length === 0) return <p className="muted small">처리 내역이 없습니다.</p>;
   const allSel = rows.length > 0 && rows.every((d) => selected.has(d.fingerprint));
   const sel = rows.filter((d) => selected.has(d.fingerprint));
   const selAckable = sel.filter((d) => d.kind !== "ack");
   const selDeletable = sel.filter(dCanDelete);
   const selResolvable = sel.filter(dCanResolve);
+
+  // delete (purge) every record dismissed at/before the chosen time. Reuses
+  // undismiss (remove_dismissals) — housekeeping for the accruing 처리 내역.
+  const purgeBefore = () => {
+    if (!purgeAt) return;
+    const cutoff = new Date(purgeAt).getTime();
+    if (Number.isNaN(cutoff)) return;
+    const victims = rows.filter((d) => {
+      const t = d.dismissed_at ? new Date(d.dismissed_at).getTime() : NaN;
+      return !Number.isNaN(t) && t <= cutoff;
+    });
+    if (!victims.length) { window.alert("해당 시각 이전의 처리 내역이 없습니다."); return; }
+    if (!window.confirm(
+      `${fmtTime(purgeAt)} 이전 처리 내역 ${victims.length}건을 삭제(정리)할까요?\n` +
+      "(아직 유효한 항목이면 조치 필요에 다시 나타날 수 있습니다)"
+    )) return;
+    onUndismiss(victims.map((d) => d.fingerprint));
+  };
   return (
     <>
-      <div className="attn-sec-tools">
+      <div className="attn-sec-tools dism-tools">
         <label className="check-cell" style={{ marginRight: "auto" }} title="전체 선택">
           <input type="checkbox" checked={allSel}
             onChange={() => onToggleSelAll(rows, !allSel)} aria-label="전체 선택" />
         </label>
-        <button className="attn-sort" onClick={onUndismissAll}>모두 해제 (원위치)</button>
+        <input type="datetime-local" className="dism-purge-at" value={purgeAt}
+          onChange={(e) => setPurgeAt(e.target.value)} title="이 시각까지의 처리 내역 삭제(정리)" />
+        <button className="attn-sort" disabled={!purgeAt || busy} onClick={purgeBefore}
+          title="입력한 시각 이전의 처리 내역을 삭제(정리)">이전 삭제</button>
+        <button className="attn-sort" onClick={onToggleSort} title="처리 시각순 정렬 전환">
+          {dir === "desc" ? "최신순 ↓" : "오래된순 ↑"}
+        </button>
+        <button className="attn-sort" onClick={onUndismissAll}>모두 해제</button>
       </div>
       <div className="attn2-list">
         {rows.map((d) => {
           const isAck = d.kind === "ack";
+          const ident = dKey(d);
           return (
             <div key={d.fingerprint} className="attn2 attn2-info">
               <div className="attn2-rowwrap">
@@ -376,13 +414,19 @@ function DismissedList({
                       <span className={`chip ${isAck ? "tone-ok" : "tone-low"}`}>{isAck ? "확인됨" : "숨김"}</span>
                       <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
                       <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
-                      {dCanDelete(d) && <span className="attn2-ident mono">data job</span>}
+                      {ident && <span className="attn2-ident mono">{ident}</span>}
                     </span>
                     <span className="attn2-action muted small">
-                      {d.dismissed_by || "operator"} · {fmtAgo(d.dismissed_at)}
+                      {d.dismissed_by || "operator"}
+                      {dCanDelete(d) ? " · data job" : dCanResolve(d) ? " · request" : ""}
                       {d.reason ? ` · ${d.reason}` : ""}
                     </span>
                   </span>
+                  {d.dismissed_at && (
+                    <span className="attn2-when muted small" title={fmtTime(d.dismissed_at)}>
+                      {fmtAgo(d.dismissed_at)}
+                    </span>
+                  )}
                 </div>
                 <button type="button" className="attn2-hide" title="해제 — 다시 조치 필요에 표시"
                   onClick={() => onUndismiss([d.fingerprint])}>해제</button>
@@ -457,6 +501,7 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const [doms, setDoms] = useState<Set<string>>(new Set());
   const [liveSort, setLiveSort] = useState<"desc" | "asc">("desc");
   const [histSort, setHistSort] = useState<"desc" | "asc">("desc");
+  const [dismSort, setDismSort] = useState<"desc" | "asc">("desc");
   // multi-select (keyed by fingerprint), like the backup/scan bulk bars.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dismSel, setDismSel] = useState<Set<string>>(new Set());
@@ -683,6 +728,9 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   );
   const histBadge = <span className="muted small">{history.length}건</span>;
   const dismBadge = <span className="muted small">{dismissed.length}건</span>;
+  const dismMs = (d: DismissedItem) => (d.dismissed_at ? new Date(d.dismissed_at).getTime() || 0 : 0);
+  const dismissedSorted = [...dismissed].sort((a, b) =>
+    dismSort === "desc" ? dismMs(b) - dismMs(a) : dismMs(a) - dismMs(b));
 
   if (loading) return <Loading rows={4} />;
   if (rows.length === 0 && dismissed.length === 0)
@@ -744,7 +792,8 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
           empty="이력 없음" />
       </Section>
       <Section title="처리 내역 (확인·숨김)" badge={dismBadge}>
-        <DismissedList rows={dismissed}
+        <DismissedList rows={dismissedSorted}
+          dir={dismSort} onToggleSort={() => setDismSort((d) => (d === "desc" ? "asc" : "desc"))}
           selected={dismSel} onToggleSel={dismToggleSel} onToggleSelAll={dismToggleSelAll}
           onClearSel={dismClearSel} onUndismiss={undismiss} onUndismissAll={undismissAll}
           onAck={dismBulkAck} onDelete={dismBulkDelete} onResolve={dismBulkResolve} busy={busy} />
