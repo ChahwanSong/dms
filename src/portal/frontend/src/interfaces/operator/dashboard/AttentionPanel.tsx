@@ -205,8 +205,15 @@ function detailRows(item: AttentionItem): ReactNode[] {
 interface ItemActions {
   onNavigate?: (s: string) => void;
   onDismiss: (item: AttentionItem) => void;
+  onAck: (item: AttentionItem) => void;
   onResolve: (item: AttentionItem) => void;
   onDelete: (item: AttentionItem) => void;
+}
+
+// Items with no programmatic DMS action (manual backend cleanup) — the system
+// recommends an operator confirm them done. ACK is the primary close-out for these.
+function needsManualAck(item: AttentionItem): boolean {
+  return !canDelete(item) && !canResolve(item);
 }
 
 function Item({ item, act, checked, onToggleSel }: {
@@ -258,7 +265,10 @@ function Item({ item, act, checked, onToggleSel }: {
             {canDelete(item) && (
               <button className="mini danger" onClick={() => act.onDelete(item)}>기록 삭제</button>
             )}
-            <button className="mini ghost" onClick={() => act.onDismiss(item)}>숨김</button>
+            <button className={needsManualAck(item) ? "mini primary" : "mini"} onClick={() => act.onAck(item)}
+              title="운영자가 확인·처리함 (예: 수동 정리 완료) — 처리 내역에 기록">확인(처리완료)</button>
+            <button className="mini ghost" onClick={() => act.onDismiss(item)}
+              title="해당없음/무시 — 처리 내역에 숨김으로 기록">숨김</button>
           </div>
         </div>
       )}
@@ -310,39 +320,98 @@ function Group({ items, dir, onToggleSort, onDismissVisible, act, empty, selecte
   );
 }
 
-function DismissedList({ rows, onUndismiss, onUndismissAll }: {
+// dismissed-record action gates (the row carries the identifiers captured at
+// dismiss time, so we don't need the live action-required item).
+function dCanDelete(d: DismissedItem): boolean {
+  return !!d.job_id;
+}
+function dCanResolve(d: DismissedItem): boolean {
+  return !!d.request_id && RESOLVABLE_REQUEST_STATES.has(d.status || "");
+}
+
+function DismissedList({
+  rows, selected, onToggleSel, onToggleSelAll, onClearSel,
+  onUndismiss, onUndismissAll, onAck, onDelete, onResolve, busy,
+}: {
   rows: DismissedItem[];
+  selected: Set<string>;
+  onToggleSel: (fp: string) => void;
+  onToggleSelAll: (rows: DismissedItem[], select: boolean) => void;
+  onClearSel: () => void;
   onUndismiss: (fingerprints: string[]) => void;
   onUndismissAll: () => void;
+  onAck: (rows: DismissedItem[]) => void;
+  onDelete: (rows: DismissedItem[]) => void;
+  onResolve: (rows: DismissedItem[]) => void;
+  busy: boolean;
 }) {
-  if (rows.length === 0) return <p className="muted small">숨긴 항목이 없습니다.</p>;
+  if (rows.length === 0) return <p className="muted small">처리 내역이 없습니다.</p>;
+  const allSel = rows.length > 0 && rows.every((d) => selected.has(d.fingerprint));
+  const sel = rows.filter((d) => selected.has(d.fingerprint));
+  const selAckable = sel.filter((d) => d.kind !== "ack");
+  const selDeletable = sel.filter(dCanDelete);
+  const selResolvable = sel.filter(dCanResolve);
   return (
     <>
       <div className="attn-sec-tools">
+        <label className="check-cell" style={{ marginRight: "auto" }} title="전체 선택">
+          <input type="checkbox" checked={allSel}
+            onChange={() => onToggleSelAll(rows, !allSel)} aria-label="전체 선택" />
+        </label>
         <button className="attn-sort" onClick={onUndismissAll}>모두 해제 (원위치)</button>
       </div>
       <div className="attn2-list">
-        {rows.map((d) => (
-          <div key={d.fingerprint} className="attn2 attn2-info">
-            <div className="attn2-rowwrap">
-              <div className="attn2-row dismissed">
-                <span className="attn2-main">
-                  <span className="attn2-head">
-                    <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
-                    <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
+        {rows.map((d) => {
+          const isAck = d.kind === "ack";
+          return (
+            <div key={d.fingerprint} className="attn2 attn2-info">
+              <div className="attn2-rowwrap">
+                <label className="check-cell attn2-check" title="선택">
+                  <input type="checkbox" checked={selected.has(d.fingerprint)}
+                    onChange={() => onToggleSel(d.fingerprint)} aria-label="선택" />
+                </label>
+                <div className="attn2-row dismissed">
+                  <span className="attn2-main">
+                    <span className="attn2-head">
+                      <span className={`chip ${isAck ? "tone-ok" : "tone-low"}`}>{isAck ? "확인됨" : "숨김"}</span>
+                      <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
+                      <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
+                      {dCanDelete(d) && <span className="attn2-ident mono">data job</span>}
+                    </span>
+                    <span className="attn2-action muted small">
+                      {d.dismissed_by || "operator"} · {fmtAgo(d.dismissed_at)}
+                      {d.reason ? ` · ${d.reason}` : ""}
+                    </span>
                   </span>
-                  <span className="attn2-action muted small">
-                    {d.dismissed_by || "operator"} · {fmtAgo(d.dismissed_at)}
-                    {d.reason ? ` · ${d.reason}` : ""}
-                  </span>
-                </span>
+                </div>
+                <button type="button" className="attn2-hide" title="해제 — 다시 조치 필요에 표시"
+                  onClick={() => onUndismiss([d.fingerprint])}>해제</button>
               </div>
-              <button type="button" className="attn2-hide" title="숨김 해제 — 다시 조치 필요에 표시"
-                onClick={() => onUndismiss([d.fingerprint])}>해제</button>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+      {sel.length > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{sel.length}개 선택</span>
+          {selAckable.length > 0 && (
+            <button className="primary mini" disabled={busy} onClick={() => onAck(selAckable)}
+              title="확인(처리완료)로 표시">확인 ({selAckable.length})</button>
+          )}
+          <button className="mini" disabled={busy} onClick={() => onUndismiss(sel.map((d) => d.fingerprint))}>
+            해제 ({sel.length})
+          </button>
+          <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={() => onDelete(selDeletable)}>
+            기록 삭제 ({selDeletable.length})
+          </button>
+          {selResolvable.length > 0 && (
+            <button className="ghost mini" disabled={busy} onClick={() => onResolve(selResolvable)}>
+              요청 중단 ({selResolvable.length})
+            </button>
+          )}
+          <button className="ghost mini" onClick={onClearSel}>선택 해제</button>
+        </div>
+      )}
     </>
   );
 }
@@ -355,10 +424,28 @@ function timeOf(item: AttentionItem): number {
   return Number.isNaN(ms) ? 0 : ms;
 }
 
-const dismissPayload = (items: AttentionItem[]) =>
+// Acknowledge payload. kind 'ack' = 운영자가 확인·수동 처리함(예: soft-delete 정리 완료),
+// 'dismissed' = 해당없음/숨김. We also capture job_id/request_id/status so the hidden
+// item can still be DMS-deleted/abandoned later from the 숨김 항목 list.
+const ackPayload = (items: AttentionItem[], kind: "ack" | "dismissed") =>
   items
     .filter((i) => i.fingerprint)
-    .map((i) => ({ fingerprint: i.fingerprint as string, issue_type: i.issue_type, label: labelOf(i) }));
+    .map((i) => ({
+      fingerprint: i.fingerprint as string,
+      issue_type: i.issue_type,
+      label: labelOf(i),
+      kind,
+      job_id: str(i.job_id) ?? null,
+      request_id: str(i.request_id) ?? null,
+      status: str(i.status) ?? null,
+    }));
+
+// re-acknowledge a dismissed record (e.g. 숨김 → 확인) — reuses the stored identifiers.
+const dismToAckPayload = (rows: DismissedItem[], kind: "ack" | "dismissed") =>
+  rows.map((d) => ({
+    fingerprint: d.fingerprint, issue_type: d.issue_type, label: d.label, kind,
+    job_id: d.job_id ?? null, request_id: d.request_id ?? null, status: d.status ?? null,
+  }));
 
 export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string) => void }) {
   const [rows, setRows] = useState<AttentionItem[]>([]);
@@ -372,6 +459,7 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const [histSort, setHistSort] = useState<"desc" | "asc">("desc");
   // multi-select (keyed by fingerprint), like the backup/scan bulk bars.
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [dismSel, setDismSel] = useState<Set<string>>(new Set());
 
   const refetch = useCallback(async () => {
     const [a, d] = await Promise.all([
@@ -380,13 +468,16 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     ]);
     setRows(a);
     setDismissed(d);
-    // prune selection to items still present (an actioned item disappears).
-    setSelected((prev) => {
+    // prune selections to items still present (an actioned item disappears).
+    const prune = (prev: Set<string>, present: Set<string>) => {
       if (!prev.size) return prev;
-      const fps = new Set(a.map((i) => i.fingerprint).filter(Boolean) as string[]);
-      const next = new Set([...prev].filter((fp) => fps.has(fp)));
+      const next = new Set([...prev].filter((fp) => present.has(fp)));
       return next.size === prev.size ? prev : next;
-    });
+    };
+    const aFps = new Set(a.map((i) => i.fingerprint).filter(Boolean) as string[]);
+    const dFps = new Set(d.map((i) => i.fingerprint));
+    setSelected((prev) => prune(prev, aFps));
+    setDismSel((prev) => prune(prev, dFps));
   }, []);
 
   useEffect(() => {
@@ -415,7 +506,11 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const act: ItemActions = {
     onNavigate,
     onDismiss: (item) => {
-      const p = dismissPayload([item]);
+      const p = ackPayload([item], "dismissed");
+      if (p.length) run(() => operatorApi.dashboard.dismissAttention(p));
+    },
+    onAck: (item) => {
+      const p = ackPayload([item], "ack");
       if (p.length) run(() => operatorApi.dashboard.dismissAttention(p));
     },
     onResolve: (item) => {
@@ -434,16 +529,16 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   };
 
   const dismissVisible = (items: AttentionItem[]) => {
-    const p = dismissPayload(items);
+    const p = ackPayload(items, "dismissed");
     if (!p.length) return;
-    if (!window.confirm(`보이는 ${p.length}건을 숨길까요? (숨김 항목에서 언제든 해제 가능)`)) return;
+    if (!window.confirm(`보이는 ${p.length}건을 숨길까요? (처리 내역에서 언제든 해제 가능)`)) return;
     run(() => operatorApi.dashboard.dismissAttention(p));
   };
   const undismiss = (fingerprints: string[]) =>
     run(() => operatorApi.dashboard.undismissAttention(fingerprints));
   const undismissAll = () => {
     if (!dismissed.length) return;
-    if (!window.confirm(`숨김 ${dismissed.length}건을 모두 해제(원위치)할까요?`)) return;
+    if (!window.confirm(`처리 내역 ${dismissed.length}건을 모두 해제(원위치)할까요?`)) return;
     undismiss(dismissed.map((d) => d.fingerprint));
   };
 
@@ -471,10 +566,16 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const selDeletable = selItems.filter(canDelete);
   const selResolvable = selItems.filter(canResolve);
 
-  const bulkDismiss = async () => {
-    const p = dismissPayload(selItems);
+  const bulkAck = async () => {
+    const p = ackPayload(selItems, "ack");
     if (!p.length) return;
-    if (!window.confirm(`선택 ${p.length}건을 숨길까요? (숨김 항목에서 언제든 해제 가능)`)) return;
+    if (!window.confirm(`선택 ${p.length}건을 '확인(처리완료)'로 표시할까요? (처리 내역에 기록)`)) return;
+    if (await run(() => operatorApi.dashboard.dismissAttention(p))) clearSel();
+  };
+  const bulkDismiss = async () => {
+    const p = ackPayload(selItems, "dismissed");
+    if (!p.length) return;
+    if (!window.confirm(`선택 ${p.length}건을 숨길까요? (처리 내역에서 언제든 해제 가능)`)) return;
     if (await run(() => operatorApi.dashboard.dismissAttention(p))) clearSel();
   };
   const bulkDelete = async () => {
@@ -502,6 +603,43 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
       }
     });
     if (ok) clearSel();
+  };
+
+  // ---- 처리 내역 (dismissed/ack) section selection + bulk ----
+  const dismToggleSel = (fp: string) =>
+    setDismSel((prev) => { const n = new Set(prev); n.has(fp) ? n.delete(fp) : n.add(fp); return n; });
+  const dismToggleSelAll = (items: DismissedItem[], select: boolean) =>
+    setDismSel((prev) => {
+      const n = new Set(prev);
+      for (const d of items) select ? n.add(d.fingerprint) : n.delete(d.fingerprint);
+      return n;
+    });
+  const dismClearSel = () => setDismSel(new Set());
+
+  const dismBulkAck = async (items: DismissedItem[]) => {
+    if (!items.length) return;
+    if (await run(() => operatorApi.dashboard.dismissAttention(dismToAckPayload(items, "ack")))) dismClearSel();
+  };
+  const dismBulkDelete = async (items: DismissedItem[]) => {
+    if (!items.length) return;
+    if (!window.confirm(`선택한 data job 기록 ${items.length}건을 DMS에서 삭제할까요? (되돌릴 수 없음)`)) return;
+    const ok = await run(async () => {
+      for (const d of items) if (d.job_id) await operatorApi.dashboard.deleteDataJob(d.job_id);
+      // the underlying items are gone now — drop their (orphaned) 처리 내역 rows too.
+      await operatorApi.dashboard.undismissAttention(items.map((d) => d.fingerprint));
+    });
+    if (ok) dismClearSel();
+  };
+  const dismBulkResolve = async (items: DismissedItem[]) => {
+    if (!items.length) return;
+    const reason = window.prompt(
+      `선택한 요청 ${items.length}건을 중단(abandon)합니다. 사유 입력 (감사 기록):`, "obsolete — 정리");
+    if (!reason) return;
+    const ok = await run(async () => {
+      for (const d of items) if (d.request_id) await operatorApi.dashboard.resolveRequest(d.request_id, "abandon", reason);
+      await operatorApi.dashboard.undismissAttention(items.map((d) => d.fingerprint));
+    });
+    if (ok) dismClearSel();
   };
 
   const sevCounts = useMemo(() => {
@@ -571,7 +709,12 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
       {selItems.length > 0 && (
         <div className="bulk-bar">
           <span className="bulk-count">{selItems.length}개 선택</span>
-          <button className="primary mini" disabled={busy} onClick={bulkDismiss}>
+          <button className="primary mini" disabled={busy} onClick={bulkAck}
+            title="운영자가 확인·처리함 (수동 정리 완료 등) — 처리 내역에 기록">
+            확인 ({selItems.length})
+          </button>
+          <button className="mini" disabled={busy} onClick={bulkDismiss}
+            title="해당없음/무시 — 처리 내역에 숨김으로 기록">
             숨김 ({selItems.length})
           </button>
           <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={bulkDelete}>
@@ -600,8 +743,11 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
           selected={selected} onToggleSel={toggleSel} onToggleSelAll={toggleSelAll}
           empty="이력 없음" />
       </Section>
-      <Section title="숨김 항목 (acknowledge)" badge={dismBadge}>
-        <DismissedList rows={dismissed} onUndismiss={undismiss} onUndismissAll={undismissAll} />
+      <Section title="처리 내역 (확인·숨김)" badge={dismBadge}>
+        <DismissedList rows={dismissed}
+          selected={dismSel} onToggleSel={dismToggleSel} onToggleSelAll={dismToggleSelAll}
+          onClearSel={dismClearSel} onUndismiss={undismiss} onUndismissAll={undismissAll}
+          onAck={dismBulkAck} onDelete={dismBulkDelete} onResolve={dismBulkResolve} busy={busy} />
       </Section>
     </div>
   );

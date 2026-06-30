@@ -455,8 +455,25 @@ export interface DismissedItem {
   issue_type?: string;
   label?: string;
   reason?: string;
+  // "ack" = 운영자가 확인·수동 처리함, "dismissed" = 해당없음/숨김
+  kind?: "ack" | "dismissed";
+  // captured at dismiss time so a hidden item can still be acted on from the list
+  job_id?: string | null;
+  request_id?: string | null;
+  status?: string | null;
   dismissed_by?: string;
   dismissed_at?: string;
+}
+
+export interface DismissPayloadItem {
+  fingerprint: string;
+  issue_type?: string;
+  label?: string;
+  reason?: string;
+  kind?: "ack" | "dismissed";
+  job_id?: string | null;
+  request_id?: string | null;
+  status?: string | null;
 }
 
 export interface VolcanoStatus {
@@ -908,7 +925,7 @@ export const operatorApi = {
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
     dismissedAttention: () =>
       request<DismissedItem[]>("/api/operator/dashboard/attention/dismissed"),
-    dismissAttention: (items: { fingerprint: string; issue_type?: string; label?: string; reason?: string }[]) =>
+    dismissAttention: (items: DismissPayloadItem[]) =>
       request<{ dismissed: number }>("/api/operator/dashboard/attention/dismiss", {
         method: "POST",
         body: JSON.stringify({ items }),

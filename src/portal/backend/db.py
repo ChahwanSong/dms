@@ -145,6 +145,10 @@ def _ddl(schema: str) -> list[str]:
             issue_type text,
             label text,
             reason text,
+            kind text NOT NULL DEFAULT 'dismissed',
+            job_id text,
+            request_id text,
+            status text,
             dismissed_by text,
             dismissed_at timestamptz NOT NULL DEFAULT now()
         )""",
@@ -152,6 +156,14 @@ def _ddl(schema: str) -> list[str]:
         f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS priority text "
         f"NOT NULL DEFAULT 'Low'",
         f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS node_count int",
+        # acknowledge layer: kind distinguishes 'ack' (운영자가 확인·수동 처리함) from
+        # 'dismissed' (해당없음/숨김); job_id/request_id/status are captured so a hidden
+        # item can still be DMS-deleted (terminal data job) or abandoned (stuck request).
+        f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS kind text "
+        f"NOT NULL DEFAULT 'dismissed'",
+        f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS job_id text",
+        f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS request_id text",
+        f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS status text",
         # migration: the FK was auto-named backup_jobs_batch_id_fkey when the table
         # was first created as backup_jobs (before the backup_jobs->backup_requests
         # rename, which doesn't rename constraints). Rename it to match the table.
@@ -949,25 +961,33 @@ class Database:
     async def add_dismissals(
         self, items: list[dict[str, Any]], dismissed_by: str
     ) -> int:
-        """Upsert dismissals (one row per fingerprint). Re-dismissing refreshes who/when/reason."""
+        """Upsert dismissals (one row per fingerprint). Re-dismissing refreshes
+        who/when/reason AND the kind (so 숨김→확인(ack) re-marking just upserts).
+        kind defaults to 'dismissed'; job_id/request_id/status are captured so the
+        hidden item can later be DMS-deleted/abandoned from the 숨김 항목 list."""
         if not items:
             return 0
         async with self.pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(
                     "INSERT INTO attention_dismissals"
-                    "(fingerprint,issue_type,label,reason,dismissed_by) "
-                    "VALUES (%s,%s,%s,%s,%s) "
+                    "(fingerprint,issue_type,label,reason,kind,job_id,request_id,status,dismissed_by) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (fingerprint) DO UPDATE SET "
                     "issue_type=excluded.issue_type, label=excluded.label, "
-                    "reason=excluded.reason, dismissed_by=excluded.dismissed_by, "
-                    "dismissed_at=now()",
+                    "reason=excluded.reason, kind=excluded.kind, job_id=excluded.job_id, "
+                    "request_id=excluded.request_id, status=excluded.status, "
+                    "dismissed_by=excluded.dismissed_by, dismissed_at=now()",
                     [
                         (
                             i["fingerprint"],
                             i.get("issue_type"),
                             i.get("label"),
                             i.get("reason"),
+                            i.get("kind") or "dismissed",
+                            i.get("job_id"),
+                            i.get("request_id"),
+                            i.get("status"),
                             dismissed_by,
                         )
                         for i in items
