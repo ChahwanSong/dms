@@ -149,6 +149,7 @@ def _ddl(schema: str) -> list[str]:
             job_id text,
             request_id text,
             status text,
+            item_at text,
             dismissed_by text,
             dismissed_at timestamptz NOT NULL DEFAULT now()
         )""",
@@ -164,6 +165,9 @@ def _ddl(schema: str) -> list[str]:
         f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS job_id text",
         f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS request_id text",
         f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS status text",
+        # the action-required item's OWN report/updated time (captured at dismiss),
+        # so 처리 내역 shows the report time like 현재 조치/과거 이력 — not the ack time.
+        f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS item_at text",
         # migration: the FK was auto-named backup_jobs_batch_id_fkey when the table
         # was first created as backup_jobs (before the backup_jobs->backup_requests
         # rename, which doesn't rename constraints). Rename it to match the table.
@@ -971,12 +975,13 @@ class Database:
             async with conn.cursor() as cur:
                 await cur.executemany(
                     "INSERT INTO attention_dismissals"
-                    "(fingerprint,issue_type,label,reason,kind,job_id,request_id,status,dismissed_by) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "(fingerprint,issue_type,label,reason,kind,job_id,request_id,status,item_at,dismissed_by) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (fingerprint) DO UPDATE SET "
                     "issue_type=excluded.issue_type, label=excluded.label, "
                     "reason=excluded.reason, kind=excluded.kind, job_id=excluded.job_id, "
                     "request_id=excluded.request_id, status=excluded.status, "
+                    "item_at=excluded.item_at, "
                     "dismissed_by=excluded.dismissed_by, dismissed_at=now()",
                     [
                         (
@@ -988,6 +993,7 @@ class Database:
                             i.get("job_id"),
                             i.get("request_id"),
                             i.get("status"),
+                            i.get("item_at"),
                             dismissed_by,
                         )
                         for i in items

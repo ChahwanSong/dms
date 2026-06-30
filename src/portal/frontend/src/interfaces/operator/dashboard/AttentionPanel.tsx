@@ -224,8 +224,7 @@ function Item({ item, act, checked, onToggleSel }: {
   const dom = domainOf(item.issue_type);
   const sev = (str(item.severity) || "WARN").toUpperCase();
   const ident = identOf(item);
-  const when = str(item.updated_at) || str(item.reported_at) || str(item.last_seen) ||
-    str(item.requested_at) || str(item.created_at) || str(item.expires_at);
+  const when = itemWhen(item);
   const nav = DOMAIN_NAV[dom];
   const fp = item.fingerprint;
   return (
@@ -364,14 +363,18 @@ function DismissedList({
   const selDeletable = sel.filter(dCanDelete);
   const selResolvable = sel.filter(dCanResolve);
 
-  // delete (purge) every record dismissed at/before the chosen time. Reuses
-  // undismiss (remove_dismissals) — housekeeping for the accruing 처리 내역.
+  // the time we show/sort/purge by: the action-required item's report time
+  // (captured at dismiss), falling back to the dismiss time for legacy records.
+  const whenOf = (d: DismissedItem) => d.item_at || d.dismissed_at;
+  // delete (purge) every record whose report time is at/before the chosen time.
+  // Reuses undismiss (remove_dismissals) — housekeeping for the accruing 처리 내역.
   const purgeBefore = () => {
     if (!purgeAt) return;
     const cutoff = new Date(purgeAt).getTime();
     if (Number.isNaN(cutoff)) return;
     const victims = rows.filter((d) => {
-      const t = d.dismissed_at ? new Date(d.dismissed_at).getTime() : NaN;
+      const w = whenOf(d);
+      const t = w ? new Date(w).getTime() : NaN;
       return !Number.isNaN(t) && t <= cutoff;
     });
     if (!victims.length) { window.alert("해당 시각 이전의 처리 내역이 없습니다."); return; }
@@ -422,9 +425,10 @@ function DismissedList({
                       {d.reason ? ` · ${d.reason}` : ""}
                     </span>
                   </span>
-                  {d.dismissed_at && (
-                    <span className="attn2-when muted small" title={fmtTime(d.dismissed_at)}>
-                      {fmtAgo(d.dismissed_at)}
+                  {whenOf(d) && (
+                    <span className="attn2-when muted small"
+                      title={`리포트 ${fmtTime(whenOf(d))}\n처리 ${fmtTime(d.dismissed_at)} · ${d.dismissed_by || "operator"}`}>
+                      {fmtAgo(whenOf(d))}
                     </span>
                   )}
                 </div>
@@ -460,10 +464,16 @@ function DismissedList({
   );
 }
 
+// the action-required item's own report/updated time (ISO string), in the same
+// priority the live/history rows display — captured into 처리 내역 so it shows the
+// report time, not the admin's dismiss time.
+function itemWhen(item: AttentionItem): string | undefined {
+  return str(item.updated_at) || str(item.reported_at) || str(item.last_seen) ||
+    str(item.requested_at) || str(item.created_at) || str(item.expires_at);
+}
 // most relevant timestamp for an item (recency), epoch ms (0 if none).
 function timeOf(item: AttentionItem): number {
-  const t = str(item.updated_at) || str(item.reported_at) || str(item.last_seen) ||
-    str(item.requested_at) || str(item.created_at) || str(item.expires_at);
+  const t = itemWhen(item);
   const ms = t ? new Date(t).getTime() : NaN;
   return Number.isNaN(ms) ? 0 : ms;
 }
@@ -482,13 +492,16 @@ const ackPayload = (items: AttentionItem[], kind: "ack" | "dismissed") =>
       job_id: str(i.job_id) ?? null,
       request_id: str(i.request_id) ?? null,
       status: str(i.status) ?? null,
+      item_at: itemWhen(i) ?? null,
     }));
 
-// re-acknowledge a dismissed record (e.g. 숨김 → 확인) — reuses the stored identifiers.
+// re-acknowledge a dismissed record (e.g. 숨김 → 확인) — reuses the stored identifiers
+// and the original report time.
 const dismToAckPayload = (rows: DismissedItem[], kind: "ack" | "dismissed") =>
   rows.map((d) => ({
     fingerprint: d.fingerprint, issue_type: d.issue_type, label: d.label, kind,
     job_id: d.job_id ?? null, request_id: d.request_id ?? null, status: d.status ?? null,
+    item_at: d.item_at ?? null,
   }));
 
 export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string) => void }) {
@@ -728,7 +741,11 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   );
   const histBadge = <span className="muted small">{history.length}건</span>;
   const dismBadge = <span className="muted small">{dismissed.length}건</span>;
-  const dismMs = (d: DismissedItem) => (d.dismissed_at ? new Date(d.dismissed_at).getTime() || 0 : 0);
+  // sort by the item's report time (item_at), falling back to dismiss time.
+  const dismMs = (d: DismissedItem) => {
+    const w = d.item_at || d.dismissed_at;
+    return w ? new Date(w).getTime() || 0 : 0;
+  };
   const dismissedSorted = [...dismissed].sort((a, b) =>
     dismSort === "desc" ? dismMs(b) - dismMs(a) : dismMs(a) - dismMs(b));
 

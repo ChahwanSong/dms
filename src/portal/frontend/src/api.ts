@@ -461,6 +461,9 @@ export interface DismissedItem {
   job_id?: string | null;
   request_id?: string | null;
   status?: string | null;
+  // the action-required item's own report/updated time (so 처리 내역 shows the
+  // report time like 현재 조치/과거 이력, not the admin's dismiss time)
+  item_at?: string | null;
   dismissed_by?: string;
   dismissed_at?: string;
 }
@@ -474,6 +477,7 @@ export interface DismissPayloadItem {
   job_id?: string | null;
   request_id?: string | null;
   status?: string | null;
+  item_at?: string | null;
 }
 
 export interface VolcanoStatus {
