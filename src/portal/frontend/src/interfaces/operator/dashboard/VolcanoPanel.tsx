@@ -184,7 +184,6 @@ export default function VolcanoPanel() {
   }
   const jobs = v.jobs || [];
   const active = jobs.filter((j) => !TERMINAL.has(j.phase || ""));
-  const badge = <span className="muted small">(큐 {v.queues?.length ?? 0} · 잡 {jobs.length})</span>;
 
   // queues: one combined running/pending/inqueue bar per queue (shared axis).
   const queues = v.queues || [];
@@ -201,7 +200,7 @@ export default function VolcanoPanel() {
   const maxTotal = Math.max(1, ...winRows.map((r) => r.total));
 
   return (
-    <Section title="Volcano 스케줄러" badge={badge}>
+    <Section title="Volcano 스케줄러">
       {(v.errors?.queues || v.errors?.jobs || v.errors?.scheduler) && (
         <div className="banner err">
           {["queues", "jobs", "scheduler"]

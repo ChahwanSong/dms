@@ -47,31 +47,57 @@ export default function OperatorApp({
   onLogout: () => void;
 }) {
   const [section, setSection] = useState<Section>("dashboard");
+  // Parent nav items with children start COLLAPSED; clicking the parent both
+  // navigates to it and toggles its sub-items (조치 필요 · 액티비티) open/closed.
+  const [expanded, setExpanded] = useState<Set<Section>>(new Set());
+
+  function selectParent(item: NavItem) {
+    setSection(item.key);
+    if (item.children) {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        next.has(item.key) ? next.delete(item.key) : next.add(item.key);
+        return next;
+      });
+    }
+  }
 
   return (
     <div className="app">
       <TopBar user={user} onLogout={onLogout} title="DMS Portal · 운영자 콘솔" />
       <div className="layout">
         <nav className="sidebar">
-          {NAV.map((item) => (
-            <Fragment key={item.key}>
-              <button
-                className={"nav-item" + (section === item.key ? " active" : "")}
-                onClick={() => setSection(item.key)}
-              >
-                {item.label}
-              </button>
-              {item.children?.map((child) => (
+          {NAV.map((item) => {
+            // keep the subtree open while a child is the active view, even if the
+            // user never explicitly expanded it (defensive — children are normally
+            // only reachable after expanding).
+            const childActive = item.children?.some((c) => c.key === section) ?? false;
+            const open = expanded.has(item.key) || childActive;
+            return (
+              <Fragment key={item.key}>
                 <button
-                  key={child.key}
-                  className={"nav-item nav-subitem" + (section === child.key ? " active" : "")}
-                  onClick={() => setSection(child.key)}
+                  className={"nav-item" + (section === item.key ? " active" : "")}
+                  onClick={() => selectParent(item)}
+                  aria-expanded={item.children ? open : undefined}
                 >
-                  {child.label}
+                  {item.children && (
+                    <span className="nav-caret" aria-hidden>{open ? "▾" : "▸"}</span>
+                  )}
+                  {item.label}
                 </button>
-              ))}
-            </Fragment>
-          ))}
+                {item.children && open &&
+                  item.children.map((child) => (
+                    <button
+                      key={child.key}
+                      className={"nav-item nav-subitem" + (section === child.key ? " active" : "")}
+                      onClick={() => setSection(child.key)}
+                    >
+                      {child.label}
+                    </button>
+                  ))}
+              </Fragment>
+            );
+          })}
         </nav>
         <main className="content content-wide">
           {section === "dashboard" && <Dashboard />}
