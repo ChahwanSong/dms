@@ -384,6 +384,17 @@ _ATTENTION_SEVERITY_DEFAULT = {
     "storage_mapping_failed": "ERROR",
     "agent_report_stale": "WARN",
 }
+# FORCE these to INFO regardless of the severity DMS emits: a terminated data job
+# that just ended (preflight gate failed, or operator/user cancelled) is a
+# notification, not something to act on — the genuinely actionable preflight causes
+# surface as their own granular issue_types (data_job_permission_denied,
+# data_job_identity_unresolved, data_job_no_ready_candidate, …), which keep their
+# severity. INFO is hidden by default, so this de-noises 현재 조치 필요 while the
+# records remain in 과거 작업 이력 (and via the INFO filter chip).
+_ATTENTION_SEVERITY_OVERRIDE = {
+    "data_job_preflight_failed": "INFO",
+    "data_job_cancelled": "INFO",
+}
 # DMS emits CRITICAL for some quota issues (usage >=95%, query failed); rank it above ERROR.
 _SEVERITY_RANK = {"CRITICAL": 0, "ERROR": 1, "WARN": 2, "INFO": 3}
 
@@ -424,8 +435,10 @@ def _refine_attention(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     refined: list[dict[str, Any]] = []
     for it in items or []:
         issue_type = it.get("issue_type") or ""
-        severity = it.get("severity") or _ATTENTION_SEVERITY_DEFAULT.get(
-            issue_type, "WARN"
+        severity = (
+            _ATTENTION_SEVERITY_OVERRIDE.get(issue_type)
+            or it.get("severity")
+            or _ATTENTION_SEVERITY_DEFAULT.get(issue_type, "WARN")
         )
         refined.append(
             {

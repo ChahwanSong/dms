@@ -209,7 +209,10 @@ interface ItemActions {
   onDelete: (item: AttentionItem) => void;
 }
 
-function Item({ item, act }: { item: AttentionItem; act: ItemActions }) {
+function Item({ item, act, checked, onToggleSel }: {
+  item: AttentionItem; act: ItemActions;
+  checked: boolean; onToggleSel: (fp: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const dom = domainOf(item.issue_type);
   const sev = (str(item.severity) || "WARN").toUpperCase();
@@ -217,9 +220,15 @@ function Item({ item, act }: { item: AttentionItem; act: ItemActions }) {
   const when = str(item.updated_at) || str(item.reported_at) || str(item.last_seen) ||
     str(item.requested_at) || str(item.created_at) || str(item.expires_at);
   const nav = DOMAIN_NAV[dom];
+  const fp = item.fingerprint;
   return (
     <div className={`attn2 attn2-${sev.toLowerCase()}`}>
       <div className="attn2-rowwrap">
+        {fp && (
+          <label className="check-cell attn2-check" title="선택">
+            <input type="checkbox" checked={checked} onChange={() => onToggleSel(fp)} aria-label="선택" />
+          </label>
+        )}
         <button type="button" className="attn2-row" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
           <span className={`attn2-sev attn2-${sev.toLowerCase()}`}>{sev}</span>
           <span className="attn2-main">
@@ -257,19 +266,30 @@ function Item({ item, act }: { item: AttentionItem; act: ItemActions }) {
   );
 }
 
-// One offender list: per-section time-sort toggle + "보이는 N건 숨김" bulk action.
-function Group({ items, dir, onToggleSort, onDismissVisible, act, empty }: {
+// One offender list: select-all + per-section time-sort toggle + "보이는 N건 숨김".
+function Group({ items, dir, onToggleSort, onDismissVisible, act, empty, selected, onToggleSel, onToggleSelAll }: {
   items: AttentionItem[];
   dir: "desc" | "asc";
   onToggleSort: () => void;
   onDismissVisible: (items: AttentionItem[]) => void;
   act: ItemActions;
   empty: string;
+  selected: Set<string>;
+  onToggleSel: (fp: string) => void;
+  onToggleSelAll: (items: AttentionItem[], select: boolean) => void;
 }) {
   if (items.length === 0) return <p className="muted small">{empty}</p>;
+  const selectable = items.filter((i) => i.fingerprint);
+  const allSel = selectable.length > 0 && selectable.every((i) => selected.has(i.fingerprint as string));
   return (
     <>
       <div className="attn-sec-tools">
+        {selectable.length > 0 && (
+          <label className="check-cell" style={{ marginRight: "auto" }} title="이 섹션 전체 선택">
+            <input type="checkbox" checked={allSel}
+              onChange={() => onToggleSelAll(selectable, !allSel)} aria-label="전체 선택" />
+          </label>
+        )}
         <button className="attn-sort" onClick={() => onDismissVisible(items)}
           title="현재 보이는(필터된) 항목을 모두 숨김 — 숨김 항목에서 해제 가능">
           보이는 {items.length}건 숨김
@@ -280,7 +300,11 @@ function Group({ items, dir, onToggleSort, onDismissVisible, act, empty }: {
         </button>
       </div>
       <div className="attn2-list">
-        {items.map((r, i) => <Item key={r.fingerprint || `${r.issue_type}-${i}`} item={r} act={act} />)}
+        {items.map((r, i) => (
+          <Item key={r.fingerprint || `${r.issue_type}-${i}`} item={r} act={act}
+            checked={!!r.fingerprint && selected.has(r.fingerprint)}
+            onToggleSel={onToggleSel} />
+        ))}
       </div>
     </>
   );
@@ -346,6 +370,8 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const [doms, setDoms] = useState<Set<string>>(new Set());
   const [liveSort, setLiveSort] = useState<"desc" | "asc">("desc");
   const [histSort, setHistSort] = useState<"desc" | "asc">("desc");
+  // multi-select (keyed by fingerprint), like the backup/scan bulk bars.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const refetch = useCallback(async () => {
     const [a, d] = await Promise.all([
@@ -354,6 +380,13 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     ]);
     setRows(a);
     setDismissed(d);
+    // prune selection to items still present (an actioned item disappears).
+    setSelected((prev) => {
+      if (!prev.size) return prev;
+      const fps = new Set(a.map((i) => i.fingerprint).filter(Boolean) as string[]);
+      const next = new Set([...prev].filter((fp) => fps.has(fp)));
+      return next.size === prev.size ? prev : next;
+    });
   }, []);
 
   useEffect(() => {
@@ -363,14 +396,17 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     return () => { alive = false; };
   }, [refetch]);
 
-  // run a mutating action, then refresh; surface failures.
-  const run = useCallback(async (fn: () => Promise<unknown>) => {
+  // run a mutating action, then refresh; surface failures. Returns success so a
+  // bulk caller can clear its selection only when the action actually applied.
+  const run = useCallback(async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     try {
       await fn();
       await refetch();
+      return true;
     } catch (e) {
       window.alert(`작업 실패: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -409,6 +445,63 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     if (!dismissed.length) return;
     if (!window.confirm(`숨김 ${dismissed.length}건을 모두 해제(원위치)할까요?`)) return;
     undismiss(dismissed.map((d) => d.fingerprint));
+  };
+
+  // ---- multi-select bulk actions (mirrors the backup/scan bulk bar) ----
+  const toggleSel = (fp: string) =>
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(fp) ? n.delete(fp) : n.add(fp);
+      return n;
+    });
+  const toggleSelAll = (items: AttentionItem[], select: boolean) =>
+    setSelected((prev) => {
+      const n = new Set(prev);
+      for (const it of items) {
+        if (!it.fingerprint) continue;
+        select ? n.add(it.fingerprint) : n.delete(it.fingerprint);
+      }
+      return n;
+    });
+  const clearSel = () => setSelected(new Set());
+
+  // selected items still present in the data (independent of the severity/domain
+  // view filter, so the count is stable while filtering).
+  const selItems = rows.filter((r) => r.fingerprint && selected.has(r.fingerprint));
+  const selDeletable = selItems.filter(canDelete);
+  const selResolvable = selItems.filter(canResolve);
+
+  const bulkDismiss = async () => {
+    const p = dismissPayload(selItems);
+    if (!p.length) return;
+    if (!window.confirm(`선택 ${p.length}건을 숨길까요? (숨김 항목에서 언제든 해제 가능)`)) return;
+    if (await run(() => operatorApi.dashboard.dismissAttention(p))) clearSel();
+  };
+  const bulkDelete = async () => {
+    if (!selDeletable.length) return;
+    if (!window.confirm(`선택한 data job 기록 ${selDeletable.length}건을 DMS에서 삭제할까요? (되돌릴 수 없음)`)) return;
+    const ok = await run(async () => {
+      for (const it of selDeletable) {
+        const id = str(it.job_id);
+        if (id) await operatorApi.dashboard.deleteDataJob(id);
+      }
+    });
+    if (ok) clearSel();
+  };
+  const bulkResolve = async () => {
+    if (!selResolvable.length) return;
+    const reason = window.prompt(
+      `선택한 요청 ${selResolvable.length}건을 중단(abandon)합니다. 사유 입력 (감사 기록):`,
+      "obsolete — 정리",
+    );
+    if (!reason) return;
+    const ok = await run(async () => {
+      for (const it of selResolvable) {
+        const id = str(it.request_id);
+        if (id) await operatorApi.dashboard.resolveRequest(id, "abandon", reason);
+      }
+    });
+    if (ok) clearSel();
   };
 
   const sevCounts = useMemo(() => {
@@ -475,16 +568,36 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
         ))}
       </div>
 
+      {selItems.length > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{selItems.length}개 선택</span>
+          <button className="primary mini" disabled={busy} onClick={bulkDismiss}>
+            숨김 ({selItems.length})
+          </button>
+          <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={bulkDelete}>
+            기록 삭제 ({selDeletable.length})
+          </button>
+          {selResolvable.length > 0 && (
+            <button className="ghost mini" disabled={busy} onClick={bulkResolve}>
+              요청 중단 ({selResolvable.length})
+            </button>
+          )}
+          <button className="ghost mini" onClick={clearSel}>선택 해제</button>
+        </div>
+      )}
+
       <Section title="현재 조치 필요" badge={liveBadge} defaultOpen>
         <Group items={live} dir={liveSort}
           onToggleSort={() => setLiveSort((d) => (d === "desc" ? "asc" : "desc"))}
           onDismissVisible={dismissVisible} act={act}
+          selected={selected} onToggleSel={toggleSel} onToggleSelAll={toggleSelAll}
           empty="현재 조치 필요한 항목이 없습니다. ✅" />
       </Section>
       <Section title="과거 작업 이력 (종료된 작업·결과)" badge={histBadge}>
         <Group items={history} dir={histSort}
           onToggleSort={() => setHistSort((d) => (d === "desc" ? "asc" : "desc"))}
           onDismissVisible={dismissVisible} act={act}
+          selected={selected} onToggleSel={toggleSel} onToggleSelAll={toggleSelAll}
           empty="이력 없음" />
       </Section>
       <Section title="숨김 항목 (acknowledge)" badge={dismBadge}>

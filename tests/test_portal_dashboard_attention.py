@@ -41,3 +41,23 @@ def test_refine_category_severity_passthrough_and_sort():
 
     # sort: live first, CRITICAL ahead of WARN/INFO → critical live item is first
     assert out[0]["issue_type"] == "quota_usage_critical"
+
+
+def test_terminated_data_jobs_forced_to_info():
+    """A preflight gate failure or a cancellation is a notification, not action-
+    required: force INFO (hidden by default) regardless of the severity DMS sent.
+    Genuinely actionable preflight causes (their own issue_types) keep their severity."""
+    items = [
+        {"issue_type": "data_job_preflight_failed", "severity": "ERROR", "resource_kind": "data_job"},
+        {"issue_type": "data_job_cancelled", "severity": "WARN", "resource_kind": "data_job"},
+        {"issue_type": "data_job_volcano_failed", "severity": "ERROR", "resource_kind": "data_job"},
+        {"issue_type": "data_job_permission_denied", "severity": "ERROR", "resource_kind": "data_job"},
+    ]
+    by_type = {r["issue_type"]: r for r in _refine_attention(items)}
+    assert by_type["data_job_preflight_failed"]["severity"] == "INFO"
+    assert by_type["data_job_cancelled"]["severity"] == "INFO"
+    # actionable data-job issues are NOT downgraded
+    assert by_type["data_job_volcano_failed"]["severity"] == "ERROR"
+    assert by_type["data_job_permission_denied"]["severity"] == "ERROR"
+    # still categorized as history (terminated jobs)
+    assert all(r["category"] == "history" for r in by_type.values())
