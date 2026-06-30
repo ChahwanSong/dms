@@ -96,6 +96,10 @@ class Settings:
     # Orchestrator: max DMS jobs in flight per batch per cycle, and poll cadence.
     backup_concurrency: int = 8
     backup_poll_seconds: float = 5.0
+    # Safety net (B): a preview_pending request that never yields a DMS job (e.g.
+    # the request terminated pre-job, or the planner is stuck) is failed after this
+    # many seconds so a single item can't park a batch in 'previewing' forever.
+    backup_preview_timeout_seconds: float = 900.0
 
     @property
     def dms_configured(self) -> bool:
@@ -151,5 +155,11 @@ class Settings:
             ),
             backup_poll_seconds=float(
                 env.get("PORTAL_BACKUP_POLL_SECONDS", defaults.backup_poll_seconds)
+            ),
+            backup_preview_timeout_seconds=float(
+                env.get(
+                    "PORTAL_BACKUP_PREVIEW_TIMEOUT_SECONDS",
+                    defaults.backup_preview_timeout_seconds,
+                )
             ),
         )

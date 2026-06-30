@@ -83,12 +83,18 @@ class FakeDB:
         r.update({"state": "registered", "dms_job_id": None, "dms_request_id": None,
                   "fingerprint": None, "preview": None, "result": None, "error": None})
 
-    async def reset_requests(self, bid: str, *, request_ids=None, failed_only: bool = False) -> int:
-        n = 0
+    async def reset_requests(
+        self, bid: str, *, request_ids=None, failed_only: bool = False,
+        all_terminal: bool = False,
+    ) -> list:
+        cleared: list = []
         for r in self.requests.values():
             if r["batch_id"] != bid:
                 continue
-            if failed_only:
+            if all_terminal:
+                if r["state"] not in ("succeeded", "failed", "preview_failed", "cancelled"):
+                    continue
+            elif failed_only:
                 if r["state"] not in ("failed", "preview_failed"):
                     continue
             else:
@@ -96,17 +102,28 @@ class FakeDB:
                     continue
                 if r["state"] not in RESETTABLE:
                     continue
+            cleared.append(r.get("dms_job_id"))
             r.update({"state": "registered", "dms_job_id": None, "dms_request_id": None,
                       "fingerprint": None, "preview": None, "result": None, "error": None})
-            n += 1
-        return n
+        return cleared
+
+
+class _StubDms:
+    """Minimal DMS stub: :reset/:rerun best-effort cancel orphaned preview jobs."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def cancel_job(self, job_id: str, *, actor: str) -> dict:
+        self.cancelled.append(job_id)
+        return {"job_id": job_id, "cancelled": True}
 
 
 def make_client(db: FakeDB) -> TestClient:
     app = FastAPI()
     app.include_router(backup_router(Settings()))
     app.dependency_overrides[deps.get_db] = lambda: db
-    app.dependency_overrides[deps.get_dms_client] = lambda: None
+    app.dependency_overrides[deps.get_dms_client] = lambda: _StubDms()
     app.dependency_overrides[security.require_authenticated] = lambda: {
         "username": "op", "role": "operator", "method": "local",
     }

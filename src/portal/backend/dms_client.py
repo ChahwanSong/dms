@@ -166,6 +166,15 @@ class DmsClient:
             "GET", f"{_DM}/sync/jobs/{_seg(job_id)}", actor=actor
         )
 
+    async def get_request(self, request_id: str, *, actor: str) -> dict[str, Any]:
+        """Read-only request lifecycle (status + results + transitions). Used by the
+        backup orchestrator to detect a preview request that terminated WITHOUT
+        producing a data_job (e.g. a 'Conflict' against a prior request for the same
+        resource_key) so a stuck preview_pending item can be auto-resolved."""
+        return await self._request(
+            "GET", f"{_OPS_BASE}/requests/{_seg(request_id)}", actor=actor
+        )
+
     async def submit_scan(self, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
         # DMS scan is READ-ONLY (no preview/confirm): POST /scan runs directly
         # (Pending -> Running -> Succeeded). Used by the data-scan orchestrator.

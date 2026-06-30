@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from .config import Settings
@@ -38,6 +39,51 @@ _PREVIEW_READY = {"ConfirmPending"}
 _PREVIEW_FAILED = {"PreflightFailed", "Failed", "PreviewExpired", "Cancelled", "TimedOut"}
 _EXEC_SUCCEEDED = {"Succeeded"}
 _EXEC_FAILED = {"Failed", "PreflightFailed", "PreviewExpired", "Cancelled", "TimedOut"}
+
+# Terminal DMS *data-job* states (mirrors domain.TERMINAL_DATA_JOB_STATES; the
+# portal must not import the DMS package).
+_TERMINAL_DATA_JOB = {
+    "Succeeded", "Failed", "Cancelled", "TimedOut",
+    "AuthorizationFailed", "PreflightFailed", "PreviewExpired",
+}
+# Terminal DMS *request* lifecycle states (mirrors domain.TERMINAL_LIFECYCLE_STATES).
+# A preview_pending whose request reaches one of these WITHOUT a usable data_job is
+# dead — fail it rather than poll forever. 'Conflict' is handled specially (it may
+# be recoverable by adopting the prior request's still-valid preview).
+_TERMINAL_LIFECYCLE = {
+    "AuthenticationRejected", "AuthorizationFailed", "Succeeded", "Failed",
+    "TimedOut", "Cancelled", "Conflict", "Rejected", "BackendApplyFailed",
+}
+
+
+def _conflict_prior_request_id(info: dict[str, Any]) -> str | None:
+    """For a request that terminated in 'Conflict' (ordering: a prior request for the
+    same resource_key is still non-terminal), return that prior request_id."""
+    for res in info.get("results") or []:
+        if res.get("terminal_status") == "Conflict":
+            vs = res.get("verification_summary") or {}
+            prior = vs.get("prior_request_id")
+            if prior:
+                return str(prior)
+    return None
+
+
+def _age_seconds(updated_at: Any) -> float:
+    """Seconds since a request row's updated_at (DB datetime/ISO string). Returns 0
+    when unknown so the timeout never fires on a value we can't parse."""
+    if updated_at is None:
+        return 0.0
+    dt = updated_at
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except ValueError:
+            return 0.0
+    if not isinstance(dt, datetime):
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
 
 
 def _preview_metrics(dms_job: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
@@ -146,6 +192,7 @@ class BackupOrchestrator:
         # 2) resolve freshly-submitted request_ids -> job_ids (DMS ignores the
         #    request_id filter, so match newest-first list client-side).
         unresolved = [j for j in pending if j.get("dms_request_id") and not j.get("dms_job_id")]
+        by_req: dict[str, dict[str, Any]] = {}
         if unresolved:
             by_req = await self._data_jobs_by_request(actor)
             for job in unresolved:
@@ -157,6 +204,14 @@ class BackupOrchestrator:
         for job in pending:
             if not job.get("dms_request_id"):
                 await self._submit_one(batch, job, actor, resubmit=True)
+
+        # 2b) (B) a pending that HAS a request_id but STILL has no job did not match
+        #     any data_job — its DMS request may have terminated WITHOUT producing one
+        #     (e.g. a resource-key 'Conflict'). Inspect the request and recover so the
+        #     item can't park the batch in 'previewing' forever.
+        for job in pending:
+            if job.get("dms_request_id") and not job.get("dms_job_id"):
+                await self._resolve_stuck_preview(job, actor, by_req)
 
         # 3) poll resolved preview_pending jobs.
         for job in pending:
@@ -181,14 +236,81 @@ class BackupOrchestrator:
                     job["id"], state="preview_failed", error=_reason(dj)
                 )
 
+        # 3.5) (A) also confirm/execute any operator-approved items WHILE previewing,
+        #      so a single slow/stuck preview can't block approving the ready ones.
+        await self._execute_steps(batch, actor)
+
         # 4) advance the batch once nothing is registered/pending. A selective
         #    preview parks the unselected as 'held' (not counted here); once the
-        #    selected ones finish, advance and release the held back to 'registered'
-        #    so they stay available for a later preview.
+        #    selected ones finish, release the held back to 'registered' (kept idle —
+        #    a later explicit re-preview runs them) and move on. If items were
+        #    approved mid-preview (A), enter the execute phase ('running'); otherwise
+        #    the preview phase is complete (ready and/or failed) -> 'previewed'.
         counts = await self._db.batch_state_counts(bid)
         if not counts.get("registered") and not counts.get("preview_pending"):
-            await self._db.set_batch_status(bid, "previewed")
             await self._db.release_held(bid)
+            after = await self._db.batch_state_counts(bid)
+            if after.get("approved") or after.get("running"):
+                await self._db.set_batch_status(bid, "running")
+            else:
+                await self._db.set_batch_status(bid, "previewed")
+
+    async def _resolve_stuck_preview(
+        self, job: dict[str, Any], actor: str, by_req: dict[str, dict[str, Any]]
+    ) -> None:
+        """Recover a preview_pending whose DMS request produced no data_job.
+
+        - Conflict + prior request's preview job still ConfirmPending -> ADOPT it
+          (the prior preview is exactly what we wanted; the normal poll then marks it
+          preview_ready with the fingerprint).
+        - Conflict + prior preview job now terminal (blocker gone, e.g. cancelled on
+          re-preview) -> re-register for a fresh submit.
+        - Conflict + prior still working -> wait (timeout backstop below).
+        - Any other terminal request status (no job) -> preview_failed.
+        - Non-terminal but no job past the timeout -> preview_failed (safety net)."""
+        rid = job.get("dms_request_id")
+        try:
+            info = await self._dms.get_request(rid, actor=actor)
+        except DmsApiError:
+            info = None
+        status = ((info or {}).get("request") or {}).get("status")
+        if status == "Conflict" and info is not None:
+            prior_id = _conflict_prior_request_id(info)
+            prior_job = by_req.get(prior_id) if prior_id else None
+            pstate = (prior_job or {}).get("state")
+            if prior_job and pstate == "ConfirmPending":
+                # adopt the prior's still-valid preview; step-3 poll will mark it ready
+                await self._db.update_request(
+                    job["id"],
+                    dms_request_id=prior_id,
+                    dms_job_id=prior_job["job_id"],
+                    error=None,
+                )
+                job["dms_job_id"] = prior_job["job_id"]
+                return
+            if prior_job and pstate in _TERMINAL_DATA_JOB:
+                # blocker resolved -> drop the conflicted request, re-submit fresh
+                await self._db.update_request(
+                    job["id"],
+                    state="registered",
+                    dms_request_id=None,
+                    dms_job_id=None,
+                    error=None,
+                )
+                return
+            # prior has no job yet / still running: wait, then fall through to timeout
+        elif status and status in _TERMINAL_LIFECYCLE:
+            await self._db.update_request(
+                job["id"], state="preview_failed", error=f"preview request {status}"
+            )
+            return
+        # timeout backstop: a request that never yields a job must not wait forever.
+        if _age_seconds(job.get("updated_at")) > self._settings.backup_preview_timeout_seconds:
+            await self._db.update_request(
+                job["id"],
+                state="preview_failed",
+                error="preview_timeout: DMS produced no job",
+            )
 
     async def _submit_one(
         self,
@@ -223,6 +345,24 @@ class BackupOrchestrator:
     async def _drive_execute(self, batch: dict[str, Any]) -> None:
         bid = batch["id"]
         actor = self._actor(batch)
+        await self._execute_steps(batch, actor)
+        # advance once nothing is approved/running: undecided preview_ready (operator
+        # may approve more in stages) or leftover registered (released held) keep the
+        # batch at 'previewed'; otherwise it's done.
+        counts = await self._db.batch_state_counts(bid)
+        if not counts.get("approved") and not counts.get("running"):
+            await self._db.release_held(bid)
+            after = await self._db.batch_state_counts(bid)
+            if after.get("preview_ready") or after.get("registered"):
+                await self._db.set_batch_status(bid, "previewed")
+            else:
+                await self._db.set_batch_status(bid, "done")
+
+    async def _execute_steps(self, batch: dict[str, Any], actor: str) -> None:
+        """Confirm operator-approved items and poll running ones to terminal. Shared
+        by the execute phase AND the preview phase (so approving a ready item works
+        even while other items in the batch are still previewing). No status change."""
+        bid = batch["id"]
         running = await self._db.requests_in_states(bid, ["running"])
 
         # 1) confirm operator-approved jobs up to the cap (selective approval:
@@ -253,16 +393,6 @@ class BackupOrchestrator:
                 await self._db.update_request(
                     job["id"], state="failed", error=_reason(dj)
                 )
-
-        # 3) advance once nothing is approved/running: return to 'previewed' if
-        #    undecided preview_ready remain (operator may approve more in stages),
-        #    otherwise the batch is done.
-        counts = await self._db.batch_state_counts(bid)
-        if not counts.get("approved") and not counts.get("running"):
-            if counts.get("preview_ready"):
-                await self._db.set_batch_status(bid, "previewed")
-            else:
-                await self._db.set_batch_status(bid, "done")
 
     async def _confirm_one(self, job: dict[str, Any], actor: str) -> None:
         if not job.get("dms_job_id") or not job.get("fingerprint"):

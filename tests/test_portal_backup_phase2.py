@@ -169,6 +169,38 @@ def test_approve_from_draft_409(client, db):
     assert resp.status_code == 409
 
 
+# --- (A) per-item approval while OTHER items are still previewing -----------
+
+def test_approve_while_previewing_keeps_status(client, db):
+    """A ready item can be approved even though a sibling is still preview_pending
+    (e.g. slow/stuck). The batch stays 'previewing' (the orchestrator's preview
+    driver also executes approved items) — it is NOT forced to 'running', which
+    would stop the remaining items from previewing."""
+    db.seed_batch("b1", status="previewing")
+    ready = db.seed_request("b1", state="preview_ready")
+    db.seed_request("b1", state="preview_pending")  # sibling still previewing
+    resp = client.post(f"{BASE}/batches/b1:approve", json={"request_ids": [ready]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["approved"] == 1
+    assert resp.json()["status"] == "previewing"
+    assert db.requests[ready]["state"] == "approved"
+    assert db.batches["b1"]["status"] == "previewing"
+
+
+def test_approve_done_409(client, db):
+    db.seed_batch("b1", status="done")
+    db.seed_request("b1", state="succeeded")
+    resp = client.post(f"{BASE}/batches/b1:approve")
+    assert resp.status_code == 409
+
+
+def test_approve_cancelled_409(client, db):
+    db.seed_batch("b1", status="cancelled")
+    db.seed_request("b1", state="cancelled")
+    resp = client.post(f"{BASE}/batches/b1:approve")
+    assert resp.status_code == 409
+
+
 # --- :close (마감) ----------------------------------------------------------
 
 def test_close_excludes_and_completes(client, db):

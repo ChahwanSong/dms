@@ -993,12 +993,15 @@ class Database:
         request_ids: list[int] | None = None,
         failed_only: bool = False,
         all_terminal: bool = False,
-    ) -> int:
+    ) -> list[str | None]:
         """Reset fixable requests to 'registered' (clearing preview/job state) for
         re-preview. `all_terminal` (full re-run) targets EVERY terminal request
         (succeeded/failed/preview_failed/cancelled); `failed_only` targets
         failed/preview_failed; otherwise the given ids, skipping in-flight/succeeded.
-        Returns how many were reset."""
+        Returns one entry per reset row = its prior `dms_job_id` (None when it had
+        none) — so len() is the reset count AND the caller can best-effort cancel the
+        live DMS preview jobs it just orphaned (prevents a re-submit Conflict against
+        the still-non-terminal prior job for the same resource_key)."""
         where = ["batch_id=%s"]
         params: list[Any] = [batch_id]
         if all_terminal:
@@ -1011,11 +1014,17 @@ class Database:
             where.append(
                 "state IN ('registered','preview_ready','preview_failed','failed','cancelled')"
             )
+        # Capture the PRIOR dms_job_id in a data-modifying CTE: a plain
+        # "UPDATE ... SET dms_job_id=NULL ... RETURNING dms_job_id" returns the NEW
+        # (already-nulled) value, so the caller could never cancel the orphaned jobs.
         sql = (
-            "UPDATE backup_requests SET state='registered', dms_job_id=NULL, "
+            "WITH target AS (SELECT id, dms_job_id FROM backup_requests WHERE "
+            + " AND ".join(where) + "), "
+            "upd AS (UPDATE backup_requests SET state='registered', dms_job_id=NULL, "
             "dms_request_id=NULL, fingerprint=NULL, preview=NULL, result=NULL, "
-            "error=NULL, updated_at=now() WHERE " + " AND ".join(where)
+            "error=NULL, updated_at=now() WHERE id IN (SELECT id FROM target)) "
+            "SELECT dms_job_id FROM target"
         )
         async with self.pool.connection() as conn:
             cur = await conn.execute(sql, params)
-            return cur.rowcount
+            return [r["dms_job_id"] for r in await cur.fetchall()]

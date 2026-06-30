@@ -349,9 +349,13 @@ export default function BackupBatchDetail({
     typeof bopts.chmod === "string" && bopts.chmod.trim() ? bopts.chmod.trim() : null;
   const deleteConfirm = "--delete 배치입니다. 승인 항목은 dst에서 src에 없는 파일을 삭제합니다. 실행할까요?";
 
-  // selective approval is available while a batch is previewed or running and
-  // still has undecided preview_ready requests.
-  const canSelect = (status === "previewed" || status === "running") && (counts.preview_ready ?? 0) > 0;
+  // selective approval is available whenever the batch is live (previewing /
+  // previewed / running) and has undecided preview_ready requests — including while
+  // OTHER items are still previewing, so one slow item can't block approving ready
+  // ones (the backend confirms approved items even mid-preview).
+  const canSelect =
+    (status === "previewing" || status === "previewed" || status === "running") &&
+    (counts.preview_ready ?? 0) > 0;
   // total rows for the active view (state_counts is authoritative): drives the
   // infinite-load stop condition + the "loaded / total" footer.
   const total = stateFilter

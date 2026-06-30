@@ -104,8 +104,8 @@ class FakeDB:
     async def reset_requests(
         self, bid: str, *, request_ids: list[int] | None = None,
         failed_only: bool = False, all_terminal: bool = False,
-    ) -> int:
-        n = 0
+    ) -> list[str | None]:
+        cleared: list[str | None] = []
         for r in self.reqs.values():
             if r["batch_id"] != bid:
                 continue
@@ -118,11 +118,11 @@ class FakeDB:
                     "registered", "preview_ready", "preview_failed", "failed", "cancelled",
                 }
             if match:
+                cleared.append(r.get("dms_job_id"))
                 r["state"] = "registered"
                 for k in CLEARED:
                     r[k] = None
-                n += 1
-        return n
+        return cleared
 
 
 class FakeDms:
@@ -157,6 +157,10 @@ class FakeDms:
             raise self.fail
         return self.logs
 
+    async def cancel_job(self, job_id: str, *, actor: str) -> dict[str, Any]:
+        self.calls.append(("cancel", job_id))
+        return {"job_id": job_id, "cancelled": True}
+
 
 def make_client(db: FakeDB, dms: FakeDms) -> TestClient:
     app = FastAPI()
@@ -188,7 +192,10 @@ def test_rerun_resets_all_terminal_incl_succeeded_to_previewing(db):
     r = client.post(f"{BACKUP}/batches/b1:rerun")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body == {"id": "b1", "status": "previewing", "reset": 2}
+    # (C) reset cancels each reset item's orphaned DMS job (j1, j2) so the fresh
+    # re-submit can't hit a resource-key Conflict against a still-live prior job.
+    assert body == {"id": "b1", "status": "previewing", "reset": 2, "dms_cancelled": 2}
+    assert sorted(c for k, c in dms.calls if k == "cancel") == ["j1", "j2"]
     assert db.bb["b1"]["status"] == "previewing"
     # succeeded item was reset too (the gap :rerun closes vs the retry route).
     assert db.reqs[ok]["state"] == "registered"
