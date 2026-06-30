@@ -1,7 +1,7 @@
 # DMS 백엔드 이슈: 읽기 API 완전성 작업 중 드러난 스케일/운영 리스크
 
 - 작성일: 2026-06-30
-- 상태: 일부 해결(코드 반영·배포 완료), 일부 DESIGN ONLY(백엔드 오너 공동 구현 대상)
+- 상태: **전부 구현·배포·라이브 스케일 검증 완료 (2026-06-30, ultracode 세션)** — §7 참조.
 - 컨텍스트: "포탈에서 DMS 기본 limit 때문에 데이터가 조용히 잘리는 경우"를 없애는 작업
   (A: DMS 읽기 API에 pagination/정확 COUNT/`latest_per_node` 추가, B: 포탈이 이를 사용 +
   잘림 배지)을 구현·배포하던 중, **실무에서 재현될 수 있는 운영 리스크**가 라이브에서
@@ -177,3 +177,38 @@ summary 682ms**(이전 34s). 단, 이는 "20만 행 인덱스 전수 스캔"이 
 2. **ISSUE-3 statement_timeout/temp_file_limit**(HIGH) — 폭주 쿼리 블래스트 반경 차단. 저비용.
 3. **ISSUE-2 agent_node_current + 보존**(HIGH) — 노드건강/메트릭 상수~bounded화.
 4. **ISSUE-4 action_required 카운트 분리**(MEDIUM).
+
+---
+
+## 7. 구현·검증 완료 (2026-06-30, ultracode) — 100노드/일1만잡/수TB 전제
+
+4건 모두 구현 → 적대적 코드 리뷰 → 전체 pytest → 라이브 배포 → **대규모 합성 데이터 스케일 검증**.
+배포 이미지: 전 DMS 컴포넌트 `pkg-01:5000/dms:node-current3` + 신규 `dms-retention`(singleton) 가동.
+커밋: `cfb7352`(Pass1 풀)·`430c5d2`(Pass2)·`b6abcf8`(test de-flake). pytest 582 passed.
+
+- **ISSUE-1 (커넥션 풀) — 해결.** `db.py`에 프로세스당 lazy `psycopg_pool.ConnectionPool`(url별, 스레드세이프),
+  `connect(pooled=True/False)`, statement_timeout/idle_in_txn을 풀 옵션으로. 역할별 사이징(API 16·loop 4·obs 3,
+  최악 천장 73<100), **API 스레드풀을 풀 크기로 cap**, 체크아웃 타임아웃(35s)≥statement_timeout. migrate/대량
+  유지보수는 pooled=False(미적용). **라이브 부하테스트: 80 동시 요청 → 전부 200·에러 0·MAX backends 34**(옛날엔
+  100 고갈→전면다운). 고갈 구조적 불가.
+- **ISSUE-3 (statement_timeout) — 해결.** 풀 연결 libpq options + init.sql ALTER ROLE(belt). 폭주 쿼리가
+  연결/디스크를 무한 점유 못 함. (temp_file_limit는 스토리지 수 TB라 불요 — 디스크가 제약이 아님.)
+- **ISSUE-2 (agent_node_current + 보존) — 해결.** ingest가 (cluster,node,role) 현재상태 테이블을 트랜잭션 내
+  UPSERT, node-health/action_required가 이 테이블을 읽고 freshness를 READ 시 산출 → O(#노드). DM 워커 노드선택도
+  현재상태 경로로 전환(죽은 노드 배정 제거). `dms retention --loop`가 age 기준(30일·7일 floor) batched prune
+  (pooled=False=untimed). **라이브 스케일: 합성 220만 행에서 node-health latest_per_node 210행 4~21ms,
+  DM워커 경로 2ms, metrics 6h윈도우 75k행 19ms** — 이력 깊이와 무관하게 상수~bounded.
+- **ISSUE-4 (work_summary 카운트) — 해결.** `action_required_count()`(소스별 cheap COUNT 합)로 교체,
+  count==len(list) 드리프트 테스트. ISSUE-2가 staleness 계산 비용도 O(#노드)로 낮춰 work_summary가 가벼워짐.
+
+**구현 중 발견·수정한 버그**:
+- (a) `PostgresConnection.executescript`가 SQL 주석 속 `;`에서 문장을 쪼개 PostgreSQL `dms migrate`를 깨뜨림
+  (SQLite 네이티브 executescript는 주석 인식이라 테스트가 못 잡은 PG 전용 버그). 주석 제거 후 분할로 하드닝 + 회귀 테스트.
+- (b) retention prune이 초기엔 pooled 연결(statement_timeout 30s)을 써서 대량 배치 DELETE가 타임아웃 → pooled=False로 수정.
+- (c) agent_node_current 백필이 매 부팅 무조건 전체 집계 실행 → 테이블 비었을 때만 실행하도록 게이트.
+- (d) DM 워커 후보 순서(테스트 단언)가 latest_per_node의 reported_at desc로 뒤집힘 → (cluster,node) 정렬로 보존.
+- (e) test_filesystem_rm 날짜 하드코딩(2026-06-30=오늘) time-bomb flake → 먼 미래로 수정.
+
+**잔여(범위 외, 별도 후속)**: failed data_jobs는 retention 대상 아님(카운트는 5000 cap; 포탈 acknowledge로 실무 backlog 제한).
+운영 시 PostgreSQL `max_connections`(현 100)는 외부 standalone이라 본 작업에서 상향하지 않음 — 동시성 증설 시
+`DMS_DB_API_POOL_MAX_SIZE`와 함께 상향(공식은 §1·CONFIGURATION.md).
