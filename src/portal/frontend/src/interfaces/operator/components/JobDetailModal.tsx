@@ -222,8 +222,16 @@ export default function JobDetailModal(props: Props) {
   if (detail?.finished_at) live.push({ label: "종료", value: fmtTime(detail.finished_at) });
 
   const preflight = asRecord(detail?.preflight_result);
+  const preflightStatus =
+    preflight && typeof preflight.status === "string" ? preflight.status : null;
   const preflightReason =
     preflight && typeof preflight.reason === "string" ? preflight.reason : null;
+  // DMS preflight: status "Ready" (reason *_passed) means it PASSED — show it
+  // green/neutral, not the alarming red error box. Anything else is a real
+  // rejection and stays red.
+  const preflightPassed =
+    preflightStatus === "Ready" ||
+    (preflightStatus == null && !!preflightReason && preflightReason.endsWith("_passed"));
 
   const rs = asRecord(detail?.result_summary);
   const summary = pickSummary(rs);
@@ -268,10 +276,22 @@ export default function JobDetailModal(props: Props) {
             <SpecGrid items={live} />
           </section>
 
-          {preflightReason && (
+          {(preflightStatus || preflightReason) && (
             <section className="job-sec">
-              <h4>Preflight</h4>
-              <div className="req-error">{preflightReason}</div>
+              <h4>
+                Preflight
+                {preflightStatus && (
+                  <span className={`chip ${preflightPassed ? "tone-ok" : "tone-danger"}`}>
+                    {preflightPassed ? "통과" : preflightStatus}
+                  </span>
+                )}
+              </h4>
+              {preflightReason &&
+                (preflightPassed ? (
+                  <div className="muted small">{preflightReason}</div>
+                ) : (
+                  <div className="req-error">{preflightReason}</div>
+                ))}
             </section>
           )}
 
