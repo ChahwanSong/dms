@@ -419,6 +419,8 @@ export interface RunRow {
   // enriched (JOIN plans/requests): what the run is actually doing
   operation_kind?: string; resource_kind?: string; resource_key?: string;
   requester_id?: string; request_status?: string;
+  // true if this run's request was hidden via the 조치 필요 dismiss/ack layer.
+  _hidden?: boolean;
 }
 
 // Runs are single-fetched with a high cap; `truncated` is set only if that cap was

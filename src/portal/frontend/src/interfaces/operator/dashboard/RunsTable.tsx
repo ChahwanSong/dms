@@ -112,8 +112,15 @@ export default function RunsTable({
       .finally(() => setLoading(false));
   }, []);
 
-  const waiting = stale.filter((r) => r.state === CONFIRM_WAIT);   // ② 확인 대기
-  const attention = stale.filter((r) => r.state !== CONFIRM_WAIT); // ③ 정체·복구
+  // Exclude runs whose request was hidden in 조치 필요 (dismiss/ack) — consistency:
+  // don't flag work as needing attention here while 조치 필요 hides it. Count them so
+  // we can show a small "숨김 N" note (no silent omission).
+  const activeVisible = active.filter((r) => !r._hidden);
+  const staleVisible = stale.filter((r) => !r._hidden);
+  const hiddenWaiting = stale.filter((r) => r._hidden && r.state === CONFIRM_WAIT).length;
+  const hiddenAttn = stale.filter((r) => r._hidden && r.state !== CONFIRM_WAIT).length;
+  const waiting = staleVisible.filter((r) => r.state === CONFIRM_WAIT);   // ② 확인 대기
+  const attention = staleVisible.filter((r) => r.state !== CONFIRM_WAIT); // ③ 정체·복구
   // ③ split: request still actionable in 조치 필요 vs already concluded (auto-cleaned).
   const openStuck = attention.filter((r) => ACTIONABLE_REQ.has(r.request_status || ""));
   const orphanStuck = attention.filter((r) => !ACTIONABLE_REQ.has(r.request_status || ""));
@@ -121,9 +128,10 @@ export default function RunsTable({
   const badge = (
     <span className="snm-badge">
       <span className="muted small">
-        실행 중 <b className={active.length ? "" : "muted"}>{active.length}</b>
+        실행 중 <b className={activeVisible.length ? "" : "muted"}>{activeVisible.length}</b>
         {waiting.length > 0 && <> · 확인 대기 <b>{waiting.length}</b></>}
         {attention.length > 0 && <> · <span className="err-num">정체·복구 {attention.length}</span></>}
+        {(hiddenAttn + hiddenWaiting) > 0 && <> · <span className="muted">숨김 {hiddenAttn + hiddenWaiting}</span></>}
       </span>
       {truncated && <span className="chip tone-warn">일부만 표시</span>}
       <InfoHint label="워커 실행 현황 설명">
@@ -146,8 +154,8 @@ export default function RunsTable({
         <div className="wrun">
           {/* ① 지금 실행 중 */}
           <div className="wrun-group">
-            <div className="wrun-h">지금 실행 중 <span className="muted small">({active.length})</span></div>
-            {active.length === 0 ? (
+            <div className="wrun-h">지금 실행 중 <span className="muted small">({activeVisible.length})</span></div>
+            {activeVisible.length === 0 ? (
               <p className="muted small ok-num">현재 실행 중인 작업이 없습니다 ✅</p>
             ) : (
               <table className="grid wrun-grid">
@@ -155,7 +163,7 @@ export default function RunsTable({
                   <th>작업</th><th>요청자</th><th>대상</th><th>경과</th><th>단계</th><th>워커</th><th></th>
                 </tr></thead>
                 <tbody>
-                  {active.map((r) => {
+                  {activeVisible.map((r) => {
                     const lv = liveness(r);
                     return (
                       <tr key={r.run_id}>
@@ -189,7 +197,7 @@ export default function RunsTable({
           {/* ② 확인 대기 (DM preview → confirm) */}
           {waiting.length > 0 && (
             <div className="wrun-group">
-              <div className="wrun-h">확인 대기 <span className="muted small">({waiting.length}) · 프리뷰 승인/취소 대기</span></div>
+              <div className="wrun-h">확인 대기 <span className="muted small">({waiting.length}) · 프리뷰 승인/취소 대기{hiddenWaiting > 0 ? ` · 숨김 ${hiddenWaiting}건` : ""}</span></div>
               <table className="grid wrun-grid">
                 <thead><tr>
                   <th>작업</th><th>요청자</th><th>대상</th><th>대기</th><th></th>
@@ -225,7 +233,7 @@ export default function RunsTable({
               종료된 잔여 run은 DMS 복구 스윕이 자동 정리한다. */}
           {attention.length > 0 && (
             <div className="wrun-group">
-              <div className="wrun-h">정체·복구 <span className="muted small">({attention.length}) · 워커 리스 만료</span></div>
+              <div className="wrun-h">정체·복구 <span className="muted small">({attention.length}) · 워커 리스 만료{hiddenAttn > 0 ? ` · 숨김 ${hiddenAttn}건` : ""}</span></div>
               {openStuck.length > 0 && (
                 <div className="wrun-attn">
                   <span className="err-num">회수 필요 {openStuck.length}건</span>

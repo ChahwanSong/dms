@@ -718,6 +718,7 @@ def dashboard_router(settings: Settings) -> APIRouter:
 
     @router.get("/runs")
     async def runs(
+        request: Request,
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
@@ -728,6 +729,15 @@ def dashboard_router(settings: Settings) -> APIRouter:
         )
         _mark_truncated(active, _RUNS_ACTIVE_LIMIT)
         _mark_truncated(stale, _RUNS_STALE_LIMIT)
+        # Consistency with 조치 필요: flag runs whose request was hidden there (dismiss/
+        # ack) by request_id, so 워커 실행 현황 doesn't count them as needing attention
+        # while 조치 필요 hides them. Front-end excludes flagged runs (with a 숨김 note).
+        db: Database | None = getattr(request.app.state, "db", None)
+        if db is not None and db.configured:
+            hidden_ids = await db.hidden_request_ids()
+            for section in (active, stale):
+                for run in section.get("data") or []:
+                    run["_hidden"] = bool(run.get("request_id") in hidden_ids)
         return {"active": active, "stale": stale}
 
     @router.get("/requests")
@@ -786,9 +796,9 @@ def dashboard_router(settings: Settings) -> APIRouter:
         )
         # Consistency with 조치 필요: flag requests that were hidden there (dismiss/ack)
         # so the activity view can hide them too (front-end default-hides, toggle shows).
-        db: Database = request.app.state.db
+        db: Database | None = getattr(request.app.state, "db", None)
         hidden_count = 0
-        if db.configured:
+        if db is not None and db.configured:
             hidden_ids = await db.hidden_request_ids()
             for it in items:
                 it["_hidden"] = bool(it.get("request_id") in hidden_ids)
