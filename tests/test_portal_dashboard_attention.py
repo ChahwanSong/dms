@@ -70,6 +70,21 @@ def test_terminated_data_jobs_forced_to_info():
     assert all(r["category"] == "history" for r in by_type.values())
 
 
+def test_request_attention_is_live_even_for_data_job():
+    # a stuck data.sync REQUEST (RecoveryNeeded) is actionable NOW — must be 'live',
+    # not bucketed into 과거 이력 just because resource_kind is data_job.
+    items = [
+        {"issue_type": "request_attention", "status": "RecoveryNeeded",
+         "resource_kind": "data_job", "request_id": "r1"},
+        # a terminated data-job notification stays history
+        {"issue_type": "data_job_preflight_failed", "resource_kind": "data_job",
+         "severity": "ERROR", "job_id": "j1"},
+    ]
+    by_type = {r["issue_type"]: r for r in _refine_attention(items)}
+    assert by_type["request_attention"]["category"] == "live"
+    assert by_type["data_job_preflight_failed"]["category"] == "history"
+
+
 def test_compact_value_trims_large_nested_but_keeps_scalars():
     # a huge preflight_result-like blob: per-node nested detail
     big = {

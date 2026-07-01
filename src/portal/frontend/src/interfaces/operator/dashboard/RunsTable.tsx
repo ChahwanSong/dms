@@ -15,6 +15,15 @@ import InfoHint from "../../../components/InfoHint";
 
 const CONFIRM_WAIT = "Blocked";
 
+// request statuses that are still ACTIONABLE in the 조치 필요 panel (request-attention).
+// A stuck run whose request is one of these = the operator can still act on the REQUEST
+// there; anything else = the request already concluded and the run is auto-reconciled
+// by the DMS recovery sweep (runs are never cleaned by hand in 조치 필요).
+const ACTIONABLE_REQ = new Set([
+  "StaleClaim", "RecoveryNeeded", "VerificationFailed",
+  "UnknownAfterSideEffect", "BackendApplyFailed",
+]);
+
 // operation_kind → 친화 라벨 (기술어는 유지). data.* → 데이터, filesystem.* → 파일시스템,
 // kubernetes.namespace_quota.* → 쿼터.
 function opLabel(op?: string): string {
@@ -105,6 +114,9 @@ export default function RunsTable({
 
   const waiting = stale.filter((r) => r.state === CONFIRM_WAIT);   // ② 확인 대기
   const attention = stale.filter((r) => r.state !== CONFIRM_WAIT); // ③ 정체·복구
+  // ③ split: request still actionable in 조치 필요 vs already concluded (auto-cleaned).
+  const openStuck = attention.filter((r) => ACTIONABLE_REQ.has(r.request_status || ""));
+  const orphanStuck = attention.filter((r) => !ACTIONABLE_REQ.has(r.request_status || ""));
 
   const badge = (
     <span className="snm-badge">
@@ -208,28 +220,43 @@ export default function RunsTable({
             </div>
           )}
 
-          {/* ③ 정체·복구 → 조치 필요로 위임 */}
+          {/* ③ 정체·복구 — run 자체는 조치 필요에서 정리되지 않는다. 요청이 아직 열린
+              run은 조치 필요에서 '요청'을 처리하면 시스템이 run을 회수하고, 요청이 이미
+              종료된 잔여 run은 DMS 복구 스윕이 자동 정리한다. */}
           {attention.length > 0 && (
             <div className="wrun-group">
-              <div className="wrun-attn">
-                <span className="err-num">정체·복구 {attention.length}건</span>
-                <span className="muted small">— 실제 조치가 필요한 run입니다.</span>
-                {onNavigate && (
-                  <button className="mini" onClick={() => onNavigate("dashboard-attention")}>
-                    조치 필요에서 해소 →
-                  </button>
-                )}
-              </div>
+              <div className="wrun-h">정체·복구 <span className="muted small">({attention.length}) · 워커 리스 만료</span></div>
+              {openStuck.length > 0 && (
+                <div className="wrun-attn">
+                  <span className="err-num">회수 필요 {openStuck.length}건</span>
+                  <span className="muted small">— run은 여기서 직접 정리하지 않습니다. 해당 <b>요청</b>을 조치 필요에서 처리(재처리·중단)하면 시스템이 run을 회수합니다.</span>
+                  {onNavigate && (
+                    <button className="mini" onClick={() => onNavigate("dashboard-attention")}>조치 필요 열기 →</button>
+                  )}
+                </div>
+              )}
+              {orphanStuck.length > 0 && (
+                <p className="muted small wrun-orphan-note">
+                  종료된 요청의 잔여 run {orphanStuck.length}건 — DMS가 자동 정리합니다(별도 조치 불필요).
+                </p>
+              )}
               <ul className="wrun-attn-list">
-                {attention.map((r) => (
-                  <li key={r.run_id}>
-                    <span className="chip tone-low">{STATE_LABEL[r.state] || r.state}</span>
-                    <span className="wrun-op">{opLabel(r.operation_kind)}</span>
-                    <span className="muted small">{r.requester_id || ""}</span>
-                    <span className="mono small">{target(r)}</span>
-                    <span className="muted small">{ago(r.started_at)} 전</span>
-                  </li>
-                ))}
+                {attention.map((r) => {
+                  const open = ACTIONABLE_REQ.has(r.request_status || "");
+                  return (
+                    <li key={r.run_id}>
+                      <span className="chip tone-low">{STATE_LABEL[r.state] || r.state}</span>
+                      <span className="wrun-op">{opLabel(r.operation_kind)}</span>
+                      <span className="muted small">{r.requester_id || ""}</span>
+                      <span className="mono small">{target(r)}</span>
+                      <span className="muted small">{ago(r.started_at)} 전</span>
+                      <span className={`chip ${open ? "tone-warn" : "tone-low"}`}
+                        title={open ? "요청이 아직 열려 있어 조치 필요에서 처리 가능" : "요청 종료됨 — 자동 정리 예정"}>
+                        {open ? "요청 처리 필요" : "자동 정리 예정"}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}

@@ -472,6 +472,73 @@ class ExecutionMixin:
             return len(rows)
 
 
+    def close_orphaned_stuck_runs(self, *, actor: str = "recovery-monitor") -> int:
+        """Terminalize stuck runs whose OWNING REQUEST has already concluded.
+
+        ``mark_stale_runs`` flags a run StaleClaim/RecoveryNeeded/UnknownAfterSideEffect
+        when its worker lease expires mid-execution — a recovery candidate. But if the
+        request has meanwhile reached a terminal state (Cancelled/Failed/Succeeded/…) —
+        cancelled by the operator, failed via another path, or manually resolved — there
+        is nothing left to recover, yet the run lingers in ATTENTION_RUN_STATES forever
+        (inflating stale/recovery and the 액티비티 정체·복구 count while never appearing
+        in the request-centric action_required). Close such orphan runs to MATCH their
+        request's terminal status. The request/plan are untouched; the run record + an
+        audit transition are preserved (history kept, only the dangling run is closed).
+
+        A run whose request is still OPEN (non-terminal) is left alone — that is a
+        genuine recovery candidate.
+        """
+        now = iso_now()
+        stuck_states = (
+            LifecycleState.STALE_CLAIM.value,
+            LifecycleState.RECOVERY_NEEDED.value,
+            LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+        )
+        # Terminal request states EXCLUDING any that are themselves an attention run
+        # state (BackendApplyFailed is both terminal AND in ATTENTION_RUN_STATES): a
+        # BackendApplyFailed request is still actionable in 조치 필요, and mirroring the
+        # run to it would leave the run in the attention set — so we don't sweep those.
+        # The remaining set (Cancelled/Failed/Succeeded/TimedOut/…) is safely non-attention.
+        terminal_states = tuple(
+            sorted(set(TERMINAL_LIFECYCLE_STATES) - set(ATTENTION_RUN_STATES))
+        )
+        run_ph = ",".join(["?"] * len(stuck_states))
+        term_ph = ",".join(["?"] * len(terminal_states))
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT r.run_id, r.plan_id, r.request_id, r.state,
+                       req.status AS request_status
+                FROM runs r
+                JOIN requests req ON req.request_id = r.request_id
+                WHERE r.state IN ({run_ph})
+                  AND req.status IN ({term_ph})
+                """,
+                (*stuck_states, *terminal_states),
+            ).fetchall()
+            for row in rows:
+                run = row_to_dict(row)
+                connection.execute(
+                    "UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ?",
+                    (run["request_status"], now, run["run_id"]),
+                )
+                self._insert_transition(
+                    connection,
+                    request_id=run["request_id"],
+                    plan_id=run["plan_id"],
+                    run_id=run["run_id"],
+                    from_state=run["state"],
+                    to_state=run["request_status"],
+                    reason=(
+                        "stuck run orphaned (request already terminal); "
+                        "closed to match request by recovery sweep"
+                    ),
+                    actor=actor,
+                    created_at=now,
+                )
+            return len(rows)
+
+
     def complete_result(
         self,
         *,

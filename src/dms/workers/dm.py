@@ -48,9 +48,10 @@ class DMWorkerRuntime:
 
     def run_once(self) -> int:
         self.repository.mark_stale_runs(actor=self.worker_id)
-        # defensive sweep: close orphaned preview runs left parked in Blocked after a
-        # confirm/cancel/preview-expiry that didn't terminalize them (idempotent).
+        # defensive sweeps: close orphaned preview runs (Blocked, plan moved on) and
+        # stuck runs whose request already reached a terminal state (idempotent).
         self.repository.close_superseded_preview_runs(actor=self.worker_id)
+        self.repository.close_orphaned_stuck_runs(actor=self.worker_id)
         if self.repository.scheduling_blocked():
             return 0
         plans = self.repository.list_claimable_plans(WorkerRole.DM, limit=1)

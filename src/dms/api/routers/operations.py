@@ -181,19 +181,26 @@ def operational_query_router() -> APIRouter:
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
         count = services.repository.mark_stale_runs(actor=actor)
-        # also close orphaned DM preview runs (parked in Blocked, plan moved on) so the
-        # recovery pass keeps the attention set free of dead preview records.
+        # also close orphaned runs so the recovery pass keeps the attention set free of
+        # dead records: DM preview runs parked in Blocked (plan moved on) + stuck runs
+        # whose owning request already reached a terminal state.
         superseded = services.repository.close_superseded_preview_runs(actor=actor)
+        orphaned = services.repository.close_orphaned_stuck_runs(actor=actor)
         stale = services.query.stale_or_recovery_runs()
         services.repository.record_control_mutation(
             actor=actor,
             mutation_kind="runs.mark_stale",
-            payload={"count": count, "superseded_preview_runs": superseded},
+            payload={
+                "count": count,
+                "superseded_preview_runs": superseded,
+                "orphaned_stuck_runs": orphaned,
+            },
             result_summary={"stale_or_recovery_count": len(stale)},
         )
         return {
             "marked": count,
             "superseded_preview_runs": superseded,
+            "orphaned_stuck_runs": orphaned,
             "stale_or_recovery_runs": stale,
         }
 

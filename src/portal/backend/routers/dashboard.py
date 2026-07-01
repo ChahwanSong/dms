@@ -491,6 +491,11 @@ _SEVERITY_RANK = {"CRITICAL": 0, "ERROR": 1, "WARN": 2, "INFO": 3}
 def _attention_category(issue_type: str, resource_kind: str | None) -> str:
     """live  = current request/mapping/agent/resource state — actionable now.
     history = a terminated data job or a past operation result that failed."""
+    # A stuck REQUEST (request_attention: StaleClaim/RecoveryNeeded/…) is actionable NOW
+    # even for a data job — it must NOT be bucketed into 과거 이력 just because its
+    # resource_kind is data_job (that rule is meant for the terminated data_job_* items).
+    if issue_type == "request_attention":
+        return "live"
     if resource_kind == "data_job":
         return "history"
     if issue_type in {"filesystem_soft_deleted", "filesystem_expired_unblocked"}:

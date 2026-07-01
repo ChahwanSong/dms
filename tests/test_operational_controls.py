@@ -245,6 +245,70 @@ def test_close_superseded_preview_runs_sweep(harness):
     assert repository.close_superseded_preview_runs(actor="test") == 0
 
 
+def _stuck_run(
+    repository: DmsRepository,
+    directory_name: str,
+    run_state: LifecycleState,
+    request_status: LifecycleState | None = None,
+) -> tuple[str, str, str]:
+    """request→plan→claimed run, then drive the run to `run_state` (cascades request+
+    plan too), and optionally override the REQUEST status. Returns (request_id, plan_id,
+    run_id). request_status=None leaves it equal to run_state (open attention)."""
+    request_id = _create_filesystem_request(repository, directory_name)
+    Planner(repository).run_once(limit=10)
+    plan = repository.get_plan_by_request(request_id)
+    run_id = repository.claim_plan(
+        plan_id=plan["plan_id"], worker_id="w", executor_id="w", lease_seconds=30
+    )
+    repository.update_run_state(run_id, run_state, reason="stuck", actor="w")
+    if request_status is not None:
+        repository.update_request_status(
+            request_id, request_status, reason="test terminal", actor="w"
+        )
+    return request_id, plan["plan_id"], run_id
+
+
+def test_close_orphaned_stuck_runs_various_cases(harness):
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    # orphans: stuck run whose REQUEST is terminal → closed, run state MIRRORS request
+    _, _, r_stale = _stuck_run(
+        repository, "o-stale", LifecycleState.STALE_CLAIM, LifecycleState.CANCELLED
+    )
+    _, _, r_recov = _stuck_run(
+        repository, "o-recov", LifecycleState.RECOVERY_NEEDED, LifecycleState.FAILED
+    )
+    _, _, r_unknown = _stuck_run(
+        repository, "o-unknown", LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT,
+        LifecycleState.SUCCEEDED,
+    )
+    # NOT orphan: stuck run whose request is still OPEN (RecoveryNeeded) → preserved
+    _, _, r_open = _stuck_run(repository, "open-recov", LifecycleState.RECOVERY_NEEDED)
+    # NOT swept: request is BackendApplyFailed — terminal BUT also an attention run state
+    # and still actionable (resolvable) in 조치 필요, so the sweep must leave it alone.
+    _, _, r_baf = _stuck_run(
+        repository, "baf", LifecycleState.RECOVERY_NEEDED, LifecycleState.BACKEND_APPLY_FAILED
+    )
+    # NOT targeted: an ACTIVE-state run (Running) even with a terminal request — the
+    # sweep only touches the stuck attention states, never in-flight runs.
+    _, _, r_active = _stuck_run(
+        repository, "active-run", LifecycleState.RUNNING, LifecycleState.CANCELLED
+    )
+
+    assert repository.close_orphaned_stuck_runs(actor="test") == 3
+    runs = {r["run_id"]: r for r in repository.list_runs(limit=50)}
+    assert runs[r_stale]["state"] == LifecycleState.CANCELLED.value    # mirrors request
+    assert runs[r_recov]["state"] == LifecycleState.FAILED.value
+    assert runs[r_unknown]["state"] == LifecycleState.SUCCEEDED.value
+    assert runs[r_open]["state"] == LifecycleState.RECOVERY_NEEDED.value  # preserved
+    assert runs[r_baf]["state"] == LifecycleState.RECOVERY_NEEDED.value   # BackendApplyFailed req → left
+    assert runs[r_active]["state"] == LifecycleState.RUNNING.value        # untouched
+    # request/plan of an orphan are NOT changed by the sweep (already terminal)
+    assert repository.get_request(runs[r_recov]["request_id"])["status"] == LifecycleState.FAILED.value
+    # idempotent
+    assert repository.close_orphaned_stuck_runs(actor="test") == 0
+
+
 def test_close_superseded_preview_runs_inline_by_plan(harness):
     repository: DmsRepository = harness["repository"]
     _register_ready_storage_mapping(repository)
