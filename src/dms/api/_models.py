@@ -18,6 +18,20 @@ class ControlStateBody(BaseModel):
     force: bool = False
 
 
+class ActionAckItem(BaseModel):
+    fingerprint: str
+    issue_type: str | None = None
+    reason: str | None = None
+
+
+class ActionAckBody(BaseModel):
+    items: list[ActionAckItem] = []
+
+
+class ActionUnackBody(BaseModel):
+    fingerprints: list[str] = []
+
+
 
 class ConfirmDataJobBody(BaseModel):
     requester_id: str | None = None

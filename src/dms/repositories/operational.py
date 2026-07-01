@@ -471,6 +471,58 @@ class OperationalMixin:
             ).fetchone()
         return int(row_to_dict(row)["n"])
 
+    # --- action-required acknowledge (server-side, record-preserving) ---------
+    # An ack marks an action-required item handled by fingerprint; action_required()
+    # filters acked items out (across ALL clients). The underlying request/data_job
+    # row is untouched — only the alarm is suppressed.
+
+    def add_action_acks(
+        self, items: list[dict[str, Any]], *, acked_by: str = "operator"
+    ) -> int:
+        rows = [i for i in items if i.get("fingerprint")]
+        if not rows:
+            return 0
+        now = iso_now()
+        with self.database.connect() as connection:
+            for i in rows:
+                connection.execute(
+                    """
+                    INSERT INTO action_acks (fingerprint, issue_type, reason, acked_by, acked_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (fingerprint) DO UPDATE SET
+                        issue_type = excluded.issue_type,
+                        reason = excluded.reason,
+                        acked_by = excluded.acked_by,
+                        acked_at = excluded.acked_at
+                    """,
+                    (i["fingerprint"], i.get("issue_type"), i.get("reason"), acked_by, now),
+                )
+        return len(rows)
+
+    def remove_action_acks(self, fingerprints: list[str]) -> int:
+        fps = [f for f in fingerprints if f]
+        if not fps:
+            return 0
+        placeholders = ",".join(["?"] * len(fps))
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                f"DELETE FROM action_acks WHERE fingerprint IN ({placeholders})",
+                tuple(fps),
+            )
+            return cursor.rowcount if cursor.rowcount is not None else len(fps)
+
+    def action_ack_fingerprints(self) -> set[str]:
+        with self.database.connect() as connection:
+            rows = connection.execute("SELECT fingerprint FROM action_acks").fetchall()
+        return {row_to_dict(row)["fingerprint"] for row in rows}
+
+    def list_action_acks(self) -> list[dict[str, Any]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM action_acks ORDER BY acked_at DESC"
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
 
     def control_state(self) -> dict[str, Any]:
         with self.database.connect() as connection:

@@ -57,6 +57,24 @@ _DATA_JOB_ATTENTION_STATES = (
 )
 
 
+def _action_fingerprint(item: dict) -> str:
+    """Stable per-item key for acknowledge (issue_type + best identifier). Mirrors the
+    portal's fingerprint so an ack targets exactly one action-required item."""
+    issue_type = item.get("issue_type") or ""
+    ns = item.get("namespace_name") or item.get("namespace")
+    key = (
+        item.get("resource_key")
+        or item.get("request_id")
+        or item.get("job_id")
+        or item.get("report_id")
+        or item.get("storage_name")
+        or (f"{item.get('cluster_name')}:{ns}" if ns else None)
+        or item.get("node_name")
+        or ""
+    )
+    return f"{issue_type}|{key}"
+
+
 @dataclass
 class OperationalQueryService:
     repository: DmsRepository
@@ -87,14 +105,20 @@ class OperationalQueryService:
         issues.extend(self._kubernetes_quota_action_required())
         issues.extend(self._filesystem_action_required())
         issues.extend(self._data_management_action_required())
+        # Server-side acknowledge: drop items an operator marked handled (by
+        # fingerprint) — record-preserving, applies across all clients.
+        acked = self.repository.action_ack_fingerprints()
+        if acked:
+            issues = [i for i in issues if _action_fingerprint(i) not in acked]
         return issues
 
     def action_required_count(self) -> int:
-        """Exact count of action_required() items via cheap per-source COUNT(*) (plus the
-        bounded len of the small complex sources) instead of materializing the full
-        composite list. INVARIANT: equals len(action_required()) for the same DB state —
-        each term mirrors its list source's cardinality (and its cap), so the dashboard
-        tile never drifts from the panel."""
+        """Exact count of action_required() items. Fast path = cheap per-source COUNT(*)
+        (each term mirrors its list source's cardinality/cap, so it equals
+        len(action_required())). When acks exist, that fast path can't cheaply exclude
+        acked items, so we materialize the (bounded) list to stay exact."""
+        if self.repository.action_ack_fingerprints():
+            return len(self.action_required())
         return (
             min(
                 self.repository.count_action_required_requests(),

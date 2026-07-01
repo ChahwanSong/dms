@@ -274,6 +274,14 @@ CREATE TABLE IF NOT EXISTS control_mutations (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS action_acks (
+    fingerprint TEXT PRIMARY KEY,   -- issue_type|key (stable per action-required item)
+    issue_type TEXT,
+    reason TEXT,
+    acked_by TEXT,
+    acked_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS dms_control_state (
     singleton_id TEXT PRIMARY KEY,
     maintenance_mode INTEGER NOT NULL,

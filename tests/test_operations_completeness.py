@@ -30,7 +30,7 @@ from dms.domain import (
     WorkerRole,
 )
 from dms.migrations import migrate_all
-from dms.query import OperationalQueryService
+from dms.query import OperationalQueryService, _action_fingerprint
 from dms.repositories import (
     ATTENTION_RUN_STATES,
     DmsRepository,
@@ -432,6 +432,34 @@ def test_blocked_request_not_action_required(tmp_path):
     assert blocked not in req_ids     # Blocked no longer alarms
     assert stuck in req_ids           # genuine stuck state still does
     assert repo.get_request(blocked)["status"] == LifecycleState.BLOCKED.value  # record intact
+
+
+def test_action_ack_hides_item_preserves_record_and_count(tmp_path):
+    # (D) server-side ACK: mark an item handled → excluded from action_required for all
+    # clients; the underlying record is untouched; count stays consistent; unack restores.
+    service = _query_service(tmp_path)
+    repo = service.repository
+    req = _seed_request(repo)
+    with repo.database.connect() as conn:
+        conn.execute("UPDATE requests SET status = ? WHERE request_id = ?",
+                     (LifecycleState.RECOVERY_NEEDED.value, req))
+    before = service.action_required()
+    item = next(i for i in before if i.get("issue_type") == "request_attention")
+    fp = _action_fingerprint(item)
+    assert service.action_required_count() == len(before)
+
+    # ack it
+    assert repo.add_action_acks([{"fingerprint": fp, "issue_type": "request_attention"}], acked_by="op") == 1
+    after = service.action_required()
+    assert fp not in {_action_fingerprint(i) for i in after}          # hidden
+    assert service.action_required_count() == len(after)              # count consistent (materialized path)
+    assert repo.get_request(req)["status"] == LifecycleState.RECOVERY_NEEDED.value  # record intact
+    assert [a["fingerprint"] for a in repo.list_action_acks()] == [fp]
+
+    # unack -> reappears
+    assert repo.remove_action_acks([fp]) == 1
+    assert fp in {_action_fingerprint(i) for i in service.action_required()}
+    assert service.action_required_count() == len(before)
 
 
 def test_action_required_uses_latest_per_node_for_staleness(tmp_path):

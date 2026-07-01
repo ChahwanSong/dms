@@ -13,7 +13,7 @@ from .._helpers.storage_mapping import (
     redact_storage_mapping,
     redact_storage_mappings,
 )
-from .._models import ControlStateBody
+from .._models import ActionAckBody, ActionUnackBody, ControlStateBody
 from .._services import AppServices
 from ..deps import authenticated_actor, get_services
 
@@ -244,6 +244,38 @@ def operational_query_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         authenticated_actor(request, services)
         return services.query.action_required()
+
+    @router.post("/action-required:ack")
+    def action_required_ack(
+        body: ActionAckBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        # Mark action-required items handled (by fingerprint). Record-preserving:
+        # action_required() then excludes them for ALL clients; nothing is deleted.
+        actor = authenticated_actor(request, services)
+        n = services.repository.add_action_acks(
+            [item.model_dump() for item in body.items], acked_by=actor
+        )
+        return {"acked": n}
+
+    @router.post("/action-required:unack")
+    def action_required_unack(
+        body: ActionUnackBody,
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        authenticated_actor(request, services)
+        n = services.repository.remove_action_acks(body.fingerprints)
+        return {"unacked": n}
+
+    @router.get("/action-required/acks")
+    def action_required_acks(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        authenticated_actor(request, services)
+        return services.repository.list_action_acks()
 
     @router.get("/inventory")
     def inventory(
