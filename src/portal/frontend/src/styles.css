@@ -1158,6 +1158,10 @@ textarea.json {
 /* 상세 → deep-link (accent, distinct from 숨김) */
 .attn2-detail-link { color: #93c5fd; }
 .attn2-detail-link:hover { color: #cfe0ff; background: rgba(59, 130, 246, 0.1); }
+/* 정리(archive) — permanent removal from 처리 내역; warm/muted, distinct from 복원 */
+.attn2-archive { color: #d9a066; }
+.attn2-archive:hover { color: #f0b878; background: rgba(217, 130, 43, 0.12); }
+.attn2-archive:disabled { color: #6b7280; cursor: default; background: none; }
 /* highlight a deep-linked target row (요청 상세 → 액티비티) briefly-persistent */
 .row-focus > td { background: rgba(59, 130, 246, 0.16); }
 .row-focus > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }

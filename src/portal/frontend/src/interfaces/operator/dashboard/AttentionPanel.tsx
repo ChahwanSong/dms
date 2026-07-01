@@ -354,7 +354,7 @@ function dKey(d: DismissedItem): string {
 
 function DismissedList({
   rows, dir, onToggleSort, selected, onToggleSel, onToggleSelAll, onClearSel,
-  onUndismiss, onUndismissAll, onPurge, onAck, onDelete, onResolve, busy,
+  onUndismiss, onUndismissAll, onArchive, onAck, onDelete, onResolve, busy,
 }: {
   rows: DismissedItem[];
   dir: "desc" | "asc";
@@ -365,7 +365,7 @@ function DismissedList({
   onClearSel: () => void;
   onUndismiss: (fingerprints: string[]) => void;
   onUndismissAll: () => void;
-  onPurge: (fingerprints: string[]) => void;
+  onArchive: (fingerprints: string[]) => void;
   onAck: (rows: DismissedItem[]) => void;
   onDelete: (rows: DismissedItem[]) => void;
   onResolve: (rows: DismissedItem[]) => void;
@@ -373,6 +373,19 @@ function DismissedList({
 }) {
   const [purgeAt, setPurgeAt] = useState("");
   if (rows.length === 0) return <p className="muted small">처리 내역이 없습니다.</p>;
+
+  // '정리(archive)': permanently drop the chosen records from the 처리 내역 list while
+  // KEEPING them hidden (they never resurface in 조치 필요/이력). Irreversible from the
+  // UI, so confirm. Used by the per-row + bulk buttons (the time cutoff has its own).
+  const archiveFps = (fingerprints: string[]) => {
+    const fps = fingerprints.filter(Boolean);
+    if (!fps.length) return;
+    if (!window.confirm(
+      `${fps.length}건을 정리할까요?\n` +
+      "처리 내역 목록에서 영구 제거되며, 숨김은 유지되어 조치 필요/이력에 다시 나타나지 않습니다."
+    )) return;
+    onArchive(fps);
+  };
   const allSel = rows.length > 0 && rows.every((d) => selected.has(d.fingerprint));
   const sel = rows.filter((d) => selected.has(d.fingerprint));
   const selAckable = sel.filter((d) => d.kind !== "ack");
@@ -398,7 +411,7 @@ function DismissedList({
       `${fmtTime(purgeAt)} 이전 처리 내역 ${victims.length}건을 정리(목록에서 제거)할까요?\n` +
       "숨김 상태는 유지되어 조치 필요/이력에 다시 나타나지 않습니다."
     )) return;
-    onPurge(victims.map((d) => d.fingerprint));
+    onArchive(victims.map((d) => d.fingerprint));
   };
   return (
     <>
@@ -460,6 +473,9 @@ function DismissedList({
                 </div>
                 <button type="button" className="attn2-hide" title="조치 필요로 복원 (항목이 아직 유효하면 다시 표시됨)"
                   onClick={() => onUndismiss([d.fingerprint])}>복원</button>
+                <button type="button" className="attn2-hide attn2-archive" disabled={busy}
+                  title="정리 — 처리 내역에서 영구 제거 (숨김 유지, 조치 필요에 다시 안 나타남)"
+                  onClick={() => archiveFps([d.fingerprint])}>정리</button>
               </div>
             </div>
           );
@@ -475,6 +491,10 @@ function DismissedList({
           <button className="mini" disabled={busy} onClick={() => onUndismiss(sel.map((d) => d.fingerprint))}
             title="조치 필요로 복원 (아직 유효한 항목은 다시 표시됨)">
             복원 ({sel.length})
+          </button>
+          <button className="mini" disabled={busy} onClick={() => archiveFps(sel.map((d) => d.fingerprint))}
+            title="정리 — 선택 항목을 처리 내역에서 영구 제거 (숨김 유지, 조치 필요에 다시 안 나타남)">
+            정리 ({sel.length})
           </button>
           <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={() => onDelete(selDeletable)}>
             기록 삭제 ({selDeletable.length})
@@ -851,7 +871,7 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
           dir={dismSort} onToggleSort={() => setDismSort((d) => (d === "desc" ? "asc" : "desc"))}
           selected={dismSel} onToggleSel={dismToggleSel} onToggleSelAll={dismToggleSelAll}
           onClearSel={dismClearSel} onUndismiss={undismiss} onUndismissAll={undismissAll}
-          onPurge={archiveDismissals}
+          onArchive={archiveDismissals}
           onAck={dismBulkAck} onDelete={dismBulkDelete} onResolve={dismBulkResolve} busy={busy} />
       </Section>
     </div>
