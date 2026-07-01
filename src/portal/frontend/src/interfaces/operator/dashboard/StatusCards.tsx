@@ -52,10 +52,12 @@ function CtrlChip({
   if (attention == null) return <span className="ctrl-chip ctrl-unknown">{label} —</span>;
   const cls = attention ? `ctrl-${tone}` : "ctrl-ok";
   const glyph = attention ? (tone === "bad" ? "✕" : "▲") : "●";
+  // Concise: normal = glyph + label only (green dot says "fine"); the state word
+  // (켜짐/차단) shows only when it's the attention condition. Full text in tooltip.
   return (
     <span className={`ctrl-chip ${cls}`} title={`${label}: ${attention ? badText : okText}`}>
       <span className="ctrl-glyph" aria-hidden="true">{glyph}</span>
-      {label} {attention ? badText : okText}
+      {label}{attention ? ` ${badText}` : ""}
     </span>
   );
 }
