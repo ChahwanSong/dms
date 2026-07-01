@@ -248,7 +248,7 @@ function Item({ item, act, checked, onToggleSel }: {
           {when && <span className="attn2-when muted small" title={fmtTime(when)}>{fmtAgo(when)}</span>}
           <span className="attn2-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
         </button>
-        <button type="button" className="attn2-hide" title="이 항목 숨김 (해당없음/처리됨 — 숨김 항목에서 해제 가능)"
+        <button type="button" className="attn2-hide" title="이 항목 숨김 (해당없음/처리됨 — 처리 내역에서 복원 가능)"
           onClick={() => act.onDismiss(item)}>숨김</button>
       </div>
       {open && (
@@ -300,7 +300,7 @@ function Group({ items, dir, onToggleSort, onDismissVisible, act, empty, selecte
           </label>
         )}
         <button className="attn-sort" onClick={() => onDismissVisible(items)}
-          title="현재 보이는(필터된) 항목을 모두 숨김 — 숨김 항목에서 해제 가능">
+          title="현재 보이는(필터된) 항목을 모두 숨김 — 처리 내역에서 복원 가능">
           보이는 {items.length}건 숨김
         </button>
         <button className="attn-sort" onClick={onToggleSort}
@@ -379,8 +379,8 @@ function DismissedList({
     });
     if (!victims.length) { window.alert("해당 시각 이전의 처리 내역이 없습니다."); return; }
     if (!window.confirm(
-      `${fmtTime(purgeAt)} 이전 처리 내역 ${victims.length}건을 삭제(정리)할까요?\n` +
-      "(아직 유효한 항목이면 조치 필요에 다시 나타날 수 있습니다)"
+      `${fmtTime(purgeAt)} 이전 처리 내역 ${victims.length}건을 정리(제거)할까요?\n` +
+      "(이미 해소된 항목은 사라지고, 아직 유효한 항목은 조치 필요에 다시 나타납니다)"
     )) return;
     onUndismiss(victims.map((d) => d.fingerprint));
   };
@@ -391,14 +391,16 @@ function DismissedList({
           <input type="checkbox" checked={allSel}
             onChange={() => onToggleSelAll(rows, !allSel)} aria-label="전체 선택" />
         </label>
+        <span className="muted small">오래된 항목 정리:</span>
         <input type="datetime-local" className="dism-purge-at" value={purgeAt}
-          onChange={(e) => setPurgeAt(e.target.value)} title="이 시각까지의 처리 내역 삭제(정리)" />
+          onChange={(e) => setPurgeAt(e.target.value)} title="이 시각 이전의 처리 내역을 정리(제거)" />
         <button className="attn-sort" disabled={!purgeAt || busy} onClick={purgeBefore}
-          title="입력한 시각 이전의 처리 내역을 삭제(정리)">이전 삭제</button>
-        <button className="attn-sort" onClick={onToggleSort} title="처리 시각순 정렬 전환">
+          title="입력한 시각 이전의 처리 내역 기록을 정리(제거) — 이미 해소된 항목 청소용">이전 정리</button>
+        <button className="attn-sort" onClick={onToggleSort} title="리포트 시각순 정렬 전환">
           {dir === "desc" ? "최신순 ↓" : "오래된순 ↑"}
         </button>
-        <button className="attn-sort" onClick={onUndismissAll}>모두 해제</button>
+        <button className="attn-sort" onClick={onUndismissAll}
+          title="처리 내역을 모두 조치 필요로 복원">모두 복원</button>
       </div>
       <div className="attn2-list">
         {rows.map((d) => {
@@ -432,8 +434,8 @@ function DismissedList({
                     </span>
                   )}
                 </div>
-                <button type="button" className="attn2-hide" title="해제 — 다시 조치 필요에 표시"
-                  onClick={() => onUndismiss([d.fingerprint])}>해제</button>
+                <button type="button" className="attn2-hide" title="조치 필요로 복원 (항목이 아직 유효하면 다시 표시됨)"
+                  onClick={() => onUndismiss([d.fingerprint])}>복원</button>
               </div>
             </div>
           );
@@ -446,8 +448,9 @@ function DismissedList({
             <button className="primary mini" disabled={busy} onClick={() => onAck(selAckable)}
               title="확인(처리완료)로 표시">확인 ({selAckable.length})</button>
           )}
-          <button className="mini" disabled={busy} onClick={() => onUndismiss(sel.map((d) => d.fingerprint))}>
-            해제 ({sel.length})
+          <button className="mini" disabled={busy} onClick={() => onUndismiss(sel.map((d) => d.fingerprint))}
+            title="조치 필요로 복원 (아직 유효한 항목은 다시 표시됨)">
+            복원 ({sel.length})
           </button>
           <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={() => onDelete(selDeletable)}>
             기록 삭제 ({selDeletable.length})
@@ -589,14 +592,17 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const dismissVisible = (items: AttentionItem[]) => {
     const p = ackPayload(items, "dismissed");
     if (!p.length) return;
-    if (!window.confirm(`보이는 ${p.length}건을 숨길까요? (처리 내역에서 언제든 해제 가능)`)) return;
+    if (!window.confirm(`보이는 ${p.length}건을 숨길까요? (처리 내역에서 언제든 복원 가능)`)) return;
     run(() => operatorApi.dashboard.dismissAttention(p));
   };
   const undismiss = (fingerprints: string[]) =>
     run(() => operatorApi.dashboard.undismissAttention(fingerprints));
   const undismissAll = () => {
     if (!dismissed.length) return;
-    if (!window.confirm(`처리 내역 ${dismissed.length}건을 모두 해제(원위치)할까요?`)) return;
+    if (!window.confirm(
+      `처리 내역 ${dismissed.length}건을 모두 조치 필요로 복원할까요?\n` +
+      "(이미 해소된 항목은 사라지고, 아직 유효한 항목은 다시 표시됩니다)"
+    )) return;
     undismiss(dismissed.map((d) => d.fingerprint));
   };
 
@@ -633,7 +639,7 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const bulkDismiss = async () => {
     const p = ackPayload(selItems, "dismissed");
     if (!p.length) return;
-    if (!window.confirm(`선택 ${p.length}건을 숨길까요? (처리 내역에서 언제든 해제 가능)`)) return;
+    if (!window.confirm(`선택 ${p.length}건을 숨길까요? (처리 내역에서 언제든 복원 가능)`)) return;
     if (await run(() => operatorApi.dashboard.dismissAttention(p))) clearSel();
   };
   const bulkDelete = async () => {
