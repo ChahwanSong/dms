@@ -47,9 +47,12 @@ export default function OperatorApp({
   onLogout: () => void;
 }) {
   const [section, setSection] = useState<Section>("dashboard");
-  // Parent nav items with children start COLLAPSED; clicking the parent both
-  // navigates to it and toggles its sub-items (조치 필요 · 액티비티) open/closed.
-  const [expanded, setExpanded] = useState<Set<Section>>(new Set());
+  // Parent nav items with children start EXPANDED (sub-items 조치 필요 · 액티비티
+  // visible by default); clicking the parent navigates to it AND toggles the
+  // sub-items open/closed, so it can still be collapsed.
+  const [expanded, setExpanded] = useState<Set<Section>>(
+    () => new Set(NAV.filter((n) => n.children).map((n) => n.key)),
+  );
   // deep-link target: which specific item the destination view should focus/open.
   const [focus, setFocus] = useState<FocusTarget | null>(null);
 
