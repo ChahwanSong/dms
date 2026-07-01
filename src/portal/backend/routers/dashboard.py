@@ -785,6 +785,33 @@ def dashboard_router(settings: Settings) -> APIRouter:
         )
         return {"requests": items, "truncated": len(items) >= limit}
 
+    @router.get("/requests/{request_id}")
+    async def request_detail(
+        request_id: str,
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # Full lifecycle detail for one request (액티비티 행 펼침): request + plan +
+        # results (terminal outcome/reason) + state transition history. Heavy nested
+        # fields are compacted (same as the attention list) so a verbose preflight/
+        # verification blob doesn't bloat the row.
+        try:
+            detail = await dms.get_request(request_id, actor=_actor(user, settings))
+        except DmsApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+        def _compact_row(row: Any) -> Any:
+            if not isinstance(row, dict):
+                return row
+            return {k: _compact_value(v) for k, v in row.items()}
+
+        return {
+            "request": _compact_row(detail.get("request")),
+            "plan": _compact_row(detail.get("plan")),
+            "results": [_compact_row(r) for r in (detail.get("results") or [])],
+            "transitions": detail.get("transitions") or [],
+        }
+
     @router.get("/volcano")
     async def volcano(
         dms: DmsClient = Depends(get_dms_client),

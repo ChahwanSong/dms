@@ -463,6 +463,20 @@ export interface RequestActivityResp {
   requests: RequestActivity[];
   truncated: boolean;
 }
+// full lifecycle detail for one request (activity row expand).
+export interface RequestTransition {
+  from_state?: string | null;
+  to_state?: string | null;
+  reason?: string | null;
+  actor?: string | null;
+  created_at?: string | null;
+}
+export interface RequestDetail {
+  request?: Record<string, unknown> | null;
+  plan?: Record<string, unknown> | null;
+  results?: Record<string, unknown>[] | null;
+  transitions?: RequestTransition[] | null;
+}
 
 export interface AttentionItem {
   issue_type: string;
@@ -1000,6 +1014,8 @@ export const operatorApi = {
       const qs = q.toString();
       return request<RequestActivityResp>(`/api/operator/dashboard/request-activity${qs ? `?${qs}` : ""}`);
     },
+    requestDetail: (requestId: string) =>
+      request<RequestDetail>(`/api/operator/dashboard/requests/${encodeURIComponent(requestId)}`),
     attention: () =>
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
     dismissedAttention: () =>
