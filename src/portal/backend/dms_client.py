@@ -367,6 +367,37 @@ class DmsClient:
             "GET", f"{_OPS_BASE}/action-required", actor=actor
         )
 
+    # --- action-required server-side ACK (record-preserving, cross-client) ---
+    # '확인(처리완료)' is a real close-out: DMS records the ack (by fingerprint) and
+    # then excludes the item from action_required() for ALL clients — the record is
+    # preserved. ('숨김' stays a portal-local view preference and never reaches DMS.)
+
+    async def ack_action_required(
+        self, items: list[dict[str, Any]], *, actor: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"{_OPS_BASE}/action-required:ack",
+            actor=actor,
+            json={"items": items},
+        )
+
+    async def unack_action_required(
+        self, fingerprints: list[str], *, actor: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"{_OPS_BASE}/action-required:unack",
+            actor=actor,
+            json={"fingerprints": fingerprints},
+        )
+
+    async def list_action_acks(self, *, actor: str) -> list[dict[str, Any]]:
+        # Server-side acks: [{fingerprint, issue_type, reason, acked_by, acked_at}].
+        return await self._request(
+            "GET", f"{_OPS_BASE}/action-required/acks", actor=actor
+        )
+
     async def get_volcano_status(self, *, actor: str) -> dict[str, Any]:
         return await self._request("GET", f"{_OPS_BASE}/volcano", actor=actor)
 

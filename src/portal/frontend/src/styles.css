@@ -1125,6 +1125,11 @@ textarea.json {
 .attn-chip.dom.on { border-color: var(--accent); color: #93c5fd; }
 .attn-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 0.15rem; }
 
+/* 확인(ack, 전체 반영) vs 숨김(포탈 한정) 의미 안내 */
+.attn-legend { margin: -0.2rem 0 0.6rem; line-height: 1.5; }
+.attn-legend-ack { color: #7ee2b8; font-weight: 700; }
+.attn-legend-hide { color: #c7ccd4; font-weight: 700; }
+
 /* action-required item cards (조치 필요 패널) */
 .attn2-list { display: flex; flex-direction: column; gap: 0.5rem; max-width: 920px; margin-top: 0.5rem; }
 .attn2 { border: 1px solid var(--border); border-left-width: 3px; border-radius: 10px; background: rgba(255, 255, 255, 0.015); overflow: hidden; }

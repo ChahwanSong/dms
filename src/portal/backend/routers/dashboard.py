@@ -677,17 +677,80 @@ def dashboard_router(settings: Settings) -> APIRouter:
 
     @router.get("/attention/dismissed")
     async def attention_dismissed(
+        dms: DmsClient = Depends(get_dms_client),
         db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> list[dict[str, Any]]:
-        return await db.list_dismissals()
+        # 처리 내역 = portal-local rows (숨김 + rich 확인 mirrors) MERGED with the
+        # DMS server-side ack list, so an ack is always reflected here — even one made
+        # by another client (or after the portal DB was reset). The portal rows are the
+        # rich source; DMS acks not tracked locally are synthesized as minimal rows.
+        rows: list[dict[str, Any]] = []
+        tracked: set[str] = set()
+        if db.configured:
+            rows = await db.list_dismissals()  # non-archived, rich
+            tracked = await db.dismissed_fingerprints()  # ALL (incl archived) → skip
+        try:
+            acks = await dms.list_action_acks(actor=_actor(user, settings))
+        except DmsApiError:
+            acks = []  # DMS unreachable/not-configured → show just the portal rows
+        ack_fps = {a.get("fingerprint") for a in acks}
+        # in_dms tells the UI whether a '확인' is reflected server-side (all clients)
+        # or is a legacy portal-only ack from before the server-side wiring.
+        for r in rows:
+            if r.get("kind") == "ack":
+                r["in_dms"] = r.get("fingerprint") in ack_fps
+        extra = [
+            {
+                "fingerprint": a.get("fingerprint"),
+                "issue_type": a.get("issue_type"),
+                "label": None,
+                "reason": a.get("reason"),
+                "kind": "ack",
+                "job_id": None,
+                "request_id": None,
+                "status": None,
+                "item_at": a.get("acked_at"),
+                "dismissed_by": a.get("acked_by"),
+                "dismissed_at": a.get("acked_at"),
+                "in_dms": True,
+                "source": "dms",
+            }
+            for a in acks
+            if a.get("fingerprint") and a["fingerprint"] not in tracked
+        ]
+        return rows + extra
 
     @router.post("/attention/dismiss")
     async def attention_dismiss(
         body: DismissIn,
+        dms: DmsClient = Depends(get_dms_client),
         db: Database = Depends(get_db),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         items = [i for i in body.items if i.get("fingerprint")]
+        # '확인(ack)' is a real, cross-client close-out → record it server-side in DMS
+        # (record-preserving; action_required() then excludes it for every client).
+        # '숨김(dismissed)' stays a portal-local view preference and never reaches DMS.
+        acks = [i for i in items if i.get("kind") == "ack"]
+        if acks:
+            try:
+                await dms.ack_action_required(
+                    [
+                        {
+                            "fingerprint": i["fingerprint"],
+                            "issue_type": i.get("issue_type"),
+                            "reason": i.get("reason"),
+                        }
+                        for i in acks
+                    ],
+                    actor=_actor(user, settings),
+                )
+            except DmsApiError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code, detail=exc.detail
+                ) from exc
+        # Portal mirror: rich 처리 내역 display + hides 숨김 items in THIS portal.
         n = await db.add_dismissals(
             items, dismissed_by=str(user.get("username") or "operator")
         )
@@ -696,9 +759,21 @@ def dashboard_router(settings: Settings) -> APIRouter:
     @router.post("/attention/undismiss")
     async def attention_undismiss(
         body: FingerprintsIn,
+        dms: DmsClient = Depends(get_dms_client),
         db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
-        n = await db.remove_dismissals([f for f in body.fingerprints if f])
+        # 복원: un-ack in DMS (a no-op for fingerprints that were only 숨김/never acked)
+        # AND drop the portal mirror, so an acked item reappears for all clients.
+        fps = [f for f in body.fingerprints if f]
+        if fps:
+            try:
+                await dms.unack_action_required(fps, actor=_actor(user, settings))
+            except DmsApiError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code, detail=exc.detail
+                ) from exc
+        n = await db.remove_dismissals(fps)
         return {"undismissed": n}
 
     @router.post("/attention/archive")
@@ -708,8 +783,12 @@ def dashboard_router(settings: Settings) -> APIRouter:
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         # '이전 정리': archive (keep hidden, drop from 처리 내역) — does NOT un-hide, so
-        # terminated items don't resurface in 조치 필요/과거 이력.
-        n = await db.archive_dismissals([f for f in body.fingerprints if f])
+        # terminated items don't resurface in 조치 필요/과거 이력, and a server-side ack
+        # stays in effect (we intentionally do NOT un-ack here).
+        n = await db.archive_dismissals(
+            [f for f in body.fingerprints if f],
+            archived_by=str(user.get("username") or "operator"),
+        )
         return {"archived": n}
 
     @router.post("/requests/{request_id}/resolve")

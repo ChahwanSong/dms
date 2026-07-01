@@ -263,7 +263,7 @@ function Item({ item, act, checked, onToggleSel }: {
           <button type="button" className="attn2-hide attn2-detail-link" title={target.label}
             onClick={goDetail}>상세 →</button>
         )}
-        <button type="button" className="attn2-hide" title="이 항목 숨김 (해당없음/처리됨 — 처리 내역에서 복원 가능)"
+        <button type="button" className="attn2-hide" title="이 포탈에서만 숨김 (해당없음 — 처리 내역에서 복원 가능). 다른 화면에는 계속 보입니다."
           onClick={() => act.onDismiss(item)}>숨김</button>
       </div>
       {open && (
@@ -280,9 +280,9 @@ function Item({ item, act, checked, onToggleSel }: {
               <button className="mini danger" onClick={() => act.onDelete(item)}>기록 삭제</button>
             )}
             <button className={needsManualAck(item) ? "mini primary" : "mini"} onClick={() => act.onAck(item)}
-              title="운영자가 확인·처리함 (예: 수동 정리 완료) — 처리 내역에 기록">확인(처리완료)</button>
+              title="운영자가 확인·처리 완료 — DMS에 기록되어 모든 화면의 '조치 필요'에서 제외됩니다 (기록은 보존)">확인(처리완료)</button>
             <button className="mini ghost" onClick={() => act.onDismiss(item)}
-              title="해당없음/무시 — 처리 내역에 숨김으로 기록">숨김</button>
+              title="이 포탈에서만 숨김 (해당없음/무시) — 처리 내역에서 복원 가능. 다른 화면에는 계속 보입니다.">숨김</button>
           </div>
         </div>
       )}
@@ -432,7 +432,15 @@ function DismissedList({
                 <div className="attn2-row dismissed">
                   <span className="attn2-main">
                     <span className="attn2-head">
-                      <span className={`chip ${isAck ? "tone-ok" : "tone-low"}`}>{isAck ? "확인됨" : "숨김"}</span>
+                      <span className={`chip ${isAck ? "tone-ok" : "tone-low"}`}
+                        title={
+                          !isAck
+                            ? "이 포탈에서만 숨김 — 다른 화면에는 계속 보입니다. '복원' 시 다시 표시됩니다."
+                            : d.in_dms
+                              ? "DMS에 확인 처리됨 — 모든 화면의 '조치 필요'에서 제외 (기록 보존). '복원' 시 다시 표시됩니다."
+                              : "이 포탈에서 확인된 이전 기록 (DMS 서버 반영 전) — '복원' 후 다시 '확인'하면 전체 화면에 반영됩니다."}>
+                        {!isAck ? "숨김 · 포탈" : d.in_dms ? "확인됨 · 전체" : "확인됨 · 로컬"}
+                      </span>
                       <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
                       <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
                       {ident && <span className="attn2-ident mono">{ident}</span>}
@@ -796,15 +804,20 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
         ))}
       </div>
 
+      <p className="muted small attn-legend">
+        <b className="attn-legend-ack">확인</b> = 처리 완료로 DMS에 반영(모든 화면 공통 · 기록 보존) ·{" "}
+        <b className="attn-legend-hide">숨김</b> = 이 포탈에서만 숨김
+      </p>
+
       {selItems.length > 0 && (
         <div className="bulk-bar">
           <span className="bulk-count">{selItems.length}개 선택</span>
           <button className="primary mini" disabled={busy} onClick={bulkAck}
-            title="운영자가 확인·처리함 (수동 정리 완료 등) — 처리 내역에 기록">
+            title="확인·처리 완료 — DMS에 반영되어 모든 화면의 '조치 필요'에서 제외 (기록 보존)">
             확인 ({selItems.length})
           </button>
           <button className="mini" disabled={busy} onClick={bulkDismiss}
-            title="해당없음/무시 — 처리 내역에 숨김으로 기록">
+            title="이 포탈에서만 숨김 (해당없음/무시) — 처리 내역에서 복원 가능">
             숨김 ({selItems.length})
           </button>
           <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={bulkDelete}>

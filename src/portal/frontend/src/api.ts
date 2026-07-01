@@ -474,6 +474,9 @@ export interface DismissedItem {
   reason?: string;
   // "ack" = 운영자가 확인·수동 처리함, "dismissed" = 해당없음/숨김
   kind?: "ack" | "dismissed";
+  // for an ack: whether it's reflected in DMS server-side (all clients) or is a
+  // legacy portal-only ack from before the server-side wiring.
+  in_dms?: boolean;
   // captured at dismiss time so a hidden item can still be acted on from the list
   job_id?: string | null;
   request_id?: string | null;

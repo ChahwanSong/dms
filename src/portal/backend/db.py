@@ -971,18 +971,26 @@ class Database:
             )
             return await cur.fetchall()
 
-    async def archive_dismissals(self, fingerprints: list[str]) -> int:
+    async def archive_dismissals(
+        self, fingerprints: list[str], *, archived_by: str = "operator"
+    ) -> int:
         """'이전 정리': flag records archived — they stay in dismissed_fingerprints
-        (so the item never resurfaces in 조치 필요/이력) but leave the 처리 내역 list."""
+        (so the item never resurfaces in 조치 필요/이력) but leave the 처리 내역 list.
+        Upserts an archived stub for a fingerprint with no local row (e.g. a DMS
+        server-side ack surfaced by the merge but never mirrored here), so archiving
+        such a synthesized row sticks instead of reappearing on the next poll."""
         if not fingerprints:
             return 0
         async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "UPDATE attention_dismissals SET archived = true "
-                "WHERE fingerprint = ANY(%s)",
-                (fingerprints,),
-            )
-            return cur.rowcount
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO attention_dismissals "
+                    "(fingerprint, kind, archived, dismissed_by) "
+                    "VALUES (%s,'ack',true,%s) "
+                    "ON CONFLICT (fingerprint) DO UPDATE SET archived = true",
+                    [(f, archived_by) for f in fingerprints],
+                )
+        return len(fingerprints)
 
     async def add_dismissals(
         self, items: list[dict[str, Any]], dismissed_by: str
