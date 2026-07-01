@@ -74,7 +74,7 @@ function RequestDetailView({ d }: { d: RequestDetail }) {
   const results = d.results || [];
   const transitions = d.transitions || [];
   return (
-    <div className="req-detail">
+    <div className="reqa-detail">
       <dl className="spec-grid">
         <Kv label="요청 ID" v={req.request_id} mono />
         <Kv label="작업" v={req.operation} />
@@ -92,13 +92,13 @@ function RequestDetailView({ d }: { d: RequestDetail }) {
       </dl>
 
       {results.length > 0 && (
-        <div className="req-block">
-          <div className="req-block-h">결과</div>
+        <div className="reqa-block">
+          <div className="reqa-block-h">결과</div>
           {results.map((raw, i) => {
             const r = asRec(raw);
             const vs = asRec(r.verification_summary);
             return (
-              <div key={i} className="req-result-line small">
+              <div key={i} className="reqa-result small">
                 <b className={statusClass(str(r.terminal_status) || "")}>{str(r.terminal_status) || "—"}</b>
                 {str(r.message) && <span className="muted"> · {str(r.message)}</span>}
                 {str(vs.reason) && <span className="muted"> · 사유: {str(vs.reason)}</span>}
@@ -110,16 +110,16 @@ function RequestDetailView({ d }: { d: RequestDetail }) {
       )}
 
       {transitions.length > 0 && (
-        <div className="req-block">
-          <div className="req-block-h">상태 변화 <span className="muted small">({transitions.length})</span></div>
-          <ul className="req-tl">
+        <div className="reqa-block">
+          <div className="reqa-block-h">상태 변화 <span className="muted small">({transitions.length})</span></div>
+          <ul className="reqa-tl">
             {transitions.slice(-15).map((t, i) => (
               <li key={i}>
-                <span className="req-tl-state mono small">
+                <span className="reqa-tl-state mono small">
                   {t.from_state || "·"} → <b className={statusClass(t.to_state || "")}>{t.to_state}</b>
                 </span>
-                {t.reason && <span className="muted small req-tl-reason">{t.reason}</span>}
-                <span className="muted small req-tl-t" title={fmtTime(t.created_at || undefined)}>
+                {t.reason && <span className="muted small reqa-tl-reason">{t.reason}</span>}
+                <span className="muted small reqa-tl-t" title={fmtTime(t.created_at || undefined)}>
                   {fmtAgo(t.created_at || undefined)}{t.actor ? ` · ${t.actor}` : ""}
                 </span>
               </li>
@@ -226,10 +226,10 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
             return (
               <Fragment key={r.request_id}>
                 <tr ref={focused ? focusRef : undefined}
-                  className={`req-row${focused ? " row-focus" : ""}${isOpen ? " req-open" : ""}`}
+                  className={`reqa-row${focused ? " row-focus" : ""}${isOpen ? " reqa-open" : ""}`}
                   onClick={() => toggle(r.request_id)}>
                   <td data-label="종류">
-                    <span className="req-caret" aria-hidden>{isOpen ? "▾" : "▸"}</span>
+                    <span className="reqa-caret" aria-hidden>{isOpen ? "▾" : "▸"}</span>
                     <span className="mono small">{r.operation}</span>
                     {r.resource_kind && (
                       <span className="muted small"> · {RKIND_LABEL[r.resource_kind] || r.resource_kind}</span>

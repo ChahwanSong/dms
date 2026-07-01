@@ -1418,20 +1418,25 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
 .wrun-attn-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
 .wrun-attn-list li { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; font-size: 0.82rem; padding: 0.15rem 0.2rem; }
 
-/* ---- 요청(전체) 행 펼침 상세 ---- */
-.req-row { cursor: pointer; }
-.req-row:hover > td { background: rgba(255, 255, 255, 0.03); }
-.req-row.req-open > td { background: rgba(59, 130, 246, 0.06); }
-.req-caret { display: inline-block; width: 1em; color: #9aa4b2; font-size: 0.72rem; }
-.req-detail { padding: 0.5rem 0.2rem 0.7rem; display: flex; flex-direction: column; gap: 0.7rem; }
-.req-block-h { font-size: 0.82rem; font-weight: 600; color: #cdd5e0; margin-bottom: 0.3rem; }
-.req-result-line { line-height: 1.6; }
-.req-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem;
-  border-left: 2px solid var(--border); padding-left: 0.7rem; }
-.req-tl li { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
-.req-tl-state { flex: 0 0 auto; min-width: 15rem; }
-.req-tl-reason { flex: 1 1 auto; }
-.req-tl-t { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
+/* ---- 요청(전체) 행 펼침 상세 (reqa-* : .req-* 백업/스캔 편집기 클래스와 충돌 회피) ---- */
+.reqa-row { cursor: pointer; }
+.reqa-row:hover > td { background: rgba(255, 255, 255, 0.03); }
+.reqa-row.reqa-open > td { background: rgba(59, 130, 246, 0.06); }
+.reqa-caret { display: inline-block; width: 1em; color: #9aa4b2; font-size: 0.72rem; }
+.reqa-detail { padding: 0.6rem 0.4rem 0.8rem; display: flex; flex-direction: column; gap: 0.9rem; max-width: 1100px; }
+.reqa-block-h { font-size: 0.82rem; font-weight: 600; color: #cdd5e0; margin-bottom: 0.35rem; }
+.reqa-result { line-height: 1.6; }
+.reqa-tl { list-style: none; margin: 0; padding: 0 0 0 0.8rem; display: flex; flex-direction: column;
+  gap: 0.3rem; border-left: 2px solid var(--border); }
+.reqa-tl li { display: grid; grid-template-columns: minmax(12rem, 15rem) 1fr auto; align-items: baseline;
+  gap: 0.5rem 0.9rem; }
+.reqa-tl-state { min-width: 0; }
+.reqa-tl-reason { min-width: 0; overflow-wrap: anywhere; }
+.reqa-tl-t { white-space: nowrap; color: #7b8494; }
+@media (max-width: 720px) {
+  .reqa-tl li { grid-template-columns: 1fr; gap: 0.1rem; }
+  .reqa-tl-t { justify-self: start; }
+}
 
 .metric-cell { display: flex; align-items: center; gap: 0.5rem; }
 .metric-now { white-space: nowrap; font-size: 0.85rem; }

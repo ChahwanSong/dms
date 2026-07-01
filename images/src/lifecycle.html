@@ -1,0 +1,116 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<link rel="stylesheet" href="style.css"></head>
+<body><div class="canvas">
+
+  <div class="title">DMS 요청 라이프사이클</div>
+  <div class="subtitle">request → plan → run → result · 상태(DB)가 진실의 원천이며, 모든 전이는 state_transitions 에 기록된다</div>
+  <div class="rule"></div>
+
+  <!-- LANE 1: API -->
+  <div class="lane">
+    <div class="lane-label">
+      <div class="ln">① API</div>
+      <div class="ls">dms api · 요청 접수</div>
+    </div>
+    <div class="lane-body">
+      <div class="flow">
+        <div class="box blue"><div class="k">RECEIVED</div><div class="d">요청 수신</div></div>
+        <span class="arr">→</span>
+        <div class="box blue"><div class="k">PERSISTED</div><div class="d">영속화 · commit_order 부여</div></div>
+        <span class="note" style="margin-left:16px">↳ 인증 · 유지보수 게이트 · 인가 통과 후 영속화</span>
+      </div>
+      <div class="branch">
+        <span class="lead">└▶</span>
+        <div class="box red"><div class="k">AUTHENTICATION_REJECTED</div><div class="d">인증 실패</div></div>
+        
+        <div class="box red"><div class="k">AUTHORIZATION_FAILED</div><div class="d">인가 실패</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="down tight rail">↓</div>
+
+  <!-- LANE 2: Planner -->
+  <div class="lane">
+    <div class="lane-label">
+      <div class="ln">② Planner</div>
+      <div class="ls">요청 → 플랜</div>
+    </div>
+    <div class="lane-body">
+      <div class="flow">
+        <div class="box purple"><div class="k">PLANNING</div><div class="d">검증 게이트 (fail-closed)</div></div>
+        <span class="arr">→</span>
+        <div class="box purple"><div class="k">PLANNED</div><div class="d">플랜 생성 · RM / DM 역할 지정</div></div>
+      </div>
+      <div class="branch">
+        <span class="lead">└▶</span>
+        <div class="box red"><div class="k">REJECTED</div><div class="d">유효성 · 안전성 거부</div></div>
+        
+        <div class="box red"><div class="k">CONFLICT</div><div class="d">동시성 충돌 (같은 리소스에 미종료 요청)</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="down tight rail">↓</div>
+
+  <!-- LANE 3: Worker claim -->
+  <div class="lane">
+    <div class="lane-label">
+      <div class="ln">③ Worker</div>
+      <div class="ls">점유 · 리스 (claim)</div>
+    </div>
+    <div class="lane-body">
+      <div class="flow">
+        <div class="box teal"><div class="k">CLAIMED</div><div class="d">CAS 점유 · lease_expires_at</div></div>
+        <span class="arr">→</span>
+        <div class="box teal"><div class="k">RUNNING</div><div class="d">실행 시작 · 하트비트로 리스 갱신</div></div>
+      </div>
+      <div class="branch">
+        <span class="lead amber">└▶</span>
+        <div class="box amber"><div class="k">STALE_CLAIM</div><div class="d">리스 만료 → 재점유 가능</div></div>
+        
+        <div class="box amber"><div class="k">RECOVERY_NEEDED</div><div class="d">진행 중 만료 → 복구 대기</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="down tight rail">↓</div>
+
+  <!-- LANE 4: Worker apply -->
+  <div class="lane">
+    <div class="lane-label">
+      <div class="ln">④ Worker</div>
+      <div class="ls">적용 · 검증 (apply)</div>
+    </div>
+    <div class="lane-body">
+      <div class="flow">
+        <div class="box teal"><div class="k">APPLYING</div><div class="d">백엔드 호출 전 커밋</div></div>
+        <span class="arr">→</span>
+        <div class="box teal"><div class="k">VERIFYING</div><div class="d">결과 검증 · upsert_resource</div></div>
+        <span class="arr green">→</span>
+        <div class="box green lg"><div class="k">SUCCEEDED ✓</div><div class="d">완료 · result 기록</div></div>
+      </div>
+      <div class="branch">
+        <span class="lead">└▶</span>
+        <div class="box red"><div class="k">BACKEND_APPLY_FAILED</div><div class="d">사이드이펙트 前 실패 (precondition)</div></div>
+        
+        <div class="box red"><div class="k">UNKNOWN_AFTER_SIDE_EFFECT</div><div class="d">이펙트 後 불명 → 수동 복구</div></div>
+        
+        <div class="box red"><div class="k">VERIFICATION_FAILED</div><div class="d">검증 실패</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="leg"><span class="sw blue"></span>API 접수</div>
+    <div class="leg"><span class="sw purple"></span>플래닝</div>
+    <div class="leg"><span class="sw teal"></span>워커 실행</div>
+    <div class="leg"><span class="sw green"></span>성공(터미널)</div>
+    <div class="leg"><span class="sw red"></span>실패 · 거부(터미널)</div>
+    <div class="leg"><span class="sw amber"></span>리스 만료 · 복구</div>
+  </div>
+  <div class="note" style="margin-top:14px">
+    <b>fail-closed 원칙</b> · 불확실하면 거부하거나 수동 복구 플래그. 워커는 매 루프 최상단에서 만료 리스를 회수(mark_stale_runs)하고 전역 킬스위치(scheduling_blocked)를 확인한다.
+  </div>
+
+</div></body></html>
