@@ -354,7 +354,7 @@ function dKey(d: DismissedItem): string {
 
 function DismissedList({
   rows, dir, onToggleSort, selected, onToggleSel, onToggleSelAll, onClearSel,
-  onUndismiss, onUndismissAll, onAck, onDelete, onResolve, busy,
+  onUndismiss, onUndismissAll, onPurge, onAck, onDelete, onResolve, busy,
 }: {
   rows: DismissedItem[];
   dir: "desc" | "asc";
@@ -365,6 +365,7 @@ function DismissedList({
   onClearSel: () => void;
   onUndismiss: (fingerprints: string[]) => void;
   onUndismissAll: () => void;
+  onPurge: (fingerprints: string[]) => void;
   onAck: (rows: DismissedItem[]) => void;
   onDelete: (rows: DismissedItem[]) => void;
   onResolve: (rows: DismissedItem[]) => void;
@@ -394,10 +395,10 @@ function DismissedList({
     });
     if (!victims.length) { window.alert("해당 시각 이전의 처리 내역이 없습니다."); return; }
     if (!window.confirm(
-      `${fmtTime(purgeAt)} 이전 처리 내역 ${victims.length}건을 정리(제거)할까요?\n` +
-      "(이미 해소된 항목은 사라지고, 아직 유효한 항목은 조치 필요에 다시 나타납니다)"
+      `${fmtTime(purgeAt)} 이전 처리 내역 ${victims.length}건을 정리(목록에서 제거)할까요?\n` +
+      "숨김 상태는 유지되어 조치 필요/이력에 다시 나타나지 않습니다."
     )) return;
-    onUndismiss(victims.map((d) => d.fingerprint));
+    onPurge(victims.map((d) => d.fingerprint));
   };
   return (
     <>
@@ -612,6 +613,9 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   };
   const undismiss = (fingerprints: string[]) =>
     run(() => operatorApi.dashboard.undismissAttention(fingerprints));
+  // '이전 정리': archive (keep hidden, drop from 처리 내역) — not un-hide.
+  const archiveDismissals = (fingerprints: string[]) =>
+    run(() => operatorApi.dashboard.archiveAttention(fingerprints));
   const undismissAll = () => {
     if (!dismissed.length) return;
     if (!window.confirm(
@@ -834,6 +838,7 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
           dir={dismSort} onToggleSort={() => setDismSort((d) => (d === "desc" ? "asc" : "desc"))}
           selected={dismSel} onToggleSel={dismToggleSel} onToggleSelAll={dismToggleSelAll}
           onClearSel={dismClearSel} onUndismiss={undismiss} onUndismissAll={undismissAll}
+          onPurge={archiveDismissals}
           onAck={dismBulkAck} onDelete={dismBulkDelete} onResolve={dismBulkResolve} busy={busy} />
       </Section>
     </div>

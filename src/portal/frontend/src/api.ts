@@ -976,6 +976,11 @@ export const operatorApi = {
         method: "POST",
         body: JSON.stringify({ fingerprints }),
       }),
+    archiveAttention: (fingerprints: string[]) =>
+      request<{ archived: number }>("/api/operator/dashboard/attention/archive", {
+        method: "POST",
+        body: JSON.stringify({ fingerprints }),
+      }),
     resolveRequest: (requestId: string, resolution: "abandon" | "succeeded", reason: string) =>
       request<{ request_id: string; resolved_to: string }>(
         `/api/operator/dashboard/requests/${encodeURIComponent(requestId)}/resolve`,

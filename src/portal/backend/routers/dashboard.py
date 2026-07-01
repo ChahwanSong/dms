@@ -701,6 +701,17 @@ def dashboard_router(settings: Settings) -> APIRouter:
         n = await db.remove_dismissals([f for f in body.fingerprints if f])
         return {"undismissed": n}
 
+    @router.post("/attention/archive")
+    async def attention_archive(
+        body: FingerprintsIn,
+        db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # '이전 정리': archive (keep hidden, drop from 처리 내역) — does NOT un-hide, so
+        # terminated items don't resurface in 조치 필요/과거 이력.
+        n = await db.archive_dismissals([f for f in body.fingerprints if f])
+        return {"archived": n}
+
     @router.post("/requests/{request_id}/resolve")
     async def resolve_request(
         request_id: str,

@@ -150,6 +150,7 @@ def _ddl(schema: str) -> list[str]:
             request_id text,
             status text,
             item_at text,
+            archived boolean NOT NULL DEFAULT false,
             dismissed_by text,
             dismissed_at timestamptz NOT NULL DEFAULT now()
         )""",
@@ -168,6 +169,11 @@ def _ddl(schema: str) -> list[str]:
         # the action-required item's OWN report/updated time (captured at dismiss),
         # so 처리 내역 shows the report time like 현재 조치/과거 이력 — not the ack time.
         f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS item_at text",
+        # 'archived' = 정리됨: still hidden from 조치 필요 (stays in dismissed_fingerprints)
+        # but dropped from the 처리 내역 list, so "이전 정리" removes it from view WITHOUT
+        # un-hiding it (un-hiding would resurface terminated jobs in 과거 작업 이력).
+        f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS archived "
+        f"boolean NOT NULL DEFAULT false",
         # migration: the FK was auto-named backup_jobs_batch_id_fkey when the table
         # was first created as backup_jobs (before the backup_jobs->backup_requests
         # rename, which doesn't rename constraints). Rename it to match the table.
@@ -956,11 +962,27 @@ class Database:
             return {r["fingerprint"] for r in await cur.fetchall()}
 
     async def list_dismissals(self) -> list[dict[str, Any]]:
+        # archived('이전 정리'된) rows stay hidden from 조치 필요 but drop out of the
+        # 처리 내역 list.
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT * FROM attention_dismissals ORDER BY dismissed_at DESC"
+                "SELECT * FROM attention_dismissals WHERE archived = false "
+                "ORDER BY dismissed_at DESC"
             )
             return await cur.fetchall()
+
+    async def archive_dismissals(self, fingerprints: list[str]) -> int:
+        """'이전 정리': flag records archived — they stay in dismissed_fingerprints
+        (so the item never resurfaces in 조치 필요/이력) but leave the 처리 내역 list."""
+        if not fingerprints:
+            return 0
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE attention_dismissals SET archived = true "
+                "WHERE fingerprint = ANY(%s)",
+                (fingerprints,),
+            )
+            return cur.rowcount
 
     async def add_dismissals(
         self, items: list[dict[str, Any]], dismissed_by: str
