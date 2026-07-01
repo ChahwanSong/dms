@@ -19,8 +19,11 @@ from ._base import (  # noqa: F401  (underscore helpers are not picked up by imp
 # Request statuses that surface as "action required" (request_attention). Shared by the
 # list (list_action_required) and the cheap COUNT(*) (count_action_required_requests) so
 # the dashboard count can never drift from the listed items.
+# (B) BLOCKED is intentionally NOT here: a Blocked request is a preview awaiting the
+# operator's confirm (ConfirmPending) — a normal pending state tracked in the data
+# backup/scan tabs, not a global action item. The remaining statuses are genuine
+# stuck/failed conditions needing attention.
 ACTION_REQUIRED_REQUEST_STATUSES = (
-    LifecycleState.BLOCKED.value,
     LifecycleState.STALE_CLAIM.value,
     LifecycleState.RECOVERY_NEEDED.value,
     LifecycleState.VERIFICATION_FAILED.value,

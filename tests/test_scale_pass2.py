@@ -253,9 +253,10 @@ def test_action_required_count_matches_list_length(tmp_path):
     repo = service.repository
     now = datetime.now(timezone.utc)
 
-    # request_attention source: one BLOCKED request
+    # request_attention source: one stuck request (RecoveryNeeded). NOTE: Blocked is
+    # intentionally NOT an action item anymore (it's a normal awaiting-confirm state).
     blocked = _seed_request(repo)
-    _set_request_status(repo, blocked, LifecycleState.BLOCKED.value)
+    _set_request_status(repo, blocked, LifecycleState.RECOVERY_NEEDED.value)
 
     # storage-mapping source: one Failed mapping
     from dms.domain import StorageMappingInput
@@ -288,7 +289,7 @@ def test_action_required_count_matches_list_length(tmp_path):
     assert {"request_attention", "storage_mapping_failed", "agent_report_stale"} <= kinds
     assert sum(1 for i in issues if i["issue_type"] == "agent_report_stale") == 1
     # the 5 failed data jobs each surface as one data_management issue (issue_type
-    # prefixed data_job_*); the BLOCKED request_attention issue also carries
+    # prefixed data_job_*); the stuck request_attention issue also carries
     # resource_kind=data_job, so filter on the data-job issue_type prefix instead.
     assert sum(1 for i in issues if i["issue_type"].startswith("data_job")) == 5
 

@@ -26,6 +26,7 @@ from .repositories import (
     DmsRepository,
     ObservabilityRepository,
 )
+from .repositories._base import iso_at
 
 # Filesystem backends run RM/DM node agents (they SSH into the storage node to
 # mutate the filesystem); agentless mappings (k8s CSI / namespace-quota) apply via
@@ -51,7 +52,8 @@ _DATA_JOB_ATTENTION_STATES = (
     DataJobState.PREFLIGHT_FAILED.value,
     DataJobState.FAILED.value,
     DataJobState.TIMED_OUT.value,
-    DataJobState.CANCELLED.value,
+    # Cancelled is a normal, expected outcome (operator/user cancel) — not an action
+    # item — so it is deliberately NOT here (B). The record is still kept as history.
 )
 
 
@@ -64,6 +66,15 @@ class OperationalQueryService:
     # read from agent_node_current, so this threshold decides which CURRENT node reports
     # count as Stale action items.
     agent_report_stale_seconds: int = 300
+    # (A′) Recency window for data-job attention: only jobs updated within this many
+    # seconds surface as action-required. The job ROW is preserved as history — older
+    # terminal jobs just stop alarming, so the alarm stays bounded without deleting
+    # anything. 0 = no window (surface all matching, legacy behavior).
+    data_job_attention_window_seconds: int = 0
+
+    def _data_job_attention_since(self) -> str | None:
+        w = self.data_job_attention_window_seconds
+        return iso_at(-w) if w and w > 0 else None
 
     def action_required(self) -> list[dict]:
         # Order preserved (request → storage → agent → kubernetes → filesystem → data) so
@@ -97,6 +108,7 @@ class OperationalQueryService:
                 self.repository.count_data_jobs(
                     states=_DATA_JOB_ATTENTION_STATES,
                     operations=_DATA_JOB_ATTENTION_OPERATIONS,
+                    updated_since=self._data_job_attention_since(),
                 ),
                 _DATA_JOB_ATTENTION_SCAN_LIMIT,
             )
@@ -734,6 +746,7 @@ class OperationalQueryService:
             limit=_DATA_JOB_ATTENTION_SCAN_LIMIT,
             operations=_DATA_JOB_ATTENTION_OPERATIONS,
             states=_DATA_JOB_ATTENTION_STATES,
+            updated_since=self._data_job_attention_since(),
         ):
             preflight = job.get("preflight_result") or {}
             result_summary = job.get("result_summary") or {}

@@ -64,6 +64,7 @@ def create_app(
             repository,
             observability,
             agent_report_stale_seconds=settings.agent_report_stale_seconds,
+            data_job_attention_window_seconds=settings.data_job_attention_window_seconds,
         ),
         volcano_adapter=volcano_adapter_from_settings(settings),
         identity_lookup=identity_lookup or identity_lookup_from_settings(settings),

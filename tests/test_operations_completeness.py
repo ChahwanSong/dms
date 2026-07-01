@@ -373,6 +373,67 @@ def test_action_required_surfaces_data_jobs_beyond_old_cap(tmp_path):
     assert len(data_job_issues) == 1001
 
 
+_DJ_COLUMNS = [
+    "job_id", "request_id", "operation", "storage_name", "source", "destination",
+    "target", "priority", "selected_tool", "worker_pool", "state", "artifact_uri",
+    "normalized_target", "preflight_result", "volcano_job_ref", "result_summary",
+    "log_uri", "preview_expires_at", "created_at", "updated_at",
+]
+
+
+def _dj_row(job_id, request_id, state, updated_at):
+    return (
+        job_id, request_id, OperationKind.DATA_SYNC.value, "cephfs-a", None, None,
+        "proj", 100, "dsync", "{}", state, None, "{}", "{}", "{}", "{}", None, None,
+        updated_at, updated_at,
+    )
+
+
+def test_data_job_attention_window_and_cancelled_excluded(tmp_path):
+    # (A′) recency window + (B) Cancelled excluded — records preserved, alarm bounded.
+    op = Database(f"sqlite:///{tmp_path / 'op.db'}")
+    obs = Database(f"sqlite:///{tmp_path / 'obs.db'}")
+    migrate_all(op, obs)
+    repo = DmsRepository(op)
+    service = OperationalQueryService(
+        repo, ObservabilityRepository(obs), data_job_attention_window_seconds=3600,
+    )
+    req = _seed_request(repo)
+    now = datetime.now(timezone.utc).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    _bulk_insert(repo, "data_jobs", _DJ_COLUMNS, [
+        _dj_row("job_recent_fail", req, DataJobState.FAILED.value, now),
+        _dj_row("job_old_fail", req, DataJobState.FAILED.value, old),        # outside window
+        _dj_row("job_recent_cancel", req, DataJobState.CANCELLED.value, now),  # B: not an alarm
+    ])
+    issues = service.action_required()
+    dj_ids = {
+        i["job_id"] for i in issues if i.get("resource_kind") == ResourceKind.DATA_JOB.value
+    }
+    assert dj_ids == {"job_recent_fail"}
+    # all 3 rows still exist (history preserved) — only the alarm is filtered
+    assert repo.count_data_jobs() == 3
+    # count stays consistent with the (windowed, cancelled-excluded) list
+    assert service.action_required_count() == len(issues)
+
+
+def test_blocked_request_not_action_required(tmp_path):
+    # (B) Blocked (awaiting confirm) is not a global action item; other stuck states are.
+    service = _query_service(tmp_path)  # window disabled (dataclass default)
+    repo = service.repository
+    blocked = _seed_request(repo)
+    stuck = _seed_request(repo)
+    with repo.database.connect() as conn:
+        conn.execute("UPDATE requests SET status = ? WHERE request_id = ?",
+                     (LifecycleState.BLOCKED.value, blocked))
+        conn.execute("UPDATE requests SET status = ? WHERE request_id = ?",
+                     (LifecycleState.RECOVERY_NEEDED.value, stuck))
+    req_ids = {r.get("request_id") for r in repo.list_action_required()}
+    assert blocked not in req_ids     # Blocked no longer alarms
+    assert stuck in req_ids           # genuine stuck state still does
+    assert repo.get_request(blocked)["status"] == LifecycleState.BLOCKED.value  # record intact
+
+
 def test_action_required_uses_latest_per_node_for_staleness(tmp_path):
     service = _query_service(tmp_path)
     repo = service.repository

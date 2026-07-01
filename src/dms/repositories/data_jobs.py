@@ -261,6 +261,7 @@ class DataJobsMixin:
         state: str | None = None,
         operations: tuple[str, ...] | None = None,
         states: tuple[str, ...] | None = None,
+        updated_since: str | None = None,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         filters: list[str] = []
@@ -290,6 +291,13 @@ class DataJobsMixin:
             placeholders = ",".join(["?"] * len(states))
             filters.append(f"data_jobs.state IN ({placeholders})")
             params.extend(states)
+        # Recency window for the action-required alarm: surface only jobs updated within
+        # the window. The row is NOT deleted (operational history is preserved); older
+        # terminal jobs simply stop alarming. Keeps the alarm bounded without touching
+        # the data_jobs table.
+        if updated_since:
+            filters.append("data_jobs.updated_at >= ?")
+            params.append(updated_since)
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         params.append(limit)
         params.append(offset)
@@ -318,6 +326,7 @@ class DataJobsMixin:
         *,
         states: tuple[str, ...] | None = None,
         operations: tuple[str, ...] | None = None,
+        updated_since: str | None = None,
     ) -> int:
         """Exact COUNT(*) of data jobs, optionally restricted to state/operation sets.
         Uses the SAME predicate as the action-required data-job scan (and the same
@@ -338,6 +347,9 @@ class DataJobsMixin:
             placeholders = ",".join(["?"] * len(operations))
             filters.append(f"data_jobs.operation IN ({placeholders})")
             params.extend(operations)
+        if updated_since:
+            filters.append("data_jobs.updated_at >= ?")
+            params.append(updated_since)
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         with self.database.connect() as connection:
             row = connection.execute(

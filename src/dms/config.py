@@ -45,6 +45,11 @@ class Settings:
     ldap_user_filter: str = "(uid={username})"
     ldap_timeout_seconds: int = 5
     agent_report_stale_seconds: int = 300
+    # (A′) Recency window for data-job action-required: only terminal-failed jobs
+    # updated within this many seconds alarm; older ones stay as history but stop
+    # surfacing, so the alarm is bounded WITHOUT deleting records. Default 7 days;
+    # 0 disables the window (legacy: every matching terminal job alarms forever).
+    data_job_attention_window_seconds: int = 7 * 24 * 3600
     # agent_reports history retention (the `dms retention` loop). The table grows to
     # millions of rows at 100+ nodes reporting ~1/min; node-health reads agent_node_current
     # (current state preserved independently), so pruning old history is safe. The
@@ -198,6 +203,9 @@ class Settings:
             ldap_timeout_seconds=int(os.getenv("DMS_LDAP_TIMEOUT_SECONDS", "5")),
             agent_report_stale_seconds=int(
                 os.getenv("DMS_AGENT_REPORT_STALE_SECONDS", "300")
+            ),
+            data_job_attention_window_seconds=int(
+                os.getenv("DMS_DATA_JOB_ATTENTION_WINDOW_SECONDS", str(7 * 24 * 3600))
             ),
             # Floor the retention window to >= 7 days so it can never be set below the
             # 72h metrics window (which would prune data the sparklines still read).
