@@ -1150,6 +1150,12 @@ textarea.json {
 /* per-row 숨김/해제 button (right of the row) */
 .attn2-hide { flex: none; border: none; border-left: 1px solid var(--border); background: none; color: #9aa4b2; font-size: 0.74rem; padding: 0 0.7rem; cursor: pointer; white-space: nowrap; }
 .attn2-hide:hover { color: #cdd5e0; background: rgba(255, 255, 255, 0.04); }
+/* 상세 → deep-link (accent, distinct from 숨김) */
+.attn2-detail-link { color: #93c5fd; }
+.attn2-detail-link:hover { color: #cfe0ff; background: rgba(59, 130, 246, 0.1); }
+/* highlight a deep-linked target row (요청 상세 → 액티비티) briefly-persistent */
+.row-focus > td { background: rgba(59, 130, 246, 0.16); }
+.row-focus > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 /* dim + lock the panel while a dismiss/resolve/delete request is in flight */
 .attn-busy { opacity: 0.55; pointer-events: none; }
 .attn2-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

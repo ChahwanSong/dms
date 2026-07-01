@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { operatorApi, type AttentionItem, type DismissedItem } from "../../../api";
+import { operatorApi, type AttentionItem, type DismissedItem, type FocusTarget } from "../../../api";
 import { fmtAgo, fmtTime } from "./helpers";
 import Section from "./Section";
 import Loading from "../../../components/Loading";
@@ -14,13 +14,6 @@ const DOMAIN_LABEL: Record<Domain, string> = {
   request: "요청", storage: "스토리지", agent: "에이전트",
   quota: "쿼터", filesystem: "파일시스템", datajob: "데이터 잡", etc: "기타",
 };
-// domain → operator section to jump to (undefined = no portal destination)
-const DOMAIN_NAV: Partial<Record<Domain, { section: string; label: string }>> = {
-  request: { section: "dashboard-activity", label: "액티비티에서 요청 보기" },
-  storage: { section: "storage", label: "스토리지 인벤토리 열기" },
-  datajob: { section: "backup", label: "데이터 백업에서 보기" },
-};
-
 function domainOf(issueType: string): Domain {
   if (issueType === "request_attention") return "request";
   if (issueType.startsWith("data_job")) return "datajob";
@@ -143,6 +136,23 @@ function canDelete(item: AttentionItem): boolean {
   return item.issue_type.startsWith("data_job") && !!str(item.job_id);
 }
 
+// Where an item's "상세" deep-link goes: the owning view + the specific item to
+// focus/open there (storage mapping detail, the request row, etc.).
+function detailTarget(
+  item: AttentionItem,
+): { section: string; focus?: FocusTarget; label: string } | null {
+  const dom = domainOf(item.issue_type);
+  const st = str(item.storage_name);
+  const rid = str(item.request_id);
+  if ((dom === "storage" || dom === "filesystem") && st)
+    return { section: "storage", focus: { kind: "storage", value: st }, label: "스토리지 상세 열기" };
+  if (dom === "request" && rid)
+    return { section: "dashboard-activity", focus: { kind: "request", value: rid }, label: "요청 상세 보기" };
+  if (dom === "datajob")
+    return { section: "backup", label: "데이터 백업에서 보기" };
+  return null;
+}
+
 // ---- detail grid ----
 const FIELD_LABEL: Record<string, string> = {
   storage_name: "스토리지", cluster_name: "클러스터", namespace_name: "네임스페이스",
@@ -203,7 +213,7 @@ function detailRows(item: AttentionItem): ReactNode[] {
 }
 
 interface ItemActions {
-  onNavigate?: (s: string) => void;
+  onNavigate?: (section: string, focus?: FocusTarget) => void;
   onDismiss: (item: AttentionItem) => void;
   onAck: (item: AttentionItem) => void;
   onResolve: (item: AttentionItem) => void;
@@ -225,8 +235,9 @@ function Item({ item, act, checked, onToggleSel }: {
   const sev = (str(item.severity) || "WARN").toUpperCase();
   const ident = identOf(item);
   const when = itemWhen(item);
-  const nav = DOMAIN_NAV[dom];
+  const target = detailTarget(item);
   const fp = item.fingerprint;
+  const goDetail = () => target && act.onNavigate?.(target.section, target.focus);
   return (
     <div className={`attn2 attn2-${sev.toLowerCase()}`}>
       <div className="attn2-rowwrap">
@@ -248,6 +259,10 @@ function Item({ item, act, checked, onToggleSel }: {
           {when && <span className="attn2-when muted small" title={fmtTime(when)}>{fmtAgo(when)}</span>}
           <span className="attn2-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
         </button>
+        {target && act.onNavigate && (
+          <button type="button" className="attn2-hide attn2-detail-link" title={target.label}
+            onClick={goDetail}>상세 →</button>
+        )}
         <button type="button" className="attn2-hide" title="이 항목 숨김 (해당없음/처리됨 — 처리 내역에서 복원 가능)"
           onClick={() => act.onDismiss(item)}>숨김</button>
       </div>
@@ -255,8 +270,8 @@ function Item({ item, act, checked, onToggleSel }: {
         <div className="attn2-detail">
           <dl className="spec-grid">{detailRows(item)}</dl>
           <div className="attn2-cta">
-            {nav && act.onNavigate && (
-              <button className="mini primary" onClick={() => act.onNavigate!(nav.section)}>{nav.label} →</button>
+            {target && act.onNavigate && (
+              <button className="mini primary" onClick={goDetail}>{target.label} →</button>
             )}
             {canResolve(item) && (
               <button className="mini" onClick={() => act.onResolve(item)}>요청 중단(abandon)</button>

@@ -430,7 +430,7 @@ export interface DashRunsResp {
 }
 
 export interface DashRequest {
-  job_id: string; operation: string; storage_name: string; state: string;
+  job_id: string; request_id?: string | null; operation: string; storage_name: string; state: string;
   selected_tool?: string | null; updated_at?: string;
 }
 
@@ -466,6 +466,13 @@ export interface DismissedItem {
   item_at?: string | null;
   dismissed_by?: string;
   dismissed_at?: string;
+}
+
+// Deep-link target: navigate to a section AND focus a specific item (open its
+// detail / highlight it). Used by 조치 필요 "상세" → the owning view.
+export interface FocusTarget {
+  kind: "storage" | "request";
+  value: string;
 }
 
 export interface DismissPayloadItem {

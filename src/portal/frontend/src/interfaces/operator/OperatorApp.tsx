@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { type User } from "../../api";
+import { type User, type FocusTarget } from "../../api";
 import TopBar from "../../components/TopBar";
 import StorageInventory from "./storage/StorageInventory";
 import BackupBatches from "./backup/BackupBatches";
@@ -50,9 +50,21 @@ export default function OperatorApp({
   // Parent nav items with children start COLLAPSED; clicking the parent both
   // navigates to it and toggles its sub-items (조치 필요 · 액티비티) open/closed.
   const [expanded, setExpanded] = useState<Set<Section>>(new Set());
+  // deep-link target: which specific item the destination view should focus/open.
+  const [focus, setFocus] = useState<FocusTarget | null>(null);
+
+  // navigate to a section, optionally asking it to focus a specific item (조치 필요
+  // "상세" → open the storage mapping / highlight the request, etc.). The focus
+  // persists until the next navigation (nav clicks reset it), so the target view
+  // keeps its highlight/open-detail while the operator stays there.
+  function go(target: string, f?: FocusTarget) {
+    setSection(target as Section);
+    setFocus(f ?? null);
+  }
 
   function selectParent(item: NavItem) {
     setSection(item.key);
+    setFocus(null);
     if (item.children) {
       setExpanded((prev) => {
         const next = new Set(prev);
@@ -90,7 +102,7 @@ export default function OperatorApp({
                     <button
                       key={child.key}
                       className={"nav-item nav-subitem" + (section === child.key ? " active" : "")}
-                      onClick={() => setSection(child.key)}
+                      onClick={() => { setSection(child.key); setFocus(null); }}
                     >
                       {child.label}
                     </button>
@@ -100,14 +112,12 @@ export default function OperatorApp({
           })}
         </nav>
         <main className="content content-wide">
-          {section === "dashboard" && (
-            <Dashboard onNavigate={(s) => setSection(s as Section)} />
-          )}
+          {section === "dashboard" && <Dashboard onNavigate={go} />}
           {section === "dashboard-attention" && (
-            <DashboardAttention onNavigate={(s) => setSection(s as Section)} />
+            <DashboardAttention onNavigate={go} />
           )}
-          {section === "dashboard-activity" && <DashboardActivity />}
-          {section === "storage" && <StorageInventory />}
+          {section === "dashboard-activity" && <DashboardActivity focus={focus} />}
+          {section === "storage" && <StorageInventory focus={focus} />}
           {section === "backup" && <BackupBatches />}
           {section === "scan" && <ScanBatches />}
         </main>

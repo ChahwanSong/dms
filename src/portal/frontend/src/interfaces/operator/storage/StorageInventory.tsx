@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ApiError, operatorApi, type StorageMapping } from "../../../api";
+import { ApiError, operatorApi, type StorageMapping, type FocusTarget } from "../../../api";
 import { SanityBadge, ReadinessDots } from "../components/SanityBadge";
 import StorageMappingDetail from "./StorageMappingDetail";
 import StorageMappingForm from "./StorageMappingForm";
@@ -23,7 +23,9 @@ const SORT_GETTERS: Record<string, (m: StorageMapping) => string> = {
 
 const SANITY_OPTIONS = ["Ready", "Degraded", "Unknown", "Failed"];
 
-export default function StorageInventory() {
+export default function StorageInventory({ focus }: {
+  focus?: FocusTarget | null;
+} = {}) {
   const [mappings, setMappings] = useState<StorageMapping[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +42,14 @@ export default function StorageInventory() {
   const [sortKey, setSortKey] = useState<string>("storage_name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [search, setSearch] = useState<string>("");
+
+  // deep-link from 조치 필요 "상세": open the referenced mapping's detail + filter to it.
+  useEffect(() => {
+    if (focus?.kind === "storage" && focus.value) {
+      setDetailName(focus.value);
+      setSearch(focus.value);
+    }
+  }, [focus]);
 
   function toggleSort(key: string) {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
