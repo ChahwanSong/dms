@@ -3,7 +3,14 @@ field passthrough, and sort order for the 조치 필요 panel."""
 
 from __future__ import annotations
 
-from portal.backend.routers.dashboard import _SEVERITY_RANK, _refine_attention
+import json
+
+from portal.backend.routers.dashboard import (
+    _MAX_ATTENTION_FIELD_BYTES,
+    _compact_value,
+    _refine_attention,
+    _SEVERITY_RANK,
+)
 
 
 def test_severity_rank_orders_critical_first():
@@ -61,3 +68,41 @@ def test_terminated_data_jobs_forced_to_info():
     assert by_type["data_job_permission_denied"]["severity"] == "ERROR"
     # still categorized as history (terminated jobs)
     assert all(r["category"] == "history" for r in by_type.values())
+
+
+def test_compact_value_trims_large_nested_but_keeps_scalars():
+    # a huge preflight_result-like blob: per-node nested detail
+    big = {
+        "status": "Failed",
+        "reason": "no ready candidate",
+        "nodes": [{"node": f"w{i}", "detail": "x" * 200} for i in range(50)],
+        "checks": {f"c{i}": {"ok": False, "msg": "y" * 100} for i in range(50)},
+    }
+    assert len(json.dumps(big)) > _MAX_ATTENTION_FIELD_BYTES
+    out = _compact_value(big)
+    # scalar top-level keys are preserved (operator still sees status/reason)
+    assert out["status"] == "Failed"
+    assert out["reason"] == "no ready candidate"
+    # heavy nested fields are dropped, noted in _trimmed
+    assert "nodes" not in out and "checks" not in out
+    assert "nested field(s) omitted" in out["_trimmed"]
+    # small values pass through untouched
+    assert _compact_value({"a": 1}) == {"a": 1}
+    assert _compact_value("short") == "short"
+
+
+def test_refine_attention_shrinks_payload():
+    heavy = {"issue_type": "data_job_preflight_failed", "resource_kind": "data_job",
+             "job_id": "j1", "severity": "ERROR",
+             "preflight_result": {"status": "Failed",
+                                  "nodes": [{"n": i, "d": "z" * 300} for i in range(60)]},
+             "result_summary": {"summary": {"files": 10},
+                                "per_path": [{"p": i, "e": "e" * 300} for i in range(60)]}}
+    before = len(json.dumps(heavy))
+    [out] = _refine_attention([heavy])
+    after = len(json.dumps(out))
+    assert after < before / 10          # ~50x in practice; assert at least 10x
+    # the scalar status is still reachable for the detail view
+    assert out["preflight_result"]["status"] == "Failed"
+    # identity/scalars intact
+    assert out["job_id"] == "j1" and out["fingerprint"] == "data_job_preflight_failed|j1"

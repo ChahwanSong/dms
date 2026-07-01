@@ -8,6 +8,7 @@ section is returned as null + error so one bad panel never breaks the page).
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -516,10 +517,43 @@ def _fingerprint(it: dict[str, Any]) -> str:
     return f"{it.get('issue_type') or ''}|{key}"
 
 
+# Attention items can carry huge nested blobs (a data_job_preflight_failed item
+# embeds the whole preflight_result + result_summary — tens of KB each, ~2.4MB total
+# across the list), yet the panel only ever renders the first ~240 chars of an object
+# field. So we compact any oversized nested field before sending it to the browser:
+# keep the useful scalar top-level keys, drop the heavy nested detail. (Deep inspection
+# uses the dedicated job detail/logs view, not this list.)
+_MAX_ATTENTION_FIELD_BYTES = 600
+
+
+def _compact_value(value: Any) -> Any:
+    try:
+        size = len(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        return value
+    if size <= _MAX_ATTENTION_FIELD_BYTES:
+        return value
+    if isinstance(value, dict):
+        scalars: dict[str, Any] = {}
+        dropped: list[str] = []
+        for k, v in value.items():
+            if v is None or isinstance(v, (str, int, float, bool)):
+                scalars[k] = v[:240] + "…" if isinstance(v, str) and len(v) > 240 else v
+            else:
+                dropped.append(k)
+        if dropped:
+            scalars["_trimmed"] = (
+                f"{len(dropped)} nested field(s) omitted: {', '.join(dropped[:6])}"
+            )
+        if len(json.dumps(scalars, default=str)) <= _MAX_ATTENTION_FIELD_BYTES * 2:
+            return scalars
+    return f"[trimmed {size}B]"
+
+
 def _refine_attention(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Backfill severity and tag each item live/history so the panel can filter and
-    group. CSI false-positive readiness warnings are suppressed upstream in DMS
-    action_required, so no per-mapping cross-check is needed here."""
+    group, and compact oversized nested fields. CSI false-positive readiness warnings
+    are suppressed upstream in DMS action_required, so no per-mapping cross-check here."""
     refined: list[dict[str, Any]] = []
     for it in items or []:
         issue_type = it.get("issue_type") or ""
@@ -528,9 +562,10 @@ def _refine_attention(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             or it.get("severity")
             or _ATTENTION_SEVERITY_DEFAULT.get(issue_type, "WARN")
         )
+        compact = {k: _compact_value(v) for k, v in it.items()}
         refined.append(
             {
-                **it,
+                **compact,
                 "severity": severity,
                 "category": _attention_category(issue_type, it.get("resource_kind")),
                 "fingerprint": _fingerprint(it),
