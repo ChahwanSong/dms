@@ -337,6 +337,40 @@ def operational_query_router() -> APIRouter:
             kwargs["until"] = until_iso
         return services.repository.list_requests(**kwargs)
 
+    @router.get("/request-activity")
+    def request_activity(
+        request: Request,
+        operation: str | None = Query(default=None),
+        resource_kind: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        requester_id: str | None = Query(default=None),
+        since: str | None = Query(default=None),
+        until: str | None = Query(default=None),
+        limit: int = Query(default=200, gt=0, le=2000),
+        offset: int = Query(default=0, ge=0),
+        services: AppServices = Depends(get_services),
+    ) -> list[dict[str, Any]]:
+        """Flexible, read-only request activity — ALL requests (any operation/
+        resource_kind/status), newest-first, paginated. Unlike /requests this does
+        not require requester_id, powering the operator 액티비티 뷰. GROWING history:
+        keep `limit` capped (le 2000) — never fetch-all."""
+        authenticated_actor(request, services)
+        try:
+            since_iso = _normalize_request_date(since, "since", end_of_day=False)
+            until_iso = _normalize_request_date(until, "until", end_of_day=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return services.repository.search_requests(
+            requester_id=requester_id,
+            operation=operation,
+            resource_kind=resource_kind,
+            status=status,
+            since=since_iso,
+            until=until_iso,
+            limit=limit,
+            offset=offset,
+        )
+
     @router.get("/requests/{request_id}")
     def request_history(
         request_id: str,

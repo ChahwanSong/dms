@@ -171,6 +171,52 @@ class RequestsMixin:
             ).fetchall()
         return [self._decode_request(row_to_dict(row)) for row in rows]
 
+    def search_requests(
+        self,
+        *,
+        requester_id: str | None = None,
+        operation: str | None = None,
+        resource_kind: str | None = None,
+        status: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = DEFAULT_REQUEST_LIST_LIMIT,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Flexible request listing for the operator activity view: any subset of
+        filters (all optional), newest-first (commit_order DESC), paginated. Unlike
+        ``list_requests`` this does NOT require a requester_id, so the portal can show
+        ALL request activity classified by operation/resource_kind/status."""
+        where: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("requester_id", requester_id),
+            ("operation", operation),
+            ("resource_kind", resource_kind),
+            ("status", status),
+        ):
+            if value:
+                where.append(f"{column} = ?")
+                params.append(value)
+        if since is not None:
+            where.append("requested_at >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("requested_at < ?")
+            params.append(until)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.extend([limit, offset])
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM requests
+                {clause}
+                ORDER BY commit_order DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._decode_request(row_to_dict(row)) for row in rows]
 
     def list_requests_for_resource(
         self,

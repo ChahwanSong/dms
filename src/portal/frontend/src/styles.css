@@ -1284,6 +1284,9 @@ textarea.json {
 .spec-kv dd.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; overflow-wrap: anywhere; }
 .tone-danger-text { color: var(--error) !important; }
 .tone-warn-text { color: #fbbf24 !important; }
+/* 요청(전체) 대상 경로: 길면 말줄임 (툴팁에 전체) */
+.req-target { max-width: 20rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) { .req-target { max-width: none; white-space: normal; overflow-wrap: anywhere; } }
 
 /* batch list: expand toggle + expanded panel */
 .col-toggle { width: 1.8rem; padding-right: 0; text-align: center; }

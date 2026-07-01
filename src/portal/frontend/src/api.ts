@@ -443,6 +443,23 @@ export interface DashRequestsResp {
   truncated: boolean;
 }
 
+// A full request (any operation/resource_kind) for the 액티비티 요청 뷰.
+export interface RequestActivity {
+  request_id: string;
+  operation: string;
+  resource_kind?: string | null;
+  resource_key?: string | null;
+  status: string;
+  requester_id?: string | null;
+  actor?: string | null;
+  requested_at?: string | null;
+  payload_summary?: Record<string, unknown> | null;
+}
+export interface RequestActivityResp {
+  requests: RequestActivity[];
+  truncated: boolean;
+}
+
 export interface AttentionItem {
   issue_type: string;
   severity?: string;
@@ -931,6 +948,19 @@ export const operatorApi = {
       if (opts?.limit != null) q.set("limit", String(opts.limit));
       const qs = q.toString();
       return request<DashRequestsResp>(`/api/operator/dashboard/requests${qs ? `?${qs}` : ""}`);
+    },
+    requestActivity: (opts?: {
+      operation?: string; resource_kind?: string; status?: string;
+      requester_id?: string; limit?: number;
+    }) => {
+      const q = new URLSearchParams();
+      if (opts?.operation) q.set("operation", opts.operation);
+      if (opts?.resource_kind) q.set("resource_kind", opts.resource_kind);
+      if (opts?.status) q.set("status", opts.status);
+      if (opts?.requester_id) q.set("requester_id", opts.requester_id);
+      if (opts?.limit != null) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      return request<RequestActivityResp>(`/api/operator/dashboard/request-activity${qs ? `?${qs}` : ""}`);
     },
     attention: () =>
       request<AttentionItem[]>("/api/operator/dashboard/attention"),

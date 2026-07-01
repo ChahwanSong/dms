@@ -615,6 +615,28 @@ def dashboard_router(settings: Settings) -> APIRouter:
             )
         return {"jobs": jobs, "total": total, "truncated": truncated}
 
+    @router.get("/request-activity")
+    async def request_activity(
+        operation: str | None = Query(default=None),
+        resource_kind: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        requester_id: str | None = Query(default=None),
+        limit: int = Query(default=_DATA_JOBS_CAP, le=2000),
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # ALL requests (RM + DM) by lifecycle status — the operator 액티비티 뷰.
+        # GROWING history: capped page + truncated flag (no fetch-all / no COUNT).
+        items = await dms.list_request_activity(
+            actor=_actor(user, settings),
+            operation=operation or None,
+            resource_kind=resource_kind or None,
+            status=status or None,
+            requester_id=requester_id or None,
+            limit=limit,
+        )
+        return {"requests": items, "truncated": len(items) >= limit}
+
     @router.get("/volcano")
     async def volcano(
         dms: DmsClient = Depends(get_dms_client),

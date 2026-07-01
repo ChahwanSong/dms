@@ -116,7 +116,9 @@ export default function OperatorApp({
           {section === "dashboard-attention" && (
             <DashboardAttention onNavigate={go} />
           )}
-          {section === "dashboard-activity" && <DashboardActivity focus={focus} />}
+          {section === "dashboard-activity" && (
+            <DashboardActivity focus={focus} onNavigate={go} />
+          )}
           {section === "storage" && <StorageInventory focus={focus} />}
           {section === "backup" && <BackupBatches />}
           {section === "scan" && <ScanBatches />}

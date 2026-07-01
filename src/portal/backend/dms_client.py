@@ -258,6 +258,34 @@ class DmsClient:
             "GET", _DATA_JOBS, actor=actor, params=params
         )
 
+    async def list_request_activity(
+        self,
+        *,
+        actor: str,
+        operation: str | None = None,
+        resource_kind: str | None = None,
+        status: str | None = None,
+        requester_id: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        # ALL requests (any operation/resource_kind/status), newest-first — the
+        # operator 액티비티 뷰. GROWING history (~10k/day): keep `limit` capped.
+        params: dict[str, Any] = {"limit": limit}
+        if offset:
+            params["offset"] = offset
+        if operation:
+            params["operation"] = operation
+        if resource_kind:
+            params["resource_kind"] = resource_kind
+        if status:
+            params["status"] = status
+        if requester_id:
+            params["requester_id"] = requester_id
+        return await self._request(
+            "GET", f"{_OPS_BASE}/request-activity", actor=actor, params=params
+        )
+
     async def get_control_state(self, *, actor: str) -> dict[str, Any]:
         return await self._request(
             "GET", f"{_OPS_BASE}/control-state", actor=actor
