@@ -403,6 +403,75 @@ class ExecutionMixin:
         return count
 
 
+    def close_superseded_preview_runs(
+        self,
+        *,
+        actor: str = "recovery-monitor",
+        plan_id: str | None = None,
+        reason: str | None = None,
+    ) -> int:
+        """Terminalize orphaned DM preview runs.
+
+        A DM data job parks its run in ``Blocked`` right after a successful preview
+        ("waiting for user confirm"; see dm.py). ``Blocked`` is the ONLY run state
+        the DM preview uses — RM never blocks a run — so a run in ``Blocked`` is
+        always a parked preview run. When the job is confirmed (plan → Planned → a
+        NEW run executes) or cancelled, that preview run is superseded but was never
+        terminalized, so it lingers in ``ATTENTION_RUN_STATES`` forever and inflates
+        the "stale/recovery" alarm. Close it (→ Succeeded) so it leaves the attention
+        set; the plan/request are already correct and are NOT touched here.
+
+        - ``plan_id`` set → close that plan's parked preview run immediately (inline
+          on confirm/cancel), regardless of the plan's current status.
+        - ``plan_id`` None → sweep: close every parked preview run whose plan has
+          LEFT ``Blocked`` (plan.status != Blocked, or the plan is gone). A run that
+          is legitimately still awaiting confirm has plan.status == Blocked and is
+          preserved.
+        """
+        now = iso_now()
+        blocked = LifecycleState.BLOCKED.value
+        with self.database.connect() as connection:
+            if plan_id is not None:
+                rows = connection.execute(
+                    "SELECT run_id, plan_id, request_id, state FROM runs "
+                    "WHERE plan_id = ? AND state = ?",
+                    (plan_id, blocked),
+                ).fetchall()
+                default_reason = "preview run superseded (data job confirmed/cancelled)"
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT r.run_id, r.plan_id, r.request_id, r.state
+                    FROM runs r
+                    LEFT JOIN plans p ON p.plan_id = r.plan_id
+                    WHERE r.state = ?
+                      AND (p.status IS NULL OR p.status != ?)
+                    """,
+                    (blocked, blocked),
+                ).fetchall()
+                default_reason = (
+                    "preview run superseded (plan left blocked); closed by recovery sweep"
+                )
+            for row in rows:
+                run = row_to_dict(row)
+                connection.execute(
+                    "UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ?",
+                    (LifecycleState.SUCCEEDED.value, now, run["run_id"]),
+                )
+                self._insert_transition(
+                    connection,
+                    request_id=run["request_id"],
+                    plan_id=run["plan_id"],
+                    run_id=run["run_id"],
+                    from_state=run["state"],
+                    to_state=LifecycleState.SUCCEEDED.value,
+                    reason=reason or default_reason,
+                    actor=actor,
+                    created_at=now,
+                )
+            return len(rows)
+
+
     def complete_result(
         self,
         *,

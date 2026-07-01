@@ -48,6 +48,9 @@ class DMWorkerRuntime:
 
     def run_once(self) -> int:
         self.repository.mark_stale_runs(actor=self.worker_id)
+        # defensive sweep: close orphaned preview runs left parked in Blocked after a
+        # confirm/cancel/preview-expiry that didn't terminalize them (idempotent).
+        self.repository.close_superseded_preview_runs(actor=self.worker_id)
         if self.repository.scheduling_blocked():
             return 0
         plans = self.repository.list_claimable_plans(WorkerRole.DM, limit=1)
@@ -2112,6 +2115,10 @@ def confirm_data_job(
         reason="data job confirmed; common lifecycle leaves blocked state",
         actor=actor,
     )
+    # The preview run parked in Blocked ("waiting for confirm") is now superseded by
+    # the fresh execution run about to be claimed — close it so it doesn't linger in
+    # the attention set forever.
+    repository.close_superseded_preview_runs(actor=actor, plan_id=plan["plan_id"])
 
 
 def cancel_data_job(
@@ -2156,4 +2163,7 @@ def cancel_data_job(
             verification_summary={"backend_side_effect": False},
             actor=actor,
         )
+        # close the parked preview run (Blocked) so a cancelled job doesn't leave a
+        # dangling run in the attention set.
+        repository.close_superseded_preview_runs(actor=actor, plan_id=plan["plan_id"])
 

@@ -181,14 +181,21 @@ def operational_query_router() -> APIRouter:
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
         count = services.repository.mark_stale_runs(actor=actor)
+        # also close orphaned DM preview runs (parked in Blocked, plan moved on) so the
+        # recovery pass keeps the attention set free of dead preview records.
+        superseded = services.repository.close_superseded_preview_runs(actor=actor)
         stale = services.query.stale_or_recovery_runs()
         services.repository.record_control_mutation(
             actor=actor,
             mutation_kind="runs.mark_stale",
-            payload={"count": count},
+            payload={"count": count, "superseded_preview_runs": superseded},
             result_summary={"stale_or_recovery_count": len(stale)},
         )
-        return {"marked": count, "stale_or_recovery_runs": stale}
+        return {
+            "marked": count,
+            "superseded_preview_runs": superseded,
+            "stale_or_recovery_runs": stale,
+        }
 
     @router.get("/work-summary")
     def work_summary(

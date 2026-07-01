@@ -202,6 +202,62 @@ def test_mark_stale_runs_classifies_claimed_and_active_side_effect_states(harnes
     )
 
 
+def _park_blocked_run(repository: DmsRepository, directory_name: str) -> tuple[str, str]:
+    """Create request→plan→claimed run, then park it in Blocked like a DM preview.
+    Returns (plan_id, run_id). update_run_state cascades plan+request to Blocked too."""
+    request_id = _create_filesystem_request(repository, directory_name)
+    Planner(repository).run_once(limit=10)
+    plan = repository.get_plan_by_request(request_id)
+    run_id = repository.claim_plan(
+        plan_id=plan["plan_id"], worker_id="dm-worker",
+        executor_id="dm-worker", lease_seconds=30,
+    )
+    repository.update_run_state(
+        run_id, LifecycleState.BLOCKED,
+        reason="preview succeeded; waiting for user confirm in data_jobs",
+        actor="dm-worker",
+    )
+    return plan["plan_id"], run_id
+
+
+def test_close_superseded_preview_runs_sweep(harness):
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    p1, run_await = _park_blocked_run(repository, "preview-await")
+    p2, run_superseded = _park_blocked_run(repository, "preview-superseded")
+
+    # both plans still Blocked (legitimately awaiting confirm) → sweep closes nothing
+    assert repository.close_superseded_preview_runs(actor="test") == 0
+    runs = {r["run_id"]: r for r in repository.list_runs(limit=10)}
+    assert runs[run_await]["state"] == LifecycleState.BLOCKED.value
+    assert runs[run_superseded]["state"] == LifecycleState.BLOCKED.value
+
+    # confirm p2 → plan leaves Blocked; its preview run is now orphaned
+    repository.update_plan_status(
+        p2, LifecycleState.PLANNED, reason="data job confirmed", actor="test"
+    )
+    # sweep closes ONLY the orphaned run; the still-awaiting one is preserved
+    assert repository.close_superseded_preview_runs(actor="test") == 1
+    runs = {r["run_id"]: r for r in repository.list_runs(limit=10)}
+    assert runs[run_superseded]["state"] == LifecycleState.SUCCEEDED.value
+    assert runs[run_await]["state"] == LifecycleState.BLOCKED.value
+    # idempotent
+    assert repository.close_superseded_preview_runs(actor="test") == 0
+
+
+def test_close_superseded_preview_runs_inline_by_plan(harness):
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    p1, run_id = _park_blocked_run(repository, "inline-close")
+    # inline (plan-scoped, e.g. on confirm/cancel) closes the parked run immediately,
+    # regardless of the plan's current status.
+    assert repository.close_superseded_preview_runs(actor="test", plan_id=p1) == 1
+    runs = {r["run_id"]: r for r in repository.list_runs(limit=10)}
+    assert runs[run_id]["state"] == LifecycleState.SUCCEEDED.value
+    # a Blocked run does NOT get reaped by mark_stale_runs (only active-state leases)
+    assert repository.close_superseded_preview_runs(actor="test", plan_id=p1) == 0
+
+
 def test_operational_queries_and_resume_blockers(harness):
     client: TestClient = harness["client"]
     repository: DmsRepository = harness["repository"]
