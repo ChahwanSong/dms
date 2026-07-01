@@ -177,7 +177,7 @@ export default function VolcanoPanel() {
   }, []);
   if (!v) {
     return (
-      <Section title="Volcano 스케줄러">
+      <Section title="Volcano 스케줄러" defaultOpen>
         <Loading rows={3} />
       </Section>
     );
@@ -200,7 +200,7 @@ export default function VolcanoPanel() {
   const maxTotal = Math.max(1, ...winRows.map((r) => r.total));
 
   return (
-    <Section title="Volcano 스케줄러">
+    <Section title="Volcano 스케줄러" defaultOpen>
       {(v.errors?.queues || v.errors?.jobs || v.errors?.scheduler) && (
         <div className="banner err">
           {["queues", "jobs", "scheduler"]

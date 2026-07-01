@@ -142,13 +142,10 @@ function ClusterMatrix({ cluster, showClusterName }: { cluster: SnmCluster; show
             <thead>
               <tr>
                 <th className="snm-corner">노드 \ 스토리지</th>
-                {cols.map((s, i) => {
+                {cols.map((s) => {
                   const r = storageRatio[s.storage_name];
                   return (
-                    <th key={s.storage_name} className="snm-scol" title={`${s.storage_name} · ${s.backend_type}`}
-                      // left columns paint above right ones so a rotated label that
-                      // overflows right isn't covered by the next cell's opaque bg.
-                      style={{ zIndex: cols.length - i + 5 }}>
+                    <th key={s.storage_name} className="snm-scol" title={`${s.storage_name} · ${s.backend_type}`}>
                       <div className="snm-scol-box">
                         <span className="snm-slabel">{s.storage_name}</span>
                       </div>

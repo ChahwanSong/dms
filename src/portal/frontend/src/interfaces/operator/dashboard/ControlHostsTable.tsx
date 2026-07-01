@@ -27,6 +27,7 @@ export default function ControlHostsTable() {
           ({rows.length}){truncated && <>{" "}<span className="chip tone-warn">일부만 표시</span></>}
         </span>
       }
+      defaultOpen
     >
       <table className="grid">
         <thead>
