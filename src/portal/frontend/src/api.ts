@@ -507,6 +507,37 @@ export interface DismissPayloadItem {
   item_at?: string | null;
 }
 
+// Worker-node × filesystem-storage mount-readiness matrix (CSI excluded).
+export interface SnmCell {
+  status?: string;            // Ready | Missing | Degraded | ...
+  mount_path?: string | null;
+  readable?: boolean | null;
+  writable?: boolean | null;
+  is_mountpoint?: boolean | null;
+  filesystem_type?: string | null;
+  reason?: string | null;
+}
+export interface SnmStorage {
+  storage_name: string;
+  backend_type: string;
+}
+export interface SnmNode {
+  node_name: string;
+  roles: string[];            // ["RM","DM"]
+  freshness?: string | null;  // Fresh | Stale
+  reported_at?: string | null;
+  cells: Record<string, SnmCell>;  // storage_name -> mount status (absent = 미구성)
+}
+export interface SnmCluster {
+  cluster_name: string;
+  storages: SnmStorage[];
+  nodes: SnmNode[];
+}
+export interface StorageNodeMatrix {
+  clusters: SnmCluster[];
+  errors?: { reports?: string | null; mappings?: string | null };
+}
+
 export interface VolcanoStatus {
   queues: { name: string; state?: string; running?: number; pending?: number; inqueue?: number }[];
   jobs: {
@@ -996,6 +1027,8 @@ export const operatorApi = {
       ),
     controlHosts: () =>
       request<ControlHostsResp>("/api/operator/dashboard/control-hosts"),
+    storageNodeMatrix: () =>
+      request<StorageNodeMatrix>("/api/operator/dashboard/storage-node-matrix"),
     volcano: () =>
       request<VolcanoStatus>("/api/operator/dashboard/volcano"),
     volcanoMetrics: () =>

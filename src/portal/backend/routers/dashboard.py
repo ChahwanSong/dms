@@ -8,6 +8,7 @@ section is returned as null + error so one bad panel never breaks the page).
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -152,6 +153,93 @@ def _latest_per_node(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
             r.get("worker_role") or "",
         ),
     )
+
+
+def _storage_node_matrix(
+    reports: list[dict[str, Any]], mappings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Per-cluster (worker node × filesystem storage) mount-readiness matrix.
+
+    Columns = registered FILESYSTEM storages (cephfs/gpfs/wekafs) from the current
+    mappings — CSI/agentless mappings are excluded (they aren't host-mounted). Rows =
+    worker nodes (one per node; RM+DM role-reports collapsed since mounts are
+    host-level — keep the newest report's mounts/freshness). Each cell is that node's
+    probed mount status for that storage (Ready/Missing/…) from agent report `mounts`,
+    or absent (→ '미구성' in the UI) when the node never reported that storage.
+    """
+    # FS storages grouped by cluster (registered mappings only, CSI excluded).
+    by_cluster_storages: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for m in mappings or []:
+        bt = (m.get("backend_template") or {}).get("backend_type") or ""
+        if bt in _FS_BACKENDS:
+            by_cluster_storages[m.get("cluster_name")].append(
+                {"storage_name": m.get("storage_name"), "backend_type": bt}
+            )
+
+    # Collapse role-reports to one entry per (cluster, node): newest report wins for
+    # host-level mounts/freshness; roles are unioned.
+    nodes: dict[tuple, dict[str, Any]] = {}
+    for r in reports or []:
+        key = (r.get("cluster_name"), r.get("node_name"))
+        cur = nodes.get(key)
+        rep = r.get("report") or {}
+        at = r.get("reported_at") or ""
+        if cur is None:
+            cur = {
+                "cluster_name": r.get("cluster_name"),
+                "node_name": r.get("node_name"),
+                "roles": set(),
+                "freshness": r.get("freshness_status"),
+                "reported_at": at,
+                "mounts": rep.get("mounts") or [],
+            }
+            nodes[key] = cur
+        elif at > (cur.get("reported_at") or ""):
+            cur["freshness"] = r.get("freshness_status")
+            cur["reported_at"] = at
+            cur["mounts"] = rep.get("mounts") or []
+        if r.get("worker_role"):
+            cur["roles"].add(r.get("worker_role"))
+
+    clusters: dict[str, dict[str, Any]] = {}
+    for (cluster, _node), nd in nodes.items():
+        storages = by_cluster_storages.get(cluster, [])
+        # skip clusters that have worker nodes but no FS storage to show
+        if not storages:
+            continue
+        slot = clusters.setdefault(
+            cluster,
+            {"cluster_name": cluster, "storages": storages, "nodes": []},
+        )
+        names = {s["storage_name"] for s in storages}
+        cells: dict[str, Any] = {}
+        for mnt in nd["mounts"]:
+            sn = mnt.get("storage_name")
+            if sn in names:
+                cells[sn] = {
+                    "status": mnt.get("status"),
+                    "mount_path": mnt.get("mount_path"),
+                    "readable": mnt.get("readable"),
+                    "writable": mnt.get("writable"),
+                    "is_mountpoint": mnt.get("is_mountpoint"),
+                    "filesystem_type": mnt.get("filesystem_type"),
+                    "reason": mnt.get("reason"),
+                }
+        slot["nodes"].append(
+            {
+                "node_name": nd["node_name"],
+                "roles": sorted(nd["roles"]),
+                "freshness": nd["freshness"],
+                "reported_at": nd["reported_at"],
+                "cells": cells,
+            }
+        )
+
+    out = sorted(clusters.values(), key=lambda c: c["cluster_name"] or "")
+    for c in out:
+        c["storages"].sort(key=lambda s: s["storage_name"] or "")
+        c["nodes"].sort(key=lambda n: n["node_name"] or "")
+    return out
 
 
 def _node_metrics(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -541,6 +629,26 @@ def dashboard_router(settings: Settings) -> APIRouter:
         if freshness:
             latest = [r for r in latest if r.get("freshness_status") == freshness]
         return latest
+
+    @router.get("/storage-node-matrix")
+    async def storage_node_matrix(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # Worker-node × filesystem-storage mount-readiness matrix (CSI excluded),
+        # grouped per cluster. Reads the same latest_per_node agent reports (mounts)
+        # + storage mappings the dashboard already uses — no DMS change.
+        actor = _actor(user, settings)
+        reports, mappings = await asyncio.gather(
+            _section(dms.list_agent_reports(actor=actor, latest_per_node=True)),
+            _section(dms.list_storage_mappings(actor=actor, limit=_STORAGE_LIMIT)),
+        )
+        return {
+            "clusters": _storage_node_matrix(
+                reports["data"] or [], mappings["data"] or []
+            ),
+            "errors": {"reports": reports["error"], "mappings": mappings["error"]},
+        }
 
     @router.get("/node-metrics")
     async def node_metrics(

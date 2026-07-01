@@ -3,6 +3,7 @@ import { operatorApi, type DashboardSummary, type AttentionItem } from "../../..
 import { fmtTime } from "./helpers";
 import StatusCards, { type AttentionCounts } from "./StatusCards";
 import NodesTable from "./NodesTable";
+import StorageNodeMatrix from "./StorageNodeMatrix";
 import ControlHostsTable from "./ControlHostsTable";
 import VolcanoPanel from "./VolcanoPanel";
 
@@ -66,6 +67,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (section: strin
       {error && <div className="banner err">{error}</div>}
       <StatusCards summary={summary} attention={attention} onNavigate={onNavigate} />
       <NodesTable />
+      <StorageNodeMatrix />
       <ControlHostsTable />
       <VolcanoPanel />
     </div>
