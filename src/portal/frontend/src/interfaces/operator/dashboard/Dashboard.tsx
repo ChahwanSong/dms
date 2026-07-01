@@ -66,8 +66,8 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (section: strin
       </div>
       {error && <div className="banner err">{error}</div>}
       <StatusCards summary={summary} attention={attention} onNavigate={onNavigate} />
-      <NodesTable />
       <StorageNodeMatrix />
+      <NodesTable />
       <ControlHostsTable />
       <VolcanoPanel />
     </div>

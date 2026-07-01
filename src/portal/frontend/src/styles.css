@@ -1365,11 +1365,15 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
   padding: 0.3rem 0.7rem; min-width: 200px; max-width: 240px;
   display: flex; align-items: center; gap: 0.4rem; }
 
-/* storage column header: rotated label + ready-ratio footer */
-.snm-scol { width: 40px; min-width: 40px; max-width: 40px; height: 140px; padding: 0; vertical-align: bottom; }
-.snm-scol-box { position: relative; height: 118px; }
-.snm-slabel { position: absolute; left: 50%; bottom: 6px; transform-origin: 0 0; transform: rotate(-50deg);
-  white-space: nowrap; font-size: 0.76rem; color: #cdd5e0; max-width: 172px; overflow: hidden; text-overflow: ellipsis; }
+/* storage column header: rotated label + ready-ratio footer.
+   The label pivots at its BOTTOM-LEFT corner, anchored at the column's horizontal
+   centre just above the ratio footer — so every label rises out of its own column at
+   the same 45° baseline and reads consistently aligned regardless of name length. */
+.snm-scol { width: 38px; min-width: 38px; max-width: 38px; height: 132px; padding: 0; vertical-align: bottom; }
+.snm-scol-box { position: relative; height: 110px; }
+.snm-slabel { position: absolute; left: 50%; bottom: 2px; transform-origin: left bottom;
+  transform: rotate(-45deg); white-space: nowrap; line-height: 1; font-size: 0.75rem; color: #cdd5e0;
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 .snm-sratio { height: 20px; line-height: 20px; text-align: center; font-size: 0.66rem;
   border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 
