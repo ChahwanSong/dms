@@ -765,6 +765,7 @@ def dashboard_router(settings: Settings) -> APIRouter:
 
     @router.get("/request-activity")
     async def request_activity(
+        request: Request,
         operation: str | None = Query(default=None),
         resource_kind: str | None = Query(default=None),
         status: str | None = Query(default=None),
@@ -783,7 +784,21 @@ def dashboard_router(settings: Settings) -> APIRouter:
             requester_id=requester_id or None,
             limit=limit,
         )
-        return {"requests": items, "truncated": len(items) >= limit}
+        # Consistency with 조치 필요: flag requests that were hidden there (dismiss/ack)
+        # so the activity view can hide them too (front-end default-hides, toggle shows).
+        db: Database = request.app.state.db
+        hidden_count = 0
+        if db.configured:
+            hidden_ids = await db.hidden_request_ids()
+            for it in items:
+                it["_hidden"] = bool(it.get("request_id") in hidden_ids)
+                if it["_hidden"]:
+                    hidden_count += 1
+        return {
+            "requests": items,
+            "truncated": len(items) >= limit,
+            "hidden_count": hidden_count,
+        }
 
     @router.get("/requests/{request_id}")
     async def request_detail(

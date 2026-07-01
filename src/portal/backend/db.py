@@ -961,6 +961,19 @@ class Database:
             cur = await conn.execute("SELECT fingerprint FROM attention_dismissals")
             return {r["fingerprint"] for r in await cur.fetchall()}
 
+    async def hidden_request_ids(self) -> set[str]:
+        """request_ids of requests hidden via the 조치 필요 dismiss/ack layer, so the
+        액티비티 요청 목록 can hide the SAME requests too (consistency). Matches ONLY on
+        request_id (captured at dismiss time) — an exact 1:1 with the activity row.
+        Deliberately NOT resource_key: a resource has many lifecycle requests, and the
+        operator dismissed one alert, not the whole request history. Includes archived
+        rows (archived stays hidden from 조치 필요)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT request_id FROM attention_dismissals WHERE request_id IS NOT NULL"
+            )
+            return {r["request_id"] for r in await cur.fetchall()}
+
     async def list_dismissals(self) -> list[dict[str, Any]]:
         # archived('이전 정리'된) rows stay hidden from 조치 필요 but drop out of the
         # 처리 내역 list.

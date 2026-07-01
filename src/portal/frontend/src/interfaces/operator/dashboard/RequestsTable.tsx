@@ -141,6 +141,7 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
   const [rkind, setRkind] = useState("");
   const [status, setStatus] = useState("");
   const [q, setQ] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [details, setDetails] = useState<Record<string, RequestDetail | "loading" | "error">>({});
   const focusRef = useRef<HTMLTableRowElement | null>(null);
@@ -178,6 +179,14 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
     );
   }, [rows, q]);
 
+  // requests hidden via 조치 필요 (dismiss/ack) — default-hidden here too for
+  // consistency, revealed by the toggle. A hidden focus target is always shown.
+  const hiddenInView = filtered.filter((r) => r._hidden).length;
+  const visible = useMemo(
+    () => (showHidden ? filtered : filtered.filter((r) => !r._hidden || r.request_id === focusRequestId)),
+    [filtered, showHidden, focusRequestId],
+  );
+
   // deep-link: scroll to + auto-expand the focused request.
   useEffect(() => {
     if (!focusRequestId) return;
@@ -189,10 +198,10 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequestId, filtered]);
 
-  const stuckCount = filtered.filter((r) => STUCK.has(r.status)).length;
+  const stuckCount = visible.filter((r) => STUCK.has(r.status)).length;
   const badge = (
     <span className="muted small">
-      (표시 {filtered.length})
+      (표시 {visible.length})
       {stuckCount > 0 && <>{" "}<span className="tone-warn-text">· 정체 {stuckCount}</span></>}
       {truncated && <>{" "}<span className="chip tone-warn">일부만 표시</span></>}
     </span>
@@ -209,6 +218,12 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
         </select>
         <input type="search" value={q} onChange={(e) => setQ(e.target.value)}
           placeholder="요청자 / 경로 / ID 검색" />
+        {hiddenInView > 0 && (
+          <button className="attn-sort" onClick={() => setShowHidden((v) => !v)}
+            title="조치 필요에서 숨김/확인한 요청 — 여기서도 기본 가림">
+            {showHidden ? `숨긴 요청 가리기 (${hiddenInView})` : `숨긴 요청 보기 (${hiddenInView})`}
+          </button>
+        )}
         <span className="muted small">행을 클릭하면 상세가 열립니다</span>
       </div>
       {truncated && (
@@ -217,8 +232,8 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
       <table className="grid"><thead><tr>
         <th>종류</th><th>상태</th><th>요청자</th><th>대상</th><th>시각</th><th>조치</th>
       </tr></thead><tbody>
-        {filtered.length === 0 ? <tr><td colSpan={6} className="muted">요청 없음</td></tr> :
-          filtered.map((r) => {
+        {visible.length === 0 ? <tr><td colSpan={6} className="muted">요청 없음</td></tr> :
+          visible.map((r) => {
             const focused = !!focusRequestId && r.request_id === focusRequestId;
             const stuck = STUCK.has(r.status);
             const isOpen = expanded.has(r.request_id);
@@ -226,7 +241,7 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
             return (
               <Fragment key={r.request_id}>
                 <tr ref={focused ? focusRef : undefined}
-                  className={`reqa-row${focused ? " row-focus" : ""}${isOpen ? " reqa-open" : ""}`}
+                  className={`reqa-row${focused ? " row-focus" : ""}${isOpen ? " reqa-open" : ""}${r._hidden ? " reqa-hidden" : ""}`}
                   onClick={() => toggle(r.request_id)}>
                   <td data-label="종류">
                     <span className="reqa-caret" aria-hidden>{isOpen ? "▾" : "▸"}</span>
@@ -234,6 +249,7 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
                     {r.resource_kind && (
                       <span className="muted small"> · {RKIND_LABEL[r.resource_kind] || r.resource_kind}</span>
                     )}
+                    {r._hidden && <span className="chip tone-low reqa-hidden-chip" title="조치 필요에서 숨김/확인됨">숨김</span>}
                   </td>
                   <td data-label="상태"><b className={statusClass(r.status)}>{r.status}</b></td>
                   <td data-label="요청자" className="small">{r.requester_id || "—"}</td>

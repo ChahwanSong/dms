@@ -458,10 +458,13 @@ export interface RequestActivity {
   actor?: string | null;
   requested_at?: string | null;
   payload_summary?: Record<string, unknown> | null;
+  // true if this request was hidden via the 조치 필요 dismiss/ack layer.
+  _hidden?: boolean;
 }
 export interface RequestActivityResp {
   requests: RequestActivity[];
   truncated: boolean;
+  hidden_count?: number;
 }
 // full lifecycle detail for one request (activity row expand).
 export interface RequestTransition {
