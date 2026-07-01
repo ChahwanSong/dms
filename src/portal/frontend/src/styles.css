@@ -1402,6 +1402,22 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
 .snm-sratio.r-bad, .snm-nratio.r-bad { color: #f87171; }
 .snm-sratio.r-none, .snm-nratio.r-none { color: #64748b; }
 
+/* ---- 워커 실행 현황 (runs, 3그룹) ---- */
+.wrun { display: flex; flex-direction: column; gap: 1rem; }
+.wrun-group { }
+.wrun-h { font-size: 0.9rem; font-weight: 600; color: #cdd5e0; margin: 0 0 0.4rem; }
+.wrun-grid { max-width: 1100px; }
+.wrun-op { font-weight: 600; color: #cdd5e0; }
+.wrun-live { white-space: nowrap; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.wrun-live.live-ok { color: #34d399; }
+.wrun-live.live-warn { color: #fbbf24; }
+.wrun-live.live-bad { color: #f87171; }
+.wrun-attn { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.5rem 0.7rem; border: 1px solid rgba(248, 113, 113, 0.3);
+  background: rgba(248, 113, 113, 0.08); border-radius: 8px; margin-bottom: 0.5rem; }
+.wrun-attn-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.wrun-attn-list li { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; font-size: 0.82rem; padding: 0.15rem 0.2rem; }
+
 .metric-cell { display: flex; align-items: center; gap: 0.5rem; }
 .metric-now { white-space: nowrap; font-size: 0.85rem; }
 .spark { display: block; flex: 0 0 auto; border-radius: 3px; background: rgba(255, 255, 255, 0.02); }

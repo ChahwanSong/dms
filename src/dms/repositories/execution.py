@@ -596,21 +596,37 @@ class ExecutionMixin:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
+        # LEFT JOIN plans/requests so attention/stale runs carry the same
+        # operator-meaningful fields as active runs (operation_kind, requester_id,
+        # resource_key, request_status) — a raw ``SELECT * FROM runs`` left these
+        # null, which is why the 스케줄러 활동 panel couldn't say WHAT each run was.
+        select = """
+            SELECT
+                runs.*,
+                plans.status AS plan_status,
+                plans.operation_kind,
+                plans.resource_key,
+                requests.resource_kind,
+                requests.requester_id,
+                requests.status AS request_status
+            FROM runs
+            LEFT JOIN plans ON plans.plan_id = runs.plan_id
+            LEFT JOIN requests ON requests.request_id = runs.request_id
+        """
         with self.database.connect() as connection:
             if states:
                 placeholders = ",".join(["?"] * len(states))
                 rows = connection.execute(
-                    f"""
-                    SELECT * FROM runs
-                    WHERE state IN ({placeholders})
-                    ORDER BY updated_at DESC
+                    f"""{select}
+                    WHERE runs.state IN ({placeholders})
+                    ORDER BY runs.updated_at DESC
                     LIMIT ? OFFSET ?
                     """,
                     (*states, limit, offset),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT * FROM runs ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    f"{select} ORDER BY runs.updated_at DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 ).fetchall()
         return rows_to_dicts(rows)

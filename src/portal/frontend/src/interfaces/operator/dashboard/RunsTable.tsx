@@ -1,43 +1,240 @@
 import { useEffect, useState } from "react";
 import { operatorApi, type RunRow } from "../../../api";
-import { stateCls, RUN_STATE } from "./helpers";
+import { fmtTime } from "./helpers";
 import Section from "./Section";
+import Loading from "../../../components/Loading";
+import InfoHint from "../../../components/InfoHint";
 
-export default function RunsTable({ defaultOpen = false }: { defaultOpen?: boolean }) {
+// "워커 실행 현황" — the run/lease layer of the request→plan→run state machine. It
+// splits three genuinely different things that used to sit in one flat table:
+//   ① 지금 실행 중 (Claimed/Running/Applying/Verifying) — live worker activity
+//   ② 확인 대기   (Blocked)                              — DM preview awaiting confirm (normal)
+//   ③ 정체·복구   (StaleClaim/RecoveryNeeded/…)          — actually stuck → 조치 필요
+// ③ is delegated to the 조치 필요 panel (which carries the resolution actions), so we
+// only summarise + link it here rather than duplicating a raw table.
+
+const CONFIRM_WAIT = "Blocked";
+
+// operation_kind → 친화 라벨 (기술어는 유지). data.* → 데이터, filesystem.* → 파일시스템,
+// kubernetes.namespace_quota.* → 쿼터.
+function opLabel(op?: string): string {
+  if (!op) return "—";
+  if (op.startsWith("data.")) return "데이터";
+  if (op.startsWith("filesystem")) return "파일시스템";
+  if (op.includes("quota")) return "쿼터";
+  if (op.startsWith("identity")) return "아이덴티티";
+  return op;
+}
+function opDetail(op?: string): string {
+  // trailing verb, e.g. filesystem.create → create, data.sync → sync
+  if (!op) return "";
+  const dot = op.lastIndexOf(".");
+  return dot >= 0 ? op.slice(dot + 1) : op;
+}
+
+const STATE_LABEL: Record<string, string> = {
+  Claimed: "할당됨", Running: "실행 중", Applying: "적용 중", Verifying: "검증 중",
+  Blocked: "확인 대기", StaleClaim: "리스 만료", RecoveryNeeded: "복구 필요",
+  UnknownAfterSideEffect: "결과 불명", BackendApplyFailed: "적용 실패",
+};
+
+// elapsed since a start time, compact ("3분"/"2시간"/"1일").
+function ago(iso?: string): string {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return `${s}초`;
+  if (s < 3600) return `${Math.floor(s / 60)}분`;
+  if (s < 86400) return `${Math.floor(s / 3600)}시간`;
+  return `${Math.floor(s / 86400)}일`;
+}
+
+// worker liveness from the run's lease + heartbeat: is the worker still alive and
+// holding this run, or has it gone quiet (lease about to be reclaimed)?
+function liveness(r: RunRow): { cls: string; label: string; title: string } {
+  const hbAge = r.heartbeat_at
+    ? Math.floor((Date.now() - new Date(r.heartbeat_at).getTime()) / 1000)
+    : null;
+  const leaseGone =
+    r.lease_expires_at != null &&
+    new Date(r.lease_expires_at).getTime() < Date.now();
+  const hbTxt = hbAge == null ? "heartbeat 없음" : `heartbeat ${ago(r.heartbeat_at)} 전`;
+  if (leaseGone) return { cls: "live-bad", label: "리스 만료", title: `${hbTxt} · 리스 만료 — 곧 회수` };
+  if (r.lease_expiring_soon) return { cls: "live-warn", label: "리스 임박", title: `${hbTxt} · 리스 곧 만료` };
+  if (hbAge != null && hbAge > 120) return { cls: "live-warn", label: "응답 지연", title: hbTxt };
+  return { cls: "live-ok", label: "정상", title: hbTxt };
+}
+
+// A readable target from the run's resource_key. Data-job keys are verbose
+// (data.<op>:<srcStore>:<srcPath>:<dstStore>:<dstPath>:sha256:<hash>) — collapse them
+// to "src → dst" (or a single path for scan/rm); other keys pass through as-is.
+function target(r: RunRow): string {
+  const k = r.resource_key;
+  if (!k) return r.request_id ? `${r.request_id.slice(0, 12)}…` : "—";
+  if (k.startsWith("data.")) {
+    const parts = k.split(":");
+    const sha = parts.indexOf("sha256");
+    const body = (sha > 0 ? parts.slice(1, sha) : parts.slice(1)).filter(Boolean);
+    if (body.length >= 4) return `${body[0]}:${body[1]} → ${body[2]}:${body[3]}`;
+    if (body.length >= 2) return `${body[0]}:${body[1]}`;
+    return body.join(":") || k;
+  }
+  return k;
+}
+
+export default function RunsTable({
+  defaultOpen = false,
+  onNavigate,
+}: {
+  defaultOpen?: boolean;
+  onNavigate?: (section: string, focus?: { kind: "request"; value: string }) => void;
+}) {
   const [active, setActive] = useState<RunRow[]>([]);
   const [stale, setStale] = useState<RunRow[]>([]);
   const [truncated, setTruncated] = useState(false);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     operatorApi.dashboard.runs().then((r) => {
       setActive(r.active.data || []);
       setStale(r.stale.data || []);
       setTruncated(Boolean(r.active.truncated || r.stale.truncated));
-    }).catch(() => { setActive([]); setStale([]); setTruncated(false); });
+    }).catch(() => { setActive([]); setStale([]); setTruncated(false); })
+      .finally(() => setLoading(false));
   }, []);
-  const rows = [...stale, ...active];
+
+  const waiting = stale.filter((r) => r.state === CONFIRM_WAIT);   // ② 확인 대기
+  const attention = stale.filter((r) => r.state !== CONFIRM_WAIT); // ③ 정체·복구
+
   const badge = (
-    <span className="muted small">
-      {stale.length > 0 ? <span className="err-num">(stale {stale.length})</span> : `(${rows.length})`}
-      {truncated && <>{" "}<span className="chip tone-warn">일부만 표시</span></>}
+    <span className="snm-badge">
+      <span className="muted small">
+        실행 중 <b className={active.length ? "" : "muted"}>{active.length}</b>
+        {waiting.length > 0 && <> · 확인 대기 <b>{waiting.length}</b></>}
+        {attention.length > 0 && <> · <span className="err-num">정체·복구 {attention.length}</span></>}
+      </span>
+      {truncated && <span className="chip tone-warn">일부만 표시</span>}
+      <InfoHint label="워커 실행 현황 설명">
+        요청이 플랜으로 바뀌면 <strong>RM/DM 워커</strong>가 리스를 잡고 실제로 처리(run)합니다.
+        <br /><strong>실행 중</strong>=지금 워커가 돌리는 작업, <strong>확인 대기</strong>=데이터
+        잡 프리뷰 후 승인 대기(정상), <strong>정체·복구</strong>=실제 조치가 필요한 run(‘조치
+        필요’에서 해소).
+      </InfoHint>
     </span>
   );
+
+  const goRequest = (rid?: string) =>
+    rid && onNavigate?.("dashboard-activity", { kind: "request", value: rid });
+
   return (
-    <Section title="스케줄러 활동" badge={badge} defaultOpen={defaultOpen}>
-      <table className="grid"><thead><tr>
-        <th>run</th><th>worker</th><th>역할</th><th>상태</th><th>lease 남음</th><th>리소스</th>
-      </tr></thead><tbody>
-        {rows.length === 0 ? <tr><td colSpan={6} className="muted">활성 run 없음</td></tr> :
-          rows.map((r) => (
-            <tr key={r.run_id}>
-              <td data-label="run" className="mono small">{r.run_id.slice(0, 12)}…</td>
-              <td data-label="worker" className="mono small">{r.worker_id || "—"}</td>
-              <td data-label="역할">{r.worker_role || "—"}</td>
-              <td data-label="상태"><span className={`san ${stateCls(RUN_STATE, r.state)}`}>{r.state}</span></td>
-              <td data-label="lease" className={r.lease_expiring_soon ? "err-num" : ""}>{r.lease_seconds_remaining ?? "—"}</td>
-              <td data-label="리소스" className="mono small">{r.resource_key || "—"}</td>
-            </tr>
-          ))}
-      </tbody></table>
+    <Section title="워커 실행 현황" badge={badge} defaultOpen={defaultOpen}>
+      {loading ? (
+        <Loading rows={3} />
+      ) : (
+        <div className="wrun">
+          {/* ① 지금 실행 중 */}
+          <div className="wrun-group">
+            <div className="wrun-h">지금 실행 중 <span className="muted small">({active.length})</span></div>
+            {active.length === 0 ? (
+              <p className="muted small ok-num">현재 실행 중인 작업이 없습니다 ✅</p>
+            ) : (
+              <table className="grid wrun-grid">
+                <thead><tr>
+                  <th>작업</th><th>요청자</th><th>대상</th><th>경과</th><th>단계</th><th>워커</th><th></th>
+                </tr></thead>
+                <tbody>
+                  {active.map((r) => {
+                    const lv = liveness(r);
+                    return (
+                      <tr key={r.run_id}>
+                        <td data-label="작업">
+                          <span className="wrun-op">{opLabel(r.operation_kind)}</span>
+                          <span className="muted small"> {opDetail(r.operation_kind)}</span>
+                        </td>
+                        <td data-label="요청자" className="small">{r.requester_id || "—"}</td>
+                        <td data-label="대상" className="mono small" title={r.resource_key || r.request_id}>{target(r)}</td>
+                        <td data-label="경과" title={fmtTime(r.started_at)}>{ago(r.started_at)}</td>
+                        <td data-label="단계"><span className="chip tone-info">{STATE_LABEL[r.state] || r.state}</span></td>
+                        <td data-label="워커">
+                          <span className={`wrun-live ${lv.cls}`} title={`${r.worker_id || "?"} · ${lv.title}`}>
+                            ● {r.worker_role || "?"} · {lv.label}
+                          </span>
+                        </td>
+                        <td data-label="" className="row-actions">
+                          {onNavigate && r.request_id && (
+                            <button className="attn2-hide attn2-detail-link" title="요청 상세 보기"
+                              onClick={() => goRequest(r.request_id)}>상세 →</button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* ② 확인 대기 (DM preview → confirm) */}
+          {waiting.length > 0 && (
+            <div className="wrun-group">
+              <div className="wrun-h">확인 대기 <span className="muted small">({waiting.length}) · 프리뷰 승인/취소 대기</span></div>
+              <table className="grid wrun-grid">
+                <thead><tr>
+                  <th>작업</th><th>요청자</th><th>대상</th><th>대기</th><th></th>
+                </tr></thead>
+                <tbody>
+                  {waiting.map((r) => {
+                    const isScan = (r.operation_kind || "").includes("scan");
+                    const dest = isScan ? "scan" : "backup";
+                    return (
+                      <tr key={r.run_id}>
+                        <td data-label="작업"><span className="wrun-op">{opLabel(r.operation_kind)}</span>
+                          <span className="muted small"> {opDetail(r.operation_kind)}</span></td>
+                        <td data-label="요청자" className="small">{r.requester_id || "—"}</td>
+                        <td data-label="대상" className="mono small" title={r.resource_key || r.request_id}>{target(r)}</td>
+                        <td data-label="대기" title={fmtTime(r.started_at)}>{ago(r.started_at)}</td>
+                        <td data-label="" className="row-actions">
+                          {onNavigate && (
+                            <button className="attn2-hide attn2-detail-link"
+                              title={`${isScan ? "데이터 스캔" : "데이터 백업"}에서 확인`}
+                              onClick={() => onNavigate(dest)}>{isScan ? "스캔" : "백업"}에서 확인 →</button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* ③ 정체·복구 → 조치 필요로 위임 */}
+          {attention.length > 0 && (
+            <div className="wrun-group">
+              <div className="wrun-attn">
+                <span className="err-num">정체·복구 {attention.length}건</span>
+                <span className="muted small">— 실제 조치가 필요한 run입니다.</span>
+                {onNavigate && (
+                  <button className="mini" onClick={() => onNavigate("dashboard-attention")}>
+                    조치 필요에서 해소 →
+                  </button>
+                )}
+              </div>
+              <ul className="wrun-attn-list">
+                {attention.map((r) => (
+                  <li key={r.run_id}>
+                    <span className="chip tone-low">{STATE_LABEL[r.state] || r.state}</span>
+                    <span className="wrun-op">{opLabel(r.operation_kind)}</span>
+                    <span className="muted small">{r.requester_id || ""}</span>
+                    <span className="mono small">{target(r)}</span>
+                    <span className="muted small">{ago(r.started_at)} 전</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </Section>
   );
 }

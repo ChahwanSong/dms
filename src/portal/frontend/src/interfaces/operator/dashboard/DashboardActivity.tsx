@@ -8,7 +8,7 @@ import RequestsTable from "./RequestsTable";
 // panels (each fetches on mount) via a key bump.
 export default function DashboardActivity({ focus, onNavigate }: {
   focus?: FocusTarget | null;
-  onNavigate?: (section: string) => void;
+  onNavigate?: (section: string, focus?: FocusTarget) => void;
 } = {}) {
   const [reloadKey, setReloadKey] = useState(0);
   const focusRequestId = focus?.kind === "request" ? focus.value : undefined;
@@ -22,7 +22,7 @@ export default function DashboardActivity({ focus, onNavigate }: {
           </button>
         </div>
       </div>
-      <RunsTable key={`runs-${reloadKey}`} defaultOpen />
+      <RunsTable key={`runs-${reloadKey}`} defaultOpen onNavigate={onNavigate} />
       <RequestsTable key={`reqs-${reloadKey}`} defaultOpen
         focusRequestId={focusRequestId} onNavigate={onNavigate} />
     </div>

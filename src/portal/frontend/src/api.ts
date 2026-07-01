@@ -412,9 +412,13 @@ export interface AgentReport {
 }
 
 export interface RunRow {
-  run_id: string; worker_id?: string; worker_role?: string; state: string;
+  run_id: string; plan_id?: string; request_id?: string;
+  worker_id?: string; executor_id?: string; worker_role?: string; state: string;
   lease_seconds_remaining?: number; lease_expiring_soon?: boolean;
-  resource_key?: string;
+  lease_expires_at?: string; heartbeat_at?: string; started_at?: string;
+  // enriched (JOIN plans/requests): what the run is actually doing
+  operation_kind?: string; resource_kind?: string; resource_key?: string;
+  requester_id?: string; request_status?: string;
 }
 
 // Runs are single-fetched with a high cap; `truncated` is set only if that cap was
