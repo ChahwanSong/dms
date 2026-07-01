@@ -48,6 +48,9 @@ class DMWorkerRuntime:
 
     def run_once(self) -> int:
         self.repository.mark_stale_runs(actor=self.worker_id)
+        # expire ConfirmPending jobs whose preview lapsed (never confirmed) — this moves
+        # their plan out of Blocked so the preview-run sweep below can close the run.
+        self.repository.expire_stale_preview_jobs(actor=self.worker_id)
         # defensive sweeps: close orphaned preview runs (Blocked, plan moved on) and
         # stuck runs whose request already reached a terminal state (idempotent).
         self.repository.close_superseded_preview_runs(actor=self.worker_id)

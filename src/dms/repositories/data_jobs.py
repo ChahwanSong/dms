@@ -251,6 +251,57 @@ class DataJobsMixin:
         }
 
 
+    def expire_stale_preview_jobs(self, *, actor: str = "recovery-monitor") -> int:
+        """Terminalize ConfirmPending data jobs whose preview has EXPIRED.
+
+        A sync/rm preview parks the job in ConfirmPending until the requester confirms.
+        DMS only checks preview expiry when a confirm is *attempted* (dm.confirm_data_job)
+        — so a preview that is never confirmed lingers ConfirmPending forever, and its run
+        stays Blocked ("확인 대기") even though confirming would now be rejected. This
+        proactive sweep applies the SAME terminalization the confirm path does: mark the
+        job PreviewExpired and complete the request as Rejected. That moves the plan out
+        of Blocked, so the existing preview-run reaper then closes the dangling run.
+
+        Only jobs with a non-null preview_expires_at in the past are swept (a job without
+        an expiry set is left alone). Returns how many were expired.
+        """
+        now = datetime.now(UTC)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT job_id, request_id, preview_expires_at
+                FROM data_jobs
+                WHERE state = ? AND preview_expires_at IS NOT NULL
+                """,
+                (DataJobState.CONFIRM_PENDING.value,),
+            ).fetchall()
+        expired = []
+        for row in rows:
+            job = row_to_dict(row)
+            parsed = _parse_iso(job.get("preview_expires_at"))
+            if parsed is not None and parsed <= now:
+                expired.append(job)
+        for job in expired:
+            plan = self.get_plan_by_request(job["request_id"])
+            if not plan:
+                continue
+            self.update_data_job(job["job_id"], state=DataJobState.PREVIEW_EXPIRED)
+            self.complete_result(
+                request_id=job["request_id"],
+                plan_id=plan["plan_id"],
+                run_id=None,
+                terminal_status=LifecycleState.REJECTED,
+                message="data job preview expired before confirm (recovery sweep)",
+                verification_summary={
+                    "backend_side_effect": False,
+                    "reason": "data_job_preview_expired",
+                },
+                error_category="data_management_confirm",
+                actor=actor,
+            )
+        return len(expired)
+
+
     def list_data_jobs(
         self,
         limit: int = 100,

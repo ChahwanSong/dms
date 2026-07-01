@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -13,7 +14,13 @@ from dms.adapters import (
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
-from dms.domain import LifecycleState, OperationKind, ResourceKind, StorageMappingInput
+from dms.domain import (
+    DataJobState,
+    LifecycleState,
+    OperationKind,
+    ResourceKind,
+    StorageMappingInput,
+)
 from dms.migrations import migrate_all
 from dms.planner import Planner
 from dms.repositories import DmsRepository, ObservabilityRepository, SchedulingBlocked
@@ -307,6 +314,52 @@ def test_close_orphaned_stuck_runs_various_cases(harness):
     assert repository.get_request(runs[r_recov]["request_id"])["status"] == LifecycleState.FAILED.value
     # idempotent
     assert repository.close_orphaned_stuck_runs(actor="test") == 0
+
+
+def _confirm_pending_job(
+    repository: DmsRepository,
+    directory_name: str,
+    *,
+    preview_expires_at: str | None,
+    state: DataJobState = DataJobState.CONFIRM_PENDING,
+) -> tuple[str, str, str]:
+    """request→plan + a data job in `state` with the given preview_expires_at.
+    Returns (request_id, plan_id, job_id)."""
+    request_id = _create_filesystem_request(repository, directory_name)
+    Planner(repository).run_once(limit=10)
+    plan = repository.get_plan_by_request(request_id)
+    job_id = repository.create_data_job(
+        request_id=request_id, operation="data.sync", storage_name="cephfs-a",
+        source="/src", destination="/dst", target=None, priority=1, worker_pool={},
+    )
+    repository.update_data_job(job_id, state=state, preview_expires_at=preview_expires_at)
+    return request_id, plan["plan_id"], job_id
+
+
+def test_expire_stale_preview_jobs_various_cases(harness):
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    past = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    future = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+
+    r_exp, _, j_exp = _confirm_pending_job(repository, "prev-expired", preview_expires_at=past)
+    r_fut, _, j_fut = _confirm_pending_job(repository, "prev-future", preview_expires_at=future)
+    r_null, _, j_null = _confirm_pending_job(repository, "prev-null", preview_expires_at=None)
+    # a non-ConfirmPending job with a past expiry must NOT be swept
+    r_run, _, j_run = _confirm_pending_job(
+        repository, "prev-running", preview_expires_at=past, state=DataJobState.RUNNING
+    )
+
+    assert repository.expire_stale_preview_jobs(actor="test") == 1
+    # expired one: job → PreviewExpired, request → Rejected (terminal)
+    assert repository.get_data_job(j_exp)["state"] == DataJobState.PREVIEW_EXPIRED.value
+    assert repository.get_request(r_exp)["status"] == LifecycleState.REJECTED.value
+    # future / null / non-ConfirmPending are untouched
+    assert repository.get_data_job(j_fut)["state"] == DataJobState.CONFIRM_PENDING.value
+    assert repository.get_data_job(j_null)["state"] == DataJobState.CONFIRM_PENDING.value
+    assert repository.get_data_job(j_run)["state"] == DataJobState.RUNNING.value
+    # idempotent
+    assert repository.expire_stale_preview_jobs(actor="test") == 0
 
 
 def test_close_superseded_preview_runs_inline_by_plan(harness):

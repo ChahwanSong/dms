@@ -181,9 +181,11 @@ def operational_query_router() -> APIRouter:
     ) -> dict[str, Any]:
         actor = authenticated_actor(request, services)
         count = services.repository.mark_stale_runs(actor=actor)
-        # also close orphaned runs so the recovery pass keeps the attention set free of
-        # dead records: DM preview runs parked in Blocked (plan moved on) + stuck runs
-        # whose owning request already reached a terminal state.
+        # expire never-confirmed previews first (moves their plan out of Blocked), then
+        # close orphaned runs so the recovery pass keeps the attention set free of dead
+        # records: DM preview runs parked in Blocked (plan moved on) + stuck runs whose
+        # owning request already reached a terminal state.
+        expired_previews = services.repository.expire_stale_preview_jobs(actor=actor)
         superseded = services.repository.close_superseded_preview_runs(actor=actor)
         orphaned = services.repository.close_orphaned_stuck_runs(actor=actor)
         stale = services.query.stale_or_recovery_runs()
@@ -192,6 +194,7 @@ def operational_query_router() -> APIRouter:
             mutation_kind="runs.mark_stale",
             payload={
                 "count": count,
+                "expired_previews": expired_previews,
                 "superseded_preview_runs": superseded,
                 "orphaned_stuck_runs": orphaned,
             },
@@ -199,6 +202,7 @@ def operational_query_router() -> APIRouter:
         )
         return {
             "marked": count,
+            "expired_previews": expired_previews,
             "superseded_preview_runs": superseded,
             "orphaned_stuck_runs": orphaned,
             "stale_or_recovery_runs": stale,
