@@ -789,19 +789,25 @@ def dashboard_router(settings: Settings) -> APIRouter:
         resource_kind: str | None = Query(default=None),
         status: str | None = Query(default=None),
         requester_id: str | None = Query(default=None),
+        search: str | None = Query(default=None),
         limit: int = Query(default=_DATA_JOBS_CAP, le=2000),
+        offset: int = Query(default=0, ge=0),
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         # ALL requests (RM + DM) by lifecycle status — the operator 액티비티 뷰.
         # GROWING history: capped page + truncated flag (no fetch-all / no COUNT).
+        # The front-end pages via offset (infinite scroll, 500/page) and passes a
+        # server-side `search` needle (requester + target) so it spans ALL history.
         items = await dms.list_request_activity(
             actor=_actor(user, settings),
             operation=operation or None,
             resource_kind=resource_kind or None,
             status=status or None,
             requester_id=requester_id or None,
+            search=(search or "").strip() or None,
             limit=limit,
+            offset=offset,
         )
         # Consistency with 조치 필요: flag requests that were hidden there (dismiss/ack)
         # so the activity view can hide them too (front-end default-hides, toggle shows).

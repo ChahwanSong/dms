@@ -235,6 +235,31 @@ def test_request_activity_lists_all_and_filters(harness):
     lim_resp = client.get("/api/v1/operations/request-activity?requester_id=alice&limit=2", headers=hdr)
     assert len(lim_resp.json()) == 2 and all(r["requester_id"] == "alice" for r in lim_resp.json())
 
+    # --- server-side free-text search: requester OR target, case-insensitive, spans
+    #     resource_key + serialized payload, LIKE metachars escaped ---
+    repo.create_request(
+        requester_id="carol", actor="api-client", operation="data.sync",
+        resource_kind="data_job", resource_key="cephfs:carol-9",
+        payload={"destination": {"path": "special/deep/target-path"}},
+    )
+    # match by requester
+    s_req = client.get("/api/v1/operations/request-activity?search=alice", headers=hdr)
+    assert len(s_req.json()) == 3 and all(r["requester_id"] == "alice" for r in s_req.json())
+    # match by target via resource_key, case-insensitive
+    s_key = client.get("/api/v1/operations/request-activity?search=BOB-1", headers=hdr)
+    assert [r["resource_key"] for r in s_key.json()] == ["cephfs:bob-1"]
+    # match by target via serialized payload (destination path) — not just resource_key
+    s_pay = client.get("/api/v1/operations/request-activity?search=target-path", headers=hdr)
+    assert [r["requester_id"] for r in s_pay.json()] == ["carol"]
+    # search + offset paginate the matched set (3 'cephfs:bob' rows → page 2 has 1)
+    s_pg = client.get(
+        "/api/v1/operations/request-activity?search=cephfs:bob&limit=2&offset=2", headers=hdr
+    )
+    assert len(s_pg.json()) == 1
+    # '_' is escaped → literal, not a wildcard: no resource_key contains 'bob_'
+    s_lit = client.get("/api/v1/operations/request-activity?search=bob_", headers=hdr)
+    assert s_lit.json() == []
+
 
 def test_request_and_plan_are_persisted_before_backend_side_effect(harness):
     register_ready_storage_mapping(harness["repository"])

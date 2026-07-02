@@ -178,6 +178,7 @@ class RequestsMixin:
         operation: str | None = None,
         resource_kind: str | None = None,
         status: str | None = None,
+        search: str | None = None,
         since: str | None = None,
         until: str | None = None,
         limit: int = DEFAULT_REQUEST_LIST_LIMIT,
@@ -186,7 +187,13 @@ class RequestsMixin:
         """Flexible request listing for the operator activity view: any subset of
         filters (all optional), newest-first (commit_order DESC), paginated. Unlike
         ``list_requests`` this does NOT require a requester_id, so the portal can show
-        ALL request activity classified by operation/resource_kind/status."""
+        ALL request activity classified by operation/resource_kind/status.
+
+        ``search`` is a case-insensitive free-text needle matched (LIKE) against the
+        requester, request id, resource key, and the serialized payload — so the
+        operator can find requests by requester *or* target (path / storage / dest),
+        both of which live in resource_key / payload_summary. Server-side so it spans
+        ALL history, not just the loaded page."""
         where: list[str] = []
         params: list[Any] = []
         for column, value in (
@@ -198,6 +205,17 @@ class RequestsMixin:
             if value:
                 where.append(f"{column} = ?")
                 params.append(value)
+        needle = (search or "").strip().lower()
+        if needle:
+            # Escape LIKE metacharacters so a path with `_`/`%` matches literally
+            # (SQLite + PostgreSQL both honor `ESCAPE`). Matched columns cover both
+            # the requester and every representation of the target.
+            esc = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{esc}%"
+            cols = ("requester_id", "request_id", "resource_key", "payload_summary")
+            ors = " OR ".join(f"LOWER({c}) LIKE ? ESCAPE '\\'" for c in cols)
+            where.append(f"({ors})")
+            params.extend([like] * len(cols))
         if since is not None:
             where.append("requested_at >= ?")
             params.append(since)

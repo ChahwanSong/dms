@@ -1055,14 +1055,16 @@ export const operatorApi = {
     },
     requestActivity: (opts?: {
       operation?: string; resource_kind?: string; status?: string;
-      requester_id?: string; limit?: number;
+      requester_id?: string; search?: string; limit?: number; offset?: number;
     }) => {
       const q = new URLSearchParams();
       if (opts?.operation) q.set("operation", opts.operation);
       if (opts?.resource_kind) q.set("resource_kind", opts.resource_kind);
       if (opts?.status) q.set("status", opts.status);
       if (opts?.requester_id) q.set("requester_id", opts.requester_id);
+      if (opts?.search) q.set("search", opts.search);
       if (opts?.limit != null) q.set("limit", String(opts.limit));
+      if (opts?.offset) q.set("offset", String(opts.offset));
       const qs = q.toString();
       return request<RequestActivityResp>(`/api/operator/dashboard/request-activity${qs ? `?${qs}` : ""}`);
     },

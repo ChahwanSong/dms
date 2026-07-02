@@ -274,11 +274,14 @@ class DmsClient:
         resource_kind: str | None = None,
         status: str | None = None,
         requester_id: str | None = None,
+        search: str | None = None,
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         # ALL requests (any operation/resource_kind/status), newest-first — the
-        # operator 액티비티 뷰. GROWING history (~10k/day): keep `limit` capped.
+        # operator 액티비티 뷰. GROWING history (~10k/day): keep `limit` capped and
+        # page via offset (infinite scroll). `search` is a server-side needle over
+        # requester + target so it spans ALL history, not just the loaded page.
         params: dict[str, Any] = {"limit": limit}
         if offset:
             params["offset"] = offset
@@ -290,6 +293,8 @@ class DmsClient:
             params["status"] = status
         if requester_id:
             params["requester_id"] = requester_id
+        if search:
+            params["search"] = search
         return await self._request(
             "GET", f"{_OPS_BASE}/request-activity", actor=actor, params=params
         )
