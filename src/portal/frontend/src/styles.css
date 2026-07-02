@@ -1687,6 +1687,20 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
   background: rgba(248, 113, 113, 0.08); border-radius: 8px; margin-bottom: 0.5rem; }
 .wrun-attn-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
 .wrun-attn-list li { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; font-size: 0.82rem; padding: 0.15rem 0.2rem; }
+/* 상세/확인 액션 셀: 일반 테이블 셀(vertical-align:middle 상속)로 우측 정렬 —
+   AttentionPanel용 .attn2-hide(border-left 세로선·세로패딩0, flex행 전용)를 표에
+   재사용해 행 높이를 못 채운 짧은 세로선이 뜨던 문제 해소. .row-actions의 display:flex도
+   피해 셀 높이가 다른 셀과 어긋나지 않게 함. */
+.wrun-grid td.wrun-actions { text-align: right; white-space: nowrap; }
+.wrun-detail {
+  border: none; background: none; color: #93c5fd; font-size: 0.78rem;
+  padding: 0.2rem 0.4rem; border-radius: 6px; cursor: pointer; white-space: nowrap; line-height: 1.2;
+}
+.wrun-detail:hover { color: #cfe0ff; background: rgba(59, 130, 246, 0.1); }
+@media (max-width: 720px) {
+  .wrun-grid td.wrun-actions { padding-top: 0.45rem; margin-top: 0.25rem; border-top: 1px solid var(--border); }
+  .wrun-grid td.wrun-actions::before { display: none; }
+}
 
 /* ---- 요청(전체) 행 펼침 상세 (reqa-* : .req-* 백업/스캔 편집기 클래스와 충돌 회피) ---- */
 .reqa-row { cursor: pointer; }

@@ -180,9 +180,9 @@ export default function RunsTable({
                             ● {r.worker_role || "?"} · {lv.label}
                           </span>
                         </td>
-                        <td data-label="" className="row-actions">
+                        <td data-label="" className="wrun-actions">
                           {onNavigate && r.request_id && (
-                            <button className="attn2-hide attn2-detail-link" title="요청 상세 보기"
+                            <button className="wrun-detail" title="요청 상세 보기"
                               onClick={() => goRequest(r.request_id)}>상세 →</button>
                           )}
                         </td>
@@ -213,9 +213,9 @@ export default function RunsTable({
                         <td data-label="요청자" className="small">{r.requester_id || "—"}</td>
                         <td data-label="대상" className="mono small" title={r.resource_key || r.request_id}>{target(r)}</td>
                         <td data-label="대기" title={fmtTime(r.started_at)}>{ago(r.started_at)}</td>
-                        <td data-label="" className="row-actions">
+                        <td data-label="" className="wrun-actions">
                           {onNavigate && (
-                            <button className="attn2-hide attn2-detail-link"
+                            <button className="wrun-detail"
                               title={`${isScan ? "데이터 스캔" : "데이터 백업"}에서 확인`}
                               onClick={() => onNavigate(dest)}>{isScan ? "스캔" : "백업"}에서 확인 →</button>
                           )}
