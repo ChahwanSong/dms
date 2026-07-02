@@ -2029,8 +2029,15 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
 .vdetail { padding: 0 0.6rem 0.4rem 1.8rem; background: rgba(255, 255, 255, 0.02); }
 
 /* per-screen column templates (header + rows MUST match to stay aligned) */
-.vgrid-bk { grid-template-columns: 1.6rem 2rem minmax(6rem, 1.5fr) minmax(6rem, 1.5fr) 5.5rem minmax(4.5rem, 0.9fr) minmax(6rem, 1.5fr) auto; }
-.vgrid-sc { grid-template-columns: 1.6rem 2rem minmax(8rem, 2fr) 5.5rem minmax(4.5rem, 0.9fr) minmax(8rem, 1.3fr) minmax(5rem, 0.9fr) auto; }
+/* the actions column MUST be a fixed width, not `auto`: auto sizes to content, so the
+   header (empty actions cell) and each row (variable button count) would get different
+   widths, redistributing the fr columns differently and misaligning 상태/결과/온도/비고
+   between header and rows. A fixed width keeps every row on the same grid (buttons
+   right-align within it). 14.5rem fits the widest set: 상세/로그·편집·재시도·삭제. */
+.vgrid-bk { grid-template-columns: 1.6rem 2rem minmax(6rem, 1.5fr) minmax(6rem, 1.5fr) 5.5rem minmax(4.5rem, 0.9fr) minmax(6rem, 1.5fr) 14.5rem; }
+.vgrid-sc { grid-template-columns: 1.6rem 2rem minmax(8rem, 2fr) 5.5rem minmax(6rem, 0.9fr) minmax(8rem, 1.3fr) minmax(5rem, 0.9fr) 14.5rem; }
+/* header labels never wrap (kept on one line so columns read cleanly) */
+.vrow.vhead .vcell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* paths ellipsis (full value in title) — never char-wrap in a narrow column */
 .vc-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
