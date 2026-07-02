@@ -1004,14 +1004,17 @@ def dashboard_router(settings: Settings) -> APIRouter:
     @router.get("/attention/archived")
     async def attention_archived(
         db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> list[dict[str, Any]]:
-        # 영구숨김된 항목 목록 (복원 대상).
+        # 영구숨김된 항목 목록 (복원 대상). Role-gated at the router too; explicit here
+        # for parity with the sibling attention endpoints (defense in depth).
         return await db.list_archived_dismissals()
 
     @router.post("/attention/unarchive")
     async def attention_unarchive(
         body: FingerprintsIn,
         db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         # 영구숨김 → 처리 내역으로 되돌림 (archived=false). 조치 필요에서 숨김 상태는
         # 그대로(처리 내역에 다시 나타남); 완전 복원은 거기서 '복원'.
