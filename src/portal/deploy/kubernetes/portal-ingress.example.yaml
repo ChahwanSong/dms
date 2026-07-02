@@ -1,0 +1,65 @@
+# DMS Portal Ingress — hostname AND bare-IP access.
+#
+# Why this exists:
+#   An nginx Ingress `rule` with a `host:` only matches requests whose Host header
+#   equals that hostname. A browser hitting the ingress by bare IP sends
+#   `Host: <node-ip>`, which matches NO host rule and falls through to the ingress
+#   controller's default backend → 404. That's why `portal.pvs-dms.local` works but
+#   `http://<ip>/` does not.
+#
+# The fix (this file): keep the named-host rule AND add a second rule with NO
+#   `host`. ingress-nginx renders a hostless rule as the catch-all default server
+#   (`server_name _;`), which matches ANY Host — the hostname, a bare IP, anything.
+#   So both `portal.pvs-dms.local` and `http://<ip>/` route to the portal.
+#
+#   Minimal equivalent: just delete `host:` from the single rule (it then becomes
+#   the catch-all). Keeping both rules is more explicit and lets the named host
+#   carry a TLS cert / host-specific annotations. See install/5.dms-portal-setup.md
+#   §5.3 for an in-place `kubectl patch` recipe against an existing Ingress.
+#
+# Caveat: a hostless (catch-all) rule becomes the default server for THIS ingress
+#   controller, so on a shared controller it also answers unmatched hosts. That's
+#   fine for a dedicated portal controller; if the controller is shared, prefer a
+#   dedicated ingress class or an explicit per-host list instead.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dms-portal
+  namespace: dms-portal
+  annotations:
+    # The portal is a plain-HTTP service (session cookie is not Secure-only when
+    # PORTAL_SESSION_HTTPS_ONLY=false). Don't force an HTTPS redirect, so bare-IP
+    # HTTP access works even if a hostname TLS cert is later added below. Over TLS,
+    # bare-IP access still works but the browser warns (cert is for the hostname).
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+spec:
+  ingressClassName: nginx
+  # Optional server TLS for the hostname. A cert is only valid for the DNS name,
+  # so bare-IP HTTPS will show a name-mismatch warning — expected for IP access.
+  # tls:
+  #   - hosts:
+  #       - portal.pvs-dms.local
+  #     secretName: dms-portal-tls
+  rules:
+    # 1) hostname access — explicit; carries TLS / host-specific annotations.
+    - host: portal.pvs-dms.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dms-portal
+                port:
+                  number: 80
+    # 2) bare-IP / any-host access — hostless rule = nginx catch-all (server_name _).
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dms-portal
+                port:
+                  number: 80
