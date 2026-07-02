@@ -1,0 +1,99 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<link rel="stylesheet" href="style.css">
+<style>
+  .vflow { display:flex; flex-direction:column; align-items:flex-start; gap:0; }
+  .step { width:940px; }
+  .step .box { min-width:0; }
+  .dn { width:940px; text-align:center; color:var(--line); font-size:24px; font-weight:800; padding:7px 0; }
+  .dn .lbl { font-size:13px; color:var(--muted); font-weight:700; margin-left:8px; }
+  .sub { display:grid; gap:8px; margin-top:10px; }
+  .sub.c4 { grid-template-columns:repeat(4,1fr); }
+  .mini { border:1.3px solid var(--slate-bd); background:#fff; border-radius:9px; padding:9px 11px; }
+  .mini .n { font-size:11px; font-weight:800; color:var(--slate-tx); }
+  .mini .t { font-size:12.5px; font-weight:700; margin-top:2px; }
+  .mini .s { font-size:11.5px; color:var(--muted); margin-top:2px; line-height:1.35; }
+  .mini.teal2 { border-color:var(--teal-bd); } .mini.teal2 .n{color:var(--teal-tx)}
+  .fork { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; width:940px; }
+  .fcol { display:flex; flex-direction:column; gap:0; }
+  .cond { font-size:12.5px; font-weight:800; text-align:center; padding:6px 8px; border-radius:8px; }
+  .cond.ok{color:var(--green-tx);background:var(--green-bg)}
+  .cond.pf{color:var(--red-tx);background:var(--red-bg)}
+  .cond.un{color:var(--red-tx);background:var(--red-bg)}
+  .fdn { text-align:center; color:var(--line); font-size:19px; font-weight:800; padding:5px 0; }
+</style></head>
+<body><div class="canvas">
+
+  <div class="title">RM 워커 실행 흐름</div>
+  <div class="subtitle">파일시스템 · K8s 네임스페이스 쿼터 뮤테이션 · 리스로 점유하고 백엔드 호출 전에 커밋, 결과를 fail-closed 로 분류한다</div>
+  <div class="rule"></div>
+
+  <div class="vflow">
+
+    <!-- preprocessing -->
+    <div class="step">
+      <div class="box teal"><div class="k">run_once() · 루프 최상단 전처리</div><div class="d">매 반복마다 회복·안전 점검을 먼저 수행한다</div>
+        <div class="sub c4">
+          <div class="mini teal2"><div class="n">1</div><div class="t">mark_stale_runs</div><div class="s">만료 리스 회수 → STALE_CLAIM / RECOVERY_NEEDED</div></div>
+          <div class="mini teal2"><div class="n">2</div><div class="t">방어 스윕</div><div class="s">superseded · orphaned 런 정리</div></div>
+          <div class="mini teal2"><div class="n">3</div><div class="t">scheduling_blocked?</div><div class="s">전역 킬스위치 → return 0</div></div>
+          <div class="mini teal2"><div class="n">4</div><div class="t">claim_plan</div><div class="s">list_claimable(RM)<br>→ CAS 점유 + 리스</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dn">↓</div>
+
+    <div class="step">
+      <div class="box teal"><div class="k">update_run_state · APPLYING</div><div class="d">백엔드 호출 <b>전에</b> 커밋 — 크래시가 나도 "적용 진행 중"이 상태에 남는다</div></div>
+    </div>
+
+    <div class="dn">↓ <span class="lbl">RunHeartbeat 스레드가 리스를 계속 갱신</span></div>
+
+    <!-- apply dispatch fanout -->
+    <div class="step">
+      <div class="box slate"><div class="k">_apply(plan) · operation_kind 별 어댑터 디스패치</div><div class="d">create / update / block / delete / assign_quota / import / check / sync · 만료 스윕(타겟별 skip · dry_run) · 어댑터는 backend_registry 가 플랜별로 해석</div>
+        <div class="sub c4">
+          <div class="mini"><div class="n">FS</div><div class="t">CephFS</div><div class="s">ssh + ceph.quota xattr</div></div>
+          <div class="mini"><div class="n">FS</div><div class="t">WekaFS</div><div class="s">weka fs quota CLI (자격증명)</div></div>
+          <div class="mini"><div class="n">FS</div><div class="t">GPFS</div><div class="s">mmcrfileset + mmsetquota</div></div>
+          <div class="mini"><div class="n">K8s</div><div class="t">ResourceQuota</div><div class="s">kubectl / ssh-kubectl</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dn">↓ <span class="lbl">각 어댑터는 AdapterResult(applied · observed) 반환 · 결과에 따라 3갈래</span></div>
+
+    <!-- result fork -->
+    <div class="fork">
+      <div class="fcol">
+        <div class="cond ok">성공 · 어댑터 적용 완료</div>
+        <div class="fdn">↓</div>
+        <div class="box teal"><div class="k">VERIFYING</div><div class="d">결과 검증 · upsert_resource(현재 상태)</div></div>
+        <div class="fdn">↓</div>
+        <div class="box green"><div class="k">SUCCEEDED ✓</div><div class="d">complete_result · result 기록</div></div>
+      </div>
+      <div class="fcol">
+        <div class="cond pf">BackendPreconditionError · 사이드이펙트 前</div>
+        <div class="fdn">↓</div>
+        <div class="box red"><div class="k">BACKEND_APPLY_FAILED</div><div class="d">precondition_failed: True<br>backend_side_effect: <b>False</b><br>(예: 미지원 백엔드 · LDAP 미구성 · 마커 불일치)</div></div>
+      </div>
+      <div class="fcol">
+        <div class="cond un">기타 예외 · 사이드이펙트 여부 불명</div>
+        <div class="fdn">↓</div>
+        <div class="box red"><div class="k">UNKNOWN_AFTER_SIDE_EFFECT</div><div class="d">recovery_required: True<br>예외를 <b>재발생</b> → 수동 복구 대기<br>(이펙트가 없었다고 증명 못 하면 fail-closed)</div></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="legend">
+    <div class="leg"><span class="sw teal"></span>워커 처리</div>
+    <div class="leg"><span class="sw slate"></span>어댑터 · 백엔드</div>
+    <div class="leg"><span class="sw green"></span>성공(터미널)</div>
+    <div class="leg"><span class="sw red"></span>실패 · 복구(터미널)</div>
+  </div>
+  <div class="note" style="margin-top:14px">
+    <b>fail-closed 핵심</b> · 어댑터를 만드는 중 생긴 설정 오류(IdentityLookupConfigurationError 등)는 사이드이펙트 <b>전</b> 실패로 강등되어 BACKEND_APPLY_FAILED 로 분류되고, 불필요한 복구 경로를 피한다.
+  </div>
+
+</div></body></html>

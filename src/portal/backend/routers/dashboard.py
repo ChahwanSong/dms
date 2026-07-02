@@ -734,7 +734,12 @@ def dashboard_router(settings: Settings) -> APIRouter:
         # while 조치 필요 hides them. Front-end excludes flagged runs (with a 숨김 note).
         db: Database | None = getattr(request.app.state, "db", None)
         if db is not None and db.configured:
-            hidden_ids = await db.hidden_request_ids()
+            run_ids = [
+                run.get("request_id")
+                for section in (active, stale)
+                for run in section.get("data") or []
+            ]
+            hidden_ids = await db.hidden_request_ids(subset=run_ids)
             for section in (active, stale):
                 for run in section.get("data") or []:
                     run["_hidden"] = bool(run.get("request_id") in hidden_ids)
@@ -799,7 +804,9 @@ def dashboard_router(settings: Settings) -> APIRouter:
         db: Database | None = getattr(request.app.state, "db", None)
         hidden_count = 0
         if db is not None and db.configured:
-            hidden_ids = await db.hidden_request_ids()
+            hidden_ids = await db.hidden_request_ids(
+                subset=[it.get("request_id") for it in items]
+            )
             for it in items:
                 it["_hidden"] = bool(it.get("request_id") in hidden_ids)
                 if it["_hidden"]:
@@ -868,10 +875,12 @@ def dashboard_router(settings: Settings) -> APIRouter:
         items = _refine_attention(
             await dms.list_action_required(actor=_actor(user, settings))
         )
-        # filter portal-side dismissed items (graceful if no portal DB configured)
-        db: Database = request.app.state.db
-        if db.configured:
-            dismissed = await db.dismissed_fingerprints()
+        # filter portal-side dismissed items (graceful if no portal DB configured).
+        # Only look up the fingerprints on screen (bounded) — O(items), not O(table).
+        db: Database | None = getattr(request.app.state, "db", None)
+        if db is not None and db.configured:
+            fps = [it["fingerprint"] for it in items if it.get("fingerprint")]
+            dismissed = await db.dismissed_fingerprints(subset=fps)
             items = [it for it in items if it.get("fingerprint") not in dismissed]
         return items
 

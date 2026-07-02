@@ -174,6 +174,13 @@ def _ddl(schema: str) -> list[str]:
         # un-hiding it (un-hiding would resurface terminated jobs in 과거 작업 이력).
         f"ALTER TABLE {s}.attention_dismissals ADD COLUMN IF NOT EXISTS archived "
         f"boolean NOT NULL DEFAULT false",
+        # keep the dismiss layer's queries O(screen), not O(table), as it accrues:
+        # 처리 내역 list = (archived,dismissed_at) newest-first; the 액티비티/워커 hide
+        # filter = request_id = ANY(...) lookup.
+        f"CREATE INDEX IF NOT EXISTS attention_dismissals_active "
+        f"ON {s}.attention_dismissals(archived, dismissed_at DESC)",
+        f"CREATE INDEX IF NOT EXISTS attention_dismissals_request_id "
+        f"ON {s}.attention_dismissals(request_id) WHERE request_id IS NOT NULL",
         # migration: the FK was auto-named backup_jobs_batch_id_fkey when the table
         # was first created as backup_jobs (before the backup_jobs->backup_requests
         # rename, which doesn't rename constraints). Rename it to match the table.
@@ -956,31 +963,57 @@ class Database:
 
     # --- attention dismissals (조치 필요 숨김/acknowledge) ----------------
 
-    async def dismissed_fingerprints(self) -> set[str]:
+    async def dismissed_fingerprints(
+        self, subset: list[str] | None = None
+    ) -> set[str]:
+        """Dismissed fingerprints. Pass `subset` (the fingerprints currently on screen)
+        to fetch ONLY the dismissed ones among them (WHERE fingerprint = ANY, PK lookup)
+        — O(screen) instead of O(table), so an accruing dismiss history never slows the
+        polled 조치 필요 filter. subset=None returns all (kept for callers that need it)."""
         async with self.pool.connection() as conn:
-            cur = await conn.execute("SELECT fingerprint FROM attention_dismissals")
+            if subset is not None:
+                if not subset:
+                    return set()
+                cur = await conn.execute(
+                    "SELECT fingerprint FROM attention_dismissals WHERE fingerprint = ANY(%s)",
+                    (list(subset),),
+                )
+            else:
+                cur = await conn.execute("SELECT fingerprint FROM attention_dismissals")
             return {r["fingerprint"] for r in await cur.fetchall()}
 
-    async def hidden_request_ids(self) -> set[str]:
-        """request_ids of requests hidden via the 조치 필요 dismiss/ack layer, so the
-        액티비티 요청 목록 can hide the SAME requests too (consistency). Matches ONLY on
-        request_id (captured at dismiss time) — an exact 1:1 with the activity row.
-        Deliberately NOT resource_key: a resource has many lifecycle requests, and the
-        operator dismissed one alert, not the whole request history. Includes archived
-        rows (archived stays hidden from 조치 필요)."""
+    async def hidden_request_ids(self, subset: list[str] | None = None) -> set[str]:
+        """request_ids hidden via the 조치 필요 dismiss/ack layer, so 액티비티 요청 목록
+        + 워커 실행 현황 hide the SAME requests (consistency). Matches ONLY on request_id
+        (exact 1:1 with the row) — deliberately NOT resource_key: a resource has many
+        lifecycle requests and the operator dismissed one alert, not the whole history.
+        Pass `subset` (request_ids currently on screen) to fetch only the hidden ones
+        among them (WHERE request_id = ANY, indexed) — O(screen) not O(table). Includes
+        archived rows (archived stays hidden from 조치 필요)."""
         async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT request_id FROM attention_dismissals WHERE request_id IS NOT NULL"
-            )
-            return {r["request_id"] for r in await cur.fetchall()}
+            if subset is not None:
+                ids = [i for i in subset if i]
+                if not ids:
+                    return set()
+                cur = await conn.execute(
+                    "SELECT request_id FROM attention_dismissals WHERE request_id = ANY(%s)",
+                    (ids,),
+                )
+            else:
+                cur = await conn.execute(
+                    "SELECT request_id FROM attention_dismissals WHERE request_id IS NOT NULL"
+                )
+            return {r["request_id"] for r in await cur.fetchall() if r["request_id"]}
 
-    async def list_dismissals(self) -> list[dict[str, Any]]:
+    async def list_dismissals(self, *, limit: int = 1000) -> list[dict[str, Any]]:
         # archived('이전 정리'된) rows stay hidden from 조치 필요 but drop out of the
-        # 처리 내역 list.
+        # 처리 내역 list. Newest-first + bounded LIMIT (idx_attention_dismissals_active)
+        # so the list never renders/fetches an unbounded set as dismissals accrue.
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT * FROM attention_dismissals WHERE archived = false "
-                "ORDER BY dismissed_at DESC"
+                "ORDER BY dismissed_at DESC LIMIT %s",
+                (limit,),
             )
             return await cur.fetchall()
 

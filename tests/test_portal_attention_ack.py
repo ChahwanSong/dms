@@ -76,11 +76,12 @@ class FakeDb:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
 
-    async def list_dismissals(self):
-        return [dict(r) for r in self.rows.values() if not r.get("archived")]
+    async def list_dismissals(self, *, limit: int = 1000):
+        return [dict(r) for r in self.rows.values() if not r.get("archived")][:limit]
 
-    async def dismissed_fingerprints(self):
-        return set(self.rows.keys())
+    async def dismissed_fingerprints(self, subset=None):
+        fps = set(self.rows.keys())
+        return fps & set(subset) if subset is not None else fps
 
     async def add_dismissals(self, items, dismissed_by):
         for i in items:
