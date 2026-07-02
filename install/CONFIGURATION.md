@@ -374,7 +374,8 @@ Target cluster:
 ```bash
 kubectl --context cluster-a apply -f install/kubernetes/target-cluster-rbac.yaml
 kubectl --context cluster-a apply -f /tmp/dms-agent-daemonset.yaml
-kubectl --context cluster-a -n dms rollout status daemonset/dms-rm-agent --timeout=180s
+# manifest는 RM·DM DaemonSet을 모두 배포하므로 둘 다 rollout 확인한다.
+kubectl --context cluster-a -n dms rollout status daemonset/dms-rm-agent daemonset/dms-dm-agent --timeout=180s
 ```
 
 여러 target cluster를 관리한다면 cluster별로 반복한다.

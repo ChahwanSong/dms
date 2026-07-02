@@ -252,7 +252,8 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 ### Agent ConfigMap 자동 동기화
 
 POST/PATCH/DELETE 시 `dms-agent-storages` ConfigMap이 자동으로 동기화된다.
-수동 편집 불필요. 동기화 후 Agent는 재시작해야 새 설정을 반영한다.
+수동 편집 불필요. 단, Agent는 startup에 storages.json을 한 번만 읽으므로(loop에서 재읽기
+안 함) **동기화 후 재시작해야 새 설정을 반영한다.**
 
 ConfigMap 내용 확인:
 
@@ -260,11 +261,15 @@ ConfigMap 내용 확인:
 ssh ion2401 "kubectl -n dms get configmap dms-agent-storages -o jsonpath='{.data.storages\.json}'" | jq '.storages[].storage_name'
 ```
 
-변경 후 Agent rollout:
+변경 후 Agent rollout — RM·DM **둘 다** (새 storage의 `resource_management`는 RM agent,
+`data_management`는 DM agent가 채우므로 하나만 재시작하면 나머지 축이 Missing으로 남는다):
 
 ```bash
-ssh ion2401 "kubectl -n dms rollout restart daemonset/dms-rm-agent && \
-  kubectl -n dms rollout status daemonset/dms-rm-agent --timeout=120s"
+ssh ion2401 "kubectl -n dms rollout restart daemonset/dms-rm-agent daemonset/dms-dm-agent && \
+  kubectl -n dms rollout status daemonset/dms-rm-agent daemonset/dms-dm-agent --timeout=180s"
+# 반영 확인: 새 storage가 (마운트된 노드에서) Ready 로 나오는지
+POD=$(ssh ion2401 "kubectl -n dms get pods -l app.kubernetes.io/name=dms-dm-agent -o jsonpath='{.items[0].metadata.name}'")
+ssh ion2401 "kubectl -n dms exec $POD -- dms agent-probe --once" | jq '.mounts[] | {storage_name,status}'
 ```
 
 RBAC이 없는 경우(403 에러) 다음을 적용한다:

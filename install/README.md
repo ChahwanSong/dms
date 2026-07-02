@@ -729,8 +729,9 @@ DMS_AGENT_HOST_ROOT: "/host"
 
 ```bash
 kubectl --context cluster-a apply -f /tmp/dms-agent-daemonset.yaml
-kubectl --context cluster-a -n dms rollout status daemonset/dms-rm-agent --timeout=180s
-kubectl --context cluster-a -n dms get pods -l app.kubernetes.io/name=dms-rm-agent -o wide
+# manifest는 RM·DM DaemonSet을 모두 배포하므로 둘 다 확인한다.
+kubectl --context cluster-a -n dms rollout status daemonset/dms-rm-agent daemonset/dms-dm-agent --timeout=180s
+kubectl --context cluster-a -n dms get pods -l dms.io/worker-role -o wide
 ```
 
 Data Management live execution을 운영하려면 DM Agent report가 Fresh여야 한다.
