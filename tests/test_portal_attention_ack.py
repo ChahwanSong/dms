@@ -101,6 +101,17 @@ class FakeDb:
                 n += 1
         return n
 
+    async def list_archived_dismissals(self, *, limit: int = 1000):
+        return [dict(r) for r in self.rows.values() if r.get("archived")][:limit]
+
+    async def unarchive_dismissals(self, fingerprints):
+        n = 0
+        for f in fingerprints:
+            if f in self.rows and self.rows[f].get("archived"):
+                self.rows[f]["archived"] = False
+                n += 1
+        return n
+
     async def archive_dismissals(self, fingerprints, *, archived_by="operator"):
         for f in fingerprints:
             if f in self.rows:
@@ -245,6 +256,27 @@ def test_dismissed_does_not_duplicate_or_resurrect_archived():
 
 
 # --- archive keeps the server-side ack in effect ----------------------------
+
+def test_archive_then_unarchive_restores_to_dismissed():
+    dms = FakeDms()
+    db = FakeDb()
+    c = make_client(dms, db)
+    fp = "filesystem_soft_deleted|d9"
+    c.post(f"{DASH}/attention/dismiss", json={"items": [
+        {"fingerprint": fp, "issue_type": "filesystem_soft_deleted", "kind": "dismissed"}]})
+    # 영구숨김(archive): gone from 처리 내역, present in 영구숨김 항목
+    c.post(f"{DASH}/attention/archive", json={"fingerprints": [fp]})
+    assert db.rows[fp]["archived"] is True
+    assert not any(d["fingerprint"] == fp for d in c.get(f"{DASH}/attention/dismissed").json())
+    archived = c.get(f"{DASH}/attention/archived").json()
+    assert [a["fingerprint"] for a in archived] == [fp]
+    # 처리내역으로 복원(unarchive): back in 처리 내역, gone from 영구숨김 항목
+    r = c.post(f"{DASH}/attention/unarchive", json={"fingerprints": [fp]})
+    assert r.json() == {"restored": 1}
+    assert db.rows[fp]["archived"] is False
+    assert c.get(f"{DASH}/attention/archived").json() == []
+    assert any(d["fingerprint"] == fp for d in c.get(f"{DASH}/attention/dismissed").json())
+
 
 def test_archive_keeps_dms_ack_and_hides_from_list():
     dms = FakeDms()

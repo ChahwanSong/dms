@@ -1017,10 +1017,35 @@ class Database:
             )
             return await cur.fetchall()
 
+    async def list_archived_dismissals(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        """'영구숨김'된 rows (archived=true) — hidden from 조치 필요/액티비티 AND dropped
+        from the 처리 내역 list, listed here so they can be restored (unarchive)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM attention_dismissals WHERE archived = true "
+                "ORDER BY dismissed_at DESC LIMIT %s",
+                (limit,),
+            )
+            return await cur.fetchall()
+
+    async def unarchive_dismissals(self, fingerprints: list[str]) -> int:
+        """'처리내역으로 복원': clear the archived flag — the row returns to the 처리 내역
+        list (still dismissed/hidden from 조치 필요; the operator can then fully restore
+        it there). Inverse of archive_dismissals."""
+        if not fingerprints:
+            return 0
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE attention_dismissals SET archived = false "
+                "WHERE fingerprint = ANY(%s)",
+                (fingerprints,),
+            )
+            return cur.rowcount
+
     async def archive_dismissals(
         self, fingerprints: list[str], *, archived_by: str = "operator"
     ) -> int:
-        """'이전 정리': flag records archived — they stay in dismissed_fingerprints
+        """'영구숨김': flag records archived — they stay in dismissed_fingerprints
         (so the item never resurfaces in 조치 필요/이력) but leave the 처리 내역 list.
         Upserts an archived stub for a fingerprint with no local row (e.g. a DMS
         server-side ack surfaced by the merge but never mirrored here), so archiving

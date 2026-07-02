@@ -1040,6 +1040,13 @@ export const operatorApi = {
         method: "POST",
         body: JSON.stringify({ fingerprints }),
       }),
+    archivedAttention: () =>
+      request<DismissedItem[]>("/api/operator/dashboard/attention/archived"),
+    unarchiveAttention: (fingerprints: string[]) =>
+      request<{ restored: number }>("/api/operator/dashboard/attention/unarchive", {
+        method: "POST",
+        body: JSON.stringify({ fingerprints }),
+      }),
     resolveRequest: (requestId: string, resolution: "abandon" | "succeeded", reason: string) =>
       request<{ request_id: string; resolved_to: string }>(
         `/api/operator/dashboard/requests/${encodeURIComponent(requestId)}/resolve`,

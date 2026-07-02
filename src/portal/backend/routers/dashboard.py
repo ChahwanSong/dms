@@ -991,14 +991,32 @@ def dashboard_router(settings: Settings) -> APIRouter:
         db: Database = Depends(get_db),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
-        # '이전 정리': archive (keep hidden, drop from 처리 내역) — does NOT un-hide, so
-        # terminated items don't resurface in 조치 필요/과거 이력, and a server-side ack
-        # stays in effect (we intentionally do NOT un-ack here).
+        # '영구숨김': archive (keep hidden EVERYWHERE, drop from 처리 내역) — does NOT
+        # un-hide, so terminated items don't resurface in 조치 필요/이력/액티비티, and a
+        # server-side ack stays in effect (we intentionally do NOT un-ack here).
+        # Reversible only via /attention/unarchive (영구숨김 항목 → 처리내역 복원).
         n = await db.archive_dismissals(
             [f for f in body.fingerprints if f],
             archived_by=str(user.get("username") or "operator"),
         )
         return {"archived": n}
+
+    @router.get("/attention/archived")
+    async def attention_archived(
+        db: Database = Depends(get_db),
+    ) -> list[dict[str, Any]]:
+        # 영구숨김된 항목 목록 (복원 대상).
+        return await db.list_archived_dismissals()
+
+    @router.post("/attention/unarchive")
+    async def attention_unarchive(
+        body: FingerprintsIn,
+        db: Database = Depends(get_db),
+    ) -> dict[str, Any]:
+        # 영구숨김 → 처리 내역으로 되돌림 (archived=false). 조치 필요에서 숨김 상태는
+        # 그대로(처리 내역에 다시 나타남); 완전 복원은 거기서 '복원'.
+        n = await db.unarchive_dismissals([f for f in body.fingerprints if f])
+        return {"restored": n}
 
     @router.post("/requests/{request_id}/resolve")
     async def resolve_request(
