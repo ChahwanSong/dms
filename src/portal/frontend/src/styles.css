@@ -160,35 +160,6 @@ button.primary:disabled {
   text-align: center;
 }
 
-.success {
-  color: #6ee7a8;
-  font-size: 0.85rem;
-  margin: 1rem 0 0;
-  text-align: center;
-}
-
-/* operator tab sub-mode switch (로그인 / 계정 만들기 / 비밀번호 재설정) */
-.subtabs {
-  display: flex;
-  gap: 0.4rem;
-  margin-bottom: 1rem;
-}
-.subtab {
-  flex: 1;
-  padding: 0.38rem 0.4rem;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  cursor: pointer;
-  font-size: 0.8rem;
-  white-space: nowrap;
-}
-.subtab.active {
-  color: var(--fg);
-  border-color: var(--accent);
-  background: rgba(59, 130, 246, 0.12);
-}
 
 .notice {
   font-size: 0.82rem;
@@ -203,6 +174,259 @@ button.primary:disabled {
 
 .notice strong {
   color: var(--fg);
+}
+
+/* ============================================================================
+   Login — front door to the DMS control plane. Systems-console aesthetic,
+   cohesive with the dark operator console you land in.
+   ========================================================================== */
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(1100px 560px at 50% -12%, rgba(56, 189, 248, 0.10), transparent 60%),
+    radial-gradient(820px 460px at 88% 118%, rgba(59, 130, 246, 0.09), transparent 55%),
+    #0a0f1c;
+  background-attachment: fixed;
+  position: relative;
+}
+/* faint console grid */
+.login-page::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(680px 480px at 50% 30%, #000, transparent 78%);
+  mask-image: radial-gradient(680px 480px at 50% 30%, #000, transparent 78%);
+  pointer-events: none;
+}
+.login-card {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  background: linear-gradient(180deg, #131c30, #0f1626);
+  border: 1px solid #223049;
+  border-radius: 16px;
+  padding: 1.9rem 1.8rem 1.35rem;
+  box-shadow: 0 26px 64px -22px rgba(0, 0, 0, 0.75);
+}
+
+.login-head { text-align: center; margin-bottom: 1.5rem; }
+.login-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.login-glyph { width: 30px; height: 30px; }
+.login-word {
+  font-size: 1.55rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: #f1f5f9;
+  line-height: 1;
+}
+.login-word-sub { color: #7dd3fc; font-weight: 500; margin-left: 0.28rem; }
+.login-eyebrow {
+  margin: 0.62rem 0 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.28em;
+  color: #64748b;
+}
+
+/* role selector — two authentication lanes */
+.login-roles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  padding: 0.3rem;
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  margin-bottom: 1.2rem;
+}
+.login-role {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  align-items: flex-start;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+.login-role:hover { color: #cbd5e1; }
+.login-role.active {
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.18), rgba(59, 130, 246, 0.08));
+  border-color: rgba(59, 130, 246, 0.55);
+  color: #f1f5f9;
+}
+.login-role-t { font-size: 0.92rem; font-weight: 650; }
+.login-role-s {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.02em;
+  color: #64748b;
+}
+.login-role.active .login-role-s { color: #93c5fd; }
+
+/* operator sub-mode segmented control */
+.login-subtabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1.05rem;
+  border-bottom: 1px solid #1e293b;
+}
+.login-subtab {
+  flex: 1;
+  padding: 0.5rem 0.3rem 0.6rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+.login-subtab:hover { color: #cbd5e1; }
+.login-subtab.active { color: #f1f5f9; border-bottom-color: #38bdf8; }
+
+.login-form { display: flex; flex-direction: column; gap: 0.9rem; }
+.login-field { display: flex; flex-direction: column; gap: 0.35rem; }
+.login-lbl {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: #cbd5e1;
+}
+.login-hint {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.66rem;
+  color: #64748b;
+  font-weight: 400;
+}
+.login-field input {
+  padding: 0.62rem 0.72rem;
+  border-radius: 9px;
+  border: 1px solid #263450;
+  background: #0a1120;
+  color: #e6edf3;
+  font-size: 0.92rem;
+  transition: border-color 0.14s, box-shadow 0.14s;
+}
+.login-field input::placeholder { color: #475569; }
+.login-field input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
+}
+/* operator secret token — distinct amber treatment */
+.login-field--secret .login-lbl { color: #f4c672; }
+.login-ic { width: 14px; height: 14px; color: #f59e0b; }
+.login-field--secret input {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.05), #0a1120);
+}
+.login-field--secret input:focus {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
+}
+
+.login-primary {
+  margin-top: 0.15rem;
+  padding: 0.72rem;
+  border: none;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #3b82f6, #2563eb);
+  color: #fff;
+  font-weight: 650;
+  font-size: 0.94rem;
+  cursor: pointer;
+  transition: filter 0.14s, opacity 0.14s;
+}
+.login-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.login-primary:disabled { opacity: 0.5; cursor: default; }
+
+.login-note {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: #94a3b8;
+}
+.login-note strong { color: #e2e8f0; }
+.login-dim { color: #64748b; }
+.login-foot-note {
+  margin: 0.1rem 0 0;
+  font-size: 0.76rem;
+  color: #64748b;
+  line-height: 1.5;
+}
+.login-foot-note strong { color: #93c5fd; }
+.login-warn {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #f4c672;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.38);
+  border-radius: 9px;
+  padding: 0.65rem 0.75rem;
+}
+.login-warn code { color: #fbdca0; }
+.login-ok {
+  margin: 0.95rem 0 0;
+  font-size: 0.84rem;
+  color: #6ee7a8;
+  text-align: center;
+}
+.login-error {
+  margin: 0.95rem 0 0;
+  font-size: 0.84rem;
+  color: #f87171;
+  text-align: center;
+}
+
+/* signature: the storage backends DMS orchestrates, as a quiet status strip */
+.login-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  justify-content: center;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #1a2436;
+}
+.login-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.02em;
+  color: #64748b;
+}
+.login-chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-role, .login-subtab, .login-field input, .login-primary { transition: none; }
 }
 
 .badge {
