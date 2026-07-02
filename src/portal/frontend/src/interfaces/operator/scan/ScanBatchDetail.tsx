@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { operatorApi, type ScanBatch, type ScanRequest } from "../../../api";
+import { operatorApi, type ScanBatch, type ScanRequest, type JobDetail } from "../../../api";
 import VirtualRows from "../../../components/VirtualRows";
 import {
   batchStatus,
@@ -45,10 +45,61 @@ function hasDetail(j: ScanRequest): boolean {
   return Boolean(j.result || j.error || j.dms_job_id);
 }
 
+// epoch ms + human-readable duration (mirrors backup detail).
+const tms = (iso?: string | null) => (iso ? new Date(iso).getTime() : NaN);
+const TERMINAL_JOB_STATES = ["Succeeded", "Failed", "Cancelled", "Rejected", "PreviewExpired", "BackendApplyFailed"];
+const isTerminalJob = (state?: string | null) => !!state && TERMINAL_JOB_STATES.includes(state);
+function fmtDuration(ms: number): string {
+  if (!isFinite(ms) || ms < 0) return "—";
+  const totalS = ms / 1000;
+  if (totalS < 60) return `${totalS < 10 ? totalS.toFixed(1) : Math.round(totalS)}초`;
+  const s = Math.round(totalS);
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}분 ${s % 60}초`;
+  const h = Math.floor(m / 60);
+  return `${h}시간 ${m % 60}분`;
+}
+
 // Rich, structured per-request detail: scan path, result metrics, identifiers,
 // and any error. Only fields actually present are shown.
-function RequestDetail({ j, roots }: { j: ScanRequest; roots: Record<string, string> }) {
+function RequestDetail({
+  j,
+  roots,
+  batchId,
+}: {
+  j: ScanRequest;
+  roots: Record<string, string>;
+  batchId: string;
+}) {
   const r = j.result;
+
+  const [job, setJob] = useState<JobDetail | null>(null);
+  const [jobLoading, setJobLoading] = useState(false);
+  useEffect(() => {
+    if (!j.dms_job_id) return;
+    let alive = true;
+    setJobLoading(true);
+    operatorApi.scan
+      .job(batchId, j.id)
+      .then((d) => { if (alive) setJob(d); })
+      .catch(() => {})
+      .finally(() => { if (alive) setJobLoading(false); });
+    return () => { alive = false; };
+  }, [batchId, j.id, j.dms_job_id]);
+
+  const created = job?.created_at;
+  const started = job?.started_at;
+  const finished = job?.finished_at || (isTerminalJob(job?.state) ? job?.updated_at : null);
+  const timing: KV[] = [];
+  if (created) timing.push({ label: "생성", value: fmtTime(created) });
+  if (started) timing.push({ label: "시작", value: fmtTime(started) });
+  if (finished) timing.push({ label: "완료", value: fmtTime(finished) });
+  if (started && finished)
+    timing.push({ label: "수행시간", value: fmtDuration(tms(finished) - tms(started)), tone: "kv-strong" });
+  else if (created && finished)
+    timing.push({ label: "소요시간 (생성→완료)", value: fmtDuration(tms(finished) - tms(created)), tone: "kv-strong" });
+  if (created && started)
+    timing.push({ label: "대기 (생성→시작)", value: fmtDuration(tms(started) - tms(created)) });
 
   const res: KV[] = [];
   if (r) {
@@ -90,6 +141,17 @@ function RequestDetail({ j, roots }: { j: ScanRequest; roots: Record<string, str
         <section className="req-sec">
           <h4>atime 데이터 온도 · 용량 (hot → cold)</h4>
           <ScanHistFull hist={r.atime_histogram} />
+        </section>
+      )}
+
+      {(timing.length > 0 || jobLoading) && (
+        <section className="req-sec">
+          <h4>타이밍</h4>
+          {timing.length > 0 ? (
+            <SpecGrid items={timing} />
+          ) : (
+            <span className="muted small">불러오는 중…</span>
+          )}
         </section>
       )}
 
@@ -705,7 +767,8 @@ export default function ScanBatchDetail({
                     />
                   </label>
                 </div>
-                <div className="vcell vc-primary mono small" data-label="경로">
+                <div className="vcell vc-primary vc-path mono small" data-label="경로"
+                  title={`${j.storage}:${j.path}`}>
                   {j.path}
                 </div>
                 <div className="vcell" data-label="상태">
@@ -756,7 +819,7 @@ export default function ScanBatchDetail({
               </div>
               {isOpen && expandable && (
                 <div className="vdetail">
-                  <RequestDetail j={j} roots={roots} />
+                  <RequestDetail j={j} roots={roots} batchId={batchId} />
                 </div>
               )}
             </div>

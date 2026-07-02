@@ -766,6 +766,7 @@ button.linklike {
   padding: 0.12rem 0.5rem;
   border-radius: 999px;
   border: 1px solid currentColor;
+  white-space: nowrap;
 }
 .san-ready {
   color: #34d399;
@@ -1559,6 +1560,8 @@ textarea.json {
 .spec-kv dd { margin: 0; font-size: 0.85rem; color: var(--fg); overflow-wrap: break-word; }
 .spec-kv dd.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.8rem; overflow-wrap: anywhere; }
 .tone-danger-text { color: var(--error) !important; }
+/* emphasized spec value (e.g. 수행시간) */
+.kv-strong { font-weight: 700; color: #cfe3ff; }
 .tone-warn-text { color: #fbbf24 !important; }
 /* 요청(전체) 대상 경로: 길면 말줄임 (툴팁에 전체) */
 .req-target { max-width: 20rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2026,8 +2029,10 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
 .vdetail { padding: 0 0.6rem 0.4rem 1.8rem; background: rgba(255, 255, 255, 0.02); }
 
 /* per-screen column templates (header + rows MUST match to stay aligned) */
-.vgrid-bk { grid-template-columns: 1.8rem 2.2rem minmax(0, 2fr) minmax(0, 2fr) 6rem minmax(0, 1fr) minmax(0, 1.3fr) auto; }
-.vgrid-sc { grid-template-columns: 1.8rem 2.2rem minmax(0, 2fr) 6rem minmax(0, 1fr) minmax(8rem, 1.2fr) minmax(0, 1fr) auto; }
+.vgrid-bk { grid-template-columns: 1.6rem 2rem minmax(6rem, 1.5fr) minmax(6rem, 1.5fr) 5.5rem minmax(4.5rem, 0.9fr) minmax(6rem, 1.5fr) auto; }
+.vgrid-sc { grid-template-columns: 1.6rem 2rem minmax(8rem, 2fr) 5.5rem minmax(4.5rem, 0.9fr) minmax(8rem, 1.3fr) minmax(5rem, 0.9fr) auto; }
+/* paths ellipsis (full value in title) — never char-wrap in a narrow column */
+.vc-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 @media (max-width: 720px) {
   .vscroll { height: min(78vh, 1000px); }
