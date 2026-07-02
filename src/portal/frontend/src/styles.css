@@ -1435,6 +1435,14 @@ textarea.json {
 .attn2-label { font-weight: 600; font-size: 0.86rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .attn2-ident { font-size: 0.74rem; color: #9aa4b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .attn2-action { font-size: 0.76rem; color: #9aa4b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 처리 내역 · 영구숨김 rows are non-expandable summary lists, so the identifier must
+   never be hidden behind an ellipsis. The resource key sits on its own line and WRAPS,
+   and the label/action wrap too (full text always visible; raw key in the title). */
+.attn2-res { font-size: 0.76rem; color: #b7c0cc; line-height: 1.4; overflow-wrap: anywhere; word-break: break-word; }
+.attn2-row.dismissed .attn2-label { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+.attn2-row.dismissed .attn2-action { white-space: normal; overflow: visible; text-overflow: clip; }
+.attn2-row.dismissed .attn2-main { gap: 0.24rem; }
+.attn2-row.dismissed .attn2-head { flex-wrap: wrap; align-items: center; row-gap: 0.2rem; }
 .attn2-tag { display: inline-block; font-size: 0.6rem; font-weight: 700; color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.5); border-radius: 4px; padding: 0.02rem 0.32rem; margin-right: 0.4rem; vertical-align: 0.06em; }
 .attn2-when { flex: none; white-space: nowrap; }
 .attn2-caret { color: #9aa4b2; font-size: 0.8rem; text-align: center; }

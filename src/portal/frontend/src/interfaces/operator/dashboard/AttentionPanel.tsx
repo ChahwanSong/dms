@@ -352,6 +352,24 @@ function dKey(d: DismissedItem): string {
   return key || str(d.job_id) || str(d.request_id) || "";
 }
 
+// A readable resource descriptor from a fingerprint key. Data-job keys are verbose
+// (data.<op>:<srcStore>:<srcPath>:<dstStore>:<dstPath>:sha256:<hash>) — collapse them
+// to "op · src → dst" (or "op · path" for scan/rm) and drop the sha256 noise, so the
+// 처리 내역 / 영구숨김 lists stay scannable. Other keys pass through unchanged.
+function friendlyKey(key: string): string {
+  if (!key) return "";
+  if (key.startsWith("data.")) {
+    const parts = key.split(":");
+    const op = parts[0].slice("data.".length); // sync / scan / rm
+    const sha = parts.indexOf("sha256");
+    const body = (sha > 0 ? parts.slice(1, sha) : parts.slice(1)).filter(Boolean);
+    if (body.length >= 4) return `${op} · ${body[0]}:${body[1]} → ${body[2]}:${body[3]}`;
+    if (body.length >= 2) return `${op} · ${body[0]}:${body[1]}`;
+    return body.length ? `${op} · ${body.join(":")}` : op;
+  }
+  return key;
+}
+
 function DismissedList({
   rows, total, dir, onToggleSort, selected, onToggleSel, onToggleSelAll, onClearSel,
   onUndismiss, onUndismissAll, onArchive, onArchiveBefore, onAck, onDelete, onResolve, busy,
@@ -459,8 +477,10 @@ function DismissedList({
                       </span>
                       <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
                       <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
-                      {ident && <span className="attn2-ident mono">{ident}</span>}
                     </span>
+                    {ident && (
+                      <span className="attn2-res mono" title={ident}>{friendlyKey(ident)}</span>
+                    )}
                     <span className="attn2-action muted small">
                       {d.dismissed_by || "operator"}
                       {dCanDelete(d) ? " · data job" : dCanResolve(d) ? " · request" : ""}
@@ -813,8 +833,10 @@ function ArchivedSection({
                       <span className="chip tone-low attn2-archive-chip">영구숨김</span>
                       <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
                       <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
-                      {ident && <span className="attn2-ident mono">{ident}</span>}
                     </span>
+                    {ident && (
+                      <span className="attn2-res mono" title={ident}>{friendlyKey(ident)}</span>
+                    )}
                     <span className="attn2-action muted small">
                       {d.dismissed_by || "operator"}{d.reason ? ` · ${d.reason}` : ""}
                     </span>
