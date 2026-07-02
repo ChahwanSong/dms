@@ -7,11 +7,15 @@ export default function Section({
   title,
   badge,
   defaultOpen = false,
+  onOpenChange,
   children,
 }: {
   title: string;
   badge?: ReactNode;
   defaultOpen?: boolean;
+  // fired with the new open state on toggle — lets a section lazy-load its body
+  // (e.g. fetch the first page of a list) only when the operator actually expands it.
+  onOpenChange?: (open: boolean) => void;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -21,7 +25,11 @@ export default function Section({
         type="button"
         className="dash-section-head"
         aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          onOpenChange?.(next);
+        }}
       >
         <span className="dash-caret">{open ? "▾" : "▸"}</span>
         <h3>{title}</h3>

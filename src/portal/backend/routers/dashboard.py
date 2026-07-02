@@ -1003,12 +1003,21 @@ def dashboard_router(settings: Settings) -> APIRouter:
 
     @router.get("/attention/archived")
     async def attention_archived(
+        offset: int = 0,
+        limit: int = 50,
+        order: str = "desc",
         db: Database = Depends(get_db),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
-    ) -> list[dict[str, Any]]:
-        # 영구숨김된 항목 목록 (복원 대상). Role-gated at the router too; explicit here
-        # for parity with the sibling attention endpoints (defense in depth).
-        return await db.list_archived_dismissals()
+    ) -> dict[str, Any]:
+        # 영구숨김된 항목 목록 (복원 대상) — 화면에 펼친 페이지만 로딩(offset/limit).
+        # 영구숨김은 forever-누적되는 rarely-opened 복원 휴지통이라, 프론트는 배지/빈상태
+        # 판정용 total(COUNT 1개)만 항상 가져오고 rows는 섹션을 펼칠 때 페이지 단위로만
+        # 받는다 → 누적돼도 로딩은 O(page) 고정. limit=0이면 total만(행 미전송).
+        # Role-gated at the router too; explicit dep here for parity (defense in depth).
+        limit = max(0, min(int(limit), 200))
+        total = await db.count_archived_dismissals()
+        items = await db.list_archived_dismissals(limit=limit, offset=offset, order=order)
+        return {"items": items, "total": total}
 
     @router.post("/attention/unarchive")
     async def attention_unarchive(

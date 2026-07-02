@@ -556,6 +556,155 @@ const dismToAckPayload = (rows: DismissedItem[], kind: "ack" | "dismissed") =>
     item_at: d.item_at ?? null,
   }));
 
+// 영구숨김 항목 (archived) — a forever-growing restore bin. Its body is fetched
+// LAZILY (only when the operator expands the section) and one PAGE at a time
+// ('더 보기'), so an unbounded archive never loads/renders all at once. The parent
+// supplies the authoritative COUNT (`total`) for the badge/visibility; this
+// component owns the paged rows + selection + restore(unarchive).
+const ARCH_PAGE = 50;
+function ArchivedSection({
+  total,
+  busy,
+  onChanged,
+}: {
+  total: number;
+  busy: boolean;
+  onChanged: () => void;
+}) {
+  const [items, setItems] = useState<DismissedItem[]>([]);
+  const [sort, setSort] = useState<"desc" | "asc">("desc");
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
+  const [done, setDone] = useState(false); // last page returned < PAGE → no more
+  const [everOpened, setEverOpened] = useState(false);
+
+  const load = useCallback(async (offset: number, order: "desc" | "asc") => {
+    setLoading(true);
+    try {
+      const res = await operatorApi.dashboard.archivedAttention(offset, ARCH_PAGE, order);
+      setItems((prev) => (offset === 0 ? res.items : [...prev, ...res.items]));
+      setDone(res.items.length < ARCH_PAGE);
+    } catch (e) {
+      window.alert(`영구숨김 목록 불러오기 실패: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // fetch the first page the first time the section is expanded (not on mount).
+  const onOpen = (open: boolean) => {
+    if (open && !everOpened) {
+      setEverOpened(true);
+      load(0, sort);
+    }
+  };
+  const flipSort = () => {
+    const next = sort === "desc" ? "asc" : "desc";
+    setSort(next);
+    setSel(new Set());
+    load(0, next); // re-page from the top in the new order
+  };
+  const loadMore = () => load(items.length, sort);
+
+  const unarchive = async (fingerprints: string[]) => {
+    if (!fingerprints.length) return;
+    setLoading(true);
+    try {
+      await operatorApi.dashboard.unarchiveAttention(fingerprints);
+    } catch (e) {
+      window.alert(`복원 실패: ${e instanceof Error ? e.message : String(e)}`);
+      setLoading(false);
+      return;
+    }
+    setSel(new Set());
+    await load(0, sort); // refresh this section's first page
+    onChanged(); // refresh parent (처리 내역 재등장 + archTotal 감소)
+    setLoading(false);
+  };
+
+  const toggleSel = (fp: string) =>
+    setSel((prev) => { const n = new Set(prev); n.has(fp) ? n.delete(fp) : n.add(fp); return n; });
+  const allSel = items.length > 0 && items.every((d) => sel.has(d.fingerprint));
+  const toggleSelAll = () =>
+    setSel((prev) => {
+      const n = new Set(prev);
+      for (const d of items) allSel ? n.delete(d.fingerprint) : n.add(d.fingerprint);
+      return n;
+    });
+
+  const disabled = busy || loading;
+  return (
+    <Section
+      title="영구숨김 항목"
+      onOpenChange={onOpen}
+      badge={<span className="muted small"><span className="attn2-archive">{total}건</span> · 복원 가능</span>}
+    >
+      <p className="muted small dism-note">
+        포탈에서 <b className="attn2-archive">완전히 가려진</b> 항목입니다 (조치 필요·과거 이력·액티비티 모두 미표시).
+        <b>처리내역으로 복원</b>하면 다시 처리 내역에 나타나며, 거기서 조치 필요로 되돌릴 수 있습니다.
+        <br />목록은 펼칠 때 <b>{ARCH_PAGE}건씩</b> 불러옵니다 (누적돼도 화면 분량만 로딩).
+      </p>
+      <div className="attn-sec-tools">
+        <label className="check-cell" style={{ marginRight: "auto" }} title="불러온 항목 전체 선택">
+          <input type="checkbox" checked={allSel} disabled={!items.length}
+            onChange={toggleSelAll} aria-label="불러온 항목 전체 선택" />
+        </label>
+        <button className="attn-sort" onClick={flipSort} disabled={disabled}
+          title="시각순 정렬 전환">{sort === "desc" ? "최신순 ↓" : "오래된순 ↑"}</button>
+      </div>
+      <div className="attn2-list">
+        {items.map((d) => {
+          const ident = dKey(d);
+          const when = d.item_at || d.dismissed_at;
+          return (
+            <div key={d.fingerprint} className="attn2 attn2-info">
+              <div className="attn2-rowwrap">
+                <label className="check-cell attn2-check" title="선택">
+                  <input type="checkbox" checked={sel.has(d.fingerprint)}
+                    onChange={() => toggleSel(d.fingerprint)} aria-label="선택" />
+                </label>
+                <div className="attn2-row dismissed">
+                  <span className="attn2-main">
+                    <span className="attn2-head">
+                      <span className="chip tone-low attn2-archive-chip">영구숨김</span>
+                      <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
+                      <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
+                      {ident && <span className="attn2-ident mono">{ident}</span>}
+                    </span>
+                    <span className="attn2-action muted small">
+                      {d.dismissed_by || "operator"}{d.reason ? ` · ${d.reason}` : ""}
+                    </span>
+                  </span>
+                  {when && <span className="attn2-when muted small" title={fmtTime(when)}>{fmtAgo(when)}</span>}
+                </div>
+                <button type="button" className="attn2-hide attn2-detail-link" disabled={disabled}
+                  title="처리 내역으로 되돌림 (다시 처리 내역에 표시 — 이후 조치 필요로 복원 가능)"
+                  onClick={() => unarchive([d.fingerprint])}>처리내역으로 복원</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {loading && !items.length && <Loading rows={2} />}
+      {!done && items.length > 0 && (
+        <div className="attn-more">
+          <button className="ghost mini" onClick={loadMore} disabled={disabled}>
+            더 보기 ({items.length} / {total})
+          </button>
+        </div>
+      )}
+      {sel.size > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{sel.size}개 선택</span>
+          <button className="primary mini" disabled={disabled}
+            onClick={() => unarchive([...sel])}>처리내역으로 복원 ({sel.size})</button>
+          <button className="ghost mini" onClick={() => setSel(new Set())}>선택 해제</button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string) => void }) {
   const [rows, setRows] = useState<AttentionItem[]>([]);
   const [dismissed, setDismissed] = useState<DismissedItem[]>([]);
@@ -570,18 +719,20 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   // multi-select (keyed by fingerprint), like the backup/scan bulk bars.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dismSel, setDismSel] = useState<Set<string>>(new Set());
-  const [archived, setArchived] = useState<DismissedItem[]>([]);
-  const [archSel, setArchSel] = useState<Set<string>>(new Set());
+  // 영구숨김은 forever-누적되는 rarely-opened 복원 휴지통이라 rows는 eager로 안 받고
+  // COUNT(정수 1개)만 받아 배지/빈상태 판정에 쓴다. 실제 rows는 ArchivedSection이
+  // 섹션을 펼칠 때 페이지 단위로 lazy 로딩한다.
+  const [archTotal, setArchTotal] = useState(0);
 
   const refetch = useCallback(async () => {
-    const [a, d, ar] = await Promise.all([
+    const [a, d, at] = await Promise.all([
       operatorApi.dashboard.attention().catch(() => [] as AttentionItem[]),
       operatorApi.dashboard.dismissedAttention().catch(() => [] as DismissedItem[]),
-      operatorApi.dashboard.archivedAttention().catch(() => [] as DismissedItem[]),
+      operatorApi.dashboard.archivedAttentionCount().catch(() => 0),
     ]);
     setRows(a);
     setDismissed(d);
-    setArchived(ar);
+    setArchTotal(at);
     // prune selections to items still present (an actioned item disappears).
     const prune = (prev: Set<string>, present: Set<string>) => {
       if (!prev.size) return prev;
@@ -590,10 +741,8 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     };
     const aFps = new Set(a.map((i) => i.fingerprint).filter(Boolean) as string[]);
     const dFps = new Set(d.map((i) => i.fingerprint));
-    const arFps = new Set(ar.map((i) => i.fingerprint));
     setSelected((prev) => prune(prev, aFps));
     setDismSel((prev) => prune(prev, dFps));
-    setArchSel((prev) => prune(prev, arFps));
   }, []);
 
   useEffect(() => {
@@ -727,21 +876,6 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     if (ok) clearSel();
   };
 
-  // ---- 영구숨김 항목 (archived) section: select + restore(unarchive) ----
-  const archToggleSel = (fp: string) =>
-    setArchSel((prev) => { const n = new Set(prev); n.has(fp) ? n.delete(fp) : n.add(fp); return n; });
-  const archToggleSelAll = (items: DismissedItem[], select: boolean) =>
-    setArchSel((prev) => {
-      const n = new Set(prev);
-      for (const d of items) select ? n.add(d.fingerprint) : n.delete(d.fingerprint);
-      return n;
-    });
-  const unarchive = (fingerprints: string[]) =>
-    run(() => operatorApi.dashboard.unarchiveAttention(fingerprints)).then((ok) => {
-      if (ok) setArchSel(new Set());
-      return ok;
-    });
-
   // ---- 처리 내역 (dismissed/ack) section selection + bulk ----
   const dismToggleSel = (fp: string) =>
     setDismSel((prev) => { const n = new Set(prev); n.has(fp) ? n.delete(fp) : n.add(fp); return n; });
@@ -828,12 +962,8 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const dismissedSorted = [...dismissed].sort((a, b) =>
     dismSort === "desc" ? dismMs(b) - dismMs(a) : dismMs(a) - dismMs(b));
 
-  const archivedSorted = [...archived].sort((a, b) =>
-    dismSort === "desc" ? dismMs(b) - dismMs(a) : dismMs(a) - dismMs(b));
-  const archAllSel = archived.length > 0 && archived.every((d) => archSel.has(d.fingerprint));
-
   if (loading) return <Loading rows={4} />;
-  if (rows.length === 0 && dismissed.length === 0 && archived.length === 0)
+  if (rows.length === 0 && dismissed.length === 0 && archTotal === 0)
     return <p className="muted">조치 필요한 항목이 없습니다. ✅</p>;
 
   return (
@@ -904,63 +1034,8 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
           onArchive={archiveDismissals}
           onAck={dismBulkAck} onDelete={dismBulkDelete} onResolve={dismBulkResolve} busy={busy} />
       </Section>
-      {archived.length > 0 && (
-        <Section title="영구숨김 항목"
-          badge={<span className="muted small"><span className="attn2-archive">{archived.length}건</span> · 복원 가능</span>}>
-          <p className="muted small dism-note">
-            포탈에서 <b className="attn2-archive">완전히 가려진</b> 항목입니다 (조치 필요·과거 이력·액티비티 모두 미표시).
-            <b>처리내역으로 복원</b>하면 다시 처리 내역에 나타나며, 거기서 조치 필요로 되돌릴 수 있습니다.
-          </p>
-          <div className="attn-sec-tools">
-            <label className="check-cell" style={{ marginRight: "auto" }} title="전체 선택">
-              <input type="checkbox" checked={archAllSel}
-                onChange={() => archToggleSelAll(archived, !archAllSel)} aria-label="전체 선택" />
-            </label>
-            <button className="attn-sort" onClick={() => setDismSort((d) => (d === "desc" ? "asc" : "desc"))}
-              title="시각순 정렬 전환">{dismSort === "desc" ? "최신순 ↓" : "오래된순 ↑"}</button>
-          </div>
-          <div className="attn2-list">
-            {archivedSorted.map((d) => {
-              const ident = dKey(d);
-              const when = d.item_at || d.dismissed_at;
-              return (
-                <div key={d.fingerprint} className="attn2 attn2-info">
-                  <div className="attn2-rowwrap">
-                    <label className="check-cell attn2-check" title="선택">
-                      <input type="checkbox" checked={archSel.has(d.fingerprint)}
-                        onChange={() => archToggleSel(d.fingerprint)} aria-label="선택" />
-                    </label>
-                    <div className="attn2-row dismissed">
-                      <span className="attn2-main">
-                        <span className="attn2-head">
-                          <span className="chip tone-low attn2-archive-chip">영구숨김</span>
-                          <span className="attn2-dom">{DOMAIN_LABEL[domainOf(d.issue_type || "")]}</span>
-                          <span className="attn2-label">{d.label || d.issue_type || d.fingerprint}</span>
-                          {ident && <span className="attn2-ident mono">{ident}</span>}
-                        </span>
-                        <span className="attn2-action muted small">
-                          {d.dismissed_by || "operator"}{d.reason ? ` · ${d.reason}` : ""}
-                        </span>
-                      </span>
-                      {when && <span className="attn2-when muted small" title={fmtTime(when)}>{fmtAgo(when)}</span>}
-                    </div>
-                    <button type="button" className="attn2-hide attn2-detail-link" disabled={busy}
-                      title="처리 내역으로 되돌림 (다시 처리 내역에 표시 — 이후 조치 필요로 복원 가능)"
-                      onClick={() => unarchive([d.fingerprint])}>처리내역으로 복원</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          {archSel.size > 0 && (
-            <div className="bulk-bar">
-              <span className="bulk-count">{archSel.size}개 선택</span>
-              <button className="primary mini" disabled={busy}
-                onClick={() => unarchive([...archSel])}>처리내역으로 복원 ({archSel.size})</button>
-              <button className="ghost mini" onClick={() => setArchSel(new Set())}>선택 해제</button>
-            </div>
-          )}
-        </Section>
+      {archTotal > 0 && (
+        <ArchivedSection total={archTotal} busy={busy} onChanged={refetch} />
       )}
     </div>
   );

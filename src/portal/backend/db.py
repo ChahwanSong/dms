@@ -1017,14 +1017,33 @@ class Database:
             )
             return await cur.fetchall()
 
-    async def list_archived_dismissals(self, *, limit: int = 1000) -> list[dict[str, Any]]:
-        """'영구숨김'된 rows (archived=true) — hidden from 조치 필요/액티비티 AND dropped
-        from the 처리 내역 list, listed here so they can be restored (unarchive)."""
+    async def count_archived_dismissals(self) -> int:
+        """Cheap total of '영구숨김'된 rows for the badge/'더 보기' — a COUNT over the
+        (archived, dismissed_at) index, so the panel can show/size the restore bin
+        WITHOUT transferring any rows (rows are fetched lazily, one page at a time)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM attention_dismissals WHERE archived = true"
+            )
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+    async def list_archived_dismissals(
+        self, *, limit: int = 50, offset: int = 0, order: str = "desc"
+    ) -> list[dict[str, Any]]:
+        """One page of '영구숨김'된 rows (archived=true) — hidden from 조치 필요/액티비티
+        AND dropped from the 처리 내역 list, listed here so they can be restored
+        (unarchive). Paginated (LIMIT/OFFSET over the (archived, dismissed_at) index)
+        so an unbounded, forever-accruing archive is loaded a screenful at a time,
+        never all at once."""
+        if limit <= 0:
+            return []
+        direction = "ASC" if str(order).lower() == "asc" else "DESC"
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT * FROM attention_dismissals WHERE archived = true "
-                "ORDER BY dismissed_at DESC LIMIT %s",
-                (limit,),
+                f"ORDER BY dismissed_at {direction} LIMIT %s OFFSET %s",
+                (limit, max(0, offset)),
             )
             return await cur.fetchall()
 

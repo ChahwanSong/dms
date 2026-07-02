@@ -101,8 +101,19 @@ class FakeDb:
                 n += 1
         return n
 
-    async def list_archived_dismissals(self, *, limit: int = 1000):
-        return [dict(r) for r in self.rows.values() if r.get("archived")][:limit]
+    def _archived_sorted(self, order: str = "desc"):
+        rows = [dict(r) for r in self.rows.values() if r.get("archived")]
+        # order is by dismissed_at in the real query; the fake preserves insertion
+        # order (dicts are ordered) and just reverses for 'desc' as a stand-in.
+        return list(reversed(rows)) if str(order).lower() != "asc" else rows
+
+    async def count_archived_dismissals(self) -> int:
+        return sum(1 for r in self.rows.values() if r.get("archived"))
+
+    async def list_archived_dismissals(self, *, limit: int = 50, offset: int = 0, order: str = "desc"):
+        if limit <= 0:
+            return []
+        return self._archived_sorted(order)[offset : offset + limit]
 
     async def unarchive_dismissals(self, fingerprints):
         n = 0
@@ -264,17 +275,21 @@ def test_archive_then_unarchive_restores_to_dismissed():
     fp = "filesystem_soft_deleted|d9"
     c.post(f"{DASH}/attention/dismiss", json={"items": [
         {"fingerprint": fp, "issue_type": "filesystem_soft_deleted", "kind": "dismissed"}]})
-    # 영구숨김(archive): gone from 처리 내역, present in 영구숨김 항목
+    # 영구숨김(archive): gone from 처리 내역, present in 영구숨김 항목 (paged {items,total})
     c.post(f"{DASH}/attention/archive", json={"fingerprints": [fp]})
     assert db.rows[fp]["archived"] is True
     assert not any(d["fingerprint"] == fp for d in c.get(f"{DASH}/attention/dismissed").json())
     archived = c.get(f"{DASH}/attention/archived").json()
-    assert [a["fingerprint"] for a in archived] == [fp]
+    assert archived["total"] == 1
+    assert [a["fingerprint"] for a in archived["items"]] == [fp]
+    # count-only (limit=0) returns the total WITHOUT transferring rows
+    count_only = c.get(f"{DASH}/attention/archived?limit=0").json()
+    assert count_only == {"items": [], "total": 1}
     # 처리내역으로 복원(unarchive): back in 처리 내역, gone from 영구숨김 항목
     r = c.post(f"{DASH}/attention/unarchive", json={"fingerprints": [fp]})
     assert r.json() == {"restored": 1}
     assert db.rows[fp]["archived"] is False
-    assert c.get(f"{DASH}/attention/archived").json() == []
+    assert c.get(f"{DASH}/attention/archived").json() == {"items": [], "total": 0}
     assert any(d["fingerprint"] == fp for d in c.get(f"{DASH}/attention/dismissed").json())
 
 

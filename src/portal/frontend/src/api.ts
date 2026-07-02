@@ -1040,8 +1040,16 @@ export const operatorApi = {
         method: "POST",
         body: JSON.stringify({ fingerprints }),
       }),
-    archivedAttention: () =>
-      request<DismissedItem[]>("/api/operator/dashboard/attention/archived"),
+    // 영구숨김 목록: 화면에 펼친 페이지만 로딩(offset/limit). {items,total} 반환 —
+    // total은 배지/빈상태·'더 보기' 판정용(누적돼도 COUNT 1개). limit=0 → total만.
+    archivedAttention: (offset = 0, limit = 50, order: "desc" | "asc" = "desc") =>
+      request<{ items: DismissedItem[]; total: number }>(
+        `/api/operator/dashboard/attention/archived?offset=${offset}&limit=${limit}&order=${order}`,
+      ),
+    archivedAttentionCount: () =>
+      request<{ items: DismissedItem[]; total: number }>(
+        "/api/operator/dashboard/attention/archived?limit=0",
+      ).then((r) => r.total),
     unarchiveAttention: (fingerprints: string[]) =>
       request<{ restored: number }>("/api/operator/dashboard/attention/unarchive", {
         method: "POST",
