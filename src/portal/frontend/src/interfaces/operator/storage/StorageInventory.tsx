@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiError, operatorApi, type StorageMapping, type FocusTarget } from "../../../api";
+import AgentRollout from "./AgentRollout";
 import { SanityBadge, ReadinessDots } from "../components/SanityBadge";
 import StorageMappingDetail from "./StorageMappingDetail";
 import StorageMappingForm from "./StorageMappingForm";
@@ -240,6 +241,8 @@ export default function StorageInventory({ focus }: {
           </button>
         </div>
       </div>
+
+      <AgentRollout />
 
       {!loading && mappings.length > 0 && (
         <div className="inv-summary">

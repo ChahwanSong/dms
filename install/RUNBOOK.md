@@ -261,6 +261,10 @@ ConfigMap 내용 확인:
 ssh ion2401 "kubectl -n dms get configmap dms-agent-storages -o jsonpath='{.data.storages\.json}'" | jq '.storages[].storage_name'
 ```
 
+> 포탈을 쓰면 **스토리지 인벤토리** 화면의 **에이전트 재시작** 버튼으로 RM·DM을 한 번에
+> 재시작하고 rollout 진행 상황(준비/갱신 N/N)까지 볼 수 있다(DMS `POST /api/v1/agent/rollout-restart`
+> · `GET /api/v1/agent/rollout-status`; dms-api SA에 daemonsets get/patch 권한 필요 — control-plane.yaml).
+
 변경 후 Agent rollout — RM·DM **둘 다** (새 storage의 `resource_management`는 RM agent,
 `data_management`는 DM agent가 채우므로 하나만 재시작하면 나머지 축이 Missing으로 남는다):
 

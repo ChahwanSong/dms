@@ -2040,3 +2040,23 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
   .vdetail { padding-left: 0.6rem; }
 }
 
+
+/* ---- storage inventory: agent (RM·DM) rollout strip -------------------- */
+.agent-rollout { background: #12161c; border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 0.9rem; margin: 0 0 1rem; }
+.agent-rollout-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; flex-wrap: wrap; }
+.agent-rollout-label b { font-size: 0.9rem; }
+.agent-rollout-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
+.agent-ds-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.7rem; }
+.agent-ds { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.65rem; border: 1px solid var(--border); border-radius: 8px; background: #0d1116; font-size: 0.82rem; }
+.agent-ds.rolling { border-color: rgba(245, 158, 11, 0.5); }
+.agent-ds.ok { border-color: rgba(52, 211, 153, 0.35); }
+.agent-ds.err { border-color: rgba(248, 113, 113, 0.5); }
+.agent-ds-name { color: #cbd5e1; font-weight: 600; }
+.agent-ds-stat { color: #9aa4b2; }
+.agent-ds-stat b { color: #e6edf3; font-variant-numeric: tabular-nums; }
+.agent-ds-badge { font-size: 0.72rem; padding: 0.08rem 0.5rem; border-radius: 999px; }
+.agent-ds-badge.ok { color: #6ee7a8; background: rgba(52, 211, 153, 0.12); }
+.agent-ds-badge.rolling { color: #f4c672; background: rgba(245, 158, 11, 0.14); }
+.agent-ds-err { color: #f87171; max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-rollout-msg { margin: 0.55rem 0 0; font-size: 0.8rem; color: #6ee7a8; }
+.agent-rollout-err { margin: 0.55rem 0 0; font-size: 0.8rem; color: #f87171; }

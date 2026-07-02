@@ -215,6 +215,39 @@ subjects:
     name: dms-api
     namespace: dms
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dms-api-agent-rollout
+  namespace: dms
+# The agent rollout-restart endpoint runs in the dms-api process and stamps the
+# `restartedAt` annotation on the dms-rm-agent / dms-dm-agent DaemonSets so they
+# re-read storages.json after a storage mapping change (agents read it once at
+# startup). Read is needed to report rollout progress. Same in-cluster access the
+# dms-agent-storages ConfigMap sync already uses.
+# NOTE: bind to the identity dms-api actually uses to reach the CONTROL cluster —
+# the pod SA (below) for in-cluster access, OR the ServiceAccount its control-cluster
+# kubeconfig authenticates as when DMS_CLUSTER_KUBECONFIGS_JSON is set (grant that SA
+# the same rule). Both need get+patch on the two agent DaemonSets.
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dms-api-agent-rollout
+  namespace: dms
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dms-api-agent-rollout
+subjects:
+  - kind: ServiceAccount
+    name: dms-api
+    namespace: dms
+---
 apiVersion: batch/v1
 kind: Job
 metadata:

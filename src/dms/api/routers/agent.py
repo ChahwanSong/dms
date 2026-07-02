@@ -8,6 +8,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ...agent import AgentReportIngestionService
 from ...domain import AgentReport
+from .._helpers.agent_rollout import (
+    KubernetesUnavailable,
+    agent_rollout_status,
+    restart_agents,
+)
 from .._services import AppServices
 from ..deps import (
     _reject_if_maintenance_blocked,
@@ -36,6 +41,39 @@ def agent_router() -> APIRouter:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         _maybe_recompute_readiness_on_ingest(services, report)
         return {"report_id": report_id, "status": "Fresh"}
+
+    @router.post("/rollout-restart")
+    def rollout_restart(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        """Rolling-restart the RM + DM agent DaemonSets so they re-read storages.json
+        after a storage mapping change. Operator action (authenticated)."""
+        authenticated_actor(request, services)
+        try:
+            return restart_agents(services.settings)
+        except KubernetesUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - k8s API error
+            raise HTTPException(
+                status_code=502, detail=f"agent_rollout_failed: {exc}"
+            ) from exc
+
+    @router.get("/rollout-status")
+    def rollout_status(
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        """Per-DaemonSet rollout progress for the agent restart."""
+        authenticated_actor(request, services)
+        try:
+            return agent_rollout_status(services.settings)
+        except KubernetesUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - k8s API error
+            raise HTTPException(
+                status_code=502, detail=f"agent_rollout_status_failed: {exc}"
+            ) from exc
 
     return router
 

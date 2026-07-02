@@ -127,4 +127,23 @@ def operator_router() -> APIRouter:
         await _forward(dms.delete_storage_mapping(storage_name, actor=_actor(user)))
         return {"storage_name": storage_name, "deleted": True}
 
+    # --- agent DaemonSet rollout ------------------------------------------
+    # After adding/changing a storage the agents must restart to re-read
+    # storages.json (they read it once at startup). DMS owns the agents and
+    # drives the rollout via its in-cluster k8s access; the portal just proxies.
+
+    @router.post("/agents/rollout-restart")
+    async def rollout_restart_agents(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        return await _forward(dms.rollout_restart_agents(actor=_actor(user)))
+
+    @router.get("/agents/rollout-status")
+    async def agent_rollout_status(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        return await _forward(dms.agent_rollout_status(actor=_actor(user)))
+
     return router

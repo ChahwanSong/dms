@@ -146,6 +146,14 @@ class DmsClient:
             "DELETE", f"{_RM}/{_seg(storage_name)}", actor=actor
         )
 
+    # --- agent DaemonSet rollout (restart to re-read storages after a change) ---
+
+    async def rollout_restart_agents(self, *, actor: str | None = None) -> dict[str, Any]:
+        return await self._request("POST", "/api/v1/agent/rollout-restart", actor=actor)
+
+    async def agent_rollout_status(self, *, actor: str | None = None) -> dict[str, Any]:
+        return await self._request("GET", "/api/v1/agent/rollout-status", actor=actor)
+
     # --- data-management (DM) sync jobs (data-backup orchestrator) --------
     # NOTE: these take an explicit `actor`. Backup jobs run as the privileged
     # `root` requester, which DMS gates behind an mTLS-verified operator, so the

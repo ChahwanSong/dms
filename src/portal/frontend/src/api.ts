@@ -719,7 +719,38 @@ const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 const SC = "/api/operator/scan/batches";
 
+export interface AgentDaemonSetStatus {
+  name: string;
+  desired: number;
+  updated: number;
+  ready: number;
+  available: number;
+  unavailable: number;
+  rolling: boolean;
+  restarted_at?: string | null;
+  error?: string;
+}
+export interface AgentRolloutStatus {
+  namespace: string;
+  daemonsets: AgentDaemonSetStatus[];
+}
+export interface AgentRolloutResult {
+  namespace: string;
+  restarted_at: string;
+  restarted: string[];
+  errors: Record<string, string>;
+}
+
 export const operatorApi = {
+  // RM·DM agent DaemonSet rollout (restart to re-read storages after a change)
+  agents: {
+    rolloutStatus: () =>
+      request<AgentRolloutStatus>("/api/operator/agents/rollout-status"),
+    rolloutRestart: () =>
+      request<AgentRolloutResult>("/api/operator/agents/rollout-restart", {
+        method: "POST",
+      }),
+  },
   storage: {
     list: (clusterName?: string) =>
       request<StorageMapping[]>(
