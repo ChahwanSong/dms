@@ -154,6 +154,14 @@ def _ddl(schema: str) -> list[str]:
             dismissed_by text,
             dismissed_at timestamptz NOT NULL DEFAULT now()
         )""",
+        # operator account management: disable (is_active=false blocks login) +
+        # audit (who created it, when it changed). Added via ALTER so pre-existing
+        # operator_users tables migrate in place.
+        f"ALTER TABLE {s}.operator_users ADD COLUMN IF NOT EXISTS is_active "
+        f"boolean NOT NULL DEFAULT true",
+        f"ALTER TABLE {s}.operator_users ADD COLUMN IF NOT EXISTS created_by text",
+        f"ALTER TABLE {s}.operator_users ADD COLUMN IF NOT EXISTS updated_at "
+        f"timestamptz NOT NULL DEFAULT now()",
         # migration for pre-existing DBs: add the per-batch priority column.
         f"ALTER TABLE {s}.backup_batches ADD COLUMN IF NOT EXISTS priority text "
         f"NOT NULL DEFAULT 'Low'",
@@ -253,7 +261,7 @@ class Database:
                     (username, hash_password(password)),
                 )
 
-    # --- operator login -------------------------------------------------
+    # --- operator login + account management ----------------------------
 
     async def operator_password_hash(self, username: str) -> str | None:
         async with self.pool.connection() as conn:
@@ -262,6 +270,78 @@ class Database:
             )
             row = await cur.fetchone()
             return row["password_hash"] if row else None
+
+    async def operator_auth_record(self, username: str) -> dict[str, Any] | None:
+        """Login record: hash + active flag. A disabled (is_active=false) account
+        must not be able to log in."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT password_hash, is_active FROM operator_users WHERE username=%s",
+                (username,),
+            )
+            return await cur.fetchone()
+
+    async def list_operators(self) -> list[dict[str, Any]]:
+        """All operator accounts (NEVER the hash) for the admin management view."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT username, is_active, created_by, created_at, updated_at "
+                "FROM operator_users ORDER BY username"
+            )
+            return await cur.fetchall()
+
+    async def count_active_operators(self) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM operator_users WHERE is_active = true"
+            )
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+    async def operator_exists(self, username: str) -> bool:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM operator_users WHERE username=%s", (username,)
+            )
+            return (await cur.fetchone()) is not None
+
+    async def create_operator(
+        self, username: str, password: str, *, created_by: str
+    ) -> bool:
+        """Insert a new operator (PBKDF2-hashed). Returns False if the username
+        already exists (caller maps to 409)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "INSERT INTO operator_users(username, password_hash, created_by) "
+                "VALUES (%s,%s,%s) ON CONFLICT (username) DO NOTHING",
+                (username, hash_password(password), created_by),
+            )
+            return cur.rowcount > 0
+
+    async def set_operator_password(self, username: str, password: str) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE operator_users SET password_hash=%s, updated_at=now() "
+                "WHERE username=%s",
+                (hash_password(password), username),
+            )
+            return cur.rowcount
+
+    async def set_operator_active(self, username: str, active: bool) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE operator_users SET is_active=%s, updated_at=now() "
+                "WHERE username=%s",
+                (active, username),
+            )
+            return cur.rowcount
+
+    async def delete_operator(self, username: str) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM operator_users WHERE username=%s", (username,)
+            )
+            return cur.rowcount
 
     # --- backup batches -------------------------------------------------
 

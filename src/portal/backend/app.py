@@ -21,6 +21,7 @@ from .db import Database
 from .dms_client import DmsClient
 from .orchestrator import BackupOrchestrator
 from .routers import operator_router, user_router
+from .routers.accounts import accounts_router
 from .routers.backup import backup_router
 from .routers.dashboard import dashboard_router
 from .routers.scan import scan_router
@@ -126,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Role-separated interface APIs (each gated by role inside the router).
     app.include_router(user_router())
     app.include_router(operator_router())
+    app.include_router(accounts_router(settings))
     app.include_router(backup_router(settings))
     app.include_router(scan_router(settings))
     app.include_router(dashboard_router(settings))

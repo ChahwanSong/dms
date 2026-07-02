@@ -13,7 +13,7 @@ stringData:
   # All values here are PLACEHOLDERS. Never commit working credentials — inject
   # the real values into the LIVE Secret out-of-band, e.g.:
   #   kubectl -n dms-portal patch secret portal-secrets --type merge -p \
-  #     '{"stringData":{"PORTAL_SESSION_SECRET":"<rand>","PORTAL_OPERATOR_USERS":"admin:<pw>","PORTAL_DMS_TOKEN":"<tok>","PORTAL_DB_URL":"<dms-db-url>"}}'
+  #     '{"stringData":{"PORTAL_SESSION_SECRET":"<rand>","PORTAL_OPERATOR_USERS":"admin:<pw>","PORTAL_DMS_TOKEN":"<tok>","PORTAL_ADMIN_TOKEN":"<admin-tok>","PORTAL_DB_URL":"<dms-db-url>"}}'
   #   kubectl -n dms-portal rollout restart deploy/dms-portal
   # (kubectl apply overwrites these back to placeholders, so re-patch after apply.)
   #
@@ -25,6 +25,11 @@ stringData:
   PORTAL_OPERATOR_USERS: "REPLACE_WITH_OPERATOR_CREDS"
   # DMS API bearer token (testbed auth profile).
   PORTAL_DMS_TOKEN: "REPLACE_WITH_DMS_TOKEN"
+  # Admin token that unlocks 관리자 모드 for operator-ACCOUNT management (create /
+  # reset others / disable / delete). SEPARATE from PORTAL_DMS_TOKEN. Empty =>
+  # account management unavailable (self password change still works). Use a strong
+  # random value; rotate independently of the DMS token.
+  PORTAL_ADMIN_TOKEN: "REPLACE_WITH_ADMIN_TOKEN"
   # Portal's OWN Postgres (operator logins + data-backup batches/requests). On the
   # testbed this is the DMS Postgres with a dedicated `portal` schema, so the
   # value equals dms-secrets/DMS_DATABASE_URL. Empty => no DB: login falls back to

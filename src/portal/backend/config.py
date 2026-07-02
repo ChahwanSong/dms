@@ -60,6 +60,14 @@ class Settings:
     operator_users: dict[str, str] = field(
         default_factory=lambda: {"admin": "admin1234"}
     )
+    # Admin token (PORTAL_ADMIN_TOKEN) that gates operator-account MANAGEMENT
+    # (create / reset others / disable / delete). Deliberately SEPARATE from
+    # dms_token (that authenticates the BFF→DMS API and must never leak to the
+    # browser). An operator unlocks "관리자 모드" by entering this once; the BFF
+    # verifies it server-side and only stores a session flag (the token itself is
+    # never returned to or stored in the browser). None => account-management is
+    # unavailable (self password change still works).
+    admin_token: str | None = None
     # DMS HTTP API base (e.g. http://10.10.10.10:30080). The portal is an
     # API-client of DMS; None means "DMS not wired" and DMS-backed routes 503.
     dms_api_url: str | None = None
@@ -133,6 +141,7 @@ class Settings:
                 env.get("PORTAL_ALLOW_INSECURE_DEFAULTS"), False
             ),
             operator_users=operator_users or defaults.operator_users,
+            admin_token=env.get("PORTAL_ADMIN_TOKEN") or None,
             dms_api_url=env.get("PORTAL_DMS_API_URL") or None,
             dms_token=env.get("PORTAL_DMS_TOKEN") or None,
             dms_actor=env.get("PORTAL_DMS_ACTOR", defaults.dms_actor),

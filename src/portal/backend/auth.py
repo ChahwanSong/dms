@@ -54,8 +54,14 @@ def auth_router(settings: Settings) -> APIRouter:
         """
         db = getattr(request.app.state, "db", None)
         if db is not None and db.configured:
-            stored = await db.operator_password_hash(payload.username)
-            ok = stored is not None and verify_password(payload.password, stored)
+            rec = await db.operator_auth_record(payload.username)
+            # a disabled (is_active=false) account can't log in even with the
+            # right password; treat it like an invalid credential.
+            ok = (
+                rec is not None
+                and rec.get("is_active", True)
+                and verify_password(payload.password, rec["password_hash"])
+            )
         else:
             ok = _verify_operator(settings, payload.username, payload.password)
         if not ok:
