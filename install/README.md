@@ -708,6 +708,12 @@ DMS_AGENT_API_URL: "https://dms.example.internal"
 DMS_AGENT_CLUSTER_NAME: "cluster-a"
 DMS_AGENT_REPORT_INTERVAL_SECONDS: "60"
 DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan,kubectl"
+# 마운트 readiness 필수: 호스트 mount table을 읽는다(컨테이너 기본 /proc/self/mountinfo면 워커
+# 노드 마운트가 안 보여 전부 Missing → readiness false). DaemonSet은 /proc/1/mountinfo를
+# /host/proc/1/mountinfo로 bind-mount한다(manifest에 포함). 자세한 내용은 CONFIGURATION.md
+# "마운트 readiness — 호스트 mountinfo bind-mount" 절.
+DMS_AGENT_MOUNTINFO_PATH: "/host/proc/1/mountinfo"
+DMS_AGENT_HOST_ROOT: "/host"
 ```
 
 `Secret/dms-agent-secrets`의 token도 control plane의 `DMS_AUTH_SHARED_TOKEN`과 같아야 한다.

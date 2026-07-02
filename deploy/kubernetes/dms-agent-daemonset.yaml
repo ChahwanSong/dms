@@ -45,6 +45,12 @@ data:
   DMS_AGENT_REPORT_INTERVAL_SECONDS: "60"
   DMS_AGENT_REPORT_TIMEOUT_SECONDS: "5"
   DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan,kubectl"
+  # REQUIRED for mount readiness: read the HOST init's mount table (bind-mounted at
+  # /host/proc/1/mountinfo below), not the container's /proc/self/mountinfo default —
+  # otherwise every worker-node storage mount probes Missing and readiness is false.
+  DMS_AGENT_MOUNTINFO_PATH: "/host/proc/1/mountinfo"
+  # Host root at /host: per-node disk metrics + per-mount capacity (statvfs).
+  DMS_AGENT_HOST_ROOT: "/host"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -129,6 +135,12 @@ spec:
             - name: storages
               mountPath: /etc/dms/agent
               readOnly: true
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            - name: proc-mountinfo
+              mountPath: /host/proc/1/mountinfo
+              readOnly: true
           resources:
             requests:
               cpu: 25m
@@ -140,6 +152,14 @@ spec:
         - name: storages
           configMap:
             name: dms-agent-storages
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: proc-mountinfo
+          hostPath:
+            path: /proc/1/mountinfo
+            type: File
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -185,6 +205,12 @@ spec:
             - name: storages
               mountPath: /etc/dms/agent
               readOnly: true
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            - name: proc-mountinfo
+              mountPath: /host/proc/1/mountinfo
+              readOnly: true
           resources:
             requests:
               cpu: 25m
@@ -196,3 +222,11 @@ spec:
         - name: storages
           configMap:
             name: dms-agent-storages
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: proc-mountinfo
+          hostPath:
+            path: /proc/1/mountinfo
+            type: File

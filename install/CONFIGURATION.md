@@ -249,6 +249,8 @@ DM identity는 별도의 mapping 등록 없이 preflight(dm-worker) 시점에 �
 | `DMS_AGENT_API_URL` | 예 | Agent cluster에서 접근하는 DMS API URL. |
 | `DMS_AGENT_CLUSTER_NAME` | 예 | DMS logical cluster name. Storage mapping과 kubeconfig JSON key와 일치해야 한다. |
 | `DMS_AGENT_WORKER_ROLE` | 예 | `RM` 또는 `DM`. |
+| `DMS_AGENT_MOUNTINFO_PATH` | **컨테이너 배포시 사실상 필수** | 마운트 존재/Ready 판정에 읽는 mount table 경로. 기본값 `/proc/self/mountinfo`는 **컨테이너 자신의 마운트**라 워커 노드의 스토리지 마운트(cephfs/gpfs/weka)가 안 보여 **모든 storage가 Missing → readiness false**가 된다. 호스트 init의 mount table을 pod에 bind-mount해(`/host/proc/1/mountinfo`, 아래 참조) 이 값으로 가리키면 호스트의 실제 마운트를 읽고 mountinfo의 rw/ro로 readable/writable까지 추론한다. per-storage hostPath를 개별 마운트할 필요가 없다. |
+| `DMS_AGENT_HOST_ROOT` | 아니오(권장) | 호스트 root fs를 마운트한 경로(`/host`). per-node 디스크 사용량 + per-mount 용량(statvfs) 리포트에 사용. readiness 자체는 mountinfo로 판정되므로 필수는 아니지만 완전한 node report에 포함. |
 | `DMS_AGENT_REPORT_INTERVAL_SECONDS` | 아니오 | 기본값은 60초. |
 | `DMS_AGENT_REPORT_TIMEOUT_SECONDS` | 아니오 | 기본값은 5초. |
 | `DMS_AGENT_TOOLS` | 아니오 | 쉼표로 구분한 tool probe 목록. 기본값: `dsync,nsync,drm,dscan,kubectl`. |
@@ -258,6 +260,37 @@ DM identity는 별도의 mapping 등록 없이 preflight(dm-worker) 시점에 �
 | `DMS_AUTH_SHARED_TOKEN` | API token이 enabled이면 필요 | Report post에 사용하는 shared bearer token. |
 
 주의: 현재 mTLS-required 운영 profile에서 agent report를 Fresh로 저장하려면 agent request의 authenticated actor가 `node:{cluster_name}:{node_name}`과 일치해야 한다. 기본 mTLS actor derivation은 `mtls:<certificate-subject>`이므로, agent certificate subject-to-node actor mapping 또는 동등한 internal authentication boundary가 별도로 필요하다.
+
+### 마운트 readiness — 호스트 mountinfo bind-mount (필수)
+
+Agent는 컨테이너에서 돈다. 마운트 존재 판정에 쓰는 `DMS_AGENT_MOUNTINFO_PATH`의 기본값
+`/proc/self/mountinfo`는 **컨테이너 자신의 마운트**만 담으므로, 워커 노드에 마운트된 스토리지
+(cephfs/gpfs/weka)가 전혀 안 보인다. 그 결과 모든 storage 마운트가 **Missing**으로 나오고
+`readiness.resource_management`/`data_management`가 **false**가 된다.
+
+해결 = **호스트 init의 mount table을 pod에 bind-mount**하고 그 경로를 가리킨다. `agent-daemonset.yaml`
+(`install/kubernetes/`·`deploy/kubernetes/`)에 다음이 포함되어 있어야 한다.
+
+```yaml
+# ConfigMap dms-agent-runtime-config
+DMS_AGENT_MOUNTINFO_PATH: "/host/proc/1/mountinfo"
+DMS_AGENT_HOST_ROOT: "/host"
+# 각 DaemonSet pod
+volumeMounts:
+  - { name: host-root,     mountPath: /host,                     readOnly: true }
+  - { name: proc-mountinfo, mountPath: /host/proc/1/mountinfo,   readOnly: true }
+volumes:
+  - { name: host-root,     hostPath: { path: /,                type: Directory } }
+  - { name: proc-mountinfo, hostPath: { path: /proc/1/mountinfo, type: File } }
+```
+
+> `host-root`(호스트 `/` → `/host`)만으로는 안 된다. `/proc`는 별도 마운트라 `/host` 아래로 안
+> 딸려온다 → `proc-mountinfo`로 `/proc/1/mountinfo`를 **따로** bind-mount해야 한다. 이 공식 방법을
+> 쓰면 storage마다 hostPath를 개별 마운트하는 우회가 필요 없다.
+>
+> **검증**: `kubectl -n dms exec <agent-pod> -- dms agent-probe --once | jq '.mounts[] | {storage_name,status}'`
+> — 노드에 실제 마운트된 storage가 `Ready`로, 안 마운트된 것만 `Missing`으로 나오면 정상. 전부 Missing이면
+> 위 bind-mount/`DMS_AGENT_MOUNTINFO_PATH`가 빠진 것이다.
 
 ## Storage Mapping 규칙
 

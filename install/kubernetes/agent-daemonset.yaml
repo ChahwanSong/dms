@@ -45,6 +45,18 @@ data:
   DMS_AGENT_REPORT_INTERVAL_SECONDS: "60"
   DMS_AGENT_REPORT_TIMEOUT_SECONDS: "5"
   DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan,kubectl"
+  # REQUIRED for mount readiness. The agent runs in a container, so its own
+  # /proc/self/mountinfo (the default) shows only the CONTAINER's mounts — never the
+  # worker node's storage mounts (cephfs/gpfs/weka), so every mount probes as Missing
+  # and RM/DM readiness is false. Point it at the HOST init's mount table, bind-mounted
+  # into the pod at /host/proc/1/mountinfo (see the DaemonSet volumes below). With this,
+  # the agent reads the host's real mounts and infers Ready + rw/ro from mountinfo — no
+  # per-storage hostPath mounts needed.
+  DMS_AGENT_MOUNTINFO_PATH: "/host/proc/1/mountinfo"
+  # Host root filesystem bind-mounted at /host (see DaemonSet volumes). Enables
+  # per-node disk-usage metrics + per-mount capacity (statvfs). Optional for
+  # readiness (that comes from mountinfo) but part of the complete node report.
+  DMS_AGENT_HOST_ROOT: "/host"
 ---
 apiVersion: v1
 kind: Secret
@@ -122,6 +134,17 @@ spec:
             - name: storages
               mountPath: /etc/dms/agent
               readOnly: true
+            # Host root (for disk metrics / per-mount capacity). `/proc` is a
+            # separate mount so it is NOT visible under this; hence the explicit
+            # proc-mountinfo mount below.
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            # The host init's mount table (DMS_AGENT_MOUNTINFO_PATH). Without this
+            # the agent sees only container mounts and every storage probes Missing.
+            - name: proc-mountinfo
+              mountPath: /host/proc/1/mountinfo
+              readOnly: true
           resources:
             requests:
               cpu: 25m
@@ -133,6 +156,14 @@ spec:
         - name: storages
           configMap:
             name: dms-agent-storages
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: proc-mountinfo
+          hostPath:
+            path: /proc/1/mountinfo
+            type: File
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -180,6 +211,17 @@ spec:
             - name: storages
               mountPath: /etc/dms/agent
               readOnly: true
+            # Host root (for disk metrics / per-mount capacity). `/proc` is a
+            # separate mount so it is NOT visible under this; hence the explicit
+            # proc-mountinfo mount below.
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            # The host init's mount table (DMS_AGENT_MOUNTINFO_PATH). Without this
+            # the agent sees only container mounts and every storage probes Missing.
+            - name: proc-mountinfo
+              mountPath: /host/proc/1/mountinfo
+              readOnly: true
           resources:
             requests:
               cpu: 25m
@@ -191,3 +233,11 @@ spec:
         - name: storages
           configMap:
             name: dms-agent-storages
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: proc-mountinfo
+          hostPath:
+            path: /proc/1/mountinfo
+            type: File

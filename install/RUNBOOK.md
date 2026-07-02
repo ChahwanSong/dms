@@ -304,6 +304,17 @@ EOF"
 
 흔한 원인:
 
+- **Agent가 워커 노드의 마운트를 못 본다 (readiness 전부 false / 매트릭스 전부 ✗).** Agent는
+  컨테이너에서 돌아 기본 `DMS_AGENT_MOUNTINFO_PATH=/proc/self/mountinfo`(컨테이너 마운트)로는 호스트
+  스토리지 마운트가 안 보여 모든 storage가 Missing이 된다. `agent-daemonset.yaml`에 호스트 mount table
+  bind-mount(`/host/proc/1/mountinfo`)와 `DMS_AGENT_MOUNTINFO_PATH`가 있는지 확인한다(CONFIGURATION.md
+  "마운트 readiness" 절 · 1.install §10.2-5). 진단:
+  ```bash
+  POD=$(kubectl -n dms get pods -l app.kubernetes.io/name=dms-dm-agent -o jsonpath='{.items[0].metadata.name}')
+  kubectl -n dms exec "$POD" -- printenv DMS_AGENT_MOUNTINFO_PATH   # /host/proc/1/mountinfo 여야 함
+  kubectl -n dms exec "$POD" -- dms agent-probe --once | jq '.mounts[] | {storage_name,status}'
+  ```
+  전부 `Missing`이면 mountinfo bind-mount가 빠진 것 — 위 문서의 패치로 두 DaemonSet에 볼륨/env 추가.
 - Mount를 볼 수 있는 node에서 Agent DaemonSet이 실행 중이 아니다.
 - `DMS_AGENT_CLUSTER_NAME`이 storage mapping의 `cluster_name`과 일치하지 않는다.
 - `storage_class_name` 또는 `csi_driver`가 live StorageClass와 일치하지 않는다.
