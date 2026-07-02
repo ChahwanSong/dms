@@ -38,6 +38,10 @@ class ResolveIn(BaseModel):
     reason: str = ""
 
 
+class ArchiveBeforeIn(BaseModel):
+    before: str  # ISO cutoff — archive 처리 내역 rows dismissed at/before this time
+
+
 def _actor(user: dict[str, Any], settings: Settings) -> str:
     return str(user.get("username") or settings.dms_actor)
 
@@ -886,49 +890,70 @@ def dashboard_router(settings: Settings) -> APIRouter:
 
     @router.get("/attention/dismissed")
     async def attention_dismissed(
+        offset: int = 0,
+        limit: int = 50,
+        order: str = "desc",
         dms: DmsClient = Depends(get_dms_client),
         db: Database = Depends(get_db),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
-    ) -> list[dict[str, Any]]:
-        # 처리 내역 = portal-local rows (숨김 + rich 확인 mirrors) MERGED with the
-        # DMS server-side ack list, so an ack is always reflected here — even one made
-        # by another client (or after the portal DB was reset). The portal rows are the
-        # rich source; DMS acks not tracked locally are synthesized as minimal rows.
-        rows: list[dict[str, Any]] = []
-        tracked: set[str] = set()
-        if db.configured:
-            rows = await db.list_dismissals()  # non-archived, rich
-            tracked = await db.dismissed_fingerprints()  # ALL (incl archived) → skip
+    ) -> dict[str, Any]:
+        # 처리 내역 = portal-local rows (숨김 + rich 확인 mirrors) MERGED with the DMS
+        # server-side ack list, so an ack is always reflected here — even one made by
+        # another client (or after the portal DB was reset). Like 영구숨김, the list
+        # forever-accrues, so it is loaded a page at a time: the portal rows are
+        # paginated (offset/limit); `total` is the grand count (portal + DMS-only acks)
+        # for the badge; `extra` (DMS-only acks, the small completeness addendum) is
+        # returned only on the first page. limit=0 → count-only (no rows transferred).
+        limit = max(0, min(int(limit), 200))
+        offset = max(0, offset)
         try:
             acks = await dms.list_action_acks(actor=_actor(user, settings))
         except DmsApiError:
             acks = []  # DMS unreachable/not-configured → show just the portal rows
-        ack_fps = {a.get("fingerprint") for a in acks}
-        # in_dms tells the UI whether a '확인' is reflected server-side (all clients)
-        # or is a legacy portal-only ack from before the server-side wiring.
-        for r in rows:
-            if r.get("kind") == "ack":
-                r["in_dms"] = r.get("fingerprint") in ack_fps
-        extra = [
-            {
-                "fingerprint": a.get("fingerprint"),
-                "issue_type": a.get("issue_type"),
-                "label": None,
-                "reason": a.get("reason"),
-                "kind": "ack",
-                "job_id": None,
-                "request_id": None,
-                "status": None,
-                "item_at": a.get("acked_at"),
-                "dismissed_by": a.get("acked_by"),
-                "dismissed_at": a.get("acked_at"),
-                "in_dms": True,
-                "source": "dms",
-            }
-            for a in acks
-            if a.get("fingerprint") and a["fingerprint"] not in tracked
+        ack_fps = {a.get("fingerprint") for a in acks if a.get("fingerprint")}
+        # DMS acks NOT tracked in the portal (another client / post-reset). Resolve
+        # membership with a subset PK lookup (O(acks)), not a full-table scan.
+        tracked_acks: set[str] = set()
+        portal_total = 0
+        if db.configured:
+            portal_total = await db.count_dismissals()
+            if ack_fps:
+                tracked_acks = await db.dismissed_fingerprints(subset=list(ack_fps))
+        dms_only = [
+            a for a in acks
+            if a.get("fingerprint") and a["fingerprint"] not in tracked_acks
         ]
-        return rows + extra
+        total = portal_total + len(dms_only)
+
+        rows: list[dict[str, Any]] = []
+        extra: list[dict[str, Any]] = []
+        if limit > 0 and db.configured:
+            rows = await db.list_dismissals(limit=limit, offset=offset, order=order)
+            # in_dms tells the UI whether a '확인' is reflected server-side (all clients)
+            # or is a legacy portal-only ack from before the server-side wiring.
+            for r in rows:
+                if r.get("kind") == "ack":
+                    r["in_dms"] = r.get("fingerprint") in ack_fps
+        if limit > 0 and offset == 0:
+            extra = [
+                {
+                    "fingerprint": a.get("fingerprint"),
+                    "issue_type": a.get("issue_type"),
+                    "label": None,
+                    "reason": a.get("reason"),
+                    "kind": "ack",
+                    "job_id": None,
+                    "request_id": None,
+                    "status": None,
+                    "item_at": a.get("acked_at"),
+                    "dismissed_by": a.get("acked_by"),
+                    "dismissed_at": a.get("acked_at"),
+                    "in_dms": True,
+                    "source": "dms",
+                }
+                for a in dms_only
+            ]
+        return {"items": rows, "extra": extra, "total": total}
 
     @router.post("/attention/dismiss")
     async def attention_dismiss(
@@ -998,6 +1023,45 @@ def dashboard_router(settings: Settings) -> APIRouter:
         n = await db.archive_dismissals(
             [f for f in body.fingerprints if f],
             archived_by=str(user.get("username") or "operator"),
+        )
+        return {"archived": n}
+
+    @router.post("/attention/undismiss-all")
+    async def attention_undismiss_all(
+        dms: DmsClient = Depends(get_dms_client),
+        db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # '모두 복원': restore EVERY non-archived 처리 내역 row, not just the loaded page —
+        # since the list is paginated, this resolves the full set server-side (fetch just
+        # the fingerprints, un-ack them in DMS, drop the portal mirrors) so it never
+        # becomes a partial op. Triggered explicitly, so the O(N) fingerprint scan is fine.
+        fps = await db.all_dismissed_fingerprints() if db.configured else []
+        if fps:
+            try:
+                await dms.unack_action_required(fps, actor=_actor(user, settings))
+            except DmsApiError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        n = await db.remove_dismissals(fps)
+        return {"undismissed": n}
+
+    @router.post("/attention/archive-before")
+    async def attention_archive_before(
+        body: ArchiveBeforeIn,
+        db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # '이전 영구숨김': archive EVERY non-archived 처리 내역 row dismissed at/before the
+        # cutoff, over the whole set server-side (so pagination can't miss older rows).
+        fps = (
+            await db.all_dismissed_fingerprints(before=body.before)
+            if db.configured else []
+        )
+        n = (
+            await db.archive_dismissals(
+                fps, archived_by=str(user.get("username") or "operator")
+            )
+            if fps else 0
         )
         return {"archived": n}
 

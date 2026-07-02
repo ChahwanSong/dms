@@ -1023,8 +1023,17 @@ export const operatorApi = {
       request<RequestDetail>(`/api/operator/dashboard/requests/${encodeURIComponent(requestId)}`),
     attention: () =>
       request<AttentionItem[]>("/api/operator/dashboard/attention"),
-    dismissedAttention: () =>
-      request<DismissedItem[]>("/api/operator/dashboard/attention/dismissed"),
+    // 처리 내역: 화면에 펼친 페이지만 로딩(offset/limit). {items,extra,total} — items는
+    // 페이지 단위 포탈 행, extra는 DMS-only ack(완전성·첫 페이지에만), total은 grand
+    // 카운트(배지). limit=0 → total만(행 미전송).
+    dismissedAttention: (offset = 0, limit = 50, order: "desc" | "asc" = "desc") =>
+      request<{ items: DismissedItem[]; extra: DismissedItem[]; total: number }>(
+        `/api/operator/dashboard/attention/dismissed?offset=${offset}&limit=${limit}&order=${order}`,
+      ),
+    dismissedAttentionCount: () =>
+      request<{ items: DismissedItem[]; extra: DismissedItem[]; total: number }>(
+        "/api/operator/dashboard/attention/dismissed?limit=0",
+      ).then((r) => r.total),
     dismissAttention: (items: DismissPayloadItem[]) =>
       request<{ dismissed: number }>("/api/operator/dashboard/attention/dismiss", {
         method: "POST",
@@ -1034,6 +1043,17 @@ export const operatorApi = {
       request<{ undismissed: number }>("/api/operator/dashboard/attention/undismiss", {
         method: "POST",
         body: JSON.stringify({ fingerprints }),
+      }),
+    // 모두 복원 / 이전 영구숨김: whole-list bulk ops — resolved server-side over the
+    // ENTIRE 처리 내역 (not just the loaded page), so pagination never truncates them.
+    undismissAllAttention: () =>
+      request<{ undismissed: number }>("/api/operator/dashboard/attention/undismiss-all", {
+        method: "POST",
+      }),
+    archiveAttentionBefore: (before: string) =>
+      request<{ archived: number }>("/api/operator/dashboard/attention/archive-before", {
+        method: "POST",
+        body: JSON.stringify({ before }),
       }),
     archiveAttention: (fingerprints: string[]) =>
       request<{ archived: number }>("/api/operator/dashboard/attention/archive", {

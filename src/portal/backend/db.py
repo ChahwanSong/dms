@@ -1005,15 +1005,47 @@ class Database:
                 )
             return {r["request_id"] for r in await cur.fetchall() if r["request_id"]}
 
-    async def list_dismissals(self, *, limit: int = 1000) -> list[dict[str, Any]]:
-        # archived('이전 정리'된) rows stay hidden from 조치 필요 but drop out of the
-        # 처리 내역 list. Newest-first + bounded LIMIT (idx_attention_dismissals_active)
-        # so the list never renders/fetches an unbounded set as dismissals accrue.
+    async def all_dismissed_fingerprints(
+        self, *, before: str | None = None
+    ) -> list[str]:
+        """All non-archived 처리 내역 fingerprints (fingerprints only — for whole-list
+        bulk ops like '모두 복원'/'이전 영구숨김' that must cover the ENTIRE set, not just
+        the loaded page). `before` (ISO) limits to rows dismissed at/before that time.
+        Fetched only on an explicit bulk action, never per panel load."""
+        q = "SELECT fingerprint FROM attention_dismissals WHERE archived = false"
+        params: list[Any] = []
+        if before:
+            q += " AND dismissed_at <= %s"
+            params.append(before)
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(q, tuple(params))
+            return [r["fingerprint"] for r in await cur.fetchall()]
+
+    async def count_dismissals(self) -> int:
+        """Cheap total of non-archived 처리 내역 rows for the badge/'더 보기' — a COUNT
+        over the (archived, dismissed_at) index, so the panel can show/size the list
+        WITHOUT transferring rows (rows are fetched lazily, one page at a time)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM attention_dismissals WHERE archived = false"
+            )
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+    async def list_dismissals(
+        self, *, limit: int = 50, offset: int = 0, order: str = "desc"
+    ) -> list[dict[str, Any]]:
+        # archived('영구숨김'된) rows stay hidden from 조치 필요 but drop out of the
+        # 처리 내역 list. Paginated (LIMIT/OFFSET over idx_attention_dismissals_active)
+        # so the forever-accruing 처리 내역 loads a screenful at a time, never all at once.
+        if limit <= 0:
+            return []
+        direction = "ASC" if str(order).lower() == "asc" else "DESC"
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT * FROM attention_dismissals WHERE archived = false "
-                "ORDER BY dismissed_at DESC LIMIT %s",
-                (limit,),
+                f"ORDER BY dismissed_at {direction} LIMIT %s OFFSET %s",
+                (limit, max(0, offset)),
             )
             return await cur.fetchall()
 

@@ -76,8 +76,24 @@ class FakeDb:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
 
-    async def list_dismissals(self, *, limit: int = 1000):
-        return [dict(r) for r in self.rows.values() if not r.get("archived")][:limit]
+    def _active_sorted(self, order: str = "desc"):
+        rows = [dict(r) for r in self.rows.values() if not r.get("archived")]
+        return list(reversed(rows)) if str(order).lower() != "asc" else rows
+
+    async def count_dismissals(self) -> int:
+        return sum(1 for r in self.rows.values() if not r.get("archived"))
+
+    async def list_dismissals(self, *, limit: int = 50, offset: int = 0, order: str = "desc"):
+        if limit <= 0:
+            return []
+        return self._active_sorted(order)[offset : offset + limit]
+
+    async def all_dismissed_fingerprints(self, *, before: str | None = None):
+        return [
+            fp for fp, r in self.rows.items()
+            if not r.get("archived")
+            and (before is None or (r.get("dismissed_at") or "") <= before)
+        ]
 
     async def dismissed_fingerprints(self, subset=None):
         fps = set(self.rows.keys())
@@ -151,6 +167,13 @@ def _ack_item(fp="request_attention|r1", issue="request_attention", reason=None)
     return {"fingerprint": fp, "issue_type": issue, "reason": reason, "kind": "ack"}
 
 
+def _dismissed(c):
+    """처리 내역 is paginated → {items, extra, total}. The UI merges portal `items`
+    with the DMS-only `extra` addendum; tests assert on that union."""
+    d = c.get(f"{DASH}/attention/dismissed").json()
+    return d["items"] + d.get("extra", [])
+
+
 # --- ack delegates to DMS + mirrors locally ---------------------------------
 
 def test_ack_delegates_to_dms_and_mirrors_once():
@@ -170,7 +193,7 @@ def test_ack_delegates_to_dms_and_mirrors_once():
 
     # portal mirror stored (kind ack) + 처리 내역 shows it exactly once (not doubled
     # by the DMS merge, since the fingerprint is tracked locally).
-    listed = c.get(f"{DASH}/attention/dismissed").json()
+    listed = _dismissed(c)
     fps = [d["fingerprint"] for d in listed]
     assert fps.count("request_attention|r1") == 1
     assert listed[0]["kind"] == "ack"
@@ -212,7 +235,7 @@ def test_ack_then_attention_excludes_it_and_undismiss_restores():
     assert "request_attention|r1" not in dms.acks
     assert db.rows == {}
     assert len(c.get(f"{DASH}/attention").json()) == 1
-    assert c.get(f"{DASH}/attention/dismissed").json() == []
+    assert _dismissed(c) == []
 
 
 # --- 처리 내역 merges the DMS ack list (completeness) ------------------------
@@ -226,7 +249,7 @@ def test_dismissed_merges_dms_only_ack():
     db = FakeDb()
     c = make_client(dms, db)
 
-    listed = c.get(f"{DASH}/attention/dismissed").json()
+    listed = _dismissed(c)
     assert len(listed) == 1
     row = listed[0]
     assert row["fingerprint"] == "data_job_failed|j9"
@@ -246,7 +269,7 @@ def test_legacy_portal_only_ack_marked_not_in_dms():
         "issue_type": "filesystem_soft_deleted", "kind": "ack", "archived": False,
     }
     c = make_client(dms, db)
-    listed = c.get(f"{DASH}/attention/dismissed").json()
+    listed = _dismissed(c)
     assert len(listed) == 1
     assert listed[0]["kind"] == "ack"
     assert listed[0]["in_dms"] is False
@@ -263,7 +286,7 @@ def test_dismissed_does_not_duplicate_or_resurrect_archived():
         "fingerprint": "data_job_failed|j9", "kind": "ack", "archived": True,
     }
     c = make_client(dms, db)
-    assert c.get(f"{DASH}/attention/dismissed").json() == []
+    assert _dismissed(c) == []
 
 
 # --- archive keeps the server-side ack in effect ----------------------------
@@ -278,7 +301,7 @@ def test_archive_then_unarchive_restores_to_dismissed():
     # 영구숨김(archive): gone from 처리 내역, present in 영구숨김 항목 (paged {items,total})
     c.post(f"{DASH}/attention/archive", json={"fingerprints": [fp]})
     assert db.rows[fp]["archived"] is True
-    assert not any(d["fingerprint"] == fp for d in c.get(f"{DASH}/attention/dismissed").json())
+    assert not any(d["fingerprint"] == fp for d in _dismissed(c))
     archived = c.get(f"{DASH}/attention/archived").json()
     assert archived["total"] == 1
     assert [a["fingerprint"] for a in archived["items"]] == [fp]
@@ -290,7 +313,7 @@ def test_archive_then_unarchive_restores_to_dismissed():
     assert r.json() == {"restored": 1}
     assert db.rows[fp]["archived"] is False
     assert c.get(f"{DASH}/attention/archived").json() == {"items": [], "total": 0}
-    assert any(d["fingerprint"] == fp for d in c.get(f"{DASH}/attention/dismissed").json())
+    assert any(d["fingerprint"] == fp for d in _dismissed(c))
 
 
 def test_archive_keeps_dms_ack_and_hides_from_list():
@@ -306,4 +329,62 @@ def test_archive_keeps_dms_ack_and_hides_from_list():
     assert r.status_code == 200
     assert "request_attention|r1" in dms.acks          # NOT un-acked
     assert db.rows["request_attention|r1"]["archived"] is True
-    assert c.get(f"{DASH}/attention/dismissed").json() == []  # gone from the list
+    assert _dismissed(c) == []  # gone from the list
+
+
+# --- 처리 내역 pagination + whole-list ops -----------------------------------
+
+def test_dismissed_is_paginated_with_count_and_more():
+    dms = FakeDms()
+    db = FakeDb()
+    # seed 3 portal dismissals with increasing dismissed_at (insertion order)
+    for i in range(3):
+        db.rows[f"filesystem_soft_deleted|d{i}"] = {
+            "fingerprint": f"filesystem_soft_deleted|d{i}", "kind": "dismissed",
+            "archived": False, "dismissed_at": f"2026-06-30T0{i}:00:00Z",
+        }
+    c = make_client(dms, db)
+
+    # count-only (limit=0) → total, no rows transferred
+    count = c.get(f"{DASH}/attention/dismissed?limit=0").json()
+    assert count == {"items": [], "extra": [], "total": 3}
+
+    # first page (limit=2) → 2 items + grand total
+    page1 = c.get(f"{DASH}/attention/dismissed?offset=0&limit=2").json()
+    assert page1["total"] == 3
+    assert len(page1["items"]) == 2
+    # next page → the remaining 1 (the '더 보기' tail)
+    page2 = c.get(f"{DASH}/attention/dismissed?offset=2&limit=2").json()
+    assert len(page2["items"]) == 1
+
+
+def test_undismiss_all_restores_entire_list_server_side():
+    dms = FakeDms()
+    db = FakeDb()
+    for i in range(5):
+        db.rows[f"filesystem_soft_deleted|d{i}"] = {
+            "fingerprint": f"filesystem_soft_deleted|d{i}", "kind": "dismissed",
+            "archived": False, "dismissed_at": f"2026-06-30T0{i}:00:00Z",
+        }
+    c = make_client(dms, db)
+    # '모두 복원' clears ALL non-archived rows, not just a loaded page
+    r = c.post(f"{DASH}/attention/undismiss-all")
+    assert r.json() == {"undismissed": 5}
+    assert _dismissed(c) == []
+
+
+def test_archive_before_archives_whole_set_by_cutoff():
+    dms = FakeDms()
+    db = FakeDb()
+    for i in range(4):
+        db.rows[f"filesystem_soft_deleted|d{i}"] = {
+            "fingerprint": f"filesystem_soft_deleted|d{i}", "kind": "dismissed",
+            "archived": False, "dismissed_at": f"2026-06-30T0{i}:00:00Z",
+        }
+    c = make_client(dms, db)
+    # archive everything dismissed at/before 02:00 → d0, d1, d2 (3 rows), d3 stays
+    r = c.post(f"{DASH}/attention/archive-before", json={"before": "2026-06-30T02:00:00Z"})
+    assert r.json() == {"archived": 3}
+    remaining = c.get(f"{DASH}/attention/dismissed?limit=0").json()["total"]
+    assert remaining == 1
+    assert c.get(f"{DASH}/attention/archived?limit=0").json()["total"] == 3

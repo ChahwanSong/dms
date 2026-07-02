@@ -353,10 +353,11 @@ function dKey(d: DismissedItem): string {
 }
 
 function DismissedList({
-  rows, dir, onToggleSort, selected, onToggleSel, onToggleSelAll, onClearSel,
-  onUndismiss, onUndismissAll, onArchive, onAck, onDelete, onResolve, busy,
+  rows, total, dir, onToggleSort, selected, onToggleSel, onToggleSelAll, onClearSel,
+  onUndismiss, onUndismissAll, onArchive, onArchiveBefore, onAck, onDelete, onResolve, busy,
 }: {
   rows: DismissedItem[];
+  total: number; // grand count (may exceed loaded rows — 처리 내역 is paginated)
   dir: "desc" | "asc";
   onToggleSort: () => void;
   selected: Set<string>;
@@ -366,6 +367,7 @@ function DismissedList({
   onUndismiss: (fingerprints: string[]) => void;
   onUndismissAll: () => void;
   onArchive: (fingerprints: string[]) => void;
+  onArchiveBefore: (beforeIso: string) => void;
   onAck: (rows: DismissedItem[]) => void;
   onDelete: (rows: DismissedItem[]) => void;
   onResolve: (rows: DismissedItem[]) => void;
@@ -396,45 +398,41 @@ function DismissedList({
   // the time we show/sort/purge by: the action-required item's report time
   // (captured at dismiss), falling back to the dismiss time for legacy records.
   const whenOf = (d: DismissedItem) => d.item_at || d.dismissed_at;
-  // delete (purge) every record whose report time is at/before the chosen time.
-  // Reuses undismiss (remove_dismissals) — housekeeping for the accruing 처리 내역.
+  // '이전 영구숨김': archive every record dismissed at/before the chosen time. Resolved
+  // SERVER-SIDE over the whole 처리 내역 (not just the loaded page), so pagination can't
+  // silently miss older rows. Housekeeping for the forever-accruing list.
   const purgeBefore = () => {
     if (!purgeAt) return;
     const cutoff = new Date(purgeAt).getTime();
     if (Number.isNaN(cutoff)) return;
-    const victims = rows.filter((d) => {
-      const w = whenOf(d);
-      const t = w ? new Date(w).getTime() : NaN;
-      return !Number.isNaN(t) && t <= cutoff;
-    });
-    if (!victims.length) { window.alert("해당 시각 이전의 처리 내역이 없습니다."); return; }
     if (!window.confirm(
-      `${fmtTime(purgeAt)} 이전 처리 내역 ${victims.length}건을 영구숨김할까요?\n` +
+      `${fmtTime(purgeAt)} 이전에 처리한 내역을 모두 영구숨김할까요? (불러온 화면 분량뿐 아니라 전체 대상)\n` +
       "조치 필요·과거 이력·액티비티에서 모두 완전히 가려집니다. 복원은 '영구숨김 항목'에서."
     )) return;
-    onArchive(victims.map((d) => d.fingerprint));
+    onArchiveBefore(purgeAt);
   };
   return (
     <>
       <p className="muted small dism-note">
         <b>복원</b> = 조치 필요로 되돌림 · <b className="attn2-archive">영구숨김</b> = 포탈에서
-        완전히 가림(복원은 아래 <b>영구숨김 항목</b>에서)
+        완전히 가림(복원은 아래 <b>영구숨김 항목</b>에서) · 목록은 <b>50건씩</b> 불러옵니다
+        (누적돼도 화면 분량만 로딩)
       </p>
       <div className="attn-sec-tools dism-tools">
-        <label className="check-cell" style={{ marginRight: "auto" }} title="전체 선택">
+        <label className="check-cell" style={{ marginRight: "auto" }} title="불러온 항목 전체 선택">
           <input type="checkbox" checked={allSel}
-            onChange={() => onToggleSelAll(rows, !allSel)} aria-label="전체 선택" />
+            onChange={() => onToggleSelAll(rows, !allSel)} aria-label="불러온 항목 전체 선택" />
         </label>
         <span className="muted small">이 시각 이전 영구숨김:</span>
         <input type="datetime-local" className="dism-purge-at" value={purgeAt}
-          onChange={(e) => setPurgeAt(e.target.value)} title="이 시각 이전의 처리 내역을 영구숨김" />
+          onChange={(e) => setPurgeAt(e.target.value)} title="이 시각 이전 처리 내역을 영구숨김 (전체 대상)" />
         <button className="attn-sort attn2-archive" disabled={!purgeAt || busy} onClick={purgeBefore}
-          title="입력한 시각 이전의 처리 내역을 영구숨김 — 조치 필요·이력·액티비티서 완전히 가림(복원은 영구숨김 항목)">이전 영구숨김</button>
+          title="입력한 시각 이전에 처리한 내역을 전체 영구숨김 — 조치 필요·이력·액티비티서 완전히 가림(복원은 영구숨김 항목)">이전 영구숨김</button>
         <button className="attn-sort" onClick={onToggleSort} title="리포트 시각순 정렬 전환">
           {dir === "desc" ? "최신순 ↓" : "오래된순 ↑"}
         </button>
         <button className="attn-sort" onClick={onUndismissAll}
-          title="처리 내역을 모두 조치 필요로 복원">모두 복원</button>
+          title="처리 내역 전체를 조치 필요로 복원 (불러온 화면 분량뿐 아니라 전체 대상)">모두 복원 ({total})</button>
       </div>
       <div className="attn2-list">
         {rows.map((d) => {
@@ -555,6 +553,152 @@ const dismToAckPayload = (rows: DismissedItem[], kind: "ack" | "dismissed") =>
     job_id: d.job_id ?? null, request_id: d.request_id ?? null, status: d.status ?? null,
     item_at: d.item_at ?? null,
   }));
+
+// sort by the item's report time (item_at), falling back to dismiss time.
+const dismMs = (d: DismissedItem) => {
+  const w = d.item_at || d.dismissed_at;
+  return w ? new Date(w).getTime() || 0 : 0;
+};
+
+// 처리 내역 (dismissed/ack) — like 영구숨김, a forever-accruing list. Its body is
+// fetched LAZILY (only when expanded) and one PAGE at a time ('더 보기'); the parent
+// supplies the grand COUNT (`total`) for the badge. Portal rows are paginated; the
+// (small) DMS-only ack addendum arrives with the first page. Whole-list ops ('모두
+// 복원'/'이전 영구숨김') go server-side so pagination never truncates them.
+const DISM_PAGE = 50;
+function DismissedSection({
+  total,
+  busy,
+  onChanged,
+}: {
+  total: number;
+  busy: boolean;
+  onChanged: () => void | Promise<void>;
+}) {
+  const [items, setItems] = useState<DismissedItem[]>([]); // paginated portal rows
+  const [extra, setExtra] = useState<DismissedItem[]>([]); // DMS-only acks (page 0)
+  const [sort, setSort] = useState<"desc" | "asc">("desc");
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
+  const [done, setDone] = useState(false); // last page returned < PAGE → no more
+  const [everOpened, setEverOpened] = useState(false);
+
+  const load = useCallback(async (offset: number, order: "desc" | "asc") => {
+    setLoading(true);
+    try {
+      const res = await operatorApi.dashboard.dismissedAttention(offset, DISM_PAGE, order);
+      setItems((prev) => (offset === 0 ? res.items : [...prev, ...res.items]));
+      if (offset === 0) setExtra(res.extra || []);
+      setDone(res.items.length < DISM_PAGE);
+    } catch (e) {
+      window.alert(`처리 내역 불러오기 실패: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const onOpen = (open: boolean) => {
+    if (open && !everOpened) { setEverOpened(true); load(0, sort); }
+  };
+  const flipSort = () => {
+    const next = sort === "desc" ? "asc" : "desc";
+    setSort(next); setSel(new Set()); load(0, next);
+  };
+  const loadMore = () => load(items.length, sort);
+
+  // run a mutating action, then reload page 0 (this section) + refresh the parent
+  // (attention counts / archived count that the action may have changed).
+  const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
+    setLoading(true);
+    try {
+      await fn();
+    } catch (e) {
+      window.alert(`작업 실패: ${e instanceof Error ? e.message : String(e)}`);
+      setLoading(false);
+      return false;
+    }
+    await load(0, sort);
+    await onChanged();
+    setLoading(false);
+    return true;
+  };
+
+  const toggleSel = (fp: string) =>
+    setSel((p) => { const n = new Set(p); n.has(fp) ? n.delete(fp) : n.add(fp); return n; });
+  const toggleSelAll = (rowsArg: DismissedItem[], select: boolean) =>
+    setSel((p) => {
+      const n = new Set(p);
+      for (const d of rowsArg) select ? n.add(d.fingerprint) : n.delete(d.fingerprint);
+      return n;
+    });
+  const clearSel = () => setSel(new Set());
+
+  const undismiss = (fps: string[]) =>
+    run(() => operatorApi.dashboard.undismissAttention(fps)).then((ok) => { if (ok) clearSel(); return ok; });
+  const archive = (fps: string[]) =>
+    run(() => operatorApi.dashboard.archiveAttention(fps)).then((ok) => { if (ok) clearSel(); return ok; });
+  const archiveBefore = (before: string) =>
+    run(() => operatorApi.dashboard.archiveAttentionBefore(before));
+  const undismissAll = async () => {
+    if (!window.confirm(
+      `처리 내역 ${total}건을 모두 조치 필요로 복원할까요?\n` +
+      "(이미 해소된 항목은 사라지고, 아직 유효한 항목은 다시 표시됩니다)"
+    )) return;
+    if (await run(() => operatorApi.dashboard.undismissAllAttention())) clearSel();
+  };
+  const bulkAck = async (rowsArg: DismissedItem[]) => {
+    if (!rowsArg.length) return;
+    if (await run(() => operatorApi.dashboard.dismissAttention(dismToAckPayload(rowsArg, "ack")))) clearSel();
+  };
+  const bulkDelete = async (rowsArg: DismissedItem[]) => {
+    if (!rowsArg.length) return;
+    if (!window.confirm(`선택한 data job 기록 ${rowsArg.length}건을 DMS에서 삭제할까요? (되돌릴 수 없음)`)) return;
+    if (await run(async () => {
+      for (const d of rowsArg) if (d.job_id) await operatorApi.dashboard.deleteDataJob(d.job_id);
+      // the underlying items are gone now — drop their (orphaned) 처리 내역 rows too.
+      await operatorApi.dashboard.undismissAttention(rowsArg.map((d) => d.fingerprint));
+    })) clearSel();
+  };
+  const bulkResolve = async (rowsArg: DismissedItem[]) => {
+    if (!rowsArg.length) return;
+    const reason = window.prompt(
+      `선택한 요청 ${rowsArg.length}건을 중단(abandon)합니다. 사유 입력 (감사 기록):`, "obsolete — 정리");
+    if (!reason) return;
+    if (await run(async () => {
+      for (const d of rowsArg) if (d.request_id) await operatorApi.dashboard.resolveRequest(d.request_id, "abandon", reason);
+      await operatorApi.dashboard.undismissAttention(rowsArg.map((d) => d.fingerprint));
+    })) clearSel();
+  };
+
+  // merged display: paginated portal rows + the small DMS-only ack addendum, client-sorted.
+  const merged = [...items, ...extra].sort((a, b) =>
+    sort === "desc" ? dismMs(b) - dismMs(a) : dismMs(a) - dismMs(b));
+  const loadedCount = items.length + extra.length;
+  const disabled = busy || loading;
+
+  return (
+    <Section title="처리 내역 (확인·숨김)" badge={<span className="muted small">{total}건</span>}
+      onOpenChange={onOpen}>
+      {loading && !merged.length ? (
+        <Loading rows={2} />
+      ) : (
+        <DismissedList rows={merged} total={total}
+          dir={sort} onToggleSort={flipSort}
+          selected={sel} onToggleSel={toggleSel} onToggleSelAll={toggleSelAll}
+          onClearSel={clearSel} onUndismiss={undismiss} onUndismissAll={undismissAll}
+          onArchive={archive} onArchiveBefore={archiveBefore}
+          onAck={bulkAck} onDelete={bulkDelete} onResolve={bulkResolve} busy={disabled} />
+      )}
+      {!done && items.length > 0 && (
+        <div className="attn-more">
+          <button className="ghost mini" onClick={loadMore} disabled={disabled}>
+            더 보기 ({loadedCount} / {total})
+          </button>
+        </div>
+      )}
+    </Section>
+  );
+}
 
 // 영구숨김 항목 (archived) — a forever-growing restore bin. Its body is fetched
 // LAZILY (only when the operator expands the section) and one PAGE at a time
@@ -707,7 +851,6 @@ function ArchivedSection({
 
 export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string) => void }) {
   const [rows, setRows] = useState<AttentionItem[]>([]);
-  const [dismissed, setDismissed] = useState<DismissedItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   // INFO (e.g. soft-deleted awaiting manual cleanup) is hidden by default
@@ -715,23 +858,22 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
   const [doms, setDoms] = useState<Set<string>>(new Set());
   const [liveSort, setLiveSort] = useState<"desc" | "asc">("desc");
   const [histSort, setHistSort] = useState<"desc" | "asc">("desc");
-  const [dismSort, setDismSort] = useState<"desc" | "asc">("desc");
   // multi-select (keyed by fingerprint), like the backup/scan bulk bars.
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [dismSel, setDismSel] = useState<Set<string>>(new Set());
-  // 영구숨김은 forever-누적되는 rarely-opened 복원 휴지통이라 rows는 eager로 안 받고
-  // COUNT(정수 1개)만 받아 배지/빈상태 판정에 쓴다. 실제 rows는 ArchivedSection이
-  // 섹션을 펼칠 때 페이지 단위로 lazy 로딩한다.
+  // 처리 내역/영구숨김은 forever-누적되는 목록이라 rows는 eager로 안 받고 COUNT(정수
+  // 1개)만 받아 배지/빈상태 판정에 쓴다. 실제 rows는 각 Section이 펼칠 때 페이지 단위로
+  // lazy 로딩한다(DismissedSection·ArchivedSection).
+  const [dismTotal, setDismTotal] = useState(0);
   const [archTotal, setArchTotal] = useState(0);
 
   const refetch = useCallback(async () => {
-    const [a, d, at] = await Promise.all([
+    const [a, dt, at] = await Promise.all([
       operatorApi.dashboard.attention().catch(() => [] as AttentionItem[]),
-      operatorApi.dashboard.dismissedAttention().catch(() => [] as DismissedItem[]),
+      operatorApi.dashboard.dismissedAttentionCount().catch(() => 0),
       operatorApi.dashboard.archivedAttentionCount().catch(() => 0),
     ]);
     setRows(a);
-    setDismissed(d);
+    setDismTotal(dt);
     setArchTotal(at);
     // prune selections to items still present (an actioned item disappears).
     const prune = (prev: Set<string>, present: Set<string>) => {
@@ -740,9 +882,7 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
       return next.size === prev.size ? prev : next;
     };
     const aFps = new Set(a.map((i) => i.fingerprint).filter(Boolean) as string[]);
-    const dFps = new Set(d.map((i) => i.fingerprint));
     setSelected((prev) => prune(prev, aFps));
-    setDismSel((prev) => prune(prev, dFps));
   }, []);
 
   useEffect(() => {
@@ -799,20 +939,6 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     if (!window.confirm(`보이는 ${p.length}건을 숨길까요? (처리 내역에서 언제든 복원 가능)`)) return;
     run(() => operatorApi.dashboard.dismissAttention(p));
   };
-  const undismiss = (fingerprints: string[]) =>
-    run(() => operatorApi.dashboard.undismissAttention(fingerprints));
-  // '이전 정리': archive (keep hidden, drop from 처리 내역) — not un-hide.
-  const archiveDismissals = (fingerprints: string[]) =>
-    run(() => operatorApi.dashboard.archiveAttention(fingerprints));
-  const undismissAll = () => {
-    if (!dismissed.length) return;
-    if (!window.confirm(
-      `처리 내역 ${dismissed.length}건을 모두 조치 필요로 복원할까요?\n` +
-      "(이미 해소된 항목은 사라지고, 아직 유효한 항목은 다시 표시됩니다)"
-    )) return;
-    undismiss(dismissed.map((d) => d.fingerprint));
-  };
-
   // ---- multi-select bulk actions (mirrors the backup/scan bulk bar) ----
   const toggleSel = (fp: string) =>
     setSelected((prev) => {
@@ -876,43 +1002,6 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     if (ok) clearSel();
   };
 
-  // ---- 처리 내역 (dismissed/ack) section selection + bulk ----
-  const dismToggleSel = (fp: string) =>
-    setDismSel((prev) => { const n = new Set(prev); n.has(fp) ? n.delete(fp) : n.add(fp); return n; });
-  const dismToggleSelAll = (items: DismissedItem[], select: boolean) =>
-    setDismSel((prev) => {
-      const n = new Set(prev);
-      for (const d of items) select ? n.add(d.fingerprint) : n.delete(d.fingerprint);
-      return n;
-    });
-  const dismClearSel = () => setDismSel(new Set());
-
-  const dismBulkAck = async (items: DismissedItem[]) => {
-    if (!items.length) return;
-    if (await run(() => operatorApi.dashboard.dismissAttention(dismToAckPayload(items, "ack")))) dismClearSel();
-  };
-  const dismBulkDelete = async (items: DismissedItem[]) => {
-    if (!items.length) return;
-    if (!window.confirm(`선택한 data job 기록 ${items.length}건을 DMS에서 삭제할까요? (되돌릴 수 없음)`)) return;
-    const ok = await run(async () => {
-      for (const d of items) if (d.job_id) await operatorApi.dashboard.deleteDataJob(d.job_id);
-      // the underlying items are gone now — drop their (orphaned) 처리 내역 rows too.
-      await operatorApi.dashboard.undismissAttention(items.map((d) => d.fingerprint));
-    });
-    if (ok) dismClearSel();
-  };
-  const dismBulkResolve = async (items: DismissedItem[]) => {
-    if (!items.length) return;
-    const reason = window.prompt(
-      `선택한 요청 ${items.length}건을 중단(abandon)합니다. 사유 입력 (감사 기록):`, "obsolete — 정리");
-    if (!reason) return;
-    const ok = await run(async () => {
-      for (const d of items) if (d.request_id) await operatorApi.dashboard.resolveRequest(d.request_id, "abandon", reason);
-      await operatorApi.dashboard.undismissAttention(items.map((d) => d.fingerprint));
-    });
-    if (ok) dismClearSel();
-  };
-
   const sevCounts = useMemo(() => {
     const c: Record<string, number> = { CRITICAL: 0, ERROR: 0, WARN: 0, INFO: 0 };
     rows.forEach((r) => { const s = (str(r.severity) || "WARN").toUpperCase(); if (s in c) c[s] += 1; });
@@ -953,17 +1042,9 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     </span>
   );
   const histBadge = <span className="muted small">{history.length}건</span>;
-  const dismBadge = <span className="muted small">{dismissed.length}건</span>;
-  // sort by the item's report time (item_at), falling back to dismiss time.
-  const dismMs = (d: DismissedItem) => {
-    const w = d.item_at || d.dismissed_at;
-    return w ? new Date(w).getTime() || 0 : 0;
-  };
-  const dismissedSorted = [...dismissed].sort((a, b) =>
-    dismSort === "desc" ? dismMs(b) - dismMs(a) : dismMs(a) - dismMs(b));
 
   if (loading) return <Loading rows={4} />;
-  if (rows.length === 0 && dismissed.length === 0 && archTotal === 0)
+  if (rows.length === 0 && dismTotal === 0 && archTotal === 0)
     return <p className="muted">조치 필요한 항목이 없습니다. ✅</p>;
 
   return (
@@ -1026,14 +1107,7 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
           selected={selected} onToggleSel={toggleSel} onToggleSelAll={toggleSelAll}
           empty="이력 없음" />
       </Section>
-      <Section title="처리 내역 (확인·숨김)" badge={dismBadge}>
-        <DismissedList rows={dismissedSorted}
-          dir={dismSort} onToggleSort={() => setDismSort((d) => (d === "desc" ? "asc" : "desc"))}
-          selected={dismSel} onToggleSel={dismToggleSel} onToggleSelAll={dismToggleSelAll}
-          onClearSel={dismClearSel} onUndismiss={undismiss} onUndismissAll={undismissAll}
-          onArchive={archiveDismissals}
-          onAck={dismBulkAck} onDelete={dismBulkDelete} onResolve={dismBulkResolve} busy={busy} />
-      </Section>
+      <DismissedSection total={dismTotal} busy={busy} onChanged={refetch} />
       {archTotal > 0 && (
         <ArchivedSection total={archTotal} busy={busy} onChanged={refetch} />
       )}
