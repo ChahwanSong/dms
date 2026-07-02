@@ -19,10 +19,6 @@ from fastapi import Depends, HTTPException, Request
 ROLE_USER = "user"
 ROLE_OPERATOR = "operator"
 
-# Session flag set once an operator unlocks 관리자 모드 by presenting the admin
-# token (PORTAL_ADMIN_TOKEN). Gates operator-account MANAGEMENT endpoints.
-SESSION_ADMIN_KEY = "operator_admin"
-
 
 def session_user(username: str, role: str, method: str, **extra: Any) -> dict[str, Any]:
     """Build the canonical user object stored in the session / returned by /me."""
@@ -51,21 +47,3 @@ def require_role(*roles: str):
         return user
 
     return _dep
-
-
-def require_operator_admin(request: Request) -> dict[str, Any]:
-    """Gate operator-account MANAGEMENT (create / reset others / disable / delete).
-
-    Requires a logged-in operator session that has ALSO unlocked 관리자 모드 by
-    presenting PORTAL_ADMIN_TOKEN (verified server-side; only a session flag is
-    stored — the token itself never reaches the browser). Self password change
-    does NOT use this — it only needs an authenticated session + current password.
-    """
-    user = current_user(request)
-    if user is None:
-        raise HTTPException(status_code=401, detail="not_authenticated")
-    if user.get("role") != ROLE_OPERATOR:
-        raise HTTPException(status_code=403, detail="forbidden")
-    if not request.session.get(SESSION_ADMIN_KEY):
-        raise HTTPException(status_code=403, detail="admin_locked")
-    return user

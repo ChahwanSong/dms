@@ -148,6 +148,22 @@ export const auth = {
   loginAd: () =>
     request<{ user: User }>("/api/auth/login/ad", { method: "POST" }),
   logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
+  // whether the login-screen 계정 만들기 / 비밀번호 재설정 flows are available
+  // (PORTAL_ADMIN_TOKEN configured). Public — used to show/hide those tabs.
+  accountTokenRequired: () =>
+    request<{ available: boolean }>("/api/auth/account-token-required"),
+  // create an operator account (login screen, gated by the shared secret token).
+  register: (username: string, password: string, token: string) =>
+    request<{ registered: string }>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ username, password, token }),
+    }),
+  // reset ('찾기'/변경) an operator's password (login screen, token-gated).
+  resetPassword: (username: string, new_password: string, token: string) =>
+    request<{ reset: string }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ username, new_password, token }),
+    }),
 };
 
 export const userApi = {
@@ -703,58 +719,7 @@ const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 const SC = "/api/operator/scan/batches";
 
-export interface OperatorAccount {
-  username: string;
-  is_active: boolean;
-  created_by?: string | null;
-  created_at?: string | null;
-  updated_at?: string | null;
-}
-
-export interface AccountAdminStatus {
-  admin_available: boolean; // PORTAL_ADMIN_TOKEN configured on the BFF
-  unlocked: boolean; // this session has unlocked 관리자 모드
-  username: string;
-}
-
-const ACC = "/api/operator/accounts";
-
 export const operatorApi = {
-  // operator account management (계정 관리)
-  accounts: {
-    status: () => request<AccountAdminStatus>(`${ACC}/status`),
-    unlock: (token: string) =>
-      request<{ unlocked: boolean }>(`${ACC}/unlock`, {
-        method: "POST",
-        body: JSON.stringify({ token }),
-      }),
-    lock: () => request<{ unlocked: boolean }>(`${ACC}/lock`, { method: "POST" }),
-    changePassword: (current_password: string, new_password: string) =>
-      request<{ changed: boolean }>(`${ACC}/change-password`, {
-        method: "POST",
-        body: JSON.stringify({ current_password, new_password }),
-      }),
-    list: () => request<OperatorAccount[]>(ACC),
-    create: (username: string, password: string) =>
-      request<{ created: string }>(ACC, {
-        method: "POST",
-        body: JSON.stringify({ username, password }),
-      }),
-    resetPassword: (username: string, new_password: string) =>
-      request<{ reset: string }>(`${ACC}/${encodeURIComponent(username)}/reset-password`, {
-        method: "POST",
-        body: JSON.stringify({ new_password }),
-      }),
-    setActive: (username: string, active: boolean) =>
-      request<{ enabled?: string; disabled?: string }>(
-        `${ACC}/${encodeURIComponent(username)}/${active ? "enable" : "disable"}`,
-        { method: "POST" },
-      ),
-    remove: (username: string) =>
-      request<{ deleted: string }>(`${ACC}/${encodeURIComponent(username)}`, {
-        method: "DELETE",
-      }),
-  },
   storage: {
     list: (clusterName?: string) =>
       request<StorageMapping[]>(

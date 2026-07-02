@@ -160,6 +160,36 @@ button.primary:disabled {
   text-align: center;
 }
 
+.success {
+  color: #6ee7a8;
+  font-size: 0.85rem;
+  margin: 1rem 0 0;
+  text-align: center;
+}
+
+/* operator tab sub-mode switch (로그인 / 계정 만들기 / 비밀번호 재설정) */
+.subtabs {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+.subtab {
+  flex: 1;
+  padding: 0.38rem 0.4rem;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.subtab.active {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.12);
+}
+
 .notice {
   font-size: 0.82rem;
   line-height: 1.5;
@@ -1786,23 +1816,3 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
   .vdetail { padding-left: 0.6rem; }
 }
 
-/* ---- 계정 관리 (operator accounts) ------------------------------------- */
-.acct-card { background: var(--panel, #12161c); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; margin: 0 0 1rem; max-width: 780px; }
-.acct-card h3 { margin: 0 0 0.6rem; font-size: 1rem; }
-.acct-card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
-.acct-form { display: flex; flex-direction: column; gap: 0.6rem; }
-.acct-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: #cdd5e0; }
-.acct-form input { background: #0d1116; border: 1px solid var(--border); border-radius: 6px; padding: 0.42rem 0.6rem; color: #e6edf3; font-size: 0.9rem; }
-.acct-form input:focus { outline: none; border-color: var(--accent); }
-.acct-inline { flex-direction: row; align-items: center; flex-wrap: wrap; }
-.acct-inline input { min-width: 12rem; }
-.acct-actions { display: flex; align-items: center; gap: 0.7rem; margin-top: 0.2rem; }
-.acct-ok { color: #6ee7a8; font-size: 0.85rem; }
-.acct-err { color: #f87171; font-size: 0.85rem; }
-.acct-create { margin: 0.4rem 0 0.2rem; }
-.acct-table { width: 100%; border-collapse: collapse; margin-top: 0.7rem; font-size: 0.88rem; }
-.acct-table th, .acct-table td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
-.acct-table th { color: #9aa4b2; font-weight: 500; font-size: 0.78rem; }
-.acct-inactive { opacity: 0.6; }
-.acct-self { margin-left: 0.4rem; }
-.acct-row-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; justify-content: flex-end; }

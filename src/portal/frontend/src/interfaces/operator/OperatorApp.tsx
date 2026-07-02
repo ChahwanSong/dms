@@ -7,7 +7,6 @@ import ScanBatches from "./scan/ScanBatches";
 import Dashboard from "./dashboard/Dashboard";
 import DashboardAttention from "./dashboard/DashboardAttention";
 import DashboardActivity from "./dashboard/DashboardActivity";
-import AccountsPanel from "./accounts/AccountsPanel";
 
 // Operator/admin interface. A simple left-nav shell; each section is a separate
 // feature module. 종합 대시보드 has two sub-sections (조치 필요 · 액티비티) shown
@@ -18,8 +17,7 @@ type Section =
   | "dashboard-activity"
   | "storage"
   | "backup"
-  | "scan"
-  | "accounts";
+  | "scan";
 
 interface NavItem {
   key: Section;
@@ -39,7 +37,6 @@ const NAV: NavItem[] = [
   { key: "storage", label: "스토리지 인벤토리" },
   { key: "backup", label: "데이터 백업" },
   { key: "scan", label: "데이터 스캔" },
-  { key: "accounts", label: "계정 관리" },
 ];
 
 export default function OperatorApp({
@@ -128,7 +125,6 @@ export default function OperatorApp({
           {section === "storage" && <StorageInventory focus={focus} />}
           {section === "backup" && <BackupBatches />}
           {section === "scan" && <ScanBatches />}
-          {section === "accounts" && <AccountsPanel me={user.username} />}
         </main>
       </div>
     </div>

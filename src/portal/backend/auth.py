@@ -12,6 +12,7 @@ Session state lives in Starlette's signed cookie (``request.session``); no DB.
 from __future__ import annotations
 
 import hmac
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -26,10 +27,62 @@ from .security import (
     session_user,
 )
 
+# New operator ids created from the login screen must match this; the bootstrap
+# `admin` account (seeded from PORTAL_OPERATOR_USERS) is grandfathered for login.
+USERNAME_RE = re.compile(r"^admin_[a-z0-9_]{2,30}$")
+MIN_PASSWORD_LEN = 8
+
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class RegisterRequest(BaseModel):
+    """Create an operator account from the login screen. Gated by the shared
+    operational secret token (PORTAL_ADMIN_TOKEN), NOT a login session."""
+    username: str
+    password: str
+    token: str
+
+
+class ResetPasswordRequest(BaseModel):
+    """Reset ('찾기'/변경) an operator's password from the login screen — the
+    password is one-way hashed, so there is no recovery, only a token-gated reset."""
+    username: str
+    new_password: str
+    token: str
+
+
+def _require_admin_token(settings: Settings, token: str) -> None:
+    """Verify the shared operational secret. 503 if the feature isn't configured
+    (no PORTAL_ADMIN_TOKEN), 403 if the presented token is wrong."""
+    if not settings.admin_token:
+        raise HTTPException(status_code=503, detail="account_token_not_configured")
+    if not hmac.compare_digest(token, settings.admin_token):
+        raise HTTPException(status_code=403, detail="invalid_token")
+
+
+def _check_username(username: str) -> None:
+    if not USERNAME_RE.match(username):
+        raise HTTPException(
+            status_code=422,
+            detail="invalid_username ('admin_' 접두어 + 소문자/숫자/밑줄, 예: admin_ops)",
+        )
+
+
+def _check_password(password: str) -> None:
+    if len(password) < MIN_PASSWORD_LEN:
+        raise HTTPException(
+            status_code=422, detail=f"password_too_short (최소 {MIN_PASSWORD_LEN}자)"
+        )
+
+
+def _require_db(request: Request):
+    db = getattr(request.app.state, "db", None)
+    if db is None or not db.configured:
+        raise HTTPException(status_code=503, detail="portal_db_not_configured")
+    return db
 
 
 def _verify_operator(settings: Settings, username: str, password: str) -> bool:
@@ -88,5 +141,39 @@ def auth_router(settings: Settings) -> APIRouter:
         if user is None:
             raise HTTPException(status_code=401, detail="not_authenticated")
         return {"user": user}
+
+    @router.get("/account-token-required")
+    def account_token_required() -> dict[str, Any]:
+        """Whether the login-screen 계정 만들기 / 비밀번호 재설정 flows are available
+        (i.e. PORTAL_ADMIN_TOKEN is configured). Public — lets the login SPA show or
+        hide those tabs. Never returns the token itself."""
+        return {"available": bool(settings.admin_token)}
+
+    @router.post("/register")
+    async def register(payload: RegisterRequest, request: Request) -> dict[str, Any]:
+        """Create an operator account from the login screen, gated ONLY by the
+        shared operational secret token (no login session required). New ids must
+        use the `admin_` prefix; the password is stored PBKDF2-hashed."""
+        _require_admin_token(settings, payload.token)
+        db = _require_db(request)
+        username = payload.username.strip()
+        _check_username(username)
+        _check_password(payload.password)
+        created = await db.create_operator(username, payload.password, created_by="self-register")
+        if not created:
+            raise HTTPException(status_code=409, detail="username_exists")
+        return {"registered": username}
+
+    @router.post("/reset-password")
+    async def reset_password(payload: ResetPasswordRequest, request: Request) -> dict[str, Any]:
+        """Reset an operator's password from the login screen, gated ONLY by the
+        shared operational secret token. 404 if the username doesn't exist."""
+        _require_admin_token(settings, payload.token)
+        db = _require_db(request)
+        _check_password(payload.new_password)
+        n = await db.set_operator_password(payload.username.strip(), payload.new_password)
+        if not n:
+            raise HTTPException(status_code=404, detail="operator_not_found")
+        return {"reset": payload.username.strip()}
 
     return router

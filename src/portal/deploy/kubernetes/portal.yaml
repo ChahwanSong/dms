@@ -25,10 +25,11 @@ stringData:
   PORTAL_OPERATOR_USERS: "REPLACE_WITH_OPERATOR_CREDS"
   # DMS API bearer token (testbed auth profile).
   PORTAL_DMS_TOKEN: "REPLACE_WITH_DMS_TOKEN"
-  # Admin token that unlocks 관리자 모드 for operator-ACCOUNT management (create /
-  # reset others / disable / delete). SEPARATE from PORTAL_DMS_TOKEN. Empty =>
-  # account management unavailable (self password change still works). Use a strong
-  # random value; rotate independently of the DMS token.
+  # Shared operational secret for the LOGIN-SCREEN account flows: entering this
+  # token there enables '계정 만들기'(create operator) and '비밀번호 재설정'(reset).
+  # Verified server-side per request (never stored in the browser). SEPARATE from
+  # PORTAL_DMS_TOKEN. Empty => those flows are hidden/disabled (normal login only).
+  # Use a strong random value; rotate independently of the DMS token.
   PORTAL_ADMIN_TOKEN: "REPLACE_WITH_ADMIN_TOKEN"
   # Portal's OWN Postgres (operator logins + data-backup batches/requests). On the
   # testbed this is the DMS Postgres with a dedicated `portal` schema, so the
