@@ -10,6 +10,7 @@ kubectl --context dms-control -n dms wait --for=condition=complete job/dms-migra
 kubectl --context dms-control -n dms rollout status deploy/dms-api --timeout=180s
 kubectl --context dms-control -n dms rollout status deploy/dms-planner --timeout=180s
 kubectl --context dms-control -n dms rollout status deploy/dms-rm-worker --timeout=180s
+kubectl --context dms-control -n dms rollout status deploy/dms-dm-worker --timeout=180s
 ```
 
 문제가 있으면 바로 describe/log를 본다.
@@ -84,7 +85,7 @@ curl_dms "$DMS_API_URL/api/v1/operations/action-required" \
 - `dms-api` 사용 가능.
 - `dms-planner` 실행 중.
 - `dms-rm-worker` 실행 중.
-- `dms-dm-worker`는 Data Management 전제조건을 확인하기 전에는 0 replica로 둘 수 있다. `DMS_DM_JOB_IMAGE`, Volcano, artifact path, DM identity LDAP(DMS_LDAP_*) 설정 (preflight 직접 조회), fresh DM Agent report가 준비된 환경에서는 1 replica로 운영할 수 있다.
+- `dms-dm-worker` 실행 중 (기본 `replicas: 1` = DM 활성). DM 전제조건(Volcano+Queue/PriorityClass·`DMS_DM_JOB_IMAGE`·공유 artifact·DM identity LDAP·fresh DM Agent report — `0.prerequisites.md`·`4.dms-dm-api.md` §7)은 설치 시 갖춘다. DM을 의도적으로 끈 환경에서만 0 replica.
 - Storage-capable RM/DM node마다 agent report가 fresh 상태다.
 - 운영 request가 사용하는 storage mapping은 `readiness.resource_management=Ready`를 표시한다.
 - 해결되지 않은 action-required 항목이 없다.
@@ -831,7 +832,7 @@ install/scripts/dms-planned-shutdown.sh \
 
 install/scripts/dms-startup-recovery-check.sh
 
-export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"
 install/scripts/dms-resume.sh \
   --reason "worker restart completed $(date -Iseconds)" \
   --replicas 1
@@ -856,7 +857,7 @@ pg_dump "$DMS_OBSERVABILITY_DATABASE_URL" > dms-observability-$(date +%Y%m%d%H%M
 2. Script가 `ready_for_shutdown=true`를 확인하고 worker Deployment를 0으로 scale할 때까지 기다린다.
 3. PostgreSQL을 backup한다.
 4. 새 image를 `dms-migrate` Job에 적용하고 실행한다.
-5. `dms-api`, `dms-planner`, `dms-rm-worker` image를 교체하고 rollout한다.
+5. `dms-api`, `dms-planner`, `dms-rm-worker`, `dms-dm-worker` image를 교체하고 rollout한다.
 6. API가 올라오면 `dms-startup-recovery-check.sh`를 실행한다.
 7. `dms-resume.sh`로 control state를 normal로 되돌리고 RM worker를 scale up한다.
 8. `install/scripts/verify-install.sh`를 실행한다.
@@ -880,13 +881,17 @@ kubectl --context dms-control -n dms wait --for=condition=complete job/dms-migra
 kubectl --context dms-control -n dms set image deploy/dms-api api="$NEW_DMS_IMAGE"
 kubectl --context dms-control -n dms set image deploy/dms-planner planner="$NEW_DMS_IMAGE"
 kubectl --context dms-control -n dms set image deploy/dms-rm-worker rm-worker="$NEW_DMS_IMAGE"
+# dm-worker도 같은 plain dms image이므로 함께 교체한다(누락 시 스테일 image로 남음).
+kubectl --context dms-control -n dms set image deploy/dms-dm-worker dm-worker="$NEW_DMS_IMAGE"
 
 kubectl --context dms-control -n dms rollout status deploy/dms-api --timeout=180s
 kubectl --context dms-control -n dms rollout status deploy/dms-planner --timeout=180s
+kubectl --context dms-control -n dms rollout status deploy/dms-rm-worker --timeout=180s
+kubectl --context dms-control -n dms rollout status deploy/dms-dm-worker --timeout=180s
 
 install/scripts/dms-startup-recovery-check.sh
 
-export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"
 install/scripts/dms-resume.sh \
   --reason "DMS upgrade completed $(date -Iseconds)" \
   --replicas 1
@@ -904,9 +909,11 @@ install/scripts/verify-install.sh
 kubectl --context dms-control -n dms rollout undo deploy/dms-api
 kubectl --context dms-control -n dms rollout undo deploy/dms-planner
 kubectl --context dms-control -n dms rollout undo deploy/dms-rm-worker
+kubectl --context dms-control -n dms rollout undo deploy/dms-dm-worker
 kubectl --context dms-control -n dms rollout status deploy/dms-api --timeout=180s
 kubectl --context dms-control -n dms rollout status deploy/dms-planner --timeout=180s
 kubectl --context dms-control -n dms rollout status deploy/dms-rm-worker --timeout=180s
+kubectl --context dms-control -n dms rollout status deploy/dms-dm-worker --timeout=180s
 ```
 
 Schema migration이 이미 실행된 뒤라면 image rollback만으로 충분하지 않을 수 있다. schema-changing release는 staging DB restore로 먼저 검증한다.

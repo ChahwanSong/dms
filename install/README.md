@@ -1365,4 +1365,4 @@ kubectl --context dms-control -n dms logs deploy/dms-rm-worker --tail=200
 
 - 설정 변수와 API 예시는 `install/CONFIGURATION.md`.
 - 일일 점검, 장애 대응, 업그레이드는 `install/RUNBOOK.md`.
-- Backend 추가 방법은 `docs/backend-extension-guide.md`.
+- Backend(스토리지 종류) 추가는 코드의 `src/dms/backends/` + `src/dms/backend_registry.py` 참조.

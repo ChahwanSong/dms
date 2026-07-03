@@ -55,7 +55,7 @@ spec:
     spec:
       containers:
         - name: portal
-          image: pkg-01:5000/dms-portal:v87
+          image: registry.example.internal/dms-portal:CHANGE_ME
           imagePullPolicy: Always
           ports:
             - name: http
@@ -107,5 +107,5 @@ spec:
     - name: http
       port: 80
       targetPort: http
-      # Desktop access: http://10.10.10.10:30090
+      # Desktop access: http://<portal-node-ip>:30090
       nodePort: 30090
