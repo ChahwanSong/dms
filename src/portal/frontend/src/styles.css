@@ -1064,6 +1064,38 @@ button.linklike {
   }
 }
 
+/* ---- 데이터 Sync 탭 (단발성 data.sync) ---- */
+.sync-form-section {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 0.9rem 1rem 1.1rem; background: rgba(255, 255, 255, 0.015);
+  margin-bottom: 1.4rem;
+}
+.sync-form { margin-top: 0.7rem; }
+.sync-form .storage-row { align-items: flex-start; flex-wrap: wrap; }
+.storage-row > .sync-endpoint { flex: 1 1 18rem; min-width: 14rem; }
+.sync-endpoint { display: flex; flex-direction: column; gap: 0.6rem; }
+.sync-arrow {
+  align-self: center; color: #7b8494; font-size: 1.4rem; padding-top: 1.6rem; flex: 0 0 auto;
+}
+@media (max-width: 720px) { .sync-arrow { display: none; } }
+/* 승인 액션: blue outline mini (mirrors .mini.danger's red-outline pattern). */
+button.mini.go { color: #93c5fd; border-color: rgba(59, 130, 246, 0.6); }
+button.mini.go:hover { color: #cfe3ff; border-color: var(--accent); }
+
+.sync-list { margin-top: 0.4rem; }
+.sync-grid { table-layout: auto; margin-top: 0.5rem; }
+.sync-info { white-space: nowrap; }
+.sync-when { white-space: nowrap; }
+.sync-memo { color: #7b8494; }
+.sync-actions { text-align: right; white-space: nowrap; vertical-align: middle; }
+.sync-actions .mini { margin-left: 0.3rem; }
+.sync-grid tr.sync-live > td { background: rgba(59, 130, 246, 0.05); }
+@media (min-width: 721px) {
+  .sync-grid .sync-target {
+    max-width: 0; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+}
+
 textarea.json {
   width: 100%;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;

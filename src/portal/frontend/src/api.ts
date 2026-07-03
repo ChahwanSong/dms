@@ -282,6 +282,57 @@ export interface BatchUpdateInput {
   node_count?: number | null; // null = 자동 (DMS policy default)
 }
 
+// --- data sync (데이터 Sync 탭: one-shot data.sync) --------------------
+// preview summary captured at ConfirmPending (files/bytes to copy).
+export interface SyncPreview {
+  files?: number | null;
+  dirs?: number | null;
+  bytes?: number | null;
+  errors?: number | null;
+  tool?: string | null;
+}
+// A one-shot sync job — carries its own config + DMS tracking (no batch).
+export interface SyncJob {
+  id: number;
+  src_storage: string;
+  src_path: string;
+  dst_storage: string;
+  dst_path: string;
+  requester_id: string;
+  owner_username?: string | null;
+  options?: Record<string, unknown>;
+  delete_enabled: boolean;
+  priority: string;
+  node_count?: number | null;
+  memo?: string | null;
+  state: string;
+  approved?: boolean;
+  dms_request_id?: string | null;
+  dms_job_id?: string | null;
+  fingerprint?: string | null;
+  preview?: SyncPreview | null;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  created_by?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+export interface SyncJobListResp {
+  items: SyncJob[];
+  total: number | null; // grand count on the first page only (infinite scroll)
+}
+export interface SyncJobCreateInput {
+  src_storage: string;
+  src_path: string;
+  dst_storage: string;
+  dst_path: string;
+  delete_enabled: boolean;
+  options?: Record<string, unknown>;
+  priority?: string;
+  node_count?: number | null; // null = 자동 (DMS policy default)
+  memo?: string | null;
+}
+
 // --- data scan (DM scan batches) ---------------------------------------
 
 // One bucket of the dscan atime time-histogram (data temperature). Buckets run
@@ -718,6 +769,7 @@ export interface JobLogs {
 const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 const SC = "/api/operator/scan/batches";
+const SY = "/api/operator/sync-jobs";
 
 export interface AgentDaemonSetStatus {
   name: string;
@@ -1031,6 +1083,34 @@ export const operatorApi = {
       request<JobLogs>(
         `${SC}/${encodeURIComponent(id)}/requests/${rid}/logs?tail=${tail}`,
       ),
+  },
+  // Data sync (데이터 Sync 탭). ONE-SHOT data.sync: each job IS the top-level unit
+  // (no batch, no re-run). Mutating, so preview -> 승인(approve/confirm) -> execute,
+  // driven server-side. The list is newest-first, paginated (infinite scroll).
+  sync: {
+    // Worker-node policy defaults for dsync/nsync, to show what "자동" resolves to.
+    nodePolicy: () => request<NodePolicyResp>(`${SY}/node-policy`),
+    list: (opts?: { offset?: number; limit?: number }) => {
+      const q = new URLSearchParams();
+      if (opts?.offset != null) q.set("offset", String(opts.offset));
+      if (opts?.limit != null) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      return request<SyncJobListResp>(`${SY}${qs ? `?${qs}` : ""}`);
+    },
+    get: (id: number) => request<SyncJob>(`${SY}/${id}`),
+    create: (payload: SyncJobCreateInput) =>
+      request<SyncJob>(SY, { method: "POST", body: JSON.stringify(payload) }),
+    // Approve a preview_ready job (the orchestrator then confirms + runs it).
+    approve: (id: number) =>
+      request<{ id: number; approved: boolean }>(`${SY}/${id}:approve`, { method: "POST" }),
+    cancel: (id: number) =>
+      request<{ id: number; state: string }>(`${SY}/${id}:cancel`, { method: "POST" }),
+    remove: (id: number) =>
+      request<{ deleted: number }>(`${SY}/${id}`, { method: "DELETE" }),
+    // Live DMS sync-job detail / launcher-pod logs (read-only) for the 상세 modal.
+    job: (id: number) => request<JobDetail>(`${SY}/${id}/job`),
+    logs: (id: number, tail = 400) =>
+      request<JobLogs>(`${SY}/${id}/logs?tail=${tail}`),
   },
   dashboard: {
     summary: () => request<DashboardSummary>("/api/operator/dashboard/summary"),

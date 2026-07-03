@@ -5,18 +5,21 @@ import {
   type JobDetail,
   type JobLogs,
   type ScanRequest,
+  type SyncJob,
 } from "../../../api";
 import { SpecGrid, type KV } from "../../../components/SpecGrid";
 
-// Per-item live detail + log-tail popup (backup + scan). Given a portal request
-// row it fetches the FULLER live DMS job dict (state, result_summary incl
-// file_size_histogram, preflight, identifiers, artifact/log URIs) and tails the
-// launcher pod logs, polling every 4s WHILE the job is non-terminal. Read-only;
-// reuses the shared .modal / SpecGrid chrome.
+// Per-item live detail + log-tail popup (backup + scan + sync). Given a portal
+// request/job row it fetches the FULLER live DMS job dict (state, result_summary
+// incl file_size_histogram, preflight, identifiers, artifact/log URIs) and tails
+// the launcher pod logs, polling every 4s WHILE the job is non-terminal. Read-only;
+// reuses the shared .modal / SpecGrid chrome. Backup/scan key off a (batchId,
+// request); sync jobs are top-level (job id only).
 
 type Props =
   | { kind: "backup"; batchId: string; request: BackupRequest; onClose: () => void }
-  | { kind: "scan"; batchId: string; request: ScanRequest; onClose: () => void };
+  | { kind: "scan"; batchId: string; request: ScanRequest; onClose: () => void }
+  | { kind: "sync"; request: SyncJob; onClose: () => void };
 
 // DMS DataJobState values that are settled (stop polling). Mirrors the
 // orchestrators' terminal sets.
@@ -142,21 +145,30 @@ function histLabel(b: Record<string, unknown>): string {
 }
 
 export default function JobDetailModal(props: Props) {
-  const { kind, batchId, request, onClose } = props;
+  const { kind, request, onClose } = props;
   const [detail, setDetail] = useState<JobDetail | null>(null);
   const [logs, setLogs] = useState<JobLogs | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const jobFn = kind === "backup" ? operatorApi.backup.job : operatorApi.scan.job;
-  const logsFn = kind === "backup" ? operatorApi.backup.logs : operatorApi.scan.logs;
-
   const load = useCallback(async () => {
     try {
-      const [d, l] = await Promise.all([
-        jobFn(batchId, request.id),
-        logsFn(batchId, request.id),
-      ]);
+      const [d, l] =
+        props.kind === "sync"
+          ? await Promise.all([
+              operatorApi.sync.job(props.request.id),
+              operatorApi.sync.logs(props.request.id),
+            ])
+          : await Promise.all([
+              (props.kind === "backup" ? operatorApi.backup.job : operatorApi.scan.job)(
+                props.batchId,
+                props.request.id,
+              ),
+              (props.kind === "backup" ? operatorApi.backup.logs : operatorApi.scan.logs)(
+                props.batchId,
+                props.request.id,
+              ),
+            ]);
       setDetail(d);
       setLogs(l);
       setError(null);
@@ -165,7 +177,7 @@ export default function JobDetailModal(props: Props) {
     } finally {
       setLoading(false);
     }
-  }, [jobFn, logsFn, batchId, request.id]);
+  }, [props]);
 
   useEffect(() => {
     load();
@@ -184,9 +196,9 @@ export default function JobDetailModal(props: Props) {
   }, [polling, load]);
 
   const subtitle =
-    kind === "backup"
-      ? `${request.src_storage}:${request.src_path} → ${request.dst_storage}:${request.dst_path}`
-      : `${request.storage}:${request.path}`;
+    kind === "scan"
+      ? `${request.storage}:${request.path}`
+      : `${request.src_storage}:${request.src_path} → ${request.dst_storage}:${request.dst_path}`;
 
   // --- live identifiers / state grid ---
   const live: KV[] = [];

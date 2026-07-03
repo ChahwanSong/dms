@@ -138,6 +138,42 @@ def _ddl(schema: str) -> list[str]:
         # speeds list_scan_batches' ORDER BY b.created_at DESC.
         f"CREATE INDEX IF NOT EXISTS scan_batches_created_at "
         f"ON {s}.scan_batches(created_at)",
+        # data-sync feature (데이터 Sync tab): ONE-SHOT data.sync jobs. Unlike backup
+        # there is NO batch wrapper and NO re-run — the job IS the top-level unit. It
+        # carries the sync config (src/dst, options, delete_enabled) AND the DMS job
+        # tracking (state, preview/confirm fingerprint, result) in one row. Lifecycle:
+        # registered -> preview_pending -> preview_ready -> (approve) running ->
+        # succeeded|failed (preview_failed / cancelled are terminal too).
+        f"""CREATE TABLE IF NOT EXISTS {s}.sync_jobs (
+            id bigserial PRIMARY KEY,
+            src_storage text NOT NULL,
+            src_path text NOT NULL,
+            dst_storage text NOT NULL,
+            dst_path text NOT NULL,
+            requester_id text NOT NULL DEFAULT 'root',
+            owner_username text,
+            options jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+            delete_enabled boolean NOT NULL DEFAULT false,
+            priority text NOT NULL DEFAULT 'Low',
+            node_count int,
+            memo text,
+            state text NOT NULL DEFAULT 'registered',
+            approved boolean NOT NULL DEFAULT false,
+            dms_request_id text,
+            dms_job_id text,
+            fingerprint text,
+            preview jsonb,
+            result jsonb,
+            error text,
+            created_by text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        # the orchestrator polls non-terminal jobs (state = ANY(...)).
+        f"CREATE INDEX IF NOT EXISTS sync_jobs_state ON {s}.sync_jobs(state)",
+        # the list is newest-first, paginated (infinite scroll).
+        f"CREATE INDEX IF NOT EXISTS sync_jobs_created_at "
+        f"ON {s}.sync_jobs(created_at DESC)",
         # action-required 숨김(acknowledge) layer: operator-side dismiss of obsolete
         # "조치 필요" items (DMS has no native ack). Keyed by a stable fingerprint.
         f"""CREATE TABLE IF NOT EXISTS {s}.attention_dismissals (
@@ -996,6 +1032,106 @@ class Database:
         async with self.pool.connection() as conn:
             cur = await conn.execute(sql, params)
             return cur.rowcount
+
+    # --- data-sync jobs (데이터 Sync tab: one-shot data.sync) ------------
+
+    async def create_sync_job(
+        self,
+        *,
+        src_storage: str,
+        src_path: str,
+        dst_storage: str,
+        dst_path: str,
+        requester_id: str,
+        owner_username: str | None,
+        options: dict[str, Any],
+        delete_enabled: bool,
+        priority: str,
+        node_count: int | None,
+        memo: str | None,
+        created_by: str | None,
+    ) -> dict[str, Any]:
+        """Insert a new one-shot sync job ('registered'; the orchestrator submits it to
+        DMS on the next cycle). Returns the created row."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "INSERT INTO sync_jobs"
+                "(src_storage,src_path,dst_storage,dst_path,requester_id,owner_username,"
+                " options,delete_enabled,priority,node_count,memo,created_by,state) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'registered') RETURNING *",
+                (
+                    src_storage, src_path, dst_storage, dst_path, requester_id,
+                    owner_username, Jsonb(options), delete_enabled, priority,
+                    node_count, memo, created_by,
+                ),
+            )
+            return await cur.fetchone()
+
+    async def list_sync_jobs(
+        self, *, limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Newest-first page of sync jobs (infinite scroll)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM sync_jobs ORDER BY id DESC LIMIT %s OFFSET %s",
+                (limit, offset),
+            )
+            return await cur.fetchall()
+
+    async def count_sync_jobs(self) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT count(*) AS n FROM sync_jobs")
+            row = await cur.fetchone()
+            return int((row or {}).get("n") or 0)
+
+    async def get_sync_job(self, job_id: int) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT * FROM sync_jobs WHERE id=%s", (job_id,))
+            return await cur.fetchone()
+
+    async def sync_jobs_in_states(self, states: list[str]) -> list[dict[str, Any]]:
+        """Non-terminal jobs for the orchestrator to drive (oldest-first)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM sync_jobs WHERE state = ANY(%s) ORDER BY id",
+                (states,),
+            )
+            return await cur.fetchall()
+
+    async def update_sync_job(self, job_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols: list[str] = []
+        params: list[Any] = []
+        for k, v in fields.items():
+            cols.append(f"{k}=%s")
+            params.append(Jsonb(v) if k in ("options", "preview", "result") else v)
+        params.append(job_id)
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                f"UPDATE sync_jobs SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
+                params,
+            )
+
+    async def approve_sync_job(self, job_id: int) -> bool:
+        """Flag a preview_ready job approved (the orchestrator then confirms it).
+        Returns False if the job isn't in preview_ready (idempotent no-op)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE sync_jobs SET approved=true, updated_at=now() "
+                "WHERE id=%s AND state='preview_ready' RETURNING id",
+                (job_id,),
+            )
+            return await cur.fetchone() is not None
+
+    async def delete_sync_job(self, job_id: int) -> dict[str, Any] | None:
+        """Delete a sync-job row, returning it (so the caller can also delete the DMS
+        data-job record). Returns None if not found."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM sync_jobs WHERE id=%s RETURNING *", (job_id,)
+            )
+            return await cur.fetchone()
 
     # --- attention dismissals (조치 필요 숨김/acknowledge) ----------------
 
