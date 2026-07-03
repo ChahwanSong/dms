@@ -40,9 +40,9 @@ const NAV: NavItem[] = [
   },
   { key: "storage", label: "스토리지 인벤토리" },
   { key: "backup", label: "데이터 백업" },
+  { key: "scan", label: "데이터 스캔" },
   { key: "sync", label: "데이터 Sync" },
   { key: "rm", label: "데이터 삭제" },
-  { key: "scan", label: "데이터 스캔" },
 ];
 
 export default function OperatorApp({
@@ -84,8 +84,8 @@ export default function OperatorApp({
   }
 
   return (
-    <div className="app">
-      <TopBar user={user} onLogout={onLogout} title="DMS Portal · 운영자 콘솔" />
+    <div className="app app-fixed">
+      <TopBar user={user} onLogout={onLogout} title="DMS Portal · 운영자 콘솔" showUser={false} />
       <div className="layout">
         <nav className="sidebar">
           {NAV.map((item) => {
@@ -119,6 +119,19 @@ export default function OperatorApp({
               </Fragment>
             );
           })}
+          {/* logged-in operator + logout, pinned to the bottom of the sidebar */}
+          <div className="sidebar-foot">
+            <span className="sidebar-user">
+              <span className="badge badge-operator">운영자</span>
+              <span className="muted">
+                {user.username}
+                {user.dummy ? " · 더미" : ""}
+              </span>
+            </span>
+            <button className="ghost sidebar-logout" onClick={onLogout}>
+              로그아웃
+            </button>
+          </div>
         </nav>
         <main className="content content-wide">
           {section === "dashboard" && <Dashboard onNavigate={go} />}

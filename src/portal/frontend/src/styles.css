@@ -491,6 +491,14 @@ button.primary.danger:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
 }
+/* Operator console: a FIXED-height app shell so the topbar + sidebar stay put and only
+   the content column scrolls (via .content-wide overflow:auto). This makes the sidebar
+   full viewport height, so its foot (user/logout) is pinned to the bottom-left and
+   always visible. Scoped to operator; the user app keeps the min-height shell. */
+.app-fixed {
+  height: 100vh;
+  overflow: hidden;
+}
 
 .topbar {
   display: flex;
@@ -576,8 +584,36 @@ button.ghost {
   color: var(--fg);
 }
 
+/* logged-in operator + logout, pinned to the bottom of the sidebar (margin-top:auto
+   pushes it down the full-height column). */
+.sidebar-foot {
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.2rem;
+  font-size: 0.85rem;
+  min-width: 0;
+}
+.sidebar-user .muted {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-logout {
+  width: 100%;
+}
+
 .content-wide {
   flex: 1;
+  min-height: 0; /* allow the flex child to shrink so overflow:auto scrolls internally */
   padding: 1.5rem 2rem;
   overflow: auto;
   display: block;
@@ -1228,6 +1264,23 @@ textarea.json {
     white-space: nowrap;
     flex: 0 0 auto;
     padding: 0.55rem 0.9rem;
+  }
+  /* the sidebar is a horizontal scroll strip on mobile — lay the user/logout foot out
+     inline at the end instead of pinning it to the (nonexistent) column bottom. */
+  .sidebar-foot {
+    margin-top: 0;
+    margin-left: auto;
+    flex-direction: row;
+    align-items: center;
+    padding-top: 0;
+    border-top: none;
+    flex: 0 0 auto;
+  }
+  .sidebar-user .muted {
+    max-width: 8rem;
+  }
+  .sidebar-logout {
+    width: auto;
   }
   .content-wide {
     padding: 1rem;

@@ -6,24 +6,32 @@ export default function TopBar({
   user,
   onLogout,
   title,
+  showUser = true,
 }: {
   user: User;
   onLogout: () => void;
   title: string;
+  // When false, the bar shows only the title + role badge; the caller renders the
+  // user/logout elsewhere (e.g. the operator console moves them to the sidebar foot).
+  showUser?: boolean;
 }) {
   const roleLabel = user.role === "operator" ? "운영자" : "사용자";
   return (
     <header className="topbar">
       <span className="brand">{title}</span>
       <span className={`badge badge-${user.role}`}>{roleLabel}</span>
-      <span className="spacer" />
-      <span className="muted">
-        {user.username}
-        {user.dummy ? " · 더미" : ""}
-      </span>
-      <button className="ghost" onClick={onLogout}>
-        로그아웃
-      </button>
+      {showUser && (
+        <>
+          <span className="spacer" />
+          <span className="muted">
+            {user.username}
+            {user.dummy ? " · 더미" : ""}
+          </span>
+          <button className="ghost" onClick={onLogout}>
+            로그아웃
+          </button>
+        </>
+      )}
     </header>
   );
 }
