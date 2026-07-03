@@ -128,7 +128,7 @@ kubectl --context dms-control -n dms get networkpolicy dms-api-from-ingress-only
 전체 목록:
 
 ```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+source /opt/dms-secrets/dms-env.sh
 curl -sS "${DMS_CURL_OPTS[@]}" "$DMS_API_URL/api/v1/operations/storage-mappings" | jq '.[].storage_name'
 ```
 
@@ -136,14 +136,14 @@ curl -sS "${DMS_CURL_OPTS[@]}" "$DMS_API_URL/api/v1/operations/storage-mappings"
 
 ```bash
 curl -sS "${DMS_CURL_OPTS[@]}" \
-  "$DMS_API_URL/api/v1/operations/storage-mappings?cluster_name=pvs-dms" | jq '.[].storage_name'
+  "$DMS_API_URL/api/v1/operations/storage-mappings?cluster_name=cluster-a" | jq '.[].storage_name'
 ```
 
 단건 조회:
 
 ```bash
 curl -sS "${DMS_CURL_OPTS[@]}" \
-  "$DMS_API_URL/api/v1/operations/storage-mappings/cephfs-pvs-dms" \
+  "$DMS_API_URL/api/v1/operations/storage-mappings/cephfs-a" \
   | jq '{storage_name, sanity_status, readiness}'
 ```
 
@@ -156,15 +156,15 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
   -X POST -H "content-type: application/json" \
   "$DMS_API_URL/api/v1/resource-management/storage-mappings" \
   -d '{
-    "storage_name": "cephfs-pvs-dms",
+    "storage_name": "cephfs-a",
     "backend_template": {
       "backend_type": "cephfs",
-      "cluster_name": "pvs-dms",
-      "mount_path": "/mgmt_storage",
-      "managed_root": "/mgmt_storage/root",
-      "rm_worker_nodes": ["ion2401","ion2402","ion2403","ion2404","ion2405","ion2406"]
+      "cluster_name": "cluster-a",
+      "mount_path": "/cephfs",
+      "managed_root": "/cephfs/root",
+      "rm_worker_nodes": ["node1","node2","node3","node4","node5","node6"]
     },
-    "cluster_name": "pvs-dms",
+    "cluster_name": "cluster-a",
     "storage_class_name": "rook-cephfs"
   }' | jq '{storage_name, status}'
 ```
@@ -172,7 +172,7 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 `ssh_host`를 고정하고 싶다면 `backend_template`에 명시한다:
 
 ```json
-"ssh_host": "ion2401"
+"ssh_host": "node1"
 ```
 
 이미 존재하면 upsert(덮어쓰기)로 동작한다.
@@ -187,21 +187,21 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 
 CephFS:
 ```json
-{"backend_type":"cephfs","cluster_name":"pvs-dms","mount_path":"/mgmt_storage",
- "managed_root":"/mgmt_storage/root","csi_driver":"rook-ceph.cephfs.csi.ceph.com"}
+{"backend_type":"cephfs","cluster_name":"cluster-a","mount_path":"/cephfs",
+ "managed_root":"/cephfs/root","csi_driver":"rook-ceph.cephfs.csi.ceph.com"}
 ```
 
 GPFS:
 ```json
-{"backend_type":"gpfs","cluster_name":"pvs-dms","filesystem_name":"pvs",
- "mount_path":"/pvs","managed_root":"/pvs/dms"}
+{"backend_type":"gpfs","cluster_name":"cluster-a","filesystem_name":"gpfs0",
+ "mount_path":"/gpfs","managed_root":"/gpfs/dms"}
 ```
 
 WekaFS (CSI 미설치 환경에서는 csi_driver 생략):
 ```json
-{"backend_type":"wekafs","cluster_name":"pvs-dms","filesystem_name":"pvs_weka",
- "mount_path":"/pvs_weka","managed_root":"/pvs_weka/dms",
- "rm_worker_nodes":["ion2402","ion2403"]}
+{"backend_type":"wekafs","cluster_name":"cluster-a","filesystem_name":"weka0",
+ "mount_path":"/weka","managed_root":"/weka/dms",
+ "rm_worker_nodes":["node2","node3"]}
 ```
 
 **WekaFS 운영 주의:**
@@ -216,11 +216,11 @@ backend_template 또는 cluster_name/storage_class_name 변경 시:
 ```bash
 curl -sS "${DMS_CURL_OPTS[@]}" \
   -X PATCH -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-pvs-dms" \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-a" \
   -d '{
-    "storage_name": "cephfs-pvs-dms",
+    "storage_name": "cephfs-a",
     "backend_template": { ... },
-    "cluster_name": "pvs-dms",
+    "cluster_name": "cluster-a",
     "storage_class_name": "rook-cephfs"
   }' | jq '{storage_name, status}'
 ```
@@ -233,7 +233,7 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 ```bash
 curl -sS "${DMS_CURL_OPTS[@]}" \
   -X DELETE \
-  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-pvs-dms" \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-a" \
   | jq '{storage_name, deleted}'
 ```
 
@@ -245,7 +245,7 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 ```bash
 curl -sS "${DMS_CURL_OPTS[@]}" \
   -X POST \
-  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-pvs-dms:check" \
+  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-a:check" \
   | jq '{storage_name, status}'
 ```
 
@@ -258,7 +258,7 @@ POST/PATCH/DELETE 시 `dms-agent-storages` ConfigMap이 자동으로 동기화�
 ConfigMap 내용 확인:
 
 ```bash
-ssh ion2401 "kubectl -n dms get configmap dms-agent-storages -o jsonpath='{.data.storages\.json}'" | jq '.storages[].storage_name'
+ssh node1 "kubectl -n dms get configmap dms-agent-storages -o jsonpath='{.data.storages\.json}'" | jq '.storages[].storage_name'
 ```
 
 > 포탈을 쓰면 **스토리지 인벤토리** 화면의 **에이전트 재시작** 버튼으로 RM·DM을 한 번에
@@ -269,17 +269,17 @@ ssh ion2401 "kubectl -n dms get configmap dms-agent-storages -o jsonpath='{.data
 `data_management`는 DM agent가 채우므로 하나만 재시작하면 나머지 축이 Missing으로 남는다):
 
 ```bash
-ssh ion2401 "kubectl -n dms rollout restart daemonset/dms-rm-agent daemonset/dms-dm-agent && \
+ssh node1 "kubectl -n dms rollout restart daemonset/dms-rm-agent daemonset/dms-dm-agent && \
   kubectl -n dms rollout status daemonset/dms-rm-agent daemonset/dms-dm-agent --timeout=180s"
 # 반영 확인: 새 storage가 (마운트된 노드에서) Ready 로 나오는지
-POD=$(ssh ion2401 "kubectl -n dms get pods -l app.kubernetes.io/name=dms-dm-agent -o jsonpath='{.items[0].metadata.name}'")
-ssh ion2401 "kubectl -n dms exec $POD -- dms agent-probe --once" | jq '.mounts[] | {storage_name,status}'
+POD=$(ssh node1 "kubectl -n dms get pods -l app.kubernetes.io/name=dms-dm-agent -o jsonpath='{.items[0].metadata.name}'")
+ssh node1 "kubectl -n dms exec $POD -- dms agent-probe --once" | jq '.mounts[] | {storage_name,status}'
 ```
 
 RBAC이 없는 경우(403 에러) 다음을 적용한다:
 
 ```bash
-ssh ion2401 "kubectl -n dms apply -f - <<'EOF'
+ssh node1 "kubectl -n dms apply -f - <<'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -550,7 +550,6 @@ Volcano/runtime failure에서 먼저 확인할 것:
 
 ```bash
 kubectl --context dms-control -n dms get job.batch.volcano.sh
-kubectl --context dms-control -n dms get mpijob
 kubectl --context dms-control -n dms get podgroup
 kubectl --context dms-control -n dms describe job.batch.volcano.sh <volcano-job-name>
 kubectl --context dms-control -n dms logs deploy/dms-dm-worker --tail=200
@@ -593,9 +592,11 @@ sync/rm:
     mpirun.json
 ```
 
-Multi-node MPI Data Management 환경에서는 추가로 다음을 확인한다.
+Multi-node Data Management 환경(Volcano가 MPI worker pod를 gang-schedule)에서는 추가로 확인한다.
 
-- MPI Operator가 Volcano gang scheduling으로 설치되어 있고 `MPIJob` CRD가 존재한다.
+- Volcano가 설치돼 있고 Queue `dms-data` + PriorityClass `dms-low/normal/high`가 존재한다
+  (`kubectl get queue.scheduling.volcano.sh dms-data`, `kubectl get priorityclass | grep dms`).
+  DM은 Volcano 네이티브 Job만 쓰므로 **Kubeflow MPI Operator는 필요 없다**.
 - mpifileutils job image가 Open MPI 기반이며 `mpirun`, `ompi_info`, `dscan`, `dsync`,
   `drm`, `nsync`를 포함한다.
 - submitted CR YAML이 artifact `mpi/submitted.yaml`에 기록된다.
@@ -638,7 +639,7 @@ DM은 더 이상 identity를 DB에 저장하지 않는다. 데이터 job의 pref
 
 DM 측에서 영속화되는 유일한 identity 상태는 **denylist**다. denylist는 requester/owner/group 단위의 즉시 kill-switch이자 admission block이며, 비어 있는 것이 기본값으로 이 경우 모두 허용한다.
 
-DNS 미설정 서버 또는 프록시 환경에서는 `/mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh`를 사용한다. `DMS_CURL_OPTS` 배열은 `--resolve`, `--noproxy`, mTLS 인증서, Bearer token, `x-dms-actor` 헤더를 포함한다.
+DNS 미설정 서버 또는 프록시 환경에서는 `/opt/dms-secrets/dms-env.sh`를 사용한다. `DMS_CURL_OPTS` 배열은 `--resolve`, `--noproxy`, mTLS 인증서, Bearer token, `x-dms-actor` 헤더를 포함한다.
 
 ### 사용자/그룹 즉시 차단 (denylist 등록)
 
@@ -646,7 +647,7 @@ DNS 미설정 서버 또는 프록시 환경에서는 `/mgmt_storage/cocoa.song/
 `subject_type`은 `requester`, `owner`, `group` 중 하나다. 성공 시 `200 {"status":"Denied"}`를 반환한다.
 
 ```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+source /opt/dms-secrets/dms-env.sh
 
 # requester 차단
 curl -sS "${DMS_CURL_OPTS[@]}" \
@@ -673,7 +674,7 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 ### 차단 해제 (denylist 제거)
 
 ```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+source /opt/dms-secrets/dms-env.sh
 
 # subject_type ∈ {requester, owner, group}
 curl -sS "${DMS_CURL_OPTS[@]}" \
@@ -688,7 +689,7 @@ curl -sS "${DMS_CURL_OPTS[@]}" \
 현재 차단된 모든 항목을 나열한다.
 
 ```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+source /opt/dms-secrets/dms-env.sh
 curl -sS "${DMS_CURL_OPTS[@]}" \
   "$DMS_API_URL/api/v1/data-management/identity-denylist" | jq
 ```
@@ -713,7 +714,7 @@ dm-worker observability 이벤트로도 동일 상황을 추적할 수 있다.
 사용자가 실제로 LDAP에서 해석되는지 직접 확인하려면 LDAP를 직접 조회한다.
 
 ```bash
-source /mgmt_storage/cocoa.song/.dms-secrets/dms-env.sh
+source /opt/dms-secrets/dms-env.sh
 ldapsearch -x -H "$DMS_LDAP_URI" -b "$DMS_LDAP_BASE_DN" "(uid=<user>)" uidNumber gidNumber
 ```
 
@@ -914,7 +915,7 @@ Rollback 전에도 가능하면 `dms-planned-shutdown.sh`로 drain mode에 진�
 
 ## 알려진 운영 공백
 
-- Data Management `scan`/`sync`/`rm` live execution은 Volcano/MPI Operator/mpifileutils image/artifact path/identity evidence가 준비된 환경에서만 DM Worker replica를 올린다. `sync`/`rm`은 preview/confirm guard 없이 실행되면 안 된다.
+- Data Management `scan`/`sync`/`rm` live execution 전제조건(Volcano + Queue/PriorityClass, DM 잡 이미지, dms-agent 이미지, 공유 artifact 경로, identity evidence — `0.prerequisites.md` 참조)은 설치 시 갖춘다. `dms-dm-worker`는 기본 `replicas: 1`(DM 활성)이며, 전제조건이 아직 없어 DM을 끄려는 경우에만 0으로 둔다. Kubeflow MPI Operator는 필요 없다(volcano-job). `sync`/`rm`은 preview/confirm guard 없이 실행되면 안 된다.
 - `DMS_DM_KUBERNETES_MODE=stub`은 로컬 테스트/dev 전용이다.
 - 운영 Helm/Kustomize packaging은 아직 완성되지 않았다. 여기 있는 manifest는 명시적 YAML template이다.
 - 서로 다른 mount를 가진 multiple local filesystem RM worker는 storage-aware worker claiming 없이는 안전하지 않다.

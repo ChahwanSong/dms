@@ -4,28 +4,36 @@
 
 이 문서는 설치·구성·셋업에 필요한 **설정값, 셋업 절차, 주의사항**을 다룬다. 운영 중 데이터 잡·리소스 요청/조회 API 사용법은 별도 문서가 전담한다.
 
-- `2.dms-rm-api-fs.md`: filesystem Resource Management API
-- `3.dms-rm-api-k8s.md`: Kubernetes namespace quota API
-- `4.dms-dm-api.md`: Data Management `scan`/`sync`/`rm` API (operations 조회 포함)
-- `5.dms-portal-setup.md`: DMS Portal(운영자/사용자 웹 UI) 설치·구성. DMS API만 소비하는 별도 앱이며 DMS 설치(아래) 이후 진행한다.
-- `6.dms-portal-data-backup.md`: Portal 데이터 백업(DM `sync` 미러 백업) 운영. 포탈 DB(`PORTAL_DB_URL`)·배치 미리보기/승인/실행·경로 규칙을 다룬다.
-- `7.dms-portal-dashboard.md`: Portal 종합 운영 대시보드(읽기 전용). 스케줄러·큐/작업·worker node·요청·조치 필요 패널, 신규 `operations/data-jobs/summary` 엔드포인트.
+설치·읽기 순서 (권장 linear path):
+
+0. **`0.prerequisites.md`** — 클러스터 사전 준비(PodSecurity=`privileged`, Volcano 설치, Queue `dms-data`+PriorityClass, 공유 RWX artifact FS, 노드 NSS/SSSD, 스토리지 host-mount). **가장 먼저** 갖춘다. 특히 DM(`scan`/`sync`/`rm`)은 이 중 하나라도 빠지면 잡이 에러 없이 **조용히 미실행**된다.
+1. **이 `README.md`** — base DMS 설치·구성 절차(PostgreSQL, image build, mTLS/TLS, control plane, ingress, agent, storage mapping, quota policy, DM 신원, 검증, shutdown/resume). 아래 §1~§18. `1.install-dms-on-pvs.md`는 실제 클러스터에 적용한 worked example(테스트베드 기록, 참고용)이다.
+2. `2.dms-rm-api-fs.md` — filesystem Resource Management API
+3. `3.dms-rm-api-k8s.md` — Kubernetes namespace quota API
+4. `4.dms-dm-api.md` — Data Management `scan`/`sync`/`rm` API (operations 조회 포함)
+5. `5.dms-portal-setup.md` — DMS Portal(운영자/사용자 웹 UI) 설치·구성. DMS API만 소비하는 별도 앱이며 DMS 설치(위) 이후 진행한다.
+6. `6.dms-portal-data-backup.md` — Portal 데이터 백업(DM `sync` 미러 백업) 운영. 포탈 DB(`PORTAL_DB_URL`)·배치 미리보기/승인/실행·경로 규칙.
+7. `7.dms-portal-dashboard.md` — Portal 종합 운영 대시보드(읽기 전용). 스케줄러·큐/작업·worker node·요청·조치 필요 패널.
+8. `8.dms-portal-data-scan.md` — Portal 데이터 스캔(DM `scan`) 운영.
+
+설정값 의미는 `CONFIGURATION.md`, 운영 점검·장애·업그레이드는 `RUNBOOK.md`.
 
 구성 대상 컴포넌트:
 
 - Kubernetes namespace quota Resource Management: live Kubernetes `ResourceQuota/dms-storage-quota` create/update/block/delete/check/sync/import/audit.
 - Filesystem Resource Management: CephFS / WEKA host-mounted adapter와 GPFS command adapter.
 - Agent inventory: Kubernetes DaemonSet 기반 report.
-- Data Management `scan/sync/rm`: DB policy/API 기반 node/process resource model, MPIJob+Volcano scheduling, native VolcanoJob fallback, preflight 시 owner_username에 대한 read-only LDAP 신원 조회(직접) + DM denylist admission, DM Agent report freshness, POSIX preflight, writable shared artifact base를 사용한다. `sync`와 `rm`은 preview/confirm guard가 필수이고, separated-role `nsync`는 MPI/Volcano backend gate를 통과해야 한다.
+- Data Management `scan/sync/rm`: DB policy/API 기반 node/process resource model, **Volcano 네이티브 Job scheduling**(Volcano가 MPI worker를 gang-schedule; Kubeflow MPI Operator 불필요), preflight 시 owner_username에 대한 read-only LDAP 신원 조회(직접) + DM denylist admission, DM Agent report freshness, POSIX preflight, writable shared artifact base를 사용한다. `sync`와 `rm`은 preview/confirm guard가 필수이고, separated-role `nsync`는 Volcano backend gate를 통과해야 한다.
 
 ## 문서 사용 방법
 
 처음 설치한다면 아래 순서대로 읽고 실행한다.
 
-1. 이 `README.md`의 순서대로 설치·구성한다.
-2. 설정값 의미가 헷갈리면 `CONFIGURATION.md`를 확인한다.
-3. 설치 후 운영 점검, 장애 확인, 업그레이드는 `RUNBOOK.md`를 따른다.
-4. 데이터 잡·리소스 요청/조회 API 사용법은 `2.dms-rm-api-fs.md` / `3.dms-rm-api-k8s.md` / `4.dms-dm-api.md`를 참고한다.
+1. **먼저 `0.prerequisites.md`로 클러스터 사전 준비를 갖춘다**(특히 DM을 쓸 경우 필수).
+2. 이 `README.md`의 순서대로 설치·구성한다.
+3. 설정값 의미가 헷갈리면 `CONFIGURATION.md`를 확인한다.
+4. 설치 후 운영 점검, 장애 확인, 업그레이드는 `RUNBOOK.md`를 따른다.
+5. 데이터 잡·리소스 요청/조회 API 사용법은 `2.dms-rm-api-fs.md` / `3.dms-rm-api-k8s.md` / `4.dms-dm-api.md`를 참고한다.
 
 명령은 DMS repository root에서 실행한다고 가정한다.
 
@@ -39,19 +47,22 @@ cd <dms-repo-root>
 
 ```text
 install/
-  README.md                              # 설치 절차
+  0.prerequisites.md                     # 클러스터 사전 준비 (가장 먼저 읽는다)
+  README.md                              # 설치 절차 (이 문서)
   CONFIGURATION.md                       # 설정 변수와 API 예시
   RUNBOOK.md                             # 운영 점검과 장애 대응
   postgresql/init.sql                    # PostgreSQL DB/user 생성 템플릿
   docker/Dockerfile                      # 운영 image build 템플릿
   docker/Dockerfile.mpifileutils         # Data Management mpifileutils job image build 템플릿
+  docker/Dockerfile.agent                # DM Agent image build (mpifileutils tool 포함, --build-arg MFU_IMAGE)
   config/dms-runtime.env.example         # 런타임 env 예시
   config/cluster-kubeconfigs.example.json
   config/agent-storages.example.json
   config/storage-mappings.example.json
   config/default-quota-policies.example.json
   config/identity-denylist.example.json
-  kubernetes/control-plane.yaml          # API, Planner, RM Worker, Secret/ConfigMap
+  kubernetes/control-plane.yaml          # API, Planner, RM/DM Worker, Secret/ConfigMap
+  kubernetes/volcano-queue-priorityclasses.yaml  # DM 잡 Queue(dms-data) + PriorityClass(dms-low/normal/high)
   kubernetes/agent-daemonset.yaml        # RM/DM Agent DaemonSet
   kubernetes/target-cluster-rbac.yaml    # Target cluster용 ServiceAccount/RBAC
   kubernetes/managed-rm-worker.yaml      # storage node local RM Worker 예시
@@ -85,7 +96,7 @@ install/
 | Target kubeconfig path inside Pod | `/etc/dms/kubeconfigs/cluster-a.kubeconfig` | `DMS_CLUSTER_KUBECONFIGS_JSON` |
 | CephFS/GPFS RM SSH host | `cephfs-rm-1`, `gpfs-rm-1` | filesystem backend command |
 | DM job image/artifacts | `registry.example.internal/dms-mpifileutils:<git-ref>`, `file:///artifacts/dms` | `DMS_DM_JOB_IMAGE`, `DMS_DM_ARTIFACT_BASE_URI` |
-| DM MPI scheduling | Volcano scheduler, MPI Operator with Volcano gang scheduling | multi-node Data Management prerequisite |
+| DM job scheduling | Volcano scheduler + Queue `dms-data` + PriorityClass (`0.prerequisites.md`) | Data Management prerequisite (native Volcano Job; MPI Operator 불필요) |
 
 For `file://` Data Management artifacts, `scan` result files are written under
 `<DMS_DM_ARTIFACT_BASE_URI path>/<job_id>/`. `sync` and `rm` write phase-scoped
@@ -225,7 +236,7 @@ SSH/launcher 구현을 사용할 수 있지만,
 
 - 필요 시 `install/docker/Dockerfile.mpifileutils`
 
-기본 Dockerfile은 `chahwansong/mpifileutils` pinned ref를 Open MPI로 빌드하고
+기본 Dockerfile은 mpifileutils upstream을 pinned ref로 Open MPI와 함께 빌드하고
 `dscan`, `dsync`, `nsync`, `drm`, `mpirun`, `ompi_info`, OpenSSH client/server를
 포함한다.
 
@@ -235,10 +246,13 @@ docker build -f install/docker/Dockerfile.mpifileutils -t "$DMS_DM_JOB_IMAGE" .
 docker push "$DMS_DM_JOB_IMAGE"
 ```
 
-빌드한 image와 upstream ref를 control-plane manifest 또는 runtime env에 기록한다.
+빌드한 job image는 반드시 실제 push된 ref로 `DMS_DM_JOB_IMAGE`에 넣는다(`...:CHANGE_ME`처럼
+placeholder를 남기면 fail-closed되지 않고 잡 파드가 `ImagePullBackOff`로 죽는다). `DMS_DM_JOB_IMAGE_REF`는
+빌드에 사용한 mpifileutils upstream ref를 남기는 **선택적 provenance 메타데이터**로, 동작에는 무관하다.
 
 ```bash
-export DMS_DM_JOB_IMAGE_REF="chahwansong/mpifileutils@e3bfee10970bb4e24204d28689e3337e9741cca4"
+# 선택: provenance 기록 (동작에는 영향 없음)
+export DMS_DM_JOB_IMAGE_REF="<mpifileutils-repo>@<pinned-commit>"
 ```
 
 Control cluster node에서 pull과 mpifileutils binary 실행이 가능한지 확인한다.
@@ -253,26 +267,38 @@ kubectl --context dms-control logs pod/dms-dm-image-check
 kubectl --context dms-control delete pod dms-dm-image-check
 ```
 
-### 2.5 Data Management MPI scheduling prerequisites
+**DM Agent image (`dms-agent`).** DM 노드의 `dms-dm-agent`는 API/worker/rm-agent가 쓰는 기본
+`dms` image가 아니라, mpifileutils 툴이 PATH에 있는 **`dms-agent` image**를 써야 한다. 에이전트는
+`which`로 `dsync/dscan/drm/nsync`를 찾는데 기본 `dms` image엔 없어서, 그대로 두면 모든 DM 후보
+노드가 `missing_dscan/dsync/drm_tool`로 거부되어 DM 잡이 스케줄되지 않는다. `Dockerfile.agent`는
+위 **잡 image에서** `/opt/mpifileutils`를 복사하므로 **잡 image(위)를 먼저 빌드**한 뒤 그것을
+`--build-arg MFU_IMAGE`로 넘긴다. (`dms-rm-agent`는 기본 `dms` image로 충분 — RM readiness는
+mount + can-i이며 툴 게이트가 없다.)
 
-Single-node live Data Management는 단일 VolcanoJob worker pod 모델이다. Multi-node MPI
-execution을 열려면 control/managed execution cluster에 Volcano와 MPI Operator를 함께
-설치하고, MPI Operator가 Volcano gang scheduling을 사용하도록 설정해야 한다.
+```bash
+export DMS_AGENT_IMAGE="registry.example.internal/dms-agent:$(git rev-parse --short HEAD)"
+docker build \
+  --build-arg MFU_IMAGE="$DMS_DM_JOB_IMAGE" \
+  -f install/docker/Dockerfile.agent \
+  -t "$DMS_AGENT_IMAGE" .
+docker push "$DMS_AGENT_IMAGE"
+```
 
-Multi-node MPI prerequisite:
+### 2.5 Data Management scheduling prerequisites (Volcano)
 
-- Volcano scheduler and CRDs
-- MPI Operator with Volcano gang scheduling enabled
-- `MPIJob` CRD
-- DMS Data Management queue and priority classes
-- RBAC for DM Worker to create/read/watch/delete MPIJob, VolcanoJob, PodGroup, Pods,
-  Events, and logs in the DMS namespace
-- shared RWX artifact path for `DMS_DM_ARTIFACT_BASE_URI=file://...`
+Data Management 잡은 **Volcano 네이티브 Job**(`batch.volcano.sh`)으로 스케줄된다
+(`DMS_DM_SCHEDULER_BACKEND=volcano-job`, control-plane.yaml 기본값). Volcano 하나가 single-node
+및 multi-node의 MPI worker pod를 gang-schedule하므로 **Kubeflow MPI Operator는 필요 없다**.
+`DMS_DM_SCHEDULER_BACKEND=auto`는 쓰지 않는다 — auto는 `MPIJob`(`kubeflow.org`)을 먼저 시도해
+MPI Operator가 없으면 매 잡마다 apply가 실패한 뒤 폴백하기 때문이다.
 
-DMS는 `MPIJob`이 Volcano PodGroup queue/gang/priority scheduling을 만들고 DMS worker
-node affinity/anti-affinity를 보존할 수 있을 때만 MPIJob backend를 사용한다. 이를
-검증할 수 없으면 DMS는 scheduling constraint를 약화시키지 않고 해당 Data Management job에
-대해 native VolcanoJob launcher/worker orchestration을 사용한다.
+DM 잡 클러스터(`dms-dm-worker`와 같은 클러스터)에 필요한 것 — 자세한 절차는 `0.prerequisites.md`:
+
+- Volcano scheduler/controller/admission + CRD (`batch.volcano.sh` Job, `scheduling.volcano.sh` Queue/PodGroup)
+- Queue `dms-data` + PriorityClass `dms-low/normal/high` — `install/kubernetes/volcano-queue-priorityclasses.yaml`로 적용한다(큐가 없으면 잡이 영구 Pending, PriorityClass가 없으면 파드가 admission에서 거부).
+- DM 잡 네임스페이스 PodSecurity=`privileged`
+- `DMS_DM_ARTIFACT_BASE_URI=file://...`용 공유 RWX artifact 경로(dm-worker와 모든 DM 잡 노드에 동일 경로)
+- DM Worker가 DMS namespace에서 Volcano Job/PodGroup/Pod/Event/log를 create/read/watch/delete할 RBAC(`control-plane.yaml`의 `dms-dm-volcano` Role)
 
 ## 3. Target cluster RBAC와 kubeconfig 생성
 
@@ -550,10 +576,11 @@ kubectl --context dms-control -n dms logs -l job-name=dms-migrate
 kubectl --context dms-control -n dms rollout status deploy/dms-api --timeout=180s
 kubectl --context dms-control -n dms rollout status deploy/dms-planner --timeout=180s
 kubectl --context dms-control -n dms rollout status deploy/dms-rm-worker --timeout=180s
+kubectl --context dms-control -n dms rollout status deploy/dms-dm-worker --timeout=180s
 kubectl --context dms-control -n dms get pods,svc,deploy
 ```
 
-`dms-dm-worker`는 기본 `replicas: 0`이 정상이다.
+`dms-dm-worker`는 기본 `replicas: 1`(DM 활성)이다. DM(`scan`/`sync`/`rm`)을 쓰지 않을 환경에서만 `0`으로 내려 비활성화한다.
 
 ### 7.4 API Service 내부 확인
 
@@ -698,7 +725,16 @@ kubectl --context cluster-a -n dms create configmap dms-agent-storages \
 
 ```bash
 cp install/kubernetes/agent-daemonset.yaml /tmp/dms-agent-daemonset.yaml
+# dms-rm-agent = 기본 dms image; dms-dm-agent = dms-agent image(§2.4에서 빌드). 둘을 각각 치환한다.
 sed -i "s#registry.example.internal/dms:CHANGE_ME#$DMS_IMAGE#g" /tmp/dms-agent-daemonset.yaml
+sed -i "s#registry.example.internal/dms-agent:CHANGE_ME#$DMS_AGENT_IMAGE#g" /tmp/dms-agent-daemonset.yaml
+```
+
+DM 노드가 신원을 vouch할 사용자도 채운다(비우면 비특권 DM 잡이 전부 `identity_not_ready_on_node`로
+거부).
+
+```bash
+sed -i "s#CHANGE_ME_user1,CHANGE_ME_user2#alice,bob#g" /tmp/dms-agent-daemonset.yaml
 ```
 
 `ConfigMap/dms-agent-runtime-config`에서 다음을 수정한다.
@@ -1063,13 +1099,11 @@ Data Management live execution을 열기 전에 다음 조건을 먼저 확인�
 - target/source/destination storage mapping의 `readiness.data_management=Ready`
 - requester의 `owner_username`이 dm-worker preflight의 read-only LDAP 조회로 POSIX 신원으로 해석됨 (§12) + DM denylist에 차단 항목 없음
 - DM Agent report에 mount, required tool(`dscan`, `dsync`, `drm`), credential, network, POSIX user evidence가 Fresh
-- `DMS_DM_JOB_IMAGE`, `DMS_DM_JOB_IMAGE_REF`, `DMS_DM_ARTIFACT_BASE_URI`가 운영 값으로 설정됨
+- `DMS_DM_JOB_IMAGE`가 실제 push된 job image ref로 설정됨(`...:CHANGE_ME` placeholder면 fail-closed 없이 `ImagePullBackOff`) + `DMS_DM_ARTIFACT_BASE_URI` 설정. `DMS_DM_JOB_IMAGE_REF`는 선택(provenance 메타데이터)
 - (선택) `DMS_DM_PATH_BASE` — 요청 path 기준점. 기본 `mount_path`, `managed_root`면 planner가 storage별 `managed_root` suffix를 prepend(filesystem mapping에 `managed_root` 명시 필수). 켜면 요청 path를 managed_root 기준으로 적는다
-- Volcano CRD/scheduler가 control 또는 managed cluster에서 동작 중
-- multi-node MPI execution을 열 경우 MPI Operator가 Volcano gang scheduling으로
-  설치되어 있고 `MPIJob` CRD가 동작 중
+- Volcano scheduler/CRD가 DM 잡 클러스터에서 동작 중이고 Queue `dms-data`·PriorityClass(`dms-low/normal/high`)가 존재(`0.prerequisites.md`; multi-node 잡도 Volcano가 gang-schedule하므로 MPI Operator 불필요)
 
-조건이 맞으면 DM Worker를 1 replica로 올린다.
+`dms-dm-worker`는 기본 replicas 1로 이미 떠 있어야 한다(DM을 끄려고 0으로 내렸다면 다시 1로 올린다).
 
 ```bash
 kubectl --context dms-control -n dms scale deploy/dms-dm-worker --replicas=1
@@ -1089,9 +1123,9 @@ kubectl --context dms-control -n dms rollout status deploy/dms-dm-worker --timeo
   `rm`은 각각 1 selected node, 1 worker pod, 1 process이며 `result_summary.selected_node`,
   `worker_pod_count`, `process_count`로 확인한다. separated-role `nsync`가 필요한 topology는
   mutation 없이 `data_job_nsync_deferred` action-required로 남아야 정상이다.
-- Multi-node MPI Data Management는 DMS가 ready mounted node set을 eligible set으로 제출하고
-  Volcano/Kubernetes scheduler가 그중 실제 feasible nodes를 선택한다. 모든 job은 submitted CR
-  YAML과 MPI metadata artifact를 남긴다.
+- Multi-node Data Management(Volcano가 MPI worker pod를 gang-schedule)는 DMS가 ready mounted
+  node set을 eligible set으로 제출하고 Volcano/Kubernetes scheduler가 그중 실제 feasible nodes를
+  선택한다. 모든 job은 submitted CR YAML과 MPI metadata artifact를 남긴다.
 
 ### 13.4 Filesystem smoke test
 
@@ -1122,7 +1156,7 @@ kubectl --context dms-control -n dms get pods,jobs,svc,ingress
 - `deploy/dms-api` Ready
 - `deploy/dms-planner` Ready
 - `deploy/dms-rm-worker` Ready
-- `deploy/dms-dm-worker` replicas 0, 또는 Data Management live execution을 활성화한 환경에서는 Ready 1
+- `deploy/dms-dm-worker` Ready 1 (DM 기본 활성); DM(`scan`/`sync`/`rm`)을 끈 환경에서만 replicas 0
 - `svc/dms-api` 존재
 - `ingress/dms-api` 존재
 
@@ -1206,10 +1240,10 @@ install/scripts/dms-startup-recovery-check.sh --allow-action-required
 
 ### 15.3 resume
 
-recovery check가 통과하면 control state를 normal로 되돌리고 worker를 다시 scale up한다.
+recovery check가 통과하면 control state를 normal로 되돌리고 worker를 다시 scale up한다. DM이 기본 활성(replicas 1)이므로 두 worker를 모두 되돌린다.
 
 ```bash
-export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"
 install/scripts/dms-resume.sh \
   --reason "source update completed $(date -Iseconds)" \
   --replicas 1
@@ -1218,14 +1252,14 @@ install/scripts/dms-resume.sh \
 recovery blocker가 남아 있으면 기본적으로 API가 409를 반환한다. 운영자가 live state를 확인했고 강제 resume이 필요하면 `--force`를 사용한다.
 
 ```bash
-export DMS_WORKER_DEPLOYMENTS="dms-rm-worker"
+export DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"
 install/scripts/dms-resume.sh \
   --reason "operator accepted recovery items $(date -Iseconds)" \
   --force \
   --replicas 1
 ```
 
-Data Management live execution 전제조건이 준비되지 않은 환경에서는 `dms-dm-worker`를 0 replica로 유지한다. 이 경우 resume 후 직접 scale을 조정한다.
+DM(`scan`/`sync`/`rm`)을 **의도적으로 비활성화**한 환경에서만 `dms-dm-worker`를 resume 대상에서 빼거나(위 `DMS_WORKER_DEPLOYMENTS`에서 제외) 0으로 내린다.
 
 ```bash
 kubectl --context dms-control -n dms scale deploy/dms-dm-worker --replicas=0
@@ -1322,7 +1356,7 @@ kubectl --context dms-control -n dms logs deploy/dms-rm-worker --tail=200
 - 하나의 storage mapping과 하나의 non-production namespace부터 시작한다.
 - source update, control cluster reboot, planned node drain 전에는 `dms-planned-shutdown.sh`로 drain mode에 진입한다.
 - startup 후에는 `dms-startup-recovery-check.sh`를 통과한 다음 `dms-resume.sh`를 실행한다.
-- `dms-dm-worker`는 0 replica로 유지한다.
+- `dms-dm-worker`는 기본 replicas 1로 DM을 활성화한다. DM을 열기 전 §13.3 전제조건(`0.prerequisites.md`의 Volcano/Queue/PriorityClass·공유 artifact FS·DM Agent Fresh·LDAP 신원)을 확인하고, DM을 쓰지 않을 때만 0으로 내려 비활성화한다.
 - `DMS_DM_ALLOW_ROOT_REQUESTER`(운영자 root 실행, §12.3)는 기본 비활성이며, 켤 경우 반드시 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 경로로만 노출한다(평문 actor 채널 금지). 필요 시 `DMS_DM_PRIVILEGED_SCOPES`로 storage/경로를 제한한다.
 - `UnknownAfterSideEffect`, `BackendApplyFailed`, action-required 항목은 운영 사고로 취급한다.
 - 업그레이드 전 operational DB와 observability DB를 모두 백업한다.

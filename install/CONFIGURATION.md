@@ -1,6 +1,8 @@
 # DMS 운영 설정 참조
 
-이 문서는 실제 클러스터에 DMS를 설치하기 전에 검토해야 하는 설정을 정리한다.
+이 문서는 실제 클러스터에 DMS를 설치하기 전에 검토해야 하는 설정을 정리한다. DMS 프로세스·에이전트가 읽는 **환경변수의 single source of truth**다.
+
+> 클러스터 자체의 사전 준비(Volcano 설치, `Queue dms-data` + `PriorityClass dms-low/normal/high`, 공유 RWX artifact 파일시스템, DM 네임스페이스 `PodSecurity=privileged`, 노드 NSS/SSSD, 스토리지 host-mount)는 이 문서가 아니라 **`0.prerequisites.md`**에 있다. 아래 env-var는 그 위에서 동작한다 — prereq이 빠지면 값이 옳아도 DM 잡이 스케줄되지 않거나 후보 노드가 전부 거부된다.
 
 ## 설치 파일 편집 체크리스트
 
@@ -127,13 +129,15 @@ batch(각 batch가 독립 트랜잭션)로 삭제한다.
 
 Data Management runtime:
 
+> DM 잡은 클러스터 prereq(Volcano · `Queue`/`PriorityClass` · 공유 RWX artifact FS · DM 네임스페이스 privileged · 노드 NSS/SSSD · 스토리지 host-mount)가 갖춰진 위에서만 실행된다 — `0.prerequisites.md` 참조. 아래는 그 위에서 DM Worker가 읽는 env-var다.
+
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `DMS_DM_NAMESPACE` | `dms` | DM Worker가 VolcanoJob을 생성하고 조회할 namespace. |
-| `DMS_DM_JOB_IMAGE` | 설정 안 됨 | 승인된 mpifileutils image. live `scan`/`sync`/`rm`에는 필수이며 없으면 DM Worker가 fail-closed한다. |
-| `DMS_DM_JOB_IMAGE_REF` | 설정 안 됨 | mpifileutils repo tag/commit. data job result evidence에 남긴다. |
+| `DMS_DM_NAMESPACE` | `dms` | DM Worker가 Volcano Job을 생성하고 조회할 namespace. 이 네임스페이스는 `PodSecurity=privileged`여야 한다(`0.prerequisites.md` §0.2). |
+| `DMS_DM_JOB_IMAGE` | 설정 안 됨 (**반드시 실제 ref로 설정**) | DM 잡 파드가 pull하는 mpifileutils 이미지(`install/docker/Dockerfile.mpifileutils`로 빌드→레지스트리 push). live `scan`/`sync`/`rm`의 **하드 필수**. ⚠️ **fail-closed(`missing_dm_job_image`)는 값이 완전히 비어 있을 때만** 작동한다 — `registry.example.internal/dms-mpifileutils:CHANGE_ME` 같은 placeholder는 **truthy라 preflight를 통과**하고 잡 파드가 `ImagePullBackOff`로 죽는다(fail-closed 아님). 반드시 **실제 push된 이미지 ref**로 채운다. |
+| `DMS_DM_JOB_IMAGE_REF` | 설정 안 됨 | 선택 — **provenance metadata 전용**. mpifileutils repo tag/commit을 data job result evidence에 기록만 하며, 실제 pull되는 이미지에는 영향이 없다(그건 `DMS_DM_JOB_IMAGE`). |
 | `DMS_DM_SERVICE_ACCOUNT` | `dms-dm-worker` | Volcano worker pod에 지정할 ServiceAccount. |
-| `DMS_DM_ARTIFACT_BASE_URI` | `file:///var/lib/dms/artifacts` | job별 stdout/stderr/report/summary URI의 base. 예: `file:///artifacts/dms/<job_id>/summary.json`. |
+| `DMS_DM_ARTIFACT_BASE_URI` | `file:///artifacts/dms` (shipped ConfigMap; 코드 bare fallback은 `file:///var/lib/dms/artifacts`) | job별 stdout/stderr/report/summary URI의 base. 예: `file:///artifacts/dms/<job_id>/summary.json`. **이 경로는 `dms-dm-worker` 노드와 모든 DM 잡 노드에 동일 경로로 마운트된 하나의 공유 RWX 파일시스템**이어야 한다 — 잡 파드가 결과를 쓰고 dm-worker가 로컬로 읽어 잡을 분류하므로, 노드별 로컬 hostPath면 워커와 잡이 다른 노드에 뜰 때 깨진다. `0.prerequisites.md` §0.5. |
 | `DMS_DM_DEFAULT_PRIORITY` | `Mid` | public priority label 기본값. |
 | `DMS_DM_DEFAULT_MAX_NODES` | `1` | legacy compatibility setting. fan-out 정책의 source of truth는 DB `data_management_policies`다. |
 | `DMS_DM_MAX_NODES` | `1` | legacy compatibility setting. 새 Data Management job resource model에는 사용하지 않는다. |
@@ -141,9 +145,9 @@ Data Management runtime:
 | `DMS_DM_POLICY_MAX_WORKER_NODES` | `3` | `scan`, `rm`, same-node `dsync` DB policy bootstrap max worker node 수. |
 | `DMS_DM_POLICY_DEFAULT_PROCESSES_PER_NODE` | `3` | operation별 DB policy bootstrap 기본 MPI ranks/processes per worker pod. |
 | `DMS_DM_POLICY_MAX_PROCESSES_PER_NODE` | `10` | operation별 DB policy bootstrap max MPI ranks/processes per worker pod. |
-| `DMS_DM_POLICY_DEFAULT_QUEUE` | `dms-data` | DB policy bootstrap Volcano queue. |
-| `DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS` | `dms-normal` | DB policy bootstrap PriorityClass. |
-| `DMS_DM_SCHEDULER_BACKEND` | `auto` | `auto`는 MPIJob을 먼저 적용하고 불가능하면 native VolcanoJob fallback을 사용한다. `mpi-operator` 또는 `volcano-job`으로 고정할 수 있다. |
+| `DMS_DM_POLICY_DEFAULT_QUEUE` | `dms-data` | DB policy bootstrap Volcano queue. 이 이름의 `Queue`가 클러스터에 **먼저 존재해야** 한다(`install/kubernetes/volcano-queue-priorityclasses.yaml`) — 없으면 잡이 **영구 Pending**. `0.prerequisites.md` §0.4. |
+| `DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS` | `dms-normal` | DB policy bootstrap PriorityClass. 같은 매니페스트가 만드는 `dms-low`/`dms-normal`/`dms-high` 중 하나여야 하며 **먼저 존재해야** 한다 — 없으면 kube-apiserver가 잡 파드를 **admission에서 거부**한다. |
+| `DMS_DM_SCHEDULER_BACKEND` | `volcano-job` (**운영 필수값**) | DM 잡을 **네이티브 Volcano Job**(`batch.volcano.sh`)으로만 스케줄한다. Volcano 하나가 MPI 워커를 gang-schedule하므로 **Kubeflow MPI Operator가 필요 없다**. ⚠️ 코드 bare default는 `auto`지만 **쓰지 말 것** — `auto`는 Kubeflow `MPIJob`(`kubeflow.org`)을 **먼저** 적용하려 하고, MPI Operator가 없는 환경에서는 그 apply가 **매 잡마다 실패**한 뒤에야 폴백한다. 반드시 `volcano-job`으로 고정한다(shipped ConfigMap이 그렇게 설정). |
 | `DMS_DM_SCAN_TIMEOUT_SECONDS` | `3600` | scan timeout. 초과하면 DM Worker가 VolcanoJob terminate 후 실패로 기록한다. |
 | `DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS` | `3600` | `sync` dry-run preview VolcanoJob timeout. |
 | `DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS` | `259200` | confirmed `sync` execution VolcanoJob timeout (기본 3일). |
@@ -152,6 +156,13 @@ Data Management runtime:
 | `DMS_DM_CONFIRM_REQUIRE_PREVIEW_FINGERPRINT` | `true` | confirm 시 preview fingerprint evidence를 요구할지 여부. |
 | `DMS_DM_SYNC_ALLOW_DELETE` | `true` | `sync` request의 `delete=true` 옵션을 운영 정책상 허용할지 여부. `false`이면 request validation에서 막는다. |
 | `DMS_DM_ALLOW_ROOT_REQUESTER` | `true` | 운영자 root(privileged) 실행 허용. requester_id/owner_username이 `DMS_DM_PRIVILEGED_REQUESTERS`(기본 `root`)에 속하면 uid/gid 0으로 합성 실행한다(LDAP·uid floor 우회). API edge에서 **mTLS-verified operator만 허용**(평문 actor의 root 요청은 403), denylist는 kill-switch로 유지. `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 경로에서만 실제 동작한다. |
+| `DMS_DM_PRIVILEGED_REQUESTERS` | `root` | 합성 root 신원으로 실행할 requester_id/owner_username allowlist(쉼표 구분). |
+| `DMS_DM_PRIVILEGED_UID` | `0` | privileged 요청에 합성할 uid. |
+| `DMS_DM_PRIVILEGED_GID` | `0` | privileged 요청에 합성할 gid. |
+| `DMS_DM_PRIVILEGED_OPERATORS` | 비어 있음 | root 요청을 낼 수 있는 operator actor allowlist(쉼표 구분). 비우면 **mTLS-verified operator 전체** 허용. |
+| `DMS_DM_PRIVILEGED_SCOPES` | 비어 있음 | root 잡 허용 scope(쉼표 구분): `storage` 또는 `storage:path-prefix`. 비우면 전체 storage 허용. |
+| `DMS_DM_MIN_UID` | `1000` | 비-privileged LDAP 신원의 uid 하한. 미만이면(또는 uid 0) `uid_below_floor`로 거부 — root MPI 파드 안에서 `runuser`로 강하하므로 시스템 계정으로의 실행을 막는다. |
+| `DMS_DM_MIN_GID` | `1000` | 비-privileged LDAP 신원의 gid 하한. 미만이면 거부. |
 | `DMS_DM_PATH_BASE` | `mount_path` | DM 요청 path의 기준점(글로벌). `mount_path`(현행: path가 storage mount_path 기준) 또는 `managed_root`(planner가 storage별 `managed_root` suffix를 prepend해 managed_root 기준으로 해석). `managed_root` 모드는 filesystem mapping에 `managed_root`가 명시돼 있어야 하며, 산출 불가 시 잡을 fail-closed로 거부한다. |
 | `DMS_DM_MAX_SYNC_NODES` | `1` | legacy compatibility setting. `dsync`/`nsync` node counts는 DB policy/API로 관리한다. |
 | `DMS_DM_MAX_RM_NODES` | `1` | legacy compatibility setting. `rm` node counts는 DB policy/API로 관리한다. |
@@ -183,12 +194,16 @@ DMS-managed mount/PVC/object prefix로 분리한다.
 
 Multi-node MPI Data Management에서는 operation별 node/process default와 max가
 DB policy table/API의 source of truth가 된다. Env/runtime config는 bootstrap default로만
-사용한다. Prerequisite로 Volcano scheduler/CRD, MPI Operator with Volcano gang
-scheduling, `MPIJob` CRD, Open MPI 기반 mpifileutils job image, DMS queue/priority
-class, PodGroup/MPIJob/VolcanoJob RBAC, 그리고 shared RWX artifact path가 필요하다.
-DMS는 mounted eligible node set을 CR
-affinity로 제출하고 scheduler가 실제 worker nodes를 선택하게 해야 한다. 모든 job은
-submitted CR YAML과 `mpi/` metadata artifact를 기록해야 한다.
+사용한다. 클러스터 prerequisite — **Volcano 설치**, `Queue dms-data` + `PriorityClass
+dms-low/normal/high`, Open MPI 기반 mpifileutils job image, 공유 RWX artifact path, DM
+네임스페이스 `PodSecurity=privileged`, 노드 NSS/SSSD, 스토리지 host-mount — 은
+`0.prerequisites.md`에 정리돼 있다. DMS는 **Kubeflow MPI Operator를 쓰지 않고** Volcano
+네이티브 Job만 제출하며(`DMS_DM_SCHEDULER_BACKEND=volcano-job`), Volcano가 MPI 워커를
+gang-schedule한다. 따라서 필요한 RBAC는 `batch.volcano.sh` Job + `scheduling.volcano.sh`
+PodGroup에 대한 것뿐이고(`MPIJob`/`kubeflow.org` CRD·RBAC는 불필요), `control-plane.yaml`의
+`dms-dm-volcano` Role이 이를 제공한다. DMS는 mounted eligible node set을 CR affinity로
+제출하고 scheduler가 실제 worker nodes를 선택하게 하며, 모든 job은 submitted CR YAML과
+`mpi/` metadata artifact를 기록한다.
 
 Kubernetes 접근:
 
@@ -221,7 +236,7 @@ Filesystem backend 실행:
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
 | `DMS_FILESYSTEM_MUTATION_MODE` | `ssh-host-exec` | CephFS adapter execution mode. `ssh-host-exec` 또는 `local`. GPFS는 storage mapping의 `command_runner`를 사용한다. |
-| `DMS_FILESYSTEM_EXEC_TIMEOUT_SECONDS` | `30` | Filesystem host command timeout. Quota read-back이 느리면 늘린다. |
+| `DMS_FILESYSTEM_EXEC_TIMEOUT_SECONDS` | `300` (shipped ConfigMap; 코드 bare fallback은 `30`) | Filesystem host command timeout. Quota read-back이 느리면 늘린다 — shipped `control-plane.yaml`/`dms-runtime.env.example`은 read-back 여유를 위해 `300`으로 올려 둔다. |
 | `DMS_FILESYSTEM_EXEC_USE_SUDO` | `true` | CephFS host executor가 host mutation에 sudo를 사용할지 여부. |
 
 LDAP/identity:
@@ -236,11 +251,13 @@ LDAP/identity:
 | `DMS_LDAP_GROUP_SEARCH_BASE` | 선택 | 기본값은 `ou=groups,<baseDN>`. |
 | `DMS_LDAP_USER_FILTER` | 선택 | 기본값은 `(uid={username})`. |
 | `DMS_LDAP_TIMEOUT_SECONDS` | 선택 | 기본값은 `5`. |
-| `DMS_LDAP_GROUP_GID_START` | 선택 | DMS가 생성한 group의 GID allocation lower bound. |
-| `DMS_LDAP_GROUP_GID_END` | 선택 | DMS가 생성한 group의 GID allocation upper bound. |
+| `DMS_LDAP_GROUP_GID_START` | `24000` (shipped ConfigMap; 코드 bare fallback은 `9000000`) | DMS가 생성한 access group의 GID allocation 하한. shipped `control-plane.yaml`/`dms-runtime.env.example`은 `24000`–`24999`를 쓴다 — 코드 fallback과 다르므로 **항상 명시 설정**하고, **기존 시스템/디렉터리 서비스 GID와 겹치지 않는 창**으로 사이징한다. |
+| `DMS_LDAP_GROUP_GID_END` | `24999` (shipped ConfigMap; 코드 bare fallback은 `9999999`) | 위 allocation 창의 상한(START와 함께 맞춘다). |
 | `DMS_DM_IDENTITY_PROVIDER` | 선택 | DM이 identity를 resolve하는 provider. 기본값은 `ldap`. |
 
 DM identity는 별도의 mapping 등록 없이 preflight(dm-worker) 시점에 위의 `DMS_LDAP_*` 설정을 그대로 사용해 read-only LDAP lookup으로 해석한다. Lookup key는 `owner_username`(기본값은 `requester_id`이며 실제 POSIX username으로 override될 수 있다)이고 user filter는 `DMS_LDAP_USER_FILTER`(기본값 `(uid={username})`)를 따른다. **Fail closed**: LDAP가 응답하지 않으면 TTL cache 없이 해당 job preflight가 `ldap_unavailable`로 실패한다.
+
+> **보안 노트 (root 실행 + 비-privileged 신원).** shipped 설정은 운영자 root 실행을 켜 둔다(`DMS_DM_ALLOW_ROOT_REQUESTER=true`). 이 경로는 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`에서만 통과하지만, `DMS_DM_PRIVILEGED_REQUESTERS`/`_OPERATORS`/`_SCOPES`로 **최소 권한으로 좁히고 주기적으로 검토**한다(광범위한 root 허용은 POSIX-신원 격리를 우회한다). 반대로 **비-privileged(일반 사용자) DM 잡**을 쓰려면 root 경로가 아니라 세 가지가 모두 갖춰져야 한다: (1) `DMS_LDAP_*`로 요청자 POSIX 신원이 resolve되고, (2) 잡이 도는 각 노드의 `DMS_AGENT_IDENTITY_USERS`에 그 사용자가 있으며(+노드 NSS/SSSD 해석), (3) 해석된 uid/gid가 `DMS_DM_MIN_UID`/`DMS_DM_MIN_GID` 이상. 하나라도 빠지면 각각 `ldap_unavailable`/`identity_not_ready_on_node`/`uid_below_floor`로 거부된다.
 
 ## Agent 환경변수
 
@@ -256,7 +273,7 @@ DM identity는 별도의 mapping 등록 없이 preflight(dm-worker) 시점에 �
 | `DMS_AGENT_TOOLS` | 아니오 | 쉼표로 구분한 tool probe 목록. 기본값: `dsync,nsync,drm,dscan,kubectl`. |
 | `DMS_AGENT_CREDENTIAL_FILES` | 아니오 | Report할 credential path의 쉼표로 구분한 목록. |
 | `DMS_AGENT_NETWORK_ENDPOINTS` | 아니오 | Probe할 network endpoint의 쉼표로 구분한 목록. |
-| `DMS_AGENT_IDENTITY_USERS` | 아니오 | NSS를 통해 probe할 POSIX user의 쉼표로 구분한 목록. |
+| `DMS_AGENT_IDENTITY_USERS` | **DM agent에서는 사실상 필수** | NSS(`getpwnam`)로 신원을 확인할 POSIX user의 쉼표 구분 목록. DM 잡 요청자는 그 잡이 도는 노드의 이 목록에 있어야 후보로 통과한다 — 비어 있으면 **모든 비-privileged DM 잡이 `identity_not_ready_on_node`로 거부**된다(privileged-root 잡만 이 게이트를 우회). 나열한 user는 노드 NSS/SSSD로도 해석돼야 한다. RM agent에는 불필요. |
 | `DMS_AUTH_SHARED_TOKEN` | API token이 enabled이면 필요 | Report post에 사용하는 shared bearer token. |
 
 주의: 현재 mTLS-required 운영 profile에서 agent report를 Fresh로 저장하려면 agent request의 authenticated actor가 `node:{cluster_name}:{node_name}`과 일치해야 한다. 기본 mTLS actor derivation은 `mtls:<certificate-subject>`이므로, agent certificate subject-to-node actor mapping 또는 동등한 internal authentication boundary가 별도로 필요하다.
