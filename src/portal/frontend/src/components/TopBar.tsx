@@ -6,13 +6,14 @@ export default function TopBar({
   user,
   onLogout,
   title,
-  showUser = true,
+  showUser = false,
 }: {
   user: User;
   onLogout: () => void;
   title: string;
-  // When false, the bar shows only the title + role badge; the caller renders the
-  // user/logout elsewhere (e.g. the operator console moves them to the sidebar foot).
+  // Default: the bar shows only the title + role badge, and the caller renders the
+  // user/logout at the bottom-left (operator → sidebar foot, user → app foot). Pass
+  // true to put them back in the bar.
   showUser?: boolean;
 }) {
   const roleLabel = user.role === "operator" ? "운영자" : "사용자";

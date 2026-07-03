@@ -39,10 +39,10 @@ const NAV: NavItem[] = [
     ],
   },
   { key: "storage", label: "스토리지 인벤토리" },
-  { key: "backup", label: "데이터 백업" },
-  { key: "scan", label: "데이터 스캔" },
-  { key: "sync", label: "데이터 Sync" },
-  { key: "rm", label: "데이터 삭제" },
+  { key: "backup", label: "데이터 백업 (배치)" },
+  { key: "scan", label: "데이터 스캔 (배치)" },
+  { key: "sync", label: "데이터 Sync (단일)" },
+  { key: "rm", label: "데이터 삭제 (단일)" },
 ];
 
 export default function OperatorApp({
@@ -85,7 +85,7 @@ export default function OperatorApp({
 
   return (
     <div className="app app-fixed">
-      <TopBar user={user} onLogout={onLogout} title="DMS Portal · 운영자 콘솔" showUser={false} />
+      <TopBar user={user} onLogout={onLogout} title="DMS Portal · 운영자 콘솔" />
       <div className="layout">
         <nav className="sidebar">
           {NAV.map((item) => {

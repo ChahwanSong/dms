@@ -611,6 +611,19 @@ button.ghost {
   width: 100%;
 }
 
+/* user app foot: the user interface has no sidebar, so its logged-in user + logout sit
+   in a full-width bottom bar (left-aligned = bottom-left). margin-top:auto pins it to
+   the bottom of the min-height:100vh app column. */
+.app-foot {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1.5rem;
+  border-top: 1px solid var(--border);
+  background: var(--card);
+}
+
 .content-wide {
   flex: 1;
   min-height: 0; /* allow the flex child to shrink so overflow:auto scrolls internally */
@@ -1700,6 +1713,24 @@ tr.expandable-row:focus-visible { outline: 2px solid var(--accent); outline-offs
 tr.row-open > td { border-bottom-color: transparent; }
 tr.row-open .expand-toggle { color: var(--accent); }
 .batch-expand { display: flex; flex-direction: column; gap: 0.85rem; padding: 0.5rem 0.2rem 0.7rem 1.8rem; }
+
+/* Unify the backup + scan batch-list columns (both share table.grid.batch-list). With
+   the default auto layout each tab sized columns to its own content (e.g. backup's long
+   'Preview 완료' status widened 상태 and squeezed 이름), so the two tabs didn't line up.
+   Fixed layout with scan's proportions as the base makes them identical; 이름 (col 3)
+   is left unsized to flex into the remaining width. Desktop only — mobile is a card
+   layout. Widths set on <thead th> drive the fixed columns; the colspan detail row is
+   untouched. */
+@media (min-width: 721px) {
+  table.grid.batch-list { table-layout: fixed; }
+  table.grid.batch-list th:nth-child(1) { width: 1.8rem; }   /* expand toggle */
+  table.grid.batch-list th:nth-child(2) { width: 2.2rem; }   /* select checkbox */
+  table.grid.batch-list th:nth-child(4) { width: 7rem; }     /* 상태 (fits 'Preview 완료') */
+  table.grid.batch-list th:nth-child(5) { width: 10rem; }    /* 성공/실패/취소/요청 */
+  table.grid.batch-list th:nth-child(6) { width: 12rem; }    /* 옵션 */
+  table.grid.batch-list th:nth-child(7) { width: 12.5rem; }  /* 생성 */
+  table.grid.batch-list th:nth-child(8) { width: 9rem; }     /* 액션 */
+}
 
 /* mini progress bar */
 .mini-progress { display: flex; align-items: center; gap: 0.6rem; }

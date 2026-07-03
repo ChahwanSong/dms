@@ -44,6 +44,17 @@ export default function UserApp({
           )}
         </div>
       </main>
+      {/* logged-in user + logout, pinned to the bottom-left (matches the operator foot) */}
+      <div className="app-foot">
+        <span className="badge badge-user">사용자</span>
+        <span className="muted">
+          {user.username}
+          {user.dummy ? " · 더미" : ""}
+        </span>
+        <button className="ghost" onClick={onLogout}>
+          로그아웃
+        </button>
+      </div>
     </div>
   );
 }
