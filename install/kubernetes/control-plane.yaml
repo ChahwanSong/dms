@@ -2,6 +2,12 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: dms
+  labels:
+    # DM data-job pods (Volcano MPI workers) run as root, add the SYS_CHROOT
+    # capability, then `runuser` down to the requester. This namespace MUST permit
+    # privileged pods — a cluster whose default Pod Security Admission is
+    # baseline/restricted would otherwise REJECT every DM job pod at admission.
+    pod-security.kubernetes.io/enforce: privileged
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -68,9 +74,17 @@ data:
   DMS_DM_POLICY_MAX_WORKER_NODES: "3"
   DMS_DM_POLICY_DEFAULT_PROCESSES_PER_NODE: "3"
   DMS_DM_POLICY_MAX_PROCESSES_PER_NODE: "10"
+  # Volcano Queue + PriorityClasses these reference are NOT created by this file --
+  # apply install/kubernetes/volcano-queue-priorityclasses.yaml (and install Volcano
+  # itself) first; see install/0.prerequisites.md. A missing queue leaves jobs Pending;
+  # a missing PriorityClass makes the API server reject the job pod at admission.
   DMS_DM_POLICY_DEFAULT_QUEUE: "dms-data"
   DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS: "dms-normal"
-  DMS_DM_SCHEDULER_BACKEND: "auto"
+  # volcano-job = schedule DM jobs as native Volcano Jobs (batch.volcano.sh) only.
+  # Do NOT use "auto": auto submits a Kubeflow MPIJob (kubeflow.org/v2beta1) FIRST and,
+  # without the MPI Operator installed, that apply fails on EVERY job before falling
+  # back. DMS needs no MPI Operator -- Volcano alone gang-schedules the MPI workers.
+  DMS_DM_SCHEDULER_BACKEND: "volcano-job"
   DMS_DM_SCAN_TIMEOUT_SECONDS: "3600"
   DMS_DM_SYNC_PREVIEW_TIMEOUT_SECONDS: "3600"
   DMS_DM_SYNC_EXECUTION_TIMEOUT_SECONDS: "259200"
@@ -151,11 +165,10 @@ metadata:
   name: dms-dm-volcano
   namespace: dms
 rules:
+  # Native Volcano Jobs only (DMS_DM_SCHEDULER_BACKEND=volcano-job). No Kubeflow
+  # MPI Operator is used, so no kubeflow.org/mpijobs verbs are needed.
   - apiGroups: ["batch.volcano.sh"]
     resources: ["jobs"]
-    verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: ["kubeflow.org"]
-    resources: ["mpijobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["scheduling.volcano.sh"]
     resources: ["podgroups"]
@@ -190,15 +203,12 @@ metadata:
   name: dms-api-dm-terminate
   namespace: dms
 # The data-job cancel endpoint runs in the dms-api process and calls `kubectl delete` on the
-# VolcanoJob/MPIJob so an in-flight data job (the MPI run) is actually stopped -- not just
-# marked Cancelled in the DB. Without these verbs the terminate fails (Forbidden) and the MPI
-# keeps running to completion despite the cancel.
+# VolcanoJob so an in-flight data job (the MPI run) is actually stopped -- not just marked
+# Cancelled in the DB. Without these verbs the terminate fails (Forbidden) and the MPI keeps
+# running to completion despite the cancel.
 rules:
   - apiGroups: ["batch.volcano.sh"]
     resources: ["jobs"]
-    verbs: ["get", "delete"]
-  - apiGroups: ["kubeflow.org"]
-    resources: ["mpijobs"]
     verbs: ["get", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -246,6 +256,46 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: dms-api
+    namespace: dms
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dms-agent-storages-sync
+  namespace: dms
+# dms-api patches the `dms-agent-storages` ConfigMap on every storage-mapping create/
+# update/delete so the node agents re-read the storage list. WITHOUT this the patch is
+# Forbidden -- and the code SWALLOWS that as a warning -- so the ConfigMap silently never
+# updates: newly registered filesystem storages never reach the agents, their mount
+# readiness stays Missing, the planner rejects all filesystem RM (missing_rm_readiness),
+# and DM ends in no_ready_dm_candidate. (list/watch aren't needed -- the code get+patches
+# this one named ConfigMap.)
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["dms-agent-storages"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dms-agent-storages-sync
+  namespace: dms
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dms-agent-storages-sync
+# Bind to the identity dms-api actually uses to reach the CONTROL cluster: the pod SA
+# (dms-api) for in-cluster access, AND -- when DMS_CLUSTER_KUBECONFIGS_JSON routes the
+# control cluster through a kubeconfig -- the ServiceAccount that kubeconfig authenticates
+# as (dms-remote, created by target-cluster-rbac.yaml). Granting both is safe; a dangling
+# subject is harmless. Same dual-identity note as dms-api-agent-rollout above.
+subjects:
+  - kind: ServiceAccount
+    name: dms-api
+    namespace: dms
+  - kind: ServiceAccount
+    name: dms-remote
     namespace: dms
 ---
 apiVersion: batch/v1
@@ -500,7 +550,9 @@ metadata:
   name: dms-dm-worker
   namespace: dms
 spec:
-  replicas: 0
+  # 1 = DM enabled. At 0 no worker ever CLAIMS a data job, so scan/sync/rm silently
+  # never execute (they sit in the queue). Only scale to 0 to deliberately DISABLE DM.
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: dms-dm-worker

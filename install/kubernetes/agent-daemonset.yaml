@@ -73,16 +73,21 @@ metadata:
   name: dms-agent-storages
   namespace: dms
 data:
+  # BOOTSTRAP seed only. dms-api OVERWRITES this ConfigMap from the registered storage
+  # mappings on every storage create/update/delete (requires the dms-agent-storages-sync
+  # RBAC in control-plane.yaml). Agents read it once at startup, so after a mapping change
+  # the DaemonSets must be restarted (POST /api/v1/agent/rollout-restart or kubectl rollout
+  # restart). For a filesystem storage, mount_paths MUST list the HOST mount point(s) so
+  # the agent can probe mount readiness (a CSI storage with mount_paths [] never goes Ready
+  # and is namespace-quota only -- not a valid DM/filesystem-RM target).
   storages.json: |
     {
       "storages": [
         {
-          "storage_name": "longhorn-a",
-          "backend_type": "longhorn",
+          "storage_name": "cephfs-a",
+          "backend_type": "cephfs",
           "cluster_name": "cluster-a",
-          "storage_class_name": "longhorn",
-          "csi_driver": "driver.longhorn.io",
-          "mount_paths": [],
+          "mount_paths": ["/cephfs"],
           "network_endpoints": []
         }
       ]
@@ -107,6 +112,8 @@ spec:
       serviceAccountName: dms-agent
       containers:
         - name: agent
+          # RM agent: the plain `dms` image is fine (RM readiness = mounts + can-i, no
+          # mpifileutils tools). The dms-dm-agent below MUST use the dms-agent image.
           image: registry.example.internal/dms:CHANGE_ME
           imagePullPolicy: IfNotPresent
           command: ["dms", "agent-loop"]
@@ -184,7 +191,14 @@ spec:
       serviceAccountName: dms-agent
       containers:
         - name: agent
-          image: registry.example.internal/dms:CHANGE_ME
+          # DM agent MUST use the dms-AGENT image (built from install/docker/Dockerfile.agent),
+          # which layers the mpifileutils tools (dsync/dscan/drm/nsync) onto PATH. The agent
+          # probes for them with `which`; on the plain `dms` image they are ABSENT, so every
+          # DM candidate node is rejected (missing_dscan/dsync/drm_tool) and DM jobs never
+          # schedule. (The dms-rm-agent above uses the plain `dms` image -- RM does not gate
+          # on tools.) Build the job image first, then build this agent image with
+          # --build-arg MFU_IMAGE=<job image> so the agent's tools match the job's.
+          image: registry.example.internal/dms-agent:CHANGE_ME
           imagePullPolicy: IfNotPresent
           command: ["dms", "agent-loop"]
           envFrom:
@@ -195,6 +209,13 @@ spec:
           env:
             - name: DMS_AGENT_WORKER_ROLE
               value: DM
+            # Comma-separated POSIX usernames this DM node vouches identity-readiness for.
+            # A DM job's requester MUST appear here (per node) or the candidate is rejected
+            # (identity_not_ready_on_node) -- so every non-privileged DM job fails until it
+            # is set. The listed users must also resolve on the node via NSS/SSSD (getpwnam)
+            # so the agent can confirm uid/gid. Privileged-root jobs bypass this gate.
+            - name: DMS_AGENT_IDENTITY_USERS
+              value: "CHANGE_ME_user1,CHANGE_ME_user2"
             - name: DMS_AGENT_NODE_NAME
               valueFrom:
                 fieldRef:
