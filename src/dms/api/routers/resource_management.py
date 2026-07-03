@@ -581,8 +581,9 @@ def resource_management_router() -> APIRouter:
         one for the same resource is still active).
 
         Resolvable states: UnknownAfterSideEffect, BackendApplyFailed, StaleClaim,
-        RecoveryNeeded. Actively-leased (Claimed/Running/Applying/Verifying) and already-
-        terminal requests are rejected (409) — only stuck ones qualify.
+        RecoveryNeeded, VerificationFailed — the full set of stuck states that surface in
+        조치 필요 (ACTION_REQUIRED_REQUEST_STATUSES). Actively-leased (Claimed/Running/
+        Applying/Verifying) and already-terminal requests are rejected (409).
 
         body fields:
           - resolution: "abandon" (→ Cancelled for StaleClaim [no side effect], else
@@ -599,6 +600,7 @@ def resource_management_router() -> APIRouter:
             LifecycleState.BACKEND_APPLY_FAILED.value,
             LifecycleState.STALE_CLAIM.value,
             LifecycleState.RECOVERY_NEEDED.value,
+            LifecycleState.VERIFICATION_FAILED.value,
         }
 
         actor = authenticated_actor(request, services)
@@ -612,9 +614,10 @@ def resource_management_router() -> APIRouter:
         if not reason:
             raise HTTPException(status_code=422, detail="reason is required")
 
-        req = services.repository.get_request(request_id)
-        if not req:
-            raise HTTPException(status_code=404, detail="request not found")
+        try:
+            req = services.repository.get_request(request_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="request not found") from None
 
         current_status = req.get("status")
         if (
@@ -644,6 +647,7 @@ def resource_management_router() -> APIRouter:
         backend_unverified = resolution == "abandon" and current_status in {
             LifecycleState.RECOVERY_NEEDED.value,
             LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+            LifecycleState.VERIFICATION_FAILED.value,
         }
         services.repository.resolve_stuck_request(
             request_id,

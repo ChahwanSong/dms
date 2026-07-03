@@ -82,14 +82,16 @@ const ISSUE_META: Record<string, { label: string; action?: string }> = {
 // request_attention carries the request's status — refine label/action by it.
 const REQ_STATUS_LABEL: Record<string, string> = {
   Blocked: "요청 차단됨", StaleClaim: "워커 리스 만료", RecoveryNeeded: "복구 필요",
+  VerificationFailed: "적용 검증 실패",
   UnknownAfterSideEffect: "결과 불명 (수동 확인)", BackendApplyFailed: "백엔드 적용 실패",
 };
 const REQ_STATUS_ACTION: Record<string, string> = {
   Blocked: "제어 상태(점검/드레인/스케줄링) 확인·해제 후 재처리",
   StaleClaim: "워커 동작 확인 → 자동 회수 대기, 또는 아래 '요청 강제 종료'로 종료(적용된 것 없음)",
   RecoveryNeeded: "실제 백엔드 상태 확인 → 재처리, 또는 아래 '요청 강제 종료'로 종료(부분 적용 가능)",
-  UnknownAfterSideEffect: "실제 백엔드 상태를 직접 확인 후 DB와 동기화",
-  BackendApplyFailed: "원인(권한/연결/백엔드) 수정 후 재요청",
+  VerificationFailed: "적용 결과 검증 실패 — 실제 백엔드 상태 확인, 또는 아래 '요청 강제 종료'로 종료(부분 적용 가능)",
+  UnknownAfterSideEffect: "실제 백엔드 상태를 직접 확인 후 DB와 동기화, 또는 아래 '요청 강제 종료'로 종료(부분 적용 가능)",
+  BackendApplyFailed: "원인(권한/연결/백엔드) 수정 후 재요청, 또는 아래 '요청 강제 종료'로 종료",
 };
 // DMS allows operator resolve/abandon for these STUCK request states (planner Conflicts
 // new requests for the resource while a prior one here is still active — abandon unblocks
@@ -100,10 +102,15 @@ const RESOLVABLE_REQUEST_STATES = new Set([
   "BackendApplyFailed",
   "StaleClaim",
   "RecoveryNeeded",
+  "VerificationFailed",
 ]);
 // Abandon of these MAY have a partially-applied, unverified backend side effect — the
 // operator must verify the backend first (extra confirm).
-const BACKEND_UNVERIFIED_STATES = new Set(["RecoveryNeeded", "UnknownAfterSideEffect"]);
+const BACKEND_UNVERIFIED_STATES = new Set([
+  "RecoveryNeeded",
+  "UnknownAfterSideEffect",
+  "VerificationFailed",
+]);
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v ? v : undefined;

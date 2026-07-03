@@ -667,3 +667,29 @@ def test_resolve_endpoint_rejects_active_state_and_missing_reason(harness):
         json={"resolution": "abandon", "reason": "  "}, headers=AUTH_HEADERS,
     )
     assert r2.status_code == 422
+
+    # a non-existent request -> 404 (not a 500 from the KeyError getter).
+    r3 = client.post(
+        _RESOLVE.format("req_doesnotexist000000"),
+        json={"resolution": "abandon", "reason": "x"}, headers=AUTH_HEADERS,
+    )
+    assert r3.status_code == 404
+
+
+def test_resolve_endpoint_verification_failed_abandon_to_failed(harness):
+    """VerificationFailed surfaces in 조치 필요 (ACTION_REQUIRED_REQUEST_STATUSES) and
+    must be abandonable too — its side effect applied but verification failed, so the
+    backend state is unverified."""
+    client: TestClient = harness["client"]
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    req, _, _ = _stuck_run(repository, "vf", LifecycleState.VERIFICATION_FAILED)
+    resp = client.post(
+        _RESOLVE.format(req),
+        json={"resolution": "abandon", "reason": "verify failed — abandoning"},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["resolved_to"] == LifecycleState.FAILED.value
+    assert resp.json()["backend_state_verified"] is False
+    assert repository.get_request(req)["status"] == LifecycleState.FAILED.value
