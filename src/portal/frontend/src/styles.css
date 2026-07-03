@@ -1077,23 +1077,45 @@ button.linklike {
 .sync-arrow {
   align-self: center; color: #7b8494; font-size: 1.4rem; padding-top: 1.6rem; flex: 0 0 auto;
 }
-@media (max-width: 720px) { .sync-arrow { display: none; } }
+@media (max-width: 720px) {
+  .sync-arrow { display: none; }
+  /* The parent flips to flex-direction:column on mobile (generic .storage-row rule),
+     which reinterprets the row-oriented flex-basis:18rem as a phantom min-HEIGHT and
+     inflates each endpoint box to 288px (huge empty gaps). Reset so each endpoint is
+     only as tall as its fields. */
+  .sync-form .storage-row > .sync-endpoint { flex: 1 1 auto; min-width: 0; }
+}
 /* 승인 액션: blue outline mini (mirrors .mini.danger's red-outline pattern). */
 button.mini.go { color: #93c5fd; border-color: rgba(59, 130, 246, 0.6); }
 button.mini.go:hover { color: #cfe3ff; border-color: var(--accent); }
 
 .sync-list { margin-top: 0.4rem; }
 .sync-grid { table-layout: auto; margin-top: 0.5rem; }
-.sync-info { white-space: nowrap; }
-.sync-when { white-space: nowrap; }
 .sync-memo { color: #7b8494; }
-.sync-actions { text-align: right; white-space: nowrap; vertical-align: middle; }
 .sync-actions .mini { margin-left: 0.3rem; }
 .sync-grid tr.sync-live > td { background: rgba(59, 130, 246, 0.05); }
 @media (min-width: 721px) {
   .sync-grid .sync-target {
     max-width: 0; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /* desktop keeps these single-line; on mobile (stacked cards) they must wrap so a
+     long error / extra buttons never force horizontal page scroll. */
+  .sync-info, .sync-when { white-space: nowrap; }
+  .sync-actions { text-align: right; white-space: nowrap; vertical-align: middle; }
+}
+@media (max-width: 720px) {
+  /* action buttons -> right-aligned wrapping footer with a divider (mirrors .row-actions);
+     drop the "조치" data-label so the buttons get the full card width. */
+  .sync-grid td.sync-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding-top: 0.55rem;
+    margin-top: 0.3rem;
+    border-top: 1px solid var(--border);
+  }
+  .sync-grid td.sync-actions::before { display: none; }
+  .sync-actions .mini { margin-left: 0; }
 }
 
 textarea.json {
