@@ -174,6 +174,16 @@ class DmsClient:
             "GET", f"{_DM}/sync/jobs/{_seg(job_id)}", actor=actor
         )
 
+    async def submit_rm(self, body: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        # data.rm is MUTATING: POST /rm runs a preview (dry-run) that must be
+        # confirmed (fingerprint) before the real delete. Used by the rm orchestrator.
+        return await self._request("POST", f"{_DM}/rm", actor=actor, json=body)
+
+    async def get_rm_job(self, job_id: str, *, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "GET", f"{_DM}/rm/jobs/{_seg(job_id)}", actor=actor
+        )
+
     async def get_request(self, request_id: str, *, actor: str) -> dict[str, Any]:
         """Read-only request lifecycle (status + results + transitions). Used by the
         backup orchestrator to detect a preview request that terminated WITHOUT

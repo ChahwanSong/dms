@@ -23,8 +23,10 @@ from .orchestrator import BackupOrchestrator
 from .routers import operator_router, user_router
 from .routers.backup import backup_router
 from .routers.dashboard import dashboard_router
+from .routers.rmjob import rm_router
 from .routers.scan import scan_router
 from .routers.syncjob import sync_router
+from .rm_orchestrator import RmOrchestrator
 from .scan_orchestrator import ScanOrchestrator
 from .sync_orchestrator import SyncOrchestrator
 
@@ -94,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.backup = None
     app.state.scan = None
     app.state.sync_orch = None
+    app.state.rm_orch = None
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -111,9 +114,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.db, app.state.dms_client, settings
             )
             app.state.sync_orch.start()
+            app.state.rm_orch = RmOrchestrator(
+                app.state.db, app.state.dms_client, settings
+            )
+            app.state.rm_orch.start()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        if app.state.rm_orch is not None:
+            await app.state.rm_orch.stop()
         if app.state.sync_orch is not None:
             await app.state.sync_orch.stop()
         if app.state.scan is not None:
@@ -138,6 +147,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(backup_router(settings))
     app.include_router(scan_router(settings))
     app.include_router(sync_router(settings))
+    app.include_router(rm_router(settings))
     app.include_router(dashboard_router(settings))
 
     # Mount the SPA last so the API routes above take precedence. html=True

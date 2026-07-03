@@ -4,6 +4,7 @@ import {
   type BackupRequest,
   type JobDetail,
   type JobLogs,
+  type RmJob,
   type ScanRequest,
   type SyncJob,
 } from "../../../api";
@@ -14,12 +15,13 @@ import { SpecGrid, type KV } from "../../../components/SpecGrid";
 // incl file_size_histogram, preflight, identifiers, artifact/log URIs) and tails
 // the launcher pod logs, polling every 4s WHILE the job is non-terminal. Read-only;
 // reuses the shared .modal / SpecGrid chrome. Backup/scan key off a (batchId,
-// request); sync jobs are top-level (job id only).
+// request); sync/rm jobs are top-level (job id only).
 
 type Props =
   | { kind: "backup"; batchId: string; request: BackupRequest; onClose: () => void }
   | { kind: "scan"; batchId: string; request: ScanRequest; onClose: () => void }
-  | { kind: "sync"; request: SyncJob; onClose: () => void };
+  | { kind: "sync"; request: SyncJob; onClose: () => void }
+  | { kind: "rm"; request: RmJob; onClose: () => void };
 
 // DMS DataJobState values that are settled (stop polling). Mirrors the
 // orchestrators' terminal sets.
@@ -159,6 +161,11 @@ export default function JobDetailModal(props: Props) {
               operatorApi.sync.job(props.request.id),
               operatorApi.sync.logs(props.request.id),
             ])
+          : props.kind === "rm"
+          ? await Promise.all([
+              operatorApi.rm.job(props.request.id),
+              operatorApi.rm.logs(props.request.id),
+            ])
           : await Promise.all([
               (props.kind === "backup" ? operatorApi.backup.job : operatorApi.scan.job)(
                 props.batchId,
@@ -198,6 +205,8 @@ export default function JobDetailModal(props: Props) {
   const subtitle =
     kind === "scan"
       ? `${request.storage}:${request.path}`
+      : kind === "rm"
+      ? `${request.target_storage}:${request.target_path}`
       : `${request.src_storage}:${request.src_path} → ${request.dst_storage}:${request.dst_path}`;
 
   // --- live identifiers / state grid ---

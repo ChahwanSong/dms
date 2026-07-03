@@ -333,6 +333,57 @@ export interface SyncJobCreateInput {
   memo?: string | null;
 }
 
+// --- data rm (데이터 삭제 탭: one-shot data.rm) ------------------------
+// preview summary captured at ConfirmPending (files/bytes that WILL be deleted).
+// target_absent = the target path doesn't exist (nothing to delete).
+export interface RmPreview {
+  files?: number | null;
+  dirs?: number | null;
+  bytes?: number | null;
+  errors?: number | null;
+  target_absent?: boolean | null;
+  tool?: string | null;
+}
+// A one-shot rm job — a SINGLE target (no source/destination), no delete flag.
+export interface RmJob {
+  id: number;
+  target_storage: string;
+  target_path: string;
+  requester_id: string;
+  owner_username?: string | null;
+  options?: Record<string, unknown>;
+  priority: string;
+  node_count?: number | null;
+  memo?: string | null;
+  state: string;
+  approved?: boolean;
+  dms_request_id?: string | null;
+  dms_job_id?: string | null;
+  fingerprint?: string | null;
+  preview?: RmPreview | null;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  created_by?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+export interface RmJobListResp {
+  items: RmJob[];
+  total: number | null; // grand count on the first page only (infinite scroll)
+}
+export interface RmJobCreateInput {
+  target_storage: string;
+  target_path: string;
+  options?: Record<string, unknown>;
+  priority?: string;
+  node_count?: number | null; // null = 자동 (DMS policy default)
+  memo?: string | null;
+}
+// drm worker-node policy default (what "자동" resolves to).
+export interface RmNodePolicyResp {
+  drm: NodePolicy | null;
+}
+
 // --- data scan (DM scan batches) ---------------------------------------
 
 // One bucket of the dscan atime time-histogram (data temperature). Buckets run
@@ -770,6 +821,7 @@ const SM = "/api/operator/storage-mappings";
 const BK = "/api/operator/backup/batches";
 const SC = "/api/operator/scan/batches";
 const SY = "/api/operator/sync-jobs";
+const RM = "/api/operator/rm-jobs";
 
 export interface AgentDaemonSetStatus {
   name: string;
@@ -1111,6 +1163,31 @@ export const operatorApi = {
     job: (id: number) => request<JobDetail>(`${SY}/${id}/job`),
     logs: (id: number, tail = 400) =>
       request<JobLogs>(`${SY}/${id}/logs?tail=${tail}`),
+  },
+  rm: {
+    // Worker-node policy default for drm, to show what "자동" resolves to.
+    nodePolicy: () => request<RmNodePolicyResp>(`${RM}/node-policy`),
+    list: (opts?: { offset?: number; limit?: number }) => {
+      const q = new URLSearchParams();
+      if (opts?.offset != null) q.set("offset", String(opts.offset));
+      if (opts?.limit != null) q.set("limit", String(opts.limit));
+      const qs = q.toString();
+      return request<RmJobListResp>(`${RM}${qs ? `?${qs}` : ""}`);
+    },
+    get: (id: number) => request<RmJob>(`${RM}/${id}`),
+    create: (payload: RmJobCreateInput) =>
+      request<RmJob>(RM, { method: "POST", body: JSON.stringify(payload) }),
+    // Approve a preview_ready job (the orchestrator then confirms + runs the delete).
+    approve: (id: number) =>
+      request<{ id: number; approved: boolean }>(`${RM}/${id}:approve`, { method: "POST" }),
+    cancel: (id: number) =>
+      request<{ id: number; state: string }>(`${RM}/${id}:cancel`, { method: "POST" }),
+    remove: (id: number) =>
+      request<{ deleted: number }>(`${RM}/${id}`, { method: "DELETE" }),
+    // Live DMS rm-job detail / launcher-pod logs (read-only) for the 상세 modal.
+    job: (id: number) => request<JobDetail>(`${RM}/${id}/job`),
+    logs: (id: number, tail = 400) =>
+      request<JobLogs>(`${RM}/${id}/logs?tail=${tail}`),
   },
   dashboard: {
     summary: () => request<DashboardSummary>("/api/operator/dashboard/summary"),

@@ -174,6 +174,36 @@ def _ddl(schema: str) -> list[str]:
         # the list is newest-first, paginated (infinite scroll).
         f"CREATE INDEX IF NOT EXISTS sync_jobs_created_at "
         f"ON {s}.sync_jobs(created_at DESC)",
+        # data-rm feature (데이터 삭제 tab): ONE-SHOT data.rm (delete) jobs. Same shape
+        # as sync_jobs but with a SINGLE target (drm removes one path) and NO delete
+        # flag (rm IS the delete). Mutating -> preview(dry-run)/confirm/execute, same
+        # lifecycle: registered -> preview_pending -> preview_ready -> (approve)
+        # running -> succeeded|failed (preview_failed / cancelled are terminal too).
+        f"""CREATE TABLE IF NOT EXISTS {s}.rm_jobs (
+            id bigserial PRIMARY KEY,
+            target_storage text NOT NULL,
+            target_path text NOT NULL,
+            requester_id text NOT NULL DEFAULT 'root',
+            owner_username text,
+            options jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+            priority text NOT NULL DEFAULT 'Low',
+            node_count int,
+            memo text,
+            state text NOT NULL DEFAULT 'registered',
+            approved boolean NOT NULL DEFAULT false,
+            dms_request_id text,
+            dms_job_id text,
+            fingerprint text,
+            preview jsonb,
+            result jsonb,
+            error text,
+            created_by text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"CREATE INDEX IF NOT EXISTS rm_jobs_state ON {s}.rm_jobs(state)",
+        f"CREATE INDEX IF NOT EXISTS rm_jobs_created_at "
+        f"ON {s}.rm_jobs(created_at DESC)",
         # action-required 숨김(acknowledge) layer: operator-side dismiss of obsolete
         # "조치 필요" items (DMS has no native ack). Keyed by a stable fingerprint.
         f"""CREATE TABLE IF NOT EXISTS {s}.attention_dismissals (
@@ -1130,6 +1160,103 @@ class Database:
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "DELETE FROM sync_jobs WHERE id=%s RETURNING *", (job_id,)
+            )
+            return await cur.fetchone()
+
+    # --- data-rm jobs (데이터 삭제 tab: one-shot data.rm) ------------------
+    # Mirrors the sync-job methods above but with a SINGLE target and no delete flag.
+
+    async def create_rm_job(
+        self,
+        *,
+        target_storage: str,
+        target_path: str,
+        requester_id: str,
+        owner_username: str | None,
+        options: dict[str, Any],
+        priority: str,
+        node_count: int | None,
+        memo: str | None,
+        created_by: str | None,
+    ) -> dict[str, Any]:
+        """Insert a new one-shot rm job ('registered'; the orchestrator submits it to
+        DMS on the next cycle). Returns the created row."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "INSERT INTO rm_jobs"
+                "(target_storage,target_path,requester_id,owner_username,"
+                " options,priority,node_count,memo,created_by,state) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'registered') RETURNING *",
+                (
+                    target_storage, target_path, requester_id, owner_username,
+                    Jsonb(options), priority, node_count, memo, created_by,
+                ),
+            )
+            return await cur.fetchone()
+
+    async def list_rm_jobs(
+        self, *, limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Newest-first page of rm jobs (infinite scroll)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM rm_jobs ORDER BY id DESC LIMIT %s OFFSET %s",
+                (limit, offset),
+            )
+            return await cur.fetchall()
+
+    async def count_rm_jobs(self) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT count(*) AS n FROM rm_jobs")
+            row = await cur.fetchone()
+            return int((row or {}).get("n") or 0)
+
+    async def get_rm_job(self, job_id: int) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT * FROM rm_jobs WHERE id=%s", (job_id,))
+            return await cur.fetchone()
+
+    async def rm_jobs_in_states(self, states: list[str]) -> list[dict[str, Any]]:
+        """Non-terminal jobs for the orchestrator to drive (oldest-first)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM rm_jobs WHERE state = ANY(%s) ORDER BY id",
+                (states,),
+            )
+            return await cur.fetchall()
+
+    async def update_rm_job(self, job_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols: list[str] = []
+        params: list[Any] = []
+        for k, v in fields.items():
+            cols.append(f"{k}=%s")
+            params.append(Jsonb(v) if k in ("options", "preview", "result") else v)
+        params.append(job_id)
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                f"UPDATE rm_jobs SET {', '.join(cols)}, updated_at=now() WHERE id=%s",
+                params,
+            )
+
+    async def approve_rm_job(self, job_id: int) -> bool:
+        """Flag a preview_ready job approved (the orchestrator then confirms it).
+        Returns False if the job isn't in preview_ready (idempotent no-op)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE rm_jobs SET approved=true, updated_at=now() "
+                "WHERE id=%s AND state='preview_ready' RETURNING id",
+                (job_id,),
+            )
+            return await cur.fetchone() is not None
+
+    async def delete_rm_job(self, job_id: int) -> dict[str, Any] | None:
+        """Delete an rm-job row, returning it (so the caller can also delete the DMS
+        data-job record). Returns None if not found."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM rm_jobs WHERE id=%s RETURNING *", (job_id,)
             )
             return await cur.fetchone()
 

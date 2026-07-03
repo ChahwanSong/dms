@@ -5,6 +5,7 @@ import StorageInventory from "./storage/StorageInventory";
 import BackupBatches from "./backup/BackupBatches";
 import ScanBatches from "./scan/ScanBatches";
 import SyncTab from "./sync/SyncTab";
+import RmTab from "./rm/RmTab";
 import Dashboard from "./dashboard/Dashboard";
 import DashboardAttention from "./dashboard/DashboardAttention";
 import DashboardActivity from "./dashboard/DashboardActivity";
@@ -19,7 +20,8 @@ type Section =
   | "storage"
   | "backup"
   | "scan"
-  | "sync";
+  | "sync"
+  | "rm";
 
 interface NavItem {
   key: Section;
@@ -39,6 +41,7 @@ const NAV: NavItem[] = [
   { key: "storage", label: "스토리지 인벤토리" },
   { key: "backup", label: "데이터 백업" },
   { key: "sync", label: "데이터 Sync" },
+  { key: "rm", label: "데이터 삭제" },
   { key: "scan", label: "데이터 스캔" },
 ];
 
@@ -128,6 +131,7 @@ export default function OperatorApp({
           {section === "storage" && <StorageInventory focus={focus} />}
           {section === "backup" && <BackupBatches />}
           {section === "sync" && <SyncTab />}
+          {section === "rm" && <RmTab />}
           {section === "scan" && <ScanBatches />}
         </main>
       </div>

@@ -152,6 +152,16 @@ button.primary:disabled {
   opacity: 0.6;
   cursor: default;
 }
+/* destructive primary CTA (데이터 삭제 '삭제 요청' 버튼): filled-red variant of .primary.
+   The red-OUTLINE .danger used on mini action buttons isn't prominent enough for a
+   tab's main submit, so the delete form uses this filled variant. */
+button.primary.danger {
+  background: var(--error);
+  color: #fff;
+}
+button.primary.danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
 
 .error {
   color: var(--error);
@@ -1071,6 +1081,7 @@ button.linklike {
   margin-bottom: 1.4rem;
 }
 .sync-form { margin-top: 0.7rem; }
+.rm-form { margin-top: 0.7rem; }  /* 데이터 삭제 폼 (single target; reuses .sync-* list styles) */
 .sync-form .storage-row { align-items: flex-start; flex-wrap: wrap; }
 .storage-row > .sync-endpoint { flex: 1 1 18rem; min-width: 14rem; }
 .sync-endpoint { display: flex; flex-direction: column; gap: 0.6rem; }
