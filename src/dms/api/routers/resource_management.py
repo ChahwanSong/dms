@@ -576,15 +576,29 @@ def resource_management_router() -> APIRouter:
         request: Request,
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
-        """Manually resolve a stuck request in UnknownAfterSideEffect or BackendApplyFailed state.
+        """Manually terminalize a request STUCK in a non-terminal state so its resource
+        stops blocking new requests (the planner Conflicts a new request while a prior
+        one for the same resource is still active).
+
+        Resolvable states: UnknownAfterSideEffect, BackendApplyFailed, StaleClaim,
+        RecoveryNeeded. Actively-leased (Claimed/Running/Applying/Verifying) and already-
+        terminal requests are rejected (409) — only stuck ones qualify.
 
         body fields:
-          - resolution: "abandon" (→ Failed) or "succeeded" (→ Succeeded)
+          - resolution: "abandon" (→ Cancelled for StaleClaim [no side effect], else
+            Failed) or "succeeded" (→ Succeeded, when the operator confirms it applied)
           - reason: human-readable explanation (required)
+
+        Abandon of RecoveryNeeded/UnknownAfterSideEffect may leave a PARTIALLY-applied
+        backend side effect (the worker died mid-apply); the caller should verify the
+        backend first. The audit result records backend_state_verified=false for these.
+        The request's still-open plan + run are terminalized in the same transaction.
         """
         RESOLVABLE_STATES = {
             LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
             LifecycleState.BACKEND_APPLY_FAILED.value,
+            LifecycleState.STALE_CLAIM.value,
+            LifecycleState.RECOVERY_NEEDED.value,
         }
 
         actor = authenticated_actor(request, services)
@@ -617,22 +631,33 @@ def resource_management_router() -> APIRouter:
                 detail=f"request is in state '{current_status}'; only {sorted(RESOLVABLE_STATES)} can be resolved",
             )
 
-        target_state = (
-            LifecycleState.FAILED
-            if resolution == "abandon"
-            else LifecycleState.SUCCEEDED
-        )
-        services.repository.update_request_status(
+        # abandon: StaleClaim never ran a side effect -> Cancelled; other stuck states
+        # may have a (possibly partial) side effect -> Failed. succeeded -> Succeeded.
+        if resolution == "succeeded":
+            target_state = LifecycleState.SUCCEEDED
+        elif current_status == LifecycleState.STALE_CLAIM.value:
+            target_state = LifecycleState.CANCELLED
+        else:
+            target_state = LifecycleState.FAILED
+        # RecoveryNeeded/UnknownAfterSideEffect abandon: a backend side effect may be
+        # partially applied and was not verified — record that in the audit result.
+        backend_unverified = resolution == "abandon" and current_status in {
+            LifecycleState.RECOVERY_NEEDED.value,
+            LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+        }
+        services.repository.resolve_stuck_request(
             request_id,
-            target_state,
+            terminal_status=target_state,
             reason=f"manually resolved by {actor}: {reason}",
             actor=actor,
+            backend_unverified=backend_unverified,
         )
         return {
             "request_id": request_id,
             "previous_status": current_status,
             "resolved_to": target_state.value,
             "resolution": resolution,
+            "backend_state_verified": not backend_unverified,
             "actor": actor,
             "reason": reason,
         }

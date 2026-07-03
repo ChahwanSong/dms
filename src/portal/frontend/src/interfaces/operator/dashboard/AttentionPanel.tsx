@@ -86,13 +86,24 @@ const REQ_STATUS_LABEL: Record<string, string> = {
 };
 const REQ_STATUS_ACTION: Record<string, string> = {
   Blocked: "제어 상태(점검/드레인/스케줄링) 확인·해제 후 재처리",
-  StaleClaim: "워커 동작 확인 → 자동 회수 대기 또는 워커 재기동",
-  RecoveryNeeded: "백엔드 상태 점검 후 재처리 또는 취소",
+  StaleClaim: "워커 동작 확인 → 자동 회수 대기, 또는 아래 '요청 강제 종료'로 종료(적용된 것 없음)",
+  RecoveryNeeded: "실제 백엔드 상태 확인 → 재처리, 또는 아래 '요청 강제 종료'로 종료(부분 적용 가능)",
   UnknownAfterSideEffect: "실제 백엔드 상태를 직접 확인 후 DB와 동기화",
   BackendApplyFailed: "원인(권한/연결/백엔드) 수정 후 재요청",
 };
-// DMS only allows resolve/abandon for these stuck request states.
-const RESOLVABLE_REQUEST_STATES = new Set(["UnknownAfterSideEffect", "BackendApplyFailed"]);
+// DMS allows operator resolve/abandon for these STUCK request states (planner Conflicts
+// new requests for the resource while a prior one here is still active — abandon unblocks
+// it). StaleClaim/RecoveryNeeded are dead-ends (workers only re-claim Planned plans), so
+// the tab is the escape hatch. Active-lease states (Running/Applying/…) are NOT here.
+const RESOLVABLE_REQUEST_STATES = new Set([
+  "UnknownAfterSideEffect",
+  "BackendApplyFailed",
+  "StaleClaim",
+  "RecoveryNeeded",
+]);
+// Abandon of these MAY have a partially-applied, unverified backend side effect — the
+// operator must verify the backend first (extra confirm).
+const BACKEND_UNVERIFIED_STATES = new Set(["RecoveryNeeded", "UnknownAfterSideEffect"]);
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v ? v : undefined;
@@ -274,7 +285,7 @@ function Item({ item, act, checked, onToggleSel }: {
               <button className="mini primary" onClick={goDetail}>{target.label} →</button>
             )}
             {canResolve(item) && (
-              <button className="mini" onClick={() => act.onResolve(item)}>요청 중단(abandon)</button>
+              <button className="mini danger" onClick={() => act.onResolve(item)}>요청 강제 종료(abandon)</button>
             )}
             {canDelete(item) && (
               <button className="mini danger" onClick={() => act.onDelete(item)}>기록 삭제</button>
@@ -943,7 +954,18 @@ export default function AttentionPanel({ onNavigate }: { onNavigate?: (s: string
     onResolve: (item) => {
       const id = str(item.request_id);
       if (!id) return;
-      const reason = window.prompt("요청 중단(abandon) 사유를 입력하세요 (감사 기록):", "obsolete — 정리");
+      const st = str(item.status) || "";
+      // Abandon terminalizes the request (→ Failed/Cancelled) so its resource stops
+      // Conflicting new requests. For states with a possible partial backend side
+      // effect, make the operator verify first.
+      const warn = BACKEND_UNVERIFIED_STATES.has(st)
+        ? `이 요청은 '${st}' 상태입니다 — 백엔드에 변경이 부분 적용됐을 수 있습니다.\n` +
+          "먼저 실제 백엔드 상태를 확인하세요. 이미 정상 적용됐다면 abandon 대신 요청 상세에서 확인하세요.\n\n" +
+          "강제 종료하면 요청이 Failed로 종료되고, 이후 같은 대상에 대한 요청 차단(Conflict)이 풀립니다. 계속할까요?"
+        : `이 요청('${st}')을 강제 종료(abandon)합니다.\n` +
+          "요청이 종료되고 같은 대상의 요청 차단(Conflict)이 풀립니다. 계속할까요?";
+      if (!window.confirm(warn)) return;
+      const reason = window.prompt("요청 강제 종료(abandon) 사유를 입력하세요 (감사 기록):", "정체 요청 정리");
       if (!reason) return;
       run(() => operatorApi.dashboard.resolveRequest(id, "abandon", reason));
     },

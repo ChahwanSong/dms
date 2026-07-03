@@ -606,6 +606,60 @@ class ExecutionMixin:
         return result_id
 
 
+    def _latest_run_for_request(self, request_id: str) -> dict[str, Any] | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs WHERE request_id = ? ORDER BY started_at DESC LIMIT 1",
+                (request_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def resolve_stuck_request(
+        self,
+        request_id: str,
+        *,
+        terminal_status: LifecycleState | str,
+        reason: str,
+        actor: str,
+        backend_unverified: bool = False,
+    ) -> str:
+        """Operator-initiated terminalization of a request stuck in a non-terminal
+        state (StaleClaim / RecoveryNeeded / UnknownAfterSideEffect / BackendApplyFailed).
+
+        Reuses ``complete_result`` to atomically close the request AND its still-open
+        plan + run in one transaction — so the "stale/recovery" alarm clears at once and
+        the recovery sweep won't re-touch them. Only plan/run that are themselves
+        non-terminal are closed (an already-terminal one is left as-is). ``backend_
+        unverified`` records that a side effect may have been partially applied and was
+        not verified (RecoveryNeeded/UnknownAfterSideEffect abandon). Returns result_id.
+        """
+        plan = self.get_plan_by_request(request_id)
+        plan_id = (
+            plan["plan_id"]
+            if plan and plan.get("status") not in TERMINAL_LIFECYCLE_STATES
+            else None
+        )
+        run = self._latest_run_for_request(request_id)
+        run_id = (
+            run["run_id"]
+            if run and run.get("state") not in TERMINAL_LIFECYCLE_STATES
+            else None
+        )
+        return self.complete_result(
+            request_id=request_id,
+            plan_id=plan_id,
+            run_id=run_id,
+            terminal_status=terminal_status,
+            message=reason,
+            verification_summary={
+                "manual_resolution": True,
+                # a stuck run may have applied a side effect that was never confirmed
+                "backend_state_verified": not backend_unverified,
+            },
+            error_category="manual",
+            actor=actor,
+        )
+
     def get_results(self, request_id: str) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
             rows = connection.execute(

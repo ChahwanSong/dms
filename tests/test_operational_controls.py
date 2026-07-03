@@ -567,3 +567,103 @@ def _expire_runs(repository: DmsRepository, *run_ids: str) -> None:
             """,
             tuple(run_ids),
         )
+
+
+# ---- operator abandon of STUCK requests (resolve_stuck_request + :resolve endpoint) ----
+# A stuck request (StaleClaim/RecoveryNeeded/…) is a dead-end (workers only re-claim
+# Planned plans) and blocks every new request for its resource with Conflict. abandon
+# terminalizes it (request + plan + run) so the resource unblocks.
+
+_RESOLVE = "/api/v1/resource-management/requests/{}:resolve"
+
+
+def test_resolve_stuck_request_recovery_needed_terminalizes_request_plan_run(harness):
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    req, plan, run = _stuck_run(repository, "ab-recov", LifecycleState.RECOVERY_NEEDED)
+
+    repository.resolve_stuck_request(
+        req, terminal_status=LifecycleState.FAILED,
+        reason="op: stuck", actor="op", backend_unverified=True,
+    )
+
+    assert repository.get_request(req)["status"] == LifecycleState.FAILED.value
+    assert repository.get_plan(plan)["status"] == LifecycleState.FAILED.value
+    runs = {r["run_id"]: r for r in repository.list_runs(limit=50)}
+    assert runs[run]["state"] == LifecycleState.FAILED.value
+    result = repository.get_results(req)[-1]
+    assert result["terminal_status"] == LifecycleState.FAILED.value
+    assert result["verification_summary"]["manual_resolution"] is True
+    # RecoveryNeeded abandon may have a partial, unverified side effect
+    assert result["verification_summary"]["backend_state_verified"] is False
+
+
+def test_resolve_stuck_request_stale_claim_to_cancelled_verified(harness):
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+    req, plan, run = _stuck_run(repository, "ab-stale", LifecycleState.STALE_CLAIM)
+
+    # StaleClaim never ran a side effect -> Cancelled, backend verified (nothing applied)
+    repository.resolve_stuck_request(
+        req, terminal_status=LifecycleState.CANCELLED,
+        reason="op: stale", actor="op", backend_unverified=False,
+    )
+
+    assert repository.get_request(req)["status"] == LifecycleState.CANCELLED.value
+    assert repository.get_plan(plan)["status"] == LifecycleState.CANCELLED.value
+    runs = {r["run_id"]: r for r in repository.list_runs(limit=50)}
+    assert runs[run]["state"] == LifecycleState.CANCELLED.value
+    assert repository.get_results(req)[-1]["verification_summary"]["backend_state_verified"] is True
+
+
+def test_resolve_endpoint_abandon_unblocks_conflict(harness):
+    """The whole point: abandoning a stuck request lets a NEW request for the same
+    resource plan again instead of Conflicting."""
+    client: TestClient = harness["client"]
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+
+    # A: stuck RecoveryNeeded request for a resource.
+    req_a, _, _ = _stuck_run(repository, "conflictdir", LifecycleState.RECOVERY_NEEDED)
+    # B: a new request for the SAME resource -> planner Conflicts it (prior active A).
+    req_b = _create_filesystem_request(repository, "conflictdir")
+    Planner(repository).run_once(limit=10)
+    assert repository.get_request(req_b)["status"] == LifecycleState.CONFLICT.value
+
+    # operator abandons A via the endpoint.
+    resp = client.post(
+        _RESOLVE.format(req_a),
+        json={"resolution": "abandon", "reason": "stuck — abandoning"},
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["resolved_to"] == LifecycleState.FAILED.value
+    assert resp.json()["backend_state_verified"] is False
+    assert repository.get_request(req_a)["status"] == LifecycleState.FAILED.value
+
+    # C: a fresh request for the same resource now plans (no active prior) — UNBLOCKED.
+    req_c = _create_filesystem_request(repository, "conflictdir")
+    Planner(repository).run_once(limit=10)
+    assert repository.get_request(req_c)["status"] != LifecycleState.CONFLICT.value
+
+
+def test_resolve_endpoint_rejects_active_state_and_missing_reason(harness):
+    client: TestClient = harness["client"]
+    repository: DmsRepository = harness["repository"]
+    _register_ready_storage_mapping(repository)
+
+    # a Running request is actively leased, NOT stuck -> 409 (not resolvable).
+    req_run, _, _ = _stuck_run(repository, "active", LifecycleState.RUNNING)
+    r = client.post(
+        _RESOLVE.format(req_run),
+        json={"resolution": "abandon", "reason": "x"}, headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 409
+
+    # reason is required even for a valid stuck state -> 422.
+    req_stuck, _, _ = _stuck_run(repository, "needreason", LifecycleState.RECOVERY_NEEDED)
+    r2 = client.post(
+        _RESOLVE.format(req_stuck),
+        json={"resolution": "abandon", "reason": "  "}, headers=AUTH_HEADERS,
+    )
+    assert r2.status_code == 422
