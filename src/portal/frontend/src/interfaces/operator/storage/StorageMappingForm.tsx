@@ -5,6 +5,7 @@ import {
   CSI_BACKEND_TYPES,
   FIELD_DOCS,
   FS_BACKEND_TYPES,
+  FS_SUBTYPE_KEY,
   formatApiError,
   pickStr,
   templateForEdit,
@@ -29,12 +30,16 @@ export default function StorageMappingForm({
   onSaved: (name: string, status: string) => void;
 }) {
   const [storageName, setStorageName] = useState(initial?.storage_name ?? "");
-  const [templateText, setTemplateText] = useState<string>(
-    JSON.stringify(
-      initial ? templateForEdit(initial) : BACKEND_SKELETONS["cephfs"],
-      null,
-      2,
-    ),
+  const [templateText, setTemplateText] = useState<string>(() => {
+    // filesystem_subtype is a portal-only discriminator driven by the checkbox below,
+    // NOT hand-edited in this JSON — strip it so there's a single source of truth.
+    const t = initial ? templateForEdit(initial) : { ...BACKEND_SKELETONS["cephfs"] };
+    delete (t as Record<string, unknown>)[FS_SUBTYPE_KEY];
+    return JSON.stringify(t, null, 2);
+  });
+  // Portal-only fs discriminator: checked => filesystem_subtype "pv", else "fs-native".
+  const [forPv, setForPv] = useState<boolean>(
+    initial?.backend_template?.[FS_SUBTYPE_KEY] === "pv",
   );
   const initialBackendType = initial?.backend_template?.backend_type;
   const [skeleton, setSkeleton] = useState<string>(
@@ -64,6 +69,8 @@ export default function StorageMappingForm({
     return FIELD_DOCS[skeleton] ? skeleton : "cephfs";
   })();
   const fieldDocs = FIELD_DOCS[currentBackend] ?? [];
+  // The fs-native/PV subtype only applies to filesystem backends (cephfs/gpfs/wekafs).
+  const isFsCurrent = (FS_BACKEND_TYPES as readonly string[]).includes(currentBackend);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -121,6 +128,16 @@ export default function StorageMappingForm({
           "(기본 kubectl 모드에선 control_host가 무시됩니다).",
       );
       return;
+    }
+
+    // Portal-only discriminator (DMS ignores this key): tag fs storages as fs-native vs
+    // PV-backing. Driven by the checkbox, not the JSON editor; CSI backends never carry it.
+    const btType =
+      typeof backend_template.backend_type === "string" ? backend_template.backend_type : "";
+    if ((FS_BACKEND_TYPES as readonly string[]).includes(btType)) {
+      backend_template[FS_SUBTYPE_KEY] = forPv ? "pv" : "fs-native";
+    } else {
+      delete backend_template[FS_SUBTYPE_KEY];
     }
 
     // DMS reads cluster_name / storage_class_name from the top-level input; derive
@@ -223,6 +240,37 @@ export default function StorageMappingForm({
               </select>
             </label>
           </div>
+
+          {isFsCurrent && (
+            <div className="fs-subtype">
+              <label className="check-line">
+                <input
+                  type="checkbox"
+                  checked={forPv}
+                  onChange={(e) => setForPv(e.target.checked)}
+                />
+                <span>
+                  이 파일시스템은 <strong>PVC(PV) 백엔드</strong>입니다 — Kubernetes CSI가 이
+                  filesystem에 subvolume(PV)을 프로비저닝합니다.
+                </span>
+              </label>
+              <div className="muted small">
+                구분자 <code>{FS_SUBTYPE_KEY} = {forPv ? "pv" : "fs-native"}</code> — 순수
+                파일시스템은 <code>fs-native</code>, PV 백엔드는 <code>pv</code>. (나중에 fs-native
+                → PV 데이터 이동 시 입력 항목이 달라집니다.)
+              </div>
+              {forPv && currentBackend === "cephfs" && (
+                <div className="banner info fs-subtype-hint">
+                  💡 <strong>CephFS(PV용) 등록 가이드</strong>: CephFS 루트(<code>/</code>)를{" "}
+                  <code>mount_path</code>에 마운트하고(예 <code>/cephfs</code>),{" "}
+                  <code>managed_root</code>는 그 아래 <strong><code>volumes</code> 디렉터리</strong> ={" "}
+                  <code>&lt;mount_path&gt;/volumes</code> (예 <code>/cephfs/volumes</code>)로
+                  지정하세요. CSI subvolume은{" "}
+                  <code>&lt;managed_root&gt;/csi/&lt;subvol&gt;/&lt;uuid&gt;/</code>에 생성됩니다.
+                </div>
+              )}
+            </div>
+          )}
           <textarea
             className="json"
             value={templateText}

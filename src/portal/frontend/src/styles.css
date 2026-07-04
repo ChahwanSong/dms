@@ -485,6 +485,45 @@ button.primary.danger:hover:not(:disabled) {
   border-radius: 999px;
   padding: 0.1rem 0.5rem;
 }
+/* Storage subtype tags: fs-native (default/muted) vs PV-backing (accent). */
+.tag-pv {
+  color: #a78bfa;
+  border-color: rgba(167, 139, 250, 0.55);
+  background: rgba(167, 139, 250, 0.12);
+  font-weight: 600;
+}
+.tag-native {
+  color: var(--muted);
+}
+.cell-tag {
+  margin-left: 0.4rem;
+  white-space: nowrap;
+}
+
+/* Storage mapping form: fs-native vs PV-backing subtype control (fs backends only). */
+.fs-subtype {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.25rem 0 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0b1220;
+}
+.fs-subtype .check-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+.fs-subtype .check-line input {
+  margin-top: 0.2rem;
+  flex: none;
+}
+.fs-subtype-hint {
+  margin: 0.2rem 0 0;
+}
 
 .app {
   min-height: 100vh;

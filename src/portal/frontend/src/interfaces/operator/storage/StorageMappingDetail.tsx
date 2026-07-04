@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { operatorApi, type StorageMapping } from "../../../api";
 import { SanityBadge } from "../components/SanityBadge";
 import { SpecGrid, BoolChip, type KV } from "../../../components/SpecGrid";
-import { backendType, formatApiError, isFsBackend, quotaTitle } from "./helpers";
+import { backendType, formatApiError, isForPv, isFsBackend, quotaTitle } from "./helpers";
 import Loading from "../../../components/Loading";
 
 export default function StorageMappingDetail({
@@ -269,6 +269,18 @@ function overviewItems(
   const items: KV[] = [
     { label: "클러스터", value: m.cluster_name || "—" },
     { label: "backend", value: backendType(m) },
+    ...(isFs
+      ? [
+          {
+            label: "종류",
+            value: (
+              <span className={"tag " + (isForPv(m) ? "tag-pv" : "tag-native")}>
+                {isForPv(m) ? "PV 백엔드 · pv" : "순수 파일시스템 · fs-native"}
+              </span>
+            ),
+          } as KV,
+        ]
+      : []),
     { label: "storage class", value: m.storage_class_name || "—", mono: !!m.storage_class_name },
     { label: "version", value: String(m.version) },
     { label: "readiness", value: axes, span: true },

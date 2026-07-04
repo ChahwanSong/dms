@@ -4,7 +4,7 @@ import AgentRollout from "./AgentRollout";
 import { SanityBadge, ReadinessDots } from "../components/SanityBadge";
 import StorageMappingDetail from "./StorageMappingDetail";
 import StorageMappingForm from "./StorageMappingForm";
-import { backendType, isFsBackend, managedRoot, quotaTitle } from "./helpers";
+import { backendType, isForPv, isFsBackend, managedRoot, quotaTitle } from "./helpers";
 import Loading from "../../../components/Loading";
 
 type FormState =
@@ -315,7 +315,10 @@ export default function StorageInventory({ focus }: {
                   {managedRoot(m) && <div className="cell-sub mono">{managedRoot(m)}</div>}
                 </td>
                 <td data-label="클러스터">{m.cluster_name || "—"}</td>
-                <td data-label="backend">{backendType(m)}</td>
+                <td data-label="backend">
+                  {backendType(m)}
+                  {isForPv(m) && <span className="tag tag-pv cell-tag">PV용</span>}
+                </td>
                 <td data-label="storage class">{m.storage_class_name || "—"}</td>
                 <td data-label="sanity">
                   <SanityBadge status={m.sanity_status} />

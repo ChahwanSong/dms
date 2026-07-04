@@ -34,6 +34,28 @@ export function isFsBackend(m: StorageMapping): boolean {
   return typeof bt === "string" && (FS_BACKEND_TYPES as readonly string[]).includes(bt);
 }
 
+// Filesystem SUBTYPE — a portal-only discriminator stored inside backend_template
+// (DMS ignores unknown keys; it is not in any DMS field set). Only meaningful for fs
+// backends (cephfs/gpfs/wekafs):
+//   - "fs-native": a plain host filesystem DMS manages directly. DEFAULT — an absent
+//     key is treated as fs-native, so all pre-existing mappings stay fs-native.
+//   - "pv": a filesystem that BACKS Kubernetes PV/PVC provisioning. CSI subvolumes live
+//     under its managed_root — e.g. CephFS root mounted at mount_path, managed_root set
+//     to <mount_path>/volumes, subvolumes at <managed_root>/csi/<subvol>/<uuid>/.
+// The portal reads this to drive fs-native vs PV workflows (e.g. future data-move input
+// differences: a PV target needs subvolume/uuid, an fs-native target does not).
+export const FS_SUBTYPE_KEY = "filesystem_subtype";
+export type FsSubtype = "fs-native" | "pv";
+
+export function fsSubtype(m: StorageMapping): FsSubtype | null {
+  if (!isFsBackend(m)) return null;
+  return m.backend_template?.[FS_SUBTYPE_KEY] === "pv" ? "pv" : "fs-native";
+}
+
+export function isForPv(m: StorageMapping): boolean {
+  return fsSubtype(m) === "pv";
+}
+
 // CSI (k8s namespace-quota) readiness axis. Instead of RM/DM agent evidence, CSI
 // mappings are validated by the ResourceQuota mutation TRANSPORT probe: can the
 // per-mapping kubectl/ssh-kubectl path reach the cluster and apply ResourceQuotas?
