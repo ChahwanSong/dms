@@ -880,15 +880,24 @@ table.grid th {
 .sort-th.active .sort-ind {
   opacity: 1;
 }
+/* CONVENTION — action cell in a desktop table.grid: keep the <td> a REAL table
+   cell (text-align:right, no display:flex) so `vertical-align: middle` from
+   `table.grid td` centers the buttons and they line up with every other column's
+   text on rows of ANY height. NEVER put `display: flex` on a table <td>: a flex
+   td leaves the table-cell box model, silently defeats vertical-align, and the
+   buttons drift off-center on taller rows — the recurring cause of action-column
+   misalignment. Buttons stay on one line via white-space:nowrap + inline-block.
+   Mirrors .sync-actions / .wrun-actions. (Mobile re-enables flex for the card
+   footer below, where the row is display:block, not a table cell.) */
 .row-actions {
-  display: flex;
-  gap: 0.35rem;
-  justify-content: flex-end;
-  flex-wrap: nowrap; /* keep action buttons on one line so row heights stay uniform */
+  text-align: right;
   white-space: nowrap;
 }
 .row-actions button {
-  flex: 0 0 auto; /* don't shrink the buttons (which would wrap their text to a 2nd line) */
+  vertical-align: middle;
+}
+.row-actions button + button {
+  margin-left: 0.35rem;
 }
 
 button.mini {
@@ -1463,9 +1472,11 @@ textarea.json {
     line-height: 1.45;
     word-break: break-word;
   }
+  /* Mobile: the table collapses to block cards, so the action cell becomes a
+     right-aligned footer — flex IS correct here (the row is no longer a table cell). */
   table.grid td.row-actions {
+    display: flex;
     justify-content: flex-end;
-    gap: 0.4rem;
     padding-top: 0.55rem;
     margin-top: 0.3rem;
     border-top: 1px solid var(--border);
