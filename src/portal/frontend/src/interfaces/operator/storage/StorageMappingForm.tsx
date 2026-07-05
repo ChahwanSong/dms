@@ -243,30 +243,44 @@ export default function StorageMappingForm({
 
           {isFsCurrent && (
             <div className="fs-subtype">
-              <label className="check-line">
-                <input
-                  type="checkbox"
-                  checked={forPv}
-                  onChange={(e) => setForPv(e.target.checked)}
-                />
-                <span>
-                  이 파일시스템은 <strong>PVC(PV) 백엔드</strong>입니다 — Kubernetes CSI가 이
-                  filesystem에 subvolume(PV)을 프로비저닝합니다.
-                </span>
-              </label>
-              <div className="muted small">
-                구분자 <code>{FS_SUBTYPE_KEY} = {forPv ? "pv" : "fs-native"}</code> — 순수
-                파일시스템은 <code>fs-native</code>, PV 백엔드는 <code>pv</code>. (나중에 fs-native
-                → PV 데이터 이동 시 입력 항목이 달라집니다.)
+              <div className="fs-subtype-label">파일시스템 종류</div>
+              <div className="fs-subtype-seg" role="radiogroup" aria-label="파일시스템 종류">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!forPv}
+                  className={"fs-opt" + (!forPv ? " active" : "")}
+                  onClick={() => setForPv(false)}
+                >
+                  <span className="fs-opt-name">순수 filesystem</span>
+                  <span className="fs-opt-val">fs-native</span>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={forPv}
+                  className={"fs-opt pv" + (forPv ? " active" : "")}
+                  onClick={() => setForPv(true)}
+                >
+                  <span className="fs-opt-name">PVC(PV) 백엔드</span>
+                  <span className="fs-opt-val">pv</span>
+                </button>
               </div>
+              <p className="fs-subtype-desc">
+                {forPv
+                  ? "Kubernetes CSI가 이 파일시스템에 PV(subvolume)를 프로비저닝합니다."
+                  : "DMS가 직접 관리하는 일반 파일시스템입니다."}
+              </p>
               {forPv && currentBackend === "cephfs" && (
-                <div className="banner info fs-subtype-hint">
-                  💡 <strong>CephFS(PV용) 등록 가이드</strong>: CephFS 루트(<code>/</code>)를{" "}
-                  <code>mount_path</code>에 마운트하고(예 <code>/cephfs</code>),{" "}
-                  <code>managed_root</code>는 그 아래 <strong><code>volumes</code> 디렉터리</strong> ={" "}
-                  <code>&lt;mount_path&gt;/volumes</code> (예 <code>/cephfs/volumes</code>)로
-                  지정하세요. CSI subvolume은{" "}
-                  <code>&lt;managed_root&gt;/csi/&lt;subvol&gt;/&lt;uuid&gt;/</code>에 생성됩니다.
+                <div className="fs-subtype-guide">
+                  <span className="fs-guide-tag">CephFS</span>
+                  <div>
+                    루트(<code>/</code>)를 <code>mount_path</code>(예 <code>/cephfs</code>)에
+                    마운트하고, <code>managed_root</code>는 그 아래 <code>volumes</code> 디렉터리
+                    (<code>&lt;mount_path&gt;/volumes</code>, 예 <code>/cephfs/volumes</code>)로
+                    지정하세요. PV(subvolume)는{" "}
+                    <code>&lt;managed_root&gt;/csi/&lt;subvol&gt;/&lt;uuid&gt;/</code>에 생성됩니다.
+                  </div>
                 </div>
               )}
             </div>
