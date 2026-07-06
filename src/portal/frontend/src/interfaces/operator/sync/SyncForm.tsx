@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type NodePolicyResp } from "../../../api";
+import { operatorApi, type NodePolicyResp, type StorageMapping } from "../../../api";
 import { validateSyncOptions } from "../backup/helpers";
 import SyncOptionsFields from "../backup/SyncOptionsFields";
 import { errMsg } from "../backup/BackupBatches";
 import { isFsBackend } from "../storage/helpers";
+import EndpointPath from "./EndpointPath";
 
 // 데이터 Sync 요청 작성 폼 (탭 상단). ONE source → ONE destination per request
 // (single-shot). Reuses the backup sync-option UI in full (sync + ownership groups
@@ -25,7 +26,7 @@ export default function SyncForm({ onCreated }: { onCreated: () => void }) {
   });
   const [showSync, setShowSync] = useState(false);
   const [showOwnership, setShowOwnership] = useState(false);
-  const [storages, setStorages] = useState<string[]>([]);
+  const [storages, setStorages] = useState<StorageMapping[]>([]);
   const [nodePolicy, setNodePolicy] = useState<NodePolicyResp | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +39,12 @@ export default function SyncForm({ onCreated }: { onCreated: () => void }) {
       // sync runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI mappings
       // are namespace-quota only and can't be a sync src/dst.
       .then((list) =>
-        alive && setStorages(list.filter(isFsBackend).map((m) => m.storage_name).sort()),
+        alive &&
+          setStorages(
+            list
+              .filter(isFsBackend)
+              .sort((a, b) => a.storage_name.localeCompare(b.storage_name)),
+          ),
       )
       .catch(() => {});
     operatorApi.sync
@@ -97,12 +103,14 @@ export default function SyncForm({ onCreated }: { onCreated: () => void }) {
         <span>{label} *</span>
         <select value={value} onChange={(e) => setter(e.target.value)}>
           <option value="">선택…</option>
-          {storages.map((s) => (
-            <option key={s} value={s}>
-              {s}
+          {storages.map((m) => (
+            <option key={m.storage_name} value={m.storage_name}>
+              {m.storage_name}
             </option>
           ))}
-          {value && !storages.includes(value) && <option value={value}>{value}</option>}
+          {value && !storages.some((m) => m.storage_name === value) && (
+            <option value={value}>{value}</option>
+          )}
         </select>
       </label>
     );
@@ -120,33 +128,44 @@ export default function SyncForm({ onCreated }: { onCreated: () => void }) {
     autoLabel = dsyncN === nsyncN ? String(dsyncN) : `동일 ${dsyncN} · 교차 ${nsyncN}`;
   else autoLabel = dsyncN != null ? String(dsyncN) : nsyncN != null ? String(nsyncN) : null;
 
+  // Switching storage resets the endpoint path (a PV builder's assembled path is
+  // meaningless for a different storage). EndpointPath is remounted via key=storage.
+  const setSrc = (v: string) => {
+    setSrcStorage(v);
+    setSrcPath("");
+  };
+  const setDst = (v: string) => {
+    setDstStorage(v);
+    setDstPath("");
+  };
+  const srcMapping = storages.find((m) => m.storage_name === srcStorage);
+  const dstMapping = storages.find((m) => m.storage_name === dstStorage);
+
   return (
     <div className="sync-form form">
       <div className="storage-row">
         <div className="sync-endpoint">
-          {storageSelect(srcStorage, setSrcStorage, "출발 스토리지 (src)")}
-          <label>
-            <span>출발 경로 (src_path) *</span>
-            <input
-              className="mono"
-              value={srcPath}
-              onChange={(e) => setSrcPath(e.target.value)}
-              placeholder="예: e2e/src"
-            />
-          </label>
+          {storageSelect(srcStorage, setSrc, "출발 스토리지 (src)")}
+          <EndpointPath
+            key={srcStorage}
+            mapping={srcMapping}
+            path={srcPath}
+            onPath={setSrcPath}
+            label="출발 경로 (src_path)"
+            placeholder="예: e2e/src"
+          />
         </div>
         <div className="sync-arrow" aria-hidden>→</div>
         <div className="sync-endpoint">
-          {storageSelect(dstStorage, setDstStorage, "대상 스토리지 (dst)")}
-          <label>
-            <span>대상 경로 (dst_path) *</span>
-            <input
-              className="mono"
-              value={dstPath}
-              onChange={(e) => setDstPath(e.target.value)}
-              placeholder="예: e2e/dst/copy1"
-            />
-          </label>
+          {storageSelect(dstStorage, setDst, "대상 스토리지 (dst)")}
+          <EndpointPath
+            key={dstStorage}
+            mapping={dstMapping}
+            path={dstPath}
+            onPath={setDstPath}
+            label="대상 경로 (dst_path)"
+            placeholder="예: e2e/dst/copy1"
+          />
         </div>
       </div>
 

@@ -1258,6 +1258,27 @@ button.linklike {
      only as tall as its fields. */
   .sync-form .storage-row > .sync-endpoint { flex: 1 1 auto; min-width: 0; }
 }
+
+/* PV(PV 백엔드) 경로 빌더 — 엔드포인트 storage가 PV 백엔드면 raw 경로 대신 PV 구성요소
+   (ceph subvol/uuid · gpfs pvc uid)를 받아 managed_root 상대 경로를 조립해 미리보기. */
+.pv-path { display: flex; flex-direction: column; gap: 0.45rem; }
+.pv-path-head { display: flex; align-items: center; gap: 0.5rem; }
+.pv-path-head > span:first-child { font-size: 0.82rem; }
+.pv-path-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0b1220;
+}
+.pv-path-fields label { display: flex; flex-direction: column; gap: 0.2rem; margin: 0; }
+.pv-path-fields label > span { font-size: 0.72rem; color: var(--muted); }
+.pv-path-fields input { margin: 0; }
+.pv-path-preview { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.pv-path-preview code { font-size: 0.82rem; color: var(--fg); word-break: break-all; }
+.pv-path-preview code.muted { color: var(--muted); }
 /* 승인 액션: blue outline mini (mirrors .mini.danger's red-outline pattern). */
 button.mini.go { color: #93c5fd; border-color: rgba(59, 130, 246, 0.6); }
 button.mini.go:hover { color: #cfe3ff; border-color: var(--accent); }
