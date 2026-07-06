@@ -251,9 +251,13 @@ def backup_router(settings: Settings) -> APIRouter:
             p = by_op.get(op)
             if not p:
                 return None
+            # nsync is a ROLE-BASED policy (separate source/destination node pools), so it has
+            # no default_worker_nodes — the DM worker maps the single node_count to both source &
+            # destination and falls back to default_source_nodes. Surface that here so the single
+            # "병렬 노드 수" field still shows what "자동" resolves to for cross-storage backups.
             return {
-                "default_worker_nodes": p.get("default_worker_nodes"),
-                "max_worker_nodes": p.get("max_worker_nodes"),
+                "default_worker_nodes": p.get("default_worker_nodes") or p.get("default_source_nodes"),
+                "max_worker_nodes": p.get("max_worker_nodes") or p.get("max_source_nodes"),
             }
 
         return {"dsync": pick("dsync"), "nsync": pick("nsync")}
