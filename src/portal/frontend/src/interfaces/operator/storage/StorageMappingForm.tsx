@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { operatorApi, type StorageMapping } from "../../../api";
 import {
   BACKEND_SKELETONS,
@@ -10,6 +10,37 @@ import {
   pickStr,
   templateForEdit,
 } from "./helpers";
+
+// PV-backend registration guide per filesystem backend — how to mount the fs and where
+// CSI-provisioned PVs land under managed_root. Shown when "PVC(PV) 백엔드" is chosen for that
+// backend. Backends without an entry (e.g. wekafs) simply show no guide.
+const PV_GUIDES: Record<string, { tag: string; body: ReactNode }> = {
+  cephfs: {
+    tag: "CephFS",
+    body: (
+      <>
+        루트(<code>/</code>)를 <code>mount_path</code>(예 <code>/cephfs</code>)에 마운트하고,{" "}
+        <code>managed_root</code>는 그 아래 <code>volumes</code> 디렉터리
+        (<code>&lt;mount_path&gt;/volumes</code>, 예 <code>/cephfs/volumes</code>)로 지정하세요.
+        PV(subvolume)는{" "}
+        <code>&lt;managed_root&gt;/csi/&lt;subvol&gt;/&lt;uuid&gt;/</code>에 생성됩니다.
+      </>
+    ),
+  },
+  gpfs: {
+    tag: "GPFS",
+    body: (
+      <>
+        GPFS(Storage Scale) 파일시스템을 <code>mount_path</code>(예 <code>/gpfs/gpfs0</code>)에
+        마운트하고, <code>managed_root</code>는 그 아래 CSI fileset 루트 <code>pvs</code> 디렉터리
+        (<code>&lt;mount_path&gt;/pvs</code>, 예 <code>/gpfs/gpfs0/pvs</code>)로 지정하세요. PV는 PVC
+        UID 이름의 독립 fileset으로{" "}
+        <code>&lt;managed_root&gt;/pvc-&lt;uid&gt;/pvc-&lt;uid&gt;-data/</code>에 생성됩니다.
+        (<code>filesystem_name</code>엔 GPFS device 이름, 예 <code>gpfs0</code>)
+      </>
+    ),
+  },
+};
 
 // Create/edit a storage mapping. The whole backend config — including
 // cluster_name and storage_class_name — is edited as ONE backend_template JSON.
@@ -268,19 +299,13 @@ export default function StorageMappingForm({
               </div>
               <p className="fs-subtype-desc">
                 {forPv
-                  ? "Kubernetes CSI가 이 파일시스템에 PV(subvolume)를 프로비저닝합니다."
+                  ? "Kubernetes CSI가 이 파일시스템에 PV를 프로비저닝합니다."
                   : "DMS가 직접 관리하는 일반 파일시스템입니다."}
               </p>
-              {forPv && currentBackend === "cephfs" && (
+              {forPv && PV_GUIDES[currentBackend] && (
                 <div className="fs-subtype-guide">
-                  <span className="fs-guide-tag">CephFS</span>
-                  <div>
-                    루트(<code>/</code>)를 <code>mount_path</code>(예 <code>/cephfs</code>)에
-                    마운트하고, <code>managed_root</code>는 그 아래 <code>volumes</code> 디렉터리
-                    (<code>&lt;mount_path&gt;/volumes</code>, 예 <code>/cephfs/volumes</code>)로
-                    지정하세요. PV(subvolume)는{" "}
-                    <code>&lt;managed_root&gt;/csi/&lt;subvol&gt;/&lt;uuid&gt;/</code>에 생성됩니다.
-                  </div>
+                  <span className="fs-guide-tag">{PV_GUIDES[currentBackend].tag}</span>
+                  <div>{PV_GUIDES[currentBackend].body}</div>
                 </div>
               )}
             </div>
