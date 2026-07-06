@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type RmNodePolicyResp } from "../../../api";
+import { operatorApi, type RmNodePolicyResp, type StorageMapping } from "../../../api";
 import { errMsg } from "../backup/BackupBatches";
 import { isFsBackend } from "../storage/helpers";
+import EndpointPath from "../sync/EndpointPath";
 
 // drm advanced flags. None of these change WHAT is deleted (target决定); they only tune
 // execution speed / log output. Exposed collapsed, default off. Mirrors _rm_flags in
@@ -23,7 +24,7 @@ export default function RmForm({ onCreated }: { onCreated: () => void }) {
   const [memo, setMemo] = useState("");
   const [options, setOptions] = useState<Record<string, unknown>>({});
   const [showOpts, setShowOpts] = useState(false);
-  const [storages, setStorages] = useState<string[]>([]);
+  const [storages, setStorages] = useState<StorageMapping[]>([]);
   const [drmDefault, setDrmDefault] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +37,12 @@ export default function RmForm({ onCreated }: { onCreated: () => void }) {
       // rm runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI mappings are
       // namespace-quota only and can't be an rm target.
       .then((list) =>
-        alive && setStorages(list.filter(isFsBackend).map((m) => m.storage_name).sort()),
+        alive &&
+          setStorages(
+            list
+              .filter(isFsBackend)
+              .sort((a, b) => a.storage_name.localeCompare(b.storage_name)),
+          ),
       )
       .catch(() => {});
     operatorApi.rm
@@ -105,27 +111,32 @@ export default function RmForm({ onCreated }: { onCreated: () => void }) {
       <div className="storage-row">
         <label>
           <span>대상 스토리지 (target) *</span>
-          <select value={storage} onChange={(e) => setStorage(e.target.value)}>
+          <select
+            value={storage}
+            onChange={(e) => {
+              setStorage(e.target.value);
+              setPath("");
+            }}
+          >
             <option value="">선택…</option>
-            {storages.map((s) => (
-              <option key={s} value={s}>
-                {s}
+            {storages.map((m) => (
+              <option key={m.storage_name} value={m.storage_name}>
+                {m.storage_name}
               </option>
             ))}
-            {storage && !storages.includes(storage) && (
+            {storage && !storages.some((m) => m.storage_name === storage) && (
               <option value={storage}>{storage}</option>
             )}
           </select>
         </label>
-        <label>
-          <span>대상 경로 (target_path) *</span>
-          <input
-            className="mono"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder="예: e2e/old-data"
-          />
-        </label>
+        <EndpointPath
+          key={storage}
+          mapping={storages.find((m) => m.storage_name === storage)}
+          path={path}
+          onPath={setPath}
+          label="대상 경로 (target_path)"
+          placeholder="예: e2e/old-data"
+        />
       </div>
 
       <div className="storage-row">
@@ -182,9 +193,15 @@ export default function RmForm({ onCreated }: { onCreated: () => void }) {
         <input value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="예: 만료 프로젝트 정리" />
       </label>
 
-      <div className="form-hints muted small">
-        대상 경로 <strong>이하 전체</strong>가 삭제됩니다(복구 불가). 실제 삭제 전에 Preview(dry-run)로
-        삭제 대상 수를 먼저 확인합니다. 원본 삭제이므로 백업/Sync와 달리 되돌릴 수 없습니다.
+      <div className="rm-warn">
+        <span className="rm-warn-icon" aria-hidden>
+          ⚠
+        </span>
+        <div>
+          <strong>대상 경로 이하 전체가 삭제됩니다 — 복구 불가.</strong> 실제 삭제 전에{" "}
+          <b>Preview(dry-run)</b>로 삭제 대상 수를 먼저 확인합니다. 원본 삭제이므로 백업·Sync와
+          달리 되돌릴 수 없습니다.
+        </div>
       </div>
 
       {error && <div className="banner err">{error}</div>}

@@ -102,7 +102,8 @@ def rm_router(settings: Settings) -> APIRouter:
         except DmsApiError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
         by_op = {p.get("operation"): p for p in (policies or [])}
-        p = by_op.get("drm")
+        # DMS keys the policy by OPERATION ("rm"), not the CLI tool name ("drm").
+        p = by_op.get("rm")
         drm = (
             {
                 "default_worker_nodes": p.get("default_worker_nodes"),

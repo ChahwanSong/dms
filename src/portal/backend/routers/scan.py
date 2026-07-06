@@ -243,7 +243,8 @@ def scan_router(settings: Settings) -> APIRouter:
                 "max_worker_nodes": p.get("max_worker_nodes"),
             }
 
-        return {"dscan": pick("dscan")}
+        # DMS keys the policy by OPERATION ("scan"), not the CLI tool name ("dscan").
+        return {"dscan": pick("scan")}
 
     @router.get("/batches")
     async def list_batches(db: Database = Depends(get_db)) -> list[dict[str, Any]]:
