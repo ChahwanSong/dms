@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type ScanBatch, type ScanNodePolicyResp } from "../../../api";
+import {
+  operatorApi,
+  type ScanBatch,
+  type ScanNodePolicyResp,
+  type StorageMapping,
+} from "../../../api";
 import {
   pathsToCsv,
   validateScanOptions,
@@ -11,7 +16,8 @@ import {
 } from "./helpers";
 import ScanCsvModal from "./ScanCsvModal";
 import { errMsg } from "./ScanBatches";
-import { isFsBackend } from "../storage/helpers";
+import { isFsBackend, isForPv, managedRoot, backendType } from "../storage/helpers";
+import EndpointPath from "../sync/EndpointPath";
 import Loading from "../../../components/Loading";
 
 // Create or edit a scan batch. STORAGE is a batch-level single dropdown applied to
@@ -42,7 +48,10 @@ export default function ScanBatchForm({
   );
   const [storage, setStorage] = useState("");
   const [rows, setRows] = useState<ScanRow[]>(isEdit ? [] : [{ path: "" }]);
-  const [storages, setStorages] = useState<string[]>([]);
+  const [storages, setStorages] = useState<StorageMapping[]>([]);
+  // PV 경로 도우미(ceph/gpfs PV): 빌더로 조립한 상대경로 초안 + remount 리셋용 키.
+  const [pvDraft, setPvDraft] = useState("");
+  const [pvKey, setPvKey] = useState(0);
   const [nodePolicy, setNodePolicy] = useState<ScanNodePolicyResp | null>(null);
   const [showOptions, setShowOptions] = useState(
     isEdit && SCAN_OPTION_FIELDS.some((f) => initial?.options?.[f.key] != null),
@@ -67,7 +76,15 @@ export default function ScanBatchForm({
       // Scan runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI
       // mappings are namespace-quota only and can't be a scan target, so exclude
       // them from the storage candidates.
-      .then((list) => alive && setStorages(list.filter(isFsBackend).map((m) => m.storage_name).sort()))
+      .then(
+        (list) =>
+          alive &&
+          setStorages(
+            list
+              .filter(isFsBackend)
+              .sort((a, b) => a.storage_name.localeCompare(b.storage_name)),
+          ),
+      )
       .catch(() => {});
     // What "자동" (DMS policy default) resolves to, to surface the actual number.
     operatorApi.scan
@@ -98,6 +115,14 @@ export default function ScanBatchForm({
   }
   function updateRow(i: number, v: string) {
     setRows((r) => r.map((row, j) => (j === i ? { path: v } : row)));
+  }
+  // PV 도우미: 빌더가 조립한 상대경로를 요청 행으로 추가하고 빌더를 초기화(remount).
+  function addPvRow() {
+    const p = pvDraft.trim();
+    if (!p) return;
+    setRows((r) => [...r, { path: p }]);
+    setPvDraft("");
+    setPvKey((k) => k + 1);
   }
 
   function setOptKey(key: string, v: unknown) {
@@ -221,6 +246,15 @@ export default function ScanBatchForm({
   const dscanN = nodePolicy?.dscan?.default_worker_nodes ?? null;
   const autoLabel = dscanN != null ? String(dscanN) : null;
 
+  // Selected batch storage → managed_root note + (ceph/gpfs PV) guided path builder.
+  // Storage is batch-level, so PV-ness applies to every row. wekafs PV has no
+  // component structure (pv-other), so it keeps raw rows without a builder.
+  const storageMapping = storages.find((m) => m.storage_name === storage);
+  const mr = storageMapping ? managedRoot(storageMapping) : null;
+  const bt = storageMapping ? backendType(storageMapping) : "";
+  const pvBuilder =
+    !!storageMapping && isForPv(storageMapping) && (bt === "cephfs" || bt === "gpfs");
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
@@ -273,14 +307,20 @@ export default function ScanBatchForm({
 
             <label>
               <span>스토리지 *</span>
-              <select value={storage} onChange={(e) => setStorage(e.target.value)}>
+              <select
+                value={storage}
+                onChange={(e) => {
+                  setStorage(e.target.value);
+                  setPvDraft("");
+                }}
+              >
                 <option value="">선택…</option>
-                {storages.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
+                {storages.map((m) => (
+                  <option key={m.storage_name} value={m.storage_name}>
+                    {m.storage_name}
                   </option>
                 ))}
-                {storage && !storages.includes(storage) && (
+                {storage && !storages.some((m) => m.storage_name === storage) && (
                   <option value={storage}>{storage}</option>
                 )}
               </select>
@@ -295,6 +335,35 @@ export default function ScanBatchForm({
             </button>
             {showOptions && (
               <div className="sync-options">{SCAN_OPTION_FIELDS.map(renderOption)}</div>
+            )}
+
+            {storageMapping && mr && (
+              <div className="muted small mr-note">
+                모든 스캔 경로는 <code>{mr.replace(/\/+$/, "")}/</code> 기준 상대 경로입니다.
+              </div>
+            )}
+            {pvBuilder && (
+              <div className="pv-adder">
+                <EndpointPath
+                  key={`${storage}:${pvKey}`}
+                  mapping={storageMapping}
+                  path={pvDraft}
+                  onPath={setPvDraft}
+                  label="스캔 대상 (PV 경로)"
+                  placeholder=""
+                  required={false}
+                />
+                <div className="pv-adder-foot">
+                  <button
+                    type="button"
+                    className="ghost mini"
+                    disabled={!pvDraft.trim()}
+                    onClick={addPvRow}
+                  >
+                    + 행 추가
+                  </button>
+                </div>
+              </div>
             )}
 
             {/* inline request table */}

@@ -1286,6 +1286,21 @@ button.linklike {
 .path-resolve { display: flex; flex-direction: column; gap: 0.1rem; }
 .path-resolve > code { font-size: 0.82rem; color: var(--fg); word-break: break-all; }
 
+/* Scan 배치의 PV 경로 도우미 — 빌더로 managed_root 상대 경로를 조립해 요청 행으로
+   추가한다(표의 행은 계속 raw 경로 → CSV 대량 붙여넣기 보존). */
+.pv-adder {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.05);
+}
+.pv-adder-foot { display: flex; justify-content: flex-end; }
+.mr-note { margin-top: 0.1rem; }
+.mr-note code { color: var(--fg); }
+
 /* 데이터 삭제 경고 — 파괴적 작업이므로 muted hint 대신 danger callout으로. */
 .rm-warn {
   display: flex;

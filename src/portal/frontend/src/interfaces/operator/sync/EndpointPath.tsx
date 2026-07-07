@@ -17,12 +17,17 @@ export default function EndpointPath({
   onPath,
   label,
   placeholder,
+  required = true,
 }: {
   mapping: StorageMapping | undefined;
   path: string;
   onPath: (p: string) => void;
   label: string;
   placeholder: string;
+  // Whether to render the " *" required marker on the label. Sync/삭제 leave it on
+  // (the endpoint path is required); the Scan row-adder passes false (rows can also
+  // come from the raw table / CSV, so the builder itself isn't a required field).
+  required?: boolean;
 }) {
   const pv = mapping ? isForPv(mapping) : false;
   const bt = mapping ? backendType(mapping) : "";
@@ -61,7 +66,8 @@ export default function EndpointPath({
       {kind === "plain" || kind === "pv-other" ? (
         <label>
           <span>
-            {label} *
+            {label}
+            {required && " *"}
             {kind === "pv-other" && <span className="muted small"> · PV(경로 직접 입력)</span>}
           </span>
           <input
@@ -74,7 +80,10 @@ export default function EndpointPath({
       ) : (
         <div className="pv-path">
           <div className="pv-path-head">
-            <span>{label} *</span>
+            <span>
+              {label}
+              {required && " *"}
+            </span>
             <span className="tag tag-pv">{kind === "ceph" ? "CephFS PV" : "GPFS PV"}</span>
           </div>
           <div className="pv-path-fields">
