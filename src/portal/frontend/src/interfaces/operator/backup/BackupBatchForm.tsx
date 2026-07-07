@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { operatorApi, type BackupBatch, type NodePolicyResp } from "../../../api";
+import {
+  operatorApi,
+  type BackupBatch,
+  type NodePolicyResp,
+  type StorageMapping,
+} from "../../../api";
 import {
   optionsWithoutDelete,
   rowsToCsv,
@@ -11,7 +16,8 @@ import {
 import SyncOptionsFields from "./SyncOptionsFields";
 import BackupCsvModal from "./BackupCsvModal";
 import { errMsg } from "./BackupBatches";
-import { isFsBackend } from "../storage/helpers";
+import { isFsBackend, isForPv, managedRoot, backendType } from "../storage/helpers";
+import EndpointPath from "../sync/EndpointPath";
 import Loading from "../../../components/Loading";
 
 // Create or edit a backup batch. Source & destination STORAGE are batch-level
@@ -50,7 +56,11 @@ export default function BackupBatchForm({
   const [srcStorage, setSrcStorage] = useState("");
   const [dstStorage, setDstStorage] = useState("");
   const [rows, setRows] = useState<BackupRow[]>(isEdit ? [] : [{ src_path: "", dst_path: "" }]);
-  const [storages, setStorages] = useState<string[]>([]);
+  const [storages, setStorages] = useState<StorageMapping[]>([]);
+  // PV 경로 도우미(ceph/gpfs PV): src/dst 조립 초안 + remount 리셋용 키.
+  const [srcDraft, setSrcDraft] = useState("");
+  const [dstDraft, setDstDraft] = useState("");
+  const [pvKey, setPvKey] = useState(0);
   const [nodePolicy, setNodePolicy] = useState<NodePolicyResp | null>(null);
   const [showSync, setShowSync] = useState(
     isEdit &&
@@ -82,7 +92,15 @@ export default function BackupBatchForm({
       // Data backup runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI
       // mappings (ceph-csi/weka-csi/gpfs-csi) are namespace-quota only and can't be
       // a backup src/dst, so exclude them from the storage candidates.
-      .then((list) => alive && setStorages(list.filter(isFsBackend).map((m) => m.storage_name).sort()))
+      .then(
+        (list) =>
+          alive &&
+          setStorages(
+            list
+              .filter(isFsBackend)
+              .sort((a, b) => a.storage_name.localeCompare(b.storage_name)),
+          ),
+      )
       .catch(() => {});
     // What "자동" (DMS policy default) resolves to, to surface the actual number.
     operatorApi.backup
@@ -116,6 +134,16 @@ export default function BackupBatchForm({
   }
   function updateRow(i: number, key: keyof BackupRow, v: string) {
     setRows((r) => r.map((row, j) => (j === i ? { ...row, [key]: v } : row)));
+  }
+  // PV 도우미: 조립된 src/dst 경로를 완결 요청 행으로 추가하고 빌더를 초기화(remount).
+  function addPvRow() {
+    const sp = srcDraft.trim();
+    const dp = dstDraft.trim();
+    if (!sp || !dp) return;
+    setRows((r) => [...r, { src_path: sp, dst_path: dp }]);
+    setSrcDraft("");
+    setDstDraft("");
+    setPvKey((k) => k + 1);
   }
 
   // CSV/text popups (consistent with the batch-detail tab). "현재 항목" copies the
@@ -212,12 +240,14 @@ export default function BackupBatchForm({
         <span>{label} *</span>
         <select value={value} onChange={(e) => setter(e.target.value)}>
           <option value="">선택…</option>
-          {storages.map((s) => (
-            <option key={s} value={s}>
-              {s}
+          {storages.map((m) => (
+            <option key={m.storage_name} value={m.storage_name}>
+              {m.storage_name}
             </option>
           ))}
-          {value && !storages.includes(value) && <option value={value}>{value}</option>}
+          {value && !storages.some((m) => m.storage_name === value) && (
+            <option value={value}>{value}</option>
+          )}
         </select>
       </label>
     );
@@ -236,6 +266,18 @@ export default function BackupBatchForm({
   else if (dsyncN != null && nsyncN != null)
     autoLabel = dsyncN === nsyncN ? String(dsyncN) : `동일 ${dsyncN} · 교차 ${nsyncN}`;
   else autoLabel = dsyncN != null ? String(dsyncN) : nsyncN != null ? String(nsyncN) : null;
+
+  // Selected storages → managed_root notes + (ceph/gpfs PV) guided path builder.
+  // Storage is batch-level, so PV-ness applies to every row on that side. The 도우미
+  // assembles a complete src→dst pair (each side adapts: PV builder or raw input) and
+  // appears when either side is a ceph/gpfs PV. wekafs PV keeps raw rows.
+  const srcMapping = storages.find((m) => m.storage_name === srcStorage);
+  const dstMapping = storages.find((m) => m.storage_name === dstStorage);
+  const srcMr = srcMapping ? managedRoot(srcMapping) : null;
+  const dstMr = dstMapping ? managedRoot(dstMapping) : null;
+  const isPvBuilder = (m?: StorageMapping) =>
+    !!m && isForPv(m) && ["cephfs", "gpfs"].includes(backendType(m));
+  const pvBuilder = isPvBuilder(srcMapping) || isPvBuilder(dstMapping);
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -289,8 +331,22 @@ export default function BackupBatchForm({
             </label>
 
             <div className="storage-row">
-              {storageSelect(srcStorage, setSrcStorage, "출발 스토리지 (src)")}
-              {storageSelect(dstStorage, setDstStorage, "대상 스토리지 (dst)")}
+              {storageSelect(
+                srcStorage,
+                (v) => {
+                  setSrcStorage(v);
+                  setSrcDraft("");
+                },
+                "출발 스토리지 (src)",
+              )}
+              {storageSelect(
+                dstStorage,
+                (v) => {
+                  setDstStorage(v);
+                  setDstDraft("");
+                },
+                "대상 스토리지 (dst)",
+              )}
             </div>
 
             <button
@@ -327,6 +383,55 @@ export default function BackupBatchForm({
             {showOwnership && (
               <div className="sync-options">
                 <SyncOptionsFields group="ownership" value={options} onChange={setOptions} />
+              </div>
+            )}
+
+            {(srcMr || dstMr) && (
+              <div className="muted small mr-note">
+                상대 경로 기준 —{" "}
+                {srcMr && (
+                  <>
+                    출발 <code>{srcMr.replace(/\/+$/, "")}/</code>
+                  </>
+                )}
+                {srcMr && dstMr && " · "}
+                {dstMr && (
+                  <>
+                    대상 <code>{dstMr.replace(/\/+$/, "")}/</code>
+                  </>
+                )}
+              </div>
+            )}
+            {pvBuilder && (
+              <div className="pv-adder pv-adder-pair">
+                <EndpointPath
+                  key={`s:${srcStorage}:${pvKey}`}
+                  mapping={srcMapping}
+                  path={srcDraft}
+                  onPath={setSrcDraft}
+                  label="출발 (src)"
+                  placeholder="예: e2e/src"
+                  required={false}
+                />
+                <EndpointPath
+                  key={`d:${dstStorage}:${pvKey}`}
+                  mapping={dstMapping}
+                  path={dstDraft}
+                  onPath={setDstDraft}
+                  label="대상 (dst)"
+                  placeholder="예: backup/day1"
+                  required={false}
+                />
+                <div className="pv-adder-foot">
+                  <button
+                    type="button"
+                    className="ghost mini"
+                    disabled={!srcDraft.trim() || !dstDraft.trim()}
+                    onClick={addPvRow}
+                  >
+                    + 행 추가
+                  </button>
+                </div>
               </div>
             )}
 

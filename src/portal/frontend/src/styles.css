@@ -1298,6 +1298,11 @@ button.linklike {
   background: rgba(148, 163, 184, 0.05);
 }
 .pv-adder-foot { display: flex; justify-content: flex-end; }
+/* 백업 통합 도우미: 출발/대상 두 엔드포인트를 얇은 점선으로 구분. */
+.pv-adder-pair > .endpoint-path + .endpoint-path {
+  border-top: 1px dashed var(--border);
+  padding-top: 0.6rem;
+}
 .mr-note { margin-top: 0.1rem; }
 .mr-note code { color: var(--fg); }
 
