@@ -12,9 +12,6 @@ venv/
 .claude/
 .playwright-mcp/
 
-# downloaded binaries (not source)
-/install/docker/kubectl
-
 # scratch UI screenshots dropped in repo root during manual testing
 /*.png
 /*.jpeg
