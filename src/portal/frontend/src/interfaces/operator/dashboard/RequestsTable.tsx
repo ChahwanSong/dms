@@ -4,6 +4,8 @@ import {
 import { operatorApi, type RequestActivity, type RequestDetail } from "../../../api";
 import { fmtAgo, fmtTime } from "./helpers";
 import Section from "./Section";
+import StatusPill from "./StatusPill";
+import { isStuck, lifecycleLabel, lifecycleTextClass } from "./statusMeta";
 
 // resource_kind filter (server-side) + friendly labels.
 const RKINDS = ["", "filesystem", "kubernetes_namespace_quota", "data_job", "identity"] as const;
@@ -16,35 +18,9 @@ const STATUSES = [
   "", "Running", "Blocked", "Conflict", "StaleClaim", "RecoveryNeeded",
   "Succeeded", "Failed", "Cancelled", "UnknownAfterSideEffect", "BackendApplyFailed",
 ];
-// attention (needs-action) vs failed vs done — for status coloring.
-const STUCK = new Set([
-  "Blocked", "Conflict", "StaleClaim", "RecoveryNeeded",
-  "UnknownAfterSideEffect", "BackendApplyFailed", "VerificationFailed",
-]);
-const FAIL = new Set(["Failed", "Rejected", "TimedOut", "AuthenticationRejected", "AuthorizationFailed"]);
-// in-flight (blue) statuses — for the status pill tone.
-const ACTIVE = new Set([
-  "Running", "Applying", "Verifying", "Claimed", "Pending", "PreflightRunning",
-  "PreviewRunning", "ConfirmPending", "Confirmed", "Scheduled", "PreviewReady",
-]);
 // GROWING history — never fetch-all. Load one page, then more on scroll (infinite).
+// lifecycle status → Korean label + tone + pill live in ./statusMeta / ./StatusPill.
 const PAGE = 500;
-
-function statusClass(s: string): string {
-  if (s === "Succeeded") return "ok-num";
-  if (FAIL.has(s)) return "err-num";
-  if (STUCK.has(s)) return "tone-warn-text";
-  return "";
-}
-
-// status → pill tone (background chip in the 상태 column).
-function statusTone(s: string): string {
-  if (s === "Succeeded") return "is-ok";
-  if (FAIL.has(s)) return "is-err";
-  if (STUCK.has(s)) return "is-warn";
-  if (ACTIVE.has(s)) return "is-info";
-  return "is-neutral";
-}
 
 // Wrap occurrences of `needle` (case-insensitive) in <mark> — shows the operator
 // exactly WHERE their query matched (requester or target), reinforcing that both
@@ -115,14 +91,14 @@ function RequestDetailView({ d }: { d: RequestDetail }) {
         <Kv label="요청 ID" v={req.request_id} mono />
         <Kv label="작업" v={req.operation} />
         <Kv label="리소스 종류" v={req.resource_kind} />
-        <Kv label="상태" v={req.status} cls={statusClass(str(req.status) || "")} />
+        <Kv label="상태" v={lifecycleLabel(str(req.status))} cls={lifecycleTextClass(str(req.status) || "")} />
         <Kv label="요청자" v={req.requester_id} />
         <Kv label="실행자" v={req.actor} />
         <Kv label="우선순위" v={req.priority} />
         <Kv label="요청 시각" v={str(req.requested_at) ? fmtTime(str(req.requested_at)) : null} />
         <Kv label="갱신" v={str(req.updated_at) ? fmtTime(str(req.updated_at)) : null} />
         {str(req.source_request_id) && <Kv label="출처 요청" v={req.source_request_id} mono />}
-        {str(plan.status) && <Kv label="플랜 상태" v={plan.status} />}
+        {str(plan.status) && <Kv label="플랜 상태" v={lifecycleLabel(str(plan.status))} />}
         <Kv label="리소스 키" v={req.resource_key} mono span />
         <Kv label="요청 내용" v={req.payload_summary} mono span />
       </dl>
@@ -135,7 +111,7 @@ function RequestDetailView({ d }: { d: RequestDetail }) {
             const vs = asRec(r.verification_summary);
             return (
               <div key={i} className="reqa-result small">
-                <b className={statusClass(str(r.terminal_status) || "")}>{str(r.terminal_status) || "—"}</b>
+                <b className={lifecycleTextClass(str(r.terminal_status) || "")}>{lifecycleLabel(str(r.terminal_status)) || "—"}</b>
                 {str(r.message) && <span className="muted"> · {str(r.message)}</span>}
                 {str(vs.reason) && <span className="muted"> · 사유: {str(vs.reason)}</span>}
                 {str(r.error_category) && <span className="muted"> · {str(r.error_category)}</span>}
@@ -152,7 +128,7 @@ function RequestDetailView({ d }: { d: RequestDetail }) {
             {transitions.slice(-15).map((t, i) => (
               <li key={i}>
                 <span className="reqa-tl-state mono small">
-                  {t.from_state || "·"} → <b className={statusClass(t.to_state || "")}>{t.to_state}</b>
+                  {lifecycleLabel(t.from_state) || "·"} → <b className={lifecycleTextClass(t.to_state || "")}>{lifecycleLabel(t.to_state)}</b>
                 </span>
                 {t.reason && <span className="muted small reqa-tl-reason">{t.reason}</span>}
                 <span className="muted small reqa-tl-t" title={fmtTime(t.created_at || undefined)}>
@@ -303,7 +279,7 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequestId, rows]);
 
-  const stuckCount = visible.filter((r) => STUCK.has(r.status)).length;
+  const stuckCount = visible.filter((r) => isStuck(r.status)).length;
   const badge = (
     <span className="muted small">
       (표시 {visible.length}{reachedEnd ? "" : "+"})
@@ -330,7 +306,7 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
           {RKINDS.map((k) => <option key={k} value={k}>{k ? RKIND_LABEL[k] : "모든 종류"}</option>)}
         </select>
         <select className="reqa-filter" value={status} onChange={(e) => setStatus(e.target.value)} title="상태">
-          {STATUSES.map((s) => <option key={s} value={s}>{s || "모든 상태"}</option>)}
+          {STATUSES.map((s) => <option key={s} value={s}>{s ? lifecycleLabel(s) : "모든 상태"}</option>)}
         </select>
         {hiddenInView > 0 && (
           <button className={`reqa-toggle${showHidden ? " on" : ""}`} onClick={() => setShowHidden((v) => !v)}
@@ -357,7 +333,7 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
         ) : (
           visible.map((r) => {
             const focused = !!focusRequestId && r.request_id === focusRequestId;
-            const stuck = STUCK.has(r.status);
+            const stuck = isStuck(r.status);
             const isOpen = expanded.has(r.request_id);
             const det = details[r.request_id];
             const tgt = targetOf(r);
@@ -375,7 +351,7 @@ export default function RequestsTable({ defaultOpen = false, focusRequestId, onN
                     {r._hidden && <span className="chip tone-low reqa-hidden-chip" title="조치 필요에서 숨김/확인됨">숨김</span>}
                   </td>
                   <td data-label="상태">
-                    <span className={`reqa-badge ${statusTone(r.status)}`}>{r.status}</span>
+                    <StatusPill state={r.status} />
                   </td>
                   <td data-label="요청자" className="reqa-requester small">
                     {r.requester_id ? highlight(r.requester_id, debouncedQ) : "—"}
