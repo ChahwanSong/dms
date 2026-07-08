@@ -28,6 +28,20 @@
   box-sizing: border-box;
 }
 
+/* Keyboard-focus baseline: every interactive control shows a visible focus ring.
+   Many bespoke buttons (.mini/.ghost/.nav-item/.tab/.attn-chip/.sort-th/.fs-opt/…)
+   previously relied on the UA default outline, which is inconsistent and often
+   invisible on the dark surfaces. Element-specific :focus-visible rules (rows/cards)
+   below still override with an inset ring. Mouse clicks don't trigger :focus-visible,
+   so this only shows for keyboard/AT users. */
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -1768,7 +1782,10 @@ textarea.json {
 /* dim + lock the panel while a dismiss/resolve/delete request is in flight */
 .attn-busy { opacity: 0.55; pointer-events: none; }
 .attn2-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.attn2-sev { font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em; text-align: center; padding: 0.14rem 0; border-radius: 5px; }
+/* action buttons sit flush at the overflow:hidden container edge → inset the ring
+   (like .attn2-row/.off2-row) so the global +2px outset baseline isn't clipped. */
+.attn2-hide:focus-visible { outline-offset: -2px; }
+.attn2-sev { font-size: 0.66rem; font-weight: 700; letter-spacing: 0.03em; text-align: center; padding: 0.14rem 0; border-radius: 5px; }
 .attn2-sev.attn2-crit { color: #ff5c5c; background: rgba(229, 72, 77, 0.16); }
 .attn2-sev.attn2-err { color: #ff6b6b; background: rgba(229, 72, 77, 0.1); }
 .attn2-sev.attn2-warn { color: #f0a050; background: rgba(217, 130, 43, 0.12); }
@@ -1787,7 +1804,7 @@ textarea.json {
 .attn2-row.dismissed .attn2-action { white-space: normal; overflow: visible; text-overflow: clip; }
 .attn2-row.dismissed .attn2-main { gap: 0.24rem; }
 .attn2-row.dismissed .attn2-head { flex-wrap: wrap; align-items: center; row-gap: 0.2rem; }
-.attn2-tag { display: inline-block; font-size: 0.6rem; font-weight: 700; color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.5); border-radius: 4px; padding: 0.02rem 0.32rem; margin-right: 0.4rem; vertical-align: 0.06em; }
+.attn2-tag { display: inline-block; font-size: 0.66rem; font-weight: 700; color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.5); border-radius: 4px; padding: 0.02rem 0.32rem; margin-right: 0.4rem; vertical-align: 0.06em; }
 .attn2-when { flex: none; white-space: nowrap; }
 .attn2-caret { color: #9aa4b2; font-size: 0.8rem; text-align: center; }
 .attn2-detail { padding: 0.5rem 0.85rem 0.75rem; border-top: 1px solid var(--border); }
@@ -1838,7 +1855,10 @@ textarea.json {
   border: 1px solid var(--border); background: transparent; color: var(--muted);
   font: italic 700 0.72rem/1 Georgia, "Times New Roman", serif;
   cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0;
+  position: relative;
 }
+/* Extend the tap target to ≥24px (WCAG 2.5.8) without growing the visible 'i' circle. */
+.info-hint-btn::before { content: ""; position: absolute; inset: -3px; border-radius: 999px; }
 .info-hint-btn:hover, .info-hint-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
 .info-hint-pop {
   position: absolute; top: calc(100% + 0.5rem); z-index: 60; width: min(23rem, 86vw);
@@ -2111,7 +2131,9 @@ table.grid.node-grid td.node-report { white-space: nowrap; }
 }
 .reqa-search-x {
   position: absolute; right: 0.45rem; border: none; background: transparent; color: #9aa4b2;
-  cursor: pointer; font-size: 1.15rem; line-height: 1; padding: 0.05rem 0.32rem; border-radius: 6px;
+  cursor: pointer; font-size: 1.15rem; line-height: 1; border-radius: 6px;
+  /* ≥24px tap target (WCAG 2.5.8), glyph centered. */
+  display: inline-flex; align-items: center; justify-content: center; min-width: 24px; min-height: 24px; padding: 0;
 }
 .reqa-search-x:hover { color: var(--fg); background: rgba(255, 255, 255, 0.06); }
 .reqa-filter { border-radius: 8px; }
