@@ -1669,9 +1669,13 @@ textarea.json {
 @media (max-width: 720px) { .dash-cards { grid-template-columns: 1fr 1fr; } }
 .dash-section { margin-top: 1.25rem; }
 .dash-sub { margin: 1rem 0 0.4rem; font-size: 0.85rem; color: #9aa4b2; font-weight: 600; }
-.dash-section-head { display: flex; align-items: center; gap: 0.5rem; width: 100%; padding: 0.35rem 0; background: none; border: none; border-bottom: 1px solid var(--border, #2a2f3a); cursor: pointer; color: inherit; text-align: left; }
-.dash-section-head:hover { color: #cdd5e0; }
-.dash-section-head h3 { margin: 0; font-size: 1rem; }
+/* Padding lives on the toggle (not the head) so the toggle keeps the old
+   full-height ≥24px tap target (WCAG 2.5.8); the head just holds the underline. */
+.dash-section-head { display: flex; align-items: center; gap: 0.5rem; width: 100%; border-bottom: 1px solid var(--border, #2a2f3a); }
+/* h3 wraps the toggle button (WAI-ARIA disclosure); the badge is its sibling. */
+.dash-section-title { margin: 0; font-size: 1rem; }
+.dash-section-toggle { display: inline-flex; align-items: center; gap: 0.5rem; min-height: 1.6rem; padding: 0.35rem 0.4rem 0.35rem 0; background: none; border: none; cursor: pointer; color: inherit; font: inherit; text-align: left; }
+.dash-section-toggle:hover { color: #cdd5e0; }
 .dash-caret { color: #9aa4b2; width: 1rem; font-size: 0.8rem; flex: none; }
 .dash-section-body { margin-top: 0.6rem; }
 .dash-filters { margin-bottom: 0.5rem; }

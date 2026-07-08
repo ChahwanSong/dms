@@ -19,22 +19,31 @@ export default function Section({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  // WAI-ARIA disclosure pattern: the heading wraps the toggle button, and the
+  // badge is a SIBLING of the button (not inside it). This keeps interactive
+  // badges — e.g. an <InfoHint> "i", itself a <button> — out of the toggle
+  // button, which would otherwise be invalid <button>-in-<button> DOM and make
+  // the "i" click also toggle the section.
   return (
     <div className="dash-section">
-      <button
-        type="button"
-        className="dash-section-head"
-        aria-expanded={open}
-        onClick={() => {
-          const next = !open;
-          setOpen(next);
-          onOpenChange?.(next);
-        }}
-      >
-        <span className="dash-caret">{open ? "▾" : "▸"}</span>
-        <h3>{title}</h3>
+      <div className="dash-section-head">
+        <h3 className="dash-section-title">
+          <button
+            type="button"
+            className="dash-section-toggle"
+            aria-expanded={open}
+            onClick={() => {
+              const next = !open;
+              setOpen(next);
+              onOpenChange?.(next);
+            }}
+          >
+            <span className="dash-caret">{open ? "▾" : "▸"}</span>
+            {title}
+          </button>
+        </h3>
         {badge}
-      </button>
+      </div>
       {open && <div className="dash-section-body">{children}</div>}
     </div>
   );
