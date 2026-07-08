@@ -1948,6 +1948,10 @@ table.grid.node-grid td { vertical-align: middle; }
 /* mounts column absorbs leftover width and ellipsizes (so the node name never wraps);
    full list on hover via title. max-width:0 + width:100% is the truncate-in-table trick. */
 table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Headers never vertical-wrap; the 보고(last) column stays on one line so the greedy
+   node-mounts column (width:100%) can't squeeze the timestamp into char-by-char wrap. */
+table.grid.node-grid th { white-space: nowrap; }
+table.grid.node-grid td.node-report { white-space: nowrap; }
 .role-badge {
   display: inline-flex; align-items: center; gap: 0.3rem;
   font-size: 0.8rem; font-weight: 600; padding: 0.1rem 0.45rem;
@@ -1970,7 +1974,9 @@ table.grid.node-grid td.node-mounts { max-width: 0; width: 100%; white-space: no
 .snm-toolbar-spacer { flex: 1 1 auto; }
 .snm-search { background: var(--surface-sunken); border: 1px solid var(--border); border-radius: 8px; color: #e5e9f0; padding: 0.28rem 0.6rem; font-size: 0.82rem; min-width: 140px; }
 
-.snm-scroll { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 10px; }
+/* Box hugs the matrix width (fit-content) so a few-storage matrix doesn't leave a
+   large empty right gutter; scrolls horizontally once the table exceeds the container. */
+.snm-scroll { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 10px; width: fit-content; max-width: 100%; }
 .snm { border-collapse: separate; border-spacing: 0; }
 .snm th, .snm td { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 
