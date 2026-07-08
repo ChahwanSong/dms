@@ -17,21 +17,9 @@ export function stateCls(map: Record<string, string>, s?: string): string {
   return map[s || ""] || "san-unknown";
 }
 
-export function fmtTime(iso?: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
-}
-
-export function fmtAgo(iso?: string): string {
-  if (!iso) return "—";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return iso;
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (s < 60) return `${s}초 전`;
-  if (s < 3600) return `${Math.round(s / 60)}분 전`;
-  return `${Math.round(s / 3600)}시간 전`;
-}
+// Canonical date/time formatting lives in lib/format; re-exported so the many
+// dashboard components importing { fmtTime, fmtAgo } from "./helpers" keep working.
+export { fmtTime, fmtAgo } from "../../../lib/format";
 
 export function summarize(list?: string[], max = 3): string {
   if (!list || list.length === 0) return "—";

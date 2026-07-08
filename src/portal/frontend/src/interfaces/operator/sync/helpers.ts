@@ -41,19 +41,5 @@ export function fmtBytes(n?: number | null): string {
   return `${v.toFixed(v >= 100 || Number.isInteger(v) ? 0 : 1)} ${units[i]}`;
 }
 
-export function fmtTime(iso?: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
-}
-
-export function fmtAgo(iso?: string | null): string {
-  if (!iso) return "—";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "—";
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (s < 60) return `${s}초 전`;
-  if (s < 3600) return `${Math.round(s / 60)}분 전`;
-  if (s < 86400) return `${Math.round(s / 3600)}시간 전`;
-  return `${Math.round(s / 86400)}일 전`;
-}
+// Canonical date/time formatting lives in lib/format; re-exported for sync/* callers.
+export { fmtTime, fmtAgo } from "../../../lib/format";

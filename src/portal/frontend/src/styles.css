@@ -1582,6 +1582,19 @@ textarea.json {
   .modal-actions {
     flex-wrap: wrap;
   }
+  /* Sticky footer ONLY inside real dialogs: `.modal-actions` is ALSO reused by the
+     inline Sync/삭제 page forms (rendered outside any .modal-backdrop), which must
+     NOT get a floating/full-bleed bottom bar over their infinite-scroll lists. Pin
+     the bar to the screen bottom so it's always reachable on long modal forms;
+     opaque bg + full-bleed (negative margin cancels the 1.1rem .modal padding). */
+  .modal .modal-actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--card);
+    margin: 1rem -1.1rem 0;
+    padding: 0.7rem 1.1rem calc(0.7rem + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--border);
+  }
   .modal-actions button {
     flex: 1 1 auto;
   }

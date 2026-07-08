@@ -9,6 +9,7 @@ import {
   type SyncJob,
 } from "../../../api";
 import { SpecGrid, type KV } from "../../../components/SpecGrid";
+import { fmtTime } from "../../../lib/format";
 
 // Per-item live detail + log-tail popup (backup + scan + sync). Given a portal
 // request/job row it fetches the FULLER live DMS job dict (state, result_summary
@@ -69,12 +70,6 @@ function fmtBytes(n?: number | null): string {
     i++;
   }
   return `${v.toFixed(v >= 100 || Number.isInteger(v) ? 0 : 1)} ${units[i]}`;
-}
-
-function fmtTime(iso?: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
 function asRecord(v: unknown): Record<string, unknown> | null {

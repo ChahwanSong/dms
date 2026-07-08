@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { ApiError, operatorApi, type ScanBatch } from "../../../api";
 import { batchStatus } from "./helpers";
+import { fmtTime } from "../../../lib/format";
 import { OptionChips, SpecGrid, optionEntries } from "./ui";
 import InfoHint from "../../../components/InfoHint";
 import ScanBatchForm from "./ScanBatchForm";
@@ -433,11 +434,5 @@ export function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : "알 수 없는 오류";
 }
 
-export function fmtTime(iso?: string | null): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
+// fmtTime is imported from lib/format above; re-exported for scan/* callers.
+export { fmtTime };

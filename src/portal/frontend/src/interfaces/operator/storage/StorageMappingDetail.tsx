@@ -3,6 +3,7 @@ import { operatorApi, type StorageMapping } from "../../../api";
 import { SanityBadge } from "../components/SanityBadge";
 import { SpecGrid, BoolChip, type KV } from "../../../components/SpecGrid";
 import { backendType, formatApiError, isForPv, isFsBackend, quotaTitle } from "./helpers";
+import { fmtTime } from "../../../lib/format";
 import Loading from "../../../components/Loading";
 
 export default function StorageMappingDetail({
@@ -240,14 +241,6 @@ export default function StorageMappingDetail({
   );
 }
 
-function fmtTime(iso?: string | null): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
 
 // Top-level identity/status of a mapping.
 function overviewItems(

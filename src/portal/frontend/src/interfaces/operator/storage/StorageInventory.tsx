@@ -5,6 +5,7 @@ import { SanityBadge, ReadinessDots } from "../components/SanityBadge";
 import StorageMappingDetail from "./StorageMappingDetail";
 import StorageMappingForm from "./StorageMappingForm";
 import { backendType, isForPv, isFsBackend, managedRoot, quotaTitle } from "./helpers";
+import { fmtTime } from "../../../lib/format";
 import Loading from "../../../components/Loading";
 
 type FormState =
@@ -407,11 +408,3 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : "알 수 없는 오류";
 }
 
-function fmtTime(iso?: string | null): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
