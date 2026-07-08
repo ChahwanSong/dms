@@ -91,6 +91,17 @@ docker build -f src/portal/deploy/Dockerfile -t "$PORTAL_IMAGE" .
 docker push "$PORTAL_IMAGE"
 ```
 
+> **프록시 전용 네트워크에서 빌드.** 인터넷이 프록시(예: `127.0.0.1:7227`)로만 되는 환경이면 위
+> `docker build` 대신 래퍼 `install/docker/build-images.sh`로 빌드한다(프록시 build-arg +
+> `--network=host` 자동 — node `npm install`은 `npm_config_proxy`, python `pip`은 `https_proxy`로
+> 프록시를 타고 **런타임 이미지엔 프록시가 남지 않음** = 서빙되는 BFF/노드 호출은 프록시로 새지
+> 않음). 메커니즘·함정 설명은 [dms-02 §1](dms-02-core.md)에 있다.
+>
+> ```bash
+> REGISTRY=registry.example.internal TAG="$(git rev-parse --short HEAD)" \
+>   PROXY=http://127.0.0.1:7227 IMAGES=portal PUSH=1 ./install/docker/build-images.sh
+> ```
+
 이미지가 정상 기동하는지 로컬에서 빠르게 확인(SPA가 빌드돼 있으면 `/healthz`가 200):
 
 ```bash

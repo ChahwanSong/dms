@@ -53,6 +53,28 @@ docker build -f install/docker/Dockerfile.agent \
 docker push "$REGISTRY/dms-agent:$TAG"
 ```
 
+> **프록시 전용 네트워크에서 빌드.** 인터넷이 프록시(예: `127.0.0.1:7227`)로만 되는 환경이면
+> 위 `docker build`들에 **빌드-타임 프록시**를 주면 된다. 편의를 위해 래퍼 스크립트
+> `install/docker/build-images.sh`가 세 DMS 이미지(+포탈)를 의존 순서대로 빌드한다.
+>
+> ```bash
+> REGISTRY=registry.example.internal TAG=v1 \
+>   PROXY=http://127.0.0.1:7227 ./install/docker/build-images.sh
+> # 직결 인터넷이면 PROXY 없이 그냥 실행(= 위 수동 docker build와 동일).
+> # 일부만: IMAGES="mpifileutils dms agent" ...   레지스트리 push까지: PUSH=1 ...
+> ```
+>
+> - `PROXY`를 주면 각 빌드에 predefined 프록시 build-arg(`http_proxy`/`https_proxy`/`no_proxy`,
+>   포탈은 `npm_config_proxy`도)와 `--network=host`가 붙는다. 이 build-arg들은 **빌드 중
+>   apt/curl/git/pip/npm만 프록시를 타게 하고 최종 이미지에는 남지 않는다** — ENV가 아니라 ARG라
+>   런타임 컨테이너(웹서버·노드 간 호출)는 프록시로 새지 않고, `docker history`에도 안 남는다.
+> - **`--network=host`가 필요한 이유**: 빌드 컨테이너 안의 `127.0.0.1`은 호스트가 아니라 컨테이너
+>   자기 루프백이라, 호스트-로컬 프록시(`127.0.0.1:PORT`)에 닿으려면 빌드가 호스트 네트워크를
+>   공유해야 한다. (프록시가 별도 호스트면 `PROXY=http://<host>:<port>`만 주면 되고 host network는
+>   불필요.)
+> - **별도 프록시용 Dockerfile은 두지 않는다** — 하나의 Dockerfile이 build-arg 유무로 두 경우를
+>   모두 처리한다(중복 Dockerfile은 drift 위험).
+
 > **⚠️ `DMS_DM_JOB_IMAGE`는 반드시 실제 push한 ref여야 한다 (함정).** ConfigMap의 기본값
 > `registry.example.internal/dms-mpifileutils:CHANGE_ME`를 그대로 두면 DMS는 이 값을 유효한
 > 문자열로 취급해 **fail-closed 하지 않는다** — DM 잡 파드가 뜨는 순간 `ImagePullBackOff`로 죽는다.

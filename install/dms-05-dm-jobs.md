@@ -66,6 +66,17 @@ DM은 이미지 두 개를 **추가로** 빌드해야 한다. `plain dms` 이미
 ① DM job 이미지  ───────────┘
 ```
 
+> **폐쇄망(프록시)에서 빌드.** 인터넷이 프록시로만 되는 환경이면 아래 수동 `docker build` 대신
+> 래퍼 `install/docker/build-images.sh`를 쓰면 프록시 build-arg + `--network=host`가 자동으로 붙는다
+> (빌드 중 apt/git/pip만 프록시를 타고 **런타임 이미지엔 프록시가 남지 않음**). 동작·함정 설명은
+> [dms-02 §1](dms-02-core.md)에 있다.
+>
+> ```bash
+> # DM 전용 이미지(mpifileutils + dms 위에 얹는 agent). dms:TAG는 dms-02에서 이미 빌드돼 있어야 함.
+> REGISTRY=registry.example.internal TAG=v1 PROXY=http://127.0.0.1:7227 \
+>   IMAGES="mpifileutils agent" PUSH=1 ./install/docker/build-images.sh
+> ```
+
 ### 2.1 DM job 이미지 → `DMS_DM_JOB_IMAGE`
 
 mpifileutils(`dsync/dcp/dscan/drm/nsync`) + Open MPI `mpirun` + OpenSSH client/server가 든

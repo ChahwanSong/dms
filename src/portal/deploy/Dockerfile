@@ -5,6 +5,13 @@
 #   docker build -f src/portal/deploy/Dockerfile -t pkg-01:5000/dms-portal:v1 .
 
 FROM node:22-alpine AS frontend
+# Optional build-time-only proxy for `npm install` on a proxy-only network. Empty by
+# default → direct internet (no effect). Set via install/docker/build-images.sh or
+# `--build-arg npm_config_proxy=http://127.0.0.1:7227`. NOT baked into the runtime
+# image (build ARG, not ENV), so the served BFF never routes through the proxy.
+# apt/curl/git/pip use the predefined http_proxy/https_proxy build-args (no ARG needed).
+ARG npm_config_proxy=
+ARG npm_config_https_proxy=
 WORKDIR /fe
 COPY src/portal/frontend/package.json ./
 RUN npm install
