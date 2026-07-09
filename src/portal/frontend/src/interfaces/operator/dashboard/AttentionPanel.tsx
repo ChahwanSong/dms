@@ -470,6 +470,32 @@ function DismissedList({
         <button className="attn-sort" onClick={onUndismissAll}
           title="처리 내역 전체를 조치 필요로 복원 (불러온 화면 분량뿐 아니라 전체 대상)">모두 복원 ({total})</button>
       </div>
+      {sel.length > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{sel.length}개 선택</span>
+          {selAckable.length > 0 && (
+            <button className="primary mini" disabled={busy} onClick={() => onAck(selAckable)}
+              title="확인(처리완료)로 표시">확인 ({selAckable.length})</button>
+          )}
+          <button className="mini" disabled={busy} onClick={() => onUndismiss(sel.map((d) => d.fingerprint))}
+            title="조치 필요로 복원 (아직 유효한 항목은 다시 표시됨)">
+            복원 ({sel.length})
+          </button>
+          <button className="mini danger" disabled={busy} onClick={() => archiveFps(sel.map((d) => d.fingerprint))}
+            title="영구숨김 — 선택 항목을 포탈에서 완전히 가림(조치 필요·이력·액티비티). 복원은 '영구숨김 항목'에서.">
+            영구숨김 ({sel.length})
+          </button>
+          <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={() => onDelete(selDeletable)}>
+            기록 삭제 ({selDeletable.length})
+          </button>
+          {selResolvable.length > 0 && (
+            <button className="ghost mini" disabled={busy} onClick={() => onResolve(selResolvable)}>
+              요청 중단 ({selResolvable.length})
+            </button>
+          )}
+          <button className="ghost mini" onClick={onClearSel}>선택 해제</button>
+        </div>
+      )}
       <div className="attn2-list">
         {rows.map((d) => {
           const isAck = d.kind === "ack";
@@ -522,32 +548,6 @@ function DismissedList({
           );
         })}
       </div>
-      {sel.length > 0 && (
-        <div className="bulk-bar">
-          <span className="bulk-count">{sel.length}개 선택</span>
-          {selAckable.length > 0 && (
-            <button className="primary mini" disabled={busy} onClick={() => onAck(selAckable)}
-              title="확인(처리완료)로 표시">확인 ({selAckable.length})</button>
-          )}
-          <button className="mini" disabled={busy} onClick={() => onUndismiss(sel.map((d) => d.fingerprint))}
-            title="조치 필요로 복원 (아직 유효한 항목은 다시 표시됨)">
-            복원 ({sel.length})
-          </button>
-          <button className="mini danger" disabled={busy} onClick={() => archiveFps(sel.map((d) => d.fingerprint))}
-            title="영구숨김 — 선택 항목을 포탈에서 완전히 가림(조치 필요·이력·액티비티). 복원은 '영구숨김 항목'에서.">
-            영구숨김 ({sel.length})
-          </button>
-          <button className="mini danger" disabled={busy || selDeletable.length === 0} onClick={() => onDelete(selDeletable)}>
-            기록 삭제 ({selDeletable.length})
-          </button>
-          {selResolvable.length > 0 && (
-            <button className="ghost mini" disabled={busy} onClick={() => onResolve(selResolvable)}>
-              요청 중단 ({selResolvable.length})
-            </button>
-          )}
-          <button className="ghost mini" onClick={onClearSel}>선택 해제</button>
-        </div>
-      )}
     </>
   );
 }
@@ -834,6 +834,14 @@ function ArchivedSection({
         <button className="attn-sort" onClick={flipSort} disabled={disabled}
           title="시각순 정렬 전환">{sort === "desc" ? "최신순 ↓" : "오래된순 ↑"}</button>
       </div>
+      {sel.size > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{sel.size}개 선택</span>
+          <button className="primary mini" disabled={disabled}
+            onClick={() => unarchive([...sel])}>처리내역으로 복원 ({sel.size})</button>
+          <button className="ghost mini" onClick={() => setSel(new Set())}>선택 해제</button>
+        </div>
+      )}
       <div className="attn2-list">
         {items.map((d) => {
           const ident = dKey(d);
@@ -875,14 +883,6 @@ function ArchivedSection({
           <button className="ghost mini" onClick={loadMore} disabled={disabled}>
             더 보기 ({items.length} / {total})
           </button>
-        </div>
-      )}
-      {sel.size > 0 && (
-        <div className="bulk-bar">
-          <span className="bulk-count">{sel.size}개 선택</span>
-          <button className="primary mini" disabled={disabled}
-            onClick={() => unarchive([...sel])}>처리내역으로 복원 ({sel.size})</button>
-          <button className="ghost mini" onClick={() => setSel(new Set())}>선택 해제</button>
         </div>
       )}
     </Section>
