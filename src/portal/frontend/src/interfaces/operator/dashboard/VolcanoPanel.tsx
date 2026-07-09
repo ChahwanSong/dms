@@ -210,6 +210,7 @@ export default function VolcanoPanel() {
         </div>
       )}
 
+      <div className="vol-grid">
       {/* 처리량 · 지연 — stacked stage bar per window; stat selector */}
       <div className="vol-block">
         <div className="vol-metrics-head">
@@ -260,25 +261,29 @@ export default function VolcanoPanel() {
         )}
       </div>
 
-      {/* 최장 Pending / 최장 Running — stacked, each row expandable to job detail */}
+      {/* 최장 Pending / 최장 Running — each its own expandable offender card */}
       {m && (
-        <div className="vol-block off2-wrap">
-          <OffenderList
-            title="최장 Pending" hint="(가장 오래 대기한 잡 · 펼치면 상세)"
-            items={m.top.longest_pending}
-            valueOf={(j) => ({ text: fmtDur(j.pending_s), v: j.pending_s, tone: "warn" })}
-            empty="대기 잡 없음"
-          />
-          <OffenderList
-            title="최장 Running" hint="(가장 오래 실행된 잡 · 펼치면 상세)"
-            items={m.top.longest_running}
-            valueOf={(j) => ({
-              text: fmtDur(j.running_s), v: j.running_s,
-              tone: j.active ? "live" : "", badge: j.active ? "진행 중" : undefined,
-            })}
-            empty="실행 잡 없음"
-          />
-        </div>
+        <>
+          <div className="vol-block">
+            <OffenderList
+              title="최장 Pending" hint="(가장 오래 대기한 잡 · 펼치면 상세)"
+              items={m.top.longest_pending}
+              valueOf={(j) => ({ text: fmtDur(j.pending_s), v: j.pending_s, tone: "warn" })}
+              empty="대기 잡 없음"
+            />
+          </div>
+          <div className="vol-block">
+            <OffenderList
+              title="최장 Running" hint="(가장 오래 실행된 잡 · 펼치면 상세)"
+              items={m.top.longest_running}
+              valueOf={(j) => ({
+                text: fmtDur(j.running_s), v: j.running_s,
+                tone: j.active ? "live" : "", badge: j.active ? "진행 중" : undefined,
+              })}
+              empty="실행 잡 없음"
+            />
+          </div>
+        </>
       )}
 
       {/* Scheduler Queue — running/pending/in-queue combined in one bar per queue */}
@@ -318,7 +323,7 @@ export default function VolcanoPanel() {
         </div>
       </div>
 
-      <div className="vol-block">
+      <div className="vol-block vol-full">
         <h4 className="dash-sub">활성 잡 ({active.length})</h4>
         <table className="grid"><thead><tr>
           <th>job</th><th>큐</th><th>phase</th><th>running</th><th>pending</th>
@@ -333,6 +338,7 @@ export default function VolcanoPanel() {
             </tr>
           )) : <tr><td colSpan={5} className="muted">활성 잡 없음</td></tr>}
         </tbody></table>
+      </div>
       </div>
     </Section>
   );

@@ -178,9 +178,9 @@ function ClusterMatrix({ cluster, showClusterName }: { cluster: SnmCluster; show
                       const c = n.cells[s.storage_name];
                       const k = kindOf(c);
                       return (
-                        <td key={s.storage_name} className={`snm-cell k-${k}`}
+                        <td key={s.storage_name} className="snm-cell"
                           title={cellTitle(s.storage_name, n.node_name, c)}>
-                          {GLYPH[k]}
+                          <span className={`snm-tile k-${k}`}>{GLYPH[k]}</span>
                         </td>
                       );
                     })}

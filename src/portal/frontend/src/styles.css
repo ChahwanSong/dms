@@ -2011,7 +2011,14 @@ textarea.json {
 .dash-stack { display: flex; flex-direction: column; gap: 0.9rem; }
 .kpi-link { cursor: pointer; transition: border-color 0.12s; }
 .kpi-link:hover, .kpi-link:focus-visible { border-color: #3a4a66; }
-.dash-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem 1.4rem; }
+/* 제어·작업·요청 detail: each group is a subtle sunken mini-card so the three
+   columns read as distinct blocks, with roomier rows + bolder values. */
+.dash-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 0.7rem; }
+.dash-detail > div { background: var(--surface-sunken); border: 1px solid var(--border-soft); border-radius: 10px; padding: 0.65rem 0.8rem; }
+.dash-detail .dash-kv { font-size: 0.86rem; margin-top: 0.15rem; }
+.dash-detail .dash-kv li { padding: 0.28rem 0; }
+.dash-detail .dash-kv li + li { border-top: 1px solid var(--border-soft); }
+.dash-detail .dash-kv b { font-size: 0.92rem; font-weight: 700; }
 .card-eyebrow { font-size: 0.62rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 0.3rem; }
 .dash-filters { margin-bottom: 0.5rem; }
 .dash-attention { list-style: none; margin: 0.5rem 0; padding: 0; }
@@ -2303,7 +2310,7 @@ table.grid.node-grid td.node-report { white-space: nowrap; }
    large empty right gutter; scrolls horizontally once the table exceeds the container. */
 .snm-scroll { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 10px; width: fit-content; max-width: 100%; }
 .snm { border-collapse: separate; border-spacing: 0; }
-.snm th, .snm td { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.snm th, .snm td { border-right: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); }
 
 /* sticky storage-column header + sticky node column + corner */
 .snm thead th { position: sticky; top: 0; z-index: 2; background: var(--card); }
@@ -2318,13 +2325,13 @@ table.grid.node-grid td.node-report { white-space: nowrap; }
    Vertical text stays inside its own ~34px column instead of a 45° diagonal that
    spilled across neighbouring columns; long names ellipsis at the top with the full
    name in the cell's title tooltip. */
-.snm-scol { width: 34px; min-width: 34px; max-width: 34px; height: 172px; padding: 6px 0 0; vertical-align: bottom; }
-.snm-scol-box { height: 150px; display: flex; align-items: flex-end; justify-content: center; }
+.snm-scol { width: 46px; min-width: 46px; max-width: 46px; height: 158px; padding: 6px 0 0; vertical-align: bottom; }
+.snm-scol-box { height: 126px; display: flex; align-items: flex-end; justify-content: center; }
 .snm-slabel { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
-  max-height: 148px; overflow: hidden; text-overflow: ellipsis; line-height: 1.15;
-  font-size: 0.72rem; color: #cdd5e0; }
-.snm-sratio { height: 20px; line-height: 20px; text-align: center; font-size: 0.66rem;
-  border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  max-height: 124px; overflow: hidden; text-overflow: ellipsis; line-height: 1.15;
+  font-size: 0.74rem; color: var(--fg-2); }
+.snm-sratio { height: 24px; line-height: 24px; text-align: center; font-size: 0.7rem;
+  border-top: 1px solid var(--border-soft); font-variant-numeric: tabular-nums; }
 
 /* node column content */
 .snm-nname { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 0.82rem; }
@@ -2336,13 +2343,16 @@ table.grid.node-grid td.node-report { white-space: nowrap; }
 .snm-nratio { margin-left: auto; flex: none; font-size: 0.68rem; font-variant-numeric: tabular-nums; }
 
 /* cells (colored mount-status tiles) */
-.snm-cell { width: 40px; min-width: 40px; height: 34px; text-align: center; font-weight: 700; font-size: 0.85rem; }
-.snm-cell.k-ready, .snm-sw.k-ready { background: rgba(52, 211, 153, 0.20); color: #6ee7b7; }
-.snm-cell.k-ro, .snm-sw.k-ro { background: rgba(251, 191, 36, 0.16); color: #fcd34d; }
-.snm-cell.k-missing, .snm-sw.k-missing { background: rgba(248, 113, 113, 0.18); color: #fca5a5; }
-.snm-cell.k-warn, .snm-sw.k-warn { background: rgba(251, 146, 60, 0.20); color: #fdba74; }
-.snm-cell.k-none { color: #475569; }
-.snm-cell:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+.snm-cell { width: 46px; min-width: 46px; height: 42px; text-align: center; padding: 3px; }
+/* airy rounded chip tile (was a solid edge-to-edge td) — padding gives breathing room */
+.snm-tile { display: inline-grid; place-items: center; width: 30px; height: 30px;
+  border-radius: 8px; font-weight: 700; font-size: 0.9rem; }
+.snm-tile.k-ready, .snm-sw.k-ready { background: rgba(52, 211, 153, 0.18); color: #6ee7b7; }
+.snm-tile.k-ro, .snm-sw.k-ro { background: rgba(251, 191, 36, 0.16); color: #fcd34d; }
+.snm-tile.k-missing, .snm-sw.k-missing { background: rgba(248, 113, 113, 0.18); color: #fca5a5; }
+.snm-tile.k-warn, .snm-sw.k-warn { background: rgba(251, 146, 60, 0.20); color: #fdba74; }
+.snm-tile.k-none { color: #475569; }
+.snm-cell:hover .snm-tile { outline: 2px solid var(--accent); outline-offset: 2px; }
 .snm-node-stale { opacity: 0.6; }
 
 /* ready-ratio color coding (header + node) */
@@ -2539,8 +2549,14 @@ mark.reqa-hl { background: rgba(251, 191, 36, 0.3); color: inherit; border-radiu
 /* dashboard width: bound the whole dashboard + each Volcano sub-block so charts/lists
    read as components, not edge-to-edge stripes, on wide monitors (left-aligned). */
 .dashboard { max-width: 1320px; }
-.vol-block { max-width: 940px; margin-bottom: 1.2rem; }
-.vol-block:last-child { margin-bottom: 0; }
+/* Volcano sub-blocks as a 2-col card grid (was a vertical stack). Each block is a
+   subtle sunken sub-card; 활성 잡 (vol-full) spans both columns. */
+.vol-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem; margin-top: 0.5rem; align-items: start; }
+.vol-block { background: var(--surface-sunken); border: 1px solid var(--border-soft);
+  border-radius: 12px; padding: 0.8rem 1rem; margin: 0; max-width: none; }
+.vol-block .dash-sub { margin-top: 0; }
+.vol-full { grid-column: 1 / -1; }
+@media (max-width: 900px) { .vol-grid { grid-template-columns: 1fr; } }
 
 /* offenders: stacked full-width lists; each row collapses to identity·route·value
    and expands to the full job detail */
