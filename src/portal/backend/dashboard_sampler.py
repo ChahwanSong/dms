@@ -43,14 +43,20 @@ def _num(value: object) -> float | None:
 
 
 def _node_row(key: tuple, m: dict) -> dict:
-    """One node metric row from a report's os_metrics (missing values → None)."""
+    """One node metric row from a report's os_metrics. The agent nests it as
+    {cpu:{percent,cores}, memory:{used_pct,...}, load:{load1,...}, disk:{used_pct,...}}
+    (missing values → None)."""
+    cpu = m.get("cpu") or {}
+    mem = m.get("memory") or {}
+    load = m.get("load") or {}
+    disk = m.get("disk") or {}
     return {
         "cluster_name": key[0],
         "node_name": key[1],
-        "cpu_percent": _num(m.get("cpu_percent")),
-        "mem_used_pct": _num(m.get("mem_used_pct")),
-        "load1": _num(m.get("load1")),
-        "disk_used_pct": _num(m.get("disk_used_pct")),
+        "cpu_percent": _num(cpu.get("percent")),
+        "mem_used_pct": _num(mem.get("used_pct")),
+        "load1": _num(load.get("load1")),
+        "disk_used_pct": _num(disk.get("used_pct")),
         "_has": bool(m),
     }
 
