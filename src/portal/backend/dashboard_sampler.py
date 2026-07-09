@@ -136,7 +136,13 @@ class DashboardSampler:
             cur = per_node.get(key)
             if cur is None or (m and not cur["_has"]):
                 per_node[key] = _node_row(key, m)
-        rows = [{k: v for k, v in n.items() if k != "_has"} for n in per_node.values()]
+        # only persist nodes that actually reported os_metrics — skip metric-less
+        # nodes so they don't accrue all-null rows or show empty cards.
+        rows = [
+            {k: v for k, v in n.items() if k != "_has"}
+            for n in per_node.values()
+            if n["_has"]
+        ]
         await self._db.insert_node_samples(rows)
 
     async def _run(self) -> None:

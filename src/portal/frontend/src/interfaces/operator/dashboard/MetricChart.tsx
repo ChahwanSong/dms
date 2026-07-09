@@ -56,7 +56,7 @@ export default function MetricChart({ series, label, unit, color, sec, max100, d
     <div className="nmc">
       <div className="nmc-hd">
         <span className="nmc-label">{label}</span>
-        <span className="nmc-cur" style={{ color }}>{cur != null ? `${cur.toFixed(digits)}${unit}` : "—"}</span>
+        <span className="nmc-cur" style={{ color }}>{hasData && cur != null ? `${cur.toFixed(digits)}${unit}` : "—"}</span>
       </div>
       <div ref={ref} className="nmc-wrap">
         {hasData ? (
