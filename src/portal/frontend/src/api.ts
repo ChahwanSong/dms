@@ -774,6 +774,16 @@ export interface NodeMetricsResp {
   window_seconds: number;
 }
 
+// Request / in-progress-job trend (BFF-sampled). requests = 활성 plan, jobs = 활성
+// run, data_jobs = 진행중 데이터잡. Each is a {t, v} series over the window.
+export interface TimeSeriesResp {
+  requests: NodeMetricPoint[];
+  jobs: NodeMetricPoint[];
+  data_jobs: NodeMetricPoint[];
+  points: number;
+  window_seconds: number;
+}
+
 // --- per-request live job detail + log tail (backup + scan) ------------
 
 // Live DMS data-job detail (fuller than the portal-stored subset). The BFF
@@ -1198,6 +1208,10 @@ export const operatorApi = {
     nodeMetrics: (sinceSeconds?: number) =>
       request<NodeMetricsResp>(
         `/api/operator/dashboard/node-metrics${sinceSeconds ? `?since_seconds=${sinceSeconds}` : ""}`,
+      ),
+    timeseries: (sinceSeconds = 86400) =>
+      request<TimeSeriesResp>(
+        `/api/operator/dashboard/timeseries?since_seconds=${sinceSeconds}`,
       ),
     runs: () =>
       request<DashRunsResp>("/api/operator/dashboard/runs"),

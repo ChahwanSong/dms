@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -292,6 +292,41 @@ def _node_metrics(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
     out.sort(key=lambda n: (n.get("cluster_name") or "", n.get("node_name") or ""))
     return out
+
+
+def _timeseries(rows: list[dict[str, Any]], window_seconds: int) -> dict[str, Any]:
+    """Downsample raw snapshot rows (oldest→newest) into ≤~180 points per series.
+
+    A 30-day window at 60s sampling is ~43k rows; bucket by window/target seconds and
+    keep the latest row in each bucket so the payload stays small and the line stays
+    smooth. Emits {t, v} series for requests (active plans), jobs (active runs) and
+    data jobs (active data jobs)."""
+    target = 180
+    bucket = max(60, window_seconds // target)
+    buckets: dict[int, dict[str, Any]] = {}
+    for r in rows:
+        ts = r.get("sampled_at")
+        if ts is None:
+            continue
+        epoch = ts.timestamp() if hasattr(ts, "timestamp") else 0.0
+        key = int(epoch // bucket)
+        cur = buckets.get(key)
+        if cur is None or epoch >= cur["_epoch"]:
+            buckets[key] = {**r, "_epoch": epoch}
+    ordered = [buckets[k] for k in sorted(buckets)]
+
+    def _iso(ts: Any) -> Any:
+        return ts.isoformat() if hasattr(ts, "isoformat") else ts
+
+    def series(col: str) -> list[dict[str, Any]]:
+        return [{"t": _iso(b.get("sampled_at")), "v": b.get(col)} for b in ordered]
+
+    return {
+        "requests": series("active_plans"),
+        "jobs": series("active_runs"),
+        "data_jobs": series("active_data_jobs"),
+        "points": len(ordered),
+    }
 
 
 def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
@@ -705,6 +740,21 @@ def dashboard_router(settings: Settings) -> APIRouter:
             since_seconds=since_seconds, actor=_actor(user, settings)
         )
         return {"nodes": _node_metrics(samples), "window_seconds": since_seconds}
+
+    @router.get("/timeseries")
+    async def timeseries(
+        since_seconds: int = Query(default=86400, ge=3600, le=2592000),
+        db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # Request / in-progress-job trend from the BFF-sampled dashboard_samples table
+        # (DMS exposes no history endpoint). Window clamped 1h..30d; history accrues from
+        # deploy time forward. Empty series (points:0) until the sampler has run.
+        since_iso = (
+            datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+        ).isoformat()
+        rows = await db.list_dashboard_samples(since_iso)
+        return {**_timeseries(rows, since_seconds), "window_seconds": since_seconds}
 
     @router.get("/control-hosts")
     async def control_hosts(

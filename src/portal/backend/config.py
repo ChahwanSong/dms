@@ -109,6 +109,14 @@ class Settings:
     # many seconds so a single item can't park a batch in 'previewing' forever.
     backup_preview_timeout_seconds: float = 900.0
 
+    # --- dashboard time-series sampler ----------------------------------
+    # DMS exposes only point-in-time work counts (no history endpoint), so the BFF
+    # samples them every N seconds into its own DB (dashboard_samples) to back the
+    # request/job trend chart. Retention bounds the table; the 1h–30d chart window
+    # fills in from deploy time forward (standard scrape-based monitoring).
+    dashboard_sample_seconds: float = 60.0
+    dashboard_retention_days: int = 31
+
     @property
     def dms_configured(self) -> bool:
         return bool(self.dms_api_url)
@@ -169,6 +177,18 @@ class Settings:
                 env.get(
                     "PORTAL_BACKUP_PREVIEW_TIMEOUT_SECONDS",
                     defaults.backup_preview_timeout_seconds,
+                )
+            ),
+            dashboard_sample_seconds=float(
+                env.get(
+                    "PORTAL_DASHBOARD_SAMPLE_SECONDS",
+                    defaults.dashboard_sample_seconds,
+                )
+            ),
+            dashboard_retention_days=int(
+                env.get(
+                    "PORTAL_DASHBOARD_RETENTION_DAYS",
+                    defaults.dashboard_retention_days,
                 )
             ),
         )

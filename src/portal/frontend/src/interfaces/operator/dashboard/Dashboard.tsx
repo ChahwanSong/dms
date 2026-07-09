@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { operatorApi, type DashboardSummary, type AttentionItem } from "../../../api";
 import { fmtTime } from "./helpers";
 import StatusCards, { type AttentionCounts } from "./StatusCards";
+import KpiRow from "./KpiRow";
+import TimeSeriesCard from "./TimeSeriesCard";
 import NodesTable from "./NodesTable";
 import StorageNodeMatrix from "./StorageNodeMatrix";
 import ControlHostsTable from "./ControlHostsTable";
@@ -10,8 +12,8 @@ import VolcanoPanel from "./VolcanoPanel";
 const POLL_MS = 7000;
 
 // Fold the 조치 필요 list (same /attention the panel uses: refined + non-dismissed)
-// into the counts the 작업 카드 shows, so card == panel. Default-visible = non-INFO
-// (preflight/cancel are INFO); live = 현재 조치 필요, else 과거 이력.
+// into the counts the KPI + detail card show, so card == panel. Default-visible =
+// non-INFO (preflight/cancel are INFO); live = 현재 조치 필요, else 과거 이력.
 function attentionCounts(items: AttentionItem[]): AttentionCounts {
   const sev = (i: AttentionItem) => String(i.severity || "WARN").toUpperCase();
   const vis = items.filter((i) => ["CRITICAL", "ERROR", "WARN"].includes(sev(i)));
@@ -65,11 +67,20 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (section: strin
         </div>
       </div>
       {error && <div className="banner err">{error}</div>}
-      <StatusCards summary={summary} attention={attention} onNavigate={onNavigate} />
-      <StorageNodeMatrix />
-      <NodesTable />
-      <ControlHostsTable />
-      <VolcanoPanel />
+      <div className="dash-stack">
+        <KpiRow summary={summary} attention={attention} onNavigate={onNavigate} />
+        <TimeSeriesCard />
+        <div className="bento">
+          {/* matrix has its own horizontal scroll; the detail card's kv columns are
+              width-flexible — safe to pair. The wide worker/CSI tables + Volcano go
+              full-width so their columns never clip in a narrow cell. */}
+          <div className="span-7"><StorageNodeMatrix /></div>
+          <div className="span-5"><StatusCards summary={summary} attention={attention} onNavigate={onNavigate} /></div>
+          <div className="span-12"><NodesTable /></div>
+          <div className="span-12"><ControlHostsTable /></div>
+          <div className="span-12"><VolcanoPanel /></div>
+        </div>
+      </div>
     </div>
   );
 }

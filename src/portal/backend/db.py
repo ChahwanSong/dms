@@ -271,6 +271,21 @@ def _ddl(schema: str) -> list[str]:
               TO backup_requests_batch_id_fkey;
           END IF;
         END $$;""",
+        # dashboard time-series: DMS exposes only point-in-time work counts (no history
+        # endpoint), so the BFF samples them on a fixed cadence and persists one snapshot
+        # row per tick here. /dashboard/timeseries serves this for the request/job trend
+        # chart. Old rows are pruned to the retention window so the table stays bounded.
+        f"""CREATE TABLE IF NOT EXISTS {s}.dashboard_samples (
+            id bigserial PRIMARY KEY,
+            sampled_at timestamptz NOT NULL DEFAULT now(),
+            active_plans int,
+            active_runs int,
+            active_data_jobs int,
+            action_required int,
+            data_jobs_total bigint
+        )""",
+        f"CREATE INDEX IF NOT EXISTS dashboard_samples_sampled_at "
+        f"ON {s}.dashboard_samples(sampled_at DESC)",
     ]
 
 
@@ -326,6 +341,43 @@ class Database:
                     "ON CONFLICT (username) DO NOTHING",
                     (username, hash_password(password)),
                 )
+
+    # --- dashboard time-series samples ----------------------------------
+
+    async def insert_dashboard_sample(self, counts: dict[str, Any]) -> None:
+        """Persist one work-count snapshot (sampled_at defaults to now())."""
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO dashboard_samples "
+                "(active_plans, active_runs, active_data_jobs, action_required, "
+                "data_jobs_total) VALUES (%s,%s,%s,%s,%s)",
+                (
+                    counts.get("active_plans"),
+                    counts.get("active_runs"),
+                    counts.get("active_data_jobs"),
+                    counts.get("action_required"),
+                    counts.get("data_jobs_total"),
+                ),
+            )
+
+    async def list_dashboard_samples(self, since_iso: str) -> list[dict[str, Any]]:
+        """Snapshots at/after since_iso, oldest→newest (for the trend chart)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT sampled_at, active_plans, active_runs, active_data_jobs, "
+                "action_required, data_jobs_total FROM dashboard_samples "
+                "WHERE sampled_at >= %s ORDER BY sampled_at ASC",
+                (since_iso,),
+            )
+            return await cur.fetchall()
+
+    async def prune_dashboard_samples(self, before_iso: str) -> int:
+        """Drop snapshots older than the retention cutoff; returns rows deleted."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM dashboard_samples WHERE sampled_at < %s", (before_iso,)
+            )
+            return cur.rowcount
 
     # --- operator login + account management ----------------------------
 

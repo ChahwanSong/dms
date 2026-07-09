@@ -1,27 +1,42 @@
 :root {
-  --bg: #0f172a;
-  --card: #1e293b;
-  --fg: #e2e8f0;
-  --muted: #94a3b8;
-  --accent: #3b82f6;
-  --border: #334155;
+  /* Near-black dark theme (SealsCRM-clean direction). Values evolved 2026-07 toward a
+     deeper, cooler ground with softer card surfaces + a brighter accent that pops on
+     black. Token NAMES are unchanged so every screen inherits the new palette for free. */
+  --bg: #0a0d13;          /* ground (was #0f172a) */
+  --card: #141922;        /* card surface (was #1e293b) */
+  --card-2: #171d28;      /* elevated / card gradient bottom */
+  --fg: #e7ecf3;          /* primary text (was #e2e8f0) */
+  --fg-2: #b9c2d0;        /* secondary text */
+  --muted: #8b95a6;       /* muted text (was #94a3b8) */
+  --faint: #5b6577;       /* tertiary / axis / caret */
+  --accent: #4f8cff;      /* brighter blue on black (was #3b82f6) */
+  --border: #263042;      /* card/table border (was #334155) */
+  --border-soft: #1b2330; /* inner dividers */
   --error: #f87171;
 
-  /* Semantic status tones — use these for ok/warn/danger/info/neutral states.
-     --danger/--info/--neutral alias existing colors so the vocabulary is complete
-     without shifting any pixel; --ok/--warn tokenize literals that had no token
-     (green/amber, each previously repeated 20+ times). */
+  /* Semantic status tones — ok/warn/danger/info/neutral + their soft tinted backgrounds
+     (for pills/chips/icon squares). --danger/--info/--neutral alias so the vocabulary is
+     complete; --ok/--warn/--teal tokenize the chart/status literals. */
   --ok: #34d399;
   --warn: #fbbf24;
   --danger: var(--error);
   --info: var(--accent);
   --neutral: var(--muted);
+  --teal: #2dd4bf;
+  --accent-soft: rgba(79, 140, 255, 0.14);
+  --ok-soft: rgba(52, 211, 153, 0.14);
+  --warn-soft: rgba(251, 191, 36, 0.14);
+  --danger-soft: rgba(248, 113, 113, 0.14);
 
-  /* Surface ramp (dark): sunken < bg < panel < card. --surface-sunken replaces the
-     #0b1220 literal (inputs/code chips/log panels/popovers); --panel was previously
-     only an undefined var() fallback (#161a22, dashboard cards). */
-  --surface-sunken: #0b1220;
-  --panel: #161a22;
+  /* Surface ramp (dark): sunken < bg < panel < card < card-2. */
+  --surface-sunken: #0d1117;
+  --panel: #12161d;
+
+  /* Card system: radius / padding / elevation shared by every card & panel. */
+  --radius: 14px;
+  --radius-sm: 10px;
+  --pad-card: 1.15rem;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset, 0 8px 24px -14px rgba(0, 0, 0, 0.7);
 }
 
 * {
@@ -670,30 +685,53 @@ button.ghost {
 }
 
 .sidebar {
-  width: 220px;
+  width: 232px;
   flex-shrink: 0;
-  background: var(--card);
-  border-right: 1px solid var(--border);
-  padding: 1rem 0.6rem;
+  background: linear-gradient(180deg, #0c1017, var(--bg));
+  border-right: 1px solid var(--border-soft);
+  padding: 1rem 0.7rem;
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.15rem;
 }
 
 .nav-item {
   text-align: left;
-  padding: 0.6rem 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.65rem;
   background: transparent;
-  color: var(--fg);
+  color: var(--fg-2);
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 9px;
   cursor: pointer;
-  font-size: 0.9rem;
+  font-size: 0.86rem;
+  font-weight: 500;
+  transition: background 0.12s, color 0.12s;
+}
+.nav-item:hover {
+  background: #131924;
+  color: var(--fg);
+}
+/* nav icon (inline SVG) — dims when inactive, accent when active */
+.nav-ic {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--faint);
+}
+.nav-item:hover .nav-ic {
+  color: var(--muted);
 }
 
 .nav-item.active {
-  background: rgba(59, 130, 246, 0.14);
-  border-color: var(--accent);
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: #cfe0ff;
+}
+.nav-item.active .nav-ic {
+  color: var(--accent);
 }
 
 /* collapse/expand caret on a parent nav item with sub-sections */
@@ -701,7 +739,7 @@ button.ghost {
   display: inline-block;
   width: 1em;
   margin-right: 0.15rem;
-  color: var(--muted);
+  color: var(--faint);
   font-size: 0.8em;
 }
 
@@ -764,6 +802,237 @@ button.ghost {
   padding: 1.5rem 2rem;
   overflow: auto;
   display: block;
+}
+
+/* ============================================================================
+   Design system v2 — card / KPI / bento grid / time-series vocabulary (2026-07).
+   Shared across every operator + user screen. Cards = --card + --radius + --shadow;
+   the KPI row + bento grid give the dashboard its aligned checkerboard layout, and
+   the same .ui-card shell wraps every section on every screen for one visual language.
+   ============================================================================ */
+.ui-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.ui-card > .ui-card-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.9rem var(--pad-card) 0.75rem;
+}
+.ui-card-hd h3 {
+  margin: 0;
+  font-size: 0.92rem;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.ui-card-hd .hd-cnt {
+  font-size: 0.68rem;
+  color: var(--muted);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-soft);
+  padding: 0.1rem 0.4rem;
+  border-radius: 6px;
+}
+.ui-card-hd .hd-link {
+  font-size: 0.74rem;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+.ui-card-hd .hd-link:hover {
+  text-decoration: underline;
+}
+.ui-card > .ui-card-bd {
+  padding: 0 var(--pad-card) var(--pad-card);
+}
+.ui-card-div {
+  height: 1px;
+  background: var(--border-soft);
+  margin: 0 0 0.85rem;
+}
+
+/* KPI stat cards */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.85rem;
+}
+.kpi {
+  background: linear-gradient(180deg, var(--card), var(--card-2));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--pad-card);
+  box-shadow: var(--shadow);
+}
+.kpi-r1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.65rem;
+}
+.kpi-icn {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--kb, var(--accent-soft));
+  color: var(--k, var(--accent));
+  flex: none;
+}
+.kpi-icn svg {
+  width: 18px;
+  height: 18px;
+}
+.kpi-delta {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.12rem 0.38rem;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.kpi-delta.up {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.kpi-delta.dn {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.kpi-delta.flat {
+  color: var(--muted);
+  background: var(--panel);
+}
+.kpi-num {
+  font-size: 1.9rem;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-num small {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-left: 0.2rem;
+}
+.kpi-num.sm {
+  font-size: 1.25rem;
+  padding-top: 0.3rem;
+  letter-spacing: -0.01em;
+}
+.kpi-lbl {
+  color: var(--muted);
+  font-size: 0.76rem;
+  margin-top: 0.35rem;
+}
+
+/* bento grid (12-col) with span helpers; collapses to full width on narrow.
+   align-items:start so each card is its natural (content) height, not stretched to
+   the tallest cell in its row — cards have varied heights and stretching leaves gaps. */
+.bento {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 0.85rem;
+  align-items: start;
+}
+.span-12 { grid-column: span 12; }
+.span-8 { grid-column: span 8; }
+.span-7 { grid-column: span 7; }
+.span-6 { grid-column: span 6; }
+.span-5 { grid-column: span 5; }
+.span-4 { grid-column: span 4; }
+@media (max-width: 1100px) {
+  .span-8, .span-7, .span-6, .span-5, .span-4 { grid-column: span 12; }
+}
+
+/* time-series chart card */
+.ts-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.ts-legend {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ts-legend .it {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--fg-2);
+}
+.ts-legend .sw {
+  width: 22px;
+  height: 3px;
+  border-radius: 2px;
+}
+.ts-legend .v {
+  font-weight: 700;
+  color: var(--fg);
+  margin-left: 0.15rem;
+  font-variant-numeric: tabular-nums;
+}
+.ts-pills {
+  display: inline-flex;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 3px;
+}
+.ts-pills button {
+  font-family: inherit;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 0.32rem 0.6rem;
+  border-radius: 7px;
+  transition: background 0.12s, color 0.12s;
+}
+.ts-pills button:hover {
+  color: var(--fg-2);
+}
+.ts-pills button.on {
+  background: var(--accent);
+  color: #08101f;
+}
+.ts-svg {
+  display: block;
+  width: 100%;
+  height: 230px;
+  overflow: visible;
+  margin-top: 0.4rem;
+}
+.ts-gridline {
+  stroke: var(--border-soft);
+  stroke-width: 1;
+}
+.ts-axis {
+  fill: var(--faint);
+  font-size: 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.ts-empty {
+  display: grid;
+  place-items: center;
+  height: 230px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
 }
 
 .small {
@@ -1710,17 +1979,40 @@ textarea.json {
 .dash-kv b { font-variant-numeric: tabular-nums; }
 .dash-kv-sep { border-top: 1px dashed var(--border); margin-top: 0.25rem; padding-top: 0.3rem; }
 @media (max-width: 720px) { .dash-cards { grid-template-columns: 1fr 1fr; } }
-.dash-section { margin-top: 1.25rem; }
+/* Each dashboard/attention section is now a CARD (part of the v2 design system).
+   In the dashboard bento each section sits in its own grid cell, so grid gap spaces
+   them; in a stacked context (조치 필요 패널 sub-sections) adjacent cards get a margin. */
+.dash-section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.5rem var(--pad-card) var(--pad-card);
+  margin-top: 0.9rem; /* stacked context (액티비티·조치 필요): gap from header/prev section */
+}
+/* dashboard bento: each section is alone in its grid cell → grid gap spaces them, so
+   drop the stacked margin (it would push the card down inside the cell / misalign rows). */
+.bento .dash-section { margin-top: 0; }
+/* collapsed section (no body rendered): drop the header underline + trim bottom padding
+   so it reads as a compact card header, not an empty card with a stray line. */
+.dash-section:not(:has(.dash-section-body)) { padding-bottom: 0.55rem; }
+.dash-section:not(:has(.dash-section-body)) .dash-section-head { border-bottom: 0; }
 .dash-sub { margin: 1rem 0 0.4rem; font-size: 0.85rem; color: var(--muted); font-weight: 600; }
 /* Padding lives on the toggle (not the head) so the toggle keeps the old
    full-height ≥24px tap target (WCAG 2.5.8); the head just holds the underline. */
-.dash-section-head { display: flex; align-items: center; gap: 0.5rem; width: 100%; border-bottom: 1px solid var(--border); }
+.dash-section-head { display: flex; align-items: center; gap: 0.5rem; width: 100%; border-bottom: 1px solid var(--border-soft); }
 /* h3 wraps the toggle button (WAI-ARIA disclosure); the badge is its sibling. */
 .dash-section-title { margin: 0; font-size: 1rem; }
 .dash-section-toggle { display: inline-flex; align-items: center; gap: 0.5rem; min-height: 1.6rem; padding: 0.35rem 0.4rem 0.35rem 0; background: none; border: none; cursor: pointer; color: inherit; font: inherit; text-align: left; }
 .dash-section-toggle:hover { color: #cdd5e0; }
 .dash-caret { color: var(--muted); width: 1rem; font-size: 0.8rem; flex: none; }
 .dash-section-body { margin-top: 0.6rem; }
+/* dashboard v2 layout helpers */
+.dash-stack { display: flex; flex-direction: column; gap: 0.9rem; }
+.kpi-link { cursor: pointer; transition: border-color 0.12s; }
+.kpi-link:hover, .kpi-link:focus-visible { border-color: #3a4a66; }
+.dash-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem 1.4rem; }
+.card-eyebrow { font-size: 0.62rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 0.3rem; }
 .dash-filters { margin-bottom: 0.5rem; }
 .dash-attention { list-style: none; margin: 0.5rem 0; padding: 0; }
 .dash-attention li { padding: 0.25rem 0; display: flex; gap: 0.5rem; align-items: baseline; }

@@ -17,6 +17,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import auth_router
 from .config import DEV_DEFAULT_SESSION_SECRET, Settings
+from .dashboard_sampler import DashboardSampler
 from .db import Database
 from .dms_client import DmsClient
 from .orchestrator import BackupOrchestrator
@@ -97,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.scan = None
     app.state.sync_orch = None
     app.state.rm_orch = None
+    app.state.sampler = None
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -118,9 +120,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.db, app.state.dms_client, settings
             )
             app.state.rm_orch.start()
+            # Dashboard trend sampler: snapshots DMS work counts into the portal DB
+            # (DMS has no history endpoint) to back the request/job time-series chart.
+            app.state.sampler = DashboardSampler(
+                app.state.db, app.state.dms_client, settings
+            )
+            app.state.sampler.start()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        if app.state.sampler is not None:
+            await app.state.sampler.stop()
         if app.state.rm_orch is not None:
             await app.state.rm_orch.stop()
         if app.state.sync_orch is not None:

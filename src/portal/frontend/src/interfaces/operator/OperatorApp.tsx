@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { type User, type FocusTarget } from "../../api";
 import TopBar from "../../components/TopBar";
 import StorageInventory from "./storage/StorageInventory";
@@ -44,6 +44,16 @@ const NAV: NavItem[] = [
   { key: "sync", label: "데이터 Sync (단일)" },
   { key: "rm", label: "데이터 삭제 (단일)" },
 ];
+
+// Left-nav icons (inline SVG, stroke=currentColor so the .nav-ic tone applies).
+const ICONS: Partial<Record<Section, ReactNode>> = {
+  dashboard: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></svg>),
+  storage: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0 0 18 0V5M3 12a9 3 0 0 0 18 0" /></svg>),
+  backup: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>),
+  scan: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>),
+  sync: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 2l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3" /></svg>),
+  rm: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>),
+};
 
 export default function OperatorApp({
   user,
@@ -104,6 +114,7 @@ export default function OperatorApp({
                   {item.children && (
                     <span className="nav-caret" aria-hidden>{open ? "▾" : "▸"}</span>
                   )}
+                  {ICONS[item.key] && <span className="nav-ic">{ICONS[item.key]}</span>}
                   {item.label}
                 </button>
                 {item.children && open &&
