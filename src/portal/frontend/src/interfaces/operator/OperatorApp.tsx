@@ -9,6 +9,7 @@ import RmTab from "./rm/RmTab";
 import Dashboard from "./dashboard/Dashboard";
 import DashboardAttention from "./dashboard/DashboardAttention";
 import DashboardActivity from "./dashboard/DashboardActivity";
+import WorkerNodes from "./dashboard/WorkerNodes";
 
 // Operator/admin interface. A simple left-nav shell; each section is a separate
 // feature module. 종합 대시보드 has two sub-sections (조치 필요 · 액티비티) shown
@@ -17,6 +18,7 @@ type Section =
   | "dashboard"
   | "dashboard-attention"
   | "dashboard-activity"
+  | "dashboard-nodes"
   | "storage"
   | "backup"
   | "scan"
@@ -36,6 +38,7 @@ const NAV: NavItem[] = [
     children: [
       { key: "dashboard-attention", label: "조치 필요" },
       { key: "dashboard-activity", label: "액티비티" },
+      { key: "dashboard-nodes", label: "워커 노드" },
     ],
   },
   { key: "storage", label: "스토리지 인벤토리" },
@@ -152,6 +155,7 @@ export default function OperatorApp({
           {section === "dashboard-activity" && (
             <DashboardActivity focus={focus} onNavigate={go} />
           )}
+          {section === "dashboard-nodes" && <WorkerNodes />}
           {section === "storage" && <StorageInventory focus={focus} />}
           {section === "backup" && <BackupBatches />}
           {section === "sync" && <SyncTab />}

@@ -35,6 +35,26 @@ def _int(value: object) -> int | None:
         return None
 
 
+def _num(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _node_row(key: tuple, m: dict) -> dict:
+    """One node metric row from a report's os_metrics (missing values → None)."""
+    return {
+        "cluster_name": key[0],
+        "node_name": key[1],
+        "cpu_percent": _num(m.get("cpu_percent")),
+        "mem_used_pct": _num(m.get("mem_used_pct")),
+        "load1": _num(m.get("load1")),
+        "disk_used_pct": _num(m.get("disk_used_pct")),
+        "_has": bool(m),
+    }
+
+
 class DashboardSampler:
     """Periodically snapshot DMS work counts into ``dashboard_samples``."""
 
@@ -78,15 +98,40 @@ class DashboardSampler:
             "data_jobs_total": _int((jobs or {}).get("total")),
         }
         await self._db.insert_dashboard_sample(counts)
-        # retention: keep the table bounded regardless of uptime.
+        # per-node OS metrics for the 워커 노드 detail graphs (DMS serves only ~24h).
+        try:
+            await self._sample_nodes(actor)
+        except DmsApiError as exc:
+            log.warning("node metric sample skipped: %s", exc)
+        except Exception:  # noqa: BLE001
+            log.exception("node metric sample failed")
+        # retention: keep BOTH sample tables bounded regardless of uptime.
         cutoff = (
             datetime.now(timezone.utc)
             - timedelta(days=self._settings.dashboard_retention_days)
         ).isoformat()
         try:
             await self._db.prune_dashboard_samples(cutoff)
+            await self._db.prune_node_samples(cutoff)
         except Exception:  # noqa: BLE001
             log.exception("dashboard sample prune failed")
+
+    async def _sample_nodes(self, actor: str) -> None:
+        """Snapshot each node's current OS metrics. latest_per_node returns one row per
+        (node, role); os_metrics is host-level (may be on only one role's report), so we
+        keep one metric-bearing row per node."""
+        reports = await self._dms.list_agent_reports(
+            actor=actor, latest_per_node=True
+        )
+        per_node: dict[tuple, dict] = {}
+        for r in reports or []:
+            key = (r.get("cluster_name"), r.get("node_name"))
+            m = (r.get("report") or {}).get("os_metrics") or {}
+            cur = per_node.get(key)
+            if cur is None or (m and not cur["_has"]):
+                per_node[key] = _node_row(key, m)
+        rows = [{k: v for k, v in n.items() if k != "_has"} for n in per_node.values()]
+        await self._db.insert_node_samples(rows)
 
     async def _run(self) -> None:
         log.info(

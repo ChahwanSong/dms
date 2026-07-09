@@ -784,6 +784,26 @@ export interface TimeSeriesResp {
   window_seconds: number;
 }
 
+// Per-node CPU/mem/load/disk trend (BFF-sampled, 1h–30d) for the 워커 노드 detail tab.
+export interface NodeSeries {
+  cluster_name: string;
+  node_name: string;
+  current: {
+    cpu_percent?: number | null;
+    mem_used_pct?: number | null;
+    load1?: number | null;
+    disk_used_pct?: number | null;
+  };
+  cpu_series: NodeMetricPoint[];
+  mem_series: NodeMetricPoint[];
+  load_series: NodeMetricPoint[];
+  disk_series: NodeMetricPoint[];
+}
+export interface NodeTimeSeriesResp {
+  nodes: NodeSeries[];
+  window_seconds: number;
+}
+
 // --- per-request live job detail + log tail (backup + scan) ------------
 
 // Live DMS data-job detail (fuller than the portal-stored subset). The BFF
@@ -1212,6 +1232,10 @@ export const operatorApi = {
     timeseries: (sinceSeconds = 86400) =>
       request<TimeSeriesResp>(
         `/api/operator/dashboard/timeseries?since_seconds=${sinceSeconds}`,
+      ),
+    nodeTimeseries: (sinceSeconds = 21600) =>
+      request<NodeTimeSeriesResp>(
+        `/api/operator/dashboard/node-timeseries?since_seconds=${sinceSeconds}`,
       ),
     runs: () =>
       request<DashRunsResp>("/api/operator/dashboard/runs"),

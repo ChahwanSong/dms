@@ -2558,6 +2558,25 @@ mark.reqa-hl { background: rgba(251, 191, 36, 0.3); color: inherit; border-radiu
 .vol-full { grid-column: 1 / -1; }
 @media (max-width: 900px) { .vol-grid { grid-template-columns: 1fr; } }
 
+/* --- 워커 노드 detail tab --- */
+.warn-num { color: var(--warn); font-variant-numeric: tabular-nums; }
+.wn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 0.9rem; align-items: start; }
+.wn-roles { display: inline-flex; align-items: center; gap: 0.4rem; }
+.wn-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin-bottom: 0.85rem; }
+.wn-stat { background: var(--surface-sunken); border: 1px solid var(--border-soft); border-radius: 10px; padding: 0.5rem 0.6rem; text-align: center; }
+.wn-stat-v { font-size: 1.15rem; font-weight: 750; letter-spacing: -0.02em; }
+.wn-stat-v b { font-variant-numeric: tabular-nums; }
+.wn-stat-u { font-size: 0.72rem; color: var(--muted); margin-left: 0.1rem; }
+.wn-stat-l { font-size: 0.66rem; color: var(--muted); margin-top: 0.15rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.wn-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 0.9rem; }
+.wn-mounts { margin-top: 0.7rem; padding-top: 0.6rem; border-top: 1px solid var(--border-soft); }
+.nmc-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 0.1rem; }
+.nmc-label { font-size: 0.72rem; color: var(--muted); font-weight: 600; }
+.nmc-cur { font-size: 0.85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.nmc-svg { display: block; width: 100%; height: 96px; overflow: visible; }
+.nmc-empty { display: grid; place-items: center; height: 96px; color: var(--faint); font-size: 0.74rem; }
+@media (max-width: 620px) { .wn-grid, .wn-charts { grid-template-columns: 1fr; } }
+
 /* offenders: stacked full-width lists; each row collapses to identity·route·value
    and expands to the full job detail */
 .off2-wrap { display: flex; flex-direction: column; gap: 1.1rem; }

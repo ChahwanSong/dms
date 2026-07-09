@@ -329,6 +329,58 @@ def _timeseries(rows: list[dict[str, Any]], window_seconds: int) -> dict[str, An
     }
 
 
+def _node_timeseries(
+    rows: list[dict[str, Any]], window_seconds: int
+) -> list[dict[str, Any]]:
+    """Group per-node metric snapshots into downsampled per-node {t,v} series
+    (cpu/mem/load/disk), ≤~180 points each — like _node_metrics but from the BFF's own
+    node_metric_samples table, so it covers the full 1h–30d window (DMS serves ~24h)."""
+    target = 180
+    bucket = max(60, window_seconds // target)
+    nodes: dict[tuple, dict[int, dict[str, Any]]] = {}
+    for r in rows:
+        ts = r.get("sampled_at")
+        if ts is None:
+            continue
+        epoch = ts.timestamp() if hasattr(ts, "timestamp") else 0.0
+        key = (r.get("cluster_name"), r.get("node_name"))
+        buckets = nodes.setdefault(key, {})
+        bk = int(epoch // bucket)
+        cur = buckets.get(bk)
+        if cur is None or epoch >= cur["_epoch"]:
+            buckets[bk] = {**r, "_epoch": epoch}
+
+    def _iso(ts: Any) -> Any:
+        return ts.isoformat() if hasattr(ts, "isoformat") else ts
+
+    out: list[dict[str, Any]] = []
+    for (cluster, node), buckets in nodes.items():
+        ordered = [buckets[k] for k in sorted(buckets)]
+        last = ordered[-1] if ordered else {}
+
+        def series(col: str, pts: list[dict[str, Any]] = ordered) -> list[dict[str, Any]]:
+            return [{"t": _iso(b.get("sampled_at")), "v": b.get(col)} for b in pts]
+
+        out.append(
+            {
+                "cluster_name": cluster,
+                "node_name": node,
+                "current": {
+                    "cpu_percent": last.get("cpu_percent"),
+                    "mem_used_pct": last.get("mem_used_pct"),
+                    "load1": last.get("load1"),
+                    "disk_used_pct": last.get("disk_used_pct"),
+                },
+                "cpu_series": series("cpu_percent"),
+                "mem_series": series("mem_used_pct"),
+                "load_series": series("load1"),
+                "disk_series": series("disk_used_pct"),
+            }
+        )
+    out.sort(key=lambda n: (n.get("cluster_name") or "", n.get("node_name") or ""))
+    return out
+
+
 def _volcano_summary(v: dict[str, Any]) -> dict[str, Any]:
     """Card-level rollup of Volcano status: queue/job counts + component health.
 
@@ -755,6 +807,23 @@ def dashboard_router(settings: Settings) -> APIRouter:
         ).isoformat()
         rows = await db.list_dashboard_samples(since_iso)
         return {**_timeseries(rows, since_seconds), "window_seconds": since_seconds}
+
+    @router.get("/node-timeseries")
+    async def node_timeseries(
+        since_seconds: int = Query(default=21600, ge=3600, le=2592000),
+        db: Database = Depends(get_db),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        # Per-node CPU/mem/load/disk trend from the BFF-sampled node_metric_samples
+        # table (covers 1h..30d; DMS's own metrics endpoint only serves ~24h).
+        since_iso = (
+            datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+        ).isoformat()
+        rows = await db.list_node_samples(since_iso)
+        return {
+            "nodes": _node_timeseries(rows, since_seconds),
+            "window_seconds": since_seconds,
+        }
 
     @router.get("/control-hosts")
     async def control_hosts(

@@ -286,6 +286,23 @@ def _ddl(schema: str) -> list[str]:
         )""",
         f"CREATE INDEX IF NOT EXISTS dashboard_samples_sampled_at "
         f"ON {s}.dashboard_samples(sampled_at DESC)",
+        # per-node OS-metric history for the 워커 노드 detail tab's 1h–30d graphs. DMS
+        # only serves ~24h of node metrics (/agent-reports/metrics clamps to 86400s), so
+        # the BFF samples them here too and prunes to the same retention window.
+        f"""CREATE TABLE IF NOT EXISTS {s}.node_metric_samples (
+            id bigserial PRIMARY KEY,
+            sampled_at timestamptz NOT NULL DEFAULT now(),
+            cluster_name text,
+            node_name text,
+            cpu_percent real,
+            mem_used_pct real,
+            load1 real,
+            disk_used_pct real
+        )""",
+        f"CREATE INDEX IF NOT EXISTS node_metric_samples_node_at "
+        f"ON {s}.node_metric_samples(node_name, sampled_at)",
+        f"CREATE INDEX IF NOT EXISTS node_metric_samples_sampled_at "
+        f"ON {s}.node_metric_samples(sampled_at)",
     ]
 
 
@@ -376,6 +393,51 @@ class Database:
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "DELETE FROM dashboard_samples WHERE sampled_at < %s", (before_iso,)
+            )
+            return cur.rowcount
+
+    # --- per-node metric samples (워커 노드 detail graphs) ---------------
+
+    async def insert_node_samples(self, rows: list[dict[str, Any]]) -> None:
+        """Bulk-insert one OS-metric snapshot per node."""
+        if not rows:
+            return
+        params = [
+            (
+                r.get("cluster_name"),
+                r.get("node_name"),
+                r.get("cpu_percent"),
+                r.get("mem_used_pct"),
+                r.get("load1"),
+                r.get("disk_used_pct"),
+            )
+            for r in rows
+        ]
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO node_metric_samples "
+                    "(cluster_name, node_name, cpu_percent, mem_used_pct, load1, "
+                    "disk_used_pct) VALUES (%s,%s,%s,%s,%s,%s)",
+                    params,
+                )
+
+    async def list_node_samples(self, since_iso: str) -> list[dict[str, Any]]:
+        """Node metric snapshots at/after since_iso, oldest→newest."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT sampled_at, cluster_name, node_name, cpu_percent, "
+                "mem_used_pct, load1, disk_used_pct FROM node_metric_samples "
+                "WHERE sampled_at >= %s ORDER BY sampled_at ASC",
+                (since_iso,),
+            )
+            return await cur.fetchall()
+
+    async def prune_node_samples(self, before_iso: str) -> int:
+        """Drop node metric snapshots older than the retention cutoff."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM node_metric_samples WHERE sampled_at < %s", (before_iso,)
             )
             return cur.rowcount
 
