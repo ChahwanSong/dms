@@ -151,10 +151,10 @@ export default function SyncList({ reloadKey }: { reloadKey: number }) {
     <section className="ui-card sync-list">
       <div className="ui-card-hd">
         <h3>
-          요청된 작업{" "}
-          <span className="muted small">
-            ({shown}
-            {total != null && total > shown ? ` / ${total}` : ""})
+          요청된 작업
+          <span className="hd-cnt">
+            {shown}
+            {total != null && total > shown ? ` / ${total}` : ""}
           </span>
         </h3>
       </div>
