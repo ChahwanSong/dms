@@ -1259,6 +1259,10 @@ button.linklike {
   gap: 0.5rem;
   margin: 0 0 0.85rem;
 }
+/* storage inventory card: sanity summary chips sit in the card header (no margin);
+   header wraps so the chips drop below the title on narrow widths. */
+.inv-card-hd { flex-wrap: wrap; row-gap: 0.5rem; }
+.inv-card-hd .inv-summary { margin: 0; }
 .sum-chip {
   display: flex;
   align-items: baseline;

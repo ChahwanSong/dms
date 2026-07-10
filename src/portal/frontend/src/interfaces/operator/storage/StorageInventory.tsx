@@ -245,34 +245,6 @@ export default function StorageInventory({ focus }: {
 
       <AgentRollout />
 
-      {!loading && mappings.length > 0 && (
-        <div className="inv-summary">
-          <button
-            type="button"
-            className={"sum-chip total" + (sanityFilter === "" ? " active" : "")}
-            onClick={() => setSanityFilter("")}
-            title="모든 sanity 보기"
-          >
-            <span className="sum-n">{summary.total}</span>
-            <span className="sum-l">전체</span>
-          </button>
-          {SANITY_OPTIONS.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className={
-                `sum-chip san-${s.toLowerCase()}` + (sanityFilter === s ? " active" : "")
-              }
-              onClick={() => setSanityFilter(sanityFilter === s ? "" : s)}
-              title={`${s} 필터`}
-            >
-              <span className="sum-n">{summary.by[s] ?? 0}</span>
-              <span className="sum-l">{s}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
       <p className="muted small">
         DMS의 storage_mapping을 조회·등록·수정·sanity 재검사·삭제합니다. 모든 작업은
         DMS HTTP API를 통해 수행됩니다.
@@ -281,6 +253,39 @@ export default function StorageInventory({ focus }: {
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
 
+      <section className="ui-card">
+        <div className="ui-card-hd inv-card-hd">
+          <h3>스토리지 매핑{!loading && mappings.length > 0 && <span className="hd-cnt">{summary.total}</span>}</h3>
+          {!loading && mappings.length > 0 && (
+            <div className="inv-summary">
+              <button
+                type="button"
+                className={"sum-chip total" + (sanityFilter === "" ? " active" : "")}
+                onClick={() => setSanityFilter("")}
+                title="모든 sanity 보기"
+              >
+                <span className="sum-n">{summary.total}</span>
+                <span className="sum-l">전체</span>
+              </button>
+              {SANITY_OPTIONS.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className={
+                    `sum-chip san-${s.toLowerCase()}` + (sanityFilter === s ? " active" : "")
+                  }
+                  onClick={() => setSanityFilter(sanityFilter === s ? "" : s)}
+                  title={`${s} 필터`}
+                >
+                  <span className="sum-n">{summary.by[s] ?? 0}</span>
+                  <span className="sum-l">{s}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="ui-card-bd">
+          <div className="ui-card-div" />
       {loading ? (
         <Loading rows={5} />
       ) : mappings.length === 0 ? (
@@ -367,6 +372,8 @@ export default function StorageInventory({ focus }: {
           </tbody>
         </table>
       )}
+        </div>
+      </section>
 
       {detailName && (
         <StorageMappingDetail

@@ -38,12 +38,12 @@ function RoleBadge({ label, status }: { label: string; status?: string }) {
   );
 }
 
-function StatTile({ label, value, unit, digits = 0 }: {
-  label: string; value?: number | null; unit: string; digits?: number;
+function StatTile({ label, value, unit, digits = 0, hint }: {
+  label: string; value?: number | null; unit: string; digits?: number; hint?: string;
 }) {
   const cls = unit === "%" && value != null ? (value >= 90 ? "err-num" : value >= 75 ? "warn-num" : "ok-num") : "";
   return (
-    <div className="wn-stat">
+    <div className="wn-stat" title={hint}>
       <div className="wn-stat-v"><b className={cls}>{value != null ? value.toFixed(digits) : "—"}</b><span className="wn-stat-u">{unit}</span></div>
       <div className="wn-stat-l">{label}</div>
     </div>
@@ -88,7 +88,9 @@ export default function WorkerNodes() {
         </div>
       </div>
       <p className="muted small" style={{ marginTop: "-0.4rem", marginBottom: "0.9rem" }}>
-        노드별 CPU·메모리·Load·디스크 추이 (1시간~30일). 데이터는 포탈이 배포 시점부터 최대 31일간 수집합니다.
+        CPU·메모리 사용률(%) · Load(1분 load average — 백분율 아님, CPU 코어 수 대비로 해석) ·
+        디스크(루트 <span className="mono">/</span> = OS·시스템 디스크 사용률 %) 추이 (1시간~30일).
+        데이터는 포탈이 배포 시점부터 최대 31일간 수집합니다.
       </p>
       {err && <div className="banner err">{err}</div>}
       <div className="wn-grid">
@@ -108,16 +110,20 @@ export default function WorkerNodes() {
               </div>
               <div className="ui-card-bd">
                 <div className="wn-stats">
-                  <StatTile label="CPU" value={c.cpu_percent} unit="%" />
-                  <StatTile label="메모리" value={c.mem_used_pct} unit="%" />
-                  <StatTile label="Load" value={c.load1} unit="" digits={2} />
-                  <StatTile label="디스크" value={c.disk_used_pct} unit="%" />
+                  <StatTile label="CPU" value={c.cpu_percent} unit="%" hint="CPU 사용률 (%)" />
+                  <StatTile label="메모리" value={c.mem_used_pct} unit="%" hint="메모리 사용률 (%)" />
+                  <StatTile label="Load 1m" value={c.load1} unit="" digits={2} hint="1분 load average — CPU 코어 수 대비로 해석(백분율 아님)." />
+                  <StatTile label="디스크 /" value={c.disk_used_pct} unit="%" hint="루트 '/' 디스크(OS·시스템) 사용률 %." />
                 </div>
                 <div className="wn-charts">
-                  <MetricChart series={n.cpu_series} label="CPU" unit="%" color="var(--accent)" sec={sec} max100 />
-                  <MetricChart series={n.mem_series} label="메모리" unit="%" color="var(--teal)" sec={sec} max100 />
-                  <MetricChart series={n.load_series} label="Load" unit="" color="var(--warn)" sec={sec} digits={2} />
-                  <MetricChart series={n.disk_series} label="디스크" unit="%" color="#a78bfa" sec={sec} max100 />
+                  <MetricChart series={n.cpu_series} label="CPU 사용률" unit="%" color="var(--accent)" sec={sec} max100
+                    hint="CPU 사용률 (%)" />
+                  <MetricChart series={n.mem_series} label="메모리 사용률" unit="%" color="var(--teal)" sec={sec} max100
+                    hint="메모리 사용률 (%)" />
+                  <MetricChart series={n.load_series} label="Load (1분)" unit="" color="var(--warn)" sec={sec} digits={2}
+                    hint="1분 load average — 실행/대기 프로세스 평균 수. CPU 코어 수보다 크면 과부하(백분율 아님)." />
+                  <MetricChart series={n.disk_series} label="디스크 / (OS)" unit="%" color="#a78bfa" sec={sec} max100
+                    hint="루트 파일시스템 '/' 사용률 (OS·시스템 디스크). cephfs/gpfs 등 데이터 스토리지와는 별개." />
                 </div>
                 {md && md.mounts.length > 0 && (
                   <div className="wn-mounts">

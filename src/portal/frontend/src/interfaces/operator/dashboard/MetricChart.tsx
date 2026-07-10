@@ -23,7 +23,7 @@ function fill(series: NodeMetricPoint[]): number[] {
 
 // A compact single-series area+line chart (dynamic y, faint grid, emphasized endpoint).
 // max100 pins the axis to 0–100 for percentages; otherwise it auto-scales (load).
-export default function MetricChart({ series, label, unit, color, sec, max100, digits = 0 }: {
+export default function MetricChart({ series, label, unit, color, sec, max100, digits = 0, hint }: {
   series: NodeMetricPoint[];
   label: string;
   unit: string;
@@ -31,6 +31,7 @@ export default function MetricChart({ series, label, unit, color, sec, max100, d
   sec: number;
   max100?: boolean;
   digits?: number;
+  hint?: string;
 }) {
   const [w, setW] = useState(280);
   const ref = useRef<HTMLDivElement>(null);
@@ -46,6 +47,7 @@ export default function MetricChart({ series, label, unit, color, sec, max100, d
   const v = fill(series);
   const cur = v.length ? v[v.length - 1] : null;
   const mx = max100 ? 100 : Math.max(1, ...v) * 1.2;
+  const yTick = (val: number) => (max100 || mx >= 10 ? String(Math.round(val)) : val.toFixed(1));
   const xAt = (i: number) => (v.length <= 1 ? PL : PL + (i * (w - PL - PR)) / (v.length - 1));
   const yAt = (val: number) => PT + (1 - val / mx) * (H - PT - PB);
   const line = v.map((x, i) => `${i ? "L" : "M"}${xAt(i).toFixed(1)} ${yAt(x).toFixed(1)}`).join(" ");
@@ -55,7 +57,7 @@ export default function MetricChart({ series, label, unit, color, sec, max100, d
   return (
     <div className="nmc">
       <div className="nmc-hd">
-        <span className="nmc-label">{label}</span>
+        <span className="nmc-label" title={hint}>{label}</span>
         <span className="nmc-cur" style={{ color }}>{hasData && cur != null ? `${cur.toFixed(digits)}${unit}` : "—"}</span>
       </div>
       <div ref={ref} className="nmc-wrap">
@@ -66,7 +68,7 @@ export default function MetricChart({ series, label, unit, color, sec, max100, d
               return (
                 <g key={i}>
                   <line className="ts-gridline" x1={PL} y1={y} x2={w - PR} y2={y} />
-                  <text className="ts-axis" x={PL - 5} y={y + 3} textAnchor="end">{Math.round(mx * (1 - i / 2))}</text>
+                  <text className="ts-axis" x={PL - 5} y={y + 3} textAnchor="end">{yTick(mx * (1 - i / 2))}{unit}</text>
                 </g>
               );
             })}
