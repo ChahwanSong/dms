@@ -76,7 +76,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (section: strin
               full-width so their columns never clip in a narrow cell. */}
           <div className="span-7"><StorageNodeMatrix /></div>
           <div className="span-5"><StatusCards summary={summary} attention={attention} onNavigate={onNavigate} /></div>
-          <div className="span-12"><NodesTable /></div>
+          <div className="span-12"><NodesTable onNavigate={onNavigate} /></div>
           <div className="span-12"><ControlHostsTable /></div>
           <div className="span-12"><VolcanoPanel /></div>
         </div>

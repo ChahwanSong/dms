@@ -2025,6 +2025,21 @@ textarea.json {
 .dash-detail .dash-kv b { font-size: 0.92rem; font-weight: 700; }
 .card-eyebrow { font-size: 0.62rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 0.3rem; }
 .dash-filters { margin-bottom: 0.5rem; }
+/* 워커 노드 대시보드 요약 — 상세 메트릭은 전용 '워커 노드' 탭, 여기선 에이전트 상태만.
+   헤더 우측에 상태 롤업 + '자세히' 링크, 본문은 노드별 상태 칩 그리드. */
+.dash-section-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; justify-content: flex-end; }
+.nsc-summary { color: var(--muted); font-variant-numeric: tabular-nums; }
+.nsc-summary b { color: var(--fg); font-weight: 700; }
+.nsc-more { font-size: 0.78rem; white-space: nowrap; }
+.node-status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(228px, 1fr)); gap: 0.5rem; }
+.nsc { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.7rem; background: var(--surface-sunken); border: 1px solid var(--border-soft); border-left: 3px solid var(--border); border-radius: 10px; }
+.nsc-ok { border-left-color: var(--ok); }
+.nsc-warn { border-left-color: var(--warn); }
+.nsc-off { border-left-color: var(--border); }
+.nsc-id { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+.nsc-name { font-size: 0.86rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nsc-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nsc-roles { margin-left: auto; display: inline-flex; gap: 0.3rem; flex: none; }
 .dash-attention { list-style: none; margin: 0.5rem 0; padding: 0; }
 .dash-attention li { padding: 0.25rem 0; display: flex; gap: 0.5rem; align-items: baseline; }
 .attn-filters { display: flex; gap: 0.4rem; margin: 0.2rem 0 0.6rem; flex-wrap: wrap; }
