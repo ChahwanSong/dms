@@ -50,6 +50,7 @@ def _node_row(key: tuple, m: dict) -> dict:
     mem = m.get("memory") or {}
     load = m.get("load") or {}
     disk = m.get("disk") or {}
+    net = m.get("network") or {}
     return {
         "cluster_name": key[0],
         "node_name": key[1],
@@ -57,6 +58,8 @@ def _node_row(key: tuple, m: dict) -> dict:
         "mem_used_pct": _num(mem.get("used_pct")),
         "load1": _num(load.get("load1")),
         "disk_used_pct": _num(disk.get("used_pct")),
+        "rx_bytes": _int(net.get("rx_bytes")),
+        "tx_bytes": _int(net.get("tx_bytes")),
         "_has": bool(m),
     }
 
@@ -133,9 +136,15 @@ class DashboardSampler:
         for r in reports or []:
             key = (r.get("cluster_name"), r.get("node_name"))
             m = (r.get("report") or {}).get("os_metrics") or {}
+            row = _node_row(key, m)
             cur = per_node.get(key)
-            if cur is None or (m and not cur["_has"]):
-                per_node[key] = _node_row(key, m)
+            # keep the richest row per node: prefer one WITH os_metrics, then one WITH
+            # network counters (only the newer agent build reports network; a node's
+            # RM/DM reports may differ, so a rm-only rebuild still wins here).
+            if cur is None or (row["_has"], row.get("rx_bytes") is not None) > (
+                cur["_has"], cur.get("rx_bytes") is not None
+            ):
+                per_node[key] = row
         # only persist nodes that actually reported os_metrics — skip metric-less
         # nodes so they don't accrue all-null rows or show empty cards.
         rows = [

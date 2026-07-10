@@ -212,6 +212,32 @@ def probe_os_metrics(
             }
         except Exception:  # noqa: BLE001
             pass
+    # network throughput — cumulative rx/tx bytes summed over PHYSICAL interfaces.
+    # /proc/net/dev is per-network-namespace, so read the HOST's copy through the
+    # host-root mount to reflect the node (not the agent pod). Virtual/pod interfaces
+    # (veth/cni/flannel/docker/…) are excluded so pod traffic isn't double-counted.
+    # Values are counters; the rate (bytes/s) is derived downstream from two samples.
+    if root:
+        try:
+            _skip = (
+                "lo", "veth", "docker", "br-", "cni", "flannel", "cali", "cilium",
+                "tunl", "dummy", "kube", "nodelocal", "lxc", "ovs", "tap", "wg",
+                "virbr", "vnet", "gre", "sit",
+            )
+            rx = tx = 0
+            with open(f"{root}/proc/net/dev") as fh:
+                for line in fh.readlines()[2:]:  # skip 2 header lines
+                    iface, _, rest = line.partition(":")
+                    iface = iface.strip()
+                    if not rest or iface.startswith(_skip):
+                        continue
+                    cols = rest.split()
+                    if len(cols) >= 9:
+                        rx += int(cols[0])   # Receive bytes
+                        tx += int(cols[8])   # Transmit bytes
+            metrics["network"] = {"rx_bytes": rx, "tx_bytes": tx}
+        except Exception:  # noqa: BLE001
+            pass
     return metrics
 
 

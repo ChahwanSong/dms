@@ -2572,6 +2572,7 @@ mark.reqa-hl { background: rgba(251, 191, 36, 0.3); color: inherit; border-radiu
 .wn-stat-v b { font-variant-numeric: tabular-nums; }
 .wn-stat-u { font-size: 0.72rem; color: var(--muted); margin-left: 0.1rem; }
 .wn-stat-l { font-size: 0.66rem; color: var(--muted); margin-top: 0.15rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.wn-net-v { font-size: 0.8rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.4; }
 .wn-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 0.9rem; }
 .wn-mounts { margin-top: 0.7rem; padding-top: 0.6rem; border-top: 1px solid var(--border-soft); }
 .nmc-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 0.1rem; }

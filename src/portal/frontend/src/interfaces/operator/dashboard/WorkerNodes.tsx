@@ -50,6 +50,24 @@ function StatTile({ label, value, unit, digits = 0, hint }: {
   );
 }
 
+// bytes/sec → human bandwidth string (includes the /s unit).
+function fmtBw(v: number): string {
+  if (v < 1024) return `${Math.round(v)} B/s`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(v < 10240 ? 1 : 0)} KB/s`;
+  if (v < 1024 * 1024 * 1024) return `${(v / 1024 / 1024).toFixed(1)} MB/s`;
+  return `${(v / 1024 / 1024 / 1024).toFixed(2)} GB/s`;
+}
+
+function NetTile({ rx, tx }: { rx?: number | null; tx?: number | null }) {
+  return (
+    <div className="wn-stat" title="네트워크 대역폭 (수신↓ / 송신↑, 초당). 노드 물리 인터페이스 합계.">
+      <div className="wn-net-v"><span style={{ color: "var(--accent)" }}>↓</span>{rx != null ? fmtBw(rx) : "—"}</div>
+      <div className="wn-net-v"><span style={{ color: "var(--teal)" }}>↑</span>{tx != null ? fmtBw(tx) : "—"}</div>
+      <div className="wn-stat-l">네트워크</div>
+    </div>
+  );
+}
+
 export default function WorkerNodes() {
   const [sec, setSec] = useState(21600);
   const [nodes, setNodes] = useState<NodeSeries[]>([]);
@@ -89,7 +107,7 @@ export default function WorkerNodes() {
       </div>
       <p className="muted small" style={{ marginTop: "-0.4rem", marginBottom: "0.9rem" }}>
         CPU·메모리 사용률(%) · Load(1분 load average — 백분율 아님, CPU 코어 수 대비로 해석) ·
-        디스크(루트 <span className="mono">/</span> = OS·시스템 디스크 사용률 %) 추이 (1시간~30일).
+        네트워크 대역폭(<span className="mono">↓</span>수신 <span className="mono">↑</span>송신, 초당 바이트) 추이 (1시간~30일).
         데이터는 포탈이 배포 시점부터 최대 31일간 수집합니다.
       </p>
       {err && <div className="banner err">{err}</div>}
@@ -113,7 +131,7 @@ export default function WorkerNodes() {
                   <StatTile label="CPU" value={c.cpu_percent} unit="%" hint="CPU 사용률 (%)" />
                   <StatTile label="메모리" value={c.mem_used_pct} unit="%" hint="메모리 사용률 (%)" />
                   <StatTile label="Load 1m" value={c.load1} unit="" digits={2} hint="1분 load average — CPU 코어 수 대비로 해석(백분율 아님)." />
-                  <StatTile label="디스크 /" value={c.disk_used_pct} unit="%" hint="루트 '/' 디스크(OS·시스템) 사용률 %." />
+                  <NetTile rx={c.rx_rate} tx={c.tx_rate} />
                 </div>
                 <div className="wn-charts">
                   <MetricChart series={n.cpu_series} label="CPU 사용률" unit="%" color="var(--accent)" sec={sec} max100
@@ -122,8 +140,9 @@ export default function WorkerNodes() {
                     hint="메모리 사용률 (%)" />
                   <MetricChart series={n.load_series} label="Load (1분)" unit="" color="var(--warn)" sec={sec} digits={2}
                     hint="1분 load average — 실행/대기 프로세스 평균 수. CPU 코어 수보다 크면 과부하(백분율 아님)." />
-                  <MetricChart series={n.disk_series} label="디스크 / (OS)" unit="%" color="#a78bfa" sec={sec} max100
-                    hint="루트 파일시스템 '/' 사용률 (OS·시스템 디스크). cephfs/gpfs 등 데이터 스토리지와는 별개." />
+                  <MetricChart series={n.rx_series} series2={n.tx_series} label="네트워크 (↓수신 ↑송신)" unit=""
+                    color="var(--accent)" color2="var(--teal)" sec={sec} fmt={fmtBw}
+                    hint="노드 물리 인터페이스 네트워크 대역폭. ↓수신(rx)·↑송신(tx), 초당 바이트. 카운터 델타로 계산." />
                 </div>
                 {md && md.mounts.length > 0 && (
                   <div className="wn-mounts">

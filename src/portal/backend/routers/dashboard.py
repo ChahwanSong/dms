@@ -361,6 +361,28 @@ def _node_timeseries(
         def series(col: str, pts: list[dict[str, Any]] = ordered) -> list[dict[str, Any]]:
             return [{"t": _iso(b.get("sampled_at")), "v": b.get(col)} for b in pts]
 
+        def rate_series(col: str, pts: list[dict[str, Any]] = ordered) -> list[dict[str, Any]]:
+            # cumulative byte counter → rate (bytes/s) via consecutive deltas. First
+            # point and counter resets (negative delta, e.g. reboot) → None.
+            res: list[dict[str, Any]] = []
+            prev_t: float | None = None
+            prev_v: int | None = None
+            for b in pts:
+                ts = b.get("sampled_at")
+                v = b.get(col)
+                epoch = ts.timestamp() if hasattr(ts, "timestamp") else None
+                rate: float | None = None
+                if prev_t is not None and prev_v is not None and v is not None and epoch is not None:
+                    dt = epoch - prev_t
+                    dv = v - prev_v
+                    if dt > 0 and dv >= 0:
+                        rate = dv / dt
+                res.append({"t": _iso(ts), "v": rate})
+                prev_t, prev_v = epoch, v
+            return res
+
+        rx = rate_series("rx_bytes")
+        tx = rate_series("tx_bytes")
         out.append(
             {
                 "cluster_name": cluster,
@@ -370,11 +392,15 @@ def _node_timeseries(
                     "mem_used_pct": last.get("mem_used_pct"),
                     "load1": last.get("load1"),
                     "disk_used_pct": last.get("disk_used_pct"),
+                    "rx_rate": rx[-1]["v"] if rx else None,
+                    "tx_rate": tx[-1]["v"] if tx else None,
                 },
                 "cpu_series": series("cpu_percent"),
                 "mem_series": series("mem_used_pct"),
                 "load_series": series("load1"),
                 "disk_series": series("disk_used_pct"),
+                "rx_series": rx,
+                "tx_series": tx,
             }
         )
     out.sort(key=lambda n: (n.get("cluster_name") or "", n.get("node_name") or ""))

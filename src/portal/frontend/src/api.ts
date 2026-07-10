@@ -793,11 +793,15 @@ export interface NodeSeries {
     mem_used_pct?: number | null;
     load1?: number | null;
     disk_used_pct?: number | null;
+    rx_rate?: number | null; // bytes/s
+    tx_rate?: number | null; // bytes/s
   };
   cpu_series: NodeMetricPoint[];
   mem_series: NodeMetricPoint[];
   load_series: NodeMetricPoint[];
   disk_series: NodeMetricPoint[];
+  rx_series: NodeMetricPoint[]; // bandwidth rate bytes/s
+  tx_series: NodeMetricPoint[];
 }
 export interface NodeTimeSeriesResp {
   nodes: NodeSeries[];

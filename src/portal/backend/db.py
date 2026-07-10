@@ -297,8 +297,13 @@ def _ddl(schema: str) -> list[str]:
             cpu_percent real,
             mem_used_pct real,
             load1 real,
-            disk_used_pct real
+            disk_used_pct real,
+            rx_bytes bigint,
+            tx_bytes bigint
         )""",
+        # migration for the v189 table: network counter columns (bandwidth = derived rate).
+        f"ALTER TABLE {s}.node_metric_samples ADD COLUMN IF NOT EXISTS rx_bytes bigint",
+        f"ALTER TABLE {s}.node_metric_samples ADD COLUMN IF NOT EXISTS tx_bytes bigint",
         f"CREATE INDEX IF NOT EXISTS node_metric_samples_node_at "
         f"ON {s}.node_metric_samples(node_name, sampled_at)",
         f"CREATE INDEX IF NOT EXISTS node_metric_samples_sampled_at "
@@ -410,6 +415,8 @@ class Database:
                 r.get("mem_used_pct"),
                 r.get("load1"),
                 r.get("disk_used_pct"),
+                r.get("rx_bytes"),
+                r.get("tx_bytes"),
             )
             for r in rows
         ]
@@ -418,7 +425,8 @@ class Database:
                 await cur.executemany(
                     "INSERT INTO node_metric_samples "
                     "(cluster_name, node_name, cpu_percent, mem_used_pct, load1, "
-                    "disk_used_pct) VALUES (%s,%s,%s,%s,%s,%s)",
+                    "disk_used_pct, rx_bytes, tx_bytes) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                     params,
                 )
 
@@ -427,7 +435,8 @@ class Database:
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT sampled_at, cluster_name, node_name, cpu_percent, "
-                "mem_used_pct, load1, disk_used_pct FROM node_metric_samples "
+                "mem_used_pct, load1, disk_used_pct, rx_bytes, tx_bytes "
+                "FROM node_metric_samples "
                 "WHERE sampled_at >= %s ORDER BY sampled_at ASC",
                 (since_iso,),
             )
