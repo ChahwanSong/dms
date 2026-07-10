@@ -247,6 +247,12 @@ export default function BackupBatches() {
         </div>
       )}
 
+      <section className="ui-card">
+        <div className="ui-card-hd">
+          <h3>백업 배치{!loading && batches.length > 0 && <span className="hd-cnt">{batches.length}</span>}</h3>
+        </div>
+        <div className="ui-card-bd">
+          <div className="ui-card-div" />
       {loading ? (
         <Loading rows={5} />
       ) : batches.length === 0 ? (
@@ -363,6 +369,8 @@ export default function BackupBatches() {
           </tbody>
         </table>
       )}
+        </div>
+      </section>
 
       {showForm && (
         <BackupBatchForm

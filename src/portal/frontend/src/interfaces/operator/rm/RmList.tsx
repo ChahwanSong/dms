@@ -161,13 +161,18 @@ export default function RmList({ reloadKey }: { reloadKey: number }) {
 
   return (
     <div className="sync-list">
-      <div className="wrun-h">
-        요청된 작업{" "}
-        <span className="muted small">
-          ({shown}
-          {total != null && total > shown ? ` / ${total}` : ""})
-        </span>
-      </div>
+      <section className="ui-card">
+        <div className="ui-card-hd">
+          <h3>
+            요청된 작업
+            <span className="hd-cnt">
+              {shown}
+              {total != null && total > shown ? ` / ${total}` : ""}
+            </span>
+          </h3>
+        </div>
+        <div className="ui-card-bd">
+          <div className="ui-card-div" />
       {error && <div className="banner err">{error}</div>}
 
       <table className="grid sync-grid">
@@ -267,6 +272,8 @@ export default function RmList({ reloadKey }: { reloadKey: number }) {
           )}
         </div>
       )}
+        </div>
+      </section>
 
       {detailJob && (
         <JobDetailModal kind="rm" request={detailJob} onClose={() => setDetailJob(null)} />

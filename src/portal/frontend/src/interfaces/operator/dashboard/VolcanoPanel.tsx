@@ -147,13 +147,13 @@ function OffenderList<T extends VolJobCard>({ title, hint, items, valueOf, empty
                   <span className="off2-type">{type}</span>
                   <span className="off2-id">·{short}</span>
                   {val.badge && <span className="chip tone-ok">{val.badge}</span>}
+                  <span className="off2-val">{val.text}</span>
                 </span>
                 {sub && <span className="off2-sub">{sub}</span>}
                 <span className="off2-bar">
                   <span className={val.tone} style={{ width: `${(val.v / max) * 100}%` }} />
                 </span>
               </span>
-              <span className="off2-val">{val.text}</span>
               <span className="off2-caret" aria-hidden="true">{isOpen ? "▾" : "▸"}</span>
             </button>
             {isOpen && <JobDetail job={j} />}

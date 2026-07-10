@@ -148,14 +148,18 @@ export default function SyncList({ reloadKey }: { reloadKey: number }) {
   const shown = rows.length;
 
   return (
-    <div className="sync-list">
-      <div className="wrun-h">
-        요청된 작업{" "}
-        <span className="muted small">
-          ({shown}
-          {total != null && total > shown ? ` / ${total}` : ""})
-        </span>
+    <section className="ui-card sync-list">
+      <div className="ui-card-hd">
+        <h3>
+          요청된 작업{" "}
+          <span className="muted small">
+            ({shown}
+            {total != null && total > shown ? ` / ${total}` : ""})
+          </span>
+        </h3>
       </div>
+      <div className="ui-card-bd">
+        <div className="ui-card-div" />
       {error && <div className="banner err">{error}</div>}
 
       <table className="grid sync-grid">
@@ -257,6 +261,7 @@ export default function SyncList({ reloadKey }: { reloadKey: number }) {
       {detailJob && (
         <JobDetailModal kind="sync" request={detailJob} onClose={() => setDetailJob(null)} />
       )}
-    </div>
+      </div>
+    </section>
   );
 }

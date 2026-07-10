@@ -246,6 +246,12 @@ export default function ScanBatches() {
         </div>
       )}
 
+      <section className="ui-card">
+        <div className="ui-card-hd inv-card-hd">
+          <h3>스캔 배치{!loading && batches.length > 0 && <span className="hd-cnt">{batches.length}</span>}</h3>
+        </div>
+        <div className="ui-card-bd">
+          <div className="ui-card-div" />
       {loading ? (
         <Loading rows={5} />
       ) : batches.length === 0 ? (
@@ -362,6 +368,8 @@ export default function ScanBatches() {
           </tbody>
         </table>
       )}
+        </div>
+      </section>
 
       {showForm && (
         <ScanBatchForm

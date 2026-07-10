@@ -15,13 +15,18 @@ export default function SyncTab() {
           <button className="ghost" onClick={bump}>새로고침</button>
         </div>
       </div>
-      <div className="sync-form-section">
-        <div className="wrun-h">
-          Sync 요청 작성{" "}
-          <span className="muted small">단발성 복사 (data.sync) · 배치·재실행 없음</span>
+      <section className="ui-card">
+        <div className="ui-card-hd">
+          <h3>
+            Sync 요청 작성{" "}
+            <span className="muted small">단발성 복사 (data.sync) · 배치·재실행 없음</span>
+          </h3>
         </div>
-        <SyncForm onCreated={bump} />
-      </div>
+        <div className="ui-card-bd">
+          <div className="ui-card-div" />
+          <SyncForm onCreated={bump} />
+        </div>
+      </section>
       <SyncList reloadKey={reloadKey} />
     </div>
   );

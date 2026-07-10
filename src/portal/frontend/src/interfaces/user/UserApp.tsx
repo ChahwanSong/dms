@@ -25,23 +25,36 @@ export default function UserApp({
     <div className="app">
       <TopBar user={user} onLogout={onLogout} title="DMS Portal" />
       <main className="content">
-        <div className="card">
+        <div>
           <h2>환영합니다, {user.username} 님</h2>
-          <p className="muted">
-            사용자 인터페이스입니다. 본인 스토리지·요청에 대한 셀프서비스
-            기능이 이후 단계에서 추가됩니다.
-          </p>
-          {error && <p className="error">{error}</p>}
-          {overview && (
-            <ul className="sections">
-              {overview.sections.map((s) => (
-                <li key={s.key}>
-                  <span>{s.title}</span>
-                  <span className="tag">{s.status}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <section className="ui-card">
+            <div className="ui-card-hd">
+              <h3>
+                개요
+                {overview && overview.sections.length > 0 && (
+                  <span className="hd-cnt">{overview.sections.length}</span>
+                )}
+              </h3>
+            </div>
+            <div className="ui-card-bd">
+              <div className="ui-card-div" />
+              <p className="muted">
+                사용자 인터페이스입니다. 본인 스토리지·요청에 대한 셀프서비스
+                기능이 이후 단계에서 추가됩니다.
+              </p>
+              {error && <p className="error">{error}</p>}
+              {overview && (
+                <ul className="sections">
+                  {overview.sections.map((s) => (
+                    <li key={s.key}>
+                      <span>{s.title}</span>
+                      <span className="tag">{s.status}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </section>
         </div>
       </main>
       {/* logged-in user + logout, pinned to the bottom-left (matches the operator foot) */}

@@ -16,13 +16,18 @@ export default function RmTab() {
           <button className="ghost" onClick={bump}>새로고침</button>
         </div>
       </div>
-      <div className="sync-form-section">
-        <div className="wrun-h">
-          삭제 요청 작성{" "}
-          <span className="muted small">단발성 삭제 (data.rm) · 복구 불가 · 배치·재실행 없음</span>
+      <section className="ui-card">
+        <div className="ui-card-hd">
+          <h3>
+            삭제 요청 작성{" "}
+            <span className="muted small">단발성 삭제 (data.rm) · 복구 불가 · 배치·재실행 없음</span>
+          </h3>
         </div>
-        <RmForm onCreated={bump} />
-      </div>
+        <div className="ui-card-bd">
+          <div className="ui-card-div" />
+          <RmForm onCreated={bump} />
+        </div>
+      </section>
       <RmList reloadKey={reloadKey} />
     </div>
   );
