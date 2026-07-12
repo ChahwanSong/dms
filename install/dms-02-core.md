@@ -75,6 +75,27 @@ docker push "$REGISTRY/dms-agent:$TAG"
 > - **별도 프록시용 Dockerfile은 두지 않는다** — 하나의 Dockerfile이 build-arg 유무로 두 경우를
 >   모두 처리한다(중복 Dockerfile은 drift 위험).
 
+> **사내 CA로 빌드 (TLS 가로채기 프록시 / 사내 HTTPS 엔드포인트).** 회사망이 TLS를 가로채 재서명하거나
+> (사내 MITM 프록시), 레지스트리·엔드포인트가 사내 CA로 서명된 HTTPS면, 빌드 중 apt/curl/git/pip/npm이
+> 그 인증서를 신뢰해야 한다. `build-images.sh`에 `CA_CERT`로 **PEM CA 파일 경로**를 주면 된다.
+>
+> ```bash
+> REGISTRY=registry.example.internal TAG=v1 \
+>   CA_CERT=/etc/pki/ca-trust/source/anchors/corp-root.crt \
+>   ./install/docker/build-images.sh
+> # TLS까지 가로채는 프록시면 PROXY=... 와 함께 준다.
+> ```
+>
+> - `CA_CERT`는 파일이라 build-arg로 못 싣는다 — 스크립트가 빌드 컨텍스트(`install/docker/certs/`)로
+>   **스테이징**했다가 종료 시 제거한다(작업트리에 안 남고 `.gitignore`로 커밋도 차단). 각 Dockerfile은
+>   그 디렉토리를 이미지 트러스트 스토어로 COPY하고 `update-ca-certificates`를 돌린다(SPA는
+>   `NODE_EXTRA_CA_CERTS`, pip은 `PIP_CERT`/`REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`가 시스템 번들을 가리킴).
+> - **프록시와 달리 CA는 런타임 이미지에 일부러 남긴다.** 사내 엔드포인트(k8s API·LDAP·PostgreSQL·DMS
+>   API 자체)가 그 CA로 서명돼 있어 **실행 중인 서비스도 신뢰해야** 하기 때문이다. `dms-agent`는 `dms`
+>   이미지를 FROM 하므로 자동 상속한다.
+> - `CA_CERT` 없이 빌드하면 디렉토리엔 `.gitkeep`만 있어 모든 COPY/update가 **깨끗한 no-op** — 기존
+>   빌드와 동일하게 동작한다. (PEM 형식 필수; 여러 CA는 한 파일에 concat 가능.)
+
 > **⚠️ `DMS_DM_JOB_IMAGE`는 반드시 실제 push한 ref여야 한다 (함정).** ConfigMap의 기본값
 > `registry.example.internal/dms-mpifileutils:CHANGE_ME`를 그대로 두면 DMS는 이 값을 유효한
 > 문자열로 취급해 **fail-closed 하지 않는다** — DM 잡 파드가 뜨는 순간 `ImagePullBackOff`로 죽는다.

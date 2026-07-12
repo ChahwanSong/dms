@@ -101,6 +101,15 @@ docker push "$PORTAL_IMAGE"
 > REGISTRY=registry.example.internal TAG="$(git rev-parse --short HEAD)" \
 >   PROXY=http://127.0.0.1:7227 IMAGES=portal PUSH=1 ./install/docker/build-images.sh
 > ```
+>
+> **사내 CA가 필요하면** (TLS 가로채기 프록시 / 사내 HTTPS) `CA_CERT=/path/to/corp-root.crt`를 함께
+> 준다 — node `npm install`과 python `pip`이 그 CA를 신뢰하고, **런타임 이미지에도 유지**돼 BFF가
+> 사내 엔드포인트를 신뢰한다. 상세는 [dms-02 §1](dms-02-core.md).
+>
+> ```bash
+> REGISTRY=registry.example.internal TAG="$(git rev-parse --short HEAD)" \
+>   CA_CERT=/etc/pki/corp-root.crt IMAGES=portal PUSH=1 ./install/docker/build-images.sh
+> ```
 
 이미지가 정상 기동하는지 로컬에서 빠르게 확인(SPA가 빌드돼 있으면 `/healthz`가 200):
 

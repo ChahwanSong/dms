@@ -21,6 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Optional corporate CA (staged by build-images.sh CA_CERT=...) — trusted before the
+# HTTPS git clones below. Dir always exists (.gitkeep); no cert => clean no-op.
+COPY install/docker/certs/ /usr/local/share/ca-certificates/dms-extra/
+RUN update-ca-certificates
+
 WORKDIR /src
 
 RUN git clone --depth 1 --branch "${LWGRP_REF}" https://github.com/llnl/lwgrp.git \
@@ -68,6 +73,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
     && sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
     && rm -rf /var/lib/apt/lists/*
+
+# Optional corporate CA in the runtime image too (consistency with dms/portal; no-op if none).
+COPY install/docker/certs/ /usr/local/share/ca-certificates/dms-extra/
+RUN update-ca-certificates
 
 COPY --from=build /opt/mpifileutils /opt/mpifileutils
 

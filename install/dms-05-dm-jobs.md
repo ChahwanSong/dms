@@ -76,6 +76,15 @@ DM은 이미지 두 개를 **추가로** 빌드해야 한다. `plain dms` 이미
 > REGISTRY=registry.example.internal TAG=v1 PROXY=http://127.0.0.1:7227 \
 >   IMAGES="mpifileutils agent" PUSH=1 ./install/docker/build-images.sh
 > ```
+>
+> **사내 CA가 필요하면** (TLS 가로채기 프록시 / 사내 HTTPS) `CA_CERT=/path/to/corp-root.crt`를 함께
+> 준다 — 빌드 중 apt/git이 그 CA를 신뢰하고, **런타임 이미지(job·agent)에도 유지**된다. 상세·동작은
+> [dms-02 §1](dms-02-core.md).
+>
+> ```bash
+> REGISTRY=registry.example.internal TAG=v1 CA_CERT=/etc/pki/corp-root.crt \
+>   IMAGES="mpifileutils agent" PUSH=1 ./install/docker/build-images.sh
+> ```
 
 ### 2.1 DM job 이미지 → `DMS_DM_JOB_IMAGE`
 
