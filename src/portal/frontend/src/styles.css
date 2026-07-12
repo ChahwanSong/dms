@@ -2915,3 +2915,86 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
 .agent-ds-err { color: var(--error); max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-rollout-msg { margin: 0.55rem 0 0; font-size: 0.8rem; color: #6ee7a8; }
 .agent-rollout-err { margin: 0.55rem 0 0; font-size: 0.8rem; color: var(--error); }
+
+/* --- end-user 데이터 스캔: registered item list ------------------------- */
+.scan-item-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.scan-item { border: 1px solid var(--border); border-radius: 8px; background: var(--card-2); padding: 0.7rem 0.85rem; }
+.scan-item-hd { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.scan-item-actions { margin-left: auto; display: flex; gap: 0.4rem; }
+.scan-item-result { display: flex; align-items: center; gap: 0.6rem 0.9rem; flex-wrap: wrap; margin-top: 0.55rem; }
+.scan-item-result .spec { font-size: 0.82rem; color: var(--fg-2); }
+.scan-item-result .spec strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+.scan-item-empty { margin-top: 0.55rem; font-size: 0.82rem; }
+
+/* --- user scan item: collapse/expand + detail ------------------------- */
+.scan-item-caret { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.72rem; line-height: 1; padding: 0.1rem 0.2rem; border-radius: 4px; }
+.scan-item-caret:hover { color: var(--fg); background: var(--accent-soft); }
+.scan-item-caret-spacer { display: inline-block; width: 1.1rem; }
+.scan-item-result { cursor: pointer; border-radius: 6px; padding: 0.3rem 0.35rem; margin-left: -0.35rem; }
+.scan-item-result:hover { background: rgba(255, 255, 255, 0.03); }
+.scan-item-hist { display: inline-flex; width: 160px; flex: 0 0 160px; }
+.scan-item-hist .ahist-bar { width: 100%; }
+.scan-item-detail { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 0.9rem; }
+.scan-item-detail .req-sec h4 { margin: 0 0 0.4rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+
+/* --- user scan table (uscan-grid): sortable/searchable + expandable rows --- */
+.scan-toolbar { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+.scan-search { padding: 0.3rem 0.55rem; font-size: 0.82rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); min-width: 12rem; }
+.scan-search:focus { outline: none; border-color: var(--accent); }
+.uscan-grid { width: 100%; }
+.uscan-grid th.num, .uscan-grid td.num { text-align: right; }
+.uscan-grid td.num { font-variant-numeric: tabular-nums; }
+.uscan-grid td.scan-sel, .uscan-grid th.scan-sel { width: 1.8rem; text-align: center; }
+.uscan-grid .scan-path-cell { min-width: 0; }
+.uscan-grid .scan-path-cell code { overflow-wrap: anywhere; }
+.scan-caret { color: var(--muted); margin-right: 0.35rem; font-size: 0.7rem; }
+.scan-memo { }
+.scan-temp-cell { width: 140px; }
+.scan-temp-cell .ahist-bar { width: 120px; }
+.scan-row.expandable { cursor: pointer; }
+.scan-row.expandable:hover td { background: rgba(255, 255, 255, 0.03); }
+.uscan-grid td.scan-act, .uscan-grid th.scan-act-h { text-align: right; white-space: nowrap; }
+.uscan-grid td.scan-act { white-space: nowrap; }
+.scan-detail-row > td { background: var(--card-2); padding: 0 !important; }
+.scan-detail-row .scan-item-detail { margin: 0; padding: 0.9rem 1rem; }
+.scan-foot-hint { margin: 0.75rem 0 0; }
+
+/* --- 데이터 액티비티: histogram | 누적 CDF (equal cols) + stats strip ---- */
+.activity-viz { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem 1.6rem; align-items: start; }
+@media (max-width: 760px) { .activity-viz { grid-template-columns: 1fr; } }
+.activity-col-sub { font-weight: 600; margin-bottom: 0.45rem; }
+.act-chart { width: 100%; aspect-ratio: 340 / 150; height: auto; overflow: visible; }
+.act-grid { stroke: var(--border-soft); stroke-width: 1; }
+/* SVG axis text scales with the chart width; these viewBox sizes render ~11px at
+   typical desktop widths, matching the histogram side's fixed 0.72rem labels. */
+.act-axis { fill: var(--faint); font-size: 7px; }
+.act-xlab { font-size: 6.5px; }
+.act-line { stroke: #e7ecf3; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.act-dot { fill: var(--bg); stroke: #e7ecf3; stroke-width: 1.4; cursor: help; }
+.act-dot:hover { fill: #e7ecf3; }
+/* full-width numeric summary strip below the two charts */
+.act-strip { display: flex; flex-wrap: wrap; gap: 0.55rem 1.5rem; margin-top: 0.9rem; padding-top: 0.8rem; border-top: 1px solid var(--border-soft); }
+.act-si { display: flex; flex-direction: column; gap: 0.15rem; flex: 1 1 6.5rem; min-width: 6.5rem; }
+.act-si-l { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
+.act-si-v { font-size: 0.85rem; color: var(--fg-2); }
+.act-si-v b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.act-si-bar { height: 5px; border-radius: 3px; background: var(--border-soft); overflow: hidden; margin-top: 0.1rem; }
+.act-si-fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); min-width: 2px; }
+.act-si-total { flex: 0 0 auto; }
+.act-si-total .act-si-v b { font-size: 1.05rem; }
+/* mobile: flex-wrap leaves ragged rows — stack each stat as a full-width row
+   (label left · value right · bar spanning below) so everything aligns to the
+   container edges. */
+@media (max-width: 640px) {
+  .act-strip { flex-direction: column; gap: 0.6rem; }
+  .act-si, .act-si-total {
+    flex: none; width: 100%; min-width: 0;
+    display: grid; grid-template-columns: 1fr auto;
+    grid-template-areas: "label value" "bar bar";
+    align-items: baseline; column-gap: 0.6rem; row-gap: 0.2rem;
+  }
+  .act-si-l { grid-area: label; }
+  .act-si-v { grid-area: value; text-align: right; }
+  .act-si-bar { grid-area: bar; margin-top: 0; }
+  .act-si-total { grid-template-areas: "label value"; }
+}

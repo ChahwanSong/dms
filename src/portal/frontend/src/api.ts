@@ -170,6 +170,82 @@ export const userApi = {
   overview: () => request<Overview>("/api/user/overview"),
 };
 
+// --- end-user self-service (데이터 Sync · 데이터 스캔) --------------------
+// Filesystem-backend storage usable as a user sync/scan endpoint (non-secret).
+export interface UserStorage {
+  storage_name: string;
+  backend_type: string | null;
+  filesystem_subtype: "fs-native" | "pv";
+  managed_root: string | null;
+}
+
+// A registered scan-lookup item + the operator's latest pulled scan result (or
+// none — has_result=false → the UI tells the user to ask an operator).
+export interface UserScanItem {
+  id: number;
+  username: string;
+  storage: string;
+  path: string;
+  memo?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  // 'succeeded' | 'failed' | 'running' | 'none' — the latest operator scan's outcome
+  // for this (storage, path). has_result is true only when status === 'succeeded'.
+  status?: "succeeded" | "failed" | "running" | "none";
+  state?: string | null; // raw DMS DataJobState of the latest scan
+  error?: string | null; // failure reason when status === 'failed'
+  has_result: boolean;
+  result: ScanResult | null;
+  dms_job_id?: string | null;
+  scanned_at?: string | null;
+}
+
+export interface UserSyncCreateInput {
+  src_storage: string;
+  src_path: string;
+  dst_storage: string;
+  dst_path: string;
+  delete_enabled: boolean;
+  contents: boolean;
+  memo?: string | null;
+}
+
+const USY = "/api/user/sync-jobs";
+const USC = "/api/user/scan-items";
+
+// User Data Sync — restricted single-item copy (FS↔FS or PVC↔PVC only). Same
+// preview→승인→실행 flow as the operator tab; the BFF forces the fixed options.
+export const userSyncApi = {
+  storages: () => request<UserStorage[]>("/api/user/storages"),
+  list: (p: { offset: number; limit: number }) =>
+    request<SyncJobListResp>(`${USY}?offset=${p.offset}&limit=${p.limit}`),
+  get: (id: number) => request<SyncJob>(`${USY}/${id}`),
+  create: (body: UserSyncCreateInput) =>
+    request<SyncJob>(USY, { method: "POST", body: JSON.stringify(body) }),
+  approve: (id: number) =>
+    request<{ id: number; approved: boolean }>(`${USY}/${id}:approve`, { method: "POST" }),
+  cancel: (id: number) =>
+    request<{ id: number; state: string }>(`${USY}/${id}:cancel`, { method: "POST" }),
+  remove: (id: number) =>
+    request<{ deleted: number }>(`${USY}/${id}`, { method: "DELETE" }),
+  job: (id: number) => request<JobDetail>(`${USY}/${id}/job`),
+  logs: (id: number, tail = 400) => request<JobLogs>(`${USY}/${id}/logs?tail=${tail}`),
+};
+
+// User Data Scan — READ-ONLY: register (storage,path) items; results are pulled
+// from the operator's completed DMS scans (auto-reflected).
+export const userScanApi = {
+  storages: () => request<UserStorage[]>("/api/user/storages"),
+  list: () => request<{ items: UserScanItem[] }>(USC),
+  get: (id: number) => request<UserScanItem>(`${USC}/${id}`),
+  create: (body: { storage: string; path: string; memo?: string | null }) =>
+    request<UserScanItem>(USC, { method: "POST", body: JSON.stringify(body) }),
+  updateMemo: (id: number, memo: string | null) =>
+    request<UserScanItem>(`${USC}/${id}`, { method: "PATCH", body: JSON.stringify({ memo }) }),
+  remove: (id: number) =>
+    request<{ deleted: number }>(`${USC}/${id}`, { method: "DELETE" }),
+};
+
 // --- data backup (DM sync batches) -------------------------------------
 
 export interface BackupBatch {
@@ -314,6 +390,7 @@ export interface SyncJob {
   result?: Record<string, unknown> | null;
   error?: string | null;
   created_by?: string | null;
+  origin?: string; // 'operator' | 'user' — who submitted it (shared sync_jobs table)
   created_at?: string;
   updated_at?: string;
 }

@@ -187,6 +187,14 @@ export default function SyncList({ reloadKey }: { reloadKey: number }) {
                 <Fragment key={j.id}>
                   <tr className={SYNC_TERMINAL.has(j.state) ? "" : "sync-live"}>
                     <td data-label="대상" className="mono small sync-target" title={target(j)}>
+                      {j.origin === "user" && (
+                        <span
+                          className="chip tone-low"
+                          title={j.created_by ? `사용자 ${j.created_by} 요청` : "사용자 요청"}
+                        >
+                          사용자{j.created_by ? ` · ${j.created_by}` : ""}
+                        </span>
+                      )}
                       {target(j)}
                       {j.memo && <span className="muted small sync-memo"> · {j.memo}</span>}
                     </td>

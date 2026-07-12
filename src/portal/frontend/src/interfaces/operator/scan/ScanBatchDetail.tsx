@@ -17,6 +17,7 @@ import ScanBatchForm from "./ScanBatchForm";
 import ScanRequestEdit from "./ScanRequestEdit";
 import ScanResults from "./ScanResults";
 import { ScanHistBar, ScanHistFull } from "./ScanHist";
+import { ActivityCumulativeChart, ActivityStatsStrip } from "../../../components/AtimeActivity";
 import Loading from "../../../components/Loading";
 import ScanCsvModal from "./ScanCsvModal";
 import JobDetailModal from "../components/JobDetailModal";
@@ -139,8 +140,18 @@ function RequestDetail({
 
       {r?.atime_histogram && r.atime_histogram.length > 0 && (
         <section className="req-sec">
-          <h4>atime 데이터 온도 · 용량 (hot → cold)</h4>
-          <ScanHistFull hist={r.atime_histogram} />
+          <h4>데이터 액티비티 · 용량 (hot → cold)</h4>
+          <div className="activity-viz">
+            <div>
+              <div className="activity-col-sub muted small">접근 경과 구간별 용량</div>
+              <ScanHistFull hist={r.atime_histogram} />
+            </div>
+            <div>
+              <div className="activity-col-sub muted small">누적 용량 (전체 대비)</div>
+              <ActivityCumulativeChart hist={r.atime_histogram} />
+            </div>
+          </div>
+          <ActivityStatsStrip hist={r.atime_histogram} />
         </section>
       )}
 
@@ -705,9 +716,9 @@ export default function ScanBatchDetail({
             <div className="vcell">결과 (파일 · 크기)</div>
             <div
               className="vcell"
-              title="atime 데이터 온도 (용량) — hot(최근 접근) → cold(오래 미접근)"
+              title="데이터 액티비티 (용량) — hot(최근 접근) → cold(오래 미접근)"
             >
-              온도 (atime·용량)
+              액티비티 (용량)
             </div>
             <div className="vcell">비고</div>
             <div className="vcell" />
@@ -779,7 +790,7 @@ export default function ScanBatchDetail({
                     ? `${(j.result.file_count ?? 0).toLocaleString()} · ${fmtBytes(j.result.total_bytes)}`
                     : "—"}
                 </div>
-                <div className="vcell col-hist" data-label="온도">
+                <div className="vcell col-hist" data-label="액티비티">
                   <ScanHistBar hist={j.result?.atime_histogram} />
                 </div>
                 <div className="vcell small" data-label="비고">

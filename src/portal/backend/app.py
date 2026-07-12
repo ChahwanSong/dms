@@ -27,6 +27,8 @@ from .routers.dashboard import dashboard_router
 from .routers.rmjob import rm_router
 from .routers.scan import scan_router
 from .routers.syncjob import sync_router
+from .routers.user_scan import user_scan_router
+from .routers.user_sync import user_sync_router
 from .rm_orchestrator import RmOrchestrator
 from .scan_orchestrator import ScanOrchestrator
 from .sync_orchestrator import SyncOrchestrator
@@ -153,6 +155,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router(settings))
     # Role-separated interface APIs (each gated by role inside the router).
     app.include_router(user_router())
+    app.include_router(user_sync_router(settings))
+    app.include_router(user_scan_router(settings))
     app.include_router(operator_router())
     app.include_router(backup_router(settings))
     app.include_router(scan_router(settings))

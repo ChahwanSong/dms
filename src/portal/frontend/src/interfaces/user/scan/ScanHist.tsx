@@ -1,9 +1,9 @@
 import type { AtimeBucket } from "../../../api";
-import { fmtBytes } from "./helpers";
+import { fmtBytes } from "../sync/helpers";
 
-// dscan's atime histogram has 9 fixed buckets in report order index 0
-// (most recent / hot) … 8 (oldest / cold). Each bucket carries the total file
-// CAPACITY (bytes) of files in that access-age band. Color them hot→cold.
+// dscan atime 히스토그램(데이터 온도): 9개 고정 버킷, index 0(최근 접근/hot) …
+// 8(오래 미접근/cold). 각 버킷은 해당 접근-경과 구간 파일들의 총 용량(bytes)이다.
+// 운영자 ScanHist와 동일한 시각화이되 사용자 인터페이스에 독립적으로 둔다.
 const HOT_COLD = [
   "#ef4444", // ≤1d   hot
   "#f97316", // ≤7d
@@ -16,7 +16,6 @@ const HOT_COLD = [
   "#6366f1", // 10y+  cold
 ];
 
-// Friendly Korean label for a bucket, derived from its day bounds.
 const DAY_LABEL: Record<number, string> = {
   1: "≤1일",
   7: "≤7일",
@@ -34,9 +33,7 @@ function bucketLabel(b: AtimeBucket): string {
 
 const totalBytes = (h: AtimeBucket[]) => h.reduce((s, b) => s + (b.bytes ?? 0), 0);
 
-// Compact stacked hot→cold capacity bar for a table row — segment widths ∝ bytes
-// per access-age band, each a tooltip. "—" when there's no histogram (older jobs)
-// or no file capacity.
+// Compact stacked hot→cold capacity bar (한 줄 요약). "—" when no histogram.
 export function ScanHistBar({ hist }: { hist?: AtimeBucket[] | null }) {
   if (!hist || hist.length === 0) return <span className="muted small">—</span>;
   const sum = totalBytes(hist);
@@ -57,8 +54,7 @@ export function ScanHistBar({ hist }: { hist?: AtimeBucket[] | null }) {
   );
 }
 
-// Full labeled histogram for the expanded detail: one row per bucket with a
-// hot→cold bar normalized to the largest bucket + that band's capacity.
+// Full labeled histogram (펼침 상세): 버킷별 한 줄 + 최대 버킷 대비 정규화 막대.
 export function ScanHistFull({ hist }: { hist?: AtimeBucket[] | null }) {
   if (!hist || hist.length === 0 || !totalBytes(hist)) return null;
   const max = Math.max(1, ...hist.map((b) => b.bytes ?? 0));

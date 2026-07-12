@@ -174,6 +174,16 @@ def _ddl(schema: str) -> list[str]:
         # the list is newest-first, paginated (infinite scroll).
         f"CREATE INDEX IF NOT EXISTS sync_jobs_created_at "
         f"ON {s}.sync_jobs(created_at DESC)",
+        # who created the row: 'operator' (data-Sync tab) or 'user' (end-user
+        # self-service Sync). The SAME SyncOrchestrator drives both; origin only
+        # scopes the LISTING (users see their own rows; the operator list can
+        # label user-submitted ones). Pre-existing rows backfill to 'operator'.
+        f"ALTER TABLE {s}.sync_jobs ADD COLUMN IF NOT EXISTS origin text "
+        f"NOT NULL DEFAULT 'operator'",
+        # speeds the user's own-jobs listing (origin='user' AND created_by=<user>,
+        # newest-first) and the operator origin filter.
+        f"CREATE INDEX IF NOT EXISTS sync_jobs_origin_creator "
+        f"ON {s}.sync_jobs(origin, created_by, id DESC)",
         # data-rm feature (데이터 삭제 tab): ONE-SHOT data.rm (delete) jobs. Same shape
         # as sync_jobs but with a SINGLE target (drm removes one path) and NO delete
         # flag (rm IS the delete). Mutating -> preview(dry-run)/confirm/execute, same
@@ -308,6 +318,24 @@ def _ddl(schema: str) -> list[str]:
         f"ON {s}.node_metric_samples(node_name, sampled_at)",
         f"CREATE INDEX IF NOT EXISTS node_metric_samples_sampled_at "
         f"ON {s}.node_metric_samples(sampled_at)",
+        # end-user 데이터 스캔 (user self-service): the user does NOT run scans — it
+        # REGISTERS single (storage, path) items and the BFF live-pulls the operator's
+        # latest completed DMS data.scan result for each (matched by storage+path). So
+        # this table holds only the user's registration list + memo; scan RESULTS are
+        # never persisted here (they come from DMS on read, auto-reflecting new operator
+        # batch scans). UNIQUE(username, storage, path) = one registration per target.
+        f"""CREATE TABLE IF NOT EXISTS {s}.user_scan_items (
+            id bigserial PRIMARY KEY,
+            username text NOT NULL,
+            storage text NOT NULL,
+            path text NOT NULL,
+            memo text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now(),
+            UNIQUE (username, storage, path)
+        )""",
+        f"CREATE INDEX IF NOT EXISTS user_scan_items_user "
+        f"ON {s}.user_scan_items(username, id DESC)",
     ]
 
 
@@ -1203,39 +1231,70 @@ class Database:
         node_count: int | None,
         memo: str | None,
         created_by: str | None,
+        origin: str = "operator",
     ) -> dict[str, Any]:
         """Insert a new one-shot sync job ('registered'; the orchestrator submits it to
-        DMS on the next cycle). Returns the created row."""
+        DMS on the next cycle). Returns the created row. `origin` is 'operator' (data-Sync
+        tab) or 'user' (end-user self-service); it only scopes the LISTING, not the flow."""
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 "INSERT INTO sync_jobs"
                 "(src_storage,src_path,dst_storage,dst_path,requester_id,owner_username,"
-                " options,delete_enabled,priority,node_count,memo,created_by,state) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'registered') RETURNING *",
+                " options,delete_enabled,priority,node_count,memo,created_by,origin,state) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'registered') RETURNING *",
                 (
                     src_storage, src_path, dst_storage, dst_path, requester_id,
                     owner_username, Jsonb(options), delete_enabled, priority,
-                    node_count, memo, created_by,
+                    node_count, memo, created_by, origin,
                 ),
             )
             return await cur.fetchone()
 
     async def list_sync_jobs(
-        self, *, limit: int = 200, offset: int = 0
+        self,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        origin: str | None = None,
+        created_by: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Newest-first page of sync jobs (infinite scroll)."""
+        """Newest-first page of sync jobs (infinite scroll). Optional origin/created_by
+        filters scope the user's own self-service jobs (origin='user' AND created_by=<me>)."""
+        where, params = self._sync_scope(origin, created_by)
+        params += [limit, offset]
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT * FROM sync_jobs ORDER BY id DESC LIMIT %s OFFSET %s",
-                (limit, offset),
+                f"SELECT * FROM sync_jobs{where} ORDER BY id DESC LIMIT %s OFFSET %s",
+                params,
             )
             return await cur.fetchall()
 
-    async def count_sync_jobs(self) -> int:
+    async def count_sync_jobs(
+        self, *, origin: str | None = None, created_by: str | None = None
+    ) -> int:
+        where, params = self._sync_scope(origin, created_by)
         async with self.pool.connection() as conn:
-            cur = await conn.execute("SELECT count(*) AS n FROM sync_jobs")
+            cur = await conn.execute(
+                f"SELECT count(*) AS n FROM sync_jobs{where}", params
+            )
             row = await cur.fetchone()
             return int((row or {}).get("n") or 0)
+
+    @staticmethod
+    def _sync_scope(
+        origin: str | None, created_by: str | None
+    ) -> tuple[str, list[Any]]:
+        """Build the WHERE clause + params for the optional origin/created_by scope."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if origin is not None:
+            clauses.append("origin=%s")
+            params.append(origin)
+        if created_by is not None:
+            clauses.append("created_by=%s")
+            params.append(created_by)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
 
     async def get_sync_job(self, job_id: int) -> dict[str, Any] | None:
         async with self.pool.connection() as conn:
@@ -1628,3 +1687,62 @@ class Database:
         async with self.pool.connection() as conn:
             cur = await conn.execute(sql, params)
             return [r["dms_job_id"] for r in await cur.fetchall()]
+
+    # --- user scan items (end-user 데이터 스캔: registered lookup targets) --------
+    # A user's personal list of (storage, path) targets. Results are NOT stored here;
+    # the BFF live-pulls the operator's latest DMS scan result per item on read.
+
+    async def create_user_scan_item(
+        self, *, username: str, storage: str, path: str, memo: str | None
+    ) -> dict[str, Any] | None:
+        """Register a scan-lookup item for a user. Returns None if the user already
+        registered the same (storage, path) — the UNIQUE constraint makes it idempotent."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "INSERT INTO user_scan_items (username,storage,path,memo) "
+                "VALUES (%s,%s,%s,%s) "
+                "ON CONFLICT (username,storage,path) DO NOTHING RETURNING *",
+                (username, storage, path, memo),
+            )
+            return await cur.fetchone()
+
+    async def list_user_scan_items(self, *, username: str) -> list[dict[str, Any]]:
+        """A user's registered scan items, newest-first."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM user_scan_items WHERE username=%s ORDER BY id DESC",
+                (username,),
+            )
+            return await cur.fetchall()
+
+    async def get_user_scan_item(
+        self, *, item_id: int, username: str
+    ) -> dict[str, Any] | None:
+        """A single item, scoped to the owner (so one user can't read another's item)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM user_scan_items WHERE id=%s AND username=%s",
+                (item_id, username),
+            )
+            return await cur.fetchone()
+
+    async def update_user_scan_item_memo(
+        self, *, item_id: int, username: str, memo: str | None
+    ) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE user_scan_items SET memo=%s, updated_at=now() "
+                "WHERE id=%s AND username=%s RETURNING *",
+                (memo, item_id, username),
+            )
+            return await cur.fetchone()
+
+    async def delete_user_scan_item(
+        self, *, item_id: int, username: str
+    ) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM user_scan_items WHERE id=%s AND username=%s RETURNING *",
+                (item_id, username),
+            )
+            return await cur.fetchone()

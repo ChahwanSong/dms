@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { ApiError, operatorApi, type ScanBatch } from "../../../api";
 import { batchStatus } from "./helpers";
-import { fmtTime } from "../../../lib/format";
+import { fmtAgo, fmtTime } from "../../../lib/format";
 import { OptionChips, SpecGrid, optionEntries } from "./ui";
 import InfoHint from "../../../components/InfoHint";
 import ScanBatchForm from "./ScanBatchForm";
@@ -12,13 +12,14 @@ import Loading from "../../../components/Loading";
 // inventory scans (file/dir/byte counts). Scan has NO preview/approve flow — a
 // batch goes 등록 -> 실행 -> 완료. This is the list of batches; click one to open
 // its detail (jobs, results, run/rescan/cancel).
-type SortKey = "name" | "status" | "created";
+type SortKey = "name" | "status" | "created" | "scanned";
 type SortState = { key: SortKey; dir: "asc" | "desc" };
 
 const ts = (iso?: string | null): number => (iso ? new Date(iso).getTime() : 0);
 
 // Client-side ordering of the (fully-fetched) batch list. name: localeCompare;
-// status: by Korean status label; created: by created_at timestamp.
+// status: by Korean status label; created: by created_at; scanned: by updated_at
+// (last transition ≈ when the batch was last scanned/run).
 function sortBatches(rows: ScanBatch[], sort: SortState): ScanBatch[] {
   const sign = sort.dir === "asc" ? 1 : -1;
   return rows.slice().sort((a, b) => {
@@ -26,6 +27,9 @@ function sortBatches(rows: ScanBatch[], sort: SortState): ScanBatch[] {
     if (sort.key === "name") r = a.name.localeCompare(b.name);
     else if (sort.key === "status")
       r = batchStatus(a.status).label.localeCompare(batchStatus(b.status).label);
+    else if (sort.key === "scanned")
+      // draft은 아직 수행 전(표시 "—") → updated_at 대신 0으로 취급해 하단으로 모음.
+      r = (a.status === "draft" ? 0 : ts(a.updated_at)) - (b.status === "draft" ? 0 : ts(b.updated_at));
     else r = ts(a.created_at) - ts(b.created_at);
     return sign * r;
   });
@@ -277,6 +281,7 @@ export default function ScanBatches() {
               <th>성공/실패/취소/요청</th>
               <th>옵션</th>
               <th>{sortTh("created", "생성")}</th>
+              <th>{sortTh("scanned", "최근 수행")}</th>
               <th></th>
             </tr>
           </thead>
@@ -342,6 +347,13 @@ export default function ScanBatches() {
                     <td data-label="생성" className="muted small">
                       {fmtTime(b.created_at)}
                     </td>
+                    <td
+                      data-label="최근 수행"
+                      className="muted small"
+                      title={b.status === "draft" ? undefined : fmtTime(b.updated_at)}
+                    >
+                      {b.status === "draft" ? "—" : fmtAgo(b.updated_at)}
+                    </td>
                     <td className="row-actions" onClick={(e) => e.stopPropagation()}>
                       <button className="mini" onClick={() => setOpenId(b.id)}>
                         열기
@@ -357,7 +369,7 @@ export default function ScanBatches() {
                   </tr>
                   {open && (
                     <tr className="detail-row">
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <BatchExpand batch={b} />
                       </td>
                     </tr>

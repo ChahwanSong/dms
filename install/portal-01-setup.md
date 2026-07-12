@@ -353,6 +353,28 @@ echo "비밀 토큰: $ADMTOK"   # 안전 채널로만 전달·보관
 - **운영자 비밀번호**는 강한 값으로 설정/회전한다(`admin/admin1234`는 데모용).
 - Portal Pod에 mTLS client cert(§6.3)·DMS 토큰 외의 control-plane 자격증명(kubeconfig/SSH key 등)을 주지 않는다.
 
+### 11.1 사용자(AD) 셀프서비스 메뉴 — 데이터 Sync · 데이터 스캔
+
+사용자(AD 로그인) 인터페이스에 셀프서비스 **데이터 Sync**(단일 복사)와 **데이터 스캔**(운영자 스캔 결과 조회)
+메뉴가 있다. Sync는 운영자와 동일한 preview→승인→실행 흐름이되 옵션이 고정된다(우선순위 중간, 병렬 노드 정책
+기본값, open_noatime ON, batch_files 100000, bufsize 4MiB, chmod/chown 미제공; 사용자는 `--delete`·`contents`만
+선택). 사용자 Sync 요청은 운영자 포탈의 **데이터 Sync 목록에 `[사용자]` 라벨과 함께** 노출되어 운영자가 확인·관리할
+수 있다(공유 `sync_jobs` 테이블). 주의할 보안 사항:
+
+- **실행 신원**: 파일시스템↔파일시스템 sync는 **사용자 본인 신원**(`requester_id=<user>`)으로 실행된다(DMS가
+  LDAP로 uid 해석 → POSIX 권한 적용). 현재 더미 AD(`ad-user`)는 LDAP에 없어 프리뷰 단계에서 실패할 수 있다(정상 —
+  실제 AD 연동 후 동작). 파일시스템↔PVC 혼합은 **차단**(사용자가 운영자에게 요청).
+- **PVC↔PVC sync는 현재 root(uid 0)로 실행**된다(PVC 소속 네임스페이스 권한 사전 확인 기능은 추후 추가 예정).
+  파괴적 `--delete`는 이 경로에서 **금지**되어 있다(root 미러 삭제 방지). 그럼에도 root 복사 자체가 가능하므로,
+  DMS의 특권 요청 게이트를 반드시 좁힌다: `DMS_DM_PRIVILEGED_OPERATORS`(빈 값=모든 mTLS actor 허용)와
+  `DMS_DM_PRIVILEGED_SCOPES`(빈 값=모든 스토리지)를 **비워 두지 말고** 허용 스토리지/경로로 제한하거나, 사용자
+  셀프서비스를 쓰지 않는다면 `DMS_DM_ALLOW_ROOT_REQUESTER=false`로 root 요청 자체를 차단한다. (BFF는 모든 사용자를
+  `mtls:<username>` actor로 표현하므로 빈 allowlist에서는 사용자·운영자가 구분되지 않는다.)
+- **데이터 스캔은 읽기 전용**이다 — 사용자는 (스토리지, 경로) 항목을 등록만 하고, 운영자가 배치로 실행한 최신 스캔
+  결과를 당겨와 본다(운영자 스캔 시 다음 조회에 자동 반영). DMS 스캔 조회는 actor 스코프가 없어, 사용자가 **접근
+  권한 없는 경로의 스캔 메타데이터**(파일 수·용량·atime 히스토그램; 파일 내용 아님)까지 조회할 수 있다. 경로 단위
+  권한 확인은 위 PVC 네임스페이스 권한 확인과 함께 추후 과제다.
+
 ## 12. 자주 발생하는 문제
 
 - **`/healthz`의 `dms_configured`가 false** — `PORTAL_DMS_API_URL`이 비어 있다. Deployment env 확인(§6.1).

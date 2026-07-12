@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { ApiError, operatorApi, type BackupBatch } from "../../../api";
 import { batchStatus } from "./helpers";
-import { fmtTime } from "../../../lib/format";
+import { fmtAgo, fmtTime } from "../../../lib/format";
 import { OptionChips, SpecGrid, optionEntries } from "./ui";
 import InfoHint from "../../../components/InfoHint";
 import BackupBatchForm from "./BackupBatchForm";
@@ -11,13 +11,14 @@ import Loading from "../../../components/Loading";
 // Data backup: register lists of DMS DM sync jobs and run them as mirror backups
 // (preview -> approve -> execute). This is the list of batches; click one to open
 // its detail (jobs, preview summary, run/cancel).
-type SortKey = "name" | "status" | "created";
+type SortKey = "name" | "status" | "created" | "scanned";
 type SortState = { key: SortKey; dir: "asc" | "desc" };
 
 const ts = (iso?: string | null): number => (iso ? new Date(iso).getTime() : 0);
 
 // Client-side ordering of the (fully-fetched) batch list. name: localeCompare;
-// status: by Korean status label; created: by created_at timestamp.
+// status: by Korean status label; created: by created_at; scanned: by updated_at
+// (last transition ≈ when the batch was last run; draft은 미수행 → 하단).
 function sortBatches(rows: BackupBatch[], sort: SortState): BackupBatch[] {
   const sign = sort.dir === "asc" ? 1 : -1;
   return rows.slice().sort((a, b) => {
@@ -25,6 +26,8 @@ function sortBatches(rows: BackupBatch[], sort: SortState): BackupBatch[] {
     if (sort.key === "name") r = a.name.localeCompare(b.name);
     else if (sort.key === "status")
       r = batchStatus(a.status).label.localeCompare(batchStatus(b.status).label);
+    else if (sort.key === "scanned")
+      r = (a.status === "draft" ? 0 : ts(a.updated_at)) - (b.status === "draft" ? 0 : ts(b.updated_at));
     else r = ts(a.created_at) - ts(b.created_at);
     return sign * r;
   });
@@ -278,6 +281,7 @@ export default function BackupBatches() {
               <th>성공/실패/취소/요청</th>
               <th>옵션</th>
               <th>{sortTh("created", "생성")}</th>
+              <th>{sortTh("scanned", "최근 수행")}</th>
               <th></th>
             </tr>
           </thead>
@@ -343,6 +347,13 @@ export default function BackupBatches() {
                     <td data-label="생성" className="muted small">
                       {fmtTime(b.created_at)}
                     </td>
+                    <td
+                      data-label="최근 수행"
+                      className="muted small"
+                      title={b.status === "draft" ? undefined : fmtTime(b.updated_at)}
+                    >
+                      {b.status === "draft" ? "—" : fmtAgo(b.updated_at)}
+                    </td>
                     <td className="row-actions" onClick={(e) => e.stopPropagation()}>
                       <button className="mini" onClick={() => setOpenId(b.id)}>
                         열기
@@ -358,7 +369,7 @@ export default function BackupBatches() {
                   </tr>
                   {open && (
                     <tr className="detail-row">
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <BatchExpand batch={b} />
                       </td>
                     </tr>

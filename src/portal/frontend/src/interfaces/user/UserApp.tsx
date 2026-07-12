@@ -1,9 +1,28 @@
-import { useEffect, useState } from "react";
-import { userApi, type Overview, type User } from "../../api";
+import { useState, type ReactNode } from "react";
+import { type User } from "../../api";
 import TopBar from "../../components/TopBar";
+import UserSyncTab from "./sync/UserSyncTab";
+import UserScanTab from "./scan/UserScanTab";
 
-// End-user interface. Talks only to /api/user/*. Placeholder content for now;
-// self-service views over DMS get added here later.
+// End-user interface. Talks only to /api/user/*. A simple left-nav shell (mirrors
+// the operator console) with two self-service menus: 데이터 Sync · 데이터 스캔.
+type Section = "sync" | "scan";
+
+interface NavItem {
+  key: Section;
+  label: string;
+}
+
+const NAV: NavItem[] = [
+  { key: "sync", label: "데이터 Sync" },
+  { key: "scan", label: "데이터 스캔" },
+];
+
+const ICONS: Record<Section, ReactNode> = {
+  sync: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 2l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3" /></svg>),
+  scan: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>),
+};
+
 export default function UserApp({
   user,
   onLogout,
@@ -11,62 +30,40 @@ export default function UserApp({
   user: User;
   onLogout: () => void;
 }) {
-  const [overview, setOverview] = useState<Overview | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    userApi
-      .overview()
-      .then(setOverview)
-      .catch((e) => setError(e instanceof Error ? e.message : "조회 실패"));
-  }, []);
+  const [section, setSection] = useState<Section>("sync");
 
   return (
-    <div className="app">
-      <TopBar user={user} onLogout={onLogout} title="DMS Portal" />
-      <main className="content">
-        <div>
-          <h2>환영합니다, {user.username} 님</h2>
-          <section className="ui-card">
-            <div className="ui-card-hd">
-              <h3>
-                개요
-                {overview && overview.sections.length > 0 && (
-                  <span className="hd-cnt">{overview.sections.length}</span>
-                )}
-              </h3>
-            </div>
-            <div className="ui-card-bd">
-              <div className="ui-card-div" />
-              <p className="muted">
-                사용자 인터페이스입니다. 본인 스토리지·요청에 대한 셀프서비스
-                기능이 이후 단계에서 추가됩니다.
-              </p>
-              {error && <p className="error">{error}</p>}
-              {overview && (
-                <ul className="sections">
-                  {overview.sections.map((s) => (
-                    <li key={s.key}>
-                      <span>{s.title}</span>
-                      <span className="tag">{s.status}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </section>
-        </div>
-      </main>
-      {/* logged-in user + logout, pinned to the bottom-left (matches the operator foot) */}
-      <div className="app-foot">
-        <span className="badge badge-user">사용자</span>
-        <span className="muted">
-          {user.username}
-          {user.dummy ? " · 더미" : ""}
-        </span>
-        <button className="ghost" onClick={onLogout}>
-          로그아웃
-        </button>
+    <div className="app app-fixed">
+      <TopBar user={user} onLogout={onLogout} title="DMS Portal · 사용자" />
+      <div className="layout">
+        <nav className="sidebar">
+          {NAV.map((item) => (
+            <button
+              key={item.key}
+              className={"nav-item" + (section === item.key ? " active" : "")}
+              onClick={() => setSection(item.key)}
+            >
+              <span className="nav-ic">{ICONS[item.key]}</span>
+              {item.label}
+            </button>
+          ))}
+          <div className="sidebar-foot">
+            <span className="sidebar-user">
+              <span className="badge badge-user">사용자</span>
+              <span className="muted">
+                {user.username}
+                {user.dummy ? " · 더미" : ""}
+              </span>
+            </span>
+            <button className="ghost sidebar-logout" onClick={onLogout}>
+              로그아웃
+            </button>
+          </div>
+        </nav>
+        <main className="content content-wide">
+          {section === "sync" && <UserSyncTab />}
+          {section === "scan" && <UserScanTab />}
+        </main>
       </div>
     </div>
   );
