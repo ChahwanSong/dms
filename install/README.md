@@ -30,6 +30,12 @@
 
 - **[portal-01-setup.md](portal-01-setup.md)** — DMS Portal (운영자/사용자 웹 UI) 설치·구성.
 
+## 재배포 (소스 수정 후)
+
+- **[redeploy.md](redeploy.md)** — DMS 코어 또는 Portal **소스코드 수정 후 재배포** 빠른 참조
+  (이미지 빌드 → rollout, 대상 워크로드·컨테이너명, schema/Secret 주의). 무중단·백업·rollback 포함 정식
+  업그레이드는 [../docs/operations-runbook.md](../docs/operations-runbook.md) §8~§10.
+
 ---
 
 ## 사용법 · 운영 (`docs/`)
