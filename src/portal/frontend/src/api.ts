@@ -145,8 +145,13 @@ export const auth = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
-  loginAd: () =>
-    request<{ user: User }>("/api/auth/login/ad", { method: "POST" }),
+  // 회사 AD 로그인. 현재는 임시 더미(아무 아이디로 로그인). username을 주면 그 신원으로,
+  // 비우면 서버가 'ad-user'로 로그인한다. 실제 AD 연동 시 백엔드 authenticate_ad만 교체.
+  loginAd: (username?: string) =>
+    request<{ user: User }>("/api/auth/login/ad", {
+      method: "POST",
+      body: JSON.stringify({ username: username || null }),
+    }),
   logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
   // whether the login-screen 계정 만들기 / 비밀번호 재설정 flows are available
   // (PORTAL_ADMIN_TOKEN configured). Public — used to show/hide those tabs.

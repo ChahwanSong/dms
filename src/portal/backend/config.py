@@ -55,6 +55,9 @@ class Settings:
     session_https_only: bool = True
     # Allow booting with the dev-default session secret (local dev only).
     allow_insecure_defaults: bool = False
+    # 회사 AD 로그인이 아직 더미 스텁(auth.authenticate_ad)일 때 그 더미 경로를 허용할지.
+    # 임시 개발용으로 기본 ON. 실제 AD 연동 후에는 false로 꺼서 더미 로그인을 차단한다.
+    allow_dummy_ad: bool = True
     # Operator credential store (PORTAL_OPERATOR_USERS). Defaults to admin/admin1234.
     # id/password login is operator-only; multiple entries == multiple operators.
     operator_users: dict[str, str] = field(
@@ -147,6 +150,9 @@ class Settings:
             ),
             allow_insecure_defaults=_env_bool(
                 env.get("PORTAL_ALLOW_INSECURE_DEFAULTS"), False
+            ),
+            allow_dummy_ad=_env_bool(
+                env.get("PORTAL_ALLOW_DUMMY_AD"), defaults.allow_dummy_ad
             ),
             operator_users=operator_users or defaults.operator_users,
             admin_token=env.get("PORTAL_ADMIN_TOKEN") or None,

@@ -384,6 +384,20 @@ echo "비밀 토큰: $ADMTOK"   # 안전 채널로만 전달·보관
   권한 없는 경로의 스캔 메타데이터**(파일 수·용량·atime 히스토그램; 파일 내용 아님)까지 조회할 수 있다. 경로 단위
   권한 확인은 위 PVC 네임스페이스 권한 확인과 함께 추후 과제다.
 
+### 11.2 회사 AD 로그인 — 현재 임시 더미 (⚠️ 프로덕션 전 교체)
+
+사용자 로그인(`POST /api/auth/login/ad`)은 **임시 더미 스텁**이다: 자격증명 검증 없이 입력한 아이디(비우면
+`ad-user`)로 로그인된다. 로그인 화면 "사용자" 탭의 **임시 더미 로그인** 버튼이 이 경로를 쓴다.
+
+- **보안 주의**: 더미는 아무나 임의 사용자로 로그인할 수 있으므로 **실제 배포 전 반드시 실제 AD로 교체**한다.
+  당장 더미를 막으려면 `PORTAL_ALLOW_DUMMY_AD=false`(라이브 Secret/env) — 단 실제 AD 미구현 상태에서 끄면 사용자
+  로그인이 전부 401(fail-closed)로 막힌다.
+- **실제 AD 연동 시 수정할 곳**: 백엔드 `src/portal/backend/auth.py`의 **`authenticate_ad()` 함수 하나**만 교체하면
+  된다(LDAP simple bind 또는 OIDC/SAML). AD 서버 설정은 `src/portal/backend/config.py`에 `PORTAL_*`로 추가.
+  비밀번호 입력이나 SSO 리다이렉트가 필요하면 프론트 `src/portal/frontend/src/pages/Login.tsx`(사용자 탭)와
+  `src/portal/frontend/src/api.ts`(`loginAd`)도 함께 손본다. **수정 파일별 상세 + 수정 후 재배포/재실행 방법은
+  [portal-ad-integration.md](portal-ad-integration.md)** 참고.
+
 ## 12. 자주 발생하는 문제
 
 - **`/healthz`의 `dms_configured`가 false** — `PORTAL_DMS_API_URL`이 비어 있다. Deployment env 확인(§6.1).

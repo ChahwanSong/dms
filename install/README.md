@@ -29,6 +29,8 @@
 ## Portal 설치 (별도)
 
 - **[portal-01-setup.md](portal-01-setup.md)** — DMS Portal (운영자/사용자 웹 UI) 설치·구성.
+- **[portal-ad-integration.md](portal-ad-integration.md)** — 사용자 로그인을 **현재 임시 더미 → 실제 회사 AD**로
+  연동할 때 수정할 파일·내용 + 수정 후 재배포/재실행 방법.
 
 ## 재배포 (소스 수정 후)
 

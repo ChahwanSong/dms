@@ -48,6 +48,8 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (u: User) => void })
   const [opMode, setOpMode] = useState<OpMode>("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  // 임시 더미 AD 로그인용 아이디(비우면 서버가 ad-user). 실제 AD 연동 시 제거/대체.
+  const [adUser, setAdUser] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +86,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (u: User) => void })
   async function submitAd() {
     setError(null); setBusy(true);
     try {
-      onLoggedIn((await auth.loginAd()).user);
+      onLoggedIn((await auth.loginAd(adUser.trim() || undefined)).user);
     } catch (err) { setError(emsg(err, "로그인 실패")); } finally { setBusy(false); }
   }
   async function submitRegister(e: React.FormEvent) {
@@ -152,10 +154,26 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (u: User) => void })
           <div className="login-form">
             <p className="login-note">
               일반 사용자는 <strong>회사 AD 계정</strong>으로 로그인합니다. 포탈에서 사용자 계정을
-              따로 만들지 않습니다. <span className="login-dim">(현재는 더미 구현, 추후 AD 연동)</span>
+              따로 만들지 않습니다.{" "}
+              <span className="login-dim">(현재는 <strong>임시 더미 로그인</strong> — 추후 AD 연동)</span>
             </p>
+            <label className="login-field">
+              <span className="login-lbl">
+                아이디
+                <span className="login-hint">임시: 원하는 사용자 아이디 (비우면 ad-user)</span>
+              </span>
+              <input
+                value={adUser}
+                autoComplete="off"
+                placeholder="ad-user"
+                onChange={(e) => setAdUser(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !busy) submitAd();
+                }}
+              />
+            </label>
             <button className="login-primary" onClick={submitAd} disabled={busy}>
-              {busy ? "로그인 중…" : "AD 계정으로 로그인"}
+              {busy ? "로그인 중…" : "임시 더미 로그인"}
             </button>
           </div>
         ) : (

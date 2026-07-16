@@ -3,8 +3,10 @@
 Login method maps directly to role (see security.py):
 - ``local`` (id/password) -> ROLE_OPERATOR. Real check against the operator
   credential store; operators may have multiple id/password accounts.
-- ``ad`` (company AD account) -> ROLE_USER. A DUMMY stand-in for now (logs in as
-  a placeholder identity), to be replaced by the real AD/LDAP integration.
+- ``ad`` (company AD account) -> ROLE_USER. Currently a **DUMMY** stand-in: the
+  ``/login/ad`` route delegates to ``authenticate_ad()`` which just accepts any id
+  and logs in. To wire real AD/LDAP/OIDC, replace ONLY that one function (see the
+  big banner above it). ``PORTAL_ALLOW_DUMMY_AD`` gates the dummy path.
 
 Session state lives in Starlette's signed cookie (``request.session``); no DB.
 """
@@ -36,6 +38,14 @@ MIN_PASSWORD_LEN = 8
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class AdLoginRequest(BaseModel):
+    """Body for the company-AD (end-user) login. All optional so the temporary dummy
+    button can post an empty body or just an id; real AD may use username+password
+    (LDAP) or neither (SSO redirect)."""
+    username: str | None = None
+    password: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -94,6 +104,37 @@ def _verify_operator(settings: Settings, username: str, password: str) -> bool:
     return hmac.compare_digest(password, expected)
 
 
+# ============================================================================
+# 회사 AD 로그인 — 더미 스텁 (임시)
+#
+#   ★ 실제 AD/LDAP/OIDC 연동 시 "이 함수 하나"만 바꾸면 됩니다. ★
+#
+#   지금(더미): 입력한 아이디(비어 있으면 "ad-user")로 무조건 로그인 성공.
+#               → 자격증명 검증이 없으므로 프로덕션 전 반드시 교체(아래 보안 주의).
+#
+#   실제 구현 방법(택1):
+#     - LDAP simple bind:  ldap3/python-ldap로 (username, password) bind →
+#                          성공 시 sAMAccountName/UPN, 실패 시 None.
+#     - OIDC/SAML(SSO):    브라우저 리다이렉트 방식 → 콜백에서 토큰 검증(이 함수 대신
+#                          콜백 라우트를 추가하고, Login 화면 버튼을 "SSO 로그인"으로).
+#   AD 서버 주소/base DN/bind 계정 등은 config.py에 PORTAL_* 설정으로 추가하고,
+#   이 함수가 `settings`를 통해 읽도록 한다(이미 인자로 넘겨받음).
+#
+#   반환 규약: 성공 → {"username": <신원>, "display_name"?: str, "dummy": bool},
+#             실패 → None (라우트가 401 처리).
+# ============================================================================
+def authenticate_ad(
+    settings: Settings, username: str | None, password: str | None
+) -> dict[str, Any] | None:
+    # --- DUMMY (임시). 실제 AD 연동 시 이 블록을 통째로 교체하세요. -----------------
+    if not settings.allow_dummy_ad:
+        # 더미가 꺼져 있는데 실제 AD가 아직 없음 → 로그인 불가(의도적 fail-closed).
+        return None
+    uid = (username or "").strip() or "ad-user"
+    return {"username": uid, "dummy": True}
+    # --- /DUMMY -----------------------------------------------------------------
+
+
 def auth_router(settings: Settings) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -124,9 +165,19 @@ def auth_router(settings: Settings) -> APIRouter:
         return {"user": user}
 
     @router.post("/login/ad")
-    def login_ad(request: Request) -> dict[str, Any]:
-        """Company AD login -> end user. DUMMY placeholder identity for now."""
-        user = session_user("ad-user", ROLE_USER, method="ad", dummy=True)
+    def login_ad(
+        request: Request, payload: AdLoginRequest | None = None
+    ) -> dict[str, Any]:
+        """Company AD login -> end user. Delegates to ``authenticate_ad()`` (a DUMMY
+        stub today). Replace that ONE function to wire real AD/LDAP/OIDC. Body is
+        optional (bodyless POST logs in as the default id)."""
+        p = payload or AdLoginRequest()
+        ident = authenticate_ad(settings, p.username, p.password)
+        if ident is None:
+            raise HTTPException(status_code=401, detail="ad_auth_failed")
+        user = session_user(
+            ident["username"], ROLE_USER, method="ad", dummy=bool(ident.get("dummy")),
+        )
         request.session["user"] = user
         return {"user": user}
 
