@@ -261,31 +261,6 @@ export default function VolcanoPanel() {
         )}
       </div>
 
-      {/* 최장 Pending / 최장 Running — each its own expandable offender card */}
-      {m && (
-        <>
-          <div className="vol-block">
-            <OffenderList
-              title="최장 Pending" hint="(가장 오래 대기한 잡 · 펼치면 상세)"
-              items={m.top.longest_pending}
-              valueOf={(j) => ({ text: fmtDur(j.pending_s), v: j.pending_s, tone: "warn" })}
-              empty="대기 잡 없음"
-            />
-          </div>
-          <div className="vol-block">
-            <OffenderList
-              title="최장 Running" hint="(가장 오래 실행된 잡 · 펼치면 상세)"
-              items={m.top.longest_running}
-              valueOf={(j) => ({
-                text: fmtDur(j.running_s), v: j.running_s,
-                tone: j.active ? "live" : "", badge: j.active ? "진행 중" : undefined,
-              })}
-              empty="실행 잡 없음"
-            />
-          </div>
-        </>
-      )}
-
       {/* Scheduler Queue — running/pending/in-queue combined in one bar per queue */}
       <div className="vol-block">
         <h4 className="dash-sub">Scheduler Queue</h4>
@@ -322,6 +297,31 @@ export default function VolcanoPanel() {
           }) : <div className="muted small">큐 없음</div>}
         </div>
       </div>
+
+      {/* 최장 Pending / 최장 Running — 같은 row(2열 grid)에 나란히 */}
+      {m && (
+        <>
+          <div className="vol-block">
+            <OffenderList
+              title="최장 Pending" hint="(가장 오래 대기한 잡 · 펼치면 상세)"
+              items={m.top.longest_pending}
+              valueOf={(j) => ({ text: fmtDur(j.pending_s), v: j.pending_s, tone: "warn" })}
+              empty="대기 잡 없음"
+            />
+          </div>
+          <div className="vol-block">
+            <OffenderList
+              title="최장 Running" hint="(가장 오래 실행된 잡 · 펼치면 상세)"
+              items={m.top.longest_running}
+              valueOf={(j) => ({
+                text: fmtDur(j.running_s), v: j.running_s,
+                tone: j.active ? "live" : "", badge: j.active ? "진행 중" : undefined,
+              })}
+              empty="실행 잡 없음"
+            />
+          </div>
+        </>
+      )}
 
       <div className="vol-block vol-full">
         <h4 className="dash-sub">활성 잡 ({active.length})</h4>

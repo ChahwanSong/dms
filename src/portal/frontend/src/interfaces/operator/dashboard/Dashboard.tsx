@@ -71,11 +71,11 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (section: strin
         <KpiRow summary={summary} attention={attention} onNavigate={onNavigate} />
         <TimeSeriesCard />
         <div className="bento">
-          {/* matrix has its own horizontal scroll; the detail card's kv columns are
-              width-flexible — safe to pair. The wide worker/CSI tables + Volcano go
-              full-width so their columns never clip in a narrow cell. */}
-          <div className="span-7"><StorageNodeMatrix /></div>
-          <div className="span-5"><StatusCards summary={summary} attention={attention} onNavigate={onNavigate} /></div>
+          {/* 각 섹션이 자기 row(전폭)를 쓴다: 스토리지 마운트 매트릭스와 제어·작업·요청
+              카드는 각각 넓은 폭이 필요해 한 줄씩 차지한다. 제어·작업·요청 카드는 내부
+              .dash-detail(auto-fit)가 전폭에서 3개 하위카드를 가로로 균등 배치한다. */}
+          <div className="span-12"><StorageNodeMatrix /></div>
+          <div className="span-12"><StatusCards summary={summary} attention={attention} onNavigate={onNavigate} /></div>
           <div className="span-12"><NodesTable onNavigate={onNavigate} /></div>
           <div className="span-12"><ControlHostsTable /></div>
           <div className="span-12"><VolcanoPanel /></div>
