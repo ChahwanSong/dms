@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { operatorApi, type AgentReport, type NodeSeries } from "../../../api";
 import { fmtAgo } from "./helpers";
 import MetricChart from "./MetricChart";
+import InfoHint from "../../../components/InfoHint";
 
 const WINDOWS: { label: string; sec: number }[] = [
   { label: "1시간", sec: 3600 },
@@ -95,7 +96,19 @@ export default function WorkerNodes() {
   return (
     <div className="inventory">
       <div className="inv-head">
-        <h2>워커 노드</h2>
+        <h2 className="title-with-hint">
+          워커 노드
+          <InfoHint label="워커 노드 지표 설명">
+            <strong className="hint-title">노드별 시스템 지표 추이</strong>
+            <p className="hint-lead">각 노드의 아래 지표를 선택한 기간(1시간~30일)으로 보여줍니다.</p>
+            <ul className="hint-list">
+              <li><b>CPU · 메모리</b> — 사용률 (%)</li>
+              <li><b>Load 1m</b> — 1분 load average. <em>백분율이 아니며</em>, CPU 코어 수 대비로 해석(코어 수보다 크면 과부하)</li>
+              <li><b>네트워크</b> — 대역폭 <span className="mono">↓</span>수신 / <span className="mono">↑</span>송신 (초당 바이트)</li>
+            </ul>
+            <p className="hint-foot muted small">데이터는 포탈 배포 시점부터 최대 31일간 수집됩니다.</p>
+          </InfoHint>
+        </h2>
         <div className="inv-actions">
           <div className="ts-pills">
             {WINDOWS.map((w) => (
@@ -105,10 +118,10 @@ export default function WorkerNodes() {
           <button className="ghost" onClick={() => loadTs(sec)}>새로고침</button>
         </div>
       </div>
-      <p className="muted small" style={{ marginTop: "-0.4rem", marginBottom: "0.9rem" }}>
-        CPU·메모리 사용률(%) · Load(1분 load average — 백분율 아님, CPU 코어 수 대비로 해석) ·
-        네트워크 대역폭(<span className="mono">↓</span>수신 <span className="mono">↑</span>송신, 초당 바이트) 추이 (1시간~30일).
-        데이터는 포탈이 배포 시점부터 최대 31일간 수집합니다.
+      <p className="wn-sub muted small">
+        노드별 <b>CPU·메모리</b>(%) · <b>Load</b>(1분) · <b>네트워크 대역폭</b>
+        (<span className="mono">↓</span>수신 <span className="mono">↑</span>송신) 추이
+        · 기간 {WINDOWS[0].label}~{WINDOWS[WINDOWS.length - 1].label} — 자세한 해석은 제목 옆 ⓘ
       </p>
       {err && <div className="banner err">{err}</div>}
       <div className="wn-grid">
@@ -146,8 +159,14 @@ export default function WorkerNodes() {
                 </div>
                 {md && md.mounts.length > 0 && (
                   <div className="wn-mounts">
-                    <span className="card-eyebrow">마운트</span>{" "}
-                    <span className="mono small muted">{md.mounts.join(", ")}</span>
+                    <div className="card-eyebrow">
+                      마운트 <span className="wn-mount-cnt">{md.mounts.length}</span>
+                    </div>
+                    <div className="wn-mount-tags">
+                      {md.mounts.map((mt) => (
+                        <span key={mt} className="wn-mount-tag mono" title={mt}>{mt}</span>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>

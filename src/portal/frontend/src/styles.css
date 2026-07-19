@@ -2998,3 +2998,18 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
   .act-si-bar { grid-area: bar; margin-top: 0; }
   .act-si-total { grid-template-areas: "label value"; }
 }
+
+/* --- topbar brand as home link (운영자 콘솔 → 종합 대시보드) --------------- */
+button.brand-link { background: none; border: 0; padding: 0; margin: 0; color: inherit;
+  font-family: inherit; font-size: inherit; letter-spacing: 0.5px; cursor: pointer; }
+button.brand-link:hover { color: var(--accent); }
+button.brand-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+/* --- 워커 노드: subtitle + mount pills ------------------------------------ */
+.wn-sub { margin: 0 0 1rem; }
+.wn-sub b { color: var(--fg-2); font-weight: 600; }
+.wn-mount-cnt { color: var(--faint); margin-left: 0.1rem; }
+.wn-mount-tags { display: flex; flex-wrap: wrap; gap: 0.3rem 0.35rem; margin-top: 0.4rem; }
+.wn-mount-tag { font-size: 0.72rem; line-height: 1; padding: 0.3rem 0.55rem; border-radius: 999px;
+  background: var(--surface-sunken); border: 1px solid var(--border-soft); color: var(--fg-2); }
+.info-hint-pop .hint-foot { margin: 0.65rem 0 0; padding-top: 0.55rem; border-top: 1px dashed var(--border-soft); }

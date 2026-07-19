@@ -98,7 +98,12 @@ export default function OperatorApp({
 
   return (
     <div className="app app-fixed">
-      <TopBar user={user} onLogout={onLogout} title="DMS Portal · 운영자 콘솔" />
+      <TopBar
+        user={user}
+        onLogout={onLogout}
+        title="DMS Portal · 운영자 콘솔"
+        onTitleClick={() => go("dashboard")}
+      />
       <div className="layout">
         <nav className="sidebar">
           {NAV.map((item) => {
