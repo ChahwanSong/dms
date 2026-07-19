@@ -77,10 +77,13 @@ done
 
 ### 2.3 agent 코드 변경 (DaemonSet)
 
-`agent` 이미지는 `dms` 위에 빌드되므로 `IMAGES="dms agent"`로 함께 빌드한다.
+`agent` 이미지는 `dms` + `mpifileutils` 위에 빌드되므로 `IMAGES="dms agent"`로 함께 빌드한다
+(`dms-mpifileutils:$TAG`가 로컬에 없으면 운영 중인 태그를 pull 후 `docker tag`로 재태그 — 도구
+이미지는 agent 코드 변경과 무관하므로 재컴파일 불필요). **두 DaemonSet의 이미지가 다르다**:
+`dms-rm-agent`는 **plain `dms` 이미지**, `dms-dm-agent`만 `dms-agent`(dms + mfu 도구) 이미지다.
 
 ```bash
-kubectl -n dms set image daemonset/dms-rm-agent agent=$REGISTRY/dms-agent:$TAG
+kubectl -n dms set image daemonset/dms-rm-agent agent=$REGISTRY/dms:$TAG
 kubectl -n dms set image daemonset/dms-dm-agent agent=$REGISTRY/dms-agent:$TAG
 kubectl -n dms rollout status daemonset/dms-rm-agent daemonset/dms-dm-agent --timeout=180s
 ```

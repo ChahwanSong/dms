@@ -213,10 +213,16 @@ def probe_os_metrics(
         except Exception:  # noqa: BLE001
             pass
     # network throughput — cumulative rx/tx bytes summed over PHYSICAL interfaces.
-    # /proc/net/dev is per-network-namespace, so read the HOST's copy through the
-    # host-root mount to reflect the node (not the agent pod). Virtual/pod interfaces
-    # (veth/cni/flannel/docker/…) are excluded so pod traffic isn't double-counted.
-    # Values are counters; the rate (bytes/s) is derived downstream from two samples.
+    # /proc/net/dev is per-network-namespace AND `/proc/net` is a symlink to
+    # `self/net`, so "{root}/proc/net/dev" resolves through the HOST procfs to the
+    # *reading process* (this agent pod) and reports the pod's netns — not the node.
+    # Read host PID 1's view instead ("{root}/proc/1/net/dev" — host init lives in
+    # the node's root network namespace), falling back to the plain path for
+    # environments where /proc/1 isn't reachable through the host mount (then the
+    # values degrade to the agent's own netns rather than disappearing).
+    # Virtual/pod interfaces (veth/cni/flannel/cilium/lxc/…) are excluded so pod
+    # traffic isn't double-counted. Values are cumulative counters; the rate
+    # (bytes/s) is derived downstream from two samples.
     if root:
         try:
             _skip = (
@@ -224,9 +230,14 @@ def probe_os_metrics(
                 "tunl", "dummy", "kube", "nodelocal", "lxc", "ovs", "tap", "wg",
                 "virbr", "vnet", "gre", "sit",
             )
-            rx = tx = 0
-            with open(f"{root}/proc/net/dev") as fh:
-                for line in fh.readlines()[2:]:  # skip 2 header lines
+            for dev_path in (f"{root}/proc/1/net/dev", f"{root}/proc/net/dev"):
+                try:
+                    with open(dev_path) as fh:
+                        lines = fh.readlines()[2:]  # skip 2 header lines
+                except OSError:
+                    continue
+                rx = tx = 0
+                for line in lines:
                     iface, _, rest = line.partition(":")
                     iface = iface.strip()
                     if not rest or iface.startswith(_skip):
@@ -235,7 +246,8 @@ def probe_os_metrics(
                     if len(cols) >= 9:
                         rx += int(cols[0])   # Receive bytes
                         tx += int(cols[8])   # Transmit bytes
-            metrics["network"] = {"rx_bytes": rx, "tx_bytes": tx}
+                metrics["network"] = {"rx_bytes": rx, "tx_bytes": tx}
+                break
         except Exception:  # noqa: BLE001
             pass
     return metrics
