@@ -114,18 +114,36 @@ def operator_voc_router() -> APIRouter:
         dependencies=[Depends(require_role(ROLE_OPERATOR))],
     )
 
+    # 기간 필터: 최근 1달 / 최근 1년 / 전체.
+    _PERIOD_DAYS: dict[str, int | None] = {"1m": 30, "1y": 365, "all": None}
+
     @router.get("")
     async def list_all(
         status: str = Query(default="open"),
-        offset: int = Query(default=0, ge=0),
+        period: str = Query(default="all"),
+        order: str = Query(default="desc"),
+        search: str = Query(default="", max_length=200),
+        cursor: int | None = Query(default=None, ge=1),
         limit: int = Query(default=100, ge=1, le=500),
         db: Database = Depends(get_db),
     ) -> dict[str, Any]:
         if status not in ("open", "resolved"):
             raise HTTPException(status_code=422, detail="status must be open|resolved")
-        items = await db.list_vocs(status=status, limit=limit, offset=offset)
-        counts = await db.voc_counts()  # 서브탭 뱃지 (미처리/처리완료 건수)
-        return {"items": items, "counts": counts}
+        if period not in _PERIOD_DAYS:
+            raise HTTPException(status_code=422, detail="period must be 1m|1y|all")
+        if order not in ("asc", "desc"):
+            raise HTTPException(status_code=422, detail="order must be asc|desc")
+        since_days = _PERIOD_DAYS[period]
+        needle = search.strip() or None
+        items = await db.list_vocs(
+            status=status, since_days=since_days, search=needle,
+            order=order, cursor=cursor, limit=limit,
+        )
+        # 서브탭 뱃지 — 기간/검색 필터를 동일 적용해 목록과 숫자가 일치.
+        counts = await db.voc_counts(since_days=since_days, search=needle)
+        # keyset 커서: 페이지가 가득 찼을 때만 다음 커서(마지막 id) 제공.
+        next_cursor = items[-1]["id"] if len(items) == limit else None
+        return {"items": items, "counts": counts, "next_cursor": next_cursor}
 
     @router.post("/{voc_id}:resolve")
     async def resolve(

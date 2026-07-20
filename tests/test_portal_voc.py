@@ -6,6 +6,7 @@ HTTP(TestClient) + in-memory FakeDB. 소유권(사용자는 자기 것만), 상�
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -27,24 +28,39 @@ class FakeDB:
         row = {
             "id": vid, "username": username, "category": category, "title": title,
             "body": body, "status": "open", "answer": None, "resolved_by": None,
-            "resolved_at": None, "created_at": "t", "updated_at": "t",
+            "resolved_at": None,
+            "created_at": datetime.now(timezone.utc), "updated_at": "t",
         }
         self.rows[vid] = row
         return dict(row)
 
-    async def list_vocs(self, *, username=None, status=None, limit=200, offset=0):
-        out = [
-            dict(r) for r in self.rows.values()
-            if (username is None or r["username"] == username)
-            and (status is None or r["status"] == status)
-        ]
-        out.sort(key=lambda r: r["id"], reverse=True)
-        return out[offset:offset + limit]
+    def _scope(self, r, username, status, since_days, search):
+        if username is not None and r["username"] != username:
+            return False
+        if status is not None and r["status"] != status:
+            return False
+        if since_days is not None and r["created_at"] < datetime.now(timezone.utc) - timedelta(days=since_days):
+            return False
+        if search:
+            fields = (r["title"], r["body"], r["username"])
+            if not any(search.lower() in f.lower() for f in fields):
+                return False
+        return True
 
-    async def voc_counts(self):
+    async def list_vocs(self, *, username=None, status=None, since_days=None,
+                        search=None, order="desc", cursor=None, limit=200):
+        out = [dict(r) for r in self.rows.values()
+               if self._scope(r, username, status, since_days, search)]
+        out.sort(key=lambda r: r["id"], reverse=(order != "asc"))
+        if cursor is not None:
+            out = [r for r in out if (r["id"] < cursor if order != "asc" else r["id"] > cursor)]
+        return out[:limit]
+
+    async def voc_counts(self, *, since_days=None, search=None):
         c = {"open": 0, "resolved": 0}
         for r in self.rows.values():
-            c[r["status"]] += 1
+            if self._scope(r, None, None, since_days, search):
+                c[r["status"]] += 1
         return c
 
     async def get_voc(self, voc_id):
@@ -193,3 +209,111 @@ def test_operator_delete_any_and_bad_status_param(db, alice, op):
 
 def test_operator_cannot_use_user_api(op):
     assert op.get(U).status_code == 403
+
+
+# --- 운영자: 정렬/기간/검색/페이징 -------------------------------------------
+
+
+def test_operator_time_order_asc_desc(db, alice, op):
+    for t in ("one", "two", "three"):  # 등록 순서 = 요청 시간 순서 (id 단조 증가)
+        alice.post(U, json={"title": t, "body": "b"})
+    desc = [v["title"] for v in op.get(O, params={"order": "desc"}).json()["items"]]
+    asc = [v["title"] for v in op.get(O, params={"order": "asc"}).json()["items"]]
+    assert desc == ["three", "two", "one"]
+    assert asc == ["one", "two", "three"]
+    assert op.get(O, params={"order": "sideways"}).status_code == 422
+
+
+def test_operator_period_filter_counts_match(db, alice, op):
+    for t in ("recent", "old-45d", "ancient-400d"):
+        alice.post(U, json={"title": t, "body": "b"})
+    now = datetime.now(timezone.utc)
+    db.rows[2]["created_at"] = now - timedelta(days=45)
+    db.rows[3]["created_at"] = now - timedelta(days=400)
+    m1 = op.get(O, params={"period": "1m"}).json()
+    y1 = op.get(O, params={"period": "1y"}).json()
+    al = op.get(O, params={"period": "all"}).json()
+    assert [v["title"] for v in m1["items"]] == ["recent"]
+    assert {v["title"] for v in y1["items"]} == {"recent", "old-45d"}
+    assert len(al["items"]) == 3
+    # 탭 카운트도 기간 필터를 따라간다 (목록과 숫자 일치)
+    assert m1["counts"]["open"] == 1 and y1["counts"]["open"] == 2 and al["counts"]["open"] == 3
+    assert op.get(O, params={"period": "junk"}).status_code == 422
+
+
+def test_operator_search_title_body_username(db, alice, op):
+    bob = make_client(db, "bob", "user")
+    alice.post(U, json={"title": "스캔 요청", "body": "teamA 경로"})
+    bob.post(U, json={"title": "권한 문의", "body": "teamB 접근"})
+    hit = lambda q: [v["title"] for v in op.get(O, params={"search": q}).json()["items"]]
+    assert hit("스캔") == ["스캔 요청"]      # 제목
+    assert hit("teamB") == ["권한 문의"]      # 본문
+    assert hit("bob") == ["권한 문의"]        # 사용자
+    r = op.get(O, params={"search": "스캔"}).json()
+    assert r["counts"]["open"] == 1           # 카운트도 검색 반영
+
+
+def test_operator_cursor_paging(db, alice, op):
+    for i in range(5):
+        alice.post(U, json={"title": f"v{i}", "body": "b"})
+    r1 = op.get(O, params={"limit": 2}).json()
+    assert [v["title"] for v in r1["items"]] == ["v4", "v3"] and r1["next_cursor"] == 4
+    r2 = op.get(O, params={"limit": 2, "cursor": r1["next_cursor"]}).json()
+    assert [v["title"] for v in r2["items"]] == ["v2", "v1"] and r2["next_cursor"] == 2
+    r3 = op.get(O, params={"limit": 2, "cursor": r2["next_cursor"]}).json()
+    assert [v["title"] for v in r3["items"]] == ["v0"] and r3["next_cursor"] is None
+
+
+def test_operator_cursor_survives_concurrent_removal(db, alice, op):
+    # 스크롤 도중 이미 로드된 행이 처리(제거)되어도 다음 페이지가 밀리지 않는다
+    # (offset 페이징이었다면 v1이 건너뛰어짐).
+    for i in range(6):
+        alice.post(U, json={"title": f"v{i}", "body": "b"})
+    r1 = op.get(O, params={"limit": 3}).json()          # v5 v4 v3, cursor=4
+    assert [v["title"] for v in r1["items"]] == ["v5", "v4", "v3"]
+    op.post(f"{O}/6:resolve", json={})                   # 로드된 영역의 v5를 처리(제거)
+    r2 = op.get(O, params={"limit": 3, "cursor": r1["next_cursor"]}).json()
+    assert [v["title"] for v in r2["items"]] == ["v2", "v1", "v0"]  # 누락 없음
+
+
+def test_operator_asc_cursor_direction(db, alice, op):
+    for i in range(4):
+        alice.post(U, json={"title": f"v{i}", "body": "b"})
+    r1 = op.get(O, params={"order": "asc", "limit": 2}).json()
+    assert [v["title"] for v in r1["items"]] == ["v0", "v1"] and r1["next_cursor"] == 2
+    r2 = op.get(O, params={"order": "asc", "limit": 2, "cursor": r1["next_cursor"]}).json()
+    assert [v["title"] for v in r2["items"]] == ["v2", "v3"]
+
+
+# --- 실 SQL 빌더(_voc_scope) 회귀 고정 — FakeDB와 별개로 이스케이프/파라미터 순서 검증
+
+
+def test_voc_scope_sql_and_params():
+    from portal.backend.db import Database
+    where, params = Database._voc_scope("alice", "open", 30, r"50%_done\x")
+    assert where.startswith(" WHERE ")
+    assert "username=%s" in where and "status=%s" in where
+    assert "make_interval(days => %s)" in where
+    assert "(title ILIKE %s OR body ILIKE %s OR username ILIKE %s)" in where
+    like = params[3]
+    # LIKE 메타문자 이스케이프: % _ \ 가 리터럴 매치되도록
+    assert like == r"%50\%\_done\\x%"
+    assert params == ["alice", "open", 30, like, like, like]
+
+
+def test_voc_scope_empty():
+    from portal.backend.db import Database
+    where, params = Database._voc_scope(None, None, None, None)
+    assert where == "" and params == []
+
+
+
+def test_voc_list_sql_cursor_directions():
+    from portal.backend.db import Database
+    sql, params = Database._voc_list_sql(None, "open", None, None, "desc", 42, 50)
+    assert "status=%s" in sql and "id < %s" in sql
+    assert sql.endswith("ORDER BY id DESC LIMIT %s") and params == ["open", 42, 50]
+    sql, params = Database._voc_list_sql(None, None, None, None, "asc", 7, 10)
+    assert "id > %s" in sql and "ORDER BY id ASC" in sql and params == [7, 10]
+    sql, params = Database._voc_list_sql(None, None, 30, None, "desc", None, 10)
+    assert "make_interval(days => %s)" in sql and "id <" not in sql and params == [30, 10]

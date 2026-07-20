@@ -265,12 +265,34 @@ export const userVocApi = {
     request<{ deleted: number }>(`${UVOC}/${id}`, { method: "DELETE" }),
 };
 
-// 운영자: 미처리/처리완료 서브탭 목록 + 처리(:resolve)/복귀(:reopen)/삭제.
+export type VocPeriod = "1m" | "1y" | "all";
+
+// 운영자: 미처리/처리완료 서브탭 목록(기간·정렬·검색·keyset 커서 페이징) +
+// 처리(:resolve)/복귀(:reopen)/삭제.
 export const opVocApi = {
-  list: (status: "open" | "resolved", offset = 0, limit = 100) =>
-    request<{ items: Voc[]; counts: { open: number; resolved: number } }>(
-      `${OVOC}?status=${status}&offset=${offset}&limit=${limit}`,
-    ),
+  list: (p: {
+    status: "open" | "resolved";
+    period?: VocPeriod;
+    order?: "asc" | "desc";
+    search?: string;
+    // keyset 커서(직전 페이지 마지막 id) — offset 드리프트 없는 무한스크롤.
+    cursor?: number | null;
+    limit?: number;
+  }) => {
+    const q = new URLSearchParams({
+      status: p.status,
+      period: p.period ?? "all",
+      order: p.order ?? "desc",
+      limit: String(p.limit ?? 100),
+    });
+    if (p.cursor != null) q.set("cursor", String(p.cursor));
+    if (p.search?.trim()) q.set("search", p.search.trim());
+    return request<{
+      items: Voc[];
+      counts: { open: number; resolved: number };
+      next_cursor: number | null;
+    }>(`${OVOC}?${q.toString()}`);
+  },
   resolve: (id: number, answer: string | null) =>
     request<Voc>(`${OVOC}/${id}:resolve`, {
       method: "POST",

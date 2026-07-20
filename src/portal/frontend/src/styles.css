@@ -3031,3 +3031,16 @@ button.brand-link:focus-visible { outline: 2px solid var(--accent); outline-offs
 .voc-tabs { display: flex; gap: 0.4rem; }
 .voc-tabs .mini { display: inline-flex; align-items: center; gap: 0.35rem; }
 .voc-tab-cnt { font-variant-numeric: tabular-nums; opacity: 0.85; }
+
+/* voc 운영자 테이블 (컬럼·정렬·무한스크롤) */
+.voc-grid { width: 100%; }
+.voc-row { cursor: pointer; }
+.voc-row:hover td { background: rgba(255, 255, 255, 0.03); }
+.voc-grid .voc-col-cat { width: 6.5rem; }
+.voc-grid .voc-col-user { width: 10rem; }
+.voc-grid .voc-col-when { width: 8.5rem; white-space: nowrap; }
+.voc-grid td.voc-col-act, .voc-grid th.voc-col-act { text-align: right; white-space: nowrap; width: 8rem; }
+.voc-title-cell { min-width: 0; }
+.voc-title-cell .voc-caret { margin-right: 0.4rem; }
+.voc-detail-row > td { background: var(--card-2); padding: 0 !important; }
+.voc-detail-row .voc-detail { border-top: 0; padding: 0.8rem 1rem; }

@@ -1779,15 +1779,14 @@ class Database:
             )
             return await cur.fetchone()
 
-    async def list_vocs(
-        self,
-        *,
-        username: str | None = None,
-        status: str | None = None,
-        limit: int = 200,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        """Newest-first. username= 사용자 자신의 목록, status= 운영자 탭(open/resolved)."""
+    @staticmethod
+    def _voc_scope(
+        username: str | None,
+        status: str | None,
+        since_days: int | None,
+        search: str | None,
+    ) -> tuple[str, list[Any]]:
+        """공통 WHERE(사용자/상태/기간/검색). search는 제목·본문·작성자 ILIKE."""
         clauses: list[str] = []
         params: list[Any] = []
         if username is not None:
@@ -1796,25 +1795,77 @@ class Database:
         if status is not None:
             clauses.append("status=%s")
             params.append(status)
+        if since_days is not None:
+            clauses.append("created_at >= now() - make_interval(days => %s)")
+            params.append(since_days)
+        if search:
+            esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{esc}%"
+            clauses.append("(title ILIKE %s OR body ILIKE %s OR username ILIKE %s)")
+            params += [like, like, like]
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        params += [limit, offset]
+        return where, params
+
+    async def list_vocs(
+        self,
+        *,
+        username: str | None = None,
+        status: str | None = None,
+        since_days: int | None = None,
+        search: str | None = None,
+        order: str = "desc",
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """운영자 목록(기간/검색/시간 정렬) 및 사용자 자신의 목록.
+
+        페이징은 offset이 아니라 **keyset 커서**(직전 페이지 마지막 id) — 스크롤 도중
+        다른 운영자의 처리/사용자 회수로 행이 빠져도 다음 페이지가 밀리지 않아
+        누락·중복이 없다. 정렬은 id 기준 asc/desc(=bigserial이라 요청 시간 순과 동일;
+        vocs_status 인덱스를 그대로 탄다). order는 허용값만 리터럴로 주입한다."""
+        sql, params = self._voc_list_sql(
+            username, status, since_days, search, order, cursor, limit
+        )
         async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                f"SELECT * FROM vocs{where} ORDER BY id DESC LIMIT %s OFFSET %s",
-                params,
-            )
+            cur = await conn.execute(sql, params)
             return await cur.fetchall()
 
-    async def voc_counts(self) -> dict[str, int]:
-        """운영자 서브탭 뱃지용 status별 건수."""
+    @staticmethod
+    def _voc_list_sql(
+        username: str | None,
+        status: str | None,
+        since_days: int | None,
+        search: str | None,
+        order: str,
+        cursor: int | None,
+        limit: int,
+    ) -> tuple[str, list[Any]]:
+        """list_vocs의 SQL 조립(순수 함수) — 커서 방향/파라미터 순서를 단위 테스트로
+        고정하기 위해 분리."""
+        direction = "ASC" if order == "asc" else "DESC"
+        where, params = Database._voc_scope(username, status, since_days, search)
+        if cursor is not None:
+            op_ = "<" if direction == "DESC" else ">"
+            where = (where + " AND " if where else " WHERE ") + f"id {op_} %s"
+            params.append(cursor)
+        params.append(limit)
+        return f"SELECT * FROM vocs{where} ORDER BY id {direction} LIMIT %s", params
+
+    async def voc_counts(
+        self, *, since_days: int | None = None, search: str | None = None
+    ) -> dict[str, int]:
+        """운영자 서브탭 뱃지용 status별 건수 — 기간/검색 필터가 같이 적용되어
+        탭 숫자와 목록이 항상 일치한다."""
+        where, params = self._voc_scope(None, None, since_days, search)
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT status, count(*) AS n FROM vocs GROUP BY status"
+                f"SELECT status, count(*) AS n FROM vocs{where} GROUP BY status", params
             )
             rows = await cur.fetchall()
         out = {"open": 0, "resolved": 0}
         for r in rows:
-            out[str(r["status"])] = int(r["n"])
+            # 낯선 status 값이 섞여도(수동 조작 등) 500 대신 그대로 집계에 추가.
+            out[str(r["status"])] = out.get(str(r["status"]), 0) + int(r["n"])
         return out
 
     async def get_voc(self, voc_id: int) -> dict[str, Any] | None:
