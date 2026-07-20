@@ -237,6 +237,50 @@ export const userSyncApi = {
   logs: (id: number, tail = 400) => request<JobLogs>(`${USY}/${id}/logs?tail=${tail}`),
 };
 
+// --- dms-voc (사용자 문의/요청 → 운영자 처리) ----------------------------
+export interface Voc {
+  id: number;
+  username: string;
+  category?: string | null;
+  title: string;
+  body: string;
+  status: "open" | "resolved";
+  answer?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+const UVOC = "/api/user/voc";
+const OVOC = "/api/operator/voc";
+
+// 사용자: VOC 등록/내 목록/미처리 건 회수.
+export const userVocApi = {
+  categories: () => request<{ categories: string[] }>(`${UVOC}/categories`),
+  create: (body: { category?: string | null; title: string; body: string }) =>
+    request<Voc>(UVOC, { method: "POST", body: JSON.stringify(body) }),
+  list: () => request<{ items: Voc[] }>(UVOC),
+  remove: (id: number) =>
+    request<{ deleted: number }>(`${UVOC}/${id}`, { method: "DELETE" }),
+};
+
+// 운영자: 미처리/처리완료 서브탭 목록 + 처리(:resolve)/복귀(:reopen)/삭제.
+export const opVocApi = {
+  list: (status: "open" | "resolved", offset = 0, limit = 100) =>
+    request<{ items: Voc[]; counts: { open: number; resolved: number } }>(
+      `${OVOC}?status=${status}&offset=${offset}&limit=${limit}`,
+    ),
+  resolve: (id: number, answer: string | null) =>
+    request<Voc>(`${OVOC}/${id}:resolve`, {
+      method: "POST",
+      body: JSON.stringify({ answer }),
+    }),
+  reopen: (id: number) => request<Voc>(`${OVOC}/${id}:reopen`, { method: "POST" }),
+  remove: (id: number) =>
+    request<{ deleted: number }>(`${OVOC}/${id}`, { method: "DELETE" }),
+};
+
 // User Data Scan — READ-ONLY: register (storage,path) items; results are pulled
 // from the operator's completed DMS scans (auto-reflected).
 export const userScanApi = {

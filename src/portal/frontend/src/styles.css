@@ -3013,3 +3013,21 @@ button.brand-link:focus-visible { outline: 2px solid var(--accent); outline-offs
 .wn-mount-tag { font-size: 0.72rem; line-height: 1; padding: 0.3rem 0.55rem; border-radius: 999px;
   background: var(--surface-sunken); border: 1px solid var(--border-soft); color: var(--fg-2); }
 .info-hint-pop .hint-foot { margin: 0.65rem 0 0; padding-top: 0.55rem; border-top: 1px dashed var(--border-soft); }
+
+/* --- dms-voc (사용자 등록 · 운영자 처리) ---------------------------------- */
+.voc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.55rem; }
+.voc-item { border: 1px solid var(--border); border-radius: 10px; background: var(--card-2); }
+.voc-hd { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.6rem 0.8rem; cursor: pointer; border-radius: 10px; }
+.voc-hd:hover { background: rgba(255, 255, 255, 0.03); }
+.voc-caret { color: var(--muted); font-size: 0.72rem; }
+.voc-title { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.voc-when { margin-left: auto; white-space: nowrap; }
+.voc-detail { border-top: 1px solid var(--border-soft); padding: 0.7rem 0.85rem 0.8rem; display: flex; flex-direction: column; gap: 0.65rem; }
+.voc-body { margin: 0; padding: 0.55rem 0.7rem; background: var(--surface-sunken); border: 1px solid var(--border-soft); border-radius: 8px; font-family: inherit; font-size: 0.85rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-2); }
+.voc-answer .voc-body { border-left: 3px solid var(--accent); }
+.voc-answer-label { display: flex; flex-direction: column; gap: 0.3rem; }
+.voc-answer-label textarea, .voc-body-input { resize: vertical; font-size: 0.88rem; line-height: 1.5; }
+.voc-actions { display: flex; gap: 0.45rem; justify-content: flex-end; }
+.voc-tabs { display: flex; gap: 0.4rem; }
+.voc-tabs .mini { display: inline-flex; align-items: center; gap: 0.35rem; }
+.voc-tab-cnt { font-variant-numeric: tabular-nums; opacity: 0.85; }

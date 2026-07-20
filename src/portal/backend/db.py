@@ -336,6 +336,25 @@ def _ddl(schema: str) -> list[str]:
         )""",
         f"CREATE INDEX IF NOT EXISTS user_scan_items_user "
         f"ON {s}.user_scan_items(username, id DESC)",
+        # dms-voc: 사용자 문의/요청(VOC). 사용자가 등록하고 운영자가 처리한다.
+        # status: open(미처리) -> resolved(처리완료, answer/resolved_by/resolved_at 기록).
+        # 운영자 reopen 시 open으로 복귀(answer는 초안으로 보존).
+        f"""CREATE TABLE IF NOT EXISTS {s}.vocs (
+            id bigserial PRIMARY KEY,
+            username text NOT NULL,
+            category text,
+            title text NOT NULL,
+            body text NOT NULL,
+            status text NOT NULL DEFAULT 'open',
+            answer text,
+            resolved_by text,
+            resolved_at timestamptz,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        # operator tabs (status별 최신순) + 사용자 자신의 목록.
+        f"CREATE INDEX IF NOT EXISTS vocs_status ON {s}.vocs(status, id DESC)",
+        f"CREATE INDEX IF NOT EXISTS vocs_username ON {s}.vocs(username, id DESC)",
     ]
 
 
@@ -1744,5 +1763,101 @@ class Database:
             cur = await conn.execute(
                 "DELETE FROM user_scan_items WHERE id=%s AND username=%s RETURNING *",
                 (item_id, username),
+            )
+            return await cur.fetchone()
+
+    # --- dms-voc (사용자 문의/요청 → 운영자 처리) --------------------------------
+
+    async def create_voc(
+        self, *, username: str, category: str | None, title: str, body: str
+    ) -> dict[str, Any]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "INSERT INTO vocs (username,category,title,body) "
+                "VALUES (%s,%s,%s,%s) RETURNING *",
+                (username, category, title, body),
+            )
+            return await cur.fetchone()
+
+    async def list_vocs(
+        self,
+        *,
+        username: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Newest-first. username= 사용자 자신의 목록, status= 운영자 탭(open/resolved)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if username is not None:
+            clauses.append("username=%s")
+            params.append(username)
+        if status is not None:
+            clauses.append("status=%s")
+            params.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params += [limit, offset]
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                f"SELECT * FROM vocs{where} ORDER BY id DESC LIMIT %s OFFSET %s",
+                params,
+            )
+            return await cur.fetchall()
+
+    async def voc_counts(self) -> dict[str, int]:
+        """운영자 서브탭 뱃지용 status별 건수."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT status, count(*) AS n FROM vocs GROUP BY status"
+            )
+            rows = await cur.fetchall()
+        out = {"open": 0, "resolved": 0}
+        for r in rows:
+            out[str(r["status"])] = int(r["n"])
+        return out
+
+    async def get_voc(self, voc_id: int) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT * FROM vocs WHERE id=%s", (voc_id,))
+            return await cur.fetchone()
+
+    async def resolve_voc(
+        self, *, voc_id: int, answer: str | None, resolved_by: str
+    ) -> dict[str, Any] | None:
+        """open -> resolved (처리자·시각 기록). 이미 resolved면 None(멱등 아님을 409로)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE vocs SET status='resolved', answer=%s, resolved_by=%s, "
+                "resolved_at=now(), updated_at=now() "
+                "WHERE id=%s AND status='open' RETURNING *",
+                (answer, resolved_by, voc_id),
+            )
+            return await cur.fetchone()
+
+    async def reopen_voc(self, *, voc_id: int) -> dict[str, Any] | None:
+        """resolved -> open 복귀(오처리 되돌리기). answer는 초안으로 남긴다."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE vocs SET status='open', resolved_by=NULL, resolved_at=NULL, "
+                "updated_at=now() WHERE id=%s AND status='resolved' RETURNING *",
+                (voc_id,),
+            )
+            return await cur.fetchone()
+
+    async def delete_voc(
+        self, *, voc_id: int, username: str | None = None, only_open: bool = False
+    ) -> dict[str, Any] | None:
+        """운영자(무조건) 또는 사용자 본인(open 상태만) 삭제."""
+        clauses = ["id=%s"]
+        params: list[Any] = [voc_id]
+        if username is not None:
+            clauses.append("username=%s")
+            params.append(username)
+        if only_open:
+            clauses.append("status='open'")
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                f"DELETE FROM vocs WHERE {' AND '.join(clauses)} RETURNING *", params
             )
             return await cur.fetchone()

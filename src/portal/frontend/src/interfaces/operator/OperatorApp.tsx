@@ -6,6 +6,7 @@ import BackupBatches from "./backup/BackupBatches";
 import ScanBatches from "./scan/ScanBatches";
 import SyncTab from "./sync/SyncTab";
 import RmTab from "./rm/RmTab";
+import VocTab from "./voc/VocTab";
 import Dashboard from "./dashboard/Dashboard";
 import DashboardAttention from "./dashboard/DashboardAttention";
 import DashboardActivity from "./dashboard/DashboardActivity";
@@ -23,7 +24,8 @@ type Section =
   | "backup"
   | "scan"
   | "sync"
-  | "rm";
+  | "rm"
+  | "voc";
 
 interface NavItem {
   key: Section;
@@ -46,6 +48,7 @@ const NAV: NavItem[] = [
   { key: "scan", label: "데이터 스캔 (배치)" },
   { key: "sync", label: "데이터 Sync (단일)" },
   { key: "rm", label: "데이터 삭제 (단일)" },
+  { key: "voc", label: "VOC" },
 ];
 
 // Left-nav icons (inline SVG, stroke=currentColor so the .nav-ic tone applies).
@@ -56,6 +59,7 @@ const ICONS: Partial<Record<Section, ReactNode>> = {
   scan: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>),
   sync: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 2l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3" /></svg>),
   rm: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>),
+  voc: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" /></svg>),
 };
 
 export default function OperatorApp({
@@ -166,6 +170,7 @@ export default function OperatorApp({
           {section === "sync" && <SyncTab />}
           {section === "rm" && <RmTab />}
           {section === "scan" && <ScanBatches />}
+          {section === "voc" && <VocTab />}
         </main>
       </div>
     </div>
