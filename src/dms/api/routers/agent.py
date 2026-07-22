@@ -40,7 +40,22 @@ def agent_router() -> APIRouter:
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         _maybe_recompute_readiness_on_ingest(services, report)
-        return {"report_id": report_id, "status": "Fresh"}
+        # On-demand identity probing: hand the agent the recently-requested POSIX
+        # usernames (registered by the DM worker at identity-resolve time) so its
+        # NEXT report carries identity evidence for them — no static-list edit or
+        # DaemonSet restart needed for a new requester. Fail-soft: never block a
+        # report ingest on this read.
+        try:
+            probe_targets = services.repository.list_identity_probe_targets(
+                ttl_seconds=services.settings.dm_identity_probe_target_ttl_seconds
+            )
+        except Exception:  # noqa: BLE001
+            probe_targets = []
+        return {
+            "report_id": report_id,
+            "status": "Fresh",
+            "identity_probe_targets": probe_targets,
+        }
 
     @router.post("/rollout-restart")
     def rollout_restart(

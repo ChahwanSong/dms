@@ -291,6 +291,16 @@ CREATE TABLE IF NOT EXISTS dms_control_state (
     changed_by TEXT NOT NULL,
     changed_at TEXT NOT NULL
 );
+
+-- On-demand identity probe targets: the DM worker registers a data-job requester's
+-- POSIX username here at identity-resolve time; node agents receive the recent set
+-- in the agent-report POST response and probe those names (in addition to the
+-- static DMS_AGENT_IDENTITY_USERS baseline) on their next cycle. Rows expire by
+-- last_requested_at (DMS_DM_IDENTITY_PROBE_TARGET_TTL_SECONDS) and are pruned on read.
+CREATE TABLE IF NOT EXISTS dm_identity_probe_targets (
+    username TEXT PRIMARY KEY,
+    last_requested_at TEXT NOT NULL
+);
 """
 
 

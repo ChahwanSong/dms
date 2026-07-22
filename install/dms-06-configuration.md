@@ -220,7 +220,7 @@ DM 잡은 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)의 클러스터 p
 | `DMS_DM_NSYNC_SERVICE_PREFIX` | `dms-nsync` | native VolcanoJob fallback의 role service/metadata 이름 prefix. |
 | `DMS_DM_DEFAULT_MAX_NODES` / `DMS_DM_MAX_NODES` / `DMS_DM_MAX_SYNC_NODES` / `DMS_DM_MAX_RM_NODES` | `1` | **legacy 호환**(사용 안 함). node counts는 DB policy/API가 SoT. |
 
-**신원 / 권한** — 비-privileged(일반 사용자) DM 잡은 세 가지가 **모두** 있어야 한다: (1) `DMS_LDAP_*`로 요청자 POSIX 신원 resolve, (2) 잡이 도는 각 노드의 `DMS_AGENT_IDENTITY_USERS`에 그 사용자 존재(+노드 NSS/SSSD), (3) 해석된 uid/gid ≥ `DMS_DM_MIN_UID`/`DMS_DM_MIN_GID`. 하나라도 빠지면 각각 `ldap_unavailable`/`identity_not_ready_on_node`/`uid_below_floor`로 거부. privileged root 경로는 LDAP를 우회하지만 **mTLS-verified operator를 통해서만** 동작하니 아래 scope로 좁히고 정기 검토한다.
+**신원 / 권한** — 비-privileged(일반 사용자) DM 잡은 세 가지가 **모두** 있어야 한다: (1) `DMS_LDAP_*`로 요청자 POSIX 신원 resolve, (2) 잡이 도는 노드의 agent 신원 증거에 그 사용자 존재 — `DMS_AGENT_IDENTITY_USERS` 베이스라인 또는 **온디맨드 프로빙**(요청 시 자동 등록·프로빙; `DMS_DM_IDENTITY_PROBE_*`)으로 확보(+노드에서 실제 해석 가능해야 함), (3) 해석된 uid/gid ≥ `DMS_DM_MIN_UID`/`DMS_DM_MIN_GID`. 하나라도 빠지면 각각 `ldap_unavailable`/`identity_not_ready_on_node`/`uid_below_floor`로 거부. privileged root 경로는 LDAP를 우회하지만 **mTLS-verified operator를 통해서만** 동작하니 아래 scope로 좁히고 정기 검토한다.
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
@@ -247,7 +247,10 @@ DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-
 | `DMS_AGENT_WORKER_ROLE` | 없음 | 예 | `RM` 또는 `DM`. |
 | `DMS_AGENT_MOUNTINFO_PATH` | `/proc/self/mountinfo` | 컨테이너 배포시 사실상 필수 | 마운트 존재/Ready 판정에 읽는 mount table. 기본값은 **컨테이너 자신의 마운트**라 노드 스토리지가 안 보여 **모든 storage Missing → readiness false**. 아래 bind-mount로 `/host/proc/1/mountinfo`를 가리켜야 함. |
 | `DMS_AGENT_HOST_ROOT` | 설정 안 됨(권장 `/host`) | 아니오 | 호스트 root fs 마운트 경로. per-node/mount 용량(statvfs) 리포트용. readiness 자체는 mountinfo로 판정. |
-| `DMS_AGENT_IDENTITY_USERS` | 없음 | **DM 에이전트 사실상 필수** | NSS(`getpwnam`)로 확인할 POSIX user 목록(쉼표). DM 요청자는 잡이 도는 노드의 이 목록에 있어야 후보 통과 — 비면 **모든 비-privileged DM 잡이 `identity_not_ready_on_node` 거부**(privileged-root만 우회). 나열 user는 노드 NSS/SSSD로도 해석돼야 함. RM에는 불필요. |
+| `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 chroot-getent(특권 agent) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. |
+| `DMS_DM_IDENTITY_PROBE_WAIT_SECONDS` | `90` | 선택 | 신원 resolve 직후, 어떤 fresh DM 노드에도 해당 사용자 증거가 없을 때 dm-worker가 증거 도착을 기다리는 최대 시간(초). 첫 요청인 사용자도 한 번에 통과하도록 agent 사이클(기본 60s)보다 크게. `0` = 대기 없음(등록만). |
+| `DMS_DM_IDENTITY_PROBE_POLL_SECONDS` | `5` | 선택 | 위 대기 중 fresh 리포트 재확인 주기(초). |
+| `DMS_DM_IDENTITY_PROBE_TARGET_TTL_SECONDS` | `3600` | 선택 | 등록된 probe 대상이 agent에 배포되는 유효기간(초). 만료 행은 조회 시 정리. |
 | `DMS_AGENT_REPORT_INTERVAL_SECONDS` | `60` | 아니오 | report 주기. |
 | `DMS_AGENT_REPORT_TIMEOUT_SECONDS` | `5` | 아니오 | report POST timeout. |
 | `DMS_AGENT_TOOLS` | `dsync,nsync,drm,dscan,kubectl` | 아니오 | tool probe 목록(쉼표). |

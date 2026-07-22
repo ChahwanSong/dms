@@ -172,6 +172,47 @@ class OperationalMixin:
             )
         return report_id
 
+    # --- on-demand identity probe targets ------------------------------------
+    # DM worker → register at identity-resolve time; agent-report POST response →
+    # list (recent window). Agents merge these names into their per-cycle NSS probe
+    # set, so a requester outside the static DMS_AGENT_IDENTITY_USERS list still
+    # gains node identity evidence without operator list maintenance.
+
+    def register_identity_probe_target(self, username: str) -> None:
+        """Upsert (username, now) — refreshes the TTL window on every request."""
+        now = iso_now()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO dm_identity_probe_targets (username, last_requested_at)
+                VALUES (?, ?)
+                ON CONFLICT (username) DO UPDATE SET
+                    last_requested_at = excluded.last_requested_at
+                """,
+                (username, now),
+            )
+
+    def list_identity_probe_targets(
+        self, *, ttl_seconds: int, limit: int = 100
+    ) -> list[str]:
+        """Usernames requested within the TTL window (sorted, bounded). Expired rows
+        are pruned on read so the table stays tiny."""
+        cutoff = (datetime.now(UTC) - timedelta(seconds=max(0, ttl_seconds))).isoformat()
+        with self.database.connect() as connection:
+            connection.execute(
+                "DELETE FROM dm_identity_probe_targets WHERE last_requested_at < ?",
+                (cutoff,),
+            )
+            rows = connection.execute(
+                """
+                SELECT username FROM dm_identity_probe_targets
+                WHERE last_requested_at >= ?
+                ORDER BY username
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+        return [row_to_dict(row)["username"] for row in rows]
 
     def list_agent_reports(
         self,

@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -1445,10 +1446,7 @@ class KubernetesVolcanoAdapter:
             )
 
         env = [
-            {
-                "name": "DMS_POSIX_USERNAME",
-                "value": str(identity.get("posix_username") or ""),
-            },
+            *_identity_env_vars(identity),
             {
                 "name": "DMS_SYNC_SOURCE_STORAGE",
                 "value": source.get("storage_name", data_job.get("storage_name") or ""),
@@ -2383,10 +2381,7 @@ class KubernetesVolcanoAdapter:
         env: list[dict[str, str]] = [
             {"name": "DMS_DATA_JOB_ID", "value": data_job["job_id"]},
             {"name": "DMS_ARTIFACT_URI", "value": artifact_uri},
-            {
-                "name": "DMS_POSIX_USERNAME",
-                "value": str(identity.get("posix_username") or ""),
-            },
+            *_identity_env_vars(identity),
             {
                 "name": "DMS_SELECTED_TOOL",
                 "value": data_job.get("selected_tool")
@@ -2588,10 +2583,7 @@ class KubernetesVolcanoAdapter:
             "volume_mounts": volume_mounts,
             "env": [
                 {"name": "DMS_DATA_JOB_ID", "value": data_job["job_id"]},
-                {
-                    "name": "DMS_POSIX_USERNAME",
-                    "value": str(identity.get("posix_username") or ""),
-                },
+                *_identity_env_vars(identity),
                 {
                     "name": "DMS_SCAN_STORAGE",
                     "value": target.get("storage_name", data_job["storage_name"]),
@@ -2702,10 +2694,7 @@ class KubernetesVolcanoAdapter:
         env = [
             {"name": "DMS_DATA_JOB_ID", "value": data_job["job_id"]},
             {"name": "DMS_ARTIFACT_URI", "value": artifact_uri},
-            {
-                "name": "DMS_POSIX_USERNAME",
-                "value": str(identity.get("posix_username") or ""),
-            },
+            *_identity_env_vars(identity),
             {"name": "DMS_SELECTED_TOOL", "value": "nsync"},
             {"name": "DMS_SELECTED_NODE", "value": ""},
             {
@@ -2778,10 +2767,72 @@ def _host_volume_mount(
     return mount
 
 
+# POSIX username shape for job-pod env (same allowlist the agent uses to decide what
+# to probe). These values are written into the job container's /etc/passwd, so a
+# username containing ':'/newline or a non-numeric uid/gid would be a passwd-injection
+# vector. We validate HERE — before they ever reach the pod env — and the shell
+# prologue guards again (defense in depth). Bad shape aborts job launch (fail-closed).
+_POSIX_USERNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,63}$")
+
+
+def _identity_env_vars(identity: dict[str, Any]) -> list[dict[str, str]]:
+    """Validated DMS_POSIX_USERNAME/UID/GID env for a job pod. Raises
+    DataManagementRuntimeError if the dm-worker-resolved identity has an unsafe shape."""
+    # Empty == "no resolved identity" (preview/preflight manifests, root-less specs):
+    # emit "" and let the shell prologue's `[ -n ... ]` guard skip materialization, as
+    # before. Only a NON-empty username is a passwd sink and must be shape-checked.
+    username = str(identity.get("posix_username") or "")
+    if username and not _POSIX_USERNAME_RE.match(username):
+        raise DataManagementRuntimeError(
+            f"refusing to launch job: unsafe posix_username {username!r}"
+        )
+
+    def _numeric(value: Any, field: str) -> str:
+        if value is None:
+            return ""
+        text = str(value)
+        if not text.isdigit():
+            raise DataManagementRuntimeError(
+                f"refusing to launch job: non-numeric {field} {text!r}"
+            )
+        return text
+
+    return [
+        {"name": "DMS_POSIX_USERNAME", "value": username},
+        {"name": "DMS_POSIX_UID", "value": _numeric(identity.get("uid"), "uid")},
+        {"name": "DMS_POSIX_GID", "value": _numeric(identity.get("gid"), "gid")},
+    ]
+
+
+def _identity_materialize_stmt() -> str:
+    """Idempotent, root-only /etc/passwd materialization for the resolved requester,
+    as a single `;`-joined shell statement. The job image has no LDAP/NSS, but the
+    dm-worker already resolved uid/gid, so runuser/chown/sshd only need the NAME to map
+    locally. Login shell is /bin/sh (NOT nologin): MPI starts remote orted over SSH and
+    a nologin shell makes the worker's sshd close the connection. Must run BEFORE the
+    first reference to the user (artifact chown, key copy). Values are validated in
+    Python (_identity_env_vars) before reaching env; the case-guards are defense in
+    depth against a non-numeric uid/gid or an injecting username (would corrupt
+    /etc/passwd)."""
+    return (
+        'if [ "$(id -u)" = 0 ] && [ -n "${DMS_POSIX_USERNAME:-}" ] && [ -n "${DMS_POSIX_UID:-}" ] '
+        '&& ! getent passwd "$DMS_POSIX_USERNAME" >/dev/null 2>&1; then '
+        'case "$DMS_POSIX_UID" in ""|*[!0-9]*) echo "dms: invalid DMS_POSIX_UID" >&2; exit 1;; esac; '
+        'case "${DMS_POSIX_GID:-$DMS_POSIX_UID}" in ""|*[!0-9]*) echo "dms: invalid DMS_POSIX_GID" >&2; exit 1;; esac; '
+        'case "$DMS_POSIX_USERNAME" in *[!A-Za-z0-9._-]*) echo "dms: invalid DMS_POSIX_USERNAME" >&2; exit 1;; esac; '
+        "printf '%s:x:%s:%s::/tmp/dms-home-%s:/bin/sh\\n' \"$DMS_POSIX_USERNAME\" \"$DMS_POSIX_UID\" \"${DMS_POSIX_GID:-$DMS_POSIX_UID}\" \"$DMS_POSIX_UID\" >> /etc/passwd; "
+        'mkdir -p "/tmp/dms-home-$DMS_POSIX_UID" && chown "$DMS_POSIX_UID:${DMS_POSIX_GID:-$DMS_POSIX_UID}" "/tmp/dms-home-$DMS_POSIX_UID" 2>/dev/null || true; '
+        "fi"
+    )
+
+
 def _mpi_worker_command() -> str:
     return "\n".join(
         [
             "set -eu",
+            # Materialize the requester into the CONTAINER's passwd db before any use of
+            # the name (sshd login, key chown). Shared with the launcher path.
+            _identity_materialize_stmt(),
             "mkdir -p /run/sshd",
             "ssh-keygen -A >/dev/null 2>&1 || true",
             'if [ -n "${DMS_POSIX_USERNAME:-}" ] && id "$DMS_POSIX_USERNAME" >/dev/null 2>&1; then',
@@ -2797,7 +2848,12 @@ def _mpi_worker_command() -> str:
             '    chmod 0600 "$user_home/.ssh"/* 2>/dev/null || true',
             "  fi",
             "fi",
-            "exec /usr/sbin/sshd -D -e -o StrictModes=no",
+            # UsePAM=no: MPI ranks authenticate with keys only. A requester materialized
+            # into /etc/passwd (on-demand identity, no LDAP/NSS in the image) has no
+            # /etc/shadow entry, so PAM's account stage would deny the login
+            # ("Access denied ... by PAM account configuration"). Disabling PAM keeps
+            # pubkey auth working without needing shadow management.
+            "exec /usr/sbin/sshd -D -e -o StrictModes=no -o UsePAM=no",
         ]
     )
 
@@ -2861,6 +2917,7 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
         "export OMPI_MCA_plm_rsh_agent='ssh -o StrictHostKeyChecking=no "
         "-o UserKnownHostsFile=/dev/null'; "
         'export DMS_POSIX_USERNAME="${DMS_POSIX_USERNAME:-}" '
+        'DMS_POSIX_UID="${DMS_POSIX_UID:-}" DMS_POSIX_GID="${DMS_POSIX_GID:-}" '
         'DMS_MPI_SCAN_TARGET="${DMS_MPI_SCAN_TARGET:-}" '
         'DMS_MPI_SCAN_REPORT="${DMS_MPI_SCAN_REPORT:-}" '
         'DMS_MPI_SYNC_SOURCE="${DMS_MPI_SYNC_SOURCE:-}" '
@@ -2868,8 +2925,11 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
         'DMS_MPI_RM_TARGET="${DMS_MPI_RM_TARGET:-}" '
         'DMS_NSYNC_ROLE_MAP="${DMS_NSYNC_ROLE_MAP:-}"; '
         "env_exports='-x PATH -x LD_LIBRARY_PATH -x DMS_POSIX_USERNAME "
+        "-x DMS_POSIX_UID -x DMS_POSIX_GID "
         "-x DMS_MPI_SCAN_TARGET -x DMS_MPI_SCAN_REPORT -x DMS_MPI_SYNC_SOURCE "
         "-x DMS_MPI_SYNC_DESTINATION -x DMS_MPI_RM_TARGET -x DMS_NSYNC_ROLE_MAP'; "
+        # Requester passwd entry is already materialized by _chown_artifact_line at the
+        # top of the launcher (before the artifact chown), so the `id` gate below resolves.
         'mpi_run_prefix=""; '
         'if [ "$(id -u)" = 0 ] && [ -n "${DMS_POSIX_USERNAME:-}" ] '
         '&& id "$DMS_POSIX_USERNAME" >/dev/null 2>&1 '
@@ -2914,7 +2974,10 @@ def _chown_artifact_line(path: str) -> str:
     # Requester-owned only (no world bits). With `umask 077` in the launcher this keeps
     # per-job artifacts unreadable by other tenants' job pods on the shared FS; the
     # dm-worker reads them as root (deployment securityContext runAsUser:0).
+    # Materialize the requester FIRST — this is the launcher's first reference to the
+    # name, so the passwd entry must exist before chown resolves it.
     return (
+        _identity_materialize_stmt() + "; "
         'if [ "$(id -u)" = 0 ] && [ -n "${DMS_POSIX_USERNAME:-}" ]; then '
         f'chown -R "$DMS_POSIX_USERNAME" "{path}" || true; '
         f'chmod -R u+rwX,go-rwx "{path}" || true; fi'

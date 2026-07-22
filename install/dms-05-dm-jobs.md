@@ -148,11 +148,22 @@ DM 잡 pod는 요청자의 POSIX uid/gid로 실행되고, 잡 스크립트가 `c
   value: "alice,bob"           # ← 이 노드에서 DM 잡을 돌릴 요청자 POSIX 유저(csv). 기본 placeholder를 교체
 ```
 
-- 여기 나열된 유저는 agent가 `getpwnam`으로 확인(identity 증거). 요청자가 목록에 없으면 그
-  노드는 `identity_not_ready_on_node`로 후보에서 빠지고, **모든 비-privileged DM 잡이 거부**된다.
-- 나열한 유저는 **노드 OS에서 실제로 해석**돼야 한다 → DM 노드에 **NSS/SSSD**(또는 동등한 디렉터리
-  연동)를 구성한다(프리렉 상세는 [dms-01 §노드 신원 해석](dms-01-prerequisites.md)). 잡 이미지
-  안에서도 `runuser`/chown이 그 유저를 해석할 수 있어야 한다.
+- 여기 나열된 유저는 agent가 상시 확인하는 **베이스라인**(identity 증거)이다. 목록에 없는 요청자는
+  **온디맨드 프로빙**으로 보충된다: dm-worker가 신원 resolve 시 요청자를 등록 → agent가 report POST
+  응답으로 받아 다음 사이클에 프로빙 → worker는 증거 도착을 최대 `DMS_DM_IDENTITY_PROBE_WAIT_SECONDS`
+  (기본 90s) 기다린 뒤 게이트를 평가한다. 프로빙은 계층형(호스트 chroot-getent → 호스트 passwd 파일 →
+  컨테이너 NSS)이라 노드가 해석하는 사용자면 통과한다. 노드가 끝내 해석 못 하면 종전과 동일하게
+  `identity_not_ready_on_node`로 거부(fail-closed 불변).
+- 나열한(또는 온디맨드로 프로빙되는) 유저는 **노드 OS에서 실제로 해석**돼야 한다 → DM 노드에
+  **NSS/SSSD**(또는 동등한 디렉터리 연동)를 구성한다(프리렉 상세는
+  [dms-01 §노드 신원 해석](dms-01-prerequisites.md)). agent의 계층형 프로빙은 노드의 chroot-getent →
+  호스트 `/etc/passwd` → 컨테이너 NSS 순으로 해석한다.
+- **잡 이미지에는 NSS/LDAP이 없어도 된다**: dm-worker가 이미 해석한 uid/gid로 잡 pod가 부팅 시
+  요청자를 컨테이너 `/etc/passwd`에 **물질화**(root-only·멱등, 로그인 셸 `/bin/sh`)하므로
+  `runuser`/`chown`/`sshd`가 그 이름을 로컬에서 해석한다. MPI 랭크 간 SSH는 키 인증만 쓰므로 잡
+  sshd는 `UsePAM=no`로 뜬다(물질화 유저는 `/etc/shadow`가 없어 PAM account 단계가 거부하기 때문).
+  물질화 대상 필드는 파이썬(`_identity_env_vars`)에서 형태 검증 후 env로 주입하고, 셸에서도 숫자
+  uid/gid·안전한 username을 재차 가드한다(passwd 주입 방지).
 - privileged root 잡은 이 게이트를 우회한다(§8) — `getpwnam("root")`는 어디서나 성공하므로
   `DMS_AGENT_IDENTITY_USERS`에 `root`를 넣을 필요는 없다.
 

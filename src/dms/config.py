@@ -111,6 +111,16 @@ class Settings:
     # rejected with `uid_below_floor`.
     dm_min_uid: int = 1000
     dm_min_gid: int = 1000
+    # On-demand identity probing: the DM worker registers a job's resolved POSIX
+    # username as a probe target; agents receive recent targets in the report-POST
+    # response and probe them next cycle (identity evidence without static list
+    # maintenance). wait = how long the worker blocks at identity-resolve time for
+    # evidence to appear on ANY fresh DM node before proceeding to (per-node) gating;
+    # 0 disables the wait (register-only). ttl = how long a registered target stays
+    # in the set handed to agents.
+    dm_identity_probe_wait_seconds: float = 90.0
+    dm_identity_probe_poll_seconds: float = 5.0
+    dm_identity_probe_target_ttl_seconds: int = 3600
     # Privileged (root) DM execution (default OFF -> identical to no-feature behavior).
     # When ON, a DM request whose effective owner_username/requester_id is in
     # `dm_privileged_requesters` resolves to a SYNTHESIZED root identity (uid/gid 0),
@@ -309,6 +319,15 @@ class Settings:
             dm_identity_provider=os.getenv("DMS_DM_IDENTITY_PROVIDER", "ldap"),
             dm_min_uid=int(os.getenv("DMS_DM_MIN_UID", "1000")),
             dm_min_gid=int(os.getenv("DMS_DM_MIN_GID", "1000")),
+            dm_identity_probe_wait_seconds=float(
+                os.getenv("DMS_DM_IDENTITY_PROBE_WAIT_SECONDS", "90")
+            ),
+            dm_identity_probe_poll_seconds=float(
+                os.getenv("DMS_DM_IDENTITY_PROBE_POLL_SECONDS", "5")
+            ),
+            dm_identity_probe_target_ttl_seconds=int(
+                os.getenv("DMS_DM_IDENTITY_PROBE_TARGET_TTL_SECONDS", "3600")
+            ),
             dm_allow_root_requester=_bool_env("DMS_DM_ALLOW_ROOT_REQUESTER", True),
             dm_privileged_requesters=_csv_set_env(
                 "DMS_DM_PRIVILEGED_REQUESTERS", "root"

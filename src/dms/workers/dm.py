@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -27,6 +28,15 @@ class DMWorkerRuntime:
     # against this threshold (O(#nodes)) — never from a stored Fresh->Stale column sweep
     # or a dead node. Injected from settings.agent_report_stale_seconds in cli.py.
     agent_report_stale_seconds: int = 300
+    # On-demand identity probing (see repositories.operational): after a successful
+    # LDAP resolve the worker registers the posix username as a probe target and —
+    # when no fresh DM node has identity evidence yet — waits up to
+    # identity_probe_wait_seconds (polling every identity_probe_poll_seconds) for an
+    # agent cycle to deliver it. Dataclass default is 0 (no wait) so directly-built
+    # runtimes (tests) keep pre-feature timing; production gets the real value from
+    # settings.dm_identity_probe_* via cli.py.
+    identity_probe_wait_seconds: float = 0.0
+    identity_probe_poll_seconds: float = 5.0
     # Read-only LDAP identity lookup (replaces the identity_mappings table). None when
     # LDAP is unconfigured -> DM fails closed with `ldap_not_configured`.
     identity_lookup: Any = None
@@ -668,6 +678,49 @@ class DMWorkerRuntime:
             correlation_id=plan["request_id"],
         )
 
+    def _await_identity_evidence(self, posix_username: str) -> None:
+        """Block (bounded) until identity evidence for the user has propagated to ALL
+        fresh DM nodes. Covers the on-demand window: a first-ever requester has no
+        evidence yet; agents pick the probe target up on their next report cycle.
+
+        Waiting for FULL coverage (not just the first node) matters: candidate
+        selection needs the job's node count, so returning after only one node has
+        evidence can still fail preflight with ``insufficient_eligible_nodes`` while
+        probing is mid-propagation. On timeout simply return — selection / preflight
+        then rejects with the precise per-node reason exactly as before (fail-closed
+        unchanged)."""
+        wait = float(self.identity_probe_wait_seconds or 0)
+        if wait <= 0:
+            return
+        poll = max(0.2, float(self.identity_probe_poll_seconds or 5.0))
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                reports = _fresh_dm_reports(
+                    self.repository, self.agent_report_stale_seconds
+                )
+            except Exception:  # noqa: BLE001
+                reports = []
+            dm_nodes = [
+                r for r in reports if r.get("worker_role") == WorkerRole.DM.value
+            ]
+            ready = sum(
+                1
+                for r in dm_nodes
+                if _identity_ready(
+                    (r.get("report") or {}).get("identity_evidence") or {},
+                    posix_username,
+                )
+            )
+            # Every fresh DM node in the candidate pool now has evidence -> the wait
+            # has served its purpose; proceed (steady-state repeat requesters hit this
+            # on the first poll with zero added latency).
+            if dm_nodes and ready >= len(dm_nodes):
+                return
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+
     def _resolve_identity(self, request: dict[str, Any]) -> dict[str, Any]:
         """Resolve the requester's POSIX identity by a READ-ONLY LDAP lookup at preflight
         time (no cache: LDAP down -> fail closed). Returns either a Rejected dict (which
@@ -761,6 +814,15 @@ class DMWorkerRuntime:
             )
 
         self._record_identity_event("data_job_identity_resolved", "INFO", requester_id, owner_username, {"uid": result.uid, "gid": result.primary_gid})
+        # On-demand probing: make agents pick this username up on their next cycle,
+        # and give the evidence a bounded window to arrive before node gating runs
+        # (fail-soft: registration/wait problems never reject the job here — the
+        # per-node identity gate downstream stays authoritative).
+        try:
+            self.repository.register_identity_probe_target(result.posix_username)
+        except Exception:  # noqa: BLE001
+            pass
+        self._await_identity_evidence(result.posix_username)
         return {
             "requester_id": requester_id,
             "owner_username": owner_username,

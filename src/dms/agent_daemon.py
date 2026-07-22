@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import socket
 import ssl
@@ -258,6 +259,7 @@ def build_agent_report(
     *,
     kubernetes_client: Any | None = None,
     now: datetime | None = None,
+    dynamic_identity_users: list[str] | None = None,
 ) -> dict[str, Any]:
     checked_at = (now or datetime.now(UTC)).isoformat()
     kubernetes_client = kubernetes_client or InClusterKubernetesClient.from_env(
@@ -283,7 +285,9 @@ def build_agent_report(
         timeout_seconds=config.report_timeout_seconds,
         checked_at=checked_at,
     )
-    identities = probe_identities(config.identity_users)
+    identities = probe_identities(
+        merge_identity_users(config.identity_users, dynamic_identity_users)
+    )
     os_metrics = probe_os_metrics()
     identity_evidence: dict[str, Any] = {
         "source": "agent-prober",
@@ -613,32 +617,145 @@ def probe_networks(
     return evidence
 
 
-def probe_identities(users: list[str]) -> list[dict[str, Any]]:
+# POSIX username shape (mirrors domain.py owner_username): probing shells out /
+# parses files, so never probe an unvalidated name.
+_IDENTITY_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,63}$")
+
+# Bound how many on-demand names one report cycle probes/carries.
+MAX_IDENTITY_PROBE_USERS = 100
+
+
+def merge_identity_users(
+    static_users: list[str], dynamic_users: list[str] | None
+) -> list[str]:
+    """Static DMS_AGENT_IDENTITY_USERS baseline + on-demand targets from the last
+    report-POST response — validated, de-duplicated (order-preserving), bounded."""
+    merged: list[str] = []
+    for username in [*static_users, *(dynamic_users or [])]:
+        name = (username or "").strip()
+        if not name or name in merged or not _IDENTITY_USER_RE.match(name):
+            continue
+        merged.append(name)
+        if len(merged) >= MAX_IDENTITY_PROBE_USERS:
+            break
+    return merged
+
+
+def _host_getent_identity(username: str, root: str) -> dict[str, Any] | None:
+    """Resolve through the HOST's NSS stack (`chroot <root> getent ...`) — the node
+    answer, including SSSD/LDAP-backed users the agent image itself cannot resolve.
+    Needs root + CAP_SYS_CHROOT in the agent container; returns None when that is
+    unavailable (non-privileged DaemonSet) so callers fall through."""
+    try:
+        proc = subprocess.run(
+            ["chroot", root, "getent", "passwd", "--", username],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode != 0:
+            return None
+        parts = proc.stdout.strip().split(":")
+        if len(parts) < 4:
+            return None
+        uid, gid = int(parts[2]), int(parts[3])
+        groups: list[str] = []
+        grp_proc = subprocess.run(
+            ["chroot", root, "id", "-nG", "--", username],
+            capture_output=True, text=True, timeout=5,
+        )
+        if grp_proc.returncode == 0:
+            groups = grp_proc.stdout.split()
+        return {"username": username, "status": "Ready", "uid": uid, "gid": gid,
+                "groups": groups}
+    except Exception:  # noqa: BLE001 - fail-soft to the next layer
+        return None
+
+
+def _host_files_identity(username: str, root: str) -> dict[str, Any] | None:
+    """Resolve from the host's /etc/passwd + /etc/group files through the host-root
+    mount. Covers node-LOCAL users without any container privilege; SSSD/LDAP-backed
+    node users need the chroot layer instead."""
+    try:
+        entry = None
+        with open(f"{root}/etc/passwd", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split(":")
+                if len(parts) >= 4 and parts[0] == username:
+                    entry = (int(parts[2]), int(parts[3]))
+                    break
+        if entry is None:
+            return None
+        groups: list[str] = []
+        try:
+            with open(f"{root}/etc/group", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split(":")
+                    if len(parts) >= 4 and username in parts[3].split(","):
+                        groups.append(parts[0])
+        except OSError:
+            pass
+        return {"username": username, "status": "Ready", "uid": entry[0],
+                "gid": entry[1], "groups": groups}
+    except Exception:  # noqa: BLE001 - fail-soft to the next layer
+        return None
+
+
+def probe_identities(
+    users: list[str], host_root: str | None = None
+) -> list[dict[str, Any]]:
+    """Per-user identity evidence, layered: host NSS via chroot-getent (privileged
+    agents) -> host /etc/passwd files (any agent with the host-root mount) -> the
+    agent container's own NSS (legacy behavior). First layer that resolves wins, so
+    evidence reflects the NODE whenever the host mount is available."""
+    root = host_root or os.environ.get("DMS_AGENT_HOST_ROOT")
     evidence = []
     for username in users:
-        try:
-            entry = pwd.getpwnam(username)
-            groups = [
-                group.gr_name for group in grp.getgrall() if username in group.gr_mem
-            ]
+        if not _IDENTITY_USER_RE.match(username or ""):
             evidence.append(
-                {
+                {"username": username, "status": "Missing",
+                 "reason": "invalid username (not probed)"}
+            )
+            continue
+        resolved = None
+        if root:
+            resolved = _host_getent_identity(username, root) or _host_files_identity(
+                username, root
+            )
+        if resolved is None:
+            try:
+                entry = pwd.getpwnam(username)
+                resolved = {
                     "username": username,
                     "status": "Ready",
                     "uid": entry.pw_uid,
                     "gid": entry.pw_gid,
-                    "groups": groups,
+                    "groups": [
+                        group.gr_name
+                        for group in grp.getgrall()
+                        if username in group.gr_mem
+                    ],
                 }
-            )
-        except KeyError:
+            except KeyError:
+                resolved = None
+        if resolved is None:
             evidence.append(
                 {
                     "username": username,
                     "status": "Missing",
-                    "reason": "user not found by local NSS lookup",
+                    "reason": "user not found by host or local NSS lookup",
                 }
             )
+        else:
+            evidence.append(resolved)
     return evidence
+
+
+def extract_identity_probe_targets(post_result: dict[str, Any]) -> list[str]:
+    """Validated on-demand usernames from the report-POST response (fail-soft:
+    absent/garbage -> []). Old APIs without the field keep agents fully working."""
+    raw = post_result.get("identity_probe_targets")
+    if not isinstance(raw, list):
+        return []
+    return merge_identity_users([], [u for u in raw if isinstance(u, str)])
 
 
 def post_report(config: AgentDaemonConfig, report: dict[str, Any]) -> dict[str, Any]:
@@ -669,12 +786,18 @@ def post_report(config: AgentDaemonConfig, report: dict[str, Any]) -> dict[str, 
 
 
 def run_loop(config: AgentDaemonConfig) -> int:
+    # On-demand identity probe targets from the LAST report-POST response — the DM
+    # worker registers requesters it needs evidence for; we probe them next cycle.
+    dynamic_identity_users: list[str] = []
     while True:
         started = datetime.now(UTC).isoformat()
         try:
-            report = build_agent_report(config)
+            report = build_agent_report(
+                config, dynamic_identity_users=dynamic_identity_users
+            )
             result = post_report(config, report)
-            _log({"event": "agent_report_posted", "started_at": started, **result})
+            dynamic_identity_users = extract_identity_probe_targets(result)
+            _log({"event": "agent_report_posted", "started_at": started, **{k: v for k, v in result.items() if k != "identity_probe_targets"}, "identity_probe_targets": len(dynamic_identity_users)})
         except Exception as exc:
             _log(
                 {
