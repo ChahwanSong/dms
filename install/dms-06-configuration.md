@@ -205,6 +205,11 @@ DM 잡은 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)의 클러스터 p
 | `DMS_DM_MONITOR_POLL_SECONDS` | `5` | VolcanoJob 상태 polling interval. |
 | `DMS_DM_JOB_DELETE_ON_TERMINAL` | `false` | terminal VolcanoJob cleanup 정책. |
 
+> 위 타임아웃은 잡이 **정상 실행 중 너무 오래 걸릴 때**의 상한이다. 런처가 **실패**하면(예: MPI
+> 기동 오류) VolcanoJob이 `PodFailed → AbortJob` 정책으로 즉시 종료되어 dm-worker가 수 초 내 실패
+> 처리한다 — 타임아웃까지 "Running"으로 매달리지 않는다. 또한 런처는 워커 sshd가 실제로 응답할
+> 때까지 대기(SSH 준비 배리어)한 뒤 mpirun을 띄우므로 sshd 기동 레이스로 인한 간헐적 실패를 피한다.
+
 **Queue / PriorityClass / fan-out 부트스트랩** — node/process default·max의 source of truth는 DB `data_management_policies` table/API다. 아래 env는 **bootstrap default**로만 쓴다.
 
 | 변수 | 기본값 | 설명 |
@@ -226,6 +231,9 @@ DM 잡은 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)의 클러스터 p
 | --- | --- | --- |
 | `DMS_DM_MIN_UID` | `1000` | 비-privileged LDAP 신원 uid 하한. 미만(또는 uid 0)이면 `uid_below_floor` 거부 — root pod 안 `runuser` 강하 전에 시스템 계정 실행 차단. |
 | `DMS_DM_MIN_GID` | `1000` | 비-privileged gid 하한. |
+| `DMS_DM_IDENTITY_PROBE_WAIT_SECONDS` | `90` | **온디맨드 프로빙** — 신원 resolve 직후 어떤 fresh DM 노드에도 그 사용자 증거가 없으면 dm-worker가 증거 전파를 기다리는 최대 시간(초). 첫 요청 사용자도 한 번에 통과하도록 agent report 주기(`DMS_AGENT_REPORT_INTERVAL_SECONDS`, 기본 60s)보다 크게 — 베이스라인 없이 순수 온디맨드로 갈 땐 2×(≈150s) 권장. `0`=대기 없음(등록만). |
+| `DMS_DM_IDENTITY_PROBE_POLL_SECONDS` | `5` | 위 대기 중 fresh 리포트 재확인 주기(초). |
+| `DMS_DM_IDENTITY_PROBE_TARGET_TTL_SECONDS` | `3600` | 등록된 probe 대상을 agent에 배포하는 유효기간(초). 만료 행은 조회 시 정리. 동시 활성 요청자가 많아도 상한(최근순 100)만 프로빙하므로 대규모 디렉터리에서도 부하 일정. |
 | `DMS_DM_ALLOW_ROOT_REQUESTER` | `true` | 운영자 root(privileged) 실행 허용. requester_id/owner_username이 `DMS_DM_PRIVILEGED_REQUESTERS`에 속하면 uid/gid 0으로 합성 실행(LDAP·uid floor 우회). **`DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 경로에서만 실동작**(평문 root 요청은 403). denylist는 kill-switch로 유지. |
 | `DMS_DM_PRIVILEGED_REQUESTERS` | `root` | 합성 root로 실행할 requester allowlist(쉼표). |
 | `DMS_DM_PRIVILEGED_UID` / `DMS_DM_PRIVILEGED_GID` | `0` / `0` | privileged 요청에 합성할 uid/gid. |
@@ -246,11 +254,8 @@ DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-
 | `DMS_AGENT_CLUSTER_NAME` | 없음 | 예 | logical cluster name. storage mapping·kubeconfig JSON key와 일치. |
 | `DMS_AGENT_WORKER_ROLE` | 없음 | 예 | `RM` 또는 `DM`. |
 | `DMS_AGENT_MOUNTINFO_PATH` | `/proc/self/mountinfo` | 컨테이너 배포시 사실상 필수 | 마운트 존재/Ready 판정에 읽는 mount table. 기본값은 **컨테이너 자신의 마운트**라 노드 스토리지가 안 보여 **모든 storage Missing → readiness false**. 아래 bind-mount로 `/host/proc/1/mountinfo`를 가리켜야 함. |
-| `DMS_AGENT_HOST_ROOT` | 설정 안 됨(권장 `/host`) | 아니오 | 호스트 root fs 마운트 경로. per-node/mount 용량(statvfs) 리포트용. readiness 자체는 mountinfo로 판정. |
-| `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 chroot-getent(특권 agent) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. |
-| `DMS_DM_IDENTITY_PROBE_WAIT_SECONDS` | `90` | 선택 | 신원 resolve 직후, 어떤 fresh DM 노드에도 해당 사용자 증거가 없을 때 dm-worker가 증거 도착을 기다리는 최대 시간(초). 첫 요청인 사용자도 한 번에 통과하도록 agent 사이클(기본 60s)보다 크게. `0` = 대기 없음(등록만). |
-| `DMS_DM_IDENTITY_PROBE_POLL_SECONDS` | `5` | 선택 | 위 대기 중 fresh 리포트 재확인 주기(초). |
-| `DMS_DM_IDENTITY_PROBE_TARGET_TTL_SECONDS` | `3600` | 선택 | 등록된 probe 대상이 agent에 배포되는 유효기간(초). 만료 행은 조회 시 정리. |
+| `DMS_AGENT_HOST_ROOT` | 설정 안 됨(권장 `/host`) | DM 에이전트 사실상 필수 | 호스트 root fs 마운트 경로(`/host` bind-mount, 아래 참조). ① per-node/mount 용량(statvfs) 리포트, ② **온디맨드 신원 프로빙의 호스트 해석 루트** — `chroot $HOST_ROOT getent`(SSSD/LDAP 유저, `SYS_CHROOT` 필요)와 `$HOST_ROOT/etc/passwd`(노드-로컬 유저) 계층이 이 경로를 쓴다. 미설정 시 두 호스트 계층이 건너뛰어져 **컨테이너 NSS만** 남아 노드 사용자를 해석 못 한다. readiness 판정 자체는 mountinfo. |
+| `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 `chroot /host getent`(SSSD/LDAP 유저용, agent에 **`SYS_CHROOT`** 필요) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. **온디맨드 튜닝(`DMS_DM_IDENTITY_PROBE_*`)은 agent가 아니라 dm-worker 설정 → §7**. |
 | `DMS_AGENT_REPORT_INTERVAL_SECONDS` | `60` | 아니오 | report 주기. |
 | `DMS_AGENT_REPORT_TIMEOUT_SECONDS` | `5` | 아니오 | report POST timeout. |
 | `DMS_AGENT_TOOLS` | `dsync,nsync,drm,dscan,kubectl` | 아니오 | tool probe 목록(쉼표). |

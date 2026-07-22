@@ -125,13 +125,21 @@ psql "postgresql://dms_obs:<강한-OBS-비밀번호>@postgres.example.internal:5
 
 DM 잡은 **요청자의 POSIX 신원(uid/gid)** 으로 실행되므로, **DM 잡 노드**에서:
 
-- `dms-dm-agent`가 `DMS_AGENT_IDENTITY_USERS`에 나열된 사용자를 `getpwnam`으로 확인할 수 있어야
-  한다(안 되면 `identity_not_ready_on_node`).
-- 잡 이미지 안에서 `runuser`/`chown`이 그 사용자를 해석할 수 있어야 한다.
+- `dms-dm-agent`가 요청자 계정을 신원-Ready로 확인할 수 있어야 한다(안 되면
+  `identity_not_ready_on_node`). agent는 계층형으로 해석한다: 호스트 `chroot /host getent`
+  → 호스트 `/etc/passwd`(host-root 마운트) → 컨테이너 NSS. `DMS_AGENT_IDENTITY_USERS`는
+  상시 프로빙할 **베이스라인**일 뿐이고, 목록에 없는 요청자도 **온디맨드 프로빙**으로 자동
+  확보된다(dm-worker가 요청 시 등록 → agent가 다음 사이클에 프로빙; `dms-05-dm-jobs.md §3`).
+- **SSSD/LDAP-backed 노드 유저**를 프로빙하려면 `dms-dm-agent`에 **`SYS_CHROOT` capability**가
+  필요하다(호스트 NSS 전체를 `chroot /host getent`로 조회 — nss_sss 포함). 노드-로컬
+  `/etc/passwd` 유저는 host-root 마운트만으로 해석되어 capability가 필요 없다.
+- 잡 이미지에는 NSS/LDAP이 없어도 된다 — dm-worker가 해석한 uid/gid로 잡 파드가 부팅 시
+  요청자를 컨테이너 `/etc/passwd`에 **물질화**하므로 `runuser`/`chown`이 그 이름을 로컬에서
+  해석한다.
 
-→ DM 노드 OS에 **NSS/SSSD(또는 동등한 디렉터리 연동)** 를 구성해 요청자 계정이 해석되게 한다.
-(LDAP는 preflight에서 dm-worker가 read-only로 조회하는 별도 경로다 — DM 신원 3요건은
-`dms-05-dm-jobs.md`.)
+→ DM 노드 OS에 **NSS/SSSD(또는 동등한 디렉터리 연동)** 를 구성해 요청자 계정이 노드에서
+해석되게 한다. (LDAP는 preflight에서 dm-worker가 read-only로 조회하는 별도 경로다 — DM
+신원 3요건은 `dms-05-dm-jobs.md`.)
 
 > 파일시스템 **RM**도 노드 SSSD에 의존한다 — RM이 만든 `dms-grp-*` 그룹 멤버십이 전 노드에서 제때
 > 보이도록 SSSD 캐시(`entry_cache_timeout`)를 낮춘다. 절차는 `dms-03-rm-filesystem.md`.

@@ -156,8 +156,15 @@ DM 잡 pod는 요청자의 POSIX uid/gid로 실행되고, 잡 스크립트가 `c
   `identity_not_ready_on_node`로 거부(fail-closed 불변).
 - 나열한(또는 온디맨드로 프로빙되는) 유저는 **노드 OS에서 실제로 해석**돼야 한다 → DM 노드에
   **NSS/SSSD**(또는 동등한 디렉터리 연동)를 구성한다(프리렉 상세는
-  [dms-01 §노드 신원 해석](dms-01-prerequisites.md)). agent의 계층형 프로빙은 노드의 chroot-getent →
-  호스트 `/etc/passwd` → 컨테이너 NSS 순으로 해석한다.
+  [dms-01 §노드 신원 해석](dms-01-prerequisites.md)). agent의 계층형 프로빙은 노드의 `chroot /host getent`
+  → 호스트 `/etc/passwd`(host-root 마운트) → 컨테이너 NSS 순으로 해석한다. **SSSD/LDAP-backed 노드
+  유저**(파일에 없고 nss_sss로만 해석되는 계정)를 프로빙하려면 `dms-dm-agent`에 **`SYS_CHROOT`
+  capability**가 필요하다(chroot 계층이 호스트 NSS 전체를 조회). 노드-로컬 `/etc/passwd` 유저는
+  host-root 마운트만으로 해석되어 capability가 필요 없다.
+- **대규모 디렉터리(예: 10만 유저)**: 프로빙은 디렉터리 전체가 아니라 **최근 요청자(TTL 내, 상한 100)**
+  만 지목 조회하므로 디렉터리 크기와 무관하다. 지목 조회는 인덱스 기반이라 단건 비용이 일정하고,
+  SSSD 캐시로 반복 프로빙은 대부분 캐시 히트다. 노드 SSSD는 `enumerate = false`(기본)를 유지해
+  SSSD가 전체를 주기적으로 끌어오지 않게 한다.
 - **잡 이미지에는 NSS/LDAP이 없어도 된다**: dm-worker가 이미 해석한 uid/gid로 잡 pod가 부팅 시
   요청자를 컨테이너 `/etc/passwd`에 **물질화**(root-only·멱등, 로그인 셸 `/bin/sh`)하므로
   `runuser`/`chown`/`sshd`가 그 이름을 로컬에서 해석한다. MPI 랭크 간 SSH는 키 인증만 쓰므로 잡
@@ -332,11 +339,16 @@ DMS_DM_POLICY_MAX_PROCESSES_PER_NODE: "10"           #                최대
 일반 사용자 DM 잡이 실행되려면 **세 가지가 모두** 갖춰져야 한다:
 
 1. **LDAP** (`DMS_LDAP_*`, §4)로 요청자 POSIX 신원(uid/gid/groups)이 해석되고,
-2. 요청자가 각 DM 노드의 **`DMS_AGENT_IDENTITY_USERS`** 에 있으며 노드 **NSS/SSSD**로 해석되고(§3),
+2. 잡이 도는 노드의 **agent 신원 증거**에 그 사용자가 있고(§3) — `DMS_AGENT_IDENTITY_USERS`
+   베이스라인 또는 **온디맨드 프로빙**(요청 시 자동 등록·프로빙; `DMS_DM_IDENTITY_PROBE_*`)으로
+   확보되며, 노드가 실제로 그 계정을 해석할 수 있어야 하고(로컬 `/etc/passwd` 또는 SSSD;
+   SSSD 유저는 agent에 `SYS_CHROOT` 필요),
 3. 해석된 uid/gid가 **하한 이상**이어야 한다 — `DMS_DM_MIN_UID`/`DMS_DM_MIN_GID`(기본 `1000`,
    control-plane.yaml에 미기재 = 기본 사용). 미만(시스템/root 계정)이면 `uid_below_floor`로 거부.
 
 하나라도 빠지면 preflight에서 `ldap_*` / `identity_not_ready_on_node` / `uid_below_floor`로 거부된다.
+요청자가 목록에 없어도 온디맨드 프로빙이 보충하므로 `DMS_AGENT_IDENTITY_USERS`는 **선택**이다
+(자세한 동작·튜닝은 §3).
 
 ### 9.2 운영자 root 경로 (특권)
 
