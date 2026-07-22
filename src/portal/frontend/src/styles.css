@@ -810,6 +810,25 @@ button.ghost {
    the KPI row + bento grid give the dashboard its aligned checkerboard layout, and
    the same .ui-card shell wraps every section on every screen for one visual language.
    ============================================================================ */
+/* Uniform vertical rhythm between stacked sections on EVERY screen (VOC, scan, sync,
+   storage, worker nodes, dashboard …). .inventory wraps each screen; making it a
+   flex column with the overview dashboard's .dash-stack gap (0.9rem) means cards no
+   longer touch and every screen reads with one consistent spacing. */
+.inventory {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.inventory > * {
+  min-width: 0; /* let wide children (tables/charts) scroll inside instead of pushing */
+  /* Neutralize per-element vertical margins (banners like .agent-rollout, .dash-section,
+     description <p>, etc.) so the 0.9rem flex gap is the SINGLE source of vertical rhythm.
+     !important enforces this container-level layout contract over later same-specificity
+     class rules — every screen then matches the dashboard's uniform card spacing. Only
+     DIRECT children are affected; margins inside cards are untouched. */
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
 .ui-card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -3027,6 +3046,8 @@ button.brand-link:focus-visible { outline: 2px solid var(--accent); outline-offs
 .voc-answer .voc-body { border-left: 3px solid var(--accent); }
 .voc-answer-label { display: flex; flex-direction: column; gap: 0.3rem; }
 .voc-answer-label textarea, .voc-body-input { resize: vertical; font-size: 0.88rem; line-height: 1.5; }
+/* 분류 드롭다운은 짧은 항목뿐이라 전폭 대신 컴팩트하게 (제목·내용은 전폭). */
+.voc-form-cat { max-width: 20rem; }
 .voc-actions { display: flex; gap: 0.45rem; justify-content: flex-end; }
 .voc-tabs { display: flex; gap: 0.4rem; }
 .voc-tabs .mini { display: inline-flex; align-items: center; gap: 0.35rem; }

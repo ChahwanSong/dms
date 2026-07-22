@@ -94,33 +94,31 @@ export default function UserVocTab() {
         <div className="ui-card-bd">
           <div className="ui-card-div" />
           <div className="form">
-            <div className="storage-row">
-              <label>
-                <span>분류 (선택)</span>
-                <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                  <option value="">선택 안 함</option>
-                  {categories.map((c) => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>제목 *</span>
-                <input
-                  value={title}
-                  maxLength={200}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="예: 프로젝트 알파 경로 스캔 요청"
-                />
-              </label>
-            </div>
+            <label className="voc-form-cat">
+              <span>분류 (선택)</span>
+              <select value={category} onChange={(e) => setCategory(e.target.value)}>
+                <option value="">선택 안 함</option>
+                {categories.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>제목 *</span>
+              <input
+                value={title}
+                maxLength={200}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="예: 프로젝트 알파 경로 스캔 요청"
+              />
+            </label>
             <label>
               <span>내용 *</span>
               <textarea
                 className="voc-body-input"
                 value={body}
                 maxLength={4000}
-                rows={5}
+                rows={10}
                 onChange={(e) => setBody(e.target.value)}
                 placeholder="요청/문의 내용을 자세히 적어주세요. 경로·스토리지 등 구체적일수록 처리가 빠릅니다."
               />
