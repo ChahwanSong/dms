@@ -256,6 +256,11 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 3. 평문 `x-dms-actor` 헤더는 **신뢰되지 않는다**. `DMS_DEFAULT_ACTOR`는 비어 있어야 하며, 설정 시
    API가 기동에 실패한다(§3).
 4. (선택) `DMS_AUTH_SHARED_TOKEN`을 얹으면 mTLS에 더해 `Authorization: Bearer <token>`도 요구된다.
+5. **DMS는 evidence 헤더(`ssl-client-*`)를 무조건 신뢰**하므로, `dms-api`는 **cert를 종단하는 ingress만**
+   닿아야 한다 — 안 그러면 in-cluster 아무 파드나 그 헤더를 스푸핑해 operator actor를 위조할 수 있다.
+   이를 **`dms-api-from-ingress-only` NetworkPolicy**(`control-plane.yaml`에 포함, §5 apply 시 함께 적용)가
+   강제한다: `dms-api` ingress를 `ingress-nginx` 네임스페이스에서만 허용. **cert 종단 지점이 다르면**
+   (다른 proxy·네임스페이스) 그 `namespaceSelector`/`podSelector`를 실제 진입점에 맞게 고친다.
 
 따라서 프로덕션 curl은 **client cert + server CA**를 쓰고 `x-dms-actor`는 보내지 않는다(§8).
 
