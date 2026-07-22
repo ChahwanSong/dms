@@ -1713,6 +1713,11 @@ class KubernetesVolcanoAdapter:
                     "app.kubernetes.io/name": "dms-data-management",
                     "dms.openai.com/data-job-id": data_job["job_id"],
                     "dms.openai.com/request-id": data_job["request_id"],
+                    # data-tool on the JOB metadata (not just the pod templates) so the
+                    # operations/dashboard status reader — which reads job labels — can
+                    # show the request kind. sync/rm/nsync jobs already set it; scan
+                    # was the one omission, surfacing as "요청 종류 ?" on the dashboard.
+                    "dms.openai.com/data-tool": "dscan",
                 },
             },
             "spec": {

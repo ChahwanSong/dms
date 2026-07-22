@@ -402,6 +402,9 @@ def test_kubernetes_scan_manifest_uses_identity_security_context():
     }
 
     manifest = adapter._manifest(plan, data_job)
+    # data-tool must be on the JOB metadata (the dashboard status reader reads job
+    # labels) — not only on the pod templates; else 요청 종류 shows "?".
+    assert manifest["metadata"]["labels"]["dms.openai.com/data-tool"] == "dscan"
     tasks = {task["name"]: task for task in manifest["spec"]["tasks"]}
     assert set(tasks) == {"launcher", "worker"}
     assert manifest["spec"]["minAvailable"] == 2
