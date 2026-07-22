@@ -1057,6 +1057,10 @@ button.ghost {
 /* --- time-series hover layer (crosshair + focus dots + tooltip) --- */
 .ts-plot {
   position: relative;
+  margin-top: 0.4rem; /* moved off .ts-svg so tooltip top maps 1:1 to viewBox y */
+}
+.ts-svg {
+  margin-top: 0;
 }
 .ts-svg:focus-visible {
   outline: 2px solid var(--accent);
@@ -1072,13 +1076,11 @@ button.ghost {
   stroke-dasharray: 3 4;
   opacity: 0.45;
 }
-.ts-dot {
-  stroke: var(--bg);
-  stroke-width: 2;
+.ts-focus circle {
+  transition: none;
 }
 .ts-tip {
   position: absolute;
-  top: 0.55rem;
   z-index: 4;
   pointer-events: none;
   min-width: 8.75rem;
@@ -1096,9 +1098,6 @@ button.ghost {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-.ts-tip-c { transform: translateX(-50%); }
-.ts-tip-l { transform: translateX(-14px); }
-.ts-tip-r { transform: translateX(calc(-100% + 10px)); }
 .ts-tip-t {
   display: flex;
   align-items: baseline;

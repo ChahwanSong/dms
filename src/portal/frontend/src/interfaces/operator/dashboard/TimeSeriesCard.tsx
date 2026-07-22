@@ -42,17 +42,33 @@ function tipTime(iso: string | undefined, sec: number): string {
   return `${d.toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })} ${hm}`;
 }
 
+// Nice integer y-axis ticks: ~4 intervals, a 1/2/5×10ⁿ step, distinct labels (so a
+// max of 1 reads 0·1 — never 0,0,1,1,1). Returns the scale top + the tick values.
+function niceScale(rawMax: number): { top: number; ticks: number[] } {
+  const m = Math.max(rawMax, 1);
+  const rough = m / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / mag;
+  const step = Math.max(1, (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag);
+  const top = Math.ceil(m / step) * step;
+  const ticks: number[] = [];
+  for (let v = 0; v <= top + 1e-9; v += step) ticks.push(Math.round(v));
+  return { top, ticks };
+}
+
 // The viewBox width tracks the measured render width (w), so the SVG maps 1:1 to CSS
 // pixels — no horizontal stretch, so axis text stays crisp and endpoint dots stay round.
 function Chart({
   reqV, jobV, times, sec, w,
 }: { reqV: number[]; jobV: number[]; times: (string | undefined)[]; sec: number; w: number }) {
-  const [hi, setHi] = useState<number | null>(null);
+  // hover = snapped sample index + the cursor's y (viewBox units) so the readout box
+  // tracks the pointer instead of sitting at a fixed height.
+  const [hov, setHov] = useState<{ i: number; cy: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const n = Math.max(reqV.length, jobV.length);
-  const mx = Math.max(1, ...reqV, ...jobV) * 1.15;
+  const { top: scaleMax, ticks } = niceScale(Math.max(0, ...reqV, ...jobV));
   const xAt = (i: number, len: number) => (len <= 1 ? PL : PL + (i * (w - PL - PR)) / (len - 1));
-  const yAt = (v: number) => PT + (1 - v / mx) * (H - PT - PB);
+  const yAt = (v: number) => PT + (1 - v / scaleMax) * (H - PT - PB);
   const line = (v: number[]) => v.map((x, i) => `${i ? "L" : "M"}${xAt(i, v.length).toFixed(1)} ${yAt(x).toFixed(1)}`).join(" ");
   const area = (v: number[]) => (v.length ? `${line(v)} L${xAt(v.length - 1, v.length).toFixed(1)} ${H - PB} L${PL} ${H - PB} Z` : "");
   const xl = xLabels(sec), step = (w - PL - PR) / (xl.length - 1);
@@ -75,27 +91,41 @@ function Chart({
     const i = Math.round(((vx - PL) / (w - PL - PR)) * (n - 1));
     return Math.max(0, Math.min(n - 1, i));
   };
-  const onMove = (e: React.PointerEvent) => setHi(idxFromClientX(e.clientX));
-  const onLeave = () => setHi(null);
+  const onMove = (e: React.PointerEvent) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const r = svg.getBoundingClientRect();
+    const cy = (e.clientY - r.top) * (H / (r.height || H));
+    setHov({ i: idxFromClientX(e.clientX), cy: Math.max(PT, Math.min(H - PB, cy)) });
+  };
+  const onLeave = () => setHov(null);
   // Keyboard: same readout on focus as hover — arrows walk samples, Home/End jump,
-  // Esc clears. Focusing an un-hovered chart lands on the latest sample.
+  // Esc clears. Without a pointer, anchor the box to the higher of the two points.
+  const anchorCy = (i: number) => {
+    const ys = [reqV[i], jobV[i]].filter((v): v is number => v != null).map(yAt);
+    return ys.length ? Math.min(...ys) : PT;
+  };
   const onKey = (e: React.KeyboardEvent) => {
     if (n <= 1) return;
-    if (e.key === "Escape") { setHi(null); return; }
-    let cur = hi ?? n - 1;
+    if (e.key === "Escape") { setHov(null); return; }
+    let cur = hov?.i ?? n - 1;
     if (e.key === "ArrowLeft") cur = Math.max(0, cur - 1);
     else if (e.key === "ArrowRight") cur = Math.min(n - 1, cur + 1);
     else if (e.key === "Home") cur = 0;
     else if (e.key === "End") cur = n - 1;
     else return;
     e.preventDefault();
-    setHi(cur);
+    setHov({ i: cur, cy: anchorCy(cur) });
   };
 
-  const active = hi != null && hi < n ? hi : null;
+  const active = hov != null && hov.i < n ? hov.i : null;
   const hx = active != null ? xAt(active, n) : 0;
-  // Flip the tooltip so it never spills past the plot edges.
-  const align = active == null ? "c" : active < n * 0.28 ? "l" : active > n * 0.72 ? "r" : "c";
+  const cy = hov?.cy ?? PT;
+  // Horizontal flip near the edges; vertical flip (box below the cursor) near the top
+  // so the box never spills off the plot and never covers the emphasized point.
+  const alignX = active == null ? "-50%" : active < n * 0.28 ? "-16px" : active > n * 0.72 ? "calc(-100% + 12px)" : "-50%";
+  const below = cy < 96;
+  const tipTransform = `translate(${alignX}, ${below ? "14px" : "calc(-100% - 14px)"})`;
 
   return (
     <div className="ts-plot">
@@ -106,16 +136,16 @@ function Chart({
         role="img"
         tabIndex={0}
         onKeyDown={onKey}
-        onFocus={() => { if (hi == null && n > 1) setHi(n - 1); }}
+        onFocus={() => { if (hov == null && n > 1) setHov({ i: n - 1, cy: anchorCy(n - 1) }); }}
         onBlur={onLeave}
         aria-label="요청 및 진행중 작업 시계열 — 좌우 방향키로 시점 이동"
       >
-        {[0, 1, 2, 3, 4].map((i) => {
-          const y = PT + (i * (H - PT - PB)) / 4;
+        {ticks.map((tk, i) => {
+          const y = yAt(tk);
           return (
             <g key={`g${i}`}>
               <line className="ts-gridline" x1={PL} y1={y} x2={w - PR} y2={y} />
-              <text className="ts-axis" x={PL - 6} y={y + 3} textAnchor="end">{Math.round(mx * (1 - i / 4))}</text>
+              <text className="ts-axis" x={PL - 6} y={y + 3} textAnchor="end">{tk}</text>
             </g>
           );
         })}
@@ -127,8 +157,8 @@ function Chart({
         {active != null && (
           <g className="ts-cursor" aria-hidden>
             <line className="ts-crosshair" x1={hx} y1={PT} x2={hx} y2={H - PB} />
-            {jobV.length > active && <circle className="ts-dot" cx={hx} cy={yAt(jobV[active])} r="4" fill="var(--teal)" />}
-            {reqV.length > active && <circle className="ts-dot" cx={hx} cy={yAt(reqV[active])} r="4" fill="var(--accent)" />}
+            {jobV.length > active && <FocusDot x={hx} y={yAt(jobV[active])} color="var(--teal)" />}
+            {reqV.length > active && <FocusDot x={hx} y={yAt(reqV[active])} color="var(--accent)" />}
           </g>
         )}
         {/* transparent hit layer on top so the whole plot area drives the crosshair */}
@@ -145,7 +175,7 @@ function Chart({
         />
       </svg>
       {active != null && (
-        <div className={`ts-tip ts-tip-${align}`} style={{ left: `${hx}px` }} role="status" aria-live="polite">
+        <div className="ts-tip" style={{ left: `${hx}px`, top: `${cy}px`, transform: tipTransform }} role="status" aria-live="polite">
           <div className="ts-tip-t">
             {tipTime(times[active], sec)}<span className="ts-tip-ago">{fmtAgo(times[active])}</span>
           </div>
@@ -162,6 +192,17 @@ function Chart({
         </div>
       )}
     </div>
+  );
+}
+
+// Emphasized hover point: a soft glow behind a solid dot ringed in the surface color,
+// so the exact (x, y) sample the reader is on stands out from the line.
+function FocusDot({ x, y, color }: { x: number; y: number; color: string }) {
+  return (
+    <g className="ts-focus">
+      <circle cx={x} cy={y} r="8" fill={color} opacity="0.18" />
+      <circle cx={x} cy={y} r="4.5" fill={color} stroke="var(--bg)" strokeWidth="2" />
+    </g>
   );
 }
 
