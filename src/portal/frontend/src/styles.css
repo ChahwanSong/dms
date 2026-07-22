@@ -1054,6 +1054,93 @@ button.ghost {
   text-align: center;
 }
 
+/* --- time-series hover layer (crosshair + focus dots + tooltip) --- */
+.ts-plot {
+  position: relative;
+}
+.ts-svg:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 10px;
+}
+.ts-hit {
+  cursor: crosshair;
+}
+.ts-crosshair {
+  stroke: var(--fg-2);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  opacity: 0.45;
+}
+.ts-dot {
+  stroke: var(--bg);
+  stroke-width: 2;
+}
+.ts-tip {
+  position: absolute;
+  top: 0.55rem;
+  z-index: 4;
+  pointer-events: none;
+  min-width: 8.75rem;
+  padding: 0.5rem 0.6rem 0.55rem;
+  background: var(--card);
+  background: color-mix(in srgb, var(--card) 80%, transparent);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  backdrop-filter: blur(12px) saturate(1.2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+  animation: ts-tip-in 0.12s ease-out;
+}
+@keyframes ts-tip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.ts-tip-c { transform: translateX(-50%); }
+.ts-tip-l { transform: translateX(-14px); }
+.ts-tip-r { transform: translateX(calc(-100% + 10px)); }
+.ts-tip-t {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+  color: var(--fg-2);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.ts-tip-ago {
+  color: var(--faint);
+  font-weight: 400;
+  font-size: 0.66rem;
+}
+.ts-tip-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.13rem 0;
+}
+.ts-tip-key {
+  height: 2px;
+  width: 14px;
+  border-radius: 1px;
+}
+.ts-tip-lbl {
+  color: var(--fg-2);
+  font-size: 0.74rem;
+}
+.ts-tip-val {
+  color: var(--fg);
+  font-weight: 700;
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ts-tip { animation: none; }
+}
+
 .small {
   font-size: 0.8rem;
 }
