@@ -195,8 +195,14 @@ class OperationalMixin:
     def list_identity_probe_targets(
         self, *, ttl_seconds: int, limit: int = 100
     ) -> list[str]:
-        """Usernames requested within the TTL window (sorted, bounded). Expired rows
-        are pruned on read so the table stays tiny."""
+        """The most-recently-requested usernames within the TTL window, bounded.
+        Expired rows are pruned on read so the table stays tiny.
+
+        Ordered by last_requested_at DESC (NOT alphabetically): when more than `limit`
+        distinct requesters are active at once — plausible against a large directory —
+        an alphabetical cap would starve a just-submitted user whose name sorts late
+        (never probed -> no evidence -> job times out). Recency ordering guarantees the
+        newest requesters are always in the probed set. username is a stable tie-break."""
         cutoff = (datetime.now(UTC) - timedelta(seconds=max(0, ttl_seconds))).isoformat()
         with self.database.connect() as connection:
             connection.execute(
@@ -207,7 +213,7 @@ class OperationalMixin:
                 """
                 SELECT username FROM dm_identity_probe_targets
                 WHERE last_requested_at >= ?
-                ORDER BY username
+                ORDER BY last_requested_at DESC, username ASC
                 LIMIT ?
                 """,
                 (cutoff, limit),

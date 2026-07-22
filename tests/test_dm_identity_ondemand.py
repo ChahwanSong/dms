@@ -80,13 +80,28 @@ def test_repo_targets_expire_and_prune(harness):
     assert len(rows) == 1
 
 
-def test_repo_targets_limit(harness):
+def test_repo_targets_limit_keeps_most_recent(harness):
+    # Cap must keep the MOST RECENTLY requested (not alphabetically first): a
+    # late-alphabet user who just submitted must not be starved when >limit users
+    # are active. Set explicit, well-separated timestamps to avoid clock flakiness.
     repo = harness["repository"]
+    now = datetime.now(UTC)
     for i in range(7):
         repo.register_identity_probe_target(f"user{i:02d}")
+    with repo.database.connect() as conn:
+        for i in range(7):
+            conn.execute(
+                "UPDATE dm_identity_probe_targets SET last_requested_at = ? "
+                "WHERE username = ?",
+                ((now - timedelta(seconds=i)).isoformat(), f"user{i:02d}"),
+            )
+    # user00 = newest, user06 = oldest -> top-3 by recency are user00/01/02.
     assert repo.list_identity_probe_targets(ttl_seconds=3600, limit=3) == [
         "user00", "user01", "user02",
     ]
+    # A brand-new (late-alphabet) requester lands at the top, evicting the oldest.
+    repo.register_identity_probe_target("zzz.newcomer")
+    assert repo.list_identity_probe_targets(ttl_seconds=3600, limit=1) == ["zzz.newcomer"]
 
 
 # --- API: report POST 응답 ---------------------------------------------------
