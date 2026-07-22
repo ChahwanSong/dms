@@ -1,25 +1,31 @@
-# Internal-only DMS API instance for NODE AGENT report ingestion.
+# Internal-only DMS API instance for TRUSTED IN-CLUSTER CLIENTS (node agents + portal BFF).
 #
 # WHY: the external dms-api runs the production mTLS profile
-# (DMS_REQUIRE_MTLS_VERIFIED_HEADER=true), where the authenticated actor is derived
-# from the client certificate subject (`mtls:<subject>`). Node agents, however, must
-# authenticate as `node:{cluster}:{node}` (AgentReportIngestionService requires the
-# actor to equal the reported node) — a plain `x-dms-actor: node:...` is rejected as an
-# actor/mTLS conflict, and a cert-derived actor never equals the node identity. So agent
-# reports (and therefore node health, storage readiness, and on-demand identity probing)
-# have no working auth path against the mTLS API.
+# (DMS_REQUIRE_MTLS_VERIFIED_HEADER=true), where the authenticated actor is derived from
+# the client certificate subject (`mtls:<subject>`) and a plaintext `x-dms-actor` is
+# rejected. Two in-cluster clients cannot live with that:
+#   - Node agents must authenticate as `node:{cluster}:{node}` (AgentReportIngestionService
+#     requires the actor to equal the reported node) — no cert subject ever equals that.
+#   - The portal BFF is multi-operator and carries per-operator identity in `x-dms-actor`
+#     (`mtls:<operator>`); one BFF cert would collapse everyone to a single actor.
+# So agent reports (node health, readiness, on-demand identity probing) AND the portal
+# have no workable auth path against the mTLS API.
 #
-# This deployment is a SECOND API process that skips mTLS and instead trusts an
-# in-cluster shared bearer token + the agent-supplied `x-dms-actor: node:...` header. It
-# is reachable ONLY from agent pods (NetworkPolicy below) via a ClusterIP Service, never
-# from outside the cluster. Same code, same databases — only the auth profile differs.
+# This is a SECOND API process that skips mTLS and instead trusts an in-cluster shared
+# bearer token + the client-supplied `x-dms-actor`. It is reachable ONLY from the agent
+# DaemonSets and the portal namespace (NetworkPolicy below) via a ClusterIP Service —
+# never from outside the cluster. Same code, same databases — only the auth profile
+# differs. External operators/automation keep using the mTLS `dms-api`.
 #
 # SECURITY / SCOPE: this exposes the full API surface without mTLS, gated by network
-# isolation + the shared token. A compromised agent pod (which already runs privileged)
-# could impersonate an actor here; the NetworkPolicy + token bound the exposure to the
-# agent DaemonSets. For a tighter boundary (agent-ingest endpoint only) use per-endpoint
-# auth in the app instead. Point agents at this Service and give them the token
-# (see agent-daemonset.yaml: DMS_AGENT_API_URL + DMS_AUTH_SHARED_TOKEN).
+# isolation + the shared token. A compromised trusted pod could impersonate an actor
+# here; the NetworkPolicy + token bound the exposure to those clients. The external
+# dms-api MUST separately be reachable only via the cert-terminating ingress/proxy (the
+# `dms-api-from-ingress-only` NetworkPolicy in control-plane.yaml) — it trusts the
+# `ssl-client-*` evidence headers, so any pod that could reach it directly could spoof an
+# mTLS actor. For a tighter internal boundary (agent-ingest endpoint only) use
+# per-endpoint auth in the app instead. Clients point `*_DMS_API_URL` at this Service and
+# present `DMS_AUTH_SHARED_TOKEN` (agent-daemonset.yaml / portal.yaml).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -106,12 +112,14 @@ spec:
       port: 80
       targetPort: http
 ---
-# Only the node agent DaemonSets may reach the internal API. Everything else (operators,
-# portal, other in-cluster workloads) must use the mTLS-guarded external dms-api.
+# Only TRUSTED in-cluster clients reach the internal API: the node agent DaemonSets and
+# the portal BFF (namespace dms-portal). Everything else — direct operators, external
+# automation — must use the mTLS-guarded external dms-api. External traffic never lands
+# here (ClusterIP + this policy).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: dms-api-internal-agents-only
+  name: dms-api-internal-trusted-clients
   namespace: dms
 spec:
   podSelector:
@@ -121,11 +129,17 @@ spec:
     - Ingress
   ingress:
     - from:
+        # node agents (same namespace)
         - podSelector:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
                 values: ["dms-dm-agent", "dms-rm-agent"]
+        # portal BFF (dms-portal namespace) — trusted multi-operator client that carries
+        # per-operator identity via x-dms-actor, which the mTLS external API can't accept.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: dms-portal
       ports:
         - protocol: TCP
           port: http

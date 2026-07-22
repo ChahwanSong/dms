@@ -66,9 +66,15 @@ spec:
             # once the portal is fronted by TLS.
             - name: PORTAL_SESSION_HTTPS_ONLY
               value: "false"
-            # In-cluster DMS API (service DNS; no node-IP dependency).
+            # DMS API — the portal is a trusted in-cluster BFF, so it talks to the
+            # INTERNAL token-gated plane (dms-api-internal), NOT the external mTLS
+            # dms-api. The external API derives the actor from the client cert
+            # (mtls:<subject>) and rejects the plaintext x-dms-actor the BFF uses to
+            # carry per-operator identity; the internal plane trusts it (shared token +
+            # NetworkPolicy). Same as the node agents. See install/kubernetes/
+            # dms-api-internal.yaml + dms-06 §1/§8.
             - name: PORTAL_DMS_API_URL
-              value: "http://dms-api.dms.svc.cluster.local"
+              value: "http://dms-api-internal.dms.svc.cluster.local"
             # Default DMS audit actor; the BFF overrides per-request with the
             # logged-in operator's username.
             - name: PORTAL_DMS_ACTOR

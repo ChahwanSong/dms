@@ -31,22 +31,28 @@ cd <dms-repo-root>
 
 > 운영자 UI 화면은 자명하므로 이 가이드는 **설치·구성**만 다룬다. 개별 기능 사용법 문서는 별도로 두지 않는다.
 
-## 2. 인증 모델 — production은 mTLS
+## 2. 인증 모델 — 포탈은 내부 신뢰 평면을 쓴다
 
-**운영에서 DMS는 mTLS-verified header profile로 노출된다**(control-plane.yaml:
-`DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`). 신뢰 ingress가 client
-certificate을 검증해 upstream으로 넘기고, DMS는 **인증서 subject에서 actor를 파생**한다(`DMS_MTLS_ACTOR_PREFIX`,
-기본 `mtls:`). 평문 `x-dms-actor`는 신뢰되지 않고 `DMS_DEFAULT_ACTOR`는 비어 있어야 한다.
+**운영에서 외부 DMS(`dms-api`)는 mTLS-verified header profile로 노출된다**(control-plane.yaml:
+`DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`) — 신뢰 ingress가 client
+certificate을 검증해 upstream으로 넘기고 DMS는 **인증서 subject에서 actor를 파생**한다(`mtls:<subject>`),
+평문 `x-dms-actor`는 거부. 이 프로필은 **개별 인증서를 가진 직접 운영자·자동화**에 맞다.
 
-따라서 **포탈 BFF는 DMS에 portal 전용 client certificate을 제시하는 mTLS 클라이언트**로 접속해야 한다(§6.3).
-- 로그인한 운영자는 인증서가 대변하는 `mtls:<…>` actor로 DMS audit에 기록된다.
-- shared bearer token(`PORTAL_DMS_TOKEN` = DMS의 `DMS_AUTH_SHARED_TOKEN`)은 mTLS 위에 **선택적으로** 겹칠 수 있다.
-- 브라우저↔BFF 세션 auth(세션 쿠키)는 BFF 자체 관심사이며, BFF↔DMS mTLS와 분리된다.
+**그런데 포탈 BFF는 이 평면을 쓸 수 없다.** BFF는 다중 운영자를 대신해 **per-operator 신원을
+`x-dms-actor: mtls:<operator>`로 실어 나르는데**, mTLS 프로필은 actor를 (하나뿐인) BFF 인증서 subject로
+덮어써 모든 운영자를 단일 actor로 뭉갠다. 그래서 **포탈은 노드 에이전트와 같은 내부 신뢰 평면
+`dms-api-internal`로 접속한다** — mTLS **off** + shared token + NetworkPolicy(agent + `dms-portal` ns만,
+ClusterIP). 근거·구조는 [`dms-06 §1·§8`](dms-06-configuration.md), 매니페스트
+`install/kubernetes/dms-api-internal.yaml`.
 
-> **(부연) 테스트베드/dev profile.** DMS가 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`로 떠 있으면 client cert
-> 없이 shared bearer token + `x-dms-actor`만으로 접속한다(`PORTAL_DMS_TOKEN` + `PORTAL_DMS_ACTOR`).
-> `portal.yaml` 기본값이 이 프로필(요청/응답 shape 확인·읽기 편의용)이다. **운영 DMS(mTLS-only)에는 이 경로만으로는
-> 접속되지 않으므로** §6.3의 client cert 경로가 필요하다.
+- **`PORTAL_DMS_API_URL` = `http://dms-api-internal.dms.svc.cluster.local`**(portal.yaml 기본값).
+- **`PORTAL_DMS_TOKEN` = DMS `DMS_AUTH_SHARED_TOKEN`**과 동일해야 인증된다(내부 API의 shared-token 게이트).
+- 로그인한 운영자는 BFF가 실어 보내는 `mtls:<operator>` actor로 DMS audit에 남는다(per-operator 보존).
+- 브라우저↔BFF 세션 auth(세션 쿠키)는 BFF 자체 관심사로, BFF↔DMS 경로와 분리된다.
+
+> **보안.** 내부 API는 `x-dms-actor`를 신뢰하므로 노출을 NetworkPolicy + shared token으로 한정한다(외부
+> 트래픽은 절대 닿지 않음). 외부 `dms-api`는 별도로 **cert 종단 ingress만** 닿게 해야 evidence 헤더
+> 스푸핑을 막는다(dms-02 참조). 포탈은 클러스터 변경 권한이 없는 순수 API 클라이언트다.
 
 ## 3. 설치 전에 정할 값
 
@@ -55,10 +61,9 @@ certificate을 검증해 upstream으로 넘기고, DMS는 **인증서 subject에
 | Portal namespace | `dms-portal` | 모든 portal manifest namespace |
 | Container registry | `registry.example.internal` | portal image push/pull |
 | Portal image ref | `registry.example.internal/dms-portal:2026-06-23-abcdef0` | Deployment image |
-| DMS API base(BFF→DMS) | `https://dms.example.internal`(mTLS ingress) 또는 `http://dms-api.dms.svc.cluster.local`(§6.3) | `PORTAL_DMS_API_URL` |
-| **Portal client cert / key**(운영 mTLS) | `client.crt` / `client.key` | Secret `portal-dms-mtls` → `/etc/portal/tls`(§6.3) |
-| **DMS CA**(운영 mTLS) | `ca.crt`(DMS 서버 cert 서명 CA) | 같은 Secret, TLS 검증용 |
-| DMS shared token(선택) | `DMS_AUTH_SHARED_TOKEN`과 동일 값 | `PORTAL_DMS_TOKEN` |
+| DMS API base(BFF→DMS) | **`http://dms-api-internal.dms.svc.cluster.local`**(내부 신뢰 평면, 기본 — §2) | `PORTAL_DMS_API_URL` |
+| **DMS shared token**(필수) | DMS `DMS_AUTH_SHARED_TOKEN`과 **동일 값** | `PORTAL_DMS_TOKEN` |
+| Portal client cert / key(선택, 외부 mTLS 직결 시만 — §6.3) | `client.crt` / `client.key` | Secret `portal-dms-mtls` → `/etc/portal/tls` |
 | DMS audit actor 기본값 | `operator` | `PORTAL_DMS_ACTOR`(요청마다 로그인 운영자로 override) |
 | 세션 서명 시크릿 | `openssl rand -hex 32` 출력 | `PORTAL_SESSION_SECRET` |
 | 운영자 계정 | `admin:<strong-pw>,ops2:<strong-pw>` | `PORTAL_OPERATOR_USERS` |
@@ -177,9 +182,15 @@ stringData:
   PORTAL_DB_URL: "REPLACE_WITH_DB_URL"          # 선택(§4). 안 쓰면 비워 둔다.
 ```
 
-### 6.3 (운영) BFF → DMS mTLS client cert
+### 6.3 (선택) BFF → 외부 mTLS dms-api 직결
 
-운영 DMS는 mTLS-verified header profile이므로(§2), BFF는 DMS에 **portal 전용 client certificate을 제시**해야
+> **기본 배포에는 필요 없다.** 포탈은 §2대로 내부 신뢰 평면 `dms-api-internal`(shared token)을 쓴다 —
+> per-operator `x-dms-actor`가 mTLS 프로필에서 뭉개지기 때문. 아래는 포탈을 **외부 mTLS `dms-api`에
+> 직접** 붙이려는 특수 케이스만을 위한 것이고, 그러면 per-operator 신원이 단일 BFF cert actor로
+> 합쳐진다는 트레이드오프가 있다. 게다가 현 BFF DMS 클라이언트는 client cert을 스스로 로드하지 않으므로
+> (bearer + `x-dms-actor`만) 코드/사이드카 보강이 별도로 필요하다.
+
+포탈을 외부 mTLS dms-api에 직결하려면, BFF는 DMS에 **portal 전용 client certificate을 제시**해야
 한다. 인증서·키·CA를 별도 Secret으로 만들어 Portal 컨테이너에 read-only로 mount한다.
 
 ```bash

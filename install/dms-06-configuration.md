@@ -35,9 +35,10 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 
 **운영 인증은 두 평면이 기본이다.** ① **외부 평면**(운영자·포탈) = mTLS-verified header profile —
 `dms-api`가 `DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`로 켠다(아래).
-② **내부 평면**(노드 에이전트) = mTLS **off** + shared token — 전용 `dms-api-internal`로, agent가
-mTLS로는 `node:{cluster}:{node}` actor를 낼 수 없기 때문이다(상세·근거는 §8, 매니페스트
-`install/kubernetes/dms-api-internal.yaml`). 아래는 **외부 평면(mTLS)** 흐름이다.
+② **내부 평면**(노드 에이전트 + 포탈 BFF) = mTLS **off** + shared token — 전용 `dms-api-internal`로,
+이 신뢰 in-cluster 클라이언트들이 mTLS로는 각각 `node:{cluster}:{node}`·per-operator `x-dms-actor`를
+낼 수 없기 때문이다(상세·근거는 §8, 매니페스트 `install/kubernetes/dms-api-internal.yaml`). 아래는
+**외부 평면(mTLS)** 흐름이다.
 
 **외부 평면 = mTLS-verified header profile.** `control-plane.yaml`의 ConfigMap `dms-runtime-config`가
 `DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`로 켠다. 흐름:
@@ -286,14 +287,20 @@ volumes:
 
 `host-root`만으로는 안 된다 — `/proc`는 별도 마운트라 `/host` 아래로 안 딸려오므로 `/proc/1/mountinfo`를 **따로** bind-mount한다. 검증: `kubectl -n dms exec <agent-pod> -- dms agent-probe --once | jq '.mounts[] | {storage_name,status}'` — 실제 마운트된 것만 `Ready`면 정상.
 
-> **agent 인증 = 내부 평면 (기본 배포).** agent report ingestion은 authenticated actor가
-> `node:{cluster_name}:{node_name}`과 일치해야 하는데, 외부 mTLS 프로필은 actor를 `mtls:<subject>`로
-> 도출하므로(평문 `x-dms-actor`는 거부) agent는 그 API로 인증할 수 없다. 그래서 **기본 배포는 인증을
-> 두 평면으로 나눈다**: **외부**(운영자·포탈) = mTLS API `dms-api`, **노드 에이전트** = 전용 내부 API
-> **`dms-api-internal`** — mTLS **off** + shared token(`DMS_AUTH_SHARED_TOKEN`) + NetworkPolicy(agent
-> DaemonSet 파드만, ClusterIP)로 평문 `x-dms-actor: node:...`를 신뢰한다. 같은 코드·같은 DB, auth
-> 프로필만 다르다. 매니페스트 `install/kubernetes/dms-api-internal.yaml`, agent의 `DMS_AGENT_API_URL`이
-> 이 내부 서비스(`http://dms-api-internal.dms.svc.cluster.local`)를 가리킨다. 인증 흐름 전체는 §1.
+> **내부 신뢰 평면 = agent + 포탈 BFF (기본 배포).** 두 in-cluster 클라이언트가 외부 mTLS 프로필로는
+> 인증할 수 없다: ① **노드 에이전트** — report ingestion이 actor `node:{cluster}:{node}`를 요구하는데
+> mTLS는 `mtls:<subject>`로 도출(평문 `x-dms-actor` 거부); ② **포탈 BFF** — 다중 운영자 신원을
+> `x-dms-actor: mtls:<operator>`로 실어 나르는데 BFF cert 하나면 전원이 단일 actor로 뭉개진다. 그래서
+> **기본 배포는 인증을 두 평면으로 나눈다**: **외부**(직접 운영자·자동화) = mTLS API `dms-api`(개별
+> client cert), **신뢰 in-cluster 클라이언트**(agent + 포탈) = 전용 내부 API **`dms-api-internal`** —
+> mTLS **off** + shared token(`DMS_AUTH_SHARED_TOKEN`) + NetworkPolicy(agent DaemonSet + `dms-portal` ns
+> 만, ClusterIP)로 `x-dms-actor`를 신뢰한다. 같은 코드·같은 DB, auth 프로필만 다르다. 매니페스트
+> `install/kubernetes/dms-api-internal.yaml`; `DMS_AGENT_API_URL`·포탈 `PORTAL_DMS_API_URL`이 이 내부
+> 서비스를 가리킨다. 인증 흐름 전체는 §1.
+>
+> **보안 필수.** mTLS `dms-api`는 `ssl-client-*` evidence 헤더를 무조건 신뢰하므로, **cert를 종단하는
+> ingress/proxy만** 닿게 해야 한다(control-plane.yaml의 `dms-api-from-ingress-only` NetworkPolicy) —
+> 아니면 in-cluster 아무 파드나 evidence 헤더를 스푸핑해 operator actor를 위조할 수 있다.
 
 ---
 
