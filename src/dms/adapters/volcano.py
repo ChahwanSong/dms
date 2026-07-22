@@ -1729,7 +1729,18 @@ class KubernetesVolcanoAdapter:
                             {
                                 "event": "TaskCompleted",
                                 "action": "CompleteJob",
-                            }
+                            },
+                            # A failed launcher (mpirun could not run — e.g. a worker's
+                            # sshd not ready yet, orted launch error) has restartPolicy
+                            # Never, so without this the Volcano job never reaches a
+                            # terminal phase: the DM worker polls it as "Running" until
+                            # dm_scan_timeout (1h) before failing. AbortJob drives it to
+                            # a terminal (Aborted) phase at once so the job fails promptly
+                            # and is retryable, instead of a ~1h phantom-Running hang.
+                            {
+                                "event": "PodFailed",
+                                "action": "AbortJob",
+                            },
                         ],
                         "template": {
                             "metadata": {
@@ -1858,7 +1869,18 @@ class KubernetesVolcanoAdapter:
                             {
                                 "event": "TaskCompleted",
                                 "action": "CompleteJob",
-                            }
+                            },
+                            # A failed launcher (mpirun could not run — e.g. a worker's
+                            # sshd not ready yet, orted launch error) has restartPolicy
+                            # Never, so without this the Volcano job never reaches a
+                            # terminal phase: the DM worker polls it as "Running" until
+                            # dm_scan_timeout (1h) before failing. AbortJob drives it to
+                            # a terminal (Aborted) phase at once so the job fails promptly
+                            # and is retryable, instead of a ~1h phantom-Running hang.
+                            {
+                                "event": "PodFailed",
+                                "action": "AbortJob",
+                            },
                         ],
                         "template": {
                             "metadata": {
@@ -2012,7 +2034,18 @@ class KubernetesVolcanoAdapter:
                             {
                                 "event": "TaskCompleted",
                                 "action": "CompleteJob",
-                            }
+                            },
+                            # A failed launcher (mpirun could not run — e.g. a worker's
+                            # sshd not ready yet, orted launch error) has restartPolicy
+                            # Never, so without this the Volcano job never reaches a
+                            # terminal phase: the DM worker polls it as "Running" until
+                            # dm_scan_timeout (1h) before failing. AbortJob drives it to
+                            # a terminal (Aborted) phase at once so the job fails promptly
+                            # and is retryable, instead of a ~1h phantom-Running hang.
+                            {
+                                "event": "PodFailed",
+                                "action": "AbortJob",
+                            },
                         ],
                         "template": {
                             "metadata": {
@@ -2953,6 +2986,24 @@ def _mpiexec_line(*, stdout: str, stderr: str) -> str:
         'chown -R "$DMS_POSIX_USERNAME" "$(dirname "$(dirname "$rank_script")")" 2>/dev/null || true; '
         'mpi_run_prefix="runuser -u $DMS_POSIX_USERNAME --preserve-environment --"; '
         "fi; "
+        # SSH-readiness barrier: hostfile entries resolve in DNS (Volcano svc plugin)
+        # BEFORE each worker's sshd is actually listening — the worker container is still
+        # running materialization + ssh-keygen + sshd startup. mpirun aborts orted if it
+        # SSHes into that window ("Connection closed by ... port 22" -> "unable to
+        # reliably start daemons"). Wait (bounded, ~90s/host) until every worker accepts
+        # SSH. Volcano's ssh plugin provisions root keys on all pods, so a working root
+        # SSH proves sshd is up; the requester's authorized_keys is written before sshd
+        # starts, so the subsequent runuser-mpirun SSH then also succeeds. Fast path:
+        # sshd already up -> first probe returns at once, zero added latency.
+        "hf=$(printf '%s' \"$hostfile_arg\" | awk '{print $2}'); "
+        "if [ -n \"$hf\" ] && [ -s \"$hf\" ]; then "
+        "for h in $(awk '{print $1}' \"$hf\" | sort -u); do "
+        "[ -n \"$h\" ] || continue; t=0; "
+        "until ssh -o BatchMode=yes -o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 \"$h\" true >/dev/null 2>&1; do "
+        "t=$((t+1)); "
+        "[ \"$t\" -ge 90 ] && { echo \"dms: worker $h sshd not ready after ${t}s, proceeding\" >&2; break; }; "
+        "sleep 1; done; done; fi; "
         "_dms_rc=0; $mpi_run_prefix mpirun --allow-run-as-root --mca pml ob1 --mca btl tcp,self "
         "--mca oob_tcp_if_exclude lo --mca btl_tcp_if_exclude lo "
         '$hostfile_arg $env_exports -np "$DMS_MPI_PROCESS_COUNT" '

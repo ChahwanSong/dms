@@ -414,8 +414,21 @@ def test_kubernetes_scan_manifest_uses_identity_security_context():
     launcher_container = launcher_spec["containers"][0]
     launcher_command = launcher_container["command"][2]
     assert launcher_spec["nodeSelector"] == {"kubernetes.io/hostname": "c1-worker"}
+    # A failed launcher must abort the job at once (else it hangs "Running" until
+    # dm_scan_timeout ~1h before the DM worker fails it).
+    launcher_policies = {
+        (p["event"], p["action"]) for p in tasks["launcher"]["policies"]
+    }
+    assert ("TaskCompleted", "CompleteJob") in launcher_policies
+    assert ("PodFailed", "AbortJob") in launcher_policies
     assert "test -r \"$target\"" in launcher_command
     assert "runuser -u \"$DMS_POSIX_USERNAME\" --preserve-environment -- dscan" in launcher_command
+    # SSH-readiness barrier must gate mpirun (waits for each worker's sshd; avoids the
+    # DNS-resolves-before-sshd race that intermittently aborts orted).
+    assert "sshd not ready" in launcher_command
+    assert launcher_command.index("sshd not ready") < launcher_command.index(
+        "mpirun --allow-run-as-root"
+    )
     assert "mpirun --allow-run-as-root --mca pml ob1 --mca btl tcp,self" in launcher_command
     assert "summary=/dms/artifacts/${DMS_DATA_JOB_ID}/summary.json" in launcher_command
     assert "total_bytes=$(find \"$target\" -type f -printf '%s\\n'" in launcher_command
