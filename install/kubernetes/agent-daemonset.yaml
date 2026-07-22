@@ -40,7 +40,7 @@ metadata:
   name: dms-agent-runtime-config
   namespace: dms
 data:
-  DMS_AGENT_API_URL: "https://dms.example.internal"
+  DMS_AGENT_API_URL: "http://dms-api-internal.dms.svc.cluster.local:80"
   DMS_AGENT_CLUSTER_NAME: "cluster-a"
   DMS_AGENT_REPORT_INTERVAL_SECONDS: "60"
   DMS_AGENT_REPORT_TIMEOUT_SECONDS: "5"

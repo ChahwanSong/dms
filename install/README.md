@@ -55,11 +55,12 @@
 
 ## 인증 프로필 (요약)
 
-운영은 **mTLS-verified 프로필**이다: control-plane에 `DMS_REQUIRE_MTLS_HEADER=true` +
-`DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`. 신뢰 ingress가 클라이언트 인증서를 검증·전달하고, DMS는
-**인증서 subject에서 actor를 파생**한다(`mtls:` prefix). 평문 `x-dms-actor`는 신뢰하지 않으며
-`DMS_DEFAULT_ACTOR`는 비워 둔다(설정 시 API startup 실패). 자세한 건 `dms-06-configuration.md` +
-`../docs/api/README.md`.
+운영 인증은 **두 평면이 기본**이다. ① **외부**(운영자·포탈) = **mTLS-verified 프로필**: `dms-api`가
+`DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`. 신뢰 ingress가 클라이언트
+인증서를 검증·전달하고 DMS는 **인증서 subject에서 actor를 파생**한다(`mtls:` prefix). 평문
+`x-dms-actor`는 신뢰하지 않으며 `DMS_DEFAULT_ACTOR`는 비워 둔다(설정 시 startup 실패). ② **노드
+에이전트** = 전용 내부 API **`dms-api-internal`**(mTLS **off** + shared token + NetworkPolicy) — agent가
+mTLS로는 `node:{cluster}:{node}` actor를 낼 수 없기 때문. 자세한 건 `dms-06-configuration.md`(§1·§8).
 
 ## 스케줄러 (요약)
 
@@ -71,7 +72,8 @@ DM 잡은 **Volcano 네이티브 Job**(`DMS_DM_SCHEDULER_BACKEND=volcano-job`)�
 ## 매니페스트 · 설정 · 스크립트 (참조)
 
 - **`kubernetes/`** — `control-plane.yaml`(네임스페이스·ConfigMap·Secret·RBAC·Deployment·Service·
-  NetworkPolicy·migrate Job), `agent-daemonset.yaml`(RM/DM agent), `volcano-queue-priorityclasses.yaml`,
+  NetworkPolicy·migrate Job), **`dms-api-internal.yaml`**(agent 전용 내부 API — mTLS off + shared token +
+  agent-only NetworkPolicy), `agent-daemonset.yaml`(RM/DM agent), `volcano-queue-priorityclasses.yaml`,
   `target-cluster-rbac.yaml`, `dms-api-volcano-rbac.yaml`, `ingress.example.yaml`, `retention.yaml`,
   `sanity-reconciler.yaml`, `managed-rm-worker.yaml`
 - **`config/`** — `dms-runtime.env.example`, `agent-storages.example.json`, `storage-mappings.example.json`,

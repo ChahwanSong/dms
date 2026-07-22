@@ -206,9 +206,10 @@ RM은 `dms-grp-*` 그룹/멤버십을 만든 뒤 소유권·접근을 검증한�
 (`registry.example.internal/dms:CHANGE_ME` 치환). ConfigMap `dms-agent-runtime-config`에서:
 
 - `DMS_AGENT_CLUSTER_NAME` = `cluster-a`(control cluster 이름과 일치)
-- `DMS_AGENT_API_URL` = **in-cluster Service** `http://dms-api.dms.svc.cluster.local`(에이전트는 mTLS 인그레스가
-  아니라 클러스터 내부로 dms-api에 보고한다; 내부 경로 인증은 Secret `dms-agent-secrets`의
-  `DMS_AUTH_SHARED_TOKEN` + NetworkPolicy로 제한 — 프로필 상세는 [`dms-02-core.md`](dms-02-core.md))
+- `DMS_AGENT_API_URL` = **내부 전용 Service** `http://dms-api-internal.dms.svc.cluster.local`(에이전트는
+  mTLS 인그레스가 아니라 전용 내부 API `dms-api-internal`로 보고한다 — mTLS off + Secret
+  `dms-agent-secrets`의 `DMS_AUTH_SHARED_TOKEN` + NetworkPolicy(agent 파드만)로 제한; 근거·프로필은
+  [`dms-06-configuration.md §8`](dms-06-configuration.md)·[`dms-02-core.md`](dms-02-core.md))
 - `DMS_AGENT_MOUNTINFO_PATH` = `/host/proc/1/mountinfo`, `DMS_AGENT_HOST_ROOT` = `/host` (아래 6.3)
 
 > DM용 `dms-dm-agent`는 이미지가 다르다(mpifileutils를 얹은 `dms-agent`). DM 설정은

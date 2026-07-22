@@ -52,13 +52,14 @@ NEW="$REGISTRY/dms:$TAG"
 kubectl -n dms get deploy -o wide | grep -E "/dms:"     # dms 이미지를 쓰는 Deployment 확인
 
 kubectl -n dms set image deploy/dms-api               api=$NEW
+kubectl -n dms set image deploy/dms-api-internal      api=$NEW   # agent 전용 내부 API(동일 dms 이미지)
 kubectl -n dms set image deploy/dms-planner           planner=$NEW
 kubectl -n dms set image deploy/dms-rm-worker         rm-worker=$NEW
 kubectl -n dms set image deploy/dms-dm-worker         dm-worker=$NEW
 kubectl -n dms set image deploy/dms-retention         retention=$NEW
 kubectl -n dms set image deploy/dms-sanity-reconciler sanity-reconciler=$NEW
 
-for d in dms-api dms-planner dms-rm-worker dms-dm-worker dms-retention dms-sanity-reconciler; do
+for d in dms-api dms-api-internal dms-planner dms-rm-worker dms-dm-worker dms-retention dms-sanity-reconciler; do
   kubectl -n dms rollout status deploy/$d --timeout=180s
 done
 ```

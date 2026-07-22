@@ -259,6 +259,11 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 
 따라서 프로덕션 curl은 **client cert + server CA**를 쓰고 `x-dms-actor`는 보내지 않는다(§8).
 
+> **노드 에이전트는 이 mTLS 평면을 쓰지 않는다.** agent는 actor가 `node:{cluster}:{node}`여야 하는데
+> mTLS는 `mtls:<subject>`로 도출하므로 인증 불가 → 에이전트는 §5의 **전용 내부 API `dms-api-internal`**
+> (mTLS off + shared token + agent-only NetworkPolicy)로 보고한다. 근거·설정은
+> [`dms-06-configuration.md §1·§8`](dms-06-configuration.md).
+
 > **부연(테스트베드/개발 프로필).** `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`로 내리면 인증서 없이
 > 평문 `Authorization: Bearer <token>` + `x-dms-actor: <name>`만으로 호출할 수 있다. 이는 요청/응답
 > 형태를 인증서 없이 읽기 위한 편의일 뿐 프로덕션 경로가 아니다. API 예시는
@@ -273,16 +278,24 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 
 ```bash
 kubectl apply -f install/kubernetes/control-plane.yaml    # 편집본 경로
+kubectl apply -f install/kubernetes/dms-api-internal.yaml  # 노드 에이전트 전용 내부 API (아래)
 
 kubectl -n dms wait --for=condition=complete job/dms-migrate --timeout=120s
 kubectl -n dms logs job/dms-migrate                        # "migrations applied"
 ```
 
+> **`dms-api-internal` = agent 전용 인증 평면 (기본).** 외부 `dms-api`는 mTLS를 켜므로 actor가
+> `mtls:<subject>`가 되어 노드 에이전트(`node:{cluster}:{node}` actor 필요)가 인증할 수 없다. 그래서
+> 에이전트는 `image` 라인만 `control-plane.yaml`과 같은 ref로 맞춘 **별도 내부 API `dms-api-internal`**
+> (mTLS **off** + `dms-secrets`의 shared token + agent-only NetworkPolicy, ClusterIP)로 보고한다.
+> `agent-daemonset.yaml`의 `DMS_AGENT_API_URL`이 이 서비스를 가리킨다. 근거·프로필은
+> [`dms-06-configuration.md §1·§8`](dms-06-configuration.md).
+
 pod 확인:
 
 ```bash
 kubectl -n dms get pods
-# dms-api ×2, dms-planner, dms-rm-worker, dms-dm-worker(1/1), dms-migrate(Completed)
+# dms-api ×2, dms-api-internal, dms-planner, dms-rm-worker, dms-dm-worker(1/1), dms-migrate(Completed)
 ```
 
 > **storages sync RBAC은 이미 `control-plane.yaml`에 포함**돼 있다(Role/RoleBinding

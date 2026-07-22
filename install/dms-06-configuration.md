@@ -33,7 +33,13 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 
 ## 1. 인증 / mTLS
 
-**운영 프로필 = mTLS-verified header profile.** `control-plane.yaml`의 ConfigMap `dms-runtime-config`가
+**운영 인증은 두 평면이 기본이다.** ① **외부 평면**(운영자·포탈) = mTLS-verified header profile —
+`dms-api`가 `DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`로 켠다(아래).
+② **내부 평면**(노드 에이전트) = mTLS **off** + shared token — 전용 `dms-api-internal`로, agent가
+mTLS로는 `node:{cluster}:{node}` actor를 낼 수 없기 때문이다(상세·근거는 §8, 매니페스트
+`install/kubernetes/dms-api-internal.yaml`). 아래는 **외부 평면(mTLS)** 흐름이다.
+
+**외부 평면 = mTLS-verified header profile.** `control-plane.yaml`의 ConfigMap `dms-runtime-config`가
 `DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`로 켠다. 흐름:
 
 1. 신뢰된 ingress/edge proxy가 client certificate를 **검증**하고 그 결과(subject + verify=SUCCESS)를 upstream header로 전달한다.
@@ -280,7 +286,14 @@ volumes:
 
 `host-root`만으로는 안 된다 — `/proc`는 별도 마운트라 `/host` 아래로 안 딸려오므로 `/proc/1/mountinfo`를 **따로** bind-mount한다. 검증: `kubectl -n dms exec <agent-pod> -- dms agent-probe --once | jq '.mounts[] | {storage_name,status}'` — 실제 마운트된 것만 `Ready`면 정상.
 
-> **actor 주의.** 현재 mTLS-required 프로필에서 agent report를 Fresh로 저장하려면 agent request의 authenticated actor가 `node:{cluster_name}:{node_name}`과 일치해야 한다. 기본 mTLS derivation은 `mtls:<subject>`이므로, agent certificate subject→node actor mapping(또는 동등한 internal auth boundary)이 별도로 필요하다.
+> **agent 인증 = 내부 평면 (기본 배포).** agent report ingestion은 authenticated actor가
+> `node:{cluster_name}:{node_name}`과 일치해야 하는데, 외부 mTLS 프로필은 actor를 `mtls:<subject>`로
+> 도출하므로(평문 `x-dms-actor`는 거부) agent는 그 API로 인증할 수 없다. 그래서 **기본 배포는 인증을
+> 두 평면으로 나눈다**: **외부**(운영자·포탈) = mTLS API `dms-api`, **노드 에이전트** = 전용 내부 API
+> **`dms-api-internal`** — mTLS **off** + shared token(`DMS_AUTH_SHARED_TOKEN`) + NetworkPolicy(agent
+> DaemonSet 파드만, ClusterIP)로 평문 `x-dms-actor: node:...`를 신뢰한다. 같은 코드·같은 DB, auth
+> 프로필만 다르다. 매니페스트 `install/kubernetes/dms-api-internal.yaml`, agent의 `DMS_AGENT_API_URL`이
+> 이 내부 서비스(`http://dms-api-internal.dms.svc.cluster.local`)를 가리킨다. 인증 흐름 전체는 §1.
 
 ---
 

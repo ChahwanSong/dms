@@ -1,0 +1,131 @@
+# Internal-only DMS API instance for NODE AGENT report ingestion.
+#
+# WHY: the external dms-api runs the production mTLS profile
+# (DMS_REQUIRE_MTLS_VERIFIED_HEADER=true), where the authenticated actor is derived
+# from the client certificate subject (`mtls:<subject>`). Node agents, however, must
+# authenticate as `node:{cluster}:{node}` (AgentReportIngestionService requires the
+# actor to equal the reported node) — a plain `x-dms-actor: node:...` is rejected as an
+# actor/mTLS conflict, and a cert-derived actor never equals the node identity. So agent
+# reports (and therefore node health, storage readiness, and on-demand identity probing)
+# have no working auth path against the mTLS API.
+#
+# This deployment is a SECOND API process that skips mTLS and instead trusts an
+# in-cluster shared bearer token + the agent-supplied `x-dms-actor: node:...` header. It
+# is reachable ONLY from agent pods (NetworkPolicy below) via a ClusterIP Service, never
+# from outside the cluster. Same code, same databases — only the auth profile differs.
+#
+# SECURITY / SCOPE: this exposes the full API surface without mTLS, gated by network
+# isolation + the shared token. A compromised agent pod (which already runs privileged)
+# could impersonate an actor here; the NetworkPolicy + token bound the exposure to the
+# agent DaemonSets. For a tighter boundary (agent-ingest endpoint only) use per-endpoint
+# auth in the app instead. Point agents at this Service and give them the token
+# (see agent-daemonset.yaml: DMS_AGENT_API_URL + DMS_AUTH_SHARED_TOKEN).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-api-internal
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-api-internal
+    app.kubernetes.io/part-of: dms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-api-internal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-api-internal
+        app.kubernetes.io/part-of: dms
+    spec:
+      serviceAccountName: dms-api
+      containers:
+        - name: api
+          image: registry.example.internal/dms:CHANGE_ME
+          imagePullPolicy: IfNotPresent
+          command: ["dms", "api", "--host", "0.0.0.0", "--port", "8080"]
+          envFrom:
+            - configMapRef:
+                name: dms-runtime-config
+            - secretRef:
+                name: dms-secrets
+          # OVERRIDE the mTLS profile from dms-runtime-config: this internal instance
+          # accepts the agent's `node:...` actor over plain HTTP + shared token. env wins
+          # over envFrom, so this holds even when the shared ConfigMap enables mTLS.
+          # DMS_AUTH_SHARED_TOKEN stays sourced from dms-secrets (the token is required).
+          env:
+            - name: DMS_REQUIRE_MTLS_HEADER
+              value: "false"
+            - name: DMS_REQUIRE_MTLS_VERIFIED_HEADER
+              value: "false"
+            - name: DMS_DEFAULT_ACTOR
+              value: ""
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          volumeMounts:
+            - name: kubeconfigs
+              mountPath: /etc/dms/kubeconfigs
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+      volumes:
+        - name: kubeconfigs
+          secret:
+            secretName: dms-cluster-kubeconfigs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dms-api-internal
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-api-internal
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dms-api-internal
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Only the node agent DaemonSets may reach the internal API. Everything else (operators,
+# portal, other in-cluster workloads) must use the mTLS-guarded external dms-api.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dms-api-internal-agents-only
+  namespace: dms
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dms-api-internal
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["dms-dm-agent", "dms-rm-agent"]
+      ports:
+        - protocol: TCP
+          port: http
