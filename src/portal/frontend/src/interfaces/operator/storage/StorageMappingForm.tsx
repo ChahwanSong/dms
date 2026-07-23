@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { operatorApi, type StorageMapping } from "../../../api";
 import {
+  applyAgentClusterDefault,
   BACKEND_SKELETONS,
   CSI_BACKEND_TYPES,
   FIELD_DOCS,
@@ -54,11 +55,13 @@ export default function StorageMappingForm({
   initial,
   onClose,
   onSaved,
+  controlCluster,
 }: {
   mode: "create" | "edit";
   initial?: StorageMapping;
   onClose: () => void;
   onSaved: (name: string, status: string) => void;
+  controlCluster?: string | null;
 }) {
   const [storageName, setStorageName] = useState(initial?.storage_name ?? "");
   const [templateText, setTemplateText] = useState<string>(() => {
@@ -66,6 +69,9 @@ export default function StorageMappingForm({
     // NOT hand-edited in this JSON — strip it so there's a single source of truth.
     const t = initial ? templateForEdit(initial) : { ...BACKEND_SKELETONS["cephfs"] };
     delete (t as Record<string, unknown>)[FS_SUBTYPE_KEY];
+    // New fs mapping: default the agent cluster to the real control cluster (not the
+    // static "cluster-a" placeholder). Edit mode keeps the mapping's stored value.
+    if (!initial) applyAgentClusterDefault(t, "cephfs", controlCluster);
     return JSON.stringify(t, null, 2);
   });
   // Portal-only fs discriminator: checked => filesystem_subtype "pv", else "fs-native".
@@ -81,10 +87,33 @@ export default function StorageMappingForm({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // controlCluster is fetched by the parent and may arrive AFTER this form mounts. When
+  // it does (create mode), replace the fs skeleton's placeholder cluster_name ("cluster-a")
+  // with the real control cluster — but only while the field is still the untouched
+  // placeholder, so an operator's own edit is never clobbered.
+  useEffect(() => {
+    if (initial || !controlCluster) return;
+    setTemplateText((prev) => {
+      let t: Record<string, unknown>;
+      try {
+        t = JSON.parse(prev);
+      } catch {
+        return prev; // mid-edit invalid JSON — leave it alone
+      }
+      const bt = typeof t.backend_type === "string" ? t.backend_type : "";
+      if (!(FS_BACKEND_TYPES as readonly string[]).includes(bt)) return prev;
+      if (t.cluster_name !== "cluster-a") return prev; // operator changed it
+      t.cluster_name = controlCluster;
+      return JSON.stringify(t, null, 2);
+    });
+  }, [controlCluster, initial]);
+
   // Changing the backend_type immediately refills the template (no separate button).
   function fillSkeleton(bt: string) {
+    const t = { ...BACKEND_SKELETONS[bt] };
+    applyAgentClusterDefault(t, bt, controlCluster);
     setSkeleton(bt);
-    setTemplateText(JSON.stringify(BACKEND_SKELETONS[bt], null, 2));
+    setTemplateText(JSON.stringify(t, null, 2));
     setError(null);
   }
 

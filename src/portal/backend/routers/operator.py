@@ -8,6 +8,7 @@ forwarded with their original status code so the SPA can render them.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -32,6 +33,13 @@ class StorageMappingPayload(BaseModel):
     version: int = 1
 
 
+# DMS control cluster name is static config (changes only on a DMS restart); cache it
+# briefly so the storage form's default-cluster lookup doesn't re-fetch the full
+# inventory on every open.
+_control_cluster_cache: dict[str, Any] = {"value": None, "at": 0.0}
+_CONTROL_CLUSTER_TTL_SECONDS = 300.0
+
+
 def _actor(user: dict[str, Any]) -> str:
     return str(user.get("username") or ROLE_OPERATOR)
 
@@ -50,6 +58,29 @@ def operator_router() -> APIRouter:
         tags=["operator"],
         dependencies=[Depends(require_role(ROLE_OPERATOR))],
     )
+
+    # --- meta: control cluster name (storage form default) ----------------
+
+    @router.get("/control-cluster")
+    async def control_cluster(
+        dms: DmsClient = Depends(get_dms_client),
+        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
+    ) -> dict[str, Any]:
+        """DMS control cluster name (static config) — the storage form uses it to
+        default a filesystem mapping's *agent* cluster (the cluster whose RM/DM agents
+        report the storage). Cached briefly; it only changes on a DMS restart."""
+        now = time.monotonic()
+        cached = _control_cluster_cache["value"]
+        if (
+            cached is not None
+            and (now - _control_cluster_cache["at"]) < _CONTROL_CLUSTER_TTL_SECONDS
+        ):
+            return {"control_cluster_name": cached}
+        inv = await _forward(dms.get_inventory(actor=_actor(user)))
+        name = inv.get("control_cluster_name") if isinstance(inv, dict) else None
+        _control_cluster_cache["value"] = name
+        _control_cluster_cache["at"] = now
+        return {"control_cluster_name": name}
 
     # --- storage inventory (storage_mapping) ------------------------------
 

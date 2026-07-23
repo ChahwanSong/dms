@@ -193,6 +193,21 @@ export function templateForEdit(m: {
   return t;
 }
 
+// For a NEW filesystem mapping, default cluster_name (the "agent cluster" — the cluster
+// whose RM/DM agents report this storage) to the real DMS control cluster instead of the
+// static "cluster-a" skeleton placeholder, which is a common misconfiguration. No-op when
+// the control cluster is unknown or the backend is CSI (whose cluster_name is a real k8s
+// target the operator must choose).
+export function applyAgentClusterDefault(
+  template: Record<string, unknown>,
+  backend: string,
+  controlCluster?: string | null,
+): void {
+  if (controlCluster && (FS_BACKEND_TYPES as readonly string[]).includes(backend)) {
+    template.cluster_name = controlCluster;
+  }
+}
+
 // Pull a top-level string field out of the template (DMS reads these top-level).
 export function pickStr(template: Record<string, unknown>, key: string): string | null {
   const v = template[key];
@@ -255,7 +270,7 @@ const CSI_FIELD_DOCS: FieldDoc[] = [
 export const FIELD_DOCS: Record<string, FieldDoc[]> = {
   cephfs: [
     { name: "backend_type", required: true, desc: "백엔드 타입 식별자", default: '"cephfs"' },
-    { name: "cluster_name", required: true, desc: "클러스터 이름 (sanity·RM readiness 조회)", default: "—" },
+    { name: "cluster_name", required: true, desc: "에이전트 클러스터 — RM/DM 에이전트가 보고하는 클러스터 (보통 기본 클러스터)", default: "기본 클러스터(자동 채움)" },
     { name: "mount_path", required: true, desc: "CephFS 마운트 경로", default: "—" },
     {
       name: "managed_root",
@@ -267,7 +282,7 @@ export const FIELD_DOCS: Record<string, FieldDoc[]> = {
   ],
   gpfs: [
     { name: "backend_type", required: true, desc: "백엔드 타입 식별자", default: '"gpfs"' },
-    { name: "cluster_name", required: true, desc: "클러스터 이름 (sanity·RM readiness 조회)", default: "—" },
+    { name: "cluster_name", required: true, desc: "에이전트 클러스터 — RM/DM 에이전트가 보고하는 클러스터 (보통 기본 클러스터)", default: "기본 클러스터(자동 채움)" },
     { name: "mount_path", required: true, desc: "GPFS 마운트 경로", default: "—" },
     { name: "managed_root", required: true, desc: "관리 루트 (mount_path 하위)", default: "—" },
     {
@@ -293,7 +308,7 @@ export const FIELD_DOCS: Record<string, FieldDoc[]> = {
   ],
   wekafs: [
     { name: "backend_type", required: true, desc: "백엔드 타입 식별자", default: '"wekafs"' },
-    { name: "cluster_name", required: true, desc: "클러스터 이름 (sanity·RM readiness 조회)", default: "—" },
+    { name: "cluster_name", required: true, desc: "에이전트 클러스터 — RM/DM 에이전트가 보고하는 클러스터 (보통 기본 클러스터)", default: "기본 클러스터(자동 채움)" },
     { name: "mount_path", required: true, desc: "WEKA 마운트 경로", default: "—" },
     { name: "managed_root", required: true, desc: "관리 루트 (mount_path 하위)", default: "—" },
     {

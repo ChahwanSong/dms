@@ -1064,6 +1064,11 @@ export const operatorApi = {
         `${SM}/${encodeURIComponent(name)}`,
         { method: "DELETE" },
       ),
+    // DMS control cluster name — default for a filesystem mapping's agent cluster.
+    controlClusterName: () =>
+      request<{ control_cluster_name: string | null }>(
+        "/api/operator/control-cluster",
+      ),
   },
   backup: {
     list: () => request<BackupBatch[]>(BK),

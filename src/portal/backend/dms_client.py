@@ -319,6 +319,9 @@ class DmsClient:
             "GET", f"{_OPS_BASE}/work-summary", actor=actor
         )
 
+    async def get_inventory(self, *, actor: str) -> dict[str, Any]:
+        return await self._request("GET", f"{_OPS_BASE}/inventory", actor=actor)
+
     async def list_agent_reports(
         self,
         *,

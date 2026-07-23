@@ -44,6 +44,7 @@ export default function StorageInventory({ focus }: {
   const [sortKey, setSortKey] = useState<string>("storage_name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [search, setSearch] = useState<string>("");
+  const [controlCluster, setControlCluster] = useState<string | null>(null);
 
   // deep-link from 조치 필요 "상세": open the referenced mapping's detail + filter to it.
   useEffect(() => {
@@ -52,6 +53,15 @@ export default function StorageInventory({ focus }: {
       setSearch(focus.value);
     }
   }, [focus]);
+
+  // Control cluster name — the create-form defaults a filesystem mapping's "agent
+  // cluster" to it. Non-fatal on failure: the form falls back to the skeleton default.
+  useEffect(() => {
+    operatorApi.storage
+      .controlClusterName()
+      .then((r) => setControlCluster(r.control_cluster_name))
+      .catch(() => {});
+  }, []);
 
   function toggleSort(key: string) {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -392,6 +402,7 @@ export default function StorageInventory({ focus }: {
         <StorageMappingForm
           mode={form.mode}
           initial={form.mode === "edit" ? form.mapping : undefined}
+          controlCluster={controlCluster}
           onClose={() => setForm(null)}
           onSaved={(name, status) => {
             setForm(null);

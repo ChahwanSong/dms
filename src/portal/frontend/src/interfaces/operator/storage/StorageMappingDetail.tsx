@@ -124,9 +124,9 @@ export default function StorageMappingDetail({
               </div>
             )}
 
-            {(k8s || (isFs && agent) || (!isFs && mutation)) && (
+            {((!isFs && k8s) || (isFs && agent) || (!isFs && mutation)) && (
               <div className="obs-cards">
-                {k8s && (
+                {!isFs && k8s && (
                   <section className="obs-card">
                     <h4>Kubernetes 관측</h4>
                     <SpecGrid
@@ -260,7 +260,7 @@ function overviewItems(
     </span>
   );
   const items: KV[] = [
-    { label: "클러스터", value: m.cluster_name || "—" },
+    { label: isFs ? "에이전트 클러스터" : "클러스터", value: m.cluster_name || "—" },
     { label: "backend", value: backendType(m) },
     ...(isFs
       ? [
@@ -274,7 +274,15 @@ function overviewItems(
           } as KV,
         ]
       : []),
-    { label: "storage class", value: m.storage_class_name || "—", mono: !!m.storage_class_name },
+    ...(!isFs
+      ? [
+          {
+            label: "storage class",
+            value: m.storage_class_name || "—",
+            mono: !!m.storage_class_name,
+          } as KV,
+        ]
+      : []),
     { label: "version", value: String(m.version) },
     { label: "readiness", value: axes, span: true },
     { label: "마지막 검사", value: fmtTime(m.sanity_checked_at), span: true },
