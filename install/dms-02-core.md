@@ -180,7 +180,7 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 | 키 | placeholder | 설정값 |
 |---|---|---|
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | 컨트롤 클러스터 이름 |
-| `DMS_CLUSTER_KUBECONFIGS_JSON` | `{"cluster-a":"/etc/dms/kubeconfigs/cluster-a.kubeconfig"}` | 클러스터명·kubeconfig 파일명 일치 (kubeconfig 생성은 [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md)) |
+| `DMS_CLUSTER_KUBECONFIGS_JSON` | `{"cluster-a":"/etc/dms/kubeconfigs/cluster-a.kubeconfig"}` | 클러스터명·kubeconfig 파일명 일치. **control cluster kubeconfig 생성·배치는 §5**(agent rollout 등에 필수), 추가 대상 클러스터는 [`dms-04`](dms-04-rm-k8s-quota.md) |
 | `DMS_LDAP_URI` | `ldap://ldap.example.internal:389` | 실제 LDAP/AD URI |
 | `DMS_LDAP_BASE_DN` | `dc=example,dc=internal` | base DN |
 | `DMS_LDAP_USER_SEARCH_BASE` | `ou=people,dc=example,dc=internal` | user search base |
@@ -224,8 +224,9 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 
 ### Secret `dms-cluster-kubeconfigs`
 
-- `cluster-a.kubeconfig` — 컨트롤/타깃 클러스터 kubeconfig로 교체. 생성은
-  [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md)(`create-serviceaccount-kubeconfig.sh`).
+- `cluster-a.kubeconfig` — **control cluster** kubeconfig로 교체(빈 placeholder로 시작). `dms-api`가
+  agent rollout(포탈 재시작 버튼)·ConfigMap sync·inventory에 쓴다. 생성·배치 절차는 **§5**
+  (`create-serviceaccount-kubeconfig.sh`). 추가 대상(remote) 클러스터는 [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md).
 
 ### image 라인
 
@@ -316,6 +317,62 @@ kubectl -n dms get pods
 > ```
 > 에이전트는 `storages.json`을 **기동 시 1회만** 읽으므로, 스토리지 매핑을 바꾼 뒤에는 DaemonSet을
 > rollout-restart 한다(`POST /api/v1/agent/rollout-restart`, [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md)).
+
+### control cluster kubeconfig 배치 — agent rollout · ConfigMap sync · inventory (필수)
+
+`dms-api`는 **control cluster**(`DMS_CONTROL_CLUSTER_NAME`, 예 `cluster-a`)의 kube API에 접근해야 한다:
+
+- **포탈 "에이전트 재시작" 버튼** → `POST /api/v1/agent/rollout-restart` → `dms-rm-agent`·`dms-dm-agent`
+  DaemonSet에 `restartedAt` 스탬프(rollout restart).
+- **스토리지 매핑 변경 시 ConfigMap sync**(`dms-agent-storages` patch) — 없으면 새 스토리지가 에이전트에
+  전달되지 않는다(위 storages-sync 주석).
+- **inventory** — control cluster의 StorageClass/CSI/노드 조회.
+
+접근 경로는 `DMS_CLUSTER_KUBECONFIGS_JSON[control_cluster_name]`으로 결정된다 — **엔트리가 있으면 그
+kubeconfig 파일**로, 없으면 pod SA(in-cluster)로 붙는다. shipped 기본값은
+`{"cluster-a":"/etc/dms/kubeconfigs/cluster-a.kubeconfig"}`라 **kubeconfig가 필수**이고, Secret의
+`cluster-a.kubeconfig`는 **빈 placeholder**로 시작하므로 반드시 실제 kubeconfig로 교체한다 — 안 하면
+재시작 버튼이 **502**, 스토리지 sync가 조용히 **no-op**이 된다.
+
+이 kubeconfig는 **`dms-remote` SA**로 인증한다(아래 스크립트). `control-plane.yaml`은
+`dms-api-agent-rollout`(daemonsets get/patch)과 `dms-agent-storages-sync`(configmaps)를
+**`dms-api`(in-cluster) + `dms-remote`(kubeconfig) 둘 다**에 바인딩하므로, 어느 경로든 rollout·sync가
+동작한다.
+
+```bash
+# 0) kubectl이 control cluster를 가리키게 한다.
+kubectl config use-context cluster-a
+
+# 1) dms-remote SA(+ nodes/namespaces/resourcequotas/storageclasses ClusterRole) 생성.
+#    이 kubeconfig가 인증할 SA다. (k8s 쿼터 RM의 대상 RBAC과 동일 파일 — dms-04에서 재사용.)
+kubectl apply -f install/kubernetes/target-cluster-rbac.yaml
+
+# 2) dms-remote 토큰을 임베드한 control cluster kubeconfig 생성.
+install/scripts/create-serviceaccount-kubeconfig.sh cluster-a certs/cluster-a.kubeconfig
+
+# 3) Secret에 배치 후, 마운트하는 워크로드 재시작.
+kubectl -n dms patch secret dms-cluster-kubeconfigs --type merge \
+  -p "{\"data\":{\"cluster-a.kubeconfig\":\"$(base64 -w0 certs/cluster-a.kubeconfig)\"}}"
+kubectl -n dms rollout restart \
+  deploy/dms-api deploy/dms-api-internal deploy/dms-planner deploy/dms-rm-worker
+```
+
+> 신규 설치라면 3) 대신 apply **전에** `control-plane.yaml`의 Secret `dms-cluster-kubeconfigs`
+> `stringData.cluster-a.kubeconfig`에 kubeconfig 내용을 붙여넣어도 된다(그러면 위 §5 apply 시 함께 적용).
+
+확인 — 재시작이 두 DaemonSet에 걸리고 error가 없어야 한다:
+
+```bash
+curl -sS --cert certs/operator.crt --key certs/operator.key --cacert certs/dms-server-ca.crt \
+  -H "authorization: Bearer $DMS_TOKEN" \
+  -X POST https://dms.example.internal/api/v1/agent/rollout-restart | jq
+# → {"restarted":["dms-rm-agent","dms-dm-agent"], "errors":{}}
+# errors에 403이 뜨면 dms-remote가 dms-api-agent-rollout RoleBinding에 있는지 확인(control-plane.yaml).
+```
+
+> **단일 클러스터(control == target)면 이 kubeconfig가 k8s 쿼터 RM 대상도 겸한다** — `dms-remote`가
+> 이미 `resourcequotas` 권한으로 등록됐으므로 [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md)에서
+> control cluster kubeconfig를 다시 만들 필요가 없다(추가 대상 클러스터만 dms-04에서 등록).
 
 ---
 

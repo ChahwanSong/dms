@@ -51,13 +51,20 @@ API(생성/변경/차단/check/sync/import/audit/만료 sweep) 사용법은
   또는 SSH bastion 경유로 도달 가능할 것(`ssh-kubectl` 모드, §4).
 - 쿼터를 적용할 namespace는 **미리 존재**해야 한다(DMS는 ResourceQuota만 만든다).
 
-아래 예시는 control plane이 **`cluster-a`**(control cluster)에 있다고 가정한다. 가장 단순한 운영
-형태는 control cluster 자신이 대상인 **단일 클러스터**(control == target)이며, 추가 대상
-클러스터(`cluster-b` 등)는 §3의 절차를 반복해 등록한다.
+아래 예시는 control plane이 **`cluster-a`**(control cluster)에 있다고 가정한다. **control cluster
+자신의 kubeconfig는 이미 [`dms-02-core.md`](dms-02-core.md) §5에서 만들어 Secret에 넣었다**(agent
+rollout에 필요 — 같은 `dms-remote` SA가 `resourcequotas` 권한도 함께 갖는다). 따라서 **단일
+클러스터**(control == target)면 §3을 건너뛰고 §5(CSI mapping)로 가면 되고, **추가 대상
+클러스터(`cluster-b` 등)**를 붙일 때만 §3의 절차를 그 클러스터에 대해 반복한다.
 
 ---
 
-## 3. 대상 클러스터 등록 (RBAC + kubeconfig)
+## 3. 추가 대상 클러스터 등록 (RBAC + kubeconfig)
+
+> **control cluster(`cluster-a`)는 [`dms-02-core.md`](dms-02-core.md) §5에서 이미 등록**됐다(같은
+> `target-cluster-rbac.yaml` + `create-serviceaccount-kubeconfig.sh`). 이 §3은 **원격 대상
+> 클러스터(`cluster-b` 등)**를 추가할 때 그 클러스터에 대해 반복하는 절차다 — 단일 클러스터
+> 배포는 건너뛰고 §5로 간다. 아래 예시의 `cluster-a`는 각 대상 클러스터 이름으로 바꿔 읽는다.
 
 ### 3.1 대상 클러스터에 DMS RBAC 적용
 
@@ -113,8 +120,9 @@ control plane(namespace `dms`)의 **두 곳**을 편집한다. 둘 다
 | `control-plane.yaml` → ConfigMap **`dms-runtime-config`** | `DMS_CONTROL_CLUSTER_NAME` | control cluster 이름(예 `cluster-a`) |
 | `control-plane.yaml` → ConfigMap **`dms-runtime-config`** | `DMS_CLUSTER_KUBECONFIGS_JSON` | `cluster_name → 컨테이너 내부 경로` 맵. 단일 클러스터면 `{"cluster-a":"/etc/dms/kubeconfigs/cluster-a.kubeconfig"}` |
 
-신규 설치라면 apply 전에 매니페스트에서 위 값을 채운 뒤 [`dms-02-core.md`](dms-02-core.md)의
-apply/migration 절차를 따른다.
+> control cluster(`cluster-a`) 값은 [`dms-02-core.md`](dms-02-core.md) §5에서 이미 채웠다. 여기서는
+> **추가 대상 클러스터**에 대해 위 두 곳(Secret 키 + `DMS_CLUSTER_KUBECONFIGS_JSON` 항목)을 더한다
+> (patch + rollout restart는 아래).
 
 > **클러스터 이름을 `cluster-a`가 아닌 것으로 바꾸는 경우**, 세 곳을 **일관되게** 바꾼다 —
 > `DMS_CONTROL_CLUSTER_NAME`, `DMS_CLUSTER_KUBECONFIGS_JSON`의 키(및 경로), Secret의 키 이름

@@ -151,7 +151,8 @@ metadata:
 type: Opaque
 stringData:
   cluster-a.kubeconfig: |
-    # install/scripts/create-serviceaccount-kubeconfig.sh로 생성한 kubeconfig로 교체한다.
+    # control cluster kubeconfig -- create-serviceaccount-kubeconfig.sh로 생성해 교체
+    # (dms-02-core.md §5 "control cluster kubeconfig" -- agent rollout/ConfigMap sync/inventory에 필수).
     apiVersion: v1
     kind: Config
     clusters: []
@@ -256,6 +257,14 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: dms-api
+    namespace: dms
+  # When DMS_CLUSTER_KUBECONFIGS_JSON routes the control cluster through a kubeconfig,
+  # dms-api authenticates as dms-remote (create-serviceaccount-kubeconfig.sh) -- grant it
+  # the same daemonset get/patch so the portal agent restart works over that path too.
+  # Mirrors dms-agent-storages-sync's dual binding below; dms-remote is created by
+  # target-cluster-rbac.yaml (a dangling subject is harmless until then).
+  - kind: ServiceAccount
+    name: dms-remote
     namespace: dms
 ---
 apiVersion: rbac.authorization.k8s.io/v1
