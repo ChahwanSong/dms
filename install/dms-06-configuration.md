@@ -47,9 +47,9 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 2. DMS는 actor를 **certificate subject에서 derive**한다. prefix는 `DMS_MTLS_ACTOR_PREFIX`(기본 `mtls:`) → 예: `mtls:CN=alice,...`.
 3. **평문 `x-dms-actor`는 신뢰하지 않는다.** 평문 actor가 mTLS로 derive한 actor와 다르면 인증을 거부한다.
 4. `DMS_DEFAULT_ACTOR`는 **비어 있어야 한다**. `DMS_REQUIRE_MTLS_HEADER=true`인데 값이 있으면 **API startup이 실패**한다.
-5. shared bearer token(`DMS_AUTH_SHARED_TOKEN`)을 mTLS 위에 **추가로** 얹을 수 있다.
+5. shared bearer token(`DMS_AUTH_SHARED_TOKEN`)은 **기본 배포에서 필수**다 — mTLS 위에 gate로 얹혀 모든 API 호출이 함께 보내며, 내부 평면 `dms-api-internal`(mTLS **off**)의 유일한 인증이라 shipped `dms-secrets`가 이를 싣는다. 비우면 내부 평면·agent·포탈이 인증 불가.
 
-운영 curl은 `--cert client.crt --key client.key --cacert ca.crt` (+ 선택 `Authorization: Bearer`)로 호출하고, **`x-dms-actor`를 보내지 않는다**.
+운영 curl은 `--cert client.crt --key client.key --cacert ca.crt` **+ `Authorization: Bearer <token>`**(기본 필수)로 호출하고, **`x-dms-actor`를 보내지 않는다**.
 
 | 변수 | 기본값 | 운영 필수 | 설명 |
 | --- | --- | --- | --- |
@@ -57,7 +57,7 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 | `DMS_REQUIRE_MTLS_VERIFIED_HEADER` | `true` | 예 | client cert verify 결과가 `SUCCESS`여야 한다. `true`면 `DMS_REQUIRE_MTLS_HEADER=true`도 필수. |
 | `DMS_MTLS_ACTOR_PREFIX` | `mtls:` | 아니오 | mTLS subject에서 derive한 actor prefix. |
 | `DMS_DEFAULT_ACTOR` | 비어 있음 | — | mTLS 프로필에서는 **반드시 비운다**(`DMS_DEFAULT_ACTOR=` 가능). 비어 있지 않으면 startup 실패. |
-| `DMS_AUTH_SHARED_TOKEN` | 없음(Secret) | 예(권장) | API가 허용하는 shared bearer token. mTLS 위에 레이어링하고 agent/스크립트가 사용. |
+| `DMS_AUTH_SHARED_TOKEN` | 없음(Secret) | **예(필수)** | shared bearer token. mTLS 위에 gate로 얹혀 모든 API 호출이 함께 보내며, 내부 평면 `dms-api-internal`(mTLS off)의 유일한 인증. agent·포탈·스크립트가 사용. |
 
 **mTLS evidence header** (두 family 지원):
 
@@ -268,7 +268,7 @@ DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-
 | `DMS_AGENT_TOOLS` | `dsync,nsync,drm,dscan,kubectl` | 아니오 | tool probe 목록(쉼표). |
 | `DMS_AGENT_CREDENTIAL_FILES` | 설정 안 됨 | 아니오 | report할 credential path 목록(쉼표). |
 | `DMS_AGENT_NETWORK_ENDPOINTS` | 설정 안 됨 | 아니오 | probe할 network endpoint 목록(쉼표). |
-| `DMS_AUTH_SHARED_TOKEN` | 없음 | 조건부 | API token이 켜져 있으면 report POST에 사용. |
+| `DMS_AUTH_SHARED_TOKEN` | 없음 | 필수 | 에이전트가 내부 API `dms-api-internal`(mTLS off)로 report POST할 때의 인증. 내부 평면의 유일한 자격증명이라 필수. |
 
 **마운트 readiness — 호스트 mountinfo bind-mount (필수).** 에이전트는 컨테이너에서 돌기 때문에, `/proc/self/mountinfo`만 보면 노드 스토리지 마운트가 전혀 안 보여 전부 Missing이 된다. `agent-daemonset.yaml`에 다음이 있어야 한다:
 

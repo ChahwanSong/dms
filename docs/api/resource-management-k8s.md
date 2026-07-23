@@ -23,8 +23,8 @@ DMS의 **Kubernetes namespace quota** Resource Management API 사용법이다. �
 `DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`로 뜬다. 신뢰된 ingress가
 클라이언트 인증서를 검증해 upstream으로 넘기고, DMS는 **인증서 subject**에서 actor를 파생한다
 (prefix `DMS_MTLS_ACTOR_PREFIX`, 기본 `mtls:`). 평문 `x-dms-actor` 헤더는 이 프로필에서 신뢰하지
-않으며, `DMS_DEFAULT_ACTOR`는 비어 있어야 한다(설정돼 있으면 API가 기동 거부). 선택적으로 shared
-bearer token(`DMS_AUTH_SHARED_TOKEN`)을 함께 요구할 수 있다.
+않으며, `DMS_DEFAULT_ACTOR`는 비어 있어야 한다(설정돼 있으면 API가 기동 거부). shared
+bearer token(`DMS_AUTH_SHARED_TOKEN`)은 **기본 배포에서 필수**이므로 함께 보낸다.
 
 따라서 모든 curl은 **클라이언트 인증서**로 호출한다(평문 `x-dms-actor` 없음):
 
@@ -34,8 +34,8 @@ CURL=(curl -sS
   --cert   /etc/dms-client/client.crt
   --key    /etc/dms-client/client.key
   --cacert /etc/dms-client/ca.crt)
-# shared token을 함께 요구하도록 배포된 경우에만:
-#   CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
+# shared token은 기본 배포에서 필수 (shipped dms-secrets가 이를 싣는다):
+CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 ```
 
 - **`requester_id`(payload 필드)** 는 이 quota의 논리적 요청자/소유자다 — 감사·정책 판정에 쓰인다.

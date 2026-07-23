@@ -204,7 +204,7 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 |---|---|---|
 | `DMS_DATABASE_URL` | `postgresql://dms_app:CHANGE_ME@postgres.example.internal:5432/dms` | operational DB URL |
 | `DMS_OBSERVABILITY_DATABASE_URL` | `postgresql://dms_obs:CHANGE_ME@.../dms_observability` | observability DB URL |
-| `DMS_AUTH_SHARED_TOKEN` | `CHANGE_ME_LONG_RANDOM_TOKEN` | (선택) mTLS 위에 얹는 공유 bearer 토큰 |
+| `DMS_AUTH_SHARED_TOKEN` | `CHANGE_ME_LONG_RANDOM_TOKEN` | **필수** 공유 bearer 토큰 — mTLS 위에 gate로 얹혀 모든 API 호출이 함께 보내며, 내부 평면 `dms-api-internal`(§5)의 유일한 인증이다 |
 | `DMS_LDAP_BIND_DN` | `cn=dms,ou=service-accounts,dc=example,dc=internal` | LDAP 서비스 계정 DN |
 | `DMS_LDAP_BIND_PASSWORD` | `CHANGE_ME` | bind 암호 |
 
@@ -255,7 +255,10 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
    actor `mtls:operator`(감사 로그에 이 값이 남는다).
 3. 평문 `x-dms-actor` 헤더는 **신뢰되지 않는다**. `DMS_DEFAULT_ACTOR`는 비어 있어야 하며, 설정 시
    API가 기동에 실패한다(§3).
-4. (선택) `DMS_AUTH_SHARED_TOKEN`을 얹으면 mTLS에 더해 `Authorization: Bearer <token>`도 요구된다.
+4. `DMS_AUTH_SHARED_TOKEN`은 **기본 배포에서 필수**다 — mTLS에 더해 `Authorization: Bearer <token>`도
+   gate로 요구된다(`auth.py`의 토큰 검사는 mTLS와 무관하게 먼저 통과해야 한다). shipped `dms-secrets`가
+   이 토큰을 싣고, 같은 secret을 쓰는 내부 평면 `dms-api-internal`(§5, mTLS **off**)은 이 토큰이 **유일한
+   인증**이다. 따라서 외부·내부 **모든 API 호출이 Bearer 토큰을 함께 보낸다**.
 5. **DMS는 evidence 헤더(`ssl-client-*`)를 무조건 신뢰**하므로, `dms-api`는 **cert를 종단하는 ingress만**
    닿아야 한다 — 안 그러면 in-cluster 아무 파드나 그 헤더를 스푸핑해 operator actor를 위조할 수 있다.
    이를 **`dms-api-from-ingress-only` NetworkPolicy**(`control-plane.yaml`에 포함, §5 apply 시 함께 적용)가
@@ -361,15 +364,17 @@ kubectl -n dms get ingress dms-api
 # 인증 불필요 health
 curl -sS --cacert certs/dms-server-ca.crt https://dms.example.internal/healthz
 
-# 인증 필요 read — actor는 operator cert의 CN에서 "mtls:operator"로 유도된다
+# 인증 필요 read — actor는 operator cert의 CN에서 "mtls:operator"로 유도된다.
+# 토큰은 기본 필수다(shipped dms-secrets가 DMS_AUTH_SHARED_TOKEN을 싣는다) → Bearer도 함께 보낸다.
 curl -sS \
   --cert certs/operator.crt --key certs/operator.key \
   --cacert certs/dms-server-ca.crt \
+  -H "authorization: Bearer $DMS_TOKEN" \
   https://dms.example.internal/api/v1/operations/storage-mappings
 # → 아직 매핑이 없으면 []
 ```
 
-- `DMS_AUTH_SHARED_TOKEN`을 얹었다면 `-H "authorization: Bearer <token>"`을 추가한다.
+- `DMS_AUTH_SHARED_TOKEN`을 (기본과 달리) 비워 두었다면 위 `-H "authorization: Bearer …"` 줄을 뺀다.
 - API 호스트가 아직 DNS에 없으면 `--resolve dms.example.internal:443:<INGRESS_IP>`를 붙인다.
 
 여기까지면 코어가 떴다. `data_management` readiness가 아직 `Missing`이어도 정상이다 — DM 축

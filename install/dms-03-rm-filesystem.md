@@ -256,8 +256,9 @@ kubectl -n dms rollout status daemonset/dms-rm-agent --timeout=180s
 재시작해 새 목록을 다시 읽게 한다:
 
 ```bash
-# API로(권장) — RM·DM 에이전트 모두 restartedAt 스탬프
+# API로(권장) — RM·DM 에이전트 모두 restartedAt 스탬프. 토큰은 기본 필수 → Bearer도 함께.
 curl -sS --cert $CERTS/operator.crt --key $CERTS/operator.key --cacert $CERTS/dms-server-ca.crt \
+  -H "authorization: Bearer $DMS_TOKEN" \
   -X POST "$DMS_API_URL/api/v1/agent/rollout-restart"
 # 또는 kubectl 직접
 kubectl -n dms rollout restart daemonset/dms-rm-agent
@@ -278,8 +279,8 @@ kubectl -n dms rollout status  daemonset/dms-rm-agent --timeout=180s
 ```bash
 DMS_API_URL=https://dms.cluster-a.local        # mTLS 인그레스 (NodePort면 --resolve 병행)
 CERTS=/opt/dms-secrets/certs
-CURL_MTLS=(--cert $CERTS/operator.crt --key $CERTS/operator.key --cacert $CERTS/dms-server-ca.crt)
-# 공유 Bearer를 겹쳐 쓰면: -H "authorization: Bearer $DMS_TOKEN" 추가
+CURL_MTLS=(--cert $CERTS/operator.crt --key $CERTS/operator.key --cacert $CERTS/dms-server-ca.crt
+           -H "authorization: Bearer $DMS_TOKEN")   # 토큰은 기본 필수 (shipped dms-secrets)
 ```
 
 > **부연(테스트베드/dev 프로필, `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`).** 이땐 인증서 없이 평문 Bearer +

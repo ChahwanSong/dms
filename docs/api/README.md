@@ -68,8 +68,9 @@ POST /api/v1/<...>/<operation>   → 202 { request_id, status: "Persisted", … 
   `actor_evidence_conflict`로 거부된다 → 운영에서는 **보내지 않는다**.
 - **`DMS_DEFAULT_ACTOR`는 비어 있어야 한다.** `DMS_REQUIRE_MTLS_HEADER=true`인데 값이 설정돼
   있으면 **API startup이 실패**한다(fail-closed).
-- **shared bearer token**(`DMS_AUTH_SHARED_TOKEN`)을 mTLS 위에 **겹쳐 쓸 수 있다**(선택). 그럴 땐
-  `Authorization: Bearer <token>`도 함께 보낸다.
+- **shared bearer token**(`DMS_AUTH_SHARED_TOKEN`)은 **기본 배포에서 필수**다 — mTLS 위에 gate로
+  얹히고, 내부 평면 `dms-api-internal`(mTLS off)의 유일한 인증이라 shipped secret이 이를 싣는다.
+  따라서 모든 요청에 `Authorization: Bearer <token>`을 함께 보낸다.
 
 > 인증서 발급·ingress의 cert 검증/evidence header 전달 구성은
 > [`install/dms-02-core.md`](../../install/dms-02-core.md), 인증 관련 env 전체 레퍼런스는
@@ -82,7 +83,7 @@ POST /api/v1/<...>/<operation>   → 202 { request_id, status: "Persisted", … 
 ```bash
 curl -sS \
   --cert operator.crt --key operator.key --cacert dms-api-ca.crt \
-  -H "authorization: Bearer $DMS_TOKEN" \          # DMS_AUTH_SHARED_TOKEN을 겹쳐 쓸 때만
+  -H "authorization: Bearer $DMS_TOKEN" \          # 기본 필수 (DMS_AUTH_SHARED_TOKEN)
   https://dms.example.internal/api/v1/operations/work-summary
 # actor는 인증서 subject에서 mtls:<subject>로 파생된다 (x-dms-actor 지정 불필요·불가).
 ```

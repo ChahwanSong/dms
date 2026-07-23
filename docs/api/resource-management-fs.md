@@ -22,16 +22,16 @@ WekaFS**다.
 **운영 프로필 = mTLS-verified header.** DMS API는 신뢰 ingress가 클라이언트 인증서를 검증한 뒤 upstream으로
 넘기고, DMS는 **인증서 subject에서 actor를 파생**한다(prefix는 `DMS_MTLS_ACTOR_PREFIX`, 기본 `mtls:`).
 따라서 운영에서는 curl에 **클라이언트 인증서**를 붙이고 평문 `x-dms-actor` 헤더는 **보내지 않는다**(신뢰되지
-않음). 공유 bearer 토큰(`DMS_AUTH_SHARED_TOKEN`)을 함께 요구하도록 구성했다면 `Authorization: Bearer`를
-얹는다. 이 문서의 모든 예시는 아래 `CURL` 배열을 전제로 한다.
+않음). 공유 bearer 토큰(`DMS_AUTH_SHARED_TOKEN`)은 **기본 배포에서 필수**이므로 `Authorization: Bearer`를
+항상 얹는다. 이 문서의 모든 예시는 아래 `CURL` 배열을 전제로 한다.
 
 ```bash
 DMS_API_URL="https://dms.cluster-a.local"
 
 # 운영(mTLS-verified) 프로필: 인증서로 인증, actor는 인증서 subject에서 파생
 CURL=(--cert /etc/dms/client.crt --key /etc/dms/client.key --cacert /etc/dms/ca.crt)
-# (선택) 공유 bearer 토큰도 요구하도록 구성했다면:
-# CURL+=(-H "Authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
+# 공유 bearer 토큰은 기본 배포에서 필수 (shipped dms-secrets가 이를 싣는다):
+CURL+=(-H "Authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 ```
 
 > **`requester_id`(요청 본문) ≠ 인증 actor(인증서 subject).** `requester_id`는 리소스의 논리적 요청자(자유

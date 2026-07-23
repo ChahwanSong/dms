@@ -354,7 +354,7 @@ set +H   # zsh: colon 엔드포인트 histexpand 방지
 # 운영(mTLS-verified) 프로필: 클라이언트 인증서로 인증하고 actor는 인증서 subject에서 파생된다
 # (평문 x-dms-actor는 신뢰하지 않음 — ingress가 cert를 검증·전달하고 DMS가 mtls:<subject>를 actor로 쓴다).
 H=(-sS --cert operator.crt --key operator.key --cacert dms-api-ca.crt \
-   -H "authorization: Bearer $DMS_TOKEN")           # Bearer는 DMS_AUTH_SHARED_TOKEN을 겹쳐 쓸 때만
+   -H "authorization: Bearer $DMS_TOKEN")           # 기본 필수 (DMS_AUTH_SHARED_TOKEN)
 U=https://dms.example.internal
 #   (dev/testbed 프로필에서만: 인증서 없이 -H "x-dms-actor: operator"로 actor를 직접 지정)
 

@@ -23,15 +23,15 @@
   보내지 않는다**(파생 actor와 다르면 `actor_evidence_conflict`로 거부).
 - **`DMS_DEFAULT_ACTOR`는 비어 있어야 한다.** `DMS_REQUIRE_MTLS_HEADER=true`인데 값이 있으면
   **API pod startup이 실패**한다(fail-closed).
-- shared bearer token(`DMS_AUTH_SHARED_TOKEN`)을 mTLS 위에 **겹쳐 쓸 수 있다**(선택). 그럴 때만
-  `Authorization: Bearer …`를 함께 보낸다.
+- shared bearer token(`DMS_AUTH_SHARED_TOKEN`)은 **기본 배포에서 필수**다(mTLS 위에 gate로 얹히고,
+  내부 평면 `dms-api-internal`(mTLS off)의 유일한 인증). 모든 운영 curl이 `Authorization: Bearer …`를 함께 보낸다.
 
 이 문서의 모든 `curl` 예시는 아래 헬퍼를 전제한다.
 
 ```bash
 export DMS_API_URL="https://dms.example.internal"
 export DMS_CLIENT_CERT=operator.crt DMS_CLIENT_KEY=operator.key DMS_CA_CERT=dms-api-ca.crt
-export DMS_TOKEN=""     # DMS_AUTH_SHARED_TOKEN을 겹쳐 쓸 때만 채운다
+export DMS_TOKEN="<DMS_AUTH_SHARED_TOKEN>"   # 기본 필수 — shipped dms-secrets의 토큰과 동일 값
 
 # 운영(mTLS): 인증서로 인증, x-dms-actor는 보내지 않는다.
 DMS_CURL=(--cert "$DMS_CLIENT_CERT" --key "$DMS_CLIENT_KEY" --cacert "$DMS_CA_CERT")
@@ -141,7 +141,7 @@ steady-state 판정 기준은 §0 "정상 steady state"를 쓴다. DM 전제조�
 | 증상 | 확인할 것 |
 | --- | --- |
 | TLS handshake 실패 | client cert가 `dms-client-ca`로 발급됐는지, ingress Secret 이름(`dms/dms-client-ca`)이 맞는지 |
-| HTTP 401 `invalid token` | `DMS_TOKEN`과 `DMS_AUTH_SHARED_TOKEN`이 같은지 (bearer를 겹쳐 쓸 때만 해당) |
+| HTTP 401 `invalid token` | `DMS_TOKEN`과 `DMS_AUTH_SHARED_TOKEN`이 같은지 (토큰은 기본 필수) |
 | HTTP 401 `mtls_subject_required` | ingress가 upstream에 cert evidence header를 전달하는지 |
 | HTTP 401 `mtls_verify_failed` | ingress의 client-cert verify 결과가 `SUCCESS`인지 |
 | `actor_evidence_conflict` | 평문 `x-dms-actor`를 보내고 있지 않은지 (운영에서는 보내지 않는다) |

@@ -35,8 +35,8 @@ API(생성/변경/차단/check/sync/import/audit/만료 sweep) 사용법은
 > DMS_CURL_OPTS=(--cert   /opt/dms-secrets/certs/operator.crt
 >                --key    /opt/dms-secrets/certs/operator.key
 >                --cacert /opt/dms-secrets/certs/dms-server-ca.crt)
-> # (선택) 공유 토큰을 함께 layer하면:
-> #   DMS_CURL_OPTS+=(-H "authorization: Bearer <DMS_AUTH_SHARED_TOKEN>")
+> # 공유 토큰은 기본 필수 (shipped dms-secrets가 이를 싣는다):
+> DMS_CURL_OPTS+=(-H "authorization: Bearer <DMS_AUTH_SHARED_TOKEN>")
 > ```
 >
 > 전체 인증 규칙은 [`docs/api/README.md`](../docs/api/README.md) 참조.
@@ -251,7 +251,7 @@ export DMS_API_URL='https://dms.cluster-a.local:30535'
 export DMS_CLIENT_CERT=/opt/dms-secrets/certs/operator.crt
 export DMS_CLIENT_KEY=/opt/dms-secrets/certs/operator.key
 export DMS_CA_CERT=/opt/dms-secrets/certs/dms-server-ca.crt
-export DMS_TOKEN='<DMS_AUTH_SHARED_TOKEN>'   # 공유 토큰을 layer한 경우만 (선택)
+export DMS_TOKEN='<DMS_AUTH_SHARED_TOKEN>'   # 기본 필수 — shipped dms-secrets의 토큰과 동일 값
 # DMS_ACTOR는 설정하지 않는다 — mTLS 프로필에선 actor를 인증서 subject에서 파생한다.
 
 install/scripts/register-default-quota-policies.sh \

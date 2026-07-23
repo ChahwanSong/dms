@@ -24,7 +24,7 @@ storage mapping 조회, 그리고 **컨트롤플레인 제어 상태**(maintenan
 클라이언트 인증서를 검증해 그 결과와 subject를 upstream으로 넘기고, DMS는 **인증서 subject**에서
 audit actor를 파생한다(prefix `DMS_MTLS_ACTOR_PREFIX`, 기본 `mtls:`). 평문 `x-dms-actor` 헤더는 이
 프로필에서 **신뢰하지 않으며**, `DMS_DEFAULT_ACTOR`는 비어 있어야 한다(설정돼 있으면 API가 기동
-거부). 선택적으로 shared bearer token(`DMS_AUTH_SHARED_TOKEN`)을 함께 요구할 수 있다.
+거부). shared bearer token(`DMS_AUTH_SHARED_TOKEN`)은 **기본 배포에서 필수**이므로 함께 보낸다(내부 평면 `dms-api-internal`의 유일한 인증이라 shipped secret이 이를 싣는다).
 
 따라서 모든 curl은 **클라이언트 인증서**로 호출한다(평문 `x-dms-actor` 없음). 아래 예시는 이 배열을
 재사용한다:
@@ -35,8 +35,8 @@ CURL=(curl -sS
   --cert   /etc/dms-client/client.crt
   --key    /etc/dms-client/client.key
   --cacert /etc/dms-client/ca.crt)
-# shared token을 함께 요구하도록 배포된 경우에만:
-#   CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
+# shared token은 기본 배포에서 필수 (shipped dms-secrets가 이를 싣는다):
+CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 ```
 
 조회 엔드포인트는 대부분 GET이라 actor를 소비하지 않지만(감사 레코드를 남기지 않음), **인증 자체는

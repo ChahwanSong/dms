@@ -159,7 +159,7 @@ cp src/portal/deploy/kubernetes/portal.yaml /tmp/dms-portal.yaml
 | --- | --- | --- |
 | `PORTAL_DMS_API_URL` | (없음) | DMS API base. 미설정이면 DMS 연동 route가 `503`. |
 | `PORTAL_DMS_VERIFY_TLS` | `true` | DMS가 https일 때 서버 cert 검증(운영 mTLS에서 `true` 유지, CA로 검증). |
-| `PORTAL_DMS_TOKEN` | (없음) | (선택) shared bearer token. Secret으로 주입. |
+| `PORTAL_DMS_TOKEN` | (없음) | **필수** shared bearer token(내부 API의 shared-token 게이트, DMS `DMS_AUTH_SHARED_TOKEN`과 동일 값). Secret으로 주입. |
 | `PORTAL_DMS_ACTOR` | `operator` | DMS audit 기본 actor. |
 | `PORTAL_SESSION_SECRET` | (dev 기본값) | 세션 쿠키 서명키. Secret으로 주입. dev 기본값이면 기동 거부. |
 | `PORTAL_SESSION_HTTPS_ONLY` | `true` | 세션 쿠키 Secure 플래그. 평문 HTTP 노출이면 `false`. |
@@ -249,7 +249,7 @@ kubectl -n dms-portal get deploy,svc,secret
 
 ```bash
 SESSION_SECRET="$(openssl rand -hex 32)"
-DMS_TOKEN="REPLACE_WITH_DMS_AUTH_SHARED_TOKEN"   # (선택) DMS의 DMS_AUTH_SHARED_TOKEN과 동일 값
+DMS_TOKEN="REPLACE_WITH_DMS_AUTH_SHARED_TOKEN"   # 필수 — DMS의 DMS_AUTH_SHARED_TOKEN과 동일 값
 
 kubectl -n dms-portal patch secret portal-secrets --type merge -p "$(cat <<JSON
 {"stringData":{
