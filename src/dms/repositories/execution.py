@@ -238,61 +238,173 @@ class ExecutionMixin:
             plan = self._get_plan(connection, plan_id)
             if plan["status"] != LifecycleState.PLANNED.value:
                 raise RuntimeError(f"plan is not claimable: {plan_id}")
-            cursor = connection.execute(
-                """
-                UPDATE plans
-                SET status = ?, attempt_count = attempt_count + 1, updated_at = ?
-                WHERE plan_id = ?
-                  AND status = ?
-                """,
-                (
-                    LifecycleState.CLAIMED.value,
-                    now,
-                    plan_id,
-                    LifecycleState.PLANNED.value,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError(f"plan is not claimable: {plan_id}")
-            connection.execute(
-                "UPDATE requests SET status = ? WHERE request_id = ?",
-                (LifecycleState.CLAIMED.value, plan["request_id"]),
-            )
-            connection.execute(
-                """
-                INSERT INTO runs (
-                    run_id, request_id, plan_id, worker_id, executor_id,
-                    worker_role, lease_expires_at, heartbeat_at, state,
-                    started_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    plan["request_id"],
-                    plan_id,
-                    worker_id,
-                    executor_id,
-                    plan["worker_role"],
-                    iso_at(lease_seconds),
-                    now,
-                    LifecycleState.CLAIMED.value,
-                    now,
-                    now,
-                ),
-            )
-            self._insert_transition(
+            if not self._do_claim(
                 connection,
-                request_id=plan["request_id"],
-                plan_id=plan_id,
+                plan,
+                worker_id=worker_id,
+                executor_id=executor_id,
+                lease_seconds=lease_seconds,
                 run_id=run_id,
-                from_state=LifecycleState.PLANNED.value,
-                to_state=LifecycleState.CLAIMED.value,
-                reason=f"claimed by {worker_id}",
-                actor=worker_id,
-                created_at=now,
-            )
+                now=now,
+            ):
+                raise RuntimeError(f"plan is not claimable: {plan_id}")
         return run_id
 
+
+    def claim_next_plan(
+        self,
+        worker_role: WorkerRole,
+        *,
+        worker_id: str,
+        executor_id: str,
+        lease_seconds: int,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Atomically claim the OLDEST claimable plan for ``worker_role`` and return
+        ``(decoded_plan, run_id)``, or ``None`` when there is nothing to claim.
+
+        Unlike ``list_claimable_plans(limit=1)`` + ``claim_plan`` — where every idle
+        worker fetches the SAME oldest plan and all but one lose the claim race — this
+        locks the selected row with ``FOR UPDATE SKIP LOCKED`` on PostgreSQL, so N
+        concurrent workers each grab a DISTINCT plan with no contention, no wasted claim
+        attempts, and no ``not claimable`` log noise. SQLite serializes writers, so the
+        plain query is race-free there (single-worker tests)."""
+        run_id = new_id("run")
+        now = iso_now()
+        skip_locked = " FOR UPDATE SKIP LOCKED" if self.database.is_postgres else ""
+        with self.database.connect() as connection:
+            control_state = row_to_dict(self._ensure_control_state(connection))
+            if self._control_state_blocks_scheduling(control_state):
+                raise SchedulingBlocked("DMS scheduling is blocked")
+            row = connection.execute(
+                f"""
+                SELECT plan_id FROM plans
+                WHERE worker_role = ? AND status = ?
+                ORDER BY created_at ASC
+                LIMIT 1{skip_locked}
+                """,
+                (worker_role.value, LifecycleState.PLANNED.value),
+            ).fetchone()
+            if not row:
+                return None
+            plan = self._get_plan(connection, row_to_dict(row)["plan_id"])
+            if not self._do_claim(
+                connection,
+                plan,
+                worker_id=worker_id,
+                executor_id=executor_id,
+                lease_seconds=lease_seconds,
+                run_id=run_id,
+                now=now,
+            ):
+                # SKIP LOCKED held the row for this tx, so this should not happen; bail
+                # out defensively rather than claim a plan that changed underfoot.
+                return None
+        return self._decode_plan(plan), run_id
+
+    def _do_claim(
+        self,
+        connection: Any,
+        plan: dict[str, Any],
+        *,
+        worker_id: str,
+        executor_id: str,
+        lease_seconds: int,
+        run_id: str,
+        now: str,
+    ) -> bool:
+        """Transition ``plan`` (and its request) to CLAIMED and open a run, inside the
+        caller's transaction. Returns False when the plan was no longer PLANNED (lost a
+        race) so the caller decides whether that is an error (claim_plan) or a no-op
+        (claim_next_plan)."""
+        cursor = connection.execute(
+            """
+            UPDATE plans
+            SET status = ?, attempt_count = attempt_count + 1, updated_at = ?
+            WHERE plan_id = ?
+              AND status = ?
+            """,
+            (
+                LifecycleState.CLAIMED.value,
+                now,
+                plan["plan_id"],
+                LifecycleState.PLANNED.value,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return False
+        connection.execute(
+            "UPDATE requests SET status = ? WHERE request_id = ?",
+            (LifecycleState.CLAIMED.value, plan["request_id"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                run_id, request_id, plan_id, worker_id, executor_id,
+                worker_role, lease_expires_at, heartbeat_at, state,
+                started_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                plan["request_id"],
+                plan["plan_id"],
+                worker_id,
+                executor_id,
+                plan["worker_role"],
+                iso_at(lease_seconds),
+                now,
+                LifecycleState.CLAIMED.value,
+                now,
+                now,
+            ),
+        )
+        self._insert_transition(
+            connection,
+            request_id=plan["request_id"],
+            plan_id=plan["plan_id"],
+            run_id=run_id,
+            from_state=LifecycleState.PLANNED.value,
+            to_state=LifecycleState.CLAIMED.value,
+            reason=f"claimed by {worker_id}",
+            actor=worker_id,
+            created_at=now,
+        )
+        return True
+
+    def try_acquire_leader(
+        self, component: str, *, holder: str, lease_seconds: int
+    ) -> bool:
+        """Acquire/renew a single-holder lease for ``component`` and return whether
+        ``holder`` now holds a non-expired lease. Lets many worker replicas run a
+        cluster-singleton task (the periodic recovery sweeps) exactly once per cycle.
+
+        Atomic: the upsert only replaces the row when the existing lease has expired or
+        is already ours, so a concurrent contender whose lease is still valid keeps it.
+        Portable across PostgreSQL and SQLite (``ON CONFLICT … DO UPDATE … WHERE``)."""
+        now = iso_now()
+        expires = iso_at(lease_seconds)
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO component_leases (component, holder, lease_expires_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (component) DO UPDATE SET
+                    holder = excluded.holder,
+                    lease_expires_at = excluded.lease_expires_at,
+                    updated_at = excluded.updated_at
+                WHERE component_leases.lease_expires_at < ?
+                   OR component_leases.holder = ?
+                """,
+                (component, holder, expires, now, now, holder),
+            )
+            row = connection.execute(
+                "SELECT holder, lease_expires_at FROM component_leases WHERE component = ?",
+                (component,),
+            ).fetchone()
+        if not row:
+            return False
+        current = row_to_dict(row)
+        return current["holder"] == holder and current["lease_expires_at"] >= now
 
     def update_run_state(
         self,

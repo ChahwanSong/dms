@@ -301,6 +301,17 @@ CREATE TABLE IF NOT EXISTS dm_identity_probe_targets (
     username TEXT PRIMARY KEY,
     last_requested_at TEXT NOT NULL
 );
+
+-- Single-holder leases for cluster-singleton work. With many worker replicas, only the
+-- ONE holder of a component's non-expired lease runs that work (e.g. the periodic
+-- recovery sweeps) instead of every replica doing it redundantly. Acquired/renewed via
+-- try_acquire_leader; on holder death the lease expires and another replica takes over.
+CREATE TABLE IF NOT EXISTS component_leases (
+    component TEXT PRIMARY KEY,
+    holder TEXT NOT NULL,
+    lease_expires_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -342,6 +353,7 @@ def migrate_operational(database: Database) -> None:
         _record_migration(connection, "operational-0023-managed-root-backfill")
         _record_migration(connection, "operational-0024-agent-node-current")
         _record_migration(connection, "operational-0025-scale-indexes")
+        _record_migration(connection, "operational-0026-component-leases")
 
 
 def migrate_observability(database: Database) -> None:

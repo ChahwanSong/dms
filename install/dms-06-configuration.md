@@ -110,9 +110,20 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
 | `DMS_WORKER_LEASE_SECONDS` | `300` | planner/RM/DM worker의 claim lease. RM/DM은 backend call 중 heartbeat로 갱신. |
+| `DMS_RECOVERY_SWEEP_LEASE_SECONDS` | `30` | 주기 복구 스윕(stale run 정리·orphan run 닫기 등)의 **단일-리더 lease**. 여러 worker replica 중 이 lease 보유자 1명만 스윕을 돌려 N× 중복을 없앤다. 짧게 둬 잡 실행으로 바빠진 리더가 빨리 인계하게 한다(`component_leases` 테이블). |
 | `DMS_PREVIEW_TTL_SECONDS` | `86400` | `sync`/`rm` preview가 `ConfirmPending`으로 유지되는 TTL. `scan`은 confirm 없이 read-only. |
 | `DMS_AGENT_REPORT_STALE_SECONDS` | `300` | storage-mapping readiness의 agent report freshness window. |
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | DM readiness·inventory aggregation에 쓰는 control cluster name. |
+
+> **RM/DM worker 수평 확장.** `dms-rm-worker`·`dms-dm-worker`는 **replicas를 늘리면 최대 그 수만큼 잡을
+> 동시 실행**한다(각 워커가 잡 1개를 claim→완료까지 처리). claim은 `FOR UPDATE SKIP LOCKED`(PostgreSQL)라
+> N개 워커가 **서로 다른** plan을 원자적으로 집어 경합·중복 claim·`not claimable` 로그 노이즈가 없고, 주기
+> 복구 스윕은 **리더 1명만** 돈다(`DMS_RECOVERY_SWEEP_LEASE_SECONDS`). 확장 시 함께 볼 것:
+> - **DB 연결 예산**: loop 프로세스당 최대 `DMS_DB_POOL_MAX_SIZE`(기본 4) connection. `replicas × 4 +
+>   API/기타`가 PostgreSQL `max_connections`(스톡 100)를 넘지 않게 한다(초과 시 checkout timeout). 워커는
+>   single-thread라 `DMS_DB_POOL_MAX_SIZE=2`로 낮춰 상한을 반감해도 된다.
+> - **동시 잡 수 상한** = `min(replicas, 노드 용량 ÷ 잡당 파드 수)`. 그 이상 replica는 idle 폴링·연결만 늘린다.
+> - 포탈 배치는 `PORTAL_BACKUP_CONCURRENCY`(기본 8)만큼 제출하므로 실제 병렬을 원하면 replicas와 **맞춘다**.
 
 **agent_reports history 보존** (`dms retention --loop`). 100+ node가 분당 1회 보고하면 history가 수백만 행으로 자란다. node-health는 `agent_node_current`(node별 최신 1행)에서 읽으므로 history는 node-metrics 시계열용이고 나이 기준 prune이 안전하다.
 

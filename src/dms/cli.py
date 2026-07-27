@@ -160,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
             worker_id=args.worker_id,
             lease_seconds=settings.worker_lease_seconds,
+            recovery_sweep_lease_seconds=settings.recovery_sweep_lease_seconds,
             backend_registry=BackendAdapterRegistry.with_live_defaults(
                 repository, settings
             ),
@@ -185,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             volcano_adapter=volcano_adapter_from_settings(settings),
             worker_id=args.worker_id,
             lease_seconds=settings.worker_lease_seconds,
+            recovery_sweep_lease_seconds=settings.recovery_sweep_lease_seconds,
             preview_ttl_seconds=settings.preview_ttl_seconds,
             agent_report_stale_seconds=settings.agent_report_stale_seconds,
             identity_probe_wait_seconds=settings.dm_identity_probe_wait_seconds,

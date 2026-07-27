@@ -21,30 +21,37 @@ class RMWorkerRuntime:
     kubernetes_adapter: KubernetesNamespaceQuotaAdapter
     worker_id: str
     lease_seconds: int = 300
+    recovery_sweep_lease_seconds: int = 30
     backend_registry: BackendAdapterRegistry | None = None
 
     def run_once(self) -> int:
-        self.repository.mark_stale_runs(actor=self.worker_id)
-        # defensive sweeps: close orphaned runs that will never recover — DM preview
-        # runs parked in Blocked whose plan moved on, and stuck runs whose request has
-        # already reached a terminal state (idempotent; no-op when there are none).
-        self.repository.close_superseded_preview_runs(actor=self.worker_id)
-        self.repository.close_orphaned_stuck_runs(actor=self.worker_id)
+        # Recovery sweeps are cluster-singleton work: only the leader replica runs them
+        # each cycle, so scaling to N workers doesn't repeat the same global cleanup N
+        # times. On leader death the short lease expires and another replica takes over.
+        if self.repository.try_acquire_leader(
+            "recovery-sweeper",
+            holder=self.worker_id,
+            lease_seconds=self.recovery_sweep_lease_seconds,
+        ):
+            self.repository.mark_stale_runs(actor=self.worker_id)
+            self.repository.close_superseded_preview_runs(actor=self.worker_id)
+            self.repository.close_orphaned_stuck_runs(actor=self.worker_id)
         if self.repository.scheduling_blocked():
             return 0
-        plans = self.repository.list_claimable_plans(WorkerRole.RM, limit=1)
-        if not plans:
-            return 0
-        plan = plans[0]
+        # Atomic SKIP-LOCKED claim: each replica grabs a DISTINCT oldest plan, so idle
+        # workers never contend on the same one (no thundering herd, no wasted attempts).
         try:
-            run_id = self.repository.claim_plan(
-                plan_id=plan["plan_id"],
+            claimed = self.repository.claim_next_plan(
+                WorkerRole.RM,
                 worker_id=self.worker_id,
                 executor_id=self.worker_id,
                 lease_seconds=self.lease_seconds,
             )
         except SchedulingBlocked:
             return 0
+        if claimed is None:
+            return 0
+        plan, run_id = claimed
         plan = self.repository.get_plan(plan["plan_id"])
         self.repository.update_run_state(
             run_id,

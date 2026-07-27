@@ -107,6 +107,12 @@ class Database:
     url: str
     pool_config: PoolConfig = PoolConfig()
 
+    @property
+    def is_postgres(self) -> bool:
+        """True for PostgreSQL URLs — gates dialect-specific SQL (e.g. the
+        ``FOR UPDATE SKIP LOCKED`` used by the multi-worker plan claim)."""
+        return urlparse(self.url).scheme in {"postgresql", "postgres"}
+
     @contextmanager
     def connect(self, *, pooled: bool = True) -> Iterator[Any]:
         """Yield a connection with commit-on-clean-exit / rollback-on-exception.

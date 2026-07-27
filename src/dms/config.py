@@ -35,6 +35,10 @@ class Settings:
     require_mtls_verified_header: bool = False
     mtls_actor_prefix: str = "mtls:"
     worker_lease_seconds: int = 300
+    # Single-holder lease for the periodic recovery sweeps (mark_stale/close-orphaned/…).
+    # Kept short (a few loop intervals) so a leader that gets busy running a job relinquishes
+    # quickly and an idle replica takes over the sweeps. See workers' run_once + try_acquire_leader.
+    recovery_sweep_lease_seconds: int = 30
     preview_ttl_seconds: int = 24 * 60 * 60
     ldap_uri: str | None = None
     ldap_base_dn: str | None = None
@@ -196,6 +200,9 @@ class Settings:
             require_mtls_verified_header=require_mtls_verified_header,
             mtls_actor_prefix=os.getenv("DMS_MTLS_ACTOR_PREFIX", "mtls:"),
             worker_lease_seconds=lease,
+            recovery_sweep_lease_seconds=int(
+                os.getenv("DMS_RECOVERY_SWEEP_LEASE_SECONDS", "30")
+            ),
             preview_ttl_seconds=preview_ttl,
             ldap_uri=os.getenv("DMS_LDAP_URI"),
             ldap_base_dn=ldap_base_dn,

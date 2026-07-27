@@ -205,18 +205,24 @@ DMS_LDAP_BIND_PASSWORD: "<실제 비밀번호로>"
 
 ---
 
-## 5. dm-worker 활성화 (`replicas: 1`)
+## 5. dm-worker 활성화 (`replicas: 1`+, 수평 확장 가능)
 
 `install/kubernetes/control-plane.yaml` → Deployment **`dms-dm-worker`**:
 
 ```yaml
 spec:
-  replicas: 1     # 1 = DM 활성 (매니페스트 기본)
+  replicas: 1     # 1 = DM 활성 (매니페스트 기본). N = 최대 N개 잡 동시 실행
 ```
 
 - **`1`이 정상 = DM 켜짐.** dm-worker가 DM plan을 claim → preflight → Volcano 잡 생성·폴링한다.
 - **`0`은 DM을 의도적으로 끌 때만.** 0이면 아무 워커도 data job을 claim하지 않아 scan/sync/rm이
   **큐에서 영구 대기**한다(0을 "정상 유휴"로 오해하지 말 것).
+- **`replicas`는 곧 동시 DM 잡 수의 상한이다.** `1`이면 잡이 **순차** 실행되고(워커가 잡 하나를 완료까지
+  블로킹 처리), `N`이면 최대 N개가 **병렬**로 돈다. N개 워커는 claim 시 `FOR UPDATE SKIP LOCKED`로 **서로
+  다른** plan을 원자적으로 집으므로 경합이 없다. 적정값 ≈ `min(원하는 동시성, 노드 용량 ÷ 잡당 파드 수)` —
+  잡은 `node_count`개 노드(런처+워커 파드)를 쓰므로 노드 CPU/메모리가 실질 상한이고, 그 이상 replica는
+  idle 폴링만 늘린다. **DB 연결 예산·`PORTAL_BACKUP_CONCURRENCY` 매칭**은
+  [`dms-06-configuration.md §3`](dms-06-configuration.md)의 "RM/DM worker 수평 확장".
 - dm-worker는 **컨트롤플레인과 동일한 plain `dms` 이미지**를 쓰며 `runAsUser: 0`(root)으로 돈다 —
   공유 FS의 요청자-소유 잠긴 artifact(`summary.json`)를 읽기 위함이다. 읽기전용 오케스트레이터라
   (FS 쓰기 0, `kubectl`은 SA 토큰) root가 그 cross-uid 읽기 외 권한을 주지 않는다. api/planner/

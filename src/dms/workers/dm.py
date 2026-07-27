@@ -22,6 +22,7 @@ class DMWorkerRuntime:
     volcano_adapter: Any
     worker_id: str
     lease_seconds: int = 300
+    recovery_sweep_lease_seconds: int = 30
     preview_ttl_seconds: int = 24 * 60 * 60
     # Node-agent freshness window for candidate selection. Candidates come from the
     # current-state table (latest report per node) with freshness computed ON READ
@@ -57,29 +58,35 @@ class DMWorkerRuntime:
     privileged_gid: int = 0
 
     def run_once(self) -> int:
-        self.repository.mark_stale_runs(actor=self.worker_id)
-        # expire ConfirmPending jobs whose preview lapsed (never confirmed) — this moves
-        # their plan out of Blocked so the preview-run sweep below can close the run.
-        self.repository.expire_stale_preview_jobs(actor=self.worker_id)
-        # defensive sweeps: close orphaned preview runs (Blocked, plan moved on) and
-        # stuck runs whose request already reached a terminal state (idempotent).
-        self.repository.close_superseded_preview_runs(actor=self.worker_id)
-        self.repository.close_orphaned_stuck_runs(actor=self.worker_id)
+        # Recovery sweeps are cluster-singleton work: only the leader replica runs them
+        # each cycle (see RMWorkerRuntime), so scaling to N dm-workers doesn't repeat the
+        # same global cleanup N times. On leader death the short lease expires and another
+        # replica takes over. (expire_stale_preview_jobs must precede the preview-run sweep.)
+        if self.repository.try_acquire_leader(
+            "recovery-sweeper",
+            holder=self.worker_id,
+            lease_seconds=self.recovery_sweep_lease_seconds,
+        ):
+            self.repository.mark_stale_runs(actor=self.worker_id)
+            self.repository.expire_stale_preview_jobs(actor=self.worker_id)
+            self.repository.close_superseded_preview_runs(actor=self.worker_id)
+            self.repository.close_orphaned_stuck_runs(actor=self.worker_id)
         if self.repository.scheduling_blocked():
             return 0
-        plans = self.repository.list_claimable_plans(WorkerRole.DM, limit=1)
-        if not plans:
-            return 0
-        plan = plans[0]
+        # Atomic SKIP-LOCKED claim: each dm-worker grabs a DISTINCT oldest plan, so idle
+        # workers never contend on the same one (no thundering herd, no wasted attempts).
         try:
-            run_id = self.repository.claim_plan(
-                plan_id=plan["plan_id"],
+            claimed = self.repository.claim_next_plan(
+                WorkerRole.DM,
                 worker_id=self.worker_id,
                 executor_id=self.worker_id,
                 lease_seconds=self.lease_seconds,
             )
         except SchedulingBlocked:
             return 0
+        if claimed is None:
+            return 0
+        plan, run_id = claimed
         plan = self.repository.get_plan(plan["plan_id"])
         job = self.repository.get_data_job(plan["execution_metadata"]["job_id"])
         self.repository.update_run_state(
