@@ -29,7 +29,7 @@ preflight에서 rejected). "정상인데 안 돈다"의 대부분은 이 체크�
 | 4 | dms-agent 이미지 | 빌드·push 후 `agent-daemonset.yaml` → DaemonSet `dms-dm-agent` → `image:` | plain `dms` 이미지면 `missing_dscan/dsync/drm_tool` |
 | 5 | 노드 신원 프로빙 | `agent-daemonset.yaml` → `dms-dm-agent` → env `DMS_AGENT_IDENTITY_USERS` + 노드 NSS/SSSD | `identity_not_ready_on_node` |
 | 6 | LDAP 신원 해석 | `control-plane.yaml` → CM + Secret `dms-secrets` → `DMS_LDAP_*` | `ldap_not_configured` / `ldap_unavailable` |
-| 7 | dm-worker 활성화 | `control-plane.yaml` → Deployment `dms-dm-worker` → `replicas: 1` | `0`이면 잡을 아무도 claim 안 함(영구 대기) |
+| 7 | dm-worker 활성화 | `control-plane.yaml` → Deployment `dms-dm-worker` → `replicas: 32`(기본) | `0`이면 잡을 아무도 claim 안 함(영구 대기); 32는 `max_connections≥400` 전제 |
 | 8 | 공유 artifact FS | `control-plane.yaml` → CM `DMS_DM_ARTIFACT_BASE_URI` + `dms-dm-worker` hostPath `dm-artifacts.path` | dm-worker가 summary 못 읽음 / 멀티노드 rank-script 공유 실패 |
 | 9 | DM RBAC | `control-plane.yaml`(내장) + `kubectl apply` `dms-api-volcano-rbac.yaml`(별도) | `no_ready_dm_candidate` / 로그 tail Forbidden |
 | 10 | DM 정책 | `control-plane.yaml` → CM `DMS_DM_POLICY_*` (또는 DMS API) | 노드/프로세스 수·큐가 의도와 다름 |
@@ -205,13 +205,14 @@ DMS_LDAP_BIND_PASSWORD: "<실제 비밀번호로>"
 
 ---
 
-## 5. dm-worker 활성화 (`replicas: 1`+, 수평 확장 가능)
+## 5. dm-worker 활성화 (`replicas: 32` 기본 · 수평 확장)
 
 `install/kubernetes/control-plane.yaml` → Deployment **`dms-dm-worker`**:
 
 ```yaml
 spec:
-  replicas: 1     # 1 = DM 활성 (매니페스트 기본). N = 최대 N개 잡 동시 실행
+  replicas: 32    # 매니페스트 기본 = 최대 32-way 동시 실행. N = 최대 N개 잡 동시.
+                  # 32는 PostgreSQL max_connections>=400 전제 — 소규모/제약 환경은 낮춘다(dms-06 §3). 0 = DM 끔
 ```
 
 - **`1`이 정상 = DM 켜짐.** dm-worker가 DM plan을 claim → preflight → Volcano 잡 생성·폴링한다.

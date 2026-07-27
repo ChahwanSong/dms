@@ -172,7 +172,7 @@ Client CA(`dms-client-ca.crt`)는 `control-plane.yaml`의 `dms-client-ca` Secret
 
 `install/kubernetes/control-plane.yaml` 하나에 Namespace(`dms`, PodSecurity=privileged) · SA ·
 ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner / rm-worker /
-**dm-worker replicas=1**) · Service · NetworkPolicy가 모두 들어 있다. 아래 항목을 **환경 값으로
+**dm-worker replicas=32**) · Service · NetworkPolicy가 모두 들어 있다. 아래 항목을 **환경 값으로
 치환**한 뒤 적용한다. (secret 값이 들어가므로 편집본은 git에 커밋하지 않는다.)
 
 ### ConfigMap `dms-runtime-config`
@@ -238,9 +238,10 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 
 - `Deployment/dms-dm-worker`의 `dm-artifacts` 볼륨 `hostPath.path: /artifacts`를 **공유 artifact FS의
   마운트포인트**로 바꾼다(서브디렉터리가 아니라 마운트포인트 자체). 상세는 prereqs §0.5 /
-  [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md). `dms-dm-worker`는 `replicas: 1`(DM 활성)로 둔다 —
-  **`0`은 DM을 의도적으로 끌 때만** 쓴다(0이면 어떤 워커도 데이터 잡을 claim하지 않아 scan/sync/rm이
-  조용히 미실행된다).
+  [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md). `dms-dm-worker`는 `replicas: 32`(DM 활성 **기본** — 최대
+  32-way 동시 실행; **32는 PostgreSQL `max_connections≥400`을 전제**하므로 소규모/제약 환경은 낮춘다,
+  [`dms-05 §5`](dms-05-dm-jobs.md)·[`dms-06 §3`](dms-06-configuration.md))로 둔다 — **`0`은 DM을
+  의도적으로 끌 때만** 쓴다(0이면 어떤 워커도 데이터 잡을 claim하지 않아 scan/sync/rm이 조용히 미실행된다).
 
 ---
 

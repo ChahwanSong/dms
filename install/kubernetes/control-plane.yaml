@@ -559,9 +559,16 @@ metadata:
   name: dms-dm-worker
   namespace: dms
 spec:
-  # 1 = DM enabled. At 0 no worker ever CLAIMS a data job, so scan/sync/rm silently
-  # never execute (they sit in the queue). Only scale to 0 to deliberately DISABLE DM.
-  replicas: 1
+  # N = up to N DM jobs run CONCURRENTLY (each worker claims one job to completion).
+  # Claims use FOR UPDATE SKIP LOCKED so replicas never contend, and the periodic recovery
+  # sweeps run on a single elected leader — so scaling is clean. 32 is the shipped default
+  # for a sizable fleet.
+  # PREREQUISITES for 32 (LOWER this for small/constrained deployments):
+  #   - PostgreSQL max_connections >= 400 — stock 100 will EXHAUST (32 x DMS_DB_POOL_MAX_SIZE
+  #     + API/others); raise it or trim DMS_DB_POOL_MAX_SIZE. See install/dms-06 §3.
+  #   - node capacity for 32 x node_count job pods, and PORTAL_BACKUP_CONCURRENCY matched.
+  # 0 = deliberately DISABLE DM (no worker claims jobs; scan/sync/rm sit in the queue).
+  replicas: 32
   selector:
     matchLabels:
       app.kubernetes.io/name: dms-dm-worker

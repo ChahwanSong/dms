@@ -188,7 +188,7 @@ DM identity는 별도 mapping 등록 없이 dm-worker preflight에서 위 `DMS_L
 
 DM 잡은 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)의 클러스터 prereq 위에서만 실행된다: **Volcano** 설치 + `Queue dms-data` + `PriorityClass dms-low/normal/high`(`install/kubernetes/volcano-queue-priorityclasses.yaml`), DM 네임스페이스 `PodSecurity=privileged`, dm-worker와 **모든 DM 잡 노드에 동일 경로로 마운트된 공유 RWX artifact FS**, 노드 NSS/SSSD, 스토리지 host-mount. queue가 없으면 잡이 영구 Pending, PriorityClass가 없으면 pod가 admission에서 거부된다.
 
-`dms-dm-worker` Deployment **replicas=1 = DM enabled**. `0`은 DM을 **의도적으로 끌 때만** — 0이면 어떤 worker도 data job을 claim하지 않아 `scan`/`sync`/`rm`이 큐에 쌓인 채 실행되지 않는다(정상 상태 아님).
+`dms-dm-worker` Deployment **replicas=32(매니페스트 기본) = DM enabled · 최대 32-way 동시 실행** (32는 `max_connections≥400` 전제 — 규모에 맞게 조정, 위 §3 "RM/DM worker 수평 확장"). `0`은 DM을 **의도적으로 끌 때만** — 0이면 어떤 worker도 data job을 claim하지 않아 `scan`/`sync`/`rm`이 큐에 쌓인 채 실행되지 않는다(정상 상태 아님).
 
 ### 이미지 빌드 순서 (DMS_DM_JOB_IMAGE 트랩)
 
