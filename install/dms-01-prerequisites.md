@@ -224,6 +224,9 @@ DM 잡 파드는 결과(`summary.json`)와 로그를 `DMS_DM_ARTIFACT_BASE_URI`(
   실제 공유 FS **마운트포인트**로 치환한다(예: `/cephfs`). 서브디렉터리가 아니라 **마운트포인트
   자체**여야 host 재마운트가 컨테이너로 전파된다.
 - 잡 파드도 같은 경로를 hostPath로 붙인다(워커가 자동 생성하는 잡 매니페스트가 처리).
+- **베이스 서브디렉 생성 (1회)**: `DMS_DM_ARTIFACT_BASE_URI`의 베이스 디렉토리(예 `/artifacts/dms`)를 공유
+  FS에 **`root:root 0755`로 미리 생성**한다 — 요청자 uid job pod가 per-job 디렉토리로 내려갈 수 있게.
+  명령은 [`dms-05-dm-jobs.md §6`](dms-05-dm-jobs.md).
 
 ---
 
@@ -253,8 +256,11 @@ kubectl get priorityclass | grep dms                      # dms-low/normal/high
 # 8) PodSecurity (DM 네임스페이스)
 kubectl get ns dms -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'   # = privileged
 
-# 4/9) 공유 FS·스토리지 (dm-worker 예정 노드에서)
+# 4/9) 공유 FS·스토리지 + 아티팩트 베이스 디렉토리 (dm-worker 예정 노드에서)
 mount | grep <artifact-mountpoint>     # 예: /cephfs — dm-worker 노드와 DM 잡 노드에 동일 경로
+ls -ld /artifacts/dms                  # 아티팩트 베이스: root:root 0755 여야 함(dms-05 §6). 없으면:
+                                       #   sudo mkdir -p /artifacts/dms && sudo chown root:root /artifacts/dms && sudo chmod 0755 /artifacts/dms
+# (파일시스템 RM만: managed_root(/cephfs/dms 등)는 dms-03 §4 — CephFS/Weka 자동 0711, GPFS 사전 생성)
 
 # 5) 노드 신원 (DM 노드에서)
 getent passwd <requester-user>         # 해석돼야 함

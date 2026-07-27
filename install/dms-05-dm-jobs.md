@@ -265,6 +265,17 @@ volumeMounts:
   launcher가 `umask 077` + 요청자 chown으로 **요청자-only**로 잠근다 → 타 테넌트 job pod가 공유
   FS에서 못 읽는다. dm-worker(root)가 잠긴 summary를 symlink containment 가드로 읽는다.
 
+**베이스 디렉토리 생성 (배포 전 1회).** launcher는 per-job 서브디렉만 `mkdir -p`(umask 077)로 만들 뿐이라,
+`DMS_DM_ARTIFACT_BASE_URI`의 **베이스 디렉토리는 미리 만들어 world-traversable(0755)로 열어 둔다** — 안
+그러면 요청자 uid로 도는 job pod가 자기 per-job 디렉토리까지 내려가지 못한다. 공유 FS라 **아무 노드에서
+1회**면 모든 DM 노드에 보인다:
+
+```bash
+sudo mkdir -p /artifacts/dms                 # ← DMS_DM_ARTIFACT_BASE_URI의 경로(마운트포인트/dms)
+sudo chown root:root /artifacts/dms
+sudo chmod 0755 /artifacts/dms               # world-traversable (1777 금지). per-job은 launcher가 요청자-only로 잠금
+```
+
 ---
 
 ## 7. DM RBAC
