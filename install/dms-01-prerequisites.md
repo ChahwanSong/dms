@@ -105,10 +105,45 @@ psql "postgresql://dms_obs:<강한-OBS-비밀번호>@postgres.example.internal:5
 `DMS_DATABASE_URL`·`DMS_OBSERVABILITY_DATABASE_URL`이 된다. **테이블 스키마는 이 스크립트가 아니라
 `dms migrate`(dms-02-core의 migration Job)가 만든다.**
 
-> **connection 사이징:** 각 DMS 프로세스는 URL당 bounded pool을 쓴다(기본 op 8 + obs 3 = 11).
-> 표준 배포(프로세스 ≈ 6)면 `≈ 6 × 11 = 66`으로 stock `postgres:16` 기본 `max_connections=100`
-> 아래에 머문다. 워커/pool을 크게 늘리면 `max_connections`도 함께 올리고 재검산한다. pool env는
-> `dms-06-configuration.md` 참고.
+> **connection 사이징 (중요).** 각 DMS 프로세스는 DB URL당 bounded pool을 쓴다 — **loop 프로세스**
+> (planner·rm-worker·dm-worker·sanity·retention)는 op `DMS_DB_POOL_MAX_SIZE`(기본 **4**) + obs **3**,
+> **API**(dms-api·dms-api-internal)는 op `DMS_DB_API_POOL_MAX_SIZE`(기본 **16**) + obs 3. 두 DB를 **같은
+> 서버**에 두면 `max_connections`는 둘의 **합산 예산**이다. 소규모 배포는 stock `max_connections=100`
+> 아래에 머물지만, **매니페스트 기본 `dms-dm-worker` replicas=32에서는 상한이 ≈300+ connection**이라
+> **`max_connections=400`이 필요**하다(안 그러면 pool checkout timeout / `FATAL: too many connections`).
+> 상향 절차는 **§3.4**, pool env는 [`dms-06 §2·§3`](dms-06-configuration.md).
+
+### 3.4 max_connections 상향 (워커 확장 시)
+
+`dms-dm-worker` replicas를 크게(매니페스트 기본 **32** 등) 쓰면 stock `max_connections=100`으로는 부족하다.
+**필요치 = Σ(프로세스별 pool 상한)**(두 DB 합산). 기본 fleet(dm-worker 32) 예시:
+
+```
+dm-worker  32 × (op 4 + obs 3)=7  = 224
+dms-api     2 × (op 16 + obs 3)=19 = 38
+api-internal 1 × 19               = 19
+planner·rm-worker·sanity·retention 4 × 7 = 28
++ superuser_reserved 3
+= ≈ 312  →  max_connections = 400  (여유 ~90)
+```
+
+replicas를 더 늘리면 위 식으로 재검산한다.
+
+**self-hosted PostgreSQL** — superuser로 설정 후 **재시작**한다(`max_connections`는 reload로 반영 안 됨):
+
+```bash
+sudo -u postgres psql -c "ALTER SYSTEM SET max_connections = 400;"   # 또는 postgresql.conf에 max_connections = 400
+sudo systemctl restart postgresql
+sudo -u postgres psql -c "SHOW max_connections;"                     # → 400 확인
+```
+
+**관리형 PostgreSQL**(RDS/Cloud SQL 등) — SSH가 없으므로 **콘솔/파라미터 그룹**에서 `max_connections`를 400으로
+바꾸고 인스턴스를 **재부팅**한다.
+
+> **메모리 주의.** connection당 백엔드가 baseline ~5–10MB + `work_mem`를 쓰므로 400 connection은 수 GB RAM을
+> 요구한다. DB 호스트 메모리를 확인하고, 빠듯하면 raw 400 대신 **PgBouncer**(연결 풀러)를 앞단에 두면 앱은
+> 400을 보되 실제 백엔드 연결은 소수로 유지된다. `max_connections`를 못 올리면 `DMS_DB_POOL_MAX_SIZE`를
+> 낮춰(4→2) 워커당 상한을 반감할 수 있으나, 32 규모에선 API·obs 합산이 여전히 100을 넘어 상향이 근본 해법이다.
 
 > **부연(테스트베드):** 클러스터 내부에 PostgreSQL StatefulSet + PVC로 띄워도 되지만, 운영에서는
 > 외부 관리형 인스턴스를 권장한다.
@@ -241,9 +276,10 @@ Kubernetes namespace-quota RM을 쓰면 타깃 클러스터에 `dms-remote` Serv
 ## 11. 사전 준비 검증 (배포 전 빠른 확인)
 
 ```bash
-# 3) PostgreSQL 2개 DB 접속
+# 3) PostgreSQL 2개 DB 접속 + max_connections (dm-worker replicas 크게 쓰면 확인)
 psql "postgresql://dms_app:***@postgres.example.internal:5432/dms" -c 'select 1'
 psql "postgresql://dms_obs:***@postgres.example.internal:5432/dms_observability" -c 'select 1'
+psql "postgresql://dms_app:***@postgres.example.internal:5432/dms" -c 'SHOW max_connections'  # 기본 replicas=32면 ≥400 (§3.4)
 
 # 6) Volcano
 kubectl -n volcano-system get deploy
