@@ -14,11 +14,22 @@ class Settings:
     # PostgreSQL connection-pool sizing + per-session safety timeouts. Defaults are
     # chosen so a typical deployment stays comfortably under the stock
     # max_connections=100; see operational_pool_config / observability_pool_config.
+    # min_size is the pool FLOOR — connections kept warm even when unused. The API keeps
+    # a warm floor (db_pool_min_size) so user-facing requests never pay cold-connect
+    # latency on the first hit. Loop processes (planner / rm-worker / dm-worker / sanity
+    # / retention) are NOT latency-sensitive, so they use db_worker_pool_min_size (0):
+    # they open connections on demand and let idle ones reap (psycopg_pool max_idle),
+    # which removes the per-replica idle floor that dominates the connection budget when
+    # scaling to many workers. NOTE: the operational pool of a loop worker still stays
+    # warm in practice because run_once polls (claim_next_plan + leader upsert) every
+    # --interval seconds (< max_idle), so it is legitimately in use; min_size=0 mainly
+    # frees the OBSERVABILITY floor, which idle workers do not touch between events.
     db_pool_min_size: int = 1
-    # Loop processes (planner / rm-worker / dm-worker / sanity / retention) are
-    # single-threaded — each holds at most ~1 connection at a time, so a small pool
-    # suffices. The API is concurrent (sync handlers in the anyio threadpool), so it
-    # gets a larger pool AND its threadpool is capped to db_api_pool_max_size (see
+    db_worker_pool_min_size: int = 0
+    # Loop processes are single-threaded — each holds at most ~1 connection at a time
+    # (up to ~2 op during a run when the heartbeat thread overlaps the main thread), so a
+    # small pool suffices. The API is concurrent (sync handlers in the anyio threadpool),
+    # so it gets a larger pool AND its threadpool is capped to db_api_pool_max_size (see
     # api/app.py) so it can never oversubscribe the pool nor wait on checkout.
     db_pool_max_size: int = 4
     db_api_pool_max_size: int = 16
@@ -180,6 +191,9 @@ class Settings:
             database_url=database_url,
             observability_database_url=observability_url,
             db_pool_min_size=int(os.getenv("DMS_DB_POOL_MIN_SIZE", "1")),
+            db_worker_pool_min_size=int(
+                os.getenv("DMS_DB_WORKER_POOL_MIN_SIZE", "0")
+            ),
             db_pool_max_size=int(os.getenv("DMS_DB_POOL_MAX_SIZE", "4")),
             db_api_pool_max_size=int(os.getenv("DMS_DB_API_POOL_MAX_SIZE", "16")),
             db_observability_pool_max_size=int(
@@ -363,12 +377,24 @@ class Settings:
     def observability_is_separate(self) -> bool:
         return self.observability_database_url != self.database_url
 
+    def _role_pool_min_size(self, role: str) -> int:
+        """Pool FLOOR by role: the API keeps a warm floor (latency), loop workers use
+        db_worker_pool_min_size (0 by default) so idle replicas hold no floor and connect
+        on demand. Applies identically to the operational and observability pools."""
+        return (
+            self.db_pool_min_size
+            if role == "api"
+            else self.db_worker_pool_min_size
+        )
+
     def operational_pool_config(self, *, role: str = "worker") -> "PoolConfig":
         """Pool config for the operational DB (request/plan/run/resource writes).
 
         ``role="api"`` uses the larger ``db_api_pool_max_size`` (the API is
         concurrent); ``role="worker"`` (default, for the single-threaded loop
         processes + one-shot CLI) uses the small ``db_pool_max_size``.
+
+        The FLOOR (min_size) is role-aware too — see ``_role_pool_min_size``.
         """
         from .db import PoolConfig
 
@@ -376,14 +402,14 @@ class Settings:
             self.db_api_pool_max_size if role == "api" else self.db_pool_max_size
         )
         return PoolConfig(
-            min_size=min(self.db_pool_min_size, max_size),
+            min_size=min(self._role_pool_min_size(role), max_size),
             max_size=max_size,
             timeout=self.db_pool_timeout_seconds,
             statement_timeout_ms=self.db_statement_timeout_ms,
             idle_in_txn_timeout_ms=self.db_idle_in_txn_timeout_ms,
         )
 
-    def observability_pool_config(self) -> "PoolConfig":
+    def observability_pool_config(self, *, role: str = "worker") -> "PoolConfig":
         """Pool config for the observability DB.
 
         The observability DB sees far lighter write traffic (diagnostic events) than
@@ -393,16 +419,21 @@ class Settings:
         single-threaded loops (planner/rm-worker/dm-worker/sanity/retention) at
         (4+3) — that is 2*19 + 5*7 = 38 + 35 = 73, plus a transient migrate Job,
         comfortably under the stock max_connections=100 (minus superuser_reserved=3).
-        Loops are single-threaded so they realistically hold ~1 each; the API is
-        capped to db_api_pool_max_size concurrent handlers (api/app.py) so it cannot
-        exceed its op pool. To scale concurrency for 100+ nodes raise db_api_pool_max_size
-        AND PostgreSQL max_connections together (e.g. postgres -c max_connections=300),
-        re-checking the ceiling stays under max_connections - superuser_reserved.
+        That is the CEILING; steady-state is far lower — loops hold ~1 op each (kept
+        warm by --interval polling) and, with role="worker" min_size=0, ZERO idle obs
+        connections between events (measured: idle worker obs connections sat 4.6h
+        unused under the old min_size=1 floor). The API keeps a warm obs floor so its
+        diagnostic writes also avoid cold-connect latency. To scale concurrency for
+        100+ nodes raise db_api_pool_max_size AND PostgreSQL max_connections together
+        (e.g. postgres -c max_connections=300), re-checking the ceiling stays under
+        max_connections - superuser_reserved.
         """
         from .db import PoolConfig
 
         return PoolConfig(
-            min_size=min(self.db_pool_min_size, self.db_observability_pool_max_size),
+            min_size=min(
+                self._role_pool_min_size(role), self.db_observability_pool_max_size
+            ),
             max_size=self.db_observability_pool_max_size,
             timeout=self.db_pool_timeout_seconds,
             statement_timeout_ms=self.db_statement_timeout_ms,

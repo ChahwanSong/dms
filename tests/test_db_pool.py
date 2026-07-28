@@ -214,6 +214,7 @@ def test_pooled_false_rolls_back_and_closes_on_exception(monkeypatch):
 def test_settings_pool_defaults(monkeypatch):
     for var in (
         "DMS_DB_POOL_MIN_SIZE",
+        "DMS_DB_WORKER_POOL_MIN_SIZE",
         "DMS_DB_POOL_MAX_SIZE",
         "DMS_DB_OBSERVABILITY_POOL_MAX_SIZE",
         "DMS_DB_POOL_TIMEOUT_SECONDS",
@@ -224,6 +225,7 @@ def test_settings_pool_defaults(monkeypatch):
     monkeypatch.setenv("DMS_DATABASE_URL", "sqlite:///./t.db")
     settings = Settings.from_env()
     assert settings.db_pool_min_size == 1
+    assert settings.db_worker_pool_min_size == 0
     assert settings.db_pool_max_size == 4
     assert settings.db_api_pool_max_size == 16
     assert settings.db_observability_pool_max_size == 3
@@ -235,17 +237,25 @@ def test_settings_pool_defaults(monkeypatch):
 
     op = settings.operational_pool_config()  # worker (default): small pool
     api_op = settings.operational_pool_config(role="api")  # concurrent: larger pool
-    obs = settings.observability_pool_config()
+    obs = settings.observability_pool_config()  # worker (default)
+    api_obs = settings.observability_pool_config(role="api")
     assert op.max_size == 4
     assert api_op.max_size == 16
     assert obs.max_size == 3
+    # role-aware FLOOR: loop workers hold NO idle floor (connect on demand); the API keeps
+    # a warm floor so user-facing requests never pay cold-connect latency on first hit.
+    assert op.min_size == 0
+    assert obs.min_size == 0
+    assert api_op.min_size == 1
+    assert api_obs.min_size == 1
     # worst-case ceiling: api*2*(16+3) + 5 loops*(4+3) = 38 + 35 = 73 < max_connections(100)-reserved(3)
     assert 2 * (api_op.max_size + obs.max_size) + 5 * (op.max_size + obs.max_size) < 97
 
 
 def test_settings_pool_env_overrides(monkeypatch):
     monkeypatch.setenv("DMS_DATABASE_URL", "sqlite:///./t.db")
-    monkeypatch.setenv("DMS_DB_POOL_MIN_SIZE", "2")
+    monkeypatch.setenv("DMS_DB_POOL_MIN_SIZE", "2")  # API floor
+    monkeypatch.delenv("DMS_DB_WORKER_POOL_MIN_SIZE", raising=False)  # worker floor stays 0
     monkeypatch.setenv("DMS_DB_POOL_MAX_SIZE", "12")
     monkeypatch.setenv("DMS_DB_API_POOL_MAX_SIZE", "40")
     monkeypatch.setenv("DMS_DB_OBSERVABILITY_POOL_MAX_SIZE", "4")
@@ -254,27 +264,46 @@ def test_settings_pool_env_overrides(monkeypatch):
     monkeypatch.setenv("DMS_DB_IDLE_IN_TXN_TIMEOUT_MS", "90000")
     settings = Settings.from_env()
 
-    op = settings.operational_pool_config()
-    assert (op.min_size, op.max_size, op.timeout) == (2, 12, 7.5)
+    op = settings.operational_pool_config()  # worker: floor stays 0 despite POOL_MIN_SIZE=2
+    assert (op.min_size, op.max_size, op.timeout) == (0, 12, 7.5)
     assert op.statement_timeout_ms == 45000
     assert op.idle_in_txn_timeout_ms == 90000
-    # role="api" picks db_api_pool_max_size
-    assert settings.operational_pool_config(role="api").max_size == 40
+    # role="api" picks db_api_pool_max_size AND the warm floor db_pool_min_size (2)
+    api_op = settings.operational_pool_config(role="api")
+    assert (api_op.min_size, api_op.max_size) == (2, 40)
 
-    obs = settings.observability_pool_config()
-    # obs min_size is clamped to <= obs max_size
-    assert obs.min_size == 2
+    obs = settings.observability_pool_config()  # worker: no floor
+    assert obs.min_size == 0
     assert obs.max_size == 4
+    # API obs keeps the warm floor (clamped to <= obs max_size)
+    assert settings.observability_pool_config(role="api").min_size == 2
+
+
+def test_worker_pool_min_size_override(monkeypatch):
+    """DMS_DB_WORKER_POOL_MIN_SIZE lets an operator opt loops back into a warm floor
+    (e.g. if cold-connect latency ever matters) without touching the API floor."""
+    monkeypatch.setenv("DMS_DATABASE_URL", "sqlite:///./t.db")
+    monkeypatch.setenv("DMS_DB_WORKER_POOL_MIN_SIZE", "1")
+    monkeypatch.delenv("DMS_DB_POOL_MIN_SIZE", raising=False)  # API floor default (1)
+    settings = Settings.from_env()
+    assert settings.db_worker_pool_min_size == 1
+    assert settings.operational_pool_config().min_size == 1  # worker now warms 1
+    assert settings.observability_pool_config().min_size == 1
+    # API floor is governed independently by db_pool_min_size (default 1)
+    assert settings.operational_pool_config(role="api").min_size == 1
 
 
 def test_observability_min_size_clamped_below_max(monkeypatch):
     monkeypatch.setenv("DMS_DATABASE_URL", "sqlite:///./t.db")
-    monkeypatch.setenv("DMS_DB_POOL_MIN_SIZE", "5")
+    monkeypatch.setenv("DMS_DB_POOL_MIN_SIZE", "5")  # API floor
+    monkeypatch.setenv("DMS_DB_WORKER_POOL_MIN_SIZE", "5")  # worker floor
     monkeypatch.setenv("DMS_DB_OBSERVABILITY_POOL_MAX_SIZE", "3")
     settings = Settings.from_env()
-    obs = settings.observability_pool_config()
-    assert obs.min_size == 3  # clamped from 5 down to max_size
-    assert obs.max_size == 3
+    # both roles' floors clamp DOWN to the obs max_size (3) so the pool never asks for
+    # more floor connections than it can hold
+    assert settings.observability_pool_config(role="api").min_size == 3
+    assert settings.observability_pool_config().min_size == 3
+    assert settings.observability_pool_config().max_size == 3
 
 
 def test_postgres_executescript_ignores_semicolons_in_comments():

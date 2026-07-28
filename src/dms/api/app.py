@@ -46,7 +46,7 @@ def create_app(
         )
         observability_db = Database(
             settings.observability_database_url,
-            pool_config=settings.observability_pool_config(),
+            pool_config=settings.observability_pool_config(role="api"),
         )
         migrate_all(operational_db, observability_db)
         repository = repository or DmsRepository(operational_db)
