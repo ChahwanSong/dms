@@ -7,6 +7,7 @@ missing static dir is fine.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -16,7 +17,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import auth_router
-from .config import DEV_DEFAULT_SESSION_SECRET, Settings
+from .config import (
+    DEV_DEFAULT_SESSION_SECRET,
+    EMAIL_DOMAIN_RE,
+    PUBLIC_EMAIL_DOMAINS,
+    Settings,
+)
 from .dashboard_sampler import DashboardSampler
 from .db import Database
 from .dms_client import DmsClient
@@ -76,6 +82,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "PORTAL_SESSION_SECRET is unset/default. Set a strong "
             "PORTAL_SESSION_SECRET, or set PORTAL_ALLOW_INSECURE_DEFAULTS=1 for "
             "local development."
+        )
+
+    # The dev echo path prints verification codes to the server log. Refusing to boot
+    # (rather than ignoring the flag) is deliberate: a silent no-op would show up only
+    # as "why is no code appearing", while a failed rollout is caught immediately.
+    if settings.email_dev_echo and not settings.allow_insecure_defaults:
+        raise RuntimeError(
+            "PORTAL_EMAIL_DEV_ECHO=true prints verification codes to the log and is "
+            "for local development only. Set PORTAL_ALLOW_INSECURE_DEFAULTS=1 to "
+            "acknowledge, or configure a real SMTP relay (PORTAL_SMTP_HOST)."
+        )
+
+    # A malformed domain would silently mail codes to a domain nobody controls.
+    # Empty is allowed (the feature is simply off).
+    if settings.email_domain and not EMAIL_DOMAIN_RE.match(settings.email_domain):
+        raise RuntimeError(
+            f"PORTAL_EMAIL_DOMAIN is not a valid domain: {settings.email_domain!r}"
+        )
+
+    # SMTP alone must not CrashLoop the portal — it is the operator console too, so
+    # the blast radius of failing closed at boot would be far worse than the feature
+    # being unavailable. Signup fails closed at request time instead (503).
+    if (
+        settings.user_signup_enabled
+        and not settings.email_configured
+        and not settings.email_dev_echo
+    ):
+        logging.getLogger("portal").warning(
+            "user signup is enabled but email delivery is not configured "
+            "(PORTAL_SMTP_HOST / PORTAL_EMAIL_DOMAIN) — code requests will 503"
+        )
+
+    # An open signup gate on a PUBLIC mail domain means "anyone with an account at that
+    # provider", and a signed-up user can run DMS data jobs. On a company domain the
+    # domain itself is the membership proof, so an empty allowlist is fine there.
+    if (
+        settings.user_signup_enabled
+        and settings.email_domain in PUBLIC_EMAIL_DOMAINS
+        and not settings.signup_allowlist
+    ):
+        logging.getLogger("portal").warning(
+            "PORTAL_EMAIL_DOMAIN=%s is a public mail provider and "
+            "PORTAL_SIGNUP_ALLOWLIST is empty — anyone with an account there can "
+            "self-register. Set PORTAL_SIGNUP_ALLOWLIST, or switch to the company domain.",
+            settings.email_domain,
         )
 
     app = FastAPI(title="DMS Portal BFF")
@@ -151,6 +202,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": "ok",
             "dms_configured": settings.dms_configured,
             "db_configured": settings.db_configured,
+            # Not secret, and makes a missed Secret re-injection after `kubectl apply`
+            # visible remotely instead of only when a user tries to sign up.
+            "email_configured": settings.email_configured,
+            "email_domain": settings.email_domain,
         }
 
     app.include_router(auth_router(settings))

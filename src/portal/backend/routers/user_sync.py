@@ -60,7 +60,25 @@ class UserSyncCreate(BaseModel):
 
 
 def _actor(user: dict[str, Any]) -> str:
+    """The portal-side OWNERSHIP key (``sync_jobs.created_by``, "my jobs" filters).
+
+    Always the login id, matching user_scan.py / voc.py. It must never follow
+    ``posix_username``: that would re-key ownership and orphan every row the user
+    already created — their own jobs would disappear from the list and fail the
+    created_by check.
+    """
     return str(user.get("username") or ROLE_USER)
+
+
+def _dms_requester(user: dict[str, Any]) -> str:
+    """The DMS EXECUTION identity — DMS resolves this to a POSIX uid via LDAP.
+
+    Separate from ``_actor`` because the portal login id is a company-mail local
+    part, which need not equal the company POSIX account name (and while the test
+    domain is gmail.com it may not exist in LDAP at all). Falls back to the login id,
+    so this is a no-op until ``user_accounts.posix_username`` is set.
+    """
+    return str(user.get("posix_username") or user.get("username") or ROLE_USER)
 
 
 def _clean_rel(path: str) -> str:
@@ -227,8 +245,9 @@ def user_sync_router(settings: Settings) -> APIRouter:
             _check_pvc_sync_permission(user, src_m, src_path, dst_m, dst_path)
             requester_id = settings.backup_requester  # "root"
         else:
-            # FS↔FS: runs as the user's own POSIX identity.
-            requester_id = _actor(user)
+            # FS↔FS: runs as the user's own POSIX identity (NOT the ownership key —
+            # see _dms_requester).
+            requester_id = _dms_requester(user)
 
         # fixed options (server-built; client-supplied options are ignored on purpose).
         options: dict[str, Any] = {

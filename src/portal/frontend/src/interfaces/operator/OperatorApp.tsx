@@ -148,7 +148,6 @@ export default function OperatorApp({
               <span className="badge badge-operator">운영자</span>
               <span className="muted">
                 {user.username}
-                {user.dummy ? " · 더미" : ""}
               </span>
             </span>
             <button className="ghost sidebar-logout" onClick={onLogout}>

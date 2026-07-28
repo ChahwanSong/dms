@@ -69,6 +69,10 @@ ClusterIP). 근거·구조는 [`dms-06 §1·§8`](dms-06-configuration.md), 매�
 | 운영자 계정 | `admin:<strong-pw>,ops2:<strong-pw>` | `PORTAL_OPERATOR_USERS` |
 | 운영자 계정 관리 토큰(선택) | `openssl rand -hex 24` 출력 | `PORTAL_ADMIN_TOKEN`(§10) |
 | 포탈 DB(선택) | DMS Postgres 재사용 시 `DMS_DATABASE_URL`과 동일 값 | `PORTAL_DB_URL`(§4) |
+| **회사 메일 도메인**(사용자 가입) | `samsung.com` (연동 전 테스트는 `gmail.com`) | `PORTAL_EMAIL_DOMAIN`(§10.2) |
+| **SMTP 릴레이**(사용자 가입) | `smtp.gmail.com:587` / STARTTLS | `PORTAL_SMTP_HOST`·`_PORT`·`_SECURITY`(§10.2) |
+| **SMTP 계정 / 앱 비밀번호** | `you@gmail.com` / 16자리 앱 비밀번호 | `PORTAL_SMTP_USER`·`PORTAL_SMTP_PASSWORD`(Secret) |
+| 가입 허용 아이디(공용 도메인 사용 중 **필수**) | `skychahwan,test1.user` | `PORTAL_SIGNUP_ALLOWLIST`(§10.2) |
 | 외부 노출 | (운영) ingress + 서버 TLS / (간단) NodePort `30090` | Service / Ingress(§8) |
 
 ## 4. (선택) 포탈 DB
@@ -319,18 +323,30 @@ curl -fsS -c "$JAR" -X POST "$BASE/api/auth/login" \
 # 3) storage mapping 목록 (DMS 연동 동작 확인)
 curl -fsS -b "$JAR" "$BASE/api/operator/storage-mappings" | jq 'length'
 
-# 4) 역할 게이트: AD(user) 세션은 operator API에서 403
+# 4) 사용자 인증 설정 노출 (도메인/발송 경로)
+curl -fsS "$BASE/api/auth/user/config"; echo
+
+# 5) 예약 아이디는 가입 차단 (root = DMS 특권 요청자 → uid 0 실행 방지)
+curl -s -o /dev/null -w "root 가입요청: %{http_code}\n" -X POST "$BASE/api/auth/user/request-code" \
+  -H 'content-type: application/json' -d '{"username":"root","purpose":"register"}'
+
+# 6) 역할 게이트: 사용자 세션은 operator API에서 403 (계정이 있을 때)
 JAR2="$(mktemp)"
-curl -fsS -c "$JAR2" -X POST "$BASE/api/auth/login/ad" >/dev/null
+curl -fsS -c "$JAR2" -X POST "$BASE/api/auth/user/login" \
+  -H 'content-type: application/json' -d '{"username":"<사용자아이디>","password":"<pw>"}' >/dev/null
 curl -s -o /dev/null -w "user->operator API: %{http_code}\n" -b "$JAR2" "$BASE/api/operator/storage-mappings"
 ```
 
 기대값:
 
-- `/healthz` → `{"status":"ok","dms_configured":true}` (포탈 DB면 `"db_configured":true` 포함)
+- `/healthz` → `{"status":"ok","dms_configured":true}` (포탈 DB면 `"db_configured":true`, 메일 설정 시
+  `"email_configured":true,"email_domain":"<회사도메인>"` 포함)
 - 운영자 로그인 → `{"user":{...,"role":"operator"}}`
 - 목록 → DMS에 등록된 storage mapping 개수
-- AD 사용자 → operator API `403`
+- 사용자 인증 설정 → `{"available":true,"email_domain":"...","code_ttl_seconds":600,...}`
+  (SMTP 미설정이면 `"available":false` — 인증요청은 `503`으로 fail-closed)
+- **`root` 가입요청 → `422`** (예약 아이디)
+- 사용자 세션 → operator API `403`
 
 ## 10. 운영자 계정 — 로그인 화면에서 생성·비밀번호 재설정
 
@@ -361,6 +377,67 @@ echo "비밀 토큰: $ADMTOK"   # 안전 채널로만 전달·보관
 > 이 토큰을 아는 사람은 로그인 없이 운영자 계정을 만들거나 비밀번호를 재설정할 수 있다(의도된 부트스트랩/복구
 > 경로). 반드시 강한 랜덤값을 쓰고 안전 채널로만 공유한다. 토큰 미설정(빈 값)이면 두 서브탭이 숨겨지고 두
 > 엔드포인트는 `503`을 반환한다. `kubectl apply`가 Secret을 placeholder로 덮으므로 apply 후 재주입한다.
+
+## 10.2 사용자 계정 — 회사메일 인증(6자리) 셀프서비스
+
+사용자(end-user)는 **아이디/비밀번호**로 로그인하고, 계정 생성·비밀번호 재설정은 **회사 메일로 받은 6자리
+인증번호**로 본인 확인한다. 운영자 토큰은 쓰지 않는다 — **메일함 통제권이 곧 인가**다. 저장소는 포탈 DB
+`portal.user_accounts`(PBKDF2) + `portal.email_verifications`이며 `PORTAL_DB_URL` 필요(§4).
+
+**흐름**: 아이디 + 비밀번호 입력 → `[인증요청]` → `<아이디>@<도메인>`으로 인증번호 메일 → 인증번호 입력 →
+계정 생성 완료. 비밀번호 재설정도 동일. 인증번호 **유효시간 10분**, 재발송 쿨다운 60초.
+
+### 설정 항목
+
+| 변수 | 예시 | 설명 |
+| --- | --- | --- |
+| `PORTAL_EMAIL_DOMAIN` | `samsung.com` | **아이디 뒤에 붙는 회사 메일 도메인.** 구축 시 회사 도메인으로 설정한다. 빈 값이면 기능 전체 비활성 |
+| `PORTAL_SMTP_HOST` / `_PORT` | `smtp.gmail.com` / `587` | SMTP 릴레이. 미설정이면 인증요청이 `503`(fail-closed) |
+| `PORTAL_SMTP_SECURITY` | `starttls` | `starttls`(587) \| `ssl`(465) \| `none` |
+| `PORTAL_SMTP_USER` / `_PASSWORD` | `you@gmail.com` / 앱 비밀번호 | **Secret**. Gmail은 발신 주소가 인증 계정과 같아야 한다 |
+| `PORTAL_SMTP_FROM` / `_FROM_NAME` | (빈 값) / `DMS 포탈` | 빈 값이면 `PORTAL_SMTP_USER`를 발신 주소로 사용 |
+| `PORTAL_SIGNUP_ALLOWLIST` | `skychahwan,test1.user` | 가입 허용 아이디. **공용 도메인 사용 중에는 필수**(아래 경고) |
+| `PORTAL_USER_SIGNUP_ENABLED` | `true` | 가입 킬스위치 |
+| `PORTAL_EMAIL_CODE_TTL_SECONDS` | `600` | 인증번호 유효시간(기본 10분) |
+| `PORTAL_EMAIL_CODE_PEPPER` | `openssl rand -hex 32` | 인증번호 해시 키(미설정 시 세션 시크릿에서 파생) |
+
+> ⚠️ **공용 도메인(gmail.com)으로 테스트하는 동안에는 `PORTAL_SIGNUP_ALLOWLIST`를 반드시 채운다.** 비워 두면
+> "그 메일 서비스 계정을 가진 누구나"가 가입 자격을 갖게 되고, 가입한 사용자는 DMS 데이터 작업(Sync/Scan)
+> 실행 경로를 얻는다. 회사 도메인으로 전환한 뒤에는 비워도 된다(도메인 자체가 소속 증명이 되므로).
+
+### Gmail 릴레이로 테스트하기 (사내 메일 연동 전 임시)
+
+1. 발신에 쓸 Google 계정에 **2단계 인증**을 켠다.
+2. [앱 비밀번호](https://myaccount.google.com/apppasswords)에서 16자리 앱 비밀번호를 발급한다
+   (계정 비밀번호가 **아니다**).
+3. 라이브 Secret에 주입 후 재기동:
+
+```bash
+kubectl -n dms-portal patch secret portal-secrets --type merge \
+  -p '{"stringData":{"PORTAL_SMTP_USER":"you@gmail.com","PORTAL_SMTP_PASSWORD":"<16자리 앱 비밀번호>"}}'
+kubectl -n dms-portal rollout restart deploy/dms-portal
+kubectl -n dms-portal rollout status deploy/dms-portal --timeout=120s
+
+# 확인: email_configured=true 여야 한다
+kubectl -n dms-portal exec deploy/dms-portal -- \
+  python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8090/healthz').read().decode())"
+```
+
+**사내 메일 서버로 전환**할 때는 `PORTAL_SMTP_HOST`/`_PORT`/`_SECURITY`를 사내 릴레이로 바꾸고,
+IP allowlist 릴레이라면 `PORTAL_SMTP_USER`/`_PASSWORD`를 비운다(인증 생략). 도메인도 함께
+`PORTAL_EMAIL_DOMAIN=<회사도메인>`으로 바꾼다. **Pod에서 릴레이의 SMTP 포트로 egress가 열려 있어야 한다**
+(HTTP 프록시는 SMTP에 쓸 수 없다). 사전 확인:
+
+```bash
+kubectl -n dms-portal exec deploy/dms-portal -- \
+  python -c "import socket;s=socket.create_connection(('smtp.gmail.com',587),8);print('reachable');s.close()"
+```
+
+### SMTP 없이 화면만 확인하려면 (로컬 개발 전용)
+
+`PORTAL_EMAIL_DEV_ECHO=true` + `PORTAL_ALLOW_INSECURE_DEFAULTS=1`이면 인증번호를 **서버 로그로만** 출력한다
+(HTTP 응답에는 절대 포함되지 않는다). 두 값이 모두 있어야 하며, 한쪽만 켜면 **기동을 거부**한다 — 테스트베드
+설정이 그대로 운영에 복사되는 사고를 배포 단계에서 드러내기 위함이다. 운영에서는 절대 켜지 않는다.
 
 ## 11. 보안 주의
 
@@ -395,19 +472,32 @@ echo "비밀 토큰: $ADMTOK"   # 안전 채널로만 전달·보관
   권한 없는 경로의 스캔 메타데이터**(파일 수·용량·atime 히스토그램; 파일 내용 아님)까지 조회할 수 있다. 경로 단위
   권한 확인은 위 PVC 네임스페이스 권한 확인과 함께 추후 과제다.
 
-### 11.2 회사 AD 로그인 — 현재 임시 더미 (⚠️ 프로덕션 전 교체)
+### 11.2 사용자 로그인 — 회사메일 인증 계정 (더미 AD 제거됨)
 
-사용자 로그인(`POST /api/auth/login/ad`)은 **임시 더미 스텁**이다: 자격증명 검증 없이 입력한 아이디(비우면
-`ad-user`)로 로그인된다. 로그인 화면 "사용자" 탭의 **임시 더미 로그인** 버튼이 이 경로를 쓴다.
+사용자 로그인은 이제 **아이디/비밀번호**이고, 계정 생성·비밀번호 재설정은 **회사 메일로 받은 6자리 인증번호**로
+본인 확인한다(운영자 토큰 불필요). 설정 절차는 **§10.2**.
 
-- **보안 주의**: 더미는 아무나 임의 사용자로 로그인할 수 있으므로 **실제 배포 전 반드시 실제 AD로 교체**한다.
-  당장 더미를 막으려면 `PORTAL_ALLOW_DUMMY_AD=false`(라이브 Secret/env) — 단 실제 AD 미구현 상태에서 끄면 사용자
-  로그인이 전부 401(fail-closed)로 막힌다.
-- **실제 AD 연동 시 수정할 곳**: 백엔드 `src/portal/backend/auth.py`의 **`authenticate_ad()` 함수 하나**만 교체하면
-  된다(LDAP simple bind 또는 OIDC/SAML). AD 서버 설정은 `src/portal/backend/config.py`에 `PORTAL_*`로 추가.
-  비밀번호 입력이나 SSO 리다이렉트가 필요하면 프론트 `src/portal/frontend/src/pages/Login.tsx`(사용자 탭)와
-  `src/portal/frontend/src/api.ts`(`loginAd`)도 함께 손본다. **수정 파일별 상세 + 수정 후 재배포/재실행 방법은
-  [portal-ad-integration.md](portal-ad-integration.md)** 참고.
+> **이전 더미 AD 로그인(`POST /api/auth/login/ad`)은 삭제되었다.** 자격증명을 전혀 검증하지 않고 입력한
+> 아이디로 로그인시켰는데, 그 아이디가 DMS의 실행 신원(`requester_id`)으로 그대로 전달되므로 사실상 인증
+> 우회였다. `PORTAL_ALLOW_DUMMY_AD` 설정도 함께 제거했다(env 하나로 되살아나는 우회 경로를 남기지 않기 위함).
+
+- **아이디 = 회사 메일 local-part.** `test1.user@samsung.com` → 아이디 `test1.user`. 인증번호는 항상
+  `<아이디>@PORTAL_EMAIL_DOMAIN`으로 발송되며, 도메인은 **서버 설정에서만** 오고 사용자 입력에서 파생하지
+  않는다(파생하면 임의 외부 주소로 인증번호를 배달시킬 수 있다).
+- **예약 아이디 차단(중요).** `root`·`admin`·`operator`·`dms` 등은 가입이 거부된다(`422 username_reserved`).
+  특히 `root`는 DMS의 `dm_privileged_requesters`(uid/gid 0, `dm_min_uid` 우회)이므로, 자가 가입을 허용하면
+  곧바로 root 권한 데이터 작업이 된다. 목록은 `src/portal/backend/email_codes.py: RESERVED_USERNAMES`.
+- **함께 점검할 DMS 설정(운영 과제).** `DMS_DM_PRIVILEGED_OPERATORS`가 비어 있으면 "mTLS actor 전원 허용"이다.
+  실제 운영자 목록으로 좁히는 것을 권장한다(DMS 측 env이므로 포탈 배포와 별개로 진행).
+- **세션 시크릿 회전.** 더미 AD로 발급된 기존 세션 쿠키는 라우트를 지워도 서명 유효기간(기본 8시간) 동안
+  살아 있다. 이번 업그레이드 배포 시 `PORTAL_SESSION_SECRET`을 **함께 교체**해 전부 무효화한다(§7.2).
+- 비밀번호 변경은 즉시 기존 세션을 끊지 않는다(쿠키 세션, 최대 8시간). 즉시 차단이 필요하면 세션 시크릿을
+  회전한다.
+- **알려진 트레이드오프 — 재설정 일시 잠금.** 인증번호 무차별 대입을 막기 위해 누적 실패 예산
+  (`PORTAL_EMAIL_MAX_FAILURES_PER_WINDOW`, 기본 20회/시간)을 두는데, 대상 아이디를 아는 제3자가 일부러
+  틀린 인증번호를 반복 입력해 **해당 사용자의 비밀번호 재설정을 최대 1시간 막을 수 있다**. 로그인 자체는
+  영향받지 않으며, 예산을 없애면 무차별 대입이 열리므로 의도적으로 감수한 설계다. 급하면 운영자가
+  `portal.email_verifications`에서 해당 행을 지우면 즉시 해제된다.
 
 ## 12. 자주 발생하는 문제
 

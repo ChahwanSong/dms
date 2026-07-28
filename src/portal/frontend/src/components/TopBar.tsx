@@ -41,7 +41,6 @@ export default function TopBar({
           <span className="spacer" />
           <span className="muted">
             {user.username}
-            {user.dummy ? " · 더미" : ""}
           </span>
           <button className="ghost" onClick={onLogout}>
             로그아웃

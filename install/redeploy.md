@@ -113,8 +113,13 @@ kubectl -n dms-portal exec deploy/dms-portal -- \
 
 `kubernetes/portal.yaml`을 바꿨을 때만 apply한다. **`kubectl apply`는 Secret 값을 placeholder로 덮으므로**
 apply 후 반드시 [portal-01-setup.md](portal-01-setup.md) §7.2 로 실값(`PORTAL_SESSION_SECRET`·
-`PORTAL_OPERATOR_USERS`·`PORTAL_DMS_TOKEN`·`PORTAL_ADMIN_TOKEN`·`PORTAL_DB_URL`)을 재주입하고 §7.3 rollout
-restart 한다. **코드만 바뀌었으면 apply 하지 말고 §3.1의 set image만 쓴다.**
+`PORTAL_OPERATOR_USERS`·`PORTAL_DMS_TOKEN`·`PORTAL_ADMIN_TOKEN`·`PORTAL_DB_URL`·`PORTAL_SMTP_USER`·
+`PORTAL_SMTP_PASSWORD`)을 재주입하고 §7.3 rollout restart 한다. **코드만 바뀌었으면 apply 하지 말고
+§3.1의 set image만 쓴다.**
+
+> **env만 추가하면 되는 경우**는 apply 대신 `kubectl -n dms-portal set env deploy/dms-portal KEY=VALUE`를 쓰면
+> Secret을 건드리지 않아 재주입이 필요 없다(예: 사용자 인증용 `PORTAL_EMAIL_DOMAIN`·`PORTAL_SMTP_HOST`).
+> 비밀값(`PORTAL_SMTP_PASSWORD` 등)만 `kubectl patch secret`으로 넣는다.
 
 ## 4. Rollback
 

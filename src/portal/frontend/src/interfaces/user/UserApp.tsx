@@ -55,7 +55,6 @@ export default function UserApp({
               <span className="badge badge-user">사용자</span>
               <span className="muted">
                 {user.username}
-                {user.dummy ? " · 더미" : ""}
               </span>
             </span>
             <button className="ghost sidebar-logout" onClick={onLogout}>

@@ -6,8 +6,34 @@ export type Role = "user" | "operator";
 export interface User {
   username: string;
   role: Role;
-  method: "local" | "ad";
-  dummy?: boolean;
+  // Both roles log in with an id/password now; the role comes from which account
+  // store matched, never from this field.
+  method: "local";
+  posix_username?: string;
+}
+
+// Public config for the end-user login screen. Lets the SPA render the
+// "<id>@<domain> 으로 인증메일이 발송됩니다" hint without hard-coding the domain,
+// so switching gmail.com -> the company domain is a config change, not a rebuild.
+export interface UserAuthConfig {
+  available: boolean;
+  email_domain: string;
+  code_length: number;
+  code_ttl_seconds: number;
+  resend_cooldown_seconds: number;
+  min_password_len: number;
+  signup_enabled: boolean;
+  email_delivery: "smtp" | "dev-echo" | "none";
+}
+
+export type VerifyPurpose = "register" | "reset";
+
+// Durations are RELATIVE seconds, not absolute timestamps, so a skewed client
+// clock cannot make a live code look expired (or vice versa).
+export interface RequestCodeResp {
+  requested: boolean;
+  expires_in: number;
+  resend_after: number;
 }
 
 export interface OverviewSection {
@@ -145,13 +171,6 @@ export const auth = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
-  // 회사 AD 로그인. 현재는 임시 더미(아무 아이디로 로그인). username을 주면 그 신원으로,
-  // 비우면 서버가 'ad-user'로 로그인한다. 실제 AD 연동 시 백엔드 authenticate_ad만 교체.
-  loginAd: (username?: string) =>
-    request<{ user: User }>("/api/auth/login/ad", {
-      method: "POST",
-      body: JSON.stringify({ username: username || null }),
-    }),
   logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
   // whether the login-screen 계정 만들기 / 비밀번호 재설정 flows are available
   // (PORTAL_ADMIN_TOKEN configured). Public — used to show/hide those tabs.
@@ -168,6 +187,31 @@ export const auth = {
     request<{ reset: string }>("/api/auth/reset-password", {
       method: "POST",
       body: JSON.stringify({ username, new_password, token }),
+    }),
+
+  // --- end user (self-service, email-verified) ---
+  userAuthConfig: () => request<UserAuthConfig>("/api/auth/user/config"),
+  loginUser: (username: string, password: string) =>
+    request<{ user: User }>("/api/auth/user/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  // No password here on purpose — the server must not hold a credential chosen by
+  // whoever requested the code. It is sent only with the code, below.
+  requestCode: (purpose: VerifyPurpose, username: string) =>
+    request<RequestCodeResp>("/api/auth/user/request-code", {
+      method: "POST",
+      body: JSON.stringify({ username, purpose }),
+    }),
+  registerUser: (username: string, password: string, code: string) =>
+    request<{ registered: string }>("/api/auth/user/register", {
+      method: "POST",
+      body: JSON.stringify({ username, password, code }),
+    }),
+  resetUserPassword: (username: string, new_password: string, code: string) =>
+    request<{ reset: string }>("/api/auth/user/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ username, new_password, code }),
     }),
 };
 

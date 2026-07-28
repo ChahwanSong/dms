@@ -5,7 +5,9 @@ default ``portal``) of PORTAL_DB_URL. On the testbed this is the DMS Postgres
 (``dms`` db) with a ``portal`` schema — ``dms_app`` lacks CREATE DATABASE, so a
 schema is used; switch PORTAL_DB_URL to a dedicated ``dms_portal`` db once an
 admin creates one. Holds:
-  - operator_users : id/password login store (seeded from PORTAL_OPERATOR_USERS)
+  - operator_users : operator id/password login store (seeded from PORTAL_OPERATOR_USERS)
+  - user_accounts  : end-user id/password login store (self-service, email-verified)
+  - email_verifications : one live 6-digit code per (username, purpose), HMAC-stored
   - backup_batches  : a registered list of sync requests (data-backup feature)
   - backup_requests : the individual sync requests of a batch (up to a few thousand)
   - scan_batches    : a registered list of scan requests (data-scan feature)
@@ -355,6 +357,64 @@ def _ddl(schema: str) -> list[str]:
         # operator tabs (status별 최신순) + 사용자 자신의 목록.
         f"CREATE INDEX IF NOT EXISTS vocs_status ON {s}.vocs(status, id DESC)",
         f"CREATE INDEX IF NOT EXISTS vocs_username ON {s}.vocs(username, id DESC)",
+        # End-user accounts. Deliberately a SEPARATE table from operator_users rather
+        # than one table with a role column: the role is then decided by "which table
+        # matched", so a forgotten `WHERE role=...` filter cannot silently grant
+        # operator access. `posix_username` is the DMS execution identity when it
+        # differs from the login id (see routers/user_sync.py `_actor`).
+        f"""CREATE TABLE IF NOT EXISTS {s}.user_accounts (
+            username text PRIMARY KEY,
+            password_hash text NOT NULL,
+            email text NOT NULL,
+            posix_username text,
+            is_active boolean NOT NULL DEFAULT true,
+            created_by text,
+            password_changed_at timestamptz NOT NULL DEFAULT now(),
+            last_login_at timestamptz,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"CREATE INDEX IF NOT EXISTS user_accounts_created_at "
+        f"ON {s}.user_accounts(created_at DESC)",
+        # Email verification codes. PRIMARY KEY (username, purpose) makes "at most one
+        # live code per id per purpose" a schema invariant: a resend is an UPSERT of
+        # this row, so the previous code_hash is overwritten (invalidated) atomically
+        # and there is never a window with two valid codes. `code_hash` is
+        # HMAC-SHA256(pepper, "purpose|username|code") — the plaintext code is never
+        # stored anywhere.
+        #
+        # sends/window_started_at/last_sent_at bound the send rate. failures/
+        # failure_window_started_at are a SEPARATE budget that a resend does NOT reset,
+        # which closes the "5 wrong guesses -> resend -> 5 more" loop that an
+        # attempts-only counter leaves open.
+        f"""CREATE TABLE IF NOT EXISTS {s}.email_verifications (
+            username text NOT NULL,
+            purpose text NOT NULL,
+            email text NOT NULL,
+            code_hash text NOT NULL,
+            expires_at timestamptz NOT NULL,
+            attempts int NOT NULL DEFAULT 0,
+            consumed_at timestamptz,
+            sends int NOT NULL DEFAULT 1,
+            mailed int NOT NULL DEFAULT 0,
+            window_started_at timestamptz NOT NULL DEFAULT now(),
+            last_sent_at timestamptz NOT NULL DEFAULT now(),
+            failures int NOT NULL DEFAULT 0,
+            failure_window_started_at timestamptz NOT NULL DEFAULT now(),
+            requested_ip text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (username, purpose)
+        )""",
+        f"CREATE INDEX IF NOT EXISTS email_verifications_expires "
+        f"ON {s}.email_verifications(expires_at)",
+        # `sends` counts REQUESTS (per-id throttling, incremented even when no mail is
+        # sent so the limits — and therefore the responses — cannot reveal whether an
+        # account exists). `mailed` counts mails actually dispatched and is what the
+        # global relay-abuse cap reads; otherwise probing ids that produce no mail
+        # would exhaust the hourly budget and take signup/reset down for everyone.
+        f"ALTER TABLE {s}.email_verifications ADD COLUMN IF NOT EXISTS mailed "
+        f"int NOT NULL DEFAULT 0",
     ]
 
 
@@ -532,6 +592,328 @@ class Database:
                 "UPDATE operator_users SET password_hash=%s, updated_at=now() "
                 "WHERE username=%s",
                 (hash_password(password), username),
+            )
+            return cur.rowcount
+
+    # --- end-user login + account management -----------------------------
+    #
+    # Kept strictly separate from the operator methods above: nothing here can write
+    # to operator_users, so "an email code cannot mint an operator" holds structurally
+    # rather than by review. Note these take an ALREADY-HASHED password (unlike
+    # create_operator) because the caller hashes off the event loop — PBKDF2 is ~100ms
+    # of CPU and these paths are unauthenticated.
+
+    async def user_auth_record(self, username: str) -> dict[str, Any] | None:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT password_hash, is_active, email, posix_username "
+                "FROM user_accounts WHERE username=%s",
+                (username,),
+            )
+            return await cur.fetchone()
+
+    async def user_exists(self, username: str) -> bool:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 AS ok FROM user_accounts WHERE username=%s", (username,)
+            )
+            return await cur.fetchone() is not None
+
+    async def touch_user_login(self, username: str) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE user_accounts SET last_login_at=now() WHERE username=%s",
+                (username,),
+            )
+
+    async def set_user_active(self, username: str, is_active: bool) -> int:
+        """Disable/enable an account. There is deliberately no hard delete: removing
+        the row would orphan the user's scan items / VOCs and let the next person who
+        registers the same id inherit them."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE user_accounts SET is_active=%s, updated_at=now() "
+                "WHERE username=%s",
+                (is_active, username),
+            )
+            return cur.rowcount
+
+    async def list_user_accounts(
+        self, *, limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """password_hash is never selected."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT username, email, posix_username, is_active, created_by, "
+                "created_at, last_login_at FROM user_accounts "
+                "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                (limit, offset),
+            )
+            return await cur.fetchall()
+
+    async def count_user_accounts(self) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT count(*) AS n FROM user_accounts")
+            row = await cur.fetchone()
+            return int((row or {}).get("n", 0))
+
+    # --- email verification codes ---------------------------------------
+
+    async def issue_verification(
+        self,
+        *,
+        username: str,
+        purpose: str,
+        email: str,
+        code_hash: str,
+        ttl_seconds: int,
+        cooldown_seconds: int,
+        window_seconds: int,
+        max_sends: int,
+        failure_window_seconds: int,
+        max_failures: int,
+        will_mail: bool = True,
+        requested_ip: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Mint a code, invalidating any previous one. None => rate limited.
+
+        A single UPSERT does all four jobs atomically: store the new code, overwrite
+        (invalidate) the old one, enforce the cooldown + per-window send cap, and
+        refuse while the cumulative-failure budget is exhausted. ON CONFLICT takes a
+        row lock, so concurrent [인증요청] clicks serialize and the loser falls out of
+        the WHERE (0 rows -> None -> 429) instead of racing a read-then-write check.
+        """
+        async with self.pool.connection() as conn:
+            # Opportunistic cleanup. Retention (24h) is deliberately longer than the
+            # rate-limit window (1h) so pruning can never become a way to reset a
+            # limit. Correctness never depends on it: every verification query also
+            # filters on expires_at > now().
+            await conn.execute(
+                "DELETE FROM email_verifications "
+                "WHERE expires_at < now() - interval '24 hours'"
+            )
+            cur = await conn.execute(
+                """
+                INSERT INTO email_verifications
+                    (username, purpose, email, code_hash, expires_at, requested_ip, mailed)
+                VALUES
+                    (%(u)s, %(p)s, %(email)s, %(ch)s,
+                     now() + make_interval(secs => %(ttl)s), %(ip)s,
+                     CASE WHEN %(mail)s THEN 1 ELSE 0 END)
+                ON CONFLICT (username, purpose) DO UPDATE SET
+                    email = excluded.email,
+                    code_hash = excluded.code_hash,
+                    expires_at = excluded.expires_at,
+                    attempts = 0,
+                    consumed_at = NULL,
+                    requested_ip = excluded.requested_ip,
+                    sends = CASE
+                        WHEN email_verifications.window_started_at
+                             < now() - make_interval(secs => %(win)s)
+                        THEN 1 ELSE email_verifications.sends + 1 END,
+                    mailed = CASE
+                        WHEN email_verifications.window_started_at
+                             < now() - make_interval(secs => %(win)s)
+                        THEN (CASE WHEN %(mail)s THEN 1 ELSE 0 END)
+                        ELSE email_verifications.mailed
+                             + (CASE WHEN %(mail)s THEN 1 ELSE 0 END) END,
+                    window_started_at = CASE
+                        WHEN email_verifications.window_started_at
+                             < now() - make_interval(secs => %(win)s)
+                        THEN now() ELSE email_verifications.window_started_at END,
+                    failures = CASE
+                        WHEN email_verifications.failure_window_started_at
+                             < now() - make_interval(secs => %(fwin)s)
+                        THEN 0 ELSE email_verifications.failures END,
+                    failure_window_started_at = CASE
+                        WHEN email_verifications.failure_window_started_at
+                             < now() - make_interval(secs => %(fwin)s)
+                        THEN now() ELSE email_verifications.failure_window_started_at END,
+                    last_sent_at = now(),
+                    updated_at = now()
+                WHERE email_verifications.last_sent_at
+                          < now() - make_interval(secs => %(cd)s)
+                  AND (email_verifications.window_started_at
+                           < now() - make_interval(secs => %(win)s)
+                       OR email_verifications.sends < %(max_sends)s)
+                  AND (email_verifications.failure_window_started_at
+                           < now() - make_interval(secs => %(fwin)s)
+                       OR email_verifications.failures < %(max_failures)s)
+                RETURNING expires_at, sends, last_sent_at
+                """,
+                {
+                    "u": username,
+                    "p": purpose,
+                    "email": email,
+                    "ch": code_hash,
+                    "ttl": ttl_seconds,
+                    "ip": requested_ip,
+                    "cd": cooldown_seconds,
+                    "win": window_seconds,
+                    "max_sends": max_sends,
+                    "fwin": failure_window_seconds,
+                    "max_failures": max_failures,
+                    "mail": will_mail,
+                },
+            )
+            return await cur.fetchone()
+
+    async def discard_verification(self, *, username: str, purpose: str) -> int:
+        """Invalidate a just-issued code because delivery failed, so a 'the mail never
+        arrived but a code is live' ghost state cannot linger.
+
+        Expires the code but KEEPS the row: the send counters live here, so deleting
+        it would hand back a fresh rate-limit budget every time delivery fails — which
+        is a state an attacker can induce.
+        """
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE email_verifications SET expires_at = now(), updated_at = now() "
+                "WHERE username=%s AND purpose=%s AND consumed_at IS NULL",
+                (username, purpose),
+            )
+            return cur.rowcount
+
+    async def global_sends_last_hour(self, window_seconds: int) -> int:
+        """Mails actually dispatched in the window — the relay-abuse budget.
+
+        Sums `mailed`, not `sends`: requests that deliberately send nothing (a reset
+        for an unknown id) still bump `sends` to keep the per-id limits uniform, and
+        counting those here would let anyone exhaust the hourly budget — and thus
+        disable signup/reset for every real user — without a single mail going out.
+        """
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT coalesce(sum(mailed),0) AS n FROM email_verifications "
+                "WHERE window_started_at > now() - make_interval(secs => %s)",
+                (window_seconds,),
+            )
+            row = await cur.fetchone()
+            return int((row or {}).get("n", 0))
+
+    async def verification_matches(
+        self, *, username: str, purpose: str, code_hash: str, max_attempts: int
+    ) -> bool:
+        """Cheap read-only check that this code is currently redeemable.
+
+        Purely a filter in front of the ~100ms PBKDF2 the confirm routes have to run
+        before they can call consume_* (the hash is a parameter of that statement).
+        Without it, anyone could force unbounded password hashing with a junk code.
+        This does NOT decide anything: consume_* re-checks the same conditions inside
+        its atomic statement, so no TOCTOU window is introduced.
+        """
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 AS ok FROM email_verifications "
+                "WHERE username=%s AND purpose=%s AND code_hash=%s "
+                "  AND consumed_at IS NULL AND expires_at > now() AND attempts < %s",
+                (username, purpose, code_hash, max_attempts),
+            )
+            return await cur.fetchone() is not None
+
+    async def consume_verification_register(
+        self, *, username: str, code_hash: str, password_hash: str, max_attempts: int
+    ) -> dict[str, Any]:
+        """Redeem a signup code and create the account in ONE statement.
+
+        The pool is autocommit, so two statements would not be atomic — a crash
+        between them could consume the code without creating the account. Matching
+        the code in the WHERE clause (possible because the HMAC is deterministic)
+        also removes the read-verify-consume window that would otherwise let one code
+        be redeemed twice.
+        """
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                WITH v AS (
+                    UPDATE email_verifications
+                       SET consumed_at = now(), updated_at = now()
+                     WHERE username = %(u)s AND purpose = 'register'
+                       AND code_hash = %(ch)s AND consumed_at IS NULL
+                       AND expires_at > now() AND attempts < %(max)s
+                 RETURNING email
+                ),
+                ins AS (
+                    INSERT INTO user_accounts (username, password_hash, email, created_by)
+                    SELECT %(u)s, %(ph)s, v.email, 'self-register' FROM v
+                    ON CONFLICT (username) DO NOTHING
+                 RETURNING username
+                )
+                SELECT (SELECT count(*) FROM v) AS matched,
+                       (SELECT count(*) FROM ins) AS created
+                """,
+                {"u": username, "ch": code_hash, "ph": password_hash, "max": max_attempts},
+            )
+            return await cur.fetchone() or {"matched": 0, "created": 0}
+
+    async def consume_verification_reset(
+        self, *, username: str, code_hash: str, password_hash: str, max_attempts: int
+    ) -> dict[str, Any]:
+        """Redeem a reset code and re-key the account in ONE statement.
+
+        `email` is refreshed from the verification row too, so after a domain change
+        (gmail.com -> the company domain) a single self-service reset converges the
+        stored address with no backfill script. `is_active` is required: a disabled
+        account must not be recoverable by its holder.
+        """
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                WITH v AS (
+                    UPDATE email_verifications
+                       SET consumed_at = now(), updated_at = now()
+                     WHERE username = %(u)s AND purpose = 'reset'
+                       AND code_hash = %(ch)s AND consumed_at IS NULL
+                       AND expires_at > now() AND attempts < %(max)s
+                 RETURNING email
+                ),
+                upd AS (
+                    UPDATE user_accounts u
+                       SET password_hash = %(ph)s,
+                           email = v.email,
+                           password_changed_at = now(),
+                           updated_at = now()
+                      FROM v
+                     WHERE u.username = %(u)s AND u.is_active
+                 RETURNING u.username
+                )
+                SELECT (SELECT count(*) FROM v) AS matched,
+                       (SELECT count(*) FROM upd) AS updated
+                """,
+                {"u": username, "ch": code_hash, "ph": password_hash, "max": max_attempts},
+            )
+            return await cur.fetchone() or {"matched": 0, "updated": 0}
+
+    async def bump_verification_failure(
+        self, *, username: str, purpose: str, failure_window_seconds: int
+    ) -> dict[str, Any]:
+        """Count a wrong code. Raises `attempts` (per-code) and `failures` (the budget
+        a resend does not reset) in one atomic UPDATE."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                UPDATE email_verifications SET
+                    attempts = attempts + 1,
+                    failures = CASE
+                        WHEN failure_window_started_at
+                             < now() - make_interval(secs => %(fwin)s)
+                        THEN 1 ELSE failures + 1 END,
+                    failure_window_started_at = CASE
+                        WHEN failure_window_started_at
+                             < now() - make_interval(secs => %(fwin)s)
+                        THEN now() ELSE failure_window_started_at END,
+                    updated_at = now()
+                WHERE username = %(u)s AND purpose = %(p)s
+                RETURNING attempts, failures
+                """,
+                {"u": username, "p": purpose, "fwin": failure_window_seconds},
+            )
+            return await cur.fetchone() or {"attempts": 0, "failures": 0}
+
+    async def prune_email_verifications(self, before_iso: str) -> int:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "DELETE FROM email_verifications WHERE expires_at < %s", (before_iso,)
             )
             return cur.rowcount
 

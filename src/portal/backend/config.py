@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
+import re
 
 # The built-in dev session secret. Booting with this (cookie-signing key known
 # from source) lets anyone forge an operator session, so create_app() refuses to
@@ -43,6 +44,47 @@ def _parse_operator_users(raw: str | None) -> dict[str, str]:
     return users
 
 
+_SMTP_SECURITY_MODES = ("starttls", "ssl", "none")
+
+
+def _smtp_security(raw: str | None, default: str) -> str:
+    """Whitelist the transport mode. An unknown value falls back to the default
+    rather than silently downgrading the connection to plaintext."""
+    value = (raw or "").strip().lower()
+    return value if value in _SMTP_SECURITY_MODES else default
+
+
+def _email_domain(raw: str | None, default: str) -> str:
+    """'@samsung.com' / ' Samsung.COM ' -> 'samsung.com'."""
+    value = (raw or "").strip().lstrip("@").lower()
+    return value or default
+
+
+def _signup_allowlist(raw: str | None) -> tuple[str, ...]:
+    """'a.b, c.d' -> ('a.b', 'c.d'). Empty => no restriction."""
+    if not raw:
+        return ()
+    return tuple(
+        item for item in (p.strip().lower() for p in raw.split(",")) if item
+    )
+
+
+# 부팅 시 PORTAL_EMAIL_DOMAIN 형식 검증용 (app.create_app이 fail-closed로 사용).
+EMAIL_DOMAIN_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?([.][a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+)
+
+# 공용 메일 도메인으로 가입을 열어두면 "그 서비스 계정 보유자 전원"이 가입 자격이 된다.
+# 회사 도메인이면 도메인 자체가 소속 증명이므로 allowlist 없이도 안전하다.
+PUBLIC_EMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com", "googlemail.com", "naver.com", "daum.net", "hanmail.net",
+        "kakao.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
+        "icloud.com", "proton.me", "protonmail.com", "nate.com",
+    }
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     # Signs the session cookie. MUST be overridden in any non-local deployment.
@@ -55,9 +97,6 @@ class Settings:
     session_https_only: bool = True
     # Allow booting with the dev-default session secret (local dev only).
     allow_insecure_defaults: bool = False
-    # 회사 AD 로그인이 아직 더미 스텁(auth.authenticate_ad)일 때 그 더미 경로를 허용할지.
-    # 임시 개발용으로 기본 ON. 실제 AD 연동 후에는 false로 꺼서 더미 로그인을 차단한다.
-    allow_dummy_ad: bool = True
     # Operator credential store (PORTAL_OPERATOR_USERS). Defaults to admin/admin1234.
     # id/password login is operator-only; multiple entries == multiple operators.
     operator_users: dict[str, str] = field(
@@ -120,6 +159,57 @@ class Settings:
     dashboard_sample_seconds: float = 60.0
     dashboard_retention_days: int = 31
 
+    # --- end-user accounts + email verification -------------------------
+    # 사용자(end-user)는 회사 메일 local-part를 아이디로 self-service 가입한다.
+    # 아이디 소유 증명 = <아이디>@email_domain 으로 보낸 6자리 인증번호. 도메인은 여기(env)에서만
+    # 오고 사용자 입력에서 절대 파생하지 않는다 — 파생하면 인증번호를 임의 외부 도메인으로
+    # 배달시킬 수 있어 "회사 메일 소유 증명"이라는 전제가 무너진다. 빈 값이면 기능 비활성.
+    # DMS 구축 시 회사 도메인으로 설정한다(테스트 중 gmail.com → 운영 samsung.com).
+    email_domain: str = ""
+    # 사용자 self-service 가입 킬스위치. false면 가입 요청이 403.
+    user_signup_enabled: bool = True
+    # 가입 허용 local-part 목록(콤마 구분). 빈 값 = 제한 없음. 도메인이 공용(gmail.com)인
+    # 동안에는 반드시 채운다 — 비우면 "임의의 gmail 계정 보유자"가 곧 가입 자격이 되고,
+    # 가입 사용자는 DMS 데이터 작업 실행 경로를 갖는다.
+    signup_allowlist: tuple[str, ...] = ()
+    # SMTP 릴레이. host가 None이면 미구성 → 인증 메일 발송 불가(fail-closed, 503).
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    # starttls | ssl | none. 알 수 없는 값은 기본값으로 폴백한다(오타 하나로 평문 전송으로
+    # 강등되는 사고 방지).
+    smtp_security: str = "starttls"
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    # 빈 값이면 smtp_user를 발신 주소로 쓴다(Gmail은 From == 인증 계정이어야 한다).
+    smtp_from: str = ""
+    smtp_from_name: str = "DMS 포탈"
+    # 무제한 금지: smtplib 기본 timeout은 무한이고 to_thread는 취소가 불가능하므로,
+    # 소켓 타임아웃이 발송 스레드의 유일한 상한이다.
+    smtp_timeout_seconds: float = 10.0
+    # 인증번호 정책. TTL 10분(요구사항).
+    email_code_ttl_seconds: int = 600
+    email_code_length: int = 6
+    email_code_max_attempts: int = 5
+    email_resend_cooldown_seconds: int = 60
+    email_send_window_seconds: int = 3600
+    email_max_sends_per_window: int = 5
+    # 재발급으로 리셋되지 않는 누적 실패 예산. attempts만 있으면 "5회 실패 → 재발급 → 5회"가
+    # 무한 반복되어 시도 제한이 사실상 없어진다.
+    email_max_failures_per_window: int = 20
+    email_failure_window_seconds: int = 3600
+    # 전역 발송 상한(시간당). 아이디별 제한만으로는 "아이디 1만 개 × 5통"을 못 막고, 메일
+    # 릴레이가 포탈을 스팸 발신원으로 차단하면 기능 전체가 죽는다.
+    email_global_max_sends_per_hour: int = 200
+    # 인증번호 해시용 pepper(DB에 없는 키). 미설정 시 session_secret에서 도메인 분리 파생.
+    email_code_pepper: str | None = None
+    # 개발 전용: SMTP 미설정 시 인증번호를 서버 로그로 출력. 프로덕션에서 켜지지 않도록
+    # allow_insecure_defaults와 이중 게이트이며, 위반 조합이면 create_app()이 기동을 거부한다.
+    email_dev_echo: bool = False
+
+    @property
+    def email_configured(self) -> bool:
+        return bool(self.smtp_host and self.email_domain)
+
     @property
     def dms_configured(self) -> bool:
         return bool(self.dms_api_url)
@@ -150,9 +240,6 @@ class Settings:
             ),
             allow_insecure_defaults=_env_bool(
                 env.get("PORTAL_ALLOW_INSECURE_DEFAULTS"), False
-            ),
-            allow_dummy_ad=_env_bool(
-                env.get("PORTAL_ALLOW_DUMMY_AD"), defaults.allow_dummy_ad
             ),
             operator_users=operator_users or defaults.operator_users,
             admin_token=env.get("PORTAL_ADMIN_TOKEN") or None,
@@ -196,5 +283,75 @@ class Settings:
                     "PORTAL_DASHBOARD_RETENTION_DAYS",
                     defaults.dashboard_retention_days,
                 )
+            ),
+            email_domain=_email_domain(
+                env.get("PORTAL_EMAIL_DOMAIN"), defaults.email_domain
+            ),
+            user_signup_enabled=_env_bool(
+                env.get("PORTAL_USER_SIGNUP_ENABLED"), defaults.user_signup_enabled
+            ),
+            signup_allowlist=_signup_allowlist(env.get("PORTAL_SIGNUP_ALLOWLIST")),
+            smtp_host=env.get("PORTAL_SMTP_HOST") or None,
+            smtp_port=int(env.get("PORTAL_SMTP_PORT", defaults.smtp_port)),
+            smtp_security=_smtp_security(
+                env.get("PORTAL_SMTP_SECURITY"), defaults.smtp_security
+            ),
+            smtp_user=env.get("PORTAL_SMTP_USER") or None,
+            smtp_password=env.get("PORTAL_SMTP_PASSWORD") or None,
+            smtp_from=env.get("PORTAL_SMTP_FROM", defaults.smtp_from),
+            smtp_from_name=env.get("PORTAL_SMTP_FROM_NAME", defaults.smtp_from_name),
+            smtp_timeout_seconds=float(
+                env.get("PORTAL_SMTP_TIMEOUT_SECONDS", defaults.smtp_timeout_seconds)
+            ),
+            email_code_ttl_seconds=int(
+                env.get("PORTAL_EMAIL_CODE_TTL_SECONDS", defaults.email_code_ttl_seconds)
+            ),
+            email_code_length=int(
+                env.get("PORTAL_EMAIL_CODE_LENGTH", defaults.email_code_length)
+            ),
+            email_code_max_attempts=int(
+                env.get(
+                    "PORTAL_EMAIL_CODE_MAX_ATTEMPTS", defaults.email_code_max_attempts
+                )
+            ),
+            email_resend_cooldown_seconds=int(
+                env.get(
+                    "PORTAL_EMAIL_RESEND_COOLDOWN_SECONDS",
+                    defaults.email_resend_cooldown_seconds,
+                )
+            ),
+            email_send_window_seconds=int(
+                env.get(
+                    "PORTAL_EMAIL_SEND_WINDOW_SECONDS",
+                    defaults.email_send_window_seconds,
+                )
+            ),
+            email_max_sends_per_window=int(
+                env.get(
+                    "PORTAL_EMAIL_MAX_SENDS_PER_WINDOW",
+                    defaults.email_max_sends_per_window,
+                )
+            ),
+            email_max_failures_per_window=int(
+                env.get(
+                    "PORTAL_EMAIL_MAX_FAILURES_PER_WINDOW",
+                    defaults.email_max_failures_per_window,
+                )
+            ),
+            email_failure_window_seconds=int(
+                env.get(
+                    "PORTAL_EMAIL_FAILURE_WINDOW_SECONDS",
+                    defaults.email_failure_window_seconds,
+                )
+            ),
+            email_global_max_sends_per_hour=int(
+                env.get(
+                    "PORTAL_EMAIL_GLOBAL_MAX_SENDS_PER_HOUR",
+                    defaults.email_global_max_sends_per_hour,
+                )
+            ),
+            email_code_pepper=env.get("PORTAL_EMAIL_CODE_PEPPER") or None,
+            email_dev_echo=_env_bool(
+                env.get("PORTAL_EMAIL_DEV_ECHO"), defaults.email_dev_echo
             ),
         )

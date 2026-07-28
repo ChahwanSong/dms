@@ -11,6 +11,8 @@ venv/
 # local tooling / agent artifacts
 .claude/
 .playwright-mcp/
+.playwright-cli/
+output/
 
 # scratch UI screenshots dropped in repo root during manual testing
 /*.png

@@ -1,9 +1,15 @@
 """Roles and session-backed auth dependencies for the portal BFF.
 
-Role model (login method == role):
-- ``operator`` — signs in with an id/password from the operator credential store
-  (multiple operator accounts allowed). Gets the operator/admin interface.
-- ``user`` — signs in with a company AD account. Gets the end-user interface.
+Role model (**account store** == role, NOT the login method):
+- ``operator`` — matched in ``portal.operator_users`` (multiple operator accounts
+  allowed; created/reset via the shared admin token). Gets the operator interface.
+- ``user`` — matched in ``portal.user_accounts`` (id = company-mail local part;
+  self-service signup / password reset via a 6-digit emailed code). Gets the
+  end-user interface.
+
+Both now log in with an id/password, so ``method`` is "local" for both and must
+NEVER be used to make an authorization decision — the role is decided by which
+table the credential matched, and each login route hard-codes its own role.
 
 The role lives in the signed session cookie (``request.session["user"]``) and is
 the single source of truth used to gate both API routes (here) and the SPA's

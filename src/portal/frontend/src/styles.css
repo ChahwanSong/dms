@@ -399,6 +399,89 @@ button.primary.danger:hover:not(:disabled) {
   box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
 }
 
+/* --- end-user email verification (계정 만들기 / 비밀번호 재설정) --------- */
+
+/* Where the code will be mailed. Shown before sending (live, as the id is typed)
+   and after (past tense) — a mistyped id mails a real colleague, so this is a
+   typo guard rather than decoration. */
+.login-mailto {
+  margin: -0.3rem 0 0.15rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #93b7dd;
+}
+.login-mailto strong { color: #dbeafe; font-weight: 600; }
+.login-mailto.is-empty { color: #6b7f95; font-style: italic; }
+.login-mailto.is-bad { color: #f4a4a4; }
+.login-mailto.is-sent {
+  margin: 0 0 0.55rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.09);
+}
+
+/* Recap of the id being verified, with a way back to fix a typo. */
+.login-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+  font-size: 0.78rem;
+}
+.login-summary-k { color: #7d93a8; }
+.login-summary-v { color: #e2eaf2; font-weight: 600; }
+.login-linkbtn {
+  margin-left: auto;
+  padding: 0.15rem 0.4rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #7dd3fc;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.login-linkbtn:hover { background: rgba(125, 211, 252, 0.12); }
+
+.login-code-row { display: flex; gap: 0.5rem; align-items: stretch; }
+.login-code-input {
+  flex: 1;
+  /* text-indent compensates for the trailing letter-spacing so the digits look
+     centred rather than pushed left. */
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+  text-align: center;
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+.login-resend {
+  flex: 0 0 auto;
+  padding: 0 0.75rem;
+  border: 1px solid rgba(148, 176, 205, 0.35);
+  border-radius: 8px;
+  background: rgba(148, 176, 205, 0.08);
+  color: #cfe0f0;
+  font-size: 0.76rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.login-resend:hover:not(:disabled) {
+  background: rgba(148, 176, 205, 0.16);
+  border-color: rgba(148, 176, 205, 0.55);
+}
+.login-resend:disabled { opacity: 0.5; cursor: default; }
+
+.login-timer {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  color: #8fa6bb;
+  font-variant-numeric: tabular-nums;
+}
+.login-timer.is-warn { color: #f4c672; }
+.login-timer.is-expired { color: #f4a4a4; }
+
 .login-primary {
   margin-top: 0.15rem;
   padding: 0.72rem;
@@ -481,7 +564,8 @@ button.primary.danger:hover:not(:disabled) {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .login-role, .login-subtab, .login-field input, .login-primary { transition: none; }
+  .login-role, .login-subtab, .login-field input, .login-primary,
+  .login-resend, .login-linkbtn { transition: none; }
 }
 
 .badge {
