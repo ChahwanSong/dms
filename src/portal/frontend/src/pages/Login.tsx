@@ -381,7 +381,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (u: User) => void })
             {cfg && !cfg.available && mode !== "login" && (
               <p className="login-warn">
                 메일 인증이 설정되지 않아 계정 생성/재설정을 사용할 수 없습니다. 관리자에게
-                <code> PORTAL_SMTP_HOST</code> · <code>PORTAL_EMAIL_DOMAIN</code> 설정을 요청하세요.
+                <code> PORTAL_EMAIL_DELIVERY</code> · <code>PORTAL_EMAIL_DOMAIN</code> 설정을 요청하세요.
               </p>
             )}
             {cfg && cfg.available && !cfg.signup_enabled && mode === "register" && (

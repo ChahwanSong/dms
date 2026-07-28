@@ -41,11 +41,11 @@ from .email_codes import (
 )
 from .mailer import (
     EmailNotConfigured,
+    OutboundEmail,
     address_for,
     build_already_registered_message,
-    build_code_message,
+    deliver,
     send_code,
-    send_message,
 )
 from .security import (
     ROLE_OPERATOR,
@@ -257,15 +257,11 @@ def auth_router(settings: Settings) -> APIRouter:
         발송됩니다" hint and size its inputs without hard-coding anything — so
         switching gmail.com -> the company domain at install time needs no rebuild.
 
-        Never exposes the SMTP host/user/password.
+        Reports WHICH delivery provider is active but never any of its credentials.
         """
-        delivery = (
-            "smtp"
-            if settings.email_configured
-            else ("dev-echo" if settings.email_dev_echo else "none")
-        )
+        delivery = settings.email_delivery if settings.email_configured else "none"
         return {
-            "available": delivery != "none",
+            "available": settings.email_configured,
             "email_domain": settings.email_domain,
             "code_length": settings.email_code_length,
             "code_ttl_seconds": settings.email_code_ttl_seconds,
@@ -300,9 +296,7 @@ def auth_router(settings: Settings) -> APIRouter:
         # Fail closed BEFORE minting anything: no relay means no proof of ownership
         # is possible, and creating an account without that proof is the one thing
         # this flow must never do.
-        if not settings.email_configured and not (
-            settings.email_dev_echo and settings.allow_insecure_defaults
-        ):
+        if not settings.email_configured:
             raise HTTPException(
                 status_code=503,
                 detail="email_not_configured (메일 발송이 설정되지 않았습니다. 관리자에게 문의하세요)",
@@ -379,7 +373,6 @@ def auth_router(settings: Settings) -> APIRouter:
                 background.add_task(
                     _send_quietly,
                     settings,
-                    to_addr,
                     build_already_registered_message(settings, to_addr=to_addr),
                 )
             return same_answer
@@ -499,11 +492,11 @@ def auth_router(settings: Settings) -> APIRouter:
     return router
 
 
-async def _send_quietly(settings: Settings, to_addr: str, msg: Any) -> None:
+async def _send_quietly(settings: Settings, email: OutboundEmail) -> None:
     """Background delivery whose failure must not surface to the caller (it would be
     an existence oracle). Logs the failure class only — never the credentials."""
     try:
-        await send_message(settings, to_addr=to_addr, msg=msg)
+        await deliver(settings, email)
     except Exception as exc:  # noqa: BLE001 - background task must not raise
         log.warning("notice mail delivery failed: %s", type(exc).__name__)
 

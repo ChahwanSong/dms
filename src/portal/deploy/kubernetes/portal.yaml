@@ -13,7 +13,7 @@ stringData:
   # All values here are PLACEHOLDERS. Never commit working credentials — inject
   # the real values into the LIVE Secret out-of-band, e.g.:
   #   kubectl -n dms-portal patch secret portal-secrets --type merge -p \
-  #     '{"stringData":{"PORTAL_SESSION_SECRET":"<rand>","PORTAL_OPERATOR_USERS":"admin:<pw>","PORTAL_DMS_TOKEN":"<tok>","PORTAL_ADMIN_TOKEN":"<admin-tok>","PORTAL_DB_URL":"<dms-db-url>","PORTAL_SMTP_USER":"<mail-account>","PORTAL_SMTP_PASSWORD":"<app-password>"}}'
+  #     '{"stringData":{"PORTAL_SESSION_SECRET":"<rand>","PORTAL_OPERATOR_USERS":"admin:<pw>","PORTAL_DMS_TOKEN":"<tok>","PORTAL_ADMIN_TOKEN":"<admin-tok>","PORTAL_DB_URL":"<dms-db-url>"}}'
   #   kubectl -n dms-portal rollout restart deploy/dms-portal
   # (kubectl apply overwrites these back to placeholders, so re-patch after apply.)
   #
@@ -36,13 +36,9 @@ stringData:
   # value equals dms-secrets/DMS_DATABASE_URL. Empty => no DB: login falls back to
   # the env store above and the data-backup tab is disabled (routes 503).
   PORTAL_DB_URL: "REPLACE_WITH_DB_URL"
-  # SMTP relay for the end-user 계정 만들기 / 비밀번호 재설정 verification mail.
-  # Gmail: PORTAL_SMTP_USER is the full address and PORTAL_SMTP_PASSWORD is a
-  # 16-char APP PASSWORD (2-step verification required) — never the account
-  # password. Empty => code requests fail closed (503) and self-signup is
-  # unavailable; everything else keeps working.
-  PORTAL_SMTP_USER: "REPLACE_WITH_SMTP_USER"
-  PORTAL_SMTP_PASSWORD: "REPLACE_WITH_SMTP_PASSWORD"
+  # NOTE: 사내 메일 발송 연동(PORTAL_EMAIL_DELIVERY=company)에 자격증명이 필요해지면
+  # 여기에 placeholder 키를 추가하고 실값은 라이브 Secret에 patch로만 주입한다.
+  # 구현 가이드: install/portal-02-user-auth.md §5·§6
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -93,12 +89,16 @@ spec:
             # pre-integration test). Empty => the whole self-signup flow is off.
             - name: PORTAL_EMAIL_DOMAIN
               value: "gmail.com"
-            - name: PORTAL_SMTP_HOST
-              value: "smtp.gmail.com"
-            - name: PORTAL_SMTP_PORT
-              value: "587"
-            - name: PORTAL_SMTP_SECURITY
-              value: "starttls"
+            # 인증메일 배송 수단: none | log | company.
+            #   none    = 인증요청이 503으로 fail-closed
+            #   log     = 인증번호를 서버 로그로만 출력(개발 전용, 아래 INSECURE 동반 필수)
+            #   company = 사내 메일 발송 시스템 (mailer.deliver_company_mail 구현 후)
+            - name: PORTAL_EMAIL_DELIVERY
+              value: "log"
+            # log 배송은 인증번호가 로그에 평문으로 남으므로 이중 게이트다. 사내 메일
+            # 연동(company) 후에는 이 두 값을 함께 제거한다.
+            - name: PORTAL_ALLOW_INSECURE_DEFAULTS
+              value: "1"
             # While the domain is a PUBLIC one (gmail.com), keep this list filled:
             # an empty allowlist means "anyone with an account on that mail provider
             # may sign up", and a signed-up user can run DMS data jobs. Comma-separated

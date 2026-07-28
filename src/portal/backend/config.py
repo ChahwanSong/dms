@@ -44,14 +44,20 @@ def _parse_operator_users(raw: str | None) -> dict[str, str]:
     return users
 
 
-_SMTP_SECURITY_MODES = ("starttls", "ssl", "none")
+def _email_delivery(raw: str | None, default: str) -> str:
+    """Whitelist the delivery provider id (mailer.DELIVERY_PROVIDERS).
 
+    Imported lazily to keep config.py free of module-level app imports, matching how
+    PoolConfig is imported inside the pool helpers.
+    """
+    from .mailer import DELIVERY_NONE, DELIVERY_PROVIDERS
 
-def _smtp_security(raw: str | None, default: str) -> str:
-    """Whitelist the transport mode. An unknown value falls back to the default
-    rather than silently downgrading the connection to plaintext."""
     value = (raw or "").strip().lower()
-    return value if value in _SMTP_SECURITY_MODES else default
+    if not value:
+        return default
+    # Unknown value -> 'none' (fail closed), never the caller's default: a typo must
+    # stop the feature, not silently pick a weaker path.
+    return value if value in DELIVERY_PROVIDERS else DELIVERY_NONE
 
 
 def _email_domain(raw: str | None, default: str) -> str:
@@ -172,20 +178,17 @@ class Settings:
     # 동안에는 반드시 채운다 — 비우면 "임의의 gmail 계정 보유자"가 곧 가입 자격이 되고,
     # 가입 사용자는 DMS 데이터 작업 실행 경로를 갖는다.
     signup_allowlist: tuple[str, ...] = ()
-    # SMTP 릴레이. host가 None이면 미구성 → 인증 메일 발송 불가(fail-closed, 503).
-    smtp_host: str | None = None
-    smtp_port: int = 587
-    # starttls | ssl | none. 알 수 없는 값은 기본값으로 폴백한다(오타 하나로 평문 전송으로
-    # 강등되는 사고 방지).
-    smtp_security: str = "starttls"
-    smtp_user: str | None = None
-    smtp_password: str | None = None
-    # 빈 값이면 smtp_user를 발신 주소로 쓴다(Gmail은 From == 인증 계정이어야 한다).
-    smtp_from: str = ""
-    smtp_from_name: str = "DMS 포탈"
-    # 무제한 금지: smtplib 기본 timeout은 무한이고 to_thread는 취소가 불가능하므로,
-    # 소켓 타임아웃이 발송 스레드의 유일한 상한이다.
-    smtp_timeout_seconds: float = 10.0
+    # 인증메일 배송 수단 (PORTAL_EMAIL_DELIVERY): none | log | company.
+    #   none    = 배송 수단 없음 → 인증요청이 503으로 fail-closed (기본값)
+    #   log     = 인증번호를 서버 로그로만 출력하는 개발 전용 경로
+    #             (PORTAL_ALLOW_INSECURE_DEFAULTS 동반 필수)
+    #   company = 사내 메일 발송 시스템 (mailer.deliver_company_mail 구현 필요)
+    # 알 수 없는 값은 'none'으로 폴백한다 — 오타 하나로 인증 없이 계정이 만들어지는
+    # 쪽이 아니라 기능이 멈추는 쪽으로 틀어져야 한다.
+    email_delivery: str = "none"
+    # 사내 발송 구현이 동기 라이브러리를 쓸 때 반드시 걸어야 하는 상한(초).
+    # asyncio.to_thread는 취소가 불가능하므로 타임아웃이 유일한 안전장치다.
+    email_send_timeout_seconds: float = 10.0
     # 인증번호 정책. TTL 10분(요구사항).
     email_code_ttl_seconds: int = 600
     email_code_length: int = 6
@@ -202,13 +205,30 @@ class Settings:
     email_global_max_sends_per_hour: int = 200
     # 인증번호 해시용 pepper(DB에 없는 키). 미설정 시 session_secret에서 도메인 분리 파생.
     email_code_pepper: str | None = None
-    # 개발 전용: SMTP 미설정 시 인증번호를 서버 로그로 출력. 프로덕션에서 켜지지 않도록
-    # allow_insecure_defaults와 이중 게이트이며, 위반 조합이면 create_app()이 기동을 거부한다.
-    email_dev_echo: bool = False
+
+    @property
+    def email_dev_echo(self) -> bool:
+        """개발 전용 로그 출력 경로가 선택되어 있는지. 실제 사용 가능 여부는
+        allow_insecure_defaults와의 이중 게이트이며, 위반 조합이면 create_app()이
+        기동을 거부한다(app.py)."""
+        from .mailer import DELIVERY_LOG
+
+        return self.email_delivery == DELIVERY_LOG
 
     @property
     def email_configured(self) -> bool:
-        return bool(self.smtp_host and self.email_domain)
+        """인증메일을 실제로 보낼 수 있는 상태인지.
+
+        도메인 없이는 수신자 주소를 만들 수 없고, 배송 수단(log/company) 없이는
+        보낼 수 없다. 둘 중 하나라도 없으면 인증요청은 503으로 fail-closed 된다.
+        """
+        from .mailer import DELIVERY_NONE
+
+        if not self.email_domain or self.email_delivery == DELIVERY_NONE:
+            return False
+        if self.email_dev_echo:
+            return self.allow_insecure_defaults
+        return True
 
     @property
     def dms_configured(self) -> bool:
@@ -291,17 +311,14 @@ class Settings:
                 env.get("PORTAL_USER_SIGNUP_ENABLED"), defaults.user_signup_enabled
             ),
             signup_allowlist=_signup_allowlist(env.get("PORTAL_SIGNUP_ALLOWLIST")),
-            smtp_host=env.get("PORTAL_SMTP_HOST") or None,
-            smtp_port=int(env.get("PORTAL_SMTP_PORT", defaults.smtp_port)),
-            smtp_security=_smtp_security(
-                env.get("PORTAL_SMTP_SECURITY"), defaults.smtp_security
+            email_delivery=_email_delivery(
+                env.get("PORTAL_EMAIL_DELIVERY"), defaults.email_delivery
             ),
-            smtp_user=env.get("PORTAL_SMTP_USER") or None,
-            smtp_password=env.get("PORTAL_SMTP_PASSWORD") or None,
-            smtp_from=env.get("PORTAL_SMTP_FROM", defaults.smtp_from),
-            smtp_from_name=env.get("PORTAL_SMTP_FROM_NAME", defaults.smtp_from_name),
-            smtp_timeout_seconds=float(
-                env.get("PORTAL_SMTP_TIMEOUT_SECONDS", defaults.smtp_timeout_seconds)
+            email_send_timeout_seconds=float(
+                env.get(
+                    "PORTAL_EMAIL_SEND_TIMEOUT_SECONDS",
+                    defaults.email_send_timeout_seconds,
+                )
             ),
             email_code_ttl_seconds=int(
                 env.get("PORTAL_EMAIL_CODE_TTL_SECONDS", defaults.email_code_ttl_seconds)
@@ -351,7 +368,4 @@ class Settings:
                 )
             ),
             email_code_pepper=env.get("PORTAL_EMAIL_CODE_PEPPER") or None,
-            email_dev_echo=_env_bool(
-                env.get("PORTAL_EMAIL_DEV_ECHO"), defaults.email_dev_echo
-            ),
         )

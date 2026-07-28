@@ -70,9 +70,8 @@ ClusterIP). 근거·구조는 [`dms-06 §1·§8`](dms-06-configuration.md), 매�
 | 운영자 계정 관리 토큰(선택) | `openssl rand -hex 24` 출력 | `PORTAL_ADMIN_TOKEN`(§10) |
 | 포탈 DB(선택) | DMS Postgres 재사용 시 `DMS_DATABASE_URL`과 동일 값 | `PORTAL_DB_URL`(§4) |
 | **회사 메일 도메인**(사용자 가입) | `samsung.com` (연동 전 테스트는 `gmail.com`) | `PORTAL_EMAIL_DOMAIN`(§10.2) |
-| **SMTP 릴레이**(사용자 가입) | `smtp.gmail.com:587` / STARTTLS | `PORTAL_SMTP_HOST`·`_PORT`·`_SECURITY`(§10.2) |
-| **SMTP 계정 / 앱 비밀번호** | `you@gmail.com` / 16자리 앱 비밀번호 | `PORTAL_SMTP_USER`·`PORTAL_SMTP_PASSWORD`(Secret) |
-| 가입 허용 아이디(공용 도메인 사용 중 **필수**) | `skychahwan,test1.user` | `PORTAL_SIGNUP_ALLOWLIST`(§10.2) |
+| **인증메일 배송 수단** | `none` \| `log`(개발) \| `company`(사내 연동) | `PORTAL_EMAIL_DELIVERY`(§10.2) |
+| 가입 허용 아이디(공용 도메인 사용 중 **필수**) | `aaa.bbb,ccc.ddd` | `PORTAL_SIGNUP_ALLOWLIST`(§10.2) |
 | 외부 노출 | (운영) ingress + 서버 TLS / (간단) NodePort `30090` | Service / Ingress(§8) |
 
 ## 4. (선택) 포탈 DB
@@ -343,8 +342,8 @@ curl -s -o /dev/null -w "user->operator API: %{http_code}\n" -b "$JAR2" "$BASE/a
   `"email_configured":true,"email_domain":"<회사도메인>"` 포함)
 - 운영자 로그인 → `{"user":{...,"role":"operator"}}`
 - 목록 → DMS에 등록된 storage mapping 개수
-- 사용자 인증 설정 → `{"available":true,"email_domain":"...","code_ttl_seconds":600,...}`
-  (SMTP 미설정이면 `"available":false` — 인증요청은 `503`으로 fail-closed)
+- 사용자 인증 설정 → `{"available":true,"email_domain":"...","code_ttl_seconds":600,"email_delivery":"log|company",...}`
+  (배송 수단 미설정이면 `"available":false` — 인증요청은 `503`으로 fail-closed)
 - **`root` 가입요청 → `422`** (예약 아이디)
 - 사용자 세션 → operator API `403`
 
@@ -387,57 +386,31 @@ echo "비밀 토큰: $ADMTOK"   # 안전 채널로만 전달·보관
 **흐름**: 아이디 + 비밀번호 입력 → `[인증요청]` → `<아이디>@<도메인>`으로 인증번호 메일 → 인증번호 입력 →
 계정 생성 완료. 비밀번호 재설정도 동일. 인증번호 **유효시간 10분**, 재발송 쿨다운 60초.
 
-### 설정 항목
+### 설정 · 사내 메일 연동 · 허용목록
 
-| 변수 | 예시 | 설명 |
+**전체 설정 항목, 사내 메일 발송 연동 코드 작성법, 도메인·허용목록 운영, 보안 불변식은
+→ [portal-02-user-auth.md](portal-02-user-auth.md) 를 참고한다.**
+
+최소 설정만 옮기면:
+
+| 변수 | 값 | 설명 |
 | --- | --- | --- |
-| `PORTAL_EMAIL_DOMAIN` | `samsung.com` | **아이디 뒤에 붙는 회사 메일 도메인.** 구축 시 회사 도메인으로 설정한다. 빈 값이면 기능 전체 비활성 |
-| `PORTAL_SMTP_HOST` / `_PORT` | `smtp.gmail.com` / `587` | SMTP 릴레이. 미설정이면 인증요청이 `503`(fail-closed) |
-| `PORTAL_SMTP_SECURITY` | `starttls` | `starttls`(587) \| `ssl`(465) \| `none` |
-| `PORTAL_SMTP_USER` / `_PASSWORD` | `you@gmail.com` / 앱 비밀번호 | **Secret**. Gmail은 발신 주소가 인증 계정과 같아야 한다 |
-| `PORTAL_SMTP_FROM` / `_FROM_NAME` | (빈 값) / `DMS 포탈` | 빈 값이면 `PORTAL_SMTP_USER`를 발신 주소로 사용 |
-| `PORTAL_SIGNUP_ALLOWLIST` | `skychahwan,test1.user` | 가입 허용 아이디. **공용 도메인 사용 중에는 필수**(아래 경고) |
-| `PORTAL_USER_SIGNUP_ENABLED` | `true` | 가입 킬스위치 |
-| `PORTAL_EMAIL_CODE_TTL_SECONDS` | `600` | 인증번호 유효시간(기본 10분) |
-| `PORTAL_EMAIL_CODE_PEPPER` | `openssl rand -hex 32` | 인증번호 해시 키(미설정 시 세션 시크릿에서 파생) |
+| `PORTAL_EMAIL_DOMAIN` | `samsung.com` | 아이디 뒤에 붙는 **회사 메일 도메인**. 구축 시 설정. 빈 값이면 기능 비활성 |
+| `PORTAL_EMAIL_DELIVERY` | `none` \| `log` \| `company` | 인증메일 배송 수단. 사내 연동 전에는 `log`(개발 전용) |
+| `PORTAL_SIGNUP_ALLOWLIST` | `aaa.bbb,ccc.ddd` | 가입 허용 아이디. **공용 도메인(gmail.com 등) 사용 중에는 필수** |
 
-> ⚠️ **공용 도메인(gmail.com)으로 테스트하는 동안에는 `PORTAL_SIGNUP_ALLOWLIST`를 반드시 채운다.** 비워 두면
-> "그 메일 서비스 계정을 가진 누구나"가 가입 자격을 갖게 되고, 가입한 사용자는 DMS 데이터 작업(Sync/Scan)
-> 실행 경로를 얻는다. 회사 도메인으로 전환한 뒤에는 비워도 된다(도메인 자체가 소속 증명이 되므로).
+> **사내 메일 발송은 아직 미구현이다.** `src/portal/backend/mailer.py`의
+> `deliver_company_mail()` 함수 하나를 구현하고 `PORTAL_EMAIL_DELIVERY=company`로 바꾸면 된다
+> (다른 파일 수정 불필요). 상세: [portal-02-user-auth.md](portal-02-user-auth.md) §5.
 
-### Gmail 릴레이로 테스트하기 (사내 메일 연동 전 임시)
-
-1. 발신에 쓸 Google 계정에 **2단계 인증**을 켠다.
-2. [앱 비밀번호](https://myaccount.google.com/apppasswords)에서 16자리 앱 비밀번호를 발급한다
-   (계정 비밀번호가 **아니다**).
-3. 라이브 Secret에 주입 후 재기동:
+연동 전 화면·플로우를 테스트하려면 `PORTAL_EMAIL_DELIVERY=log` + `PORTAL_ALLOW_INSECURE_DEFAULTS=1`로
+인증번호를 서버 로그에서 확인한다. 인증번호는 **HTTP 응답에 절대 포함되지 않는다.**
+`PORTAL_EMAIL_DELIVERY=log`인데 `PORTAL_ALLOW_INSECURE_DEFAULTS`가 없으면 **기동을 거부**한다
+(반대로 `PORTAL_ALLOW_INSECURE_DEFAULTS`만 있는 것은 정상 — 이 플래그는 dev 세션 시크릿 허용에도 쓰인다):
 
 ```bash
-kubectl -n dms-portal patch secret portal-secrets --type merge \
-  -p '{"stringData":{"PORTAL_SMTP_USER":"you@gmail.com","PORTAL_SMTP_PASSWORD":"<16자리 앱 비밀번호>"}}'
-kubectl -n dms-portal rollout restart deploy/dms-portal
-kubectl -n dms-portal rollout status deploy/dms-portal --timeout=120s
-
-# 확인: email_configured=true 여야 한다
-kubectl -n dms-portal exec deploy/dms-portal -- \
-  python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8090/healthz').read().decode())"
+kubectl -n dms-portal logs deploy/dms-portal | grep "DEV CODE ECHO" | tail -1
 ```
-
-**사내 메일 서버로 전환**할 때는 `PORTAL_SMTP_HOST`/`_PORT`/`_SECURITY`를 사내 릴레이로 바꾸고,
-IP allowlist 릴레이라면 `PORTAL_SMTP_USER`/`_PASSWORD`를 비운다(인증 생략). 도메인도 함께
-`PORTAL_EMAIL_DOMAIN=<회사도메인>`으로 바꾼다. **Pod에서 릴레이의 SMTP 포트로 egress가 열려 있어야 한다**
-(HTTP 프록시는 SMTP에 쓸 수 없다). 사전 확인:
-
-```bash
-kubectl -n dms-portal exec deploy/dms-portal -- \
-  python -c "import socket;s=socket.create_connection(('smtp.gmail.com',587),8);print('reachable');s.close()"
-```
-
-### SMTP 없이 화면만 확인하려면 (로컬 개발 전용)
-
-`PORTAL_EMAIL_DEV_ECHO=true` + `PORTAL_ALLOW_INSECURE_DEFAULTS=1`이면 인증번호를 **서버 로그로만** 출력한다
-(HTTP 응답에는 절대 포함되지 않는다). 두 값이 모두 있어야 하며, 한쪽만 켜면 **기동을 거부**한다 — 테스트베드
-설정이 그대로 운영에 복사되는 사고를 배포 단계에서 드러내기 위함이다. 운영에서는 절대 켜지 않는다.
 
 ## 11. 보안 주의
 

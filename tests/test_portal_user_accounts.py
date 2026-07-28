@@ -158,9 +158,9 @@ def make_client(**overrides) -> tuple[TestClient, FakeDb, Settings]:
         session_secret="t" * 32,
         allow_insecure_defaults=True,
         email_domain=DOMAIN,
-        # dev echo keeps SMTP out of the tests while still exercising the real
-        # fail-closed check in the route (email_configured is False here).
-        email_dev_echo=True,
+        # 'log' delivery keeps real mail out of the tests while still exercising the
+        # route's fail-closed check and the provider seam.
+        email_delivery="log",
     )
     kwargs.update(overrides)
     settings = Settings(**kwargs)
@@ -193,15 +193,58 @@ def live_code(db: FakeDb, settings: Settings, username: str, purpose: str) -> st
 # --- config endpoint --------------------------------------------------------
 
 
-def test_user_config_exposes_domain_but_never_smtp_secrets():
-    c, _, _ = make_client(smtp_host="smtp.example.com", smtp_password="hunter2")
+def test_user_config_exposes_domain_and_provider_but_no_credentials():
+    c, _, _ = make_client(email_code_pepper="super-secret-pepper")
     body = c.get(f"{AUTH}/user/config").json()
     assert body["email_domain"] == DOMAIN
     assert body["code_ttl_seconds"] == 600  # 요구사항: 10분
     assert body["code_length"] == 6
     assert body["available"] is True
-    blob = str(body)
-    assert "hunter2" not in blob and "smtp.example.com" not in blob
+    assert body["email_delivery"] == "log"
+    assert "super-secret-pepper" not in str(body)
+
+
+def test_unknown_delivery_provider_fails_closed_to_none():
+    """A typo in PORTAL_EMAIL_DELIVERY must stop the feature, not silently pick a
+    weaker path."""
+    from portal.backend.config import Settings as S
+
+    s = S.from_env({"PORTAL_EMAIL_DOMAIN": DOMAIN, "PORTAL_EMAIL_DELIVERY": "smpt"})
+    assert s.email_delivery == "none"
+    assert s.email_configured is False
+
+
+def test_log_delivery_requires_the_insecure_defaults_acknowledgement():
+    """'log' prints codes to the server log, so it is only usable together with
+    PORTAL_ALLOW_INSECURE_DEFAULTS (create_app refuses to boot otherwise)."""
+    from portal.backend.config import Settings as S
+
+    without = S.from_env({"PORTAL_EMAIL_DOMAIN": DOMAIN, "PORTAL_EMAIL_DELIVERY": "log"})
+    assert without.email_dev_echo is True and without.email_configured is False
+    with_ack = S.from_env({
+        "PORTAL_EMAIL_DOMAIN": DOMAIN, "PORTAL_EMAIL_DELIVERY": "log",
+        "PORTAL_ALLOW_INSECURE_DEFAULTS": "1",
+    })
+    assert with_ack.email_configured is True
+
+
+def test_company_provider_is_an_unimplemented_seam():
+    """The company integration is a single function to fill in; until then it must
+    raise (fail closed) rather than silently succeed."""
+    import asyncio
+
+    from portal.backend.config import Settings as S
+    from portal.backend.mailer import (
+        EmailNotConfigured, OutboundEmail, deliver_company_mail,
+    )
+
+    s = S.from_env({"PORTAL_EMAIL_DOMAIN": DOMAIN, "PORTAL_EMAIL_DELIVERY": "company"})
+    assert s.email_configured is True  # provider selected …
+    email = OutboundEmail(
+        to_addr=f"x@{DOMAIN}", subject="s", body="b", kind="verification_code", code="000000"
+    )
+    with pytest.raises(EmailNotConfigured):  # … but not implemented yet
+        asyncio.run(deliver_company_mail(s, email))
 
 
 # --- username policy (the privilege-escalation guard) -----------------------
@@ -290,8 +333,9 @@ def test_code_is_never_in_the_response_and_never_stored_plaintext():
 
 
 def test_request_code_fails_closed_without_email_delivery():
-    """No relay => no proof of mailbox ownership is possible, so signup must stop."""
-    c, _, _ = make_client(email_dev_echo=False)
+    """No delivery provider => no proof of mailbox control is possible, so signup
+    must stop rather than create an unverified account."""
+    c, _, _ = make_client(email_delivery="none")
     assert request_code(c, "test1.user").status_code == 503
 
 
@@ -331,6 +375,25 @@ def test_existing_account_is_rate_limited_identically_to_a_new_one():
     assert first_repeat.status_code == second_repeat.status_code == 429
     # …and the existing-account path is charged against the send quota.
     assert db.codes[("taken", "register")]["sends"] >= 1
+
+
+def test_resending_does_not_reset_the_cumulative_failure_budget():
+    """§8-7: a resend clears `attempts` (new code, fresh 5 tries) but must NOT clear
+    `failures`. Otherwise '5 wrong guesses -> resend -> 5 more' loops forever and the
+    attempt limit is decorative."""
+    c, db, settings = make_client(email_resend_cooldown_seconds=0)
+    request_code(c, "test1.user")
+    row = db.codes[("test1.user", "register")]
+    for _ in range(3):
+        c.post(
+            f"{AUTH}/user/register",
+            json={"username": "test1.user", "password": "userpw1234", "code": "000000"},
+        )
+    assert row["attempts"] == 3 and row["failures"] == 3
+    assert request_code(c, "test1.user").status_code == 202  # resend
+    row = db.codes[("test1.user", "register")]
+    assert row["attempts"] == 0   # new code -> fresh per-code tries
+    assert row["failures"] == 3   # …but the budget carries over
 
 
 def test_reset_for_unknown_id_is_also_rate_limited():
@@ -416,6 +479,35 @@ def test_register_code_cannot_be_replayed_as_a_reset():
     assert r.status_code == 400
 
 
+def test_bad_code_is_rejected_before_any_password_hashing():
+    """§8-9: PBKDF2 (240k iters, ~100ms) must run only AFTER the code is known to be
+    redeemable. These routes are unauthenticated, so hashing first would let anyone
+    force unbounded CPU work with a junk code."""
+    c, db, settings = make_client()
+    request_code(c, "test1.user")
+    hashed: list[str] = []
+    import portal.backend.auth as auth_mod
+
+    real = auth_mod.hash_password
+    auth_mod.hash_password = lambda pw: (hashed.append(pw), real(pw))[1]
+    try:
+        bad = c.post(
+            f"{AUTH}/user/register",
+            json={"username": "test1.user", "password": "userpw1234", "code": "000000"},
+        )
+        assert bad.status_code in (400, 429)
+        assert hashed == []  # rejected without hashing
+        # …and the good path still hashes (the guard is a filter, not a bypass).
+        good_code = live_code(db, settings, "test1.user", "register")
+        ok = c.post(
+            f"{AUTH}/user/register",
+            json={"username": "test1.user", "password": "userpw1234", "code": good_code},
+        )
+        assert ok.status_code == 201 and hashed == ["userpw1234"]
+    finally:
+        auth_mod.hash_password = real
+
+
 def test_short_password_rejected():
     c, db, settings = make_client()
     request_code(c, "test1.user")
@@ -487,3 +579,40 @@ def test_dummy_ad_login_route_is_gone():
     """The unauthenticated login path that accepted any id must not come back."""
     c, _, _ = make_client()
     assert c.post(f"{AUTH}/login/ad", json={"username": "root"}).status_code == 404
+
+
+def test_login_clears_any_pre_login_session_state():
+    """§8-11: session fixation — nothing from the pre-login session may survive the
+    privilege change."""
+    import itsdangerous  # noqa: F401  (SessionMiddleware dependency; import guards intent)
+
+    c, db, _ = make_client()
+    db.users["test1.user"] = {
+        "password_hash": hash_password("userpw1234"), "email": f"test1.user@{DOMAIN}",
+        "is_active": True,
+    }
+    # Seed a session cookie carrying an extra key, then log in over it.
+    c.post(f"{AUTH}/user/login", json={"username": "test1.user", "password": "nope"})
+    r = c.post(
+        f"{AUTH}/user/login", json={"username": "test1.user", "password": "userpw1234"}
+    )
+    assert r.status_code == 200
+    me = c.get(f"{AUTH}/me").json()["user"]
+    # Exactly the freshly-built session object — no inherited keys.
+    assert set(me) == {"username", "role", "method", "posix_username"}
+    assert me["role"] == "user"
+
+
+def test_user_sync_separates_ownership_key_from_dms_execution_identity():
+    """§8-12: `_actor` keys portal-side ownership (sync_jobs.created_by, "my jobs"),
+    `_dms_requester` is the POSIX identity DMS resolves. Collapsing them would re-key
+    ownership when posix_username is set and orphan the user's existing rows."""
+    from portal.backend.routers.user_sync import _actor, _dms_requester
+
+    plain = {"username": "test1.user"}
+    assert _actor(plain) == "test1.user"
+    assert _dms_requester(plain) == "test1.user"  # no-op until posix_username is set
+
+    mapped = {"username": "test1.user", "posix_username": "tuser"}
+    assert _actor(mapped) == "test1.user"      # ownership must NOT follow posix
+    assert _dms_requester(mapped) == "tuser"   # execution identity must

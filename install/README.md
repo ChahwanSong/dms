@@ -29,8 +29,9 @@
 ## Portal 설치 (별도)
 
 - **[portal-01-setup.md](portal-01-setup.md)** — DMS Portal (운영자/사용자 웹 UI) 설치·구성.
-- **[portal-user-auth-integration.md](portal-user-auth-integration.md)** — 사용자 로그인(아이디/비밀번호 +
-  회사메일 인증번호)의 **테스트용 Gmail → 사내 메일 서버 전환**, 향후 AD/SSO 확장 시 수정할 파일·내용.
+- **[portal-02-user-auth.md](portal-02-user-auth.md)** — 포탈 **사용자 인증(회사메일 인증 계정)** 종합
+  가이드: 설정 항목, **사내 메일 발송 연동 코드 작성법**(`deliver_company_mail()` 하나만 구현),
+  도메인·가입 허용목록 운영, 보안 불변식. 이 기능을 수정하는 코드 에이전트는 여기부터 읽는다.
 
 ## 재배포 (소스 수정 후)
 

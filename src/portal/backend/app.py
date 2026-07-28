@@ -89,9 +89,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # as "why is no code appearing", while a failed rollout is caught immediately.
     if settings.email_dev_echo and not settings.allow_insecure_defaults:
         raise RuntimeError(
-            "PORTAL_EMAIL_DEV_ECHO=true prints verification codes to the log and is "
-            "for local development only. Set PORTAL_ALLOW_INSECURE_DEFAULTS=1 to "
-            "acknowledge, or configure a real SMTP relay (PORTAL_SMTP_HOST)."
+            "PORTAL_EMAIL_DELIVERY=log prints verification codes to the server log "
+            "and is for development only. Set PORTAL_ALLOW_INSECURE_DEFAULTS=1 to "
+            "acknowledge, or switch to PORTAL_EMAIL_DELIVERY=company (see "
+            "install/portal-02-user-auth.md §5)."
         )
 
     # A malformed domain would silently mail codes to a domain nobody controls.
@@ -101,17 +102,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             f"PORTAL_EMAIL_DOMAIN is not a valid domain: {settings.email_domain!r}"
         )
 
-    # SMTP alone must not CrashLoop the portal — it is the operator console too, so
-    # the blast radius of failing closed at boot would be far worse than the feature
-    # being unavailable. Signup fails closed at request time instead (503).
-    if (
-        settings.user_signup_enabled
-        and not settings.email_configured
-        and not settings.email_dev_echo
-    ):
+    # Missing mail delivery must not CrashLoop the portal — it is the operator console
+    # too, so the blast radius of failing closed at boot would be far worse than this
+    # one feature being unavailable. Signup fails closed at request time instead (503).
+    if settings.user_signup_enabled and not settings.email_configured:
         logging.getLogger("portal").warning(
-            "user signup is enabled but email delivery is not configured "
-            "(PORTAL_SMTP_HOST / PORTAL_EMAIL_DOMAIN) — code requests will 503"
+            "user signup is enabled but email delivery is not usable "
+            "(PORTAL_EMAIL_DELIVERY=%s, PORTAL_EMAIL_DOMAIN=%r) — code requests will 503",
+            settings.email_delivery,
+            settings.email_domain,
         )
 
     # An open signup gate on a PUBLIC mail domain means "anyone with an account at that
@@ -202,8 +201,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": "ok",
             "dms_configured": settings.dms_configured,
             "db_configured": settings.db_configured,
-            # Not secret, and makes a missed Secret re-injection after `kubectl apply`
-            # visible remotely instead of only when a user tries to sign up.
+            # Not secret. NOTE: these reflect Deployment env only (domain + provider) —
+            # they say nothing about whether a delivery credential in the Secret is
+            # real or still a placeholder, so do not use them to check Secret
+            # re-injection after `kubectl apply`.
             "email_configured": settings.email_configured,
             "email_domain": settings.email_domain,
         }

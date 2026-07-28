@@ -23,7 +23,8 @@ export interface UserAuthConfig {
   resend_cooldown_seconds: number;
   min_password_len: number;
   signup_enabled: boolean;
-  email_delivery: "smtp" | "dev-echo" | "none";
+  // Which delivery provider the BFF is using (mailer.DELIVERY_*). Never credentials.
+  email_delivery: "none" | "log" | "company";
 }
 
 export type VerifyPurpose = "register" | "reset";
