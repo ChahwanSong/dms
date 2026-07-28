@@ -105,18 +105,25 @@ psql "postgresql://dms_obs:<강한-OBS-비밀번호>@postgres.example.internal:5
 `DMS_DATABASE_URL`·`DMS_OBSERVABILITY_DATABASE_URL`이 된다. **테이블 스키마는 이 스크립트가 아니라
 `dms migrate`(dms-02-core의 migration Job)가 만든다.**
 
-> **connection 사이징 (중요).** 각 DMS 프로세스는 DB URL당 bounded pool을 쓴다 — **loop 프로세스**
-> (planner·rm-worker·dm-worker·sanity·retention)는 op `DMS_DB_POOL_MAX_SIZE`(기본 **4**) + obs **3**,
-> **API**(dms-api·dms-api-internal)는 op `DMS_DB_API_POOL_MAX_SIZE`(기본 **16**) + obs 3. 두 DB를 **같은
-> 서버**에 두면 `max_connections`는 둘의 **합산 예산**이다. 소규모 배포는 stock `max_connections=100`
-> 아래에 머물지만, **매니페스트 기본 `dms-dm-worker` replicas=32에서는 상한이 ≈300+ connection**이라
-> **`max_connections=400`이 필요**하다(안 그러면 pool checkout timeout / `FATAL: too many connections`).
-> 상향 절차는 **§3.4**, pool env는 [`dms-06 §2·§3`](dms-06-configuration.md).
+> **connection 사이징 (중요).** 프로세스마다 DB URL당 bounded pool을 쓴다. 두 축을 구분하라.
+> **max_size(상한)** — loop(planner·rm-worker·dm-worker·sanity·retention)는 op `DMS_DB_POOL_MAX_SIZE`
+> (기본 **4**) + obs **3**, **API**(dms-api·dms-api-internal)는 op `DMS_DB_API_POOL_MAX_SIZE`(기본 **16**) + obs 3.
+> **min_size(floor, 안 써도 warm 유지)** — API는 `DMS_DB_POOL_MIN_SIZE`(기본 **1**)로 첫 요청 cold-connect
+> 지연을 없애고, **loop는 `DMS_DB_WORKER_POOL_MIN_SIZE`(기본 0)** 라 idle 워커는 커넥션을 **0개**로 반납하고
+> 필요할 때만 연결한다(idle 커넥션은 psycopg_pool `max_idle`≈600초 후 자동 reap). 두 DB를 **같은 서버**에 두면
+> `max_connections`는 둘의 **합산 예산**이다. pool env는 [`dms-06 §2·§3`](dms-06-configuration.md).
+>
+> **상한(ceiling) vs 실사용(steady-state)을 구분하라.** replicas=32의 *worst-case 상한*은 ≈300+(모든 풀이
+> 동시에 max까지 차는 가정, §3.4)이지만 **실측 정상상태는 ~50뿐**이다 — loop는 5초 폴링으로 op를 ~1개씩만
+> 잡고(claim/leader), min_size=0이라 **idle obs floor는 0**이다(측정: replicas=8에서 op~16 + obs~4). 즉
+> replicas=32라도 정상 부하는 stock `max_connections=100`에 든다. **`max_connections=400`(§3.4)은 정상 필요치가
+> 아니라 버스트/worst-case를 위한 안전 상한**이니, 규모를 키우거나 확실한 여유가 필요할 때 상향한다.
 
 ### 3.4 max_connections 상향 (워커 확장 시)
 
-`dms-dm-worker` replicas를 크게(매니페스트 기본 **32** 등) 쓰면 stock `max_connections=100`으로는 부족하다.
-**필요치 = Σ(프로세스별 pool 상한)**(두 DB 합산). 기본 fleet(dm-worker 32) 예시:
+`dms-dm-worker` replicas를 크게(매니페스트 기본 **32** 등) 쓸 때 **버스트/worst-case**에서 stock
+`max_connections=100`을 넘을 수 있다. **worst-case 상한(ceiling) = Σ(프로세스별 pool max_size)**(두 DB 합산).
+기본 fleet(dm-worker 32) 예시:
 
 ```
 dm-worker  32 × (op 4 + obs 3)=7  = 224
@@ -124,8 +131,14 @@ dms-api     2 × (op 16 + obs 3)=19 = 38
 api-internal 1 × 19               = 19
 planner·rm-worker·sanity·retention 4 × 7 = 28
 + superuser_reserved 3
-= ≈ 312  →  max_connections = 400  (여유 ~90)
+= ≈ 312 (worst-case 상한)  →  max_connections = 400 (여유 ~90)
 ```
+
+> **상한 ≠ 실사용.** 이건 *모든 풀이 동시에 max까지 차는* 가정의 상한이다. **실측 정상상태는 훨씬 낮다** —
+> loop는 5초 폴링으로 op를 ~1개씩만 잡고(`DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 **idle obs floor는 0**), API만
+> warm floor를 유지한다. replicas=8 실측이 op~16 + obs~4였고, replicas=32로 선형 외삽해도 **정상 부하 ≈ 50**로
+> `max_connections=100`에 든다. 따라서 **400은 정상 운영 필수치가 아니라 안전 상한**이다 — 대규모 버스트나
+> `DMS_DB_API_POOL_MAX_SIZE` 상향을 계획할 때, 혹은 확실한 여유가 필요할 때 올린다.
 
 replicas를 더 늘리면 위 식으로 재검산한다.
 

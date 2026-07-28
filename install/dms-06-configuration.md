@@ -93,7 +93,8 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `DMS_DB_POOL_MIN_SIZE` | `1` | 미리 열어두는 최소 connection 수(운영·관측 공통; 관측은 max로 clamp). |
+| `DMS_DB_POOL_MIN_SIZE` | `1` | **API** pool의 floor(미리 열어둘 최소 connection). 첫 요청 cold-connect 지연을 없앤다. loop에는 적용되지 않는다(아래 `WORKER` 항목). 관측은 max로 clamp. |
+| `DMS_DB_WORKER_POOL_MIN_SIZE` | `0` | **loop 프로세스**(planner/rm-worker/dm-worker/sanity/retention) pool의 floor. 기본 `0` — idle 워커는 커넥션을 0개로 반납하고 필요시에만 연결(idle은 `max_idle`≈600초 후 reap). 워커를 많이 띄울 때 idle obs floor(=replica당 1개)를 없애 예산을 절약한다. cold-connect 지연이 문제면 `1`로 올린다. |
 | `DMS_DB_POOL_MAX_SIZE` | `4` | loop 프로세스(planner/rm-worker/dm-worker/sanity/retention)의 운영 DB pool 최대치. 단일 스레드라 작게 둔다. |
 | `DMS_DB_API_POOL_MAX_SIZE` | `16` | API 프로세스의 운영 DB pool 최대치. API sync-handler 스레드풀이 이 값으로 cap된다. |
 | `DMS_DB_OBSERVABILITY_POOL_MAX_SIZE` | `3` | 관측 DB pool 최대치(쓰기 부하 가벼워 작게). |
@@ -101,7 +102,7 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 | `DMS_DB_STATEMENT_TIMEOUT_MS` | `30000` | pooled connection `statement_timeout`(ms). runaway 쿼리 강제 종료. |
 | `DMS_DB_IDLE_IN_TXN_TIMEOUT_MS` | `60000` | pooled connection `idle_in_transaction_session_timeout`(ms). 누수 트랜잭션 강제 종료. |
 
-천장 공식: `서버 PG connection ≤ Σ프로세스(op_max + obs_max)`. 기본값 기준 API×2 + loop 5개 = `2×(16+3) + 5×(4+3) = 73 < 100`. 동시성을 키울 땐 `DMS_DB_API_POOL_MAX_SIZE`와 PostgreSQL `max_connections`를 **함께** 올린다([`dms-02-core.md`](dms-02-core.md) DB 섹션). migration/대량 유지보수는 unpooled로 실행되어 위 timeout 영향을 받지 않는다.
+**천장(ceiling) 공식**: `서버 PG connection ≤ Σ프로세스(op_max + obs_max)`. 기본값 기준 API×2 + loop 5개 = `2×(16+3) + 5×(4+3) = 73 < 100`. 이는 *모든 풀이 동시에 max까지 차는* 상한이며, **실측 정상상태는 훨씬 낮다** — loop는 `--interval`(5초) 폴링으로 op를 ~1개씩만 잡고, `DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 idle obs floor가 0이다(min_size=0은 idle 커넥션을 reap해 커넥션 수를 워커 수와 사실상 분리한다). 동시성을 키울 땐 `DMS_DB_API_POOL_MAX_SIZE`와 PostgreSQL `max_connections`를 **함께** 올린다([`dms-02-core.md`](dms-02-core.md) DB 섹션, 워커 대량 확장은 [`dms-01 §3.4`](dms-01-prerequisites.md)). migration/대량 유지보수는 unpooled로 실행되어 위 timeout 영향을 받지 않는다.
 
 ---
 
