@@ -56,7 +56,7 @@ def _register_ready_storage_mapping(repository: DmsRepository) -> None:
         "agent_observed": {
             "dm_candidates": [{"cluster_name": "cluster-a", "node_name": "dm-1"}],
         },
-        "readiness": {"data_management": "Ready", "resource_management": "Ready"},
+        "readiness": {"data_management": "Ready", "inventory": "Ready"},
     }
     repository.upsert_storage_mapping(
         StorageMappingInput(

@@ -6,7 +6,6 @@ SILENT truncation while keeping the polled paths cheap:
 
   - /runs single-fetches high caps (active 1000 / stale 2000) and flags each section
     `truncated` ONLY when the cap was actually hit.
-  - /storage-node-matrix single-fetches the bounded mapping set (limit 10000).
   - /requests (data jobs = GROWING history) keeps a CAPPED page and returns
     {jobs, total, truncated}; the exact total comes from the uncapped COUNT summary
     and is fetched ONLY when the page is truncated (never a fetch-all).
@@ -23,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from portal.backend import deps, security
 from portal.backend.config import Settings
-from portal.backend.routers.dashboard import _STORAGE_LIMIT, dashboard_router
+from portal.backend.routers.dashboard import dashboard_router
 
 DASH = "/api/operator/dashboard"
 
@@ -118,16 +117,6 @@ def make_client(dms: FakeDms) -> TestClient:
     }
     return TestClient(app)
 
-
-def _csi(name: str) -> dict[str, Any]:
-    return {
-        "storage_name": name, "cluster_name": "c",
-        "backend_template": {"backend_type": "k8s-csi"},
-        "sanity_status": "Ready",
-        "sanity_result": {"mutation_observed": {
-            "mode": "kubectl", "reachable": True, "can_mutate": True,
-        }},
-    }
 
 
 def _job(i: int, op: str = "data.sync", state: str = "Running") -> dict[str, Any]:

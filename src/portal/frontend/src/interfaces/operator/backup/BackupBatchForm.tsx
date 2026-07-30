@@ -90,8 +90,8 @@ export default function BackupBatchForm({
     operatorApi.storage
       .list()
       // Data backup runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI
-      // mappings (ceph-csi/weka-csi/gpfs-csi) are namespace-quota only and can't be
-      // a backup src/dst, so exclude them from the storage candidates.
+      // mappings (ceph-csi/weka-csi/gpfs-csi) are not host-mounted on the DM agents
+      // and can't be a backup src/dst, so exclude them from the storage candidates.
       .then(
         (list) =>
           alive &&

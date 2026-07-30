@@ -37,7 +37,7 @@ export default function SyncForm({ onCreated }: { onCreated: () => void }) {
     operatorApi.storage
       .list()
       // sync runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI mappings
-      // are namespace-quota only and can't be a sync src/dst.
+      // are not host-mounted on the DM agents and can't be a sync src/dst.
       .then((list) =>
         alive &&
           setStorages(

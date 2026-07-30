@@ -34,8 +34,8 @@ export default function RmForm({ onCreated }: { onCreated: () => void }) {
     let alive = true;
     operatorApi.storage
       .list()
-      // rm runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI mappings are
-      // namespace-quota only and can't be an rm target.
+      // rm runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI mappings
+      // are not host-mounted on the DM agents and can't be an rm target.
       .then((list) =>
         alive &&
           setStorages(

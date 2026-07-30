@@ -74,8 +74,8 @@ export default function ScanBatchForm({
     operatorApi.storage
       .list()
       // Scan runs on filesystem backends only (cephfs/gpfs/wekafs); k8s CSI
-      // mappings are namespace-quota only and can't be a scan target, so exclude
-      // them from the storage candidates.
+      // mappings are not host-mounted on the DM agents, so they can't be a scan
+      // target — exclude them from the storage candidates.
       .then(
         (list) =>
           alive &&
