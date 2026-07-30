@@ -126,6 +126,18 @@ RM(Resource Management) 기능이 제거된 릴리스로 처음 올리는 **기�
 정리한다. **DMS는 이 정리를 자동으로 하지 않는다** — 특히 DB 삭제는 되돌릴 수 없으므로 운영자가
 의도적으로 실행해야 한다.
 
+> **순서 — 이 릴리스에 한해 §4를 §2·§3보다 먼저 한다.**
+> - **§4.1을 §2보다 먼저**: §2.1의 `grep -E "/dms:"` 는 아직 살아 있는 `dms-rm-worker`도 잡아내고,
+>   새 이미지에는 `dms rm-worker` 서브커맨드가 없어 그대로 교체하면 CrashLoopBackOff에 빠진다.
+> - **dms-api를 포탈보다 먼저**: 포탈 BFF는 스토리지 매핑 쓰기를 `/api/v1/storage-mappings`
+>   (신규 경로)로 호출한다. 포탈을 먼저 올리면 옛 dms-api가 그 경로를 모르므로 스토리지 인벤토리의
+>   생성·수정·삭제·재검사가 **404**가 된다(읽기는 `/operations/storage-mappings`라 영향 없음).
+>   반대 순서(dms-api 먼저)는 안전하다 — 옛 포탈이 호출하던 `/api/v1/resource-management/...`가
+>   404가 되지만, 이는 포탈을 올리는 짧은 구간에만 해당한다. 두 이미지를 연달아 교체한다.
+> - 멀티 클러스터에 `managed-rm-worker.yaml`로 띄운 `dms-rm-worker-local`이 있으면 그것도
+>   지운다. 남아 있으면 `recovery-sweeper` 리더 리스를 계속 잡아 dm-worker의 복구 스윕을 굶긴다:
+>   `kubectl --context <managed> -n <ns> delete deploy/dms-rm-worker-local --ignore-not-found`
+
 ### 4.1 워크로드 제거 (필수)
 
 새 매니페스트에는 이 오브젝트들이 더 이상 없고, `kubectl apply`는 사라진 오브젝트를 지우지 않는다:
@@ -218,7 +230,10 @@ DELETE FROM resources
 ### 4.3 스토리지 매핑 필드 정리 (선택)
 
 기존 매핑의 `backend_template`에 남아 있는 RM 전용 키(`rm_worker_nodes`·`ssh_host`·`command_runner`·
-`quota_scope`·`mutation_mode`·`control_host` 등)는 더 이상 읽히지 않으므로 그대로 둬도 무해하다.
+`command_timeout_seconds`·`quota_scope`·`fileset_name_template`·`mutation_mode`·`control_host`·
+`weka_profile`·`weka_credentials`)는 더 이상 읽히지 않는다. **`weka_credentials`는 예외적으로
+정리를 권장한다** — 아무도 쓰지 않는 자격증명이 DB에 남기 때문이다(응답에서는 계속 redaction된다).
+나머지는 그대로 둬도 무해하다.
 정리하고 싶으면 PATCH로 **전체 `backend_template`을 round-trip**하면서 뺀다
 ([../docs/api/storage-mappings.md](../docs/api/storage-mappings.md) §5).
 
@@ -227,8 +242,8 @@ DELETE FROM resources
 이미지 교체 후 문제가 있으면 직전 리비전으로 되돌린다.
 
 ```bash
-# DMS 코어 (교체한 Deployment 전부)
-for d in dms-api dms-planner dms-dm-worker dms-retention dms-sanity-reconciler; do
+# DMS 코어 (교체한 Deployment 전부 — §2.1의 목록과 반드시 동일하게)
+for d in dms-api dms-api-internal dms-planner dms-dm-worker dms-retention dms-sanity-reconciler; do
   kubectl -n dms rollout undo deploy/$d
 done
 # Portal

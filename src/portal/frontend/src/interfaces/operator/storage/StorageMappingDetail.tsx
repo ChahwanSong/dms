@@ -274,10 +274,6 @@ function configItems(m: StorageMapping): KV[] {
   if (mp) items.push({ label: "마운트 (mount_path)", value: mp, mono: true, span: true });
   const fsName = str("filesystem_name");
   if (fsName) items.push({ label: "파일시스템", value: fsName, mono: true });
-  const runner = str("command_runner");
-  if (runner) items.push({ label: "실행 방식", value: runner });
-  const tmpl = str("fileset_name_template");
-  if (tmpl) items.push({ label: "fileset 템플릿", value: tmpl, mono: true });
   const drv = str("csi_driver");
   if (drv) items.push({ label: "csi driver", value: drv, mono: true });
   return items;

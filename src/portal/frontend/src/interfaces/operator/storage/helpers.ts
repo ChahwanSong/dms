@@ -64,14 +64,13 @@ export function isForPv(m: StorageMapping): boolean {
 //
 // cluster_name (fs+csi) and storage_class_name (csi) live in the template for a single
 // edit surface, but DMS reads them from the TOP-LEVEL mapping fields; the form derives
-// those on submit. The weka_credentials.password secret stays blank; on edit DMS shows
-// "***" and merges the stored secret back when left blank/unchanged.
+// those on submit.
 export const BACKEND_SKELETONS: Record<string, Record<string, unknown>> = {
-  // ---- filesystem (fs): only cephfs/wekafs/gpfs drive a real DMS fs adapter ----
-  // CephFS is the LEAN backend: CephFsBackendTemplate reads ONLY these 6 keys. It
-  // ignores csi_driver/storage_class_name/command_runner/command_timeout_seconds/
-  // filesystem_name/data_network — CephFS executor mode/timeout come from the global
-  // DMS_FILESYSTEM_MUTATION_MODE / DMS_FILESYSTEM_EXEC_* settings, not the template.
+  // ---- filesystem (fs): cephfs/wekafs/gpfs are the host-mounted data-job targets ----
+  // Only the keys DMS actually reads are offered. The RM-era execution keys
+  // (rm_worker_nodes/ssh_host/command_runner/command_timeout_seconds/quota_scope/
+  // fileset_name_template/weka_profile/weka_credentials) are gone with resource
+  // management — nothing reads them any more, so the form must not collect them.
   cephfs: {
     backend_type: "cephfs",
     cluster_name: "cluster-a",
@@ -79,33 +78,21 @@ export const BACKEND_SKELETONS: Record<string, Record<string, unknown>> = {
     managed_root: "/mnt/cephfs/dms",
   },
   // GPFS reads cluster_name only from the top-level field, not the template; it is
-  // kept here so the form derives the top-level cluster_name. command_runner default
-  // is "ssh-host-exec" for both gpfs and wekafs (runs against an agent Ready node);
-  // set "local" to run on the worker.
+  // kept here so the form derives the top-level cluster_name. filesystem_name is the
+  // GPFS device the DM worker addresses.
   gpfs: {
     backend_type: "gpfs",
     cluster_name: "cluster-a",
     filesystem_name: "gpfs0",
     mount_path: "/gpfs/gpfs0",
     managed_root: "/gpfs/gpfs0/dms",
-    fileset_name_template: "dms-{directory_name}",
-    command_runner: "ssh-host-exec",
-    command_timeout_seconds: 60,
   },
-  // WekaFS REQUIRES weka_credentials{username,password} (SECRET) for every operation
-  // — DMS fails closed without them (it does NOT read ambient WEKA_* env). command_runner
-  // default is "ssh-host-exec" (runs against an agent Ready node); set "local" to run on
-  // the worker. organization defaults to "0".
   wekafs: {
     backend_type: "wekafs",
     cluster_name: "cluster-a",
     filesystem_name: "default",
     mount_path: "/mnt/weka",
     managed_root: "/mnt/weka/dms",
-    command_runner: "ssh-host-exec",
-    command_timeout_seconds: 60,
-    weka_profile: "default",
-    weka_credentials: { organization: "0", username: "dms-svc", password: "" },
   },
   // ---- k8s CSI (csi): a PVC↔PVC data-sync target on a CSI StorageClass ----
   // NOTE: 'ceph-csi'/'gpfs-csi'/'weka-csi' are NOT recognized backend_type values in the
@@ -227,19 +214,6 @@ export const FIELD_DOCS: Record<string, FieldDoc[]> = {
       desc: "GPFS 파일시스템(device) 이름. mm* 명령 대상. GPFS는 등록 필수",
       default: "—",
     },
-    {
-      name: "fileset_name_template",
-      required: false,
-      desc: "fileset 이름 템플릿. {directory_name}·{storage_name} 치환",
-      default: '"dms-{directory_name}"',
-    },
-    {
-      name: "command_runner",
-      required: false,
-      desc: "명령 실행 방식: 'ssh-host-exec' | 'local'",
-      default: '"ssh-host-exec"',
-    },
-    { name: "command_timeout_seconds", required: false, desc: "명령 타임아웃(초)", default: "60" },
   ],
   wekafs: [
     { name: "backend_type", required: true, desc: "백엔드 타입 식별자", default: '"wekafs"' },
@@ -247,26 +221,11 @@ export const FIELD_DOCS: Record<string, FieldDoc[]> = {
     { name: "mount_path", required: true, desc: "WEKA 마운트 경로", default: "—" },
     { name: "managed_root", required: true, desc: "관리 루트 (mount_path 하위)", default: "—" },
     {
-      name: "weka_credentials",
-      required: true,
-      secret: true,
-      desc: "WEKA 자격증명 {organization, username, password}. 모든 weka 작업에 필수(시크릿)",
-      default: "organization=\"0\"",
-    },
-    {
       name: "filesystem_name",
       required: false,
       desc: "WEKA 파일시스템 이름",
       default: "storage_name",
     },
-    {
-      name: "command_runner",
-      required: false,
-      desc: "명령 실행 방식: 'ssh-host-exec' | 'local'",
-      default: '"ssh-host-exec"',
-    },
-    { name: "command_timeout_seconds", required: false, desc: "명령 타임아웃(초)", default: "60" },
-    { name: "weka_profile", required: false, desc: "weka CLI '--profile' 이름", default: "—" },
   ],
   "ceph-csi": CSI_FIELD_DOCS,
   "gpfs-csi": CSI_FIELD_DOCS,

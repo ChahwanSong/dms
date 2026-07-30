@@ -46,7 +46,7 @@
         "csi_driver": "rook-ceph.cephfs.csi.ceph.com"
       },
       "cluster_name": "cluster-a",
-      "storage_class_name": "cephfs-rwx"
+      "storage_class_name": "cephfs-csi"
     },
     {
       "storage_name": "gpfs-csi-a",

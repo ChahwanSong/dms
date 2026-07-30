@@ -195,8 +195,13 @@ CURL_MTLS=(--cert $CERTS/operator.crt --key $CERTS/operator.key --cacert $CERTS/
 | `managed_root` | 파일시스템 **필수** | DMS가 관리하는 루트(반드시 `mount_path` 하위). 생략 시 등록 `422` |
 | `filesystem_name` | **gpfs 필수** | 대상 device(예 `gpfs0`). WEKA는 선택(생략 시 `storage_name`) |
 | `csi_driver` | 선택(CSI는 사실상 필수) | live StorageClass provisioner와 **일치**해야 한다. 생략 시 `csi_driver_matches` sanity 제외 |
-| `weka_profile` | 선택(weka) | `weka --profile <name>`(멀티 클러스터) |
-| `weka_credentials` | 선택(weka) | `{username, password, org}`. 응답에서 `password`만 redaction |
+| `data_network` | 선택 | 데이터 이동에 쓸 네트워크 이름. DM 워커풀 힌트로 전달된다 |
+
+> `weka_credentials`·`weka_profile`·`command_runner`·`command_timeout_seconds`·
+> `fileset_name_template`·`quota_scope`·`rm_worker_nodes`·`ssh_host`는 RM(파일시스템 프로비저닝·
+> 쿼터) 전용이었고 **더 이상 어떤 코드도 읽지 않는다**. 새 매핑에는 넣지 말고, 기존 매핑에 남아
+> 있다면 [redeploy.md §4.3](redeploy.md#43-스토리지-매핑-필드-정리-선택)으로 정리한다.
+> 특히 `weka_credentials`는 쓰이지 않는 자격증명이 DB에 남는 것이므로 정리를 권장한다.
 
 ### 4.1 CephFS
 

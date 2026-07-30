@@ -157,7 +157,7 @@ export default function StorageMappingForm({
     }
 
     // Enforce the required fields marked in FIELD_DOCS for this backend_type. A
-    // string field must be present and non-blank; object fields (e.g. weka_credentials)
+    // string field must be present and non-blank; object fields
     // only need to be present (DMS validates their contents server-side).
     const missing = fieldDocs
       .filter((f) => f.required)
