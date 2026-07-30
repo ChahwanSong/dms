@@ -207,7 +207,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # re-injection after `kubectl apply`.
             "email_configured": settings.email_configured,
             "email_domain": settings.email_domain,
+            "cluster_name": settings.cluster_name,
         }
+
+    @app.get("/api/config")
+    def app_config() -> dict[str, object]:
+        """Public, pre-auth app chrome config.
+
+        The SPA needs the cluster name on the login screen too (before any session
+        exists), so this cannot live behind auth or on /api/auth/me. Deliberately
+        holds only non-secret display values.
+        """
+        return {"cluster_name": settings.cluster_name}
 
     app.include_router(auth_router(settings))
     # Role-separated interface APIs (each gated by role inside the router).

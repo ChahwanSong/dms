@@ -27,6 +27,15 @@ export interface UserAuthConfig {
   email_delivery: "none" | "log" | "company";
 }
 
+// Pre-auth app chrome config (GET /api/config). Non-secret display values only.
+export interface AppConfig {
+  cluster_name: string;
+}
+
+export const appApi = {
+  config: () => request<AppConfig>("/api/config"),
+};
+
 export type VerifyPurpose = "register" | "reset";
 
 // Durations are RELATIVE seconds, not absolute timestamps, so a skewed client

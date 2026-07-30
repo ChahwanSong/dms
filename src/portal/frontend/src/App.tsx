@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { auth, type User } from "./api";
+import { appApi, auth, type User } from "./api";
 import Login from "./pages/Login";
 import OperatorApp from "./interfaces/operator/OperatorApp";
 import UserApp from "./interfaces/user/UserApp";
@@ -10,6 +10,9 @@ import Loading from "./components/Loading";
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  // Which cluster this portal serves. Fetched once here (pre-auth) so both the login
+  // screen and the two logged-in shells show the same value from one request.
+  const [clusterName, setClusterName] = useState("");
 
   useEffect(() => {
     auth
@@ -17,6 +20,11 @@ export default function App() {
       .then((res) => setUser(res.user))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
+    // Chrome-only: a failure must not block login, so it degrades to "no label".
+    appApi
+      .config()
+      .then((c) => setClusterName(c.cluster_name || ""))
+      .catch(() => setClusterName(""));
   }, []);
 
   function logout() {
@@ -28,11 +36,11 @@ export default function App() {
   }
 
   if (!user) {
-    return <Login onLoggedIn={setUser} />;
+    return <Login onLoggedIn={setUser} clusterName={clusterName} />;
   }
 
   if (user.role === "operator") {
-    return <OperatorApp user={user} onLogout={logout} />;
+    return <OperatorApp user={user} onLogout={logout} clusterName={clusterName} />;
   }
-  return <UserApp user={user} onLogout={logout} />;
+  return <UserApp user={user} onLogout={logout} clusterName={clusterName} />;
 }

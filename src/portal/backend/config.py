@@ -103,6 +103,11 @@ class Settings:
     session_https_only: bool = True
     # Allow booting with the dev-default session secret (local dev only).
     allow_insecure_defaults: bool = False
+    # 이 포탈이 담당하는 클러스터 이름. 로그인 화면과 로그인 후 상단 타이틀 옆에 표시된다.
+    # 여러 클러스터에 포탈을 각각 띄웠을 때 "지금 보고 있는 곳이 어디인지"를 화면에서 바로
+    # 알 수 있게 하는 것이 목적이므로, 설치 시 환경마다 다른 값을 넣는다.
+    # 빈 값이면 아무것도 표시하지 않는다(기능 off).
+    cluster_name: str = ""
     # Operator credential store (PORTAL_OPERATOR_USERS). Defaults to admin/admin1234.
     # id/password login is operator-only; multiple entries == multiple operators.
     operator_users: dict[str, str] = field(
@@ -261,6 +266,7 @@ class Settings:
             allow_insecure_defaults=_env_bool(
                 env.get("PORTAL_ALLOW_INSECURE_DEFAULTS"), False
             ),
+            cluster_name=env.get("PORTAL_CLUSTER_NAME", defaults.cluster_name).strip(),
             operator_users=operator_users or defaults.operator_users,
             admin_token=env.get("PORTAL_ADMIN_TOKEN") or None,
             dms_api_url=env.get("PORTAL_DMS_API_URL") or None,

@@ -65,6 +65,7 @@ ClusterIP). 근거·구조는 [`dms-06 §1·§8`](dms-06-configuration.md), 매�
 | **DMS shared token**(필수) | DMS `DMS_AUTH_SHARED_TOKEN`과 **동일 값** | `PORTAL_DMS_TOKEN` |
 | Portal client cert / key(선택, 외부 mTLS 직결 시만 — §6.3) | `client.crt` / `client.key` | Secret `portal-dms-mtls` → `/etc/portal/tls` |
 | DMS audit actor 기본값 | `operator` | `PORTAL_DMS_ACTOR`(요청마다 로그인 운영자로 override) |
+| **클러스터 이름**(화면 표시) | `테스트베드` / `운영` / `dms-prod` 등 | `PORTAL_CLUSTER_NAME`(§6.1 — 환경마다 다르게) |
 | 세션 서명 시크릿 | `openssl rand -hex 32` 출력 | `PORTAL_SESSION_SECRET` |
 | 운영자 계정 | `admin:<strong-pw>,ops2:<strong-pw>` | `PORTAL_OPERATOR_USERS` |
 | 운영자 계정 관리 토큰(선택) | `openssl rand -hex 24` 출력 | `PORTAL_ADMIN_TOKEN`(§10) |
@@ -155,6 +156,8 @@ cp src/portal/deploy/kubernetes/portal.yaml /tmp/dms-portal.yaml
   - `PORTAL_SESSION_HTTPS_ONLY` — **운영(TLS 서빙)이면 `"true"`**(기본값·fail-closed). 평문 HTTP NodePort로만
     노출하는 경우에 한해 `"false"`.
   - `PORTAL_DMS_ACTOR` — DMS audit 기본 actor(BFF가 요청마다 로그인 운영자 username으로 override).
+  - `PORTAL_CLUSTER_NAME` — **이 포탈이 담당하는 클러스터 이름.** manifest 기본값은
+    `CHANGE_ME_CLUSTER_NAME`이므로 **설치 시 반드시 환경에 맞게 바꾼다**(예: `운영`, `테스트베드`).
 
 전체 env 변수는 `src/portal/backend/config.py`가 정의한다. 주요 항목:
 
@@ -164,6 +167,7 @@ cp src/portal/deploy/kubernetes/portal.yaml /tmp/dms-portal.yaml
 | `PORTAL_DMS_VERIFY_TLS` | `true` | DMS가 https일 때 서버 cert 검증(운영 mTLS에서 `true` 유지, CA로 검증). |
 | `PORTAL_DMS_TOKEN` | (없음) | **필수** shared bearer token(내부 API의 shared-token 게이트, DMS `DMS_AUTH_SHARED_TOKEN`과 동일 값). Secret으로 주입. |
 | `PORTAL_DMS_ACTOR` | `operator` | DMS audit 기본 actor. |
+| `PORTAL_CLUSTER_NAME` | (빈 값) | 로그인 화면·상단 타이틀 옆에 칩으로 표시되는 **클러스터 이름**. manifest는 `CHANGE_ME_CLUSTER_NAME`이므로 설치 시 교체한다. 빈 값이면 미표시. 여러 환경의 포탈을 동시에 열어두었을 때 혼동을 막는 용도다. |
 | `PORTAL_SESSION_SECRET` | (dev 기본값) | 세션 쿠키 서명키. Secret으로 주입. dev 기본값이면 기동 거부. |
 | `PORTAL_SESSION_HTTPS_ONLY` | `true` | 세션 쿠키 Secure 플래그. 평문 HTTP 노출이면 `false`. |
 | `PORTAL_OPERATOR_USERS` | `admin:admin1234` | 운영자 ID/PW 저장소. Secret으로 주입. `user:pw,user2:pw2`. |

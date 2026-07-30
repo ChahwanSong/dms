@@ -78,7 +78,13 @@ function StorageMark() {
   );
 }
 
-export default function Login({ onLoggedIn }: { onLoggedIn: (u: User) => void }) {
+export default function Login({
+  onLoggedIn,
+  clusterName,
+}: {
+  onLoggedIn: (u: User) => void;
+  clusterName?: string;
+}) {
   const [tab, setTab] = useState<Tab>("user");
   const [mode, setMode] = useState<Mode>("login");
   const [username, setUsername] = useState("");
@@ -346,6 +352,12 @@ export default function Login({ onLoggedIn }: { onLoggedIn: (u: User) => void })
           <div className="login-brand">
             <StorageMark />
             <span className="login-word">DMS<span className="login-word-sub">Portal</span></span>
+            {clusterName && (
+              <span className="cluster-chip" title={`클러스터: ${clusterName}`}>
+                <i className="cluster-chip-dot" />
+                {clusterName}
+              </span>
+            )}
           </div>
           <p className="login-eyebrow">DATA MANAGEMENT · CONTROL PLANE</p>
         </header>

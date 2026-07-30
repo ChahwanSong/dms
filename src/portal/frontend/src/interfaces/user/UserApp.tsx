@@ -29,15 +29,22 @@ const ICONS: Record<Section, ReactNode> = {
 export default function UserApp({
   user,
   onLogout,
+  clusterName,
 }: {
   user: User;
   onLogout: () => void;
+  clusterName?: string;
 }) {
   const [section, setSection] = useState<Section>("sync");
 
   return (
     <div className="app app-fixed">
-      <TopBar user={user} onLogout={onLogout} title="DMS Portal · 사용자" />
+      <TopBar
+        user={user}
+        onLogout={onLogout}
+        title="DMS Portal · 사용자"
+        clusterName={clusterName}
+      />
       <div className="layout">
         <nav className="sidebar">
           {NAV.map((item) => (

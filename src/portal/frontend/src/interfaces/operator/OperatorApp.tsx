@@ -65,9 +65,11 @@ const ICONS: Partial<Record<Section, ReactNode>> = {
 export default function OperatorApp({
   user,
   onLogout,
+  clusterName,
 }: {
   user: User;
   onLogout: () => void;
+  clusterName?: string;
 }) {
   const [section, setSection] = useState<Section>("dashboard");
   // Parent nav items with children start EXPANDED (sub-items 조치 필요 · 액티비티
@@ -106,6 +108,7 @@ export default function OperatorApp({
         user={user}
         onLogout={onLogout}
         title="DMS Portal · 운영자 콘솔"
+        clusterName={clusterName}
         onTitleClick={() => go("dashboard")}
       />
       <div className="layout">

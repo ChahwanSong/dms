@@ -6,12 +6,17 @@ export default function TopBar({
   user,
   onLogout,
   title,
+  clusterName,
   showUser = false,
   onTitleClick,
 }: {
   user: User;
   onLogout: () => void;
   title: string;
+  // Which cluster this portal serves. Rendered as its own chip rather than being
+  // concatenated into `title` so it reads as an environment marker, not part of the
+  // product name — the point is to notice at a glance which cluster you are on.
+  clusterName?: string;
   // Default: the bar shows only the title + role badge, and the caller renders the
   // user/logout at the bottom-left (operator → sidebar foot, user → app foot). Pass
   // true to put them back in the bar.
@@ -34,6 +39,12 @@ export default function TopBar({
         </button>
       ) : (
         <span className="brand">{title}</span>
+      )}
+      {clusterName && (
+        <span className="cluster-chip" title={`클러스터: ${clusterName}`}>
+          <i className="cluster-chip-dot" />
+          {clusterName}
+        </span>
       )}
       <span className={`badge badge-${user.role}`}>{roleLabel}</span>
       {showUser && (

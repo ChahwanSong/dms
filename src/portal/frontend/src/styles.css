@@ -91,6 +91,35 @@ body {
   letter-spacing: 0.5px;
 }
 
+/* Which cluster this portal serves. Deliberately NOT styled like part of the
+   product name: it is an environment marker, so it reads as a separate token you
+   can spot at a glance when several portals are open side by side. */
+.cluster-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid rgba(125, 211, 252, 0.32);
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.1);
+  color: #bae6fd;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cluster-chip-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.75);
+}
+
 h1.brand {
   margin: 0 0 1.5rem;
   text-align: center;

@@ -82,6 +82,12 @@ spec:
             # logged-in operator's username.
             - name: PORTAL_DMS_ACTOR
               value: "operator"
+            # 이 포탈이 담당하는 클러스터 이름. 로그인 화면과 로그인 후 상단 타이틀 옆에
+            # 칩으로 표시된다. 여러 환경(운영/스테이징/테스트베드)에 포탈을 각각 띄웠을 때
+            # 어느 클러스터를 보고 있는지 화면에서 바로 구분하기 위한 것이므로,
+            # **설치 시 환경마다 다른 값으로 바꾼다**. 빈 값이면 아무것도 표시하지 않는다.
+            - name: PORTAL_CLUSTER_NAME
+              value: "CHANGE_ME_CLUSTER_NAME"
             # --- end-user accounts (회사메일 인증) -------------------------
             # The id a user signs up with is the local part of their company mail,
             # and the verification code goes to <id>@PORTAL_EMAIL_DOMAIN. Set this
