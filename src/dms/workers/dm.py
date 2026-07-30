@@ -71,6 +71,8 @@ class DMWorkerRuntime:
             self.repository.expire_stale_preview_jobs(actor=self.worker_id)
             self.repository.close_superseded_preview_runs(actor=self.worker_id)
             self.repository.close_orphaned_stuck_runs(actor=self.worker_id)
+        if self.repository.scheduling_blocked():
+            return 0
         # Atomic SKIP-LOCKED claim: each dm-worker grabs a DISTINCT oldest plan, so idle
         # workers never contend on the same one (no thundering herd, no wasted attempts).
         try:
@@ -81,7 +83,7 @@ class DMWorkerRuntime:
                 lease_seconds=self.lease_seconds,
             )
         except SchedulingBlocked:
-            raise
+            return 0
         if claimed is None:
             return 0
         plan, run_id = claimed

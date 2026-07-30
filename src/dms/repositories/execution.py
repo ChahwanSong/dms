@@ -276,11 +276,11 @@ class ExecutionMixin:
             row = connection.execute(
                 f"""
                 SELECT plan_id FROM plans
-                WHERE worker_role = ? AND status = ?
+                WHERE status = ?
                 ORDER BY created_at ASC
                 LIMIT 1{skip_locked}
                 """,
-                (worker_role.value, LifecycleState.PLANNED.value),
+                (LifecycleState.PLANNED.value,),
             ).fetchone()
             if not row:
                 return None

@@ -157,22 +157,48 @@ kubectl --context <target> delete clusterrole        dms-remote-resource-managem
 DELETE FROM agent_node_current WHERE worker_role = 'RM';
 ```
 
-**(b) 선택 — 남은 RM 잔재 정리.** 필요 없다고 판단되면 지운다(이력 감사 목적이면 남겨도 무해하다):
+**(b) 사실상 필수 — 멈춰 있는 RM `run`은 drain/resume을 영구히 막는다.** `resume_blockers()`와
+`drain_status().ready_for_shutdown`은 `runs`를 **worker_role 구분 없이** 스캔한다
+(`src/dms/query.py`). 따라서 rm-worker가 apply 도중 죽어 남긴 `RecoveryNeeded` /
+`UnknownAfterSideEffect` / `BackendApplyFailed` run이 하나라도 있으면, RM이 사라진 뒤에도
+`dms-planned-shutdown.sh`는 타임아웃까지 기다리다 `exit 3`으로 끝나고 `:resume`은 계속 blocker를
+보고한다. **더 이상 이 run을 해소할 워커가 없으므로** 반드시 정리한다.
+
+먼저 남아 있는지 확인한다:
+
+```sql
+SELECT r.run_id, r.state, q.operation
+FROM runs r JOIN requests q ON q.request_id = r.request_id
+WHERE r.state IN ('RecoveryNeeded','UnknownAfterSideEffect','BackendApplyFailed')
+  AND (q.operation LIKE 'filesystem.%' OR q.operation LIKE 'kubernetes.namespace_quota.%');
+```
+
+한 건이라도 나오면 아래 (c)를 실행하거나, 이력을 남기고 싶으면 최소한 run만 종료 상태로 옮긴다:
+
+```sql
+UPDATE runs SET state = 'Cancelled', updated_at = <now-iso>
+WHERE state IN ('RecoveryNeeded','UnknownAfterSideEffect','BackendApplyFailed')
+  AND request_id IN (SELECT request_id FROM requests
+    WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%');
+```
+
+**(c) 선택 — 남은 RM 행 완전 삭제.** 이력 감사가 필요 없으면 지운다:
 
 ```sql
 -- 기본 쿼터 정책 테이블(더 이상 쓰이지 않음)
 DROP TABLE IF EXISTS default_quota_policies;
 
--- 레거시 RM operation/resource 행 (requests → plans → runs → results 순서 주의)
-DELETE FROM results WHERE run_id IN (
-  SELECT run_id FROM runs WHERE plan_id IN (
-    SELECT plan_id FROM plans WHERE request_id IN (
-      SELECT request_id FROM requests
-      WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%')));
-DELETE FROM runs WHERE plan_id IN (
-  SELECT plan_id FROM plans WHERE request_id IN (
-    SELECT request_id FROM requests
-    WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%'));
+-- 레거시 RM operation/resource 행.
+-- 주의: results/plans/runs는 모두 requests(request_id)를 FK로 참조하므로 requests를 마지막에
+-- 지운다. 그리고 results는 반드시 **request_id 기준**으로 지워야 한다 — planner가 거부한
+-- 요청(Conflict/Rejected)과 인증 실패 기록은 plan_id·run_id가 NULL인 results 행을 남기므로
+-- run_id 기준으로 지우면 그 행들이 살아남아 마지막 DELETE가 FK 위반으로 실패한다.
+DELETE FROM results WHERE request_id IN (
+  SELECT request_id FROM requests
+  WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%');
+DELETE FROM runs WHERE request_id IN (
+  SELECT request_id FROM requests
+  WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%');
 DELETE FROM plans WHERE request_id IN (
   SELECT request_id FROM requests
   WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%');
@@ -186,7 +212,8 @@ DELETE FROM resources
 ```
 
 > **실행 전 백업.** 어떤 경우든 [../docs/operations-runbook.md](../docs/operations-runbook.md) §8의
-> 두 DB 백업을 먼저 뜬다. 위 DELETE는 되돌릴 수 없다.
+> 두 DB 백업을 먼저 뜬다. 위 DELETE는 되돌릴 수 없다. 전체를 **하나의 트랜잭션**으로 감싸면
+> 중간 실패 시 반쪽 정리 상태가 남지 않는다.
 
 ### 4.3 스토리지 매핑 필드 정리 (선택)
 
