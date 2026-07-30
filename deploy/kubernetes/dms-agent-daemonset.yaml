@@ -47,7 +47,7 @@ data:
   DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan,kubectl"
   # REQUIRED for mount readiness: read the HOST init's mount table (bind-mounted at
   # /host/proc/1/mountinfo below), not the container's /proc/self/mountinfo default —
-  # otherwise every worker-node storage mount probes Missing and readiness is false.
+  # otherwise every worker-node storage mount probes Missing and DM readiness is false.
   DMS_AGENT_MOUNTINFO_PATH: "/host/proc/1/mountinfo"
   # Host root at /host: per-node disk metrics + per-mount capacity (statvfs).
   DMS_AGENT_HOST_ROOT: "/host"
@@ -90,76 +90,6 @@ data:
         }
       ]
     }
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: dms-rm-agent
-  namespace: dms
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: dms-rm-agent
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: dms-rm-agent
-        app.kubernetes.io/part-of: dms
-        dms.io/worker-role: rm
-    spec:
-      serviceAccountName: dms-agent
-      containers:
-        - name: agent
-          image: testbed-registry:5000/dms:phase8
-          imagePullPolicy: Always
-          command: ["dms", "agent-loop"]
-          envFrom:
-            - configMapRef:
-                name: dms-agent-runtime-config
-          env:
-            - name: DMS_AGENT_WORKER_ROLE
-              value: RM
-            - name: DMS_AGENT_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: DMS_AGENT_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: DMS_AGENT_POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-          volumeMounts:
-            - name: storages
-              mountPath: /etc/dms/agent
-              readOnly: true
-            - name: host-root
-              mountPath: /host
-              readOnly: true
-            - name: proc-mountinfo
-              mountPath: /host/proc/1/mountinfo
-              readOnly: true
-          resources:
-            requests:
-              cpu: 25m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
-      volumes:
-        - name: storages
-          configMap:
-            name: dms-agent-storages
-        - name: host-root
-          hostPath:
-            path: /
-            type: Directory
-        - name: proc-mountinfo
-          hostPath:
-            path: /proc/1/mountinfo
-            type: File
 ---
 apiVersion: apps/v1
 kind: DaemonSet

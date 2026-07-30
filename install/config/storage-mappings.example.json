@@ -7,56 +7,66 @@
         "cluster_name": "cluster-a",
         "mount_path": "/mnt/cephfs-rwx",
         "managed_root": "/mnt/cephfs-rwx/dms",
-        "rm_worker_nodes": ["cephfs-rm-1"],
-        "ssh_host": "cephfs-rm-1",
         "csi_driver": "rook-ceph.cephfs.csi.ceph.com"
       },
       "cluster_name": "cluster-a",
       "storage_class_name": "cephfs-rwx"
     },
     {
-      "storage_name": "longhorn-a",
-      "backend_template": {
-        "backend_type": "longhorn",
-        "csi_driver": "driver.longhorn.io"
-      },
-      "cluster_name": "cluster-a",
-      "storage_class_name": "longhorn"
-    },
-    {
       "storage_name": "gpfs-a",
       "backend_template": {
         "backend_type": "gpfs",
+        "cluster_name": "cluster-a",
         "filesystem_name": "gpfs0",
         "mount_path": "/gpfs/gpfs0",
         "managed_root": "/gpfs/gpfs0/dms",
-        "quota_scope": "fileset",
-        "fileset_name_template": "dms-{directory_name}",
-        "rm_worker_nodes": ["gpfs-rm-1"],
-        "ssh_host": "gpfs-rm-1",
-        "command_runner": "ssh-host-exec",
-        "command_timeout_seconds": 300,
-        "csi_driver": "spectrumscale.csi.ibm.com",
-        "data_network": "storage-net-a"
+        "csi_driver": "spectrumscale.csi.ibm.com"
       },
       "cluster_name": "cluster-a",
-      "storage_class_name": "gpfs-csi"
+      "storage_class_name": "gpfs-sc"
     },
     {
       "storage_name": "weka-a",
       "backend_template": {
         "backend_type": "wekafs",
+        "cluster_name": "cluster-a",
         "filesystem_name": "default",
         "mount_path": "/weka/default",
         "managed_root": "/weka/default/dms",
-        "quota_scope": "directory",
-        "rm_worker_nodes": ["weka-rm-1"],
-        "ssh_host": "weka-rm-1",
-        "command_runner": "ssh-host-exec",
         "csi_driver": "csi.weka.io"
       },
       "cluster_name": "cluster-a",
       "storage_class_name": "weka-sc"
+    },
+    {
+      "storage_name": "ceph-csi-a",
+      "backend_template": {
+        "backend_type": "ceph-csi",
+        "cluster_name": "cluster-a",
+        "csi_driver": "rook-ceph.cephfs.csi.ceph.com"
+      },
+      "cluster_name": "cluster-a",
+      "storage_class_name": "cephfs-rwx"
+    },
+    {
+      "storage_name": "gpfs-csi-a",
+      "backend_template": {
+        "backend_type": "gpfs-csi",
+        "cluster_name": "cluster-a",
+        "csi_driver": "spectrumscale.csi.ibm.com"
+      },
+      "cluster_name": "cluster-a",
+      "storage_class_name": "gpfs-csi"
+    },
+    {
+      "storage_name": "weka-csi-a",
+      "backend_template": {
+        "backend_type": "weka-csi",
+        "cluster_name": "cluster-a",
+        "csi_driver": "csi.weka.io"
+      },
+      "cluster_name": "cluster-a",
+      "storage_class_name": "weka-csi"
     }
   ]
 }

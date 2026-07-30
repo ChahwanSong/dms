@@ -1,9 +1,10 @@
 """BFF storage-node matrix: worker node × filesystem-storage mount readiness.
 
-Columns = registered FS storages only (CSI excluded); rows = nodes (RM+DM collapsed,
-newest report's host-level mounts); cell = the node's probed mount status per storage
-(absent → 미구성). Grouped per cluster. Reads the same agent-reports(mounts) +
-storage-mappings the dashboard already uses — no DMS change.
+Columns = registered FS storages only (CSI excluded); rows = nodes (a node's repeated
+reports collapse into ONE row, keeping the newest report's host-level mounts/freshness);
+cell = the node's probed mount status per storage (absent → 미구성). Grouped per cluster.
+Reads the same agent-reports(mounts) + storage-mappings the dashboard already uses —
+no DMS change.
 """
 
 from __future__ import annotations
@@ -25,9 +26,10 @@ def _mapping(name: str, backend: str, cluster: str = "dms") -> dict[str, Any]:
             "backend_template": {"backend_type": backend}}
 
 
-def _report(node: str, role: str, mounts: list[dict[str, Any]], *,
-            cluster: str = "dms", freshness: str = "Fresh", at: str = "2026-07-01T00:00:00Z"):
-    return {"cluster_name": cluster, "node_name": node, "worker_role": role,
+def _report(node: str, mounts: list[dict[str, Any]], *, cluster: str = "dms",
+            freshness: str = "Fresh", at: str = "2026-07-01T00:00:00Z"):
+    # every agent report carries the single worker role, DM
+    return {"cluster_name": cluster, "node_name": node, "worker_role": "DM",
             "freshness_status": freshness, "reported_at": at, "report": {"mounts": mounts}}
 
 
@@ -45,9 +47,12 @@ def test_matrix_excludes_csi_and_builds_cells():
         _mapping("k8s-csi-vol", "k8s-csi"),      # CSI → excluded
     ]
     reports = [
-        _report("w1", "RM", [_mnt("cephfs-dms", "Ready"), _mnt("cephfs-third", "Ready")]),
-        _report("w1", "DM", [_mnt("cephfs-dms", "Ready"), _mnt("cephfs-third", "Ready")]),
-        _report("w2", "DM", [_mnt("cephfs-dms", "Ready"), _mnt("cephfs-third", "Missing")]),
+        # w1 reported twice (successive agent reports for the same host)
+        _report("w1", [_mnt("cephfs-dms", "Ready"), _mnt("cephfs-third", "Ready")],
+                at="2026-07-01T00:00:00Z"),
+        _report("w1", [_mnt("cephfs-dms", "Ready"), _mnt("cephfs-third", "Ready")],
+                at="2026-07-01T00:05:00Z"),
+        _report("w2", [_mnt("cephfs-dms", "Ready"), _mnt("cephfs-third", "Missing")]),
     ]
     out = _storage_node_matrix(reports, mappings)
     assert len(out) == 1
@@ -55,9 +60,11 @@ def test_matrix_excludes_csi_and_builds_cells():
     assert cl["cluster_name"] == "dms"
     # only FS storages, sorted; CSI excluded
     assert [s["storage_name"] for s in cl["storages"]] == ["cephfs-dms", "cephfs-third"]
+    # w1's two reports collapse into ONE row — 2 nodes, not 3 rows
+    assert [n["node_name"] for n in cl["nodes"]] == ["w1", "w2"]
     nodes = {n["node_name"]: n for n in cl["nodes"]}
-    # w1 collapses RM+DM into one row with both roles
-    assert sorted(nodes["w1"]["roles"]) == ["DM", "RM"]
+    # roles are a deduped union, so repeated DM reports yield a single role
+    assert nodes["w1"]["roles"] == ["DM"]
     assert nodes["w1"]["cells"]["cephfs-dms"]["status"] == "Ready"
     assert nodes["w2"]["cells"]["cephfs-third"]["status"] == "Missing"
     # CSI storage never appears as a cell
@@ -66,19 +73,27 @@ def test_matrix_excludes_csi_and_builds_cells():
 
 def test_matrix_newest_report_wins_for_mounts():
     mappings = [_mapping("cephfs-dms", "cephfs")]
+    # same node, two reports over time, fed NEWEST FIRST so "newest wins" can't be
+    # satisfied by simply keeping the last row seen
     reports = [
-        _report("w1", "RM", [_mnt("cephfs-dms", "Missing")], at="2026-07-01T00:00:00Z"),
-        _report("w1", "DM", [_mnt("cephfs-dms", "Ready")], at="2026-07-01T01:00:00Z"),  # newer
+        _report("w1", [_mnt("cephfs-dms", "Ready")],
+                at="2026-07-01T01:00:00Z", freshness="Fresh"),
+        _report("w1", [_mnt("cephfs-dms", "Missing")],
+                at="2026-07-01T00:00:00Z", freshness="Stale"),
     ]
     out = _storage_node_matrix(reports, mappings)
+    assert len(out[0]["nodes"]) == 1                          # one row per node
     node = out[0]["nodes"][0]
     assert node["cells"]["cephfs-dms"]["status"] == "Ready"   # newest wins
+    # freshness/reported_at come from that same newest report, not the older one
+    assert node["freshness"] == "Fresh"
+    assert node["reported_at"] == "2026-07-01T01:00:00Z"
 
 
 def test_matrix_unconfigured_storage_has_no_cell():
     mappings = [_mapping("cephfs-dms", "cephfs"), _mapping("cephfs-third", "cephfs")]
     # node only reports cephfs-dms → cephfs-third cell absent (→ 미구성 in UI)
-    reports = [_report("w1", "DM", [_mnt("cephfs-dms", "Ready")])]
+    reports = [_report("w1", [_mnt("cephfs-dms", "Ready")])]
     out = _storage_node_matrix(reports, mappings)
     node = out[0]["nodes"][0]
     assert "cephfs-dms" in node["cells"]
@@ -88,7 +103,7 @@ def test_matrix_unconfigured_storage_has_no_cell():
 def test_matrix_cluster_without_fs_storage_skipped():
     # cluster has a node but only CSI mappings → no FS matrix for it
     mappings = [_mapping("k8s-csi-vol", "k8s-csi", cluster="edge")]
-    reports = [_report("e1", "DM", [], cluster="edge")]
+    reports = [_report("e1", [], cluster="edge")]
     assert _storage_node_matrix(reports, mappings) == []
 
 
@@ -96,8 +111,8 @@ def test_matrix_multi_cluster_grouped():
     mappings = [_mapping("cephfs-dms", "cephfs", cluster="a"),
                 _mapping("gpfs-x", "gpfs", cluster="b")]
     reports = [
-        _report("a1", "DM", [_mnt("cephfs-dms", "Ready")], cluster="a"),
-        _report("b1", "DM", [_mnt("gpfs-x", "Missing")], cluster="b"),
+        _report("a1", [_mnt("cephfs-dms", "Ready")], cluster="a"),
+        _report("b1", [_mnt("gpfs-x", "Missing")], cluster="b"),
     ]
     out = _storage_node_matrix(reports, mappings)
     assert [c["cluster_name"] for c in out] == ["a", "b"]
@@ -119,7 +134,7 @@ class FakeDms:
 
 def test_endpoint_returns_matrix():
     dms = FakeDms(
-        reports=[_report("w1", "DM", [_mnt("cephfs-dms", "Ready")])],
+        reports=[_report("w1", [_mnt("cephfs-dms", "Ready")])],
         mappings=[_mapping("cephfs-dms", "cephfs"), _mapping("csi", "ceph-csi")],
     )
     app = FastAPI()

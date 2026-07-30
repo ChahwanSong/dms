@@ -9,14 +9,14 @@
 
 | 수정한 소스 | 재빌드 이미지 (`IMAGES` 토큰) | 반영 대상 |
 |---|---|---|
-| `src/dms/` (api·planner·workers·adapters·query·repositories 등) | `dms` | ns `dms` Deployment: `dms-api`·`dms-planner`·`dms-rm-worker`·`dms-dm-worker`·`dms-retention`·`dms-sanity-reconciler` |
-| `src/dms/agent*.py` (노드 agent) | `agent` (dms 위에 빌드되므로 `dms`도 함께) | ns `dms` DaemonSet: `dms-rm-agent`·`dms-dm-agent` |
+| `src/dms/` (api·planner·workers·adapters·query·repositories 등) | `dms` | ns `dms` Deployment: `dms-api`·`dms-planner`·`dms-dm-worker`·`dms-retention`·`dms-sanity-reconciler` |
+| `src/dms/agent*.py` (노드 agent) | `agent` (dms 위에 빌드되므로 `dms`도 함께) | ns `dms` DaemonSet: `dms-dm-agent` |
 | DM 잡 도구 이미지(mpifileutils) | `mpifileutils` | DM 잡 런타임 이미지(Deployment 아님; dm-worker가 잡 생성 시 참조) |
 | `src/portal/` (BFF `backend/` · SPA `frontend/`) | `portal` | ns `dms-portal` Deployment: `dms-portal` |
 | DB **schema**(`src/dms/migrations.py`) 변경 동반 | `dms` | 이미지 교체 **전에** migrate — 아래 §2 주의 |
 
 > 컨테이너명 규약: ns `dms` Deployment는 이름에서 `dms-`를 뗀 것(`dms-api`→`api`,
-> `dms-rm-worker`→`rm-worker` …), agent DaemonSet은 `agent`, 포탈은 `portal`.
+> `dms-dm-worker`→`dm-worker` …), agent DaemonSet은 `agent`, 포탈은 `portal`.
 
 ## 1. 공통: 이미지 빌드 · push
 
@@ -54,12 +54,11 @@ kubectl -n dms get deploy -o wide | grep -E "/dms:"     # dms 이미지를 쓰�
 kubectl -n dms set image deploy/dms-api               api=$NEW
 kubectl -n dms set image deploy/dms-api-internal      api=$NEW   # agent 전용 내부 API(동일 dms 이미지)
 kubectl -n dms set image deploy/dms-planner           planner=$NEW
-kubectl -n dms set image deploy/dms-rm-worker         rm-worker=$NEW
 kubectl -n dms set image deploy/dms-dm-worker         dm-worker=$NEW
 kubectl -n dms set image deploy/dms-retention         retention=$NEW
 kubectl -n dms set image deploy/dms-sanity-reconciler sanity-reconciler=$NEW
 
-for d in dms-api dms-api-internal dms-planner dms-rm-worker dms-dm-worker dms-retention dms-sanity-reconciler; do
+for d in dms-api dms-api-internal dms-planner dms-dm-worker dms-retention dms-sanity-reconciler; do
   kubectl -n dms rollout status deploy/$d --timeout=180s
 done
 ```
@@ -80,13 +79,12 @@ done
 
 `agent` 이미지는 `dms` + `mpifileutils` 위에 빌드되므로 `IMAGES="dms agent"`로 함께 빌드한다
 (`dms-mpifileutils:$TAG`가 로컬에 없으면 운영 중인 태그를 pull 후 `docker tag`로 재태그 — 도구
-이미지는 agent 코드 변경과 무관하므로 재컴파일 불필요). **두 DaemonSet의 이미지가 다르다**:
-`dms-rm-agent`는 **plain `dms` 이미지**, `dms-dm-agent`만 `dms-agent`(dms + mfu 도구) 이미지다.
+이미지는 agent 코드 변경과 무관하므로 재컴파일 불필요). `dms-dm-agent`는 **`dms-agent`
+이미지**(dms + mfu 도구)를 쓴다 — plain `dms` 이미지로 바꾸면 안 된다.
 
 ```bash
-kubectl -n dms set image daemonset/dms-rm-agent agent=$REGISTRY/dms:$TAG
 kubectl -n dms set image daemonset/dms-dm-agent agent=$REGISTRY/dms-agent:$TAG
-kubectl -n dms rollout status daemonset/dms-rm-agent daemonset/dms-dm-agent --timeout=180s
+kubectl -n dms rollout status daemonset/dms-dm-agent --timeout=180s
 ```
 
 ## 3. Portal 재배포 (ns `dms-portal`)
@@ -122,13 +120,88 @@ apply 후 반드시 [portal-01-setup.md](portal-01-setup.md) §7.2 로 실값(`P
 > `PORTAL_SIGNUP_ALLOWLIST`). 비밀값만 `kubectl patch secret`으로 넣는다
 > ([portal-02-user-auth.md](portal-02-user-auth.md) §6).
 
-## 4. Rollback
+## 4. RM 제거 릴리스로 올릴 때 (일회성 정리)
+
+RM(Resource Management) 기능이 제거된 릴리스로 처음 올리는 **기존 배포**는 아래를 한 번 수동으로
+정리한다. **DMS는 이 정리를 자동으로 하지 않는다** — 특히 DB 삭제는 되돌릴 수 없으므로 운영자가
+의도적으로 실행해야 한다.
+
+### 4.1 워크로드 제거 (필수)
+
+새 매니페스트에는 이 오브젝트들이 더 이상 없고, `kubectl apply`는 사라진 오브젝트를 지우지 않는다:
+
+```bash
+kubectl -n dms delete deployment/dms-rm-worker --ignore-not-found
+kubectl -n dms delete daemonset/dms-rm-agent  --ignore-not-found
+kubectl -n dms delete serviceaccount/dms-rm-worker --ignore-not-found
+kubectl -n dms delete secret/dms-ssh-client --ignore-not-found   # RM host-exec 전용이었음
+```
+
+대상 클러스터마다(멀티 클러스터면 전부) 이름이 바뀌면서 고아가 된 예전 ClusterRole도 지운다 —
+`target-cluster-rbac.yaml`은 `dms-remote-inventory`로 이름이 바뀌었고, apply는 예전 이름을 정리하지
+않는다:
+
+```bash
+kubectl --context <target> delete clusterrolebinding dms-remote-resource-management --ignore-not-found
+kubectl --context <target> delete clusterrole        dms-remote-resource-management --ignore-not-found
+```
+
+### 4.2 DB 정리 (수동 SQL — 운영자가 직접 실행)
+
+**(a) 필수 — 예전 RM 노드가 대시보드에 영구 stale로 남는 것을 막는다.** `agent_node_current`는 노드별
+최신 1행을 보관하는 테이블이고 retention loop는 `agent_reports`(이력)만 prune한다. 따라서
+`dms-rm-agent`를 지워도 그 노드 행은 **영원히 남아** 대시보드에 `Stale`로 계속 뜬다:
+
+```sql
+-- 운영 DB (DMS_DATABASE_URL)
+DELETE FROM agent_node_current WHERE worker_role = 'RM';
+```
+
+**(b) 선택 — 남은 RM 잔재 정리.** 필요 없다고 판단되면 지운다(이력 감사 목적이면 남겨도 무해하다):
+
+```sql
+-- 기본 쿼터 정책 테이블(더 이상 쓰이지 않음)
+DROP TABLE IF EXISTS default_quota_policies;
+
+-- 레거시 RM operation/resource 행 (requests → plans → runs → results 순서 주의)
+DELETE FROM results WHERE run_id IN (
+  SELECT run_id FROM runs WHERE plan_id IN (
+    SELECT plan_id FROM plans WHERE request_id IN (
+      SELECT request_id FROM requests
+      WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%')));
+DELETE FROM runs WHERE plan_id IN (
+  SELECT plan_id FROM plans WHERE request_id IN (
+    SELECT request_id FROM requests
+    WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%'));
+DELETE FROM plans WHERE request_id IN (
+  SELECT request_id FROM requests
+  WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%');
+DELETE FROM state_transitions WHERE request_id IN (
+  SELECT request_id FROM requests
+  WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%');
+DELETE FROM requests
+  WHERE operation LIKE 'filesystem.%' OR operation LIKE 'kubernetes.namespace_quota.%';
+DELETE FROM resources
+  WHERE resource_kind IN ('filesystem', 'kubernetes_namespace_quota', 'default_quota_policy');
+```
+
+> **실행 전 백업.** 어떤 경우든 [../docs/operations-runbook.md](../docs/operations-runbook.md) §8의
+> 두 DB 백업을 먼저 뜬다. 위 DELETE는 되돌릴 수 없다.
+
+### 4.3 스토리지 매핑 필드 정리 (선택)
+
+기존 매핑의 `backend_template`에 남아 있는 RM 전용 키(`rm_worker_nodes`·`ssh_host`·`command_runner`·
+`quota_scope`·`mutation_mode`·`control_host` 등)는 더 이상 읽히지 않으므로 그대로 둬도 무해하다.
+정리하고 싶으면 PATCH로 **전체 `backend_template`을 round-trip**하면서 뺀다
+([../docs/api/storage-mappings.md](../docs/api/storage-mappings.md) §5).
+
+## 5. Rollback
 
 이미지 교체 후 문제가 있으면 직전 리비전으로 되돌린다.
 
 ```bash
 # DMS 코어 (교체한 Deployment 전부)
-for d in dms-api dms-planner dms-rm-worker dms-dm-worker dms-retention dms-sanity-reconciler; do
+for d in dms-api dms-planner dms-dm-worker dms-retention dms-sanity-reconciler; do
   kubectl -n dms rollout undo deploy/$d
 done
 # Portal

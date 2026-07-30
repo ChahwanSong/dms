@@ -134,7 +134,7 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: ["dms-dm-agent", "dms-rm-agent"]
+                values: ["dms-dm-agent"]
         # portal BFF (dms-portal namespace) — trusted multi-operator client that carries
         # per-operator identity via x-dms-actor, which the mTLS external API can't accept.
         - namespaceSelector:

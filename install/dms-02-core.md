@@ -24,7 +24,7 @@ DMS는 컨테이너 이미지 **3개**를 쓴다. 역할과 빌드 소스는 다
 | 이미지 | Dockerfile | 쓰는 컴포넌트 |
 |---|---|---|
 | **DM job** (mpifileutils) | `install/docker/Dockerfile.mpifileutils` | DM 잡 파드(Volcano MPI worker). `DMS_DM_JOB_IMAGE`로 참조 |
-| **plain dms** | `install/docker/Dockerfile` | dms-api / planner / rm-worker / dm-worker / retention / sanity-reconciler + **dms-rm-agent** |
+| **plain dms** | `install/docker/Dockerfile` | dms-api / planner / dm-worker / retention / sanity-reconciler |
 | **dms-agent** | `install/docker/Dockerfile.agent` | **dms-dm-agent** DaemonSet 전용 (plain dms + mpifileutils 도구 바이너리) |
 
 빌드 의존성상 순서는 **DM job → plain dms → dms-agent**다. dms-agent 이미지는 `FROM <plain dms>`
@@ -40,7 +40,7 @@ docker build -f install/docker/Dockerfile.mpifileutils \
   -t "$REGISTRY/dms-mpifileutils:$TAG" .
 docker push "$REGISTRY/dms-mpifileutils:$TAG"
 
-# (2) plain dms 이미지 — 코어 서비스 전부 + dms-rm-agent.
+# (2) plain dms 이미지 — 코어 서비스 전부.
 docker build -f install/docker/Dockerfile \
   -t "$REGISTRY/dms:$TAG" .
 docker push "$REGISTRY/dms:$TAG"
@@ -106,7 +106,7 @@ docker push "$REGISTRY/dms-agent:$TAG"
 >
 > **plain dms 이미지만으로는 DM이 안 된다** — mpifileutils 도구가 없어 DM 후보가
 > `missing_dscan`/`missing_dsync`/`missing_drm_tool`로 거부된다. DM 잡 노드의 에이전트는 반드시
-> (3) dms-agent 이미지를 써야 한다(DaemonSet 배포는 [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md)).
+> (3) dms-agent 이미지를 써야 한다(DaemonSet 배포는 [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)).
 
 ---
 
@@ -171,7 +171,7 @@ Client CA(`dms-client-ca.crt`)는 `control-plane.yaml`의 `dms-client-ca` Secret
 ## 3. `control-plane.yaml` 편집
 
 `install/kubernetes/control-plane.yaml` 하나에 Namespace(`dms`, PodSecurity=privileged) · SA ·
-ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner / rm-worker /
+ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner /
 **dm-worker replicas=32**) · Service · NetworkPolicy가 모두 들어 있다. 아래 항목을 **환경 값으로
 치환**한 뒤 적용한다. (secret 값이 들어가므로 편집본은 git에 커밋하지 않는다.)
 
@@ -180,7 +180,7 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 | 키 | placeholder | 설정값 |
 |---|---|---|
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | 컨트롤 클러스터 이름 |
-| `DMS_CLUSTER_KUBECONFIGS_JSON` | `{"cluster-a":"/etc/dms/kubeconfigs/cluster-a.kubeconfig"}` | 클러스터명·kubeconfig 파일명 일치. **control cluster kubeconfig 생성·배치는 §5**(agent rollout 등에 필수), 추가 대상 클러스터는 [`dms-04`](dms-04-rm-k8s-quota.md) |
+| `DMS_CLUSTER_KUBECONFIGS_JSON` | `{"cluster-a":"/etc/dms/kubeconfigs/cluster-a.kubeconfig"}` | 클러스터명·kubeconfig 파일명 일치. **control cluster kubeconfig 생성·배치는 §5**(agent rollout 등에 필수), 추가 대상 클러스터는 [`dms-03 §3`](dms-03-storage-mappings.md) |
 | `DMS_LDAP_URI` | `ldap://ldap.example.internal:389` | 실제 LDAP/AD URI |
 | `DMS_LDAP_BASE_DN` | `dc=example,dc=internal` | base DN |
 | `DMS_LDAP_USER_SEARCH_BASE` | `ou=people,dc=example,dc=internal` | user search base |
@@ -208,39 +208,33 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 | `DMS_LDAP_BIND_DN` | `cn=dms,ou=service-accounts,dc=example,dc=internal` | LDAP 서비스 계정 DN |
 | `DMS_LDAP_BIND_PASSWORD` | `CHANGE_ME` | bind 암호 |
 
-> CephFS·WekaFS 파일시스템 작업은 **동작하는 LDAP bind가 eager 필수**다(GPFS는 선택). bind가
-> 안 되면 해당 백엔드 RM이 실패한다. 상세 [`dms-03-rm-filesystem.md`](dms-03-rm-filesystem.md).
+> DM 잡은 요청자의 POSIX 신원을 이 LDAP로 **read-only** 조회한다 — bind가 안 되면 preflight가
+> `ldap_not_configured`/`ldap_unavailable`로 fail-closed된다. 상세 [`dms-04-dm-jobs.md §4`](dms-04-dm-jobs.md).
 
 ### Secret `dms-client-ca`
 
 - `ca.crt` — §2 (1)에서 만든 `dms-client-ca.crt` PEM을 붙여넣는다. ingress mTLS가 클라이언트
   인증서를 이 CA로 검증한다(annotation `auth-tls-secret: dms/dms-client-ca`, §6).
 
-### Secret `dms-ssh-client`
-
-- `id_ed25519` / `known_hosts` — 파일시스템 백엔드(CephFS/GPFS/Weka) 관리 명령을 노드에서 실행하는
-  SSH private key와 host key. 발급·등록 절차는 [`dms-03-rm-filesystem.md`](dms-03-rm-filesystem.md).
-  (`config`는 그대로 둔다. 파일 권한은 rm-worker의 initContainer가 세팅한다.)
-
 ### Secret `dms-cluster-kubeconfigs`
 
 - `cluster-a.kubeconfig` — **control cluster** kubeconfig로 교체(빈 placeholder로 시작). `dms-api`가
   agent rollout(포탈 재시작 버튼)·ConfigMap sync·inventory에 쓴다. 생성·배치 절차는 **§5**
-  (`create-serviceaccount-kubeconfig.sh`). 추가 대상(remote) 클러스터는 [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md).
+  (`create-serviceaccount-kubeconfig.sh`). 추가 대상(remote) 클러스터는 [`dms-03-storage-mappings.md §3`](dms-03-storage-mappings.md).
 
 ### image 라인
 
 - 모든 `image: registry.example.internal/dms:CHANGE_ME`를 §1 (2) **plain dms** ref로 바꾼다.
   등장 위치: `Job/dms-migrate`, `Deployment/dms-api`, `Deployment/dms-planner`,
-  `Deployment/dms-rm-worker`(initContainer + 컨테이너), `Deployment/dms-dm-worker`.
+  `Deployment/dms-dm-worker`.
 
 ### dm-worker artifact hostPath (DM 사용 시)
 
 - `Deployment/dms-dm-worker`의 `dm-artifacts` 볼륨 `hostPath.path: /artifacts`를 **공유 artifact FS의
   마운트포인트**로 바꾼다(서브디렉터리가 아니라 마운트포인트 자체). 상세는 prereqs §0.5 /
-  [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md). `dms-dm-worker`는 `replicas: 32`(DM 활성 **기본** — 최대
+  [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md). `dms-dm-worker`는 `replicas: 32`(DM 활성 **기본** — 최대
   32-way 동시 실행; **32는 PostgreSQL `max_connections≥400`을 전제**하므로 소규모/제약 환경은 낮춘다,
-  [`dms-05 §5`](dms-05-dm-jobs.md)·[`dms-06 §3`](dms-06-configuration.md))로 둔다 — **`0`은 DM을
+  [`dms-04 §5`](dms-04-dm-jobs.md)·[`dms-05 §3`](dms-05-configuration.md))로 둔다 — **`0`은 DM을
   의도적으로 끌 때만** 쓴다(0이면 어떤 워커도 데이터 잡을 claim하지 않아 scan/sync/rm이 조용히 미실행된다).
 
 ---
@@ -272,7 +266,7 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 > **노드 에이전트는 이 mTLS 평면을 쓰지 않는다.** agent는 actor가 `node:{cluster}:{node}`여야 하는데
 > mTLS는 `mtls:<subject>`로 도출하므로 인증 불가 → 에이전트는 §5의 **전용 내부 API `dms-api-internal`**
 > (mTLS off + shared token + agent-only NetworkPolicy)로 보고한다. 근거·설정은
-> [`dms-06-configuration.md §1·§8`](dms-06-configuration.md).
+> [`dms-05-configuration.md §1·§8`](dms-05-configuration.md).
 
 > **부연(테스트베드/개발 프로필).** `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`로 내리면 인증서 없이
 > 평문 `Authorization: Bearer <token>` + `x-dms-actor: <name>`만으로 호출할 수 있다. 이는 요청/응답
@@ -299,31 +293,31 @@ kubectl -n dms logs job/dms-migrate                        # "migrations applied
 > 에이전트는 `image` 라인만 `control-plane.yaml`과 같은 ref로 맞춘 **별도 내부 API `dms-api-internal`**
 > (mTLS **off** + `dms-secrets`의 shared token + agent-only NetworkPolicy, ClusterIP)로 보고한다.
 > `agent-daemonset.yaml`의 `DMS_AGENT_API_URL`이 이 서비스를 가리킨다. 근거·프로필은
-> [`dms-06-configuration.md §1·§8`](dms-06-configuration.md).
+> [`dms-05-configuration.md §1·§8`](dms-05-configuration.md).
 
 pod 확인:
 
 ```bash
 kubectl -n dms get pods
-# dms-api ×2, dms-api-internal, dms-planner, dms-rm-worker, dms-dm-worker(1/1), dms-migrate(Completed)
+# dms-api ×2, dms-api-internal, dms-planner, dms-dm-worker, dms-migrate(Completed)
 ```
 
 > **storages sync RBAC은 이미 `control-plane.yaml`에 포함**돼 있다(Role/RoleBinding
 > `dms-agent-storages-sync`, `configmaps` get/update/patch on `dms-agent-storages`, `dms-api`와
 > `dms-remote` **둘 다**에 바인딩). 이게 없으면 storage-mapping → ConfigMap 동기화가 `Forbidden`을
-> **조용히 삼켜** no-op이 되고 → 새 파일시스템 스토리지가 에이전트에 전달되지 않아 RM은
-> `missing_rm_readiness`, DM은 `no_ready_dm_candidate`가 된다. 존재 확인:
+> **조용히 삼켜** no-op이 되고 → 새 파일시스템 스토리지가 에이전트에 전달되지 않아 DM이
+> `no_ready_dm_candidate`가 된다. 존재 확인:
 > ```bash
 > kubectl -n dms get role,rolebinding dms-agent-storages-sync
 > ```
 > 에이전트는 `storages.json`을 **기동 시 1회만** 읽으므로, 스토리지 매핑을 바꾼 뒤에는 DaemonSet을
-> rollout-restart 한다(`POST /api/v1/agent/rollout-restart`, [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md)).
+> rollout-restart 한다(`POST /api/v1/agent/rollout-restart`, [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)).
 
 ### control cluster kubeconfig 배치 — agent rollout · ConfigMap sync · inventory (필수)
 
 `dms-api`는 **control cluster**(`DMS_CONTROL_CLUSTER_NAME`, 예 `cluster-a`)의 kube API에 접근해야 한다:
 
-- **포탈 "에이전트 재시작" 버튼** → `POST /api/v1/agent/rollout-restart` → `dms-rm-agent`·`dms-dm-agent`
+- **포탈 "에이전트 재시작" 버튼** → `POST /api/v1/agent/rollout-restart` → `dms-dm-agent`
   DaemonSet에 `restartedAt` 스탬프(rollout restart).
 - **스토리지 매핑 변경 시 ConfigMap sync**(`dms-agent-storages` patch) — 없으면 새 스토리지가 에이전트에
   전달되지 않는다(위 storages-sync 주석).
@@ -344,8 +338,8 @@ kubeconfig 파일**로, 없으면 pod SA(in-cluster)로 붙는다. shipped 기�
 # 0) kubectl이 control cluster를 가리키게 한다.
 kubectl config use-context cluster-a
 
-# 1) dms-remote SA(+ nodes/namespaces/resourcequotas/storageclasses ClusterRole) 생성.
-#    이 kubeconfig가 인증할 SA다. (k8s 쿼터 RM의 대상 RBAC과 동일 파일 — dms-04에서 재사용.)
+# 1) dms-remote SA(+ nodes/namespaces/storageclasses/csidrivers 읽기 전용 ClusterRole) 생성.
+#    이 kubeconfig가 인증할 SA다. (추가 대상 클러스터에도 같은 파일을 적용 — dms-03 §3.)
 kubectl apply -f install/kubernetes/target-cluster-rbac.yaml
 
 # 2) dms-remote 토큰을 임베드한 control cluster kubeconfig 생성.
@@ -355,25 +349,26 @@ install/scripts/create-serviceaccount-kubeconfig.sh cluster-a certs/cluster-a.ku
 kubectl -n dms patch secret dms-cluster-kubeconfigs --type merge \
   -p "{\"data\":{\"cluster-a.kubeconfig\":\"$(base64 -w0 certs/cluster-a.kubeconfig)\"}}"
 kubectl -n dms rollout restart \
-  deploy/dms-api deploy/dms-api-internal deploy/dms-planner deploy/dms-rm-worker
+  deploy/dms-api deploy/dms-api-internal deploy/dms-planner deploy/dms-dm-worker
 ```
 
 > 신규 설치라면 3) 대신 apply **전에** `control-plane.yaml`의 Secret `dms-cluster-kubeconfigs`
 > `stringData.cluster-a.kubeconfig`에 kubeconfig 내용을 붙여넣어도 된다(그러면 위 §5 apply 시 함께 적용).
 
-확인 — 재시작이 두 DaemonSet에 걸리고 error가 없어야 한다:
+확인 — 재시작이 agent DaemonSet에 걸리고 error가 없어야 한다:
 
 ```bash
 curl -sS --cert certs/operator.crt --key certs/operator.key --cacert certs/dms-server-ca.crt \
   -H "authorization: Bearer $DMS_TOKEN" \
   -X POST https://dms.example.internal/api/v1/agent/rollout-restart | jq
-# → {"restarted":["dms-rm-agent","dms-dm-agent"], "errors":{}}
+# → {"restarted":["dms-dm-agent"], "errors":{}}
 # errors에 403이 뜨면 dms-remote가 dms-api-agent-rollout RoleBinding에 있는지 확인(control-plane.yaml).
 ```
 
-> **단일 클러스터(control == target)면 이 kubeconfig가 k8s 쿼터 RM 대상도 겸한다** — `dms-remote`가
-> 이미 `resourcequotas` 권한으로 등록됐으므로 [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md)에서
-> control cluster kubeconfig를 다시 만들 필요가 없다(추가 대상 클러스터만 dms-04에서 등록).
+> **단일 클러스터(control == target)면 이 kubeconfig가 인벤토리 대상도 겸한다** — `dms-remote`가
+> 이미 읽기 전용 인벤토리 권한으로 등록됐으므로
+> [`dms-03-storage-mappings.md`](dms-03-storage-mappings.md)에서 control cluster kubeconfig를 다시 만들
+> 필요가 없다(추가 대상 클러스터만 dms-03 §3에서 등록).
 
 ---
 
@@ -436,16 +431,15 @@ curl -sS \
 - API 호스트가 아직 DNS에 없으면 `--resolve dms.example.internal:443:<INGRESS_IP>`를 붙인다.
 
 여기까지면 코어가 떴다. `data_management` readiness가 아직 `Missing`이어도 정상이다 — DM 축
-(에이전트·artifact FS·큐)이 [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md)에서 구성되면 `Ready`로 바뀐다.
+(에이전트·artifact FS·큐)이 [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)에서 구성되면 `Ready`로 바뀐다.
 
 ---
 
 ## 다음 문서
 
-- [`dms-03-rm-filesystem.md`](dms-03-rm-filesystem.md) — 파일시스템 RM 설정(SSH 백엔드 credential,
-  per-backend LDAP, 스토리지 매핑 등록).
-- [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md) — k8s 네임스페이스 쿼터 RM(타깃 클러스터 kubeconfig·RBAC).
-- [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md) — DM 잡(에이전트 DaemonSet, artifact FS, 신원, 큐).
-- [`dms-06-configuration.md`](dms-06-configuration.md) — 환경변수 레퍼런스.
+- [`dms-03-storage-mappings.md`](dms-03-storage-mappings.md) — 스토리지 매핑(인벤토리) 등록, 멀티 클러스터
+  kubeconfig·읽기 전용 RBAC.
+- [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md) — DM 잡(에이전트 DaemonSet, artifact FS, 신원, 큐).
+- [`dms-05-configuration.md`](dms-05-configuration.md) — 환경변수 레퍼런스.
 - [`portal-01-setup.md`](portal-01-setup.md) — 포탈 설치(별도 앱, BFF↔DMS mTLS).
 - API 사용법은 [`../docs/api/README.md`](../docs/api/README.md)부터.

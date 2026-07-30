@@ -1,8 +1,8 @@
 """Install manifests must mount shared-filesystem hostPath volumes with
 HostToContainer (rslave) propagation.
 
-Long-lived workers (dm-worker, the managed local rm-worker) read/operate on a
-shared FS bind-mounted from the host. Under the default (None) propagation the
+Long-lived workers (dm-worker) read/operate on a shared FS bind-mounted from the
+host. Under the default (None) propagation the
 bind goes stale if the host unmounts/remounts the FS while the pod is alive,
 leaving the worker with a detached view. HostToContainer lets host (re-)mounts
 propagate in live. This is a regression guard for that bind-mount-stale fix.
@@ -53,9 +53,3 @@ def test_control_plane_dm_worker_mounts_shared_fs_with_host_propagation():
     for vol in pod_spec["volumes"]:
         if vol["name"] in names:
             assert vol["hostPath"].get("type") == "Directory"
-
-
-def test_managed_rm_worker_mounts_shared_fs_with_host_propagation():
-    docs = _load_docs("managed-rm-worker.yaml")
-    pod_spec = _deployment(docs, "dms-rm-worker-local")["spec"]["template"]["spec"]
-    _assert_hostpath_mounts_propagate(pod_spec)

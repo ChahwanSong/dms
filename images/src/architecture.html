@@ -47,9 +47,8 @@
   <!-- PROCESSES -->
   <div class="band">
     <div class="cap">컨트롤 플레인 프로세스 (dms … --loop)</div>
-    <div class="grid4">
+    <div class="grid3">
       <div class="box purple full"><div class="k">planner</div><div class="d">요청 → 플랜 · 검증 게이트 · dedup · 만료 계산</div></div>
-      <div class="box teal full"><div class="k">rm-worker</div><div class="d">파일시스템 · K8s 네임스페이스 쿼터 뮤테이션</div></div>
       <div class="box teal full"><div class="k">dm-worker</div><div class="d">데이터 잡 scan / sync / rm · 프리뷰·컨펌</div></div>
       <div class="box slate full"><div class="k">sanity-reconciler · retention</div><div class="d">준비상태 재계산 · 리포트 정리</div></div>
     </div>
@@ -63,14 +62,14 @@
     <div class="cap">연동 계층 · 외부 시스템</div>
     <div class="grid4" style="align-items:stretch">
       <div class="col">
-        <div class="box slate full"><div class="k">backends</div><div class="d">cephfs · weka · gpfs<br>(SSH 호스트 실행)</div></div>
+        <div class="box slate full"><div class="k">스토리지 매핑</div><div class="d">cephfs · weka · gpfs<br>+ CSI (ceph/gpfs/weka)</div></div>
         <div class="down tight">↓</div>
-        <div class="box slate full center"><div class="k">스토리지 노드</div><div class="d">xattr / weka CLI / mmfileset</div></div>
+        <div class="box slate full center"><div class="k">스토리지 노드</div><div class="d">host-mount 경로 · PVC</div></div>
       </div>
       <div class="col">
-        <div class="box slate full"><div class="k">K8s 쿼터 어댑터</div><div class="d">kubectl / ssh-kubectl</div></div>
+        <div class="box slate full"><div class="k">인벤토리 어댑터</div><div class="d">kubectl / ssh-kubectl (읽기 전용)</div></div>
         <div class="down tight">↓</div>
-        <div class="box slate full center"><div class="k">ResourceQuota</div><div class="d">여러 클러스터</div></div>
+        <div class="box slate full center"><div class="k">StorageClass · CSI</div><div class="d">여러 클러스터</div></div>
       </div>
       <div class="col">
         <div class="box slate full"><div class="k">Volcano 어댑터</div><div class="d">MPIJob / Volcano Job</div></div>
@@ -88,7 +87,7 @@
   <div class="legend">
     <div class="leg"><span class="sw blue"></span>클라이언트 · API</div>
     <div class="leg"><span class="sw purple"></span>planner</div>
-    <div class="leg"><span class="sw teal"></span>worker (RM · DM)</div>
+    <div class="leg"><span class="sw teal"></span>worker (DM)</div>
     <div class="leg"><span class="sw slate"></span>어댑터 · 외부 시스템</div>
     <div class="leg"><span class="sw green"></span>노드 에이전트</div>
   </div>

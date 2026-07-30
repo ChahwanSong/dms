@@ -4,10 +4,10 @@ The agent reads its storages.json only once at startup, so after a storage
 mapping change (which auto-syncs the dms-agent-storages ConfigMap) the agents must
 be restarted to pick up the new set. DMS already owns the agents (it deploys them
 and syncs their ConfigMap), so it also drives their rollout — the same in-cluster
-k8s access the ConfigMap sync uses. RM and DM are BOTH restarted (a new storage's
-resource_management readiness comes from the RM agent, data_management from the DM
-agent). Targets the control cluster (settings.control_cluster_name), like the
-ConfigMap sync; agents in other clusters are out of scope here.
+k8s access the ConfigMap sync uses. A new storage's data_management readiness only
+becomes Ready once the DM agent has re-probed it, which is what this restart forces.
+Targets the control cluster (settings.control_cluster_name), like the ConfigMap
+sync; agents in other clusters are out of scope here.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from ...config import Settings
 
 _log = logging.getLogger(__name__)
 
-AGENT_DAEMONSETS = ("dms-rm-agent", "dms-dm-agent")
+AGENT_DAEMONSETS = ("dms-dm-agent",)
 _RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
 
 
@@ -50,7 +50,7 @@ def _apps_api(settings: Settings):
 
 
 def restart_agents(settings: Settings, *, restarted_at: str | None = None) -> dict[str, Any]:
-    """Trigger a rolling restart of both agent DaemonSets by stamping the standard
+    """Trigger a rolling restart of the agent DaemonSets by stamping the standard
     `restartedAt` annotation on the pod template (same mechanism as
     `kubectl rollout restart`). Per-DaemonSet failures are collected, not fatal."""
     stamp = restarted_at or datetime.now(timezone.utc).isoformat()

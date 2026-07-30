@@ -1,7 +1,7 @@
 """Read-API completeness + low-overhead changes for the operator dashboard.
 
 Covers:
-- latest_per_node agent-report reads (one newest row per node/role, server-side dedup),
+- latest_per_node agent-report reads (one newest row per cluster/node, server-side dedup),
 - limit/offset pagination on the list endpoints (no overlap / no gaps),
 - exact COUNT(*) work-summary totals that never saturate at a list cap,
 - action_required still surfacing issues when a constituent table exceeds the old cap,
@@ -59,14 +59,14 @@ def _query_service(tmp_path) -> OperationalQueryService:
     return OperationalQueryService(DmsRepository(op), ObservabilityRepository(obs))
 
 
-def _rep(node: str, role: str, dt: datetime, *, cluster: str = "cluster-a") -> dict[str, Any]:
+def _rep(node: str, dt: datetime, *, cluster: str = "cluster-a") -> dict[str, Any]:
     return {
         "schema_version": "test.v1",
         "reported_at": dt.isoformat(),
         "cluster_name": cluster,
         "node_name": node,
-        "node_uid": f"uid-{node}-{role}",
-        "worker_role": role,
+        "node_uid": f"uid-{cluster}-{node}",
+        "worker_role": WorkerRole.DM.value,
         "mounts": [],
         "csi": [],
         "tools": [],
@@ -100,7 +100,7 @@ def _bulk_active_plans(repo: DmsRepository, n: int) -> str:
     ]
     rows = [
         (
-            f"plan_{i}", request_id, LifecycleState.PLANNED.value, "RM",
+            f"plan_{i}", request_id, LifecycleState.PLANNED.value, WorkerRole.DM.value,
             OperationKind.DATA_SYNC.value, "cephfs-a:proj", "{}", "{}", "{}",
             0, _TS, _TS,
         )
@@ -124,7 +124,7 @@ def _bulk_attention_runs(repo: DmsRepository, n: int) -> None:
             "attempt_count", "created_at", "updated_at",
         ],
         [(
-            plan_id, request_id, LifecycleState.SUCCEEDED.value, "RM",
+            plan_id, request_id, LifecycleState.SUCCEEDED.value, WorkerRole.DM.value,
             OperationKind.DATA_SYNC.value, "cephfs-a:proj", "{}", "{}", "{}",
             0, _TS, _TS,
         )],
@@ -136,7 +136,7 @@ def _bulk_attention_runs(repo: DmsRepository, n: int) -> None:
     ]
     rows = [
         (
-            f"run_{i}", request_id, plan_id, "w1", "e1", "RM", _TS, _TS,
+            f"run_{i}", request_id, plan_id, "w1", "e1", WorkerRole.DM.value, _TS, _TS,
             LifecycleState.RECOVERY_NEEDED.value, _TS, _TS,
         )
         for i in range(n)
@@ -180,40 +180,47 @@ def _register_mapping(repo: DmsRepository, storage_name: str) -> None:
 # --------------------------------------------------------------------------- #
 # (a) latest_per_node
 # --------------------------------------------------------------------------- #
-def test_latest_per_node_returns_one_newest_row_per_node_role(tmp_path):
+def test_latest_per_node_returns_one_newest_row_per_node(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
-    # w1/RM: three reports, newest at -1m
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=5)))
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=3)))
-    newest_w1_rm = repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=1)))
-    # w1/DM: a different role for the same node is a distinct identity
-    newest_w1_dm = repo.ingest_agent_report(_rep("w1", "DM", now - timedelta(minutes=2)))
-    # w2/RM: two reports
-    repo.ingest_agent_report(_rep("w2", "RM", now - timedelta(minutes=10)))
-    newest_w2_rm = repo.ingest_agent_report(_rep("w2", "RM", now - timedelta(minutes=4)))
+    # cluster-a/w1: three reports over time, newest at -1m (and NOT ingested last, so
+    # "newest" can only come from reported_at, not from insertion order)
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=5)))
+    newest_a_w1 = repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=1)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=3)))
+    # cluster-a/w2: two reports
+    repo.ingest_agent_report(_rep("w2", now - timedelta(minutes=10)))
+    newest_a_w2 = repo.ingest_agent_report(_rep("w2", now - timedelta(minutes=4)))
+    # cluster-b/w1: the SAME node name in a different cluster is a distinct identity
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=8), cluster="cluster-b"))
+    newest_b_w1 = repo.ingest_agent_report(
+        _rep("w1", now - timedelta(minutes=2), cluster="cluster-b")
+    )
 
     latest = repo.list_agent_reports(latest_per_node=True)
 
-    # exactly one row per (node, role)
-    keys = sorted((r["node_name"], r["worker_role"]) for r in latest)
-    assert keys == [("w1", "DM"), ("w1", "RM"), ("w2", "RM")]
+    # exactly one row per (cluster, node) — 7 reports collapse to 3 nodes
+    keys = sorted((r["cluster_name"], r["node_name"]) for r in latest)
+    assert keys == [("cluster-a", "w1"), ("cluster-a", "w2"), ("cluster-b", "w1")]
     assert len(latest) == 3
-    # and each is the NEWEST report for its node/role
-    assert {r["report_id"] for r in latest} == {
-        newest_w1_rm,
-        newest_w1_dm,
-        newest_w2_rm,
+    # and each is the NEWEST report for its node
+    assert {r["report_id"] for r in latest} == {newest_a_w1, newest_a_w2, newest_b_w1}
+    assert {r["reported_at"] for r in latest} == {
+        (now - timedelta(minutes=1)).isoformat(),
+        (now - timedelta(minutes=4)).isoformat(),
+        (now - timedelta(minutes=2)).isoformat(),
     }
+    # DM is the only role, so every current row carries it
+    assert {r["worker_role"] for r in latest} == {WorkerRole.DM.value}
 
 
 def test_latest_per_node_breaks_reported_at_ties_deterministically(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
     same = now - timedelta(minutes=1)
-    # two reports with the SAME reported_at for one node/role
-    id_a = repo.ingest_agent_report(_rep("w1", "RM", same))
-    id_b = repo.ingest_agent_report(_rep("w1", "RM", same))
+    # two reports with the SAME reported_at for one node
+    id_a = repo.ingest_agent_report(_rep("w1", same))
+    id_b = repo.ingest_agent_report(_rep("w1", same))
 
     latest = repo.list_agent_reports(latest_per_node=True)
 
@@ -225,12 +232,12 @@ def test_latest_per_node_breaks_reported_at_ties_deterministically(tmp_path):
 def test_latest_per_node_respects_freshness_filter(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
-    # w1/RM: an old report (will go Stale) then a recent one — w1's CURRENT report
+    # w1: an old report (will go Stale) then a recent one — w1's CURRENT report
     # is Fresh (a newer Fresh report resolves the older Stale one).
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(hours=2)))
-    recent = repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(seconds=5)))
-    # w2/RM: only an old report — w2's CURRENT (and only) report is Stale.
-    repo.ingest_agent_report(_rep("w2", "RM", now - timedelta(hours=2)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(hours=2)))
+    recent = repo.ingest_agent_report(_rep("w1", now - timedelta(seconds=5)))
+    # w2: only an old report — w2's CURRENT (and only) report is Stale.
+    repo.ingest_agent_report(_rep("w2", now - timedelta(hours=2)))
     repo.mark_stale_agent_reports(stale_seconds=300)
 
     # no freshness filter -> one latest row per node: w1 (Fresh), w2 (Stale)
@@ -259,7 +266,7 @@ def test_agent_reports_limit_offset_paginate_without_overlap_or_gaps(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
     ids = [
-        repo.ingest_agent_report(_rep(f"n{i}", "RM", now - timedelta(minutes=i)))
+        repo.ingest_agent_report(_rep(f"n{i}", now - timedelta(minutes=i)))
         for i in range(10)
     ]
 
@@ -318,7 +325,7 @@ def test_count_methods_match_list_where_clauses(tmp_path):
     # drive a couple of plans/runs through the real lifecycle into mixed states
     req_a = _seed_request(repo)
     plan_a = repo.create_plan(
-        request_id=req_a, worker_role=WorkerRole.RM,
+        request_id=req_a, worker_role=WorkerRole.DM,
         operation_kind=OperationKind.DATA_SYNC.value, resource_key="cephfs-a:proj",
         desired_state={}, precondition={}, execution_metadata={},
     )
@@ -337,9 +344,12 @@ def test_count_methods_match_list_where_clauses(tmp_path):
     # counts equal the (uncapped) list cardinalities, with identical WHERE clauses
     assert repo.count_active_plans() == len(repo.list_active_plans(limit=1000))
     assert repo.count_active_runs() == len(repo.list_active_runs(limit=1000))
-    assert repo.count_active_runs(worker_role="RM") == len(
-        repo.list_active_runs(worker_role="RM", limit=1000)
-    )
+    # the optional worker_role filter narrows both paths identically; pin the value so
+    # this is not a vacuous 0 == 0 (run_a is Running, i.e. active, on the DM role).
+    dm = WorkerRole.DM.value
+    assert repo.count_active_runs(worker_role=dm) == len(
+        repo.list_active_runs(worker_role=dm, limit=1000)
+    ) == 1
     assert repo.count_runs() == len(repo.list_runs(limit=1000))
     assert repo.count_runs(states=ATTENTION_RUN_STATES) == len(
         repo.list_runs(states=ATTENTION_RUN_STATES, limit=1000)
@@ -466,17 +476,20 @@ def test_action_required_uses_latest_per_node_for_staleness(tmp_path):
     service = _query_service(tmp_path)
     repo = service.repository
     now = datetime.now(timezone.utc)
-    # w1/RM: old report + a recent one -> latest is Fresh -> NOT an action item
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(hours=2)))
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(seconds=5)))
-    # w2/DM: only an old report -> latest is Stale -> IS an action item
-    repo.ingest_agent_report(_rep("w2", "DM", now - timedelta(hours=3)))
+    # w1: old report + a recent one -> latest is Fresh -> NOT an action item
+    repo.ingest_agent_report(_rep("w1", now - timedelta(hours=2)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(seconds=5)))
+    # w2: only an old report -> latest is Stale -> IS an action item
+    repo.ingest_agent_report(_rep("w2", now - timedelta(hours=3)))
     repo.mark_stale_agent_reports(stale_seconds=300)
 
     stale = [i for i in service.action_required() if i["issue_type"] == "agent_report_stale"]
 
     assert len(stale) == 1
-    assert (stale[0]["node_name"], stale[0]["worker_role"]) == ("w2", "DM")
+    assert (stale[0]["node_name"], stale[0]["worker_role"]) == (
+        "w2",
+        WorkerRole.DM.value,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -511,9 +524,9 @@ def client(tmp_path):
 def test_route_agent_reports_latest_per_node(client):
     app, repo = client
     now = datetime.now(timezone.utc)
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=5)))
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=1)))
-    repo.ingest_agent_report(_rep("w2", "DM", now - timedelta(minutes=2)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=5)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=1)))
+    repo.ingest_agent_report(_rep("w2", now - timedelta(minutes=2)))
     tc = TestClient(app)
 
     resp = tc.get(
@@ -521,9 +534,10 @@ def test_route_agent_reports_latest_per_node(client):
     )
     assert resp.status_code == 200
     body = resp.json()
+    # 3 reports across 2 nodes collapse to one current row per node
     assert sorted((r["node_name"], r["worker_role"]) for r in body) == [
-        ("w1", "RM"),
-        ("w2", "DM"),
+        ("w1", WorkerRole.DM.value),
+        ("w2", WorkerRole.DM.value),
     ]
 
     # default (no param) keeps the full history view

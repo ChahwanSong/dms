@@ -15,8 +15,6 @@ from .agent import AgentReportIngestionService
 from .agent_daemon import build_agent_report, config_from_env, post_report, run_loop
 from .adapters import (
     LdapIdentityLookupAdapter,
-    StubFilesystemBackendAdapter,
-    StubKubernetesNamespaceQuotaAdapter,
     volcano_adapter_from_settings,
 )
 from .backend_registry import BackendAdapterRegistry
@@ -26,7 +24,7 @@ from .domain import AgentReport
 from .migrations import migrate_all
 from .planner import Planner
 from .repositories import DmsRepository, ObservabilityRepository
-from .workers import DMWorkerRuntime, RMWorkerRuntime
+from .workers import DMWorkerRuntime
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,11 +41,6 @@ def main(argv: list[str] | None = None) -> int:
     planner.add_argument("--loop", action="store_true")
     planner.add_argument("--interval", type=float, default=5.0)
     planner.add_argument("--limit", type=int, default=50)
-
-    rm_worker = subcommands.add_parser("rm-worker")
-    rm_worker.add_argument("--worker-id", required=True)
-    rm_worker.add_argument("--loop", action="store_true")
-    rm_worker.add_argument("--interval", type=float, default=5.0)
 
     dm_worker = subcommands.add_parser("dm-worker")
     dm_worker.add_argument("--worker-id", required=True)
@@ -99,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         settings.observability_database_url,
         pool_config=settings.observability_pool_config(),
     )
-    # Long-running CLI processes (planner / rm-worker / dm-worker / sanity-reconciler)
+    # Long-running CLI processes (planner / dm-worker / sanity-reconciler / retention)
     # create pools lazily on first connect; return them on clean exit. (Loops run
     # forever, so this mainly covers the one-shot commands.)
     atexit.register(close_all_pools)
@@ -152,20 +145,6 @@ def main(argv: list[str] | None = None) -> int:
             else settings.agent_report_retention_interval_seconds
         )
         return _run_once_or_loop(runner, loop=args.loop, interval=interval)
-    if args.command == "rm-worker":
-        worker = RMWorkerRuntime(
-            repository=repository,
-            observability=observability,
-            filesystem_adapter=StubFilesystemBackendAdapter(),
-            kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
-            worker_id=args.worker_id,
-            lease_seconds=settings.worker_lease_seconds,
-            recovery_sweep_lease_seconds=settings.recovery_sweep_lease_seconds,
-            backend_registry=BackendAdapterRegistry.with_live_defaults(
-                repository, settings
-            ),
-        )
-        return _run_once_or_loop(worker.run_once, loop=args.loop, interval=args.interval)
     if args.command == "dm-worker":
         # dm-worker runs as root and writes job metadata into the shared artifact FS;
         # restrict its umask so those files are owner-only (the locked-down artifact

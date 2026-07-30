@@ -3,15 +3,14 @@ import { operatorApi, type AgentReport } from "../../../api";
 import { fmtAgo } from "./helpers";
 import Section from "./Section";
 
-// One entry per worker NODE. RM/DM are separate agents on the same host, so we merge a
+// One entry per worker NODE. A node may send more than one report, so we merge a
 // node's role-reports into one record and surface only agent freshness — the "status".
 // The detailed per-node resource graphs (CPU/메모리/네트워크) live in the dedicated
 // 워커 노드 tab, so this dashboard section stays a brief status board: no metric
-// columns, just each node's RM/DM health and how recently it reported.
+// columns, just each node's DM health and how recently it reported.
 interface NodeView {
   cluster_name: string;
   node_name: string;
-  rm?: string; // freshness of the RM agent report (undefined = no RM agent)
   dm?: string; // freshness of the DM agent report
   reported_at?: string;
 }
@@ -21,7 +20,7 @@ type Health = "ok" | "warn" | "off";
 // node health rollup from its role freshness: ok = every present role Fresh,
 // warn = some role Stale, off = no agent reporting at all.
 function health(n: NodeView): Health {
-  const roles = [n.rm, n.dm].filter(Boolean) as string[];
+  const roles = [n.dm].filter(Boolean) as string[];
   if (roles.length === 0) return "off";
   return roles.every((s) => s === "Fresh") ? "ok" : "warn";
 }
@@ -50,8 +49,7 @@ function buildNodes(reports: AgentReport[]): NodeView[] {
       n = { cluster_name: r.cluster_name, node_name: r.node_name };
       byNode.set(key, n);
     }
-    if (r.worker_role === "RM") n.rm = r.freshness_status;
-    else if (r.worker_role === "DM") n.dm = r.freshness_status;
+    if (r.worker_role === "DM") n.dm = r.freshness_status;
     if (!n.reported_at || (r.reported_at || "") > n.reported_at) n.reported_at = r.reported_at;
   }
   return [...byNode.values()].sort((a, b) =>
@@ -101,7 +99,6 @@ export default function NodesTable({ onNavigate }: { onNavigate?: (section: stri
                 </span>
               </span>
               <span className="nsc-roles">
-                {roleBadge("RM", n.rm)}
                 {roleBadge("DM", n.dm)}
               </span>
             </div>

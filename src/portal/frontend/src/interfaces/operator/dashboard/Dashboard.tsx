@@ -6,7 +6,6 @@ import KpiRow from "./KpiRow";
 import TimeSeriesCard from "./TimeSeriesCard";
 import NodesTable from "./NodesTable";
 import StorageNodeMatrix from "./StorageNodeMatrix";
-import ControlHostsTable from "./ControlHostsTable";
 import VolcanoPanel from "./VolcanoPanel";
 
 const POLL_MS = 7000;
@@ -77,7 +76,6 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (section: strin
           <div className="span-12"><StorageNodeMatrix /></div>
           <div className="span-12"><StatusCards summary={summary} attention={attention} onNavigate={onNavigate} /></div>
           <div className="span-12"><NodesTable onNavigate={onNavigate} /></div>
-          <div className="span-12"><ControlHostsTable /></div>
           <div className="span-12"><VolcanoPanel /></div>
         </div>
       </div>

@@ -29,7 +29,7 @@ def test_agent_inventory_and_storage_mapping_sanity(harness):
             cluster_name="cluster-a",
             node_name="c1-worker",
             node_uid="uid-a",
-            worker_role="RM",
+            worker_role="DM",
             mounts=[mount("cephfs-a")],
             csi=[csi(CEPHFS_DRIVER, "testbed-cephfs")],
         ),
@@ -40,23 +40,26 @@ def test_agent_inventory_and_storage_mapping_sanity(harness):
         event["event_type"] == "agent_node_identity_mismatch"
         for event in harness["observability"].list_events()
     )
+    # the rejected report was never ingested: no report exists for that node at all
     reports = client.get("/api/v1/operations/agent-reports", headers=API_HEADERS).json()
-    assert all(
-        report["node_name"] != "c1-worker"
-        or report["worker_role"] != "RM"
-        for report in reports
-    )
+    assert all(report["node_name"] != "c1-worker" for report in reports)
 
     inventory = client.get("/api/v1/operations/inventory", headers=API_HEADERS).json()
     assert "testbed-cephfs" in {
         item["name"] for item in inventory["clusters"]["cluster-a"]["storage_classes"]
     }
-    assert "cephfs-a" in inventory["worker_roles"]["RM"]["cluster-a"][
-        "mounts_by_storage_name"
-    ]
-    assert "longhorn-b" in inventory["worker_roles"]["DM"]["cluster-a"][
-        "mounts_by_storage_name"
-    ]
+    # every fresh node lands in the single DM bucket, and multiple nodes of one
+    # cluster aggregate into that cluster's evidence (per-node entries preserved).
+    dm_cluster_a = inventory["worker_roles"]["DM"]["cluster-a"]
+    assert {node["node_name"] for node in dm_cluster_a["nodes"]} == {
+        "c1-worker-1",
+        "c1-worker-2",
+    }
+    assert {
+        entry["node_name"]
+        for entry in dm_cluster_a["mounts_by_storage_name"]["cephfs-a"]
+    } == {"c1-worker-1", "c1-worker-2"}
+    assert "longhorn-b" in dm_cluster_a["mounts_by_storage_name"]
 
     ready = upsert_mapping(
         client,
@@ -72,8 +75,10 @@ def test_agent_inventory_and_storage_mapping_sanity(harness):
     )
     assert ready["status"] == "Ready"
     sanity = ready["mapping"]["sanity_result"]
-    assert sanity["readiness"]["resource_management"] == "Ready"
+    # sanity readiness has exactly two axes
+    assert set(sanity["readiness"]) == {"data_management", "inventory"}
     assert sanity["readiness"]["data_management"] == "Ready"
+    assert sanity["readiness"]["inventory"] == "Ready"
     assert "/this/path/is/not-observed-by-api-pod" not in str(sanity)
 
     longhorn = upsert_mapping(
@@ -161,14 +166,6 @@ def test_gpfs_storage_mapping_uses_default_csi_driver(harness):
     reports = [
         agent_report(
             cluster_name="cluster-a",
-            node_name="c1-rm-gpfs",
-            node_uid="uid-c1-rm-gpfs",
-            worker_role="RM",
-            mounts=[],
-            csi=[csi(GPFS_DRIVER, "gpfs-csi")],
-        ),
-        agent_report(
-            cluster_name="cluster-a",
             node_name="c1-dm-gpfs",
             node_uid="uid-c1-dm-gpfs",
             worker_role="DM",
@@ -197,8 +194,8 @@ def test_gpfs_storage_mapping_uses_default_csi_driver(harness):
     assert gpfs["status"] == "Ready"
     sanity = gpfs["mapping"]["sanity_result"]
     assert "csi_driver_mismatch" not in issue_codes(sanity["errors"])
-    assert sanity["readiness"]["resource_management"] == "Ready"
     assert sanity["readiness"]["data_management"] == "Ready"
+    assert sanity["readiness"]["inventory"] == "Ready"
 
 
 def test_planner_rejects_failed_mapping_and_uses_ready_agent_pool(harness):
@@ -266,16 +263,14 @@ def test_storage_mapping_upsert_conflicts_with_active_work(harness):
         storage_class_name="testbed-cephfs",
     )
 
+    # any in-flight request touching the storage counts as active work; a data.scan
+    # is the cheapest vehicle to create one.
     request = client.post(
-        "/api/v1/resource-management/filesystems",
+        "/api/v1/data-management/scan",
         json={
             "requester_id": "user-1",
-            "payload": {
-                "storage_name": "cephfs-a",
-                "directory_name": "alpha",
-                "resource_type": "user",
-                "users": ["alice", "bob"],
-            },
+            "storage_name": "cephfs-a",
+            "target_path": "dataset",
         },
         headers=API_HEADERS,
     )
@@ -308,7 +303,7 @@ def upsert_mapping(
     expected_status: int = 200,
 ) -> dict:
     response = client.post(
-        "/api/v1/resource-management/storage-mappings",
+        "/api/v1/storage-mappings",
         json={
             "storage_name": storage_name,
             "backend_template": backend_template
@@ -333,19 +328,21 @@ def upsert_mapping(
 
 
 def submit_core_reports(client: TestClient) -> None:
+    # two DM nodes on the control cluster (cluster-a) plus one on cluster-b, so the
+    # per-cluster DM evidence is an aggregate of several nodes rather than one row.
     reports = [
         agent_report(
             cluster_name="cluster-a",
-            node_name="c1-rm",
-            node_uid="uid-c1-rm",
-            worker_role="RM",
+            node_name="c1-worker-1",
+            node_uid="uid-c1-worker-1",
+            worker_role="DM",
             mounts=[mount("cephfs-a")],
             csi=[csi(CEPHFS_DRIVER, "testbed-cephfs")],
         ),
         agent_report(
             cluster_name="cluster-a",
-            node_name="c1-dm",
-            node_uid="uid-c1-dm",
+            node_name="c1-worker-2",
+            node_uid="uid-c1-worker-2",
             worker_role="DM",
             mounts=[mount("cephfs-a"), mount("longhorn-b")],
             csi=[
@@ -356,9 +353,9 @@ def submit_core_reports(client: TestClient) -> None:
         ),
         agent_report(
             cluster_name="cluster-b",
-            node_name="c2-rm",
-            node_uid="uid-c2-rm",
-            worker_role="RM",
+            node_name="c2-worker-1",
+            node_uid="uid-c2-worker-1",
+            worker_role="DM",
             mounts=[mount("longhorn-b")],
             csi=[csi(LONGHORN_DRIVER, "testbed-longhorn")],
         ),
@@ -427,7 +424,7 @@ def static_inventory() -> dict:
     return {
         "clusters": {
             "cluster-a": {
-                "nodes": [{"name": "c1-rm", "uid": "uid-c1-rm"}],
+                "nodes": [{"name": "c1-worker-1", "uid": "uid-c1-worker-1"}],
                 "storage_classes": [
                     {
                         "name": "testbed-cephfs",
@@ -443,7 +440,7 @@ def static_inventory() -> dict:
                 "csi_drivers": [{"name": CEPHFS_DRIVER}, {"name": GPFS_DRIVER}],
             },
             "cluster-b": {
-                "nodes": [{"name": "c2-rm", "uid": "uid-c2-rm"}],
+                "nodes": [{"name": "c2-worker-1", "uid": "uid-c2-worker-1"}],
                 "storage_classes": [
                     {
                         "name": "testbed-longhorn",

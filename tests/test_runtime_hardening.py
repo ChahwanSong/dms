@@ -1,30 +1,25 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 from typing import Any
 
 from fastapi.testclient import TestClient
 
 from dms.adapters import (
-    KubernetesNamespaceQuotaLiveAdapter,
-    StubFilesystemBackendAdapter,
-    StubKubernetesNamespaceQuotaAdapter,
-)
-from dms.backend_registry import BackendAdapterRegistry
-from dms.backends.gpfs import (
-    GPFS_BACKEND_TYPE,
-    GPFS_CSI_DRIVER,
-    GpfsFilesystemBackendAdapter,
+    IdentityLookupResult,
+    StubIdentityLookupAdapter,
+    StubVolcanoAdapter,
 )
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
-from dms.domain import LifecycleState, OperationKind, ResourceKind, StorageMappingInput
+from dms.domain import DataJobState, LifecycleState, StorageMappingInput
 from dms.migrations import migrate_all
 from dms.planner import Planner
 from dms.query import OperationalQueryService
 from dms.repositories import DmsRepository, ObservabilityRepository
-from dms.workers import RMWorkerRuntime
+from dms.workers import DMWorkerRuntime
 
 
 class FailingObservabilityRepository(ObservabilityRepository):
@@ -38,8 +33,8 @@ def test_auth_rejection_survives_observability_write_failure(tmp_path, caplog):
 
     with caplog.at_level(logging.WARNING, logger="dms.repositories"):
         response = client.post(
-            "/api/v1/resource-management/filesystems",
-            json=_filesystem_body("auth-failure"),
+            "/api/v1/data-management/scan",
+            json=_scan_body("auth-failure"),
         )
 
     assert response.status_code == 401
@@ -48,28 +43,31 @@ def test_auth_rejection_survives_observability_write_failure(tmp_path, caplog):
 
 
 def test_worker_success_survives_observability_write_failure(tmp_path):
-    _, repository, observability = _repositories(tmp_path)
+    settings, repository, observability = _repositories(tmp_path)
     _register_mapping(repository, storage_name="cephfs-a", backend_type="cephfs")
-    request_id = repository.create_request(
-        requester_id="user-1",
-        actor="api-client",
-        operation=OperationKind.FILESYSTEM_CREATE.value,
-        resource_kind=ResourceKind.FILESYSTEM.value,
-        resource_key="cephfs-a:phase14-success",
-        payload=_filesystem_payload("cephfs-a", "phase14-success"),
-    )
-    Planner(repository).run_once()
-    worker = RMWorkerRuntime(
+    _ingest_ready_dm_report(repository, storage_name="cephfs-a")
+    client = TestClient(create_app(settings, repository, observability))
+    request_id = client.post(
+        "/api/v1/data-management/scan",
+        json=_scan_body("phase14-success"),
+        headers={"x-dms-actor": "api-client"},
+    ).json()["request_id"]
+    Planner(repository, settings=settings).run_once()
+    worker = DMWorkerRuntime(
         repository=repository,
         observability=observability,
-        filesystem_adapter=StubFilesystemBackendAdapter(),
-        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
-        worker_id="rm-phase14",
+        identity_lookup=_identity_lookup(),
+        volcano_adapter=StubVolcanoAdapter(),
+        worker_id="dm-phase14",
     )
 
     assert worker.run_once() == 1
     assert (
         repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+    )
+    assert (
+        repository.get_data_job_by_request(request_id)["state"]
+        == DataJobState.SUCCEEDED.value
     )
     results = repository.get_results(request_id)
     assert [result["terminal_status"] for result in results] == [
@@ -77,56 +75,12 @@ def test_worker_success_survives_observability_write_failure(tmp_path):
     ]
 
 
-def test_unsupported_filesystem_backend_fails_closed_and_is_action_required(tmp_path):
-    settings, repository, observability = _repositories(tmp_path)
-    _register_mapping(repository, storage_name="typo-a", backend_type="cephfss")
-    request_id = repository.create_request(
-        requester_id="user-1",
-        actor="api-client",
-        operation=OperationKind.FILESYSTEM_CREATE.value,
-        resource_kind=ResourceKind.FILESYSTEM.value,
-        resource_key="typo-a:phase14-unsupported",
-        payload=_filesystem_payload("typo-a", "phase14-unsupported"),
-    )
-    Planner(repository).run_once()
-    worker = RMWorkerRuntime(
-        repository=repository,
-        observability=observability,
-        filesystem_adapter=StubFilesystemBackendAdapter(),
-        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
-        worker_id="rm-phase14",
-        backend_registry=BackendAdapterRegistry.with_live_defaults(
-            repository, settings
-        ),
-    )
-
-    assert worker.run_once() == 1
-    request = repository.get_request(request_id)
-    assert request["status"] == LifecycleState.BACKEND_APPLY_FAILED.value
-    [result] = repository.get_results(request_id)
-    assert result["terminal_status"] == LifecycleState.BACKEND_APPLY_FAILED.value
-    assert result["error_category"] == "backend_precondition"
-    assert result["verification_summary"]["backend_side_effect"] is False
-    assert (
-        result["verification_summary"]["issues"][0]["issue_type"]
-        == "unsupported_backend"
-    )
-    issues = OperationalQueryService(repository, observability).action_required()
-    assert any(
-        issue["issue_type"] == "request_attention"
-        and issue["request_id"] == request_id
-        and issue["status"] == LifecycleState.BACKEND_APPLY_FAILED.value
-        for issue in issues
-    )
-
-
 def test_action_required_readiness_only_for_agent_backed_mappings(tmp_path):
-    """Agentless CSI mappings legitimately have Missing RM/DM readiness (they run
-    no node agent); only filesystem (agent-backed) mappings should surface
-    missing_rm/dm_readiness as an action item."""
+    """Agentless CSI mappings legitimately have Missing DM readiness (they run
+    no node agent); only agent-backed (filesystem) mappings should surface
+    missing_dm_readiness as an action item."""
     _, repository, observability = _repositories(tmp_path)
     missing = {
-        "resource_management": "Missing",
         "data_management": "Missing",
         "inventory": "Ready",
     }
@@ -147,154 +101,10 @@ def test_action_required_readiness_only_for_agent_backed_mappings(tmp_path):
         )
     issues = OperationalQueryService(repository, observability).action_required()
     codes = {(i["issue_type"], i.get("storage_name")) for i in issues}
-    # filesystem (agent-backed) mapping surfaces both readiness warnings
-    assert ("missing_rm_readiness", "cephfs-fs") in codes
+    # cephfs (agent-backed) mapping surfaces the readiness warning
     assert ("missing_dm_readiness", "cephfs-fs") in codes
     # agentless CSI mapping does NOT (its Missing readiness is expected)
-    assert ("missing_rm_readiness", "ceph-csi-x") not in codes
     assert ("missing_dm_readiness", "ceph-csi-x") not in codes
-
-
-def test_identity_config_error_during_adapter_build_is_precondition(tmp_path):
-    # A cephfs mapping is valid, but the live registry builds an LdapIdentityGroupManager
-    # at adapter-construction time, which raises IdentityLookupConfigurationError when no
-    # LDAP bind credentials are configured. This is a precondition failure with no backend
-    # side effect, so it must be classified BackendApplyFailed(precondition) rather than
-    # UnknownAfterSideEffect (which would trigger an unnecessary manual recovery flow).
-    settings, repository, observability = _repositories(tmp_path)
-    assert settings.ldap_bind_dn is None  # no LDAP group-management credentials
-    _register_mapping(repository, storage_name="cephfs-a", backend_type="cephfs")
-    request_id = repository.create_request(
-        requester_id="user-1",
-        actor="api-client",
-        operation=OperationKind.FILESYSTEM_CREATE.value,
-        resource_kind=ResourceKind.FILESYSTEM.value,
-        resource_key="cephfs-a:phase14-identity-config",
-        payload=_filesystem_payload("cephfs-a", "phase14-identity-config"),
-    )
-    Planner(repository).run_once()
-    worker = RMWorkerRuntime(
-        repository=repository,
-        observability=observability,
-        filesystem_adapter=StubFilesystemBackendAdapter(),
-        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
-        worker_id="rm-phase14",
-        backend_registry=BackendAdapterRegistry.with_live_defaults(
-            repository, settings
-        ),
-    )
-
-    assert worker.run_once() == 1
-    request = repository.get_request(request_id)
-    assert request["status"] == LifecycleState.BACKEND_APPLY_FAILED.value
-    [result] = repository.get_results(request_id)
-    assert result["terminal_status"] == LifecycleState.BACKEND_APPLY_FAILED.value
-    assert result["error_category"] == "backend_precondition"
-    assert result["verification_summary"]["backend_side_effect"] is False
-    assert result["verification_summary"]["precondition_failed"] is True
-
-
-def test_live_registry_uses_live_kubernetes_adapter_for_generic_csi_backend(tmp_path):
-    settings, repository, _ = _repositories(tmp_path)
-    _register_mapping(
-        repository,
-        storage_name="longhorn-b",
-        backend_type="longhorn",
-        cluster_name="cluster-b",
-        storage_class_name="testbed-longhorn",
-    )
-    registry = BackendAdapterRegistry.with_live_defaults(repository, settings)
-    plan = _kubernetes_quota_plan("longhorn-b", "testbed-longhorn")
-
-    adapter = registry.kubernetes_for_plan(plan)
-
-    assert isinstance(adapter, KubernetesNamespaceQuotaLiveAdapter)
-
-
-def test_rm_worker_does_not_select_filesystem_adapter_for_kubernetes_quota(tmp_path):
-    settings, repository, observability = _repositories(tmp_path)
-    _register_mapping(
-        repository,
-        storage_name="longhorn-b",
-        backend_type="longhorn",
-        cluster_name="cluster-b",
-        storage_class_name="testbed-longhorn",
-    )
-    request_id = repository.create_request(
-        requester_id="user-1",
-        actor="api-client",
-        operation=OperationKind.K8S_QUOTA_CREATE.value,
-        resource_kind=ResourceKind.KUBERNETES_NAMESPACE_QUOTA.value,
-        resource_key="cluster-b:alice",
-        payload={
-            "cluster_name": "cluster-b",
-            "namespace_name": "alice",
-            "storage_class_quotas": [{"storage_name": "longhorn-b"}],
-            "quota": {"requests_storage_bytes": 1024**3, "pvc_count": 2},
-            "expires_at": "2099-01-01T00:00:00Z",
-        },
-    )
-    Planner(repository).run_once()
-    kubernetes_adapter = StubKubernetesNamespaceQuotaAdapter()
-    registry = BackendAdapterRegistry(
-        repository=repository,
-        default_kubernetes_adapter=kubernetes_adapter,
-        settings=settings,
-        enforce_supported_backends=True,
-    )
-    worker = RMWorkerRuntime(
-        repository=repository,
-        observability=observability,
-        filesystem_adapter=StubFilesystemBackendAdapter(),
-        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
-        worker_id="rm-phase14",
-        backend_registry=registry,
-    )
-
-    assert worker.run_once() == 1
-    assert (
-        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
-    )
-    assert kubernetes_adapter.calls == [
-        ("apply_resource_quota", repository.get_plan_by_request(request_id)["plan_id"])
-    ]
-
-
-def test_live_registry_keeps_gpfs_filesystem_and_kubernetes_paths_separate(tmp_path):
-    settings, repository, _ = _repositories(tmp_path)
-    _register_gpfs_mapping(repository)
-    registry = BackendAdapterRegistry.with_live_defaults(repository, settings)
-    filesystem_plan = {
-        "plan_id": "plan-gpfs-fs",
-        "resource_key": "gpfs-a:project-alpha",
-        "desired_state": {"storage_name": "gpfs-a", "directory_name": "project-alpha"},
-    }
-    kubernetes_plan = _kubernetes_quota_plan("gpfs-a", "gpfs-csi")
-
-    assert isinstance(
-        registry.filesystem_for_plan(filesystem_plan), GpfsFilesystemBackendAdapter
-    )
-    assert isinstance(
-        registry.kubernetes_for_plan(kubernetes_plan),
-        KubernetesNamespaceQuotaLiveAdapter,
-    )
-
-
-def test_live_registry_uses_live_kubernetes_adapter_for_unknown_csi_backend(tmp_path):
-    settings, repository, _ = _repositories(tmp_path)
-    _register_mapping(
-        repository,
-        storage_name="mystery-b",
-        backend_type="mysteryfs",
-        cluster_name="cluster-b",
-        storage_class_name="mystery-sc",
-    )
-    registry = BackendAdapterRegistry.with_live_defaults(repository, settings)
-
-    assert isinstance(
-        registry.kubernetes_for_plan(_kubernetes_quota_plan("mystery-b", "mystery-sc")),
-        KubernetesNamespaceQuotaLiveAdapter,
-    )
 
 
 def _repositories(tmp_path):
@@ -304,6 +114,9 @@ def _repositories(tmp_path):
         database_url=operational_url,
         observability_database_url=observability_url,
         worker_lease_seconds=300,
+        dm_kubernetes_mode="stub",
+        dm_policy_default_worker_nodes=1,
+        dm_policy_default_processes_per_node=1,
     )
     operational = Database(operational_url)
     observability_db = Database(observability_url)
@@ -315,21 +128,28 @@ def _repositories(tmp_path):
     )
 
 
-def _filesystem_body(directory_name: str) -> dict[str, Any]:
+def _scan_body(target_name: str) -> dict[str, Any]:
     return {
         "requester_id": "user-1",
-        "payload": _filesystem_payload("cephfs-a", directory_name),
+        "storage_name": "cephfs-a",
+        "target_path": f"project/{target_name}",
     }
 
 
-def _filesystem_payload(storage_name: str, directory_name: str) -> dict[str, Any]:
-    return {
-        "storage_name": storage_name,
-        "directory_name": directory_name,
-        "resource_type": "user",
-        "users": ["alice", "bob"],
-        "expires_at": "2099-01-01T00:00:00Z",
-    }
+def _identity_lookup() -> StubIdentityLookupAdapter:
+    return StubIdentityLookupAdapter(
+        mappings={
+            ("ldap", "user-1"): IdentityLookupResult(
+                provider="ldap",
+                posix_username="user-1",
+                uid=10000,
+                primary_gid=10000,
+                groups=["dms-users"],
+                user_dn="uid=user-1,ou=people,dc=example,dc=internal",
+                source_metadata={"adapter": "phase14-test"},
+            )
+        }
+    )
 
 
 def _register_mapping(
@@ -353,13 +173,10 @@ def _register_mapping(
         "agent_observed": {
             "fresh_reports": 1,
             "stale_reports": 0,
-            "rm_readiness": "Ready",
             "dm_readiness": "Ready",
-            "rm_candidates": [{"cluster_name": cluster_name, "node_name": "rm-1"}],
             "dm_candidates": [{"cluster_name": cluster_name, "node_name": "dm-1"}],
         },
         "readiness": {
-            "resource_management": "Ready",
             "data_management": "Ready",
             "inventory": "Ready",
         },
@@ -385,59 +202,45 @@ def _register_mapping(
     )
 
 
-def _register_gpfs_mapping(repository: DmsRepository) -> None:
-    _register_mapping(
-        repository,
-        storage_name="gpfs-a",
-        backend_type=GPFS_BACKEND_TYPE,
-        cluster_name="cluster-a",
-        storage_class_name="gpfs-csi",
-    )
-    mapping = repository.get_storage_mapping("gpfs-a")
-    backend_template = {
-        **mapping["backend_template"],
-        "filesystem_name": "gpfs0",
-        "mount_path": "/gpfs/gpfs0",
-        "managed_root": "/gpfs/gpfs0/dms",
-        "quota_scope": "fileset",
-        "fileset_name_template": "dms-{directory_name}",
-        "csi_driver": GPFS_CSI_DRIVER,
-        "data_network": "storage-net-a",
-        # command_runner default changed to ssh-host-exec; this local-execution test
-        # pins "local" explicitly (no ssh_host needed).
-        "command_runner": "local",
-    }
-    repository.upsert_storage_mapping(
-        StorageMappingInput(
-            storage_name="gpfs-a",
-            backend_template=backend_template,
-            cluster_name="cluster-a",
-            storage_class_name="gpfs-csi",
-            sanity_status="Ready",
-        ),
-        actor="admin",
-        sanity_result=mapping["sanity_result"],
-        readiness=mapping["readiness"],
-    )
-
-
-def _kubernetes_quota_plan(
-    storage_name: str, storage_class_name: str
-) -> dict[str, Any]:
-    return {
-        "plan_id": f"plan-{storage_name}",
-        "resource_key": "cluster-b:alice",
-        "desired_state": {
-            "cluster_name": "cluster-b",
-            "namespace_name": "alice",
-            "storage_class_quotas": [
+def _ingest_ready_dm_report(
+    repository: DmsRepository,
+    *,
+    storage_name: str,
+    node_name: str = "dm-1",
+) -> None:
+    repository.ingest_agent_report(
+        {
+            "schema_version": "phase19.v1",
+            # Freshness is computed ON READ against the staleness window, so a
+            # "ready" node must have reported recently — use now, not a fixed past.
+            "reported_at": datetime.now(timezone.utc).isoformat(),
+            "cluster_name": "cluster-a",
+            "node_name": node_name,
+            "node_uid": f"uid-{node_name}",
+            "worker_role": "DM",
+            "mounts": [
                 {
                     "storage_name": storage_name,
-                    "storage_class_name": storage_class_name,
-                    "requests_storage_bytes": 1024**3,
-                    "pvc_count": 2,
+                    "mount_path": "/mnt/testbed-cephfs",
+                    "status": "Ready",
+                    "readable": True,
                 }
             ],
-            "quota": {"requests_storage_bytes": 1024**3, "pvc_count": 2},
-        },
-    }
+            "tools": [{"name": "dscan", "status": "Ready"}],
+            "credentials": [{"name": "kubernetes-service-account", "status": "Ready"}],
+            "networks": [{"name": "storage-net", "status": "Ready"}],
+            "identity_evidence": {
+                "source": "phase14-test",
+                "users": [
+                    {
+                        "username": "user-1",
+                        "status": "Ready",
+                        "uid": 10000,
+                        "gid": 10000,
+                        "groups": ["dms-users"],
+                    }
+                ],
+            },
+            "csi": [],
+        }
+    )

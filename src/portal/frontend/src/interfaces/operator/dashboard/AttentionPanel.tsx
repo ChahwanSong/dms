@@ -9,62 +9,34 @@ const SEVERITIES = ["CRITICAL", "ERROR", "WARN", "INFO"] as const;
 const SEV_RANK: Record<string, number> = { CRITICAL: 0, ERROR: 1, WARN: 2, INFO: 3 };
 
 // ---- domains (derived from issue_type prefix) ----
-type Domain = "request" | "storage" | "agent" | "quota" | "filesystem" | "datajob" | "etc";
+// Unknown/legacy issue types (e.g. rows archived before a feature removal) fall
+// through to "etc" — domainOf never throws on an unrecognized string.
+type Domain = "request" | "storage" | "agent" | "datajob" | "etc";
 const DOMAIN_LABEL: Record<Domain, string> = {
   request: "요청", storage: "스토리지", agent: "에이전트",
-  quota: "쿼터", filesystem: "파일시스템", datajob: "데이터 잡", etc: "기타",
+  datajob: "데이터 잡", etc: "기타",
 };
 function domainOf(issueType: string): Domain {
   if (issueType === "request_attention") return "request";
   if (issueType.startsWith("data_job")) return "datajob";
-  if (issueType.startsWith("filesystem")) return "filesystem";
-  if (issueType.includes("quota")) return "quota";
   if (issueType === "agent_report_stale") return "agent";
   if (
     issueType.startsWith("storage_") || issueType === "csi_driver_mismatch" ||
-    issueType.startsWith("missing_rm") || issueType.startsWith("missing_dm")
+    issueType.startsWith("missing_dm")
   ) return "storage";
   return "etc";
 }
 
 // ---- friendly labels + fallback actions (DMS provides recommended_action for
-// quota/filesystem/data_job; for request/storage/agent we supply the action here). ----
+// data_job; for request/storage/agent we supply the action here). An issue_type with
+// no entry here falls back to its raw string, so unknown/legacy types still render. ----
 const ISSUE_META: Record<string, { label: string; action?: string }> = {
   storage_mapping_failed: { label: "스토리지 sanity 실패", action: "스토리지 인벤토리에서 원인 확인 후 sanity 재검사" },
   storage_mapping_unknown: { label: "스토리지 sanity 미검사", action: "스토리지 인벤토리에서 sanity 재검사 실행" },
   storage_class_missing: { label: "StorageClass 없음", action: "클러스터에 해당 StorageClass 생성" },
   csi_driver_mismatch: { label: "CSI 드라이버 불일치", action: "매핑의 CSI provisioner를 실제 드라이버에 맞게 정정" },
-  missing_rm_readiness: { label: "RM agent 미준비", action: "해당 스토리지 노드의 RM agent(DaemonSet) 동작 확인" },
   missing_dm_readiness: { label: "DM agent 미준비", action: "해당 스토리지 노드의 DM agent(DaemonSet) 동작 확인" },
   agent_report_stale: { label: "노드 agent report 오래됨", action: "해당 노드의 agent 데몬 상태·시계·네트워크 확인 (DM job 실행 gate)" },
-  // quota
-  kubernetes_quota_expired_unblocked: { label: "Quota 만료 (미차단)", action: "namespace quota expiration sweep 실행, 또는 resource 수동 block" },
-  kubernetes_quota_drifted: { label: "Quota drift", action: "update로 DB desired state 재적용, 또는 sync로 live 상태 수용" },
-  kubernetes_quota_missing: { label: "Quota 없음 (live)", action: "DMS 관리 ResourceQuota 재생성, 또는 검토 후 DMS resource 레코드 삭제" },
-  kubernetes_quota_db_only: { label: "Quota DB만 존재", action: "live ResourceQuota 재생성, 또는 검토 후 DB resource 레코드 삭제" },
-  kubernetes_quota_metadata_drift: { label: "Quota metadata drift", action: "update/reset apply로 DMS metadata 복구, 또는 수동 변경 내역 확인" },
-  kubernetes_quota_query_failed: { label: "Quota 조회 실패", action: "Kubernetes API 접근 확인 후 audit 재실행" },
-  quota_usage_warning: { label: "Quota 사용량 경고", action: "quota 증설, storage 정리, 또는 namespace 소유자에게 연락" },
-  quota_usage_critical: { label: "Quota 사용량 위험", action: "즉시 quota 증설 또는 storage 정리" },
-  non_dms_quota_more_restrictive: { label: "non-DMS quota가 더 제한적", action: "non-DMS ResourceQuota 소유자 확인" },
-  non_dms_quota_zero_limit: { label: "non-DMS quota 0 제한", action: "non-DMS ResourceQuota 소유자 확인" },
-  kubernetes_quota_expiration_sweep_failed: { label: "Quota expiration sweep 실패", action: "실패한 target 점검 후 sweep 재실행, 또는 수동 block" },
-  kubernetes_quota_expiration_sweep_skipped: { label: "Quota expiration sweep skip", action: "skip된 namespace quota expiration target 검토" },
-  // filesystem
-  filesystem_soft_deleted: { label: "Filesystem soft-delete (수동 제거 필요)", action: "backend 노드에서 디렉토리 수동 제거 (CephFS rm -rf / GPFS mmunlinkfileset+mmdelfileset)" },
-  filesystem_expired_unblocked: { label: "Filesystem 만료 (미차단)", action: "filesystem expiration sweep 실행, 또는 resource 수동 block" },
-  filesystem_quota_drifted: { label: "Filesystem quota drift", action: "filesystem sync로 live 수용, 또는 quota 재적용" },
-  filesystem_quota_missing: { label: "Filesystem quota 없음", action: "filesystem quota 재적용, 또는 검토 후 DB 상태 sync" },
-  filesystem_marker_mismatch: { label: "Filesystem marker 불일치", action: "수동 변경 전 filesystem marker 점검" },
-  filesystem_unblock_restore_missing: { label: "Filesystem unblock 복원 누락", action: "filesystem 접근 수동 복구, 또는 DB block_state 보정" },
-  filesystem_access_group_missing: { label: "Filesystem access group 없음", action: "DMS 관리 LDAP access group 복구 후 unblock 재실행" },
-  filesystem_unsafe_existing_directory: { label: "기존 디렉토리 안전성 문제", action: "기존 디렉토리 안전성(owner·group·marker) 점검" },
-  filesystem_import_preflight_failed: { label: "Filesystem import preflight 실패", action: "기존 디렉토리 owner·group·marker 보정 후 import 재시도" },
-  filesystem_assign_quota_failed: { label: "Filesystem assign-quota 실패", action: "디렉토리 안전성 점검 후 assign-quota 재시도" },
-  filesystem_block_failed: { label: "Filesystem block 실패", action: "block 결과 점검·조치 후 재실행" },
-  filesystem_block_verification_failed: { label: "Filesystem block 검증 실패", action: "block/unblock 결과 점검 후 재실행" },
-  filesystem_expiration_sweep_partial_failure: { label: "Filesystem expiration sweep 부분 실패", action: "실패한 target 점검 후 sweep 재실행" },
-  filesystem_expiration_sweep_skipped: { label: "Filesystem expiration sweep skip", action: "skip된 filesystem expiration target 검토" },
   // data jobs
   data_job_policy_failed: { label: "Data job policy 실패", action: "data management policy 확인·수정 후 job 재시도" },
   data_job_identity_unresolved: { label: "Data job identity 미해결", action: "LDAP identity 등록/해결 후 job 재시도" },
@@ -133,11 +105,8 @@ function actionOf(item: AttentionItem): string {
   );
 }
 function identOf(item: AttentionItem): string | undefined {
-  const ns = str(item.namespace_name) || str(item.namespace);
   return (
     str(item.storage_name) ||
-    (ns ? `${str(item.cluster_name) ? str(item.cluster_name) + "/" : ""}${ns}` : undefined) ||
-    str(item.directory_name) ||
     str(item.node_name) ||
     str(item.target) ||
     (str(item.request_id) ? `req…${str(item.request_id)!.slice(-6)}` : undefined)
@@ -162,7 +131,7 @@ function detailTarget(
   const dom = domainOf(item.issue_type);
   const st = str(item.storage_name);
   const rid = str(item.request_id);
-  if ((dom === "storage" || dom === "filesystem") && st)
+  if (dom === "storage" && st)
     return { section: "storage", focus: { kind: "storage", value: st }, label: "스토리지 상세 열기" };
   if (dom === "request" && rid)
     return { section: "dashboard-activity", focus: { kind: "request", value: rid }, label: "요청 상세 보기" };
@@ -172,29 +141,29 @@ function detailTarget(
 }
 
 // ---- detail grid ----
+// Unlisted keys render with their raw name, so an unexpected/legacy field is still shown.
 const FIELD_LABEL: Record<string, string> = {
-  storage_name: "스토리지", cluster_name: "클러스터", namespace_name: "네임스페이스",
-  namespace: "네임스페이스", node_name: "노드", worker_role: "역할",
-  directory_name: "디렉토리", resource_type: "리소스 유형", resource_key: "리소스 키",
-  key: "쿼터 항목", used: "사용", hard: "한도", used_percent: "사용률(%)",
+  storage_name: "스토리지", cluster_name: "클러스터",
+  node_name: "노드", worker_role: "역할",
+  resource_type: "리소스 유형", resource_key: "리소스 키",
   operation: "작업", target: "대상", requester_id: "요청자", status: "상태",
   state: "상태", reason: "사유", message: "메시지", sanity_status: "sanity 상태",
   expires_at: "만료", reported_at: "보고 시각", updated_at: "갱신",
   last_seen: "마지막 관측", created_at: "생성", request_id: "요청 ID",
   job_id: "작업 ID", report_id: "리포트 ID", source_request_id: "출처 요청",
-  seconds_overdue: "초과(초)", desired: "원함", live: "라이브",
+  seconds_overdue: "초과(초)",
   actor: "실행자", resource_kind: "리소스 종류", payload_summary: "요청 내용",
   requested_at: "요청 시각", commit_order: "커밋 순서", field: "필드",
   sanity_result: "sanity 결과", preflight_result: "프리플라이트 결과",
-  result_summary: "결과 요약", fileset_name: "fileset", recommended: "권고",
+  result_summary: "결과 요약", recommended: "권고",
 };
 const TIME_FIELDS = new Set([
   "expires_at", "reported_at", "updated_at", "last_seen", "created_at", "requested_at",
 ]);
 const DETAIL_ORDER = [
   "status", "state", "reason", "field", "message", "storage_name", "cluster_name",
-  "namespace_name", "namespace", "node_name", "worker_role", "directory_name",
-  "resource_type", "resource_kind", "resource_key", "key", "used", "hard", "used_percent",
+  "node_name", "worker_role",
+  "resource_type", "resource_kind", "resource_key",
   "operation", "target", "requester_id", "actor", "sanity_status", "expires_at",
   "requested_at", "reported_at", "updated_at", "last_seen", "created_at",
   "commit_order", "source_request_id", "request_id", "job_id", "report_id",

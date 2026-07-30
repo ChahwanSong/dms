@@ -10,12 +10,17 @@ from dms.adapters import (
     IdentityLookupResult,
     StaticKubernetesReadOnlyInventoryAdapter,
     StubIdentityLookupAdapter,
-    StubKubernetesNamespaceQuotaAdapter,
 )
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
-from dms.domain import DataJobState, OperationKind, ResourceKind, WorkerRole
+from dms.domain import (
+    DataJobState,
+    LifecycleState,
+    OperationKind,
+    ResourceKind,
+    WorkerRole,
+)
 from dms.migrations import migrate_all
 from dms.repositories import DmsRepository, ObservabilityRepository
 
@@ -41,8 +46,8 @@ def test_existing_dev_actor_header_still_works_when_mtls_not_required(tmp_path):
     harness = _harness(tmp_path)
 
     response = harness["client"].post(
-        "/api/v1/resource-management/filesystems",
-        json=_filesystem_body(),
+        "/api/v1/data-management/scan",
+        json=_scan_body(),
         headers={"x-dms-actor": "api-client"},
     )
 
@@ -85,8 +90,8 @@ def test_mtls_required_without_evidence_rejects_without_operational_request(tmp_
     harness = _harness(tmp_path, require_mtls_header=True)
 
     response = harness["client"].post(
-        "/api/v1/resource-management/filesystems",
-        json=_filesystem_body(),
+        "/api/v1/data-management/scan",
+        json=_scan_body(),
     )
 
     assert response.status_code == 401
@@ -106,8 +111,8 @@ def test_dms_edge_mtls_headers_derive_actor(tmp_path):
     )
 
     response = harness["client"].post(
-        "/api/v1/resource-management/filesystems",
-        json=_filesystem_body(),
+        "/api/v1/data-management/scan",
+        json=_scan_body(),
         headers={
             **MTLS_DMS_HEADERS,
             "authorization": "Bearer secret-token",
@@ -310,10 +315,26 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
     seeded_request_id = repository.create_request(
         requester_id="phase16-all",
         actor=MTLS_ACTOR,
-        operation=OperationKind.FILESYSTEM_CHECK.value,
-        resource_kind=ResourceKind.FILESYSTEM.value,
-        resource_key="cephfs-a:seeded",
-        payload={"storage_name": "cephfs-a", "directory_name": "seeded"},
+        operation=OperationKind.DATA_SCAN.value,
+        resource_kind=ResourceKind.DATA_JOB.value,
+        resource_key="data.scan:cephfs-a:seeded",
+        payload={"storage_name": "cephfs-a", "target_path": "seeded"},
+    )
+    # Vehicle for POST /operations/requests/{id}:resolve, which only accepts a request
+    # already stuck in a resolvable (non-terminal) state.
+    stuck_request_id = repository.create_request(
+        requester_id="phase16-all",
+        actor=MTLS_ACTOR,
+        operation=OperationKind.DATA_SCAN.value,
+        resource_kind=ResourceKind.DATA_JOB.value,
+        resource_key="data.scan:cephfs-a:stuck",
+        payload={"storage_name": "cephfs-a", "target_path": "stuck"},
+    )
+    repository.update_request_status(
+        stuck_request_id,
+        LifecycleState.STALE_CLAIM,
+        reason="phase16 endpoint coverage seed",
+        actor=MTLS_ACTOR,
     )
     confirm_job_id = _seed_data_job(repository, state=DataJobState.CONFIRM_PENDING)
     cancel_job_id = _seed_data_job(repository, state=DataJobState.PENDING)
@@ -322,28 +343,12 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
     cases: list[tuple[str, str, dict[str, Any] | None, set[int]]] = [
         (
             "POST",
-            "/api/v1/resource-management/storage-mappings",
-            {
-                "storage_name": "phase16-mtls-storage",
-                "backend_template": {
-                    "backend_type": "cephfs",
-                    "mount_path": "/mnt/phase16",
-                    "managed_root": "/mnt/phase16/dms",
-                },
-            },
+            "/api/v1/storage-mappings",
+            _storage_mapping_body(),
             {200},
         ),
-        ("POST", "/api/v1/resource-management/storage-mappings/phase16-mtls-storage:check", None, {200}),
-        (
-            "POST",
-            "/api/v1/resource-management/default-quota-policies",
-            {
-                "resource_kind": ResourceKind.FILESYSTEM.value,
-                "resource_type": "user",
-                "quota": {"capacity_bytes": 1024},
-            },
-            {200},
-        ),
+        ("POST", "/api/v1/storage-mappings/phase16-mtls-storage:check", None, {200}),
+        ("PATCH", "/api/v1/storage-mappings/phase16-mtls-storage", _storage_mapping_body(), {200}),
         (
             "PUT",
             "/api/v1/data-management/identity-denylist/requester/phase16-user",
@@ -353,40 +358,10 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
         ("GET", "/api/v1/data-management/identity-denylist", None, {200}),
         (
             "POST",
-            "/api/v1/resource-management/requests",
-            {
-                "requester_id": "phase16-all",
-                "operation": OperationKind.FILESYSTEM_CHECK.value,
-                "resource_kind": ResourceKind.FILESYSTEM.value,
-                "resource_key": "cephfs-a:generic",
-                "payload": {"storage_name": "cephfs-a", "directory_name": "generic"},
-            },
-            {202},
+            f"/api/v1/operations/requests/{stuck_request_id}:resolve",
+            {"resolution": "abandon", "reason": "phase16 endpoint coverage"},
+            {200},
         ),
-        ("POST", "/api/v1/resource-management/filesystems", _filesystem_body(), {202}),
-        ("PATCH", "/api/v1/resource-management/filesystems/cephfs-a/fs-update", _mutating_body({"expires_at": "2099-01-01T00:00:00Z"}), {202}),
-        ("POST", "/api/v1/resource-management/filesystems/cephfs-a/fs-block:block", _mutating_body({"block": True}), {202}),
-        ("POST", "/api/v1/resource-management/filesystems/cephfs-a/fs-init:initialize", _mutating_body({"quota": {"capacity_bytes": 1024}}), {202}),
-        ("DELETE", "/api/v1/resource-management/filesystems/cephfs-a/fs-delete", _mutating_body({}), {202}),
-        ("POST", "/api/v1/resource-management/filesystems/cephfs-a/fs-assign:assign-quota", _mutating_body({"quota": {"capacity_bytes": 1024}}), {202}),
-        ("POST", "/api/v1/resource-management/filesystems/cephfs-a/fs-import:import", _mutating_body({"expires_at": "2099-01-01T00:00:00Z"}), {202}),
-        ("POST", "/api/v1/resource-management/filesystems/cephfs-a/fs-check:check", _mutating_body({}), {202}),
-        ("POST", "/api/v1/resource-management/filesystems/cephfs-a/fs-sync:sync", _mutating_body({}), {202}),
-        ("POST", "/api/v1/resource-management/filesystems:expiration-sweep", _mutating_body({"dry_run": True}), {202}),
-        (
-            "POST",
-            "/api/v1/resource-management/kubernetes/namespace-quotas",
-            _mutating_body(_kubernetes_quota_payload("phase16-create")),
-            {202},
-        ),
-        ("PATCH", "/api/v1/resource-management/kubernetes/namespace-quotas/cluster-a/phase16-update", _mutating_body({"expires_at": "2099-01-01T00:00:00Z"}), {202}),
-        ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas/cluster-a/phase16-block:block", _mutating_body({"block": True}), {202}),
-        ("DELETE", "/api/v1/resource-management/kubernetes/namespace-quotas/cluster-a/phase16-delete", _mutating_body({}), {202}),
-        ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas/cluster-a/phase16-sync:sync", _mutating_body({}), {202}),
-        ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas/cluster-a/phase16-import:import", _mutating_body({"expires_at": "2099-01-01T00:00:00Z"}), {202}),
-        ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas/cluster-a/phase16-check:check", _mutating_body({}), {202}),
-        ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas:expiration-sweep", _mutating_body({"dry_run": True}), {202}),
-        ("POST", "/api/v1/resource-management/kubernetes/namespace-quotas:audit", _mutating_body({"scope": {"cluster_name": "cluster-a"}}), {202}),
         ("POST", "/api/v1/data-management/sync", _data_job_body(source_path="src", destination_path="dst"), {202}),
         ("POST", "/api/v1/data-management/rm", _data_job_body(target_path="target", options={"recursive": True}), {202}),
         ("POST", "/api/v1/data-management/scan", _data_job_body(target_path="target"), {202}),
@@ -401,9 +376,6 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
         ("GET", "/api/v1/operations/requests?requester_id=phase16-all&limit=20", None, {200}),
         ("GET", f"/api/v1/operations/requests/{seeded_request_id}", None, {200}),
         ("GET", "/api/v1/operations/resources", None, {200}),
-        ("GET", "/api/v1/operations/filesystems/expiring?status=expired", None, {200}),
-        ("GET", "/api/v1/operations/kubernetes/namespace-quotas/cluster-a/phase16-create", None, {200}),
-        ("GET", "/api/v1/operations/kubernetes/namespace-quotas/expiring?status=expired", None, {200}),
         ("GET", "/api/v1/operations/control-state", None, {200}),
         ("GET", "/api/v1/operations/work-summary", None, {200}),
         ("GET", "/api/v1/operations/plans/active", None, {200}),
@@ -433,6 +405,8 @@ def test_all_protected_api_endpoints_reach_handler_with_mtls_auth(tmp_path):
             {"reason": "phase16 endpoint coverage"},
             {200},
         ),
+        # Last: hard-deletes the mapping the GET reads above depend on.
+        ("DELETE", "/api/v1/storage-mappings/phase16-mtls-storage", None, {200}),
     ]
 
     for method, path, body, expected_statuses in cases:
@@ -534,7 +508,6 @@ def _harness(
         observability,
         identity_lookup=lookup,
         kubernetes_inventory=StaticKubernetesReadOnlyInventoryAdapter({"clusters": {}}),
-        kubernetes_quota=StubKubernetesNamespaceQuotaAdapter(),
     )
     return {
         "settings": settings,
@@ -544,15 +517,21 @@ def _harness(
     }
 
 
-def _filesystem_body() -> dict[str, Any]:
+def _scan_body() -> dict[str, Any]:
     return {
         "requester_id": "user-1",
-        "payload": {
-            "storage_name": "cephfs-a",
-            "directory_name": "phase16-auth",
-            "resource_type": "user",
-            "users": ["alice", "bob"],
-            "expires_at": "2099-01-01T00:00:00Z",
+        "storage_name": "cephfs-a",
+        "target_path": "phase16-auth",
+    }
+
+
+def _storage_mapping_body() -> dict[str, Any]:
+    return {
+        "storage_name": "phase16-mtls-storage",
+        "backend_template": {
+            "backend_type": "cephfs",
+            "mount_path": "/mnt/phase16",
+            "managed_root": "/mnt/phase16/dms",
         },
     }
 
@@ -564,27 +543,13 @@ def _agent_report() -> dict[str, Any]:
         "cluster_name": "cluster-a",
         "node_name": "c1-worker",
         "node_uid": "uid-c1-worker",
-        "worker_role": "RM",
+        "worker_role": "DM",
         "mounts": [],
         "csi": [],
         "tools": [],
         "credentials": [],
         "networks": [],
         "identity_evidence": {"source": "phase16-test"},
-    }
-
-
-def _mutating_body(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"requester_id": "phase16-all", "payload": payload}
-
-
-def _kubernetes_quota_payload(namespace_name: str) -> dict[str, Any]:
-    return {
-        "cluster_name": "cluster-a",
-        "namespace_name": namespace_name,
-        "storage_class_quotas": [{"storage_name": "phase16-mtls-storage"}],
-        "quota": {"requests_storage_bytes": 1024, "pvc_count": 1},
-        "expires_at": "2099-01-01T00:00:00Z",
     }
 
 

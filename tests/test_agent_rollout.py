@@ -50,15 +50,15 @@ def _patch(monkeypatch, apps):
     monkeypatch.setattr(agent_rollout, "_apps_api", lambda settings: (apps, "dms"))
 
 
-def test_restart_agents_patches_both(monkeypatch):
+def test_restart_agents_patches_every_agent_daemonset(monkeypatch):
     apps = FakeApps(statuses={})
     _patch(monkeypatch, apps)
     res = agent_rollout.restart_agents(SimpleNamespace(), restarted_at="2026-07-02T12:00:00Z")
     assert res["namespace"] == "dms"
-    assert set(res["restarted"]) == {"dms-rm-agent", "dms-dm-agent"}
+    assert set(res["restarted"]) == set(agent_rollout.AGENT_DAEMONSETS)
     assert res["errors"] == {}
-    # both DaemonSets stamped with the same restartedAt
-    assert {n for n, _ in apps.patched} == {"dms-rm-agent", "dms-dm-agent"}
+    # every DaemonSet stamped with the same restartedAt
+    assert {n for n, _ in apps.patched} == set(agent_rollout.AGENT_DAEMONSETS)
     assert all(ts == "2026-07-02T12:00:00Z" for _, ts in apps.patched)
 
 
@@ -66,37 +66,43 @@ def test_restart_agents_reports_per_daemonset_error(monkeypatch):
     apps = FakeApps(statuses={}, fail={"dms-dm-agent"})
     _patch(monkeypatch, apps)
     res = agent_rollout.restart_agents(SimpleNamespace(), restarted_at="t")
-    assert res["restarted"] == ["dms-rm-agent"]
+    # the failure is reported per DaemonSet and does not abort the sweep
+    assert "dms-dm-agent" not in res["restarted"]
     assert "dms-dm-agent" in res["errors"]
 
 
-def test_rollout_status_flags_rolling_vs_converged(monkeypatch):
+def test_rollout_status_flags_converged(monkeypatch):
+    # converged: observed>=gen, updated==desired, available==desired, unavailable 0
     apps = FakeApps(statuses={
-        # converged: observed>=gen, updated==desired, available==desired, unavailable 0
-        "dms-rm-agent": {"desired": 3, "updated": 3, "ready": 3, "available": 3,
+        "dms-dm-agent": {"desired": 3, "updated": 3, "ready": 3, "available": 3,
                           "unavailable": 0, "observed": 2, "generation": 2},
-        # rolling: not all updated/available yet
+    })
+    _patch(monkeypatch, apps)
+    out = agent_rollout.agent_rollout_status(SimpleNamespace())
+    by = {d["name"]: d for d in out["daemonsets"]}
+    assert by["dms-dm-agent"]["rolling"] is False
+    assert by["dms-dm-agent"]["ready"] == 3 and by["dms-dm-agent"]["desired"] == 3
+
+
+def test_rollout_status_flags_rolling(monkeypatch):
+    # rolling: not all updated/available yet
+    apps = FakeApps(statuses={
         "dms-dm-agent": {"desired": 3, "updated": 1, "ready": 1, "available": 1,
                           "unavailable": 2, "observed": 2, "generation": 2},
     })
     _patch(monkeypatch, apps)
     out = agent_rollout.agent_rollout_status(SimpleNamespace())
     by = {d["name"]: d for d in out["daemonsets"]}
-    assert by["dms-rm-agent"]["rolling"] is False
-    assert by["dms-rm-agent"]["ready"] == 3 and by["dms-rm-agent"]["desired"] == 3
     assert by["dms-dm-agent"]["rolling"] is True
     assert by["dms-dm-agent"]["updated"] == 1
 
 
 def test_rollout_status_surfaces_read_error(monkeypatch):
-    apps = FakeApps(statuses={
-        "dms-rm-agent": {"desired": 1, "updated": 1, "ready": 1, "available": 1},
-    }, fail={"dms-dm-agent"})
+    apps = FakeApps(statuses={}, fail={"dms-dm-agent"})
     _patch(monkeypatch, apps)
     out = agent_rollout.agent_rollout_status(SimpleNamespace())
     by = {d["name"]: d for d in out["daemonsets"]}
     assert "error" in by["dms-dm-agent"]
-    assert by["dms-rm-agent"]["rolling"] is False
 
 
 def test_kubernetes_unavailable_raises(monkeypatch):

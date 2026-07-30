@@ -16,43 +16,21 @@ export function SanityBadge({ status }: { status?: string }) {
   return <span className={`san ${STATUS_CLASS[s] || "san-unknown"}`}>{s}</span>;
 }
 
-// Compact readiness dots. For filesystem mappings this is the RM / DM / INV triple.
-// For k8s CSI namespace-quota mappings (agentless) RM/DM/INV agent evidence is not
-// meaningful — instead a single QUOTA dot reflects the ResourceQuota mutation
-// transport probe (readiness.kubernetes_mutation). Pass `quota` to render that axis;
-// `quota.title` overrides the dot tooltip with the transport detail.
+// Compact readiness dots: the DM / INV pair for filesystem mappings. k8s CSI
+// mappings are agentless (no DM agent evidence), so they render the INV dot only
+// — pass showRoles={false} for those.
 export function ReadinessDots({
   readiness,
   showRoles = true,
-  quota,
 }: {
   readiness?: {
-    resource_management?: string;
     data_management?: string;
     inventory?: string;
-    kubernetes_mutation?: string;
   };
   showRoles?: boolean;
-  quota?: { title?: string };
 }) {
-  if (quota) {
-    const value = readiness?.kubernetes_mutation || "Unknown";
-    return (
-      <span className="readiness-dots">
-        <span
-          className={`rdot ${STATUS_CLASS[value] || "san-unknown"}`}
-          title={quota.title || `QUOTA: ${value}`}
-        >
-          QUOTA
-        </span>
-      </span>
-    );
-  }
   const roleAxes: [string, string | undefined][] = showRoles
-    ? [
-        ["RM", readiness?.resource_management],
-        ["DM", readiness?.data_management],
-      ]
+    ? [["DM", readiness?.data_management]]
     : [];
   const axes: [string, string | undefined][] = [
     ...roleAxes,

@@ -103,38 +103,6 @@ _FS_BACKENDS = {"cephfs", "gpfs", "wekafs"}
 _VOLCANO_TERMINAL = {"Completed", "Succeeded", "Failed", "Aborted", "Terminated"}
 
 
-def _control_hosts(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """CSI (non-fs) storage mappings + their ResourceQuota mutation transport.
-
-    fs mappings (cephfs/gpfs/wekafs) run node agents and belong in the worker-node
-    panel; CSI/free-form mappings are agentless and instead reach their cluster via
-    (ssh-)kubectl from a control host. Surface that host + reachability/can-i from
-    the sanity `mutation_observed` block (already returned by storage-mappings).
-    """
-    rows: list[dict[str, Any]] = []
-    for m in mappings or []:
-        bt = (m.get("backend_template") or {}).get("backend_type") or ""
-        if bt in _FS_BACKENDS:
-            continue
-        mo = (m.get("sanity_result") or {}).get("mutation_observed") or {}
-        rows.append(
-            {
-                "storage_name": m.get("storage_name"),
-                "cluster_name": m.get("cluster_name"),
-                "backend_type": bt,
-                "sanity_status": m.get("sanity_status"),
-                "mode": mo.get("mode"),
-                "control_host": mo.get("control_host"),
-                "reachable": mo.get("reachable"),
-                "can_mutate": mo.get("can_mutate"),
-                "permissions": mo.get("permissions") or {},
-                "detail": mo.get("detail"),
-            }
-        )
-    rows.sort(key=lambda r: (r.get("cluster_name") or "", r.get("storage_name") or ""))
-    return rows
-
-
 def _latest_per_node(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse agent reports to the most recent one per (cluster, node, role).
 
@@ -167,7 +135,7 @@ def _storage_node_matrix(
 
     Columns = registered FILESYSTEM storages (cephfs/gpfs/wekafs) from the current
     mappings — CSI/agentless mappings are excluded (they aren't host-mounted). Rows =
-    worker nodes (one per node; RM+DM role-reports collapsed since mounts are
+    worker nodes (one per node; role-reports collapsed since mounts are
     host-level — keep the newest report's mounts/freshness). Each cell is that node's
     probed mount status for that storage (Ready/Missing/…) from agent report `mounts`,
     or absent (→ '미구성' in the UI) when the node never reported that storage.
@@ -584,7 +552,6 @@ def _volcano_metrics(jobs: list[dict[str, Any]], now_ts: float) -> dict[str, Any
 # a sensible default so the UI can filter by severity uniformly.
 _ATTENTION_SEVERITY_DEFAULT = {
     "request_attention": "WARN",
-    "missing_rm_readiness": "WARN",
     "missing_dm_readiness": "WARN",
     "storage_mapping_unknown": "WARN",
     "storage_mapping_failed": "ERROR",
@@ -601,7 +568,7 @@ _ATTENTION_SEVERITY_OVERRIDE = {
     "data_job_preflight_failed": "INFO",
     "data_job_cancelled": "INFO",
 }
-# DMS emits CRITICAL for some quota issues (usage >=95%, query failed); rank it above ERROR.
+# CRITICAL is ranked above ERROR so the worst item leads the list.
 _SEVERITY_RANK = {"CRITICAL": 0, "ERROR": 1, "WARN": 2, "INFO": 3}
 
 
@@ -614,10 +581,6 @@ def _attention_category(issue_type: str, resource_kind: str | None) -> str:
     if issue_type == "request_attention":
         return "live"
     if resource_kind == "data_job":
-        return "history"
-    if issue_type in {"filesystem_soft_deleted", "filesystem_expired_unblocked"}:
-        return "live"
-    if issue_type.startswith("filesystem_") or "sweep" in issue_type:
         return "history"
     return "live"
 
@@ -716,17 +679,16 @@ def dashboard_router(settings: Settings) -> APIRouter:
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         actor = _actor(user, settings)
-        control, work, jobs, reports, mappings, volcano = await asyncio.gather(
+        control, work, jobs, reports, volcano = await asyncio.gather(
             _section(dms.get_control_state(actor=actor)),
             _section(dms.get_work_summary(actor=actor)),
             _section(dms.get_data_job_summary(actor=actor)),
-            # latest_per_node => one row per node/role; node health stays complete
-            # AND cheap on this polled path (no agent-report history scan/transfer).
+            # latest_per_node => one row per node; node health stays complete AND
+            # cheap on this polled path (no agent-report history scan/transfer).
             _section(dms.list_agent_reports(actor=actor, latest_per_node=True)),
-            _section(dms.list_storage_mappings(actor=actor, limit=_STORAGE_LIMIT)),
             _section(dms.get_volcano_status(actor=actor)),
         )
-        # node counts derived from each agent's LATEST report (Fresh/Stale by role)
+        # node counts derived from each agent's LATEST report (Fresh/Stale)
         nodes = {"fresh": 0, "stale": 0, "by_role": {}}
         if reports["data"]:
             for r in _latest_per_node(reports["data"]):
@@ -736,22 +698,12 @@ def dashboard_router(settings: Settings) -> APIRouter:
                 role = r.get("worker_role") or "?"
                 slot = nodes["by_role"].setdefault(role, {"fresh": 0, "stale": 0})
                 slot["fresh" if fresh else "stale"] += 1
-        # CSI control host rollup (reachable / can-i) folded into the node card.
-        ch = {"total": 0, "reachable": 0, "can_mutate": 0}
-        if mappings["data"]:
-            hosts = _control_hosts(mappings["data"])
-            ch = {
-                "total": len(hosts),
-                "reachable": sum(1 for h in hosts if h.get("reachable")),
-                "can_mutate": sum(1 for h in hosts if h.get("can_mutate")),
-            }
         vol = _volcano_summary(volcano["data"]) if volcano["data"] else None
         return {
             "control_state": control,
             "work_summary": work,
             "data_jobs": jobs,
             "nodes": {"data": nodes, "error": reports["error"]},
-            "control_hosts": {"data": ch, "error": mappings["error"]},
             "volcano": {"data": vol, "error": volcano["error"]},
         }
 
@@ -770,7 +722,7 @@ def dashboard_router(settings: Settings) -> APIRouter:
         latest = _latest_per_node(reports)
         # os_metrics (cpu/mem/load/disk) is host-level — lift it from the agent's
         # full report and SHARE it across a node's role-rows, so a node shows
-        # metrics even if only one of its agents (RM/DM) reports them.
+        # metrics even if only one of its agent reports carries them.
         for r in latest:
             r["os_metrics"] = (r.get("report") or {}).get("os_metrics") or {}
         by_node: dict[tuple, dict[str, Any]] = {
@@ -849,20 +801,6 @@ def dashboard_router(settings: Settings) -> APIRouter:
         return {
             "nodes": _node_timeseries(rows, since_seconds),
             "window_seconds": since_seconds,
-        }
-
-    @router.get("/control-hosts")
-    async def control_hosts(
-        dms: DmsClient = Depends(get_dms_client),
-        user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
-    ) -> dict[str, Any]:
-        # Single-fetch the bounded mapping set; CSI control hosts are a subset.
-        mappings = await dms.list_storage_mappings(
-            actor=_actor(user, settings), limit=_STORAGE_LIMIT
-        )
-        return {
-            "items": _control_hosts(mappings),
-            "truncated": len(mappings) >= _STORAGE_LIMIT,
         }
 
     @router.get("/runs")

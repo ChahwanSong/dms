@@ -2,7 +2,7 @@
 #
 # Periodically re-runs storage-mapping sanity so `readiness` tracks live agent evidence
 # automatically (instead of requiring a manual `:check`). Reuses the same sanity path as
-# the API, so RM and DM readiness stay consistent.
+# the API, so the data_management and inventory axes stay consistent.
 #
 # Self-healing:
 #   * Heartbeat-driven livenessProbe — each reconcile cycle writes a heartbeat file; if
@@ -49,10 +49,12 @@ spec:
               value: "30"
             - name: DMS_SANITY_TTL_SECONDS
               value: "120"
-          # Read-only cluster kubeconfigs: the reconciler now mirrors the API's
-          # KubectlReadOnlyInventoryAdapter so it can validate k8s/CSI mappings on
+          # Read-only cluster kubeconfigs: the reconciler mirrors the API's
+          # KubectlReadOnlyInventoryAdapter so it can validate CSI mappings on
           # agentless managed clusters (kubectl inventory mode). For ssh-kubectl
-          # inventory mode, mount the dms-ssh-client secret here too (as rm-worker does).
+          # inventory mode (DMS_KUBERNETES_INVENTORY_MODE / DMS_CLUSTER_CONTROL_HOSTS_JSON)
+          # you must additionally mount an SSH key Secret at /home/dms/.ssh yourself —
+          # the control plane no longer ships one.
           volumeMounts:
             - name: kubeconfigs
               mountPath: /etc/dms/kubeconfigs

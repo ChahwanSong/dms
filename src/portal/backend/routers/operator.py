@@ -67,7 +67,7 @@ def operator_router() -> APIRouter:
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
         """DMS control cluster name (static config) — the storage form uses it to
-        default a filesystem mapping's *agent* cluster (the cluster whose RM/DM agents
+        default a filesystem mapping's *agent* cluster (the cluster whose DM agents
         report the storage). Cached briefly; it only changes on a DMS restart."""
         now = time.monotonic()
         cached = _control_cluster_cache["value"]

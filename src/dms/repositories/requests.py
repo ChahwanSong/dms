@@ -9,8 +9,6 @@ from uuid import uuid4
 from ._base import *  # noqa: F401,F403
 from ._base import (  # noqa: F401  (underscore helpers are not picked up by import *)
     _agent_capability_summary,
-    _filesystem_block_state,
-    _kubernetes_quota_block_state,
     _parse_iso,
     _storage_names_in_payload,
 )

@@ -1,18 +1,11 @@
-"""RM/DM worker runtimes.
+"""DM worker runtime.
 
-Historically a single workers.py module. Each runtime now owns its
-helpers (rm.py / dm.py); only the shared RunHeartbeat lives in _base.py.
-The public `dms.workers` surface is unchanged.
+The runtime owns its helpers (dm.py); only the shared RunHeartbeat lives in
+_base.py.
 """
 from __future__ import annotations
 
 from ._base import *  # noqa: F401,F403
-from .rm import (  # noqa: F401
-    RMWorkerRuntime,
-    _filesystem_sweep_failure_reason,
-    _kubernetes_sweep_failure_reason,
-    _rm_precondition_issue,
-)
 from .dm import (  # noqa: F401
     DMWorkerRuntime,
     _adapter_nsync_enabled,

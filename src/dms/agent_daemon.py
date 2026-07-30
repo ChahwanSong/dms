@@ -119,7 +119,7 @@ def config_from_env(environ: dict[str, str] | None = None) -> AgentDaemonConfig:
         or environ.get("NODE_NAME")
         or socket.gethostname(),
         node_uid=environ.get("DMS_AGENT_NODE_UID") or environ.get("NODE_UID"),
-        worker_role=environ.get("DMS_AGENT_WORKER_ROLE", "RM"),
+        worker_role=environ.get("DMS_AGENT_WORKER_ROLE", "DM"),
         report_interval_seconds=float(
             environ.get("DMS_AGENT_REPORT_INTERVAL_SECONDS", "60")
         ),

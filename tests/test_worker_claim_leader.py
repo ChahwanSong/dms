@@ -23,7 +23,7 @@ from dms.planner import Planner
 from dms.repositories import DmsRepository
 
 from test_operational_controls import (
-    _create_filesystem_request,
+    _create_scan_request,
     _register_ready_storage_mapping,
 )
 
@@ -36,10 +36,10 @@ def repo(tmp_path) -> DmsRepository:
     return DmsRepository(op)
 
 
-def _seed_rm_plans(repo: DmsRepository, n: int) -> None:
+def _seed_dm_plans(repo: DmsRepository, n: int) -> None:
     _register_ready_storage_mapping(repo)
     for i in range(n):
-        _create_filesystem_request(repo, f"claimdir-{i:02d}")
+        _create_scan_request(repo, f"claimdir-{i:02d}")
     Planner(repo).run_once(limit=100)
 
 
@@ -52,31 +52,25 @@ def test_is_postgres_dialect_detection(tmp_path):
 
 # --- claim_next_plan -----------------------------------------------------------
 def test_claim_next_plan_claims_distinct_oldest_first(repo):
-    _seed_rm_plans(repo, 3)
-    a = repo.claim_next_plan(WorkerRole.RM, worker_id="w1", executor_id="w1", lease_seconds=60)
-    b = repo.claim_next_plan(WorkerRole.RM, worker_id="w2", executor_id="w2", lease_seconds=60)
-    c = repo.claim_next_plan(WorkerRole.RM, worker_id="w3", executor_id="w3", lease_seconds=60)
+    _seed_dm_plans(repo, 3)
+    a = repo.claim_next_plan(WorkerRole.DM, worker_id="w1", executor_id="w1", lease_seconds=60)
+    b = repo.claim_next_plan(WorkerRole.DM, worker_id="w2", executor_id="w2", lease_seconds=60)
+    c = repo.claim_next_plan(WorkerRole.DM, worker_id="w3", executor_id="w3", lease_seconds=60)
     assert a and b and c
     ids = {a[0]["plan_id"], b[0]["plan_id"], c[0]["plan_id"]}
     assert len(ids) == 3  # each worker got a DISTINCT plan -- no double-claim
     assert a[0]["created_at"] <= b[0]["created_at"] <= c[0]["created_at"]  # oldest first
     # queue drained
-    assert repo.claim_next_plan(WorkerRole.RM, worker_id="w4", executor_id="w4", lease_seconds=60) is None
+    assert repo.claim_next_plan(WorkerRole.DM, worker_id="w4", executor_id="w4", lease_seconds=60) is None
 
 
 def test_claim_next_plan_none_when_empty(repo):
-    assert repo.claim_next_plan(WorkerRole.RM, worker_id="w1", executor_id="w1", lease_seconds=60) is None
-
-
-def test_claim_next_plan_respects_role(repo):
-    _seed_rm_plans(repo, 1)  # filesystem => RM plans only
     assert repo.claim_next_plan(WorkerRole.DM, worker_id="w1", executor_id="w1", lease_seconds=60) is None
-    assert repo.claim_next_plan(WorkerRole.RM, worker_id="w1", executor_id="w1", lease_seconds=60) is not None
 
 
 def test_claim_next_plan_creates_run_and_transitions_claimed(repo):
-    _seed_rm_plans(repo, 1)
-    claimed = repo.claim_next_plan(WorkerRole.RM, worker_id="w1", executor_id="w1", lease_seconds=60)
+    _seed_dm_plans(repo, 1)
+    claimed = repo.claim_next_plan(WorkerRole.DM, worker_id="w1", executor_id="w1", lease_seconds=60)
     assert claimed is not None
     plan, run_id = claimed
     assert repo.get_plan(plan["plan_id"])["status"] == LifecycleState.CLAIMED.value

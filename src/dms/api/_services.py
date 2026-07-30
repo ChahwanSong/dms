@@ -7,7 +7,6 @@ from typing import Any
 
 from ..adapters import (
     IdentityLookupAdapter,
-    KubernetesNamespaceQuotaAdapter,
     KubernetesReadOnlyInventoryAdapter,
 )
 from ..auth import AuthVerifier, AuthorizationPolicy
@@ -27,4 +26,3 @@ class AppServices:
     volcano_adapter: Any
     identity_lookup: IdentityLookupAdapter | None = None
     kubernetes_inventory: KubernetesReadOnlyInventoryAdapter | None = None
-    kubernetes_quota: KubernetesNamespaceQuotaAdapter | None = None

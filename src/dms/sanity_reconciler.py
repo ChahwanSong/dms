@@ -8,7 +8,7 @@ Without periodic refresh it drifts stale in BOTH directions:
 
 This module provides three layers, all of which REUSE the existing
 ``StorageMappingSanityService.check_mapping`` + ``update_storage_mapping_sanity`` path
-(no logic fork — RM and DM stay consistent):
+(no logic fork — registration-time and sweep-time checks stay consistent):
 
   (1) ``reconcile_once`` — a periodic sweep (cli ``sanity-reconciler --loop``) that
       re-runs sanity for every storage mapping and persists the result. Fail-isolated
@@ -30,51 +30,12 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import KubectlReadOnlyInventoryAdapter
-from .adapters.kubernetes_quota import (
-    KubernetesNamespaceQuotaLiveAdapter,
-    StubKubernetesNamespaceQuotaAdapter,
-)
 from .config import Settings
 from .inventory import EffectiveInventoryService, StorageMappingSanityService
 from .repositories import DmsRepository
 from .repositories._base import _parse_iso
 
 RECONCILER_ACTOR = "sanity-reconciler"
-
-
-def _should_use_live_probe(
-    settings: Settings, repository: DmsRepository | None
-) -> bool:
-    """Whether the mutation-transport probe should actually shell out (live adapter) vs
-    use a healthy stub.
-
-    Live when managed clusters are configured globally (``DMS_CLUSTER_CONTROL_HOSTS_JSON``
-    / ``DMS_CLUSTER_KUBECONFIGS_JSON``) OR when any registered storage mapping pins a
-    per-mapping transport (``mutation_mode`` / ``control_host``) -- the latter is how an
-    agentless managed cluster (e.g. ddz26 reached via ssh-kubectl + control_host) is
-    addressed WITHOUT a global entry, so its sanity must still be probed for real. Tests
-    and the default CLI (no global clusters, no per-mapping transport) get the stub, so
-    sanity never shells out to ssh/kubectl there."""
-    if settings.cluster_control_hosts or settings.cluster_kubeconfigs:
-        return True
-    if repository is not None:
-        for mapping in repository.list_storage_mappings():
-            template = mapping.get("backend_template") or {}
-            if template.get("mutation_mode") or template.get("control_host"):
-                return True
-    return False
-
-
-def mutation_transport_probe_from_settings(
-    settings: Settings, repository: DmsRepository | None = None
-):
-    """Pick the ResourceQuota mutation-transport probe for the sanity service: a live
-    adapter (shells out to ``kubectl auth can-i`` over kubectl / ssh-kubectl) when a real
-    transport is in play (see :func:`_should_use_live_probe`), otherwise a healthy stub so
-    tests / default CLI never shell out (and CSI mappings stay Ready)."""
-    if _should_use_live_probe(settings, repository):
-        return KubernetesNamespaceQuotaLiveAdapter.from_settings(settings)
-    return StubKubernetesNamespaceQuotaAdapter()
 
 
 def build_sanity_service(
@@ -86,9 +47,9 @@ def build_sanity_service(
     ssh-kubectl, never running a DMS node agent) are reconciled the same way the API
     validates them at registration. Without it the reconciler would see only agent
     reports and flip every managed-cluster mapping back to a spurious ``Failed`` on each
-    sweep, defeating the per-mapping ssh-kubectl transport. DM/filesystem readiness is
-    still derived from agent reports; the k8s adapter is per-cluster fail-isolated, so an
-    unreachable cluster degrades only its own mappings."""
+    sweep. DM readiness is still derived from agent reports; the k8s adapter is
+    per-cluster fail-isolated, so an unreachable cluster degrades only its own
+    mappings."""
     return StorageMappingSanityService(
         repository=repository,
         inventory_service=EffectiveInventoryService(
@@ -97,9 +58,6 @@ def build_sanity_service(
             settings=settings,
         ),
         settings=settings,
-        kubernetes_quota_probe=mutation_transport_probe_from_settings(
-            settings, repository
-        ),
     )
 
 

@@ -129,16 +129,6 @@ CREATE TABLE IF NOT EXISTS storage_mappings (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_storage_class_mapping
     ON storage_mappings(cluster_name, storage_class_name);
 
-CREATE TABLE IF NOT EXISTS default_quota_policies (
-    policy_id TEXT PRIMARY KEY,
-    resource_kind TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    quota TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_default_quota_policies
-    ON default_quota_policies(resource_kind, resource_type);
-
 -- identity_mappings was removed: DM resolves POSIX identity by READ-ONLY LDAP lookup
 -- at preflight time (no cached/admission-gated mapping table). The only DM-side
 -- identity state is the denylist below (per-user/group instant kill-switch + block).

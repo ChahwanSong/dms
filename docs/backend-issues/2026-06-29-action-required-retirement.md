@@ -2,6 +2,21 @@
 
 - 작성일: 2026-06-29
 - 상태: DESIGN ONLY (제안서) — 코드 변경 없음. DMS 백엔드 오너와 공동 구현 대상.
+- **⚠️ 이후 변경(RM 제거) — 이 문서는 작성 시점 기록으로 보존한다.** RM(Resource Management)
+  기능이 제거되면서 아래 분석의 일부 전제가 더 이상 유효하지 않다:
+  - **경로 이동**: `:resolve`는 `POST /api/v1/operations/requests/{request_id}:resolve`로 옮겨졌다
+    (구 `resource-management` 라우터는 삭제됨). 현재 스펙은
+    [`../api/operations.md`](../api/operations.md) "Stuck Request 해소" 절.
+  - **GAP 1**(stuck request 은퇴)은 **여전히 유효**하다 — RM과 무관하게 DM 요청도 같은 상태로
+    굳는다. 위 새 경로 기준으로 읽는다.
+  - **GAP 2**(`resources` 은퇴)는 다뤘던 대상(`filesystem` / `kubernetes_namespace_quota`
+    ResourceKind, `filesystem.forget` / `kubernetes.namespace_quota.forget` OperationKind 제안)이
+    **전부 사라져 무의미**해졌다. `kubernetes_quota_missing` / `filesystem_*` action-required
+    항목도 더 이상 생성되지 않는다.
+  - **GAP 3**(data_job aging/purge)·**GAP 4**(네이티브 ack)는 **여전히 유효**하다. GAP 4의
+    fingerprint 기반 ack/unack은 이후 실제로 구현됐다(`/operations/action-required:ack`).
+  - 본문에 나오는 `src/dms/api/routers/resource_management.py` 라인 참조는 그 파일이 삭제되어
+    더 이상 유효하지 않다.
 - 컨텍스트: 포탈(operator 콘솔)이 `operations` 읽기 전용 API로 `action_required` 목록을
   렌더링한다. 현재 이 목록에서 더 이상 유효하지 않거나(stale) 종료된 항목을 **영구히
   치울(retire) 방법이 부분적으로만 존재**한다. 본 문서는 그 공백을 정리한다.

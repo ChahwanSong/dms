@@ -81,38 +81,15 @@ TERMINAL_DATA_JOB_STATES: frozenset[DataJobState] = frozenset(
 
 
 class WorkerRole(StrEnum):
-    RM = "RM"
     DM = "DM"
 
 
 class ResourceKind(StrEnum):
-    FILESYSTEM = "filesystem"
-    KUBERNETES_NAMESPACE_QUOTA = "kubernetes_namespace_quota"
     DATA_JOB = "data_job"
     STORAGE_MAPPING = "storage_mapping"
-    DEFAULT_QUOTA_POLICY = "default_quota_policy"
 
 
 class OperationKind(StrEnum):
-    FILESYSTEM_CREATE = "filesystem.create"
-    FILESYSTEM_UPDATE = "filesystem.update"
-    FILESYSTEM_BLOCK = "filesystem.block"
-    FILESYSTEM_INITIALIZE = "filesystem.initialize"
-    FILESYSTEM_DELETE = "filesystem.delete"
-    FILESYSTEM_ASSIGN_QUOTA = "filesystem.assign_quota"
-    FILESYSTEM_IMPORT = "filesystem.import"
-    FILESYSTEM_CHECK = "filesystem.consistency_check"
-    FILESYSTEM_SYNC = "filesystem.sync"
-    FILESYSTEM_EXPIRATION_SWEEP = "filesystem.expiration_sweep"
-    K8S_QUOTA_CREATE = "kubernetes.namespace_quota.create"
-    K8S_QUOTA_UPDATE = "kubernetes.namespace_quota.update"
-    K8S_QUOTA_BLOCK = "kubernetes.namespace_quota.block"
-    K8S_QUOTA_DELETE = "kubernetes.namespace_quota.delete"
-    K8S_QUOTA_SYNC = "kubernetes.namespace_quota.sync"
-    K8S_QUOTA_CHECK = "kubernetes.namespace_quota.consistency_check"
-    K8S_QUOTA_AUDIT = "kubernetes.namespace_quota.audit"
-    K8S_QUOTA_IMPORT = "kubernetes.namespace_quota.import"
-    K8S_QUOTA_EXPIRATION_SWEEP = "kubernetes.namespace_quota.expiration_sweep"
     DATA_SYNC = "data.sync"
     DATA_RM = "data.rm"
     DATA_SCAN = "data.scan"
@@ -127,10 +104,6 @@ class StorageMappingSanityStatus(StrEnum):
     DEGRADED = "Degraded"
     UNKNOWN = "Unknown"
     FAILED = "Failed"
-
-
-class ResourcePayload(BaseModel):
-    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class RequestEnvelope(BaseModel):
@@ -302,9 +275,10 @@ DM_DENYLIST_SUBJECT_TYPES = ("requester", "owner", "group")
 
 
 # Filesystem backends that manage a directory subtree under their mount point.
-# Values mirror backends/{cephfs,weka,gpfs}.py *_BACKEND_TYPE; kept as literals here
-# to avoid a domain -> backends import dependency.
-_FILESYSTEM_BACKEND_TYPES = ("cephfs", "wekafs", "gpfs")
+# Kept as literals here (rather than imported from backends/) so that the domain
+# layer — and the query/inventory layers that only need to *classify* a mapping —
+# never depend on the backend adapter modules.
+FILESYSTEM_BACKEND_TYPES = ("cephfs", "wekafs", "gpfs")
 
 
 def managed_root_path_suffix(mount_path: str, managed_root: str) -> str:
@@ -331,7 +305,7 @@ def validate_filesystem_managed_root(backend_template: dict[str, Any]) -> None:
     managed_root and are skipped.
     """
     backend_type = backend_template.get("backend_type")
-    if backend_type not in _FILESYSTEM_BACKEND_TYPES:
+    if backend_type not in FILESYSTEM_BACKEND_TYPES:
         return
     mount_path = backend_template.get("mount_path")
     managed_root = backend_template.get("managed_root")
@@ -348,69 +322,13 @@ def validate_filesystem_managed_root(backend_template: dict[str, Any]) -> None:
         raise ValueError("gpfs storage mapping requires filesystem_name")
 
 
-# Per-mapping Kubernetes ResourceQuota mutation transport. Mirrors how filesystem
-# mappings carry command_runner/ssh_host: a k8s/CSI mapping may pin HOW DMS applies
-# quota mutations to its cluster, overriding the global DMS_KUBERNETES_MUTATION_MODE.
-_KUBERNETES_MUTATION_MODES = ("kubectl", "ssh-kubectl")
-# control_host is interpolated into ``ssh <host> kubectl ...``. Restrict it to a bare
-# hostname/IPv4 with an alphanumeric first character so it cannot be parsed by ssh as an
-# option (e.g. a leading '-' -> '-oProxyCommand=...' injection) or carry a user@/metachar.
-_CONTROL_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def validate_kubernetes_mutation_template(backend_template: dict[str, Any]) -> None:
-    """Validate the optional per-mapping Kubernetes mutation settings on a mapping.
-
-    A storage mapping may carry, in its ``backend_template``:
-      - ``mutation_mode``: ``"kubectl"`` (run kubectl locally with the cluster's
-        kubeconfig) or ``"ssh-kubectl"`` (ssh to ``control_host`` then run kubectl there).
-      - ``control_host``: the SSH host the rm-worker connects to; **required** when
-        ``mutation_mode == "ssh-kubectl"``, and conversely **rejected when set without an
-        explicit mutation_mode** (it is ignored under the default ``kubectl`` mode). A bare
-        host, no whitespace.
-    Both are optional and, when absent, fall back to the global settings
-    (``DMS_KUBERNETES_MUTATION_MODE`` -- which now defaults to ``kubectl`` --
-    / ``DMS_CLUSTER_CONTROL_HOSTS_JSON``). They are validated whenever present so a typo
-    fails closed at registration (422) rather than at quota-apply time.
-    """
-    mode = backend_template.get("mutation_mode")
-    control_host = backend_template.get("control_host")
-    if mode is None and control_host is None:
-        return
-    if mode is not None and (
-        not isinstance(mode, str) or mode not in _KUBERNETES_MUTATION_MODES
-    ):
-        raise ValueError(
-            "mutation_mode must be one of " + ", ".join(_KUBERNETES_MUTATION_MODES)
-        )
-    if control_host is not None and (
-        not isinstance(control_host, str) or not _CONTROL_HOST_RE.match(control_host)
-    ):
-        raise ValueError(
-            "control_host must be a bare hostname or IPv4 address "
-            "(alphanumeric start; letters, digits, '.', '_', '-' only) -- "
-            f"got {control_host!r}"
-        )
-    if mode == "ssh-kubectl" and not control_host:
-        raise ValueError("mutation_mode 'ssh-kubectl' requires control_host")
-    # control_host is only consumed by ssh-kubectl. With the default mutation mode now
-    # 'kubectl' (which ignores control_host), a control_host pinned WITHOUT an explicit
-    # mutation_mode would be a silent no-op -- reject it so the mapping's intent is
-    # unambiguous regardless of the global default.
-    if control_host is not None and mode is None:
-        raise ValueError(
-            "control_host requires an explicit mutation_mode='ssh-kubectl' "
-            "(it is ignored under the default 'kubectl' mutation mode)"
-        )
-
-
 def managed_root_for_mapping(mapping: dict[str, Any]) -> tuple[str, str] | None:
     """``(mount_path, managed_root)`` for a filesystem storage mapping, or ``None`` if it
     cannot be determined (non-filesystem backend, or missing mount_path/managed_root).
     managed_root is mandatory at registration, so ``None`` here is a fail-closed signal
     for the caller (planner rejects the job)."""
     template = mapping.get("backend_template") or {}
-    if template.get("backend_type") not in _FILESYSTEM_BACKEND_TYPES:
+    if template.get("backend_type") not in FILESYSTEM_BACKEND_TYPES:
         return None
     mount_path = template.get("mount_path")
     managed_root = template.get("managed_root")
@@ -434,12 +352,6 @@ class StorageMappingInput(BaseModel):
     storage_class_name: str | None = None
     version: int = 1
     sanity_status: str = "Unknown"
-
-
-class DefaultQuotaPolicyInput(BaseModel):
-    resource_kind: ResourceKind
-    resource_type: str
-    quota: dict[str, Any]
 
 
 class DataManagementPolicyInput(BaseModel):
@@ -513,54 +425,6 @@ class DataManagementPolicyInput(BaseModel):
         if self.max_worker_nodes < self.default_worker_nodes:
             raise ValueError("max_worker_nodes must be >= default_worker_nodes")
         return self
-
-
-_BASENAME = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
-def validate_storage_root_basename(field_name: str, value: str) -> None:
-    if (
-        value in {"", ".", ".."}
-        or "/" in value
-        or "\\" in value
-        or "\x00" in value
-        or value.startswith("-")
-        or not _BASENAME.match(value)
-    ):
-        raise ValueError(f"{field_name} must be a storage-root basename")
-
-
-@dataclass(frozen=True)
-class FilesystemResourceKey:
-    storage_name: str
-    directory_name: str
-
-    def __post_init__(self) -> None:
-        for field_name, value in {
-            "storage_name": self.storage_name,
-            "directory_name": self.directory_name,
-        }.items():
-            validate_storage_root_basename(field_name, value)
-
-    def as_string(self) -> str:
-        return f"{self.storage_name}:{self.directory_name}"
-
-
-@dataclass(frozen=True)
-class KubernetesNamespaceQuotaKey:
-    cluster_name: str
-    namespace_name: str
-
-    def __post_init__(self) -> None:
-        for field_name, value in {
-            "cluster_name": self.cluster_name,
-            "namespace_name": self.namespace_name,
-        }.items():
-            if value in {"", ".", ".."} or "/" in value:
-                raise ValueError(f"{field_name} must not contain path separators")
-
-    def as_string(self) -> str:
-        return f"{self.cluster_name}:{self.namespace_name}"
 
 
 def reject_unsafe_relative_path(path: str) -> None:

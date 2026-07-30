@@ -3,10 +3,11 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 This repo contains two parts:
-- **DMS backend** (`src/dms/`) — a control plane for managing filesystem resources, Kubernetes
-  namespace storage quotas, and data jobs (`scan`/`sync`/`rm`) across multiple storage backends and
-  Kubernetes clusters. A FastAPI service plus background loop processes, backed by two PostgreSQL
-  databases (operational + observability), portable to SQLite for tests.
+- **DMS backend** (`src/dms/`) — a control plane for a **storage inventory** (storage mappings over
+  CephFS/GPFS/WekaFS and their CSI counterparts) and **data jobs** (`scan`/`sync`/`rm`) across
+  multiple storage backends and Kubernetes clusters. A FastAPI service plus background loop
+  processes, backed by two PostgreSQL databases (operational + observability), portable to SQLite
+  for tests.
 - **Portal** (`src/portal/`) — the operator/user-facing web UI. A FastAPI BFF (`src/portal/backend/`)
   plus a Vite SPA (`src/portal/frontend/`). The portal is a **pure client of the DMS HTTP API**; see
   the Portal section below for the rules that keep backend changes out of portal work.
@@ -30,7 +31,6 @@ pytest tests/test_dm_sync_chmod_chown.py -k some_case -x
 dms migrate                                  # apply DB migrations to both databases
 dms api --host 0.0.0.0 --port 8080           # serve FastAPI (uvicorn factory dms.api:create_app)
 dms planner --loop --interval 5              # requests -> plans
-dms rm-worker --worker-id rm-1 --loop        # claim RM plans, apply filesystem / k8s quota changes
 dms dm-worker --worker-id dm-1 --loop        # claim DM data jobs (scan/sync/rm)
 dms sanity-reconciler --loop                 # reconcile storage-mapping sanity status
 dms agent-probe --once                       # build one node agent report as JSON (run on a node)
@@ -69,37 +69,39 @@ adapters. State is the source of truth; every process is a restartable loop that
 - `LifecycleState` and `DataJobState` enums (`src/dms/domain.py`) define the state machines.
   `TERMINAL_LIFECYCLE_STATES` gates ret/cleanup. Workers claim work with time-bounded **leases**
   (`worker_lease_seconds`); stale claims are reaped (`mark_stale_runs`).
-- `OperationKind` (`filesystem.*`, `kubernetes.namespace_quota.*`, `data.*`, `identity.*`),
-  `ResourceKind`, and `WorkerRole` (RM/DM) classify each request and route it to a worker.
+- `OperationKind` (`data.*` — `scan`/`sync`/`rm`/`cancel` — and `identity.*`), `ResourceKind`
+  (`data_job`, `storage_mapping`), and `WorkerRole` (`DM`) classify each request and route it to a
+  worker. Storage-mapping CRUD is handled **synchronously** in the API and does not enter the
+  request→plan→run machine.
 
 ### Layers
 - **API** (`src/dms/api/`): `create_app()` (`app.py`) wires `Settings`, repositories, adapters, and
   auth into `AppServices` (`_services.py`), then mounts routers under `/api/v1/`:
-  `data-management`, `resource-management`, `agent`, `operations` (read-only queries), `identity`
-  (DM denylist). Request-shaping logic lives in `api/_helpers/`. Auth (`src/dms/auth.py`) supports a
+  `storage-mappings` (inventory CRUD + sanity `:check`), `data-management`, `identity`
+  (DM denylist), `agent`, `operations` (read-only queries + control state + stuck-request
+  `:resolve`). Request-shaping logic lives in `api/_helpers/`. Auth (`src/dms/auth.py`) supports a
   shared bearer token and an mTLS header profile (`AuthVerifier` + `AuthorizationPolicy`); when
   `require_mtls_header` is on, the actor comes from a verified header and `default_actor` is rejected
   at startup.
-- **Planner** (`src/dms/planner/`): `Planner` (split into `_core`, `_filesystem`, `_kubernetes`
-  mixins via `from ._base import *`). `run_once(limit)` reads plannable requests and emits plans;
-  it dedups against prior active requests and computes filesystem/quota issues and expiries.
-- **Workers** (`src/dms/workers/`): `RMWorkerRuntime` (`rm.py`) applies filesystem and k8s-quota
-  mutations; `DMWorkerRuntime` (`dm.py`, the largest module) runs data jobs through a
-  **preview/confirm** flow (`scan`/`sync`/`rm`), resolves the job owner's POSIX identity via
-  read-only LDAP, enforces a uid/gid floor, optional opt-in root (`allow_root_requester` +
-  `privileged_requesters`), and schedules MPI jobs via Volcano. Both extend `_base.py`.
+- **Planner** (`src/dms/planner/`): `Planner` (`_core` mixin re-exported via `from ._base import *`).
+  `run_once(limit)` reads plannable requests and emits plans; it dedups against prior active
+  requests and gates on storage-mapping readiness.
+- **Workers** (`src/dms/workers/`): `DMWorkerRuntime` (`dm.py`, the largest module) runs data jobs
+  through a **preview/confirm** flow (`scan`/`sync`/`rm`), resolves the job owner's POSIX identity
+  via read-only LDAP, enforces a uid/gid floor, optional opt-in root (`allow_root_requester` +
+  `privileged_requesters`), and schedules MPI jobs via Volcano. It extends `_base.py`.
 - **Repositories** (`src/dms/repositories/`): `DmsRepository` (operational) and
   `ObservabilityRepository` aggregate per-concern repos (`requests`, `data_jobs`, `resources`,
   `policies`, `identity`, `execution`, `operational`, `storage_mappings`). All SQL lives here and is
   kept portable across SQLite and PostgreSQL (`src/dms/db.py` `Database` wrapper).
 - **Adapters** (`src/dms/adapters/`): the only layer that touches the outside world — `identity`
-  (LDAP), `kubernetes_quota` (live `ResourceQuota` or `kubectl`/SSH), `inventory`, `volcano` (MPIJob
-  scheduling), `filesystem`. Each has a `*Live*`/real implementation and a `Stub*` counterpart used
+  (LDAP), `inventory` (read-only `kubectl`/`ssh-kubectl` StorageClass/CSI/node reads), `volcano`
+  (Volcano Job scheduling). Each has a `*Live*`/real implementation and a `Stub*` counterpart used
   in tests and default CLI wiring. `subprocess` is re-exported from `adapters/__init__.py` so tests
   can monkeypatch it.
 - **Backends** (`src/dms/backends/` + `backend_registry.py`): per-storage-type behavior for
-  `cephfs`, `weka`, `gpfs`. `BackendAdapterRegistry` resolves the right filesystem/DM adapter per
-  resource from storage mappings, with `enforce_supported_backends` gating.
+  `weka` and `gpfs`. `BackendAdapterRegistry` resolves the right DM adapter per resource from
+  storage mappings, with `enforce_supported_backends` gating.
 - **Agent** (`src/dms/agent.py`, `agent_daemon.py`): a node-side daemon (Kubernetes DaemonSet) that
   probes storage mounts, tools, credentials, and identity, then POSTs `AgentReport`s. The DM worker
   checks **report freshness** (`agent_report_stale_seconds`) as a preflight gate before running data
@@ -138,7 +140,7 @@ application that consumes DMS over HTTP only.
   session auth is the BFF's own concern, separate from BFF↔DMS mTLS.
 - **API surface the portal consumes** (all under `/api/v1/`, see `src/dms/api/routers/`):
   `operations` (read-only queries — inventory, storage mappings, work summary, control state),
-  `resource-management` (filesystem + k8s quota requests), `data-management` (`scan`/`sync`/`rm`
+  `storage-mappings` (inventory CRUD + `:check`), `data-management` (`scan`/`sync`/`rm`
   with the preview/confirm flow), `agent`, `identity` (DM denylist). Health: `/healthz`.
 - Mirror DMS's request/preview/confirm semantics in the UI: mutating data jobs require showing the
   preview and confirming its fingerprint before execution; long operations are async (poll
@@ -195,8 +197,12 @@ Keep the two interfaces separate as they grow — add operator features under `i
 
 ## Install / deployment docs
 
-`install/` is the operational source of truth (numbered guides `1`–`5` — `5.dms-portal-setup.md` covers
-the portal — plus `CONFIGURATION.md`, `RUNBOOK.md`, Kubernetes manifests, PostgreSQL `init.sql`, helper
-scripts, and Dockerfiles including `Dockerfile.mpifileutils` for the DM job image). Much of it is written
-in Korean. When changing runtime settings, env-var names, or API request options, update the relevant
-`install/` doc to match.
+`install/` is the operational source of truth. Numbered guides run `dms-01`–`dms-06`:
+`dms-01-prerequisites.md`, `dms-02-core.md`, `dms-03-storage-mappings.md`, `dms-04-dm-jobs.md`,
+`dms-05-configuration.md` (env-var reference), `dms-06-ingress-metallb.md`; the portal has its own
+`portal-01-setup.md` / `portal-02-user-auth.md`, and `redeploy.md` covers rebuild→rollout. Alongside
+them: Kubernetes manifests (`install/kubernetes/`), config examples (`install/config/`), PostgreSQL
+`init.sql`, helper scripts, and Dockerfiles including `Dockerfile.mpifileutils` for the DM job image.
+Runtime/API usage docs live in `docs/` (`docs/api/`, `docs/operations-runbook.md`). Much of it is
+written in Korean. When changing runtime settings, env-var names, or API request options, update the
+relevant `install/` doc to match.

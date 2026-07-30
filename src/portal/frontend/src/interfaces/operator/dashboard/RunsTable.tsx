@@ -24,18 +24,15 @@ const ACTIONABLE_REQ = new Set([
   "UnknownAfterSideEffect", "BackendApplyFailed",
 ]);
 
-// operation_kind → 친화 라벨 (기술어는 유지). data.* → 데이터, filesystem.* → 파일시스템,
-// kubernetes.namespace_quota.* → 쿼터.
+// operation_kind → 친화 라벨 (기술어는 유지). data.* → 데이터, identity.* → 아이덴티티.
 function opLabel(op?: string): string {
   if (!op) return "—";
   if (op.startsWith("data.")) return "데이터";
-  if (op.startsWith("filesystem")) return "파일시스템";
-  if (op.includes("quota")) return "쿼터";
   if (op.startsWith("identity")) return "아이덴티티";
   return op;
 }
 function opDetail(op?: string): string {
-  // trailing verb, e.g. filesystem.create → create, data.sync → sync
+  // trailing verb, e.g. data.sync → sync, identity.deny → deny
   if (!op) return "";
   const dot = op.lastIndexOf(".");
   return dot >= 0 ? op.slice(dot + 1) : op;
@@ -135,7 +132,7 @@ export default function RunsTable({
       </span>
       {truncated && <span className="chip tone-warn">일부만 표시</span>}
       <InfoHint label="워커 실행 현황 설명">
-        요청이 플랜으로 바뀌면 <strong>RM/DM 워커</strong>가 리스를 잡고 실제로 처리(run)합니다.
+        요청이 플랜으로 바뀌면 <strong>DM 워커</strong>가 리스를 잡고 실제로 처리(run)합니다.
         <br /><strong>실행 중</strong>=지금 워커가 돌리는 작업, <strong>확인 대기</strong>=데이터
         잡 프리뷰 후 승인 대기(정상), <strong>정체·복구</strong>=실제 조치가 필요한 run(‘조치
         필요’에서 해소).

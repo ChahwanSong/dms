@@ -24,12 +24,6 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: dms-rm-worker
-  namespace: dms
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
   name: dms-dm-worker
   namespace: dms
 ---
@@ -44,13 +38,10 @@ data:
   DMS_AGENT_REPORT_STALE_SECONDS: "300"
   DMS_CONTROL_CLUSTER_NAME: "cluster-a"
   DMS_KUBERNETES_INVENTORY_MODE: "kubectl"
-  DMS_KUBERNETES_MUTATION_MODE: "kubectl"
   DMS_CLUSTER_KUBECONFIGS_JSON: '{"cluster-a":"/etc/dms/kubeconfigs/cluster-a.kubeconfig"}'
   DMS_KUBERNETES_INVENTORY_TIMEOUT_SECONDS: "10"
+  # Timeout for the Volcano/kubectl calls the DM worker makes (adapters/volcano.py).
   DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS: "30"
-  DMS_FILESYSTEM_MUTATION_MODE: "ssh-host-exec"
-  DMS_FILESYSTEM_EXEC_TIMEOUT_SECONDS: "300"
-  DMS_FILESYSTEM_EXEC_USE_SUDO: "true"
   DMS_REQUIRE_MTLS_HEADER: "true"
   DMS_REQUIRE_MTLS_VERIFIED_HEADER: "true"
   DMS_MTLS_ACTOR_PREFIX: "mtls:"
@@ -60,8 +51,6 @@ data:
   DMS_LDAP_GROUP_SEARCH_BASE: "ou=groups,dc=example,dc=internal"
   DMS_LDAP_USER_FILTER: "(uid={username})"
   DMS_LDAP_TIMEOUT_SECONDS: "5"
-  DMS_LDAP_GROUP_GID_START: "24000"
-  DMS_LDAP_GROUP_GID_END: "24999"
   DMS_DM_NAMESPACE: "dms"
   DMS_DM_JOB_IMAGE: "registry.example.internal/dms-mpifileutils:CHANGE_ME"
   DMS_DM_JOB_IMAGE_REF: "CHANGE_ME_MPIFILEUTILS_GIT_REF"
@@ -76,7 +65,7 @@ data:
   DMS_DM_POLICY_MAX_PROCESSES_PER_NODE: "10"
   # Volcano Queue + PriorityClasses these reference are NOT created by this file --
   # apply install/kubernetes/volcano-queue-priorityclasses.yaml (and install Volcano
-  # itself) first; see install/0.prerequisites.md. A missing queue leaves jobs Pending;
+  # itself) first; see install/dms-01-prerequisites.md. A missing queue leaves jobs Pending;
   # a missing PriorityClass makes the API server reject the job pod at admission.
   DMS_DM_POLICY_DEFAULT_QUEUE: "dms-data"
   DMS_DM_POLICY_DEFAULT_PRIORITY_CLASS: "dms-normal"
@@ -124,24 +113,6 @@ type: Opaque
 stringData:
   ca.crt: |
     # DMS API client certificate CA bundle for ingress mTLS validation.
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: dms-ssh-client
-  namespace: dms
-type: Opaque
-stringData:
-  id_ed25519: |
-    # Backend 관리 명령 실행이 허용된 private key로 교체한다.
-  known_hosts: |
-    # CephFS/GPFS RM host의 ssh-keyscan output으로 교체한다.
-  config: |
-    Host *
-      IdentitiesOnly yes
-      StrictHostKeyChecking yes
-      UserKnownHostsFile /home/dms/.ssh/known_hosts
-      IdentityFile /home/dms/.ssh/id_ed25519
 ---
 apiVersion: v1
 kind: Secret
@@ -232,14 +203,14 @@ metadata:
   name: dms-api-agent-rollout
   namespace: dms
 # The agent rollout-restart endpoint runs in the dms-api process and stamps the
-# `restartedAt` annotation on the dms-rm-agent / dms-dm-agent DaemonSets so they
-# re-read storages.json after a storage mapping change (agents read it once at
-# startup). Read is needed to report rollout progress. Same in-cluster access the
+# `restartedAt` annotation on the dms-dm-agent DaemonSet so it re-reads
+# storages.json after a storage mapping change (agents read it once at startup).
+# Read is needed to report rollout progress. Same in-cluster access the
 # dms-agent-storages ConfigMap sync already uses.
 # NOTE: bind to the identity dms-api actually uses to reach the CONTROL cluster —
 # the pod SA (below) for in-cluster access, OR the ServiceAccount its control-cluster
 # kubeconfig authenticates as when DMS_CLUSTER_KUBECONFIGS_JSON is set (grant that SA
-# the same rule). Both need get+patch on the two agent DaemonSets.
+# the same rule). Both need get+patch on the agent DaemonSet.
 rules:
   - apiGroups: ["apps"]
     resources: ["daemonsets"]
@@ -276,9 +247,8 @@ metadata:
 # update/delete so the node agents re-read the storage list. WITHOUT this the patch is
 # Forbidden -- and the code SWALLOWS that as a warning -- so the ConfigMap silently never
 # updates: newly registered filesystem storages never reach the agents, their mount
-# readiness stays Missing, the planner rejects all filesystem RM (missing_rm_readiness),
-# and DM ends in no_ready_dm_candidate. (list/watch aren't needed -- the code get+patches
-# this one named ConfigMap.)
+# readiness stays Missing, and the planner rejects DM with no_ready_dm_candidate.
+# (list/watch aren't needed -- the code get+patches this one named ConfigMap.)
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -475,87 +445,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dms-rm-worker
-  namespace: dms
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: dms-rm-worker
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: dms-rm-worker
-        app.kubernetes.io/part-of: dms
-        dms.io/worker-role: rm
-    spec:
-      serviceAccountName: dms-rm-worker
-      initContainers:
-        - name: prepare-ssh-client
-          image: registry.example.internal/dms:CHANGE_ME
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -eu
-              cp /ssh-source/id_ed25519 /ssh/id_ed25519
-              cp /ssh-source/known_hosts /ssh/known_hosts
-              cp /ssh-source/config /ssh/config
-              chown 65532:65532 /ssh/id_ed25519 /ssh/known_hosts /ssh/config
-              chmod 0400 /ssh/id_ed25519 /ssh/config
-              chmod 0444 /ssh/known_hosts
-          volumeMounts:
-            - name: ssh-client-source
-              mountPath: /ssh-source
-              readOnly: true
-            - name: ssh-client
-              mountPath: /ssh
-      containers:
-        - name: rm-worker
-          image: registry.example.internal/dms:CHANGE_ME
-          imagePullPolicy: IfNotPresent
-          command: ["dms", "rm-worker", "--worker-id", "$(POD_NAME)", "--loop", "--interval", "5"]
-          envFrom:
-            - configMapRef:
-                name: dms-runtime-config
-            - secretRef:
-                name: dms-secrets
-          env:
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: HOME
-              value: /home/dms
-          volumeMounts:
-            - name: kubeconfigs
-              mountPath: /etc/dms/kubeconfigs
-              readOnly: true
-            - name: ssh-client
-              mountPath: /home/dms/.ssh
-              readOnly: true
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
-      volumes:
-        - name: kubeconfigs
-          secret:
-            secretName: dms-cluster-kubeconfigs
-        - name: ssh-client
-          emptyDir: {}
-        - name: ssh-client-source
-          secret:
-            secretName: dms-ssh-client
-            defaultMode: 0444
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: dms-dm-worker
   namespace: dms
 spec:
@@ -565,7 +454,7 @@ spec:
   # for a sizable fleet.
   # PREREQUISITES for 32 (LOWER this for small/constrained deployments):
   #   - PostgreSQL max_connections >= 400 — stock 100 will EXHAUST (32 x DMS_DB_POOL_MAX_SIZE
-  #     + API/others); raise it or trim DMS_DB_POOL_MAX_SIZE. See install/dms-06 §3.
+  #     + API/others); raise it or trim DMS_DB_POOL_MAX_SIZE. See install/dms-05 §3.
   #   - node capacity for 32 x node_count job pods, and PORTAL_BACKUP_CONCURRENCY matched.
   # 0 = deliberately DISABLE DM (no worker claims jobs; scan/sync/rm sit in the queue).
   replicas: 32
@@ -590,7 +479,7 @@ spec:
           # requester-only, unreadable by other tenants' job pods). It is a read-only
           # orchestrator -- no filesystem writes, only `kubectl` with the ServiceAccount
           # token and reading summary.json behind a symlink-containment guard -- so root
-          # grants no privilege beyond that cross-uid read. (api/planner/rm-worker stay
+          # grants no privilege beyond that cross-uid read. (api/planner stay
           # non-root uid 65532.)
           securityContext:
             runAsUser: 0

@@ -1,7 +1,7 @@
 # DMS API — 개요와 인증
 
-DMS는 파일시스템, Kubernetes 네임스페이스 쿼터, 데이터 잡(`scan`/`sync`/`rm`)을 **하나의
-컨트롤플레인**에서 관리하는 HTTP 제어면이다. 이 문서는 **DMS HTTP API 사용 문서의 인덱스**로,
+DMS는 스토리지 인벤토리와 데이터 잡(`scan`/`sync`/`rm`)을 **하나의 컨트롤플레인**에서 관리하는
+HTTP 제어면이다. 이 문서는 **DMS HTTP API 사용 문서의 인덱스**로,
 모든 API가 공유하는 개념(request→plan→run 수명주기), 공통 규약(base path·상태 폴링),
 그리고 **인증(운영 = mTLS-verified 프로필)** 을 설명한다. 개별 API 상세는 아래
 [API 문서 맵](#5-api-문서-맵)의 각 문서로 이어진다.
@@ -19,18 +19,18 @@ DMS는 **상태 머신**이다. 모든 변경은 요청으로 영속화되고, p
 
 ```
 POST /api/v1/<...>/<operation>   → 202 { request_id, status: "Persisted", … }   (요청만 영속화, side effect 아직 없음)
-    → planner : request → plan (worker_role = RM 또는 DM)
+    → planner : request → plan (worker_role = DM)
     → worker  : plan claim(lease) → 어댑터로 side effect 적용 → run/result 기록
     → GET /api/v1/operations/requests/{request_id}   (.request.status 폴링)
 ```
 
 - **POST 응답은 `202 Persisted`이며 결과가 아니다.** 반환된 `request_id`(DM 잡은 이후 `job_id`)로
   상태를 폴링한다. 긴 작업은 전부 **비동기** — blocking 호출이 아니다.
-- **worker role로 라우팅**된다: `resource-management`(파일시스템·k8s 쿼터)는 **RM worker**가,
-  `data-management`(`scan`/`sync`/`rm`)는 **DM worker**가 처리한다.
+- **비동기 상태 머신을 타는 것은 `data-management`(`scan`/`sync`/`rm`)와 `identity`**이며 **DM worker**가
+  처리한다. **스토리지 매핑 CRUD(`/api/v1/storage-mappings`)는 동기 처리**라 `request_id` 폴링이 없다.
 - **operations** 라우터는 이 상태를 읽는 **조회 API**(inventory, storage mapping, work summary,
   requests/request-activity, resources, data-jobs 등)와 컨트롤플레인 상태 제어(maintenance/drain/
-  resume)를 제공한다 — 대부분 read-only다.
+  resume), stuck request `:resolve`를 제공한다 — 대부분 read-only다.
 
 ---
 
@@ -39,7 +39,7 @@ POST /api/v1/<...>/<operation>   → 202 { request_id, status: "Persisted", … 
 | 항목 | 값 |
 |---|---|
 | Base path | 모든 엔드포인트는 **`/api/v1/`** 하위 |
-| 라우터 prefix | `/api/v1/resource-management`, `/api/v1/data-management`, `/api/v1/operations`, `/api/v1/agent` |
+| 라우터 prefix | `/api/v1/storage-mappings`, `/api/v1/data-management`, `/api/v1/operations`, `/api/v1/agent`, `/api/v1/identity` |
 | Health | `GET /healthz` (**인증 불요** — k8s probe용) |
 | 제출 응답 | 변경 요청은 `202 { request_id, status: "Persisted", … }` |
 | 상태 폴링 | 범용: `GET /api/v1/operations/requests/{request_id}` · DM 잡: `GET /api/v1/data-management/<op>/jobs/{job_id}` |
@@ -74,7 +74,7 @@ POST /api/v1/<...>/<operation>   → 202 { request_id, status: "Persisted", … 
 
 > 인증서 발급·ingress의 cert 검증/evidence header 전달 구성은
 > [`install/dms-02-core.md`](../../install/dms-02-core.md), 인증 관련 env 전체 레퍼런스는
-> [`install/dms-06-configuration.md`](../../install/dms-06-configuration.md)를 본다.
+> [`install/dms-05-configuration.md`](../../install/dms-05-configuration.md)를 본다.
 
 ### curl 인증 패턴
 
@@ -120,10 +120,9 @@ curl -sS \
 
 | 문서 | 라우터 prefix | 내용 |
 |---|---|---|
-| [파일시스템 RM API](./resource-management-fs.md) | `/api/v1/resource-management/filesystems` · `/storage-mappings` | 디렉토리 생성·chmod/chown·quota·block/import/delete, storage mapping CRUD, sanity `:check` |
-| [k8s 쿼터 RM API](./resource-management-k8s.md) | `/api/v1/resource-management/kubernetes/namespace-quotas` | 네임스페이스 ResourceQuota 생성·변경·삭제·expiration-sweep·audit |
+| [스토리지 매핑 API](./storage-mappings.md) | `/api/v1/storage-mappings` | storage mapping 등록·수정·삭제, sanity `:check`, agent ConfigMap 동기화 |
 | [DM 데이터 잡 API](./data-management.md) | `/api/v1/data-management` | `scan`/`sync`/`rm`, preview→confirm, 정책(policies), identity-denylist |
-| [operations 조회 API](./operations.md) | `/api/v1/operations` | inventory·storage mapping·work summary·requests·resources·data-jobs 조회, 컨트롤플레인 상태(maintenance/drain) |
+| [operations 조회 API](./operations.md) | `/api/v1/operations` | inventory·storage mapping·work summary·requests·resources·data-jobs 조회, 컨트롤플레인 상태(maintenance/drain), stuck request `:resolve` |
 
 운영 절차(점검·유지보수·장애 대응)는 [운영 런북](../operations-runbook.md)에 있다.
 
@@ -131,10 +130,9 @@ curl -sS \
 
 ## 다음 문서
 
-- 파일시스템 RM API — [`docs/api/resource-management-fs.md`](./resource-management-fs.md)
-- k8s 쿼터 RM API — [`docs/api/resource-management-k8s.md`](./resource-management-k8s.md)
+- 스토리지 매핑 API — [`docs/api/storage-mappings.md`](./storage-mappings.md)
 - DM 데이터 잡 API — [`docs/api/data-management.md`](./data-management.md)
 - operations 조회 API — [`docs/api/operations.md`](./operations.md)
 - 운영 런북 — [`docs/operations-runbook.md`](../operations-runbook.md)
 - 설치(코어·mTLS·ingress) — [`install/dms-02-core.md`](../../install/dms-02-core.md)
-- 환경변수 레퍼런스 — [`install/dms-06-configuration.md`](../../install/dms-06-configuration.md)
+- 환경변수 레퍼런스 — [`install/dms-05-configuration.md`](../../install/dms-05-configuration.md)

@@ -38,7 +38,8 @@ _TERMINAL = {"succeeded", "failed", "preview_failed", "cancelled"}
 _CANCELLABLE = {"preview_pending", "preview_ready", "running"}
 
 # DMS filesystem backends (cephfs/gpfs/wekafs) — the only sync-capable storages;
-# k8s CSI mappings are namespace-quota only. Mirrors the frontend isFsBackend.
+# k8s CSI mappings are not host-mounted, so they cannot be a sync endpoint.
+# Mirrors the frontend isFsBackend.
 _FS_BACKEND_TYPES = {"cephfs", "gpfs", "wekafs"}
 
 # Fixed sync options for user jobs (policy). open_noatime always on; batch_files /

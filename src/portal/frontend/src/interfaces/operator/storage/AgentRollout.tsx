@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { operatorApi, ApiError, type AgentRolloutStatus } from "../../../api";
 
-// Restart the RM·DM agent DaemonSets + watch the rollout. Agents read storages.json
+// Restart the DM agent DaemonSets + watch the rollout. Agents read storages.json
 // once at startup, so after adding/changing a storage they must restart to pick it
 // up. DMS owns the agents and drives the rollout (in-cluster); the portal proxies.
 const POLL_MS = 3000;
@@ -44,7 +44,7 @@ export default function AgentRollout() {
 
   const restart = async () => {
     if (!window.confirm(
-      "RM·DM 에이전트 DaemonSet을 재시작할까요?\n" +
+      "DM 에이전트 DaemonSet을 재시작할까요?\n" +
       "스토리지 추가/변경을 에이전트가 반영하려면 필요합니다 (에이전트는 시작 시 목록을 한 번만 읽음)."
     )) return;
     setErr(null); setMsg(null); setBusy(true);
@@ -77,7 +77,7 @@ export default function AgentRollout() {
     <div className="agent-rollout">
       <div className="agent-rollout-bar">
         <div className="agent-rollout-label">
-          <b>에이전트 (RM · DM)</b>
+          <b>에이전트 (DM)</b>
           <span className="muted small"> 스토리지 추가/변경 후 재시작해야 에이전트가 새 목록을 반영합니다</span>
         </div>
         <div className="agent-rollout-actions">

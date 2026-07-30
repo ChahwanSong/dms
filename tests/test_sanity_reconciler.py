@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from dms.domain import WorkerRole
 from dms.planner import Planner
 from dms.sanity_reconciler import (
     readiness_is_stale,
@@ -140,21 +139,19 @@ def _stale_mapping():
     return {
         "storage_name": "fs-a",
         "sanity_checked_at": (datetime.now(UTC) - timedelta(seconds=999)).isoformat(),
-        "readiness": {"data_management": "Ready", "resource_management": "Ready"},
+        "readiness": {"data_management": "Ready", "inventory": "Ready"},
     }
 
 
 def test_planner_gate_disabled_by_default():
     planner = Planner(repository=None)  # sanity_ttl_seconds None -> gate off
-    assert planner._dm_readiness_is_stale(WorkerRole.DM, _stale_mapping()) is False
+    assert planner._dm_readiness_is_stale(_stale_mapping()) is False
 
 
-def test_planner_gate_dm_only_when_enabled():
+def test_planner_gate_only_when_enabled():
     planner = Planner(repository=None, sanity_ttl_seconds=120)
-    # DM + stale -> gated
-    assert planner._dm_readiness_is_stale(WorkerRole.DM, _stale_mapping()) is True
-    # RM is never gated (RM behaviour unchanged)
-    assert planner._dm_readiness_is_stale(WorkerRole.RM, _stale_mapping()) is False
-    # DM but fresh -> not gated
+    # stale -> gated
+    assert planner._dm_readiness_is_stale(_stale_mapping()) is True
+    # fresh -> not gated
     fresh = dict(_stale_mapping(), sanity_checked_at=datetime.now(UTC).isoformat())
-    assert planner._dm_readiness_is_stale(WorkerRole.DM, fresh) is False
+    assert planner._dm_readiness_is_stale(fresh) is False

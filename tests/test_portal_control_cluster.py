@@ -1,7 +1,7 @@
 """Portal BFF /api/operator/control-cluster proxies the DMS control cluster name.
 
 The storage form uses it to default a filesystem mapping's *agent* cluster (the
-cluster whose RM/DM agents report the storage) instead of the static "cluster-a"
+cluster whose DM agents report the storage) instead of the static "cluster-a"
 skeleton placeholder. The value is static DMS config, so the route caches it.
 """
 

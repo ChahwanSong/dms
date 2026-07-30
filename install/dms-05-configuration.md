@@ -1,6 +1,6 @@
 # DMS 환경변수 레퍼런스
 
-DMS 프로세스(api/planner/rm-worker/dm-worker/retention/sanity)와 노드 에이전트가 읽는
+DMS 프로세스(api/planner/dm-worker/retention/sanity)와 노드 에이전트가 읽는
 **환경변수의 single source of truth**다. 값의 의미·기본값·운영 필수 여부를 카테고리별로 정리한다.
 
 - 이 값들이 **어떤 매니페스트의 어떤 key로** 들어가고 core를 어떻게 배포하는지는 [`dms-02-core.md`](dms-02-core.md).
@@ -37,7 +37,7 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 `dms-api`가 `DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`로 켠다(아래).
 ② **내부 평면**(노드 에이전트 + 포탈 BFF) = mTLS **off** + shared token — 전용 `dms-api-internal`로,
 이 신뢰 in-cluster 클라이언트들이 mTLS로는 각각 `node:{cluster}:{node}`·per-operator `x-dms-actor`를
-낼 수 없기 때문이다(상세·근거는 §8, 매니페스트 `install/kubernetes/dms-api-internal.yaml`). 아래는
+낼 수 없기 때문이다(상세·근거는 §7, 매니페스트 `install/kubernetes/dms-api-internal.yaml`). 아래는
 **외부 평면(mTLS)** 흐름이다.
 
 **외부 평면 = mTLS-verified header profile.** `control-plane.yaml`의 ConfigMap `dms-runtime-config`가
@@ -94,15 +94,15 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
 | `DMS_DB_POOL_MIN_SIZE` | `1` | **API** pool의 floor(미리 열어둘 최소 connection). 첫 요청 cold-connect 지연을 없앤다. loop에는 적용되지 않는다(아래 `WORKER` 항목). 관측은 max로 clamp. |
-| `DMS_DB_WORKER_POOL_MIN_SIZE` | `0` | **loop 프로세스**(planner/rm-worker/dm-worker/sanity/retention) pool의 floor. 기본 `0` — idle 워커는 커넥션을 0개로 반납하고 필요시에만 연결(idle은 `max_idle`≈600초 후 reap). 워커를 많이 띄울 때 idle obs floor(=replica당 1개)를 없애 예산을 절약한다. cold-connect 지연이 문제면 `1`로 올린다. |
-| `DMS_DB_POOL_MAX_SIZE` | `4` | loop 프로세스(planner/rm-worker/dm-worker/sanity/retention)의 운영 DB pool 최대치. 단일 스레드라 작게 둔다. |
+| `DMS_DB_WORKER_POOL_MIN_SIZE` | `0` | **loop 프로세스**(planner/dm-worker/sanity/retention) pool의 floor. 기본 `0` — idle 워커는 커넥션을 0개로 반납하고 필요시에만 연결(idle은 `max_idle`≈600초 후 reap). 워커를 많이 띄울 때 idle obs floor(=replica당 1개)를 없애 예산을 절약한다. cold-connect 지연이 문제면 `1`로 올린다. |
+| `DMS_DB_POOL_MAX_SIZE` | `4` | loop 프로세스(planner/dm-worker/sanity/retention)의 운영 DB pool 최대치. 단일 스레드라 작게 둔다. |
 | `DMS_DB_API_POOL_MAX_SIZE` | `16` | API 프로세스의 운영 DB pool 최대치. API sync-handler 스레드풀이 이 값으로 cap된다. |
 | `DMS_DB_OBSERVABILITY_POOL_MAX_SIZE` | `3` | 관측 DB pool 최대치(쓰기 부하 가벼워 작게). |
 | `DMS_DB_POOL_TIMEOUT_SECONDS` | `35` | pool 만석 시 checkout 대기 최대(초). **`DMS_DB_STATEMENT_TIMEOUT_MS`(초 환산) 이상**이어야 한다. |
 | `DMS_DB_STATEMENT_TIMEOUT_MS` | `30000` | pooled connection `statement_timeout`(ms). runaway 쿼리 강제 종료. |
 | `DMS_DB_IDLE_IN_TXN_TIMEOUT_MS` | `60000` | pooled connection `idle_in_transaction_session_timeout`(ms). 누수 트랜잭션 강제 종료. |
 
-**천장(ceiling) 공식**: `서버 PG connection ≤ Σ프로세스(op_max + obs_max)`. 기본값 기준 API×2 + loop 5개 = `2×(16+3) + 5×(4+3) = 73 < 100`. 이는 *모든 풀이 동시에 max까지 차는* 상한이며, **실측 정상상태는 훨씬 낮다** — loop는 `--interval`(5초) 폴링으로 op를 ~1개씩만 잡고, `DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 idle obs floor가 0이다(min_size=0은 idle 커넥션을 reap해 커넥션 수를 워커 수와 사실상 분리한다). 동시성을 키울 땐 `DMS_DB_API_POOL_MAX_SIZE`와 PostgreSQL `max_connections`를 **함께** 올린다([`dms-02-core.md`](dms-02-core.md) DB 섹션, 워커 대량 확장은 [`dms-01 §3.4`](dms-01-prerequisites.md)). migration/대량 유지보수는 unpooled로 실행되어 위 timeout 영향을 받지 않는다.
+**천장(ceiling) 공식**: `서버 PG connection ≤ Σ프로세스(op_max + obs_max)`. 기본값 기준 API×2 + loop 4개(planner/dm-worker/sanity/retention) = `2×(16+3) + 4×(4+3) = 38 + 28 = 66 < 100`. 이는 *모든 풀이 동시에 max까지 차는* 상한이며, **실측 정상상태는 훨씬 낮다** — loop는 `--interval`(5초) 폴링으로 op를 ~1개씩만 잡고, `DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 idle obs floor가 0이다(min_size=0은 idle 커넥션을 reap해 커넥션 수를 워커 수와 사실상 분리한다). 동시성을 키울 땐 `DMS_DB_API_POOL_MAX_SIZE`와 PostgreSQL `max_connections`를 **함께** 올린다([`dms-02-core.md`](dms-02-core.md) DB 섹션, 워커 대량 확장은 [`dms-01 §3.4`](dms-01-prerequisites.md)). migration/대량 유지보수는 unpooled로 실행되어 위 timeout 영향을 받지 않는다.
 
 ---
 
@@ -110,13 +110,13 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `DMS_WORKER_LEASE_SECONDS` | `300` | planner/RM/DM worker의 claim lease. RM/DM은 backend call 중 heartbeat로 갱신. |
+| `DMS_WORKER_LEASE_SECONDS` | `300` | planner/DM worker의 claim lease. DM worker는 backend call 중 heartbeat로 갱신. |
 | `DMS_RECOVERY_SWEEP_LEASE_SECONDS` | `30` | 주기 복구 스윕(stale run 정리·orphan run 닫기 등)의 **단일-리더 lease**. 여러 worker replica 중 이 lease 보유자 1명만 스윕을 돌려 N× 중복을 없앤다. 짧게 둬 잡 실행으로 바빠진 리더가 빨리 인계하게 한다(`component_leases` 테이블). |
 | `DMS_PREVIEW_TTL_SECONDS` | `86400` | `sync`/`rm` preview가 `ConfirmPending`으로 유지되는 TTL. `scan`은 confirm 없이 read-only. |
 | `DMS_AGENT_REPORT_STALE_SECONDS` | `300` | storage-mapping readiness의 agent report freshness window. |
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | DM readiness·inventory aggregation에 쓰는 control cluster name. |
 
-> **RM/DM worker 수평 확장.** `dms-rm-worker`·`dms-dm-worker`는 **replicas를 늘리면 최대 그 수만큼 잡을
+> **DM worker 수평 확장.** `dms-dm-worker`는 **replicas를 늘리면 최대 그 수만큼 잡을
 > 동시 실행**한다(각 워커가 잡 1개를 claim→완료까지 처리). claim은 `FOR UPDATE SKIP LOCKED`(PostgreSQL)라
 > N개 워커가 **서로 다른** plan을 원자적으로 집어 경합·중복 claim·`not claimable` 로그 노이즈가 없고, 주기
 > 복구 스윕은 **리더 1명만** 돈다(`DMS_RECOVERY_SWEEP_LEASE_SECONDS`). 확장 시 함께 볼 것:
@@ -138,11 +138,11 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 
 ## 4. LDAP / identity
 
-RM의 access-group 관리와 DM의 요청자 POSIX 신원 resolve가 **같은 `DMS_LDAP_*` 값을 공유**한다. **CephFS·WekaFS filesystem 작업은 동작하는 LDAP bind를 eager하게 요구**(bind 실패 시 그 작업이 실패)하고, GPFS는 선택이다. 자세한 backend별 요건은 [`dms-03-rm-filesystem.md`](dms-03-rm-filesystem.md).
+DM의 요청자 POSIX 신원 resolve가 이 `DMS_LDAP_*` 값을 쓴다. DMS는 이 디렉토리를 **read-only로만** 조회하며 계정·그룹을 만들지 않는다. DM 신원 게이트는 [`dms-04-dm-jobs.md §3·§4`](dms-04-dm-jobs.md).
 
 | 변수 | 기본값 | 운영 필수 | 설명 |
 | --- | --- | --- | --- |
-| `DMS_LDAP_URI` | `ldap://ldap.example.internal:389` | 예(FS/DM) | LDAP URI. |
+| `DMS_LDAP_URI` | `ldap://ldap.example.internal:389` | 예(DM) | LDAP URI. |
 | `DMS_LDAP_BASE_DN` | `dc=example,dc=internal` | 예 | Base DN. |
 | `DMS_LDAP_BIND_DN` | 없음(Secret) | 예 | Bind DN. Secret 저장. |
 | `DMS_LDAP_BIND_PASSWORD` | 없음(Secret) | 예 | Bind password. Secret 저장. |
@@ -150,54 +150,41 @@ RM의 access-group 관리와 DM의 요청자 POSIX 신원 resolve가 **같은 `D
 | `DMS_LDAP_GROUP_SEARCH_BASE` | `ou=groups,<baseDN>` | 아니오 | 그룹 검색 base. |
 | `DMS_LDAP_USER_FILTER` | `(uid={username})` | 아니오 | 사용자 필터. DM identity lookup도 이 필터를 쓴다. |
 | `DMS_LDAP_TIMEOUT_SECONDS` | `5` | 아니오 | LDAP timeout. |
-| `DMS_LDAP_GROUP_GID_START` | `24000` (코드 fallback `9000000`) | 예(명시) | DMS 생성 access group의 GID 할당 하한. **기존 시스템/디렉터리 GID와 겹치지 않는 창**으로 사이징. |
-| `DMS_LDAP_GROUP_GID_END` | `24999` (코드 fallback `9999999`) | 예(명시) | 위 할당 창 상한(START와 맞춘다). |
 | `DMS_DM_IDENTITY_PROVIDER` | `ldap` | 아니오 | DM identity provider. |
 
 DM identity는 별도 mapping 등록 없이 dm-worker preflight에서 위 `DMS_LDAP_*`로 `owner_username`(기본 `requester_id`)을 read-only lookup해 해석한다. 캐시가 없어 **fail closed** — LDAP가 응답하지 않으면 그 job preflight가 `ldap_unavailable`로 실패한다.
 
 ---
 
-## 5. 파일시스템 RM 실행
+## 5. 스토리지 인벤토리 (Kubernetes 읽기)
+
+DMS는 등록된 클러스터의 StorageClass·CSI driver·노드를 **읽기 전용**으로 수집해 storage mapping sanity를 판정한다. 대상 클러스터에는 아무것도 만들거나 바꾸지 않는다.
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `DMS_FILESYSTEM_MUTATION_MODE` | `ssh-host-exec` | CephFS adapter execution mode. `ssh-host-exec` 또는 `local`. GPFS는 storage mapping의 `command_runner` 사용. |
-| `DMS_FILESYSTEM_EXEC_TIMEOUT_SECONDS` | `300` (코드 fallback `30`) | filesystem host command timeout. quota read-back이 느리면 늘린다. |
-| `DMS_FILESYSTEM_EXEC_USE_SUDO` | `true` | CephFS host executor가 host mutation에 sudo 사용 여부. |
-
-파일시스템 RM 전체 설정(SSH 신뢰, host-exec, storage mapping 등록)은 [`dms-03-rm-filesystem.md`](dms-03-rm-filesystem.md).
-
----
-
-## 6. Kubernetes RM (네임스페이스 쿼터)
-
-| 변수 | 기본값 | 설명 |
-| --- | --- | --- |
-| `DMS_KUBERNETES_INVENTORY_MODE` | `kubectl` | 읽기 전용 inventory mode. `kubectl` / `ssh-kubectl` / `python-client`. API 등록 sanity와 sanity-reconciler가 이 mode로 클러스터를 읽어 agentless managed cluster의 k8s/CSI mapping을 검증. 클러스터별 격리(한 클러스터 실패가 전체 inventory를 무력화하지 않음). |
-| `DMS_KUBERNETES_MUTATION_MODE` | `kubectl` | Namespace/ResourceQuota mutation mode(전역 기본). `kubectl`(직접 도달) 또는 `ssh-kubectl`. **storage mapping의 `backend_template.mutation_mode`로 클러스터별 override 가능**. |
+| `DMS_KUBERNETES_INVENTORY_MODE` | `kubectl` | 읽기 전용 inventory mode. `kubectl` / `ssh-kubectl` / `python-client`. API 등록 sanity와 sanity-reconciler가 이 mode로 클러스터를 읽어 agentless managed cluster의 CSI mapping을 검증. 클러스터별 격리(한 클러스터 실패가 전체 inventory를 무력화하지 않음). |
 | `DMS_CLUSTER_KUBECONFIGS_JSON` | 설정 안 됨 | cluster name → kubeconfig path JSON. current-context를 안 쓰는 `kubectl` mode에 필요. |
-| `DMS_CLUSTER_CONTROL_HOSTS_JSON` | 설정 안 됨 | cluster name → SSH host JSON. `ssh-kubectl` mode 전역 기본. mapping의 `control_host`가 있으면 그게 우선. |
+| `DMS_CLUSTER_CONTROL_HOSTS_JSON` | 설정 안 됨 | cluster name → SSH host JSON. `ssh-kubectl` inventory mode에서 그 클러스터를 `ssh <host> kubectl ...`로 읽는다. |
 | `DMS_KUBERNETES_INVENTORY_TIMEOUT_SECONDS` | `10` | inventory read timeout. |
-| `DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS` | `30` | ResourceQuota mutation timeout. |
+| `DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS` | `30` | **DM 전용** — dm-worker가 Volcano 잡을 kubectl로 다룰 때의 timeout(`adapters/volcano.py`). |
 
-> **per-mapping override.** 전역은 `kubectl`(직접 도달 클러스터)로 두고, 직접 도달 불가한 managed 클러스터 매핑만 `backend_template`에 `mutation_mode:"ssh-kubectl"` + `control_host:"<bastion>"`을 넣으면 그 클러스터의 ResourceQuota mutation만 `ssh <bastion> kubectl ...`로 라우팅된다(없으면 전역값으로 fallback). `control_host`만 있고 `mutation_mode`가 없으면 등록 시 **422 거부**(전역 기본 `kubectl`이라 control_host가 무시되므로 명시 필요). 이 per-mapping 경로는 CSI mapping sanity(`kubectl auth can-i ... resourcequota`)에도 그대로 쓰인다. 등록·검증 절차는 [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md).
+> **`ssh-kubectl` inventory를 쓰려면** dms-api·dms-planner·dms-sanity-reconciler 파드에 그 bastion으로 접속할 SSH 키를 **직접 마운트**해야 한다 — 컨트롤 플레인은 더 이상 SSH 키 Secret을 기본 제공하지 않는다. 클러스터 등록 절차는 [`dms-03-storage-mappings.md §3`](dms-03-storage-mappings.md).
 
 ---
 
-## 7. 데이터 관리(DM) 잡
+## 6. 데이터 관리(DM) 잡
 
 DM 잡은 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)의 클러스터 prereq 위에서만 실행된다: **Volcano** 설치 + `Queue dms-data` + `PriorityClass dms-low/normal/high`(`install/kubernetes/volcano-queue-priorityclasses.yaml`), DM 네임스페이스 `PodSecurity=privileged`, dm-worker와 **모든 DM 잡 노드에 동일 경로로 마운트된 공유 RWX artifact FS**, 노드 NSS/SSSD, 스토리지 host-mount. queue가 없으면 잡이 영구 Pending, PriorityClass가 없으면 pod가 admission에서 거부된다.
 
-`dms-dm-worker` Deployment **replicas=32(매니페스트 기본) = DM enabled · 최대 32-way 동시 실행** (32는 `max_connections≥400` 전제 — 규모에 맞게 조정, 위 §3 "RM/DM worker 수평 확장"). `0`은 DM을 **의도적으로 끌 때만** — 0이면 어떤 worker도 data job을 claim하지 않아 `scan`/`sync`/`rm`이 큐에 쌓인 채 실행되지 않는다(정상 상태 아님).
+`dms-dm-worker` Deployment **replicas=32(매니페스트 기본) = DM enabled · 최대 32-way 동시 실행** (32는 `max_connections≥400` 전제 — 규모에 맞게 조정, 위 §3 "DM worker 수평 확장"). `0`은 DM을 **의도적으로 끌 때만** — 0이면 어떤 worker도 data job을 claim하지 않아 `scan`/`sync`/`rm`이 큐에 쌓인 채 실행되지 않는다(정상 상태 아님).
 
 ### 이미지 빌드 순서 (DMS_DM_JOB_IMAGE 트랩)
 
-빌드 순서와 대상은 [`dms-02-core.md`](dms-02-core.md)·[`dms-05-dm-jobs.md`](dms-05-dm-jobs.md)에 있다. 요지:
+빌드 순서와 대상은 [`dms-02-core.md`](dms-02-core.md)·[`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)에 있다. 요지:
 
 1. **DM 잡 이미지**를 `install/docker/Dockerfile.mpifileutils`로 빌드→레지스트리 push → 그 ref를 `control-plane.yaml` ConfigMap `dms-runtime-config`의 `DMS_DM_JOB_IMAGE`에 넣는다(실제 push한 ref로).
 2. **dms-agent 이미지**를 `install/docker/Dockerfile.agent`로 빌드하되 `--build-arg MFU_IMAGE=<위 잡 이미지>`(잡 이미지가 **먼저** 있어야 함) → `dms-dm-agent` DaemonSet이 사용. plain `dms` 이미지에는 mpifileutils tool이 없어 DM 후보가 `missing_dscan`/`dsync`/`drm_tool`로 거부된다.
-3. **plain dms 이미지**(`install/docker/Dockerfile`) → api/planner/rm-worker/dm-worker/retention/sanity + `dms-rm-agent`.
+3. **plain dms 이미지**(`install/docker/Dockerfile`) → api/planner/dm-worker/retention/sanity.
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
@@ -259,11 +246,11 @@ DM 잡은 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)의 클러스터 p
 | `DMS_DM_PRIVILEGED_OPERATORS` | 비어 있음 | root 요청 가능한 operator actor allowlist(쉼표). 비우면 **mTLS-verified operator 전체** 허용. |
 | `DMS_DM_PRIVILEGED_SCOPES` | 비어 있음 | root 잡 허용 scope(쉼표): `storage` 또는 `storage:path-prefix`. 비우면 전체 storage. |
 
-DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-management.md`](../docs/api/data-management.md), 설치·정책은 [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md).
+DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-management.md`](../docs/api/data-management.md), 설치·정책은 [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md).
 
 ---
 
-## 8. 노드 에이전트 (`DMS_AGENT_*`)
+## 7. 노드 에이전트 (`DMS_AGENT_*`)
 
 에이전트 ConfigMap은 `install/kubernetes/agent-daemonset.yaml`의 `dms-agent-runtime-config`에 있다.
 
@@ -271,10 +258,10 @@ DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-
 | --- | --- | --- | --- |
 | `DMS_AGENT_API_URL` | 없음 | 예 | 에이전트 클러스터에서 접근하는 DMS API URL. |
 | `DMS_AGENT_CLUSTER_NAME` | 없음 | 예 | logical cluster name. storage mapping·kubeconfig JSON key와 일치. |
-| `DMS_AGENT_WORKER_ROLE` | 없음 | 예 | `RM` 또는 `DM`. |
+| `DMS_AGENT_WORKER_ROLE` | 없음 | 예 | `DM`(현재 유일한 worker role). |
 | `DMS_AGENT_MOUNTINFO_PATH` | `/proc/self/mountinfo` | 컨테이너 배포시 사실상 필수 | 마운트 존재/Ready 판정에 읽는 mount table. 기본값은 **컨테이너 자신의 마운트**라 노드 스토리지가 안 보여 **모든 storage Missing → readiness false**. 아래 bind-mount로 `/host/proc/1/mountinfo`를 가리켜야 함. |
 | `DMS_AGENT_HOST_ROOT` | 설정 안 됨(권장 `/host`) | DM 에이전트 사실상 필수 | 호스트 root fs 마운트 경로(`/host` bind-mount, 아래 참조). ① per-node/mount 용량(statvfs) 리포트, ② **온디맨드 신원 프로빙의 호스트 해석 루트** — `chroot $HOST_ROOT getent`(SSSD/LDAP 유저, `SYS_CHROOT` 필요)와 `$HOST_ROOT/etc/passwd`(노드-로컬 유저) 계층이 이 경로를 쓴다. 미설정 시 두 호스트 계층이 건너뛰어져 **컨테이너 NSS만** 남아 노드 사용자를 해석 못 한다. readiness 판정 자체는 mountinfo. |
-| `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 `chroot /host getent`(SSSD/LDAP 유저용, agent에 **`SYS_CHROOT`** 필요) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. **온디맨드 튜닝(`DMS_DM_IDENTITY_PROBE_*`)은 agent가 아니라 dm-worker 설정 → §7**. |
+| `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 `chroot /host getent`(SSSD/LDAP 유저용, agent에 **`SYS_CHROOT`** 필요) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. **온디맨드 튜닝(`DMS_DM_IDENTITY_PROBE_*`)은 agent가 아니라 dm-worker 설정 → §6**. |
 | `DMS_AGENT_REPORT_INTERVAL_SECONDS` | `60` | 아니오 | report 주기. |
 | `DMS_AGENT_REPORT_TIMEOUT_SECONDS` | `5` | 아니오 | report POST timeout. |
 | `DMS_AGENT_TOOLS` | `dsync,nsync,drm,dscan,kubectl` | 아니오 | tool probe 목록(쉼표). |
@@ -316,11 +303,11 @@ volumes:
 
 ---
 
-## 9. env-var만으로는 부족 — 함께 적용할 RBAC
+## 8. env-var만으로는 부족 — 함께 적용할 RBAC
 
-아래 RBAC가 없으면 값이 옳아도 조용히 no-op하거나 Forbidden으로 실패한다. 매니페스트 편집·적용은 [`dms-02-core.md`](dms-02-core.md)·[`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md).
+아래 RBAC가 없으면 값이 옳아도 조용히 no-op하거나 Forbidden으로 실패한다. 매니페스트 편집·적용은 [`dms-02-core.md`](dms-02-core.md)·[`dms-03-storage-mappings.md`](dms-03-storage-mappings.md).
 
-- **`dms-agent-storages-sync`** (Role/RoleBinding, `control-plane.yaml`, `configmaps get/update/patch` on `dms-agent-storages`, bound `dms-api` + `dms-remote`). 없으면 dms-api의 storage-mapping→ConfigMap sync가 **조용히 no-op**(Forbidden을 warning으로 삼킴) → 새 filesystem storage가 에이전트에 도달하지 못해 RM `missing_rm_readiness`, DM `no_ready_dm_candidate`. 에이전트는 `storages.json`을 **startup에 1회만** 읽으므로, mapping 변경 후에는 `POST /api/v1/agent/rollout-restart`로 DaemonSet을 rollout-restart한다.
+- **`dms-agent-storages-sync`** (Role/RoleBinding, `control-plane.yaml`, `configmaps get/update/patch` on `dms-agent-storages`, bound `dms-api` + `dms-remote`). 없으면 dms-api의 storage-mapping→ConfigMap sync가 **조용히 no-op**(Forbidden을 warning으로 삼킴) → 새 filesystem storage가 에이전트에 도달하지 못해 DM이 `no_ready_dm_candidate`가 된다. 에이전트는 `storages.json`을 **startup에 1회만** 읽으므로, mapping 변경 후에는 `POST /api/v1/agent/rollout-restart`로 DaemonSet을 rollout-restart한다.
 - **`dms-api-volcano-rbac.yaml`** (`install/kubernetes/dms-api-volcano-rbac.yaml` — **control-plane.yaml에 없음, 별도 적용**). dms-api에 `pods/log` + volcano read를 부여해 `GET /operations/data-jobs/{id}/logs`(포탈 로그 tail)를 가능하게 한다.
 - **`dms-dm-volcano`**(dm-worker의 `batch.volcano.sh` Job + `scheduling.volcano.sh` PodGroup), **`dms-api-dm-terminate`**(`data.cancel`이 VolcanoJob을 실제 `kubectl delete`), **`dms-api-agent-rollout`**(rollout-restart) — 모두 `control-plane.yaml`에 포함. dms-api가 control 클러스터를 kubeconfig로 접근하면 그 kubeconfig가 인증하는 SA(예: `dms-remote`)에도 rollout/storages-sync rule을 grant한다.
 
@@ -330,8 +317,7 @@ volumes:
 
 - [`dms-01-prerequisites.md`](dms-01-prerequisites.md) — 클러스터/외부 사전 준비(Volcano·Queue·PriorityClass·privileged ns·NSS/SSSD·공유 RWX·host-mount)
 - [`dms-02-core.md`](dms-02-core.md) — 코어 배포(이미지 빌드·Secret·control-plane·mTLS·ingress·migration), 파일별 편집 목록
-- [`dms-03-rm-filesystem.md`](dms-03-rm-filesystem.md) — 파일시스템 RM 설정(backend별 LDAP·SSH host-exec·storage mapping)
-- [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md) — k8s 네임스페이스 쿼터 RM 설정(mutation transport·CSI sanity)
-- [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md) — DM(데이터 잡) 설정(이미지·정책·에이전트)
+- [`dms-03-storage-mappings.md`](dms-03-storage-mappings.md) — 스토리지 매핑(인벤토리) 등록(백엔드 타입·멀티 클러스터·readiness)
+- [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md) — DM(데이터 잡) 설정(이미지·정책·에이전트)
 - [`../docs/api/README.md`](../docs/api/README.md) — DMS API 개요 + 인증
 - [`../docs/operations-runbook.md`](../docs/operations-runbook.md) — 운영 런북

@@ -331,17 +331,35 @@ def test_rendered_prologues_are_valid_sh_and_guard_injection():
     assert run("seongje.jang", "10004", "10000") == 0  # valid passes
 
 
-def test_await_ignores_rm_only_evidence():
-    class RmRepo(_AwaitRepo):
+def test_await_ignores_stale_node_evidence():
+    # 게이트는 *fresh* DM 노드의 증거로만 만족된다. 증거를 들고 있어도 리포트가 stale한
+    # 노드는 후보 풀에서 빠지고(worker는 freshness="Fresh"로 읽는다), fresh 노드가 하나도
+    # 없는 상태는 "모두 Ready"로 취급되지 않는다 -> 조기 반환 없이 타임아웃까지 폴링.
+    class StaleRepo(_AwaitRepo):
+        def list_agent_reports(self, **kwargs):
+            self.calls += 1
+            if kwargs.get("freshness") == "Fresh":
+                return []  # 유일한 노드가 stale -> fresh 후보 없음
+            return [_dm_report("n0", ready=True)]
+
+    repo = StaleRepo(ready_after_calls=0)
+    _runtime(repo, wait=0.08, poll=0.02)._await_identity_evidence("alice")
+    assert repo.calls >= 2  # stale 증거로는 만족하지 않고 타임아웃까지 감
+
+
+def test_await_ignores_evidence_for_a_different_user():
+    # fresh DM 노드가 증거를 올렸더라도 그것이 *다른* 사용자의 증거라면 게이트는
+    # 만족되지 않는다(사용자 단위 매칭).
+    class OtherUserRepo(_AwaitRepo):
         def list_agent_reports(self, **_kw):
             self.calls += 1
             return [{
-                "cluster_name": "c", "node_name": "n", "worker_role": "RM",
+                "cluster_name": "c", "node_name": "n", "worker_role": "DM",
                 "report": {"identity_evidence": {"users": [
-                    {"username": "alice", "status": "Ready", "uid": 15000},
+                    {"username": "bob", "status": "Ready", "uid": 15001},
                 ]}},
             }]
 
-    repo = RmRepo(ready_after_calls=0)
+    repo = OtherUserRepo(ready_after_calls=0)
     _runtime(repo, wait=0.08, poll=0.02)._await_identity_evidence("alice")
-    assert repo.calls >= 2  # RM 증거로는 만족하지 않고 타임아웃까지 감
+    assert repo.calls >= 2  # bob 증거로는 alice 게이트가 만족되지 않음

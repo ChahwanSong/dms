@@ -6,7 +6,7 @@ DMS control plane을 배포하기 **전에** 클러스터와 외부 인프라에
 
 특히 **DM(데이터 잡: `scan`/`sync`/`rm`)** 은 아래 DM 전용 항목이 하나라도 빠지면 잡이 스케줄되지
 않거나 후보 노드가 전부 거부되어 **에러 없이 조용히 미실행**된다(큐에 머물거나 preflight에서
-rejected). 파일시스템·쿼터 **RM만** 쓰는 배포는 DM 전용 항목(§6~§9)을 건너뛸 수 있다.
+rejected). 스토리지 인벤토리만 등록하고 DM을 쓰지 않는 배포는 DM 전용 항목(§6~§9)을 건너뛸 수 있다.
 
 값(호스트명·경로·도메인)은 모두 예시 placeholder다 — `registry.example.internal`, `cluster-a`,
 `dc=example,dc=internal`, `/cephfs` 등. 각자 환경 값으로 치환한다.
@@ -20,13 +20,13 @@ rejected). 파일시스템·쿼터 **RM만** 쓰는 배포는 DM 전용 항목(�
 | 1 | Kubernetes ≥ 1.26 + cluster-admin `kubectl` 접근 | 항상 | — |
 | 2 | 컨테이너 레지스트리 (모든 노드에서 pull 가능) | 항상 | 파드 `ImagePullBackOff` |
 | 3 | PostgreSQL 2개 DB (`dms` + `dms_observability`) | 항상 | API/워커/migration 기동 불가 |
-| 4 | 관리 파일시스템 스토리지가 RM/DM 워커 노드에 **host-mount** | 파일시스템 RM/DM | mount readiness Missing → RM `missing_rm_readiness` |
-| 5 | 노드 **NSS/SSSD** 신원 해석 | 파일시스템 RM(그룹)·DM(요청자) | DM `identity_not_ready_on_node`, RM 그룹 반영 지연 |
+| 4 | 관리 파일시스템 스토리지가 DM 잡 노드에 **host-mount** | 파일시스템 스토리지 | mount readiness Missing → DM `no_ready_dm_candidate` |
+| 5 | 노드 **NSS/SSSD** 신원 해석 | DM(요청자) | DM `identity_not_ready_on_node` |
 | 6 | **Volcano** 설치 (scheduler+controller+admission+CRD) | **DM 전용** | DM 잡 스케줄 불가 |
 | 7 | **Queue `dms-data`** + **PriorityClass `dms-low/normal/high`** | **DM 전용** | 잡 영구 Pending / 파드 admission 거부 |
 | 8 | DM 잡 네임스페이스 **PodSecurity=`privileged`** | **DM 전용** | DM 잡 파드 admission 거부 |
 | 9 | 공유 **RWX artifact FS** — dm-worker·DM 잡 노드에 **동일 경로** | **DM 전용** | dm-worker가 `summary.json`을 못 읽어 잡 실패 |
-| 10 | (k8s 쿼터 RM) 타깃 클러스터 kubeconfig + RBAC | 선택 | k8s namespace-quota RM 불가 |
+| 10 | (멀티 클러스터) 타깃 클러스터 kubeconfig + 읽기 전용 RBAC | 선택 | 그 클러스터 인벤토리 미수집 → 매핑 sanity `cluster_missing` |
 
 > **MPI Operator는 설치하지 않는다.** DMS는 `DMS_DM_SCHEDULER_BACKEND=volcano-job`
 > (control-plane.yaml 기본값)으로 **Volcano 네이티브 Job**(`batch.volcano.sh`)만 사용하며, Volcano
@@ -37,7 +37,7 @@ rejected). 파일시스템·쿼터 **RM만** 쓰는 배포는 DM 전용 항목(�
 
 ## 1. Kubernetes / kubectl
 
-- control plane(`dms-api`·`dms-planner`·`dms-rm-worker`·`dms-dm-worker`)이 도는 클러스터에
+- control plane(`dms-api`·`dms-planner`·`dms-dm-worker`)이 도는 클러스터에
   cluster-admin `kubectl` 접근이 있어야 한다. Kubernetes **≥ 1.26** 권장.
 - DM 잡은 **`dms-dm-worker`가 도는 클러스터**에서 in-cluster로 생성된다
   (`DMS_DM_KUBERNETES_MODE=cluster`, 워커가 `--kubeconfig` 없이 잡을 만든다). 따라서 아래
@@ -48,7 +48,7 @@ rejected). 파일시스템·쿼터 **RM만** 쓰는 배포는 DM 전용 항목(�
 
 control plane·에이전트·DM 잡에 쓰이는 이미지를 **모든 관련 노드가 pull 할 수 있는 레지스트리**가
 있어야 한다(control 클러스터 노드 + DM 잡 노드). 이후 `dms-02-core.md`에서 이미지를 빌드·push 하고,
-DM 이미지는 `dms-05-dm-jobs.md`에서 다룬다. 빌드는 총 3종이며 **빌드 순서가 있다**(DM 잡 이미지 →
+DM 이미지는 `dms-04-dm-jobs.md`에서 다룬다. 빌드는 총 3종이며 **빌드 순서가 있다**(DM 잡 이미지 →
 `dms-agent` 이미지 → 기본 `dms` 이미지) — 자세한 절차는 `dms-02-core.md`.
 
 - private 레지스트리라면 각 클러스터 `dms` 네임스페이스에 **imagePullSecret**을 만들고 manifest의
@@ -106,12 +106,12 @@ psql "postgresql://dms_obs:<강한-OBS-비밀번호>@postgres.example.internal:5
 `dms migrate`(dms-02-core의 migration Job)가 만든다.**
 
 > **connection 사이징 (중요).** 프로세스마다 DB URL당 bounded pool을 쓴다. 두 축을 구분하라.
-> **max_size(상한)** — loop(planner·rm-worker·dm-worker·sanity·retention)는 op `DMS_DB_POOL_MAX_SIZE`
+> **max_size(상한)** — loop(planner·dm-worker·sanity·retention)는 op `DMS_DB_POOL_MAX_SIZE`
 > (기본 **4**) + obs **3**, **API**(dms-api·dms-api-internal)는 op `DMS_DB_API_POOL_MAX_SIZE`(기본 **16**) + obs 3.
 > **min_size(floor, 안 써도 warm 유지)** — API는 `DMS_DB_POOL_MIN_SIZE`(기본 **1**)로 첫 요청 cold-connect
 > 지연을 없애고, **loop는 `DMS_DB_WORKER_POOL_MIN_SIZE`(기본 0)** 라 idle 워커는 커넥션을 **0개**로 반납하고
 > 필요할 때만 연결한다(idle 커넥션은 psycopg_pool `max_idle`≈600초 후 자동 reap). 두 DB를 **같은 서버**에 두면
-> `max_connections`는 둘의 **합산 예산**이다. pool env는 [`dms-06 §2·§3`](dms-06-configuration.md).
+> `max_connections`는 둘의 **합산 예산**이다. pool env는 [`dms-05 §2·§3`](dms-05-configuration.md).
 >
 > **상한(ceiling) vs 실사용(steady-state)을 구분하라.** replicas=32의 *worst-case 상한*은 ≈300+(모든 풀이
 > 동시에 max까지 차는 가정, §3.4)이지만 **실측 정상상태는 ~50뿐**이다 — loop는 5초 폴링으로 op를 ~1개씩만
@@ -129,9 +129,9 @@ psql "postgresql://dms_obs:<강한-OBS-비밀번호>@postgres.example.internal:5
 dm-worker  32 × (op 4 + obs 3)=7  = 224
 dms-api     2 × (op 16 + obs 3)=19 = 38
 api-internal 1 × 19               = 19
-planner·rm-worker·sanity·retention 4 × 7 = 28
+planner·sanity·retention  3 × 7   = 21
 + superuser_reserved 3
-= ≈ 312 (worst-case 상한)  →  max_connections = 400 (여유 ~90)
+= ≈ 305 (worst-case 상한)  →  max_connections = 400 (여유 ~95)
 ```
 
 > **상한 ≠ 실사용.** 이건 *모든 풀이 동시에 max까지 차는* 가정의 상한이다. **실측 정상상태는 훨씬 낮다** —
@@ -163,11 +163,11 @@ sudo -u postgres psql -c "SHOW max_connections;"                     # → 400 �
 
 ## 4. 스토리지 host-mount
 
-관리 대상 파일시스템 스토리지(cephfs/gpfs/wekafs)는 **RM/DM 워커 노드에 host-mount** 돼 있어야
+관리 대상 파일시스템 스토리지(cephfs/gpfs/wekafs)는 **DM 잡 노드에 host-mount** 돼 있어야
 한다(스토리지 매핑의 `mount_path`, 예: `/cephfs`). 에이전트가 host mountinfo로 mount readiness를
 판정하고, DM 잡 파드는 이 경로를 `hostPath`(`type: Directory`)로 붙인다 — 마운트가 없으면 파드가
 기동 실패한다. 각 노드 `fstab` 등으로 부팅 시 자동 마운트되게 한다. 스토리지 매핑 등록은
-`dms-03-rm-filesystem.md`.
+`dms-03-storage-mappings.md`.
 
 ## 5. 노드 신원 해석 (NSS/SSSD)
 
@@ -177,7 +177,7 @@ DM 잡은 **요청자의 POSIX 신원(uid/gid)** 으로 실행되므로, **DM �
   `identity_not_ready_on_node`). agent는 계층형으로 해석한다: 호스트 `chroot /host getent`
   → 호스트 `/etc/passwd`(host-root 마운트) → 컨테이너 NSS. `DMS_AGENT_IDENTITY_USERS`는
   상시 프로빙할 **베이스라인**일 뿐이고, 목록에 없는 요청자도 **온디맨드 프로빙**으로 자동
-  확보된다(dm-worker가 요청 시 등록 → agent가 다음 사이클에 프로빙; `dms-05-dm-jobs.md §3`).
+  확보된다(dm-worker가 요청 시 등록 → agent가 다음 사이클에 프로빙; `dms-04-dm-jobs.md §3`).
 - **SSSD/LDAP-backed 노드 유저**를 프로빙하려면 `dms-dm-agent`에 **`SYS_CHROOT` capability**가
   필요하다(호스트 NSS 전체를 `chroot /host getent`로 조회 — nss_sss 포함). 노드-로컬
   `/etc/passwd` 유저는 host-root 마운트만으로 해석되어 capability가 필요 없다.
@@ -187,10 +187,7 @@ DM 잡은 **요청자의 POSIX 신원(uid/gid)** 으로 실행되므로, **DM �
 
 → DM 노드 OS에 **NSS/SSSD(또는 동등한 디렉터리 연동)** 를 구성해 요청자 계정이 노드에서
 해석되게 한다. (LDAP는 preflight에서 dm-worker가 read-only로 조회하는 별도 경로다 — DM
-신원 3요건은 `dms-05-dm-jobs.md`.)
-
-> 파일시스템 **RM**도 노드 SSSD에 의존한다 — RM이 만든 `dms-grp-*` 그룹 멤버십이 전 노드에서 제때
-> 보이도록 SSSD 캐시(`entry_cache_timeout`)를 낮춘다. 절차는 `dms-03-rm-filesystem.md`.
+신원 3요건은 `dms-04-dm-jobs.md`.)
 
 ---
 
@@ -274,15 +271,15 @@ DM 잡 파드는 결과(`summary.json`)와 로그를 `DMS_DM_ARTIFACT_BASE_URI`(
 - 잡 파드도 같은 경로를 hostPath로 붙인다(워커가 자동 생성하는 잡 매니페스트가 처리).
 - **베이스 서브디렉 생성 (1회)**: `DMS_DM_ARTIFACT_BASE_URI`의 베이스 디렉토리(예 `/artifacts/dms`)를 공유
   FS에 **`root:root 0755`로 미리 생성**한다 — 요청자 uid job pod가 per-job 디렉토리로 내려갈 수 있게.
-  명령은 [`dms-05-dm-jobs.md §6`](dms-05-dm-jobs.md).
+  명령은 [`dms-04-dm-jobs.md §6`](dms-04-dm-jobs.md).
 
 ---
 
-## 10. (선택) k8s namespace-quota RM 타깃 클러스터
+## 10. (선택) 추가 타깃 클러스터 인벤토리
 
-Kubernetes namespace-quota RM을 쓰면 타깃 클러스터에 `dms-remote` ServiceAccount + RBAC
-(`install/kubernetes/target-cluster-rbac.yaml`)와 그 kubeconfig가 필요하다. 절차는
-`dms-04-rm-k8s-quota.md`.
+control cluster 외의 클러스터를 인벤토리에 넣으려면 그 클러스터에 `dms-remote` ServiceAccount +
+**읽기 전용** RBAC(`install/kubernetes/target-cluster-rbac.yaml`)와 그 kubeconfig가 필요하다. 절차는
+`dms-03-storage-mappings.md §3`.
 
 ---
 
@@ -307,9 +304,8 @@ kubectl get ns dms -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/e
 
 # 4/9) 공유 FS·스토리지 + 아티팩트 베이스 디렉토리 (dm-worker 예정 노드에서)
 mount | grep <artifact-mountpoint>     # 예: /cephfs — dm-worker 노드와 DM 잡 노드에 동일 경로
-ls -ld /artifacts/dms                  # 아티팩트 베이스: root:root 0755 여야 함(dms-05 §6). 없으면:
+ls -ld /artifacts/dms                  # 아티팩트 베이스: root:root 0755 여야 함(dms-04 §6). 없으면:
                                        #   sudo mkdir -p /artifacts/dms && sudo chown root:root /artifacts/dms && sudo chmod 0755 /artifacts/dms
-# (파일시스템 RM만: managed_root(/cephfs/dms 등)는 dms-03 §4 — CephFS/Weka 자동 0711, GPFS 사전 생성)
 
 # 5) 노드 신원 (DM 노드에서)
 getent passwd <requester-user>         # 해석돼야 함
@@ -322,8 +318,7 @@ getent passwd <requester-user>         # 해석돼야 함
 ## 다음 문서
 
 - **[`dms-02-core.md`](dms-02-core.md)** — 코어 배포(이미지 빌드·순서, secret, control-plane, mTLS, ingress, migration)
-- [`dms-03-rm-filesystem.md`](dms-03-rm-filesystem.md) — 파일시스템 RM 설정(스토리지 매핑, host-mount, SSSD)
-- [`dms-04-rm-k8s-quota.md`](dms-04-rm-k8s-quota.md) — k8s namespace-quota RM(타깃 클러스터 kubeconfig/RBAC)
-- [`dms-05-dm-jobs.md`](dms-05-dm-jobs.md) — DM(데이터 잡) 설정(DM 이미지·에이전트·신원 3요건)
-- [`dms-06-configuration.md`](dms-06-configuration.md) — 환경변수 레퍼런스
+- [`dms-03-storage-mappings.md`](dms-03-storage-mappings.md) — 스토리지 매핑(인벤토리) 등록(host-mount, 멀티 클러스터 kubeconfig/RBAC)
+- [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md) — DM(데이터 잡) 설정(DM 이미지·에이전트·신원 3요건)
+- [`dms-05-configuration.md`](dms-05-configuration.md) — 환경변수 레퍼런스
 - [`README.md`](README.md) — 설치 인덱스

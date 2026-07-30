@@ -8,9 +8,8 @@ import StatusPill from "./StatusPill";
 import { isStuck, lifecycleLabel, lifecycleTextClass } from "./statusMeta";
 
 // resource_kind filter (server-side) + friendly labels.
-const RKINDS = ["", "filesystem", "kubernetes_namespace_quota", "data_job", "identity"] as const;
+const RKINDS = ["", "data_job", "identity"] as const;
 const RKIND_LABEL: Record<string, string> = {
-  filesystem: "파일시스템", kubernetes_namespace_quota: "쿼터",
   data_job: "데이터 잡", identity: "identity",
 };
 // lifecycle statuses worth filtering by (server-side, exact).
@@ -55,10 +54,8 @@ function targetOf(r: RequestActivity): string {
   const sp = str(src.path), dp = str(dst.path);
   if (sp || dp) return `${sp ?? "?"} → ${dp ?? "?"}`;
   if (str(tgt.path)) return `${str(tgt.storage_name) ? str(tgt.storage_name) + ":" : ""}${str(tgt.path)}`;
-  const ns = str(p.namespace_name) || str(p.namespace);
-  if (ns) return `${str(p.cluster_name) ? str(p.cluster_name) + "/" : ""}${ns}`;
-  const st = str(p.storage_name), dir = str(p.directory_name) || str(p.path);
-  if (st && dir) return `${st}:${dir}`;
+  const st = str(p.storage_name), path = str(p.path);
+  if (st && path) return `${st}:${path}`;
   return str(r.resource_key) || "—";
 }
 

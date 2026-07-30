@@ -194,24 +194,6 @@ def _parse_iso(value: str | None) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _filesystem_block_state(resource: dict[str, Any]) -> dict[str, Any]:
-    for section in ("desired_state", "applied_state", "observed_state"):
-        state = resource.get(section) or {}
-        block_state = state.get("block_state")
-        if isinstance(block_state, dict) and block_state:
-            return dict(block_state)
-    return {"blocked": resource.get("status") == LifecycleState.BLOCKED.value}
-
-
-def _kubernetes_quota_block_state(resource: dict[str, Any]) -> dict[str, Any]:
-    for section in ("desired_state", "applied_state", "observed_state"):
-        state = resource.get(section) or {}
-        block_state = state.get("block_state")
-        if isinstance(block_state, dict) and block_state:
-            return dict(block_state)
-    return {"blocked": resource.get("status") == LifecycleState.BLOCKED.value}
-
-
 def _agent_capability_summary(report: dict[str, Any]) -> dict[str, Any]:
     tools = []
     for tool in report.get("tools", []):

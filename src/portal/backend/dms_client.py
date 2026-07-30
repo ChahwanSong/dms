@@ -8,10 +8,10 @@ responses into ``DmsApiError`` so routers can re-raise them with the same status
 Storage-mapping endpoints used:
 - GET    /api/v1/operations/storage-mappings(?cluster_name=)        list (redacted)
 - GET    /api/v1/operations/storage-mappings/{name}                 get (redacted)
-- POST   /api/v1/resource-management/storage-mappings               upsert/create
-- PATCH  /api/v1/resource-management/storage-mappings/{name}        update (full body)
-- POST   /api/v1/resource-management/storage-mappings/{name}:check  re-run sanity
-- DELETE /api/v1/resource-management/storage-mappings/{name}        hard delete
+- POST   /api/v1/storage-mappings                                   upsert/create
+- PATCH  /api/v1/storage-mappings/{name}                            update (full body)
+- POST   /api/v1/storage-mappings/{name}:check                      re-run sanity
+- DELETE /api/v1/storage-mappings/{name}                            hard delete
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from .config import Settings
 
 _OPS = "/api/v1/operations/storage-mappings"
 _OPS_BASE = "/api/v1/operations"
-_RM = "/api/v1/resource-management/storage-mappings"
+_SM = "/api/v1/storage-mappings"
 _DM = "/api/v1/data-management"
 _DATA_JOBS = "/api/v1/operations/data-jobs"
 
@@ -122,13 +122,13 @@ class DmsClient:
     async def upsert_storage_mapping(
         self, body: dict[str, Any], *, actor: str | None = None
     ) -> dict[str, Any]:
-        return await self._request("POST", _RM, actor=actor, json=body)
+        return await self._request("POST", _SM, actor=actor, json=body)
 
     async def patch_storage_mapping(
         self, storage_name: str, body: dict[str, Any], *, actor: str | None = None
     ) -> dict[str, Any]:
         return await self._request(
-            "PATCH", f"{_RM}/{_seg(storage_name)}", actor=actor, json=body
+            "PATCH", f"{_SM}/{_seg(storage_name)}", actor=actor, json=body
         )
 
     async def check_storage_mapping(
@@ -136,14 +136,14 @@ class DmsClient:
     ) -> dict[str, Any]:
         # DMS uses a colon-suffixed action route: {name}:check
         return await self._request(
-            "POST", f"{_RM}/{_seg(storage_name)}:check", actor=actor
+            "POST", f"{_SM}/{_seg(storage_name)}:check", actor=actor
         )
 
     async def delete_storage_mapping(
         self, storage_name: str, *, actor: str | None = None
     ) -> dict[str, Any]:
         return await self._request(
-            "DELETE", f"{_RM}/{_seg(storage_name)}", actor=actor
+            "DELETE", f"{_SM}/{_seg(storage_name)}", actor=actor
         )
 
     # --- agent DaemonSet rollout (restart to re-read storages after a change) ---
@@ -244,7 +244,7 @@ class DmsClient:
         DMS only allows UnknownAfterSideEffect / BackendApplyFailed."""
         return await self._request(
             "POST",
-            f"/api/v1/resource-management/requests/{_seg(request_id)}:resolve",
+            f"{_OPS_BASE}/requests/{_seg(request_id)}:resolve",
             actor=actor,
             json={"resolution": resolution, "reason": reason},
         )

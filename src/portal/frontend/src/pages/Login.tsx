@@ -557,7 +557,7 @@ export default function Login({
 
         {/* signature: the storage backends DMS manages, as a quiet status strip */}
         <footer className="login-foot">
-          {["cephfs", "gpfs", "wekafs", "k8s-quota"].map((s) => (
+          {["cephfs", "gpfs", "wekafs"].map((s) => (
             <span key={s} className="login-chip"><i className="login-chip-dot" />{s}</span>
           ))}
         </footer>

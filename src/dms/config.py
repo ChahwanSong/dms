@@ -16,7 +16,7 @@ class Settings:
     # max_connections=100; see operational_pool_config / observability_pool_config.
     # min_size is the pool FLOOR — connections kept warm even when unused. The API keeps
     # a warm floor (db_pool_min_size) so user-facing requests never pay cold-connect
-    # latency on the first hit. Loop processes (planner / rm-worker / dm-worker / sanity
+    # latency on the first hit. Loop processes (planner / dm-worker / sanity
     # / retention) are NOT latency-sensitive, so they use db_worker_pool_min_size (0):
     # they open connections on demand and let idle ones reap (psycopg_pool max_idle),
     # which removes the per-replica idle floor that dominates the connection budget when
@@ -78,13 +78,7 @@ class Settings:
     cluster_control_hosts: dict[str, str] | None = None
     kubernetes_inventory_mode: str = "kubectl"
     kubernetes_inventory_timeout_seconds: int = 10
-    kubernetes_mutation_mode: str = "kubectl"
     kubernetes_mutation_timeout_seconds: int = 30
-    filesystem_mutation_mode: str = "ssh-host-exec"
-    filesystem_exec_timeout_seconds: int = 30
-    filesystem_exec_use_sudo: bool = True
-    ldap_group_gid_start: int = 9000000
-    ldap_group_gid_end: int = 9999999
     dm_namespace: str = "dms"
     dm_job_image: str | None = None
     dm_job_image_ref: str | None = None
@@ -263,24 +257,9 @@ class Settings:
             kubernetes_inventory_timeout_seconds=int(
                 os.getenv("DMS_KUBERNETES_INVENTORY_TIMEOUT_SECONDS", "10")
             ),
-            kubernetes_mutation_mode=os.getenv(
-                "DMS_KUBERNETES_MUTATION_MODE", "kubectl"
-            ),
             kubernetes_mutation_timeout_seconds=int(
                 os.getenv("DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS", "30")
             ),
-            filesystem_mutation_mode=os.getenv(
-                "DMS_FILESYSTEM_MUTATION_MODE", "ssh-host-exec"
-            ),
-            filesystem_exec_timeout_seconds=int(
-                os.getenv("DMS_FILESYSTEM_EXEC_TIMEOUT_SECONDS", "30")
-            ),
-            filesystem_exec_use_sudo=os.getenv(
-                "DMS_FILESYSTEM_EXEC_USE_SUDO", "true"
-            ).lower()
-            not in {"0", "false", "no"},
-            ldap_group_gid_start=int(os.getenv("DMS_LDAP_GROUP_GID_START", "9000000")),
-            ldap_group_gid_end=int(os.getenv("DMS_LDAP_GROUP_GID_END", "9999999")),
             dm_namespace=os.getenv("DMS_DM_NAMESPACE", "dms"),
             dm_job_image=os.getenv("DMS_DM_JOB_IMAGE"),
             dm_job_image_ref=os.getenv("DMS_DM_JOB_IMAGE_REF"),
@@ -415,9 +394,9 @@ class Settings:
         The observability DB sees far lighter write traffic (diagnostic events) than
         the operational DB, so it gets a smaller max_size. SIZING MATH (worst-case
         ceiling): total PG connections per server <= sum over processes of
-        (op_max_size + obs_max_size). With defaults — API*2 at (16+3) and the 5
-        single-threaded loops (planner/rm-worker/dm-worker/sanity/retention) at
-        (4+3) — that is 2*19 + 5*7 = 38 + 35 = 73, plus a transient migrate Job,
+        (op_max_size + obs_max_size). With defaults — API*2 at (16+3) and the 4
+        single-threaded loops (planner/dm-worker/sanity/retention) at
+        (4+3) — that is 2*19 + 4*7 = 38 + 28 = 66, plus a transient migrate Job,
         comfortably under the stock max_connections=100 (minus superuser_reserved=3).
         That is the CEILING; steady-state is far lower — loops hold ~1 op each (kept
         warm by --interval polling) and, with role="worker" min_size=0, ZERO idle obs

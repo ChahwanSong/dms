@@ -17,21 +17,22 @@ from portal.backend.routers.operator import operator_router
 
 OP = "/api/operator"
 
+# DMS ships exactly one agent DaemonSet (AGENT_DAEMONSETS).
+DM_AGENT = "dms-dm-agent"
+
+
+def _ds(**over):
+    """One rollout-status DaemonSet entry, converged unless overridden."""
+    return {"name": DM_AGENT, "desired": 3, "updated": 3, "ready": 3,
+            "available": 3, "unavailable": 0, "rolling": False, **over}
+
 
 class FakeDms:
     def __init__(self, *, status=None, restart=None, raise_on=None):
-        self._status = status or {
-            "namespace": "dms",
-            "daemonsets": [
-                {"name": "dms-rm-agent", "desired": 3, "updated": 3, "ready": 3,
-                 "available": 3, "unavailable": 0, "rolling": False},
-                {"name": "dms-dm-agent", "desired": 3, "updated": 1, "ready": 1,
-                 "available": 1, "unavailable": 2, "rolling": True},
-            ],
-        }
+        self._status = status or {"namespace": "dms", "daemonsets": [_ds()]}
         self._restart = restart or {
             "namespace": "dms", "restarted_at": "2026-07-02T12:00:00Z",
-            "restarted": ["dms-rm-agent", "dms-dm-agent"], "errors": {},
+            "restarted": [DM_AGENT], "errors": {},
         }
         self._raise_on = raise_on or {}
         self.calls: list[tuple[str, str]] = []
@@ -59,7 +60,7 @@ def make_client(dms: FakeDms) -> TestClient:
     return TestClient(app)
 
 
-def test_rollout_status_proxied():
+def test_rollout_status_converged_proxied():
     dms = FakeDms()
     c = make_client(dms)
     r = c.get(f"{OP}/agents/rollout-status")
@@ -67,9 +68,22 @@ def test_rollout_status_proxied():
     body = r.json()
     assert body["namespace"] == "dms"
     names = {d["name"]: d for d in body["daemonsets"]}
-    assert names["dms-rm-agent"]["rolling"] is False
-    assert names["dms-dm-agent"]["rolling"] is True
+    assert list(names) == [DM_AGENT]
+    assert names[DM_AGENT]["rolling"] is False
+    assert names[DM_AGENT]["updated"] == 3
     assert ("status", "op") in dms.calls  # actor forwarded = logged-in operator
+
+
+def test_rollout_status_rolling_proxied():
+    # mid-restart: the DaemonSet's per-pod progress is forwarded verbatim
+    dms = FakeDms(status={"namespace": "dms", "daemonsets": [
+        _ds(updated=1, ready=1, available=1, unavailable=2, rolling=True),
+    ]})
+    body = make_client(dms).get(f"{OP}/agents/rollout-status").json()
+    ds = body["daemonsets"][0]
+    assert ds["name"] == DM_AGENT
+    assert ds["rolling"] is True
+    assert (ds["updated"], ds["unavailable"]) == (1, 2)
 
 
 def test_rollout_restart_proxied():
@@ -77,7 +91,7 @@ def test_rollout_restart_proxied():
     c = make_client(dms)
     r = c.post(f"{OP}/agents/rollout-restart")
     assert r.status_code == 200
-    assert set(r.json()["restarted"]) == {"dms-rm-agent", "dms-dm-agent"}
+    assert r.json()["restarted"] == [DM_AGENT]
     assert ("restart", "op") in dms.calls
 
 

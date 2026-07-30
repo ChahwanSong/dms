@@ -7,10 +7,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from dms.adapters import (
-    StubFilesystemBackendAdapter,
-    StubKubernetesNamespaceQuotaAdapter,
-)
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
@@ -20,11 +16,12 @@ from dms.domain import (
     OperationKind,
     ResourceKind,
     StorageMappingInput,
+    WorkerRole,
 )
 from dms.migrations import migrate_all
 from dms.planner import Planner
 from dms.repositories import DmsRepository, ObservabilityRepository, SchedulingBlocked
-from dms.workers import RMWorkerRuntime, RunHeartbeat
+from dms.workers import RunHeartbeat
 
 AUTH_HEADERS = {"x-dms-actor": "api-client"}
 
@@ -63,9 +60,12 @@ def test_maintenance_blocks_mutating_requests_but_allows_queries(harness):
 
     assert response.status_code == 200
     assert response.json()["control_state"]["scheduling_blocked"] is True
+    # A mutating route (data-job submission goes through deps.submit_request, which calls
+    # _reject_if_maintenance_blocked BEFORE persisting) must be refused with 409 and must
+    # not leave a request behind.
     blocked = client.post(
-        "/api/v1/resource-management/filesystems",
-        json=_filesystem_body("blocked-during-maintenance"),
+        "/api/v1/data-management/scan",
+        json=_scan_body("blocked-during-maintenance"),
         headers=AUTH_HEADERS,
     )
     assert blocked.status_code == 409
@@ -83,25 +83,36 @@ def test_maintenance_blocks_mutating_requests_but_allows_queries(harness):
 
 
 def test_drain_blocks_worker_claim_until_resume(harness):
+    """Drain gates worker *claim admission*: the claim path a worker loop drives
+    (``claim_next_plan``) refuses while drained and the PLANNED plan is left untouched,
+    then the very same call succeeds once the operator resumes."""
     client: TestClient = harness["client"]
     repository: DmsRepository = harness["repository"]
-    observability: ObservabilityRepository = harness["observability"]
     _register_ready_storage_mapping(repository)
-    request_id = _create_filesystem_request(repository, "drain-claim")
+    request_id = _create_scan_request(repository, "drain-claim")
     Planner(repository).run_once()
     plan = repository.get_plan_by_request(request_id)
+    assert repository.get_plan(plan["plan_id"])["status"] == LifecycleState.PLANNED.value
 
     client.post(
         "/api/v1/operations/control-state:begin-drain",
         json={"reason": "planned shutdown"},
         headers=AUTH_HEADERS,
     )
-    worker = _rm_worker(repository, observability)
 
-    assert worker.run_once() == 0
+    # Drained: claim_next_plan raises rather than handing the plan out, and the plan is
+    # still PLANNED afterwards (nothing was half-claimed).
+    with pytest.raises(SchedulingBlocked):
+        repository.claim_next_plan(
+            WorkerRole.DM,
+            worker_id="dm-worker",
+            executor_id="dm-worker",
+            lease_seconds=30,
+        )
     assert (
         repository.get_plan(plan["plan_id"])["status"] == LifecycleState.PLANNED.value
     )
+    assert repository.get_request(request_id)["status"] == LifecycleState.PLANNED.value
 
     resume = client.post(
         "/api/v1/operations/control-state:resume",
@@ -109,17 +120,26 @@ def test_drain_blocks_worker_claim_until_resume(harness):
         headers=AUTH_HEADERS,
     )
     assert resume.status_code == 200
-    assert worker.run_once() == 1
-    assert (
-        repository.get_request(request_id)["status"] == LifecycleState.SUCCEEDED.value
+
+    claimed = repository.claim_next_plan(
+        WorkerRole.DM,
+        worker_id="dm-worker",
+        executor_id="dm-worker",
+        lease_seconds=30,
     )
+    assert claimed is not None
+    claimed_plan, run_id = claimed
+    assert claimed_plan["plan_id"] == plan["plan_id"]
+    assert repository.get_plan(plan["plan_id"])["status"] == LifecycleState.CLAIMED.value
+    assert repository.get_request(request_id)["status"] == LifecycleState.CLAIMED.value
+    assert run_id in {run["run_id"] for run in repository.list_active_runs(limit=10)}
 
 
 def test_claim_plan_transaction_refuses_when_scheduling_blocked(harness):
     client: TestClient = harness["client"]
     repository: DmsRepository = harness["repository"]
     _register_ready_storage_mapping(repository)
-    request_id = _create_filesystem_request(repository, "claim-race")
+    request_id = _create_scan_request(repository, "claim-race")
     Planner(repository).run_once()
     plan = repository.get_plan_by_request(request_id)
 
@@ -132,8 +152,8 @@ def test_claim_plan_transaction_refuses_when_scheduling_blocked(harness):
     with pytest.raises(SchedulingBlocked):
         repository.claim_plan(
             plan_id=plan["plan_id"],
-            worker_id="rm-worker",
-            executor_id="rm-worker",
+            worker_id="dm-worker",
+            executor_id="dm-worker",
             lease_seconds=30,
         )
 
@@ -142,13 +162,13 @@ def test_run_heartbeat_extends_lease(harness):
     repository: DmsRepository = harness["repository"]
     observability: ObservabilityRepository = harness["observability"]
     _register_ready_storage_mapping(repository)
-    request_id = _create_filesystem_request(repository, "heartbeat")
+    request_id = _create_scan_request(repository, "heartbeat")
     Planner(repository).run_once()
     plan = repository.get_plan_by_request(request_id)
     run_id = repository.claim_plan(
         plan_id=plan["plan_id"],
-        worker_id="rm-worker",
-        executor_id="rm-worker",
+        worker_id="dm-worker",
+        executor_id="dm-worker",
         lease_seconds=1,
     )
     before = repository.list_active_runs(limit=1)[0]["lease_expires_at"]
@@ -157,7 +177,7 @@ def test_run_heartbeat_extends_lease(harness):
         repository=repository,
         observability=observability,
         run_id=run_id,
-        worker_id="rm-worker",
+        worker_id="dm-worker",
         lease_seconds=1,
         interval_seconds=0.05,
     ):
@@ -170,28 +190,28 @@ def test_run_heartbeat_extends_lease(harness):
 def test_mark_stale_runs_classifies_claimed_and_active_side_effect_states(harness):
     repository: DmsRepository = harness["repository"]
     _register_ready_storage_mapping(repository)
-    claimed_request_id = _create_filesystem_request(repository, "stale-claimed")
-    applying_request_id = _create_filesystem_request(repository, "stale-applying")
+    claimed_request_id = _create_scan_request(repository, "stale-claimed")
+    applying_request_id = _create_scan_request(repository, "stale-applying")
     Planner(repository).run_once(limit=10)
     claimed_plan = repository.get_plan_by_request(claimed_request_id)
     applying_plan = repository.get_plan_by_request(applying_request_id)
     claimed_run_id = repository.claim_plan(
         plan_id=claimed_plan["plan_id"],
-        worker_id="rm-worker",
-        executor_id="rm-worker",
+        worker_id="dm-worker",
+        executor_id="dm-worker",
         lease_seconds=1,
     )
     applying_run_id = repository.claim_plan(
         plan_id=applying_plan["plan_id"],
-        worker_id="rm-worker",
-        executor_id="rm-worker",
+        worker_id="dm-worker",
+        executor_id="dm-worker",
         lease_seconds=1,
     )
     repository.update_run_state(
         applying_run_id,
         LifecycleState.APPLYING,
         reason="test active side effect state",
-        actor="rm-worker",
+        actor="dm-worker",
     )
     _expire_runs(repository, claimed_run_id, applying_run_id)
 
@@ -209,10 +229,10 @@ def test_mark_stale_runs_classifies_claimed_and_active_side_effect_states(harnes
     )
 
 
-def _park_blocked_run(repository: DmsRepository, directory_name: str) -> tuple[str, str]:
+def _park_blocked_run(repository: DmsRepository, target_path: str) -> tuple[str, str]:
     """Create request→plan→claimed run, then park it in Blocked like a DM preview.
     Returns (plan_id, run_id). update_run_state cascades plan+request to Blocked too."""
-    request_id = _create_filesystem_request(repository, directory_name)
+    request_id = _create_scan_request(repository, target_path)
     Planner(repository).run_once(limit=10)
     plan = repository.get_plan_by_request(request_id)
     run_id = repository.claim_plan(
@@ -254,14 +274,14 @@ def test_close_superseded_preview_runs_sweep(harness):
 
 def _stuck_run(
     repository: DmsRepository,
-    directory_name: str,
+    target_path: str,
     run_state: LifecycleState,
     request_status: LifecycleState | None = None,
 ) -> tuple[str, str, str]:
     """request→plan→claimed run, then drive the run to `run_state` (cascades request+
     plan too), and optionally override the REQUEST status. Returns (request_id, plan_id,
     run_id). request_status=None leaves it equal to run_state (open attention)."""
-    request_id = _create_filesystem_request(repository, directory_name)
+    request_id = _create_scan_request(repository, target_path)
     Planner(repository).run_once(limit=10)
     plan = repository.get_plan_by_request(request_id)
     run_id = repository.claim_plan(
@@ -318,14 +338,14 @@ def test_close_orphaned_stuck_runs_various_cases(harness):
 
 def _confirm_pending_job(
     repository: DmsRepository,
-    directory_name: str,
+    target_path: str,
     *,
     preview_expires_at: str | None,
     state: DataJobState = DataJobState.CONFIRM_PENDING,
 ) -> tuple[str, str, str]:
     """request→plan + a data job in `state` with the given preview_expires_at.
     Returns (request_id, plan_id, job_id)."""
-    request_id = _create_filesystem_request(repository, directory_name)
+    request_id = _create_scan_request(repository, target_path)
     Planner(repository).run_once(limit=10)
     plan = repository.get_plan_by_request(request_id)
     job_id = repository.create_data_job(
@@ -379,20 +399,20 @@ def test_operational_queries_and_resume_blockers(harness):
     client: TestClient = harness["client"]
     repository: DmsRepository = harness["repository"]
     _register_ready_storage_mapping(repository)
-    request_id = _create_filesystem_request(repository, "active-query")
+    request_id = _create_scan_request(repository, "active-query")
     Planner(repository).run_once()
     plan = repository.get_plan_by_request(request_id)
     run_id = repository.claim_plan(
         plan_id=plan["plan_id"],
-        worker_id="rm-worker",
-        executor_id="rm-worker",
+        worker_id="dm-worker",
+        executor_id="dm-worker",
         lease_seconds=30,
     )
     repository.update_run_state(
         run_id,
         LifecycleState.APPLYING,
         reason="test active query",
-        actor="rm-worker",
+        actor="dm-worker",
     )
 
     work_summary = client.get("/api/v1/operations/work-summary", headers=AUTH_HEADERS)
@@ -431,41 +451,46 @@ def test_operational_queries_and_resume_blockers(harness):
     assert mutation["payload"]["force"] is True
 
 
-def _filesystem_body(directory_name: str) -> dict[str, Any]:
+def _scan_body(target_path: str) -> dict[str, Any]:
+    """POST body for ``/api/v1/data-management/scan`` (a ``DataJobRequest``)."""
     return {
         "requester_id": "user-1",
-        "payload": _filesystem_payload(directory_name),
+        "target": {"storage_name": "cephfs-a", "path": target_path},
+        "priority": 100,
     }
 
 
-def _filesystem_payload(directory_name: str) -> dict[str, Any]:
+def _scan_payload(target_path: str) -> dict[str, Any]:
     return {
         "storage_name": "cephfs-a",
-        "directory_name": directory_name,
-        "resource_type": "user",
-        "users": ["alice", "bob"],
-        "expires_at": "2099-01-01T00:00:00Z",
+        "target": {"storage_name": "cephfs-a", "path": target_path},
+        "target_path": target_path,
+        "priority": 100,
     }
 
 
-def _create_filesystem_request(repository: DmsRepository, directory_name: str) -> str:
+def _create_scan_request(repository: DmsRepository, target_path: str) -> str:
+    """Persist a ``data.scan`` request directly (skipping the API) — the planner turns
+    it into a ``WorkerRole.DM`` plan, which is the scaffolding these operational-control
+    tests need."""
     return repository.create_request(
         requester_id="user-1",
         actor="api-client",
-        operation=OperationKind.FILESYSTEM_CREATE.value,
-        resource_kind=ResourceKind.FILESYSTEM.value,
-        resource_key=f"cephfs-a:{directory_name}",
-        payload=_filesystem_payload(directory_name),
+        operation=OperationKind.DATA_SCAN.value,
+        resource_kind=ResourceKind.DATA_JOB.value,
+        resource_key=f"cephfs-a:data.scan:{target_path}",
+        payload=_scan_payload(target_path),
     )
 
 
 def _register_ready_storage_mapping(repository: DmsRepository) -> None:
+    """A cephfs storage mapping the planner will accept for data jobs (sanity Ready +
+    ``data_management`` readiness Ready)."""
     sanity = {
         "storage_name": "cephfs-a",
         "status": "Ready",
         "checked_at": "2026-06-03T00:00:00+00:00",
         "readiness": {
-            "resource_management": "Ready",
             "data_management": "Ready",
             "inventory": "Ready",
         },
@@ -476,7 +501,11 @@ def _register_ready_storage_mapping(repository: DmsRepository) -> None:
     repository.upsert_storage_mapping(
         StorageMappingInput(
             storage_name="cephfs-a",
-            backend_template={"backend_type": "cephfs"},
+            backend_template={
+                "backend_type": "cephfs",
+                "mount_path": "/mnt/cephfs-a",
+                "managed_root": "/mnt/cephfs-a/managed",
+            },
             cluster_name="cluster-a",
             storage_class_name="cephfs-sc",
         ),
@@ -486,26 +515,12 @@ def _register_ready_storage_mapping(repository: DmsRepository) -> None:
     )
 
 
-def _rm_worker(
-    repository: DmsRepository,
-    observability: ObservabilityRepository,
-) -> RMWorkerRuntime:
-    return RMWorkerRuntime(
-        repository=repository,
-        observability=observability,
-        filesystem_adapter=StubFilesystemBackendAdapter(),
-        kubernetes_adapter=StubKubernetesNamespaceQuotaAdapter(),
-        worker_id="rm-worker",
-        lease_seconds=2,
-    )
-
-
 def test_list_requests_filters_by_date_range(harness):
     repository: DmsRepository = harness["repository"]
     _register_ready_storage_mapping(repository)
-    rid_old = _create_filesystem_request(repository, "fs-old")
-    rid_mid = _create_filesystem_request(repository, "fs-mid")
-    rid_new = _create_filesystem_request(repository, "fs-new")
+    rid_old = _create_scan_request(repository, "scan-old")
+    rid_mid = _create_scan_request(repository, "scan-mid")
+    rid_new = _create_scan_request(repository, "scan-new")
     _stamp_requested_at(repository, rid_old, "2025-04-30T23:59:59+00:00")
     _stamp_requested_at(repository, rid_mid, "2025-05-15T12:00:00+00:00")
     _stamp_requested_at(repository, rid_new, "2025-06-01T00:00:00+00:00")
@@ -574,7 +589,7 @@ def _expire_runs(repository: DmsRepository, *run_ids: str) -> None:
 # Planned plans) and blocks every new request for its resource with Conflict. abandon
 # terminalizes it (request + plan + run) so the resource unblocks.
 
-_RESOLVE = "/api/v1/resource-management/requests/{}:resolve"
+_RESOLVE = "/api/v1/operations/requests/{}:resolve"
 
 
 def test_resolve_stuck_request_recovery_needed_terminalizes_request_plan_run(harness):
@@ -626,7 +641,7 @@ def test_resolve_endpoint_abandon_unblocks_conflict(harness):
     # A: stuck RecoveryNeeded request for a resource.
     req_a, _, _ = _stuck_run(repository, "conflictdir", LifecycleState.RECOVERY_NEEDED)
     # B: a new request for the SAME resource -> planner Conflicts it (prior active A).
-    req_b = _create_filesystem_request(repository, "conflictdir")
+    req_b = _create_scan_request(repository, "conflictdir")
     Planner(repository).run_once(limit=10)
     assert repository.get_request(req_b)["status"] == LifecycleState.CONFLICT.value
 
@@ -642,7 +657,7 @@ def test_resolve_endpoint_abandon_unblocks_conflict(harness):
     assert repository.get_request(req_a)["status"] == LifecycleState.FAILED.value
 
     # C: a fresh request for the same resource now plans (no active prior) — UNBLOCKED.
-    req_c = _create_filesystem_request(repository, "conflictdir")
+    req_c = _create_scan_request(repository, "conflictdir")
     Planner(repository).run_once(limit=10)
     assert repository.get_request(req_c)["status"] != LifecycleState.CONFLICT.value
 

@@ -12,17 +12,16 @@ const WINDOWS: { label: string; sec: number }[] = [
   { label: "30일", sec: 2592000 },
 ];
 
-interface NodeMeta { rm?: string; dm?: string; mounts: string[]; reported_at?: string }
+interface NodeMeta { dm?: string; mounts: string[]; reported_at?: string }
 
-// merge a node's RM/DM role-reports into one meta record (roles + mounts + reported).
+// merge a node's role-reports into one meta record (roles + mounts + reported).
 function metaByNode(reports: AgentReport[]): Map<string, NodeMeta> {
   const m = new Map<string, NodeMeta>();
   for (const r of reports || []) {
     const key = `${r.cluster_name}/${r.node_name}`;
     let n = m.get(key);
     if (!n) { n = { mounts: [] }; m.set(key, n); }
-    if (r.worker_role === "RM") n.rm = r.freshness_status;
-    else if (r.worker_role === "DM") n.dm = r.freshness_status;
+    if (r.worker_role === "DM") n.dm = r.freshness_status;
     for (const mt of r.capability_summary?.mounts || []) if (!n.mounts.includes(mt)) n.mounts.push(mt);
     if (!n.reported_at || (r.reported_at || "") > n.reported_at) n.reported_at = r.reported_at;
   }
@@ -134,7 +133,6 @@ export default function WorkerNodes() {
               <div className="ui-card-hd">
                 <h3><span className="mono">{n.node_name}</span> <span className="muted small">{n.cluster_name}</span></h3>
                 <span className="wn-roles">
-                  <RoleBadge label="RM" status={md?.rm} />
                   <RoleBadge label="DM" status={md?.dm} />
                   <span className="muted small">{md?.reported_at ? fmtAgo(md.reported_at) : ""}</span>
                 </span>

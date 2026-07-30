@@ -16,18 +16,16 @@
    PodSecurity=privileged, 공유 RWX artifact FS, 노드 NSS/SSSD, 레지스트리)
 2. **[dms-02-core.md](dms-02-core.md)** — 코어 배포
    (이미지 3종 빌드/push, secret, `control-plane.yaml` 편집·apply, **mTLS 인증서** + ingress, DB migration)
-3. **[dms-03-rm-filesystem.md](dms-03-rm-filesystem.md)** — 파일시스템 RM 설정 *(파일시스템 스토리지 관리 시)*
-   (CephFS/WekaFS/GPFS 백엔드, ssh/sudoers, 백엔드별 LDAP, 스토리지 매핑, RM agent)
-4. **[dms-04-rm-k8s-quota.md](dms-04-rm-k8s-quota.md)** — Kubernetes 네임스페이스 쿼터 RM 설정 *(k8s 쿼터 관리 시)*
-   (agentless, target cluster RBAC + kubeconfig, 쿼터 정책)
-5. **[dms-05-dm-jobs.md](dms-05-dm-jobs.md)** — 데이터 잡(scan/sync/rm) 활성화 *(DM 사용 시)*
+3. **[dms-03-storage-mappings.md](dms-03-storage-mappings.md)** — 스토리지 매핑(인벤토리) 등록
+   (CephFS/WekaFS/GPFS + CSI 백엔드 타입, host-mount, 멀티 클러스터 RBAC + kubeconfig, `:check`·readiness)
+4. **[dms-04-dm-jobs.md](dms-04-dm-jobs.md)** — 데이터 잡(scan/sync/rm) 활성화 *(DM 사용 시)*
    (Volcano 스케줄링, DM job 이미지 + dms-agent 이미지, `DMS_AGENT_IDENTITY_USERS`, dm-worker, artifact FS)
-6. **[dms-06-configuration.md](dms-06-configuration.md)** — 환경변수 레퍼런스
-7. **[dms-07-ingress-metallb.md](dms-07-ingress-metallb.md)** — (선택) ingress-nginx + MetalLB로
+5. **[dms-05-configuration.md](dms-05-configuration.md)** — 환경변수 레퍼런스
+6. **[dms-06-ingress-metallb.md](dms-06-ingress-metallb.md)** — (선택) ingress-nginx + MetalLB로
    서비스 노출. bare-metal에서 `type: LoadBalancer`를 쓰려면 필요하며, 포탈/DMS API를 IP·호스트명
    하나로 라우팅한다. IP 풀 선정(충돌 방지)과 IP 접속 시 404 함정을 다룬다.
 
-> RM(3·4)과 DM(5)은 필요한 것만 선택 활성화한다. 최소 설치는 1·2·6.
+> DM(4)은 필요할 때만 활성화한다. 최소 설치는 1·2·3·5.
 
 ## Portal 설치 (별도)
 
@@ -41,6 +39,10 @@
 - **[redeploy.md](redeploy.md)** — DMS 코어 또는 Portal **소스코드 수정 후 재배포** 빠른 참조
   (이미지 빌드 → rollout, 대상 워크로드·컨테이너명, schema/Secret 주의). 무중단·백업·rollback 포함 정식
   업그레이드는 [../docs/operations-runbook.md](../docs/operations-runbook.md) §8~§10.
+- **RM 제거 릴리스로 올리는 기존 배포**는 [redeploy.md §4](redeploy.md)의 **일회성 정리**를 반드시
+  거친다 — `dms-rm-worker`/`dms-rm-agent` 삭제, 고아 ClusterRole 삭제, 그리고 예전 RM 노드가 대시보드에
+  영구 stale로 남지 않게 하는 **수동 SQL**(`DELETE FROM agent_node_current WHERE worker_role='RM'`).
+  DMS는 이 정리를 자동으로 하지 않는다.
 
 ---
 
@@ -49,8 +51,7 @@
 설치가 아니라 **운영 중 사용법**은 `docs/`에 있다.
 
 - **[../docs/api/README.md](../docs/api/README.md)** — DMS API 개요 + **인증(production = mTLS-verified)**
-- [../docs/api/resource-management-fs.md](../docs/api/resource-management-fs.md) — 파일시스템 RM API
-- [../docs/api/resource-management-k8s.md](../docs/api/resource-management-k8s.md) — k8s 쿼터 RM API
+- [../docs/api/storage-mappings.md](../docs/api/storage-mappings.md) — 스토리지 매핑 등록/수정/삭제 API
 - [../docs/api/data-management.md](../docs/api/data-management.md) — DM scan/sync/rm API
 - [../docs/api/operations.md](../docs/api/operations.md) — operations 조회 API
 - **[../docs/operations-runbook.md](../docs/operations-runbook.md)** — 운영 런북 (점검·장애 대응·업그레이드·rollback)
@@ -64,7 +65,7 @@
 인증서를 검증·전달하고 DMS는 **인증서 subject에서 actor를 파생**한다(`mtls:` prefix). 평문
 `x-dms-actor`는 신뢰하지 않으며 `DMS_DEFAULT_ACTOR`는 비워 둔다(설정 시 startup 실패). ② **신뢰 in-cluster
 클라이언트**(노드 에이전트 + 포탈 BFF) = 전용 내부 API **`dms-api-internal`**(mTLS **off** + shared
-token + NetworkPolicy) — 이들이 mTLS로는 `node:{cluster}:{node}`·per-operator `x-dms-actor`를 낼 수 없기 때문. 자세한 건 `dms-06-configuration.md`(§1·§8).
+token + NetworkPolicy) — 이들이 mTLS로는 `node:{cluster}:{node}`·per-operator `x-dms-actor`를 낼 수 없기 때문. 자세한 건 `dms-05-configuration.md`(§1·§8).
 
 ## 스케줄러 (요약)
 
@@ -78,10 +79,10 @@ DM 잡은 **Volcano 네이티브 Job**(`DMS_DM_SCHEDULER_BACKEND=volcano-job`)�
 - **`kubernetes/`** — `control-plane.yaml`(네임스페이스·ConfigMap·Secret·RBAC·Deployment·Service·
   NetworkPolicy·migrate Job), **`dms-api-internal.yaml`**(신뢰 in-cluster 클라이언트 전용 내부 API —
   agent + 포탈 BFF, mTLS off + shared token + trusted-clients NetworkPolicy),
-  `agent-daemonset.yaml`(RM/DM agent), `volcano-queue-priorityclasses.yaml`,
-  `target-cluster-rbac.yaml`, `dms-api-volcano-rbac.yaml`, `ingress.example.yaml`, `retention.yaml`,
-  `sanity-reconciler.yaml`, `managed-rm-worker.yaml`
+  `agent-daemonset.yaml`(DM agent), `volcano-queue-priorityclasses.yaml`,
+  `target-cluster-rbac.yaml`(대상 클러스터 **읽기 전용** 인벤토리 RBAC), `dms-api-volcano-rbac.yaml`,
+  `ingress.example.yaml`, `retention.yaml`, `sanity-reconciler.yaml`
 - **`config/`** — `dms-runtime.env.example`, `agent-storages.example.json`, `storage-mappings.example.json`,
-  `cluster-kubeconfigs.example.json`, `default-quota-policies.example.json`, `identity-denylist.example.json`
+  `cluster-kubeconfigs.example.json`, `identity-denylist.example.json`
 - **`docker/`** — `Dockerfile`(dms 코어), `Dockerfile.mpifileutils`(DM 잡 이미지), `Dockerfile.agent`(DM agent 이미지)
 - **`postgresql/init.sql`**, **`scripts/`** (dms-planned-shutdown·dms-resume·verify-install 등)

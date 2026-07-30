@@ -6,8 +6,7 @@ SILENT truncation while keeping the polled paths cheap:
 
   - /runs single-fetches high caps (active 1000 / stale 2000) and flags each section
     `truncated` ONLY when the cap was actually hit.
-  - /control-hosts single-fetches the bounded mapping set (limit 10000) and returns
-    {items, truncated}.
+  - /storage-node-matrix single-fetches the bounded mapping set (limit 10000).
   - /requests (data jobs = GROWING history) keeps a CAPPED page and returns
     {jobs, total, truncated}; the exact total comes from the uncapped COUNT summary
     and is fetched ONLY when the page is truncated (never a fetch-all).
@@ -157,26 +156,6 @@ def test_runs_not_truncated_for_small_sets():
     assert body["stale"]["truncated"] is False
 
 
-# --- control hosts -----------------------------------------------------------
-
-def test_control_hosts_items_and_not_truncated():
-    dms = FakeDms(mappings=[
-        _csi("csi1"),
-        {"storage_name": "fs1", "cluster_name": "c",
-         "backend_template": {"backend_type": "cephfs"}},  # fs => not a control host
-    ])
-    body = make_client(dms).get(f"{DASH}/control-hosts").json()
-    assert dms.limit_for("list_storage_mappings") == _STORAGE_LIMIT
-    assert [h["storage_name"] for h in body["items"]] == ["csi1"]
-    assert body["truncated"] is False
-
-
-def test_control_hosts_truncated_when_cap_hit():
-    dms = FakeDms(mappings=[_csi(f"csi{i}") for i in range(_STORAGE_LIMIT)])
-    body = make_client(dms).get(f"{DASH}/control-hosts").json()
-    assert body["truncated"] is True
-    assert len(body["items"]) == _STORAGE_LIMIT
-
 
 # --- data jobs (growing history) --------------------------------------------
 
@@ -222,23 +201,26 @@ def test_data_jobs_truncated_storage_filter_total_unknown():
 
 def test_summary_uses_latest_per_node_reports():
     reports = [
-        {"cluster_name": "c", "node_name": "n1", "worker_role": "RM",
-         "freshness_status": "Fresh", "reported_at": "2026-01-02"},
         {"cluster_name": "c", "node_name": "n1", "worker_role": "DM",
+         "freshness_status": "Fresh", "reported_at": "2026-01-02"},
+        {"cluster_name": "c", "node_name": "n2", "worker_role": "DM",
          "freshness_status": "Stale", "reported_at": "2026-01-02"},
     ]
     dms = FakeDms(reports=reports, summary={"total": 0})
     body = make_client(dms).get(f"{DASH}/summary").json()
     assert body["nodes"]["data"]["fresh"] == 1
     assert body["nodes"]["data"]["stale"] == 1
+    assert body["nodes"]["data"]["by_role"] == {"DM": {"fresh": 1, "stale": 1}}
     # node health requested as one-row-per-node (no history scan)
     assert any(name == "list_agent_reports" and kw["latest_per_node"] is True
                for name, kw in dms.calls)
-    assert dms.limit_for("list_storage_mappings") == _STORAGE_LIMIT
+    # /summary must NOT fetch storage mappings: node health comes from agent reports
+    # alone, and the polled path stays as cheap as possible.
+    assert not any(name == "list_storage_mappings" for name, _ in dms.calls)
 
 
 def test_nodes_endpoint_requests_latest_per_node():
-    reports = [{"cluster_name": "c", "node_name": "n1", "worker_role": "RM",
+    reports = [{"cluster_name": "c", "node_name": "n1", "worker_role": "DM",
                 "freshness_status": "Fresh", "reported_at": "2026-01-02", "report": {}}]
     dms = FakeDms(reports=reports)
     r = make_client(dms).get(f"{DASH}/nodes")

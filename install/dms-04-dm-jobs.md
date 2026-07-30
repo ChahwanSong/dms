@@ -1,8 +1,8 @@
 # DMS 설치 — DM(데이터 잡) 설정
 
-DMS의 **DM(Data Management) 잡** — `scan` / `sync` / `rm` — 을 켜는 설치 단계다. DM은 RM과
-단일 컨트롤플레인(API·planner·operational DB·요청 수명주기)을 공유하되, **실행은 Volcano
-네이티브 Job**으로 분리된다: planner가 요청을 `data_job`으로 만들고, `dms-dm-worker`가
+DMS의 **DM(Data Management) 잡** — `scan` / `sync` / `rm` — 을 켜는 설치 단계다. DM은 스토리지
+인벤토리·operations와 단일 컨트롤플레인(API·planner·operational DB·요청 수명주기)을 공유하되,
+**실행은 Volcano 네이티브 Job**으로 분리된다: planner가 요청을 `data_job`으로 만들고, `dms-dm-worker`가
 Volcano 잡(launcher 1 + worker N, mpifileutils MPI)으로 `dsync`/`dscan`/`drm`을 요청자의
 **POSIX 신원(uid/gid)** 으로 실행한다.
 
@@ -11,8 +11,9 @@ Volcano 잡(launcher 1 + worker N, mpifileutils MPI)으로 `dsync`/`dscan`/`drm`
 >
 > **선행 문서**: 클러스터 프리렉(Volcano·Queue·PriorityClass·PodSecurity·공유 FS·NSS/SSSD·
 > host-mount)은 **[dms-01-prerequisites.md](dms-01-prerequisites.md)**, 코어 배포(이미지·secret·
-> control-plane·mTLS·ingress·migration)는 **[dms-02-core.md](dms-02-core.md)** 에서 이미 끝냈다고
->가정한다. 여기서는 그 위에서 **DM을 켜는 DMS 측 단계**에 집중한다.
+> control-plane·mTLS·ingress·migration)는 **[dms-02-core.md](dms-02-core.md)**, DM이 대상으로 삼을
+> **스토리지 매핑 등록**은 **[dms-03-storage-mappings.md](dms-03-storage-mappings.md)** 에서 이미
+> 끝냈다고 가정한다. 여기서는 그 위에서 **DM을 켜는 DMS 측 단계**에 집중한다.
 
 DM은 프리렉이나 아래 단계가 **하나라도 빠지면 잡이 조용히 미실행**된다(에러 없이 큐에 머물거나
 preflight에서 rejected). "정상인데 안 돈다"의 대부분은 이 체크리스트의 누락이다.
@@ -57,8 +58,7 @@ DMS_DM_SCHEDULER_BACKEND: "volcano-job"   # 매니페스트 기본. 절대 "auto
 ## 2. 이미지 빌드 (3종 — 순서가 중요)
 
 DM은 이미지 두 개를 **추가로** 빌드해야 한다. `plain dms` 이미지는 [dms-02](dms-02-core.md)에서
-이미 빌드·push 했다고 가정한다(dms-api·planner·rm-worker·dm-worker·retention·sanity + dms-rm-agent
-가 이걸 쓴다). 빌드 컨텍스트는 **repo 루트**.
+이미 빌드·push 했다고 가정한다(dms-api·planner·dm-worker·retention·sanity가 이걸 쓴다). 빌드 컨텍스트는 **repo 루트**.
 
 ```
 (dms-02) plain dms 이미지  ─┐
@@ -131,8 +131,8 @@ docker push registry.example.internal/dms-agent:v1
 image: registry.example.internal/dms-agent:v1   # ← dms-agent 이미지 (dms 아님)
 ```
 
-> **`dms-rm-agent`는 plain `dms` 이미지 그대로** 둔다 — RM readiness는 mount + can-i만 보고
-> mpifileutils 툴을 요구하지 않는다. DM/RM 두 DaemonSet의 이미지가 다르다는 점에 주의.
+> **plain `dms` 이미지로 두면 안 된다** — 컨트롤플레인 이미지에는 mpifileutils 툴이 없어 모든 DM
+> 후보 노드가 거부된다.
 
 ---
 
@@ -179,7 +179,7 @@ DM 잡 pod는 요청자의 POSIX uid/gid로 실행되고, 잡 스크립트가 `c
 ## 4. LDAP 신원 해석 (read-only)
 
 dm-worker가 preflight에서 요청의 `owner_username`을 **LDAP로 조회**해 uid/gid/groups를 해석하고
-job pod의 `runAsUser`/`runAsGroup`/`fsGroup`을 세팅한다(저장 매핑 없음, RM과 동일 디렉토리).
+job pod의 `runAsUser`/`runAsGroup`/`fsGroup`을 세팅한다(저장 매핑 없음, read-only 조회).
 미설정 → `ldap_not_configured`, 다운 → `ldap_unavailable`로 **fail-closed**(stale 신원 없음).
 
 `control-plane.yaml` → ConfigMap `dms-runtime-config`:
@@ -200,8 +200,8 @@ DMS_LDAP_BIND_DN: "cn=dms,ou=service-accounts,dc=example,dc=internal"
 DMS_LDAP_BIND_PASSWORD: "<실제 비밀번호로>"
 ```
 
-> RM의 CephFS/WekaFS 파일시스템 연산은 LDAP bind를 **강하게(eager) 요구**하므로 RM을 이미 설정했다면
-> 이 값들은 채워져 있을 것이다([dms-03](dms-03-rm-filesystem.md) 참조). DM은 그 동일 디렉토리를 재사용한다.
+> DMS는 이 디렉토리를 **read-only로만** 조회한다 — 계정·그룹을 만들지 않는다. 전체 변수 목록은
+> [dms-05 §4](dms-05-configuration.md).
 
 ---
 
@@ -212,7 +212,7 @@ DMS_LDAP_BIND_PASSWORD: "<실제 비밀번호로>"
 ```yaml
 spec:
   replicas: 32    # 매니페스트 기본 = 최대 32-way 동시 실행. N = 최대 N개 잡 동시.
-                  # 32는 PostgreSQL max_connections>=400 전제 — 소규모/제약 환경은 낮춘다(dms-06 §3). 0 = DM 끔
+                  # 32는 PostgreSQL max_connections>=400 전제 — 소규모/제약 환경은 낮춘다(dms-05 §3). 0 = DM 끔
 ```
 
 - **`1`이 정상 = DM 켜짐.** dm-worker가 DM plan을 claim → preflight → Volcano 잡 생성·폴링한다.
@@ -223,11 +223,11 @@ spec:
   다른** plan을 원자적으로 집으므로 경합이 없다. 적정값 ≈ `min(원하는 동시성, 노드 용량 ÷ 잡당 파드 수)` —
   잡은 `node_count`개 노드(런처+워커 파드)를 쓰므로 노드 CPU/메모리가 실질 상한이고, 그 이상 replica는
   idle 폴링만 늘린다. **DB 연결 예산·`PORTAL_BACKUP_CONCURRENCY` 매칭**은
-  [`dms-06-configuration.md §3`](dms-06-configuration.md)의 "RM/DM worker 수평 확장".
+  [`dms-05-configuration.md §3`](dms-05-configuration.md)의 "DM worker 수평 확장".
 - dm-worker는 **컨트롤플레인과 동일한 plain `dms` 이미지**를 쓰며 `runAsUser: 0`(root)으로 돈다 —
   공유 FS의 요청자-소유 잠긴 artifact(`summary.json`)를 읽기 위함이다. 읽기전용 오케스트레이터라
-  (FS 쓰기 0, `kubectl`은 SA 토큰) root가 그 cross-uid 읽기 외 권한을 주지 않는다. api/planner/
-  rm-worker는 비-root uid 65532 유지.
+  (FS 쓰기 0, `kubectl`은 SA 토큰) root가 그 cross-uid 읽기 외 권한을 주지 않는다. api/planner는
+  비-root uid 65532 유지.
 
 ---
 
@@ -317,12 +317,12 @@ kubectl apply -f install/kubernetes/dms-api-volcano-rbac.yaml
 create/update/delete마다 `dms-agent-storages` ConfigMap을 patch하는데, 이는 `control-plane.yaml`의
 **Role/RoleBinding `dms-agent-storages-sync`**(configmaps get·update·patch, SA `dms-api` +
 `dms-remote`에 바인딩)에 의존한다. **이 RBAC가 없으면 patch가 Forbidden인데 코드가 그걸 삼켜**
-ConfigMap이 조용히 안 갱신되고, 새 스토리지가 agent에 닿지 못해 **DM은 `no_ready_dm_candidate`**
-(RM은 `missing_rm_readiness`)가 된다. control-plane.yaml에 내장돼 있으니 그대로 적용되면 된다.
+ConfigMap이 조용히 안 갱신되고, 새 스토리지가 agent에 닿지 못해 **DM이 `no_ready_dm_candidate`**가
+된다. control-plane.yaml에 내장돼 있으니 그대로 적용되면 된다.
 
 > **agent는 storages.json을 startup에 한 번만 읽는다.** 그래서 스토리지 매핑을 바꾼 뒤에는 DaemonSet을
-> rollout-restart 해야 새 스토리지가 반영된다: `POST /api/v1/agent/rollout-restart`(RM·DM DaemonSet에
-> `restartedAt` stamp) 또는 `kubectl -n dms rollout restart ds/dms-dm-agent ds/dms-rm-agent`.
+> rollout-restart 해야 새 스토리지가 반영된다: `POST /api/v1/agent/rollout-restart`(agent DaemonSet에
+> `restartedAt` stamp) 또는 `kubectl -n dms rollout restart ds/dms-dm-agent`.
 
 ---
 
@@ -427,7 +427,7 @@ U=https://dms.example.internal
 curl "${H[@]}" "$U/api/v1/operations/storage-mappings" | jq '.[] | {name, readiness}'
 
 # dm-agent를 새로 붙였으면 sanity 재실행(readiness stale "Missing" 해소)
-curl "${H[@]}" -X POST "$U/api/v1/resource-management/storage-mappings/cephfs-a:check"
+curl "${H[@]}" -X POST "$U/api/v1/storage-mappings/cephfs-a:check"
 ```
 
 > **부연(dev/testbed 프로필).** `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`인 비-프로덕션에서만 인증서
@@ -446,5 +446,6 @@ curl "${H[@]}" -X POST "$U/api/v1/resource-management/storage-mappings/cephfs-a:
 - **[docs/api/data-management.md](../docs/api/data-management.md)** — DM `scan`/`sync`/`rm` API(요청·preview/confirm·옵션·응답)
 - **[dms-01-prerequisites.md](dms-01-prerequisites.md)** — 클러스터 프리렉(Volcano·큐·PriorityClass·PSA·공유 FS·NSS/SSSD·host-mount)
 - **[dms-02-core.md](dms-02-core.md)** — 코어 배포(plain dms 이미지·secret·control-plane·mTLS·ingress·migration)
-- **[dms-06-configuration.md](dms-06-configuration.md)** — 환경변수 레퍼런스(`DMS_DM_*`·`DMS_LDAP_*` 전체)
+- **[dms-03-storage-mappings.md](dms-03-storage-mappings.md)** — 스토리지 매핑(인벤토리) 등록 — DM 대상 스토리지의 선행 조건
+- **[dms-05-configuration.md](dms-05-configuration.md)** — 환경변수 레퍼런스(`DMS_DM_*`·`DMS_LDAP_*` 전체)
 - **[docs/operations-runbook.md](../docs/operations-runbook.md)** — 운영 런북(readiness 디버깅·잡 라이프사이클·sanity-reconciler)

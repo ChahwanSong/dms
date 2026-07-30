@@ -21,95 +21,24 @@ class AdapterResult:
     artifact_uri: str | None = None
 
 
-
-class FilesystemBackendAdapter(Protocol):
-    def create(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def update(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def block(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def initialize(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def delete(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def consistency_check(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def import_directory(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def assign_quota_only(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-
-
-class FilesystemQuotaStrategy(Protocol):
-    backend_type: str
-
-    def render_quota(self, quota: dict[str, Any]) -> dict[str, Any]: ...
-
-
-
-class KubernetesNamespaceQuotaAdapter(Protocol):
-    def read_namespace(
-        self, cluster_name: str, namespace_name: str
-    ) -> dict[str, Any]: ...
-
-    def read_resource_quota(
-        self,
-        cluster_name: str,
-        namespace_name: str,
-        resource_quota_name: str = "dms-storage-quota",
-    ) -> dict[str, Any]: ...
-
-    def list_resource_quotas(
-        self, cluster_name: str, namespace_name: str
-    ) -> list[dict[str, Any]]: ...
-
-    def create_namespace(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def apply_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def delete_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def sync_live_state(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def import_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def check_resource_quota(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-    def audit_resource_quotas(self, plan: dict[str, Any]) -> AdapterResult: ...
-
-
-
 class StorageInventoryAdapter(Protocol):
     def effective_inventory(self) -> dict[str, Any]: ...
-
 
 
 class KubernetesInventoryReadError(RuntimeError):
     pass
 
 
-
-class KubernetesMutationError(RuntimeError):
-    pass
-
-
-
 class DataManagementRuntimeError(RuntimeError):
     pass
-
 
 
 class KubernetesReadOnlyInventoryAdapter(Protocol):
     def read_inventory(self) -> dict[str, Any]: ...
 
 
-
 class DataManagementStorageAdapter(Protocol):
     def worker_pool(self, storage_name: str) -> dict[str, Any]: ...
-
 
 
 @dataclass(frozen=True)
@@ -123,46 +52,14 @@ class IdentityLookupResult:
     source_metadata: dict[str, Any]
 
 
-
 class IdentityLookupAdapter(Protocol):
     def lookup(
         self, provider: str, posix_username: str
     ) -> IdentityLookupResult | None: ...
 
 
-
-class IdentityGroupManager(Protocol):
-    def ensure_group_members(
-        self,
-        *,
-        group_name: str,
-        users: list[str],
-        resource_key: str,
-    ) -> dict[str, Any]: ...
-
-    def delete_group(self, *, group_name: str) -> dict[str, Any]: ...
-
-    def list_group_members(self, *, group_name: str) -> list[str]: ...
-
-    def lookup_group_gid(self, *, group_name: str) -> int | None: ...
-
-    def lookup_group_name_by_gid(self, *, gid: int) -> str | None: ...
-
-
-
-class IdentityLookupConfigurationError(RuntimeError):
-    pass
-
-
-
 class IdentityLookupReadError(RuntimeError):
     pass
-
-
-
-class BackendPreconditionError(RuntimeError):
-    pass
-
 
 
 def probe_filesystem_access(
@@ -242,7 +139,6 @@ def probe_filesystem_access(
         )
         denied[user] = "denied" if rc == 0 else "unexpected_access"
     return {"allowed_users": allowed, "denied_users": denied}
-
 
 
 class VolcanoAdapter(Protocol):

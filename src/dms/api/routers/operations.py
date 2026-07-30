@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from ...domain import ResourceKind
+from ...domain import LifecycleState, ResourceKind, TERMINAL_LIFECYCLE_STATES
 from .._helpers.inventory import inventory_service
 from .._helpers.storage_mapping import (
     redact_storage_mapping,
@@ -442,154 +442,6 @@ def operational_query_router() -> APIRouter:
         authenticated_actor(request, services)
         return services.repository.list_resources()
 
-    @router.get("/filesystems/expiring")
-    def filesystem_expiring(
-        request: Request,
-        storage_name: str | None = None,
-        status: str = "expired",
-        before: str | None = None,
-        within_seconds: int | None = Query(default=None, gt=0),
-        include_blocked: bool = False,
-        limit: int | None = Query(default=None, gt=0),
-        brief: bool = False,
-        services: AppServices = Depends(get_services),
-    ) -> list[dict[str, Any]]:
-        authenticated_actor(request, services)
-        try:
-            return services.query.filesystem_expiring(
-                storage_name=storage_name,
-                status=status,
-                before=before,
-                within_seconds=within_seconds,
-                include_blocked=include_blocked,
-                limit=limit,
-                brief=brief,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @router.get("/filesystems/{storage_name}/{directory_name}")
-    def filesystem_get(
-        storage_name: str,
-        directory_name: str,
-        request: Request,
-        services: AppServices = Depends(get_services),
-    ) -> dict[str, Any]:
-        authenticated_actor(request, services)
-        resource_key = f"{storage_name}:{directory_name}"
-        resource = services.repository.get_resource(
-            ResourceKind.FILESYSTEM.value, resource_key
-        )
-        if not resource or resource.get("status") == "Deleted":
-            raise HTTPException(status_code=404, detail="filesystem resource not found")
-        desired = resource.get("desired_state") or {}
-        observed = resource.get("observed_state") or {}
-        request_summary = services.query._filesystem_request_summary(resource_key)
-        return {
-            "resource_key": resource_key,
-            "storage_name": storage_name,
-            "directory_name": directory_name,
-            "status": resource.get("status"),
-            "resource_type": resource.get("resource_type"),
-            "requester_id": desired.get("requester_id"),
-            "users": desired.get("users"),
-            "quota": desired.get("quota"),
-            "expires_at": desired.get("expires_at"),
-            "access_group": desired.get("access_group"),
-            "mode": desired.get("mode"),
-            "path": observed.get("path") or observed.get("junction_path"),
-            "fileset_name": observed.get("fileset_name"),
-            "access_group_info": observed.get("access_group"),
-            "quota_state": observed.get("quota_state"),
-            "last_block_request_id": request_summary.get("last_block_request_id"),
-            "last_block_status": request_summary.get("last_block_status"),
-            "updated_at": resource.get("updated_at"),
-        }
-
-    @router.get("/filesystems/{storage_name}")
-    def filesystem_list(
-        storage_name: str,
-        request: Request,
-        services: AppServices = Depends(get_services),
-    ) -> list[dict[str, Any]]:
-        authenticated_actor(request, services)
-        all_resources = services.repository.list_resources()
-        results = []
-        prefix = f"{storage_name}:"
-        for r in all_resources:
-            if r.get("resource_kind") != ResourceKind.FILESYSTEM.value:
-                continue
-            if not r.get("resource_key", "").startswith(prefix):
-                continue
-            if r.get("status") == "Deleted":
-                continue
-            desired = r.get("desired_state") or {}
-            directory_name = r["resource_key"][len(prefix) :]
-            results.append(
-                {
-                    "resource_key": r["resource_key"],
-                    "storage_name": storage_name,
-                    "directory_name": directory_name,
-                    "status": r.get("status"),
-                    "requester_id": desired.get("requester_id"),
-                    "quota": desired.get("quota"),
-                    "expires_at": desired.get("expires_at"),
-                    "updated_at": r.get("updated_at"),
-                }
-            )
-        return results
-
-    @router.get("/kubernetes/namespace-quotas/{cluster_name}/{namespace_name}")
-    def kubernetes_namespace_quota(
-        cluster_name: str,
-        namespace_name: str,
-        request: Request,
-        source: str = "both",
-        include_non_dms: bool = False,
-        include_status_used: bool = True,
-        services: AppServices = Depends(get_services),
-    ) -> dict[str, Any]:
-        authenticated_actor(request, services)
-        try:
-            return services.query.kubernetes_namespace_quota(
-                cluster_name=cluster_name,
-                namespace_name=namespace_name,
-                source=source,
-                include_non_dms=include_non_dms,
-                include_status_used=include_status_used,
-                kubernetes_adapter=services.kubernetes_quota,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @router.get("/kubernetes/namespace-quotas/expiring")
-    def kubernetes_namespace_quota_expiring(
-        request: Request,
-        cluster_name: str | None = None,
-        namespace_name: str | None = None,
-        resource_type: str | None = None,
-        status: str = "expired",
-        before: str | None = None,
-        within_seconds: int | None = Query(default=None, gt=0),
-        include_blocked: bool = False,
-        limit: int | None = Query(default=None, gt=0),
-        services: AppServices = Depends(get_services),
-    ) -> list[dict[str, Any]]:
-        authenticated_actor(request, services)
-        try:
-            return services.query.kubernetes_namespace_quota_expiring(
-                cluster_name=cluster_name,
-                namespace_name=namespace_name,
-                resource_type=resource_type,
-                status=status,
-                before=before,
-                within_seconds=within_seconds,
-                include_blocked=include_blocked,
-                limit=limit,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
     @router.get("/runs/stale")
     def stale_runs(
         request: Request,
@@ -713,5 +565,102 @@ def operational_query_router() -> APIRouter:
         Read-only live snapshot."""
         authenticated_actor(request, services)
         return services.volcano_adapter.volcano_job_metrics(limit=max(1, min(int(limit), 2000)))
+
+    @router.post("/requests/{request_id}:resolve", status_code=200)
+    def resolve_request(
+        request_id: str,
+        body: dict[str, Any],
+        request: Request,
+        services: AppServices = Depends(get_services),
+    ) -> dict[str, Any]:
+        """Manually terminalize a request STUCK in a non-terminal state so its resource
+        stops blocking new requests (the planner Conflicts a new request while a prior
+        one for the same resource is still active).
+
+        Resolvable states: UnknownAfterSideEffect, BackendApplyFailed, StaleClaim,
+        RecoveryNeeded, VerificationFailed — the full set of stuck states that surface in
+        조치 필요 (ACTION_REQUIRED_REQUEST_STATUSES). Actively-leased (Claimed/Running/
+        Applying/Verifying) and already-terminal requests are rejected (409).
+
+        body fields:
+          - resolution: "abandon" (→ Cancelled for StaleClaim [no side effect], else
+            Failed) or "succeeded" (→ Succeeded, when the operator confirms it applied)
+          - reason: human-readable explanation (required)
+
+        Abandon of RecoveryNeeded/UnknownAfterSideEffect may leave a PARTIALLY-applied
+        backend side effect (the worker died mid-apply); the caller should verify the
+        backend first. The audit result records backend_state_verified=false for these.
+        The request's still-open plan + run are terminalized in the same transaction.
+        """
+        RESOLVABLE_STATES = {
+            LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+            LifecycleState.BACKEND_APPLY_FAILED.value,
+            LifecycleState.STALE_CLAIM.value,
+            LifecycleState.RECOVERY_NEEDED.value,
+            LifecycleState.VERIFICATION_FAILED.value,
+        }
+
+        actor = authenticated_actor(request, services)
+        resolution = body.get("resolution")
+        reason = body.get("reason", "").strip()
+        if resolution not in ("abandon", "succeeded"):
+            raise HTTPException(
+                status_code=422,
+                detail="resolution must be 'abandon' or 'succeeded'",
+            )
+        if not reason:
+            raise HTTPException(status_code=422, detail="reason is required")
+
+        try:
+            req = services.repository.get_request(request_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="request not found") from None
+
+        current_status = req.get("status")
+        if (
+            current_status in TERMINAL_LIFECYCLE_STATES
+            and current_status not in RESOLVABLE_STATES
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=f"request is already in terminal state '{current_status}' and cannot be resolved",
+            )
+        if current_status not in RESOLVABLE_STATES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"request is in state '{current_status}'; only {sorted(RESOLVABLE_STATES)} can be resolved",
+            )
+
+        # abandon: StaleClaim never ran a side effect -> Cancelled; other stuck states
+        # may have a (possibly partial) side effect -> Failed. succeeded -> Succeeded.
+        if resolution == "succeeded":
+            target_state = LifecycleState.SUCCEEDED
+        elif current_status == LifecycleState.STALE_CLAIM.value:
+            target_state = LifecycleState.CANCELLED
+        else:
+            target_state = LifecycleState.FAILED
+        # RecoveryNeeded/UnknownAfterSideEffect abandon: a backend side effect may be
+        # partially applied and was not verified — record that in the audit result.
+        backend_unverified = resolution == "abandon" and current_status in {
+            LifecycleState.RECOVERY_NEEDED.value,
+            LifecycleState.UNKNOWN_AFTER_SIDE_EFFECT.value,
+            LifecycleState.VERIFICATION_FAILED.value,
+        }
+        services.repository.resolve_stuck_request(
+            request_id,
+            terminal_status=target_state,
+            reason=f"manually resolved by {actor}: {reason}",
+            actor=actor,
+            backend_unverified=backend_unverified,
+        )
+        return {
+            "request_id": request_id,
+            "previous_status": current_status,
+            "resolved_to": target_state.value,
+            "resolution": resolution,
+            "backend_state_verified": not backend_unverified,
+            "actor": actor,
+            "reason": reason,
+        }
 
     return router

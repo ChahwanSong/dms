@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from dms.db import Database
+from dms.domain import WorkerRole
 from dms.migrations import migrate_all
 from dms.repositories import DmsRepository
 
@@ -15,14 +16,14 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-def _report(node: str, role: str, reported_at: str, cpu, mem, *, os_metrics=True) -> dict:
+def _report(node: str, reported_at: str, cpu, mem, *, os_metrics=True) -> dict:
     rep = {
         "schema_version": "phase9.v1",
         "reported_at": reported_at,
         "cluster_name": "cluster-a",
         "node_name": node,
-        "node_uid": f"uid-{node}-{role}",
-        "worker_role": role,
+        "node_uid": f"uid-{node}",
+        "worker_role": WorkerRole.DM.value,
         "mounts": [],
         "csi": [],
         "tools": [],
@@ -47,10 +48,10 @@ def _repo(tmp_path) -> DmsRepository:
 def test_metric_samples_window_and_fields(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
-    repo.ingest_agent_report(_report("w1", "RM", _iso(now - timedelta(minutes=2)), 40.0, 60.0))
-    repo.ingest_agent_report(_report("w1", "RM", _iso(now - timedelta(minutes=1)), 42.0, 61.0))
-    repo.ingest_agent_report(_report("w2", "DM", _iso(now - timedelta(minutes=1)), 78.0, 55.0))
-    repo.ingest_agent_report(_report("w1", "RM", _iso(now - timedelta(hours=10)), 99.0, 99.0))
+    repo.ingest_agent_report(_report("w1", _iso(now - timedelta(minutes=2)), 40.0, 60.0))
+    repo.ingest_agent_report(_report("w1", _iso(now - timedelta(minutes=1)), 42.0, 61.0))
+    repo.ingest_agent_report(_report("w2", _iso(now - timedelta(minutes=1)), 78.0, 55.0))
+    repo.ingest_agent_report(_report("w1", _iso(now - timedelta(hours=10)), 99.0, 99.0))
 
     samples = repo.list_agent_metric_samples(since_iso=_iso(now - timedelta(hours=6)))
 
@@ -69,14 +70,14 @@ def test_metric_samples_window_and_fields(tmp_path):
     assert latest["mem_total_kb"] == 32_000_000
     assert latest["load1"] == 1.5
     assert latest["disk_used_pct"] == 55.0
-    assert latest["worker_role"] == "RM"
+    assert latest["worker_role"] == "DM"
 
 
 def test_metric_samples_missing_os_metrics_yields_nulls(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
     repo.ingest_agent_report(
-        _report("w3", "RM", _iso(now - timedelta(minutes=1)), 0, 0, os_metrics=False)
+        _report("w3", _iso(now - timedelta(minutes=1)), 0, 0, os_metrics=False)
     )
     samples = repo.list_agent_metric_samples(since_iso=_iso(now - timedelta(hours=1)))
     assert len(samples) == 1

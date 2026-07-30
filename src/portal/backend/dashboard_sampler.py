@@ -98,7 +98,7 @@ class DashboardSampler:
         counts = {
             # active plans ~= requests currently being processed (the "요청" line)
             "active_plans": _int(plans.get("total_active")),
-            # in-progress RM+DM runs (the "진행중 작업" line)
+            # in-progress runs (the "진행중 작업" line)
             "active_runs": _int(runs.get("total_active")),
             # in-progress data jobs (scan/sync/rm) — kept for an alt series
             "active_data_jobs": _int((jobs or {}).get("active_total")),
@@ -140,7 +140,7 @@ class DashboardSampler:
             cur = per_node.get(key)
             # keep the richest row per node: prefer one WITH os_metrics, then one WITH
             # network counters (only the newer agent build reports network; a node's
-            # RM/DM reports may differ, so a rm-only rebuild still wins here).
+            # per-node reports may differ, so a partial rebuild still wins here).
             if cur is None or (row["_has"], row.get("rx_bytes") is not None) > (
                 cur["_has"], cur.get("rx_bytes") is not None
             ):

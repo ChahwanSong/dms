@@ -1,7 +1,13 @@
 # DMS Portal 대시보드 — CSI control host 패널 (서브프로젝트 A) 설계
 
 - 날짜: 2026-06-25
-- 상태: 승인됨 (구현 대기)
+- 상태: **폐기(OBSOLETE) — RM 제거로 전제가 사라짐.** 작성 시점 기록으로만 보존한다.
+  이 패널의 데이터 원천인 **ResourceQuota mutation-transport 프로브**
+  (`sanity_result.mutation_observed`, `readiness.kubernetes_mutation`)가 RM과 함께 제거되었고,
+  구현물이던 `ControlHostsTable` 패널도 삭제되었다. 현재 storage-mapping sanity 축은
+  `data_management`와 `inventory` 둘뿐이다 → [`../../api/storage-mappings.md`](../../api/storage-mappings.md).
+  CSI 매핑(`ceph-csi`/`gpfs-csi`/`weka-csi`) 자체는 DM의 PVC↔PVC sync 대상으로 계속 존재한다.
+- 원래 상태(당시): 승인됨 (구현 대기)
 - 범위: 종합 대시보드에 **k8s-CSI 스토리지 매핑의 control host + ResourceQuota mutation transport 상태** 패널 추가
 - DMS 변경: **없음** (기존 `GET /api/v1/operations/operations/storage-mappings`의 `sanity_result.mutation_observed` 재사용)
 - 더 큰 후속: B(worker node OS 메트릭), C(Volcano 상태)는 별도 스펙

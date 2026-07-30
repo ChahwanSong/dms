@@ -1,14 +1,14 @@
 # DMS 데이터 관리 API — scan / sync / rm
 
 `data-management` 라우터(`/api/v1/data-management`)는 **파일시스템 데이터 잡**을 다룬다:
-경로 스캔(`scan`), 경로 간 복제(`sync`), 삭제(`rm`). RM(파일시스템·k8s 쿼터)과 **단일
+경로 스캔(`scan`), 경로 간 복제(`sync`), 삭제(`rm`). 스토리지 인벤토리·operations와 **단일
 컨트롤플레인**(API·planner·수명주기·operational DB)을 공유하되, 실제 실행은 **Volcano 잡**으로
 분리된다.
 
 이 문서는 **사용법**만 다룬다. 요청 수명주기(request→plan→run)·인증(운영 = mTLS-verified
 프로필)·공통 규약은 [`docs/api/README.md`](./README.md)에, DM을 **켜는 설치·활성화**(이미지 빌드,
 Volcano/큐/PriorityClass 사전 준비, agent·LDAP·공유 artifact FS 구성)는
-[`install/dms-05-dm-jobs.md`](../../install/dms-05-dm-jobs.md)에 있다 — 여기서는 다루지 않는다.
+[`install/dms-04-dm-jobs.md`](../../install/dms-04-dm-jobs.md)에 있다 — 여기서는 다루지 않는다.
 
 ---
 
@@ -227,7 +227,7 @@ PreflightRunning → PreviewRunning → ConfirmPending → (confirm) → Running
 - **운영자 root 실행**(privileged): 임의 사용자 데이터를 이관·정리해야 할 때 root(uid 0)로 실행하는
   경로가 있다. **mTLS-verified operator만** 허용되며(평문 actor의 root 요청은 `403`),
   `owner_username`/`requester_id`가 privileged 집합에 속해야 하고 scope로 대상을 제한한다. 활성화·
-  범위 축소는 [`install/dms-05-dm-jobs.md`](../../install/dms-05-dm-jobs.md) 참고. preview→confirm
+  범위 축소는 [`install/dms-04-dm-jobs.md`](../../install/dms-04-dm-jobs.md) 참고. preview→confirm
   게이트는 root에서도 우회되지 않는다.
 
 ---
@@ -284,7 +284,7 @@ confirm 무결성(옵션 중간 변경 감지)에 쓰인다.
 - `process_count = worker_pod_count × processes_per_node`(launcher 1개 별도).
 - **검증 권장**: 처음엔 `node_count=1, processes_per_node=1`(launcher+worker 1쌍)로 단순하게 시작한다.
   다중 노드/`nsync`는 모든 참여 노드에 **공유 artifact FS**가 동일 경로로 마운트돼야 rank-script를
-  worker가 읽는다(설치 요건 — [`install/dms-05-dm-jobs.md`](../../install/dms-05-dm-jobs.md)).
+  worker가 읽는다(설치 요건 — [`install/dms-04-dm-jobs.md`](../../install/dms-04-dm-jobs.md)).
 
 정책 조회/수정:
 
@@ -343,7 +343,7 @@ dst가 src와 identical해진다. 대표 실패는 대부분 **execution 전에 
 
 - `no_ready_dm_candidate`·`missing_dm_readiness`는 대개 **설치·활성화 요건 미충족**(agent 이미지에
   mpifileutils 툴 부재, storages ConfigMap sync RBAC 누락, LDAP/`DMS_AGENT_IDENTITY_USERS` 미설정
-  등)이다 → [`install/dms-05-dm-jobs.md`](../../install/dms-05-dm-jobs.md).
+  등)이다 → [`install/dms-04-dm-jobs.md`](../../install/dms-04-dm-jobs.md).
 
 ---
 
@@ -387,6 +387,6 @@ curl "${H[@]}" "$U/api/v1/data-management/sync/jobs/${jid}"
 - API 개요·인증(mTLS)·수명주기 — [`docs/api/README.md`](./README.md)
 - operations 조회 API(잡·요청·work summary) — [`docs/api/operations.md`](./operations.md)
 - 운영 런북(점검·유지보수·장애 대응) — [`docs/operations-runbook.md`](../operations-runbook.md)
-- DM 설치·활성화(이미지·Volcano·agent·LDAP·공유 artifact FS) — [`install/dms-05-dm-jobs.md`](../../install/dms-05-dm-jobs.md)
+- DM 설치·활성화(이미지·Volcano·agent·LDAP·공유 artifact FS) — [`install/dms-04-dm-jobs.md`](../../install/dms-04-dm-jobs.md)
 - 클러스터 사전 준비 — [`install/dms-01-prerequisites.md`](../../install/dms-01-prerequisites.md)
-- 환경변수 레퍼런스(`DMS_DM_*`·`DMS_LDAP_*`) — [`install/dms-06-configuration.md`](../../install/dms-06-configuration.md)
+- 환경변수 레퍼런스(`DMS_DM_*`·`DMS_LDAP_*`) — [`install/dms-05-configuration.md`](../../install/dms-05-configuration.md)

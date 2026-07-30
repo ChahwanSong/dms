@@ -4,7 +4,7 @@ import AgentRollout from "./AgentRollout";
 import { SanityBadge, ReadinessDots } from "../components/SanityBadge";
 import StorageMappingDetail from "./StorageMappingDetail";
 import StorageMappingForm from "./StorageMappingForm";
-import { backendType, isForPv, isFsBackend, managedRoot, quotaTitle } from "./helpers";
+import { backendType, isForPv, isFsBackend, managedRoot } from "./helpers";
 import { fmtTime } from "../../../lib/format";
 import Loading from "../../../components/Loading";
 
@@ -340,17 +340,10 @@ export default function StorageInventory({ focus }: {
                   <SanityBadge status={m.sanity_status} />
                 </td>
                 <td data-label="readiness">
-                  {isFsBackend(m) ? (
-                    <ReadinessDots
-                      readiness={m.readiness || m.sanity_result?.readiness}
-                      showRoles
-                    />
-                  ) : (
-                    <ReadinessDots
-                      readiness={m.readiness || m.sanity_result?.readiness}
-                      quota={{ title: quotaTitle(m) }}
-                    />
-                  )}
+                  <ReadinessDots
+                    readiness={m.readiness || m.sanity_result?.readiness}
+                    showRoles={isFsBackend(m)}
+                  />
                 </td>
                 <td data-label="갱신" className="muted small">{fmtTime(m.updated_at)}</td>
                 <td className="row-actions">

@@ -2731,8 +2731,8 @@ mark.reqa-hl { background: rgba(251, 191, 36, 0.3); color: inherit; border-radiu
 @media (min-width: 721px) {
   .reqa-grid .req-target { max-width: 0; width: 100%; }
   /* 종류: give the operation room so common ops (data.sync/scan/rm) stay on one
-     line and the kind tag sits below — instead of the op wrapping mid-token. Long
-     ops (kubernetes.namespace_quota.*) still wrap within this width (no blow-up). */
+     line and the kind tag sits below — instead of the op wrapping mid-token. Longer
+     operation kinds still wrap within this width (no blow-up). */
   .reqa-grid thead th:first-child,
   .reqa-grid td[data-label="종류"] { min-width: 9rem; }
 }
@@ -3114,7 +3114,7 @@ table.grid th.col-check, table.grid td.col-check { width: 2.2rem; padding: 0; te
 }
 
 
-/* ---- storage inventory: agent (RM·DM) rollout strip -------------------- */
+/* ---- storage inventory: agent (DM) rollout strip ----------------------- */
 .agent-rollout { background: #12161c; border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 0.9rem; margin: 0 0 1rem; }
 .agent-rollout-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; flex-wrap: wrap; }
 .agent-rollout-label b { font-size: 0.9rem; }

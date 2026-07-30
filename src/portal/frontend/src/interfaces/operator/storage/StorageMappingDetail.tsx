@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { operatorApi, type StorageMapping } from "../../../api";
 import { SanityBadge } from "../components/SanityBadge";
 import { SpecGrid, BoolChip, type KV } from "../../../components/SpecGrid";
-import { backendType, formatApiError, isForPv, isFsBackend, quotaTitle } from "./helpers";
+import { backendType, formatApiError, isForPv, isFsBackend } from "./helpers";
 import { fmtTime } from "../../../lib/format";
 import Loading from "../../../components/Loading";
 
@@ -45,9 +45,8 @@ export default function StorageMappingDetail({
   const readiness = m?.readiness || sr?.readiness;
   const agent = sr?.agent_observed;
   const k8s = sr?.kubernetes_observed;
-  const mutation = sr?.mutation_observed;
-  // CSI (agentless namespace-quota) mappings don't track RM/DM/INV agent readiness —
-  // they show a single QUOTA axis from the ResourceQuota mutation transport probe.
+  // CSI mappings are agentless — no DM agent evidence, so they show the StorageClass /
+  // CSI-driver probe (kubernetes_observed) instead of the agent observation card.
   const isFs = m ? isFsBackend(m) : false;
 
   return (
@@ -124,7 +123,7 @@ export default function StorageMappingDetail({
               </div>
             )}
 
-            {((!isFs && k8s) || (isFs && agent) || (!isFs && mutation)) && (
+            {((!isFs && k8s) || (isFs && agent)) && (
               <div className="obs-cards">
                 {!isFs && k8s && (
                   <section className="obs-card">
@@ -148,43 +147,11 @@ export default function StorageMappingDetail({
                     />
                   </section>
                 )}
-                {!isFs && mutation && (
-                  <section className="obs-card">
-                    <h4>Quota mutation transport</h4>
-                    <SpecGrid
-                      items={[
-                        { label: "모드", value: mutation.mode ?? "kubectl" },
-                        ...(mutation.control_host
-                          ? [{ label: "control host", value: mutation.control_host, mono: true } as KV]
-                          : []),
-                        { label: "도달", value: <BoolChip value={mutation.reachable} /> },
-                        { label: "변경 가능", value: <BoolChip value={mutation.can_mutate} /> },
-                        { label: "can-i · create", value: <BoolChip value={mutation.permissions?.create} /> },
-                        { label: "can-i · patch", value: <BoolChip value={mutation.permissions?.patch} /> },
-                        { label: "can-i · delete", value: <BoolChip value={mutation.permissions?.delete} /> },
-                        ...(mutation.detail
-                          ? [{ label: "detail", value: mutation.detail, span: true } as KV]
-                          : []),
-                      ]}
-                    />
-                  </section>
-                )}
                 {isFs && agent && (
                   <section className="obs-card">
-                    <h4>Agent 관측 (RM/DM 작업 준비도)</h4>
+                    <h4>Agent 관측 (DM 작업 준비도)</h4>
                     <SpecGrid
                       items={[
-                        {
-                          label: "RM 준비",
-                          value: (
-                            <span className="axes">
-                              <SanityBadge status={agent.rm_readiness} />
-                              <span className="muted small">
-                                준비 노드 {agent.rm_candidates?.length ?? 0}
-                              </span>
-                            </span>
-                          ),
-                        },
                         {
                           label: "DM 준비",
                           value: (
@@ -208,7 +175,7 @@ export default function StorageMappingDetail({
                       ]}
                     />
                     <p className="obs-note">
-                      에이전트가 최근에 보고한 노드가 RM/DM 작업 대상입니다. <b>Fresh</b>는 최신
+                      에이전트가 최근에 보고한 노드가 DM 작업 대상입니다. <b>Fresh</b>는 최신
                       보고, <b>Stale</b>은 보고 시한이 지난 과거 기록을 뜻합니다. Fresh 리포트가
                       0이면 해당 노드의 에이전트가 동작하지 않는 상태이며, Stale 리포트는 시간이
                       지나면 자연히 쌓이므로 많아도 정상입니다.
@@ -248,15 +215,10 @@ function overviewItems(
   readiness: StorageMapping["readiness"],
   isFs: boolean,
 ): KV[] {
-  const axes: ReactNode = isFs ? (
+  const axes: ReactNode = (
     <span className="axes">
-      <span>RM: <SanityBadge status={readiness?.resource_management} /></span>
-      <span>DM: <SanityBadge status={readiness?.data_management} /></span>
+      {isFs && <span>DM: <SanityBadge status={readiness?.data_management} /></span>}
       <span>INV: <SanityBadge status={readiness?.inventory} /></span>
-    </span>
-  ) : (
-    <span className="axes" title={quotaTitle(m)}>
-      QUOTA: <SanityBadge status={readiness?.kubernetes_mutation} />
     </span>
   );
   const items: KV[] = [
@@ -305,9 +267,6 @@ function configItems(m: StorageMapping): KV[] {
     const v = tpl[k];
     return typeof v === "string" && v.trim() ? v.trim() : null;
   };
-  const nodes = Array.isArray(tpl.rm_worker_nodes)
-    ? (tpl.rm_worker_nodes as unknown[]).map(String)
-    : [];
   const items: KV[] = [];
   const mr = str("managed_root");
   if (mr) items.push({ label: "경로 (managed_root)", value: mr, mono: true, span: true });
@@ -315,19 +274,6 @@ function configItems(m: StorageMapping): KV[] {
   if (mp) items.push({ label: "마운트 (mount_path)", value: mp, mono: true, span: true });
   const fsName = str("filesystem_name");
   if (fsName) items.push({ label: "파일시스템", value: fsName, mono: true });
-  if (nodes.length)
-    items.push({
-      label: "RM 노드",
-      value: (
-        <span className="opt-chips">
-          {nodes.map((n) => (
-            <span className="chip" key={n}>
-              {n}
-            </span>
-          ))}
-        </span>
-      ),
-    });
   const runner = str("command_runner");
   if (runner) items.push({ label: "실행 방식", value: runner });
   const tmpl = str("fileset_name_template");

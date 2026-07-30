@@ -42,7 +42,7 @@ certificate을 검증해 upstream으로 넘기고 DMS는 **인증서 subject에�
 `x-dms-actor: mtls:<operator>`로 실어 나르는데**, mTLS 프로필은 actor를 (하나뿐인) BFF 인증서 subject로
 덮어써 모든 운영자를 단일 actor로 뭉갠다. 그래서 **포탈은 노드 에이전트와 같은 내부 신뢰 평면
 `dms-api-internal`로 접속한다** — mTLS **off** + shared token + NetworkPolicy(agent + `dms-portal` ns만,
-ClusterIP). 근거·구조는 [`dms-06 §1·§8`](dms-06-configuration.md), 매니페스트
+ClusterIP). 근거·구조는 [`dms-05 §1·§7`](dms-05-configuration.md), 매니페스트
 `install/kubernetes/dms-api-internal.yaml`.
 
 - **`PORTAL_DMS_API_URL` = `http://dms-api-internal.dms.svc.cluster.local`**(portal.yaml 기본값).
@@ -292,7 +292,7 @@ kubectl -n dms-portal rollout status  deploy/dms-portal --timeout=120s
 
 ### 8.1 (권장) Ingress + 서버 TLS
 
-**ingress-nginx + MetalLB 설치 절차는 [dms-07-ingress-metallb.md](dms-07-ingress-metallb.md)** 를 따른다
+**ingress-nginx + MetalLB 설치 절차는 [dms-06-ingress-metallb.md](dms-06-ingress-metallb.md)** 를 따른다
 (이미지 미러링, MetalLB IP 풀 선정, `host:` 유무에 따른 IP 접속 404 함정, `/healthz` 선점 이슈 포함).
 테스트베드에는 이미 적용되어 있고 포탈은 `http://10.10.10.200/`으로 서빙된다.
 
@@ -499,6 +499,6 @@ kubectl -n dms-portal logs deploy/dms-portal | grep "DEV CODE ECHO" | tail -1
 
 - [install/README.md](README.md) — 설치 가이드 인덱스
 - [dms-02-core.md](dms-02-core.md) — DMS core 배포(mTLS 인증서·ingress·shared token — 포탈이 의존하는 대상)
-- [dms-06-configuration.md](dms-06-configuration.md) — DMS 환경변수 레퍼런스
+- [dms-05-configuration.md](dms-05-configuration.md) — DMS 환경변수 레퍼런스
 - [../docs/api/README.md](../docs/api/README.md) — DMS API 개요 + 인증(포탈이 소비하는 계약)
 - [../docs/operations-runbook.md](../docs/operations-runbook.md) — 운영 런북

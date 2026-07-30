@@ -59,7 +59,7 @@ class DMWorkerRuntime:
 
     def run_once(self) -> int:
         # Recovery sweeps are cluster-singleton work: only the leader replica runs them
-        # each cycle (see RMWorkerRuntime), so scaling to N dm-workers doesn't repeat the
+        # each cycle, so scaling to N dm-workers doesn't repeat the
         # same global cleanup N times. On leader death the short lease expires and another
         # replica takes over. (expire_stale_preview_jobs must precede the preview-run sweep.)
         if self.repository.try_acquire_leader(

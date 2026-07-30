@@ -47,7 +47,7 @@ export 해두면 그대로 동작한다. `DMS_ACTOR`는 운영에서 **unset**�
 > **부연 — dev/testbed 프로필(`DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`).** 인증서 없이 평문
 > `Authorization: Bearer <token>` + `x-dms-actor: operator`로 호출한다. 요청/응답 shape은 동일하다.
 > 운영에서는 이 형태를 쓰지 않는다. 인증 전체 규약은 [`api/README.md`](api/README.md) §3,
-> 관련 env는 [`../install/dms-06-configuration.md`](../install/dms-06-configuration.md).
+> 관련 env는 [`../install/dms-05-configuration.md`](../install/dms-05-configuration.md).
 
 ### 클러스터 컨텍스트
 
@@ -57,11 +57,11 @@ export 해두면 그대로 동작한다. `DMS_ACTOR`는 운영에서 **unset**�
 
 ### 정상 steady state (요약)
 
-- `dms-api`(replicas 2)·`dms-planner`·`dms-rm-worker`·`dms-dm-worker`가 모두 실행 중.
-- **`dms-dm-worker`는 기본 `replicas: 1`(= DM 활성)**. DM을 의도적으로 끈 환경에서만 0이며,
+- `dms-api`(replicas 2)·`dms-planner`·`dms-dm-worker`가 모두 실행 중.
+- **`dms-dm-worker`는 매니페스트 기본 `replicas: 32`(= DM 활성)**. DM을 의도적으로 끈 환경에서만 0이며,
   0을 "정상 유휴"로 오해하지 말 것. DM 잡은 **Volcano 네이티브 Job**(`DMS_DM_SCHEDULER_BACKEND=volcano-job`)으로
   실행되고 **Kubeflow MPI Operator는 필요 없다**.
-- 스토리지 매핑을 쓰는 축(RM/DM)마다 agent report가 fresh이고 `readiness.*=Ready`.
+- 스토리지 매핑의 축(`data_management`·`inventory`)마다 agent report가 fresh이고 `readiness.*=Ready`.
 - 해결되지 않은 `action-required` 항목이 없다.
 
 ---
@@ -73,7 +73,7 @@ export 해두면 그대로 동작한다. `DMS_ACTOR`는 운영에서 **unset**�
 ```bash
 kubectl -n dms get pods,jobs,svc,ingress
 kubectl -n dms wait --for=condition=complete job/dms-migrate --timeout=180s
-for d in dms-api dms-planner dms-rm-worker dms-dm-worker; do
+for d in dms-api dms-planner dms-dm-worker; do
   kubectl -n dms rollout status deploy/$d --timeout=180s
 done
 ```
@@ -86,14 +86,13 @@ kubectl -n dms logs deploy/dms-api --tail=200
 kubectl -n dms logs job/dms-migrate --tail=200
 ```
 
-k8s 쿼터 RM을 쓴다면 target cluster RBAC/kubeconfig 권한을 확인한다(설정은
-[`../install/dms-04-rm-k8s-quota.md`](../install/dms-04-rm-k8s-quota.md)).
+등록된 대상 클러스터가 있으면 인벤토리 읽기용 RBAC/kubeconfig를 확인한다(설정은
+[`../install/dms-03-storage-mappings.md`](../install/dms-03-storage-mappings.md) §3).
 
 ```bash
 KUBECONFIG=<cluster-a.kubeconfig> kubectl get nodes
 KUBECONFIG=<cluster-a.kubeconfig> kubectl get storageclass
-KUBECONFIG=<cluster-a.kubeconfig> kubectl auth can-i create resourcequotas --all-namespaces
-KUBECONFIG=<cluster-a.kubeconfig> kubectl auth can-i patch namespaces
+KUBECONFIG=<cluster-a.kubeconfig> kubectl get csidrivers
 ```
 
 `no`가 나오면 `install/kubernetes/target-cluster-rbac.yaml` 적용 여부와 ServiceAccount token을
@@ -132,7 +131,7 @@ curl -sS --cacert "$DMS_CA_CERT" "$DMS_API_URL/api/v1/operations/action-required
 steady-state 판정 기준은 §0 "정상 steady state"를 쓴다. DM 전제조건(Volcano+Queue/PriorityClass·
 `DMS_DM_JOB_IMAGE`·dms-agent 이미지·공유 artifact·DM identity)은 설치 시 갖춘다 —
 [`../install/dms-01-prerequisites.md`](../install/dms-01-prerequisites.md) ·
-[`../install/dms-05-dm-jobs.md`](../install/dms-05-dm-jobs.md).
+[`../install/dms-04-dm-jobs.md`](../install/dms-04-dm-jobs.md).
 
 ---
 
@@ -169,15 +168,15 @@ kubectl -n dms get networkpolicy dms-api-from-ingress-only -o yaml
 ```
 
 > 인증서 발급·ingress의 verify/evidence 구성은 [`../install/dms-02-core.md`](../install/dms-02-core.md),
-> 인증 env 레퍼런스는 [`../install/dms-06-configuration.md`](../install/dms-06-configuration.md).
+> 인증 env 레퍼런스는 [`../install/dms-05-configuration.md`](../install/dms-05-configuration.md).
 
 ---
 
 ## 4. Storage mapping 운영
 
-스토리지 매핑은 백엔드(경로·클러스터·마운트)와 그 **readiness/sanity**를 담는 레코드다. RM/DM
-요청은 대상 매핑이 `Ready`여야 진행된다. 요청 페이로드 전체 스키마는
-[`api/resource-management-fs.md`](api/resource-management-fs.md)에 있고, 여기서는 **운영 절차**만 다룬다.
+스토리지 매핑은 백엔드(경로·클러스터·마운트)와 그 **readiness/sanity**를 담는 레코드다. DM
+요청은 대상 매핑의 `data_management`가 `Ready`여야 진행된다. 요청 페이로드 전체 스키마는
+[`api/storage-mappings.md`](api/storage-mappings.md)에 있고, 여기서는 **운영 절차**만 다룬다.
 
 ### 4.1 조회
 
@@ -193,11 +192,11 @@ curl_dms "$DMS_API_URL/api/v1/operations/storage-mappings/cephfs-a" \
 
 ### 4.2 등록 · 수정 · 삭제
 
-**등록(POST).** `ssh_host`를 생략하면 agent 보고의 `rm_candidates` 중 `Ready` 노드가 자동 선택된다.
+**등록(POST).** 파일시스템 매핑은 `mount_path` + `managed_root`가 필수다(GPFS는 `filesystem_name`도).
 
 ```bash
 curl_dms -X POST -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/resource-management/storage-mappings" \
+  "$DMS_API_URL/api/v1/storage-mappings" \
   -d '{
     "storage_name": "cephfs-a",
     "backend_template": {
@@ -205,29 +204,26 @@ curl_dms -X POST -H "content-type: application/json" \
       "cluster_name": "cluster-a",
       "mount_path": "/cephfs",
       "managed_root": "/cephfs/root",
-      "rm_worker_nodes": ["node1","node2","node3"]
+      "csi_driver": "rook-ceph.cephfs.csi.ceph.com"
     },
     "cluster_name": "cluster-a",
     "storage_class_name": "rook-cephfs"
   }' | jq '{storage_name, status}'
 ```
 
-- `ssh_host` 자동 선택 우선순위: ① `backend_template.ssh_host` 명시 → 그 노드 · ② 생략 →
-  `sanity_result.agent_observed.rm_candidates` 중 `Ready` 첫 노드 · ③ 후보 없음(최초 등록 직후) →
-  `rm_worker_nodes[0]` fallback.
 - 이미 존재하면 **upsert(덮어쓰기)** 로 동작한다. 백엔드별 필드(GPFS `filesystem_name`, WekaFS,
-  CSI mutation transport 등)는 [`../install/dms-03-rm-filesystem.md`](../install/dms-03-rm-filesystem.md) ·
-  [`api/resource-management-fs.md`](api/resource-management-fs.md).
-- WekaFS 운영 주의: quota 작업은 RM worker가 ssh로 접속하는 호스트에서 `weka user login`(또는
-  `WEKA_USERNAME`/`PASSWORD`/`ORG`)이 선행돼야 한다. WEKA path quota는 **`capacity_bytes`만** 지원하고
-  `file_count`(inode quota)는 backend가 거절한다.
+  CSI 타입)는 [`../install/dms-03-storage-mappings.md`](../install/dms-03-storage-mappings.md) ·
+  [`api/storage-mappings.md`](api/storage-mappings.md).
+- CSI 매핑(`ceph-csi`/`gpfs-csi`/`weka-csi`)은 호스트 마운트가 없어 `cluster_name` +
+  `storage_class_name` + `csi_driver`만으로 등록되며, `data_management` 축은 `Missing`이 정상이다
+  (PVC↔PVC sync 대상).
 
 **수정(PATCH).** DMS는 **전체 `StorageMappingInput`을 받는다** — 부분(partial) 전송이 아니라
 현재 상태 전체를 round-trip 한다.
 
 ```bash
 curl_dms -X PATCH -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-a" \
+  "$DMS_API_URL/api/v1/storage-mappings/cephfs-a" \
   -d '{ "storage_name": "cephfs-a", "backend_template": { … 전체 … },
         "cluster_name": "cluster-a", "storage_class_name": "rook-cephfs" }' \
   | jq '{storage_name, status}'
@@ -239,7 +235,7 @@ curl_dms -X PATCH -H "content-type: application/json" \
 **삭제(DELETE).** 하드 삭제다(disable/enable 없음).
 
 ```bash
-curl_dms -X DELETE "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-a" \
+curl_dms -X DELETE "$DMS_API_URL/api/v1/storage-mappings/cephfs-a" \
   | jq '{storage_name, deleted}'
 ```
 
@@ -251,25 +247,25 @@ readiness가 stale로 남았거나 방금 노드/마운트를 바꿨으면 수�
 
 ```bash
 curl_dms -X POST \
-  "$DMS_API_URL/api/v1/resource-management/storage-mappings/cephfs-a:check" \
+  "$DMS_API_URL/api/v1/storage-mappings/cephfs-a:check" \
   | jq '{storage_name, status}'
 ```
 
 > **zsh 주의:** 콜론 액션은 `"…/cephfs-a:check"`처럼 **전체를 따옴표**로 감싼다(`$var:check`는
 > 수식어로 변형돼 404가 난다).
 
-### 4.4 agent ConfigMap 동기화 · rollout-restart (RM·DM **둘 다**)
+### 4.4 agent ConfigMap 동기화 · rollout-restart
 
 POST/PATCH/DELETE 시 `dms-agent-storages` ConfigMap이 **자동 동기화**된다(수동 편집 불필요). 단,
 **agent는 startup에 `storages.json`을 한 번만 읽으므로**(loop에서 재읽기 안 함) 매핑을 바꾼 뒤에는
 DaemonSet을 **rollout-restart** 해야 새 스토리지가 반영된다.
 
-새 스토리지의 `resource_management` readiness는 **RM agent**가, `data_management`는 **DM agent**가
-채운다 — **둘 중 하나만 재시작하면 나머지 축이 `Missing`으로 남는다.** 반드시 RM·DM을 함께 재시작한다.
+새 스토리지의 `data_management` readiness는 **DM agent**(`dms-dm-agent`)가 채운다 — 재시작하지 않으면
+그 축이 `Missing`으로 남는다.
 
 ```bash
-kubectl -n dms rollout restart daemonset/dms-rm-agent daemonset/dms-dm-agent
-kubectl -n dms rollout status  daemonset/dms-rm-agent daemonset/dms-dm-agent --timeout=180s
+kubectl -n dms rollout restart daemonset/dms-dm-agent
+kubectl -n dms rollout status  daemonset/dms-dm-agent --timeout=180s
 ```
 
 또는 DMS API로(포탈의 "에이전트 재시작" 버튼이 쓰는 경로):
@@ -282,8 +278,8 @@ curl_dms     "$DMS_API_URL/api/v1/agent/rollout-status"  | jq   # desired/update
 > ConfigMap 동기화 자체는 `control-plane.yaml`의 Role/RoleBinding **`dms-agent-storages-sync`**
 > (configmaps get·update·patch, SA `dms-api`+`dms-remote`)에 의존한다. **이 RBAC가 없으면 patch가
 > Forbidden인데 코드가 그걸 삼켜** ConfigMap이 조용히 갱신되지 않고, 새 스토리지가 agent에 닿지
-> 못해 RM은 `missing_rm_readiness`, DM은 `no_ready_dm_candidate`가 된다(설치 시 함께 적용됨 —
-> [`../install/dms-05-dm-jobs.md`](../install/dms-05-dm-jobs.md) §7).
+> 못해 DM이 `no_ready_dm_candidate`가 된다(설치 시 함께 적용됨 —
+> [`../install/dms-04-dm-jobs.md`](../install/dms-04-dm-jobs.md) §7).
 
 반영 확인:
 
@@ -315,30 +311,27 @@ live StorageClass와 불일치 · agent report stale(`DMS_AGENT_REPORT_STALE_SEC
 curl_dms "$DMS_API_URL/api/v1/operations/agent-reports" | jq '.[0] | {node_name, freshness, updated_at}'
 ```
 
-**(b) CSI/k8s 네임스페이스-쿼터 매핑 — ResourceQuota mutation transport.** `backend_type`이
-`cephfs`/`wekafs`/`gpfs`가 **아닌** 매핑(예: `ceph-csi`)은 agent가 아니라 **RM worker가 실제로 quota를
-적용하는 경로**(`kubectl` 또는 `ssh-kubectl`)로 대상 클러스터에 도달해 `resourcequota`를
-create/patch/delete 할 수 있는지를 sanity가 직접 검사한다.
+**(b) `inventory` 축 — live StorageClass / CSI driver 대조.** 매핑의 `storage_class_name`이 대상
+클러스터에 실제로 존재하고 `csi_driver`가 live provisioner와 일치해야 한다. CSI 매핑
+(`ceph-csi`/`gpfs-csi`/`weka-csi`)은 agent 증거가 없으므로 사실상 이 축만 본다.
 
 ```bash
 curl_dms "$DMS_API_URL/api/v1/operations/storage-mappings/<name>" \
   | jq '{status: .sanity_status,
-         kubernetes_mutation: .sanity_result.readiness.kubernetes_mutation,
-         mutation_observed: .sanity_result.mutation_observed, errors: .sanity_result.errors}'
+         inventory: .sanity_result.readiness.inventory, errors: .sanity_result.errors}'
 ```
-
-`Failed`이면 `errors[].code`가 둘 중 하나이며 조치가 다르다.
 
 | error code | 의미 | 조치 |
 | --- | --- | --- |
-| `mutation_transport_unreachable` | transport가 대상 클러스터에 **도달 못 함** (`control_host` 오설정/SSH 불가/원격에 kubectl 없음/kubeconfig 무효/timeout) | transport 경로 점검: `ssh <control_host> "kubectl auth can-i create resourcequota -A"` 또는 `KUBECONFIG=<kc> kubectl auth can-i create resourcequota -A` |
-| `mutation_no_permission` | 도달은 하지만 `can-i`가 **no** (RBAC 부족) | 대상 클러스터에서 resourcequota create/patch/delete RBAC 부여 (`install/kubernetes/target-cluster-rbac.yaml`) |
+| `cluster_missing` | 매핑의 `cluster_name`이 인벤토리에 없음 | `DMS_CLUSTER_KUBECONFIGS_JSON` 키와 Secret `dms-cluster-kubeconfigs`를 확인(§1) |
+| `storage_class_missing` | 대상 클러스터에 그 StorageClass가 없음 | `KUBECONFIG=<kc> kubectl get storageclass`로 실제 이름 확인 후 매핑 수정 |
+| `csi_driver_mismatch` | `csi_driver` ≠ live provisioner | `kubectl get sc <name> -o jsonpath='{.provisioner}'` 값으로 매핑 수정 |
 
-전역 transport는 `DMS_KUBERNETES_MUTATION_MODE` + `DMS_CLUSTER_CONTROL_HOSTS_JSON`(ssh-kubectl) /
-`DMS_CLUSTER_KUBECONFIGS_JSON`(kubectl)에서 오고, 매핑별로 `backend_template.mutation_mode`/`control_host`가
-우선한다. env/Secret을 바꾼 뒤에는 `dms-api`와 `dms-sanity-reconciler`를 rollout restart 해야 반영된다.
-수정 후 `:check`로 `kubernetes_mutation`이 `Ready`로 돌아오는지 확인한다. 설정 상세는
-[`../install/dms-04-rm-k8s-quota.md`](../install/dms-04-rm-k8s-quota.md).
+인벤토리 읽기 경로는 `DMS_KUBERNETES_INVENTORY_MODE` + `DMS_CLUSTER_KUBECONFIGS_JSON`(kubectl) /
+`DMS_CLUSTER_CONTROL_HOSTS_JSON`(ssh-kubectl)에서 온다. env/Secret을 바꾼 뒤에는 `dms-api`와
+`dms-sanity-reconciler`를 rollout restart 해야 반영된다. 수정 후 `:check`로 `inventory`가 `Ready`로
+돌아오는지 확인한다. 설정 상세는
+[`../install/dms-03-storage-mappings.md`](../install/dms-03-storage-mappings.md) §3.
 
 ---
 
@@ -374,7 +367,7 @@ curl_dms "$DMS_API_URL/api/v1/operations/runs/active"  | jq
 curl_dms "$DMS_API_URL/api/v1/operations/runs/stale"   | jq
 ```
 
-RM/DM worker는 긴 backend call 중 run heartbeat로 `lease_expires_at`을 갱신한다. 그래도 worker
+DM worker는 긴 backend call 중 run heartbeat로 `lease_expires_at`을 갱신한다. 그래도 worker
 process가 죽거나 heartbeat가 끊기면 expired lease가 남을 수 있으므로, startup 또는 planned shutdown
 전후에 stale guard를 돌린다.
 
@@ -400,7 +393,7 @@ worker 재시작·노드 작업·업그레이드 전에는 무작정 scale-down 
 
 **① 종료(drain + scale down).** `dms-planned-shutdown.sh`는 `control-state:begin-drain`으로 drain에
 진입하고 `ready_for_shutdown=true`가 될 때까지 폴링한 뒤, worker Deployment를 0으로 내린다
-(기본 `DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"` — **둘 다** 내린다). Kubernetes node
+(기본 `DMS_WORKER_DEPLOYMENTS="dms-dm-worker"`). Kubernetes node
 drain/reboot는 이 스크립트가 하지 않는다.
 
 ```bash
@@ -417,16 +410,14 @@ install/scripts/dms-planned-shutdown.sh \
 install/scripts/dms-startup-recovery-check.sh
 ```
 
-**④ 재개(resume + scale up) — RM·DM 두 워커 모두.** `dms-resume.sh`는 `control-state:resume`으로
-정상 상태로 되돌리고 워커를 scale up 한다. ⚠️ **이 스크립트의 `DMS_WORKER_DEPLOYMENTS` 기본값은
-`dms-rm-worker`(RM 하나뿐)** 이다 — DM이 활성(`replicas: 1`)인 운영에서는 반드시 **두 워커를 모두**
-지정해야 `dms-dm-worker`가 0에서 올라온다. 안 그러면 데이터 잡이 claim되지 않고 큐에 영구 대기한다.
+**④ 재개(resume + scale up).** `dms-resume.sh`는 `control-state:resume`으로 정상 상태로 되돌리고
+워커를 scale up 한다. `DMS_WORKER_DEPLOYMENTS` 기본값은 `dms-dm-worker`이며, `--replicas`는
+**종료 전 replica 수와 맞춘다**(매니페스트 기본은 32). 잘못 낮추면 DM 동시성이 조용히 줄어든다.
 
 ```bash
-export DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"   # ← DM 활성이면 필수
 install/scripts/dms-resume.sh \
   --reason "worker restart completed $(date -Iseconds)" \
-  --replicas 1
+  --replicas 32        # ← 종료 전 dms-dm-worker replica 수
 ```
 
 - `--force` 없이 resume하면 `RecoveryNeeded`/`UnknownAfterSideEffect`/`BackendApplyFailed`가 남아
@@ -450,11 +441,13 @@ migration을 검증한다.
 
 ## 9. 업그레이드
 
-순서: drain → backup → migrate → 4개 Deployment image 교체 → recovery check → resume → verify.
+순서: drain → backup → migrate → Deployment image 교체 → recovery check → resume → verify.
 
 먼저 **`install/kubernetes/control-plane.yaml`의 image 값을 새 ref로 바꾼다** — `dms-migrate` Job의
-`image:`와 4개 Deployment(`dms-api`·`dms-planner`·`dms-rm-worker`·`dms-dm-worker`)의 `image:`.
-(그래야 다음 `apply`에서 되돌아가지 않는다. 네 Deployment는 모두 **동일한 plain `dms` 이미지**를 쓴다.)
+`image:`와 Deployment(`dms-api`·`dms-planner`·`dms-dm-worker`)의 `image:`.
+(그래야 다음 `apply`에서 되돌아가지 않는다. 세 Deployment는 모두 **동일한 plain `dms` 이미지**를 쓴다.
+`dms-retention`·`dms-sanity-reconciler`도 같은 이미지를 쓰므로 별도 매니페스트에서 함께 올린다 —
+누락 방지는 [`../install/redeploy.md`](../install/redeploy.md) §2.1의 `grep /dms:`.)
 
 ```bash
 NEW_DMS_IMAGE="registry.example.internal/dms:vNEXT"
@@ -472,36 +465,34 @@ kubectl -n dms delete job dms-migrate --ignore-not-found=true
 kubectl apply -f install/kubernetes/control-plane.yaml
 kubectl -n dms wait --for=condition=complete job/dms-migrate --timeout=180s
 
-# ④ 4개 Deployment image 교체 (dm-worker 누락 주의 — 빠뜨리면 스테일 이미지로 남는다)
+# ④ Deployment image 교체 (dm-worker 누락 주의 — 빠뜨리면 스테일 이미지로 남는다)
 kubectl -n dms set image deploy/dms-api        api="$NEW_DMS_IMAGE"
 kubectl -n dms set image deploy/dms-planner    planner="$NEW_DMS_IMAGE"
-kubectl -n dms set image deploy/dms-rm-worker  rm-worker="$NEW_DMS_IMAGE"
 kubectl -n dms set image deploy/dms-dm-worker  dm-worker="$NEW_DMS_IMAGE"
-for d in dms-api dms-planner dms-rm-worker dms-dm-worker; do
+for d in dms-api dms-planner dms-dm-worker; do
   kubectl -n dms rollout status deploy/$d --timeout=180s
 done
 
-# ⑤ recovery check → resume(둘 다) → verify
+# ⑤ recovery check → resume → verify
 install/scripts/dms-startup-recovery-check.sh
-export DMS_WORKER_DEPLOYMENTS="dms-rm-worker dms-dm-worker"
-install/scripts/dms-resume.sh --reason "upgrade completed $(date -Iseconds)" --replicas 1
+install/scripts/dms-resume.sh --reason "upgrade completed $(date -Iseconds)" --replicas 32
 install/scripts/verify-install.sh
 ```
 
-> DM 잡/agent 이미지(`DMS_DM_JOB_IMAGE`·`dms-agent`)를 함께 올릴 때는 [dms-05](../install/dms-05-dm-jobs.md)의
+> DM 잡/agent 이미지(`DMS_DM_JOB_IMAGE`·`dms-agent`)를 함께 올릴 때는 [dms-04](../install/dms-04-dm-jobs.md)의
 > 빌드 순서(job 이미지 먼저 → agent 이미지)와 `DMS_DM_JOB_IMAGE` `:CHANGE_ME` 트랩에 유의한다.
 
 ---
 
 ## 10. Rollback
 
-새 image rollout 후 문제가 있으면 직전 image로 되돌린다(4개 Deployment 모두).
+새 image rollout 후 문제가 있으면 직전 image로 되돌린다(교체한 Deployment 모두).
 
 ```bash
-for d in dms-api dms-planner dms-rm-worker dms-dm-worker; do
+for d in dms-api dms-planner dms-dm-worker; do
   kubectl -n dms rollout undo deploy/$d
 done
-for d in dms-api dms-planner dms-rm-worker dms-dm-worker; do
+for d in dms-api dms-planner dms-dm-worker; do
   kubectl -n dms rollout status deploy/$d --timeout=180s
 done
 ```
@@ -509,7 +500,7 @@ done
 - **schema migration이 이미 실행된 뒤라면 image rollback만으로는 부족할 수 있다.** schema를 바꾸는
   release는 §8의 staging restore로 먼저 검증한다.
 - rollback 전에도 가능하면 §7의 drain으로 들어가고, rollback 후 `dms-startup-recovery-check.sh` →
-  `dms-resume.sh`(두 워커)를 같은 순서로 실행한다.
+  `dms-resume.sh`를 같은 순서로 실행한다.
 
 ---
 
@@ -517,22 +508,19 @@ done
 
 먼저 §2 `action-required`와 §6 `work-summary`/`runs/stale`로 전체 상태를 본다. 이후 도메인별로:
 
-### 11.1 RM — 파일시스템 · k8s 쿼터
+### 11.1 요청 흐름 (planner)
 
-요청 흐름과 live 객체를 확인한다.
+요청이 plan으로 넘어가는 단계에서 막혔는지 먼저 본다.
 
 ```bash
 curl_dms "$DMS_API_URL/api/v1/operations/requests?requester_id=<requester>&limit=20" | jq
-kubectl -n dms logs deploy/dms-planner   --tail=200
-kubectl -n dms logs deploy/dms-rm-worker --tail=200
-# k8s 쿼터: target 클러스터의 live ResourceQuota
-kubectl --context <target-context> -n <namespace> get resourcequota dms-storage-quota -o yaml
+curl_dms "$DMS_API_URL/api/v1/operations/plans/active" | jq
+kubectl -n dms logs deploy/dms-planner --tail=200
 ```
 
-single check·scope audit·expiration-sweep(dry-run→real) 등 **페이로드 스키마와 절차**는
-[`api/resource-management-k8s.md`](api/resource-management-k8s.md) ·
-[`api/resource-management-fs.md`](api/resource-management-fs.md)에 있다. sweep은 항상 **`dry_run:true`로
-대상을 먼저 검토**한 뒤 실행하며, system/admin resource는 policy가 skip한다.
+`Rejected`면 `issues[]`에 사유가 담긴다(가장 흔한 것은 `no_ready_dm_candidate` — §4.5로).
+`UnknownAfterSideEffect`/`BackendApplyFailed`/`Conflict`로 굳은 요청은
+[`api/operations.md` §stuck request 해소](api/operations.md)의 `:resolve`로 종결한다.
 
 ### 11.2 DM — 데이터 잡
 
@@ -562,7 +550,7 @@ kubectl -n dms logs deploy/dms-dm-worker --tail=200
 
   artifact parse 실패 시 dm-worker(root)가 artifact base를 traverse/read 할 수 있는지 먼저 본다 —
   사용자 target 디렉토리(`0750`) 하위에 base를 두면 못 읽을 수 있다. 운영은 별도 DMS-managed
-  artifact 마운트를 쓴다([dms-05](../install/dms-05-dm-jobs.md) §6).
+  artifact 마운트를 쓴다([dms-04](../install/dms-04-dm-jobs.md) §6).
 - **preview→confirm.** `sync`/`rm`은 preview 없이 실행되면 안 된다. preview를 검토한 뒤
   `POST …/data-management/jobs/<job_id>:confirm`에 preview fingerprint를 실어 confirm한다.
   `PreviewExpired`가 되면 같은 job을 재사용하지 말고 **새 request**를 제출한다. 전체 흐름과 페이로드는
@@ -606,20 +594,7 @@ curl_dms "$DMS_API_URL/api/v1/data-management/identity-denylist" | jq
 
 privileged root 경로(`DMS_DM_ALLOW_ROOT_REQUESTER=true`)는 LDAP/uid 하한을 우회하지만 **mTLS-verified
 operator만** 쓸 수 있고 `DMS_DM_PRIVILEGED_REQUESTERS`/`_OPERATORS`/`_SCOPES`로 좁혀 검토한다
-([dms-05](../install/dms-05-dm-jobs.md) §9).
-
-### 11.4 Expiry sweep
-
-만료 resource를 나열하고, sweep은 **dry-run으로 대상을 검토한 뒤** 실행한다.
-
-```bash
-curl_dms "$DMS_API_URL/api/v1/operations/filesystems/expiring?status=expired" | jq
-curl_dms "$DMS_API_URL/api/v1/operations/kubernetes/namespace-quotas/expiring?status=expired" | jq
-```
-
-`:expiration-sweep`(filesystems / kubernetes/namespace-quotas)의 `dry_run`·`action`·`scope`·`max_targets`
-페이로드와 절차는 [`api/resource-management-k8s.md`](api/resource-management-k8s.md) ·
-[`api/resource-management-fs.md`](api/resource-management-fs.md).
+([dms-04](../install/dms-04-dm-jobs.md) §9).
 
 ---
 
@@ -627,25 +602,24 @@ curl_dms "$DMS_API_URL/api/v1/operations/kubernetes/namespace-quotas/expiring?st
 
 - **DM live execution 전제조건**(Volcano + Queue/PriorityClass, DM 잡 이미지, dms-agent 이미지, 공유
   artifact 경로, identity evidence)은 **설치 시** 갖춘다([dms-01](../install/dms-01-prerequisites.md)).
-  `dms-dm-worker`는 기본 `replicas: 1`(DM 활성)이며, 전제조건이 아직 없어 DM을 **끄려는 경우에만** 0으로
+  `dms-dm-worker`는 매니페스트 기본 `replicas: 32`(DM 활성)이며, 전제조건이 아직 없어 DM을 **끄려는 경우에만** 0으로
   둔다. DM은 **volcano-job**만 쓰므로 Kubeflow MPI Operator는 필요 없다. `sync`/`rm`은 preview/confirm
   guard 없이 실행되면 안 된다.
 - `DMS_DM_KUBERNETES_MODE=stub`은 로컬 테스트/dev 전용이다(운영에서 쓰지 않는다).
 - 운영 Helm/Kustomize packaging은 아직 없다 — `install/kubernetes/`의 명시적 YAML template로 배포한다.
-- 서로 다른 mount를 가진 **다중 로컬-filesystem RM worker**는 storage-aware worker claiming 없이는
-  안전하지 않다.
-- **WekaFS quota는 `capacity_bytes`만** 지원한다(`file_count`/inode quota는 backend가 거절). quota
-  작업은 RM ssh 대상 호스트의 `weka user login`이 선행돼야 한다(§4.2).
+- **agent report retention은 이력(`agent_reports`)만 prune한다.** 노드별 최신 1행 테이블
+  (`agent_node_current`)은 자동으로 지워지지 않으므로, 노드를 영구히 제거했으면 그 행을 수동으로
+  삭제해야 대시보드에서 `Stale`로 남지 않는다(SQL 예시는
+  [`../install/redeploy.md`](../install/redeploy.md) §4.2).
 
 ---
 
 ## 다음 문서
 
 - DMS API 개요·인증 — [`docs/api/README.md`](api/README.md)
-- 파일시스템 RM API — [`docs/api/resource-management-fs.md`](api/resource-management-fs.md)
-- k8s 쿼터 RM API — [`docs/api/resource-management-k8s.md`](api/resource-management-k8s.md)
+- 스토리지 매핑 API — [`docs/api/storage-mappings.md`](api/storage-mappings.md)
 - DM scan/sync/rm API — [`docs/api/data-management.md`](api/data-management.md)
 - operations 조회 API — [`docs/api/operations.md`](api/operations.md)
 - 설치(코어·mTLS·ingress·migration) — [`install/dms-02-core.md`](../install/dms-02-core.md)
-- 환경변수 레퍼런스 — [`install/dms-06-configuration.md`](../install/dms-06-configuration.md)
+- 환경변수 레퍼런스 — [`install/dms-05-configuration.md`](../install/dms-05-configuration.md)
 - 설치 가이드 인덱스 — [`install/README.md`](../install/README.md)

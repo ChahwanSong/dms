@@ -2,8 +2,9 @@
 import subprocess, sys, os
 from PIL import Image, ImageChops
 
-SRC = "/home/mason/.claude/jobs/abe83062/tmp/diagram"
-OUT = "/home/mason/dms-dev/dms/images"
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = HERE                              # images/src -- the .html sources live next to this script
+OUT = os.path.dirname(HERE)             # images/     -- rendered .png output
 CHROME = "google-chrome"
 SCALE = 2            # device scale factor -> crisp 2x output
 WIN_W = 1500

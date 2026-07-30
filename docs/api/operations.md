@@ -3,17 +3,16 @@
 DMS의 **operations 라우터**(`/api/v1/operations`)는 컨트롤플레인 **상태를 읽는** 엔드포인트를 모은
 곳이다. request→plan→run 상태 머신이 남긴 결과(요청 이력·리소스 상태·워커/에이전트 상태·인벤토리),
 storage mapping 조회, 그리고 **컨트롤플레인 제어 상태**(maintenance/drain)를 노출한다. 대부분
-**read-only**이며, 예외는 문서 끝의 컨트롤 상태 mutation 몇 개뿐이다.
+**read-only**이며, 예외는 문서 끝의 컨트롤 상태 mutation과 stuck request `:resolve`뿐이다.
 
 - API 개요·인증 전반 → [`README.md`](README.md)
-- 파일시스템 RM API → [`resource-management-fs.md`](resource-management-fs.md)
-- k8s 네임스페이스 쿼터 RM API → [`resource-management-k8s.md`](resource-management-k8s.md)
+- 스토리지 매핑(인벤토리) API → [`storage-mappings.md`](storage-mappings.md)
 - DM 데이터 잡 API → [`data-management.md`](data-management.md)
 - 운영 절차(점검·업그레이드·`:resolve`·복구) → [`operations-runbook.md`](../operations-runbook.md)
 
 > 이 문서는 **조회 API 사용법**만 다룬다. 컨트롤플레인 배포·mTLS·ingress·migration 등 **설치**는
 > [`install/dms-02-core.md`](../../install/dms-02-core.md)를, 환경변수 레퍼런스는
-> [`install/dms-06-configuration.md`](../../install/dms-06-configuration.md)를 본다.
+> [`install/dms-05-configuration.md`](../../install/dms-05-configuration.md)를 본다.
 
 ---
 
@@ -55,7 +54,7 @@ CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 |---|---|---|
 | `GET` | `/inventory` | 클러스터·StorageClass·CSI driver 등 effective 인벤토리 |
 | `GET` | `/storage-mappings` | storage mapping 목록(redacted). `?cluster_name=&limit=&offset=` |
-| `GET` | `/storage-mappings/{storage_name}` | storage mapping 단건(redacted, `sanity_result`/`rm_candidates` 포함) |
+| `GET` | `/storage-mappings/{storage_name}` | storage mapping 단건(redacted, `sanity_result`/`dm_candidates` 포함) |
 | `GET` | `/requests` | requester별 요청 목록. **`requester_id` 필수**, `?limit=&since=&until=` |
 | `GET` | `/request-activity` | **전체** 요청 활동(모든 requester), 최신순·페이지네이션·서버측 검색 |
 | `GET` | `/requests/{request_id}` | 요청 단건(상태 + 전이 이력 + 결과 요약) |
@@ -69,12 +68,11 @@ CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 | `GET` | `/action-required/acks` | 확인(ack) 처리된 항목 목록 |
 | `GET` | `/agent-reports` | 노드 agent 리포트. `?freshness=&latest_per_node=&limit=&offset=` |
 | `GET` | `/agent-reports/metrics` | 노드 OS 메트릭 샘플(cpu/mem/load/disk). `?since_seconds=` |
-| `GET` | `/filesystems/{storage}` · `/{storage}/{dir}` · `/expiring` | 파일시스템 리소스 조회 → [fs API §조회](resource-management-fs.md) |
-| `GET` | `/kubernetes/namespace-quotas/{cluster}/{ns}` · `/expiring` | 쿼터 상태(DB↔live) → [k8s API §조회](resource-management-k8s.md) |
 | `GET` | `/data-jobs` · `/data-jobs/summary` · `/{job_id}` · `/{job_id}/logs` | DM 잡 조회 → [DM API](data-management.md) |
 | `GET` | `/volcano` · `/volcano/job-metrics` | Volcano 스케줄러 상태·잡 메트릭 |
 | `GET` | `/diagnostics/{correlation_id}` | correlation_id로 observability 이벤트 추적 |
 | `GET` | `/control-state` · `/drain-status` | 컨트롤플레인 제어 상태 조회(아래) |
+| `POST` | `/requests/{request_id}:resolve` | stuck request 수동 종결(아래 §stuck request 해소) |
 | `POST` | `/control-state:*` · `/runs:mark-stale` · `/action-required:ack`\|`:unack` | 제어 상태 mutation(절차는 [런북](../operations-runbook.md)) |
 
 > **콜론 액션 주의.** `:enter-maintenance` 같은 콜론 경로는 zsh에서 `"${id}:enter-maintenance"`처럼
@@ -111,8 +109,8 @@ CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 
 | 파라미터 | 설명 |
 |---|---|
-| `operation` | 예: `filesystem.create`, `data.sync`, `kubernetes.namespace_quota.create` |
-| `resource_kind` | `filesystem` / `kubernetes_namespace_quota` / `data_job` 등 |
+| `operation` | 예: `data.scan`, `data.sync`, `data.rm`, `identity.upsert` |
+| `resource_kind` | `data_job` / `storage_mapping` 등 |
 | `status` | 요청 상태(아래 표) |
 | `requester_id` | 선택 필터(단건 requester로 좁힐 때) |
 | `search` | **서버측** 대소문자 무시 부분검색. requester + 대상(`resource_key`/payload)을 훑어 **전체 이력**을 커버 |
@@ -156,37 +154,69 @@ CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 | `UnknownAfterSideEffect` | side effect 발생 후 결과 불명 → `:resolve` 필요 | ✓ |
 | `Conflict` | 동일 resource에 non-terminal 요청 존재 → 선행 해소 필요 | ✓ |
 
-> `UnknownAfterSideEffect`·`Conflict`·`BackendApplyFailed` 같은 stuck 상태의 수동 처리
-> (`POST …/requests/{id}:resolve`)는 [운영 런북](../operations-runbook.md)과
-> [fs API](resource-management-fs.md)를 본다.
+> `UnknownAfterSideEffect`·`Conflict`·`BackendApplyFailed` 같은 stuck 상태의 수동 처리는
+> 아래 [stuck request 해소(`:resolve`)](#stuck-request-해소-resolve)와
+> [운영 런북](../operations-runbook.md)을 본다.
+
+---
+
+## Stuck Request 해소 (`:resolve`)
+
+`UnknownAfterSideEffect` 또는 `BackendApplyFailed` 상태의 request가 남아 있으면 동일 resource에 새 요청 시
+`Conflict`가 난다. 실제 상태를 확인한 뒤 request를 수동으로 종결한다. **이 문서에서 유일하게 상태를 바꾸는
+요청 계열 엔드포인트**다.
+
+**엔드포인트:** `POST /api/v1/operations/requests/{request_id}:resolve`
+
+| resolution | 전환 상태 | 사용 시점 |
+|---|---|---|
+| `abandon` | `Failed` | side effect가 없었거나 수동 롤백을 마친 경우 |
+| `succeeded` | `Succeeded` | 실제로 성공한 상태임을 직접 확인한 경우 |
+
+```bash
+# 1) stuck request 확인
+"${CURL[@]}" "$DMS_API_URL/api/v1/operations/requests?requester_id=alice" \
+  | jq '[.[] | select(.status | IN("UnknownAfterSideEffect","BackendApplyFailed"))
+             | {request_id, status, resource_key}]'
+
+# 2) 실제 상태 확인 (대상 스토리지/잡 산출물 등 — 런북 참고)
+
+# 3) side effect 없음 → abandon
+"${CURL[@]}" -X POST -H "content-type: application/json" \
+  "$DMS_API_URL/api/v1/operations/requests/<request_id>:resolve" \
+  -d '{"resolution":"abandon","reason":"verified no side effect took place"}' | jq
+
+# 3') 실제로 완료됐음을 확인 → succeeded
+"${CURL[@]}" -X POST -H "content-type: application/json" \
+  "$DMS_API_URL/api/v1/operations/requests/<request_id>:resolve" \
+  -d '{"resolution":"succeeded","reason":"job output confirmed on the target storage"}' | jq
+```
+
+응답:
+```json
+{"request_id":"req_...","previous_status":"UnknownAfterSideEffect","resolved_to":"Failed",
+ "resolution":"abandon","actor":"operator","reason":"verified no side effect took place"}
+```
+
+에러: `422`(resolution 값 오류 또는 `reason` 누락), `404`(request 없음), `409`(이미 다른 terminal 상태이거나
+resolve 불가 상태).
+
+> zsh에서는 `"$DMS_API_URL/api/v1/operations/requests/${rid}:resolve"`처럼 브레이스로 감싼다
+> (`"$rid:resolve"`는 수식어로 변형돼 404).
 
 ---
 
 ## 리소스 상태 조회
 
-관리 리소스의 materialized 현재 상태를 본다. 리소스 종류별 상세 응답 형태는 각 RM 문서에 있으므로
-여기서는 진입점만 정리한다.
+관리 리소스의 materialized 현재 상태를 본다.
 
 ```bash
 # 전체 리소스의 현재 상태 (desired/observed materialized)
 "${CURL[@]}" "$DMS_API_URL/api/v1/operations/resources" | jq 'length'
-
-# 파일시스템 — storage별 목록 / 단건 / 만료 목록  (→ resource-management-fs.md)
-"${CURL[@]}" "$DMS_API_URL/api/v1/operations/filesystems/cephfs-a" | jq
-"${CURL[@]}" "$DMS_API_URL/api/v1/operations/filesystems/cephfs-a/project1" | jq
-"${CURL[@]}" "$DMS_API_URL/api/v1/operations/filesystems/expiring?status=expired" | jq
-
-# k8s 네임스페이스 쿼터 — DB desired + live + diff  (→ resource-management-k8s.md)
-"${CURL[@]}" \
-  "$DMS_API_URL/api/v1/operations/kubernetes/namespace-quotas/cluster-a/team-alpha" | jq
-"${CURL[@]}" \
-  "$DMS_API_URL/api/v1/operations/kubernetes/namespace-quotas/expiring?status=expired" | jq
 ```
 
-- 파일시스템 조회 파라미터·응답 필드(`/filesystems/expiring`의 `status`/`within_seconds`/`brief`
-  등) → [`resource-management-fs.md`](resource-management-fs.md).
-- 쿼터 상태(`db`/`live`/`diff`, `source=both|db|live`, effective 경고) →
-  [`resource-management-k8s.md`](resource-management-k8s.md).
+DM 잡 자체의 상태·산출물 조회는 [`data-management.md`](data-management.md), 스토리지 매핑 조회는
+아래 [인벤토리 · 스토리지 매핑](#인벤토리--스토리지-매핑)을 본다.
 
 ---
 
@@ -195,7 +225,7 @@ CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 ### `/inventory`
 
 등록된 클러스터와 각 클러스터에서 관측된 StorageClass·CSI driver 등 effective 인벤토리를 돌려준다.
-k8s 쿼터 mapping 등록 전에 대상 클러스터가 실제로 보이는지 확인하는 용도다.
+storage mapping 등록 전에 대상 클러스터가 실제로 보이는지 확인하는 용도다.
 
 ```bash
 "${CURL[@]}" "$DMS_API_URL/api/v1/operations/inventory" \
@@ -205,7 +235,7 @@ k8s 쿼터 mapping 등록 전에 대상 클러스터가 실제로 보이는지 �
 ### `/storage-mappings`
 
 storage mapping을 **redacted**로 조회한다(`weka_credentials.password` 등 비밀은 렌더링하지 않음).
-`sanity_status`/`readiness`로 각 축(RM/DM/mutation)의 준비 상태를 본다.
+`sanity_status`/`readiness`로 각 축(`data_management`/`inventory`)의 준비 상태를 본다.
 
 ```bash
 # 전체 목록
@@ -216,19 +246,20 @@ storage mapping을 **redacted**로 조회한다(`weka_credentials.password` 등 
 "${CURL[@]}" "$DMS_API_URL/api/v1/operations/storage-mappings?cluster_name=cluster-a" \
   | jq '.[].storage_name'
 
-# 단건 상세 (sanity_result·rm_candidates 포함)
+# 단건 상세 (sanity_result·dm_candidates 포함)
 "${CURL[@]}" "$DMS_API_URL/api/v1/operations/storage-mappings/cephfs-a" \
   | jq '{storage_name, sanity_status, readiness,
-         rm_candidates: [.sanity_result.agent_observed.rm_candidates[]? | {node_name, status}]}'
+         dm_candidates: [.sanity_result.agent_observed.dm_candidates[]? | {node_name, status}]}'
 ```
 
-- **읽기 전용이다.** 등록/수정/삭제(`POST`/`PATCH`/`DELETE …/resource-management/storage-mappings`)와
-  sanity 재실행(`:check`), Agent ConfigMap 동기화·rollout은 설치·운영 영역이다 →
-  [`install/dms-03-rm-filesystem.md`](../../install/dms-03-rm-filesystem.md),
-  [운영 런북](../operations-runbook.md).
-- CSI/k8s mapping의 sanity는 agent evidence가 아니라 **ResourceQuota mutation transport**로 판정한다.
-  `sanity_result.readiness.kubernetes_mutation`·`sanity_result.mutation_observed`로 진단한다(자세히는
-  [`resource-management-k8s.md`](resource-management-k8s.md)와 [런북](../operations-runbook.md)).
+- **이 경로는 읽기 전용이다.** 등록/수정/삭제(`POST`/`PATCH`/`DELETE /api/v1/storage-mappings`)와
+  sanity 재실행(`:check`), Agent ConfigMap 동기화·rollout은
+  [`storage-mappings.md`](storage-mappings.md)에 있다. 설치·사전 준비는
+  [`install/dms-03-storage-mappings.md`](../../install/dms-03-storage-mappings.md),
+  운영 절차는 [운영 런북](../operations-runbook.md).
+- readiness 축은 **`data_management`**(agent 마운트·도구·신원 증거)와 **`inventory`**(live StorageClass
+  존재 + `csi_driver` 일치) 두 개다. CSI 매핑은 호스트 마운트가 없어 `data_management`가 `Missing`으로
+  남는 것이 정상이다.
 
 ---
 
@@ -248,13 +279,13 @@ plan·run·action-required를 한 번에 집계한다(대시보드/헬스체크 
   "plans": {
     "total_active": 3,
     "by_status": {"Ready": 2, "Claimed": 1},
-    "by_worker_role": {"RM": 2, "DM": 1}
+    "by_worker_role": {"DM": 3}
   },
   "runs": {
     "total_active": 2,
     "by_state": {"Running": 1, "Applying": 1},
-    "by_worker_role": {"RM": 1, "DM": 1},
-    "by_worker_id": {"rm-1": 1, "dm-1": 1},
+    "by_worker_role": {"DM": 2},
+    "by_worker_id": {"dm-1": 1, "dm-2": 1},
     "lease_expiring_soon": 0,
     "stale_or_recovery": 0
   },
@@ -294,7 +325,7 @@ plan·run·action-required를 한 번에 집계한다(대시보드/헬스체크 
 
 ## 조치 필요 (action-required)
 
-여러 소스(요청 attention · storage mapping · agent 신선도 · k8s 쿼터 · 파일시스템 · 데이터 잡)를 하나의
+여러 소스(요청 attention · storage mapping · agent 신선도 · 데이터 잡)를 하나의
 리스트로 합쳐 **지금 손봐야 할 것**을 돌려준다. 각 항목은 `issue_type` 디스크리미네이터 + 타입별
 필드를 가진다.
 
@@ -312,7 +343,7 @@ plan·run·action-required를 한 번에 집계한다(대시보드/헬스체크 
 ```
 
 흔한 `issue_type`: `storage_mapping_failed` / `storage_mapping_unknown` / `storage_class_missing` /
-`csi_driver_mismatch` / `agent_report_stale` + 요청·k8s 쿼터·파일시스템·데이터 잡 계열.
+`csi_driver_mismatch` / `agent_report_stale` + 요청·데이터 잡 계열.
 
 ### 확인 처리 (ack / unack)
 
@@ -384,7 +415,7 @@ DM 잡 상태·로그 조회는 조회 API에도 있지만 상세는 [DM 데이�
   `{"available": false, "note": "..."}`를 돌려준다. 이 엔드포인트는 dms-api에 **추가 RBAC**
   (`pods/log` + volcano read)가 필요하다 — `install/kubernetes/dms-api-volcano-rbac.yaml`이며
   control-plane.yaml에 포함돼 있지 않으니 **별도로 적용**해야 한다(→
-  [`install/dms-05-dm-jobs.md`](../../install/dms-05-dm-jobs.md)).
+  [`install/dms-04-dm-jobs.md`](../../install/dms-04-dm-jobs.md)).
 - `/volcano` — Volcano 스케줄러/큐 상태. `/volcano/job-metrics?limit=1000` — 잡별 lifecycle 메트릭
   (타임스탬프·지연·상태 카운트, 대시보드 throughput/latency용).
 - `/diagnostics/{correlation_id}` — correlation_id로 observability 이벤트 타임라인을 모아 본다.
@@ -450,9 +481,8 @@ scale-down하기 전에 이 값을 확인한다.
 ## 다음 문서
 
 - [`README.md`](README.md) — DMS API 개요와 인증(mTLS 운영 프로필).
-- [`resource-management-fs.md`](resource-management-fs.md) — 파일시스템 RM API(리소스 상세 응답 형태).
-- [`resource-management-k8s.md`](resource-management-k8s.md) — k8s 쿼터 RM API(쿼터 상태 DB↔live).
+- [`storage-mappings.md`](storage-mappings.md) — 스토리지 매핑(인벤토리) 등록/수정/삭제·`:check` API.
 - [`data-management.md`](data-management.md) — DM 데이터 잡 API(잡 상태·로그·preview/confirm).
 - [`operations-runbook.md`](../operations-runbook.md) — 운영 런북(점검·업그레이드·drain/resume 절차·`:resolve`).
-- [`install/dms-06-configuration.md`](../../install/dms-06-configuration.md) — 환경변수 레퍼런스
+- [`install/dms-05-configuration.md`](../../install/dms-05-configuration.md) — 환경변수 레퍼런스
   (`DMS_AGENT_REPORT_STALE_SECONDS`·mTLS actor·lease 등).

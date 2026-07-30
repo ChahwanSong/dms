@@ -9,8 +9,6 @@ from uuid import uuid4
 from ._base import *  # noqa: F401,F403
 from ._base import (  # noqa: F401  (underscore helpers are not picked up by import *)
     _agent_capability_summary,
-    _filesystem_block_state,
-    _kubernetes_quota_block_state,
     _parse_iso,
     _storage_names_in_payload,
 )
@@ -18,74 +16,6 @@ from ._base import (  # noqa: F401  (underscore helpers are not picked up by imp
 
 class PoliciesMixin:
     """Default quota policies and data-management policies."""
-
-
-    def upsert_default_quota_policy(
-        self,
-        *,
-        resource_kind: str,
-        resource_type: str,
-        quota: dict[str, Any],
-        actor: str,
-    ) -> str:
-        policy_id = f"{resource_kind}:{resource_type}"
-        now = iso_now()
-        with self.database.connect() as connection:
-            existing = connection.execute(
-                """
-                SELECT policy_id FROM default_quota_policies
-                WHERE resource_kind = ? AND resource_type = ?
-                """,
-                (resource_kind, resource_type),
-            ).fetchone()
-            if existing:
-                connection.execute(
-                    """
-                    UPDATE default_quota_policies
-                    SET quota = ?, updated_at = ?
-                    WHERE resource_kind = ? AND resource_type = ?
-                    """,
-                    (json_dumps(quota), now, resource_kind, resource_type),
-                )
-            else:
-                connection.execute(
-                    """
-                    INSERT INTO default_quota_policies (
-                        policy_id, resource_kind, resource_type, quota, updated_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (policy_id, resource_kind, resource_type, json_dumps(quota), now),
-                )
-            self._insert_control_mutation(
-                connection,
-                actor=actor,
-                mutation_kind="default_quota_policy.upsert",
-                payload={
-                    "resource_kind": resource_kind,
-                    "resource_type": resource_type,
-                    "quota": quota,
-                },
-                created_at=now,
-            )
-        return policy_id
-
-
-    def get_default_quota_policy(
-        self, *, resource_kind: str, resource_type: str
-    ) -> dict[str, Any] | None:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM default_quota_policies
-                WHERE resource_kind = ? AND resource_type = ?
-                """,
-                (resource_kind, resource_type),
-            ).fetchone()
-        policy = row_to_dict(row) if row else None
-        if not policy:
-            return None
-        policy["quota"] = json_loads(policy["quota"]) or {}
-        return policy
 
 
     def bootstrap_data_management_policies(

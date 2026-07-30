@@ -19,7 +19,7 @@ usage() {
   DMS_CA_CERT              DMS API CA path
   DMS_NAMESPACE            기본값: dms
   DMS_KUBECTL_CONTEXT      선택, kubectl context
-  DMS_WORKER_DEPLOYMENTS   기본값: "dms-rm-worker". DM live execution 전에는 dms-dm-worker를 넣지 않는다.
+  DMS_WORKER_DEPLOYMENTS   기본값: "dms-dm-worker". 공백으로 구분해 여러 Deployment를 넣을 수 있다.
 USAGE
 }
 
@@ -65,7 +65,7 @@ fi
 
 api_url="${DMS_API_URL:?DMS_API_URL 값이 필요합니다}"
 namespace="${DMS_NAMESPACE:-dms}"
-worker_deployments="${DMS_WORKER_DEPLOYMENTS:-dms-rm-worker}"
+worker_deployments="${DMS_WORKER_DEPLOYMENTS:-dms-dm-worker}"
 actor="${DMS_ACTOR:-}"
 token="${DMS_TOKEN:-}"
 

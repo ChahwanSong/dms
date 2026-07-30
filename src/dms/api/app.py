@@ -9,8 +9,6 @@ from fastapi import FastAPI
 
 from ..adapters import (
     IdentityLookupAdapter,
-    KubernetesNamespaceQuotaAdapter,
-    KubernetesNamespaceQuotaLiveAdapter,
     KubernetesReadOnlyInventoryAdapter,
     KubectlReadOnlyInventoryAdapter,
     volcano_adapter_from_settings,
@@ -27,7 +25,7 @@ from .routers.agent import agent_router
 from .routers.data_management import data_management_router
 from .routers.identity import identity_denylist_router
 from .routers.operations import operational_query_router
-from .routers.resource_management import resource_management_router
+from .routers.storage_mappings import storage_mappings_router
 
 
 def create_app(
@@ -36,7 +34,6 @@ def create_app(
     observability: ObservabilityRepository | None = None,
     identity_lookup: IdentityLookupAdapter | None = None,
     kubernetes_inventory: KubernetesReadOnlyInventoryAdapter | None = None,
-    kubernetes_quota: KubernetesNamespaceQuotaAdapter | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     if repository is None or observability is None:
@@ -70,8 +67,6 @@ def create_app(
         identity_lookup=identity_lookup or identity_lookup_from_settings(settings),
         kubernetes_inventory=kubernetes_inventory
         or KubectlReadOnlyInventoryAdapter.from_settings(settings),
-        kubernetes_quota=kubernetes_quota
-        or KubernetesNamespaceQuotaLiveAdapter.from_settings(settings),
     )
 
     @asynccontextmanager
@@ -96,7 +91,7 @@ def create_app(
 
     app = FastAPI(title="DMS", version="0.1.0", lifespan=lifespan)
     app.state.services = services
-    app.include_router(resource_management_router())
+    app.include_router(storage_mappings_router())
     app.include_router(data_management_router())
     app.include_router(identity_denylist_router())
     app.include_router(agent_router())

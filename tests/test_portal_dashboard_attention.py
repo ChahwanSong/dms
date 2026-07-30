@@ -26,28 +26,29 @@ def test_refine_category_severity_passthrough_and_sort():
     items = [
         {"issue_type": "data_job_failed", "severity": "ERROR",
          "resource_kind": "data_job", "recommended_action": "fix and retry"},
-        {"issue_type": "quota_usage_critical", "severity": "CRITICAL", "namespace_name": "ns1"},
+        {"issue_type": "storage_mapping_failed", "severity": "CRITICAL", "storage_name": "cephfs-a"},
         {"issue_type": "request_attention", "status": "Blocked"},  # no severity → WARN, live
-        {"issue_type": "filesystem_soft_deleted", "severity": "INFO"},  # live exception
-        {"issue_type": "filesystem_quota_drifted", "severity": "WARN"},  # history
+        {"issue_type": "missing_dm_readiness", "severity": "WARN", "storage_name": "cephfs-b"},
+        # a request stuck on a data job is STILL live (the resource_kind rule must not
+        # bucket it into history)
+        {"issue_type": "request_attention", "resource_kind": "data_job", "status": "StaleClaim"},
     ]
     out = _refine_attention(items)
     by_type = {x["issue_type"]: x for x in out}
 
     # live vs history categorization
-    assert by_type["quota_usage_critical"]["category"] == "live"
+    assert by_type["storage_mapping_failed"]["category"] == "live"
     assert by_type["request_attention"]["category"] == "live"
-    assert by_type["filesystem_soft_deleted"]["category"] == "live"
+    assert by_type["missing_dm_readiness"]["category"] == "live"
     assert by_type["data_job_failed"]["category"] == "history"
-    assert by_type["filesystem_quota_drifted"]["category"] == "history"
 
     # severity backfill + passthrough of detail fields
     assert by_type["request_attention"]["severity"] == "WARN"
     assert by_type["data_job_failed"]["recommended_action"] == "fix and retry"
-    assert by_type["quota_usage_critical"]["namespace_name"] == "ns1"
+    assert by_type["storage_mapping_failed"]["storage_name"] == "cephfs-a"
 
     # sort: live first, CRITICAL ahead of WARN/INFO → critical live item is first
-    assert out[0]["issue_type"] == "quota_usage_critical"
+    assert out[0]["issue_type"] == "storage_mapping_failed"
 
 
 def test_terminated_data_jobs_forced_to_info():

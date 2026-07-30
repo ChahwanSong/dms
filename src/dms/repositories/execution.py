@@ -9,8 +9,6 @@ from uuid import uuid4
 from ._base import *  # noqa: F401,F403
 from ._base import (  # noqa: F401  (underscore helpers are not picked up by import *)
     _agent_capability_summary,
-    _filesystem_block_state,
-    _kubernetes_quota_block_state,
     _parse_iso,
     _storage_names_in_payload,
 )
@@ -525,13 +523,13 @@ class ExecutionMixin:
         """Terminalize orphaned DM preview runs.
 
         A DM data job parks its run in ``Blocked`` right after a successful preview
-        ("waiting for user confirm"; see dm.py). ``Blocked`` is the ONLY run state
-        the DM preview uses — RM never blocks a run — so a run in ``Blocked`` is
-        always a parked preview run. When the job is confirmed (plan → Planned → a
-        NEW run executes) or cancelled, that preview run is superseded but was never
-        terminalized, so it lingers in ``ATTENTION_RUN_STATES`` forever and inflates
-        the "stale/recovery" alarm. Close it (→ Succeeded) so it leaves the attention
-        set; the plan/request are already correct and are NOT touched here.
+        ("waiting for user confirm"; see dm.py). ``Blocked`` is used ONLY there, so a
+        run in ``Blocked`` is always a parked preview run. When the job is confirmed
+        (plan → Planned → a NEW run executes) or cancelled, that preview run is
+        superseded but was never terminalized, so it lingers in
+        ``ATTENTION_RUN_STATES`` forever and inflates the "stale/recovery" alarm.
+        Close it (→ Succeeded) so it leaves the attention set; the plan/request are
+        already correct and are NOT touched here.
 
         - ``plan_id`` set → close that plan's parked preview run immediately (inline
           on confirm/cancel), regardless of the plan's current status.

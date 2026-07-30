@@ -174,22 +174,6 @@ export default function StorageMappingForm({
       return;
     }
 
-    // Cross-field: control_host is only consumed by mutation_mode='ssh-kubectl'. With the
-    // default mutation mode 'kubectl' it would be ignored, so DMS rejects a control_host
-    // set without an explicit mutation_mode (422). Catch it client-side for a clearer message.
-    const bt = backend_template as Record<string, unknown>;
-    const ctlHost =
-      typeof bt.control_host === "string" ? bt.control_host.trim() : bt.control_host;
-    const mutMode =
-      typeof bt.mutation_mode === "string" ? bt.mutation_mode.trim() : bt.mutation_mode;
-    if (ctlHost && !mutMode) {
-      setError(
-        "control_host를 쓰려면 mutation_mode=\"ssh-kubectl\"을 함께 지정해야 합니다 " +
-          "(기본 kubectl 모드에선 control_host가 무시됩니다).",
-      );
-      return;
-    }
-
     // Portal-only discriminator (DMS ignores this key): tag fs storages as fs-native vs
     // PV-backing. Driven by the checkbox, not the JSON editor; CSI backends never carry it.
     const btType =

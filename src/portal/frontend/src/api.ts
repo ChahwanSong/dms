@@ -61,26 +61,8 @@ export interface Overview {
 // --- storage mapping (storage inventory) -------------------------------
 
 export interface Readiness {
-  resource_management?: string;
   data_management?: string;
   inventory?: string;
-  // CSI (k8s namespace-quota) mappings: ResourceQuota mutation transport+permission
-  // axis (Ready/Failed/Unknown), replacing RM/DM agent evidence for those mappings.
-  kubernetes_mutation?: string;
-}
-
-// CSI mutation transport probe result (kubectl/ssh-kubectl reachability + can-i).
-export interface MutationObserved {
-  mode?: string | null;
-  control_host?: string | null;
-  reachable?: boolean;
-  permissions?: {
-    create?: boolean | null;
-    patch?: boolean | null;
-    delete?: boolean | null;
-  };
-  can_mutate?: boolean;
-  detail?: string | null;
 }
 
 export interface SanityCheck {
@@ -108,12 +90,9 @@ export interface SanityResult {
   agent_observed?: {
     fresh_reports?: number;
     stale_reports?: number;
-    rm_readiness?: string;
     dm_readiness?: string;
-    rm_candidates?: unknown[];
     dm_candidates?: unknown[];
   };
-  mutation_observed?: MutationObserved;
   [k: string]: unknown;
 }
 
@@ -706,7 +685,6 @@ export interface DashboardSummary {
     fresh: number; stale: number;
     by_role: Record<string, { fresh: number; stale: number }>;
   }>;
-  control_hosts: Section<{ total: number; reachable: number; can_mutate: number }>;
   volcano: Section<{
     queues: number; queues_open: number;
     jobs_active: number; jobs_total: number;
@@ -866,7 +844,7 @@ export interface SnmStorage {
 }
 export interface SnmNode {
   node_name: string;
-  roles: string[];            // ["RM","DM"]
+  roles: string[];            // ["DM"]
   freshness?: string | null;  // Fresh | Stale
   reported_at?: string | null;
   cells: Record<string, SnmCell>;  // storage_name -> mount status (absent = 미구성)
@@ -930,25 +908,6 @@ export interface VolcanoMetrics {
     longest_running: (VolJobCard & { running_s: number; active: boolean })[];
   };
   error?: string | null;
-}
-
-export interface ControlHost {
-  storage_name: string;
-  cluster_name: string | null;
-  backend_type: string;
-  sanity_status?: string;
-  mode?: string | null;
-  control_host?: string | null;
-  reachable?: boolean;
-  can_mutate?: boolean;
-  permissions?: { create?: boolean | null; patch?: boolean | null; delete?: boolean | null };
-  detail?: string | null;
-}
-// CSI control hosts are derived from the bounded storage-mapping set; `truncated`
-// is set only if that single fetch hit the high cap.
-export interface ControlHostsResp {
-  items: ControlHost[];
-  truncated: boolean;
 }
 
 // Per-node OS-metric time-series for the worker-node workload graphs.
@@ -1082,7 +1041,7 @@ export interface AgentRolloutResult {
 }
 
 export const operatorApi = {
-  // RM·DM agent DaemonSet rollout (restart to re-read storages after a change)
+  // DM agent DaemonSet rollout (restart to re-read storages after a change)
   agents: {
     rolloutStatus: () =>
       request<AgentRolloutStatus>("/api/operator/agents/rollout-status"),
@@ -1540,8 +1499,6 @@ export const operatorApi = {
         `/api/operator/dashboard/data-jobs/${encodeURIComponent(jobId)}`,
         { method: "DELETE" },
       ),
-    controlHosts: () =>
-      request<ControlHostsResp>("/api/operator/dashboard/control-hosts"),
     storageNodeMatrix: () =>
       request<StorageNodeMatrix>("/api/operator/dashboard/storage-node-matrix"),
     volcano: () =>

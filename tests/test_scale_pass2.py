@@ -23,7 +23,13 @@ from typing import Any
 
 from dms.config import Settings
 from dms.db import Database
-from dms.domain import DataJobState, LifecycleState, OperationKind, ResourceKind
+from dms.domain import (
+    DataJobState,
+    LifecycleState,
+    OperationKind,
+    ResourceKind,
+    WorkerRole,
+)
 from dms.migrations import migrate_all
 from dms.query import OperationalQueryService
 from dms.repositories import DmsRepository, ObservabilityRepository
@@ -50,14 +56,14 @@ def _query_service(tmp_path) -> OperationalQueryService:
     return OperationalQueryService(DmsRepository(op), ObservabilityRepository(obs))
 
 
-def _rep(node: str, role: str, dt: datetime, *, cluster: str = "cluster-a") -> dict[str, Any]:
+def _rep(node: str, dt: datetime, *, cluster: str = "cluster-a") -> dict[str, Any]:
     return {
         "schema_version": "test.v1",
         "reported_at": dt.isoformat(),
         "cluster_name": cluster,
         "node_name": node,
-        "node_uid": f"uid-{node}-{role}",
-        "worker_role": role,
+        "node_uid": f"uid-{cluster}-{node}",
+        "worker_role": WorkerRole.DM.value,
         "mounts": [],
         "csi": [],
         "tools": [],
@@ -113,12 +119,12 @@ def _bulk_failed_data_jobs(repo: DmsRepository, n: int, *, operation: str | None
 def test_ingest_upserts_current_row_newest_wins(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=5)))
-    newest = repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=1)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=5)))
+    newest = repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=1)))
 
     with repo.database.connect() as connection:
         rows = connection.execute("SELECT * FROM agent_node_current").fetchall()
-    # exactly one current row per (cluster, node, role), holding the NEWEST report
+    # exactly one current row per (cluster, node), holding the NEWEST report
     assert len(rows) == 1
     row = {k: rows[0][k] for k in rows[0].keys()}
     assert row["report_id"] == newest
@@ -128,9 +134,9 @@ def test_ingest_upserts_current_row_newest_wins(tmp_path):
 def test_ingest_out_of_order_older_report_is_ignored(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
-    newest = repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=1)))
+    newest = repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=1)))
     # a delayed/out-of-order report with an OLDER reported_at must NOT overwrite the row
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=30)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=30)))
 
     [report] = repo.list_agent_reports(latest_per_node=True)
     assert report["report_id"] == newest
@@ -146,8 +152,8 @@ def test_latest_per_node_freshness_on_read(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
     # w1: reported just now -> Fresh; w2: last reported 2h ago -> Stale (no mark sweep run)
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(seconds=5)))
-    repo.ingest_agent_report(_rep("w2", "DM", now - timedelta(hours=2)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(seconds=5)))
+    repo.ingest_agent_report(_rep("w2", now - timedelta(hours=2)))
 
     fresh_view = {
         (r["node_name"], r["freshness_status"])
@@ -166,15 +172,17 @@ def test_latest_per_node_freshness_on_read(tmp_path):
     stale = repo.list_agent_reports(
         latest_per_node=True, freshness="Stale", stale_seconds=300
     )
-    assert [(r["node_name"], r["worker_role"]) for r in stale] == [("w2", "DM")]
+    assert [(r["node_name"], r["worker_role"]) for r in stale] == [
+        ("w2", WorkerRole.DM.value)
+    ]
 
 
 def test_latest_per_node_stale_at_is_transition_time(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
     reported = now - timedelta(hours=2)
-    repo.ingest_agent_report(_rep("w-stale", "RM", reported))
-    repo.ingest_agent_report(_rep("w-fresh", "DM", now - timedelta(seconds=5)))
+    repo.ingest_agent_report(_rep("w-stale", reported))
+    repo.ingest_agent_report(_rep("w-fresh", now - timedelta(seconds=5)))
 
     by_node = {
         r["node_name"]: r
@@ -200,8 +208,8 @@ def test_prune_deletes_only_old_rows_batched_and_keeps_node_health(tmp_path):
     now = datetime.now(timezone.utc)
     # 6 OLD reports for a node that has since gone silent (>40d), plus 1 recent for w-live
     for i in range(6):
-        repo.ingest_agent_report(_rep("w-old", "RM", now - timedelta(days=40, minutes=i)))
-    repo.ingest_agent_report(_rep("w-live", "DM", now - timedelta(minutes=2)))
+        repo.ingest_agent_report(_rep("w-old", now - timedelta(days=40, minutes=i)))
+    repo.ingest_agent_report(_rep("w-live", now - timedelta(minutes=2)))
     assert len(repo.list_agent_reports(limit=100)) == 7
 
     cutoff = (now - timedelta(days=10)).isoformat()
@@ -213,18 +221,19 @@ def test_prune_deletes_only_old_rows_batched_and_keeps_node_health(tmp_path):
     assert remaining[0]["node_name"] == "w-live"
 
     # node-health is STILL complete after prune: the silent w-old node still appears
-    # (its current row in agent_node_current is independent of pruned history).
+    # (its current row in agent_node_current is independent of pruned history), and
+    # its computed freshness still reports it as the Stale/silent one.
     health = {
-        (r["node_name"], r["worker_role"])
+        (r["node_name"], r["freshness_status"])
         for r in repo.list_agent_reports(latest_per_node=True, stale_seconds=300)
     }
-    assert health == {("w-old", "RM"), ("w-live", "DM")}
+    assert health == {("w-old", "Stale"), ("w-live", "Fresh")}
 
 
 def test_prune_noop_when_nothing_old(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=1)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=1)))
     deleted = repo.prune_agent_reports(
         older_than_iso=(now - timedelta(days=30)).isoformat()
     )
@@ -235,8 +244,8 @@ def test_prune_noop_when_nothing_old(tmp_path):
 def test_retention_once_prunes_and_returns_count(tmp_path):
     repo = _repo(tmp_path)
     now = datetime.now(timezone.utc)
-    repo.ingest_agent_report(_rep("w-old", "RM", now - timedelta(days=40)))
-    repo.ingest_agent_report(_rep("w-new", "RM", now - timedelta(minutes=1)))
+    repo.ingest_agent_report(_rep("w-old", now - timedelta(days=40)))
+    repo.ingest_agent_report(_rep("w-new", now - timedelta(minutes=1)))
 
     deleted = prune_agent_reports_once(
         repo, retention_seconds=7 * 24 * 60 * 60, batch_size=1000
@@ -273,8 +282,8 @@ def test_action_required_count_matches_list_length(tmp_path):
     )
 
     # agent-stale source: one silent node (Stale) + one fresh node (NOT an item)
-    repo.ingest_agent_report(_rep("w-stale", "RM", now - timedelta(hours=3)))
-    repo.ingest_agent_report(_rep("w-fresh", "DM", now - timedelta(seconds=5)))
+    repo.ingest_agent_report(_rep("w-stale", now - timedelta(hours=3)))
+    repo.ingest_agent_report(_rep("w-fresh", now - timedelta(seconds=5)))
 
     # data-management source: a few failed scan/sync/rm jobs (mixed operations)
     _bulk_failed_data_jobs(repo, 2, operation=OperationKind.DATA_SYNC.value)
@@ -303,7 +312,7 @@ def test_work_summary_action_required_uses_count(tmp_path):
     service = _query_service(tmp_path)
     repo = service.repository
     now = datetime.now(timezone.utc)
-    repo.ingest_agent_report(_rep("w-stale", "RM", now - timedelta(hours=3)))
+    repo.ingest_agent_report(_rep("w-stale", now - timedelta(hours=3)))
     _bulk_failed_data_jobs(repo, 4, operation=OperationKind.DATA_SCAN.value)
 
     summary = service.work_summary()
@@ -347,8 +356,8 @@ def test_migrate_is_idempotent_and_backfills_current(tmp_path):
     now = datetime.now(timezone.utc)
     # seed history, then DROP the current row to simulate a pre-existing DB whose
     # current table must be backfilled from history on the next migrate.
-    repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=5)))
-    newest = repo.ingest_agent_report(_rep("w1", "RM", now - timedelta(minutes=1)))
+    repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=5)))
+    newest = repo.ingest_agent_report(_rep("w1", now - timedelta(minutes=1)))
     with op.connect() as connection:
         connection.execute("DELETE FROM agent_node_current")
     assert repo.list_agent_reports(latest_per_node=True) == []

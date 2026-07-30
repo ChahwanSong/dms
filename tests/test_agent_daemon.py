@@ -6,10 +6,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dms.adapters import StaticKubernetesReadOnlyInventoryAdapter
-from dms.agent_daemon import AgentDaemonConfig, build_agent_report, parse_mountinfo
+from dms.agent_daemon import (
+    AgentDaemonConfig,
+    build_agent_report,
+    config_from_env,
+    parse_mountinfo,
+)
 from dms.api import create_app
 from dms.config import Settings
 from dms.db import Database
+from dms.domain import WorkerRole
 from dms.migrations import migrate_all
 from dms.repositories import DmsRepository, ObservabilityRepository
 
@@ -51,7 +57,7 @@ def test_agent_probe_builds_phase8_report_from_real_observations(tmp_path):
         cluster_name="cluster-a",
         node_name="c1-worker",
         node_uid=None,
-        worker_role="RM",
+        worker_role="DM",
         storages=[
             {
                 "storage_name": "testbed-cephfs",
@@ -73,13 +79,52 @@ def test_agent_probe_builds_phase8_report_from_real_observations(tmp_path):
     assert report["schema_version"] == "phase9.v1"
     assert "os_metrics" in report  # cpu/mem/load from the agent's own procfs
     assert report["node_uid"] == "uid-c1-worker"
-    assert report["worker_role"] == "RM"
+    assert report["worker_role"] == "DM"
     assert report["mounts"][0]["status"] == "Ready"
     assert report["mounts"][0]["filesystem_type"] == "ceph"
     assert report["csi"][0]["status"] == "Ready"
     assert report["csi"][0]["storage_classes"] == ["testbed-cephfs"]
     assert report["tools"][0]["status"] == "Missing"
     assert report["identity_evidence"]["source"] == "agent-prober"
+
+
+def test_agent_worker_role_defaults_to_dm(tmp_path, harness):
+    """DM is the only worker role, so an agent that sets no DMS_AGENT_WORKER_ROLE must
+    default to DM — and a report claiming any other role is rejected by the schema."""
+    environ = {"DMS_AGENT_CONFIG_PATH": str(tmp_path / "no-such-storages.json")}
+
+    assert list(WorkerRole) == [WorkerRole.DM]
+    assert config_from_env(environ).worker_role == WorkerRole.DM.value == "DM"
+    # an explicit env override is still read verbatim
+    assert (
+        config_from_env({**environ, "DMS_AGENT_WORKER_ROLE": "DM"}).worker_role == "DM"
+    )
+
+    # the default is the only role the ingest endpoint accepts
+    headers = {"x-dms-actor": "node:cluster-b:c2-worker"}
+    accepted = harness["client"].post(
+        "/api/v1/agent/reports",
+        json=phase8_report(
+            reported_at=datetime.now(UTC).isoformat(),
+            csi_status="Ready",
+            mount_status="Ready",
+        ),
+        headers=headers,
+    )
+    assert accepted.status_code == 200
+    rejected = harness["client"].post(
+        "/api/v1/agent/reports",
+        json={
+            **phase8_report(
+                reported_at=datetime.now(UTC).isoformat(),
+                csi_status="Ready",
+                mount_status="Ready",
+            ),
+            "worker_role": "RM",
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 422
 
 
 def test_mountinfo_parser_decodes_mount_paths():
@@ -110,8 +155,8 @@ def test_non_ready_evidence_is_not_used_as_readiness_candidate(harness):
 
     mapping = upsert_mapping(client)
     sanity = mapping["mapping"]["sanity_result"]
-    assert sanity["readiness"]["resource_management"] == "Missing"
-    assert sanity["agent_observed"]["rm_candidates"] == []
+    assert sanity["readiness"]["data_management"] == "Missing"
+    assert sanity["agent_observed"]["dm_candidates"] == []
 
     ready = phase8_report(
         reported_at=(base_time + timedelta(seconds=1)).isoformat(),
@@ -127,12 +172,15 @@ def test_non_ready_evidence_is_not_used_as_readiness_candidate(harness):
 
     mapping = upsert_mapping(client)
     sanity = mapping["mapping"]["sanity_result"]
-    assert sanity["readiness"]["resource_management"] == "Ready"
-    assert sanity["readiness"]["data_management"] == "Missing"
-    assert sanity["agent_observed"]["rm_candidates"][0]["status"] == "Ready"
+    assert sanity["readiness"]["data_management"] == "Ready"
+    # ONLY the now-Ready CSI evidence became a candidate; the still-Missing mount in
+    # the very same report did not.
+    candidates = sanity["agent_observed"]["dm_candidates"]
+    assert [candidate["status"] for candidate in candidates] == ["Ready"]
+    assert candidates[0]["driver"] == LONGHORN_DRIVER
 
     inventory = client.get("/api/v1/operations/inventory", headers=API_HEADERS).json()
-    role_nodes = inventory["worker_roles"]["RM"]["cluster-b"]["nodes"]
+    role_nodes = inventory["worker_roles"]["DM"]["cluster-b"]["nodes"]
     assert role_nodes == [
         {
             "node_name": "c2-worker",
@@ -149,7 +197,7 @@ def phase8_report(*, reported_at: str, csi_status: str, mount_status: str) -> di
         "cluster_name": "cluster-b",
         "node_name": "c2-worker",
         "node_uid": "uid-c2-worker",
-        "worker_role": "RM",
+        "worker_role": "DM",
         "mounts": [
             {
                 "storage_name": "phase8-longhorn",
@@ -176,7 +224,7 @@ def phase8_report(*, reported_at: str, csi_status: str, mount_status: str) -> di
 
 def upsert_mapping(client: TestClient) -> dict:
     response = client.post(
-        "/api/v1/resource-management/storage-mappings",
+        "/api/v1/storage-mappings",
         json={
             "storage_name": "phase8-longhorn",
             "backend_template": {"backend_type": "longhorn"},
@@ -215,7 +263,9 @@ def harness(tmp_path):
         database_url=operational_url,
         observability_database_url=observability_url,
         agent_report_stale_seconds=300,
-        control_cluster_name="cluster-a",
+        # DM readiness is evaluated against the CONTROL cluster, so the node whose
+        # evidence this file exercises has to live on it.
+        control_cluster_name="cluster-b",
     )
     operational = Database(operational_url)
     observability_db = Database(observability_url)
