@@ -1,0 +1,31 @@
+# DMS Portal Ingress (testbed): bare-IP access over HTTP.
+#
+# The single rule has NO `host:` on purpose. ingress-nginx renders a hostless rule as
+# the catch-all default server (`server_name _;`), which matches ANY Host header — so
+# http://10.10.10.200/ works without any DNS. A rule WITH `host:` would only match
+# that exact hostname and a bare-IP request would fall through to the controller's
+# default backend (404).
+#
+# ssl-redirect is off because the portal is served over plain HTTP here
+# (PORTAL_SESSION_HTTPS_ONLY=false); forcing HTTPS would break the session cookie.
+# To add a hostname + TLS later, see src/portal/deploy/kubernetes/portal-ingress.example.yaml.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dms-portal
+  namespace: dms-portal
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dms-portal
+                port:
+                  number: 80

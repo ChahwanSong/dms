@@ -23,6 +23,9 @@
 5. **[dms-05-dm-jobs.md](dms-05-dm-jobs.md)** — 데이터 잡(scan/sync/rm) 활성화 *(DM 사용 시)*
    (Volcano 스케줄링, DM job 이미지 + dms-agent 이미지, `DMS_AGENT_IDENTITY_USERS`, dm-worker, artifact FS)
 6. **[dms-06-configuration.md](dms-06-configuration.md)** — 환경변수 레퍼런스
+7. **[dms-07-ingress-metallb.md](dms-07-ingress-metallb.md)** — (선택) ingress-nginx + MetalLB로
+   서비스 노출. bare-metal에서 `type: LoadBalancer`를 쓰려면 필요하며, 포탈/DMS API를 IP·호스트명
+   하나로 라우팅한다. IP 풀 선정(충돌 방지)과 IP 접속 시 404 함정을 다룬다.
 
 > RM(3·4)과 DM(5)은 필요한 것만 선택 활성화한다. 최소 설치는 1·2·6.
 

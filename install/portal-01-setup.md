@@ -286,12 +286,15 @@ kubectl -n dms-portal rollout status  deploy/dms-portal --timeout=120s
 
 ## 8. 외부 노출
 
-### 8.1 (운영) Ingress + 서버 TLS
+### 8.1 (권장) Ingress + 서버 TLS
 
-운영에서는 ingress + 서버 TLS로 노출하고 사용자 인증(AD/OIDC)을 BFF에 붙인다. TLS로 서빙하면
-`PORTAL_SESSION_HTTPS_ONLY=true`(기본값)로 두어 세션 쿠키를 Secure-only로 만든다. 참고 manifest는
-`src/portal/deploy/kubernetes/portal-ingress.example.yaml`(host, TLS secret, `ingressClassName`을 환경에
-맞춰 조정). 백엔드는 Service `dms-portal:80`.
+**ingress-nginx + MetalLB 설치 절차는 [dms-07-ingress-metallb.md](dms-07-ingress-metallb.md)** 를 따른다
+(이미지 미러링, MetalLB IP 풀 선정, `host:` 유무에 따른 IP 접속 404 함정, `/healthz` 선점 이슈 포함).
+테스트베드에는 이미 적용되어 있고 포탈은 `http://10.10.10.200/`으로 서빙된다.
+
+운영에서는 TLS로 서빙하고 `PORTAL_SESSION_HTTPS_ONLY=true`(기본값)로 두어 세션 쿠키를 Secure-only로
+만든다. 참고 manifest는 `src/portal/deploy/kubernetes/portal-ingress.example.yaml`(host, TLS secret,
+`ingressClassName`을 환경에 맞춰 조정). 백엔드는 Service `dms-portal:80`.
 
 ### 8.2 (간단) NodePort
 
