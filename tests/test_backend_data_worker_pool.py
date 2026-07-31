@@ -129,7 +129,7 @@ def _plan_scan(repository: DmsRepository, storage_name: str) -> dict:
     )
     Planner(
         repository,
-        backend_registry=BackendAdapterRegistry.with_test_stubs(repository),
+        backend_registry=BackendAdapterRegistry(repository),
     ).run_once()
     job = repository.get_data_job_by_request(request_id)
     assert job is not None
@@ -175,7 +175,7 @@ def test_backend_without_a_dedicated_adapter_falls_back_to_agent_inventory(repos
 
 
 def test_data_worker_pool_for_unregistered_storage_is_agent_inventory(repository):
-    pool = BackendAdapterRegistry.with_test_stubs(repository).data_worker_pool("nope")
+    pool = BackendAdapterRegistry(repository).data_worker_pool("nope")
 
     assert pool == {
         "selection": "agent-inventory",

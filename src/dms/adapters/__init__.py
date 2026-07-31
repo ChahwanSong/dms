@@ -20,7 +20,6 @@ from .base import (
     IdentityLookupResult,
     KubernetesInventoryReadError,
     KubernetesReadOnlyInventoryAdapter,
-    StorageInventoryAdapter,
     VolcanoAdapter,
 )
 from ._util import (
@@ -33,7 +32,6 @@ from ._util import (
 from .inventory import (
     KubectlReadOnlyInventoryAdapter,
     StaticKubernetesReadOnlyInventoryAdapter,
-    StubStorageInventoryAdapter,
     _node_summary,
     _storage_class_summary,
 )
@@ -101,9 +99,7 @@ __all__ = [
     "KubernetesVolcanoAdapter",
     "LdapIdentityLookupAdapter",
     "StaticKubernetesReadOnlyInventoryAdapter",
-    "StorageInventoryAdapter",
     "StubIdentityLookupAdapter",
-    "StubStorageInventoryAdapter",
     "StubVolcanoAdapter",
     "VolcanoAdapter",
     "_artifact_child_uri",

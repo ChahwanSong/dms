@@ -224,9 +224,6 @@ def _storage_names_in_payload(payload: dict[str, Any]) -> set[str]:
         value = payload.get(key)
         if isinstance(value, dict) and value.get("storage_name"):
             names.add(str(value["storage_name"]))
-    for quota in payload.get("storage_class_quotas") or []:
-        if isinstance(quota, dict) and quota.get("storage_name"):
-            names.add(str(quota["storage_name"]))
     for key in ("source_storage_name", "destination_storage_name"):
         if payload.get(key):
             names.add(str(payload[key]))

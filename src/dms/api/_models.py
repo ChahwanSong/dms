@@ -7,11 +7,6 @@ from typing import Any
 from pydantic import BaseModel
 
 
-class MutatingBody(BaseModel):
-    requester_id: str
-    payload: dict[str, Any] = {}
-
-
 class ControlStateBody(BaseModel):
     reason: str | None = None
     block_scheduling: bool = True

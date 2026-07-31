@@ -12,10 +12,6 @@ class AdapterResult:
     artifact_uri: str | None = None
 
 
-class StorageInventoryAdapter(Protocol):
-    def effective_inventory(self) -> dict[str, Any]: ...
-
-
 class KubernetesInventoryReadError(RuntimeError):
     pass
 

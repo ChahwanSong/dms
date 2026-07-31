@@ -15,7 +15,6 @@ from ..adapters import (
     AdapterResult,
     DataManagementRuntimeError,
 )
-from ..backend_registry import BackendAdapterRegistry
 from ..domain import (
     DataJobState,
     LifecycleState,

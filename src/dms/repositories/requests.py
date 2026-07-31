@@ -234,34 +234,6 @@ class RequestsMixin:
             ).fetchall()
         return [self._decode_request(row_to_dict(row)) for row in rows]
 
-    def list_requests_for_resource(
-        self,
-        *,
-        resource_kind: str,
-        resource_key: str,
-        operations: tuple[str, ...] | None = None,
-        limit: int = 20,
-    ) -> list[dict[str, Any]]:
-        where = ["resource_kind = ?", "resource_key = ?"]
-        params: list[Any] = [resource_kind, resource_key]
-        if operations:
-            placeholders = ",".join(["?"] * len(operations))
-            where.append(f"operation IN ({placeholders})")
-            params.extend(operations)
-        params.append(limit)
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT * FROM requests
-                WHERE {' AND '.join(where)}
-                ORDER BY commit_order DESC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
-        return [self._decode_request(row_to_dict(row)) for row in rows]
-
-
     def update_request_status(
         self,
         request_id: str,

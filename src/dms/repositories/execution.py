@@ -784,42 +784,6 @@ class ExecutionMixin:
         return results
 
 
-    def list_results_for_operations(
-        self, *, operations: tuple[str, ...], limit: int = 1000
-    ) -> list[dict[str, Any]]:
-        if not operations:
-            return []
-        placeholders = ",".join(["?"] * len(operations))
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT
-                    results.*,
-                    requests.operation,
-                    requests.resource_kind,
-                    requests.resource_key,
-                    requests.requester_id,
-                    requests.actor,
-                    requests.payload_summary,
-                    requests.commit_order,
-                    requests.status AS request_status
-                FROM results
-                JOIN requests ON requests.request_id = results.request_id
-                WHERE requests.operation IN ({placeholders})
-                ORDER BY requests.commit_order DESC, results.created_at DESC
-                LIMIT ?
-                """,
-                (*operations, limit),
-            ).fetchall()
-        results = rows_to_dicts(rows)
-        for result in results:
-            result["verification_summary"] = (
-                json_loads(result["verification_summary"]) or {}
-            )
-            result["payload_summary"] = json_loads(result["payload_summary"]) or {}
-        return results
-
-
     def list_runs(
         self,
         *,

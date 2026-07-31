@@ -24,22 +24,6 @@ from ._util import (  # noqa: F401
 
 
 @dataclass
-class StubStorageInventoryAdapter:
-    reports: list[dict[str, Any]] = field(default_factory=list)
-
-    def effective_inventory(self) -> dict[str, Any]:
-        return {
-            "rm": {
-                "storage_classes": [],
-                "quota_capabilities": [],
-                "reports": self.reports,
-            },
-            "dm": {"worker_pool": [], "tools": [], "reports": self.reports},
-        }
-
-
-
-@dataclass
 class StaticKubernetesReadOnlyInventoryAdapter:
     inventory: dict[str, Any] = field(default_factory=lambda: {"clusters": {}})
 

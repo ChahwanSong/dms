@@ -210,6 +210,22 @@ class StorageMappingSanityService:
         )
         backend_type = backend_template.get("backend_type")
         is_csi = bool(backend_type) and backend_type not in FILESYSTEM_BACKEND_TYPES
+        # A CSI/agentless mapping is validated ENTIRELY by the read-only cluster inventory
+        # (does the StorageClass exist, does its provisioner match csi_driver). Both of
+        # those checks are conditional on cluster_name / storage_class_name being set, and
+        # the agent-evidence warnings below are skipped for CSI -- so a CSI mapping that
+        # declares NEITHER would pass with a single trivial `backend_type_present` check
+        # and be reported Ready on zero evidence. Fail closed instead: with nothing to
+        # check against, we cannot claim the mapping is sane.
+        if is_csi and not (cluster_name and storage_class_name):
+            errors.append(
+                _issue(
+                    "csi_mapping_unpinned",
+                    "CSI/agentless storage mapping must declare cluster_name and "
+                    "storage_class_name -- they are the only evidence its sanity can be "
+                    "checked against",
+                )
+            )
         # Agent-report aggregate signals only gate filesystem mappings (which depend on
         # node-agent evidence). CSI/k8s mappings may target agentless managed clusters, so
         # the absence/staleness of agent reports must not degrade or fail them -- their

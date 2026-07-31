@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from ...domain import LifecycleState, ResourceKind, TERMINAL_LIFECYCLE_STATES
+from ...domain import LifecycleState, TERMINAL_LIFECYCLE_STATES
 from .._helpers.inventory import inventory_service
 from .._helpers.storage_mapping import (
     redact_storage_mapping,

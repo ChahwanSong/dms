@@ -205,20 +205,6 @@ class StorageMappingsMixin:
         return self._decode_storage_mapping(row_to_dict(row)) if row else None
 
 
-    def get_storage_mapping_by_cluster_storage_class(
-        self, cluster_name: str, storage_class_name: str
-    ) -> dict[str, Any] | None:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM storage_mappings
-                WHERE cluster_name = ? AND storage_class_name = ?
-                """,
-                (cluster_name, storage_class_name),
-            ).fetchone()
-        return self._decode_storage_mapping(row_to_dict(row)) if row else None
-
-
     def list_storage_mappings(
         self,
         limit: int = 100,

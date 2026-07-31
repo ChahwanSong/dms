@@ -23,10 +23,16 @@ export const CSI_BACKEND_TYPES = ["ceph-csi", "gpfs-csi", "weka-csi"] as const;
 export const BACKEND_TYPES = [...FS_BACKEND_TYPES, ...CSI_BACKEND_TYPES] as const;
 
 // DM (agent) readiness is only meaningful for the filesystem backends
-// (cephfs/gpfs/wekafs): those run a DM agent on the storage node. k8s CSI mappings
-// are agentless, so DMS does not gate them on DM readiness at all — control or
-// managed cluster alike (see planner _reject_unsafe_storage_mapping).
-// Treat anything that is not a known fs backend as CSI/free-form and hide DM.
+// (cephfs/gpfs/wekafs): those run a DM agent on the storage node, so we show the DM
+// dot only for them. k8s CSI mappings are agentless — their sanity comes from the
+// read-only cluster inventory (StorageClass exists + csi_driver matches), and DMS
+// deliberately does NOT raise missing_dm_readiness for them.
+//
+// NOTE: that is a DISPLAY rule, not an admission rule. The planner's
+// `_reject_unsafe_storage_mapping` still requires readiness.data_management == "Ready"
+// for EVERY data job, CSI included — so a CSI mapping cannot actually be a data-job
+// target today, which is why every data-job form below filters with isFsBackend().
+// Do not read the hidden DM dot as "DMS does not gate this".
 export function isFsBackend(m: StorageMapping): boolean {
   const bt = m.backend_template?.["backend_type"];
   return typeof bt === "string" && (FS_BACKEND_TYPES as readonly string[]).includes(bt);

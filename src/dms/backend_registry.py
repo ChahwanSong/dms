@@ -13,7 +13,6 @@ from .backends.weka import (
     WekaFsBackendTemplate,
     WekaFsDataManagementAdapter,
 )
-from .config import Settings
 from .repositories import DmsRepository
 
 
@@ -27,27 +26,6 @@ class BackendAdapterRegistry:
     """
 
     repository: DmsRepository
-    settings: Settings | None = None
-
-    @classmethod
-    def with_live_defaults(
-        cls, repository: DmsRepository, settings: Settings
-    ) -> "BackendAdapterRegistry":
-        return cls(repository=repository, settings=settings)
-
-    @classmethod
-    def with_test_stubs(
-        cls, repository: DmsRepository, settings: Settings | None = None
-    ) -> "BackendAdapterRegistry":
-        return cls(repository=repository, settings=settings)
-
-    @classmethod
-    def with_defaults(
-        cls, repository: DmsRepository, settings: Settings | None = None
-    ) -> "BackendAdapterRegistry":
-        if settings is not None:
-            return cls.with_live_defaults(repository, settings)
-        return cls.with_test_stubs(repository, settings)
 
     def data_worker_pool(self, storage_name: str) -> dict[str, Any]:
         mapping = self.repository.get_storage_mapping(storage_name)

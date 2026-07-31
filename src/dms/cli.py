@@ -17,7 +17,6 @@ from .adapters import (
     LdapIdentityLookupAdapter,
     volcano_adapter_from_settings,
 )
-from .backend_registry import BackendAdapterRegistry
 from .config import Settings
 from .db import Database, close_all_pools
 from .domain import AgentReport

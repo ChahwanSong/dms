@@ -71,30 +71,6 @@ class OperationalMixin:
         return None
 
 
-    def active_work_for_resource(
-        self, *, resource_kind: str, resource_key: str
-    ) -> dict[str, Any] | None:
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM requests
-                WHERE resource_kind = ? AND resource_key = ?
-                ORDER BY commit_order ASC
-                """,
-                (resource_kind, resource_key),
-            ).fetchall()
-        for row in rows:
-            request = self._decode_request(row_to_dict(row))
-            if request["status"] in TERMINAL_LIFECYCLE_STATES:
-                continue
-            return {
-                "kind": "request",
-                "id": request["request_id"],
-                "status": request["status"],
-            }
-        return None
-
-
     def ingest_agent_report(self, report: dict[str, Any]) -> str:
         report_id = new_id("agent")
         now = iso_now()

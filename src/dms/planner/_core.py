@@ -160,9 +160,7 @@ class _PlannerCoreMixin:
                 "candidates": agent_observed.get("dm_candidates", []),
                 "sanity_status": mapping.get("sanity_status"),
             }
-        registry = self.backend_registry or BackendAdapterRegistry.with_test_stubs(
-            self.repository
-        )
+        registry = self.backend_registry or BackendAdapterRegistry(self.repository)
         return registry.data_worker_pool(storage_name)
 
 
