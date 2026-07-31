@@ -164,11 +164,19 @@ DMS는 등록된 클러스터의 StorageClass·CSI driver·노드를 **읽기 �
 | --- | --- | --- |
 | `DMS_KUBERNETES_INVENTORY_MODE` | `kubectl` | 읽기 전용 inventory mode. `kubectl` / `ssh-kubectl` / `python-client`. API 등록 sanity와 sanity-reconciler가 이 mode로 클러스터를 읽어 agentless managed cluster의 CSI mapping을 검증. 클러스터별 격리(한 클러스터 실패가 전체 inventory를 무력화하지 않음). |
 | `DMS_CLUSTER_KUBECONFIGS_JSON` | 설정 안 됨 | cluster name → kubeconfig path JSON. current-context를 안 쓰는 `kubectl` mode에 필요. |
-| `DMS_CLUSTER_CONTROL_HOSTS_JSON` | 설정 안 됨 | cluster name → SSH host JSON. `ssh-kubectl` inventory mode에서 그 클러스터를 `ssh <host> kubectl ...`로 읽는다. |
+| `DMS_CLUSTER_CONTROL_HOSTS_JSON` | 설정 안 됨 | cluster name → SSH host JSON. **여기 등록된 클러스터는 `DMS_KUBERNETES_INVENTORY_MODE`와 무관하게** `ssh <host> kubectl ...`로 읽는다(`adapters/inventory.py`의 per-cluster transport). 즉 mode가 `kubectl`이어도 이 항목이 있으면 그 클러스터에는 SSH 키가 필요하다. kubeconfig로 직접 도달 가능한 클러스터는 **여기에 넣지 않는 편이 낫다** — 넣는 순간 SSH 의존이 생긴다. |
 | `DMS_KUBERNETES_INVENTORY_TIMEOUT_SECONDS` | `10` | inventory read timeout. |
 | `DMS_KUBERNETES_MUTATION_TIMEOUT_SECONDS` | `30` | **DM 전용** — dm-worker가 Volcano 잡을 kubectl로 다룰 때의 timeout(`adapters/volcano.py`). |
 
-> **`ssh-kubectl` inventory를 쓰려면** dms-api·dms-planner·dms-sanity-reconciler 파드에 그 bastion으로 접속할 SSH 키를 **직접 마운트**해야 한다 — 컨트롤 플레인은 더 이상 SSH 키 Secret을 기본 제공하지 않는다. 클러스터 등록 절차는 [`dms-03-storage-mappings.md §3`](dms-03-storage-mappings.md).
+> **SSH가 필요한 경우** — `DMS_KUBERNETES_INVENTORY_MODE=ssh-kubectl`이거나, mode와 무관하게
+> `DMS_CLUSTER_CONTROL_HOSTS_JSON`에 그 클러스터가 등록된 경우 — dms-api·dms-api-internal·
+> dms-sanity-reconciler 파드에 해당 bastion 접속용 SSH 키를 **직접 마운트**해야 한다. 컨트롤
+> 플레인은 더 이상 SSH 키 Secret을 기본 제공하지 않는다.
+>
+> **키가 없으면 그 클러스터는 `cluster_missing`으로 sanity `Failed`가 되고**, 그 클러스터의 CSI
+> 매핑은 플래너의 admission gate에 걸려 데이터 잡을 받지 못한다. 실제로 테스트베드에서 이 조합
+> (mode=`kubectl` + control_host 지정 + 키 없음)으로 재현했다. 클러스터 등록 절차는
+> [`dms-03-storage-mappings.md §3`](dms-03-storage-mappings.md).
 
 ---
 

@@ -146,7 +146,42 @@ RM(Resource Management) 기능이 제거된 릴리스로 처음 올리는 **기�
 kubectl -n dms delete deployment/dms-rm-worker --ignore-not-found
 kubectl -n dms delete daemonset/dms-rm-agent  --ignore-not-found
 kubectl -n dms delete serviceaccount/dms-rm-worker --ignore-not-found
-kubectl -n dms delete secret/dms-ssh-client --ignore-not-found   # RM host-exec 전용이었음
+```
+
+> **`dms-ssh-client` Secret은 여기서 지우지 않는다.** RM host-exec 전용이 아니다 —
+> `dms-api`·`dms-api-internal`·`dms-sanity-reconciler` 파드도 이 Secret을 마운트하며,
+> **`DMS_CLUSTER_CONTROL_HOSTS_JSON`에 등록된 클러스터는 `DMS_KUBERNETES_INVENTORY_MODE`와
+> 무관하게** `ssh <host> kubectl`로 읽히기 때문이다(`src/dms/adapters/inventory.py`의
+> per-cluster transport). 실제 테스트베드에서 이를 먼저 지웠다가 다음 두 가지가 동시에 터졌다:
+>
+> 1. **파드가 기동 불가.** 아직 옛 파드 스펙(`prepare-ssh-client` initContainer + `ssh-client`
+>    볼륨)을 가진 `dms-api`/`dms-sanity-reconciler`가 `MountVolume.SetUp failed ... secret
+>    "dms-ssh-client" not found`로 멈춘다.
+> 2. **`kubectl rollout status`가 성공이라고 거짓 보고.** 새 파드가 Pending이어도 **옛 파드가
+>    가용성을 채우고 있으면** rollout이 완료로 뜬다. 그 사이 옛 이미지 파드가 계속 돌면서
+>    `missing_rm_readiness` 같은 옛 데이터를 다시 써 넣는다(실제로 sanity-reconciler에서 발생).
+>
+> **올바른 순서:** ① 새 매니페스트(`control-plane.yaml`·`sanity-reconciler.yaml`)를 먼저 반영해
+> 파드 스펙에서 ssh 마운트를 없애고 → ② `DMS_CLUSTER_CONTROL_HOSTS_JSON`이 비어 있고
+> `DMS_KUBERNETES_INVENTORY_MODE`가 `ssh-kubectl`이 아님을 확인한 뒤 → ③ 그때 Secret을 지운다.
+> 둘 중 하나라도 SSH를 쓰고 있으면 **Secret을 유지**한다.
+>
+> 참고: kubeconfig로 직접 도달 가능한 클러스터라면 `DMS_CLUSTER_CONTROL_HOSTS_JSON`에서 빼는
+> 편이 낫다. SSH 의존이 사라지고 인벤토리는 kubeconfig로 그대로 동작한다(테스트베드에서 확인).
+
+**롤아웃 검증은 `rollout status`만 믿지 말고 실제 파드 이미지로 확인한다:**
+
+```bash
+kubectl -n dms get pods -o json | python3 -c "
+import json,sys
+bad=[(p['metadata']['name'], c['image'])
+     for p in json.load(sys.stdin)['items']
+     for c in p['spec']['containers'] + p['spec'].get('initContainers',[])
+     if '/dms' in c['image'] and '<새태그>' not in c['image'] and 'mpifileutils' not in c['image']]
+print('구버전 이미지 파드:', bad or '없음')"
+
+# 옛 ReplicaSet이 replicas>0으로 남아 있는지도 본다 (남아 있으면 옛 파드가 계속 돈다)
+kubectl -n dms get rs -o custom-columns='NAME:.metadata.name,DESIRED:.spec.replicas,IMAGE:.spec.template.spec.containers[0].image' | awk '$2>0'
 ```
 
 대상 클러스터마다(멀티 클러스터면 전부) 이름이 바뀌면서 고아가 된 예전 ClusterRole도 지운다 —
@@ -236,6 +271,22 @@ DELETE FROM resources
 나머지는 그대로 둬도 무해하다.
 정리하고 싶으면 PATCH로 **전체 `backend_template`을 round-trip**하면서 뺀다
 ([../docs/api/storage-mappings.md](../docs/api/storage-mappings.md) §5).
+
+### 4.4 스토리지 매핑 sanity 재검사 (권장)
+
+`readiness`는 **마지막 검사 결과가 저장된 값**이다. 업그레이드 직후 기존 매핑은 여전히 옛 축
+(`resource_management`·`kubernetes_mutation`)과 옛 `missing_rm_readiness` 경고를 들고 있고,
+그 경고 때문에 파일시스템 매핑이 `Degraded`로 남는다. sanity-reconciler가 다음 스윕에서 정리하지만,
+바로 반영하려면 전 매핑을 재검사한다:
+
+```bash
+for s in $(curl -sS "${CURL_MTLS[@]}" "$DMS_API_URL/api/v1/operations/storage-mappings" | jq -r '.[].storage_name'); do
+  curl -sS "${CURL_MTLS[@]}" -X POST "$DMS_API_URL/api/v1/storage-mappings/${s}:check" | jq -c '{storage_name, status}'
+done
+```
+
+정리 후에는 `readiness`가 `data_management`·`inventory` **두 축만** 남아야 한다. 테스트베드에서는
+이 재검사로 파일시스템 매핑 4개가 `Degraded` → `Ready`로 바뀌었다(사라진 RM 경고가 원인이었다).
 
 ## 5. Rollback
 
