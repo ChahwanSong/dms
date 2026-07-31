@@ -62,7 +62,7 @@ def agent_router() -> APIRouter:
         request: Request,
         services: AppServices = Depends(get_services),
     ) -> dict[str, Any]:
-        """Rolling-restart the RM + DM agent DaemonSets so they re-read storages.json
+        """Rolling-restart the DM agent DaemonSet so it re-reads storages.json
         after a storage mapping change. Operator action (authenticated)."""
         authenticated_actor(request, services)
         try:

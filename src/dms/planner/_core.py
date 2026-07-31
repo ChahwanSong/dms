@@ -146,14 +146,6 @@ class _PlannerCoreMixin:
         return desired
 
 
-    @staticmethod
-    def _precondition(request: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "commit_order": request["commit_order"],
-            "resource_key": request["resource_key"],
-            "source_of_truth": "operational-postgresql",
-        }
-
 
     def _worker_pool(self, storage_name: str) -> dict[str, Any]:
         mapping = self.repository.get_storage_mapping(storage_name)

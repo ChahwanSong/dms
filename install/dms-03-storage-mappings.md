@@ -197,6 +197,12 @@ CURL_MTLS=(--cert $CERTS/operator.crt --key $CERTS/operator.key --cacert $CERTS/
 | `csi_driver` | 선택(CSI는 사실상 필수) | live StorageClass provisioner와 **일치**해야 한다. 생략 시 `csi_driver_matches` sanity 제외 |
 | `data_network` | 선택 | 데이터 이동에 쓸 네트워크 이름. DM 워커풀 힌트로 전달된다 |
 
+> **`(cluster_name, storage_class_name)`은 유니크하다** (`uq_storage_class_mapping`,
+> `src/dms/migrations.py`). 같은 클러스터의 한 StorageClass를 두 매핑이 가리킬 수 없으므로,
+> 같은 스토리지를 host-mount(fs)와 PVC(CSI) 양쪽으로 등록하려면 **StorageClass를 서로 다르게**
+> 잡아야 한다(아래 예시는 `rook-cephfs` / `rook-cephfs-csi`). 어길 경우 두 번째 등록은 DB
+> 유니크 위반으로 실패한다.
+
 > `weka_credentials`·`weka_profile`·`command_runner`·`command_timeout_seconds`·
 > `fileset_name_template`·`quota_scope`·`rm_worker_nodes`·`ssh_host`는 RM(파일시스템 프로비저닝·
 > 쿼터) 전용이었고 **더 이상 어떤 코드도 읽지 않는다**. 새 매핑에는 넣지 말고, 기존 매핑에 남아
@@ -280,7 +286,7 @@ curl -sS "${CURL_MTLS[@]}" -X POST -H "content-type: application/json" \
       "csi_driver": "rook-ceph.cephfs.csi.ceph.com"
     },
     "cluster_name": "cluster-a",
-    "storage_class_name": "rook-cephfs"
+    "storage_class_name": "rook-cephfs-csi"
   }' | jq '{storage_name, status}'
 ```
 

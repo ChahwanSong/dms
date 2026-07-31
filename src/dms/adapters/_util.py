@@ -73,7 +73,3 @@ _KUBECTL_TRANSPORT_ERROR_MARKERS = (
     "dial tcp",
 )
 
-
-def _kubectl_transport_error(stderr: str) -> bool:
-    lowered = stderr.lower()
-    return any(marker in lowered for marker in _KUBECTL_TRANSPORT_ERROR_MARKERS)

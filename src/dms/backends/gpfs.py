@@ -42,18 +42,6 @@ class GpfsBackendTemplate:
             data_network=template.get("data_network"),
         )
 
-    def metadata(self) -> dict[str, Any]:
-        return {
-            "backend_type": GPFS_BACKEND_TYPE,
-            "storage_name": self.storage_name,
-            "filesystem_name": self.filesystem_name,
-            "mount_path": self.mount_path,
-            "managed_root": self.managed_root,
-            "csi_driver": self.csi_driver,
-            "storage_class_name": self.storage_class_name,
-            "data_network": self.data_network,
-        }
-
 
 @dataclass(frozen=True)
 class GpfsDataManagementAdapter:

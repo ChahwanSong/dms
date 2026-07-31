@@ -97,3 +97,45 @@ def test_try_acquire_leader_takeover_on_expiry(repo):
 def test_try_acquire_leader_independent_components(repo):
     assert repo.try_acquire_leader("comp-a", holder="w1", lease_seconds=60) is True
     assert repo.try_acquire_leader("comp-b", holder="w2", lease_seconds=60) is True  # different component
+
+
+# --- worker_role is part of the claim predicate ---------------------------------
+def test_claim_next_plan_never_claims_a_plan_for_another_role(repo):
+    """`claim_next_plan` MUST filter on worker_role, even though only one role exists
+    today. An existing database upgraded from a release that still had RM keeps
+    legacy `worker_role='RM'` plans in `Planned`; without the filter the dm-worker
+    claims one and tries to execute a `filesystem.*` desired_state as a data job.
+
+    The filter cannot be exercised through the WorkerRole enum any more (it is
+    single-valued), so seed the foreign role directly at the SQL layer — which is
+    exactly the shape a real upgraded database has.
+    """
+    _seed_dm_plans(repo, 1)
+    dm_plan = repo.claim_next_plan(
+        WorkerRole.DM, worker_id="w1", executor_id="w1", lease_seconds=60
+    )
+    assert dm_plan is not None  # the DM plan is drained first
+
+    with repo.database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO plans (
+                plan_id, request_id, status, worker_role, operation_kind,
+                resource_key, desired_state, precondition, execution_metadata,
+                attempt_count, created_at, updated_at
+            ) VALUES (
+                'plan_legacy_rm', ?, ?, 'RM', 'filesystem.create',
+                'cephfs-a:legacy', '{}', '{}', '{}', 0, '2000-01-01', '2000-01-01'
+            )
+            """,
+            (dm_plan[0]["request_id"], LifecycleState.PLANNED.value),
+        )
+
+    # the legacy row is Planned and OLDER than anything else, so an unfiltered
+    # "oldest Planned plan" query would hand it straight to the dm-worker.
+    assert (
+        repo.claim_next_plan(
+            WorkerRole.DM, worker_id="w2", executor_id="w2", lease_seconds=60
+        )
+        is None
+    )

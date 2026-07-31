@@ -15,13 +15,13 @@ from .base import (
     DataManagementRuntimeError,
     DataManagementStorageAdapter,
     IdentityLookupAdapter,
+    IdentityLookupConfigurationError,
     IdentityLookupReadError,
     IdentityLookupResult,
     KubernetesInventoryReadError,
     KubernetesReadOnlyInventoryAdapter,
     StorageInventoryAdapter,
     VolcanoAdapter,
-    probe_filesystem_access,
 )
 from ._util import (
     _first_present,
@@ -92,6 +92,7 @@ __all__ = [
     "DataManagementRuntimeError",
     "DataManagementStorageAdapter",
     "IdentityLookupAdapter",
+    "IdentityLookupConfigurationError",
     "IdentityLookupReadError",
     "IdentityLookupResult",
     "KubectlReadOnlyInventoryAdapter",
@@ -152,6 +153,5 @@ __all__ = [
     "_write_json",
     "_write_mpi_metadata_artifacts",
     "_yaml_scalar",
-    "probe_filesystem_access",
     "volcano_adapter_from_settings",
 ]

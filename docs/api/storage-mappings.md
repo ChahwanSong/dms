@@ -63,6 +63,10 @@ CURL+=(-H "Authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 
 ## 2. backend_template 필드
 
+> **`(cluster_name, storage_class_name)`은 유니크하다**(`uq_storage_class_mapping`). 같은 클러스터의
+> 한 StorageClass를 두 매핑이 가리킬 수 없으므로, 같은 스토리지를 host-mount(fs)와 PVC(CSI) 양쪽으로
+> 등록하려면 StorageClass를 서로 다르게 잡는다(아래 예시: `rook-cephfs` / `rook-cephfs-csi`).
+
 매핑은 최상위 필드(`storage_name` · `cluster_name` · `storage_class_name`)와 백엔드별
 `backend_template`으로 이루어진다.
 
@@ -142,7 +146,7 @@ curl -sS "${CURL[@]}" \
       "csi_driver": "rook-ceph.cephfs.csi.ceph.com"
     },
     "cluster_name": "cluster-a",
-    "storage_class_name": "rook-cephfs"
+    "storage_class_name": "rook-cephfs-csi"
   }' | jq '{storage_name, status}'
 ```
 
