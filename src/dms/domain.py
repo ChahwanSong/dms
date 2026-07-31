@@ -275,7 +275,7 @@ DM_DENYLIST_SUBJECT_TYPES = ("requester", "owner", "group")
 
 
 # Filesystem backends that manage a directory subtree under their mount point.
-# Kept as literals here (rather than imported from backends/) so that the domain
+# Kept as literals here (rather than imported from backend_registry) so that the domain
 # layer — and the query/inventory layers that only need to *classify* a mapping —
 # never depend on the backend adapter modules.
 FILESYSTEM_BACKEND_TYPES = ("cephfs", "wekafs", "gpfs")

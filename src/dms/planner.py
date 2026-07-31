@@ -1,12 +1,49 @@
+"""Request planner: validation, rejection and desired-state generation.
+
+Turns plannable data-job requests into plans + data_jobs rows, rejecting any whose
+storage mapping is missing/disabled/unsafe or whose DM readiness is not fresh.
+
+(Historically a package of per-domain mixins; with resource management removed the
+data-job planner is the whole planner, so it lives in one module again.)
+"""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from ._base import *  # noqa: F401,F403
+from .backend_registry import BackendAdapterRegistry
+from .config import Settings
+from .domain import (
+    LifecycleState,
+    OperationKind,
+    ResourceKind,
+    WorkerRole,
+    apply_managed_root_suffix,
+    managed_root_for_mapping,
+    managed_root_path_suffix,
+)
+from .repositories import DmsRepository
+
+DM_OPERATIONS = {
+    OperationKind.DATA_SCAN.value,
+    OperationKind.DATA_SYNC.value,
+    OperationKind.DATA_RM.value,
+}
 
 
-class _PlannerCoreMixin:
-    """Dispatch and shared planning helpers."""
+@dataclass
+class Planner:
+    """Plans persisted requests into executable desired state."""
+
+    repository: DmsRepository
+    backend_registry: BackendAdapterRegistry | None = None
+    # DM-only readiness staleness gate. None disables it (default), preserving existing
+    # behaviour. When set, DM requests are fail-closed if a storage mapping's sanity is
+    # older than this many seconds (the sanity reconciler keeps it fresh).
+    sanity_ttl_seconds: float | None = None
+    # Runtime settings (DM path base, etc.). None (default) disables managed_root
+    # rebasing, preserving existing behaviour and `Planner(repository)` test fixtures.
+    settings: Settings | None = None
 
     def run_once(self, limit: int = 50) -> int:
         planned = 0
@@ -148,9 +185,9 @@ class _PlannerCoreMixin:
 
 
     def _worker_pool(self, storage_name: str) -> dict[str, Any]:
-        mapping = self.repository.get_storage_mapping(storage_name)
         if self.backend_registry is not None:
             return self.backend_registry.data_worker_pool(storage_name)
+        mapping = self.repository.get_storage_mapping(storage_name)
         if mapping and mapping.get("sanity_result"):
             agent_observed = mapping["sanity_result"].get("agent_observed", {})
             return {
@@ -160,8 +197,7 @@ class _PlannerCoreMixin:
                 "candidates": agent_observed.get("dm_candidates", []),
                 "sanity_status": mapping.get("sanity_status"),
             }
-        registry = self.backend_registry or BackendAdapterRegistry(self.repository)
-        return registry.data_worker_pool(storage_name)
+        return BackendAdapterRegistry(self.repository).data_worker_pool(storage_name)
 
 
     def _data_worker_pool(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -247,7 +283,7 @@ class _PlannerCoreMixin:
         ttl = getattr(self, "sanity_ttl_seconds", None)
         if ttl is None:
             return False
-        from ..sanity_reconciler import readiness_is_stale
+        from .sanity_reconciler import readiness_is_stale
 
         return readiness_is_stale(mapping, ttl_seconds=ttl)
 

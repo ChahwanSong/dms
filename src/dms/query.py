@@ -48,14 +48,12 @@ def _action_fingerprint(item: dict) -> str:
     """Stable per-item key for acknowledge (issue_type + best identifier). Mirrors the
     portal's fingerprint so an ack targets exactly one action-required item."""
     issue_type = item.get("issue_type") or ""
-    ns = item.get("namespace_name") or item.get("namespace")
     key = (
         item.get("resource_key")
         or item.get("request_id")
         or item.get("job_id")
         or item.get("report_id")
         or item.get("storage_name")
-        or (f"{item.get('cluster_name')}:{ns}" if ns else None)
         or item.get("node_name")
         or ""
     )
@@ -229,7 +227,7 @@ class OperationalQueryService:
             issues.append(
                 {
                     "issue_type": issue_type,
-                    "severity": "WARN" if job["state"] == "Cancelled" else "ERROR",
+                    "severity": "ERROR",
                     "resource_kind": ResourceKind.DATA_JOB.value,
                     "job_id": job["job_id"],
                     "request_id": job["request_id"],
@@ -498,7 +496,5 @@ def _data_job_issue_type(job: dict[str, Any], reason: Any) -> str:
         return "data_job_artifact_parse_failed"
     if "volcano" in reason_text or "mpi" in reason_text or "scheduler" in reason_text:
         return "data_job_volcano_failed"
-    if job["state"] == "Cancelled":
-        return "data_job_cancelled"
     return "data_job_failed"
 

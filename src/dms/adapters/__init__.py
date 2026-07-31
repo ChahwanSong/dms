@@ -13,22 +13,14 @@ import subprocess  # noqa: F401
 from .base import (
     AdapterResult,
     DataManagementRuntimeError,
-    DataManagementStorageAdapter,
     IdentityLookupAdapter,
     IdentityLookupConfigurationError,
     IdentityLookupReadError,
     IdentityLookupResult,
     KubernetesInventoryReadError,
     KubernetesReadOnlyInventoryAdapter,
-    VolcanoAdapter,
 )
-from ._util import (
-    _first_present,
-    _json_stdout,
-    _kubectl_not_found,
-    _positive_int,
-    _shell_quote,
-)
+from ._util import _shell_quote
 from .inventory import (
     KubectlReadOnlyInventoryAdapter,
     StaticKubernetesReadOnlyInventoryAdapter,
@@ -88,7 +80,6 @@ from .volcano import (
 __all__ = [
     "AdapterResult",
     "DataManagementRuntimeError",
-    "DataManagementStorageAdapter",
     "IdentityLookupAdapter",
     "IdentityLookupConfigurationError",
     "IdentityLookupReadError",
@@ -101,7 +92,6 @@ __all__ = [
     "StaticKubernetesReadOnlyInventoryAdapter",
     "StubIdentityLookupAdapter",
     "StubVolcanoAdapter",
-    "VolcanoAdapter",
     "_artifact_child_uri",
     "_artifact_job_uri",
     "_can_fallback_from_manifest_apply",
@@ -112,10 +102,7 @@ __all__ = [
     "_default_tool_for_operation",
     "_drop_none",
     "_file_uri_parent_path",
-    "_first_present",
     "_job_ref_for_manifest",
-    "_json_stdout",
-    "_kubectl_not_found",
     "_kubernetes_name",
     "_manifest_min_available",
     "_merge_affinity",
@@ -132,7 +119,6 @@ __all__ = [
     "_parse_kind_ref",
     "_parse_volcano_ref",
     "_pod_security_context",
-    "_positive_int",
     "_render_option_flags",
     "_render_yaml",
     "_resource_model",

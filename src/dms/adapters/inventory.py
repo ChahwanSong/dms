@@ -12,13 +12,7 @@ from urllib.parse import urlparse
 
 from ..config import Settings
 from .base import *  # noqa: F401,F403
-from ._util import (  # noqa: F401
-    _first_present,
-    _json_stdout,
-    _kubectl_not_found,
-    _positive_int,
-    _shell_quote,
-)
+from ._util import _shell_quote
 
 
 

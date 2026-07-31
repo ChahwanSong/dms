@@ -23,7 +23,7 @@ Volcano/큐/PriorityClass 사전 준비, agent·LDAP·공유 artifact FS 구성)
 
 - **요청자 POSIX 신원으로 실행.** 잡 pod는 요청자의 uid/gid로 뜬다(`runAsUser`/`runAsGroup`/
   `fsGroup`). dm-worker가 preflight에서 `owner_username`을 **read-only LDAP**로 조회해 uid/gid를
-  해석한다(RM과 동일 디렉토리, 저장 매핑 없음). 성공/실패의 핵심은 이 신원의 **파일 접근 권한**이다(§7).
+  해석한다(캐시/저장 매핑 테이블 없음, 요청 시 조회). 성공/실패의 핵심은 이 신원의 **파일 접근 권한**이다(§7).
 
 - **preview → confirm 게이트(파괴 방지).** `sync`·`rm`은 파괴적이므로 먼저 dry-run **preview**로
   인벤토리와 fingerprint를 산출하고, 그 fingerprint를 **confirm**해야 실제 실행이 일어난다.

@@ -218,9 +218,9 @@ def _storage_node_matrix(
 def _node_metrics(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group flat per-report metric samples (oldest→newest) into per-node time-series.
 
-    A node with both an RM and a DM agent emits ~2 samples/min for the same host, so we
-    bucket per minute and keep the latest sample in each bucket — one point per minute
-    per node. Each node gets cpu/mem series ({t, v}) + a `current` snapshot."""
+    A node can emit more than one sample per minute (repeated reports), so we bucket
+    per minute and keep the latest sample in each bucket — one point per minute per
+    node. Each node gets cpu/mem series ({t, v}) + a `current` snapshot."""
     nodes: dict[tuple, dict[str, Any]] = {}
     for s in samples or []:
         key = (s.get("cluster_name"), s.get("node_name"))

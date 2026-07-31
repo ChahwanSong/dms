@@ -83,9 +83,9 @@ adapters. State is the source of truth; every process is a restartable loop that
   shared bearer token and an mTLS header profile (`AuthVerifier` + `AuthorizationPolicy`); when
   `require_mtls_header` is on, the actor comes from a verified header and `default_actor` is rejected
   at startup.
-- **Planner** (`src/dms/planner/`): `Planner` (`_core` mixin re-exported via `from ._base import *`).
-  `run_once(limit)` reads plannable requests and emits plans; it dedups against prior active
-  requests and gates on storage-mapping readiness.
+- **Planner** (`src/dms/planner.py`): `Planner.run_once(limit)` reads plannable requests and emits
+  plans + `data_jobs` rows; it dedups against prior active requests and gates on storage-mapping
+  sanity/readiness (fail closed).
 - **Workers** (`src/dms/workers/`): `DMWorkerRuntime` (`dm.py`, the largest module) runs data jobs
   through a **preview/confirm** flow (`scan`/`sync`/`rm`), resolves the job owner's POSIX identity
   via read-only LDAP, enforces a uid/gid floor, optional opt-in root (`allow_root_requester` +
@@ -96,12 +96,11 @@ adapters. State is the source of truth; every process is a restartable loop that
   kept portable across SQLite and PostgreSQL (`src/dms/db.py` `Database` wrapper).
 - **Adapters** (`src/dms/adapters/`): the only layer that touches the outside world — `identity`
   (LDAP), `inventory` (read-only `kubectl`/`ssh-kubectl` StorageClass/CSI/node reads), `volcano`
-  (Volcano Job scheduling). Live and stub implementations are paired where a test needs
-  in tests and default CLI wiring. `subprocess` is re-exported from `adapters/__init__.py` so tests
-  can monkeypatch it.
-- **Backends** (`src/dms/backends/` + `backend_registry.py`): per-storage-type behavior for
-  `weka` and `gpfs`. `BackendAdapterRegistry` resolves the right DM adapter per resource from
-  storage mappings.
+  (Volcano Job scheduling). Live and stub implementations are paired where tests need them.
+  `subprocess` is re-exported from `adapters/__init__.py` so tests can monkeypatch it.
+- **Backends** (`src/dms/backend_registry.py`): per-storage placement hints for data jobs.
+  GPFS/WekaFS templates carry mount/filesystem/network hints; `BackendAdapterRegistry` resolves
+  the DM worker pool per storage mapping, defaulting to agent-inventory selection.
 - **Agent** (`src/dms/agent.py`, `agent_daemon.py`): a node-side daemon (Kubernetes DaemonSet) that
   probes storage mounts, tools, credentials, and identity, then POSTs `AgentReport`s. The DM worker
   checks **report freshness** (`agent_report_stale_seconds`) as a preflight gate before running data
@@ -109,7 +108,9 @@ adapters. State is the source of truth; every process is a restartable loop that
 
 ### Conventions
 - Submodules that grow large are split into a `_base.py` (shared imports/helpers, re-exported via
-  `from ._base import *`) plus topic mixins/files (`planner`, `workers`). Follow this when extending.
+  `from ._base import *`) plus topic files (`workers`, `repositories`). Follow this when extending;
+  conversely, a package whose split no longer earns its keep gets flattened back into one module
+  (`planner.py` and `backend_registry.py` are exactly that).
 - Workers are designed to **fail closed**: half-configured LDAP yields a per-request
   `ldap_not_configured` rejection rather than crashing the loop; the `dm-worker` sets `umask 0o077`
   so artifact metadata is owner-only.

@@ -224,9 +224,8 @@ class StorageMappingSanityService:
                     )
                 else:
                     checks.append(_passed("csi_driver_matches"))
-        dm_readiness, dm_candidates = _role_readiness(
+        dm_readiness, dm_candidates = _dm_readiness(
             inventory=inventory,
-            role=WorkerRole.DM.value,
             cluster_name=self.settings.control_cluster_name,
             storage_name=storage_name,
             csi_driver=expected_driver,
@@ -356,10 +355,9 @@ def _find_storage_class(
     return None
 
 
-def _role_readiness(
+def _dm_readiness(
     *,
     inventory: dict[str, Any],
-    role: str,
     cluster_name: str | None,
     storage_name: str,
     csi_driver: str | None,
@@ -368,7 +366,10 @@ def _role_readiness(
     if not cluster_name:
         return "Unknown", []
     role_cluster = (
-        inventory.get("worker_roles", {}).get(role, {}).get(cluster_name) or {}
+        inventory.get("worker_roles", {})
+        .get(WorkerRole.DM.value, {})
+        .get(cluster_name)
+        or {}
     )
     candidates: list[dict[str, Any]] = list(
         role_cluster.get("mounts_by_storage_name", {}).get(storage_name, [])

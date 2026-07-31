@@ -24,10 +24,6 @@ class KubernetesReadOnlyInventoryAdapter(Protocol):
     def read_inventory(self) -> dict[str, Any]: ...
 
 
-class DataManagementStorageAdapter(Protocol):
-    def worker_pool(self, storage_name: str) -> dict[str, Any]: ...
-
-
 @dataclass(frozen=True)
 class IdentityLookupResult:
     provider: str
@@ -57,25 +53,3 @@ class IdentityLookupConfigurationError(RuntimeError):
 class IdentityLookupReadError(RuntimeError):
     pass
 
-
-class VolcanoAdapter(Protocol):
-    def verify_scan_preflight(
-        self, plan: dict[str, Any], data_job: dict[str, Any], preflight: dict[str, Any]
-    ) -> dict[str, Any]: ...
-
-    def verify_data_preflight(
-        self,
-        plan: dict[str, Any],
-        data_job: dict[str, Any],
-        preflight: dict[str, Any],
-        *,
-        phase: str,
-    ) -> dict[str, Any]: ...
-
-    def create_job(
-        self, plan: dict[str, Any], data_job: dict[str, Any]
-    ) -> AdapterResult: ...
-
-    def get_job(self, job_ref: str) -> dict[str, Any]: ...
-
-    def terminate_job(self, job_ref: str) -> AdapterResult: ...

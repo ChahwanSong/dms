@@ -102,8 +102,6 @@ def _maybe_recompute_readiness_on_ingest(
     settings = getattr(services, "settings", None)
     if settings is None or not getattr(settings, "sanity_event_recompute_enabled", False):
         return
-    if getattr(report.worker_role, "value", report.worker_role) != "DM":
-        return
     try:
         from ...sanity_reconciler import build_sanity_service, recompute_storage_readiness
 

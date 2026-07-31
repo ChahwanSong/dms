@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import pytest
 
-from dms.backend_registry import BackendAdapterRegistry
-from dms.backends.gpfs import GPFS_BACKEND_TYPE, GPFS_CSI_DRIVER
-from dms.backends.weka import WEKAFS_BACKEND_TYPE, WEKAFS_CSI_DRIVER
+from dms.backend_registry import (
+    GPFS_BACKEND_TYPE,
+    GPFS_CSI_DRIVER,
+    WEKAFS_BACKEND_TYPE,
+    WEKAFS_CSI_DRIVER,
+    BackendAdapterRegistry,
+)
 from dms.db import Database
 from dms.domain import OperationKind, ResourceKind, StorageMappingInput
 from dms.migrations import migrate_all
