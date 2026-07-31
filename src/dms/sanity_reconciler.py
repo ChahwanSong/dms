@@ -25,6 +25,7 @@ reconciler via the heartbeat-driven liveness probe.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -114,29 +115,36 @@ def reconcile_once(
     changed. One storage's failure is isolated so it never kills the whole sweep."""
     mappings = repository.list_storage_mappings(limit=10000)
     changed = 0
-    for mapping in mappings:
-        storage_name = mapping.get("storage_name")
-        if not storage_name:
-            continue
-        try:
-            did_change, _ = recompute_storage_readiness(
-                repository,
-                sanity_service,
-                storage_name,
-                actor=actor,
-                observability=observability,
-            )
-            if did_change:
-                changed += 1
-        except Exception as exc:  # noqa: BLE001 - per-storage fault isolation
-            if observability is not None:
-                observability.safe_record_event(
-                    component="sanity-reconciler",
-                    severity="WARN",
-                    event_type="storage_mapping_readiness_reconcile_failed",
-                    message=f"readiness reconcile failed for {storage_name}",
-                    payload={"storage_name": storage_name, "error": str(exc)},
+    # One fleet read for the whole sweep: without this, every mapping triggered its own
+    # full Kubernetes inventory read (3 kubectl/ssh calls per configured cluster) and its
+    # own agent-report scan, so the sweep cost grew with the number of mappings for data
+    # that cannot change mid-sweep.
+    inventory = getattr(sanity_service, "inventory_service", None)
+    sweep = inventory.snapshot() if hasattr(inventory, "snapshot") else nullcontext()
+    with sweep:
+        for mapping in mappings:
+            storage_name = mapping.get("storage_name")
+            if not storage_name:
+                continue
+            try:
+                did_change, _ = recompute_storage_readiness(
+                    repository,
+                    sanity_service,
+                    storage_name,
+                    actor=actor,
+                    observability=observability,
                 )
+                if did_change:
+                    changed += 1
+            except Exception as exc:  # noqa: BLE001 - per-storage fault isolation
+                if observability is not None:
+                    observability.safe_record_event(
+                        component="sanity-reconciler",
+                        severity="WARN",
+                        event_type="storage_mapping_readiness_reconcile_failed",
+                        message=f"readiness reconcile failed for {storage_name}",
+                        payload={"storage_name": storage_name, "error": str(exc)},
+                    )
     _write_heartbeat(heartbeat_path, total=len(mappings), changed=changed)
     return changed
 

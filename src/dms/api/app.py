@@ -5,7 +5,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from ..adapters import (
     IdentityLookupAdapter,
@@ -17,8 +18,9 @@ from ..auth import AuthVerifier, AuthorizationPolicy
 from ..config import Settings
 from ..db import Database, close_all_pools
 from ..migrations import migrate_all
+from ..adapters import DataManagementRuntimeError
 from ..query import OperationalQueryService
-from ..repositories import DmsRepository, ObservabilityRepository
+from ..repositories import DmsRepository, ObservabilityRepository, RecordNotFound
 from ._services import AppServices
 from .deps import identity_lookup_from_settings
 from .routers.agent import agent_router
@@ -91,6 +93,24 @@ def create_app(
 
     app = FastAPI(title="DMS", version="0.1.0", lifespan=lifespan)
     app.state.services = services
+
+    # Addressing a record by an id that does not exist is a client error, not a server
+    # fault. The repositories raise RecordNotFound (a KeyError subclass) for it; without
+    # this handler it escaped every read/action route that takes an id and surfaced as a
+    # bare 500 with no detail. A plain KeyError from a handler bug is NOT caught here.
+    @app.exception_handler(RecordNotFound)
+    def _record_not_found(_request: Request, exc: RecordNotFound) -> JSONResponse:
+        detail = exc.args[0] if exc.args else "not found"
+        return JSONResponse(status_code=404, content={"detail": str(detail)})
+
+    # A worker that could not finish a side effect carries an actionable message (e.g.
+    # "the MPI job may still be running -- retry cancel or terminate manually"). 502
+    # keeps it distinguishable from a client mistake while preserving that message.
+    @app.exception_handler(DataManagementRuntimeError)
+    def _dm_runtime_error(
+        _request: Request, exc: DataManagementRuntimeError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
     app.include_router(storage_mappings_router())
     app.include_router(data_management_router())
     app.include_router(identity_denylist_router())

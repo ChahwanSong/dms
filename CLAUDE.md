@@ -96,12 +96,12 @@ adapters. State is the source of truth; every process is a restartable loop that
   kept portable across SQLite and PostgreSQL (`src/dms/db.py` `Database` wrapper).
 - **Adapters** (`src/dms/adapters/`): the only layer that touches the outside world — `identity`
   (LDAP), `inventory` (read-only `kubectl`/`ssh-kubectl` StorageClass/CSI/node reads), `volcano`
-  (Volcano Job scheduling). Each has a `*Live*`/real implementation and a `Stub*` counterpart used
+  (Volcano Job scheduling). Live and stub implementations are paired where a test needs
   in tests and default CLI wiring. `subprocess` is re-exported from `adapters/__init__.py` so tests
   can monkeypatch it.
 - **Backends** (`src/dms/backends/` + `backend_registry.py`): per-storage-type behavior for
   `weka` and `gpfs`. `BackendAdapterRegistry` resolves the right DM adapter per resource from
-  storage mappings, with `enforce_supported_backends` gating.
+  storage mappings.
 - **Agent** (`src/dms/agent.py`, `agent_daemon.py`): a node-side daemon (Kubernetes DaemonSet) that
   probes storage mounts, tools, credentials, and identity, then POSTs `AgentReport`s. The DM worker
   checks **report freshness** (`agent_report_stale_seconds`) as a preflight gate before running data

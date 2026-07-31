@@ -134,7 +134,7 @@ class StorageMappingsMixin:
                 (storage_name,),
             ).fetchone()
             if not existing:
-                raise KeyError(f"storage mapping not found: {storage_name}")
+                raise RecordNotFound(f"storage mapping not found: {storage_name}")
             before = self._decode_storage_mapping(row_to_dict(existing))
             connection.execute(
                 """
@@ -233,7 +233,7 @@ class StorageMappingsMixin:
                 (storage_name,),
             ).fetchone()
             if not existing:
-                raise KeyError(f"storage mapping not found: {storage_name}")
+                raise RecordNotFound(f"storage mapping not found: {storage_name}")
             before = self._decode_storage_mapping(row_to_dict(existing))
             connection.execute(
                 "DELETE FROM storage_mappings WHERE storage_name = ?",

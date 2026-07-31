@@ -83,6 +83,8 @@ class DataJobsMixin:
                 "SELECT * FROM data_jobs WHERE job_id = ?",
                 (job_id,),
             ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"data job not found: {job_id}")
         return self._decode_data_job(row_to_dict(row))
 
 

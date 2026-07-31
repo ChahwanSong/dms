@@ -73,6 +73,14 @@ ATTENTION_RUN_STATES = (
 )
 
 
+class RecordNotFound(KeyError):
+    """A record addressed by id does not exist.
+
+    Subclasses KeyError so existing ``except KeyError`` handlers keep working, but
+    gives the API a type it can map to 404 without swallowing genuine KeyErrors from
+    a bug in the handler itself."""
+
+
 class SchedulingBlocked(RuntimeError):
     pass
 

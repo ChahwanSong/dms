@@ -1355,8 +1355,14 @@ def _scan_candidate_rejection_reason(
     posix_username: str,
     privileged: bool = False,
 ) -> str | None:
-    if not _mount_ready(report.get("mounts") or [], storage_name):
-        return "missing_target_mount"
+    # drm MUTATES the target; dscan only reads it.
+    needs_write = tool == "drm"
+    if not _mount_ready(
+        report.get("mounts") or [], storage_name, require_writable=needs_write
+    ):
+        return "target_mount_read_only" if needs_write and _mount_ready(
+            report.get("mounts") or [], storage_name
+        ) else "missing_target_mount"
     if not _tool_ready(report.get("tools") or [], tool):
         return f"missing_{tool}_tool"
     if not _any_ready(
@@ -1611,8 +1617,15 @@ def _sync_dsync_candidate_rejection_reason(
 ) -> str | None:
     if not _mount_ready(report.get("mounts") or [], source_storage):
         return "missing_source_mount"
-    if not _mount_ready(report.get("mounts") or [], destination_storage):
-        return "missing_destination_mount"
+    # the destination is written to -- a read-only mount there fails at dsync time
+    if not _mount_ready(
+        report.get("mounts") or [], destination_storage, require_writable=True
+    ):
+        return (
+            "destination_mount_read_only"
+            if _mount_ready(report.get("mounts") or [], destination_storage)
+            else "missing_destination_mount"
+        )
     if not _tool_ready(report.get("tools") or [], "dsync"):
         return "missing_dsync_tool"
     if not _any_ready(
@@ -1628,15 +1641,29 @@ def _sync_dsync_candidate_rejection_reason(
     return None
 
 
-def _mount_ready(mounts: list[dict[str, Any]], storage_name: str) -> bool:
-    return _ready_mount(mounts, storage_name) is not None
+def _mount_ready(
+    mounts: list[dict[str, Any]], storage_name: str, *, require_writable: bool = False
+) -> bool:
+    return _ready_mount(mounts, storage_name, require_writable=require_writable) is not None
 
 
 def _ready_mount(
-    mounts: list[dict[str, Any]], storage_name: str
+    mounts: list[dict[str, Any]], storage_name: str, *, require_writable: bool = False
 ) -> dict[str, Any] | None:
+    """First mount on this node that can serve ``storage_name``.
+
+    ``status`` is computed by the agent purely from "exists and is a mountpoint"
+    (agent_daemon.probe_mounts), so a read-only mount reports Ready. For a MUTATING
+    target (sync destination, rm target) that is not enough: pass
+    ``require_writable=True`` and an explicitly non-writable mount is skipped.
+
+    Only an explicit ``writable is False`` disqualifies. A mount that does not report
+    the field at all (an agent older than the probe) is still accepted, so upgrading
+    the control plane ahead of the fleet cannot strand every write job."""
     for mount in mounts:
         if mount.get("storage_name") != storage_name:
+            continue
+        if require_writable and mount.get("writable") is False:
             continue
         if mount.get("status") == "Ready":
             return mount
@@ -2110,8 +2137,17 @@ def _artifact_requires_local_parse(artifact_uri: str | None) -> bool:
     return urlparse(artifact_uri).scheme == "file"
 
 
-def _summary_fingerprint(summary: dict[str, Any]) -> str:
-    payload = json.dumps(summary or {}, sort_keys=True, separators=(",", ":"))
+def _summary_fingerprint(summary: dict[str, Any]) -> str | None:
+    """Bind a confirm to the preview evidence the operator actually saw.
+
+    Returns None when there is NO evidence. Hashing an empty summary would produce
+    sha256 of "{}" -- a constant anyone can compute without ever reading the preview,
+    which would let a destructive sync/rm be confirmed against evidence that was never
+    produced (unreadable artifact, adapter that reported no summary). Callers must treat
+    a missing fingerprint as "not confirmable", not as "matches anything"."""
+    if not summary:
+        return None
+    payload = json.dumps(summary, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -2164,8 +2200,18 @@ def confirm_data_job(
             raise ValueError("data job preview has expired")
         preview = (job.get("result_summary") or {}).get("preview") or {}
         expected_hash = preview.get("fingerprint")
-        if require_preview_fingerprint and not preview_observed_hash:
-            raise ValueError("preview_observed_hash is required")
+        if require_preview_fingerprint:
+            if not preview_observed_hash:
+                raise ValueError("preview_observed_hash is required")
+            # Fail closed when the preview produced no fingerprint. Previously the
+            # comparison below was skipped entirely for a falsy expected_hash, so a job
+            # whose preview yielded no evidence could be confirmed with ANY value --
+            # exactly the case the fingerprint exists to prevent.
+            if not expected_hash:
+                raise ValueError(
+                    "preview produced no fingerprint evidence; re-run the preview "
+                    "before confirming"
+                )
         if (
             preview_observed_hash
             and expected_hash

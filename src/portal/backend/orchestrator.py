@@ -371,7 +371,7 @@ class BackupOrchestrator:
         if slots:
             ready = await self._db.list_requests(bid, state="approved", limit=slots)
             for job in ready:
-                await self._confirm_one(job, actor)
+                await self._confirm_one(job, batch, actor)
             running = await self._db.requests_in_states(bid, ["running"])
 
         # 2) poll running jobs to terminal.
@@ -394,7 +394,9 @@ class BackupOrchestrator:
                     job["id"], state="failed", error=_reason(dj)
                 )
 
-    async def _confirm_one(self, job: dict[str, Any], actor: str) -> None:
+    async def _confirm_one(
+        self, job: dict[str, Any], batch: dict[str, Any], actor: str
+    ) -> None:
         if not job.get("dms_job_id") or not job.get("fingerprint"):
             await self._db.update_request(
                 job["id"], state="failed", error="missing job_id/fingerprint"
@@ -407,7 +409,11 @@ class BackupOrchestrator:
                 {
                     "confirm": True,
                     "preview_observed_hash": job["fingerprint"],
-                    "requester_id": "root",
+                    # MUST match the requester the submit used (_submit_one above):
+                    # DMS rejects a confirm whose requester_id differs from the data
+                    # job's with a 409. Hardcoding "root" here meant every approved
+                    # item failed whenever PORTAL_BACKUP_REQUESTER was not root.
+                    "requester_id": batch.get("requester_id") or "root",
                 },
                 actor=actor,
             )

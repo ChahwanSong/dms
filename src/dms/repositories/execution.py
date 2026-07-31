@@ -935,7 +935,7 @@ class ExecutionMixin:
             (plan_id,),
         ).fetchone()
         if not row:
-            raise KeyError(f"plan not found: {plan_id}")
+            raise RecordNotFound(f"plan not found: {plan_id}")
         return row_to_dict(row)
 
 
@@ -945,7 +945,7 @@ class ExecutionMixin:
             (run_id,),
         ).fetchone()
         if not row:
-            raise KeyError(f"run not found: {run_id}")
+            raise RecordNotFound(f"run not found: {run_id}")
         return row_to_dict(row)
 
 

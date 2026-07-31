@@ -315,7 +315,7 @@ class RequestsMixin:
             (request_id,),
         ).fetchone()
         if not row:
-            raise KeyError(f"request not found: {request_id}")
+            raise RecordNotFound(f"request not found: {request_id}")
         return row_to_dict(row)
 
 

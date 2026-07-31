@@ -78,8 +78,14 @@ CURL+=(-H "Authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 | `managed_root` | 파일시스템 **필수** | DMS가 관리하는 루트 디렉토리. **반드시 `mount_path` 하위**. 생략 시 등록이 `422`로 거부된다. DM의 `DMS_DM_PATH_BASE=managed_root` 모드가 이 값을 경계/기준점으로 쓴다 |
 | `filesystem_name` | **gpfs 필수** / wekafs 선택 | 대상 filesystem(device) 이름(예: `gpfs0`, `weka0`). 생략 시 GPFS는 `422`, WEKA는 `storage_name`으로 폴백. CephFS는 해당 없음 |
 | `csi_driver` | 선택(CSI는 사실상 필수) | 이 스토리지의 PVC를 provisioning하는 CSI 드라이버. live StorageClass의 provisioner와 **일치**해야 하며 불일치 시 sanity `csi_driver_mismatch`. 생략 시 `csi_driver_matches` 검사에서 제외 |
-| `weka_profile` | 선택(weka) | `weka --profile <name>` 옵션(멀티 클러스터) |
-| `weka_credentials` | 선택(weka) | `{username, password, org}`. **응답에서 `password`만 redaction**되며, 재전송 시 생략하면 DMS가 기존 값을 merge한다 |
+
+> **RM 전용이었던 키는 더 이상 읽히지 않는다.** `weka_credentials`·`weka_profile`·
+> `command_runner`·`command_timeout_seconds`·`fileset_name_template`·`quota_scope`·
+> `rm_worker_nodes`·`ssh_host`는 파일시스템 프로비저닝/쿼터(RM)를 위한 것이었고, 그 기능이
+> 제거되면서 어떤 코드도 참조하지 않는다. 새 매핑에는 넣지 않는다. 기존 매핑에 남아 있어도
+> 무해하지만, `weka_credentials`는 쓰이지 않는 자격증명이 DB에 남는 것이므로
+> [redeploy.md §4.3](../../install/redeploy.md)으로 정리를 권장한다(응답에서는 계속
+> `password`만 redaction된다).
 
 > **파일시스템 매핑 vs CSI 매핑.** `cephfs`/`gpfs`/`wekafs`는 **호스트 마운트**를 가진 파일시스템 매핑이라
 > `mount_path` + `managed_root`가 필수이고, 노드 에이전트의 마운트 증거로 DM readiness가 선다.

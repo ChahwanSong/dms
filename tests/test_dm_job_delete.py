@@ -17,7 +17,7 @@ from dms.db import Database
 from dms.domain import DataJobState, StorageMappingInput
 from dms.migrations import migrate_all
 from dms.planner import Planner
-from dms.repositories import DmsRepository, ObservabilityRepository
+from dms.repositories import DmsRepository, ObservabilityRepository, RecordNotFound
 
 
 HEADERS = {"x-dms-actor": "api-client"}
@@ -106,8 +106,11 @@ def test_delete_terminal_job_removes_it_everywhere(harness):
     assert response.status_code == 200
     assert response.json() == {"job_id": job_id, "status": "deleted"}
 
-    # Row is gone from the store and from list_data_jobs().
-    assert repo.get_data_job(job_id) == {}
+    # Row is gone from the store and from list_data_jobs(). Addressing it by id now
+    # raises RecordNotFound (which the API maps to 404) rather than returning an empty
+    # dict that callers would go on to subscript.
+    with pytest.raises(RecordNotFound):
+        repo.get_data_job(job_id)
     assert all(job["job_id"] != job_id for job in repo.list_data_jobs())
 
     # ...and therefore no longer reported by action_required().

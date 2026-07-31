@@ -194,7 +194,9 @@ def storage_mappings_router() -> APIRouter:
                 status_code=409,
                 detail=f"storage mapping has active work: {conflict}",
             )
-        deleted = services.repository.delete_storage_mapping(storage_name, actor)
+        deleted = redact_storage_mapping(
+            services.repository.delete_storage_mapping(storage_name, actor)
+        )
         sync_agent_storages_configmap(services.settings, storage_name, None)
         services.observability.safe_record_event(
             component="storage-mapping",

@@ -233,9 +233,12 @@ export default function JobDetailModal(props: Props) {
     live.push({ label: "artifact", value: detail.artifact_uri, mono: true, span: true });
   if (detail?.log_uri)
     live.push({ label: "log_uri", value: detail.log_uri, mono: true, span: true });
+  // data_jobs carries created_at / updated_at only — DMS never emits started_at or
+  // finished_at for a data job, so those rows could never render. updated_at is the
+  // last state transition, which for a terminal job IS when it finished.
   if (detail?.created_at) live.push({ label: "생성", value: fmtTime(detail.created_at) });
-  if (detail?.started_at) live.push({ label: "시작", value: fmtTime(detail.started_at) });
-  if (detail?.finished_at) live.push({ label: "종료", value: fmtTime(detail.finished_at) });
+  if (detail?.updated_at)
+    live.push({ label: "최종 갱신", value: fmtTime(detail.updated_at) });
 
   const preflight = asRecord(detail?.preflight_result);
   const preflightStatus =

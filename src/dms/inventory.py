@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 from .adapters import KubernetesReadOnlyInventoryAdapter
@@ -20,16 +22,46 @@ class EffectiveInventoryService:
     kubernetes_inventory: KubernetesReadOnlyInventoryAdapter | None
     settings: Settings
 
+    # Set by snapshot() so one reconciler sweep reads the fleet ONCE instead of once
+    # per storage mapping. None = always recompute (the API path).
+    _snapshot: dict[str, Any] | None = field(default=None, init=False, repr=False)
+
+    @contextmanager
+    def snapshot(self) -> "Iterator[EffectiveInventoryService]":
+        """Freeze the effective inventory for the duration of the block.
+
+        `reconcile_once` re-checks every mapping in a loop, and each check called
+        `effective_inventory()` again — N mappings meant N full Kubernetes reads (3
+        kubectl/ssh calls per configured cluster each) and N whole-table agent-report
+        sweeps. Nothing in one sweep can change the fleet's inventory, so it is read
+        once and shared. The API path does NOT use this: a registration check must see
+        the live cluster."""
+        previous = self._snapshot
+        self._snapshot = None
+        try:
+            self._snapshot = self.effective_inventory()
+            yield self
+        finally:
+            self._snapshot = previous
+
     def effective_inventory(self) -> dict[str, Any]:
+        if self._snapshot is not None:
+            return self._snapshot
         k8s_inventory = (
             self.kubernetes_inventory.read_inventory()
             if self.kubernetes_inventory is not None
             else {"clusters": {}}
         )
+        # latest_per_node reads agent_node_current (one row per node, freshness computed
+        # on read) instead of the agent_reports HISTORY table. The history path both ran
+        # a whole-table Fresh->Stale UPDATE sweep and capped at N rows, so on a fleet
+        # reporting every minute the newest N rows could all belong to a handful of
+        # chatty nodes and silently hide the rest. Every other consumer (the DM worker's
+        # freshness gate, the action-required agent check) already reads this table.
         reports = self.repository.list_agent_reports(
             stale_seconds=self.settings.agent_report_stale_seconds,
-            update_stale=True,
-            limit=1000,
+            latest_per_node=True,
+            limit=10000,
         )
         clusters = {
             name: {
@@ -246,9 +278,29 @@ class StorageMappingSanityService:
                         "no fresh Agent reports are available",
                     )
                 )
+        # The `inventory` axis answers "does DMS have inventory evidence FOR THIS
+        # MAPPING", so it is scoped to the mapping -- it used to be a fleet-wide fresh
+        # agent-report count, identical for every mapping in one sweep, which meant one
+        # fresh report from one unrelated node in one unrelated cluster flipped it Ready
+        # for everything and it could never read anything but Ready/Unknown.
+        #   CSI/agentless: the cluster inventory IS the evidence -- the StorageClass was
+        #     found in the mapping's cluster.
+        #   filesystem: fresh node-agent reports in the cluster the mapping's agents
+        #     report from (its own cluster when pinned, else the control cluster).
+        if is_csi:
+            inventory_readiness = "Ready" if storage_class is not None else "Missing"
+        else:
+            scoped = (
+                inventory.get("clusters", {}).get(
+                    cluster_name or self.settings.control_cluster_name
+                )
+                or {}
+            )
+            scoped_fresh = len(scoped.get("agent_reports", {}).get("fresh", []))
+            inventory_readiness = "Ready" if scoped_fresh else "Unknown"
         readiness = {
             "data_management": dm_readiness,
-            "inventory": "Ready" if fresh_reports else "Unknown",
+            "inventory": inventory_readiness,
         }
         # CSI/k8s mappings target agentless managed clusters that legitimately run no DMS
         # node agent -- they are validated by the read-only cluster inventory above
