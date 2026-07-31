@@ -443,11 +443,16 @@ migration을 검증한다.
 
 순서: drain → backup → migrate → Deployment image 교체 → recovery check → resume → verify.
 
-먼저 **`install/kubernetes/control-plane.yaml`의 image 값을 새 ref로 바꾼다** — `dms-migrate` Job의
-`image:`와 Deployment(`dms-api`·`dms-planner`·`dms-dm-worker`)의 `image:`.
-(그래야 다음 `apply`에서 되돌아가지 않는다. 세 Deployment는 모두 **동일한 plain `dms` 이미지**를 쓴다.
-`dms-retention`·`dms-sanity-reconciler`도 같은 이미지를 쓰므로 별도 매니페스트에서 함께 올린다 —
-누락 방지는 [`../install/redeploy.md`](../install/redeploy.md) §2.1의 `grep /dms:`.)
+먼저 **매니페스트의 image 값을 새 ref로 바꾼다** — `control-plane.yaml`의 `dms-migrate` Job과
+Deployment(`dms-api`·`dms-planner`·`dms-dm-worker`), 그리고 별도 매니페스트인
+`dms-api-internal.yaml`·`retention.yaml`·`sanity-reconciler.yaml`. 그래야 다음 `apply`에서
+되돌아가지 않는다.
+
+> **plain `dms` 이미지를 쓰는 Deployment는 6개다** — `dms-api`, `dms-api-internal`, `dms-planner`,
+> `dms-dm-worker`, `dms-retention`, `dms-sanity-reconciler`. 하나라도 빠뜨리면 스테일 이미지로
+> 남는다. 특히 `dms-api-internal`은 **노드 agent와 포탈 BFF가 실제로 호출하는 평면**이라 누락 시
+> 증상이 늦게 드러난다. 배포 전 실제 대상을 확인한다:
+> `kubectl -n dms get deploy -o wide | grep -E "/dms:"`
 
 ```bash
 NEW_DMS_IMAGE="registry.example.internal/dms:vNEXT"
@@ -465,13 +470,27 @@ kubectl -n dms delete job dms-migrate --ignore-not-found=true
 kubectl apply -f install/kubernetes/control-plane.yaml
 kubectl -n dms wait --for=condition=complete job/dms-migrate --timeout=180s
 
-# ④ Deployment image 교체 (dm-worker 누락 주의 — 빠뜨리면 스테일 이미지로 남는다)
-kubectl -n dms set image deploy/dms-api        api="$NEW_DMS_IMAGE"
-kubectl -n dms set image deploy/dms-planner    planner="$NEW_DMS_IMAGE"
-kubectl -n dms set image deploy/dms-dm-worker  dm-worker="$NEW_DMS_IMAGE"
-for d in dms-api dms-planner dms-dm-worker; do
+# ④ Deployment image 교체 — plain dms 이미지를 쓰는 6개 전부
+kubectl -n dms set image deploy/dms-api               api="$NEW_DMS_IMAGE"
+kubectl -n dms set image deploy/dms-api-internal      api="$NEW_DMS_IMAGE"
+kubectl -n dms set image deploy/dms-planner           planner="$NEW_DMS_IMAGE"
+kubectl -n dms set image deploy/dms-dm-worker         dm-worker="$NEW_DMS_IMAGE"
+kubectl -n dms set image deploy/dms-retention         retention="$NEW_DMS_IMAGE"
+kubectl -n dms set image deploy/dms-sanity-reconciler sanity-reconciler="$NEW_DMS_IMAGE"
+for d in dms-api dms-api-internal dms-planner dms-dm-worker dms-retention dms-sanity-reconciler; do
   kubectl -n dms rollout status deploy/$d --timeout=180s
 done
+
+# ④-1 실제로 모두 교체됐는지 확인 — `rollout status`는 옛 파드가 가용성을 채우고 있으면
+#      성공이라고 보고할 수 있다. 파드 이미지와 남은 ReplicaSet을 직접 본다.
+kubectl -n dms get pods -o json | python3 -c "
+import json,sys
+bad=[(p['metadata']['name'], c['image'])
+     for p in json.load(sys.stdin)['items'] if p['status'].get('phase')=='Running'
+     for c in p['spec']['containers'] + p['spec'].get('initContainers',[])
+     if '/dms:' in c['image'] and '$NEW_DMS_IMAGE'.split(':')[-1] not in c['image']]
+print('구버전 이미지 파드:', bad or '없음')"
+kubectl -n dms get rs -o custom-columns='NAME:.metadata.name,DESIRED:.spec.replicas,IMAGE:.spec.template.spec.containers[0].image' | awk '$2>0' 
 
 # ⑤ recovery check → resume → verify
 install/scripts/dms-startup-recovery-check.sh
@@ -489,12 +508,10 @@ install/scripts/verify-install.sh
 새 image rollout 후 문제가 있으면 직전 image로 되돌린다(교체한 Deployment 모두).
 
 ```bash
-for d in dms-api dms-planner dms-dm-worker; do
-  kubectl -n dms rollout undo deploy/$d
-done
-for d in dms-api dms-planner dms-dm-worker; do
-  kubectl -n dms rollout status deploy/$d --timeout=180s
-done
+# §9 ④에서 교체한 것과 반드시 같은 목록이어야 한다 — 일부만 되돌리면 혼합 버전 상태가 된다.
+ROLL="dms-api dms-api-internal dms-planner dms-dm-worker dms-retention dms-sanity-reconciler"
+for d in $ROLL; do kubectl -n dms rollout undo deploy/$d; done
+for d in $ROLL; do kubectl -n dms rollout status deploy/$d --timeout=180s; done
 ```
 
 - **schema migration이 이미 실행된 뒤라면 image rollback만으로는 부족할 수 있다.** schema를 바꾸는
@@ -592,6 +609,13 @@ curl_dms -X DELETE \
 curl_dms "$DMS_API_URL/api/v1/data-management/identity-denylist" | jq
 ```
 
+여러 건(예: 퇴사자 계정)을 한꺼번에 넣을 때는 JSON 파일로 일괄 적용한다 — 형식은
+[`install/config/identity-denylist.example.json`](../install/config/identity-denylist.example.json):
+
+```bash
+install/scripts/apply-identity-denylist.sh <identity-denylist.json>
+```
+
 privileged root 경로(`DMS_DM_ALLOW_ROOT_REQUESTER=true`)는 LDAP/uid 하한을 우회하지만 **mTLS-verified
 operator만** 쓸 수 있고 `DMS_DM_PRIVILEGED_REQUESTERS`/`_OPERATORS`/`_SCOPES`로 좁혀 검토한다
 ([dms-04](../install/dms-04-dm-jobs.md) §9).
@@ -610,7 +634,7 @@ operator만** 쓸 수 있고 `DMS_DM_PRIVILEGED_REQUESTERS`/`_OPERATORS`/`_SCOPE
 - **agent report retention은 이력(`agent_reports`)만 prune한다.** 노드별 최신 1행 테이블
   (`agent_node_current`)은 자동으로 지워지지 않으므로, 노드를 영구히 제거했으면 그 행을 수동으로
   삭제해야 대시보드에서 `Stale`로 남지 않는다(SQL 예시는
-  [`../install/redeploy.md`](../install/redeploy.md) §4.2).
+  [`../install/migration-rm-removal.md`](../install/migration-rm-removal.md) §2).
 
 ---
 

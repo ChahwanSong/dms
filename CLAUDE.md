@@ -148,10 +148,13 @@ application that consumes DMS over HTTP only.
   request/job state), not blocking calls.
 
 ### Role model & interface separation
-The portal has two distinct interfaces, selected by **role**, and login method maps directly to role:
-- **`operator`** — signs in with an **id/password** (operator-only; multiple operator accounts via
-  `PORTAL_OPERATOR_USERS`, `user:pw,user2:pw2`). Gets the operator/admin console.
-- **`user`** — signs in with a **company AD account** (currently a dummy stand-in). Gets the
+The portal has two distinct interfaces, selected by **role**. Both roles log in with an id/password,
+so the **account store decides the role**, never the login method (`backend/security.py`):
+- **`operator`** — matched in `portal.operator_users` (multiple operator accounts, seeded from
+  `PORTAL_OPERATOR_USERS`, `user:pw,user2:pw2`; created/reset with `PORTAL_ADMIN_TOKEN`). Gets the
+  operator/admin console.
+- **`user`** — matched in `portal.user_accounts`; the id is the company-mail local part and signup /
+  password reset is self-service via a 6-digit code mailed to `<id>@PORTAL_EMAIL_DOMAIN`. Gets the
   end-user interface.
 
 Role lives in the signed session cookie (`request.session["user"]`) and is the single source of
@@ -159,7 +162,7 @@ truth, enforced on **both** sides:
 - Backend: `backend/security.py` (`ROLE_*`, `require_role(...)` dependency). Role-scoped routers under
   `backend/routers/` — `user_router` (`/api/user/*`) and `operator_router` (`/api/operator/*`), each
   gated so the other role gets 403. Shared auth in `backend/auth.py` (`/api/auth/login` → operator,
-  `/api/auth/login/ad` → user).
+  `/api/auth/user/login` → user); each login route hard-codes its own role.
 - Frontend: `App.tsx` switches on `user.role` into entirely separate interface trees under
   `frontend/src/interfaces/operator/` and `frontend/src/interfaces/user/`; each calls only its own
   `/api/<role>/*` surface. Shared chrome in `frontend/src/components/`, shared login in `pages/`.

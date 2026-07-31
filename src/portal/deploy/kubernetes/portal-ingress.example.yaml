@@ -14,8 +14,8 @@
 #
 #   Minimal equivalent: just delete `host:` from the single rule (it then becomes
 #   the catch-all). Keeping both rules is more explicit and lets the named host
-#   carry a TLS cert / host-specific annotations. See install/5.dms-portal-setup.md
-#   §5.3 for an in-place `kubectl patch` recipe against an existing Ingress.
+#   carry a TLS cert / host-specific annotations. See install/dms-06-ingress-metallb.md
+#   §5 for an in-place `kubectl patch` recipe against an existing Ingress.
 #
 # Caveat: a hostless (catch-all) rule becomes the default server for THIS ingress
 #   controller, so on a shared controller it also answers unmatched hosts. That's

@@ -21,11 +21,12 @@
 4. **[dms-04-dm-jobs.md](dms-04-dm-jobs.md)** — 데이터 잡(scan/sync/rm) 활성화 *(DM 사용 시)*
    (Volcano 스케줄링, DM job 이미지 + dms-agent 이미지, `DMS_AGENT_IDENTITY_USERS`, dm-worker, artifact FS)
 5. **[dms-05-configuration.md](dms-05-configuration.md)** — 환경변수 레퍼런스
-6. **[dms-06-ingress-metallb.md](dms-06-ingress-metallb.md)** — (선택) ingress-nginx + MetalLB로
-   서비스 노출. bare-metal에서 `type: LoadBalancer`를 쓰려면 필요하며, 포탈/DMS API를 IP·호스트명
-   하나로 라우팅한다. IP 풀 선정(충돌 방지)과 IP 접속 시 404 함정을 다룬다.
+6. **[dms-06-ingress-metallb.md](dms-06-ingress-metallb.md)** — ingress-nginx + MetalLB로 서비스 노출.
+   **운영 mTLS 프로필은 신뢰하는 종단 ingress를 전제**하므로 dms-02 §7(Ingress 배포) 전에 끝나 있어야
+   한다. bare-metal에서 `type: LoadBalancer`를 쓰려면 MetalLB가 필요하다. IP 풀 선정(충돌 방지)과
+   IP 접속 시 404 함정을 다룬다.
 
-> DM(4)은 필요할 때만 활성화한다. 최소 설치는 1·2·3·5.
+> DM(4)은 필요할 때만 활성화한다. 최소 설치는 1·2·3·5(+ 외부 노출이 필요하면 6).
 
 ## Portal 설치 (별도)
 
@@ -39,10 +40,8 @@
 - **[redeploy.md](redeploy.md)** — DMS 코어 또는 Portal **소스코드 수정 후 재배포** 빠른 참조
   (이미지 빌드 → rollout, 대상 워크로드·컨테이너명, schema/Secret 주의). 무중단·백업·rollback 포함 정식
   업그레이드는 [../docs/operations-runbook.md](../docs/operations-runbook.md) §8~§10.
-- **RM 제거 릴리스로 올리는 기존 배포**는 [redeploy.md §4](redeploy.md)의 **일회성 정리**를 반드시
-  거친다 — `dms-rm-worker`/`dms-rm-agent` 삭제, 고아 ClusterRole 삭제, 그리고 예전 RM 노드가 대시보드에
-  영구 stale로 남지 않게 하는 **수동 SQL**(`DELETE FROM agent_node_current WHERE worker_role='RM'`).
-  DMS는 이 정리를 자동으로 하지 않는다.
+- RM(Resource Management)이 있던 릴리스에서 올라오는 기존 배포는
+  [migration-rm-removal.md](migration-rm-removal.md)의 **일회성 정리**를 먼저 거친다(신규 설치는 해당 없음).
 
 ---
 
@@ -58,19 +57,13 @@
 
 ---
 
-## 인증 프로필 (요약)
+## 두 가지 전제 (요약)
 
-운영 인증은 **두 평면이 기본**이다. ① **외부**(운영자·포탈) = **mTLS-verified 프로필**: `dms-api`가
-`DMS_REQUIRE_MTLS_HEADER=true` + `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`. 신뢰 ingress가 클라이언트
-인증서를 검증·전달하고 DMS는 **인증서 subject에서 actor를 파생**한다(`mtls:` prefix). 평문
-`x-dms-actor`는 신뢰하지 않으며 `DMS_DEFAULT_ACTOR`는 비워 둔다(설정 시 startup 실패). ② **신뢰 in-cluster
-클라이언트**(노드 에이전트 + 포탈 BFF) = 전용 내부 API **`dms-api-internal`**(mTLS **off** + shared
-token + NetworkPolicy) — 이들이 mTLS로는 `node:{cluster}:{node}`·per-operator `x-dms-actor`를 낼 수 없기 때문. 자세한 건 `dms-05-configuration.md`(§1·§8).
-
-## 스케줄러 (요약)
-
-DM 잡은 **Volcano 네이티브 Job**(`DMS_DM_SCHEDULER_BACKEND=volcano-job`)으로 스케줄된다. Volcano
-하나가 MPI worker를 gang-schedule하므로 **Kubeflow MPI Operator는 필요 없다**.
+- **인증 = 두 평면.** 외부(운영자·포탈)는 mTLS-verified 프로필의 `dms-api`, 신뢰 in-cluster 클라이언트
+  (노드 에이전트 + 포탈 BFF)는 shared-token 내부 API `dms-api-internal`을 쓴다 →
+  [dms-02 §4·§5](dms-02-core.md), [dms-05 §1·§8](dms-05-configuration.md).
+- **스케줄러 = Volcano 네이티브 Job.** Kubeflow MPI Operator는 필요 없다 →
+  [dms-01 §6](dms-01-prerequisites.md), [dms-04 §1](dms-04-dm-jobs.md).
 
 ---
 
@@ -81,8 +74,12 @@ DM 잡은 **Volcano 네이티브 Job**(`DMS_DM_SCHEDULER_BACKEND=volcano-job`)�
   agent + 포탈 BFF, mTLS off + shared token + trusted-clients NetworkPolicy),
   `agent-daemonset.yaml`(DM agent), `volcano-queue-priorityclasses.yaml`,
   `target-cluster-rbac.yaml`(대상 클러스터 **읽기 전용** 인벤토리 RBAC), `dms-api-volcano-rbac.yaml`,
-  `ingress.example.yaml`, `retention.yaml`, `sanity-reconciler.yaml`
+  `ingress.example.yaml`, `retention.yaml`, `sanity-reconciler.yaml`,
+  그리고 dms-06 소관인 `metallb-pool.yaml`·`portal-ingress-testbed.yaml`
 - **`config/`** — `dms-runtime.env.example`, `agent-storages.example.json`, `storage-mappings.example.json`,
   `cluster-kubeconfigs.example.json`, `identity-denylist.example.json`
-- **`docker/`** — `Dockerfile`(dms 코어), `Dockerfile.mpifileutils`(DM 잡 이미지), `Dockerfile.agent`(DM agent 이미지)
-- **`postgresql/init.sql`**, **`scripts/`** (dms-planned-shutdown·dms-resume·verify-install 등)
+- **`docker/`** — `Dockerfile`(dms 코어), `Dockerfile.mpifileutils`(DM 잡 이미지), `Dockerfile.agent`(DM agent 이미지),
+  `build-images.sh`(빌드 래퍼 — 프록시/사내 CA/PUSH 옵션)
+- **`postgresql/init.sql`**, **`scripts/`** — `verify-install.sh`, `create-serviceaccount-kubeconfig.sh`
+  (대상 클러스터 kubeconfig 발급 — dms-03 §3.2), `dms-planned-shutdown.sh`/`dms-resume.sh`/
+  `dms-startup-recovery-check.sh`(런북 §7), `apply-identity-denylist.sh`(denylist 일괄 적용 — 런북 §11.3)

@@ -17,6 +17,21 @@ DMS에 **스토리지 매핑**으로 등록하는 설치 문서다. 매핑은 DM
 > **placeholder 규약.** 아래 값(`registry.example.internal`, `cluster-a`, `/cephfs`,
 > `dc=example,dc=internal`, `node1`…)은 모두 예시다. 실제 환경 값으로 치환한다.
 
+**API 호출 변수(이 문서 전체에서 사용).** 운영 프로필은 mTLS-verified header이므로 operator는 mTLS
+인그레스로 호출하고 **actor는 인증서 subject에서 파생**된다(평문 `x-dms-actor`는 신뢰하지 않음):
+
+```bash
+DMS_API_URL=https://dms.cluster-a.local        # mTLS 인그레스 (NodePort면 --resolve 병행)
+CERTS=/opt/dms-secrets/certs
+DMS_TOKEN=...                                  # dms-02 §3에서 Secret `dms-secrets`에 넣은 값
+CURL_MTLS=(--cert $CERTS/operator.crt --key $CERTS/operator.key --cacert $CERTS/dms-server-ca.crt
+           -H "authorization: Bearer $DMS_TOKEN")   # 토큰은 기본 필수 (shipped dms-secrets)
+```
+
+> **부연(테스트베드/dev 프로필, `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`).** 이땐 인증서 없이 평문 Bearer +
+> `x-dms-actor`로 호출한다(`-H "authorization: Bearer $DMS_TOKEN" -H "x-dms-actor: operator"`). 요청/응답
+> 형태만 빠르게 보고 싶을 때 쓰는 읽기 편의용이며, 운영 경로는 위 mTLS다.
+
 ---
 
 ## 1. 매핑 종류 — 파일시스템 vs CSI
@@ -107,10 +122,7 @@ KUBECONFIG="$KUBECONFIG_OUT" kubectl get storageclass
 KUBECONFIG="$KUBECONFIG_OUT" kubectl get csidrivers
 ```
 
-> - SA 토큰 유효기간은 `DMS_TOKEN_DURATION`(기본 `8760h` = 1년)으로 정한다. **만료 전 재발급**이
->   필요하다.
-> - 스크립트는 kubectl v1.35+에서 제거된 `--certificate-authority-data`를 쓰지 않고
->   `--certificate-authority` + `--embed-certs=true`로 CA를 임베드한다(이미 반영됨).
+> SA 토큰 유효기간은 `DMS_TOKEN_DURATION`(기본 `8760h` = 1년)으로 정한다. **만료 전 재발급**이 필요하다.
 
 ### 3.3 DMS에 kubeconfig 등록 (Secret + ConfigMap 편집)
 
@@ -142,8 +154,10 @@ kubectl -n dms patch secret dms-cluster-kubeconfigs --type merge \
 kubectl -n dms patch configmap dms-runtime-config --type merge -p \
   '{"data":{"DMS_CLUSTER_KUBECONFIGS_JSON":"{\"cluster-a\":\"/etc/dms/kubeconfigs/cluster-a.kubeconfig\",\"cluster-b\":\"/etc/dms/kubeconfigs/cluster-b.kubeconfig\"}"}}'
 
-# 3) ConfigMap/Secret 반영을 위해 재시작
-kubectl -n dms rollout restart deploy/dms-api deploy/dms-planner deploy/dms-dm-worker
+# 3) ConfigMap/Secret 반영을 위해 재시작 (kubeconfig을 쓰는 워크로드 전부)
+kubectl -n dms rollout restart \
+  deploy/dms-api deploy/dms-api-internal deploy/dms-planner deploy/dms-dm-worker \
+  deploy/dms-sanity-reconciler
 ```
 
 > **sanity-reconciler도 같은 secret이 필요하다.** 주기 sweep이 managed 클러스터의 매핑을
@@ -161,8 +175,6 @@ curl -sS "${CURL_MTLS[@]}" "$DMS_API_URL/api/v1/operations/inventory" \
         csi:(.value.csi_drivers|map(.name))}'
 ```
 
-(`CURL_MTLS` / `DMS_API_URL`은 4장에서 정의한다.)
-
 ---
 
 ## 4. 스토리지 매핑 등록
@@ -171,45 +183,27 @@ curl -sS "${CURL_MTLS[@]}" "$DMS_API_URL/api/v1/operations/inventory" \
 **전체 필드/CRUD/제약은** [`docs/api/storage-mappings.md`](../docs/api/storage-mappings.md)에 있다 —
 여기서는 설치에 필요한 최소 커맨드만 싣는다.
 
-**인증(운영 프로필 = mTLS-verified header).** operator는 mTLS 인그레스로 호출하며 **actor는 인증서 subject에서
-파생**된다(평문 `x-dms-actor`는 신뢰하지 않음). 아래 변수를 먼저 잡는다:
+매핑은 **최상위 필드**(`storage_name` · `cluster_name` · `storage_class_name`)와 백엔드별
+**`backend_template`**으로 이루어진다. **sanity는 최상위 `cluster_name`/`storage_class_name`만 읽는다** —
+예시가 `backend_template` 안에도 `cluster_name`을 넣는 것은 WekaFS 워커풀 힌트용 폴백일 뿐이다.
 
-```bash
-DMS_API_URL=https://dms.cluster-a.local        # mTLS 인그레스 (NodePort면 --resolve 병행)
-CERTS=/opt/dms-secrets/certs
-CURL_MTLS=(--cert $CERTS/operator.crt --key $CERTS/operator.key --cacert $CERTS/dms-server-ca.crt
-           -H "authorization: Bearer $DMS_TOKEN")   # 토큰은 기본 필수 (shipped dms-secrets)
-```
+| 필드 | 위치 | 필수 | 설명 |
+|---|---|---|---|
+| `cluster_name` | 최상위 | 필수 | DMS 클러스터 이름(= `DMS_CLUSTER_KUBECONFIGS_JSON`의 키) |
+| `storage_class_name` | 최상위 | **CSI 필수** | 대상 클러스터의 StorageClass 이름. CSI 매핑에서 `cluster_name`과 함께 없으면 sanity가 `csi_mapping_unpinned`로 **Failed** |
+| `backend_type` | template | 필수 | `cephfs` / `wekafs` / `gpfs` / `ceph-csi` / `gpfs-csi` / `weka-csi` |
+| `mount_path` | template | 파일시스템 필수 | 각 노드에 마운트된 절대 경로 |
+| `managed_root` | template | 파일시스템 **필수** | DMS가 관리하는 루트(반드시 `mount_path` 하위). 생략 시 등록 `422` |
+| `filesystem_name` | template | **gpfs 필수** | 대상 device(예 `gpfs0`). WEKA는 선택(생략 시 `storage_name`) |
+| `csi_driver` | template | 선택(CSI는 사실상 필수) | live StorageClass provisioner와 **일치**해야 한다. 생략 시 `csi_driver_matches` sanity 제외 |
+| `data_network` | template | 선택 | **gpfs/wekafs 전용** — DM 워커풀 힌트로 전달된다(cephfs·CSI에서는 무시) |
 
-> **부연(테스트베드/dev 프로필, `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`).** 이땐 인증서 없이 평문 Bearer +
-> `x-dms-actor`로 호출한다(`-H "authorization: Bearer $DMS_TOKEN" -H "x-dms-actor: operator"`). 요청/응답
-> 형태만 빠르게 보고 싶을 때 쓰는 읽기 편의용이며, 운영 경로는 위 mTLS다.
+**나머지 필드·제약·응답 형태는 [`docs/api/storage-mappings.md`](../docs/api/storage-mappings.md) §2**에
+있다. 특히 `(cluster_name, storage_class_name)`이 유니크하다는 점(같은 스토리지를 host-mount와 PVC
+양쪽으로 등록하려면 StorageClass를 서로 다르게 잡아야 한다)과, RM 시절에만 쓰이던 잔여 키
+(`weka_credentials` 등)를 새 매핑에 넣지 말라는 규칙이 거기 있다.
 
-**설치에 필요한 `backend_template` 핵심 필드:**
-
-| 필드 | 필수 | 설명 |
-|---|---|---|
-| `backend_type` | 필수 | `cephfs` / `wekafs` / `gpfs` / `ceph-csi` / `gpfs-csi` / `weka-csi` |
-| `cluster_name` | 필수 | DMS 클러스터 이름(= `DMS_CLUSTER_KUBECONFIGS_JSON`의 키) |
-| `mount_path` | 파일시스템 필수 | 각 노드에 마운트된 절대 경로 |
-| `managed_root` | 파일시스템 **필수** | DMS가 관리하는 루트(반드시 `mount_path` 하위). 생략 시 등록 `422` |
-| `filesystem_name` | **gpfs 필수** | 대상 device(예 `gpfs0`). WEKA는 선택(생략 시 `storage_name`) |
-| `csi_driver` | 선택(CSI는 사실상 필수) | live StorageClass provisioner와 **일치**해야 한다. 생략 시 `csi_driver_matches` sanity 제외 |
-| `data_network` | 선택 | 데이터 이동에 쓸 네트워크 이름. DM 워커풀 힌트로 전달된다 |
-
-> **`(cluster_name, storage_class_name)`은 유니크하다** (`uq_storage_class_mapping`,
-> `src/dms/migrations.py`). 같은 클러스터의 한 StorageClass를 두 매핑이 가리킬 수 없으므로,
-> 같은 스토리지를 host-mount(fs)와 PVC(CSI) 양쪽으로 등록하려면 **StorageClass를 서로 다르게**
-> 잡아야 한다(아래 예시는 `rook-cephfs` / `rook-cephfs-csi`). 어길 경우 두 번째 등록은 DB
-> 유니크 위반으로 실패한다.
-
-> `weka_credentials`·`weka_profile`·`command_runner`·`command_timeout_seconds`·
-> `fileset_name_template`·`quota_scope`·`rm_worker_nodes`·`ssh_host`는 RM(파일시스템 프로비저닝·
-> 쿼터) 전용이었고 **더 이상 어떤 코드도 읽지 않는다**. 새 매핑에는 넣지 말고, 기존 매핑에 남아
-> 있다면 [redeploy.md §4.3](redeploy.md#43-스토리지-매핑-필드-정리-선택)으로 정리한다.
-> 특히 `weka_credentials`는 쓰이지 않는 자격증명이 DB에 남는 것이므로 정리를 권장한다.
-
-### 4.1 CephFS
+### 4.1 CephFS (파일시스템 매핑 대표 예시)
 
 ```bash
 curl -sS "${CURL_MTLS[@]}" -X POST -H "content-type: application/json" \
@@ -228,85 +222,23 @@ curl -sS "${CURL_MTLS[@]}" -X POST -H "content-type: application/json" \
   }' | jq '{storage_name, status}'
 ```
 
-### 4.2 WekaFS
+**WekaFS·GPFS·CSI 매핑의 등록 본문**은 위와 같은 형태이고 필수 필드만 다르다(§1 표) — 전체 예시는
+[`docs/api/storage-mappings.md`](../docs/api/storage-mappings.md) §3에 있다. GPFS는
+`filesystem_name`이 **필수**이고(누락 시 `422`), CSI 매핑은 host-mount 없이 최상위 `cluster_name` +
+`storage_class_name` + template의 `csi_driver`만으로 등록한다.
+
+### 4.2 재검사 (`:check`) · 수정 · 삭제
+
+설정이나 에이전트를 바꾼 뒤 readiness를 갱신하려면 sanity를 다시 돌린다:
 
 ```bash
-curl -sS "${CURL_MTLS[@]}" -X POST -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/storage-mappings" \
-  -d '{
-    "storage_name": "weka-a",
-    "backend_template": {
-      "backend_type": "wekafs",
-      "cluster_name": "cluster-a",
-      "filesystem_name": "weka0",
-      "mount_path": "/weka",
-      "managed_root": "/weka/dms",
-      "csi_driver": "csi.weka.io"
-    },
-    "cluster_name": "cluster-a",
-    "storage_class_name": "weka-sc"
-  }' | jq '{storage_name, status}'
-```
-
-### 4.3 GPFS
-
-`filesystem_name`(대상 GPFS device, 예 `gpfs0`)이 **필수**다 — `managed_root`와 함께 둘 중 하나라도
-없으면 등록이 `422`로 거부된다.
-
-```bash
-curl -sS "${CURL_MTLS[@]}" -X POST -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/storage-mappings" \
-  -d '{
-    "storage_name": "gpfs-a",
-    "backend_template": {
-      "backend_type": "gpfs",
-      "cluster_name": "cluster-a",
-      "filesystem_name": "gpfs0",
-      "mount_path": "/gpfs",
-      "managed_root": "/gpfs/dms",
-      "csi_driver": "spectrumscale.csi.ibm.com"
-    },
-    "cluster_name": "cluster-a"
-  }' | jq '{storage_name, status}'
-```
-
-### 4.4 CSI 스토리지 (PVC↔PVC sync 대상)
-
-host-mount 없이 PVC로만 접근하는 스토리지는 CSI 타입으로 등록한다. `cluster_name` +
-`storage_class_name` + `csi_driver`만 있으면 된다.
-
-```bash
-curl -sS "${CURL_MTLS[@]}" -X POST -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/storage-mappings" \
-  -d '{
-    "storage_name": "ceph-csi-a",
-    "backend_template": {
-      "backend_type": "ceph-csi",
-      "cluster_name": "cluster-a",
-      "csi_driver": "rook-ceph.cephfs.csi.ceph.com"
-    },
-    "cluster_name": "cluster-a",
-    "storage_class_name": "rook-cephfs-csi"
-  }' | jq '{storage_name, status}'
-```
-
-> `gpfs-csi`(`spectrumscale.csi.ibm.com`) · `weka-csi`(`csi.weka.io`)도 같은 형태다.
-
-### 4.5 재검사 (`:check`) · 수정 · 삭제
-
-```bash
-# sanity 재실행 (설정/에이전트 변경 후 readiness 갱신)
 curl -sS "${CURL_MTLS[@]}" -X POST \
   "$DMS_API_URL/api/v1/storage-mappings/cephfs-a:check" | jq '{storage_name, status}'
-
-# 수정 — 부분 patch가 아니라 전체 backend_template을 round-trip해야 한다
-curl -sS "${CURL_MTLS[@]}" -X PATCH -H "content-type: application/json" \
-  "$DMS_API_URL/api/v1/storage-mappings/cephfs-a" -d '{ ... 전체 본문 ... }' | jq
-
-# 삭제 (하드 삭제; 진행 중 작업이 있으면 409)
-curl -sS "${CURL_MTLS[@]}" -X DELETE \
-  "$DMS_API_URL/api/v1/storage-mappings/cephfs-a" | jq '{storage_name, deleted}'
 ```
+
+수정(PATCH — 부분 patch가 아니라 **전체 `backend_template` round-trip**)과 삭제(하드 삭제, 진행 중
+작업이 있으면 `409`)의 본문·응답은 [`docs/api/storage-mappings.md`](../docs/api/storage-mappings.md)
+§5·§6.
 
 > 등록 직후엔 `data_management: Missing`이 정상이다(DM agent가 아직 새 목록을 못 읽었거나 DM 축이
 > 미구성). 5장의 rollout-restart 후 6장 조건을 확인한다. CSI 매핑은 `data_management`가 계속
@@ -343,8 +275,8 @@ kubectl -n dms rollout restart daemonset/dms-dm-agent
 kubectl -n dms rollout status  daemonset/dms-dm-agent --timeout=180s
 ```
 
-> DM 노드 에이전트(`dms-dm-agent`)의 이미지·신원 설정·host mountinfo bind-mount는
-> [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)에서 다룬다.
+> DM 노드 에이전트(`dms-dm-agent`)의 이미지·신원 설정은 [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md),
+> 호스트 mountinfo bind-mount는 [`dms-05-configuration.md §7`](dms-05-configuration.md)에서 다룬다.
 
 ---
 
@@ -355,7 +287,11 @@ kubectl -n dms rollout status  daemonset/dms-dm-agent --timeout=180s
 | 축 | 판정 근거 | `Ready`가 아니면 |
 |---|---|---|
 | `data_management` | 노드 에이전트가 보고한 마운트 + mpifileutils 도구 + 신원 증거 | planner가 DM 잡을 `no_ready_dm_candidate`로 거부 |
-| `inventory` | 대상 클러스터의 live StorageClass 존재 + `csi_driver` 일치 | `storage_class_missing` / `csi_driver_mismatch` sanity 오류 |
+| `inventory` (파일시스템 매핑) | **매핑 클러스터**(핀 안 됐으면 control cluster)에 **fresh 노드 에이전트 리포트**가 있음 | `Unknown`(리포트 없음/전부 stale) |
+| `inventory` (CSI 매핑) | 매핑의 `cluster_name`에서 `storage_class_name`이 발견됨 | `Missing` |
+
+> **`storage_class_missing` / `csi_driver_mismatch`는 readiness 축이 아니라 sanity 오류**다 —
+> `readiness`를 바꾸지 않고 `sanity_status`를 `Failed`로 만든다(아래 표).
 
 파일시스템 스토리지의 `data_management`가 `Ready`가 되려면:
 
@@ -364,18 +300,18 @@ kubectl -n dms rollout status  daemonset/dms-dm-agent --timeout=180s
    해당 `storage_name`이 ConfigMap `storages.json`에 나타나야 한다.
 3. **DM Agent가 대상 노드에서 Running** 이고 매핑 등록/변경 후 **rollout-restart** 됨(5장).
 4. **호스트 mountinfo bind-mount 활성** — 에이전트가 실제 마운트를 관측
-   ([`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)).
+   ([`dms-05-configuration.md §7`](dms-05-configuration.md)).
 5. **스토리지가 그 노드들에 rw로 host-mount** 됨(2장).
 
-`inventory`가 `Ready`가 되려면 3장의 클러스터 등록이 끝나 있고, 매핑의 `storage_class_name`이 대상
-클러스터에 실제로 존재하며 `csi_driver`가 live provisioner와 일치해야 한다.
+`inventory`는 파일시스템 매핑이면 위 3번(에이전트 rollout 후 리포트가 들어와야) `Unknown` → `Ready`가
+된다. **CSI 매핑**이면 3장의 클러스터 등록이 끝나 있고 매핑의 `storage_class_name`이 대상 클러스터에
+실제로 존재해야 `Ready`다.
 
 확인:
 
 ```bash
 curl -sS "${CURL_MTLS[@]}" "$DMS_API_URL/api/v1/operations/storage-mappings/cephfs-a" \
   | jq '{storage_name, sanity_status, readiness}'
-# inventory: Ready 확인 (data_management는 DM 구성 후 Ready)
 ```
 
 에이전트 프로브 단독 확인:
@@ -390,9 +326,12 @@ kubectl -n dms exec "$POD" -- dms agent-probe --once | jq '.mounts[] | {storage_
 
 | error / 사유 | 조치 |
 |---|---|
+| `backend_type_missing` | `backend_template.backend_type` 지정(4장) |
 | `cluster_missing` | 3장 클러스터 등록 확인 — `DMS_CLUSTER_KUBECONFIGS_JSON` 키와 Secret kubeconfig |
 | `storage_class_missing` | 대상 클러스터에 해당 StorageClass 존재/이름 확인 |
 | `csi_driver_mismatch` | 매핑 `csi_driver`를 live provisioner에 맞춤(4장) |
+| `csi_mapping_unpinned` | CSI 매핑에 **최상위** `cluster_name` + `storage_class_name`을 둘 다 지정(4장) |
+| `stale_only_inventory` | fresh 에이전트 리포트가 하나도 없고 stale만 있다 — DaemonSet 상태와 `DMS_AGENT_REPORT_STALE_SECONDS` 확인(5장) |
 
 ---
 

@@ -4,27 +4,36 @@
       "storage_name": "cephfs-a",
       "backend_type": "cephfs",
       "cluster_name": "cluster-a",
-      "storage_class_name": "cephfs-rwx",
+      "storage_class_name": "rook-cephfs",
       "csi_driver": "rook-ceph.cephfs.csi.ceph.com",
-      "mount_paths": ["/mnt/cephfs-rwx"],
+      "mount_paths": ["/cephfs"],
       "network_endpoints": []
     },
     {
-      "storage_name": "longhorn-a",
-      "backend_type": "longhorn",
+      "storage_name": "weka-a",
+      "backend_type": "wekafs",
       "cluster_name": "cluster-a",
-      "storage_class_name": "longhorn",
-      "csi_driver": "driver.longhorn.io",
-      "mount_paths": [],
+      "storage_class_name": "weka-sc",
+      "csi_driver": "csi.weka.io",
+      "mount_paths": ["/weka"],
       "network_endpoints": []
     },
     {
       "storage_name": "gpfs-a",
       "backend_type": "gpfs",
       "cluster_name": "cluster-a",
-      "storage_class_name": "gpfs-csi",
+      "storage_class_name": "gpfs-sc",
       "csi_driver": "spectrumscale.csi.ibm.com",
-      "mount_paths": ["/gpfs/gpfs0"],
+      "mount_paths": ["/gpfs"],
+      "network_endpoints": []
+    },
+    {
+      "storage_name": "ceph-csi-a",
+      "backend_type": "ceph-csi",
+      "cluster_name": "cluster-a",
+      "storage_class_name": "rook-cephfs-csi",
+      "csi_driver": "rook-ceph.cephfs.csi.ceph.com",
+      "mount_paths": [],
       "network_endpoints": []
     }
   ]

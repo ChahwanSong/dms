@@ -171,19 +171,8 @@ async def deliver_company_mail(settings: "Settings", email: OutboundEmail) -> No
     * `settings.*` — 새 설정이 필요하면 `config.py`에 `PORTAL_*`로 추가한다
       (비밀값은 매니페스트에 placeholder만 두고 라이브 Secret에 주입: §6)
 
-    예시 골격 (사내 REST API)
-    -------------------------
-        import httpx
-        async with httpx.AsyncClient(timeout=settings.email_send_timeout_seconds) as c:
-            r = await c.post(
-                settings.company_mail_api_url,
-                headers={"Authorization": f"Bearer {settings.company_mail_api_token}"},
-                json={"to": email.to_addr, "subject": email.subject, "body": email.body},
-            )
-            r.raise_for_status()
-
     구현 후에는 `PORTAL_EMAIL_DELIVERY=company`로 바꾸고, 개발용 `log` 경로는 끈다.
-    상세 가이드: install/portal-02-user-auth.md §5
+    **REST/SMTP 예시 골격과 설정 절차는 install/portal-02-user-auth.md §5**에 있다.
     """
     raise EmailNotConfigured(
         "PORTAL_EMAIL_DELIVERY=company 이지만 deliver_company_mail()이 아직 "

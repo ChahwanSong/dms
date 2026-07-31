@@ -24,10 +24,14 @@ POST /api/v1/<...>/<operation>   → 202 { request_id, status: "Persisted", … 
     → GET /api/v1/operations/requests/{request_id}   (.request.status 폴링)
 ```
 
-- **POST 응답은 `202 Persisted`이며 결과가 아니다.** 반환된 `request_id`(DM 잡은 이후 `job_id`)로
-  상태를 폴링한다. 긴 작업은 전부 **비동기** — blocking 호출이 아니다.
-- **비동기 상태 머신을 타는 것은 `data-management`(`scan`/`sync`/`rm`)와 `identity`**이며 **DM worker**가
-  처리한다. **스토리지 매핑 CRUD(`/api/v1/storage-mappings`)는 동기 처리**라 `request_id` 폴링이 없다.
+- **POST 응답은 `202 Persisted`이며 결과가 아니다.** 긴 작업은 전부 **비동기** — blocking 호출이 아니다.
+- **`request_id`와 `job_id`는 별개다.** 제출 응답은 `request_id`만 준다. planner가 그 요청을 계획하면서
+  `job_id`를 **새로 발급**하므로, `request_id`로 `.../jobs/{id}`를 부르면 404다. 흐름은
+  `GET /api/v1/operations/requests/{request_id}`로 요청 상태를 보고,
+  `GET /api/v1/operations/data-jobs?requester_id=…`(또는 `/api/v1/data-management/<op>?requester_id=…`)
+  목록에서 `job_id`를 찾은 뒤 `.../jobs/{job_id}`를 폴링하는 것이다.
+- **비동기 상태 머신(request → plan → run)을 타는 것은 데이터 잡(`scan`/`sync`/`rm`)뿐**이며 **DM worker**가
+  처리한다. **스토리지 매핑 CRUD와 identity-denylist(PUT/DELETE)는 동기 처리**라 `request_id` 폴링이 없다.
 - **operations** 라우터는 이 상태를 읽는 **조회 API**(inventory, storage mapping, work summary,
   requests/request-activity, resources, data-jobs 등)와 컨트롤플레인 상태 제어(maintenance/drain/
   resume), stuck request `:resolve`를 제공한다 — 대부분 read-only다.
@@ -39,15 +43,17 @@ POST /api/v1/<...>/<operation>   → 202 { request_id, status: "Persisted", … 
 | 항목 | 값 |
 |---|---|
 | Base path | 모든 엔드포인트는 **`/api/v1/`** 하위 |
-| 라우터 prefix | `/api/v1/storage-mappings`, `/api/v1/data-management`, `/api/v1/operations`, `/api/v1/agent`, `/api/v1/identity` |
+| 라우터 prefix | `/api/v1/storage-mappings`, `/api/v1/data-management`, `/api/v1/operations`, `/api/v1/agent` |
 | Health | `GET /healthz` (**인증 불요** — k8s probe용) |
 | 제출 응답 | 변경 요청은 `202 { request_id, status: "Persisted", … }` |
 | 상태 폴링 | 범용: `GET /api/v1/operations/requests/{request_id}` · DM 잡: `GET /api/v1/data-management/<op>/jobs/{job_id}` |
 | 콜론 액션 | `:confirm` / `:cancel` / `:check` / `:resolve` 등. **zsh는 `"${id}:confirm"` 브레이스로 호출**(`"$id:confirm"`은 수식어로 변형돼 404) |
 | 검증 실패 | unknown 필드·경로 위반(`/`·`..`)·옵션 위반 등은 `422`/`400`이며 **영속화되지 않는다** |
 
-`agent` 라우터는 노드 agent(DaemonSet)가 리포트를 POST하는 **내부 경로**이며, 운영자가 직접
-호출하지 않는다(설치·구성은 `install/` 참고).
+`POST /api/v1/agent/reports`는 노드 agent(DaemonSet) 전용 **내부 경로**로 운영자가 직접 호출하지
+않는다. 다만 같은 라우터의 `POST /api/v1/agent/rollout-restart`·`GET /api/v1/agent/rollout-status`는
+**운영자용**이다 — 스토리지 매핑을 바꾼 뒤 agent DaemonSet을 재기동해 새 목록을 읽히는 데 쓴다
+([storage-mappings.md](./storage-mappings.md)).
 
 ---
 

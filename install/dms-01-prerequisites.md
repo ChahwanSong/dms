@@ -48,8 +48,8 @@ rejected). 스토리지 인벤토리만 등록하고 DM을 쓰지 않는 배포�
 
 control plane·에이전트·DM 잡에 쓰이는 이미지를 **모든 관련 노드가 pull 할 수 있는 레지스트리**가
 있어야 한다(control 클러스터 노드 + DM 잡 노드). 이후 `dms-02-core.md`에서 이미지를 빌드·push 하고,
-DM 이미지는 `dms-04-dm-jobs.md`에서 다룬다. 빌드는 총 3종이며 **빌드 순서가 있다**(DM 잡 이미지 →
-`dms-agent` 이미지 → 기본 `dms` 이미지) — 자세한 절차는 `dms-02-core.md`.
+DM 이미지는 `dms-04-dm-jobs.md`에서 다룬다. 빌드는 총 3종이고 **의존 순서가 있다**(DM 잡 이미지 →
+기본 `dms` → `dms-agent`) — 절차는 [`dms-02-core.md §1`](dms-02-core.md).
 
 - private 레지스트리라면 각 클러스터 `dms` 네임스페이스에 **imagePullSecret**을 만들고 manifest의
   `imagePullSecrets`에 추가한다(기본 template에는 없다).
@@ -113,11 +113,8 @@ psql "postgresql://dms_obs:<강한-OBS-비밀번호>@postgres.example.internal:5
 > 필요할 때만 연결한다(idle 커넥션은 psycopg_pool `max_idle`≈600초 후 자동 reap). 두 DB를 **같은 서버**에 두면
 > `max_connections`는 둘의 **합산 예산**이다. pool env는 [`dms-05 §2·§3`](dms-05-configuration.md).
 >
-> **상한(ceiling) vs 실사용(steady-state)을 구분하라.** replicas=32의 *worst-case 상한*은 ≈300+(모든 풀이
-> 동시에 max까지 차는 가정, §3.4)이지만 **실측 정상상태는 ~50뿐**이다 — loop는 5초 폴링으로 op를 ~1개씩만
-> 잡고(claim/leader), min_size=0이라 **idle obs floor는 0**이다(측정: replicas=8에서 op~16 + obs~4). 즉
-> replicas=32라도 정상 부하는 stock `max_connections=100`에 든다. **`max_connections=400`(§3.4)은 정상 필요치가
-> 아니라 버스트/worst-case를 위한 안전 상한**이니, 규모를 키우거나 확실한 여유가 필요할 때 상향한다.
+>
+> 상한과 실사용의 차이, `max_connections` 산정은 **§3.4**에 있다.
 
 ### 3.4 max_connections 상향 (워커 확장 시)
 
@@ -134,11 +131,10 @@ planner·sanity·retention  3 × 7   = 21
 = ≈ 305 (worst-case 상한)  →  max_connections = 400 (여유 ~95)
 ```
 
-> **상한 ≠ 실사용.** 이건 *모든 풀이 동시에 max까지 차는* 가정의 상한이다. **실측 정상상태는 훨씬 낮다** —
-> loop는 5초 폴링으로 op를 ~1개씩만 잡고(`DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 **idle obs floor는 0**), API만
-> warm floor를 유지한다. replicas=8 실측이 op~16 + obs~4였고, replicas=32로 선형 외삽해도 **정상 부하 ≈ 50**로
-> `max_connections=100`에 든다. 따라서 **400은 정상 운영 필수치가 아니라 안전 상한**이다 — 대규모 버스트나
-> `DMS_DB_API_POOL_MAX_SIZE` 상향을 계획할 때, 혹은 확실한 여유가 필요할 때 올린다.
+> **상한 ≠ 실사용.** 이건 *모든 풀이 동시에 max까지 차는* 가정의 상한이다. 정상상태는 훨씬 낮다 —
+> loop는 5초 폴링으로 op 커넥션을 ~1개씩만 잡고(`DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 **idle obs floor는
+> 0**), warm floor를 유지하는 것은 API뿐이다. 따라서 **400은 정상 운영 필수치가 아니라 안전 상한**이다 —
+> 대규모 버스트나 `DMS_DB_API_POOL_MAX_SIZE` 상향을 계획할 때, 혹은 확실한 여유가 필요할 때 올린다.
 
 replicas를 더 늘리면 위 식으로 재검산한다.
 
@@ -178,9 +174,12 @@ DM 잡은 **요청자의 POSIX 신원(uid/gid)** 으로 실행되므로, **DM �
   → 호스트 `/etc/passwd`(host-root 마운트) → 컨테이너 NSS. `DMS_AGENT_IDENTITY_USERS`는
   상시 프로빙할 **베이스라인**일 뿐이고, 목록에 없는 요청자도 **온디맨드 프로빙**으로 자동
   확보된다(dm-worker가 요청 시 등록 → agent가 다음 사이클에 프로빙; `dms-04-dm-jobs.md §3`).
-- **SSSD/LDAP-backed 노드 유저**를 프로빙하려면 `dms-dm-agent`에 **`SYS_CHROOT` capability**가
-  필요하다(호스트 NSS 전체를 `chroot /host getent`로 조회 — nss_sss 포함). 노드-로컬
-  `/etc/passwd` 유저는 host-root 마운트만으로 해석되어 capability가 필요 없다.
+- **SSSD/LDAP-backed 노드 유저**(파일에 없고 nss_sss로만 해석되는 계정)를 프로빙하려면
+  `chroot /host getent` 계층이 살아 있어야 하고, 그러려면 `dms-dm-agent` 컨테이너가
+  **root(`runAsUser: 0`) + `SYS_CHROOT` capability**로 떠야 한다. **출하 매니페스트는 둘 다 주지
+  않으므로**(이미지 기본 uid 65532) 기본 구성에서는 이 계층이 조용히 실패하고 **호스트
+  `/etc/passwd`에 있는 노드-로컬 유저만** 해석된다. 필요하면
+  [`dms-04 §3`](dms-04-dm-jobs.md)의 `securityContext` 편집을 적용한다.
 - 잡 이미지에는 NSS/LDAP이 없어도 된다 — dm-worker가 해석한 uid/gid로 잡 파드가 부팅 시
   요청자를 컨테이너 `/etc/passwd`에 **물질화**하므로 `runuser`/`chown`이 그 이름을 로컬에서
   해석한다.
@@ -197,7 +196,7 @@ Volcano는 (1) DM 잡의 gang-scheduler이자 (2) DMS가 쓰는 네이티브 잡
 `Queue`·`PodGroup` CRD를 제공한다. **DM을 쓰면 하드 필수.**
 
 ```bash
-# 버전은 조직 표준에 맞춰 핀한다(테스트베드 검증 버전 = v1.15.0). ⚠️ 확인 필요.
+# 조직 표준 버전으로 핀한다. 아래는 검증된 버전 예시다.
 VOLCANO_VERSION=v1.15.0
 kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/${VOLCANO_VERSION}/installer/volcano-development.yaml
 ```
@@ -209,8 +208,7 @@ kubectl -n volcano-system get deploy          # volcano-admission / -controllers
 kubectl api-resources | grep volcano          # jobs.batch.volcano.sh, queues.scheduling.volcano.sh, podgroups...
 ```
 
-MPI Operator는 설치하지 않는다(상단 callout 참조). `DMS_DM_SCHEDULER_BACKEND`는 `volcano-job`으로
-둔다.
+MPI Operator는 설치하지 않는다(상단 callout 참조).
 
 > **부연(제한망/air-gapped):** `raw.githubusercontent.com`에 직접 접근이 안 되면 매니페스트를 내부로
 > 받아오고, Volcano 컨테이너 이미지도 내부 레지스트리로 미러링한 뒤 매니페스트의 이미지 참조를
@@ -264,14 +262,17 @@ DM 잡 파드는 결과(`summary.json`)와 로그를 `DMS_DM_ARTIFACT_BASE_URI`(
 **하나의 공유 RWX 파일시스템**이 **`dms-dm-worker` 노드와 모든 DM 잡 노드에 동일한 경로**로 마운트돼
 있어야 한다(노드별 로컬 hostPath면 워커와 잡이 다른 노드에 뜰 때 깨진다).
 
-- 수정할 파일: `install/kubernetes/control-plane.yaml` → `dms-dm-worker` Deployment →
-  `dm-artifacts` hostPath. 기본 `path: /artifacts`(`type: Directory`, `HostToContainer` 전파)를
-  실제 공유 FS **마운트포인트**로 치환한다(예: `/cephfs`). 서브디렉터리가 아니라 **마운트포인트
-  자체**여야 host 재마운트가 컨테이너로 전파된다.
-- 잡 파드도 같은 경로를 hostPath로 붙인다(워커가 자동 생성하는 잡 매니페스트가 처리).
-- **베이스 서브디렉 생성 (1회)**: `DMS_DM_ARTIFACT_BASE_URI`의 베이스 디렉토리(예 `/artifacts/dms`)를 공유
-  FS에 **`root:root 0755`로 미리 생성**한다 — 요청자 uid job pod가 per-job 디렉토리로 내려갈 수 있게.
-  명령은 [`dms-04-dm-jobs.md §6`](dms-04-dm-jobs.md).
+**여기서 필요한 것은 그런 FS가 존재하고 동일 경로로 마운트돼 있다는 사실뿐**이다. 매니페스트
+편집(`dm-artifacts` hostPath 치환·전파 설정)과 베이스 디렉토리 생성은
+[`dms-04-dm-jobs.md §6`](dms-04-dm-jobs.md)에서 한다.
+
+```bash
+# dm-worker 예정 노드와 DM 잡 노드 각각에서 — 같은 경로가 보여야 한다
+mount | grep <artifact-mountpoint>     # 예: /cephfs
+```
+
+> **호스트 경로 ≠ 컨테이너 경로.** 컨테이너 안 경로는 항상 `/artifacts/dms`
+> (= `DMS_DM_ARTIFACT_BASE_URI`)이고, 호스트 경로는 **`<공유 FS 마운트포인트>/dms`**(예 `/cephfs/dms`)다.
 
 ---
 
@@ -303,9 +304,12 @@ kubectl get priorityclass | grep dms                      # dms-low/normal/high
 kubectl get ns dms -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'   # = privileged
 
 # 4/9) 공유 FS·스토리지 + 아티팩트 베이스 디렉토리 (dm-worker 예정 노드에서)
-mount | grep <artifact-mountpoint>     # 예: /cephfs — dm-worker 노드와 DM 잡 노드에 동일 경로
-ls -ld /artifacts/dms                  # 아티팩트 베이스: root:root 0755 여야 함(dms-04 §6). 없으면:
-                                       #   sudo mkdir -p /artifacts/dms && sudo chown root:root /artifacts/dms && sudo chmod 0755 /artifacts/dms
+#      <artifact-mountpoint>는 §9에서 정한 공유 FS 마운트포인트(예: /cephfs). 컨테이너 경로가
+#      아니라 호스트 경로다 — 컨테이너 안에서는 항상 /artifacts/dms로 보인다.
+MP=<artifact-mountpoint>
+mount | grep "$MP"                     # dm-worker 노드와 DM 잡 노드에 동일 경로로 보여야 함
+ls -ld "$MP/dms"                       # 아티팩트 베이스: root:root 0755 여야 함(dms-04 §6). 없으면:
+                                       #   sudo mkdir -p "$MP/dms" && sudo chown root:root "$MP/dms" && sudo chmod 0755 "$MP/dms"
 
 # 5) 노드 신원 (DM 노드에서)
 getent passwd <requester-user>         # 해석돼야 함

@@ -3,8 +3,8 @@ set -euo pipefail
 
 # DM identity denylist (kill-switch + admission block) bulk-apply helper.
 #
-# identity_mappings was REMOVED. DM resolves the requester's POSIX identity by a
-# READ-ONLY LDAP lookup at preflight time; there is NO mapping registration step.
+# DM resolves the requester's POSIX identity by a READ-ONLY LDAP lookup at preflight
+# time; there is NO mapping registration step.
 # The denylist is normally EMPTY (default = allow all) and is operated per entry as
 # an instant kill-switch. This script is only for seeding a known block list (e.g.
 # offboarded accounts) from a JSON file -- it is optional.

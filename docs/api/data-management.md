@@ -145,11 +145,11 @@ POST /api/v1/data-management/jobs/{job_id}:confirm
 
 ## 5. rm (`drm` — preview → confirm → execution)
 
-경로 삭제. sync와 동일한 preview→confirm 흐름을 탄다. **디렉토리 삭제는 `options.recursive=true`가
+경로 삭제. sync와 동일한 preview→confirm 흐름을 탄다. **`options.recursive=true`가
 필수**다(파일 삭제는 불필요).
 
 ```jsonc
-// 디렉토리를 recursive 없이 요청하면 거부
+// recursive 없이 요청하면 거부 (대상이 파일이어도 동일)
 POST /api/v1/data-management/rm
 { "requester_id": "alice", "target": { "storage_name": "cephfs-a", "path": "dms/case/victim" } }
 // → 422 { "detail": "rm directory requests require recursive=true" }
@@ -170,7 +170,7 @@ POST /api/v1/data-management/rm
 ```
 
 - `target_absent: true` = 삭제 완료로 대상이 더 이상 없음.
-- 주요 `options`(§8): `recursive`(디렉토리 필수), `stat`/`lite`(상호배타), `quiet`.
+- 주요 `options`(§8): `recursive`(**항상 필수**), `stat`/`lite`(상호배타), `quiet`.
 - **디렉토리 rm은 대상의 부모 디렉토리 쓰기 권한이 필요**하다(§7) — 부모가 root 소유면 요청자는
   `posix_permission_denied`로 PreflightFailed된다.
 
@@ -235,8 +235,12 @@ PreflightRunning → PreviewRunning → ConfirmPending → (confirm) → Running
 ## 8. 요청 옵션 (`options`) 레퍼런스
 
 `options`는 연산별 **allowlist**로 검증된다 — 미지원 키·타입오류·경계초과·precondition 위반은 전부
-**`422`(영속화 안 됨)**. 검증 통과분만 CLI 플래그로 변환되고, `option_fingerprint`로 해시돼 preview→
-confirm 무결성(옵션 중간 변경 감지)에 쓰인다.
+**`422`(영속화 안 됨)**. 검증 통과분만 CLI 플래그로 변환된다.
+
+`option_fingerprint`는 **`resource_key`의 구성 요소**다(`data.sync:<src>:<dst>:<fingerprint>`).
+같은 경로라도 옵션이 다르면 다른 resource로 취급돼 서로를 `Conflict`로 막지 않는다.
+preview→confirm 무결성은 이것과 **별개**로, confirm 시 보내는 `preview_observed_hash`
+(preview 산출물의 fingerprint)가 담당한다(§6).
 
 | 연산 | 옵션 | 타입 | 의미 / 검증 |
 |---|---|---|---|
@@ -249,7 +253,7 @@ confirm 무결성(옵션 중간 변경 감지)에 쓰인다.
 | | `bufsize` | int [4096, 1 GiB] | 버퍼 크기 |
 | | `chmod` | str | 목적지 권한비트 강제. octal `0750` 또는 `D<oct>,F<oct>`(디렉토리/파일 분리) |
 | | `chown` | str | 목적지 소유자/그룹. `USER` / `:GROUP` / `USER:GROUP` |
-| **rm** | `recursive` | bool | 디렉토리 삭제 시 **`true` 필수** |
+| **rm** | `recursive` | bool | **항상 `true` 필수** — 대상이 파일이어도 생략하면 `422`. (오류 메시지는 `rm directory requests require recursive=true`로 나오지만 검증은 무조건이다.) |
 | | `stat` / `lite` | bool | `--stat` / `--lite` (**상호배타**) |
 | | `quiet` | bool | 조용히 |
 
@@ -292,11 +296,30 @@ confirm 무결성(옵션 중간 변경 감지)에 쓰인다.
 GET /api/v1/data-management/policies                 // → 200 (배열; operation은 토폴로지별로 분리)
 GET /api/v1/data-management/policies/dsync
 PUT /api/v1/data-management/policies/dsync
-{ "default_processes_per_node": 4, "max_processes_per_node": 8 }
+// scan/rm/dsync — worker_nodes 쌍이 필수, source/destination 카운트는 넣으면 422
+{ "operation": "dsync",
+  "default_worker_nodes": 3, "max_worker_nodes": 3,
+  "default_processes_per_node": 4, "max_processes_per_node": 8 }
+
+PUT /api/v1/data-management/policies/nsync
+// nsync — worker_nodes 대신 source/destination 4개가 모두 필수
+{ "operation": "nsync",
+  "default_source_nodes": 2, "max_source_nodes": 4,
+  "default_destination_nodes": 2, "max_destination_nodes": 4,
+  "default_processes_per_node": 4, "max_processes_per_node": 8 }
 ```
 
+- **`operation`은 바디에 필수**이며 path segment와 별개로 검증된다. 빠뜨리면
+  `422 {"detail":[{"loc":["body","operation"],"msg":"Field required"}]}`.
 - **`operation ∈ {scan, rm, dsync, nsync}`**(`sync` 아님 — 토폴로지별 `dsync`/`nsync`로 분리).
   잘못된 값 → `422 {"detail": "operation must be one of: scan, rm, dsync, nsync"}`.
+- **노드 카운트 필드는 토폴로지에 따라 배타적이다.**
+  - `scan`/`rm`/`dsync`: `default_worker_nodes`·`max_worker_nodes` **필수**,
+    source/destination 카운트를 넣으면 `422 "source/destination node counts are only valid for nsync"`.
+  - `nsync`: `default_source_nodes`·`max_source_nodes`·`default_destination_nodes`·
+    `max_destination_nodes` **4개 모두 필수**, `worker_nodes`를 넣으면
+    `422 "nsync policy uses source/destination node counts"`.
+  - 각 쌍은 `max >= default`여야 한다.
 
 ---
 

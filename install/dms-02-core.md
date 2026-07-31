@@ -5,8 +5,10 @@ mTLS 인증서 발급 → `control-plane.yaml` 편집 → 적용(+migration) →
 스모크 테스트**.
 
 - 시작 전 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)를 끝낸다(PostgreSQL 2개 DB,
-  로컬 registry, ingress-nginx, 그리고 DM을 쓸 경우 Volcano·Queue/PriorityClass·공유 artifact
-  FS·노드 신원·스토리지 host-mount).
+  로컬 registry, 그리고 DM을 쓸 경우 Volcano·Queue/PriorityClass·공유 artifact FS·노드 신원·
+  스토리지 host-mount).
+- **운영 mTLS 프로필에는 신뢰하는 종단 ingress가 필수**다. ingress-nginx(+ bare-metal이면 MetalLB)
+  설치는 [`dms-06-ingress-metallb.md`](dms-06-ingress-metallb.md)에 있고, **§7 전에** 끝나 있어야 한다.
 - 아래의 `registry.example.internal`, `cluster-a`, `dms.example.internal`,
   `dc=example,dc=internal`, `/cephfs`는 **예시 placeholder**다. 각자 환경 값으로 치환한다.
 - 명령은 DMS repository root에서 실행한다고 가정한다(`cd <dms-repo-root>`).
@@ -105,7 +107,7 @@ docker push "$REGISTRY/dms-agent:$TAG"
 > 않는다. 채우려면 `Dockerfile.mpifileutils`의 `MPIFILEUTILS_REF` 값을 쓴다.
 >
 > **plain dms 이미지만으로는 DM이 안 된다** — mpifileutils 도구가 없어 DM 후보가
-> `missing_dscan`/`missing_dsync`/`missing_drm_tool`로 거부된다. DM 잡 노드의 에이전트는 반드시
+> `missing_{dscan,dsync,drm}_tool`로 거부된다. DM 잡 노드의 에이전트는 반드시
 > (3) dms-agent 이미지를 써야 한다(DaemonSet 배포는 [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)).
 
 ---
@@ -117,7 +119,7 @@ ingress mTLS 종단에 필요한 인증서 3종을 만든다. 안전한 위치(�
 1. **Client CA** — operator/BFF 클라이언트 인증서를 서명하고, ingress가 이걸로 클라이언트를 검증한다.
 2. **Server CA + server cert** — API 호스트(`dms.example.internal`)의 TLS. 클라이언트는 server CA를
    `--cacert`로 신뢰한다.
-3. **Operator client cert** — DMS 호출용. **CN이 곧 actor**가 된다(§4).
+3. **Operator client cert** — DMS 호출용. **인증서 subject 전체가 actor**가 된다(§4).
 
 ```bash
 CERTS=certs; mkdir -p "$CERTS"
@@ -142,7 +144,14 @@ openssl x509 -req -days 3650 \
   -CAcreateserial -extfile "$CERTS/san.ext" \
   -out "$CERTS/dms-api-server.crt"
 
-# (3) Operator client cert — CN=operator → DMS actor "mtls:operator"
+# (3) Operator client cert.
+#     주의: DMS actor는 CN이 아니라 **인증서 subject 전체**에 `mtls:` 접두어를 붙인 값이다
+#     (src/dms/auth.py: f"{mtls_actor_prefix}{evidence.subject}").
+#     예) subject "/CN=operator/O=dms-testbed" → actor "mtls:O=dms-testbed,CN=operator"
+#     정확한 표기는 ingress/프록시가 넘기는 subject 형식에 따르므로, 운영자 allowlist
+#     (DMS_DM_PRIVILEGED_OPERATORS 등)에 넣을 값은 실제 관측값으로 확인한다:
+#       SELECT DISTINCT actor FROM requests WHERE actor LIKE 'mtls:%';
+#     (포탈 BFF는 이와 별개로 로그인 운영자명을 `mtls:<username>`으로 실어 보낸다.)
 openssl req -newkey rsa:2048 -nodes \
   -keyout "$CERTS/operator.key" -out "$CERTS/operator.csr" \
   -subj "/CN=operator/O=cluster-a"
@@ -163,8 +172,8 @@ kubectl -n dms create secret tls dms-api-tls \
 
 Client CA(`dms-client-ca.crt`)는 `control-plane.yaml`의 `dms-client-ca` Secret에 넣는다(§3).
 
-> 운영자·포탈 BFF마다 별도 client cert를 (3)과 같이 발급한다. CN을 사람/시스템별로 구분하면
-> 감사 로그의 actor(`mtls:<CN>`)로 구별된다. Portal BFF cert는 [`portal-01-setup.md`](portal-01-setup.md).
+> 운영자·포탈 BFF마다 별도 client cert를 (3)과 같이 발급한다. subject를 사람/시스템별로 구분하면
+> 감사 로그의 actor(`mtls:<subject-DN>`)로 구별된다. Portal BFF cert는 [`portal-01-setup.md`](portal-01-setup.md).
 
 ---
 
@@ -225,14 +234,16 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 ### image 라인
 
 - 모든 `image: registry.example.internal/dms:CHANGE_ME`를 §1 (2) **plain dms** ref로 바꾼다.
-  등장 위치: `Job/dms-migrate`, `Deployment/dms-api`, `Deployment/dms-planner`,
-  `Deployment/dms-dm-worker`.
+  `control-plane.yaml`의 `Job/dms-migrate`·`Deployment/dms-api`·`Deployment/dms-planner`·
+  `Deployment/dms-dm-worker` 네 곳뿐 아니라, §5에서 함께 apply하는 **`dms-api-internal.yaml`·
+  `retention.yaml`·`sanity-reconciler.yaml`에도 같은 placeholder가 하나씩** 있으니 전부 바꾼다.
+  (DM agent 이미지는 별도 ref다 — `agent-daemonset.yaml`, [dms-04 §2.2](dms-04-dm-jobs.md).)
 
 ### dm-worker artifact hostPath (DM 사용 시)
 
 - `Deployment/dms-dm-worker`의 `dm-artifacts` 볼륨 `hostPath.path: /artifacts`를 **공유 artifact FS의
-  마운트포인트**로 바꾼다(서브디렉터리가 아니라 마운트포인트 자체). 상세는 prereqs §0.5 /
-  [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md). `dms-dm-worker`는 `replicas: 32`(DM 활성 **기본** — 최대
+  마운트포인트**로 바꾼다(서브디렉터리가 아니라 마운트포인트 자체). 상세는
+  [`dms-01 §9`](dms-01-prerequisites.md) / [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md). `dms-dm-worker`는 `replicas: 32`(DM 활성 **기본** — 최대
   32-way 동시 실행; **32는 PostgreSQL `max_connections≥400`을 전제**하므로 소규모/제약 환경은 낮춘다,
   [`dms-04 §5`](dms-04-dm-jobs.md)·[`dms-05 §3`](dms-05-configuration.md))로 둔다 — **`0`은 DM을
   의도적으로 끌 때만** 쓴다(0이면 어떤 워커도 데이터 잡을 claim하지 않아 scan/sync/rm이 조용히 미실행된다).
@@ -246,9 +257,11 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 1. 신뢰하는 ingress가 클라이언트 인증서를 **Client CA로 검증**하고
    (`auth-tls-verify-client: on`), 검증한 인증서를 upstream 헤더로 전달한다
    (`auth-tls-pass-certificate-to-upstream: true`).
-2. DMS는 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`이므로 그 검증된 인증서만 신뢰하고, **subject의
-   CN**에 `DMS_MTLS_ACTOR_PREFIX`(기본 `mtls:`)를 붙여 actor로 삼는다. 예: `CN=operator` →
-   actor `mtls:operator`(감사 로그에 이 값이 남는다).
+2. DMS는 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`이므로 그 검증된 인증서만 신뢰하고, **ingress가
+   넘긴 subject DN 전체**에 `DMS_MTLS_ACTOR_PREFIX`(기본 `mtls:`)를 붙여 actor로 삼는다 — CN만
+   떼어내지 않는다. 예: `-subj "/CN=operator/O=cluster-a"`로 발급한 인증서 →
+   actor `mtls:O=cluster-a,CN=operator`(감사 로그에 이 값이 그대로 남는다). O/OU까지 actor 문자열의
+   일부이므로 CN만 정해서는 actor가 결정되지 않는다.
 3. 평문 `x-dms-actor` 헤더는 **신뢰되지 않는다**. `DMS_DEFAULT_ACTOR`는 비어 있어야 하며, 설정 시
    API가 기동에 실패한다(§3).
 4. `DMS_AUTH_SHARED_TOKEN`은 **기본 배포에서 필수**다 — mTLS에 더해 `Authorization: Bearer <token>`도
@@ -263,10 +276,10 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 
 따라서 프로덕션 curl은 **client cert + server CA**를 쓰고 `x-dms-actor`는 보내지 않는다(§8).
 
-> **노드 에이전트는 이 mTLS 평면을 쓰지 않는다.** agent는 actor가 `node:{cluster}:{node}`여야 하는데
-> mTLS는 `mtls:<subject>`로 도출하므로 인증 불가 → 에이전트는 §5의 **전용 내부 API `dms-api-internal`**
-> (mTLS off + shared token + agent-only NetworkPolicy)로 보고한다. 근거·설정은
-> [`dms-05-configuration.md §1·§8`](dms-05-configuration.md).
+> **노드 에이전트와 포탈 BFF는 이 mTLS 평면을 쓰지 않는다.** 둘 다 자기 actor
+> (`node:{cluster}:{node}` / per-operator)를 실어야 하는데 mTLS는 actor를 `mtls:<subject>`로 고정하므로
+> 인증 불가 → §5의 **내부 API `dms-api-internal`**(mTLS off + shared token + trusted-clients
+> NetworkPolicy)로 접속한다. 근거·설정은 [`dms-05-configuration.md §1·§8`](dms-05-configuration.md).
 
 > **부연(테스트베드/개발 프로필).** `DMS_REQUIRE_MTLS_VERIFIED_HEADER=false`로 내리면 인증서 없이
 > 평문 `Authorization: Bearer <token>` + `x-dms-actor: <name>`만으로 호출할 수 있다. 이는 요청/응답
@@ -281,25 +294,34 @@ ConfigMap · Secret · RBAC · `dms-migrate` Job · Deployment(api ×2 / planner
 적용한다(DB는 prereqs에서 준비돼 있어야 한다).
 
 ```bash
-kubectl apply -f install/kubernetes/control-plane.yaml    # 편집본 경로
-kubectl apply -f install/kubernetes/dms-api-internal.yaml  # 노드 에이전트 전용 내부 API (아래)
+kubectl apply -f install/kubernetes/control-plane.yaml     # 편집본 경로
+kubectl apply -f install/kubernetes/dms-api-internal.yaml  # 신뢰 in-cluster 클라이언트 전용 내부 API (아래)
+kubectl apply -f install/kubernetes/sanity-reconciler.yaml # 스토리지 매핑 sanity 주기 재계산
+kubectl apply -f install/kubernetes/retention.yaml         # 이력 테이블 prune 루프
 
 kubectl -n dms wait --for=condition=complete job/dms-migrate --timeout=120s
 kubectl -n dms logs job/dms-migrate                        # "migrations applied"
 ```
 
-> **`dms-api-internal` = agent 전용 인증 평면 (기본).** 외부 `dms-api`는 mTLS를 켜므로 actor가
-> `mtls:<subject>`가 되어 노드 에이전트(`node:{cluster}:{node}` actor 필요)가 인증할 수 없다. 그래서
-> 에이전트는 `image` 라인만 `control-plane.yaml`과 같은 ref로 맞춘 **별도 내부 API `dms-api-internal`**
-> (mTLS **off** + `dms-secrets`의 shared token + agent-only NetworkPolicy, ClusterIP)로 보고한다.
-> `agent-daemonset.yaml`의 `DMS_AGENT_API_URL`이 이 서비스를 가리킨다. 근거·프로필은
+> `sanity-reconciler`와 `retention`은 각각 singleton(`replicas: 1`)이며 기본 배포 구성의 일부다 —
+> DB 연결 예산([dms-01 §3.4](dms-01-prerequisites.md))도 이 둘을 포함해 계산돼 있다.
+
+> **`dms-api-internal` = 신뢰 in-cluster 클라이언트 전용 인증 평면 (기본).** 외부 `dms-api`는 mTLS를
+> 켜므로 actor가 `mtls:<subject>`로 고정되어, 노드 에이전트(`node:{cluster}:{node}` actor 필요)도
+> 포탈 BFF(per-operator `x-dms-actor` 필요)도 인증할 수 없다. 그래서 둘 다 `image` 라인만
+> `control-plane.yaml`과 같은 ref로 맞춘 **별도 내부 API `dms-api-internal`**(mTLS **off** +
+> `dms-secrets`의 shared token + ClusterIP)로 접속한다. NetworkPolicy
+> `dms-api-internal-trusted-clients`는 `dms-dm-agent` 파드와 **`dms-portal` 네임스페이스**를 함께
+> 허용하므로, 하드닝할 때 포탈 규칙을 지우지 않는다. `agent-daemonset.yaml`의 `DMS_AGENT_API_URL`,
+> 포탈의 `PORTAL_DMS_API_URL`이 이 서비스를 가리킨다. 근거·프로필은
 > [`dms-05-configuration.md §1·§8`](dms-05-configuration.md).
 
 pod 확인:
 
 ```bash
 kubectl -n dms get pods
-# dms-api ×2, dms-api-internal, dms-planner, dms-dm-worker, dms-migrate(Completed)
+# dms-api ×2, dms-api-internal, dms-planner, dms-dm-worker, dms-sanity-reconciler,
+# dms-retention, dms-migrate(Completed)
 ```
 
 > **storages sync RBAC은 이미 `control-plane.yaml`에 포함**돼 있다(Role/RoleBinding
@@ -349,7 +371,8 @@ install/scripts/create-serviceaccount-kubeconfig.sh cluster-a certs/cluster-a.ku
 kubectl -n dms patch secret dms-cluster-kubeconfigs --type merge \
   -p "{\"data\":{\"cluster-a.kubeconfig\":\"$(base64 -w0 certs/cluster-a.kubeconfig)\"}}"
 kubectl -n dms rollout restart \
-  deploy/dms-api deploy/dms-api-internal deploy/dms-planner deploy/dms-dm-worker
+  deploy/dms-api deploy/dms-api-internal deploy/dms-planner deploy/dms-dm-worker \
+  deploy/dms-sanity-reconciler
 ```
 
 > 신규 설치라면 3) 대신 apply **전에** `control-plane.yaml`의 Secret `dms-cluster-kubeconfigs`
@@ -387,7 +410,8 @@ dms-api SA에 `pods/log`(+ Volcano read)를 부여한다 — `GET /api/v1/operat
 
 ## 7. Ingress 배포
 
-신뢰하는 ingress-nginx(mTLS 종단)가 설치돼 있어야 한다(prereqs). `install/kubernetes/ingress.example.yaml`을
+신뢰하는 ingress-nginx(mTLS 종단)가 설치돼 있어야 한다([`dms-06-ingress-metallb.md`](dms-06-ingress-metallb.md)).
+`install/kubernetes/ingress.example.yaml`을
 템플릿으로 아래를 치환해 적용한다.
 
 **편집 항목** (`ingress.example.yaml`):
@@ -417,7 +441,7 @@ kubectl -n dms get ingress dms-api
 # 인증 불필요 health
 curl -sS --cacert certs/dms-server-ca.crt https://dms.example.internal/healthz
 
-# 인증 필요 read — actor는 operator cert의 CN에서 "mtls:operator"로 유도된다.
+# 인증 필요 read — actor는 operator cert의 subject DN 전체에서 "mtls:<subject>"로 유도된다.
 # 토큰은 기본 필수다(shipped dms-secrets가 DMS_AUTH_SHARED_TOKEN을 싣는다) → Bearer도 함께 보낸다.
 curl -sS \
   --cert certs/operator.crt --key certs/operator.key \
@@ -429,6 +453,17 @@ curl -sS \
 
 - `DMS_AUTH_SHARED_TOKEN`을 (기본과 달리) 비워 두었다면 위 `-H "authorization: Bearer …"` 줄을 뺀다.
 - API 호스트가 아직 DNS에 없으면 `--resolve dms.example.internal:443:<INGRESS_IP>`를 붙인다.
+
+호출 형태가 확인됐으면 나머지 엔드포인트(`/healthz`·control-state·inventory·storage-mappings·
+work-summary)는 스크립트로 한 번에 점검한다:
+
+```bash
+DMS_API_URL=https://dms.example.internal \
+DMS_CLIENT_CERT=certs/operator.crt DMS_CLIENT_KEY=certs/operator.key \
+DMS_CA_CERT=certs/dms-server-ca.crt DMS_TOKEN="$DMS_TOKEN" \
+  install/scripts/verify-install.sh
+# 운영 mTLS 프로필에서는 DMS_ACTOR를 설정하지 않는다(설정하면 actor_evidence_conflict).
+```
 
 여기까지면 코어가 떴다. `data_management` readiness가 아직 `Missing`이어도 정상이다 — DM 축
 (에이전트·artifact FS·큐)이 [`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)에서 구성되면 `Ready`로 바뀐다.

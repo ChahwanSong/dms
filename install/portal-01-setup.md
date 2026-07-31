@@ -17,9 +17,11 @@ cd <dms-repo-root>
   이미지가 빌드된 SPA 정적 자산과 BFF API(`/api/...`)를 같은 포트(`8090`)로 서빙한다.
 - **순수 DMS API 클라이언트** — 브라우저는 **BFF만** 호출하고, BFF가 DMS `/api/v1/...`를 호출한다. 브라우저는
   DMS 자격증명(client cert/token)을 절대 갖지 않는다. DMS와 통신하는 코드는 `backend/dms_client.py` 한 곳뿐이다.
-- **역할 모델(로그인 방식 = role)**
-  - `operator` — **ID/비밀번호** 로그인(운영자 전용, 다중 계정). 운영자 콘솔.
-  - `user` — **회사 AD 계정** 로그인(현재 더미 stand-in). 사용자 인터페이스.
+- **역할 모델(계정 저장소 = role)** — 두 역할 모두 아이디/비밀번호로 로그인하므로 **로그인 방식이
+  아니라 자격증명이 어느 테이블에 매칭됐는지**가 역할을 결정한다(`backend/security.py`).
+  - `operator` — `portal.operator_users` 계정(다중 계정, 관리 토큰으로 생성/재설정 — §10). 운영자 콘솔.
+  - `user` — `portal.user_accounts` 계정. 회사 메일 6자리 인증번호로 셀프서비스 가입/재설정(§10.2).
+    사용자 인터페이스.
 - **배치** — DMS와 **별도 namespace `dms-portal`**에 둔다. Portal Pod는 어떤 클러스터 변경 권한도 갖지 않으며
   kubeconfig/SSH secret을 mount하지 않는다(순수 API 클라이언트). 모든 변경은 DMS API를 통해서만 일어난다.
 
@@ -39,7 +41,7 @@ certificate을 검증해 upstream으로 넘기고 DMS는 **인증서 subject에�
 평문 `x-dms-actor`는 거부. 이 프로필은 **개별 인증서를 가진 직접 운영자·자동화**에 맞다.
 
 **그런데 포탈 BFF는 이 평면을 쓸 수 없다.** BFF는 다중 운영자를 대신해 **per-operator 신원을
-`x-dms-actor: mtls:<operator>`로 실어 나르는데**, mTLS 프로필은 actor를 (하나뿐인) BFF 인증서 subject로
+`x-dms-actor`로 실어 나르는데**, mTLS 프로필은 actor를 (하나뿐인) BFF 인증서 subject로
 덮어써 모든 운영자를 단일 actor로 뭉갠다. 그래서 **포탈은 노드 에이전트와 같은 내부 신뢰 평면
 `dms-api-internal`로 접속한다** — mTLS **off** + shared token + NetworkPolicy(agent + `dms-portal` ns만,
 ClusterIP). 근거·구조는 [`dms-05 §1·§7`](dms-05-configuration.md), 매니페스트
@@ -47,7 +49,9 @@ ClusterIP). 근거·구조는 [`dms-05 §1·§7`](dms-05-configuration.md), 매�
 
 - **`PORTAL_DMS_API_URL` = `http://dms-api-internal.dms.svc.cluster.local`**(portal.yaml 기본값).
 - **`PORTAL_DMS_TOKEN` = DMS `DMS_AUTH_SHARED_TOKEN`**과 동일해야 인증된다(내부 API의 shared-token 게이트).
-- 로그인한 운영자는 BFF가 실어 보내는 `mtls:<operator>` actor로 DMS audit에 남는다(per-operator 보존).
+- 로그인한 운영자/사용자는 BFF가 실어 보내는 `x-dms-actor`로 DMS audit에 남는다(per-operator 보존).
+  DM 잡(scan/sync/rm) 경로만 `PORTAL_BACKUP_ACTOR_PREFIX`(기본 `mtls:`)가 붙어 `mtls:<username>`이 되고,
+  스토리지 인벤토리 등 나머지 운영자 route는 username을 그대로 보낸다.
 - 브라우저↔BFF 세션 auth(세션 쿠키)는 BFF 자체 관심사로, BFF↔DMS 경로와 분리된다.
 
 > **보안.** 내부 API는 `x-dms-actor`를 신뢰하므로 노출을 NetworkPolicy + shared token으로 한정한다(외부
@@ -63,7 +67,6 @@ ClusterIP). 근거·구조는 [`dms-05 §1·§7`](dms-05-configuration.md), 매�
 | Portal image ref | `registry.example.internal/dms-portal:2026-06-23-abcdef0` | Deployment image |
 | DMS API base(BFF→DMS) | **`http://dms-api-internal.dms.svc.cluster.local`**(내부 신뢰 평면, 기본 — §2) | `PORTAL_DMS_API_URL` |
 | **DMS shared token**(필수) | DMS `DMS_AUTH_SHARED_TOKEN`과 **동일 값** | `PORTAL_DMS_TOKEN` |
-| Portal client cert / key(선택, 외부 mTLS 직결 시만 — §6.3) | `client.crt` / `client.key` | Secret `portal-dms-mtls` → `/etc/portal/tls` |
 | DMS audit actor 기본값 | `operator` | `PORTAL_DMS_ACTOR`(요청마다 로그인 운영자로 override) |
 | **클러스터 이름**(화면 표시) | `테스트베드` / `운영` / `dms-prod` 등 | `PORTAL_CLUSTER_NAME`(§6.1 — 환경마다 다르게) |
 | 세션 서명 시크릿 | `openssl rand -hex 32` 출력 | `PORTAL_SESSION_SECRET` |
@@ -80,11 +83,13 @@ ClusterIP). 근거·구조는 [`dms-05 §1·§7`](dms-05-configuration.md), 매�
 포탈은 기본적으로 **상태가 없는** API 클라이언트지만, **DB 기반 운영자 로그인**(§10)과 **데이터 백업 배치**
 기능을 쓰려면 포탈 전용 Postgres(`PORTAL_DB_URL`)가 필요하다.
 
-- **미설정(`PORTAL_DB_URL` 없음)** — 스토리지 인벤토리 등 DMS-연동 기능은 그대로 동작한다. 로그인은
-  `PORTAL_OPERATOR_USERS`(env 저장소)로 처리되고, 데이터 백업 route는 `503`으로 비활성된다.
-- **설정** — 기동 시 `PORTAL_DB_SCHEMA`(기본 `portal`) 스키마에 자신의 테이블(operator_users /
-  backup_batches / backup_requests)을 자동 생성한다. 운영자 로그인은 DB가 source of truth가 되고(최초 1회
-  `PORTAL_OPERATOR_USERS`로 시드), 데이터 백업 탭이 활성화된다.
+- **미설정(`PORTAL_DB_URL` 없음)** — DB 없이 동작하는 것은 **스토리지 인벤토리처럼 DMS를 그대로 프록시하는
+  read/write 뿐**이다. 데이터 백업·스캔·Sync·rm·VOC·대시보드 추세, 그리고 **사용자 계정 라우트 전부**가
+  `503 portal_db_not_configured`가 된다. 운영자 로그인만 `PORTAL_OPERATOR_USERS`(env 저장소)로 처리된다.
+- **설정** — 기동 시 `PORTAL_DB_SCHEMA`(기본 `portal`) 스키마에 자신의 테이블 14개
+  (`operator_users`·`user_accounts`·`email_verifications`·`backup_*`·`scan_*`·`sync_jobs`·`rm_jobs`·
+  `dashboard_samples` 등)를 자동 생성한다. 운영자 로그인은 DB가 source of truth가 되고(최초 1회
+  `PORTAL_OPERATOR_USERS`로 시드), 위 기능이 모두 활성화된다.
 
 DMS Postgres를 **전용 스키마(`portal`)로 재사용**할 수 있다. 이때 `PORTAL_DB_URL` = DMS의 `DMS_DATABASE_URL`
 값(§7.2에서 라이브 Secret로 주입).
@@ -151,13 +156,24 @@ cp src/portal/deploy/kubernetes/portal.yaml /tmp/dms-portal.yaml
   ```
 
 - **Deployment `dms-portal` → `env`**:
-  - `PORTAL_DMS_API_URL` — BFF가 호출할 DMS API base. (운영 mTLS ingress면 `https://dms.example.internal`,
-    in-cluster 신뢰 경계면 `http://dms-api.dms.svc.cluster.local` — §6.3.)
+  - `PORTAL_DMS_API_URL` — BFF가 호출할 DMS API base. **기본값
+    `http://dms-api-internal.dms.svc.cluster.local`**(§2)을 그대로 쓴다. 외부 mTLS `dms-api`에 직결하는
+    특수 케이스만 §6.3.
   - `PORTAL_SESSION_HTTPS_ONLY` — **운영(TLS 서빙)이면 `"true"`**(기본값·fail-closed). 평문 HTTP NodePort로만
     노출하는 경우에 한해 `"false"`.
   - `PORTAL_DMS_ACTOR` — DMS audit 기본 actor(BFF가 요청마다 로그인 운영자 username으로 override).
   - `PORTAL_CLUSTER_NAME` — **이 포탈이 담당하는 클러스터 이름.** manifest 기본값은
     `CHANGE_ME_CLUSTER_NAME`이므로 **설치 시 반드시 환경에 맞게 바꾼다**(예: `운영`, `테스트베드`).
+
+  manifest는 **개발 전용 메일 설정 4개를 그대로 싣고 있다.** 그냥 apply하면 운영 포탈이 인증번호를
+  평문 로그로 뿌리는 `log` 모드로 뜨고 dev 기본 세션 시크릿 허용 플래그까지 켜진 채 배포되므로,
+  아래 4개도 반드시 함께 고친다(상세 → [portal-02-user-auth.md](portal-02-user-auth.md) §3·§5):
+
+  - `PORTAL_EMAIL_DOMAIN` — `gmail.com`(연동 전 테스트값) → **회사 메일 도메인**.
+  - `PORTAL_EMAIL_DELIVERY` — `log`(개발 전용) → 사내 연동 후 `company`, 아직이면 `none`.
+  - `PORTAL_ALLOW_INSECURE_DEFAULTS` — `"1"` → **운영에서는 이 env 자체를 삭제한다.**
+  - `PORTAL_SIGNUP_ALLOWLIST` — 특정 아이디가 박혀 있다. 회사 도메인으로 바꾼 뒤에는 비우고,
+    공용 도메인을 계속 쓴다면 허용 아이디 목록으로 채운다.
 
 전체 env 변수는 `src/portal/backend/config.py`가 정의한다. 주요 항목:
 
@@ -184,60 +200,19 @@ cp src/portal/deploy/kubernetes/portal.yaml /tmp/dms-portal.yaml
 stringData:
   PORTAL_SESSION_SECRET: "REPLACE_WITH_SESSION_SECRET"
   PORTAL_OPERATOR_USERS: "REPLACE_WITH_OPERATOR_CREDS"
-  PORTAL_DMS_TOKEN: "REPLACE_WITH_DMS_TOKEN"    # 선택(bearer 레이어). 안 쓰면 비워 둔다.
+  PORTAL_DMS_TOKEN: "REPLACE_WITH_DMS_TOKEN"    # 필수 — DMS의 DMS_AUTH_SHARED_TOKEN과 동일 값
+                                                #        (내부 평면 dms-api-internal의 유일한 인증)
   PORTAL_ADMIN_TOKEN: "REPLACE_WITH_ADMIN_TOKEN"  # 선택(§10). 안 쓰면 비워 둔다.
   PORTAL_DB_URL: "REPLACE_WITH_DB_URL"          # 선택(§4). 안 쓰면 비워 둔다.
 ```
 
-### 6.3 (선택) BFF → 외부 mTLS dms-api 직결
+### 6.3 (참고) BFF → 외부 mTLS dms-api 직결은 지원하지 않는다
 
-> **기본 배포에는 필요 없다.** 포탈은 §2대로 내부 신뢰 평면 `dms-api-internal`(shared token)을 쓴다 —
-> per-operator `x-dms-actor`가 mTLS 프로필에서 뭉개지기 때문. 아래는 포탈을 **외부 mTLS `dms-api`에
-> 직접** 붙이려는 특수 케이스만을 위한 것이고, 그러면 per-operator 신원이 단일 BFF cert actor로
-> 합쳐진다는 트레이드오프가 있다. 게다가 현 BFF DMS 클라이언트는 client cert을 스스로 로드하지 않으므로
-> (bearer + `x-dms-actor`만) 코드/사이드카 보강이 별도로 필요하다.
-
-포탈을 외부 mTLS dms-api에 직결하려면, BFF는 DMS에 **portal 전용 client certificate을 제시**해야
-한다. 인증서·키·CA를 별도 Secret으로 만들어 Portal 컨테이너에 read-only로 mount한다.
-
-```bash
-kubectl -n dms-portal create secret generic portal-dms-mtls \
-  --from-file=client.crt=./portal-client.crt \
-  --from-file=client.key=./portal-client.key \
-  --from-file=ca.crt=./dms-ca.crt
-```
-
-`/tmp/dms-portal.yaml`의 Deployment `dms-portal`에 volume/volumeMount를 추가한다(파일 → 리소스 → 키).
-
-```yaml
-# Deployment dms-portal → spec.template.spec.containers[portal]
-volumeMounts:
-  - name: dms-mtls
-    mountPath: /etc/portal/tls
-    readOnly: true
-# Deployment dms-portal → spec.template.spec
-volumes:
-  - name: dms-mtls
-    secret:
-      secretName: portal-dms-mtls
-```
-
-그리고 `PORTAL_DMS_API_URL`을 mTLS를 강제하는 DMS 엔드포인트로, `PORTAL_DMS_VERIFY_TLS=true`(마운트한
-`ca.crt`로 DMS 서버 cert 검증)로 둔다. DMS는 client cert subject에서 actor를 파생한다(`mtls:` prefix).
-
-> **client cert 제시 경로(중요).** 현재 in-tree BFF DMS 클라이언트(`backend/dms_client.py`)는 bearer +
-> `x-dms-actor`만 붙이고 client cert을 스스로 로드하지는 않는다. mTLS-only DMS에 맞추려면 다음 중 하나로
-> 배포한다.
-> - **(a) egress에서 mTLS 종단** — BFF의 DMS egress를 client cert(`/etc/portal/tls/client.{crt,key}`)을
->   제시하고 `ca.crt`를 신뢰하는 mTLS-terminating proxy/sidecar 뒤에 둔다. `PORTAL_DMS_API_URL`은 그
->   proxy(예: `http://127.0.0.1:<port>`)를 가리키고, proxy가 DMS mTLS ingress로 relay한다.
-> - **(b) in-cluster 신뢰 경계** — BFF가 DMS Service(`http://dms-api.dms.svc.cluster.local`)에 직접
->   접속하고, NetworkPolicy 신뢰 경계 + DMS 측 verified-header 처리로 보호한다. 사용자별 actor 전달 계약은
->   DMS owner와 확인한다.
->
-> 어느 쪽을 택할지는 `CLAUDE.md`의 Portal 작업 규칙(필요 시 backend 변경을 이슈로 제기 후 공동구현)에 따라 DMS
-> owner와 합의한다. 데이터 백업 등 privileged(root) DM 잡은 BFF가 이미 actor를 `mtls:<operator>`로
-> 접두(prefix)하므로(`PORTAL_BACKUP_ACTOR_PREFIX`), 위 mTLS 신원과 결합돼 DMS가 verified operator로 인식한다.
+**기본 배포는 §2의 내부 신뢰 평면(`dms-api-internal` + shared token)을 쓴다.** 포탈을 외부 mTLS
+`dms-api`에 직접 붙이려면 BFF가 client certificate을 제시해야 하는데, 현재 DMS 클라이언트
+(`backend/dms_client.py`)는 bearer + `x-dms-actor`만 붙이고 cert을 로드하지 않는다. 굳이 붙인다면
+mTLS를 종단하는 egress proxy/sidecar를 앞에 둬야 하고, 그렇게 하면 **모든 운영자가 단일 BFF 인증서
+actor로 뭉개져** per-operator audit이 사라진다. 그래서 내부 평면을 쓰는 것이다.
 
 ## 7. 배포
 
@@ -292,13 +267,12 @@ kubectl -n dms-portal rollout status  deploy/dms-portal --timeout=120s
 
 ### 8.1 (권장) Ingress + 서버 TLS
 
-**ingress-nginx + MetalLB 설치 절차는 [dms-06-ingress-metallb.md](dms-06-ingress-metallb.md)** 를 따른다
-(이미지 미러링, MetalLB IP 풀 선정, `host:` 유무에 따른 IP 접속 404 함정, `/healthz` 선점 이슈 포함).
-테스트베드에는 이미 적용되어 있고 포탈은 `http://10.10.10.200/`으로 서빙된다.
+**ingress-nginx + MetalLB 설치, 포탈 ingress 적용, 운영 TLS 전환(쿠키 Secure 포함) 절차는
+[dms-06-ingress-metallb.md](dms-06-ingress-metallb.md) §5·§7** 에 있다(이미지 미러링, IP 풀 선정,
+`host:` 유무에 따른 IP 접속 404 함정, `/healthz` 선점 이슈 포함).
 
-운영에서는 TLS로 서빙하고 `PORTAL_SESSION_HTTPS_ONLY=true`(기본값)로 두어 세션 쿠키를 Secure-only로
-만든다. 참고 manifest는 `src/portal/deploy/kubernetes/portal-ingress.example.yaml`(host, TLS secret,
-`ingressClassName`을 환경에 맞춰 조정). 백엔드는 Service `dms-portal:80`.
+참고 manifest는 `src/portal/deploy/kubernetes/portal-ingress.example.yaml` — host, TLS secret,
+`ingressClassName`을 환경에 맞춰 조정한다.
 
 ### 8.2 (간단) NodePort
 
@@ -318,8 +292,9 @@ kubectl -n dms-portal get svc dms-portal
 BASE="https://portal.example.internal"   # 또는 http://<node-ip>:30090
 JAR="$(mktemp)"
 
-# 1) health (dms_configured=true 여야 함; 포탈 DB면 db_configured=true도)
-curl -fsS "$BASE/healthz"; echo
+# 1) health — ingress-nginx가 `/healthz`를 선점하므로(빈 body 200, dms-06 §5) 파드에서 직접 본다
+kubectl -n dms-portal exec deploy/dms-portal -- \
+  python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8090/healthz').read().decode())"
 
 # 2) 운영자 로그인 (PORTAL_OPERATOR_USERS의 계정)
 curl -fsS -c "$JAR" -X POST "$BASE/api/auth/login" \
@@ -345,8 +320,10 @@ curl -s -o /dev/null -w "user->operator API: %{http_code}\n" -b "$JAR2" "$BASE/a
 
 기대값:
 
-- `/healthz` → `{"status":"ok","dms_configured":true}` (포탈 DB면 `"db_configured":true`, 메일 설정 시
-  `"email_configured":true,"email_domain":"<회사도메인>"` 포함)
+- `/healthz` → 항상 `status`·`dms_configured`·`db_configured`·`email_configured`·`email_domain`·
+  `cluster_name` **6개 키**가 오며, 키 유무가 아니라 **값**으로 판단한다. 정상 설치면
+  `dms_configured`·`db_configured`(포탈 DB 사용 시)·`email_configured`(메일 설정 시)가 모두 `true`이고
+  `cluster_name`이 §6.1에서 지정한 값이다
 - 운영자 로그인 → `{"user":{...,"role":"operator"}}`
 - 목록 → DMS에 등록된 storage mapping 개수
 - 사용자 인증 설정 → `{"available":true,"email_domain":"...","code_ttl_seconds":600,"email_delivery":"log|company",...}`
@@ -354,7 +331,9 @@ curl -s -o /dev/null -w "user->operator API: %{http_code}\n" -b "$JAR2" "$BASE/a
 - **`root` 가입요청 → `422`** (예약 아이디)
 - 사용자 세션 → operator API `403`
 
-## 10. 운영자 계정 — 로그인 화면에서 생성·비밀번호 재설정
+## 10. 계정 운영
+
+### 10.1 운영자 계정 — 로그인 화면에서 생성·비밀번호 재설정
 
 운영자 계정 생성/비밀번호 재설정은 **로그인 화면**(로그인 전)에서 **운영용 비밀 토큰(`PORTAL_ADMIN_TOKEN`)**을
 함께 입력해 수행한다. 계정 저장소는 포탈 DB `portal.operator_users`(PBKDF2 해시)이며 `PORTAL_DB_URL`이 설정된
@@ -382,42 +361,18 @@ echo "비밀 토큰: $ADMTOK"   # 안전 채널로만 전달·보관
 
 > 이 토큰을 아는 사람은 로그인 없이 운영자 계정을 만들거나 비밀번호를 재설정할 수 있다(의도된 부트스트랩/복구
 > 경로). 반드시 강한 랜덤값을 쓰고 안전 채널로만 공유한다. 토큰 미설정(빈 값)이면 두 서브탭이 숨겨지고 두
-> 엔드포인트는 `503`을 반환한다. `kubectl apply`가 Secret을 placeholder로 덮으므로 apply 후 재주입한다.
+> 엔드포인트는 `503`을 반환한다. apply 후 재주입은 §7.2 참조.
 
-## 10.2 사용자 계정 — 회사메일 인증(6자리) 셀프서비스
+### 10.2 사용자 계정 — 회사메일 인증(6자리) 셀프서비스
 
-사용자(end-user)는 **아이디/비밀번호**로 로그인하고, 계정 생성·비밀번호 재설정은 **회사 메일로 받은 6자리
-인증번호**로 본인 확인한다. 운영자 토큰은 쓰지 않는다 — **메일함 통제권이 곧 인가**다. 저장소는 포탈 DB
-`portal.user_accounts`(PBKDF2) + `portal.email_verifications`이며 `PORTAL_DB_URL` 필요(§4).
+사용자(end-user)는 **아이디/비밀번호**로 로그인하고, 계정 생성·비밀번호 재설정은 `<아이디>@<회사도메인>`
+으로 받은 **6자리 인증번호**로 본인 확인한다. 운영자 토큰은 쓰지 않는다 — **메일함 통제권이 곧 인가**다.
+저장소는 포탈 DB `portal.user_accounts`(PBKDF2) + `portal.email_verifications`이며 `PORTAL_DB_URL`이
+필요하다(§4).
 
-**흐름**: 아이디 + 비밀번호 입력 → `[인증요청]` → `<아이디>@<도메인>`으로 인증번호 메일 → 인증번호 입력 →
-계정 생성 완료. 비밀번호 재설정도 동일. 인증번호 **유효시간 10분**, 재발송 쿨다운 60초.
-
-### 설정 · 사내 메일 연동 · 허용목록
-
-**전체 설정 항목, 사내 메일 발송 연동 코드 작성법, 도메인·허용목록 운영, 보안 불변식은
-→ [portal-02-user-auth.md](portal-02-user-auth.md) 를 참고한다.**
-
-최소 설정만 옮기면:
-
-| 변수 | 값 | 설명 |
-| --- | --- | --- |
-| `PORTAL_EMAIL_DOMAIN` | `samsung.com` | 아이디 뒤에 붙는 **회사 메일 도메인**. 구축 시 설정. 빈 값이면 기능 비활성 |
-| `PORTAL_EMAIL_DELIVERY` | `none` \| `log` \| `company` | 인증메일 배송 수단. 사내 연동 전에는 `log`(개발 전용) |
-| `PORTAL_SIGNUP_ALLOWLIST` | `aaa.bbb,ccc.ddd` | 가입 허용 아이디. **공용 도메인(gmail.com 등) 사용 중에는 필수** |
-
-> **사내 메일 발송은 아직 미구현이다.** `src/portal/backend/mailer.py`의
-> `deliver_company_mail()` 함수 하나를 구현하고 `PORTAL_EMAIL_DELIVERY=company`로 바꾸면 된다
-> (다른 파일 수정 불필요). 상세: [portal-02-user-auth.md](portal-02-user-auth.md) §5.
-
-연동 전 화면·플로우를 테스트하려면 `PORTAL_EMAIL_DELIVERY=log` + `PORTAL_ALLOW_INSECURE_DEFAULTS=1`로
-인증번호를 서버 로그에서 확인한다. 인증번호는 **HTTP 응답에 절대 포함되지 않는다.**
-`PORTAL_EMAIL_DELIVERY=log`인데 `PORTAL_ALLOW_INSECURE_DEFAULTS`가 없으면 **기동을 거부**한다
-(반대로 `PORTAL_ALLOW_INSECURE_DEFAULTS`만 있는 것은 정상 — 이 플래그는 dev 세션 시크릿 허용에도 쓰인다):
-
-```bash
-kubectl -n dms-portal logs deploy/dms-portal | grep "DEV CODE ECHO" | tail -1
-```
+설치 시 정해야 할 값은 `PORTAL_EMAIL_DOMAIN`·`PORTAL_EMAIL_DELIVERY`·`PORTAL_SIGNUP_ALLOWLIST`
+세 개다(§6.1). **전체 설정 항목, 사내 메일 발송 연동 코드 작성법, 도메인·허용목록 운영, 보안 불변식·
+트레이드오프는 → [portal-02-user-auth.md](portal-02-user-auth.md).**
 
 ## 11. 보안 주의
 
@@ -428,19 +383,18 @@ kubectl -n dms-portal logs deploy/dms-portal | grep "DEV CODE ECHO" | tail -1
 - **운영은 TLS로 서빙**하고 `PORTAL_SESSION_HTTPS_ONLY=true`(기본값)를 유지한다. `false`는 세션 쿠키가 평문으로
   오가 스니핑/재전송 위험이 있어 평문 HTTP 노출 시에만 쓴다.
 - **운영자 비밀번호**는 강한 값으로 설정/회전한다(`admin/admin1234`는 데모용).
-- Portal Pod에 mTLS client cert(§6.3)·DMS 토큰 외의 control-plane 자격증명(kubeconfig/SSH key 등)을 주지 않는다.
+- Portal Pod에 DMS 토큰 외의 control-plane 자격증명(kubeconfig/SSH key 등)을 주지 않는다.
 
-### 11.1 사용자(AD) 셀프서비스 메뉴 — 데이터 Sync · 데이터 스캔
+### 11.1 사용자 셀프서비스 메뉴(데이터 Sync · 데이터 스캔)에서 주의할 점
 
-사용자(AD 로그인) 인터페이스에 셀프서비스 **데이터 Sync**(단일 복사)와 **데이터 스캔**(운영자 스캔 결과 조회)
-메뉴가 있다. Sync는 운영자와 동일한 preview→승인→실행 흐름이되 옵션이 고정된다(우선순위 중간, 병렬 노드 정책
-기본값, open_noatime ON, batch_files 100000, bufsize 4MiB, chmod/chown 미제공; 사용자는 `--delete`·`contents`만
-선택). 사용자 Sync 요청은 운영자 포탈의 **데이터 Sync 목록에 `[사용자]` 라벨과 함께** 노출되어 운영자가 확인·관리할
-수 있다(공유 `sync_jobs` 테이블). 주의할 보안 사항:
+사용자 인터페이스에는 셀프서비스 **데이터 Sync**(단일 복사)와 **데이터 스캔**(운영자 스캔 결과 조회)
+메뉴가 있다. Sync는 운영자와 동일한 preview→승인→실행 흐름이되 옵션이 고정되고(사용자는 `--delete`·
+`contents`만 선택), 요청은 운영자 포탈의 데이터 Sync 목록에 `[사용자]` 라벨로 함께 노출된다.
+주의할 보안 사항:
 
 - **실행 신원**: 파일시스템↔파일시스템 sync는 **사용자 본인 신원**(`requester_id=<user>`)으로 실행된다(DMS가
-  LDAP로 uid 해석 → POSIX 권한 적용). 현재 더미 AD(`ad-user`)는 LDAP에 없어 프리뷰 단계에서 실패할 수 있다(정상 —
-  실제 AD 연동 후 동작). 파일시스템↔PVC 혼합은 **차단**(사용자가 운영자에게 요청).
+  LDAP로 uid 해석 → POSIX 권한 적용). 로그인 아이디(또는 `posix_username`)가 LDAP에 없으면 프리뷰 단계에서
+  실패한다. 파일시스템↔PVC 혼합은 **차단**(사용자가 운영자에게 요청).
 - **PVC↔PVC sync는 현재 root(uid 0)로 실행**된다(PVC 소속 네임스페이스 권한 사전 확인 기능은 추후 추가 예정).
   파괴적 `--delete`는 이 경로에서 **금지**되어 있다(root 미러 삭제 방지). 그럼에도 root 복사 자체가 가능하므로,
   DMS의 특권 요청 게이트를 반드시 좁힌다: `DMS_DM_PRIVILEGED_OPERATORS`(빈 값=모든 mTLS actor 허용)와
@@ -452,44 +406,38 @@ kubectl -n dms-portal logs deploy/dms-portal | grep "DEV CODE ECHO" | tail -1
   권한 없는 경로의 스캔 메타데이터**(파일 수·용량·atime 히스토그램; 파일 내용 아님)까지 조회할 수 있다. 경로 단위
   권한 확인은 위 PVC 네임스페이스 권한 확인과 함께 추후 과제다.
 
-### 11.2 사용자 로그인 — 회사메일 인증 계정 (더미 AD 제거됨)
+### 11.2 사용자 로그인 — 회사메일 인증 계정
 
 사용자 로그인은 이제 **아이디/비밀번호**이고, 계정 생성·비밀번호 재설정은 **회사 메일로 받은 6자리 인증번호**로
 본인 확인한다(운영자 토큰 불필요). 설정 절차는 **§10.2**.
 
-> **이전 더미 AD 로그인(`POST /api/auth/login/ad`)은 삭제되었다.** 자격증명을 전혀 검증하지 않고 입력한
-> 아이디로 로그인시켰는데, 그 아이디가 DMS의 실행 신원(`requester_id`)으로 그대로 전달되므로 사실상 인증
-> 우회였다. `PORTAL_ALLOW_DUMMY_AD` 설정도 함께 제거했다(env 하나로 되살아나는 우회 경로를 남기지 않기 위함).
-
-- **아이디 = 회사 메일 local-part.** `test1.user@samsung.com` → 아이디 `test1.user`. 인증번호는 항상
-  `<아이디>@PORTAL_EMAIL_DOMAIN`으로 발송되며, 도메인은 **서버 설정에서만** 오고 사용자 입력에서 파생하지
-  않는다(파생하면 임의 외부 주소로 인증번호를 배달시킬 수 있다).
 - **예약 아이디 차단(중요).** `root`·`admin`·`operator`·`dms` 등은 가입이 거부된다(`422 username_reserved`).
   특히 `root`는 DMS의 `dm_privileged_requesters`(uid/gid 0, `dm_min_uid` 우회)이므로, 자가 가입을 허용하면
-  곧바로 root 권한 데이터 작업이 된다. 목록은 `src/portal/backend/email_codes.py: RESERVED_USERNAMES`.
-- **함께 점검할 DMS 설정(운영 과제).** `DMS_DM_PRIVILEGED_OPERATORS`가 비어 있으면 "mTLS actor 전원 허용"이다.
-  실제 운영자 목록으로 좁히는 것을 권장한다(DMS 측 env이므로 포탈 배포와 별개로 진행).
-- **세션 시크릿 회전.** 더미 AD로 발급된 기존 세션 쿠키는 라우트를 지워도 서명 유효기간(기본 8시간) 동안
-  살아 있다. 이번 업그레이드 배포 시 `PORTAL_SESSION_SECRET`을 **함께 교체**해 전부 무효화한다(§7.2).
+  곧바로 root 권한 데이터 작업이 된다. 목록·상세는 portal-02 §7.3.
+- **함께 좁힐 DMS 설정(운영 과제).** `DMS_DM_PRIVILEGED_OPERATORS`가 비어 있으면 "mTLS actor 전원 허용"이다.
+  §11.1과 함께 실제 운영자 목록으로 좁힌다(DMS 측 env이므로 포탈 배포와 별개로 진행).
 - 비밀번호 변경은 즉시 기존 세션을 끊지 않는다(쿠키 세션, 최대 8시간). 즉시 차단이 필요하면 세션 시크릿을
-  회전한다.
-- **알려진 트레이드오프 — 재설정 일시 잠금.** 인증번호 무차별 대입을 막기 위해 누적 실패 예산
-  (`PORTAL_EMAIL_MAX_FAILURES_PER_WINDOW`, 기본 20회/시간)을 두는데, 대상 아이디를 아는 제3자가 일부러
-  틀린 인증번호를 반복 입력해 **해당 사용자의 비밀번호 재설정을 최대 1시간 막을 수 있다**. 로그인 자체는
-  영향받지 않으며, 예산을 없애면 무차별 대입이 열리므로 의도적으로 감수한 설계다. 급하면 운영자가
-  `portal.email_verifications`에서 해당 행을 지우면 즉시 해제된다.
+  회전한다(§7.2).
+- 도메인 파생 금지·재설정 일시 잠금 등 **보안 불변식과 알려진 트레이드오프는 portal-02 §8**에 있다.
 
 ## 12. 자주 발생하는 문제
 
 - **`/healthz`의 `dms_configured`가 false** — `PORTAL_DMS_API_URL`이 비어 있다. Deployment env 확인(§6.1).
 - **DMS 연동 route가 `503 dms_not_configured`** — `PORTAL_DMS_API_URL` 미설정.
-- **DMS 연동 route가 `502 dms_unreachable`** — Portal Pod에서 DMS API에 도달 불가. service DNS/NodePort
-  도달성과 NetworkPolicy를 확인한다(`dms-portal`을 dms-api 허용 목록에 포함).
-- **DMS 호출이 `401`/`403`** — 운영 mTLS profile에 client cert 없이 접속 중이거나(§6.3), (부연 profile에서)
-  `PORTAL_DMS_TOKEN`이 DMS의 `DMS_AUTH_SHARED_TOKEN`과 다르다. §7.2로 재주입 후 재기동.
-- **운영자 로그인 `401`** — `PORTAL_OPERATOR_USERS`에 계정이 없거나 비밀번호가 다르다. 라이브 Secret 값 확인.
-- **Pod가 `CrashLoopBackOff`** — 로그에 `PORTAL_SESSION_SECRET is unset/default`면 세션 시크릿이 dev
-  기본값(또는 미주입)이다. §7.2로 실값 주입 후 재기동. `kubectl -n dms-portal logs deploy/dms-portal --tail=50`.
+- **DMS 연동 route가 `502 dms_unreachable`** — Portal Pod에서 DMS API에 도달 불가. service DNS 도달성과,
+  `dms-api-internal`의 NetworkPolicy `dms-api-internal-trusted-clients`에 `dms-portal` 네임스페이스가
+  포함돼 있는지 확인한다(`install/kubernetes/dms-api-internal.yaml`).
+- **DMS 호출이 `401`/`403`** — 대부분 `PORTAL_DMS_TOKEN`이 DMS의 `DMS_AUTH_SHARED_TOKEN`과 다른 경우다.
+  §7.2로 재주입 후 재기동. (외부 mTLS `dms-api`에 직결하도록 바꿨다면 §6.3.)
+- **운영자 로그인 `401`** — 포탈 DB를 쓰지 않으면 `PORTAL_OPERATOR_USERS`에 계정이 없거나 비밀번호가
+  다른 것이다(라이브 Secret 값 확인). **`PORTAL_DB_URL`을 설정한 배포에서는 `portal.operator_users`가
+  source of truth**라 env는 최초 시드일 뿐이므로, Secret만 고쳐도 계속 `401`이다 — §10.1의 비밀번호
+  재설정(관리 토큰)으로 바꾼다.
+- **Pod가 `CrashLoopBackOff`** — `create_app`의 부팅 가드 3개 중 하나다(`kubectl -n dms-portal logs
+  deploy/dms-portal --tail=50`): ① `PORTAL_SESSION_SECRET is unset/default` → §7.2로 실값 주입,
+  ② `PORTAL_EMAIL_DELIVERY=log ...` → 운영이면 `company`/`none`으로, 개발이면
+  `PORTAL_ALLOW_INSECURE_DEFAULTS=1` 동반(§6.1), ③ `PORTAL_EMAIL_DOMAIN is not a valid domain` →
+  도메인 오타.
 - **apply 후 갑자기 DMS 호출 `401`/로그인 불가** — `kubectl apply`가 Secret을 placeholder로 덮었다. §7.2
   재패치 + §7.3 재기동.
 - **데이터 백업 탭이 `503` / `db_configured`가 false** — `PORTAL_DB_URL`이 비어 있다(또는 placeholder). §7.2로

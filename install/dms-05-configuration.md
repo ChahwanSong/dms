@@ -102,7 +102,23 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 | `DMS_DB_STATEMENT_TIMEOUT_MS` | `30000` | pooled connection `statement_timeout`(ms). runaway 쿼리 강제 종료. |
 | `DMS_DB_IDLE_IN_TXN_TIMEOUT_MS` | `60000` | pooled connection `idle_in_transaction_session_timeout`(ms). 누수 트랜잭션 강제 종료. |
 
-**천장(ceiling) 공식**: `서버 PG connection ≤ Σ프로세스(op_max + obs_max)`. 기본값 기준 API×2 + loop 4개(planner/dm-worker/sanity/retention) = `2×(16+3) + 4×(4+3) = 38 + 28 = 66 < 100`. 이는 *모든 풀이 동시에 max까지 차는* 상한이며, **실측 정상상태는 훨씬 낮다** — loop는 `--interval`(5초) 폴링으로 op를 ~1개씩만 잡고, `DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 idle obs floor가 0이다(min_size=0은 idle 커넥션을 reap해 커넥션 수를 워커 수와 사실상 분리한다). 동시성을 키울 땐 `DMS_DB_API_POOL_MAX_SIZE`와 PostgreSQL `max_connections`를 **함께** 올린다([`dms-02-core.md`](dms-02-core.md) DB 섹션, 워커 대량 확장은 [`dms-01 §3.4`](dms-01-prerequisites.md)). migration/대량 유지보수는 unpooled로 실행되어 위 timeout 영향을 받지 않는다.
+**천장(ceiling) 공식**: `서버 PG connection ≤ Σ프로세스(op_max + obs_max)`.
+
+**주의 — 프로세스 수는 replica 수로 세야 한다.** 출하 매니페스트 기준으로 `dms-api`는 replicas 2,
+`dms-dm-worker`는 **replicas 32**(`control-plane.yaml`)이며, `dms-api-internal`은 API와 같은 풀
+설정을 쓰는 별도 Deployment다. 따라서 기본값 기준 실제 천장은
+
+```
+dms-api            2 × (16+3) =  38
+dms-api-internal   1 × (16+3) =  19
+dms-dm-worker     32 × ( 4+3) = 224
+planner·sanity·retention  3 × ( 4+3) =  21
+                                 -----
+                                   302  (+ superuser_reserved 3, + 일시적 migrate Job)
+```
+
+즉 **stock `max_connections=100`으로는 부족하다** — 32-replica 기본 배치는 `max_connections=400`
+급을 전제로 한다([`dms-01 §3.4`](dms-01-prerequisites.md)). 이는 *모든 풀이 동시에 max까지 차는* 상한이며, **실측 정상상태는 훨씬 낮다** — loop는 `--interval`(5초) 폴링으로 op를 ~1개씩만 잡고, `DMS_DB_WORKER_POOL_MIN_SIZE=0`이라 idle obs floor가 0이다(min_size=0은 idle 커넥션을 reap해 커넥션 수를 워커 수와 사실상 분리한다). 동시성을 키울 땐 `DMS_DB_API_POOL_MAX_SIZE`와 PostgreSQL `max_connections`를 **함께** 올린다([`dms-02-core.md`](dms-02-core.md) DB 섹션, 워커 대량 확장은 [`dms-01 §3.4`](dms-01-prerequisites.md)). migration/대량 유지보수는 unpooled로 실행되어 위 timeout 영향을 받지 않는다.
 
 ---
 
@@ -115,6 +131,23 @@ grep -R "CHANGE_ME\|registry.example.internal\|dms.example.internal\|postgres.ex
 | `DMS_PREVIEW_TTL_SECONDS` | `86400` | `sync`/`rm` preview가 `ConfirmPending`으로 유지되는 TTL. `scan`은 confirm 없이 read-only. |
 | `DMS_AGENT_REPORT_STALE_SECONDS` | `300` | storage-mapping readiness의 agent report freshness window. |
 | `DMS_CONTROL_CLUSTER_NAME` | `cluster-a` | DM readiness·inventory aggregation에 쓰는 control cluster name. |
+| `DMS_DATA_JOB_ATTENTION_WINDOW_SECONDS` | `604800` (7일) | 종료된 데이터 잡이 "조치 필요"에 남아 있는 시간(초). `0`이면 창 없음(조건에 맞는 잡 전부 노출). 잡 row 자체는 이력으로 보존되고, 알람만 이 창으로 제한된다. |
+
+### 2.1 sanity reconciler · planner 게이트
+
+storage mapping의 `readiness`는 **마지막 검사 결과가 저장된 값**이라 주기적으로 갱신되지 않으면
+양방향으로 낡는다(낡은 `Missing`이 정상 작업을 막고, 낡은 `Ready`가 사라진 agent를 가린다).
+`dms sanity-reconciler --loop`가 이를 새로 고치며, 아래 값들은
+[`kubernetes/sanity-reconciler.yaml`](kubernetes/sanity-reconciler.yaml)이 설정한다.
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `DMS_SANITY_RECONCILE_ENABLED` | `true` | 리컨실러 스윕 활성화. `false`면 루프가 아무 것도 하지 않는다(readiness는 등록/`:check` 시점에만 갱신). |
+| `DMS_SANITY_RECONCILE_INTERVAL_SECONDS` | `30` | 스윕 주기(초). 한 스윕은 클러스터 인벤토리를 **1회** 읽어 전 매핑에 재사용한다. |
+| `DMS_SANITY_RECONCILE_HEARTBEAT_PATH` | 설정 안 됨 | 매 사이클 갱신되는 heartbeat 파일 경로. k8s liveness probe가 이 파일의 age를 본다. |
+| `DMS_SANITY_TTL_SECONDS` | `120` | readiness를 신뢰할 수 있는 최대 나이(초). 아래 planner 게이트가 이 값을 쓴다. |
+| `DMS_SANITY_PLANNER_GATE_ENABLED` | `false` | `true`면 planner가 **`Ready`지만 TTL보다 오래된** readiness를 fail-closed로 거부한다(`dm_readiness_stale`). 리컨실러를 먼저 배포·정상 확인한 뒤 켠다 — 반대로 하면 모든 데이터 잡이 막힌다. |
+| `DMS_SANITY_EVENT_RECOMPUTE_ENABLED` | `false` | `true`면 agent 리포트 수신 시 그 노드가 보고한 storage의 readiness를 즉시 재계산한다(주기 스윕을 기다리지 않음). 리포트 처리 경로에 부하를 더하므로 기본은 꺼져 있다. |
 
 > **DM worker 수평 확장.** `dms-dm-worker`는 **replicas를 늘리면 최대 그 수만큼 잡을
 > 동시 실행**한다(각 워커가 잡 1개를 claim→완료까지 처리). claim은 `FOR UPDATE SKIP LOCKED`(PostgreSQL)라
@@ -186,13 +219,11 @@ DM 잡은 [`dms-01-prerequisites.md`](dms-01-prerequisites.md)의 클러스터 p
 
 `dms-dm-worker` Deployment **replicas=32(매니페스트 기본) = DM enabled · 최대 32-way 동시 실행** (32는 `max_connections≥400` 전제 — 규모에 맞게 조정, 위 §3 "DM worker 수평 확장"). `0`은 DM을 **의도적으로 끌 때만** — 0이면 어떤 worker도 data job을 claim하지 않아 `scan`/`sync`/`rm`이 큐에 쌓인 채 실행되지 않는다(정상 상태 아님).
 
-### 이미지 빌드 순서 (DMS_DM_JOB_IMAGE 트랩)
+### 이미지 (DMS_DM_JOB_IMAGE)
 
-빌드 순서와 대상은 [`dms-02-core.md`](dms-02-core.md)·[`dms-04-dm-jobs.md`](dms-04-dm-jobs.md)에 있다. 요지:
-
-1. **DM 잡 이미지**를 `install/docker/Dockerfile.mpifileutils`로 빌드→레지스트리 push → 그 ref를 `control-plane.yaml` ConfigMap `dms-runtime-config`의 `DMS_DM_JOB_IMAGE`에 넣는다(실제 push한 ref로).
-2. **dms-agent 이미지**를 `install/docker/Dockerfile.agent`로 빌드하되 `--build-arg MFU_IMAGE=<위 잡 이미지>`(잡 이미지가 **먼저** 있어야 함) → `dms-dm-agent` DaemonSet이 사용. plain `dms` 이미지에는 mpifileutils tool이 없어 DM 후보가 `missing_dscan`/`dsync`/`drm_tool`로 거부된다.
-3. **plain dms 이미지**(`install/docker/Dockerfile`) → api/planner/dm-worker/retention/sanity.
+이미지 3종의 빌드 순서·명령은 [`dms-02-core.md §1`](dms-02-core.md), 그 ref를 어디에 넣는지는
+[`dms-04-dm-jobs.md §2`](dms-04-dm-jobs.md)에 있다. `:CHANGE_ME` placeholder가 fail-closed되지 않는
+트랩은 dms-04 §2.1에 설명돼 있다.
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
@@ -268,8 +299,8 @@ DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-
 | `DMS_AGENT_CLUSTER_NAME` | 없음 | 예 | logical cluster name. storage mapping·kubeconfig JSON key와 일치. |
 | `DMS_AGENT_WORKER_ROLE` | 없음 | 예 | `DM`(현재 유일한 worker role). |
 | `DMS_AGENT_MOUNTINFO_PATH` | `/proc/self/mountinfo` | 컨테이너 배포시 사실상 필수 | 마운트 존재/Ready 판정에 읽는 mount table. 기본값은 **컨테이너 자신의 마운트**라 노드 스토리지가 안 보여 **모든 storage Missing → readiness false**. 아래 bind-mount로 `/host/proc/1/mountinfo`를 가리켜야 함. |
-| `DMS_AGENT_HOST_ROOT` | 설정 안 됨(권장 `/host`) | DM 에이전트 사실상 필수 | 호스트 root fs 마운트 경로(`/host` bind-mount, 아래 참조). ① per-node/mount 용량(statvfs) 리포트, ② **온디맨드 신원 프로빙의 호스트 해석 루트** — `chroot $HOST_ROOT getent`(SSSD/LDAP 유저, `SYS_CHROOT` 필요)와 `$HOST_ROOT/etc/passwd`(노드-로컬 유저) 계층이 이 경로를 쓴다. 미설정 시 두 호스트 계층이 건너뛰어져 **컨테이너 NSS만** 남아 노드 사용자를 해석 못 한다. readiness 판정 자체는 mountinfo. |
-| `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 `chroot /host getent`(SSSD/LDAP 유저용, agent에 **`SYS_CHROOT`** 필요) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. **온디맨드 튜닝(`DMS_DM_IDENTITY_PROBE_*`)은 agent가 아니라 dm-worker 설정 → §6**. |
+| `DMS_AGENT_HOST_ROOT` | 설정 안 됨(권장 `/host`) | DM 에이전트 사실상 필수 | 호스트 root fs 마운트 경로(`/host` bind-mount, 아래 참조). ① per-node/mount 용량(statvfs) 리포트, ② **온디맨드 신원 프로빙의 호스트 해석 루트** — `chroot $HOST_ROOT getent`(SSSD/LDAP 유저 — agent 컨테이너가 **root + `SYS_CHROOT`**여야 하며 출하 매니페스트는 그렇지 않다, dms-04 §3)와 `$HOST_ROOT/etc/passwd`(노드-로컬 유저) 계층이 이 경로를 쓴다. 미설정 시 두 호스트 계층이 건너뛰어져 **컨테이너 NSS만** 남아 노드 사용자를 해석 못 한다. readiness 판정 자체는 mountinfo. |
+| `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 `chroot /host getent`(SSSD/LDAP 유저용 — agent 컨테이너가 **root + `SYS_CHROOT`**여야 하며 출하 매니페스트는 그렇지 않다, dms-04 §3) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. **온디맨드 튜닝(`DMS_DM_IDENTITY_PROBE_*`)은 agent가 아니라 dm-worker 설정 → §6**. |
 | `DMS_AGENT_REPORT_INTERVAL_SECONDS` | `60` | 아니오 | report 주기. |
 | `DMS_AGENT_REPORT_TIMEOUT_SECONDS` | `5` | 아니오 | report POST timeout. |
 | `DMS_AGENT_TOOLS` | `dsync,nsync,drm,dscan,kubectl` | 아니오 | tool probe 목록(쉼표). |

@@ -151,27 +151,42 @@ CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 | `Failed` | 실패 처리됨 | ✓ |
 | `BackendApplyFailed` | 백엔드 실행 실패 | ✓ |
 | `Rejected` | validation 실패(원인은 `issues[]`) | ✓ |
-| `UnknownAfterSideEffect` | side effect 발생 후 결과 불명 → `:resolve` 필요 | ✓ |
-| `Conflict` | 동일 resource에 non-terminal 요청 존재 → 선행 해소 필요 | ✓ |
+| `UnknownAfterSideEffect` | side effect 발생 후 결과 불명 → `:resolve` 필요 | **non-terminal** |
+| `StaleClaim` | worker가 lease를 놓쳐 claim이 만료됨 → `:resolve` 필요 | **non-terminal** |
+| `RecoveryNeeded` | 복구 판단이 필요한 상태 → `:resolve` 필요 | **non-terminal** |
+| `VerificationFailed` | 실행 후 검증 실패 → `:resolve` 필요 | **non-terminal** |
+| `Conflict` | 동일 resource에 non-terminal 요청 존재 → 선행 해소 후 **재제출** | ✓ |
 
-> `UnknownAfterSideEffect`·`Conflict`·`BackendApplyFailed` 같은 stuck 상태의 수동 처리는
-> 아래 [stuck request 해소(`:resolve`)](#stuck-request-해소-resolve)와
-> [운영 런북](../operations-runbook.md)을 본다.
+> **terminal 여부가 중요한 이유**: planner는 동일 resource에 **non-terminal** 선행 요청이 있으면
+> 새 요청을 `Conflict`로 막는다. 즉 위 non-terminal 4종이 남아 있으면 그 resource가 잠긴다 —
+> `:resolve`로 종결해야 풀린다. `BackendApplyFailed`는 terminal이라 후속 요청을 막지는 않지만
+> `:resolve` 대상이긴 하다. `Conflict` 자체는 terminal이라 `:resolve` 대상이 아니다(409) —
+> 선행 요청을 해소한 뒤 **다시 제출**한다.
+> 자세한 절차는 아래 [stuck request 해소(`:resolve`)](#stuck-request-해소-resolve)와
+> [운영 런북](../operations-runbook.md).
 
 ---
 
 ## Stuck Request 해소 (`:resolve`)
 
-`UnknownAfterSideEffect` 또는 `BackendApplyFailed` 상태의 request가 남아 있으면 동일 resource에 새 요청 시
-`Conflict`가 난다. 실제 상태를 확인한 뒤 request를 수동으로 종결한다. **이 문서에서 유일하게 상태를 바꾸는
-요청 계열 엔드포인트**다.
+non-terminal stuck 상태(`UnknownAfterSideEffect`·`StaleClaim`·`RecoveryNeeded`·`VerificationFailed`)의
+request가 남아 있으면 동일 resource에 새 요청 시 `Conflict`가 난다. 실제 상태를 확인한 뒤 request를
+수동으로 종결한다. **이 문서에서 유일하게 상태를 바꾸는 요청 계열 엔드포인트**다.
 
 **엔드포인트:** `POST /api/v1/operations/requests/{request_id}:resolve`
 
+**resolvable 상태(5종)**: `UnknownAfterSideEffect`, `BackendApplyFailed`, `StaleClaim`,
+`RecoveryNeeded`, `VerificationFailed`. 그 외 상태는 `409`.
+
 | resolution | 전환 상태 | 사용 시점 |
 |---|---|---|
-| `abandon` | `Failed` | side effect가 없었거나 수동 롤백을 마친 경우 |
+| `abandon` (현재 `StaleClaim`) | `Cancelled` | claim만 만료됐고 side effect는 없었던 경우 |
+| `abandon` (그 외) | `Failed` | side effect가 있었을 수 있어 수동 확인/롤백을 마친 경우 |
 | `succeeded` | `Succeeded` | 실제로 성공한 상태임을 직접 확인한 경우 |
+
+> `abandon`으로 `RecoveryNeeded`/`UnknownAfterSideEffect`/`VerificationFailed`를 종결하면
+> 백엔드에 **부분 적용된 side effect가 남아 있을 수 있다** — 감사 결과에
+> `backend_state_verified=false`로 기록된다. 백엔드 상태를 먼저 확인한다.
 
 ```bash
 # 1) stuck request 확인
@@ -227,9 +242,15 @@ DM 잡 자체의 상태·산출물 조회는 [`data-management.md`](data-managem
 등록된 클러스터와 각 클러스터에서 관측된 StorageClass·CSI driver 등 effective 인벤토리를 돌려준다.
 storage mapping 등록 전에 대상 클러스터가 실제로 보이는지 확인하는 용도다.
 
+응답 최상위는 `clusters`(**클러스터명을 키로 하는 객체**), `worker_roles`, `control_cluster_name`이다.
+`clusters`는 배열이 아니므로 `to_entries`로 편다:
+
 ```bash
 "${CURL[@]}" "$DMS_API_URL/api/v1/operations/inventory" \
-  | jq '.clusters[] | {cluster_name, storage_classes, csi_drivers}'
+  | jq '.clusters | to_entries[]
+        | {cluster_name: .key,
+           storage_classes: [.value.storage_classes[]?.name],
+           csi_drivers: [.value.csi_drivers[]?.name]}'
 ```
 
 ### `/storage-mappings`
@@ -257,9 +278,15 @@ storage mapping을 **redacted**로 조회한다(`weka_credentials.password` 등 
   [`storage-mappings.md`](storage-mappings.md)에 있다. 설치·사전 준비는
   [`install/dms-03-storage-mappings.md`](../../install/dms-03-storage-mappings.md),
   운영 절차는 [운영 런북](../operations-runbook.md).
-- readiness 축은 **`data_management`**(agent 마운트·도구·신원 증거)와 **`inventory`**(live StorageClass
-  존재 + `csi_driver` 일치) 두 개다. CSI 매핑은 호스트 마운트가 없어 `data_management`가 `Missing`으로
-  남는 것이 정상이다.
+- readiness 축은 두 개다.
+  - **`data_management`** — 노드 agent가 그 storage의 **마운트**(또는 일치하는 CSI 드라이버)를
+    Ready로 보고했는지. `Ready` / `Missing`. 도구(mpifileutils)·자격증명·신원 증거는 이 축이 아니라
+    잡 제출 시점의 **preflight**에서 본다.
+  - **`inventory`** — **매핑별 스코프**다. CSI 매핑은 대상 클러스터에서 `storage_class_name`이
+    실제로 보이면 `Ready`, 아니면 `Missing`. 파일시스템 매핑은 그 매핑의 클러스터(미지정 시 control
+    cluster)에 **fresh agent 리포트가 있는지**로 `Ready`/`Unknown`.
+  - `csi_driver` 불일치는 축 값이 아니라 `errors[]`의 `csi_driver_mismatch`로 나온다.
+  - CSI 매핑은 호스트 마운트가 없어 `data_management`가 `Missing`으로 남는 것이 정상이다.
 
 ---
 

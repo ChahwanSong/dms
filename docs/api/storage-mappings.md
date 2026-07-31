@@ -79,13 +79,13 @@ CURL+=(-H "Authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 | `filesystem_name` | **gpfs 필수** / wekafs 선택 | 대상 filesystem(device) 이름(예: `gpfs0`, `weka0`). 생략 시 GPFS는 `422`, WEKA는 `storage_name`으로 폴백. CephFS는 해당 없음 |
 | `csi_driver` | 선택(CSI는 사실상 필수) | 이 스토리지의 PVC를 provisioning하는 CSI 드라이버. live StorageClass의 provisioner와 **일치**해야 하며 불일치 시 sanity `csi_driver_mismatch`. 생략 시 `csi_driver_matches` 검사에서 제외 |
 
-> **RM 전용이었던 키는 더 이상 읽히지 않는다.** `weka_credentials`·`weka_profile`·
+> **RM 전용이었던 키는 더 이상 동작에 영향을 주지 않는다.** `weka_credentials`·`weka_profile`·
 > `command_runner`·`command_timeout_seconds`·`fileset_name_template`·`quota_scope`·
 > `rm_worker_nodes`·`ssh_host`는 파일시스템 프로비저닝/쿼터(RM)를 위한 것이었고, 그 기능이
-> 제거되면서 어떤 코드도 참조하지 않는다. 새 매핑에는 넣지 않는다. 기존 매핑에 남아 있어도
+> 제거되면서 뒤 7개는 어떤 코드도 참조하지 않는다. 새 매핑에는 넣지 않는다. 기존 매핑에 남아 있어도
 > 무해하지만, `weka_credentials`는 쓰이지 않는 자격증명이 DB에 남는 것이므로
-> [redeploy.md §4.3](../../install/redeploy.md)으로 정리를 권장한다(응답에서는 계속
-> `password`만 redaction된다).
+> [migration-rm-removal.md §3](../../install/migration-rm-removal.md)으로 정리를 권장한다
+> (응답에서는 계속 `password`만 redaction되고, PATCH round-trip 시 머지된다).
 
 > **파일시스템 매핑 vs CSI 매핑.** `cephfs`/`gpfs`/`wekafs`는 **호스트 마운트**를 가진 파일시스템 매핑이라
 > `mount_path` + `managed_root`가 필수이고, 노드 에이전트의 마운트 증거로 DM readiness가 선다.
@@ -180,8 +180,13 @@ curl -sS "${CURL[@]}" \
 
 | 축 | 판정 근거 | 영향 |
 |---|---|---|
-| `data_management` | 노드 에이전트(`dms-dm-agent`)가 보고한 마운트 + mpifileutils 도구 + 신원 증거 | `Ready`가 아니면 planner가 DM 잡을 `no_ready_dm_candidate`로 거부 |
-| `inventory` | 대상 클러스터에서 읽은 live StorageClass 존재 + `csi_driver` 일치 | 불일치는 `storage_class_missing` / `csi_driver_mismatch` sanity 오류 |
+| `data_management` | 노드 에이전트(`dms-dm-agent`)가 그 storage의 **마운트**를 Ready로 보고했는지(또는 일치하는 CSI 드라이버 증거) | `Ready`가 아니면 planner가 DM 잡을 `missing_dm_readiness`로 거부 |
+| `inventory` | **매핑별 스코프.** CSI 매핑: 대상 클러스터에서 `storage_class_name`이 보이면 `Ready`, 아니면 `Missing`. 파일시스템 매핑: 그 매핑의 클러스터(미지정 시 control cluster)에 fresh agent 리포트가 있으면 `Ready`, 없으면 `Unknown` | 축 자체는 planner를 막지 않는다 |
+
+> mpifileutils 도구·자격증명·신원 증거는 이 축이 **아니라** 잡 제출 시점의 preflight에서 본다.
+> `csi_driver` 불일치도 축 값이 아니라 `errors[]`의 `csi_driver_mismatch`로 나온다.
+> `cluster_name`·`storage_class_name`을 **둘 다 선언하지 않은 CSI 매핑**은 검증할 근거가 없어
+> `csi_mapping_unpinned` 오류로 `Failed` 처리된다(fail-closed).
 
 ---
 
@@ -226,8 +231,8 @@ curl -sS "${CURL[@]}" \
   | jq '{storage_name, status}'
 ```
 
-DELETE 응답에는 삭제된 매핑 전체가 (조회와 달리 **un-redacted**로) 포함되므로, 이 값을 로그로 남기거나
-클라이언트로 그대로 전달하지 않도록 주의한다. 없는 스토리지 `404`, 진행 중 작업이 있으면 `409`.
+DELETE 응답에는 삭제된 매핑이 포함되며, 다른 경로와 **동일하게 redaction된다**(`weka_credentials.password`
+등 시크릿은 마스킹). 없는 스토리지 `404`, 진행 중 작업이 있으면 `409`.
 
 ---
 

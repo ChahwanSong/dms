@@ -27,17 +27,13 @@ preflight에서 rejected). "정상인데 안 돈다"의 대부분은 이 체크�
 | 1 | 클러스터 프리렉 | → [dms-01](dms-01-prerequisites.md) (Volcano·`dms-data` 큐·`dms-low/normal/high` PriorityClass·PSA=privileged·공유 FS·NSS/SSSD·host-mount) | 잡 Pending / 파드 admission 거부 / 후보 전무 |
 | 2 | 스케줄러 백엔드 | `control-plane.yaml` → CM `dms-runtime-config` → `DMS_DM_SCHEDULER_BACKEND: volcano-job` | `auto`면 매 잡마다 MPIJob 시도→실패 후 폴백 |
 | 3 | DM job 이미지 | 빌드·push 후 `control-plane.yaml` → CM → `DMS_DM_JOB_IMAGE: <실제 ref>` | `:CHANGE_ME`면 job pod `ImagePullBackOff` |
-| 4 | dms-agent 이미지 | 빌드·push 후 `agent-daemonset.yaml` → DaemonSet `dms-dm-agent` → `image:` | plain `dms` 이미지면 `missing_dscan/dsync/drm_tool` |
-| 5 | 노드 신원 프로빙 | `agent-daemonset.yaml` → `dms-dm-agent` → env `DMS_AGENT_IDENTITY_USERS` + 노드 NSS/SSSD | `identity_not_ready_on_node` |
+| 4 | dms-agent 이미지 | 빌드·push 후 `agent-daemonset.yaml` → DaemonSet `dms-dm-agent` → `image:` | plain `dms` 이미지면 `missing_{dscan,dsync,drm}_tool` |
+| 5 | 노드 신원 프로빙 | `agent-daemonset.yaml` → `dms-dm-agent` → env `DMS_AGENT_IDENTITY_USERS`(**선택** — 베이스라인) + 노드 NSS/SSSD(**필수**) | 노드가 계정을 해석 못 하면 `identity_not_ready_on_node` |
 | 6 | LDAP 신원 해석 | `control-plane.yaml` → CM + Secret `dms-secrets` → `DMS_LDAP_*` | `ldap_not_configured` / `ldap_unavailable` |
 | 7 | dm-worker 활성화 | `control-plane.yaml` → Deployment `dms-dm-worker` → `replicas: 32`(기본) | `0`이면 잡을 아무도 claim 안 함(영구 대기); 32는 `max_connections≥400` 전제 |
 | 8 | 공유 artifact FS | `control-plane.yaml` → CM `DMS_DM_ARTIFACT_BASE_URI` + `dms-dm-worker` hostPath `dm-artifacts.path` | dm-worker가 summary 못 읽음 / 멀티노드 rank-script 공유 실패 |
 | 9 | DM RBAC | `control-plane.yaml`(내장) + `kubectl apply` `dms-api-volcano-rbac.yaml`(별도) | `no_ready_dm_candidate` / 로그 tail Forbidden |
 | 10 | DM 정책 | `control-plane.yaml` → CM `DMS_DM_POLICY_*` (또는 DMS API) | 노드/프로세스 수·큐가 의도와 다름 |
-
-> **MPI Operator는 설치하지 않는다.** DMS는 Volcano 네이티브 Job(`batch.volcano.sh`)만 만들고,
-> Volcano의 `ssh`/`svc` plugin이 launcher↔worker를 gang-schedule + 배선하므로 Volcano 단독으로
-> MPI 워커가 뜬다. Kubeflow MPI Operator / MPIJob / `kubeflow.org` / `auto` 백엔드는 쓰지 않는다.
 
 ---
 
@@ -55,49 +51,15 @@ DMS_DM_SCHEDULER_BACKEND: "volcano-job"   # 매니페스트 기본. 절대 "auto
 
 ---
 
-## 2. 이미지 빌드 (3종 — 순서가 중요)
+## 2. DM 이미지 참조 지정
 
-DM은 이미지 두 개를 **추가로** 빌드해야 한다. `plain dms` 이미지는 [dms-02](dms-02-core.md)에서
-이미 빌드·push 했다고 가정한다(dms-api·planner·dm-worker·retention·sanity가 이걸 쓴다). 빌드 컨텍스트는 **repo 루트**.
-
-```
-(dms-02) plain dms 이미지  ─┐
-                            ├─▶ ② dms-agent 이미지 (DMS_IMAGE=plain, MFU_IMAGE=job)
-① DM job 이미지  ───────────┘
-```
-
-> **폐쇄망(프록시)에서 빌드.** 인터넷이 프록시로만 되는 환경이면 아래 수동 `docker build` 대신
-> 래퍼 `install/docker/build-images.sh`를 쓰면 프록시 build-arg + `--network=host`가 자동으로 붙는다
-> (빌드 중 apt/git/pip만 프록시를 타고 **런타임 이미지엔 프록시가 남지 않음**). 동작·함정 설명은
-> [dms-02 §1](dms-02-core.md)에 있다.
->
-> ```bash
-> # DM 전용 이미지(mpifileutils + dms 위에 얹는 agent). dms:TAG는 dms-02에서 이미 빌드돼 있어야 함.
-> REGISTRY=registry.example.internal TAG=v1 PROXY=http://127.0.0.1:7227 \
->   IMAGES="mpifileutils agent" PUSH=1 ./install/docker/build-images.sh
-> ```
->
-> **사내 CA가 필요하면** (TLS 가로채기 프록시 / 사내 HTTPS) `CA_CERT=/path/to/corp-root.crt`를 함께
-> 준다 — 빌드 중 apt/git이 그 CA를 신뢰하고, **런타임 이미지(job·agent)에도 유지**된다. 상세·동작은
-> [dms-02 §1](dms-02-core.md).
->
-> ```bash
-> REGISTRY=registry.example.internal TAG=v1 CA_CERT=/etc/pki/corp-root.crt \
->   IMAGES="mpifileutils agent" PUSH=1 ./install/docker/build-images.sh
-> ```
+**이미지 3종(plain `dms` · DM job(mpifileutils) · `dms-agent`)의 빌드·push는
+[dms-02 §1](dms-02-core.md)에서 끝났다고 전제한다.** DM 설치에서 할 일은 그 중 두 개를 매니페스트가
+가리키게 하는 것뿐이다.
 
 ### 2.1 DM job 이미지 → `DMS_DM_JOB_IMAGE`
 
-mpifileutils(`dsync/dcp/dscan/drm/nsync`) + Open MPI `mpirun` + OpenSSH client/server가 든
-**job pod 실행 이미지**다.
-
-```bash
-docker build -f install/docker/Dockerfile.mpifileutils \
-  -t registry.example.internal/dms-mpifileutils:v1 .
-docker push registry.example.internal/dms-mpifileutils:v1
-```
-
-그런 다음 `control-plane.yaml` → ConfigMap `dms-runtime-config`:
+`control-plane.yaml` → ConfigMap `dms-runtime-config`:
 
 ```yaml
 DMS_DM_JOB_IMAGE: "registry.example.internal/dms-mpifileutils:v1"   # ← push한 실제 ref로
@@ -106,33 +68,20 @@ DMS_DM_JOB_IMAGE: "registry.example.internal/dms-mpifileutils:v1"   # ← push�
 
 > ⚠️ **`:CHANGE_ME` 트랩.** 매니페스트 기본값은 `registry.example.internal/dms-mpifileutils:CHANGE_ME`
 > 이다. 이 값은 **truthy라서 fail-closed 되지 않는다** — DMS는 정상으로 보고 잡을 만들지만 job pod가
-> `ImagePullBackOff`로 죽는다. **반드시 실제 push한 ref로 교체**할 것. `DMS_DM_JOB_IMAGE_REF`는
-> provenance 메타데이터일 뿐이라 남겨둬도 스케줄링에 무관하다.
+> `ImagePullBackOff`로 죽는다. **반드시 실제 push한 ref로 교체**할 것.
 
 ### 2.2 dms-agent 이미지 → `dms-dm-agent` DaemonSet
-
-`dms-dm-agent`(DM 노드 prober)는 **plain `dms` 이미지가 아니라 dms-agent 이미지**를 써야 한다.
-agent가 `shutil.which()`로 `dscan/dsync/drm` 존재를 확인하는데, plain `dms` 이미지엔 이 툴이
-없어 **모든 DM 후보 노드가 `missing_dscan/dsync/drm_tool`로 거부**된다. 그래서 job 이미지의
-mpifileutils 바이너리를 plain `dms` 위에 얹은 별도 이미지가 필요하다. → **job 이미지를 먼저
-빌드**(§2.1)해야 `MFU_IMAGE`로 넘길 수 있다.
-
-```bash
-docker build -f install/docker/Dockerfile.agent \
-  --build-arg DMS_IMAGE=registry.example.internal/dms:v1 \
-  --build-arg MFU_IMAGE=registry.example.internal/dms-mpifileutils:v1 \
-  -t registry.example.internal/dms-agent:v1 .
-docker push registry.example.internal/dms-agent:v1
-```
 
 `install/kubernetes/agent-daemonset.yaml` → DaemonSet **`dms-dm-agent`** 컨테이너:
 
 ```yaml
-image: registry.example.internal/dms-agent:v1   # ← dms-agent 이미지 (dms 아님)
+image: registry.example.internal/dms-agent:v1   # ← dms-agent 이미지 (plain dms 아님)
 ```
 
-> **plain `dms` 이미지로 두면 안 된다** — 컨트롤플레인 이미지에는 mpifileutils 툴이 없어 모든 DM
-> 후보 노드가 거부된다.
+> **plain `dms` 이미지로 두면 안 된다.** agent는 `shutil.which()`로 `dscan/dsync/drm` 존재를
+> 확인하는데 컨트롤플레인 이미지에는 이 툴이 없어 **모든 DM 후보 노드가
+> `missing_{dscan,dsync,drm}_tool`로 거부**된다. `dms-agent` 이미지는 job 이미지의 mpifileutils
+> 바이너리를 plain `dms` 위에 얹은 것이다.
 
 ---
 
@@ -158,9 +107,19 @@ DM 잡 pod는 요청자의 POSIX uid/gid로 실행되고, 잡 스크립트가 `c
   **NSS/SSSD**(또는 동등한 디렉터리 연동)를 구성한다(프리렉 상세는
   [dms-01 §노드 신원 해석](dms-01-prerequisites.md)). agent의 계층형 프로빙은 노드의 `chroot /host getent`
   → 호스트 `/etc/passwd`(host-root 마운트) → 컨테이너 NSS 순으로 해석한다. **SSSD/LDAP-backed 노드
-  유저**(파일에 없고 nss_sss로만 해석되는 계정)를 프로빙하려면 `dms-dm-agent`에 **`SYS_CHROOT`
-  capability**가 필요하다(chroot 계층이 호스트 NSS 전체를 조회). 노드-로컬 `/etc/passwd` 유저는
-  host-root 마운트만으로 해석되어 capability가 필요 없다.
+  유저**(파일에 없고 nss_sss로만 해석되는 계정)를 프로빙하려면 chroot 계층이 살아 있어야 하고, 그러려면
+  `dms-dm-agent` 컨테이너가 **root(`runAsUser: 0`) + `SYS_CHROOT` capability**로 떠야 한다. 출하
+  `agent-daemonset.yaml`은 **둘 다 주지 않는다**(이미지 기본 uid 65532) — 필요하면 컨테이너에
+  다음을 추가한다:
+
+  ```yaml
+  securityContext:
+    runAsUser: 0
+    capabilities:
+      add: ["SYS_CHROOT"]
+  ```
+
+  추가하지 않으면 호스트 `/etc/passwd`에 있는 **노드-로컬 유저만** 해석된다.
 - **대규모 디렉터리(예: 10만 유저)**: 프로빙은 디렉터리 전체가 아니라 **최근 요청자(TTL 내, 상한 100)**
   만 지목 조회하므로 디렉터리 크기와 무관하다. 지목 조회는 인덱스 기반이라 단건 비용이 일정하고,
   SSSD 캐시로 반복 프로빙은 대부분 캐시 히트다. 노드 SSSD는 `enumerate = false`(기본)를 유지해
@@ -171,7 +130,7 @@ DM 잡 pod는 요청자의 POSIX uid/gid로 실행되고, 잡 스크립트가 `c
   sshd는 `UsePAM=no`로 뜬다(물질화 유저는 `/etc/shadow`가 없어 PAM account 단계가 거부하기 때문).
   물질화 대상 필드는 파이썬(`_identity_env_vars`)에서 형태 검증 후 env로 주입하고, 셸에서도 숫자
   uid/gid·안전한 username을 재차 가드한다(passwd 주입 방지).
-- privileged root 잡은 이 게이트를 우회한다(§8) — `getpwnam("root")`는 어디서나 성공하므로
+- privileged root 잡은 이 게이트를 우회한다(§9.2) — `getpwnam("root")`는 어디서나 성공하므로
   `DMS_AGENT_IDENTITY_USERS`에 `root`를 넣을 필요는 없다.
 
 ---
@@ -215,15 +174,13 @@ spec:
                   # 32는 PostgreSQL max_connections>=400 전제 — 소규모/제약 환경은 낮춘다(dms-05 §3). 0 = DM 끔
 ```
 
-- **`1`이 정상 = DM 켜짐.** dm-worker가 DM plan을 claim → preflight → Volcano 잡 생성·폴링한다.
+- **`1` 이상이면 DM 켜짐** (매니페스트 기본 `32`). dm-worker가 DM plan을 claim → preflight →
+  Volcano 잡 생성·폴링한다.
 - **`0`은 DM을 의도적으로 끌 때만.** 0이면 아무 워커도 data job을 claim하지 않아 scan/sync/rm이
   **큐에서 영구 대기**한다(0을 "정상 유휴"로 오해하지 말 것).
-- **`replicas`는 곧 동시 DM 잡 수의 상한이다.** `1`이면 잡이 **순차** 실행되고(워커가 잡 하나를 완료까지
-  블로킹 처리), `N`이면 최대 N개가 **병렬**로 돈다. N개 워커는 claim 시 `FOR UPDATE SKIP LOCKED`로 **서로
-  다른** plan을 원자적으로 집으므로 경합이 없다. 적정값 ≈ `min(원하는 동시성, 노드 용량 ÷ 잡당 파드 수)` —
-  잡은 `node_count`개 노드(런처+워커 파드)를 쓰므로 노드 CPU/메모리가 실질 상한이고, 그 이상 replica는
-  idle 폴링만 늘린다. **DB 연결 예산·`PORTAL_BACKUP_CONCURRENCY` 매칭**은
-  [`dms-05-configuration.md §3`](dms-05-configuration.md)의 "DM worker 수평 확장".
+- **`replicas`는 곧 동시 DM 잡 수의 상한이다.** `1`이면 순차, `N`이면 최대 N개가 병렬로 돈다.
+  적정값 산정·DB 연결 예산·`PORTAL_BACKUP_CONCURRENCY` 매칭은
+  [`dms-05-configuration.md §3`](dms-05-configuration.md)의 "DM worker 수평 확장"에 있다.
 - dm-worker는 **컨트롤플레인과 동일한 plain `dms` 이미지**를 쓰며 `runAsUser: 0`(root)으로 돈다 —
   공유 FS의 요청자-소유 잠긴 artifact(`summary.json`)를 읽기 위함이다. 읽기전용 오케스트레이터라
   (FS 쓰기 0, `kubectl`은 SA 토큰) root가 그 cross-uid 읽기 외 권한을 주지 않는다. api/planner는
@@ -278,9 +235,11 @@ volumeMounts:
 1회**면 모든 DM 노드에 보인다:
 
 ```bash
-sudo mkdir -p /artifacts/dms                 # ← DMS_DM_ARTIFACT_BASE_URI의 경로(마운트포인트/dms)
-sudo chown root:root /artifacts/dms
-sudo chmod 0755 /artifacts/dms               # world-traversable (1777 금지). per-job은 launcher가 요청자-only로 잠금
+# 호스트 경로다 — 컨테이너 안 경로(/artifacts/dms)가 아니라 <공유 FS 마운트포인트>/dms 다.
+MP=/cephfs                                   # ← 위 hostPath로 지정한 마운트포인트로 치환
+sudo mkdir -p "$MP/dms"
+sudo chown root:root "$MP/dms"
+sudo chmod 0755 "$MP/dms"                    # world-traversable (1777 금지). per-job은 launcher가 요청자-only로 잠금
 ```
 
 ---
@@ -301,28 +260,16 @@ DM은 RBAC 두 벌이 필요하다 — 하나는 `control-plane.yaml`에 **내�
 
 ### 7.2 별도 apply — `dms-api-volcano-rbac.yaml`
 
-`GET /api/v1/operations/data-jobs/{id}/logs`(포탈의 잡 로그 tail이 사용)가 launcher pod 로그를
-읽으려면 dms-api에 `pods/log` + Volcano read가 필요하다. 이건 **control-plane.yaml에 없으니 반드시
-따로 적용**한다:
-
-```bash
-kubectl apply -f install/kubernetes/dms-api-volcano-rbac.yaml
-```
-
-(ClusterRole `dms-api-volcano-read` → SA `dms-api`: `queues`·`jobs`·`pods` read + `pods/log` get.)
+포탈의 잡 로그 tail(`GET /api/v1/operations/data-jobs/{id}/logs`)에 필요하며 **control-plane.yaml에
+없다.** [dms-02 §6](dms-02-core.md)에서 적용했다 — 안 했으면
+`kubectl apply -f install/kubernetes/dms-api-volcano-rbac.yaml`.
 
 ### 7.3 storages sync RBAC (신규 filesystem 스토리지 전파)
 
-신규 filesystem 스토리지가 DM 후보가 되려면 agent에 전파돼야 한다. dms-api는 스토리지 매핑
-create/update/delete마다 `dms-agent-storages` ConfigMap을 patch하는데, 이는 `control-plane.yaml`의
-**Role/RoleBinding `dms-agent-storages-sync`**(configmaps get·update·patch, SA `dms-api` +
-`dms-remote`에 바인딩)에 의존한다. **이 RBAC가 없으면 patch가 Forbidden인데 코드가 그걸 삼켜**
-ConfigMap이 조용히 안 갱신되고, 새 스토리지가 agent에 닿지 못해 **DM이 `no_ready_dm_candidate`**가
-된다. control-plane.yaml에 내장돼 있으니 그대로 적용되면 된다.
-
-> **agent는 storages.json을 startup에 한 번만 읽는다.** 그래서 스토리지 매핑을 바꾼 뒤에는 DaemonSet을
-> rollout-restart 해야 새 스토리지가 반영된다: `POST /api/v1/agent/rollout-restart`(agent DaemonSet에
-> `restartedAt` stamp) 또는 `kubectl -n dms rollout restart ds/dms-dm-agent`.
+새 filesystem 스토리지가 DM 후보가 되려면 `dms-agent-storages` ConfigMap 동기화 RBAC
+(`dms-agent-storages-sync`)와 agent DaemonSet rollout-restart가 필요하다. 없으면
+`no_ready_dm_candidate`가 된다 — 절차·확인 커맨드는
+**[dms-03 §5](dms-03-storage-mappings.md)**. control-plane.yaml에 내장돼 있으니 apply만 됐으면 된다.
 
 ---
 
@@ -360,7 +307,7 @@ DMS_DM_POLICY_MAX_PROCESSES_PER_NODE: "10"           #                최대
 2. 잡이 도는 노드의 **agent 신원 증거**에 그 사용자가 있고(§3) — `DMS_AGENT_IDENTITY_USERS`
    베이스라인 또는 **온디맨드 프로빙**(요청 시 자동 등록·프로빙; `DMS_DM_IDENTITY_PROBE_*`)으로
    확보되며, 노드가 실제로 그 계정을 해석할 수 있어야 하고(로컬 `/etc/passwd` 또는 SSSD;
-   SSSD 유저는 agent에 `SYS_CHROOT` 필요),
+   SSSD 유저는 agent가 root + `SYS_CHROOT`여야 한다 — §3),
 3. 해석된 uid/gid가 **하한 이상**이어야 한다 — `DMS_DM_MIN_UID`/`DMS_DM_MIN_GID`(기본 `1000`,
    control-plane.yaml에 미기재 = 기본 사용). 미만(시스템/root 계정)이면 `uid_below_floor`로 거부.
 
@@ -374,13 +321,10 @@ DMS_DM_POLICY_MAX_PROCESSES_PER_NODE: "10"           #                최대
 LDAP·uid 하한을 우회하고 job pod를 `runAsUser: 0`으로 띄운다. `control-plane.yaml` → CM에서
 `DMS_DM_ALLOW_ROOT_REQUESTER: "true"`(매니페스트 기본)로 켜지며, 나머지는 코드 기본을 쓴다.
 
-| 통제 | 설정(기본) | 의미 |
-|---|---|---|
-| feature flag | `DMS_DM_ALLOW_ROOT_REQUESTER` (`true`) | 꺼지면 root 요청은 `ldap_identity_not_found`로 거부 |
-| 권한 requester 집합 | `DMS_DM_PRIVILEGED_REQUESTERS` (`root`) | 이 집합과 일치할 때만 uid/gid 0 합성 |
-| **mTLS operator 강제** | `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true` 전제 | root 요청은 **mTLS-verified operator**(actor `mtls:` 접두)만. 평문 채널 root는 `403` |
-| operator allowlist | `DMS_DM_PRIVILEGED_OPERATORS` (비움=verified 전체) | 특정 operator actor만 허용 |
-| scope allowlist | `DMS_DM_PRIVILEGED_SCOPES` (비움=전체) | root 잡이 건드릴 `storage`/`storage:prefix` 제한 |
+이 경로를 좁히는 통제는 `DMS_DM_PRIVILEGED_REQUESTERS` · `DMS_DM_PRIVILEGED_OPERATORS` ·
+`DMS_DM_PRIVILEGED_SCOPES` 세 개이고, 전제 조건은 `DMS_REQUIRE_MTLS_VERIFIED_HEADER=true`다
+(평문 채널 root 요청은 `403`). 각 변수의 기본값·의미는
+[`dms-05-configuration.md §6`](dms-05-configuration.md).
 
 > **보안 노트.** `requester_id`는 클라가 채우는 인증 안 된 필드다. root 경로의 안전성은 전적으로
 > **"누가 DMS DM API를 호출할 수 있는가"** 로 환원된다 — 그래서 프로덕션 mTLS-verified 프로필
@@ -424,7 +368,7 @@ H=(-sS --cert client.crt --key client.key --cacert ca.crt -H "authorization: Bea
 U=https://dms.example.internal
 
 # 스토리지 매핑의 data_management readiness가 Ready여야 planner가 통과
-curl "${H[@]}" "$U/api/v1/operations/storage-mappings" | jq '.[] | {name, readiness}'
+curl "${H[@]}" "$U/api/v1/operations/storage-mappings" | jq '.[] | {storage_name, readiness}'
 
 # dm-agent를 새로 붙였으면 sanity 재실행(readiness stale "Missing" 해소)
 curl "${H[@]}" -X POST "$U/api/v1/storage-mappings/cephfs-a:check"
