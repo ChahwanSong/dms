@@ -47,7 +47,10 @@ data:
   DMS_AGENT_CLUSTER_NAME: "cluster-a"
   DMS_AGENT_REPORT_INTERVAL_SECONDS: "60"
   DMS_AGENT_REPORT_TIMEOUT_SECONDS: "5"
-  DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan,kubectl"
+  # DM job tools only -- these are the names _tool_ready() gates a candidate node on.
+  # kubectl is deliberately absent: the agent talks to the Kubernetes API directly, not
+  # through the CLI, so probing it only adds a permanently-Missing entry to the inventory.
+  DMS_AGENT_TOOLS: "dsync,nsync,drm,dscan"
   # REQUIRED for mount readiness. The agent runs in a container, so its own
   # /proc/self/mountinfo (the default) shows only the CONTAINER's mounts — never the
   # worker node's storage mounts (cephfs/gpfs/weka), so every mount probes as Missing

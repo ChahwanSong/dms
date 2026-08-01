@@ -303,7 +303,7 @@ DM 잡 사용법(preview/confirm 플로우, 파라미터)은 [`../docs/api/data-
 | `DMS_AGENT_IDENTITY_USERS` | 없음 | DM 에이전트 권장(베이스라인) | NSS로 상시 확인할 POSIX user **베이스라인** 목록(쉼표). 여기에 없어도 **온디맨드 프로빙**이 보충한다: dm-worker가 신원 resolve 시 요청자를 probe 대상으로 등록하고, agent가 report POST 응답(`identity_probe_targets`)으로 받아 다음 사이클에 프로빙 — 신규 요청자도 목록 편집 없이 증거 확보. 프로빙은 계층형: 호스트 `chroot /host getent`(SSSD/LDAP 유저용 — agent 컨테이너가 **root + `SYS_CHROOT`**여야 하며 출하 매니페스트는 그렇지 않다, dms-04 §3) → 호스트 `/etc/passwd` 파일(host-root 마운트) → 컨테이너 NSS. **온디맨드 튜닝(`DMS_DM_IDENTITY_PROBE_*`)은 agent가 아니라 dm-worker 설정 → §6**. |
 | `DMS_AGENT_REPORT_INTERVAL_SECONDS` | `60` | 아니오 | report 주기. |
 | `DMS_AGENT_REPORT_TIMEOUT_SECONDS` | `5` | 아니오 | report POST timeout. |
-| `DMS_AGENT_TOOLS` | `dsync,nsync,drm,dscan,kubectl` | 아니오 | tool probe 목록(쉼표). |
+| `DMS_AGENT_TOOLS` | `dsync,nsync,drm,dscan` | 아니오 | tool probe 목록(쉼표). DM 후보 판정(`_tool_ready`)은 **job이 고르는 도구**(`dsync`/`nsync`/`drm`/`dscan`)만 보고, 그 도구가 노드에 없으면 `missing_<tool>_tool`로 탈락한다. 목록에 도구를 더 넣어도 게이트가 늘지는 않고 report/인벤토리에 항목만 추가된다 — `kubectl`은 에이전트가 CLI가 아니라 Kubernetes API를 직접 쓰므로 항상 Missing으로 남는 잡음이라 넣지 않는다. |
 | `DMS_AGENT_CREDENTIAL_FILES` | 설정 안 됨 | 아니오 | report할 credential path 목록(쉼표). |
 | `DMS_AGENT_NETWORK_ENDPOINTS` | 설정 안 됨 | 아니오 | probe할 network endpoint 목록(쉼표). |
 | `DMS_AUTH_SHARED_TOKEN` | 없음 | 필수 | 에이전트가 내부 API `dms-api-internal`(mTLS off)로 report POST할 때의 인증. 내부 평면의 유일한 자격증명이라 필수. |
