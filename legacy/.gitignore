@@ -1,0 +1,20 @@
+.pytest_cache/
+.code-review-graph/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# local tooling / agent artifacts
+.claude/
+.playwright-mcp/
+.playwright-cli/
+.superpowers
+output/
+
+# scratch UI screenshots dropped in repo root during manual testing
+/*.png
+/*.jpeg
