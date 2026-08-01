@@ -22,7 +22,7 @@
 - **DMS 관련 모든 리소스는 포탈에서 생성·수정·삭제·모니터링할 수 있다.** 컨테이너 이미지의
   빌드와 롤아웃까지 포함한다.
 - **모든 거부·실패에는 기계가 읽을 수 있는 사유 코드가 붙는다** (`missing_tool:dsync`,
-  `insufficient_eligible_nodes`, `posix_permission_denied`, ...). 조용한 실패 금지 — 설정·권한
+  `no_eligible_nodes`, `posix_permission_denied`, ...). 조용한 실패 금지 — 설정·권한
   문제는 삼키지 말고 기동 시 검증하거나 상태로 노출한다.
 
 ## 2. 전제 (prerequisite)
@@ -30,7 +30,11 @@
 - 단일 Kubernetes 클러스터 (v1.34+), CRI-O, Cilium, Volcano, PostgreSQL, MetalLB, ingress-nginx
   구성 완료. 멀티 클러스터 지원 없음 — kubeconfig 관리, ssh-kubectl 같은 원격 transport 없음.
 - 모든 노드에 관리용 스토리지 디렉토리가 마운트되어 있고, DMS 운영 데이터(아티팩트, 레지스트리
-  데이터 등)는 전부 그 아래에 둔다.
+  데이터 등)는 전부 그 아래에 둔다. root-squash 없이 root 읽기/쓰기가 가능해야 한다.
+- 로컬 레지스트리는 노드에서 도달 가능한 **고정 엔드포인트**(NodePort 또는 MetalLB IP)로 노출하고,
+  전 노드 CRI-O `registries.conf`에 insecure 등록(또는 TLS CA 신뢰)을 부트스트랩에서 완료한다.
+  이미지 pull 참조는 항상 이 엔드포인트를 쓴다 — 이미지 pull은 노드의 CRI-O가 수행하므로
+  서비스 DNS(`*.svc.cluster.local`) 주소는 동작하지 않는다.
 - Volcano queue 1개(`dms-data`) + PriorityClass 3개: `dms-low`(50) / `dms-mid`(100) /
   `dms-high`(200). DMS 워커 노드에 배포되는 모든 잡 컨테이너는 Volcano 스케줄러를 쓴다.
 
@@ -64,16 +68,17 @@
 
 ## 4. 도메인 모델
 
-### 테이블 (~16개)
+### 테이블 (20개)
 
 ```
 requests, plans, runs, results, state_transitions   ← lifecycle (원칙 그대로)
 data_jobs                                           ← 잡 상세: 도구, 경로, preview 지문, volcano ref, artifact uri
 storages                                            ← 스토리지 등록: 이름, mount_path, managed_root, 종류, 활성여부, 상태
-policies                                            ← 연산별(scan/dsync/nsync/rm) 노드·프로세스 fan-out, queue, priority, timeout
+policies                                            ← 도구별 행(scan/dsync/nsync/rm): 노드 fan-out 상한, 프로세스 수, queue, priority, timeout
 identity_denylist, identity_probe_targets           ← 신원 kill-switch + 온디맨드 프로빙 대상
 agent_reports(이력), agent_nodes(노드별 최신 1행)
 accounts                                            ← 포탈 계정 (role: user/admin)
+user_scan_paths                                     ← 사용자가 등록한 scan 조회 경로 (storage, path)
 builds, releases                                    ← 이미지 빌드 기록, 컴포넌트별 배포 태그
 component_leases, control_state, audit_log, events  ← 리더 리스, 유지보수/드레인, 감사, 진단 이벤트
 ```
@@ -93,8 +98,11 @@ result의 사유 코드로 남긴다.
 
 ### 검증 규칙 (legacy에서 계승)
 
-- 경로는 storage-relative: 선행 `/`, `..`, NUL 금지. sync destination이 source와 같거나 하위면
-  거부. rm은 스토리지 루트 대상 거부 + `recursive` 명시 필수.
+- 경로는 storage-relative — 해당 스토리지의 **managed_root 기준** 상대 경로다 (절대경로 =
+  managed_root + 상대경로). managed_root가 모든 잡 경로의 containment 경계이며, legacy의
+  `DMS_DM_PATH_BASE` 같은 기준 전환 설정은 두지 않는다. 선행 `/`, `..`, NUL 금지. sync
+  destination이 source와 같거나 하위면 거부. rm은 managed_root 자체(빈 상대 경로) 대상 거부 +
+  `recursive` 명시 필수.
 - 잡 옵션은 allowlist + 타입/범위 검증. 원시 CLI 문자열 주입 불가.
 - 동일 resource_key(경로+옵션 지문)의 미종결 선행 요청이 있으면 `Conflict`.
 - `owner_username`은 API 경계에서 POSIX 유저명 정규식 검증 (runuser/chown으로 흘러가므로).
@@ -116,7 +124,8 @@ job-stepper 루프가 `FOR UPDATE SKIP LOCKED`로 "진행할 차례인 잡"을 �
 
 요청을 플랜으로 바꾸기 전에: 스토리지 미등록/비활성 → `storage_missing`/`storage_disabled`,
 신선한 에이전트 증거로 뒷받침되지 않는 스토리지 → `storage_not_ready`, 동일 리소스 선행 요청 →
-`Conflict`. 정책 행이 없는 연산 → `missing_policy`.
+`Conflict`. 정책 행 존재 검사는 도구가 확정되는 시점에 한다 — scan/rm은 어드미션에서, sync는
+도구 선택(preflight) 시점에. 해당 도구의 행이 없으면 `missing_policy`.
 
 ### 실행 신원
 
@@ -133,16 +142,19 @@ job-stepper 루프가 `FOR UPDATE SKIP LOCKED`로 "진행할 차례인 잡"을 �
 ### 도구 선택 (자동)
 
 - scan → `dscan`, rm → `drm`.
-- sync: 신선한 에이전트 증거에서 source·destination 마운트가 **같은 노드**에 있는 후보가 있으면
-  `dsync`, 없고 source/destination 후보 집합이 각각 존재하면 `nsync` (role 분리: source-worker ×N
-  + destination-worker ×M, role별 hostfile, preflight 파드도 role별 2개), 둘 다 아니면
-  `no_ready_sync_candidate`로 거부.
+- sync: 신선한 에이전트 증거에서 source·destination 마운트를 **모두 가진 노드가 1개 이상**이면
+  `dsync`, 없고 source 후보와 destination 후보가 각각 1개 이상이면 `nsync` (role 분리:
+  source-worker ×N + destination-worker ×M, role별 hostfile, preflight 파드도 role별 2개), 둘 다
+  아니면 `no_ready_sync_candidate`로 거부.
+- 정책의 fan-out은 **상한**이다: 실제 노드 수 = min(적격 노드 수, 정책 상한). 적격 노드가 상한보다
+  적어도 잡은 축소 실행되며, 적격 노드가 0일 때만 거부한다.
 - 노드별 탈락 사유를 기록한다: `missing_target_mount`, `missing_tool:<name>`,
   `identity_not_ready_on_node`, `stale_agent_report`, ...
 
 ### preview → confirm (sync/rm 필수 게이트)
 
-1. **런타임 preflight**: 잡 이미지로 검사 파드를 띄워 요청자 uid/gid로 실제 POSIX 권한을 확인
+1. **런타임 preflight**: 잡 이미지로 검사 파드를 띄워 해석된 실행 신원의 uid/gid로 실제 POSIX
+   권한을 확인
    (`source_not_readable`, `destination_parent_not_writable`, ...). nsync는 role별 2개 파드 모두
    통과해야 한다.
 2. **preview**: `--dryrun` MPI 잡. summary JSON의 sha256 지문을 계산한다. **빈 summary는 지문을
@@ -153,18 +165,19 @@ job-stepper 루프가 `FOR UPDATE SKIP LOCKED`로 "진행할 차례인 잡"을 �
 
 ### Volcano 실행
 
-- 네이티브 `batch.volcano.sh/v1alpha1 Job` **한 형식만** 지원 (MPIJob·auto 폴백 없음). 제출·조회·
-  삭제는 kubernetes Python 클라이언트로.
+- 네이티브 `batch.volcano.sh/v1alpha1 Job` **한 형식만** 지원. **MPI Operator(MPIJob)는 설치도
+  사용도 하지 않는다** — legacy의 mpi-operator/auto 폴백 경로를 만들지 않는다. 제출·조회·삭제는
+  kubernetes Python 클라이언트로.
 - gang scheduling: `minAvailable = worker + launcher`, `plugins: {ssh, svc}`, queue/priorityClass는
   정책에서. launcher ×1 + worker ×N (nsync는 source ×N + destination ×M). 노드 고정은
   nodeAffinity + 워커 anti-affinity(노드당 1개).
-- **worker 파드는 sshd만 띄운다.** launcher가 mpirun을 요청자 신원(runuser)으로 실행한다.
+- **worker 파드는 sshd만 띄운다.** launcher가 mpirun을 해석된 실행 신원(runuser)으로 실행한다.
 - **잡 파드 내부 로직은 셸 문자열 조립이 아니라 잡 이미지에 포함된 `dms-job-runner`(Python)가
   담당한다**: hostfile 대기, SSH 준비 배리어, `/etc/passwd` 물질화, mpirun 실행, summary/로그
   아티팩트 기록. 단위 테스트 가능하고 이미지와 함께 버전된다. 컨트롤플레인은 환경변수(경로,
   도구, 플래그, 프로세스 수)만 넘긴다.
-- phase별 타임아웃은 정책에서 (scan 1h, sync preview 1h, sync execution 3d, rm preview 30m,
-  rm execution 1h 를 기본값으로 시작).
+- phase별 타임아웃은 정책 행에서 (기본값: scan 1h / dsync·nsync preview 1h, execution 3d /
+  rm preview 30m, execution 1h).
 - 우선순위는 요청 시 low/mid/high 중 선택(기본 mid)하고, 정책이 연산별 기본값과 허용 상한을
   정한다. 선택값은 Volcano PriorityClass(`dms-low`/`dms-mid`/`dms-high`)로 매핑된다.
 
@@ -177,8 +190,10 @@ job-stepper 루프가 `FOR UPDATE SKIP LOCKED`로 "진행할 차례인 잡"을 �
   execution/ summary.json, stdout.log, stderr.log                      # sync·rm
   mpi/       submitted.yaml, hostfile, ...(디버깅 증거)
 ```
-- per-job 디렉토리는 요청자 소유·요청자 전용(umask 077)으로 잠근다. 컨트롤플레인이 읽을 때는
-  symlink containment 가드(realpath가 base 밖이면 거부).
+- per-job 디렉토리는 **잡 실행 신원**(preflight에서 해석된 owner uid/gid) 소유·전용(umask 077)
+  으로 잠근다. 포탈 열람 권한은 별개로 API 레벨에서 검사한다(본인 잡 또는 관리자).
+- 컨트롤플레인(controller/api)은 관리용 스토리지를 마운트하고 root로 아티팩트를 읽는다
+  (§2 전제: root-squash 없음). 읽을 때는 symlink containment 가드(realpath가 base 밖이면 거부).
 - DB에는 URI와 요약만 저장. scan 결과(dscan 리포트)도 아티팩트에 두고 포탈이 조회한다.
 
 ### Cancel
@@ -190,8 +205,9 @@ Volcano 잡 종료가 **성공한 뒤에만** DB를 `Cancelled`로 기록한다.
 
 ### 스토리지 등록 (단순화)
 
-- `storages`: 이름(PK), mount_path, managed_root(mount_path 하위), backend 종류(cephfs/gpfs/
-  wekafs — 표시용 메타데이터), 활성/비활성, 상태. 포탈 관리자 CRUD, 모든 변경은 audit_log에
+- `storages`: 이름(PK), mount_path, managed_root(mount_path 하위 — **잡 경로 해석의 기준점이자
+  containment 경계**, §4 검증 규칙 참조), backend 종류(cephfs/gpfs/wekafs — 표시용 메타데이터),
+  활성/비활성, 상태. 포탈 관리자 CRUD, 모든 변경은 audit_log에
   before/after 기록.
 - legacy의 CSI/StorageClass 조회, sanity 검사 8종, 클러스터 인벤토리 어댑터는 **만들지 않는다**.
   스토리지 상태는 한 가지 질문으로 환원한다: "신선한 에이전트 리포트에 이 마운트가 Ready로
@@ -217,7 +233,9 @@ Volcano 잡 종료가 **성공한 뒤에만** DB를 `Cancelled`로 기록한다.
   이미지는 여기서 pull.
 - **빌드 노드 지정**: 인터넷 가능한 노드가 제한적이므로, 관리자가 포탈에서 빌드 노드를 지정한다
   (DB 저장). 빌드는 그 노드에 고정된 K8s Job: git clone(지정 repo/ref) → buildah 빌드 → 로컬
-  레지스트리 push. `builds`에 커밋/태그/digest/로그/결과 기록.
+  레지스트리 push. `builds`에 커밋/태그/digest/로그/결과 기록. 빌드 Job은 **privileged**로
+  실행한다(관리자 전용 기능, 지정 빌드 노드 한정). 레지스트리가 HTTP면 push는
+  `--tls-verify=false`.
 - **롤아웃**: 관리자가 포탈에서 컴포넌트별 배포 태그를 선택 → controller가 k8s API로
   Deployment/DaemonSet 이미지를 교체하고 롤아웃 상태를 추적. `releases`가 컴포넌트별 현재/이력
   태그의 진실이다.
@@ -226,17 +244,22 @@ Volcano 잡 종료가 **성공한 뒤에만** DB를 `Cancelled`로 기록한다.
 
 ## 8. 포탈
 
-- React + Vite + TypeScript SPA, `dms-api`가 서빙. role에 따라 사용자/관리자 인터페이스 트리를
-  분리하고, 프론트 라우팅과 백엔드 API 양쪽에서 role을 검사한다 (`/api/user/*`, `/api/admin/*`).
+- React + Vite + TypeScript SPA, `dms-api`가 정적 서빙. role에 따라 사용자/관리자 인터페이스
+  트리를 분리하고, 프론트 라우팅과 백엔드 API 양쪽에서 role을 검사한다 (`/api/user/*`,
+  `/api/admin/*`).
 - **사용자**: 잡 제출(sync/rm은 preview 요약 확인 → confirm 클릭 강제) + 자기 잡의 상태/로그/
-  결과/수행시간/실패 사유 조회. scan은 직접 실행하지 않고 **관리자가 실행한 scan 결과 중 자기
-  디렉토리 몫을 조회**한다.
+  결과/수행시간/실패 사유 조회. scan은 직접 실행하지 않는다 — (storage, 경로)를 등록해 두면
+  (`user_scan_paths`), 그 경로를 커버하는 **최신 완료 scan의 해당 서브트리 통계**를 조회한다.
+  등록 경로의 소유권 검증은 하지 않는다 (노출되는 것은 파일 수·용량·온도 히스토그램 같은 집계
+  통계뿐이다).
 - **관리자**: 전체 잡 관리(취소, 특권 root 잡), scan 실행/결과, 스토리지 CRUD, 정책, denylist,
   계정 관리, 노드 대시보드(에이전트 신선도·마운트·도구·메트릭), 빌드·릴리스, 컨트롤 상태
   (유지보수/드레인), 감사 로그.
 
 ### 디자인 지침 (AI 티 금지)
 
+- 최신 프론트엔드 기술을 적극 사용한다 — 프레임워크와 주변 라이브러리(라우팅·서버 상태 관리·
+  차트 포함)는 최신 안정 버전 기준.
 - 이모지·이모티콘 금지. 왼쪽 선 강조 박스 패턴 금지.
 - 상태 뱃지: "왼쪽 점 + 상태 텍스트 둥근 뱃지" 금지. Figma Community에서 직관적이되 흔하지 않은
   상태 표현을 찾아 참고할 것.
@@ -244,17 +267,26 @@ Volcano 잡 종료가 **성공한 뒤에만** DB를 `Cancelled`로 기록한다.
 
 ## 9. 모니터링
 
-포탈에서 DMS 관련 모든 리소스 상태를 확인할 수 있어야 한다:
+포탈에서 DMS 관련 모든 리소스 상태를 확인할 수 있어야 한다. 대시보드는 두 축으로 설계한다:
+
+- **노드/리소스 대시보드 — Grafana를 운영·디버깅에 쓰듯 구성.** 시계열 그래프 중심: 노드별
+  CPU/메모리/디스크/네트워크 추이, 에이전트 신선도, 마운트/도구/identity 증거 상태. 기간 선택과
+  노드별 드릴다운을 지원한다. 데이터는 `agent_reports` 이력에서 (retention이 추이 윈도우를
+  보장한다).
+- **잡 통계 대시보드 — 의미 있는 통계를 최대한 제공.** 기간별 잡 처리량과 성공/실패율, 수행시간
+  분포, 큐 대기시간, 도구별/스토리지별/사용자별 분해, 실패 사유 상위 목록, 전송 파일 수·바이트
+  추이.
+
+개별 리소스 상세:
 
 - 잡: 상태, 수행시간, 실패 사유 코드, preview/execution 요약, 로그(launcher 파드 로그 tail +
   아티팩트 stdout/stderr).
-- 노드: 에이전트 신선도, 마운트/도구/identity 증거, OS 메트릭 추이.
 - 인프라: 컴포넌트 배포 상태(이미지 태그, replica, 롤아웃), Volcano 큐/우선순위, 레지스트리·빌드
   이력.
 - 진단: 요청 단위 correlation(`events` 테이블, request_id 기준), 상태 전이 이력, 감사 로그.
 
-별도 모니터링 스택(Prometheus 등)은 이번 범위 밖이다. 데이터 출처는 DB(에이전트 리포트 포함)와
-k8s API다.
+별도 모니터링 스택(Prometheus/Grafana 배포)은 이번 범위 밖 — 포탈 대시보드가 그 역할을 대신한다.
+데이터 출처는 DB(에이전트 리포트 이력 포함)와 k8s API다.
 
 ## 10. 테스트 전략
 
@@ -271,7 +303,7 @@ k8s API다.
 - DB 3개 (observability/portal DB 분리), 포탈 BFF·포탈 전용 오케스트레이터 4종
 - 멀티 클러스터: kubeconfig Secret, ssh-kubectl transport, 원격 클러스터 RBAC
 - mTLS 이중 API 평면 (dms-api / dms-api-internal), ingress client-CA 검증
-- kubectl 서브프로세스 호출, MPIJob/auto 스케줄러 폴백
+- kubectl 서브프로세스 호출, MPI Operator(MPIJob)·auto 스케줄러 폴백
 - 블로킹 워커 + 리스 하트비트 + run Blocked 파킹 + 고아 정리 스윕 3종
 - 수백 줄 셸 스크립트 f-string 조립 (job-runner로 대체)
 - uid/gid 하한 (MIN_UID/MIN_GID)
