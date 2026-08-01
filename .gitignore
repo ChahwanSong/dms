@@ -12,6 +12,7 @@ venv/
 .claude/
 .playwright-mcp/
 .playwright-cli/
+.superpowers
 output/
 
 # scratch UI screenshots dropped in repo root during manual testing
