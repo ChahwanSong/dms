@@ -1,21 +1,15 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-import json
-import logging
 from typing import Any
-from uuid import uuid4
 
 from ._base import *  # noqa: F401,F403
-from ._base import (  # noqa: F401  (underscore helpers are not picked up by import *)
-    _agent_capability_summary,
-    _parse_iso,
-    _storage_names_in_payload,
-)
 
 
 class ResourcesMixin:
-    """Managed resource rows (filesystem + k8s namespace quota)."""
+    """Materialized current state per resource, as a desired/applied/observed ledger.
+
+    The only kind written today is ``ResourceKind.DATA_JOB``; the RM-era ``filesystem``
+    and ``kubernetes_namespace_quota`` kinds were removed with the feature."""
 
 
     def upsert_resource(

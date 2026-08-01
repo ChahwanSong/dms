@@ -20,7 +20,6 @@ export function managedRoot(m: StorageMapping): string | null {
 //   cluster_name and storage_class_name go in the top-level mapping fields.
 export const FS_BACKEND_TYPES = ["cephfs", "gpfs", "wekafs"] as const;
 export const CSI_BACKEND_TYPES = ["ceph-csi", "gpfs-csi", "weka-csi"] as const;
-export const BACKEND_TYPES = [...FS_BACKEND_TYPES, ...CSI_BACKEND_TYPES] as const;
 
 // DM (agent) readiness is only meaningful for the filesystem backends
 // (cephfs/gpfs/wekafs): those run a DM agent on the storage node, so we show the DM
@@ -75,8 +74,10 @@ export const BACKEND_SKELETONS: Record<string, Record<string, unknown>> = {
   // ---- filesystem (fs): cephfs/wekafs/gpfs are the host-mounted data-job targets ----
   // Only the keys DMS actually reads are offered. The RM-era execution keys
   // (rm_worker_nodes/ssh_host/command_runner/command_timeout_seconds/quota_scope/
-  // fileset_name_template/weka_profile/weka_credentials) are gone with resource
-  // management — nothing reads them any more, so the form must not collect them.
+  // fileset_name_template/mutation_mode/control_host/weka_profile/weka_credentials)
+  // are gone with resource management — nothing reads them any more, so the form must
+  // not collect them. weka_credentials is additionally erased from stored templates by
+  // `dms migrate`, since it could hold a cleartext password DMS can no longer use.
   cephfs: {
     backend_type: "cephfs",
     cluster_name: "cluster-a",
@@ -85,7 +86,8 @@ export const BACKEND_SKELETONS: Record<string, Record<string, unknown>> = {
   },
   // GPFS reads cluster_name only from the top-level field, not the template; it is
   // kept here so the form derives the top-level cluster_name. filesystem_name is the
-  // GPFS device the DM worker addresses.
+  // GPFS device name — identifying metadata required at registration, not a command
+  // target: DMS treats GPFS as a plain POSIX mount and runs no mm* command.
   gpfs: {
     backend_type: "gpfs",
     cluster_name: "cluster-a",
@@ -172,7 +174,6 @@ export interface FieldDoc {
   required: boolean;
   desc: string;
   default: string;
-  secret?: boolean;
 }
 
 const CSI_FIELD_DOCS: FieldDoc[] = [
@@ -217,7 +218,7 @@ export const FIELD_DOCS: Record<string, FieldDoc[]> = {
     {
       name: "filesystem_name",
       required: true,
-      desc: "GPFS 파일시스템(device) 이름. mm* 명령 대상. GPFS는 등록 필수",
+      desc: "GPFS 파일시스템(device) 이름. 식별용 메타데이터이며 GPFS는 등록 필수",
       default: "—",
     },
   ],

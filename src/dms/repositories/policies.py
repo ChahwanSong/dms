@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import json
-import logging
 from typing import Any
-from uuid import uuid4
 
 from ._base import *  # noqa: F401,F403
-from ._base import (  # noqa: F401  (underscore helpers are not picked up by import *)
-    _agent_capability_summary,
-    _parse_iso,
-    _storage_names_in_payload,
-)
 
 
 class PoliciesMixin:
-    """Default quota policies and data-management policies."""
+    """Data-management policies (MPI fan-out / queue / priority per operation).
+
+    Fail-closed: a missing row for an operation stops every data job of that kind.
+    Not to be confused with the RM-era ``default_quota_policies`` table, which was
+    dropped — no quota policy survives."""
 
 
     def bootstrap_data_management_policies(

@@ -152,9 +152,10 @@ def operator_router() -> APIRouter:
         dms: DmsClient = Depends(get_dms_client),
         user: dict[str, Any] = Depends(require_role(ROLE_OPERATOR)),
     ) -> dict[str, Any]:
-        # DMS's DELETE returns the deleted mapping UN-redacted (cleartext weka
-        # password). Do NOT forward that body to the browser — call for the side
-        # effect / error propagation only, then return a minimal confirmation.
+        # DMS's DELETE echoes the deleted mapping. The browser has no use for that
+        # body, and not forwarding it keeps the blast radius small if DMS ever stops
+        # redacting — call for the side effect / error propagation only, then return
+        # a minimal confirmation.
         await _forward(dms.delete_storage_mapping(storage_name, actor=_actor(user)))
         return {"storage_name": storage_name, "deleted": True}
 

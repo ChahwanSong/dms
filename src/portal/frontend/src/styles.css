@@ -2739,13 +2739,6 @@ mark.reqa-hl { background: rgba(251, 191, 36, 0.3); color: inherit; border-radiu
 
 .metric-cell { display: flex; align-items: center; gap: 0.5rem; }
 .metric-now { white-space: nowrap; font-size: 0.85rem; }
-.spark { display: block; flex: 0 0 auto; border-radius: 3px; background: rgba(255, 255, 255, 0.02); }
-.spark-ok { color: var(--ok); }
-.spark-warn { color: var(--warn); }
-.spark-bad { color: var(--error); }
-.spark-line { stroke: currentColor; stroke-width: 1.5; fill: none; }
-.spark-area { fill: currentColor; opacity: 0.16; stroke: none; }
-.spark-dot { fill: currentColor; stroke: none; }
 
 /* scheduler control-state chips (StatusCards) */
 .ctrl-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.5rem 0 0.2rem; }

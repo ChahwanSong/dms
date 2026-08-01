@@ -6,8 +6,7 @@
       "cluster_name": "cluster-a",
       "storage_class_name": "rook-cephfs",
       "csi_driver": "rook-ceph.cephfs.csi.ceph.com",
-      "mount_paths": ["/cephfs"],
-      "network_endpoints": []
+      "mount_paths": ["/cephfs"]
     },
     {
       "storage_name": "weka-a",
@@ -15,8 +14,7 @@
       "cluster_name": "cluster-a",
       "storage_class_name": "weka-sc",
       "csi_driver": "csi.weka.io",
-      "mount_paths": ["/weka"],
-      "network_endpoints": []
+      "mount_paths": ["/weka"]
     },
     {
       "storage_name": "gpfs-a",
@@ -24,8 +22,7 @@
       "cluster_name": "cluster-a",
       "storage_class_name": "gpfs-sc",
       "csi_driver": "spectrumscale.csi.ibm.com",
-      "mount_paths": ["/gpfs"],
-      "network_endpoints": []
+      "mount_paths": ["/gpfs"]
     },
     {
       "storage_name": "ceph-csi-a",
@@ -33,8 +30,7 @@
       "cluster_name": "cluster-a",
       "storage_class_name": "rook-cephfs-csi",
       "csi_driver": "rook-ceph.cephfs.csi.ceph.com",
-      "mount_paths": [],
-      "network_endpoints": []
+      "mount_paths": []
     }
   ]
 }

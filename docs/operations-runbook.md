@@ -633,8 +633,14 @@ operator만** 쓸 수 있고 `DMS_DM_PRIVILEGED_REQUESTERS`/`_OPERATORS`/`_SCOPE
 - 운영 Helm/Kustomize packaging은 아직 없다 — `install/kubernetes/`의 명시적 YAML template로 배포한다.
 - **agent report retention은 이력(`agent_reports`)만 prune한다.** 노드별 최신 1행 테이블
   (`agent_node_current`)은 자동으로 지워지지 않으므로, 노드를 영구히 제거했으면 그 행을 수동으로
-  삭제해야 대시보드에서 `Stale`로 남지 않는다(SQL 예시는
-  [`../install/migration-rm-removal.md`](../install/migration-rm-removal.md) §2).
+  삭제해야 대시보드에서 `Stale`로 남지 않는다:
+
+  ```sql
+  -- 운영 DB (DMS_DATABASE_URL). 먼저 지울 대상을 확인한다.
+  SELECT cluster_name, node_name, worker_role, reported_at FROM agent_node_current
+   WHERE node_name = '<제거한 노드>';
+  DELETE FROM agent_node_current WHERE node_name = '<제거한 노드>';
+  ```
 
 ---
 

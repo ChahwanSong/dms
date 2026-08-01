@@ -219,8 +219,6 @@ def _agent_capability_summary(report: dict[str, Any]) -> dict[str, Any]:
             csi.get("driver") for csi in report.get("csi", []) if csi.get("driver")
         ],
         "tools": tools,
-        "credential_count": len(report.get("credentials", [])),
-        "network_count": len(report.get("networks", [])),
     }
 
 

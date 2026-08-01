@@ -79,13 +79,15 @@ CURL+=(-H "Authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 | `filesystem_name` | **gpfs 필수** / wekafs 선택 | 대상 filesystem(device) 이름(예: `gpfs0`, `weka0`). 생략 시 GPFS는 `422`, WEKA는 `storage_name`으로 폴백. CephFS는 해당 없음 |
 | `csi_driver` | 선택(CSI는 사실상 필수) | 이 스토리지의 PVC를 provisioning하는 CSI 드라이버. live StorageClass의 provisioner와 **일치**해야 하며 불일치 시 sanity `csi_driver_mismatch`. 생략 시 `csi_driver_matches` 검사에서 제외 |
 
-> **RM 전용이었던 키는 더 이상 동작에 영향을 주지 않는다.** `weka_credentials`·`weka_profile`·
+> **RM 전용이었던 키는 어떤 코드도 참조하지 않는다.** `weka_credentials`·`weka_profile`·
 > `command_runner`·`command_timeout_seconds`·`fileset_name_template`·`quota_scope`·
-> `rm_worker_nodes`·`ssh_host`는 파일시스템 프로비저닝/쿼터(RM)를 위한 것이었고, 그 기능이
-> 제거되면서 뒤 7개는 어떤 코드도 참조하지 않는다. 새 매핑에는 넣지 않는다. 기존 매핑에 남아 있어도
-> 무해하지만, `weka_credentials`는 쓰이지 않는 자격증명이 DB에 남는 것이므로
-> [migration-rm-removal.md §3](../../install/migration-rm-removal.md)으로 정리를 권장한다
-> (응답에서는 계속 `password`만 redaction되고, PATCH round-trip 시 머지된다).
+> `rm_worker_nodes`·`ssh_host`·`mutation_mode`·`control_host`는 파일시스템 프로비저닝/쿼터(RM)를
+> 위한 것이었고, 그 기능과 함께 소비처가 사라졌다. 새 매핑에는 넣지 않는다.
+>
+> `weka_credentials`는 **migrate 시 자동으로 삭제된다** — `dms migrate`가 모든
+> `backend_template`에서 이 키를 제거한다(idempotent). DMS는 어떤 파일시스템에도 로그인하지 않으므로
+> 남겨둘 이유가 없고, 평문 자격증명이 DB에 남는 것을 막기 위해 수동 절차가 아닌 마이그레이션으로 처리한다.
+> 나머지 키는 그대로 둬도 무해하다.
 
 > **파일시스템 매핑 vs CSI 매핑.** `cephfs`/`gpfs`/`wekafs`는 **호스트 마운트**를 가진 파일시스템 매핑이라
 > `mount_path` + `managed_root`가 필수이고, 노드 에이전트의 마운트 증거로 DM readiness가 선다.
@@ -194,7 +196,7 @@ curl -sS "${CURL[@]}" \
 
 > **PATCH는 부분 patch가 아니라 전체 `backend_template`을 round-trip**해야 한다. 현재 상태를 GET으로 읽어
 > 바꿀 필드만 고친 뒤 **전체를 다시 보낸다**. 부분만 보내면 나머지 필드가 사라진다.
-> 시크릿(`weka_credentials.password`)은 생략하면 DMS가 기존 값을 merge하므로 다시 넣지 않아도 된다.
+> `backend_template`에 시크릿은 없다 — DMS는 어떤 스토리지에도 인증하지 않으므로 merge-back 동작도 없다.
 
 ```bash
 # 예: managed_root를 변경 (나머지 필드는 현재 값 그대로 재전송)
@@ -231,8 +233,8 @@ curl -sS "${CURL[@]}" \
   | jq '{storage_name, status}'
 ```
 
-DELETE 응답에는 삭제된 매핑이 포함되며, 다른 경로와 **동일하게 redaction된다**(`weka_credentials.password`
-등 시크릿은 마스킹). 없는 스토리지 `404`, 진행 중 작업이 있으면 `409`.
+DELETE 응답에는 삭제된 매핑이 포함되며, 다른 경로와 **동일하게 redaction된다**(`password`·`secret`·
+`token` 등 비밀 형태의 키는 깊이에 상관없이 마스킹). 없는 스토리지 `404`, 진행 중 작업이 있으면 `409`.
 
 ---
 

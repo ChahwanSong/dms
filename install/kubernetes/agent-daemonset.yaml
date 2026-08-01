@@ -13,13 +13,16 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: dms-agent-readonly
+# Minimal: the agent only ever fetches single named objects —
+# nodes/<node> (node UID), storageclasses/<name> and csidrivers/<name> (CSI probe).
+# No list, and no pods.
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods"]
-    verbs: ["get", "list"]
+    resources: ["nodes"]
+    verbs: ["get"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses", "csidrivers"]
-    verbs: ["get", "list"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -53,9 +56,10 @@ data:
   # the agent reads the host's real mounts and infers Ready + rw/ro from mountinfo — no
   # per-storage hostPath mounts needed.
   DMS_AGENT_MOUNTINFO_PATH: "/host/proc/1/mountinfo"
-  # Host root filesystem bind-mounted at /host (see DaemonSet volumes). Enables
-  # per-node disk-usage metrics + per-mount capacity (statvfs). Optional for
-  # readiness (that comes from mountinfo) but part of the complete node report.
+  # Host root filesystem bind-mounted at /host (see DaemonSet volumes). Two uses:
+  # per-node disk-usage metrics, and the resolution root for on-demand POSIX identity
+  # probing (chroot $HOST_ROOT getent / $HOST_ROOT/etc/passwd — see dms-04 §3).
+  # Optional for readiness (that comes from mountinfo).
   DMS_AGENT_HOST_ROOT: "/host"
 ---
 apiVersion: v1
@@ -88,8 +92,7 @@ data:
           "storage_name": "cephfs-a",
           "backend_type": "cephfs",
           "cluster_name": "cluster-a",
-          "mount_paths": ["/cephfs"],
-          "network_endpoints": []
+          "mount_paths": ["/cephfs"]
         }
       ]
     }
@@ -130,30 +133,25 @@ spec:
           env:
             - name: DMS_AGENT_WORKER_ROLE
               value: DM
-            # Comma-separated POSIX usernames this DM node vouches identity-readiness for.
-            # A DM job's requester MUST appear here (per node) or the candidate is rejected
-            # (identity_not_ready_on_node) -- so every non-privileged DM job fails until it
-            # is set. The listed users must also resolve on the node via NSS/SSSD (getpwnam)
-            # so the agent can confirm uid/gid. Privileged-root jobs bypass this gate.
+            # Comma-separated POSIX usernames the agent probes on EVERY cycle -- a warm
+            # baseline, not the whole allowlist. A requester who is not listed is probed
+            # ON DEMAND (dm-worker registers them, the agent picks the target up in its
+            # next report and probes it), so new requesters work without editing this.
+            # What is actually required is that the node itself can resolve the user via
+            # NSS/SSSD (getpwnam); if it cannot, the candidate is rejected with
+            # identity_not_ready_on_node. Privileged-root jobs bypass the gate.
+            # See dms-04 §3 (step 5) and dms-05 for the on-demand tuning knobs.
             - name: DMS_AGENT_IDENTITY_USERS
               value: "CHANGE_ME_user1,CHANGE_ME_user2"
             - name: DMS_AGENT_NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: DMS_AGENT_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: DMS_AGENT_POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
           volumeMounts:
             - name: storages
               mountPath: /etc/dms/agent
               readOnly: true
-            # Host root (for disk metrics / per-mount capacity). `/proc` is a
+            # Host root (for per-node disk metrics + identity probing). `/proc` is a
             # separate mount so it is NOT visible under this; hence the explicit
             # proc-mountinfo mount below.
             - name: host-root

@@ -18,7 +18,9 @@ from typing import Any
 from urllib import error, parse, request
 
 DEFAULT_AGENT_CONFIG_PATH = "/etc/dms/agent/storages.json"
-DEFAULT_TOOL_NAMES = ("dsync", "nsync", "drm", "dscan", "kubectl")
+# The mpiFileUtils tools the DM worker gates on (_tool_ready). Nothing gates on
+# kubectl, and the agent reaches Kubernetes over the API, not the CLI.
+DEFAULT_TOOL_NAMES = ("dsync", "nsync", "drm", "dscan")
 SERVICE_ACCOUNT_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 SERVICE_ACCOUNT_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
@@ -38,8 +40,6 @@ class AgentDaemonConfig:
     network_endpoints: list[str] = field(default_factory=list)
     identity_users: list[str] = field(default_factory=list)
     auth_shared_token: str | None = None
-    pod_name: str | None = None
-    pod_namespace: str | None = None
     mountinfo_path: str = "/proc/self/mountinfo"
 
 
@@ -132,9 +132,6 @@ def config_from_env(environ: dict[str, str] | None = None) -> AgentDaemonConfig:
         network_endpoints=_csv(environ.get("DMS_AGENT_NETWORK_ENDPOINTS")),
         identity_users=_csv(environ.get("DMS_AGENT_IDENTITY_USERS")),
         auth_shared_token=environ.get("DMS_AUTH_SHARED_TOKEN"),
-        pod_name=environ.get("DMS_AGENT_POD_NAME") or environ.get("POD_NAME"),
-        pod_namespace=environ.get("DMS_AGENT_POD_NAMESPACE")
-        or environ.get("POD_NAMESPACE"),
         mountinfo_path=environ.get("DMS_AGENT_MOUNTINFO_PATH", "/proc/self/mountinfo"),
     )
 
@@ -292,8 +289,9 @@ def build_agent_report(
     identity_evidence: dict[str, Any] = {
         "source": "agent-prober",
         "checked_at": checked_at,
-        "pod_name": config.pod_name,
-        "pod_namespace": config.pod_namespace,
+        # Which account the probe ran as — the identity hierarchy (chroot getent ->
+        # host /etc/passwd -> container NSS) behaves differently as root, so this is
+        # the first thing to check when a user resolves unexpectedly.
         "process_user": getpass.getuser(),
     }
     if node_reason:
@@ -368,24 +366,11 @@ def probe_mounts(
                 "checked_at": checked_at,
             }
             if mount:
-                item.update(
-                    {
-                        "filesystem_type": mount.get("filesystem_type"),
-                        "mount_source": mount.get("source"),
-                        "mount_options": mount_options,
-                        "super_options": mount.get("super_options", []),
-                    }
-                )
-            if local_exists:
-                try:
-                    stat = os.statvfs(path)
-                    item["statvfs"] = {
-                        "block_size": stat.f_frsize,
-                        "blocks": stat.f_blocks,
-                        "blocks_available": stat.f_bavail,
-                    }
-                except OSError as exc:
-                    item["statvfs_error"] = str(exc)
+                # filesystem_type only: it is rendered in the portal's storage/node
+                # matrix. The mount source/options/super_options were reported for the
+                # RM-era capacity view and have no consumer; per-mount statvfs capacity
+                # went with them — DMS no longer allocates or accounts for space.
+                item["filesystem_type"] = mount.get("filesystem_type")
             evidence.append(item)
     return evidence
 

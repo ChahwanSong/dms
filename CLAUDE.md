@@ -51,9 +51,10 @@ truth; every process is a restartable loop calling `run_once()`.
   `TERMINAL_LIFECYCLE_STATES` marks the states nothing further advances from (used for request
   listing, stuck-request `:resolve`, and attention detection). Workers claim work with time-bounded
   **leases** (`worker_lease_seconds`); stale claims are reaped (`mark_stale_runs`).
-- `OperationKind` (`data.scan`/`sync`/`rm`/`cancel`, `identity.*`), `ResourceKind` (`data_job`,
-  `storage_mapping`), `WorkerRole` (`DM` only) classify and route each request. **Storage-mapping CRUD
-  is synchronous in the API** and never enters the request→plan→run machine.
+- `OperationKind` (`data.scan`/`sync`/`rm`/`cancel`, `identity.*`), `ResourceKind` (`data_job`, the
+  only one) and `WorkerRole` (`DM` only) classify and route each request. **Storage-mapping CRUD is
+  synchronous in the API** and never enters the request→plan→run machine — hence no ResourceKind of
+  its own.
 
 ### Layers
 - **API** (`src/dms/api/`) — `create_app()` (`app.py`) wires `Settings`, repositories, adapters and
@@ -80,9 +81,9 @@ truth; every process is a restartable loop calling `run_once()`.
   `inventory` (read-only `kubectl`/`ssh-kubectl` StorageClass/CSI/node reads), `volcano` (Job
   scheduling). Live/stub implementations are paired where tests need them; `subprocess` is
   re-exported from `adapters/__init__.py` so tests can monkeypatch it.
-- **Backend registry** (`src/dms/backend_registry.py`) — per-storage placement hints. GPFS/WekaFS
-  templates carry mount/filesystem/network hints; resolves the DM worker pool per storage mapping,
-  defaulting to agent-inventory selection.
+- **Placement is backend-agnostic.** Every filesystem is treated as a plain POSIX mount, so there
+  is no per-backend adapter: the planner seeds one agent-inventory worker pool from the mapping's
+  sanity evidence, and the DM worker replaces it with its own candidate lists on claim.
 - **Agent** (`src/dms/agent.py`, `agent_daemon.py`) — node-side DaemonSet probing mounts, tools,
   credentials and identity, then POSTing `AgentReport`s. The DM worker gates on **report freshness**
   (`agent_report_stale_seconds`) before running jobs on a node.
@@ -90,7 +91,7 @@ truth; every process is a restartable loop calling `run_once()`.
 ### Conventions
 - Large submodules split into `_base.py` (shared imports/helpers, re-exported via
   `from ._base import *`) plus topic files (`workers`, `repositories`). Conversely, a package whose
-  split stops earning its keep is flattened back into one module (`planner.py`, `backend_registry.py`).
+  split stops earning its keep is flattened back into one module (`planner.py`).
 - **Fail closed**: half-configured LDAP yields a per-request `ldap_not_configured` rejection rather
   than crashing the loop; `dm-worker` sets `umask 0o077` so artifact metadata is owner-only.
 - Mutating jobs (`sync`/`rm`) require a preview whose fingerprint is confirmed before execution
@@ -140,8 +141,9 @@ Keep the two separate as they grow.
 
 ### DMS contract quirks (storage inventory is the reference feature)
 - PATCH takes the **full** `StorageMappingInput` — round-trip the whole current state, never partials.
-- Only `weka_credentials.password` is redacted in responses; DMS merges omitted secrets back on upsert.
-  Never render secrets.
+- `backend_template` carries no secrets — DMS authenticates to no filesystem. Responses still run a
+  generic redactor over secret-shaped keys (`password`/`secret`/`token`/…) as a safety net; there is
+  no merge-back on upsert. Never render whatever it masks.
 - DELETE is a **hard** delete (no disable/enable endpoint) and returns the deleted mapping.
 - **All portal Secret values are `REPLACE_WITH_*` placeholders** in `kubernetes/portal.yaml`
   (`PORTAL_SESSION_SECRET`, `PORTAL_OPERATOR_USERS`, `PORTAL_DMS_TOKEN`, `PORTAL_ADMIN_TOKEN`,

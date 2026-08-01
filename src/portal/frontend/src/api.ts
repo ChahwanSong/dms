@@ -699,7 +699,6 @@ export interface AgentReport {
   worker_role: string; freshness_status: string; reported_at?: string;
   capability_summary?: {
     mounts?: string[]; tools?: string[]; csi_drivers?: string[];
-    credential_count?: number;
   };
   os_metrics?: {
     cpu?: { percent?: number; cores?: number };

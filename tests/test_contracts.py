@@ -266,13 +266,15 @@ def test_operations_requests_filters_by_requester_and_limit(harness):
 def test_request_activity_lists_all_and_filters(harness):
     repo = harness["repository"]
     # Two distinct (operation, resource_kind) groups so the filter assertions below
-    # actually discriminate. Both pairs are surviving contract members; the rows are
-    # written straight to the repository, so no planner/worker semantics are implied.
+    # actually discriminate. data_job is the only kind a live request can carry, so the
+    # other group uses a legacy RM-era value -- exactly what an upgraded database still
+    # holds. Rows are written straight to the repository, so no planner/worker semantics
+    # are implied.
     for index in range(3):
         repo.create_request(
             requester_id="alice", actor="api-client",
             operation=OperationKind.IDENTITY_UPSERT.value,
-            resource_kind=ResourceKind.STORAGE_MAPPING.value,
+            resource_kind="filesystem",
             resource_key=f"weka-a:alice-{index}", payload={},
         )
         repo.create_request(
@@ -289,8 +291,8 @@ def test_request_activity_lists_all_and_filters(harness):
     op_resp = client.get("/api/v1/operations/request-activity?operation=data.sync", headers=hdr)
     assert [r["operation"] for r in op_resp.json()] == ["data.sync"] * 3
     # filter by resource_kind
-    rk_resp = client.get("/api/v1/operations/request-activity?resource_kind=storage_mapping", headers=hdr)
-    assert len(rk_resp.json()) == 3 and all(r["resource_kind"] == "storage_mapping" for r in rk_resp.json())
+    rk_resp = client.get("/api/v1/operations/request-activity?resource_kind=data_job", headers=hdr)
+    assert len(rk_resp.json()) == 3 and all(r["resource_kind"] == "data_job" for r in rk_resp.json())
     # requester + limit still work
     lim_resp = client.get("/api/v1/operations/request-activity?requester_id=alice&limit=2", headers=hdr)
     assert len(lim_resp.json()) == 2 and all(r["requester_id"] == "alice" for r in lim_resp.json())

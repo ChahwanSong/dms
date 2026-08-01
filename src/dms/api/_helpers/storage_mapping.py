@@ -1,4 +1,17 @@
-"""Storage mapping API helpers — secret redaction & merge for PATCH."""
+"""Storage mapping API helpers — defensive secret redaction for responses.
+
+DMS holds no storage credentials: it authenticates to no filesystem and runs no
+storage-vendor CLI, so ``backend_template`` should carry mount/identification metadata
+only. The RM-era ``weka_credentials`` field is stripped from stored templates by
+``_purge_storage_template_secrets`` in migrations.py.
+
+This redactor stays anyway, as a generic safety net rather than support for one named
+field: it masks anything secret-shaped that a legacy row, a hand-written PATCH or a
+future field might put in the template, so no such value can reach an API response.
+There is deliberately no merge-back counterpart -- the old one restored a stored
+password whenever a client sent ``weka_credentials: {}``, which resurrected the very
+secret a cleanup was trying to remove.
+"""
 
 from __future__ import annotations
 
@@ -6,49 +19,45 @@ from typing import Any
 
 REDACTED = "***"
 
+# Substring match on the key name, applied at every depth of backend_template.
+_SECRET_KEY_HINTS = ("password", "secret", "token", "api_key", "apikey", "private_key")
+
+
+def _is_secret_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(hint in lowered for hint in _SECRET_KEY_HINTS)
+
+
+def _redact_value(value: Any) -> Any:
+    """Recursively mask secret-shaped keys. Returns a copy; input is not mutated."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                REDACTED
+                if _is_secret_key(str(key)) and item not in (None, "")
+                else _redact_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
+
 
 def redact_storage_mapping(mapping: dict[str, Any] | None) -> dict[str, Any] | None:
-    """API 응답용으로 backend_template 안의 비밀 필드를 마스킹."""
+    """Mask secret-shaped fields inside ``backend_template`` for API responses."""
     if not mapping:
         return mapping
     template = mapping.get("backend_template")
     if not isinstance(template, dict):
         return mapping
-    creds = template.get("weka_credentials")
-    if isinstance(creds, dict) and creds.get("password") not in (None, "", REDACTED):
-        redacted_template = dict(template)
-        redacted_template["weka_credentials"] = {**creds, "password": REDACTED}
-        redacted = dict(mapping)
-        redacted["backend_template"] = redacted_template
-        return redacted
-    return mapping
+    redacted_template = _redact_value(template)
+    if redacted_template == template:
+        return mapping
+    return {**mapping, "backend_template": redacted_template}
 
 
 def redact_storage_mappings(
     mappings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     return [redact_storage_mapping(m) for m in mappings]
-
-
-def merge_storage_mapping_secrets(
-    incoming_template: dict[str, Any], existing: dict[str, Any] | None
-) -> None:
-    """PATCH 입력의 redacted 비밀 필드를 기존 값으로 머지 (in-place).
-
-    클라이언트가 redacted GET 응답을 그대로 PATCH로 다시 보낼 때 기존 password를 유지."""
-    if not existing:
-        return
-    existing_template = existing.get("backend_template") or {}
-    incoming_creds = incoming_template.get("weka_credentials")
-    if not isinstance(incoming_creds, dict):
-        return
-    existing_creds = existing_template.get("weka_credentials") or {}
-    password = incoming_creds.get("password")
-    merged = dict(incoming_creds)
-    if password in (None, "", REDACTED) and existing_creds.get("password"):
-        merged["password"] = existing_creds["password"]
-    if not merged.get("organization") and existing_creds.get("organization"):
-        merged["organization"] = existing_creds["organization"]
-    if not merged.get("username") and existing_creds.get("username"):
-        merged["username"] = existing_creds["username"]
-    incoming_template["weka_credentials"] = merged

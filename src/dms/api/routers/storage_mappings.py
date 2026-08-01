@@ -23,10 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ...domain import StorageMappingInput, validate_filesystem_managed_root
 from .._helpers.configmap import sync_agent_storages_configmap
 from .._helpers.inventory import sanity_service
-from .._helpers.storage_mapping import (
-    merge_storage_mapping_secrets,
-    redact_storage_mapping,
-)
+from .._helpers.storage_mapping import redact_storage_mapping
 from .._services import AppServices
 from ..deps import (
     _reject_if_maintenance_blocked,
@@ -52,8 +49,6 @@ def storage_mappings_router() -> APIRouter:
                 storage_name=data.storage_name, actor=actor, conflict=conflict
             )
             raise HTTPException(status_code=409, detail=conflict)
-        existing = services.repository.get_storage_mapping(data.storage_name)
-        merge_storage_mapping_secrets(data.backend_template, existing)
         try:
             validate_filesystem_managed_root(data.backend_template)
         except ValueError as exc:
@@ -144,7 +139,6 @@ def storage_mappings_router() -> APIRouter:
                 storage_name=storage_name, actor=actor, conflict=conflict
             )
             raise HTTPException(status_code=409, detail=conflict)
-        merge_storage_mapping_secrets(data.backend_template, existing)
         try:
             validate_filesystem_managed_root(data.backend_template)
         except ValueError as exc:

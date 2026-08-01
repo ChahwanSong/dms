@@ -85,8 +85,11 @@ class WorkerRole(StrEnum):
 
 
 class ResourceKind(StrEnum):
+    # The only kind a request can carry: RequestEnvelope is built in exactly one place
+    # (api/_helpers/data_job.py) and hardcodes it. Storage-mapping CRUD is synchronous
+    # in the API and never enters the request -> plan -> run machine, so it has no
+    # ResourceKind of its own; its audit trail is mutation_class="storage_mapping".
     DATA_JOB = "data_job"
-    STORAGE_MAPPING = "storage_mapping"
 
 
 class OperationKind(StrEnum):
@@ -275,9 +278,8 @@ DM_DENYLIST_SUBJECT_TYPES = ("requester", "owner", "group")
 
 
 # Filesystem backends that manage a directory subtree under their mount point.
-# Kept as literals here (rather than imported from backend_registry) so that the domain
-# layer — and the query/inventory layers that only need to *classify* a mapping —
-# never depend on the backend adapter modules.
+# Kept as literals here so the domain layer — and the query/inventory layers that only
+# need to *classify* a mapping — stay free of any per-backend module.
 FILESYSTEM_BACKEND_TYPES = ("cephfs", "wekafs", "gpfs")
 
 
@@ -300,9 +302,8 @@ def validate_filesystem_managed_root(backend_template: dict[str, Any]) -> None:
     under it. ``managed_root`` is the security/isolation boundary (and the DM path base
     when ``DMS_DM_PATH_BASE=managed_root``), so it must be explicit -- the historical
     implicit ``{mount_path}/dms`` default is no longer accepted. GPFS additionally
-    requires an explicit ``filesystem_name`` (the GPFS device its mm* fileset/quota
-    commands target). Non-filesystem backends (CSI, kubernetes namespace quota) have no
-    managed_root and are skipped.
+    requires an explicit ``filesystem_name`` (the GPFS device name). Non-filesystem
+    backends (CSI) have no managed_root and are skipped.
     """
     backend_type = backend_template.get("backend_type")
     if backend_type not in FILESYSTEM_BACKEND_TYPES:
@@ -316,8 +317,10 @@ def validate_filesystem_managed_root(backend_template: dict[str, Any]) -> None:
             f"{backend_type} storage mapping requires an explicit managed_root"
         )
     managed_root_path_suffix(mount_path, managed_root)  # validates under mount_path
-    # GPFS mm* commands target a named filesystem (the GPFS device), so filesystem_name
-    # is required and is not silently defaulted to storage_name.
+    # A GPFS mount does not name its own device, so the filesystem (device) name is
+    # operator-supplied identifying metadata captured at registration -- required, and
+    # not silently defaulted to storage_name. DMS does not itself run any GPFS
+    # administrative (mm*) command; it treats the mount as plain POSIX.
     if backend_type == "gpfs" and not backend_template.get("filesystem_name"):
         raise ValueError("gpfs storage mapping requires filesystem_name")
 

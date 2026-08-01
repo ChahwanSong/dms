@@ -48,8 +48,8 @@ const PV_GUIDES: Record<string, { tag: string; body: ReactNode }> = {
 // On submit the form derives the top-level StorageMappingInput fields DMS reads
 // (cluster_name, storage_class_name) from the template. DMS PATCH takes the FULL
 // input, so on edit the template is pre-filled from the current state (top-level
-// values merged in) and the whole thing is re-sent. Secrets (weka password) come
-// back redacted as "***"; leaving them is safe — DMS merges the stored secret.
+// values merged in) and the whole thing is re-sent. The template holds no secrets —
+// DMS authenticates to no storage — so there is nothing to re-enter on edit.
 export default function StorageMappingForm({
   mode,
   initial,
@@ -366,7 +366,6 @@ export default function StorageMappingForm({
                     <tr key={f.name}>
                       <td>
                         <code>{f.name}</code>
-                        {f.secret && <span title="secret"> 🔒</span>}
                       </td>
                       <td>
                         <span className={f.required ? "fr-req" : "fr-opt"}>

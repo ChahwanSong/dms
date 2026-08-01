@@ -231,6 +231,12 @@ CREATE INDEX IF NOT EXISTS idx_data_jobs_updated_at ON data_jobs(updated_at);
 -- cheap COUNT(*) / filtered list that the work-summary "action required" tile uses.
 CREATE INDEX IF NOT EXISTS idx_data_jobs_operation_state ON data_jobs(operation, state);
 
+-- default_quota_policies was removed with resource management: DMS neither allocates
+-- nor accounts for capacity. Dropped here for parity with identity_mappings above, so
+-- an upgrade does not leave the table behind for an operator to find and misread.
+-- NOTE: this is NOT the table below -- data_management_policies is the live MPI
+-- fan-out/queue/priority policy, and every data job fails closed without its row.
+DROP TABLE IF EXISTS default_quota_policies;
 CREATE TABLE IF NOT EXISTS data_management_policies (
     operation TEXT PRIMARY KEY,
     default_worker_nodes INTEGER,
@@ -335,6 +341,7 @@ def migrate_operational(database: Database) -> None:
         _ensure_operational_phase19_columns(connection, database)
         _backfill_filesystem_managed_root(connection)
         _backfill_agent_node_current(connection)
+        _purge_storage_template_secrets(connection)
         _record_migration(connection, "operational-0001-phase1")
         _record_migration(connection, "operational-0002-phase2-identity")
         _record_migration(connection, "operational-0003-phase3-inventory")
@@ -344,6 +351,7 @@ def migrate_operational(database: Database) -> None:
         _record_migration(connection, "operational-0024-agent-node-current")
         _record_migration(connection, "operational-0025-scale-indexes")
         _record_migration(connection, "operational-0026-component-leases")
+        _record_migration(connection, "operational-0027-purge-storage-template-secrets")
 
 
 def migrate_observability(database: Database) -> None:
@@ -446,6 +454,42 @@ def _backfill_filesystem_managed_root(connection) -> None:
         if not mount_path:
             continue
         template["managed_root"] = f"{mount_path.rstrip('/')}/dms"
+        connection.execute(
+            "UPDATE storage_mappings SET backend_template = ? WHERE storage_name = ?",
+            (json.dumps(template), row["storage_name"]),
+        )
+
+
+# Template keys that once carried storage credentials. DMS authenticates to no
+# filesystem and runs no storage-vendor CLI, so nothing reads these -- but a legacy
+# row can still hold a cleartext password, which is why they are erased at migrate
+# time rather than merely ignored. The API-side redactor is a second line of defence.
+_OBSOLETE_SECRET_TEMPLATE_KEYS = ("weka_credentials",)
+
+
+def _purge_storage_template_secrets(connection) -> None:
+    """Strip obsolete credential blobs from stored ``backend_template`` JSON.
+
+    Idempotent and cheap: rewrites only rows that still carry one of the keys, so it
+    is a no-op scan once every deployment has migrated.
+    """
+    rows = connection.execute(
+        "SELECT storage_name, backend_template FROM storage_mappings"
+    ).fetchall()
+    for row in rows:
+        raw = row["backend_template"]
+        if not raw:
+            continue
+        try:
+            template = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(template, dict):
+            continue
+        if not any(key in template for key in _OBSOLETE_SECRET_TEMPLATE_KEYS):
+            continue
+        for key in _OBSOLETE_SECRET_TEMPLATE_KEYS:
+            template.pop(key, None)
         connection.execute(
             "UPDATE storage_mappings SET backend_template = ? WHERE storage_name = ?",
             (json.dumps(template), row["storage_name"]),

@@ -1,25 +1,20 @@
-"""BackendAdapterRegistry.data_worker_pool: per-backend DM worker-pool derivation.
+"""Planner worker-pool derivation: one placement path for every backend.
 
-GPFS and WekaFS mappings carry backend-specific placement hints (mount_path,
-filesystem_name, data_network) that the planner stamps onto the data_jobs row so the
-DM worker can pick nodes and build the MPI job. Everything else falls back to plain
-agent-inventory selection.
+DMS treats each filesystem as a plain POSIX mount, so there is no per-backend placement
+branch -- GPFS, WekaFS and CephFS all seed the same agent-inventory pool, and the DM
+worker replaces it wholesale with its own candidate lists when it claims the job.
 
-(Previously covered inside tests/test_gpfs_backend.py and tests/test_weka_backend.py,
-which were RM-only and removed with the resource-management feature.)
+(Previously tests/test_backend_data_worker_pool.py, which exercised the GPFS/WekaFS
+adapters in dms.backend_registry. Those adapters emitted placement hints -- mount_path,
+filesystem_name, data_network, tool_candidates -- that nothing ever read, and were
+removed along with the module. Before that it was tests/test_gpfs_backend.py and
+tests/test_weka_backend.py, which were RM-only.)
 """
 
 from __future__ import annotations
 
 import pytest
 
-from dms.backend_registry import (
-    GPFS_BACKEND_TYPE,
-    GPFS_CSI_DRIVER,
-    WEKAFS_BACKEND_TYPE,
-    WEKAFS_CSI_DRIVER,
-    BackendAdapterRegistry,
-)
 from dms.db import Database
 from dms.domain import OperationKind, ResourceKind, StorageMappingInput
 from dms.migrations import migrate_all
@@ -74,11 +69,11 @@ def _gpfs_mapping() -> StorageMappingInput:
     return StorageMappingInput(
         storage_name="gpfs-a",
         backend_template={
-            "backend_type": GPFS_BACKEND_TYPE,
+            "backend_type": "gpfs",
             "filesystem_name": "gpfs0",
             "mount_path": "/gpfs/gpfs0",
             "managed_root": "/gpfs/gpfs0/dms",
-            "csi_driver": GPFS_CSI_DRIVER,
+            "csi_driver": "spectrumscale.csi.ibm.com",
             "data_network": "storage-net-a",
         },
         cluster_name="cluster-a",
@@ -91,11 +86,11 @@ def _weka_mapping() -> StorageMappingInput:
     return StorageMappingInput(
         storage_name="weka-a",
         backend_template={
-            "backend_type": WEKAFS_BACKEND_TYPE,
+            "backend_type": "wekafs",
             "filesystem_name": "pvs_weka",
             "mount_path": "/pvs_weka",
             "managed_root": "/pvs_weka/dms",
-            "csi_driver": WEKAFS_CSI_DRIVER,
+            "csi_driver": "csi.weka.io",
             "data_network": "storage-net-w",
         },
         cluster_name="cluster-a",
@@ -131,57 +126,56 @@ def _plan_scan(repository: DmsRepository, storage_name: str) -> dict:
             "priority": 100,
         },
     )
-    Planner(
-        repository,
-        backend_registry=BackendAdapterRegistry(repository),
-    ).run_once()
+    Planner(repository).run_once()
     job = repository.get_data_job_by_request(request_id)
     assert job is not None
     return job
 
 
-def test_gpfs_data_management_planning_records_gpfs_worker_pool(repository):
+@pytest.mark.parametrize(
+    "mapping_factory, storage_name",
+    [
+        (_gpfs_mapping, "gpfs-a"),
+        (_weka_mapping, "weka-a"),
+        (_cephfs_mapping, "cephfs-a"),
+    ],
+)
+def test_every_backend_plans_to_agent_inventory(
+    repository, mapping_factory, storage_name
+):
+    _register(repository, mapping_factory())
+
+    job = _plan_scan(repository, storage_name)
+
+    pool = job["worker_pool"]
+    assert pool["selection"] == "agent-inventory"
+    assert pool["required_mounts"] == [storage_name]
+    assert pool["readiness"]["data_management"] == "Ready"
+    assert pool["candidates"] == [{"cluster_name": "cluster-a", "node_name": "dm-1"}]
+
+
+def test_no_per_backend_placement_hints_are_emitted(repository):
+    """GPFS/WekaFS used to stamp mount_path, filesystem_name, data_network and
+    tool_candidates onto the pool. Nothing ever read them; they must not come back."""
     _register(repository, _gpfs_mapping())
 
-    job = _plan_scan(repository, "gpfs-a")
+    pool = _plan_scan(repository, "gpfs-a")["worker_pool"]
 
-    assert job["worker_pool"]["backend_type"] == GPFS_BACKEND_TYPE
-    assert job["worker_pool"]["required_mounts"] == ["gpfs-a"]
-    assert job["worker_pool"]["mount_path"] == "/gpfs/gpfs0"
-    assert job["worker_pool"]["filesystem_name"] == "gpfs0"
-    assert job["worker_pool"]["data_network"] == "storage-net-a"
-    assert "dscan" in job["worker_pool"]["tool_candidates"]
-
-
-def test_weka_data_management_planning_records_weka_worker_pool(repository):
-    _register(repository, _weka_mapping())
-
-    job = _plan_scan(repository, "weka-a")
-
-    assert job["worker_pool"]["backend_type"] == WEKAFS_BACKEND_TYPE
-    assert job["worker_pool"]["required_mounts"] == ["weka-a"]
-    assert job["worker_pool"]["mount_path"] == "/pvs_weka"
-    assert job["worker_pool"]["filesystem_name"] == "pvs_weka"
-    assert job["worker_pool"]["data_network"] == "storage-net-w"
-    assert "dscan" in job["worker_pool"]["tool_candidates"]
+    for stale_hint in (
+        "backend_type",
+        "mount_path",
+        "filesystem_name",
+        "data_network",
+        "tool_candidates",
+        "requires_posix_identity",
+    ):
+        assert stale_hint not in pool
 
 
-def test_backend_without_a_dedicated_adapter_falls_back_to_agent_inventory(repository):
-    """CephFS (and any unrecognised backend) has no placement hints of its own — the
-    DM worker selects purely from the agent inventory."""
-    _register(repository, _cephfs_mapping())
-
-    job = _plan_scan(repository, "cephfs-a")
-
-    assert job["worker_pool"]["selection"] == "agent-inventory"
-    assert job["worker_pool"]["required_mounts"] == ["cephfs-a"]
-    assert "backend_type" not in job["worker_pool"]
-
-
-def test_data_worker_pool_for_unregistered_storage_is_agent_inventory(repository):
-    pool = BackendAdapterRegistry(repository).data_worker_pool("nope")
-
-    assert pool == {
+def test_worker_pool_floor_for_unregistered_storage(repository):
+    """Defensive floor. The DM readiness gate rejects unregistered storage before
+    planning, so this shape is never persisted in practice."""
+    assert Planner(repository)._worker_pool("nope") == {
         "selection": "agent-inventory",
         "required_mounts": ["nope"],
         "candidates": [],

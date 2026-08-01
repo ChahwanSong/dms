@@ -110,7 +110,7 @@ CURL+=(-H "authorization: Bearer $DMS_AUTH_SHARED_TOKEN")
 | 파라미터 | 설명 |
 |---|---|
 | `operation` | 예: `data.scan`, `data.sync`, `data.rm`, `identity.upsert` |
-| `resource_kind` | `data_job` / `storage_mapping` 등 |
+| `resource_kind` | `data_job` (현재 요청이 가질 수 있는 유일한 값. 업그레이드된 DB에는 `filesystem` 등 RM 시절 행이 남아 있을 수 있다) |
 | `status` | 요청 상태(아래 표) |
 | `requester_id` | 선택 필터(단건 requester로 좁힐 때) |
 | `search` | **서버측** 대소문자 무시 부분검색. requester + 대상(`resource_key`/payload)을 훑어 **전체 이력**을 커버 |
@@ -255,7 +255,7 @@ storage mapping 등록 전에 대상 클러스터가 실제로 보이는지 확�
 
 ### `/storage-mappings`
 
-storage mapping을 **redacted**로 조회한다(`weka_credentials.password` 등 비밀은 렌더링하지 않음).
+storage mapping을 **redacted**로 조회한다(`password`·`secret`·`token` 등 비밀 형태의 키는 마스킹).
 `sanity_status`/`readiness`로 각 축(`data_management`/`inventory`)의 준비 상태를 본다.
 
 ```bash

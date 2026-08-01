@@ -1,8 +1,8 @@
 # Read-only DMS access to a TARGET cluster.
 #
-# DMS reads each registered cluster's inventory (nodes, namespaces, StorageClasses,
-# CSI drivers) to validate storage mappings — it does NOT create or mutate anything
-# on the target cluster. Apply this with kubectl pointed AT the target cluster, then
+# DMS reads each registered cluster's inventory (nodes, StorageClasses, CSI drivers)
+# to validate storage mappings — it does NOT create or mutate anything on the target
+# cluster. Apply this with kubectl pointed AT the target cluster, then
 # mint a kubeconfig for the dms-remote SA with
 # install/scripts/create-serviceaccount-kubeconfig.sh (see install/dms-03-storage-mappings.md §3).
 #
@@ -30,10 +30,11 @@ kind: ClusterRole
 metadata:
   name: dms-remote-inventory
 rules:
-  # Inventory reads only. `namespaces` read stays because inventory reports them;
-  # no create/patch/update — DMS never provisions namespaces.
+  # Inventory reads only. Namespaces are NOT granted: the inventory adapter fetches
+  # nodes, storageclasses and csidrivers and nothing else (src/dms/adapters/inventory.py).
+  # The namespace read existed for RM, which provisioned namespaces for quota.
   - apiGroups: [""]
-    resources: ["nodes", "namespaces"]
+    resources: ["nodes"]
     verbs: ["get", "list"]
   # StorageClass + CSIDriver reads back the storage-mapping sanity check
   # (storage_class_missing / csi_driver_mismatch).

@@ -118,10 +118,10 @@ WHERE state IN ('RecoveryNeeded','UnknownAfterSideEffect','BackendApplyFailed')
 
 **(c) 선택 — 남은 RM 행 완전 삭제.** 이력 감사가 필요 없으면 지운다:
 
-```sql
--- 기본 쿼터 정책 테이블(더 이상 쓰이지 않음)
-DROP TABLE IF EXISTS default_quota_policies;
+> `default_quota_policies` 테이블은 여기 없다 — `dms migrate`가 자동으로 DROP한다
+> (`identity_mappings`와 동일한 처리). 아래는 이력 행만 다룬다.
 
+```sql
 -- 레거시 RM operation/resource 행.
 -- 주의: results/plans/runs는 모두 requests(request_id)를 FK로 참조하므로 requests를 마지막에
 -- 지운다. 그리고 results는 반드시 **request_id 기준**으로 지워야 한다 — planner가 거부한
@@ -153,11 +153,14 @@ DELETE FROM resources
 
 기존 매핑의 `backend_template`에 남아 있는 RM 전용 키(`rm_worker_nodes`·`ssh_host`·`command_runner`·
 `command_timeout_seconds`·`quota_scope`·`fileset_name_template`·`mutation_mode`·`control_host`·
-`weka_profile`·`weka_credentials`)는 더 이상 읽히지 않는다. **`weka_credentials`는 예외적으로
-정리를 권장한다** — 아무도 쓰지 않는 자격증명이 DB에 남기 때문이다(응답에서는 계속 redaction된다).
-나머지는 그대로 둬도 무해하다.
-정리하고 싶으면 PATCH로 **전체 `backend_template`을 round-trip**하면서 뺀다
-([../docs/api/storage-mappings.md](../docs/api/storage-mappings.md) §5).
+`weka_profile`·`weka_credentials`)는 더 이상 읽히지 않는다.
+
+**`weka_credentials`는 수동 정리가 필요 없다** — `dms migrate`가 모든 `backend_template`에서
+자동으로 제거한다(idempotent, §2의 migrate Job에 포함). 평문 자격증명이 DB에 남는 문제라 운영자가
+SQL을 기억하는 데 맡기지 않는다.
+
+나머지 키는 그대로 둬도 무해하다. 굳이 지우려면 PATCH로 **전체 `backend_template`을 round-trip**
+하면서 뺀다([../docs/api/storage-mappings.md](../docs/api/storage-mappings.md) §5).
 
 ## 4. 스토리지 매핑 sanity 재검사 (권장)
 

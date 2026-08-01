@@ -68,7 +68,6 @@ def sync_agent_storages_configmap(
                 "storage_class_name": mapping.get("storage_class_name")
                 or tmpl.get("storage_class_name", ""),
                 "mount_paths": [mount_path] if mount_path else [],
-                "network_endpoints": tmpl.get("network_endpoints") or [],
             }
             if tmpl.get("csi_driver"):
                 entry["csi_driver"] = tmpl["csi_driver"]

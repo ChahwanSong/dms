@@ -149,7 +149,7 @@ def test_domain_enum_members_are_exactly_the_expected_set():
         "identity.refresh",
         "identity.disable",
     }
-    assert {r.value for r in ResourceKind} == {"data_job", "storage_mapping"}
+    assert {r.value for r in ResourceKind} == {"data_job"}
     assert {w.value for w in WorkerRole} == {"DM"}
 
 

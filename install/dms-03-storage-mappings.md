@@ -185,7 +185,9 @@ curl -sS "${CURL_MTLS[@]}" "$DMS_API_URL/api/v1/operations/inventory" \
 
 매핑은 **최상위 필드**(`storage_name` · `cluster_name` · `storage_class_name`)와 백엔드별
 **`backend_template`**으로 이루어진다. **sanity는 최상위 `cluster_name`/`storage_class_name`만 읽는다** —
-예시가 `backend_template` 안에도 `cluster_name`을 넣는 것은 WekaFS 워커풀 힌트용 폴백일 뿐이다.
+예시가 `backend_template` 안에도 `cluster_name`을 넣는 것은 포탈 등록 폼이 최상위 값을 이 키에서
+파생시키기 때문이다. 빼면 PATCH가 최상위 `cluster_name`을 `null`로 보내 sanity가
+`csi_mapping_unpinned`로 **Failed**가 되니 그대로 둔다.
 
 | 필드 | 위치 | 필수 | 설명 |
 |---|---|---|---|
@@ -196,7 +198,7 @@ curl -sS "${CURL_MTLS[@]}" "$DMS_API_URL/api/v1/operations/inventory" \
 | `managed_root` | template | 파일시스템 **필수** | DMS가 관리하는 루트(반드시 `mount_path` 하위). 생략 시 등록 `422` |
 | `filesystem_name` | template | **gpfs 필수** | 대상 device(예 `gpfs0`). WEKA는 선택(생략 시 `storage_name`) |
 | `csi_driver` | template | 선택(CSI는 사실상 필수) | live StorageClass provisioner와 **일치**해야 한다. 생략 시 `csi_driver_matches` sanity 제외 |
-| `data_network` | template | 선택 | **gpfs/wekafs 전용** — DM 워커풀 힌트로 전달된다(cephfs·CSI에서는 무시) |
+| `data_network` | template | 선택 | 식별용 메타데이터. 어떤 코드도 읽지 않는다 — 노드 선택은 전적으로 에이전트 인벤토리가 한다 |
 
 **나머지 필드·제약·응답 형태는 [`docs/api/storage-mappings.md`](../docs/api/storage-mappings.md) §2**에
 있다. 특히 `(cluster_name, storage_class_name)`이 유니크하다는 점(같은 스토리지를 host-mount와 PVC

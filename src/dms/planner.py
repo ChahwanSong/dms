@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .backend_registry import BackendAdapterRegistry
 from .config import Settings
 from .domain import (
     LifecycleState,
@@ -36,7 +35,6 @@ class Planner:
     """Plans persisted requests into executable desired state."""
 
     repository: DmsRepository
-    backend_registry: BackendAdapterRegistry | None = None
     # DM-only readiness staleness gate. None disables it (default), preserving existing
     # behaviour. When set, DM requests are fail-closed if a storage mapping's sanity is
     # older than this many seconds (the sanity reconciler keeps it fresh).
@@ -185,8 +183,12 @@ class Planner:
 
 
     def _worker_pool(self, storage_name: str) -> dict[str, Any]:
-        if self.backend_registry is not None:
-            return self.backend_registry.data_worker_pool(storage_name)
+        """Seed DM placement for the data_jobs row.
+
+        Selection is agent-inventory for every backend -- DMS treats each filesystem as
+        a plain POSIX mount, so there is no per-backend placement branch. The DM worker
+        replaces this blob wholesale with its own candidate lists when it claims the job.
+        """
         mapping = self.repository.get_storage_mapping(storage_name)
         if mapping and mapping.get("sanity_result"):
             agent_observed = mapping["sanity_result"].get("agent_observed", {})
@@ -197,7 +199,13 @@ class Planner:
                 "candidates": agent_observed.get("dm_candidates", []),
                 "sanity_status": mapping.get("sanity_status"),
             }
-        return BackendAdapterRegistry(self.repository).data_worker_pool(storage_name)
+        # Unregistered / never-sanity-checked storage. The DM readiness gate rejects
+        # these before planning, so this is a defensive floor rather than a live path.
+        return {
+            "selection": "agent-inventory",
+            "required_mounts": [storage_name],
+            "candidates": [],
+        }
 
 
     def _data_worker_pool(self, request: dict[str, Any]) -> dict[str, Any]:
