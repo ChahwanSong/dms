@@ -18,3 +18,33 @@ def test_shared_token_grants_admin(client):
 def test_wrong_token_rejected(client):
     r = client.get("/api/auth/me", headers={"Authorization": "Bearer nope"})
     assert r.status_code == 401
+
+
+def test_signup_login_me_logout(client):
+    assert client.post("/api/auth/signup", json={
+        "username": "alice", "password": "pw1", "email": "alice@corp.example"
+    }).status_code == 201
+    assert client.post("/api/auth/login", json={
+        "username": "alice", "password": "bad"}).status_code == 401
+    r = client.post("/api/auth/login", json={"username": "alice", "password": "pw1"})
+    assert r.json() == {"actor": "alice", "role": "user"}
+    assert client.get("/api/auth/me").json()["actor"] == "alice"
+    client.post("/api/auth/logout")
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_duplicate_signup_409(client):
+    client.post("/api/auth/signup", json={"username": "dup", "password": "x"})
+    r = client.post("/api/auth/signup", json={"username": "dup", "password": "x"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "account_exists"
+
+
+def test_admin_account_creation_requires_ops_token(client):
+    assert client.post("/api/admin/accounts", json={
+        "username": "boss", "password": "pw"}).status_code == 403
+    assert client.post("/api/admin/accounts", json={
+        "username": "boss", "password": "pw"},
+        headers={"x-admin-token": "tok-admin"}).status_code == 201
+    r = client.post("/api/auth/login", json={"username": "boss", "password": "pw"})
+    assert r.json()["role"] == "admin"

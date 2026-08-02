@@ -1,9 +1,9 @@
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 from ..config import Settings
 from ..db import Database
 from ..repositories import Repositories
-from .auth import Identity, require_user
+from .routes_auth import router as auth_router
 
 
 def create_app(settings: Settings, db: Database) -> FastAPI:
@@ -17,8 +17,6 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     def healthz():
         return {"status": "ok"}
 
-    @app.get("/api/auth/me")
-    def me(identity: Identity = Depends(require_user)):
-        return {"actor": identity.actor, "role": identity.role}
+    app.include_router(auth_router)
 
     return app
