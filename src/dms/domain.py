@@ -1,6 +1,7 @@
 """도메인 모델: 상태머신(스펙 §4), 검증 규칙, 옵션 allowlist. 이 모듈은 DB를 모른다."""
 import posixpath
 import re
+
 from enum import StrEnum
 
 
@@ -73,10 +74,12 @@ _USERNAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9._-]{0,63}$")
 
 
 def validate_relative_path(path: str) -> str:
-    if not path or path.startswith("/") or "\x00" in path or ".." in path:
+    if not path or path.startswith("/") or "\x00" in path:
+        raise DomainValidationError("unsafe_path", repr(path))
+    if any(part == ".." for part in path.split("/")):
         raise DomainValidationError("unsafe_path", repr(path))
     normalized = posixpath.normpath(path)
-    if normalized in (".", "..") or normalized.startswith("../"):
+    if normalized == ".":
         raise DomainValidationError("unsafe_path", repr(path))
     return normalized
 

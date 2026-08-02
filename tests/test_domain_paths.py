@@ -17,6 +17,18 @@ def test_valid_path_normalized():
     assert validate_relative_path("a/b/./c/") == "a/b/c"
 
 
+def test_dotdot_substring_in_filename_is_allowed():
+    assert validate_relative_path("notes..txt") == "notes..txt"
+    assert validate_relative_path("v1..2/report.csv") == "v1..2/report.csv"
+
+
+@pytest.mark.parametrize("bad", ["a/..", "../x", "./."])
+def test_dotdot_component_still_rejected(bad):
+    with pytest.raises(DomainValidationError) as e:
+        validate_relative_path(bad)
+    assert e.value.reason_code == "unsafe_path"
+
+
 @pytest.mark.parametrize("src,dst", [("a/b", "a/b"), ("a", "a/b/c")])
 def test_sync_destination_inside_source_rejected(src, dst):
     with pytest.raises(DomainValidationError) as e:
