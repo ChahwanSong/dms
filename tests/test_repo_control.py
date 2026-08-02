@@ -22,7 +22,7 @@ def test_denylist_matching(db):
     repo = ControlRepository(db)
     repo.deny("requester", "Mallory", reason="incident", actor="admin")
     repo.deny("group", "blocked-team", reason=None, actor="admin")
-    assert repo.is_denied(requester="mallory", owner="x", groups=[]) == "Mallory"
+    assert repo.is_denied(requester="mallory", owner="x", groups=[]) == "mallory"
     assert repo.is_denied(requester="a", owner="b", groups=["Blocked-Team"]) == "blocked-team"
     assert repo.is_denied(requester="a", owner="b", groups=["ok"]) is None
     repo.allow("requester", "Mallory", actor="admin")
@@ -43,3 +43,22 @@ def test_lease_semantics(db):
     assert not repo.try_acquire_lease("planner", "h2", 30, now_iso="2026-08-02T10:00:10Z")
     assert repo.try_acquire_lease("planner", "h1", 30, now_iso="2026-08-02T10:00:10Z")
     assert repo.try_acquire_lease("planner", "h2", 30, now_iso="2026-08-02T10:00:41Z")
+
+
+def test_denylist_case_insensitive_write_paths(db):
+    repo = ControlRepository(db)
+    repo.deny("requester", "Mallory", reason="incident", actor="admin")
+    repo.deny("requester", "MALLORY", reason="dup", actor="admin")  # 케이스 다른 중복 — 1행 유지
+    rows = db.query("SELECT subject FROM identity_denylist WHERE subject_type = 'requester'")
+    assert rows == [{"subject": "mallory"}]
+    repo.allow("requester", "mAlLoRy", actor="admin")  # 케이스 달라도 삭제됨
+    assert repo.is_denied(requester="Mallory", owner="x", groups=[]) is None
+
+
+def test_audit_entries_returns_latest_first(db):
+    repo = ControlRepository(db)
+    repo.deny("requester", "u1", reason=None, actor="admin")
+    repo.set_control_state(maintenance=True, drain=False, reason="r", actor="admin")
+    entries = repo.audit_entries(limit=10)
+    assert [e["mutation_class"] for e in entries[:2]] == ["control_state", "denylist"]
+    assert repo.audit_entries(limit=1)[0]["mutation_class"] == "control_state"

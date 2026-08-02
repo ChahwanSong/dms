@@ -21,8 +21,8 @@ class ControlRepository:
                    before_state, after_state, at)
                VALUES (:c, :op, :key, :actor, :b, :a, :at)""",
             {"c": mutation_class, "op": operation, "key": target, "actor": actor,
-             "b": dump_json(before) if before else None,
-             "a": dump_json(after) if after else None, "at": utc_now_iso()})
+             "b": dump_json(before) if before is not None else None,
+             "a": dump_json(after) if after is not None else None, "at": utc_now_iso()})
 
     # --- policies ---
     def get_policy(self, tool):
@@ -52,6 +52,7 @@ class ControlRepository:
     def deny(self, subject_type, subject, reason, actor):
         if subject_type not in DENY_SUBJECT_TYPES:
             raise DomainValidationError("invalid_denylist_subject_type", subject_type)
+        subject = subject.lower()
         with self._db.transaction():
             self._db.execute(
                 """INSERT INTO identity_denylist (subject_type, subject, reason,
@@ -62,9 +63,10 @@ class ControlRepository:
                 {"t": subject_type, "s": subject, "r": reason,
                  "actor": actor, "now": utc_now_iso()})
             self._audit("denylist", "deny", f"{subject_type}:{subject}", None,
-                        {"subject_type": subject_type, "subject": subject}, actor)
+                        {"subject_type": subject_type, "subject": subject, "reason": reason}, actor)
 
     def allow(self, subject_type, subject, actor):
+        subject = subject.lower()
         with self._db.transaction():
             self._db.execute(
                 "DELETE FROM identity_denylist WHERE subject_type = :t AND subject = :s",
