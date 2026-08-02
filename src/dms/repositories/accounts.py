@@ -32,14 +32,15 @@ class AccountsRepository:
     def create(self, username, password, role, email=None):
         if not _USERNAME_RE.fullmatch(username):
             raise DomainValidationError("invalid_username", repr(username))
-        if self._db.query_one("SELECT 1 AS x FROM accounts WHERE username = :u",
-                              {"u": username}):
-            raise DomainValidationError("account_exists", username)
-        self._db.execute(
-            """INSERT INTO accounts (username, password_hash, role, email, created_at)
-               VALUES (:u, :h, :r, :e, :now)""",
-            {"u": username, "h": _hash_password(password), "r": role,
-             "e": email, "now": utc_now_iso()})
+        with self._db.transaction():
+            if self._db.query_one("SELECT 1 AS x FROM accounts WHERE username = :u",
+                                  {"u": username}):
+                raise DomainValidationError("account_exists", username)
+            self._db.execute(
+                """INSERT INTO accounts (username, password_hash, role, email, created_at)
+                   VALUES (:u, :h, :r, :e, :now)""",
+                {"u": username, "h": _hash_password(password), "r": role,
+                 "e": email, "now": utc_now_iso()})
 
     def verify(self, username, password) -> str | None:
         row = self._db.query_one(

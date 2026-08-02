@@ -30,3 +30,25 @@ def test_set_password(db):
     repo.set_password("carol", "new")
     assert repo.verify("carol", "old") is None
     assert repo.verify("carol", "new") == ROLE_USER
+
+
+def test_concurrent_create_same_username_raises_domain_error(db):
+    import threading
+    repo = AccountsRepository(db)
+    errors = []
+
+    def try_create():
+        try:
+            repo.create("race", "pw", ROLE_USER)
+        except DomainValidationError as e:
+            errors.append(e.reason_code)
+        except Exception as e:  # raw DB 예외가 새면 실패로 드러나게
+            errors.append(type(e).__name__)
+
+    threads = [threading.Thread(target=try_create) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == ["account_exists"]
+    assert repo.get("race") is not None
