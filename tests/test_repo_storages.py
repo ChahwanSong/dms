@@ -28,6 +28,14 @@ def test_invalid_fields_rejected(db, bad):
     assert e.value.reason_code == "invalid_storage"
 
 
+def test_duplicate_create_raises_domain_error(db):
+    repo = StoragesRepository(db)
+    repo.create(**FIELDS, actor="admin")
+    with pytest.raises(DomainValidationError) as e:
+        repo.create(**FIELDS, actor="admin")
+    assert e.value.reason_code == "storage_exists"
+
+
 def test_update_and_delete_are_audited(db):
     repo = StoragesRepository(db)
     repo.create(**FIELDS, actor="admin")

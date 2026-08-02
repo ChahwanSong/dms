@@ -34,7 +34,9 @@ def create_storage(body: StorageCreate, request: Request,
             managed_root=body.managed_root, backend_type=body.backend_type,
             actor=identity.actor)
     except DomainValidationError as e:
-        raise HTTPException(status_code=422, detail=e.reason_code)
+        raise HTTPException(
+            status_code=409 if e.reason_code == "storage_exists" else 422,
+            detail=e.reason_code)
 
 
 @router.put("/api/admin/storages/{name}")

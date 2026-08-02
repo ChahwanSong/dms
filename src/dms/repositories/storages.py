@@ -39,6 +39,8 @@ class StoragesRepository:
         _validate(storage_name, mount_path, managed_root, backend_type)
         now = utc_now_iso()
         with self._db.transaction():
+            if self.get(storage_name) is not None:
+                raise DomainValidationError("storage_exists", storage_name)
             self._db.execute(
                 """INSERT INTO storages (storage_name, mount_path, managed_root,
                        backend_type, enabled, status, created_at, updated_at, updated_by)

@@ -12,6 +12,8 @@ def test_requires_admin(client):
 
 def test_crud_flow(client):
     assert client.post("/api/admin/storages", json=BODY, headers=ADMIN).status_code == 201
+    r = client.post("/api/admin/storages", json=BODY, headers=ADMIN)
+    assert r.status_code == 409 and r.json()["detail"] == "storage_exists"
     assert client.post("/api/admin/storages", json={
         **BODY, "managed_root": "/elsewhere"}, headers=ADMIN).status_code == 422
     rows = client.get("/api/admin/storages", headers=ADMIN).json()
