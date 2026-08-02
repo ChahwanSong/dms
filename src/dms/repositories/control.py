@@ -1,14 +1,8 @@
-from datetime import datetime, timedelta, timezone
-from ..db import Database, dump_json, utc_now_iso
+from ..db import Database, dump_json, iso_plus, utc_now_iso
 from ..domain import DomainValidationError
 
 POLICY_TOOLS = ("scan", "dsync", "nsync", "rm")
 DENY_SUBJECT_TYPES = ("requester", "owner", "group")
-
-
-def _iso_plus(now_iso: str, seconds: int) -> str:
-    base = datetime.strptime(now_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    return (base + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class ControlRepository:
@@ -107,7 +101,7 @@ class ControlRepository:
     def try_acquire_lease(self, component, holder, lease_seconds,
                           now_iso: str | None = None) -> bool:
         now = now_iso or utc_now_iso()
-        expires = _iso_plus(now, lease_seconds)
+        expires = iso_plus(now, lease_seconds)
         with self._db.transaction():
             row = self._db.query_one(
                 "SELECT holder, expires_at FROM component_leases WHERE component = :c",

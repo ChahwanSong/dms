@@ -4,13 +4,19 @@ import re
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _NAMED = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def iso_plus(ts: str, seconds: int) -> str:
+    """ISO-8601 UTC(...Z) 문자열에 초를 더한다(음수 허용)."""
+    base = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return (base + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class Database:

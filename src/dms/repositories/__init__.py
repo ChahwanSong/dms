@@ -1,5 +1,6 @@
 from ..db import Database
 from .accounts import AccountsRepository
+from .agents import AgentsRepository
 from .requests import RequestsRepository
 from .storages import StoragesRepository
 from .control import ControlRepository
@@ -10,6 +11,7 @@ class Repositories:
     def __init__(self, db: Database):
         self.db = db
         self.accounts = AccountsRepository(db)
+        self.agents = AgentsRepository(db)
         self.requests = RequestsRepository(db)
         self.storages = StoragesRepository(db)
         self.control = ControlRepository(db)
