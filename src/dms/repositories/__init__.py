@@ -1,5 +1,6 @@
 from ..db import Database
 from .requests import RequestsRepository
+from .storages import StoragesRepository
 
 
 class Repositories:
@@ -7,3 +8,4 @@ class Repositories:
     def __init__(self, db: Database):
         self.db = db
         self.requests = RequestsRepository(db)
+        self.storages = StoragesRepository(db)
