@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import os
 import re
-from ..db import Database, utc_now_iso
+from ..db import Database, dump_json, utc_now_iso
 from ..domain import DomainValidationError
 
 _USERNAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
@@ -29,18 +29,26 @@ class AccountsRepository:
     def __init__(self, db: Database):
         self._db = db
 
-    def create(self, username, password, role, email=None):
+    def create(self, username, password, role, email=None, *, actor="self"):
         if not _USERNAME_RE.fullmatch(username):
             raise DomainValidationError("invalid_username", repr(username))
         with self._db.transaction():
             if self._db.query_one("SELECT 1 AS x FROM accounts WHERE username = :u",
                                   {"u": username}):
                 raise DomainValidationError("account_exists", username)
+            now = utc_now_iso()
             self._db.execute(
                 """INSERT INTO accounts (username, password_hash, role, email, created_at)
                    VALUES (:u, :h, :r, :e, :now)""",
                 {"u": username, "h": _hash_password(password), "r": role,
-                 "e": email, "now": utc_now_iso()})
+                 "e": email, "now": now})
+            self._db.execute(
+                """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                       before_state, after_state, at)
+                   VALUES ('account', 'create', :u, :actor, NULL, :a, :at)""",
+                {"u": username, "actor": actor,
+                 "a": dump_json({"username": username, "role": role, "email": email}),
+                 "at": now})
 
     def verify(self, username, password) -> str | None:
         row = self._db.query_one(

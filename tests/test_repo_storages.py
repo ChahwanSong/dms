@@ -28,6 +28,15 @@ def test_invalid_fields_rejected(db, bad):
     assert e.value.reason_code == "invalid_storage"
 
 
+def test_paths_are_stored_normalized(db):
+    repo = StoragesRepository(db)
+    repo.create(storage_name="ceph-b", mount_path="/mnt/ceph/",
+                managed_root="/mnt/ceph/dms/", backend_type="cephfs", actor="admin")
+    row = repo.get("ceph-b")
+    assert row["mount_path"] == "/mnt/ceph"
+    assert row["managed_root"] == "/mnt/ceph/dms"
+
+
 def test_duplicate_create_raises_domain_error(db):
     repo = StoragesRepository(db)
     repo.create(**FIELDS, actor="admin")

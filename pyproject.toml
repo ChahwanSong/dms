@@ -25,3 +25,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:fastapi.*:",
+    "ignore::DeprecationWarning:starlette.*:",
+    # starlette.testclient가 import 시점에 발하는 StarletteDeprecationWarning은
+    # UserWarning의 서브클래스라 위 DeprecationWarning 규칙에 걸리지 않는다.
+    # fastapi.testclient -> starlette.testclient 임포트 체인에서만 발생하는
+    # upstream 경고이므로 그 경로로 범위를 좁혀 무시한다.
+    "ignore::starlette.exceptions.StarletteDeprecationWarning:fastapi.testclient:",
+]

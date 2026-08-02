@@ -5,12 +5,18 @@ from fastapi import HTTPException, Request
 Identity = namedtuple("Identity", "actor role")
 
 
+def tokens_match(supplied: str, expected: str) -> bool:
+    return hmac.compare_digest(
+        supplied.encode("utf-8", "surrogateescape"),
+        expected.encode("utf-8", "surrogateescape"))
+
+
 def current_identity(request: Request) -> Identity:
     settings = request.app.state.settings
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         token = auth[len("Bearer "):]
-        if hmac.compare_digest(token, settings.shared_token):
+        if tokens_match(token, settings.shared_token):
             actor = request.headers.get("x-dms-actor", "shared-token")
             return Identity(actor=actor, role="admin")
         raise HTTPException(status_code=401, detail="invalid_token")

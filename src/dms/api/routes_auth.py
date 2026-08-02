@@ -1,8 +1,7 @@
-import hmac
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
-from .auth import Identity, require_user
+from .auth import Identity, require_user, tokens_match
 
 router = APIRouter()
 
@@ -23,7 +22,8 @@ def signup(body: SignupBody, request: Request):
     # 사내 메일 인증은 더미: email은 기록만 하고 검증 없이 계정 생성 (스펙 §3 인증)
     try:
         request.app.state.repos.accounts.create(
-            body.username, body.password, ROLE_USER, email=body.email)
+            body.username, body.password, ROLE_USER, email=body.email,
+            actor=body.username)
     except DomainValidationError as e:
         raise HTTPException(status_code=409 if e.reason_code == "account_exists" else 422,
                             detail=e.reason_code)
@@ -55,10 +55,11 @@ def me(identity: Identity = Depends(require_user)):
 @router.post("/api/admin/accounts", status_code=201)
 def create_admin_account(body: LoginBody, request: Request):
     supplied = request.headers.get("x-admin-token", "")
-    if not hmac.compare_digest(supplied, request.app.state.settings.admin_token):
+    if not tokens_match(supplied, request.app.state.settings.admin_token):
         raise HTTPException(status_code=403, detail="admin_token_required")
     try:
-        request.app.state.repos.accounts.create(body.username, body.password, ROLE_ADMIN)
+        request.app.state.repos.accounts.create(
+            body.username, body.password, ROLE_ADMIN, actor="admin-token")
     except DomainValidationError as e:
         raise HTTPException(status_code=409 if e.reason_code == "account_exists" else 422,
                             detail=e.reason_code)

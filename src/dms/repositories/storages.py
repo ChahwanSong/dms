@@ -37,6 +37,8 @@ class StoragesRepository:
 
     def create(self, *, storage_name, mount_path, managed_root, backend_type, actor):
         _validate(storage_name, mount_path, managed_root, backend_type)
+        mount_path = posixpath.normpath(mount_path)
+        managed_root = posixpath.normpath(managed_root)
         now = utc_now_iso()
         with self._db.transaction():
             if self.get(storage_name) is not None:
@@ -54,6 +56,8 @@ class StoragesRepository:
     def update(self, storage_name, *, mount_path, managed_root, backend_type,
                enabled: bool, actor):
         _validate(storage_name, mount_path, managed_root, backend_type)
+        mount_path = posixpath.normpath(mount_path)
+        managed_root = posixpath.normpath(managed_root)
         before = self.get(storage_name)
         if before is None:
             raise KeyError(storage_name)

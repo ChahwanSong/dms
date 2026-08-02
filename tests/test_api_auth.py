@@ -48,3 +48,14 @@ def test_admin_account_creation_requires_ops_token(client):
         headers={"x-admin-token": "tok-admin"}).status_code == 201
     r = client.post("/api/auth/login", json={"username": "boss", "password": "pw"})
     assert r.json()["role"] == "admin"
+
+
+def test_non_ascii_token_is_rejected_not_500(client):
+    # httpx(TestClient)는 str 헤더값을 기본 ascii로만 인코딩하므로, 와이어 상에서
+    # 실클라이언트가 보낼 수 있는 latin-1 바이트를 직접 넘겨 ASGI 디코딩 경로를 재현한다.
+    r = client.get("/api/auth/me",
+                    headers={"Authorization": "Bearer caf\xe9".encode("latin-1")})
+    assert r.status_code == 401
+    r = client.post("/api/admin/accounts", json={"username": "x", "password": "p"},
+                    headers={"x-admin-token": "caf\xe9".encode("latin-1")})
+    assert r.status_code == 403

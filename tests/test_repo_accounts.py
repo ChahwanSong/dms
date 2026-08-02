@@ -32,6 +32,15 @@ def test_set_password(db):
     assert repo.verify("carol", "new") == ROLE_USER
 
 
+def test_create_is_audited_without_password(db):
+    repo = AccountsRepository(db)
+    repo.create("alice", "pw", ROLE_USER, email="a@x", actor="admin-token")
+    row = db.query("SELECT * FROM audit_log WHERE mutation_class = 'account'")[0]
+    assert row["operation"] == "create" and row["target_key"] == "alice"
+    assert "password" not in (row["after_state"] or "")
+    assert "scrypt" not in (row["after_state"] or "")
+
+
 def test_concurrent_create_same_username_raises_domain_error(db):
     import threading
     repo = AccountsRepository(db)
