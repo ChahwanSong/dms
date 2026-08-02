@@ -98,3 +98,43 @@ def test_run_once_survives_non_dict_json(monkeypatch, capsys):
     old = {"storages": [], "probe_targets": [], "interval": 60}
     assert runner.run_once(old) == old
     assert "agent report failed" in capsys.readouterr().err
+
+
+def test_run_once_survives_malformed_field_types(monkeypatch, capsys):
+    def handler(request):
+        return httpx.Response(200, json={"storages": "oops",
+                                         "identity_probe_targets": [],
+                                         "report_interval_seconds": 60})
+
+    monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    monkeypatch.setattr("dms.agent.runner.probe_tools", lambda names, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_identities", lambda users, **k: [])
+    runner = AgentRunner(SETTINGS, _client(handler))
+    old = {"storages": [], "probe_targets": [], "interval": 60}
+    assert runner.run_once(old) == old
+
+
+def test_run_loop_once_probes_with_received_storages(monkeypatch):
+    requests = []
+
+    def handler(request):
+        import json
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "storages": [{"storage_name": "s", "mount_path": "/mnt/s",
+                          "managed_root": "/mnt/s/dms"}],
+            "identity_probe_targets": [],
+            "report_interval_seconds": 60,
+        })
+
+    monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    monkeypatch.setattr("dms.agent.runner.probe_tools", lambda names, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_identities", lambda users, **k: [])
+    from dms.agent.runner import run_loop
+    # httpx.Client 자체를 monkeypatch하면 _client() 헬퍼도 같은 전역 심볼을 통해
+    # httpx.Client(...)를 호출하므로 무한 재귀에 빠진다 (동일 모듈 객체 공유).
+    # run_loop에 client_factory 주입점을 열어 실제 재귀 없이 목 클라이언트를 공급한다.
+    run_loop(SETTINGS, once=True, client_factory=lambda: _client(handler))
+    assert len(requests) == 2
+    assert requests[0]["mounts"] == []                      # 부트스트랩: 빈 상태
+    assert [m["storage_name"] for m in requests[1]["mounts"]] == ["s"]  # 본 사이클

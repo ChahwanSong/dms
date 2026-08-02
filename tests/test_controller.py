@@ -44,3 +44,22 @@ def test_reconciler_loop_wired_end_to_end(db, settings):
     loops = build_loops(settings, repos)
     run_all_once(loops, repos, holder="h1")
     assert repos.storages.get("s1")["status"] == "Unknown"
+
+
+def test_run_forever_ticks_and_stops(db, settings):
+    from dms.controller import run_forever
+    repos = Repositories(db)
+    ticks = []
+
+    def fake_sleep(seconds):
+        ticks.append(seconds)
+        if len(ticks) >= 3:
+            raise KeyboardInterrupt  # 테스트 종료 장치
+
+    try:
+        run_forever(settings, repos, holder="h1", sleep=fake_sleep)
+    except KeyboardInterrupt:
+        pass
+    assert ticks == [1, 1, 1]
+    # 첫 틱에서 루프들이 실제 실행됐는지 (리스가 잡혀 있음)
+    assert db.query_one("SELECT holder FROM component_leases WHERE component = 'loop:storage-reconciler'")["holder"] == "h1"

@@ -1,16 +1,19 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .auth import Identity, require_user
 
 router = APIRouter()
 
+_NODE_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
+
 
 @router.post("/api/agent/report")
 def ingest_report(body: dict, request: Request,
                   identity: Identity = Depends(require_user)):
     node_name = body.get("node_name")
-    if (not isinstance(node_name, str) or not node_name
-            or any(ch.isspace() for ch in node_name)):
+    if not isinstance(node_name, str) or not _NODE_NAME_RE.fullmatch(node_name):
         raise HTTPException(status_code=422, detail="invalid_node_name")
     if identity.actor != f"node:{node_name}":
         raise HTTPException(status_code=403, detail="agent_node_identity_mismatch")

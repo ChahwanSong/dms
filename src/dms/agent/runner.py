@@ -1,6 +1,7 @@
 """에이전트 러너: 프로브 → POST → 응답으로 설정 갱신. DB를 모르는 순수 HTTP 클라이언트."""
 import sys
 import time
+from typing import Callable, Optional
 
 import httpx
 
@@ -55,24 +56,32 @@ class AgentRunner:
             body = response.json()
             if not isinstance(body, dict):
                 raise ValueError(f"non-dict response: {type(body).__name__}")
-            new_state = {
-                "storages": body.get("storages", state["storages"]),
-                "probe_targets": body.get("identity_probe_targets", state["probe_targets"]),
-                "interval": body.get("report_interval_seconds", state["interval"]),
-            }
+            storages = body.get("storages", state["storages"])
+            probe_targets = body.get("identity_probe_targets", state["probe_targets"])
+            interval = body.get("report_interval_seconds", state["interval"])
+            if (not isinstance(storages, list) or not isinstance(probe_targets, list)
+                    or not isinstance(interval, int) or isinstance(interval, bool)):
+                raise ValueError("malformed response fields")
+            new_state = {"storages": storages, "probe_targets": probe_targets,
+                         "interval": interval}
         except Exception as exc:
             print(f"agent report failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             return state
         return new_state
 
 
-def run_loop(settings: AgentSettings, *, once: bool = False) -> None:
+def run_loop(settings: AgentSettings, *, once: bool = False,
+            client_factory: Optional[Callable[[], httpx.Client]] = None) -> None:
     state = {"storages": [], "probe_targets": [],
              "interval": settings.interval_seconds}
-    with httpx.Client(base_url=settings.api_url, timeout=10.0) as client:
+    if client_factory is None:
+        client_factory = lambda: httpx.Client(base_url=settings.api_url, timeout=10.0)
+    with client_factory() as client:
         runner = AgentRunner(settings, client)
+        if once:
+            state = runner.run_once(state)   # 부트스트랩 사이클: 빈 상태로 설정(storages) 수신
+            runner.run_once(state)           # 본 사이클: 받은 storages로 실제 프로브
+            return
         while True:
             state = runner.run_once(state)
-            if once:
-                return
             time.sleep(max(1, int(state["interval"])))

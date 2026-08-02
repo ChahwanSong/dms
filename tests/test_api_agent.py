@@ -1,3 +1,6 @@
+import pytest
+
+
 def _agent_headers(node="node-a"):
     return {"Authorization": "Bearer tok-shared", "x-dms-actor": f"node:{node}"}
 
@@ -44,10 +47,11 @@ def test_session_user_cannot_report(client):
     assert r.status_code == 403
 
 
-def test_invalid_node_name_422(client):
-    r = client.post("/api/agent/report", json={"node_name": "bad name"},
+@pytest.mark.parametrize("bad", ["bad name", "a/b", "-lead", "trail-", ""])
+def test_invalid_node_name_422(client, bad):
+    r = client.post("/api/agent/report", json={"node_name": bad},
                     headers={"Authorization": "Bearer tok-shared",
-                             "x-dms-actor": "node:bad name"})
+                             "x-dms-actor": f"node:{bad}"})
     assert r.status_code == 422 and r.json()["detail"] == "invalid_node_name"
 
 
