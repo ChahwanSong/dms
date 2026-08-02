@@ -24,6 +24,12 @@ class RequestBody(BaseModel):
     owner_username: str | None = None
 
 
+def _require(value: str | None, reason: str) -> str:
+    if not value:
+        raise DomainValidationError(reason, "required field missing")
+    return value
+
+
 def _validated_payload(body: RequestBody) -> tuple[dict, str]:
     op = Operation(body.operation)
     if body.priority not in PRIORITIES:
@@ -33,21 +39,25 @@ def _validated_payload(body: RequestBody) -> tuple[dict, str]:
         validate_owner_username(body.owner_username)
     fp = option_fingerprint(options)
     if op is Operation.SYNC:
+        src_storage = _require(body.source_storage, "missing_source_storage")
+        dst_storage = _require(body.destination_storage, "missing_destination_storage")
         src, dst = validate_sync_paths(body.source or "", body.destination or "")
-        key = build_resource_key(op, source_storage=body.source_storage, source=src,
-                                 destination_storage=body.destination_storage,
+        key = build_resource_key(op, source_storage=src_storage, source=src,
+                                 destination_storage=dst_storage,
                                  destination=dst, fingerprint=fp)
-        payload = {"source_storage": body.source_storage, "source": src,
-                   "destination_storage": body.destination_storage,
+        payload = {"source_storage": src_storage, "source": src,
+                   "destination_storage": dst_storage,
                    "destination": dst}
     elif op is Operation.RM:
+        storage = _require(body.storage, "missing_storage")
         target = validate_rm_target(body.target or "", options)
-        key = build_resource_key(op, storage=body.storage, target=target, fingerprint=fp)
-        payload = {"storage": body.storage, "target": target}
+        key = build_resource_key(op, storage=storage, target=target, fingerprint=fp)
+        payload = {"storage": storage, "target": target}
     else:
+        storage = _require(body.storage, "missing_storage")
         target = validate_relative_path(body.target or "")
-        key = build_resource_key(op, storage=body.storage, target=target, fingerprint=fp)
-        payload = {"storage": body.storage, "target": target}
+        key = build_resource_key(op, storage=storage, target=target, fingerprint=fp)
+        payload = {"storage": storage, "target": target}
     payload.update({"options": options, "owner_username": body.owner_username})
     return payload, key
 

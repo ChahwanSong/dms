@@ -24,11 +24,16 @@ def test_validation_maps_to_422(client):
     _login(client, "bob")
     cases = [
         ({"operation": "scan", "storage": "s", "target": "/abs"}, "unsafe_path"),
+        ({"operation": "scan", "target": "a"}, "missing_storage"),
         ({"operation": "rm", "storage": "s", "target": "a", "options": {}},
          "rm_recursive_required"),
+        ({"operation": "rm", "storage": None, "target": "a",
+          "options": {"recursive": True}}, "missing_storage"),
         ({"operation": "sync", "source_storage": "s", "source": "a",
           "destination_storage": "s", "destination": "a/b"},
          "sync_destination_inside_source"),
+        ({"operation": "sync", "source_storage": "s", "source": "a",
+          "destination": "b"}, "missing_destination_storage"),
         ({"operation": "scan", "storage": "s", "target": "a",
           "options": {"nope": 1}}, "unknown_option"),
         ({"operation": "scan", "storage": "s", "target": "a",
