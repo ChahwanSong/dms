@@ -50,6 +50,9 @@
 
 - 네임스페이스는 `dms` 하나. DB는 PostgreSQL **하나** — legacy의 operational/observability/portal
   3개 DB를 통합하고, 포탈 계정·진단 이벤트도 같은 DB 테이블로 둔다.
+- **포탈/API 노출은 ingress-nginx + MetalLB로 HA를 확보한다**: `dms-api`(ClusterIP)를
+  ingress-nginx 뒤에 두고, ingress-nginx는 MetalLB LoadBalancer IP로 노출한다. `dms-api` ×2
+  replica + LB 조합으로 단일 노드 장애에도 포탈이 살아있다. NodePort 직접 노출은 쓰지 않는다.
 - 언어/스택: 백엔드 Python + FastAPI, 프론트엔드 React + Vite + TypeScript. 별도 BFF 없음 —
   `dms-api`가 포탈 백엔드를 겸한다.
 - Kubernetes 접근은 kubernetes Python 클라이언트(in-cluster)만. kubectl 서브프로세스 금지.
