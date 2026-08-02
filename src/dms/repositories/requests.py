@@ -34,7 +34,7 @@ class RequestsRepository:
                    to_state, reason_code, actor, at)
                VALUES ('request', :id, :f, :t, :r, :actor, :at)""",
             {"id": request_id,
-             "f": from_state.value if from_state else None,
+             "f": from_state.value if from_state is not None else None,
              "t": to_state.value, "r": reason_code, "actor": actor, "at": at},
         )
 
@@ -60,11 +60,11 @@ class RequestsRepository:
 
     def set_state(self, request_id, to_state: RequestState, *, reason_code=None, actor):
         now = utc_now_iso()
-        current = self._db.query_one(
-            "SELECT state FROM requests WHERE request_id = :id", {"id": request_id})
-        if current is None:
-            raise KeyError(request_id)
         with self._db.transaction():
+            current = self._db.query_one(
+                "SELECT state FROM requests WHERE request_id = :id", {"id": request_id})
+            if current is None:
+                raise KeyError(request_id)
             self._db.execute(
                 "UPDATE requests SET state = :s, updated_at = :now WHERE request_id = :id",
                 {"s": to_state.value, "now": now, "id": request_id})

@@ -45,3 +45,23 @@ def test_record_result_and_list(db):
                        summary={"n": 1})
     assert repo.list(requester_id="alice")[0]["request_id"] == rid
     assert repo.list(requester_id="bob") == []
+
+
+def test_set_state_from_state_is_atomic(db):
+    import threading
+    repo = RequestsRepository(db)
+    rid = _create(repo)
+    states = [RequestState.PLANNED, RequestState.RUNNING]
+
+    def advance(s):
+        repo.set_state(rid, s, actor="t")
+
+    threads = [threading.Thread(target=advance, args=(s,)) for s in states]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    ts = repo.transitions(rid)
+    # 어떤 순서로 실행됐든 전이 체인은 이어져야 한다: from[i] == to[i-1]
+    for prev, cur in zip(ts, ts[1:]):
+        assert cur["from_state"] == prev["to_state"]
