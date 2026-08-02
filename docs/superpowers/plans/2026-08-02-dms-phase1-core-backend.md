@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - 스펙이 진실이다: `docs/superpowers/specs/2026-08-02-dms-clean-slate-design.md`. legacy(`legacy/`)와 다르면 스펙이 이긴다. legacy 코드 import/복사 금지 (읽기 전용 참고만).
-- 모든 SQL은 `src/dms/repositories/` 안에만. SQLite/PostgreSQL 양쪽 호환 (named param `:name`, PG 전용 문법은 방언 분기).
+- 모든 런타임 SQL은 `src/dms/repositories/` 안에만 (스키마 DDL은 `src/dms/migrations.py`가 예외). API/도메인 계층에 SQL 금지. SQLite/PostgreSQL 양쪽 호환 (named param `:name`, PG 전용 문법은 방언 분기).
 - 전체 테스트는 서비스 없이 SQLite로 돈다: `pytest` 단독 실행 가능해야 한다.
 - 설정은 env var `DMS_*`. 기동 시 검증하고, placeholder(`""`, `CHANGE_ME`, `REPLACE_WITH_*`)가 truthy로 게이트를 통과하는 구멍 금지.
 - 모든 거부·실패에 기계가 읽는 사유 코드(snake_case 문자열). 조용한 실패 금지.
@@ -1713,6 +1713,7 @@ git commit -m "feat: 포탈 계정 저장소 (scrypt 해시, role)"
     - denylist: `deny(subject_type, subject, reason, actor)` / `allow(subject_type, subject, actor)` / `is_denied(*, requester, owner, groups: list[str]) -> str | None` (대소문자 무관 매칭, 걸린 subject 반환). subject_type ∈ `{requester, owner, group}`. 변경은 audit_log(`mutation_class='denylist'`)
     - 컨트롤 상태: `control_state() -> dict`, `set_control_state(*, maintenance: bool, drain: bool, reason, actor)` (audit 포함)
     - 리스: `try_acquire_lease(component, holder, lease_seconds, now_iso: str | None = None) -> bool` — 만료 전이면 다른 holder 거부, 같은 holder는 갱신
+    - 감사 조회: `audit_entries(limit: int = 50) -> list[dict]` — audit_log 최신순 (API 계층에 SQL을 두지 않기 위한 조회 메서드)
 - 테스트 주입을 위해 `now_iso` 파라미터 허용 (기본 `utc_now_iso()`)
 
 - [ ] **Step 1: 실패하는 테스트 작성**
@@ -1900,6 +1901,11 @@ class ControlRepository:
                    WHERE component = :c""",
                 {"c": component, "h": holder, "e": expires})
             return True
+
+    # --- audit ---
+    def audit_entries(self, limit: int = 50) -> list[dict]:
+        return self._db.query(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT :n", {"n": limit})
 ```
 
 `Repositories`에 `self.control = ControlRepository(db)` 추가.
@@ -2334,8 +2340,7 @@ def delete_storage(name: str, request: Request,
 
 @router.get("/api/admin/audit-log")
 def audit_log(request: Request, limit: int = 50):
-    return request.app.state.repos.db.query(
-        "SELECT * FROM audit_log ORDER BY id DESC LIMIT :n", {"n": limit})
+    return request.app.state.repos.control.audit_entries(limit)
 ```
 
 `app.py`에 `app.include_router(storages_router)` 추가.
