@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import uuid
+from ..db import Database, dump_json, load_json, utc_now_iso
+from ..domain import RequestState, TERMINAL_REQUEST_STATES
+
+
+class RequestsRepository:
+    def __init__(self, db: Database):
+        self._db = db
+
+    def create(self, *, operation, requester_id, actor, resource_key,
+               payload: dict, priority: str) -> str:
+        request_id = uuid.uuid4().hex
+        now = utc_now_iso()
+        with self._db.transaction():
+            row = self._db.query_one("SELECT COALESCE(MAX(commit_order), 0) AS m FROM requests")
+            order = row["m"] + 1
+            self._db.execute(
+                """INSERT INTO requests (request_id, commit_order, operation, requester_id,
+                       actor, resource_key, priority, payload, state, created_at, updated_at)
+                   VALUES (:id, :o, :op, :req, :actor, :key, :pri, :payload, :state, :now, :now)""",
+                {"id": request_id, "o": order, "op": operation, "req": requester_id,
+                 "actor": actor, "key": resource_key, "pri": priority,
+                 "payload": dump_json(payload), "state": RequestState.PENDING.value,
+                 "now": now},
+            )
+            self._record_transition(request_id, None, RequestState.PENDING, None, actor, now)
+        return request_id
+
+    def _record_transition(self, request_id, from_state, to_state, reason_code, actor, at):
+        self._db.execute(
+            """INSERT INTO state_transitions (entity_kind, entity_id, from_state,
+                   to_state, reason_code, actor, at)
+               VALUES ('request', :id, :f, :t, :r, :actor, :at)""",
+            {"id": request_id,
+             "f": from_state.value if from_state else None,
+             "t": to_state.value, "r": reason_code, "actor": actor, "at": at},
+        )
+
+    def get(self, request_id) -> dict | None:
+        row = self._db.query_one("SELECT * FROM requests WHERE request_id = :id",
+                                 {"id": request_id})
+        if row:
+            row["payload"] = load_json(row["payload"])
+        return row
+
+    def list(self, requester_id=None, limit: int = 50) -> list[dict]:
+        if requester_id is None:
+            rows = self._db.query(
+                "SELECT * FROM requests ORDER BY commit_order DESC LIMIT :n", {"n": limit})
+        else:
+            rows = self._db.query(
+                """SELECT * FROM requests WHERE requester_id = :req
+                   ORDER BY commit_order DESC LIMIT :n""",
+                {"req": requester_id, "n": limit})
+        for row in rows:
+            row["payload"] = load_json(row["payload"])
+        return rows
+
+    def set_state(self, request_id, to_state: RequestState, *, reason_code=None, actor):
+        now = utc_now_iso()
+        current = self._db.query_one(
+            "SELECT state FROM requests WHERE request_id = :id", {"id": request_id})
+        if current is None:
+            raise KeyError(request_id)
+        with self._db.transaction():
+            self._db.execute(
+                "UPDATE requests SET state = :s, updated_at = :now WHERE request_id = :id",
+                {"s": to_state.value, "now": now, "id": request_id})
+            self._record_transition(request_id, RequestState(current["state"]),
+                                    to_state, reason_code, actor, now)
+
+    def find_active(self, resource_key) -> dict | None:
+        terminal = tuple(s.value for s in TERMINAL_REQUEST_STATES)
+        placeholders = ", ".join(f":t{i}" for i in range(len(terminal)))
+        params = {f"t{i}": v for i, v in enumerate(terminal)}
+        params["key"] = resource_key
+        return self._db.query_one(
+            f"""SELECT * FROM requests WHERE resource_key = :key
+                AND state NOT IN ({placeholders})
+                ORDER BY commit_order LIMIT 1""", params)
+
+    def record_result(self, request_id, terminal_state, *, reason_code=None,
+                      message=None, summary=None):
+        self._db.execute(
+            """INSERT INTO results (request_id, terminal_state, reason_code, message,
+                   summary, completed_at)
+               VALUES (:id, :s, :r, :m, :sum, :now)""",
+            {"id": request_id, "s": RequestState(terminal_state).value, "r": reason_code,
+             "m": message, "sum": dump_json(summary) if summary is not None else None,
+             "now": utc_now_iso()})
+
+    def transitions(self, request_id) -> list[dict]:
+        return self._db.query(
+            """SELECT * FROM state_transitions
+               WHERE entity_kind = 'request' AND entity_id = :id ORDER BY id""",
+            {"id": request_id})
