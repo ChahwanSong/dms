@@ -2,6 +2,7 @@ from ..db import Database
 from .accounts import AccountsRepository
 from .requests import RequestsRepository
 from .storages import StoragesRepository
+from .control import ControlRepository
 
 
 class Repositories:
@@ -11,3 +12,4 @@ class Repositories:
         self.accounts = AccountsRepository(db)
         self.requests = RequestsRepository(db)
         self.storages = StoragesRepository(db)
+        self.control = ControlRepository(db)
