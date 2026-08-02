@@ -1,0 +1,73 @@
+import httpx
+from dms.config import AgentSettings
+from dms.agent.runner import AgentRunner, build_report
+
+SETTINGS = AgentSettings(api_url="http://api", shared_token="tok", node_name="node-a",
+                         interval_seconds=60, mountinfo_path="/unused")
+
+
+def test_build_report_shape():
+    report = build_report(
+        "node-a", [{"storage_name": "s", "mount_path": "/mnt/s"}], ["alice"],
+        mountinfo_text="1 1 0:1 / /mnt/s rw - ext4 d rw\n",
+        mounts_fn=lambda storages, **k: [{"storage_name": "s", "mount_path": "/mnt/s", "status": "Ready"}],
+        tools_fn=lambda names, **k: [{"name": n, "status": "Ready"} for n in names],
+        identities_fn=lambda users, **k: [{"username": u, "status": "Ready"} for u in users],
+        os_fn=lambda storages, **k: {"load1": 0.1},
+    )
+    assert report["node_name"] == "node-a"
+    assert report["probed_at"].endswith("Z")
+    assert report["mounts"][0]["status"] == "Ready"
+    assert report["tools"][0]["name"] == "dscan"
+    assert report["identities"] == [{"username": "alice", "status": "Ready"}]
+    assert report["os"] == {"load1": 0.1}
+
+
+def _client(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://api")
+
+
+def test_run_once_posts_and_updates_state(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers["authorization"]
+        seen["actor"] = request.headers["x-dms-actor"]
+        return httpx.Response(200, json={
+            "storages": [{"storage_name": "s", "mount_path": "/mnt/s",
+                          "managed_root": "/mnt/s/dms"}],
+            "identity_probe_targets": ["alice"],
+            "report_interval_seconds": 15,
+        })
+
+    monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    runner = AgentRunner(SETTINGS, _client(handler))
+    state = runner.run_once({"storages": [], "probe_targets": [], "interval": 60})
+    assert seen["url"] == "http://api/api/agent/report"
+    assert seen["auth"] == "Bearer tok" and seen["actor"] == "node:node-a"
+    assert state["storages"][0]["storage_name"] == "s"
+    assert state["probe_targets"] == ["alice"]
+    assert state["interval"] == 15
+
+
+def test_run_once_keeps_state_on_error(monkeypatch, capsys):
+    def handler(request):
+        return httpx.Response(500, text="boom")
+
+    monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    runner = AgentRunner(SETTINGS, _client(handler))
+    old = {"storages": [{"storage_name": "keep", "mount_path": "/k"}],
+           "probe_targets": ["bob"], "interval": 60}
+    assert runner.run_once(old) == old
+    assert "agent report failed" in capsys.readouterr().err
+
+
+def test_run_once_survives_connect_error(monkeypatch, capsys):
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    runner = AgentRunner(SETTINGS, _client(handler))
+    old = {"storages": [], "probe_targets": [], "interval": 60}
+    assert runner.run_once(old) == old
