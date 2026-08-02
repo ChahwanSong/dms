@@ -4,6 +4,7 @@ from ..config import Settings
 from ..db import Database
 from ..repositories import Repositories
 from .routes_auth import router as auth_router
+from .routes_storages import router as storages_router
 
 
 def create_app(settings: Settings, db: Database) -> FastAPI:
@@ -18,5 +19,6 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth_router)
+    app.include_router(storages_router)
 
     return app
