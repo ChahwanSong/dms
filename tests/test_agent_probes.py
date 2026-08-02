@@ -48,3 +48,15 @@ def test_probe_mounts_not_a_mountpoint_and_not_readable():
         [{"storage_name": "s", "mount_path": "/mnt/ceph"}],
         mountinfo_text=MOUNTINFO, isdir=lambda p: True, access=no_read)
     assert out[0]["status"] == "Missing" and out[0]["reason"] == "not_readable"
+
+
+def test_backslash_escape_is_not_double_interpreted():
+    # \134 처리 순서가 바뀌면 "\134040"이 스페이스로 이중 해석된다 — 현재 순서 고정
+    line = "50 22 0:35 / /mnt/bs\\134040dir rw - ext4 /dev/sdc rw\n"
+    points = parse_mountinfo(line)
+    assert "/mnt/bs\\040dir" in points  # 리터럴 백슬래시 + '040dir' (스페이스 아님)
+
+
+def test_short_and_blank_lines_are_skipped():
+    text = "\n1 2 0:3\nmalformed\n22 1 0:20 / /ok rw - ext4 /dev/root rw\n"
+    assert parse_mountinfo(text) == {"/ok"}
