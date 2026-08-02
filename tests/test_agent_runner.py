@@ -42,6 +42,10 @@ def test_run_once_posts_and_updates_state(monkeypatch):
         })
 
     monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    monkeypatch.setattr("dms.agent.runner.probe_tools",
+                        lambda names, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_identities",
+                        lambda users, **k: [])
     runner = AgentRunner(SETTINGS, _client(handler))
     state = runner.run_once({"storages": [], "probe_targets": [], "interval": 60})
     assert seen["url"] == "http://api/api/agent/report"
@@ -56,6 +60,10 @@ def test_run_once_keeps_state_on_error(monkeypatch, capsys):
         return httpx.Response(500, text="boom")
 
     monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    monkeypatch.setattr("dms.agent.runner.probe_tools",
+                        lambda names, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_identities",
+                        lambda users, **k: [])
     runner = AgentRunner(SETTINGS, _client(handler))
     old = {"storages": [{"storage_name": "keep", "mount_path": "/k"}],
            "probe_targets": ["bob"], "interval": 60}
@@ -68,6 +76,25 @@ def test_run_once_survives_connect_error(monkeypatch, capsys):
         raise httpx.ConnectError("refused")
 
     monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    monkeypatch.setattr("dms.agent.runner.probe_tools",
+                        lambda names, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_identities",
+                        lambda users, **k: [])
     runner = AgentRunner(SETTINGS, _client(handler))
     old = {"storages": [], "probe_targets": [], "interval": 60}
     assert runner.run_once(old) == old
+
+
+def test_run_once_survives_non_dict_json(monkeypatch, capsys):
+    def handler(request):
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    monkeypatch.setattr("dms.agent.runner.probe_tools",
+                        lambda names, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_identities",
+                        lambda users, **k: [])
+    runner = AgentRunner(SETTINGS, _client(handler))
+    old = {"storages": [], "probe_targets": [], "interval": 60}
+    assert runner.run_once(old) == old
+    assert "agent report failed" in capsys.readouterr().err

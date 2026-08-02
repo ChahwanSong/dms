@@ -15,9 +15,13 @@ def _read_text(path: str) -> str:
 
 
 def build_report(node_name, storages, probe_targets, *, mountinfo_text,
-                 tool_names=AGENT_TOOL_NAMES, mounts_fn=probe_mounts,
-                 tools_fn=probe_tools, identities_fn=probe_identities,
-                 os_fn=probe_os_metrics, read_text=_read_text) -> dict:
+                 tool_names=AGENT_TOOL_NAMES, mounts_fn=None, tools_fn=None,
+                 identities_fn=None, os_fn=None, read_text=None) -> dict:
+    mounts_fn = mounts_fn or probe_mounts
+    tools_fn = tools_fn or probe_tools
+    identities_fn = identities_fn or probe_identities
+    os_fn = os_fn or probe_os_metrics
+    read_text = read_text or _read_text
     return {
         "node_name": node_name,
         "probed_at": utc_now_iso(),
@@ -49,14 +53,17 @@ class AgentRunner:
                 })
             response.raise_for_status()
             body = response.json()
+            if not isinstance(body, dict):
+                raise ValueError(f"non-dict response: {type(body).__name__}")
+            new_state = {
+                "storages": body.get("storages", state["storages"]),
+                "probe_targets": body.get("identity_probe_targets", state["probe_targets"]),
+                "interval": body.get("report_interval_seconds", state["interval"]),
+            }
         except Exception as exc:
             print(f"agent report failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             return state
-        return {
-            "storages": body.get("storages", state["storages"]),
-            "probe_targets": body.get("identity_probe_targets", state["probe_targets"]),
-            "interval": body.get("report_interval_seconds", state["interval"]),
-        }
+        return new_state
 
 
 def run_loop(settings: AgentSettings, *, once: bool = False) -> None:
