@@ -17,8 +17,7 @@ class Database:
     def __init__(self, conn, dialect: str):
         self._conn = conn
         self.dialect = dialect
-        self._lock = threading.Lock()
-        self._in_txn = False
+        self._lock = threading.RLock()
 
     @classmethod
     def connect(cls, url: str) -> "Database":
@@ -58,14 +57,12 @@ class Database:
     def transaction(self):
         with self._lock:
             self._conn.execute("BEGIN")
-        try:
-            yield self
-        except BaseException:
-            with self._lock:
+            try:
+                yield self
+            except BaseException:
                 self._conn.execute("ROLLBACK")
-            raise
-        else:
-            with self._lock:
+                raise
+            else:
                 self._conn.execute("COMMIT")
 
 
