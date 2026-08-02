@@ -120,6 +120,28 @@ class ControlRepository:
                 {"c": component, "h": holder, "e": expires})
             return True
 
+    # --- identity probe targets ---
+    def register_probe_target(self, username: str, now_iso: str | None = None) -> None:
+        now = now_iso or utc_now_iso()
+        with self._db.transaction():
+            self._db.execute(
+                "DELETE FROM identity_probe_targets WHERE username = :u", {"u": username})
+            self._db.execute(
+                """INSERT INTO identity_probe_targets (username, last_requested_at)
+                   VALUES (:u, :at)""",
+                {"u": username, "at": now})
+
+    def probe_targets(self, *, ttl_seconds: int, now_iso: str | None = None) -> list[str]:
+        now = now_iso or utc_now_iso()
+        cutoff = iso_plus(now, -ttl_seconds)
+        with self._db.transaction():
+            self._db.execute(
+                "DELETE FROM identity_probe_targets WHERE last_requested_at < :cutoff",
+                {"cutoff": cutoff})
+            rows = self._db.query(
+                "SELECT username FROM identity_probe_targets ORDER BY username")
+        return [r["username"] for r in rows]
+
     # --- audit ---
     def audit_entries(self, limit: int = 50) -> list[dict]:
         return self._db.query(
