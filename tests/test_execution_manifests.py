@@ -81,3 +81,22 @@ def test_worker_replicas_follow_candidates():
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
     worker = next(t for t in m["spec"]["tasks"] if t["name"] == "worker")
     assert worker["replicas"] == 3 and m["spec"]["minAvailable"] == 4
+
+
+def test_artifact_dir_strips_file_scheme():
+    spec = _spec(operation="scan", tool="dscan",
+                 artifact_base="file:///cephfs/dms/artifacts",
+                 candidates={"primary": ["dms-w1"]}, paths={"target": "/cephfs/data"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    launcher = next(t for t in m["spec"]["tasks"] if t["name"] == "launcher")
+    env = {e["name"]: e["value"]
+           for e in launcher["template"]["spec"]["containers"][0]["env"]}
+    # file:// 스킴 제거된 파일시스템 경로 (job-runner가 open()하는 경로)
+    assert env["DMS_JR_ARTIFACT_DIR"] == "/cephfs/dms/artifacts/j1/execution"
+
+
+def test_job_name_format():
+    spec = _spec(operation="scan", tool="dscan", candidates={"primary": ["dms-w1"]},
+                 paths={"target": "/cephfs/data"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    assert m["metadata"]["name"] == "dms-scan-execution-j1"  # job_id "j1" < 12자
