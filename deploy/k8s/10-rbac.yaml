@@ -22,12 +22,25 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # execution_volcano.KubernetesClient.get() polls preflight Pods via
+  # read_namespaced_pod_status -> the pods/status subresource is a SEPARATE
+  # RBAC resource from pods, so it must be granted explicitly (without it the
+  # stepper 403s on every poll and jobs hang in Preflight/Executing).
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
   - apiGroups: ["batch.volcano.sh"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # vcjob status is read via get_namespaced_custom_object (covered by jobs get
+  # above), but grant jobs/status too in case the client is switched to the
+  # status subresource endpoint.
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs/status"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
