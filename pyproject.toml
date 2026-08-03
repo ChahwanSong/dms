@@ -21,6 +21,7 @@ ldap = ["ldap3>=2.9"]
 
 [project.scripts]
 dms = "dms.cli:main"
+dms-job-runner = "dms_job_runner.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
