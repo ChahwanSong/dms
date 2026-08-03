@@ -16,6 +16,7 @@ _SERVER_INT_KEYS = (
     ("DMS_PLANNER_INTERVAL_SECONDS", "planner_interval_seconds", 10),
     ("DMS_STEPPER_INTERVAL_SECONDS", "stepper_interval_seconds", 5),
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
+    ("DMS_JOB_MAX_ATTEMPTS", "job_max_attempts", 3),
 )
 
 
@@ -72,6 +73,15 @@ class Settings:
     artifact_base_uri: str = "file:///artifacts/dms"
     allow_privileged_requesters: bool = False
     privileged_requesters: frozenset = frozenset()
+    ldap_uri: str = ""
+    ldap_user_base: str = ""
+    ldap_group_base: str = ""
+    ldap_bind_dn: str = ""
+    ldap_bind_pw: str = ""
+    execution_backend: str = "stub"
+    job_image: str = ""
+    k8s_namespace: str = "dms"
+    job_max_attempts: int = 3
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -107,6 +117,14 @@ class Settings:
             allow_privileged_requesters=_parse_bool(
                 environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS"),
             privileged_requesters=_parse_csv_set(environ, "DMS_PRIVILEGED_REQUESTERS"),
+            ldap_uri=environ.get("DMS_LDAP_URI", ""),
+            ldap_user_base=environ.get("DMS_LDAP_USER_BASE", ""),
+            ldap_group_base=environ.get("DMS_LDAP_GROUP_BASE", ""),
+            ldap_bind_dn=environ.get("DMS_LDAP_BIND_DN", ""),
+            ldap_bind_pw=environ.get("DMS_LDAP_BIND_PW", ""),
+            execution_backend=environ.get("DMS_EXECUTION_BACKEND", "stub"),
+            job_image=environ.get("DMS_JOB_IMAGE", ""),
+            k8s_namespace=environ.get("DMS_K8S_NAMESPACE", "dms"),
         )
 
 
