@@ -140,10 +140,14 @@ def main():  # pragma: no cover - 실증에서 실행
     def wait_hostfile(role=None):
         # Volcano ssh plugin이 /etc/volcano/<task>.host 또는 VC_*_HOSTS 제공.
         # nsync는 source-worker/destination-worker 두 task의 hostfile을 각각 기다린다.
+        # Volcano's svc plugin names the per-task hostfile after the task with
+        # hyphens converted to UNDERSCORES: task "source-worker" ->
+        # /etc/volcano/source_worker.host (verified on the testbed). Reading the
+        # hyphenated path yields an empty hostfile -> mpirun "no nodes available".
         env_var = {"source": "DMS_JR_SOURCE_HOSTFILE",
                    "destination": "DMS_JR_DEST_HOSTFILE"}.get(role, "DMS_JR_HOSTFILE")
-        default_path = {"source": "/etc/volcano/source-worker.host",
-                        "destination": "/etc/volcano/destination-worker.host"}.get(
+        default_path = {"source": "/etc/volcano/source_worker.host",
+                        "destination": "/etc/volcano/destination_worker.host"}.get(
                             role, "/etc/volcano/worker.host")
         hostfile = os.environ.get(env_var, default_path)
         for _ in range(60):
