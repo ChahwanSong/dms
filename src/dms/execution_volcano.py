@@ -9,6 +9,7 @@ _POD_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
               "Succeeded": ExecStatus.SUCCEEDED, "Failed": ExecStatus.FAILED,
               "Unknown": ExecStatus.FAILED}
 _VCJOB_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
+                "Inqueue": ExecStatus.PENDING,
                 "Completed": ExecStatus.SUCCEEDED, "Completing": ExecStatus.RUNNING,
                 "Failed": ExecStatus.FAILED, "Aborted": ExecStatus.FAILED,
                 "Aborting": ExecStatus.RUNNING, "Terminating": ExecStatus.RUNNING,
@@ -19,7 +20,9 @@ _KIND = {"pod": "Pod", "vcjob": "Job"}
 class K8sClient(Protocol):
     def create(self, manifest: dict) -> None: ...
     def get(self, kind: str, name: str, namespace: str) -> "dict | None": ...
-    def delete(self, kind: str, name: str, namespace: str) -> None: ...
+    def delete(self, kind: str, name: str, namespace: str) -> None:
+        """대상이 이미 없으면 조용히 무시(404 삼킴) — 멱등 종료 계약."""
+        ...
     def read_pod_log(self, name: str, namespace: str) -> str: ...
 
 
@@ -33,25 +36,29 @@ class VolcanoExecutionAdapter:
         self._summary_paths = {}   # ref -> artifact summary.json path
 
     def _volumes(self, spec):
-        names = set()
+        # 데이터 스토리지 mount_path + 아티팩트 base 를 수집해 hostPath 볼륨으로.
         if spec.operation == "sync":
-            names.update([spec.paths.get("source_storage"),
-                          spec.paths.get("destination_storage")])
+            snames = [spec.paths.get("source_storage"),
+                      spec.paths.get("destination_storage")]
         else:
-            names.add(spec.paths.get("storage"))
-        vols = []
-        seen = set()
-        for sname in names:
-            if not sname:
+            snames = [spec.paths.get("storage")]
+        mount_paths = []
+        for sname in snames:
+            if sname:
+                mount_paths.append(self._storages(sname)["mount_path"])
+        # summary.json 기록 위치 — 스킴 제거한 artifact base 도 반드시 마운트.
+        mount_paths.append(spec.artifact_base.replace("file://", ""))
+        # 다른 경로가 상위(ancestor)면 하위 경로는 커버되므로 생략 — 중첩 마운트 방지.
+        # 후행 슬래시로 "/cephfs" 가 "/cephfs-third" 를 잘못 삼키지 않게 함.
+        minimal = []
+        for p in mount_paths:
+            covered = any(p != q and p.startswith(q.rstrip("/") + "/")
+                          for q in mount_paths)
+            if covered or p in minimal:
                 continue
-            meta = self._storages(sname)
-            mp = meta["mount_path"]
-            if mp in seen:
-                continue
-            seen.add(mp)
-            vols.append({"name": mp.strip("/").replace("/", "-") or "root",
-                         "hostPath": {"path": mp}, "mountPath": mp})
-        return vols
+            minimal.append(p)
+        return [{"name": mp.strip("/").replace("/", "-") or "root",
+                 "hostPath": {"path": mp}, "mountPath": mp} for mp in minimal]
 
     def submit(self, spec) -> str:
         try:
@@ -69,7 +76,7 @@ class VolcanoExecutionAdapter:
                 prefix = "vcjob"
             self._k8s.create(manifest)
         except Exception as exc:
-            raise ExecutionError("submit_failed", str(exc)[:200])
+            raise ExecutionError("submit_failed", str(exc)[:200]) from exc
         name = manifest["metadata"]["name"]
         ref = f"{prefix}/{name}"
         base = spec.artifact_base
@@ -105,4 +112,4 @@ class VolcanoExecutionAdapter:
         try:
             self._k8s.delete(_KIND[prefix], name, self._namespace)
         except Exception as exc:
-            raise ExecutionError("terminate_failed", str(exc)[:200])
+            raise ExecutionError("terminate_failed", str(exc)[:200]) from exc
