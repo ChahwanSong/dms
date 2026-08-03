@@ -4,7 +4,7 @@ import os
 import sys
 
 from .commands import (
-    getent_hosts_command, mpirun_command, passwd_line,
+    getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
 
 _SSH_READY_MAX_ATTEMPTS = 90  # legacy _mpiexec_line 이식: 워커당 ~90s 상한
@@ -29,8 +29,14 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #    mpirun을 runuser로 실행해 SSH 나갈 때 요청자 home의 클라이언트 키가 필요.
     run(ssh_key_copy_command(home, uid, gid))
 
-    # 3. hostfile 대기
-    ordered_hosts, _ = wait_hostfile()
+    # 3. hostfile 대기 — nsync는 source/destination 두 role을 각각 기다린다(순서
+    #    보존: source 먼저 -> rank 0..N-1, destination 다음 -> role_map과 일치해야 함).
+    if tool == "nsync":
+        src_hosts, _ = wait_hostfile("source")
+        dst_hosts, _ = wait_hostfile("destination")
+        ordered_hosts = [*src_hosts, *dst_hosts]
+    else:
+        ordered_hosts, _ = wait_hostfile()
 
     # 4. 원시 호스트명을 getent로 IP 해석 + slots=<procs_per_node> 첨부한 새 hostfile 생성
     #    (legacy _mpi_hostfile_lines 개념 — Volcano svc plugin의 DNS 전파를 기다린다).
@@ -44,9 +50,17 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #    재시도/타임아웃에 맡긴다).
     _wait_ssh_ready(resolved_hosts, run=run, sleep=sleep)
 
-    # 6. rank script — scan은 리포트 경로 치환
+    # 6. rank script — scan은 리포트 경로 치환, nsync는 role-map 인자를 삽입.
+    #    role_map은 계획 시점의 소스/목적지 노드 수(DMS_JR_SOURCE_NODES/DEST_NODES,
+    #    execution_manifests._build_nsync_job이 채움)로 결정론적으로 계산된다 —
+    #    개수만 필요하므로 hostfile의 실제 SSH 호스트명과 무관하다(commands.nsync_role_map).
     report_path = f"{artifact_dir}/dscan-report.json"
     rendered = [report_path if a == "$DMS_SCAN_REPORT" else a for a in argv]
+    if tool == "nsync":
+        src_nodes = json.loads(env.get("DMS_JR_SOURCE_NODES", "[]"))
+        dst_nodes = json.loads(env.get("DMS_JR_DEST_NODES", "[]"))
+        role_map = nsync_role_map(src_nodes, dst_nodes, slots_per_host=procs_per_node)
+        rendered = ["--role-mode", "map", "--role-map", role_map, *rendered]
     rank_body = " ".join(_shquote(a) for a in [tool, *rendered])
     rank_path = f"{artifact_dir}/rank.sh"
     write_text(rank_path, f"#!/bin/sh\nexec {rank_body}\n")
@@ -116,9 +130,15 @@ def main():  # pragma: no cover - 실증에서 실행
         except OSError:
             return ""
 
-    def wait_hostfile():
-        # Volcano ssh plugin이 /etc/volcano/<task>.host 또는 VC_*_HOSTS 제공
-        hostfile = os.environ.get("DMS_JR_HOSTFILE", "/etc/volcano/worker.host")
+    def wait_hostfile(role=None):
+        # Volcano ssh plugin이 /etc/volcano/<task>.host 또는 VC_*_HOSTS 제공.
+        # nsync는 source-worker/destination-worker 두 task의 hostfile을 각각 기다린다.
+        env_var = {"source": "DMS_JR_SOURCE_HOSTFILE",
+                   "destination": "DMS_JR_DEST_HOSTFILE"}.get(role, "DMS_JR_HOSTFILE")
+        default_path = {"source": "/etc/volcano/source-worker.host",
+                        "destination": "/etc/volcano/destination-worker.host"}.get(
+                            role, "/etc/volcano/worker.host")
+        hostfile = os.environ.get(env_var, default_path)
         for _ in range(60):
             if os.path.exists(hostfile):
                 with open(hostfile) as f:

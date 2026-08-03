@@ -179,6 +179,57 @@ def test_run_job_ssh_barrier_gives_up_after_bounded_attempts():
     assert slept  # bounded 재시도 동안 sleep이 호출됨
 
 
+def _nsync_env(**kw):
+    base = _env(
+        DMS_JR_TOOL="nsync", DMS_JR_OPERATION="sync",
+        DMS_JR_PROCESSES_PER_NODE="2",
+        DMS_JR_SOURCE_NODES=json.dumps(["dms-w1", "dms-w2"]),
+        DMS_JR_DEST_NODES=json.dumps(["dms-w4"]),
+        DMS_JR_ARGV=json.dumps(["/cephfs-third/a", "/cephfs-secondary/b"]))
+    base.update(kw)
+    return base
+
+
+def _nsync_wait_hostfile(calls):
+    def wait_hostfile(role=None):
+        calls.append(role)
+        if role == "source":
+            return ["dms-w1", "dms-w2"], "/tmp/source.host"
+        if role == "destination":
+            return ["dms-w4"], "/tmp/dest.host"
+        raise AssertionError(f"unexpected role: {role!r}")
+    return wait_hostfile
+
+
+def test_run_job_nsync_waits_for_source_and_destination_hostfiles():
+    calls = []
+    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rc = run_job(_nsync_env(), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: None,
+                 wait_hostfile=_nsync_wait_hostfile(calls),
+                 make_executable=rec.make_executable)
+    assert rc == 0
+    assert "source" in calls and "destination" in calls
+    # source가 destination보다 먼저 (rank 순서 = source 먼저 -> role_map과 일치해야 함)
+    assert calls.index("source") < calls.index("destination")
+
+
+def test_run_job_nsync_computes_role_map_and_inserts_role_map_args():
+    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rc = run_job(_nsync_env(), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: None,
+                 wait_hostfile=_nsync_wait_hostfile([]),
+                 make_executable=rec.make_executable)
+    assert rc == 0
+    rank_path = "/cephfs/dms/artifacts/j1/execution/rank.sh"
+    body = rec.writes[rank_path]
+    assert body.startswith("#!/bin/sh\nexec nsync ")
+    assert "--role-mode map" in body or "--role-mode' 'map'" in body
+    # 2호스트*2슬롯=src rank 0..3, 1호스트*2슬롯=dst rank 4..5 (commands.nsync_role_map과 동일 계산)
+    assert "0:src" in body and "4:dst" in body
+    assert "/cephfs-third/a" in body and "/cephfs-secondary/b" in body
+
+
 def test_run_job_mpirun_has_ompi_env_and_runuser_preserve_environment():
     rec = _Recorder(rc=0, stdout='{"files": 1}')
     rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
