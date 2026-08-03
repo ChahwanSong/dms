@@ -86,6 +86,8 @@ def migrate(db: Database) -> None:
             result_summary TEXT,
             worker_pool TEXT,
             precondition TEXT,
+            confirmed_fingerprint TEXT,
+            phase_refs TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
@@ -234,6 +236,8 @@ def _ensure_columns(db):
     for table, column, coltype in (
         ("data_jobs", "worker_pool", "TEXT"),
         ("data_jobs", "precondition", "TEXT"),
+        ("data_jobs", "confirmed_fingerprint", "TEXT"),
+        ("data_jobs", "phase_refs", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
