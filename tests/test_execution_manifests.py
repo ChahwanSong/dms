@@ -167,3 +167,85 @@ def test_preflight_pod_shell_injection_safety():
     assert malicious_target in cmd[4:]
     # 검사 마커 있음
     assert "DMS_PREFLIGHT_REASON" in script or "DMS_PREFLIGHT_OK" in script
+
+
+def _worker_container(m, name="worker"):
+    task = next(t for t in m["spec"]["tasks"] if t["name"] == name)
+    return task["template"]["spec"]["containers"][0]
+
+
+def test_worker_container_has_identity_env():
+    spec = _spec(operation="scan", tool="dscan",
+                 identity={"uid": 10001, "gid": 10000, "username": "alice"},
+                 candidates={"primary": ["dms-w1"]}, paths={"target": "/cephfs/data"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    c = _worker_container(m)
+    env = {e["name"]: e["value"] for e in c["env"]}
+    assert env["DMS_JR_UID"] == "10001"
+    assert env["DMS_JR_GID"] == "10000"
+    assert env["DMS_JR_USERNAME"] == "alice"
+
+
+def test_worker_command_materializes_identity_and_execs_sshd():
+    spec = _spec(operation="scan", tool="dscan",
+                 identity={"uid": 10001, "gid": 10000, "username": "alice"},
+                 candidates={"primary": ["dms-w1"]}, paths={"target": "/cephfs/data"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    c = _worker_container(m)
+    cmd = c["command"]
+    assert cmd[0] == "sh" and cmd[1] == "-c"
+    script = cmd[2]
+    # 물질화(case-guard) 참조 — env var로만, f-string 보간 없음
+    assert "DMS_JR_USERNAME" in script and "DMS_JR_UID" in script
+    assert "getent passwd" in script
+    # ssh-keygen 호스트키 생성
+    assert "ssh-keygen -A" in script
+    # 요청자 홈으로 authorized_keys 복사
+    assert "authorized_keys" in script
+    # UsePAM=no, StrictModes=no로 sshd 기동 (root passwd 없는 요청자도 SSH 가능)
+    assert "sshd -D -e -o StrictModes=no -o UsePAM=no" in script
+
+
+def test_worker_security_context_has_sys_chroot():
+    spec = _spec(operation="scan", tool="dscan",
+                 identity={"uid": 10001, "gid": 10000, "username": "alice"},
+                 candidates={"primary": ["dms-w1"]}, paths={"target": "/cephfs/data"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    sc = _worker_container(m)["securityContext"]
+    assert sc["runAsUser"] == 0  # 물질화/sshd는 root 필요
+    assert sc["capabilities"]["add"] == ["SYS_CHROOT"]
+
+
+def test_worker_command_injection_safe():
+    # 악성 username이 spec.identity에 들어와도 셸 스크립트 자체는 절대 변하지 않는다
+    # (env var 참조만, f-string 보간 없음) — 스크립트는 매니페스트 생성 시점에 고정.
+    malicious = "alice; rm -rf / #"
+    spec1 = _spec(operation="scan", tool="dscan",
+                  identity={"uid": 10001, "gid": 10000, "username": "alice"},
+                  candidates={"primary": ["dms-w1"]}, paths={"target": "/cephfs/data"})
+    spec2 = _spec(operation="scan", tool="dscan",
+                  identity={"uid": 10001, "gid": 10000, "username": malicious},
+                  candidates={"primary": ["dms-w1"]}, paths={"target": "/cephfs/data"})
+    m1 = build_volcano_job(spec1, job_image="i", namespace="dms", volumes=_VOL)
+    m2 = build_volcano_job(spec2, job_image="i", namespace="dms", volumes=_VOL)
+    script1 = _worker_container(m1)["command"][2]
+    script2 = _worker_container(m2)["command"][2]
+    assert malicious not in script1 and malicious not in script2
+    assert script1 == script2  # 스크립트는 identity와 무관하게 고정
+
+
+def test_nsync_worker_containers_have_identity_and_sshd_command():
+    spec = _spec(operation="sync", tool="nsync",
+                 identity={"uid": 10001, "gid": 10000, "username": "alice"},
+                 candidates={"source": ["dms-w1", "dms-w2"], "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b",
+                        "destination_storage": "cephfs-secondary"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    for name in ("source-worker", "destination-worker"):
+        c = _worker_container(m, name)
+        env = {e["name"]: e["value"] for e in c["env"]}
+        assert env["DMS_JR_USERNAME"] == "alice"
+        assert c["command"][0] == "sh" and c["command"][1] == "-c"
+        assert "exec /usr/sbin/sshd -D -e -o StrictModes=no -o UsePAM=no" in c["command"][2]
+        assert c["securityContext"]["capabilities"]["add"] == ["SYS_CHROOT"]

@@ -49,14 +49,89 @@ def _abs_paths(spec):
     return spec.paths
 
 
-def _container(name, image, command, env, volumes):
+def _container(name, image, command, env, volumes, *, security_context=None):
     return {
         "name": name, "image": image, "command": command,
-        "securityContext": {"runAsUser": 0},
+        "securityContext": security_context or {"runAsUser": 0},
         "env": [{"name": k, "value": v} for k, v in env.items()],
         "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],
                           "mountPropagation": "HostToContainer"} for v in volumes],
     }
+
+
+def _identity_materialize_stmt():
+    """root가 요청자를 컨테이너 /etc/passwd에 idempotent 물질화. legacy
+    _identity_materialize_stmt() 이식 — 값은 case-guard로만 검증하고 전부
+    ${DMS_JR_*} 환경변수로 참조한다(f-string 보간 금지, 셸 인젝션 방지)."""
+    return (
+        'if [ "$(id -u)" = 0 ] && [ -n "${DMS_JR_USERNAME:-}" ] && [ -n "${DMS_JR_UID:-}" ] '
+        '&& ! getent passwd "$DMS_JR_USERNAME" >/dev/null 2>&1; then '
+        'case "$DMS_JR_UID" in ""|*[!0-9]*) echo "dms: invalid DMS_JR_UID" >&2; exit 1;; esac; '
+        'case "${DMS_JR_GID:-$DMS_JR_UID}" in ""|*[!0-9]*) echo "dms: invalid DMS_JR_GID" >&2; exit 1;; esac; '
+        'case "$DMS_JR_USERNAME" in *[!A-Za-z0-9._-]*) echo "dms: invalid DMS_JR_USERNAME" >&2; exit 1;; esac; '
+        "printf '%s:x:%s:%s::/tmp/dms-home-%s:/bin/sh\\n' \"$DMS_JR_USERNAME\" \"$DMS_JR_UID\" "
+        '"${DMS_JR_GID:-$DMS_JR_UID}" "$DMS_JR_UID" >> /etc/passwd; '
+        'mkdir -p "/tmp/dms-home-$DMS_JR_UID" && '
+        'chown "$DMS_JR_UID:${DMS_JR_GID:-$DMS_JR_UID}" "/tmp/dms-home-$DMS_JR_UID" 2>/dev/null || true; '
+        "fi"
+    )
+
+
+def _worker_command_script():
+    """worker(sshd) 컨테이너 command 본문. legacy _mpi_worker_command() 이식:
+    물질화 -> ssh-keygen -A -> 요청자 home ~/.ssh에 authorized_keys 복사/chown ->
+    exec sshd. StrictModes=no(온디맨드 물질화 계정), UsePAM=no(shadow 엔트리 없음)."""
+    return "\n".join([
+        "set -eu",
+        _identity_materialize_stmt(),
+        "mkdir -p /run/sshd",
+        "ssh-keygen -A >/dev/null 2>&1 || true",
+        'if [ -n "${DMS_JR_USERNAME:-}" ] && id "$DMS_JR_USERNAME" >/dev/null 2>&1; then',
+        "  user_home=$(getent passwd \"$DMS_JR_USERNAME\" | awk -F: '{print $6}')",
+        # root는 스킵: Volcano ssh 플러그인이 이미 /root/.ssh에 읽기전용으로 키를 마운트.
+        '  if [ -n "$user_home" ] && [ "$user_home" != /root ]; then',
+        '    mkdir -p "$user_home/.ssh"',
+        '    chown "$DMS_JR_USERNAME" "$user_home" 2>/dev/null || true',
+        '    if [ -f /root/.ssh/authorized_keys ]; then '
+        'cp /root/.ssh/authorized_keys "$user_home/.ssh/authorized_keys"; fi',
+        '    chown -R "$DMS_JR_USERNAME" "$user_home/.ssh"',
+        '    chmod 0700 "$user_home/.ssh"',
+        '    chmod 0600 "$user_home/.ssh"/* 2>/dev/null || true',
+        "  fi",
+        "fi",
+        # UsePAM=no: 물질화된 요청자는 /etc/shadow 엔트리가 없어 PAM account 단계가
+        # 거부한다. StrictModes=no: 온디맨드로 생성된 home/.ssh의 권한을 sshd가
+        # 지나치게 깐깐하게 검사하지 않도록.
+        "exec /usr/sbin/sshd -D -e -o StrictModes=no -o UsePAM=no",
+    ])
+
+
+def _worker_security_context():
+    return {"runAsUser": 0, "capabilities": {"add": ["SYS_CHROOT"]}}
+
+
+def _processes_per_node(spec):
+    if "primary" in spec.candidates:
+        node_count = max(1, len(spec.candidates.get("primary", [])))
+    else:
+        node_count = max(1, len(spec.candidates.get("source", []))
+                         + len(spec.candidates.get("destination", [])))
+    return max(1, spec.process_count // node_count)
+
+
+def _worker_env(spec):
+    ident = spec.identity or {}
+    return {
+        "DMS_JR_UID": str(ident.get("uid", 0)), "DMS_JR_GID": str(ident.get("gid", 0)),
+        "DMS_JR_USERNAME": ident.get("username", "root"),
+        "DMS_JR_PROCESSES_PER_NODE": str(_processes_per_node(spec)),
+    }
+
+
+def _worker_container(name, image, spec, volumes):
+    return _container(name, image, ["sh", "-c", _worker_command_script()],
+                      _worker_env(spec), volumes,
+                      security_context=_worker_security_context())
 
 
 def _pod_volumes(volumes):
@@ -78,6 +153,7 @@ def _launcher_env(spec):
         "DMS_JR_TOOL": spec.tool, "DMS_JR_OPERATION": spec.operation,
         "DMS_JR_PHASE": spec.phase, "DMS_JR_DRYRUN": "1" if spec.dryrun else "0",
         "DMS_JR_PROCESS_COUNT": str(spec.process_count),
+        "DMS_JR_PROCESSES_PER_NODE": str(_processes_per_node(spec)),
         "DMS_JR_ARGV": json.dumps(argv),
         "DMS_JR_UID": str(ident.get("uid", 0)), "DMS_JR_GID": str(ident.get("gid", 0)),
         "DMS_JR_USERNAME": ident.get("username", "root"),
@@ -153,14 +229,12 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
     src_worker = {"name": "source-worker", "replicas": len(src_nodes),
         "template": {"spec": {"restartPolicy": "Never",
             "affinity": _node_affinity(src_nodes),
-            "containers": [_container("source-worker", job_image,
-                ["/usr/sbin/sshd", "-D"], {}, volumes)],
+            "containers": [_worker_container("source-worker", job_image, spec, volumes)],
             "volumes": _pod_volumes(volumes)}}}
     dst_worker = {"name": "destination-worker", "replicas": len(dst_nodes),
         "template": {"spec": {"restartPolicy": "Never",
             "affinity": _node_affinity(dst_nodes),
-            "containers": [_container("destination-worker", job_image,
-                ["/usr/sbin/sshd", "-D"], {}, volumes)],
+            "containers": [_worker_container("destination-worker", job_image, spec, volumes)],
             "volumes": _pod_volumes(volumes)}}}
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
@@ -195,8 +269,7 @@ def build_volcano_job(spec, *, job_image, namespace, volumes):
         "template": {"spec": {
             "restartPolicy": "Never",
             "affinity": _node_affinity(nodes) if nodes else {},
-            "containers": [_container("worker", job_image,
-                ["/usr/sbin/sshd", "-D"], {}, volumes)],
+            "containers": [_worker_container("worker", job_image, spec, volumes)],
             "volumes": _pod_volumes(volumes)}}}
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
