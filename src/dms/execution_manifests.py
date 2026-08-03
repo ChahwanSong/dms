@@ -202,7 +202,10 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node):
         # (phase "preflight") and the post-confirm re-validation (phase
         # "exec_preflight"). Same job_id[:12]+node would collide (create ->
         # AlreadyExists) if the first Pod still lingers, so scope the name by phase.
-        "metadata": {"name": f"dms-preflight-{spec.job_id[:12]}-{spec.phase}-{node}"[:63],
+        # Underscores are illegal in a Pod name (DNS-1123) -> "exec_preflight"
+        # must become "exec-preflight" or the create is rejected (submit_failed).
+        "metadata": {"name": (f"dms-preflight-{spec.job_id[:12]}-"
+                              f"{spec.phase.replace('_', '-')}-{node}")[:63],
                      "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": "preflight"}},

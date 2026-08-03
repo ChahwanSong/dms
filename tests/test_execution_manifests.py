@@ -130,6 +130,22 @@ def test_preflight_pod_runs_as_identity():
     assert m["metadata"]["labels"]["dms.io/phase"] == "preflight"
 
 
+def test_preflight_pod_name_scoped_by_phase_and_dns_safe():
+    # initial and exec-recheck preflight must get distinct, DNS-1123-valid names
+    scan_paths = {"target": "/cephfs/dms/a"}
+    n1 = build_preflight_pod(_spec(operation="scan", tool="dscan", phase="preflight",
+                                   paths=scan_paths),
+                             job_image="i", namespace="dms", volumes=_VOL, node="dms-w1"
+                             )["metadata"]["name"]
+    n2 = build_preflight_pod(_spec(operation="scan", tool="dscan", phase="exec_preflight",
+                                   paths=scan_paths),
+                             job_image="i", namespace="dms", volumes=_VOL, node="dms-w1"
+                             )["metadata"]["name"]
+    assert n1 != n2                       # no collision between the two preflights
+    assert "_" not in n1 and "_" not in n2  # underscores are illegal in Pod names
+    assert "exec-preflight" in n2          # underscore sanitized to hyphen
+
+
 def test_nsync_three_tasks_node_affinity():
     spec = _spec(operation="sync", tool="nsync",
                  candidates={"source": ["dms-w1", "dms-w2"],
