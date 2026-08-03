@@ -1,5 +1,5 @@
 from dms.execution import JobSpec
-from dms.execution_manifests import render_tool_flags, tool_argv, build_volcano_job
+from dms.execution_manifests import render_tool_flags, tool_argv, build_volcano_job, build_preflight_pod
 
 
 def _spec(**kw):
@@ -100,3 +100,31 @@ def test_job_name_format():
                  paths={"target": "/cephfs/data"})
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
     assert m["metadata"]["name"] == "dms-scan-execution-j1"  # job_id "j1" < 12자
+
+
+def test_nsync_three_tasks():
+    spec = _spec(operation="sync", tool="nsync",
+                 candidates={"source": ["dms-w1", "dms-w2"],
+                             "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b",
+                        "destination_storage": "cephfs-secondary"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    names = [t["name"] for t in m["spec"]["tasks"]]
+    assert names == ["launcher", "source-worker", "destination-worker"]
+    src = next(t for t in m["spec"]["tasks"] if t["name"] == "source-worker")
+    dst = next(t for t in m["spec"]["tasks"] if t["name"] == "destination-worker")
+    assert src["replicas"] == 2 and dst["replicas"] == 1
+    assert m["spec"]["minAvailable"] == 4  # 2 + 1 + launcher
+
+
+def test_preflight_pod_runs_as_identity():
+    spec = _spec(operation="scan", tool="dscan", identity={"uid": 10001, "gid": 10000,
+                 "username": "alice"}, paths={"target": "/cephfs/dms/a"})
+    m = build_preflight_pod(spec, job_image="i", namespace="dms", volumes=_VOL,
+                            node="dms-w1")
+    assert m["kind"] == "Pod"
+    sc = m["spec"]["containers"][0]["securityContext"]
+    assert sc["runAsUser"] == 10001 and sc["runAsGroup"] == 10000
+    assert m["spec"]["nodeSelector"]["kubernetes.io/hostname"] == "dms-w1"
+    assert m["metadata"]["labels"]["dms.io/phase"] == "preflight"

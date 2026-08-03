@@ -95,7 +95,86 @@ def _node_affinity(nodes):
             {"key": "kubernetes.io/hostname", "operator": "In", "values": nodes}]}]}}}
 
 
+def _preflight_script(spec):
+    ap = _abs_paths(spec)
+    if spec.operation == "sync":
+        return ("set -e; "
+                f'test -r "{ap["source"]}" || {{ echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }}; '
+                f'dest_parent=$(dirname "{ap["destination"]}"); '
+                'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
+                "echo DMS_PREFLIGHT_OK")
+    if spec.operation == "rm":
+        return ("set -e; "
+                f'parent=$(dirname "{ap["target"]}"); '
+                'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
+                "echo DMS_PREFLIGHT_OK")
+    return ("set -e; "
+            f'test -r "{ap["target"]}" || {{ echo DMS_PREFLIGHT_REASON=target_not_readable; exit 1; }}; '
+            "echo DMS_PREFLIGHT_OK")
+
+
+def build_preflight_pod(spec, *, job_image, namespace, volumes, node):
+    ident = spec.identity or {}
+    return {
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": f"dms-preflight-{spec.job_id[:12]}-{node}"[:63],
+                     "namespace": namespace,
+                     "labels": {"dms.io/job-id": spec.job_id,
+                                "dms.io/phase": "preflight"}},
+        "spec": {"restartPolicy": "Never",
+                 "nodeSelector": {"kubernetes.io/hostname": node},
+                 "containers": [{
+                     "name": "preflight", "image": job_image,
+                     "command": ["sh", "-c", _preflight_script(spec)],
+                     "securityContext": {"runAsUser": ident.get("uid", 0),
+                                         "runAsGroup": ident.get("gid", 0)},
+                     "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],
+                                       "mountPropagation": "HostToContainer"}
+                                      for v in volumes]}],
+                 "volumes": _pod_volumes(volumes)}}
+
+
+def _build_nsync_job(spec, *, job_image, namespace, volumes):
+    src_nodes = spec.candidates["source"]
+    dst_nodes = spec.candidates["destination"]
+    env = _launcher_env(spec)
+    env["DMS_JR_SOURCE_NODES"] = json.dumps(src_nodes)
+    env["DMS_JR_DEST_NODES"] = json.dumps(dst_nodes)
+    launcher = {"name": "launcher", "replicas": 1, "template": {"spec": {
+        "restartPolicy": "Never",
+        "containers": [_container("launcher", job_image,
+            ["/usr/local/bin/dms-job-runner"], env, volumes)],
+        "volumes": _pod_volumes(volumes)}}}
+    src_worker = {"name": "source-worker", "replicas": len(src_nodes),
+        "template": {"spec": {"restartPolicy": "Never",
+            "affinity": _node_affinity(src_nodes),
+            "containers": [_container("source-worker", job_image,
+                ["/usr/sbin/sshd", "-D"], {}, volumes)],
+            "volumes": _pod_volumes(volumes)}}}
+    dst_worker = {"name": "destination-worker", "replicas": len(dst_nodes),
+        "template": {"spec": {"restartPolicy": "Never",
+            "affinity": _node_affinity(dst_nodes),
+            "containers": [_container("destination-worker", job_image,
+                ["/usr/sbin/sshd", "-D"], {}, volumes)],
+            "volumes": _pod_volumes(volumes)}}}
+    return {
+        "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
+        "metadata": {"name": _job_name(spec), "namespace": namespace,
+                     "labels": {"dms.io/job-id": spec.job_id,
+                                "dms.io/phase": spec.phase, "dms.io/tool": spec.tool}},
+        "spec": {"schedulerName": "volcano", "queue": spec.queue,
+                 "minAvailable": len(src_nodes) + len(dst_nodes) + 1,
+                 "priorityClassName": spec.priority_class,
+                 "plugins": {"ssh": [], "svc": []},
+                 "policies": [{"event": "TaskCompleted", "action": "CompleteJob"},
+                              {"event": "PodFailed", "action": "AbortJob"}],
+                 "tasks": [launcher, src_worker, dst_worker]}}
+
+
 def build_volcano_job(spec, *, job_image, namespace, volumes):
+    if "primary" not in spec.candidates:
+        return _build_nsync_job(spec, job_image=job_image, namespace=namespace,
+                                volumes=volumes)
     workers = _worker_count(spec)
     nodes = spec.candidates.get("primary", [])
     launcher = {
