@@ -78,3 +78,53 @@ def test_cancel_terminated_ref_reports_failure_not_false_cancel(client):
     assert r.status_code == 500 and r.json()["detail"] == "cancel_failed"
     # 거짓 취소 금지 — 상태 그대로
     assert repos.data_jobs.get_job(jid)["state"] == "Executing"
+
+
+def test_confirm_no_preview_fingerprint_409(client):
+    from dms.domain import DataJobState
+    repos = client.app.state.repos
+    rid, jid = _confirmpending_job(repos)
+    # preview_fingerprint를 비움 (빈 preview 흉내)
+    repos.data_jobs.set_preview(jid, fingerprint=None,
+        expires_at="2099-01-01T00:00:00Z", artifact_uri=None)
+    _login(client, "alice")
+    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "x"})
+    assert r.status_code == 409 and r.json()["detail"] == "no_preview_fingerprint"
+
+
+def test_confirm_expired_preview_409_and_flips_state(client):
+    from dms.domain import DataJobState
+    repos = client.app.state.repos
+    rid, jid = _confirmpending_job(repos)
+    repos.data_jobs.set_preview(jid, fingerprint="sha256:abc",
+        expires_at="2000-01-01T00:00:00Z", artifact_uri=None)  # 과거 → 만료
+    _login(client, "alice")
+    r = client.post(f"/api/user/jobs/{jid}:confirm", json={"fingerprint": "sha256:abc"})
+    assert r.status_code == 409 and r.json()["detail"] == "preview_expired"
+    assert repos.data_jobs.get_job(jid)["state"] == "PreviewExpired"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+
+
+def test_cancel_terminal_job_409(client):
+    from dms.domain import DataJobState
+    repos = client.app.state.repos
+    rid, jid = _confirmpending_job(repos)
+    repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="test")
+    _login(client, "alice")
+    r = client.post(f"/api/user/jobs/{jid}:cancel")
+    assert r.status_code == 409 and r.json()["detail"] == "already_terminal"
+
+
+ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+
+
+def test_admin_bearer_can_access_others_jobs(client):
+    repos = client.app.state.repos
+    rid, jid = _confirmpending_job(repos, requester="alice")
+    # admin bearer token (세션 로그인 없이) 로 남의 요청 잡 조회
+    jobs = client.get(f"/api/user/requests/{rid}/jobs", headers=ADMIN).json()
+    assert jobs[0]["job_id"] == jid
+    # admin이 confirm도 가능
+    r = client.post(f"/api/user/jobs/{jid}:confirm",
+                    json={"fingerprint": "sha256:abc"}, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["state"] == "Executing"
