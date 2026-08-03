@@ -1,8 +1,18 @@
 """job-stepper: 계획된 data_job을 비블로킹 스텝으로 전진시키는 루프 본체. 실행은 어댑터 뒤."""
+import hashlib
+import json
 import sys
 
+from .db import iso_plus, utc_now_iso
 from .domain import DataJobState
 from .execution import ExecStatus, ExecutionError, JobSpec
+
+
+def _summary_fingerprint(summary):
+    if not summary:
+        return None
+    payload = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
 
 
 class JobStepper:
@@ -59,7 +69,10 @@ class JobStepper:
             return self._poll_preflight(job)
         if state == DataJobState.RUNNING.value:
             return self._poll_execution(job)
-        # PreviewRunning / Executing 는 Task 7
+        if state == DataJobState.PREVIEW_RUNNING.value:
+            return self._poll_preview(job)
+        if state == DataJobState.EXECUTING.value:
+            return self._poll_or_submit_execution(job)
         return state
 
     def _submit_preflight(self, job):
@@ -117,5 +130,42 @@ class JobStepper:
         return target.value
 
     def _submit_preview(self, job):
-        # Task 7에서 구현 — placeholder가 아니라 Task 7이 채운다
-        raise NotImplementedError("preview path implemented in Task 7")
+        jid = job["job_id"]
+        try:
+            ref = self._exec.submit(self._build_spec(job, "preview", dryrun=True))
+        except ExecutionError as exc:
+            self._finalize(job, DataJobState.FAILED,
+                           reason_code=f"preview_submit_failed:{exc.reason_code}")
+            return "Failed"
+        self._repos.data_jobs.set_phase_ref(jid, "preview", ref)
+        self._repos.data_jobs.set_job_state(jid, DataJobState.PREVIEW_RUNNING,
+                                            actor="stepper")
+        return "PreviewRunning"
+
+    def _poll_preview(self, job):
+        jid = job["job_id"]
+        ref = (job["phase_refs"] or {}).get("preview")
+        status = self._exec.poll(ref)
+        if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
+            return "PreviewRunning"
+        if status == ExecStatus.SUCCEEDED:
+            summary = self._exec.read_summary(ref)
+            fingerprint = _summary_fingerprint(summary)
+            if fingerprint is None:
+                self._finalize(job, DataJobState.REJECTED, reason_code="empty_preview")
+                return "Rejected"
+            expires = iso_plus(utc_now_iso(), self._settings.preview_ttl_seconds)
+            artifact = f"{self._settings.artifact_base_uri}/{jid}"
+            self._repos.data_jobs.set_preview(jid, fingerprint=fingerprint,
+                                              expires_at=expires, artifact_uri=artifact)
+            self._repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING,
+                                                actor="stepper")
+            return "ConfirmPending"
+        self._finalize(job, DataJobState.FAILED, reason_code="preview_failed")
+        return "Failed"
+
+    def _poll_or_submit_execution(self, job):
+        refs = job["phase_refs"] or {}
+        if "execution" not in refs:
+            return self._submit_execution(job, DataJobState.EXECUTING)
+        return self._poll_execution(job)
