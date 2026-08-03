@@ -82,6 +82,11 @@ class ControlRepository:
                 return subject
         return None
 
+    def list_denylist(self):
+        return self._db.query(
+            """SELECT subject_type, subject, reason FROM identity_denylist
+               ORDER BY subject_type, subject""")
+
     # --- control state ---
     def control_state(self):
         return self._db.query_one("SELECT * FROM control_state WHERE id = 1")
