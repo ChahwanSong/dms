@@ -65,6 +65,16 @@ def _validated_payload(body: RequestBody) -> tuple[dict, str]:
 @router.post("/api/user/requests", status_code=202)
 def submit(body: RequestBody, request: Request,
            identity: Identity = Depends(require_user)):
+    # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요
+    owner = body.owner_username
+    if owner is not None and owner != identity.actor:
+        settings = request.app.state.settings
+        authorized = (identity.role == "admin"
+                      and settings.allow_privileged_requesters
+                      and identity.actor in settings.privileged_requesters)
+        if not authorized:
+            raise HTTPException(status_code=403, detail="privileged_not_authorized")
+
     try:
         payload, resource_key = _validated_payload(body)
     except (DomainValidationError, ValueError) as e:
