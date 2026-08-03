@@ -65,6 +65,13 @@ def test_run_job_materializes_identity_and_runs_mpirun():
     assert any("alice:x:10001:10000" in c for _, c in rec.appends)
     # mpirun 실행됨
     assert any("mpirun" in cmd for cmd in rec.ran)
+    # mpirun 전에 execution 디렉터리를 요청자 소유로 chown(도구가 report를 쓸 수 있게)
+    assert ["chown", "-R", "10001:10000",
+            "/cephfs/dms/artifacts/j1/execution"] in rec.ran
+    chown_idx = rec.ran.index(["chown", "-R", "10001:10000",
+                               "/cephfs/dms/artifacts/j1/execution"])
+    mpirun_idx = next(i for i, c in enumerate(rec.ran) if "mpirun" in c)
+    assert chown_idx < mpirun_idx
     # rank.sh가 executable로 표시됨
     assert any(p.endswith("rank.sh") for p in rec.made_exec)
     # rank.sh 본문에서 $DMS_SCAN_REPORT가 치환됨

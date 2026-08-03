@@ -66,6 +66,13 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     write_text(rank_path, f"#!/bin/sh\nexec {rank_body}\n")
     make_executable(rank_path)
 
+    # 6b. mpirun은 runuser로 요청자 신원으로 도구를 돌린다. 도구(dscan/dsync/…)가
+    #     결과 파일(dscan-report.json 등)을 execution 디렉터리에 직접 쓰므로, root가
+    #     만든 이 디렉터리를 요청자 소유로 넘겨야 쓰기가 가능하다(안 그러면 도구가
+    #     "Failed to write output file"로 실패). 이후 summary/로그는 root가 다시 써도
+    #     되고(권한 무시), world-readable이라 컨트롤러 read_summary가 읽을 수 있다.
+    run(["chown", "-R", f"{uid}:{gid}", artifact_dir])
+
     # 7. mpirun — runuser로 요청자 신원, OMPI env + -x 전파(commands.mpirun_command)
     proc = run(mpirun_command(process_count=process_count, hostfile=hostfile_path,
                               username=username, rank_script=rank_path))
