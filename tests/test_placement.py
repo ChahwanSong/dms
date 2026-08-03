@@ -87,3 +87,51 @@ def test_no_candidates_raise():
                                    destination_storage="dst", owner="alice",
                                    privileged=False)
     assert e.value.reason_code == "no_ready_sync_candidate"
+
+
+# Task 5: 정책 fan-out 산정
+from dms.placement import TOOL_TO_POLICY, resolve_fanout
+
+POLICY = {"max_nodes": 3, "procs_per_node": 8, "queue": "dms-data",
+          "default_priority": "mid", "max_priority": "high",
+          "execution_timeout_seconds": 3600, "enabled": 1}
+
+
+def test_tool_to_policy_map():
+    assert TOOL_TO_POLICY == {"dscan": "scan", "drm": "rm",
+                              "dsync": "dsync", "nsync": "nsync"}
+
+
+def test_fanout_primary_clamps_to_max():
+    out = resolve_fanout(POLICY, {"primary": ["n1", "n2", "n3", "n4", "n5"]},
+                         priority="mid")
+    assert out["node_count"] == 3 and out["process_count"] == 24
+    assert out["queue"] == "dms-data" and out["priority_class"] == "dms-mid"
+
+
+def test_fanout_uses_all_when_below_max():
+    out = resolve_fanout(POLICY, {"primary": ["n1"]}, priority="mid")
+    assert out["node_count"] == 1 and out["process_count"] == 8
+
+
+def test_fanout_nsync_roles():
+    out = resolve_fanout(POLICY, {"source": ["n1", "n2", "n3", "n4"],
+                                  "destination": ["n5", "n6"]}, priority="low")
+    assert out["source_count"] == 3 and out["destination_count"] == 2
+    assert out["node_count"] == 5 and out["process_count"] == 40
+    assert out["priority_class"] == "dms-low"
+
+
+def test_priority_clamped_to_policy_max():
+    capped = {**POLICY, "max_priority": "mid"}
+    out = resolve_fanout(capped, {"primary": ["n1"]}, priority="high")
+    assert out["priority_class"] == "dms-mid"
+
+
+def test_missing_and_disabled_policy():
+    with pytest.raises(PlacementError) as e:
+        resolve_fanout(None, {"primary": ["n1"]}, priority="mid")
+    assert e.value.reason_code == "missing_policy"
+    with pytest.raises(PlacementError) as e:
+        resolve_fanout({**POLICY, "enabled": 0}, {"primary": ["n1"]}, priority="mid")
+    assert e.value.reason_code == "policy_disabled"

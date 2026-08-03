@@ -1,5 +1,7 @@
 """도구 선택 + 후보 노드 산정. 신선한 에이전트 증거(리포트)만으로 판단하는 순수 함수."""
 
+from .domain import PRIORITIES, PRIORITY_CLASS
+
 
 class PlacementError(Exception):
     def __init__(self, reason_code: str, detail: str = ""):
@@ -89,3 +91,33 @@ def select_tool_and_candidates(operation, fresh_reports, *, storage_name=None,
                     "rejections": rejections}
         raise PlacementError("no_ready_sync_candidate")
     raise PlacementError("invalid_operation", operation)
+
+
+TOOL_TO_POLICY = {"dscan": "scan", "drm": "rm", "dsync": "dsync", "nsync": "nsync"}
+
+
+def _clamp_priority(requested, policy_max):
+    if PRIORITIES.index(requested) <= PRIORITIES.index(policy_max):
+        return requested
+    return policy_max
+
+
+def resolve_fanout(policy, candidates, *, priority):
+    if policy is None:
+        raise PlacementError("missing_policy")
+    if not policy.get("enabled"):
+        raise PlacementError("policy_disabled")
+    max_nodes = policy["max_nodes"]
+    per_node = policy["procs_per_node"]
+    clamped = _clamp_priority(priority, policy["max_priority"])
+    common = {"queue": policy["queue"], "priority_class": PRIORITY_CLASS[clamped]}
+    if "primary" in candidates:
+        node_count = min(len(candidates["primary"]), max_nodes)
+        return {**common, "node_count": node_count,
+                "process_count": node_count * per_node}
+    source_count = min(len(candidates["source"]), max_nodes)
+    destination_count = min(len(candidates["destination"]), max_nodes)
+    return {**common, "source_count": source_count,
+            "destination_count": destination_count,
+            "node_count": source_count + destination_count,
+            "process_count": (source_count + destination_count) * per_node}
