@@ -133,3 +133,64 @@ class VolcanoExecutionAdapter:
             self._k8s.delete(_KIND[prefix], name, self._namespace)
         except Exception as exc:
             raise ExecutionError("terminate_failed", str(exc)[:200]) from exc
+
+
+class KubernetesClient:  # pragma: no cover - 실증 대상
+    """실 kubernetes 파이썬 클라이언트 기반 K8sClient. in-cluster config를
+    최초 메서드 호출 시점까지 lazy 하게 미룬다 — 클러스터 밖 단위 테스트가
+    이 클래스를 생성만 하고(config 로드 없이) mock으로 대체해 사용하기 때문."""
+    _VC = {"group": "batch.volcano.sh", "version": "v1alpha1", "plural": "jobs"}
+
+    def __init__(self, namespace):
+        self._namespace = namespace
+        self._core = None
+        self._custom = None
+
+    def _ensure(self):
+        if self._core is None:
+            import kubernetes
+            kubernetes.config.load_incluster_config()
+            self._core = kubernetes.client.CoreV1Api()
+            self._custom = kubernetes.client.CustomObjectsApi()
+
+    def create(self, manifest):
+        self._ensure()
+        if manifest["kind"] == "Pod":
+            self._core.create_namespaced_pod(self._namespace, manifest)
+        else:
+            self._custom.create_namespaced_custom_object(
+                self._VC["group"], self._VC["version"], self._namespace,
+                self._VC["plural"], manifest)
+
+    def get(self, kind, name, namespace):
+        self._ensure()
+        import kubernetes
+        try:
+            if kind == "Pod":
+                obj = self._core.read_namespaced_pod_status(name, namespace)
+                return obj.to_dict()
+            return self._custom.get_namespaced_custom_object(
+                self._VC["group"], self._VC["version"], namespace,
+                self._VC["plural"], name)
+        except kubernetes.client.ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def delete(self, kind, name, namespace):
+        self._ensure()
+        import kubernetes
+        try:
+            if kind == "Pod":
+                self._core.delete_namespaced_pod(name, namespace)
+            else:
+                self._custom.delete_namespaced_custom_object(
+                    self._VC["group"], self._VC["version"], namespace,
+                    self._VC["plural"], name)
+        except kubernetes.client.ApiException as exc:
+            if exc.status != 404:
+                raise
+
+    def read_pod_log(self, name, namespace):
+        self._ensure()
+        return self._core.read_namespaced_pod_log(name, namespace)

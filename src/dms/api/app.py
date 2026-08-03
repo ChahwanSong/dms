@@ -2,8 +2,8 @@ from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 from ..config import Settings
 from ..db import Database
-from ..execution import StubExecutionAdapter
 from ..repositories import Repositories
+from ..wiring import build_execution_adapter, build_identity_resolver
 from .routes_auth import router as auth_router
 from .routes_storages import router as storages_router
 from .routes_requests import router as requests_router
@@ -18,8 +18,8 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app = FastAPI(title="dms")
     app.state.settings = settings
     app.state.repos = Repositories(db)
-    app.state.identity_resolver = None
-    app.state.execution_adapter = StubExecutionAdapter()
+    app.state.identity_resolver = build_identity_resolver(settings)
+    app.state.execution_adapter = build_execution_adapter(settings, app.state.repos)
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
                        session_cookie="dms_session")
 
