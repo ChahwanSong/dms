@@ -198,7 +198,11 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node):
     script, path_args = _preflight_script(spec)
     return {
         "apiVersion": "v1", "kind": "Pod",
-        "metadata": {"name": f"dms-preflight-{spec.job_id[:12]}-{node}"[:63],
+        # phase in the name: one job can run TWO preflight Pods -- the initial
+        # (phase "preflight") and the post-confirm re-validation (phase
+        # "exec_preflight"). Same job_id[:12]+node would collide (create ->
+        # AlreadyExists) if the first Pod still lingers, so scope the name by phase.
+        "metadata": {"name": f"dms-preflight-{spec.job_id[:12]}-{spec.phase}-{node}"[:63],
                      "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": "preflight"}},

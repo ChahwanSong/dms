@@ -182,10 +182,13 @@ class JobStepper:
         refs = job["phase_refs"] or {}
         if "execution" in refs:
             return self._poll_execution(job)
-        # confirm 후 execution 전 preflight 재검증 (Phase 3b 파킹 백로그)
+        # confirm 후 execution 전 preflight 재검증 (Phase 3b 파킹 백로그).
+        # phase="exec_preflight"(초기 preflight의 "preflight"와 구분) — build_preflight_pod의
+        # 파드 이름이 phase를 포함하므로, 초기 preflight 파드가 아직 남아 있어도 이름이
+        # 충돌하지 않는다(안 그러면 create가 AlreadyExists→submit_failed로 실패).
         if "exec_preflight" not in refs:
             try:
-                ref = self._exec.submit(self._build_spec(job, "preflight", dryrun=False))
+                ref = self._exec.submit(self._build_spec(job, "exec_preflight", dryrun=False))
             except ExecutionError as exc:
                 self._finalize(job, DataJobState.FAILED,
                                reason_code=f"execution_recheck_submit_failed:{exc.reason_code}")
