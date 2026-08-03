@@ -5,7 +5,11 @@
 #
 # Build (context = repo root):
 #   podman build -f deploy/docker/Dockerfile.dms -t pkg-01:5000/dms:<tag> .
-FROM python:3.11-slim
+# Pin bookworm: bare python:3.11-slim now resolves to Debian trixie. Nothing
+# here needs OpenMPI, but keeping the whole image set on one Debian release
+# avoids surprise apt/glibc drift (the agent image is FROM this one and copies
+# the bookworm-built mpifileutils tree onto it).
+FROM python:3.11-slim-bookworm
 
 # Match the testbed's pinned cluster version (see CLAUDE.md: K8s 1.34.6).
 ARG KUBECTL_VERSION=v1.34.6

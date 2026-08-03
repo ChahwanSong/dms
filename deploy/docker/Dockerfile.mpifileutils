@@ -71,11 +71,14 @@ RUN cmake /release \
     && make install
 
 # ---- stage 2: runtime --------------------------------------------------
-# python:3.11-slim (not debian:bookworm-slim) so pip is python.org's own --
-# Debian's system pip on bookworm is PEP-668 "externally managed" and refuses
-# plain `pip install` without --break-system-packages. Still Debian bookworm
-# underneath, so the apt packages below behave identically to the legacy image.
-FROM python:3.11-slim
+# python:3.11-slim-bookworm (NOT bare python:3.11-slim, which now resolves to
+# Debian trixie where libopenmpi3 was replaced by libopenmpi40 -> apt fails,
+# AND the stage-1 build compiled mpifileutils against bookworm's OpenMPI so a
+# trixie libopenmpi40 runtime is an ABI mismatch). Pinning bookworm keeps the
+# runtime OpenMPI ABI identical to what the binaries were linked against, and
+# it's still python.org's pip (PEP-668 unmanaged), so plain `pip install`
+# works without --break-system-packages.
+FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
