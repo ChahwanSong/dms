@@ -56,10 +56,28 @@ spec:
       serviceAccountName: dms-agent
       containers:
         - name: agent
-          image: pkg-01:5000/dms-agent:dev
+          image: pkg-01:5000/dms-agent:dev5
           imagePullPolicy: IfNotPresent
-          command: ["dms", "agent"]
+          # agent-entrypoint.sh brings up nslcd (LDAP NSS) then execs `dms agent`
+          command: ["/usr/local/bin/agent-entrypoint.sh"]
+          args: ["dms", "agent"]
+          # root: nslcd must start as root (creates its socket, then drops to
+          # the nslcd user). A node agent is inherently privileged (host mounts).
+          securityContext:
+            runAsUser: 0
           env:
+            # LDAP endpoint for nslcd (node NSS) -- same directory the API/
+            # controller feed the DMS identity resolver. Anonymous bind
+            # (DMS_LDAP_BIND_DN empty), so no bind creds needed here.
+            - name: DMS_LDAP_URI
+              valueFrom:
+                configMapKeyRef: {name: dms-config, key: DMS_LDAP_URI}
+            - name: DMS_LDAP_USER_BASE
+              valueFrom:
+                configMapKeyRef: {name: dms-config, key: DMS_LDAP_USER_BASE}
+            - name: DMS_LDAP_GROUP_BASE
+              valueFrom:
+                configMapKeyRef: {name: dms-config, key: DMS_LDAP_GROUP_BASE}
             - name: DMS_AGENT_API_URL
               value: "http://dms-api:8080"
             - name: DMS_AGENT_MOUNTINFO_PATH

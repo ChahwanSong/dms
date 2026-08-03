@@ -21,3 +21,32 @@ FROM ${DMS_IMAGE}
 COPY --from=mfu /opt/mpifileutils /opt/mpifileutils
 ENV PATH=/opt/mpifileutils/bin:${PATH} \
     LD_LIBRARY_PATH=/opt/mpifileutils/lib
+
+# --- LDAP NSS (production-faithful node identity resolution) ----------------
+# placement.eligible_nodes() rejects a node for a non-privileged owner unless
+# the agent's probe_identities() -> pwd.getpwnam()/grp.getgrall() on THIS
+# container resolves that owner. In production the nodes are LDAP/SSSD-joined,
+# so getpwnam hits the directory. We reproduce that faithfully: the agent
+# image runs nslcd (nss-pam-ldapd) pointed at the SAME OpenLDAP the planner's
+# identity resolver uses, and nsswitch routes passwd/group through it. So the
+# agent resolves alice/bob/etc from the LIVE directory (uidNumber/gidNumber/
+# memberUid) -- no hardcoded users. nslcd is configured at container start from
+# the DMS_LDAP_* env (see deploy/docker/agent-entrypoint.sh), which is the same
+# config the API/controller feed the LDAP identity resolver.
+USER root
+RUN export DEBIAN_FRONTEND=noninteractive \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nslcd libnss-ldapd \
+ && rm -rf /var/lib/apt/lists/* \
+ && printf 'passwd:         files ldap\ngroup:          files ldap\nshadow:         files ldap\n' \
+      > /etc/nsswitch.conf \
+ && mkdir -p /var/run/nslcd
+
+COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/agent-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/agent-entrypoint.sh
+
+# Stays root: nslcd must start as root (creates /var/run/nslcd/socket, drops to
+# the nslcd user itself). The entrypoint templates nslcd.conf, launches nslcd,
+# then hands off to `dms agent`. The DaemonSet sets command to this script.
+ENTRYPOINT ["/usr/local/bin/agent-entrypoint.sh"]
+CMD ["dms", "agent"]
