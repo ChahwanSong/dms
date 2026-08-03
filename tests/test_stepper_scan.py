@@ -62,6 +62,32 @@ def test_full_scan_lifecycle_to_succeeded(db):
     assert repos.requests.get(rid)["state"] == "Succeeded"
 
 
+class _NullSummaryAdapter(StubExecutionAdapter):
+    """SUCCEEDED vcjob이지만 controller가 artifact_base를 못 읽어 summary.json이
+    없는 배포 오구성을 흉내. 실제 job-runner는 summary.json을 항상 쓰므로
+    read_summary()가 None을 반환하는 상황은 정상 잡에서는 발생하지 않는다."""
+    def read_summary(self, ref: str):
+        return None
+
+
+def test_execution_succeeded_with_none_summary_is_visible(db):
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = _NullSummaryAdapter()
+    stepper = _stepper(repos, adapter)
+    stepper.run_once()  # Pending → Preflight
+    stepper.run_once()  # Preflight poll Succeeded → Running (exec submit)
+    stepper.run_once()  # Running poll Succeeded, read_summary() -> None
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Succeeded"
+    assert job["result_summary"] == {"summary_unavailable": True}
+    req = repos.requests.get(rid)
+    assert req["state"] == "Succeeded"
+    result = db.query_one("SELECT summary FROM results WHERE request_id = :r", {"r": rid})
+    from dms.db import load_json
+    assert load_json(result["summary"]) == {"summary_unavailable": True}
+
+
 def test_preflight_failure_rejects(db):
     repos = Repositories(db)
     rid, jid = _scan_job(repos)

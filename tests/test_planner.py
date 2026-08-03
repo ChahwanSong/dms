@@ -157,6 +157,51 @@ def test_replan_is_idempotent(db):
     assert repos.requests.get(rid)["state"] == "Planned"
 
 
+def test_policy_max_nodes_trims_scan_candidates(db):
+    repos = Repositories(db)
+    _seed_storage(repos)
+    _seed_policy(repos)  # max_nodes=3, procs_per_node=8
+    for node in ("n1", "n2", "n3", "n4", "n5"):
+        _seed_report(repos, node=node)
+    rid = _scan_request(repos)
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["candidates"]["primary"] == ["n1", "n2", "n3"]
+    assert len(wp["candidates"]["primary"]) == wp["node_count"] == 3
+    assert wp["process_count"] == 24
+
+
+def test_policy_max_nodes_trims_sync_candidates(db):
+    repos = Repositories(db)
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_policy(repos, "nsync")  # max_nodes=3, procs_per_node=8
+    for node in ("s1", "s2", "s3", "s4"):
+        repos.agents.ingest(node, {"node_name": node,
+            "mounts": [{"storage_name": "src", "mount_path": "/mnt/src",
+                        "status": "Ready", "writable": True}],
+            "tools": [{"name": "nsync", "status": "Ready"}],
+            "identities": [{"username": "alice", "status": "Ready"}]},
+            reported_at="2026-08-02T09:59:00Z")
+    for node in ("d1", "d2"):
+        repos.agents.ingest(node, {"node_name": node,
+            "mounts": [{"storage_name": "dst", "mount_path": "/mnt/dst",
+                        "status": "Ready", "writable": True}],
+            "tools": [{"name": "nsync", "status": "Ready"}],
+            "identities": [{"username": "alice", "status": "Ready"}]},
+            reported_at="2026-08-02T09:59:00Z")
+    rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
+        resource_key="data.sync:src:a:dst:b:ff",
+        payload={"source_storage": "src", "source": "a",
+                 "destination_storage": "dst", "destination": "b",
+                 "options": {}, "owner_username": None}, priority="mid")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["candidates"]["source"] == ["s1", "s2", "s3"]
+    assert wp["candidates"]["destination"] == ["d1", "d2"]
+    assert len(wp["candidates"]["source"]) == wp["source_count"] == 3
+    assert len(wp["candidates"]["destination"]) == wp["destination_count"] == 2
+
+
 def test_worker_pool_records_rejections(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos)

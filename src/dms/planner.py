@@ -95,8 +95,14 @@ class Planner:
             return self._reject(rid, exc.reason_code)
         # 6. emit
         identity_dict = {**asdict(identity), "groups": list(identity.groups)}
+        cand = placement["candidates"]
+        if "primary" in cand:
+            cand = {"primary": cand["primary"][:fanout["node_count"]]}
+        else:
+            cand = {"source": cand["source"][:fanout["source_count"]],
+                    "destination": cand["destination"][:fanout["destination_count"]]}
         worker_pool = {"tool": placement["tool"], "identity": identity_dict,
-                       "candidates": placement["candidates"],
+                       "candidates": cand,
                        "rejections": placement["rejections"], **fanout}
         precondition = {"requester_id": req["requester_id"],
                         "owner": identity.username, "operation": req["operation"]}

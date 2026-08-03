@@ -128,6 +128,11 @@ class JobStepper:
             return job["state"]
         if status == ExecStatus.SUCCEEDED:
             summary = self._exec.read_summary(ref)
+            if summary is None:
+                # 정상 잡은 job-runner가 summary.json을 항상 쓴다. None은 컨트롤러가
+                # artifact_base 파일시스템을 못 읽는 배포 오구성을 뜻한다 — vcjob phase가
+                # 권위이므로 SUCCEEDED는 유지하되, null을 조용히 묻지 않고 가시화한다.
+                summary = {"summary_unavailable": True}
             self._repos.data_jobs.set_artifact(job["job_id"], artifact_uri=None,
                                                result_summary=summary)
             self._finalize(job, DataJobState.SUCCEEDED, summary=summary)

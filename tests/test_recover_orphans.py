@@ -44,3 +44,20 @@ def test_orphan_recovery_via_controller(db):
     run_all_once(loops, repos, holder="h1")  # job-stepper 스텝이 고아 복구
     assert repos.requests.get(rid)["state"] == "Succeeded"
     assert repos.data_jobs.terminal_jobs_with_live_request() == []
+
+
+def test_orphan_recovery_propagates_job_result_summary(db):
+    """SUCCEEDED로 result_summary를 이미 가진 채 request finalize 직전 크래시한
+    시나리오: 복구된 request의 결과 summary가 잡의 result_summary와 같아야 한다
+    (Task 8이 겨냥한 데이터 유실 방지 시나리오)."""
+    from dms.controller import build_loops, run_all_once
+    repos = Repositories(db)
+    rid, jid = _orphan(repos)
+    repos.data_jobs.set_artifact(jid, artifact_uri=None,
+                                 result_summary={"files": 7, "bytes": 999})
+    loops = build_loops(_Settings(), repos, execution_adapter=StubExecutionAdapter())
+    run_all_once(loops, repos, holder="h1")
+    assert repos.requests.get(rid)["state"] == "Succeeded"
+    result = db.query_one("SELECT summary FROM results WHERE request_id = :r", {"r": rid})
+    from dms.db import load_json
+    assert load_json(result["summary"]) == {"files": 7, "bytes": 999}
