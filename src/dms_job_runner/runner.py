@@ -6,7 +6,8 @@ import sys
 from .commands import mpirun_command, passwd_line
 
 
-def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile) -> int:
+def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
+            make_executable=lambda path: None) -> int:
     username = env["DMS_JR_USERNAME"]
     uid = int(env["DMS_JR_UID"])
     gid = int(env["DMS_JR_GID"])
@@ -28,6 +29,7 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile) -> int:
     rank_body = " ".join(_shquote(a) for a in [tool, *rendered])
     rank_path = f"{artifact_dir}/rank.sh"
     write_text(rank_path, f"#!/bin/sh\nexec {rank_body}\n")
+    make_executable(rank_path)
 
     # 4. mpirun
     proc = run(mpirun_command(process_count=process_count, hostfile=hostfile,
@@ -87,5 +89,9 @@ def main():  # pragma: no cover - 실증에서 실행
             time.sleep(1)
         return [], hostfile
 
+    def make_executable(path):
+        os.chmod(path, 0o755)
+
     sys.exit(run_job(dict(os.environ), run=run, write_text=write_text,
-                     read_text=read_text, sleep=time.sleep, wait_hostfile=wait_hostfile))
+                     read_text=read_text, sleep=time.sleep, wait_hostfile=wait_hostfile,
+                     make_executable=make_executable))
