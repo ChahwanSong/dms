@@ -4,6 +4,7 @@ from .agents import AgentsRepository
 from .requests import RequestsRepository
 from .storages import StoragesRepository
 from .control import ControlRepository
+from .data_jobs import DataJobsRepository
 
 
 class Repositories:
@@ -15,3 +16,4 @@ class Repositories:
         self.requests = RequestsRepository(db)
         self.storages = StoragesRepository(db)
         self.control = ControlRepository(db)
+        self.data_jobs = DataJobsRepository(db)

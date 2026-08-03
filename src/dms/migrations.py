@@ -84,6 +84,8 @@ def migrate(db: Database) -> None:
             volcano_job_ref TEXT,
             artifact_uri TEXT,
             result_summary TEXT,
+            worker_pool TEXT,
+            precondition TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
