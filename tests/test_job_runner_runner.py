@@ -3,13 +3,14 @@ from dms_job_runner.runner import run_job
 
 
 class _Recorder:
-    def __init__(self, rc=0, stdout=""):
+    def __init__(self, rc=0, stdout="", run_fn=None):
         self.writes = {}       # path -> content (마지막)
         self.appends = []      # (path, content)
         self.ran = []          # command list
         self.made_exec = []    # paths made executable
         self._rc = rc
         self._stdout = stdout
+        self._run_fn = run_fn  # optional command -> R override
 
     def write_text(self, path, content, *, append=False):
         if append:
@@ -22,6 +23,8 @@ class _Recorder:
 
     def run(self, command):
         self.ran.append(command)
+        if self._run_fn is not None:
+            return self._run_fn(command)
         class R:
             returncode = self._rc
             stdout = self._stdout
@@ -36,11 +39,19 @@ def _env(**kw):
     base = {"DMS_JR_TOOL": "dscan", "DMS_JR_OPERATION": "scan", "DMS_JR_PHASE": "execution",
             "DMS_JR_DRYRUN": "0", "DMS_JR_PROCESS_COUNT": "8", "DMS_JR_UID": "10001",
             "DMS_JR_GID": "10000", "DMS_JR_USERNAME": "alice",
+            "DMS_JR_PROCESSES_PER_NODE": "8",
             "DMS_JR_ARTIFACT_DIR": "/cephfs/dms/artifacts/j1/execution",
             "DMS_JR_ARGV": json.dumps(["--directory", "/cephfs/dms/a",
                                        "--output", "$DMS_SCAN_REPORT", "--print"])}
     base.update(kw)
     return base
+
+
+class _R:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def test_run_job_materializes_identity_and_runs_mpirun():
@@ -96,3 +107,89 @@ def test_rank_script_quotes_argv():
     assert "$(x)" not in body or "'" in body  # either not there, or quoted
     # The space in the path should be quoted
     assert "/cephfs/a b" not in body or "'" in body or '"' in body
+
+
+def test_run_job_copies_ssh_keys_to_requester_home_before_mpirun():
+    rec = _Recorder(rc=0, stdout='{"files": 5}')
+    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: None,
+                 wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable)
+    assert rc == 0
+    key_copy_calls = [cmd for cmd in rec.ran
+                      if cmd[:2] == ["sh", "-c"] and "/tmp/dms-home-10001" in cmd]
+    assert key_copy_calls, "ssh key copy command not issued"
+    key_copy_idx = rec.ran.index(key_copy_calls[0])
+    mpirun_idx = next(i for i, cmd in enumerate(rec.ran) if "runuser" in cmd)
+    assert key_copy_idx < mpirun_idx  # 키 복사가 mpirun보다 먼저
+
+
+def test_run_job_resolves_hosts_and_writes_slotted_hostfile():
+    def run_fn(cmd):
+        if cmd[0] == "getent":
+            return _R(returncode=0, stdout="10.0.0.5   dms-w1\n")
+        return _R(returncode=0, stdout='{"files": 1}')
+    rec = _Recorder(run_fn=run_fn)
+    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: None,
+                 wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable)
+    assert rc == 0
+    hostfile_writes = [c for p, c in rec.writes.items()
+                       if p != "/cephfs/dms/artifacts/j1/execution/rank.sh"
+                       and "slots=" in c]
+    assert hostfile_writes
+    assert "10.0.0.5 slots=8" in hostfile_writes[0]
+    # mpirun이 참조하는 --hostfile은 원본이 아니라 새로 만든 슬롯 첨부 hostfile
+    mpirun_cmd = next(cmd for cmd in rec.ran if "runuser" in cmd)
+    hostfile_arg = mpirun_cmd[mpirun_cmd.index("--hostfile") + 1]
+    assert hostfile_arg != "/tmp/hostfile"
+
+
+def test_run_job_ssh_readiness_barrier_probes_before_mpirun():
+    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: None,
+                 wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable)
+    assert rc == 0
+    ssh_probe_calls = [i for i, cmd in enumerate(rec.ran) if cmd[0] == "ssh"]
+    assert ssh_probe_calls, "no ssh readiness probe issued"
+    mpirun_idx = next(i for i, cmd in enumerate(rec.ran) if "runuser" in cmd)
+    assert all(i < mpirun_idx for i in ssh_probe_calls)
+
+
+def test_run_job_ssh_barrier_gives_up_after_bounded_attempts():
+    # ssh probe는 절대 성공하지 않음 -> barrier가 job을 막지 않고 결국 mpirun까지 진행
+    slept = []
+
+    def run_fn(cmd):
+        if cmd[0] == "ssh":
+            return _R(returncode=1)
+        if cmd[0] == "getent":
+            return _R(returncode=1, stdout="")
+        return _R(returncode=0, stdout='{"files": 1}')
+    rec = _Recorder(run_fn=run_fn)
+    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: slept.append(s),
+                 wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable)
+    assert rc == 0  # barrier 포기 후에도 mpirun은 실행됨 (legacy: proceeding)
+    assert any("runuser" in cmd for cmd in rec.ran)
+    assert slept  # bounded 재시도 동안 sleep이 호출됨
+
+
+def test_run_job_mpirun_has_ompi_env_and_runuser_preserve_environment():
+    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: None,
+                 wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable)
+    assert rc == 0
+    mpirun_cmd = next(cmd for cmd in rec.ran if "runuser" in cmd)
+    assert "OMPI_ALLOW_RUN_AS_ROOT=1" in mpirun_cmd
+    assert any(c.startswith("OMPI_MCA_plm_rsh_agent=") for c in mpirun_cmd)
+    assert "--preserve-environment" in mpirun_cmd
+    i = mpirun_cmd.index("runuser")
+    assert mpirun_cmd[i:i + 3] == ["runuser", "-u", "alice"]
+    assert mpirun_cmd.count("-x") >= 2
