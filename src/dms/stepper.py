@@ -1,0 +1,121 @@
+"""job-stepper: 계획된 data_job을 비블로킹 스텝으로 전진시키는 루프 본체. 실행은 어댑터 뒤."""
+import sys
+
+from .domain import DataJobState
+from .execution import ExecStatus, ExecutionError, JobSpec
+
+
+class JobStepper:
+    def __init__(self, repos, execution_adapter, *, settings):
+        self._repos = repos
+        self._exec = execution_adapter
+        self._settings = settings
+
+    def run_once(self) -> dict:
+        control = self._repos.control.control_state()
+        if control and control["drain"]:
+            return {}
+        results = {}
+        for job in self._repos.data_jobs.claim_steppable():
+            jid = job["job_id"]
+            try:
+                results[jid] = self._step_one(job)
+            except Exception as exc:
+                print(f"stepper error on {jid}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+                results[jid] = f"error:{type(exc).__name__}"
+        return results
+
+    def _build_spec(self, job, phase, dryrun):
+        wp = job["worker_pool"] or {}
+        op = job["operation"]
+        if op == "sync":
+            paths = {"source": job["source"], "source_storage": job["source_storage"],
+                     "destination": job["destination"],
+                     "destination_storage": job["destination_storage"]}
+        else:
+            paths = {"target": job["target"], "storage": job["storage_name"]}
+        return JobSpec(
+            job_id=job["job_id"], phase=phase, operation=op, tool=job["tool"],
+            dryrun=dryrun, identity=wp.get("identity", {}), paths=paths,
+            options=job["options"] or {}, candidates=wp.get("candidates", {}),
+            process_count=wp.get("process_count", 1), queue=wp.get("queue", "dms-data"),
+            priority_class=wp.get("priority_class", "dms-mid"),
+            artifact_base=self._settings.artifact_base_uri)
+
+    def _finalize(self, job, job_state, *, reason_code=None, summary=None):
+        self._repos.data_jobs.set_job_state(job["job_id"], job_state,
+                                            reason_code=reason_code, actor="stepper")
+        self._repos.requests.finalize_from_job(
+            job["request_id"], job_state, reason_code=reason_code, summary=summary,
+            actor="stepper")
+
+    def _step_one(self, job) -> str:
+        state = job["state"]
+        jid = job["job_id"]
+        if state == DataJobState.PENDING.value:
+            return self._submit_preflight(job)
+        if state == DataJobState.PREFLIGHT.value:
+            return self._poll_preflight(job)
+        if state == DataJobState.RUNNING.value:
+            return self._poll_execution(job)
+        # PreviewRunning / Executing 는 Task 7
+        return state
+
+    def _submit_preflight(self, job):
+        jid = job["job_id"]
+        try:
+            ref = self._exec.submit(self._build_spec(job, "preflight", dryrun=False))
+        except ExecutionError as exc:
+            self._finalize(job, DataJobState.REJECTED,
+                           reason_code=f"preflight_submit_failed:{exc.reason_code}")
+            return "Rejected"
+        self._repos.data_jobs.set_phase_ref(jid, "preflight", ref)
+        self._repos.data_jobs.set_job_state(jid, DataJobState.PREFLIGHT, actor="stepper")
+        return "Preflight"
+
+    def _poll_preflight(self, job):
+        jid = job["job_id"]
+        ref = (job["phase_refs"] or {}).get("preflight")
+        status = self._exec.poll(ref)
+        if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
+            return "Preflight"
+        if status == ExecStatus.SUCCEEDED:
+            # scan: 바로 execution. (sync/rm preview는 Task 7)
+            if job["operation"] == "scan":
+                return self._submit_execution(job, DataJobState.RUNNING)
+            return self._submit_preview(job)  # Task 7에서 구현
+        self._finalize(job, DataJobState.REJECTED, reason_code="preflight_failed")
+        return "Rejected"
+
+    def _submit_execution(self, job, running_state):
+        jid = job["job_id"]
+        try:
+            ref = self._exec.submit(self._build_spec(job, "execution", dryrun=False))
+        except ExecutionError as exc:
+            self._finalize(job, DataJobState.FAILED,
+                           reason_code=f"execution_submit_failed:{exc.reason_code}")
+            return "Failed"
+        self._repos.data_jobs.set_phase_ref(jid, "execution", ref)
+        self._repos.data_jobs.set_job_state(jid, running_state, actor="stepper")
+        return running_state.value
+
+    def _poll_execution(self, job):
+        ref = (job["phase_refs"] or {}).get("execution")
+        status = self._exec.poll(ref)
+        if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
+            return job["state"]
+        if status == ExecStatus.SUCCEEDED:
+            summary = self._exec.read_summary(ref)
+            self._repos.data_jobs.set_artifact(job["job_id"], artifact_uri=None,
+                                               result_summary=summary)
+            self._finalize(job, DataJobState.SUCCEEDED, summary=summary)
+            return "Succeeded"
+        target = (DataJobState.TIMED_OUT if status == ExecStatus.TIMED_OUT
+                  else DataJobState.FAILED)
+        self._finalize(job, target, reason_code="execution_failed")
+        return target.value
+
+    def _submit_preview(self, job):
+        # Task 7에서 구현 — placeholder가 아니라 Task 7이 채운다
+        raise NotImplementedError("preview path implemented in Task 7")
