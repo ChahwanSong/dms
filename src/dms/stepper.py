@@ -36,15 +36,23 @@ class JobStepper:
                 results[jid] = f"error:{type(exc).__name__}"
         return results
 
+    def _abs(self, storage_name, rel):
+        storage = self._repos.storages.get(storage_name)
+        if storage and storage.get("managed_root"):
+            return f"{storage['managed_root']}/{rel}"
+        return rel
+
     def _build_spec(self, job, phase, dryrun):
         wp = job["worker_pool"] or {}
         op = job["operation"]
         if op == "sync":
-            paths = {"source": job["source"], "source_storage": job["source_storage"],
-                     "destination": job["destination"],
+            paths = {"source": self._abs(job["source_storage"], job["source"]),
+                     "source_storage": job["source_storage"],
+                     "destination": self._abs(job["destination_storage"], job["destination"]),
                      "destination_storage": job["destination_storage"]}
         else:
-            paths = {"target": job["target"], "storage": job["storage_name"]}
+            paths = {"target": self._abs(job["storage_name"], job["target"]),
+                     "storage": job["storage_name"]}
         return JobSpec(
             job_id=job["job_id"], phase=phase, operation=op, tool=job["tool"],
             dryrun=dryrun, identity=wp.get("identity", {}), paths=paths,
@@ -165,7 +173,24 @@ class JobStepper:
         return "Failed"
 
     def _poll_or_submit_execution(self, job):
+        jid = job["job_id"]
         refs = job["phase_refs"] or {}
-        if "execution" not in refs:
+        if "execution" in refs:
+            return self._poll_execution(job)
+        # confirm 후 execution 전 preflight 재검증 (Phase 3b 파킹 백로그)
+        if "exec_preflight" not in refs:
+            try:
+                ref = self._exec.submit(self._build_spec(job, "preflight", dryrun=False))
+            except ExecutionError as exc:
+                self._finalize(job, DataJobState.FAILED,
+                               reason_code=f"execution_recheck_submit_failed:{exc.reason_code}")
+                return "Failed"
+            self._repos.data_jobs.set_phase_ref(jid, "exec_preflight", ref)
+            return "Executing"
+        status = self._exec.poll(refs["exec_preflight"])
+        if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
+            return "Executing"
+        if status == ExecStatus.SUCCEEDED:
             return self._submit_execution(job, DataJobState.EXECUTING)
-        return self._poll_execution(job)
+        self._finalize(job, DataJobState.REJECTED, reason_code="execution_recheck_failed")
+        return "Rejected"

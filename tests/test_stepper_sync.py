@@ -84,9 +84,11 @@ def test_confirmed_job_executes(db):
     fp = repos.data_jobs.get_job(jid)["preview_fingerprint"]
     repos.data_jobs.set_confirmed(jid, fp)
     repos.data_jobs.set_job_state(jid, DataJobState.EXECUTING, actor="test")
-    stepper.run_once()  # Executing, exec ref 없음 → execution submit
+    stepper.run_once()  # Executing, ref 없음 → exec_preflight submit (재검증)
+    assert repos.data_jobs.get_job(jid)["state"] == "Executing"
+    stepper.run_once()  # exec_preflight poll Succeeded → execution submit
     assert repos.data_jobs.get_job(jid)["state"] == "Executing"
     assert [s for s in adapter.submitted_specs() if s.phase == "execution"]
-    stepper.run_once()  # Executing poll Succeeded → Succeeded
+    stepper.run_once()  # execution poll Succeeded → Succeeded
     assert repos.data_jobs.get_job(jid)["state"] == "Succeeded"
     assert repos.requests.get(rid)["state"] == "Succeeded"
