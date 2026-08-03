@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
-from ..domain import RequestState, TERMINAL_REQUEST_STATES
+from ..domain import DataJobState, RequestState, TERMINAL_REQUEST_STATES
 
 
 class RequestsRepository:
+    _JOB_TO_REQUEST = {
+        DataJobState.SUCCEEDED: RequestState.SUCCEEDED,
+        DataJobState.FAILED: RequestState.FAILED,
+        DataJobState.TIMED_OUT: RequestState.FAILED,
+        DataJobState.CANCELLED: RequestState.CANCELLED,
+        DataJobState.REJECTED: RequestState.REJECTED,
+        DataJobState.PREVIEW_EXPIRED: RequestState.REJECTED,
+    }
+
     def __init__(self, db: Database):
         self._db = db
 
@@ -103,3 +112,17 @@ class RequestsRepository:
             """SELECT * FROM state_transitions
                WHERE entity_kind = 'request' AND entity_id = :id ORDER BY id""",
             {"id": request_id})
+
+    def finalize_from_job(self, request_id, job_state, *, reason_code=None,
+                          summary=None, actor):
+        target = self._JOB_TO_REQUEST.get(DataJobState(job_state))
+        if target is None:
+            raise ValueError(f"non-terminal job state: {job_state}")
+        current = self._db.query_one(
+            "SELECT state FROM requests WHERE request_id = :id", {"id": request_id})
+        if current is None:
+            raise KeyError(request_id)
+        if RequestState(current["state"]) in TERMINAL_REQUEST_STATES:
+            return  # idempotent
+        self.set_state(request_id, target, reason_code=reason_code, actor=actor)
+        self.record_result(request_id, target, reason_code=reason_code, summary=summary)
