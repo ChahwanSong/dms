@@ -6,6 +6,7 @@ from typing import Callable
 
 from .config import Settings
 from .db import utc_now_iso
+from .domain import DataJobState
 from .execution import StubExecutionAdapter
 from .planner import Planner
 from .reconciler import reconcile_storages_once
@@ -27,7 +28,11 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
 
     def _stepper_step():
         JobStepper(repos, adapter, settings=settings).run_once()
-        repos.data_jobs.expire_previews(now_iso=utc_now_iso())
+        for job_id in repos.data_jobs.expire_previews(now_iso=utc_now_iso()):
+            job = repos.data_jobs.get_job(job_id)
+            repos.requests.finalize_from_job(
+                job["request_id"], DataJobState.PREVIEW_EXPIRED,
+                reason_code="preview_expired", actor="stepper")
 
     return [
         Loop("planner", settings.planner_interval_seconds,
