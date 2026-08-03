@@ -15,11 +15,11 @@
 #     DMS_AGENT_MOUNTINFO_PATH. Required -- the agent's OWN /proc/1/mountinfo
 #     (default path) only shows the container's mounts, so every storage
 #     would probe Missing without this.
-#   host-root (/host, ro): general host visibility for future probing; no
-#     current code path in probes.py reads under /host (loadavg/meminfo/
-#     net-dev are read at their plain /proc paths, which already reflect the
-#     host inside a container without hostPID -- see report). Kept per spec
-#     as cheap, harmless context.
+# (host-root /host mount REMOVED: probes.py has no code path reading under
+#  /host -- loadavg/meminfo/net-dev use plain /proc paths that already reflect
+#  the host in a container without hostPID -- so mounting the entire host
+#  filesystem was pure attack surface with no consumer. Dropped per security
+#  review.)
 #   cephfs-dms / cephfs-third / cephfs-secondary: probe_mounts() (probes.py)
 #     checks os.path.isdir()/os.access() on the LITERAL storage["mount_path"]
 #     value returned by the API (e.g. "/cephfs"), not a /host-prefixed path
@@ -82,9 +82,6 @@ spec:
             - name: proc-mountinfo
               mountPath: /host/proc/1/mountinfo
               readOnly: true
-            - name: host-root
-              mountPath: /host
-              readOnly: true
             - name: cephfs-dms
               mountPath: /cephfs
               mountPropagation: HostToContainer
@@ -106,10 +103,6 @@ spec:
           hostPath:
             path: /proc/1/mountinfo
             type: File
-        - name: host-root
-          hostPath:
-            path: /
-            type: Directory
         - name: cephfs-dms
           hostPath:
             path: /cephfs
