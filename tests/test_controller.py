@@ -5,6 +5,7 @@ from dms.repositories import Repositories
 def test_build_loops_names_and_intervals(db, settings):
     loops = build_loops(settings, Repositories(db))
     assert [(l.name, l.interval_seconds) for l in loops] == [
+        ("planner", settings.planner_interval_seconds),
         ("storage-reconciler", settings.reconcile_interval_seconds),
         ("retention", settings.retention_interval_seconds)]
 

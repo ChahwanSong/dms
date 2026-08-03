@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .config import Settings
+from .planner import Planner
 from .reconciler import reconcile_storages_once
 from .repositories import Repositories
 from .retention import prune_agent_reports_once
@@ -17,8 +18,10 @@ class Loop:
     fn: Callable[[], object]
 
 
-def build_loops(settings: Settings, repos: Repositories) -> list[Loop]:
+def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=None) -> list[Loop]:
     return [
+        Loop("planner", settings.planner_interval_seconds,
+             lambda: Planner(repos, identity_resolver, settings=settings).run_once()),
         Loop("storage-reconciler", settings.reconcile_interval_seconds,
              lambda: reconcile_storages_once(
                  repos, stale_seconds=settings.agent_report_stale_seconds)),
@@ -48,8 +51,8 @@ def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[st
 
 
 def run_forever(settings: Settings, repos: Repositories, holder: str,
-                *, sleep=time.sleep) -> None:
-    loops = build_loops(settings, repos)
+                *, sleep=time.sleep, identity_resolver=None) -> None:
+    loops = build_loops(settings, repos, identity_resolver=identity_resolver)
     next_due = {loop.name: 0.0 for loop in loops}
     while True:
         now = time.monotonic()

@@ -16,6 +16,7 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app = FastAPI(title="dms")
     app.state.settings = settings
     app.state.repos = Repositories(db)
+    app.state.identity_resolver = None
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
                        session_cookie="dms_session")
 
