@@ -14,6 +14,8 @@ _SERVER_INT_KEYS = (
     ("DMS_AGENT_REPORT_RETENTION_DAYS", "agent_report_retention_days", 30),
     ("DMS_IDENTITY_PROBE_TTL_SECONDS", "identity_probe_ttl_seconds", 3600),
     ("DMS_PLANNER_INTERVAL_SECONDS", "planner_interval_seconds", 10),
+    ("DMS_STEPPER_INTERVAL_SECONDS", "stepper_interval_seconds", 5),
+    ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
 )
 
 
@@ -65,6 +67,9 @@ class Settings:
     agent_report_retention_days: int = 30
     identity_probe_ttl_seconds: int = 3600
     planner_interval_seconds: int = 10
+    stepper_interval_seconds: int = 5
+    preview_ttl_seconds: int = 86400
+    artifact_base_uri: str = "file:///artifacts/dms"
     allow_privileged_requesters: bool = False
     privileged_requesters: frozenset = frozenset()
 
@@ -97,6 +102,8 @@ class Settings:
             api_host=environ.get("DMS_API_HOST", "0.0.0.0"),
             api_port=port,
             **extra,
+            artifact_base_uri=environ.get("DMS_ARTIFACT_BASE_URI",
+                                          "file:///artifacts/dms"),
             allow_privileged_requesters=_parse_bool(
                 environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS"),
             privileged_requesters=_parse_csv_set(environ, "DMS_PRIVILEGED_REQUESTERS"),
