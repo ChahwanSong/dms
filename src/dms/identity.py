@@ -45,7 +45,7 @@ def resolve_job_identity(control, resolver, *, requester_id, owner_username,
     denied = control.is_denied(requester=requester_id, owner=owner, groups=[])
     if denied:
         raise IdentityRejected("identity_denied", denied)
-    if allow_privileged and owner in privileged_requesters:
+    if allow_privileged and requester_id in privileged_requesters:
         return ResolvedIdentity(owner, 0, 0, (), True)
     if resolver is None:
         raise IdentityRejected("ldap_not_configured")

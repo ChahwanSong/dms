@@ -68,8 +68,23 @@ def test_privileged_path_synthesizes_root(db):
     control = _control(db)
     out = resolve_job_identity(control, None, requester_id="ops",
                                owner_username="victim", allow_privileged=True,
-                               privileged_requesters=frozenset({"victim"}))
+                               privileged_requesters=frozenset({"ops"}))
     assert out.privileged and out.uid == 0 and out.gid == 0
+
+
+def test_privileged_gates_on_requester_not_owner(db):
+    control = _control(db)
+    # requester는 allowlist에 없고, owner_username만 allowlist 멤버 → root 금지, LDAP 경로로
+    with pytest.raises(IdentityRejected) as e:
+        resolve_job_identity(control, None, requester_id="mallory",
+                             owner_username="ops", allow_privileged=True,
+                             privileged_requesters=frozenset({"ops"}))
+    assert e.value.reason_code == "ldap_not_configured"  # 특권 우회 안 됨 → resolver None 경로
+    # requester가 allowlist에 있으면 root
+    out = resolve_job_identity(control, None, requester_id="ops",
+                               owner_username="victim", allow_privileged=True,
+                               privileged_requesters=frozenset({"ops"}))
+    assert out.privileged and out.uid == 0
 
 
 def test_ldap_not_configured_and_unavailable_and_missing(db):

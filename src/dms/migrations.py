@@ -203,6 +203,7 @@ def migrate(db: Database) -> None:
     ]
     for stmt in stmts:
         db.execute(stmt)
+    _ensure_columns(db)
     db.execute(
         """INSERT INTO schema_migrations (version, applied_at)
            SELECT :v, :at WHERE NOT EXISTS
@@ -214,3 +215,25 @@ def migrate(db: Database) -> None:
         """INSERT INTO control_state (id, maintenance, drain)
            SELECT 1, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM control_state WHERE id = 1)""",
     )
+
+
+def _column_exists(db, table, column):
+    if db.dialect == "sqlite":
+        rows = db.query(f"PRAGMA table_info({table})")
+        return any(r["name"] == column for r in rows)
+    rows = db.query(
+        """SELECT 1 AS x FROM information_schema.columns
+           WHERE table_name = :t AND column_name = :c""",
+        {"t": table, "c": column})
+    return bool(rows)
+
+
+def _ensure_columns(db):
+    # 이미 마이그레이트된(구형) DB엔 CREATE TABLE IF NOT EXISTS가 컬럼을 못 채운다 —
+    # schema_migrations를 넘어 실제 컬럼 존재를 확인하고 없으면 ALTER로 보강한다.
+    for table, column, coltype in (
+        ("data_jobs", "worker_pool", "TEXT"),
+        ("data_jobs", "precondition", "TEXT"),
+    ):
+        if not _column_exists(db, table, column):
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

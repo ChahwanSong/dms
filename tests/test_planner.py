@@ -1,4 +1,5 @@
 import pytest
+from dms.domain import RequestState
 from dms.identity import ResolvedIdentity, StubIdentityResolver
 from dms.planner import Planner
 from dms.repositories import Repositories
@@ -142,3 +143,32 @@ def test_sync_selects_nsync(db):
     assert job["tool"] == "nsync"
     assert job["worker_pool"]["candidates"]["source"] == ["n1"]
     assert job["worker_pool"]["candidates"]["destination"] == ["n2"]
+
+
+def test_replan_is_idempotent(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _scan_request(repos)
+    _planner(repos).run_once(now_iso=NOW)
+    # 크래시 흉내: 상태만 Pending으로 되돌림(잡은 남음)
+    repos.requests.set_state(rid, RequestState.PENDING, actor="test")
+    _planner(repos).run_once(now_iso=NOW)
+    assert len(repos.data_jobs.list_jobs(request_id=rid)) == 1
+    assert repos.requests.get(rid)["state"] == "Planned"
+
+
+def test_worker_pool_records_rejections(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_report(repos, node="n1")  # 적격
+    # n2는 도구 없음 → 탈락 사유 기록돼야
+    repos.agents.ingest("n2", {"node_name": "n2",
+        "mounts": [{"storage_name": "s1", "mount_path": "/mnt/s1",
+                    "status": "Ready", "writable": True}],
+        "tools": [{"name": "dsync", "status": "Ready"}],  # dscan 없음
+        "identities": [{"username": "alice", "status": "Ready"}]},
+        reported_at="2026-08-02T09:59:00Z")
+    rid = _scan_request(repos)
+    _planner(repos).run_once(now_iso=NOW)
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["rejections"]  # 비어있지 않음

@@ -21,10 +21,7 @@ class Planner:
         self._settings = settings
 
     def run_once(self, limit: int = 50, *, now_iso=None) -> dict:
-        pending = self._repos.db.query(
-            """SELECT request_id FROM requests WHERE state = :s
-               ORDER BY commit_order LIMIT :n""",
-            {"s": RequestState.PENDING.value, "n": limit})
+        pending = self._repos.requests.list_pending(limit)
         results = {}
         for row in pending:
             rid = row["request_id"]
@@ -44,6 +41,11 @@ class Planner:
 
     def _plan_one(self, rid, now_iso):
         req = self._repos.requests.get(rid)
+        # 멱등: 이미 emit된 잡이 있으면(크래시 복구) 상태만 정리
+        if self._repos.data_jobs.list_jobs(request_id=rid):
+            if req["state"] != "Planned":
+                self._repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+            return "planned"
         payload = req["payload"]
         # 1. conflict: 앞선 비터미널 동일 resource_key
         prior = self._repos.requests.find_active(req["resource_key"])
@@ -94,7 +96,8 @@ class Planner:
         # 6. emit
         identity_dict = {**asdict(identity), "groups": list(identity.groups)}
         worker_pool = {"tool": placement["tool"], "identity": identity_dict,
-                       "candidates": placement["candidates"], **fanout}
+                       "candidates": placement["candidates"],
+                       "rejections": placement["rejections"], **fanout}
         precondition = {"requester_id": req["requester_id"],
                         "owner": identity.username, "operation": req["operation"]}
         plan_id = self._repos.data_jobs.create_plan(rid, actor="planner")

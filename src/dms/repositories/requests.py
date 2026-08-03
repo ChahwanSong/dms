@@ -71,6 +71,13 @@ class RequestsRepository:
             self._record_transition(request_id, RequestState(current["state"]),
                                     to_state, reason_code, actor, now)
 
+    def list_pending(self, limit: int = 50) -> list[dict]:
+        rows = self._db.query(
+            """SELECT request_id FROM requests WHERE state = :s
+               ORDER BY commit_order LIMIT :n""",
+            {"s": RequestState.PENDING.value, "n": limit})
+        return rows
+
     def find_active(self, resource_key) -> dict | None:
         terminal = tuple(s.value for s in TERMINAL_REQUEST_STATES)
         placeholders = ", ".join(f":t{i}" for i in range(len(terminal)))
