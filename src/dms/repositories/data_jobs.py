@@ -4,7 +4,7 @@ from ..db import Database, dump_json, load_json, utc_now_iso
 from ..domain import DataJobState, RequestState
 
 _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
-                 "volcano_job_ref")
+                 "volcano_job_ref", "phase_refs")
 
 
 class DataJobsRepository:
@@ -104,3 +104,63 @@ class DataJobsRepository:
             """SELECT * FROM state_transitions
                WHERE entity_kind = 'data_job' AND entity_id = :j ORDER BY id""",
             {"j": job_id})
+
+    _STEPPABLE_STATES = ("Pending", "Preflight", "PreviewRunning", "Executing", "Running")
+
+    def claim_steppable(self, *, limit: int = 10):
+        placeholders = ", ".join(f":s{i}" for i in range(len(self._STEPPABLE_STATES)))
+        params = {f"s{i}": v for i, v in enumerate(self._STEPPABLE_STATES)}
+        params["n"] = limit
+        suffix = " FOR UPDATE SKIP LOCKED" if self._db.dialect == "postgresql" else ""
+        rows = self._db.query(
+            f"""SELECT * FROM data_jobs WHERE state IN ({placeholders})
+                ORDER BY updated_at LIMIT :n{suffix}""", params)
+        return [self._hydrate(r) for r in rows]
+
+    def set_phase_ref(self, job_id, phase, ref):
+        now = utc_now_iso()
+        with self._db.transaction():
+            row = self._db.query_one(
+                "SELECT phase_refs FROM data_jobs WHERE job_id = :j", {"j": job_id})
+            refs = load_json(row["phase_refs"]) or {}
+            refs[phase] = ref
+            self._db.execute(
+                "UPDATE data_jobs SET phase_refs = :p, updated_at = :now WHERE job_id = :j",
+                {"p": dump_json(refs), "now": now, "j": job_id})
+
+    def set_preview(self, job_id, *, fingerprint, expires_at, artifact_uri):
+        self._db.execute(
+            """UPDATE data_jobs SET preview_fingerprint = :f, preview_expires_at = :e,
+                   artifact_uri = COALESCE(:a, artifact_uri), updated_at = :now
+               WHERE job_id = :j""",
+            {"f": fingerprint, "e": expires_at, "a": artifact_uri,
+             "now": utc_now_iso(), "j": job_id})
+
+    def set_confirmed(self, job_id, fingerprint):
+        self._db.execute(
+            "UPDATE data_jobs SET confirmed_fingerprint = :f, updated_at = :now WHERE job_id = :j",
+            {"f": fingerprint, "now": utc_now_iso(), "j": job_id})
+
+    def set_artifact(self, job_id, *, artifact_uri, result_summary):
+        self._db.execute(
+            """UPDATE data_jobs SET artifact_uri = COALESCE(:a, artifact_uri),
+                   result_summary = :s, updated_at = :now WHERE job_id = :j""",
+            {"a": artifact_uri,
+             "s": dump_json(result_summary) if result_summary is not None else None,
+             "now": utc_now_iso(), "j": job_id})
+
+    def list_confirmable(self, job_id):
+        return self.get_job(job_id)
+
+    def expire_previews(self, *, now_iso):
+        rows = self._db.query(
+            """SELECT job_id FROM data_jobs
+               WHERE state = :s AND preview_expires_at IS NOT NULL
+                 AND preview_expires_at < :now""",
+            {"s": DataJobState.CONFIRM_PENDING.value, "now": now_iso})
+        expired = []
+        for row in rows:
+            self.set_job_state(row["job_id"], DataJobState.PREVIEW_EXPIRED,
+                               reason_code="preview_expired", actor="stepper")
+            expired.append(row["job_id"])
+        return expired
