@@ -75,9 +75,10 @@ stringData:
   DMS_ADMIN_TOKEN: "dms-testbed-admin-3b7e5f1a9c2d4e81"
   # Signs the session cookie (SessionMiddleware) for the browser login flow.
   DMS_SESSION_SECRET: "dms-testbed-session-c4d8a2f6e1b3907a"
-  # UNRESOLVED demo values -- fill in the real testbed OpenLDAP bind account
-  # before relying on LDAP identity resolution (planner.py silently treats a
-  # failed bind as IdentityUnavailable, not a fatal startup error, so a wrong
-  # value here fails soft: candidates just never become ready).
-  DMS_LDAP_BIND_DN: "cn=admin,dc=dms,dc=local"
-  DMS_LDAP_BIND_PW: "REPLACE_WITH_REAL_LDAP_BIND_PASSWORD"
+  # Testbed OpenLDAP allows ANONYMOUS simple bind + search of uidNumber/
+  # gidNumber/memberUid (verified: `ldapsearch -x -H ldap://10.10.10.30:389
+  # -b ou=People,dc=dms,dc=local "(uid=alice)"` returns the attrs). Empty
+  # bind DN/PW -> identity_ldap.build_ldap_resolver passes user=None/
+  # password=None to ldap3 (anonymous). No bind account needed.
+  DMS_LDAP_BIND_DN: ""
+  DMS_LDAP_BIND_PW: ""
