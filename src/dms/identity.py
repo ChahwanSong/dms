@@ -37,3 +37,28 @@ class IdentityRejected(Exception):
         self.reason_code = reason_code
         self.detail = detail
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
+
+
+def resolve_job_identity(control, resolver, *, requester_id, owner_username,
+                         allow_privileged, privileged_requesters) -> ResolvedIdentity:
+    owner = (owner_username or requester_id).strip()
+    denied = control.is_denied(requester=requester_id, owner=owner, groups=[])
+    if denied:
+        raise IdentityRejected("identity_denied", denied)
+    if allow_privileged and owner in privileged_requesters:
+        return ResolvedIdentity(owner, 0, 0, (), True)
+    if resolver is None:
+        raise IdentityRejected("ldap_not_configured")
+    try:
+        resolved = resolver.resolve(owner)
+    except IdentityUnavailable as exc:
+        raise IdentityRejected("ldap_unavailable", str(exc)[:200])
+    if resolved is None:
+        raise IdentityRejected("ldap_identity_not_found", owner)
+    denied = control.is_denied(requester=requester_id, owner=owner,
+                               groups=list(resolved.groups))
+    if denied:
+        raise IdentityRejected("identity_denied", denied)
+    control.register_probe_target(owner)
+    return ResolvedIdentity(owner, resolved.uid, resolved.gid,
+                            tuple(resolved.groups), False)
