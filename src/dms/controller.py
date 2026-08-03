@@ -5,10 +5,13 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .config import Settings
+from .db import utc_now_iso
+from .execution import StubExecutionAdapter
 from .planner import Planner
 from .reconciler import reconcile_storages_once
 from .repositories import Repositories
 from .retention import prune_agent_reports_once
+from .stepper import JobStepper
 
 
 @dataclass
@@ -18,10 +21,18 @@ class Loop:
     fn: Callable[[], object]
 
 
-def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=None) -> list[Loop]:
+def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=None,
+                execution_adapter=None) -> list[Loop]:
+    adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
+
+    def _stepper_step():
+        JobStepper(repos, adapter, settings=settings).run_once()
+        repos.data_jobs.expire_previews(now_iso=utc_now_iso())
+
     return [
         Loop("planner", settings.planner_interval_seconds,
              lambda: Planner(repos, identity_resolver, settings=settings).run_once()),
+        Loop("job-stepper", settings.stepper_interval_seconds, _stepper_step),
         Loop("storage-reconciler", settings.reconcile_interval_seconds,
              lambda: reconcile_storages_once(
                  repos, stale_seconds=settings.agent_report_stale_seconds)),
@@ -51,8 +62,9 @@ def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[st
 
 
 def run_forever(settings: Settings, repos: Repositories, holder: str,
-                *, sleep=time.sleep, identity_resolver=None) -> None:
-    loops = build_loops(settings, repos, identity_resolver=identity_resolver)
+                *, sleep=time.sleep, identity_resolver=None, execution_adapter=None) -> None:
+    loops = build_loops(settings, repos, identity_resolver=identity_resolver,
+                        execution_adapter=execution_adapter)
     next_due = {loop.name: 0.0 for loop in loops}
     while True:
         now = time.monotonic()

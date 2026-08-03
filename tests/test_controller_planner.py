@@ -8,6 +8,7 @@ class _Settings:
     reconcile_interval_seconds = 30
     retention_interval_seconds = 3600
     planner_interval_seconds = 10
+    stepper_interval_seconds = 5
     agent_report_retention_days = 30
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
@@ -17,7 +18,7 @@ def test_planner_loop_registered_first(db):
     loops = build_loops(_Settings(), Repositories(db))
     assert loops[0].name == "planner"
     assert loops[0].interval_seconds == 10
-    assert {l.name for l in loops} == {"planner", "storage-reconciler", "retention"}
+    assert {l.name for l in loops} == {"planner", "job-stepper", "storage-reconciler", "retention"}
 
 
 def test_planner_loop_runs_end_to_end(db):
