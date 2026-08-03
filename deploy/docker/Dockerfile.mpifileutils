@@ -1,0 +1,118 @@
+# DMS job image ("dms-mpifileutils"). Runs as BOTH the Volcano job "launcher"
+# (command: /usr/local/bin/dms-job-runner) and the "worker" (command:
+# /usr/sbin/sshd -D) -- see build_volcano_job() / _build_nsync_job() in
+# src/dms/execution_manifests.py, which point both task templates at the same
+# DMS_JOB_IMAGE. So this single image must carry:
+#   (a) mpifileutils binaries (dscan/dsync/nsync/drm) on PATH
+#   (b) an OpenMPI runtime (mpirun, launcher side)
+#   (c) openssh-server (sshd, worker side) + openssh-client (launcher dials out)
+#   (d) python3 + the dms_job_runner package, with /usr/local/bin/dms-job-runner
+#       guaranteed executable (that exact path is hardcoded in
+#       execution_manifests.py's launcher container command)
+#
+# Build (context = repo root):
+#   podman build -f deploy/docker/Dockerfile.mpifileutils -t pkg-01:5000/dms-mpifileutils:<tag> .
+
+# ---- stage 1: compile mpifileutils + its dependency libs -------------------
+FROM debian:bookworm AS build
+
+ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
+ARG MPIFILEUTILS_REF=faefdaf05b8da9386671c2cee00db75efc0e9cd7
+ARG LWGRP_REF=v1.0.6
+ARG DTCMP_REF=v1.1.5
+ARG LIBCIRCLE_REF=v0.3
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    cmake \
+    g++ \
+    gcc \
+    git \
+    libbz2-dev \
+    libopenmpi-dev \
+    libssl-dev \
+    make \
+    openmpi-bin \
+    uuid-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch "${LWGRP_REF}" https://github.com/llnl/lwgrp.git \
+    && git clone --depth 1 --branch "${DTCMP_REF}" https://github.com/llnl/dtcmp.git \
+    && git clone --depth 1 --branch "${LIBCIRCLE_REF}" https://github.com/hpc/libcircle.git \
+    && git clone "${MPIFILEUTILS_REPO}" mpifileutils \
+    && cd mpifileutils \
+    && git checkout "${MPIFILEUTILS_REF}" \
+    && cd .. \
+    && sed -i 's@#include "../config/config.h"@@g' /src/lwgrp/src/lwgrp_internal.h \
+    && sed -i 's@#include <config.h>@@g' /src/libcircle/libcircle/lib.h \
+    && sed -i 's@ADD_SUBDIRECTORY(common)@#ADD_SUBDIRECTORY(common)@g' /src/mpifileutils/src/CMakeLists.txt \
+    && mkdir /release \
+    && cp -a /src/lwgrp /src/dtcmp /src/libcircle /src/mpifileutils /release/ \
+    && cp -a /src/mpifileutils/dist/CMakeLists.txt /release/CMakeLists.txt \
+    && cp -a /src/mpifileutils/cmake /release/cmake \
+    && sed -i 's@ADD_SUBDIRECTORY(mpifileutils/test)@#ADD_SUBDIRECTORY(mpifileutils/test)@g' /release/CMakeLists.txt \
+    && sed -i '/mpifileutils\/src\/common\/mfu_pred.h/a\  mpifileutils/src/common/mfu_proc.h' /release/CMakeLists.txt \
+    && sed -i '/mpifileutils\/src\/common\/mfu_pred.c/a\  mpifileutils/src/common/mfu_proc.c' /release/CMakeLists.txt
+
+WORKDIR /src/build
+
+RUN cmake /release \
+      -DCMAKE_INSTALL_PREFIX=/opt/mpifileutils \
+      -DENABLE_LIBARCHIVE=OFF \
+      -DENABLE_XATTRS=OFF \
+      -DENABLE_LUSTRE=OFF \
+      -DENABLE_GPFS=OFF \
+      -DENABLE_HPSS=OFF \
+      -DENABLE_DAOS=OFF \
+    && make -j2 \
+    && make install
+
+# ---- stage 2: runtime --------------------------------------------------
+# python:3.11-slim (not debian:bookworm-slim) so pip is python.org's own --
+# Debian's system pip on bookworm is PEP-668 "externally managed" and refuses
+# plain `pip install` without --break-system-packages. Still Debian bookworm
+# underneath, so the apt packages below behave identically to the legacy image.
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgomp1 \
+    libopenmpi3 \
+    openmpi-bin \
+    openssh-client \
+    openssh-server \
+    && mkdir -p /run/sshd \
+    && sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /opt/mpifileutils /opt/mpifileutils
+
+ENV OMPI_ALLOW_RUN_AS_ROOT=1 \
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    PATH=/opt/mpifileutils/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/mpifileutils/lib
+
+WORKDIR /app
+COPY pyproject.toml /app/
+COPY src /app/src
+
+# Installs the whole "dms" distribution (setuptools discovers both the `dms`
+# and `dms_job_runner` top-level packages under src/), which registers BOTH
+# console_scripts (dms, dms-job-runner) per pyproject.toml. Only dms-job-runner
+# is used in this image; the unconditional base deps (fastapi/uvicorn/httpx/
+# itsdangerous) come along for the ride but add no functional risk here.
+# No extras (postgres/ldap/kubernetes) needed -- dms_job_runner only touches
+# subprocess/files/env.
+RUN pip install --no-cache-dir . \
+    && (test -x /usr/local/bin/dms-job-runner \
+        || ln -sf "$(command -v dms-job-runner)" /usr/local/bin/dms-job-runner) \
+    && test -x /usr/local/bin/dms-job-runner
+
+# Default CMD is a placeholder -- the real command is always set per-container
+# by build_volcano_job()/_build_nsync_job() in execution_manifests.py
+# (launcher: /usr/local/bin/dms-job-runner, worker: /usr/sbin/sshd -D).
+CMD ["/usr/sbin/sshd", "-D"]

@@ -1,0 +1,39 @@
+# DMS control-plane image. Used, unmodified, for all of: `dms migrate`,
+# `dms api`, `dms controller` (see deploy/k8s/30-migrate-job.yaml,
+# 40-api.yaml, 41-controller.yaml) -- the entrypoint is the dms CLI, k8s
+# picks the subcommand via `command:`.
+#
+# Build (context = repo root):
+#   podman build -f deploy/docker/Dockerfile.dms -t pkg-01:5000/dms:<tag> .
+FROM python:3.11-slim
+
+# Match the testbed's pinned cluster version (see CLAUDE.md: K8s 1.34.6).
+ARG KUBECTL_VERSION=v1.34.6
+
+ENV PYTHONUNBUFFERED=1 \
+    HOME=/home/dms
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && curl -fsSLo /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod 0755 /usr/local/bin/kubectl \
+    && addgroup --system --gid 65532 dms \
+    && adduser --system --uid 65532 --ingroup dms --home /home/dms dms \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml /app/
+COPY src /app/src
+
+# postgres: psycopg driver for DMS_DATABASE_URL (db.py Database.connect).
+# ldap: ldap3 for the LDAP identity resolver (identity_ldap.py).
+# kubernetes: python kubernetes client for the Volcano execution adapter
+#   (execution_volcano.py KubernetesClient, in-cluster config).
+RUN pip install --no-cache-dir '.[postgres,ldap,kubernetes]'
+
+USER 65532:65532
+ENTRYPOINT ["dms"]

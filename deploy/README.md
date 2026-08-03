@@ -1,0 +1,264 @@
+# DMS testbed deployment runbook
+
+Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
+`dms agent`, execution backend = Volcano) onto the `dms` testbed. All
+manifests here are written against the **new** CLI/config (`src/dms/cli.py`,
+`src/dms/config.py`) -- do not confuse with `legacy/install/`, which targets
+the old implementation and is read-only design reference only.
+
+Testbed facts baked into these assets (see repo `CLAUDE.md` for the source of
+truth):
+
+| thing | value |
+|---|---|
+| build/registry node | `pkg-01` (10.10.10.30), has `podman` |
+| registry | `pkg-01:5000`, insecure |
+| PostgreSQL | `postgresql://dmsapp:AppPass123!@10.10.10.30:5432/dmsdb` |
+| LDAP | `ldap://10.10.10.30:389`, base `dc=dms,dc=local` |
+| CephFS `cephfs-dms` | `/cephfs`, mounted on w1-5 |
+| CephFS `cephfs-third` | `/cephfs-third`, mounted on w1-3 |
+| CephFS `cephfs-secondary` | `/cephfs-secondary`, mounted on w4-5 |
+| artifact base | `file:///cephfs/dms/artifacts` |
+| namespace | `dms`, PSA enforce=privileged |
+| Volcano | v1.15.0 installed; queue/priority classes NOT yet installed |
+
+---
+
+## 0. Registry setup (once)
+
+On `pkg-01`, start the insecure registry and point every cluster node's
+CRI-O at it:
+
+```bash
+# on pkg-01:
+./deploy/docker/registry-setup.sh registry
+
+# from anywhere with ssh to the k8s nodes (or kubectl --context dms configured):
+./deploy/docker/registry-setup.sh nodes
+```
+
+Verify: `crictl pull pkg-01:5000/dms:dev` from any cluster node should not
+error with "http: server gave HTTP response to HTTPS client".
+
+## 1. Build and push images
+
+Also on `pkg-01` (build context = repo root, run from anywhere in the repo):
+
+```bash
+REGISTRY=pkg-01:5000 TAG=dev ./deploy/docker/build-and-push.sh
+```
+
+Builds and pushes, in order (agent depends on the other two):
+`pkg-01:5000/dms-mpifileutils:dev`, `pkg-01:5000/dms:dev`,
+`pkg-01:5000/dms-agent:dev`.
+
+If you use a `TAG` other than `dev`, update it in `deploy/k8s/20-config.yaml`
+(`DMS_JOB_IMAGE`) and the `image:` fields in `30-migrate-job.yaml`,
+`40-api.yaml`, `41-controller.yaml`, `50-agent-daemonset.yaml` to match --
+these are static manifests, not templated.
+
+## 2. Mount CephFS on the worker nodes
+
+If not already mounted (testbed IaC target):
+
+```bash
+cd ~/dms-dev/testbed
+make cephfs-nsync   # or whatever combination of cephfs-* targets mounts
+                     # cephfs-dms/cephfs-third/cephfs-secondary on w1-5/w1-3/w4-5
+```
+
+Then, on any node with `/cephfs` mounted, create the directories the
+manifests/seed step below assume exist:
+
+```bash
+mkdir -p /cephfs/dms/artifacts /cephfs/managed
+mkdir -p /cephfs-third/managed /cephfs-secondary/managed
+```
+
+(`managed_root` for each registered storage below lives under its
+`mount_path` -- `StoragesRepository._validate` in
+`src/dms/repositories/storages.py` requires `managed_root == mount_path` or
+a subdirectory of it. `dms-controller`/`dms-api` need `/cephfs/dms/artifacts`
+readable -- see `DMS_ARTIFACT_BASE_URI`.)
+
+## 3. Apply manifests, in order
+
+```bash
+kubectl apply -f deploy/k8s/00-namespace.yaml
+kubectl apply -f deploy/k8s/05-volcano-queue-priorityclass.yaml
+kubectl apply -f deploy/k8s/10-rbac.yaml
+kubectl apply -f deploy/k8s/20-config.yaml
+```
+
+## 4. Migrate
+
+```bash
+kubectl apply -f deploy/k8s/30-migrate-job.yaml
+kubectl wait --for=condition=complete job/dms-migrate -n dms --timeout=120s
+kubectl logs job/dms-migrate -n dms   # expect: "migrated"
+```
+
+Re-running: `kubectl delete job/dms-migrate -n dms` then re-apply (Job specs
+are immutable, so a stale completed Job blocks re-apply).
+
+## 5. Bring up api / controller / agent
+
+```bash
+kubectl apply -f deploy/k8s/40-api.yaml
+kubectl apply -f deploy/k8s/41-controller.yaml
+kubectl apply -f deploy/k8s/50-agent-daemonset.yaml
+
+kubectl -n dms rollout status deployment/dms-api
+kubectl -n dms rollout status deployment/dms-controller
+kubectl -n dms rollout status daemonset/dms-agent
+
+kubectl -n dms port-forward svc/dms-api 8080:8080 &
+curl -sf http://localhost:8080/healthz   # {"status":"ok"}
+```
+
+Give the agent DaemonSet 1-2 report cycles (`DMS_AGENT_INTERVAL_SECONDS=30`)
+before seeding -- the planner's admission gate needs at least one fresh
+`/api/agent/report` per node before any storage/tool/identity reads as
+"Ready" (`src/dms/placement.py::eligible_nodes`).
+
+## 6. Seed storages and policies
+
+All admin calls below authenticate with `Authorization: Bearer
+$DMS_SHARED_TOKEN` -- `auth.py::current_identity` maps that bearer straight
+to `Identity(role="admin")`, no signup/login needed for scripted seeding.
+
+```bash
+export DMS_SHARED_TOKEN="dms-testbed-shared-8f2a1c9d4e6b7f30"   # from dms-secrets
+export API=http://localhost:8080
+AUTH=(-H "Authorization: Bearer $DMS_SHARED_TOKEN" -H "x-dms-actor: seed-script")
+
+# storages (backend_type must be one of cephfs/gpfs/wekafs; managed_root
+# must be mount_path or a subdirectory of it)
+curl -sf -X POST "$API/api/admin/storages" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+  "storage_name": "cephfs-dms", "mount_path": "/cephfs",
+  "managed_root": "/cephfs/managed", "backend_type": "cephfs"}'
+
+curl -sf -X POST "$API/api/admin/storages" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+  "storage_name": "cephfs-third", "mount_path": "/cephfs-third",
+  "managed_root": "/cephfs-third/managed", "backend_type": "cephfs"}'
+
+curl -sf -X POST "$API/api/admin/storages" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+  "storage_name": "cephfs-secondary", "mount_path": "/cephfs-secondary",
+  "managed_root": "/cephfs-secondary/managed", "backend_type": "cephfs"}'
+
+# policies -- tool names per repositories/control.py POLICY_TOOLS =
+# ("scan", "dsync", "nsync", "rm")  (note: "dsync", not "sync")
+for tool in scan dsync nsync rm; do
+  curl -sf -X PUT "$API/api/admin/policies/$tool" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+    "max_nodes": 3, "procs_per_node": 2, "queue": "dms-data",
+    "default_priority": "mid", "max_priority": "high",
+    "execution_timeout_seconds": 3600, "enabled": true}'
+done
+
+curl -sf "$API/api/admin/storages" "${AUTH[@]}" | python3 -m json.tool
+curl -sf "$API/api/admin/policies" "${AUTH[@]}" | python3 -m json.tool
+```
+
+## 7. Scenarios
+
+Same `AUTH`/`API` env as above. Every request goes through
+`planner -> job-stepper` on `dms-controller`'s loops (default
+`DMS_PLANNER_INTERVAL_SECONDS=10`, `DMS_STEPPER_INTERVAL_SECONDS=5`) --
+poll `GET .../requests/{id}` a few times rather than expecting an instant
+terminal state.
+
+### scan (single storage, no confirm step)
+
+```bash
+RID=$(curl -sf -X POST "$API/api/user/requests" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+  "operation": "scan", "storage": "cephfs-dms", "target": "managed",
+  "priority": "mid"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["request_id"])')
+
+for i in $(seq 1 12); do curl -sf "$API/api/user/requests/$RID" "${AUTH[@]}"; echo; sleep 5; done
+# state progression: Pending -> Planned -> ... job: Pending -> Preflight -> Running -> Succeeded
+kubectl -n dms get pods,vcjob -l dms.io/job-id  # (job_id from the jobs list below)
+curl -sf "$API/api/user/requests/$RID/jobs" "${AUTH[@]}" | python3 -m json.tool
+```
+
+### sync (same-node candidates -> tool=dsync, needs confirm)
+
+`cephfs-dms` (w1-5) and `cephfs-third` (w1-3) overlap on w1-3, so
+`select_tool_and_candidates` (`src/dms/placement.py`) picks co-located nodes
+and tool `dsync`:
+
+```bash
+RID=$(curl -sf -X POST "$API/api/user/requests" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+  "operation": "sync", "source_storage": "cephfs-dms", "source": "managed/scratch",
+  "destination_storage": "cephfs-third", "destination": "managed/copy",
+  "priority": "mid"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["request_id"])')
+
+# poll until job state == ConfirmPending, then read preview_fingerprint:
+JOB=$(curl -sf "$API/api/user/requests/$RID/jobs" "${AUTH[@]}" | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)[0]))')
+JOB_ID=$(echo "$JOB" | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
+FP=$(echo "$JOB" | python3 -c 'import sys,json;print(json.load(sys.stdin)["preview_fingerprint"])')
+
+curl -sf -X POST "$API/api/user/jobs/$JOB_ID:confirm" "${AUTH[@]}" -H 'content-type: application/json' \
+  -d "{\"fingerprint\": \"$FP\"}"
+# -> Executing -> Succeeded
+```
+
+### nsync (disjoint node pools -> tool=nsync, gang-scheduled)
+
+`cephfs-third` (w1-3) and `cephfs-secondary` (w4-5) share NO node, so
+`select_tool_and_candidates` falls through to `nsync` with
+`candidates={"source": [...w1-3], "destination": [...w4-5]}` -- this is the
+`_build_nsync_job` path in `execution_manifests.py` (separate
+source-worker/destination-worker Volcano tasks):
+
+```bash
+RID=$(curl -sf -X POST "$API/api/user/requests" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+  "operation": "sync", "source_storage": "cephfs-third", "source": "managed/scratch",
+  "destination_storage": "cephfs-secondary", "destination": "managed/copy",
+  "priority": "mid"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["request_id"])')
+
+# same confirm flow as above once ConfirmPending; then:
+kubectl -n dms get vcjob -o wide   # expect tasks: launcher, source-worker, destination-worker
+```
+
+### cancel
+
+```bash
+# while a job is Executing/Running/PreviewRunning:
+curl -sf -X POST "$API/api/user/jobs/$JOB_ID:cancel" "${AUTH[@]}"
+# -> {"state": "Cancelled"}; verify the Volcano Job/preflight Pod is gone:
+kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
+```
+
+---
+
+## Unresolved values to fill in during live validation
+
+- **`DMS_LDAP_BIND_DN` / `DMS_LDAP_BIND_PW`** (`deploy/k8s/20-config.yaml`,
+  Secret `dms-secrets`): placeholder demo values. Only `DMS_LDAP_URI`,
+  `DMS_LDAP_USER_BASE`, `DMS_LDAP_GROUP_BASE` were given as testbed facts --
+  the bind account/password for `ldap://10.10.10.30:389` needs the real
+  value. A wrong value fails soft (`IdentityRejected`/`IdentityUnavailable`
+  at plan time, not a container crash), so this can be fixed and rolled out
+  without redeploying anything else.
+- **`DMS_JOB_IMAGE` / image tags**: all manifests hardcode `:dev`. Keep
+  `build-and-push.sh`'s `TAG` and the manifests' tags in sync manually (no
+  templating layer here by design -- see CLAUDE.md's "legacy/install/ 미러
+  금지" instruction, which ruled out introducing e.g. Helm/kustomize for this
+  pass).
+- **`/cephfs` scheduling assumption on `dms-api`/`dms-controller`**: both
+  Deployments hostPath-mount `/cephfs` with `type: Directory` (fails pod
+  admission on a node without that mount). This is safe today because the
+  only schedulable nodes are w1-5, all of which mount `cephfs-dms`. If a
+  non-cephfs node joins the schedulable pool, add a nodeSelector/affinity or
+  relax to `DirectoryOrCreate`.
+- **DaemonSet node heterogeneity**: `cephfs-third` volume is
+  `DirectoryOrCreate` so the agent pod still starts on w4-5 (which never had
+  `/cephfs-third`) -- it just shadows an empty dir there, and
+  `probe_mounts()` correctly reports that storage `Missing` on those nodes.
+  Confirm this reads as expected once agents are actually running.
+- **Agent os-metrics network figures**: `probe_os_metrics()` reads
+  `/proc/net/dev` from the container's own (pod) network namespace, not the
+  host's -- `network_rx_bytes`/`network_tx_bytes` in agent reports will
+  reflect the pod's veth, not real node throughput. `hostNetwork: true`
+  would fix this but was not added (out of scope for this pass / changes the
+  agent's security posture); flagging for follow-up if that metric matters.

@@ -1,0 +1,23 @@
+# DMS node-agent image = the dms image (dms package + kubectl) PLUS the
+# mpifileutils tool binaries layered onto PATH, so the agent's tool probe
+# (shutil.which() in src/dms/agent/probes.py::probe_tools) reports
+# dscan/dsync/nsync/drm as "Ready". The agent itself never RUNS the mpi
+# tools (Volcano job pods do that, via the dms-mpifileutils image) -- it
+# only needs the binaries present to probe them, plus `<tool> --version`
+# to be invocable (probe_tools shells out for the version line), so no MPI
+# runtime env is required here beyond what's already on the binaries' PATH.
+#
+# Build (context = repo root; both build args are already-built/pushed images):
+#   podman build -f deploy/docker/Dockerfile.agent \
+#     --build-arg DMS_IMAGE=pkg-01:5000/dms:<tag> \
+#     --build-arg MFU_IMAGE=pkg-01:5000/dms-mpifileutils:<tag> \
+#     -t pkg-01:5000/dms-agent:<tag> .
+ARG DMS_IMAGE=pkg-01:5000/dms:dev
+ARG MFU_IMAGE=pkg-01:5000/dms-mpifileutils:dev
+
+FROM ${MFU_IMAGE} AS mfu
+
+FROM ${DMS_IMAGE}
+COPY --from=mfu /opt/mpifileutils /opt/mpifileutils
+ENV PATH=/opt/mpifileutils/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/mpifileutils/lib

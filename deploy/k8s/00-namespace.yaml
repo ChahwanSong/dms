@@ -1,0 +1,13 @@
+# DM data-job pods (Volcano MPI launcher/worker) run as root (see
+# src/dms/execution_manifests.py::_container, runAsUser: 0) so the launcher
+# can `runuser` down to the actual requester identity. A default
+# baseline/restricted Pod Security Admission would reject every DM job pod
+# at admission, so this namespace must allow privileged.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dms
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

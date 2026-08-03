@@ -1,0 +1,37 @@
+# One-shot schema migration (`dms migrate` -> src/dms/migrations.py migrate()).
+# Re-run safely after every image/schema update; re-apply this file to get a
+# fresh Job (kubectl delete job/dms-migrate first if one already completed --
+# Job specs are immutable). No ServiceAccount needed: migrate() only touches
+# DMS_DATABASE_URL, no k8s API calls (see cli.py: the "migrate" branch never
+# builds an execution_adapter or identity_resolver).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dms-migrate
+  namespace: dms
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-migrate
+        app.kubernetes.io/part-of: dms
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: pkg-01:5000/dms:dev
+          imagePullPolicy: IfNotPresent
+          command: ["dms", "migrate"]
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

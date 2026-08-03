@@ -1,0 +1,85 @@
+# dms-api (`dms api` -> uvicorn serving api/app.py create_app()). Starts at
+# replicas: 1 for the testbed; the app itself is stateless (DB + k8s backed)
+# so this can be scaled up once the run is stable.
+#
+# /cephfs hostPath: app.state.execution_adapter (built in api/app.py exactly
+# like the controller's) currently only ever calls .terminate() from the
+# cancel route, which is DB+k8s only and needs no filesystem access. This
+# mount is here for parity with the controller and forward-compatibility
+# (e.g. a future artifact/log read route) per the design review; if it never
+# gains a filesystem-reading route it is inert.
+#
+# NOTE: `type: Directory` means this pod FAILS to start on any node without a
+# real /cephfs mount. That's fine as long as dms-api only schedules onto the
+# w1-5 workers (all of which mount cephfs-dms per the testbed) -- if the
+# cluster grows a non-cephfs worker, add a nodeSelector/affinity here (or
+# switch to DirectoryOrCreate to degrade instead of failing).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-api
+  namespace: dms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-api
+        app.kubernetes.io/part-of: dms
+    spec:
+      serviceAccountName: dms-api
+      containers:
+        - name: api
+          image: pkg-01:5000/dms:dev
+          imagePullPolicy: IfNotPresent
+          command: ["dms", "api"]
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          volumeMounts:
+            - name: cephfs
+              mountPath: /cephfs
+              mountPropagation: HostToContainer
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: cephfs
+          hostPath:
+            path: /cephfs
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dms-api
+  namespace: dms
+spec:
+  selector:
+    app.kubernetes.io/name: dms-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

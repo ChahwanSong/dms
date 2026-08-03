@@ -1,0 +1,124 @@
+# dms-agent (`dms agent`, no --once -> AgentSettings + run_loop): reports
+# mounts/tools/identities/os metrics to POST /api/agent/report every
+# DMS_AGENT_INTERVAL_SECONDS.
+#
+# Env is set EXPLICITLY here (not envFrom dms-config/dms-secrets): cli.py's
+# "agent" branch calls AgentSettings.from_env() directly and never touches
+# Settings.from_env, so the agent needs none of DMS_DATABASE_URL/
+# DMS_ADMIN_TOKEN/DMS_SESSION_SECRET/etc -- only DMS_AGENT_API_URL,
+# DMS_SHARED_TOKEN, DMS_AGENT_NODE_NAME, DMS_AGENT_INTERVAL_SECONDS,
+# DMS_AGENT_MOUNTINFO_PATH. Blanket envFrom would needlessly expose
+# DMS_DATABASE_URL/DMS_ADMIN_TOKEN on every node.
+#
+# Volume mounts:
+#   proc-mountinfo: the host init's real mount table, bind-mounted at
+#     DMS_AGENT_MOUNTINFO_PATH. Required -- the agent's OWN /proc/1/mountinfo
+#     (default path) only shows the container's mounts, so every storage
+#     would probe Missing without this.
+#   host-root (/host, ro): general host visibility for future probing; no
+#     current code path in probes.py reads under /host (loadavg/meminfo/
+#     net-dev are read at their plain /proc paths, which already reflect the
+#     host inside a container without hostPID -- see report). Kept per spec
+#     as cheap, harmless context.
+#   cephfs-dms / cephfs-third / cephfs-secondary: probe_mounts() (probes.py)
+#     checks os.path.isdir()/os.access() on the LITERAL storage["mount_path"]
+#     value returned by the API (e.g. "/cephfs"), not a /host-prefixed path
+#     -- so each real storage mount point must be bind-mounted at that EXACT
+#     absolute path inside the agent container too (mirrors how job pods
+#     mount storages in execution_volcano.py::_volumes). type:
+#     DirectoryOrCreate (not Directory) because cephfs-third only exists on
+#     w1-3 and cephfs-secondary only on w4-5 -- on a node lacking one of
+#     these, DirectoryOrCreate shadows it with an empty local dir instead of
+#     crash-looping the pod, and probe_mounts correctly reports that storage
+#     Missing/not_a_mountpoint on that node (the true state). Mounted
+#     read-write (not readOnly) so os.access(path, os.W_OK) reports real
+#     writability -- the agent itself never writes there.
+#
+# hostPID is deliberately NOT set: probe_identities() resolves usernames via
+# pwd.getpwnam()/grp.getgrall() against the CONTAINER's own /etc/passwd,
+# /etc/group -- hostPID (PID namespace sharing) has no effect on NSS
+# resolution, so it buys nothing for this code path.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dms-agent
+  namespace: dms
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-agent
+        app.kubernetes.io/part-of: dms
+    spec:
+      serviceAccountName: dms-agent
+      containers:
+        - name: agent
+          image: pkg-01:5000/dms-agent:dev
+          imagePullPolicy: IfNotPresent
+          command: ["dms", "agent"]
+          env:
+            - name: DMS_AGENT_API_URL
+              value: "http://dms-api:8080"
+            - name: DMS_AGENT_MOUNTINFO_PATH
+              value: "/host/proc/1/mountinfo"
+            - name: DMS_AGENT_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DMS_AGENT_INTERVAL_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: dms-config
+                  key: DMS_AGENT_INTERVAL_SECONDS
+            - name: DMS_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dms-secrets
+                  key: DMS_SHARED_TOKEN
+          volumeMounts:
+            - name: proc-mountinfo
+              mountPath: /host/proc/1/mountinfo
+              readOnly: true
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            - name: cephfs-dms
+              mountPath: /cephfs
+              mountPropagation: HostToContainer
+            - name: cephfs-third
+              mountPath: /cephfs-third
+              mountPropagation: HostToContainer
+            - name: cephfs-secondary
+              mountPath: /cephfs-secondary
+              mountPropagation: HostToContainer
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: proc-mountinfo
+          hostPath:
+            path: /proc/1/mountinfo
+            type: File
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: cephfs-dms
+          hostPath:
+            path: /cephfs
+            type: DirectoryOrCreate
+        - name: cephfs-third
+          hostPath:
+            path: /cephfs-third
+            type: DirectoryOrCreate
+        - name: cephfs-secondary
+          hostPath:
+            path: /cephfs-secondary
+            type: DirectoryOrCreate

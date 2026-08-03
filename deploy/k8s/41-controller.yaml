@@ -1,0 +1,57 @@
+# dms-controller (`dms controller`, no --once -> run_forever): hosts the
+# planner/job-stepper/storage-reconciler/retention loops under a DB lease
+# (controller.py build_loops/run_forever). replicas: 1 for the testbed --
+# run_all_once() takes a DB lease per loop so more replicas would be safe
+# (hot standby), but one is enough to validate the scenarios.
+#
+# /cephfs hostPath is REQUIRED (not optional, unlike dms-api): JobStepper
+# calls execution_adapter.read_summary(ref) (stepper.py, preview + execution
+# phases), which does a plain local open() on
+# <DMS_ARTIFACT_BASE_URI>/<job_id>/<phase>/summary.json with the file:// "
+# scheme stripped (execution_volcano.py::read_summary / wiring.py's
+# read_text closure) -- i.e. it expects that path to exist on the
+# CONTROLLER'S OWN filesystem, not through the k8s API. Without this mount
+# every preview/execution phase would read back None and jobs would stall.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dms-controller
+  namespace: dms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dms-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dms-controller
+        app.kubernetes.io/part-of: dms
+    spec:
+      serviceAccountName: dms-controller
+      containers:
+        - name: controller
+          image: pkg-01:5000/dms:dev
+          imagePullPolicy: IfNotPresent
+          command: ["dms", "controller"]
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+          volumeMounts:
+            - name: cephfs
+              mountPath: /cephfs
+              mountPropagation: HostToContainer
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: cephfs
+          hostPath:
+            path: /cephfs
+            type: Directory

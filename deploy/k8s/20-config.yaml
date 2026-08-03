@@ -1,0 +1,83 @@
+# Non-secret DMS_* runtime config (dms-config) + secret DMS_* values
+# (dms-secrets). Env NAMES here are cross-checked 1:1 against
+# src/dms/config.py (Settings.from_env / AgentSettings.from_env) -- this is
+# the new clean-slate config surface, NOT legacy's DMS_DM_*/DMS_AUTH_*
+# naming.
+#
+# dms-secrets values below are TESTBED DEMO VALUES, not production secrets.
+# DMS_LDAP_BIND_DN / DMS_LDAP_BIND_PW in particular are UNRESOLVED
+# placeholders -- see deploy/README.md "Unresolved values to fill in".
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-config
+  namespace: dms
+data:
+  # --- execution backend (wiring.py: != "volcano" falls back to the stub
+  #     adapter, which never touches k8s at all) ---
+  DMS_EXECUTION_BACKEND: "volcano"
+  DMS_K8S_NAMESPACE: "dms"
+  # Must match whatever build-and-push.sh TAG was actually pushed as.
+  DMS_JOB_IMAGE: "pkg-01:5000/dms-mpifileutils:dev"
+
+  # --- artifact storage: shared-FS path job pods/controller/api write/read
+  #     summary.json under (execution_manifests.py::_artifact_dir,
+  #     execution_volcano.py::_volumes) ---
+  DMS_ARTIFACT_BASE_URI: "file:///cephfs/dms/artifacts"
+
+  # --- api server bind ---
+  DMS_API_HOST: "0.0.0.0"
+  DMS_API_PORT: "8080"
+
+  # --- LDAP identity resolution (identity_ldap.py) ---
+  DMS_LDAP_URI: "ldap://10.10.10.30:389"
+  DMS_LDAP_USER_BASE: "ou=People,dc=dms,dc=local"
+  DMS_LDAP_GROUP_BASE: "ou=Groups,dc=dms,dc=local"
+
+  # --- privileged-requester gate (routes_requests.py submit()) ---
+  DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"
+  DMS_PRIVILEGED_REQUESTERS: ""
+
+  # --- controller loop intervals / retention / job-runner knobs (all have
+  #     code defaults in config.py _SERVER_INT_KEYS -- set explicitly here so
+  #     this ConfigMap is the single source of truth for the live testbed) ---
+  DMS_AGENT_REPORT_STALE_SECONDS: "300"
+  DMS_AGENT_REPORT_INTERVAL_SECONDS: "60"
+  DMS_RECONCILE_INTERVAL_SECONDS: "30"
+  DMS_RETENTION_INTERVAL_SECONDS: "3600"
+  DMS_AGENT_REPORT_RETENTION_DAYS: "30"
+  DMS_IDENTITY_PROBE_TTL_SECONDS: "3600"
+  DMS_PLANNER_INTERVAL_SECONDS: "10"
+  DMS_STEPPER_INTERVAL_SECONDS: "5"
+  DMS_PREVIEW_TTL_SECONDS: "86400"
+  DMS_JOB_MAX_ATTEMPTS: "3"
+
+  # --- agent report cadence (AgentSettings.from_env; consumed via
+  #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the
+  #     agent should only see the small env slice it actually needs) ---
+  DMS_AGENT_INTERVAL_SECONDS: "30"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dms-secrets
+  namespace: dms
+type: Opaque
+stringData:
+  DMS_DATABASE_URL: "postgresql://dmsapp:AppPass123!@10.10.10.30:5432/dmsdb"
+  # Bearer token that grants role=admin on every API call (auth.py
+  # current_identity: Bearer <DMS_SHARED_TOKEN> => Identity(role="admin")).
+  # Used by the agent to authenticate /api/agent/report, and is the easiest
+  # way to script admin/user API calls for seeding (see README).
+  DMS_SHARED_TOKEN: "dms-testbed-shared-8f2a1c9d4e6b7f30"
+  # Required only for POST /api/admin/accounts (x-admin-token header).
+  DMS_ADMIN_TOKEN: "dms-testbed-admin-3b7e5f1a9c2d4e81"
+  # Signs the session cookie (SessionMiddleware) for the browser login flow.
+  DMS_SESSION_SECRET: "dms-testbed-session-c4d8a2f6e1b3907a"
+  # UNRESOLVED demo values -- fill in the real testbed OpenLDAP bind account
+  # before relying on LDAP identity resolution (planner.py silently treats a
+  # failed bind as IdentityUnavailable, not a fatal startup error, so a wrong
+  # value here fails soft: candidates just never become ready).
+  DMS_LDAP_BIND_DN: "cn=admin,dc=dms,dc=local"
+  DMS_LDAP_BIND_PW: "REPLACE_WITH_REAL_LDAP_BIND_PASSWORD"

@@ -1,0 +1,49 @@
+# Volcano scheduling objects every DM job manifest references by name (see
+# src/dms/domain.py PRIORITY_CLASS = {"low": "dms-low", "mid": "dms-mid",
+# "high": "dms-high"}, and stepper.py's default queue "dms-data"). Apply
+# AFTER Volcano itself is installed, BEFORE running any DM job:
+#
+#   kubectl apply -f deploy/k8s/05-volcano-queue-priorityclass.yaml
+#   kubectl get queue.scheduling.volcano.sh dms-data
+#   kubectl get priorityclass | grep dms
+#
+# A missing Queue leaves jobs Pending forever (Volcano never dispatches); a
+# missing PriorityClass makes kube-apiserver REJECT the job pod at admission.
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: dms-data
+spec:
+  weight: 1
+  reclaimable: true
+---
+# Three tiers map 1:1 to domain.py's PRIORITIES ("low"/"mid"/"high"). "mid" is
+# the default (see routes_policies.py PolicyBody.default_priority = "mid").
+# globalDefault: false so these never become the cluster-wide default.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: dms-low
+value: 50
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "DMS data jobs -- low priority (background scans/copies)."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: dms-mid
+value: 100
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "DMS data jobs -- default priority."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: dms-high
+value: 200
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "DMS data jobs -- operator-expedited priority."

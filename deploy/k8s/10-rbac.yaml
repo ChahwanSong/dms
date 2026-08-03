@@ -1,0 +1,121 @@
+# ServiceAccounts + namespaced RBAC for the three DMS workloads. All
+# resources this file grants are namespace-scoped (dms) except the agent's
+# ClusterRole (Nodes are cluster-scoped).
+---
+# dms-controller (dms controller, deploy/k8s/41-controller.yaml): the only
+# process that SUBMITS work. stepper.py's JobStepper calls
+# VolcanoExecutionAdapter.submit()/poll()/terminate() -- i.e. K8sClient.create/
+# get/delete on Pods (preflight) and batch.volcano.sh Jobs (preview/execution/
+# nsync), plus KubernetesClient.read_pod_log (pods/log) for future log-tail use.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dms-controller
+  namespace: dms
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dms-controller
+  namespace: dms
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dms-controller
+  namespace: dms
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dms-controller
+subjects:
+  - kind: ServiceAccount
+    name: dms-controller
+    namespace: dms
+---
+# dms-api (dms api, deploy/k8s/40-api.yaml): builds the SAME
+# VolcanoExecutionAdapter as the controller (see api/app.py
+# create_app -> build_execution_adapter), but only ever calls
+# .terminate() -- from POST /api/user/jobs/{id}:cancel (routes_jobs.py
+# cancel_job -> adapter.terminate(ref) for each phase_refs entry). That is a
+# k8s DELETE on the job's Pod/vcjob refs, so a read-only grant here would make
+# every cancel fail with 500 cancel_failed. No create -- api never submits.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dms-api
+  namespace: dms
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dms-api
+  namespace: dms
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["batch.volcano.sh"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dms-api
+  namespace: dms
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dms-api
+subjects:
+  - kind: ServiceAccount
+    name: dms-api
+    namespace: dms
+---
+# dms-agent (dms agent, deploy/k8s/50-agent-daemonset.yaml): current
+# src/dms/agent/probes.py makes NO in-cluster API calls at all (mounts/tools/
+# identities/os metrics are all local file/subprocess checks). This
+# ClusterRole is a minimal, currently-UNUSED placeholder kept because it is
+# called out explicitly as "nodes get, if needed" -- safe to drop later if it
+# stays unused.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dms-agent
+  namespace: dms
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dms-agent-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dms-agent-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dms-agent-readonly
+subjects:
+  - kind: ServiceAccount
+    name: dms-agent
+    namespace: dms
