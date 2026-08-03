@@ -27,13 +27,15 @@ class K8sClient(Protocol):
 
 
 class VolcanoExecutionAdapter:
-    def __init__(self, k8s, *, job_image, namespace, storages_lookup, read_text):
+    def __init__(self, k8s, *, job_image, namespace, storages_lookup, read_text,
+                 artifact_base):
         self._k8s = k8s
         self._job_image = job_image
         self._namespace = namespace
         self._storages = storages_lookup
         self._read_text = read_text
-        self._summary_paths = {}   # ref -> artifact summary.json path
+        self._artifact_base = artifact_base  # summary 경로 fallback 재구성용
+        self._summary_paths = {}   # ref -> artifact summary.json path (in-memory 빠른 경로)
 
     def _volumes(self, spec):
         # 데이터 스토리지 mount_path + 아티팩트 base 를 수집해 hostPath 볼륨으로.
@@ -98,7 +100,9 @@ class VolcanoExecutionAdapter:
     def read_summary(self, ref):
         path = self._summary_paths.get(ref)
         if path is None:
-            return None
+            path = self._reconstruct_summary_path(ref)
+            if path is None:
+                return None
         text = self._read_text(path)
         if not text:
             return None
@@ -106,6 +110,22 @@ class VolcanoExecutionAdapter:
             return json.loads(text)
         except (ValueError, TypeError):
             return None
+
+    def _reconstruct_summary_path(self, ref):
+        """컨트롤러 재시작으로 _summary_paths가 유실됐을 때 k8s 오브젝트 라벨에서
+        summary.json 경로를 재구성한다. build_volcano_job/build_preflight_pod가
+        dms.io/job-id(전체 job_id)와 dms.io/phase 라벨을 이미 붙여둔다."""
+        prefix, name = ref.split("/", 1)
+        obj = self._k8s.get(_KIND[prefix], name, self._namespace)
+        if obj is None:
+            return None
+        labels = ((obj.get("metadata") or {}).get("labels") or {})
+        job_id = labels.get("dms.io/job-id")
+        phase = labels.get("dms.io/phase")
+        if not job_id or not phase:
+            return None
+        return (f"{self._artifact_base}/{job_id}/{phase}/summary.json"
+                .replace("file://", ""))
 
     def terminate(self, ref) -> None:
         prefix, name = ref.split("/", 1)

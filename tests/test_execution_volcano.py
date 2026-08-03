@@ -49,7 +49,8 @@ def _adapter(k8s, summaries=None):
     return VolcanoExecutionAdapter(
         k8s, job_image="reg/img:1", namespace="dms",
         storages_lookup=lambda n: {"mount_path": "/cephfs", "managed_root": "/cephfs/dms"},
-        read_text=lambda path: summaries.get(path))
+        read_text=lambda path: summaries.get(path),
+        artifact_base="file:///cephfs/dms/artifacts")
 
 
 def test_submit_preflight_creates_pod():
@@ -108,6 +109,34 @@ def test_read_summary_missing_is_none():
     assert a.read_summary(ref) is None
 
 
+def test_read_summary_reconstructs_from_labels():
+    """컨트롤러 재시작 흉내: 새 어댑터 인스턴스(_summary_paths 빈 상태)가 같은 k8s의
+    오브젝트 라벨(dms.io/job-id, dms.io/phase)에서 summary 경로를 재구성한다."""
+    k8s = _FakeK8s()
+    summaries = {
+        "/cephfs/dms/artifacts/job123456789abc/execution/summary.json": '{"files": 3}'}
+    a1 = _adapter(k8s, summaries=summaries)
+    ref = a1.submit(_spec(phase="execution"))
+    a2 = VolcanoExecutionAdapter(
+        k8s, job_image="reg/img:1", namespace="dms",
+        storages_lookup=lambda n: {"mount_path": "/cephfs", "managed_root": "/cephfs/dms"},
+        read_text=lambda path: summaries.get(path),
+        artifact_base="file:///cephfs/dms/artifacts")
+    assert ref not in a2._summary_paths
+    assert a2.read_summary(ref) == {"files": 3}
+
+
+def test_read_summary_reconstruction_missing_object_is_none():
+    """오브젝트가 사라졌으면(또는 라벨 없으면) 재구성 불가 → None."""
+    k8s = _FakeK8s()
+    a = VolcanoExecutionAdapter(
+        k8s, job_image="reg/img:1", namespace="dms",
+        storages_lookup=lambda n: {"mount_path": "/cephfs", "managed_root": "/cephfs/dms"},
+        read_text=lambda path: None,
+        artifact_base="file:///cephfs/dms/artifacts")
+    assert a.read_summary("vcjob/nonexistent") is None
+
+
 def test_terminate_idempotent_and_error():
     k8s = _FakeK8s()
     a = _adapter(k8s)
@@ -156,7 +185,8 @@ def test_volumes_include_artifact_base_when_independent():
     a = VolcanoExecutionAdapter(
         k8s, job_image="reg/img:1", namespace="dms",
         storages_lookup=storages_lookup,
-        read_text=lambda path: None)
+        read_text=lambda path: None,
+        artifact_base="file:///cephfs/dms/artifacts")
     spec = _spec(phase="execution", artifact_base="file:///cephfs/dms/artifacts")
     ref = a.submit(spec)
     volumes = k8s.created[0]["spec"]["tasks"][0]["template"]["spec"]["volumes"]
@@ -177,7 +207,8 @@ def test_volumes_sync_two_storages():
     a = VolcanoExecutionAdapter(
         k8s, job_image="reg/img:1", namespace="dms",
         storages_lookup=storages_lookup,
-        read_text=lambda path: None)
+        read_text=lambda path: None,
+        artifact_base="file:///cephfs/dms/artifacts")
     spec = _spec(phase="execution", op="sync", tool="nsync",
                  cand={"source": ["dms-src1"], "destination": ["dms-dst1"]},
                  paths={"source": "/cephfs-third/a", "source_storage": "storage-third",

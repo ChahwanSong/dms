@@ -1,7 +1,8 @@
 """data_jobs + plans 저장소: planner가 emit하고 stepper(3b)가 전진시키는 잡 레코드."""
 import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
-from ..domain import DataJobState, RequestState
+from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
+                      TERMINAL_REQUEST_STATES)
 
 _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
                  "volcano_job_ref", "phase_refs")
@@ -164,3 +165,17 @@ class DataJobsRepository:
                                reason_code="preview_expired", actor="stepper")
             expired.append(row["job_id"])
         return expired
+
+    def terminal_jobs_with_live_request(self):
+        """잡은 터미널인데 그 request가 아직 비터미널인 (job_id, request_id, state) 목록.
+        컨트롤러 크래시 등으로 finalize_from_job이 누락된 고아를 찾아 복구하기 위함."""
+        job_terminal = tuple(s.value for s in TERMINAL_DATA_JOB_STATES)
+        req_terminal = tuple(s.value for s in TERMINAL_REQUEST_STATES)
+        jt = ", ".join(f":jt{i}" for i in range(len(job_terminal)))
+        rt = ", ".join(f":rt{i}" for i in range(len(req_terminal)))
+        params = {f"jt{i}": v for i, v in enumerate(job_terminal)}
+        params.update({f"rt{i}": v for i, v in enumerate(req_terminal)})
+        return self._db.query(
+            f"""SELECT d.job_id, d.request_id, d.state FROM data_jobs d
+                JOIN requests r ON r.request_id = d.request_id
+                WHERE d.state IN ({jt}) AND r.state NOT IN ({rt})""", params)

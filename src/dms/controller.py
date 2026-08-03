@@ -33,6 +33,12 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
             repos.requests.finalize_from_job(
                 job["request_id"], DataJobState.PREVIEW_EXPIRED,
                 reason_code="preview_expired", actor="stepper")
+        # 고아 복구: 잡은 터미널인데 request가 크래시 등으로 비터미널로 남은 경우.
+        # finalize_from_job은 idempotent(이미 터미널이면 no-op)라 안전하게 재호출 가능.
+        for orphan in repos.data_jobs.terminal_jobs_with_live_request():
+            repos.requests.finalize_from_job(
+                orphan["request_id"], DataJobState(orphan["state"]),
+                reason_code="orphan_recovery", actor="stepper")
 
     return [
         Loop("planner", settings.planner_interval_seconds,
