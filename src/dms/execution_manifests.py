@@ -96,25 +96,30 @@ def _node_affinity(nodes):
 
 
 def _preflight_script(spec):
+    """(script, path_args) — 경로는 positional 파라미터로 넘겨 셸 인젝션을 원천 차단."""
     ap = _abs_paths(spec)
     if spec.operation == "sync":
-        return ("set -e; "
-                f'test -r "{ap["source"]}" || {{ echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }}; '
-                f'dest_parent=$(dirname "{ap["destination"]}"); '
-                'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
-                "echo DMS_PREFLIGHT_OK")
+        script = ('set -e; '
+                  'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
+                  'dest_parent=$(dirname "$2"); '
+                  'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
+                  'echo DMS_PREFLIGHT_OK')
+        return script, [ap["source"], ap["destination"]]
     if spec.operation == "rm":
-        return ("set -e; "
-                f'parent=$(dirname "{ap["target"]}"); '
-                'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
-                "echo DMS_PREFLIGHT_OK")
-    return ("set -e; "
-            f'test -r "{ap["target"]}" || {{ echo DMS_PREFLIGHT_REASON=target_not_readable; exit 1; }}; '
-            "echo DMS_PREFLIGHT_OK")
+        script = ('set -e; '
+                  'parent=$(dirname "$1"); '
+                  'test -w "$parent" || { echo DMS_PREFLIGHT_REASON=parent_not_writable; exit 1; }; '
+                  'echo DMS_PREFLIGHT_OK')
+        return script, [ap["target"]]
+    script = ('set -e; '
+              'test -r "$1" || { echo DMS_PREFLIGHT_REASON=target_not_readable; exit 1; }; '
+              'echo DMS_PREFLIGHT_OK')
+    return script, [ap["target"]]
 
 
 def build_preflight_pod(spec, *, job_image, namespace, volumes, node):
     ident = spec.identity or {}
+    script, path_args = _preflight_script(spec)
     return {
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": f"dms-preflight-{spec.job_id[:12]}-{node}"[:63],
@@ -125,7 +130,7 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node):
                  "nodeSelector": {"kubernetes.io/hostname": node},
                  "containers": [{
                      "name": "preflight", "image": job_image,
-                     "command": ["sh", "-c", _preflight_script(spec)],
+                     "command": ["sh", "-c", script, "sh", *path_args],
                      "securityContext": {"runAsUser": ident.get("uid", 0),
                                          "runAsGroup": ident.get("gid", 0)},
                      "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],

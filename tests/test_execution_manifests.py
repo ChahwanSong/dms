@@ -128,3 +128,42 @@ def test_preflight_pod_runs_as_identity():
     assert sc["runAsUser"] == 10001 and sc["runAsGroup"] == 10000
     assert m["spec"]["nodeSelector"]["kubernetes.io/hostname"] == "dms-w1"
     assert m["metadata"]["labels"]["dms.io/phase"] == "preflight"
+
+
+def test_nsync_three_tasks_node_affinity():
+    spec = _spec(operation="sync", tool="nsync",
+                 candidates={"source": ["dms-w1", "dms-w2"],
+                             "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b",
+                        "destination_storage": "cephfs-secondary"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    src = next(t for t in m["spec"]["tasks"] if t["name"] == "source-worker")
+    dst = next(t for t in m["spec"]["tasks"] if t["name"] == "destination-worker")
+    # 소스 워커는 source 노드에 affinity
+    src_values = src["template"]["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchExpressions"][0]["values"]
+    assert src_values == ["dms-w1", "dms-w2"]
+    # 목적지 워커는 destination 노드에 affinity
+    dst_values = dst["template"]["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchExpressions"][0]["values"]
+    assert dst_values == ["dms-w4"]
+
+
+def test_preflight_pod_shell_injection_safety():
+    # 셸 인젝션 공격을 시뮬레이트: 경로에 명령 치환 포함
+    malicious_target = 'a/$(touch /tmp/pwned)'
+    spec = _spec(operation="scan", tool="dscan", identity={"uid": 10001, "gid": 10000},
+                 paths={"target": malicious_target})
+    m = build_preflight_pod(spec, job_image="i", namespace="dms", volumes=_VOL,
+                            node="dms-w1")
+    cmd = m["spec"]["containers"][0]["command"]
+    # command는 ["sh", "-c", script, "sh", *path_args] 형태여야 함
+    assert cmd[0] == "sh" and cmd[1] == "-c"
+    script = cmd[2]
+    # 악성 경로가 스크립트에 직접 인라인되지 않음 (f-string 인젝션 없음)
+    assert malicious_target not in script
+    # 스크립트는 positional 파라미터 참조 (예: "$1")
+    assert '"$1"' in script or "'$1'" in script or "$1" in script
+    # 악성 경로는 argv의 positional args에만 있음
+    assert malicious_target in cmd[4:]
+    # 검사 마커 있음
+    assert "DMS_PREFLIGHT_REASON" in script or "DMS_PREFLIGHT_OK" in script
