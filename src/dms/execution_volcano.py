@@ -62,9 +62,15 @@ class VolcanoExecutionAdapter:
         return [{"name": mp.strip("/").replace("/", "-") or "root",
                  "hostPath": {"path": mp}, "mountPath": mp} for mp in minimal]
 
+    # phases that run as a single preflight Pod (not a Volcano Job): the initial
+    # preflight AND the post-confirm re-validation. Both must route to
+    # build_preflight_pod, else the re-check would be built as a Volcano Job with
+    # an "exec_preflight" phase in its name (underscore -> invalid -> 422).
+    _PREFLIGHT_PHASES = ("preflight", "exec_preflight")
+
     def submit(self, spec) -> str:
         try:
-            if spec.phase == "preflight":
+            if spec.phase in self._PREFLIGHT_PHASES:
                 nodes = (spec.candidates.get("primary")
                          or spec.candidates.get("source") or ["dms-w1"])
                 manifest = build_preflight_pod(

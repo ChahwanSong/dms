@@ -60,6 +60,17 @@ def test_submit_preflight_creates_pod():
     assert k8s.created[0]["kind"] == "Pod"
 
 
+def test_submit_exec_preflight_creates_pod_not_vcjob():
+    # the post-confirm re-validation phase must ALSO route to a preflight Pod,
+    # not a Volcano Job (a vcjob named with "exec_preflight" underscores is
+    # rejected by k8s -> submit 422).
+    k8s = _FakeK8s()
+    ref = _adapter(k8s).submit(_spec(phase="exec_preflight"))
+    assert ref.startswith("pod/")
+    assert k8s.created[0]["kind"] == "Pod"
+    assert "_" not in k8s.created[0]["metadata"]["name"]
+
+
 def test_submit_execution_creates_vcjob():
     k8s = _FakeK8s()
     ref = _adapter(k8s).submit(_spec(phase="execution"))
