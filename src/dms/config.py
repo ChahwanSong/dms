@@ -13,6 +13,7 @@ _SERVER_INT_KEYS = (
     ("DMS_RETENTION_INTERVAL_SECONDS", "retention_interval_seconds", 3600),
     ("DMS_AGENT_REPORT_RETENTION_DAYS", "agent_report_retention_days", 30),
     ("DMS_IDENTITY_PROBE_TTL_SECONDS", "identity_probe_ttl_seconds", 3600),
+    ("DMS_PLANNER_INTERVAL_SECONDS", "planner_interval_seconds", 10),
 )
 
 
@@ -37,6 +38,18 @@ def _parse_int(environ, key, default, problems):
         return default
 
 
+def _parse_bool(environ, key, default=False):
+    value = environ.get(key)
+    if value is None:
+        return default
+    return value.strip().lower() in ("true", "1")
+
+
+def _parse_csv_set(environ, key):
+    raw = environ.get(key, "")
+    return frozenset(item.strip() for item in raw.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -51,6 +64,9 @@ class Settings:
     retention_interval_seconds: int = 3600
     agent_report_retention_days: int = 30
     identity_probe_ttl_seconds: int = 3600
+    planner_interval_seconds: int = 10
+    allow_privileged_requesters: bool = False
+    privileged_requesters: frozenset = frozenset()
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -80,7 +96,10 @@ class Settings:
             session_secret=values["DMS_SESSION_SECRET"],
             api_host=environ.get("DMS_API_HOST", "0.0.0.0"),
             api_port=port,
-            **extra
+            **extra,
+            allow_privileged_requesters=_parse_bool(
+                environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS"),
+            privileged_requesters=_parse_csv_set(environ, "DMS_PRIVILEGED_REQUESTERS"),
         )
 
 
