@@ -174,3 +174,42 @@ def build_resource_key(operation, *, storage=None, source_storage=None,
     if op is Operation.SYNC:
         return f"data.sync:{source_storage}:{source}:{destination_storage}:{destination}:{fingerprint}"
     return f"data.{op.value}:{storage}:{target}:{fingerprint}"
+
+
+def build_data_payload(operation, *, storage=None, target=None, source_storage=None,
+                       source=None, destination_storage=None, destination=None,
+                       options: dict) -> tuple[dict, str]:
+    op = Operation(operation)
+    opts = validate_options(op, options)
+    fp = option_fingerprint(opts)
+    if op is Operation.SYNC:
+        src, dst = validate_sync_paths(source or "", destination or "")
+        if not source_storage or not destination_storage:
+            raise DomainValidationError("missing_storage")
+        payload = {"source_storage": source_storage, "source": src,
+                   "destination_storage": destination_storage, "destination": dst}
+        key = build_resource_key(op, source_storage=source_storage, source=src,
+                                 destination_storage=destination_storage,
+                                 destination=dst, fingerprint=fp)
+        return payload, key
+    if op is Operation.RM:
+        if not storage:
+            raise DomainValidationError("missing_storage")
+        tgt = validate_rm_target(target or "", opts)
+        return ({"storage": storage, "target": tgt},
+                build_resource_key(op, storage=storage, target=tgt, fingerprint=fp))
+    # scan
+    if not storage:
+        raise DomainValidationError("missing_storage")
+    tgt = validate_relative_path(target or "")
+    return ({"storage": storage, "target": tgt},
+            build_resource_key(op, storage=storage, target=tgt, fingerprint=fp))
+
+
+def validate_batch(operation, max_concurrency, items) -> None:
+    if operation not in (Operation.SCAN.value, Operation.SYNC.value):
+        raise DomainValidationError("invalid_batch_operation", operation)
+    if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool) or max_concurrency < 1:
+        raise DomainValidationError("invalid_max_concurrency")
+    if not items:
+        raise DomainValidationError("empty_batch")

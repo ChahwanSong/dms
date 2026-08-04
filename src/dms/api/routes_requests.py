@@ -2,9 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import (
     DomainValidationError, Operation, PRIORITIES,
-    build_resource_key, option_fingerprint, validate_options,
-    validate_owner_username, validate_relative_path, validate_rm_target,
-    validate_sync_paths,
+    build_data_payload, validate_options, validate_owner_username,
 )
 from .auth import Identity, require_user
 
@@ -37,27 +35,26 @@ def _validated_payload(body: RequestBody) -> tuple[dict, str]:
     options = validate_options(op, body.options)
     if body.owner_username is not None:
         validate_owner_username(body.owner_username)
-    fp = option_fingerprint(options)
+    # storage 필드 존재 검증은 여기서 구체적 reason_code로 먼저 수행한다
+    # (build_data_payload는 sync에 대해 "missing_storage" 하나로 뭉뚱그리므로,
+    #  source/destination을 구분하는 기존 API 계약(422 reason_code)을 유지하려면
+    #  존재 체크는 라우트에서, 경로/옵션 검증+fingerprint+resource_key는
+    #  build_data_payload에 위임한다).
     if op is Operation.SYNC:
         src_storage = _require(body.source_storage, "missing_source_storage")
         dst_storage = _require(body.destination_storage, "missing_destination_storage")
-        src, dst = validate_sync_paths(body.source or "", body.destination or "")
-        key = build_resource_key(op, source_storage=src_storage, source=src,
-                                 destination_storage=dst_storage,
-                                 destination=dst, fingerprint=fp)
-        payload = {"source_storage": src_storage, "source": src,
-                   "destination_storage": dst_storage,
-                   "destination": dst}
+        payload, key = build_data_payload(
+            "sync", source_storage=src_storage, source=body.source,
+            destination_storage=dst_storage, destination=body.destination,
+            options=body.options)
     elif op is Operation.RM:
         storage = _require(body.storage, "missing_storage")
-        target = validate_rm_target(body.target or "", options)
-        key = build_resource_key(op, storage=storage, target=target, fingerprint=fp)
-        payload = {"storage": storage, "target": target}
+        payload, key = build_data_payload(
+            "rm", storage=storage, target=body.target, options=body.options)
     else:
         storage = _require(body.storage, "missing_storage")
-        target = validate_relative_path(body.target or "")
-        key = build_resource_key(op, storage=storage, target=target, fingerprint=fp)
-        payload = {"storage": storage, "target": target}
+        payload, key = build_data_payload(
+            "scan", storage=storage, target=body.target, options=body.options)
     payload.update({"options": options, "owner_username": body.owner_username})
     return payload, key
 
