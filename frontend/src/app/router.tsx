@@ -1,0 +1,35 @@
+import { Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider } from "./AuthContext";
+import { AppShell } from "./AppShell";
+import { RequireRole } from "./RequireRole";
+import { useMe } from "../features/auth/useAuth";
+import { Login } from "../features/auth/Login";
+import { JobsList } from "../features/jobs/JobsList";
+import { SubmitSync } from "../features/jobs/SubmitSync";
+import { RequestDetail } from "../features/jobs/RequestDetail";
+import { StoragesList } from "../features/storages/StoragesList";
+import { Dashboard } from "../features/dashboard/Dashboard";
+
+function Home() {
+  const me = useMe();
+  if (me.isLoading) return <div className="p-6 text-muted">불러오는 중…</div>;
+  if (me.data?.role === "admin") return <Navigate to="/admin/dashboard" replace />;
+  return <Navigate to="/jobs" replace />;
+}
+
+export function AppRouter() {
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/" element={<Home />} />
+        <Route path="/jobs" element={<RequireRole><AppShell><JobsList /></AppShell></RequireRole>} />
+        <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitSync /></AppShell></RequireRole>} />
+        <Route path="/jobs/:requestId" element={<RequireRole><AppShell><RequestDetail /></AppShell></RequireRole>} />
+        <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
+        <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AuthProvider>
+  );
+}

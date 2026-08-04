@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useLogin } from "./useAuth";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -7,11 +8,15 @@ import { ApiError } from "../../lib/api";
 export function Login() {
   const [username, setU] = useState(""); const [password, setP] = useState("");
   const login = useLogin();
+  const nav = useNavigate();
   return (
     <div className="min-h-full grid place-items-center p-6">
       <Card className="w-full max-w-sm">
         <h1 className="text-lg font-semibold mb-4">DMS 로그인</h1>
-        <form onSubmit={(e) => { e.preventDefault(); login.mutate({ username, password }); }}
+        <form onSubmit={(e) => {
+                e.preventDefault();
+                login.mutate({ username, password }, { onSuccess: () => nav("/") });
+              }}
               className="space-y-3">
           <label className="block text-sm">사용자명
             <input aria-label="사용자명" className="mt-1 w-full rounded-lg border border-black/10 px-3 py-2"
