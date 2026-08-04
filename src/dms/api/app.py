@@ -41,16 +41,17 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
 
     static_dir = settings.static_dir
     if static_dir and os.path.isdir(static_dir):
-        assets = os.path.join(static_dir, "assets")
+        static_root = os.path.abspath(static_dir)
+        assets = os.path.join(static_root, "assets")
         if os.path.isdir(assets):
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
-        index_path = os.path.join(static_dir, "index.html")
+        index_path = os.path.join(static_root, "index.html")
 
         @app.get("/{full_path:path}")
         def spa_fallback(full_path: str) -> Response:
             # /api·/healthz·/docs·/openapi.json 는 이미 위 라우터가 처리했다.
-            candidate = os.path.normpath(os.path.join(static_dir, full_path))
-            if (candidate.startswith(os.path.abspath(static_dir))
+            candidate = os.path.normpath(os.path.join(static_root, full_path))
+            if ((candidate == static_root or candidate.startswith(static_root + os.sep))
                     and os.path.isfile(candidate)):
                 return FileResponse(candidate)
             return FileResponse(index_path)
