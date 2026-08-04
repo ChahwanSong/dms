@@ -10,7 +10,7 @@ def test_submit_scan_and_poll(client):
     _login(client, "alice")
     r = client.post("/api/user/requests", json={
         "operation": "scan", "storage": "ceph-a", "target": "team/data",
-        "options": {"summary_only": True}, "priority": "high"})
+        "options": {"top_k": 5}, "priority": "high"})
     assert r.status_code == 202
     rid = r.json()["request_id"]
     detail = client.get(f"/api/user/requests/{rid}").json()

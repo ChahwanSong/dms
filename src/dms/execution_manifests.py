@@ -2,6 +2,8 @@
 
 import json
 
+_SCAN_BOOL_FLAGS = {"verbose": "--verbose", "quiet": "--quiet"}
+_SCAN_VALUE_FLAGS = {"top_k": "--top-k"}
 _SYNC_BOOL_FLAGS = {"delete": "--delete", "contents": "--contents",
                     "direct": "--direct", "open_noatime": "--open-noatime",
                     "quiet": "--quiet"}
@@ -10,27 +12,38 @@ _SYNC_VALUE_FLAGS = {"batch_files": "--batch-files", "bufsize": "--bufsize",
 _RM_BOOL_FLAGS = {"stat": "--stat", "lite": "--lite", "quiet": "--quiet"}
 
 
+def _render(options, bool_flags, value_flags):
+    flags: list[str] = []
+    for key, flag in bool_flags.items():
+        if options.get(key) is True:
+            flags.append(flag)
+    for key, flag in value_flags.items():
+        if key in options:
+            flags.extend([flag, str(options[key])])
+    return flags
+
+
 def render_tool_flags(tool: str, options: dict) -> list[str]:
     options = options or {}
-    flags: list[str] = []
+    if tool == "dscan":
+        return _render(options, _SCAN_BOOL_FLAGS, _SCAN_VALUE_FLAGS)
     if tool in ("dsync", "nsync"):
-        for key, flag in _SYNC_BOOL_FLAGS.items():
-            if options.get(key) is True:
-                flags.append(flag)
-        for key, flag in _SYNC_VALUE_FLAGS.items():
-            if key in options:
-                flags.extend([flag, str(options[key])])
-    elif tool == "drm":
-        for key, flag in _RM_BOOL_FLAGS.items():
-            if options.get(key) is True:
-                flags.append(flag)
-    return flags
+        return _render(options, _SYNC_BOOL_FLAGS, _SYNC_VALUE_FLAGS)
+    if tool == "drm":
+        return _render(options, _RM_BOOL_FLAGS, {})
+    return []
 
 
 def tool_argv(spec, *, abs_paths: dict) -> list[str]:
     if spec.tool == "dscan":
-        return ["--directory", abs_paths["target"],
-                "--output", "$DMS_SCAN_REPORT", "--print"]
+        opts = spec.options or {}
+        flags = render_tool_flags("dscan", opts)
+        # --output(JSON 리포트)는 항상 필요. --print(rank0 사람용 요약)는 기본이되
+        # quiet면 생략한다 — --quiet와 상충하기 때문.
+        tail = ["--output", "$DMS_SCAN_REPORT"]
+        if opts.get("quiet") is not True:
+            tail.append("--print")
+        return ["--directory", abs_paths["target"], *flags, *tail]
     flags = render_tool_flags(spec.tool, spec.options)
     dry = ["--dryrun"] if spec.dryrun else []
     if spec.tool in ("dsync", "nsync"):

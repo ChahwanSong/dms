@@ -6,8 +6,30 @@ from dms.domain import (
 
 
 def test_scan_options_ok():
-    out = validate_options(Operation.SCAN, {"summary_only": True, "max_depth": 3})
-    assert out == {"summary_only": True, "max_depth": 3}
+    # dscan이 실제 지원하는 옵션만 수락한다: top_k/verbose/quiet.
+    out = validate_options(Operation.SCAN, {"top_k": 5, "verbose": True})
+    assert out == {"top_k": 5, "verbose": True}
+
+
+@pytest.mark.parametrize("key", ["summary_only", "follow_symlinks",
+                                 "one_file_system", "max_depth"])
+def test_scan_unsupported_options_rejected(key):
+    # dscan에 대응 플래그가 없는 옛 옵션은 이제 unknown_option으로 거부(수락-무시 금지).
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SCAN, {key: 3 if key == "max_depth" else True})
+    assert e.value.reason_code == "unknown_option"
+
+
+def test_scan_verbose_quiet_exclusive():
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SCAN, {"verbose": True, "quiet": True})
+    assert e.value.reason_code == "invalid_option"
+
+
+def test_scan_top_k_range():
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SCAN, {"top_k": 0})
+    assert e.value.reason_code == "invalid_option"
 
 
 def test_unknown_option_rejected():

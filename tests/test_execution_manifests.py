@@ -30,6 +30,28 @@ def test_scan_argv():
                     "--output", "$DMS_SCAN_REPORT", "--print"]
 
 
+def test_scan_argv_with_options():
+    # top_k(값)/verbose(불리언)가 dscan 명령에 렌더된다. --print는 기본 유지.
+    spec = _spec(operation="scan", tool="dscan", options={"top_k": 25, "verbose": True})
+    argv = tool_argv(spec, abs_paths={"target": "/cephfs/dms/t"})
+    assert argv == ["--directory", "/cephfs/dms/t", "--verbose", "--top-k", "25",
+                    "--output", "$DMS_SCAN_REPORT", "--print"]
+
+
+def test_scan_argv_quiet_omits_print():
+    # quiet면 --quiet를 넣고, 상충하는 --print는 생략한다.
+    spec = _spec(operation="scan", tool="dscan", options={"quiet": True})
+    argv = tool_argv(spec, abs_paths={"target": "/cephfs/dms/t"})
+    assert "--quiet" in argv and "--print" not in argv
+    assert argv[-2:] == ["--output", "$DMS_SCAN_REPORT"]
+
+
+def test_render_tool_flags_dscan():
+    assert render_tool_flags("dscan", {"top_k": 3}) == ["--top-k", "3"]
+    assert render_tool_flags("dscan", {"verbose": True}) == ["--verbose"]
+    assert render_tool_flags("dscan", {}) == []
+
+
 def test_sync_argv_with_dryrun():
     spec = _spec(operation="sync", tool="dsync", dryrun=True, options={"delete": True})
     argv = tool_argv(spec, abs_paths={"source": "/cephfs/a", "destination": "/cephfs/b"})

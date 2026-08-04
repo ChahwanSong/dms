@@ -114,9 +114,12 @@ _CHOWN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9._-]{0,63})?(:[A-Za-z_][A-Za-z0-9._
 
 _BOOL = ("bool",)
 _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {
+    # dscan(포크)이 실제 지원하는 플래그만 노출한다: --top-k <N>, --verbose, --quiet.
+    # (이전의 summary_only/follow_symlinks/one_file_system/max_depth는 dscan에
+    #  대응 플래그가 없어 수락돼도 무효였으므로 제거 — unknown_option으로 거부된다.)
     Operation.SCAN: {
-        "summary_only": _BOOL, "follow_symlinks": _BOOL, "one_file_system": _BOOL,
-        "max_depth": ("int", 1, 64),
+        "top_k": ("int", 1, 1_000_000),
+        "verbose": _BOOL, "quiet": _BOOL,
     },
     Operation.SYNC: {
         "delete": _BOOL, "contents": _BOOL, "direct": _BOOL,
@@ -154,6 +157,8 @@ def validate_options(operation: Operation, options: dict) -> dict:
         out[key] = value
     if Operation(operation) is Operation.RM and out.get("stat") and out.get("lite"):
         raise DomainValidationError("invalid_option", "stat and lite are mutually exclusive")
+    if Operation(operation) is Operation.SCAN and out.get("verbose") and out.get("quiet"):
+        raise DomainValidationError("invalid_option", "verbose and quiet are mutually exclusive")
     return out
 
 
