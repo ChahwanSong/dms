@@ -5,6 +5,7 @@ from .requests import RequestsRepository
 from .storages import StoragesRepository
 from .control import ControlRepository
 from .data_jobs import DataJobsRepository
+from .batches import BatchesRepository
 
 
 class Repositories:
@@ -17,3 +18,4 @@ class Repositories:
         self.storages = StoragesRepository(db)
         self.control = ControlRepository(db)
         self.data_jobs = DataJobsRepository(db)
+        self.batches = BatchesRepository(db)

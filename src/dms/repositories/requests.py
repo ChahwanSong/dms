@@ -19,7 +19,7 @@ class RequestsRepository:
         self._db = db
 
     def create(self, *, operation, requester_id, actor, resource_key,
-               payload: dict, priority: str) -> str:
+               payload: dict, priority: str, batch_id=None) -> str:
         request_id = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
@@ -27,12 +27,14 @@ class RequestsRepository:
             order = row["m"] + 1
             self._db.execute(
                 """INSERT INTO requests (request_id, commit_order, operation, requester_id,
-                       actor, resource_key, priority, payload, state, created_at, updated_at)
-                   VALUES (:id, :o, :op, :req, :actor, :key, :pri, :payload, :state, :now, :now)""",
+                       actor, resource_key, priority, payload, state, created_at, updated_at,
+                       batch_id)
+                   VALUES (:id, :o, :op, :req, :actor, :key, :pri, :payload, :state, :now, :now,
+                       :bid)""",
                 {"id": request_id, "o": order, "op": operation, "req": requester_id,
                  "actor": actor, "key": resource_key, "pri": priority,
                  "payload": dump_json(payload), "state": RequestState.PENDING.value,
-                 "now": now},
+                 "now": now, "bid": batch_id},
             )
             self._record_transition(request_id, None, RequestState.PENDING, None, actor, now)
         return request_id
