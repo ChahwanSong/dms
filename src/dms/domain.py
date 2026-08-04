@@ -187,7 +187,8 @@ def build_data_payload(operation, *, storage=None, target=None, source_storage=N
         if not source_storage or not destination_storage:
             raise DomainValidationError("missing_storage")
         payload = {"source_storage": source_storage, "source": src,
-                   "destination_storage": destination_storage, "destination": dst}
+                   "destination_storage": destination_storage, "destination": dst,
+                   "options": opts}
         key = build_resource_key(op, source_storage=source_storage, source=src,
                                  destination_storage=destination_storage,
                                  destination=dst, fingerprint=fp)
@@ -196,13 +197,13 @@ def build_data_payload(operation, *, storage=None, target=None, source_storage=N
         if not storage:
             raise DomainValidationError("missing_storage")
         tgt = validate_rm_target(target or "", opts)
-        return ({"storage": storage, "target": tgt},
+        return ({"storage": storage, "target": tgt, "options": opts},
                 build_resource_key(op, storage=storage, target=tgt, fingerprint=fp))
     # scan
     if not storage:
         raise DomainValidationError("missing_storage")
     tgt = validate_relative_path(target or "")
-    return ({"storage": storage, "target": tgt},
+    return ({"storage": storage, "target": tgt, "options": opts},
             build_resource_key(op, storage=storage, target=tgt, fingerprint=fp))
 
 
