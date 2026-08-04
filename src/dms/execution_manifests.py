@@ -171,10 +171,26 @@ def _node_affinity(nodes):
             {"key": "kubernetes.io/hostname", "operator": "In", "values": nodes}]}]}}}
 
 
-def _preflight_script(spec):
-    """(script, path_args) — 경로는 positional 파라미터로 넘겨 셸 인젝션을 원천 차단."""
+def _preflight_script(spec, *, role=None):
+    """(script, path_args) — 경로는 positional 파라미터로 넘겨 셸 인젝션을 원천 차단.
+
+    role: nsync(소스/목적지가 disjoint 노드)는 한 노드에서 양쪽을 검사할 수 없다 —
+    소스 노드엔 목적지가, 목적지 노드엔 소스가 마운트되지 않기 때문. role="source"는
+    소스 읽기만, role="destination"은 목적지 부모 쓰기만 검사한다(각각 해당 노드에서).
+    role=None(dsync 코로케이션/scan/rm)은 한 파드에서 전부 검사."""
     ap = _abs_paths(spec)
     if spec.operation == "sync":
+        if role == "source":
+            script = ('set -e; '
+                      'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
+                      'echo DMS_PREFLIGHT_OK')
+            return script, [ap["source"]]
+        if role == "destination":
+            script = ('set -e; '
+                      'dest_parent=$(dirname "$1"); '
+                      'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
+                      'echo DMS_PREFLIGHT_OK')
+            return script, [ap["destination"]]
         script = ('set -e; '
                   'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
                   'dest_parent=$(dirname "$2"); '
@@ -193,19 +209,24 @@ def _preflight_script(spec):
     return script, [ap["target"]]
 
 
-def build_preflight_pod(spec, *, job_image, namespace, volumes, node):
+_PREFLIGHT_ROLE_SEG = {"source": "-src", "destination": "-dst"}
+
+
+def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None):
     ident = spec.identity or {}
-    script, path_args = _preflight_script(spec)
+    script, path_args = _preflight_script(spec, role=role)
+    role_seg = _PREFLIGHT_ROLE_SEG.get(role, "")
     return {
         "apiVersion": "v1", "kind": "Pod",
-        # phase in the name: one job can run TWO preflight Pods -- the initial
-        # (phase "preflight") and the post-confirm re-validation (phase
-        # "exec_preflight"). Same job_id[:12]+node would collide (create ->
-        # AlreadyExists) if the first Pod still lingers, so scope the name by phase.
+        # phase(+role) in the name: one job can run multiple preflight Pods -- the
+        # initial (phase "preflight") and the post-confirm re-validation (phase
+        # "exec_preflight"), and for nsync EACH of those splits into a source-node
+        # and a destination-node Pod (role src/dst). Same job_id[:12]+node would
+        # collide (create -> AlreadyExists), so scope the name by phase and role.
         # Underscores are illegal in a Pod name (DNS-1123) -> "exec_preflight"
         # must become "exec-preflight" or the create is rejected (submit_failed).
         "metadata": {"name": (f"dms-preflight-{spec.job_id[:12]}-"
-                              f"{spec.phase.replace('_', '-')}-{node}")[:63],
+                              f"{spec.phase.replace('_', '-')}{role_seg}-{node}")[:63],
                      "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": "preflight"}},

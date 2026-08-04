@@ -37,11 +37,19 @@ class VolcanoExecutionAdapter:
         self._artifact_base = artifact_base  # summary 경로 fallback 재구성용
         self._summary_paths = {}   # ref -> artifact summary.json path (in-memory 빠른 경로)
 
-    def _volumes(self, spec):
+    def _volumes(self, spec, *, role=None):
         # 데이터 스토리지 mount_path + 아티팩트 base 를 수집해 hostPath 볼륨으로.
+        # role: nsync preflight는 소스/목적지가 disjoint 노드라 각 role 파드에는 해당
+        # 스토리지만 마운트해야 한다 — 반대편 스토리지는 그 노드에 없어 type:Directory
+        # hostPath가 스케줄 실패한다. role=None은 양쪽(코로케이션 dsync/실행)을 마운트.
         if spec.operation == "sync":
-            snames = [spec.paths.get("source_storage"),
-                      spec.paths.get("destination_storage")]
+            if role == "source":
+                snames = [spec.paths.get("source_storage")]
+            elif role == "destination":
+                snames = [spec.paths.get("destination_storage")]
+            else:
+                snames = [spec.paths.get("source_storage"),
+                          spec.paths.get("destination_storage")]
         else:
             snames = [spec.paths.get("storage")]
         mount_paths = []
@@ -68,14 +76,29 @@ class VolcanoExecutionAdapter:
     # an "exec_preflight" phase in its name (underscore -> invalid -> 422).
     _PREFLIGHT_PHASES = ("preflight", "exec_preflight")
 
+    def _preflight_pod(self, spec, node, role):
+        return build_preflight_pod(
+            spec, job_image=self._job_image, namespace=self._namespace,
+            volumes=self._volumes(spec, role=role), node=node, role=role)
+
     def submit(self, spec) -> str:
         try:
             if spec.phase in self._PREFLIGHT_PHASES:
+                # nsync = disjoint source/destination pools ("primary" 없음). 소스
+                # 노드에서는 목적지 쓰기를, 목적지 노드에서는 소스 읽기를 검증할 수
+                # 없으므로 preflight를 양쪽 노드에 각각 띄운다(role src/dst). 복합
+                # ref "pods/<src>,<dst>"로 반환 — poll/terminate가 둘 다 다룬다.
+                if "primary" not in spec.candidates and spec.candidates.get("source"):
+                    src = self._preflight_pod(spec, spec.candidates["source"][0], "source")
+                    dst = self._preflight_pod(
+                        spec, spec.candidates["destination"][0], "destination")
+                    self._k8s.create(src)
+                    self._k8s.create(dst)
+                    return "pods/" + ",".join(
+                        [src["metadata"]["name"], dst["metadata"]["name"]])
                 nodes = (spec.candidates.get("primary")
                          or spec.candidates.get("source") or ["dms-w1"])
-                manifest = build_preflight_pod(
-                    spec, job_image=self._job_image, namespace=self._namespace,
-                    volumes=self._volumes(spec), node=nodes[0])
+                manifest = self._preflight_pod(spec, nodes[0], None)
                 prefix = "pod"
             else:
                 manifest = build_volcano_job(
@@ -92,15 +115,29 @@ class VolcanoExecutionAdapter:
             f"{base}/{spec.job_id}/{spec.phase}/summary.json".replace("file://", ""))
         return ref
 
+    def _poll_pod(self, name) -> ExecStatus:
+        obj = self._k8s.get("Pod", name, self._namespace)
+        if obj is None:
+            return ExecStatus.FAILED
+        return _POD_PHASE.get((obj.get("status") or {}).get("phase"), ExecStatus.FAILED)
+
     def poll(self, ref) -> ExecStatus:
         prefix, name = ref.split("/", 1)
+        if prefix == "pods":
+            # 복합 preflight(nsync src+dst): fail-closed 결합 — 하나라도 FAILED면 FAILED,
+            # 전부 SUCCEEDED라야 SUCCEEDED, 그 외(진행 중)는 RUNNING.
+            statuses = [self._poll_pod(n) for n in name.split(",")]
+            if any(s == ExecStatus.FAILED for s in statuses):
+                return ExecStatus.FAILED
+            if all(s == ExecStatus.SUCCEEDED for s in statuses):
+                return ExecStatus.SUCCEEDED
+            return ExecStatus.RUNNING
+        if prefix == "pod":
+            return self._poll_pod(name)
         obj = self._k8s.get(_KIND[prefix], name, self._namespace)
         if obj is None:
             return ExecStatus.FAILED
-        status = obj.get("status") or {}
-        if prefix == "pod":
-            return _POD_PHASE.get(status.get("phase"), ExecStatus.FAILED)
-        phase = (status.get("state") or {}).get("phase")
+        phase = ((obj.get("status") or {}).get("state") or {}).get("phase")
         return _VCJOB_PHASE.get(phase, ExecStatus.FAILED)
 
     def read_summary(self, ref):
@@ -122,6 +159,8 @@ class VolcanoExecutionAdapter:
         summary.json 경로를 재구성한다. build_volcano_job/build_preflight_pod가
         dms.io/job-id(전체 job_id)와 dms.io/phase 라벨을 이미 붙여둔다."""
         prefix, name = ref.split("/", 1)
+        if prefix not in _KIND:      # 복합 preflight ref("pods") 등 — summary 없음
+            return None
         obj = self._k8s.get(_KIND[prefix], name, self._namespace)
         if obj is None:
             return None
@@ -135,8 +174,11 @@ class VolcanoExecutionAdapter:
 
     def terminate(self, ref) -> None:
         prefix, name = ref.split("/", 1)
+        names = name.split(",") if prefix == "pods" else [name]
+        kind = "Pod" if prefix in ("pod", "pods") else _KIND[prefix]
         try:
-            self._k8s.delete(_KIND[prefix], name, self._namespace)
+            for n in names:
+                self._k8s.delete(kind, n, self._namespace)
         except Exception as exc:
             raise ExecutionError("terminate_failed", str(exc)[:200]) from exc
 

@@ -71,6 +71,68 @@ def test_submit_exec_preflight_creates_pod_not_vcjob():
     assert "_" not in k8s.created[0]["metadata"]["name"]
 
 
+def _nsync_adapter(k8s):
+    def storages_lookup(n):
+        return {"cephfs-third": {"mount_path": "/cephfs-third", "managed_root": "/cephfs-third"},
+                "cephfs-secondary": {"mount_path": "/cephfs-secondary",
+                                     "managed_root": "/cephfs-secondary"}}.get(
+            n, {"mount_path": "/cephfs", "managed_root": "/cephfs/dms"})
+    return VolcanoExecutionAdapter(
+        k8s, job_image="reg/img:1", namespace="dms", storages_lookup=storages_lookup,
+        read_text=lambda p: None, artifact_base="file:///cephfs/dms/artifacts")
+
+
+def _nsync_preflight_spec(phase="preflight"):
+    return _spec(phase=phase, op="sync", tool="nsync",
+                 cand={"source": ["dms-w1", "dms-w2"], "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b",
+                        "destination_storage": "cephfs-secondary"})
+
+
+def test_submit_nsync_preflight_creates_source_and_dest_pods():
+    # nsync preflight는 소스 노드(소스 읽기)와 목적지 노드(목적지 쓰기)에 각각 Pod를
+    # 띄운다 -- 한 노드에서는 반대편이 마운트되지 않아 검증 불가.
+    k8s = _FakeK8s()
+    ref = _nsync_adapter(k8s).submit(_nsync_preflight_spec())
+    assert ref.startswith("pods/") and "," in ref
+    assert len(k8s.created) == 2
+    pods = {p["spec"]["nodeSelector"]["kubernetes.io/hostname"]: p for p in k8s.created}
+    assert set(pods) == {"dms-w1", "dms-w4"}          # source[0] + destination[0]
+    src, dst = pods["dms-w1"], pods["dms-w4"]
+    # role별 볼륨: 소스 Pod엔 목적지 스토리지가 없어야(그 노드에 미마운트), 반대도
+    src_mp = {v["hostPath"]["path"] for v in src["spec"]["volumes"]}
+    dst_mp = {v["hostPath"]["path"] for v in dst["spec"]["volumes"]}
+    assert "/cephfs-third" in src_mp and "/cephfs-secondary" not in src_mp
+    assert "/cephfs-secondary" in dst_mp and "/cephfs-third" not in dst_mp
+    # 소스 Pod는 소스 읽기만, 목적지 Pod는 목적지 쓰기만 검사
+    assert "source_not_readable" in src["spec"]["containers"][0]["command"][2]
+    assert "destination_parent_not_writable" in dst["spec"]["containers"][0]["command"][2]
+    assert "_" not in src["metadata"]["name"] and "_" not in dst["metadata"]["name"]
+
+
+def test_poll_nsync_preflight_combines_fail_closed():
+    k8s = _FakeK8s()
+    a = _nsync_adapter(k8s)
+    ref = a.submit(_nsync_preflight_spec())
+    n1, n2 = ref.split("/", 1)[1].split(",")
+    k8s.set_status("Pod", n1, {"phase": "Running"})
+    k8s.set_status("Pod", n2, {"phase": "Succeeded"})
+    assert a.poll(ref) == ExecStatus.RUNNING          # 하나라도 미완료면 RUNNING
+    k8s.set_status("Pod", n1, {"phase": "Succeeded"})
+    assert a.poll(ref) == ExecStatus.SUCCEEDED         # 전부 성공이라야 SUCCEEDED
+    k8s.set_status("Pod", n2, {"phase": "Failed"})
+    assert a.poll(ref) == ExecStatus.FAILED            # 하나라도 실패면 FAILED(fail-closed)
+
+
+def test_terminate_nsync_preflight_deletes_both():
+    k8s = _FakeK8s()
+    a = _nsync_adapter(k8s)
+    ref = a.submit(_nsync_preflight_spec())
+    a.terminate(ref)
+    assert len({name for _, name in k8s.deleted}) == 2
+
+
 def test_submit_execution_creates_vcjob():
     k8s = _FakeK8s()
     ref = _adapter(k8s).submit(_spec(phase="execution"))
