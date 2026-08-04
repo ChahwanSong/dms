@@ -15,6 +15,7 @@ from .routes_agent import router as agent_router
 from .routes_nodes import router as nodes_router
 from .routes_policies import router as policies_router
 from .routes_denylist import router as denylist_router
+from .routes_batches import router as batches_router
 
 
 def create_app(settings: Settings, db: Database) -> FastAPI:
@@ -38,6 +39,7 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app.include_router(nodes_router)
     app.include_router(policies_router)
     app.include_router(denylist_router)
+    app.include_router(batches_router)
 
     static_dir = settings.static_dir
     if static_dir and os.path.isdir(static_dir):
