@@ -728,7 +728,10 @@ export function useLogin() {
   return useMutation({
     mutationFn: (b: { username: string; password: string }) =>
       apiSend<Me>("POST", "/api/auth/login", b),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "me"] }),
+    // clear ALL cached data on login, not just me — otherwise the previous
+    // user's jobs/storages/nodes queries linger and the new user briefly sees
+    // them (cross-user leak). me is refetched fresh when the shell mounts.
+    onSuccess: () => qc.clear(),
   });
 }
 
@@ -736,7 +739,9 @@ export function useLogout() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiSend("POST", "/api/auth/logout"),
-    onSuccess: () => qc.clear(),
+    // onSettled (not onSuccess): clear the client cache even if the logout
+    // POST fails — the user intends to log out; never leave stale session data.
+    onSettled: () => qc.clear(),
   });
 }
 ```
@@ -748,7 +753,10 @@ import { useQueryClient } from "@tanstack/react-query";
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const qc = useQueryClient();
   useEffect(() => {
-    const h = () => qc.invalidateQueries({ queryKey: ["auth", "me"] });
+    // session invalidated (any 401) → drop ALL cached authorized data, not just
+    // me, so no stale user data lingers. RequireRole (Task 6) redirects to
+    // /login on the me error, which unmounts the me observer and bounds refetch.
+    const h = () => qc.clear();
     window.addEventListener("dms:unauthorized", h);
     return () => window.removeEventListener("dms:unauthorized", h);
   }, [qc]);
