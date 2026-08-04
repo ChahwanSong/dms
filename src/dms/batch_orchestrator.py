@@ -1,12 +1,17 @@
 """배치 오케스트레이터: 배치 자식(item)을 실제 request로 throttle-materialize하고,
 자식 종단 상태를 집계해 배치를 완료시키는 controller-loop.
 
-스캔 경로(이 파일): Running 배치에서 max_concurrency - in_flight 만큼 Queued item을
+스캔 경로: Running 배치에서 max_concurrency - in_flight 만큼 Queued item을
 materialize하고, 자식 request가 종단이면 item을 종단화 + counts를 bump하며,
 전 item이 종단이면 배치를 Completed로 전이한다.
 
-sync 분기(Previewing/confirm/preview-expiry)는 이후 작업에서 `_drive`를 확장한다.
+sync 경로: Previewing 배치에서 Queued item을 쓰로틀 materialize해 preview를 진행시키고,
+전 item이 previewed(ConfirmPending)/종단이면 배치를 PreviewReady로 전이한다. 운영자가
+배치를 Running으로 confirm하면, 남은 Queued item을 materialize한 뒤 남은 슬롯만큼
+ConfirmPending 자식을 쓰로틀 confirm(`_confirm_child`)한다. preview가 만료된 자식은
+Queued로 재시도(reset)된다.
 """
+from .db import utc_now_iso
 from .domain import (Operation, RequestState, TERMINAL_REQUEST_STATES,
                      DataJobState, build_data_payload)
 
@@ -75,7 +80,29 @@ class BatchOrchestrator:
         if terminal == total:
             self._repos.batches.set_status(bid, "Completed")
             return
-        if batch["status"] == "Running":
+        now = utc_now_iso()
+        if batch["status"] == "Previewing":
+            if not queued and not in_flight:          # 전원 previewed(또는 종단)
+                self._repos.batches.set_status(bid, "PreviewReady")
+                return
             slots = batch["max_concurrency"] - len(in_flight)
             for item in queued[:max(0, slots)]:
                 self._materialize(batch, item)
+            for item, job in previewed:               # preview 만료 재시도
+                if job.get("preview_expires_at") and job["preview_expires_at"] < now:
+                    self._repos.batches.reset_item_to_queued(bid, item["seq"])
+            return
+        if batch["status"] == "Running":
+            slots = batch["max_concurrency"] - len(in_flight)
+            for item in queued[:max(0, slots)]:
+                self._materialize(batch, item); slots -= 1
+            if batch["operation"] == "sync":
+                for item, job in previewed[:max(0, slots)]:
+                    self._confirm_child(item, job, now)
+
+    def _confirm_child(self, item, job, now):
+        if job.get("preview_expires_at") and job["preview_expires_at"] < now:
+            self._repos.batches.reset_item_to_queued(item["batch_id"], item["seq"])
+            return
+        self._repos.data_jobs.set_confirmed(job["job_id"], job["preview_fingerprint"])
+        self._repos.data_jobs.set_job_state(job["job_id"], DataJobState.EXECUTING, actor="batch-orchestrator")
