@@ -86,6 +86,7 @@ class Settings:
     job_image: str = ""
     k8s_namespace: str = "dms"
     job_max_attempts: int = 3
+    static_dir: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -131,6 +132,7 @@ class Settings:
             execution_backend=environ.get("DMS_EXECUTION_BACKEND", "stub"),
             job_image=environ.get("DMS_JOB_IMAGE", ""),
             k8s_namespace=environ.get("DMS_K8S_NAMESPACE", "dms"),
+            static_dir=environ.get("DMS_STATIC_DIR"),
         )
 
 
