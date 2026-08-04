@@ -28,10 +28,37 @@ def migrate(db: Database) -> None:
             payload TEXT NOT NULL,
             state TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL)""",
+            updated_at TEXT NOT NULL,
+            batch_id TEXT)""",
         "CREATE INDEX IF NOT EXISTS idx_requests_resource ON requests (resource_key, commit_order)",
         "CREATE INDEX IF NOT EXISTS idx_requests_requester ON requests (requester_id, commit_order)",
         "CREATE INDEX IF NOT EXISTS idx_requests_state ON requests (state, commit_order)",
+        """CREATE TABLE IF NOT EXISTS batches (
+            batch_id TEXT PRIMARY KEY,
+            operation TEXT NOT NULL,
+            requester_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            status TEXT NOT NULL,
+            max_concurrency INTEGER NOT NULL,
+            options TEXT NOT NULL,
+            note TEXT,
+            item_count INTEGER NOT NULL DEFAULT 0,
+            succeeded_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS idx_batches_status ON batches (status, created_at)",
+        """CREATE TABLE IF NOT EXISTS batch_items (
+            batch_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL,
+            request_id TEXT,
+            reason_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (batch_id, seq))""",
+        "CREATE INDEX IF NOT EXISTS idx_batch_items_status ON batch_items (batch_id, status)",
         """CREATE TABLE IF NOT EXISTS plans (
             plan_id TEXT PRIMARY KEY,
             request_id TEXT NOT NULL,
@@ -206,6 +233,9 @@ def migrate(db: Database) -> None:
     for stmt in stmts:
         db.execute(stmt)
     _ensure_columns(db)
+    # requests.batch_id는 CREATE TABLE(신규 DB) 또는 _ensure_columns의 ALTER(구형 DB)로
+    # 보강된 뒤에만 존재가 보장되므로, 이 인덱스는 그 이후에 생성한다.
+    db.execute("CREATE INDEX IF NOT EXISTS idx_requests_batch ON requests (batch_id)")
     db.execute(
         """INSERT INTO schema_migrations (version, applied_at)
            SELECT :v, :at WHERE NOT EXISTS
@@ -238,6 +268,7 @@ def _ensure_columns(db):
         ("data_jobs", "precondition", "TEXT"),
         ("data_jobs", "confirmed_fingerprint", "TEXT"),
         ("data_jobs", "phase_refs", "TEXT"),
+        ("requests", "batch_id", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
