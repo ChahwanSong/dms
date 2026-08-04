@@ -73,16 +73,22 @@ import pytest
 from dms.domain import build_data_payload, validate_batch, DomainValidationError
 
 def test_build_data_payload_scan():
+    # payload INCLUDES the validated options (single source of the full request payload)
     payload, key = build_data_payload("scan", storage="s1", target="a/b", options={})
-    assert payload == {"storage": "s1", "target": "a/b"}
+    assert payload == {"storage": "s1", "target": "a/b", "options": {}}
     assert key.startswith("data.scan:s1:a/b:")
 
 def test_build_data_payload_sync():
     payload, key = build_data_payload("sync", source_storage="s1", source="a",
         destination_storage="s2", destination="b", options={"delete": True})
     assert payload == {"source_storage": "s1", "source": "a",
-                       "destination_storage": "s2", "destination": "b"}
+                       "destination_storage": "s2", "destination": "b",
+                       "options": {"delete": True}}
     assert key.startswith("data.sync:s1:a:s2:b:")
+
+def test_build_data_payload_missing_storage():
+    with pytest.raises(DomainValidationError):
+        build_data_payload("scan", target="a", options={})   # storage 누락 → 방어 가드
 
 def test_build_data_payload_rejects_bad_path():
     with pytest.raises(DomainValidationError):
@@ -116,7 +122,8 @@ def build_data_payload(operation, *, storage=None, target=None, source_storage=N
         if not source_storage or not destination_storage:
             raise DomainValidationError("missing_storage")
         payload = {"source_storage": source_storage, "source": src,
-                   "destination_storage": destination_storage, "destination": dst}
+                   "destination_storage": destination_storage, "destination": dst,
+                   "options": opts}
         key = build_resource_key(op, source_storage=source_storage, source=src,
                                  destination_storage=destination_storage,
                                  destination=dst, fingerprint=fp)
@@ -125,16 +132,21 @@ def build_data_payload(operation, *, storage=None, target=None, source_storage=N
         if not storage:
             raise DomainValidationError("missing_storage")
         tgt = validate_rm_target(target or "", opts)
-        return ({"storage": storage, "target": tgt},
+        return ({"storage": storage, "target": tgt, "options": opts},
                 build_resource_key(op, storage=storage, target=tgt, fingerprint=fp))
     # scan
     if not storage:
         raise DomainValidationError("missing_storage")
     tgt = validate_relative_path(target or "")
-    return ({"storage": storage, "target": tgt},
+    return ({"storage": storage, "target": tgt, "options": opts},
             build_resource_key(op, storage=storage, target=tgt, fingerprint=fp))
+```
 
+**payload에 `options`가 포함된다** — 이것이 요청 payload의 단일 출처다. `routes_requests`와 배치
+오케스트레이터(Task 4) 둘 다 이 payload를 그대로 requests.create에 넘긴다(오케스트레이터는
+options 유실 없이 자식 요청을 만든다). 아래 Step 4 리팩터는 이 payload를 쓰고 owner_username만 더한다.
 
+```python
 def validate_batch(operation, max_concurrency, items) -> None:
     if operation not in (Operation.SCAN.value, Operation.SYNC.value):
         raise DomainValidationError("invalid_batch_operation", operation)
@@ -147,14 +159,22 @@ def validate_batch(operation, max_concurrency, items) -> None:
 - [ ] **Step 4: `routes_requests._validated_payload` 리팩터(중복 제거)**
 
 `_validated_payload(body)`의 operation별 payload/resource_key 계산부를 `build_data_payload`
-호출로 교체한다(옵션 검증·owner_username 검증은 그대로). 예: sync 분기를
+호출로 교체한다. `build_data_payload`가 이제 **payload에 검증된 options를 포함**하므로, 상단의
+별도 `validate_options(...)` 선호출과 `payload.update({"options": ...})`는 제거하고, 반환된 payload에
+`owner_username`만 더한다(옵션 검증은 build_data_payload가 단일 수행 = 이중 검증 제거). 예: sync 분기를
 ```python
     if op is Operation.SYNC:
+        _require(body.source_storage, "missing_source_storage")   # 기존 구체 사유코드 유지
+        _require(body.destination_storage, "missing_destination_storage")
         payload, key = build_data_payload("sync", source_storage=body.source_storage,
             source=body.source, destination_storage=body.destination_storage,
             destination=body.destination, options=body.options)
 ```
-처럼. scan/rm도 동일하게. `option_fingerprint`/`build_resource_key` 직접 호출은 제거.
+처럼. scan/rm도 동일하게(scan/rm은 `_require(body.storage, "missing_storage")` 유지). 이후
+`payload["owner_username"] = body.owner_username`만 추가. `option_fingerprint`/`build_resource_key`
+직접 호출과 상단 `validate_options` 선호출은 제거. **불변 유지**: priority 체크, `validate_owner_username`,
+`submit()`의 특권-owner 게이트, 그리고 `missing_source_storage`/`missing_destination_storage` 등 구체
+사유코드(기존 `test_api_requests.py` green). `build_data_payload`가 예상 밖 키에서 던지는 것은 그대로 422.
 
 - [ ] **Step 5: 통과 + 회귀** — Run: `.venv/bin/pytest tests/test_domain_batch.py tests/test_api_requests.py tests/test_domain_options.py tests/test_domain_paths.py -v` → 신규 PASS + 기존 요청 테스트 그대로 통과. 이어 `.venv/bin/pytest -q`.
 
