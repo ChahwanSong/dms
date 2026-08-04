@@ -1,0 +1,41 @@
+# Docker build context for deploy/docker/Dockerfile.dms (context = repo root).
+#
+# Keep the "web" stage hermetic: it runs `npm ci` from frontend/package.json +
+# frontend/package-lock.json, THEN `COPY frontend/ /web/`. If the host's
+# frontend/node_modules (or build output) is present in the build context, that
+# COPY overwrites the clean npm-ci install with whatever happens to be on the
+# host -- non-hermetic, and breaks on any host whose native deps don't match
+# linux/x64 (e.g. building on macOS/arm64). Excluding node_modules/dist here is
+# what makes the multi-stage split actually mean something.
+#
+# Do NOT exclude anything Dockerfile.dms COPYs: pyproject.toml, src/, or
+# frontend/ (package.json, package-lock.json, index.html, src/, vite/tailwind/
+# tsconfig configs) -- those must remain in the build context.
+
+# --- Node / frontend build artifacts (must not shadow a clean `npm ci`) ---
+**/node_modules
+frontend/dist
+**/*.tsbuildinfo
+
+# --- Python build/test artifacts ---
+**/__pycache__
+*.pyc
+**/*.egg-info
+.pytest_cache
+.venv
+venv
+tests
+
+# --- VCS / worktree metadata ---
+.git
+
+# --- Design-reference-only tree; never needed in the image ---
+legacy
+
+# --- Agent/tooling scratch state, not part of the app ---
+.claude
+.superpowers
+
+# --- Misc scratch dropped in repo root during manual testing ---
+*.png
+*.jpeg
