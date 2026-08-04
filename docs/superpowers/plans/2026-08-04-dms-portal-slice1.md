@@ -528,22 +528,30 @@ git commit -m "feat(portal): status/job-state helpers and base UI primitives"
 ```ts
 export type Role = "user" | "admin";
 export interface Me { actor: string; role: Role }
+// state_transitions rows come back as SELECT * → from_state/to_state/reason_code/actor/at
+export interface Transition {
+  from_state: string | null; to_state: string;
+  reason_code?: string | null; actor?: string; at: string;
+}
 export interface RequestRow {
   request_id: string; operation: string; requester_id: string; resource_key: string;
-  priority: string; state: string; created_at: string; updated_at: string; payload: string;
+  priority: string; state: string; created_at: string; updated_at: string;
+  payload: Record<string, unknown>;   // backend load_json's it → object, NOT a JSON string
 }
-export interface RequestDetail extends RequestRow { transitions: Array<{ state: string; at: string; reason_code?: string | null }> }
+export interface RequestDetail extends RequestRow { transitions: Transition[] }
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
   reason_code: string | null; preview_fingerprint: string | null;
-  preview_expires_at: string | null; result_summary: string | null;
-  transitions: Array<{ state: string; at: string; reason_code?: string | null }>;
+  preview_expires_at: string | null;
+  result_summary: unknown;             // JSON column, hydrated → string | object | null
+  transitions: Transition[];
 }
 export interface Storage {
   storage_name: string; mount_path: string; backend_type: string;
   enabled: number; status: string; status_detail: string | null;
 }
-export interface Node { node_name: string; reported_at: string; stale: boolean; report: unknown }
+// backend list_nodes returns `fresh` (NOT stale) — inverted meaning
+export interface Node { node_name: string; reported_at: string; fresh: boolean; report: unknown }
 ```
 
 - [ ] **Step 2: 실패 테스트 — `api.test.ts`** (MSW로 성공/에러/401 검증)
@@ -1008,7 +1016,7 @@ test("lists requests with status pill", async () => {
   server.use(http.get("/api/user/requests", () => HttpResponse.json([
     { request_id: "r1", operation: "sync", state: "Succeeded", priority: "mid",
       created_at: "2026-08-04T00:00:00Z", updated_at: "", requester_id: "alice",
-      resource_key: "k", payload: "{}" },
+      resource_key: "k", payload: {} },
   ])));
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={qc}><MemoryRouter><JobsList /></MemoryRouter></QueryClientProvider>);
@@ -1395,7 +1403,11 @@ export function ConfirmDialog({ job }: { job: DataJob }) {
             trigger={<Button>미리보기 확인</Button>}>
       <div className="space-y-2 text-sm">
         <p className="text-muted">아래 dry-run 결과를 확인하고 실행하세요.</p>
-        <pre className="bg-canvas rounded-lg p-3 whitespace-pre-wrap">{job.result_summary ?? "(요약 없음)"}</pre>
+        <pre className="bg-canvas rounded-lg p-3 whitespace-pre-wrap">{
+          job.result_summary == null ? "(요약 없음)"
+            : typeof job.result_summary === "string" ? job.result_summary
+            : JSON.stringify(job.result_summary, null, 2)
+        }</pre>
         <p className="text-muted">지문(fingerprint): <code>{job.preview_fingerprint}</code></p>
         <p className="text-muted">만료: {job.preview_expires_at}</p>
         {confirm.isError && <p className="text-bad">{(confirm.error as ApiError).message}</p>}
@@ -1547,12 +1559,12 @@ test("aggregates request metrics and lists nodes", async () => {
   server.use(
     http.get("/api/user/requests", () => HttpResponse.json([
       { request_id: "r1", operation: "sync", state: "Executing", priority: "mid",
-        created_at: "", updated_at: "", requester_id: "a", resource_key: "k", payload: "{}" },
+        created_at: "", updated_at: "", requester_id: "a", resource_key: "k", payload: {} },
       { request_id: "r2", operation: "sync", state: "Succeeded", priority: "mid",
-        created_at: "", updated_at: "", requester_id: "a", resource_key: "k", payload: "{}" },
+        created_at: "", updated_at: "", requester_id: "a", resource_key: "k", payload: {} },
     ])),
     http.get("/api/admin/nodes", () => HttpResponse.json([
-      { node_name: "w1", reported_at: "2026-08-04T00:00:00Z", stale: false, report: {} },
+      { node_name: "w1", reported_at: "2026-08-04T00:00:00Z", fresh: true, report: {} },
     ])),
   );
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1610,7 +1622,7 @@ export function Dashboard() {
             {(nodes.data ?? []).map((n) => (
               <li key={n.node_name} className="flex items-center justify-between">
                 <span>{n.node_name}</span>
-                <StatusPill state={n.stale ? "Failed" : "Succeeded"} />
+                <StatusPill state={n.fresh ? "Succeeded" : "Failed"} />
               </li>
             ))}
           </ul>
