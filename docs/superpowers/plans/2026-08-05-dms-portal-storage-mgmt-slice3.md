@@ -286,7 +286,7 @@ test("create posts the four fields", async () => {
 - [ ] **Step 3: 구현 — `StorageDialog.tsx`**
 
 ```tsx
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
@@ -302,6 +302,14 @@ export function StorageDialog({ mode, storage, trigger }: {
   const [root, setRoot] = useState(storage?.managed_root ?? "");
   const [backend, setBackend] = useState(storage?.backend_type ?? "");
   const [enabled, setEnabled] = useState(storage ? storage.enabled === 1 : true);
+  // 다이얼로그를 열 때(그리고 storage prop이 바뀔 때) 폼을 최신 값으로 재시딩한다.
+  // 행별 StorageDialog가 목록 refetch 후에도 마운트 상태로 남아 stale 값을 보이는 것을 방지.
+  useEffect(() => {
+    if (!open) return;
+    setName(storage?.storage_name ?? ""); setMount(storage?.mount_path ?? "");
+    setRoot(storage?.managed_root ?? ""); setBackend(storage?.backend_type ?? "");
+    setEnabled(storage ? storage.enabled === 1 : true);
+  }, [open, storage]);
   const create = useCreateStorage(); const update = useUpdateStorage();
   const m = mode === "create" ? create : update;
   const submit = () => {
