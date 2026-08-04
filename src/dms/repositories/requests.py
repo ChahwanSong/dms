@@ -99,6 +99,19 @@ class RequestsRepository:
                 AND state NOT IN ({placeholders})
                 ORDER BY commit_order LIMIT 1""", params)
 
+    def active_referencing_storage(self, storage_name) -> bool:
+        terminal = tuple(s.value for s in TERMINAL_REQUEST_STATES)
+        placeholders = ", ".join(f":t{i}" for i in range(len(terminal)))
+        params = {f"t{i}": v for i, v in enumerate(terminal)}
+        rows = self._db.query(
+            f"SELECT payload FROM requests WHERE state NOT IN ({placeholders})", params)
+        for r in rows:
+            p = load_json(r["payload"])
+            if storage_name in (p.get("storage"), p.get("source_storage"),
+                                p.get("destination_storage")):
+                return True
+        return False
+
     def record_result(self, request_id, terminal_state, *, reason_code=None,
                       message=None, summary=None):
         self._db.execute(

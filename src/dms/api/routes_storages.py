@@ -56,6 +56,8 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
 @router.delete("/api/admin/storages/{name}")
 def delete_storage(name: str, request: Request,
                    identity: Identity = Depends(require_admin)):
+    if request.app.state.repos.requests.active_referencing_storage(name):
+        raise HTTPException(status_code=409, detail="storage_in_use")
     try:
         return request.app.state.repos.storages.delete(name, actor=identity.actor)
     except KeyError:
