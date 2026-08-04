@@ -7,8 +7,17 @@ VALID = {"DMS_DATABASE_URL": "sqlite:///tmp/dms.db", "DMS_SHARED_TOKEN": "tok",
 def test_planner_defaults():
     s = Settings.from_env(VALID)
     assert s.planner_interval_seconds == 10
-    assert s.allow_privileged_requesters is False
+    # 기본값: root/admin이 특권 요청자, allow=True (미설정 시 적용).
+    assert s.allow_privileged_requesters is True
+    assert s.privileged_requesters == frozenset({"root", "admin"})
+
+
+def test_privileged_can_be_disabled_explicitly():
+    # 명시적 빈값/false로 특권을 끌 수 있다(기본값을 덮어씀).
+    s = Settings.from_env({**VALID, "DMS_PRIVILEGED_REQUESTERS": ""})
     assert s.privileged_requesters == frozenset()
+    s2 = Settings.from_env({**VALID, "DMS_ALLOW_PRIVILEGED_REQUESTERS": "false"})
+    assert s2.allow_privileged_requesters is False
 
 
 def test_privileged_settings_parsed():

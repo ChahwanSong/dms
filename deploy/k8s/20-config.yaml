@@ -36,8 +36,12 @@ data:
   DMS_LDAP_GROUP_BASE: "ou=Groups,dc=dms,dc=local"
 
   # --- privileged-requester gate (routes_requests.py submit()) ---
-  DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"
-  DMS_PRIVILEGED_REQUESTERS: ""
+  # 기본값: root/admin actor를 특권 요청자로 인정 → 이 id로 온 잡은 uid0/gid0(root)로
+  # 실행되고 LDAP 노드-신원 검사를 건너뛴다. 게이트는 인증된 requester_id 기준이므로
+  # 일반 사용자는 owner_username을 조작해도 승격 불가(403). 특권을 완전히 끄려면
+  # DMS_ALLOW_PRIVILEGED_REQUESTERS="false" 또는 DMS_PRIVILEGED_REQUESTERS=""(명시적 빈값).
+  DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"
+  DMS_PRIVILEGED_REQUESTERS: "root,admin"
 
   # --- controller loop intervals / retention / job-runner knobs (all have
   #     code defaults in config.py _SERVER_INT_KEYS -- set explicitly here so

@@ -48,8 +48,12 @@ def _parse_bool(environ, key, default=False):
     return value.strip().lower() in ("true", "1")
 
 
-def _parse_csv_set(environ, key):
-    raw = environ.get(key, "")
+def _parse_csv_set(environ, key, default=frozenset()):
+    # 미설정(absent)이면 default. 명시적 빈 문자열("")은 "비활성"으로 default를
+    # 덮어써 빈 집합을 준다(운영자가 특권을 끄고 싶을 때).
+    raw = environ.get(key)
+    if raw is None:
+        return default
     return frozenset(item.strip() for item in raw.split(",") if item.strip())
 
 
@@ -71,8 +75,8 @@ class Settings:
     stepper_interval_seconds: int = 5
     preview_ttl_seconds: int = 86400
     artifact_base_uri: str = "file:///artifacts/dms"
-    allow_privileged_requesters: bool = False
-    privileged_requesters: frozenset = frozenset()
+    allow_privileged_requesters: bool = True
+    privileged_requesters: frozenset = frozenset({"root", "admin"})
     ldap_uri: str = ""
     ldap_user_base: str = ""
     ldap_group_base: str = ""
@@ -115,8 +119,10 @@ class Settings:
             artifact_base_uri=environ.get("DMS_ARTIFACT_BASE_URI",
                                           "file:///artifacts/dms"),
             allow_privileged_requesters=_parse_bool(
-                environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS"),
-            privileged_requesters=_parse_csv_set(environ, "DMS_PRIVILEGED_REQUESTERS"),
+                environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS", default=True),
+            privileged_requesters=_parse_csv_set(
+                environ, "DMS_PRIVILEGED_REQUESTERS",
+                default=frozenset({"root", "admin"})),
             ldap_uri=environ.get("DMS_LDAP_URI", ""),
             ldap_user_base=environ.get("DMS_LDAP_USER_BASE", ""),
             ldap_group_base=environ.get("DMS_LDAP_GROUP_BASE", ""),
