@@ -1,0 +1,29 @@
+# Testbed-only convenience: expose the portal (dms-api) on a fixed NodePort so a
+# host with routes to the cluster node network (e.g. the KVM/libvirt host
+# "luminous", which bridges dmsbr0 10.10.10.0/24) can reach the SPA + API in a
+# browser without a long-lived `kubectl port-forward`.
+#
+#   http://<any-node-ip>:30080   (nodes: cp1 .10, w1-5 .11-.15)
+#
+# The primary in-cluster Service (dms-api, ClusterIP, in 40-api.yaml) is
+# unchanged; this is an additive NodePort over the SAME pods/selector. Do NOT
+# use this to expose the portal outside a trusted network -- it is plain HTTP
+# with session-cookie auth and no TLS. For real exposure, front it with the
+# cluster ingress + TLS instead.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dms-api-nodeport
+  namespace: dms
+  labels:
+    app.kubernetes.io/name: dms-api
+    app.kubernetes.io/part-of: dms
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: dms-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 30080
