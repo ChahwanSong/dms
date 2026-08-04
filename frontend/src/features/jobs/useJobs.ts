@@ -37,13 +37,19 @@ export function useConfirmJob(requestId: string) {
   return useMutation({
     mutationFn: (v: { jobId: string; fingerprint: string }) =>
       apiSend("POST", `/api/user/jobs/${v.jobId}:confirm`, { fingerprint: v.fingerprint }),
-    onSettled: () => qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] });
+      qc.invalidateQueries({ queryKey: ["request", requestId] });
+    },
   });
 }
 export function useCancelJob(requestId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (jobId: string) => apiSend("POST", `/api/user/jobs/${jobId}:cancel`),
-    onSettled: () => qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] });
+      qc.invalidateQueries({ queryKey: ["request", requestId] });
+    },
   });
 }
