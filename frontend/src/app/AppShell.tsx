@@ -12,8 +12,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <NavLink to="/jobs/new" className={linkCls}>작업 제출</NavLink>
         {isAdmin && <NavLink to="/admin/storages" className={linkCls}>스토리지</NavLink>}
         {isAdmin && <NavLink to="/admin/dashboard" className={linkCls}>대시보드</NavLink>}
-        <span className="block rounded-lg px-3 py-2 text-sm text-muted opacity-50 cursor-not-allowed"
-              aria-disabled="true" title="다음 예정">배치 작업 · 준비 중</span>
+        {isAdmin && <NavLink to="/admin/batches" className={linkCls}>배치 작업</NavLink>}
       </aside>
       <div className="flex-1">
         <header className="flex items-center justify-between px-5 h-14 bg-surface shadow-soft">

@@ -34,3 +34,12 @@ test("user visiting admin route is redirected to /jobs", async () => {
   renderAt("/admin/dashboard");
   expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
 });
+
+test("admin can open batches list", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/batches", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/batches");
+  expect(await screen.findByRole("heading", { name: "배치 작업" })).toBeInTheDocument();
+});
