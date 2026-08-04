@@ -20,3 +20,13 @@ export interface Storage {
   enabled: number; status: string; status_detail: string | null;
 }
 export interface Node { node_name: string; reported_at: string; fresh: boolean; report: unknown }
+export interface Batch {
+  batch_id: string; operation: string; status: string; max_concurrency: number;
+  item_count: number; succeeded_count: number; failed_count: number;
+  note: string | null; created_at: string;
+}
+export interface BatchItem {
+  seq: number; payload: Record<string, unknown>; status: string;
+  request_id: string | null; reason_code: string | null;
+}
+export interface BatchDetail extends Batch { items: BatchItem[] }
