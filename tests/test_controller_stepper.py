@@ -16,12 +16,13 @@ class _Settings:
     agent_report_retention_days = 30
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
+    batch_orchestrator_interval_seconds = 5
 
 
 def test_stepper_loop_registered_second(db):
     loops = build_loops(_Settings(), Repositories(db))
     assert [l.name for l in loops] == [
-        "planner", "job-stepper", "storage-reconciler", "retention"]
+        "planner", "job-stepper", "storage-reconciler", "retention", "batch-orchestrator"]
     assert loops[1].interval_seconds == 5
 
 

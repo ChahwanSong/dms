@@ -17,6 +17,7 @@ _SERVER_INT_KEYS = (
     ("DMS_STEPPER_INTERVAL_SECONDS", "stepper_interval_seconds", 5),
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
     ("DMS_JOB_MAX_ATTEMPTS", "job_max_attempts", 3),
+    ("DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS", "batch_orchestrator_interval_seconds", 5),
 )
 
 
@@ -87,6 +88,7 @@ class Settings:
     k8s_namespace: str = "dms"
     job_max_attempts: int = 3
     static_dir: str | None = None
+    batch_orchestrator_interval_seconds: int = 5
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":

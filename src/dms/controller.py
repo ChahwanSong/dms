@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from .batch_orchestrator import BatchOrchestrator
 from .config import Settings
 from .db import utc_now_iso
 from .domain import DataJobState
@@ -52,6 +53,8 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
         Loop("retention", settings.retention_interval_seconds,
              lambda: prune_agent_reports_once(
                  repos, retention_days=settings.agent_report_retention_days)),
+        Loop("batch-orchestrator", settings.batch_orchestrator_interval_seconds,
+             lambda: BatchOrchestrator(repos, settings=settings).run_once()),
     ]
 
 
