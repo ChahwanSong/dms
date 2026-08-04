@@ -33,3 +33,15 @@ test("401 dispatches auth-expired event", async () => {
   await expect(apiGet("/api/auth/me")).rejects.toBeInstanceOf(ApiError);
   expect(spy).toHaveBeenCalledOnce();
 });
+
+test("401 with unmapped reason_code falls back to raw code, not a hardcoded password message", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json({ detail: "session_expired" }, { status: 401 })));
+  await expect(apiGet("/api/auth/me")).rejects.toMatchObject({ status: 401, code: "session_expired",
+    message: "session_expired" });
+});
+
+test("401 with invalid_credentials still maps to the korean login message", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json({ detail: "invalid_credentials" }, { status: 401 })));
+  await expect(apiGet("/api/auth/me")).rejects.toMatchObject({ status: 401, code: "invalid_credentials",
+    message: "사용자명 또는 비밀번호가 올바르지 않습니다" });
+});

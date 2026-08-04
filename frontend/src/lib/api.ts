@@ -25,7 +25,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent("dms:unauthorized"));
-    throw new ApiError(401, "unauthorized", REASON_MESSAGES.invalid_credentials);
+    let code = "http_401";
+    try { code = (await res.json()).detail ?? code; } catch { /* noop */ }
+    throw new ApiError(401, code, REASON_MESSAGES[code] ?? code);
   }
   if (!res.ok) {
     let code = `http_${res.status}`;
