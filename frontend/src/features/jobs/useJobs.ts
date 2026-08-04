@@ -1,4 +1,4 @@
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import { isTerminal } from "../../lib/jobState";
 import type { RequestRow, RequestDetail, DataJob } from "../../lib/types";
@@ -31,3 +31,19 @@ export const useSubmitSync = () =>
       apiSend<{ request_id: string; state: string }>("POST", "/api/user/requests",
         { operation: "sync", ...b }),
   });
+
+export function useConfirmJob(requestId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { jobId: string; fingerprint: string }) =>
+      apiSend("POST", `/api/user/jobs/${v.jobId}:confirm`, { fingerprint: v.fingerprint }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] }),
+  });
+}
+export function useCancelJob(requestId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: string) => apiSend("POST", `/api/user/jobs/${jobId}:cancel`),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] }),
+  });
+}
