@@ -10,7 +10,7 @@ export function useLogin() {
   return useMutation({
     mutationFn: (b: { username: string; password: string }) =>
       apiSend<Me>("POST", "/api/auth/login", b),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "me"] }),
+    onSuccess: () => qc.clear(),
   });
 }
 
@@ -18,6 +18,6 @@ export function useLogout() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiSend("POST", "/api/auth/logout"),
-    onSuccess: () => qc.clear(),
+    onSettled: () => qc.clear(),
   });
 }
