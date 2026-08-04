@@ -240,6 +240,20 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
   value. A wrong value fails soft (`IdentityRejected`/`IdentityUnavailable`
   at plan time, not a container crash), so this can be fixed and rolled out
   without redeploying anything else.
+- **`DMS_ALLOW_PRIVILEGED_REQUESTERS` / `DMS_PRIVILEGED_REQUESTERS`**
+  (`deploy/k8s/20-config.yaml`, ConfigMap): **default is `true` /
+  `root,admin`** (also the code default in `src/dms/config.py`). A request
+  whose authenticated `requester_id` (x-dms-actor) is `root` or `admin` runs
+  as **uid 0/gid 0 (root)** and skips the LDAP node-identity check; everyone
+  else runs as their own resolved LDAP identity. The gate keys on the
+  authenticated `requester_id`, NOT the client-supplied `owner_username`, so a
+  normal user cannot escalate (owner_username != actor -> 403
+  `privileged_not_authorized`). Note the shared-token lets a caller set
+  x-dms-actor freely, so a shared-token holder can pick `root`/`admin` and get
+  root -- use session-based actors in production, and keep the allowlist
+  minimal. To disable entirely: `DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"`
+  (or `DMS_PRIVILEGED_REQUESTERS: ""` -- an explicit empty string overrides
+  the default to no privileged requesters).
 - **`DMS_JOB_IMAGE` / image tags**: all manifests hardcode `:dev`. Keep
   `build-and-push.sh`'s `TAG` and the manifests' tags in sync manually (no
   templating layer here by design -- see CLAUDE.md's "legacy/install/ 미러

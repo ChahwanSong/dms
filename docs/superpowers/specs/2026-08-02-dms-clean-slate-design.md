@@ -139,6 +139,11 @@ job-stepper 루프가 `FOR UPDATE SKIP LOCKED`로 "진행할 차례인 잡"을 �
   평가된다.
 - 관리자 root 특권 경로: 관리자가 임의 사용자 데이터를 이관·정리할 때 uid/gid 0으로 실행.
   포탈 관리자 인터페이스에서만 제출 가능. preview→confirm 게이트는 root도 우회 불가.
+  - 설정: `DMS_ALLOW_PRIVILEGED_REQUESTERS`(bool)와 `DMS_PRIVILEGED_REQUESTERS`(콤마구분
+    actor 목록). **기본값 `true` / `root,admin`** — 인증된 `requester_id`가 이 목록에 있으면
+    root로 실행되고 노드-로컬 신원 검사를 건너뛴다. 게이트는 클라이언트가 보내는
+    `owner_username`이 아니라 **인증된 `requester_id`** 기준이라 일반 사용자는 승격 불가(403).
+    끄려면 `DMS_ALLOW_PRIVILEGED_REQUESTERS=false` 또는 `DMS_PRIVILEGED_REQUESTERS=""`(명시적 빈값).
 - 잡 파드에는 NSS가 없어도 되도록, 해석된 uid/gid를 `/etc/passwd`에 물질화한다 (job-runner 담당).
 - 에이전트는 리포트 응답으로 받은 프로브 대상 사용자의 노드별 해석 가능 여부를 증거로 보고한다.
 
