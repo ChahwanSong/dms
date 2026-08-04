@@ -1477,7 +1477,7 @@ afterAll(() => server.close());
 
 test("lists storages", async () => {
   server.use(http.get("/api/admin/storages", () => HttpResponse.json([
-    { storage_name: "cephfs", mount_path: "/cephfs", backend_type: "cephfs",
+    { storage_name: "cephfs", mount_path: "/cephfs", backend_type: "ceph",
       enabled: 1, status: "Healthy", status_detail: null },
   ])));
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
