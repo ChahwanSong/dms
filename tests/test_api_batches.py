@@ -47,3 +47,23 @@ def test_confirm_requires_previewready(client):
 def test_requires_admin(client):
     r = client.get("/api/admin/batches")
     assert r.status_code == 401
+
+
+def test_cancel_running_batch_succeeds(client):
+    _admin(client)
+    bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"storage": "s1", "target": "a"}]}).json()["batch_id"]
+    r = client.post(f"/api/admin/batches/{bid}:cancel")
+    assert r.status_code == 200
+    assert r.json()["status"] == "Cancelled"
+    assert client.app.state.repos.batches.get(bid)["status"] == "Cancelled"
+
+
+def test_cancel_completed_batch_rejected(client):
+    _admin(client)
+    bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"storage": "s1", "target": "a"}]}).json()["batch_id"]
+    client.app.state.repos.batches.set_status(bid, "Completed")
+    r = client.post(f"/api/admin/batches/{bid}:cancel")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "batch_not_cancelable"

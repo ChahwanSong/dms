@@ -76,6 +76,8 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    if b["status"] not in ("Previewing", "Running"):
+        raise HTTPException(status_code=409, detail="batch_not_cancelable")
     for it in repo.list_items(batch_id):
         if it["status"] in ("Queued", "Materialized"):
             repo.set_item_status(batch_id, it["seq"], "Cancelled")
