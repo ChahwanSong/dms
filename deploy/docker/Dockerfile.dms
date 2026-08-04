@@ -5,6 +5,18 @@
 #
 # Build (context = repo root):
 #   podman build -f deploy/docker/Dockerfile.dms -t pkg-01:5000/dms:<tag> .
+
+# --- web build stage ---
+# Builds the portal SPA (frontend/) independently of, and before, the python
+# runtime stage below. Only its /web/dist output is copied forward -- node
+# and the frontend toolchain never end up in the final image.
+FROM node:20-bookworm-slim AS web
+WORKDIR /web
+COPY frontend/package.json frontend/package-lock.json* /web/
+RUN npm ci || npm install
+COPY frontend/ /web/
+RUN npm run build
+
 # Pin bookworm: bare python:3.11-slim now resolves to Debian trixie. Nothing
 # here needs OpenMPI, but keeping the whole image set on one Debian release
 # avoids surprise apt/glibc drift (the agent image is FROM this one and copies
@@ -32,6 +44,12 @@ RUN apt-get update \
 
 COPY pyproject.toml /app/
 COPY src /app/src
+
+# Portal SPA build output (built in the "web" stage above from frontend/).
+# api/app.py create_app() serves it as static files + SPA fallback when
+# DMS_STATIC_DIR points at a dist dir (see Task 1).
+COPY --from=web /web/dist /app/static
+ENV DMS_STATIC_DIR=/app/static
 
 # postgres: psycopg driver for DMS_DATABASE_URL (db.py Database.connect).
 # ldap: ldap3 for the LDAP identity resolver (identity_ldap.py).
