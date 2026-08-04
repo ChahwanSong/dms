@@ -822,7 +822,22 @@ disabled로 자리만 둔다.
 - Create: `frontend/src/app/AppShell.tsx`, `frontend/src/app/RequireRole.tsx`,
   `frontend/src/app/router.tsx`
 - Modify: `frontend/src/main.tsx`(Provider+Router 부트스트랩)
+- Modify: `frontend/src/features/auth/Login.tsx`(성공 시 `navigate("/")`) +
+  `Login.test.tsx`(MemoryRouter로 감싸기)
+- Modify: `frontend/src/app/AuthContext.tsx`(`dms:unauthorized` 핸들러를 `qc.clear()`→
+  `qc.invalidateQueries(["auth","me"])`로 되돌림; 루프 방지) + `AuthContext.test.tsx`
 - Test: `frontend/src/app/router.test.tsx`
+
+> **인증 통합 두 가지(중요):**
+> 1. **로그인 성공 → 앱 이동.** `/login`은 me를 관찰하지 않으므로, 로그인 성공 후 아무도
+>    리다이렉트하지 않아 사용자가 `/login`에 갇힌다. `Login`이 성공 시 `navigate("/")`를 호출하게
+>    한다. 그러면 `Home`이 마운트되며 me를 fresh로 조회(로그인으로 세션 쿠키 설정됨)→role별 이동.
+> 2. **`dms:unauthorized` 핸들러는 `qc.clear()`가 아니라 `invalidateQueries(["auth","me"])`.**
+>    `qc.clear()`는 관찰 중인 me를 pending으로 리셋 → RequireRole이 "loading"을 계속 표시(navigate
+>    안 함) → me 재요청 401 → clear → **무한 루프**. `invalidate(me)`면 me가 error로 남아
+>    RequireRole이 `/login`으로 navigate하며 관찰자를 언마운트해 루프가 없다. 교차사용자 캐시
+>    누수는 **로그인 시 `qc.clear()`(useLogin, Task 5 fix #2)**가 막으므로 401 핸들러는 me만
+>    무효화하면 된다. (logout의 `onSettled: qc.clear()`는 유지.)
 
 **Interfaces:**
 - Consumes: `useMe`(Task 5), `queryClient`, `AuthProvider`.
@@ -977,10 +992,42 @@ createRoot(document.getElementById("root")!).render(
 );
 ```
 
-> 주: 이 Task의 router 테스트는 Task 7~11의 화면 컴포넌트를 import한다. 순서상 먼저 각 화면의
-> **빈 스텁**(예: `export function JobsList(){return <h1>내 작업</h1>}`)을 만들고 진행하거나,
-> subagent-driven 실행 시 Task 7~11을 먼저 구현한 뒤 이 Task의 통합 테스트를 통과시켜도 된다.
-> 스텁으로 시작하면 각 후속 Task가 스텁을 실제 구현으로 대체한다.
+**인증 통합 수정 — `Login.tsx`(성공 시 이동):**
+
+```tsx
+// Login.tsx 상단에 추가
+import { useNavigate } from "react-router-dom";
+// ... 컴포넌트 내부:
+  const login = useLogin();
+  const nav = useNavigate();
+  // onSubmit에서 성공 콜백으로 홈 이동:
+  //   login.mutate({ username, password }, { onSuccess: () => nav("/") });
+```
+
+`Login.test.tsx`는 이제 `useNavigate`를 쓰므로 `<Login/>`를 `<MemoryRouter>`로 감싼다(기존
+401 에러-메시지 단언은 그대로 통과). 예: `render(<QueryClientProvider client={qc}><MemoryRouter><Login /></MemoryRouter></QueryClientProvider>)`.
+
+**인증 통합 수정 — `AuthContext.tsx`(401 핸들러 되돌림, 루프 방지):**
+
+```tsx
+  useEffect(() => {
+    // dms:unauthorized(any 401) → me만 무효화(제거/clear 아님). clear()는 관찰 중인 me를
+    // pending으로 리셋해 RequireRole이 계속 loading을 띄우고 재요청→401→clear 무한 루프가 된다.
+    // invalidate면 me가 error로 남아 RequireRole이 /login으로 이동(관찰자 언마운트)→루프 없음.
+    // 교차사용자 캐시 누수는 useLogin의 qc.clear()(로그인 성공 시)가 막는다.
+    const h = () => qc.invalidateQueries({ queryKey: ["auth", "me"] });
+    window.addEventListener("dms:unauthorized", h);
+    return () => window.removeEventListener("dms:unauthorized", h);
+  }, [qc]);
+```
+
+`AuthContext.test.tsx`의 "clears on dms:unauthorized" 테스트는 이제 **me가 무효화되는지**로 바꾼다
+(전체 clear가 아니므로 seed한 `["requests"]`는 남는다). 예: me에 `qc.setQueryData(["auth","me"], {...})`
+후 이벤트 dispatch → me가 stale/invalidated 됨을 확인하거나, 핸들러가 `["requests"]`를 **건드리지
+않음**을 확인. (로그인/로그아웃 clear 테스트는 useAuth.test.ts에 그대로 둔다.)
+
+> 주: 이 Task의 router 테스트는 Task 7~11의 화면 컴포넌트를 import한다. 이 슬라이스는 실행 순서
+> 1,2,3,4,5,7,8,9,10,11,6,12로 진행하므로 Task 7~11이 이미 구현돼 있어 스텁이 필요 없다.
 
 - [ ] **Step 4: 통과 확인 + 커밋**
 
@@ -1582,7 +1629,10 @@ test("aggregates request metrics and lists nodes", async () => {
   render(<QueryClientProvider client={qc}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>);
   expect(await screen.findByText("w1")).toBeInTheDocument();
   // 실행 중 타일 값 1
-  const running = screen.getByText("실행 중").closest("div")!;
+  // getByText matches the MetricTile label div itself; .closest("div") is
+  // self-inclusive (returns that same label div, which lacks the value), so
+  // use .parentElement to reach the tile container holding both label + value.
+  const running = screen.getByText("실행 중").parentElement!;
   expect(running).toHaveTextContent("1");
 });
 ```
