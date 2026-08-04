@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { apiGet } from "../../lib/api";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { apiGet, apiSend } from "../../lib/api";
 import { isTerminal } from "../../lib/jobState";
 import type { RequestRow, RequestDetail, DataJob } from "../../lib/types";
 
@@ -18,4 +18,16 @@ export const useRequestJobs = (id: string) =>
       const jobs = q.state.data as DataJob[] | undefined;
       return jobs && jobs.some((j) => !isTerminal(j.state)) ? 2000 : false;
     },
+  });
+
+export interface SyncBody {
+  source_storage: string; source: string;
+  destination_storage: string; destination: string;
+  options: Record<string, boolean | number>; priority: string;
+}
+export const useSubmitSync = () =>
+  useMutation({
+    mutationFn: (b: SyncBody) =>
+      apiSend<{ request_id: string; state: string }>("POST", "/api/user/requests",
+        { operation: "sync", ...b }),
   });
