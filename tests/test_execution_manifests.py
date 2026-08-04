@@ -53,9 +53,30 @@ def test_render_tool_flags_dscan():
 
 
 def test_sync_argv_with_dryrun():
-    spec = _spec(operation="sync", tool="dsync", dryrun=True, options={"delete": True})
+    # 비특권 요청자 → 목적지를 요청자 소유로 강제하는 --chown 자동 주입.
+    spec = _spec(operation="sync", tool="dsync", dryrun=True, options={"delete": True},
+                 identity={"uid": 10001, "gid": 10000, "privileged": False})
     argv = tool_argv(spec, abs_paths={"source": "/cephfs/a", "destination": "/cephfs/b"})
-    assert argv == ["--delete", "--dryrun", "/cephfs/a", "/cephfs/b"]
+    assert argv == ["--delete", "--chown", "10001:10000", "--dryrun",
+                    "/cephfs/a", "/cephfs/b"]
+
+
+def test_sync_argv_privileged_preserves_source_owner():
+    # 특권(root) 요청자 → --chown 미주입(소스 소유권 그대로 보존, root가 chown 가능).
+    spec = _spec(operation="sync", tool="dsync",
+                 identity={"uid": 0, "gid": 0, "privileged": True})
+    argv = tool_argv(spec, abs_paths={"source": "/cephfs/a", "destination": "/cephfs/b"})
+    assert "--chown" not in argv
+    assert argv == ["/cephfs/a", "/cephfs/b"]
+
+
+def test_sync_argv_user_chown_wins():
+    # 사용자가 chown 옵션을 명시하면 그 값이 우선 — auto-chown 미주입(중복 없음).
+    spec = _spec(operation="sync", tool="nsync", options={"chown": "bob:staff"},
+                 identity={"uid": 10001, "gid": 10000, "privileged": False})
+    argv = tool_argv(spec, abs_paths={"source": "/cephfs/a", "destination": "/cephfs/b"})
+    assert argv.count("--chown") == 1
+    assert argv[argv.index("--chown") + 1] == "bob:staff"
 
 
 def test_rm_argv():

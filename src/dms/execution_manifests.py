@@ -47,9 +47,26 @@ def tool_argv(spec, *, abs_paths: dict) -> list[str]:
     flags = render_tool_flags(spec.tool, spec.options)
     dry = ["--dryrun"] if spec.dryrun else []
     if spec.tool in ("dsync", "nsync"):
-        return [*flags, *dry, abs_paths["source"], abs_paths["destination"]]
+        return [*flags, *_auto_chown(spec), *dry,
+                abs_paths["source"], abs_paths["destination"]]
     # drm
     return [*flags, *dry, abs_paths["target"]]
+
+
+def _auto_chown(spec) -> list[str]:
+    """비특권 요청자의 sync는 목적지를 요청자(uid:gid) 소유로 강제한다(--chown).
+
+    dsync/nsync는 기본적으로 소스의 소유권을 목적지에 재현(chown)하려 하는데, 도구는
+    요청자 신원(runuser)으로 실행되므로 소스가 남(예: root) 소유면 목적지를 그 소유자로
+    chown할 권한이 없어 메타데이터 적용이 실패한다(데이터는 복사되지만 잡은 Failed).
+    비특권 요청자에겐 `--chown <uid>:<gid>`를 주입해 "복사본은 요청자 소유"로 만들어
+    (요청자는 자기 소유로 chown 가능) 실패를 없앤다. 특권(root)이면 root가 어떤 소유자로도
+    chown 가능하므로 소스 소유권을 그대로 보존한다(개입 안 함). 사용자가 chown 옵션을
+    명시했으면 그 값이 우선(중복 주입 안 함)."""
+    ident = spec.identity or {}
+    if ident.get("privileged") or "chown" in (spec.options or {}):
+        return []
+    return ["--chown", f"{ident.get('uid', 0)}:{ident.get('gid', 0)}"]
 
 
 def _worker_count(spec) -> int:
