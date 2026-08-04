@@ -41,14 +41,15 @@ class BatchOrchestrator:
         return ("in_flight", None)
 
     def _record_terminal(self, batch_id, item, req_state):
-        if req_state == RequestState.SUCCEEDED.value:
-            self._repos.batches.set_item_status(batch_id, item["seq"], "Succeeded")
-            self._repos.batches.bump_counts(batch_id, succeeded=1)
-        else:
-            status = "Rejected" if req_state == RequestState.REJECTED.value else "Failed"
-            self._repos.batches.set_item_status(batch_id, item["seq"], status,
-                                                reason_code=req_state)
-            self._repos.batches.bump_counts(batch_id, failed=1)
+        with self._repos.db.transaction():
+            if req_state == RequestState.SUCCEEDED.value:
+                self._repos.batches.set_item_status(batch_id, item["seq"], "Succeeded")
+                self._repos.batches.bump_counts(batch_id, succeeded=1)
+            else:
+                status = "Rejected" if req_state == RequestState.REJECTED.value else "Failed"
+                self._repos.batches.set_item_status(batch_id, item["seq"], status,
+                                                    reason_code=req_state)
+                self._repos.batches.bump_counts(batch_id, failed=1)
 
     def _materialize(self, batch, item):
         payload, key = build_data_payload(batch["operation"], options=batch["options"],
