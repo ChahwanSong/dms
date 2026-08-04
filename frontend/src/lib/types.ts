@@ -16,8 +16,12 @@ export interface DataJob {
   transitions: Transition[];
 }
 export interface Storage {
-  storage_name: string; mount_path: string; backend_type: string;
+  storage_name: string; mount_path: string; managed_root: string; backend_type: string;
   enabled: number; status: string; status_detail: string | null;
+}
+export interface AuditEntry {
+  id: number; mutation_class: string; operation: string; target_key: string;
+  actor: string; before_state: string | null; after_state: string | null; at: string;
 }
 export interface Node { node_name: string; reported_at: string; fresh: boolean; report: unknown }
 export interface Batch {

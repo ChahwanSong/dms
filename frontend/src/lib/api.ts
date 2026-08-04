@@ -8,6 +8,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   resource_conflict: "동일 대상에 진행 중인 작업이 있습니다",
   no_eligible_nodes: "실행 가능한 노드가 없습니다",
   no_ready_sync_candidate: "실행 가능한 노드가 없습니다",
+  storage_exists: "이미 존재하는 스토리지입니다",
+  storage_in_use: "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)",
+  storage_not_found: "스토리지를 찾을 수 없습니다",
 };
 
 export class ApiError extends Error {
