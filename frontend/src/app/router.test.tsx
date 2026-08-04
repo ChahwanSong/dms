@@ -43,3 +43,12 @@ test("admin can open batches list", async () => {
   renderAt("/admin/batches");
   expect(await screen.findByRole("heading", { name: "배치 작업" })).toBeInTheDocument();
 });
+
+test("admin can open audit log", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/audit-log", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/audit");
+  expect(await screen.findByRole("heading", { name: "감사 로그" })).toBeInTheDocument();
+});

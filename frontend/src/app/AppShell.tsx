@@ -13,6 +13,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {isAdmin && <NavLink to="/admin/storages" className={linkCls}>스토리지</NavLink>}
         {isAdmin && <NavLink to="/admin/dashboard" className={linkCls}>대시보드</NavLink>}
         {isAdmin && <NavLink to="/admin/batches" className={linkCls}>배치 작업</NavLink>}
+        {isAdmin && <NavLink to="/admin/audit" className={linkCls}>감사 로그</NavLink>}
       </aside>
       <div className="flex-1">
         <header className="flex items-center justify-between px-5 h-14 bg-surface shadow-soft">
