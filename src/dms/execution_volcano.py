@@ -20,6 +20,18 @@ _VCJOB_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
 _KIND = {"pod": "Pod", "vcjob": "Job"}
 
 
+def _deadline_exceeded(obj) -> bool:
+    """k8s가 activeDeadlineSeconds로 죽였는지. 확실하지 않으면 False —
+    오분류(멀쩡한 실패를 TimedOut으로)보다 보수적 유지가 낫다."""
+    status = obj.get("status") or {}
+    if status.get("reason") == "DeadlineExceeded":
+        return True
+    for cond in (status.get("conditions") or []):
+        if cond.get("reason") == "DeadlineExceeded":
+            return True
+    return False
+
+
 class K8sClient(Protocol):
     def create(self, manifest: dict) -> None: ...
     def get(self, kind: str, name: str, namespace: str) -> "dict | None": ...
@@ -122,14 +134,21 @@ class VolcanoExecutionAdapter:
         obj = self._k8s.get("Pod", name, self._namespace)
         if obj is None:
             return ExecStatus.FAILED
-        return _POD_PHASE.get((obj.get("status") or {}).get("phase"), ExecStatus.FAILED)
+        status = _POD_PHASE.get((obj.get("status") or {}).get("phase"), ExecStatus.FAILED)
+        if status == ExecStatus.FAILED and _deadline_exceeded(obj):
+            return ExecStatus.TIMED_OUT
+        return status
 
     def poll(self, ref) -> ExecStatus:
         prefix, name = ref.split("/", 1)
         if prefix == "pods":
-            # 복합 preflight(nsync src+dst): fail-closed 결합 — 하나라도 FAILED면 FAILED,
-            # 전부 SUCCEEDED라야 SUCCEEDED, 그 외(진행 중)는 RUNNING.
+            # 복합 preflight(nsync src+dst): fail-closed 결합 — 하나라도 TIMED_OUT이면
+            # TIMED_OUT(deadline이 곧 실패의 특수 케이스이므로 fail-closed와 같은 우선순위),
+            # 그 다음 하나라도 FAILED면 FAILED, 전부 SUCCEEDED라야 SUCCEEDED,
+            # 그 외(진행 중)는 RUNNING.
             statuses = [self._poll_pod(n) for n in name.split(",")]
+            if any(s == ExecStatus.TIMED_OUT for s in statuses):
+                return ExecStatus.TIMED_OUT
             if any(s == ExecStatus.FAILED for s in statuses):
                 return ExecStatus.FAILED
             if all(s == ExecStatus.SUCCEEDED for s in statuses):
@@ -141,7 +160,10 @@ class VolcanoExecutionAdapter:
         if obj is None:
             return ExecStatus.FAILED
         phase = ((obj.get("status") or {}).get("state") or {}).get("phase")
-        return _VCJOB_PHASE.get(phase, ExecStatus.FAILED)
+        status = _VCJOB_PHASE.get(phase, ExecStatus.FAILED)
+        if status == ExecStatus.FAILED and _deadline_exceeded(obj):
+            return ExecStatus.TIMED_OUT
+        return status
 
     def read_summary(self, ref):
         path = self._summary_paths.get(ref)

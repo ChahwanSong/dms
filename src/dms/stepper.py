@@ -6,6 +6,7 @@ import sys
 from .db import iso_plus, utc_now_iso
 from .domain import DataJobState
 from .execution import ExecStatus, ExecutionError, JobSpec
+from .placement import TOOL_TO_POLICY
 
 
 def _summary_fingerprint(summary):
@@ -53,13 +54,23 @@ class JobStepper:
         else:
             paths = {"target": self._abs(job["storage_name"], job["target"]),
                      "storage": job["storage_name"]}
+        # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
+        # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
+        # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.
+        policy = self._repos.control.get_policy(TOOL_TO_POLICY[job["tool"]])
+        if policy is None:
+            timeout = None
+        elif phase == "execution":
+            timeout = policy["execution_timeout_seconds"]
+        else:
+            timeout = policy["preview_timeout_seconds"]
         return JobSpec(
             job_id=job["job_id"], phase=phase, operation=op, tool=job["tool"],
             dryrun=dryrun, identity=wp.get("identity", {}), paths=paths,
             options=job["options"] or {}, candidates=wp.get("candidates", {}),
             process_count=wp.get("process_count", 1), queue=wp.get("queue", "dms-data"),
             priority_class=wp.get("priority_class", "dms-mid"),
-            artifact_base=self._settings.artifact_base_uri)
+            artifact_base=self._settings.artifact_base_uri, timeout_seconds=timeout)
 
     def _finalize(self, job, job_state, *, reason_code=None, summary=None):
         self._repos.data_jobs.set_job_state(job["job_id"], job_state,
@@ -178,6 +189,9 @@ class JobStepper:
             self._repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING,
                                                 actor="stepper")
             return "ConfirmPending"
+        if status == ExecStatus.TIMED_OUT:
+            self._finalize(job, DataJobState.TIMED_OUT, reason_code="preview_timed_out")
+            return "TimedOut"
         self._finalize(job, DataJobState.FAILED, reason_code="preview_failed")
         return "Failed"
 

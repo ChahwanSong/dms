@@ -246,6 +246,19 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None)
     ident = spec.identity or {}
     script, path_args = _preflight_script(spec, role=role)
     role_seg = _PREFLIGHT_ROLE_SEG.get(role, "")
+    pod_spec = {"restartPolicy": "Never",
+                "nodeSelector": {"kubernetes.io/hostname": node},
+                "containers": [{
+                    "name": "preflight", "image": job_image,
+                    "command": ["sh", "-c", script, "sh", *path_args],
+                    "securityContext": {"runAsUser": ident.get("uid", 0),
+                                        "runAsGroup": ident.get("gid", 0)},
+                    "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],
+                                      "mountPropagation": "HostToContainer"}
+                                     for v in volumes]}],
+                "volumes": _pod_volumes(volumes)}
+    if spec.timeout_seconds:
+        pod_spec["activeDeadlineSeconds"] = spec.timeout_seconds
     return {
         "apiVersion": "v1", "kind": "Pod",
         # phase(+role) in the name: one job can run multiple preflight Pods -- the
@@ -260,17 +273,7 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None)
                      "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": "preflight"}},
-        "spec": {"restartPolicy": "Never",
-                 "nodeSelector": {"kubernetes.io/hostname": node},
-                 "containers": [{
-                     "name": "preflight", "image": job_image,
-                     "command": ["sh", "-c", script, "sh", *path_args],
-                     "securityContext": {"runAsUser": ident.get("uid", 0),
-                                         "runAsGroup": ident.get("gid", 0)},
-                     "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],
-                                       "mountPropagation": "HostToContainer"}
-                                      for v in volumes]}],
-                 "volumes": _pod_volumes(volumes)}}
+        "spec": pod_spec}
 
 
 def _build_nsync_job(spec, *, job_image, namespace, volumes):
@@ -294,18 +297,21 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
             "affinity": _node_affinity(dst_nodes),
             "containers": [_worker_container("destination-worker", job_image, spec, volumes)],
             "volumes": _pod_volumes(volumes)}}}
+    job_spec = {"schedulerName": "volcano", "queue": spec.queue,
+                "minAvailable": len(src_nodes) + len(dst_nodes) + 1,
+                "priorityClassName": spec.priority_class,
+                "plugins": {"ssh": [], "svc": []},
+                "policies": [{"event": "TaskCompleted", "action": "CompleteJob"},
+                             {"event": "PodFailed", "action": "AbortJob"}],
+                "tasks": [launcher, src_worker, dst_worker]}
+    if spec.timeout_seconds:
+        job_spec["activeDeadlineSeconds"] = spec.timeout_seconds
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": spec.phase, "dms.io/tool": spec.tool}},
-        "spec": {"schedulerName": "volcano", "queue": spec.queue,
-                 "minAvailable": len(src_nodes) + len(dst_nodes) + 1,
-                 "priorityClassName": spec.priority_class,
-                 "plugins": {"ssh": [], "svc": []},
-                 "policies": [{"event": "TaskCompleted", "action": "CompleteJob"},
-                              {"event": "PodFailed", "action": "AbortJob"}],
-                 "tasks": [launcher, src_worker, dst_worker]}}
+        "spec": job_spec}
 
 
 def build_volcano_job(spec, *, job_image, namespace, volumes):
@@ -329,14 +335,17 @@ def build_volcano_job(spec, *, job_image, namespace, volumes):
             "affinity": _node_affinity(nodes) if nodes else {},
             "containers": [_worker_container("worker", job_image, spec, volumes)],
             "volumes": _pod_volumes(volumes)}}}
+    job_spec = {"schedulerName": "volcano", "queue": spec.queue,
+                "minAvailable": workers + 1, "priorityClassName": spec.priority_class,
+                "plugins": {"ssh": [], "svc": []},
+                "policies": [{"event": "TaskCompleted", "action": "CompleteJob"},
+                             {"event": "PodFailed", "action": "AbortJob"}],
+                "tasks": [launcher, worker]}
+    if spec.timeout_seconds:
+        job_spec["activeDeadlineSeconds"] = spec.timeout_seconds
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
                                 "dms.io/phase": spec.phase, "dms.io/tool": spec.tool}},
-        "spec": {"schedulerName": "volcano", "queue": spec.queue,
-                 "minAvailable": workers + 1, "priorityClassName": spec.priority_class,
-                 "plugins": {"ssh": [], "svc": []},
-                 "policies": [{"event": "TaskCompleted", "action": "CompleteJob"},
-                              {"event": "PodFailed", "action": "AbortJob"}],
-                 "tasks": [launcher, worker]}}
+        "spec": job_spec}

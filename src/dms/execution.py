@@ -27,6 +27,7 @@ class JobSpec:
     queue: str
     priority_class: str
     artifact_base: str
+    timeout_seconds: int | None = None
 
 
 class ExecutionError(Exception):
