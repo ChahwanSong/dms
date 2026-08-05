@@ -6,6 +6,7 @@ import { Button } from "../../components/ui/Button";
 import { isTerminal } from "../../lib/jobState";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Timeline } from "./Timeline";
+import { JobViewer } from "./JobViewer";
 import { ApiError } from "../../lib/api";
 
 function durationText(from?: string, to?: string): string {
@@ -101,7 +102,7 @@ export function RequestDetail() {
             <div className="mt-3">
               <Timeline transitions={j.transitions} />
             </div>
-            {/* Task 7: <JobViewer jobId={j.job_id} /> */}
+            <JobViewer jobId={j.job_id} />
           </Card>
         ))}
       </div>
