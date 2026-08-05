@@ -13,6 +13,9 @@ import { BatchesList } from "../features/batches/BatchesList";
 import { BatchCreate } from "../features/batches/BatchCreate";
 import { BatchDetail } from "../features/batches/BatchDetail";
 import { AuditLog } from "../features/audit/AuditLog";
+import { PoliciesList } from "../features/policies/PoliciesList";
+import { DenylistList } from "../features/denylist/DenylistList";
+import { ControlStatePage } from "../features/control/ControlStatePage";
 
 function Home() {
   const me = useMe();
@@ -36,6 +39,9 @@ export function AppRouter() {
         <Route path="/admin/batches/new" element={<RequireRole role="admin"><AppShell><BatchCreate /></AppShell></RequireRole>} />
         <Route path="/admin/batches/:batchId" element={<RequireRole role="admin"><AppShell><BatchDetail /></AppShell></RequireRole>} />
         <Route path="/admin/audit" element={<RequireRole role="admin"><AppShell><AuditLog /></AppShell></RequireRole>} />
+        <Route path="/admin/policies" element={<RequireRole role="admin"><AppShell><PoliciesList /></AppShell></RequireRole>} />
+        <Route path="/admin/denylist" element={<RequireRole role="admin"><AppShell><DenylistList /></AppShell></RequireRole>} />
+        <Route path="/admin/control" element={<RequireRole role="admin"><AppShell><ControlStatePage /></AppShell></RequireRole>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AuthProvider>

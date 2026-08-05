@@ -52,3 +52,40 @@ test("admin can open audit log", async () => {
   renderAt("/admin/audit");
   expect(await screen.findByRole("heading", { name: "감사 로그" })).toBeInTheDocument();
 });
+
+test("admin can open policies list", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/policies", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/policies");
+  expect(await screen.findByRole("heading", { name: "정책" })).toBeInTheDocument();
+});
+
+test("admin can open denylist", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/identity-denylist", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/denylist");
+  expect(await screen.findByRole("heading", { name: "denylist" })).toBeInTheDocument();
+});
+
+test("admin can open control state", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/control-state", () =>
+      HttpResponse.json({ maintenance: 0, drain: 0, reason: null, changed_by: null, changed_at: null })),
+  );
+  renderAt("/admin/control");
+  expect(await screen.findByRole("heading", { name: "컨트롤 상태" })).toBeInTheDocument();
+});
+
+test("user visiting /admin/policies is redirected to /jobs", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/policies");
+  expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
+});
