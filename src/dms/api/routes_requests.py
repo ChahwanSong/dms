@@ -9,6 +9,14 @@ from .auth import Identity, require_user
 router = APIRouter()
 
 
+def _reject_when_maintenance(request: Request) -> None:
+    # 유지보수 창에는 신규 유입을 막는다 (진행 중인 잡은 건드리지 않는다 — 그건 drain의 몫).
+    # 관리자도 예외가 아니다. 콘솔의 control-state PUT은 제출 경로가 아니라 잠기지 않는다.
+    state = request.app.state.repos.control.control_state()
+    if state and state["maintenance"]:
+        raise HTTPException(status_code=503, detail="maintenance_mode")
+
+
 class RequestBody(BaseModel):
     operation: str
     storage: str | None = None
@@ -63,6 +71,7 @@ def _validated_payload(body: RequestBody) -> tuple[dict, str]:
 @router.post("/api/user/requests", status_code=202)
 def submit(body: RequestBody, request: Request,
            identity: Identity = Depends(require_user)):
+    _reject_when_maintenance(request)
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요
     owner = body.owner_username
     if owner is not None and owner != identity.actor:

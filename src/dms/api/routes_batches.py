@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError, Operation, build_data_payload, validate_batch
 from .auth import Identity, require_admin
+from .routes_requests import _reject_when_maintenance
 
 router = APIRouter()
 
@@ -16,6 +17,7 @@ class BatchBody(BaseModel):
 
 @router.post("/api/admin/batches", status_code=202)
 def create_batch(body: BatchBody, request: Request, identity: Identity = Depends(require_admin)):
+    _reject_when_maintenance(request)
     try:
         validate_batch(body.operation, body.max_concurrency, body.items)
         for item in body.items:                       # 각 행 검증(조기 거부)
