@@ -25,13 +25,14 @@ export function SubmitScan() {
   const loadingStorages = storagesQ.isLoading;
 
   const verboseQuietConflict = f.verbose && f.quiet;
-  const blocked = submit.isPending || verboseQuietConflict;
+  const blocked = submit.isPending || verboseQuietConflict || storagesQ.isError;
 
   const on = (k: keyof typeof initial) => (e: any) =>
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (blocked) return;
     const options: Record<string, boolean | number> = {};
     if (f.verbose) options.verbose = true;
     if (f.quiet) options.quiet = true;
@@ -54,6 +55,9 @@ export function SubmitScan() {
         scan은 미리보기 확인 단계가 없습니다 — 제출하면 바로 실행됩니다.
       </p>
       <form className="space-y-3" onSubmit={handleSubmit}>
+        {storagesQ.isError && (
+          <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <StoragePicker label="스토리지" value={f.storage}
             onChange={(v) => setF({ ...f, storage: v })} storages={storages} loading={loadingStorages} />
@@ -83,8 +87,9 @@ export function SubmitScan() {
           </select>
         </label>
 
-        <label className="text-sm block">다른 사용자로 실행
-          <input aria-label="다른 사용자로 실행" className={field} value={f.ownerUsername} onChange={on("ownerUsername")} />
+        <label className="text-sm block">관리자 특권 실행(root)
+          <input aria-label="관리자 특권 실행(root)" className={field} value={f.ownerUsername} onChange={on("ownerUsername")} />
+          <p className="text-muted text-xs mt-1">root로 실행되며, 입력한 사용자는 소유자로 기록됩니다</p>
         </label>
 
         {submit.isError && <p className="text-bad text-sm">{(submit.error as ApiError).message}</p>}

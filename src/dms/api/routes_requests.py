@@ -72,6 +72,10 @@ def _validated_payload(body: RequestBody) -> tuple[dict, str]:
 def submit(body: RequestBody, request: Request,
            identity: Identity = Depends(require_user)):
     reject_when_maintenance(request)
+    # scan 제출은 관리자 전용이다 (설계 결정 레코드) — /admin/scan이 admin 라우트라는
+    # 사실만으로는 강제되지 않으므로 여기서 명시적으로 게이트한다.
+    if Operation(body.operation) is Operation.SCAN and identity.role != "admin":
+        raise HTTPException(status_code=403, detail="scan_admin_only")
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요
     owner = body.owner_username
     if owner is not None and owner != identity.actor:

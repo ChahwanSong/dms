@@ -22,7 +22,9 @@ export function StoragePicker({ label, value, onChange, storages, loading }: {
         <option value="">{loading ? "불러오는 중…" : "선택하세요"}</option>
         {storages.map((s) => (
           <option key={s.storage_name} value={s.storage_name}>
-            {s.storage_name} ({s.status})
+            {s.status === "Ready" || s.status === "Degraded"
+              ? `${s.storage_name} (${s.status})`
+              : `${s.storage_name} (${s.status} — 준비 안 됨)`}
           </option>
         ))}
       </select>
@@ -60,13 +62,14 @@ export function SubmitJob() {
 
   const recursiveMissing = f.operation === "rm" && !f.recursive;
   const statLiteConflict = f.operation === "rm" && f.stat && f.lite;
-  const blocked = submit.isPending || recursiveMissing || statLiteConflict;
+  const blocked = submit.isPending || recursiveMissing || statLiteConflict || storagesQ.isError;
 
   const on = (k: keyof typeof initial) => (e: any) =>
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (blocked) return;
     const body: SubmitBody = f.operation === "sync"
       ? {
           operation: "sync",
@@ -98,9 +101,13 @@ export function SubmitJob() {
         </label>
 
         {f.operation === "rm" && (
-          <p className="text-bad text-sm">
+          <p className="rounded-lg border border-bad/40 bg-bad/5 p-3 text-bad text-sm">
             삭제는 되돌릴 수 없습니다. 미리보기에서 대상을 확인한 뒤 확인해야 실행됩니다.
           </p>
+        )}
+
+        {storagesQ.isError && (
+          <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
         )}
 
         {f.operation === "sync" ? (
@@ -140,7 +147,7 @@ export function SubmitJob() {
               </label>
             </div>
             <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" aria-label="recursive" checked={f.recursive} onChange={on("recursive")} /> recursive
+              <input type="checkbox" aria-label="재귀 삭제(필수)" checked={f.recursive} onChange={on("recursive")} /> 재귀 삭제(필수)
             </label>
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" aria-label="stat" checked={f.stat} onChange={on("stat")} /> stat
@@ -163,8 +170,12 @@ export function SubmitJob() {
         </label>
 
         {isAdmin && (
-          <label className="text-sm block">다른 사용자로 실행
-            <input aria-label="다른 사용자로 실행" className={field} value={f.ownerUsername} onChange={on("ownerUsername")} />
+          <label className="text-sm block">관리자 특권 실행(root)
+            <input aria-label="관리자 특권 실행(root)" className={field} value={f.ownerUsername} onChange={on("ownerUsername")} />
+            <p className="text-muted text-xs mt-1">root로 실행되며, 입력한 사용자는 소유자로 기록됩니다</p>
+            {f.operation === "rm" && (
+              <p className="text-bad text-xs">삭제가 root 권한으로 수행됩니다</p>
+            )}
           </label>
         )}
 

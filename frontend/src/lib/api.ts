@@ -38,6 +38,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   sync_destination_inside_source: "목적지가 소스 하위 경로일 수 없습니다",
   invalid_owner_username: "사용자명이 올바르지 않습니다",
   invalid_operation: "지원하지 않는 연산입니다",
+  scan_admin_only: "scan 실행은 관리자만 가능합니다",
 };
 
 export class ApiError extends Error {

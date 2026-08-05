@@ -12,6 +12,9 @@ def _client_with(db, **overrides):
 
 
 SCAN = {"operation": "scan", "storage": "s1", "target": "a"}
+# scan은 관리자 전용 제출이므로(별도 게이트), non-admin으로 특권 게이트만 단독 검증하는
+# 아래 테스트들은 scan 대신 rm을 사용한다.
+RM = {"operation": "rm", "storage": "s1", "target": "a", "options": {"recursive": True}}
 
 
 def test_owner_self_is_allowed(db):
@@ -19,17 +22,17 @@ def test_owner_self_is_allowed(db):
     client.post("/api/auth/signup", json={"username": "alice", "password": "p"})
     client.post("/api/auth/login", json={"username": "alice", "password": "p"})
     # owner_username 없음 → 자기 데이터 → 202
-    assert client.post("/api/user/requests", json=SCAN).status_code == 202
+    assert client.post("/api/user/requests", json=RM).status_code == 202
     # owner_username == 자신 → 202
     assert client.post("/api/user/requests",
-                       json={**SCAN, "owner_username": "alice"}).status_code == 202
+                       json={**RM, "owner_username": "alice"}).status_code == 202
 
 
 def test_user_cannot_submit_for_other_owner(db):
     client = _client_with(db)
     client.post("/api/auth/signup", json={"username": "mallory", "password": "p"})
     client.post("/api/auth/login", json={"username": "mallory", "password": "p"})
-    r = client.post("/api/user/requests", json={**SCAN, "owner_username": "victim"})
+    r = client.post("/api/user/requests", json={**RM, "owner_username": "victim"})
     assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized"
 
 

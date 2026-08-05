@@ -10,8 +10,8 @@ import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
 
 const storageRows: UserStorage[] = [
-  { storage_name: "cephfs", backend_type: "cephfs", status: "ready" },
-  { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "ready" },
+  { storage_name: "cephfs", backend_type: "cephfs", status: "Ready" },
+  { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready" },
 ];
 const meAdmin: Me = { actor: "root", role: "admin" };
 
@@ -40,8 +40,8 @@ function renderPage() {
 test("스토리지 드롭다운이 API 목록으로 채워진다", async () => {
   renderPage();
   const storageSelect = await screen.findByLabelText("스토리지");
-  expect(await within(storageSelect).findByText("cephfs (ready)")).toBeInTheDocument();
-  expect(within(storageSelect).getByText("cephfs-secondary (ready)")).toBeInTheDocument();
+  expect(await within(storageSelect).findByText("cephfs (Ready)")).toBeInTheDocument();
+  expect(within(storageSelect).getByText("cephfs-secondary (Ready)")).toBeInTheDocument();
 });
 
 test("top_k를 비우면 제출 바디에서 옵션이 빠진다", async () => {
@@ -52,7 +52,7 @@ test("top_k를 비우면 제출 바디에서 옵션이 빠진다", async () => {
   }));
   renderPage();
   const storageSelect = await screen.findByLabelText("스토리지");
-  await within(storageSelect).findByText("cephfs (ready)");
+  await within(storageSelect).findByText("cephfs (Ready)");
   await userEvent.selectOptions(storageSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("대상 경로"), "a/b");
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
@@ -74,7 +74,7 @@ test("top_k에 5를 넣으면 옵션에 숫자 5로 들어간다", async () => {
   }));
   renderPage();
   const storageSelect = await screen.findByLabelText("스토리지");
-  await within(storageSelect).findByText("cephfs (ready)");
+  await within(storageSelect).findByText("cephfs (Ready)");
   await userEvent.selectOptions(storageSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("대상 경로"), "a/b");
   await userEvent.type(screen.getByLabelText("top_k"), "5");
@@ -100,4 +100,13 @@ test("verbose와 quiet을 동시에 체크하면 제출 버튼이 비활성이�
 
   expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
   expect(screen.getByText("verbose와 quiet은 함께 쓸 수 없습니다")).toBeInTheDocument();
+});
+
+test("스토리지 목록 로드가 실패하면 오류 메시지가 뜨고 제출 버튼이 비활성화된다", async () => {
+  server.use(http.get("/api/user/storages", () =>
+    HttpResponse.json({ detail: "storage_list_failed" }, { status: 500 })));
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  expect(await screen.findByText("storage_list_failed")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
 });
