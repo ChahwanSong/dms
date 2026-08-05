@@ -6,6 +6,7 @@ from .storages import StoragesRepository
 from .control import ControlRepository
 from .data_jobs import DataJobsRepository
 from .batches import BatchesRepository
+from .scan_paths import UserScanPathsRepository
 
 
 class Repositories:
@@ -19,3 +20,4 @@ class Repositories:
         self.control = ControlRepository(db)
         self.data_jobs = DataJobsRepository(db)
         self.batches = BatchesRepository(db)
+        self.scan_paths = UserScanPathsRepository(db)
