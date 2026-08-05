@@ -162,8 +162,12 @@ def test_nsync_three_tasks():
 
 
 def test_preflight_pod_runs_as_identity():
-    spec = _spec(operation="scan", tool="dscan", identity={"uid": 10001, "gid": 10000,
-                 "username": "alice"}, paths={"target": "/cephfs/dms/a"})
+    # phase를 명시적으로 "preflight"로 지정한다 — build_preflight_pod의 라벨은
+    # spec.phase를 그대로 쓰므로(하드코드 아님), _spec()의 기본값 phase="execution"을
+    # 그대로 두면 아래 라벨 검증과 스펙이 어긋난다.
+    spec = _spec(operation="scan", tool="dscan", phase="preflight",
+                 identity={"uid": 10001, "gid": 10000, "username": "alice"},
+                 paths={"target": "/cephfs/dms/a"})
     m = build_preflight_pod(spec, job_image="i", namespace="dms", volumes=_VOL,
                             node="dms-w1")
     assert m["kind"] == "Pod"

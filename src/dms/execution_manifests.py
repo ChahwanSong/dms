@@ -288,7 +288,7 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None)
                               f"{spec.phase.replace('_', '-')}{role_seg}-{node}")[:63],
                      "namespace": namespace,
                      "labels": {"dms.io/job-id": spec.job_id,
-                                "dms.io/phase": "preflight"}},
+                                "dms.io/phase": spec.phase}},
         "spec": pod_spec}
 
 

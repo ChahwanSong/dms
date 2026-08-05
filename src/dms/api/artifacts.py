@@ -158,6 +158,19 @@ def _read_capped(fd: int, limit: int) -> bytes:
     return b"".join(chunks)
 
 
+def tail_lines(text: str, n: int) -> str:
+    """텍스트의 마지막 n줄. str.splitlines()는 '\\r'·'\\v'·'\\f'·'\\x85'에서도 쪼갠다 —
+    rsync/dsync류 진행률 출력(한 줄을 '\\r'로 덮어쓰는)이 조각조각 나서 tail=N이
+    N줄이 아니게 된다. '\\n'으로만 분할하고, n은 MAX_TAIL_LINES로 클램프한다."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # 파일 끝 개행은 마지막 줄의 종결자지 빈 줄이 아니다
+    capped = min(max(n, 1), MAX_TAIL_LINES)
+    if len(lines) > capped:
+        lines = lines[-capped:]
+    return "\n".join(lines)
+
+
 def read_artifact(base: str, job_id: str, phase: str, name: str,
                   tail: int | None = None) -> dict:
     path = resolve_artifact_path(base, job_id, phase, name)
@@ -197,15 +210,13 @@ def read_artifact(base: str, job_id: str, phase: str, name: str,
         os.close(fd)
     text = raw.decode("utf-8", errors="replace")
     if tail is not None:
-        # str.splitlines()는 '\r'·'\v'·'\f'·'\x85'에서도 쪼갠다 — rsync/dsync류 진행률
-        # 출력(한 줄을 '\r'로 덮어쓰는)이 조각조각 나서 tail=N이 N줄이 아니게 된다.
+        # 자른 줄 수(tail_lines가 실제로 자르는 개수와 같은 규칙)를 세어 truncated를
+        # 판정한다 — tail_lines 자체는 텍스트만 돌려주므로 여기서 별도로 셀 수밖에 없다.
         lines = text.split("\n")
         if lines and lines[-1] == "":
             lines.pop()  # 파일 끝 개행은 마지막 줄의 종결자지 빈 줄이 아니다
-        capped = min(max(tail, 1), MAX_TAIL_LINES)
-        if len(lines) > capped:
+        if len(lines) > min(max(tail, 1), MAX_TAIL_LINES):
             truncated = True
-            lines = lines[-capped:]
-        text = "\n".join(lines)
+        text = tail_lines(text, tail)
     return {"phase": phase, "name": name, "size": st.st_size,
             "truncated": truncated, "content": text}

@@ -174,6 +174,50 @@ def test_cancel_failed_terminate_leaves_everything_unchanged(client):
     assert repos.requests.get(rid) == before_req
 
 
+def _make_batch_with_one_confirm_pending_child(client):
+    """PreviewReady 배치: item 하나가 미리보기를 든 채 ConfirmPending으로 대기 중이다
+    (자식이 confirm을 기다리는 상태). 자연스러운 프로덕션 경로는 sync 배치가
+    오케스트레이터를 통해 도달하는 것이지만, 여기서는 cancel_batch의 상태 가드만
+    검증하면 되므로 배치 상태를 직접 PreviewReady로 지정한다."""
+    _admin(client)
+    repos = client.app.state.repos
+    adapter = client.app.state.execution_adapter
+    bid = client.post("/api/admin/batches", json={
+        "operation": "scan", "max_concurrency": 1, "options": {}, "note": None,
+        "items": [{"storage": "s1", "target": "a"}],
+    }).json()["batch_id"]
+    _orch(repos).run_once()
+    item = repos.batches.list_items(bid)[0]
+    assert item["status"] == "Materialized"
+    rid = item["request_id"]
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(
+        rid, plan_id, operation="scan", priority="mid", storage_name="s1",
+        target="a", options={}, tool="dscan", worker_pool={}, precondition={},
+        actor="planner")
+    repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="planner")
+    ref = adapter.submit(_spec(jid, phase="preview"))
+    repos.data_jobs.set_phase_ref(jid, "preview", ref)
+    repos.batches.set_status(bid, "PreviewReady")
+    return bid, item, jid, rid, ref
+
+
+def test_cancel_preview_ready_batch_terminates_children(client):
+    bid, item, jid, rid, ref = _make_batch_with_one_confirm_pending_child(client)
+    repos = client.app.state.repos
+    adapter = client.app.state.execution_adapter
+
+    r = client.post(f"/api/admin/batches/{bid}:cancel")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "Cancelled"
+    assert adapter.poll(ref) == ExecStatus.FAILED   # terminate가 preview phase ref로 호출됐다
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Cancelled" and job["reason_code"] == "cancelled_by_batch"
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+    assert repos.batches.get(bid)["status"] == "Cancelled"
+
+
 def test_cancel_non_previewing_or_running_batch_409(client):
     _admin(client)
     repos = client.app.state.repos

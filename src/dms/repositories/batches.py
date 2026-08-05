@@ -35,8 +35,11 @@ class BatchesRepository:
         return row
 
     def list(self, limit=100):
-        return self._db.query("SELECT * FROM batches ORDER BY created_at DESC LIMIT :n",
+        rows = self._db.query("SELECT * FROM batches ORDER BY created_at DESC LIMIT :n",
                               {"n": limit})
+        for r in rows:
+            r["options"] = load_json(r["options"])
+        return rows
 
     def list_active(self):
         rows = self._db.query(
@@ -80,11 +83,12 @@ class BatchesRepository:
             {"s": succeeded, "f": failed, "now": utc_now_iso(), "b": batch_id})
 
     def reset_failed_items(self, batch_id) -> int:
-        rows = self._db.query(
-            "SELECT seq FROM batch_items WHERE batch_id = :b AND (status = 'Failed' OR status = 'Rejected')",
-            {"b": batch_id})
-        for r in rows:
-            self.reset_item_to_queued(batch_id, r["seq"])
-        if rows:
-            self.bump_counts(batch_id, failed=-len(rows))
+        with self._db.transaction():
+            rows = self._db.query(
+                "SELECT seq FROM batch_items WHERE batch_id = :b AND (status = 'Failed' OR status = 'Rejected')",
+                {"b": batch_id})
+            for r in rows:
+                self.reset_item_to_queued(batch_id, r["seq"])
+            if rows:
+                self.bump_counts(batch_id, failed=-len(rows))
         return len(rows)

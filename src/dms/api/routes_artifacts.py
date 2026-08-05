@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ..execution import ExecutionError
-from .artifacts import ArtifactError, MAX_BYTES, PHASES, list_artifacts, read_artifact, strip_scheme
+from .artifacts import (ArtifactError, MAX_BYTES, PHASES, list_artifacts, read_artifact,
+                        strip_scheme, tail_lines)
 from .auth import Identity, require_user
 from .routes_jobs import _owned_job
 
@@ -57,7 +58,7 @@ def get_job_logs(job_id: str, request: Request, phase: str = Query(default="pref
     for pod, log in entries:
         if log is not None:
             if tail is not None:
-                log = "\n".join(log.splitlines()[-tail:])
+                log = tail_lines(log, tail)
             if len(log.encode()) > MAX_BYTES:
                 log = log.encode()[-MAX_BYTES:].decode("utf-8", errors="replace")
         out.append({"pod": pod, "log": log})
