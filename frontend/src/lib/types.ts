@@ -13,7 +13,14 @@ export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
   reason_code: string | null; preview_fingerprint: string | null;
   preview_expires_at: string | null; result_summary: unknown;
-  transitions: Transition[];
+  transitions: Transition[]; artifact_uri: string | null;
+}
+export interface ArtifactEntry { phase: string; name: string; size: number; modified_at: number }
+export interface ArtifactFile {
+  phase: string; name: string; size: number; truncated: boolean; content: string;
+}
+export interface JobLogs {
+  phase: string; ref: string; entries: { pod: string; log: string | null }[];
 }
 export interface Storage {
   storage_name: string; mount_path: string; managed_root: string; backend_type: string;

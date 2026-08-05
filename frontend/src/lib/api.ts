@@ -17,6 +17,12 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_priority: "우선순위 값이 올바르지 않습니다",
   invalid_denylist_subject_type: "대상 유형이 올바르지 않습니다",
   policy_not_found: "정책을 찾을 수 없습니다",
+  artifact_not_found: "아티팩트를 찾을 수 없습니다",
+  artifact_forbidden: "허용되지 않은 아티팩트 경로입니다",
+  invalid_phase: "알 수 없는 실행 단계입니다",
+  invalid_artifact_name: "아티팩트 이름이 올바르지 않습니다",
+  log_ref_not_found: "이 단계의 로그 참조가 없습니다",
+  log_not_available: "이 단계는 파드 로그를 제공하지 않습니다 — 아티팩트를 확인하세요",
 };
 
 export class ApiError extends Error {
