@@ -12,6 +12,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   storage_in_use: "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)",
   storage_not_found: "스토리지를 찾을 수 없습니다",
   maintenance_mode: "유지보수 중입니다 — 새 작업 제출이 일시 중단되었습니다",
+  http_422: "입력값이 올바르지 않습니다",
   invalid_policy: "정책 값이 올바르지 않습니다",
   invalid_priority: "우선순위 값이 올바르지 않습니다",
   invalid_denylist_subject_type: "대상 유형이 올바르지 않습니다",
@@ -34,12 +35,18 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent("dms:unauthorized"));
     let code = "http_401";
-    try { code = (await res.json()).detail ?? code; } catch { /* noop */ }
+    try {
+      const detail = (await res.json()).detail;
+      code = typeof detail === "string" ? detail : "http_401";
+    } catch { /* noop */ }
     throw new ApiError(401, code, REASON_MESSAGES[code] ?? code);
   }
   if (!res.ok) {
     let code = `http_${res.status}`;
-    try { code = (await res.json()).detail ?? code; } catch { /* noop */ }
+    try {
+      const detail = (await res.json()).detail;
+      code = typeof detail === "string" ? detail : `http_${res.status}`;
+    } catch { /* noop */ }
     throw new ApiError(res.status, code, REASON_MESSAGES[code] ?? code);
   }
   if (res.status === 204) return undefined as T;

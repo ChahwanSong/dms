@@ -19,7 +19,8 @@ function wrap() {
 test("shows the maintenance banner and changed_by, but no drain banner", async () => {
   server.use(http.get("/api/admin/control-state", () => HttpResponse.json(CS)));
   wrap();
-  expect(await screen.findByText("유지보수 중 — 새 작업 제출이 차단됩니다")).toBeInTheDocument();
+  expect(await screen.findByText((_, node) =>
+    Boolean(node?.textContent?.startsWith("유지보수 중") && node.textContent.includes("드레인도 함께 켜세요")))).toBeInTheDocument();
   expect(screen.getByText("ops")).toBeInTheDocument();
   expect(screen.queryByText("드레인 중 — 진행 중인 작업이 더 전진하지 않습니다")).not.toBeInTheDocument();
 });
@@ -44,6 +45,6 @@ test("renders no warning banners when both flags are off", async () => {
     HttpResponse.json({ maintenance: 0, drain: 0, reason: null, changed_by: null, changed_at: null })));
   wrap();
   await screen.findByLabelText("유지보수");
-  expect(screen.queryByText("유지보수 중 — 새 작업 제출이 차단됩니다")).not.toBeInTheDocument();
+  expect(screen.queryByText((_, node) => Boolean(node?.textContent?.startsWith("유지보수 중")))).not.toBeInTheDocument();
   expect(screen.queryByText("드레인 중 — 진행 중인 작업이 더 전진하지 않습니다")).not.toBeInTheDocument();
 });

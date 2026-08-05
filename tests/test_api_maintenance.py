@@ -37,6 +37,18 @@ def test_batch_create_blocked_during_maintenance(client):
     assert r.json()["detail"] == "maintenance_mode"
 
 
+def test_rerun_failed_blocked_during_maintenance(client):
+    r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 2,
+        "options": {}, "note": "n", "items": [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b"}]},
+        headers=ADMIN)
+    bid = r.json()["batch_id"]
+    client.app.state.repos.batches.set_item_status(bid, 0, "Failed")
+    _set(client, maintenance=True)
+    res = client.post(f"/api/admin/batches/{bid}:rerun-failed", headers=ADMIN)
+    assert res.status_code == 503
+    assert res.json()["detail"] == "maintenance_mode"
+
+
 def test_control_state_put_never_locks_out_during_maintenance(client):
     # 관리자도 제출 경로에서는 예외가 아니지만, control-state PUT은 제출 경로가 아니므로
     # 유지보수 중에도 반드시 성공해야 한다 (락아웃 방지).

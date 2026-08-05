@@ -97,6 +97,10 @@ PUT  /api/admin/control-state   body {maintenance: bool, drain: bool, reason: st
 **관리자도 동일하게 차단한다**(예외 없음). 콘솔에서 끄는 경로(`PUT /api/admin/control-state`)는
 제출 경로가 아니므로 절대 잠기지 않는다 — 락아웃이 생기지 않는다.
 
+maintenance가 막는 것은 위 두 제출 엔드포인트뿐이다. 이미 접수된 배치는 `BatchOrchestrator`가
+설정된 동시성만큼 계속 항목을 물질화하고 stepper도 계속 파드를 제출한다 — 둘 다 `drain`만
+확인하기 때문이다. 클러스터 작업을 완전히 멈추려면 maintenance와 drain을 함께 켜야 한다.
+
 ### 2.4 denylist 평가 순서 교정 (identity.py)
 
 현재: `is_denied(..., groups=[])` → 특권 단축 반환 → LDAP 해석 → `is_denied(..., groups=실제)`.

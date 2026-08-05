@@ -45,3 +45,11 @@ test("401 with invalid_credentials still maps to the korean login message", asyn
   await expect(apiGet("/api/auth/me")).rejects.toMatchObject({ status: 401, code: "invalid_credentials",
     message: "사용자명 또는 비밀번호가 올바르지 않습니다" });
 });
+
+test("422 with FastAPI field-validation detail array maps to a korean message, not [object Object]", async () => {
+  server.use(http.post("/api/admin/policies", () => HttpResponse.json(
+    { detail: [{ loc: ["body", "max_nodes"], msg: "ensure this value is greater than or equal to 1" }] },
+    { status: 422 })));
+  await expect(apiSend("POST", "/api/admin/policies", { max_nodes: 0 }))
+    .rejects.toMatchObject({ status: 422, code: "http_422", message: "입력값이 올바르지 않습니다" });
+});
