@@ -182,6 +182,22 @@ class VolcanoExecutionAdapter:
         except Exception as exc:
             raise ExecutionError("terminate_failed", str(exc)[:200]) from exc
 
+    def read_log(self, ref):
+        # preflight는 파드 ref라 직접 읽는다. vcjob(launcher)은 파드 이름이 잡 이름과
+        # 달라 라벨 조회가 필요하고 잡 종료 후 사라진다 — 이 슬라이스 범위 밖이므로
+        # 명시적으로 거절하고, 호출자는 아티팩트 stdout/stderr로 유도한다.
+        prefix, name = ref.split("/", 1)
+        if prefix not in ("pod", "pods"):
+            raise ExecutionError("log_not_available", prefix)
+        out = []
+        for pod in name.split(","):
+            try:
+                out.append((pod, self._k8s.read_pod_log(pod, self._namespace)))
+            except Exception:
+                # 파드가 이미 GC됐거나 아직 로그가 없다 — 그 항목만 비우고 계속한다.
+                out.append((pod, None))
+        return out
+
 
 class KubernetesClient:  # pragma: no cover - 실증 대상
     """실 kubernetes 파이썬 클라이언트 기반 K8sClient. in-cluster config를

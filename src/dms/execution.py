@@ -41,6 +41,7 @@ class ExecutionAdapter(Protocol):
     def poll(self, ref: str) -> ExecStatus: ...
     def read_summary(self, ref: str) -> "dict | None": ...
     def terminate(self, ref: str) -> None: ...
+    def read_log(self, ref: str) -> "list[tuple[str, str | None]]": ...
 
 
 class StubExecutionAdapter:
@@ -48,6 +49,7 @@ class StubExecutionAdapter:
         self._jobs = {}
         self._scripts = {}
         self._summaries = {}
+        self._logs = {}
         self._fail_submit_phase = None
         self._fail_terminate_refs = set()
         self._submitted = []
@@ -77,12 +79,18 @@ class StubExecutionAdapter:
         if ref in self._jobs:
             self._jobs[ref]["terminated"] = True
 
+    def read_log(self, ref: str):
+        return self._logs.get(ref, [(ref, "")])
+
     # --- test helpers ---
     def script(self, ref, statuses):
         self._scripts[ref] = list(statuses)
 
     def set_summary(self, ref, summary):
         self._summaries[ref] = summary
+
+    def set_log(self, ref, entries):
+        self._logs[ref] = list(entries)
 
     def fail_submit(self, phase):
         self._fail_submit_phase = phase
