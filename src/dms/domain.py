@@ -207,6 +207,18 @@ def build_data_payload(operation, *, storage=None, target=None, source_storage=N
             build_resource_key(op, storage=storage, target=tgt, fingerprint=fp))
 
 
+_OP_POLICY = {"scan": "scan", "rm": "rm", "sync": "dsync"}
+
+
+def resolve_priority(repos, operation: str, requested: str | None) -> str:
+    # 클라이언트가 명시하면 그 값이 이긴다. 생략하면 정책의 기본값, 그것도 없으면 mid.
+    # sync는 제출 시점에 도구(dsync/nsync)가 정해지지 않으므로 dsync 정책을 대표로 읽는다.
+    if requested is not None:
+        return requested
+    policy = repos.control.get_policy(_OP_POLICY.get(operation, ""))
+    return (policy or {}).get("default_priority") or "mid"
+
+
 def validate_batch(operation, max_concurrency, items) -> None:
     if operation not in (Operation.SCAN.value, Operation.SYNC.value):
         raise DomainValidationError("invalid_batch_operation", operation)

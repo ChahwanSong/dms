@@ -31,3 +31,10 @@ test("renders items table with status", async () => {
   renderAt("Running");
   expect(await screen.findByText("Materialized")).toBeInTheDocument();
 });
+test("PreviewReady also shows cancel button and posts cancel", async () => {
+  let cancelled = false;
+  server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));
+  renderAt("PreviewReady");
+  await userEvent.click(await screen.findByRole("button", { name: "취소" }));
+  expect(cancelled).toBe(true);
+});

@@ -114,3 +114,25 @@ def test_succeeded_scans_orders_by_completion_not_creation(db):
         old_creation, new_creation]
     assert [r["job_id"] for r in repos.data_jobs.succeeded_scans("s1", limit=1)] == [
         old_creation]
+
+
+def test_terminal_jobs_older_than_drains_oldest_first(db):
+    """GC는 오래된 것부터 비워야 한다 — 대상이 limit보다 많을 때 최신순으로 잘라내면
+    가장 오래된(가장 급한) 잡이 윈도우 밖으로 밀려나 영원히 재방문되지 않는다
+    (컨트롤러가 오래 멈췄다 돌아온 뒤 특히 치명적). limit=2, 대상 3건일 때
+    가장 오래된 두 건이 나와야 한다."""
+    repos = _repos(db)
+    oldest = _job(repos, target="a", state=DataJobState.SUCCEEDED)
+    middle = _job(repos, target="b", state=DataJobState.FAILED)
+    newest = _job(repos, target="c", state=DataJobState.CANCELLED)
+    db.execute("UPDATE data_jobs SET updated_at = :u WHERE job_id = :j",
+               {"u": "2020-01-01T00:00:00Z", "j": oldest})
+    db.execute("UPDATE data_jobs SET updated_at = :u WHERE job_id = :j",
+               {"u": "2020-06-01T00:00:00Z", "j": middle})
+    db.execute("UPDATE data_jobs SET updated_at = :u WHERE job_id = :j",
+               {"u": "2021-01-01T00:00:00Z", "j": newest})
+
+    rows = repos.data_jobs.terminal_jobs_older_than(
+        3600, limit=2, now_iso="2030-01-01T00:00:00Z")
+
+    assert [r["job_id"] for r in rows] == [oldest, middle]

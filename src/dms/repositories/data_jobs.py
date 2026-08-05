@@ -191,11 +191,16 @@ class DataJobsRepository:
 
     def terminal_jobs_older_than(self, after_seconds: int, *, limit: int = 200,
                                   now_iso: str | None = None) -> list[dict]:
-        """종단 상태이고 updated_at이 (now - after_seconds)보다 오래된 잡을 최신순
-        limit건. updated_at은 종단 진입 시점이다 — set_job_state의 터미널 가드가
-        그 뒤로는 다시 찍지 않으므로("종단 잡은 되돌리지 않는다") 이 나이 필터가
-        곧 '종단이 된 지 얼마나 됐는가'가 된다. Pod GC(preflight pod 정리)가
-        진행 중인 잡을 절대 건드리지 않도록 state 필터를 두는 게 이 메서드의 핵심."""
+        """종단 상태이고 updated_at이 (now - after_seconds)보다 오래된 잡을
+        **오래된 순**으로 최대 limit건. GC는 반드시 오래된 것부터 비워야 한다 —
+        대상이 limit을 넘으면(예: 컨트롤러가 오래 멈췄다 돌아온 경우) 최신순으로
+        자르면 가장 오래된, 가장 급한 잡이 윈도우 밖으로 영영 밀려나 파드가
+        누수된다. updated_at은 이 잡에 대해 **단조 비감소**다(뒤로 가지 않는다) —
+        set_phase_ref/set_preview/set_confirmed/set_artifact는 종단 잡에도 가드 없이
+        updated_at을 찍을 수 있지만, 모든 갱신이 시각을 **앞으로만** 미므로 이
+        나이 필터는 GC를 늦출 뿐 일찍 발동시키지는 않는다. Pod GC(preflight pod
+        정리)가 진행 중인 잡을 절대 건드리지 않도록 state 필터를 두는 게 이
+        메서드의 핵심."""
         threshold = iso_plus(now_iso or utc_now_iso(), -after_seconds)
         states = tuple(s.value for s in TERMINAL_DATA_JOB_STATES)
         placeholders = ", ".join(f":s{i}" for i in range(len(states)))
@@ -205,7 +210,7 @@ class DataJobsRepository:
         rows = self._db.query(
             f"""SELECT * FROM data_jobs WHERE state IN ({placeholders})
                    AND updated_at < :threshold
-                ORDER BY updated_at DESC, job_id DESC LIMIT :n""", params)
+                ORDER BY updated_at ASC, job_id ASC LIMIT :n""", params)
         return [self._hydrate(r) for r in rows]
 
     def terminal_jobs_with_live_request(self):

@@ -11,10 +11,9 @@ sync 경로: Previewing 배치에서 Queued item을 쓰로틀 materialize해 pre
 ConfirmPending 자식을 쓰로틀 confirm(`_confirm_child`)한다. preview가 만료된 자식은
 Queued로 재시도(reset)된다.
 """
-from .api.routes_requests import resolve_priority
 from .db import utc_now_iso
 from .domain import (Operation, RequestState, TERMINAL_REQUEST_STATES,
-                     DataJobState, build_data_payload)
+                     DataJobState, build_data_payload, resolve_priority)
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
 _REQ_TERMINAL = {s.value for s in TERMINAL_REQUEST_STATES}

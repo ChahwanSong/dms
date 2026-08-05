@@ -18,7 +18,11 @@ _SERVER_INT_KEYS = (
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
     ("DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS", "batch_orchestrator_interval_seconds", 5),
     ("DMS_VCJOB_TTL_SECONDS", "vcjob_ttl_seconds", 86400),
-    ("DMS_POD_GC_AFTER_SECONDS", "pod_gc_after_seconds", 3600),
+    # vcjob TTL과 동일한 86400으로 맞춘다: preflight Pod은 아무 아티팩트도 쓰지 않으므로
+    # (dms_job_runner가 아니라 bare `sh -c`) DMS_PREFLIGHT_REASON 같은 진단 정보는
+    # 파드 로그에만 존재한다 -- 1시간짜리 GC 창은 운영자가 확인하기 전에 그 유일한
+    # 사본을 지워버린다.
+    ("DMS_POD_GC_AFTER_SECONDS", "pod_gc_after_seconds", 86400),
     ("DMS_POD_GC_INTERVAL_SECONDS", "pod_gc_interval_seconds", 600),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
@@ -94,7 +98,7 @@ class Settings:
     static_dir: str | None = None
     batch_orchestrator_interval_seconds: int = 5
     vcjob_ttl_seconds: int = 86400
-    pod_gc_after_seconds: int = 3600
+    pod_gc_after_seconds: int = 86400
     pod_gc_interval_seconds: int = 600
 
     @classmethod
