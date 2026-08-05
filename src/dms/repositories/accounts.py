@@ -3,7 +3,7 @@ import hmac
 import os
 import re
 from ..db import Database, dump_json, utc_now_iso
-from ..domain import DomainValidationError
+from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
 
 _USERNAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
 _N, _R, _P = 16384, 8, 1
@@ -72,3 +72,33 @@ class AccountsRepository:
         return self._db.query(
             "SELECT username, role, email, disabled, created_at FROM accounts "
             "ORDER BY username")
+
+    def _audit_account(self, operation, username, before, after, actor, now):
+        self._db.execute(
+            """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                   before_state, after_state, at)
+               VALUES ('account', :op, :u, :actor, :b, :a, :at)""",
+            {"op": operation, "u": username, "actor": actor,
+             "b": dump_json(before), "a": dump_json(after), "at": now})
+
+    def set_role(self, username, role, *, actor):
+        if role not in (ROLE_USER, ROLE_ADMIN):
+            raise DomainValidationError("invalid_role", repr(role))
+        with self._db.transaction():
+            before = self.get(username)
+            if before is None:
+                raise KeyError(username)
+            self._db.execute("UPDATE accounts SET role = :r WHERE username = :u",
+                             {"r": role, "u": username})
+            self._audit_account("role", username, before, self.get(username),
+                                actor, utc_now_iso())
+
+    def set_disabled(self, username, disabled, *, actor):
+        with self._db.transaction():
+            before = self.get(username)
+            if before is None:
+                raise KeyError(username)
+            self._db.execute("UPDATE accounts SET disabled = :d WHERE username = :u",
+                             {"d": 1 if disabled else 0, "u": username})
+            self._audit_account("disabled", username, before, self.get(username),
+                                actor, utc_now_iso())
