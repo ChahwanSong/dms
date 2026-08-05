@@ -12,7 +12,7 @@ function DeleteButton({ s }: { s: Storage }) {
   const [open, setOpen] = useState(false);
   const del = useDeleteStorage();
   return (
-    <Dialog open={open} onOpenChange={setOpen} title="스토리지 삭제"
+    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) del.reset(); }} title="스토리지 삭제"
             trigger={<Button variant="ghost">삭제</Button>}>
       <p className="text-sm text-muted mb-3">{s.storage_name} 을(를) 삭제할까요?</p>
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
@@ -47,6 +47,7 @@ export function StoragesList() {
                 <td className="flex gap-2 py-2">
                   <StorageDialog mode="edit" storage={s} trigger={<Button variant="ghost">수정</Button>} />
                   <Button variant="ghost" onClick={() => toggle(s)}>{s.enabled === 1 ? "비활성화" : "활성화"}</Button>
+                  {update.isError && <p className="text-bad text-sm">{(update.error as ApiError).message}</p>}
                   <DeleteButton s={s} />
                 </td>
               </tr>

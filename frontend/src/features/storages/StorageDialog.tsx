@@ -14,13 +14,13 @@ export function StorageDialog({ mode, storage, trigger }: {
   const [root, setRoot] = useState(storage?.managed_root ?? "");
   const [backend, setBackend] = useState(storage?.backend_type ?? "");
   const [enabled, setEnabled] = useState(storage ? storage.enabled === 1 : true);
+  const create = useCreateStorage(); const update = useUpdateStorage();
   useEffect(() => {
-    if (!open) return;
+    if (!open) { create.reset(); update.reset(); return; }
     setName(storage?.storage_name ?? ""); setMount(storage?.mount_path ?? "");
     setRoot(storage?.managed_root ?? ""); setBackend(storage?.backend_type ?? "");
     setEnabled(storage ? storage.enabled === 1 : true);
   }, [open, storage]);
-  const create = useCreateStorage(); const update = useUpdateStorage();
   const m = mode === "create" ? create : update;
   const submit = () => {
     if (mode === "create")
