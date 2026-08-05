@@ -90,6 +90,16 @@ test("admin can open scan screen", async () => {
   expect(await screen.findByRole("heading", { name: "scan 실행" })).toBeInTheDocument();
 });
 
+test("non-admin user can open my scan paths (not admin-gated)", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/scan-paths", () => HttpResponse.json([])),
+    http.get("/api/user/storages", () => HttpResponse.json([])),
+  );
+  renderAt("/scan-paths");
+  expect(await screen.findByRole("heading", { name: "내 스캔 경로" })).toBeInTheDocument();
+});
+
 test("user visiting /admin/policies is redirected to /jobs", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
