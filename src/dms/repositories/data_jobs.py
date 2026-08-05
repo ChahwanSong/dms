@@ -93,6 +93,12 @@ class DataJobsRepository:
                 "SELECT state FROM data_jobs WHERE job_id = :j", {"j": job_id})
             if current is None:
                 raise KeyError(job_id)
+            if DataJobState(current["state"]) in TERMINAL_DATA_JOB_STATES:
+                # 종단 잡은 되돌리지 않는다. 취소 직후 늦게 도착한 stepper 틱이
+                # Cancelled 를 덮어쓰고 고아 Volcano Job 을 만드는 경쟁을 막는다.
+                # 예외 대신 조용히 무시한다 — 취소는 정상 동작이고 stepper 루프를
+                # 한 잡 때문에 죽여선 안 된다. 일어나지 않은 전이는 기록도 안 한다.
+                return
             self._db.execute(
                 """UPDATE data_jobs SET state = :s, reason_code = :rc, updated_at = :now
                    WHERE job_id = :j""",
