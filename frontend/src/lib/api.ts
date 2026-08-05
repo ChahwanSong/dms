@@ -47,6 +47,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   scan_path_exists: "이미 등록된 경로입니다",
   scan_path_not_found: "등록된 경로를 찾을 수 없습니다",
   no_covering_scan: "아직 이 경로를 커버하는 scan 결과가 없습니다",
+  scan_report_too_large: "scan 리포트가 너무 커서 통계를 읽을 수 없습니다 — 관리자에게 문의하세요",
 };
 
 export class ApiError extends Error {

@@ -31,8 +31,15 @@ function DeleteButton({ sp }: { sp: ScanPath }) {
   );
 }
 
-function StatsPanel({ id }: { id: number }) {
-  const statsQ = useScanPathStats(id, true);
+/** 리포트 생성 시각은 UTC로만 보여준다 — 스토리지·잡은 UTC로 기록되고,
+ *  브라우저 로컬시간으로 바꿔 보여주면 운영자·사용자가 다른 시각을 말하게 된다. */
+function utcStamp(epoch: number) {
+  return `${new Date(epoch * 1000).toISOString().replace("T", " ").slice(0, 19)} UTC`;
+}
+
+function StatsPanel({ sp }: { sp: ScanPath }) {
+  const statsQ = useScanPathStats(sp.id, true);
+  const title = `${sp.storage_name}:${sp.path} 통계`;
 
   if (statsQ.isLoading) return <p className="text-muted">통계를 불러오는 중…</p>;
 
@@ -40,6 +47,7 @@ function StatsPanel({ id }: { id: number }) {
     const err = statsQ.error as ApiError;
     return (
       <Card className="mt-4 space-y-1">
+        <h2 className="font-semibold">{title}</h2>
         <p className="text-bad text-sm">{err.message}</p>
         {err.code === "no_covering_scan" && (
           <p className="text-muted text-sm">관리자가 이 경로를 포함하는 scan을 실행하면 통계가 표시됩니다</p>
@@ -51,6 +59,16 @@ function StatsPanel({ id }: { id: number }) {
   const stats = statsQ.data!;
   return (
     <Card className="mt-4 space-y-4">
+      <div>
+        <h2 className="font-semibold">{title}</h2>
+        {/* 언제 찍힌 숫자인지 없이 보여주는 건 "디렉터리 전체 기준"을 숨기는 것과
+            같은 부정직이다 — 리포트 생성 시각을 항상 같이 보여준다. */}
+        <p className="text-muted text-sm">
+          {typeof stats.generated_at_epoch === "number"
+            ? `scan 리포트 생성: ${utcStamp(stats.generated_at_epoch)}`
+            : "scan 리포트 생성 시각을 알 수 없습니다"}
+        </p>
+      </div>
       {!stats.covered_by.exact && (
         <p className="text-bad text-sm">
           상위 경로 {stats.covered_by.target} 기준 집계입니다 — 이 경로만의 통계가 아닙니다
@@ -59,7 +77,9 @@ function StatsPanel({ id }: { id: number }) {
       <div>
         <h2 className="font-semibold mb-2">요약</h2>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-          {Object.entries(stats.summary).map(([k, v]) => (
+          {/* 서버가 null을 흘리지 않도록 고쳤지만 화면도 스스로 버틴다 — 앱 전역에
+              ErrorBoundary가 없어서 렌더 예외 하나면 루트가 통째로 언마운트된다. */}
+          {Object.entries(stats.summary ?? {}).map(([k, v]) => (
             <Fragment key={k}>
               <dt className="text-muted">{k}</dt>
               <dd>{v}</dd>
@@ -72,7 +92,7 @@ function StatsPanel({ id }: { id: number }) {
         <Table>
           <thead><tr className="text-muted"><th className="py-2">구간</th><th>개수</th></tr></thead>
           <tbody>
-            {stats.file_size_histogram.map((b, i) => (
+            {(stats.file_size_histogram ?? []).map((b, i) => (
               <tr key={i} className="border-t border-black/5">
                 <td className="py-2">{b.bucket}</td><td>{b.count}</td>
               </tr>
@@ -80,13 +100,13 @@ function StatsPanel({ id }: { id: number }) {
           </tbody>
         </Table>
       </div>
-      {Object.entries(stats.time_histograms).map(([key, buckets]) => (
+      {Object.entries(stats.time_histograms ?? {}).map(([key, buckets]) => (
         <div key={key}>
           <h2 className="font-semibold mb-2">{key} 히스토그램</h2>
           <Table>
             <thead><tr className="text-muted"><th className="py-2">구간</th><th>바이트</th></tr></thead>
             <tbody>
-              {buckets.map((b, i) => (
+              {(buckets ?? []).map((b, i) => (
                 <tr key={i} className="border-t border-black/5">
                   <td className="py-2">{b.bucket}</td><td>{b.bytes}</td>
                 </tr>
@@ -109,6 +129,8 @@ export function ScanPaths() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const storages = storagesQ.data ?? [];
+  // 패널이 어느 행의 통계인지 제목에 그대로 적으려면 선택된 행 자체가 필요하다.
+  const selected = (q.data ?? []).find((sp) => sp.id === selectedId) ?? null;
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -157,7 +179,7 @@ export function ScanPaths() {
         </Table>
       )}
 
-      {selectedId !== null && <StatsPanel id={selectedId} />}
+      {selected !== null && <StatsPanel sp={selected} />}
     </section>
   );
 }

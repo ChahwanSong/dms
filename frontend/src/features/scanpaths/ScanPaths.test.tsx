@@ -109,6 +109,47 @@ test("clicking '통계 보기' shows summary/histograms and the not-exact upstre
   )).toBeInTheDocument();
 });
 
+test("a stats payload with null fields still renders instead of unmounting the app", async () => {
+  // ErrorBoundary가 없어서 렌더 도중 예외 하나면 React가 루트를 통째로 언마운트한다
+  // (내비게이션까지 사라진다). 서버가 null을 흘리지 않도록 고쳤지만, 화면도 스스로
+  // 버텨야 한다.
+  server.use(
+    http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/user/scan-paths", () => HttpResponse.json([
+      { id: 1, storage_name: "s1", path: "/s1/alice", created_at: "2026-08-01T00:00:00Z" },
+    ])),
+    http.get("/api/user/scan-paths/1/stats", () => HttpResponse.json({
+      covered_by: { target: "team", exact: true },
+      generated_at_epoch: 0,
+      summary: null, file_size_histogram: null, time_histograms: null,
+    })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "통계 보기" }));
+
+  expect(await screen.findByRole("heading", { name: "요약" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "내 스캔 경로" })).toBeInTheDocument();
+});
+
+test("the stats panel names the registered path and the report's UTC timestamp", async () => {
+  server.use(
+    http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/user/scan-paths", () => HttpResponse.json([
+      { id: 1, storage_name: "s1", path: "/s1/alice", created_at: "2026-08-01T00:00:00Z" },
+    ])),
+    http.get("/api/user/scan-paths/1/stats", () => HttpResponse.json({
+      covered_by: { target: "/s1/alice", exact: true },
+      generated_at_epoch: 1754400000,
+      summary: { total_files: 42 }, file_size_histogram: [], time_histograms: {},
+    })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "통계 보기" }));
+
+  expect(await screen.findByRole("heading", { name: "s1:/s1/alice 통계" })).toBeInTheDocument();
+  expect(screen.getByText(/2025-08-05 13:20:00 UTC/)).toBeInTheDocument();
+});
+
 test("shows the Korean no_covering_scan message on 404 with an admin-scan hint", async () => {
   server.use(
     http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),

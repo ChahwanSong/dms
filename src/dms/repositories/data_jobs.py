@@ -75,13 +75,19 @@ class DataJobsRepository:
             "SELECT * FROM data_jobs WHERE job_id = :j", {"j": job_id}))
 
     def succeeded_scans(self, storage_name: str, *, limit: int = 50) -> list[dict]:
-        """storage_name에서 성공(Succeeded)한 scan 잡을 최신순으로 최대 limit건.
+        """storage_name에서 성공(Succeeded)한 scan 잡을 **완료 최신순**으로 최대 limit건.
         커버링 scan 조회(Task 3)가 후보를 DB 필드만으로 좁히는 데 쓴다 —
-        target(스토리지 상대 경로)만 보고, 리포트는 매치된 1건만 나중에 읽는다."""
+        target(스토리지 상대 경로)만 보고, 리포트는 매치된 1건만 나중에 읽는다.
+
+        정렬은 created_at이 아니라 updated_at이다: 통계의 신선도는 **언제 끝났는지**로
+        정해진다(리포트는 성공 시점의 파일시스템 상태다). 큰 스캔이 먼저 제출되고 늦게
+        끝나면 created_at 순서는 오래된 리포트를 최신인 척 앞세운다. Succeeded 전이에서
+        set_job_state가 updated_at을 찍고, idx_data_jobs_state (state, updated_at)이
+        이 정렬을 그대로 받아준다."""
         rows = self._db.query(
             """SELECT * FROM data_jobs
                WHERE operation = 'scan' AND state = :s AND storage_name = :sn
-               ORDER BY created_at DESC, job_id DESC LIMIT :n""",
+               ORDER BY updated_at DESC, job_id DESC LIMIT :n""",
             {"s": DataJobState.SUCCEEDED.value, "sn": storage_name, "n": limit})
         return [self._hydrate(r) for r in rows]
 

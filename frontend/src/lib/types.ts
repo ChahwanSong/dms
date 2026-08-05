@@ -80,13 +80,15 @@ export interface ScanPath {
   id: number; username?: string; storage_name: string; path: string; created_at: string;
 }
 export interface HistogramBucket {
-  bucket: string; count?: number; bytes?: number;
+  // 구간 라벨은 서버가 모양 검사를 통과한 것만 넘긴다 — 경로처럼 생긴 라벨은 빠진다.
+  bucket?: string; count?: number; bytes?: number;
   lower_inclusive?: number; upper_inclusive?: number;
   min_age_days?: number; max_age_days?: number;
 }
 export interface ScanPathStats {
   covered_by: { target: string; exact: boolean };
-  generated_at_epoch: number;
+  // 리포트에 생성 시각이 없거나 수치가 아니면 null이다(경로가 섞여 들어오는 걸 막는다).
+  generated_at_epoch: number | null;
   summary: Record<string, number>;
   file_size_histogram: HistogramBucket[];
   time_histograms: Record<string, HistogramBucket[]>;
