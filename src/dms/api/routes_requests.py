@@ -74,7 +74,9 @@ def submit(body: RequestBody, request: Request,
     reject_when_maintenance(request)
     # scan 제출은 관리자 전용이다 (설계 결정 레코드) — /admin/scan이 admin 라우트라는
     # 사실만으로는 강제되지 않으므로 여기서 명시적으로 게이트한다.
-    if Operation(body.operation) is Operation.SCAN and identity.role != "admin":
+    # 원시 문자열로 비교한다 — Operation(...)은 알 수 없는 값에 ValueError를 던지는데
+    # 이 지점은 그것을 422로 바꿔주는 try 블록 밖이라 500이 되어 버린다.
+    if body.operation == Operation.SCAN.value and identity.role != "admin":
         raise HTTPException(status_code=403, detail="scan_admin_only")
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요
     owner = body.owner_username

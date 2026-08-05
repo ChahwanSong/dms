@@ -63,6 +63,15 @@ def test_isolation_between_users_and_admin_sees_all(client):
     assert client.get("/api/user/requests", headers=ADMIN).json()[0]["request_id"] == rid
 
 
+def test_unknown_operation_is_422_not_500(client):
+    # scan 관리자 게이트는 422 매핑 try 블록 앞에 있다 — 거기서 Operation(...)을
+    # 구성하면 알 수 없는 연산이 ValueError로 새어 500이 된다.
+    _login(client, "dave")
+    r = client.post("/api/user/requests", json={"operation": "bogus", "storage": "s1"})
+    assert r.status_code == 422
+    assert r.json()["detail"] == "invalid_operation"
+
+
 def test_scan_submission_is_admin_only(client):
     _login(client, "carol")
     r = client.post("/api/user/requests", json={
