@@ -169,5 +169,13 @@ POST /api/user/requests/{request_id}:cancel
 - 배치 취소는 **종료 성공 후에만** DB를 바꾼다. 실패하면 500 `cancel_failed`, DB 불변.
 - 취소는 **요청을 종결하기 전에 잡을 먼저 종료**한다(planner 경쟁 창을 좁힌다).
 - 타임아웃 판정이 불확실하면 `FAILED`로 유지한다(오분류보다 보수적).
+- `activeDeadlineSeconds`는 **Volcano Job의 `spec`이 아니라 각 task의 파드 템플릿 `spec`에**
+  넣는다. Volcano v1.15.0 CRD의 `Job.spec`에는 그 필드가 없어 API 서버가 조용히 잘라내기
+  때문이다(그 상태로는 타임아웃이 전혀 걸리지 않는다). 파드 템플릿은 실제 PodSpec이라 살아남는다.
+- vcjob의 deadline 판정은 `status.state.reason`/`.message`를 본다 — Volcano의
+  `status.conditions[]` 항목에는 `reason` 필드 자체가 없다.
+- **scan·rm의 실행 타임아웃 시드 기본값은 24h**다(초안 1h에서 상향). 데드라인이 실제로
+  집행되면 1h는 대규모 dscan/drm을 중간에 죽이고, drm은 부분 삭제로 남는다. 운영자는
+  포탈 `/admin/policies`에서 조정한다.
 - 배치 item의 Cancelled는 **성공도 실패도 아니다** — 카운터를 올리지 않는다.
 - Volcano Job/Pod GC는 이번 범위 밖.
