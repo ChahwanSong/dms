@@ -247,6 +247,25 @@ def migrate(db: Database) -> None:
         """INSERT INTO control_state (id, maintenance, drain)
            SELECT 1, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM control_state WHERE id = 1)""",
     )
+    # 도구별 기본 정책 시드 (스펙 §5 "phase별 타임아웃은 정책 행에서"). 멱등하며
+    # 기존 행은 절대 덮어쓰지 않는다 — 운영자가 포탈에서 고친 값을 마이그레이션이
+    # 되돌리면 안 된다. 행이 없으면 planner가 missing_policy로 전부 거부한다.
+    now = utc_now_iso()
+    for tool, max_nodes, preview_timeout, execution_timeout in (
+        ("scan", 4, None, 3600),
+        ("dsync", 8, 3600, 259200),
+        ("nsync", 8, 3600, 259200),
+        ("rm", 4, 1800, 3600),
+    ):
+        db.execute(
+            """INSERT INTO policies (tool, max_nodes, procs_per_node, queue,
+                   default_priority, max_priority, preview_timeout_seconds,
+                   execution_timeout_seconds, enabled, updated_at, updated_by)
+               SELECT :t, :mn, 8, 'dms-data', 'mid', 'high', :pt, :et, 1, :now,
+                      'migration-seed'
+               WHERE NOT EXISTS (SELECT 1 FROM policies WHERE tool = :t)""",
+            {"t": tool, "mn": max_nodes, "pt": preview_timeout,
+             "et": execution_timeout, "now": now})
 
 
 def _column_exists(db, table, column):

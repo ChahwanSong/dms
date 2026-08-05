@@ -5,6 +5,7 @@ from dms.repositories.control import ControlRepository
 
 def test_policy_upsert_and_get(db):
     repo = ControlRepository(db)
+    db.execute("DELETE FROM policies WHERE tool = 'dsync'")  # 시드된 기본 정책 제거
     assert repo.get_policy("dsync") is None
     repo.upsert_policy("dsync", max_nodes=4, procs_per_node=8, queue="dms-data",
                        default_priority="mid", max_priority="high",

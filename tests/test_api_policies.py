@@ -20,9 +20,10 @@ def test_policy_crud(client):
     assert client.get("/api/admin/policies/dsync",
                       headers=ADMIN).json()["max_nodes"] == 3
     listed = client.get("/api/admin/policies", headers=ADMIN).json()
-    assert [p["tool"] for p in listed] == ["dsync"]
-    assert client.get("/api/admin/policies/scan",
-                      headers=ADMIN).status_code == 404
+    # migrate()가 4개 도구를 시드하므로 목록은 항상 4행이고 정렬돼 있다
+    assert [p["tool"] for p in listed] == ["dsync", "nsync", "rm", "scan"]
+    # 시드된 scan 정책은 조회된다 (시드 전에는 404였다)
+    assert client.get("/api/admin/policies/scan", headers=ADMIN).status_code == 200
     assert client.put("/api/admin/policies/dcp", json=BODY,
                       headers=ADMIN).status_code == 422
     assert client.put("/api/admin/policies/scan",

@@ -103,7 +103,8 @@ def test_identity_rejection(db):
 
 def test_missing_policy_rejects(db):
     repos = Repositories(db)
-    _seed_storage(repos); _seed_report(repos)  # 정책 없음
+    _seed_storage(repos); _seed_report(repos)
+    db.execute("DELETE FROM policies WHERE tool = 'scan'")  # 시드된 기본 정책 제거
     rid = _scan_request(repos)
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:missing_policy"
 
