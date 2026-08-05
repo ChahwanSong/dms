@@ -4,6 +4,7 @@ from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from ..db import utc_now_iso
 from ..execution import ExecutionError
 from .auth import Identity, require_user
+from .cancel import terminate_job
 
 router = APIRouter()
 
@@ -75,10 +76,8 @@ def cancel_job(job_id: str, request: Request,
     if DataJobState(job["state"]) in TERMINAL_DATA_JOB_STATES:
         raise HTTPException(status_code=409, detail="already_terminal")
     adapter = request.app.state.execution_adapter
-    refs = [r for r in (job["phase_refs"] or {}).values() if r]
     try:
-        for ref in refs:
-            adapter.terminate(ref)
+        terminate_job(adapter, job)
     except ExecutionError:
         raise HTTPException(status_code=500, detail="cancel_failed")
     repos.data_jobs.set_job_state(job_id, DataJobState.CANCELLED,
