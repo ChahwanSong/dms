@@ -11,6 +11,7 @@ from .routes_auth import router as auth_router
 from .routes_storages import router as storages_router
 from .routes_requests import router as requests_router
 from .routes_jobs import router as jobs_router
+from .routes_artifacts import router as artifacts_router
 from .routes_agent import router as agent_router
 from .routes_nodes import router as nodes_router
 from .routes_policies import router as policies_router
@@ -36,6 +37,7 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app.include_router(storages_router)
     app.include_router(requests_router)
     app.include_router(jobs_router)
+    app.include_router(artifacts_router)
     app.include_router(agent_router)
     app.include_router(nodes_router)
     app.include_router(policies_router)
