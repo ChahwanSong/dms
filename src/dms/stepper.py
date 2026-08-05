@@ -133,8 +133,12 @@ class JobStepper:
                 # artifact_base 파일시스템을 못 읽는 배포 오구성을 뜻한다 — vcjob phase가
                 # 권위이므로 SUCCEEDED는 유지하되, null을 조용히 묻지 않고 가시화한다.
                 summary = {"summary_unavailable": True}
-            self._repos.data_jobs.set_artifact(job["job_id"], artifact_uri=None,
-                                               result_summary=summary)
+            # 성공 경로도 URI를 남긴다 — preview를 거치지 않는 scan 잡은 여기서만
+            # 기록되고, 없으면 포탈이 아티팩트를 가리킬 수 없다.
+            self._repos.data_jobs.set_artifact(
+                job["job_id"],
+                artifact_uri=f"{self._settings.artifact_base_uri}/{job['job_id']}",
+                result_summary=summary)
             self._finalize(job, DataJobState.SUCCEEDED, summary=summary)
             return "Succeeded"
         target = (DataJobState.TIMED_OUT if status == ExecStatus.TIMED_OUT
