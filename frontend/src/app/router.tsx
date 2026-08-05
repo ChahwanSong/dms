@@ -5,7 +5,7 @@ import { RequireRole } from "./RequireRole";
 import { useMe } from "../features/auth/useAuth";
 import { Login } from "../features/auth/Login";
 import { JobsList } from "../features/jobs/JobsList";
-import { SubmitSync } from "../features/jobs/SubmitSync";
+import { SubmitJob } from "../features/jobs/SubmitJob";
 import { RequestDetail } from "../features/jobs/RequestDetail";
 import { StoragesList } from "../features/storages/StoragesList";
 import { Dashboard } from "../features/dashboard/Dashboard";
@@ -31,7 +31,7 @@ export function AppRouter() {
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Home />} />
         <Route path="/jobs" element={<RequireRole><AppShell><JobsList /></AppShell></RequireRole>} />
-        <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitSync /></AppShell></RequireRole>} />
+        <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitJob /></AppShell></RequireRole>} />
         <Route path="/jobs/:requestId" element={<RequireRole><AppShell><RequestDetail /></AppShell></RequireRole>} />
         <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
         <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
