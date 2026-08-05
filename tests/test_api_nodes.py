@@ -35,3 +35,19 @@ def test_unknown_node_404_and_limit_bound(client):
                       headers=ADMIN).status_code == 422
     assert client.get("/api/admin/nodes/node-a/reports?limit=5000",
                       headers=ADMIN).status_code == 422
+
+
+def test_node_with_empty_history_returns_empty_list_not_404(client, db):
+    # retention이 agent_reports 이력만 지우고 agent_nodes(목록에 보이는 최신 1행)는
+    # 남긴다 — 그 상태에서 상세(이력) 조회는 404가 아니라 빈 목록이어야 한다.
+    from dms.repositories import Repositories
+    _ingest(client, "node-a")
+    repos = Repositories(db)
+    pruned = repos.agents.prune_reports("9999-01-01T00:00:00Z")
+    assert pruned == 1
+    r = client.get("/api/admin/nodes/node-a/reports", headers=ADMIN)
+    assert r.status_code == 200
+    assert r.json() == []
+    # 노드 자체는 여전히 목록에 보인다
+    names = [n["node_name"] for n in client.get("/api/admin/nodes", headers=ADMIN).json()]
+    assert "node-a" in names

@@ -37,7 +37,6 @@ def login(body: LoginBody, request: Request):
         raise HTTPException(status_code=401, detail="invalid_credentials")
     request.session.clear()
     request.session["username"] = body.username
-    request.session["role"] = role
     return {"actor": body.username, "role": role}
 
 

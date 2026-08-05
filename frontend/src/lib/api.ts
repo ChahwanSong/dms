@@ -53,6 +53,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   cannot_lock_self: "자기 계정의 역할 변경·비활성화는 할 수 없습니다",
   account_disabled: "계정이 비활성화되었습니다",
   node_not_found: "노드를 찾을 수 없습니다",
+  requester_disabled: "요청자 계정이 비활성화되었습니다",
+  http_500: "서버 오류가 발생했습니다",
+  http_503: "서비스를 일시적으로 사용할 수 없습니다",
 };
 
 export class ApiError extends Error {

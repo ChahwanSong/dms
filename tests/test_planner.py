@@ -1,5 +1,5 @@
 import pytest
-from dms.domain import RequestState
+from dms.domain import ROLE_USER, RequestState
 from dms.identity import ResolvedIdentity, StubIdentityResolver
 from dms.planner import Planner
 from dms.repositories import Repositories
@@ -201,6 +201,34 @@ def test_policy_max_nodes_trims_sync_candidates(db):
     assert wp["candidates"]["destination"] == ["d1", "d2"]
     assert len(wp["candidates"]["source"]) == wp["source_count"] == 3
     assert len(wp["candidates"]["destination"]) == wp["destination_count"] == 2
+
+
+def test_requester_disabled_account_rejects(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    repos.accounts.create("alice", "pw", ROLE_USER, actor="admin")
+    repos.accounts.set_disabled("alice", True, actor="admin")
+    rid = _scan_request(repos)
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:requester_disabled"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+
+
+def test_requester_enabled_account_plans_normally(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    repos.accounts.create("alice", "pw", ROLE_USER, actor="admin")
+    rid = _scan_request(repos)
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+
+
+def test_requester_without_account_row_plans_normally(db):
+    # 회귀 가드: 포탈 계정이 없는 요청자(대부분의 기존 테스트가 이 형태)는
+    # "무판정"이어야 한다 — account row가 없다고 해서 거부되면 안 된다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    assert repos.accounts.get("alice") is None
+    rid = _scan_request(repos)
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
 
 
 def test_worker_pool_records_rejections(db):

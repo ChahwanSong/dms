@@ -4,7 +4,11 @@ import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
-import type { NodeInfo } from "../../lib/types";
+import type { NodeInfo, NodeMount, NodeTool, NodeDisk, NodeReport } from "../../lib/types";
+
+// 에이전트 리포트는 스키마 검증 없이 저장된다 — 배열이어야 할 필드가 배열이
+// 아닌 값(예: {})으로 와도 여기서 걸러야 목록 화면 전체가 죽지 않는다.
+const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
 
 // TiB/GiB/MiB만 다룬다 — 디스크 총량·사용량은 늘 MiB를 넘는다. 소수점 1자리.
 const BYTE_UNITS: [string, number][] = [
@@ -12,16 +16,19 @@ const BYTE_UNITS: [string, number][] = [
   ["GiB", 1024 ** 3],
   ["MiB", 1024 ** 2],
 ];
-function humanBytes(bytes: number): string {
+function humanBytes(bytes: unknown): string {
+  if (!Number.isFinite(bytes)) return "—";
+  const n = bytes as number;
   for (const [unit, size] of BYTE_UNITS) {
-    if (bytes >= size) return `${(bytes / size).toFixed(1)} ${unit}`;
+    if (n >= size) return `${(n / size).toFixed(1)} ${unit}`;
   }
-  return `${bytes} B`;
+  return `${n} B`;
 }
 
-function readyRatio(items: { status: string }[]): string {
-  const ready = items.filter((i) => i.status === "Ready").length;
-  return `Ready ${ready}/${items.length}`;
+function readyRatio(items: unknown): string {
+  const arr = asArray<{ status: string }>(items);
+  const ready = arr.filter((i) => i.status === "Ready").length;
+  return `Ready ${ready}/${arr.length}`;
 }
 
 function NodeDetail({ node }: { node: NodeInfo }) {
@@ -30,10 +37,10 @@ function NodeDetail({ node }: { node: NodeInfo }) {
   const reportsQ = useNodeReports(node.node_name, showHistory);
 
   const report = node.report ?? {};
-  const mounts = report.mounts ?? [];
-  const tools = report.tools ?? [];
-  const disks = report.os?.disks ?? [];
-  const identities = report.identities ?? [];
+  const mounts = asArray<NodeMount>(report.mounts);
+  const tools = asArray<NodeTool>(report.tools);
+  const disks = asArray<NodeDisk>(report.os?.disks);
+  const identities = asArray<unknown>(report.identities);
 
   return (
     <Card className="space-y-5">
@@ -91,7 +98,11 @@ function NodeDetail({ node }: { node: NodeInfo }) {
                 <td className="py-2">{d.storage_name}</td>
                 <td>{humanBytes(d.used_bytes)}</td>
                 <td>{humanBytes(d.total_bytes)}</td>
-                <td>{d.total_bytes === 0 ? "—" : `${((d.used_bytes / d.total_bytes) * 100).toFixed(1)}%`}</td>
+                <td>
+                  {Number.isFinite(d.used_bytes) && Number.isFinite(d.total_bytes) && d.total_bytes !== 0
+                    ? `${((d.used_bytes / d.total_bytes) * 100).toFixed(1)}%`
+                    : "—"}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -120,7 +131,7 @@ function NodeDetail({ node }: { node: NodeInfo }) {
             <Table>
               <thead><tr className="text-muted"><th className="py-2">리포트 시각</th></tr></thead>
               <tbody>
-                {(reportsQ.data ?? []).map((r, i) => (
+                {asArray<NodeReport>(reportsQ.data).map((r, i) => (
                   <tr key={i} className="border-t border-black/5">
                     <td className="py-2">{r.reported_at}</td>
                   </tr>
@@ -155,22 +166,18 @@ export function NodesList() {
             </tr>
           </thead>
           <tbody>
-            {nodes.map((n) => {
-              const mounts = n.report?.mounts ?? [];
-              const tools = n.report?.tools ?? [];
-              return (
-                <tr key={n.node_name} className="border-t border-black/5">
-                  <td className="py-2">{n.node_name}</td>
-                  <td>{n.fresh ? "fresh" : <span className="text-bad">stale</span>}</td>
-                  <td className="text-muted">{n.reported_at}</td>
-                  <td>{readyRatio(mounts)}</td>
-                  <td>{readyRatio(tools)}</td>
-                  <td className="py-2">
-                    <Button variant="ghost" onClick={() => setSelectedName(n.node_name)}>상세</Button>
-                  </td>
-                </tr>
-              );
-            })}
+            {nodes.map((n) => (
+              <tr key={n.node_name} className="border-t border-black/5">
+                <td className="py-2">{n.node_name}</td>
+                <td>{n.fresh ? "fresh" : <span className="text-bad">stale</span>}</td>
+                <td className="text-muted">{n.reported_at}</td>
+                <td>{readyRatio(n.report?.mounts)}</td>
+                <td>{readyRatio(n.report?.tools)}</td>
+                <td className="py-2">
+                  <Button variant="ghost" onClick={() => setSelectedName(n.node_name)}>상세</Button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </Table>
       )}

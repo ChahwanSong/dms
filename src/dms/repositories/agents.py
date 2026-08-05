@@ -37,6 +37,11 @@ class AgentsRepository:
         return [n for n in self.list_nodes(stale_seconds=stale_seconds, now_iso=now_iso)
                 if n["fresh"]]
 
+    def node_exists(self, node_name: str) -> bool:
+        return self._db.query_one(
+            "SELECT 1 AS x FROM agent_nodes WHERE node_name = :n",
+            {"n": node_name}) is not None
+
     def node_reports(self, node_name: str, *, limit: int = 200) -> list[dict]:
         rows = self._db.query(
             """SELECT report, reported_at FROM agent_reports

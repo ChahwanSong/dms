@@ -2,6 +2,12 @@ def test_healthz_is_public(client):
     assert client.get("/healthz").json() == {"status": "ok"}
 
 
+def test_readyz_ok(client):
+    r = client.get("/readyz")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
 def test_admin_route_requires_auth(client):
     # /api/admin/storages 는 Task 14에서 생기므로 여기서는 보호 확인용 임시 라우트 대신
     # 아직 없는 경로는 401/404 어느 쪽도 될 수 있다 — 인증 자체는 /api/auth/me 로 검증한다.

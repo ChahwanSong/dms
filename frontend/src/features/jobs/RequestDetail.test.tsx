@@ -109,7 +109,9 @@ test("shows an inline error message when the jobs list fails to load", async () 
       HttpResponse.json({ detail: "http_500" }, { status: 500 })),
   );
   renderAt();
-  expect(await screen.findByText("http_500")).toBeInTheDocument();
+  // http_500은 이제 REASON_MESSAGES에 매핑돼 있으므로 원시 코드가 아니라 번역된
+  // 메시지가 보여야 한다 (원시 코드 노출은 이번 수정으로 고친 버그였다).
+  expect(await screen.findByText("서버 오류가 발생했습니다")).toBeInTheDocument();
 });
 
 test("shows the job's artifact_uri on the job card", async () => {

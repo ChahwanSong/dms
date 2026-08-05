@@ -106,6 +106,55 @@ test("no reports request goes out before 최근 리포트 is clicked", async () 
   expect(reportsCalls).toBe(0);
 });
 
+test("a malformed report shape does not crash the node list", async () => {
+  // 스키마 검증 없이 저장되는 /api/agent/report 리포트가 배열이어야 할 필드에
+  // 다른 타입을 담아 보내더라도(빈 report, report 자체 부재, non-array mounts)
+  // 목록은 렌더링을 계속해야 한다 — 화이트스크린은 없어야 한다.
+  const malformed = [
+    { node_name: "bad-empty-report", reported_at: "2026-08-06T00:00:00Z", fresh: true, report: {} },
+    { node_name: "bad-no-report", reported_at: "2026-08-06T00:00:00Z", fresh: true },
+    { node_name: "bad-non-array-mounts", reported_at: "2026-08-06T00:00:00Z", fresh: true,
+      report: { mounts: {}, tools: {} } },
+  ];
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(malformed)));
+  wrap();
+  expect(await screen.findByText("bad-empty-report")).toBeInTheDocument();
+  expect(screen.getByText("bad-no-report")).toBeInTheDocument();
+  expect(screen.getByText("bad-non-array-mounts")).toBeInTheDocument();
+  const badRow = screen.getByText("bad-non-array-mounts").closest("tr")!;
+  expect(within(badRow).getAllByText("Ready 0/0")).toHaveLength(2); // mounts, tools
+});
+
+test("opening detail on a node with a malformed (non-array) report does not crash", async () => {
+  const malformed = [
+    { node_name: "bad-non-array-mounts", reported_at: "2026-08-06T00:00:00Z", fresh: true,
+      report: { mounts: {}, tools: {}, os: { disks: {} }, identities: {} } },
+  ];
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(malformed)));
+  wrap();
+  const row = (await screen.findByText("bad-non-array-mounts")).closest("tr")!;
+  await userEvent.click(within(row).getByRole("button", { name: "상세" }));
+  expect(await screen.findByText("bad-non-array-mounts 상세")).toBeInTheDocument();
+});
+
+test("disk row with missing byte fields renders a dash instead of undefined/NaN", async () => {
+  const nodes = [
+    { node_name: "node-disk", reported_at: "2026-08-06T00:00:00Z", fresh: true,
+      report: { mounts: [], tools: [],
+        os: { disks: [{ storage_name: "vol1", total_bytes: undefined, used_bytes: null }] },
+        identities: [] } },
+  ];
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(nodes)));
+  wrap();
+  const row = (await screen.findByText("node-disk")).closest("tr")!;
+  await userEvent.click(within(row).getByRole("button", { name: "상세" }));
+  expect(await screen.findByText("vol1")).toBeInTheDocument();
+  const dashes = screen.getAllByText("—");
+  expect(dashes.length).toBeGreaterThanOrEqual(3); // used, total, percentage
+  expect(screen.queryByText(/undefined B/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+});
+
 test("clicking 최근 리포트 loads and shows report history", async () => {
   let reportsCalls = 0;
   server.use(

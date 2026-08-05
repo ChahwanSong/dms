@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
-from starlette.responses import FileResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.staticfiles import StaticFiles
 from ..config import Settings
 from ..db import Database
@@ -33,6 +33,17 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz():
+        # liveness(/healthz)와 달리 실제 의존성(DB)에 쿼리를 날려 readiness를 검증한다 —
+        # DB가 죽으면 인증 게이트를 포함한 거의 모든 요청이 500이 되므로, readiness
+        # probe가 이를 감지해 Service에서 이 파드를 빼야 한다.
+        try:
+            db.query_one("SELECT 1 AS x")
+        except Exception:
+            return JSONResponse(status_code=503, content={"status": "degraded"})
         return {"status": "ok"}
 
     app.include_router(auth_router)

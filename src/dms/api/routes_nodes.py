@@ -18,5 +18,9 @@ def node_reports(name: str, request: Request,
     repos = request.app.state.repos
     rows = repos.agents.node_reports(name, limit=limit)
     if not rows:
-        raise HTTPException(status_code=404, detail="node_not_found")
+        # 이력이 없더라도 노드 자체(agent_nodes)가 존재하면 빈 목록을 돌려준다 —
+        # retention이 agent_reports만 지우고 agent_nodes는 남기므로, 목록에 보이는
+        # 노드가 상세 화면에서 404로 보이면 안 된다.
+        if not repos.agents.node_exists(name):
+            raise HTTPException(status_code=404, detail="node_not_found")
     return rows

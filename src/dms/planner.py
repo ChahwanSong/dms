@@ -56,7 +56,12 @@ class Planner:
             self._repos.requests.record_result(rid, RequestState.CONFLICT,
                                                 reason_code="resource_conflict")
             return "conflict"
-        # 2. storage admission
+        # 2. requester 계정 admission: 계정 row가 존재 & disabled일 때만 거부한다.
+        #    row가 없으면 "무판정" — 포탈 계정이 없는 LDAP 신원의 잡은 그대로 통과.
+        account = self._repos.accounts.get(req["requester_id"])
+        if account is not None and account["disabled"]:
+            return self._reject(rid, "requester_disabled")
+        # 3. storage admission
         for name in _required_storages(req["operation"], payload):
             storage = self._repos.storages.get(name)
             if storage is None:
@@ -65,7 +70,7 @@ class Planner:
                 return self._reject(rid, "storage_disabled")
             if storage["status"] not in ("Ready", "Degraded"):
                 return self._reject(rid, "storage_not_ready")
-        # 3. identity
+        # 4. identity
         try:
             identity = resolve_job_identity(
                 self._repos.control, self._resolver,
@@ -75,7 +80,7 @@ class Planner:
                 privileged_requesters=self._settings.privileged_requesters)
         except IdentityRejected as exc:
             return self._reject(rid, exc.reason_code)
-        # 4. tool + candidates
+        # 5. tool + candidates
         fresh = self._repos.agents.fresh_reports(
             stale_seconds=self._settings.agent_report_stale_seconds, now_iso=now_iso)
         try:
@@ -86,14 +91,14 @@ class Planner:
                 owner=identity.username, privileged=identity.privileged)
         except PlacementError as exc:
             return self._reject(rid, exc.reason_code)
-        # 5. policy fan-out
+        # 6. policy fan-out
         policy = self._repos.control.get_policy(TOOL_TO_POLICY[placement["tool"]])
         try:
             fanout = resolve_fanout(policy, placement["candidates"],
                                     priority=req["priority"])
         except PlacementError as exc:
             return self._reject(rid, exc.reason_code)
-        # 6. emit
+        # 7. emit
         identity_dict = {**asdict(identity), "groups": list(identity.groups)}
         cand = placement["candidates"]
         if "primary" in cand:

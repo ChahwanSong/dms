@@ -28,6 +28,10 @@ def list_accounts(request: Request):
 @router.put("/api/admin/accounts/{username}/role")
 def set_role(username: str, body: RoleBody, request: Request,
              identity: Identity = Depends(require_admin)):
+    # 존재 확인을 self-guard보다 먼저: 존재하지 않는 계정을 대상으로 하면
+    # (설령 그 이름이 자신의 actor와 같더라도) 409가 아니라 404여야 한다.
+    if request.app.state.repos.accounts.get(username) is None:
+        raise HTTPException(status_code=404, detail="account_not_found")
     _guard_self(identity, username)
     try:
         request.app.state.repos.accounts.set_role(username, body.role,
@@ -42,6 +46,8 @@ def set_role(username: str, body: RoleBody, request: Request,
 @router.put("/api/admin/accounts/{username}/disabled")
 def set_disabled(username: str, body: DisabledBody, request: Request,
                   identity: Identity = Depends(require_admin)):
+    if request.app.state.repos.accounts.get(username) is None:
+        raise HTTPException(status_code=404, detail="account_not_found")
     _guard_self(identity, username)
     try:
         request.app.state.repos.accounts.set_disabled(username, body.disabled,
