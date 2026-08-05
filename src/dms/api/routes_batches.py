@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from ..domain import DomainValidationError, Operation, build_data_payload, validate_batch
+from ..domain import DataJobState, DomainValidationError, Operation, build_data_payload, validate_batch
+from ..execution import ExecutionError
 from .auth import Identity, require_admin
+from .cancel import terminate_job
 from .routes_requests import reject_when_maintenance
 
 router = APIRouter()
@@ -75,13 +77,36 @@ def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(r
 
 @router.post("/api/admin/batches/{batch_id}:cancel")
 def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
-    repo = request.app.state.repos.batches
+    repos = request.app.state.repos
+    repo = repos.batches
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
     if b["status"] not in ("Previewing", "Running"):
         raise HTTPException(status_code=409, detail="batch_not_cancelable")
-    for it in repo.list_items(batch_id):
+    adapter = request.app.state.execution_adapter
+    items = repo.list_items(batch_id)
+    # 1) 먼저 종료한다. 하나라도 실패하면 DB는 건드리지 않고 실패를 보고한다
+    #    (거짓 취소 금지 — 상위 스펙 §5).
+    child_jobs = []
+    for it in items:
+        rid = it.get("request_id")
+        if not rid:
+            continue
+        for job in repos.data_jobs.list_jobs(request_id=rid):
+            child_jobs.append((it, job))
+    try:
+        for _, job in child_jobs:
+            terminate_job(adapter, job)
+    except ExecutionError:
+        raise HTTPException(status_code=500, detail="cancel_failed")
+    # 2) 종료가 전부 성공한 뒤에만 기록한다.
+    for it, job in child_jobs:
+        repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
+                                      reason_code="cancelled_by_batch", actor=identity.actor)
+        repos.requests.finalize_from_job(job["request_id"], DataJobState.CANCELLED,
+                                         reason_code="cancelled_by_batch", actor=identity.actor)
+    for it in items:
         if it["status"] in ("Queued", "Materialized"):
             repo.set_item_status(batch_id, it["seq"], "Cancelled")
     repo.set_status(batch_id, "Cancelled")
