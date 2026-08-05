@@ -74,6 +74,17 @@ class DataJobsRepository:
         return self._hydrate(self._db.query_one(
             "SELECT * FROM data_jobs WHERE job_id = :j", {"j": job_id}))
 
+    def succeeded_scans(self, storage_name: str, *, limit: int = 50) -> list[dict]:
+        """storage_name에서 성공(Succeeded)한 scan 잡을 최신순으로 최대 limit건.
+        커버링 scan 조회(Task 3)가 후보를 DB 필드만으로 좁히는 데 쓴다 —
+        target(스토리지 상대 경로)만 보고, 리포트는 매치된 1건만 나중에 읽는다."""
+        rows = self._db.query(
+            """SELECT * FROM data_jobs
+               WHERE operation = 'scan' AND state = :s AND storage_name = :sn
+               ORDER BY created_at DESC, job_id DESC LIMIT :n""",
+            {"s": DataJobState.SUCCEEDED.value, "sn": storage_name, "n": limit})
+        return [self._hydrate(r) for r in rows]
+
     def list_jobs(self, *, request_id=None, limit=50):
         if request_id is None:
             rows = self._db.query(
