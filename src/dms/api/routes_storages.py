@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
-from .auth import Identity, require_admin
+from .auth import Identity, require_admin, require_user
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -67,3 +67,17 @@ def delete_storage(name: str, request: Request,
 @router.get("/api/admin/audit-log")
 def audit_log(request: Request, limit: int = 50):
     return request.app.state.repos.control.audit_entries(limit)
+
+
+# 사용자용 읽기 전용 목록. 제출 폼 드롭다운이 유일한 소비자다 — 경로(mount_path/
+# managed_root)와 운영 내부 정보(status_detail)는 담지 않는다. 비활성 스토리지는
+# 고를 수 없어야 하므로 제외하고, Degraded는 남긴다(어드미션 판단은 planner의 몫).
+user_router = APIRouter()
+
+
+@user_router.get("/api/user/storages")
+def list_user_storages(request: Request, identity: Identity = Depends(require_user)):
+    rows = request.app.state.repos.storages.list()
+    return [{"storage_name": r["storage_name"], "backend_type": r["backend_type"],
+             "status": r["status"]}
+            for r in rows if r["enabled"] == 1]
