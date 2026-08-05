@@ -263,4 +263,11 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
 
     def read_pod_log(self, name, namespace):
         self._ensure()
-        return self._core.read_namespaced_pod_log(name, namespace)
+        # _preload_content=True로 두면 클라이언트가 본문을 역직렬화하면서 bytes의 repr을
+        # 문자열로 돌려주는 경우가 있다 — 실증에서 포탈에 b'DMS_PREFLIGHT_OK\n' 이 그대로
+        # 노출됐다. 원시 응답을 받아 우리가 직접 디코드한다.
+        resp = self._core.read_namespaced_pod_log(name, namespace, _preload_content=False)
+        data = getattr(resp, "data", resp)
+        if isinstance(data, bytes):
+            return data.decode("utf-8", errors="replace")
+        return str(data)
