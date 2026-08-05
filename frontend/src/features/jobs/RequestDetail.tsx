@@ -1,5 +1,5 @@
 import { useParams } from "react-router-dom";
-import { useRequest, useRequestJobs, useCancelJob } from "./useJobs";
+import { useRequest, useRequestJobs, useCancelJob, useCancelRequest } from "./useJobs";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
@@ -8,6 +8,11 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Timeline } from "./Timeline";
 import { JobViewer } from "./JobViewer";
 import { ApiError } from "../../lib/api";
+
+// 요청 상태의 종단 집합은 잡 상태(jobState.ts의 isTerminal)와 다르다 —
+// "Conflict"를 포함하고 "PreviewExpired"는 포함하지 않는다.
+const TERMINAL_REQUEST_STATES = new Set(["Succeeded", "Failed", "Rejected", "Conflict", "Cancelled"]);
+const isRequestTerminal = (s: string) => TERMINAL_REQUEST_STATES.has(s);
 
 function durationText(from?: string, to?: string): string {
   if (!from || !to) return "—";
@@ -43,6 +48,7 @@ export function RequestDetail() {
   const req = useRequest(requestId);
   const jobs = useRequestJobs(requestId);
   const cancel = useCancelJob(requestId);
+  const cancelRequest = useCancelRequest(requestId);
 
   if (req.isLoading || jobs.isLoading) {
     return (
@@ -68,6 +74,8 @@ export function RequestDetail() {
   if (!data) return null;
   const transitions = data.transitions;
   const end = transitions[transitions.length - 1]?.at ?? data.updated_at;
+  // 잡이 하나도 없을 때만 요청 단위 취소를 보여준다 — 잡이 있으면 잡 단위 취소가 그 역할을 한다.
+  const canCancelRequest = !isRequestTerminal(data.state) && (jobs.data ?? []).length === 0;
 
   return (
     <section className="space-y-4">
@@ -81,6 +89,15 @@ export function RequestDetail() {
           <dt className="text-muted">요청자</dt><dd>{data.requester_id}</dd>
           <dt className="text-muted">수행시간</dt><dd>{durationText(data.created_at, end)}</dd>
         </dl>
+        {canCancelRequest && (
+          <div className="mt-3">
+            <Button variant="ghost" disabled={cancelRequest.isPending}
+                    onClick={() => cancelRequest.mutate()}>요청 취소</Button>
+            {cancelRequest.isError && (
+              <p className="text-bad text-sm mt-1">{(cancelRequest.error as ApiError).message}</p>
+            )}
+          </div>
+        )}
       </Card>
       <Card>
         <h2 className="text-sm font-semibold mb-2">전이 이력</h2>

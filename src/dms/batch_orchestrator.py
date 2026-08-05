@@ -45,6 +45,10 @@ class BatchOrchestrator:
             if req_state == RequestState.SUCCEEDED.value:
                 self._repos.batches.set_item_status(batch_id, item["seq"], "Succeeded")
                 self._repos.batches.bump_counts(batch_id, succeeded=1)
+            elif req_state == RequestState.CANCELLED.value:
+                # 취소는 성공도 실패도 아니다 — 카운터를 올리지 않는다.
+                self._repos.batches.set_item_status(batch_id, item["seq"], "Cancelled",
+                                                    reason_code=req_state)
             else:
                 status = "Rejected" if req_state == RequestState.REJECTED.value else "Failed"
                 self._repos.batches.set_item_status(batch_id, item["seq"], status,

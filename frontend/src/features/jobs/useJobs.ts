@@ -56,3 +56,15 @@ export function useCancelJob(requestId: string) {
     },
   });
 }
+
+export function useCancelRequest(requestId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiSend("POST", `/api/user/requests/${requestId}:cancel`),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["request", requestId] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] });
+    },
+  });
+}

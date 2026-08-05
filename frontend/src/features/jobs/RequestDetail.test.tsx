@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
@@ -120,4 +121,46 @@ test("shows the job's artifact_uri on the job card", async () => {
   expect(
     await screen.findByText("아티팩트 file:///cephfs/dms/artifacts/j1"),
   ).toBeInTheDocument();
+});
+
+test("shows a request-cancel button for a job-less non-terminal request and posts to the request cancel path", async () => {
+  const PENDING_REQUEST = { ...REQUEST, state: "Pending", transitions: [
+    { from_state: null, to_state: "Pending", at: "2026-08-05T00:00:00Z" },
+  ] };
+  let cancelCalled = false;
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(PENDING_REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+    http.post("/api/user/requests/r1:cancel", () => {
+      cancelCalled = true;
+      return HttpResponse.json({ state: "Cancelled" });
+    }),
+  );
+  renderAt();
+  const button = await screen.findByRole("button", { name: "요청 취소" });
+  await userEvent.click(button);
+  expect(cancelCalled).toBe(true);
+});
+
+test("hides the request-cancel button when the request already has jobs", async () => {
+  const PENDING_REQUEST = { ...REQUEST, state: "Pending", transitions: [
+    { from_state: null, to_state: "Pending", at: "2026-08-05T00:00:00Z" },
+  ] };
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(PENDING_REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  await screen.findByText("전이 이력");
+  expect(screen.queryByRole("button", { name: "요청 취소" })).not.toBeInTheDocument();
+});
+
+test("hides the request-cancel button when the request is terminal", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)), // state: "Failed"
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+  );
+  renderAt();
+  await screen.findByText("전이 이력");
+  expect(screen.queryByRole("button", { name: "요청 취소" })).not.toBeInTheDocument();
 });
