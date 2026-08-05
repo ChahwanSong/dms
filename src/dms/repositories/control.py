@@ -87,6 +87,11 @@ class ControlRepository:
             """SELECT subject_type, subject, reason FROM identity_denylist
                ORDER BY subject_type, subject""")
 
+    def has_group_denies(self) -> bool:
+        row = self._db.query_one(
+            "SELECT COUNT(*) AS n FROM identity_denylist WHERE subject_type = 'group'")
+        return bool(row and row["n"])
+
     # --- control state ---
     def control_state(self):
         return self._db.query_one("SELECT * FROM control_state WHERE id = 1")

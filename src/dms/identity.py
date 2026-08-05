@@ -42,10 +42,24 @@ class IdentityRejected(Exception):
 def resolve_job_identity(control, resolver, *, requester_id, owner_username,
                          allow_privileged, privileged_requesters) -> ResolvedIdentity:
     owner = (owner_username or requester_id).strip()
-    denied = control.is_denied(requester=requester_id, owner=owner, groups=[])
+    # denylist는 최우선 kill-switch이고 특권 경로보다 먼저 평가된다 (스펙 §5).
+    # group 규칙이 등재돼 있을 때만 특권 경로에서도 그룹을 해석한다 — 규칙이 없으면
+    # 특권 경로는 지금처럼 LDAP 없이 통과한다.
+    groups: list[str] = []
+    privileged = allow_privileged and requester_id in privileged_requesters
+    if privileged and control.has_group_denies():
+        if resolver is None:
+            raise IdentityRejected("ldap_not_configured")
+        try:
+            probe = resolver.resolve(owner)
+        except IdentityUnavailable as exc:
+            raise IdentityRejected("ldap_unavailable", str(exc)[:200])
+        if probe is not None:
+            groups = list(probe.groups)
+    denied = control.is_denied(requester=requester_id, owner=owner, groups=groups)
     if denied:
         raise IdentityRejected("identity_denied", denied)
-    if allow_privileged and requester_id in privileged_requesters:
+    if privileged:
         return ResolvedIdentity(owner, 0, 0, (), True)
     if resolver is None:
         raise IdentityRejected("ldap_not_configured")
