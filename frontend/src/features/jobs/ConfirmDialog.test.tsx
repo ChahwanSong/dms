@@ -43,3 +43,10 @@ test("shows error message on fingerprint mismatch", async () => {
   await userEvent.click(screen.getByRole("button", { name: "확인" }));
   expect(await screen.findByText("미리보기가 변경되었습니다. 다시 확인해 주세요")).toBeInTheDocument();
 });
+
+test("rm job shows rm-specific dialog title", async () => {
+  const rmJob = { ...job, operation: "rm" };
+  wrap(<ConfirmDialog job={rmJob as any} />);
+  await userEvent.click(screen.getByRole("button", { name: "미리보기 확인" }));
+  expect(await screen.findByText("rm 미리보기 확인")).toBeInTheDocument();
+});

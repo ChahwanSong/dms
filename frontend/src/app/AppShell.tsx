@@ -10,6 +10,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="px-3 py-2 font-semibold">DMS</div>
         <NavLink to="/jobs" className={linkCls}>내 작업</NavLink>
         <NavLink to="/jobs/new" className={linkCls}>작업 제출</NavLink>
+        {isAdmin && <NavLink to="/admin/scan" className={linkCls}>scan 실행</NavLink>}
         {isAdmin && <NavLink to="/admin/storages" className={linkCls}>스토리지</NavLink>}
         {isAdmin && <NavLink to="/admin/dashboard" className={linkCls}>대시보드</NavLink>}
         {isAdmin && <NavLink to="/admin/batches" className={linkCls}>배치 작업</NavLink>}

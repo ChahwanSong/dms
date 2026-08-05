@@ -9,7 +9,7 @@ export function ConfirmDialog({ job }: { job: DataJob }) {
   const [open, setOpen] = useState(false);
   const confirm = useConfirmJob(job.request_id);
   return (
-    <Dialog open={open} onOpenChange={setOpen} title="sync 미리보기 확인"
+    <Dialog open={open} onOpenChange={setOpen} title={`${job.operation} 미리보기 확인`}
             trigger={<Button>미리보기 확인</Button>}>
       <div className="space-y-2 text-sm">
         <p className="text-muted">아래 dry-run 결과를 확인하고 실행하세요.</p>

@@ -81,6 +81,15 @@ test("admin can open control state", async () => {
   expect(await screen.findByRole("heading", { name: "컨트롤 상태" })).toBeInTheDocument();
 });
 
+test("admin can open scan screen", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/user/storages", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/scan");
+  expect(await screen.findByRole("heading", { name: "scan 실행" })).toBeInTheDocument();
+});
+
 test("user visiting /admin/policies is redirected to /jobs", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
