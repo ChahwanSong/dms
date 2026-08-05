@@ -47,7 +47,6 @@ export function StoragesList() {
                 <td className="flex gap-2 py-2">
                   <StorageDialog mode="edit" storage={s} trigger={<Button variant="ghost">수정</Button>} />
                   <Button variant="ghost" onClick={() => toggle(s)}>{s.enabled === 1 ? "비활성화" : "활성화"}</Button>
-                  {update.isError && <p className="text-bad text-sm">{(update.error as ApiError).message}</p>}
                   <DeleteButton s={s} />
                 </td>
               </tr>
@@ -55,6 +54,7 @@ export function StoragesList() {
           </tbody>
         </Table>
       )}
+      {update.isError && <p className="text-bad text-sm mt-2">{(update.error as ApiError).message}</p>}
     </section>
   );
 }
