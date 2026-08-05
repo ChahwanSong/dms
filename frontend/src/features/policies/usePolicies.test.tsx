@@ -8,8 +8,8 @@ const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 test("usePolicies returns the list", async () => {
   const rows = [{
-    tool: "scan", max_nodes: 4, procs_per_node: 8, queue: "default",
-    default_priority: "normal", max_priority: "high",
+    tool: "scan", max_nodes: 4, procs_per_node: 8, queue: "dms-data",
+    default_priority: "mid", max_priority: "high",
     preview_timeout_seconds: 300, execution_timeout_seconds: 3600,
     enabled: 1, updated_at: "2026-08-05T00:00:00Z", updated_by: "admin",
   }];
@@ -27,8 +27,8 @@ test("useUpsertPolicy puts body unchanged to /api/admin/policies/scan", async ()
   const { result } = renderHook(() => useUpsertPolicy(), { wrapper: ({ children }) =>
     <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
   const reqBody = {
-    max_nodes: 4, procs_per_node: 8, queue: "default",
-    default_priority: "normal", max_priority: "high",
+    max_nodes: 4, procs_per_node: 8, queue: "dms-data",
+    default_priority: "mid", max_priority: "high",
     preview_timeout_seconds: 300, execution_timeout_seconds: 3600,
     enabled: true,
   };

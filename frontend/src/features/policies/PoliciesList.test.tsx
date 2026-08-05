@@ -79,5 +79,5 @@ test("shows an inline message when the PUT returns 422 invalid_priority", async 
   const row = (await screen.findByText("scan")).closest("tr")!;
   await userEvent.click(within(row).getByRole("button", { name: "수정" }));
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
-  expect(await screen.findByText("invalid_priority")).toBeInTheDocument();
+  expect(await screen.findByText("우선순위 값이 올바르지 않습니다")).toBeInTheDocument();
 });
