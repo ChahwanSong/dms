@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from dms.execution import ExecutionError, StubExecutionAdapter
 from dms.execution_volcano import VolcanoExecutionAdapter
@@ -49,6 +51,18 @@ def test_read_log_missing_pod_yields_none():
     k8s.fail_log("p2")
     a = _adapter(k8s)
     assert a.read_log("pods/p1,p2") == [("p1", "log1"), ("p2", None)]
+
+
+def test_read_log_failure_leaves_a_trace(caplog):
+    # bare except가 RBAC 거부·설정 오류·프로그래밍 버그를 전부 "파드가 GC됐다"와
+    # 똑같이 렌더한다. 반환 계약(log=None)은 그대로 두되, 최소한 흔적은 남겨야 한다.
+    k8s = _FakeK8s()
+    k8s.set_log("p1", "log1")
+    k8s.fail_log("p2")
+    a = _adapter(k8s)
+    with caplog.at_level(logging.WARNING, logger="dms.execution_volcano"):
+        assert a.read_log("pods/p1,p2") == [("p1", "log1"), ("p2", None)]
+    assert any("p2" in r.getMessage() for r in caplog.records), caplog.text
 
 
 def test_read_log_rejects_vcjob_ref():

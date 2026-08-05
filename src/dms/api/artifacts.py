@@ -17,7 +17,11 @@ import os
 import re
 import stat
 
-PHASES = ("preflight", "preview", "execution")
+# stepper가 실제로 쓰는 phase 전부. "exec_preflight"는 confirm 후 execution 직전의
+# 재검증(stepper._poll_or_submit_execution, execution_volcano._PREFLIGHT_PHASES)이다 —
+# 실패하면 잡이 execution_recheck_failed로 거절되고 phase_refs에 pod/<name>이 남는데,
+# 여기 빠져 있으면 그 로그·아티팩트가 422로 막혀 운영자가 진단할 방법이 없어진다.
+PHASES = ("preflight", "preview", "exec_preflight", "execution")
 # fullmatch로만 쓴다: re의 '$'는 문자열 끝의 개행 *앞*에서도 매칭되므로 "..\n" 같은 이름이
 # 앵커를 통과해 버린다(그리고 set("..\n")은 {"."}의 부분집합이 아니라 점-전용 가드도 피한다).
 NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
@@ -26,6 +30,10 @@ MAX_BYTES = 256 * 1024
 MAX_TAIL_LINES = 5000
 # 사용자가 phase 디렉터리 소유자라 파일을 무한정 만들 수 있다 — 응답(과 stat 횟수)을 묶는다.
 MAX_ENTRIES = 1000
+# 응답 항목 수 상한만으로는 부족하다: 정규 파일이 하나도 없는 디렉터리(하위 디렉터리·
+# 심링크만 수십만 개)는 MAX_ENTRIES를 영원히 채우지 못해 예산이 발동하지 않고, 스캔은
+# 사용자가 만든 dirent 수만큼 늘어난다. 타입과 무관하게 "검사한 dirent" 자체를 묶는다.
+MAX_SCAN = 10 * MAX_ENTRIES
 
 
 class ArtifactError(Exception):
@@ -77,38 +85,64 @@ def name_of(path: str) -> str:
 
 
 def list_artifacts(base: str, job_id: str) -> dict:
-    """{"entries": [...], "truncated": bool}. 심링크는 항목이든 phase 디렉터리든 건너뛴다."""
+    """{"entries": [...], "truncated": bool}. 심링크는 항목이든 phase 디렉터리든 건너뛴다.
+
+    read_artifact와 같은 원칙을 목록에도 적용한다 — **경로 문자열을 두 번 해석하지 않는다.**
+    예전 구현은 os.lstat(d)로 "디렉터리다"를 확인한 뒤 os.listdir(d)로 같은 경로를 다시
+    해석했다. 두 해석 사이에 <phase>를 심링크로 바꿔치기하면 listdir가 링크를 따라가고,
+    뒤이은 os.lstat(d/name)도 바뀐 중간 컴포넌트를 통해 해석돼 임의 디렉터리의 이름·크기·
+    mtime이 새어 나갔다(리뷰어 재현). 이제 phase 디렉터리를 fd로 한 번만 열어 고정하고
+    이후 스캔·stat은 전부 그 fd 기준(scandir(dfd) + fstatat)이라 바꿔치기가 통하지 않는다.
+
+    작업량도 두 축으로 묶는다: 수락한 항목은 MAX_ENTRIES, **검사한 dirent**는 MAX_SCAN.
+    디렉터리 소유자가 사용자이므로 둘 중 하나라도 없으면 요청당 메모리·시스템 콜을
+    사용자가 좌우한다(팟 메모리 한계까지).
+    """
     root = artifact_dir(base, job_id)
     entries: list[dict] = []
     truncated = False
     for phase in PHASES:
         if truncated:
             break
-        d = os.path.join(root, phase)
         try:
-            # phase 디렉터리 자체가 심링크면 통째로 무시한다(os.listdir는 따라간다).
-            if not stat.S_ISDIR(os.lstat(d).st_mode):
-                continue
-            names = sorted(os.listdir(d))
+            # O_NOFOLLOW로 "phase 디렉터리가 심링크면 열지도 않는다"를 커널에 맡긴다
+            # (예전 lstat(d) 검사를 대체한다). O_DIRECTORY는 디렉터리가 아니면 ENOTDIR.
+            dfd = os.open(os.path.join(root, phase),
+                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError:
             continue
-        for name in names:
-            if not NAME_RE.fullmatch(name):
-                continue
-            try:
-                # lstat 한 번으로 끝낸다: 심링크는 S_ISLNK라 S_ISREG 검사에서 탈락하고
-                # (os.stat/os.path.isfile은 둘 다 따라가서 바깥 파일의 크기·mtime을 흘린다),
-                # 시스템 콜도 하나 줄어든다.
-                st = os.lstat(os.path.join(d, name))
-            except OSError:
-                continue
-            if not stat.S_ISREG(st.st_mode):
-                continue
-            if len(entries) >= MAX_ENTRIES:
-                truncated = True
-                break
-            entries.append({"phase": phase, "name": name, "size": st.st_size,
-                            "modified_at": int(st.st_mtime)})
+        try:
+            # O_NOFOLLOW는 마지막 컴포넌트만 본다 — 상위(<job_id>)가 바꿔치기된 경우는
+            # 지금 손에 쥔 fd가 실제로 어디인지 물어서(/proc/self/fd) 봉쇄한다.
+            _assert_contained(base, job_id, os.path.realpath(f"/proc/self/fd/{dfd}"))
+            scanned = 0
+            with os.scandir(dfd) as it:
+                for entry in it:
+                    scanned += 1
+                    if scanned > MAX_SCAN or len(entries) >= MAX_ENTRIES:
+                        truncated = True
+                        break
+                    if not NAME_RE.fullmatch(entry.name):
+                        continue
+                    try:
+                        # follow_symlinks=False → fstatat(dfd, name, AT_SYMLINK_NOFOLLOW).
+                        # 심링크는 S_ISLNK라 아래 검사에서 탈락한다(os.stat/isfile은 둘 다
+                        # 따라가서 바깥 파일의 크기·mtime을 흘린다). 보고하는 size·mtime이
+                        # 판정에 쓴 stat과 같은 호출에서 나오도록 한 번만 부른다.
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if not stat.S_ISREG(st.st_mode):
+                        continue
+                    entries.append({"phase": phase, "name": entry.name, "size": st.st_size,
+                                    "modified_at": int(st.st_mtime)})
+        except (OSError, ArtifactError):
+            continue
+        finally:
+            os.close(dfd)
+    # dirent 순서는 파일시스템 마음대로다 — 수집한 (상한이 걸린) 조각만 정렬해
+    # 응답 순서를 결정론적으로 만든다. phase 순서는 PHASES를 따른다.
+    entries.sort(key=lambda r: (PHASES.index(r["phase"]), r["name"]))
     return {"entries": entries, "truncated": truncated}
 
 
@@ -132,7 +166,13 @@ def read_artifact(base: str, job_id: str, phase: str, name: str,
         # 딱 한 번만 연다. O_NOFOLLOW는 마지막 컴포넌트가 심링크면 ELOOP로 실패시킨다.
         # 이후 stat/봉쇄 검사는 경로 문자열이 아니라 이 fd에 대해서만 한다 — 검사한
         # 대상과 읽는 대상이 같은 inode임이 보장된다(TOCTOU 제거).
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK이 **필수**다: 사용자가 자기 phase 디렉터리 소유자라 아티팩트 이름으로
+        # mkfifo를 걸 수 있는데, 이 플래그가 없으면 os.open이 writer를 기다리며 영원히
+        # 블록한다(아래 S_ISREG 검사는 실행되지도 않는다). 스타레트는 이 동기 라우트를
+        # AnyIO 스레드풀(~40)에서 돌리므로 그런 요청 40번이면 dms-api가 SPA까지 포함해
+        # 전부 멈추고, 클라이언트가 끊어도 스레드는 돌아오지 않는다(팟 재시작 전까지).
+        # 리눅스에서 정규 파일에는 아무 영향이 없고, FIFO는 즉시 돌아와 S_ISREG에서 걸린다.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         # ELOOP/ENOENT/EACCES/ENAMETOOLONG/EISDIR… 전부 같은 응답으로 뭉갠다 —
         # errno나 경로가 새어 나가면 그 자체가 존재 오라클이 된다.

@@ -14,6 +14,9 @@ export interface DataJob {
   reason_code: string | null; preview_fingerprint: string | null;
   preview_expires_at: string | null; result_summary: unknown;
   transitions: Transition[]; artifact_uri: string | null;
+  // phase -> 실행 ref("pod/<name>" 등). 로그를 실제로 조회할 수 있는 phase가 정확히
+  // 이 키들이다 — 뷰어는 하드코딩된 "preflight"가 아니라 여기에 맞춰 탭을 만든다.
+  phase_refs?: Record<string, string> | null;
 }
 export interface ArtifactEntry { phase: string; name: string; size: number; modified_at: number }
 // 목록은 상한(MAX_ENTRIES)이 있어 배열이 아니라 truncated 플래그를 동반한 객체다.

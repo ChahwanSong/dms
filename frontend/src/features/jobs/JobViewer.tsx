@@ -3,13 +3,21 @@ import { useArtifacts, useArtifactFile, useJobLogs } from "./useArtifacts";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
 
-type Tab = { kind: "artifact"; phase: string; name: string } | { kind: "log" };
+type Tab =
+  | { kind: "artifact"; phase: string; name: string }
+  | { kind: "log"; phase: string };
 
 function tabKey(t: Tab): string {
-  return t.kind === "log" ? "log:preflight" : `artifact:${t.phase}/${t.name}`;
+  return t.kind === "log" ? `log:${t.phase}` : `artifact:${t.phase}/${t.name}`;
 }
 
-export function JobViewer({ jobId }: { jobId: string }) {
+export function JobViewer({
+  jobId,
+  phaseRefs,
+}: {
+  jobId: string;
+  phaseRefs?: Record<string, string> | null;
+}) {
   const [selected, setSelected] = useState<Tab | null>(null);
   const artifacts = useArtifacts(jobId);
 
@@ -20,7 +28,9 @@ export function JobViewer({ jobId }: { jobId: string }) {
     selectedArtifact?.name ?? "",
     selectedArtifact !== null,
   );
-  const logs = useJobLogs(jobId, "preflight", selected?.kind === "log");
+  // 로그 탭은 하나만 선택되므로 훅도 하나면 된다(선택된 phase로 조회).
+  const selectedLog = selected?.kind === "log" ? selected : null;
+  const logs = useJobLogs(jobId, selectedLog?.phase ?? "", selectedLog !== null);
 
   if (artifacts.isLoading) return <p className="text-muted text-sm mt-3">불러오는 중…</p>;
   if (artifacts.isError) {
@@ -30,16 +40,23 @@ export function JobViewer({ jobId }: { jobId: string }) {
   const entries = artifacts.data?.entries ?? [];
   const truncatedList = artifacts.data?.truncated ?? false;
 
+  // 로그 탭은 실제로 ref가 있는 phase에만 만든다. 예전에는 "preflight"를 하드코딩해서,
+  // confirm 후 재검증(exec_preflight)이 실패한 잡을 진단할 때 *초기* preflight의 성공
+  // 로그를 보여줬다 — 정확히 이 슬라이스가 존재하는 상황에서 사람을 오도한다.
+  const logPhases = Object.entries(phaseRefs ?? {})
+    .filter(([, ref]) => Boolean(ref))
+    .map(([phase]) => phase);
+
   const tabs: Tab[] = [
     ...entries.map((e) => ({ kind: "artifact" as const, phase: e.phase, name: e.name })),
-    { kind: "log" as const },
+    ...logPhases.map((phase) => ({ kind: "log" as const, phase })),
   ];
 
   return (
     <div className="mt-3">
       <div className="flex flex-wrap items-center gap-2">
         {tabs.map((t) => {
-          const label = t.kind === "log" ? "preflight 로그" : `${t.phase}/${t.name}`;
+          const label = t.kind === "log" ? `${t.phase} 로그` : `${t.phase}/${t.name}`;
           const isSelected = selected !== null && tabKey(selected) === tabKey(t);
           return (
             <Button

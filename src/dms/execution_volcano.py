@@ -1,9 +1,12 @@
 """Volcano/k8s 실행 어댑터. k8s 접근은 주입된 K8sClient 뒤, 아티팩트 읽기는 read_text 뒤."""
 import json
+import logging
 from typing import Protocol
 
 from .execution import ExecStatus, ExecutionError
 from .execution_manifests import build_preflight_pod, build_volcano_job
+
+logger = logging.getLogger(__name__)
 
 _POD_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
               "Succeeded": ExecStatus.SUCCEEDED, "Failed": ExecStatus.FAILED,
@@ -193,8 +196,11 @@ class VolcanoExecutionAdapter:
         for pod in name.split(","):
             try:
                 out.append((pod, self._k8s.read_pod_log(pod, self._namespace)))
-            except Exception:
+            except Exception as exc:
                 # 파드가 이미 GC됐거나 아직 로그가 없다 — 그 항목만 비우고 계속한다.
+                # 다만 RBAC 거부·설정 오류·프로그래밍 버그도 여기로 떨어져 "GC됐다"와
+                # 똑같이 렌더된다. 반환 계약은 그대로 두고 흔적만 남긴다.
+                logger.warning("read_pod_log failed pod=%s: %s", pod, exc)
                 out.append((pod, None))
         return out
 

@@ -19,21 +19,57 @@ const ARTIFACTS = {
   truncated: false,
 };
 
-function wrap(jobId = "j1") {
+const REFS = { preflight: "pod/p1" };
+
+function wrap(phaseRefs: Record<string, string> | null = REFS, jobId = "j1") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <JobViewer jobId={jobId} />
+      <JobViewer jobId={jobId} phaseRefs={phaseRefs} />
     </QueryClientProvider>,
   );
 }
 
-test("renders a tab for each artifact entry plus the preflight log tab", async () => {
+test("renders a tab for each artifact entry plus a log tab per phase_refs key", async () => {
   server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)));
   wrap();
   expect(await screen.findByRole("button", { name: "execution/stdout.log" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "execution/stderr.log" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "preflight 로그" })).toBeInTheDocument();
+});
+
+test("renders one log tab per phase that actually has a ref, including exec_preflight", async () => {
+  // confirm 후 재검증(exec_preflight)이 실패한 잡을 진단할 때, 하드코딩된 "preflight"
+  // 탭은 *초기* preflight의 성공 로그를 보여줘 사람을 오도한다.
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)));
+  wrap({ preflight: "pod/a", exec_preflight: "pod/b" });
+  expect(await screen.findByRole("button", { name: "preflight 로그" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "exec_preflight 로그" })).toBeInTheDocument();
+});
+
+test("renders no log tab when the job has no phase_refs", async () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)));
+  wrap({});
+  await screen.findByRole("button", { name: "execution/stdout.log" });
+  expect(screen.queryByRole("button", { name: /로그$/ })).not.toBeInTheDocument();
+});
+
+test("requests the log of the selected phase, not a hardcoded preflight", async () => {
+  const asked: string[] = [];
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
+    http.get("/api/user/jobs/j1/logs", ({ request }) => {
+      const phase = new URL(request.url).searchParams.get("phase") ?? "";
+      asked.push(phase);
+      return HttpResponse.json({
+        phase, ref: "pod/b", entries: [{ pod: "b", log: `log of ${phase}` }],
+      });
+    }),
+  );
+  wrap({ preflight: "pod/a", exec_preflight: "pod/b" });
+  await userEvent.click(await screen.findByRole("button", { name: "exec_preflight 로그" }));
+  expect(await screen.findByText("log of exec_preflight")).toBeInTheDocument();
+  expect(asked).toEqual(["exec_preflight"]);
 });
 
 test("does not request the artifact body before a tab is clicked", async () => {

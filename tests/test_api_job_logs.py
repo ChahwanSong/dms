@@ -51,6 +51,22 @@ def test_get_preflight_log_returns_entries(client):
     assert body["entries"] == [{"pod": "p1", "log": "hello preflight log"}]
 
 
+def test_exec_preflight_log_is_reachable(client):
+    # confirm 후 재검증은 phase="exec_preflight"로 제출되고(stepper._poll_or_submit_execution),
+    # 실패하면 execution_recheck_failed로 잡이 거절된다. 그 실패를 진단할 로그가 정확히
+    # 이 ref다 — PHASES에 빠져 있어 422로 막히면 운영자가 볼 방법이 아예 없다.
+    repos = client.app.state.repos
+    rid, jid = _confirmpending_job(repos)
+    repos.data_jobs.set_phase_ref(jid, "exec_preflight", "pod/p2")
+    client.app.state.execution_adapter.set_log("pod/p2", [("p2", "recheck failed: dst full")])
+    _login(client, "alice")
+    r = client.get(f"/api/user/jobs/{jid}/logs", params={"phase": "exec_preflight"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["phase"] == "exec_preflight"
+    assert body["entries"] == [{"pod": "p2", "log": "recheck failed: dst full"}]
+
+
 def test_missing_phase_ref_404(client):
     repos = client.app.state.repos
     rid, jid = _confirmpending_job(repos)

@@ -53,11 +53,13 @@ export function RequestDetail() {
     );
   }
 
-  if (req.isError) {
+  // 잡 조회 실패를 삼키면 "잡이 0개"와 구별되지 않는다 — 요청 조회 실패와 같게 보여준다.
+  if (req.isError || jobs.isError) {
+    const err = (req.isError ? req.error : jobs.error) as ApiError;
     return (
       <section className="space-y-4">
         <h1 className="text-lg font-semibold">요청 {requestId}</h1>
-        <p className="text-bad">{(req.error as ApiError).message}</p>
+        <p className="text-bad">{err.message}</p>
       </section>
     );
   }
@@ -91,6 +93,9 @@ export function RequestDetail() {
               <span className="text-sm">{j.job_id}</span><StatusPill state={j.state} />
             </div>
             {j.reason_code && <p className="text-bad text-sm mt-1">{j.reason_code}</p>}
+            {j.artifact_uri && (
+              <p className="text-muted text-xs mt-1 break-all">아티팩트 {j.artifact_uri}</p>
+            )}
             <ResultSummary summary={j.result_summary} />
             {j.state === "ConfirmPending" && <div className="mt-2"><ConfirmDialog job={j} /></div>}
             {j.state !== "ConfirmPending" && !isTerminal(j.state) && (
@@ -102,7 +107,7 @@ export function RequestDetail() {
             <div className="mt-3">
               <Timeline transitions={j.transitions} />
             </div>
-            <JobViewer jobId={j.job_id} />
+            <JobViewer jobId={j.job_id} phaseRefs={j.phase_refs} />
           </Card>
         ))}
       </div>

@@ -31,7 +31,7 @@ const JOBS = [
       { from_state: null, to_state: "Executing", at: "2026-08-05T00:00:10Z" },
       { from_state: "Executing", to_state: "Failed", reason_code: "no_eligible_nodes", at: "2026-08-05T00:01:30Z" },
     ],
-    artifact_uri: null },
+    artifact_uri: "file:///cephfs/dms/artifacts/j1", phase_refs: { preflight: "pod/p1" } },
 ];
 
 function renderAt() {
@@ -98,4 +98,26 @@ test("shows an inline error message when the request fails to load", async () =>
   );
   renderAt();
   expect(await screen.findByText("http_404")).toBeInTheDocument();
+});
+
+test("shows an inline error message when the jobs list fails to load", async () => {
+  // 삼키면 "잡이 0개"와 화면상 구별되지 않는다 — 실패한 조회를 성공으로 오인하게 된다.
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () =>
+      HttpResponse.json({ detail: "http_500" }, { status: 500 })),
+  );
+  renderAt();
+  expect(await screen.findByText("http_500")).toBeInTheDocument();
+});
+
+test("shows the job's artifact_uri on the job card", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  expect(
+    await screen.findByText("아티팩트 file:///cephfs/dms/artifacts/j1"),
+  ).toBeInTheDocument();
 });
