@@ -16,9 +16,11 @@ _SERVER_INT_KEYS = (
     ("DMS_PLANNER_INTERVAL_SECONDS", "planner_interval_seconds", 10),
     ("DMS_STEPPER_INTERVAL_SECONDS", "stepper_interval_seconds", 5),
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
-    ("DMS_JOB_MAX_ATTEMPTS", "job_max_attempts", 3),
     ("DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS", "batch_orchestrator_interval_seconds", 5),
 )
+# 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
+# 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
+# (DMS_JOB_MAX_ATTEMPTS 는 소비처가 0건인 채로 오래 남아 있어 슬라이스 10 에서 제거했다.)
 
 
 class SettingsError(Exception):
@@ -86,7 +88,6 @@ class Settings:
     execution_backend: str = "stub"
     job_image: str = ""
     k8s_namespace: str = "dms"
-    job_max_attempts: int = 3
     static_dir: str | None = None
     batch_orchestrator_interval_seconds: int = 5
 
