@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import (
-    DomainValidationError, Operation, PRIORITIES,
-    build_data_payload, validate_owner_username,
+    DataJobState, DomainValidationError, Operation, PRIORITIES, RequestState,
+    TERMINAL_REQUEST_STATES, build_data_payload, validate_owner_username,
 )
+from ..execution import ExecutionError
 from .auth import Identity, require_user
+from .cancel import terminate_job
+from .routes_jobs import _owned_request
 
 router = APIRouter()
 
@@ -115,3 +118,26 @@ def get_request(request_id: str, request: Request,
         raise HTTPException(status_code=404, detail="request_not_found")
     row["transitions"] = repo.transitions(request_id)
     return row
+
+
+@router.post("/api/user/requests/{request_id}:cancel")
+def cancel_request(request_id: str, request: Request,
+                   identity: Identity = Depends(require_user)):
+    repos = request.app.state.repos
+    req = _owned_request(request, request_id, identity)
+    if RequestState(req["state"]) in TERMINAL_REQUEST_STATES:
+        raise HTTPException(status_code=409, detail="already_terminal")
+    # planner 경쟁: 요청을 종결하기 전에 잡을 먼저 조회·종료해야 고아가 남지 않는다.
+    adapter = request.app.state.execution_adapter
+    jobs = repos.data_jobs.list_jobs(request_id=request_id)
+    try:
+        for job in jobs:
+            terminate_job(adapter, job)
+    except ExecutionError:
+        raise HTTPException(status_code=500, detail="cancel_failed")
+    for job in jobs:
+        repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
+                                      reason_code="cancelled_by_user", actor=identity.actor)
+    repos.requests.set_state(request_id, RequestState.CANCELLED,
+                             reason_code="cancelled_by_user", actor=identity.actor)
+    return {"state": "Cancelled"}
