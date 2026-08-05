@@ -174,8 +174,9 @@ POST /api/user/requests/{request_id}:cancel
   때문이다(그 상태로는 타임아웃이 전혀 걸리지 않는다). 파드 템플릿은 실제 PodSpec이라 살아남는다.
 - vcjob의 deadline 판정은 `status.state.reason`/`.message`를 본다 — Volcano의
   `status.conditions[]` 항목에는 `reason` 필드 자체가 없다.
-- **scan·rm의 실행 타임아웃 시드 기본값은 24h**다(초안 1h에서 상향). 데드라인이 실제로
-  집행되면 1h는 대규모 dscan/drm을 중간에 죽이고, drm은 부분 삭제로 남는다. 운영자는
-  포탈 `/admin/policies`에서 조정한다.
+- **타임아웃 시드 기본값은 모든 도구가 동일**하다 — preview 12h(43200s) / execution
+  24h(86400s). 초안의 도구별 짧은 값(scan 1h, rm 30m/1h 등)은 데드라인이 집행되지 않던
+  시절의 것이라, 집행이 시작되면 대규모 작업을 중간에 죽인다(drm은 부분 삭제로 남는다).
+  운영자는 포탈 `/admin/policies`에서 도구별로 조정한다.
 - 배치 item의 Cancelled는 **성공도 실패도 아니다** — 카운터를 올리지 않는다.
 - Volcano Job/Pod GC는 이번 범위 밖.

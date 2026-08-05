@@ -60,14 +60,15 @@
 
 | tool | max_nodes | procs_per_node | queue | default_priority | max_priority | preview_timeout | execution_timeout |
 |---|---|---|---|---|---|---|---|
-| scan | 4 | 8 | dms-data | mid | high | NULL | 86400 (24h) |
-| dsync | 8 | 8 | dms-data | mid | high | 3600 (1h) | 259200 (3d) |
-| nsync | 8 | 8 | dms-data | mid | high | 3600 (1h) | 259200 (3d) |
-| rm | 4 | 8 | dms-data | mid | high | 1800 (30m) | 86400 (24h) |
+| scan | 4 | 8 | dms-data | mid | high | 43200 (12h) | 86400 (24h) |
+| dsync | 8 | 8 | dms-data | mid | high | 43200 (12h) | 86400 (24h) |
+| nsync | 8 | 8 | dms-data | mid | high | 43200 (12h) | 86400 (24h) |
+| rm | 4 | 8 | dms-data | mid | high | 43200 (12h) | 86400 (24h) |
 
-> scan·rm의 execution은 이 문서 최초 작성 시 1h였으나 슬라이스 7에서 **24h로 상향**했다.
-> 그때까지는 데드라인이 실제로 집행되지 않아 값이 무해했지만, 집행이 시작되면 1h는 대규모
-> dscan/drm을 중간에 죽인다. 운영자는 `/admin/policies`에서 언제든 조정한다.
+> 타임아웃 기본값은 이 문서 최초 작성 시 도구별로 달랐으나(scan 1h, dsync·nsync 1h/3d,
+> rm 30m/1h) 슬라이스 7에서 **모든 도구 preview 12h / execution 24h로 통일·상향**했다.
+> 그때까지는 데드라인이 실제로 집행되지 않아 값이 무해했지만, 집행이 시작되면 짧은 값이
+> 대규모 작업을 중간에 죽인다. 운영자는 `/admin/policies`에서 도구별로 조정한다.
 
 - `preview_timeout_seconds`는 scan만 NULL(스펙상 scan은 preview 게이트가 없다 —
   `stepper.py:105`).

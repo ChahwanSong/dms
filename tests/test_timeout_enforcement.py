@@ -62,22 +62,23 @@ def _scan_job(repos):
 # --- Layer 1: stepper._build_spec ------------------------------------------------
 
 def test_build_spec_preview_phases_use_preview_timeout_execution_uses_execution(db):
-    # migrate()가 시드하는 dsync 기본 정책: preview=3600, execution=259200.
+    # migrate()가 시드하는 dsync 기본 정책: preview=43200(12h), execution=86400(24h).
+    # execution이 아닌 모든 phase가 preview 타임아웃을 쓴다.
     repos = Repositories(db)
     _, jid = _dsync_job(repos)
     job = repos.data_jobs.get_job(jid)
     stepper = _stepper(repos, StubExecutionAdapter())
     for phase in ("preflight", "preview", "exec_preflight"):
         spec = stepper._build_spec(job, phase, dryrun=False)
-        assert spec.timeout_seconds == 3600, phase
+        assert spec.timeout_seconds == 43200, phase
     spec = stepper._build_spec(job, "execution", dryrun=False)
-    assert spec.timeout_seconds == 259200
+    assert spec.timeout_seconds == 86400
 
 
 def test_build_spec_maps_scan_tool_name_to_scan_policy_key(db):
     # job["tool"]은 "dscan"(실행 파일 이름)이지 정책 키 "scan"이 아니다 — placement.py의
-    # TOOL_TO_POLICY를 거쳐야 한다. 시드 기본값(scan.preview=NULL)과 다른 값을 넣어,
-    # 우연히 None과 일치하는 게 아니라 실제로 매핑이 동작함을 검증한다.
+    # TOOL_TO_POLICY를 거쳐야 한다. 시드 기본값(43200/86400)과 다른 값을 일부러 넣어,
+    # 우연히 기본값과 일치하는 게 아니라 실제로 매핑이 동작함을 검증한다.
     repos = Repositories(db)
     repos.control.upsert_policy("scan", max_nodes=4, procs_per_node=8, queue="dms-data",
         default_priority="mid", max_priority="high",

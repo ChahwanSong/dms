@@ -252,14 +252,16 @@ def migrate(db: Database) -> None:
     # 되돌리면 안 된다. 행이 없으면 planner가 missing_policy로 전부 거부한다.
     now = utc_now_iso()
     for tool, max_nodes, preview_timeout, execution_timeout in (
-        # scan/rm 의 실행 타임아웃은 24h. 스펙 초안의 1h 는 activeDeadlineSeconds 가
-        # 실제로 걸리지 않던 시절의 값이라, 데드라인이 진짜로 발동하게 된 뒤로는 대규모
-        # dscan/drm 을 중간에 죽이는 값이 된다(drm 은 부분 삭제로 남는다). 운영자가
-        # 포탈 /admin/policies 에서 언제든 조정한다.
-        ("scan", 4, None, 86400),
-        ("dsync", 8, 3600, 259200),
-        ("nsync", 8, 3600, 259200),
-        ("rm", 4, 1800, 86400),
+        # 모든 도구가 같은 기본값을 쓴다: preview 12h(43200) / execution 24h(86400).
+        # 초안의 1h/30m 은 activeDeadlineSeconds 가 실제로 걸리지 않던 시절의 값이라,
+        # 데드라인이 진짜로 발동하게 된 뒤로는 대규모 작업을 중간에 죽인다(drm 은 부분
+        # 삭제로 남는다). preview 는 dry-run 이지만 대상 트리가 크면 오래 걸리고,
+        # preflight/exec_preflight 파드의 데드라인으로도 쓰인다.
+        # 운영자가 포탈 /admin/policies 에서 언제든 조정한다.
+        ("scan", 4, 43200, 86400),
+        ("dsync", 8, 43200, 86400),
+        ("nsync", 8, 43200, 86400),
+        ("rm", 4, 43200, 86400),
     ):
         db.execute(
             """INSERT INTO policies (tool, max_nodes, procs_per_node, queue,

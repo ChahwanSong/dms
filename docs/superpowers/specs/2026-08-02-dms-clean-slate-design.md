@@ -184,12 +184,14 @@ job-stepper 루프가 `FOR UPDATE SKIP LOCKED`로 "진행할 차례인 잡"을 �
   담당한다**: hostfile 대기, SSH 준비 배리어, `/etc/passwd` 물질화, mpirun 실행, summary/로그
   아티팩트 기록. 단위 테스트 가능하고 이미지와 함께 버전된다. 컨트롤플레인은 환경변수(경로,
   도구, 플래그, 프로세스 수)만 넘긴다.
-- phase별 타임아웃은 정책 행에서. 시드 기본값: scan execution 24h(preview 없음) /
-  dsync·nsync preview 1h, execution 3d / rm preview 30m, execution 24h. 값은 **운영자가
-  포탈 `/admin/policies`에서 조정**한다.
-  - scan·rm의 execution은 초안에서 1h였으나 **24h로 상향**했다 — 데드라인이 실제로
-    집행되기 시작하면(파드 `activeDeadlineSeconds`) 1h는 대규모 dscan/drm을 중간에
-    죽이는 값이고, drm은 부분 삭제 상태로 남기 때문이다.
+- phase별 타임아웃은 정책 행에서. 시드 기본값은 **모든 도구(dscan·dsync·nsync·drm)가
+  동일**하다 — **preview 12h(43200s) / execution 24h(86400s)**. 값은 **운영자가 포탈
+  `/admin/policies`에서 도구별로 조정**한다.
+  - 초안은 scan 1h / dsync·nsync preview 1h·execution 3d / rm preview 30m·execution 1h
+    였다. 그 값들은 `activeDeadlineSeconds`가 실제로 집행되지 않던 시절의 것이라 무해했지만,
+    데드라인이 진짜로 걸리기 시작하면 대규모 작업을 중간에 죽인다(drm은 부분 삭제로 남는다).
+  - preview 타임아웃은 dry-run 실행뿐 아니라 **preflight/exec_preflight 파드의 데드라인**
+    으로도 쓰인다(execution이 아닌 모든 phase).
 - 우선순위는 요청 시 low/mid/high 중 선택(기본 mid)하고, 정책이 연산별 기본값과 허용 상한을
   정한다. 선택값은 Volcano PriorityClass(`dms-low`/`dms-mid`/`dms-high`)로 매핑된다.
 
