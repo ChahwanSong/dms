@@ -14,4 +14,5 @@ test("renders audit entries", async () => {
   render(<QueryClientProvider client={qc}><AuditLog /></QueryClientProvider>);
   expect(await screen.findByText("cephfs")).toBeInTheDocument();
   expect(screen.getByText("create")).toBeInTheDocument();
+  expect(screen.getByText("storage")).toBeInTheDocument();
 });
