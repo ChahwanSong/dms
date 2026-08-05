@@ -23,6 +23,21 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_artifact_name: "아티팩트 이름이 올바르지 않습니다",
   log_ref_not_found: "이 단계의 로그 참조가 없습니다",
   log_not_available: "이 단계는 파드 로그를 제공하지 않습니다 — 아티팩트를 확인하세요",
+  rm_recursive_required: "삭제는 재귀 옵션이 필요합니다",
+  rm_root_forbidden: "관리 루트 자체는 삭제할 수 없습니다",
+  unsafe_path: "경로가 올바르지 않습니다",
+  unknown_option: "지원하지 않는 옵션입니다",
+  invalid_option: "옵션 값이 올바르지 않습니다",
+  invalid_priority_value: "우선순위 값이 올바르지 않습니다",
+  storage_missing: "등록되지 않은 스토리지입니다",
+  storage_disabled: "비활성 스토리지입니다",
+  storage_not_ready: "스토리지가 준비되지 않았습니다",
+  missing_storage: "스토리지를 선택하세요",
+  missing_source_storage: "소스 스토리지를 선택하세요",
+  missing_destination_storage: "목적지 스토리지를 선택하세요",
+  sync_destination_inside_source: "목적지가 소스 하위 경로일 수 없습니다",
+  invalid_owner_username: "사용자명이 올바르지 않습니다",
+  invalid_operation: "지원하지 않는 연산입니다",
 };
 
 export class ApiError extends Error {

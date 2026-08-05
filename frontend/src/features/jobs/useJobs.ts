@@ -20,16 +20,19 @@ export const useRequestJobs = (id: string) =>
     },
   });
 
-export interface SyncBody {
-  source_storage: string; source: string;
-  destination_storage: string; destination: string;
-  options: Record<string, boolean | number>; priority: string;
+export interface SubmitBody {
+  operation: "sync" | "rm" | "scan";
+  storage?: string; target?: string;
+  source_storage?: string; source?: string;
+  destination_storage?: string; destination?: string;
+  options: Record<string, boolean | number>;
+  priority: string;
+  owner_username?: string;
 }
-export const useSubmitSync = () =>
+export const useSubmitRequest = () =>
   useMutation({
-    mutationFn: (b: SyncBody) =>
-      apiSend<{ request_id: string; state: string }>("POST", "/api/user/requests",
-        { operation: "sync", ...b }),
+    mutationFn: (b: SubmitBody) =>
+      apiSend<{ request_id: string; state: string }>("POST", "/api/user/requests", b),
   });
 
 export function useConfirmJob(requestId: string) {

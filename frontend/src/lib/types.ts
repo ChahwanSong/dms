@@ -66,6 +66,8 @@ export interface DenyEntry {
   reason: string | null;
 }
 
+export interface UserStorage { storage_name: string; backend_type: string; status: string }
+
 export interface ControlState {
   maintenance: number;
   drain: number;

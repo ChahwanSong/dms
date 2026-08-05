@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useSubmitSync } from "./useJobs";
+import { useSubmitRequest } from "./useJobs";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
@@ -8,7 +8,7 @@ import { ApiError } from "../../lib/api";
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 
 export function SubmitSync() {
-  const nav = useNavigate(); const submit = useSubmitSync();
+  const nav = useNavigate(); const submit = useSubmitRequest();
   const [f, setF] = useState({ ss: "", sp: "", ds: "", dp: "", del: false, priority: "mid" });
   const on = (k: string) => (e: any) =>
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
@@ -18,7 +18,7 @@ export function SubmitSync() {
       <form className="space-y-3" onSubmit={(e) => {
         e.preventDefault();
         submit.mutate(
-          { source_storage: f.ss, source: f.sp, destination_storage: f.ds, destination: f.dp,
+          { operation: "sync", source_storage: f.ss, source: f.sp, destination_storage: f.ds, destination: f.dp,
             options: f.del ? { delete: true } : {}, priority: f.priority },
           { onSuccess: (r) => nav(`/jobs/${r.request_id}`) });
       }}>
