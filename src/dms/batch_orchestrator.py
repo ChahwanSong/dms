@@ -11,6 +11,7 @@ sync 경로: Previewing 배치에서 Queued item을 쓰로틀 materialize해 pre
 ConfirmPending 자식을 쓰로틀 confirm(`_confirm_child`)한다. preview가 만료된 자식은
 Queued로 재시도(reset)된다.
 """
+from .api.routes_requests import resolve_priority
 from .db import utc_now_iso
 from .domain import (Operation, RequestState, TERMINAL_REQUEST_STATES,
                      DataJobState, build_data_payload)
@@ -58,10 +59,11 @@ class BatchOrchestrator:
     def _materialize(self, batch, item):
         payload, key = build_data_payload(batch["operation"], options=batch["options"],
                                           **item["payload"])
+        priority = resolve_priority(self._repos, batch["operation"], None)
         rid = self._repos.requests.create(
             operation=batch["operation"], requester_id=batch["requester_id"],
             actor=batch["actor"], resource_key=key, payload=payload,
-            priority="mid", batch_id=batch["batch_id"])
+            priority=priority, batch_id=batch["batch_id"])
         self._repos.batches.set_item_materialized(batch["batch_id"], item["seq"], rid)
 
     def _drive(self, batch):

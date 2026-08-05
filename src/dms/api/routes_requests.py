@@ -30,8 +30,20 @@ class RequestBody(BaseModel):
     source: str | None = None
     destination: str | None = None
     options: dict = {}
-    priority: str = "mid"
+    priority: str | None = None
     owner_username: str | None = None
+
+
+_OP_POLICY = {"scan": "scan", "rm": "rm", "sync": "dsync"}
+
+
+def resolve_priority(repos, operation: str, requested: str | None) -> str:
+    # 클라이언트가 명시하면 그 값이 이긴다. 생략하면 정책의 기본값, 그것도 없으면 mid.
+    # sync는 제출 시점에 도구(dsync/nsync)가 정해지지 않으므로 dsync 정책을 대표로 읽는다.
+    if requested is not None:
+        return requested
+    policy = repos.control.get_policy(_OP_POLICY.get(operation, ""))
+    return (policy or {}).get("default_priority") or "mid"
 
 
 def _require(value: str | None, reason: str) -> str:
@@ -40,10 +52,10 @@ def _require(value: str | None, reason: str) -> str:
     return value
 
 
-def _validated_payload(body: RequestBody) -> tuple[dict, str]:
+def _validated_payload(body: RequestBody, priority: str) -> tuple[dict, str]:
     op = Operation(body.operation)
-    if body.priority not in PRIORITIES:
-        raise DomainValidationError("invalid_priority", body.priority)
+    if priority not in PRIORITIES:
+        raise DomainValidationError("invalid_priority", priority)
     if body.owner_username is not None:
         validate_owner_username(body.owner_username)
     # storage 필드 존재 검증은 여기서 구체적 reason_code로 먼저 수행한다
@@ -92,14 +104,16 @@ def submit(body: RequestBody, request: Request,
         if not authorized:
             raise HTTPException(status_code=403, detail="privileged_not_authorized")
 
+    repos = request.app.state.repos
+    priority = resolve_priority(repos, body.operation, body.priority)
     try:
-        payload, resource_key = _validated_payload(body)
+        payload, resource_key = _validated_payload(body, priority)
     except (DomainValidationError, ValueError) as e:
         reason = getattr(e, "reason_code", "invalid_operation")
         raise HTTPException(status_code=422, detail=reason)
-    rid = request.app.state.repos.requests.create(
+    rid = repos.requests.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
-        resource_key=resource_key, payload=payload, priority=body.priority)
+        resource_key=resource_key, payload=payload, priority=priority)
     return {"request_id": rid, "state": "Pending"}
 
 
