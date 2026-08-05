@@ -75,3 +75,19 @@ export interface ControlState {
   changed_by: string | null;
   changed_at: string | null;
 }
+
+export interface ScanPath {
+  id: number; username?: string; storage_name: string; path: string; created_at: string;
+}
+export interface HistogramBucket {
+  bucket: string; count?: number; bytes?: number;
+  lower_inclusive?: number; upper_inclusive?: number;
+  min_age_days?: number; max_age_days?: number;
+}
+export interface ScanPathStats {
+  covered_by: { target: string; exact: boolean };
+  generated_at_epoch: number;
+  summary: Record<string, number>;
+  file_size_histogram: HistogramBucket[];
+  time_histograms: Record<string, HistogramBucket[]>;
+}

@@ -44,6 +44,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   request_not_found: "요청을 찾을 수 없습니다",
   cancelled_by_user: "사용자가 취소했습니다",
   cancelled_by_batch: "배치 취소로 종료되었습니다",
+  scan_path_exists: "이미 등록된 경로입니다",
+  scan_path_not_found: "등록된 경로를 찾을 수 없습니다",
+  no_covering_scan: "아직 이 경로를 커버하는 scan 결과가 없습니다",
 };
 
 export class ApiError extends Error {
