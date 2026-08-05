@@ -21,7 +21,8 @@ _KIND = {"pod": "Pod", "vcjob": "Job"}
 
 
 def _deadline_exceeded(obj) -> bool:
-    """k8s가 activeDeadlineSeconds로 죽였는지. 확실하지 않으면 False —
+    """Pod가 activeDeadlineSeconds로 죽었는지. kubelet은 status.phase=Failed 와 함께
+    status.reason=DeadlineExceeded를 쓴다. 확실하지 않으면 False —
     오분류(멀쩡한 실패를 TimedOut으로)보다 보수적 유지가 낫다."""
     status = obj.get("status") or {}
     if status.get("reason") == "DeadlineExceeded":
@@ -30,6 +31,17 @@ def _deadline_exceeded(obj) -> bool:
         if cond.get("reason") == "DeadlineExceeded":
             return True
     return False
+
+
+def _vcjob_deadline_exceeded(obj) -> bool:
+    """Volcano Job이 deadline으로 죽었는지. 파드와 필드 위치가 다르다: v1.15.0 CRD의
+    Job.status.conditions[] 항목은 {lastTransitionTime, status}만 갖고 reason/message는
+    status.state에만 있다 — status.reason이나 conditions[].reason을 보면 영원히 못 잡는다.
+    파드와 마찬가지로 불확실하면 False(FAILED 유지)."""
+    state = (obj.get("status") or {}).get("state") or {}
+    if state.get("reason") == "DeadlineExceeded":
+        return True
+    return "DeadlineExceeded" in (state.get("message") or "")
 
 
 class K8sClient(Protocol):
@@ -161,7 +173,7 @@ class VolcanoExecutionAdapter:
             return ExecStatus.FAILED
         phase = ((obj.get("status") or {}).get("state") or {}).get("phase")
         status = _VCJOB_PHASE.get(phase, ExecStatus.FAILED)
-        if status == ExecStatus.FAILED and _deadline_exceeded(obj):
+        if status == ExecStatus.FAILED and _vcjob_deadline_exceeded(obj):
             return ExecStatus.TIMED_OUT
         return status
 

@@ -4,7 +4,7 @@ import json
 import sys
 
 from .db import iso_plus, utc_now_iso
-from .domain import DataJobState
+from .domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .placement import TOOL_TO_POLICY
 
@@ -57,7 +57,11 @@ class JobStepper:
         # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
         # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
         # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.
-        policy = self._repos.control.get_policy(TOOL_TO_POLICY[job["tool"]])
+        # 알 수 없는 tool은 정책 조회를 KeyError로 터뜨리는 대신 "타임아웃 없음"으로
+        # 다룬다 — 여기서 raise하면 그 잡은 매 틱 같은 예외로 스텝이 막혀 영구히 낀다.
+        policy_key = TOOL_TO_POLICY.get(job["tool"])
+        policy = (self._repos.control.get_policy(policy_key)
+                  if policy_key is not None else None)
         if policy is None:
             timeout = None
         elif phase == "execution":
@@ -78,6 +82,25 @@ class JobStepper:
         self._repos.requests.finalize_from_job(
             job["request_id"], job_state, reason_code=reason_code, summary=summary,
             actor="stepper")
+
+    def _reclaim_if_terminal(self, job, ref):
+        """제출 직후 잡이 이미 종단이면(= claim과 제출 사이에 취소가 들어왔다) 방금 만든
+        Pod/vcjob을 즉시 회수하고 현재 상태를 돌려준다. None이면 계속 진행해도 된다.
+
+        claim_steppable의 스냅샷에는 잠금이 없다 — 커넥션이 autocommit이라
+        FOR UPDATE SKIP LOCKED가 곧바로 풀린다. 그 창에서 취소된 잡도 _step_one이
+        그대로 제출해 버리고, 뒤따르는 set_job_state는 종단 가드가 삼키므로 클러스터에만
+        고아가 남는다. 그 고아는 아무도 못 치운다 — cancel_job은 종단 잡에 409,
+        terminate_job은 종단 잡에 no-op이기 때문. 그래서 여기서 한 번 더 읽는다."""
+        current = self._repos.data_jobs.get_job(job["job_id"])
+        state = (current or job)["state"]
+        if DataJobState(state) not in TERMINAL_DATA_JOB_STATES:
+            return None
+        try:
+            self._exec.terminate(ref)
+        except ExecutionError:
+            pass  # best-effort — 잡은 이미 종단이라 더 기록할 상태가 없다
+        return state
 
     def _step_one(self, job) -> str:
         state = job["state"]
@@ -103,6 +126,9 @@ class JobStepper:
                            reason_code=f"preflight_submit_failed:{exc.reason_code}")
             return "Rejected"
         self._repos.data_jobs.set_phase_ref(jid, "preflight", ref)
+        reclaimed = self._reclaim_if_terminal(job, ref)
+        if reclaimed is not None:
+            return reclaimed
         self._repos.data_jobs.set_job_state(jid, DataJobState.PREFLIGHT, actor="stepper")
         return "Preflight"
 
@@ -129,6 +155,9 @@ class JobStepper:
                            reason_code=f"execution_submit_failed:{exc.reason_code}")
             return "Failed"
         self._repos.data_jobs.set_phase_ref(jid, "execution", ref)
+        reclaimed = self._reclaim_if_terminal(job, ref)
+        if reclaimed is not None:
+            return reclaimed
         self._repos.data_jobs.set_job_state(jid, running_state, actor="stepper")
         return running_state.value
 
@@ -166,6 +195,9 @@ class JobStepper:
                            reason_code=f"preview_submit_failed:{exc.reason_code}")
             return "Failed"
         self._repos.data_jobs.set_phase_ref(jid, "preview", ref)
+        reclaimed = self._reclaim_if_terminal(job, ref)
+        if reclaimed is not None:
+            return reclaimed
         self._repos.data_jobs.set_job_state(jid, DataJobState.PREVIEW_RUNNING,
                                             actor="stepper")
         return "PreviewRunning"
@@ -212,6 +244,9 @@ class JobStepper:
                                reason_code=f"execution_recheck_submit_failed:{exc.reason_code}")
                 return "Failed"
             self._repos.data_jobs.set_phase_ref(jid, "exec_preflight", ref)
+            reclaimed = self._reclaim_if_terminal(job, ref)
+            if reclaimed is not None:
+                return reclaimed
             return "Executing"
         status = self._exec.poll(refs["exec_preflight"])
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):

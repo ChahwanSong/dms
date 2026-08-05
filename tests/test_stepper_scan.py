@@ -113,6 +113,38 @@ def test_execution_failure(db):
     assert repos.requests.get(rid)["state"] == "Failed"
 
 
+class _TerminateRecordingAdapter(StubExecutionAdapter):
+    def __init__(self):
+        super().__init__()
+        self.terminated = []
+
+    def terminate(self, ref):
+        self.terminated.append(ref)
+        super().terminate(ref)
+
+
+def test_job_cancelled_between_claim_and_step_reclaims_submitted_ref(db):
+    """claim_steppable의 스냅샷에는 잠금이 없다(커넥션이 autocommit이라
+    FOR UPDATE SKIP LOCKED가 즉시 풀린다). 그 창에서 취소된 잡도 _step_one이 그대로
+    제출해 버리고 뒤따르는 상태 기록은 종단 가드가 삼키므로, 클러스터에 아무도 못 치우는
+    고아가 남는다(cancel_job은 종단 잡에 409, terminate_job은 no-op). 제출 직후 상태를
+    한 번 더 읽어 즉시 회수해야 한다."""
+    from dms.domain import DataJobState
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = _TerminateRecordingAdapter()
+    stepper = _stepper(repos, adapter)
+    job = [j for j in repos.data_jobs.claim_steppable() if j["job_id"] == jid][0]
+    repos.data_jobs.set_job_state(jid, DataJobState.CANCELLED,
+                                  reason_code="cancelled_by_user", actor="alice")
+
+    result = stepper._step_one(job)      # 낡은 스냅샷으로 계속 진행한다
+
+    assert adapter.terminated == [f"stub-preflight-{jid}"]
+    assert result == "Cancelled"
+    assert repos.data_jobs.get_job(jid)["state"] == "Cancelled"
+
+
 def test_drain_stops_stepping(db):
     repos = Repositories(db)
     rid, jid = _scan_job(repos)

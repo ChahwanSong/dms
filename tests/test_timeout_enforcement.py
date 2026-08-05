@@ -7,7 +7,8 @@
 from dms.domain import RequestState
 from dms.execution import ExecStatus, JobSpec, StubExecutionAdapter
 from dms.execution_manifests import build_preflight_pod, build_volcano_job
-from dms.execution_volcano import VolcanoExecutionAdapter, _deadline_exceeded
+from dms.execution_volcano import (VolcanoExecutionAdapter, _deadline_exceeded,
+                                   _vcjob_deadline_exceeded)
 from dms.repositories import Repositories
 from dms.stepper import JobStepper
 
@@ -114,11 +115,29 @@ def _spec(**kw):
     return JobSpec(**base)
 
 
-def test_build_volcano_job_sets_active_deadline_seconds_when_present():
+def _nsync_spec(**kw):
+    return _spec(operation="sync", tool="nsync",
+                 candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b",
+                        "destination_storage": "cephfs-secondary"}, **kw)
+
+
+def _deadlines(manifest):
+    """(task name -> template.spec.activeDeadlineSeconds) — 없으면 키 자체가 없다."""
+    return {t["name"]: t["template"]["spec"].get("activeDeadlineSeconds")
+            for t in manifest["spec"]["tasks"]}
+
+
+def test_build_volcano_job_sets_active_deadline_on_every_task_pod_spec():
+    # activeDeadlineSeconds는 Volcano Job.spec의 필드가 아니다 — v1.15.0 CRD에 없고
+    # preserve-unknown-fields도 아니라 API 서버가 조용히 prune한다(create는 성공하고
+    # 데드라인만 사라진다). 실제 PodSpec 필드인 tasks[i].template.spec에 있어야 한다.
     spec = _spec(operation="scan", tool="dscan", candidates={"primary": ["dms-w1"]},
                  paths={"target": "/cephfs/data"}, timeout_seconds=120)
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
-    assert m["spec"]["activeDeadlineSeconds"] == 120
+    assert _deadlines(m) == {"launcher": 120, "worker": 120}
+    assert "activeDeadlineSeconds" not in m["spec"]
 
 
 def test_build_volcano_job_omits_active_deadline_seconds_when_none():
@@ -127,27 +146,23 @@ def test_build_volcano_job_omits_active_deadline_seconds_when_none():
     assert spec.timeout_seconds is None
     m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
     assert "activeDeadlineSeconds" not in m["spec"]
+    for task in m["spec"]["tasks"]:
+        assert "activeDeadlineSeconds" not in task["template"]["spec"], task["name"]
 
 
-def test_build_nsync_job_sets_active_deadline_seconds_when_present():
-    spec = _spec(operation="sync", tool="nsync",
-                 candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
-                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
-                        "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"},
-                 timeout_seconds=259200)
-    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
-    assert m["spec"]["activeDeadlineSeconds"] == 259200
+def test_build_nsync_job_sets_active_deadline_on_every_task_pod_spec():
+    m = build_volcano_job(_nsync_spec(timeout_seconds=259200), job_image="i",
+                          namespace="dms", volumes=_VOL)
+    assert _deadlines(m) == {"launcher": 259200, "source-worker": 259200,
+                             "destination-worker": 259200}
+    assert "activeDeadlineSeconds" not in m["spec"]
 
 
 def test_build_nsync_job_omits_active_deadline_seconds_when_none():
-    spec = _spec(operation="sync", tool="nsync",
-                 candidates={"source": ["dms-w1"], "destination": ["dms-w4"]},
-                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
-                        "destination": "/cephfs-secondary/b",
-                        "destination_storage": "cephfs-secondary"})
-    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    m = build_volcano_job(_nsync_spec(), job_image="i", namespace="dms", volumes=_VOL)
     assert "activeDeadlineSeconds" not in m["spec"]
+    for task in m["spec"]["tasks"]:
+        assert "activeDeadlineSeconds" not in task["template"]["spec"], task["name"]
 
 
 def test_build_preflight_pod_sets_active_deadline_seconds_when_present():
@@ -169,6 +184,7 @@ def test_build_preflight_pod_omits_active_deadline_seconds_when_none():
 # --- Layer 3: deadline 판정 (순수 함수 + 어댑터 poll 통합) -----------------------
 
 def test_deadline_exceeded_pure_function_is_conservative():
+    # 파드: kubelet이 status.phase=Failed + status.reason=DeadlineExceeded를 쓴다.
     assert _deadline_exceeded({"status": {"reason": "DeadlineExceeded"}}) is True
     assert _deadline_exceeded(
         {"status": {"conditions": [{"reason": "DeadlineExceeded"}]}}) is True
@@ -177,6 +193,23 @@ def test_deadline_exceeded_pure_function_is_conservative():
     assert _deadline_exceeded({"status": {"reason": "Error"}}) is False
     assert _deadline_exceeded({}) is False
     assert _deadline_exceeded({"status": None}) is False
+
+
+def test_vcjob_deadline_exceeded_reads_status_state_not_status_reason():
+    # Volcano Job의 reason/message는 status.state 안에만 있다 — v1.15.0 CRD의
+    # status.conditions[] 항목은 {lastTransitionTime, status}뿐이라 reason이 아예 없고,
+    # 최상위 status.reason도 Volcano가 쓰지 않는다.
+    assert _vcjob_deadline_exceeded(
+        {"status": {"state": {"phase": "Failed", "reason": "DeadlineExceeded"}}}) is True
+    assert _vcjob_deadline_exceeded(
+        {"status": {"state": {"phase": "Failed",
+                              "message": "pod dms-x failed: DeadlineExceeded"}}}) is True
+    # 평범한 실패/무관한 신호는 False → FAILED 유지 (보수적 기본값).
+    assert _vcjob_deadline_exceeded(
+        {"status": {"state": {"phase": "Failed", "reason": "PodFailed"}}}) is False
+    assert _vcjob_deadline_exceeded({"status": {"state": {"phase": "Failed"}}}) is False
+    assert _vcjob_deadline_exceeded({"status": {"state": None}}) is False
+    assert _vcjob_deadline_exceeded({}) is False
 
 
 class _FakeK8s:
@@ -240,9 +273,20 @@ def test_poll_vcjob_deadline_exceeded_maps_to_timed_out():
     a = _adapter(k8s)
     ref = a.submit(_volcano_spec("execution"))
     name = ref.split("/", 1)[1]
-    k8s.set_status("Job", name,
-                   {"state": {"phase": "Failed"}, "reason": "DeadlineExceeded"})
+    # Volcano가 실제로 내보내는 모양: reason은 status.state 안에 있다.
+    k8s.set_status("Job", name, {"state": {"phase": "Failed",
+                                           "reason": "DeadlineExceeded"}})
     assert a.poll(ref) == ExecStatus.TIMED_OUT
+
+
+def test_poll_vcjob_ordinary_failed_without_deadline_reason_stays_failed():
+    k8s = _FakeK8s()
+    a = _adapter(k8s)
+    ref = a.submit(_volcano_spec("execution"))
+    name = ref.split("/", 1)[1]
+    k8s.set_status("Job", name, {"state": {"phase": "Failed", "reason": "PodFailed",
+                                           "message": "pod dms-x failed"}})
+    assert a.poll(ref) == ExecStatus.FAILED
 
 
 def test_poll_vcjob_failed_without_deadline_reason_stays_failed():

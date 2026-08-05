@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import (
     DataJobState, DomainValidationError, Operation, PRIORITIES, RequestState,
-    TERMINAL_REQUEST_STATES, build_data_payload, validate_owner_username,
+    TERMINAL_DATA_JOB_STATES, TERMINAL_REQUEST_STATES, build_data_payload,
+    validate_owner_username,
 )
 from ..execution import ExecutionError
 from .auth import Identity, require_user
@@ -130,6 +131,18 @@ def cancel_request(request_id: str, request: Request,
     # planner 경쟁: 요청을 종결하기 전에 잡을 먼저 조회·종료해야 고아가 남지 않는다.
     adapter = request.app.state.execution_adapter
     jobs = repos.data_jobs.list_jobs(request_id=request_id)
+    # 잡은 이미 전부 종단인데 요청만 아직 비종단인 창이 있다 — stepper의 finalize가
+    # 누락된 고아(data_jobs.terminal_jobs_with_live_request()가 복구하려는 바로 그 상태,
+    # 컨트롤러 크래시 후엔 재시작까지 지속된다). 여기서 취소를 기록하면 실제 결과
+    # (rm이면 이미 끝난 삭제!)를 Cancelled로 덮어쓰는 거짓 취소가 되고, 결과 행도 없이
+    # 요청이 종단이 되어 고아 리컨실러의 시야에서도 사라진다. 취소 대신 실제 결과로
+    # 화해시키고 409를 돌려준다.
+    if jobs and all(DataJobState(j["state"]) in TERMINAL_DATA_JOB_STATES for j in jobs):
+        for job in jobs:
+            repos.requests.finalize_from_job(
+                request_id, DataJobState(job["state"]),
+                reason_code="orphan_recovery", actor=identity.actor)  # 멱등 — 첫 잡이 이긴다
+        raise HTTPException(status_code=409, detail="already_terminal")
     try:
         for job in jobs:
             terminate_job(adapter, job)
@@ -138,6 +151,8 @@ def cancel_request(request_id: str, request: Request,
     for job in jobs:
         repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
                                       reason_code="cancelled_by_user", actor=identity.actor)
-    repos.requests.set_state(request_id, RequestState.CANCELLED,
-                             reason_code="cancelled_by_user", actor=identity.actor)
+    # set_state가 아니라 finalize_from_job — 다른 모든 종단 전이와 동일하게 results 행을
+    # 남긴다(set_state는 상태만 바꾸고 결과를 기록하지 않는다).
+    repos.requests.finalize_from_job(request_id, DataJobState.CANCELLED,
+                                     reason_code="cancelled_by_user", actor=identity.actor)
     return {"state": "Cancelled"}

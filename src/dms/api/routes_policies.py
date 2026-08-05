@@ -13,7 +13,9 @@ class PolicyBody(BaseModel):
     queue: str = "dms-data"
     default_priority: str = "mid"
     max_priority: str = "high"
-    preview_timeout_seconds: int | None = None
+    # None(타임아웃 없음)은 허용하되 0/음수는 막는다 — 그대로 activeDeadlineSeconds로
+    # 흘러가 API 서버가 파드 생성을 거부하고 잡이 submit_failed로 죽는다.
+    preview_timeout_seconds: int | None = Field(default=None, ge=1)
     execution_timeout_seconds: int = Field(ge=1)
     enabled: bool = True
 

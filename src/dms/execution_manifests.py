@@ -195,6 +195,22 @@ def _job_name(spec):
     return f"dms-{spec.operation}-{spec.phase}-{spec.job_id[:12]}"
 
 
+def _apply_task_deadlines(spec, tasks):
+    """타임아웃은 각 task의 파드 템플릿(PodSpec)에 건다 — Volcano Job의 spec이 아니라.
+
+    Volcano v1.15.0 CRD의 Job.spec 프로퍼티는 maxRetry/minAvailable/minSuccess/
+    networkTopology/plugins/policies/priorityClassName/queue/runningEstimate/
+    schedulerName/tasks/ttlSecondsAfterFinished/volumes 뿐이고
+    x-kubernetes-preserve-unknown-fields도 없다. 즉 spec.activeDeadlineSeconds는
+    API 서버가 조용히 prune한다 — create는 200으로 성공하고 데드라인만 사라져
+    타임아웃이 영원히 발화하지 않는다. activeDeadlineSeconds는 실제 PodSpec 필드이므로
+    tasks[i].template.spec에 두어야 prune를 견디고 kubelet이 집행한다."""
+    if not spec.timeout_seconds:
+        return
+    for task in tasks:
+        task["template"]["spec"]["activeDeadlineSeconds"] = spec.timeout_seconds
+
+
 def _node_affinity(nodes):
     return {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
         "nodeSelectorTerms": [{"matchExpressions": [
@@ -304,8 +320,7 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
                 "policies": [{"event": "TaskCompleted", "action": "CompleteJob"},
                              {"event": "PodFailed", "action": "AbortJob"}],
                 "tasks": [launcher, src_worker, dst_worker]}
-    if spec.timeout_seconds:
-        job_spec["activeDeadlineSeconds"] = spec.timeout_seconds
+    _apply_task_deadlines(spec, job_spec["tasks"])
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,
@@ -341,8 +356,7 @@ def build_volcano_job(spec, *, job_image, namespace, volumes):
                 "policies": [{"event": "TaskCompleted", "action": "CompleteJob"},
                              {"event": "PodFailed", "action": "AbortJob"}],
                 "tasks": [launcher, worker]}
-    if spec.timeout_seconds:
-        job_spec["activeDeadlineSeconds"] = spec.timeout_seconds
+    _apply_task_deadlines(spec, job_spec["tasks"])
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,

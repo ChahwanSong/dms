@@ -110,6 +110,47 @@ def test_cancel_marks_batch_cancelled(client):
     assert repos.batches.get(bid)["status"] == "Cancelled"
 
 
+def test_cancel_terminates_materialized_child_that_has_no_job_yet(client):
+    """orchestrator가 materialize했지만 planner가 아직 도달하지 않은 자식 — 잡 행이
+    하나도 없다. 일감을 잡에서만 모으면 이 요청은 취소되지 않고 Pending으로 남아
+    planner가 곧바로 집어 실행한다(거짓 취소, 상위 스펙 §5 금지). orchestrator 5s /
+    planner 10s 주기라 가장 흔한 창이다."""
+    _admin(client)
+    repos = client.app.state.repos
+    bid = client.post("/api/admin/batches", json={
+        "operation": "scan", "max_concurrency": 1, "options": {}, "note": None,
+        "items": [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b"}],
+    }).json()["batch_id"]
+    _orch(repos).run_once()          # item[0]만 materialize — planner는 돌리지 않는다
+    item = [it for it in repos.batches.list_items(bid)
+            if it["status"] == "Materialized"][0]
+    rid = item["request_id"]
+    assert repos.data_jobs.list_jobs(request_id=rid) == []
+    assert rid in [r["request_id"] for r in repos.requests.list_pending()]
+
+    r = client.post(f"/api/admin/batches/{bid}:cancel")
+
+    assert r.status_code == 200
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+    assert rid not in [r["request_id"] for r in repos.requests.list_pending()]
+
+
+def test_cancel_leaves_already_terminal_child_job_alone(client):
+    """자식 잡이 이미 Failed면 그 실제 결과를 Cancelled로 덮어쓰지 않는다."""
+    bid, item, queued_item, jid, rid, ref = _make_batch_with_one_executing_child(client)
+    repos = client.app.state.repos
+    repos.data_jobs.set_job_state(jid, DataJobState.FAILED,
+                                  reason_code="execution_failed", actor="stepper")
+
+    r = client.post(f"/api/admin/batches/{bid}:cancel")
+
+    assert r.status_code == 200
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Failed" and job["reason_code"] == "execution_failed"
+    # 요청도 취소가 아니라 잡의 실제 결과로 화해된다
+    assert repos.requests.get(rid)["state"] == "Failed"
+
+
 def test_cancel_failed_terminate_leaves_everything_unchanged(client):
     bid, item, queued_item, jid, rid, ref = _make_batch_with_one_executing_child(client)
     repos = client.app.state.repos
