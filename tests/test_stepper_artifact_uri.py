@@ -16,6 +16,7 @@ class _Settings:
     artifact_base_uri = "file:///art"
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
+    vcjob_ttl_seconds = 86400
 
 
 def _stepper(repos, adapter):

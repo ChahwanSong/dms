@@ -17,6 +17,7 @@ class _Settings:
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
     batch_orchestrator_interval_seconds = 5
+    vcjob_ttl_seconds = 86400
 
 
 def test_stepper_loop_registered_second(db):

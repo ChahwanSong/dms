@@ -28,6 +28,7 @@ class JobSpec:
     priority_class: str
     artifact_base: str
     timeout_seconds: int | None = None
+    ttl_seconds: int | None = None
 
 
 class ExecutionError(Exception):

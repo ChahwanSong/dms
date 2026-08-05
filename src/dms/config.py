@@ -17,6 +17,7 @@ _SERVER_INT_KEYS = (
     ("DMS_STEPPER_INTERVAL_SECONDS", "stepper_interval_seconds", 5),
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
     ("DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS", "batch_orchestrator_interval_seconds", 5),
+    ("DMS_VCJOB_TTL_SECONDS", "vcjob_ttl_seconds", 86400),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -90,6 +91,7 @@ class Settings:
     k8s_namespace: str = "dms"
     static_dir: str | None = None
     batch_orchestrator_interval_seconds: int = 5
+    vcjob_ttl_seconds: int = 86400
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":

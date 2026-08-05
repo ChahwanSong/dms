@@ -211,6 +211,15 @@ def _apply_task_deadlines(spec, tasks):
         task["template"]["spec"]["activeDeadlineSeconds"] = spec.timeout_seconds
 
 
+def _apply_ttl(spec, job_spec):
+    """ttlSecondsAfterFinished는 activeDeadlineSeconds와 달리 Volcano v1.15.0 CRD의
+    Job.spec 허용 필드 목록에 실제로 포함돼 있다(maxRetry/.../ttlSecondsAfterFinished/
+    volumes) -- 그래서 task 템플릿(PodSpec)이 아니라 여기 Job.spec에 바로 얹는다.
+    값이 없거나(None) 0이면 키 자체를 넣지 않아 기존 매니페스트와 동일하게 유지한다."""
+    if spec.ttl_seconds:
+        job_spec["ttlSecondsAfterFinished"] = spec.ttl_seconds
+
+
 def _node_affinity(nodes):
     return {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
         "nodeSelectorTerms": [{"matchExpressions": [
@@ -321,6 +330,7 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
                              {"event": "PodFailed", "action": "AbortJob"}],
                 "tasks": [launcher, src_worker, dst_worker]}
     _apply_task_deadlines(spec, job_spec["tasks"])
+    _apply_ttl(spec, job_spec)
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,
@@ -357,6 +367,7 @@ def build_volcano_job(spec, *, job_image, namespace, volumes):
                              {"event": "PodFailed", "action": "AbortJob"}],
                 "tasks": [launcher, worker]}
     _apply_task_deadlines(spec, job_spec["tasks"])
+    _apply_ttl(spec, job_spec)
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
         "metadata": {"name": _job_name(spec), "namespace": namespace,

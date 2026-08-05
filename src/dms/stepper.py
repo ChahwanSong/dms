@@ -74,7 +74,8 @@ class JobStepper:
             options=job["options"] or {}, candidates=wp.get("candidates", {}),
             process_count=wp.get("process_count", 1), queue=wp.get("queue", "dms-data"),
             priority_class=wp.get("priority_class", "dms-mid"),
-            artifact_base=self._settings.artifact_base_uri, timeout_seconds=timeout)
+            artifact_base=self._settings.artifact_base_uri, timeout_seconds=timeout,
+            ttl_seconds=self._settings.vcjob_ttl_seconds)
 
     def _finalize(self, job, job_state, *, reason_code=None, summary=None):
         self._repos.data_jobs.set_job_state(job["job_id"], job_state,
