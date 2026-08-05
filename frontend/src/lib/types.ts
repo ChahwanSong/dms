@@ -34,3 +34,30 @@ export interface BatchItem {
   request_id: string | null; reason_code: string | null;
 }
 export interface BatchDetail extends Batch { items: BatchItem[] }
+export interface Policy {
+  tool: string;
+  max_nodes: number;
+  procs_per_node: number;
+  queue: string;
+  default_priority: string;
+  max_priority: string;
+  preview_timeout_seconds: number | null;
+  execution_timeout_seconds: number;
+  enabled: number;
+  updated_at: string;
+  updated_by: string;
+}
+
+export interface DenyEntry {
+  subject_type: string;
+  subject: string;
+  reason: string | null;
+}
+
+export interface ControlState {
+  maintenance: number;
+  drain: number;
+  reason: string | null;
+  changed_by: string | null;
+  changed_at: string | null;
+}

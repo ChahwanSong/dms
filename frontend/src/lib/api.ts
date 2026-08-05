@@ -11,6 +11,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   storage_exists: "이미 존재하는 스토리지입니다",
   storage_in_use: "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)",
   storage_not_found: "스토리지를 찾을 수 없습니다",
+  maintenance_mode: "유지보수 중입니다 — 새 작업 제출이 일시 중단되었습니다",
+  invalid_policy: "정책 값이 올바르지 않습니다",
+  invalid_denylist_subject_type: "대상 유형이 올바르지 않습니다",
+  policy_not_found: "정책을 찾을 수 없습니다",
 };
 
 export class ApiError extends Error {
