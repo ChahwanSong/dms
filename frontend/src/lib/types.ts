@@ -36,6 +36,28 @@ export interface AuditEntry {
   actor: string; before_state: string | null; after_state: string | null; at: string;
 }
 export interface Node { node_name: string; reported_at: string; fresh: boolean; report: unknown }
+export interface Account {
+  username: string; role: string; email: string | null;
+  disabled: number; created_at: string;
+}
+export interface NodeMount {
+  storage_name: string; mount_path: string; status: string;
+  exists?: boolean; is_mountpoint?: boolean; readable?: boolean; reason?: string | null;
+}
+export interface NodeTool {
+  name: string; status: string; path?: string; version?: string; reason?: string | null;
+}
+export interface NodeDisk { storage_name: string; total_bytes: number; used_bytes: number }
+export interface NodeReportBody {
+  node_name?: string; probed_at?: string;
+  mounts?: NodeMount[]; tools?: NodeTool[];
+  os?: { disks?: NodeDisk[] } & Record<string, unknown>;
+  identities?: unknown[];
+}
+export interface NodeInfo {
+  node_name: string; reported_at: string; fresh: boolean; report: NodeReportBody;
+}
+export interface NodeReport { reported_at: string; report: NodeReportBody }
 export interface Batch {
   batch_id: string; operation: string; status: string; max_concurrency: number;
   item_count: number; succeeded_count: number; failed_count: number;
