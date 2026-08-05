@@ -45,3 +45,17 @@ test("toggling a storage sends the correct PUT body", async () => {
     mount_path: S.mount_path, managed_root: S.managed_root, backend_type: S.backend_type, enabled: false,
   });
 });
+test("cancelling the delete dialog clears the stale 409 error", async () => {
+  server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json([S])),
+    http.delete("/api/admin/storages/cephfs", () => HttpResponse.json({ detail: "storage_in_use" }, { status: 409 })));
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "삭제" }));
+  await userEvent.click(await screen.findByRole("button", { name: "삭제 확인" }));
+  const msg = "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)";
+  expect(await screen.findByText(msg)).toBeInTheDocument();
+  // "취소"는 setOpen(false)를 직접 부른다 — Radix의 onOpenChange가 발화하지 않는 경로다.
+  await userEvent.click(screen.getByRole("button", { name: "취소" }));
+  await userEvent.click(await screen.findByRole("button", { name: "삭제" }));
+  expect(screen.queryByText(msg)).not.toBeInTheDocument();
+});

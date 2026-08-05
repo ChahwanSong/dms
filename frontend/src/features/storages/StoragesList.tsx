@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useStorages, useUpdateStorage, useDeleteStorage } from "./useStorages";
 import { StorageDialog } from "./StorageDialog";
 import { Table } from "../../components/ui/Table";
@@ -11,8 +11,11 @@ import type { Storage } from "../../lib/types";
 function DeleteButton({ s }: { s: Storage }) {
   const [open, setOpen] = useState(false);
   const del = useDeleteStorage();
+  // 닫힐 때마다 에러를 비운다. onOpenChange만으로는 부족하다 — "취소"는 setOpen(false)를
+  // 직접 부르고 Radix는 그 경우 onOpenChange를 발화하지 않아 낡은 409가 재오픈 시 남는다.
+  useEffect(() => { if (!open) del.reset(); }, [open]);
   return (
-    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) del.reset(); }} title="스토리지 삭제"
+    <Dialog open={open} onOpenChange={setOpen} title="스토리지 삭제"
             trigger={<Button variant="ghost">삭제</Button>}>
       <p className="text-sm text-muted mb-3">{s.storage_name} 을(를) 삭제할까요?</p>
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
