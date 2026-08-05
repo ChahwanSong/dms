@@ -21,8 +21,13 @@ def current_identity(request: Request) -> Identity:
             return Identity(actor=actor, role="admin")
         raise HTTPException(status_code=401, detail="invalid_token")
     session = request.session
-    if session.get("username") and session.get("role"):
-        return Identity(actor=session["username"], role=session["role"])
+    username = session.get("username")
+    if username:
+        account = request.app.state.repos.accounts.get(username)
+        if account is None or account["disabled"]:
+            request.session.clear()
+            raise HTTPException(status_code=401, detail="account_disabled")
+        return Identity(actor=username, role=account["role"])
     raise HTTPException(status_code=401, detail="not_authenticated")
 
 
