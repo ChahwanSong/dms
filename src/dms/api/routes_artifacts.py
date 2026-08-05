@@ -16,6 +16,8 @@ def list_job_artifacts(job_id: str, request: Request,
                        identity: Identity = Depends(require_user)):
     _owned_job(request, job_id, identity)
     try:
+        # {"entries": [...], "truncated": bool} — 사용자가 phase 디렉터리 소유자라
+        # 항목 수를 묶어야 한다(MAX_ENTRIES). 잘렸는지는 호출자가 알 수 있어야 한다.
         return list_artifacts(_base(request), job_id)
     except ArtifactError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
@@ -29,9 +31,12 @@ def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
     try:
         return read_artifact(_base(request), job_id, phase, name, tail=tail)
     except ArtifactError as e:
-        status = {"artifact_not_found": 404, "artifact_forbidden": 403}.get(
-            e.reason_code, 422)
-        raise HTTPException(status_code=status, detail=e.reason_code)
+        if e.reason_code in ("artifact_not_found", "artifact_forbidden"):
+            # 봉쇄 실패(탈출 시도)와 단순 미존재는 클라이언트에게 완전히 같아야 한다 —
+            # 403/404가 갈리면 팟 안의 임의 절대경로 존재 여부를 캐는 오라클이 된다.
+            # (artifact_forbidden은 서버 내부 구분용으로만 남긴다.)
+            raise HTTPException(status_code=404, detail="artifact_not_found")
+        raise HTTPException(status_code=422, detail=e.reason_code)
 
 
 @router.get("/api/user/jobs/{job_id}/logs")
