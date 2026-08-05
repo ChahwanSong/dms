@@ -15,6 +15,8 @@ class _Settings:
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
     batch_orchestrator_interval_seconds = 5
+    pod_gc_after_seconds = 3600
+    pod_gc_interval_seconds = 600
 
 
 def _orphan(repos):

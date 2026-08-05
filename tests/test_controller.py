@@ -9,7 +9,8 @@ def test_build_loops_names_and_intervals(db, settings):
         ("job-stepper", settings.stepper_interval_seconds),
         ("storage-reconciler", settings.reconcile_interval_seconds),
         ("retention", settings.retention_interval_seconds),
-        ("batch-orchestrator", settings.batch_orchestrator_interval_seconds)]
+        ("batch-orchestrator", settings.batch_orchestrator_interval_seconds),
+        ("pod-gc", settings.pod_gc_interval_seconds)]
 
 
 def test_run_all_once_runs_and_isolates_errors(db, capsys):

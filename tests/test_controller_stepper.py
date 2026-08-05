@@ -18,12 +18,15 @@ class _Settings:
     privileged_requesters = frozenset()
     batch_orchestrator_interval_seconds = 5
     vcjob_ttl_seconds = 86400
+    pod_gc_after_seconds = 3600
+    pod_gc_interval_seconds = 600
 
 
 def test_stepper_loop_registered_second(db):
     loops = build_loops(_Settings(), Repositories(db))
     assert [l.name for l in loops] == [
-        "planner", "job-stepper", "storage-reconciler", "retention", "batch-orchestrator"]
+        "planner", "job-stepper", "storage-reconciler", "retention",
+        "batch-orchestrator", "pod-gc"]
     assert loops[1].interval_seconds == 5
 
 

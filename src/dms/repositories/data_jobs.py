@@ -1,6 +1,6 @@
 """data_jobs + plans 저장소: planner가 emit하고 stepper(3b)가 전진시키는 잡 레코드."""
 import uuid
-from ..db import Database, dump_json, load_json, utc_now_iso
+from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
 from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
                       TERMINAL_REQUEST_STATES)
 
@@ -188,6 +188,25 @@ class DataJobsRepository:
                                reason_code="preview_expired", actor="stepper")
             expired.append(row["job_id"])
         return expired
+
+    def terminal_jobs_older_than(self, after_seconds: int, *, limit: int = 200,
+                                  now_iso: str | None = None) -> list[dict]:
+        """종단 상태이고 updated_at이 (now - after_seconds)보다 오래된 잡을 최신순
+        limit건. updated_at은 종단 진입 시점이다 — set_job_state의 터미널 가드가
+        그 뒤로는 다시 찍지 않으므로("종단 잡은 되돌리지 않는다") 이 나이 필터가
+        곧 '종단이 된 지 얼마나 됐는가'가 된다. Pod GC(preflight pod 정리)가
+        진행 중인 잡을 절대 건드리지 않도록 state 필터를 두는 게 이 메서드의 핵심."""
+        threshold = iso_plus(now_iso or utc_now_iso(), -after_seconds)
+        states = tuple(s.value for s in TERMINAL_DATA_JOB_STATES)
+        placeholders = ", ".join(f":s{i}" for i in range(len(states)))
+        params = {f"s{i}": v for i, v in enumerate(states)}
+        params["threshold"] = threshold
+        params["n"] = limit
+        rows = self._db.query(
+            f"""SELECT * FROM data_jobs WHERE state IN ({placeholders})
+                   AND updated_at < :threshold
+                ORDER BY updated_at DESC, job_id DESC LIMIT :n""", params)
+        return [self._hydrate(r) for r in rows]
 
     def terminal_jobs_with_live_request(self):
         """잡은 터미널인데 그 request가 아직 비터미널인 (job_id, request_id, state) 목록.

@@ -13,13 +13,15 @@ class _Settings:
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
     batch_orchestrator_interval_seconds = 5
+    pod_gc_after_seconds = 3600
+    pod_gc_interval_seconds = 600
 
 
 def test_planner_loop_registered_first(db):
     loops = build_loops(_Settings(), Repositories(db))
     assert loops[0].name == "planner"
     assert loops[0].interval_seconds == 10
-    assert {l.name for l in loops} == {"planner", "job-stepper", "storage-reconciler", "retention", "batch-orchestrator"}
+    assert {l.name for l in loops} == {"planner", "job-stepper", "storage-reconciler", "retention", "batch-orchestrator", "pod-gc"}
 
 
 def test_planner_loop_runs_end_to_end(db):

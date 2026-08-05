@@ -10,6 +10,7 @@ from .db import utc_now_iso
 from .domain import DataJobState
 from .execution import StubExecutionAdapter
 from .planner import Planner
+from .pod_gc import PodGarbageCollector
 from .reconciler import reconcile_storages_once
 from .repositories import Repositories
 from .retention import prune_agent_reports_once
@@ -55,6 +56,9 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                  repos, retention_days=settings.agent_report_retention_days)),
         Loop("batch-orchestrator", settings.batch_orchestrator_interval_seconds,
              lambda: BatchOrchestrator(repos, settings=settings).run_once()),
+        Loop("pod-gc", settings.pod_gc_interval_seconds,
+             lambda: PodGarbageCollector(
+                 repos, adapter, after_seconds=settings.pod_gc_after_seconds).run_once()),
     ]
 
 

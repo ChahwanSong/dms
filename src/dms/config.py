@@ -18,6 +18,8 @@ _SERVER_INT_KEYS = (
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
     ("DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS", "batch_orchestrator_interval_seconds", 5),
     ("DMS_VCJOB_TTL_SECONDS", "vcjob_ttl_seconds", 86400),
+    ("DMS_POD_GC_AFTER_SECONDS", "pod_gc_after_seconds", 3600),
+    ("DMS_POD_GC_INTERVAL_SECONDS", "pod_gc_interval_seconds", 600),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -92,6 +94,8 @@ class Settings:
     static_dir: str | None = None
     batch_orchestrator_interval_seconds: int = 5
     vcjob_ttl_seconds: int = 86400
+    pod_gc_after_seconds: int = 3600
+    pod_gc_interval_seconds: int = 600
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
