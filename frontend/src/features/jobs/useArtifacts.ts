@@ -1,10 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../../lib/api";
-import type { ArtifactEntry, ArtifactFile, JobLogs } from "../../lib/types";
+import type { ArtifactList, ArtifactFile, JobLogs } from "../../lib/types";
 
 export const useArtifacts = (jobId: string) =>
   useQuery({ queryKey: ["artifacts", jobId],
-             queryFn: () => apiGet<ArtifactEntry[]>(`/api/user/jobs/${jobId}/artifacts`) });
+             queryFn: () => apiGet<ArtifactList>(`/api/user/jobs/${jobId}/artifacts`) });
 
 export const useArtifactFile = (jobId: string, phase: string, name: string, enabled: boolean) =>
   useQuery({

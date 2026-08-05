@@ -16,6 +16,8 @@ export interface DataJob {
   transitions: Transition[]; artifact_uri: string | null;
 }
 export interface ArtifactEntry { phase: string; name: string; size: number; modified_at: number }
+// 목록은 상한(MAX_ENTRIES)이 있어 배열이 아니라 truncated 플래그를 동반한 객체다.
+export interface ArtifactList { entries: ArtifactEntry[]; truncated: boolean }
 export interface ArtifactFile {
   phase: string; name: string; size: number; truncated: boolean; content: string;
 }

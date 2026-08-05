@@ -13,11 +13,15 @@ function wrapper({ children }: { children: React.ReactNode }) {
   return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
 }
 
-test("useArtifacts returns the list", async () => {
-  const rows = [{ phase: "preflight", name: "stdout.log", size: 128, modified_at: 1754400000 }];
-  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(rows)));
+test("useArtifacts returns the entries and the truncated flag", async () => {
+  const body = {
+    entries: [{ phase: "preflight", name: "stdout.log", size: 128, modified_at: 1754400000 }],
+    truncated: false,
+  };
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(body)));
   const { result } = renderHook(() => useArtifacts("j1"), { wrapper });
-  await waitFor(() => expect(result.current.data).toEqual(rows));
+  await waitFor(() => expect(result.current.data).toEqual(body));
+  expect(result.current.data?.entries).toHaveLength(1);
 });
 
 test("useArtifactFile with enabled: false sends no request", async () => {
