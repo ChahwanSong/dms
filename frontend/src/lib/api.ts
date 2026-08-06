@@ -63,6 +63,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_not_found: "빌드를 찾을 수 없습니다",
   build_failed: "빌드가 실패했습니다 — 로그를 확인하세요",
   submit_failed: "빌드 파드를 만들지 못했습니다",
+  poll_failed: "빌드 상태를 확인하지 못했습니다",
 };
 
 export class ApiError extends Error {

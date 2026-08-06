@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Table } from "../../components/ui/Table";
@@ -70,7 +71,7 @@ export function BuildsPage() {
           <thead>
             <tr className="text-muted">
               <th className="py-2">시각</th><th>ref</th><th>commit</th><th>이미지</th>
-              <th>노드</th><th>태그</th><th>상태</th>
+              <th>노드</th><th>태그</th><th>상태</th><th>작업</th>
             </tr>
           </thead>
           <tbody>
@@ -83,6 +84,9 @@ export function BuildsPage() {
                 <td>{b.node_name ?? "—"}</td>
                 <td>{b.tag ?? "—"}</td>
                 <td>{b.state}</td>
+                <td className="py-2">
+                  <Link className="text-accent" to={`/admin/builds/${b.build_id}`}>상세</Link>
+                </td>
               </tr>
             ))}
           </tbody>

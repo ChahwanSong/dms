@@ -118,6 +118,32 @@ test("admin can open nodes dashboard", async () => {
   expect(await screen.findByRole("heading", { name: "노드" })).toBeInTheDocument();
 });
 
+test("admin can open builds screen", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/control-state", () =>
+      HttpResponse.json({ maintenance: 0, drain: 0, reason: null, build_node_name: "dms-w1",
+                          changed_by: null, changed_at: null })),
+    http.get("/api/admin/builds", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/builds");
+  expect(await screen.findByRole("heading", { name: "빌드" })).toBeInTheDocument();
+});
+
+test("admin can open build detail", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json({ build_id: "b1", repo_url: "u", git_ref: "main", commit_sha: "deadbeef",
+                          images: ["dms"], node_name: "dms-w1", state: "Succeeded", reason_code: null,
+                          tag: "b01234567", created_at: "2026-08-06T00:00:00Z",
+                          finished_at: "2026-08-06T00:10:00Z" })),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderAt("/admin/builds/b1");
+  expect(await screen.findByRole("heading", { name: "빌드 b1" })).toBeInTheDocument();
+});
+
 test("user visiting /admin/policies is redirected to /jobs", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
