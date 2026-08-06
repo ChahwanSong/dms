@@ -131,12 +131,15 @@ class RequestsRepository:
     def last_reason_code(self, request_id) -> "str | None":
         """그 요청이 종단으로 간 진짜 이유. 배치 항목이 상태값(Cancelled/Rejected/Failed)
         대신 이것을 들고 있어야 「사유」 열이 바로 옆 StatusPill과 중복되지 않고 운영자에게
-        '왜'를 알려준다. 사유 없이 종단화된 전이(예: 사유 없는 취소)는 걸러지므로 그때는
-        None을 돌려준다 — 상태값을 사유인 양 채워 넣느니 비우는 편이 낫다."""
+        '왜'를 알려준다. 사유 없이 종단화된 전이(예: 사유 없는 취소)는 None을 돌려준다 —
+        상태값을 사유인 양 채워 넣느니 비우는 편이 낫다.
+        `reason_code IS NOT NULL` 필터를 두지 않는다: 그걸 두면 마지막 비-Pending 전이가
+        사유 없이 끝났을 때 그보다 오래된(중간 전이의) 사유를 되살려 보여주게 된다 —
+        "마지막 전이의 사유"가 아니라 "마지막으로 사유가 붙은 전이"가 되어버린다."""
         row = self._db.query_one(
             """SELECT reason_code FROM state_transitions
                WHERE entity_kind = 'request' AND entity_id = :id
-                 AND to_state <> 'Pending' AND reason_code IS NOT NULL
+                 AND to_state <> 'Pending'
                ORDER BY id DESC LIMIT 1""",
             {"id": request_id})
         return row["reason_code"] if row else None

@@ -64,6 +64,17 @@ def test_last_reason_code_is_none_when_the_terminal_transition_has_no_reason(db)
     assert repo.last_reason_code(rid) is None
 
 
+def test_last_reason_code_does_not_resurrect_a_stale_reason_from_an_earlier_transition(db):
+    # 중간 전이(Planned)에는 사유가 있고 마지막 전이(Cancelled)에는 없다 — 마지막
+    # 전이가 진짜로 사유 없이 끝났으면 그보다 오래된 사유를 잘못 집어오면 안 된다.
+    repo = RequestsRepository(db)
+    rid = _create(repo)
+    repo.set_state(rid, RequestState.PLANNED, reason_code="replanned_due_to_capacity",
+                   actor="planner")
+    repo.set_state(rid, RequestState.CANCELLED, actor="admin")
+    assert repo.last_reason_code(rid) is None
+
+
 def test_set_state_from_state_is_atomic(db):
     import threading
     repo = RequestsRepository(db)
