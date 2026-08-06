@@ -203,6 +203,10 @@ def migrate(db: Database) -> None:
             tag TEXT NOT NULL,
             digest TEXT,
             state TEXT NOT NULL,
+            reason_code TEXT,
+            -- seq: 배치 안 적용 순서(전역 단조 증가). builds.seq와 같은 이유로
+            -- 제약은 여기 걸지 않고 create_batch()의 MAX(seq)+1이 지킨다.
+            seq INTEGER,
             actor TEXT NOT NULL,
             applied_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_releases_component ON releases (component, id)",
@@ -309,6 +313,8 @@ def _ensure_columns(db):
         ("control_state", "build_node_name", "TEXT"),
         ("builds", "log_text", "TEXT"),
         ("builds", "seq", "INTEGER"),
+        ("releases", "reason_code", "TEXT"),
+        ("releases", "seq", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

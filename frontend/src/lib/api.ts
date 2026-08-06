@@ -117,6 +117,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   unknown_build_node: "등록된 에이전트 노드 중에서 선택해 주세요",
   build_timeout: "빌드가 제한 시간을 넘겨 중단되었습니다",
   invalid_build_ref: "빌드 참조가 올바르지 않습니다 — 관리자에게 문의하세요",
+  rollout_in_progress: "이미 진행 중인 롤아웃이 있습니다",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

@@ -9,6 +9,7 @@ from .batches import BatchesRepository
 from .scan_paths import UserScanPathsRepository
 from .builds import BuildsRepository
 from .observability import ObservabilityRepository
+from .releases import ReleasesRepository
 
 
 class Repositories:
@@ -25,3 +26,4 @@ class Repositories:
         self.scan_paths = UserScanPathsRepository(db)
         self.builds = BuildsRepository(db)
         self.observability = ObservabilityRepository(db)
+        self.releases = ReleasesRepository(db)

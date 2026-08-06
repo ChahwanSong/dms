@@ -26,7 +26,7 @@
   "storage_exists", "storage_in_use", "storage_not_found", "node_not_found",
   "build_node_not_set", "build_in_progress", "unknown_image", "invalid_git_ref",
   "build_not_found", "submit_failed", "poll_failed", "unknown_build_node",
-  "invalid_build_ref",
+  "invalid_build_ref", "rollout_in_progress",
 
   "artifact_forbidden", "invalid_artifact_name", "rm_recursive_required",
   "rm_root_forbidden", "unknown_option", "invalid_option", "storage_missing",
