@@ -35,13 +35,35 @@ class BuildRunner:
                 git_ref=build["git_ref"], images=build["images"],
                 node=build["node_name"], namespace=self._ns,
                 registry=self._registry, builder_image=self._builder_image)
-            self._k8s.create(manifest)
         except Exception as exc:
             raise ExecutionError("submit_failed", str(exc)[:200]) from exc
-        return f"{_PREFIX}/{manifest['metadata']['name']}"
+        name = manifest["metadata"]["name"]
+        ref = f"{_PREFIX}/{name}"
+        try:
+            self._k8s.create(manifest)
+        except Exception as exc:
+            # 파드 이름이 build_id에서 결정적으로 나온다 -- create가 실패해도
+            # (예: AlreadyExists) 같은 이름의 파드가 이미 떠 있다면 그건 이전
+            # 시도가 만든 이 빌드 자신의 파드다. 재시도 시나리오: submit 성공
+            # 직후 mark_running 전에 프로세스가 죽으면 다음 틱이 같은
+            # build_id로 다시 submit한다 -- k8s.delete가 404를 삼켜 멱등한
+            # 것과 같은 계약으로 존재를 확인해 성공 취급해야, 잘 도는 빌드를
+            # Failed로 오기록하지 않는다.
+            try:
+                exists = self._k8s.get("Pod", name, self._ns) is not None
+            except Exception:
+                exists = False  # 존재 확인 자체가 실패하면 원래 실패로 폴백
+            if not exists:
+                raise ExecutionError("submit_failed", str(exc)[:200]) from exc
+        return ref
 
     def poll(self, ref) -> ExecStatus:
-        obj = self._k8s.get("Pod", _name(ref), self._ns)
+        try:
+            obj = self._k8s.get("Pod", _name(ref), self._ns)
+        except ExecutionError:
+            raise
+        except Exception as exc:
+            raise ExecutionError("poll_failed", str(exc)[:200]) from exc
         if obj is None:
             return ExecStatus.FAILED
         return _POD_PHASE.get((obj.get("status") or {}).get("phase"), ExecStatus.FAILED)

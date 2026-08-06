@@ -110,6 +110,55 @@ def test_non_buildpod_ref_is_rejected():
     assert e.value.reason_code == "invalid_build_ref"
 
 
+def test_poll_wraps_k8s_get_exception_as_execution_error():
+    # k8s.get이 404가 아니라 5xx/네트워크 예외를 던지면 원시 예외가 아니라
+    # ExecutionError여야 한다 -- BuildWatcher는 ExecutionError만 잡아 빌드를
+    # Failed로 기록하므로, 새어나간 원시 예외는 run_once()를 죽이고
+    # (running()이 seq ASC라) 그 뒤 모든 빌드가 매 틱 처리되지 않는다.
+    class _Boom(_FakeK8s):
+        def get(self, kind, name, namespace):
+            raise RuntimeError("connection reset")
+    with pytest.raises(ExecutionError) as e:
+        _runner(_Boom()).poll("buildpod/dms-build-0123456789ab")
+    assert e.value.reason_code == "poll_failed"
+
+
+def test_poll_invalid_ref_is_not_reported_as_poll_failed():
+    # _name(ref)가 던지는 invalid_build_ref는 k8s.get을 부르기도 전에 나야
+    # 한다 -- get이 호출되면 "should not be called"이 RuntimeError로 새어나와
+    # poll_failed로 둔갑했을 것이므로, get을 절대 안 부르는지까지 확인한다.
+    class _Boom(_FakeK8s):
+        def get(self, kind, name, namespace):
+            raise RuntimeError("should not be called")
+    with pytest.raises(ExecutionError) as e:
+        _runner(_Boom()).poll("vcjob/whatever")
+    assert e.value.reason_code == "invalid_build_ref"
+
+
+def test_submit_is_idempotent_when_pod_already_exists():
+    # 재시도 시나리오: submit 성공 직후 mark_running 전에 프로세스가 죽으면
+    # 다음 틱이 같은 build_id로 다시 submit한다. 파드 이름이 build_id에서
+    # 결정적으로 나오므로 k8s.create가 AlreadyExists류로 실패해도 그 이름의
+    # 파드가 이미 있다면 그건 이 빌드 자신의 파드다 -- k8s.delete가 404를
+    # 삼켜 멱등한 것과 같은 계약으로, 존재를 확인해 성공으로 취급해야 한다.
+    # 안 그러면 잘 도는 빌드를 Failed로 오기록한다.
+    k8s = _FakeK8s()
+    ref1 = _runner(k8s).submit(BUILD)
+    k8s.fail_create = True  # 재시도: create가 실패(예: AlreadyExists)
+    ref2 = _runner(k8s).submit(BUILD)
+    assert ref2 == ref1
+
+
+def test_submit_failure_with_no_existing_pod_is_still_submit_failed():
+    # create가 실패했는데 그 이름의 파드도 없다면(진짜 실패) 여전히
+    # submit_failed여야 한다 -- 존재 확인 폴백이 진짜 실패까지 삼키면 안 된다.
+    k8s = _FakeK8s()
+    k8s.fail_create = True
+    with pytest.raises(ExecutionError) as e:
+        _runner(k8s).submit(BUILD)
+    assert e.value.reason_code == "submit_failed"
+
+
 def test_stub_runner_runs_without_a_cluster():
     stub = StubBuildRunner()
     ref = stub.submit(BUILD)

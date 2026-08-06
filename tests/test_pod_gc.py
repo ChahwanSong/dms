@@ -1,12 +1,27 @@
 """PodGarbageCollector: 종단 잡이 남긴 preflight Pod(pod/, pods/) 정리.
 
 가장 중요한 단언(behavior 2): **비종단 잡은 절대 대상이 아니다** — 대상 잡이면 stepper가
-아직 진행 중으로 보는 잡의 파드가 사라져 stepper가 그 잡을 실패로 오인한다."""
-from dms.db import iso_plus
+아직 진행 중으로 보는 잡의 파드가 사라져 stepper가 그 잡을 실패로 오인한다.
+
+빌드 파드 GC(build_runner가 주어졌을 때만 동작)에도 같은 단언이 적용된다: 종단
+빌드만 대상이고, 비종단 빌드의 파드가 사라지면 BuildRunner.poll이 FAILED로 오인한다."""
+from dms.db import iso_plus, utc_now_iso
 from dms.domain import DataJobState
 from dms.execution import StubExecutionAdapter
 from dms.pod_gc import PodGarbageCollector
 from dms.repositories import Repositories
+from dms.repositories.builds import build_pod_name
+
+
+class _BuildRunnerSpy:
+    """실제 terminate 호출을 관찰하기 위한 스파이 -- BuildRunner/StubBuildRunner의
+    submit/poll/read_log는 pod GC 경로에서 쓰이지 않아 구현하지 않는다."""
+
+    def __init__(self):
+        self.terminated = []
+
+    def terminate(self, ref):
+        self.terminated.append(ref)
 
 
 class _TerminateRecordingAdapter(StubExecutionAdapter):
@@ -142,3 +157,90 @@ def test_run_once_returns_total_deleted_count(db):
 
     # jid1: pod/a1 + pods/a2,a3(콤마는 어댑터 내부 형식, 1건으로 카운트) = 2건, jid2: pod/b1 = 1건
     assert result == {"deleted": 3}
+
+
+def _make_build(repos, *, node="dms-w1"):
+    return repos.builds.create(repo_url="u", git_ref="main", images=["dms"],
+                               node_name=node, actor="a")
+
+
+def test_terminal_build_pod_is_terminated_when_build_runner_given(db):
+    """7. build_runner가 주어지면 종단 빌드의 빌드 파드도 같은 창(after_seconds)으로
+    수거된다."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+    build_runner = _BuildRunnerSpy()
+    bid = _make_build(repos)
+    repos.builds.mark_running(bid)
+    repos.builds.finish(bid, state="Succeeded")
+    finished_at = repos.builds.get(bid)["finished_at"]
+    now = iso_plus(finished_at, 3601)  # after_seconds(3600)를 넘겨 대상이 되게 함
+
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600, build_runner=build_runner)
+    result = gc.run_once(now_iso=now)
+
+    assert result == {"deleted": 1}
+    assert build_runner.terminated == [f"buildpod/{build_pod_name(bid)}"]
+    assert adapter.terminated == []  # 이 테스트엔 잡 파드가 없다
+
+
+def test_non_terminal_build_pod_is_never_gcd(db):
+    """8. 가장 중요한 단언: 비종단 빌드는 절대 대상이 아니다.
+
+    아무리 '오래돼 보여도'(now_iso를 아주 먼 미래로 줘도) Running 빌드의 파드는
+    지워지지 않아야 한다 -- 지우면 BuildRunner.poll이 객체 없음을 FAILED로 오인한다."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+    build_runner = _BuildRunnerSpy()
+    bid = _make_build(repos)
+    repos.builds.mark_running(bid)  # 아직 Running -- finish 호출 안 함(finished_at NULL)
+    far_future = iso_plus(utc_now_iso(), 10_000_000)
+
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600, build_runner=build_runner)
+    result = gc.run_once(now_iso=far_future)
+
+    assert result == {"deleted": 0}
+    assert build_runner.terminated == []
+    assert repos.builds.get(bid)["state"] == "Running"
+
+
+def test_build_runner_none_leaves_legacy_preflight_gc_unaffected(db):
+    """9. build_runner=None(기본값)이면 빌드 파드 블록 자체가 스킵되고, 기존
+    preflight pod GC 경로는 그대로 동작한다 -- builds 테이블에 종단 빌드가 있어도."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+    jid = _make_job(repos, resource_key="kb1", refs={"preflight": "pod/p1"})
+    repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
+    bid = _make_build(repos)
+    repos.builds.mark_running(bid)
+    repos.builds.finish(bid, state="Succeeded")
+    updated_at = repos.data_jobs.get_job(jid)["updated_at"]
+    now = iso_plus(updated_at, 3601)
+
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600)  # build_runner 기본값 None
+    result = gc.run_once(now_iso=now)
+
+    assert result == {"deleted": 1}  # job pod만 -- 빌드 파드는 대상 밖(러너가 없어서)
+    assert adapter.terminated == ["pod/p1"]
+
+
+def test_build_runner_none_skips_the_builds_query_entirely(db):
+    """9b. build_runner=None이면 repos.builds.terminal_older_than 조회 자체를 안 부른다.
+
+    (9)만으로는 부족하다 -- per-build terminate 호출을 감싼 except Exception이
+    None.terminate() 의 AttributeError까지 삼켜버려서, "if self._build_runner is
+    not None" 가드를 통째로 지워도 (9)의 단언(job pod 1건만 지워짐)은 여전히
+    통과한다(빌드 파드 쪽은 예외로 조용히 실패할 뿐 deleted 카운트에 안 잡히므로).
+    가드가 실제로 조회 자체를 막는지까지 봐야 진짜 회귀 가드가 된다."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "build_runner=None인데 builds.terminal_older_than이 호출됨")
+    repos.builds.terminal_older_than = _boom
+
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600)
+    result = gc.run_once(now_iso=iso_plus(utc_now_iso(), 10))
+
+    assert result == {"deleted": 0}
