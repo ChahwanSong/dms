@@ -2,6 +2,14 @@
 # replicas: 1 for the testbed; the app itself is stateless (DB + k8s backed)
 # so this can be scaled up once the run is stable.
 #
+# EXCEPT: since slice 11 (portal-driven image build), replicas > 1 breaks the
+# builds "at most one active build" invariant -- the guard in
+# repositories/builds.py::create() is a threading.RLock on Database._lock,
+# which only serializes within a single process. Two API processes can both
+# pass the active() pre-check and both INSERT a Pending build. Before
+# increasing replicas, add a DB-level partial unique index that enforces at
+# most one row of builds with state IN ('Pending','Running').
+#
 # /cephfs hostPath: app.state.execution_adapter (built in api/app.py exactly
 # like the controller's) currently only ever calls .terminate() from the
 # cancel route, which is DB+k8s only and needs no filesystem access. This
