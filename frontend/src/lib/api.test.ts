@@ -1,7 +1,7 @@
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
-import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
-import { apiGet, apiSend, ApiError } from "./api";
+import { beforeAll, afterAll, afterEach, test, expect, vi, describe, it } from "vitest";
+import { apiGet, apiSend, ApiError, reasonText } from "./api";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -52,4 +52,32 @@ test("422 with FastAPI field-validation detail array maps to a korean message, n
     { status: 422 })));
   await expect(apiSend("POST", "/api/admin/policies", { max_nodes: 0 }))
     .rejects.toMatchObject({ status: 422, code: "http_422", message: "입력값이 올바르지 않습니다" });
+});
+
+describe("reasonText", () => {
+  it("빈 값은 빈 문자열", () => {
+    expect(reasonText(null)).toBe("");
+    expect(reasonText(undefined)).toBe("");
+    expect(reasonText("")).toBe("");
+  });
+
+  it("매핑된 코드는 한국어", () => {
+    expect(reasonText("identity_denied")).toBe("차단 목록에 있는 신원입니다");
+  });
+
+  it("매핑 없는 코드는 원시 코드 그대로", () => {
+    // api.test.ts 가 이미 단언하는 폴백 규칙 -- 일반 문구로 바꾸지 않는다
+    expect(reasonText("totally_unknown_code")).toBe("totally_unknown_code");
+  });
+
+  it("복합 코드는 접두를 번역하고 접미를 병기한다", () => {
+    // stepper.py 가 f"preflight_submit_failed:{exc.reason_code}" 를 만든다 --
+    // 정확 일치 조회로는 영원히 매핑되지 않는다
+    expect(reasonText("preflight_submit_failed:submit_failed"))
+      .toBe("사전 점검을 시작하지 못했습니다 (submit_failed)");
+  });
+
+  it("접두도 매핑 없으면 원시 전체", () => {
+    expect(reasonText("nope:whatever")).toBe("nope:whatever");
+  });
 });

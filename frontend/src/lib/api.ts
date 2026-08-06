@@ -1,4 +1,46 @@
 export const REASON_MESSAGES: Record<string, string> = {
+  // planner / identity / placement
+  identity_denied: "차단 목록에 있는 신원입니다",
+  ldap_not_configured: "LDAP이 설정되지 않았습니다",
+  ldap_unavailable: "LDAP에 연결할 수 없습니다",
+  ldap_identity_not_found: "LDAP에서 사용자를 찾을 수 없습니다",
+  missing_policy: "해당 도구의 정책이 없습니다",
+  policy_disabled: "해당 도구의 정책이 비활성 상태입니다",
+  // stepper / controller
+  orphan_recovery: "컨트롤러 재시작으로 상태를 복구했습니다",
+  preflight_failed: "사전 점검에 실패했습니다",
+  execution_failed: "실행에 실패했습니다",
+  empty_preview: "대상이 없습니다",
+  preview_timed_out: "미리보기가 제한 시간을 넘겼습니다",
+  preview_failed: "미리보기에 실패했습니다",
+  execution_recheck_failed: "실행 직전 재점검에 실패했습니다",
+  // 복합 접두 (stepper.py 가 f"{prefix}:{ExecutionError.reason_code}" 형태로 발생시킨다)
+  preflight_submit_failed: "사전 점검을 시작하지 못했습니다",
+  execution_submit_failed: "실행을 시작하지 못했습니다",
+  preview_submit_failed: "미리보기를 시작하지 못했습니다",
+  execution_recheck_submit_failed: "실행 직전 재점검을 시작하지 못했습니다",
+  // 인증/계정
+  not_authenticated: "로그인이 필요합니다",
+  admin_required: "관리자 권한이 필요합니다",
+  admin_token_required: "관리자 토큰이 필요합니다",
+  invalid_token: "토큰이 올바르지 않습니다",
+  account_exists: "이미 존재하는 계정입니다",
+  invalid_username: "사용자명이 올바르지 않습니다",
+  // job / batch
+  job_not_found: "잡을 찾을 수 없습니다",
+  batch_not_found: "배치를 찾을 수 없습니다",
+  batch_not_confirmable: "확인할 수 없는 상태의 배치입니다",
+  no_failed_items: "실패한 항목이 없습니다",
+  no_preview_fingerprint: "아직 미리보기가 준비되지 않았습니다",
+  empty_batch: "배치에 항목이 없습니다",
+  invalid_batch_operation: "배치로 지원하지 않는 연산입니다",
+  invalid_max_concurrency: "동시 실행 수 값이 올바르지 않습니다",
+  invalid_storage: "스토리지 설정이 올바르지 않습니다",
+  invalid_node_name: "노드 이름이 올바르지 않습니다",
+  agent_node_identity_mismatch: "에이전트 노드 신원이 일치하지 않습니다",
+  terminate_failed: "종료 요청에 실패했습니다",
+  invalid_job_id: "잡 ID가 올바르지 않습니다",
+  invalid_batch: "배치 값이 올바르지 않습니다",
   invalid_credentials: "사용자명 또는 비밀번호가 올바르지 않습니다",
   fingerprint_mismatch: "미리보기가 변경되었습니다. 다시 확인해 주세요",
   preview_expired: "미리보기가 만료되었습니다. 다시 제출해 주세요",
@@ -18,17 +60,25 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_denylist_subject_type: "대상 유형이 올바르지 않습니다",
   policy_not_found: "정책을 찾을 수 없습니다",
   artifact_not_found: "아티팩트를 찾을 수 없습니다",
-  artifact_forbidden: "허용되지 않은 아티팩트 경로입니다",
   invalid_phase: "알 수 없는 실행 단계입니다",
-  invalid_artifact_name: "아티팩트 이름이 올바르지 않습니다",
   log_ref_not_found: "이 단계의 로그 참조가 없습니다",
   log_not_available: "이 단계는 파드 로그를 제공하지 않습니다 — 아티팩트를 확인하세요",
+  unsafe_path: "경로가 올바르지 않습니다",
+  scan_admin_only: "scan 실행은 관리자만 가능합니다",
+  account_disabled: "계정이 비활성화되었습니다",
+  node_not_found: "노드를 찾을 수 없습니다",
+  requester_disabled: "요청자 계정이 비활성화되었습니다",
+  // 브리프 BACKEND_CODES 목록에는 없지만 src/dms/ grep으로 확인한, 현재도 실제로
+  // 발생하는 코드들 -- 삭제하면 ScanPaths.test.tsx / AccountsList.test.tsx 가
+  // 깨진다(no_covering_scan, cannot_lock_self는 기존 테스트가 한국어 문구를 직접
+  // 단언하고 있었다). 브리프의 목록이 백엔드 실제 코드 전수조사와 어긋나 있어
+  // "죽은 키" 판정에서 제외했다 -- task-1-report.md 참고.
+  artifact_forbidden: "허용되지 않은 아티팩트 경로입니다",
+  invalid_artifact_name: "아티팩트 이름이 올바르지 않습니다",
   rm_recursive_required: "삭제는 재귀 옵션이 필요합니다",
   rm_root_forbidden: "관리 루트 자체는 삭제할 수 없습니다",
-  unsafe_path: "경로가 올바르지 않습니다",
   unknown_option: "지원하지 않는 옵션입니다",
   invalid_option: "옵션 값이 올바르지 않습니다",
-  invalid_priority_value: "우선순위 값이 올바르지 않습니다",
   storage_missing: "등록되지 않은 스토리지입니다",
   storage_disabled: "비활성 스토리지입니다",
   storage_not_ready: "스토리지가 준비되지 않았습니다",
@@ -38,7 +88,6 @@ export const REASON_MESSAGES: Record<string, string> = {
   sync_destination_inside_source: "목적지가 소스 하위 경로일 수 없습니다",
   invalid_owner_username: "사용자명이 올바르지 않습니다",
   invalid_operation: "지원하지 않는 연산입니다",
-  scan_admin_only: "scan 실행은 관리자만 가능합니다",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",
   request_not_found: "요청을 찾을 수 없습니다",
@@ -51,9 +100,6 @@ export const REASON_MESSAGES: Record<string, string> = {
   account_not_found: "계정을 찾을 수 없습니다",
   invalid_role: "역할 값이 올바르지 않습니다",
   cannot_lock_self: "자기 계정의 역할 변경·비활성화는 할 수 없습니다",
-  account_disabled: "계정이 비활성화되었습니다",
-  node_not_found: "노드를 찾을 수 없습니다",
-  requester_disabled: "요청자 계정이 비활성화되었습니다",
   http_500: "서버 오류가 발생했습니다",
   http_503: "서비스를 일시적으로 사용할 수 없습니다",
   build_node_not_set: "빌드 노드가 지정되지 않았습니다 — 컨트롤 상태에서 먼저 지정하세요",
@@ -68,6 +114,22 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_timeout: "빌드가 제한 시간을 넘겨 중단되었습니다",
   invalid_build_ref: "빌드 참조가 올바르지 않습니다 — 관리자에게 문의하세요",
 };
+
+/** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다
+ *  -- 영문 코드라도 보이는 편이 "알 수 없는 오류"보다 진단에 쓸모 있다.
+ *  stepper 는 f"{prefix}:{ExecutionError.reason_code}" 형태의 복합 코드를 만들므로
+ *  정확 일치 조회만으로는 영원히 매핑되지 않는다 -- 접두를 번역하고 접미를 병기한다. */
+export function reasonText(code: string | null | undefined): string {
+  if (!code) return "";
+  const direct = REASON_MESSAGES[code];
+  if (direct) return direct;
+  const sep = code.indexOf(":");
+  if (sep > 0) {
+    const prefix = REASON_MESSAGES[code.slice(0, sep)];
+    if (prefix) return `${prefix} (${code.slice(sep + 1)})`;
+  }
+  return code;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -89,7 +151,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       const detail = (await res.json()).detail;
       code = typeof detail === "string" ? detail : "http_401";
     } catch { /* noop */ }
-    throw new ApiError(401, code, REASON_MESSAGES[code] ?? code);
+    throw new ApiError(401, code, reasonText(code));
   }
   if (!res.ok) {
     let code = `http_${res.status}`;
@@ -97,7 +159,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       const detail = (await res.json()).detail;
       code = typeof detail === "string" ? detail : `http_${res.status}`;
     } catch { /* noop */ }
-    throw new ApiError(res.status, code, REASON_MESSAGES[code] ?? code);
+    throw new ApiError(res.status, code, reasonText(code));
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
