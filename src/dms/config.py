@@ -24,6 +24,7 @@ _SERVER_INT_KEYS = (
     # 사본을 지워버린다.
     ("DMS_POD_GC_AFTER_SECONDS", "pod_gc_after_seconds", 86400),
     ("DMS_POD_GC_INTERVAL_SECONDS", "pod_gc_interval_seconds", 600),
+    ("DMS_BUILD_WATCHER_INTERVAL_SECONDS", "build_watcher_interval_seconds", 15),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -106,6 +107,10 @@ class Settings:
     vcjob_ttl_seconds: int = 86400
     pod_gc_after_seconds: int = 86400
     pod_gc_interval_seconds: int = 600
+    build_registry: str = "pkg-01:5000"
+    build_builder_image: str = "quay.io/buildah/stable:latest"
+    build_repo_url: str = "https://github.com/ChahwanSong/dms.git"
+    build_watcher_interval_seconds: int = 15
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -152,6 +157,11 @@ class Settings:
             job_image=environ.get("DMS_JOB_IMAGE", ""),
             k8s_namespace=environ.get("DMS_K8S_NAMESPACE", "dms"),
             static_dir=environ.get("DMS_STATIC_DIR"),
+            build_registry=environ.get("DMS_BUILD_REGISTRY", "pkg-01:5000"),
+            build_builder_image=environ.get(
+                "DMS_BUILD_BUILDER_IMAGE", "quay.io/buildah/stable:latest"),
+            build_repo_url=environ.get(
+                "DMS_BUILD_REPO_URL", "https://github.com/ChahwanSong/dms.git"),
         )
 
 

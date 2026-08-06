@@ -24,3 +24,15 @@ def build_execution_adapter(settings, repos):
         job_image=settings.job_image, namespace=settings.k8s_namespace,
         storages_lookup=lambda n: repos.storages.get(n), read_text=read_text,
         artifact_base=settings.artifact_base_uri)
+
+
+def build_build_runner(settings):
+    if settings.execution_backend != "volcano":
+        from .build_runner import StubBuildRunner
+        return StubBuildRunner()
+    from .build_runner import BuildRunner
+    from .execution_volcano import KubernetesClient
+    return BuildRunner(KubernetesClient(settings.k8s_namespace),
+                       namespace=settings.k8s_namespace,
+                       registry=settings.build_registry,
+                       builder_image=settings.build_builder_image)
