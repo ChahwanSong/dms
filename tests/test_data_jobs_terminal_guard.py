@@ -77,6 +77,27 @@ def test_terminal_guard_records_event_with_calling_actor_as_component(db):
     assert "Cancelled" in events[0]["message"] and "Executing" in events[0]["message"]
 
 
+def test_terminal_guard_component_is_normalized_for_api_callers(db):
+    # M2 고카디널리티 가드: routes_jobs.py/routes_requests.py/routes_batches.py는
+    # set_job_state(actor=identity.actor)로 부른다 -- 사용자가 잡을 취소하면 actor는
+    # 실제 사용자명("alice")이다. component에 그대로 쓰면 사용자 수만큼 값이 늘어나
+    # 슬라이스 14 대시보드가 component를 그룹핑 키로 못 쓴다. "stepper"/
+    # "batch-orchestrator"처럼 고정된 소수 리터럴이 아닌 actor는 "api"로 접고,
+    # 실제 발신자는 message에 남긴다.
+    repos = _repos(db)
+    job_id = _mk_job(repos)
+    rid = repos.data_jobs.get_job(job_id)["request_id"]
+    repos.data_jobs.set_job_state(job_id, DataJobState.CANCELLED,
+                                  reason_code="cancelled_by_user", actor="alice")
+
+    repos.data_jobs.set_job_state(job_id, DataJobState.EXECUTING, actor="alice")
+
+    events = repos.observability.events_for_request(rid)
+    assert len(events) == 1
+    assert events[0]["component"] == "api"          # "alice"가 아니라 정규화된 값
+    assert "actor=alice" in events[0]["message"]     # 실제 발신자는 message에 남는다
+
+
 def test_guard_applies_to_every_terminal_state(db):
     repos = _repos(db)
     for terminal_state in TERMINAL_DATA_JOB_STATES:

@@ -8,6 +8,19 @@ from .observability import ObservabilityRepository
 _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
                  "volcano_job_ref", "phase_refs")
 
+# set_job_state는 stepper.py(actor="stepper")와 batch_orchestrator.py
+# (actor="batch-orchestrator") 말고도 API 라우트(actor=identity.actor, 즉 실제
+# 사용자명)에서도 불린다. 종단 가드 이벤트의 component에 사용자명을 그대로 쓰면
+# 사용자 수만큼 값이 늘어나(고카디널리티) 슬라이스 14 대시보드가 component를
+# 그룹핑 키로 못 쓴다(설계 §5). stepper/batch-orchestrator는 고정된 소수 리터럴이라
+# 그대로 어휘에 넣고, 그 외(=API 호출자)는 전부 "api"로 접는다 -- 실제 발신자는
+# message에 남기므로 정보 손실은 없다.
+_KNOWN_COMPONENTS = frozenset({"stepper", "batch-orchestrator"})
+
+
+def _guard_component(actor: str) -> str:
+    return actor if actor in _KNOWN_COMPONENTS else "api"
+
 
 class DataJobsRepository:
     def __init__(self, db: Database):
@@ -131,14 +144,14 @@ class DataJobsRepository:
             # 협력자를 주입받는 대신 여기서 즉석으로 만든다. ObservabilityRepository는
             # db 핸들 하나만 감싸는 얇은 래퍼라 생성 비용이 없고, 위 with-transaction
             # 블록 밖에서 호출하므로 진단 INSERT가 업무 트랜잭션에 섞이지 않는다.
-            # component는 "stepper"로 하드코딩하지 않는다 -- set_job_state는
-            # stepper.py 말고도 batch_orchestrator.py(actor="batch-orchestrator"),
-            # API 라우트(actor=identity.actor)에서도 불린다. 호출자가 이미 넘긴
-            # actor가 곧 실제 발신자이므로 그대로 component로 쓴다 -- 브리프
-            # 표의 "stepper"는 가장 흔한 호출자를 적은 예시였을 뿐이다.
+            # component는 _guard_component()로 정규화한다(위 설명) -- actor를 그대로
+            # 쓰면 API 호출자(사용자명)가 그대로 새어 고카디널리티가 된다. 실제
+            # 발신자는 message에 남긴다.
             ObservabilityRepository(self._db).record_event(
-                component=actor, severity="info", event_type="terminal_guard_skip",
-                message=f"job_id={job_id} state={current['state']} attempted_to={to_state.value}",
+                component=_guard_component(actor), severity="info",
+                event_type="terminal_guard_skip",
+                message=(f"actor={actor} job_id={job_id} state={current['state']} "
+                         f"attempted_to={to_state.value}"),
                 request_id=current["request_id"])
 
     def job_transitions(self, job_id):
