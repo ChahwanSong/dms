@@ -124,7 +124,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   rollout_timeout: "롤아웃이 제한 시간을 넘겨 실패했습니다",
   rollout_aborted: "앞 컴포넌트 실패로 롤아웃이 중단되었습니다",
   workload_not_found: "대상 워크로드를 찾을 수 없습니다",
-  unknown_component: "알 수 없는 컴포넌트입니다 — 관리자에게 문의하세요",
+  // 두 곳에서 난다: 롤아웃 컨트롤러가 모르는 component 행을 만났을 때(내부 오류)와
+  // 릴리스 제출 폼이 빈 선택/중복 선택을 보냈을 때 -- 양쪽에서 읽히는 문구를 쓴다.
+  unknown_component: "알 수 없는 컴포넌트이거나 중복 선택입니다",
+  unknown_tag: "레지스트리에 없는 태그입니다",
+  same_tag: "현재 태그와 같습니다 — IfNotPresent라 재적용해도 아무 일도 일어나지 않습니다",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다
