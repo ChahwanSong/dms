@@ -80,7 +80,7 @@ export function BuildsPage() {
                 <td className="py-2">{b.created_at}</td>
                 <td>{b.git_ref}</td>
                 <td className="text-muted">{b.commit_sha ? b.commit_sha.slice(0, 8) : "—"}</td>
-                <td>{b.images.join(", ")}</td>
+                <td>{(b.images ?? []).join(", ")}</td>
                 <td>{b.node_name ?? "—"}</td>
                 <td>{b.tag ?? "—"}</td>
                 <td>{b.state}</td>

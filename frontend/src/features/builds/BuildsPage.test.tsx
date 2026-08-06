@@ -74,6 +74,13 @@ describe("BuildsPage", () => {
     expect(await screen.findByText("이미 진행 중인 빌드가 있습니다")).toBeInTheDocument();
   });
 
+  it("T6: 행의 images가 null이어도 흰 화면이 되지 않는다", async () => {
+    server.use(http.get("/api/admin/builds", () =>
+      HttpResponse.json([{ ...BUILD, images: null }])));
+    wrap(<BuildsPage />);
+    expect(await screen.findByText("b01234567")).toBeInTheDocument();
+  });
+
   it("목록이 배열이 아니어도 흰 화면이 되지 않는다", async () => {
     server.use(http.get("/api/admin/builds", () => HttpResponse.json({ oops: true })));
     wrap(<BuildsPage />);

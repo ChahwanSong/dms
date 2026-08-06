@@ -29,6 +29,18 @@ function renderPage() {
   );
 }
 
+test("저장소 URL을 보여준다", async () => {
+  // I3: repo_url을 화면에 안 보여주면 commit SHA만으로는 어느 저장소의 커밋인지
+  // 알 수 없다 -- admin이 임의 저장소를 제출해도 운영자가 알아챌 방법이 없다.
+  server.use(
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json(buildRow({ state: "Succeeded", repo_url: "https://example/r.git" }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderPage();
+  expect(await screen.findByText("https://example/r.git")).toBeInTheDocument();
+});
+
 test("로그가 렌더된다", async () => {
   server.use(
     http.get("/api/admin/builds/b1", () => HttpResponse.json(buildRow({ state: "Succeeded" }))),
@@ -36,6 +48,17 @@ test("로그가 렌더된다", async () => {
   );
   renderPage();
   expect(await screen.findByText(/hello build log/)).toBeInTheDocument();
+});
+
+test("M5: 진행 중(Running) 빌드는 busy 배지로 보인다(회색이 아니다)", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () => HttpResponse.json(buildRow({ state: "Running" }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "building\n" })),
+  );
+  const { container } = renderPage();
+  await screen.findByText(/building/);
+  expect(screen.getByText("Running")).toBeInTheDocument();
+  expect(container.querySelector(".text-busy")).not.toBeNull();
 });
 
 test("log가 null이면 흰 화면 대신 안내 문구를 보여준다", async () => {
@@ -56,6 +79,18 @@ test("사유 코드를 한글 메시지로 보여주고 원시 코드는 노출�
   renderPage();
   expect(await screen.findByText("빌드가 실패했습니다 — 로그를 확인하세요")).toBeInTheDocument();
   expect(screen.queryByText("build_failed")).not.toBeInTheDocument();
+});
+
+test("T6: images가 null이어도 흰 화면이 되지 않는다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () => HttpResponse.json(buildRow({ images: null }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderPage();
+  // h1은 로딩 중에도 이미 있으므로, 데이터가 실제로 로드된 뒤에만 나타나는
+  // 노드 이름까지 기다려야 images 렌더 경로(크래시 지점)를 실제로 지나간다.
+  expect(await screen.findByText("dms-w1")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "빌드 b1" })).toBeInTheDocument();
 });
 
 test("종단 빌드(Succeeded)는 로그를 더 폴링하지 않는다", async () => {

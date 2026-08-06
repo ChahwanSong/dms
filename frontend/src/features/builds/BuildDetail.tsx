@@ -2,7 +2,7 @@ import { useParams } from "react-router-dom";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, REASON_MESSAGES } from "../../lib/api";
-import { isTerminal } from "../../lib/jobState";
+import { buildPillVariant, isTerminal } from "../../lib/jobState";
 import { useBuild, useBuildLog } from "./useBuilds";
 
 export function BuildDetail() {
@@ -23,12 +23,13 @@ export function BuildDetail() {
         <>
           <Card className="space-y-2 text-sm">
             <div className="flex items-center gap-3">
-              <StatusPill state={b?.state ?? "—"} />
+              <StatusPill state={b?.state ?? "—"} variant={b ? buildPillVariant(b.state) : undefined} />
               <span className="text-muted">태그 {b?.tag ?? "—"}</span>
             </div>
+            <p>저장소: <span className="text-ink">{b?.repo_url ?? "—"}</span></p>
             <p>git ref: <span className="text-ink">{b?.git_ref ?? "—"}</span></p>
             <p>commit: <span className="text-ink">{b?.commit_sha ? b.commit_sha.slice(0, 8) : "—"}</span></p>
-            <p>이미지: <span className="text-ink">{b && b.images.length > 0 ? b.images.join(", ") : "—"}</span></p>
+            <p>이미지: <span className="text-ink">{b && (b.images ?? []).length > 0 ? (b.images ?? []).join(", ") : "—"}</span></p>
             <p>노드: <span className="text-ink">{b?.node_name ?? "—"}</span></p>
             <p>사유: <span className="text-ink">
               {b?.reason_code ? (REASON_MESSAGES[b.reason_code] ?? b.reason_code) : "—"}

@@ -64,6 +64,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_failed: "빌드가 실패했습니다 — 로그를 확인하세요",
   submit_failed: "빌드 파드를 만들지 못했습니다",
   poll_failed: "빌드 상태를 확인하지 못했습니다",
+  unknown_build_node: "등록된 에이전트 노드 중에서 선택해 주세요",
+  build_timeout: "빌드가 제한 시간을 넘겨 중단되었습니다",
+  invalid_build_ref: "빌드 참조가 올바르지 않습니다 — 관리자에게 문의하세요",
 };
 
 export class ApiError extends Error {
