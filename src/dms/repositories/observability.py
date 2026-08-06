@@ -29,13 +29,16 @@ class ObservabilityRepository:
             logger.warning("record_event failed type=%s: %s", event_type, exc)
 
     def events_for_request(self, request_id: str, limit: int = 100) -> list[dict]:
+        # 잘라야 한다면 오래된 쪽을 버린다 -- 장애 진단에 필요한 것은 최신이다.
+        # DESC로 최신 limit건을 뽑은 뒤, 화면이 읽기 자연스러운 시간 오름차순으로
+        # 되돌린다(reversed) -- 호출자는 여전히 오름차순 리스트를 받는다.
         rows = self._db.query(
             """SELECT id, request_id, component, severity, event_type, message,
                       payload, at
-               FROM events WHERE request_id = :r ORDER BY id ASC LIMIT :n""",
+               FROM events WHERE request_id = :r ORDER BY id DESC LIMIT :n""",
             {"r": request_id, "n": limit})
         out = []
-        for row in rows:
+        for row in reversed(rows):
             e = dict(row)
             e["payload"] = load_json(e.get("payload"))
             out.append(e)

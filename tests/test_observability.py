@@ -47,6 +47,18 @@ def test_null_request_id_is_allowed_and_excluded_from_request_scope(repos):
     assert repos.observability.events_for_request("r1") == []
 
 
+def test_events_for_request_truncation_drops_the_oldest_not_the_newest(repos):
+    # 잘라야 한다면 오래된 쪽을 버린다 -- 장애 진단에 필요한 것은 최신이다(가장 최근에도
+    # 실패가 계속되고 있는지가 운영자의 관심사). limit보다 많이 쌓이면 최신 limit건만
+    # 남되, 반환은 여전히 시간 오름차순이어야 화면(오래된 것 위, 최신 것 아래)이
+    # 자연스럽다.
+    for i in range(5):
+        repos.observability.record_event(component="planner", severity="error",
+                                         event_type=f"e{i}", request_id="r1")
+    events = repos.observability.events_for_request("r1", limit=3)
+    assert [e["event_type"] for e in events] == ["e2", "e3", "e4"]
+
+
 def test_prune_events_removes_only_old_rows(repos):
     repos.observability.record_event(component="planner", severity="error",
                                      event_type="old", request_id="r1")

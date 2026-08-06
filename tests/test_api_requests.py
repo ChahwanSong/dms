@@ -131,6 +131,8 @@ def test_request_detail_marks_truncation_past_the_display_cap(client):
     # events_for_request의 기본 limit=100이 API에 그대로 적용되면 잘린 사실이
     # 화면에 보이지 않는다 -- 조용한 절단. 플래너/스테퍼가 같은 요청에서 매 틱
     # 실패를 반복하면 100건을 넘기는 것도 현실적인 시나리오다(스택된 요청).
+    # 잘릴 때 버려지는 건 가장 오래된 한 건(boom0)이어야 한다 -- 최신(boom100)이
+    # 사라지면 "지금도 실패 중인지"를 운영자가 놓친다.
     repos = client.app.state.repos
     rid = _pending_request(repos)
     for i in range(101):
@@ -138,8 +140,12 @@ def test_request_detail_marks_truncation_past_the_display_cap(client):
             component="planner", severity="error", event_type="plan_error",
             message=f"boom{i}", request_id=rid)
     body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    messages = [e["message"] for e in body["events"]]
     assert len(body["events"]) == 100
     assert body["events_truncated"] is True
+    assert "boom0" not in messages          # 가장 오래된 것이 버려졌다
+    assert messages[0] == "boom1"           # 오름차순 유지, 다음으로 오래된 것이 맨 앞
+    assert messages[-1] == "boom100"        # 최신이 살아남아 맨 뒤에 온다
 
 
 def test_request_detail_events_truncated_flag_is_false_under_the_cap(client):
@@ -150,3 +156,20 @@ def test_request_detail_events_truncated_flag_is_false_under_the_cap(client):
         message="boom", request_id=rid)
     body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
     assert body["events_truncated"] is False
+
+
+def test_request_detail_events_exactly_at_the_display_cap_is_not_truncated(client):
+    # 경계값: 정확히 100건이면 전부 보여야 하고 잘림 플래그도 False여야 한다.
+    # len(events) > display_limit 을 >= 로 잘못 쓰면 이 케이스가 깨진다.
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    for i in range(100):
+        repos.observability.record_event(
+            component="planner", severity="error", event_type="plan_error",
+            message=f"boom{i}", request_id=rid)
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    messages = [e["message"] for e in body["events"]]
+    assert len(body["events"]) == 100
+    assert body["events_truncated"] is False
+    assert messages[0] == "boom0"
+    assert messages[-1] == "boom99"

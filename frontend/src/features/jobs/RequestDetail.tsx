@@ -41,7 +41,7 @@ function DiagnosticEvents({ req }: { req: RequestDetailType }) {
       <h2 className="text-sm font-semibold mb-2">진단 이벤트</h2>
       {req.events_truncated && (
         <p className="text-muted text-xs mb-2">
-          오래된 순으로 최근 100건만 표시됩니다 — 그 이후 이벤트는 보이지 않습니다.
+          최근 100건만 표시됩니다 — 그 이전 이벤트는 보이지 않습니다.
         </p>
       )}
       <ul className="space-y-2 text-sm">

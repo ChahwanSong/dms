@@ -123,12 +123,14 @@ def get_request(request_id: str, request: Request,
     # events_for_request 기본 limit(100)이 조용히 잘리면 운영자가 눈치채지 못한다 --
     # 스택된 요청이 매 컨트롤러 틱마다 같은 예외로 실패를 반복하면 100건을 넘기는 것도
     # 현실적이다(plan_error/step_error는 정확히 이런 루프에서 기록된다). 표시 상한보다
-    # 하나 더 가져와 잘림 여부를 판별하고, 값은 상한만큼만 내려준다.
+    # 하나 더 가져와 잘림 여부를 판별한다. events_for_request는 이제 최신 N건을
+    # 오름차순으로 돌려주므로(오래된 쪽을 버린다), 잘렸을 때 버릴 것도 리스트 앞쪽
+    # (가장 오래된 한 건)이다 -- events[-display_limit:]로 뒤에서부터 자른다.
     display_limit = 100
     events = request.app.state.repos.observability.events_for_request(
         request_id, limit=display_limit + 1)
     row["events_truncated"] = len(events) > display_limit
-    row["events"] = events[:display_limit]
+    row["events"] = events[-display_limit:]
     return row
 
 
