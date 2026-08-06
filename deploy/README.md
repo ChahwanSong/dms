@@ -265,6 +265,65 @@ curl -sf -X POST "$API/api/user/jobs/$JOB_ID:cancel" "${AUTH[@]}"
 kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 ```
 
+## 8. 포탈에서 이미지 빌드 (슬라이스 11)
+
+포탈이 `dms-mpifileutils`/`dms`/`dms-agent` 이미지를 빌드 노드 위 bare Pod로 빌드해
+`DMS_BUILD_REGISTRY`(기본 `pkg-01:5000`)로 push하는 기능. `20-config.yaml`의
+`DMS_BUILD_*` 4개 키가 이 기능의 설정 전부이고, 빌드 노드 자체는 ConfigMap에 **없다**
+(아래 참고).
+
+**0) 빌드 노드를 먼저 지정한다.** 포탈 「컨트롤 상태」 화면(`PUT
+/api/admin/control-state`, `build_node_name`)에서 지정하며, `control_state`
+테이블에 저장된다 — ConfigMap이 아니다, 운영자가 포탈에서 언제든 바꾸는 값이라
+재적용마다 되돌아가면 안 되기 때문이다. 지정 전에 「빌드」 화면에서 제출하면 API가
+`422 build_node_not_set`으로 거절한다.
+
+**1) 빌드는 GitHub에 push된 커밋만 대상이다.** 빌드 파드는 빌드 노드 위에서
+`git clone --depth 1 --branch "$DMS_BUILD_REF" "$DMS_BUILD_REPO"`로 소스를 가져온다
+(`src/dms/build_manifests.py`). `--depth 1 --branch`는 브랜치/태그 **이름**만
+받는다 — 임의의 커밋 SHA는 clone 대상이 될 수 없다. 즉 로컬에만 있는 커밋(이 저장소를
+포함해서)은 빌드되지 않는다: 먼저 `git push origin <branch>`로 GitHub에 올려야 포탈
+빌드가 그 내용을 볼 수 있다. 「빌드」 상세 화면이 clone 대상 ref와 실제로 해석된 commit
+SHA를 함께 보여주는 이유가 이것이다 — 화면에 보이는 SHA가 기대한 커밋인지 항상 확인할 것.
+
+**2) 빌드마다 새 태그가 나온다.** 태그는 `b<build_id 앞 8자>`(`build_tag()`,
+`src/dms/repositories/builds.py`) — 커밋 SHA가 아니라 빌드 고유 id에서 뽑는다(같은
+커밋을 두 번 빌드하는 것도 정상 동작이다). `30-migrate-job.yaml`/`40-api.yaml`/
+`41-controller.yaml`/`50-agent-daemonset.yaml`이 전부 `imagePullPolicy:
+IfNotPresent`이므로, **같은 태그를 다시 push해도 클러스터는 절대 새로 집어오지
+않는다** — 이미 그 태그의 이미지를 가진 노드는 로컬 캐시를 그대로 쓴다. 빌드마다 새
+태그가 나오는 이유가 바로 이것이다.
+
+**3) 빌드 노드는 인터넷 egress가 필요하다.** 빌드가 hermetic하지 않다 — Buildah
+빌드(`quay.io/buildah/stable` 컨테이너, privileged) 안에서 npm install(포탈
+프론트엔드), `dl.k8s.io`(kubectl 등 설치), `github.com`(소스 clone), PyPI(파이썬
+의존성), Debian bookworm 미러(apt 패키지)에 접근한다. 방화벽/프록시로 격리된 빌드
+노드에서는 실패한다 — 사전에 해당 egress를 열어둘 것.
+
+**4) 만들어진 태그를 실제로 쓰려면 매니페스트를 손으로 바꿔 apply해야 한다.**
+빌드 성공은 레지스트리에 새 태그를 push하는 것으로 끝난다 — 그 태그로의 자동
+롤아웃(매니페스트의 `image:`를 갱신해서 재배포하는 것)은 **이 슬라이스 범위 밖**이다
+(다음 슬라이스에서 다룬다). 새로 빌드한 `dms:b<...>`를 실제로 띄우려면, 위 §1의
+방식대로 `40-api.yaml`/`41-controller.yaml`/`30-migrate-job.yaml`의 `image:`
+필드를 그 태그로 직접 고치고 `kubectl apply`한 뒤 `kubectl rollout restart`(또는
+재적용에 따른 자연 롤아웃)로 반영해야 한다. `dms-agent`/`DMS_JOB_IMAGE`는 별도
+태그 계열(`dms-agent:dev5`, `dms-mpifileutils:job3`)이라 이 흐름과 독립적이다.
+
+**5) `dms-mpifileutils`는 기본 선택이 아니다.** mpifileutils를 소스에서
+`make -j2`로 컴파일하기 때문에 다른 두 이미지보다 훨씬 오래 걸린다 — 「빌드」 화면에서
+기본으로 체크돼 있지 않다, 필요할 때(예: mpifileutils 자체를 바꿨을 때)만 명시적으로
+포함시킬 것. `dms-agent`는 앞의 두 이미지를 `FROM`하므로, `dms-agent`만 새로 빌드하려면
+그 두 태그가 이미 레지스트리에 있어야 한다 — `BUILD_IMAGES` 순서
+(`dms-mpifileutils` → `dms` → `dms-agent`, `src/dms/repositories/builds.py`)가 이
+의존 관계를 강제한다.
+
+**6) 동시 빌드는 하나로 제한된다.** 이미 진행 중(`Pending`/`Running`)인 빌드가 있는
+채로 `POST /api/admin/builds`를 부르면 `409 build_in_progress`. 새 빌드를 넣기
+전에 「빌드」 화면에서 이전 빌드가 종단 상태(`Succeeded`/`Failed`)인지 확인할 것.
+
+화면: 「빌드」(`/admin/builds`, 목록/제출) 와 빌드 상세(`/admin/builds/:buildId`,
+로그 뷰어 포함). 빌드 노드 지정은 「컨트롤 상태」 화면.
+
 ---
 
 ## Unresolved values to fill in during live validation

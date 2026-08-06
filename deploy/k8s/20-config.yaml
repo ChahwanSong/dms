@@ -74,3 +74,11 @@ data:
   #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the
   #     agent should only see the small env slice it actually needs) ---
   DMS_AGENT_INTERVAL_SECONDS: "30"
+
+  # --- 포탈 주도 이미지 빌드 (슬라이스 11) ---
+  # 빌드 노드는 DB(control_state.build_node_name)에 있다 -- 운영자가 포탈에서 바꾸므로
+  # 여기 두면 재적용마다 되돌아간다.
+  DMS_BUILD_REGISTRY: "pkg-01:5000"
+  DMS_BUILD_BUILDER_IMAGE: "quay.io/buildah/stable:latest"
+  DMS_BUILD_REPO_URL: "https://github.com/ChahwanSong/dms.git"
+  DMS_BUILD_WATCHER_INTERVAL_SECONDS: "15"
