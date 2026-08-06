@@ -31,6 +31,26 @@ function eventSeverityClass(severity: string): string {
   return severity === "error" ? "text-bad" : "text-muted";
 }
 
+// I3: stepper.py의 summary_unreadable은 message가 아예 없이 payload={"ref": ref}만
+// 있고, terminate_failed는 message=exc.reason_code가 event_type과 완전히 중복돼서
+// 실질적으로 payload의 ref가 운영자가 얻을 수 있는 유일한 단서다. payload를 렌더하지
+// 않으면 화면에는 event_type 하나만 뜨고 아무 단서도 없다 -- JSON.stringify를 코드
+// 블록으로 보여주는 것으로 충분하다(구조를 안다고 가정하지 않는다: dict/array/스칼라/
+// null 어떤 모양이 와도 죽지 않아야 한다).
+function EventPayload({ payload }: { payload: unknown }) {
+  if (payload === null || payload === undefined) return null;
+  let text: string;
+  try {
+    text = JSON.stringify(payload);
+  } catch {
+    text = String(payload); // 순환 참조 등 JSON.stringify가 던지는 극단적인 경우의 방어
+  }
+  if (!text) return null;
+  return (
+    <pre className="mt-0.5 text-xs text-muted whitespace-pre-wrap break-all">{text}</pre>
+  );
+}
+
 function DiagnosticEvents({ req }: { req: RequestDetailType }) {
   // 방어적 정규화: events가 배열이 아니거나(백엔드 오응답) 아예 없으면 빈 배열로
   // 취급한다 -- 배열 아닌 페이로드 하나가 SPA 전체를 흰 화면으로 만든 사고가 있었다.
@@ -53,6 +73,7 @@ function DiagnosticEvents({ req }: { req: RequestDetailType }) {
               <span className="text-muted text-xs">({e.component})</span>
             </div>
             {e.message && <p className="mt-0.5">{e.message}</p>}
+            <EventPayload payload={e.payload} />
           </li>
         ))}
       </ul>
@@ -108,7 +129,10 @@ export function RequestDetail() {
 
   const data = req.data;
   if (!data) return null;
-  const transitions = data.transitions;
+  // M5: 방어적 정규화 -- 배열이 아닌(또는 없는) transitions 페이로드 하나가 화면
+  // 전체를 무방어 인덱싱(`transitions[len-1]`)으로 죽인 적이 있다. ErrorBoundary가
+  // 있어도 애초에 안 죽는 편이 낫다(경계는 최후의 방어선이지 정상 경로가 아니다).
+  const transitions = Array.isArray(data.transitions) ? data.transitions : [];
   const end = transitions[transitions.length - 1]?.at ?? data.updated_at;
   // 잡이 하나도 없을 때만 요청 단위 취소를 보여준다 — 잡이 있으면 잡 단위 취소가 그 역할을 한다.
   const canCancelRequest = !isRequestTerminal(data.state) && (jobs.data ?? []).length === 0;

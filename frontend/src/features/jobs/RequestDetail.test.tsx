@@ -207,6 +207,54 @@ test("renders no diagnostic-events card when the backend omits or malforms the e
   expect(screen.queryByText("진단 이벤트")).not.toBeInTheDocument();
 });
 
+test("shows the diagnostic event's payload alongside the message", async () => {
+  // I3: stepper.py의 summary_unreadable/terminate_failed는 message가 없거나
+  // event_type과 중복되고, 운영자가 알아야 하는 ref는 payload에만 있다.
+  // payload를 렌더하지 않으면 화면에는 event_type 딱 하나만 뜨고 단서가 없다.
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST,
+      events: [{ id: 1, component: "stepper", severity: "warning",
+                 event_type: "summary_unreadable", message: null,
+                 payload: { ref: "pod/p9" }, at: "2026-08-06T00:00:00Z" }],
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  expect(await screen.findByText("summary_unreadable")).toBeInTheDocument();
+  expect(screen.getByText(/pod\/p9/)).toBeInTheDocument();
+});
+
+test("does not crash when an event's payload is an array or other unexpected shape", async () => {
+  // 방어적 정규화: payload는 백엔드가 dict로 쓰지만, 뭐가 오든(배열, 문자열, 숫자)
+  // 렌더가 죽으면 안 된다 -- events 필드 자체의 방어(위 테스트들)와 같은 이유.
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST,
+      events: [{ id: 1, component: "stepper", severity: "warning",
+                 event_type: "weird_payload", message: null,
+                 payload: [1, 2, 3], at: "2026-08-06T00:00:00Z" }],
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  expect(await screen.findByText("weird_payload")).toBeInTheDocument();
+});
+
+test("M5: does not crash when transitions is null (malformed backend payload)", async () => {
+  // 회귀 가드: transitions[transitions.length - 1]가 무방어였다 -- null이면 TypeError로
+  // 렌더가 죽는다(router.innerBoundary.test.tsx가 이 크래시를 안쪽 경계 시험 재료로
+  // 썼었는데, 이 방어를 넣으면서 그 재료를 던지는 컴포넌트로 바꿔치기했다). 정상적인
+  // 배열이 아닌 페이로드가 와도 화면 자체는 죽지 않아야 한다.
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, transitions: null })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  expect(await screen.findByText("전이 이력")).toBeInTheDocument();
+  expect(screen.getByText("전이 이력이 없습니다")).toBeInTheDocument();
+});
+
 test("shows a truncation notice when events_truncated is true", async () => {
   server.use(
     http.get("/api/user/requests/r1", () => HttpResponse.json({
