@@ -3,7 +3,9 @@ from dms.config import Settings
 from dms.execution import StubExecutionAdapter
 from dms.execution_volcano import VolcanoExecutionAdapter
 from dms.repositories import Repositories
-from dms.wiring import build_build_runner, build_execution_adapter, build_identity_resolver
+from dms.rollout_runner import RolloutRunner, StubRolloutRunner
+from dms.wiring import (build_build_runner, build_execution_adapter,
+                        build_identity_resolver, build_rollout_runner)
 
 BASE = {"DMS_DATABASE_URL": "sqlite:///tmp/x.db", "DMS_SHARED_TOKEN": "t",
         "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "s"}
@@ -44,3 +46,16 @@ def test_build_runner_reads_timeout_from_settings():
     runner = build_build_runner(settings)
     assert isinstance(runner, BuildRunner)
     assert runner._timeout_seconds == 111
+
+
+def test_rollout_runner_is_stub_when_backend_is_not_volcano():
+    settings = Settings.from_env(BASE)
+    assert isinstance(build_rollout_runner(settings), StubRolloutRunner)
+
+
+def test_rollout_runner_builds_runner_when_volcano():
+    settings = Settings.from_env({**BASE, "DMS_EXECUTION_BACKEND": "volcano",
+                                  "DMS_JOB_IMAGE": "reg/img:1"})
+    runner = build_rollout_runner(settings)
+    assert isinstance(runner, RolloutRunner)
+    assert runner._ns == settings.k8s_namespace

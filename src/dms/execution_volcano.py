@@ -249,6 +249,7 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
         self._namespace = namespace
         self._core = None
         self._custom = None
+        self._apps = None
 
     def _ensure(self):
         if self._core is None:
@@ -256,6 +257,7 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
             kubernetes.config.load_incluster_config()
             self._core = kubernetes.client.CoreV1Api()
             self._custom = kubernetes.client.CustomObjectsApi()
+            self._apps = kubernetes.client.AppsV1Api()
 
     def create(self, manifest):
         self._ensure()
@@ -305,3 +307,67 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
         if isinstance(data, bytes):
             return data.decode("utf-8", errors="replace")
         return str(data)
+
+    def patch_workload(self, kind, name, namespace, body):
+        self._ensure()
+        # 콘텐츠 타입을 명시한다 -- 클라이언트 내부 기본값이 JSON merge로 바뀌면
+        # containers 배열이 통째로 교체돼 env/volumeMounts가 날아간다(설계 §4).
+        content_type = "application/strategic-merge-patch+json"
+        try:
+            if kind == "Deployment":
+                self._apps.patch_namespaced_deployment(
+                    name, namespace, body, _content_type=content_type)
+            elif kind == "DaemonSet":
+                self._apps.patch_namespaced_daemon_set(
+                    name, namespace, body, _content_type=content_type)
+            else:
+                raise ValueError(f"unsupported workload kind: {kind}")
+        except Exception as exc:
+            self._log_forbidden("patch", kind, name, namespace, exc)
+            raise
+
+    def get_workload(self, kind, name, namespace):
+        from .rollout_status import normalize_daemonset, normalize_deployment
+        self._ensure()
+        try:
+            if kind == "Deployment":
+                obj = self._apps.read_namespaced_deployment(name, namespace)
+                return normalize_deployment(obj.to_dict())
+            if kind == "DaemonSet":
+                obj = self._apps.read_namespaced_daemon_set(name, namespace)
+                return normalize_daemonset(obj.to_dict())
+            raise ValueError(f"unsupported workload kind: {kind}")
+        except Exception as exc:
+            # ApiException 타입 대신 status 속성으로 판별한다 -- .venv에 kubernetes가
+            # 없어 테스트가 그 타입을 만들 수 없고, 클라이언트가 보는 것도 status뿐이다.
+            if getattr(exc, "status", None) == 404:
+                return None
+            self._log_forbidden("get", kind, name, namespace, exc)
+            raise
+
+    def _log_forbidden(self, verb, kind, name, namespace, exc):
+        # RBAC 거부(403)가 "객체가 없다"와 똑같이 렌더된 read_pod_log 사고의 교훈 --
+        # 403은 로그에서 즉시 구분돼야 한다(설계 §4).
+        if getattr(exc, "status", None) == 403:
+            logger.error("workload %s forbidden(403, RBAC?) %s %s/%s",
+                         verb, kind, namespace, name)
+
+    def list_pod_briefs(self, namespace, label_selector):
+        self._ensure()
+        pods = self._core.list_namespaced_pod(namespace,
+                                              label_selector=label_selector)
+        briefs = []
+        for pod in pods.items:
+            reason = None
+            for cs in (pod.status.container_statuses or []):
+                waiting = getattr(cs.state, "waiting", None)
+                if waiting is not None and waiting.reason:
+                    reason = waiting.reason      # 예: ImagePullBackOff
+            briefs.append({
+                "name": pod.metadata.name,
+                "node": pod.spec.node_name,
+                "images": {c.name: c.image for c in pod.spec.containers},
+                "phase": pod.status.phase or "",
+                "waiting_reason": reason,
+            })
+        return briefs

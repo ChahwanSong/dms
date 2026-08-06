@@ -31,6 +31,13 @@ _SERVER_INT_KEYS = (
     # (nodeSelector 오타 등) Pending은 BuildWatcher의 created_at 기반 회수가 잡는다.
     ("DMS_BUILD_TIMEOUT_SECONDS", "build_timeout_seconds", 7200),
     ("DMS_EVENT_RETENTION_DAYS", "event_retention_days", 30),
+    # 롤아웃 루프 간격 10초 -> per-loop 리스 max(10*3, 30)=30초. 설계 §2: 리스는
+    # 갱신되지 않으므로 긴 간격은 컨트롤러 자기 갱신 후 재획득을 그만큼 늦춘다.
+    ("DMS_ROLLOUT_INTERVAL_SECONDS", "rollout_interval_seconds", 10),
+    # DaemonSet 벽시계 타임아웃(설계 §3: conditions가 없어 이것이 유일한 실패 수단).
+    # 600은 Deployment의 progressDeadlineSeconds와 같은 값 -- Deployment에는 이
+    # 값의 3배를 최후 회수로만 쓴다(rollout_watcher.py 참고).
+    ("DMS_ROLLOUT_TIMEOUT_SECONDS", "rollout_timeout_seconds", 600),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -119,6 +126,8 @@ class Settings:
     build_watcher_interval_seconds: int = 15
     build_timeout_seconds: int = 7200
     event_retention_days: int = 30
+    rollout_interval_seconds: int = 10
+    rollout_timeout_seconds: int = 600
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":

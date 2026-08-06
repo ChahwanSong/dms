@@ -37,3 +37,13 @@ def build_build_runner(settings):
                        registry=settings.build_registry,
                        builder_image=settings.build_builder_image,
                        timeout_seconds=settings.build_timeout_seconds)
+
+
+def build_rollout_runner(settings):
+    if settings.execution_backend != "volcano":
+        from .rollout_runner import StubRolloutRunner
+        return StubRolloutRunner()
+    from .execution_volcano import KubernetesClient
+    from .rollout_runner import RolloutRunner
+    return RolloutRunner(KubernetesClient(settings.k8s_namespace),
+                         namespace=settings.k8s_namespace)
