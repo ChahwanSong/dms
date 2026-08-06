@@ -44,7 +44,7 @@
 | `releases` 실제 컬럼 | `id`(auto_pk), `component`, `image`, `tag`, `digest`, `state`, `actor`, `applied_at NOT NULL` + 인덱스 `idx_releases_component (component, id)` — `reason_code`/`seq` 없음 |
 | `KubernetesClient._ensure` 가드 | `if self._core is None:` — `_core`/`_custom`만 만든다 |
 | api 테스트 픽스처 | `tests/conftest.py`의 `client(db, settings)`; admin 헤더는 `{"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}` (`tests/test_api_builds.py` 패턴) |
-| api Role의 pods 동사 | `get, list, watch, delete` (apps 없음 — 설계 §5가 apps는 컨트롤러 Role에만 부여) |
+| api Role의 apps 접근 | 설계 §5(커밋 `1f5f4e5`)가 **읽기 전용** `get`/`list`를 부여 — `patch`는 컨트롤러 Role에만(resourceNames 한정). api Role 주석은 뮤테이션에 관한 것이지 읽기를 막는 규칙이 아니다 |
 
 ## 파일 구조
 
@@ -54,7 +54,7 @@
 | `src/dms/repositories/releases.py` (신규) | `ReleasesRepository` + `ROLLOUT_ORDER`/`COMPONENTS` 좌표표. SQL은 전부 여기 |
 | `src/dms/repositories/__init__.py` (수정) | `self.releases` 등록 |
 | `src/dms/rollout_status.py` (신규) | 정규화(snake/camel)·수렴 판정 **순수 함수**. k8s 접근 없음 |
-| `src/dms/rollout_runner.py` (신규) | `WorkloadClient`/`PodBriefReader` Protocol + `RolloutRunner`/`StubRolloutRunner` |
+| `src/dms/rollout_runner.py` (신규) | `WorkloadClient` Protocol(유일한 새 Protocol) + `RolloutRunner`/`StubRolloutRunner` |
 | `src/dms/execution_volcano.py` (수정) | `KubernetesClient`에 `_apps` + `patch_workload`/`get_workload`/`list_pod_briefs` |
 | `src/dms/rollout_watcher.py` (신규) | `RolloutWatcher.run_once()` — record-then-patch, 순서 강제, 나이 기반 회수 |
 | `src/dms/controller.py` (수정) | `rollout-watcher` 루프 등록 (`rollout_runner=None` 하위호환) |
@@ -706,18 +706,15 @@ git commit -m "feat(releases): 워크로드 상태 정규화와 수렴 판정 �
 **Interfaces:**
 - Consumes: `ExecutionError` from `.execution`; `normalize_deployment`/`normalize_daemonset` from `.rollout_status` (Task 2).
 - Produces (Task 4·5가 그대로 쓴다):
-  - `WorkloadClient` Protocol: `patch_workload(kind, name, namespace, body) -> None`, `get_workload(kind, name, namespace) -> dict | None` (**정규화 dict** 반환 — 정규화는 클라이언트 안)
-  - `PodBriefReader` Protocol: `list_pod_briefs(namespace, label_selector) -> list[dict]` — 항목 `{"name", "node", "images": {컨테이너: 이미지}, "phase", "waiting_reason": str | None}`
+  - `WorkloadClient` Protocol: `patch_workload(kind, name, namespace, body) -> None`, `get_workload(kind, name, namespace) -> dict | None` (**정규화 dict** 반환 — 정규화는 클라이언트 안). **이것이 유일한 새 Protocol이다** — 설계 §4의 "두 메서드" 그대로.
   - `image_patch_body(container: str, image: str) -> dict` — strategic merge patch 본문 (순수 함수)
   - `RolloutRunner(k8s, *, namespace)`:
     - `.patch_image(*, kind, name, container, image) -> None` — 실패 시 `ExecutionError("patch_failed", ...)`
-    - `.observe(*, kind, name) -> dict | None` — 404는 `None`, 그 외 `ExecutionError("observe_failed", ...)`
-    - `.pod_briefs(*, selector) -> list[dict]` — **best-effort**, 실패 시 빈 리스트 (진단·현재 이미지 조회용)
+    - `.observe(*, kind, name) -> dict | None` — 404는 `None`, 그 외 `ExecutionError("observe_failed", ...)`. **api의 targets/same_tag도 이 메서드를 읽기 전용으로 쓴다** — 설계 §5(`1f5f4e5`)가 api Role에 apps `get`/`list`를 부여했다.
+    - `.pod_briefs(*, selector) -> list[dict]` — **best-effort**, 실패 시 빈 리스트. 항목 `{"name", "node", "images", "phase", "waiting_reason"}`. DaemonSet 타임아웃 시 "멈춘 노드의 파드 사유"(설계 §3) 진단 전용 — 소비자가 `RolloutWatcher` 하나뿐이라 **별도 Protocol을 선언하지 않고** 구체 클래스의 duck-typed 메서드로만 둔다.
   - `StubRolloutRunner` — 클러스터 없이 도는 결정적 페어. `.patched: list[tuple]` 기록, `observe`는 패치한 이미지로 즉시 수렴한 정규화 dict
   - `build_rollout_runner(settings) -> RolloutRunner | StubRolloutRunner` in `wiring.py`
   - `Settings.rollout_interval_seconds: int = 10`, `Settings.rollout_timeout_seconds: int = 600`
-
-**왜 `PodBriefReader`가 따로 있나:** (1) DaemonSet 타임아웃 시 "멈춘 노드의 파드 사유"를 보고해야 하고(설계 §3), (2) api 파드는 apps RBAC이 없으므로(설계 §5는 apps를 **컨트롤러 Role에만** 부여) targets 화면의 "클러스터의 현재 이미지"(설계 §7)를 이미 가진 `pods list` 권한으로 읽어야 한다. `WorkloadClient`는 설계 §4대로 두 메서드로 유지하고, 파드 읽기는 별도 좁은 Protocol로 둔다.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -940,13 +937,6 @@ class WorkloadClient(Protocol):
         ...
 
 
-class PodBriefReader(Protocol):
-    def list_pod_briefs(self, namespace: str, label_selector: str) -> list[dict]:
-        """[{"name", "node", "images": {컨테이너: 이미지}, "phase",
-        "waiting_reason"}] -- 현재 이미지 조회(targets)와 멈춘 노드 사유 보고용."""
-        ...
-
-
 def image_patch_body(container: str, image: str) -> dict:
     # strategic merge patch: containers는 name을 patchMergeKey로 병합된다.
     # JSON merge patch는 배열 전체를 교체해 env/volumeMounts를 날린다(설계 §4).
@@ -973,7 +963,9 @@ class RolloutRunner:
             raise ExecutionError("observe_failed", str(exc)[:200]) from exc
 
     def pod_briefs(self, *, selector) -> list[dict]:
-        # best-effort 진단 채널 -- 이것이 실패해도 롤아웃 판정을 막으면 안 된다.
+        # best-effort 진단 채널(DaemonSet 타임아웃의 멈춘 노드 사유, 설계 §3) --
+        # 이것이 실패해도 롤아웃 판정을 막으면 안 된다. 소비자가 RolloutWatcher
+        # 하나뿐이라 Protocol로 선언하지 않는다(WorkloadClient는 두 메서드 유지).
         try:
             return self._k8s.list_pod_briefs(self._ns, selector)
         except Exception as exc:
@@ -1548,18 +1540,20 @@ git commit -m "feat(releases): 롤아웃 컨트롤러 루프 -- record-then-patc
 - Test: `tests/test_registry.py`, `tests/test_api_releases.py`
 
 **Interfaces:**
-- Consumes: `require_admin`/`Identity`/`audit_actor` from `.auth`; `reject_when_maintenance` from `.routes_requests`; `ReleasesRepository`(Task 1), `COMPONENTS`/`ROLLOUT_ORDER`; `app.state.rollout_runner`(`pod_briefs`만 사용 — api Role에는 apps RBAC이 없으므로 이 라우터는 `patch_image`/`observe`를 **절대 부르지 않는다**); `DomainValidationError`.
+- Consumes: `require_admin`/`Identity`/`audit_actor` from `.auth`; `reject_when_maintenance` from `.routes_requests`; `ReleasesRepository`(Task 1), `COMPONENTS`/`ROLLOUT_ORDER`; `ExecutionError`; `app.state.rollout_runner`(**`observe`만, 읽기 전용** — 설계 §5 `1f5f4e5`가 api Role에 apps `get`/`list`를 부여했다. `patch_image`는 **절대 부르지 않는다** — patch RBAC은 컨트롤러에만 있다); `DomainValidationError`.
 - Produces:
   - `fetch_repo_tags(registry: str, repository: str) -> list[str] | None` in `src/dms/registry.py` — 성공 시 **정렬된** 태그 목록, 실패 시 `None`(예외를 올리지 않는다)
-  - `app.state.rollout_runner = build_rollout_runner(settings)` (stub 백엔드에서는 `StubRolloutRunner` — `pod_briefs`가 `[]`를 줘 현재 이미지는 `null`)
+  - `app.state.rollout_runner = build_rollout_runner(settings)` — `app.state.build_runner`와 같은 방식(wiring 함수 산출물을 state에 두고 라우터가 꺼내 쓴다). stub 백엔드에서는 `StubRolloutRunner` — 패치된 적 없는 워크로드의 `observe`가 `None`이라 현재 이미지는 `null`
 
 | 메서드 | 경로 | 응답 |
 |---|---|---|
 | GET | `/api/admin/releases` | `{"current": {component: row}, "history": [row, ...]}` (최신순) |
-| GET | `/api/admin/releases/targets` | `{"targets": [{component, kind, workload, container, repository, current_image, current_images, tags}], "registry_ok": bool}` |
+| GET | `/api/admin/releases/targets` | `{"targets": [{component, kind, workload, container, repository, current_image, tags}], "registry_ok": bool}` |
 | POST | `/api/admin/releases` | `{"items": [row, ...]}` `202` — 순서는 서버(`create_batch`)가 강제 |
 
-거부: 유지보수 → `503 maintenance_mode`; 빈 items/모르는 component/중복 component → `422 unknown_component`; 태그 형식 불량 또는 레지스트리에 없음(**레지스트리가 응답할 때만**) → `422 unknown_tag`; 현재 클러스터 이미지와 동일(**현재 이미지를 읽을 수 있을 때만** — `IfNotPresent`라 재적용은 no-op) → `422 same_tag`; 활성 롤아웃 존재 → `409 rollout_in_progress`.
+`current_image`는 `get_workload`(observe)가 주는 **spec.template의 선언된 이미지**다 — 파드에서 유도하면 롤링 중 옛/새 파드가 섞여 정확하지 않아 설계 §5가 명시적으로 기각했다. 읽기 실패 시 `null`(레지스트리와 같은 강등 원칙 — 화면은 산다).
+
+거부: 유지보수 → `503 maintenance_mode`; 빈 items/모르는 component/중복 component → `422 unknown_component`; 태그 형식 불량 또는 레지스트리에 없음(**레지스트리가 응답할 때만**) → `422 unknown_tag`; 현재 선언 이미지와 동일(**읽을 수 있을 때만** — `IfNotPresent`라 재적용은 no-op) → `422 same_tag`; 활성 롤아웃 존재 → `409 rollout_in_progress`.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -1597,23 +1591,27 @@ import pytest
 ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
 
 
-class _FakeRunner:
-    """pod_briefs만 쓰인다 -- api는 patch/observe를 부르면 안 된다(RBAC 없음)."""
-    def __init__(self, images=None):
-        self._images = images or {}   # selector -> {container: image}
+from dms.execution import ExecutionError
 
-    def pod_briefs(self, *, selector):
-        images = self._images.get(selector)
+
+class _FakeRunner:
+    """observe만 쓰인다(읽기 전용) -- api는 patch를 부르면 안 된다(patch RBAC은
+    컨트롤러에만 있다, 설계 §5)."""
+    def __init__(self, images=None):
+        self._images = images or {}   # (kind, workload) -> {container: image}
+        self.fail_observe = False
+
+    def observe(self, *, kind, name):
+        if self.fail_observe:
+            raise ExecutionError("observe_failed", "down")
+        images = self._images.get((kind, name))
         if images is None:
-            return []
-        return [{"name": "p", "node": "w1", "images": images,
-                 "phase": "Running", "waiting_reason": None}]
+            return None
+        return {"kind": kind, "generation": 1, "observed_generation": 1,
+                "images": dict(images)}
 
     def patch_image(self, **kw):
         raise AssertionError("api must never patch")
-
-    def observe(self, **kw):
-        raise AssertionError("api must never observe via apps")
 
 
 @pytest.fixture
@@ -1624,14 +1622,14 @@ def rollout_client(client, monkeypatch):
         lambda registry, repo: {"dms": ["d22", "d23"],
                                 "dms-agent": ["dev5", "dev6"]}.get(repo))
     client.app.state.rollout_runner = _FakeRunner({
-        "app.kubernetes.io/name=dms-api": {"api": "pkg-01:5000/dms:d22"},
-        "app.kubernetes.io/name=dms-controller": {"controller": "pkg-01:5000/dms:d22"},
-        "app.kubernetes.io/name=dms-agent": {"agent": "pkg-01:5000/dms-agent:dev5"},
+        ("Deployment", "dms-api"): {"api": "pkg-01:5000/dms:d22"},
+        ("Deployment", "dms-controller"): {"controller": "pkg-01:5000/dms:d22"},
+        ("DaemonSet", "dms-agent"): {"agent": "pkg-01:5000/dms-agent:dev5"},
     })
     return client
 
 
-def test_targets_expose_current_images_and_tags(rollout_client):
+def test_targets_expose_current_image_and_tags(rollout_client):
     r = rollout_client.get("/api/admin/releases/targets", headers=ADMIN)
     assert r.status_code == 200
     body = r.json()
@@ -1651,6 +1649,14 @@ def test_targets_survive_registry_outage(rollout_client, monkeypatch):
     assert r.status_code == 200
     assert r.json()["registry_ok"] is False
     assert all(t["tags"] == [] for t in r.json()["targets"])
+
+
+def test_targets_survive_workload_read_failure(rollout_client):
+    # 워크로드 읽기 실패도 같은 강등 원칙 -- current_image만 null이 되고 화면은 산다
+    rollout_client.app.state.rollout_runner.fail_observe = True
+    r = rollout_client.get("/api/admin/releases/targets", headers=ADMIN)
+    assert r.status_code == 200
+    assert all(t["current_image"] is None for t in r.json()["targets"])
 
 
 def test_submit_orders_components_server_side(rollout_client):
@@ -1704,7 +1710,7 @@ def test_same_tag_is_rejected(rollout_client):
 
 
 def test_same_tag_skipped_when_current_unreadable(rollout_client):
-    # 파드가 안 보이면(briefs 비어 있음) fail-open -- 레지스트리와 같은 원칙
+    # 워크로드를 못 읽으면(observe None) fail-open -- 레지스트리와 같은 원칙
     rollout_client.app.state.rollout_runner = _FakeRunner()
     r = rollout_client.post("/api/admin/releases",
                             json={"items": [{"component": "dms-api", "tag": "d22"}]},
@@ -1814,6 +1820,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..domain import DomainValidationError
+from ..execution import ExecutionError
 from ..registry import fetch_repo_tags
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
 from .auth import Identity, audit_actor, require_admin
@@ -1834,12 +1841,18 @@ class ReleaseBody(BaseModel):
     items: list[ReleaseItem]
 
 
-def _current_images(runner, spec) -> list[str]:
-    # 현재 이미지는 apps API가 아니라 파드 목록에서 읽는다 -- api Role에는 apps
-    # get이 없다(설계 §5는 apps RBAC을 컨트롤러에만 부여). pods list는 이미 있다.
-    briefs = runner.pod_briefs(selector=spec["selector"])
-    images = {b["images"].get(spec["container"]) for b in briefs}
-    return sorted(i for i in images if i)
+def _current_image(runner, spec) -> "str | None":
+    # 설계 §5(1f5f4e5): api Role에 읽기 전용 apps get/list가 있다 -- 컨트롤러와
+    # 같은 get_workload(observe)로 "현재 선언된" spec 이미지를 읽는다. 파드에서
+    # 유도하는 대안은 롤링 중 옛/새 파드가 섞여 부정확해 설계가 기각했다.
+    try:
+        obs = runner.observe(kind=spec["kind"], name=spec["workload"])
+    except ExecutionError:
+        # 읽기 실패로 화면 전체가 죽으면 안 된다 -- 레지스트리와 같은 강등 원칙.
+        return None
+    if obs is None:
+        return None
+    return (obs.get("images") or {}).get(spec["container"])
 
 
 @router.get("/api/admin/releases")
@@ -1865,14 +1878,11 @@ def release_targets(request: Request):
         tags = tags_cache[repo_name]
         if tags is None:
             registry_ok = False
-        images = _current_images(runner, spec)
         targets.append({
             "component": component, "kind": spec["kind"],
             "workload": spec["workload"], "container": spec["container"],
             "repository": repo_name,
-            # 롤링 중이면 이미지가 2종일 수 있다 -- 단일일 때만 current_image를 준다
-            "current_image": images[0] if len(images) == 1 else None,
-            "current_images": images,
+            "current_image": _current_image(runner, spec),
             "tags": tags or [],
         })
     return {"targets": targets, "registry_ok": registry_ok}
@@ -1913,10 +1923,9 @@ def submit_releases(body: ReleaseBody, request: Request,
         if tags is not None and tag not in tags:
             raise HTTPException(status_code=422, detail="unknown_tag")
         image = f"{settings.build_registry}/{repo_name}:{tag}"
-        current = _current_images(runner, spec)
         # IfNotPresent 함정: 같은 태그 재적용은 아무 일도 안 일어난다(설계 §7).
-        # 현재 이미지를 못 읽으면(파드 0개 등) 검사를 건너뛴다 -- fail-open.
-        if current == [image]:
+        # 현재 선언 이미지를 못 읽으면(observe None/실패) 검사를 건너뛴다 -- fail-open.
+        if _current_image(runner, spec) == image:
             raise HTTPException(status_code=422, detail="same_tag")
         records.append({"component": item.component, "image": image, "tag": tag})
     try:
@@ -1947,7 +1956,7 @@ def submit_releases(body: ReleaseBody, request: Request,
 - [ ] **Step 7: 통과를 확인한다**
 
 Run: `.venv/bin/python -m pytest tests/test_registry.py tests/test_api_releases.py -q`
-Expected: PASS (3 + 12 tests)
+Expected: PASS (3 + 13 tests)
 
 Run: `cd frontend && npx vitest run src/lib/reasonCodes.test.ts`
 Expected: PASS
@@ -1980,7 +1989,7 @@ git commit -m "feat(api): admin 릴리스 엔드포인트와 레지스트리 태
 
 **화면 계약 (테스트가 고정한다):**
 - h1은 정확히 `릴리스`.
-- 컴포넌트 3행: 이름 / 현재 이미지(단일이 아니면 `current_images`를 `, `로 병기, 없으면 `—`) / 새 태그 select(`aria-label`은 컴포넌트 이름 그대로, 첫 옵션은 `변경 없음`(값 `""`)) / 상태(해당 컴포넌트의 현재 릴리스 상태 + 사유 `reasonText`).
+- 컴포넌트 3행: 이름 / 현재 이미지(`current_image ?? "—"` — 워크로드 읽기 실패 시 서버가 `null`을 준다) / 새 태그 select(`aria-label`은 컴포넌트 이름 그대로, 첫 옵션은 `변경 없음`(값 `""`)) / 상태(해당 컴포넌트의 현재 릴리스 상태 + 사유 `reasonText`).
 - 제출 버튼 이름은 `롤아웃 시작` — 선택이 하나도 없으면 비활성. 선택된 것만 `{items: [{component, tag}]}` **한 배치**로 POST(순서는 서버가 강제).
 - **경고 문구는 항상 보인다**: `컨트롤러를 갱신하면 컨트롤러가 재시작되어 롤아웃 추적이 잠시 끊깁니다 — 화면이 멈춘 것은 장애가 아닙니다.` (설계 §8: 운영자가 자기유발 정지를 장애로 오해하면 안 된다.)
 - `registry_ok === false`면 `reasonText("registry_unreachable")` 경고를 보여주되 화면은 산다.
@@ -2000,8 +2009,7 @@ export interface Release {
 }
 export interface ReleaseTarget {
   component: string; kind: string; workload: string; container: string;
-  repository: string; current_image: string | null; current_images: string[];
-  tags: string[];
+  repository: string; current_image: string | null; tags: string[];
 }
 export interface ReleaseTargets { targets: ReleaseTarget[]; registry_ok: boolean }
 export interface Releases { current: Record<string, Release>; history: Release[] }
@@ -2032,16 +2040,13 @@ const TARGETS = {
   targets: [
     { component: "dms-agent", kind: "DaemonSet", workload: "dms-agent",
       container: "agent", repository: "dms-agent",
-      current_image: "pkg-01:5000/dms-agent:dev5",
-      current_images: ["pkg-01:5000/dms-agent:dev5"], tags: ["dev5", "dev6"] },
+      current_image: "pkg-01:5000/dms-agent:dev5", tags: ["dev5", "dev6"] },
     { component: "dms-api", kind: "Deployment", workload: "dms-api",
       container: "api", repository: "dms",
-      current_image: "pkg-01:5000/dms:d22",
-      current_images: ["pkg-01:5000/dms:d22"], tags: ["d22", "d23"] },
+      current_image: "pkg-01:5000/dms:d22", tags: ["d22", "d23"] },
     { component: "dms-controller", kind: "Deployment", workload: "dms-controller",
       container: "controller", repository: "dms",
-      current_image: "pkg-01:5000/dms:d22",
-      current_images: ["pkg-01:5000/dms:d22"], tags: ["d22", "d23"] },
+      current_image: "pkg-01:5000/dms:d22", tags: ["d22", "d23"] },
   ],
 };
 const HISTORY = {
@@ -2237,7 +2242,7 @@ export function ReleasesPage() {
 - `<h1 className="text-lg font-semibold">릴리스</h1>` + `{active && <span>진행 중</span>}` 배지.
 - 경고 문단(항상): `컨트롤러를 갱신하면 컨트롤러가 재시작되어 롤아웃 추적이 잠시 끊깁니다 — 화면이 멈춘 것은 장애가 아닙니다.`
 - `{targetsQ.data && targetsQ.data.registry_ok === false && <p className="text-bad">{reasonText("registry_unreachable")}</p>}`
-- 대상 표: 행마다 `component` / 현재 이미지 `t.current_image ?? ((t.current_images ?? []).length ? t.current_images.join(", ") : "—")` / `<select aria-label={t.component}>`(첫 옵션 `<option value="">변경 없음</option>`, 이후 `(t.tags ?? []).map(...)`) / 상태(`current[t.component]` 있으면 `state` + `reasonText(reason_code)`, 없으면 `—`).
+- 대상 표: 행마다 `component` / 현재 이미지 `t.current_image ?? "—"` / `<select aria-label={t.component}>`(첫 옵션 `<option value="">변경 없음</option>`, 이후 `(t.tags ?? []).map(...)`) / 상태(`current[t.component]` 있으면 `state` + `reasonText(reason_code)`, 없으면 `—`).
 - 제출: `<Button onClick={() => submit.mutate({ items })} disabled={items.length === 0 || submit.isPending}>롤아웃 시작</Button>`; `submit.isError`면 `{(submit.error as ApiError).message}`를 `text-bad`로.
 - 이력 표: `history.map` — 시각(`applied_at`) / 컴포넌트 / 태그 / 상태 / `reasonText(r.reason_code)` / actor. null은 `—`.
 - 로딩은 `불러오는 중…`, `targetsQ.isError`/`releasesQ.isError`는 `(q.error as ApiError).message`.
@@ -2280,9 +2285,9 @@ git commit -m "feat(portal): 릴리스 화면 -- 태그 선택과 롤아웃 진�
 - Consumes: Task 3의 설정 이름(`DMS_ROLLOUT_INTERVAL_SECONDS`/`DMS_ROLLOUT_TIMEOUT_SECONDS`), Task 4의 롤아웃 동작.
 - Produces: 롤아웃 가능한 매니페스트와 운영 절차 문서.
 
-- [ ] **Step 1: 컨트롤러 Role에만 apps 권한을 더한다**
+- [ ] **Step 1: 컨트롤러 Role에 apps patch+get, api Role에 읽기 전용 get/list를 더한다**
 
-`deploy/k8s/10-rbac.yaml`의 **dms-controller Role** `rules` 끝(`batch.volcano.sh` `jobs/status` 규칙 뒤)에 더한다. **api Role은 건드리지 않는다** — 의도적으로 create-free이고 patch도 없다, 롤아웃은 컨트롤러가 한다(설계 §5). 주석은 이 파일의 기존 영어 톤을 따른다:
+`deploy/k8s/10-rbac.yaml`의 **dms-controller Role** `rules` 끝(`batch.volcano.sh` `jobs/status` 규칙 뒤)에 더한다. 주석은 이 파일의 기존 영어 톤을 따른다:
 
 ```yaml
   # Slice 13 (portal-driven rollout): RolloutWatcher (rollout_watcher.py) patches
@@ -2304,6 +2309,21 @@ git commit -m "feat(portal): 릴리스 화면 -- 태그 선택과 롤아웃 진�
     verbs: ["get"]
 ```
 
+그리고 **dms-api Role** `rules` 끝에 더한다 (설계 §5, 커밋 `1f5f4e5`):
+
+```yaml
+  # Slice 13: GET /api/admin/releases/targets shows the workloads' CURRENT
+  # declared image (routes_releases.py -> RolloutRunner.observe ->
+  # KubernetesClient.get_workload). Read-only on purpose: the mutation notes
+  # above (delete for cancel, no create) are about writes, not a rule against
+  # reads -- the image tag is a value the portal displays anyway. NO patch:
+  # rollout is the controller's job. resourceNames is omitted because list
+  # does not honor it and the grant is read-only anyway.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list"]
+```
+
 - [ ] **Step 2: ConfigMap에 롤아웃 설정을 더한다**
 
 `deploy/k8s/20-config.yaml`의 슬라이스 11 블록 아래에:
@@ -2323,7 +2343,11 @@ git commit -m "feat(portal): 릴리스 화면 -- 태그 선택과 롤아웃 진�
 - [ ] **Step 3: RBAC 반영을 확인한다 (테스트베드가 있을 때)**
 
 Run: `kubectl --context dms apply -f deploy/k8s/10-rbac.yaml && kubectl --context dms auth can-i patch deployments.apps/dms-controller --as=system:serviceaccount:dms:dms-controller -n dms`
-Expected: `yes`. 그리고 `kubectl --context dms auth can-i patch deployments.apps --as=system:serviceaccount:dms:dms-api -n dms` → `no` (api는 여전히 patch 불가).
+Expected: `yes`.
+Run: `kubectl --context dms auth can-i get deployments.apps/dms-api --as=system:serviceaccount:dms:dms-api -n dms`
+Expected: `yes` (api 읽기 전용 grant).
+Run: `kubectl --context dms auth can-i patch deployments.apps --as=system:serviceaccount:dms:dms-api -n dms`
+Expected: `no` (api는 여전히 patch 불가 — 롤아웃은 컨트롤러가 한다).
 클러스터가 없으면 이 단계는 건너뛰고 보고서에 "미검증"으로 남긴다.
 
 - [ ] **Step 4: README에 절차와 제약을 적는다**
@@ -2361,7 +2385,7 @@ git commit -m "deploy: 롤아웃 RBAC(컨트롤러 한정)과 설정, 릴리스 
 | §2 2단계 record-then-patch, 순서 agent→api→controller, 순서의 DB 지속(seq), 재패치 멱등, 루프 간격 10–15초 | Task 1(순서 지속) + Task 4(record-then-patch·재패치·회수) + Task 3(간격 10초 설정) |
 | §3 Deployment 판정(세대 게이트→PDE→3조건, ReplicaFailure 노출), DaemonSet 판정(4조건)·벽시계·멈춘 노드 사유 | Task 2(순수 함수) + Task 4(벽시계·pod_briefs 사유) |
 | §4 새 좁은 Protocol, `_ensure` 본문 확장, strategic merge + `_content_type` 명시, 키 정규화, 404/403 | Task 3 |
-| §5 RBAC — 컨트롤러 Role에만, resourceNames 한정, list 별도, `*/status` | Task 7 |
+| §5 RBAC — 컨트롤러 patch+get(resourceNames 한정)·list·`*/status`, api **읽기 전용** get/list(`1f5f4e5`) | Task 7 |
 | §6 데이터 모델 — `reason_code`/`seq` 추가(`_ensure_columns` 양쪽), 상태기계, MAX(id) 현재 | Task 1 |
 | §7 API 3종, 거부 5종, 레지스트리 실패 내성(fail-open) | Task 5 |
 | §8 포탈 화면 — h1 릴리스, 3행+select, 한 배치 제출, 폴링, 이력, reasonText, 컨트롤러 경고 | Task 6 |
@@ -2371,20 +2395,19 @@ git commit -m "deploy: 롤아웃 RBAC(컨트롤러 한정)과 설정, 릴리스 
 
 **2. 플레이스홀더 점검** — "적절히 처리한다"/"TBD"/코드 없는 "테스트를 작성한다" 없음. 코드 단계마다 실제 코드가 있다. Task 6 Step 5만 뼈대+산문인데, 그 화면의 계약(h1, 경고 문구, aria-label, 버튼 이름, 정규화, 폴링 조건, 번역)은 Step 2의 테스트가 전부 고정해 구현이 결정된다. Task 7 Step 4·5는 문서 작성이라 담을 항목을 전부 열거했다.
 
-**3. 타입 일관성** — `ROLLOUT_ORDER`/`COMPONENTS`(키: `kind`/`workload`/`container`/`repository`/`selector`)는 Task 1이 정의하고 4·5가 같은 키로 쓴다. `ReleasesRepository` 메서드명(`create_batch`/`active`/`mark_applying`/`finish`/`abort_pending`/`current`/`list`)은 Task 1 정의를 4·5가 그대로 쓴다. 정규화 dict 키(`observed_generation`/`updated_replicas`/`desired_number_scheduled`/`images` 등)는 Task 2가 정의하고 Task 3의 `get_workload` 반환·Stub·Task 4의 fake가 같은 키를 쓴다. `RolloutRunner.patch_image/observe/pod_briefs` 키워드 시그니처는 Task 3 정의를 Task 4·5의 fake가 동일하게 구현한다. `pod_briefs` 항목 키(`name`/`node`/`images`/`phase`/`waiting_reason`)는 3·4·5에서 동일. 프론트 `Release`/`ReleaseTarget` 필드는 Task 5 응답 dict와 1:1. 사유 코드는 도입 태스크(1: `rollout_in_progress`, 3: `patch_failed`/`observe_failed`, 4: `rollout_failed`/`rollout_timeout`/`rollout_aborted`/`workload_not_found`, 5: `unknown_component`/`unknown_tag`/`same_tag`, 6: `registry_unreachable`)에서 json+매핑 양쪽에 넣는다.
+**3. 타입 일관성** — `ROLLOUT_ORDER`/`COMPONENTS`(키: `kind`/`workload`/`container`/`repository`/`selector`)는 Task 1이 정의하고 4·5가 같은 키로 쓴다. `ReleasesRepository` 메서드명(`create_batch`/`active`/`mark_applying`/`finish`/`abort_pending`/`current`/`list`)은 Task 1 정의를 4·5가 그대로 쓴다. 정규화 dict 키(`observed_generation`/`updated_replicas`/`desired_number_scheduled`/`images` 등)는 Task 2가 정의하고 Task 3의 `get_workload` 반환·Stub·Task 4의 fake가 같은 키를 쓴다. `RolloutRunner.patch_image/observe/pod_briefs` 키워드 시그니처는 Task 3 정의를 Task 4·5의 fake가 동일하게 구현한다(Task 5는 `observe`만 소비). `pod_briefs` 항목 키(`name`/`node`/`images`/`phase`/`waiting_reason`)는 3·4에서 동일. 프론트 `Release`/`ReleaseTarget` 필드는 Task 5 응답 dict와 1:1. 사유 코드는 도입 태스크(1: `rollout_in_progress`, 3: `patch_failed`/`observe_failed`, 4: `rollout_failed`/`rollout_timeout`/`rollout_aborted`/`workload_not_found`, 5: `unknown_component`/`unknown_tag`/`same_tag`, 6: `registry_unreachable`)에서 json+매핑 양쪽에 넣는다.
 
-**4. 설계와의 긴장 — 플랜이 내린 결정 (리뷰어 확인 요망)**
+**4. 설계와의 긴장 — 발견·판정 이력**
 
-1. **targets의 "클러스터 현재 이미지" 출처**: 설계 §7은 api가 현재 이미지를 주라 하고, §5는 apps RBAC을 컨트롤러에만 부여한다 — api는 apps `get`이 없어 Deployment spec을 못 읽는다. 해소: api가 **이미 가진 `pods list` 권한**으로 라벨 셀렉터 조회(`PodBriefReader.list_pod_briefs`)를 해 실행 중 파드의 이미지에서 유도한다. §5를 그대로 지키는 유일한 경로다. 부작용: 롤링 중에는 이미지가 2종일 수 있어 `current_image`(단일일 때만)와 `current_images`(전체)를 분리했고, `same_tag` 검사는 단일일 때만 강제된다(fail-open — 레지스트리 검증과 같은 원칙).
-2. **`WorkloadClient` 두 메서드 유지 + `PodBriefReader` 별도 Protocol**: 설계 §4는 "두 메서드"라 했다. 파드 읽기(§3 멈춘 노드 사유 + 위 1번)를 그 Protocol에 넣으면 세 메서드가 되므로, `WorkloadClient`는 두 메서드로 유지하고 별도 좁은 Protocol을 추가했다.
-3. **Deployment 최후 회수 `timeout*3`**: 설계 §3은 Deployment에 "자체적으로 더 짧은 상한을 두지 않는다"고 했다. 그러나 상태 조회가 지속 실패하면(RBAC 오설정 등) `Applying`이 영원히 남아 `rollout_in_progress`가 새 롤아웃을 영구 차단한다. PDE(진행 시 리셋)보다 확실히 긴 3배 벽시계를 최후 회수로만 둔다 — "더 짧은 상한"이 아니므로 충돌하지 않는다고 판단했다.
-4. **실패 시 배치 중단(`rollout_aborted`)**: 설계는 한 컴포넌트 실패 후 뒤 컴포넌트의 처리를 명시하지 않았다. 진행하면 반쯤 섞인 버전 조합이 생기고, 방치하면 배치가 영원히 활성이다 — 남은 `Pending`을 `Failed`/`rollout_aborted`로 닫는 쪽을 골랐다(이력에서 옛 태그를 다시 골라 재시도하면 된다는 §10 롤백 논리와 일관).
-5. **`ApiException` 타입 대신 `status` 속성 판별**: `.venv`에 `kubernetes`가 없어 테스트가 그 타입을 만들 수 없다. `getattr(exc, "status", None)`으로 404/403을 판별한다 — 시맨틱은 동일하고("404→None, 그 외 재전파") 테스트 가능해진다.
+1. **[해소됨]** targets의 "클러스터 현재 이미지" 출처: 플랜 초안이 §5(apps는 컨트롤러만)와 §7(api가 현재 이미지 제공)의 모순을 발견했고, 설계 커밋 `1f5f4e5`가 **api Role에 읽기 전용 apps `get`/`list`를 부여**하는 것으로 해소했다. api는 컨트롤러와 같은 `get_workload`(observe)로 **선언된 spec 이미지**를 읽는다 — 파드에서 유도하는 초안 대안은 롤링 중 옛/새 파드가 섞여 부정확해 기각됐다. `patch`는 여전히 컨트롤러에만 있다.
+2. **[재구성됨]** 초안의 `PodBriefReader` Protocol은 제거했다(코디네이터 지시 — `WorkloadClient` 하나면 된다). 파드 목록 읽기는 §3의 "멈춘 노드의 파드 사유" 진단에만 남는다: 소비자가 `RolloutWatcher` 하나뿐이라 Protocol 선언 없이 `KubernetesClient.list_pod_briefs`(duck-typed) + `RolloutRunner.pod_briefs`(best-effort)로만 둔다.
+3. **[승인됨]** Deployment 최후 회수 `timeout*3`: 설계 §3은 Deployment에 "자체적으로 더 짧은 상한을 두지 않는다"고 했다. 상태 조회가 지속 실패하면(RBAC 오설정 등) `Applying`이 영원히 남아 `rollout_in_progress`가 새 롤아웃을 영구 차단하므로, PDE(진행 시 리셋)보다 확실히 긴 3배 벽시계를 최후 회수로만 둔다 — "더 짧은 상한"이 아니라 충돌하지 않는다.
+4. **[승인됨]** 실패 시 배치 중단(`rollout_aborted`): 설계는 한 컴포넌트 실패 후 뒤 컴포넌트의 처리를 명시하지 않았다. 진행하면 반쯤 섞인 버전 조합이 생기고, 방치하면 배치가 영원히 활성이다 — 남은 `Pending`을 `Failed`/`rollout_aborted`로 닫는다(이력에서 옛 태그를 다시 골라 재시도하면 된다는 §10 롤백 논리와 일관). 사유 코드는 `REASON_MESSAGES`+`reasonCodes.json` 양쪽에 있다(Task 4).
+5. **[승인됨]** `ApiException` 타입 대신 `status` 속성 판별(duck-typing): `.venv`에 `kubernetes` 패키지가 없어 테스트가 그 타입을 만들 수 없고, `_ensure` 스텁 패턴을 유지하려면 예외 판별이 패키지에 의존하면 안 된다. `getattr(exc, "status", None)`으로 404/403을 판별한다 — 시맨틱은 동일하다("404→None, 그 외 재전파").
 
 **5. 알려진 위험**
 
 - **strategic merge patch의 `_content_type` 인자**: kubernetes 파이썬 클라이언트 버전에 따라 `_content_type` kwarg 지원이 다르다(구버전은 header_params를 직접 노출하지 않음). 실증(§11.4~6)에서 patch가 415/400을 내면 대응은 `api_client.call_api`를 쓰거나 클라이언트 버전을 올리는 것이다 — 단위 테스트는 kwarg 전달만 고정하므로 이 위험은 실증에서만 드러난다.
-- **`same_tag`의 파드 기반 판정**: Deployment spec이 아니라 실행 중 파드 이미지 기준이라, 방금 패치돼 아직 옛 파드만 도는 순간에는 새 태그==spec 태그 제출이 `same_tag`로 안 걸릴 수 있다. 그 경우에도 재패치는 no-op(멱등)이라 실해는 없다.
 - **DaemonSet 타임아웃 600초**: 5노드 순차 롤링(이미지 pull 포함)이 정상적으로 600초를 넘기면 거짓 실패가 난다. 그 경우 `DMS_ROLLOUT_TIMEOUT_SECONDS`를 올리면 된다 — 실증 §11.4에서 실측할 것.
 - **레지스트리 조회가 요청 경로에서 동기 호출**: targets/POST가 최대 2회(리포 2종) × 3초 타임아웃을 문다. 폴링 화면은 targets를 폴링하지 않고(releases만 폴링) 최초 로드에만 부르므로 수용했다.
 
