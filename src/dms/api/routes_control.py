@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from .auth import Identity, require_admin
+from .auth import Identity, audit_actor, require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -36,5 +36,5 @@ def put_control_state(body: ControlStateBody, request: Request,
         raise HTTPException(status_code=422, detail="unknown_build_node")
     control.set_control_state(maintenance=body.maintenance, drain=body.drain,
                               reason=body.reason, build_node_name=build_node_name,
-                              actor=identity.actor)
+                              actor=audit_actor(identity))
     return control.control_state()

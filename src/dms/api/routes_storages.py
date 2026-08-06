@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
-from .auth import Identity, require_admin, require_user
+from .auth import Identity, audit_actor, require_admin, require_user
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -32,7 +32,7 @@ def create_storage(body: StorageCreate, request: Request,
         return request.app.state.repos.storages.create(
             storage_name=body.storage_name, mount_path=body.mount_path,
             managed_root=body.managed_root, backend_type=body.backend_type,
-            actor=identity.actor)
+            actor=audit_actor(identity))
     except DomainValidationError as e:
         raise HTTPException(
             status_code=409 if e.reason_code == "storage_exists" else 422,
@@ -46,7 +46,7 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
         return request.app.state.repos.storages.update(
             name, mount_path=body.mount_path, managed_root=body.managed_root,
             backend_type=body.backend_type, enabled=body.enabled,
-            actor=identity.actor)
+            actor=audit_actor(identity))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
     except KeyError:
@@ -59,7 +59,7 @@ def delete_storage(name: str, request: Request,
     if request.app.state.repos.requests.active_referencing_storage(name):
         raise HTTPException(status_code=409, detail="storage_in_use")
     try:
-        return request.app.state.repos.storages.delete(name, actor=identity.actor)
+        return request.app.state.repos.storages.delete(name, actor=audit_actor(identity))
     except KeyError:
         raise HTTPException(status_code=404, detail="storage_not_found")
 

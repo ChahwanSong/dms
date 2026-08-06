@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from ..domain import DomainValidationError, PRIORITIES
 from ..repositories.control import POLICY_TOOLS
-from .auth import Identity, require_admin
+from .auth import Identity, audit_actor, require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -47,7 +47,7 @@ def put_policy(tool: str, body: PolicyBody, request: Request,
             max_priority=body.max_priority,
             preview_timeout_seconds=body.preview_timeout_seconds,
             execution_timeout_seconds=body.execution_timeout_seconds,
-            enabled=body.enabled, actor=identity.actor)
+            enabled=body.enabled, actor=audit_actor(identity))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
     return request.app.state.repos.control.get_policy(tool)

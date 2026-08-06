@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
-from .auth import Identity, require_admin
+from .auth import Identity, audit_actor, require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -35,7 +35,7 @@ def set_role(username: str, body: RoleBody, request: Request,
     _guard_self(identity, username)
     try:
         request.app.state.repos.accounts.set_role(username, body.role,
-                                                   actor=identity.actor)
+                                                   actor=audit_actor(identity))
     except KeyError:
         raise HTTPException(status_code=404, detail="account_not_found")
     except DomainValidationError as e:
@@ -51,7 +51,7 @@ def set_disabled(username: str, body: DisabledBody, request: Request,
     _guard_self(identity, username)
     try:
         request.app.state.repos.accounts.set_disabled(username, body.disabled,
-                                                       actor=identity.actor)
+                                                       actor=audit_actor(identity))
     except KeyError:
         raise HTTPException(status_code=404, detail="account_not_found")
     return request.app.state.repos.accounts.get(username)

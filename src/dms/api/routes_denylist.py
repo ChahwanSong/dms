@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
 from ..repositories.control import DENY_SUBJECT_TYPES
-from .auth import Identity, require_admin
+from .auth import Identity, audit_actor, require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -23,7 +23,7 @@ def deny(subject_type: str, subject: str, body: DenyBody, request: Request,
         raise HTTPException(status_code=422, detail="invalid_denylist_subject_type")
     try:
         request.app.state.repos.control.deny(subject_type, subject, body.reason,
-                                             identity.actor)
+                                             audit_actor(identity))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
     return {"subject_type": subject_type, "subject": subject.lower()}
@@ -32,5 +32,5 @@ def deny(subject_type: str, subject: str, body: DenyBody, request: Request,
 @router.delete("/api/admin/identity-denylist/{subject_type}/{subject}")
 def allow(subject_type: str, subject: str, request: Request,
           identity: Identity = Depends(require_admin)):
-    request.app.state.repos.control.allow(subject_type, subject, identity.actor)
+    request.app.state.repos.control.allow(subject_type, subject, audit_actor(identity))
     return {"subject_type": subject_type, "subject": subject.lower()}

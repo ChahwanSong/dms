@@ -7,7 +7,7 @@ from ..build_runner import BUILD_REF_PREFIX
 from ..domain import DomainValidationError
 from ..repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
 from .artifacts import tail_lines
-from .auth import Identity, require_admin
+from .auth import Identity, audit_actor, require_admin
 from .routes_requests import reject_when_maintenance
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -60,7 +60,7 @@ def submit_build(body: BuildBody, request: Request,
         build_id = repos.builds.create(
             repo_url=body.repo_url or request.app.state.settings.build_repo_url,
             git_ref=ref, images=list(body.images), node_name=node,
-            actor=identity.actor)
+            actor=audit_actor(identity))
     except DomainValidationError as e:
         # 위 사전 체크와 이 사이의 경합 창에서 다른 요청이 먼저 활성 빌드를
         # 만든 경우 -- 트랜잭션 안 가드가 여기서 잡는다.

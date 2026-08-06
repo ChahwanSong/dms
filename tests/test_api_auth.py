@@ -56,6 +56,28 @@ def test_admin_account_creation_requires_ops_token(client):
     assert r.json()["role"] == "admin"
 
 
+def test_auth_me_returns_raw_actor_for_token_auth(client):
+    # /api/auth/me는 감사 로그가 아니라 로그인 신원 표시용이다 -- audit_actor()의
+    # token: 접두가 여기 새어 들어가면 프론트 헤더와 기존 단언이 깨진다.
+    r = client.get("/api/auth/me", headers={
+        "Authorization": "Bearer tok-shared", "x-dms-actor": "ops-debug"})
+    assert r.json()["actor"] == "ops-debug"
+    assert ":" not in r.json()["actor"]
+
+
+def test_auth_me_default_token_actor_is_raw_shared_token(client):
+    r = client.get("/api/auth/me", headers={"Authorization": "Bearer tok-shared"})
+    assert r.json()["actor"] == "shared-token"
+
+
+def test_reserved_prefix_in_actor_header_is_rejected(client):
+    # 접두가 서버 소유의 출처 표식이 아니게 되면 의미가 없다.
+    r = client.get("/api/auth/me", headers={
+        "Authorization": "Bearer tok-shared", "x-dms-actor": "token:alice"})
+    assert r.status_code == 401
+    assert r.json()["detail"] == "invalid_actor"
+
+
 def test_non_ascii_token_is_rejected_not_500(client):
     # httpx(TestClient)는 str 헤더값을 기본 ascii로만 인코딩하므로, 와이어 상에서
     # 실클라이언트가 보낼 수 있는 latin-1 바이트를 직접 넘겨 ASGI 디코딩 경로를 재현한다.
