@@ -14,6 +14,7 @@ class _Settings:
     preview_ttl_seconds = 86400
     artifact_base_uri = "file:///art"
     agent_report_retention_days = 30
+    event_retention_days = 30
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
     batch_orchestrator_interval_seconds = 5

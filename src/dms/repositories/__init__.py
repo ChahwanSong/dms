@@ -8,6 +8,7 @@ from .data_jobs import DataJobsRepository
 from .batches import BatchesRepository
 from .scan_paths import UserScanPathsRepository
 from .builds import BuildsRepository
+from .observability import ObservabilityRepository
 
 
 class Repositories:
@@ -23,3 +24,4 @@ class Repositories:
         self.batches = BatchesRepository(db)
         self.scan_paths = UserScanPathsRepository(db)
         self.builds = BuildsRepository(db)
+        self.observability = ObservabilityRepository(db)

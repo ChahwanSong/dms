@@ -3,6 +3,7 @@ import uuid
 from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
 from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
                       TERMINAL_REQUEST_STATES)
+from .observability import ObservabilityRepository
 
 _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
                  "volcano_job_ref", "phase_refs")
@@ -105,23 +106,35 @@ class DataJobsRepository:
 
     def set_job_state(self, job_id, to_state: DataJobState, *, reason_code=None, actor):
         now = utc_now_iso()
+        guard_tripped = False
         with self._db.transaction():
             current = self._db.query_one(
-                "SELECT state FROM data_jobs WHERE job_id = :j", {"j": job_id})
+                "SELECT state, request_id FROM data_jobs WHERE job_id = :j", {"j": job_id})
             if current is None:
                 raise KeyError(job_id)
             if DataJobState(current["state"]) in TERMINAL_DATA_JOB_STATES:
                 # 종단 잡은 되돌리지 않는다. 취소 직후 늦게 도착한 stepper 틱이
                 # Cancelled 를 덮어쓰고 고아 Volcano Job 을 만드는 경쟁을 막는다.
                 # 예외 대신 조용히 무시한다 — 취소는 정상 동작이고 stepper 루프를
-                # 한 잡 때문에 죽여선 안 된다. 일어나지 않은 전이는 기록도 안 한다.
-                return
-            self._db.execute(
-                """UPDATE data_jobs SET state = :s, reason_code = :rc, updated_at = :now
-                   WHERE job_id = :j""",
-                {"s": to_state.value, "rc": reason_code, "now": now, "j": job_id})
-            self._record_transition("data_job", job_id, DataJobState(current["state"]),
-                                    to_state, reason_code, actor, now)
+                # 한 잡 때문에 죽여선 안 된다. 일어나지 않은 전이는 state_transitions에
+                # 기록하지 않는다 -- 진단 이벤트는 트랜잭션 밖에서(아래) 남긴다.
+                guard_tripped = True
+            else:
+                self._db.execute(
+                    """UPDATE data_jobs SET state = :s, reason_code = :rc, updated_at = :now
+                       WHERE job_id = :j""",
+                    {"s": to_state.value, "rc": reason_code, "now": now, "j": job_id})
+                self._record_transition("data_job", job_id, DataJobState(current["state"]),
+                                        to_state, reason_code, actor, now)
+        if guard_tripped:
+            # self._db만 있고 repos가 없다 -- 저장소 규약(__init__(self, db))을 지키려고
+            # 협력자를 주입받는 대신 여기서 즉석으로 만든다. ObservabilityRepository는
+            # db 핸들 하나만 감싸는 얇은 래퍼라 생성 비용이 없고, 위 with-transaction
+            # 블록 밖에서 호출하므로 진단 INSERT가 업무 트랜잭션에 섞이지 않는다.
+            ObservabilityRepository(self._db).record_event(
+                component="stepper", severity="info", event_type="terminal_guard_skip",
+                message=f"job_id={job_id} state={current['state']} attempted_to={to_state.value}",
+                request_id=current["request_id"])
 
     def job_transitions(self, job_id):
         return self._db.query(

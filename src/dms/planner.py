@@ -30,6 +30,11 @@ class Planner:
             except Exception as exc:  # 한 요청 실패가 다음을 막지 않는다
                 print(f"planner error on {rid}: {type(exc).__name__}: {exc}",
                       file=sys.stderr)
+                # 이 실패는 전이를 남기지 않는다(예외가 어느 set_state 호출보다도 먼저
+                # 터질 수 있다) -- stderr만으로는 파드 재시작에 사라지므로 events에 남긴다.
+                self._repos.observability.record_event(
+                    component="planner", severity="error", event_type="plan_error",
+                    message=f"{type(exc).__name__}: {exc}"[:500], request_id=rid)
         return results
 
     def _reject(self, rid, reason):

@@ -238,6 +238,9 @@ def migrate(db: Database) -> None:
             payload TEXT,
             at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_events_request ON events (request_id, id)",
+        # purge(prune_events)와 시간순 조회는 request_id로 좁혀지지 않으므로
+        # (request_id, id) 인덱스가 커버하지 못한다 -- at 단독 인덱스가 필요하다.
+        "CREATE INDEX IF NOT EXISTS idx_events_at ON events (at)",
     ]
     for stmt in stmts:
         db.execute(stmt)

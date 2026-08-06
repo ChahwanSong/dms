@@ -10,6 +10,7 @@ class _Settings:
     planner_interval_seconds = 10
     stepper_interval_seconds = 5
     agent_report_retention_days = 30
+    event_retention_days = 30
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
     batch_orchestrator_interval_seconds = 5

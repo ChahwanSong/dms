@@ -9,3 +9,10 @@ def prune_agent_reports_once(repos: Repositories, *, retention_days: int,
     now = now_iso or utc_now_iso()
     cutoff = iso_plus(now, -retention_days * 86400)
     return repos.agents.prune_reports(cutoff, batch_size=batch_size)
+
+
+def prune_events_once(repos: Repositories, *, retention_days: int,
+                      now_iso: str | None = None, batch_size: int = 5000) -> int:
+    now = now_iso or utc_now_iso()
+    cutoff = iso_plus(now, -retention_days * 86400)
+    return repos.observability.prune_events(cutoff, batch_size=batch_size)

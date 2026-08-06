@@ -35,6 +35,11 @@ class JobStepper:
                 print(f"stepper error on {jid}: {type(exc).__name__}: {exc}",
                       file=sys.stderr)
                 results[jid] = f"error:{type(exc).__name__}"
+                # 전이를 남기지 못한 실패 -- stderr로만 새면 파드 재시작에 사라진다.
+                self._repos.observability.record_event(
+                    component="stepper", severity="error", event_type="step_error",
+                    message=f"{type(exc).__name__}: {exc}"[:500],
+                    request_id=job.get("request_id"))
         return results
 
     def _abs(self, storage_name, rel):
@@ -99,8 +104,13 @@ class JobStepper:
             return None
         try:
             self._exec.terminate(ref)
-        except ExecutionError:
-            pass  # best-effort — 잡은 이미 종단이라 더 기록할 상태가 없다
+        except ExecutionError as exc:
+            # best-effort -- 잡은 이미 종단이라 더 기록할 상태가 없다. 그래도 고아
+            # 리소스가 남았을 수 있으니 진단 채널에는 남긴다.
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="terminate_failed",
+                message=exc.reason_code, payload={"ref": ref},
+                request_id=job.get("request_id"))
         return state
 
     def _step_one(self, job) -> str:
@@ -174,6 +184,10 @@ class JobStepper:
                 # artifact_base 파일시스템을 못 읽는 배포 오구성을 뜻한다 — vcjob phase가
                 # 권위이므로 SUCCEEDED는 유지하되, null을 조용히 묻지 않고 가시화한다.
                 summary = {"summary_unavailable": True}
+                self._repos.observability.record_event(
+                    component="stepper", severity="warning",
+                    event_type="summary_unreadable", payload={"ref": ref},
+                    request_id=job.get("request_id"))
             # 성공 경로도 URI를 남긴다 — preview를 거치지 않는 scan 잡은 여기서만
             # 기록되고, 없으면 포탈이 아티팩트를 가리킬 수 없다.
             self._repos.data_jobs.set_artifact(

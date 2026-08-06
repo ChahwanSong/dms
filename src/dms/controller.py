@@ -14,7 +14,7 @@ from .planner import Planner
 from .pod_gc import PodGarbageCollector
 from .reconciler import reconcile_storages_once
 from .repositories import Repositories
-from .retention import prune_agent_reports_once
+from .retention import prune_agent_reports_once, prune_events_once
 from .stepper import JobStepper
 
 
@@ -45,6 +45,12 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                 reason_code="orphan_recovery",
                 summary=(job or {}).get("result_summary"), actor="stepper")
 
+    def _retention_step():
+        # events는 state_transitions처럼 영구 보관하지 않는다 -- 같은 성격의 배치
+        # 삭제이니 agent_reports 정리와 같은 루프에 묶는다(새 루프를 만들지 않는다).
+        prune_agent_reports_once(repos, retention_days=settings.agent_report_retention_days)
+        prune_events_once(repos, retention_days=settings.event_retention_days)
+
     loops = [
         Loop("planner", settings.planner_interval_seconds,
              lambda: Planner(repos, identity_resolver, settings=settings).run_once()),
@@ -52,9 +58,7 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
         Loop("storage-reconciler", settings.reconcile_interval_seconds,
              lambda: reconcile_storages_once(
                  repos, stale_seconds=settings.agent_report_stale_seconds)),
-        Loop("retention", settings.retention_interval_seconds,
-             lambda: prune_agent_reports_once(
-                 repos, retention_days=settings.agent_report_retention_days)),
+        Loop("retention", settings.retention_interval_seconds, _retention_step),
         Loop("batch-orchestrator", settings.batch_orchestrator_interval_seconds,
              lambda: BatchOrchestrator(repos, settings=settings).run_once()),
         Loop("pod-gc", settings.pod_gc_interval_seconds,

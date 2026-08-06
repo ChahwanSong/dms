@@ -30,6 +30,7 @@ _SERVER_INT_KEYS = (
     # 둘 다 이 값을 쓴다: 파드가 스케줄된 뒤엔 kubelet이, 스케줄조차 못 된
     # (nodeSelector 오타 등) Pending은 BuildWatcher의 created_at 기반 회수가 잡는다.
     ("DMS_BUILD_TIMEOUT_SECONDS", "build_timeout_seconds", 7200),
+    ("DMS_EVENT_RETENTION_DAYS", "event_retention_days", 30),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -117,6 +118,7 @@ class Settings:
     build_repo_url: str = "https://github.com/ChahwanSong/dms.git"
     build_watcher_interval_seconds: int = 15
     build_timeout_seconds: int = 7200
+    event_retention_days: int = 30
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
