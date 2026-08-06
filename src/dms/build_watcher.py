@@ -66,12 +66,24 @@ class BuildWatcher:
             # 갇히므로 반드시 이 둘이 함께 있어야 한다.
             try:
                 if cutoff is not None and build["created_at"] < cutoff:
+                    # terminate로 파드를 지우기 전에 로그부터 읽는다 -- 타임아웃은 이
+                    # 기능에서 원인 규명이 가장 필요한 실패(clone/npm/make/push 중
+                    # 어디서 멈췄나)인데, 파드가 사라지고 나면 그 유일한 증거도 함께
+                    # 사라진다. 성공/실패 종단 경로(read_log 후 finish)와 일관되게 맞춘다.
+                    try:
+                        log_text = self._runner.read_log(ref)
+                    except ExecutionError:
+                        # 로그 조회 실패로 회수 자체를 막으면 빌드가 다시 Running에
+                        # 갇힌다 -- 못 읽었을 뿐이니 None으로 계속 진행한다(finish의
+                        # log_text=None은 COALESCE라 기존 값을 지우지 않는다).
+                        log_text = None
                     try:
                         self._runner.terminate(ref)
                     except ExecutionError:
                         pass  # best-effort -- 타임아웃 판정 자체는 지켜야 한다
                     self._repos.builds.finish(build_id, state="Failed",
-                                              reason_code="build_timeout")
+                                              reason_code="build_timeout",
+                                              log_text=log_text)
                     finished += 1
                     continue
                 status = self._runner.poll(ref)

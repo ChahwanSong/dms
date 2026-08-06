@@ -16,6 +16,7 @@ class _Runner:
         self.terminated = []
         self.fail_submit = None
         self.fail_poll = None  # I6: reason_code로 세팅하면 poll에서 ExecutionError
+        self.fail_read_log = None  # reason_code로 세팅하면 read_log에서 ExecutionError
 
     def submit(self, build):
         if self.fail_submit:
@@ -30,6 +31,8 @@ class _Runner:
         return self.status
 
     def read_log(self, ref):
+        if self.fail_read_log:
+            raise ExecutionError(self.fail_read_log, "boom")
         return self.log
 
     def terminate(self, ref):
@@ -137,7 +140,9 @@ def test_running_build_past_deadline_is_terminated_and_marked_timeout(repos):
     bid = _mk(repos)
     repos.builds.mark_running(bid)
     created_at = repos.builds.get(bid)["created_at"]
-    runner = _Runner(status=ExecStatus.RUNNING)  # poll에 도달하면 안 된다 -- 마감이 우선
+    # 로그가 있는 러너로 만든다 -- 회수 시점에도 이 로그가 박제돼야 한다(아래 단언).
+    runner = _Runner(status=ExecStatus.RUNNING,
+                     log="=== building pkg-01:5000/dms:b01234567 ===\nnpm install...\n")
     now = iso_plus(created_at, 7201)  # 기본 타임아웃(7200)을 막 넘겼다
     out = BuildWatcher(repos, runner, timeout_seconds=7200).run_once(now_iso=now)
     row = repos.builds.get(bid)
@@ -145,6 +150,27 @@ def test_running_build_past_deadline_is_terminated_and_marked_timeout(repos):
     assert runner.terminated == [f"{BUILD_REF_PREFIX}/dms-build-{bid[:12]}"]
     assert runner.polled == []  # 마감 넘긴 빌드는 poll을 부르지 않고 바로 회수한다
     assert out["finished"] == 1
+    # 타임아웃은 원인 규명이 가장 필요한 실패(어디서 멈췄나 -- clone? npm? make? push?)인데,
+    # read_log 없이 terminate만 하면 파드가 즉시 사라져 유일한 증거가 없어진다. 성공/실패
+    # 종단 경로와 똑같이 회수 경로도 로그를 박제해야 한다.
+    assert row["log_text"] == runner.log
+
+
+def test_reclaim_survives_read_log_failure_and_still_marks_timeout(repos):
+    # read_log가 예외를 던져도(파드가 이미 사라졌거나 네트워크 문제) 회수 자체는
+    # 반드시 끝나야 한다 -- 안 그러면 회수가 스킵돼 빌드가 다시 Running에 갇힌다.
+    bid = _mk(repos)
+    repos.builds.mark_running(bid)
+    created_at = repos.builds.get(bid)["created_at"]
+    runner = _Runner(status=ExecStatus.RUNNING)
+    runner.fail_read_log = "log_read_failed"
+    now = iso_plus(created_at, 7201)
+    out = BuildWatcher(repos, runner, timeout_seconds=7200).run_once(now_iso=now)
+    row = repos.builds.get(bid)
+    assert (row["state"], row["reason_code"]) == ("Failed", "build_timeout")
+    assert runner.terminated == [f"{BUILD_REF_PREFIX}/dms-build-{bid[:12]}"]
+    assert out["finished"] == 1
+    assert row["log_text"] is None  # 못 읽었을 뿐 -- 크래시도, COALESCE로 값이 지워지지도 않는다
 
 
 def test_running_build_before_deadline_is_left_alone(repos):
