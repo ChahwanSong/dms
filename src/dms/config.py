@@ -25,6 +25,11 @@ _SERVER_INT_KEYS = (
     ("DMS_POD_GC_AFTER_SECONDS", "pod_gc_after_seconds", 86400),
     ("DMS_POD_GC_INTERVAL_SECONDS", "pod_gc_interval_seconds", 600),
     ("DMS_BUILD_WATCHER_INTERVAL_SECONDS", "build_watcher_interval_seconds", 15),
+    # 빌드 파드 activeDeadlineSeconds + BuildWatcher 나이 기반 회수 창(C2). 기본
+    # 7200(2h) -- mpifileutils를 소스에서 컴파일하는 빌드가 가장 오래 걸린다.
+    # 둘 다 이 값을 쓴다: 파드가 스케줄된 뒤엔 kubelet이, 스케줄조차 못 된
+    # (nodeSelector 오타 등) Pending은 BuildWatcher의 created_at 기반 회수가 잡는다.
+    ("DMS_BUILD_TIMEOUT_SECONDS", "build_timeout_seconds", 7200),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -111,6 +116,7 @@ class Settings:
     build_builder_image: str = "quay.io/buildah/stable:latest"
     build_repo_url: str = "https://github.com/ChahwanSong/dms.git"
     build_watcher_interval_seconds: int = 15
+    build_timeout_seconds: int = 7200
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":

@@ -1,5 +1,5 @@
 import pytest
-from dms.build_runner import BuildRunner, StubBuildRunner
+from dms.build_runner import BUILD_REF_PREFIX, BuildRunner, StubBuildRunner
 from dms.execution import ExecStatus, ExecutionError
 
 
@@ -35,16 +35,30 @@ BUILD = {"build_id": "0123456789abcdef0123456789abcdef", "repo_url": "u",
          "git_ref": "main", "images": ["dms"], "node_name": "dms-w1"}
 
 
-def _runner(k8s):
+def _runner(k8s, timeout_seconds=7200):
     return BuildRunner(k8s, namespace="dms", registry="pkg-01:5000",
-                       builder_image="quay.io/buildah/stable:latest")
+                       builder_image="quay.io/buildah/stable:latest",
+                       timeout_seconds=timeout_seconds)
+
+
+def test_build_ref_prefix_is_buildpod():
+    # I5: 4곳(build_runner/build_watcher/pod_gc/routes_builds)이 이 상수 하나를
+    # 공유한다 -- 각자 리터럴을 들고 있으면 하나만 드리프트해도 조용히 깨진다.
+    assert BUILD_REF_PREFIX == "buildpod"
 
 
 def test_submit_creates_pod_and_returns_buildpod_ref():
     k8s = _FakeK8s()
     ref = _runner(k8s).submit(BUILD)
-    assert ref == "buildpod/dms-build-0123456789ab"
+    assert ref == f"{BUILD_REF_PREFIX}/dms-build-0123456789ab"
     assert k8s.created[0]["kind"] == "Pod"
+
+
+def test_submit_pins_active_deadline_seconds_from_constructor():
+    # C2(a): BuildRunner가 받은 timeout_seconds가 실제로 파드 spec까지 전달되는지.
+    k8s = _FakeK8s()
+    _runner(k8s, timeout_seconds=42).submit(BUILD)
+    assert k8s.created[0]["spec"]["activeDeadlineSeconds"] == 42
 
 
 def test_submit_failure_becomes_execution_error():
@@ -81,7 +95,7 @@ def test_poll_maps_pod_phase(phase, expected):
 def test_poll_treats_missing_pod_as_failed():
     # 어댑터 규약과 같다: 사라진 객체는 '모름'이 아니라 실패다
     k8s = _FakeK8s()
-    assert _runner(k8s).poll("buildpod/gone") == ExecStatus.FAILED
+    assert _runner(k8s).poll(f"{BUILD_REF_PREFIX}/gone") == ExecStatus.FAILED
 
 
 def test_read_log_returns_text_and_none_when_unavailable():
@@ -119,7 +133,7 @@ def test_poll_wraps_k8s_get_exception_as_execution_error():
         def get(self, kind, name, namespace):
             raise RuntimeError("connection reset")
     with pytest.raises(ExecutionError) as e:
-        _runner(_Boom()).poll("buildpod/dms-build-0123456789ab")
+        _runner(_Boom()).poll(f"{BUILD_REF_PREFIX}/dms-build-0123456789ab")
     assert e.value.reason_code == "poll_failed"
 
 
@@ -162,7 +176,7 @@ def test_submit_failure_with_no_existing_pod_is_still_submit_failed():
 def test_stub_runner_runs_without_a_cluster():
     stub = StubBuildRunner()
     ref = stub.submit(BUILD)
-    assert ref.startswith("buildpod/")
+    assert ref.startswith(f"{BUILD_REF_PREFIX}/")
     assert stub.poll(ref) == ExecStatus.SUCCEEDED
     assert stub.read_log(ref) is not None
     stub.terminate(ref)

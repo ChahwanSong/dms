@@ -314,8 +314,12 @@ IfNotPresent`이므로, **같은 태그를 다시 push해도 클러스터는 절
 기본으로 체크돼 있지 않다, 필요할 때(예: mpifileutils 자체를 바꿨을 때)만 명시적으로
 포함시킬 것. `dms-agent`는 앞의 두 이미지를 `FROM`하므로, `dms-agent`만 새로 빌드하려면
 그 두 태그가 이미 레지스트리에 있어야 한다 — `BUILD_IMAGES` 순서
-(`dms-mpifileutils` → `dms` → `dms-agent`, `src/dms/repositories/builds.py`)가 이
-의존 관계를 강제한다.
+(`dms-mpifileutils` → `dms` → `dms-agent`, `src/dms/repositories/builds.py`)가 실행
+순서를 강제하고, 빌드 스크립트가 `dms-agent`를 빌드할 때 `--build-arg
+DMS_IMAGE=$DMS_BUILD_REGISTRY/dms:$DMS_BUILD_TAG`/`MFU_IMAGE=...`로 **이 빌드가 push할
+바로 그 태그**를 `FROM`에 고정한다(`src/dms/build_manifests.py`) — 그래서 앞의 둘이 같은
+빌드 안에 없거나 그 태그가 레지스트리에 없으면 buildah가 pull에 실패해 시끄럽게 죽는다
+(Dockerfile.agent의 `ARG` 기본값 `:dev`로 조용히 폴백하지 않는다).
 
 **6) 동시 빌드는 하나로 제한된다.** 이미 진행 중(`Pending`/`Running`)인 빌드가 있는
 채로 `POST /api/admin/builds`를 부르면 `409 build_in_progress`. 새 빌드를 넣기

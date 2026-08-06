@@ -66,7 +66,9 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
     # None을 넘겨 매 틱마다 AttributeError로 죽게 두지 않기 위해서다.
     if build_runner is not None:
         loops.append(Loop("build-watcher", settings.build_watcher_interval_seconds,
-                          lambda: BuildWatcher(repos, build_runner).run_once()))
+                          lambda: BuildWatcher(
+                              repos, build_runner,
+                              timeout_seconds=settings.build_timeout_seconds).run_once()))
     return loops
 
 

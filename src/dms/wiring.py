@@ -35,4 +35,5 @@ def build_build_runner(settings):
     return BuildRunner(KubernetesClient(settings.k8s_namespace),
                        namespace=settings.k8s_namespace,
                        registry=settings.build_registry,
-                       builder_image=settings.build_builder_image)
+                       builder_image=settings.build_builder_image,
+                       timeout_seconds=settings.build_timeout_seconds)

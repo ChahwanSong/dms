@@ -82,3 +82,8 @@ data:
   DMS_BUILD_BUILDER_IMAGE: "quay.io/buildah/stable:latest"
   DMS_BUILD_REPO_URL: "https://github.com/ChahwanSong/dms.git"
   DMS_BUILD_WATCHER_INTERVAL_SECONDS: "15"
+  # 빌드 파드 activeDeadlineSeconds + BuildWatcher 나이 기반 회수 창(초). 빌드
+  # 노드 오타로 nodeSelector가 안 맞아 파드가 영구 Pending이 되는 등, 포탈 안에서
+  # 빠져나올 길이 없는 경로를 막는다 -- 기본 7200(2h)은 mpifileutils 소스 컴파일
+  # 포함 3종 빌드가 가장 오래 걸리는 경우를 기준으로 잡은 여유값이다.
+  DMS_BUILD_TIMEOUT_SECONDS: "7200"

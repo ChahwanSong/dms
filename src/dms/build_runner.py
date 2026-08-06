@@ -8,7 +8,10 @@ from .repositories.builds import build_pod_name
 
 logger = logging.getLogger(__name__)
 
-_PREFIX = "buildpod"
+# I5: 빌드 ref 접두의 유일한 출처 -- build_watcher.py/pod_gc.py/api/routes_builds.py가
+# 전부 여기서 import해 쓴다. 각자 리터럴 "buildpod"를 들고 있으면 한 곳만 드리프트해도
+# (예: 오타로 "pod"가 되면) ref가 안 맞아 poll/terminate/read_log가 조용히 miss된다.
+BUILD_REF_PREFIX = "buildpod"
 _POD_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
               "Succeeded": ExecStatus.SUCCEEDED, "Failed": ExecStatus.FAILED,
               "Unknown": ExecStatus.FAILED}
@@ -16,17 +19,18 @@ _POD_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
 
 def _name(ref: str) -> str:
     prefix, _, name = ref.partition("/")
-    if prefix != _PREFIX or not name:
+    if prefix != BUILD_REF_PREFIX or not name:
         raise ExecutionError("invalid_build_ref", ref[:200])
     return name
 
 
 class BuildRunner:
-    def __init__(self, k8s, *, namespace, registry, builder_image):
+    def __init__(self, k8s, *, namespace, registry, builder_image, timeout_seconds):
         self._k8s = k8s
         self._ns = namespace
         self._registry = registry
         self._builder_image = builder_image
+        self._timeout_seconds = timeout_seconds
 
     def submit(self, build) -> str:
         try:
@@ -34,11 +38,12 @@ class BuildRunner:
                 build_id=build["build_id"], repo_url=build["repo_url"],
                 git_ref=build["git_ref"], images=build["images"],
                 node=build["node_name"], namespace=self._ns,
-                registry=self._registry, builder_image=self._builder_image)
+                registry=self._registry, builder_image=self._builder_image,
+                timeout_seconds=self._timeout_seconds)
         except Exception as exc:
             raise ExecutionError("submit_failed", str(exc)[:200]) from exc
         name = manifest["metadata"]["name"]
-        ref = f"{_PREFIX}/{name}"
+        ref = f"{BUILD_REF_PREFIX}/{name}"
         try:
             self._k8s.create(manifest)
         except Exception as exc:
@@ -92,7 +97,7 @@ class StubBuildRunner:
         self._log = {}
 
     def submit(self, build) -> str:
-        ref = f"{_PREFIX}/{build_pod_name(build['build_id'])}"
+        ref = f"{BUILD_REF_PREFIX}/{build_pod_name(build['build_id'])}"
         self._log[ref] = "DMS_COMMIT_SHA=stubcommit\nDMS_BUILD_OK\n"
         return ref
 
