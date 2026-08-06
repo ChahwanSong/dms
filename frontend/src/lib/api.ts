@@ -24,6 +24,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   admin_required: "관리자 권한이 필요합니다",
   admin_token_required: "관리자 토큰이 필요합니다",
   invalid_token: "토큰이 올바르지 않습니다",
+  invalid_actor: "요청자 표기(x-dms-actor)가 올바르지 않습니다",
   account_exists: "이미 존재하는 계정입니다",
   invalid_username: "사용자명이 올바르지 않습니다",
   // job / batch
@@ -100,6 +101,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   account_not_found: "계정을 찾을 수 없습니다",
   invalid_role: "역할 값이 올바르지 않습니다",
   cannot_lock_self: "자기 계정의 역할 변경·비활성화는 할 수 없습니다",
+  // 인그레스/프록시가 만든 401(백엔드까지 못 간 경우)은 본문이 JSON이 아니라서
+  // detail을 못 읽는다 -- request()가 이때 http_401을 합성한다.
+  http_401: "인증이 필요합니다",
   http_500: "서버 오류가 발생했습니다",
   http_503: "서비스를 일시적으로 사용할 수 없습니다",
   build_node_not_set: "빌드 노드가 지정되지 않았습니다 — 컨트롤 상태에서 먼저 지정하세요",

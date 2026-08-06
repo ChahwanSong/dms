@@ -1,0 +1,40 @@
+[
+  "identity_denied", "ldap_not_configured", "ldap_unavailable",
+  "ldap_identity_not_found", "missing_policy", "policy_disabled",
+  "no_eligible_nodes", "no_ready_sync_candidate", "resource_conflict",
+  "requester_disabled", "unsafe_path",
+
+  "orphan_recovery", "preflight_failed", "execution_failed", "empty_preview",
+  "preview_timed_out", "preview_failed", "execution_recheck_failed",
+  "preview_expired", "build_timeout", "build_failed",
+
+  "preflight_submit_failed", "execution_submit_failed",
+  "preview_submit_failed", "execution_recheck_submit_failed",
+
+  "not_authenticated", "admin_required", "admin_token_required", "invalid_token",
+  "invalid_actor",
+  "account_exists", "invalid_username", "job_not_found", "batch_not_found",
+  "batch_not_confirmable", "no_failed_items", "no_preview_fingerprint",
+  "empty_batch", "invalid_batch_operation", "invalid_max_concurrency",
+  "invalid_storage", "invalid_node_name", "agent_node_identity_mismatch",
+  "terminate_failed", "invalid_job_id", "invalid_batch", "invalid_phase",
+  "log_ref_not_found", "log_not_available", "artifact_not_found",
+  "account_disabled", "maintenance_mode", "scan_admin_only",
+  "privileged_not_authorized", "fingerprint_mismatch", "not_confirmable",
+  "already_terminal", "invalid_credentials", "invalid_policy",
+  "invalid_priority", "invalid_denylist_subject_type", "policy_not_found",
+  "storage_exists", "storage_in_use", "storage_not_found", "node_not_found",
+  "build_node_not_set", "build_in_progress", "unknown_image", "invalid_git_ref",
+  "build_not_found", "submit_failed", "poll_failed", "unknown_build_node",
+  "invalid_build_ref",
+
+  "artifact_forbidden", "invalid_artifact_name", "rm_recursive_required",
+  "rm_root_forbidden", "unknown_option", "invalid_option", "storage_missing",
+  "storage_disabled", "storage_not_ready", "missing_storage",
+  "missing_source_storage", "missing_destination_storage",
+  "sync_destination_inside_source", "invalid_owner_username", "invalid_operation",
+  "cancel_failed", "batch_not_cancelable", "request_not_found",
+  "cancelled_by_user", "cancelled_by_batch", "scan_path_exists",
+  "scan_path_not_found", "no_covering_scan", "scan_report_too_large",
+  "account_not_found", "invalid_role", "cannot_lock_self"
+]
