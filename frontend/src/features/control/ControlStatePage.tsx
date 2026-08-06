@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
+import { useNodes } from "../nodes/useNodes";
 import { useControlState, useSetControlState } from "./useControlState";
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 
 export function ControlStatePage() {
   const q = useControlState();
+  const nodesQ = useNodes();
   const setControlState = useSetControlState();
   const [maintenance, setMaintenance] = useState(false);
   const [drain, setDrain] = useState(false);
@@ -59,8 +61,17 @@ export function ControlStatePage() {
                 <input aria-label="사유" className={field} value={reason}
                        onChange={(e) => setReason(e.target.value)} /></label>
               <label className="block">빌드 노드
-                <input aria-label="빌드 노드" className={field} value={buildNodeName}
-                       onChange={(e) => setBuildNodeName(e.target.value)} /></label>
+                {/* I1: 자유 입력 금지 -- 오타가 nodeSelector로 새면 빌드 파드가
+                    영원히 Pending이다. agent_nodes에 실제로 보고된 노드 중에서만
+                    고르게 한다(select). */}
+                <select aria-label="빌드 노드" className={field} value={buildNodeName}
+                        onChange={(e) => setBuildNodeName(e.target.value)}>
+                  <option value="">지정 안 함</option>
+                  {(nodesQ.data ?? []).map((n) => (
+                    <option key={n.node_name} value={n.node_name}>{n.node_name}</option>
+                  ))}
+                </select>
+              </label>
               {setControlState.isError && (
                 <p className="text-bad">{(setControlState.error as ApiError).message}</p>
               )}

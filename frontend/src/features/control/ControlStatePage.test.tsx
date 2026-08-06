@@ -6,7 +6,13 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { ControlStatePage } from "./ControlStatePage";
 
-const server = setupServer();
+const server = setupServer(
+  // 컨트롤 상태 화면의 빌드 노드는 이제 select다 -- 옵션 목록을 이 엔드포인트에서
+  // 읽는다(useNodes). 아래 CS가 가리키는 "dms-w1"이 항상 옵션에 있도록 기본으로 둔다.
+  http.get("/api/admin/nodes", () => HttpResponse.json([
+    { node_name: "dms-w1", reported_at: "2026-08-05T00:00:00Z", fresh: true, report: {} },
+  ])),
+);
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
 const CS = { maintenance: 1, drain: 0, reason: "점검", build_node_name: "dms-w1", changed_by: "ops", changed_at: "2026-08-05T00:00:00Z" };
@@ -38,6 +44,34 @@ test("toggling drain and saving sends the correct PUT body", async () => {
   await userEvent.click(screen.getByLabelText("드레인"));
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   expect(body).toEqual({ maintenance: true, drain: true, reason: "점검", build_node_name: "dms-w1" });
+});
+
+test("빌드 노드는 자유 입력이 아니라 보고된 노드 중에서 고른다(select)", async () => {
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.get("/api/admin/nodes", () => HttpResponse.json([
+      { node_name: "dms-w1", reported_at: "t", fresh: true, report: {} },
+      { node_name: "dms-w2", reported_at: "t", fresh: true, report: {} },
+    ])),
+  );
+  wrap();
+  const select = (await screen.findByLabelText("빌드 노드")) as HTMLSelectElement;
+  const optionValues = Array.from(select.options).map((o) => o.value);
+  // "지정 안 함"(빈 값) + 보고된 두 노드만 있고, 자유 입력(텍스트 박스)이 아니다.
+  expect(optionValues).toEqual(["", "dms-w1", "dms-w2"]);
+  expect(select.tagName).toBe("SELECT");
+});
+
+test("빌드 노드를 서버가 거절하면(unknown_build_node) 한글 메시지를 보여준다", async () => {
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.put("/api/admin/control-state", () =>
+      HttpResponse.json({ detail: "unknown_build_node" }, { status: 422 })),
+  );
+  wrap();
+  await screen.findByLabelText("유지보수");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  expect(await screen.findByText("등록된 에이전트 노드 중에서 선택해 주세요")).toBeInTheDocument();
 });
 
 test("renders no warning banners when both flags are off", async () => {
