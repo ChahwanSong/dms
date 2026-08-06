@@ -120,6 +120,20 @@ def test_log_uses_log_text_when_build_is_terminal(client):
     assert tailed.json()["log"] == "line3"
 
 
+def test_whitespace_only_build_node_is_treated_as_unset(client):
+    # build_node_name은 k8s nodeSelector로 그대로 흘러간다 -- 공백만 있는 값이 저장되면
+    # 파드가 스케줄되지 않고 조용히 Pending에 머문다. PUT 시점에 trim해 빈 문자열은
+    # None(미설정)으로 정규화되는지 확인한다.
+    r = client.put("/api/admin/control-state",
+                   json={"maintenance": False, "drain": False, "reason": None,
+                         "build_node_name": "   "},
+                   headers=ADMIN)
+    assert r.status_code == 200 and r.json()["build_node_name"] is None
+    r2 = client.post("/api/admin/builds", json={"git_ref": "main", "images": ["dms"]},
+                     headers=ADMIN)
+    assert r2.status_code == 422 and r2.json()["detail"] == "build_node_not_set"
+
+
 def test_control_state_accepts_build_node(client):
     r = client.put("/api/admin/control-state",
                    json={"maintenance": False, "drain": False, "reason": None,

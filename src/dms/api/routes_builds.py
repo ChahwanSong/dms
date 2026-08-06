@@ -3,6 +3,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from ..domain import DomainValidationError
 from ..repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
 from .artifacts import tail_lines
 from .auth import Identity, require_admin
@@ -42,12 +43,21 @@ def submit_build(body: BuildBody, request: Request,
     ref = (body.git_ref or "").strip()
     if not _REF_RE.fullmatch(ref) or ".." in ref or ref.startswith("-"):
         raise HTTPException(status_code=422, detail="invalid_git_ref")
+    # 빠른 거절(fail-fast)일 뿐이다 -- 진짜 "동시에 하나만" 가드는
+    # repos.builds.create()의 트랜잭션 안에 있다(builds.py 주석 참고). 이 체크가
+    # 없어도 정합성은 깨지지 않지만, 있으면 트랜잭션을 시작하기도 전에 흔한 경우를
+    # 싸게 걸러낸다.
     if repos.builds.active() is not None:
         raise HTTPException(status_code=409, detail="build_in_progress")
-    build_id = repos.builds.create(
-        repo_url=body.repo_url or request.app.state.settings.build_repo_url,
-        git_ref=ref, images=list(body.images), node_name=node,
-        actor=identity.actor)
+    try:
+        build_id = repos.builds.create(
+            repo_url=body.repo_url or request.app.state.settings.build_repo_url,
+            git_ref=ref, images=list(body.images), node_name=node,
+            actor=identity.actor)
+    except DomainValidationError as e:
+        # 위 사전 체크와 이 사이의 경합 창에서 다른 요청이 먼저 활성 빌드를
+        # 만든 경우 -- 트랜잭션 안 가드가 여기서 잡는다.
+        raise HTTPException(status_code=409, detail=e.reason_code)
     return {"build_id": build_id, "state": "Pending"}
 
 

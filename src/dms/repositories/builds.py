@@ -1,6 +1,7 @@
 import uuid
 
 from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
+from ..domain import DomainValidationError
 
 # 의존 순서다 — dms-agent 가 앞의 둘을 FROM 한다. 이 순서로 빌드하지 않으면 실패한다.
 BUILD_IMAGES = ("dms-mpifileutils", "dms", "dms-agent")
@@ -49,6 +50,18 @@ class BuildsRepository:
         after = {"build_id": build_id, "git_ref": git_ref, "images": list(images),
                  "node_name": node_name}
         with self._db.transaction():
+            # "동시에 활성 빌드 하나만" 불변식의 진짜 가드는 여기다 -- active() 존재
+            # 확인과 INSERT를 같은 트랜잭션(=Database._lock을 쥔 같은 구간) 안에서
+            # 원자적으로 처리한다. 호출자(라우터)가 트랜잭션 밖에서 미리 active()를
+            # 체크하는 건 빠른 거절(fail-fast)일 뿐이다 -- 두 요청이 거의 동시에
+            # 각자 create()를 부르면 그 사전 체크만으로는 활성 빌드가 2개 생기는 걸
+            # 막지 못한다. Database._lock은 threading.RLock이라 같은 프로세스 안
+            # 여러 스레드 사이의 경쟁은 막아주지만, api replicas가 2개 이상으로
+            # 늘어나면(프로세스가 여러 개) 프로세스 경계를 못 넘으므로 소용없다 --
+            # 지금은 replicas=1이라 이걸로 충분하다.
+            if self.active() is not None:
+                raise DomainValidationError(
+                    "build_in_progress", "an active build already exists")
             # created_at은 초 단위 정밀도라 같은 초에 만들어진 빌드끼리는 정렬이
             # 안 된다(build_id는 uuid4라 순서와 무관) -- requests.commit_order와
             # 같은 방식으로 별도 단조 증가 seq를 둬서 생성 순서를 보장한다.

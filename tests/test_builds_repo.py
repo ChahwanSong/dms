@@ -1,5 +1,6 @@
 import pytest
 from dms.db import Database
+from dms.domain import DomainValidationError
 from dms.migrations import migrate
 from dms.repositories import Repositories
 from dms.repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
@@ -37,6 +38,20 @@ def test_active_sees_pending_and_running_only(repos):
     assert repos.builds.active()["build_id"] == bid
     repos.builds.finish(bid, state="Succeeded")
     assert repos.builds.active() is None
+
+
+def test_create_raises_when_active_build_exists(repos):
+    # "동시에 활성 빌드 하나만" 불변식의 진짜 가드는 create() 트랜잭션 안에 있다 --
+    # 여기서 이 가드 자체를 저장소 레벨에서 직접 검증한다(API 레벨의 409 테스트는
+    # 라우터의 사전 active() "빠른 거절"만 확인할 뿐, 트랜잭션 안 가드까지는 못 짚는다).
+    repos.builds.create(repo_url="u", git_ref="main", images=["dms"],
+                        node_name="dms-w1", actor="a")
+    with pytest.raises(DomainValidationError) as exc_info:
+        repos.builds.create(repo_url="u", git_ref="dev", images=["dms"],
+                            node_name="dms-w1", actor="a")
+    assert exc_info.value.reason_code == "build_in_progress"
+    # 실패한 시도는 행을 남기지 않는다 -- 활성 빌드는 여전히 하나뿐.
+    assert len(repos.builds.list(limit=10)) == 1
 
 
 def test_finish_records_reason_commit_and_log(repos):
