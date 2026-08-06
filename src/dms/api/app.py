@@ -6,7 +6,7 @@ from starlette.staticfiles import StaticFiles
 from ..config import Settings
 from ..db import Database
 from ..repositories import Repositories
-from ..wiring import build_execution_adapter, build_identity_resolver
+from ..wiring import build_build_runner, build_execution_adapter, build_identity_resolver
 from .routes_accounts import router as accounts_router
 from .routes_auth import router as auth_router
 from .routes_storages import router as storages_router, user_router as user_storages_router
@@ -20,6 +20,7 @@ from .routes_policies import router as policies_router
 from .routes_denylist import router as denylist_router
 from .routes_batches import router as batches_router
 from .routes_control import router as control_router
+from .routes_builds import router as builds_router
 
 
 def create_app(settings: Settings, db: Database) -> FastAPI:
@@ -28,6 +29,7 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app.state.repos = Repositories(db)
     app.state.identity_resolver = build_identity_resolver(settings)
     app.state.execution_adapter = build_execution_adapter(settings, app.state.repos)
+    app.state.build_runner = build_build_runner(settings)
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
                        session_cookie="dms_session")
 
@@ -60,6 +62,7 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app.include_router(denylist_router)
     app.include_router(batches_router)
     app.include_router(control_router)
+    app.include_router(builds_router)
 
     static_dir = settings.static_dir
     if static_dir and os.path.isdir(static_dir):
