@@ -56,6 +56,18 @@ def test_admin_account_creation_requires_ops_token(client):
     assert r.json()["role"] == "admin"
 
 
+def test_admin_account_bootstrap_actor_is_in_a_reserved_namespace(client, db):
+    # M8: actor="admin-token"을 그대로 쓰면, _USERNAME_RE가 "admin-token"을 유효한
+    # 사용자명으로 허용하고(영숫자+하이픈) /api/auth/signup은 무인증이라 누구나 그
+    # 이름으로 셀프 가입해 부트스트랩 경로가 남긴 감사 행과 구분 안 되는 행을 만들
+    # 수 있다. ':'는 사용자명에 금지돼 있어 "token:admin-token"은 어떤 사용자도
+    # 도달할 수 없는 네임스페이스다.
+    client.post("/api/admin/accounts", json={"username": "boss", "password": "pw"},
+               headers={"x-admin-token": "tok-admin"})
+    rows = db.query("SELECT * FROM audit_log WHERE mutation_class = 'account'")
+    assert rows[-1]["actor"] == "token:admin-token"
+
+
 def test_auth_me_returns_raw_actor_for_token_auth(client):
     # /api/auth/me는 감사 로그가 아니라 로그인 신원 표시용이다 -- audit_actor()의
     # token: 접두가 여기 새어 들어가면 프론트 헤더와 기존 단언이 깨진다.

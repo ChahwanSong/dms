@@ -57,8 +57,14 @@ def create_admin_account(body: LoginBody, request: Request):
     if not tokens_match(supplied, request.app.state.settings.admin_token):
         raise HTTPException(status_code=403, detail="admin_token_required")
     try:
+        # M8: actor="admin-token"을 그대로 쓰면 accounts._USERNAME_RE가 "admin-token"을
+        # 유효한 사용자명으로 허용하고 /api/auth/signup은 무인증이라, 누구나 그 이름으로
+        # 셀프 가입해 이 부트스트랩 경로가 남긴 감사 행과 구분 안 되는 행을 만들 수
+        # 있다. ':'는 사용자명에 금지돼 있어(auth.py의 audit_actor()가 감사 actor에
+        # token: 접두를 붙일 때 쓰는 것과 같은 예약 네임스페이스) 어떤 사용자도 절대
+        # 이 값에 도달할 수 없다.
         request.app.state.repos.accounts.create(
-            body.username, body.password, ROLE_ADMIN, actor="admin-token")
+            body.username, body.password, ROLE_ADMIN, actor="token:admin-token")
     except DomainValidationError as e:
         raise HTTPException(status_code=409 if e.reason_code == "account_exists" else 422,
                             detail=e.reason_code)
