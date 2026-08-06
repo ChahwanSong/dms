@@ -128,6 +128,19 @@ class RequestsRepository:
                WHERE entity_kind = 'request' AND entity_id = :id ORDER BY id""",
             {"id": request_id})
 
+    def last_reason_code(self, request_id) -> "str | None":
+        """그 요청이 종단으로 간 진짜 이유. 배치 항목이 상태값(Cancelled/Rejected/Failed)
+        대신 이것을 들고 있어야 「사유」 열이 바로 옆 StatusPill과 중복되지 않고 운영자에게
+        '왜'를 알려준다. 사유 없이 종단화된 전이(예: 사유 없는 취소)는 걸러지므로 그때는
+        None을 돌려준다 — 상태값을 사유인 양 채워 넣느니 비우는 편이 낫다."""
+        row = self._db.query_one(
+            """SELECT reason_code FROM state_transitions
+               WHERE entity_kind = 'request' AND entity_id = :id
+                 AND to_state <> 'Pending' AND reason_code IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            {"id": request_id})
+        return row["reason_code"] if row else None
+
     def finalize_from_job(self, request_id, job_state, *, reason_code=None,
                           summary=None, actor):
         target = self._JOB_TO_REQUEST.get(DataJobState(job_state))

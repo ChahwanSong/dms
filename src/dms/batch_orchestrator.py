@@ -47,12 +47,16 @@ class BatchOrchestrator:
                 self._repos.batches.bump_counts(batch_id, succeeded=1)
             elif req_state == RequestState.CANCELLED.value:
                 # 취소는 성공도 실패도 아니다 — 카운터를 올리지 않는다.
-                self._repos.batches.set_item_status(batch_id, item["seq"], "Cancelled",
-                                                    reason_code=req_state)
+                # reason_code 는 상태값을 되풀이하지 않고 요청의 실제 종단 사유를 옮긴다
+                # (없으면 NULL — 바로 옆 StatusPill과 중복 표시하지 않는다).
+                self._repos.batches.set_item_status(
+                    batch_id, item["seq"], "Cancelled",
+                    reason_code=self._repos.requests.last_reason_code(item["request_id"]))
             else:
                 status = "Rejected" if req_state == RequestState.REJECTED.value else "Failed"
-                self._repos.batches.set_item_status(batch_id, item["seq"], status,
-                                                    reason_code=req_state)
+                self._repos.batches.set_item_status(
+                    batch_id, item["seq"], status,
+                    reason_code=self._repos.requests.last_reason_code(item["request_id"]))
                 self._repos.batches.bump_counts(batch_id, failed=1)
 
     def _materialize(self, batch, item):

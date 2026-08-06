@@ -47,6 +47,23 @@ def test_record_result_and_list(db):
     assert repo.list(requester_id="bob") == []
 
 
+def test_last_reason_code_returns_the_terminal_transitions_reason(db):
+    repo = RequestsRepository(db)
+    rid = _create(repo)
+    repo.set_state(rid, RequestState.PLANNED, actor="planner")
+    repo.set_state(rid, RequestState.REJECTED, reason_code="storage_missing", actor="planner")
+    assert repo.last_reason_code(rid) == "storage_missing"
+
+
+def test_last_reason_code_is_none_when_the_terminal_transition_has_no_reason(db):
+    # 사유 없이 종단화된 경우(예: 취소)는 NULL을 돌려줘야 한다 — 상태값을 사유인 양
+    # 중복 표시하느니 화면을 비우는 편이 낫다는 설계 결정.
+    repo = RequestsRepository(db)
+    rid = _create(repo)
+    repo.set_state(rid, RequestState.CANCELLED, actor="admin")
+    assert repo.last_reason_code(rid) is None
+
+
 def test_set_state_from_state_is_atomic(db):
     import threading
     repo = RequestsRepository(db)

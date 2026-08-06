@@ -4,6 +4,7 @@ import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
+import { reasonText } from "../../lib/api";
 export function BatchDetail() {
   const { batchId = "" } = useParams();
   const q = useBatch(batchId);
@@ -35,7 +36,7 @@ export function BatchDetail() {
               <td className="py-2">{it.seq}</td>
               <td className="text-muted font-mono text-xs">{JSON.stringify(it.payload)}</td>
               <td><StatusPill state={it.status} /></td>
-              <td className="text-bad text-xs">{it.reason_code ?? ""}</td>
+              <td className="text-bad text-xs">{reasonText(it.reason_code)}</td>
             </tr>))}
         </tbody>
       </Table>
