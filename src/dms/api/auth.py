@@ -12,7 +12,12 @@ _RESERVED_ACTOR_PREFIX = "token:"
 # requester_id -> LDAP/denylist 해석, 스캔 경로 소유권, 계정 자기잠금 가드가 전부 이
 # 값을 그대로 비교한다. 대신 인증 방식만 auth 필드로 따로 들고 다니고, 감사 로그를
 # 쓰는 라우트에서만 audit_actor()를 거쳐 표시용 actor를 만든다.
-Identity = namedtuple("Identity", "actor role auth", defaults=("session",))
+# auth 필드에는 일부러 기본값을 두지 않는다 -- current_identity()의 두 반환 지점이
+# 이미 둘 다 명시적으로 채우므로 기본값은 어떤 정상 경로에서도 쓰이지 않는다. 만약
+# 앞으로 생기는 세 번째 생성 지점이 이 필드를 빠뜨리면, 기본값이 있는 순간 조용히
+# "session"으로 분류돼 토큰 호출이 사람 admin으로 감사 로그에 남는다 -- 감사 로그가
+# 거짓말하는 것보다는 그 자리에서 TypeError로 즉시 터지는 편이 낫다.
+Identity = namedtuple("Identity", "actor role auth")
 
 
 def audit_actor(identity: Identity) -> str:
@@ -34,7 +39,11 @@ def current_identity(request: Request) -> Identity:
     if auth.startswith("Bearer "):
         token = auth[len("Bearer "):]
         if tokens_match(token, settings.shared_token):
-            actor = request.headers.get("x-dms-actor", "shared-token")
+            # 헤더가 아예 없을 때만 .get()의 기본값이 적용된다 -- 헤더가 빈 문자열이나
+            # 공백만으로 존재하면 그 값이 그대로 actor가 돼 audit_actor()가 빈
+            # "token:"을 만든다. "값 없음"을 헤더 부재/빈 문자열/공백 세 가지 모두에서
+            # 동일하게 "shared-token"으로 정규화해 옆문을 막는다.
+            actor = (request.headers.get("x-dms-actor") or "").strip() or "shared-token"
             if actor.startswith(_RESERVED_ACTOR_PREFIX):
                 raise HTTPException(status_code=401, detail="invalid_actor")
             return Identity(actor=actor, role="admin", auth="token")

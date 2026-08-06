@@ -103,3 +103,25 @@ def test_reserved_actor_prefix_in_header_is_rejected(client):
                             "x-dms-actor": "token:alice"},
                    json={"maintenance": False, "drain": False, "reason": None})
     assert r.status_code == 401
+
+
+def test_empty_actor_header_audit_is_not_bare_prefix(client, db):
+    # x-dms-actor 헤더가 "헤더 자체가 없음"이 아니라 빈 문자열로 존재하면
+    # request.headers.get(..., "shared-token") 기본값 폴백을 건너뛴다 -- 그대로
+    # actor로 쓰면 audit_log에 빈 "token:"이 남아 추적성이 사라진다.
+    r = client.put("/api/admin/control-state",
+                   headers={"Authorization": "Bearer tok-shared", "x-dms-actor": ""},
+                   json={"maintenance": False, "drain": False, "reason": None})
+    assert r.status_code == 200
+    rows = db.query("SELECT * FROM audit_log WHERE mutation_class = 'control_state'")
+    assert rows[-1]["actor"] == "token:shared-token"
+
+
+def test_whitespace_only_actor_header_audit_is_not_bare_prefix(client, db):
+    # 빈 문자열만 막고 공백만 있는 값을 방치하면 같은 구멍이 옆문으로 남는다.
+    r = client.put("/api/admin/control-state",
+                   headers={"Authorization": "Bearer tok-shared", "x-dms-actor": "   "},
+                   json={"maintenance": False, "drain": False, "reason": None})
+    assert r.status_code == 200
+    rows = db.query("SELECT * FROM audit_log WHERE mutation_class = 'control_state'")
+    assert rows[-1]["actor"] == "token:shared-token"
