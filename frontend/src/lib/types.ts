@@ -94,8 +94,15 @@ export interface ControlState {
   maintenance: number;
   drain: number;
   reason: string | null;
+  build_node_name: string | null;
   changed_by: string | null;
   changed_at: string | null;
+}
+
+export interface Build {
+  build_id: string; repo_url: string; git_ref: string; commit_sha: string | null;
+  images: string[]; node_name: string; state: string; reason_code: string | null;
+  tag: string; created_at: string; finished_at: string | null;
 }
 
 export interface ScanPath {

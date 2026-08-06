@@ -3,7 +3,10 @@ import { apiGet, apiSend } from "../../lib/api";
 import type { ControlState } from "../../lib/types";
 export const useControlState = () =>
   useQuery({ queryKey: ["control-state"], queryFn: () => apiGet<ControlState>("/api/admin/control-state") });
-export interface ControlStateBody { maintenance: boolean; drain: boolean; reason: string | null; }
+export interface ControlStateBody {
+  maintenance: boolean; drain: boolean; reason: string | null;
+  build_node_name: string | null;
+}
 export const useSetControlState = () => {
   const qc = useQueryClient();
   return useMutation({ mutationFn: (b: ControlStateBody) =>

@@ -9,7 +9,7 @@ import { ControlStatePage } from "./ControlStatePage";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
-const CS = { maintenance: 1, drain: 0, reason: "점검", changed_by: "ops", changed_at: "2026-08-05T00:00:00Z" };
+const CS = { maintenance: 1, drain: 0, reason: "점검", build_node_name: "dms-w1", changed_by: "ops", changed_at: "2026-08-05T00:00:00Z" };
 
 function wrap() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -37,12 +37,12 @@ test("toggling drain and saving sends the correct PUT body", async () => {
   await screen.findByLabelText("유지보수");
   await userEvent.click(screen.getByLabelText("드레인"));
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
-  expect(body).toEqual({ maintenance: true, drain: true, reason: "점검" });
+  expect(body).toEqual({ maintenance: true, drain: true, reason: "점검", build_node_name: "dms-w1" });
 });
 
 test("renders no warning banners when both flags are off", async () => {
   server.use(http.get("/api/admin/control-state", () =>
-    HttpResponse.json({ maintenance: 0, drain: 0, reason: null, changed_by: null, changed_at: null })));
+    HttpResponse.json({ maintenance: 0, drain: 0, reason: null, build_node_name: null, changed_by: null, changed_at: null })));
   wrap();
   await screen.findByLabelText("유지보수");
   expect(screen.queryByText((_, node) => Boolean(node?.textContent?.startsWith("유지보수 중")))).not.toBeInTheDocument();

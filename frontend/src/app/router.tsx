@@ -20,6 +20,7 @@ import { DenylistList } from "../features/denylist/DenylistList";
 import { ControlStatePage } from "../features/control/ControlStatePage";
 import { AccountsList } from "../features/accounts/AccountsList";
 import { NodesList } from "../features/nodes/NodesList";
+import { BuildsPage } from "../features/builds/BuildsPage";
 
 function Home() {
   const me = useMe();
@@ -50,6 +51,7 @@ export function AppRouter() {
         <Route path="/admin/control" element={<RequireRole role="admin"><AppShell><ControlStatePage /></AppShell></RequireRole>} />
         <Route path="/admin/accounts" element={<RequireRole role="admin"><AppShell><AccountsList /></AppShell></RequireRole>} />
         <Route path="/admin/nodes" element={<RequireRole role="admin"><AppShell><NodesList /></AppShell></RequireRole>} />
+        <Route path="/admin/builds" element={<RequireRole role="admin"><AppShell><BuildsPage /></AppShell></RequireRole>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AuthProvider>

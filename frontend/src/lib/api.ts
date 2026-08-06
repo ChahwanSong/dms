@@ -56,6 +56,13 @@ export const REASON_MESSAGES: Record<string, string> = {
   requester_disabled: "요청자 계정이 비활성화되었습니다",
   http_500: "서버 오류가 발생했습니다",
   http_503: "서비스를 일시적으로 사용할 수 없습니다",
+  build_node_not_set: "빌드 노드가 지정되지 않았습니다 — 컨트롤 상태에서 먼저 지정하세요",
+  build_in_progress: "이미 진행 중인 빌드가 있습니다",
+  unknown_image: "빌드할 이미지를 선택해 주세요",
+  invalid_git_ref: "git ref 형식이 올바르지 않습니다",
+  build_not_found: "빌드를 찾을 수 없습니다",
+  build_failed: "빌드가 실패했습니다 — 로그를 확인하세요",
+  submit_failed: "빌드 파드를 만들지 못했습니다",
 };
 
 export class ApiError extends Error {

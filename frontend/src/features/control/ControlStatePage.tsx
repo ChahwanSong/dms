@@ -12,18 +12,21 @@ export function ControlStatePage() {
   const [maintenance, setMaintenance] = useState(false);
   const [drain, setDrain] = useState(false);
   const [reason, setReason] = useState("");
+  const [buildNodeName, setBuildNodeName] = useState("");
 
   useEffect(() => {
     if (!q.data) return;
     setMaintenance(q.data.maintenance === 1);
     setDrain(q.data.drain === 1);
     setReason(q.data.reason ?? "");
+    setBuildNodeName(q.data.build_node_name ?? "");
   }, [q.data]);
 
   const submit = () => {
     setControlState.mutate({
       maintenance, drain,
       reason: reason.trim() === "" ? null : reason,
+      build_node_name: buildNodeName.trim() === "" ? null : buildNodeName,
     });
   };
 
@@ -55,6 +58,9 @@ export function ControlStatePage() {
               <label className="block">사유
                 <input aria-label="사유" className={field} value={reason}
                        onChange={(e) => setReason(e.target.value)} /></label>
+              <label className="block">빌드 노드
+                <input aria-label="빌드 노드" className={field} value={buildNodeName}
+                       onChange={(e) => setBuildNodeName(e.target.value)} /></label>
               {setControlState.isError && (
                 <p className="text-bad">{(setControlState.error as ApiError).message}</p>
               )}
