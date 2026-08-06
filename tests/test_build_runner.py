@@ -55,6 +55,18 @@ def test_submit_failure_becomes_execution_error():
     assert e.value.reason_code == "submit_failed"
 
 
+def test_submit_manifest_build_failure_becomes_execution_error():
+    # build_build_pod(...) 호출 자체가 실패해도(예: build dict에 필수 키가
+    # 빠짐) 원시 KeyError가 아니라 ExecutionError(submit_failed)로 나와야
+    # 한다 -- 호출자(BuildWatcher)는 ExecutionError만 잡아 빌드를 Failed로
+    # 기록하므로, 새어나간 예외는 루프를 죽이고 빌드가 Running에 영원히 남는다.
+    k8s = _FakeK8s()
+    incomplete = {k: v for k, v in BUILD.items() if k != "images"}
+    with pytest.raises(ExecutionError) as e:
+        _runner(k8s).submit(incomplete)
+    assert e.value.reason_code == "submit_failed"
+
+
 @pytest.mark.parametrize("phase,expected", [
     ("Pending", ExecStatus.PENDING), ("Running", ExecStatus.RUNNING),
     ("Succeeded", ExecStatus.SUCCEEDED), ("Failed", ExecStatus.FAILED),

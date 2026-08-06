@@ -29,12 +29,12 @@ class BuildRunner:
         self._builder_image = builder_image
 
     def submit(self, build) -> str:
-        manifest = build_build_pod(
-            build_id=build["build_id"], repo_url=build["repo_url"],
-            git_ref=build["git_ref"], images=build["images"],
-            node=build["node_name"], namespace=self._ns,
-            registry=self._registry, builder_image=self._builder_image)
         try:
+            manifest = build_build_pod(
+                build_id=build["build_id"], repo_url=build["repo_url"],
+                git_ref=build["git_ref"], images=build["images"],
+                node=build["node_name"], namespace=self._ns,
+                registry=self._registry, builder_image=self._builder_image)
             self._k8s.create(manifest)
         except Exception as exc:
             raise ExecutionError("submit_failed", str(exc)[:200]) from exc
