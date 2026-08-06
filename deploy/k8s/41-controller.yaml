@@ -31,7 +31,7 @@ spec:
       serviceAccountName: dms-controller
       containers:
         - name: controller
-          image: pkg-01:5000/dms:d21
+          image: pkg-01:5000/dms:d22
           imagePullPolicy: IfNotPresent
           command: ["dms", "controller"]
           envFrom:
