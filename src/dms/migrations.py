@@ -178,6 +178,7 @@ def migrate(db: Database) -> None:
             UNIQUE (username, storage_name, path))""",
         """CREATE TABLE IF NOT EXISTS builds (
             build_id TEXT PRIMARY KEY,
+            seq INTEGER,
             repo_url TEXT NOT NULL,
             git_ref TEXT NOT NULL,
             commit_sha TEXT,
@@ -186,6 +187,7 @@ def migrate(db: Database) -> None:
             state TEXT NOT NULL,
             reason_code TEXT,
             log_uri TEXT,
+            log_text TEXT,
             created_at TEXT NOT NULL,
             finished_at TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS releases (
@@ -207,6 +209,7 @@ def migrate(db: Database) -> None:
             maintenance INTEGER NOT NULL DEFAULT 0,
             drain INTEGER NOT NULL DEFAULT 0,
             reason TEXT,
+            build_node_name TEXT,
             changed_by TEXT,
             changed_at TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
@@ -294,6 +297,9 @@ def _ensure_columns(db):
         ("data_jobs", "confirmed_fingerprint", "TEXT"),
         ("data_jobs", "phase_refs", "TEXT"),
         ("requests", "batch_id", "TEXT"),
+        ("control_state", "build_node_name", "TEXT"),
+        ("builds", "log_text", "TEXT"),
+        ("builds", "seq", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

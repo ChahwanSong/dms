@@ -96,14 +96,17 @@ class ControlRepository:
     def control_state(self):
         return self._db.query_one("SELECT * FROM control_state WHERE id = 1")
 
-    def set_control_state(self, *, maintenance, drain, reason, actor):
+    def set_control_state(self, *, maintenance, drain, reason, actor,
+                          build_node_name=None):
         before = self.control_state()
         with self._db.transaction():
             self._db.execute(
                 """UPDATE control_state SET maintenance = :m, drain = :d, reason = :r,
+                       build_node_name = :bn,
                        changed_by = :actor, changed_at = :now WHERE id = 1""",
                 {"m": 1 if maintenance else 0, "d": 1 if drain else 0,
-                 "r": reason, "actor": actor, "now": utc_now_iso()})
+                 "r": reason, "bn": build_node_name, "actor": actor,
+                 "now": utc_now_iso()})
             self._audit("control_state", "set", "control_state", before,
                         self.control_state(), actor)
 
