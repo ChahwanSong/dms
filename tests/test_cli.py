@@ -37,6 +37,11 @@ def test_controller_once(tmp_path, monkeypatch, capsys):
     assert main(["controller", "--once"]) == 0
     out = capsys.readouterr().out
     assert "storage-reconciler=ok" in out and "retention=ok" in out
+    # I4: cli.py가 build_build_runner(settings)로 만든 러너(기본 execution_backend=
+    # "stub"이면 StubBuildRunner, None이 아니다)를 build_loops에 실제로 넘기는지 --
+    # 이 배선이 빠지면 build-watcher 루프가 아예 등록되지 않아 모든 빌드가 Pending에
+    # 영구히 남는데, 이 어서션이 없으면 그 회귀를 잡을 방법이 없었다.
+    assert "build-watcher=ok" in out
 
 
 def test_agent_once_uses_agent_settings(monkeypatch):

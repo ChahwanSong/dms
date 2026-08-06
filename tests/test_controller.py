@@ -1,3 +1,4 @@
+from dms.build_runner import StubBuildRunner
 from dms.controller import Loop, build_loops, run_all_once
 from dms.repositories import Repositories
 
@@ -11,6 +12,21 @@ def test_build_loops_names_and_intervals(db, settings):
         ("retention", settings.retention_interval_seconds),
         ("batch-orchestrator", settings.batch_orchestrator_interval_seconds),
         ("pod-gc", settings.pod_gc_interval_seconds)]
+
+
+def test_build_loops_includes_build_watcher_when_build_runner_is_given(db, settings):
+    # I4: 이 슬라이스의 심장(빌드를 실제로 돌게 만드는 배선)이 회귀 가드 없이
+    # 들어갔던 자리 -- controller.py의 `if build_runner is not None` 가드가
+    # 지워지거나 망가져도 641개 테스트가 전부 초록불이었다. build_runner가
+    # 주어지면 루프 목록에 "build-watcher"가 실제로 등록되는지 직접 확인한다.
+    loops = build_loops(settings, Repositories(db), build_runner=StubBuildRunner())
+    names_and_intervals = [(l.name, l.interval_seconds) for l in loops]
+    assert ("build-watcher", settings.build_watcher_interval_seconds) in names_and_intervals
+
+
+def test_build_watcher_loop_is_absent_when_build_runner_is_none(db, settings):
+    loops = build_loops(settings, Repositories(db))
+    assert "build-watcher" not in [l.name for l in loops]
 
 
 def test_run_all_once_runs_and_isolates_errors(db, capsys):
