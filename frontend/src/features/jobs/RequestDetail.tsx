@@ -7,7 +7,7 @@ import { isTerminal } from "../../lib/jobState";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Timeline } from "./Timeline";
 import { JobViewer } from "./JobViewer";
-import { ApiError } from "../../lib/api";
+import { ApiError, reasonText } from "../../lib/api";
 
 // 요청 상태의 종단 집합은 잡 상태(jobState.ts의 isTerminal)와 다르다 —
 // "Conflict"를 포함하고 "PreviewExpired"는 포함하지 않는다.
@@ -109,7 +109,7 @@ export function RequestDetail() {
             <div className="flex items-center justify-between">
               <span className="text-sm">{j.job_id}</span><StatusPill state={j.state} />
             </div>
-            {j.reason_code && <p className="text-bad text-sm mt-1">{j.reason_code}</p>}
+            {j.reason_code && <p className="text-bad text-sm mt-1">{reasonText(j.reason_code)}</p>}
             {j.artifact_uri && (
               <p className="text-muted text-xs mt-1 break-all">아티팩트 {j.artifact_uri}</p>
             )}

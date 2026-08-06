@@ -68,7 +68,7 @@ test("renders the request transition timeline in order with the failed transitio
   expect(items[0]).toHaveTextContent("Queued");
   expect(items[1]).toHaveTextContent("Executing");
   expect(items[2]).toHaveTextContent("Failed");
-  expect(items[2]).toHaveTextContent("no_eligible_nodes");
+  expect(items[2]).toHaveTextContent("실행 가능한 노드가 없습니다");
 });
 
 test("computes and renders the request duration from created_at to the last transition", async () => {
