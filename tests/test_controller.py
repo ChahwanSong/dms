@@ -1,6 +1,7 @@
 from dms.build_runner import StubBuildRunner
 from dms.controller import Loop, build_loops, run_all_once
 from dms.repositories import Repositories
+from dms.rollout_runner import StubRolloutRunner
 
 
 def test_build_loops_names_and_intervals(db, settings):
@@ -27,6 +28,34 @@ def test_build_loops_includes_build_watcher_when_build_runner_is_given(db, setti
 def test_build_watcher_loop_is_absent_when_build_runner_is_none(db, settings):
     loops = build_loops(settings, Repositories(db))
     assert "build-watcher" not in [l.name for l in loops]
+
+
+def test_build_loops_includes_rollout_watcher_when_rollout_runner_is_given(db, settings):
+    loops = build_loops(settings, Repositories(db), rollout_runner=StubRolloutRunner())
+    assert ("rollout-watcher", settings.rollout_interval_seconds) in [
+        (l.name, l.interval_seconds) for l in loops]
+
+
+def test_rollout_watcher_loop_is_absent_when_rollout_runner_is_none(db, settings):
+    loops = build_loops(settings, Repositories(db))
+    assert "rollout-watcher" not in [l.name for l in loops]
+
+
+def test_rollout_watcher_loop_actually_applies_a_release(db, settings):
+    # 배선 회귀 가드: 루프 "이름"만 보는 위 테스트는 lambda 안이 잘못돼도(예: 다른
+    # repos/runner를 넘기거나 run_once를 안 부르거나) 초록불이다. 여기선 실제로
+    # Pending 릴리스가 패치되어 Applying이 되는지 행동으로 고정한다 -- 이 배선이
+    # 빠지면 포탈이 만든 롤아웃이 영원히 Pending에 남는다.
+    repos = Repositories(db)
+    rows = repos.releases.create_batch(
+        items=[{"component": "dms-agent", "image": "pkg-01:5000/dms-agent:v2",
+                "tag": "v2"}], actor="ops")
+    runner = StubRolloutRunner()
+    loops = build_loops(settings, repos, rollout_runner=runner)
+    run_all_once(loops, repos, holder="h1")
+    assert runner.patched == [("DaemonSet", "dms-agent", "agent",
+                               "pkg-01:5000/dms-agent:v2")]
+    assert repos.releases.get(rows[0]["id"])["state"] == "Applying"
 
 
 def test_run_all_once_runs_and_isolates_errors(db, capsys):

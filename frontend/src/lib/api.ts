@@ -120,6 +120,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   rollout_in_progress: "이미 진행 중인 롤아웃이 있습니다",
   patch_failed: "워크로드 패치에 실패했습니다 — 컨트롤러 RBAC/로그를 확인하세요",
   observe_failed: "워크로드 상태를 읽지 못했습니다",
+  rollout_failed: "롤아웃이 실패했습니다",
+  rollout_timeout: "롤아웃이 제한 시간을 넘겨 실패했습니다",
+  rollout_aborted: "앞 컴포넌트 실패로 롤아웃이 중단되었습니다",
+  workload_not_found: "대상 워크로드를 찾을 수 없습니다",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

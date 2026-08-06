@@ -15,6 +15,7 @@ from .pod_gc import PodGarbageCollector
 from .reconciler import reconcile_storages_once
 from .repositories import Repositories
 from .retention import prune_agent_reports_once, prune_events_once
+from .rollout_watcher import RolloutWatcher
 from .stepper import JobStepper
 
 
@@ -26,7 +27,8 @@ class Loop:
 
 
 def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=None,
-                execution_adapter=None, build_runner=None) -> list[Loop]:
+                execution_adapter=None, build_runner=None,
+                rollout_runner=None) -> list[Loop]:
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
 
     def _stepper_step():
@@ -73,6 +75,14 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                           lambda: BuildWatcher(
                               repos, build_runner,
                               timeout_seconds=settings.build_timeout_seconds).run_once()))
+    # rollout_runner가 없으면(기존 호출자) 루프를 아예 넣지 않는다 --
+    # build-watcher와 같은 하위호환 규칙이다.
+    if rollout_runner is not None:
+        loops.append(Loop("rollout-watcher", settings.rollout_interval_seconds,
+                          lambda: RolloutWatcher(
+                              repos, rollout_runner,
+                              timeout_seconds=settings.rollout_timeout_seconds
+                          ).run_once()))
     return loops
 
 
@@ -97,9 +107,10 @@ def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[st
 
 def run_forever(settings: Settings, repos: Repositories, holder: str,
                 *, sleep=time.sleep, identity_resolver=None, execution_adapter=None,
-                build_runner=None) -> None:
+                build_runner=None, rollout_runner=None) -> None:
     loops = build_loops(settings, repos, identity_resolver=identity_resolver,
-                        execution_adapter=execution_adapter, build_runner=build_runner)
+                        execution_adapter=execution_adapter, build_runner=build_runner,
+                        rollout_runner=rollout_runner)
     next_due = {loop.name: 0.0 for loop in loops}
     while True:
         now = time.monotonic()

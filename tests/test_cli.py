@@ -42,6 +42,10 @@ def test_controller_once(tmp_path, monkeypatch, capsys):
     # 이 배선이 빠지면 build-watcher 루프가 아예 등록되지 않아 모든 빌드가 Pending에
     # 영구히 남는데, 이 어서션이 없으면 그 회귀를 잡을 방법이 없었다.
     assert "build-watcher=ok" in out
+    # 같은 이유의 배선 가드: cli.py가 build_rollout_runner(settings)를 만들어
+    # build_loops에 넘기지 않으면 rollout-watcher 루프가 등록되지 않아 포탈이
+    # 만든 릴리스가 영원히 Pending에 남는다.
+    assert "rollout-watcher=ok" in out
 
 
 def test_agent_once_uses_agent_settings(monkeypatch):
