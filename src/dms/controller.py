@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .batch_orchestrator import BatchOrchestrator
+from .build_watcher import BuildWatcher
 from .config import Settings
 from .db import utc_now_iso
 from .domain import DataJobState
@@ -25,7 +26,7 @@ class Loop:
 
 
 def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=None,
-                execution_adapter=None) -> list[Loop]:
+                execution_adapter=None, build_runner=None) -> list[Loop]:
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
 
     def _stepper_step():
@@ -44,7 +45,7 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                 reason_code="orphan_recovery",
                 summary=(job or {}).get("result_summary"), actor="stepper")
 
-    return [
+    loops = [
         Loop("planner", settings.planner_interval_seconds,
              lambda: Planner(repos, identity_resolver, settings=settings).run_once()),
         Loop("job-stepper", settings.stepper_interval_seconds, _stepper_step),
@@ -58,8 +59,15 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
              lambda: BatchOrchestrator(repos, settings=settings).run_once()),
         Loop("pod-gc", settings.pod_gc_interval_seconds,
              lambda: PodGarbageCollector(
-                 repos, adapter, after_seconds=settings.pod_gc_after_seconds).run_once()),
+                 repos, adapter, after_seconds=settings.pod_gc_after_seconds,
+                 build_runner=build_runner).run_once()),
     ]
+    # build_runner가 없으면(stub조차 배선되지 않은 기존 호출자) 루프를 아예 넣지 않는다 --
+    # None을 넘겨 매 틱마다 AttributeError로 죽게 두지 않기 위해서다.
+    if build_runner is not None:
+        loops.append(Loop("build-watcher", settings.build_watcher_interval_seconds,
+                          lambda: BuildWatcher(repos, build_runner).run_once()))
+    return loops
 
 
 def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[str, str]:
@@ -82,9 +90,10 @@ def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[st
 
 
 def run_forever(settings: Settings, repos: Repositories, holder: str,
-                *, sleep=time.sleep, identity_resolver=None, execution_adapter=None) -> None:
+                *, sleep=time.sleep, identity_resolver=None, execution_adapter=None,
+                build_runner=None) -> None:
     loops = build_loops(settings, repos, identity_resolver=identity_resolver,
-                        execution_adapter=execution_adapter)
+                        execution_adapter=execution_adapter, build_runner=build_runner)
     next_due = {loop.name: 0.0 for loop in loops}
     while True:
         now = time.monotonic()

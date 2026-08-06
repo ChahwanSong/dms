@@ -53,19 +53,22 @@ def main(argv=None) -> int:
     if args.command == "controller":
         from .controller import build_loops, run_all_once, run_forever
         from .repositories import Repositories
-        from .wiring import build_execution_adapter, build_identity_resolver
+        from .wiring import (build_build_runner, build_execution_adapter,
+                             build_identity_resolver)
         repos = Repositories(db)
         holder = f"controller-{os.getpid()}"
         identity_resolver = build_identity_resolver(settings)
         execution_adapter = build_execution_adapter(settings, repos)
+        build_runner = build_build_runner(settings)
         if args.once:
             loops = build_loops(settings, repos, identity_resolver=identity_resolver,
-                                execution_adapter=execution_adapter)
+                                execution_adapter=execution_adapter,
+                                build_runner=build_runner)
             results = run_all_once(loops, repos, holder)
             print(" ".join(f"{k}={v}" for k, v in results.items()))
             return 0
         run_forever(settings, repos, holder, identity_resolver=identity_resolver,
-                    execution_adapter=execution_adapter)
+                    execution_adapter=execution_adapter, build_runner=build_runner)
         return 0
 
     return 2
