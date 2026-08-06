@@ -127,8 +127,7 @@ camelCase 를 준다. 클라이언트 안에서 작은 정수 dict 로 정규화
 
 ## 5. RBAC
 
-`deploy/k8s/10-rbac.yaml` 의 **컨트롤러 Role 에만** 더한다 (api Role 은 의도적으로
-create-free 이고 patch 도 없다 — 롤아웃은 컨트롤러가 한다):
+**컨트롤러 Role** — 패치와 상태 읽기:
 
 ```yaml
   - apiGroups: ["apps"]
@@ -146,6 +145,25 @@ create-free 이고 patch 도 없다 — 롤아웃은 컨트롤러가 한다):
 `resourceNames` 로 범위를 좁힌다 — 컨트롤러가 네임스페이스의 임의 워크로드를 패치할
 이유가 없다. `pods/status` 를 별도 리소스로 부여한 이 파일의 기존 관례를 따라
 `*/status` 도 함께 준다.
+
+**api Role — 읽기 전용으로 같은 리소스를 준다:**
+
+```yaml
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list"]
+```
+
+§7의 `GET /api/admin/releases/targets` 가 **클러스터의 현재 이미지**를 보여주려면 api 가
+워크로드를 읽어야 한다. 이 파일의 api Role 주석은 **뮤테이션**에 관한 것이다 —
+`delete` 가 있는 이유(취소)와 `create` 가 없는 이유(제출을 안 함)를 적은 것이지 읽기를
+막는 규칙이 아니다. Deployment 의 이미지 태그는 포탈이 어차피 화면에 띄우는 값이라
+읽기 권한이 권한 상승이 아니다. **patch 는 주지 않는다** — 롤아웃은 컨트롤러가 한다.
+
+대안으로 "api 가 이미 가진 `pods list` 로 파드 이미지에서 유도"를 검토했으나 기각한다:
+롤링 업데이트 중에는 옛/새 파드가 섞여 있어 **현재 선언된 이미지를 정확히 알 수 없고**,
+읽기 전용 grant 하나로 끝날 일에 별도 추상화를 만들게 된다. api 는 컨트롤러와 같은
+`get_workload` 를 읽기 전용으로 쓴다 — 새 Protocol 을 만들지 않는다.
 
 ---
 
