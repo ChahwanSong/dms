@@ -50,5 +50,22 @@ https://github.com/advisories/GHSA-qwww-vcr4-c8h2
 `npm audit fix --force`를 이 패키지에 대해 실행하지 말 것 — 위 1)에서 설명한
 대로 더 명백히 이 앱에 해당하는 취약점 3건을 되살린다.
 
-전체 조사 기록: `.superpowers/sdd/2026-08-06-dms-portal-hygiene-slice12/task-5-report.md`
-(gitignore 대상, 로컬 워크트리에만 존재).
+## 알려진 advisory — vite/vitest/esbuild 체인(moderate 3, high 1, critical 1) — 범위 밖
+
+`npm audit`을 지금 돌리면 위 react-router 항목 외에 7건 중 나머지 5건이 더 뜬다:
+`esbuild`(moderate, 개발 서버가 임의 origin의 요청을 받아주는 문제),
+`vite`(moderate 2건 + high 1건, 옵티마이즈드 의존성 `.map` 경로 순회 등),
+`vite-node`/`@vitest/mocker`(moderate, vite 취약점의 전이), `vitest`(critical,
+Vitest UI 서버가 켜져 있을 때 임의 파일을 읽고 실행할 수 있는 문제 —
+`GHSA-5xrq-8626-4rwp`).
+
+**전부 개발 도구 체인(빌드 서버·테스트 러너)이고 배포되는 프로덕션 번들에는
+들어가지 않는다** — `npm run build`(`tsc -b && vite build`) 산출물이 아니라
+`npm run dev`/`vitest`를 실행하는 로컬 개발 환경에서만 노출 표면이 있다.
+critical로 표시된 `vitest` 건도 Vitest의 `--ui` 서버가 실제로 켜져 있어야
+성립하는데, 이 프로젝트는 그 모드를 쓰지 않는다(`package.json`의 `test`/
+`test:watch` 스크립트 어디에도 `--ui`가 없다). 고치려면 `vite`/`vitest`
+메이저 업그레이드(현재 `vite@5`/`vitest@2` → `vite@8`/`vitest@3` 이상)가
+필요한데, 이는 슬라이스 12 설계 §7이 명시적으로 범위 밖으로 둔 semver-major
+하네스 교체다. `npm audit fix --force`를 여기 실행하지 말 것 — 검증되지
+않은 메이저 업그레이드로 테스트 하네스 전체가 흔들릴 수 있다.
