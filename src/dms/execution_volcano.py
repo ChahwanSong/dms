@@ -19,6 +19,15 @@ _VCJOB_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
                 "Restarting": ExecStatus.RUNNING}
 _KIND = {"pod": "Pod", "vcjob": "Job"}
 
+# 롤아웃 apiserver 호출의 요청 상한(초). urllib3 기본값은 무제한이라 apiserver 가 멈추면
+# 틱이 영원히 블록된다 -- 이 저장소의 리스는 갱신되지 않으므로(controller.run_all_once 가
+# 틱마다 새로 획득한다) 리스 max(interval*3, 30)=30초가 만료되고 다른 파드가 같은 루프에
+# 진입한다. 롤아웃은 자기 자신을 재시작하는 경로라 여기서 막히는 것이 특히 나쁘다.
+# 한 틱이 최대 2회 호출(observe + pod_briefs)이므로 10초면 최악 20초 < 30초.
+# 설정 키로 빼지 않는다: 운영자가 튜닝할 값이 아니라 리스 TTL 과 맞물린 내부 불변식이고,
+# 노출하면 리스보다 큰 값이 설정돼 이 가드가 그대로 무력화될 수 있다.
+ROLLOUT_REQUEST_TIMEOUT_SECONDS = 10
+
 
 def _deadline_exceeded(obj) -> bool:
     """Pod가 activeDeadlineSeconds로 죽었는지. kubelet은 status.phase=Failed 와 함께
@@ -244,6 +253,7 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
     최초 메서드 호출 시점까지 lazy 하게 미룬다 — 클러스터 밖 단위 테스트가
     이 클래스를 생성만 하고(config 로드 없이) mock으로 대체해 사용하기 때문."""
     _VC = {"group": "batch.volcano.sh", "version": "v1alpha1", "plural": "jobs"}
+    _WORKLOAD_KINDS = ("Deployment", "DaemonSet")
 
     def __init__(self, namespace):
         self._namespace = namespace
@@ -308,38 +318,52 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
             return data.decode("utf-8", errors="replace")
         return str(data)
 
+    def _check_kind(self, kind):
+        # 검증은 try 밖에서 한다 -- 안에서 터지면 프로그래밍 오류가 _log_forbidden 을
+        # 거쳐 API 오류처럼 새어 나간다. _ensure 보다도 먼저다: 잘못된 kind 는
+        # apiserver 연결과 무관하게 확정적으로 틀렸다.
+        if kind not in self._WORKLOAD_KINDS:
+            raise ValueError(f"unsupported workload kind: {kind}")
+
     def patch_workload(self, kind, name, namespace, body):
+        self._check_kind(kind)
         self._ensure()
-        # 콘텐츠 타입을 명시한다 -- 클라이언트 내부 기본값이 JSON merge로 바뀌면
-        # containers 배열이 통째로 교체돼 env/volumeMounts가 날아간다(설계 §4).
+        # 콘텐츠 타입을 명시한다 -- 생략하면 클라이언트 기본값이
+        # application/json-patch+json(RFC 6902, 최상위가 배열)이라 이 dict 본문은
+        # apiserver 가 422 로 거절한다(설계 §4). kubernetes>=36 에서만 받는 kwarg다
+        # (pyproject 의 하한 근거).
         content_type = "application/strategic-merge-patch+json"
         try:
             if kind == "Deployment":
                 self._apps.patch_namespaced_deployment(
-                    name, namespace, body, _content_type=content_type)
-            elif kind == "DaemonSet":
-                self._apps.patch_namespaced_daemon_set(
-                    name, namespace, body, _content_type=content_type)
+                    name, namespace, body, _content_type=content_type,
+                    _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
             else:
-                raise ValueError(f"unsupported workload kind: {kind}")
+                self._apps.patch_namespaced_daemon_set(
+                    name, namespace, body, _content_type=content_type,
+                    _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
         except Exception as exc:
             self._log_forbidden("patch", kind, name, namespace, exc)
             raise
 
     def get_workload(self, kind, name, namespace):
         from .rollout_status import normalize_daemonset, normalize_deployment
+        self._check_kind(kind)
         self._ensure()
         try:
             if kind == "Deployment":
-                obj = self._apps.read_namespaced_deployment(name, namespace)
+                obj = self._apps.read_namespaced_deployment(
+                    name, namespace,
+                    _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
                 return normalize_deployment(obj.to_dict())
-            if kind == "DaemonSet":
-                obj = self._apps.read_namespaced_daemon_set(name, namespace)
-                return normalize_daemonset(obj.to_dict())
-            raise ValueError(f"unsupported workload kind: {kind}")
+            obj = self._apps.read_namespaced_daemon_set(
+                name, namespace, _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
+            return normalize_daemonset(obj.to_dict())
         except Exception as exc:
             # ApiException 타입 대신 status 속성으로 판별한다 -- .venv에 kubernetes가
             # 없어 테스트가 그 타입을 만들 수 없고, 클라이언트가 보는 것도 status뿐이다.
+            # (실 패키지 35.0.0/36.0.2 로 ApiException.status 존재를 확인했다 --
+            #  duck-typing 이 실 클라이언트에서도 동작한다.)
             if getattr(exc, "status", None) == 404:
                 return None
             self._log_forbidden("get", kind, name, namespace, exc)
@@ -354,15 +378,22 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
 
     def list_pod_briefs(self, namespace, label_selector):
         self._ensure()
-        pods = self._core.list_namespaced_pod(namespace,
-                                              label_selector=label_selector)
+        pods = self._core.list_namespaced_pod(
+            namespace, label_selector=label_selector,
+            _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
         briefs = []
         for pod in pods.items:
-            reason = None
+            # waiting 컨테이너가 여럿이면 전부 모은다(중복 제거, 등장 순서 유지).
+            # 하나만 채택하면 보고되는 원인이 컨테이너 순서에 좌우된다 -- 사이드카가
+            # ImagePullBackOff 인데 주 컨테이너의 CrashLoopBackOff 만 보이는 식이다.
+            # 순수 진단 채널이라 정보를 버리는 쪽보다 다 보여주는 쪽이 낫다.
+            reasons = []
             for cs in (pod.status.container_statuses or []):
                 waiting = getattr(cs.state, "waiting", None)
                 if waiting is not None and waiting.reason:
-                    reason = waiting.reason      # 예: ImagePullBackOff
+                    if waiting.reason not in reasons:
+                        reasons.append(waiting.reason)   # 예: ImagePullBackOff
+            reason = ",".join(reasons) or None   # 단일 컨테이너면 이전과 같은 문자열
             briefs.append({
                 "name": pod.metadata.name,
                 "node": pod.spec.node_name,
