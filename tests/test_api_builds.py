@@ -2,6 +2,10 @@ ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
 
 
 def _set_build_node(client, node="dms-w1"):
+    # I1: build_node_name은 이제 자유 입력이 아니라 agent_nodes에 보고된 노드
+    # 이름 중에서만 골라야 한다(422 unknown_build_node) -- PUT 전에 노드를
+    # 보고해 둔다.
+    client.app.state.repos.agents.ingest(node, {})
     r = client.put("/api/admin/control-state",
                    json={"maintenance": False, "drain": False, "reason": None,
                          "build_node_name": node},
@@ -106,6 +110,30 @@ def test_list_orders_newest_first(client):
     assert ids.index(second) < ids.index(first)
 
 
+def test_list_response_never_carries_log_text_or_seq(client):
+    # I2: 목록 응답은 로그 텍스트를 실어 나르지 않는다 -- 전용 /log 엔드포인트가
+    # 있고, 프론트는 목록 화면에서 log_text를 쓰지 않는다. seq도 내부 컬럼이다.
+    _set_build_node(client)
+    bid = client.post("/api/admin/builds", json={"git_ref": "main", "images": ["dms"]},
+                      headers=ADMIN).json()["build_id"]
+    client.app.state.repos.builds.finish(bid, state="Succeeded", log_text="x" * 1000)
+    listed = client.get("/api/admin/builds", headers=ADMIN).json()
+    assert "log_text" not in listed[0]
+    assert "seq" not in listed[0]
+
+
+def test_detail_response_never_carries_log_text_or_seq(client):
+    # 상세 화면도 로그는 /log를 따로 부른다 -- 여기 실으면 상세 조회마다 최대 64KB가
+    # 불필요하게 왕복한다.
+    _set_build_node(client)
+    bid = client.post("/api/admin/builds", json={"git_ref": "main", "images": ["dms"]},
+                      headers=ADMIN).json()["build_id"]
+    client.app.state.repos.builds.finish(bid, state="Succeeded", log_text="x" * 1000)
+    detail = client.get(f"/api/admin/builds/{bid}", headers=ADMIN).json()
+    assert "log_text" not in detail
+    assert "seq" not in detail
+
+
 def test_log_uses_log_text_when_build_is_terminal(client):
     # 진행 중이면 파드에서 실시간으로 읽지만, 종단이면 파드가 GC 되어 사라질 수 있어
     # DB에 박제된 log_text가 진실이다.
@@ -134,7 +162,26 @@ def test_whitespace_only_build_node_is_treated_as_unset(client):
     assert r2.status_code == 422 and r2.json()["detail"] == "build_node_not_set"
 
 
+def test_log_reads_from_runner_with_the_exported_ref_prefix_while_active(client):
+    # I5: 진행 중(Pending/Running)이면 라우터가 buildpod/<pod-name> ref를 직접
+    # 구성해 runner.read_log를 부른다(routes_builds.py). 이 리터럴이 build_runner.py의
+    # BUILD_REF_PREFIX와 어긋나면 조회가 조용히 miss돼 로그가 안 보인다 -- StubBuildRunner의
+    # 내부 로그를 정확한 ref로 시딩해 라우터가 그 ref를 그대로 구성하는지 검증한다.
+    from dms.build_runner import BUILD_REF_PREFIX
+    from dms.repositories.builds import build_pod_name
+    _set_build_node(client)
+    bid = client.post("/api/admin/builds", json={"git_ref": "main", "images": ["dms"]},
+                      headers=ADMIN).json()["build_id"]
+    assert client.get(f"/api/admin/builds/{bid}", headers=ADMIN).json()["state"] == "Pending"
+    ref = f"{BUILD_REF_PREFIX}/{build_pod_name(bid)}"
+    client.app.state.build_runner._log[ref] = "still building...\n"
+    r = client.get(f"/api/admin/builds/{bid}/log", headers=ADMIN)
+    assert r.status_code == 200
+    assert r.json()["log"] == "still building...\n"
+
+
 def test_control_state_accepts_build_node(client):
+    client.app.state.repos.agents.ingest("dms-w2", {})
     r = client.put("/api/admin/control-state",
                    json={"maintenance": False, "drain": False, "reason": None,
                          "build_node_name": "dms-w2"},

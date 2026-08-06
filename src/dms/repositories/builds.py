@@ -6,7 +6,6 @@ from ..domain import DomainValidationError
 # 의존 순서다 — dms-agent 가 앞의 둘을 FROM 한다. 이 순서로 빌드하지 않으면 실패한다.
 BUILD_IMAGES = ("dms-mpifileutils", "dms", "dms-agent")
 
-_TERMINAL = ("Succeeded", "Failed")
 _ACTIVE = ("Pending", "Running")
 LOG_TEXT_MAX = 64 * 1024
 
@@ -47,8 +46,11 @@ class BuildsRepository:
     def create(self, *, repo_url, git_ref, images, node_name, actor) -> str:
         build_id = uuid.uuid4().hex
         now = utc_now_iso()
-        after = {"build_id": build_id, "git_ref": git_ref, "images": list(images),
-                 "node_name": node_name}
+        # repo_url을 감사에 남긴다 -- 이게 빠지면 admin이 임의 저장소로 이미지를
+        # 만들어도(예: repo_url="https://evil/x.git") 감사 기록에 "어느 저장소의"
+        # 커밋인지가 안 남는다. commit SHA만으로는 저장소를 특정할 수 없다.
+        after = {"build_id": build_id, "repo_url": repo_url, "git_ref": git_ref,
+                 "images": list(images), "node_name": node_name}
         with self._db.transaction():
             # "동시에 활성 빌드 하나만" 불변식의 진짜 가드는 여기다 -- active() 존재
             # 확인과 INSERT를 같은 트랜잭션(=Database._lock을 쥔 같은 구간) 안에서
@@ -81,8 +83,14 @@ class BuildsRepository:
             "SELECT * FROM builds WHERE build_id = :id", {"id": build_id}))
 
     def list(self, limit: int = 50):
+        # I2: 목록은 SELECT * 를 쓰지 않는다 -- log_text는 행마다 최대 64KB라
+        # limit(기본 50) x 64KB = 최대 3.2MB가 매 폴링(프론트 5초 간격)마다 왕복한다.
+        # 로그는 전용 /log 엔드포인트가 따로 있어 목록에서 쓰이지 않는다. seq도
+        # 내부 정렬용 컬럼이라 함께 뺀다(정렬 자체는 SELECT 목록에 없어도 동작한다).
         rows = self._db.query(
-            "SELECT * FROM builds ORDER BY seq DESC LIMIT :n",
+            """SELECT build_id, repo_url, git_ref, commit_sha, images, node_name,
+                      state, reason_code, created_at, finished_at
+               FROM builds ORDER BY seq DESC LIMIT :n""",
             {"n": limit})
         return [_row(r) for r in rows]
 

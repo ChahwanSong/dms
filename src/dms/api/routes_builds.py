@@ -3,6 +3,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from ..build_runner import BUILD_REF_PREFIX
 from ..domain import DomainValidationError
 from ..repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
 from .artifacts import tail_lines
@@ -24,6 +25,12 @@ class BuildBody(BaseModel):
 
 def _detail(row):
     out = dict(row)
+    # I2: get_build_log()가 폴백용으로 repos.builds.get()의 SELECT * 결과를 그대로
+    # 쓰므로 저장소 레벨에서는 log_text를 빼지 않는다 -- 여기 API 응답 레벨에서만
+    # 뺀다. 상세 화면은 로그를 /log로 따로 받으므로 여기 실으면 최대 64KB가 헛돈다.
+    # seq도 내부 정렬용 컬럼이라 밖으로 새면 안 된다.
+    out.pop("log_text", None)
+    out.pop("seq", None)
     out["tag"] = build_tag(row["build_id"])
     return out
 
@@ -86,7 +93,7 @@ def get_build_log(build_id: str, request: Request,
     if row["state"] in ("Pending", "Running") and runner is not None:
         # 진행 중이면 파드에서 실시간으로 읽는다. 종단이면 박제된 사본이 진실이다
         # -- 파드는 GC 되어 사라질 수 있다.
-        log = runner.read_log(f"buildpod/{build_pod_name(build_id)}")
+        log = runner.read_log(f"{BUILD_REF_PREFIX}/{build_pod_name(build_id)}")
     if log is None:
         log = row.get("log_text")
     if log is not None and tail is not None:

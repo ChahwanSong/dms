@@ -6,6 +6,7 @@
 BuildRunner.poll 이 객체 없음을 FAILED 로 오인한다."""
 import logging
 
+from .build_runner import BUILD_REF_PREFIX
 from .repositories.builds import build_pod_name
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class PodGarbageCollector:
         if self._build_runner is not None:
             for build in self._repos.builds.terminal_older_than(
                     self._after, limit=self._limit, now_iso=now_iso):
-                ref = f"buildpod/{build_pod_name(build['build_id'])}"
+                ref = f"{BUILD_REF_PREFIX}/{build_pod_name(build['build_id'])}"
                 try:
                     self._build_runner.terminate(ref)
                     deleted += 1

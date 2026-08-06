@@ -3,6 +3,7 @@ from dms.db import Database
 from dms.domain import DomainValidationError
 from dms.migrations import migrate
 from dms.repositories import Repositories
+from dms.db import load_json
 from dms.repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
 
 
@@ -28,6 +29,17 @@ def test_create_writes_audit_row(repos):
                         images=["dms"], node_name="dms-w1", actor="ops")
     entries = repos.control.audit_entries(limit=5)
     assert any(e["mutation_class"] == "build" and e["actor"] == "ops" for e in entries)
+
+
+def test_create_audit_after_state_includes_repo_url(repos):
+    # I3: 감사 로그에 repo_url이 빠져 있으면 admin이 임의 저장소(repo_url)로 만든
+    # 이미지가 push돼도 감사 기록에 "어느 저장소의" 커밋인지가 안 남는다 -- commit
+    # SHA만으로는 저장소를 특정할 수 없다.
+    repos.builds.create(repo_url="https://example/r.git", git_ref="main",
+                        images=["dms"], node_name="dms-w1", actor="ops")
+    entries = repos.control.audit_entries(limit=5)
+    entry = next(e for e in entries if e["mutation_class"] == "build")
+    assert load_json(entry["after_state"])["repo_url"] == "https://example/r.git"
 
 
 def test_active_sees_pending_and_running_only(repos):
@@ -63,6 +75,20 @@ def test_finish_records_reason_commit_and_log(repos):
     assert (row["state"], row["reason_code"]) == ("Failed", "build_failed")
     assert row["commit_sha"] == "abc123" and row["log_text"] == "boom"
     assert row["finished_at"] is not None
+
+
+def test_list_excludes_log_text_and_seq(repos):
+    # I2: list()는 목록 화면용이다 -- 프론트는 log_text를 목록에서 쓰지 않는데
+    # (로그는 전용 /log 엔드포인트로 받는다), SELECT *를 쓰면 행마다 최대 64KB가
+    # 딸려 온다(limit 기본 50 x 64KB = 최대 3.2MB). seq도 내부 정렬용 컬럼이라
+    # 밖으로 새면 안 된다.
+    bid = repos.builds.create(repo_url="u", git_ref="main", images=["dms"],
+                              node_name="dms-w1", actor="x")
+    repos.builds.finish(bid, state="Succeeded", log_text="x" * 1000)
+    row = repos.builds.list(limit=10)[0]
+    assert "log_text" not in row
+    assert "seq" not in row
+    assert row["build_id"] == bid  # 나머지 컬럼은 그대로 살아있다
 
 
 def test_list_is_newest_first(repos):

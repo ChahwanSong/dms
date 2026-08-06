@@ -178,6 +178,12 @@ def migrate(db: Database) -> None:
             UNIQUE (username, storage_name, path))""",
         """CREATE TABLE IF NOT EXISTS builds (
             build_id TEXT PRIMARY KEY,
+            -- seq는 개념적으로 NOT NULL UNIQUE(단조 증가 생성 순서, requests.commit_order와
+            -- 같은 용도)여야 하지만 여기 걸지 않는다: 신규 DB는 이 CREATE TABLE로,
+            -- 기존(구형) DB는 _ensure_columns의 ALTER TABLE ADD COLUMN으로 채워지는데
+            -- SQLite의 ALTER TABLE ADD COLUMN은 UNIQUE/PRIMARY KEY 제약을 아예 허용하지
+            -- 않고, NOT NULL도 NULL이 아닌 DEFAULT 없이는 못 붙인다 -- 두 경로가 같은
+            -- 스키마로 수렴해야 하므로 제약은 애플리케이션(create()의 MAX(seq)+1)에 둔다.
             seq INTEGER,
             repo_url TEXT NOT NULL,
             git_ref TEXT NOT NULL,

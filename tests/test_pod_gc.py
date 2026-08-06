@@ -5,6 +5,7 @@
 
 빌드 파드 GC(build_runner가 주어졌을 때만 동작)에도 같은 단언이 적용된다: 종단
 빌드만 대상이고, 비종단 빌드의 파드가 사라지면 BuildRunner.poll이 FAILED로 오인한다."""
+from dms.build_runner import BUILD_REF_PREFIX
 from dms.db import iso_plus, utc_now_iso
 from dms.domain import DataJobState
 from dms.execution import StubExecutionAdapter
@@ -180,7 +181,10 @@ def test_terminal_build_pod_is_terminated_when_build_runner_given(db):
     result = gc.run_once(now_iso=now)
 
     assert result == {"deleted": 1}
-    assert build_runner.terminated == [f"buildpod/{build_pod_name(bid)}"]
+    # I5: 리터럴 "buildpod" 대신 build_runner.py가 export하는 상수를 쓴다 -- 네 곳
+    # (build_runner/build_watcher/pod_gc/routes_builds)이 각자 리터럴을 들고 있으면
+    # 한 곳만 드리프트해도 조용히 깨진다.
+    assert build_runner.terminated == [f"{BUILD_REF_PREFIX}/{build_pod_name(bid)}"]
     assert adapter.terminated == []  # 이 테스트엔 잡 파드가 없다
 
 
