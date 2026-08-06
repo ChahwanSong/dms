@@ -1,12 +1,12 @@
-# Non-secret DMS_* runtime config (dms-config) + secret DMS_* values
-# (dms-secrets). Env NAMES here are cross-checked 1:1 against
-# src/dms/config.py (Settings.from_env / AgentSettings.from_env) -- this is
-# the new clean-slate config surface, NOT legacy's DMS_DM_*/DMS_AUTH_*
-# naming.
+# Non-secret DMS_* runtime config (dms-config) ONLY. Env NAMES here are
+# cross-checked 1:1 against src/dms/config.py (Settings.from_env /
+# AgentSettings.from_env) -- this is the new clean-slate config surface, NOT
+# legacy's DMS_DM_*/DMS_AUTH_* naming.
 #
-# dms-secrets values below are TESTBED DEMO VALUES, not production secrets.
-# DMS_LDAP_BIND_DN / DMS_LDAP_BIND_PW in particular are UNRESOLVED
-# placeholders -- see deploy/README.md "Unresolved values to fill in".
+# Secret values (dms-secrets) are deliberately NOT in this file: it is
+# re-applied on every deploy, and a placeholder Secret riding along would
+# overwrite live credentials each time. See 20-secret.example.yaml and
+# deploy/README.md section 3b.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -74,33 +74,3 @@ data:
   #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the
   #     agent should only see the small env slice it actually needs) ---
   DMS_AGENT_INTERVAL_SECONDS: "30"
----
-# SECURITY: this committed manifest carries ONLY non-secret placeholders. The
-# real dms-secrets is created out-of-band at deploy time and is NEVER committed
-# (the repo has a public GitHub remote). See deploy/README.md "Create the
-# secret": `kubectl -n dms create secret generic dms-secrets --from-literal=...`
-# with the real testbed DB password + freshly generated tokens. Applying this
-# file's placeholders would start the pods but every DB call / auth would fail,
-# which is the intended fail-loud behavior if the real secret step was skipped.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: dms-secrets
-  namespace: dms
-type: Opaque
-stringData:
-  DMS_DATABASE_URL: "postgresql://dmsapp:CHANGE_ME_DB_PASSWORD@10.10.10.30:5432/dmsdb"
-  # Bearer token that grants role=admin on every API call (auth.py
-  # current_identity: Bearer <DMS_SHARED_TOKEN> => Identity(role="admin")).
-  DMS_SHARED_TOKEN: "CHANGE_ME_SHARED_TOKEN"
-  # Required only for POST /api/admin/accounts (x-admin-token header).
-  DMS_ADMIN_TOKEN: "CHANGE_ME_ADMIN_TOKEN"
-  # Signs the session cookie (SessionMiddleware) for the browser login flow.
-  DMS_SESSION_SECRET: "CHANGE_ME_SESSION_SECRET"
-  # Testbed OpenLDAP allows ANONYMOUS simple bind + search of uidNumber/
-  # gidNumber/memberUid (verified: `ldapsearch -x -H ldap://10.10.10.30:389
-  # -b ou=People,dc=dms,dc=local "(uid=alice)"` returns the attrs). Empty
-  # bind DN/PW -> identity_ldap.build_ldap_resolver passes user=None/
-  # password=None to ldap3 (anonymous). No bind account needed.
-  DMS_LDAP_BIND_DN: ""
-  DMS_LDAP_BIND_PW: ""

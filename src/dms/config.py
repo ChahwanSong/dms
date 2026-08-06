@@ -37,7 +37,13 @@ class SettingsError(Exception):
 
 
 def _is_placeholder(value: str | None) -> bool:
-    return not value or value == "CHANGE_ME" or value.startswith("REPLACE_WITH_")
+    # 완전일치만 보면 커밋된 예시값(CHANGE_ME_SHARED_TOKEN 등)이 그대로 통과한다.
+    # DMS_SHARED_TOKEN 은 Bearer 로 admin 을 주므로, 공개 저장소에 적힌 값으로
+    # 기동하는 것은 곧 무인증 admin 이다. DB URL 처럼 자리표시자가 문자열 중간에
+    # 박히는 경우도 있어 부분일치로 본다.
+    if not value:
+        return True
+    return "CHANGE_ME" in value or "REPLACE_WITH_" in value
 
 
 def _parse_int(environ, key, default, problems):

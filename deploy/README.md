@@ -90,6 +90,40 @@ kubectl apply -f deploy/k8s/10-rbac.yaml
 kubectl apply -f deploy/k8s/20-config.yaml
 ```
 
+`20-config.yaml` holds only non-secret config, so it is safe to re-apply on a
+running cluster. Never apply `20-secret.example.yaml` — it carries
+placeholders, and applying it over a live `dms-secrets` replaces the real
+credentials (the api/controller then CrashLoopBackOff on
+`password authentication failed for user "dmsapp"`).
+
+## 3b. Create the secret (once, out-of-band)
+
+`dms-secrets` is never committed. Create it directly, with the real DB
+password and freshly generated tokens:
+
+```bash
+kubectl -n dms create secret generic dms-secrets \
+  --from-literal=DMS_DATABASE_URL='postgresql://dmsapp:<DB_PASSWORD>@10.10.10.30:5432/dmsdb' \
+  --from-literal=DMS_SHARED_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=DMS_ADMIN_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=DMS_SESSION_SECRET="$(openssl rand -base64 32)" \
+  --from-literal=DMS_LDAP_BIND_DN='' \
+  --from-literal=DMS_LDAP_BIND_PW=''
+```
+
+`DMS_SHARED_TOKEN` grants `role=admin` on every API call (`Bearer <token>`),
+so generate it — don't copy one from the repo. Startup rejects any value
+containing `CHANGE_ME` or `REPLACE_WITH_` (`src/dms/config.py`
+`_is_placeholder`), so a skipped or half-filled secret fails loud instead of
+coming up with a publicly known admin token.
+
+Read the value back later with:
+
+```bash
+kubectl -n dms get secret dms-secrets \
+  -o jsonpath='{.data.DMS_SHARED_TOKEN}' | base64 -d; echo
+```
+
 ## 4. Migrate
 
 ```bash
@@ -128,7 +162,9 @@ $DMS_SHARED_TOKEN` -- `auth.py::current_identity` maps that bearer straight
 to `Identity(role="admin")`, no signup/login needed for scripted seeding.
 
 ```bash
-export DMS_SHARED_TOKEN="dms-testbed-shared-8f2a1c9d4e6b7f30"   # from dms-secrets
+# Read the live token instead of pasting one -- never commit a real token.
+export DMS_SHARED_TOKEN=$(kubectl -n dms get secret dms-secrets \
+  -o jsonpath='{.data.DMS_SHARED_TOKEN}' | base64 -d)
 export API=http://localhost:8080
 AUTH=(-H "Authorization: Bearer $DMS_SHARED_TOKEN" -H "x-dms-actor: seed-script")
 
@@ -233,8 +269,8 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 
 ## Unresolved values to fill in during live validation
 
-- **`DMS_LDAP_BIND_DN` / `DMS_LDAP_BIND_PW`** (`deploy/k8s/20-config.yaml`,
-  Secret `dms-secrets`): placeholder demo values. Only `DMS_LDAP_URI`,
+- **`DMS_LDAP_BIND_DN` / `DMS_LDAP_BIND_PW`** (Secret `dms-secrets`, shape in
+  `deploy/k8s/20-secret.example.yaml`): empty (anonymous bind). Only `DMS_LDAP_URI`,
   `DMS_LDAP_USER_BASE`, `DMS_LDAP_GROUP_BASE` were given as testbed facts --
   the bind account/password for `ldap://10.10.10.30:389` needs the real
   value. A wrong value fails soft (`IdentityRejected`/`IdentityUnavailable`

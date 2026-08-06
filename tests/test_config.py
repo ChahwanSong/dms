@@ -28,6 +28,30 @@ def test_missing_and_placeholder_collected():
     assert "DMS_ADMIN_TOKEN" in text
 
 
+def test_committed_manifest_placeholders_are_rejected():
+    # deploy/k8s/20-secret.example.yaml 이 담고 있는 값 그대로. 이 값들은 공개
+    # 저장소에 적혀 있고 DMS_SHARED_TOKEN 은 Bearer 로 admin 을 준다 -- 접미사가
+    # 붙었다는 이유로 통과시키면 누구나 아는 admin 토큰으로 기동한다.
+    env = {
+        "DMS_DATABASE_URL":
+            "postgresql://dmsapp:CHANGE_ME_DB_PASSWORD@10.10.10.30:5432/dmsdb",
+        "DMS_SHARED_TOKEN": "CHANGE_ME_SHARED_TOKEN",
+        "DMS_ADMIN_TOKEN": "CHANGE_ME_ADMIN_TOKEN",
+        "DMS_SESSION_SECRET": "CHANGE_ME_SESSION_SECRET",
+    }
+    with pytest.raises(SettingsError) as e:
+        Settings.from_env(env)
+    text = str(e.value)
+    for key in env:
+        assert key in text
+
+
+def test_placeholder_check_does_not_reject_real_values():
+    # 실제 자격증명이 우연히 그 단어를 품고 있을 뿐인 경우까지 막지는 않는다.
+    s = Settings.from_env({**VALID, "DMS_SESSION_SECRET": "xchange_mexico"})
+    assert s.session_secret == "xchange_mexico"
+
+
 def test_port_parsing():
     s = Settings.from_env({**VALID, "DMS_API_PORT": "9000"})
     assert s.api_port == 9000
