@@ -42,12 +42,23 @@ class ObservabilityRepository:
         return out
 
     def prune_events(self, cutoff: str, batch_size: int = 5000) -> int:
-        rows = self._db.query(
-            "SELECT id FROM events WHERE at < :c ORDER BY id ASC LIMIT :n",
-            {"c": cutoff, "n": batch_size})
-        if not rows:
-            return 0
-        ids = {f"i{n}": r["id"] for n, r in enumerate(rows)}
-        placeholders = ", ".join(f":{k}" for k in ids)
-        self._db.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
-        return len(rows)
+        # agents.py의 prune_reports와 같은 패턴: 배치가 남는 한 계속 돈다. 틱당
+        # 배치 1개만 지우고 리턴하면(예전 구현), 유입량이 batch_size /
+        # retention_interval_seconds(기본 5000/3600 ≈ 1.4행/초)를 한 번이라도
+        # 넘는 순간(배포 초기 누적분, 다섯 배선 지점 중 하나가 폭주하는 장애 등)
+        # purge가 영원히 못 따라잡는다 -- 이 테이블에 증가 제한을 두겠다는
+        # 목적 자체가 무너진다. 배치마다 독립 트랜잭션으로 커밋해 한 트랜잭션이
+        # 테이블을 오래 잠그지 않게 한다.
+        total = 0
+        while True:
+            with self._db.transaction():
+                rows = self._db.query(
+                    "SELECT id FROM events WHERE at < :c ORDER BY id ASC LIMIT :n",
+                    {"c": cutoff, "n": batch_size})
+                if not rows:
+                    return total
+                placeholders = ", ".join(f":i{k}" for k in range(len(rows)))
+                params = {f"i{k}": row["id"] for k, row in enumerate(rows)}
+                self._db.execute(
+                    f"DELETE FROM events WHERE id IN ({placeholders})", params)
+                total += len(rows)

@@ -231,6 +231,27 @@ def test_requester_without_account_row_plans_normally(db):
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
 
 
+def test_unexpected_exception_records_plan_error_event(db, monkeypatch):
+    # 배선 회귀 가드: run_once의 항목별 except Exception이 stderr만 찍고 끝나면
+    # 이 실패는 전이도, 이벤트도 안 남는다 -- events 테이블을 직접 검사한다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _scan_request(repos)
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(repos.accounts, "get", _boom)
+
+    result = _planner(repos).run_once(now_iso=NOW)
+    assert rid not in result  # 예외 분기는 results에 아무 것도 안 남긴다
+    events = repos.observability.events_for_request(rid)
+    assert len(events) == 1
+    assert events[0]["component"] == "planner"
+    assert events[0]["event_type"] == "plan_error"
+    assert events[0]["severity"] == "error"
+    assert "RuntimeError" in events[0]["message"] and "boom" in events[0]["message"]
+
+
 def test_worker_pool_records_rejections(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos)

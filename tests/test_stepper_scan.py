@@ -87,6 +87,12 @@ def test_execution_succeeded_with_none_summary_is_visible(db):
     result = db.query_one("SELECT summary FROM results WHERE request_id = :r", {"r": rid})
     from dms.db import load_json
     assert load_json(result["summary"]) == {"summary_unavailable": True}
+    # 배선 회귀 가드: 코드 경로는 타지만 events 테이블은 검사 안 하던 구멍.
+    events = repos.observability.events_for_request(rid)
+    assert len(events) == 1
+    assert events[0]["component"] == "stepper"
+    assert events[0]["event_type"] == "summary_unreadable"
+    assert events[0]["severity"] == "warning"
 
 
 def test_preflight_failure_rejects(db):
@@ -144,6 +150,53 @@ def test_job_cancelled_between_claim_and_step_reclaims_submitted_ref(db):
     assert adapter.terminated == [f"stub-preflight-{jid}"]
     assert result == "Cancelled"
     assert repos.data_jobs.get_job(jid)["state"] == "Cancelled"
+
+
+def test_unexpected_exception_records_step_error_event(db, monkeypatch):
+    # 배선 회귀 가드: run_once의 항목별 except Exception이 stderr만 찍고 끝나면
+    # 이 실패는 events 테이블에 안 남는다 -- 직접 검사한다.
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = StubExecutionAdapter()
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(repos.storages, "get", _boom)  # _build_spec의 _abs()가 부른다
+
+    result = _stepper(repos, adapter).run_once()
+    assert result[jid] == "error:RuntimeError"
+    events = repos.observability.events_for_request(rid)
+    assert len(events) == 1
+    assert events[0]["component"] == "stepper"
+    assert events[0]["event_type"] == "step_error"
+    assert events[0]["severity"] == "error"
+    assert "RuntimeError" in events[0]["message"] and "boom" in events[0]["message"]
+
+
+def test_terminate_failure_during_reclaim_records_terminate_failed_event(db):
+    """test_job_cancelled_between_claim_and_step_reclaims_submitted_ref와 같은 경쟁
+    시나리오지만, best-effort terminate() 자체가 ExecutionError로 실패하는 경우 --
+    고아 리소스가 남았을 수 있으니 진단 채널(events)에 남아야 한다."""
+    from dms.domain import DataJobState
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = StubExecutionAdapter()
+    ref = f"stub-preflight-{jid}"
+    adapter.fail_terminate(ref)
+    stepper = _stepper(repos, adapter)
+    job = [j for j in repos.data_jobs.claim_steppable() if j["job_id"] == jid][0]
+    repos.data_jobs.set_job_state(jid, DataJobState.CANCELLED,
+                                  reason_code="cancelled_by_user", actor="alice")
+
+    result = stepper._step_one(job)      # 낡은 스냅샷으로 계속 진행한다
+
+    assert result == "Cancelled"
+    events = repos.observability.events_for_request(rid)
+    assert len(events) == 1
+    assert events[0]["component"] == "stepper"
+    assert events[0]["event_type"] == "terminate_failed"
+    assert events[0]["severity"] == "warning"
+    assert events[0]["payload"] == {"ref": ref}
 
 
 def test_drain_stops_stepping(db):

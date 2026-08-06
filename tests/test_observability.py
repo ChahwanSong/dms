@@ -52,3 +52,15 @@ def test_prune_events_removes_only_old_rows(repos):
                                      event_type="old", request_id="r1")
     assert repos.observability.prune_events("2999-01-01T00:00:00Z") == 1
     assert repos.observability.events_for_request("r1") == []
+
+
+def test_prune_events_exhausts_all_batches_in_a_single_call(repos):
+    # 회귀 가드: 예전 구현은 배치 1개만 지우고 리턴했다 -- 유입량이
+    # batch_size/retention_interval_seconds를 넘으면 purge가 영원히 못
+    # 따라잡는다. batch_size(2)보다 많은(5) 오래된 행을 넣고, 호출 한 번으로
+    # 전부 지워지는지(= 내부에서 배치를 소진할 때까지 도는지) 고정한다.
+    for i in range(5):
+        repos.observability.record_event(component="planner", severity="error",
+                                         event_type=f"old{i}", request_id="r1")
+    assert repos.observability.prune_events("2999-01-01T00:00:00Z", batch_size=2) == 5
+    assert repos.observability.events_for_request("r1") == []

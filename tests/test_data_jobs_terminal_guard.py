@@ -57,6 +57,26 @@ def test_non_terminal_transitions_still_work(db):
     assert (after[-1]["from_state"], after[-1]["to_state"]) == ("Pending", "Preflight")
 
 
+def test_terminal_guard_records_event_with_calling_actor_as_component(db):
+    # 배선 회귀 가드: 종단 가드가 트립될 때 events에 실제로 남는지, 그리고 component가
+    # "stepper"로 하드코딩되지 않고 이 호출의 actor(batch_orchestrator.py 등도
+    # set_job_state를 부른다)에서 유도되는지 함께 고정한다.
+    repos = _repos(db)
+    job_id = _mk_job(repos)
+    rid = repos.data_jobs.get_job(job_id)["request_id"]
+    repos.data_jobs.set_job_state(job_id, DataJobState.CANCELLED,
+                                  reason_code="cancelled_by_user", actor="alice")
+
+    repos.data_jobs.set_job_state(job_id, DataJobState.EXECUTING, actor="batch-orchestrator")
+
+    events = repos.observability.events_for_request(rid)
+    assert len(events) == 1
+    assert events[0]["component"] == "batch-orchestrator"  # actor를 그대로 썼다
+    assert events[0]["event_type"] == "terminal_guard_skip"
+    assert events[0]["severity"] == "info"
+    assert "Cancelled" in events[0]["message"] and "Executing" in events[0]["message"]
+
+
 def test_guard_applies_to_every_terminal_state(db):
     repos = _repos(db)
     for terminal_state in TERMINAL_DATA_JOB_STATES:

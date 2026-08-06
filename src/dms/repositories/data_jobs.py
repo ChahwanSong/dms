@@ -131,8 +131,13 @@ class DataJobsRepository:
             # 협력자를 주입받는 대신 여기서 즉석으로 만든다. ObservabilityRepository는
             # db 핸들 하나만 감싸는 얇은 래퍼라 생성 비용이 없고, 위 with-transaction
             # 블록 밖에서 호출하므로 진단 INSERT가 업무 트랜잭션에 섞이지 않는다.
+            # component는 "stepper"로 하드코딩하지 않는다 -- set_job_state는
+            # stepper.py 말고도 batch_orchestrator.py(actor="batch-orchestrator"),
+            # API 라우트(actor=identity.actor)에서도 불린다. 호출자가 이미 넘긴
+            # actor가 곧 실제 발신자이므로 그대로 component로 쓴다 -- 브리프
+            # 표의 "stepper"는 가장 흔한 호출자를 적은 예시였을 뿐이다.
             ObservabilityRepository(self._db).record_event(
-                component="stepper", severity="info", event_type="terminal_guard_skip",
+                component=actor, severity="info", event_type="terminal_guard_skip",
                 message=f"job_id={job_id} state={current['state']} attempted_to={to_state.value}",
                 request_id=current["request_id"])
 

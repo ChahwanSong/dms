@@ -56,6 +56,19 @@ def test_run_all_once_respects_leases(db):
     assert run_all_once(loops, repos, holder="h1") == {"solo": "ok"}
 
 
+def test_retention_loop_actually_prunes_events(db, settings):
+    # 배선 회귀 가드: test_build_loops_names_and_intervals는 루프 "이름"만 확인한다 --
+    # _retention_step 안에서 prune_events_once 호출이 빠지거나 오타가 나도 그 테스트는
+    # 초록불이다. 여기선 실제로 오래된 이벤트가 지워지는지 행동으로 고정한다.
+    repos = Repositories(db)
+    db.execute("""INSERT INTO events (component, severity, event_type, at)
+                  VALUES ('planner', 'error', 'x', :at)""",
+              {"at": "2000-01-01T00:00:00Z"})  # 어떤 기본 retention_days보다도 오래됨
+    loops = build_loops(settings, repos)
+    run_all_once(loops, repos, holder="h1")
+    assert db.query("SELECT id FROM events") == []
+
+
 def test_reconciler_loop_wired_end_to_end(db, settings):
     repos = Repositories(db)
     repos.storages.create(storage_name="s1", mount_path="/mnt/s",
