@@ -110,9 +110,9 @@ test("clicking '통계 보기' shows summary/histograms and the not-exact upstre
 });
 
 test("a stats payload with null fields still renders instead of unmounting the app", async () => {
-  // ErrorBoundary가 없어서 렌더 도중 예외 하나면 React가 루트를 통째로 언마운트한다
-  // (내비게이션까지 사라진다). 서버가 null을 흘리지 않도록 고쳤지만, 화면도 스스로
-  // 버텨야 한다.
+  // 앱 전역 ErrorBoundary는 경로 단위로 화면 하나만 대체하는 최후의 방어선이다 —
+  // 이 화면 자체가 null을 방어하지 않으면 경로 목록(내 스캔 경로)까지 함께 사라진다.
+  // 서버가 null을 흘리지 않도록 고쳤지만, 화면도 스스로 버텨야 한다.
   server.use(
     http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),
     http.get("/api/user/scan-paths", () => HttpResponse.json([

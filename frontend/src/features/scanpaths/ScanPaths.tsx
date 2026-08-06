@@ -77,8 +77,9 @@ function StatsPanel({ sp }: { sp: ScanPath }) {
       <div>
         <h2 className="font-semibold mb-2">요약</h2>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-          {/* 서버가 null을 흘리지 않도록 고쳤지만 화면도 스스로 버틴다 — 앱 전역에
-              ErrorBoundary가 없어서 렌더 예외 하나면 루트가 통째로 언마운트된다. */}
+          {/* 서버가 null을 흘리지 않도록 고쳤지만 화면도 스스로 버틴다 — 앱 전역
+              ErrorBoundary는 최후의 방어선일 뿐, 이 화면 자체가 방어하지 않으면
+              옆의 다른 데이터(경로 목록, 나머지 통계 항목)까지 같이 사라진다. */}
           {Object.entries(stats.summary ?? {}).map(([k, v]) => (
             <Fragment key={k}>
               <dt className="text-muted">{k}</dt>

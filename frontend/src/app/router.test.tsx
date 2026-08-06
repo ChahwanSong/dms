@@ -1,9 +1,10 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
-import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
+import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
 import { AppRouter } from "./router";
 
 const server = setupServer();
@@ -151,4 +152,49 @@ test("user visiting /admin/policies is redirected to /jobs", async () => {
   );
   renderAt("/admin/policies");
   expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
+});
+
+// /admin/nodes는 NodesList가 이미 `q.data ?? []`로 null 페이로드를 방어해서 죽지
+// 않는다(슬라이스 9의 교훈이 이미 반영돼 있다). 실제로 렌더를 죽이는 조합은 요청
+// 상세다 -- RequestDetail은 `data.transitions`가 배열이라고 가정하고 방어 없이
+// `transitions[transitions.length - 1]`에 접근한다(null이면 TypeError).
+test("기능 화면이 크래시해도 사이드바가 살아 있다", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      request_id: "r1", operation: "sync", requester_id: "alice", state: "Failed",
+      created_at: "2026-08-05T00:00:00Z", updated_at: "2026-08-05T00:01:30Z",
+      transitions: null,
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+  );
+  renderAt("/jobs/r1");
+  expect(await screen.findByText("화면을 표시하지 못했습니다")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "내 작업" })).toBeInTheDocument();
+});
+
+// 이 테스트가 이 태스크의 요점이다 -- AppShell이 key 없이 ErrorBoundary를 마운트하면
+// 모든 보호 라우트가 같은 컴포넌트 타입・같은 트리 위치라 한 번 에러 상태에 빠진 뒤
+// 다른 화면으로 이동해도 React가 같은 인스턴스를 재사용해서 영원히 갇힌다.
+// key={pathname}이 있어야 경로가 바뀔 때 경계가 스스로 초기화된다.
+test("다른 경로로 이동하면 경계가 스스로 풀린다", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      request_id: "r1", operation: "sync", requester_id: "alice", state: "Failed",
+      created_at: "2026-08-05T00:00:00Z", updated_at: "2026-08-05T00:01:30Z",
+      transitions: null,
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
+  );
+  renderAt("/jobs/r1");
+  expect(await screen.findByText("화면을 표시하지 못했습니다")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("link", { name: "내 작업" }));
+
+  expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
+  expect(screen.queryByText("화면을 표시하지 못했습니다")).not.toBeInTheDocument();
 });

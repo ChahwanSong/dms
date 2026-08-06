@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./AuthContext";
 import { AppShell } from "./AppShell";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { RequireRole } from "./RequireRole";
 import { useMe } from "../features/auth/useAuth";
 import { Login } from "../features/auth/Login";
@@ -33,29 +34,31 @@ function Home() {
 export function AppRouter() {
   return (
     <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/" element={<Home />} />
-        <Route path="/jobs" element={<RequireRole><AppShell><JobsList /></AppShell></RequireRole>} />
-        <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitJob /></AppShell></RequireRole>} />
-        <Route path="/jobs/:requestId" element={<RequireRole><AppShell><RequestDetail /></AppShell></RequireRole>} />
-        <Route path="/scan-paths" element={<RequireRole><AppShell><ScanPaths /></AppShell></RequireRole>} />
-        <Route path="/admin/scan" element={<RequireRole role="admin"><AppShell><SubmitScan /></AppShell></RequireRole>} />
-        <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
-        <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
-        <Route path="/admin/batches" element={<RequireRole role="admin"><AppShell><BatchesList /></AppShell></RequireRole>} />
-        <Route path="/admin/batches/new" element={<RequireRole role="admin"><AppShell><BatchCreate /></AppShell></RequireRole>} />
-        <Route path="/admin/batches/:batchId" element={<RequireRole role="admin"><AppShell><BatchDetail /></AppShell></RequireRole>} />
-        <Route path="/admin/audit" element={<RequireRole role="admin"><AppShell><AuditLog /></AppShell></RequireRole>} />
-        <Route path="/admin/policies" element={<RequireRole role="admin"><AppShell><PoliciesList /></AppShell></RequireRole>} />
-        <Route path="/admin/denylist" element={<RequireRole role="admin"><AppShell><DenylistList /></AppShell></RequireRole>} />
-        <Route path="/admin/control" element={<RequireRole role="admin"><AppShell><ControlStatePage /></AppShell></RequireRole>} />
-        <Route path="/admin/accounts" element={<RequireRole role="admin"><AppShell><AccountsList /></AppShell></RequireRole>} />
-        <Route path="/admin/nodes" element={<RequireRole role="admin"><AppShell><NodesList /></AppShell></RequireRole>} />
-        <Route path="/admin/builds" element={<RequireRole role="admin"><AppShell><BuildsPage /></AppShell></RequireRole>} />
-        <Route path="/admin/builds/:buildId" element={<RequireRole role="admin"><AppShell><BuildDetail /></AppShell></RequireRole>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <ErrorBoundary>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<Home />} />
+          <Route path="/jobs" element={<RequireRole><AppShell><JobsList /></AppShell></RequireRole>} />
+          <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitJob /></AppShell></RequireRole>} />
+          <Route path="/jobs/:requestId" element={<RequireRole><AppShell><RequestDetail /></AppShell></RequireRole>} />
+          <Route path="/scan-paths" element={<RequireRole><AppShell><ScanPaths /></AppShell></RequireRole>} />
+          <Route path="/admin/scan" element={<RequireRole role="admin"><AppShell><SubmitScan /></AppShell></RequireRole>} />
+          <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
+          <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
+          <Route path="/admin/batches" element={<RequireRole role="admin"><AppShell><BatchesList /></AppShell></RequireRole>} />
+          <Route path="/admin/batches/new" element={<RequireRole role="admin"><AppShell><BatchCreate /></AppShell></RequireRole>} />
+          <Route path="/admin/batches/:batchId" element={<RequireRole role="admin"><AppShell><BatchDetail /></AppShell></RequireRole>} />
+          <Route path="/admin/audit" element={<RequireRole role="admin"><AppShell><AuditLog /></AppShell></RequireRole>} />
+          <Route path="/admin/policies" element={<RequireRole role="admin"><AppShell><PoliciesList /></AppShell></RequireRole>} />
+          <Route path="/admin/denylist" element={<RequireRole role="admin"><AppShell><DenylistList /></AppShell></RequireRole>} />
+          <Route path="/admin/control" element={<RequireRole role="admin"><AppShell><ControlStatePage /></AppShell></RequireRole>} />
+          <Route path="/admin/accounts" element={<RequireRole role="admin"><AppShell><AccountsList /></AppShell></RequireRole>} />
+          <Route path="/admin/nodes" element={<RequireRole role="admin"><AppShell><NodesList /></AppShell></RequireRole>} />
+          <Route path="/admin/builds" element={<RequireRole role="admin"><AppShell><BuildsPage /></AppShell></RequireRole>} />
+          <Route path="/admin/builds/:buildId" element={<RequireRole role="admin"><AppShell><BuildDetail /></AppShell></RequireRole>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </ErrorBoundary>
     </AuthProvider>
   );
 }

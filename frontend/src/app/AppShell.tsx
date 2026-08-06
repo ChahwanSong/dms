@@ -1,9 +1,11 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import { useMe, useLogout } from "../features/auth/useAuth";
+import { ErrorBoundary } from "./ErrorBoundary";
 const linkCls = ({ isActive }: { isActive: boolean }) =>
   `block rounded-lg px-3 py-2 text-sm ${isActive ? "bg-accent text-white" : "text-ink hover:bg-black/5"}`;
 export function AppShell({ children }: { children: React.ReactNode }) {
   const me = useMe(); const logout = useLogout(); const isAdmin = me.data?.role === "admin";
+  const { pathname } = useLocation();
   return (
     <div className="min-h-full md:flex">
       <aside className="md:w-60 md:min-h-full bg-surface md:shadow-soft p-3 space-y-1">
@@ -28,7 +30,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="text-sm text-muted">{me.data?.actor} · {me.data?.role}</div>
           <button className="text-sm text-accent" onClick={() => logout.mutate()}>로그아웃</button>
         </header>
-        <main className="p-5">{children}</main>
+        <main className="p-5">
+          {/* key 가 없으면 AppShell 은 모든 보호 라우트에서 같은 위치의 같은 컴포넌트라
+              한 번 에러 상태에 빠지면 화면을 옮겨도 풀리지 않는다. */}
+          <ErrorBoundary key={pathname}>{children}</ErrorBoundary>
+        </main>
       </div>
     </div>
   );
