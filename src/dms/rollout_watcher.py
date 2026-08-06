@@ -33,9 +33,22 @@ class RolloutWatcher:
     def _fail(self, head, reason_code) -> None:
         # 한 컴포넌트가 실패하면 뒤 Pending까지 닫아 배치를 끝낸다 -- 안 닫으면
         # active()가 영원히 비지 않아 rollout_in_progress가 새 롤아웃을 막는다.
-        self._repos.releases.finish(head["id"], state="Failed",
-                                    reason_code=reason_code)
-        self._repos.releases.abort_pending(reason_code="rollout_aborted")
+        #
+        # 두 쓰기를 한 트랜잭션으로 묶는다. 각각 자동커밋이면 그 사이에 프로세스가
+        # 죽었을 때 (a) 남은 Pending이 살아남아 다음 틱의 head가 되어 패치된다 --
+        # "앞이 실패하면 뒤는 중단"이 정확히 반대로 깨진다. (b) 단일 컴포넌트
+        # 배치에서는 finish 직후 active()가 잠깐 비어, 그 틈에 통과한 새 배치를
+        # 뒤이은 abort_pending이 rollout_aborted로 죽인다. 묶으면 실패 기록 전체가
+        # 원자적으로 보이거나 아예 안 보인다 -- 후자면 head는 Applying으로 남아
+        # 다음 틱이 같은 판정을 다시 한다.
+        #
+        # 이 안에서 patch를 부르지 않는다: record-then-patch는 "기록이 커밋된
+        # 뒤에 patch"이고, 트랜잭션 안의 patch는 커밋 전 호출이 되어 계약을 깬다.
+        # _fail은 실패 기록 전용이라 지금은 그 위험이 없다.
+        with self._repos.db.transaction():
+            self._repos.releases.finish(head["id"], state="Failed",
+                                        reason_code=reason_code)
+            self._repos.releases.abort_pending(reason_code="rollout_aborted")
 
     def _stuck_detail(self, spec) -> str:
         """멈춘 노드와 사유(ImagePullBackOff 등)를 회수 사유에 싣는다.
@@ -72,8 +85,22 @@ class RolloutWatcher:
         # dms-controller 순서가 seq로 지속돼 있어(Task 1), 자기 갱신으로 죽은
         # 컨트롤러의 후임도 이미 끝낸 패치를 다시 하지 않는다(설계 §2).
         head = active[0]
-        spec = COMPONENTS[head["component"]]
         try:
+            # 좌표 조회는 반드시 try 안이다. 밖에 두고 KeyError가 나면 그것은
+            # ExecutionError가 아니라 run_all_once까지 올라가 로그만 남고, 아래
+            # 벽시계 회수는 이 줄 하류라 도달조차 못 해 배치가 영원히
+            # rollout_in_progress로 잠긴다. 지금은 create_batch의
+            # ROLLOUT_ORDER.index()가 먼저 막지만, ROLLOUT_ORDER에만 컴포넌트를
+            # 더하면 즉시 살아나는 경로다.
+            spec = COMPONENTS.get(head["component"])
+            if spec is None:
+                # 재시도로 고쳐질 수 없는 영구 오류다(다음 틱에도 표는 그대로다).
+                # 그래서 예외를 삼켜 다음 틱에 맡기지 않고 즉시 _fail로 종단시킨다 --
+                # 회수는 Applying 행만 보므로 Pending head가 여기 걸리면 벽시계도
+                # 못 푼다. 배치를 닫는 것만이 잠김을 막는다.
+                self._fail(head, "unknown_component")
+                return {"patched": patched, "finished": finished + 1}
+
             if head["state"] == "Pending":
                 # 1단계: 기록을 먼저 커밋한다. "방금 patch를 불렀다"는 사실은
                 # 프로세스 죽음(특히 컨트롤러 자기 갱신)을 넘지 못한다(설계 §2).

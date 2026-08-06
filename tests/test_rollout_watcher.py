@@ -3,6 +3,7 @@ from dms.db import Database, iso_plus, utc_now_iso
 from dms.execution import ExecutionError
 from dms.migrations import migrate
 from dms.repositories import Repositories
+from dms.repositories import releases as releases_mod
 from dms.rollout_watcher import RolloutWatcher
 
 
@@ -221,6 +222,43 @@ def test_pde_fails_release_and_aborts_the_rest(repos):
     tail = repos.releases.get(rows[1]["id"])
     # 배치를 닫지 않으면 rollout_in_progress가 영원히 새 롤아웃을 막는다
     assert (tail["state"], tail["reason_code"]) == ("Failed", "rollout_aborted")
+    assert repos.releases.active() == []
+
+
+def test_fail_writes_are_atomic(repos, monkeypatch):
+    # finish와 abort_pending이 각각 자동커밋이면 그 사이에 프로세스가 죽었을 때
+    # 남은 Pending이 살아남아 다음 틱의 head가 되어 패치된다 -- "앞이 실패하면
+    # 뒤는 중단"이라는 불변식이 정확히 반대로 깨진다. 한 트랜잭션으로 묶였으면
+    # head의 Failed도 함께 롤백되어 Applying으로 남고, 다음 틱이 판정을 다시 한다.
+    rows = _batch(repos, "dms-api", "dms-controller")
+    repos.releases.mark_applying(rows[0]["id"])
+    runner = _Runner()
+    runner.observations[("Deployment", "dms-api")] = _pde_deploy("pkg-01:5000/dms:new1")
+
+    def die(*, reason_code):
+        raise RuntimeError("abort_pending 도중 프로세스가 죽었다")
+
+    monkeypatch.setattr(repos.releases, "abort_pending", die)
+    with pytest.raises(RuntimeError):
+        _watch(repos, runner).run_once()
+    assert repos.releases.get(rows[0]["id"])["state"] == "Applying"
+    assert repos.releases.get(rows[1]["id"])["state"] == "Pending"
+
+
+def test_unknown_component_is_terminated_not_locked(repos, monkeypatch):
+    # ROLLOUT_ORDER에만 컴포넌트를 더하고 COMPONENTS를 빠뜨리면 살아나는 경로다.
+    # 조회가 예외로 새면 ExecutionError가 아니라서 run_all_once가 로그만 남기고,
+    # 벽시계 회수는 그 줄 하류라 도달조차 못 해 배치가 영원히
+    # rollout_in_progress로 잠긴다 -- 잠기지 않고 종단되는 것을 고정한다.
+    monkeypatch.setattr(releases_mod, "ROLLOUT_ORDER",
+                        releases_mod.ROLLOUT_ORDER + ("dms-newthing",))
+    rows = _batch(repos, "dms-newthing")
+    runner = _Runner()
+    out = _watch(repos, runner).run_once()
+    row = repos.releases.get(rows[0]["id"])
+    assert (row["state"], row["reason_code"]) == ("Failed", "unknown_component")
+    assert out == {"patched": 0, "finished": 1}
+    assert runner.patched == []
     assert repos.releases.active() == []
 
 

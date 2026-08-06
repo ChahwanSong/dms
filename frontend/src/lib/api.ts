@@ -124,6 +124,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   rollout_timeout: "롤아웃이 제한 시간을 넘겨 실패했습니다",
   rollout_aborted: "앞 컴포넌트 실패로 롤아웃이 중단되었습니다",
   workload_not_found: "대상 워크로드를 찾을 수 없습니다",
+  unknown_component: "알 수 없는 컴포넌트입니다 — 관리자에게 문의하세요",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

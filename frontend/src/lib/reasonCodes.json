@@ -28,6 +28,7 @@
   "build_not_found", "submit_failed", "poll_failed", "unknown_build_node",
   "invalid_build_ref", "rollout_in_progress", "patch_failed", "observe_failed",
   "rollout_failed", "rollout_timeout", "rollout_aborted", "workload_not_found",
+  "unknown_component",
 
   "artifact_forbidden", "invalid_artifact_name", "rm_recursive_required",
   "rm_root_forbidden", "unknown_option", "invalid_option", "storage_missing",
