@@ -120,6 +120,15 @@ def get_request(request_id: str, request: Request,
                        and row["requester_id"] != identity.actor):
         raise HTTPException(status_code=404, detail="request_not_found")
     row["transitions"] = repo.transitions(request_id)
+    # events_for_request 기본 limit(100)이 조용히 잘리면 운영자가 눈치채지 못한다 --
+    # 스택된 요청이 매 컨트롤러 틱마다 같은 예외로 실패를 반복하면 100건을 넘기는 것도
+    # 현실적이다(plan_error/step_error는 정확히 이런 루프에서 기록된다). 표시 상한보다
+    # 하나 더 가져와 잘림 여부를 판별하고, 값은 상한만큼만 내려준다.
+    display_limit = 100
+    events = request.app.state.repos.observability.events_for_request(
+        request_id, limit=display_limit + 1)
+    row["events_truncated"] = len(events) > display_limit
+    row["events"] = events[:display_limit]
     return row
 
 

@@ -8,6 +8,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Timeline } from "./Timeline";
 import { JobViewer } from "./JobViewer";
 import { ApiError, reasonText } from "../../lib/api";
+import type { RequestDetail as RequestDetailType } from "../../lib/types";
 
 // 요청 상태의 종단 집합은 잡 상태(jobState.ts의 isTerminal)와 다르다 —
 // "Conflict"를 포함하고 "PreviewExpired"는 포함하지 않는다.
@@ -22,6 +23,41 @@ function durationText(from?: string, to?: string): string {
   if (s < 60) return `${s}초`;
   const m = Math.floor(s / 60);
   return s % 60 === 0 ? `${m}분` : `${m}분 ${s % 60}초`;
+}
+
+// severity별로 text-bad/text-muted만 쓴다(다른 색 유틸은 이 카드의 몫이 아니다) --
+// error만 눈에 띄게, warning/info는 muted로 뭉뚱그린다.
+function eventSeverityClass(severity: string): string {
+  return severity === "error" ? "text-bad" : "text-muted";
+}
+
+function DiagnosticEvents({ req }: { req: RequestDetailType }) {
+  // 방어적 정규화: events가 배열이 아니거나(백엔드 오응답) 아예 없으면 빈 배열로
+  // 취급한다 -- 배열 아닌 페이로드 하나가 SPA 전체를 흰 화면으로 만든 사고가 있었다.
+  const events = Array.isArray(req.events) ? req.events : [];
+  if (events.length === 0) return null; // 정상 요청에 빈 카드가 뜨면 노이즈다
+  return (
+    <Card>
+      <h2 className="text-sm font-semibold mb-2">진단 이벤트</h2>
+      {req.events_truncated && (
+        <p className="text-muted text-xs mb-2">
+          오래된 순으로 최근 100건만 표시됩니다 — 그 이후 이벤트는 보이지 않습니다.
+        </p>
+      )}
+      <ul className="space-y-2 text-sm">
+        {events.map((e) => (
+          <li key={e.id}>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-muted tabular-nums">{e.at}</span>
+              <span className={eventSeverityClass(e.severity)}>{e.event_type}</span>
+              <span className="text-muted text-xs">({e.component})</span>
+            </div>
+            {e.message && <p className="mt-0.5">{e.message}</p>}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
 }
 
 function ResultSummary({ summary }: { summary: unknown }) {
@@ -103,6 +139,7 @@ export function RequestDetail() {
         <h2 className="text-sm font-semibold mb-2">전이 이력</h2>
         <Timeline transitions={transitions} />
       </Card>
+      <DiagnosticEvents req={data} />
       <div className="space-y-2">
         {(jobs.data ?? []).map((j) => (
           <Card key={j.job_id}>

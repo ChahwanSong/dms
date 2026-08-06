@@ -6,6 +6,14 @@ def _login(client, name):
     client.post("/api/auth/login", json={"username": name, "password": "p"})
 
 
+def _pending_request(repos, requester="alice"):
+    # test_api_request_cancel.py의 동명 헬퍼와 동일한 모양 -- 두 파일이 별개의
+    # 테스트 모듈이라 공유하지 않고 그대로 복제한다.
+    return repos.requests.create(
+        operation="rm", requester_id=requester, actor=requester,
+        resource_key="k", payload={"storage": "s", "target": "a"}, priority="mid")
+
+
 def test_submit_scan_and_poll(client):
     # scan은 관리자 전용 제출이다 (test_scan_submission_is_admin_only 참고) — Bearer로 인증한다.
     r = client.post("/api/user/requests", headers=ADMIN, json={
@@ -93,3 +101,52 @@ def test_scan_submission_is_admin_only(client):
         "operation": "sync", "source_storage": "s1", "source": "a",
         "destination_storage": "s2", "destination": "b"})
     assert r.status_code == 202
+
+
+def test_request_detail_carries_events(client):
+    # events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는다.
+    # 화면에 안 뜨면 운영자는 kubectl logs로 stderr를 뒤져야 한다(파드 재시작 시 소실).
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    repos.observability.record_event(
+        component="planner", severity="error", event_type="plan_error",
+        message="boom", request_id=rid)
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    assert [e["event_type"] for e in body["events"]] == ["plan_error"]
+    assert body["events"][0]["message"] == "boom"
+
+
+def test_request_detail_events_are_scoped(client):
+    # 다른 request_id로 기록된 이벤트가 새어 들어오지 않는지 -- 요청 상세는 기존
+    # 소유권 검사를 그대로 타므로 여기에 추가 인가 로직을 넣지 않았다. 이 테스트는
+    # events 조회가 request_id로 제대로 스코프되는지를 리뷰가 확인할 근거다.
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    repos.observability.record_event(component="planner", severity="error",
+                                     event_type="other", request_id="someone-else")
+    assert client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()["events"] == []
+
+
+def test_request_detail_marks_truncation_past_the_display_cap(client):
+    # events_for_request의 기본 limit=100이 API에 그대로 적용되면 잘린 사실이
+    # 화면에 보이지 않는다 -- 조용한 절단. 플래너/스테퍼가 같은 요청에서 매 틱
+    # 실패를 반복하면 100건을 넘기는 것도 현실적인 시나리오다(스택된 요청).
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    for i in range(101):
+        repos.observability.record_event(
+            component="planner", severity="error", event_type="plan_error",
+            message=f"boom{i}", request_id=rid)
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    assert len(body["events"]) == 100
+    assert body["events_truncated"] is True
+
+
+def test_request_detail_events_truncated_flag_is_false_under_the_cap(client):
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    repos.observability.record_event(
+        component="planner", severity="error", event_type="plan_error",
+        message="boom", request_id=rid)
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    assert body["events_truncated"] is False

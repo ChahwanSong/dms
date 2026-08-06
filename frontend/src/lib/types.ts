@@ -8,7 +8,20 @@ export interface RequestRow {
   request_id: string; operation: string; requester_id: string; resource_key: string;
   priority: string; state: string; created_at: string; updated_at: string; payload: Record<string, unknown>;
 }
-export interface RequestDetail extends RequestRow { transitions: Transition[] }
+// events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
+// 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).
+export interface DiagEvent {
+  id: number; component: string; severity: string; event_type: string;
+  message: string | null; payload: unknown; at: string;
+}
+export interface RequestDetail extends RequestRow {
+  transitions: Transition[];
+  // 서버는 표시 상한(100건)보다 하나 더 가져와 잘림 여부를 판별한다 -- 조용한
+  // 절단을 피하기 위함(routes_requests.py 참고). 두 필드 다 백엔드 응답이 배열이
+  // 아니거나 필드 자체가 없을 수 있어 프론트는 방어적으로 정규화해야 한다.
+  events?: DiagEvent[];
+  events_truncated?: boolean;
+}
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
   reason_code: string | null; preview_fingerprint: string | null;

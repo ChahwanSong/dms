@@ -166,3 +166,60 @@ test("hides the request-cancel button when the request is terminal", async () =>
   await screen.findByText("전이 이력");
   expect(screen.queryByRole("button", { name: "요청 취소" })).not.toBeInTheDocument();
 });
+
+test("shows diagnostic events below the timeline", async () => {
+  // events는 transitions와 달리 "일어나지 않은 전이"를 담는다 -- 이것이 안 보이면
+  // 운영자는 stderr를 뒤져야 한다
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST,
+      events: [{ id: 1, component: "planner", severity: "error",
+                 event_type: "plan_error", message: "boom",
+                 payload: null, at: "2026-08-06T00:00:00Z" }],
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  expect(await screen.findByText("plan_error")).toBeInTheDocument();
+  expect(screen.getByText("boom")).toBeInTheDocument();
+});
+
+test("renders no diagnostic-events card when there are no events", async () => {
+  // 정상 요청에 빈 카드가 뜨면 노이즈다 -- 카드 자체를 그리지 않아야 한다.
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, events: [] })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  await screen.findByText("전이 이력");
+  expect(screen.queryByText("진단 이벤트")).not.toBeInTheDocument();
+});
+
+test("renders no diagnostic-events card when the backend omits or malforms the events field", async () => {
+  // 방어적 정규화: 배열이 아닌 페이로드(또는 필드 누락) 하나가 SPA 전체를 흰 화면으로
+  // 만든 사고가 있었다 -- Array.isArray로 방어한다.
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, events: { oops: true } })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  await screen.findByText("전이 이력");
+  expect(screen.queryByText("진단 이벤트")).not.toBeInTheDocument();
+});
+
+test("shows a truncation notice when events_truncated is true", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST,
+      events: [{ id: 1, component: "planner", severity: "error",
+                 event_type: "plan_error", message: "boom",
+                 payload: null, at: "2026-08-06T00:00:00Z" }],
+      events_truncated: true,
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  const heading = await screen.findByText("진단 이벤트");
+  const card = heading.closest("div")!;
+  expect(within(card).getByText(/100건/)).toBeInTheDocument();
+});
