@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider } from "./AuthContext";
 import { AppShell } from "./AppShell";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -32,9 +32,16 @@ function Home() {
 }
 
 export function AppRouter() {
+  // AppRouter는 main.tsx에서 <BrowserRouter><AppRouter /></BrowserRouter>로
+  // 마운트되고(테스트는 MemoryRouter) -- useLocation은 Router 컨텍스트 안에서만
+  // 쓸 수 있는데, AppRouter 자체가 그 컨텍스트의 자식이므로 여기서 바로 쓸 수 있다.
+  const { pathname } = useLocation();
   return (
     <AuthProvider>
-      <ErrorBoundary>
+      {/* key가 없으면 location이 바뀌어도(뒤로가기, 주소창 편집) 이미 잡힌 에러
+          상태가 그대로 남아 "다시 시도"를 누르기 전까지 계속 같은 폴백만 보여준다
+          -- AppShell의 안쪽 경계와 같은 이유로 여기도 key={pathname}이 필요하다. */}
+      <ErrorBoundary key={pathname}>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/" element={<Home />} />
