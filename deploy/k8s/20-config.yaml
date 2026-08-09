@@ -91,3 +91,18 @@ data:
   # 빠져나올 길이 없는 경로를 막는다 -- 기본 7200(2h)은 mpifileutils 소스 컴파일
   # 포함 3종 빌드가 가장 오래 걸리는 경우를 기준으로 잡은 여유값이다.
   DMS_BUILD_TIMEOUT_SECONDS: "7200"
+
+  # --- 포탈 주도 롤아웃 (슬라이스 13) ---
+  # 레지스트리는 빌드와 같은 것을 쓴다 -- 롤아웃 전용 레지스트리 설정은 없다.
+  # 「릴리스」 화면의 태그 목록과 최종 image 문자열은 위 DMS_BUILD_REGISTRY로
+  # 조립된다(routes_releases.py). 즉 이 절에 새로 넣을 키는 아래 둘뿐이다.
+  # 간격 10초 -> per-loop 리스 30초. 리스는 갱신되지 않으므로 간격을 늘리면
+  # 컨트롤러 자기 갱신 뒤 새 파드의 리스 재획득이 그만큼 늦어져 롤아웃 추적이
+  # 몇 배로 멈춘다(설계 §2) -- 늘리기 전에 그 트레이드오프를 확인할 것.
+  DMS_ROLLOUT_INTERVAL_SECONDS: "10"
+  # DaemonSet 수렴의 벽시계 상한(초). DaemonSet에는 progressDeadlineSeconds가
+  # 없어 이것이 유일한 실패 수단이다. Deployment는 PDE(600)가 확정하고, 이 값의
+  # 3배가 최후 회수로만 쓰인다(rollout_watcher.py).
+  # 참고: k8s API 호출 자체의 타임아웃(ROLLOUT_REQUEST_TIMEOUT_SECONDS=10,
+  # execution_volcano.py)은 env가 아니라 코드 상수다 -- 여기에 키가 없는 게 맞다.
+  DMS_ROLLOUT_TIMEOUT_SECONDS: "600"

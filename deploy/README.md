@@ -328,6 +328,103 @@ DMS_IMAGE=$DMS_BUILD_REGISTRY/dms:$DMS_BUILD_TAG`/`MFU_IMAGE=...`로 **이 빌�
 화면: 「빌드」(`/admin/builds`, 목록/제출) 와 빌드 상세(`/admin/builds/:buildId`,
 로그 뷰어 포함). 빌드 노드 지정은 「컨트롤 상태」 화면.
 
+## 9. 포탈에서 릴리스(롤아웃) (슬라이스 13)
+
+§8의 「빌드」가 레지스트리에 태그를 만드는 데서 끝났다면, 「릴리스」 화면
+(`/admin/releases`)은 그 태그를 **실제로 클러스터에 올린다** — 운영자가
+`kubectl apply`/`rollout restart` 없이 포탈 안에서 워크로드의 `image:`를 갱신한다.
+설정은 `20-config.yaml`의 `DMS_ROLLOUT_INTERVAL_SECONDS`/`DMS_ROLLOUT_TIMEOUT_SECONDS`
+둘뿐이고, 레지스트리는 빌드와 같은 `DMS_BUILD_REGISTRY`를 쓴다.
+
+**1) 흐름: 한 배치로 제출하고, 순서는 서버가 강제한다.** 「릴리스」 화면은 세 컴포넌트
+(`dms-agent`/`dms-api`/`dms-controller`) 행마다 select를 주고, 올리고 싶은 것만 태그를
+골라 **한 번에** 제출한다(`POST /api/admin/releases`). 제출 순서가 무엇이든 서버가
+`ROLLOUT_ORDER = ("dms-agent", "dms-api", "dms-controller")`로 정렬해
+`releases.seq`에 **DB로 지속**시키고(`src/dms/repositories/releases.py`), 컨트롤러의
+RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다음으로 넘어간다. 순서가
+행에 박혀 있으므로 배치 중간에 컨트롤러가 죽어도 새 파드가 seq만 보고 이어간다. 동시
+롤아웃은 하나로 제한된다 — 진행 중인 배치가 있으면 `409 rollout_in_progress`.
+
+**2) `dms-controller`를 갱신하면 컨트롤러가 자기 자신을 재시작시킨다.** 그래서
+`dms-controller`가 배치의 **마지막**이다. 컨트롤러가 자기 Deployment를 patch하는 순간
+옛 파드는 종료되고, 「릴리스」 화면의 갱신이 리스 재획득(최대 ~30초 + 파드 기동)만큼
+멈춘다 — **장애가 아니다.** 컨트롤러는 patch 전에 행을 `Applying`으로 먼저 기록하므로
+(record-then-patch), 새 파드가 그 `Applying` 행을 이어받아 수렴을 확인하고 `Applied`로
+닫는다. 화면이 잠시 얼어 있어도 기다릴 것 — 이것이 이 기능의 정상 동작이다.
+간격을 늘리면(`DMS_ROLLOUT_INTERVAL_SECONDS`) per-loop 리스가 함께 길어져 이 정지
+구간이 몇 배로 늘어난다.
+
+**3) 같은 태그 재롤아웃은 거절된다(`same_tag`).** 현재 워크로드에 걸린 것과 같은 태그를
+고르면 `422 same_tag`로 막는다 — 모든 매니페스트가 `imagePullPolicy: IfNotPresent`라
+같은 태그를 다시 밀어봐야 파드 스펙이 그대로여서 아무 일도 일어나지 않기 때문이다(§8-2와
+같은 함정). 레지스트리에 없는 태그는 `422 unknown_tag`, 모르는 컴포넌트는
+`422 unknown_component`.
+
+**4) 롤아웃 성공 후 매니페스트의 `image:`를 손으로 맞춰야 한다(설계 §9).** 정적 YAML이
+여전히 **선언적 진실**이다. 롤아웃은 살아 있는 클러스터 오브젝트만 바꾸므로, 파일을
+그대로 두면 다음 `kubectl apply -f deploy/k8s/`가 클러스터를 옛 태그로 **되돌린다.**
+성공한 배치마다:
+
+- `dms` 계보: `30-migrate-job.yaml`/`40-api.yaml`/`41-controller.yaml` 세 파일 모두
+  (하나라도 빠지면 그 컴포넌트만 옛 이미지로 돈다)
+- `dms-agent` 계보: `50-agent-daemonset.yaml`
+
+이 슬라이스는 파일을 자동으로 고치지 않는다 — 컨트롤러 파드 안에 저장소가 없다.
+어긋남을 화면에 표시하는 것은 슬라이스 14 대시보드의 몫이다. Helm/kustomize는 도입하지
+않는다 — 이 README에 기록된 설계 결정이다(§1, "Unresolved values" 참고).
+
+**5) 태그 계보 세 개는 서로 독립이고, `DMS_JOB_IMAGE`는 롤아웃 대상이 아니다.**
+`dms:`(api/controller/migrate가 공유), `dms-agent:`, `dms-mpifileutils:`는 각각 다른
+레지스트리 리포이고 버전이 같이 갈 이유가 없다 — 「릴리스」 화면은 컴포넌트별로 자기
+리포의 태그 목록만 보여준다(`COMPONENTS[*].repository`). `DMS_JOB_IMAGE`
+(`dms-mpifileutils`)는 **롤아웃 대상이 아니다**: 워크로드 이미지 패치가 아니라 ConfigMap
+갱신 + 소비자 재시작이 필요해서 범위 밖이다(설계 §10). 바꾸려면 지금처럼
+`20-config.yaml`을 고쳐 apply한다.
+
+**6) RBAC은 세 워크로드로 좁혀져 있다.** 컨트롤러 Role의 apps patch 권한은
+`resourceNames: ["dms-api", "dms-controller", "dms-agent"]`로 한정된다
+(`10-rbac.yaml`) — 컨트롤러가 네임스페이스의 임의 워크로드를 건드릴 수 없다.
+`list`는 `resourceNames`를 따르지 않아 별도 read-only 규칙으로 준다. api Role은
+**읽기 전용 get/list만** 받는다(「릴리스」 화면이 현재 이미지를 보여주기 위한 것) —
+patch는 컨트롤러에만 있다. 새 태그를 쓰기 전에 `10-rbac.yaml`을 apply해야 한다.
+확인:
+
+```bash
+kubectl --context dms auth can-i patch deployments.apps/dms-controller \
+  --as=system:serviceaccount:dms:dms-controller -n dms      # yes
+kubectl --context dms auth can-i patch deployments.apps \
+  --as=system:serviceaccount:dms:dms-api -n dms             # no
+```
+
+**7) 없는 태그를 강제로 넣으면 시끄럽게 실패한다.** 레지스트리가 다운이면 태그 검증이
+fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 그 경우 파드가
+`ImagePullBackOff`에 빠지고, Deployment는 `ProgressDeadlineExceeded`로, DaemonSet은
+`DMS_ROLLOUT_TIMEOUT_SECONDS` 벽시계로 `Failed`가 된다(DaemonSet에는
+`progressDeadlineSeconds`가 없어 이 값이 유일한 실패 수단이다). 실패하면 배치의 남은
+컴포넌트는 `rollout_aborted`로 닫히고 반쯤 섞인 버전 조합이 생기지 않는다 — 복구는
+이력에서 옛 태그를 골라 다시 롤아웃하면 된다(별도 롤백 버튼이 없는 이유).
+
+### 실증 체크리스트 (설계 §11 — 테스트베드에서 수행)
+
+- [ ] 1. `GET /api/admin/releases/targets`가 세 컴포넌트의 **현재 이미지**와 레지스트리
+      태그 목록을 준다.
+- [ ] 2. 현재와 같은 태그 제출이 `same_tag`로 거절된다(`IfNotPresent` 함정).
+- [ ] 3. 레지스트리에 없는 태그가 `unknown_tag`로 거절된다.
+- [ ] 4. **`dms-agent` 롤아웃**(`dev5` → 새 태그) — DaemonSet 세대 게이트와 4조건 수렴
+      판정이 실제로 동작해 `Applied`로 넘어간다. 5노드 순차 롤링이 600초를 정상적으로
+      넘긴다면 `DMS_ROLLOUT_TIMEOUT_SECONDS`를 올릴 것(여기서 실측한다).
+- [ ] 5. **`dms-api` 롤아웃** — Deployment 조건 기반 판정(세대 게이트 → PDE → 3조건).
+- [ ] 6. **`dms-controller` 자기 갱신 — 이 슬라이스의 핵심 실증.** 컨트롤러가 자기
+      Deployment를 patch해 죽은 뒤, **새 파드가 `Applying` 행을 이어받아 `Applied`로
+      수렴**시킨다. 화면 정지 구간(리스 재획득 ~30초 + 기동)을 실제로 재고, 그 뒤
+      배치가 스스로 닫히는지 확인한다.
+- [ ] 7. 감사 로그에 `mutation_class=release`가 남는다.
+- [ ] 8. 존재하지 않는 태그로 강제 패치 시 `ImagePullBackOff` 후 타임아웃 또는
+      `ProgressDeadlineExceeded`로 `Failed`가 된다.
+
+화면: 「릴리스」(`/admin/releases`) — 컴포넌트 3행 + 태그 select, 한 배치 제출, 진행
+중에는 폴링, 아래에 롤아웃 이력.
+
 ---
 
 ## Unresolved values to fill in during live validation

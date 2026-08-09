@@ -41,6 +41,23 @@ rules:
   - apiGroups: ["batch.volcano.sh"]
     resources: ["jobs/status"]
     verbs: ["get"]
+  # Slice 13 (portal-driven rollout): RolloutWatcher (rollout_watcher.py) patches
+  # the image of the three DMS workloads and reads their status/generation to
+  # decide convergence (execution_volcano.KubernetesClient.patch_workload/
+  # get_workload). resourceNames-scoped -- the controller has no business
+  # patching arbitrary workloads in the namespace.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    resourceNames: ["dms-api", "dms-controller", "dms-agent"]
+    verbs: ["get", "patch"]
+  # resourceNames does not apply to list -- grant it separately, read-only.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["list"]
+  # status is a SEPARATE RBAC resource (same convention as pods/status above).
+  - apiGroups: ["apps"]
+    resources: ["deployments/status", "daemonsets/status"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -84,6 +101,16 @@ rules:
   - apiGroups: ["batch.volcano.sh"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "delete"]
+  # Slice 13: GET /api/admin/releases/targets shows the workloads' CURRENT
+  # declared image (routes_releases.py -> RolloutRunner.observe ->
+  # KubernetesClient.get_workload). Read-only on purpose: the mutation notes
+  # above (delete for cancel, no create) are about writes, not a rule against
+  # reads -- the image tag is a value the portal displays anyway. NO patch:
+  # rollout is the controller's job. resourceNames is omitted because list
+  # does not honor it and the grant is read-only anyway.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
