@@ -84,6 +84,11 @@ def test_sync_bytes_in_rate_line_is_not_matched():
     assert parse_sync_counts(out) == (None, None)
 
 
+def test_sync_items_with_trailing_text_is_not_matched():
+    # "Items: 10 (done)"처럼 숫자 뒤에 내용이 붙으면 요약 줄이 아니다 -- $ 앵커가 배제
+    assert parse_sync_counts("[ts] Items: 10 (done)\n") == (None, None)
+
+
 def test_sync_empty_and_irrelevant_stdout():
     # --quiet 억제·조기 실패 등으로 요약이 없으면 값만 null(설계 §4 fail-soft)
     assert parse_sync_counts("") == (None, None)
@@ -100,6 +105,13 @@ def test_rm_real_capture_removed_items_bytes_always_none():
 def test_rm_last_match_wins():
     out = "Removed 3 items\nRemoved 7 items in 0.1 seconds\n"
     assert parse_rm_counts(out) == (7, None)
+
+
+def test_rm_progress_line_alone_is_not_matched():
+    # "Removing N items"(진행 줄)만 있으면 완료 요약이 없는 것 -- 배제되어야 한다.
+    # DRM_STDOUT은 진행/완료 값이 같아(1/1) 이 배제를 증명 못하므로 값이 다른
+    # 단독 진행 줄로 고정한다(sync의 MID_DIFFERS와 같은 이유).
+    assert parse_rm_counts("[ts] Removing 100 items\n") == (None, None)
 
 
 def test_rm_empty_and_walked_only():
@@ -126,6 +138,14 @@ def test_scan_missing_report_file(tmp_path):
 
 def test_scan_corrupt_json(tmp_path):
     assert parse_scan_counts(_write_report(tmp_path, "{broken")) == (None, None)
+
+
+def test_scan_pathological_nesting_does_not_raise(tmp_path):
+    # 병적으로 깊게 중첩된 JSON은 RecursionError를 던진다 -- ValueError가 아니라서
+    # 좁은 except로는 새어 나간다. 계약은 "절대 예외 없음"(설계 §4)이므로 이것도
+    # None으로 강등되어야 한다.
+    deep = "[" * 100000 + "]" * 100000
+    assert parse_scan_counts(_write_report(tmp_path, deep)) == (None, None)
 
 
 def test_scan_wrong_shapes_and_types(tmp_path):

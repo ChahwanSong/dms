@@ -43,7 +43,7 @@ def parse_scan_counts(report_path: str) -> "tuple[int | None, None]":
     try:
         with open(report_path) as f:
             report = json.load(f)
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 -- 계약이 "절대 예외 없음"(설계 §4)이라 문자 그대로 지킨다
         return None, None
     summary = report.get("summary") if isinstance(report, dict) else None
     entries = summary.get("total_entries") if isinstance(summary, dict) else None
