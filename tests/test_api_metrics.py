@@ -194,3 +194,26 @@ def test_metrics_infra_degrades_only_the_failed_component(client):
 
 def test_metrics_infra_admin_only(client):
     assert client.get("/api/admin/metrics/infra").status_code == 401
+
+
+def test_metrics_infra_observes_in_parallel_and_keeps_order(client):
+    # observe는 컴포넌트당 1회 k8s GET(각 10s 타임아웃)이라 순차면 최악 3×10=30초 --
+    # 프론트 5s 폴링과 충돌한다. 병렬화하면 최악 1×10초. 완료 순서를 ROLLOUT_ORDER의
+    # 역순으로 뒤집어(첫째 dms-agent가 가장 늦게 끝나게) 응답이 완료 순서가 아니라
+    # ROLLOUT_ORDER로 정렬됨을 고정하고, 동시에 벽시계로 병렬성을 잡는다.
+    import time
+
+    class _SlowObserver(_FakeObserver):
+        _delays = {"dms-agent": 0.3, "dms-api": 0.2, "dms-controller": 0.1}
+
+        def observe(self, *, kind, name):
+            time.sleep(self._delays.get(name, 0))
+            return super().observe(kind=kind, name=name)
+
+    client.app.state.rollout_runner = _SlowObserver()
+    t0 = time.monotonic()
+    body = client.get("/api/admin/metrics/infra", headers=ADMIN).json()
+    elapsed = time.monotonic() - t0
+    assert [c["component"] for c in body["components"]] == [
+        "dms-agent", "dms-api", "dms-controller"]      # 완료 역순이어도 순서 불변
+    assert elapsed < 0.5, elapsed                       # 병렬(≈0.3s) -- 순차면 0.6s
