@@ -23,6 +23,7 @@ from .routes_batches import router as batches_router
 from .routes_control import router as control_router
 from .routes_builds import router as builds_router
 from .routes_releases import router as releases_router
+from .routes_metrics import router as metrics_router
 
 
 def create_app(settings: Settings, db: Database) -> FastAPI:
@@ -69,6 +70,7 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app.include_router(control_router)
     app.include_router(builds_router)
     app.include_router(releases_router)
+    app.include_router(metrics_router)
 
     static_dir = settings.static_dir
     if static_dir and os.path.isdir(static_dir):
