@@ -10,6 +10,7 @@ from .scan_paths import UserScanPathsRepository
 from .builds import BuildsRepository
 from .observability import ObservabilityRepository
 from .releases import ReleasesRepository
+from .metrics import MetricsRepository
 
 
 class Repositories:
@@ -27,3 +28,4 @@ class Repositories:
         self.builds = BuildsRepository(db)
         self.observability = ObservabilityRepository(db)
         self.releases = ReleasesRepository(db)
+        self.metrics = MetricsRepository(db)

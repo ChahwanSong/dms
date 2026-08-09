@@ -136,3 +136,44 @@ def test_terminal_jobs_older_than_drains_oldest_first(db):
         3600, limit=2, now_iso="2030-01-01T00:00:00Z")
 
     assert [r["job_id"] for r in rows] == [oldest, middle]
+
+
+def _mk_job(repos, rid):
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    return repos.data_jobs.create_job(
+        rid, plan_id, operation="scan", priority="mid", storage_name="s1",
+        target="a", options={}, tool="dscan", worker_pool={}, precondition={},
+        actor="planner")
+
+
+def test_set_artifact_promotes_files_bytes_to_columns(db):
+    # 설계 §2.3: runner가 언젠가 summary에 files/bytes를 쓰면 마이그레이션 없이
+    # typed 컬럼으로 흘러들어 대시보드 SQL 집계에 잡힌다 -- 그 파이프라인의 계약.
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    repos.data_jobs.set_artifact(
+        job_id, artifact_uri="file:///a",
+        result_summary={"returncode": 0, "files": 12, "bytes": 3456})
+    job = repos.data_jobs.get_job(job_id)
+    assert (job["files_count"], job["bytes_count"]) == (12, 3456)
+    assert job["result_summary"] == {"returncode": 0, "files": 12, "bytes": 3456}
+
+
+def test_set_artifact_without_counts_leaves_null(db):
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    repos.data_jobs.set_artifact(job_id, artifact_uri=None,
+                                 result_summary={"returncode": 0})
+    job = repos.data_jobs.get_job(job_id)
+    assert (job["files_count"], job["bytes_count"]) == (None, None)
+
+
+def test_set_artifact_rejects_non_int_counts(db):
+    # summary는 신뢰 경계 밖(runner 산출물) -- 문자열·bool·음수가 컬럼을 오염시키면 안 된다
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    repos.data_jobs.set_artifact(
+        job_id, artifact_uri=None,
+        result_summary={"files": "12", "bytes": True})
+    job = repos.data_jobs.get_job(job_id)
+    assert (job["files_count"], job["bytes_count"]) == (None, None)

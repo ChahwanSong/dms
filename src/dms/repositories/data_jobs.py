@@ -22,6 +22,15 @@ def _guard_component(actor: str) -> str:
     return actor if actor in _KNOWN_COMPONENTS else "api"
 
 
+def _as_count(value) -> "int | None":
+    # result_summary는 신뢰 경계 밖(runner 산출물)이다. bool은 int의 서브클래스라
+    # 명시적으로 제외하고, 음수는 계수로서 의미가 없어 버린다 -- 잘못된 값이
+    # typed 컬럼으로 새면 SUM 집계 전체가 오염된다.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 class DataJobsRepository:
     def __init__(self, db: Database):
         self._db = db
@@ -197,11 +206,20 @@ class DataJobsRepository:
             {"f": fingerprint, "now": utc_now_iso(), "j": job_id})
 
     def set_artifact(self, job_id, *, artifact_uri, result_summary):
+        # files/bytes 승격(설계 §2.3): summary에 키가 있으면 typed 컬럼에 채운다.
+        # 지금 runner는 이 키를 안 쓰므로 대부분 NULL -- runner의 mpifileutils
+        # 출력 파싱은 이 슬라이스 범위 밖(별도 작업)이다.
+        files_count = bytes_count = None
+        if isinstance(result_summary, dict):
+            files_count = _as_count(result_summary.get("files"))
+            bytes_count = _as_count(result_summary.get("bytes"))
         self._db.execute(
             """UPDATE data_jobs SET artifact_uri = COALESCE(:a, artifact_uri),
-                   result_summary = :s, updated_at = :now WHERE job_id = :j""",
+                   result_summary = :s, files_count = :fc, bytes_count = :bc,
+                   updated_at = :now WHERE job_id = :j""",
             {"a": artifact_uri,
              "s": dump_json(result_summary) if result_summary is not None else None,
+             "fc": files_count, "bc": bytes_count,
              "now": utc_now_iso(), "j": job_id})
 
     def list_confirmable(self, job_id):

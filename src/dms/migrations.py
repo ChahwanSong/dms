@@ -111,6 +111,11 @@ def migrate(db: Database) -> None:
             volcano_job_ref TEXT,
             artifact_uri TEXT,
             result_summary TEXT,
+            -- files/bytes 파이프라인(슬라이스 14 설계 §2.3): set_artifact가
+            -- result_summary의 "files"/"bytes"를 typed 컬럼으로 승격한다. runner가
+            -- 아직 그 키를 안 써서 당분간 대부분 NULL -- 대시보드는 "—"로 생략한다.
+            files_count INTEGER,
+            bytes_count INTEGER,
             worker_pool TEXT,
             precondition TEXT,
             confirmed_fingerprint TEXT,
@@ -314,6 +319,8 @@ def _ensure_columns(db):
         ("data_jobs", "precondition", "TEXT"),
         ("data_jobs", "confirmed_fingerprint", "TEXT"),
         ("data_jobs", "phase_refs", "TEXT"),
+        ("data_jobs", "files_count", "INTEGER"),
+        ("data_jobs", "bytes_count", "INTEGER"),
         ("requests", "batch_id", "TEXT"),
         ("control_state", "build_node_name", "TEXT"),
         ("builds", "log_text", "TEXT"),
