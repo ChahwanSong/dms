@@ -123,6 +123,25 @@ def test_missing_rx_field_propagates_null_to_next_interval():
     assert [p["net_rx_bps"] for p in pts] == [None, None, None, 33.3]
 
 
+def test_non_list_disks_degrades_to_empty_without_crash():
+    # 스키마 검증 없이 저장된 리포트라 os.disks 가 트루시 스칼라(5)일 수 있다.
+    # `disks or []` 였다면 `for disk in 5` -> TypeError 로 노드 전체 시리즈가 죽는다.
+    # mem 필드가 오염 시 None 으로 강등되듯, 비-리스트 disks 는 []로 강등해야 한다.
+    pts = build_node_points([_sample(
+        "2026-08-09T00:00:00Z", load1=0.5, load5=0.4, load15=0.3,
+        memory_total_kb=100, memory_available_kb=25, disks=5)])
+    # 예외 없이 포인트가 나오고, disks 만 []로 강등, 나머지 필드는 온전하다
+    assert pts[0]["disks"] == []
+    assert pts[0]["load1"] == 0.5 and pts[0]["mem_used_pct"] == 75.0
+
+
+def test_dict_and_string_disks_also_degrade_to_empty():
+    # isinstance(list) 가드를 고정: dict/str 도 순회하면 각각 키/문자로 새므로 []로 닫는다
+    for bad in ({"storage_name": "s1"}, "s1"):
+        pts = build_node_points([_sample("2026-08-09T00:00:00Z", disks=bad)])
+        assert pts[0]["disks"] == [], bad
+
+
 def test_duration_histogram_fixed_buckets():
     hist = duration_histogram([30, 3599, 100000, -5, None])
     assert hist == [

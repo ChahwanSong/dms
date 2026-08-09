@@ -71,6 +71,24 @@ def test_metrics_nodes_fail_soft_on_corrupt_report(client, db):
     assert len(body["nodes"][0]["points"]) == 1  # 손상 행만 빠지고 시리즈는 산다(설계 §6-6)
 
 
+def test_metrics_nodes_fail_soft_on_non_list_disks(client, db):
+    # 스키마 검증 없이 저장된 리포트라 os.disks 가 트루시 스칼라(5)일 수 있다.
+    # `for disk in 5` 는 TypeError -- 나쁜 노드 하나가 라우트 전체를 500으로 죽이면
+    # 안 된다. 그 노드만 disks:[]로 강등되고 건강한 노드 시리즈는 살아야 한다(§6-6).
+    repos = Repositories(db)
+    now = utc_now_iso()
+    repos.agents.ingest("healthy", _report(), reported_at=now)
+    bad = _report()
+    bad["os"]["disks"] = 5               # 비-리스트: 순회 시 TypeError로 라우트가 죽을 것
+    repos.agents.ingest("bad", bad, reported_at=now)
+    r = client.get("/api/admin/metrics/nodes?window=24", headers=ADMIN)
+    assert r.status_code == 200          # 라우트 전체가 500 나지 않는다(불변식)
+    nodes = {n["node_name"]: n for n in r.json()["nodes"]}
+    assert nodes["healthy"]["points"][0]["disks"] == [
+        {"storage_name": "s1", "used_pct": 40.0}]   # 건강한 노드 시리즈는 온전
+    assert nodes["bad"]["points"][0]["disks"] == []  # 나쁜 노드만 []로 우아하게 강등
+
+
 def test_metrics_jobs_aggregates_and_histogram_shape(client, db):
     repos = Repositories(db)
     now = utc_now_iso()

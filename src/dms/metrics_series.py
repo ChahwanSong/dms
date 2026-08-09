@@ -50,7 +50,13 @@ def _mem_used_pct(os_block):
 
 def _disks(os_block):
     out = []
-    for disk in os_block.get("disks") or []:
+    disks = os_block.get("disks")
+    # 비-리스트 disks(트루시 스칼라 5, dict, str 등)는 순회 시 TypeError -- 이는
+    # 노드 하나가 아니라 라우트 전체를 500으로 죽인다. mem 필드가 오염 시 None으로
+    # 강등되듯, 여기서도 "디스크 없음([])"으로 우아하게 강등한다(모듈 전역 fail-soft).
+    if not isinstance(disks, list):
+        return out
+    for disk in disks:
         if not isinstance(disk, dict) or not isinstance(disk.get("storage_name"), str):
             continue
         total = _num(disk.get("total_bytes"))
