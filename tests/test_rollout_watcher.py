@@ -414,6 +414,29 @@ def test_stalled_daemonset_is_still_reclaimed(repos):
     assert repos.releases.get(rows[0]["id"])["state"] == "Failed"
 
 
+def test_stale_generation_observation_does_not_poison_daemonset_progress(repos):
+    # I6 회귀: 패치 직후 첫 관찰이 아직 옛 세대 status를 실으면
+    # observed_generation < generation 이고 updated_number_scheduled == desired(=5)다.
+    # 세대 게이트 없이 그 값을 믿으면 progress가 즉시 5로 올라, 이후의 진짜
+    # 진행(1->2->3->4)이 전부 updated <= progress 라 시계를 한 번도 리셋하지 못한다.
+    # -> I6이 겨냥한 "5노드 순차 2000초" 시나리오가 조용히 무효화되어 회수된다.
+    rows = _batch(repos, "dms-agent", "dms-api")
+    repos.releases.mark_applying(rows[0]["id"])
+    start = repos.releases.get(rows[0]["id"])["applied_at"]
+    runner = _Runner()
+    w = _watch(repos, runner, timeout=600)
+    # 패치 직후: 옛 세대(gen 1, observed 0)인데 updated == desired == 5
+    stale = _progressing_daemonset(5)
+    stale["generation"], stale["observed_generation"] = 2, 1
+    runner.observations[("DaemonSet", "dms-agent")] = stale
+    w.run_once(now_iso=iso_plus(start, 5))
+    # progress가 오염되지 않아야 이후 정상 진행이 시계를 리셋할 수 있다
+    for node in range(1, 5):
+        runner.observations[("DaemonSet", "dms-agent")] = _progressing_daemonset(node)
+        w.run_once(now_iso=iso_plus(start, 500 * node))
+        assert repos.releases.get(rows[0]["id"])["state"] == "Applying", node
+
+
 def test_deployment_progress_does_not_move_the_pde_baseline(repos):
     # Deployment의 applied_at은 sticky PDE 판별(I1)의 기준 시각이다 -- 진행 중에
     # 앞당기면 이 롤아웃이 만든 진짜 PDE 조건까지 stale로 읽혀 유일한 종단 수단이

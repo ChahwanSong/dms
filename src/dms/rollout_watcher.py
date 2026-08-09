@@ -93,6 +93,13 @@ class RolloutWatcher:
         시각이라(rollout_status._is_stale_pde) 앞당기면 이 롤아웃이 만든 진짜 PDE
         조건까지 stale로 읽혀 유일한 종단 수단이 사라진다. 애초에 Deployment는
         progressDeadlineSeconds가 진행마다 리셋되므로 이 보정이 필요 없다."""
+        # 세대 게이트를 먼저 건다: 패치 직후 첫 관찰이 아직 옛 세대 status를 실으면
+        # updated_number_scheduled == desired(=5)라, 그 값을 믿고 progress를 5로
+        # 올려버리면 이후의 진짜 진행(1->2->3->4)이 전부 updated <= progress가 되어
+        # 시계를 한 번도 리셋하지 못한다 -- 이 보정이 겨냥한 바로 그 시나리오가
+        # 조용히 무효화된다. assess_daemonset이 쓰는 것과 같은 게이트다.
+        if obs["observed_generation"] < obs["generation"]:
+            return
         updated = obs["updated_number_scheduled"]
         if updated <= (head["progress"] or 0):
             return
