@@ -70,6 +70,15 @@ def _converged_daemonset(image, container="agent", desired=5):
             "number_misscheduled": 0, "images": {container: image}}
 
 
+def _progressing_daemonset(updated, image="pkg-01:5000/dms-agent:new1",
+                           container="agent", desired=5):
+    """순차 롤아웃 도중: updated 노드까지 새 파드로 교체됐다."""
+    return {"kind": "DaemonSet", "generation": 1, "observed_generation": 1,
+            "desired_number_scheduled": desired, "updated_number_scheduled": updated,
+            "number_ready": updated, "number_unavailable": desired - updated,
+            "number_misscheduled": 0, "images": {container: image}}
+
+
 @pytest.fixture
 def repos(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
@@ -363,6 +372,60 @@ def test_deployment_wallclock_is_three_times_longer(repos):
     assert repos.releases.get(rows[0]["id"])["state"] == "Applying"   # 아직
     w.run_once(now_iso=iso_plus(utc_now_iso(), 1801))
     assert repos.releases.get(rows[0]["id"])["state"] == "Failed"
+
+
+def test_daemonset_progress_pushes_back_the_wallclock(repos):
+    # I6: 실 클러스터는 5노드 DaemonSet에 maxUnavailable=1이라 순차 롤아웃이다.
+    # 벽시계가 applied_at(=mark_applying 시각)부터 절대 시각으로 재면 전체가
+    # 600초 안에 끝나야 하고, dms-agent는 ROLLOUT_ORDER 첫째라 회수되면
+    # abort_pending이 dms-api/dms-controller까지 rollout_aborted로 죽인다.
+    # 시계는 "지속시간"이 아니라 "정체"를 재야 한다.
+    rows = _batch(repos, "dms-agent", "dms-api")
+    repos.releases.mark_applying(rows[0]["id"])
+    start = repos.releases.get(rows[0]["id"])["applied_at"]
+    runner = _Runner()
+    w = _watch(repos, runner, timeout=600)
+    for node in range(1, 5):        # 노드당 500초 -> 전체 2000초, 마감의 세 배 넘음
+        runner.observations[("DaemonSet", "dms-agent")] = _progressing_daemonset(node)
+        w.run_once(now_iso=iso_plus(start, 500 * node))
+        assert repos.releases.get(rows[0]["id"])["state"] == "Applying", node
+    # 마지막 진행(=2000초) 이후로는 같은 관찰만 온다 -- 그때부터 600초를 잰다
+    w.run_once(now_iso=iso_plus(start, 2000 + 599))
+    assert repos.releases.get(rows[0]["id"])["state"] == "Applying"
+    w.run_once(now_iso=iso_plus(start, 2000 + 601))
+    row = repos.releases.get(rows[0]["id"])
+    assert (row["state"], row["reason_code"]) == ("Failed", "rollout_timeout")
+    assert repos.releases.get(rows[1]["id"])["state"] == "Failed"   # 배치는 닫힌다
+
+
+def test_stalled_daemonset_is_still_reclaimed(repos):
+    # 반대 증거: 진행이 멈추면 시계는 그대로 흐른다 -- 정체 기반 회수가
+    # "영원히 안 죽는다"가 되면 배치가 rollout_in_progress로 잠긴다.
+    rows = _batch(repos, "dms-agent")
+    repos.releases.mark_applying(rows[0]["id"])
+    start = repos.releases.get(rows[0]["id"])["applied_at"]
+    runner = _Runner()
+    runner.observations[("DaemonSet", "dms-agent")] = _progressing_daemonset(2)
+    w = _watch(repos, runner, timeout=600)
+    w.run_once(now_iso=iso_plus(start, 100))          # 2노드까지 진행 -> 시계 리셋
+    w.run_once(now_iso=iso_plus(start, 400))          # 같은 관찰 -> 리셋 없음
+    assert repos.releases.get(rows[0]["id"])["state"] == "Applying"
+    w.run_once(now_iso=iso_plus(start, 100 + 601))    # 마지막 진행 +601초
+    assert repos.releases.get(rows[0]["id"])["state"] == "Failed"
+
+
+def test_deployment_progress_does_not_move_the_pde_baseline(repos):
+    # Deployment의 applied_at은 sticky PDE 판별(I1)의 기준 시각이다 -- 진행 중에
+    # 앞당기면 이 롤아웃이 만든 진짜 PDE 조건까지 stale로 읽혀 유일한 종단 수단이
+    # 사라진다. Deployment는 PDE가 진행마다 리셋되므로 애초에 필요도 없다.
+    rows = _batch(repos, "dms-api")
+    repos.releases.mark_applying(rows[0]["id"])
+    start = repos.releases.get(rows[0]["id"])["applied_at"]
+    runner = _Runner()
+    runner.observations[("Deployment", "dms-api")] = _progressing_deploy(
+        "pkg-01:5000/dms:new1")
+    _watch(repos, runner).run_once(now_iso=iso_plus(start, 60))
+    assert repos.releases.get(rows[0]["id"])["applied_at"] == start
 
 
 def test_terminal_rows_are_not_reprocessed(repos):

@@ -30,7 +30,15 @@ class RolloutWatcher:
         self._runner = runner
         self._timeout_seconds = timeout_seconds
 
-    def _fail(self, head, reason_code) -> None:
+    def _fail(self, head, *, reason_code) -> None:
+        # reason_code는 반드시 **키워드**로 받는다. tests/test_reason_codes_coverage.py
+        # 의 추출기가 detail=/reason_code= 키워드 리터럴만 읽으므로, 위치 인자로 넘기면
+        # 이 모듈의 사유 코드가 통째로 가드에 안 보인다 -- "새 사유 코드는
+        # REASON_MESSAGES와 reasonCodes.json 양쪽에"라는 슬라이스 불변식이 여기서만
+        # 강제되지 않게 된다. 같은 이유로 절단(200자)도 호출부의 [:200] 슬라이스가
+        # 아니라 여기서 한다: 슬라이스 표현식은 리터럴도 f-string도 아니라 추출기가
+        # 못 읽는다.
+        reason_code = reason_code[:200]
         # 한 컴포넌트가 실패하면 뒤 Pending까지 닫아 배치를 끝낸다 -- 안 닫으면
         # active()가 영원히 비지 않아 rollout_in_progress가 새 롤아웃을 막는다.
         #
@@ -66,13 +74,43 @@ class RolloutWatcher:
         return ",".join(sorted({f"{b.get('node')}:{b.get('waiting_reason')}"
                                 for b in briefs if b.get("waiting_reason")}))
 
+    def _note_daemonset_progress(self, head, obs, now) -> None:
+        """DaemonSet 회수 시계를 '정체' 기준으로 다시 건다(I6).
+
+        DaemonSet에는 conditions도 progressDeadlineSeconds도 없어 벽시계가 유일한
+        실패 수단인데, applied_at(mark_applying 때 한 번 설정)부터 절대 시각으로
+        재면 정상적인 순차 롤아웃이 회수된다 -- 실 클러스터는 5노드에
+        maxUnavailable=1이라 노드 하나씩 차례로 교체되고, 전체가 600초 안에 끝나야
+        한다는 뜻이 되기 때문이다. 게다가 dms-agent가 ROLLOUT_ORDER 첫째라 회수되면
+        abort_pending이 dms-api/dms-controller까지 rollout_aborted로 죽인다.
+
+        updated_number_scheduled가 늘어난 틱마다 시계를 다시 건다. 이전 값은
+        releases.progress로 지속시킨다 -- 이 워처는 틱마다 새로 생성되므로
+        (controller.build_loops의 람다) 인스턴스 변수는 다음 틱까지 살아남지 않고,
+        컨트롤러 파드가 교체되면 더더욱 그렇다.
+
+        Deployment에는 하지 않는다: 그쪽 applied_at은 sticky PDE 판별의 기준
+        시각이라(rollout_status._is_stale_pde) 앞당기면 이 롤아웃이 만든 진짜 PDE
+        조건까지 stale로 읽혀 유일한 종단 수단이 사라진다. 애초에 Deployment는
+        progressDeadlineSeconds가 진행마다 리셋되므로 이 보정이 필요 없다."""
+        updated = obs["updated_number_scheduled"]
+        if updated <= (head["progress"] or 0):
+            return
+        self._repos.releases.note_progress(head["id"], progress=updated, now=now)
+
     def _reclaim(self, head, spec, now) -> bool:
-        """벽시계 회수. observe보다 먼저 -- 조회가 지속 실패해도 회수는 돼야 한다."""
+        """벽시계 회수. observe보다 먼저 -- 조회가 지속 실패해도 회수는 돼야 한다.
+
+        진행 시 갱신되는 applied_at(_note_daemonset_progress)을 기준으로 재므로
+        observe가 지속 실패하면 시계는 리셋되지 않고 그대로 흘러 회수된다."""
         factor = 1 if spec["kind"] == "DaemonSet" else _DEPLOY_TIMEOUT_FACTOR
         if head["applied_at"] >= iso_plus(now, -self._timeout_seconds * factor):
             return False
         stuck = self._stuck_detail(spec)
-        self._fail(head, f"rollout_timeout:{stuck}"[:200] if stuck else "rollout_timeout")
+        if stuck:
+            self._fail(head, reason_code=f"rollout_timeout:{stuck}")
+        else:
+            self._fail(head, reason_code="rollout_timeout")
         return True
 
     def run_once(self, *, now_iso=None) -> dict:
@@ -98,7 +136,7 @@ class RolloutWatcher:
                 # 그래서 예외를 삼켜 다음 틱에 맡기지 않고 즉시 _fail로 종단시킨다 --
                 # 회수는 Applying 행만 보므로 Pending head가 여기 걸리면 벽시계도
                 # 못 푼다. 배치를 닫는 것만이 잠김을 막는다.
-                self._fail(head, "unknown_component")
+                self._fail(head, reason_code="unknown_component")
                 return {"patched": patched, "finished": finished + 1}
 
             if head["state"] == "Pending":
@@ -122,7 +160,7 @@ class RolloutWatcher:
             if obs is None:
                 # 404. 워크로드 이름이 바뀌었거나 네임스페이스가 다르다 -- 기다려도
                 # 저절로 생기지 않으므로 즉시 종단시킨다.
-                self._fail(head, "workload_not_found")
+                self._fail(head, reason_code="workload_not_found")
                 return {"patched": patched, "finished": finished + 1}
             if obs["images"].get(spec["container"]) != head["image"]:
                 # 크래시 복구: 행은 Applying인데 spec 이미지가 목표가 아니다 --
@@ -138,13 +176,18 @@ class RolloutWatcher:
                 # 이 롤아웃의 실패가 아니다(rollout_status._is_stale_pde).
                 verdict, detail = assess_deployment(obs, since=head["applied_at"])
             else:
+                # 판정 전에 시계를 다시 건다 -- 이 틱이 progressing으로 끝나도
+                # 다음 틱의 회수 기준은 "마지막 진행"이어야 한다.
+                self._note_daemonset_progress(head, obs, now)
                 verdict, detail = assess_daemonset(obs)
             if verdict == "applied":
                 self._repos.releases.finish(head["id"], state="Applied")
                 finished += 1
             elif verdict == "failed":
-                self._fail(head, f"rollout_failed:{detail}"[:200] if detail
-                           else "rollout_failed")
+                if detail:
+                    self._fail(head, reason_code=f"rollout_failed:{detail}")
+                else:
+                    self._fail(head, reason_code="rollout_failed")
                 finished += 1
             # progressing이면 아무것도 안 한다 -- 다음 틱이 다시 본다
         except ExecutionError as exc:
