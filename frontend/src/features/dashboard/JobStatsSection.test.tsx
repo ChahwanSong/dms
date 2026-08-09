@@ -53,7 +53,7 @@ test("성공률·처리량·분해 표·실패 사유를 그린다", async () =>
 
 test("files/bytes가 NULL이면 — 로 우아하게 생략한다", async () => {
   renderSection();
-  const row = await screen.findByText("처리 파일/바이트");
+  const row = await screen.findByText("처리 항목/바이트");
   expect(row.parentElement).toHaveTextContent("— / —");
 });
 

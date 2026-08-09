@@ -124,7 +124,7 @@ export function JobStatsSection() {
         </div>
       )}
       <p className="text-muted text-sm mt-4">
-        <span className="font-medium">처리 파일/바이트</span>{" "}
+        <span className="font-medium">처리 항목/바이트</span>{" "}
         {d?.files_total ?? "—"} / {humanBytes(d?.bytes_total ?? null)}
       </p>
     </Card>
