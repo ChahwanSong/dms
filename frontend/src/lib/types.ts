@@ -142,9 +142,9 @@ export interface ScanPathStats {
 export interface Release {
   id: number; component: string; image: string; tag: string;
   digest: string | null; state: string; reason_code: string | null;
-  // seq는 배치 안의 적용 순서다(서버가 ROLLOUT_ORDER로 매긴다) -- 목록 응답에는 늘
-  // 있지만 스키마가 바뀌어도 화면이 죽지 않도록 선택 필드로 둔다.
-  seq?: number; actor: string; applied_at: string;
+  // seq(배치 안 적용 순서)는 서버가 응답에서 뺀다 -- 내부 정렬용 컬럼이고, 화면은
+  // 이미 서버가 ROLLOUT_ORDER로 정렬해 준 목록을 그대로 그린다.
+  actor: string; applied_at: string;
 }
 export interface ReleaseTarget {
   component: string; kind: string; workload: string; container: string;

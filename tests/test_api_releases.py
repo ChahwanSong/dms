@@ -205,6 +205,22 @@ def test_list_carries_current_and_history(rollout_client):
     assert body["history"][0]["component"] == "dms-api"
 
 
+def test_internal_columns_never_leave_the_api(rollout_client):
+    # seq(누가 head인가)와 progress(DaemonSet 회수 시계의 내부 상태)는 저장소
+    # 내부 값이다 -- routes_builds._detail과 같은 관례로 응답에서 뺀다. SELECT *가
+    # 그대로 나가면 내부 컬럼이 조용히 공개 스키마가 된다.
+    posted = rollout_client.post(
+        "/api/admin/releases",
+        json={"items": [{"component": "dms-api", "tag": "d23"}]},
+        headers=ADMIN).json()
+    body = rollout_client.get("/api/admin/releases", headers=ADMIN).json()
+    rows = (posted["items"] + body["history"] + list(body["current"].values()))
+    assert rows, "검사할 행이 없으면 이 테스트는 아무것도 증명하지 못한다"
+    for row in rows:
+        assert "seq" not in row and "progress" not in row, row
+        assert row["component"] == "dms-api"        # 나머지 필드는 그대로 나간다
+
+
 def test_submit_writes_release_audit_with_actor(rollout_client):
     rollout_client.post("/api/admin/releases",
                         json={"items": [{"component": "dms-api", "tag": "d23"}]},

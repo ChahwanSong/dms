@@ -23,7 +23,10 @@ _KIND = {"pod": "Pod", "vcjob": "Job"}
 # 틱이 영원히 블록된다 -- 이 저장소의 리스는 갱신되지 않으므로(controller.run_all_once 가
 # 틱마다 새로 획득한다) 리스 max(interval*3, 30)=30초가 만료되고 다른 파드가 같은 루프에
 # 진입한다. 롤아웃은 자기 자신을 재시작하는 경로라 여기서 막히는 것이 특히 나쁘다.
-# 한 틱이 최대 2회 호출(observe + pod_briefs)이므로 10초면 최악 20초 < 30초.
+# 한 틱의 최악은 apiserver 호출 2회다 -- observe 뒤 spec 이미지가 목표와 달라
+# 재패치하는 크래시 복구 경로(rollout_watcher.run_once)가 그것이다. observe 와
+# pod_briefs 가 함께 나가는 경로는 없다: 회수(_reclaim, pod_briefs 를 부르는 유일한
+# 자리)는 observe 앞에서 판정하고 즉시 반환한다. 10초면 최악 20초 < 30초.
 # 설정 키로 빼지 않는다: 운영자가 튜닝할 값이 아니라 리스 TTL 과 맞물린 내부 불변식이고,
 # 노출하면 리스보다 큰 값이 설정돼 이 가드가 그대로 무력화될 수 있다.
 ROLLOUT_REQUEST_TIMEOUT_SECONDS = 10

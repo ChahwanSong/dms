@@ -381,19 +381,24 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
 갱신 + 소비자 재시작이 필요해서 범위 밖이다(설계 §10). 바꾸려면 지금처럼
 `20-config.yaml`을 고쳐 apply한다.
 
-**6) RBAC은 세 워크로드로 좁혀져 있다.** 컨트롤러 Role의 apps patch 권한은
+**6) RBAC은 세 워크로드로 좁혀져 있다.** 컨트롤러 Role의 apps `get`/`patch`는
 `resourceNames: ["dms-api", "dms-controller", "dms-agent"]`로 한정된다
 (`10-rbac.yaml`) — 컨트롤러가 네임스페이스의 임의 워크로드를 건드릴 수 없다.
-`list`는 `resourceNames`를 따르지 않아 별도 read-only 규칙으로 준다. api Role은
-**읽기 전용 get/list만** 받는다(「릴리스」 화면이 현재 이미지를 보여주기 위한 것) —
-patch는 컨트롤러에만 있다. 새 태그를 쓰기 전에 `10-rbac.yaml`을 apply해야 한다.
-확인:
+api Role은 같은 세 이름에 **읽기 전용 `get`만** 받는다(「릴리스」 화면이 현재
+이미지를 보여주기 위한 것) — patch는 컨트롤러에만 있다. `list`와 `*/status`
+규칙은 **두지 않는다**: 코드는 `read_namespaced_deployment`/`_daemon_set`으로
+메인 리소스만 읽고(상태는 그 안에 담겨 온다) 어디서도 apps를 list하지 않는다.
+특히 `list`는 `resourceNames`를 따르지 않아, 두면 Role이 네임스페이스의 모든
+워크로드로 조용히 넓어져 위의 "세 워크로드로 좁혀져 있다"가 사실이 아니게 된다.
+새 태그를 쓰기 전에 `10-rbac.yaml`을 apply해야 한다. 확인:
 
 ```bash
 kubectl --context dms auth can-i patch deployments.apps/dms-controller \
   --as=system:serviceaccount:dms:dms-controller -n dms      # yes
 kubectl --context dms auth can-i patch deployments.apps \
   --as=system:serviceaccount:dms:dms-api -n dms             # no
+kubectl --context dms auth can-i list deployments.apps \
+  --as=system:serviceaccount:dms:dms-controller -n dms      # no (의도적)
 ```
 
 **7) 없는 태그를 강제로 넣으면 시끄럽게 실패한다.** 레지스트리가 다운이면 태그 검증이

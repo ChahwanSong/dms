@@ -33,6 +33,12 @@ def test_empty_tag_list_is_not_confused_with_failure(monkeypatch):
 def test_request_always_carries_a_timeout(monkeypatch):
     # 폴링 엔드포인트(targets)가 이 함수를 부른다 -- 타임아웃 없이 매달리면 레지스트리
     # 행업 하나가 api 워커 스레드를 계속 물고 있게 된다. 계약으로 고정한다.
+    #
+    # "is not None"만 보면 httpx.Timeout(None)(= 무제한)도 통과한다 -- 그것이
+    # 정확히 이 테스트가 막아야 할 회귀다. 값 자체를 못박는다: targets는 컴포넌트
+    # 3종을 훑고 그중 두 개가 같은 dms 리포라 요청당 레지스트리 조회는 최대 2회,
+    # 즉 최악 대기는 2×3초다. connect를 따로 더 짧게 두는 이유는 레지스트리가
+    # 죽었을 때(연결 자체가 안 됨) 화면이 빨리 강등되어야 하기 때문이다.
     seen = {}
 
     def capture(url, timeout):
@@ -40,4 +46,6 @@ def test_request_always_carries_a_timeout(monkeypatch):
         return {"tags": ["d1"]}
     monkeypatch.setattr("dms.registry._get_json", capture)
     fetch_repo_tags("pkg-01:5000", "dms")
-    assert seen["timeout"] is not None
+    timeout = seen["timeout"]
+    assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (
+        2.0, 3.0, 3.0, 3.0)

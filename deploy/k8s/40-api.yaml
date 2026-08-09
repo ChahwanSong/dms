@@ -10,6 +10,15 @@
 # increasing replicas, add a DB-level partial unique index that enforces at
 # most one row of builds with state IN ('Pending','Running').
 #
+# Slice 13 (portal-driven rollout) adds a SECOND invariant with the same shape:
+# repositories/releases.py::create_batch() raises rollout_in_progress from an
+# active() check inside the same transaction as its INSERTs, which is the same
+# single-process idiom. Two API processes can both admit a rollout batch, and
+# two concurrent batches racing over the same three workloads would break the
+# ROLLOUT_ORDER guarantee (the watcher only ever advances the single head).
+# The same partial unique index treatment is needed for releases with state IN
+# ('Pending','Applying') before replicas > 1.
+#
 # /cephfs hostPath: app.state.execution_adapter (built in api/app.py exactly
 # like the controller's) currently only ever calls .terminate() from the
 # cancel route, which is DB+k8s only and needs no filesystem access. This

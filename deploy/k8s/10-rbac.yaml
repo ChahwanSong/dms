@@ -46,18 +46,22 @@ rules:
   # decide convergence (execution_volcano.KubernetesClient.patch_workload/
   # get_workload). resourceNames-scoped -- the controller has no business
   # patching arbitrary workloads in the namespace.
+  #
+  # get on the MAIN resource is enough and no other apps verb is granted:
+  # get_workload calls read_namespaced_deployment / read_namespaced_daemon_set,
+  # which read the main resource (status comes back inside it), and nothing in
+  # src/dms ever lists or reads the /status subresource of an apps object. The
+  # earlier `list` and `deployments/status` rules were dead. `list` in
+  # particular was the ONE rule here without resourceNames, which quietly
+  # widened this Role to every workload in the namespace and made the
+  # "resourceNames-scoped" claim above untrue. Dropped rather than kept as
+  # forward-looking: a grant that no caller exercises cannot be verified, and
+  # re-adding it is one line the day something needs it. (Pod listing for
+  # rollout diagnostics uses the core pods rule above, not this one.)
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets"]
     resourceNames: ["dms-api", "dms-controller", "dms-agent"]
     verbs: ["get", "patch"]
-  # resourceNames does not apply to list -- grant it separately, read-only.
-  - apiGroups: ["apps"]
-    resources: ["deployments", "daemonsets"]
-    verbs: ["list"]
-  # status is a SEPARATE RBAC resource (same convention as pods/status above).
-  - apiGroups: ["apps"]
-    resources: ["deployments/status", "daemonsets/status"]
-    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -106,11 +110,17 @@ rules:
   # KubernetesClient.get_workload). Read-only on purpose: the mutation notes
   # above (delete for cancel, no create) are about writes, not a rule against
   # reads -- the image tag is a value the portal displays anyway. NO patch:
-  # rollout is the controller's job. resourceNames is omitted because list
-  # does not honor it and the grant is read-only anyway.
+  # rollout is the controller's job.
+  #
+  # `list` was dropped for the same reason as in the controller Role: the route
+  # iterates ROLLOUT_ORDER and reads each workload by name, so only get is ever
+  # called. With list gone, resourceNames now applies and is worth having --
+  # the three names are exactly the ones COMPONENTS can ask for, and
+  # tests/test_release_manifest_contract.py pins them to the manifests.
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets"]
-    verbs: ["get", "list"]
+    resourceNames: ["dms-api", "dms-controller", "dms-agent"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

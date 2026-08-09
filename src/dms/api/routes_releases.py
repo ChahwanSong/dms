@@ -27,10 +27,22 @@ class ReleaseBody(BaseModel):
     items: list[ReleaseItem]
 
 
+def _public(row) -> dict:
+    # seq는 내부 정렬용 컬럼(누가 head인가)이라 밖으로 새면 안 된다 --
+    # routes_builds._detail과 같은 관례다. 화면은 이미 서버가 강제한 순서대로 온
+    # 목록을 그대로 그리므로 seq를 쓸 일이 없다.
+    out = dict(row)
+    out.pop("seq", None)
+    # progress는 DaemonSet 회수 시계의 내부 상태다(마지막으로 관찰된 노드 수) --
+    # 운영자에게 보여줄 값이 아니고 스키마 계약도 아니다.
+    out.pop("progress", None)
+    return out
+
+
 def _current_image(runner, spec) -> "str | None":
-    # 설계 §5(1f5f4e5): api Role에 읽기 전용 apps get/list가 있다 -- 컨트롤러와
-    # 같은 get_workload(observe)로 "현재 선언된" spec 이미지를 읽는다. 파드에서
-    # 유도하는 대안은 롤링 중 옛/새 파드가 섞여 부정확해 설계가 기각했다.
+    # 설계 §5(1f5f4e5): api Role에 읽기 전용 apps get이 있다(세 워크로드 한정) --
+    # 컨트롤러와 같은 get_workload(observe)로 "현재 선언된" spec 이미지를 읽는다.
+    # 파드에서 유도하는 대안은 롤링 중 옛/새 파드가 섞여 부정확해 설계가 기각했다.
     try:
         obs = runner.observe(kind=spec["kind"], name=spec["workload"])
     except ExecutionError:
@@ -53,8 +65,8 @@ def _tags_for(cache: dict, registry: str, repository: str) -> "list[str] | None"
 @router.get("/api/admin/releases")
 def list_releases(request: Request, limit: int = Query(default=50, ge=1, le=200)):
     repos = request.app.state.repos
-    return {"current": repos.releases.current(),
-            "history": repos.releases.list(limit=limit)}
+    return {"current": {c: _public(r) for c, r in repos.releases.current().items()},
+            "history": [_public(r) for r in repos.releases.list(limit=limit)]}
 
 
 @router.get("/api/admin/releases/targets")
@@ -126,4 +138,4 @@ def submit_releases(body: ReleaseBody, request: Request,
     except DomainValidationError as e:
         # 사전 체크와 이 사이의 경합 창 -- 트랜잭션 안 가드가 잡는다.
         raise HTTPException(status_code=409, detail=e.reason_code)
-    return {"items": rows}
+    return {"items": [_public(r) for r in rows]}
