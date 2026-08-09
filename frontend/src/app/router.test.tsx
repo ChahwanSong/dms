@@ -144,6 +144,19 @@ test("admin can open build detail", async () => {
   expect(await screen.findByRole("heading", { name: "빌드 b1" })).toBeInTheDocument();
 });
 
+// h1과 사이드바 라벨과 이 이름이 어긋나면 운영자가 링크와 화면을 짝지을 수 없다
+// -- 세 곳이 같은 문자열이라는 것을 여기서 고정한다.
+test("admin can open releases screen", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/releases/targets", () =>
+      HttpResponse.json({ registry_ok: true, targets: [] })),
+    http.get("/api/admin/releases", () => HttpResponse.json({ current: {}, history: [] })),
+  );
+  renderAt("/admin/releases");
+  expect(await screen.findByRole("heading", { name: "릴리스" })).toBeInTheDocument();
+});
+
 test("user visiting /admin/policies is redirected to /jobs", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),

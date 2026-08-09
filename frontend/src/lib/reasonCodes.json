@@ -30,6 +30,8 @@
   "rollout_failed", "rollout_timeout", "rollout_aborted", "workload_not_found",
   "unknown_component", "unknown_tag", "same_tag",
 
+  "registry_unreachable",
+
   "artifact_forbidden", "invalid_artifact_name", "rm_recursive_required",
   "rm_root_forbidden", "unknown_option", "invalid_option", "storage_missing",
   "storage_disabled", "storage_not_ready", "missing_storage",

@@ -135,3 +135,25 @@ export interface ScanPathStats {
   file_size_histogram: HistogramBucket[];
   time_histograms: Record<string, HistogramBucket[]>;
 }
+
+// 릴리스(롤아웃). 상태는 Pending → Applying → Applied/Failed 이고 잡/빌드의 종단
+// 집합(Succeeded/Failed/...)과 겹치지 않는다 -- isTerminal을 그대로 쓰면 Applied가
+// 비종단으로 읽힌다(useReleases.ts의 RELEASE_ACTIVE_STATES 주석 참고).
+export interface Release {
+  id: number; component: string; image: string; tag: string;
+  digest: string | null; state: string; reason_code: string | null;
+  // seq는 배치 안의 적용 순서다(서버가 ROLLOUT_ORDER로 매긴다) -- 목록 응답에는 늘
+  // 있지만 스키마가 바뀌어도 화면이 죽지 않도록 선택 필드로 둔다.
+  seq?: number; actor: string; applied_at: string;
+}
+export interface ReleaseTarget {
+  component: string; kind: string; workload: string; container: string;
+  repository: string;
+  // 워크로드 읽기(observe)가 실패하면 서버가 null을 준다 -- 화면 전체를 죽이지
+  // 않는 강등이므로 프론트도 "—"로 살려 보여준다.
+  current_image: string | null;
+  tags: string[];
+}
+// registry_ok=false면 tags가 전부 비어 있고 서버의 태그 존재 검증도 꺼진 상태다.
+export interface ReleaseTargets { targets: ReleaseTarget[]; registry_ok: boolean }
+export interface Releases { current: Record<string, Release>; history: Release[] }

@@ -129,6 +129,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   unknown_component: "알 수 없는 컴포넌트이거나 중복 선택입니다",
   unknown_tag: "레지스트리에 없는 태그입니다",
   same_tag: "현재 태그와 같습니다 — IfNotPresent라 재적용해도 아무 일도 일어나지 않습니다",
+  // 프론트 전용 코드다 -- 백엔드는 이걸 detail로 내지 않고 targets 응답의
+  // registry_ok=false 로만 알린다(태그 목록은 빈 배열이 되고 존재 검증이 꺼진다).
+  // 그래도 문구를 여기에 두는 이유: 화면이 한국어를 하드코딩하지 않는다는 규칙을
+  // 릴리스 화면만 예외로 두면 문구가 두 곳으로 갈라진다.
+  registry_unreachable: "레지스트리에 연결할 수 없어 태그 목록이 비어 있습니다",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다
