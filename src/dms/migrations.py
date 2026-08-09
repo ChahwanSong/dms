@@ -207,6 +207,11 @@ def migrate(db: Database) -> None:
             -- seq: 배치 안 적용 순서(전역 단조 증가). builds.seq와 같은 이유로
             -- 제약은 여기 걸지 않고 create_batch()의 MAX(seq)+1이 지킨다.
             seq INTEGER,
+            -- progress: 마지막으로 관찰된 DaemonSet updated_number_scheduled.
+            -- RolloutWatcher는 틱마다 새로 생성되므로(controller.build_loops의
+            -- 람다) "지난 틱에 몇 노드까지 갔나"를 인스턴스에 담아 둘 수 없다 --
+            -- 회수 시계를 정체 기준으로 재려면 이 값이 행에 남아야 한다.
+            progress INTEGER,
             actor TEXT NOT NULL,
             applied_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_releases_component ON releases (component, id)",
@@ -315,6 +320,7 @@ def _ensure_columns(db):
         ("builds", "seq", "INTEGER"),
         ("releases", "reason_code", "TEXT"),
         ("releases", "seq", "INTEGER"),
+        ("releases", "progress", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

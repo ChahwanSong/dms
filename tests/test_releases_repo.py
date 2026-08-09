@@ -77,6 +77,50 @@ def test_mark_applying_updates_applied_at(repos):
     assert after["applied_at"] >= row["applied_at"]
 
 
+def test_note_progress_moves_applied_at_and_keeps_the_row_resumable(repos):
+    # I6: 진행 중인 DaemonSet의 회수 시계를 다시 건다. 재개 판정은 state만 보므로
+    # applied_at을 앞당겨도 "Applying이면 이어받는다"는 계약은 그대로여야 한다.
+    row = repos.releases.create_batch(items=_items("dms-agent"), actor="ops")[0]
+    repos.releases.mark_applying(row["id"])
+    repos.releases.note_progress(row["id"], progress=3, now="2030-01-01T00:00:00Z")
+    after = repos.releases.get(row["id"])
+    assert (after["applied_at"], after["progress"]) == ("2030-01-01T00:00:00Z", 3)
+    assert after["state"] == "Applying"
+    assert [r["id"] for r in repos.releases.active()] == [row["id"]]
+
+
+def test_note_progress_never_touches_non_applying_rows(repos):
+    # 종단 행의 시각을 되돌리거나 아직 패치도 안 나간 Pending을 건드리면 안 된다.
+    rows = repos.releases.create_batch(items=_items("dms-agent", "dms-api"),
+                                       actor="ops")
+    repos.releases.note_progress(rows[1]["id"], progress=9, now="2030-01-01T00:00:00Z")
+    pending = repos.releases.get(rows[1]["id"])
+    assert (pending["progress"], pending["applied_at"]) == (None, rows[1]["applied_at"])
+
+    repos.releases.mark_applying(rows[0]["id"])
+    repos.releases.finish(rows[0]["id"], state="Applied")
+    done = repos.releases.get(rows[0]["id"])
+    repos.releases.note_progress(rows[0]["id"], progress=9, now="2030-01-01T00:00:00Z")
+    assert repos.releases.get(rows[0]["id"]) == done
+
+
+def test_null_seq_rows_sort_last_not_first(repos):
+    # seq는 nullable이고(SQLite ALTER 제약) ORDER BY seq만 두면 SQLite는 NULL을
+    # 먼저, PostgreSQL은 나중에 놓는다 -- 그 갈림은 "누가 head인가"를 뒤집는다.
+    # 구형 DB에서 ALTER로 보강된 NULL seq 행이 head를 가로채면 ROLLOUT_ORDER가
+    # 조용히 깨지므로, 어느 백엔드에서도 맨 뒤여야 한다.
+    rows = repos.releases.create_batch(items=_items("dms-agent", "dms-api"),
+                                       actor="ops")
+    repos.releases._db.execute(
+        """INSERT INTO releases (component, image, tag, digest, state, reason_code,
+               seq, actor, applied_at)
+           VALUES ('dms-controller', 'i', 't', NULL, 'Pending', NULL, NULL, 'ops',
+                   '2020-01-01T00:00:00Z')""")
+    active = repos.releases.active()
+    assert [r["id"] for r in active[:2]] == [rows[0]["id"], rows[1]["id"]]
+    assert active[-1]["seq"] is None
+
+
 def test_finish_is_terminal_guarded(repos):
     row = repos.releases.create_batch(items=_items("dms-api"), actor="ops")[0]
     repos.releases.mark_applying(row["id"])
