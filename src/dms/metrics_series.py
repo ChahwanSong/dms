@@ -40,6 +40,11 @@ def _mem_used_pct(os_block):
     avail = _num(os_block.get("memory_available_kb"))
     if total is None or avail is None or total <= 0:
         return None
+    # avail > total 은 오염된 os 리포트(used = total - avail 가 음수).
+    # 모듈 전역이 fail-soft 이므로 여기도 클램프(포화 100)로 감추지 않고
+    # "모름(None)" 으로 낸다 -- 음수/과장 사용률을 그리는 것보다 결측이 정직하다.
+    if avail > total:
+        return None
     return round((total - avail) / total * 100, 1)
 
 
@@ -50,8 +55,10 @@ def _disks(os_block):
             continue
         total = _num(disk.get("total_bytes"))
         used = _num(disk.get("used_bytes"))
-        used_pct = (round(used / total * 100, 1)
-                    if total is not None and used is not None and total > 0 else None)
+        # used > total 은 mem 과 같은 오염 신호(used_pct 가 100 초과) -- 같은 규칙으로
+        # None. 항목 자체는 살린다(storage_name 은 유효하니 이름은 남긴다).
+        valid = (total is not None and used is not None and total > 0 and used <= total)
+        used_pct = round(used / total * 100, 1) if valid else None
         out.append({"storage_name": disk["storage_name"], "used_pct": used_pct})
     return out
 

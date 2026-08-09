@@ -79,6 +79,50 @@ def test_bool_and_string_values_are_not_numbers():
     assert pts[0]["disks"] == [{"storage_name": "s1", "used_pct": None}]
 
 
+def test_mem_used_pct_none_when_avail_exceeds_total():
+    # 오염 os 리포트: avail > total -> used = total - avail 가 음수.
+    # fail-soft(모르면 None) -- 음수 사용률을 그리느니 결측이 정직하다.
+    pts = build_node_points([_sample(
+        "2026-08-09T00:00:00Z", memory_total_kb=100, memory_available_kb=150)])
+    assert pts[0]["mem_used_pct"] is None
+
+
+def test_disk_used_pct_none_when_used_exceeds_total():
+    # 같은 오염 규칙: used > total -> used_pct 가 100 초과. None으로 닫는다.
+    pts = build_node_points([_sample(
+        "2026-08-09T00:00:00Z",
+        disks=[{"storage_name": "s1", "total_bytes": 100, "used_bytes": 150}])])
+    assert pts[0]["disks"] == [{"storage_name": "s1", "used_pct": None}]
+
+
+def test_zero_and_backward_dt_yield_null_not_crash():
+    # 같은 reported_at(dt=0)과 역행 타임스탬프(dt<0)는 net_rx_bps=None,
+    # ZeroDivisionError 없이. 두 경우 모두 cur>prev 라 cur<prev 가드가 아니라
+    # dt<=0 가드가 잡는 것임을 격리한다.
+    dt_zero = build_node_points([
+        _sample("2026-08-09T00:00:00Z", network_rx_bytes=1000),
+        _sample("2026-08-09T00:00:00Z", network_rx_bytes=2000),
+    ])
+    assert dt_zero[1]["net_rx_bps"] is None
+    dt_back = build_node_points([
+        _sample("2026-08-09T00:01:00Z", network_rx_bytes=1000),
+        _sample("2026-08-09T00:00:00Z", network_rx_bytes=2000),
+    ])
+    assert dt_back[1]["net_rx_bps"] is None
+
+
+def test_missing_rx_field_propagates_null_to_next_interval():
+    # os는 유효하나 network_rx_bytes 필드만 결측인 샘플(전체가 버려지진 않는다):
+    # 그 구간(prev,None)과 다음 구간(None,cur) 둘 다 throughput null, 그 뒤 회복.
+    pts = build_node_points([
+        _sample("2026-08-09T00:00:00Z", network_rx_bytes=1000),
+        _sample("2026-08-09T00:01:00Z", load1=0.5),
+        _sample("2026-08-09T00:02:00Z", network_rx_bytes=3000),
+        _sample("2026-08-09T00:03:00Z", network_rx_bytes=5000),
+    ])
+    assert [p["net_rx_bps"] for p in pts] == [None, None, None, 33.3]
+
+
 def test_duration_histogram_fixed_buckets():
     hist = duration_histogram([30, 3599, 100000, -5, None])
     assert hist == [
