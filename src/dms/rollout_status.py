@@ -3,7 +3,12 @@
 kubernetes 파이썬 클라이언트의 to_dict()는 snake_case 키를, (테스트 fake나 원시
 CRD처럼) dict 그대로 온 객체는 camelCase 키를 준다. 여기서 한 표기로 정규화하지
 않으면 테스트 페어는 통과하고 프로덕션만 None을 읽어 "영원히 수렴 안 함"으로
-보고한다(설계 §4). 판정 함수는 정규화된 dict만 받는다."""
+보고한다(설계 §4). 판정 함수는 정규화된 dict만 받는다.
+
+판정 함수는 순수하다 -- I/O도 전역 상태도 없다. 기준 시각(since)은 인자로 받는다."""
+from datetime import datetime, timezone
+
+_TS_FMT = "%Y-%m-%dT%H:%M:%SZ"      # db.utc_now_iso()와 같은 포맷
 
 
 def _num(mapping, snake, camel, default=0):
@@ -29,9 +34,28 @@ def _generations(obj):
     return generation, observed
 
 
+def _ts(value):
+    """조건의 lastUpdateTime을 releases.applied_at과 같은 문자열 포맷으로 접는다.
+
+    to_dict()는 metav1.Time을 tz-aware datetime으로, 원시 dict는 RFC3339 문자열로
+    준다 -- 한 축으로 접지 않으면 applied_at과의 비교가 TypeError로 터지거나(전자)
+    tz 표기 차이로 어긋난다. apiserver는 항상 UTC로 직렬화하므로 naive면 UTC로 본다."""
+    if value is None or isinstance(value, str):
+        return value
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime(_TS_FMT)
+
+
 def _conditions(status):
+    # lastUpdateTime을 반드시 실어 나른다 -- 이것이 없으면 "이 롤아웃이 만든
+    # 조건"과 "앞 롤아웃이 남긴 sticky 조건"을 구분할 수단이 아예 없다(assess의 I1).
     return [{"type": c.get("type"), "status": c.get("status"),
-             "reason": c.get("reason"), "message": c.get("message")}
+             "reason": c.get("reason"), "message": c.get("message"),
+             "last_update_time": _ts(c.get("last_update_time",
+                                           c.get("lastUpdateTime")))}
             for c in (status.get("conditions") or [])]
 
 
@@ -73,23 +97,47 @@ def normalize_daemonset(obj: dict) -> dict:
     }
 
 
-def assess_deployment(norm: dict) -> "tuple[str, str | None]":
+def _is_stale_pde(cond, since) -> bool:
+    """이 PDE 조건이 앞 롤아웃이 남긴 것인가.
+
+    k8s의 Progressing=False/ProgressDeadlineExceeded는 sticky다: 배포 컨트롤러가
+    조건을 세대 너머로 그대로 이어 나르고, SetDeploymentCondition은 status/reason이
+    안 바뀌면 early-return하므로 옛 조건은 옛 lastUpdateTime을 그대로 유지한다 --
+    그래서 lastUpdateTime < applied_at이 "앞 롤아웃의 잔재"의 정확한 판별식이다.
+    판별할 근거가 없으면(since 미제공, lastUpdateTime 부재) stale로 보지 않는다:
+    PDE는 Deployment의 유일한 실패 확정 수단이라 삼키면 종단이 사라진다."""
+    if since is None:
+        return False
+    at = cond.get("last_update_time")
+    return bool(at) and at < since
+
+
+def assess_deployment(norm: dict, *, since: "str | None" = None) -> "tuple[str, str | None]":
     """("applied" | "progressing" | "failed", detail).
+
+    since: 이 롤아웃의 기준 시각(releases 행의 applied_at). 순수 함수를 유지하기
+    위해 시각을 읽지 않고 인자로 받는다.
 
     세대 게이트를 반드시 먼저 본다 -- 통과 전의 상태 필드는 전부 패치 이전 값이라
     옛 ReplicaSet 기준 거짓 성공이 난다(설계 §3)."""
     if norm["observed_generation"] < norm["generation"]:
         return ("progressing", None)
-    for cond in norm["conditions"]:
-        if (cond.get("type") == "Progressing" and cond.get("status") == "False"
-                and cond.get("reason") == "ProgressDeadlineExceeded"):
-            # progressDeadlineSeconds=600이 이미 설정돼 있어 10분 상한을 공짜로
-            # 물려받는다 -- 자체 상한을 더 두지 않는다(설계 §3).
-            return ("failed", f"ProgressDeadlineExceeded: {cond.get('message') or ''}"[:200])
+    # 수렴 검사가 PDE 스캔보다 먼저다. 진짜로 마감을 넘긴 배포는 절대 수렴하지
+    # 않으므로 순서를 바꿔도 실패를 놓치지 않고, 대신 "이미 수렴했는데 옛 PDE
+    # 조건이 아직 안 지워진" 창(패치 직후 첫 status 쓰기)에서 거짓 실패가 나던
+    # 경로가 닫힌다. 그 거짓 실패는 _fail이 남은 컴포넌트까지 rollout_aborted로
+    # 죽여 복구 배치 전체를 첫 컴포넌트에서 멈추게 했다.
     if (norm["updated_replicas"] == norm["replicas"]
             and norm["status_replicas"] == norm["updated_replicas"]
             and norm["ready_replicas"] == norm["updated_replicas"]):
         return ("applied", None)
+    for cond in norm["conditions"]:
+        if (cond.get("type") == "Progressing" and cond.get("status") == "False"
+                and cond.get("reason") == "ProgressDeadlineExceeded"
+                and not _is_stale_pde(cond, since)):
+            # progressDeadlineSeconds=600이 이미 설정돼 있어 10분 상한을 공짜로
+            # 물려받는다 -- 자체 상한을 더 두지 않는다(설계 §3).
+            return ("failed", f"ProgressDeadlineExceeded: {cond.get('message') or ''}"[:200])
     for cond in norm["conditions"]:
         if cond.get("type") == "ReplicaFailure" and cond.get("status") == "True":
             # 종단이 아니라 노출이다 -- admission 오류(/cephfs hostPath 없음 등)를

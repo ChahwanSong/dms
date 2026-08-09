@@ -53,6 +53,16 @@ def _pde_deploy(image, container="api"):
                             "reason": "ProgressDeadlineExceeded", "message": "x"}]}
 
 
+def _stale_pde_deploy(image, at, container="api"):
+    """앞 롤아웃이 남긴 sticky PDE 조건(lastUpdateTime이 at)을 단 미수렴 관찰."""
+    return {"kind": "Deployment", "generation": 2, "observed_generation": 2,
+            "replicas": 1, "status_replicas": 1, "updated_replicas": 0,
+            "ready_replicas": 0, "images": {container: image},
+            "conditions": [{"type": "Progressing", "status": "False",
+                            "reason": "ProgressDeadlineExceeded",
+                            "message": "old", "last_update_time": at}]}
+
+
 def _converged_daemonset(image, container="agent", desired=5):
     return {"kind": "DaemonSet", "generation": 1, "observed_generation": 1,
             "desired_number_scheduled": desired, "updated_number_scheduled": desired,
@@ -223,6 +233,37 @@ def test_pde_fails_release_and_aborts_the_rest(repos):
     # 배치를 닫지 않으면 rollout_in_progress가 영원히 새 롤아웃을 막는다
     assert (tail["state"], tail["reason_code"]) == ("Failed", "rollout_aborted")
     assert repos.releases.active() == []
+
+
+def test_stale_pde_from_a_previous_rollout_does_not_fail_the_new_one(repos):
+    # README §9-7 복구 경로 그대로: 나쁜 태그로 PDE -> Failed -> 운영자가 옛 태그로
+    # 다시 롤아웃. PDE 조건은 sticky라 패치 직후 첫 status 쓰기에 "새 세대 + 옛
+    # 조건"이 함께 실린다. 워처가 릴리스 행의 applied_at을 기준 시각으로 넘기지
+    # 않으면 정상 진행 중인 복구 롤아웃이 실패로 판정되고, _fail이 뒤 컴포넌트까지
+    # rollout_aborted로 죽여 3컴포넌트 복구가 첫 컴포넌트에서 멈춘다.
+    rows = _batch(repos, "dms-api", "dms-controller")
+    repos.releases.mark_applying(rows[0]["id"])
+    applied_at = repos.releases.get(rows[0]["id"])["applied_at"]
+    runner = _Runner()
+    runner.observations[("Deployment", "dms-api")] = _stale_pde_deploy(
+        "pkg-01:5000/dms:new1", iso_plus(applied_at, -3600))
+    assert _watch(repos, runner).run_once() == {"patched": 0, "finished": 0}
+    assert repos.releases.get(rows[0]["id"])["state"] == "Applying"
+    assert repos.releases.get(rows[1]["id"])["state"] == "Pending"   # 중단되지 않았다
+
+
+def test_pde_raised_by_this_rollout_still_fails(repos):
+    # 반대 증거: applied_at 이후에 갱신된 PDE는 이 롤아웃의 실패다 -- staleness
+    # 게이트가 종단 수단을 통째로 삼키면 안 된다.
+    rows = _batch(repos, "dms-api")
+    repos.releases.mark_applying(rows[0]["id"])
+    applied_at = repos.releases.get(rows[0]["id"])["applied_at"]
+    runner = _Runner()
+    runner.observations[("Deployment", "dms-api")] = _stale_pde_deploy(
+        "pkg-01:5000/dms:new1", iso_plus(applied_at, 601))
+    _watch(repos, runner).run_once()
+    row = repos.releases.get(rows[0]["id"])
+    assert (row["state"], row["reason_code"].startswith("rollout_failed:")) == ("Failed", True)
 
 
 def test_fail_writes_are_atomic(repos, monkeypatch):

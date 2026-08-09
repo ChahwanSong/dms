@@ -132,9 +132,13 @@ class RolloutWatcher:
                                          container=spec["container"],
                                          image=head["image"])
                 return {"patched": patched + 1, "finished": finished}
-            verdict, detail = (assess_deployment(obs)
-                               if spec["kind"] == "Deployment"
-                               else assess_daemonset(obs))
+            if spec["kind"] == "Deployment":
+                # applied_at을 기준 시각으로 넘긴다 -- 이 값보다 오래된
+                # ProgressDeadlineExceeded 조건은 앞 롤아웃이 남긴 sticky 잔재라
+                # 이 롤아웃의 실패가 아니다(rollout_status._is_stale_pde).
+                verdict, detail = assess_deployment(obs, since=head["applied_at"])
+            else:
+                verdict, detail = assess_daemonset(obs)
             if verdict == "applied":
                 self._repos.releases.finish(head["id"], state="Applied")
                 finished += 1

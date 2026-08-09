@@ -55,6 +55,100 @@ def test_progress_deadline_exceeded_is_failed():
     assert "ProgressDeadlineExceeded" in detail
 
 
+# --- I1: sticky ProgressDeadlineExceeded -------------------------------------
+# 세대 게이트는 observedGeneration만 증명한다. conditions는 배포 컨트롤러가 세대를
+# 넘겨 그대로 이어 나르므로, 패치 직후 첫 status 쓰기가 "새 세대 + 옛 PDE"를 함께
+# 실을 수 있다. 그 창에 관찰이 떨어지면 정상 진행 중인 복구 롤아웃이 실패로
+# 판정되고 _fail이 남은 컴포넌트까지 rollout_aborted로 죽인다(README §9-7 복구 경로).
+APPLIED_AT = "2026-08-06T12:00:00Z"
+STALE_PDE = {"type": "Progressing", "status": "False",
+             "reason": "ProgressDeadlineExceeded", "message": "old failure",
+             "lastUpdateTime": "2026-08-06T11:00:00Z"}      # applied_at 이전
+FRESH_PDE = {"type": "Progressing", "status": "False",
+             "reason": "ProgressDeadlineExceeded", "message": "this rollout",
+             "lastUpdateTime": "2026-08-06T12:10:00Z"}      # applied_at 이후
+
+
+def _deploy_with(conditions, *, updated=2, ready=2, status_replicas=2):
+    return {**DEPLOY_SNAKE, "status": {
+        "observed_generation": 3, "replicas": status_replicas,
+        "updated_replicas": updated, "ready_replicas": ready,
+        "conditions": conditions}}
+
+
+def test_converged_with_stale_pde_is_applied():
+    # (a) 완전히 수렴했는데 옛 PDE 조건이 아직 붙어 있다 -- 수렴 검사가 PDE 스캔
+    # 앞에 있어야 이 절반이 닫힌다. 진짜 timeout된 배포는 절대 수렴하지 않는다.
+    norm = normalize_deployment(_deploy_with([STALE_PDE]))
+    assert assess_deployment(norm, since=APPLIED_AT) == ("applied", None)
+
+
+def test_converged_with_a_fresh_pde_is_still_applied():
+    # (a') 수렴 검사가 PDE 스캔보다 **앞**이어야만 통과한다 -- staleness 게이트는
+    # 여기서 도와주지 않는다(조건이 이 롤아웃 것이다). 마감을 넘긴 뒤 뒤늦게 파드가
+    # 뜨면(느린 이미지 풀) 카운터는 이미 수렴인데 조건 갱신이 한 박자 늦는다.
+    # 전 레플리카가 새 이미지로 Ready인 배포를 실패로 박을 근거는 없다.
+    norm = normalize_deployment(_deploy_with([FRESH_PDE]))
+    assert assess_deployment(norm, since=APPLIED_AT) == ("applied", None)
+
+
+def test_unconverged_with_fresh_pde_is_failed():
+    # (b) 이 롤아웃이 실제로 마감을 넘겼다 -- 종단시켜야 한다
+    norm = normalize_deployment(_deploy_with([FRESH_PDE], updated=1, ready=0))
+    verdict, detail = assess_deployment(norm, since=APPLIED_AT)
+    assert verdict == "failed"
+    assert "this rollout" in detail
+
+
+def test_unconverged_with_stale_pde_is_progressing():
+    # (c) 패치 직후 창: 새 세대인데 옛 PDE가 아직 안 지워졌다. lastUpdateTime이
+    # applied_at 이전이므로 이 롤아웃의 실패가 아니다 -- 기다린다.
+    norm = normalize_deployment(_deploy_with([STALE_PDE], updated=1, ready=0))
+    assert assess_deployment(norm, since=APPLIED_AT) == ("progressing", None)
+
+
+def test_pde_without_since_is_still_failed():
+    # 기준 시각을 안 넘기면(순수 함수 단독 사용) 옛 동작 그대로 -- 판별 근거가
+    # 없을 때 실패를 삼키면 Deployment의 유일한 종단 수단이 사라진다.
+    norm = normalize_deployment(_deploy_with([FRESH_PDE], updated=1, ready=0))
+    assert assess_deployment(norm)[0] == "failed"
+
+
+def test_pde_without_last_update_time_is_still_failed():
+    # SetDeploymentCondition은 lastUpdateTime을 항상 채우지만, 없으면 stale임을
+    # 증명할 수 없다 -- 증명 못 하는 쪽을 실패로 본다(위와 같은 이유).
+    bare = {k: v for k, v in FRESH_PDE.items() if k != "lastUpdateTime"}
+    norm = normalize_deployment(_deploy_with([bare], updated=1, ready=0))
+    assert assess_deployment(norm, since=APPLIED_AT)[0] == "failed"
+
+
+@pytest.mark.parametrize("key", ["lastUpdateTime", "last_update_time"])
+def test_condition_last_update_time_normalizes_in_both_notations(key):
+    cond = {"type": "Progressing", "status": "False",
+            "reason": "ProgressDeadlineExceeded", "message": "m",
+            key: "2026-08-06T11:00:00Z"}
+    norm = normalize_deployment(_deploy_with([cond], updated=1, ready=0))
+    assert norm["conditions"][0]["last_update_time"] == "2026-08-06T11:00:00Z"
+
+
+def test_datetime_last_update_time_is_folded_to_the_applied_at_format():
+    # to_dict()는 metav1.Time을 datetime으로 준다 -- 문자열로 접지 않으면
+    # applied_at(utc_now_iso 포맷)과의 사전식 비교가 TypeError로 터진다.
+    from datetime import datetime, timedelta, timezone
+    cond = {"type": "Progressing", "status": "False",
+            "reason": "ProgressDeadlineExceeded", "message": "m",
+            "last_update_time": datetime(2026, 8, 6, 11, 0, 0, tzinfo=timezone.utc)}
+    norm = normalize_deployment(_deploy_with([cond], updated=1, ready=0))
+    assert norm["conditions"][0]["last_update_time"] == "2026-08-06T11:00:00Z"
+    assert assess_deployment(norm, since=APPLIED_AT)[0] == "progressing"
+    # UTC가 아닌 tz로 와도 UTC로 접는다(비교 기준이 한 축이어야 한다)
+    other = datetime(2026, 8, 6, 20, 0, 0,
+                     tzinfo=timezone(timedelta(hours=9)))     # == 11:00Z
+    norm2 = normalize_deployment(_deploy_with(
+        [{**cond, "last_update_time": other}], updated=1, ready=0))
+    assert norm2["conditions"][0]["last_update_time"] == "2026-08-06T11:00:00Z"
+
+
 def test_replica_failure_condition_surfaces_as_detail():
     # /cephfs hostPath type:Directory가 없는 노드의 admission 오류가 여기 실린다
     obj = {**DEPLOY_SNAKE, "status": {
@@ -65,6 +159,24 @@ def test_replica_failure_condition_surfaces_as_detail():
     verdict, detail = assess_deployment(normalize_deployment(obj))
     assert verdict == "progressing"
     assert "hostPath missing" in detail
+
+
+# I2: 수렴 조건 세 개를 각각 하나씩만 깨서 고정한다. DaemonSet 쪽
+# test_daemonset_each_gate_blocks_applied의 Deployment 판이다 -- 한 조건만 깨야
+# "그 조건을 지워도 다른 조건이 대신 막아준다"는 위장 통과가 안 생긴다.
+@pytest.mark.parametrize("spec_patch,status_patch,why", [
+    # updated != replicas: 새 파드가 아직 다 안 떴다(스케일업 중)
+    ({"replicas": 3}, {}, "updated_replicas == replicas"),
+    # status_replicas != updated: 옛 파드가 아직 남아 있다
+    ({}, {"replicas": 3}, "status_replicas == updated_replicas"),
+    # ready != updated: Recreate 전략이나 노드 실패로 아무것도 서빙하지 않는다
+    ({}, {"ready_replicas": 0}, "ready_replicas == updated_replicas"),
+])
+def test_deployment_each_gate_blocks_applied(spec_patch, status_patch, why):
+    obj = {**DEPLOY_SNAKE,
+           "spec": {**DEPLOY_SNAKE["spec"], **spec_patch},
+           "status": {**DEPLOY_SNAKE["status"], **status_patch}}
+    assert assess_deployment(normalize_deployment(obj))[0] == "progressing", why
 
 
 def test_old_pods_still_around_is_progressing():
