@@ -4,8 +4,11 @@ metrics_series 순수 함수가 하고, 이 계층은 기간 클램프와 응답
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db import iso_plus, utc_now_iso
+from ..execution import ExecutionError
 from ..metrics_series import (bucket_chars_for, build_node_points,
                               clamp_window_hours, duration_histogram)
+from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
+from ..rollout_status import assess_daemonset, assess_deployment
 from .auth import require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -67,3 +70,39 @@ def request_events(request_id: str, request: Request,
         raise HTTPException(status_code=404, detail="request_not_found")
     return {"request_id": request_id,
             "events": repos.observability.events_for_request(request_id, limit=limit)}
+
+
+@router.get("/api/admin/metrics/infra")
+def metrics_infra(request: Request):
+    """컴포넌트 3종의 이미지 + N/N ready + 롤아웃 판정(설계 §2.4). targets가
+    이미지만 남기고 버리던 observe()의 카운트와 assess_* 판정을 통과시킨다 --
+    레지스트리를 건드리지 않으므로 targets보다 싸고(5s 폴링 가능), 슬라이스 13이
+    api Role에 부여한 apps get 권한을 그대로 재사용한다(RBAC 변경 없음)."""
+    runner = request.app.state.rollout_runner
+    components = []
+    for component in ROLLOUT_ORDER:
+        spec = COMPONENTS[component]
+        entry = {"component": component, "kind": spec["kind"],
+                 "workload": spec["workload"], "image": None, "ready": None,
+                 "desired": None, "verdict": None, "detail": None}
+        try:
+            obs = runner.observe(kind=spec["kind"], name=spec["workload"])
+        except ExecutionError:
+            obs = None    # 읽기 실패는 그 컴포넌트만 null 강등(슬라이스 13 규약)
+        if obs is not None:
+            entry["image"] = (obs.get("images") or {}).get(spec["container"])
+            try:
+                if spec["kind"] == "DaemonSet":
+                    entry["ready"] = obs.get("number_ready")
+                    entry["desired"] = obs.get("desired_number_scheduled")
+                    entry["verdict"], entry["detail"] = assess_daemonset(obs)
+                else:
+                    entry["ready"] = obs.get("ready_replicas")
+                    entry["desired"] = obs.get("replicas")
+                    entry["verdict"], entry["detail"] = assess_deployment(obs)
+            except Exception:
+                # 정규화 키가 빠진 비정상 관측(구버전 스텁 등) -- 판정만 포기하고
+                # 이미지·카운트는 남긴다. 대시보드 읽기는 전부 fail-soft다(설계 §3).
+                entry["verdict"] = entry["detail"] = None
+        components.append(entry)
+    return {"components": components}

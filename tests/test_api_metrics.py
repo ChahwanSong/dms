@@ -135,3 +135,62 @@ def test_metrics_window_non_integer_still_422(client):
     # 비정수는 범위 문제가 아니라 파싱 오류다 -- 여전히 422가 맞다.
     for path in ("/api/admin/metrics/nodes", "/api/admin/metrics/jobs"):
         assert client.get(f"{path}?window=abc", headers=ADMIN).status_code == 422
+
+
+class _FakeObserver:
+    """observe만 쓰는 페어 -- 반환 모양은 StubRolloutRunner.observe(rollout_runner.py
+    실측)와 같은 정규화 dict다. api는 patch를 절대 부르지 않는다(슬라이스 13 RBAC)."""
+    def __init__(self):
+        self.fail = set()
+        self.objects = {
+            ("DaemonSet", "dms-agent"): {
+                "kind": "DaemonSet", "generation": 1, "observed_generation": 1,
+                "desired_number_scheduled": 5, "updated_number_scheduled": 5,
+                "number_ready": 5, "number_unavailable": 0,
+                "number_misscheduled": 0,
+                "images": {"agent": "pkg-01:5000/dms-agent:dev6"}},
+            ("Deployment", "dms-api"): {
+                "kind": "Deployment", "generation": 3, "observed_generation": 3,
+                "replicas": 1, "status_replicas": 1, "updated_replicas": 1,
+                "ready_replicas": 1, "conditions": [],
+                "images": {"api": "pkg-01:5000/dms:d23"}},
+            ("Deployment", "dms-controller"): {
+                "kind": "Deployment", "generation": 3, "observed_generation": 3,
+                "replicas": 1, "status_replicas": 1, "updated_replicas": 1,
+                "ready_replicas": 0, "conditions": [],
+                "images": {"controller": "pkg-01:5000/dms:d23"}},
+        }
+
+    def observe(self, *, kind, name):
+        if (kind, name) in self.fail:
+            from dms.execution import ExecutionError
+            raise ExecutionError("observe_failed", "down")
+        return self.objects.get((kind, name))
+
+
+def test_metrics_infra_passes_counts_and_verdict(client):
+    client.app.state.rollout_runner = _FakeObserver()
+    body = client.get("/api/admin/metrics/infra", headers=ADMIN).json()
+    by = {c["component"]: c for c in body["components"]}
+    assert [c["component"] for c in body["components"]] == [
+        "dms-agent", "dms-api", "dms-controller"]        # ROLLOUT_ORDER 순
+    assert by["dms-agent"]["image"] == "pkg-01:5000/dms-agent:dev6"
+    assert (by["dms-agent"]["ready"], by["dms-agent"]["desired"]) == (5, 5)
+    assert by["dms-agent"]["verdict"] == "applied"
+    assert by["dms-api"]["verdict"] == "applied"
+    assert by["dms-controller"]["verdict"] == "progressing"   # ready 0/1
+
+
+def test_metrics_infra_degrades_only_the_failed_component(client):
+    runner = _FakeObserver()
+    runner.fail.add(("Deployment", "dms-api"))
+    client.app.state.rollout_runner = runner
+    body = client.get("/api/admin/metrics/infra", headers=ADMIN).json()
+    by = {c["component"]: c for c in body["components"]}
+    # observe 실패는 그 컴포넌트만 null 강등(슬라이스 13 규약) -- 화면 전체가 죽지 않는다
+    assert by["dms-api"]["image"] is None and by["dms-api"]["verdict"] is None
+    assert by["dms-agent"]["verdict"] == "applied"
+
+
+def test_metrics_infra_admin_only(client):
+    assert client.get("/api/admin/metrics/infra").status_code == 401
