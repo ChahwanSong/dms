@@ -157,3 +157,35 @@ export interface ReleaseTarget {
 // registry_ok=false면 tags가 전부 비어 있고 서버의 태그 존재 검증도 꺼진 상태다.
 export interface ReleaseTargets { targets: ReleaseTarget[]; registry_ok: boolean }
 export interface Releases { current: Record<string, Release>; history: Release[] }
+
+export interface NodeMetricDisk { storage_name: string; used_pct: number | null }
+export interface NodeMetricPoint {
+  at: string; load1: number | null; load5: number | null; load15: number | null;
+  mem_used_pct: number | null; net_rx_bps: number | null; net_tx_bps: number | null;
+  disks: NodeMetricDisk[];
+}
+export interface NodeMetricSeries {
+  node_name: string; reported_at: string; fresh: boolean; points: NodeMetricPoint[];
+}
+export interface NodeMetrics {
+  window_hours: number; start: string; end: string; nodes: NodeMetricSeries[];
+}
+export interface StateCount { state: string; count: number }
+export interface BreakdownRow { count: number; succeeded: number; failed: number }
+export interface JobMetrics {
+  window_hours: number; bucket: "hour" | "day";
+  by_state: StateCount[];
+  by_tool: ({ tool: string | null } & BreakdownRow)[];
+  by_storage: ({ storage: string | null } & BreakdownRow)[];
+  by_requester: ({ requester_id: string } & BreakdownRow)[];
+  failure_reasons: { reason_code: string; count: number }[];
+  throughput: { bucket: string; count: number }[];
+  duration_histogram: { bucket: string; count: number }[];
+  files_total: number | null; bytes_total: number | null;
+}
+export interface InfraComponent {
+  component: string; kind: string; workload: string;
+  image: string | null; ready: number | null; desired: number | null;
+  verdict: "applied" | "progressing" | "failed" | null; detail: string | null;
+}
+export interface InfraMetrics { components: InfraComponent[] }
