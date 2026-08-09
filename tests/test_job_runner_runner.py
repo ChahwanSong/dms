@@ -107,9 +107,13 @@ def _run(rec, env, wait_hostfile=None):
                    make_executable=rec.make_executable)
 
 
-def test_run_job_materializes_identity_and_runs_mpirun():
+def test_run_job_materializes_identity_and_runs_mpirun(tmp_path):
+    # artifact_dir은 tmp_path로 격리한다 -- summary 단계가 dscan 리포트를 실제로
+    # open()하므로, 절대경로 /cephfs를 쓰면 CephFS가 마운트된 테스트베드에서
+    # 남은 j1 아티팩트를 읽어 all-null 단언이 깨질 수 있다.
     rec = _Recorder(rc=0, stdout="tool output")
-    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
+    rc = run_job(_env(DMS_JR_ARTIFACT_DIR=str(tmp_path)),
+                 run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
                  make_executable=rec.make_executable)
@@ -119,16 +123,14 @@ def test_run_job_materializes_identity_and_runs_mpirun():
     # mpirun 실행됨
     assert any("mpirun" in cmd for cmd in rec.ran)
     # mpirun 전에 execution 디렉터리를 요청자 소유로 chown(도구가 report를 쓸 수 있게)
-    assert ["chown", "-R", "10001:10000",
-            "/cephfs/dms/artifacts/j1/execution"] in rec.ran
-    chown_idx = rec.ran.index(["chown", "-R", "10001:10000",
-                               "/cephfs/dms/artifacts/j1/execution"])
+    assert ["chown", "-R", "10001:10000", str(tmp_path)] in rec.ran
+    chown_idx = rec.ran.index(["chown", "-R", "10001:10000", str(tmp_path)])
     mpirun_idx = next(i for i, c in enumerate(rec.ran) if "mpirun" in c)
     assert chown_idx < mpirun_idx
     # rank.sh가 executable로 표시됨
     assert any(p.endswith("rank.sh") for p in rec.made_exec)
     # rank.sh 본문에서 $DMS_SCAN_REPORT가 치환됨
-    rank_path = "/cephfs/dms/artifacts/j1/execution/rank.sh"
+    rank_path = f"{tmp_path}/rank.sh"
     body = rec.writes[rank_path]
     assert "$DMS_SCAN_REPORT" not in body
     assert "dscan-report.json" in body

@@ -55,7 +55,7 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #    role_map은 계획 시점의 소스/목적지 노드 수(DMS_JR_SOURCE_NODES/DEST_NODES,
     #    execution_manifests._build_nsync_job이 채움)로 결정론적으로 계산된다 —
     #    개수만 필요하므로 hostfile의 실제 SSH 호스트명과 무관하다(commands.nsync_role_map).
-    report_path = f"{artifact_dir}/dscan-report.json"
+    report_path = _scan_report_path(artifact_dir)
     rendered = [report_path if a == "$DMS_SCAN_REPORT" else a for a in argv]
     if tool == "nsync":
         src_nodes = json.loads(env.get("DMS_JR_SOURCE_NODES", "[]"))
@@ -85,6 +85,13 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     summary = _build_summary(tool, proc.stdout, proc.returncode, artifact_dir)
     write_text(f"{artifact_dir}/summary.json", json.dumps(summary))
     return proc.returncode
+
+
+def _scan_report_path(artifact_dir):
+    # 도구에 주는 경로($DMS_SCAN_REPORT)와 summary가 읽는 경로는 반드시 같은 식이어야
+    # 한다 -- 리터럴이 두 곳에 갈라지면 한쪽만 바뀌어도 테스트는 초록인 채 프로덕션
+    # scan 카운트가 조용히 null이 된다(리뷰 M7 뮤테이션).
+    return f"{artifact_dir}/dscan-report.json"
 
 
 def _resolve_host(host, *, run):
@@ -118,7 +125,7 @@ def _build_summary(tool, stdout, returncode, artifact_dir):
         elif tool == "drm":
             files, nbytes = parse_rm_counts(stdout or "")
         elif tool == "dscan":
-            files, nbytes = parse_scan_counts(f"{artifact_dir}/dscan-report.json")
+            files, nbytes = parse_scan_counts(_scan_report_path(artifact_dir))
         # 그 외 도구: 파싱 규칙이 없다 -- (None, None) 그대로 둔다
     except Exception:  # noqa: BLE001 -- fail-soft가 계약이다(설계 §4)
         files = nbytes = None
