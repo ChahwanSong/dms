@@ -1,6 +1,7 @@
 import { useRequests } from "../jobs/useJobs";
-import { useNodes } from "./useDashboard";
 import { useInfraMetrics, useJobMetrics } from "./useMetrics";
+import { NodeMetricsSection } from "./NodeMetricsSection";
+import { JobStatsSection } from "./JobStatsSection";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -33,7 +34,6 @@ const VERDICT_VARIANT: Record<string, PillVariant> = {
 
 export function Dashboard() {
   const reqs = useRequests();
-  const nodes = useNodes();
   const jobsQ = useJobMetrics(24);
   const infraQ = useInfraMetrics();
   // 방어적 정규화 -- 배열 아닌 페이로드 하나가 화면을 죽이면 안 된다
@@ -82,19 +82,8 @@ export function Dashboard() {
           </ul>
         </Card>
       </div>
-      {/* 노드 상태 카드는 Task 7의 시계열 섹션(NodeMetricsSection)이 대체한다 --
-          그때까지 신선도 목록을 유지해 화면 공백을 만들지 않는다 */}
-      <Card>
-        <h2 className="font-medium mb-3">노드 상태</h2>
-        <ul className="space-y-2 text-sm">
-          {(nodes.data ?? []).map((n) => (
-            <li key={n.node_name} className="flex items-center justify-between">
-              <span>{n.node_name}</span>
-              <StatusPill state={n.fresh ? "Succeeded" : "Failed"} />
-            </li>
-          ))}
-        </ul>
-      </Card>
+      <NodeMetricsSection />
+      <JobStatsSection />
     </section>
   );
 }
