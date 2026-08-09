@@ -29,17 +29,25 @@ export const useReleaseTargets = () =>
     refetchOnWindowFocus: false,
   });
 
+export const RELEASE_POLL_MS = 5000;
+
+/** 진행 중인 릴리스가 하나라도 있으면 폴링 간격을, 전부 종단이면 false를 준다.
+ *  useQuery 옵션 안의 인라인 화살표가 아니라 이름 붙은 함수로 두는 이유: 폴링
+ *  시작/정지는 설계 §8의 요구사항인데 인라인이면 테스트가 옵션 함수에 닿지 못해
+ *  "폴링이 아예 시작되지 않는" 회귀가 그대로 통과한다. */
+export function releaseRefetchInterval(data: Releases | undefined): number | false {
+  const history = data?.history;
+  return Array.isArray(history)
+    && history.some((r) => RELEASE_ACTIVE_STATES.has(r.state)) ? RELEASE_POLL_MS : false;
+}
+
 export const useReleases = () =>
   useQuery({
     queryKey: ["releases"],
     queryFn: () => apiGet<Releases>("/api/admin/releases"),
     // 진행 중일 때만 폴링 -- useBuilds와 같은 관용구. 전부 종단이면 상태가 더
     // 바뀔 일이 없고, 제출이 쿼리를 무효화하면 폴링이 자동 재개된다.
-    refetchInterval: (q) => {
-      const history = (q.state.data as Releases | undefined)?.history;
-      return Array.isArray(history)
-        && history.some((r) => RELEASE_ACTIVE_STATES.has(r.state)) ? 5000 : false;
-    },
+    refetchInterval: (q) => releaseRefetchInterval(q.state.data as Releases | undefined),
   });
 
 /** 롤아웃이 진행 중 -> 전부 종단으로 바뀌는 순간에만 targets를 한 번 다시 읽는다.
