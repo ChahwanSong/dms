@@ -450,11 +450,16 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
   minimal. To disable entirely: `DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"`
   (or `DMS_PRIVILEGED_REQUESTERS: ""` -- an explicit empty string overrides
   the default to no privileged requesters).
-- **`DMS_JOB_IMAGE` / image tags**: all manifests hardcode `:dev`. Keep
-  `build-and-push.sh`'s `TAG` and the manifests' tags in sync manually (no
-  templating layer here by design -- see CLAUDE.md's "legacy/install/ 미러
-  금지" instruction, which ruled out introducing e.g. Helm/kustomize for this
-  pass).
+- **`DMS_JOB_IMAGE` / image tags**: manifests hardcode tags across three
+  independent lineages -- `pkg-01:5000/dms:<tag>` (api/controller/migrate,
+  currently `d23`), `pkg-01:5000/dms-agent:<tag>` (agent DaemonSet, `dev5`),
+  `pkg-01:5000/dms-mpifileutils:<tag>` (`DMS_JOB_IMAGE` ConfigMap value,
+  `job3`). Keep `build-and-push.sh`'s `TAG` and the manifests' tags in sync
+  manually (no templating layer here by design -- see CLAUDE.md's
+  "legacy/install/ 미러 금지" instruction, which ruled out introducing e.g.
+  Helm/kustomize for this pass). Portal-driven rollout (§9) patches the live
+  `dms:` and `dms-agent:` workloads but does NOT rewrite these files, so after
+  a rollout you must hand-edit the tag here to keep repo and cluster aligned.
 - **`/cephfs` scheduling assumption on `dms-api`/`dms-controller`**: both
   Deployments hostPath-mount `/cephfs` with `type: Directory` (fails pod
   admission on a node without that mount). This is safe today because the
