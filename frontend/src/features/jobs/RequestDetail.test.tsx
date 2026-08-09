@@ -271,3 +271,36 @@ test("shows a truncation notice when events_truncated is true", async () => {
   const card = heading.closest("div")!;
   expect(within(card).getByText(/100건/)).toBeInTheDocument();
 });
+
+test("큐 대기를 첫 비-Pending 전이에서 유도해 보여준다", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST,
+      transitions: [
+        { from_state: null, to_state: "Pending", at: "2026-08-05T00:00:00Z" },
+        { from_state: "Pending", to_state: "Planned", at: "2026-08-05T00:01:30Z" },
+        { from_state: "Planned", to_state: "Failed",
+          reason_code: "no_eligible_nodes", at: "2026-08-05T00:02:00Z" },
+      ],
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
+  );
+  renderAt();
+  expect(await screen.findByText("큐 대기")).toBeInTheDocument();
+  expect(screen.getByText("1분 30초")).toBeInTheDocument();
+});
+
+test("실행 전이가 아직 없으면 큐 대기는 —", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST, state: "Pending",
+      transitions: [
+        { from_state: null, to_state: "Pending", at: "2026-08-05T00:00:00Z" },
+      ],
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+  );
+  renderAt();
+  const dt = await screen.findByText("큐 대기");
+  expect(dt.nextElementSibling).toHaveTextContent("—");
+});
