@@ -1,0 +1,140 @@
+"""parsers.py 단위 테스트. 픽스처는 테스트베드 실 잡의 캡처 출력을 그대로 고정한다
+(잡 60d24700 dsync stdout, drm stdout, dscan-report.json 실 스키마) -- 파서가
+"실제 mpifileutils가 찍는 것"을 파싱함을 픽스처 수준에서 보증한다(설계 §6)."""
+import json
+
+from dms_job_runner.parsers import (parse_rm_counts, parse_scan_counts,
+                                    parse_sync_counts)
+
+# 실측 dsync stdout(잡 60d24700, 파싱 관련 줄 전체). 같은 stdout에 walk 단계의
+# 패딩 요약("Items     : 0"), 복사 단계 중간 요약(Items: 10 + per-file Data),
+# Copy data/Copy rate, 최종 블록(Items/Data/Rate)이 전부 공존한다 -- 파서는 이
+# 전체에서 최종 블록만 골라내야 한다(설계 §1).
+DSYNC_STDOUT = """\
+[2026-08-04T02:14:12] Walked 10 items in 0.001 seconds (15463.025 items/sec)
+[2026-08-04T02:14:12] Started   : Aug-04-2026, 02:14:12
+[2026-08-04T02:14:12] Items     : 0
+[2026-08-04T02:14:12] Copying items to destination
+[2026-08-04T02:14:12] Items: 10
+[2026-08-04T02:14:12]   Directories: 3
+[2026-08-04T02:14:12]   Files: 7
+[2026-08-04T02:14:12] Data: 50.000 B (7.000 B per file)
+[2026-08-04T02:14:12] Copy data: 50.000 B (50 bytes)
+[2026-08-04T02:14:12] Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)
+[2026-08-04T02:14:12] Items: 10
+[2026-08-04T02:14:12]   Directories: 3
+[2026-08-04T02:14:12]   Files: 7
+[2026-08-04T02:14:12]   Links: 0
+[2026-08-04T02:14:12] Data: 50.000 B (50 bytes)
+[2026-08-04T02:14:12] Rate: 0.991 KiB/s (050 bytes in 0.049 seconds)
+[2026-08-04T02:14:12] Completed sync
+"""
+
+# 실측 캡처는 중간·최종 값이 같아(10/50) "마지막 매치가 이긴다"를 증명하지 못한다.
+# 값을 달리한 합성 변형으로 순서 규칙을 고정한다(설계 §3: 마지막 매치 = 최종 블록).
+DSYNC_STDOUT_MID_DIFFERS = """\
+[2026-08-04T02:14:12] Items: 4
+[2026-08-04T02:14:12] Copy data: 20.000 B (20 bytes)
+[2026-08-04T02:14:12] Items: 10
+[2026-08-04T02:14:12] Data: 50.000 B (50 bytes)
+"""
+
+# 실측 drm stdout 요지: "Removed N items"가 "Walked N items" 줄과 혼재하고
+# bytes는 보고하지 않는다(설계 §1).
+DRM_STDOUT = """\
+[2026-08-04T02:31:08] Walked 1 items in 0.001 seconds (1035.197 items/sec)
+[2026-08-04T02:31:08] Removing 1 items
+[2026-08-04T02:31:08] Removed 1 items (0.482 items/sec) in 2.077 seconds
+"""
+
+# 실측 dscan-report.json 스키마(잡 8464cdd4). 파서는 summary.total_entries만 읽지만
+# top-level 키를 실 스키마대로 유지해 픽스처가 실물을 대표하게 한다.
+DSCAN_REPORT = {
+    "directory": "/cephfs/dms/smoke-src",
+    "generated_at_epoch": 1754273652,
+    "top_k": 10,
+    "thresholds": {},
+    "summary": {"total_entries": 10, "total_files": 7, "total_directories": 3,
+                "total_symlinks": 0, "total_other": 0},
+    "file_size_histogram": [],
+}
+
+
+# ---- parse_sync_counts ----
+
+def test_sync_real_capture_final_items_and_bytes():
+    # 최종 블록의 Items: 10 / Data: (50 bytes) -- 중간 요약·rate 줄이 있어도
+    assert parse_sync_counts(DSYNC_STDOUT) == (10, 50)
+
+
+def test_sync_last_match_wins_over_mid_copy_summary():
+    assert parse_sync_counts(DSYNC_STDOUT_MID_DIFFERS) == (10, 50)
+
+
+def test_sync_padded_walk_items_is_not_matched():
+    # walk 단계 "Items     : 0"(콜론 앞 패딩)은 "Items: " 형태가 아니라 자연 배제 --
+    # 이것만 있으면 최종 요약이 없는 것이므로 None(설계 §3)
+    assert parse_sync_counts("[ts] Items     : 0\n") == (None, None)
+
+
+def test_sync_bytes_in_rate_line_is_not_matched():
+    # "(50 bytes in 0.015 seconds)"는 "bytes" 뒤에 닫는 괄호가 바로 오지 않아
+    # 배제된다 -- 전송률이 총량으로 새면 안 된다(설계 §3)
+    out = "[ts] Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)\n"
+    assert parse_sync_counts(out) == (None, None)
+
+
+def test_sync_empty_and_irrelevant_stdout():
+    # --quiet 억제·조기 실패 등으로 요약이 없으면 값만 null(설계 §4 fail-soft)
+    assert parse_sync_counts("") == (None, None)
+    assert parse_sync_counts("no summary here\nCompleted sync\n") == (None, None)
+
+
+# ---- parse_rm_counts ----
+
+def test_rm_real_capture_removed_items_bytes_always_none():
+    # "Removing 1 items"(진행 줄)와 "Walked 1 items"는 배제, "Removed 1 items"만
+    assert parse_rm_counts(DRM_STDOUT) == (1, None)
+
+
+def test_rm_last_match_wins():
+    out = "Removed 3 items\nRemoved 7 items in 0.1 seconds\n"
+    assert parse_rm_counts(out) == (7, None)
+
+
+def test_rm_empty_and_walked_only():
+    assert parse_rm_counts("") == (None, None)
+    assert parse_rm_counts("[ts] Walked 10 items in 0.001 seconds\n") == (None, None)
+
+
+# ---- parse_scan_counts ----
+
+def _write_report(tmp_path, payload) -> str:
+    path = tmp_path / "dscan-report.json"
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+    return str(path)
+
+
+def test_scan_real_report_total_entries(tmp_path):
+    assert parse_scan_counts(_write_report(tmp_path, DSCAN_REPORT)) == (10, None)
+
+
+def test_scan_missing_report_file(tmp_path):
+    # 도구 실패로 리포트가 안 생겨도 파서는 예외 대신 None(설계 §4)
+    assert parse_scan_counts(str(tmp_path / "nope.json")) == (None, None)
+
+
+def test_scan_corrupt_json(tmp_path):
+    assert parse_scan_counts(_write_report(tmp_path, "{broken")) == (None, None)
+
+
+def test_scan_wrong_shapes_and_types(tmp_path):
+    # 승격 경로 _as_count(data_jobs.py)와 같은 원칙: bool은 int의 서브클래스라
+    # 명시 배제, 음수는 계수로 무의미 -- 여기서 먼저 거르면 summary가 애초에 깨끗하다
+    for payload in ([1, 2],                                   # 리포트가 dict 아님
+                    {"summary": "oops"},                      # summary 비 dict
+                    {"summary": {}},                          # total_entries 없음
+                    {"summary": {"total_entries": "10"}},     # 비 int
+                    {"summary": {"total_entries": True}},     # bool
+                    {"summary": {"total_entries": -1}}):      # 음수
+        assert parse_scan_counts(_write_report(tmp_path, payload)) == (None, None)
