@@ -54,8 +54,61 @@ class _R:
         self.stderr = stderr
 
 
+# 실측 캡처 픽스처 -- tests/test_job_runner_parsers.py와 의도적으로 중복(테스트
+# 파일끼리 import로 결합하지 않는다). 내용은 잡 60d24700 dsync stdout,
+# drm stdout, dscan-report.json 실 스키마 그대로.
+DSYNC_STDOUT = """\
+[2026-08-04T02:14:12] Walked 10 items in 0.001 seconds (15463.025 items/sec)
+[2026-08-04T02:14:12] Started   : Aug-04-2026, 02:14:12
+[2026-08-04T02:14:12] Items     : 0
+[2026-08-04T02:14:12] Copying items to destination
+[2026-08-04T02:14:12] Items: 10
+[2026-08-04T02:14:12]   Directories: 3
+[2026-08-04T02:14:12]   Files: 7
+[2026-08-04T02:14:12] Data: 50.000 B (7.000 B per file)
+[2026-08-04T02:14:12] Copy data: 50.000 B (50 bytes)
+[2026-08-04T02:14:12] Copy rate: 3.284 KiB/s (50 bytes in 0.015 seconds)
+[2026-08-04T02:14:12] Items: 10
+[2026-08-04T02:14:12]   Directories: 3
+[2026-08-04T02:14:12]   Files: 7
+[2026-08-04T02:14:12]   Links: 0
+[2026-08-04T02:14:12] Data: 50.000 B (50 bytes)
+[2026-08-04T02:14:12] Rate: 0.991 KiB/s (050 bytes in 0.049 seconds)
+[2026-08-04T02:14:12] Completed sync
+"""
+
+DRM_STDOUT = """\
+[2026-08-04T02:31:08] Walked 1 items in 0.001 seconds (1035.197 items/sec)
+[2026-08-04T02:31:08] Removing 1 items
+[2026-08-04T02:31:08] Removed 1 items (0.482 items/sec) in 2.077 seconds
+"""
+
+DSCAN_REPORT = {
+    "directory": "/cephfs/dms/smoke-src",
+    "generated_at_epoch": 1754273652,
+    "top_k": 10,
+    "thresholds": {},
+    "summary": {"total_entries": 10, "total_files": 7, "total_directories": 3,
+                "total_symlinks": 0, "total_other": 0},
+    "file_size_histogram": [],
+}
+
+
+def _summary(rec):
+    path = [p for p in rec.writes if p.endswith("summary.json")][0]
+    return json.loads(rec.writes[path])
+
+
+def _run(rec, env, wait_hostfile=None):
+    return run_job(env, run=rec.run, write_text=rec.write_text,
+                   read_text=rec.read_text, sleep=lambda s: None,
+                   wait_hostfile=wait_hostfile
+                   or (lambda: (["dms-w1"], "/tmp/hostfile")),
+                   make_executable=rec.make_executable)
+
+
 def test_run_job_materializes_identity_and_runs_mpirun():
-    rec = _Recorder(rc=0, stdout='{"files": 5}')
+    rec = _Recorder(rc=0, stdout="tool output")
     rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
@@ -80,21 +133,61 @@ def test_run_job_materializes_identity_and_runs_mpirun():
     assert "$DMS_SCAN_REPORT" not in body
     assert "dscan-report.json" in body
     assert body.startswith("#!/bin/sh")
-    # summary.json 기록
-    summary_writes = [p for p in rec.writes if p.endswith("summary.json")]
-    assert summary_writes
-    assert json.loads(rec.writes[summary_writes[0]]) == {"files": 5}
+    # summary.json은 항상 3키 계약(설계 §2.3) -- dscan인데 리포트가 없으니
+    # files/bytes는 fail-soft로 null, returncode만 실린다
+    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None}
 
 
-def test_run_job_nonjson_stdout_writes_returncode_summary():
+def test_run_job_dsync_summary_parses_final_items_and_bytes():
+    rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
+    rc = _run(rec, _env(DMS_JR_TOOL="dsync", DMS_JR_OPERATION="sync"))
+    assert rc == 0
+    # 실 캡처에는 중간·최종 요약이 공존한다 -- 최종 블록의 10/50이 잡혀야 한다
+    # (순서 규칙 자체는 파서 단위 테스트가 값을 달리해 고정한다)
+    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}
+
+
+def test_run_job_drm_summary_parses_removed_items():
+    rec = _Recorder(rc=0, stdout=DRM_STDOUT)
+    rc = _run(rec, _env(DMS_JR_TOOL="drm", DMS_JR_OPERATION="rm"))
+    assert rc == 0
+    # drm은 바이트를 보고하지 않는다(설계 §1) -- bytes는 null이 정답이다
+    assert _summary(rec) == {"returncode": 0, "files": 1, "bytes": None}
+
+
+def test_run_job_dscan_summary_reads_report(tmp_path):
+    # dscan의 구조화 수치는 stdout이 아니라 {artifact_dir}/dscan-report.json에 있다
+    (tmp_path / "dscan-report.json").write_text(json.dumps(DSCAN_REPORT))
+    rec = _Recorder(rc=0, stdout="human readable listing\n")
+    rc = _run(rec, _env(DMS_JR_ARTIFACT_DIR=str(tmp_path)))
+    assert rc == 0
+    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": None}
+
+
+def test_run_job_dscan_summary_fail_soft_when_report_missing(tmp_path):
+    # 도구가 실패해 리포트가 없어도 파싱은 잡을 죽이지 않는다(설계 §4) --
+    # returncode는 보존되고 files/bytes만 null로 강등된다
     rec = _Recorder(rc=3, stdout="some non-json output")
-    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
-                 read_text=rec.read_text, sleep=lambda s: None,
-                 wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
-                 make_executable=rec.make_executable)
+    rc = _run(rec, _env(DMS_JR_ARTIFACT_DIR=str(tmp_path)))
     assert rc == 3
-    sp = [p for p in rec.writes if p.endswith("summary.json")][0]
-    assert json.loads(rec.writes[sp]) == {"returncode": 3}
+    assert _summary(rec) == {"returncode": 3, "files": None, "bytes": None}
+
+
+def test_run_job_unknown_tool_summary_is_nulls():
+    # 미지 도구는 파싱 규칙이 없다 -- 출력이 있어도 (None, None)으로 강등(설계 §3)
+    rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
+    rc = _run(rec, _env(DMS_JR_TOOL="dcp"))
+    assert rc == 0
+    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None}
+
+
+def test_run_job_preview_phase_uses_same_summary_contract():
+    # preview도 동일 계약(설계 §3): set_preview는 files/bytes를 무시하지만 dryrun
+    # 예상치로 정보 가치가 있고, phase 분기가 없어 runner가 단순해진다
+    rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
+    rc = _run(rec, _env(DMS_JR_TOOL="dsync", DMS_JR_PHASE="preview"))
+    assert rc == 0
+    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}
 
 
 def test_rank_script_quotes_argv():
@@ -102,7 +195,7 @@ def test_rank_script_quotes_argv():
     env = _env(**{"DMS_JR_ARGV": json.dumps(
         ["--directory", "/cephfs/a b$(x)", "--output", "$DMS_SCAN_REPORT", "--print"]
     )})
-    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rec = _Recorder(rc=0, stdout="ok")
     rc = run_job(env, run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
@@ -117,7 +210,7 @@ def test_rank_script_quotes_argv():
 
 
 def test_run_job_copies_ssh_keys_to_requester_home_before_mpirun():
-    rec = _Recorder(rc=0, stdout='{"files": 5}')
+    rec = _Recorder(rc=0, stdout="ok")
     rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
@@ -135,7 +228,7 @@ def test_run_job_resolves_hosts_and_writes_slotted_hostfile():
     def run_fn(cmd):
         if cmd[0] == "getent":
             return _R(returncode=0, stdout="10.0.0.5   dms-w1\n")
-        return _R(returncode=0, stdout='{"files": 1}')
+        return _R(returncode=0, stdout="ok")
     rec = _Recorder(run_fn=run_fn)
     rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
@@ -154,7 +247,7 @@ def test_run_job_resolves_hosts_and_writes_slotted_hostfile():
 
 
 def test_run_job_ssh_readiness_barrier_probes_before_mpirun():
-    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rec = _Recorder(rc=0, stdout="ok")
     rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
@@ -175,7 +268,7 @@ def test_run_job_ssh_barrier_gives_up_after_bounded_attempts():
             return _R(returncode=1)
         if cmd[0] == "getent":
             return _R(returncode=1, stdout="")
-        return _R(returncode=0, stdout='{"files": 1}')
+        return _R(returncode=0, stdout="ok")
     rec = _Recorder(run_fn=run_fn)
     rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: slept.append(s),
@@ -210,7 +303,7 @@ def _nsync_wait_hostfile(calls):
 
 def test_run_job_nsync_waits_for_source_and_destination_hostfiles():
     calls = []
-    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rec = _Recorder(rc=0, stdout="ok")
     rc = run_job(_nsync_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=_nsync_wait_hostfile(calls),
@@ -222,7 +315,7 @@ def test_run_job_nsync_waits_for_source_and_destination_hostfiles():
 
 
 def test_run_job_nsync_computes_role_map_and_inserts_role_map_args():
-    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rec = _Recorder(rc=0, stdout="ok")
     rc = run_job(_nsync_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=_nsync_wait_hostfile([]),
@@ -238,7 +331,7 @@ def test_run_job_nsync_computes_role_map_and_inserts_role_map_args():
 
 
 def test_run_job_mpirun_has_ompi_env_and_runuser_preserve_environment():
-    rec = _Recorder(rc=0, stdout='{"files": 1}')
+    rec = _Recorder(rc=0, stdout="ok")
     rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
                  read_text=rec.read_text, sleep=lambda s: None,
                  wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
@@ -251,3 +344,12 @@ def test_run_job_mpirun_has_ompi_env_and_runuser_preserve_environment():
     i = mpirun_cmd.index("runuser")
     assert mpirun_cmd[i:i + 3] == ["runuser", "-u", "alice"]
     assert mpirun_cmd.count("-x") >= 2
+
+
+def test_run_job_nsync_summary_uses_sync_parser():
+    # nsync 실 출력은 미확인(설계 §4의 명시적 가정) -- 여기서는 디스패치가
+    # parse_sync_counts로 가는 것만 고정한다. 형식이 다르면 fail-soft로 null일 뿐이다.
+    rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
+    rc = _run(rec, _nsync_env(), wait_hostfile=_nsync_wait_hostfile([]))
+    assert rc == 0
+    assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}

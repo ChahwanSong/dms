@@ -6,6 +6,7 @@ import sys
 from .commands import (
     getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
+from .parsers import parse_rm_counts, parse_scan_counts, parse_sync_counts
 
 _SSH_READY_MAX_ATTEMPTS = 90  # legacy _mpiexec_line 이식: 워커당 ~90s 상한
 
@@ -79,8 +80,9 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     write_text(f"{artifact_dir}/stdout.log", proc.stdout or "")
     write_text(f"{artifact_dir}/stderr.log", proc.stderr or "")
 
-    # 8. summary
-    summary = _summary_from_stdout(proc.stdout, proc.returncode)
+    # 8. summary — 도구별 파싱(설계 §3). preview/execution 공통: phase 분기가
+    #    없어 preview의 files/bytes도 dryrun 예상치로 실린다(set_preview는 무시).
+    summary = _build_summary(tool, proc.stdout, proc.returncode, artifact_dir)
     write_text(f"{artifact_dir}/summary.json", json.dumps(summary))
     return proc.returncode
 
@@ -103,14 +105,24 @@ def _wait_ssh_ready(hosts, *, run, sleep, max_attempts=_SSH_READY_MAX_ATTEMPTS):
             sleep(1)
 
 
-def _summary_from_stdout(stdout, returncode):
-    last = (stdout or "").strip().splitlines()
-    if last:
-        try:
-            return json.loads(last[-1])
-        except (ValueError, TypeError):
-            pass
-    return {"returncode": returncode}
+def _build_summary(tool, stdout, returncode, artifact_dir):
+    """summary.json은 항상 정확히 3키 {"returncode", "files", "bytes"} -- 모르면
+    null(설계 §2.3). 기존 "마지막 줄 JSON" 계약은 실 mpifileutils가 JSON을 찍지
+    않아 사문이라 제거했다. 파싱이 잡을 죽이는 경로는 없다(설계 §4): 어떤 예외든
+    삼키고 returncode만 보존한 채 files/bytes를 null로 강등한다 -- 제어면
+    _as_count(bool·비int·음수 거부)가 2차 방어로 이미 배포되어 있다(d24)."""
+    files = nbytes = None
+    try:
+        if tool in ("dsync", "nsync"):
+            files, nbytes = parse_sync_counts(stdout or "")
+        elif tool == "drm":
+            files, nbytes = parse_rm_counts(stdout or "")
+        elif tool == "dscan":
+            files, nbytes = parse_scan_counts(f"{artifact_dir}/dscan-report.json")
+        # 그 외 도구: 파싱 규칙이 없다 -- (None, None) 그대로 둔다
+    except Exception:  # noqa: BLE001 -- fail-soft가 계약이다(설계 §4)
+        files = nbytes = None
+    return {"returncode": returncode, "files": files, "bytes": nbytes}
 
 
 def _shquote(s):
