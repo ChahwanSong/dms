@@ -1,6 +1,7 @@
 """Volcano/k8s 실행 어댑터. k8s 접근은 주입된 K8sClient 뒤, 아티팩트 읽기는 read_text 뒤."""
 import json
 import logging
+import threading
 from typing import Protocol
 
 from .execution import ExecStatus, ExecutionError
@@ -263,14 +264,23 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
         self._core = None
         self._custom = None
         self._apps = None
+        self._init_lock = threading.Lock()
 
     def _ensure(self):
-        if self._core is None:
+        # 병렬 진입(예: /api/admin/metrics/infra 가 세 컴포넌트를 스레드풀로 동시에
+        # observe) 시 _core 를 세팅했지만 _apps 를 아직 못 세팅한 창에서 다른 스레드가
+        # None 인 _apps 를 만지지 않도록 이중검사 잠금으로 세 핸들의 세팅을 원자화한다.
+        if self._core is not None:
+            return
+        with self._init_lock:
+            if self._core is not None:
+                return
             import kubernetes
             kubernetes.config.load_incluster_config()
-            self._core = kubernetes.client.CoreV1Api()
+            core = kubernetes.client.CoreV1Api()
             self._custom = kubernetes.client.CustomObjectsApi()
             self._apps = kubernetes.client.AppsV1Api()
+            self._core = core  # _core 는 마지막에 — 나머지 두 핸들이 준비된 뒤 게이트 해제
 
     def create(self, manifest):
         self._ensure()
