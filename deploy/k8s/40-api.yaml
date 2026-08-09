@@ -50,7 +50,7 @@ spec:
       serviceAccountName: dms-api
       containers:
         - name: api
-          image: pkg-01:5000/dms:d23
+          image: pkg-01:5000/dms:d24
           imagePullPolicy: IfNotPresent
           command: ["dms", "api"]
           env:
