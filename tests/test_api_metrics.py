@@ -118,3 +118,20 @@ def test_request_events_unknown_request_404(client):
 
 def test_request_events_admin_only(client):
     assert client.get("/api/admin/requests/x/events").status_code == 401
+
+
+def test_metrics_window_zero_and_negative_fold_to_lower_bound(client):
+    # §6-2: 기간은 접는다, 거부하지 않는다 -- 하한도 상한과 같은 철학.
+    # 0·음수는 422가 아니라 200 + 1시간 창으로 접혀야 한다(clamp_window_hours가
+    # 유일한 범위 권위). nodes·jobs 둘 다 같은 규칙.
+    for path in ("/api/admin/metrics/nodes", "/api/admin/metrics/jobs"):
+        for w in (0, -5):
+            r = client.get(f"{path}?window={w}", headers=ADMIN)
+            assert r.status_code == 200, (path, w)
+            assert r.json()["window_hours"] == 1, (path, w)
+
+
+def test_metrics_window_non_integer_still_422(client):
+    # 비정수는 범위 문제가 아니라 파싱 오류다 -- 여전히 422가 맞다.
+    for path in ("/api/admin/metrics/nodes", "/api/admin/metrics/jobs"):
+        assert client.get(f"{path}?window=abc", headers=ADMIN).status_code == 422

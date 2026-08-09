@@ -22,7 +22,10 @@ def _window(request: Request, window: int) -> "tuple[int, str, str]":
 
 
 @router.get("/api/admin/metrics/nodes")
-def metrics_nodes(request: Request, window: int = Query(default=24, ge=1)):
+def metrics_nodes(request: Request, window: int = Query(default=24)):
+    # ge=1을 두지 않는다 -- 기간은 접지 거부하지 않는다(§6-2). 0·음수는 여기서
+    # 422로 걸지 않고 clamp_window_hours가 하한(1)으로, 과대값은 상한(720)으로
+    # 접게 둔다(같은 철학, 한 권위). int 타입은 유지 -- 비정수는 파싱 오류로 422.
     repos = request.app.state.repos
     settings = request.app.state.settings
     hours, start, end = _window(request, window)
@@ -39,7 +42,8 @@ def metrics_nodes(request: Request, window: int = Query(default=24, ge=1)):
 
 
 @router.get("/api/admin/metrics/jobs")
-def metrics_jobs(request: Request, window: int = Query(default=24, ge=1)):
+def metrics_jobs(request: Request, window: int = Query(default=24)):
+    # nodes와 같은 규칙 -- ge=1 없이 clamp_window_hours가 상·하한을 접는다(§6-2).
     repos = request.app.state.repos
     hours, start, end = _window(request, window)
     chars = bucket_chars_for(hours)
