@@ -40,9 +40,10 @@ def test_agent_settings_required_and_defaults(monkeypatch):
 
 
 def test_virtual_net_path_defaults_to_unset_not_the_pods_own_sysfs():
-    # 함정(설계 §2.6): 파드 안에도 /sys/devices/virtual/net/ 이 있고 거기엔 파드
-    # 인터페이스 eth0 이 들어 있다. 이 기본값을 그 경로로 두면 마운트가 없는 배포에서
-    # 호스트 물리 eth0 을 가상으로 오판해 제외한다 -- 기본은 반드시 "미설정"이다.
+    # 함정(설계 §2.6): 파드 안에도 /sys/devices/virtual/net/ 이 있지만 그건 파드
+    # netns 의 집합이다. 이 기본값을 그 경로로 두면 마운트가 없는 배포에서 그 집합으로
+    # 호스트 목록을 걸러, 이름이 겹치는 호스트 인터페이스를 무엇이든 제외해 버린다
+    # (eth0 이 가장 흔한 충돌일 뿐이다) -- 기본은 반드시 "미설정"이다.
     env = {"DMS_AGENT_API_URL": "http://dms-api:8080", "DMS_SHARED_TOKEN": "tok"}
     s = AgentSettings.from_env(env)
     assert not s.virtual_net_path

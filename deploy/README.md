@@ -503,9 +503,13 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
   `DMS_AGENT_VIRTUAL_NET_PATH`.
   **`DMS_AGENT_VIRTUAL_NET_PATH` defaults to UNSET on purpose -- never set it
   to the in-container `/sys/devices/virtual/net`.** A pod has that path too,
-  holding the pod's *own* virtual interfaces, and the pod's interface is
-  normally named `eth0` -- a deployment missing the hostPath mount would read
-  the pod's sysfs, judge the host's real `eth0` virtual, and exclude exactly
-  the interface that matters. Unset (or an unreadable path) means no
+  but what it holds is the *pod netns's* virtual interfaces. Pointing the
+  probe there filters the **host's** interface list through a set from a
+  **different namespace** -- the two were never comparable, so **any** host
+  interface whose name collides with a pod-side one is misjudged virtual and
+  dropped. `eth0` is merely where that collision is most likely (CNIs name the
+  pod interface `eth0` by convention, and VM/cloud hosts often name the
+  physical NIC `eth0` too), but a host on `ens192`/`enp5s0`/`eno1` breaks the
+  same way if the name collides. Unset (or an unreadable path) means no
   filtering: the probe keeps today's all-but-`lo` sum rather than losing the
   metric.

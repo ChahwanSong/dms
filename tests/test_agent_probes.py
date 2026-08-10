@@ -73,9 +73,11 @@ Inter-|   Receive                                                |  Transmit
 """
 
 
-# CNI 가 붙은 실제 노드 모양(dms-w3 실측 축약): 물리 eth0 + 오버레이 터널
+# cilium 이 붙은 실제 노드 모양(dms-w3 실측 축약): 물리 eth0 + 오버레이 터널
 # cilium_vxlan + 파드 veth 호스트쪽 lxc_*. 이름 폭이 6칸을 넘으면 왼쪽 여백이
 # 사라지는 것까지 실물 그대로다 -- 파서가 name.strip() 에 기대는 지점이다.
+# 여기 이름들은 이 테스트베드의 우연일 뿐이라, 판별이 이름을 안 본다는 것은 아래
+# calico/flannel/다중 NIC 형상이 따로 못박는다.
 NETDEV_CNI = """\
 Inter-|   Receive                                                |  Transmit
  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
@@ -87,21 +89,56 @@ lxc_abc:  70          7    0    0    0     0          0        0       90       
 FILES_CNI = {"/proc/loadavg": LOADAVG, "/proc/meminfo": MEMINFO,
              "/host/proc/1/net/dev": NETDEV_CNI}
 
+# 커널이 /proc/net/dev 를 찍는 서식 그대로(net/core/net-procfs.c 의 seq_printf):
+# 이름은 %6s 라 6칸 우측 정렬이고 길면 그대로 밀려 왼쪽 여백이 사라진다. 위
+# NETDEV_CNI 는 실제 캡처처럼 여백이 고르지 않은 판, 아래 생성기는 커널 서식 판 --
+# 두 폭 모두에서 파서가 같은 값을 내야 한다. 이름에 콜론은 없다(파서가 partition(":")).
+_NETDEV_FMT = ("%6s: %7d %7d %4d %4d %4d %5d %10d %9d "
+               "%8d %7d %4d %4d %4d %5d %7d %10d")
+_NETDEV_HEAD = (
+    "Inter-|   Receive                                                |  Transmit\n"
+    " face |bytes    packets errs drop fifo frame compressed multicast|"
+    "bytes    packets errs drop fifo colls carrier compressed\n")
 
-def _virtual_net_dir(tmp_path, names):
+
+def _netdev(rows):
+    """(이름, rx_bytes, tx_bytes) 목록 -> /proc/net/dev 텍스트. rx 8칸 + tx 8칸."""
+    body = "".join(
+        _NETDEV_FMT % (name, rx, 1, 0, 0, 0, 0, 0, 0, tx, 1, 0, 0, 0, 0, 0, 0) + "\n"
+        for name, rx, tx in rows)
+    return _NETDEV_HEAD + body
+
+
+# 같은 숫자(물리 1000/2000, 가상 400/600 + 70/90)를 이름만 바꿔 심는다 -- 값이 같으니
+# 결과가 갈리면 원인은 오직 이름/등록 위치다.
+NETDEV_CALICO = _netdev([("lo", 999999, 999999), ("ens192", 1000, 2000),
+                         ("cali3f7a1b2c4d5", 400, 600), ("tunl0", 70, 90)])
+NETDEV_FLANNEL = _netdev([("lo", 999999, 999999), ("eno1", 1000, 2000),
+                          ("bond0", 400, 600), ("flannel.1", 70, 90),
+                          ("cni0", 30, 50), ("veth1a2b3c", 7, 9)])
+NETDEV_MULTI_NIC = _netdev([("lo", 999999, 999999), ("ens192", 1000, 2000),
+                            ("ens224", 300, 500), ("br0", 400, 600)])
+
+
+def _virtual_net_dir(tmp_path, names, subdir="virtual-net"):
     """커널이 가상 인터페이스를 등록하는 /sys/devices/virtual/net/<name> 모사."""
-    path = tmp_path / "virtual-net"
+    path = tmp_path / subdir
     path.mkdir()
     for name in names:
         (path / name).mkdir()
     return str(path)
 
 
-def _net(**kwargs):
-    out = probe_os_metrics([], read_text=lambda p: FILES_CNI[p],
-                           statvfs=lambda p: None,
+def _net_of(netdev_text, **kwargs):
+    files = {"/proc/loadavg": LOADAVG, "/proc/meminfo": MEMINFO,
+             "/host/proc/1/net/dev": netdev_text}
+    out = probe_os_metrics([], read_text=lambda p: files[p], statvfs=lambda p: None,
                            net_dev_path="/host/proc/1/net/dev", **kwargs)
     return out["network_rx_bytes"], out["network_tx_bytes"]
+
+
+def _net(**kwargs):
+    return _net_of(NETDEV_CNI, **kwargs)
 
 
 def test_probe_os_metrics_sums_only_physical_interfaces_when_configured(tmp_path):
@@ -111,6 +148,29 @@ def test_probe_os_metrics_sums_only_physical_interfaces_when_configured(tmp_path
     rx, tx = _net(virtual_net_path=_virtual_net_dir(
         tmp_path, ["lo", "cilium_vxlan", "lxc_abc"]))
     assert (rx, tx) == (1000, 2000)
+
+
+def test_physical_detection_is_name_independent_calico_shape(tmp_path):
+    # calico: 물리가 ens192 고 가상은 cali*/tunl0 -- eth0 이라는 이름은 아예 없다.
+    # 접두 블록리스트였다면 CNI 마다 목록을 새로 알아야 했을 자리다.
+    assert _net_of(NETDEV_CALICO, virtual_net_path=_virtual_net_dir(
+        tmp_path, ["lo", "cali3f7a1b2c4d5", "tunl0"])) == (1000, 2000)
+
+
+def test_physical_detection_is_name_independent_flannel_and_bonded_shape(tmp_path):
+    # flannel + 본딩: 물리는 본드 슬레이브 eno1 이고, bond0 은 사람 눈에 "진짜 NIC"
+    # 같지만 본딩은 커널 가상 드라이버라 /sys/devices/virtual/net/bond0 로 등록된다
+    # (로컬 실측: 브리지 dmsbr0/docker0/virbr0 도 같은 자리에 있다). 이름 감각으로
+    # 골랐다면 정확히 여기서 틀린다. 게다가 bond0 의 바이트는 슬레이브로도 나가므로
+    # 둘 다 더하면 이중 계상이다 -- 등록 위치를 따르면 슬레이브만 한 번 세어 맞는다.
+    assert _net_of(NETDEV_FLANNEL, virtual_net_path=_virtual_net_dir(
+        tmp_path, ["lo", "bond0", "flannel.1", "cni0", "veth1a2b3c"])) == (1000, 2000)
+
+
+def test_multiple_physical_nics_are_summed_together(tmp_path):
+    # 물리가 하나라는 가정도 테스트베드 편향이다 -- 이중화/스토리지 전용 NIC 가 흔하다.
+    assert _net_of(NETDEV_MULTI_NIC, virtual_net_path=_virtual_net_dir(
+        tmp_path, ["lo", "br0"])) == (1000 + 300, 2000 + 500)
 
 
 def test_probe_os_metrics_without_virtual_net_path_sums_all_but_lo():
@@ -128,18 +188,36 @@ def test_probe_os_metrics_unreadable_virtual_net_path_falls_back_to_all_but_lo(t
     assert _net(virtual_net_path=str(not_a_dir)) == (1470, 2690)
 
 
-def test_unset_virtual_net_path_cannot_exclude_host_eth0_via_pod_sysfs(tmp_path):
-    """함정 못박기: 파드 자신의 sysfs 에는 파드 인터페이스인 eth0 이 들어 있다.
+def test_unset_virtual_net_path_cannot_exclude_host_nic_via_pod_sysfs_collision(tmp_path):
+    """함정 못박기: 마운트가 없으면 **다른 네임스페이스의 집합으로 거르게** 된다.
 
-    기본값이 /sys/devices/virtual/net 이었다면 마운트 없는 배포에서 파드의 sysfs 를
-    읽어 **호스트의 물리 eth0 을 가상으로 오판해 제외**한다 -- 고치려던 것보다 나쁜
-    값이다(설계 §2.6). 그래서 기본은 필터 없음이어야 한다. 아래 첫 단언이 그 계약이고,
-    둘째는 "그런 디렉터리를 실제로 읽히면 eth0 이 빠진다"는 전제를 함께 고정해
-    첫 단언이 공허하지 않음을 보인다.
+    파드 안에도 /sys/devices/virtual/net/ 이 있지만 거기 든 것은 **파드 netns 의**
+    가상 인터페이스다. 기본값이 그 경로였다면 마운트 없는 배포에서 그 집합으로
+    **호스트의** 인터페이스 목록을 거른다 -- 애초에 비교 대상이 아닌 두 집합이라,
+    이름이 겹치는 호스트 인터페이스는 **무엇이든** 가상으로 오판돼 빠진다. 고치려던
+    것보다 나쁜 값이다(설계 §2.6). 그래서 기본은 필터 없음이어야 한다.
+
+    여기서는 그 충돌이 가장 흔한 사례인 eth0 으로 재현한다(CNI 가 파드 인터페이스를
+    관례적으로 eth0 으로 만들고, VM/클라우드 호스트의 물리 NIC 도 흔히 eth0 이다).
+    이름이 본질이 아니라는 것은 아래 ens192 판이 따로 못박는다. 첫 단언이 계약이고,
+    둘째는 "그 디렉터리를 실제로 읽히면 물리가 빠진다"는 전제를 고정해 첫 단언이
+    공허하지 않음을 보인다.
     """
     pod_sysfs = _virtual_net_dir(tmp_path, ["lo", "eth0"])   # 파드 안에서 본 모습
     assert _net() == (1470, 2690)                            # 미설정 -> eth0 살아 있다
     assert _net(virtual_net_path=pod_sysfs) == (400 + 70, 600 + 90)
+
+
+def test_pod_sysfs_collision_hits_any_host_nic_name_not_only_eth0(tmp_path):
+    """같은 사고가 eth0 이 아닌 이름에서도 똑같이 난다 -- 규칙은 이름이 아니라 충돌이다.
+
+    호스트 물리가 ens192 인 calico 노드에서, 파드 쪽 집합에 어쩌다 ens192 가 있으면
+    (멀티어스 등으로 파드 인터페이스 이름은 배포마다 다르다) 그 물리 NIC 가 제외된다.
+    'eth0 일 때만 위험하다'로 읽고 기본값을 되살리는 회귀를 막는다.
+    """
+    pod_sysfs = _virtual_net_dir(tmp_path, ["lo", "ens192"])
+    assert _net_of(NETDEV_CALICO) == (1470, 2690)            # 미설정 -> ens192 살아 있다
+    assert _net_of(NETDEV_CALICO, virtual_net_path=pod_sysfs) == (400 + 70, 600 + 90)
 
 
 def test_probe_tools_found_and_missing():
