@@ -110,6 +110,37 @@ class ControlRepository:
             self._audit("control_state", "set", "control_state", before,
                         self.control_state(), actor)
 
+    def set_artifact_base(self, uri, *, actor, forced=False, affected_jobs=0):
+        """아티팩트 base 전용 UPDATE(슬라이스 18 설계 §2.1). set_control_state 에
+        얹지 않는다: 그 UPDATE 는 build_node_name = :bn 을 **무조건** 쓰므로 인자를
+        생략한 호출이 기존 값을 조용히 NULL 로 지운다(현재는 라우트가 항상 넘겨
+        잠복해 있을 뿐). 같은 자리에 컬럼을 하나 더 얹으면 그 함정이 그대로
+        복제된다 -- 이 컬럼 하나만 만지는 UPDATE 로 분리하면 구조적으로
+        불가능해진다. changed_by/changed_at 도 만지지 않는다: 그 둘은 유지보수·
+        드레인 변경 표시라, base 변경이 덮으면 컨트롤 상태 화면의 변경 이력이
+        오염된다(변경자는 감사 로그가 나른다)."""
+        before = self.control_state()
+        with self._db.transaction():
+            self._db.execute(
+                "UPDATE control_state SET artifact_base_uri = :uri WHERE id = 1",
+                {"uri": uri})
+            # force 통과는 반드시 감사에 남는다(설계 §2.3): affected_jobs 건의
+            # 아티팩트·로그 열람이 깨진다는 사실이 추적 가능해야 한다.
+            self._audit("artifact_base", "set", "artifact_base", before,
+                        {"artifact_base_uri": uri, "forced": forced,
+                         "affected_jobs": affected_jobs}, actor)
+
+    def set_artifact_base_check(self, *, uri, ok, reason, now_iso=None):
+        """컨트롤러 관점 검증 결과(설계 §2.4c) 전용 UPDATE. 주기 기록이라 감사를
+        남기지 않고(운영자 변경이 아니다), 검증 4컬럼 밖은 만지지 않는다
+        (set_artifact_base 와 같은 분리 원칙)."""
+        self._db.execute(
+            """UPDATE control_state SET artifact_base_check_uri = :uri,
+                   artifact_base_check_ok = :ok, artifact_base_check_reason = :r,
+                   artifact_base_check_at = :at WHERE id = 1""",
+            {"uri": uri, "ok": 1 if ok else 0, "r": reason,
+             "at": now_iso or utc_now_iso()})
+
     # --- leases ---
     def try_acquire_lease(self, component, holder, lease_seconds,
                           now_iso: str | None = None) -> bool:

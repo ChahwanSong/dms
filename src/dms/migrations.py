@@ -286,6 +286,23 @@ def _apply_migrations(db: Database) -> None:
             drain INTEGER NOT NULL DEFAULT 0,
             reason TEXT,
             build_node_name TEXT,
+            -- 아티팩트 base(슬라이스 18 설계 §2.1). NULL = 미설정 -> env
+            -- (DMS_ARTIFACT_BASE_URI) 사용 -- 기존 배포는 동작이 바뀌지 않는다
+            -- (시드 불필요, 하위호환). ConfigMap 에 두지 않는 근거는
+            -- 20-config.yaml 이 build_node_name 으로 이미 명문화한 그것:
+            -- 운영자가 포탈에서 바꾸는 값을 ConfigMap 에 두면 재적용마다 되돌아간다.
+            artifact_base_uri TEXT,
+            -- 컨트롤러 관점 검증(설계 §2.4c): 컨트롤러는 read_summary 로 실제
+            -- 읽기를 하는 유일한 프로세스라, 마운트가 없으면 "SUCCEEDED 인데
+            -- 요약이 없는" 조용한 실패가 난다(stepper 의 summary_unavailable) --
+            -- 그 실패를 사전에 화면에 보이게 컨트롤러가 주기 기록을 남긴다.
+            -- check_uri 를 함께 남기는 이유: 값 변경 직후 "옛 base 의 결과"를
+            -- "새 base 실패"로 오독하지 않도록, 화면이 check_uri != effective 를
+            -- "확인 대기 중"으로 구분한다(설계 §4: 모름과 실패를 뭉개지 않는다).
+            artifact_base_check_uri TEXT,
+            artifact_base_check_ok INTEGER,
+            artifact_base_check_reason TEXT,
+            artifact_base_check_at TEXT,
             changed_by TEXT,
             changed_at TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
@@ -417,6 +434,13 @@ def _ensure_columns(db):
         ("data_jobs", "submit_wait_seconds", "BIGINT"),
         ("requests", "batch_id", "TEXT"),
         ("control_state", "build_node_name", "TEXT"),
+        # 슬라이스 18 아티팩트 base -- 기배포 DB 는 CREATE 를 다시 안 탄다(위
+        # submit_wait_seconds 와 같은 이유: 양쪽에 넣지 않으면 라이브에서만 없다).
+        ("control_state", "artifact_base_uri", "TEXT"),
+        ("control_state", "artifact_base_check_uri", "TEXT"),
+        ("control_state", "artifact_base_check_ok", "INTEGER"),
+        ("control_state", "artifact_base_check_reason", "TEXT"),
+        ("control_state", "artifact_base_check_at", "TEXT"),
         ("builds", "log_text", "TEXT"),
         ("builds", "seq", "INTEGER"),
         ("releases", "reason_code", "TEXT"),

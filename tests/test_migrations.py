@@ -314,3 +314,24 @@ def test_backfill_treats_zero_as_a_recorded_value(db):
     migrate(db)
     row = db.query_one("SELECT submit_wait_seconds FROM data_jobs WHERE job_id = 'j0'")
     assert row["submit_wait_seconds"] == 0
+
+
+def test_migrate_adds_artifact_base_columns_to_existing_control_state(db):
+    # 구형 control_state 흉내(슬라이스 18): CREATE 경로와 _ensure_columns ALTER
+    # 경로가 같은 스키마로 수렴해야 한다 -- 한쪽만 넣으면 기배포 DB 에서만 컬럼이
+    # 없다(슬라이스 14 실 500 교훈, migrations.py 의 _ensure_columns 주석).
+    db.execute("DROP TABLE control_state")
+    db.execute("""CREATE TABLE control_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        maintenance INTEGER NOT NULL DEFAULT 0,
+        drain INTEGER NOT NULL DEFAULT 0,
+        reason TEXT, build_node_name TEXT, changed_by TEXT, changed_at TEXT)""")
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    for column in ("artifact_base_uri", "artifact_base_check_uri",
+                   "artifact_base_check_ok", "artifact_base_check_reason",
+                   "artifact_base_check_at"):
+        assert _column_exists(db, "control_state", column), column
+    # 싱글톤 시드가 살아 있고 새 컬럼은 NULL(미설정 = env 사용, 하위호환)이다
+    row = db.query_one("SELECT * FROM control_state WHERE id = 1")
+    assert row["artifact_base_uri"] is None
