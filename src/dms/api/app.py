@@ -21,6 +21,7 @@ from .routes_nodes import router as nodes_router
 from .routes_policies import router as policies_router
 from .routes_denylist import router as denylist_router
 from .routes_batches import router as batches_router
+from .routes_artifact_base import router as artifact_base_router
 from .routes_control import router as control_router
 from .routes_builds import router as builds_router
 from .routes_releases import router as releases_router
@@ -72,6 +73,7 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     app.include_router(denylist_router)
     app.include_router(batches_router)
     app.include_router(control_router)
+    app.include_router(artifact_base_router)
     app.include_router(builds_router)
     app.include_router(releases_router)
     app.include_router(metrics_router)
