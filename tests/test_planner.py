@@ -66,6 +66,18 @@ def _seed_sync_reports(repos, identities):
             reported_at="2026-08-02T09:59:00Z")
 
 
+def _seed_sync_node(repos, node, storage, *, identity_ready):
+    # 노드별로 신원 전파 여부를 따로 준다 -- 합집합의 한쪽 절반에만 신원 대기 노드를
+    # 두는 비대칭 형상을 만들기 위한 것(아래 destination-only/source-only 테스트).
+    repos.agents.ingest(node, {"node_name": node,
+        "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
+                    "status": "Ready", "writable": True}],
+        "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")],
+        "identities": ([{"username": "alice", "status": "Ready"}]
+                       if identity_ready else [])},
+        reported_at="2026-08-02T09:59:00Z")
+
+
 def _seed_unmounted_report(repos, node, tool="dscan"):
     repos.agents.ingest(node, {"node_name": node, "mounts": [],
         "tools": [{"name": tool, "status": "Ready"}], "identities": []},
@@ -415,6 +427,56 @@ def test_sync_identity_pending_defers_and_plans_after_propagation(db):
     assert planner.run_once(now_iso=NOW)[rid] == "planned"
     job = repos.data_jobs.list_jobs(request_id=rid)[0]
     assert job["tool"] == "nsync"
+    assert job["worker_pool"]["candidates"] == {"source": ["n1"], "destination": ["n2"]}
+
+
+def test_sync_defers_when_only_destination_has_identity_pending(db):
+    # 합집합의 destination 절반을 고정한다. source 쪽 사유에는 identity 가 하나도
+    # 없고(n1 은 이미 적격, n2 는 src 미마운트) destination 쪽 n2 만 신원 대기다 --
+    # _identity_pending_nodes 가 source dict 만 훑도록 좁아지면 이 요청은 즉시
+    # 거부되고, 그게 이 태스크가 없애려던 과잉 거부다.
+    repos = Repositories(db)
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_policy(repos, "nsync")
+    _seed_sync_node(repos, "n1", "src", identity_ready=True)
+    _seed_sync_node(repos, "n2", "dst", identity_ready=False)
+    rid = _sync_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    assert repos.requests.get(rid)["state"] == "Pending"
+    events = repos.observability.events_for_request(rid)
+    assert events[0]["payload"]["rejections"] == {
+        "source": {"n2": "missing_target_mount"},
+        "destination": {"n1": "missing_target_mount",
+                        "n2": "identity_not_ready_on_node"}}
+    # 유예 사유가 destination 쪽에만 있어도 전파되면 정상 수렴한다.
+    _seed_sync_node(repos, "n2", "dst", identity_ready=True)
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
+    job = repos.data_jobs.list_jobs(request_id=rid)[0]
+    assert job["worker_pool"]["candidates"] == {"source": ["n1"], "destination": ["n2"]}
+
+
+def test_sync_defers_when_only_source_has_identity_pending(db):
+    # 위의 거울상 -- 합집합의 source 절반을 고정한다(destination 쪽만 훑는 회귀를 잡는다).
+    repos = Repositories(db)
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_policy(repos, "nsync")
+    _seed_sync_node(repos, "n1", "src", identity_ready=False)
+    _seed_sync_node(repos, "n2", "dst", identity_ready=True)
+    rid = _sync_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    assert repos.requests.get(rid)["state"] == "Pending"
+    events = repos.observability.events_for_request(rid)
+    assert events[0]["payload"]["rejections"] == {
+        "source": {"n1": "identity_not_ready_on_node",
+                   "n2": "missing_target_mount"},
+        "destination": {"n1": "missing_target_mount"}}
+    _seed_sync_node(repos, "n1", "src", identity_ready=True)
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
+    job = repos.data_jobs.list_jobs(request_id=rid)[0]
     assert job["worker_pool"]["candidates"] == {"source": ["n1"], "destination": ["n2"]}
 
 
