@@ -234,17 +234,17 @@ def test_migrate_adds_stepper_columns_to_existing_data_jobs(db):
     assert _column_exists(db, "data_jobs", "phase_refs")
 
 
-def test_queue_wait_column_and_covering_index_on_fresh_db(tmp_path):
+def test_submit_wait_column_and_covering_index_on_fresh_db(tmp_path):
     # CREATE 경로(신규 DB). BIGINT 선언은 files_count 와 같은 규약 --
     # 두 경로(CREATE/ALTER)가 같은 선언형으로 수렴해야 한다.
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
-    assert _declared_type(db, "data_jobs", "queue_wait_seconds") == "BIGINT"
+    assert _declared_type(db, "data_jobs", "submit_wait_seconds") == "BIGINT"
     rows = db.query("SELECT name FROM sqlite_master WHERE type = 'index'")
     assert "idx_data_jobs_created" in {r["name"] for r in rows}
 
 
-def test_migrate_backfills_queue_wait_from_transitions(db):
+def test_migrate_backfills_submit_wait_from_transitions(db):
     # ALTER 경로(구형 DB) + one-shot 백필(설계 §2.3). PodGroup 은 잡 종료와 함께
     # 삭제되므로(설계 §1-1) 이력에서 소급할 수 있는 것은 이 DMS 내부 대기뿐이다.
     db.execute("DROP TABLE data_jobs")
@@ -273,9 +273,9 @@ def test_migrate_backfills_queue_wait_from_transitions(db):
                    {"f": from_s, "t": to_s, "at": at})
     from dms.migrations import _column_exists, migrate
     migrate(db)
-    assert _column_exists(db, "data_jobs", "queue_wait_seconds")
-    waits = {r["job_id"]: r["queue_wait_seconds"]
-             for r in db.query("SELECT job_id, queue_wait_seconds FROM data_jobs")}
+    assert _column_exists(db, "data_jobs", "submit_wait_seconds")
+    waits = {r["job_id"]: r["submit_wait_seconds"]
+             for r in db.query("SELECT job_id, submit_wait_seconds FROM data_jobs")}
     assert waits["j-done"] == 90         # 첫 비-Pending 전이(00:01:30) - created_at
     assert waits["j-pending"] is None    # 아직 Pending -- 백필 대상이 아니다(집계 제외)
 
@@ -285,7 +285,7 @@ def test_backfill_only_fills_null_rows(db):
     # write-once 포함)을 백필이 재계산해 덮으면 write-once 계약이 마이그레이션
     # 경로로 우회된다. NULL 만 채우는 멱등성이 계약이다.
     db.execute("""INSERT INTO data_jobs (job_id, request_id, operation, options,
-        priority, state, queue_wait_seconds, created_at, updated_at)
+        priority, state, submit_wait_seconds, created_at, updated_at)
         VALUES ('j1', 'r1', 'scan', '{}', 'mid', 'Succeeded', 7,
                 '2026-08-01T00:00:00Z', '2026-08-01T01:00:00Z')""")
     db.execute("""INSERT INTO state_transitions (entity_kind, entity_id,
@@ -293,5 +293,24 @@ def test_backfill_only_fills_null_rows(db):
         VALUES ('data_job', 'j1', 'Pending', 'Preflight', 'stepper',
                 '2026-08-01T00:05:00Z')""")   # 재계산되면 300 이 된다
     migrate(db)
-    row = db.query_one("SELECT queue_wait_seconds FROM data_jobs WHERE job_id = 'j1'")
-    assert row["queue_wait_seconds"] == 7
+    row = db.query_one("SELECT submit_wait_seconds FROM data_jobs WHERE job_id = 'j1'")
+    assert row["submit_wait_seconds"] == 7
+
+
+def test_backfill_treats_zero_as_a_recorded_value(db):
+    # 0 은 "기록됨"이지 "없음"이 아니다 -- 타임스탬프가 1초 해상도라 빠른 픽업은
+    # 정당하게 0 을 남긴다. 백필 필터가 IS NULL 이 아니라 falsy 검사(= 0, NOT
+    # submit_wait_seconds, COALESCE(...,0)=0)로 쓰이면 0 인 행이 매 재-migrate 마다
+    # 재계산되어 write-once 가 깨진다. 위 테스트는 값 7 을 써서 이 버그를 못 잡으므로
+    # 0 을 따로 고정한다.
+    db.execute("""INSERT INTO data_jobs (job_id, request_id, operation, options,
+        priority, state, submit_wait_seconds, created_at, updated_at)
+        VALUES ('j0', 'r1', 'scan', '{}', 'mid', 'Succeeded', 0,
+                '2026-08-01T00:00:00Z', '2026-08-01T01:00:00Z')""")
+    db.execute("""INSERT INTO state_transitions (entity_kind, entity_id,
+        from_state, to_state, actor, at)
+        VALUES ('data_job', 'j0', 'Pending', 'Preflight', 'stepper',
+                '2026-08-01T00:05:00Z')""")   # 재계산되면 300 이 된다
+    migrate(db)
+    row = db.query_one("SELECT submit_wait_seconds FROM data_jobs WHERE job_id = 'j0'")
+    assert row["submit_wait_seconds"] == 0

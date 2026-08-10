@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 대시보드에 (A) Volcano 큐 현황(Queue state + 라이브 PodGroup 대기 표)과 (B) 전역 제출 대기 통계(`queue_wait_seconds` 파생 컬럼)를 낸다 — 슬라이스 14가 풀스캔을 이유로 미룬 (B)를 쓰기 시점 접기로 해소하고, 14가 붙인 거짓 「큐 대기」 라벨을 정정한다.
+**Goal:** 대시보드에 (A) Volcano 큐 현황(Queue state + 라이브 PodGroup 대기 표)과 (B) 전역 제출 대기 통계(`submit_wait_seconds` 파생 컬럼)를 낸다 — 슬라이스 14가 풀스캔을 이유로 미룬 (B)를 쓰기 시점 접기로 해소하고, 14가 붙인 거짓 「큐 대기」 라벨을 정정한다.
 
-**Architecture:** (A)는 PodGroup이 코어다(설계 §2.1): 대기 중 잡·대기 시간은 살아 있는 PodGroup에만 있고 잡이 끝나면 삭제된다. `queue_reader.py`의 `VolcanoQueueReader`가 namespaced PodGroup **list**(spec.queue 필터)와 cluster-scoped Queue **이름 지정 GET**(state 하나만)을 읽고, `StubQueueReader` 페어가 클러스터 없는 로컬·CI를 살린다(기본 백엔드가 `stub`이므로 페어가 없으면 전부 500). RBAC은 기존 `dms-api` Role에 `podgroups: get,list` 한 줄 + 새 ClusterRole(`queues` GET, `resourceNames: ["dms-data"]`)이고, 처음으로 RBAC 계약 테스트를 만든다. (B)는 `set_job_state`의 기존 SELECT/UPDATE에 얹는 write-once 기록 + migrate 시 `state_transitions` one-shot 백필 + `(created_at, queue_wait_seconds)` 커버링 인덱스 — 기존 `created_at BETWEEN` 풀스캔 7개도 덤으로 레인지 스캔이 된다.
+**Architecture:** (A)는 PodGroup이 코어다(설계 §2.1): 대기 중 잡·대기 시간은 살아 있는 PodGroup에만 있고 잡이 끝나면 삭제된다. `queue_reader.py`의 `VolcanoQueueReader`가 namespaced PodGroup **list**(spec.queue 필터)와 cluster-scoped Queue **이름 지정 GET**(state 하나만)을 읽고, `StubQueueReader` 페어가 클러스터 없는 로컬·CI를 살린다(기본 백엔드가 `stub`이므로 페어가 없으면 전부 500). RBAC은 기존 `dms-api` Role에 `podgroups: get,list` 한 줄 + 새 ClusterRole(`queues` GET, `resourceNames: ["dms-data"]`)이고, 처음으로 RBAC 계약 테스트를 만든다. (B)는 `set_job_state`의 기존 SELECT/UPDATE에 얹는 write-once 기록 + migrate 시 `state_transitions` one-shot 백필 + `(created_at, submit_wait_seconds)` 커버링 인덱스 — 기존 `created_at BETWEEN` 풀스캔 7개도 덤으로 레인지 스캔이 된다.
 
 **Tech Stack:** Python 3.11 표준 라이브러리(FastAPI 라우트 1건 + kubernetes CustomObjectsApi 호출 2종), React 18 + Vitest(카드 1건 + 분포 1건 + 라벨 정정), k8s RBAC 매니페스트 1파일.
 
@@ -16,7 +16,7 @@
 - **스텁 큐 리더 페어는 필수**다(설계 §2.5): 기본 실행 백엔드가 `stub`(`config.py:120,:178`)이라, 페어가 없으면 모든 로컬·CI 환경에서 `/api/admin/metrics/queue`가 500이고 `app.state` 주입 테스트 관례도 못 쓴다.
 - **`resourceNames`는 `get`에만, `list`에는 절대 금지**: `resourceNames`는 `list`에 적용되지 않는다(10-rbac.yaml이 두 번 적어 둔 함정, ~:53-60/:115-119). Queue는 반드시 이름 지정 GET.
 - **용량/사용률 게이지는 만들지 않는다**(설계 §2.2): `dms-data` 큐에 `capability`도 `deserved`도 없다(실측). weight 1을 사용률처럼 그리면 없는 사실을 지어내는 것이다.
-- **`queue_wait_seconds`는 첫 비-Pending 엣지에서 write-once**(비터미널 재전이가 덮어쓰지 못하게), NULL 행은 집계에서 제외하고 **제외 건수를 표면화**한다(백필 공백을 화면에서 숨기지 않는다).
+- **`submit_wait_seconds`는 첫 비-Pending 엣지에서 write-once**(비터미널 재전이가 덮어쓰지 못하게), NULL 행은 집계에서 제외하고 **제외 건수를 표면화**한다(백필 공백을 화면에서 숨기지 않는다).
 - **컬럼은 CREATE TABLE과 `_ensure_columns` 양쪽에** 넣는다 — 기배포 DB는 CREATE를 다시 안 탄다(슬라이스 14가 실 500으로 배운 교훈). 테이블 추가는 없다(`tests/test_migrations.py:173`이 `len(ALL_TABLES) == 20`을 고정).
 - **「잡 통계」에 이미 있는 것을 중복하지 않는다**: 처리량·성공률·도구/스토리지/사용자별 분해·실패 사유·처리 항목/바이트는 `JobStatsSection.tsx`에 이미 있다.
 - **새 pip/npm 의존성 금지.**
@@ -58,7 +58,7 @@
 | `src/dms/api/routes_metrics.py` (수정) | `GET /api/admin/metrics/queue` + `metrics_jobs`에 제출 대기 분포 |
 | `deploy/k8s/10-rbac.yaml` (수정) | `dms-api` Role에 podgroups get,list + ClusterRole/Binding `dms-api-queue-readonly` |
 | `tests/test_rbac_contract.py` (신규) | RBAC 계약 테스트(설계 §1-10: 지금은 아무것도 이걸 안 붙잡는다) |
-| `src/dms/migrations.py` (수정) | `queue_wait_seconds` 컬럼(양쪽) + `idx_data_jobs_created` + one-shot 백필 |
+| `src/dms/migrations.py` (수정) | `submit_wait_seconds` 컬럼(양쪽) + `idx_data_jobs_created` + one-shot 백필 |
 | `src/dms/repositories/data_jobs.py` (수정) | `set_job_state` write-once 기록 |
 | `src/dms/repositories/metrics.py` (수정) | `job_stats`에 제출 대기 2쿼리(인덱스 커버) |
 | `src/dms/metrics_series.py` (수정) | `duration_histogram` 버킷 파라미터화 + `SUBMIT_WAIT_BUCKETS` |
@@ -1117,7 +1117,14 @@ git commit -m "feat(portal): 대시보드 큐 현황 카드 — 라이브 PodGro
 
 ---
 
-### Task 5: data_jobs.queue_wait_seconds — write-once + one-shot 백필 + 커버링 인덱스
+### Task 5: data_jobs.submit_wait_seconds — write-once + one-shot 백필 + 커버링 인덱스
+
+> **정정(구현 중 발견)**: 이 문서의 초안은 컬럼명을 `queue_wait_seconds` 로 적었으나
+> 설계 §2.4(이름을 정직하게 — "제출 대기")와 모순이고 API 키 `submit_wait_*` 와도
+> 어긋나서 `submit_wait_seconds` 로 정정했다(설계 §2.3 정정 노트 참고). 이 절의
+> 코드 블록·테스트명은 정정된 이름이다. 구현은 두 커밋으로 나뉜다 — `4e5860b`
+> (원래 이름으로 기능 구현) + 후속 rename 커밋. 배포 전이라 마이그레이션 호환
+> 처리는 없다.
 
 **Files:**
 - Modify: `src/dms/migrations.py` (CREATE TABLE + `_ensure_columns` + 인덱스 + 백필)
@@ -1127,16 +1134,16 @@ git commit -m "feat(portal): 대시보드 큐 현황 카드 — 라이브 PodGro
 **Interfaces:**
 - Consumes (Task 3): `db.iso_epoch`.
 - Produces (Task 6이 이 컬럼·인덱스를 그대로 쓴다):
-  - `data_jobs.queue_wait_seconds BIGINT`(NULL 허용) — Pending → 첫 비-Pending 전이까지의 초. **write-once**: `set_job_state`가 `from_state == Pending`인 엣지에서만, 기존 값이 NULL일 때만 기록. NULL = 기록 전(아직 Pending / 백필 불가분 / 시각 오염).
-  - `idx_data_jobs_created ON data_jobs (created_at, queue_wait_seconds)` — 제출 대기 집계 커버링 + 기존 `created_at BETWEEN` 집계 7개의 레인지 스캔화(설계 §2.3: 읽기 비용 순감).
-  - `migrations._backfill_queue_wait(db)` — migrate 시 1회, `state_transitions`의 `from_state='Pending'` 첫 전이로 NULL 행만 채움(멱등).
+  - `data_jobs.submit_wait_seconds BIGINT`(NULL 허용) — Pending → 첫 비-Pending 전이까지의 초. **write-once**: `set_job_state`가 `from_state == Pending`인 엣지에서만, 기존 값이 NULL일 때만 기록. NULL = 기록 전(아직 Pending / 백필 불가분 / 시각 오염).
+  - `idx_data_jobs_created ON data_jobs (created_at, submit_wait_seconds)` — 제출 대기 집계 커버링 + 기존 `created_at BETWEEN` 집계 7개의 레인지 스캔화(설계 §2.3: 읽기 비용 순감).
+  - `migrations._backfill_submit_wait(db)` — migrate 시 1회, `state_transitions`의 `from_state='Pending'` 첫 전이로 NULL 행만 채움(멱등).
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
 **(1)** `tests/test_repo_data_jobs.py` 파일 끝에 추가:
 
 ```python
-def test_queue_wait_recorded_once_on_first_pickup(db):
+def test_submit_wait_recorded_once_on_first_pickup(db):
     # 슬라이스 17 설계 §2.3: Pending -> 첫 비-Pending 엣지에서 한 번만(write-once).
     # 이름과 달리 Volcano 큐 대기가 아니라 DMS 내부 픽업 지연이다 -- 화면 라벨은
     # "제출 대기"(설계 §2.4).
@@ -1147,38 +1154,38 @@ def test_queue_wait_recorded_once_on_first_pickup(db):
     db.execute("UPDATE data_jobs SET created_at = :c WHERE job_id = :j",
                {"c": iso_plus(utc_now_iso(), -120), "j": job_id})
     repos.data_jobs.set_job_state(job_id, DataJobState.PREFLIGHT, actor="stepper")
-    wait = repos.data_jobs.get_job(job_id)["queue_wait_seconds"]
+    wait = repos.data_jobs.get_job(job_id)["submit_wait_seconds"]
     assert 120 <= wait <= 122            # 1초 해상도 + 실행 지연 여유
     # 이후 전이는 덮어쓰지 않는다 -- created_at 을 더 과거로 밀어도 값이 그대로여야
     # "재계산 없음"이 증명된다(비터미널 재전이의 덮어쓰기 금지, 설계 §2.3).
     db.execute("UPDATE data_jobs SET created_at = :c WHERE job_id = :j",
                {"c": "2020-01-01T00:00:00Z", "j": job_id})
     repos.data_jobs.set_job_state(job_id, DataJobState.EXECUTING, actor="stepper")
-    assert repos.data_jobs.get_job(job_id)["queue_wait_seconds"] == wait
+    assert repos.data_jobs.get_job(job_id)["submit_wait_seconds"] == wait
 
 
-def test_queue_wait_stays_null_while_pending(db):
+def test_submit_wait_stays_null_while_pending(db):
     # 아직 Pending 인 잡은 "대기 미확정"이다 -- 0 이나 지금까지의 경과로 채우면
     # 집계가 진행 중인 대기를 완료된 대기처럼 오염시킨다(NULL = 집계 제외).
     repos = _repos(db)
     job_id = _mk_job(repos, _mk_request(repos))
-    assert repos.data_jobs.get_job(job_id)["queue_wait_seconds"] is None
+    assert repos.data_jobs.get_job(job_id)["submit_wait_seconds"] is None
 ```
 
 **(2)** `tests/test_migrations.py` 파일 끝에 추가:
 
 ```python
-def test_queue_wait_column_and_covering_index_on_fresh_db(tmp_path):
+def test_submit_wait_column_and_covering_index_on_fresh_db(tmp_path):
     # CREATE 경로(신규 DB). BIGINT 선언은 files_count 와 같은 규약 --
     # 두 경로(CREATE/ALTER)가 같은 선언형으로 수렴해야 한다.
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
-    assert _declared_type(db, "data_jobs", "queue_wait_seconds") == "BIGINT"
+    assert _declared_type(db, "data_jobs", "submit_wait_seconds") == "BIGINT"
     rows = db.query("SELECT name FROM sqlite_master WHERE type = 'index'")
     assert "idx_data_jobs_created" in {r["name"] for r in rows}
 
 
-def test_migrate_backfills_queue_wait_from_transitions(db):
+def test_migrate_backfills_submit_wait_from_transitions(db):
     # ALTER 경로(구형 DB) + one-shot 백필(설계 §2.3). PodGroup 은 잡 종료와 함께
     # 삭제되므로(설계 §1-1) 이력에서 소급할 수 있는 것은 이 DMS 내부 대기뿐이다.
     db.execute("DROP TABLE data_jobs")
@@ -1207,9 +1214,9 @@ def test_migrate_backfills_queue_wait_from_transitions(db):
                    {"f": from_s, "t": to_s, "at": at})
     from dms.migrations import _column_exists, migrate
     migrate(db)
-    assert _column_exists(db, "data_jobs", "queue_wait_seconds")
-    waits = {r["job_id"]: r["queue_wait_seconds"]
-             for r in db.query("SELECT job_id, queue_wait_seconds FROM data_jobs")}
+    assert _column_exists(db, "data_jobs", "submit_wait_seconds")
+    waits = {r["job_id"]: r["submit_wait_seconds"]
+             for r in db.query("SELECT job_id, submit_wait_seconds FROM data_jobs")}
     assert waits["j-done"] == 90         # 첫 비-Pending 전이(00:01:30) - created_at
     assert waits["j-pending"] is None    # 아직 Pending -- 백필 대상이 아니다(집계 제외)
 
@@ -1219,7 +1226,7 @@ def test_backfill_only_fills_null_rows(db):
     # write-once 포함)을 백필이 재계산해 덮으면 write-once 계약이 마이그레이션
     # 경로로 우회된다. NULL 만 채우는 멱등성이 계약이다.
     db.execute("""INSERT INTO data_jobs (job_id, request_id, operation, options,
-        priority, state, queue_wait_seconds, created_at, updated_at)
+        priority, state, submit_wait_seconds, created_at, updated_at)
         VALUES ('j1', 'r1', 'scan', '{}', 'mid', 'Succeeded', 7,
                 '2026-08-01T00:00:00Z', '2026-08-01T01:00:00Z')""")
     db.execute("""INSERT INTO state_transitions (entity_kind, entity_id,
@@ -1227,14 +1234,14 @@ def test_backfill_only_fills_null_rows(db):
         VALUES ('data_job', 'j1', 'Pending', 'Preflight', 'stepper',
                 '2026-08-01T00:05:00Z')""")   # 재계산되면 300 이 된다
     migrate(db)
-    row = db.query_one("SELECT queue_wait_seconds FROM data_jobs WHERE job_id = 'j1'")
-    assert row["queue_wait_seconds"] == 7
+    row = db.query_one("SELECT submit_wait_seconds FROM data_jobs WHERE job_id = 'j1'")
+    assert row["submit_wait_seconds"] == 7
 ```
 
 - [ ] **Step 2: 실패를 확인한다**
 
 Run: `.venv/bin/python -m pytest tests/test_repo_data_jobs.py tests/test_migrations.py -q`
-Expected: FAIL — repo 2건은 `KeyError: 'queue_wait_seconds'`(SELECT * 결과에 컬럼 부재), migrations 3건은 선언형/`_column_exists`/백필 값 단언에서. 기존 테스트는 PASS 유지.
+Expected: FAIL — repo 2건은 `KeyError: 'submit_wait_seconds'`(SELECT * 결과에 컬럼 부재), migrations 3건은 선언형/`_column_exists`/백필 값 단언에서. 기존 테스트는 PASS 유지.
 
 - [ ] **Step 3: migrations.py를 고친다**
 
@@ -1254,7 +1261,7 @@ from .db import Database, iso_epoch, utc_now_iso
             -- "제출 대기"로 정직하게 붙인다(설계 §2.4). NULL = 기록 전(아직
             -- Pending/백필 불가분/시각 오염) -- 집계에서 제외하고 제외 건수를
             -- 표면화한다. BIGINT 는 files_count 와 같은 규약(두 경로 동일 선언형).
-            queue_wait_seconds BIGINT,
+            submit_wait_seconds BIGINT,
             created_at TEXT NOT NULL,
 ```
 
@@ -1263,27 +1270,27 @@ from .db import Database, iso_epoch, utc_now_iso
 ```python
         # 슬라이스 17 제출 대기 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스 14 의
         # 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
-        ("data_jobs", "queue_wait_seconds", "BIGINT"),
+        ("data_jobs", "submit_wait_seconds", "BIGINT"),
 ```
 
 **(4)** `_apply_migrations`의 `idx_requests_batch` 생성(:308) 바로 아래에 추가:
 
 ```python
-    # queue_wait_seconds 는 CREATE(신규) 또는 _ensure_columns(구형)로 보강된 뒤에만
+    # submit_wait_seconds 는 CREATE(신규) 또는 _ensure_columns(구형)로 보강된 뒤에만
     # 존재하므로 이 인덱스도 그 이후다(idx_requests_batch 와 같은 이유).
-    # (created_at, queue_wait_seconds) 커버링: 제출 대기 집계 2쿼리가 인덱스만 읽고,
+    # (created_at, submit_wait_seconds) 커버링: 제출 대기 집계 2쿼리가 인덱스만 읽고,
     # 덤으로 기존 created_at BETWEEN 집계 7개(repositories/metrics.py)가 풀스캔에서
     # 레인지 스캔이 된다 -- 이 슬라이스는 읽기 비용의 순증이 아니라 순감이다(설계 §2.3).
     db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_created"
-               " ON data_jobs (created_at, queue_wait_seconds)")
-    _backfill_queue_wait(db)
+               " ON data_jobs (created_at, submit_wait_seconds)")
+    _backfill_submit_wait(db)
 ```
 
 **(5)** `_ensure_columns` 함수 아래에 백필 함수 추가:
 
 ```python
-def _backfill_queue_wait(db):
-    """queue_wait_seconds one-shot 백필(설계 §2.3). state_transitions 에서 잡별
+def _backfill_submit_wait(db):
+    """submit_wait_seconds one-shot 백필(설계 §2.3). state_transitions 에서 잡별
     Pending -> 첫 전이 시각을 찾아 created_at 과의 차를 채운다. NULL 행만 채우므로
     멱등이다 -- migrate 는 파드 기동마다(initContainer) 재실행되고, 이미 채워진
     값을 재계산하면 write-once 계약이 마이그레이션 경로로 우회된다. 잔여 NULL 은
@@ -1297,7 +1304,7 @@ def _backfill_queue_wait(db):
            JOIN state_transitions t
              ON t.entity_kind = 'data_job' AND t.entity_id = d.job_id
                 AND t.from_state = 'Pending'
-           WHERE d.queue_wait_seconds IS NULL
+           WHERE d.submit_wait_seconds IS NULL
            GROUP BY d.job_id, d.created_at""")
     for row in rows:
         try:
@@ -1307,7 +1314,7 @@ def _backfill_queue_wait(db):
         if wait < 0:
             continue          # 시계 역행/오염 -- 값을 지어내느니 NULL 이 정직하다
         db.execute(
-            "UPDATE data_jobs SET queue_wait_seconds = :w WHERE job_id = :j",
+            "UPDATE data_jobs SET submit_wait_seconds = :w WHERE job_id = :j",
             {"w": wait, "j": row["job_id"]})
 ```
 
@@ -1323,7 +1330,7 @@ from ..db import Database, dump_json, iso_epoch, iso_plus, load_json, utc_now_is
 
 ```python
             current = self._db.query_one(
-                """SELECT state, request_id, created_at, queue_wait_seconds
+                """SELECT state, request_id, created_at, submit_wait_seconds
                    FROM data_jobs WHERE job_id = :j""", {"j": job_id})
 ```
 
@@ -1334,29 +1341,29 @@ from ..db import Database, dump_json, iso_epoch, iso_plus, load_json, utc_now_is
                 # 제출 대기(슬라이스 17 설계 §2.3): Pending -> 첫 비-Pending 엣지에서만
                 # 계산해 한 번 쓴다(write-once). IS NULL 가드는 이중 안전장치다 --
                 # 상태 기계상 Pending 재진입은 없지만, 생겨도 덮어쓰지 않는다.
-                queue_wait = current["queue_wait_seconds"]
-                if (queue_wait is None
+                submit_wait = current["submit_wait_seconds"]
+                if (submit_wait is None
                         and current["state"] == DataJobState.PENDING.value
                         and to_state is not DataJobState.PENDING):
                     try:
                         # 시계 스큐(다른 프로세스가 쓴 created_at)로 음수가 나올 수
                         # 있다 -- 1초 해상도 세계에서 0 으로 접는 것이 정직하다.
-                        queue_wait = max(
+                        submit_wait = max(
                             0, int(iso_epoch(now) - iso_epoch(current["created_at"])))
                     except (TypeError, ValueError):
-                        queue_wait = None   # 시각이 깨졌으면 지어내지 않는다(NULL)
+                        submit_wait = None   # 시각이 깨졌으면 지어내지 않는다(NULL)
                 self._db.execute(
                     """UPDATE data_jobs SET state = :s, reason_code = :rc,
-                           updated_at = :now, queue_wait_seconds = :qw
+                           updated_at = :now, submit_wait_seconds = :sw
                        WHERE job_id = :j""",
                     {"s": to_state.value, "rc": reason_code, "now": now,
-                     "qw": queue_wait, "j": job_id})
+                     "sw": submit_wait, "j": job_id})
                 self._record_transition(
                     "data_job", job_id, DataJobState(current["state"]),
                     to_state, reason_code, actor, now)
 ```
 
-(`_record_transition` 호출은 기존 그대로 — UPDATE만 바뀐다. 엣지가 아닐 때는 `queue_wait`에 기존 값을 되쓰므로 값이 변하지 않는다.)
+(`_record_transition` 호출은 기존 그대로 — UPDATE만 바뀐다. 엣지가 아닐 때는 `submit_wait`에 기존 값을 되쓰므로 값이 변하지 않는다.)
 
 - [ ] **Step 5: 통과를 확인한다**
 
@@ -1372,7 +1379,7 @@ Expected: 전부 PASS — set_job_state·migrate는 거의 모든 테스트의 �
 
 ```bash
 git add src/dms/migrations.py src/dms/repositories/data_jobs.py tests/test_migrations.py tests/test_repo_data_jobs.py
-git commit -m "feat(db): data_jobs.queue_wait_seconds — write-once 기록 + one-shot 백필 + 커버링 인덱스"
+git commit -m "feat(db): data_jobs.submit_wait_seconds — write-once 기록 + one-shot 백필 + 커버링 인덱스"
 ```
 
 ---
@@ -1386,7 +1393,7 @@ git commit -m "feat(db): data_jobs.queue_wait_seconds — write-once 기록 + on
 - Modify: `tests/test_metrics_series.py`, `tests/test_repo_metrics.py`, `tests/test_api_metrics.py`
 
 **Interfaces:**
-- Consumes (Task 5): `data_jobs.queue_wait_seconds` + `idx_data_jobs_created`.
+- Consumes (Task 5): `data_jobs.submit_wait_seconds` + `idx_data_jobs_created`.
 - Produces (Task 7 프론트가 이 키를 그대로 쓴다):
   - `metrics_series.SUBMIT_WAIT_BUCKETS = (("<10s", 10), ("10-30s", 30), ("30-60s", 60), ("1-5m", 300), ("5-30m", 1800))`, `SUBMIT_WAIT_OVERFLOW = ">30m"`.
   - `duration_histogram(seconds, *, buckets=DURATION_BUCKETS, overflow=">24h")` — 기본 호출 무변경(기존 수행시간 분포 동작 동일).
@@ -1424,7 +1431,7 @@ def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
               wait=None):
     """data_jobs 한 행을 원하는 상태·시각으로 심는다. set_job_state는 updated_at을
     현재 시각으로 찍으므로 창(window) 테스트가 불가능하다 -- 정상 경로로 만들고
-    시각·상태만 UPDATE로 덮는다. wait 는 queue_wait_seconds(기본 NULL -- 백필
+    시각·상태만 UPDATE로 덮는다. wait 는 submit_wait_seconds(기본 NULL -- 백필
     공백/진행 중과 같은 모양)."""
     rid = repos.requests.create(
         operation="scan", requester_id=requester, actor=requester,
@@ -1438,7 +1445,7 @@ def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
     db.execute(
         """UPDATE data_jobs SET state = :st, reason_code = :rc, created_at = :c,
                updated_at = :u, files_count = :f, bytes_count = :b,
-               queue_wait_seconds = :w
+               submit_wait_seconds = :w
            WHERE job_id = :j""",
         {"st": state, "rc": reason_code, "c": created_at,
          "u": updated_at or created_at, "f": files, "b": nbytes, "w": wait,
@@ -1470,7 +1477,7 @@ def test_metrics_jobs_submit_wait_distribution_and_counts(client, db):
     now = utc_now_iso()
     rid = _seed_job(db, repos, created_at=iso_plus(now, -3600))
     _seed_job(db, repos, created_at=iso_plus(now, -1800))              # NULL 유지
-    db.execute("UPDATE data_jobs SET queue_wait_seconds = 12 WHERE request_id = :r",
+    db.execute("UPDATE data_jobs SET submit_wait_seconds = 12 WHERE request_id = :r",
                {"r": rid})
     body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
     hist = {b["bucket"]: b["count"] for b in body["submit_wait_histogram"]}
@@ -1525,17 +1532,17 @@ def duration_histogram(seconds: list, *, buckets=DURATION_BUCKETS,
 ```python
         # 제출 대기(슬라이스 17 설계 §2.3): NULL(백필 불가분·아직 Pending)은 집계에서
         # 제외하고 제외 건수를 함께 낸다 -- 백필 공백을 화면에서 숨기지 않는다(설계
-        # §3). 두 쿼리 모두 idx_data_jobs_created (created_at, queue_wait_seconds)
+        # §3). 두 쿼리 모두 idx_data_jobs_created (created_at, submit_wait_seconds)
         # 가 커버한다 -- 테이블을 건드리지 않는 인덱스 온리 레인지 스캔이라,
         # 슬라이스 14 가 (B) 를 금지했던 근거(전기간 풀스캔)가 성립하지 않는다.
         waits = self._db.query(
-            """SELECT queue_wait_seconds AS w FROM data_jobs
+            """SELECT submit_wait_seconds AS w FROM data_jobs
                WHERE created_at BETWEEN :s AND :e
-                 AND queue_wait_seconds IS NOT NULL""", params)
+                 AND submit_wait_seconds IS NOT NULL""", params)
         excluded = self._db.query_one(
             """SELECT COUNT(*) AS c FROM data_jobs
                WHERE created_at BETWEEN :s AND :e
-                 AND queue_wait_seconds IS NULL""", params)
+                 AND submit_wait_seconds IS NULL""", params)
 ```
 
 반환 dict의 `"duration_seconds": duration_seconds,` 아래에 추가:
@@ -1748,7 +1755,7 @@ git commit -m "feat(portal): 제출 대기 분포 + 「큐 대기」→「제출
 2. (§6-1) RBAC 적용 전: `/api/admin/metrics/queue`가 403을 **null(알 수 없음)**로 내고, 대시보드 큐 카드가 "대기 정보를 알 수 없습니다"를 렌더하는지 — 빈 큐로 렌더되면 실패다.
 3. `kubectl apply -f deploy/k8s/10-rbac.yaml` → (§6-2) 큐 상태 Open + Phase 카운트가 나오는지.
 4. (§6-3) 실제 sync 잡 제출 → 대기 중 PodGroup이 표에 뜨고 대기 시간이 증가하는지, 완료 후 표에서 사라지는지(PodGroup 삭제 §1-1의 귀결).
-5. (§6-4) `queue_wait_seconds`가 신규 잡에 채워지고, initContainer migrate의 백필이 기존 잡을 채웠는지(`SELECT COUNT(*) FROM data_jobs WHERE queue_wait_seconds IS NULL` 전후 비교).
+5. (§6-4) `submit_wait_seconds`가 신규 잡에 채워지고, initContainer migrate의 백필이 기존 잡을 채웠는지(`SELECT COUNT(*) FROM data_jobs WHERE submit_wait_seconds IS NULL` 전후 비교).
 6. (§6-5) 제출 대기 분포가 「잡 통계」에 뜨고 집계/제외 건수가 함께 표시되는지.
 7. (§6-6) 요청 상세의 라벨이 「큐 대기」에서 「제출 대기」로 바뀌었는지.
 
@@ -1761,7 +1768,7 @@ git commit -m "feat(portal): 제출 대기 분포 + 「큐 대기」→「제출
 | §1 실측 전제(PodGroup 삭제, RBAC 전무, capability 없음, vcjob conditions 결함, created_at 인덱스 없음, 시작 시각 컬럼 없음, stub 기본, timeout 미전달, 단일 커넥션, RBAC 테스트 0건) | 실측 고정값 표 + 각 태스크 근거 주석 |
 | §2.1 PodGroup 코어 + Queue state 하나(이름 지정 GET, podgroups namespaced list) | Task 1(리더) + Task 2(RBAC) |
 | §2.2 용량 게이지 금지 | Task 4가 만들지 않음(QueueSection 주석으로 명시) + Global Constraints |
-| §2.3 queue_wait_seconds 컬럼 + 커버링 인덱스 + write-once + 백필 + 풀스캔 순감 | Task 5 + Task 6(읽기) |
+| §2.3 submit_wait_seconds 컬럼 + 커버링 인덱스 + write-once + 백필 + 풀스캔 순감 | Task 5 + Task 6(읽기) |
 | §2.4 정직한 이름(제출 대기) + 기존 거짓 라벨 정정 + 포함 관계 명시 | Task 6(키 이름) + Task 7(라벨·문구) |
 | §2.5 스텁 페어 필수 | Task 1(StubQueueReader) + Task 3(스텁 경유 라우트 테스트) |
 | §3 화면(배지/카운트/대기 표/제출 대기 분포+건수, 중복 금지, KPI 어긋남 라벨) | Task 4 + Task 7 — 기존 JobStatsSection 항목은 하나도 재현하지 않음 |
@@ -1772,7 +1779,7 @@ git commit -m "feat(portal): 제출 대기 분포 + 「큐 대기」→「제출
 
 **2. 플레이스홀더 점검** — "TBD"/"적절히 처리"/코드 없는 테스트 지시 없음. 모든 코드 단계(신규 파일 2 + 프론트 신규 2 포함)에 전문이 있고, YAML 삽입 블록도 전문 수록. 다른 태스크 참조는 Interfaces 블록의 시그니처로만 한다.
 
-**3. 타입 일관성** — Task 1의 `read_queue()`/`read_podgroups()` 반환 모양(`name/phase/min_member/created_at`)을 Task 3 라우트가 그대로 받아 `wait_seconds`만 얹고, Task 4의 `QueuePodgroup`이 다섯 키를 같은 철자로 선언한다. `DMS_QUEUE`/`build_queue_reader`/`app.state.queue_reader`는 Task 1→3의 한 철자다. `iso_epoch`는 Task 3이 정의하고 Task 5(set_job_state·백필)가 같은 이름으로 import한다. `queue_wait_seconds`는 컬럼(Task 5)·쿼리(Task 6)·테스트 시드 전부 동일 철자, API 키는 일관되게 `submit_wait_*`(histogram/counted/excluded)이고 Task 7 타입·JSX가 그대로 쓴다. `SUBMIT_WAIT_BUCKETS`/`SUBMIT_WAIT_OVERFLOW`는 Task 6 정의·import·테스트가 같은 이름이다. RBAC 이름 `dms-api-queue-readonly`는 매니페스트·계약 테스트·실증 절에서 동일하다.
+**3. 타입 일관성** — Task 1의 `read_queue()`/`read_podgroups()` 반환 모양(`name/phase/min_member/created_at`)을 Task 3 라우트가 그대로 받아 `wait_seconds`만 얹고, Task 4의 `QueuePodgroup`이 다섯 키를 같은 철자로 선언한다. `DMS_QUEUE`/`build_queue_reader`/`app.state.queue_reader`는 Task 1→3의 한 철자다. `iso_epoch`는 Task 3이 정의하고 Task 5(set_job_state·백필)가 같은 이름으로 import한다. `submit_wait_seconds`는 컬럼(Task 5)·쿼리(Task 6)·테스트 시드 전부 동일 철자, API 키는 일관되게 `submit_wait_*`(histogram/counted/excluded)이고 Task 7 타입·JSX가 그대로 쓴다. `SUBMIT_WAIT_BUCKETS`/`SUBMIT_WAIT_OVERFLOW`는 Task 6 정의·import·테스트가 같은 이름이다. RBAC 이름 `dms-api-queue-readonly`는 매니페스트·계약 테스트·실증 절에서 동일하다.
 
 **알려진 위험:**
 - **PodGroup 응답 모양은 실측 기반**: `spec.queue`/`status.phase`/`creationTimestamp`는 v1.15.0 클러스터에서 확인했지만 페이크 기반 테스트는 클러스터 드리프트를 못 잡는다 — 실증 §6-3이 실물로 확인한다.

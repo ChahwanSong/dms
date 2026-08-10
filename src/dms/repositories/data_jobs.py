@@ -131,7 +131,7 @@ class DataJobsRepository:
         guard_tripped = False
         with self._db.transaction():
             current = self._db.query_one(
-                """SELECT state, request_id, created_at, queue_wait_seconds
+                """SELECT state, request_id, created_at, submit_wait_seconds
                    FROM data_jobs WHERE job_id = :j""", {"j": job_id})
             if current is None:
                 raise KeyError(job_id)
@@ -146,23 +146,25 @@ class DataJobsRepository:
                 # 제출 대기(슬라이스 17 설계 §2.3): Pending -> 첫 비-Pending 엣지에서만
                 # 계산해 한 번 쓴다(write-once). IS NULL 가드는 이중 안전장치다 --
                 # 상태 기계상 Pending 재진입은 없지만, 생겨도 덮어쓰지 않는다.
-                queue_wait = current["queue_wait_seconds"]
-                if (queue_wait is None
+                # 재는 것은 created_at -> **이 호출 시각**이라 스테퍼 틱 간격이
+                # 포함된다 -- DMS 내부 픽업 지연이지 Volcano 큐 대기가 아니다(§2.4).
+                submit_wait = current["submit_wait_seconds"]
+                if (submit_wait is None
                         and current["state"] == DataJobState.PENDING.value
                         and to_state is not DataJobState.PENDING):
                     try:
                         # 시계 스큐(다른 프로세스가 쓴 created_at)로 음수가 나올 수
                         # 있다 -- 1초 해상도 세계에서 0 으로 접는 것이 정직하다.
-                        queue_wait = max(
+                        submit_wait = max(
                             0, int(iso_epoch(now) - iso_epoch(current["created_at"])))
                     except (TypeError, ValueError):
-                        queue_wait = None   # 시각이 깨졌으면 지어내지 않는다(NULL)
+                        submit_wait = None  # 시각이 깨졌으면 지어내지 않는다(NULL)
                 self._db.execute(
                     """UPDATE data_jobs SET state = :s, reason_code = :rc,
-                           updated_at = :now, queue_wait_seconds = :qw
+                           updated_at = :now, submit_wait_seconds = :sw
                        WHERE job_id = :j""",
                     {"s": to_state.value, "rc": reason_code, "now": now,
-                     "qw": queue_wait, "j": job_id})
+                     "sw": submit_wait, "j": job_id})
                 self._record_transition("data_job", job_id, DataJobState(current["state"]),
                                         to_state, reason_code, actor, now)
         if guard_tripped:

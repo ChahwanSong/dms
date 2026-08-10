@@ -195,10 +195,10 @@ def test_set_artifact_rejects_non_int_counts(db):
     assert (job["files_count"], job["bytes_count"]) == (None, None)
 
 
-def test_queue_wait_recorded_once_on_first_pickup(db):
+def test_submit_wait_recorded_once_on_first_pickup(db):
     # 슬라이스 17 설계 §2.3: Pending -> 첫 비-Pending 엣지에서 한 번만(write-once).
-    # 이름과 달리 Volcano 큐 대기가 아니라 DMS 내부 픽업 지연이다 -- 화면 라벨은
-    # "제출 대기"(설계 §2.4).
+    # 이름 그대로 "제출 대기"다 -- Volcano 큐 대기가 아니라 DMS 내부 픽업 지연
+    # (스테퍼 틱 간격 포함)이고, 스키마·API·화면 라벨이 모두 같은 말을 한다(§2.4).
     from dms.db import iso_plus, utc_now_iso
     repos = _repos(db)
     rid = _mk_request(repos)
@@ -206,19 +206,19 @@ def test_queue_wait_recorded_once_on_first_pickup(db):
     db.execute("UPDATE data_jobs SET created_at = :c WHERE job_id = :j",
                {"c": iso_plus(utc_now_iso(), -120), "j": job_id})
     repos.data_jobs.set_job_state(job_id, DataJobState.PREFLIGHT, actor="stepper")
-    wait = repos.data_jobs.get_job(job_id)["queue_wait_seconds"]
+    wait = repos.data_jobs.get_job(job_id)["submit_wait_seconds"]
     assert 120 <= wait <= 122            # 1초 해상도 + 실행 지연 여유
     # 이후 전이는 덮어쓰지 않는다 -- created_at 을 더 과거로 밀어도 값이 그대로여야
     # "재계산 없음"이 증명된다(비터미널 재전이의 덮어쓰기 금지, 설계 §2.3).
     db.execute("UPDATE data_jobs SET created_at = :c WHERE job_id = :j",
                {"c": "2020-01-01T00:00:00Z", "j": job_id})
     repos.data_jobs.set_job_state(job_id, DataJobState.EXECUTING, actor="stepper")
-    assert repos.data_jobs.get_job(job_id)["queue_wait_seconds"] == wait
+    assert repos.data_jobs.get_job(job_id)["submit_wait_seconds"] == wait
 
 
-def test_queue_wait_stays_null_while_pending(db):
+def test_submit_wait_stays_null_while_pending(db):
     # 아직 Pending 인 잡은 "대기 미확정"이다 -- 0 이나 지금까지의 경과로 채우면
     # 집계가 진행 중인 대기를 완료된 대기처럼 오염시킨다(NULL = 집계 제외).
     repos = _repos(db)
     job_id = _mk_job(repos, _mk_request(repos))
-    assert repos.data_jobs.get_job(job_id)["queue_wait_seconds"] is None
+    assert repos.data_jobs.get_job(job_id)["submit_wait_seconds"] is None

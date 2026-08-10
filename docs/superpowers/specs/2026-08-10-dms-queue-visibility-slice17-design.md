@@ -53,14 +53,25 @@
 §1-3 때문에 표시할 진실이 없다. weight 1 을 사용률처럼 그리면 없는 사실을 지어내는
 것이다. "40/100 사용 중" 류의 UI 는 이 슬라이스에서 **명시적으로 제외**한다.
 
-### 2.3 (B) 는 `data_jobs.queue_wait_seconds` 파생 컬럼 + 커버링 인덱스
+### 2.3 (B) 는 `data_jobs.submit_wait_seconds` 파생 컬럼 + 커버링 인덱스
 
 슬라이스 14 가 금지한 근거는 "전기간 풀스캔"이었다. 이 방식은 그 스캔을 **쓰기
 시점에 미리 접어** 근거 자체를 없앤다.
 
-- 컬럼 `queue_wait_seconds BIGINT` 를 CREATE TABLE **과** `_ensure_columns` 양쪽에
+> **정정(구현 중 발견)**: 초안의 컬럼명은 `queue_wait_seconds` 였다. 그런데 바로
+> 아래 §2.4 는 "이 값은 Volcano 큐 대기가 아니라 DMS 내부 픽업 지연이므로 이름을
+> **제출 대기**로 한다"고 못박는다 — 화면 라벨은 "제출 대기", API 키는
+> `submit_wait_*` 인데 스키마만 "queue wait" 이면 **앞으로 스키마를 읽는 사람은
+> 정확히 우리가 없애려던 오해를 하게 된다.** 슬라이스 14 의 거짓 「큐 대기」 라벨을
+> 고치러 온 슬라이스가 같은 거짓을 스키마에 심는 셈이라 특히 앞뒤가 안 맞는다.
+> 그래서 `submit_wait_seconds` 로 바꿨다. **배포 전이라 비용 0** 이다 — 이 컬럼은
+> 아직 어떤 DB 에도 없고(라이브는 d27, 해당 커밋 미배포) 마이그레이션 호환 처리도
+> 필요 없다. 데이터가 쌓인 뒤에는 같은 정정이 비싸진다.
+
+- 컬럼 `submit_wait_seconds BIGINT` 를 CREATE TABLE **과** `_ensure_columns` 양쪽에
   (기배포 DB 는 CREATE 를 다시 안 탄다 — 슬라이스 14 가 실 500 으로 배운 교훈).
-- `CREATE INDEX idx_data_jobs_created ON data_jobs (created_at, queue_wait_seconds)`.
+- `CREATE INDEX idx_data_jobs_created ON data_jobs (created_at, submit_wait_seconds)`
+  (인덱스 이름은 선두 컬럼 기준이라 컬럼 개명과 무관하게 그대로 둔다).
 - 쓰기는 `set_job_state` 의 **기존 SELECT 에 `created_at` 을 얹고**, `from_state ==
   'Pending'` 인 엣지에서만 **기존 UPDATE 에 값을 추가**한다 — 추가 statement 0,
   추가 왕복 0. **write-once**(비터미널 재전이가 덮어쓰지 못하게).
@@ -129,8 +140,9 @@ Volcano 큐 대기가 아니다. 그래서 이름은 **"제출 대기"** 로 한
 
 - 큐 리더: 403/404/빈 목록/정상 목록 네 경우가 각각 다른 결과로 나오는지(뭉개짐 금지).
 - 스텁 페어가 클러스터 없이 결정적 값을 주는지.
-- `queue_wait_seconds`: Pending→ 첫 전이에서만 기록(write-once), 재전이가 덮어쓰지
-  않는지, 백필이 기존 행을 채우는지, NULL 이 집계에서 제외되는지.
+- `submit_wait_seconds`: Pending→ 첫 전이에서만 기록(write-once), 재전이가 덮어쓰지
+  않는지, 백필이 기존 행을 채우는지, NULL 이 집계에서 제외되는지, **값 0 이
+  "기록됨"으로 취급되어 재-migrate 에 덮이지 않는지**(1초 해상도라 0 은 정상값).
 - 마이그레이션: CREATE 경로와 `_ensure_columns` ALTER 경로 **양쪽**, 인덱스 생성.
 - **RBAC 계약 테스트를 새로 만든다**(§1-10) — 매니페스트에 `podgroups` 읽기와
   이름 지정 Queue GET 이 실제로 있는지. 지금은 아무것도 이걸 안 붙잡는다.
@@ -143,7 +155,7 @@ Volcano 큐 대기가 아니다. 그래서 이름은 **"제출 대기"** 로 한
 2. RBAC 적용 후 → 큐 상태 Open, Phase 카운트가 나오는지.
 3. 실제 sync 잡을 제출해 **대기 중 PodGroup 이 표에 뜨고 대기 시간이 증가**하는지,
    완료 후 사라지는지(PodGroup 삭제 §1-1 의 귀결을 화면에서 확인).
-4. `queue_wait_seconds` 가 신규 잡에 채워지고, 백필이 기존 잡을 채웠는지.
+4. `submit_wait_seconds` 가 신규 잡에 채워지고, 백필이 기존 잡을 채웠는지.
 5. 제출 대기 분포가 화면에 뜨고 집계 건수가 함께 표시되는지.
 6. 요청 상세의 라벨이 「큐 대기」에서 정정된 이름으로 바뀌었는지.
 
