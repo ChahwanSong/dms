@@ -333,6 +333,29 @@ def test_metrics_queue_computes_wait_and_sorts_longest_first(client):
     assert pods[2]["wait_seconds"] is None
 
 
+def test_metrics_queue_broken_item_degrades_alone_not_the_route(client):
+    # 항목 하나의 결함이 라우트를 죽이거나 목록 전체를 지우면 안 된다. created_at
+    # 키가 아예 없으면 맨 서브스크립트는 KeyError -- (TypeError, ValueError) 그물을
+    # 통과해 500 이 된다. "리더가 늘 그 키를 채운다"는 다른 모듈의 현재 구현에 대한
+    # 의존이지 이 라우트가 스스로 지키는 성질이 아니다(설계 §4).
+    now = utc_now_iso()
+    client.app.state.queue_reader = _FakeQueueReader(podgroups=[
+        {"name": "ok", "phase": "Pending", "min_member": 1,
+         "created_at": iso_plus(now, -120)},
+        {"name": "no-key", "phase": "Pending", "min_member": 1},  # created_at 결측
+        {"name": "bad-str", "phase": "Pending", "min_member": 1,
+         "created_at": "2026-08-10 05:00:00+00:00"},              # 파싱 불가 포맷
+    ])
+    r = client.get("/api/admin/metrics/queue", headers=ADMIN)
+    assert r.status_code == 200                    # 결함 항목이 라우트를 죽이지 않는다
+    pods = {p["name"]: p for p in r.json()["podgroups"]}
+    # 세 항목 모두 살아남는다 -- 한 항목 때문에 목록이 사라지지도 않는다
+    assert set(pods) == {"ok", "no-key", "bad-str"}
+    assert 120 <= pods["ok"]["wait_seconds"] <= 122   # 멀쩡한 항목은 계산까지 온전
+    assert pods["no-key"]["wait_seconds"] is None     # 결함 항목만 null 강등
+    assert pods["bad-str"]["wait_seconds"] is None
+
+
 def test_metrics_queue_unknown_axes_stay_null_not_empty(client):
     # 403(리더 예외)과 CRD 부재(None)는 "빈 큐"가 아니다 -- []로 접으면 권한
     # 누락이 "큐가 한가함"으로 렌더된다(설계 §4). 축 강등이지 라우트 실패가

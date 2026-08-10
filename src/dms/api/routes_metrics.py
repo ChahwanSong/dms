@@ -187,9 +187,20 @@ def metrics_queue(request: Request):
         now = iso_epoch(utc_now_iso())
         for pg in pods:
             # 대기 시간(now - creationTimestamp)은 서버가 계산한다 -- 브라우저
-            # 시계 스큐가 대기 시간을 왜곡하지 않게. 시각이 깨진 항목만 null.
+            # 시계 스큐가 대기 시간을 왜곡하지 않게. 시각이 깨진 항목만 null이고
+            # 항목 자체는 목록에 남는다.
+            #
+            # .get 이다: 맨 서브스크립트면 created_at 키가 없는 항목 하나가
+            # KeyError 로 이 그물을 통과해 라우트 전체를 500 낸다. 리더가 늘 그
+            # 키를 채운다는 건 다른 모듈의 현재 구현에 대한 의존이지 이 라우트가
+            # 스스로 지키는 성질이 아니다 -- 결측(None)도 파싱 실패와 같은 등급의
+            # 항목 단위 강등으로 닫는다(설계 §4).
+            #
+            # pg 를 제자리 수정한다: 리더가 매 호출 새 dict 를 만들어 주므로 안전
+            # 하지만, 리더가 캐시된 객체를 재사용하게 되면 캐시를 오염시킨다.
             try:
-                pg["wait_seconds"] = max(0, int(now - iso_epoch(pg["created_at"])))
+                pg["wait_seconds"] = max(
+                    0, int(now - iso_epoch(pg.get("created_at"))))
             except (TypeError, ValueError):
                 pg["wait_seconds"] = None
         # 오래 기다린 잡이 위로 -- 표의 목적이 "무엇이 막혀 있나"이므로.
