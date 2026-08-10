@@ -350,3 +350,58 @@ def test_migrate_adds_auth_method_to_existing_requests(db):
     from dms.migrations import migrate, _column_exists
     migrate(db)
     assert _column_exists(db, "requests", "auth_method")
+
+
+def test_sched_wait_columns_and_covering_index_on_fresh_db(tmp_path):
+    # CREATE 경로(신규 DB). 슬라이스 20: submit_wait_seconds 선례의 이중 경로
+    # 규약 그대로 -- 선언형(BIGINT/TEXT)이 CREATE 와 ALTER 두 경로에서 같아야
+    # 한다(다르면 기배포 DB 만 다른 타입으로 굳는다). 인덱스는 집계 2쿼리
+    # (repositories/metrics.py)의 커버링이다.
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    assert _declared_type(db, "data_jobs", "exec_submitted_at") == "TEXT"
+    assert _declared_type(db, "data_jobs", "sched_wait_seconds") == "BIGINT"
+    rows = db.query("SELECT name FROM sqlite_master WHERE type = 'index'")
+    assert "idx_data_jobs_created_sched" in {r["name"] for r in rows}
+
+
+def test_migrate_adds_sched_wait_columns_without_backfill(db):
+    # ALTER 경로(기배포 DB) + **백필 부재 자체가 계약이다**(설계 §2.5): sched_wait
+    # 의 원천(Volcano 가 잡을 Running 으로 올린 시각)은 state_transitions 어디에도
+    # 없다 -- 전이 행이 온전히 남아 있어도 과거 잡은 NULL 이어야 한다. 나중에
+    # 누군가 _backfill_submit_wait 를 본떠 전이 행에서 값을 "지어내는" 백필을
+    # 추가하면 이 테스트가 잡는다(NULL = excluded 로 화면에 표면화되는 것이 정직).
+    db.execute("DROP TABLE data_jobs")
+    db.execute("""CREATE TABLE data_jobs (job_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL, operation TEXT NOT NULL, tool TEXT,
+        storage_name TEXT, source_storage TEXT, destination_storage TEXT,
+        source TEXT, destination TEXT, target TEXT, options TEXT NOT NULL,
+        priority TEXT NOT NULL, state TEXT NOT NULL, reason_code TEXT,
+        preview_fingerprint TEXT, preview_expires_at TEXT, volcano_job_ref TEXT,
+        artifact_uri TEXT, result_summary TEXT, files_count BIGINT,
+        bytes_count BIGINT, worker_pool TEXT, precondition TEXT,
+        confirmed_fingerprint TEXT, phase_refs TEXT, submit_wait_seconds BIGINT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    db.execute("""INSERT INTO data_jobs (job_id, request_id, operation, options,
+        priority, state, created_at, updated_at)
+        VALUES ('j-old', 'r1', 'scan', '{}', 'mid', 'Succeeded',
+                '2026-08-01T00:00:00Z', '2026-08-01T01:00:00Z')""")
+    # 과거 잡의 전이 이력(제출 시점의 Preflight→Running 포함)이 전부 남아 있어도
+    # -- Running "전이 시각"은 DMS 상태 기계의 시각이지 Volcano 스케줄 시각이
+    # 아니다. 여기서 소급하면 없는 사실을 지어내는 것이다.
+    for from_s, to_s, at in ((None, "Pending", "2026-08-01T00:00:00Z"),
+                             ("Pending", "Preflight", "2026-08-01T00:01:00Z"),
+                             ("Preflight", "Running", "2026-08-01T00:02:00Z"),
+                             ("Running", "Succeeded", "2026-08-01T01:00:00Z")):
+        db.execute("""INSERT INTO state_transitions (entity_kind, entity_id,
+            from_state, to_state, actor, at)
+            VALUES ('data_job', 'j-old', :f, :t, 'stepper', :at)""",
+                   {"f": from_s, "t": to_s, "at": at})
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    assert _column_exists(db, "data_jobs", "exec_submitted_at")
+    assert _column_exists(db, "data_jobs", "sched_wait_seconds")
+    row = db.query_one("""SELECT exec_submitted_at, sched_wait_seconds
+                          FROM data_jobs WHERE job_id = 'j-old'""")
+    assert row["exec_submitted_at"] is None    # 앵커도 소급하지 않는다
+    assert row["sched_wait_seconds"] is None   # 과거 잡은 전부 NULL(excluded 로 표면화)

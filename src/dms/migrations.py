@@ -180,6 +180,26 @@ def _apply_migrations(db: Database) -> None:
             -- (아직 Pending/백필 불가분/시각 오염) -- 집계에서 제외하고 제외 건수를
             -- 표면화한다. BIGINT 는 files_count 와 같은 규약(두 경로 동일 선언형).
             submit_wait_seconds BIGINT,
+            -- 슬라이스 20(설계 §2.2): 스케줄 대기의 앵커 -- _submit_execution 이
+            -- execution vcjob 제출 직후 write-once 로 남기는 시각(ISO-8601 UTC).
+            -- 전이 행(scan: Preflight→Running, sync/rm: Executing→Executing 자기
+            -- 전이)의 at 과 같은 틱의 값이지만, 전이 해석(세 모듈 교차 불변식)에
+            -- 의존하지 않는 명시적 계약으로 컬럼에 둔다(플랜 D1). preview/preflight
+            -- 제출은 이 앵커를 남기지 않는다 -- sync/rm 은 vcjob 이 둘이라 단일
+            -- 컬럼에 두 대기를 섞으면 안 된다.
+            exec_submitted_at TEXT,
+            -- 스케줄 대기(슬라이스 20 설계 §2.2): exec_submitted_at -> 스테퍼가
+            -- 처음 RUNNING 을 관측한 틱까지의 초. submit_wait_seconds(DMS 내부
+            -- 픽업 지연)와 **다른 것**을 잰다 -- 이 값이 Volcano 큐 대기의
+            -- **근사**다(스테퍼 틱 5s + vcjob status 갱신 지연이 더해지고,
+            -- Completing 등도 RUNNING 으로 접힌다 -- execution_volcano._VCJOB_PHASE).
+            -- _poll_execution 의 첫 RUNNING 관측에서 별도 UPDATE + IS NULL 술어로
+            -- 한 번만 쓴다(write-once). NULL = 관측 없음(마이그레이션 이전 잡/
+            -- Running 미도달 실패/한 틱 완료/스텁 백엔드) -- 백필은 불가능하다:
+            -- 원천이 DB 어디에도 없다(설계 §2.5). 집계는 NULL 을 제외하고 제외
+            -- 건수를 표면화한다. 0 은 정상값(같은 틱 스케줄)이다. BIGINT 는
+            -- submit_wait_seconds 와 같은 규약(두 경로 동일 선언형).
+            sched_wait_seconds BIGINT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
@@ -349,6 +369,15 @@ def _apply_migrations(db: Database) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_created"
                " ON data_jobs (created_at, submit_wait_seconds)")
     _backfill_submit_wait(db)
+    # 슬라이스 20: sched_wait_seconds 도 CREATE(신규) 또는 _ensure_columns(구형)로
+    # 보강된 뒤에만 존재하므로 인덱스는 그 이후다(idx_data_jobs_created 와 같은
+    # 순서 규칙). (created_at, sched_wait_seconds) 커버링: job_stats 의 sched_wait
+    # 2쿼리가 테이블을 건드리지 않는 인덱스 온리 레인지 스캔이 된다.
+    # **백필 호출은 없다**(설계 §2.5): submit_wait 과 달리 원천(Volcano 가 Running
+    # 으로 올린 시각)이 state_transitions 에도 없다 -- 지어내는 대신 과거 잡을
+    # NULL 로 두고 화면이 제외 건수로 표면화한다(tests 가 이 부재를 계약으로 고정).
+    db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_created_sched"
+               " ON data_jobs (created_at, sched_wait_seconds)")
     db.execute(
         """INSERT INTO schema_migrations (version, applied_at)
            SELECT :v, :at WHERE NOT EXISTS
@@ -436,6 +465,10 @@ def _ensure_columns(db):
         # 슬라이스 17 제출 대기 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스 14 의
         # 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
         ("data_jobs", "submit_wait_seconds", "BIGINT"),
+        # 슬라이스 20 스케줄 대기 -- submit_wait 과 같은 이중 경로 규약(슬라이스 14
+        # 의 실 500 교훈: CREATE 만 고치면 기배포 DB 에서만 컬럼이 없다).
+        ("data_jobs", "exec_submitted_at", "TEXT"),
+        ("data_jobs", "sched_wait_seconds", "BIGINT"),
         ("requests", "batch_id", "TEXT"),
         # 슬라이스 19: 기배포 DB 는 CREATE 를 다시 안 탄다 -- 양쪽에 넣지 않으면
         # planner 의 req["auth_method"] 가 라이브에서만 없다(슬라이스 14 교훈).
