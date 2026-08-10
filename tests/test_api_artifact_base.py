@@ -6,7 +6,7 @@ import json
 from dms.domain import DataJobState
 from dms.repositories import Repositories
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 def _make_rejected_job(repos):

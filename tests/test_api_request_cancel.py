@@ -1,6 +1,6 @@
 from dms.domain import DataJobState, RequestState
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 def _login(client, name="alice"):

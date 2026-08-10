@@ -115,7 +115,7 @@ def test_cancel_terminal_job_409(client):
     assert r.status_code == 409 and r.json()["detail"] == "already_terminal"
 
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 def test_admin_bearer_can_access_others_jobs(client):

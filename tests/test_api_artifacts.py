@@ -41,7 +41,7 @@ def _confirmpending_job(app_repos, requester="alice"):
     return rid, jid
 
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 def test_list_returns_phase_name_size(tmp_path):

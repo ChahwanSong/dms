@@ -1,4 +1,4 @@
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 SCAN = {"operation": "scan", "storage": "s1", "target": "data", "priority": "mid"}
 
 

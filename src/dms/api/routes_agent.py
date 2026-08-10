@@ -1,13 +1,11 @@
-import re
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..artifact_base import resolve_artifact_base, strip_scheme
-from .auth import Identity, require_user
+# 노드 이름 규칙은 auth 가 유일 출처다 -- 토큰 경로의 actor 게이트가 통과시킨
+# node:<이름> 을 여기서 다시 검증하므로 두 규칙이 갈라지면 안 된다(슬라이스 19).
+from .auth import Identity, _NODE_NAME_RE, require_user
 
 router = APIRouter()
-
-_NODE_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
 
 
 @router.post("/api/agent/report")

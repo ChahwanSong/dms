@@ -1,4 +1,5 @@
 import hmac
+import re
 from collections import namedtuple
 from fastapi import HTTPException, Request
 
@@ -6,6 +7,12 @@ from fastapi import HTTPException, Request
 # x-dms-actor에 이 접두를 직접 넣으면 감사 로그에서 서버가 붙인 표식과 구분이 안 돼
 # 사람 admin으로 위장할 수 있으므로 여기서 거절한다.
 _RESERVED_ACTOR_PREFIX = "token:"
+
+# 에이전트 노드 이름 규칙(DNS-1123). routes_agent 의 잡 신원 검증(ingest_report)이
+# 쓰는 바로 그 규칙이어야 한다 -- 토큰 경로에서 여기서 통과시킨 node:<이름> 을
+# 에이전트 라우트가 다시 검증하므로, 두 곳이 갈라지면 한쪽이 받은 값을 다른 쪽이
+# 거절한다. 그래서 정의는 여기 한 곳뿐이고 routes_agent 가 이 상수를 import 한다.
+_NODE_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
 
 # Identity.actor 자체는 절대 건드리지 않는다 -- 에이전트 노드 인증(routes_agent.py),
 # 특권 요청자 판정(routes_requests.py의 settings.privileged_requesters),
@@ -39,13 +46,21 @@ def current_identity(request: Request) -> Identity:
     if auth.startswith("Bearer "):
         token = auth[len("Bearer "):]
         if tokens_match(token, settings.shared_token):
-            # 헤더가 아예 없을 때만 .get()의 기본값이 적용된다 -- 헤더가 빈 문자열이나
-            # 공백만으로 존재하면 그 값이 그대로 actor가 돼 audit_actor()가 빈
-            # "token:"을 만든다. "값 없음"을 헤더 부재/빈 문자열/공백 세 가지 모두에서
-            # 동일하게 "shared-token"으로 정규화해 옆문을 막는다.
-            actor = (request.headers.get("x-dms-actor") or "").strip() or "shared-token"
-            if actor.startswith(_RESERVED_ACTOR_PREFIX):
-                raise HTTPException(status_code=401, detail="invalid_actor")
+            # 슬라이스 19: 토큰 경로의 x-dms-actor 는 node:<이름>(에이전트 전용)만
+            # 허용한다. 빈 값/공백만은 기존대로 shared-token 으로 정규화하고(옆문 유지
+            # 금지 -- 헤더 부재/빈 문자열/공백 세 가지를 한 값으로 모아 빈 "token:"
+            # 감사 위장을 막는다), 그 외 임의 값(root, alice, token:x ...)은 400 으로
+            # 거절한다. 이 게이트가 공유 토큰 보유자가 잡 신원을 자유 지정해 uid 0 으로
+            # 승격하던 스푸핑(설계 §1-4)을 닫는다: requester_id 가 사람 이름/특권
+            # 이름이 될 여지가 사라진다. token: 접두 거절(구 401)은 더 넓은 이 게이트에
+            # 흡수된다(node: 아님 -> 400).
+            raw = (request.headers.get("x-dms-actor") or "").strip()
+            if not raw:
+                actor = "shared-token"
+            elif raw.startswith("node:") and _NODE_NAME_RE.fullmatch(raw[len("node:"):]):
+                actor = raw
+            else:
+                raise HTTPException(status_code=400, detail="invalid_actor")
             return Identity(actor=actor, role="admin", auth="token")
         raise HTTPException(status_code=401, detail="invalid_token")
     session = request.session

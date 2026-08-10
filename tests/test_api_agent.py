@@ -5,7 +5,7 @@ def _agent_headers(node="node-a"):
     return {"Authorization": "Bearer tok-shared", "x-dms-actor": f"node:{node}"}
 
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 REPORT = {"node_name": "node-a", "mounts": [], "tools": [], "identities": [], "os": {}}
 
 
@@ -49,10 +49,24 @@ def test_session_user_cannot_report(client):
 
 @pytest.mark.parametrize("bad", ["bad name", "a/b", "-lead", "trail-", ""])
 def test_invalid_node_name_422(client, bad):
+    # 본문 node_name 검증은 헤더와 독립이다 -- actor 헤더를 유효한 node:<이름> 으로
+    # 두고 본문만 망가뜨려 라우트의 422 를 그대로 유지한다. (슬라이스 19 전에는
+    # 헤더에도 같은 bad 값을 실었는데, 이제 그건 auth 게이트가 400 으로 먼저 잡는다 --
+    # 아래 test_invalid_node_name_in_actor_header_400 이 그 경로를 따로 못박는다.)
+    r = client.post("/api/agent/report", json={"node_name": bad},
+                    headers=_agent_headers())
+    assert r.status_code == 422 and r.json()["detail"] == "invalid_node_name"
+
+
+@pytest.mark.parametrize("bad", ["bad name", "a/b", "-lead", "trail-", ""])
+def test_invalid_node_name_in_actor_header_400(client, bad):
+    # 슬라이스 19 actor 게이트: node: 접두가 붙어도 이름부가 DNS-1123 이 아니면
+    # 인증 단계에서 400 이다. 라우트의 422 보다 앞서므로 잘못된 노드 이름은 이제
+    # 요청 처리에 아예 도달하지 못한다.
     r = client.post("/api/agent/report", json={"node_name": bad},
                     headers={"Authorization": "Bearer tok-shared",
                              "x-dms-actor": f"node:{bad}"})
-    assert r.status_code == 422 and r.json()["detail"] == "invalid_node_name"
+    assert r.status_code == 400 and r.json()["detail"] == "invalid_actor"
 
 
 def test_report_is_persisted(client, db):

@@ -1,6 +1,6 @@
 import pytest
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 BODY = {"max_nodes": 3, "procs_per_node": 8, "queue": "dms-data",
         "default_priority": "mid", "max_priority": "high",
         "preview_timeout_seconds": 3600, "execution_timeout_seconds": 3600,

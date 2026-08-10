@@ -75,7 +75,7 @@ def _scan_job(repos, db, *, storage_name, target, requester="alice",
 
 
 def _register(client, storage_name="ceph-a", path="team"):
-    admin = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+    admin = {"Authorization": "Bearer tok-shared"}
     client.post("/api/admin/storages", json={
         "storage_name": storage_name, "mount_path": f"/mnt/{storage_name}",
         "managed_root": f"/mnt/{storage_name}/dms", "backend_type": "cephfs"},
@@ -343,7 +343,7 @@ def test_scan_on_different_storage_does_not_cover(tmp_path):
     repos = client.app.state.repos
     _login(client, "alice")
     path_id = _register(client, "ceph-a", "team")
-    admin = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+    admin = {"Authorization": "Bearer tok-shared"}
     client.post("/api/admin/storages", json={
         "storage_name": "ceph-b", "mount_path": "/mnt/ceph-b",
         "managed_root": "/mnt/ceph-b/dms", "backend_type": "cephfs"}, headers=admin)

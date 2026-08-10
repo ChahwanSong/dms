@@ -1,4 +1,4 @@
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 def test_control_state_requires_admin(client):
@@ -71,7 +71,9 @@ def test_token_auth_audit_actor_is_prefixed(client, db):
                json={"maintenance": False, "drain": False, "reason": None},
                headers=ADMIN)
     rows = db.query("SELECT * FROM audit_log WHERE mutation_class = 'control_state'")
-    assert rows[-1]["actor"] == "token:ops"
+    # 헤더에서 x-dms-actor 를 지운 뒤 토큰 actor 는 shared-token 으로 정규화되고
+    # audit_actor 가 token: 접두를 붙인다(감사 표식은 계속 기록된다, 슬라이스 19).
+    assert rows[-1]["actor"] == "token:shared-token"
 
 
 def test_token_auth_default_actor_audit_is_not_bare_prefix(client, db):
@@ -98,11 +100,13 @@ def test_session_auth_audit_actor_is_bare(client, db):
 
 def test_reserved_actor_prefix_in_header_is_rejected(client):
     # 접두가 서버 소유의 출처 표식이 아니게 되면 호출자가 자기 출처를 위조할 수 있다.
+    # token:alice 는 node:<이름> 이 아니므로 슬라이스 19 의 더 넓은 actor 게이트가
+    # 401 이 아니라 400 으로 거절한다(위조 경로는 여전히 닫혀 있다).
     r = client.put("/api/admin/control-state",
                    headers={"Authorization": "Bearer tok-shared",
                             "x-dms-actor": "token:alice"},
                    json={"maintenance": False, "drain": False, "reason": None})
-    assert r.status_code == 401
+    assert r.status_code == 400
 
 
 def test_empty_actor_header_audit_is_not_bare_prefix(client, db):

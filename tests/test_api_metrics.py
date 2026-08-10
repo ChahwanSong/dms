@@ -1,7 +1,7 @@
 from dms.db import iso_plus, utc_now_iso
 from dms.repositories import Repositories
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 def _report(*, load1=0.5, mem_total=100, mem_avail=50, rx=0, tx=0):

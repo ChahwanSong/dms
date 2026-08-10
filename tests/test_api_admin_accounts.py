@@ -1,4 +1,4 @@
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 def _login(client, username, password="p"):
@@ -80,9 +80,9 @@ def test_self_lock_role_forbidden(client):
 
 
 def test_nonexistent_target_is_404_even_when_name_equals_self_actor(client):
-    # 공유 토큰으로 인증하면 identity.actor는 클라이언트가 보낸 x-dms-actor 헤더값이다
-    # (여기선 "ops") — 그 값이 계정 row 없이도 자기 자신처럼 보일 수 있다. 존재하지
-    # 않는 계정을 대상으로 하면 self-guard(409)보다 먼저 404가 나야 한다.
+    # 공유 토큰으로 인증하면 identity.actor는 계정 row 없이도 존재하는 이름이다
+    # (슬라이스 19 이후 "shared-token"). 그 값이 자기 자신처럼 보일 수 있으므로,
+    # 존재하지 않는 계정을 대상으로 하면 self-guard(409)보다 먼저 404가 나야 한다.
     resp = client.put("/api/admin/accounts/ops/role", json={"role": "admin"},
                       headers=ADMIN)
     assert resp.status_code == 404

@@ -2,7 +2,7 @@ import pytest
 
 from dms.execution import ExecutionError
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 class _FakeRunner:
@@ -227,8 +227,9 @@ def test_submit_writes_release_audit_with_actor(rollout_client):
                         headers=ADMIN)
     entries = rollout_client.app.state.repos.control.audit_entries(limit=3)
     entry = next(e for e in entries if e["mutation_class"] == "release")
-    # 공유 토큰 인증은 token: 접두(슬라이스 12 audit_actor)
-    assert entry["actor"] == "token:ops"
+    # 공유 토큰 인증은 token: 접두(슬라이스 12 audit_actor). 슬라이스 19 에서
+    # x-dms-actor 를 헤더에서 지운 뒤 토큰 actor 는 shared-token 으로 정규화된다.
+    assert entry["actor"] == "token:shared-token"
 
 
 def test_submit_writes_exactly_one_release_audit_row(rollout_client):

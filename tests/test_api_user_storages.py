@@ -1,4 +1,4 @@
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 FORBIDDEN_FIELDS = ("mount_path", "managed_root", "status_detail")
 
 

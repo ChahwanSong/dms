@@ -13,7 +13,7 @@ from dms.execution_volcano import VolcanoExecutionAdapter
 from dms.repositories import Repositories
 from dms.stepper import JobStepper
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
 class _Settings:

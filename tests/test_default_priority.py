@@ -8,7 +8,7 @@
 from dms.batch_orchestrator import BatchOrchestrator
 from dms.repositories import Repositories
 
-ADMIN = {"Authorization": "Bearer tok-shared", "x-dms-actor": "ops"}
+ADMIN = {"Authorization": "Bearer tok-shared"}
 
 POLICY_BODY = {"max_nodes": 3, "procs_per_node": 8, "queue": "dms-data",
                "max_priority": "high", "preview_timeout_seconds": 3600,

@@ -15,10 +15,11 @@ def test_admin_route_requires_auth(client):
 
 
 def test_shared_token_grants_admin(client):
-    r = client.get("/api/auth/me", headers={
-        "Authorization": "Bearer tok-shared", "x-dms-actor": "ops-debug"})
+    # 슬라이스 19: x-dms-actor 없이도 토큰만으로 admin 이다. actor 는 shared-token 으로
+    # 정규화된다(임의 actor 지정은 이제 400 -- test_actor_spoof_regression 이 고정).
+    r = client.get("/api/auth/me", headers={"Authorization": "Bearer tok-shared"})
     assert r.status_code == 200
-    assert r.json() == {"actor": "ops-debug", "role": "admin"}
+    assert r.json() == {"actor": "shared-token", "role": "admin"}
 
 
 def test_wrong_token_rejected(client):
@@ -70,10 +71,10 @@ def test_admin_account_bootstrap_actor_is_in_a_reserved_namespace(client, db):
 
 def test_auth_me_returns_raw_actor_for_token_auth(client):
     # /api/auth/me는 감사 로그가 아니라 로그인 신원 표시용이다 -- audit_actor()의
-    # token: 접두가 여기 새어 들어가면 프론트 헤더와 기존 단언이 깨진다.
-    r = client.get("/api/auth/me", headers={
-        "Authorization": "Bearer tok-shared", "x-dms-actor": "ops-debug"})
-    assert r.json()["actor"] == "ops-debug"
+    # token: 접두가 여기 새어 들어가면 프론트 헤더와 기존 단언이 깨진다. 슬라이스 19
+    # 이후 기본 토큰 actor 는 shared-token(콜론 없음)이다.
+    r = client.get("/api/auth/me", headers={"Authorization": "Bearer tok-shared"})
+    assert r.json()["actor"] == "shared-token"
     assert ":" not in r.json()["actor"]
 
 
@@ -83,10 +84,12 @@ def test_auth_me_default_token_actor_is_raw_shared_token(client):
 
 
 def test_reserved_prefix_in_actor_header_is_rejected(client):
-    # 접두가 서버 소유의 출처 표식이 아니게 되면 의미가 없다.
+    # 접두가 서버 소유의 출처 표식이 아니게 되면 의미가 없다. token:alice 는
+    # node:<이름> 이 아니라 슬라이스 19 의 더 넓은 actor 게이트에 흡수돼 400 이다 --
+    # 접두 위조로 감사 로그를 오염시키던 경로는 여전히 닫혀 있다.
     r = client.get("/api/auth/me", headers={
         "Authorization": "Bearer tok-shared", "x-dms-actor": "token:alice"})
-    assert r.status_code == 401
+    assert r.status_code == 400
     assert r.json()["detail"] == "invalid_actor"
 
 
