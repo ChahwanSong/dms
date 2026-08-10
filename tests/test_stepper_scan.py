@@ -206,3 +206,23 @@ def test_drain_stops_stepping(db):
     result = _stepper(repos, StubExecutionAdapter()).run_once()
     assert result == {}
     assert repos.data_jobs.get_job(jid)["state"] == "Pending"
+
+
+def test_execution_submit_records_anchor_but_preflight_does_not(db):
+    # 슬라이스 20 설계 §2.2: 앵커는 execution vcjob 제출 직후다. preflight 제출
+    # (틱 1)에서 남으면 preflight 파드 수행 시간이 "스케줄 대기"에 통째로 섞인다.
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = StubExecutionAdapter()
+    adapter.script(f"stub-preflight-{jid}",
+                   [ExecStatus.RUNNING, ExecStatus.SUCCEEDED])
+    stepper = _stepper(repos, adapter)
+    stepper.run_once()   # Pending → Preflight (preflight 제출 -- 앵커 아님)
+    assert repos.data_jobs.get_job(jid)["exec_submitted_at"] is None
+    stepper.run_once()   # preflight poll RUNNING -- 아직 execution 제출 전
+    assert repos.data_jobs.get_job(jid)["exec_submitted_at"] is None
+    stepper.run_once()   # preflight SUCCEEDED → execution 제출 + 앵커
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Running"
+    assert job["exec_submitted_at"] is not None
+    assert job["sched_wait_seconds"] is None     # 관측 전 -- 기록은 Task 3

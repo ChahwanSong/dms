@@ -211,6 +211,19 @@ class DataJobsRepository:
                 "UPDATE data_jobs SET phase_refs = :p, updated_at = :now WHERE job_id = :j",
                 {"p": dump_json(refs), "now": now, "j": job_id})
 
+    def mark_exec_submitted(self, job_id) -> None:
+        """execution vcjob 제출 직후의 앵커 시각(슬라이스 20 설계 §2.2, 플랜 D1).
+        write-once 는 SQL 술어(IS NULL)가 강제한다 -- 재제출·중복 호출이 앵커를
+        뒤로 밀면 sched_wait 이 실제보다 짧게 측정된다. preview/preflight 제출
+        경로는 이 메서드를 부르지 않는다(단일 컬럼에 두 vcjob 의 대기를 섞지
+        않는다). updated_at 은 건드리지 않는다: 같은 틱의 뒤따르는 set_job_state
+        가 어차피 같은 초의 시각을 찍고, 앵커 기록이 클레임 순서(ORDER BY
+        updated_at)·GC 나이 계산에 끼어들 이유가 없다."""
+        self._db.execute(
+            """UPDATE data_jobs SET exec_submitted_at = :now
+               WHERE job_id = :j AND exec_submitted_at IS NULL""",
+            {"now": utc_now_iso(), "j": job_id})
+
     def set_preview(self, job_id, *, fingerprint, expires_at, artifact_uri):
         self._db.execute(
             """UPDATE data_jobs SET preview_fingerprint = :f, preview_expires_at = :e,

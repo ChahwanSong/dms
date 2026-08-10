@@ -93,3 +93,27 @@ def test_confirmed_job_executes(db):
     stepper.run_once()  # execution poll Succeeded → Succeeded
     assert repos.data_jobs.get_job(jid)["state"] == "Succeeded"
     assert repos.requests.get(rid)["state"] == "Succeeded"
+
+
+def test_sync_anchor_only_at_execution_submit_not_preview(db):
+    # sync 는 vcjob 이 둘(preview + execution)이다(설계 §2.2) -- preview 제출이나
+    # exec_preflight(재검증 파드) 제출에서 앵커가 남으면 단일 컬럼에 두 대기가
+    # 섞여 값의 의미가 무너진다.
+    repos = Repositories(db)
+    rid, jid = _sync_job(repos)
+    adapter = StubExecutionAdapter()
+    adapter.set_summary(f"stub-preview-{jid}", {"files": 3})
+    stepper = _stepper(repos, adapter)
+    stepper.run_once()   # Pending → Preflight
+    stepper.run_once()   # Preflight → PreviewRunning (preview vcjob 제출)
+    assert repos.data_jobs.get_job(jid)["exec_submitted_at"] is None
+    stepper.run_once()   # PreviewRunning → ConfirmPending
+    fp = repos.data_jobs.get_job(jid)["preview_fingerprint"]
+    repos.data_jobs.set_confirmed(jid, fp)
+    repos.data_jobs.set_job_state(jid, DataJobState.EXECUTING, actor="test")
+    stepper.run_once()   # Executing, ref 없음 → exec_preflight 제출(파드 -- 앵커 아님)
+    assert repos.data_jobs.get_job(jid)["exec_submitted_at"] is None
+    stepper.run_once()   # exec_preflight SUCCEEDED → execution vcjob 제출 + 앵커
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Executing"
+    assert job["exec_submitted_at"] is not None

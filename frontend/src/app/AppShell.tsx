@@ -8,7 +8,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   return (
     <div className="min-h-full md:flex">
-      <aside className="md:w-60 md:min-h-full bg-surface md:shadow-soft p-3 space-y-1">
+      {/* shrink-0: 넓은 표(계정·잡·릴리스…)가 있는 화면에서 사이드바가 쪼그라들어
+          메뉴 글자가 줄바꿈되던 것을 막는다 -- 폭 15rem 은 고정이어야 한다. */}
+      <aside className="md:w-60 md:shrink-0 md:min-h-full bg-surface md:shadow-soft p-3 space-y-1">
         <div className="px-3 py-2 font-semibold">DMS</div>
         <NavLink to="/jobs" className={linkCls}>내 작업</NavLink>
         <NavLink to="/jobs/new" className={linkCls}>작업 제출</NavLink>
@@ -27,7 +29,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {isAdmin && <NavLink to="/admin/builds" className={linkCls}>빌드</NavLink>}
         {isAdmin && <NavLink to="/admin/releases" className={linkCls}>릴리스</NavLink>}
       </aside>
-      <div className="flex-1">
+      {/* min-w-0: flex 자식의 기본 min-width 는 auto 라 콘텐츠보다 좁아지지 못한다.
+          그래서 안쪽 표의 overflow-x-auto 가 발동하지 못하고 레이아웃 전체가 넓어져
+          사이드바를 밀어냈다 -- 이 한 줄이 표를 자기 컨테이너 안에서 스크롤하게 만든다. */}
+      <div className="flex-1 min-w-0">
         <header className="flex items-center justify-between px-5 h-14 bg-surface shadow-soft">
           <div className="text-sm text-muted">{me.data?.actor} · {me.data?.role}</div>
           <button className="text-sm text-accent" onClick={() => logout.mutate()}>로그아웃</button>

@@ -174,6 +174,12 @@ class JobStepper:
                            reason_code=f"execution_submit_failed:{exc.reason_code}")
             return "Failed"
         self._repos.data_jobs.set_phase_ref(jid, "execution", ref)
+        # 슬라이스 20(설계 §2.2, 플랜 D1): 스케줄 대기의 앵커 = "execution vcjob
+        # 제출 직후". 전이 행(Preflight→Running/Executing→Executing)의 at 을 나중에
+        # 해석하는 대신 여기서 컬럼에 직접 남긴다 -- 세 모듈 교차 불변식(자기 전이
+        # 유일성)에 측정이 얹히지 않고, write-once 는 SQL 술어가 강제한다.
+        # preview(_submit_preview)/preflight 제출은 앵커를 남기지 않는다.
+        self._repos.data_jobs.mark_exec_submitted(jid)
         reclaimed = self._reclaim_if_terminal(job, ref)
         if reclaimed is not None:
             return reclaimed

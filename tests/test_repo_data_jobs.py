@@ -222,3 +222,20 @@ def test_submit_wait_stays_null_while_pending(db):
     repos = _repos(db)
     job_id = _mk_job(repos, _mk_request(repos))
     assert repos.data_jobs.get_job(job_id)["submit_wait_seconds"] is None
+
+
+def test_mark_exec_submitted_is_write_once(db):
+    # 슬라이스 20 설계 §2.2: 앵커는 "첫 execution 제출" 시각이다. 재호출(크래시 후
+    # 재제출 등)이 앵커를 뒤로 밀면 sched_wait 이 실제보다 짧게 측정된다 --
+    # write-once 는 호출자 선의가 아니라 SQL 술어(IS NULL)가 강제한다.
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    assert repos.data_jobs.get_job(job_id)["exec_submitted_at"] is None
+    repos.data_jobs.mark_exec_submitted(job_id)
+    assert repos.data_jobs.get_job(job_id)["exec_submitted_at"] is not None
+    # 이미 기록된 앵커를 식별 가능한 값으로 바꿔 두고 재호출 -- 술어가 막는다
+    db.execute("UPDATE data_jobs SET exec_submitted_at = '2020-01-01T00:00:00Z' "
+               "WHERE job_id = :j", {"j": job_id})
+    repos.data_jobs.mark_exec_submitted(job_id)
+    assert (repos.data_jobs.get_job(job_id)["exec_submitted_at"]
+            == "2020-01-01T00:00:00Z")
