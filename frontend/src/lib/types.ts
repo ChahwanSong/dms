@@ -181,6 +181,12 @@ export interface JobMetrics {
   failure_reasons: { reason_code: string; count: number }[];
   throughput: { bucket: string; count: number }[];
   duration_histogram: { bucket: string; count: number }[];
+  // 제출 대기(슬라이스 17): created_at -> 첫 비-Pending 전이. Volcano 큐 대기가
+  // 아니라 DMS 내부 픽업 지연이다(설계 §2.4 -- 그래서 이름이 "제출 대기"다).
+  // excluded = NULL(백필 불가분·아직 Pending)로 집계에서 빠진 건수.
+  submit_wait_histogram: { bucket: string; count: number }[];
+  submit_wait_counted: number;
+  submit_wait_excluded: number;
   files_total: number | null; bytes_total: number | null;
 }
 export interface InfraComponent {

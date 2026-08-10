@@ -28,6 +28,11 @@ const STATS = {
     { bucket: "<1m", count: 1 }, { bucket: "1-10m", count: 0 },
     { bucket: "10-60m", count: 1 }, { bucket: "1-6h", count: 0 },
     { bucket: "6-24h", count: 0 }, { bucket: ">24h", count: 0 }],
+  submit_wait_histogram: [
+    { bucket: "<10s", count: 2 }, { bucket: "10-30s", count: 1 },
+    { bucket: "30-60s", count: 0 }, { bucket: "1-5m", count: 0 },
+    { bucket: "5-30m", count: 0 }, { bucket: ">30m", count: 0 }],
+  submit_wait_counted: 3, submit_wait_excluded: 1,
   files_total: null, bytes_total: null,
 };
 
@@ -60,4 +65,13 @@ test("files/bytes가 NULL이면 — 로 우아하게 생략한다", async () => 
 test("응답이 비배열이어도 죽지 않는다", async () => {
   renderSection({ by_state: null });
   expect(await screen.findByText("잡 통계")).toBeInTheDocument();
+});
+
+test("제출 대기 분포와 집계/제외 건수를 보여준다", async () => {
+  renderSection();
+  const chart = await screen.findByRole("img", { name: "제출 대기 분포" });
+  expect(chart.querySelectorAll("rect")).toHaveLength(6);
+  // 제외 건수를 숨기지 않는다(설계 §3) + 수행시간과의 포함 관계 명시(설계 §2.4)
+  expect(screen.getByText(/집계 3건 · 제외\(기록 없음\) 1건/)).toBeInTheDocument();
+  expect(screen.getByText(/수행시간 분포는 이 대기를 포함/)).toBeInTheDocument();
 });

@@ -78,6 +78,8 @@ export function JobStatsSection() {
     .map((b) => ({ label: bucketLabel(b.bucket, bucketKind), value: b.count }));
   const durations = asArray<{ bucket: string; count: number }>(d?.duration_histogram)
     .map((b) => ({ label: b.bucket, value: b.count }));
+  const submitWaits = asArray<{ bucket: string; count: number }>(d?.submit_wait_histogram)
+    .map((b) => ({ label: b.bucket, value: b.count }));
   const reasons = asArray<{ reason_code: string; count: number }>(d?.failure_reasons);
   return (
     <Card>
@@ -87,7 +89,7 @@ export function JobStatsSection() {
       </div>
       {q.isLoading && <p className="text-muted text-sm">불러오는 중…</p>}
       <p className="text-sm">성공률 {successRate(byState)}</p>
-      <div className="grid md:grid-cols-2 gap-4 mt-3">
+      <div className="grid md:grid-cols-3 gap-4 mt-3">
         <div>
           <h3 className="font-medium mb-2 text-sm">처리량</h3>
           <BarChart data={throughput} label="처리량" />
@@ -95,6 +97,17 @@ export function JobStatsSection() {
         <div>
           <h3 className="font-medium mb-2 text-sm">수행시간 분포</h3>
           <BarChart data={durations} label="수행시간 분포" />
+        </div>
+        <div>
+          <h3 className="font-medium mb-2 text-sm">제출 대기 분포</h3>
+          <BarChart data={submitWaits} label="제출 대기 분포" />
+          {/* 수행시간(created_at -> updated_at)은 이 대기를 포함한 전체 수명이다 --
+              나란히 놓인 두 분포의 포함 관계를 화면에 명시한다(설계 §2.4). 제외
+              건수(NULL)는 백필 공백 -- 숨기지 않는다(설계 §3). 한 개의 템플릿
+              리터럴 = 한 개의 텍스트 노드(getByText 가 통으로 찾도록). */}
+          <p className="text-muted text-xs mt-1">
+            {`집계 ${d?.submit_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.submit_wait_excluded ?? 0}건 — 수행시간 분포는 이 대기를 포함합니다`}
+          </p>
         </div>
       </div>
       <div className="grid md:grid-cols-3 gap-4 mt-4">

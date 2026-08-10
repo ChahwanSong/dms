@@ -135,9 +135,9 @@ export function RequestDetail() {
   // 전체를 무방어 인덱싱(`transitions[len-1]`)으로 죽인 적이 있다. ErrorBoundary가
   // 있어도 애초에 안 죽는 편이 낫다(경계는 최후의 방어선이지 정상 경로가 아니다).
   const transitions = Array.isArray(data.transitions) ? data.transitions : [];
-  // 큐 대기(슬라이스 14 설계 §2.3): runs 테이블이 죽어 있어 첫 비-Pending 전이
-  // (planner가 집어간 시각) − created_at으로 유도한다. 전역 집계는 전기간
-  // state_transitions 풀스캔이라 금지 -- 이 화면에서만 계산한다.
+  // 제출 대기(슬라이스 17이 슬라이스 14의 「큐 대기」 라벨을 정정 -- 설계 §2.4):
+  // 이 값은 요청 Pending -> 첫 비-Pending 전이(플래너 픽업)의 지연이지 Volcano 큐
+  // 대기가 아니다. 진짜 Volcano 대기는 대시보드 큐 카드(라이브 PodGroup)에만 있다.
   const firstPickup = transitions.find((t) => t.to_state !== "Pending");
   const end = transitions[transitions.length - 1]?.at ?? data.updated_at;
   // 잡이 하나도 없을 때만 요청 단위 취소를 보여준다 — 잡이 있으면 잡 단위 취소가 그 역할을 한다.
@@ -153,7 +153,7 @@ export function RequestDetail() {
         </div>
         <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-3">
           <dt className="text-muted">요청자</dt><dd>{data.requester_id}</dd>
-          <dt className="text-muted">큐 대기</dt>
+          <dt className="text-muted">제출 대기</dt>
           <dd>{durationText(data.created_at, firstPickup?.at)}</dd>
           <dt className="text-muted">수행시간</dt><dd>{durationText(data.created_at, end)}</dd>
         </dl>

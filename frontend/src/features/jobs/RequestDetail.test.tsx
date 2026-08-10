@@ -286,7 +286,10 @@ test("shows a truncation notice when events_truncated is true", async () => {
   expect(within(card).getByText(/100건/)).toBeInTheDocument();
 });
 
-test("큐 대기를 첫 비-Pending 전이에서 유도해 보여준다", async () => {
+test("제출 대기를 첫 비-Pending 전이에서 유도해 보여준다", async () => {
+  // 슬라이스 17이 슬라이스 14의 「큐 대기」 라벨을 정정했다(설계 §2.4): 이 값은
+  // 플래너 픽업 지연이지 Volcano 큐 대기가 아니다 -- 옛 라벨은 사용자가 "Volcano
+  // 큐에서 기다린 시간"으로 읽는다.
   server.use(
     http.get("/api/user/requests/r1", () => HttpResponse.json({
       ...REQUEST,
@@ -300,11 +303,12 @@ test("큐 대기를 첫 비-Pending 전이에서 유도해 보여준다", async 
     http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(JOBS)),
   );
   renderAt();
-  expect(await screen.findByText("큐 대기")).toBeInTheDocument();
+  expect(await screen.findByText("제출 대기")).toBeInTheDocument();
   expect(screen.getByText("1분 30초")).toBeInTheDocument();
+  expect(screen.queryByText("큐 대기")).toBeNull();   // 옛 라벨이 되살아나면 회귀
 });
 
-test("실행 전이가 아직 없으면 큐 대기는 —", async () => {
+test("실행 전이가 아직 없으면 제출 대기는 —", async () => {
   server.use(
     http.get("/api/user/requests/r1", () => HttpResponse.json({
       ...REQUEST, state: "Pending",
@@ -315,6 +319,6 @@ test("실행 전이가 아직 없으면 큐 대기는 —", async () => {
     http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
   );
   renderAt();
-  const dt = await screen.findByText("큐 대기");
+  const dt = await screen.findByText("제출 대기");
   expect(dt.nextElementSibling).toHaveTextContent("—");
 });
