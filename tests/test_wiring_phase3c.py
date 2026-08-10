@@ -2,8 +2,8 @@ from dms.build_runner import BuildRunner, StubBuildRunner
 from dms.config import Settings
 from dms.execution import StubExecutionAdapter
 from dms.execution_volcano import VolcanoExecutionAdapter
-from dms.repositories import Repositories
 from dms.queue_reader import StubQueueReader, VolcanoQueueReader
+from dms.repositories import Repositories
 from dms.rollout_runner import RolloutRunner, StubRolloutRunner
 from dms.wiring import (build_build_runner, build_execution_adapter,
                         build_identity_resolver, build_queue_reader,

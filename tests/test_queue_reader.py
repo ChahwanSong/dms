@@ -93,6 +93,14 @@ def test_stub_pair_is_deterministic_without_cluster():
 # ---- KubernetesClient.get_queue / list_podgroups ----
 
 class _FakeCustom:
+    """호출마다 **어느 메서드가 불렸는지**를 op 태그로 함께 기록한다
+    (test_rollout_runner 의 _FakeApps 가 Deployment/DaemonSet 라우팅 실수를 잡으려
+    쓰는 것과 같은 패턴). 태그 없이 위치 인자만 모으면 두 호출의 모양이
+    (group, version, ?, ?) 로 우연히 같아서 구분이 사라진다 -- 실제로 get_queue 를
+    list_namespaced_custom_object 로 바꿔치기해도 전 테스트가 초록이었다.
+    queues 는 cluster-scoped GET, podgroups 는 namespaced LIST 로 스코프 자체가
+    다르므로, 뒤바뀌면 런타임에 엉뚱한 엔드포인트를 때린다."""
+
     def __init__(self, *, fail_status=None, result=None):
         self.calls = []
         self._fail = fail_status
@@ -105,12 +113,12 @@ class _FakeCustom:
             raise exc
 
     def get_cluster_custom_object(self, group, version, plural, name, **kw):
-        self.calls.append((group, version, plural, name, kw))
+        self.calls.append(("get_cluster", group, version, plural, name, kw))
         self._maybe_fail()
         return self._result
 
     def list_namespaced_custom_object(self, group, version, namespace, plural, **kw):
-        self.calls.append((group, version, namespace, plural, kw))
+        self.calls.append(("list_namespaced", group, version, namespace, plural, kw))
         self._maybe_fail()
         return self._result
 
@@ -125,9 +133,12 @@ def _k8s(custom):
 def test_get_queue_passes_request_timeout_and_coordinates():
     custom = _FakeCustom(result={"status": {"state": "Open"}})
     assert _k8s(custom).get_queue("dms-data") == {"status": {"state": "Open"}}
-    group, version, plural, name, kw = custom.calls[0]
-    assert (group, version, plural, name) == (
-        "scheduling.volcano.sh", "v1beta1", "queues", "dms-data")
+    op, group, version, plural, name, kw = custom.calls[0]
+    # op 까지 단언한다: queues 는 cluster-scoped 라 반드시 GET 이어야 하고,
+    # resourceNames 기반 RBAC 는 list 에 적용되지 않는다. 위치 인자만 보면
+    # list_namespaced_custom_object 로 바꿔도 모양이 같아 통과해 버린다.
+    assert (op, group, version, plural, name) == (
+        "get_cluster", "scheduling.volcano.sh", "v1beta1", "queues", "dms-data")
     # urllib3 기본은 무제한 -- 이 kwarg 가 빠지면 apiserver 멈춤이 5초 폴링의
     # 스레드풀을 고갈시킨다(설계 §1-8). _preload_content 를 못박은
     # test_k8s_read_pod_log 와 같은 방식으로 kwarg 자체를 고정한다.
@@ -137,9 +148,11 @@ def test_get_queue_passes_request_timeout_and_coordinates():
 def test_list_podgroups_passes_request_timeout_and_coordinates():
     custom = _FakeCustom(result={"items": []})
     assert _k8s(custom).list_podgroups("dms") == {"items": []}
-    group, version, namespace, plural, kw = custom.calls[0]
-    assert (group, version, namespace, plural) == (
-        "scheduling.volcano.sh", "v1beta1", "dms", "podgroups")
+    op, group, version, namespace, plural, kw = custom.calls[0]
+    # 반대 방향도 같이 못박는다: podgroups 는 namespaced 라 cluster-scoped GET 으로
+    # 부르면 런타임에 존재하지 않는 엔드포인트를 때린다.
+    assert (op, group, version, namespace, plural) == (
+        "list_namespaced", "scheduling.volcano.sh", "v1beta1", "dms", "podgroups")
     assert kw.get("_request_timeout") == ROLLOUT_REQUEST_TIMEOUT_SECONDS
 
 
