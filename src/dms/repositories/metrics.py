@@ -109,6 +109,22 @@ class MetricsRepository:
             if delta >= 0:
                 duration_seconds.append(delta)
 
+        # 제출 대기(슬라이스 17 설계 §2.3): NULL(백필 불가분·아직 Pending)은 집계에서
+        # 제외하고 제외 건수를 함께 낸다 -- 백필 공백을 화면에서 숨기지 않는다(설계
+        # §3). 술어는 IS NOT NULL / IS NULL 이다: COALESCE(...,0) = 0 같은 falsy
+        # 검사로 쓰면 0(같은 초 픽업이라는 정상값)이 미기록으로 새 나간다.
+        # 두 쿼리 모두 idx_data_jobs_created (created_at, submit_wait_seconds)
+        # 가 커버한다 -- 테이블을 건드리지 않는 인덱스 온리 레인지 스캔이라,
+        # 슬라이스 14 가 (B) 를 금지했던 근거(전기간 풀스캔)가 성립하지 않는다.
+        waits = self._db.query(
+            """SELECT submit_wait_seconds AS w FROM data_jobs
+               WHERE created_at BETWEEN :s AND :e
+                 AND submit_wait_seconds IS NOT NULL""", params)
+        excluded = self._db.query_one(
+            """SELECT COUNT(*) AS c FROM data_jobs
+               WHERE created_at BETWEEN :s AND :e
+                 AND submit_wait_seconds IS NULL""", params)
+
         sums = self._db.query_one(
             """SELECT SUM(files_count) AS files_total, SUM(bytes_count) AS bytes_total
                FROM data_jobs
@@ -131,6 +147,8 @@ class MetricsRepository:
             "throughput": [{"bucket": r["bucket"], "count": r["cnt"]}
                            for r in throughput],
             "duration_seconds": duration_seconds,
+            "submit_wait_seconds": [row["w"] for row in waits],
+            "submit_wait_excluded": excluded["c"],
             "files_total": sums["files_total"],
             "bytes_total": sums["bytes_total"],
         }

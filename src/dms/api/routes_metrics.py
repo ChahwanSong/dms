@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db import iso_epoch, iso_plus, utc_now_iso
 from ..manifest_tags import manifest_images, manifest_job_image
-from ..metrics_series import (bucket_chars_for, build_node_points,
+from ..metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
+                              bucket_chars_for, build_node_points,
                               clamp_window_hours, duration_histogram)
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
 from ..rollout_status import assess_daemonset, assess_deployment
@@ -59,6 +60,14 @@ def metrics_jobs(request: Request, window: int = Query(default=24)):
     # 원자료(초 목록)는 응답에 싣지 않는다 -- 프론트가 필요로 하는 것은 분포뿐이고,
     # 창이 크면 행 수만큼 커진다.
     stats["duration_histogram"] = duration_histogram(stats.pop("duration_seconds"))
+    # 제출 대기 분포(슬라이스 17): duration 과 같은 이유로 원자료 대신 분포만.
+    # counted 는 NULL 제외 후 집계 대상 건수 -- excluded 와 함께 내 화면이 백필
+    # 공백을 숨기지 못하게 한다(설계 §3). len() 그대로다: 0(같은 초 픽업)을 걸러
+    # 내는 truthy 필터를 끼우면 가장 건강한 잡이 집계 건수에서 사라진다.
+    submit_waits = stats.pop("submit_wait_seconds")
+    stats["submit_wait_counted"] = len(submit_waits)
+    stats["submit_wait_histogram"] = duration_histogram(
+        submit_waits, buckets=SUBMIT_WAIT_BUCKETS, overflow=SUBMIT_WAIT_OVERFLOW)
     stats["window_hours"] = hours
     stats["bucket"] = "hour" if chars == 13 else "day"
     return stats

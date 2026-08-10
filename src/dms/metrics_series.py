@@ -113,18 +113,29 @@ def build_node_points(samples: list[dict]) -> list[dict]:
 DURATION_BUCKETS = (("<1m", 60), ("1-10m", 600), ("10-60m", 3600),
                     ("1-6h", 21600), ("6-24h", 86400))
 
+# 제출 대기(슬라이스 17)의 버킷. 수행시간 버킷(<1m 시작)을 그대로 쓰면 플래너 틱
+# (10s)+스테퍼 틱(5s) 안에 끝나는 정상 대기가 전부 첫 버킷에 뭉쳐 분포가 사라진다 --
+# 정상(<30s), 유예·지연(30s-5m: 신원 전파 유예 기본 300s), 백로그(>5m)가 구분되는
+# 경계로 자른다.
+SUBMIT_WAIT_BUCKETS = (("<10s", 10), ("10-30s", 30), ("30-60s", 60),
+                       ("1-5m", 300), ("5-30m", 1800))
+SUBMIT_WAIT_OVERFLOW = ">30m"
 
-def duration_histogram(seconds: list) -> list[dict]:
-    counts = [0] * (len(DURATION_BUCKETS) + 1)
+
+def duration_histogram(seconds: list, *, buckets=DURATION_BUCKETS,
+                       overflow=">24h") -> list[dict]:
+    counts = [0] * (len(buckets) + 1)
     for value in seconds:
         v = _num(value)
+        # `if not v` 가 아니다 -- 0 은 버려야 할 결측이 아니라 실제 값이다(제출
+        # 대기의 시각 해상도가 1초라 같은 초 픽업이 정상적으로 0 을 기록한다).
         if v is None or v < 0:
             continue
-        for i, (_, upper) in enumerate(DURATION_BUCKETS):
+        for i, (_, upper) in enumerate(buckets):
             if v < upper:
                 counts[i] += 1
                 break
         else:
             counts[-1] += 1
-    labels = [label for label, _ in DURATION_BUCKETS] + [">24h"]
+    labels = [label for label, _ in buckets] + [overflow]
     return [{"bucket": label, "count": counts[i]} for i, label in enumerate(labels)]

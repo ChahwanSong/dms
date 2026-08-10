@@ -402,3 +402,35 @@ def test_metrics_queue_403_on_podgroups_axis_keeps_queue(client):
     assert r.status_code == 200
     assert r.json() == {"queue": {"name": "dms-data", "state": "Closed"},
                         "podgroups": None}
+
+
+def test_metrics_jobs_submit_wait_distribution_and_counts(client, db):
+    repos = Repositories(db)
+    now = utc_now_iso()
+    rid = _seed_job(db, repos, created_at=iso_plus(now, -3600))
+    _seed_job(db, repos, created_at=iso_plus(now, -1800))              # NULL 유지
+    db.execute("UPDATE data_jobs SET submit_wait_seconds = 12 WHERE request_id = :r",
+               {"r": rid})
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    hist = {b["bucket"]: b["count"] for b in body["submit_wait_histogram"]}
+    assert list(hist) == ["<10s", "10-30s", "30-60s", "1-5m", "5-30m", ">30m"]
+    assert hist["10-30s"] == 1
+    assert body["submit_wait_counted"] == 1
+    assert body["submit_wait_excluded"] == 1     # NULL 잡의 제외를 표면화(설계 §3)
+    assert "submit_wait_seconds" not in body     # 원자료는 내보내지 않는다(duration 규칙)
+
+
+def test_metrics_jobs_submit_wait_zero_counts_toward_the_total(client, db):
+    # 라우트 층의 falsy 함정: counted 를 `len([w for w in waits if w])` 로 세거나
+    # 원자료를 `waits or []` 로 다루면 0(같은 초 픽업 = 가장 건강한 잡)이 사라져
+    # "N건 중 M건 집계"의 M 이 조용히 줄고 첫 버킷이 빈다. 0 은 결측이 아니다.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    rid = _seed_job(db, repos, created_at=iso_plus(now, -3600))
+    db.execute("UPDATE data_jobs SET submit_wait_seconds = 0 WHERE request_id = :r",
+               {"r": rid})
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    hist = {b["bucket"]: b["count"] for b in body["submit_wait_histogram"]}
+    assert hist["<10s"] == 1
+    assert body["submit_wait_counted"] == 1
+    assert body["submit_wait_excluded"] == 0

@@ -148,3 +148,33 @@ def test_duration_histogram_fixed_buckets():
         {"bucket": "<1m", "count": 1}, {"bucket": "1-10m", "count": 0},
         {"bucket": "10-60m", "count": 1}, {"bucket": "1-6h", "count": 0},
         {"bucket": "6-24h", "count": 0}, {"bucket": ">24h", "count": 1}]
+
+
+def test_duration_histogram_accepts_custom_buckets():
+    # 제출 대기(슬라이스 17)는 플래너 틱(10s)·스테퍼 틱(5s) 규모다 -- 수행시간
+    # 버킷(<1m 시작)을 그대로 쓰면 정상 대기가 전부 첫 버킷에 뭉쳐 분포가
+    # 사라진다. 경계는 정상(<30s)/유예·지연(30s-5m: 신원 전파 유예 기본 300s)/
+    # 백로그(>5m)를 가른다.
+    from dms.metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
+                                    duration_histogram)
+    hist = duration_histogram([5, 45, 2000], buckets=SUBMIT_WAIT_BUCKETS,
+                              overflow=SUBMIT_WAIT_OVERFLOW)
+    assert {b["bucket"]: b["count"] for b in hist} == {
+        "<10s": 1, "10-30s": 0, "30-60s": 1, "1-5m": 0, "5-30m": 0, ">30m": 1}
+    # 기본 호출(수행시간)은 파라미터화 전과 완전히 같아야 한다 -- 기존 테스트
+    # test_duration_histogram_fixed_buckets 가 그 절반을 지키고, 여기는 라벨 순서.
+    assert [b["bucket"] for b in duration_histogram([])] == [
+        "<1m", "1-10m", "10-60m", "1-6h", "6-24h", ">24h"]
+
+
+def test_duration_histogram_counts_zero_as_a_real_value():
+    # 제출 대기의 시각 해상도는 1초다 -- 스테퍼가 같은 초 안에 픽업하면 0 이
+    # **정상 기록**이지 결측이 아니다. 스킵 가드가 `if not v` 였다면 0 이
+    # 음수·None 과 한 덩어리로 버려져 첫 버킷이 통째로 비고, 가장 건강한 잡들만
+    # 분포에서 사라진다(= 제출 대기가 실제보다 나빠 보인다).
+    from dms.metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
+                                    duration_histogram)
+    hist = duration_histogram([0, 0, -1, None], buckets=SUBMIT_WAIT_BUCKETS,
+                              overflow=SUBMIT_WAIT_OVERFLOW)
+    assert {b["bucket"]: b["count"] for b in hist}["<10s"] == 2
+    assert sum(b["count"] for b in hist) == 2    # 음수·None 만 빠진다
