@@ -1,6 +1,6 @@
 """data_jobs + plans 저장소: planner가 emit하고 stepper(3b)가 전진시키는 잡 레코드."""
 import uuid
-from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
+from ..db import Database, dump_json, iso_epoch, iso_plus, load_json, utc_now_iso
 from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
                       TERMINAL_REQUEST_STATES)
 from .observability import ObservabilityRepository
@@ -131,7 +131,8 @@ class DataJobsRepository:
         guard_tripped = False
         with self._db.transaction():
             current = self._db.query_one(
-                "SELECT state, request_id FROM data_jobs WHERE job_id = :j", {"j": job_id})
+                """SELECT state, request_id, created_at, queue_wait_seconds
+                   FROM data_jobs WHERE job_id = :j""", {"j": job_id})
             if current is None:
                 raise KeyError(job_id)
             if DataJobState(current["state"]) in TERMINAL_DATA_JOB_STATES:
@@ -142,10 +143,26 @@ class DataJobsRepository:
                 # 기록하지 않는다 -- 진단 이벤트는 트랜잭션 밖에서(아래) 남긴다.
                 guard_tripped = True
             else:
+                # 제출 대기(슬라이스 17 설계 §2.3): Pending -> 첫 비-Pending 엣지에서만
+                # 계산해 한 번 쓴다(write-once). IS NULL 가드는 이중 안전장치다 --
+                # 상태 기계상 Pending 재진입은 없지만, 생겨도 덮어쓰지 않는다.
+                queue_wait = current["queue_wait_seconds"]
+                if (queue_wait is None
+                        and current["state"] == DataJobState.PENDING.value
+                        and to_state is not DataJobState.PENDING):
+                    try:
+                        # 시계 스큐(다른 프로세스가 쓴 created_at)로 음수가 나올 수
+                        # 있다 -- 1초 해상도 세계에서 0 으로 접는 것이 정직하다.
+                        queue_wait = max(
+                            0, int(iso_epoch(now) - iso_epoch(current["created_at"])))
+                    except (TypeError, ValueError):
+                        queue_wait = None   # 시각이 깨졌으면 지어내지 않는다(NULL)
                 self._db.execute(
-                    """UPDATE data_jobs SET state = :s, reason_code = :rc, updated_at = :now
+                    """UPDATE data_jobs SET state = :s, reason_code = :rc,
+                           updated_at = :now, queue_wait_seconds = :qw
                        WHERE job_id = :j""",
-                    {"s": to_state.value, "rc": reason_code, "now": now, "j": job_id})
+                    {"s": to_state.value, "rc": reason_code, "now": now,
+                     "qw": queue_wait, "j": job_id})
                 self._record_transition("data_job", job_id, DataJobState(current["state"]),
                                         to_state, reason_code, actor, now)
         if guard_tripped:

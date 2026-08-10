@@ -1,5 +1,5 @@
 """전체 스키마. CREATE TABLE IF NOT EXISTS 선언 스크립트 — 스펙 §4 도메인 모델의 20개 테이블."""
-from .db import Database, utc_now_iso
+from .db import Database, iso_epoch, utc_now_iso
 
 ALL_TABLES = (
     "requests", "plans", "runs", "results", "state_transitions",
@@ -163,6 +163,13 @@ def _apply_migrations(db: Database) -> None:
             precondition TEXT,
             confirmed_fingerprint TEXT,
             phase_refs TEXT,
+            -- 제출 대기(슬라이스 17 설계 §2.3): Pending -> 첫 비-Pending 전이까지의
+            -- 초. set_job_state 가 그 엣지에서 한 번만 쓴다(write-once). 컬럼명과
+            -- 달리 Volcano 큐 대기가 아니라 DMS 내부 픽업 지연이다 -- 화면 라벨은
+            -- "제출 대기"로 정직하게 붙인다(설계 §2.4). NULL = 기록 전(아직
+            -- Pending/백필 불가분/시각 오염) -- 집계에서 제외하고 제외 건수를
+            -- 표면화한다. BIGINT 는 files_count 와 같은 규약(두 경로 동일 선언형).
+            queue_wait_seconds BIGINT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
@@ -306,6 +313,14 @@ def _apply_migrations(db: Database) -> None:
     # requests.batch_id는 CREATE TABLE(신규 DB) 또는 _ensure_columns의 ALTER(구형 DB)로
     # 보강된 뒤에만 존재가 보장되므로, 이 인덱스는 그 이후에 생성한다.
     db.execute("CREATE INDEX IF NOT EXISTS idx_requests_batch ON requests (batch_id)")
+    # queue_wait_seconds 는 CREATE(신규) 또는 _ensure_columns(구형)로 보강된 뒤에만
+    # 존재하므로 이 인덱스도 그 이후다(idx_requests_batch 와 같은 이유).
+    # (created_at, queue_wait_seconds) 커버링: 제출 대기 집계 2쿼리가 인덱스만 읽고,
+    # 덤으로 기존 created_at BETWEEN 집계 7개(repositories/metrics.py)가 풀스캔에서
+    # 레인지 스캔이 된다 -- 이 슬라이스는 읽기 비용의 순증이 아니라 순감이다(설계 §2.3).
+    db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_created"
+               " ON data_jobs (created_at, queue_wait_seconds)")
+    _backfill_queue_wait(db)
     db.execute(
         """INSERT INTO schema_migrations (version, applied_at)
            SELECT :v, :at WHERE NOT EXISTS
@@ -390,6 +405,9 @@ def _ensure_columns(db):
         # SQLite에선 INTEGER와 affinity가 같아 기존 DB에 아무 변화가 없다.
         ("data_jobs", "files_count", "BIGINT"),
         ("data_jobs", "bytes_count", "BIGINT"),
+        # 슬라이스 17 제출 대기 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스 14 의
+        # 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
+        ("data_jobs", "queue_wait_seconds", "BIGINT"),
         ("requests", "batch_id", "TEXT"),
         ("control_state", "build_node_name", "TEXT"),
         ("builds", "log_text", "TEXT"),
@@ -400,3 +418,32 @@ def _ensure_columns(db):
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
+def _backfill_queue_wait(db):
+    """queue_wait_seconds one-shot 백필(설계 §2.3). state_transitions 에서 잡별
+    Pending -> 첫 전이 시각을 찾아 created_at 과의 차를 채운다. NULL 행만 채우므로
+    멱등이다 -- migrate 는 파드 기동마다(initContainer) 재실행되고, 이미 채워진
+    값을 재계산하면 write-once 계약이 마이그레이션 경로로 우회된다. 잔여 NULL 은
+    아직 Pending 인 잡뿐이라(조인이 걸러 낸다) 재실행 비용은 무시할 수준이다.
+    시각 산술은 SQL 로 이식 불가(julianday=SQLite, EXTRACT=PG 전용) -- 파이썬에서
+    빼고 행별 UPDATE 를 친다. 마이그레이션 1회 경로라 허용한다(폴링 경로가 아니고,
+    PG 어드바이저리 락 안이라 동시 기동과도 경합하지 않는다)."""
+    rows = db.query(
+        """SELECT d.job_id, d.created_at, MIN(t.at) AS picked_at
+           FROM data_jobs d
+           JOIN state_transitions t
+             ON t.entity_kind = 'data_job' AND t.entity_id = d.job_id
+                AND t.from_state = 'Pending'
+           WHERE d.queue_wait_seconds IS NULL
+           GROUP BY d.job_id, d.created_at""")
+    for row in rows:
+        try:
+            wait = int(iso_epoch(row["picked_at"]) - iso_epoch(row["created_at"]))
+        except (TypeError, ValueError):
+            continue          # 시각이 깨진 행은 NULL 로 남긴다(집계 제외 -- 설계 §4)
+        if wait < 0:
+            continue          # 시계 역행/오염 -- 값을 지어내느니 NULL 이 정직하다
+        db.execute(
+            "UPDATE data_jobs SET queue_wait_seconds = :w WHERE job_id = :j",
+            {"w": wait, "j": row["job_id"]})
