@@ -64,3 +64,19 @@ def test_disabled_storage_skipped(db):
                           managed_root="/mnt/ceph/dms", backend_type="cephfs",
                           enabled=False, actor="admin")
     assert reconcile_storages_once(repos, stale_seconds=300, now_iso=NOW) == {}
+
+
+def test_artifact_base_report_field_does_not_touch_storages(db):
+    # 슬라이스 18 최대 함정의 반대편 가드: 별도 필드 artifact_base 는 리콘사일러가
+    # 완전히 무시해야 한다 -- 훗날 누가 이 프로브를 mounts 로 옮기면(또는
+    # 리콘사일러가 이 필드를 읽기 시작하면) 스토리지 판정이 오염되는 그 순간을
+    # 여기서 잡는다. (현행 고정 테스트라 RED 없이 통과한다 -- 의도된 것.)
+    repos = _setup(db, {"n1": [_mount("Ready")]})
+    repos.agents.ingest("n2", {"node_name": "n2", "mounts": [],
+                               "artifact_base": {"path": "/cephfs/dms/artifacts",
+                                                 "exists": True, "writable": True}},
+                        reported_at="2026-08-02T09:59:00Z")
+    result = reconcile_storages_once(repos, stale_seconds=300, now_iso=NOW)
+    # n2 의 base 프로브는 ceph-a 판정에 아무 영향이 없다: mounts 증거는 n1 뿐.
+    assert result == {"ceph-a": "Ready"}
+    assert repos.storages.get("ceph-a")["status_detail"] == "ready_nodes=1"

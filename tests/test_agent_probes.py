@@ -299,3 +299,18 @@ def test_probe_os_metrics_reads_injected_net_dev_path():
                            statvfs=lambda p: None,
                            net_dev_path="/host/proc/1/net/dev")
     assert out["network_rx_bytes"] == 1500 and out["network_tx_bytes"] == 2700
+
+
+def test_probe_artifact_base_reports_exists_and_writable():
+    # 슬라이스 18(설계 §2.4b): exists 는 hostPath type: Directory 기동 가능 여부의
+    # 직접 신호이고, writable 은 에이전트 프로세스 uid 기준의 정직한 한계 표기다.
+    from dms.agent.probes import probe_artifact_base
+    r = probe_artifact_base("/base", isdir=lambda p: True,
+                            access=lambda p, mode: False)
+    assert r == {"path": "/base", "exists": True, "writable": False}
+    r = probe_artifact_base("/nope", isdir=lambda p: False,
+                            access=lambda p, mode: True)
+    # 존재하지 않으면 writable 도 False 다(없는 디렉터리에 쓸 수 없다)
+    assert r == {"path": "/nope", "exists": False, "writable": False}
+    assert probe_artifact_base(None) is None
+    assert probe_artifact_base("") is None

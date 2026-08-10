@@ -59,3 +59,14 @@ def test_report_is_persisted(client, db):
     client.post("/api/agent/report", json=REPORT, headers=_agent_headers())
     assert db.query_one("SELECT node_name FROM agent_nodes")["node_name"] == "node-a"
     assert len(db.query("SELECT id FROM agent_reports")) == 1
+
+
+def test_report_response_carries_artifact_base_path(client, db):
+    # 하달 경로(설계 §2.4b): 스킴 제거된 파일시스템 경로 -- 에이전트 프로브는
+    # os.path 만 안다. DB 설정이 env 를 이긴다(resolve 와 같은 규칙).
+    r = client.post("/api/agent/report", json=REPORT, headers=_agent_headers())
+    assert r.json()["artifact_base_path"] == "/artifacts/dms"
+    from dms.repositories import Repositories
+    Repositories(db).control.set_artifact_base("file:///new/base", actor="ops")
+    r = client.post("/api/agent/report", json=REPORT, headers=_agent_headers())
+    assert r.json()["artifact_base_path"] == "/new/base"

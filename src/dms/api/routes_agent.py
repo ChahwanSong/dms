@@ -2,6 +2,7 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from ..artifact_base import resolve_artifact_base, strip_scheme
 from .auth import Identity, require_user
 
 router = APIRouter()
@@ -28,4 +29,9 @@ def ingest_report(body: dict, request: Request,
         "identity_probe_targets": repos.control.probe_targets(
             ttl_seconds=settings.identity_probe_ttl_seconds),
         "report_interval_seconds": settings.agent_report_interval_seconds,
+        # 슬라이스 18(설계 §2.4b): 에이전트는 ConfigMap 을 envFrom 으로 받지 않아
+        # (50-agent-daemonset.yaml) base 를 아는 유일한 경로가 이 응답이다.
+        # 스킴을 벗겨 내린다 -- 에이전트 프로브는 os.path 만 안다.
+        "artifact_base_path": strip_scheme(
+            resolve_artifact_base(repos.control, settings)),
     }

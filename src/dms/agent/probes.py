@@ -89,6 +89,25 @@ def probe_identities(usernames, *, getpwnam=pwd.getpwnam, getgrall=grp.getgrall)
     return results
 
 
+def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access):
+    """아티팩트 base 프로브(슬라이스 18 설계 §2.4b). **mounts 배열에 섞지 않는다**:
+    reconciler 가 mounts 를 storage_name 기준으로 storages.status 에 매핑하므로
+    섞으면 스토리지 판정이 오염된다 -- 리포트 최상위의 별도 필드로만 나른다
+    (build_report 참고).
+
+    exists 가 핵심 신호다: 잡 파드 hostPath 는 type: Directory 강제라
+    (execution_manifests) 디렉터리가 없는 노드에서는 파드가 기동 자체를 실패한다.
+    writable 은 **에이전트 프로세스 uid** 의 W_OK 지 잡 파드 요청자 uid 가 아니다
+    -- 정직한 한계로 화면이 문구로 표기한다. probe_mounts 의 status 판정이
+    writable 을 반영하지 않는 것과 같은 이유로, 소비자는 status 같은 요약이 아니라
+    이 두 필드를 직접 본다."""
+    if not path:
+        return None    # 서버가 아직 대상을 내리지 않았다(부트스트랩) -- 모름
+    exists = bool(isdir(path))
+    return {"path": path, "exists": exists,
+            "writable": exists and bool(access(path, os.W_OK))}
+
+
 def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
                      net_dev_path="/proc/net/dev", virtual_net_path=""):
     metrics = {"load1": None, "load5": None, "load15": None,
