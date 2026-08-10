@@ -3,9 +3,11 @@ from dms.config import Settings
 from dms.execution import StubExecutionAdapter
 from dms.execution_volcano import VolcanoExecutionAdapter
 from dms.repositories import Repositories
+from dms.queue_reader import StubQueueReader, VolcanoQueueReader
 from dms.rollout_runner import RolloutRunner, StubRolloutRunner
 from dms.wiring import (build_build_runner, build_execution_adapter,
-                        build_identity_resolver, build_rollout_runner)
+                        build_identity_resolver, build_queue_reader,
+                        build_rollout_runner)
 
 BASE = {"DMS_DATABASE_URL": "sqlite:///tmp/x.db", "DMS_SHARED_TOKEN": "t",
         "DMS_ADMIN_TOKEN": "a", "DMS_SESSION_SECRET": "s"}
@@ -59,3 +61,19 @@ def test_rollout_runner_builds_runner_when_volcano():
     runner = build_rollout_runner(settings)
     assert isinstance(runner, RolloutRunner)
     assert runner._ns == settings.k8s_namespace
+
+
+def test_queue_reader_is_stub_when_backend_is_not_volcano():
+    # 기본 백엔드(stub)에서 스텁 페어가 안 꽂히면 conftest 의 create_app 경로
+    # 전부가 /api/admin/metrics/queue 에서 500 이다(설계 §2.5).
+    settings = Settings.from_env(BASE)
+    assert isinstance(build_queue_reader(settings), StubQueueReader)
+
+
+def test_queue_reader_builds_volcano_reader_when_volcano():
+    settings = Settings.from_env({**BASE, "DMS_EXECUTION_BACKEND": "volcano",
+                                  "DMS_JOB_IMAGE": "reg/img:1"})
+    reader = build_queue_reader(settings)
+    assert isinstance(reader, VolcanoQueueReader)
+    assert reader._namespace == settings.k8s_namespace
+    assert reader._queue == "dms-data"

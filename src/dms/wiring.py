@@ -47,3 +47,15 @@ def build_rollout_runner(settings):
     from .rollout_runner import RolloutRunner
     return RolloutRunner(KubernetesClient(settings.k8s_namespace),
                          namespace=settings.k8s_namespace)
+
+
+def build_queue_reader(settings):
+    # StubRolloutRunner 와 같은 선택 규칙(설계 §2.5): 기본 백엔드(stub)에서 스텁
+    # 페어가 없으면 /api/admin/metrics/queue 가 모든 로컬·CI 에서 500 이다.
+    if settings.execution_backend != "volcano":
+        from .queue_reader import StubQueueReader
+        return StubQueueReader()
+    from .execution_volcano import KubernetesClient
+    from .queue_reader import VolcanoQueueReader
+    return VolcanoQueueReader(KubernetesClient(settings.k8s_namespace),
+                              namespace=settings.k8s_namespace)

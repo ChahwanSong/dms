@@ -415,3 +415,37 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
                 "waiting_reason": reason,
             })
         return briefs
+
+    # 슬라이스 17(큐 가시성): scheduling.volcano.sh 는 잡 제출용 _VC(batch.volcano.sh)
+    # 와 다른 그룹이다. queues 는 cluster-scoped, podgroups 는 namespaced.
+    _SCHED = {"group": "scheduling.volcano.sh", "version": "v1beta1"}
+
+    def get_queue(self, name):
+        """이름 지정 Queue GET. 404 는 None 으로 접는다: CRD 부재(Volcano 미설치)
+        또는 큐 오브젝트 부재 -- 어느 쪽도 "빈 큐"가 아니라 "알 수 없음"이다(설계
+        §4). _request_timeout 필수: urllib3 기본은 무제한이라 5초 폴링 라우트가
+        apiserver 멈춤에 스레드풀째 매달린다(설계 §1-8)."""
+        self._ensure()
+        try:
+            return self._custom.get_cluster_custom_object(
+                self._SCHED["group"], self._SCHED["version"], "queues", name,
+                _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
+        except Exception as exc:
+            if getattr(exc, "status", None) == 404:
+                return None
+            self._log_forbidden("get", "Queue", name, "-", exc)
+            raise
+
+    def list_podgroups(self, namespace):
+        """네임스페이스 PodGroup list(필터는 리더의 몫 -- PodGroup 엔 DMS 라벨이
+        없어 셀렉터를 못 쓴다). 404 접기·타임아웃은 get_queue 와 같은 이유."""
+        self._ensure()
+        try:
+            return self._custom.list_namespaced_custom_object(
+                self._SCHED["group"], self._SCHED["version"], namespace,
+                "podgroups", _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
+        except Exception as exc:
+            if getattr(exc, "status", None) == 404:
+                return None
+            self._log_forbidden("list", "PodGroup", "*", namespace, exc)
+            raise
