@@ -89,6 +89,32 @@ def test_no_candidates_raise():
     assert e.value.reason_code == "no_ready_sync_candidate"
 
 
+def test_no_eligible_nodes_error_carries_rejections():
+    # 플래너 유예(설계 §2.3)가 "전원이 신원 대기인가"를 예외에서 직접 읽는다 --
+    # rejections 가 안 실리면 신원 지연과 진짜 결격(미마운트)을 가를 수 없다.
+    reports = [_report("n1", mounts=[_mount("s1")], identities=("bob",))]
+    with pytest.raises(PlacementError) as e:
+        select_tool_and_candidates("scan", reports, storage_name="s1",
+                                   owner="alice", privileged=False)
+    assert e.value.reason_code == "no_eligible_nodes"
+    assert e.value.rejections == {"n1": "identity_not_ready_on_node"}
+
+
+def test_sync_no_candidate_error_carries_no_flat_rejections():
+    # sync 의 rejections 는 {"source": {...}, "destination": {...}} 중첩이라 노드별
+    # 사유의 flat dict 가 아니다. 유예 판정은 flat {node: reason} 만 읽으므로
+    # no_ready_sync_candidate 에는 아무것도 싣지 않는다 -- 빈 rejections 는
+    # 플래너에서 "신원 문제라는 증거 없음" = 즉시 거부로 떨어진다(설계 §2.3).
+    reports = [_report("n1", mounts=[_mount("src"), _mount("dst")],
+                       identities=("bob",))]
+    with pytest.raises(PlacementError) as e:
+        select_tool_and_candidates("sync", reports, source_storage="src",
+                                   destination_storage="dst", owner="alice",
+                                   privileged=False)
+    assert e.value.reason_code == "no_ready_sync_candidate"
+    assert e.value.rejections == {}
+
+
 # Task 5: 정책 fan-out 산정
 from dms.placement import TOOL_TO_POLICY, resolve_fanout
 

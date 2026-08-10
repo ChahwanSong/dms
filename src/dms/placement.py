@@ -4,9 +4,13 @@ from .domain import PRIORITIES, PRIORITY_CLASS
 
 
 class PlacementError(Exception):
-    def __init__(self, reason_code: str, detail: str = ""):
+    def __init__(self, reason_code: str, detail: str = "", *, rejections=None):
         self.reason_code = reason_code
         self.detail = detail
+        # 노드별 탈락 사유({node: reason}). 플래너의 신원 전파 유예(설계 §2.3)가
+        # "왜 0대인가"를 여기서 읽는다 -- 이것 없이는 신원 지연과 진짜 결격
+        # (미마운트·도구 없음)을 가를 수 없다.
+        self.rejections = dict(rejections or {})
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
 
 
@@ -58,14 +62,14 @@ def select_tool_and_candidates(operation, fresh_reports, *, storage_name=None,
                                     owner=owner, privileged=privileged,
                                     require_writable=False)
         if not nodes:
-            raise PlacementError("no_eligible_nodes", storage_name)
+            raise PlacementError("no_eligible_nodes", storage_name, rejections=rej)
         return {"tool": "dscan", "candidates": {"primary": nodes}, "rejections": rej}
     if operation == "rm":
         nodes, rej = eligible_nodes(fresh_reports, storage_name, tool="drm",
                                     owner=owner, privileged=privileged,
                                     require_writable=True)
         if not nodes:
-            raise PlacementError("no_eligible_nodes", storage_name)
+            raise PlacementError("no_eligible_nodes", storage_name, rejections=rej)
         return {"tool": "drm", "candidates": {"primary": nodes}, "rejections": rej}
     if operation == "sync":
         src_dsync, rej_s = eligible_nodes(fresh_reports, source_storage, tool="dsync",
@@ -89,6 +93,10 @@ def select_tool_and_candidates(operation, fresh_reports, *, storage_name=None,
             return {"tool": "nsync",
                     "candidates": {"source": src_n, "destination": dst_n},
                     "rejections": rejections}
+        # rejections 를 싣지 않는다: sync 의 것은 {"source": {...},
+        # "destination": {...}} 중첩이라 {node: reason} flat dict 가 아니고, 유예는
+        # no_eligible_nodes 한정이다(설계 §2.3). 빈 rejections = 증거 없음 =
+        # 플래너 즉시 거부.
         raise PlacementError("no_ready_sync_candidate")
     raise PlacementError("invalid_operation", operation)
 

@@ -2,6 +2,7 @@
 import sys
 from dataclasses import asdict
 
+from .db import iso_plus, utc_now_iso
 from .domain import Operation, RequestState
 from .identity import IdentityRejected, resolve_job_identity
 from .placement import (
@@ -43,6 +44,21 @@ class Planner:
         self._repos.requests.record_result(rid, RequestState.REJECTED,
                                             reason_code=reason)
         return f"rejected:{reason}"
+
+    def _identity_grace_active(self, req, exc, now_iso):
+        """설계 §2.3의 3중 조건: (a) 사유가 no_eligible_nodes, (b) 모든 노드의 탈락
+        사유가 identity_not_ready_on_node, (c) 요청 나이 < grace. 셋 다 참일 때만
+        유예한다. rejections 가 비면(신선한 리포트 0건) 신원 문제라는 증거가 없다 --
+        유예하지 않는다. grace 를 짧게(기본 300s -- 최악 전파 130s 의 2배 남짓) 두는
+        이유: 같은 resource_key 의 후속 요청이 find_active 에 걸려 Conflict 가 되므로
+        무한정 붙잡으면 안 된다."""
+        if exc.reason_code != "no_eligible_nodes" or not exc.rejections:
+            return False
+        if any(r != "identity_not_ready_on_node" for r in exc.rejections.values()):
+            return False
+        now = now_iso or utc_now_iso()
+        return now < iso_plus(req["created_at"],
+                              self._settings.planner_identity_grace_seconds)
 
     def _plan_one(self, rid, now_iso):
         req = self._repos.requests.get(rid)
@@ -95,6 +111,18 @@ class Planner:
                 destination_storage=payload.get("destination_storage"),
                 owner=identity.username, privileged=identity.privileged)
         except PlacementError as exc:
+            # 신원 전파만이 원인이고 grace 안이면 아무 상태도 바꾸지 않는다 -- 요청은
+            # Pending 으로 남아 다음 틱(list_pending)에 재계획된다(설계 §2.3).
+            if self._identity_grace_active(req, exc, now_iso):
+                # 유예는 관측 가능해야 한다 -- 매 유예마다 이벤트. record_event 는
+                # 절대 예외를 올리지 않으므로(observability 계약) 유예 자체는 안전하다.
+                self._repos.observability.record_event(
+                    component="planner", severity="info",
+                    event_type="identity_propagating",
+                    message=("identity not ready on: "
+                             + ", ".join(sorted(exc.rejections)))[:500],
+                    payload={"rejections": exc.rejections}, request_id=rid)
+                return "deferred:identity_propagating"
             return self._reject(rid, exc.reason_code)
         # 6. policy fan-out
         policy = self._repos.control.get_policy(TOOL_TO_POLICY[placement["tool"]])

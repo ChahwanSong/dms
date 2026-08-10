@@ -14,6 +14,10 @@ _SERVER_INT_KEYS = (
     ("DMS_AGENT_REPORT_RETENTION_DAYS", "agent_report_retention_days", 30),
     ("DMS_IDENTITY_PROBE_TTL_SECONDS", "identity_probe_ttl_seconds", 3600),
     ("DMS_PLANNER_INTERVAL_SECONDS", "planner_interval_seconds", 10),
+    # 신원 전파 유예 창(설계 §2.3). 최악 전파 ≈130s(보고 60s×2 + 플래너 10s)의 2배
+    # 남짓. 늘리기 전에: 같은 resource_key 후속 요청이 Conflict 로 죽는 시간도 같이
+    # 늘어난다(planner 의 find_active 게이트).
+    ("DMS_PLANNER_IDENTITY_GRACE_SECONDS", "planner_identity_grace_seconds", 300),
     ("DMS_STEPPER_INTERVAL_SECONDS", "stepper_interval_seconds", 5),
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
     ("DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS", "batch_orchestrator_interval_seconds", 5),
@@ -102,6 +106,7 @@ class Settings:
     agent_report_retention_days: int = 30
     identity_probe_ttl_seconds: int = 3600
     planner_interval_seconds: int = 10
+    planner_identity_grace_seconds: int = 300
     stepper_interval_seconds: int = 5
     preview_ttl_seconds: int = 86400
     artifact_base_uri: str = "file:///artifacts/dms"

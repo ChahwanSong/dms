@@ -12,6 +12,7 @@ class _Settings:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = False
     privileged_requesters = frozenset()
+    planner_identity_grace_seconds = 300
 
 
 def _seed_storage(repos, name="s1", status="Ready"):
@@ -38,6 +39,26 @@ def _seed_report(repos, node="n1", storage="s1", user="alice"):
                   for t in ("dscan", "dsync", "nsync", "drm")],
         "identities": [{"username": user, "status": "Ready"}]},
         reported_at="2026-08-02T09:59:00Z")
+
+
+def _seed_identity_pending_report(repos, node="n1", storage="s1"):
+    # 마운트·도구는 전부 Ready, 신원만 미전파 -- 유예 대상의 정확한 형태(설계 §2.3).
+    # identities 빈 목록 = 에이전트가 아직 alice 를 프로브 대상으로 못 받은 상태.
+    repos.agents.ingest(node, {
+        "node_name": node,
+        "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
+                    "status": "Ready", "writable": True}],
+        "tools": [{"name": t, "status": "Ready"}
+                  for t in ("dscan", "dsync", "nsync", "drm")],
+        "identities": []},
+        reported_at="2026-08-02T09:59:00Z")
+
+
+def _backdate(db, rid, created_at):
+    # repos.requests.create 는 created_at 을 벽시계로 넣는다 -- grace 판정을
+    # 결정적으로 만들려면 NOW(고정 시각) 기준으로 나이를 직접 심어야 한다.
+    db.execute("UPDATE requests SET created_at = :c WHERE request_id = :id",
+               {"c": created_at, "id": rid})
 
 
 def _scan_request(repos, requester="alice", key="data.scan:s1:a:ff"):
@@ -267,3 +288,84 @@ def test_worker_pool_records_rejections(db):
     _planner(repos).run_once(now_iso=NOW)
     wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
     assert wp["rejections"]  # 비어있지 않음
+
+
+def test_identity_only_rejection_defers_within_grace(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")        # 나이 120s < grace 300s
+    result = _planner(repos).run_once(now_iso=NOW)
+    assert result[rid] == "deferred:identity_propagating"
+    # 아무 상태도 바꾸지 않는다(설계 §2.3) -- Pending 으로 남아 다음 틱의
+    # list_pending 에 다시 걸린다. results 행(종단)도 물론 없다.
+    assert repos.requests.get(rid)["state"] == "Pending"
+    assert repos.data_jobs.list_jobs(request_id=rid) == []
+    # 유예는 관측 가능해야 한다 -- 매 유예마다 이벤트(설계 §2.3)
+    events = repos.observability.events_for_request(rid)
+    assert [e["event_type"] for e in events] == ["identity_propagating"]
+    assert events[0]["severity"] == "info"
+    assert events[0]["payload"] == {
+        "rejections": {"n1": "identity_not_ready_on_node"}}
+
+
+def test_identity_grace_expired_rejects(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:54:00Z")        # 나이 360s > grace 300s
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_eligible_nodes"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+
+
+def test_mixed_rejections_reject_immediately(db):
+    # 신원 대기가 섞여 있어도 다른 결격(마운트 없음)이 하나라도 있으면 즉시 거부 --
+    # 유예는 "모든 노드가 신원 대기"일 때만이다(설계 §2.3).
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_identity_pending_report(repos, node="n1")
+    repos.agents.ingest("n2", {"node_name": "n2", "mounts": [],
+        "tools": [{"name": "dscan", "status": "Ready"}], "identities": []},
+        reported_at="2026-08-02T09:59:00Z")
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")        # grace 안이어도
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_eligible_nodes"
+
+
+def test_deferred_request_plans_after_identity_propagates(db):
+    # 슬라이스 15 실증에서 실패했던 바로 그 시나리오(설계 §6-4): 첫 요청이 전파를
+    # 기다렸다가 자동 성공해야 한다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    _seed_report(repos)                                # 신원 전파 완료(alice Ready)
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
+    assert repos.requests.get(rid)["state"] == "Planned"
+
+
+def test_sync_identity_pending_rejects_immediately(db):
+    # sync 는 no_ready_sync_candidate 로 실패하고 rejections 를 싣지 않는다 --
+    # 중첩 shape({"source":..,"destination":..})은 노드별 flat dict 가 아니어서
+    # "전원이 신원 대기"를 증명할 수 없기 때문. 증거가 없으면 즉시 거부한다.
+    repos = Repositories(db)
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_policy(repos, "nsync")
+    for node, storage in (("n1", "src"), ("n2", "dst")):
+        repos.agents.ingest(node, {"node_name": node,
+            "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
+                        "status": "Ready", "writable": True}],
+            "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")],
+            "identities": []},          # 신원 미전파
+            reported_at="2026-08-02T09:59:00Z")
+    rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
+        resource_key="data.sync:src:a:dst:b:ff",
+        payload={"source_storage": "src", "source": "a",
+                 "destination_storage": "dst", "destination": "b",
+                 "options": {}, "owner_username": None}, priority="mid")
+    _backdate(db, rid, "2026-08-02T09:58:00Z")        # grace 안이어도
+    result = _planner(repos).run_once(now_iso=NOW)
+    assert result[rid] == "rejected:no_ready_sync_candidate"
+    assert repos.requests.get(rid)["state"] == "Rejected"
