@@ -104,7 +104,9 @@ class VolcanoExecutionAdapter:
             if sname:
                 mount_paths.append(self._storages(sname)["mount_path"])
         # summary.json 기록 위치 — 스킴 제거한 artifact base 도 반드시 마운트.
-        mount_paths.append(spec.artifact_base.replace("file://", ""))
+        # 접두사만 벗긴다(설계 §2.2): 전체 치환은 경로 중간의 file:// 까지 지워,
+        # 읽기 계열(strip_scheme)과 다른 디렉터리를 마운트하게 된다.
+        mount_paths.append(strip_scheme(spec.artifact_base))
         # 다른 경로가 상위(ancestor)면 하위 경로는 커버되므로 생략 — 중첩 마운트 방지.
         # 후행 슬래시로 "/cephfs" 가 "/cephfs-third" 를 잘못 삼키지 않게 함.
         minimal = []
@@ -157,9 +159,8 @@ class VolcanoExecutionAdapter:
             raise ExecutionError("submit_failed", str(exc)[:200]) from exc
         name = manifest["metadata"]["name"]
         ref = f"{prefix}/{name}"
-        base = spec.artifact_base
-        self._summary_paths[ref] = (
-            f"{base}/{spec.job_id}/{spec.phase}/summary.json".replace("file://", ""))
+        base = strip_scheme(spec.artifact_base)  # 접두사 전용(설계 §2.2)
+        self._summary_paths[ref] = f"{base}/{spec.job_id}/{spec.phase}/summary.json"
         return ref
 
     def _poll_pod(self, name) -> ExecStatus:

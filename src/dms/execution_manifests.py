@@ -2,6 +2,8 @@
 
 import json
 
+from .artifact_base import strip_scheme
+
 _SCAN_BOOL_FLAGS = {"verbose": "--verbose", "quiet": "--quiet"}
 _SCAN_VALUE_FLAGS = {"top_k": "--top-k"}
 _SYNC_BOOL_FLAGS = {"delete": "--delete", "contents": "--contents",
@@ -171,8 +173,9 @@ def _pod_volumes(volumes):
 
 def _artifact_dir(spec):
     # artifact_base는 URI(file:///cephfs/...) — 파드 안 파일 연산용으로 스킴 제거.
-    base = spec.artifact_base.replace("file://", "")
-    return f"{base}/{spec.job_id}/{spec.phase}"
+    # 접두사만 벗긴다(설계 §2.2): 전체 치환(replace)은 경로 중간의 file:// 까지
+    # 지워, 러너가 쓰는 위치가 마운트 계산·읽기 라우트와 갈라질 수 있다.
+    return f"{strip_scheme(spec.artifact_base)}/{spec.job_id}/{spec.phase}"
 
 
 def _launcher_env(spec):
