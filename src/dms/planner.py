@@ -155,7 +155,10 @@ class Planner:
                 requester_id=req["requester_id"],
                 owner_username=payload.get("owner_username"),
                 allow_privileged=self._settings.allow_privileged_requesters,
-                privileged_requesters=self._settings.privileged_requesters)
+                privileged_requesters=self._settings.privileged_requesters,
+                # 요청을 만든 인증 방식. token(또는 컬럼 미채움/NULL)은 특권을 못
+                # 얻는다 -- 기배포 DB 의 구형 행은 NULL 이라 자동으로 비특권이다.
+                session_authenticated=(req.get("auth_method") == "session"))
         except IdentityRejected as exc:
             return self._reject(rid, exc.reason_code)
         # 5. tool + candidates

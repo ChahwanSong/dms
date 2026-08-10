@@ -101,7 +101,10 @@ def submit(body: RequestBody, request: Request,
         raise HTTPException(status_code=422, detail=reason)
     rid = repos.requests.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
-        resource_key=resource_key, payload=payload, priority=priority)
+        resource_key=resource_key, payload=payload, priority=priority,
+        # 특권 승격을 session 요청에만 허용하기 위해 인증 방식을 요청에 실어 둔다
+        # (planner 가 plan 시점에 읽는다, 설계 §2.2-2).
+        auth_method=identity.auth)
     return {"request_id": rid, "state": "Pending"}
 
 

@@ -66,7 +66,10 @@ class BatchOrchestrator:
         rid = self._repos.requests.create(
             operation=batch["operation"], requester_id=batch["requester_id"],
             actor=batch["actor"], resource_key=key, payload=payload,
-            priority=priority, batch_id=batch["batch_id"])
+            priority=priority, batch_id=batch["batch_id"],
+            # 배치 자식은 기계가 materialize 하는 것이지 사람이 세션으로 낸 것이 아니다
+            # -- 특권 없이 실 신원(LDAP)로만 돈다(설계 §2.2-2, 비특권 안전 기본).
+            auth_method="token")
         self._repos.batches.set_item_materialized(batch["batch_id"], item["seq"], rid)
 
     def _drive(self, batch):

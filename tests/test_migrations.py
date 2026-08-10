@@ -335,3 +335,18 @@ def test_migrate_adds_artifact_base_columns_to_existing_control_state(db):
     # 싱글톤 시드가 살아 있고 새 컬럼은 NULL(미설정 = env 사용, 하위호환)이다
     row = db.query_one("SELECT * FROM control_state WHERE id = 1")
     assert row["artifact_base_uri"] is None
+
+
+def test_migrate_adds_auth_method_to_existing_requests(db):
+    # 구형 requests 를 흉내: auth_method 컬럼을 빼고 재생성. 한쪽(CREATE)만 넣으면
+    # 기배포 DB 는 이 컬럼이 없어 planner 의 req["auth_method"] 조회가 라이브에서만
+    # 터진다(슬라이스 14 의 실 500 교훈).
+    db.execute("DROP TABLE requests")
+    db.execute("""CREATE TABLE requests (request_id TEXT PRIMARY KEY,
+        commit_order INTEGER NOT NULL UNIQUE, operation TEXT NOT NULL,
+        requester_id TEXT NOT NULL, actor TEXT NOT NULL, resource_key TEXT NOT NULL,
+        priority TEXT NOT NULL DEFAULT 'mid', payload TEXT NOT NULL, state TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, batch_id TEXT)""")
+    from dms.migrations import migrate, _column_exists
+    migrate(db)
+    assert _column_exists(db, "requests", "auth_method")

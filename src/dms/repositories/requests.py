@@ -19,7 +19,11 @@ class RequestsRepository:
         self._db = db
 
     def create(self, *, operation, requester_id, actor, resource_key,
-               payload: dict, priority: str, batch_id=None) -> str:
+               payload: dict, priority: str, batch_id=None,
+               auth_method="token") -> str:
+        # auth_method 기본값이 "token" 인 이유(슬라이스 19, 설계 §2.2-2): 이 값을
+        # 빠뜨린 호출자는 특권 승격을 못 얻는다 -- 기본이 "session" 이면 새 생성
+        # 지점이 하나 생길 때마다 조용히 uid 0 경로가 열린다. fail-closed 가 기본.
         request_id = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
@@ -28,13 +32,13 @@ class RequestsRepository:
             self._db.execute(
                 """INSERT INTO requests (request_id, commit_order, operation, requester_id,
                        actor, resource_key, priority, payload, state, created_at, updated_at,
-                       batch_id)
+                       batch_id, auth_method)
                    VALUES (:id, :o, :op, :req, :actor, :key, :pri, :payload, :state, :now, :now,
-                       :bid)""",
+                       :bid, :auth)""",
                 {"id": request_id, "o": order, "op": operation, "req": requester_id,
                  "actor": actor, "key": resource_key, "pri": priority,
                  "payload": dump_json(payload), "state": RequestState.PENDING.value,
-                 "now": now, "bid": batch_id},
+                 "now": now, "bid": batch_id, "auth": auth_method},
             )
             self._record_transition(request_id, None, RequestState.PENDING, None, actor, now)
         return request_id
@@ -157,3 +161,18 @@ class RequestsRepository:
             return  # idempotent
         self.set_state(request_id, target, reason_code=reason_code, actor=actor)
         self.record_result(request_id, target, reason_code=reason_code, summary=summary)
+
+    def has_active_for_requester(self, requester_id) -> bool:
+        """이 requester 소유의 비종단(진행 중) 요청이 하나라도 있으면 True. 잡 신원은
+        plan 시점에 구워져(설계 §1-6) 삭제가 소급되지 않으므로, 소유자 삭제 전에
+        진행 중 요청을 막아 '소유자 없는 잡'을 예방한다. TERMINAL_REQUEST_STATES 밖의
+        상태를 NOT IN 으로 센다(find_active 와 같은 placeholder 관례)."""
+        terminal = tuple(s.value for s in TERMINAL_REQUEST_STATES)
+        placeholders = ", ".join(f":t{i}" for i in range(len(terminal)))
+        params = {f"t{i}": v for i, v in enumerate(terminal)}
+        params["req"] = requester_id
+        row = self._db.query_one(
+            f"""SELECT 1 AS x FROM requests
+                WHERE requester_id = :req AND state NOT IN ({placeholders})
+                LIMIT 1""", params)
+        return row is not None

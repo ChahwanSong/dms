@@ -64,7 +64,11 @@ def _apply_migrations(db: Database) -> None:
             state TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            batch_id TEXT)""",
+            batch_id TEXT,
+            -- 슬라이스 19: 요청을 만든 인증 방식(session/token). planner 가 특권 승격을
+            -- session 요청에만 허용하는 심층 방어에 쓴다(설계 §2.2-2). 기존 행/기본은
+            -- token(비특권) -- 승격은 명시적으로 session 일 때만.
+            auth_method TEXT)""",
         "CREATE INDEX IF NOT EXISTS idx_requests_resource ON requests (resource_key, commit_order)",
         "CREATE INDEX IF NOT EXISTS idx_requests_requester ON requests (requester_id, commit_order)",
         "CREATE INDEX IF NOT EXISTS idx_requests_state ON requests (state, commit_order)",
@@ -433,6 +437,9 @@ def _ensure_columns(db):
         # 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
         ("data_jobs", "submit_wait_seconds", "BIGINT"),
         ("requests", "batch_id", "TEXT"),
+        # 슬라이스 19: 기배포 DB 는 CREATE 를 다시 안 탄다 -- 양쪽에 넣지 않으면
+        # planner 의 req["auth_method"] 가 라이브에서만 없다(슬라이스 14 교훈).
+        ("requests", "auth_method", "TEXT"),
         ("control_state", "build_node_name", "TEXT"),
         # 슬라이스 18 아티팩트 base -- 기배포 DB 는 CREATE 를 다시 안 탄다(위
         # submit_wait_seconds 와 같은 이유: 양쪽에 넣지 않으면 라이브에서만 없다).

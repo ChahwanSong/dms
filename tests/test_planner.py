@@ -522,3 +522,43 @@ def test_repeated_defer_records_event_once_until_reason_changes(db):
     events = repos.observability.events_for_request(rid)
     assert len(events) == 2
     assert events[1]["payload"]["rejections"]["n2"] == "missing_target_mount"
+
+
+class _PrivSettings:
+    agent_report_stale_seconds = 300
+    allow_privileged_requesters = True
+    privileged_requesters = frozenset({"root"})
+    planner_identity_grace_seconds = 300
+
+
+def _root_request(repos, key, auth_method):
+    return repos.requests.create(
+        operation="scan", requester_id="root", actor="root", resource_key=key,
+        payload={"storage": "s1", "target": "a", "options": {},
+                 "owner_username": None},
+        priority="mid", auth_method=auth_method)
+
+
+def test_session_auth_root_request_runs_privileged(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos, user="root")
+    rid = _root_request(repos, "k-session", "session")
+    resolver = StubIdentityResolver(
+        {"root": ResolvedIdentity("root", 5000, 5000, (), False)})
+    Planner(repos, resolver, settings=_PrivSettings()).run_once(now_iso=NOW)
+    ident = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
+    assert ident["uid"] == 0 and ident["privileged"] is True
+
+
+def test_token_auth_root_request_never_runs_privileged(db):
+    # 설계 §2.2-2 심층 방어: 토큰 인증이면 requester_id 가 root 라도 uid 0 이 아니라
+    # LDAP 로 해석된 실제 uid 로 돈다. (Task 1 이 애초에 token 으로 requester_id=root
+    # 를 못 만들게 막지만, 다른 경로로 들어와도 여기서 다시 끊긴다.)
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos, user="root")
+    rid = _root_request(repos, "k-token", "token")
+    resolver = StubIdentityResolver(
+        {"root": ResolvedIdentity("root", 5000, 5000, (), False)})
+    Planner(repos, resolver, settings=_PrivSettings()).run_once(now_iso=NOW)
+    ident = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
+    assert ident["uid"] == 5000 and ident["privileged"] is False

@@ -113,3 +113,21 @@ def test_denylist_second_pass_on_groups(db):
                              requester_id="alice", owner_username=None,
                              allow_privileged=False, privileged_requesters=frozenset())
     assert e.value.reason_code == "identity_denied"
+
+
+def test_privileged_requires_session_auth(db):
+    # 심층 방어(설계 §2.2-2): 같은 특권 requester 라도 session 이면 root, token 이면
+    # 특권을 강제로 끈다. token 경로는 privileged 를 못 얻어 LDAP 경로로 떨어진다.
+    control = _control(db)
+    out = resolve_job_identity(control, None, requester_id="ops",
+                               owner_username="victim", allow_privileged=True,
+                               privileged_requesters=frozenset({"ops"}),
+                               session_authenticated=True)
+    assert out.privileged and out.uid == 0
+    with pytest.raises(IdentityRejected) as e:
+        resolve_job_identity(control, None, requester_id="ops",
+                             owner_username="victim", allow_privileged=True,
+                             privileged_requesters=frozenset({"ops"}),
+                             session_authenticated=False)
+    # 특권을 안 쓰므로 resolver=None 인 LDAP 경로로 떨어진다.
+    assert e.value.reason_code == "ldap_not_configured"
