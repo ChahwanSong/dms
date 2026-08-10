@@ -2,6 +2,7 @@ import { useRequests } from "../jobs/useJobs";
 import { useInfraMetrics, useJobMetrics } from "./useMetrics";
 import { NodeMetricsSection } from "./NodeMetricsSection";
 import { JobStatsSection } from "./JobStatsSection";
+import { QueueSection } from "./QueueSection";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -109,6 +110,9 @@ export function Dashboard() {
         </Card>
       </div>
       <NodeMetricsSection />
+      {/* 설계 §3: 「잡 통계」 앞 자립형 카드 -- 잡 통계와 달리 DB 가 아니라
+          라이브 PodGroup 을 본다 */}
+      <QueueSection />
       <JobStatsSection />
     </section>
   );

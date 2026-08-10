@@ -41,6 +41,9 @@ function renderDash(overrides: Record<string, unknown> = {}) {
              () => HttpResponse.json(overrides.jobs ?? JOB_METRICS)),
     http.get("/api/admin/metrics/infra",
              () => HttpResponse.json(overrides.infra ?? INFRA)),
+    http.get("/api/admin/metrics/queue",
+             () => HttpResponse.json(overrides.queue ??
+               { queue: { name: "dms-data", state: "Open" }, podgroups: [] })),
     http.get("/api/admin/metrics/nodes",
              () => HttpResponse.json({ window_hours: 24, start: "", end: "", nodes: [] })),
     http.get("/api/user/requests", () => HttpResponse.json([
@@ -118,4 +121,13 @@ test("일치하거나 매니페스트가 null이면 아무 배지도 내지 않�
   expect(await screen.findByText("dms-agent")).toBeInTheDocument();
   expect(screen.queryByText("드리프트")).toBeNull();
   expect(screen.queryByText(/되돌립니다/)).toBeNull();
+});
+
+test("큐 현황 카드가 잡 통계 앞에 뜬다", async () => {
+  renderDash();
+  const queueCard = await screen.findByText("큐 현황");
+  const jobStats = await screen.findByText("잡 통계");
+  // DOM 순서 단언(설계 §3: 「잡 통계」 앞 자립형 카드)
+  expect(queueCard.compareDocumentPosition(jobStats)
+         & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });

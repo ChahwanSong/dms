@@ -195,3 +195,19 @@ export interface InfraMetrics {
   components: InfraComponent[];
   job_image: { live: string | null; manifest: string | null };
 }
+
+// 큐 현황(슬라이스 17). null 은 서버가 "알 수 없음"(403/CRD 부재)을 명시적으로
+// 보낸 것이다 -- []("비었음")와 절대 같지 않다(설계 §4). 여기서 ?? [] 로 접으면
+// 권한 누락이 "큐가 한가함"으로 렌더된다.
+// 필드는 queue_reader.py 의 read_queue/read_podgroups 가 만드는 dict 그대로다:
+// name 은 리더가 "" 로 채워 늘 문자열이고, phase/min_member/created_at 은 k8s
+// 오브젝트에서 그대로 온 값이라 결측이면 null. wait_seconds 는 라우트가 계산해
+// 넣는다(시각이 깨진 항목만 null).
+export interface QueuePodgroup {
+  name: string; phase: string | null; min_member: number | null;
+  created_at: string | null; wait_seconds: number | null;
+}
+export interface QueueMetrics {
+  queue: { name: string; state: string | null } | null;
+  podgroups: QueuePodgroup[] | null;
+}
