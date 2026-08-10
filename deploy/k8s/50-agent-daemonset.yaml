@@ -7,19 +7,23 @@
 # Settings.from_env, so the agent needs none of DMS_DATABASE_URL/
 # DMS_ADMIN_TOKEN/DMS_SESSION_SECRET/etc -- only DMS_AGENT_API_URL,
 # DMS_SHARED_TOKEN, DMS_AGENT_NODE_NAME, DMS_AGENT_INTERVAL_SECONDS,
-# DMS_AGENT_MOUNTINFO_PATH. Blanket envFrom would needlessly expose
-# DMS_DATABASE_URL/DMS_ADMIN_TOKEN on every node.
+# DMS_AGENT_MOUNTINFO_PATH, DMS_AGENT_NET_DEV_PATH. Blanket envFrom would
+# needlessly expose DMS_DATABASE_URL/DMS_ADMIN_TOKEN on every node.
 #
 # Volume mounts:
 #   proc-mountinfo: the host init's real mount table, bind-mounted at
 #     DMS_AGENT_MOUNTINFO_PATH. Required -- the agent's OWN /proc/1/mountinfo
 #     (default path) only shows the container's mounts, so every storage
 #     would probe Missing without this.
-# (host-root /host mount REMOVED: probes.py has no code path reading under
-#  /host -- loadavg/meminfo/net-dev use plain /proc paths that already reflect
-#  the host in a container without hostPID -- so mounting the entire host
-#  filesystem was pure attack surface with no consumer. Dropped per security
-#  review.)
+#   proc-net-dev: PID 1(호스트 netns)의 net/dev. 파드 자신의 /proc/net/dev 는 자기
+#     netns(veth) 값이라 network_rx/tx_bytes 가 틀린다(슬라이스 16 설계 §2.5).
+#     hostNetwork 대안은 dnsPolicy: ClusterFirstWithHostNet 동반 변경 없이는
+#     dms-api DNS 가 죽어 보고가 조용히 영구 중단되므로 기각 -- mountinfo 와 같은
+#     hostPath File 관례를 쓴다.
+# (host-root /host mount REMOVED: loadavg/meminfo are not namespaced so plain
+#  /proc paths already reflect the host -- mounting the entire host filesystem
+#  was pure attack surface. /proc/net/* IS netns-scoped though: the in-pod
+#  value is the veth's, so net/dev alone is bind-mounted below, like mountinfo.)
 #   cephfs-dms / cephfs-third / cephfs-secondary: probe_mounts() (probes.py)
 #     checks os.path.isdir()/os.access() on the LITERAL storage["mount_path"]
 #     value returned by the API (e.g. "/cephfs"), not a /host-prefixed path
@@ -82,6 +86,8 @@ spec:
               value: "http://dms-api:8080"
             - name: DMS_AGENT_MOUNTINFO_PATH
               value: "/host/proc/1/mountinfo"
+            - name: DMS_AGENT_NET_DEV_PATH
+              value: "/host/proc/1/net/dev"
             - name: DMS_AGENT_NODE_NAME
               valueFrom:
                 fieldRef:
@@ -99,6 +105,9 @@ spec:
           volumeMounts:
             - name: proc-mountinfo
               mountPath: /host/proc/1/mountinfo
+              readOnly: true
+            - name: proc-net-dev
+              mountPath: /host/proc/1/net/dev
               readOnly: true
             - name: cephfs-dms
               mountPath: /cephfs
@@ -120,6 +129,10 @@ spec:
         - name: proc-mountinfo
           hostPath:
             path: /proc/1/mountinfo
+            type: File
+        - name: proc-net-dev
+          hostPath:
+            path: /proc/1/net/dev
             type: File
         - name: cephfs-dms
           hostPath:

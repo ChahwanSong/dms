@@ -89,7 +89,8 @@ def probe_identities(usernames, *, getpwnam=pwd.getpwnam, getgrall=grp.getgrall)
     return results
 
 
-def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs):
+def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
+                     net_dev_path="/proc/net/dev"):
     metrics = {"load1": None, "load5": None, "load15": None,
                "memory_total_kb": None, "memory_available_kb": None,
                "disks": [], "network_rx_bytes": None, "network_tx_bytes": None}
@@ -118,7 +119,11 @@ def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs):
             continue
     try:
         rx = tx = 0
-        for line in read_text("/proc/net/dev").splitlines()[2:]:
+        # /proc/net/* 는 네트워크 네임스페이스 범위다 -- 파드 안에서 기본 경로를
+        # 읽으면 veth 값이 나온다. loadavg/meminfo 는 네임스페이스되지 않아 이미
+        # 호스트 값이라 그대로 두고(설계 §2.5), 네트워크만 DaemonSet 이 마운트한
+        # PID 1 경로(/host/proc/1/net/dev)를 주입받는다 -- mountinfo 와 같은 관례.
+        for line in read_text(net_dev_path).splitlines()[2:]:
             name, _, rest = line.partition(":")
             if not rest or name.strip() == "lo":
                 continue

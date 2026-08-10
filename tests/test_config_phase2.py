@@ -30,10 +30,13 @@ def test_agent_settings_required_and_defaults(monkeypatch):
     assert s.api_url == "http://dms-api:8080"
     assert s.interval_seconds == 60
     assert s.mountinfo_path == "/proc/1/mountinfo"
+    assert s.net_dev_path == "/proc/net/dev"
     assert s.node_name  # hostname fallback은 비어있지 않다
     s2 = AgentSettings.from_env({**env, "DMS_AGENT_NODE_NAME": "node-7",
-                                 "DMS_AGENT_INTERVAL_SECONDS": "10"})
+                                 "DMS_AGENT_INTERVAL_SECONDS": "10",
+                                 "DMS_AGENT_NET_DEV_PATH": "/host/proc/1/net/dev"})
     assert s2.node_name == "node-7" and s2.interval_seconds == 10
+    assert s2.net_dev_path == "/host/proc/1/net/dev"
 
 
 def test_agent_settings_fail_closed():

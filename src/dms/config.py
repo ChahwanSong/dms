@@ -194,6 +194,7 @@ class AgentSettings:
     node_name: str
     interval_seconds: int = 60
     mountinfo_path: str = "/proc/1/mountinfo"
+    net_dev_path: str = "/proc/net/dev"
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "AgentSettings":
@@ -213,4 +214,5 @@ class AgentSettings:
             node_name=environ.get("DMS_AGENT_NODE_NAME") or socket.gethostname(),
             interval_seconds=interval,
             mountinfo_path=environ.get("DMS_AGENT_MOUNTINFO_PATH", "/proc/1/mountinfo"),
+            net_dev_path=environ.get("DMS_AGENT_NET_DEV_PATH", "/proc/net/dev"),
         )

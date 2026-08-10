@@ -140,3 +140,15 @@ def test_probe_os_metrics_with_failures_are_soft():
     out = probe_os_metrics([], read_text=broken, statvfs=lambda p: Vfs())
     assert out["load1"] is None and out["memory_total_kb"] is None
     assert out["network_rx_bytes"] is None and out["disks"] == []
+
+
+def test_probe_os_metrics_reads_injected_net_dev_path():
+    # /proc/net/* 는 netns 범위라 파드 기본 경로는 veth 값이다(설계 §2.5) --
+    # DaemonSet 이 마운트하는 호스트 netns 경로가 실제로 읽혀야 한다. files 에 기본
+    # 경로를 안 넣어, 주입이 무시되면 KeyError -> fail-soft None 으로 단언이 깨진다.
+    files = {"/proc/loadavg": LOADAVG, "/proc/meminfo": MEMINFO,
+             "/host/proc/1/net/dev": NETDEV}
+    out = probe_os_metrics([], read_text=lambda p: files[p],
+                           statvfs=lambda p: None,
+                           net_dev_path="/host/proc/1/net/dev")
+    assert out["network_rx_bytes"] == 1500 and out["network_tx_bytes"] == 2700

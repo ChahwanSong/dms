@@ -138,3 +138,41 @@ def test_run_loop_once_probes_with_received_storages(monkeypatch):
     assert len(requests) == 2
     assert requests[0]["mounts"] == []                      # 부트스트랩: 빈 상태
     assert [m["storage_name"] for m in requests[1]["mounts"]] == ["s"]  # 본 사이클
+
+
+def test_build_report_threads_net_dev_path_to_os_probe():
+    seen = {}
+
+    def os_fn(storages, **kw):
+        seen.update(kw)
+        return {}
+
+    build_report("node-a", [], [], mountinfo_text="",
+                 mounts_fn=lambda s, **k: [], tools_fn=lambda n, **k: [],
+                 identities_fn=lambda u, **k: [], os_fn=os_fn,
+                 net_dev_path="/host/proc/1/net/dev")
+    assert seen["net_dev_path"] == "/host/proc/1/net/dev"
+
+
+def test_run_once_uses_settings_net_dev_path(monkeypatch):
+    # 설정 -> run_once -> build_report -> probe 배선이 한 군데라도 끊기면 기본
+    # /proc/net/dev(veth)로 조용히 되돌아간다 -- 배선 자체를 고정한다.
+    seen = {}
+
+    def handler(request):
+        return httpx.Response(200, json={"storages": [],
+                                         "identity_probe_targets": [],
+                                         "report_interval_seconds": 60})
+
+    monkeypatch.setattr("dms.agent.runner._read_text", lambda path: "")
+    monkeypatch.setattr("dms.agent.runner.probe_tools", lambda names, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_identities", lambda users, **k: [])
+    monkeypatch.setattr("dms.agent.runner.probe_os_metrics",
+                        lambda storages, **k: seen.update(k) or {})
+    settings = AgentSettings(api_url="http://api", shared_token="tok",
+                             node_name="node-a", interval_seconds=60,
+                             mountinfo_path="/unused",
+                             net_dev_path="/host/proc/1/net/dev")
+    AgentRunner(settings, _client(handler)).run_once(
+        {"storages": [], "probe_targets": [], "interval": 60})
+    assert seen["net_dev_path"] == "/host/proc/1/net/dev"
