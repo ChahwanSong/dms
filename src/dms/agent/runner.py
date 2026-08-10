@@ -18,7 +18,7 @@ def _read_text(path: str) -> str:
 def build_report(node_name, storages, probe_targets, *, mountinfo_text,
                  tool_names=AGENT_TOOL_NAMES, mounts_fn=None, tools_fn=None,
                  identities_fn=None, os_fn=None, read_text=None,
-                 net_dev_path="/proc/net/dev") -> dict:
+                 net_dev_path="/proc/net/dev", virtual_net_path="") -> dict:
     mounts_fn = mounts_fn or probe_mounts
     tools_fn = tools_fn or probe_tools
     identities_fn = identities_fn or probe_identities
@@ -30,7 +30,8 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
         "mounts": mounts_fn(storages, mountinfo_text=mountinfo_text),
         "tools": tools_fn(list(tool_names)),
         "identities": identities_fn(probe_targets),
-        "os": os_fn(storages, read_text=read_text, net_dev_path=net_dev_path),
+        "os": os_fn(storages, read_text=read_text, net_dev_path=net_dev_path,
+                    virtual_net_path=virtual_net_path),
     }
 
 
@@ -46,7 +47,8 @@ class AgentRunner:
             mountinfo_text = ""
         report = build_report(self._settings.node_name, state["storages"],
                               state["probe_targets"], mountinfo_text=mountinfo_text,
-                              net_dev_path=self._settings.net_dev_path)
+                              net_dev_path=self._settings.net_dev_path,
+                              virtual_net_path=self._settings.virtual_net_path)
         try:
             response = self._client.post(
                 "/api/agent/report", json=report,

@@ -7,7 +7,8 @@
 # Settings.from_env, so the agent needs none of DMS_DATABASE_URL/
 # DMS_ADMIN_TOKEN/DMS_SESSION_SECRET/etc -- only DMS_AGENT_API_URL,
 # DMS_SHARED_TOKEN, DMS_AGENT_NODE_NAME, DMS_AGENT_INTERVAL_SECONDS,
-# DMS_AGENT_MOUNTINFO_PATH, DMS_AGENT_NET_DEV_PATH. Blanket envFrom would
+# DMS_AGENT_MOUNTINFO_PATH, DMS_AGENT_NET_DEV_PATH,
+# DMS_AGENT_VIRTUAL_NET_PATH. Blanket envFrom would
 # needlessly expose DMS_DATABASE_URL/DMS_ADMIN_TOKEN on every node.
 #
 # Volume mounts:
@@ -20,6 +21,13 @@
 #     hostNetwork 대안은 dnsPolicy: ClusterFirstWithHostNet 동반 변경 없이는
 #     dms-api DNS 가 죽어 보고가 조용히 영구 중단되므로 기각 -- mountinfo 와 같은
 #     hostPath File 관례를 쓴다.
+#   sys-virtual-net: 호스트의 /sys/devices/virtual/net -- 커널이 가상 인터페이스를
+#     등록하는 곳이다. net/dev 에는 있는데 여기 없는 것이 물리 NIC 라, 이 디렉터리가
+#     있어야 물리만 합산한다(설계 §2.6). 접두 블록리스트 대신 등록 위치로 판별한다.
+#     이 마운트와 DMS_AGENT_VIRTUAL_NET_PATH 가 둘 다 있어야 필터가 켜진다 --
+#     코드 기본값은 미설정이다. 파드 자신의 /sys/devices/virtual/net 에는 파드
+#     인터페이스 eth0 이 들어 있어, 기본값을 그 경로로 뒀다면 마운트 없는 배포가
+#     호스트 물리 eth0 을 가상으로 오판해 제외했을 것이다(고치려던 것보다 나쁜 값).
 # (host-root /host mount REMOVED: loadavg/meminfo are not namespaced so plain
 #  /proc paths already reflect the host -- mounting the entire host filesystem
 #  was pure attack surface. /proc/net/* IS netns-scoped though: the in-pod
@@ -88,6 +96,8 @@ spec:
               value: "/host/proc/1/mountinfo"
             - name: DMS_AGENT_NET_DEV_PATH
               value: "/host/proc/1/net/dev"
+            - name: DMS_AGENT_VIRTUAL_NET_PATH
+              value: "/host/sys/devices/virtual/net"
             - name: DMS_AGENT_NODE_NAME
               valueFrom:
                 fieldRef:
@@ -108,6 +118,9 @@ spec:
               readOnly: true
             - name: proc-net-dev
               mountPath: /host/proc/1/net/dev
+              readOnly: true
+            - name: sys-virtual-net
+              mountPath: /host/sys/devices/virtual/net
               readOnly: true
             - name: cephfs-dms
               mountPath: /cephfs
@@ -134,6 +147,10 @@ spec:
           hostPath:
             path: /proc/1/net/dev
             type: File
+        - name: sys-virtual-net
+          hostPath:
+            path: /sys/devices/virtual/net
+            type: Directory
         - name: cephfs-dms
           hostPath:
             path: /cephfs

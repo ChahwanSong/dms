@@ -154,6 +154,20 @@ def test_build_report_threads_net_dev_path_to_os_probe():
     assert seen["net_dev_path"] == "/host/proc/1/net/dev"
 
 
+def test_build_report_threads_virtual_net_path_to_os_probe():
+    seen = {}
+
+    def os_fn(storages, **kw):
+        seen.update(kw)
+        return {}
+
+    build_report("node-a", [], [], mountinfo_text="",
+                 mounts_fn=lambda s, **k: [], tools_fn=lambda n, **k: [],
+                 identities_fn=lambda u, **k: [], os_fn=os_fn,
+                 virtual_net_path="/host/sys/devices/virtual/net")
+    assert seen["virtual_net_path"] == "/host/sys/devices/virtual/net"
+
+
 def test_run_once_uses_settings_net_dev_path(monkeypatch):
     # 설정 -> run_once -> build_report -> probe 배선이 한 군데라도 끊기면 기본
     # /proc/net/dev(veth)로 조용히 되돌아간다 -- 배선 자체를 고정한다.
@@ -172,7 +186,9 @@ def test_run_once_uses_settings_net_dev_path(monkeypatch):
     settings = AgentSettings(api_url="http://api", shared_token="tok",
                              node_name="node-a", interval_seconds=60,
                              mountinfo_path="/unused",
-                             net_dev_path="/host/proc/1/net/dev")
+                             net_dev_path="/host/proc/1/net/dev",
+                             virtual_net_path="/host/sys/devices/virtual/net")
     AgentRunner(settings, _client(handler)).run_once(
         {"storages": [], "probe_targets": [], "interval": 60})
     assert seen["net_dev_path"] == "/host/proc/1/net/dev"
+    assert seen["virtual_net_path"] == "/host/sys/devices/virtual/net"

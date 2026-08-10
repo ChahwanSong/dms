@@ -39,6 +39,19 @@ def test_agent_settings_required_and_defaults(monkeypatch):
     assert s2.net_dev_path == "/host/proc/1/net/dev"
 
 
+def test_virtual_net_path_defaults_to_unset_not_the_pods_own_sysfs():
+    # 함정(설계 §2.6): 파드 안에도 /sys/devices/virtual/net/ 이 있고 거기엔 파드
+    # 인터페이스 eth0 이 들어 있다. 이 기본값을 그 경로로 두면 마운트가 없는 배포에서
+    # 호스트 물리 eth0 을 가상으로 오판해 제외한다 -- 기본은 반드시 "미설정"이다.
+    env = {"DMS_AGENT_API_URL": "http://dms-api:8080", "DMS_SHARED_TOKEN": "tok"}
+    s = AgentSettings.from_env(env)
+    assert not s.virtual_net_path
+    assert s.virtual_net_path != "/sys/devices/virtual/net"
+    s2 = AgentSettings.from_env(
+        {**env, "DMS_AGENT_VIRTUAL_NET_PATH": "/host/sys/devices/virtual/net"})
+    assert s2.virtual_net_path == "/host/sys/devices/virtual/net"
+
+
 def test_agent_settings_fail_closed():
     with pytest.raises(SettingsError) as e:
         AgentSettings.from_env({"DMS_AGENT_API_URL": "CHANGE_ME",

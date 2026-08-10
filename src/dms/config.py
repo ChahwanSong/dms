@@ -195,6 +195,11 @@ class AgentSettings:
     interval_seconds: int = 60
     mountinfo_path: str = "/proc/1/mountinfo"
     net_dev_path: str = "/proc/net/dev"
+    # 물리 인터페이스 판별용 /sys/devices/virtual/net (설계 §2.6). 기본은 반드시
+    # **미설정**이다 -- 파드 안에도 같은 경로가 있고 거기엔 파드 자신의 eth0 이
+    # 들어 있어서, 기본값을 넣으면 마운트 없는 배포가 호스트 물리 eth0 을 가상으로
+    # 오판해 제외해 버린다. 미설정이면 필터 없이 기존대로 lo 만 뺀다.
+    virtual_net_path: str = ""
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "AgentSettings":
@@ -215,4 +220,5 @@ class AgentSettings:
             interval_seconds=interval,
             mountinfo_path=environ.get("DMS_AGENT_MOUNTINFO_PATH", "/proc/1/mountinfo"),
             net_dev_path=environ.get("DMS_AGENT_NET_DEV_PATH", "/proc/net/dev"),
+            virtual_net_path=environ.get("DMS_AGENT_VIRTUAL_NET_PATH", ""),
         )

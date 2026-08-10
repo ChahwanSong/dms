@@ -90,7 +90,7 @@ def probe_identities(usernames, *, getpwnam=pwd.getpwnam, getgrall=grp.getgrall)
 
 
 def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
-                     net_dev_path="/proc/net/dev"):
+                     net_dev_path="/proc/net/dev", virtual_net_path=""):
     metrics = {"load1": None, "load5": None, "load15": None,
                "memory_total_kb": None, "memory_available_kb": None,
                "disks": [], "network_rx_bytes": None, "network_tx_bytes": None}
@@ -118,6 +118,21 @@ def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
         except Exception:
             continue
     try:
+        # 커널은 가상 인터페이스를 /sys/devices/virtual/net/<name> 아래 등록한다 --
+        # /proc/net/dev 에는 있는데 거기엔 없는 것이 물리 NIC 다(설계 §2.6). 이름
+        # 접두 블록리스트(lxc*/cilium_*/cali*/flannel*/...)는 CNI 마다 달라 조용히
+        # 틀리므로 쓰지 않는다.
+        virtual, filtering = set(), False
+        if virtual_net_path:
+            try:
+                virtual = set(os.listdir(virtual_net_path))
+                filtering = True
+            except OSError:
+                # 설정됐는데 못 읽으면(마운트 누락 등) 필터를 켜지 않는다. 여기서
+                # 지표를 None/0 으로 떨구거나 빈 집합으로 필터하는 척하는 것보다,
+                # 덜 정밀하더라도 기존 값(lo 제외 전량 합)을 유지하는 편이 낫다 --
+                # 지표를 잃는 쪽이 더 나쁜 실패다(설계 §2.6, §4 fail-soft).
+                filtering = False
         rx = tx = 0
         # /proc/net/* 는 네트워크 네임스페이스 범위다 -- 파드 안에서 기본 경로를
         # 읽으면 veth 값이 나온다. loadavg/meminfo 는 네임스페이스되지 않아 이미
@@ -125,7 +140,12 @@ def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
         # PID 1 경로(/host/proc/1/net/dev)를 주입받는다 -- mountinfo 와 같은 관례.
         for line in read_text(net_dev_path).splitlines()[2:]:
             name, _, rest = line.partition(":")
-            if not rest or name.strip() == "lo":
+            name = name.strip()
+            # lo 제외는 두 경로 모두에 남긴다: 필터 시엔 lo 도 가상이라 중복이지만
+            # 무해하고, 필터가 꺼진 배포에서는 이것만이 기존 동작을 지킨다.
+            if not rest or name == "lo":
+                continue
+            if filtering and name in virtual:
                 continue
             fields = rest.split()
             rx += int(fields[0])

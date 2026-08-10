@@ -73,6 +73,75 @@ Inter-|   Receive                                                |  Transmit
 """
 
 
+# CNI 가 붙은 실제 노드 모양(dms-w3 실측 축약): 물리 eth0 + 오버레이 터널
+# cilium_vxlan + 파드 veth 호스트쪽 lxc_*. 이름 폭이 6칸을 넘으면 왼쪽 여백이
+# 사라지는 것까지 실물 그대로다 -- 파서가 name.strip() 에 기대는 지점이다.
+NETDEV_CNI = """\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 999999     100    0    0    0     0          0         0   999999     100    0    0    0     0       0          0
+  eth0:   1000      10    0    0    0     0          0         0     2000      20    0    0    0     0       0          0
+cilium_vxlan:    400   4    0    0    0     0          0        0      600       6    0    0    0     0       0          0
+lxc_abc:  70          7    0    0    0     0          0        0       90       9    0    0    0     0       0          0
+"""
+FILES_CNI = {"/proc/loadavg": LOADAVG, "/proc/meminfo": MEMINFO,
+             "/host/proc/1/net/dev": NETDEV_CNI}
+
+
+def _virtual_net_dir(tmp_path, names):
+    """커널이 가상 인터페이스를 등록하는 /sys/devices/virtual/net/<name> 모사."""
+    path = tmp_path / "virtual-net"
+    path.mkdir()
+    for name in names:
+        (path / name).mkdir()
+    return str(path)
+
+
+def _net(**kwargs):
+    out = probe_os_metrics([], read_text=lambda p: FILES_CNI[p],
+                           statvfs=lambda p: None,
+                           net_dev_path="/host/proc/1/net/dev", **kwargs)
+    return out["network_rx_bytes"], out["network_tx_bytes"]
+
+
+def test_probe_os_metrics_sums_only_physical_interfaces_when_configured(tmp_path):
+    # 판별은 이름이 아니라 커널 등록 위치다(설계 §2.6): /proc/net/dev 에 있는데
+    # /sys/devices/virtual/net/ 에 없는 것만 물리다. 여기서는 eth0 만 남아야 한다 --
+    # cilium_vxlan 은 eth0 과 이중 계상이고 lxc_* 는 파드 veth 라 노드 처리량이 아니다.
+    rx, tx = _net(virtual_net_path=_virtual_net_dir(
+        tmp_path, ["lo", "cilium_vxlan", "lxc_abc"]))
+    assert (rx, tx) == (1000, 2000)
+
+
+def test_probe_os_metrics_without_virtual_net_path_sums_all_but_lo():
+    # 미설정이면 기존 동작 그대로 -- 필터는 명시적으로 설정된 경우에만 켠다.
+    assert _net() == (1000 + 400 + 70, 2000 + 600 + 90)
+
+
+def test_probe_os_metrics_unreadable_virtual_net_path_falls_back_to_all_but_lo(tmp_path):
+    # 설정됐지만 마운트가 없거나 못 읽는 배포에서도 지표는 살아 있어야 한다 --
+    # None 이나 0 으로 무너지면 대시보드가 "네트워크 없음"으로 거짓말을 한다.
+    missing = str(tmp_path / "nope")
+    assert _net(virtual_net_path=missing) == (1470, 2690)
+    not_a_dir = tmp_path / "file"
+    not_a_dir.write_text("")
+    assert _net(virtual_net_path=str(not_a_dir)) == (1470, 2690)
+
+
+def test_unset_virtual_net_path_cannot_exclude_host_eth0_via_pod_sysfs(tmp_path):
+    """함정 못박기: 파드 자신의 sysfs 에는 파드 인터페이스인 eth0 이 들어 있다.
+
+    기본값이 /sys/devices/virtual/net 이었다면 마운트 없는 배포에서 파드의 sysfs 를
+    읽어 **호스트의 물리 eth0 을 가상으로 오판해 제외**한다 -- 고치려던 것보다 나쁜
+    값이다(설계 §2.6). 그래서 기본은 필터 없음이어야 한다. 아래 첫 단언이 그 계약이고,
+    둘째는 "그런 디렉터리를 실제로 읽히면 eth0 이 빠진다"는 전제를 함께 고정해
+    첫 단언이 공허하지 않음을 보인다.
+    """
+    pod_sysfs = _virtual_net_dir(tmp_path, ["lo", "eth0"])   # 파드 안에서 본 모습
+    assert _net() == (1470, 2690)                            # 미설정 -> eth0 살아 있다
+    assert _net(virtual_net_path=pod_sysfs) == (400 + 70, 600 + 90)
+
+
 def test_probe_tools_found_and_missing():
     def which(name):
         return f"/opt/bin/{name}" if name != "nsync" else None

@@ -490,3 +490,22 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
   **permanently and silently** -- the report loop is fail-soft, so nothing
   surfaces the breakage. It also widens the agent's network exposure for no
   gain over the bind mount.
+- **Agent os-metrics counts PHYSICAL interfaces only** (design §2.6): summing
+  every non-`lo` interface in the host netns double-counts cross-node pod
+  traffic (`cilium_vxlan` *and* `eth0` see the same bytes) and mixes in pod
+  veth host ends (`lxc*`). Detection is by kernel registration site, not by
+  name -- the kernel registers virtual interfaces under
+  `/sys/devices/virtual/net/<name>`, so an interface in `/proc/net/dev` with
+  no directory there is physical. Prefix blocklists (`lxc*`/`cilium_*`/
+  `cali*`/...) differ per CNI and fail silently. The DaemonSet mounts that
+  directory read-only as hostPath `type: Directory` at
+  `/host/sys/devices/virtual/net` and points the probe at it with
+  `DMS_AGENT_VIRTUAL_NET_PATH`.
+  **`DMS_AGENT_VIRTUAL_NET_PATH` defaults to UNSET on purpose -- never set it
+  to the in-container `/sys/devices/virtual/net`.** A pod has that path too,
+  holding the pod's *own* virtual interfaces, and the pod's interface is
+  normally named `eth0` -- a deployment missing the hostPath mount would read
+  the pod's sysfs, judge the host's real `eth0` virtual, and exclude exactly
+  the interface that matters. Unset (or an unreadable path) means no
+  filtering: the probe keeps today's all-but-`lo` sum rather than losing the
+  metric.
