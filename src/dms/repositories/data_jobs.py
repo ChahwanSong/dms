@@ -207,8 +207,10 @@ class DataJobsRepository:
 
     def set_artifact(self, job_id, *, artifact_uri, result_summary):
         # files/bytes 승격(설계 §2.3): summary에 키가 있으면 typed 컬럼에 채운다.
-        # 지금 runner는 이 키를 안 쓰므로 대부분 NULL -- runner의 mpifileutils
-        # 출력 파싱은 이 슬라이스 범위 밖(별도 작업)이다.
+        # 슬라이스 15부터 runner가 mpifileutils 출력을 파싱해 이 키를 실제로 채운다.
+        # files는 "항목(items)" 의미로 통일했고(dsync/nsync Items, drm Removed N
+        # items, dscan summary.total_entries), scan/rm은 설계상 바이트를 보고하지
+        # 않으므로 bytes는 NULL이다 -- 파싱 실패도 fail-soft로 NULL이 된다.
         files_count = bytes_count = None
         if isinstance(result_summary, dict):
             files_count = _as_count(result_summary.get("files"))

@@ -159,6 +159,22 @@ def test_set_artifact_promotes_files_bytes_to_columns(db):
     assert job["result_summary"] == {"returncode": 0, "files": 12, "bytes": 3456}
 
 
+def test_set_artifact_round_trips_counts_beyond_int4(db):
+    # 3 GiB. PostgreSQL의 int4 천장(2147483647)을 넘는 실 바이트가 승격 경로를
+    # 손상 없이 통과해야 한다 -- 스키마가 BIGINT인 이유(migrations.py). 구형 PG DB를
+    # 넓히는 ALTER COLUMN TYPE 경로는 여기서 검증할 수 없다: SQLite는 INTEGER가
+    # 애초에 동적 64비트라 좁은 컬럼을 만들 수도, ALTER COLUMN TYPE을 지원하지도
+    # 않는다. 이 테스트가 고정하는 건 "파이프라인이 큰 정수를 클램프/절단하지
+    # 않는다"까지다(_as_count는 의도적으로 클램프하지 않는다 -- 조용한 오염 금지).
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    repos.data_jobs.set_artifact(
+        job_id, artifact_uri=None,
+        result_summary={"files": 3, "bytes": 3221225472})
+    job = repos.data_jobs.get_job(job_id)
+    assert (job["files_count"], job["bytes_count"]) == (3, 3221225472)
+
+
 def test_set_artifact_without_counts_leaves_null(db):
     repos = _repos(db)
     job_id = _mk_job(repos, _mk_request(repos))

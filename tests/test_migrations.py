@@ -9,6 +9,73 @@ def _table_names(db):
     return {r["name"] for r in rows}
 
 
+def _declared_type(db, table, column):
+    rows = db.query(f"PRAGMA table_info({table})")
+    return next(r["type"] for r in rows if r["name"] == column)
+
+
+def test_count_columns_are_declared_bigint(tmp_path):
+    # PostgreSQL의 INTEGER는 int4(최대 2147483647)다 -- 슬라이스 15의 runner가 실
+    # 바이트를 채우기 시작한 뒤로 2GiB를 넘는 첫 sync에서 set_artifact UPDATE가
+    # 22003(integer out of range)로 터진다. 그 예외는 stepper의 _finalize보다
+    # 앞에서 나므로 잡이 Executing에 박힌 채 매 틱 재클레임되고 vcjob도 회수되지
+    # 않는다. SQLite는 INTEGER가 동적 64비트라 이 증상이 절대 재현되지 않으므로,
+    # 실제로 배포되는 방언을 지키는 유일한 수단으로 **선언형 자체**를 고정한다.
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    assert _declared_type(db, "data_jobs", "files_count") == "BIGINT"
+    assert _declared_type(db, "data_jobs", "bytes_count") == "BIGINT"
+
+
+class _FakeDb:
+    """_widen_count_columns의 방언 분기만 보기 위한 최소 대역. 실 PostgreSQL을
+    붙이지 않고도 "SQLite엔 ALTER를 안 친다 / int4일 때만 친다"를 고정한다 --
+    이 저장소엔 PG 테스트 하니스가 없고, SQLite로는 좁은 컬럼을 만들 수도
+    ALTER COLUMN TYPE을 쓸 수도 없어 실 경로를 재현할 방법이 없다."""
+
+    def __init__(self, dialect, data_type):
+        self.dialect = dialect
+        self._data_type = data_type
+        self.executed = []
+
+    def query(self, sql, params=None):
+        return [{"data_type": self._data_type}]
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+
+
+def test_widen_count_columns_skips_sqlite():
+    # SQLite는 INTEGER가 동적 64비트라 넓힐 게 없고, ALTER COLUMN TYPE 자체를
+    # 지원하지 않는다 -- 여기서 SQL이 나가면 매 마이그레이션이 터진다.
+    from dms.migrations import _widen_count_columns
+    fake = _FakeDb("sqlite", "integer")
+    _widen_count_columns(fake)
+    assert fake.executed == []
+
+
+def test_widen_count_columns_alters_int4_on_postgres():
+    # 이미 배포된 d24 DB는 두 컬럼이 int4다 -- _ensure_columns는 "없는 컬럼 추가"만
+    # 하므로 이 단계가 없으면 그 DB는 영영 int4에 머문다.
+    from dms.migrations import _widen_count_columns
+    fake = _FakeDb("postgresql", "integer")
+    _widen_count_columns(fake)
+    assert fake.executed == [
+        "ALTER TABLE data_jobs ALTER COLUMN files_count TYPE BIGINT",
+        "ALTER TABLE data_jobs ALTER COLUMN bytes_count TYPE BIGINT",
+    ]
+
+
+def test_widen_count_columns_is_idempotent_when_already_bigint():
+    # 멱등성: 두 번째 마이그레이션은 아무것도 치지 않아야 한다. PostgreSQL은 같은
+    # 타입으로의 ALTER TYPE도 받아 주지만 그때마다 ACCESS EXCLUSIVE 락을 잡으므로,
+    # 컨트롤러가 뜰 때마다 도는 이 경로에선 현재 타입을 보고 건너뛴다.
+    from dms.migrations import _widen_count_columns
+    fake = _FakeDb("postgresql", "bigint")
+    _widen_count_columns(fake)
+    assert fake.executed == []
+
+
 def test_migrate_creates_all_tables(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
@@ -39,6 +106,10 @@ def test_migrate_adds_columns_to_existing_data_jobs(db):
     migrate(db)
     assert _column_exists(db, "data_jobs", "worker_pool")
     assert _column_exists(db, "data_jobs", "precondition")
+    # ALTER로 보강되는 경로도 CREATE TABLE 경로와 같은 선언형이어야 한다 --
+    # 두 경로가 다른 타입으로 수렴하면 구형 DB만 int4 천장에 걸린다.
+    assert _declared_type(db, "data_jobs", "files_count") == "BIGINT"
+    assert _declared_type(db, "data_jobs", "bytes_count") == "BIGINT"
 
 
 def test_migrate_adds_progress_to_existing_releases(db):

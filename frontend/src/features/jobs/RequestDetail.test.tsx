@@ -92,6 +92,20 @@ test("renders the job's result_summary as key/value pairs", async () => {
   expect(screen.getByText("456")).toBeInTheDocument();
 });
 
+test("renders a null result_summary value as — instead of the literal \"null\"", async () => {
+  // scan/rm 잡은 설계상 바이트를 보고하지 않아 result_summary에 늘 bytes: null이
+  // 온다 -- String(null)이 "null"로 새면 그 문자열이 사용자 화면에 그대로 뜬다.
+  const jobs = [{ ...JOBS[0], result_summary: { files: 10, bytes: null } }];
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(jobs)),
+  );
+  renderAt();
+  const dt = await screen.findByText("bytes");
+  expect(dt.nextElementSibling).toHaveTextContent("—");
+  expect(screen.queryByText("null")).not.toBeInTheDocument();
+});
+
 test("shows an inline error message when the request fails to load", async () => {
   server.use(
     http.get("/api/user/requests/r1", () => HttpResponse.json({ detail: "http_404" }, { status: 404 })),

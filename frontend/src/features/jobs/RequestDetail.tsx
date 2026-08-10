@@ -91,7 +91,9 @@ function ResultSummary({ summary }: { summary: unknown }) {
         {entries.map(([k, v]) => (
           <div key={k} className="contents">
             <dt className="text-muted">{k}</dt>
-            <dd>{String(v)}</dd>
+            {/* String(null)은 "null" -- scan/rm은 설계상 bytes가 없어 매번 null이
+                들어온다. 대시보드와 같은 "—" 규약으로 비운다. */}
+            <dd>{v === null ? "—" : String(v)}</dd>
           </div>
         ))}
       </dl>

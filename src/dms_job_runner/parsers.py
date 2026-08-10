@@ -15,8 +15,10 @@ import re
 _SYNC_ITEMS = re.compile(r"Items: (\d+)\s*$", re.MULTILINE)
 # "(50 bytes)"만 -- "(50 bytes in 0.015 seconds)"류는 "bytes" 뒤에 닫는 괄호가
 # 바로 오지 않아 배제된다. Copy data:와 최종 Data:가 둘 다 매치 -> 마지막
-# (=최종 Data)이 남는다.
-_SYNC_BYTES = re.compile(r"\((\d+) bytes\)")
+# (=최종 Data)이 남는다. 줄 끝 앵커: 요약 줄은 항상 이 괄호로 끝난다 --
+# 앵커가 없으면 경로에 박힌 "(999 bytes)"(예: /backup (999 bytes)/f.bin)가
+# 총량 행세를 할 수 있다.
+_SYNC_BYTES = re.compile(r"\((\d+) bytes\)\s*$", re.MULTILINE)
 _RM_ITEMS = re.compile(r"Removed (\d+) items")
 
 
@@ -41,7 +43,9 @@ def parse_scan_counts(report_path: str) -> "tuple[int | None, None]":
     JSON 깨짐/키 없음/타입 이상 -> None. bool·음수 배제는 승격 경로 _as_count와
     같은 원칙 -- 여기서 먼저 걸러 summary 자체를 깨끗하게 유지한다."""
     try:
-        with open(report_path) as f:
+        # encoding 명시: 로케일 기본 인코딩(비 UTF-8 컨테이너)에서 한글 경로가
+        # 든 리포트가 UnicodeDecodeError로 터지면 fail-soft가 삼켜 조용히 NULL이 된다.
+        with open(report_path, encoding="utf-8") as f:
             report = json.load(f)
     except Exception:  # noqa: BLE001 -- 계약이 "절대 예외 없음"(설계 §4)이라 문자 그대로 지킨다
         return None, None

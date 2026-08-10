@@ -112,10 +112,18 @@ def migrate(db: Database) -> None:
             artifact_uri TEXT,
             result_summary TEXT,
             -- files/bytes 파이프라인(슬라이스 14 설계 §2.3): set_artifact가
-            -- result_summary의 "files"/"bytes"를 typed 컬럼으로 승격한다. runner가
-            -- 아직 그 키를 안 써서 당분간 대부분 NULL -- 대시보드는 "—"로 생략한다.
-            files_count INTEGER,
-            bytes_count INTEGER,
+            -- result_summary의 "files"/"bytes"를 typed 컬럼으로 승격한다. 슬라이스 15의
+            -- runner가 mpifileutils 출력을 파싱해 실제로 이 키를 채운다 -- files는
+            -- "항목(items)" 의미로 통일했고(dsync/nsync Items, drm Removed N items,
+            -- dscan total_entries), scan/rm은 설계상 bytes가 없어 NULL이다.
+            -- BIGINT여야 한다: PostgreSQL의 INTEGER는 int4(최대 2147483647)라
+            -- 2GiB를 넘는 첫 sync에서 set_artifact UPDATE가 22003(integer out of
+            -- range)로 터진다 -- 그 예외는 stepper의 _finalize 앞에서 나므로 잡이
+            -- Executing에 박힌 채 틱마다 재클레임되고 vcjob이 영영 GC되지 않는다.
+            -- (SQLite는 INTEGER가 동적 64비트라 증상이 안 잡힌다. BIGINT도 SQLite에선
+            --  INTEGER affinity로 같게 동작한다.)
+            files_count BIGINT,
+            bytes_count BIGINT,
             worker_pool TEXT,
             precondition TEXT,
             confirmed_fingerprint TEXT,
@@ -259,6 +267,7 @@ def migrate(db: Database) -> None:
     for stmt in stmts:
         db.execute(stmt)
     _ensure_columns(db)
+    _widen_count_columns(db)
     # requests.batch_id는 CREATE TABLE(신규 DB) 또는 _ensure_columns의 ALTER(구형 DB)로
     # 보강된 뒤에만 존재가 보장되므로, 이 인덱스는 그 이후에 생성한다.
     db.execute("CREATE INDEX IF NOT EXISTS idx_requests_batch ON requests (batch_id)")
@@ -311,6 +320,28 @@ def _column_exists(db, table, column):
     return bool(rows)
 
 
+def _widen_count_columns(db):
+    # 이미 배포된 DB(d24)는 files_count/bytes_count가 int4로 만들어져 있다 --
+    # _ensure_columns는 "없는 컬럼 추가"만 하지 타입을 바꾸지 않으므로 그 DB는
+    # CREATE TABLE의 BIGINT 선언을 영영 못 받는다. PostgreSQL의 int4 천장은
+    # 2147483647이라 2GiB를 넘는 첫 sync에서 set_artifact UPDATE가 22003으로
+    # 터지고, 그 예외가 stepper의 _finalize보다 앞이라 잡이 Executing에 박힌 채
+    # 매 틱 재클레임 -> step_error 이벤트 폭주 + vcjob 미회수로 이어진다.
+    # 따라서 기존 DB도 여기서 한 번 넓혀 준다.
+    if db.dialect != "postgresql":
+        return  # SQLite는 INTEGER가 동적 64비트라 넓힐 게 없다(ALTER COLUMN TYPE 미지원이기도 하다).
+    for column in ("files_count", "bytes_count"):
+        # 멱등성: PostgreSQL은 같은 타입으로의 ALTER TYPE도 허용하지만 매번
+        # ACCESS EXCLUSIVE 락을 잡는다 -- 컨트롤러가 뜰 때마다 그러면 안 되니
+        # 현재 타입을 먼저 보고 int4일 때만 친다(그래서 두 번째 실행은 no-op).
+        rows = db.query(
+            """SELECT data_type FROM information_schema.columns
+               WHERE table_name = 'data_jobs' AND column_name = :c""",
+            {"c": column})
+        if rows and rows[0]["data_type"] == "integer":
+            db.execute(f"ALTER TABLE data_jobs ALTER COLUMN {column} TYPE BIGINT")
+
+
 def _ensure_columns(db):
     # 이미 마이그레이트된(구형) DB엔 CREATE TABLE IF NOT EXISTS가 컬럼을 못 채운다 —
     # schema_migrations를 넘어 실제 컬럼 존재를 확인하고 없으면 ALTER로 보강한다.
@@ -319,8 +350,10 @@ def _ensure_columns(db):
         ("data_jobs", "precondition", "TEXT"),
         ("data_jobs", "confirmed_fingerprint", "TEXT"),
         ("data_jobs", "phase_refs", "TEXT"),
-        ("data_jobs", "files_count", "INTEGER"),
-        ("data_jobs", "bytes_count", "INTEGER"),
+        # BIGINT: CREATE TABLE 경로와 같은 선언형이어야 한다(위 int4 천장 주석 참고).
+        # SQLite에선 INTEGER와 affinity가 같아 기존 DB에 아무 변화가 없다.
+        ("data_jobs", "files_count", "BIGINT"),
+        ("data_jobs", "bytes_count", "BIGINT"),
         ("requests", "batch_id", "TEXT"),
         ("control_state", "build_node_name", "TEXT"),
         ("builds", "log_text", "TEXT"),

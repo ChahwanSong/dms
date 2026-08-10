@@ -84,6 +84,12 @@ def test_sync_bytes_in_rate_line_is_not_matched():
     assert parse_sync_counts(out) == (None, None)
 
 
+def test_sync_bytes_embedded_mid_line_is_not_matched():
+    # 요약 줄은 항상 "(N bytes)"로 끝난다 -- 줄 중간에 박힌 같은 모양(예: 경로
+    # 이름에 든 "(999 bytes)")이 총량 행세를 하면 안 된다. Items 쪽과 같은 $ 앵커.
+    assert parse_sync_counts("[ts] copying /backup (999 bytes)/f.bin to x\n") == (None, None)
+
+
 def test_sync_items_with_trailing_text_is_not_matched():
     # "Items: 10 (done)"처럼 숫자 뒤에 내용이 붙으면 요약 줄이 아니다 -- $ 앵커가 배제
     assert parse_sync_counts("[ts] Items: 10 (done)\n") == (None, None)
