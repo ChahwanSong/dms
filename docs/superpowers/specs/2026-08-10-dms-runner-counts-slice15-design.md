@@ -120,3 +120,41 @@ nsync 출력이 dsync 와 다르면(미확인 가정) 같은 fail-soft 로 null 
 - 파일별 상세·에러 카운트·전송률 등 추가 지표.
 - dscan 총바이트(리포트에 없음 — 리포트 스키마 확장은 별도 슬라이스).
 - mpifileutils 버전 교체·`--quiet` 기본값 변경.
+
+## 부록 A — nsync 실측 (2026-08-10 실증에서 확보, §4 가정의 해소)
+
+§4 는 "nsync 출력이 dsync 와 다르면 fail-soft 로 null" 을 명시적 가정으로 남겼다.
+실증(잡 abc0b559, cephfs-third -> cephfs-secondary)에서 **가정이 적중**했다:
+nsync 는 stock mpifileutils 가 아니라 역할 기반(src/dst rank) 별도 도구이고
+`Items:`/`(N bytes)` 를 전혀 찍지 않아 `{"files": null, "bytes": null}` 이 나왔다.
+fail-soft 는 의도대로 동작했으나 nsync 잡의 카운트가 영구 결측이 되므로 파서를 더한다.
+
+실측 출력(실행/프리뷰 공통 줄은 **굵게**):
+
+```
+# 실행(execution)
+Progress 100.0% batch 1/1 actions=9 copied-files=7 copied-volume=50.000 B recent(...) avg(...)
+**Metadata diff summary: only-src=10 only-dst=0 common=0 changed=0**
+**Planned actions: copy=7 mkdir=3 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0**
+Execution completed successfully
+
+# 프리뷰(dryrun)
+Progress 100.0% batch 1/1 planned-actions=10 planned-copy-files=7 planned-volume=50.000 B
+**Metadata diff summary: only-src=10 only-dst=0 common=0 changed=0**
+**Planned actions: copy=7 mkdir=3 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0**
+```
+
+결정:
+
+- **items 는 `Planned actions:` 줄에서 뽑는다.** 실행·프리뷰 양쪽에 같은 형식으로
+  나오고 합이 10 으로 dsync 의 `Items: 10` 과 정확히 일치한다(같은 트리). 실행 줄의
+  `actions=9` 는 planned 10 과 어긋나므로(배치 병합 추정) 쓰지 않는다.
+  합산 시 `skipped-dst-only` 는 **제외**한다 — 건드리지 않은 항목이다. 새 액션 종류가
+  추가돼도 따라가도록 "`이름=정수` 쌍을 전부 합하되 skipped-dst-only 만 뺀다" 로 구현한다.
+  `set_artifact` 는 SUCCEEDED 에서만 승격하므로 planned == executed 다.
+- **bytes 는 `planned-volume=`/`copied-volume=` 에서 뽑되 근사값이다.** nsync 는 원시
+  바이트 정수를 찍지 않고 `50.000 B` 같은 사람용 표기만 낸다. 단위(B/KiB/MiB/GiB/TiB)
+  환산으로 정수화한다. 소수 3자리라 GiB 규모에서 오차 ±0.5MiB(≈0.05%) 수준이며,
+  대시보드가 어차피 `humanBytes` 로 축약 표시하므로 표시 정밀도보다 높다. null 로 두면
+  nsync 트래픽이 `bytes_total` 에서 **체계적으로 누락**되므로 근사가 더 정직하다.
+- 파싱 실패는 기존과 동일하게 해당 값만 null(전면 fail-soft 불변).
