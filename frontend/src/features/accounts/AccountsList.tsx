@@ -2,6 +2,7 @@ import { useAccounts, useSetRole, useSetDisabled } from "./useAccounts";
 import { useMe } from "../auth/useAuth";
 import { Table } from "../../components/ui/Table";
 import { Button } from "../../components/ui/Button";
+import { DeleteAccountDialog } from "./DeleteAccountDialog";
 import { ApiError } from "../../lib/api";
 import type { Account } from "../../lib/types";
 
@@ -19,6 +20,12 @@ export function AccountsList() {
 
   const toggle = (a: Account) => setDisabled.mutate({ username: a.username, disabled: a.disabled !== 1 });
 
+  const rows = q.data ?? [];
+  // 활성 관리자(role=admin AND disabled=0). 하나뿐이면 그 행의 삭제를 막는다 --
+  // 서버가 last_active_admin(409)으로 다시 강제하지만, 화면에서 미리 사유를 낸다.
+  // 목록이 낡으면 어긋날 수 있는 클라이언트 계산이라 힌트일 뿐이다.
+  const activeAdmins = rows.filter((a) => a.role === "admin" && a.disabled === 0);
+
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
@@ -34,8 +41,10 @@ export function AccountsList() {
             </tr>
           </thead>
           <tbody>
-            {(q.data ?? []).map((a) => {
+            {rows.map((a) => {
               const isSelf = me.data?.actor === a.username;
+              const isLastActiveAdmin = a.role === "admin" && a.disabled === 0
+                && activeAdmins.length === 1;
               return (
                 <tr key={a.username} className="border-t border-black/5">
                   <td className="py-2">{a.username}</td>
@@ -58,6 +67,15 @@ export function AccountsList() {
                       {a.disabled === 1 ? "활성화" : "비활성화"}
                     </Button>
                     {isSelf && <span className="text-muted text-xs">자기 계정은 변경할 수 없습니다</span>}
+                    {/* 삭제 자리에는 삭제 고유의 사유를 낸다 -- 왼쪽 문구는 역할/토글
+                        가드용이고 여기는 삭제 버튼이 있어야 할 자리다(설계 §3). */}
+                    {isSelf ? (
+                      <span className="text-muted text-xs">자기 계정은 삭제할 수 없습니다</span>
+                    ) : isLastActiveAdmin ? (
+                      <span className="text-muted text-xs">마지막 관리자는 삭제할 수 없습니다</span>
+                    ) : (
+                      <DeleteAccountDialog account={a} />
+                    )}
                   </td>
                 </tr>
               );

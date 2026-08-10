@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
@@ -89,4 +89,57 @@ test("shows the Korean message when a mutation returns 409 cannot_lock_self", as
   const row = (await screen.findByText("alice")).closest("tr")!;
   await userEvent.click(within(row).getByRole("button", { name: "활성화" }));
   expect(await screen.findByText("자기 계정의 역할 변경·비활성화는 할 수 없습니다")).toBeInTheDocument();
+});
+
+test("자기 계정은 삭제 버튼 대신 비활성 사유를 보여준다", async () => {
+  stubMe("alice");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)));
+  wrap();
+  const selfRow = (await screen.findByText("alice")).closest("tr")!;
+  expect(within(selfRow).getByText("자기 계정은 삭제할 수 없습니다")).toBeInTheDocument();
+  expect(within(selfRow).queryByRole("button", { name: "삭제" })).toBeNull();
+});
+
+test("마지막 활성 관리자는 삭제 버튼 대신 비활성 사유를 보여준다", async () => {
+  stubMe("root");   // 어느 행도 자기 자신이 아니다
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)));
+  wrap();
+  const adminRow = (await screen.findByText("admin", { selector: "td" })).closest("tr")!;
+  expect(within(adminRow).getByText("마지막 관리자는 삭제할 수 없습니다")).toBeInTheDocument();
+  expect(within(adminRow).queryByRole("button", { name: "삭제" })).toBeNull();
+});
+
+test("관리자가 둘이면 삭제 버튼이 뜬다 (대조)", async () => {
+  stubMe("root");
+  const two = [
+    { username: "admin", role: "admin", email: null, disabled: 0, created_at: "2026-08-05T00:00:00Z" },
+    { username: "admin2", role: "admin", email: null, disabled: 0, created_at: "2026-08-05T00:00:00Z" },
+  ];
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(two)));
+  wrap();
+  const adminRow = (await screen.findByText("admin", { selector: "td" })).closest("tr")!;
+  expect(within(adminRow).getByRole("button", { name: "삭제" })).toBeInTheDocument();
+});
+
+test("사용자명 재입력이 일치해야 삭제가 전송된다", async () => {
+  stubMe("root");
+  let deleted = false;
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)),
+    http.delete("/api/admin/accounts/alice", () => {
+      deleted = true; return new HttpResponse(null, { status: 204 }); }));
+  wrap();
+  const aliceRow = (await screen.findByText("alice")).closest("tr")!;
+  await userEvent.click(within(aliceRow).getByRole("button", { name: "삭제" }));
+  const dialog = await screen.findByRole("dialog");
+  const confirm = within(dialog).getByRole("button", { name: "계정 삭제" });
+  const input = within(dialog).getByRole("textbox", { name: "삭제 확인 사용자명 재입력" });
+  // 불일치면 확인 버튼이 비활성 -- 눌러도 삭제가 안 나간다.
+  await userEvent.type(input, "wrong");
+  expect(confirm).toBeDisabled();
+  await userEvent.clear(input);
+  await userEvent.type(input, "alice");
+  expect(confirm).toBeEnabled();
+  await userEvent.click(confirm);
+  await waitFor(() => expect(deleted).toBe(true));
 });

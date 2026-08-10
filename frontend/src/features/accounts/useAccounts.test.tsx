@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { useAccounts, useSetRole, useSetDisabled } from "./useAccounts";
+import { useAccounts, useSetRole, useSetDisabled, useDeleteAccount } from "./useAccounts";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 test("useAccounts returns the list", async () => {
@@ -36,4 +36,14 @@ test("useSetDisabled puts {disabled} to /api/admin/accounts/:username/disabled",
     <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
   result.current.mutate({ username: "alice", disabled: true });
   await waitFor(() => expect(body).toEqual({ disabled: true }));
+});
+test("useDeleteAccount DELETEs /api/admin/accounts/:username", async () => {
+  let called = false;
+  server.use(http.delete("/api/admin/accounts/victim", () => {
+    called = true; return new HttpResponse(null, { status: 204 }); }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { result } = renderHook(() => useDeleteAccount(), { wrapper: ({ children }) =>
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+  result.current.mutate("victim");
+  await waitFor(() => expect(called).toBe(true));
 });

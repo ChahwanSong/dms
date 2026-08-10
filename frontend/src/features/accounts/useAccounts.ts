@@ -15,3 +15,11 @@ export const useSetDisabled = () => {
     apiSend("PUT", `/api/admin/accounts/${v.username}/disabled`, { disabled: v.disabled }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }) });
 };
+// 하드 삭제(슬라이스 19). 서버가 자기 삭제·마지막 관리자·비종단 요청을 409 로 다시
+// 강제하므로, 훅은 그 에러를 그대로 올려 다이얼로그가 한국어 사유를 표면화한다.
+export const useDeleteAccount = () => {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (username: string) =>
+    apiSend("DELETE", `/api/admin/accounts/${username}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }) });
+};
