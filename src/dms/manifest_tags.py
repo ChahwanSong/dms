@@ -159,6 +159,27 @@ def container_names(doc: "list[str]") -> "list[str]":
             if _indent(line) == item_indent and line.strip().startswith("- name:")]
 
 
+def init_container_names(doc: "list[str]") -> "list[str]":
+    """initContainers 블록의 컨테이너 이름들. 블록이 없으면 빈 리스트.
+
+    container_names 와 대칭이지만 '없음'을 assert 로 막지 않는다 -- initContainers 가
+    없는 워크로드(dms-agent DaemonSet)가 정상이고, 그 **부재 자체가 계약의 한쪽
+    방향**이기 때문이다(test_release_manifest_contract 가 양방향으로 건다).
+
+    container_names 와 합치지 말 것. 저쪽은 'containers:' 만 집어 **본 컨테이너만**
+    돌려줘야 한다 -- 드리프트 배지가 그 반환값으로 라이브 이미지와 비교하므로
+    initContainer 가 새어 들어가면 엉뚱한 이미지를 비교하게 된다(설계 §2.1)."""
+    at = _find(doc, "initContainers")
+    if at is None:
+        return []
+    body = _block(doc, at)
+    if not body:
+        return []
+    item_indent = min(_indent(line) for line in body)
+    return [_value(line.strip()[2:]) for line in body
+            if _indent(line) == item_indent and line.strip().startswith("- name:")]
+
+
 def container_image(doc: "list[str]", container: str) -> "str | None":
     """containers 블록에서 이름이 container 인 항목의 image. 런타임 경로라 fail-soft.
 
