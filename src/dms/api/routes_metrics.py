@@ -68,6 +68,16 @@ def metrics_jobs(request: Request, window: int = Query(default=24)):
     stats["submit_wait_counted"] = len(submit_waits)
     stats["submit_wait_histogram"] = duration_histogram(
         submit_waits, buckets=SUBMIT_WAIT_BUCKETS, overflow=SUBMIT_WAIT_OVERFLOW)
+    # 스케줄 대기 분포(슬라이스 20): submit_wait 과 같은 접기 -- 원자료 대신 분포만
+    # 싣고, counted 는 len() 그대로다(truthy 필터를 끼우면 0 = 같은 틱 스케줄이라는
+    # 가장 건강한 잡이 집계 건수에서 사라진다). 버킷은 SUBMIT_WAIT_BUCKETS 재사용
+    # (설계 §2.7 -- 두 대기를 같은 축으로 나란히 비교, 실분포 확인 후 후속 조정).
+    # excluded 에는 과거 잡(백필 없음)·Running 미도달·한 틱 완료·스텁 백엔드가
+    # 모두 들어간다 -- 도입 직후 "집계 0건 · 제외 N건"이 정상 표시다(설계 §4).
+    sched_waits = stats.pop("sched_wait_seconds")
+    stats["sched_wait_counted"] = len(sched_waits)
+    stats["sched_wait_histogram"] = duration_histogram(
+        sched_waits, buckets=SUBMIT_WAIT_BUCKETS, overflow=SUBMIT_WAIT_OVERFLOW)
     stats["window_hours"] = hours
     stats["bucket"] = "hour" if chars == 13 else "day"
     return stats

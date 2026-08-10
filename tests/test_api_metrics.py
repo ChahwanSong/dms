@@ -434,3 +434,36 @@ def test_metrics_jobs_submit_wait_zero_counts_toward_the_total(client, db):
     assert hist["<10s"] == 1
     assert body["submit_wait_counted"] == 1
     assert body["submit_wait_excluded"] == 0
+
+
+def test_metrics_jobs_sched_wait_distribution_and_counts(client, db):
+    repos = Repositories(db)
+    now = utc_now_iso()
+    rid = _seed_job(db, repos, created_at=iso_plus(now, -3600))
+    _seed_job(db, repos, created_at=iso_plus(now, -1800))     # NULL 유지(관측 없음)
+    db.execute("UPDATE data_jobs SET sched_wait_seconds = 12 WHERE request_id = :r",
+               {"r": rid})
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    hist = {b["bucket"]: b["count"] for b in body["sched_wait_histogram"]}
+    # submit_wait 과 같은 축(설계 §2.7) -- 두 분포가 나란히 비교 가능해야 한다
+    assert list(hist) == ["<10s", "10-30s", "30-60s", "1-5m", "5-30m", ">30m"]
+    assert hist["10-30s"] == 1
+    assert body["sched_wait_counted"] == 1
+    assert body["sched_wait_excluded"] == 1   # 관측 없는 잡의 제외를 표면화(설계 §2.5)
+    assert "sched_wait_seconds" not in body   # 원자료는 내보내지 않는다(duration 규칙)
+
+
+def test_metrics_jobs_sched_wait_zero_counts_toward_the_total(client, db):
+    # 라우트 층의 falsy 함정(submit_wait 선례 그대로): counted 를
+    # `len([w for w in ws if w])` 로 세거나 원자료를 truthy 로 거르면 0(같은 틱
+    # 스케줄 = 가장 건강한 잡)이 사라져 counted 가 조용히 줄고 첫 버킷이 빈다.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    rid = _seed_job(db, repos, created_at=iso_plus(now, -3600))
+    db.execute("UPDATE data_jobs SET sched_wait_seconds = 0 WHERE request_id = :r",
+               {"r": rid})
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    hist = {b["bucket"]: b["count"] for b in body["sched_wait_histogram"]}
+    assert hist["<10s"] == 1
+    assert body["sched_wait_counted"] == 1
+    assert body["sched_wait_excluded"] == 0
