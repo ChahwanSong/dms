@@ -42,6 +42,14 @@ _ROOT_CANDIDATES = (
     Path("/app/deploy/k8s"),
 )
 
+# 조회 계층이 삼키는 예외. OSError 만으로는 부족하다: read_text 는 비-UTF-8 바이트에
+# UnicodeDecodeError 를 내는데 그건 OSError 가 아니라 ValueError 의 서브클래스라
+# 그대로 라우트까지 전파된다(파일 하나가 깨졌을 뿐인데 배지가 아니라 응답이 죽는다).
+# errors="replace" 로 뭉개지 않고 예외를 넓히는 쪽을 택한다 -- 깨진 문자로 계속 파싱해
+# 엉뚱한 태그를 뽑느니 None 이 낫다(설계 §4: 추측하지 않는다). ValueError 는 파싱 중
+# 나올 수 있는 다른 사고(빈 시퀀스 min() 등)도 함께 덮는다.
+_READ_ERRORS = (OSError, ValueError)
+
 
 def _strip_comment(line: str) -> str:
     """따옴표 밖의 ' #' 이후를 버린다. 값 안의 '#'(없지만)을 지우지 않기 위해서다."""
@@ -187,11 +195,11 @@ def _root(root=None) -> "Path | None":
 def _image_from(path, kind, name, container) -> "str | None":
     try:
         doc = workload_doc(path, kind, name)
-    except OSError:
-        return None                # 파일 없음/읽기 실패 -- 그 항목만 None(설계 §4)
-    if doc is None:
-        return None
-    return container_image(doc, container)
+        if doc is None:
+            return None
+        return container_image(doc, container)
+    except _READ_ERRORS:
+        return None                # 그 항목만 None(설계 §4)
 
 
 def manifest_images(root=None) -> "dict[str, str | None]":
@@ -215,15 +223,15 @@ def manifest_job_image(root=None) -> "str | None":
     filename, kind, name = _CONFIGMAP
     try:
         doc = workload_doc(base / filename, kind, name)
-    except OSError:
+        if doc is None:
+            return None
+        data_at = _find(doc, "data", indent=0)
+        if data_at is None:
+            return None
+        data = _block(doc, data_at)
+        key_at = _find(data, "DMS_JOB_IMAGE")
+        if key_at is None:
+            return None
+        return _unquote(_value(data[key_at])) or None
+    except _READ_ERRORS:
         return None
-    if doc is None:
-        return None
-    data_at = _find(doc, "data", indent=0)
-    if data_at is None:
-        return None
-    data = _block(doc, data_at)
-    key_at = _find(data, "DMS_JOB_IMAGE")
-    if key_at is None:
-        return None
-    return _unquote(_value(data[key_at])) or None
