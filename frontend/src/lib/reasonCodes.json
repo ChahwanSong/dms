@@ -41,6 +41,7 @@
   "cancelled_by_user", "cancelled_by_batch", "scan_path_exists",
   "scan_path_not_found", "no_covering_scan", "scan_report_too_large",
   "account_not_found", "invalid_role", "cannot_lock_self",
+  "cannot_delete_self", "last_active_admin", "account_has_active_requests",
   "artifact_base_not_absolute", "artifact_base_traversal",
   "artifact_base_scheme_in_path", "artifact_base_missing",
   "artifact_base_not_directory", "artifact_base_not_writable",

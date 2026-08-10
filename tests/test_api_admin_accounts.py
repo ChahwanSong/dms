@@ -188,3 +188,51 @@ def test_delete_account_with_only_terminal_requests_succeeds(client, db):
     # 이력 보존: 요청 행의 requester_id 문자열은 남는다(설계 §2.3, FK 0건).
     assert db.query_one("SELECT requester_id FROM requests WHERE request_id='rq2'"
                         )["requester_id"] == "done"
+
+
+def test_demote_last_active_admin_forbidden(client):
+    # 유일 admin 을 user 로 강등 시도(토큰 호출, self-guard 미발동) -> 409, 역할 불변.
+    _mk_admin(client, "onlyadm2")
+    r = client.put("/api/admin/accounts/onlyadm2/role", json={"role": "user"}, headers=ADMIN)
+    assert r.status_code == 409 and r.json()["detail"] == "last_active_admin"
+    row = next(a for a in client.get("/api/admin/accounts", headers=ADMIN).json()
+               if a["username"] == "onlyadm2")
+    assert row["role"] == "admin"
+
+
+def test_disable_last_active_admin_forbidden(client):
+    # 유일 admin 을 비활성화 시도 -> 409, disabled 불변.
+    _mk_admin(client, "onlyadm3")
+    r = client.put("/api/admin/accounts/onlyadm3/disabled", json={"disabled": True},
+                   headers=ADMIN)
+    assert r.status_code == 409 and r.json()["detail"] == "last_active_admin"
+    row = next(a for a in client.get("/api/admin/accounts", headers=ADMIN).json()
+               if a["username"] == "onlyadm3")
+    assert row["disabled"] == 0
+
+
+def test_demote_one_of_two_admins_succeeds(client):
+    # 대조: admin 이 둘이면 강등 통과.
+    _mk_admin(client, "adm_a")
+    _mk_admin(client, "adm_b")
+    assert client.put("/api/admin/accounts/adm_b/role", json={"role": "user"},
+                      headers=ADMIN).status_code == 200
+
+
+def test_promote_last_admin_is_not_guarded(client):
+    # 승격/재활성화는 관리자 수를 줄이지 않으므로 마지막 관리자 가드 대상이 아니다.
+    _mk_admin(client, "onlyadm4")
+    # admin -> admin(무변화)도 강등이 아니므로 통과해야 한다.
+    assert client.put("/api/admin/accounts/onlyadm4/role", json={"role": "admin"},
+                      headers=ADMIN).status_code == 200
+
+
+def test_reenable_last_admin_is_not_guarded(client):
+    # 대조: 비활성화된 유일 admin 을 다시 켜는 것은 관리자 수를 늘리므로 통과한다
+    # (활성 admin 이 0명일 때 잠금을 푸는 유일한 출구이기도 하다).
+    _mk_admin(client, "onlyadm5")
+    _mk_admin(client, "spare")
+    client.put("/api/admin/accounts/onlyadm5/disabled", json={"disabled": True},
+               headers=ADMIN)
+    assert client.put("/api/admin/accounts/onlyadm5/disabled", json={"disabled": False},
+                      headers=ADMIN).status_code == 200

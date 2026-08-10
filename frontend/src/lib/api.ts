@@ -101,6 +101,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   account_not_found: "계정을 찾을 수 없습니다",
   invalid_role: "역할 값이 올바르지 않습니다",
   cannot_lock_self: "자기 계정의 역할 변경·비활성화는 할 수 없습니다",
+  // 계정 위생(슬라이스 19) 안전장치 3종. reasonCodes.json 과 함께 갱신해야 양방향
+  // 커버리지 테스트가 초록이다.
+  cannot_delete_self: "자기 계정은 삭제할 수 없습니다",
+  last_active_admin: "마지막 관리자는 삭제할 수 없습니다",
+  account_has_active_requests: "진행 중인 요청이 있어 삭제할 수 없습니다",
   // 인그레스/프록시가 만든 401(백엔드까지 못 간 경우)은 본문이 JSON이 아니라서
   // detail을 못 읽는다 -- request()가 이때 http_401을 합성한다.
   http_401: "인증이 필요합니다",
