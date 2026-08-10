@@ -112,6 +112,26 @@ export interface ControlState {
   changed_at: string | null;
 }
 
+export interface ArtifactBaseNodeCheck {
+  node_name: string; reported_at: string; fresh: boolean;
+  // pending = 이 노드가 아직 현재 base 를 프로브하지 않았다("확인 대기 중") --
+  // 실패와 다른 상태다(설계 §4). pending 이면 exists/writable 은 null 이다.
+  pending: boolean; exists: boolean | null; writable: boolean | null;
+}
+export interface ArtifactBaseControllerCheck {
+  pending: boolean; ok: boolean | null; reason: string | null;
+  checked_at: string | null;
+}
+export interface ArtifactBaseInfo {
+  effective: string; source: "db" | "env"; db_value: string | null; env_value: string;
+  locked_by_jobs: number;
+  checks: {
+    api: { ok: boolean; reason: string | null };
+    controller: ArtifactBaseControllerCheck;
+    nodes: ArtifactBaseNodeCheck[];
+  };
+}
+
 export interface Build {
   build_id: string; repo_url: string; git_ref: string; commit_sha: string | null;
   images: string[]; node_name: string; state: string; reason_code: string | null;

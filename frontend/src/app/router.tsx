@@ -19,6 +19,7 @@ import { AuditLog } from "../features/audit/AuditLog";
 import { PoliciesList } from "../features/policies/PoliciesList";
 import { DenylistList } from "../features/denylist/DenylistList";
 import { ControlStatePage } from "../features/control/ControlStatePage";
+import { ArtifactBasePage } from "../features/control/ArtifactBasePage";
 import { AccountsList } from "../features/accounts/AccountsList";
 import { NodesList } from "../features/nodes/NodesList";
 import { BuildsPage } from "../features/builds/BuildsPage";
@@ -60,6 +61,7 @@ export function AppRouter() {
           <Route path="/admin/policies" element={<RequireRole role="admin"><AppShell><PoliciesList /></AppShell></RequireRole>} />
           <Route path="/admin/denylist" element={<RequireRole role="admin"><AppShell><DenylistList /></AppShell></RequireRole>} />
           <Route path="/admin/control" element={<RequireRole role="admin"><AppShell><ControlStatePage /></AppShell></RequireRole>} />
+          <Route path="/admin/artifact-base" element={<RequireRole role="admin"><AppShell><ArtifactBasePage /></AppShell></RequireRole>} />
           <Route path="/admin/accounts" element={<RequireRole role="admin"><AppShell><AccountsList /></AppShell></RequireRole>} />
           <Route path="/admin/nodes" element={<RequireRole role="admin"><AppShell><NodesList /></AppShell></RequireRole>} />
           <Route path="/admin/builds" element={<RequireRole role="admin"><AppShell><BuildsPage /></AppShell></RequireRole>} />

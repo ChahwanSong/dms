@@ -21,6 +21,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {isAdmin && <NavLink to="/admin/policies" className={linkCls}>정책</NavLink>}
         {isAdmin && <NavLink to="/admin/denylist" className={linkCls}>denylist</NavLink>}
         {isAdmin && <NavLink to="/admin/control" className={linkCls}>컨트롤 상태</NavLink>}
+        {isAdmin && <NavLink to="/admin/artifact-base" className={linkCls}>아티팩트 경로</NavLink>}
         {isAdmin && <NavLink to="/admin/accounts" className={linkCls}>계정</NavLink>}
         {isAdmin && <NavLink to="/admin/nodes" className={linkCls}>노드</NavLink>}
         {isAdmin && <NavLink to="/admin/builds" className={linkCls}>빌드</NavLink>}
