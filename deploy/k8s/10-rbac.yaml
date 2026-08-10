@@ -1,6 +1,7 @@
 # ServiceAccounts + namespaced RBAC for the three DMS workloads. All
-# resources this file grants are namespace-scoped (dms) except the agent's
-# ClusterRole (Nodes are cluster-scoped).
+# resources this file grants are namespace-scoped (dms) except two
+# ClusterRoles: the agent's (Nodes are cluster-scoped) and the api's
+# dms-api-queue-readonly (Volcano Queues are cluster-scoped; named GET only).
 ---
 # dms-controller (dms controller, deploy/k8s/41-controller.yaml): the only
 # process that SUBMITS work. stepper.py's JobStepper calls
@@ -121,6 +122,15 @@ rules:
     resources: ["deployments", "daemonsets"]
     resourceNames: ["dms-api", "dms-controller", "dms-agent"]
     verbs: ["get"]
+  # 슬라이스 17(큐 가시성): /api/admin/metrics/queue 가 라이브 PodGroup 을 읽는다
+  # (VolcanoQueueReader.read_podgroups -> list_namespaced_custom_object).
+  # PodGroup 엔 DMS 라벨이 없고 이름 접미(-<uid>)는 문서화된 계약이 아니라,
+  # 리더는 네임스페이스를 list 한 뒤 spec.queue 로 거른다 -- 그래서 list 가
+  # 실제로 필요한 동사다. resourceNames 를 여기 붙이지 말 것: resourceNames 는
+  # list 에 적용되지 않아(위에 두 번 적힌 함정) 모든 list 가 조용히 403 이 된다.
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -131,6 +141,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: dms-api
+subjects:
+  - kind: ServiceAccount
+    name: dms-api
+    namespace: dms
+---
+# 슬라이스 17: Volcano Queue 는 cluster-scoped 다 -- 이 파일에서 api 가 갖는
+# 유일한 클러스터 권한(머리 주석의 두 번째 예외). api 가 Queue 에서 읽는 것은
+# status.state(Open/Closed) 하나뿐이라("잡이 왜 하나도 안 도는가"의 1순위 원인,
+# 설계 §2.1) 이름 지정 GET 으로 최소 표면만 연다. verbs 는 ["get"] 을 유지할 것:
+# resourceNames 는 list 에 적용되지 않으므로 list 를 열면 이 이름 제한이
+# 무력화되어 클러스터의 모든 큐가 열린다. tests/test_rbac_contract.py 가 이
+# 모양을 계약으로 고정한다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dms-api-queue-readonly
+rules:
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["queues"]
+    resourceNames: ["dms-data"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dms-api-queue-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dms-api-queue-readonly
 subjects:
   - kind: ServiceAccount
     name: dms-api
