@@ -226,6 +226,30 @@ def _node_affinity(nodes):
             {"key": "kubernetes.io/hostname", "operator": "In", "values": nodes}]}]}}}
 
 
+def _worker_task_metadata(spec, task_name):
+    # 자기참조 labelSelector 를 쓰려면 라벨이 파드에 먼저 있어야 한다(설계 §2.4) --
+    # volcano task 템플릿에는 지금까지 metadata 자체가 없었다.
+    return {"labels": {"dms.io/job-id": spec.job_id, "dms.io/task": task_name}}
+
+
+def _worker_affinity(spec, task_name, nodes):
+    """nodeAffinity(후보 노드 고정)에 required podAntiAffinity(같은 잡·같은 task 산개)를
+    병합한다.
+
+    required 로 거는 근거(설계 §2.4): resolve_fanout 이 node_count =
+    min(len(candidates), max_nodes)(placement.py)라 레플리카가 후보 노드 수를 절대
+    넘지 않는다 -- 산개 불가로 인한 영구 Pending 이 구조적으로 없다. 이것이 없으면
+    max_nodes 가 노드가 아니라 레플리카만 제한해 MPI 팬아웃이 한 노드로 붕괴할 수
+    있다(원본 설계 §181 위반). 셀렉터를 같은 job 의 같은 task 로 좁히는 이유:
+    nsync 의 source/destination 은 별개 task 라 서로 밀어내면 안 되고, 다른 잡의
+    워커와도 무관해야 한다."""
+    return {**_node_affinity(nodes),
+            "podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [{
+                "labelSelector": {"matchLabels": {
+                    "dms.io/job-id": spec.job_id, "dms.io/task": task_name}},
+                "topologyKey": "kubernetes.io/hostname"}]}}
+
+
 def _preflight_script(spec, *, role=None):
     """(script, path_args) — 경로는 positional 파라미터로 넘겨 셸 인젝션을 원천 차단.
 
@@ -313,15 +337,19 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
             ["/usr/local/bin/dms-job-runner"], env, volumes)],
         "volumes": _pod_volumes(volumes)}}}
     src_worker = {"name": "source-worker", "replicas": len(src_nodes),
-        "template": {"spec": {"restartPolicy": "Never",
-            "affinity": _node_affinity(src_nodes),
-            "containers": [_worker_container("source-worker", job_image, spec, volumes)],
-            "volumes": _pod_volumes(volumes)}}}
+        "template": {
+            "metadata": _worker_task_metadata(spec, "source-worker"),
+            "spec": {"restartPolicy": "Never",
+                "affinity": _worker_affinity(spec, "source-worker", src_nodes),
+                "containers": [_worker_container("source-worker", job_image, spec, volumes)],
+                "volumes": _pod_volumes(volumes)}}}
     dst_worker = {"name": "destination-worker", "replicas": len(dst_nodes),
-        "template": {"spec": {"restartPolicy": "Never",
-            "affinity": _node_affinity(dst_nodes),
-            "containers": [_worker_container("destination-worker", job_image, spec, volumes)],
-            "volumes": _pod_volumes(volumes)}}}
+        "template": {
+            "metadata": _worker_task_metadata(spec, "destination-worker"),
+            "spec": {"restartPolicy": "Never",
+                "affinity": _worker_affinity(spec, "destination-worker", dst_nodes),
+                "containers": [_worker_container("destination-worker", job_image, spec, volumes)],
+                "volumes": _pod_volumes(volumes)}}}
     job_spec = {"schedulerName": "volcano", "queue": spec.queue,
                 "minAvailable": len(src_nodes) + len(dst_nodes) + 1,
                 "priorityClassName": spec.priority_class,
@@ -355,11 +383,14 @@ def build_volcano_job(spec, *, job_image, namespace, volumes):
             "volumes": _pod_volumes(volumes)}}}
     worker = {
         "name": "worker", "replicas": workers,
-        "template": {"spec": {
-            "restartPolicy": "Never",
-            "affinity": _node_affinity(nodes) if nodes else {},
-            "containers": [_worker_container("worker", job_image, spec, volumes)],
-            "volumes": _pod_volumes(volumes)}}}
+        "template": {
+            "metadata": _worker_task_metadata(spec, "worker"),
+            "spec": {
+                "restartPolicy": "Never",
+                # nodes 가 비면(개발 스텁 경로) 산개할 대상이 없다 -- 기존과 같이 빈 dict
+                "affinity": _worker_affinity(spec, "worker", nodes) if nodes else {},
+                "containers": [_worker_container("worker", job_image, spec, volumes)],
+                "volumes": _pod_volumes(volumes)}}}
     job_spec = {"schedulerName": "volcano", "queue": spec.queue,
                 "minAvailable": workers + 1, "priorityClassName": spec.priority_class,
                 "plugins": {"ssh": [], "svc": []},

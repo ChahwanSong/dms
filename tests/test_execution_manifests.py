@@ -312,3 +312,56 @@ def test_nsync_worker_containers_have_identity_and_sshd_command():
         assert c["command"][0] == "sh" and c["command"][1] == "-c"
         assert "exec /usr/sbin/sshd -D -e -o StrictModes=no -o UsePAM=no" in c["command"][2]
         assert c["securityContext"]["capabilities"]["add"] == ["SYS_CHROOT"]
+
+
+def _anti_affinity_rule(task):
+    rules = task["template"]["spec"]["affinity"]["podAntiAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"]
+    assert len(rules) == 1
+    return rules[0]
+
+
+def test_colocated_worker_spreads_with_required_anti_affinity():
+    # 이것이 없으면 max_nodes 는 레플리카 수만 제한할 뿐, 스케줄러가 워커들을 한
+    # 노드에 몰아넣을 수 있다(설계 §2.4 -- MPI 팬아웃 붕괴). required 로 걸어도
+    # 안전한 근거: resolve_fanout 이 레플리카를 후보 노드 수 이하로 자른다(§1-7).
+    spec = _spec(operation="sync", tool="dsync",
+                 candidates={"primary": ["dms-w1", "dms-w2", "dms-w3"]},
+                 paths={"source": "s", "source_storage": "src",
+                        "destination": "d", "destination_storage": "dst"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    worker = next(t for t in m["spec"]["tasks"] if t["name"] == "worker")
+    labels = worker["template"]["metadata"]["labels"]
+    assert labels == {"dms.io/job-id": "j1", "dms.io/task": "worker"}
+    rule = _anti_affinity_rule(worker)
+    assert rule["topologyKey"] == "kubernetes.io/hostname"
+    assert rule["labelSelector"]["matchLabels"] == labels   # 자기참조: 같은 잡·같은 task
+    # nodeAffinity(후보 고정)는 그대로 남는다 -- 병합이지 교체가 아니다
+    aff = worker["template"]["spec"]["affinity"]
+    values = aff["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"][0]["matchExpressions"][0]["values"]
+    assert values == ["dms-w1", "dms-w2", "dms-w3"]
+    # 런처는 산개 대상이 아니다(rank0 하나뿐) -- 라벨도 안티어피니티도 없다
+    launcher = next(t for t in m["spec"]["tasks"] if t["name"] == "launcher")
+    assert "metadata" not in launcher["template"]
+    assert "podAntiAffinity" not in launcher["template"]["spec"]["affinity"]
+
+
+def test_nsync_workers_get_task_scoped_anti_affinity():
+    spec = _spec(operation="sync", tool="nsync",
+                 candidates={"source": ["dms-w1", "dms-w2"],
+                             "destination": ["dms-w4"]},
+                 paths={"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                        "destination": "/cephfs-secondary/b",
+                        "destination_storage": "cephfs-secondary"})
+    m = build_volcano_job(spec, job_image="i", namespace="dms", volumes=_VOL)
+    for task_name in ("source-worker", "destination-worker"):
+        task = next(t for t in m["spec"]["tasks"] if t["name"] == task_name)
+        # task 별 셀렉터 -- source 가 destination 을 밀어내면 각자 자기 풀 안에서
+        # 퍼진다는 설계(§2.4)가 깨진다.
+        assert _anti_affinity_rule(task)["labelSelector"]["matchLabels"] == {
+            "dms.io/job-id": "j1", "dms.io/task": task_name}
+        assert task["template"]["metadata"]["labels"]["dms.io/task"] == task_name
+    launcher = next(t for t in m["spec"]["tasks"] if t["name"] == "launcher")
+    assert "metadata" not in launcher["template"]
+    assert "affinity" not in launcher["template"]["spec"]   # nsync 런처는 원래 affinity 없음
