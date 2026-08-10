@@ -224,6 +224,36 @@ class DataJobsRepository:
                WHERE job_id = :j AND exec_submitted_at IS NULL""",
             {"now": utc_now_iso(), "j": job_id})
 
+    def record_sched_wait(self, job) -> None:
+        """execution vcjob 의 첫 RUNNING 관측에서 스케줄 대기를 기록(슬라이스 20
+        설계 §2.3). job 은 claim_steppable 의 SELECT * 스냅샷이다 --
+        sched_wait_seconds 선독으로 이미 기록된 잡은 UPDATE 자체를 건너뛴다(매 틱
+        0행 UPDATE 반복 방지). 진짜 write-once 강제는 SQL 술어(IS NULL)다: 스냅샷이
+        낡아 선독을 통과해도 덮어쓰지 못한다. set_job_state 의 UPDATE 에 끼우지
+        않는 이유(설계 §2.3): 그 UPDATE 는 항상 submit_wait_seconds 를 쓰므로 같은
+        자리에 넣으면 매 전이 선독-보존을 지켜야 하고 한 곳만 놓쳐도 NULL 로
+        덮인다.
+
+        0 은 정상값(같은 틱 안에 스케줄됨 -- 설계 §2.4)이라 비교는 전부 is None
+        이다(truthy 금지). 음수(시계 스큐)는 submit_wait 규칙 그대로 0 으로 접고
+        (1초 해상도 세계에서 0 이 정직하다), 시각이 깨졌으면(iso_epoch ValueError)
+        지어내지 않고 NULL 로 남긴다 -- 둘 다 set_job_state 의 강등 선례와 같은
+        규칙(설계 §4). 앵커가 없는 잡(마이그레이션 이전)은 NULL 유지 -- excluded
+        로 집계에 표면화된다(설계 §2.5)."""
+        if job.get("sched_wait_seconds") is not None:
+            return
+        anchor = job.get("exec_submitted_at")
+        if anchor is None:
+            return
+        try:
+            wait = max(0, int(iso_epoch(utc_now_iso()) - iso_epoch(anchor)))
+        except (TypeError, ValueError):
+            return
+        self._db.execute(
+            """UPDATE data_jobs SET sched_wait_seconds = :w
+               WHERE job_id = :j AND sched_wait_seconds IS NULL""",
+            {"w": wait, "j": job["job_id"]})
+
     def set_preview(self, job_id, *, fingerprint, expires_at, artifact_uri):
         self._db.execute(
             """UPDATE data_jobs SET preview_fingerprint = :f, preview_expires_at = :e,

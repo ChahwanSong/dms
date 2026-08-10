@@ -239,3 +239,59 @@ def test_mark_exec_submitted_is_write_once(db):
     repos.data_jobs.mark_exec_submitted(job_id)
     assert (repos.data_jobs.get_job(job_id)["exec_submitted_at"]
             == "2020-01-01T00:00:00Z")
+
+
+def test_record_sched_wait_zero_survives_and_predicate_blocks_overwrite(db):
+    # 0 은 결측이 아니라 "같은 틱 안에 스케줄됨"이라는 가장 건강한 값이다(설계
+    # §2.4). 미래 앵커(시계 스큐)를 심어 max(0, 음수) -> 0 이 되는 **결정적**
+    # 경로로 0 을 만든다 -- 기록 계층에 truthy 검사(`if wait:` 따위)가 끼면
+    # 여기서 NULL 로 새는 것이 잡힌다. 이어서 낡은 스냅샷(선독 통과)으로 재호출해
+    # SQL 술어(IS NULL)가 최종 방어선임을 고정한다: 값이 0 이어도 "기록됨"이라
+    # 덮이면 안 된다(술어가 IS NULL 아닌 falsy 로 쓰였으면 여기서 덮인다).
+    from dms.db import iso_plus, utc_now_iso
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    db.execute("UPDATE data_jobs SET exec_submitted_at = :t WHERE job_id = :j",
+               {"t": iso_plus(utc_now_iso(), 3600), "j": job_id})
+    repos.data_jobs.record_sched_wait(repos.data_jobs.get_job(job_id))
+    assert repos.data_jobs.get_job(job_id)["sched_wait_seconds"] == 0  # NULL 아님
+    db.execute("UPDATE data_jobs SET exec_submitted_at = '2020-01-01T00:00:00Z' "
+               "WHERE job_id = :j", {"j": job_id})
+    stale = dict(repos.data_jobs.get_job(job_id))
+    stale["sched_wait_seconds"] = None            # 선독을 일부러 통과시킨다
+    repos.data_jobs.record_sched_wait(stale)
+    assert repos.data_jobs.get_job(job_id)["sched_wait_seconds"] == 0
+
+
+def test_record_sched_wait_skips_update_when_snapshot_has_value(db, monkeypatch):
+    # 클레임 스냅샷 선독(설계 §2.3): 이미 기록된 잡은 매 틱 0행 UPDATE 를 반복하지
+    # 않는다 -- RUNNING 이 오래 지속되는 잡이 폴링마다 DB 쓰기를 만들면 안 된다.
+    # 0 도 "기록됨"이다: 선독이 truthy(`if job[...]`)로 쓰이면 0 스냅샷에서
+    # UPDATE 가 나가 여기서 잡힌다.
+    repos = _repos(db)
+    executed = []
+    orig = db.execute
+    monkeypatch.setattr(
+        db, "execute",
+        lambda sql, params=None: (executed.append(sql), orig(sql, params))[1])
+    repos.data_jobs.record_sched_wait(
+        {"job_id": "j-x", "sched_wait_seconds": 7,
+         "exec_submitted_at": "2026-01-01T00:00:00Z"})
+    repos.data_jobs.record_sched_wait(
+        {"job_id": "j-x", "sched_wait_seconds": 0,
+         "exec_submitted_at": "2026-01-01T00:00:00Z"})
+    assert executed == []
+
+
+def test_record_sched_wait_without_anchor_or_broken_anchor_stays_null(db):
+    # 앵커가 없으면(마이그레이션 이전 잡 등) 값을 지어내지 않는다(설계 §2.5).
+    # 깨진 시각은 iso_epoch ValueError -> NULL 유지 -- set_job_state 의
+    # submit_wait 강등 선례(data_jobs.py)와 같은 규칙(설계 §4).
+    repos = _repos(db)
+    job_id = _mk_job(repos, _mk_request(repos))
+    repos.data_jobs.record_sched_wait(repos.data_jobs.get_job(job_id))  # 앵커 None
+    assert repos.data_jobs.get_job(job_id)["sched_wait_seconds"] is None
+    db.execute("UPDATE data_jobs SET exec_submitted_at = 'not-a-time' "
+               "WHERE job_id = :j", {"j": job_id})
+    repos.data_jobs.record_sched_wait(repos.data_jobs.get_job(job_id))
+    assert repos.data_jobs.get_job(job_id)["sched_wait_seconds"] is None

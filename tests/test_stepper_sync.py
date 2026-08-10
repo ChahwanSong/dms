@@ -117,3 +117,23 @@ def test_sync_anchor_only_at_execution_submit_not_preview(db):
     job = repos.data_jobs.get_job(jid)
     assert job["state"] == "Executing"
     assert job["exec_submitted_at"] is not None
+
+
+def test_preview_polling_never_records_sched_wait(db):
+    # preview vcjob 폴링은 기록 경로가 아니다(설계 §2.2 -- 단일 컬럼에 두 vcjob
+    # 대기를 섞지 않는다). 앵커를 **인위로 심어** "기록 가능한 상태"를 만들어
+    # 둔다: 안 그러면 앵커 부재 덕에 잘못된 훅(_poll_preview 에 기록)도 우연히
+    # 초록이 되는 약한 테스트가 된다.
+    repos = Repositories(db)
+    rid, jid = _sync_job(repos)
+    adapter = StubExecutionAdapter()
+    adapter.script(f"stub-preview-{jid}", [ExecStatus.RUNNING])
+    stepper = _stepper(repos, adapter)
+    stepper.run_once()   # Pending → Preflight
+    stepper.run_once()   # Preflight → PreviewRunning (preview 제출)
+    db.execute("UPDATE data_jobs SET exec_submitted_at = '2026-01-01T00:00:00Z' "
+               "WHERE job_id = :j", {"j": jid})
+    stepper.run_once()   # preview poll RUNNING -- 기록하면 안 된다
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "PreviewRunning"
+    assert job["sched_wait_seconds"] is None

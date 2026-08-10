@@ -189,6 +189,15 @@ class JobStepper:
     def _poll_execution(self, job):
         ref = (job["phase_refs"] or {}).get("execution")
         status = self._exec.poll(ref)
+        if status == ExecStatus.RUNNING:
+            # 슬라이스 20(설계 §2.3, 플랜 D2): execution vcjob 의 첫 RUNNING 관측
+            # -- 스케줄 대기를 write-once 기록한다. execution ref 를 폴링하는
+            # 함수는 여기뿐이라(preview 는 _poll_preview, preflight 는
+            # _poll_preflight) preview 대기가 섞일 경로가 없다. 이미 기록된 잡은
+            # 스냅샷 선독으로 no-op. 기록 실패는 run_once 의 잡 단위 try/except 로
+            # 격리되고 다음 틱의 RUNNING 관측이 재시도한다(설계 §4). Completing
+            # 등도 RUNNING 으로 접히므로(_VCJOB_PHASE) 이 값은 근사다(설계 §2.2).
+            self._repos.data_jobs.record_sched_wait(job)
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return job["state"]
         if status == ExecStatus.SUCCEEDED:

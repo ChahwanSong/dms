@@ -226,3 +226,61 @@ def test_execution_submit_records_anchor_but_preflight_does_not(db):
     assert job["state"] == "Running"
     assert job["exec_submitted_at"] is not None
     assert job["sched_wait_seconds"] is None     # 관측 전 -- 기록은 Task 3
+
+
+def test_first_running_observation_records_sched_wait_once(db):
+    # 설계 §2.3: 첫 RUNNING 관측(execution ref 폴링)이 기록하고, 이후 관측은
+    # 덮지 않는다. 앵커를 -120s 로 밀어 값(≈120)까지 함께 고정한다.
+    from dms.db import iso_plus, utc_now_iso
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = StubExecutionAdapter()
+    adapter.script(f"stub-execution-{jid}",
+                   [ExecStatus.RUNNING, ExecStatus.RUNNING, ExecStatus.SUCCEEDED])
+    stepper = _stepper(repos, adapter)
+    stepper.run_once()   # Pending → Preflight
+    stepper.run_once()   # Preflight SUCCEEDED → Running (execution 제출 + 앵커)
+    db.execute("UPDATE data_jobs SET exec_submitted_at = :t WHERE job_id = :j",
+               {"t": iso_plus(utc_now_iso(), -120), "j": jid})
+    stepper.run_once()   # execution poll RUNNING -- 첫 관측: 기록
+    wait = repos.data_jobs.get_job(jid)["sched_wait_seconds"]
+    assert wait is not None and 120 <= wait <= 122   # 1초 해상도 + 실행 지연 여유
+    # 두 번째 RUNNING 관측 전에 앵커를 더 밀어도 값이 그대로여야 "재계산 없음"이
+    # 증명된다(write-once -- 선독 + IS NULL 술어).
+    db.execute("UPDATE data_jobs SET exec_submitted_at = '2020-01-01T00:00:00Z' "
+               "WHERE job_id = :j", {"j": jid})
+    stepper.run_once()   # 두 번째 RUNNING 관측
+    assert repos.data_jobs.get_job(jid)["sched_wait_seconds"] == wait
+    stepper.run_once()   # SUCCEEDED → 종단 -- 값은 이력으로 남는다(이 슬라이스의 목적)
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Succeeded"
+    assert job["sched_wait_seconds"] == wait
+
+
+def test_job_finishing_without_running_stays_null(db):
+    # 스텁 기본(즉시 SUCCEEDED) = 한 틱 완료 잡: RUNNING 을 관측할 기회가 없어
+    # 구조적으로 NULL 이다(설계 §2.6). 스텁 백엔드(로컬·CI 기본값)에서 sched_wait
+    # 가 "정직한 no-op"(설계 §4)이라는 계약이자, 스텁 기본 동작을 바꾸지 않았다는
+    # 증거이기도 하다.
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    stepper = _stepper(repos, StubExecutionAdapter())
+    stepper.run_once(); stepper.run_once(); stepper.run_once()
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Succeeded"
+    assert job["exec_submitted_at"] is not None   # 앵커는 있다 -- 관측이 없었을 뿐
+    assert job["sched_wait_seconds"] is None
+
+
+def test_job_failing_without_running_stays_null(db):
+    # Running 미도달 실패 -- 값을 지어내지 않는다(설계 §2.6). NULL 은 excluded 로
+    # 집계돼 분포를 오염시키지 않는다.
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = StubExecutionAdapter()
+    adapter.script(f"stub-execution-{jid}", [ExecStatus.FAILED])
+    stepper = _stepper(repos, adapter)
+    stepper.run_once(); stepper.run_once(); stepper.run_once()
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Failed"
+    assert job["sched_wait_seconds"] is None
