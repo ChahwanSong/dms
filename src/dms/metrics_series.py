@@ -5,7 +5,8 @@ agent_reports의 report blob에서 노드 메트릭 포인트를 만든다. 계�
 - 네트워크는 부팅 이후 누적 카운터다 -- throughput은 인접 샘플 차분으로 여기서
   계산해 프론트가 카운터 의미를 몰라도 되게 한다(설계 §3). 카운터가 감소하면
   (리부팅 리셋) 그 구간은 null -- 음수 대역폭을 그리는 것보다 빈 구간이 정직하다."""
-from datetime import datetime, timezone
+# 사본이던 _epoch 를 db.iso_epoch 로 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
+from .db import iso_epoch as _epoch
 
 
 def clamp_window_hours(window, *, retention_days: int) -> int:
@@ -21,11 +22,6 @@ def bucket_chars_for(window_hours: int) -> int:
     절단이 곧 시간 절단이다: 13자="YYYY-MM-DDTHH"(시간), 10자="YYYY-MM-DD"(일).
     48h 이하만 시간 버킷 -- 7일 창을 시간으로 쪼개면 막대 168개가 나온다."""
     return 13 if window_hours <= 48 else 10
-
-
-def _epoch(ts) -> float:
-    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
-        tzinfo=timezone.utc).timestamp()
 
 
 def _num(value):

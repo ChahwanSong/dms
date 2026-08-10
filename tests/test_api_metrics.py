@@ -277,3 +277,105 @@ def test_metrics_infra_manifest_fail_soft_all_none(client, monkeypatch):
     body = r.json()
     assert all(c["manifest_image"] is None for c in body["components"])
     assert body["job_image"] == {"live": None, "manifest": None}
+
+
+class _FakeQueueReader:
+    """StubQueueReader(queue_reader.py)와 같은 두 메서드 페어. 축별로 값/예외를
+    주입해 403(예외)·404/CRD 부재(None)·빈 목록([])·정상이 각각 다른 응답으로
+    나오는지 -- 뭉개짐 금지(설계 §4) -- 를 고정한다."""
+    _UNSET = object()
+
+    def __init__(self, queue=_UNSET, podgroups=_UNSET):
+        self._queue = ({"name": "dms-data", "state": "Open"}
+                       if queue is self._UNSET else queue)
+        self._podgroups = [] if podgroups is self._UNSET else podgroups
+
+    def _resolve(self, value):
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def read_queue(self):
+        return self._resolve(self._queue)
+
+    def read_podgroups(self):
+        return self._resolve(self._podgroups)
+
+
+def test_metrics_queue_stub_pair_serves_without_cluster(client):
+    # 주입 없이 그대로 -- conftest 기본 백엔드(stub)의 wiring 이 StubQueueReader 를
+    # 꽂는다. 이 스텁 페어가 없으면 모든 로컬·CI 가 여기서 500 이다(설계 §2.5).
+    body = client.get("/api/admin/metrics/queue", headers=ADMIN).json()
+    assert body == {"queue": {"name": "dms-data", "state": "Open"},
+                    "podgroups": []}
+
+
+def test_metrics_queue_admin_only(client):
+    assert client.get("/api/admin/metrics/queue").status_code == 401
+
+
+def test_metrics_queue_computes_wait_and_sorts_longest_first(client):
+    now = utc_now_iso()
+    client.app.state.queue_reader = _FakeQueueReader(podgroups=[
+        {"name": "dms-b-uid2", "phase": "Inqueue", "min_member": 1,
+         "created_at": iso_plus(now, -30)},
+        {"name": "dms-a-uid1", "phase": "Pending", "min_member": 3,
+         "created_at": iso_plus(now, -300)},
+        {"name": "dms-c-uid3", "phase": "Pending", "min_member": 1,
+         "created_at": None},                    # 시각 없음 -- null 강등
+    ])
+    body = client.get("/api/admin/metrics/queue", headers=ADMIN).json()
+    pods = body["podgroups"]
+    # 오래 기다린 잡이 먼저 -- 표의 목적이 "무엇이 막혀 있나"다(설계 §3)
+    assert [p["name"] for p in pods] == ["dms-a-uid1", "dms-b-uid2", "dms-c-uid3"]
+    assert 300 <= pods[0]["wait_seconds"] <= 302   # 1초 해상도 + 호출 지연 여유
+    assert pods[0]["min_member"] == 3
+    assert pods[2]["wait_seconds"] is None
+
+
+def test_metrics_queue_unknown_axes_stay_null_not_empty(client):
+    # 403(리더 예외)과 CRD 부재(None)는 "빈 큐"가 아니다 -- []로 접으면 권한
+    # 누락이 "큐가 한가함"으로 렌더된다(설계 §4). 축 강등이지 라우트 실패가
+    # 아니므로 응답은 200 이다.
+    client.app.state.queue_reader = _FakeQueueReader(
+        queue=RuntimeError("forbidden 403"), podgroups=None)
+    r = client.get("/api/admin/metrics/queue", headers=ADMIN)
+    assert r.status_code == 200
+    assert r.json() == {"queue": None, "podgroups": None}
+
+
+def test_metrics_queue_empty_list_is_not_null(client):
+    # 반대 방향도 고정: 정말 빈 큐([])가 null 로 승격되면 "알 수 없음" 경고가
+    # 정상 상태에 뜬다.
+    client.app.state.queue_reader = _FakeQueueReader(queue=None, podgroups=[])
+    assert client.get("/api/admin/metrics/queue", headers=ADMIN).json() == {
+        "queue": None, "podgroups": []}
+
+
+def test_metrics_queue_403_on_queue_axis_keeps_podgroups(client):
+    # 두 축은 필요한 권한이 다르다: Queue 는 이름 지정 GET(ClusterRole), PodGroup 은
+    # 네임스페이스 list(Role) -- ClusterRole 만 빠지면 queue 축만 403 이다. 두 축을
+    # 한 try 로 묶으면 그 하나가 라우트 전체를 500 으로 만들어 살아 있는 대기 목록
+    # 까지 잃는다. 그래서 축마다 독립 try/except 여야 한다.
+    now = utc_now_iso()
+    client.app.state.queue_reader = _FakeQueueReader(
+        queue=RuntimeError("queues.scheduling.volcano.sh is forbidden 403"),
+        podgroups=[{"name": "dms-a-uid1", "phase": "Pending", "min_member": 1,
+                    "created_at": iso_plus(now, -60)}])
+    r = client.get("/api/admin/metrics/queue", headers=ADMIN)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["queue"] is None                      # 죽은 축만 "알 수 없음"
+    assert [p["name"] for p in body["podgroups"]] == ["dms-a-uid1"]
+    assert body["podgroups"][0]["wait_seconds"] >= 60  # 산 축은 계산까지 온전
+
+
+def test_metrics_queue_403_on_podgroups_axis_keeps_queue(client):
+    # 반대 방향(Role 누락 -> podgroups 축만 403)도 같은 독립성이어야 한다.
+    client.app.state.queue_reader = _FakeQueueReader(
+        queue={"name": "dms-data", "state": "Closed"},
+        podgroups=RuntimeError("podgroups.scheduling.volcano.sh is forbidden 403"))
+    r = client.get("/api/admin/metrics/queue", headers=ADMIN)
+    assert r.status_code == 200
+    assert r.json() == {"queue": {"name": "dms-data", "state": "Closed"},
+                        "podgroups": None}

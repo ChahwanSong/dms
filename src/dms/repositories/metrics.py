@@ -2,9 +2,9 @@
 agent_reports(JSON blob 시계열 -- 앱측 파싱)와 data_jobs(typed 컬럼 -- SQL GROUP BY).
 blob은 dual-dialect(SQLite/PostgreSQL)라 json_extract에 기댈 수 없어 여기서 파싱하고,
 GROUP BY는 typed 컬럼에만 건다."""
-from datetime import datetime, timezone
-
 from ..db import Database, load_json
+# metrics_series 와 같은 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
+from ..db import iso_epoch as _epoch
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 
 # 실패로 세는 종단 상태 = 종단 전체 - Succeeded. sorted로 고정해 플레이스홀더
@@ -12,11 +12,6 @@ from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 _FAILED_STATES = tuple(sorted(
     s.value for s in TERMINAL_DATA_JOB_STATES if s is not DataJobState.SUCCEEDED))
 _TERMINAL_STATES = tuple(sorted(s.value for s in TERMINAL_DATA_JOB_STATES))
-
-
-def _epoch(ts: str) -> float:
-    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
-        tzinfo=timezone.utc).timestamp()
 
 
 class MetricsRepository:

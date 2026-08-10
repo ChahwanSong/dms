@@ -19,6 +19,14 @@ def iso_plus(ts: str, seconds: int) -> str:
     return (base + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def iso_epoch(ts: str) -> float:
+    """ISO-8601 UTC(...Z) 문자열 -> epoch 초. 시각의 차는 SQL 로 이식성 있게 못
+    뺀다(julianday 는 SQLite, EXTRACT(EPOCH)는 PG 전용) -- 전부 파이썬에서 뺀다.
+    metrics_series/repositories.metrics 의 사본 _epoch 두 벌을 여기로 승격했다."""
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc).timestamp()
+
+
 class Database:
     def __init__(self, conn, dialect: str):
         self._conn = conn

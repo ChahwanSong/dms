@@ -6,7 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from ..db import iso_plus, utc_now_iso
+from ..db import iso_epoch, iso_plus, utc_now_iso
 from ..manifest_tags import manifest_images, manifest_job_image
 from ..metrics_series import (bucket_chars_for, build_node_points,
                               clamp_window_hours, duration_histogram)
@@ -154,3 +154,44 @@ def metrics_infra(request: Request):
     return {"components": components,
             "job_image": {"live": settings.job_image or None,
                           "manifest": manifest_job_image()}}
+
+
+@router.get("/api/admin/metrics/queue")
+def metrics_queue(request: Request):
+    """Volcano 큐 현황(슬라이스 17 설계 §3). 축마다 독립 fail-soft: queue(이름
+    지정 GET)와 podgroups(네임스페이스 list)는 필요한 권한이 다르므로 --
+    ClusterRole 누락은 queue 만, Role 누락은 podgroups 만 403 -- 한쪽이 죽어도
+    다른 쪽은 산다. null = 알 수 없음(403/CRD 부재), [] = 정말 비었음. 이 구분을
+    접으면 권한 누락이 "큐가 한가함"으로 렌더된다(설계 §4).
+
+    metrics_infra 와 같은 이유로 동기 def + ThreadPoolExecutor 병렬이다: 각 k8s
+    호출엔 _request_timeout(10s)이 걸려 있지만 순차면 최악 2x10초가 5초 폴링에
+    쌓여 threadpool 을 고갈시킨다."""
+    reader = request.app.state.queue_reader
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {"queue": pool.submit(reader.read_queue),
+                   "podgroups": pool.submit(reader.read_podgroups)}
+    results = {}
+    for axis, future in futures.items():
+        try:
+            results[axis] = future.result()
+        except Exception as exc:
+            # 403 등 리더가 올린 예외는 그 축만 null(알 수 없음) 강등. 축을 하나의
+            # try 로 묶으면 RBAC 한 줄 누락이 라우트 전체를 500 으로 만든다. 로그가
+            # 없으면 RBAC 누락이 화면의 "알 수 없음"으로만 보여 원인 추적이
+            # 안 된다(read_pod_log 403 사고의 교훈).
+            logger.warning("metrics/queue read failed axis=%s: %s", axis, exc)
+            results[axis] = None
+    pods = results["podgroups"]
+    if pods is not None:
+        now = iso_epoch(utc_now_iso())
+        for pg in pods:
+            # 대기 시간(now - creationTimestamp)은 서버가 계산한다 -- 브라우저
+            # 시계 스큐가 대기 시간을 왜곡하지 않게. 시각이 깨진 항목만 null.
+            try:
+                pg["wait_seconds"] = max(0, int(now - iso_epoch(pg["created_at"])))
+            except (TypeError, ValueError):
+                pg["wait_seconds"] = None
+        # 오래 기다린 잡이 위로 -- 표의 목적이 "무엇이 막혀 있나"이므로.
+        pods.sort(key=lambda p: -(p["wait_seconds"] or 0))
+    return {"queue": results["queue"], "podgroups": pods}

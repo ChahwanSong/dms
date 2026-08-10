@@ -7,7 +7,8 @@ from ..config import Settings
 from ..db import Database
 from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
-                     build_identity_resolver, build_rollout_runner)
+                     build_identity_resolver, build_queue_reader,
+                     build_rollout_runner)
 from .routes_accounts import router as accounts_router
 from .routes_auth import router as auth_router
 from .routes_storages import router as storages_router, user_router as user_storages_router
@@ -36,6 +37,9 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     # targets/same_tag 엔드포인트가 클러스터 현재 이미지를 읽기 전용으로 관찰하는 데
     # 쓴다(설계 §5/§7, 1f5f4e5) -- observe()만 쓰고 patch_image()는 호출하지 않는다.
     app.state.rollout_runner = build_rollout_runner(settings)
+    # 슬라이스 17: /api/admin/metrics/queue 가 쓴다. 기본 백엔드(stub)에선
+    # StubQueueReader 라 클러스터 없이도 라우트가 산다(설계 §2.5).
+    app.state.queue_reader = build_queue_reader(settings)
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
                        session_cookie="dms_session")
 
