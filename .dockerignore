@@ -8,7 +8,7 @@
 # linux/x64 (e.g. building on macOS/arm64). Excluding node_modules/dist here is
 # what makes the multi-stage split actually mean something.
 #
-# Do NOT exclude anything Dockerfile.dms COPYs: pyproject.toml, src/, or
+# Do NOT exclude anything Dockerfile.dms COPYs: pyproject.toml, src/, deploy/k8s, or
 # frontend/ (package.json, package-lock.json, index.html, src/, vite/tailwind/
 # tsconfig configs) -- those must remain in the build context.
 

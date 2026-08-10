@@ -235,3 +235,45 @@ def test_metrics_infra_observes_in_parallel_and_keeps_order(client):
     assert [c["component"] for c in body["components"]] == [
         "dms-agent", "dms-api", "dms-controller"]      # 완료 역순이어도 순서 불변
     assert elapsed < 0.5, elapsed                       # 병렬(≈0.3s) -- 순차면 0.6s
+
+
+def _stub_manifests(monkeypatch, images=None, job=None):
+    # 기본 루트는 저장소의 실 deploy/k8s 를 읽는다(테스트 환경에도 존재) -- 실 태그에
+    # 단언을 걸면 태그 범프마다 테스트가 깨지므로 라우트 테스트는 조회 함수를 대역화한다.
+    # 실물 파싱 자체는 tests/test_manifest_tags.py 가 고정한다.
+    monkeypatch.setattr(
+        "dms.api.routes_metrics.manifest_images",
+        lambda: images if images is not None else
+        {"dms-agent": None, "dms-api": None, "dms-controller": None,
+         "dms-migrate": None})
+    monkeypatch.setattr("dms.api.routes_metrics.manifest_job_image", lambda: job)
+
+
+def test_metrics_infra_reports_manifest_image_and_job_image(client, monkeypatch):
+    client.app.state.rollout_runner = _FakeObserver()
+    _stub_manifests(
+        monkeypatch,
+        images={"dms-agent": "pkg-01:5000/dms-agent:dev6",   # live 와 일치
+                "dms-api": "pkg-01:5000/dms:d99",            # live(d23)와 드리프트
+                "dms-controller": None,                      # 동봉 파싱 실패
+                "dms-migrate": "pkg-01:5000/dms:d99"},
+        job="pkg-01:5000/dms-mpifileutils:job9")
+    body = client.get("/api/admin/metrics/infra", headers=ADMIN).json()
+    by = {c["component"]: c for c in body["components"]}
+    assert by["dms-agent"]["manifest_image"] == "pkg-01:5000/dms-agent:dev6"
+    assert by["dms-api"]["manifest_image"] == "pkg-01:5000/dms:d99"
+    assert by["dms-controller"]["manifest_image"] is None    # null -> 프론트 무배지
+    # conftest 의 settings 는 job_image="" (기본) -- 빈 문자열은 None 으로 접는다
+    assert body["job_image"] == {"live": None,
+                                 "manifest": "pkg-01:5000/dms-mpifileutils:job9"}
+
+
+def test_metrics_infra_manifest_fail_soft_all_none(client, monkeypatch):
+    # 동봉본이 없는 이미지(COPY 이전 빌드)에서도 라우트는 200 -- 값만 전량 null(설계 §4)
+    client.app.state.rollout_runner = _FakeObserver()
+    _stub_manifests(monkeypatch)
+    r = client.get("/api/admin/metrics/infra", headers=ADMIN)
+    assert r.status_code == 200
+    body = r.json()
+    assert all(c["manifest_image"] is None for c in body["components"])
+    assert body["job_image"] == {"live": None, "manifest": None}

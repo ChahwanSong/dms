@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db import iso_plus, utc_now_iso
+from ..manifest_tags import manifest_images, manifest_job_image
 from ..metrics_series import (bucket_chars_for, build_node_points,
                               clamp_window_hours, duration_histogram)
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
@@ -91,6 +92,11 @@ def metrics_infra(request: Request):
     1×10초로 줄인다 -- 각 스레드의 요청 자체 타임아웃(슬라이스 13)이 무한 매달림을
     막으므로 여기서 별도 타임아웃을 더 걸지 않는다."""
     runner = request.app.state.rollout_runner
+    settings = request.app.state.settings
+    # 동봉 매니페스트(이미지에 COPY 된 스냅샷)는 프로세스 수명 동안 불변이지만 수 KB
+    # 텍스트 5개라 요청마다 읽어도 5s 폴링에 부담이 없다 -- 캐시 없는 단순성을 택한다.
+    # 못 읽으면 값이 전부 None 일 뿐 예외가 없다(설계 §4 fail-soft).
+    manifest = manifest_images()
     # submit는 즉시 반환하고 실제 대기는 result()에서 일어난다. 결과를 component로
     # 키한 dict에 담아, 완료 순서(병렬이라 뒤섞인다)와 무관하게 아래 응답 루프가
     # ROLLOUT_ORDER를 그대로 돌게 한다 -- 병렬화가 응답 순서를 흩뜨리지 않는다.
@@ -107,7 +113,10 @@ def metrics_infra(request: Request):
         spec = COMPONENTS[component]
         entry = {"component": component, "kind": spec["kind"],
                  "workload": spec["workload"], "image": None, "ready": None,
-                 "desired": None, "verdict": None, "detail": None}
+                 "desired": None, "verdict": None, "detail": None,
+                 # 비교는 프론트가 한다 -- 서버는 "이 이미지를 만든 소스 트리의
+                 # 매니페스트" 값을 정직하게 실어줄 뿐이다(설계 §2.1/§3).
+                 "manifest_image": manifest.get(component)}
         try:
             # future.result()는 워커가 던진 예외(observe는 ExecutionError로 감싼다)를
             # 재던진다 -- 컴포넌트별 try/except로 잡아 그 하나만 null 강등하고 나머지
@@ -139,4 +148,9 @@ def metrics_infra(request: Request):
                                component, exc)
                 entry["verdict"] = entry["detail"] = None
         components.append(entry)
-    return {"components": components}
+    # 잡 이미지도 같은 위험이다(설계 §2.1): api 가 실제로 든 env 값(live) vs 동봉
+    # 20-config.yaml 값(manifest). 빈 문자열(미설정)은 None 으로 접어 프론트가
+    # "비교 불가"와 "불일치"를 헷갈리지 않게 한다.
+    return {"components": components,
+            "job_image": {"live": settings.job_image or None,
+                          "manifest": manifest_job_image()}}

@@ -45,6 +45,14 @@ RUN apt-get update \
 COPY pyproject.toml /app/
 COPY src /app/src
 
+# 배포 매니페스트 동봉(슬라이스 16 설계 §2.1): api 가 manifest_tags.py 로 이 사본을
+# 읽어 라이브 워크로드 이미지와 비교한다(드리프트 배지). 이 사본은 "이 이미지를 만든
+# 소스 트리의 매니페스트"라 의미가 정확하다 -- 포탈 롤아웃은 매니페스트를 고치지
+# 않으므로 롤아웃 직후에는 반드시 불일치가 표시된다(의도된 동작). dms 패키지는 pip
+# install 로 site-packages 에 들어가므로 경로는 /app/deploy/k8s 고정이다(manifest_tags
+# 의 _ROOT_CANDIDATES 둘째 후보).
+COPY deploy/k8s /app/deploy/k8s
+
 # Portal SPA build output (built in the "web" stage above from frontend/).
 # api/app.py create_app() serves it as static files + SPA fallback when
 # DMS_STATIC_DIR points at a dist dir (see Task 1).
