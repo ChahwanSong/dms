@@ -134,6 +134,15 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 그래도 문구를 여기에 두는 이유: 화면이 한국어를 하드코딩하지 않는다는 규칙을
   // 릴리스 화면만 예외로 두면 문구가 두 곳으로 갈라진다.
   registry_unreachable: "레지스트리에 연결할 수 없어 태그 목록이 비어 있습니다",
+  // 아티팩트 base 설정(슬라이스 18). 정규화 3종 + 즉석 검증 3종 + 잠금 1종 --
+  // reasonCodes.json 과 함께 갱신해야 양방향 커버리지 테스트가 초록이다.
+  artifact_base_not_absolute: "아티팩트 경로는 절대 경로여야 합니다",
+  artifact_base_traversal: "아티팩트 경로에 .. 세그먼트를 쓸 수 없습니다",
+  artifact_base_scheme_in_path: "경로 중간에 file:// 를 쓸 수 없습니다",
+  artifact_base_missing: "경로가 존재하지 않습니다",
+  artifact_base_not_directory: "경로가 디렉터리가 아닙니다",
+  artifact_base_not_writable: "경로에 쓸 수 없습니다",
+  artifact_base_locked: "잡 이력이 있어 아티팩트 경로를 바꿀 수 없습니다",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다
