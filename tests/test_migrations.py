@@ -39,12 +39,21 @@ class _FakeDb:
         self.dialect = dialect
         self._data_type = data_type
         self.executed = []
+        # (sql, params) 도 남긴다 -- executed 만으로는 어드바이저리 락 "키"가 무검증이라
+        # unlock 키를 MIGRATE_LOCK_KEY+1 로 바꾸는 뮤테이션이 초록으로 통과했다.
+        # 키가 어긋나면 상호배제 자체가 깨지므로 파라미터까지 고정해야 한다.
+        self.calls = []
+        self.fail_on = None      # 이 부분문자열을 담은 SQL 에서 예외를 던진다
 
     def query(self, sql, params=None):
         return [{"data_type": self._data_type}]
 
     def execute(self, sql, params=None):
+        # 기록 후 예외 -- "시도는 했고 실패했다"를 호출자가 구분할 수 있어야 한다.
         self.executed.append(sql)
+        self.calls.append((sql, params))
+        if self.fail_on and self.fail_on in sql:
+            raise RuntimeError("connection lost")
 
 
 def test_migrate_pg_wraps_schema_in_advisory_lock(monkeypatch):
@@ -73,6 +82,38 @@ def test_migrate_pg_releases_lock_on_exception(monkeypatch):
         migrations.migrate(fake)
     assert fake.executed == ["SELECT pg_advisory_lock(:k)",
                              "SELECT pg_advisory_unlock(:k)"]
+
+
+def test_migrate_lock_and_unlock_use_the_same_key(monkeypatch):
+    # 락 키는 이 태스크의 핵심 제약이다: 롤링 배포 중 구/신 이미지가 동시에 migrate 를
+    # 도는데 둘이 다른 키를 잡으면 서로를 배제하지 못해 락이 있으나 마나 해진다.
+    # 순서만 보는 테스트는 키를 놓친다(unlock 키를 +1 로 바꿔도 초록이었다) --
+    # lock·unlock 이 같은 MIGRATE_LOCK_KEY 를 쓰는지 파라미터로 못박는다.
+    from dms import migrations
+    fake = _FakeDb("postgresql", "bigint")
+    monkeypatch.setattr(migrations, "_apply_migrations", lambda db: None)
+    migrations.migrate(fake)
+    assert fake.calls == [
+        ("SELECT pg_advisory_lock(:k)", {"k": migrations.MIGRATE_LOCK_KEY}),
+        ("SELECT pg_advisory_unlock(:k)", {"k": migrations.MIGRATE_LOCK_KEY}),
+    ]
+    # psycopg 는 2^63 이상을 numeric OID 로 보내고 numeric->bigint 암시적 캐스트가
+    # 없어 pg_advisory_lock(numeric) does not exist 로 죽는다 -- 상한을 고정한다.
+    assert 0 < migrations.MIGRATE_LOCK_KEY < 2 ** 63
+
+
+def test_migrate_does_not_unlock_when_acquire_fails(monkeypatch):
+    # 획득 실패는 그대로 올라가야 하고(스키마가 불확실한 채 앱이 뜨는 것보다 파드 실패가
+    # 낫다, 설계 §4), 잡지도 않은 락을 해제해선 안 된다. acquire 를 try 안으로 옮기는
+    # 리팩터가 들어오면 여기서 잡힌다.
+    from dms import migrations
+    fake = _FakeDb("postgresql", "bigint")
+    fake.fail_on = "pg_advisory_lock"
+    monkeypatch.setattr(migrations, "_apply_migrations",
+                        lambda db: fake.executed.append("SCHEMA"))
+    with pytest.raises(RuntimeError):
+        migrations.migrate(fake)
+    assert fake.executed == ["SELECT pg_advisory_lock(:k)"]
 
 
 def test_migrate_sqlite_issues_no_advisory_lock(monkeypatch):

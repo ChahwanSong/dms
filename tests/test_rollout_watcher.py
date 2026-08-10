@@ -16,11 +16,15 @@ class _Runner:
         self.fail_observe = False
         self.fail_briefs = False
         self.briefs = []
+        self.init_args = []        # (name, init_container)
 
-    def patch_image(self, *, kind, name, container, image):
+    def patch_image(self, *, kind, name, container, image, init_container=None):
         if self.fail_patch:
             raise ExecutionError("patch_failed", "boom")
         self.patched.append((kind, name, container, image))
+        # initContainer 전달은 따로 기록한다 -- patched 튜플 모양을 바꾸면 순서/멱등성
+        # 단언이 전부 흔들린다.
+        self.init_args.append((name, init_container))
 
     def observe(self, *, kind, name):
         if self.fail_observe:
@@ -109,6 +113,23 @@ def test_pending_head_is_recorded_then_patched(repos):
     assert repos.releases.get(rows[1]["id"])["state"] == "Pending"
 
 
+@pytest.mark.parametrize("component,expected_init", [
+    ("dms-agent", None),
+    ("dms-api", "migrate"),
+    ("dms-controller", "migrate"),
+])
+def test_patch_carries_component_scoped_init_container(repos, component,
+                                                       expected_init):
+    # 워처 -> 러너 배선. 두 Deployment 는 migrate initContainer 를 본 컨테이너와 같은
+    # 새 이미지로 함께 갱신해야 한다(안 그러면 새 파드가 구 이미지로 migrate 한 뒤 신
+    # 앱을 구식 스키마 위에 띄운다). DaemonSet 은 반드시 None -- 없는 initContainer 를
+    # 패치하면 strategic merge 가 에이전트 파드에 없던 컨테이너를 새로 만든다.
+    _batch(repos, component)
+    runner = _Runner()
+    _watch(repos, runner).run_once()
+    assert runner.init_args == [(component, expected_init)]
+
+
 def test_state_is_committed_before_patch_is_called(tmp_path):
     # record-then-patch의 핵심 계약: patch가 나가는 순간 이미 다른 커넥션에서도
     # Applying이 보여야 한다. 같은 커넥션으로 읽으면 미커밋 쓰기도 보이므로
@@ -123,7 +144,7 @@ def test_state_is_committed_before_patch_is_called(tmp_path):
     seen = {}
     runner = _Runner()
 
-    def spy(*, kind, name, container, image):
+    def spy(*, kind, name, container, image, init_container=None):
         seen["state"] = observer.releases.get(rows[0]["id"])["state"]
 
     runner.patch_image = spy

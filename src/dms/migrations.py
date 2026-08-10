@@ -12,9 +12,15 @@ ALL_TABLES = (
 )
 
 
-# PostgreSQL 어드바이저리 락 키(임의 64비트 상수 "DMS\x10"). migrate() 전체를
-# 직렬화하는 전역 락이라 값 자체에 의미는 없다 -- 이 저장소의 유일한 어드바이저리 락
-# 사용처라 충돌도 없다. 바꾸면 구/신 이미지가 서로 다른 락을 잡아 경합이 부활한다.
+# PostgreSQL 어드바이저리 락 키(임의 32비트 상수 "DMS\x10" = 1145918224). migrate()
+# 전체를 직렬화하는 전역 락이라 값 자체에 의미는 없다 -- 이 저장소의 유일한 어드바이저리
+# 락 사용처라 충돌도 없다. 바꾸면 구/신 이미지가 서로 다른 락을 잡아 경합이 부활한다.
+#
+# 반드시 2**63 미만을 유지할 것. pg_advisory_lock의 인자는 bigint인데, psycopg는
+# 2**63 이상의 파이썬 int를 numeric OID로 보낸다. numeric -> bigint는 암시적 캐스트가
+# 없어 "더 큰 값이니 더 안전하겠지"라며 64비트로 넓히는 순간 런타임에
+# `function pg_advisory_lock(numeric) does not exist`로 죽는다 -- 그 시점이 하필
+# initContainer라 모든 파드가 기동에 실패한다. 32비트로 충분하다(중복이 없으므로).
 MIGRATE_LOCK_KEY = 0x444D5310
 
 

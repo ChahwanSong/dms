@@ -9,16 +9,27 @@ ROLLOUT_ORDER = ("dms-agent", "dms-api", "dms-controller")
 # component -> 워크로드 좌표. 컨테이너 이름은 워크로드 이름에서 유도되지 않는다
 # (실측: dms-controller의 컨테이너는 "controller", dms-api는 "api") -- 표로 박아둔다.
 # repository는 레지스트리 리포 이름: api/controller는 같은 dms 이미지 계보를 쓴다.
+#
+# init_container: 슬라이스 16이 40-api.yaml/41-controller.yaml에 넣은 migrate
+# initContainer의 이름. 롤아웃 패치가 본 컨테이너만 갱신하면 새 파드가 "구 이미지로
+# migrate -> 신 앱"을 하게 되어 스키마가 뒤처진 채 앱이 뜬다(슬라이스 14·15의 그 500).
+# 반드시 컴포넌트별이어야 한다 -- dms-agent DaemonSet에는 이 initContainer가 없고,
+# 없는 것을 strategic merge로 패치하면 병합이 아니라 **새 컨테이너 생성**이 된다.
+# 그래서 dms-agent는 값을 None으로 두는 대신 키 자체를 두지 않는다(위 dict 리터럴을
+# 통째로 비교하는 계약 테스트가 그 부재를 지킨다). 매니페스트에서 initContainer를
+# 빼거나 이름을 바꾸면 이 표도 같이 고쳐야 한다.
 COMPONENTS = {
     "dms-agent": {"kind": "DaemonSet", "workload": "dms-agent",
                   "container": "agent", "repository": "dms-agent",
                   "selector": "app.kubernetes.io/name=dms-agent"},
     "dms-api": {"kind": "Deployment", "workload": "dms-api",
                 "container": "api", "repository": "dms",
-                "selector": "app.kubernetes.io/name=dms-api"},
+                "selector": "app.kubernetes.io/name=dms-api",
+                "init_container": "migrate"},
     "dms-controller": {"kind": "Deployment", "workload": "dms-controller",
                        "container": "controller", "repository": "dms",
-                       "selector": "app.kubernetes.io/name=dms-controller"},
+                       "selector": "app.kubernetes.io/name=dms-controller",
+                       "init_container": "migrate"},
 }
 
 # 이 표에서 순서는 곧 "누가 head인가"이고 head만 패치된다 -- 순서가 백엔드마다

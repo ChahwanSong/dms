@@ -152,7 +152,8 @@ class RolloutWatcher:
                 self._repos.releases.mark_applying(head["id"])
                 self._runner.patch_image(kind=spec["kind"], name=spec["workload"],
                                          container=spec["container"],
-                                         image=head["image"])
+                                         image=head["image"],
+                                         init_container=spec.get("init_container"))
                 # 패치 직후 반드시 반환한다. dms-controller를 패치했다면 이 프로세스는
                 # 곧 SIGTERM을 받는다 -- 그 뒤의 어떤 관찰/DB 쓰기도 중간에 잘릴 수
                 # 있어 결과를 신뢰할 수 없고, 방금 패치한 워크로드를 같은 틱에 관찰해
@@ -175,7 +176,8 @@ class RolloutWatcher:
                 # 만들지 않으므로 그냥 다시 패치한다(설계 §2 멱등성 요구).
                 self._runner.patch_image(kind=spec["kind"], name=spec["workload"],
                                          container=spec["container"],
-                                         image=head["image"])
+                                         image=head["image"],
+                                         init_container=spec.get("init_container"))
                 return {"patched": patched + 1, "finished": finished}
             if spec["kind"] == "Deployment":
                 # applied_at을 기준 시각으로 넘긴다 -- 이 값보다 오래된

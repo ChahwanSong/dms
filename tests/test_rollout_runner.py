@@ -16,6 +16,50 @@ def test_patch_body_is_strategic_merge_shape():
             {"name": "api", "image": "pkg-01:5000/dms:d23"}]}}}}
 
 
+def test_patch_body_updates_init_container_too():
+    # 슬라이스 16: api/controller 는 migrate initContainer 로 스키마를 올린다. 패치가
+    # 본 컨테이너만 갱신하면 새 파드가 "구 이미지로 migrate -> 신 앱"을 하게 되어
+    # 스키마가 뒤처진 채 앱이 뜬다 -- 슬라이스 14·15의 그 500이 포탈 롤아웃으로
+    # 그대로 재현된다. initContainers 도 같은 새 이미지로 함께 패치해야 한다.
+    body = image_patch_body("api", "dms:d26", init_container="migrate")
+    assert body == {"spec": {"template": {"spec": {
+        "containers": [{"name": "api", "image": "dms:d26"}],
+        "initContainers": [{"name": "migrate", "image": "dms:d26"}]}}}}
+
+
+def test_patch_body_omits_init_containers_when_component_has_none():
+    # 핵심 안전장치: dms-agent DaemonSet 에는 migrate initContainer 가 없다.
+    # 무조건 initContainers 절을 넣으면 strategic merge 가 "없는 컨테이너를 새로
+    # 만들어" 에이전트 파드마다 엉뚱한 init 컨테이너가 생긴다(치명적) -- 키 자체가
+    # 없어야 한다(빈 리스트도 안 된다: 빈 리스트는 병합 대상이 없을 뿐이지만
+    # 의도를 흐리고, 아래 COMPONENTS 연동 테스트와 함께 "컴포넌트별"을 못박는다).
+    body = image_patch_body("agent", "dms-agent:d26")
+    assert "initContainers" not in body["spec"]["template"]["spec"]
+    assert body["spec"]["template"]["spec"]["containers"] == [
+        {"name": "agent", "image": "dms-agent:d26"}]
+
+
+def test_components_declare_init_container_only_where_it_exists():
+    # 패치 대상은 COMPONENTS 표가 단일 진실이다 -- 매니페스트에 initContainer 가 있는
+    # 두 Deployment 만 값을 갖고, DaemonSet 은 키가 없어야 한다(위 테스트의 근거).
+    from dms.repositories.releases import COMPONENTS
+    assert COMPONENTS["dms-api"]["init_container"] == "migrate"
+    assert COMPONENTS["dms-controller"]["init_container"] == "migrate"
+    assert "init_container" not in COMPONENTS["dms-agent"]
+
+
+def test_runner_forwards_init_container_to_patch_body():
+    # 워처가 COMPONENTS 값을 넘기면 러너가 그대로 바디에 실어야 한다 -- 여기서
+    # 끊기면 표만 고치고 실제 패치는 예전 모양이 나간다.
+    k8s = _FakeWorkloads()
+    RolloutRunner(k8s, namespace="dms").patch_image(
+        kind="Deployment", name="dms-controller", container="controller",
+        image="dms:d26", init_container="migrate")
+    body = k8s.patched[0][3]
+    assert body == image_patch_body("controller", "dms:d26",
+                                    init_container="migrate")
+
+
 class _FakeWorkloads:
     """WorkloadClient 페어 -- get_workload는 계약대로 '정규화된' dict를 돌려준다."""
     def __init__(self):

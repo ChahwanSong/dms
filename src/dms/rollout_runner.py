@@ -19,11 +19,23 @@ class WorkloadClient(Protocol):
         ...
 
 
-def image_patch_body(container: str, image: str) -> dict:
+def image_patch_body(container: str, image: str,
+                     init_container: "str | None" = None) -> dict:
     # strategic merge patch: containers는 name을 patchMergeKey로 병합된다.
     # JSON merge patch는 배열 전체를 교체해 env/volumeMounts를 날린다(설계 §4).
-    return {"spec": {"template": {"spec": {"containers": [
-        {"name": container, "image": image}]}}}}
+    pod_spec: dict = {"containers": [{"name": container, "image": image}]}
+    if init_container:
+        # api/controller의 migrate initContainer도 같은 새 이미지로 함께 올린다 --
+        # 본 컨테이너만 패치하면 새 파드가 구 이미지로 migrate한 뒤 신 앱을 구식
+        # 스키마 위에 띄운다(슬라이스 16 설계 §2.2).
+        #
+        # 이 절은 initContainer가 **실제로 있는** 워크로드에만 붙여야 한다. patchMergeKey
+        # 병합은 이름이 없으면 조용히 새 항목을 추가하므로, dms-agent처럼 migrate
+        # initContainer가 없는 워크로드에 넣으면 병합이 아니라 없던 컨테이너를 만들어
+        # 파드 기동을 통째로 망가뜨린다. 그래서 COMPONENTS[...]["init_container"]가
+        # 있을 때만(=키가 있는 컴포넌트만) 붙인다.
+        pod_spec["initContainers"] = [{"name": init_container, "image": image}]
+    return {"spec": {"template": {"spec": pod_spec}}}
 
 
 class RolloutRunner:
@@ -31,10 +43,12 @@ class RolloutRunner:
         self._k8s = k8s
         self._ns = namespace
 
-    def patch_image(self, *, kind, name, container, image) -> None:
+    def patch_image(self, *, kind, name, container, image,
+                    init_container=None) -> None:
         try:
-            self._k8s.patch_workload(kind, name, self._ns,
-                                     image_patch_body(container, image))
+            self._k8s.patch_workload(
+                kind, name, self._ns,
+                image_patch_body(container, image, init_container))
         except Exception as exc:
             raise ExecutionError("patch_failed", str(exc)[:200]) from exc
 
@@ -62,7 +76,11 @@ class StubRolloutRunner:
         self.patched = []        # (kind, name, container, image)
         self._images = {}        # (kind, name) -> {container: image}
 
-    def patch_image(self, *, kind, name, container, image) -> None:
+    def patch_image(self, *, kind, name, container, image,
+                    init_container=None) -> None:
+        # init_container는 받되 _images에 넣지 않는다 -- 실 observe(rollout_status의
+        # _images)도 spec.template.spec.containers만 읽어 initContainer 이미지를
+        # 보고하지 않는다. 여기 넣으면 페어가 실물보다 더 많은 것을 아는 셈이 된다.
         self.patched.append((kind, name, container, image))
         self._images.setdefault((kind, name), {})[container] = image
 
