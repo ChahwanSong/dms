@@ -3,6 +3,7 @@ import hashlib
 import json
 import sys
 
+from .artifact_base import resolve_artifact_base
 from .db import iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from .execution import ExecStatus, ExecutionError, JobSpec
@@ -48,6 +49,13 @@ class JobStepper:
             return f"{storage['managed_root']}/{rel}"
         return rel
 
+    def _artifact_base(self):
+        # 슬라이스 18: DB 가 env 를 이긴다(설계 §2.1). JobStepper 는 매 틱
+        # 재생성되고 정책도 매 틱 DB 재조회라 이 조회가 새 비용을 만들지 않는다.
+        # 스냅숏을 들고 있으면 base 변경이 컨트롤러 재시작 전까지 반영되지
+        # 않는다(설계 §1-7).
+        return resolve_artifact_base(self._repos.control, self._settings)
+
     def _build_spec(self, job, phase, dryrun):
         wp = job["worker_pool"] or {}
         op = job["operation"]
@@ -79,7 +87,7 @@ class JobStepper:
             options=job["options"] or {}, candidates=wp.get("candidates", {}),
             process_count=wp.get("process_count", 1), queue=wp.get("queue", "dms-data"),
             priority_class=wp.get("priority_class", "dms-mid"),
-            artifact_base=self._settings.artifact_base_uri, timeout_seconds=timeout,
+            artifact_base=self._artifact_base(), timeout_seconds=timeout,
             ttl_seconds=self._settings.vcjob_ttl_seconds)
 
     def _finalize(self, job, job_state, *, reason_code=None, summary=None):
@@ -192,7 +200,7 @@ class JobStepper:
             # 기록되고, 없으면 포탈이 아티팩트를 가리킬 수 없다.
             self._repos.data_jobs.set_artifact(
                 job["job_id"],
-                artifact_uri=f"{self._settings.artifact_base_uri}/{job['job_id']}",
+                artifact_uri=f"{self._artifact_base()}/{job['job_id']}",
                 result_summary=summary)
             self._finalize(job, DataJobState.SUCCEEDED, summary=summary)
             return "Succeeded"
@@ -230,7 +238,7 @@ class JobStepper:
                 self._finalize(job, DataJobState.REJECTED, reason_code="empty_preview")
                 return "Rejected"
             expires = iso_plus(utc_now_iso(), self._settings.preview_ttl_seconds)
-            artifact = f"{self._settings.artifact_base_uri}/{jid}"
+            artifact = f"{self._artifact_base()}/{jid}"
             self._repos.data_jobs.set_preview(jid, fingerprint=fingerprint,
                                               expires_at=expires, artifact_uri=artifact)
             self._repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING,

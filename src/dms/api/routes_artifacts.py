@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from ..artifact_base import resolve_artifact_base
 from ..execution import ExecutionError
 from .artifacts import (ArtifactError, MAX_BYTES, PHASES, list_artifacts, read_artifact,
                         strip_scheme, tail_lines)
@@ -9,7 +10,11 @@ router = APIRouter()
 
 
 def _base(request: Request) -> str:
-    return strip_scheme(request.app.state.settings.artifact_base_uri)
+    # 슬라이스 18: 설정 스냅숏이 아니라 DB 우선 해석(설계 §2.1). 읽기 라우트는 잡
+    # 행이 아니라 현재 base 로 경로를 조립한다(설계 §1-5) -- base 는 잠금(§2.3)
+    # 탓에 잡이 존재하는 한 바뀌지 않으므로 이 조립은 여전히 안전하다.
+    return strip_scheme(resolve_artifact_base(request.app.state.repos.control,
+                                              request.app.state.settings))
 
 
 @router.get("/api/user/jobs/{job_id}/artifacts")

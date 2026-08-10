@@ -1,4 +1,5 @@
 """설정 기반 live 어댑터/리졸버 선택. cli/app 공용."""
+from .artifact_base import resolve_artifact_base
 from .execution import StubExecutionAdapter
 from .identity_ldap import build_ldap_resolver
 
@@ -23,7 +24,9 @@ def build_execution_adapter(settings, repos):
         KubernetesClient(settings.k8s_namespace),
         job_image=settings.job_image, namespace=settings.k8s_namespace,
         storages_lookup=lambda n: repos.storages.get(n), read_text=read_text,
-        artifact_base=settings.artifact_base_uri)
+        # 생성자 캡처 금지(설계 §2.1/§1-7): base 변경 후 컨트롤러가 재시작해도
+        # 호출 시점의 DB 값으로 summary 경로를 재구성한다.
+        artifact_base=lambda: resolve_artifact_base(repos.control, settings))
 
 
 def build_build_runner(settings):

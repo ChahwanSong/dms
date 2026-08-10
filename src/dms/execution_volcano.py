@@ -4,6 +4,7 @@ import logging
 import threading
 from typing import Protocol
 
+from .artifact_base import strip_scheme
 from .execution import ExecStatus, ExecutionError
 from .execution_manifests import build_preflight_pod, build_volcano_job
 
@@ -74,7 +75,13 @@ class VolcanoExecutionAdapter:
         self._namespace = namespace
         self._storages = storages_lookup
         self._read_text = read_text
-        self._artifact_base = artifact_base  # summary 경로 fallback 재구성용
+        # summary 경로 fallback 재구성용. str(고정값) 또는 0-인자 callable(호출
+        # 시점 해석) 둘 다 받는다: 설계 §2.1 이 생성자 캡처를 금지하는 이유는
+        # §1-7 -- base 변경 후 컨트롤러가 재시작하면 in-flight 잡의 summary 를 옛
+        # 경로에서 찾게 된다. wiring 은 resolve 클로저를 넘기고, 고정 문자열을
+        # 넘기는 기존 테스트·스텁 조립은 람다로 감싸 그대로 산다.
+        self._artifact_base_fn = (artifact_base if callable(artifact_base)
+                                  else (lambda: artifact_base))
         self._summary_paths = {}   # ref -> artifact summary.json path (in-memory 빠른 경로)
 
     def _volumes(self, spec, *, role=None):
@@ -219,8 +226,8 @@ class VolcanoExecutionAdapter:
         phase = labels.get("dms.io/phase")
         if not job_id or not phase:
             return None
-        return (f"{self._artifact_base}/{job_id}/{phase}/summary.json"
-                .replace("file://", ""))
+        # 호출 시점 해석(설계 §2.1) + 접두사 전용 스킴 제거(설계 §2.2).
+        return f"{strip_scheme(self._artifact_base_fn())}/{job_id}/{phase}/summary.json"
 
     def terminate(self, ref) -> None:
         prefix, name = ref.split("/", 1)

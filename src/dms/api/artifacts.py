@@ -17,6 +17,11 @@ import os
 import re
 import stat
 
+# strip_scheme 은 중립 모듈(artifact_base.py)로 승격했다(슬라이스 18 설계 §2.2) --
+# 실행 계열(execution_*.py)이 FastAPI 계층(api/)을 임포트하지 않게 하기 위해서다.
+# 기존 임포트 경로(from .artifacts import strip_scheme)를 위해 여기서 재수출한다.
+from ..artifact_base import strip_scheme  # noqa: F401
+
 # stepper가 실제로 쓰는 phase 전부. "exec_preflight"는 confirm 후 execution 직전의
 # 재검증(stepper._poll_or_submit_execution, execution_volcano._PREFLIGHT_PHASES)이다 —
 # 실패하면 잡이 execution_recheck_failed로 거절되고 phase_refs에 pod/<name>이 남는데,
@@ -41,10 +46,6 @@ class ArtifactError(Exception):
         self.reason_code = reason_code
         self.detail = detail
         super().__init__(reason_code)
-
-
-def strip_scheme(base_uri: str) -> str:
-    return base_uri[len("file://"):] if base_uri.startswith("file://") else base_uri
 
 
 def artifact_dir(base: str, job_id: str) -> str:

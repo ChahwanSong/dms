@@ -8,6 +8,7 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from ..artifact_base import resolve_artifact_base
 from ..domain import DomainValidationError, validate_relative_path
 from ..repositories.scan_paths import covers
 from .artifacts import ArtifactError, read_artifact, strip_scheme
@@ -123,7 +124,9 @@ def scan_path_stats(path_id: int, request: Request,
     row = repos.scan_paths.get_owned(path_id, identity.actor)
     if row is None:
         raise HTTPException(status_code=404, detail="scan_path_not_found")
-    base = strip_scheme(request.app.state.settings.artifact_base_uri)
+    # 슬라이스 18: DB 우선 해석(설계 §2.1) -- routes_artifacts._base 와 같은 이유.
+    base = strip_scheme(resolve_artifact_base(repos.control,
+                                              request.app.state.settings))
     attempts = 0
     for job in repos.data_jobs.succeeded_scans(row["storage_name"],
                                                limit=_CANDIDATE_LIMIT):
