@@ -102,3 +102,29 @@ class AccountsRepository:
                              {"d": 1 if disabled else 0, "u": username})
             self._audit_account("disabled", username, before, self.get(username),
                                 actor, utc_now_iso())
+
+    def active_admin_count(self) -> int:
+        """활성 관리자(role='admin' AND disabled=0) 수. 삭제·강등·비활성화 세 경로가
+        '마지막 활성 관리자'를 잠그지 못하게 하는 데 쓴다(설계 §2.3 안전장치 2).
+        공유 토큰이 항상 admin 이라 완전 잠금은 아니지만 사람 admin 0 명은 사고다."""
+        row = self._db.query_one(
+            "SELECT COUNT(*) AS c FROM accounts WHERE role = :r AND disabled = 0",
+            {"r": ROLE_ADMIN})
+        return row["c"]
+
+    def delete(self, username, *, actor):
+        """하드 삭제(설계 §2.3): accounts + user_scan_paths(계정 소유 리소스) + 감사를
+        한 트랜잭션으로 묶는다 -- 부분 삭제나 감사 누락을 막는다(set_role 이 이미 쓰는
+        transaction 관례). FK 가 저장소 전체에 0 건이라(설계 §1-7) requests/audit_log 의
+        문자열 actor 는 그대로 남는다 -- 버그가 아니라 이력 보존이다. before_state
+        스냅샷은 get()이 password_hash 를 SELECT 에서 빼므로 자연히 해시가 빠진다."""
+        with self._db.transaction():
+            before = self.get(username)
+            if before is None:
+                raise KeyError(username)
+            self._db.execute("DELETE FROM accounts WHERE username = :u", {"u": username})
+            # user_scan_paths 는 username 을 관례로만 참조한다(제약 없음, §1-7). 소유자가
+            # 사라지면 아무도 볼 수 없는 데드 로우가 되므로 여기서 함께 지운다.
+            self._db.execute("DELETE FROM user_scan_paths WHERE username = :u",
+                             {"u": username})
+            self._audit_account("delete", username, before, None, actor, utc_now_iso())
