@@ -79,3 +79,18 @@ def roundtrip_artifact_base(path: str) -> "str | None":
         except OSError:
             pass  # 생성 자체가 실패했으면 지울 것이 없다 -- 판정에 무관
     return None
+
+
+def controller_check_once(repos, settings) -> dict:
+    """(c) 컨트롤러 자기 관점 검증(설계 §2.4c)의 루프 본체. 컨트롤러는
+    read_summary 로 실제 **읽기**를 하는 유일한 프로세스다 -- 마운트가 없으면
+    read_text 가 OSError 를 None 으로 접고(wiring) stepper 는 SUCCEEDED 를 유지한
+    채 summary_unavailable 경고만 남긴다(§1-3, 실패가 조용하다). 그 실패를 사전에,
+    화면에 보이게 주기적으로 자기 파일시스템에서 왕복 검증해 결과를 control_state
+    에 남긴다. 검증한 uri 를 함께 남겨 GET 라우트가 "옛 base 의 결과"를 "확인
+    대기 중"으로 구분한다(설계 §4)."""
+    base = resolve_artifact_base(repos.control, settings)
+    reason = roundtrip_artifact_base(strip_scheme(base))
+    repos.control.set_artifact_base_check(uri=base, ok=reason is None,
+                                          reason=reason)
+    return {"uri": base, "ok": reason is None, "reason": reason}

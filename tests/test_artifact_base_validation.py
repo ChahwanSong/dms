@@ -8,8 +8,10 @@ import os
 
 import pytest
 
-from dms.artifact_base import normalize_artifact_base, roundtrip_artifact_base
+from dms.artifact_base import (controller_check_once, normalize_artifact_base,
+                               roundtrip_artifact_base)
 from dms.domain import DomainValidationError
+from dms.repositories import Repositories
 
 
 def _reason(fn, *args):
@@ -69,3 +71,31 @@ def test_roundtrip_not_writable(tmp_path):
         assert roundtrip_artifact_base(str(locked)) == "artifact_base_not_writable"
     finally:
         locked.chmod(0o700)   # tmp_path 정리가 실패하지 않도록 복원
+
+
+class _CtlSettings:
+    artifact_base_uri = "file:///env/base"
+
+
+def test_controller_check_records_failure_for_missing_base(db, tmp_path):
+    # (c) 컨트롤러 자기 관점(설계 §2.4c): read_summary 마운트 부재의 "SUCCEEDED
+    # 인데 요약이 없는" 조용한 실패(§1-3)를 사전에 DB 에 남겨 화면에 보이게 한다.
+    repos = Repositories(db)
+    repos.control.set_artifact_base(f"file://{tmp_path}/gone", actor="ops")
+    result = controller_check_once(repos, _CtlSettings())
+    assert result == {"uri": f"file://{tmp_path}/gone", "ok": False,
+                      "reason": "artifact_base_missing"}
+    st = repos.control.control_state()
+    assert st["artifact_base_check_uri"] == f"file://{tmp_path}/gone"
+    assert st["artifact_base_check_ok"] == 0
+    assert st["artifact_base_check_reason"] == "artifact_base_missing"
+    assert st["artifact_base_check_at"] is not None
+
+
+def test_controller_check_records_success(db, tmp_path):
+    repos = Repositories(db)
+    repos.control.set_artifact_base(f"file://{tmp_path}", actor="ops")
+    assert controller_check_once(repos, _CtlSettings())["ok"] is True
+    st = repos.control.control_state()
+    assert st["artifact_base_check_ok"] == 1
+    assert st["artifact_base_check_reason"] is None

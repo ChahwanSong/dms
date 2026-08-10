@@ -153,3 +153,19 @@ def test_controller_hop_pending_until_checked_for_current_base(client, db, tmp_p
     assert body["checks"]["controller"] == {
         "pending": False, "ok": True, "reason": None,
         "checked_at": "2026-08-10T00:01:00Z"}
+
+
+def test_controller_loop_unblocks_api_controller_hop(client, db, tmp_path):
+    # 저장 직후 "확인 대기 중" -> 컨트롤러 한 틱 -> 정상, 의 수렴을 API 수준에서
+    # 고정한다(설계 §2.4 닭-달걀 회피: 저장 전엔 (a)만 강제, (b)(c)는 저장 후
+    # 폴링으로 수렴).
+    from dms.artifact_base import controller_check_once
+    repos = Repositories(db)
+    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}"},
+               headers=ADMIN)
+    assert client.get("/api/admin/artifact-base", headers=ADMIN).json()[
+        "checks"]["controller"]["pending"] is True
+    controller_check_once(repos, client.app.state.settings)
+    ctl = client.get("/api/admin/artifact-base", headers=ADMIN).json()[
+        "checks"]["controller"]
+    assert ctl["pending"] is False and ctl["ok"] is True

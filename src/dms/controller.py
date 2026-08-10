@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from .artifact_base import controller_check_once
 from .batch_orchestrator import BatchOrchestrator
 from .build_watcher import BuildWatcher
 from .config import Settings
@@ -67,6 +68,11 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
              lambda: PodGarbageCollector(
                  repos, adapter, after_seconds=settings.pod_gc_after_seconds,
                  build_runner=build_runner).run_once()),
+        # 슬라이스 18(설계 §2.4c): 컨트롤러 관점의 아티팩트 base 검증. 간격은 새
+        # 설정 키를 만들지 않고 storage-reconciler 와 같은 값을 쓴다 -- 같은
+        # "증거 신선도" 계열이고 운영자가 따로 튜닝할 값이 아니다.
+        Loop("artifact-base-check", settings.reconcile_interval_seconds,
+             lambda: controller_check_once(repos, settings)),
     ]
     # build_runner가 없으면(stub조차 배선되지 않은 기존 호출자) 루프를 아예 넣지 않는다 --
     # None을 넘겨 매 틱마다 AttributeError로 죽게 두지 않기 위해서다.

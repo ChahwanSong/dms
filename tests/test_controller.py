@@ -12,7 +12,23 @@ def test_build_loops_names_and_intervals(db, settings):
         ("storage-reconciler", settings.reconcile_interval_seconds),
         ("retention", settings.retention_interval_seconds),
         ("batch-orchestrator", settings.batch_orchestrator_interval_seconds),
-        ("pod-gc", settings.pod_gc_interval_seconds)]
+        ("pod-gc", settings.pod_gc_interval_seconds),
+        ("artifact-base-check", settings.reconcile_interval_seconds)]
+
+
+def test_artifact_base_check_loop_actually_writes_the_check_row(db, settings):
+    # 이름만 보는 위 테스트는 lambda 안이 잘못돼도 초록이다(rollout-watcher 의
+    # 같은 교훈) -- 한 틱이 실제로 검증 결과를 남기는지 행동으로 고정한다.
+    # conftest 의 settings 기본 base(file:///artifacts/dms)는 테스트 머신에
+    # 없으므로 실패 기록이 남아야 한다.
+    repos = Repositories(db)
+    loops = build_loops(settings, repos)
+    run_all_once([l for l in loops if l.name == "artifact-base-check"],
+                 repos, holder="h1")
+    st = repos.control.control_state()
+    assert st["artifact_base_check_uri"] == "file:///artifacts/dms"
+    assert st["artifact_base_check_ok"] == 0
+    assert st["artifact_base_check_reason"] == "artifact_base_missing"
 
 
 def test_build_loops_includes_build_watcher_when_build_runner_is_given(db, settings):

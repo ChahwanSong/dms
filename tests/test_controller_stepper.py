@@ -27,7 +27,7 @@ def test_stepper_loop_registered_second(db):
     loops = build_loops(_Settings(), Repositories(db))
     assert [l.name for l in loops] == [
         "planner", "job-stepper", "storage-reconciler", "retention",
-        "batch-orchestrator", "pod-gc"]
+        "batch-orchestrator", "pod-gc", "artifact-base-check"]
     assert loops[1].interval_seconds == 5
 
 
