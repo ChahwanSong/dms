@@ -77,6 +77,14 @@ DSYNC_STDOUT = """\
 [2026-08-04T02:14:12] Completed sync
 """
 
+# 실측 nsync stdout(잡 abc0b559 실행 단계, 설계 부록 A) -- 파싱에 쓰이는 줄만.
+NSYNC_STDOUT = """\
+[2026-08-10T01:28:39] Progress 100.0% batch 1/1 actions=9 copied-files=7 copied-volume=50.000 B recent(actions=9 files=7 volume=50.000 B, 27.35 files/s, 195.333 B/s over 0.256 s) avg(27.35 files/s, 195.333 B/s)
+[2026-08-10T01:28:39] Metadata diff summary: only-src=10 only-dst=0 common=0 changed=0
+[2026-08-10T01:28:39] Planned actions: copy=7 mkdir=3 symlink-update=0 meta-update=0 remove=0 skipped-dst-only=0
+[2026-08-10T01:28:39] Execution completed successfully
+"""
+
 DRM_STDOUT = """\
 [2026-08-04T02:31:08] Walked 1 items in 0.001 seconds (1035.197 items/sec)
 [2026-08-04T02:31:08] Removing 1 items
@@ -348,10 +356,11 @@ def test_run_job_mpirun_has_ompi_env_and_runuser_preserve_environment():
     assert mpirun_cmd.count("-x") >= 2
 
 
-def test_run_job_nsync_summary_uses_sync_parser():
-    # nsync 실 출력은 미확인(설계 §4의 명시적 가정) -- 여기서는 디스패치가
-    # parse_sync_counts로 가는 것만 고정한다. 형식이 다르면 fail-soft로 null일 뿐이다.
-    rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
+def test_run_job_nsync_summary_uses_nsync_parser():
+    # nsync 실 출력이 확보되어(설계 부록 A) 가정이 해소됐다 -- nsync는 "Items:"/
+    # "(N bytes)"를 안 찍으므로 dsync 파서로 가면 null이 된다. 디스패치가
+    # parse_nsync_counts로 가야 "Planned actions:" 합계 10과 50 B가 실린다.
+    rec = _Recorder(rc=0, stdout=NSYNC_STDOUT)
     rc = _run(rec, _nsync_env(), wait_hostfile=_nsync_wait_hostfile([]))
     assert rc == 0
     assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}

@@ -6,7 +6,8 @@ import sys
 from .commands import (
     getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
-from .parsers import parse_rm_counts, parse_scan_counts, parse_sync_counts
+from .parsers import (parse_nsync_counts, parse_rm_counts, parse_scan_counts,
+                      parse_sync_counts)
 
 _SSH_READY_MAX_ATTEMPTS = 90  # legacy _mpiexec_line 이식: 워커당 ~90s 상한
 
@@ -120,8 +121,12 @@ def _build_summary(tool, stdout, returncode, artifact_dir):
     _as_count(bool·비int·음수 거부)가 2차 방어로 이미 배포되어 있다(d24)."""
     files = nbytes = None
     try:
-        if tool in ("dsync", "nsync"):
+        if tool == "dsync":
             files, nbytes = parse_sync_counts(stdout or "")
+        elif tool == "nsync":
+            # nsync는 mpifileutils가 아니라 역할 기반 별도 도구라 출력 형식이
+            # 완전히 다르다 -- dsync 파서로 보내면 항상 null이었다(설계 부록 A).
+            files, nbytes = parse_nsync_counts(stdout or "")
         elif tool == "drm":
             files, nbytes = parse_rm_counts(stdout or "")
         elif tool == "dscan":
