@@ -9,6 +9,38 @@ from .placement import (
     PlacementError, TOOL_TO_POLICY, resolve_fanout, select_tool_and_candidates)
 
 
+_IDENTITY_PENDING = "identity_not_ready_on_node"
+# 유예를 검토할 사유 -- "후보 0"을 뜻하는 두 코드뿐이다. missing_policy·policy_disabled·
+# invalid_operation 은 신원과 무관하고 노드별 사유 자체가 없다(설계 §2.3).
+_GRACE_REASONS = ("no_eligible_nodes", "no_ready_sync_candidate")
+
+
+def _identity_pending_nodes(rejections) -> set:
+    """사유가 정확히 identity_not_ready_on_node 인 노드 이름들.
+
+    "하나라도 있으면 유예"로 충분한 근거는 eligible_nodes 의 구조에 있다: 노드마다
+    **첫 실패 사유 하나**만 기록하고 검사 순서가 mount -> writable -> tool ->
+    **identity(마지막)** 다. 즉 사유가 identity 인 노드는 마운트·쓰기·도구를 이미
+    통과했고 신원 전파만 남았다 -- 전파되면 그 노드는 반드시 적격이 된다. "모든 노드"를
+    요구하면 실 테스트베드 형상(일부 노드는 애초에 미마운트)에서 유예가 아예 발동하지
+    않는다.
+
+    rejections shape 는 둘이다 -- scan/rm 은 flat {node: reason}, sync 는
+    {"source": {...}, "destination": {...}} 중첩이라 두 쪽을 합집합으로 본다.
+    받아들이는 트레이드오프: source 에만 신원 대기 노드가 있고 destination 이 전부
+    미마운트면 전파돼도 끝내 실패하지만, grace 만큼 Pending 했다가 거부된다 -- 영구
+    오거부보다 낫고 스스로 수렴한다. 값이 문자열도 dict 도 아닌 미지의 형태면 어느
+    비교에도 걸리지 않아 자연히 "증거 없음"(=즉시 거부)이 된다.
+    """
+    nodes = set()
+    for key, value in rejections.items():
+        if isinstance(value, dict):          # sync: source/destination 중첩
+            nodes |= {n for n, r in value.items() if r == _IDENTITY_PENDING}
+        elif value == _IDENTITY_PENDING:
+            nodes.add(key)
+    return nodes
+
+
 def _required_storages(operation, payload):
     if operation == Operation.SYNC.value:
         return [payload["source_storage"], payload["destination_storage"]]
@@ -46,19 +78,44 @@ class Planner:
         return f"rejected:{reason}"
 
     def _identity_grace_active(self, req, exc, now_iso):
-        """설계 §2.3의 3중 조건: (a) 사유가 no_eligible_nodes, (b) 모든 노드의 탈락
-        사유가 identity_not_ready_on_node, (c) 요청 나이 < grace. 셋 다 참일 때만
-        유예한다. rejections 가 비면(신선한 리포트 0건) 신원 문제라는 증거가 없다 --
-        유예하지 않는다. grace 를 짧게(기본 300s -- 최악 전파 130s 의 2배 남짓) 두는
-        이유: 같은 resource_key 의 후속 요청이 find_active 에 걸려 Conflict 가 되므로
-        무한정 붙잡으면 안 된다."""
-        if exc.reason_code != "no_eligible_nodes" or not exc.rejections:
+        """설계 §2.3의 유예 조건: (a) 사유가 "후보 0"이고 (b) 탈락 사유가 정확히
+        identity_not_ready_on_node 인 노드가 **하나라도** 있고 (c) 요청 나이 < grace.
+        방향은 "증명되면 유예, 아니면 거부"다 -- rejections 가 비었거나(신선한 리포트
+        0건) 신원 대기 노드가 없으면 유예하지 않는다. 알 수 없는 사유에 유예를 걸면
+        진짜 결격이 조용히 매달린다.
+
+        grace 를 짧게(기본 300s -- 최악 전파 130s 의 2배 남짓) 두는 이유: 같은
+        resource_key 의 후속 요청이 find_active 에 걸려 Conflict 가 되므로 무한정
+        붙잡으면 안 된다."""
+        if exc.reason_code not in _GRACE_REASONS:
             return False
-        if any(r != "identity_not_ready_on_node" for r in exc.rejections.values()):
+        if not _identity_pending_nodes(exc.rejections):
             return False
         now = now_iso or utc_now_iso()
         return now < iso_plus(req["created_at"],
                               self._settings.planner_identity_grace_seconds)
+
+    def _record_identity_defer(self, rid, exc):
+        """유예는 관측 가능해야 하지만, 틱마다(기본 10s) 남기면 grace 300s 동안 요청
+        하나에 최대 30건이 쌓여 요청 상세의 이벤트 목록(limit 100)을 유예 잡음으로
+        덮는다. 사유가 바뀔 때만(첫 유예 포함) 남긴다 -- 같은 사유의 연속 유예는
+        새 정보가 없다."""
+        payload = {"rejections": exc.rejections}
+        try:
+            prior = [e for e in self._repos.observability.events_for_request(rid)
+                     if e["event_type"] == "identity_propagating"]
+        except Exception:
+            # 중복 억제는 진단 편의일 뿐이다 -- 조회가 실패했다고 유예 자체를 깨지
+            # 않는다(record_event 가 절대 예외를 올리지 않는 것과 같은 이유).
+            prior = []
+        if prior and prior[-1]["payload"] == payload:
+            return
+        nodes = ", ".join(sorted(_identity_pending_nodes(exc.rejections)))
+        self._repos.observability.record_event(
+            component="planner", severity="info",
+            event_type="identity_propagating",
+            message=f"identity not ready on: {nodes}"[:500],
+            payload=payload, request_id=rid)
 
     def _plan_one(self, rid, now_iso):
         req = self._repos.requests.get(rid)
@@ -111,17 +168,11 @@ class Planner:
                 destination_storage=payload.get("destination_storage"),
                 owner=identity.username, privileged=identity.privileged)
         except PlacementError as exc:
-            # 신원 전파만이 원인이고 grace 안이면 아무 상태도 바꾸지 않는다 -- 요청은
-            # Pending 으로 남아 다음 틱(list_pending)에 재계획된다(설계 §2.3).
+            # 신원 전파를 기다리면 적격이 될 노드가 있고 grace 안이면 아무 상태도
+            # 바꾸지 않는다 -- 요청은 Pending 으로 남아 다음 틱(list_pending)에
+            # 재계획된다(설계 §2.3). scan/rm 과 sync 양쪽 모두 대상이다.
             if self._identity_grace_active(req, exc, now_iso):
-                # 유예는 관측 가능해야 한다 -- 매 유예마다 이벤트. record_event 는
-                # 절대 예외를 올리지 않으므로(observability 계약) 유예 자체는 안전하다.
-                self._repos.observability.record_event(
-                    component="planner", severity="info",
-                    event_type="identity_propagating",
-                    message=("identity not ready on: "
-                             + ", ".join(sorted(exc.rejections)))[:500],
-                    payload={"rejections": exc.rejections}, request_id=rid)
+                self._record_identity_defer(rid, exc)
                 return "deferred:identity_propagating"
             return self._reject(rid, exc.reason_code)
         # 6. policy fan-out

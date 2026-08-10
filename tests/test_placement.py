@@ -90,7 +90,7 @@ def test_no_candidates_raise():
 
 
 def test_no_eligible_nodes_error_carries_rejections():
-    # 플래너 유예(설계 §2.3)가 "전원이 신원 대기인가"를 예외에서 직접 읽는다 --
+    # 플래너 유예(설계 §2.3)가 "신원 대기 노드가 있는가"를 예외에서 직접 읽는다 --
     # rejections 가 안 실리면 신원 지연과 진짜 결격(미마운트)을 가를 수 없다.
     reports = [_report("n1", mounts=[_mount("s1")], identities=("bob",))]
     with pytest.raises(PlacementError) as e:
@@ -100,19 +100,22 @@ def test_no_eligible_nodes_error_carries_rejections():
     assert e.value.rejections == {"n1": "identity_not_ready_on_node"}
 
 
-def test_sync_no_candidate_error_carries_no_flat_rejections():
-    # sync 의 rejections 는 {"source": {...}, "destination": {...}} 중첩이라 노드별
-    # 사유의 flat dict 가 아니다. 유예 판정은 flat {node: reason} 만 읽으므로
-    # no_ready_sync_candidate 에는 아무것도 싣지 않는다 -- 빈 rejections 는
-    # 플래너에서 "신원 문제라는 증거 없음" = 즉시 거부로 떨어진다(설계 §2.3).
-    reports = [_report("n1", mounts=[_mount("src"), _mount("dst")],
-                       identities=("bob",))]
+def test_sync_no_candidate_error_carries_nested_rejections():
+    # sync 도 유예 대상이다(설계 §2.3 정정 -- 슬라이스 15 실패에 sync 가 포함됐다).
+    # rejections 는 {"source": {...}, "destination": {...}} 중첩이고, 플래너는 두 쪽을
+    # 합집합으로 본다. 그러니 양쪽 사유가 모두 실려야 한다 -- 한쪽만 실으면 반대쪽에만
+    # 신원 대기 노드가 있는 형상에서 유예가 증발한다.
+    reports = [_report("n1", mounts=[_mount("src")], identities=("bob",)),
+               _report("n2", mounts=[_mount("dst")], identities=("bob",))]
     with pytest.raises(PlacementError) as e:
         select_tool_and_candidates("sync", reports, source_storage="src",
                                    destination_storage="dst", owner="alice",
                                    privileged=False)
     assert e.value.reason_code == "no_ready_sync_candidate"
-    assert e.value.rejections == {}
+    assert e.value.rejections == {
+        "source": {"n1": "identity_not_ready_on_node", "n2": "missing_target_mount"},
+        "destination": {"n1": "missing_target_mount",
+                        "n2": "identity_not_ready_on_node"}}
 
 
 # Task 5: 정책 fan-out 산정

@@ -54,6 +54,33 @@ def _seed_identity_pending_report(repos, node="n1", storage="s1"):
         reported_at="2026-08-02T09:59:00Z")
 
 
+def _seed_sync_reports(repos, identities):
+    # n1 은 src 만, n2 는 dst 만 마운트 -- 실 테스트베드처럼 노드별 사유가 섞인다.
+    # 한쪽 role 에서 신원 대기인 노드가 반대쪽에서는 미마운트로 잡힌다.
+    for node, storage in (("n1", "src"), ("n2", "dst")):
+        repos.agents.ingest(node, {"node_name": node,
+            "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
+                        "status": "Ready", "writable": True}],
+            "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")],
+            "identities": identities},
+            reported_at="2026-08-02T09:59:00Z")
+
+
+def _seed_unmounted_report(repos, node, tool="dscan"):
+    repos.agents.ingest(node, {"node_name": node, "mounts": [],
+        "tools": [{"name": tool, "status": "Ready"}], "identities": []},
+        reported_at="2026-08-02T09:59:00Z")
+
+
+def _sync_request(repos):
+    return repos.requests.create(
+        operation="sync", requester_id="alice", actor="alice",
+        resource_key="data.sync:src:a:dst:b:ff",
+        payload={"source_storage": "src", "source": "a",
+                 "destination_storage": "dst", "destination": "b",
+                 "options": {}, "owner_username": None}, priority="mid")
+
+
 def _backdate(db, rid, created_at):
     # repos.requests.create 는 created_at 을 벽시계로 넣는다 -- grace 판정을
     # 결정적으로 만들려면 NOW(고정 시각) 기준으로 나이를 직접 심어야 한다.
@@ -318,18 +345,36 @@ def test_identity_grace_expired_rejects(db):
     assert repos.requests.get(rid)["state"] == "Rejected"
 
 
-def test_mixed_rejections_reject_immediately(db):
-    # 신원 대기가 섞여 있어도 다른 결격(마운트 없음)이 하나라도 있으면 즉시 거부 --
-    # 유예는 "모든 노드가 신원 대기"일 때만이다(설계 §2.3).
+def test_mixed_rejections_defer_within_grace(db):
+    # 실 테스트베드 형상(설계 §2.3 정정): cephfs-third 처럼 일부 노드는 미마운트,
+    # 일부는 신원만 대기다. "모든 노드가 신원 대기" 규칙이었다면 이 형상은 유예되지
+    # 못했다 -- 고치겠다고 한 바로 그 케이스를 못 고치는 규칙이었다.
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos)
     _seed_identity_pending_report(repos, node="n1")
-    repos.agents.ingest("n2", {"node_name": "n2", "mounts": [],
-        "tools": [{"name": "dscan", "status": "Ready"}], "identities": []},
-        reported_at="2026-08-02T09:59:00Z")
+    _seed_unmounted_report(repos, "n2")
     rid = _scan_request(repos)
-    _backdate(db, rid, "2026-08-02T09:58:00Z")        # grace 안이어도
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    assert repos.requests.get(rid)["state"] == "Pending"
+    assert repos.data_jobs.list_jobs(request_id=rid) == []
+    events = repos.observability.events_for_request(rid)
+    assert [e["event_type"] for e in events] == ["identity_propagating"]
+    # 페이로드는 섞인 사유를 그대로 남긴다 -- 운영자가 "왜 0대인가"를 봐야 한다.
+    assert events[0]["payload"]["rejections"] == {
+        "n1": "identity_not_ready_on_node", "n2": "missing_target_mount"}
+
+
+def test_non_identity_rejections_reject_immediately(db):
+    # 신원 사유 노드가 하나도 없으면(전 노드 미마운트) 전파돼도 적격이 될 노드가
+    # 없다 -- grace 안이어도 즉시 거부. "증명되면 유예, 아니면 거부".
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_unmounted_report(repos, "n1")
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
     assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_eligible_nodes"
+    assert repos.requests.get(rid)["state"] == "Rejected"
 
 
 def test_deferred_request_plans_after_identity_propagates(db):
@@ -346,26 +391,72 @@ def test_deferred_request_plans_after_identity_propagates(db):
     assert repos.requests.get(rid)["state"] == "Planned"
 
 
-def test_sync_identity_pending_rejects_immediately(db):
-    # sync 는 no_ready_sync_candidate 로 실패하고 rejections 를 싣지 않는다 --
-    # 중첩 shape({"source":..,"destination":..})은 노드별 flat dict 가 아니어서
-    # "전원이 신원 대기"를 증명할 수 없기 때문. 증거가 없으면 즉시 거부한다.
+def test_sync_identity_pending_defers_and_plans_after_propagation(db):
+    # 슬라이스 15 실증에서 실제로 났던 전이(Rejected / no_ready_sync_candidate)가
+    # 이 형상이다 -- sync 도 유예 대상이어야 한다(설계 §2.3 정정).
     repos = Repositories(db)
     _seed_storage(repos, "src"); _seed_storage(repos, "dst")
     _seed_policy(repos, "nsync")
-    for node, storage in (("n1", "src"), ("n2", "dst")):
-        repos.agents.ingest(node, {"node_name": node,
-            "mounts": [{"storage_name": storage, "mount_path": f"/mnt/{storage}",
-                        "status": "Ready", "writable": True}],
-            "tools": [{"name": t, "status": "Ready"} for t in ("dsync", "nsync")],
-            "identities": []},          # 신원 미전파
-            reported_at="2026-08-02T09:59:00Z")
-    rid = repos.requests.create(operation="sync", requester_id="alice", actor="alice",
-        resource_key="data.sync:src:a:dst:b:ff",
-        payload={"source_storage": "src", "source": "a",
-                 "destination_storage": "dst", "destination": "b",
-                 "options": {}, "owner_username": None}, priority="mid")
+    _seed_sync_reports(repos, identities=[])          # 신원 미전파
+    rid = _sync_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    assert repos.requests.get(rid)["state"] == "Pending"
+    events = repos.observability.events_for_request(rid)
+    assert [e["event_type"] for e in events] == ["identity_propagating"]
+    # 합집합 판정의 증거: source 쪽 신원 대기는 n1, destination 쪽은 n2 이고 각각
+    # 반대쪽에서는 미마운트다. 한쪽 dict 만 봤다면 이 형상도 놓쳤을 것이다.
+    assert events[0]["payload"]["rejections"] == {
+        "source": {"n1": "identity_not_ready_on_node", "n2": "missing_target_mount"},
+        "destination": {"n1": "missing_target_mount",
+                        "n2": "identity_not_ready_on_node"}}
+    _seed_sync_reports(repos, identities=[{"username": "alice", "status": "Ready"}])
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
+    job = repos.data_jobs.list_jobs(request_id=rid)[0]
+    assert job["tool"] == "nsync"
+    assert job["worker_pool"]["candidates"] == {"source": ["n1"], "destination": ["n2"]}
+
+
+def test_sync_without_identity_pending_rejects_immediately(db):
+    # 양쪽 합집합에 신원 사유 노드가 0 -- 전파돼도 적격이 될 노드가 없으므로 즉시 거부.
+    repos = Repositories(db)
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_policy(repos, "nsync")
+    _seed_unmounted_report(repos, "n1", tool="nsync")
+    _seed_unmounted_report(repos, "n2", tool="nsync")
+    rid = _sync_request(repos)
     _backdate(db, rid, "2026-08-02T09:58:00Z")        # grace 안이어도
-    result = _planner(repos).run_once(now_iso=NOW)
-    assert result[rid] == "rejected:no_ready_sync_candidate"
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_ready_sync_candidate"
     assert repos.requests.get(rid)["state"] == "Rejected"
+
+
+def test_sync_identity_grace_expired_rejects(db):
+    repos = Repositories(db)
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_policy(repos, "nsync")
+    _seed_sync_reports(repos, identities=[])
+    rid = _sync_request(repos)
+    _backdate(db, rid, "2026-08-02T09:54:00Z")        # 나이 360s > grace 300s
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:no_ready_sync_candidate"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+
+
+def test_repeated_defer_records_event_once_until_reason_changes(db):
+    # 유예는 매 틱(기본 10s) 재평가된다 -- 틱마다 남기면 grace 300s 동안 요청 하나에
+    # 30건이 쌓여 요청 상세의 이벤트 목록(limit 100)을 유예 잡음으로 덮는다.
+    # 사유가 바뀔 때만(첫 유예 포함) 남긴다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = _planner(repos)
+    for _ in range(3):
+        assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    assert len(repos.observability.events_for_request(rid)) == 1
+    # 사유가 바뀌면 다시 남긴다 -- 억제는 "같은 사유의 연속"에만 적용된다.
+    _seed_unmounted_report(repos, "n2")
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    events = repos.observability.events_for_request(rid)
+    assert len(events) == 2
+    assert events[1]["payload"]["rejections"]["n2"] == "missing_target_mount"

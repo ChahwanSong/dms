@@ -7,9 +7,10 @@ class PlacementError(Exception):
     def __init__(self, reason_code: str, detail: str = "", *, rejections=None):
         self.reason_code = reason_code
         self.detail = detail
-        # 노드별 탈락 사유({node: reason}). 플래너의 신원 전파 유예(설계 §2.3)가
-        # "왜 0대인가"를 여기서 읽는다 -- 이것 없이는 신원 지연과 진짜 결격
-        # (미마운트·도구 없음)을 가를 수 없다.
+        # 노드별 탈락 사유. 플래너의 신원 전파 유예(설계 §2.3)가 "왜 0대인가"를
+        # 여기서 읽는다 -- 이것 없이는 신원 지연과 진짜 결격(미마운트·도구 없음)을
+        # 가를 수 없다. shape 는 select_tool_and_candidates 의 rejections 와 같다:
+        # scan/rm 은 flat {node: reason}, sync 는 {"source"|"destination": {node: reason}}.
         self.rejections = dict(rejections or {})
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
 
@@ -93,11 +94,10 @@ def select_tool_and_candidates(operation, fresh_reports, *, storage_name=None,
             return {"tool": "nsync",
                     "candidates": {"source": src_n, "destination": dst_n},
                     "rejections": rejections}
-        # rejections 를 싣지 않는다: sync 의 것은 {"source": {...},
-        # "destination": {...}} 중첩이라 {node: reason} flat dict 가 아니고, 유예는
-        # no_eligible_nodes 한정이다(설계 §2.3). 빈 rejections = 증거 없음 =
-        # 플래너 즉시 거부.
-        raise PlacementError("no_ready_sync_candidate")
+        # sync 도 유예 대상이다(설계 §2.3 정정 -- 슬라이스 15에서 실제로 거부된
+        # 전이가 no_ready_sync_candidate 였다). 중첩 shape 그대로 싣고, 두 쪽의
+        # 합집합으로 판정하는 것은 플래너 몫이다.
+        raise PlacementError("no_ready_sync_candidate", rejections=rejections)
     raise PlacementError("invalid_operation", operation)
 
 
