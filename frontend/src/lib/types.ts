@@ -207,6 +207,14 @@ export interface JobMetrics {
   submit_wait_histogram: { bucket: string; count: number }[];
   submit_wait_counted: number;
   submit_wait_excluded: number;
+  // 스케줄 대기(슬라이스 20): execution vcjob 제출(exec_submitted_at) -> 스테퍼가
+  // 처음 RUNNING 을 관측한 틱. 제출 대기(DMS 픽업 지연)와 다른 것을 재며,
+  // Volcano 큐 대기의 **근사**다(스테퍼 틱 5s + vcjob status 갱신 지연 포함 --
+  // 설계 §2.2). excluded = NULL(과거 잡: 백필 없음 §2.5, Running 미도달/한 틱
+  // 완료 §2.6, 스텁 백엔드 §4) 제외 건수 -- 0 과 절대 같지 않다.
+  sched_wait_histogram: { bucket: string; count: number }[];
+  sched_wait_counted: number;
+  sched_wait_excluded: number;
   files_total: number | null; bytes_total: number | null;
 }
 export interface InfraComponent {

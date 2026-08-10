@@ -80,6 +80,8 @@ export function JobStatsSection() {
     .map((b) => ({ label: b.bucket, value: b.count }));
   const submitWaits = asArray<{ bucket: string; count: number }>(d?.submit_wait_histogram)
     .map((b) => ({ label: b.bucket, value: b.count }));
+  const schedWaits = asArray<{ bucket: string; count: number }>(d?.sched_wait_histogram)
+    .map((b) => ({ label: b.bucket, value: b.count }));
   const reasons = asArray<{ reason_code: string; count: number }>(d?.failure_reasons);
   return (
     <Card>
@@ -89,7 +91,12 @@ export function JobStatsSection() {
       </div>
       {q.isLoading && <p className="text-muted text-sm">불러오는 중…</p>}
       <p className="text-sm">성공률 {successRate(byState)}</p>
-      <div className="grid md:grid-cols-3 gap-4 mt-3">
+      {/* 2×2 배치(슬라이스 20): 아래 행에 두 "대기" 분포가 나란히 온다 --
+          「제출 대기」(created_at→첫 비-Pending, DMS 픽업 지연)와 「스케줄
+          대기(Volcano)」(execution 제출→첫 RUNNING 관측)는 다른 것을 잰다(설계
+          §2.2). 4열로 눌러 넣으면 md 폭에서 차트가 읽히지 않아 2열 줄바꿈을
+          택했다. */}
+      <div className="grid md:grid-cols-2 gap-4 mt-3">
         <div>
           <h3 className="font-medium mb-2 text-sm">처리량</h3>
           <BarChart data={throughput} label="처리량" />
@@ -107,6 +114,19 @@ export function JobStatsSection() {
               리터럴 = 한 개의 텍스트 노드(getByText 가 통으로 찾도록). */}
           <p className="text-muted text-xs mt-1">
             {`집계 ${d?.submit_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.submit_wait_excluded ?? 0}건 — 수행시간 분포는 이 대기를 포함합니다`}
+          </p>
+        </div>
+        <div>
+          <h3 className="font-medium mb-2 text-sm">스케줄 대기(Volcano) 분포</h3>
+          <BarChart data={schedWaits} label="스케줄 대기(Volcano) 분포" />
+          {/* 제출 대기와 같은 캡션 패턴(집계/제외 -- 설계 §3) + 근사 오차 명시
+              (설계 §2.2: 스테퍼 틱 5s + vcjob status 지연이 더해진 근사이지
+              PodGroup 이 보고하는 값이 아니다). 제외(기록 없음)에는 과거 잡(백필
+              없음 §2.5)·Running 미도달·한 틱 완료·스텁 백엔드가 모두 들어간다 --
+              도입 직후 "집계 0건 · 제외 N건"이 정상이며, 이 수가 보여야 화면이
+              "데이터 없음"으로 거짓말하지 않는다(설계 §2.6). */}
+          <p className="text-muted text-xs mt-1">
+            {`집계 ${d?.sched_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.sched_wait_excluded ?? 0}건 — 제출 대기(DMS 픽업 지연)와 달리 Volcano 큐 대기의 근사입니다(스테퍼 틱 5초 오차)`}
           </p>
         </div>
       </div>

@@ -33,6 +33,11 @@ const STATS = {
     { bucket: "30-60s", count: 0 }, { bucket: "1-5m", count: 0 },
     { bucket: "5-30m", count: 0 }, { bucket: ">30m", count: 0 }],
   submit_wait_counted: 3, submit_wait_excluded: 1,
+  sched_wait_histogram: [
+    { bucket: "<10s", count: 1 }, { bucket: "10-30s", count: 1 },
+    { bucket: "30-60s", count: 0 }, { bucket: "1-5m", count: 0 },
+    { bucket: "5-30m", count: 0 }, { bucket: ">30m", count: 0 }],
+  sched_wait_counted: 2, sched_wait_excluded: 4,
   files_total: null, bytes_total: null,
 };
 
@@ -74,4 +79,19 @@ test("제출 대기 분포와 집계/제외 건수를 보여준다", async () =>
   // 제외 건수를 숨기지 않는다(설계 §3) + 수행시간과의 포함 관계 명시(설계 §2.4)
   expect(screen.getByText(/집계 3건 · 제외\(기록 없음\) 1건/)).toBeInTheDocument();
   expect(screen.getByText(/수행시간 분포는 이 대기를 포함/)).toBeInTheDocument();
+});
+
+test("스케줄 대기(Volcano) 분포가 제출 대기와 구분돼 나온다", async () => {
+  renderSection();
+  const chart = await screen.findByRole("img", { name: "스케줄 대기(Volcano) 분포" });
+  expect(chart.querySelectorAll("rect")).toHaveLength(6);
+  // 두 대기의 라벨이 한 화면에서 구분된다 -- getByText 는 유일 매치를 강제하므로
+  // 라벨이 같은 문자열로 뭉치면 여기서 터진다(설계 §3: 「제출 대기」 옆에
+  // 나란히, 서로 다른 이름으로 -- 슬라이스 17 이 queue_wait 라벨을 정정한 교훈).
+  expect(screen.getByText("제출 대기 분포")).toBeInTheDocument();
+  expect(screen.getByText("스케줄 대기(Volcano) 분포")).toBeInTheDocument();
+  // 집계/제외 캡션(설계 §2.5: 백필이 없으므로 도입 직후 "제외 N건"이 정상 표시
+  // -- 숨으면 "데이터 없음"처럼 보인다) + 근사 오차 명시(설계 §2.2).
+  expect(screen.getByText(/집계 2건 · 제외\(기록 없음\) 4건/)).toBeInTheDocument();
+  expect(screen.getByText(/Volcano 큐 대기의 근사/)).toBeInTheDocument();
 });
