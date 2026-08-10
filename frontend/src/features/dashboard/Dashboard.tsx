@@ -6,7 +6,7 @@ import { MetricTile } from "../../components/ui/MetricTile";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import type { PillVariant } from "../../lib/jobState";
-import type { StateCount } from "../../lib/types";
+import type { InfraComponent, StateCount } from "../../lib/types";
 
 // KPI는 잡 상태의 집합 합산이다. 옛 스텁의 요청 목록 즉석 계산은 페이지네이션
 // 상한(50건)에 걸려 총계가 거짓이 됐다 -- 백엔드 GROUP BY 집계로 바꾼다(설계 §4.1).
@@ -41,6 +41,11 @@ export function Dashboard() {
   const kpi = kpiFromStates(byState);
   const components = Array.isArray(infraQ.data?.components)
     ? infraQ.data.components : [];
+  const jobImage = infraQ.data?.job_image;
+  // 드리프트 = live(워크로드 파드템플릿)와 동봉 매니페스트가 "둘 다 있고" 다르다.
+  // 어느 한쪽이 null 이면 비교하지 않는다 -- 추측 금지(설계 §4).
+  const drifted = (c: InfraComponent) =>
+    c.image != null && c.manifest_image != null && c.image !== c.manifest_image;
   const rs = Array.isArray(reqs.data) ? reqs.data : [];
   return (
     <section className="space-y-5">
@@ -56,19 +61,35 @@ export function Dashboard() {
           <h2 className="font-medium mb-3">컴포넌트</h2>
           <ul className="space-y-2 text-sm">
             {components.map((c) => (
-              <li key={c.component} className="flex items-center gap-2">
-                <span className="shrink-0">{c.component}</span>
-                <span className="text-muted text-xs truncate grow">
-                  {c.image ?? "—"}
-                </span>
-                <span className="text-xs tabular-nums shrink-0">
-                  {`${c.ready ?? "—"}/${c.desired ?? "—"}`}
-                </span>
-                <StatusPill state={c.verdict ?? "unknown"}
-                            variant={c.verdict ? VERDICT_VARIANT[c.verdict] : "neutral"} />
+              <li key={c.component} className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="shrink-0">{c.component}</span>
+                  <span className="text-muted text-xs truncate grow">
+                    {c.image ?? "—"}
+                  </span>
+                  {drifted(c) && <StatusPill state="드리프트" variant="bad" />}
+                  <span className="text-xs tabular-nums shrink-0">
+                    {`${c.ready ?? "—"}/${c.desired ?? "—"}`}
+                  </span>
+                  <StatusPill state={c.verdict ?? "unknown"}
+                              variant={c.verdict ? VERDICT_VARIANT[c.verdict] : "neutral"} />
+                </div>
+                {/* 롤아웃이 성공(applied)해도 뜨는 줄이다 -- 고장이 아니라 "매니페스트가
+                    아직 옛 태그"라는 뜻이며, 문장은 그 결과(다음 apply의 되돌림)를
+                    미래형으로 말한다. 한 개의 템플릿 리터럴 = 한 개의 텍스트 노드. */}
+                {drifted(c) && (
+                  <p className="text-xs text-bad">
+                    {`매니페스트 ${c.manifest_image} — 다음 kubectl apply가 이 태그로 되돌립니다`}
+                  </p>
+                )}
               </li>
             ))}
           </ul>
+          {jobImage?.live && jobImage?.manifest && jobImage.live !== jobImage.manifest && (
+            <p className="mt-3 text-xs text-bad">
+              {`잡 이미지 ${jobImage.live} · 매니페스트 ${jobImage.manifest} — 다음 kubectl apply가 매니페스트 값으로 되돌립니다`}
+            </p>
+          )}
         </Card>
         <Card>
           <h2 className="font-medium mb-3">최근 작업</h2>

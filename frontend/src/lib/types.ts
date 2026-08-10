@@ -187,5 +187,11 @@ export interface InfraComponent {
   component: string; kind: string; workload: string;
   image: string | null; ready: number | null; desired: number | null;
   verdict: "applied" | "progressing" | "failed" | null; detail: string | null;
+  // 이미지에 동봉된 "이 이미지를 만든 소스 트리"의 매니페스트 image 값.
+  // null = 동봉 없음/파싱 실패 -- 비교 자체를 하지 않는다(무배지).
+  manifest_image: string | null;
 }
-export interface InfraMetrics { components: InfraComponent[] }
+export interface InfraMetrics {
+  components: InfraComponent[];
+  job_image: { live: string | null; manifest: string | null };
+}
