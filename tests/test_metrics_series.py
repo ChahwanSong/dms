@@ -178,3 +178,17 @@ def test_duration_histogram_counts_zero_as_a_real_value():
                               overflow=SUBMIT_WAIT_OVERFLOW)
     assert {b["bucket"]: b["count"] for b in hist}["<10s"] == 2
     assert sum(b["count"] for b in hist) == 2    # 음수·None 만 빠진다
+
+
+def test_sched_wait_reuses_submit_buckets_and_zero_lands_in_first_bucket():
+    # 슬라이스 20 은 새 버킷을 짓지 않고 SUBMIT_WAIT_BUCKETS 를 재사용한다(설계
+    # §2.7 -- 두 대기 분포를 같은 축으로 나란히 비교, 실분포는 실증 후 조정).
+    # 0(같은 틱 스케줄)이 첫 버킷에 남아야 한다: duration_histogram 의 가드가
+    # `v is None or v < 0` 에서 `if not v` 류로 퇴행하면 여기서 잡힌다.
+    from dms.metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
+                                    duration_histogram)
+    hist = duration_histogram([0, 12], buckets=SUBMIT_WAIT_BUCKETS,
+                              overflow=SUBMIT_WAIT_OVERFLOW)
+    counts = {b["bucket"]: b["count"] for b in hist}
+    assert counts["<10s"] == 1      # 0 이 산다
+    assert counts["10-30s"] == 1

@@ -10,11 +10,11 @@ def repos(db):
 def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
               storage="s1", dest_storage=None, requester="alice",
               reason_code=None, updated_at=None, files=None, nbytes=None,
-              wait=None):
+              wait=None, sched=None):
     """data_jobs 한 행을 원하는 상태·시각으로 심는다. set_job_state는 updated_at을
     현재 시각으로 찍으므로 창(window) 테스트가 불가능하다 -- 정상 경로로 만들고
-    시각·상태만 UPDATE로 덮는다. wait 는 submit_wait_seconds(기본 NULL -- 백필
-    공백/진행 중과 같은 모양)."""
+    시각·상태만 UPDATE로 덮는다. wait 는 submit_wait_seconds, sched 는
+    sched_wait_seconds(둘 다 기본 NULL -- 기록 없음/진행 중과 같은 모양)."""
     rid = repos.requests.create(
         operation="scan", requester_id=requester, actor=requester,
         resource_key=f"k:{created_at}:{tool}:{state}:{requester}", payload={},
@@ -27,11 +27,11 @@ def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
     db.execute(
         """UPDATE data_jobs SET state = :st, reason_code = :rc, created_at = :c,
                updated_at = :u, files_count = :f, bytes_count = :b,
-               submit_wait_seconds = :w
+               submit_wait_seconds = :w, sched_wait_seconds = :sw
            WHERE job_id = :j""",
         {"st": state, "rc": reason_code, "c": created_at,
          "u": updated_at or created_at, "f": files, "b": nbytes, "w": wait,
-         "j": job_id})
+         "sw": sched, "j": job_id})
     return job_id
 
 
@@ -175,3 +175,31 @@ def test_job_stats_submit_wait_zero_is_counted_not_excluded(db, repos):
                                     end="2026-08-09T23:59:59Z")
     assert sorted(stats["submit_wait_seconds"]) == [0, 7]  # 0 이 원자료에 남는다
     assert stats["submit_wait_excluded"] == 1              # NULL 만 제외 -- 0 은 아니다
+
+
+def test_job_stats_sched_wait_excludes_null_and_surfaces_the_gap(db, repos):
+    # NULL(과거 잡·Running 미도달·한 틱 완료·스텁 백엔드)을 0 으로 세면 분포가
+    # 통째로 왜곡된다 -- 제외하되 제외 건수를 함께 낸다(설계 §2.5·§2.6: 백필이
+    # 없으므로 도입 직후 화면은 "집계 0건 · 제외 N건"이 정상이고, 그 수가 보여야
+    # 공백이 숨지 않는다).
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", sched=5)
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", sched=45)
+    _seed_job(db, repos, created_at="2026-08-09T03:00:00Z")            # NULL
+    _seed_job(db, repos, created_at="2026-07-01T00:00:00Z", sched=999) # 창 밖
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert sorted(stats["sched_wait_seconds"]) == [5, 45]
+    assert stats["sched_wait_excluded"] == 1
+
+
+def test_job_stats_sched_wait_zero_is_counted_not_excluded(db, repos):
+    # 0 = 같은 틱 안에 스케줄된 가장 건강한 잡(설계 §2.4). 집계 술어가
+    # IS NOT NULL / IS NULL 대신 falsy 검사(> 0, COALESCE(...,0) <> 0)로 퇴행하면
+    # 여기서 잡힌다 -- submit_wait 의 동명 테스트와 같은 계약.
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", sched=0)
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", sched=7)
+    _seed_job(db, repos, created_at="2026-08-09T03:00:00Z")            # NULL
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert sorted(stats["sched_wait_seconds"]) == [0, 7]   # 0 이 원자료에 남는다
+    assert stats["sched_wait_excluded"] == 1               # NULL 만 제외 -- 0 은 아니다

@@ -125,6 +125,22 @@ class MetricsRepository:
                WHERE created_at BETWEEN :s AND :e
                  AND submit_wait_seconds IS NULL""", params)
 
+        # 스케줄 대기(슬라이스 20 설계 §2.4): submit_wait 페어와 같은 모양의
+        # 2쿼리. 술어는 IS NOT NULL / IS NULL 이다 -- COALESCE(...,0) = 0 같은
+        # falsy 검사로 쓰면 0(같은 틱 스케줄이라는 정상값)이 미기록으로 새 나간다.
+        # 둘 다 idx_data_jobs_created_sched (created_at, sched_wait_seconds) 가
+        # 커버한다 -- 테이블을 건드리지 않는 인덱스 온리 레인지 스캔.
+        # excluded 에는 과거 잡(백필 없음 -- 설계 §2.5)·Running 미도달·한 틱 완료·
+        # 스텁 백엔드가 모두 들어간다 -- 이 수를 내야 화면이 공백을 숨기지 못한다.
+        sched_waits = self._db.query(
+            """SELECT sched_wait_seconds AS w FROM data_jobs
+               WHERE created_at BETWEEN :s AND :e
+                 AND sched_wait_seconds IS NOT NULL""", params)
+        sched_excluded = self._db.query_one(
+            """SELECT COUNT(*) AS c FROM data_jobs
+               WHERE created_at BETWEEN :s AND :e
+                 AND sched_wait_seconds IS NULL""", params)
+
         sums = self._db.query_one(
             """SELECT SUM(files_count) AS files_total, SUM(bytes_count) AS bytes_total
                FROM data_jobs
@@ -149,6 +165,8 @@ class MetricsRepository:
             "duration_seconds": duration_seconds,
             "submit_wait_seconds": [row["w"] for row in waits],
             "submit_wait_excluded": excluded["c"],
+            "sched_wait_seconds": [row["w"] for row in sched_waits],
+            "sched_wait_excluded": sched_excluded["c"],
             "files_total": sums["files_total"],
             "bytes_total": sums["bytes_total"],
         }
