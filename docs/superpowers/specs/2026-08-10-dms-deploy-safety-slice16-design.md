@@ -79,10 +79,27 @@ api·controller 파드에 `initContainer: dms migrate`를 넣어 **스키마 변
 ### 2.3 플래너는 신원 전파를 **유예**한다 (거부하지 않음)
 
 `PlacementError`에 `rejections`를 실어 보내고, `_plan_one`이
-**(a) 사유가 `no_eligible_nodes`이고 (b) 모든 노드의 사유가
-`identity_not_ready_on_node`이며 (c) `now - requests.created_at < grace`** 인
-경우에만 아무 상태도 바꾸지 않고 반환한다. 요청은 Pending으로 남아 다음 틱에 다시
-계획된다. 유예 초과 시 기존대로 거부한다.
+**(a) 사유가 정확히 `identity_not_ready_on_node`인 노드가 하나라도 있고
+(b) `now - requests.created_at < grace`** 인 경우에만 아무 상태도 바꾸지 않고
+반환한다. 요청은 Pending으로 남아 다음 틱에 다시 계획된다. 유예 초과 시 기존대로
+거부한다.
+
+> **정정(구현 중 발견)**: 초안은 "(a) 사유가 `no_eligible_nodes`이고 (b) **모든**
+> 노드의 사유가 identity"였다. 이 규칙은 **§6-4의 합격 기준을 스스로 못 맞춘다** —
+> 슬라이스 15에서 실패한 시나리오에는 sync(`no_ready_sync_candidate`)가 포함됐고,
+> 게다가 실 테스트베드 형상에서 사유가 **섞인다**(cephfs-third는 w1-3 Ready /
+> w4-5 Missing이라 전파 전에는 w1-3이 identity, w4-5가 `missing_target_mount`).
+> 그래서 "하나라도"로 바꾸고 `no_ready_sync_candidate`까지 포함한다.
+>
+> "하나라도"로 충분한 근거는 코드 구조에 있다: `eligible_nodes`는 노드마다 **첫
+> 실패 사유 하나**만 기록하고 검사 순서가 mount → writable → tool → **identity(마지막)**
+> 다. 따라서 사유가 identity인 노드는 마운트·쓰기·도구를 **이미 통과**했고 신원 전파만
+> 남았다 — 전파되면 그 노드는 반드시 적격이 된다.
+>
+> sync의 `rejections`는 `{"source": ..., "destination": ...}` 형태이므로 두 쪽의
+> **합집합**에 같은 규칙을 적용한다. 받아들이는 트레이드오프: source에만 identity
+> 노드가 있고 destination이 전부 미마운트면 끝내 실패하지만 grace만큼 Pending 후
+> 거부된다 — 영구 오거부보다 낫고 스스로 수렴한다.
 
 grace 기본값 **300초**(`DMS_PLANNER_IDENTITY_GRACE_SECONDS`) — 최악 전파 130초의
 2배 남짓. 짧게 두는 이유: 같은 `resource_key`의 후속 요청이 `find_active`에 걸려
