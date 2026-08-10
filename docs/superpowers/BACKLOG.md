@@ -93,12 +93,48 @@ Running(6초)로 잡히고 완료 후 사라졌다 — "PodGroup 은 잡 종료�
    금지됐다(`slice14-design.md:63-68`). 원본 설계 §293이 요구한 지표.
    → `runs` 부활 또는 `data_jobs`에 인덱스된 파생 컬럼 중 택일(설계 시 결정).
 
-### 슬라이스 18 «아티팩트 경로 설정» (사용자 요청) — 설계 확정
-- 설계: `specs/2026-08-10-dms-artifact-base-slice18-design.md`.
-- 사용자 확정: **설치·초기 구성 전용**. 잡이 1건이라도 있으면 변경을 409로 거부하고
-  명시적 `force` 로만 통과(감사에 기록). 검증은 **API 즉석 + 에이전트 노드별 +
-  컨트롤러 자기 관점** 3홉.
-- 아래는 착수 당시의 원 항목이다(기록 보존용).
+### ✅ 슬라이스 18 «아티팩트 경로 설정» — **완료**(2026-08-11, d29 배포·§6 실증 6/6 통과)
+
+설계 `specs/2026-08-10-dms-artifact-base-slice18-design.md`, 플랜
+`plans/2026-08-10-dms-artifact-base-slice18.md`. 백엔드 1043 / 프론트 219 / tsc 0.
+
+실증 결과(테스트베드, d29):
+1. DB 미설정 → `source: env`, `db_value: null`, `effective == env_value` — 기존 배포
+   무변화. **라이브 DB 는 오래전에 만들어졌으므로 새 컬럼 5개는 `_ensure_columns`
+   ALTER 경로로 들어왔다**(슬라이스 14 의 "한쪽만 넣으면 라이브에서만 컬럼이 없다"
+   교훈이 이번엔 통과).
+2. base 를 `/cephfs/dms/artifacts-slice18` 로 바꾸고 실 scan 잡을 돌리니
+   `artifact_uri` 가 새 경로를 가리키고 `files_count=10` 이 채워졌다 — 컨트롤러가
+   **새 경로에서 summary.json 을 실제로 읽어냈다**는 뜻이라 쓰기→읽기 사슬 전체가
+   확인됐다. 디스크에도 dscan-report/summary/stdout/stderr 가 요청자 uid 로 있었다.
+3. 잡 55건 상태에서 PUT 이 409 `artifact_base_locked`, `force:true` 로 통과.
+   감사에 `{"forced": true, "affected_jobs": 53}` 기록. **부수 확인**: `before_state`
+   의 `changed_by`/`changed_at` 이 그대로였다 — 전용 UPDATE 가 컨트롤 상태의 변경
+   이력을 오염시키지 않는다(설계 §2.1)는 것이 라이브에서 확인됐다.
+4. 없는 경로 → `validate` 가 422 `artifact_base_missing`. 파일을 주면
+   `artifact_base_not_directory`. **PUT 은 잠금이 먼저라 409 가 난다** — 정규화 →
+   잠금 → 즉석 검증 순서(설계 §2.5)가 라이브에서 그대로 관측됐다.
+5. **핵심**: `/cephfs` 밖 경로(API 파드에만 만든 `/tmp/dms-outside`)로 바꾸니
+   API `ok:true` / 컨트롤러 `artifact_base_missing` / 노드 `exists:false` 로
+   **세 홉이 실제로 갈라졌다**. API 혼자 판단했다면 "쓰기 가능"으로 저장하고 끝났을
+   상황이다. 아직 프로브하지 않은 노드는 `pending` 으로 실패와 구분됐다.
+6. 경로 중간 `file://` → 422 `artifact_base_scheme_in_path`. 상대경로·`..` 도 각각
+   고유 사유 코드로 거부.
+
+포탈 화면(`/admin/artifact-base`)도 라이브 확인: 경로 변경 직후 노드 5행이 전부
+「확인 대기 중」이었다가 60s 주기로 「있음/가능」으로 수렴하는 것을 브라우저에서 봤다.
+
+**이번에 배포 순서를 틀렸다(기록)**: 이미지를 먼저 빌드하고 매니페스트를 나중에
+올렸다. 드리프트 판정은 **그 이미지를 만든 소스 트리의 매니페스트**를 보므로
+(`manifest_tags.py` 머리 주석 — Dockerfile.dms 가 deploy/k8s 를 이미지에 COPY 한다),
+d29 안의 동봉본은 d28/d27 이고 라이브는 d29 라 배지가 떴다. 슬라이스 16 이 세운
+**매니페스트-우선** 관례의 진짜 의미가 이것이다: **매니페스트를 먼저 올려 커밋하고,
+그 커밋으로 이미지를 빌드해야** 동봉본과 라이브가 일치한다. 다음 슬라이스 배포부터
+그 순서를 지킨다(그때 이 드리프트도 함께 해소된다).
+
+아래는 착수 당시의 원 항목이다(기록 보존용).
+
+### 슬라이스 18 «아티팩트 경로 설정» (사용자 요청)
 - 포탈에서 **아티팩트 저장 경로 설정** + **가능여부 검증**(실제로 써도 문제없는지).
 - 현재는 ConfigMap 환경변수 `DMS_ARTIFACT_BASE_URI=file:///cephfs/dms/artifacts` 고정.
 - **설계 시 반드시 다룰 것**: 경로를 바꾸면 **기존 잡의 아티팩트를 못 읽는다**.
@@ -173,6 +209,14 @@ Running(6초)로 잡히고 완료 후 사라졌다 — "PodGroup 은 잡 종료�
   **`npm audit fix --force` 실행 금지.**
 
 ### 2.3 운영 / 배포
+- **포탈 빌드(슬라이스 11)는 이 테스트베드에서 쓸 수 없다** — 빌드 파드가 빌드
+  노드(=dms 워커) 위에서 돌면서 GitHub·npm·PyPI·dl.k8s.io 로 나가야 하는데, 테스트베드
+  아키텍처가 "pkg-01 만 인터넷, dms 노드는 ssh 만"이다(`testbed/docs/ARCHITECTURE.md`
+  §15). 실제로 이 클러스터의 유일한 포탈 빌드 기록이 `build_failed` 다. 실 빌드 경로는
+  **pkg-01 에서 podman**(`deploy/docker/build-and-push.sh`)이며, 슬라이스 18 의 d29 도
+  그렇게 만들었다. 포탈 빌드를 살리려면 빌드 노드를 pkg-01 로 둘 수 있어야 하는데
+  pkg-01 은 어느 클러스터에도 join 하지 않으므로 에이전트가 없다 → `build_node_name`
+  후보에 뜨지 않는다. **구조적 미해결**이다.
 - **클러스터 내 registry 미구축** — 원본 설계 §246은 "클러스터 내 registry:2",
   실제는 호스트 `pkg-01:5000`(슬라이스 11 비목표: "독립된 인프라 작업").
 - **`DMS_JOB_IMAGE`는 포탈 롤아웃 불가** — ConfigMap 갱신 + 소비자 재시작이라

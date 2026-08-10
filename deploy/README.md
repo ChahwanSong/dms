@@ -205,9 +205,16 @@ terminal state.
 
 ### scan (single storage, no confirm step)
 
+`target`은 storage의 `managed_root` 아래 **실재하는** 상대 경로여야 한다 -- 없으면
+preflight가 `target_not_readable`로 잡을 Rejected 시킨다(슬라이스 18 실증에서
+`managed`가 실재하지 않아 한 번 밟았다). 현재 `cephfs-dms`(`/cephfs/dms`) 아래에
+있는 것: `team`, `artifacts`, `s16-verify`, `s17-live` 등 -- `ls`로 먼저 확인할 것.
+그리고 `x-dms-actor`는 **LDAP에 있는 사용자**여야 한다(`alice` 등); 임의 문자열이면
+플래너가 `ldap_identity_not_found`로 거절한다.
+
 ```bash
 RID=$(curl -sf -X POST "$API/api/user/requests" "${AUTH[@]}" -H 'content-type: application/json' -d '{
-  "operation": "scan", "storage": "cephfs-dms", "target": "managed",
+  "operation": "scan", "storage": "cephfs-dms", "target": "team",
   "priority": "mid"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["request_id"])')
 
 for i in $(seq 1 12); do curl -sf "$API/api/user/requests/$RID" "${AUTH[@]}"; echo; sleep 5; done
@@ -266,6 +273,15 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 ```
 
 ## 8. 포탈에서 이미지 빌드 (슬라이스 11)
+
+> **이 테스트베드에서는 동작하지 않는다(구조적).** 빌드 파드는 빌드 노드(=dms 워커)
+> 위에서 돌면서 GitHub·npm·PyPI·dl.k8s.io 로 나가야 하는데, 테스트베드가
+> "pkg-01 만 인터넷, dms 노드는 ssh 만" 모델이다(`testbed/docs/ARCHITECTURE.md` §15).
+> 이 클러스터의 유일한 포탈 빌드 기록도 `build_failed` 다. pkg-01 을 빌드 노드로
+> 지정할 수도 없다 -- pkg-01 은 어느 클러스터에도 join 하지 않아 에이전트가 없고,
+> `build_node_name` 은 `agent_nodes` 에 실재하는 노드만 받는다.
+> **실제 빌드는 §1 대로 pkg-01 에서 podman 으로 한다**(슬라이스 18 의 d29 도 그렇게
+> 만들었다). 아래 절은 기능 자체의 설명으로 남긴다.
 
 포탈이 `dms-mpifileutils`/`dms`/`dms-agent` 이미지를 빌드 노드 위 bare Pod로 빌드해
 `DMS_BUILD_REGISTRY`(기본 `pkg-01:5000`)로 push하는 기능. `20-config.yaml`의
