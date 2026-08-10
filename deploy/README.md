@@ -476,9 +476,17 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
   `/cephfs-third`) -- it just shadows an empty dir there, and
   `probe_mounts()` correctly reports that storage `Missing` on those nodes.
   Confirm this reads as expected once agents are actually running.
-- **Agent os-metrics network figures**: `probe_os_metrics()` reads
-  `/proc/net/dev` from the container's own (pod) network namespace, not the
-  host's -- `network_rx_bytes`/`network_tx_bytes` in agent reports will
-  reflect the pod's veth, not real node throughput. `hostNetwork: true`
-  would fix this but was not added (out of scope for this pass / changes the
-  agent's security posture); flagging for follow-up if that metric matters.
+- **Agent os-metrics network figures**: `probe_os_metrics()` reads the HOST
+  network namespace's counters, so `network_rx_bytes`/`network_tx_bytes` are
+  real node throughput. The DaemonSet bind-mounts `/proc/1/net/dev` (PID 1 =
+  host netns) as a hostPath `type: File` at `/host/proc/1/net/dev` and points
+  the probe there with `DMS_AGENT_NET_DEV_PATH` -- the same injection
+  convention `DMS_AGENT_MOUNTINFO_PATH` already uses. A plain `/host/proc`
+  directory mount would NOT fix it: `/proc/net/*` reflects the *reader's*
+  netns, so it has to be the PID 1 file.
+  **Do not adopt `hostNetwork: true`** as an alternative (design §2.5 rejected
+  it): without a matching `dnsPolicy: ClusterFirstWithHostNet` the agent pod
+  loses cluster DNS, can no longer resolve `dms-api`, and stops reporting
+  **permanently and silently** -- the report loop is fail-soft, so nothing
+  surfaces the breakage. It also widens the agent's network exposure for no
+  gain over the bind mount.

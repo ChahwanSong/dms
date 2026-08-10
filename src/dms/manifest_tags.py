@@ -180,13 +180,15 @@ def init_container_names(doc: "list[str]") -> "list[str]":
             if _indent(line) == item_indent and line.strip().startswith("- name:")]
 
 
-def container_image(doc: "list[str]", container: str) -> "str | None":
-    """containers 블록에서 이름이 container 인 항목의 image. 런타임 경로라 fail-soft.
+def _image_in(doc: "list[str]", block_key: str, container: str) -> "str | None":
+    """block_key 블록에서 이름이 container 인 항목의 image. 못 찾으면 None.
 
-    initContainers 는 'containers:' 프리픽스가 달라 _find 에 안 걸리고(Task 4 가
-    40/41 에 initContainers 를 넣어도 본 컨테이너 이미지를 정확히 집는다), env 의
-    `- name:` 항목들은 item_indent 보다 깊어 이름 추적을 오염시키지 않는다."""
-    at = _find(doc, "containers")
+    블록 키만 다를 뿐 containers/initContainers 의 탐색 규칙은 같아서 한 몸으로
+    둔다 -- 두 벌로 두면 한쪽만 고쳐지는 드리프트가 난다. block_key 는 정확 매칭이
+    아니라 접두사 매칭(_find)이지만 'containers:' 는 'initContainers:' 에 걸리지
+    않는다(뒤쪽이 'initC...' 로 시작한다) -- container_image 가 본 컨테이너만
+    보는 성질은 그 비대칭에 기대고 있다."""
+    at = _find(doc, block_key)
     if at is None:
         return None
     body = _block(doc, at)
@@ -201,6 +203,28 @@ def container_image(doc: "list[str]", container: str) -> "str | None":
         elif current == container and stripped.startswith("image:"):
             return _unquote(_value(line)) or None
     return None
+
+
+def container_image(doc: "list[str]", container: str) -> "str | None":
+    """containers 블록에서 이름이 container 인 항목의 image. 런타임 경로라 fail-soft.
+
+    initContainers 는 'containers:' 프리픽스가 달라 _find 에 안 걸리고(Task 4 가
+    40/41 에 initContainers 를 넣어도 본 컨테이너 이미지를 정확히 집는다), env 의
+    `- name:` 항목들은 item_indent 보다 깊어 이름 추적을 오염시키지 않는다."""
+    return _image_in(doc, "containers", container)
+
+
+def init_container_image(doc: "list[str]", container: str) -> "str | None":
+    """initContainers 블록에서 이름이 container 인 항목의 image. 없으면 None.
+
+    container_image 와 합치지 말 것 -- 드리프트 배지는 반드시 **본 컨테이너만**
+    비교해야 한다(설계 §2.1). 이 헬퍼의 용도는 그 배지가 아니라 계약 테스트다:
+    라이브 관측(rollout_status 의 _images)이 spec.template.spec.containers 만
+    읽으므로, 매니페스트 안에서 initContainer 이미지만 다른 태그로 어긋나면
+    배지에는 **아무것도 뜨지 않는다**. 그 침묵을 테스트로 메운다 -- 새 파드가 구
+    이미지로 migrate 한 뒤 신 앱을 구식 스키마 위에 띄우는 슬라이스 14·15의
+    실패 그대로다."""
+    return _image_in(doc, "initContainers", container)
 
 
 def _root(root=None) -> "Path | None":

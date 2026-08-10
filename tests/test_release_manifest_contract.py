@@ -15,7 +15,8 @@ container_names)은 그대로다.
 from pathlib import Path
 
 import pytest
-from dms.manifest_tags import (container_names, init_container_names,
+from dms.manifest_tags import (container_image, container_names,
+                               init_container_image, init_container_names,
                                match_labels, workload_doc)
 from dms.repositories.releases import COMPONENTS, ROLLOUT_ORDER
 
@@ -81,6 +82,25 @@ def test_init_container_declaration_matches_the_manifests(component):
             f"{path.name} 의 initContainers 는 {names} 다. 롤아웃 패치가 이 이름으로 "
             f"strategic merge 를 걸면 병합이 아니라 없던 컨테이너가 새로 생긴다 -- "
             f"워크로드가 오염되고 파드가 영영 Ready 가 안 된다")
+
+        # 그리고 두 이미지는 같은 태그여야 한다. 이 어긋남에는 **어떤 감시 장치도
+        # 없다**: 드리프트 배지는 container_image(본 컨테이너)와 라이브
+        # observe().images 만 비교하고, 라이브 쪽(rollout_status 의 _images)도
+        # spec.template.spec.containers 만 읽는다. 그래서 매니페스트를 손으로 고칠 때
+        # containers[api] 만 새 태그로 올리고 initContainers[migrate] 를 구 태그로
+        # 두면 live == manifest 라 배지가 뜨지 않고, 그 뒤 뜨는 모든 파드가 구
+        # 이미지로 dms migrate 를 돌린 다음 신 앱을 구식 스키마 위에 띄운다 --
+        # 슬라이스 14·15에서 실제로 났던 실패다. 그 침묵을 여기서 메운다.
+        init_image = init_container_image(doc, declared)
+        main_image = container_image(doc, spec["container"])
+        assert main_image is not None, (
+            f"{path.name} 의 컨테이너 '{spec['container']}' 에서 image 를 못 읽었다 -- "
+            f"파서나 매니페스트 모양이 바뀌었다")
+        assert init_image == main_image, (
+            f"{path.name} 의 initContainer '{declared}' 이미지는 {init_image!r} 인데 "
+            f"본 컨테이너 '{spec['container']}' 는 {main_image!r} 다. 드리프트 배지는 "
+            f"본 컨테이너만 비교하므로 이 어긋남을 절대 못 잡는다 -- 새 파드가 구 "
+            f"이미지로 migrate 한 뒤 신 앱을 구식 스키마 위에 띄운다")
 
 
 def test_init_container_names_does_not_leak_into_container_names():
