@@ -20,7 +20,8 @@ def test_privileged_path_needs_no_resolver_when_no_group_denies(db):
     repos.control.deny("requester", "mallory", None, "admin")
     identity = resolve_job_identity(repos.control, None,
                                     requester_id="admin", owner_username="alice",
-                                    allow_privileged=True, privileged_requesters=("admin",))
+                                    allow_privileged=True, privileged_requesters=("admin",),
+                                    session_authenticated=True)
     assert identity.privileged is True
     assert identity.uid == 0
 
@@ -72,6 +73,7 @@ def test_group_denylist_privileged_path_treats_missing_ldap_entry_as_groupless(d
     resolver = StubIdentityResolver({})  # "ghost"는 등록되어 있지 않음 → resolve() -> None
     identity = resolve_job_identity(repos.control, resolver,
                                     requester_id="admin", owner_username="ghost",
-                                    allow_privileged=True, privileged_requesters=("admin",))
+                                    allow_privileged=True, privileged_requesters=("admin",),
+                                    session_authenticated=True)
     assert identity.privileged is True
     assert identity.groups == ()

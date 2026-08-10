@@ -36,10 +36,14 @@ def test_privileged_requester_synthesizes_root_uid_zero(db):
     # (1) 승격은 실재한다: root 는 privileged_requesters 기본값 멤버(config.py:114)이고
     # group deny 가 없으면 LDAP 없이 uid 0 으로 합성된다(identity.py:49,:62-63).
     control = ControlRepository(db)
+    # session_authenticated=True 는 "세션 로그인한 관리자가 root 를 requester 로
+    # 쓰는" 정상 경로를 뜻한다 -- 승격 자체는 살아 있고(이 슬라이스가 없애는 것이
+    # 아니다), 토큰 경로가 그 이름을 고를 수 없게 된 것이 차단의 본질이다.
     ident = resolve_job_identity(
         control, None, requester_id="root", owner_username=None,
         allow_privileged=True,
-        privileged_requesters=frozenset({"root", "admin"}))
+        privileged_requesters=frozenset({"root", "admin"}),
+        session_authenticated=True)
     assert ident.uid == 0 and ident.gid == 0 and ident.privileged is True
 
 

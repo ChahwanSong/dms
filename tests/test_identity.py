@@ -65,10 +65,13 @@ def test_denylist_blocks_before_privileged(db):
 
 
 def test_privileged_path_synthesizes_root(db):
+    # session_authenticated 를 명시한다: 기본값이 fail-closed(False)라 특권을 원하는
+    # 테스트는 그 조건을 스스로 말해야 한다(슬라이스 19).
     control = _control(db)
     out = resolve_job_identity(control, None, requester_id="ops",
                                owner_username="victim", allow_privileged=True,
-                               privileged_requesters=frozenset({"ops"}))
+                               privileged_requesters=frozenset({"ops"}),
+                               session_authenticated=True)
     assert out.privileged and out.uid == 0 and out.gid == 0
 
 
@@ -78,12 +81,14 @@ def test_privileged_gates_on_requester_not_owner(db):
     with pytest.raises(IdentityRejected) as e:
         resolve_job_identity(control, None, requester_id="mallory",
                              owner_username="ops", allow_privileged=True,
-                             privileged_requesters=frozenset({"ops"}))
+                             privileged_requesters=frozenset({"ops"}),
+                             session_authenticated=True)
     assert e.value.reason_code == "ldap_not_configured"  # 특권 우회 안 됨 → resolver None 경로
     # requester가 allowlist에 있으면 root
     out = resolve_job_identity(control, None, requester_id="ops",
                                owner_username="victim", allow_privileged=True,
-                               privileged_requesters=frozenset({"ops"}))
+                               privileged_requesters=frozenset({"ops"}),
+                               session_authenticated=True)
     assert out.privileged and out.uid == 0
 
 
