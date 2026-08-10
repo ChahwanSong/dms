@@ -29,6 +29,24 @@ spec:
         app.kubernetes.io/part-of: dms
     spec:
       serviceAccountName: dms-controller
+      # 40-api.yaml 의 initContainer 와 동일 -- 근거 주석은 그쪽에.
+      initContainers:
+        - name: migrate
+          image: pkg-01:5000/dms:d25
+          imagePullPolicy: IfNotPresent
+          command: ["dms", "migrate"]
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
       containers:
         - name: controller
           image: pkg-01:5000/dms:d25

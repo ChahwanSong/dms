@@ -4,6 +4,8 @@
 # Job specs are immutable). No ServiceAccount needed: migrate() only touches
 # DMS_DATABASE_URL, no k8s API calls (see cli.py: the "migrate" branch never
 # builds an execution_adapter or identity_resolver).
+# 슬라이스 16부터 api/controller initContainer 가 기동 시 자동 실행하므로, 이 Job 은
+# 명시적 실행·복구 수단으로 유지된다(설계 §2.2).
 apiVersion: batch/v1
 kind: Job
 metadata:

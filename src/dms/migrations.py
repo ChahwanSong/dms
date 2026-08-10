@@ -12,7 +12,36 @@ ALL_TABLES = (
 )
 
 
+# PostgreSQL 어드바이저리 락 키(임의 64비트 상수 "DMS\x10"). migrate() 전체를
+# 직렬화하는 전역 락이라 값 자체에 의미는 없다 -- 이 저장소의 유일한 어드바이저리 락
+# 사용처라 충돌도 없다. 바꾸면 구/신 이미지가 서로 다른 락을 잡아 경합이 부활한다.
+MIGRATE_LOCK_KEY = 0x444D5310
+
+
 def migrate(db: Database) -> None:
+    """스키마 적용 진입점(시그니처 불변 -- cli.py 와 테스트 conftest 가 그대로 쓴다).
+
+    initContainer 도입(슬라이스 16 설계 §2.2)으로 api·controller 두 파드가 동시에
+    이걸 돌린다. _ensure_columns 가 "존재 확인 후 ALTER"(비 IF NOT EXISTS)라 동시
+    실행이면 뒤쪽이 42701(column already exists)로 죽는다 -- pg_advisory_lock 으로
+    전 구간을 직렬화한다. psycopg 연결은 autocommit(db.py)이라 락이 트랜잭션 경계와
+    무관하게 세션에 붙는다. SQLite 는 로컬 단일 파일(개발·테스트 전용)이라 no-op.
+    락 획득 실패(연결 단절 등)는 그대로 예외로 올라가 initContainer 를 실패시킨다 --
+    스키마가 불확실한 채 앱이 뜨는 것보다 낫다(설계 §4). one-shot Job
+    (30-migrate-job.yaml)도 같은 경로를 지나므로 함께 안전해진다."""
+    locked = db.dialect == "postgresql"
+    if locked:
+        db.execute("SELECT pg_advisory_lock(:k)", {"k": MIGRATE_LOCK_KEY})
+    try:
+        _apply_migrations(db)
+    finally:
+        if locked:
+            # 예외 경로에서도 반드시 해제(설계 §5) -- 세션 락은 커넥션이 살아 있는 한
+            # 남아, 같은 커넥션의 다음 migrate 를 영원히 기다리게 한다.
+            db.execute("SELECT pg_advisory_unlock(:k)", {"k": MIGRATE_LOCK_KEY})
+
+
+def _apply_migrations(db: Database) -> None:
     auto_pk = ("INTEGER PRIMARY KEY AUTOINCREMENT" if db.dialect == "sqlite"
                else "BIGSERIAL PRIMARY KEY")
     stmts = [

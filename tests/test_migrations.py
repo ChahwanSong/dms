@@ -1,4 +1,6 @@
 """Schema migrations tests — TDD RED/GREEN."""
+import pytest
+
 from dms.db import Database
 from dms.migrations import migrate, ALL_TABLES
 from dms.repositories import Repositories
@@ -43,6 +45,44 @@ class _FakeDb:
 
     def execute(self, sql, params=None):
         self.executed.append(sql)
+
+
+def test_migrate_pg_wraps_schema_in_advisory_lock(monkeypatch):
+    # initContainer 도입으로 api/controller 가 동시에 migrate 를 돌린다 --
+    # _ensure_columns 의 "확인 후 ALTER"가 경합하면 뒤쪽이 42701 로 죽는다(설계 §2.2).
+    # 실 PG 하니스가 없으므로 "락 SQL 이 스키마 적용을 감싸는 순서" 자체를 고정한다.
+    from dms import migrations
+    fake = _FakeDb("postgresql", "bigint")
+    monkeypatch.setattr(migrations, "_apply_migrations",
+                        lambda db: fake.executed.append("SCHEMA"))
+    migrations.migrate(fake)
+    assert fake.executed == ["SELECT pg_advisory_lock(:k)", "SCHEMA",
+                             "SELECT pg_advisory_unlock(:k)"]
+
+
+def test_migrate_pg_releases_lock_on_exception(monkeypatch):
+    # 세션 락은 커넥션이 살아 있는 한 남는다 -- 예외 경로에서 해제를 빼먹으면 같은
+    # 커넥션을 재사용하는 다음 migrate 가 영원히 대기한다(설계 §5).
+    from dms import migrations
+    fake = _FakeDb("postgresql", "bigint")
+
+    def boom(db):
+        raise RuntimeError("column already exists")
+    monkeypatch.setattr(migrations, "_apply_migrations", boom)
+    with pytest.raises(RuntimeError):
+        migrations.migrate(fake)
+    assert fake.executed == ["SELECT pg_advisory_lock(:k)",
+                             "SELECT pg_advisory_unlock(:k)"]
+
+
+def test_migrate_sqlite_issues_no_advisory_lock(monkeypatch):
+    # SQLite 에 pg_advisory_lock 을 치면 즉사한다 -- 방언 분기 자체를 고정한다.
+    from dms import migrations
+    fake = _FakeDb("sqlite", "integer")
+    monkeypatch.setattr(migrations, "_apply_migrations",
+                        lambda db: fake.executed.append("SCHEMA"))
+    migrations.migrate(fake)
+    assert fake.executed == ["SCHEMA"]
 
 
 def test_widen_count_columns_skips_sqlite():

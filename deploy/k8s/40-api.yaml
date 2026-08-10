@@ -48,6 +48,30 @@ spec:
         app.kubernetes.io/part-of: dms
     spec:
       serviceAccountName: dms-api
+      # 스키마 변경 배포가 자동으로 마이그레이션되도록 앱보다 먼저 dms migrate 를
+      # 돌린다(슬라이스 16 설계 §2.2 -- 슬라이스 14·15는 이게 없어 실 500/수동
+      # 재실행이 났다). api·controller 가 동시에 떠도 migrate() 안의 PG 어드바이저리
+      # 락이 직렬화한다. one-shot Job(30-migrate-job.yaml)은 명시적 실행·복구
+      # 수단으로 유지된다. 이미지는 본 컨테이너와 같은 태그를 쓴다 -- 포탈 롤아웃
+      # 패치는 본 컨테이너만 갱신하므로, 매니페스트를 먼저 고치는 배포 관례가 이
+      # 태그의 단일 진실이다(어긋나면 드리프트 배지가 표시한다).
+      initContainers:
+        - name: migrate
+          image: pkg-01:5000/dms:d25
+          imagePullPolicy: IfNotPresent
+          command: ["dms", "migrate"]
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
       containers:
         - name: api
           image: pkg-01:5000/dms:d25
