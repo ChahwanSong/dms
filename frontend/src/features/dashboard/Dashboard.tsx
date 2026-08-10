@@ -67,7 +67,12 @@ export function Dashboard() {
                   <span className="text-muted text-xs truncate grow">
                     {c.image ?? "—"}
                   </span>
-                  {drifted(c) && <StatusPill state="드리프트" variant="bad" />}
+                  {/* neutral 이다: 드리프트는 포탈 롤아웃 직후 반드시 생기는 정상
+                      상태이고, 같은 행의 bad 는 이미 verdict=failed 를 뜻한다.
+                      빨강을 겹치면 정상 롤아웃마다 "고장" 으로 오독돼 알람 피로가
+                      구조적으로 생긴다. 긴급함은 아래 문장(미래형 + 되돌림 결과)이
+                      진다 -- 배지는 눈을 그 문장으로 끌기만 하면 된다. */}
+                  {drifted(c) && <StatusPill state="드리프트" variant="neutral" />}
                   <span className="text-xs tabular-nums shrink-0">
                     {`${c.ready ?? "—"}/${c.desired ?? "—"}`}
                   </span>
