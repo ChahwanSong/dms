@@ -332,7 +332,8 @@ def _widen_count_columns(db):
         return  # SQLite는 INTEGER가 동적 64비트라 넓힐 게 없다(ALTER COLUMN TYPE 미지원이기도 하다).
     for column in ("files_count", "bytes_count"):
         # 멱등성: PostgreSQL은 같은 타입으로의 ALTER TYPE도 허용하지만 매번
-        # ACCESS EXCLUSIVE 락을 잡는다 -- 컨트롤러가 뜰 때마다 그러면 안 되니
+        # ACCESS EXCLUSIVE 락을 잡는다 -- migrate는 배포마다 재실행되는 one-shot
+        # Job(30-migrate-job.yaml)이라 매 배포가 락을 잡으면 안 되니
         # 현재 타입을 먼저 보고 int4일 때만 친다(그래서 두 번째 실행은 no-op).
         rows = db.query(
             """SELECT data_type FROM information_schema.columns
