@@ -93,6 +93,42 @@ test("T6: images가 null이어도 흰 화면이 되지 않는다", async () => {
   expect(await screen.findByRole("heading", { name: "빌드 b1" })).toBeInTheDocument();
 });
 
+test("Pending 빌드는 프리플라이트 캡션을 보여준다", async () => {
+  // 슬라이스 21 §3: Pending 은 이제 "제출 대기"가 아니라 적합성 확인(프로브,
+  // 최대 180s)을 포함한다 -- 별도 상태 기계 없이 캡션 한 줄이 그 사실을 알린다.
+  server.use(
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json(buildRow({ state: "Pending", commit_sha: null, finished_at: null }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: null })),
+  );
+  renderPage();
+  expect(await screen.findByText("적합성 확인(프리플라이트) 포함 — 최대 약 3분")).toBeInTheDocument();
+});
+
+test("종단 빌드에는 프리플라이트 캡션이 없다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () => HttpResponse.json(buildRow({ state: "Succeeded" }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderPage();
+  await screen.findByText("dms-w1");   // 데이터 로드 완료를 기다린 뒤 부재를 단언
+  expect(screen.queryByText(/프리플라이트/)).not.toBeInTheDocument();
+});
+
+test("egress 실패 사유가 '인터넷을 아직 열지 않았을 수 있습니다' 문구로 보인다", async () => {
+  // 설계 §3 의 핵심 문구 -- "운영자가 인터넷을 안 열었다를 즉시 안다"의 실체가
+  // 이 한 줄이다. 원시 코드는 노출하지 않는다(reasonText 매핑 경로).
+  server.use(
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json(buildRow({ state: "Failed", reason_code: "build_node_no_egress" }))),
+    http.get("/api/admin/builds/b1/log", () =>
+      HttpResponse.json({ build_id: "b1", log: "unreachable_443=github.com\n" })),
+  );
+  renderPage();
+  expect(await screen.findByText(/인터넷을 아직 열지 않았을 수 있습니다/)).toBeInTheDocument();
+  expect(screen.queryByText("build_node_no_egress")).not.toBeInTheDocument();
+});
+
 test("종단 빌드(Succeeded)는 로그를 더 폴링하지 않는다", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let logCalls = 0;

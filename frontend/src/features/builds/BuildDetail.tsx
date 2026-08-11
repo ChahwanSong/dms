@@ -26,6 +26,12 @@ export function BuildDetail() {
               <StatusPill state={b?.state ?? "—"} variant={b ? buildPillVariant(b.state) : undefined} />
               <span className="text-muted">태그 {b?.tag ?? "—"}</span>
             </div>
+            {/* 슬라이스 21 §3: Pending 은 적합성 확인(프리플라이트 프로브, 최대
+                DMS_BUILD_PREFLIGHT_TIMEOUT_SECONDS=180s)을 포함한다 -- 별도 상태
+                기계는 만들지 않는다. 실패는 어차피 고유 사유 코드로 드러난다. */}
+            {b?.state === "Pending" && (
+              <p className="text-muted">적합성 확인(프리플라이트) 포함 — 최대 약 3분</p>
+            )}
             <p>저장소: <span className="text-ink">{b?.repo_url ?? "—"}</span></p>
             <p>git ref: <span className="text-ink">{b?.git_ref ?? "—"}</span></p>
             <p>commit: <span className="text-ink">{b?.commit_sha ? b.commit_sha.slice(0, 8) : "—"}</span></p>
