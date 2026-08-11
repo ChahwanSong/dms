@@ -11,6 +11,15 @@ from .parsers import (parse_nsync_counts, parse_rm_counts, parse_scan_counts,
 
 _SSH_READY_MAX_ATTEMPTS = 90  # legacy _mpiexec_line 이식: 워커당 ~90s 상한
 
+# 슬라이스 24 §2.1 층3: 러너가 exec 할 수 있는 도구의 최종 allowlist.
+# dms 패키지의 config.AGENT_TOOL_NAMES 와 같은 값이어야 하지만 dms_job_runner 는
+# dms 를 import 하지 않는 독립 패키지(잡 이미지에 단독 설치)라 여기 중복 정의한다
+# -- 동일성은 tests/test_job_runner_runner.py 의 계약 테스트가 강제한다.
+# rank.sh 가 `exec {tool}` 이라 명령 이름 자체가 tool 값이다: 층1(스테퍼)·층2
+# (tool_argv)가 뚫려도 -- 이미 제출된 매니페스트/env 의 사후 변조까지 포함해 --
+# 이 층만은 실행을 막는다.
+ALLOWED_TOOLS = ("dscan", "dsync", "nsync", "drm")
+
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
             make_executable=lambda path: None) -> int:
@@ -23,6 +32,16 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     procs_per_node = max(1, int(env.get("DMS_JR_PROCESSES_PER_NODE", process_count)))
     argv = json.loads(env["DMS_JR_ARGV"])
     tool = env["DMS_JR_TOOL"]
+
+    if tool not in ALLOWED_TOOLS:
+        # exec 은 물론 어떤 부작용(passwd 물질화·ssh 키 복사·chown)도 시작하기
+        # 전에 끊는다. 마커는 grep 가능한 한 단어 -- 층3 발동 자체가 층1·2 가
+        # 뚫렸다는 조사 신호다(설계 §4). summary 는 3키 계약 유지: 모름은 null.
+        print(f"DMS_JR_UNKNOWN_TOOL tool={tool!r} allowed={ALLOWED_TOOLS}",
+              file=sys.stderr)
+        write_text(f"{artifact_dir}/summary.json",
+                   json.dumps({"returncode": 1, "files": None, "bytes": None}))
+        return 1
 
     # 1. identity 물질화 (launcher 자신의 /etc/passwd)
     write_text("/etc/passwd", passwd_line(username, uid, gid, home) + "\n", append=True)

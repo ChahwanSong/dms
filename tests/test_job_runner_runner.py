@@ -1,5 +1,5 @@
 import json
-from dms_job_runner.runner import run_job
+from dms_job_runner.runner import _build_summary, run_job
 
 
 class _Recorder:
@@ -183,12 +183,15 @@ def test_run_job_dscan_summary_fail_soft_when_report_missing(tmp_path):
     assert _summary(rec) == {"returncode": 3, "files": None, "bytes": None}
 
 
-def test_run_job_unknown_tool_summary_is_nulls():
-    # 미지 도구는 파싱 규칙이 없다 -- 출력이 있어도 (None, None)으로 강등(설계 §3)
-    rec = _Recorder(rc=0, stdout=DSYNC_STDOUT)
-    rc = _run(rec, _env(DMS_JR_TOOL="dcp"))
-    assert rc == 0
-    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None}
+def test_build_summary_unknown_tool_folds_to_nulls():
+    # 미지 도구는 파싱 규칙이 없다 -- 출력이 있어도 (None, None)으로 강등(설계 §3).
+    # 슬라이스 24 층3 전에는 이걸 run_job 으로 확인했지만(tool="dcp" 가 끝까지
+    # 돌아 rc 0), 이제 allowlist 가 그 경로를 exec 전에 끊는다. 그래도
+    # _build_summary 의 fold 분기는 남아 있으므로(도구별 elif 사슬의 기본값)
+    # 순수 함수 층에서 계속 못박는다 -- 지우면 "미지 도구를 dsync 파서로
+    # 보내는" 회귀를 아무도 못 잡는다.
+    assert _build_summary("dcp", DSYNC_STDOUT, 0, "/tmp/nonexistent-artifacts") == {
+        "returncode": 0, "files": None, "bytes": None}
 
 
 def test_run_job_preview_phase_uses_same_summary_contract():
@@ -364,3 +367,32 @@ def test_run_job_nsync_summary_uses_nsync_parser():
     rc = _run(rec, _nsync_env(), wait_hostfile=_nsync_wait_hostfile([]))
     assert rc == 0
     assert _summary(rec) == {"returncode": 0, "files": 10, "bytes": 50}
+
+
+# ---- 슬라이스 24 §2.1 층3: allowlist 밖 tool 은 exec 없이 거부 ----
+
+def test_unknown_tool_is_refused_before_any_side_effect(capsys):
+    # rank.sh 는 `exec {tool} {argv}` 다 -- 명령 이름 자체가 tool 값이라(§1-3)
+    # DB 에 "sh" 를 쓸 수 있는 자는 사용자 통제 파일을 워커 노드에서 요청자
+    # 신원의 스크립트로 실행시킬 수 있다. 층1·2 는 제어면의 방어고, 이 층만이
+    # "이미 제출된 매니페스트/env 의 사후 변조"까지 막는다 -- 그래서 부작용
+    # (passwd append, ssh 복사, chown, mpirun)이 하나도 시작되기 전에 끊어야 한다.
+    rec = _Recorder()
+    rc = _run(rec, _env(DMS_JR_TOOL="sh", DMS_JR_ARGV=json.dumps(["/etc"])))
+    assert rc != 0
+    assert rec.ran == []        # mpirun 은 물론 어떤 명령도 안 돌았다
+    assert rec.appends == []    # /etc/passwd 물질화도 없다
+    # summary 는 3키 계약 유지(설계 §4) -- 모름(files/bytes)은 null 이지 0 이 아니다.
+    assert _summary(rec) == {"returncode": 1, "files": None, "bytes": None}
+    # 층3 발동은 층1·2 가 뚫렸다는 조사 신호 -- grep 가능한 마커로 남긴다.
+    assert "DMS_JR_UNKNOWN_TOOL" in capsys.readouterr().err
+
+
+def test_runner_allowlist_matches_the_control_plane_tool_names():
+    # dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 튜플을 중복 정의한다
+    # (설계 §2.1 층3). 두 값이 갈라지면 다섯째 도구를 추가했을 때 "제어면은
+    # 아는데 러너가 거부"하는 조용한 실패가 된다 -- 이 저장소 테스트만이 둘을
+    # 잇는다(테스트 층은 독립 패키지 규칙의 밖이다).
+    from dms.config import AGENT_TOOL_NAMES
+    from dms_job_runner.runner import ALLOWED_TOOLS
+    assert ALLOWED_TOOLS == AGENT_TOOL_NAMES
