@@ -93,3 +93,46 @@ def test_dms_solo_build_case_has_no_build_arg():
     mfu_block = re.search(r"dms-mpifileutils\)(.*?);;", script, re.S).group(1)
     assert "--build-arg" not in dms_block
     assert "--build-arg" not in mfu_block
+
+
+# ---- 슬라이스 21 §2.2/§2.3/§2.4: 리소스 봉투 + dms-build 클래스 + sizeLimit ----
+
+def test_build_container_resource_envelope_pins_the_design_numbers():
+    # 수치는 전부 워커 실측(allocatable 1800m/1355Mi/36.4GB) 역산이다(설계 §2.2):
+    # - cpu limit 1000m 이 실질 보호막 -- 빌드가 날뛰어도 잡+제어면 몫 800m 이 남는다.
+    # - memory requests 128Mi 는 일부러 작게 -- 실압박에서 빌드가 항상 "requests
+    #   초과" 축출 그룹에 들어 ②priority(dms-build 10)가 방향을 가른다.
+    # - memory limit 1Gi 는 노드 eviction 전에 빌드가 먼저 혼자 OOM-kill 되는
+    #   의도된 1차 방어(M8 재발 방지).
+    c = _pod()["spec"]["containers"][0]
+    assert c["resources"] == {
+        "requests": {"cpu": "250m", "memory": "128Mi", "ephemeral-storage": "10Gi"},
+        "limits": {"cpu": "1000m", "memory": "1Gi", "ephemeral-storage": "12Gi"},
+    }
+
+
+def test_build_pod_uses_the_dms_build_priority_class():
+    # 미적용 클러스터에서는 admission 거절이다 -- Task 1 매니페스트가 먼저 apply
+    # 돼야 한다(플랜 이후 절의 배포 순서).
+    assert _pod()["spec"]["priorityClassName"] == "dms-build"
+
+
+def test_sizelimit_is_10gi_and_not_above_the_eph_limit():
+    # §2.4: 20Gi 는 실측 여유(eviction 임계 차감 후 15.7GB)보다 커서 sizeLimit
+    # 이전에 노드 압박 eviction(같은 노드 파드 전체가 후보)이 먼저 온다 -- 10Gi 로
+    # 내려 레이어 폭주 시 빌드 파드만 축출되게 한다. eph limits(12Gi)는 emptyDir
+    # 사용량 포함 파드 단위 집행이라 sizeLimit ≤ limits 여야 sizeLimit 이 먼저
+    # 발화한다(관계 단언).
+    pod = _pod()
+    assert pod["spec"]["volumes"][0]["emptyDir"]["sizeLimit"] == "10Gi"
+    eph_limit = pod["spec"]["containers"][0]["resources"]["limits"]["ephemeral-storage"]
+    assert 10 <= int(eph_limit.removesuffix("Gi"))
+
+
+def test_scheduling_shape_is_unchanged_nodeselector_and_default_scheduler():
+    # §2.1: nodeSelector+default-scheduler 유지 -- requests 를 얹어 스케줄러
+    # Fit(노드 여유 검사)을 공짜로 사고, 지정 노드 보장은 hostname nodeSelector 가
+    # 그대로 한다. (현행 고정 가드 -- Step 2 에서 즉시 PASS 가 맞다.)
+    pod = _pod()
+    assert pod["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "dms-w1"}
+    assert "schedulerName" not in pod["spec"]
