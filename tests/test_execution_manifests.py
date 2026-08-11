@@ -1,3 +1,5 @@
+import pytest
+
 from dms.execution import JobSpec
 from dms.execution_manifests import render_tool_flags, tool_argv, build_volcano_job, build_preflight_pod
 
@@ -365,3 +367,26 @@ def test_nsync_workers_get_task_scoped_anti_affinity():
     launcher = next(t for t in m["spec"]["tasks"] if t["name"] == "launcher")
     assert "metadata" not in launcher["template"]
     assert "affinity" not in launcher["template"]["spec"]   # nsync 런처는 원래 affinity 없음
+
+
+# ---- 슬라이스 24 §2.1 층2: 미지 도구는 drm 꼴 argv 로 흘러가면 안 된다 ----
+
+def test_unknown_tool_argv_raises_instead_of_falling_through_to_drm():
+    # 현행 마지막 분기는 주석 `# drm` 짜리 fall-through 다 -- dscan/dsync/nsync 가
+    # 아닌 **모든** 문자열이 맨몸 절대경로 argv(= drm 꼴)를 받는다(실측: "dwalk"
+    # -> ['/cephfs/x']). 미래의 다섯째 도구를 placement 에 추가하고 여기를 잊으면
+    # 그 도구가 경로 positional 을 삭제 대상으로 해석할 때 스캔 의도가 삭제가
+    # 된다(설계 §2.1 시나리오 a). 층1(스테퍼)이 앞서 막지만, 순수 함수 스스로도
+    # 조용히 틀리면 안 된다.
+    with pytest.raises(ValueError) as e:
+        tool_argv(_spec(operation="scan", tool="dwalk"),
+                  abs_paths={"target": "/cephfs/x"})
+    assert "dwalk" in str(e.value)   # 어댑터 submit_failed 의 detail 로 보존된다
+
+
+def test_drm_dryrun_argv_is_unchanged_by_the_explicit_branch():
+    # 명시 분기 치환의 무회귀 앵커(기존 test_rm_argv 는 dryrun=False 만 고정한다).
+    spec = _spec(operation="rm", tool="drm", dryrun=True,
+                 options={"recursive": True})
+    assert tool_argv(spec, abs_paths={"target": "/cephfs/junk"}) == [
+        "--dryrun", "/cephfs/junk"]

@@ -51,8 +51,14 @@ def tool_argv(spec, *, abs_paths: dict) -> list[str]:
     if spec.tool in ("dsync", "nsync"):
         return [*flags, *_auto_chown(spec), *dry,
                 abs_paths["source"], abs_paths["destination"]]
-    # drm
-    return [*flags, *dry, abs_paths["target"]]
+    if spec.tool == "drm":
+        return [*flags, *dry, abs_paths["target"]]
+    # 슬라이스 24 §2.1 층2: 여기가 fall-through 였다 -- dscan/dsync/nsync 가 아닌
+    # 모든 문자열이 drm 꼴 argv(맨몸 절대경로)를 받았다. 미지 도구는 argv 를
+    # 지어내지 않고 던진다. 어댑터의 blanket except 가 submit_failed(detail=도구명)
+    # 로 접으므로 조용히 사라지지 않고, 층1(stepper unknown_tool)이 앞서므로
+    # 정상 운영에선 여기 도달 자체가 회귀 신호다(설계 §4).
+    raise ValueError(f"unknown tool for argv: {spec.tool!r}")
 
 
 def _auto_chown(spec) -> list[str]:

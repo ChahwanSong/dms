@@ -291,3 +291,17 @@ def test_volumes_sync_two_storages():
     paths = {v["hostPath"]["path"] for v in volumes}
     assert "/cephfs-third" in paths, f"/cephfs-third not in {paths}"
     assert "/cephfs-secondary" in paths, f"/cephfs-secondary not in {paths}"
+
+
+# ---- 슬라이스 24 §2.1 층2: raise 가 submit_failed 로 접히되 조용하지 않다 ----
+
+def test_unknown_tool_submit_folds_into_submit_failed_with_the_tool_in_detail():
+    # 층2 raise 는 어댑터 blanket except 가 submit_failed 로 접는다(설계 §4) --
+    # 사유는 층1(unknown_tool)보다 거칠지만 detail 이 원인을 보존하고, 여기 도달
+    # 자체가 층1이 뚫렸다는 회귀 신호다. k8s 에는 아무것도 만들지 않아야 한다.
+    k8s = _FakeK8s()
+    with pytest.raises(ExecutionError) as e:
+        _adapter(k8s).submit(_spec(tool="dwalk"))
+    assert e.value.reason_code == "submit_failed"
+    assert "dwalk" in e.value.detail
+    assert k8s.created == []
