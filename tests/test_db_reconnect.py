@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from dms.db import Database
+from dms.db import DB_CONNECT_TIMEOUT_SECONDS, Database
 
 
 # psycopg 3 예외 계층의 최소 대역(3.3.4 실증 §1-3: Operational/Programming 은
@@ -354,3 +354,42 @@ def test_wire_reconnect_event_writes_a_db_reconnected_event(db):
         "SELECT component, severity, event_type, message FROM events")
     assert row == {"component": "db", "severity": "warning",
                    "event_type": "db_reconnected", "message": "dialect=sqlite count=3"}
+
+
+# ---- 연결 타임아웃: 자기 종료 장치가 실제로 발화하게 만드는 전제 ----
+
+def test_postgres_connect_uses_a_bounded_connect_timeout(monkeypatch):
+    # 슬라이스 22 실증이 찾은 결함: connect 에 타임아웃이 없으면 psycopg 가 내부
+    # 재시도로 오래 매달리고, 단일 커넥션 RLock 뒤라 readyz 핸들러가 락을 쥔 채
+    # 응답을 못 한다 -- 프로브가 503 대신 **타임아웃**하므로 연속 실패 카운터가
+    # except 분기에 도달하지 못하고 자기 종료(§2.4)가 영원히 발화하지 않는다.
+    # 라이브에서 실제로 관측했다(probe context deadline exceeded x35 over 11m).
+    # 유한 타임아웃이 그 사슬의 첫 고리를 끊는다.
+    seen = {}
+    mod = _fake_psycopg_module()
+
+    def connect(url, **kw):
+        seen["url"] = url
+        seen["kw"] = kw
+        return _FakePgConn()
+
+    mod.connect = connect
+    mod.rows = types.SimpleNamespace(dict_row=object())
+    monkeypatch.setitem(sys.modules, "psycopg", mod)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", mod.rows)
+    Database._open("postgresql://u@h/db")
+    assert seen["kw"]["connect_timeout"] == DB_CONNECT_TIMEOUT_SECONDS
+    assert DB_CONNECT_TIMEOUT_SECONDS > 0
+
+
+def test_connect_timeout_is_not_overridden_when_the_url_sets_one(monkeypatch):
+    # 운영자가 URL 로 명시했으면 그 값이 이긴다 -- 우리 기본값이 조용히 덮으면
+    # 튜닝이 안 먹는다.
+    seen = {}
+    mod = _fake_psycopg_module()
+    mod.connect = lambda url, **kw: (seen.update(kw), _FakePgConn())[1]
+    mod.rows = types.SimpleNamespace(dict_row=object())
+    monkeypatch.setitem(sys.modules, "psycopg", mod)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", mod.rows)
+    Database._open("postgresql://u@h/db?connect_timeout=30")
+    assert "connect_timeout" not in seen

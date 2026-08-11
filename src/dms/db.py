@@ -10,6 +10,15 @@ from datetime import datetime, timedelta, timezone
 
 _NAMED = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 
+# PostgreSQL 접속 시도의 상한(초). 슬라이스 22 실증(2026-08-11)이 찾은 결함:
+# 타임아웃이 없으면 libpq 가 TCP 재시도로 수 분씩 매달리고, 단일 커넥션 RLock
+# 뒤라 /readyz 핸들러가 락을 쥔 채 응답을 못 한다 -- kubelet 프로브가 503 대신
+# **타임아웃**하므로 연속 실패 카운터가 except 분기에 닿지 못하고 자기 종료
+# (§2.4)가 영원히 발화하지 않는다(실측: probe context deadline exceeded, 11분간
+# 35회). 5초는 프로브 주기(10s)보다 짧아 매 프로브가 반드시 503 으로 끝나게
+# 만드는 값이다 -- 이 값을 10 이상으로 올리면 그 성질이 깨진다.
+DB_CONNECT_TIMEOUT_SECONDS = 5
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -69,8 +78,13 @@ class Database:
         if url.startswith("postgresql://") or url.startswith("postgres://"):
             import psycopg
             from psycopg.rows import dict_row
-            return (psycopg.connect(url, row_factory=dict_row, autocommit=True),
-                    "postgresql")
+            kwargs = {"row_factory": dict_row, "autocommit": True}
+            # URL 이 이미 지정했으면 그 값이 이긴다 -- 운영자 튜닝을 조용히 덮지
+            # 않는다. libpq 는 kwargs 를 URL 파라미터보다 우선하므로 여기서 안
+            # 걸러내면 명시값이 무시된다.
+            if "connect_timeout=" not in url:
+                kwargs["connect_timeout"] = DB_CONNECT_TIMEOUT_SECONDS
+            return psycopg.connect(url, **kwargs), "postgresql"
         raise ValueError(f"unsupported database url: {url}")
 
     def _adapt(self, sql: str) -> str:
