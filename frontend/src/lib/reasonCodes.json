@@ -27,6 +27,7 @@
   "invalid_priority", "invalid_denylist_subject_type", "policy_not_found",
   "storage_exists", "storage_in_use", "storage_not_found", "node_not_found",
   "build_node_not_set", "build_in_progress", "unknown_image", "invalid_git_ref",
+  "invalid_repo_url", "build_node_report_stale",
   "build_not_found", "submit_failed", "poll_failed", "unknown_build_node",
   "invalid_build_ref", "rollout_in_progress", "patch_failed", "observe_failed",
   "rollout_failed", "rollout_timeout", "rollout_aborted", "workload_not_found",

@@ -3,6 +3,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from ..build_manifests import repo_host
 from ..build_runner import BUILD_REF_PREFIX
 from ..domain import DomainValidationError
 from ..repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
@@ -50,6 +51,26 @@ def submit_build(body: BuildBody, request: Request,
     ref = (body.git_ref or "").strip()
     if not _REF_RE.fullmatch(ref) or ".." in ref or ref.startswith("-"):
         raise HTTPException(status_code=422, detail="invalid_git_ref")
+    settings = request.app.state.settings
+    repo_url = body.repo_url or settings.build_repo_url
+    # 슬라이스 21 §2.5 동기 ①: 호스트를 못 뽑으면 egress 프로브 대상을 만들 수
+    # 없다 -- 프로브 파드를 띄우기 전에 즉답한다. 프로브 매니페스트와 같은 파서
+    # (build_manifests.repo_host)를 쓴다: 두 곳이 다르게 파싱하면 "제출은
+    # 통과했는데 프로브를 못 만드는" 창이 생긴다. scp 형(git@host:path)도 여기서
+    # 걸린다 -- 명시 거절이지 지원 축소가 아니다(빌드 스크립트는 https 전제).
+    if repo_host(repo_url) is None:
+        raise HTTPException(status_code=422, detail="invalid_repo_url")
+    # 슬라이스 21 §2.5 동기 ②: 빌드 노드 리포트가 stale 이면 노드 다운일 공산이
+    # 크다 -- 비동기 프로브(최대 180s 창)까지 가지 않고 제출 시점에 즉답한다.
+    # fresh 판정은 agents.list_nodes 의 그것(reported_at > now - stale) 재사용 --
+    # 판정을 여기서 복제하면 노드 화면과 다른 답을 주는 두 번째 진실이 생긴다.
+    # egress·디스크는 동기로 검사하지 않는다: API 파드는 다른 노드라 무의미하다.
+    fresh = {n["node_name"]
+             for n in repos.agents.list_nodes(
+                 stale_seconds=settings.agent_report_stale_seconds)
+             if n["fresh"]}
+    if node not in fresh:
+        raise HTTPException(status_code=422, detail="build_node_report_stale")
     # 빠른 거절(fail-fast)일 뿐이다 -- 진짜 "동시에 하나만" 가드는
     # repos.builds.create()의 트랜잭션 안에 있다(builds.py 주석 참고). 이 체크가
     # 없어도 정합성은 깨지지 않지만, 있으면 트랜잭션을 시작하기도 전에 흔한 경우를
@@ -58,7 +79,9 @@ def submit_build(body: BuildBody, request: Request,
         raise HTTPException(status_code=409, detail="build_in_progress")
     try:
         build_id = repos.builds.create(
-            repo_url=body.repo_url or request.app.state.settings.build_repo_url,
+            # 위에서 확정한 값 재사용 -- 검증한 값과 저장하는 값이 갈리면
+            # "검증은 통과했는데 프로브를 못 만드는" 창이 생긴다.
+            repo_url=repo_url,
             git_ref=ref, images=list(body.images), node_name=node,
             actor=audit_actor(identity))
     except DomainValidationError as e:

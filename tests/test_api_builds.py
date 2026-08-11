@@ -187,3 +187,55 @@ def test_control_state_accepts_build_node(client):
                          "build_node_name": "dms-w2"},
                    headers=ADMIN)
     assert r.status_code == 200 and r.json()["build_node_name"] == "dms-w2"
+
+
+# ---- 슬라이스 21 §2.5 동기 검증: repo_url 호스트 / 빌드 노드 리포트 신선도 ----
+
+def test_unparseable_repo_url_is_rejected(client):
+    # scp 형(git@host:path)은 urlsplit 이 호스트를 못 뽑는다 -- egress 프로브
+    # 대상을 만들 수 없으므로 파드를 띄우기 전에 즉답으로 거른다.
+    _set_build_node(client)
+    r = client.post("/api/admin/builds",
+                    json={"git_ref": "main", "images": ["dms"],
+                          "repo_url": "git@github.com:ChahwanSong/dms.git"},
+                    headers=ADMIN)
+    assert r.status_code == 422 and r.json()["detail"] == "invalid_repo_url"
+
+
+def test_default_repo_url_from_settings_passes_host_validation(client):
+    # repo_url 생략 시 settings.build_repo_url(https://github.com/...)이 쓰인다 --
+    # 기본값 경로가 새 검증에 걸리면 기존 제출 흐름 전체가 퇴행한다.
+    _set_build_node(client)
+    r = client.post("/api/admin/builds", json={"git_ref": "main", "images": ["dms"]},
+                    headers=ADMIN)
+    assert r.status_code == 202
+
+
+def test_stale_build_node_report_is_rejected_at_the_exact_threshold(client):
+    # fresh 판정은 reported_at > (now - stale_seconds) 엄격 부등호다(agents.py
+    # list_nodes) -- 정확히 문턱 나이의 리포트는 stale 이다. 경계값을 고정해 두면
+    # 부등호가 >= 로 바뀌는 회귀도 잡힌다(라우트 호출 시점의 now 는 ingest 시점
+    # 이상이므로 어느 쪽이든 문턱 리포트는 stale 로 판정돼야 한다).
+    from dms.db import iso_plus, utc_now_iso
+    node = "dms-w1"
+    stale = client.app.state.settings.agent_report_stale_seconds
+    client.app.state.repos.agents.ingest(node, {})   # PUT 검증(node_exists) 통과용
+    r = client.put("/api/admin/control-state",
+                   json={"maintenance": False, "drain": False, "reason": None,
+                         "build_node_name": node},
+                   headers=ADMIN)
+    assert r.status_code == 200
+    # 마지막 리포트를 정확히 문턱 나이로 교체 -- ingest 는 노드당 1행 교체라
+    # agent_nodes 의 유일 행이 이 시각이 된다.
+    client.app.state.repos.agents.ingest(
+        node, {}, reported_at=iso_plus(utc_now_iso(), -stale))
+    r = client.post("/api/admin/builds", json={"git_ref": "main", "images": ["dms"]},
+                    headers=ADMIN)
+    assert r.status_code == 422 and r.json()["detail"] == "build_node_report_stale"
+
+
+def test_fresh_build_node_report_passes_the_stale_gate(client):
+    _set_build_node(client)   # ingest 가 지금 막 리포트를 넣는다 -- fresh
+    r = client.post("/api/admin/builds", json={"git_ref": "main", "images": ["dms"]},
+                    headers=ADMIN)
+    assert r.status_code == 202

@@ -115,6 +115,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_in_progress: "이미 진행 중인 빌드가 있습니다",
   unknown_image: "빌드할 이미지를 선택해 주세요",
   invalid_git_ref: "git ref 형식이 올바르지 않습니다",
+  // 슬라이스 21 동기 검증 2종(제출 시 422). reasonCodes.json 과 같은 커밋.
+  invalid_repo_url: "저장소 URL에서 호스트를 읽을 수 없습니다 — https://호스트/경로 형식으로 입력하세요",
+  build_node_report_stale: "빌드 노드의 에이전트 리포트가 오래되었습니다 — 노드가 내려갔을 수 있습니다",
   build_not_found: "빌드를 찾을 수 없습니다",
   build_failed: "빌드가 실패했습니다 — 로그를 확인하세요",
   submit_failed: "빌드 파드를 만들지 못했습니다",
