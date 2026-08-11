@@ -70,11 +70,10 @@ class JobStepper:
         # job["tool"]은 실행 파일 이름(dscan/dsync/nsync/drm)이지 정책 키(scan/dsync/
         # nsync/rm)가 아니다 -- planner.py가 policy를 조회할 때 쓰는 것과 동일한
         # TOOL_TO_POLICY 매핑을 거쳐야 scan/rm 잡의 정책을 정확히 찾는다.
-        # 알 수 없는 tool은 정책 조회를 KeyError로 터뜨리는 대신 "타임아웃 없음"으로
-        # 다룬다 — 여기서 raise하면 그 잡은 매 틱 같은 예외로 스텝이 막혀 영구히 낀다.
-        policy_key = TOOL_TO_POLICY.get(job["tool"])
-        policy = (self._repos.control.get_policy(policy_key)
-                  if policy_key is not None else None)
+        # 미지 tool 은 _step_one 층1 가드(슬라이스 24)가 이미 종단시켰으므로 여기서
+        # 직접 인덱싱해도 KeyError 불능이다. policy None 은 이제 "정책 행이 지워진"
+        # 운영 조작뿐이라 크래시 대신 타임아웃 없음으로 관용한다(기존 동작 유지).
+        policy = self._repos.control.get_policy(TOOL_TO_POLICY[job["tool"]])
         if policy is None:
             timeout = None
         elif phase == "execution":
@@ -121,9 +120,40 @@ class JobStepper:
                 request_id=job.get("request_id"))
         return state
 
+    # FAILED 로 갈리는 상태: 실행 자원이 이미 붙었다(execution vcjob 제출 이후).
+    # 그 전 단계는 REJECTED -- preflight_submit_failed→REJECTED /
+    # execution_submit_failed→FAILED 의 기존 대칭을 그대로 따른다(설계 §2.1).
+    _EXEC_STATES = (DataJobState.EXECUTING.value, DataJobState.RUNNING.value)
+
+    def _fail_closed(self, job, *, reason_code):
+        """신뢰 경계가 깨진 잡(미지 tool·스텝 시점 스토리지 결측)의 종단 처리.
+
+        살아 있을 수 있는 phase_refs 는 _reclaim_if_terminal 관례대로 best-effort
+        terminate 하고, 실패는 terminate_failed 이벤트로 남긴다 -- 고아 리소스를
+        조용히 두지 않는다(설계 §4). 이미 끝난 파드의 terminate 는 무해하다."""
+        target = (DataJobState.FAILED if job["state"] in self._EXEC_STATES
+                  else DataJobState.REJECTED)
+        for ref in (job["phase_refs"] or {}).values():
+            try:
+                self._exec.terminate(ref)
+            except ExecutionError as exc:
+                self._repos.observability.record_event(
+                    component="stepper", severity="warning",
+                    event_type="terminate_failed", message=exc.reason_code,
+                    payload={"ref": ref}, request_id=job.get("request_id"))
+        self._finalize(job, target, reason_code=reason_code)
+        return target.value
+
     def _step_one(self, job) -> str:
+        # 슬라이스 24 §2.1 층1: tool 의 유일한 정상 원천은 placement 의 리터럴
+        # 4종이고 create_job 은 무검증 INSERT 다(§1-1) -- DB 가 신뢰 경계다.
+        # 미지 tool 이 층2 이전의 fall-through 를 타면 drm 꼴 argv(파괴적)로
+        # 실행되므로 제출 전에 종단시킨다. 이 가드로 _build_spec 의 "미지 tool ->
+        # 타임아웃 없음" 관용 분기는 도달 불능이 되어 제거했다 -- 그 주석이
+        # 걱정한 "매 틱 예외로 영구히 낀 잡"은 종단이라 애초에 생기지 않는다.
+        if job["tool"] not in TOOL_TO_POLICY:
+            return self._fail_closed(job, reason_code="unknown_tool")
         state = job["state"]
-        jid = job["job_id"]
         if state == DataJobState.PENDING.value:
             return self._submit_preflight(job)
         if state == DataJobState.PREFLIGHT.value:
