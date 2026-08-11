@@ -14,6 +14,8 @@ venv/
 .playwright-cli/
 .superpowers
 output/
+# e2e 러너 산출물(트레이스·스크린샷) -- 실패 디버깅용이지 형상관리 대상이 아니다
+frontend/test-results/
 
 # scratch UI screenshots dropped in repo root during manual testing
 /*.png
