@@ -342,12 +342,18 @@ phase 관측을 썼다 — 추가 k8s 호출 0, **RBAC 변경 0**, 계약 테스
 
 ### 슬라이스 21 잔여 (다음 작업 리스트로)
 
-1. **미실행 실증 2건** — 설계 §6-5 디스크 부족(`build_node_disk_low`), §6-6 레지스트리
-   차단(`build_registry_unreachable`). 단위 테스트로만 덮였다. 재현 방법은 확인돼 있다:
-   디스크는 빌드 노드에 큰 파일을 만들어 공식(`avail ≥ 0.15·total + 12GiB`) 아래로
-   내리고, 레지스트리는 `iptables -I FORWARD -p tcp --dport 5000 -j REJECT`(파드
-   egress 를 막아야 한다 — OUTPUT 은 노드 자신의 트래픽만 걸린다. 슬라이스 21 실증에서
-   이 차이로 한 번 헛짚었다).
+1. ✅ **미실행 실증 2건 — 완료(2026-08-11)**. 둘 다 **45초** 만에 각자의 사유 코드로
+   실패했고 로그에 실측값이 남았다: `build_node_disk_low`
+   (`avail_bytes=17918570496 need_bytes=18957493248`, 노드에 3.5GB 파일을 만들어 공식
+   아래로 내림), `build_registry_unreachable`(`unreachable_registry=pkg-01:5000`,
+   `iptables -I FORWARD -p tcp --dport 5000 -j REJECT`). **세 사유 코드(egress·disk·
+   registry)가 각각 구분되어** 나오는 것을 확인했다. 규칙 제거 후 대조 빌드가
+   `pushed pkg-01:5000/dms:b2d3749d6` 로 성공해 원상 복구도 확인했다.
+   재현 시 주의(실증에서 헛짚고 배운 것): **파드 egress 는 `FORWARD` 로 막아야 한다.**
+   `OUTPUT` 은 노드 자신이 만든 트래픽만 걸리므로 파드는 그대로 나간다.
+   덤으로 `build_node_report_stale` 도 의도치 않게 실증됐다 — API 가 90분간 불능이던
+   동안 에이전트 리포트가 수집되지 못해 전 노드가 stale 이 됐고 제출이 422 로 거절됐다
+   (§1 슬라이스 22 후보 참고).
 2. **`build_failed` 세분화** — OOMKilled(memory limit 1Gi)와 sizeLimit 축출이 파드
    phase Failed 로 접혀 전부 `build_failed` 가 된다(설계 §4 가 한계로 명시). 로그가
    급단절된 build_failed 를 만나면 운영자가 OOM/축출을 의심해야 하는 상태 — 파드
