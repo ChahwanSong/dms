@@ -1,8 +1,12 @@
 import { defineConfig } from "@playwright/test";
 
-// e2e 러너 설정. globalSetup/Teardown(풀스택 부팅·시드)은 다음 태스크가 배선한다.
+// e2e 러너 설정.
 export default defineConfig({
   testDir: "./e2e",
+  // 풀스택 부팅·시드. setup 이 throw 하면 스위트는 한 건도 돌지 않고 러너가
+  // 비0 으로 죽는다 -- 부팅 실패를 skip 으로 눙치지 않기 위한 배선이다.
+  globalSetup: "./e2e/harness/global-setup.ts",
+  globalTeardown: "./e2e/harness/global-teardown.ts",
   workers: 1,
   fullyParallel: false, // 단일 sqlite 상태를 공유하므로 병렬 금지
   retries: 0, // 플레이크를 재시도로 숨기지 않는다
