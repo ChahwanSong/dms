@@ -326,16 +326,26 @@ class DataJobsRepository:
                 ORDER BY updated_at ASC, job_id ASC LIMIT :n""", params)
         return [self._hydrate(r) for r in rows]
 
-    def terminal_jobs_with_live_request(self):
-        """잡은 터미널인데 그 request가 아직 비터미널인 (job_id, request_id, state) 목록.
-        컨트롤러 크래시 등으로 finalize_from_job이 누락된 고아를 찾아 복구하기 위함."""
+    def terminal_jobs_with_live_request(self, *, limit: int = 200):
+        """잡은 터미널인데 그 request가 아직 비터미널인 (job_id, request_id, state)
+        목록. 컨트롤러 크래시 등으로 finalize_from_job이 누락된 고아 복구용.
+
+        슬라이스 24 §2.3: 오래된순 + LIMIT 200 -- 같은 파일
+        terminal_jobs_older_than 의 선례 미러다. 무제한 전량 JOIN 은 preview 만료
+        직후 크래시(expire_previews 가 한 호출로 N 건을 종단시키고 finalize 는
+        행별 후속) 같은 대량 고아에서 단일 스레드 컨트롤러의 한 틱을 통째로
+        먹는다. finalize 가 멱등이고 처리된 행은 술어(request 비종단)에서 빠지므로
+        틱마다 200건씩 반드시 전진한다 -- 오래된순이라 잘려도 가장 급한 행이
+        먼저다."""
         job_terminal = tuple(s.value for s in TERMINAL_DATA_JOB_STATES)
         req_terminal = tuple(s.value for s in TERMINAL_REQUEST_STATES)
         jt = ", ".join(f":jt{i}" for i in range(len(job_terminal)))
         rt = ", ".join(f":rt{i}" for i in range(len(req_terminal)))
         params = {f"jt{i}": v for i, v in enumerate(job_terminal)}
         params.update({f"rt{i}": v for i, v in enumerate(req_terminal)})
+        params["n"] = limit
         return self._db.query(
             f"""SELECT d.job_id, d.request_id, d.state FROM data_jobs d
                 JOIN requests r ON r.request_id = d.request_id
-                WHERE d.state IN ({jt}) AND r.state NOT IN ({rt})""", params)
+                WHERE d.state IN ({jt}) AND r.state NOT IN ({rt})
+                ORDER BY d.updated_at ASC, d.job_id ASC LIMIT :n""", params)

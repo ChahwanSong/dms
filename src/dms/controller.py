@@ -40,13 +40,24 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                 job["request_id"], DataJobState.PREVIEW_EXPIRED,
                 reason_code="preview_expired", actor="stepper")
         # 고아 복구: 잡은 터미널인데 request가 크래시 등으로 비터미널로 남은 경우.
-        # finalize_from_job은 idempotent(이미 터미널이면 no-op)라 안전하게 재호출 가능.
+        # finalize_from_job은 idempotent(이미 터미널이면 no-op)라 안전하게 재호출
+        # 가능. 슬라이스 24 §2.3: 스윕은 오래된순 200건 상한(리포지토리 몫)이고,
+        # 독 행 하나가 나머지 199건을 영구히 굶기지 않도록 행 단위로 격리한다 --
+        # 실패 행은 이벤트로 남고 다음 틱에 멱등 재시도된다. 0건 스윕은 정상값이라
+        # 아무것도 기록하지 않는다(0 을 실패로 위장하지 않는다).
         for orphan in repos.data_jobs.terminal_jobs_with_live_request():
-            job = repos.data_jobs.get_job(orphan["job_id"])
-            repos.requests.finalize_from_job(
-                orphan["request_id"], DataJobState(orphan["state"]),
-                reason_code="orphan_recovery",
-                summary=(job or {}).get("result_summary"), actor="stepper")
+            try:
+                job = repos.data_jobs.get_job(orphan["job_id"])
+                repos.requests.finalize_from_job(
+                    orphan["request_id"], DataJobState(orphan["state"]),
+                    reason_code="orphan_recovery",
+                    summary=(job or {}).get("result_summary"), actor="stepper")
+            except Exception as exc:
+                repos.observability.record_event(
+                    component="stepper", severity="error",
+                    event_type="orphan_recovery_failed",
+                    message=f"{type(exc).__name__}: {exc}"[:500],
+                    request_id=orphan["request_id"])
 
     def _retention_step():
         # events는 state_transitions처럼 영구 보관하지 않는다 -- 같은 성격의 배치
