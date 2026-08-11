@@ -48,5 +48,6 @@
   "artifact_base_not_absolute", "artifact_base_traversal",
   "artifact_base_scheme_in_path", "artifact_base_missing",
   "artifact_base_not_directory", "artifact_base_not_writable",
-  "artifact_base_locked"
+  "artifact_base_locked",
+  "build_oom_killed", "build_evicted"
 ]

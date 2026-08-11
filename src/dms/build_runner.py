@@ -111,6 +111,32 @@ class BuildRunner:
             return ExecStatus.FAILED
         return _POD_PHASE.get((obj.get("status") or {}).get("phase"), ExecStatus.FAILED)
 
+    def failure_reason(self, ref) -> str:
+        """실패한 빌드 파드의 사유를 구분한다(슬라이스 21 설계 §4 의 한계 해소).
+
+        지금까지 OOMKilled(memory limit 1Gi 초과)와 Evicted(emptyDir sizeLimit 초과
+        또는 노드 압박)가 전부 파드 phase Failed 로 접혀 `build_failed` 로 뭉개졌다 --
+        운영자는 "로그가 급단절된 build_failed 를 만나면 OOM 을 의심하라"는 문서에
+        의존해야 했다. 이 둘은 대응이 완전히 다르다: OOM 은 봉투를 키우거나 빌드를
+        줄여야 하고, Evicted 는 노드 디스크·메모리를 봐야 한다.
+
+        **구분 재료가 없으면 지어내지 않고 build_failed 로 남긴다** -- 파드가 이미
+        사라졌거나(GC) 조회가 실패한 경우도 마찬가지다. 없는 사실을 만드는 것보다
+        기존만큼만 아는 편이 낫다."""
+        try:
+            obj = self._k8s.get("Pod", _name(ref), self._ns)
+        except Exception:
+            return "build_failed"
+        status = (obj or {}).get("status") or {}
+        # 축출은 파드 수준 reason 이다(컨테이너가 시작조차 못 했을 수 있다).
+        if status.get("reason") == "Evicted":
+            return "build_evicted"
+        for cs in status.get("containerStatuses") or []:
+            term = ((cs.get("state") or {}).get("terminated") or {})
+            if term.get("reason") == "OOMKilled":
+                return "build_oom_killed"
+        return "build_failed"
+
     def read_log(self, ref):
         try:
             return self._k8s.read_pod_log(_name(ref), self._ns)
@@ -150,6 +176,11 @@ class StubBuildRunner:
     def poll(self, ref) -> ExecStatus:
         _name(ref)
         return ExecStatus.SUCCEEDED
+
+    def failure_reason(self, ref) -> str:
+        # 스텁은 실패를 만들지 않는다(poll 이 항상 SUCCEEDED) -- 인터페이스만 맞춘다.
+        _name(ref)
+        return "build_failed"
 
     def read_log(self, ref):
         return self._log.get(ref, "")

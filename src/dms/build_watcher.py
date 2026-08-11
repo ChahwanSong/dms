@@ -186,7 +186,10 @@ class BuildWatcher:
                 self._repos.builds.finish(
                     build_id,
                     state="Succeeded" if status == ExecStatus.SUCCEEDED else "Failed",
-                    reason_code=None if status == ExecStatus.SUCCEEDED else "build_failed",
+                    # 실패면 파드 상태로 사유를 구분한다(OOMKilled/Evicted) -- 재료가
+                    # 없으면 runner 가 build_failed 를 그대로 돌려준다.
+                    reason_code=(None if status == ExecStatus.SUCCEEDED
+                                 else self._runner.failure_reason(ref)),
                     commit_sha=parse_commit_sha(log_text),
                     log_text=log_text)
                 finished += 1

@@ -25,9 +25,17 @@ class _Runner:
         self.fail_submit_preflight = None
         self.fail_poll = None  # I6: reason_code로 세팅하면 poll에서 ExecutionError
         self.fail_read_log = None  # reason_code로 세팅하면 read_log에서 ExecutionError
+        # 실패 사유 세분화(슬라이스 21 잔여). 기본은 실 러너가 "구분 재료 없음"일 때
+        # 돌려주는 값과 같다 -- 세분화를 보고 싶은 테스트만 이 값을 바꾼다.
+        self.failure = "build_failed"
+        self.failure_asked = []
 
     def _is_probe(self, ref):
         return "/dms-build-pf-" in ref
+
+    def failure_reason(self, ref):
+        self.failure_asked.append(ref)
+        return self.failure
 
     def submit(self, build):
         if self.fail_submit:
@@ -454,3 +462,19 @@ def test_stub_runner_full_flow_with_preflight_succeeds_without_a_cluster(repos):
 ])
 def test_parse_preflight_reason(text, expected):
     assert parse_preflight_reason(text) == expected
+
+
+def test_failed_build_records_the_runner_s_specific_reason(db):
+    # 워처가 실패 사유를 runner 에 물어 그대로 박제하는지. 물어보지 않고
+    # build_failed 를 하드코딩하면 OOM·축출이 영원히 구분되지 않는다.
+    repos = Repositories(db)
+    bid = repos.builds.create(repo_url="u", git_ref="main", images=["dms"],
+                              node_name="dms-w1", actor="ops")
+    runner = _Runner(status=ExecStatus.FAILED)
+    runner.failure = "build_oom_killed"
+    BuildWatcher(repos, runner, timeout_seconds=7200).run_once()
+    BuildWatcher(repos, runner, timeout_seconds=7200).run_once()
+    row = repos.builds.get(bid)
+    assert (row["state"], row["reason_code"]) == ("Failed", "build_oom_killed")
+    # 빌드 파드 ref 로 물었다 -- 프로브 ref 로 물으면 엉뚱한 파드 상태를 읽는다.
+    assert runner.failure_asked and "/dms-build-pf-" not in runner.failure_asked[-1]

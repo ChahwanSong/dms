@@ -159,6 +159,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   artifact_base_not_directory: "경로가 디렉터리가 아닙니다",
   artifact_base_not_writable: "경로에 쓸 수 없습니다",
   artifact_base_locked: "잡 이력이 있어 아티팩트 경로를 바꿀 수 없습니다",
+  // 빌드 실패 세분화(슬라이스 21 잔여). 지금까지 전부 build_failed 로 뭉개져
+  // 운영자가 로그 단절만 보고 OOM 을 추측해야 했다 — 대응이 서로 다르다.
+  build_oom_killed: "빌드가 메모리 한도를 넘어 종료됐습니다 — 빌드 봉투를 늘리거나 빌드를 줄이세요",
+  build_evicted: "빌드가 노드에서 축출됐습니다 — 빌드 노드의 디스크·메모리를 확인하세요",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

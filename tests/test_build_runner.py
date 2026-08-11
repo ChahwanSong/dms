@@ -246,3 +246,42 @@ def test_stub_submit_preflight_is_immediately_ok_without_a_cluster():
     assert ref == f"{BUILD_REF_PREFIX}/dms-build-pf-0123456789ab"
     assert stub.poll(ref) == ExecStatus.SUCCEEDED
     assert "DMS_PREFLIGHT_OK" in stub.read_log(ref)
+
+
+# ---- 실패 사유 세분화(슬라이스 21 잔여 A-3) ----
+
+_FAILED_REF = f"{BUILD_REF_PREFIX}/dms-build-0123456789ab"
+
+
+def test_failure_reason_distinguishes_oom_kill():
+    # memory limit(1Gi) 초과로 cgroup 이 빌드를 죽인 경우. 지금까지는 전부
+    # build_failed 로 뭉개져 "로그가 급단절된 build_failed 를 만나면 OOM 을
+    # 의심하라"는 문서에 의존해야 했다(슬라이스 21 설계 §4 가 한계로 명시).
+    k8s = _FakeK8s()
+    k8s.set_status("dms-build-0123456789ab", {
+        "phase": "Failed",
+        "containerStatuses": [{"state": {"terminated": {"reason": "OOMKilled"}}}]})
+    assert _runner(k8s).failure_reason(_FAILED_REF) == "build_oom_killed"
+
+
+def test_failure_reason_distinguishes_eviction():
+    # emptyDir sizeLimit(10Gi) 초과나 노드 압박으로 kubelet 이 축출한 경우.
+    k8s = _FakeK8s()
+    k8s.set_status("dms-build-0123456789ab", {"phase": "Failed", "reason": "Evicted"})
+    assert _runner(k8s).failure_reason(_FAILED_REF) == "build_evicted"
+
+
+def test_failure_reason_falls_back_to_build_failed():
+    # 구분 재료가 없으면 지어내지 않는다 -- 기존 코드 그대로.
+    k8s = _FakeK8s()
+    k8s.set_status("dms-build-0123456789ab", {"phase": "Failed"})
+    assert _runner(k8s).failure_reason(_FAILED_REF) == "build_failed"
+
+
+def test_failure_reason_when_pod_is_gone_is_build_failed():
+    # 파드가 사라졌으면(GC 등) 읽을 상태가 없다 -- 조회 실패도 마찬가지로 뭉갠다.
+    assert _runner(_FakeK8s()).failure_reason(_FAILED_REF) == "build_failed"
+
+
+def test_stub_failure_reason_is_build_failed():
+    assert StubBuildRunner().failure_reason(_FAILED_REF) == "build_failed"
