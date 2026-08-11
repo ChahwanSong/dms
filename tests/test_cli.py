@@ -71,3 +71,22 @@ def test_agent_fails_closed_on_bad_settings(monkeypatch, capsys):
     from dms.cli import main as cli_main
     assert cli_main(["agent", "--once"]) == 2
     assert "DMS_AGENT_API_URL" in capsys.readouterr().err
+
+
+def test_controller_once_wires_the_reconnect_event_hook(tmp_path, monkeypatch):
+    # 슬라이스 22 §2.6: api(create_app)와 같은 훅이 controller 경로에도 배선되는지.
+    # main() 이 만드는 Database 는 밖에서 못 잡으므로 wiring 함수 호출 자체를
+    # 스파이한다 -- cli 는 wire_reconnect_event 를 .wiring 모듈에서 호출 시점에
+    # 읽기 때문에 monkeypatch 가 통한다.
+    monkeypatch.setenv("DMS_DATABASE_URL", f"sqlite:///{tmp_path}/c.db")
+    monkeypatch.setenv("DMS_SHARED_TOKEN", "t")
+    monkeypatch.setenv("DMS_ADMIN_TOKEN", "a")
+    monkeypatch.setenv("DMS_SESSION_SECRET", "s")
+    assert main(["migrate"]) == 0
+    import dms.wiring as wiring
+    real = wiring.wire_reconnect_event
+    wired = []
+    monkeypatch.setattr(wiring, "wire_reconnect_event",
+                        lambda db, repos: wired.append(real(db, repos)))
+    assert main(["controller", "--once"]) == 0
+    assert len(wired) == 1

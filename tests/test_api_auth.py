@@ -102,3 +102,11 @@ def test_non_ascii_token_is_rejected_not_500(client):
     r = client.post("/api/admin/accounts", json={"username": "x", "password": "p"},
                     headers={"x-admin-token": "caf\xe9".encode("latin-1")})
     assert r.status_code == 403
+
+
+def test_create_app_wires_the_reconnect_event_hook(client, db):
+    # 슬라이스 22 §2.6: client 픽스처가 create_app 을 이미 통과했다 -- 훅이
+    # 배선되어 실제 events 행을 남기는지 행동으로 고정한다(배선 회귀 가드).
+    db.on_reconnect()
+    row = db.query_one("SELECT component, event_type FROM events")
+    assert row == {"component": "db", "event_type": "db_reconnected"}

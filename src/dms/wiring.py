@@ -67,3 +67,16 @@ def build_queue_reader(settings):
     from .queue_reader import VolcanoQueueReader
     return VolcanoQueueReader(KubernetesClient(settings.k8s_namespace),
                               namespace=settings.k8s_namespace)
+
+
+def wire_reconnect_event(db, repos) -> None:
+    """슬라이스 22 §2.6: 재연결 성공의 영속 흔적 1건. record_event 는 절대
+    예외를 올리지 않는 계약(observability.py)이라 재연결 직후 재실패에도
+    안전하고, 트랜잭션 밖 단독 INSERT 라 업무 변경을 되돌릴 수도 없다.
+    api(create_app)와 controller(cli)가 이 함수 하나를 같이 쓴다 -- 두 곳이
+    각자 훅을 만들면 이벤트 모양이 갈라져 SQL 집계가 깨진다."""
+    def _record():
+        repos.observability.record_event(
+            component="db", severity="warning", event_type="db_reconnected",
+            message=f"dialect={db.dialect} count={db.reconnect_count}")
+    db.on_reconnect = _record

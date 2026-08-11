@@ -8,7 +8,7 @@ from ..db import Database
 from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
                      build_identity_resolver, build_queue_reader,
-                     build_rollout_runner)
+                     build_rollout_runner, wire_reconnect_event)
 from .routes_accounts import router as accounts_router
 from .routes_auth import router as auth_router
 from .routes_storages import router as storages_router, user_router as user_storages_router
@@ -41,6 +41,8 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     # 슬라이스 17: /api/admin/metrics/queue 가 쓴다. 기본 백엔드(stub)에선
     # StubQueueReader 라 클러스터 없이도 라우트가 산다(설계 §2.5).
     app.state.queue_reader = build_queue_reader(settings)
+    # 슬라이스 22 §2.6: 재연결 성공의 영속 흔적(events.db_reconnected) 훅.
+    wire_reconnect_event(db, app.state.repos)
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
                        session_cookie="dms_session")
 

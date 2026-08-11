@@ -53,9 +53,14 @@ def main(argv=None) -> int:
     if args.command == "controller":
         from .controller import build_loops, run_all_once, run_forever
         from .repositories import Repositories
+        from . import wiring
         from .wiring import (build_build_runner, build_execution_adapter,
                              build_identity_resolver, build_rollout_runner)
         repos = Repositories(db)
+        # 슬라이스 22 §2.6: 컨트롤러도 재연결 흔적을 남긴다(api 와 같은 훅).
+        # 모듈 속성으로 호출한다 -- 테스트가 monkeypatch 로 배선을 스파이할 수
+        # 있어야 하고, from-import 로 묶으면 그 시점에 이름이 고정돼 안 통한다.
+        wiring.wire_reconnect_event(db, repos)
         holder = f"controller-{os.getpid()}"
         identity_resolver = build_identity_resolver(settings)
         execution_adapter = build_execution_adapter(settings, repos)

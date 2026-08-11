@@ -336,3 +336,21 @@ def test_txn_depth_is_restored_so_the_next_standalone_statement_can_retry(monkey
     db.execute("INSERT INTO t (a) VALUES (1)")   # 깊이 0 복원 -> 재시도가 산다
     assert newer.executed == ["INSERT INTO t (a) VALUES (1)"]
     assert db.reconnect_count == 2
+
+
+# ---- §2.6 영속 흔적: events db_reconnected (훅 배선) ----
+
+def test_wire_reconnect_event_writes_a_db_reconnected_event(db):
+    # "얼마나 자주 끊기는가"를 SQL 로 셀 수 있는 유일한 영속 흔적(§2.6). 새
+    # 테이블·새 사유 코드 없이 기존 events + 기존 retention 을 그대로 쓴다.
+    # record_event 는 절대 예외를 올리지 않으므로(observability 계약) 재연결
+    # 직후 재실패에도 안전하다.
+    from dms.repositories import Repositories
+    from dms.wiring import wire_reconnect_event
+    wire_reconnect_event(db, Repositories(db))
+    db.reconnect_count = 3           # 메시지가 카운터·방언을 나르는지까지 본다
+    db.on_reconnect()
+    row = db.query_one(
+        "SELECT component, severity, event_type, message FROM events")
+    assert row == {"component": "db", "severity": "warning",
+                   "event_type": "db_reconnected", "message": "dialect=sqlite count=3"}
