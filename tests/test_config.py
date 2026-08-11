@@ -57,3 +57,11 @@ def test_port_parsing():
     assert s.api_port == 9000
     with pytest.raises(SettingsError):
         Settings.from_env({**VALID, "DMS_API_PORT": "not-a-number"})
+
+
+def test_build_preflight_timeout_default_and_env_override():
+    # 슬라이스 21 §2.5: 프로브 대기 상한. _SERVER_INT_KEYS 튜플에만 넣으면
+    # from_env 의 **extra 가 배선한다 -- 필드/키 양쪽이 실제로 이어졌는지 고정.
+    assert Settings.from_env(VALID).build_preflight_timeout_seconds == 180
+    s = Settings.from_env({**VALID, "DMS_BUILD_PREFLIGHT_TIMEOUT_SECONDS": "60"})
+    assert s.build_preflight_timeout_seconds == 60

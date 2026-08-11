@@ -180,3 +180,69 @@ def test_stub_runner_runs_without_a_cluster():
     assert stub.poll(ref) == ExecStatus.SUCCEEDED
     assert stub.read_log(ref) is not None
     stub.terminate(ref)
+
+
+# ---- 슬라이스 21 §2.5: submit_preflight (프로브 파드 멱등 제출) ----
+
+def _pf_runner(k8s):
+    return BuildRunner(k8s, namespace="dms", registry="pkg-01:5000",
+                       builder_image="quay.io/buildah/stable:latest",
+                       timeout_seconds=7200,
+                       job_image="pkg-01:5000/dms-mpifileutils:d27",
+                       preflight_timeout_seconds=180)
+
+
+PF_BUILD = {**BUILD, "repo_url": "https://github.com/ChahwanSong/dms.git"}
+
+
+def test_submit_preflight_creates_probe_pod_under_the_buildpod_ref():
+    k8s = _FakeK8s()
+    runner = _pf_runner(k8s)
+    ref = runner.submit_preflight(PF_BUILD)
+    assert ref == f"{BUILD_REF_PREFIX}/dms-build-pf-0123456789ab"
+    pod = k8s.created[0]
+    assert pod["metadata"]["name"] == "dms-build-pf-0123456789ab"
+    assert pod["spec"]["containers"][0]["image"] == "pkg-01:5000/dms-mpifileutils:d27"
+    assert pod["spec"]["activeDeadlineSeconds"] == 180
+    # 같은 buildpod/ ref 계약이라 poll/read_log/terminate 가 공짜다 -- 이게
+    # 프로브에 별도 러너를 만들지 않은 이유다.
+    k8s.set_status("dms-build-pf-0123456789ab", {"phase": "Succeeded"})
+    assert runner.poll(ref) == ExecStatus.SUCCEEDED
+
+
+def test_submit_preflight_is_idempotent_when_probe_already_exists():
+    # 워처가 매 틱 재호출한다 -- AlreadyExists 를 실패로 접으면 두 번째 틱부터
+    # 멀쩡한 빌드가 전부 Failed 다(submit 의 관용 선례와 같은 계약).
+    k8s = _FakeK8s()
+    ref1 = _pf_runner(k8s).submit_preflight(PF_BUILD)
+    k8s.fail_create = True
+    ref2 = _pf_runner(k8s).submit_preflight(PF_BUILD)
+    assert ref2 == ref1
+
+
+def test_submit_preflight_unparseable_repo_url_is_submit_failed():
+    # 라우트가 제출 시점에 invalid_repo_url 로 거르지만(§2.5 동기), 검증 전에
+    # 만들어진 구형 Pending 행이 남아 있을 수 있다 -- 원시 ValueError 가 아니라
+    # ExecutionError(submit_failed)로 나와야 워처가 Failed 로 기록한다.
+    with pytest.raises(ExecutionError) as e:
+        _pf_runner(_FakeK8s()).submit_preflight({**BUILD, "repo_url": "not a url"})
+    assert e.value.reason_code == "submit_failed"
+    assert e.value.detail.startswith("preflight:")   # 빌드 파드 제출 실패와 구분
+
+
+def test_submit_preflight_create_failure_without_existing_pod_raises():
+    k8s = _FakeK8s()
+    k8s.fail_create = True
+    with pytest.raises(ExecutionError) as e:
+        _pf_runner(k8s).submit_preflight(PF_BUILD)
+    assert e.value.reason_code == "submit_failed"
+
+
+def test_stub_submit_preflight_is_immediately_ok_without_a_cluster():
+    # 스텁 경로 계약(설계 §4): 프리플라이트 포함 즉시 성공 -- poll 은 어떤 ref 든
+    # SUCCEEDED 이므로 OK 마커 로그만 있으면 워처가 같은 틱에 빌드 제출로 넘어간다.
+    stub = StubBuildRunner()
+    ref = stub.submit_preflight(BUILD)
+    assert ref == f"{BUILD_REF_PREFIX}/dms-build-pf-0123456789ab"
+    assert stub.poll(ref) == ExecStatus.SUCCEEDED
+    assert "DMS_PREFLIGHT_OK" in stub.read_log(ref)

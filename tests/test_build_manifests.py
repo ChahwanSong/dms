@@ -1,6 +1,6 @@
 import re
 
-from dms.build_manifests import build_build_pod
+from dms.build_manifests import build_build_pod, build_probe_pod, repo_host
 
 BID = "0123456789abcdef0123456789abcdef"
 
@@ -136,3 +136,75 @@ def test_scheduling_shape_is_unchanged_nodeselector_and_default_scheduler():
     pod = _pod()
     assert pod["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "dms-w1"}
     assert "schedulerName" not in pod["spec"]
+
+
+# ---- 슬라이스 21 §2.5: 적합성 프로브 파드 (매니페스트는 순수 함수) ----
+
+def _probe(repo_url="https://github.com/ChahwanSong/dms.git", timeout_seconds=180):
+    return build_probe_pod(build_id=BID, repo_url=repo_url, node="dms-w1",
+                           namespace="dms", registry="pkg-01:5000",
+                           job_image="pkg-01:5000/dms-mpifileutils:d27",
+                           timeout_seconds=timeout_seconds)
+
+
+def test_probe_identity_small_envelope_and_class():
+    pod = _probe()
+    # 결정적 이름 + 63자 상한: 워처가 상태를 DB 에 두지 않고도 "이 빌드의 프로브"를
+    # 언제든 다시 찾는 근거다(buildpod/ ref 재사용 -- poll/read_log/terminate 공짜).
+    assert pod["metadata"]["name"] == "dms-build-pf-0123456789ab"
+    assert len(pod["metadata"]["name"]) <= 63
+    assert pod["metadata"]["labels"]["dms.io/build-id"] == BID
+    assert pod["spec"]["restartPolicy"] == "Never"
+    assert pod["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "dms-w1"}
+    assert pod["spec"]["priorityClassName"] == "dms-build"   # 빌드와 같은 축출 방향
+    assert pod["spec"]["activeDeadlineSeconds"] == 180
+    c = pod["spec"]["containers"][0]
+    # job_image(캐시 존재·pull 은 pkg-01 만 필요)여야 프로브 기동 자체가 인터넷과
+    # 무관하다 -- builder image(quay.io)면 위음성/위양성이 난다(설계 §2.5).
+    assert c["image"] == "pkg-01:5000/dms-mpifileutils:d27"
+    # 작은 봉투: 소켓 3~4개와 statvfs 뿐 -- 프로브가 노드에 압박을 만들면 안 된다.
+    assert c["resources"] == {"requests": {"cpu": "50m", "memory": "32Mi"},
+                              "limits": {"cpu": "200m", "memory": "128Mi"}}
+
+
+def test_probe_targets_travel_as_env_not_in_the_script():
+    c = _probe()["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in c["env"]}
+    # repo 호스트(파싱) + quay.io(빌더 이미지) + registry-1.docker.io(베이스 이미지
+    # -- Dockerfile.dms:13,24 / Dockerfile.mpifileutils:17 이 전부 docker.io).
+    assert env["DMS_PF_EGRESS_HOSTS"] == "github.com quay.io registry-1.docker.io"
+    assert env["DMS_PF_REGISTRY"] == "pkg-01:5000"
+    assert env["DMS_PF_NEED_BYTES"] == str(12 * 1024 ** 3)   # sizeLimit 10Gi + 마진 2Gi
+    assert c["command"][:2] == ["python3", "-c"]
+    script = c["command"][2]
+    # 값이 스크립트 본문에 박히면 repo_url 이 코드가 된다(빌드 파드와 같은 원칙).
+    assert "github.com" not in script
+    assert "pkg-01:5000" not in script
+
+
+def test_probe_script_follows_the_preflight_marker_convention():
+    # execution_manifests._preflight_script 와 같은 마커 문법(실패 = REASON= + exit 1,
+    # 성공 = OK) -- 워처가 한 가지 파서 계열로 읽는다.
+    script = _probe()["spec"]["containers"][0]["command"][2]
+    assert "DMS_PREFLIGHT_REASON=" in script
+    assert "DMS_PREFLIGHT_OK" in script
+    for code in ("build_node_no_egress", "build_registry_unreachable",
+                 "build_node_disk_low"):
+        assert code in script, code
+    assert "os.statvfs" in script and "0.15" in script   # eviction 미러 상수
+
+
+def test_probe_host_list_dedups_the_repo_host():
+    env = {e["name"]: e["value"]
+           for e in _probe(repo_url="https://quay.io/x.git")["spec"]["containers"][0]["env"]}
+    assert env["DMS_PF_EGRESS_HOSTS"] == "quay.io registry-1.docker.io"
+
+
+def test_repo_host_parses_https_and_rejects_unparseable():
+    assert repo_host("https://github.com/ChahwanSong/dms.git") == "github.com"
+    assert repo_host("http://pkg-01:8080/r.git") == "pkg-01"
+    assert repo_host("not a url") is None
+    assert repo_host("") is None
+    # scp 형(git@host:path)은 urlsplit 이 호스트를 못 뽑는다 -- 라우트가 422
+    # invalid_repo_url 로 명시 거절한다(조용한 오동작 대신).
+    assert repo_host("git@github.com:ChahwanSong/dms.git") is None

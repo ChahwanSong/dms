@@ -39,7 +39,12 @@ def build_build_runner(settings):
                        namespace=settings.k8s_namespace,
                        registry=settings.build_registry,
                        builder_image=settings.build_builder_image,
-                       timeout_seconds=settings.build_timeout_seconds)
+                       timeout_seconds=settings.build_timeout_seconds,
+                       # 프로브는 job_image(§2.5): 워커 캐시 존재 + pull 은
+                       # pkg-01 만 필요 -- 프로브 기동이 인터넷과 무관해야
+                       # "인터넷만 없는 노드"를 정확히 판별한다.
+                       job_image=settings.job_image,
+                       preflight_timeout_seconds=settings.build_preflight_timeout_seconds)
 
 
 def build_rollout_runner(settings):

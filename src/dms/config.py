@@ -34,6 +34,11 @@ _SERVER_INT_KEYS = (
     # 둘 다 이 값을 쓴다: 파드가 스케줄된 뒤엔 kubelet이, 스케줄조차 못 된
     # (nodeSelector 오타 등) Pending은 BuildWatcher의 created_at 기반 회수가 잡는다.
     ("DMS_BUILD_TIMEOUT_SECONDS", "build_timeout_seconds", 7200),
+    # 슬라이스 21 §2.5: 적합성 프로브(프리플라이트 파드) 대기 상한. 프로브는
+    # 캐시된 job_image 로 수 초면 종단한다 -- 이 창을 넘기면 노드 다운/스케줄
+    # 불가로 보고 build_preflight_timeout 으로 즉시 회수한다(2h generic 대기를
+    # 수 분으로 줄이는 것이 이 슬라이스의 존재 이유다).
+    ("DMS_BUILD_PREFLIGHT_TIMEOUT_SECONDS", "build_preflight_timeout_seconds", 180),
     ("DMS_EVENT_RETENTION_DAYS", "event_retention_days", 30),
     # 롤아웃 루프 간격 10초 -> per-loop 리스 max(10*3, 30)=30초. 설계 §2: 리스는
     # 갱신되지 않으므로 긴 간격은 컨트롤러 자기 갱신 후 재획득을 그만큼 늦춘다.
@@ -130,6 +135,7 @@ class Settings:
     build_repo_url: str = "https://github.com/ChahwanSong/dms.git"
     build_watcher_interval_seconds: int = 15
     build_timeout_seconds: int = 7200
+    build_preflight_timeout_seconds: int = 180
     event_retention_days: int = 30
     rollout_interval_seconds: int = 10
     rollout_timeout_seconds: int = 600

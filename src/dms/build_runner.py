@@ -2,9 +2,9 @@
 빌드는 JobSpec 도 큐도 아티팩트도 없어서 그 계약에 억지로 끼우면 빈 dict 만 늘어난다."""
 import logging
 
-from .build_manifests import build_build_pod
+from .build_manifests import build_build_pod, build_probe_pod
 from .execution import ExecStatus, ExecutionError
-from .repositories.builds import build_pod_name
+from .repositories.builds import build_pod_name, build_probe_pod_name
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +25,19 @@ def _name(ref: str) -> str:
 
 
 class BuildRunner:
-    def __init__(self, k8s, *, namespace, registry, builder_image, timeout_seconds):
+    def __init__(self, k8s, *, namespace, registry, builder_image, timeout_seconds,
+                 job_image="", preflight_timeout_seconds=180):
         self._k8s = k8s
         self._ns = namespace
         self._registry = registry
         self._builder_image = builder_image
         self._timeout_seconds = timeout_seconds
+        # 슬라이스 21 §2.5: 프로브는 builder image 가 아니라 job_image 로 띄운다 --
+        # 워커에 캐시돼 있고 pull 도 pkg-01 만 필요해 프로브 기동이 인터넷과
+        # 무관하다. 기본값은 기존 생성 호출(테스트 다수) 무변경용이고, 실제 배선
+        # (wiring.py)은 항상 settings 값을 명시한다.
+        self._job_image = job_image
+        self._preflight_timeout_seconds = preflight_timeout_seconds
 
     def submit(self, build) -> str:
         try:
@@ -60,6 +67,37 @@ class BuildRunner:
                 exists = False  # 존재 확인 자체가 실패하면 원래 실패로 폴백
             if not exists:
                 raise ExecutionError("submit_failed", str(exc)[:200]) from exc
+        return ref
+
+    def submit_preflight(self, build) -> str:
+        """적합성 프로브 파드(§2.5)를 멱등 제출한다. submit 과 같은 계약: 이름이
+        build_id 에서 결정적이라 AlreadyExists 는 이전 틱이 만든 이 빌드 자신의
+        프로브다 -- 성공 취급해야 워처의 매 틱 재호출("없음→생성"과 "진행 중→대기"
+        를 상태 저장 없이 한 호출로 접는 장치)이 안전하다."""
+        try:
+            manifest = build_probe_pod(
+                build_id=build["build_id"], repo_url=build["repo_url"],
+                node=build["node_name"], namespace=self._ns,
+                registry=self._registry, job_image=self._job_image,
+                timeout_seconds=self._preflight_timeout_seconds)
+        except Exception as exc:
+            # 프로브 생성 실패는 기존 submit_failed 재사용(§4) -- "preflight:"
+            # detail 접두가 빌드 파드 제출 실패와 구분한다(새 코드를 만들지 않는다).
+            raise ExecutionError("submit_failed",
+                                 f"preflight: {str(exc)[:180]}") from exc
+        name = manifest["metadata"]["name"]
+        ref = f"{BUILD_REF_PREFIX}/{name}"
+        try:
+            self._k8s.create(manifest)
+        except Exception as exc:
+            # submit 의 AlreadyExists 관용 선례 그대로: 존재하면 성공 취급.
+            try:
+                exists = self._k8s.get("Pod", name, self._ns) is not None
+            except Exception:
+                exists = False
+            if not exists:
+                raise ExecutionError("submit_failed",
+                                     f"preflight: {str(exc)[:180]}") from exc
         return ref
 
     def poll(self, ref) -> ExecStatus:
@@ -99,6 +137,14 @@ class StubBuildRunner:
     def submit(self, build) -> str:
         ref = f"{BUILD_REF_PREFIX}/{build_pod_name(build['build_id'])}"
         self._log[ref] = "DMS_COMMIT_SHA=stubcommit\nDMS_BUILD_OK\n"
+        return ref
+
+    def submit_preflight(self, build) -> str:
+        # 클러스터 없는 경로도 프리플라이트를 "즉시 통과"로 지나가야 한다(설계 §4:
+        # 로컬·CI 가 클러스터 없이 초록) -- poll 은 어떤 ref 든 SUCCEEDED 이므로
+        # OK 마커 로그만 심으면 워처가 같은 틱에 빌드 제출로 넘어간다.
+        ref = f"{BUILD_REF_PREFIX}/{build_probe_pod_name(build['build_id'])}"
+        self._log[ref] = "DMS_PREFLIGHT_OK\n"
         return ref
 
     def poll(self, ref) -> ExecStatus:

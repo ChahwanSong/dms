@@ -21,6 +21,14 @@ def build_pod_name(build_id: str) -> str:
     return f"dms-build-{build_id[:12]}"[:63]
 
 
+def build_probe_pod_name(build_id: str) -> str:
+    # 슬라이스 21 §2.5: 적합성 프로브 파드. 빌드 파드와 같은 결정적 이름 규칙이라
+    # 워처가 프로브 상태를 DB 에 두지 않고도(컬럼 0개) "이 빌드의 프로브"를 매 틱
+    # 다시 찾을 수 있다 -- 멱등 create + poll 만으로 상태기계가 성립한다.
+    # "pf" 세그먼트는 hex(build_id)와 절대 충돌하지 않아 빌드 파드와 판별 가능하다.
+    return f"dms-build-pf-{build_id[:12]}"[:63]
+
+
 def _row(row):
     if row is None:
         return None

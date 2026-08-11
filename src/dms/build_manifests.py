@@ -1,5 +1,8 @@
 """빌드 파드 매니페스트. 순수 함수 -- k8s 클라이언트에 접근하지 않는다."""
-from .repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
+from urllib.parse import urlsplit
+
+from .repositories.builds import (BUILD_IMAGES, build_pod_name,
+                                  build_probe_pod_name, build_tag)
 
 # 레지스트리가 평문 HTTP 라 pull 도 insecure 로 열어야 한다: dms-agent 이미지가
 # `FROM pkg-01:5000/...` 를 하기 때문이다. push 만 --tls-verify=false 로는 부족하다.
@@ -50,6 +53,131 @@ BUILD_SIZELIMIT_GIB = 10
 # 프리플라이트 디스크 공식의 여유 마진(GiB) -- 빌드 중 같은 노드 다른 파드의
 # 로그·쓰기층 몫. eph limits = sizeLimit + 마진(12Gi)으로도 쓰인다.
 BUILD_DISK_MARGIN_GIB = 2
+
+
+def repo_host(repo_url: str) -> str | None:
+    """repo_url 에서 egress 프로브 대상 호스트를 뽑는다. 파싱 불가면 None.
+
+    라우트(제출 시 422 invalid_repo_url)와 프로브 매니페스트가 **같은 함수**를
+    쓴다 -- 두 곳이 다르게 파싱하면 "제출은 통과했는데 프로브를 못 만드는" 창이
+    생긴다. scp 형(git@host:path)은 urlsplit 이 호스트를 못 뽑아 None 이다 --
+    지원 확대가 아니라 명시 거절이 목적이다(테스트베드는 https 만 쓴다)."""
+    try:
+        return urlsplit(repo_url or "").hostname
+    except ValueError:
+        # 잘못된 IPv6 브래킷 등 urlsplit 자체가 던지는 경우 -- 파싱 불가와 동치.
+        return None
+
+
+# 프리플라이트 프로브 스크립트(§2.5). 실행 preflight 의 마커 관례를 그대로 따른다
+# (execution_manifests._preflight_script: 실패 = DMS_PREFLIGHT_REASON=<code> +
+# exit 1, 성공 = DMS_PREFLIGHT_OK) -- 워처가 같은 파서 계열로 읽는다. 대상
+# 호스트·수치는 전부 env 로 나른다(빌드 스크립트와 같은 인젝션 회피 원칙: 값이
+# 본문에 박히면 repo_url 이 코드가 된다). 이미지는 job_image(python:3.11-slim
+# 기반 -- Dockerfile.mpifileutils:81 -- 이라 python3 보장, 워커 캐시 존재, pull 도
+# pkg-01 만 필요) -- 프로브 기동 자체가 인터넷과 무관해야 "인터넷만 없는 노드"를
+# 정확히 판별한다.
+_PROBE_SCRIPT = r"""
+import os
+import socket
+import sys
+
+
+def reachable(host, port):
+    # TCP 연결만 본다(각 5s): 운영 모델의 질문이 "인터넷이 열렸는가"라는 이진
+    # 질문이기 때문이다. 선별 개방(예: github 만)이면 여기를 통과하고 npm 에서
+    # 죽는다 -- 그건 기존대로 build_failed + 로그의 몫이다(설계 §2.5 정직한 한계).
+    try:
+        with socket.create_connection((host, port), timeout=5.0):
+            return True
+    except OSError:
+        return False
+
+
+def fail(reason, detail):
+    # 마커보다 detail 을 먼저 찍는다 -- 로그 꼬리 박제(64KB)에서 마커가 잘리는
+    # 것보다 detail 이 잘리는 편이 낫다(마커가 없으면 build_preflight_failed 로
+    # 접혀 사유가 뭉개진다).
+    print(detail)
+    print("DMS_PREFLIGHT_REASON=" + reason)
+    sys.exit(1)
+
+
+egress_hosts = os.environ["DMS_PF_EGRESS_HOSTS"].split()
+unreachable = [h for h in egress_hosts if not reachable(h, 443)]
+if unreachable:
+    # 실패 호스트 전부를 로그로 -- "어느 호스트가 막혔나"가 운영자의 첫 질문이다.
+    fail("build_node_no_egress", "unreachable_443=" + ",".join(unreachable))
+
+registry = os.environ["DMS_PF_REGISTRY"]
+reg_host, _, reg_port = registry.partition(":")
+if not reachable(reg_host, int(reg_port or "443")):
+    fail("build_registry_unreachable", "unreachable_registry=" + registry)
+
+# 노드 fs 여유 검사: 컨테이너 overlay 의 "/" 는 노드 fs 를 그대로 보고한다
+# (nodefs=imagefs 동일 실측). 0.15 는 kubelet evictionHard(imagefs 15%, 2026-08-11
+# configz 실측)의 미러 상수다 -- kubelet 설정이 바뀌면 여기도 같이 갱신할 것.
+# NEED_BYTES = sizeLimit(10Gi) + 마진(2Gi) -- build_manifests 상수에서 온다.
+st = os.statvfs("/")
+avail = st.f_bavail * st.f_frsize
+total = st.f_blocks * st.f_frsize
+need = int(0.15 * total) + int(os.environ["DMS_PF_NEED_BYTES"])
+if avail < need:
+    fail("build_node_disk_low",
+         "avail_bytes=%d need_bytes=%d total_bytes=%d" % (avail, need, total))
+print("disk avail_bytes=%d need_bytes=%d" % (avail, need))
+print("DMS_PREFLIGHT_OK")
+"""
+
+# 고정 egress 대상(§2.5-①): quay.io 는 빌더 이미지(kubelet 이 pull), docker.io
+# 베이스 이미지(node:20-bookworm-slim -- Dockerfile.dms:13, python:3.11-slim-bookworm
+# -- Dockerfile.dms:24 / Dockerfile.mpifileutils:81, debian:bookworm --
+# Dockerfile.mpifileutils:17)는 registry-1.docker.io 에서 온다.
+_PROBE_STATIC_HOSTS = ("quay.io", "registry-1.docker.io")
+
+
+def build_probe_pod(*, build_id, repo_url, node, namespace, registry, job_image,
+                    timeout_seconds) -> dict:
+    host = repo_host(repo_url)
+    if not host:
+        # 라우트가 제출 시점에 invalid_repo_url 로 거른다 -- 여기 도달은 검증 전에
+        # 만들어진 구형 Pending 행뿐이고, BuildRunner 가 submit_failed 로 접는다.
+        raise ValueError(f"cannot parse repo host from {repo_url!r}")
+    hosts = [host] + [h for h in _PROBE_STATIC_HOSTS if h != host]
+    env = {
+        "DMS_PF_EGRESS_HOSTS": " ".join(hosts),
+        "DMS_PF_REGISTRY": registry,
+        # 빌드 파드 봉투와 같은 상수(§2.4) -- 프리플라이트가 통과한 노드에서
+        # sizeLimit 이 반드시 담길 수 있어야 두 방어가 한 공식이 된다.
+        "DMS_PF_NEED_BYTES": str((BUILD_SIZELIMIT_GIB + BUILD_DISK_MARGIN_GIB)
+                                 * 1024 ** 3),
+    }
+    return {
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": build_probe_pod_name(build_id), "namespace": namespace,
+                     "labels": {"dms.io/build-id": build_id,
+                                "dms.io/phase": "build-preflight"}},
+        "spec": {
+            "restartPolicy": "Never",
+            # 프로브 자체의 벽시계 상한 -- 워처의 프리플라이트 타임아웃과 같은 값.
+            # 단 activeDeadlineSeconds 는 스케줄 후에만 발화하므로(§1-9) 영구
+            # Pending 프로브는 워처의 created_at 기반 회수만 잡는다.
+            "activeDeadlineSeconds": timeout_seconds,
+            "nodeSelector": {"kubernetes.io/hostname": node},
+            # 빌드와 같은 클래스(§2.3): 프로브도 데이터 잡보다 먼저 죽고 아무도
+            # 선점하지 않는다. 미적용 클러스터에서는 admission 거절 -- 배포 순서 참고.
+            "priorityClassName": "dms-build",
+            "containers": [{
+                "name": "preflight", "image": job_image,
+                "command": ["python3", "-c", _PROBE_SCRIPT],
+                "env": [{"name": k, "value": v} for k, v in env.items()],
+                # 작은 봉투: 소켓 3~4개와 statvfs 뿐이다 -- 프로브가 노드에
+                # 유의미한 압박을 만들면 검사가 검사 대상을 오염시킨다.
+                "resources": {"requests": {"cpu": "50m", "memory": "32Mi"},
+                              "limits": {"cpu": "200m", "memory": "128Mi"}},
+            }],
+        },
+    }
 
 
 def build_build_pod(*, build_id, repo_url, git_ref, images, node, namespace,
