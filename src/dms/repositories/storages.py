@@ -13,7 +13,19 @@ def _validate(storage_name, mount_path, managed_root, backend_type):
     if backend_type not in _BACKENDS:
         raise DomainValidationError("invalid_storage", f"bad backend {backend_type!r}")
     for p in (mount_path, managed_root):
-        if not p.startswith("/") or posixpath.normpath(p) != p.rstrip("/") and p != "/":
+        if p == "/":
+            # 슬라이스 24 §2.2: CephFS/GPFS/WekaFS 는 노드 루트에 마운트되지
+            # 않는다 -- "/" 가 정당한 배포는 없다. 이 값이 살면 mount 검사가 어느
+            # 노드에서나 statvfs("/") 로 Ready 가 되고, 잡 파드는 노드 루트를
+            # hostPath 로 통째로 마운트하며(_volumes 의 조상-커버 축약이 전부를
+            # "/" 하나로 접는다), rm 대상 검증(""/"."만 거부)을 통과한 "etc" 류가
+            # 요청자 신원으로 지워진다. 검증은 create/update 에만 발화하므로 이미
+            # DB 에 있는 "/" 행은 stepper._abs 의 join 이 2차 방어다(같은 슬라이스).
+            raise DomainValidationError("invalid_storage",
+                                        "root filesystem is not a storage")
+        # 기존 규칙에서 `and p != "/"` 예외 절을 제거했다 -- 그 절의 유일한 존재
+        # 이유가 "/" 를 살리는 것이었고, 이제 위에서 명시 거부한다(이중 봉인).
+        if not p.startswith("/") or posixpath.normpath(p) != p.rstrip("/"):
             raise DomainValidationError("invalid_storage", f"bad path {p!r}")
     mount = posixpath.normpath(mount_path)
     root = posixpath.normpath(managed_root)

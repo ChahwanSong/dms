@@ -20,12 +20,25 @@ def test_create_get_list(db):
     {"backend_type": "nfs"},                  # 미지원 백엔드
     {"mount_path": "relative/path"},          # 상대 경로
     {"storage_name": "Bad_Name"},             # 이름 규칙 위반
+    {"mount_path": "/", "managed_root": "/"},  # 노드 루트(슬라이스 24 §2.2) -- 현행 ACCEPTED
+    {"managed_root": "/"},                     # root "/"만 -- 기존에도 mount 밖 규칙으로 거부(명시 고정)
 ])
 def test_invalid_fields_rejected(db, bad):
     repo = StoragesRepository(db)
     with pytest.raises(DomainValidationError) as e:
         repo.create(**{**FIELDS, **bad}, actor="admin")
     assert e.value.reason_code == "invalid_storage"
+
+
+def test_root_filesystem_rejection_is_explicit(db):
+    # "/" 는 일반 경로 규칙(normpath("/") == "/" != "/".rstrip("/") == "")에도 우연히
+    # 걸린다 -- 그 우연에 기대면 규칙이 언젠가 느슨해질 때 노드 루트가 조용히 다시
+    # 통과한다. detail 까지 고정해 명시 분기(슬라이스 24 §2.2)가 지워지면 빨개지게.
+    repo = StoragesRepository(db)
+    with pytest.raises(DomainValidationError) as e:
+        repo.create(**{**FIELDS, "mount_path": "/", "managed_root": "/"}, actor="admin")
+    assert e.value.reason_code == "invalid_storage"
+    assert e.value.detail == "root filesystem is not a storage"
 
 
 def test_paths_are_stored_normalized(db):

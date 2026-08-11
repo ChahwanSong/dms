@@ -1,3 +1,4 @@
+import posixpath
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
@@ -42,8 +43,24 @@ def create_storage(body: StorageCreate, request: Request,
 @router.put("/api/admin/storages/{name}")
 def update_storage(name: str, body: StorageUpdate, request: Request,
                    identity: Identity = Depends(require_admin)):
+    repos = request.app.state.repos
+    current = repos.storages.get(name)
+    if current is None:
+        raise HTTPException(status_code=404, detail="storage_not_found")
+    # 슬라이스 24 §2.4: 진행 중 잡이 참조하는 스토리지의 경로·백엔드 변경을 막는다
+    # -- preview 에서 확인한 경로와 execution 이 도는 경로가 갈라지는 TOCTOU(확인
+    # 게이트 우회)의 봉인이다. enabled 토글은 가드 없이 통과: 진행 중 잡의 비상
+    # 차단(비활성화) 경로를 막으면 안 된다. 비교는 저장값과 같은 normpath 정규화
+    # (후행 슬래시만 다른 PUT 의 409 오탐 방지). delete 가드와 같은 요청 레벨
+    # check-then-act 라 원자적이지 않다 -- 잔여 창은 stepper._abs fail-closed 가
+    # 최종 방어이고, 이 가드는 창을 좁힐 뿐 없애지 못한다(설계 §2.4 정직한 한계).
+    changed = (posixpath.normpath(body.mount_path) != current["mount_path"]
+               or posixpath.normpath(body.managed_root) != current["managed_root"]
+               or body.backend_type != current["backend_type"])
+    if changed and repos.requests.active_referencing_storage(name):
+        raise HTTPException(status_code=409, detail="storage_in_use")
     try:
-        return request.app.state.repos.storages.update(
+        return repos.storages.update(
             name, mount_path=body.mount_path, managed_root=body.managed_root,
             backend_type=body.backend_type, enabled=body.enabled,
             actor=audit_actor(identity))
