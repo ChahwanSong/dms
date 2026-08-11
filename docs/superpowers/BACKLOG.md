@@ -296,6 +296,58 @@ phase 관측을 썼다 — 추가 k8s 호출 0, **RBAC 변경 0**, 계약 테스
 - 백필 원천이 존재하지 않으므로 **과거 잡은 전부 NULL 이 맞다** — 지어내지 않고
   `excluded` 건수로 표면화한다.
 
+### 슬라이스 22 후보 «SSH 의존 점검·완화» (사용자 제기, 2026-08-11) — **우선순위 높음**
+
+**계기**: 사용자 프로덕션 클러스터는 노드 간 네트워크는 되지만 **SSH 가 제한**된다.
+
+**조사 결과(2026-08-11, 코드 전수)**:
+- **DMS 런타임에 노드↔노드 SSH 는 없다.** `paramiko` 0건, 노드 호스트명 접속 0건.
+  legacy DMS 는 노드 root SSH 를 썼지만(`testbed/docs/ARCHITECTURE.md` §15 의
+  `ssh-host-exec`) **clean-slate 구현은 그 의존이 없다.**
+- **SSH 는 정확히 한 곳, MPI rank 기동에 파드↔파드로만 쓰인다.**
+  vcjob 이 `plugins: {"ssh": [], "svc": []}` 선언(`execution_manifests.py:359,399`)
+  → Volcano 가 파드에 키쌍 물질화 + task 별 hostfile 제공. **워커 파드가 컨테이너 안에서
+  `sshd -D`** 를 띄우고(`deploy/docker/Dockerfile.mpifileutils:121`), 런처가
+  `OMPI_MCA_plm_rsh_agent="ssh -o StrictHostKeyChecking=no …"`
+  (`dms_job_runner/commands.py:20-22`)로 **워커 파드 호스트명**에 접속한다
+  (`runner.py:165` — `/etc/volcano/<task>.host`). 대상은 전부 파드이지 노드가 아니다.
+- **그래도 프로덕션에서 깨질 수 있다**: 파드↔파드 SSH 도 물리적으로는 노드 사이를
+  지난다. **CNI 데이터패스에 달렸다** — 오버레이/캡슐화(VXLAN·Geneve·IPIP)면 안쪽 22 가
+  터널에 감싸여 무관하지만, **네이티브 라우팅이면 노드 간 22 차단이 MPI 를 깬다.**
+
+**할 일**:
+1. **프로덕션 CNI 캡슐화 여부 확인**(사용자 환경 정보 필요) — 이게 갈림길이다.
+2. 막힌다면 **파드 내 sshd 포트를 22 밖으로 이동**: `Dockerfile.mpifileutils` 의
+   sshd_config `Port`, `commands.py` 의 `plm_rsh_agent` 에 `-p <port>` — 포트 기반
+   제한이면 이걸로 끝난다. 가장 싼 해법.
+3. 그래도 안 되면 SSH 런처 자체를 대체(PMIx/PRRTE 등) — 범위가 크고 mpifileutils
+   빌드까지 얽히므로 2 가 실패한 뒤에만 검토한다.
+4. **설치 시점 SSH 도 정리 대상**: `deploy/docker/registry-setup.sh` 가 노드에 SSH 해
+   `/etc/containers/registries.conf.d/` 를 쓴다. 런타임은 아니지만 SSH 제한 환경에서는
+   설치가 막히므로 Ansible/DaemonSet/운영자 수기 중 하나로 대체 경로를 문서화한다.
+
+### 슬라이스 21 잔여 (다음 작업 리스트로)
+
+1. **미실행 실증 2건** — 설계 §6-5 디스크 부족(`build_node_disk_low`), §6-6 레지스트리
+   차단(`build_registry_unreachable`). 단위 테스트로만 덮였다. 재현 방법은 확인돼 있다:
+   디스크는 빌드 노드에 큰 파일을 만들어 공식(`avail ≥ 0.15·total + 12GiB`) 아래로
+   내리고, 레지스트리는 `iptables -I FORWARD -p tcp --dport 5000 -j REJECT`(파드
+   egress 를 막아야 한다 — OUTPUT 은 노드 자신의 트래픽만 걸린다. 슬라이스 21 실증에서
+   이 차이로 한 번 헛짚었다).
+2. **`build_failed` 세분화** — OOMKilled(memory limit 1Gi)와 sizeLimit 축출이 파드
+   phase Failed 로 접혀 전부 `build_failed` 가 된다(설계 §4 가 한계로 명시). 로그가
+   급단절된 build_failed 를 만나면 운영자가 OOM/축출을 의심해야 하는 상태 — 파드
+   `status.containerStatuses[].state.terminated.reason` 을 읽어 구분하면 된다.
+3. **리소스 봉투의 설정화** — 지금은 상수다(`build_manifests.py`). 실증에서 emptyDir
+   피크 1.2G·memory 1Gi 통과가 확인됐으므로 당장 급하지 않지만, 노드 사양이 다른
+   환경에서는 env 튜너블이 필요해진다.
+4. **빌더 이미지 미러 갱신 절차의 자동화** — 지금은 `20-config.yaml` 주석의 수기 3줄
+   (pkg-01 에서 pull/tag/push)이다. 미러가 낡으면 buildah 버전이 고정된다.
+5. **pkg-01 podman 우회 삭제** — 포탈 빌드가 성공하므로 `deploy/README.md` §1 의 수기
+   빌드 경로를 "비상용"으로 격하하고 §8 의 "구조적 불가" 경고를 걷어낸다. (슬라이스 21
+   이 §8 경고를 아직 안 걷었다 — 실증 통과 뒤 정리하기로 했던 항목이다.)
+6. **빌드 동시 2개 허용** — 지금은 `api-replicas=1` 전제의 단일 활성 빌드 가드다.
+
 ---
 
 ## 2. 미분류 백로그 (테마별)
