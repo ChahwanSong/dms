@@ -40,7 +40,11 @@ CRI-O at it:
 Verify: `crictl pull pkg-01:5000/dms:dev` from any cluster node should not
 error with "http: server gave HTTP response to HTTPS client".
 
-## 1. Build and push images
+## 1. Build and push images (비상용 — 평상시엔 §8 포탈 빌드를 쓴다)
+
+> 슬라이스 21 부터 **평상시 빌드는 포탈**에서 한다(§8). 이 절은 **비상용**이다 —
+> 클러스터가 아직 없거나(최초 부트스트랩), 포탈/컨트롤러가 죽어 빌드를 제출할 수
+> 없을 때만 쓴다. 포탈 빌드와 달리 적합성 프리플라이트도, 리소스 봉투도 없다.
 
 Also on `pkg-01` (build context = repo root, run from anywhere in the repo):
 
@@ -274,14 +278,14 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 
 ## 8. 포탈에서 이미지 빌드 (슬라이스 11)
 
-> **이 테스트베드에서는 동작하지 않는다(구조적).** 빌드 파드는 빌드 노드(=dms 워커)
-> 위에서 돌면서 GitHub·npm·PyPI·dl.k8s.io 로 나가야 하는데, 테스트베드가
-> "pkg-01 만 인터넷, dms 노드는 ssh 만" 모델이다(`testbed/docs/ARCHITECTURE.md` §15).
-> 이 클러스터의 유일한 포탈 빌드 기록도 `build_failed` 다. pkg-01 을 빌드 노드로
-> 지정할 수도 없다 -- pkg-01 은 어느 클러스터에도 join 하지 않아 에이전트가 없고,
-> `build_node_name` 은 `agent_nodes` 에 실재하는 노드만 받는다.
-> **실제 빌드는 §1 대로 pkg-01 에서 podman 으로 한다**(슬라이스 18 의 d29 도 그렇게
-> 만들었다). 아래 절은 기능 자체의 설명으로 남긴다.
+> **동작한다(슬라이스 21, 2026-08-11 실증).** 이 문서는 한동안 "구조적으로 불가"라고
+> 적고 있었다 -- 빌드 노드(=dms 워커)에 인터넷이 없다는 이유였다. 운영 방식이
+> 정해지면서 그 전제가 바뀌었다: **빌드할 때만 운영자가 그 워커에 인터넷을 열고**,
+> 포탈이 착수 전에 **적합성 프리플라이트**로 실제 개방 여부를 확인한다(§8-7).
+> 빌드 `824ce0e2` 가 `pkg-01:5000/dms:b824ce0e2` 를 실제로 push 했다.
+>
+> §1 의 pkg-01 podman 경로는 **비상용으로 남긴다** -- 클러스터가 없거나 포탈이 죽은
+> 상태에서 이미지를 만들어야 할 때만 쓴다. 평상시 빌드는 포탈에서 한다.
 
 포탈이 `dms-mpifileutils`/`dms`/`dms-agent` 이미지를 빌드 노드 위 bare Pod로 빌드해
 `DMS_BUILD_REGISTRY`(기본 `pkg-01:5000`)로 push하는 기능. `20-config.yaml`의
@@ -311,10 +315,36 @@ IfNotPresent`이므로, **같은 태그를 다시 push해도 클러스터는 절
 태그가 나오는 이유가 바로 이것이다.
 
 **3) 빌드 노드는 인터넷 egress가 필요하다.** 빌드가 hermetic하지 않다 — Buildah
-빌드(`quay.io/buildah/stable` 컨테이너, privileged) 안에서 npm install(포탈
-프론트엔드), `dl.k8s.io`(kubectl 등 설치), `github.com`(소스 clone), PyPI(파이썬
-의존성), Debian bookworm 미러(apt 패키지)에 접근한다. 방화벽/프록시로 격리된 빌드
-노드에서는 실패한다 — 사전에 해당 egress를 열어둘 것.
+빌드(privileged 컨테이너) 안에서 npm install(포탈 프론트엔드), `dl.k8s.io`(kubectl 등
+설치), `github.com`(소스 clone), PyPI(파이썬 의존성), Debian bookworm 미러(apt
+패키지)에 접근한다. **빌드할 때만 운영자가 그 워커에 인터넷을 열면 된다** — 상시
+개방이 아니어도 된다.
+
+**필요한 egress 는 전부 빌드 파드 경로다.** 빌더 이미지는
+`pkg-01:5000/buildah:stable` **로컬 미러**를 쓰므로(`20-config.yaml`) 노드(kubelet/
+CRI-O)는 인터넷 없이도 빌더를 받는다. 슬라이스 21 실증에서 이걸 안 하면 무슨 일이
+나는지 확인했다: 프리플라이트 프로브는 **파드 네트워크**로 검사하는데 빌더 이미지
+pull 은 **노드 네트워크**로 일어나, 노드 egress 만 막으면 프로브는 통과하고 빌드
+파드가 `ImagePullBackOff` 로 앉는다. 미러 갱신은 `20-config.yaml` 주석의 3줄.
+
+**3b) 착수 전에 적합성 프리플라이트가 돈다(슬라이스 21).** 제출하면 빌드 노드 위에
+단발 프로브 파드(`dms-build-pf-<build_id[:12]>`, job image 라 인터넷 없이도 뜬다)가
+세 가지를 검사하고 실패하면 **수 초~수십 초 안에** 고유 사유 코드로 끝낸다 — 2시간
+generic 타임아웃을 기다리지 않는다:
+- egress(저장소 호스트·`quay.io`·`registry-1.docker.io` TCP 443) → `build_node_no_egress`
+  (로그에 실패 호스트 전부)
+- `pkg-01:5000` 도달 → `build_registry_unreachable`
+- 노드 fs 여유(`avail ≥ 0.15·total + 12GiB`) → `build_node_disk_low`(실측 바이트 기록)
+
+실증: 인터넷을 막은 상태로 제출하니 **45초** 만에
+`build_node_no_egress` + `unreachable_443=github.com,quay.io,registry-1.docker.io`.
+
+**3c) 빌드는 데이터 잡과 같은 워커에서 동시에 돈다.** 빌드 노드를 잡 풀에서 빼지
+않는다. 빌드 파드는 봉투(cpu 250m/1000m, mem 128Mi/1Gi, eph 10Gi/12Gi)와
+PriorityClass `dms-build`(10 < `dms-low` 50)를 달고 돈다 — cpu limit 이 실질
+보호막이고(allocatable 1800m 중 최소 800m 이 남는다), 노드가 압박받으면 **빌드가
+먼저 죽는다**. 실증: 빌드 중 scan 잡이 평시와 동일한 대기(`sched_wait=5`)로 완료,
+잡 파드 축출 0건.
 
 **4) 만들어진 태그를 실제로 쓰려면 매니페스트를 손으로 바꿔 apply해야 한다.**
 빌드 성공은 레지스트리에 새 태그를 push하는 것으로 끝난다 — 그 태그로의 자동
