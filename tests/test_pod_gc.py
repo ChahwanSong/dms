@@ -11,7 +11,7 @@ from dms.domain import DataJobState
 from dms.execution import StubExecutionAdapter
 from dms.pod_gc import PodGarbageCollector
 from dms.repositories import Repositories
-from dms.repositories.builds import build_pod_name
+from dms.repositories.builds import build_pod_name, build_probe_pod_name
 
 
 class _BuildRunnerSpy:
@@ -180,11 +180,17 @@ def test_terminal_build_pod_is_terminated_when_build_runner_given(db):
     gc = PodGarbageCollector(repos, adapter, after_seconds=3600, build_runner=build_runner)
     result = gc.run_once(now_iso=now)
 
-    assert result == {"deleted": 1}
+    # 슬라이스 21: 종단 빌드는 빌드 파드 + 프리플라이트 프로브 파드 2개를 남긴다 --
+    # 같은 창으로 함께 수거한다(프로브 로그도 종단 후 after_seconds 동안은 증거로
+    # 보존된다 -- 20-config.yaml 의 GC 창 주석과 같은 이유).
+    assert result == {"deleted": 2}
     # I5: 리터럴 "buildpod" 대신 build_runner.py가 export하는 상수를 쓴다 -- 네 곳
     # (build_runner/build_watcher/pod_gc/routes_builds)이 각자 리터럴을 들고 있으면
     # 한 곳만 드리프트해도 조용히 깨진다.
-    assert build_runner.terminated == [f"{BUILD_REF_PREFIX}/{build_pod_name(bid)}"]
+    assert build_runner.terminated == [
+        f"{BUILD_REF_PREFIX}/{build_pod_name(bid)}",
+        f"{BUILD_REF_PREFIX}/{build_probe_pod_name(bid)}",
+    ]
     assert adapter.terminated == []  # 이 테스트엔 잡 파드가 없다
 
 
@@ -248,3 +254,36 @@ def test_build_runner_none_skips_the_builds_query_entirely(db):
     result = gc.run_once(now_iso=iso_plus(utc_now_iso(), 10))
 
     assert result == {"deleted": 0}
+
+
+def test_build_pod_terminate_failure_still_reclaims_the_probe_pod(db):
+    """10. ref 별 예외 격리: 빌드 파드 terminate 가 죽어도 프로브 파드 수거는
+    계속된다(기존 잡 파드 GC 의 per-ref 격리와 같은 계약)."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+
+    class _BoomOnBuildPod:
+        def __init__(self):
+            self.terminated = []
+
+        def terminate(self, ref):
+            self.terminated.append(ref)
+            if "/dms-build-pf-" not in ref:
+                raise RuntimeError("boom")
+
+    build_runner = _BoomOnBuildPod()
+    bid = _make_build(repos)
+    repos.builds.mark_running(bid)
+    repos.builds.finish(bid, state="Succeeded")
+    finished_at = repos.builds.get(bid)["finished_at"]
+    now = iso_plus(finished_at, 3601)
+
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600,
+                             build_runner=build_runner)
+    result = gc.run_once(now_iso=now)
+
+    assert result == {"deleted": 1}   # 프로브만 성공 카운트
+    assert build_runner.terminated == [
+        f"{BUILD_REF_PREFIX}/{build_pod_name(bid)}",
+        f"{BUILD_REF_PREFIX}/{build_probe_pod_name(bid)}",
+    ]
