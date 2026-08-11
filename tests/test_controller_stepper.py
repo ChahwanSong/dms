@@ -23,6 +23,15 @@ class _Settings:
     pod_gc_interval_seconds = 600
 
 
+def _seed_storage(repos, name):
+    # 슬라이스 24: _abs 의 결측 폴백(상대경로 반환)이 fail-closed 로 바뀌어
+    # (stepper.StorageMissingAtStep) 스텝 가능한 잡은 실제 storage 행이 필요하다.
+    if repos.storages.get(name) is None:
+        repos.storages.create(storage_name=name, mount_path=f"/{name}",
+                              managed_root=f"/{name}/dms", backend_type="cephfs",
+                              actor="test")
+
+
 def test_stepper_loop_registered_second(db):
     loops = build_loops(_Settings(), Repositories(db))
     assert [l.name for l in loops] == [
@@ -38,6 +47,7 @@ def test_stepper_loop_advances_pending_job(db):
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    _seed_storage(repos, "s1")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
         storage_name="s1", target="a", options={}, tool="dscan",
         worker_pool={"identity": {"uid": 1}, "candidates": {"primary": ["n1"]},
@@ -58,6 +68,8 @@ def test_expired_preview_sweep_finalizes_request(db):
         "destination_storage": "dst", "destination": "b"}, priority="mid")
     repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    _seed_storage(repos, "src")
+    _seed_storage(repos, "dst")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="sync", priority="mid",
         source_storage="src", source="a", destination_storage="dst", destination="b",
         options={}, tool="dsync", worker_pool={}, precondition={}, actor="planner")

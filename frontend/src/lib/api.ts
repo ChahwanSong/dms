@@ -92,6 +92,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 슬라이스 24 파괴적 경로 fail-closed. reasonCodes.json 과 같은 커밋 -- 양방향
   // 계약(reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
   unknown_tool: "허용되지 않은 도구입니다 — 관리자에게 문의하세요",
+  storage_missing_at_step: "잡 진행 중 스토리지 정의가 사라졌습니다 — 관리자에게 문의하세요",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",
   request_not_found: "요청을 찾을 수 없습니다",

@@ -12,7 +12,7 @@
 
   "preflight_submit_failed", "execution_submit_failed",
   "preview_submit_failed", "execution_recheck_submit_failed",
-  "unknown_tool",
+  "unknown_tool", "storage_missing_at_step",
 
   "not_authenticated", "admin_required", "admin_token_required", "invalid_token",
   "invalid_actor",

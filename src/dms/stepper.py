@@ -1,6 +1,7 @@
 """job-stepper: 계획된 data_job을 비블로킹 스텝으로 전진시키는 루프 본체. 실행은 어댑터 뒤."""
 import hashlib
 import json
+import posixpath
 import sys
 
 from .artifact_base import resolve_artifact_base
@@ -15,6 +16,18 @@ def _summary_fingerprint(summary):
         return None
     payload = json.dumps(summary, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
+class StorageMissingAtStep(Exception):
+    """_abs 가 storage 행/managed_root 를 찾지 못했다 -- 요청 시점엔 있었는데
+    스텝 시점에 없다는 뜻이다(행 삭제 또는 직접 DB 조작; 라우트 update 는 가드가
+    막는다 -- 슬라이스 24 §2.4). 예전 폴백(상대경로 반환, 로그 0건)은 dsync 를
+    launcher cwd 기준 컨테이너 오버레이에 쓰고 SUCCEEDED 로 끝내는 조용한 데이터
+    증발이었고 drm 이면 cwd 기준 상대 삭제였다 -- 예외로 끊고 종단시킨다."""
+
+    def __init__(self, storage_name):
+        self.storage_name = storage_name
+        super().__init__(f"storage {storage_name!r} missing at step time")
 
 
 class JobStepper:
@@ -45,9 +58,23 @@ class JobStepper:
 
     def _abs(self, storage_name, rel):
         storage = self._repos.storages.get(storage_name)
-        if storage and storage.get("managed_root"):
-            return f"{storage['managed_root']}/{rel}"
-        return rel
+        root = (storage or {}).get("managed_root")
+        if root is None or root == "":
+            # 컬럼이 NOT NULL(migrations.py:209)이라 여기 도달은 사실상 "행
+            # 삭제"와 직접 DB 조작뿐이다(설계 §1-8). 폴백 금지 -- fail-closed.
+            raise StorageMissingAtStep(storage_name)
+        # f-string 결합이 아니라 join(설계 §2.2): 검증 이전에 DB 에 남아 있을 수
+        # 있는 root "/" 행에서 f"{root}/{rel}" 은 "//rel" 을 만들고 POSIX 는
+        # "//" 를 구현 정의로 취급한다(문자열 비교 계열 -- 감사 로그·아티팩트
+        # 표시 -- 와도 어긋난다). normpath 후처리는 "//x" 를 보존해서(실측)
+        # 대안이 못 된다. 정상 root 에선 출력이 동일하다(test_stepper_enrich 앵커).
+        # lstrip("/") 이 붙는 이유: join 은 둘째 인자가 절대경로면 root 를 **버린다**
+        # (join("/cephfs/dms", "/etc") == "/etc"). 요청 경로는 validate_relative_path
+        # (domain.py:79)가 절대경로를 막지만 create_job 은 무검증 INSERT 라 DB 가
+        # 신뢰 경계다(§1-1) -- 변조된 절대 target 이 그대로 실리면 drm 이
+        # managed_root 밖을 지운다. 기존 f-string 은 "/cephfs/dms//etc" 로 안에
+        # 가뒀었고, 그 봉쇄를 join 치환의 부수효과로 잃을 수는 없다.
+        return posixpath.join(root, rel.lstrip("/"))
 
     def _artifact_base(self):
         # 슬라이스 18: DB 가 env 를 이긴다(설계 §2.1). JobStepper 는 매 틱
@@ -153,6 +180,20 @@ class JobStepper:
         # 걱정한 "매 틱 예외로 영구히 낀 잡"은 종단이라 애초에 생기지 않는다.
         if job["tool"] not in TOOL_TO_POLICY:
             return self._fail_closed(job, reason_code="unknown_tool")
+        try:
+            return self._dispatch(job)
+        except StorageMissingAtStep as exc:
+            # 종단 전이의 reason_code 만으론 "어느 스토리지가 없었는지"가 남지
+            # 않는다 -- 이벤트로 보강한다(설계 §2.4). run_once 의 step_error
+            # (매 틱 재시도 루프)와 달리 여기는 종단이라 한 번만 남는다.
+            self._repos.observability.record_event(
+                component="stepper", severity="error",
+                event_type="storage_missing_at_step",
+                message=f"storage={exc.storage_name} job={job['job_id']}",
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="storage_missing_at_step")
+
+    def _dispatch(self, job) -> str:
         state = job["state"]
         if state == DataJobState.PENDING.value:
             return self._submit_preflight(job)

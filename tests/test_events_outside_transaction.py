@@ -85,7 +85,19 @@ class _StepperSettings:
     vcjob_ttl_seconds = 86400
 
 
+def _seed_storage(repos, name):
+    # 슬라이스 24: _abs 의 결측 폴백(상대경로 반환)이 fail-closed 로 바뀌어
+    # (stepper.StorageMissingAtStep) 스텝 가능한 잡은 실제 storage 행이 필요하다.
+    # 이 파일의 _TxTrackingDB 는 "events INSERT 가 트랜잭션 밖"만 본다 --
+    # storages.create 가 트랜잭션을 하나 더 여는 것은 그 단언과 무관하다.
+    if repos.storages.get(name) is None:
+        repos.storages.create(storage_name=name, mount_path=f"/{name}",
+                              managed_root=f"/{name}/dms", backend_type="cephfs",
+                              actor="test")
+
+
 def _scan_job(repos):
+    _seed_storage(repos, "s1")
     rid = repos.requests.create(
         operation="scan", requester_id="alice", actor="alice", resource_key="k",
         payload={"storage": "s1", "target": "a"}, priority="mid")
