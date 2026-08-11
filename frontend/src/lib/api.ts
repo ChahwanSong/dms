@@ -121,6 +121,14 @@ export const REASON_MESSAGES: Record<string, string> = {
   poll_failed: "빌드 상태를 확인하지 못했습니다",
   unknown_build_node: "등록된 에이전트 노드 중에서 선택해 주세요",
   build_timeout: "빌드가 제한 시간을 넘겨 중단되었습니다",
+  // 슬라이스 21 빌드 프리플라이트/회수 세분화. reasonCodes.json 과 같은 커밋 --
+  // 양방향 계약(reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
+  build_stuck_pending: "빌드 파드가 스케줄되지 못한 채 제한 시간을 넘겼습니다 — 빌드 노드 상태·여유를 확인하세요",
+  build_preflight_timeout: "빌드 적합성 확인이 제한 시간을 넘겼습니다 — 빌드 노드가 내려갔거나 프로브가 스케줄되지 못했을 수 있습니다",
+  build_preflight_failed: "빌드 적합성 확인에 실패했습니다 — 로그를 확인하세요",
+  build_node_no_egress: "빌드 노드에서 인터넷으로 나갈 수 없습니다 — 운영자가 인터넷을 아직 열지 않았을 수 있습니다",
+  build_registry_unreachable: "빌드 노드에서 이미지 레지스트리에 연결할 수 없습니다",
+  build_node_disk_low: "빌드 노드의 디스크 여유가 부족합니다 — 로그의 실측 수치를 확인하세요",
   invalid_build_ref: "빌드 참조가 올바르지 않습니다 — 관리자에게 문의하세요",
   rollout_in_progress: "이미 진행 중인 롤아웃이 있습니다",
   patch_failed: "워크로드 패치에 실패했습니다 — 컨트롤러 RBAC/로그를 확인하세요",

@@ -80,7 +80,12 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
         loops.append(Loop("build-watcher", settings.build_watcher_interval_seconds,
                           lambda: BuildWatcher(
                               repos, build_runner,
-                              timeout_seconds=settings.build_timeout_seconds).run_once()))
+                              timeout_seconds=settings.build_timeout_seconds,
+                              # 슬라이스 21 §2.5: 프로브 대기 상한 -- 이게 없으면
+                              # Pending 빌드가 프로브 영구 오류 시 갇힌다.
+                              preflight_timeout_seconds=(
+                                  settings.build_preflight_timeout_seconds),
+                          ).run_once()))
     # rollout_runner가 없으면(기존 호출자) 루프를 아예 넣지 않는다 --
     # build-watcher와 같은 하위호환 규칙이다.
     if rollout_runner is not None:

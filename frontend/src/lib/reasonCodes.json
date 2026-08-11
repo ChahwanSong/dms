@@ -7,6 +7,8 @@
   "orphan_recovery", "preflight_failed", "execution_failed", "empty_preview",
   "preview_timed_out", "preview_failed", "execution_recheck_failed",
   "preview_expired", "build_timeout", "build_failed",
+  "build_stuck_pending", "build_preflight_timeout", "build_preflight_failed",
+  "build_node_no_egress", "build_registry_unreachable", "build_node_disk_low",
 
   "preflight_submit_failed", "execution_submit_failed",
   "preview_submit_failed", "execution_recheck_submit_failed",
