@@ -100,6 +100,14 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
 def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[str, str]:
     results: dict[str, str] = {}
     for loop in loops:
+        # 슬라이스 22 §2.5 규약: 리스 획득은 **의도적으로** per-loop try 밖이다.
+        # 여기의 DB 죽음(transaction 의 BEGIN)은 재연결 + 1회 재시도(db.py §2.3)
+        # 로 같은 틱에서 복구되고, 재연결조차 실패하는 지속 장애면 예외가 그대로
+        # 전파돼 프로세스가 죽는다 -- 컨트롤러엔 HTTP 헬스가 없으므로 이
+        # crash-restart 가 api 자기 종료(§2.4)의 동등물이다. try 안으로 옮기는
+        # 리팩터링 금지: 옮기면 지속 장애가 "error 결과로 접혀 조용히 도는
+        # 정지"가 된다(test_persistent_lease_death_still_crashes_the_controller
+        # 가 이 규약의 집행부다).
         acquired = repos.control.try_acquire_lease(
             f"loop:{loop.name}", holder,
             lease_seconds=max(loop.interval_seconds * 3, 30))

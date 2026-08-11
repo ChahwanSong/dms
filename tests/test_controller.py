@@ -180,3 +180,19 @@ def test_lease_begin_death_recovers_in_the_same_tick_without_crash(db, monkeypat
     assert result == {"solo": "ok"}   # 예외 없음 = RESTARTS 불변의 단위 등가물
     assert ticks == [1]               # 같은 틱에서 루프까지 실행됐다
     assert db.reconnect_count == 1
+
+
+def test_persistent_lease_death_still_crashes_the_controller(db, monkeypatch):
+    # 슬라이스 22 §2.5 안전망 보존: 재연결조차 소용없는 지속 장애는 지금처럼
+    # per-loop try **밖**에서 전파돼 프로세스가 죽고(crash-restart), Deployment
+    # 재시작이 새 커넥션을 얻는다. 컨트롤러엔 HTTP 헬스가 없으므로 이것이 api
+    # 자기 종료(§2.4)의 동등물이다. 이 테스트는 "리스 획득을 try 안으로 옮기는"
+    # 리팩터링을 금지하는 규약의 집행부다 -- 옮기면 지속 장애가 error 결과로
+    # 접혀 "조용히 도는 정지"가 된다(90분 방치 사건의 컨트롤러판).
+    def boom(component, holder, lease_seconds, now_iso=None):
+        raise RuntimeError("db unreachable")
+
+    repos = Repositories(db)
+    monkeypatch.setattr(repos.control, "try_acquire_lease", boom)
+    with pytest.raises(RuntimeError):
+        run_all_once([Loop("solo", 30, lambda: None)], repos, holder="h1")
