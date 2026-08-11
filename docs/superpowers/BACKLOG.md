@@ -20,9 +20,10 @@ SDD 레저의 `minor (deferred)`, `deploy/README.md`의 미해결 값에 흩어�
 
 ## 0. 현재 상태
 
-- 슬라이스 1~22 완료.
-- 테스트베드 이미지: 제어면 `dms:d34`, 에이전트 `dms-agent:d34`,
-  잡 러너 `dms-mpifileutils:d27`. 태그 체계를 dNN/jobNN 분리에서 단일 dNN 으로
+- 슬라이스 1~22, 24 완료(23·25·26 은 설계만 있고 미착수).
+- 테스트베드 이미지: 제어면 `dms:d35`, 에이전트 `dms-agent:d35`,
+  잡 러너 `dms-mpifileutils:d35` — 슬라이스 24 에서 **세 이미지의 태그가 처음으로
+  일치**한다(층3 러너가 잡 이미지에 살아서 d27 로 방치할 수 없었다). 태그 체계를 dNN/jobNN 분리에서 단일 dNN 으로
   바꿨다 — 세 이미지가 같은 소스 트리에서 나오고 agent 는 나머지 둘을 같은 태그로
   참조해 빌드되므로 분리가 오히려 함정이었다.
 - ✅ 슬라이스 15 nsync 카운트 파서 **실증 완료**(d27, 잡 ace0581d):
@@ -448,6 +449,73 @@ kwargs 를 URL 파라미터보다 우선하므로, 안 걸러내면 운영자 �
 
 ---
 
+### ✅ 슬라이스 24 «파괴적 경로 fail-open 봉인» — **완료·실증 5/5**(2026-08-12, d35)
+
+설계 `specs/2026-08-11-dms-destructive-failopen-slice24-design.md`, 플랜
+`plans/2026-08-11-dms-destructive-failopen-slice24.md`.
+백엔드 **1189 passed**(기준선 1166 +23) / 프론트 228 / tsc 0. §2.1 의 4건을 닫았다.
+이미지는 제어면·에이전트·**잡 러너까지** d35 (층3 이 잡 이미지에 살기 때문 —
+`DMS_JOB_IMAGE` 가 d27 로 뒤처져 있었다).
+
+**실증(전부 실 클러스터, 되돌릴 수 있는 조작만)**
+
+1. **§6-1 파괴적 정상 경로 무회귀** — 전용 드릴 디렉터리
+   `/cephfs/dms/slice24-rm-drill`(f1·f2·sub/f3, 소유 10003:10000)에 rm 잡을
+   preview→confirm→실행. **Succeeded**, `{"files": 5, "returncode": 0}`.
+   드릴 디렉터리는 사라졌고 **형제 9개는 전부 무손상**. 층1~3 을 모두 무변경
+   통과함을 파괴적 연산으로 직접 확인했다.
+2. **§6-2 `"/"` 등록 거부** — `{mount "/", root "/"}` 와 `{mount "/cephfs", root "/"}`
+   둘 다 **422 `invalid_storage`**. 같은 요청에서 정상 조합은 **201** (무회귀).
+3. **§6-3 층1 — 이번 슬라이스의 핵심 증거.** Pending 잡 2건(대조군 `dscan` +
+   변조 `dwalk`)을 만들고 drain 해제. 변조 잡은 **Pending → Rejected
+   `unknown_tool`**(중간 상태 없음), **pod/vcjob 0건** — 제출 자체가 막혔다.
+   같은 틱에 대조군은 **Succeeded, 453 파일 스캔** — 정상 경로는 끝까지 정상이다.
+   대조군이 있어서 "막혔다"와 "그냥 안 돌았다"가 구분된다.
+4. **§6-4 층3 단독** — d35 잡 이미지 파드에서 `DMS_JR_TOOL=sh` 로 러너만 실행:
+   `rc=1`, stderr `DMS_JR_UNKNOWN_TOOL tool='sh' allowed=('dscan','dsync','nsync','drm')`,
+   `summary.json == {"returncode": 1, "files": null, "bytes": null}`(3키 계약, 모름은
+   null). mpirun/ssh 시도 흔적 0 — 부작용 이전에 끊겼다.
+5. **§6-5 고아 복구** — 3건 재현 → **한 틱에 전부 복구**(`orphan_recovery` 전이 3건),
+   재스윕 **0건**.
+
+**🔎 실증이 설계 전제 2건을 정정했다(§1-10 관련):**
+- 설계는 "`record_result` 가 무조건 INSERT 라 **results 중복 삽입**이 가능하다 —
+  복구가 이력을 오염시킨다"고 적었다. **틀렸다.** `results.request_id` 는
+  **PRIMARY KEY**(`migrations.py:117`)라 중복은 구조적으로 불가능하고, 실제로는
+  `UniqueViolation` 으로 **시끄럽게** 실패한다. 조용한 오염 위험은 없었다.
+  따라서 플랜 §6-5(d) 의 "중복 results 원복 DELETE" 절차도 불필요했다 — 실측
+  결과 request 당 results 는 정확히 1행이었다.
+- 그 대신 **행 단위 격리(§2.3)가 라이브에서 실제로 발화했다**: 위 재현이
+  (요청을 되돌리는 방식 탓에 results 행이 이미 있어) 독 행 3개를 만들었고,
+  세 행이 **각각 독립적으로** 실패해 `orphan_recovery_failed` 이벤트 3건을 남겼으며
+  **서로를 막지 않았다**. 플랜은 이 경로를 "독 행 없인 발화하지 않으니 단위 테스트
+  몫"이라고 정직하게 적었는데, 재현이 우연히 진짜 독 행을 만들어 **프로덕션에서
+  증명**됐다. 구 코드였다면 첫 예외가 나머지 전부를 다음 틱으로 밀었을 자리다.
+- 부수 관찰: `finalize_from_job` 은 원자적이지 않다 — 상태 전이는 커밋되고 그
+  뒤 `record_result` 가 터졌다(그래서 재스윕은 0인데 이벤트는 3건). 실 고아
+  (finalize 가 아예 안 돈 경우)엔 results 행이 없어 이 경로가 안 생기지만,
+  "부분 적용된 finalize" 자체는 남는 관찰이다 → §2.1 에 항목으로 남긴다.
+
+**구현 중 에이전트가 잡은 플랜 결함 3건**(전부 고쳐서 반영):
+- **가장 중요**: 플랜의 `posixpath.join(root, rel)` 은 `rel` 이 절대경로면 root 를
+  **통째로 버린다**(`join("/cephfs/dms", "/etc") == "/etc"`). 기존 f-string 은
+  `"/cephfs/dms//etc"` 로 **안에 가두고 있었다** — `//` 를 없애는 수정이 그 봉쇄까지
+  걷어내면 fail-open 하나를 닫으면서 **더 나쁜 것(drm 이 managed_root 밖을 삭제)을
+  연다**. `rel.lstrip("/")` 로 구현하고 회귀 테스트
+  (`test_absolute_target_in_db_cannot_escape_managed_root`)를 추가했다.
+- 플랜이 지정한 storages 뮤테이션이 **살아남았다**(일반 경로 규칙이 이미 `"/"` 를
+  잡으므로 명시 분기는 이빨이 0이었다) → `detail == "root filesystem is not a storage"`
+  까지 고정하는 테스트를 추가해 명시 분기 자체를 계약으로 걸었다.
+- 플랜이 **기존 테스트 1건을 놓쳤다** — `test_run_job_unknown_tool_summary_is_nulls`
+  가 미지 도구의 `rc == 0`(= 이 슬라이스가 닫는 fail-open)을 고정하고 있었다.
+  삭제 대신 `_build_summary` 순수 함수 층으로 **재조준**해 회귀 그물을 보존했다.
+
+**남은 것**: 없음(설계 §7 의 비목표는 의도적 제외). 잔여 창은 §2.4 의
+check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것을 코드 주석에
+명시했다.
+
+---
+
 ## 2. 미분류 백로그 (테마별)
 
 ### 2.1 러너 / 실행
@@ -459,14 +527,18 @@ kwargs 를 URL 파라미터보다 우선하므로, 안 걸러내면 운영자 �
   `bytes_total`은 sync 전용으로 남는다(`slice15-design.md:121`).
 - **소급 백필 없음**(슬라이스 15 이전 잡), **프리뷰 카운트 DB 미승격**,
   **파일별 상세·에러 카운트·전송률 없음**.
-- `storages.managed_root = "/"` 허용 → `_abs`가 `//team/data` 생성 가능
-  (phase3c `progress.md:24`, 검증 강화 미이행).
-- `_abs()` 스토리지 결측 폴백이 로그를 안 남김(phase3c `:22`).
-- 고아 복구 쿼리에 `LIMIT` 없음 — 크래시루프 대량시(phase3c `:29`).
-- `tool_argv` 미지 도구가 `drm` 분기로 흘러감(phase3c `:6`) — 상류 enum 검증에만 의존.
-  **파괴적 경로의 fail-open 형태**.
+- ✅ **[슬라이스 24 에서 4건 전부 닫힘]** — 아래 §2.1-완료 참조.
+  - ~~`storages.managed_root = "/"` 허용 → `_abs`가 `//team/data` 생성 가능~~
+  - ~~`_abs()` 스토리지 결측 폴백이 로그를 안 남김~~
+  - ~~고아 복구 쿼리에 `LIMIT` 없음~~
+  - ~~`tool_argv` 미지 도구가 `drm` 분기로 흘러감~~
 - `imagePullPolicy: IfNotPresent` + 태그 재사용 = 노드 캐시 stale(phase3c `:88`).
   고유 태그 관례로만 완화됨.
+- **`finalize_from_job` 이 원자적이지 않다**(슬라이스 24 실증에서 관찰). 상태 전이는
+  커밋되고 그 뒤 `record_result` 가 터질 수 있다 — 그러면 요청은 종단인데 results
+  행이 없다. 실 고아 경로(finalize 가 아예 안 돈 경우)엔 results 행이 없어 이 창이
+  안 생기지만, 두 쓰기를 한 트랜잭션으로 묶으면 구조적으로 닫힌다. 지금은 행 단위
+  격리(슬라이스 24 §2.3)가 이걸 이벤트로 표면화하므로 조용하지는 않다.
 
 ### 2.2 포탈
 - 슬라이스 1 FAST-FOLLOW 7건(`.superpowers/sdd/2026-08-04-dms-portal-slice1/progress.md:41-43`,
