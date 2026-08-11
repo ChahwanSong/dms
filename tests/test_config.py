@@ -65,3 +65,12 @@ def test_build_preflight_timeout_default_and_env_override():
     assert Settings.from_env(VALID).build_preflight_timeout_seconds == 180
     s = Settings.from_env({**VALID, "DMS_BUILD_PREFLIGHT_TIMEOUT_SECONDS": "60"})
     assert s.build_preflight_timeout_seconds == 60
+
+
+def test_readyz_exit_failures_default_and_env_override():
+    # 슬라이스 22 §2.4: 연속 readyz 실패 자기 종료 임계(10s 프로브 기준 30 ≈ 5분,
+    # 0=비활성). _SERVER_INT_KEYS 튜플에만 넣으면 from_env 의 **extra 가
+    # 배선한다 -- 필드/키 양쪽이 실제로 이어졌는지 고정(빌드 프리플라이트 선례).
+    assert Settings.from_env(VALID).readyz_exit_failures == 30
+    assert Settings.from_env(
+        {**VALID, "DMS_READYZ_EXIT_FAILURES": "0"}).readyz_exit_failures == 0

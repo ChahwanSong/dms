@@ -5,7 +5,9 @@ def test_healthz_is_public(client):
 def test_readyz_ok(client):
     r = client.get("/readyz")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    # 슬라이스 22 §2.6: kubelet 은 상태 코드만 본다 -- 본문 카운터는 운영자용
+    # (curl 한 번으로 재연결 빈도를 본다). 프로브 계약 무영향.
+    assert r.json() == {"status": "ok", "reconnects": 0, "last_reconnect_at": None}
 
 
 def test_admin_route_requires_auth(client):

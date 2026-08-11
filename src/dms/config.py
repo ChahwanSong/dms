@@ -39,6 +39,12 @@ _SERVER_INT_KEYS = (
     # 불가로 보고 build_preflight_timeout 으로 즉시 회수한다(2h generic 대기를
     # 수 분으로 줄이는 것이 이 슬라이스의 존재 이유다).
     ("DMS_BUILD_PREFLIGHT_TIMEOUT_SECONDS", "build_preflight_timeout_seconds", 180),
+    # 연속 readyz 실패 자기 종료 임계(슬라이스 22 §2.4). 프로브 주기 10s 기준
+    # 30 이면 약 5분이다. **0 은 명시적 비활성** -- 운영자가 장치를 끄고 관찰만
+    # 하고 싶을 때의 탈출구다. liveness 를 DB 에 직결하지 않는 이유는 그쪽이
+    # 90초 만에 발화해 DB 순단에도 파드를 재시작시키고, CrashLoopBackOff 백오프가
+    # DB 복귀 **후의** 회복을 오히려 늦추기 때문이다(replicas 1 이라 그동안 0대).
+    ("DMS_READYZ_EXIT_FAILURES", "readyz_exit_failures", 30),
     ("DMS_EVENT_RETENTION_DAYS", "event_retention_days", 30),
     # 롤아웃 루프 간격 10초 -> per-loop 리스 max(10*3, 30)=30초. 설계 §2: 리스는
     # 갱신되지 않으므로 긴 간격은 컨트롤러 자기 갱신 후 재획득을 그만큼 늦춘다.
@@ -136,6 +142,7 @@ class Settings:
     build_watcher_interval_seconds: int = 15
     build_timeout_seconds: int = 7200
     build_preflight_timeout_seconds: int = 180
+    readyz_exit_failures: int = 30
     event_retention_days: int = 30
     rollout_interval_seconds: int = 10
     rollout_timeout_seconds: int = 600

@@ -1,4 +1,6 @@
 import os
+import signal
+import sys
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response
@@ -28,7 +30,13 @@ from .routes_releases import router as releases_router
 from .routes_metrics import router as metrics_router
 
 
-def create_app(settings: Settings, db: Database) -> FastAPI:
+def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
+    # exit_fn: readyz 연속 실패 자기 종료의 실행부(슬라이스 22 §2.4). 기본은
+    # 자신에게 SIGTERM -- uvicorn graceful 종료 -> 컨테이너 종료 -> restartPolicy
+    # 재시작이다. 주입은 테스트용(실 SIGTERM 없이 발화를 검증한다).
+    if exit_fn is None:
+        def exit_fn():
+            os.kill(os.getpid(), signal.SIGTERM)
     app = FastAPI(title="dms")
     app.state.settings = settings
     app.state.repos = Repositories(db)
@@ -50,6 +58,11 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
     def healthz():
         return {"status": "ok"}
 
+    # 연속 readyz 실패 카운터(슬라이스 22 §2.4). 리스트에 담는 이유는 클로저에서
+    # 재바인딩하기 위함이고, 요청 처리가 단일 커넥션 RLock 뒤에서 직렬화되므로
+    # 별도 락이 필요 없다.
+    _readyz_fails = [0]
+
     @app.get("/readyz")
     def readyz():
         # liveness(/healthz)와 달리 실제 의존성(DB)에 쿼리를 날려 readiness를 검증한다 —
@@ -58,8 +71,23 @@ def create_app(settings: Settings, db: Database) -> FastAPI:
         try:
             db.query_one("SELECT 1 AS x")
         except Exception:
+            _readyz_fails[0] += 1
+            limit = settings.readyz_exit_failures
+            # 재연결(§2.2)이 들어간 뒤의 readyz 실패는 "**재연결까지 실패**"를
+            # 뜻한다. 그 상태로 임계(기본 30회 ≈ 5분)를 넘기면 파드 교체가 옳다 --
+            # 이미 readiness 503 으로 Service 에서 빠져 있어 종료로 잃는 가용성이
+            # 0 이고, 2026-08-11 사건의 실측된 유일한 처방이 "파드 삭제"였다.
+            if limit > 0 and _readyz_fails[0] >= limit:
+                print(f"readyz failed {_readyz_fails[0]} times in a row "
+                      f"(limit={limit}) -- self-terminating", file=sys.stderr)
+                exit_fn()
+            # 503 본문은 기존 그대로 -- 프로브 계약을 건드리지 않는다.
             return JSONResponse(status_code=503, content={"status": "degraded"})
-        return {"status": "ok"}
+        _readyz_fails[0] = 0   # **연속** 실패만 센다 -- 성공 한 번이면 리셋
+        # kubelet 은 상태 코드만 본다 -- 본문 카운터는 운영자용이다(curl 한 번으로
+        # 재연결 빈도를 본다). 조용한 재연결을 만들지 않기 위한 창구(§2.6).
+        return {"status": "ok", "reconnects": db.reconnect_count,
+                "last_reconnect_at": db.last_reconnect_at}
 
     app.include_router(auth_router)
     app.include_router(accounts_router)
