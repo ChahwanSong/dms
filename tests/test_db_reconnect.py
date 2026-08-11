@@ -256,3 +256,83 @@ def test_sqlite_syntax_error_propagates_without_reconnect(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         db.execute("SELEC 1")
     assert db.reconnect_count == 0
+
+
+# ---- §2.3 트랜잭션 경계: BEGIN 이후는 절대 재시도하지 않는다 ----
+
+def test_death_after_yield_is_never_retried_and_preserves_the_original_exception(monkeypatch):
+    old = _FakePgConn(fail_on=["UPDATE"])
+    new = _FakePgConn()
+    db = _pg_db(monkeypatch, old, [new])
+    with pytest.raises(FakeOperationalError) as e:
+        with db.transaction():
+            db.execute("UPDATE t SET a = 1")
+    assert e.value is old.raised[-1]   # 원 예외 "그 객체"가 보존된다
+    # 죽은 문장은 구 커넥션에서 1회만 시도됐고 새 커넥션에서 재실행되지 않았다 --
+    # 서버는 BEGIN 이후 문장들을 커넥션 소멸과 함께 폐기했으므로, 재실행은
+    # 부분 적용을 "만들어내는" 동작이다(§2.3).
+    assert old.executed == ["BEGIN", "UPDATE t SET a = 1"]
+    assert not any("UPDATE" in sql for sql in new.executed)
+    # 죽은 커넥션에 ROLLBACK 을 또 치지 않는다 -- 새 OperationalError 가 원
+    # 예외를 가리는 현행 버그(§1-2)의 수정점. 서버는 커넥션 소멸 시점에
+    # 트랜잭션을 폐기하므로 생략이 PG 의미론상 안전하다.
+    assert not any("ROLLBACK" in sql for sql in old.executed)
+    # 재연결은 됐다 -- 달라지는 건 "그 다음" 호출이 성공한다는 것뿐이다.
+    assert db.reconnect_count == 1
+    db.execute("INSERT INTO t (a) VALUES (1)")
+    assert new.executed == ["INSERT INTO t (a) VALUES (1)"]
+
+
+def test_begin_death_is_retried_once_and_the_transaction_proceeds(monkeypatch):
+    # BEGIN(yield 전)은 아직 아무것도 적용하지 않았다 -- 유일한 재시도 허용
+    # 지점(§2.3). 컨트롤러 리스 획득이 정확히 여기서 죽는다(§2.5).
+    old = _FakePgConn(fail_on=["BEGIN"])
+    new = _FakePgConn()
+    db = _pg_db(monkeypatch, old, [new])
+    with db.transaction():
+        db.execute("INSERT INTO t (a) VALUES (1)")
+    assert old.executed == ["BEGIN"]
+    assert new.executed == ["BEGIN", "INSERT INTO t (a) VALUES (1)", "COMMIT"]
+    assert db.reconnect_count == 1
+
+
+def test_live_connection_error_inside_transaction_still_rolls_back(monkeypatch):
+    # 살아있는 커넥션의 업무 예외(제약 위반류)는 현행 유지(§4): ROLLBACK 후 전파.
+    conn = _FakePgConn()
+    db = _pg_db(monkeypatch, conn, [])
+    with pytest.raises(RuntimeError):
+        with db.transaction():
+            db.execute("INSERT INTO t (a) VALUES (1)")
+            raise RuntimeError("business rule")
+    assert conn.executed == ["BEGIN", "INSERT INTO t (a) VALUES (1)", "ROLLBACK"]
+    assert db.reconnect_count == 0
+
+
+def test_commit_death_is_not_retried_on_the_new_connection(monkeypatch):
+    # COMMIT 재시도는 유실을 성공으로 위장한다: 서버가 트랜잭션을 폐기한 뒤 새
+    # 커넥션의 COMMIT 은 빈 트랜잭션의 no-op "성공"이다(§2.3 yield 이후 금지의
+    # 극단). 정직하게 던지고, 다음 호출자를 위한 재연결만 한다.
+    old = _FakePgConn(fail_on=["COMMIT"])
+    new = _FakePgConn()
+    db = _pg_db(monkeypatch, old, [new])
+    with pytest.raises(FakeOperationalError):
+        with db.transaction():
+            db.execute("INSERT INTO t (a) VALUES (1)")
+    assert old.executed == ["BEGIN", "INSERT INTO t (a) VALUES (1)", "COMMIT"]
+    assert new.executed == []            # 새 커넥션엔 아무것도 다시 치지 않았다
+    assert db.reconnect_count == 1
+
+
+def test_txn_depth_is_restored_so_the_next_standalone_statement_can_retry(monkeypatch):
+    # 실패한 트랜잭션이 깊이 카운터를 새면(leak) 이후 모든 단독 문장이 "트랜잭션
+    # 안"으로 오판돼 재연결이 영구히 꺼진다 -- 복원을 행동으로 고정한다.
+    old = _FakePgConn(fail_on=["UPDATE"])
+    new = _FakePgConn(fail_on=["INSERT"])
+    newer = _FakePgConn()
+    db = _pg_db(monkeypatch, old, [new, newer])
+    with pytest.raises(FakeOperationalError):
+        with db.transaction():
+            db.execute("UPDATE t SET a = 1")
+    db.execute("INSERT INTO t (a) VALUES (1)")   # 깊이 0 복원 -> 재시도가 산다
+    assert newer.executed == ["INSERT INTO t (a) VALUES (1)"]
+    assert db.reconnect_count == 2

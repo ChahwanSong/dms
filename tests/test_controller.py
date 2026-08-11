@@ -1,3 +1,5 @@
+import pytest
+
 from dms.build_runner import StubBuildRunner
 from dms.controller import Loop, build_loops, run_all_once
 from dms.repositories import Repositories
@@ -141,3 +143,40 @@ def test_run_forever_ticks_and_stops(db, settings):
     assert ticks == [1, 1, 1]
     # 첫 틱에서 루프들이 실제 실행됐는지 (리스가 잡혀 있음)
     assert db.query_one("SELECT holder FROM component_leases WHERE component = 'loop:storage-reconciler'")["holder"] == "h1"
+
+
+def test_lease_begin_death_recovers_in_the_same_tick_without_crash(db, monkeypatch):
+    """슬라이스 22 §2.5: 사건 때 컨트롤러는 리스 BEGIN 죽음 -> 크래시 -> 재시작
+    으로 살아났다(RESTARTS +1). 재연결이 들어가면 같은 죽음이 **무크래시 같은
+    틱**에서 복구돼야 한다(재시작으로 잃던 루프 한 바퀴 + 파드 기동 시간 소거).
+    죽음 판정은 방언별(§2.1)이라 sqlite 실 DB 로는 판정 함수를 monkeypatch 해
+    마커 예외를 죽음으로 인식시킨다 -- 게이트만 우회할 뿐, 기전 전체(재연결 ->
+    BEGIN 재시도 -> 리스 획득 -> 루프 실행)는 실 sqlite 파일 재접속으로 통과한다."""
+
+    class _Dead(Exception):
+        pass
+
+    class _DiesOnFirstBegin:
+        def __init__(self, real):
+            self._real = real
+            self.died = False
+
+        def execute(self, sql, params=None):
+            if sql == "BEGIN" and not self.died:
+                self.died = True
+                raise _Dead("connection lost")
+            return self._real.execute(sql, params)
+
+        def close(self):
+            self._real.close()
+
+    db._conn = _DiesOnFirstBegin(db._conn)
+    monkeypatch.setattr(db, "_connection_is_dead",
+                        lambda exc: isinstance(exc, _Dead))
+    repos = Repositories(db)
+    ticks = []
+    result = run_all_once([Loop("solo", 30, lambda: ticks.append(1))], repos,
+                          holder="h1")
+    assert result == {"solo": "ok"}   # 예외 없음 = RESTARTS 불변의 단위 등가물
+    assert ticks == [1]               # 같은 틱에서 루프까지 실행됐다
+    assert db.reconnect_count == 1

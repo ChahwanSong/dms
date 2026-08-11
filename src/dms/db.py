@@ -157,20 +157,42 @@ class Database:
 
     @contextmanager
     def transaction(self):
-        # 경계 의미론(BEGIN 재시도·죽음 시 ROLLBACK 생략)은 Task 2 -- 여기서는
-        # 깊이 계수만 유지해 "트랜잭션 안 문장은 재시도 금지"(§2.3)를 먼저 세운다.
         with self._lock:
-            self._conn.execute("BEGIN")
+            # BEGIN(yield 전)은 아직 아무것도 적용하지 않았다 -- 트랜잭션에서
+            # 유일하게 재연결 + 1회 재시도가 허용되는 지점이다(§2.3). _run 은
+            # 이 시점 _txn_depth == 0 이라 단독 문장과 같은 규칙을 탄다.
+            # 컨트롤러 리스 획득이 정확히 여기서 죽으므로(§1-6) 이 허용이
+            # 컨트롤러 무크래시 같은-틱 복구(§2.5)의 실체다.
+            self._run("BEGIN", None)
             self._txn_depth += 1
             try:
                 yield self
-            except BaseException:
+            except BaseException as exc:
                 self._txn_depth -= 1
-                self._conn.execute("ROLLBACK")
+                if self._connection_is_dead(exc):
+                    # 죽은 커넥션에 ROLLBACK 을 또 치면 새 OperationalError 가
+                    # 원 예외를 가린다(§1-2 현행 버그). 서버는 커넥션 소멸
+                    # 시점에 트랜잭션을 폐기하므로 생략이 PG 의미론상 안전하다.
+                    # 재연결만 해서 다음 호출자가 산 커넥션을 받게 하고, 원
+                    # 예외를 그대로 올린다 -- 호출자는 지금과 동일하게 실패를
+                    # 보고, 달라지는 건 "그 다음" 호출이 성공한다는 것뿐이다.
+                    self._reconnect(cause=exc)
+                else:
+                    # 살아있는 커넥션의 업무 예외(제약 위반 등): 현행 유지(§4).
+                    self._conn.execute("ROLLBACK")
                 raise
             else:
                 self._txn_depth -= 1
-                self._conn.execute("COMMIT")
+                try:
+                    self._conn.execute("COMMIT")
+                except Exception as exc:
+                    if self._connection_is_dead(exc):
+                        # COMMIT 재시도는 금물: 서버가 트랜잭션을 폐기한 뒤 새
+                        # 커넥션의 COMMIT 은 빈 트랜잭션의 no-op "성공"이라
+                        # 유실을 성공으로 위장한다(§2.3 yield 이후 금지의 극단).
+                        # 다음 호출자를 위한 재연결만 하고 정직하게 던진다.
+                        self._reconnect(cause=exc)
+                    raise
 
 
 def dump_json(value) -> str:
