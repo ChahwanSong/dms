@@ -18,6 +18,38 @@ def _summary_fingerprint(summary):
     return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
 
 
+# 슬라이스 25 §2.2: 진단 로그 박제 상한. 파드당 꼬리 16KB x 항목 4 = 총 64KB --
+# builds.LOG_TEXT_MAX(64KB)와 같은 총량 규약이다(계약 테스트가 곱을 고정한다).
+# 상한 없는 박제는 다행 조회에서 이미 격리했더라도(리포지토리 몫) DB 자체를
+# 부풀린다 -- 꼬리를 남기는 이유는 트레이스백·실패 사유가 끝에 몰리기 때문.
+DIAG_TAIL_BYTES = 16 * 1024
+DIAG_MAX_ENTRIES = 4
+
+
+def _diag_entry(pod, log):
+    """박제 항목 하나. log=None(얻을 수 없었다)은 None 그대로 저장한다 --
+    "박제 시점에 이미 없었다"는 사실 자체가 진단이다. 빈 문자열은 정상값이라
+    truthy 검사를 쓰지 않는다(설계 §4). 꼬리 자르기는 바이트 기준이다."""
+    if log is None:
+        return {"pod": pod, "log": None, "truncated": False}
+    raw = log.encode()
+    if len(raw) <= DIAG_TAIL_BYTES:
+        return {"pod": pod, "log": log, "truncated": False}
+    tail = raw[-DIAG_TAIL_BYTES:]
+    # 경계에서 코드포인트 가운데가 잘렸으면 조각을 **버리고** 물러난다. 그냥
+    # errors="replace" 로 넘기면 1~3바이트 조각이 U+FFFD(3바이트)로 부풀어
+    # 결과가 도리어 DIAG_TAIL_BYTES 를 넘는다 -- 상한이 상한이 아니게 된다.
+    # 게다가 원본에 없던 깨진 글자를 진단 로그에 심는 셈이라(한국어 실패 사유가
+    # 흔하다) 버리는 쪽이 정직하다. log 는 str 이라 raw 는 항상 정상 UTF-8 이고,
+    # 선두 연속 바이트를 걷어낸 접미사는 그대로 디코드된다 -- replace 는 방어용.
+    cut = 0
+    while cut < len(tail) and 0x80 <= tail[cut] < 0xC0:
+        cut += 1
+    return {"pod": pod,
+            "log": tail[cut:].decode("utf-8", errors="replace"),
+            "truncated": True}
+
+
 class StorageMissingAtStep(Exception):
     """_abs 가 storage 행/managed_root 를 찾지 못했다 -- 요청 시점엔 있었는데
     스텝 시점에 없다는 뜻이다(행 삭제 또는 직접 DB 조작; 라우트 update 는 가드가
@@ -116,12 +148,37 @@ class JobStepper:
             artifact_base=self._artifact_base(), timeout_seconds=timeout,
             ttl_seconds=self._settings.vcjob_ttl_seconds)
 
-    def _finalize(self, job, job_state, *, reason_code=None, summary=None):
+    def _finalize(self, job, job_state, *, reason_code=None, summary=None, diag=None):
+        # 슬라이스 25 §2.2: diag=(phase, ref) 가 오면 종단 전이 **전에** 박제한다.
+        # 순서가 계약이다 -- 박제 후 크래시하면 잡이 비종단으로 남아 다음 틱이
+        # finalize 를 재시도하고(archive 는 IS NULL 이 중복을 막는다), 역순이면
+        # 종단 잡은 다시 스텝되지 않아 박제 기회가 영영 사라진다.
+        if diag is not None:
+            self._archive_diag(job, *diag)
         self._repos.data_jobs.set_job_state(job["job_id"], job_state,
                                             reason_code=reason_code, actor="stepper")
         self._repos.requests.finalize_from_job(
             job["request_id"], job_state, reason_code=reason_code, summary=summary,
             actor="stepper")
+
+    def _archive_diag(self, job, phase, ref):
+        """실패 종단 시점 파드 로그 박제(설계 §2.2). 어댑터가 launcher 를 앞에
+        놓으므로 [:DIAG_MAX_ENTRIES] 상한이 잘라도 launcher 가 산다. 박제 실패는
+        finalize 를 막지 않는다 -- 한 잡의 로그 때문에 종단 전이가 막히면 잡이
+        낀다 -- 대신 이벤트로 표면화한다(조용한 실패 금지, 설계 §4)."""
+        try:
+            raw = self._exec.read_log(ref)
+            entries = [_diag_entry(pod, log)
+                       for pod, log, _wr in raw[:DIAG_MAX_ENTRIES]]
+            self._repos.data_jobs.archive_diag_logs(job["job_id"], phase=phase,
+                                                    entries=entries)
+        except Exception as exc:
+            self._repos.observability.record_event(
+                component="stepper", severity="warning",
+                event_type="diag_archive_failed",
+                message=f"{type(exc).__name__}: {exc}"[:500],
+                payload={"phase": phase, "ref": ref},
+                request_id=job.get("request_id"))
 
     def _reclaim_if_terminal(self, job, ref):
         """제출 직후 잡이 이미 종단이면(= claim과 제출 사이에 취소가 들어왔다) 방금 만든
@@ -233,7 +290,8 @@ class JobStepper:
             if job["operation"] == "scan":
                 return self._submit_execution(job, DataJobState.RUNNING)
             return self._submit_preview(job)  # Task 7에서 구현
-        self._finalize(job, DataJobState.REJECTED, reason_code="preflight_failed")
+        self._finalize(job, DataJobState.REJECTED, reason_code="preflight_failed",
+                       diag=("preflight", ref))
         return "Rejected"
 
     def _submit_execution(self, job, running_state):
@@ -292,7 +350,8 @@ class JobStepper:
             return "Succeeded"
         target = (DataJobState.TIMED_OUT if status == ExecStatus.TIMED_OUT
                   else DataJobState.FAILED)
-        self._finalize(job, target, reason_code="execution_failed")
+        self._finalize(job, target, reason_code="execution_failed",
+                       diag=("execution", ref))
         return target.value
 
     def _submit_preview(self, job):
@@ -331,9 +390,11 @@ class JobStepper:
                                                 actor="stepper")
             return "ConfirmPending"
         if status == ExecStatus.TIMED_OUT:
-            self._finalize(job, DataJobState.TIMED_OUT, reason_code="preview_timed_out")
+            self._finalize(job, DataJobState.TIMED_OUT, reason_code="preview_timed_out",
+                           diag=("preview", ref))
             return "TimedOut"
-        self._finalize(job, DataJobState.FAILED, reason_code="preview_failed")
+        self._finalize(job, DataJobState.FAILED, reason_code="preview_failed",
+                       diag=("preview", ref))
         return "Failed"
 
     def _poll_or_submit_execution(self, job):
@@ -362,5 +423,6 @@ class JobStepper:
             return "Executing"
         if status == ExecStatus.SUCCEEDED:
             return self._submit_execution(job, DataJobState.EXECUTING)
-        self._finalize(job, DataJobState.REJECTED, reason_code="execution_recheck_failed")
+        self._finalize(job, DataJobState.REJECTED, reason_code="execution_recheck_failed",
+                       diag=("exec_preflight", refs["exec_preflight"]))
         return "Rejected"
