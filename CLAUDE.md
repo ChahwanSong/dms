@@ -43,6 +43,11 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   거치면 다른 세션 커밋에 파일이 섞인다(실제 사고 있었음, BACKLOG §5).
 - **PYTHONPATH 함정**: venv 의 `dms` 편집설치는 **본 저장소** src 를 가리킨다. 워크트리
   코드를 테스트·실행하려면 `PYTHONPATH=<워크트리>/src` 를 명시해야 한다.
+- **런타임은 airgap 이다** (배포 환경은 사내망 — 인터넷 불가. 빌드 타임만 인터넷 가능).
+  포탈·백엔드가 런타임에 로드하는 모든 리소스(폰트·아이콘·스크립트·이미지)는 **번들에
+  포함**돼야 한다 — CDN `<link>`·외부 fetch 금지. 폰트는 @fontsource 류 셀프호스팅,
+  아이콘은 번들되는 라이브러리(lucide-react)나 인라인 SVG. 프론트 빌드 후
+  `dist/index.html` 에 외부 URL 참조가 없는지 확인하는 것이 배포 게이트다.
 
 ## legacy/ — 읽기 전용, 설계 참고용
 
