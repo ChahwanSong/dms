@@ -38,7 +38,16 @@ export interface ArtifactFile {
   phase: string; name: string; size: number; truncated: boolean; content: string;
 }
 export interface JobLogs {
-  phase: string; ref: string; entries: { pod: string; log: string | null }[];
+  phase: string; ref: string;
+  // 슬라이스 25: live = 지금 파드에서 읽음, archived = 실패 종단 시점의 박제 사본.
+  source: "live" | "archived";
+  entries: {
+    // log 은 string | null 이다 -- ""(빈 로그, launcher 의 정상값)와 null(로그를
+    // 얻을 수 없음)은 다른 사실이라 optional 로 뭉개지 않는다.
+    pod: string; log: string | null;
+    waiting_reason?: string | null;   // live 전용 -- 로그가 없는 "이유"의 별 채널
+    truncated?: boolean;              // archived 전용 -- 파드당 16KB 꼬리 잘림
+  }[];
 }
 export interface Storage {
   storage_name: string; mount_path: string; managed_root: string; backend_type: string;

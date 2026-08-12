@@ -113,6 +113,7 @@ test("log tab shows the localized message on a 409 log_not_available error", asy
 });
 
 test("log tab shows the pod-gone message when an entry's log is null", async () => {
+  // 이 payload 에는 source 가 없다 -- 구형 응답 형태에도 죽지 않는다는 회귀 가드를 겸한다.
   server.use(
     http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
     http.get("/api/user/jobs/j1/logs", () =>
@@ -122,4 +123,65 @@ test("log tab shows the pod-gone message when an entry's log is null", async () 
   await userEvent.click(await screen.findByRole("button", { name: "preflight 로그" }));
   expect(await screen.findByText("파드 로그를 더 이상 조회할 수 없습니다")).toBeInTheDocument();
   expect(screen.getByText("p1")).toBeInTheDocument();
+});
+
+test("log tab pairs a null log with its waiting_reason when present", async () => {
+  // null(로그 없음)과 "왜 없는지"(waiting_reason)는 별 채널이다 -- 병기는 하되
+  // null 을 합성 문자열로 뭉개지 않는다(백엔드 계약). ImagePullBackOff 파드는
+  // 로그가 생기기 전에 죽는 대표 사례다.
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
+    http.get("/api/user/jobs/j1/logs", () =>
+      HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "live",
+        entries: [{ pod: "p1", log: null, waiting_reason: "ImagePullBackOff" }] })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "preflight 로그" }));
+  expect(await screen.findByText("파드 로그 없음 — ImagePullBackOff")).toBeInTheDocument();
+});
+
+test("archived response shows the caption and per-entry truncation badge", async () => {
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
+    http.get("/api/user/jobs/j1/logs", () =>
+      HttpResponse.json({ phase: "execution", ref: "vcjob/j1", source: "archived",
+        entries: [{ pod: "j-launcher-0", log: "Traceback tail", truncated: true }] })),
+  );
+  wrap({ execution: "vcjob/j1" });
+  await userEvent.click(await screen.findByRole("button", { name: "execution 로그" }));
+  expect(await screen.findByText("Traceback tail")).toBeInTheDocument();
+  expect(screen.getByText("잡 종료 시점에 저장된 사본 — 파드당 마지막 16KB")).toBeInTheDocument();
+  expect(screen.getByText("뒷부분만 표시")).toBeInTheDocument();
+});
+
+test("a live response shows neither the archived caption nor a truncation badge", async () => {
+  // 캡션·배지가 조건과 무관하게 늘 붙어 있으면 위 테스트는 "검사하는 척"이 된다.
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
+    http.get("/api/user/jobs/j1/logs", () =>
+      HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "live",
+        entries: [{ pod: "p1", log: "live tail", waiting_reason: null }] })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "preflight 로그" }));
+  expect(await screen.findByText("live tail")).toBeInTheDocument();
+  expect(screen.queryByText("잡 종료 시점에 저장된 사본 — 파드당 마지막 16KB")).not.toBeInTheDocument();
+  expect(screen.queryByText("뒷부분만 표시")).not.toBeInTheDocument();
+});
+
+test("an empty-string log renders as content, not as the pod-gone message", async () => {
+  // 빈 로그는 정상값이다(launcher 는 대개 비어 있다) -- truthy 검사로 null 문구를
+  // 내면 "로그가 없다"와 "빈 로그"가 뭉개진다.
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
+    http.get("/api/user/jobs/j1/logs", () =>
+      HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "live",
+        entries: [{ pod: "p1", log: "", waiting_reason: null }] })),
+  );
+  const { container } = wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "preflight 로그" }));
+  await screen.findByText("p1");
+  // 빈 문자열은 text 쿼리로 못 잡으니 <pre> 자체의 존재로 "내용으로 그렸다"를 고정한다.
+  expect(container.querySelector("pre")).not.toBeNull();
+  expect(screen.queryByText("파드 로그를 더 이상 조회할 수 없습니다")).not.toBeInTheDocument();
 });

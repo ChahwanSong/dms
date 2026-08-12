@@ -96,11 +96,30 @@ export function JobViewer({
             <p className="text-bad text-sm">{(logs.error as ApiError).message}</p>
           ) : logs.data ? (
             <div className="space-y-3">
+              {/* 박제 사본은 "지금 파드에서 읽은 것"이 아니다 — 어느 시점의 무엇인지
+                  말해주지 않으면 사용자는 라이브로 오인한다. */}
+              {logs.data.source === "archived" && (
+                <span className="inline-block text-xs text-muted border border-black/10 rounded px-2 py-0.5">
+                  잡 종료 시점에 저장된 사본 — 파드당 마지막 16KB
+                </span>
+              )}
               {logs.data.entries.map((e) => (
                 <div key={e.pod}>
                   <p className="text-xs font-medium">{e.pod}</p>
+                  {e.truncated && (
+                    <span className="inline-block text-xs text-muted border border-black/10 rounded px-2 py-0.5 mb-2">
+                      뒷부분만 표시
+                    </span>
+                  )}
+                  {/* log === null 비교만 쓴다: ""(빈 로그)는 정상값이라 truthy 검사로
+                      묶으면 "비어 있음"이 "로그 없음"으로 둔갑한다. waiting_reason 은
+                      null 을 대체하지 않고 "왜 없는지"를 병기할 뿐이다. */}
                   {e.log === null ? (
-                    <p className="text-muted text-sm">파드 로그를 더 이상 조회할 수 없습니다</p>
+                    <p className="text-muted text-sm">
+                      {e.waiting_reason
+                        ? `파드 로그 없음 — ${e.waiting_reason}`
+                        : "파드 로그를 더 이상 조회할 수 없습니다"}
+                    </p>
                   ) : (
                     <pre className="overflow-x-auto text-xs whitespace-pre-wrap">{e.log}</pre>
                   )}
