@@ -32,12 +32,23 @@ export function Sparkline({ values, width = 120, height = 32, label }: {
 }) {
   const d = sparklinePath(values, width, height);
   if (!d) return <span className="text-muted text-xs">—</span>;
+  // 유효점이 정확히 1개면 path 는 bare M 이라 아무것도 안 보인다. "—" 로 접지
+  // 않는 이유: 첫 리포트 1점은 실측값이지 결측이 아니다 -- 0 과 null 을 뭉개지
+  // 않는 원칙의 SVG 판. 좌표는 path 와 같은 규칙(step 공식, span 0 → 중앙선).
+  const validIdx = values
+    .map((v, i) => (v !== null && Number.isFinite(v) ? i : null))
+    .filter((i): i is number => i !== null);
+  const step = values.length > 1 ? width / (values.length - 1) : 0;
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-8"
          preserveAspectRatio="none" role="img" aria-label={label}>
       {/* currentColor -- 색은 부모의 text-* 유틸리티가 정한다(라이트/다크 공통) */}
       <path d={d} fill="none" stroke="currentColor" strokeWidth={1.5}
             vectorEffect="non-scaling-stroke" />
+      {validIdx.length === 1 && (
+        <circle cx={r2(validIdx[0] * step)} cy={height / 2} r={1.5}
+                fill="currentColor" />
+      )}
     </svg>
   );
 }
