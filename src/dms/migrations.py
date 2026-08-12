@@ -200,6 +200,17 @@ def _apply_migrations(db: Database) -> None:
             -- 건수를 표면화한다. 0 은 정상값(같은 틱 스케줄)이다. BIGINT 는
             -- submit_wait_seconds 와 같은 규약(두 경로 동일 선언형).
             sched_wait_seconds BIGINT,
+            -- 슬라이스 25(실행 단계 진단): 실패 종단 시 스테퍼가 파드 로그를 박제하는
+            -- 자리. JSON {"phase", "at", "entries": [{"pod", "log", "truncated"}]} --
+            -- 파드당 꼬리 16KB, 항목 최대 4, 총 <=64KB(builds.LOG_TEXT_MAX 와 같은
+            -- 총량, stepper 상수와 계약 테스트가 강제). write-once 는 SQL 술어
+            -- (IS NULL, archive_diag_logs)가 강제한다. NULL = 박제 없음(성공 종단/
+            -- 배포 전 종단/박제 실패 -- 백필하지 않는다, 설계 §7). 항목의 log 이
+            -- null 이면 "그 파드 로그를 얻을 수 없었다"는 뜻이고 ""(빈 로그)는
+            -- 정상값이다 -- 둘을 뭉개지 않는다. 다행 조회(list_jobs 등 4곳)는 이
+            -- 컬럼을 절대 싣지 않는다 -- 5초 폴링에 최대 50x64KB 가 실리는 builds
+            -- I2 의 그 문제를 재발시키지 않기 위해서다.
+            diag_logs TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
@@ -469,6 +480,9 @@ def _ensure_columns(db):
         # 의 실 500 교훈: CREATE 만 고치면 기배포 DB 에서만 컬럼이 없다).
         ("data_jobs", "exec_submitted_at", "TEXT"),
         ("data_jobs", "sched_wait_seconds", "BIGINT"),
+        # 슬라이스 25 진단 로그 박제 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스
+        # 14 의 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
+        ("data_jobs", "diag_logs", "TEXT"),
         ("requests", "batch_id", "TEXT"),
         # 슬라이스 19: 기배포 DB 는 CREATE 를 다시 안 탄다 -- 양쪽에 넣지 않으면
         # planner 의 req["auth_method"] 가 라이브에서만 없다(슬라이스 14 교훈).

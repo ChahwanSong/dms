@@ -405,3 +405,53 @@ def test_migrate_adds_sched_wait_columns_without_backfill(db):
                           FROM data_jobs WHERE job_id = 'j-old'""")
     assert row["exec_submitted_at"] is None    # 앵커도 소급하지 않는다
     assert row["sched_wait_seconds"] is None   # 과거 잡은 전부 NULL(excluded 로 표면화)
+
+
+def test_migrate_adds_diag_logs_to_existing_data_jobs(db):
+    # 슬라이스 25: 기배포 DB 는 CREATE TABLE IF NOT EXISTS 를 다시 안 탄다 --
+    # _ensure_columns 쪽을 빼먹으면 라이브에서만 컬럼이 없어, 첫 실패 종단의
+    # 박제 UPDATE 가 500 을 낸다(슬라이스 14 files_count 실 사고의 재현 시나리오).
+    # 구형 흉내는 슬라이스 20 까지의 전 컬럼을 갖춘 모양이다.
+    db.execute("DROP TABLE data_jobs")
+    db.execute("""CREATE TABLE data_jobs (job_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL, operation TEXT NOT NULL, tool TEXT,
+        storage_name TEXT, source_storage TEXT, destination_storage TEXT,
+        source TEXT, destination TEXT, target TEXT, options TEXT NOT NULL,
+        priority TEXT NOT NULL, state TEXT NOT NULL, reason_code TEXT,
+        preview_fingerprint TEXT, preview_expires_at TEXT, volcano_job_ref TEXT,
+        artifact_uri TEXT, result_summary TEXT, files_count BIGINT,
+        bytes_count BIGINT, worker_pool TEXT, precondition TEXT,
+        confirmed_fingerprint TEXT, phase_refs TEXT, submit_wait_seconds BIGINT,
+        exec_submitted_at TEXT, sched_wait_seconds BIGINT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    assert _column_exists(db, "data_jobs", "diag_logs")
+    # 선언형도 CREATE 경로와 같아야 한다 -- 다르면 기배포 DB 만 다른 타입으로 굳는다.
+    assert _declared_type(db, "data_jobs", "diag_logs") == "TEXT"
+
+
+def test_diag_logs_is_declared_in_the_create_table_block():
+    # 신규 DB 에선 CREATE 누락도 _ensure_columns 가 흡수해 버려 PRAGMA 로는 두
+    # 경로를 구분할 수 없다 -- "양쪽 선언" 규약(files_count 이후 전 컬럼의 관례)의
+    # CREATE 쪽은 소스 자체로 고정하는 수밖에 없다. 이 테스트가 없으면 CREATE 쪽
+    # 누락은 어떤 테스트로도 안 잡힌다.
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    block = re.search(r'CREATE TABLE IF NOT EXISTS data_jobs.*?"""', src, re.S)
+    assert block is not None
+    # 단순 substring 검사로는 부족하다: 블록 안 주석이 archive_diag_logs 를
+    # 언급하므로 선언 줄만 지워도 통과해 버린다(검사하는 척하는 단언). SQL 주석을
+    # 걷어낸 뒤 **선언 자체**를 본다 -- 선언형(TEXT)까지 함께 고정해 ALTER 경로와의
+    # 패리티도 소스에서 못 박는다.
+    sql = re.sub(r"--[^\n]*", "", block.group(0))
+    assert re.search(r"^\s*diag_logs\s+TEXT\s*,\s*$", sql, re.M)
+
+
+def test_all_tables_is_still_twenty_tables_not_columns():
+    # len(ALL_TABLES) == 20 은 **테이블** 수 계약이다 -- diag_logs 는 컬럼이라
+    # 여기 안 걸린다는 사실 자체를 명시로 남긴다(새 테이블 0 이 이 슬라이스의
+    # 계약이고, 이 단언이 그 계약의 그물이다).
+    assert len(ALL_TABLES) == 20
