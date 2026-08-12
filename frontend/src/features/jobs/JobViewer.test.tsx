@@ -169,6 +169,59 @@ test("a live response shows neither the archived caption nor a truncation badge"
   expect(screen.queryByText("뒷부분만 표시")).not.toBeInTheDocument();
 });
 
+test("artifact tab shows a download link pointing at the /download stream route", async () => {
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
+    http.get("/api/user/jobs/j1/artifacts/execution/stdout.log", () =>
+      HttpResponse.json({ phase: "execution", name: "stdout.log", size: 120, truncated: false, content: "hello" })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "execution/stdout.log" }));
+  const link = await screen.findByRole("link", { name: "다운로드 (120 B)" });
+  // 뷰 라우트(256KB 꼬리 JSON)가 아니라 /download 접미의 스트림 라우트여야 한다 --
+  // 정확값 단언이라야 "뷰 JSON 을 다운로드로 내미는" 회귀를 잡는다.
+  expect(link).toHaveAttribute("href", "/api/user/jobs/j1/artifacts/execution/stdout.log/download");
+  expect(link).toHaveAttribute("download");
+  // truncated 가 아니면 전체 다운로드 안내는 붙지 않는다(늘 붙으면 검사하는 척).
+  expect(screen.queryByText("전체는 다운로드로 받으세요")).not.toBeInTheDocument();
+});
+
+test("download label humanizes the list size — 0 bytes is '0 B', not a dash", async () => {
+  // 크기는 목록 entries 의 값이다(본문 응답의 size 가 아니다). 0 바이트는 정상값
+  // ("0 B") -- truthy 검사로 "—"(null 전용)에 뭉개지면 빈 파일이 결측으로 둔갑한다.
+  const artifacts = {
+    entries: [
+      { phase: "execution", name: "big.bin", size: 2048, modified_at: 1754400000 },
+      { phase: "execution", name: "empty.txt", size: 0, modified_at: 1754400001 },
+    ],
+    truncated: false,
+  };
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(artifacts)),
+    http.get("/api/user/jobs/j1/artifacts/execution/:name", ({ params }) =>
+      HttpResponse.json({ phase: "execution", name: params.name, size: 0, truncated: false, content: "" })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "execution/big.bin" }));
+  expect(await screen.findByRole("link", { name: "다운로드 (2.0 KiB)" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "execution/empty.txt" }));
+  expect(await screen.findByRole("link", { name: "다운로드 (0 B)" })).toBeInTheDocument();
+});
+
+test("a truncated artifact pairs the badge with the full-download notice", async () => {
+  // 256KB 꼬리와 전체 파일의 관계를 화면이 말해야 한다 -- 배지만으로는 "전체를
+  // 얻을 수단이 있다"는 사실이 전달되지 않는다.
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)),
+    http.get("/api/user/jobs/j1/artifacts/execution/stdout.log", () =>
+      HttpResponse.json({ phase: "execution", name: "stdout.log", size: 999999, truncated: true, content: "tail" })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "execution/stdout.log" }));
+  expect(await screen.findByText("전체는 다운로드로 받으세요")).toBeInTheDocument();
+  expect(screen.getByText("뒷부분만 표시")).toBeInTheDocument();
+});
+
 test("an empty-string log renders as content, not as the pod-gone message", async () => {
   // 빈 로그는 정상값이다(launcher 는 대개 비어 있다) -- truthy 검사로 null 문구를
   // 내면 "로그가 없다"와 "빈 로그"가 뭉개진다.

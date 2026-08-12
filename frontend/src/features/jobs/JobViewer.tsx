@@ -11,6 +11,20 @@ function tabKey(t: Tab): string {
   return t.kind === "log" ? `log:${t.phase}` : `artifact:${t.phase}/${t.name}`;
 }
 
+// JobStatsSection.tsx(:25-36)와 같은 로직의 국소 사본 관례 -- "이 표시 하나를 위해
+// 공용 모듈을 만드는 것은 이르다". 아티팩트에는 작은 파일이 흔해 KiB 단위를 더한다.
+// 0 바이트는 정상값("0 B") -- "—" 는 null(크기 모름) 전용이다.
+const BYTE_UNITS: [string, number][] = [
+  ["TiB", 1024 ** 4], ["GiB", 1024 ** 3], ["MiB", 1024 ** 2], ["KiB", 1024],
+];
+function humanBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes)) return "—";
+  for (const [unit, size] of BYTE_UNITS) {
+    if (bytes >= size) return `${(bytes / size).toFixed(1)} ${unit}`;
+  }
+  return `${bytes} B`;
+}
+
 export function JobViewer({
   jobId,
   phaseRefs,
@@ -39,6 +53,14 @@ export function JobViewer({
 
   const entries = artifacts.data?.entries ?? [];
   const truncatedList = artifacts.data?.truncated ?? false;
+
+  // 다운로드 라벨의 크기는 목록 entries 의 실측값이다(뷰 본문 응답의 size 가 아니다).
+  // 일치 항목이 없으면 null(모름)로 두어 "—" 를 그린다 -- 0 과 null 을 섞지 않는다.
+  const selectedEntry = selectedArtifact
+    ? entries.find(
+        (e) => e.phase === selectedArtifact.phase && e.name === selectedArtifact.name,
+      )
+    : undefined;
 
   // 로그 탭은 실제로 ref가 있는 phase에만 만든다. 예전에는 "preflight"를 하드코딩해서,
   // confirm 후 재검증(exec_preflight)이 실패한 잡을 진단할 때 *초기* preflight의 성공
@@ -79,11 +101,27 @@ export function JobViewer({
             <p className="text-bad text-sm">{(artifactFile.error as ApiError).message}</p>
           ) : artifactFile.data ? (
             <div>
-              {artifactFile.data.truncated && (
-                <span className="inline-block text-xs text-muted border border-black/10 rounded px-2 py-0.5 mb-2">
-                  뒷부분만 표시
-                </span>
-              )}
+              {/* a href 네비게이션에도 세션 쿠키가 실리므로 fetch+blob 우회가 필요 없다
+                  (그쪽은 상한 크기까지 메모리 버퍼링이라 더 나쁘다). 오류 응답이면
+                  브라우저가 JSON 오류 본문으로 이동할 수 있다 -- 설계가 수용한
+                  트레이드오프다(설계 §4). */}
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <a
+                  className="text-xs text-accent"
+                  href={`/api/user/jobs/${jobId}/artifacts/${encodeURIComponent(selectedArtifact.phase)}/${encodeURIComponent(selectedArtifact.name)}/download`}
+                  download
+                >
+                  다운로드 ({humanBytes(selectedEntry?.size ?? null)})
+                </a>
+                {artifactFile.data.truncated && (
+                  <>
+                    <span className="inline-block text-xs text-muted border border-black/10 rounded px-2 py-0.5">
+                      뒷부분만 표시
+                    </span>
+                    <span className="text-xs text-muted">전체는 다운로드로 받으세요</span>
+                  </>
+                )}
+              </div>
               <pre className="overflow-x-auto text-xs whitespace-pre-wrap">{artifactFile.data.content}</pre>
             </div>
           ) : null
