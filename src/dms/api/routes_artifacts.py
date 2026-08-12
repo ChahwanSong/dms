@@ -1,10 +1,12 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from ..artifact_base import resolve_artifact_base
 from ..execution import ExecutionError
-from .artifacts import (ArtifactError, MAX_BYTES, PHASES, list_artifacts, read_artifact,
-                        strip_scheme, tail_lines)
+from .artifacts import (ArtifactError, MAX_BYTES, PHASES, list_artifacts,
+                        open_artifact_stream, read_artifact, strip_scheme,
+                        stream_artifact_fd, tail_lines)
 from .auth import Identity, require_user
 from .routes_jobs import _owned_job
 
@@ -45,6 +47,39 @@ def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
             # (artifact_forbidden은 서버 내부 구분용으로만 남긴다.)
             raise HTTPException(status_code=404, detail="artifact_not_found")
         raise HTTPException(status_code=422, detail=e.reason_code)
+
+
+@router.get("/api/user/jobs/{job_id}/artifacts/{phase}/{name}/download")
+def download_job_artifact(job_id: str, phase: str, name: str, request: Request,
+                          identity: Identity = Depends(require_user)):
+    _owned_job(request, job_id, identity)
+    try:
+        # 봉쇄 사슬은 뷰(read_artifact)와 같은 함수 하나다 — 검사를 통과한 fd 를
+        # 그대로 스트림해야 TOCTOU 가 없다(경로 문자열을 두 번 해석하지 않는다).
+        fd, size = open_artifact_stream(
+            _base(request), job_id, phase, name,
+            max_bytes=request.app.state.settings.artifact_download_max_bytes)
+    except ArtifactError as e:
+        if e.reason_code == "artifact_too_large":
+            # open_artifact_stream 이 봉쇄 통과 뒤에만 이 코드를 내므로(순서 계약),
+            # 413 이 봉쇄 밖 파일의 크기를 캐는 오라클이 될 수 없다.
+            raise HTTPException(status_code=413, detail="artifact_too_large")
+        if e.reason_code in ("artifact_not_found", "artifact_forbidden"):
+            # 뷰 라우트(:42-47)와 body 까지 동일해야 한다 — 라우트 간에 404 가
+            # 갈리면 그 차이 자체가 존재 오라클이 된다.
+            raise HTTPException(status_code=404, detail="artifact_not_found")
+        # invalid_phase 등 화이트리스트 거부는 공개 지식이라 오라클이 아니다(뷰와 동일).
+        raise HTTPException(status_code=422, detail=e.reason_code)
+    # 여기서부터 fd 소유권은 제너레이터가 진다(try/finally close). 헤더 3종이 함께
+    # stored-XSS 경로를 닫는다(설계 §2.2): 사용자가 만든 내용을 브라우저가 문서로
+    # 렌더하지 않도록 octet-stream + attachment + nosniff — inline 표시 절대 금지.
+    # NAME_RE([A-Za-z0-9._-]+)가 따옴표·개행을 구성상 배제해 헤더 인젝션이 불가능하다.
+    return StreamingResponse(
+        stream_artifact_fd(fd, size),
+        media_type="application/octet-stream",
+        headers={"Content-Length": str(size),
+                 "Content-Disposition": f'attachment; filename="{name}"',
+                 "X-Content-Type-Options": "nosniff"})
 
 
 def _render_log(log, tail):

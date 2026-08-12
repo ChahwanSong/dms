@@ -22,6 +22,7 @@
   "invalid_storage", "invalid_node_name", "agent_node_identity_mismatch",
   "terminate_failed", "invalid_job_id", "invalid_batch", "invalid_phase",
   "log_ref_not_found", "log_not_available", "artifact_not_found",
+  "artifact_too_large",
   "account_disabled", "maintenance_mode", "scan_admin_only",
   "privileged_not_authorized", "fingerprint_mismatch", "not_confirmable",
   "already_terminal", "invalid_credentials", "invalid_policy",

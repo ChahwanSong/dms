@@ -61,6 +61,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_denylist_subject_type: "대상 유형이 올바르지 않습니다",
   policy_not_found: "정책을 찾을 수 없습니다",
   artifact_not_found: "아티팩트를 찾을 수 없습니다",
+  artifact_too_large: "파일이 다운로드 상한을 넘습니다 — 관리자에게 문의하세요",
   invalid_phase: "알 수 없는 실행 단계입니다",
   log_ref_not_found: "이 단계의 로그 참조가 없습니다",
   log_not_available: "이 단계는 파드 로그를 제공하지 않습니다 — 아티팩트를 확인하세요",
