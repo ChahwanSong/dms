@@ -254,3 +254,14 @@ def test_scan_wrong_shapes_and_types(tmp_path):
                     {"summary": {"total_entries": True}},     # bool
                     {"summary": {"total_entries": -1}}):      # 음수
         assert parse_scan_counts(_write_report(tmp_path, payload)) == (None, None)
+
+
+def test_parsers_accept_none_stdout():
+    # 계약은 "절대 예외 없음"(fail-soft, 이 모듈 docstring)이고 구현은
+    # `stdout or ""` 로 None 까지 삼키겠다고 반쪽 약속해 왔다(슬라이스 15) --
+    # 검증은 빈 문자열뿐이었다(BACKLOG §2.5). None 은 "" 와 다른 입력이다:
+    # subprocess 캡처가 어긋난 병적 경로에서 파서가 TypeError 로 잡을 죽이면
+    # 계약 위반이고, 그 예외는 stepper _finalize 앞이라 잡이 Executing 에 박힌다.
+    assert parse_sync_counts(None) == (None, None)
+    assert parse_nsync_counts(None) == (None, None)
+    assert parse_rm_counts(None) == (None, None)

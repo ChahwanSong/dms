@@ -170,10 +170,15 @@ def test_poll_missing_is_failed():
 def test_read_summary_reads_artifact():
     k8s = _FakeK8s()
     spec = _spec(phase="execution")
+    # 픽스처는 실 summary 계약과 같은 모양이어야 한다: runner _build_summary 는
+    # 항상 정확히 3키 {"returncode","files","bytes"} 를 쓴다(슬라이스 15 §2.3).
+    # 옛 {"files": 3} 은 사문 계약의 박제였다(BACKLOG §2.5). 등식 단언을 유지해
+    # read_summary 가 키를 거르거나 변환하지 않는 pass-through 임도 함께 고정한다.
     a = _adapter(k8s, summaries={
-        "/cephfs/dms/artifacts/job123456789abc/execution/summary.json": '{"files": 3}'})
+        "/cephfs/dms/artifacts/job123456789abc/execution/summary.json":
+            '{"returncode": 0, "files": 3, "bytes": 50}'})
     ref = a.submit(spec)
-    assert a.read_summary(ref) == {"files": 3}
+    assert a.read_summary(ref) == {"returncode": 0, "files": 3, "bytes": 50}
 
 
 def test_read_summary_missing_is_none():
@@ -187,7 +192,8 @@ def test_read_summary_reconstructs_from_labels():
     오브젝트 라벨(dms.io/job-id, dms.io/phase)에서 summary 경로를 재구성한다."""
     k8s = _FakeK8s()
     summaries = {
-        "/cephfs/dms/artifacts/job123456789abc/execution/summary.json": '{"files": 3}'}
+        "/cephfs/dms/artifacts/job123456789abc/execution/summary.json":
+            '{"returncode": 0, "files": 3, "bytes": 50}'}
     a1 = _adapter(k8s, summaries=summaries)
     ref = a1.submit(_spec(phase="execution"))
     a2 = VolcanoExecutionAdapter(
@@ -196,7 +202,7 @@ def test_read_summary_reconstructs_from_labels():
         read_text=lambda path: summaries.get(path),
         artifact_base="file:///cephfs/dms/artifacts")
     assert ref not in a2._summary_paths
-    assert a2.read_summary(ref) == {"files": 3}
+    assert a2.read_summary(ref) == {"returncode": 0, "files": 3, "bytes": 50}
 
 
 def test_read_summary_reconstruction_missing_object_is_none():

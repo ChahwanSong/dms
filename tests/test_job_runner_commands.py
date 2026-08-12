@@ -72,3 +72,10 @@ def test_nsync_role_map():
     rm = nsync_role_map(["s1", "s2"], ["d1"], slots_per_host=2)
     # source 2호스트×2slots = rank 0..3 = src, dest 1호스트×2slots = rank 4..5 = dst
     assert rm == "0:src,1:src,2:src,3:src,4:dst,5:dst"
+
+
+def test_parse_hostfile_none_is_empty():
+    # hostfile 미물질화(Volcano ssh 플러그인 지연) 경로에서 read 가 None 을 넘겨도
+    # 빈 목록이어야 한다 -- `text or ""`(commands.py) 반쪽 약속의 검증. 파서
+    # 계열(test_parsers_accept_none_stdout)과 같은 그물.
+    assert parse_hostfile(None) == []
