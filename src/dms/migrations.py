@@ -434,9 +434,15 @@ def _column_exists(db, table, column):
     if db.dialect == "sqlite":
         rows = db.query(f"PRAGMA table_info({table})")
         return any(r["name"] == column for r in rows)
+    # 슬라이스 30(BACKLOG §2.5 슬라이스 15 잔여): information_schema.columns 는
+    # DB 전체 스키마를 본다 -- 다른 스키마의 동명 테이블·컬럼(예: 백업 복원
+    # backup.data_jobs)을 "이미 있다"로 오판하면 ALTER 를 건너뛰어, 라이브만
+    # 컬럼이 없는 슬라이스 14 실 500 이 재현된다. 비정규화 CREATE/ALTER 가
+    # 떨어지는 곳이 current_schema()(search_path 선두)이므로 거기만 본다.
     rows = db.query(
         """SELECT 1 AS x FROM information_schema.columns
-           WHERE table_name = :t AND column_name = :c""",
+           WHERE table_schema = current_schema()
+             AND table_name = :t AND column_name = :c""",
         {"t": table, "c": column})
     return bool(rows)
 
@@ -458,7 +464,8 @@ def _widen_count_columns(db):
         # 현재 타입을 먼저 보고 int4일 때만 친다(그래서 두 번째 실행은 no-op).
         rows = db.query(
             """SELECT data_type FROM information_schema.columns
-               WHERE table_name = 'data_jobs' AND column_name = :c""",
+               WHERE table_schema = current_schema()
+                 AND table_name = 'data_jobs' AND column_name = :c""",
             {"c": column})
         if rows and rows[0]["data_type"] == "integer":
             db.execute(f"ALTER TABLE data_jobs ALTER COLUMN {column} TYPE BIGINT")

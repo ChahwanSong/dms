@@ -44,8 +44,13 @@ class _FakeDb:
         # 키가 어긋나면 상호배제 자체가 깨지므로 파라미터까지 고정해야 한다.
         self.calls = []
         self.fail_on = None      # 이 부분문자열을 담은 SQL 에서 예외를 던진다
+        self.queries = []
 
     def query(self, sql, params=None):
+        # (sql, params) 기록: information_schema 조회가 current_schema() 로
+        # 한정되는지(슬라이스 30)는 반환값으로 구분할 수 없다 -- 대역은 스키마
+        # 개념이 없어서다. 락 키를 params 로 못박은 calls 기록과 같은 타협.
+        self.queries.append((sql, params))
         return [{"data_type": self._data_type}]
 
     def execute(self, sql, params=None):
@@ -606,3 +611,29 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     assert len(pairs) == 23
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
+
+
+def test_column_exists_pg_scopes_to_current_schema():
+    # 미필터 쿼리는 DB 의 모든 스키마에서 (table, column)을 찾는다 -- 다른
+    # 스키마의 동명 테이블(백업 복원 등)이 "이미 있다"로 오판되면 ALTER 를
+    # 건너뛰어 라이브만 컬럼이 없는 슬라이스 14 실 500 이 재현된다(BACKLOG §2.5
+    # "단일 스키마 배포에서만 안전"). 비정규화 DDL 이 떨어지는 current_schema()
+    # 만 본다 -- 'public' 하드코드는 search_path 를 바꾼 배포에서 또 틀린다.
+    from dms.migrations import _column_exists
+    fake = _FakeDb("postgresql", "bigint")
+    assert _column_exists(fake, "data_jobs", "diag_logs") is True
+    sql, params = fake.queries[-1]
+    assert "table_schema = current_schema()" in sql
+    assert params == {"t": "data_jobs", "c": "diag_logs"}
+
+
+def test_widen_count_columns_scopes_to_current_schema():
+    # _column_exists 와 같은 이유의 쌍둥이: 남의 스키마 int4 를 보면 매 배포
+    # 불필요한 ACCESS EXCLUSIVE ALTER, 남의 bigint 를 보면 진짜 int4 가 영영
+    # 안 넓혀진다(침묵 실패 -- 더 나쁜 방향).
+    from dms.migrations import _widen_count_columns
+    fake = _FakeDb("postgresql", "bigint")
+    _widen_count_columns(fake)
+    assert len(fake.queries) == 2            # files_count·bytes_count 각 1회
+    assert all("table_schema = current_schema()" in sql
+               for sql, _ in fake.queries)
