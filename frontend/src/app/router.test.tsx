@@ -157,6 +157,34 @@ test("admin can open releases screen", async () => {
   expect(await screen.findByRole("heading", { name: "릴리스" })).toBeInTheDocument();
 });
 
+test("me 500 이면 / 는 오류 문구 + 재시도를 렌더하고 어디로도 리다이렉트하지 않는다", async () => {
+  // §2.4-5: /api/auth/me 의 일시 500/네트워크 오류를 /login 으로 보내면 로그인된
+  // 관리자가 "세션 만료"로 오독하고 재로그인한다 -- 오류 화면 + 재시도가 정직하다.
+  server.use(http.get("/api/auth/me", () =>
+    HttpResponse.json({ detail: "http_500" }, { status: 500 })));
+  renderAt("/");
+  expect(await screen.findByText(
+    "세션 확인에 실패했습니다 — 서버 오류이거나 네트워크 문제일 수 있습니다",
+  )).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
+  // 리다이렉트 없음: /login 의 로그인 버튼도 /jobs 의 목록 헤딩도 렌더되지 않는다.
+  expect(screen.queryByRole("button", { name: "로그인" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "내 작업" })).toBeNull();
+});
+
+test("me 401 이면 / 는 여전히 로그인으로 보낸다(오류 화면이 아니다)", async () => {
+  // 401 은 "서버 오류"가 아니라 "세션 없음"이다 -- 여기서 오류 화면을 띄우면 문구가
+  // 거짓말이 되고, dms:unauthorized -> me 무효화 -> 재조회 401 무한 루프까지 생긴다
+  // (AuthContext 는 관찰자가 /login 이동으로 언마운트되어야 루프가 끊긴다).
+  server.use(http.get("/api/auth/me", () =>
+    HttpResponse.json({ detail: "not_authenticated" }, { status: 401 })));
+  renderAt("/");
+  expect(await screen.findByRole("button", { name: "로그인" })).toBeInTheDocument();
+  expect(screen.queryByText(
+    "세션 확인에 실패했습니다 — 서버 오류이거나 네트워크 문제일 수 있습니다",
+  )).toBeNull();
+});
+
 test("user visiting /admin/policies is redirected to /jobs", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),

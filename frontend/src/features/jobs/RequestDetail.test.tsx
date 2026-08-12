@@ -308,6 +308,51 @@ test("제출 대기를 첫 비-Pending 전이에서 유도해 보여준다", asy
   expect(screen.queryByText("큐 대기")).toBeNull();   // 옛 라벨이 되살아나면 회귀
 });
 
+test("잡 취소 실패(409 cancel_failed) 문구는 해당 잡 카드에만 뜬다", async () => {
+  // §2.4-4: 취소 실패가 화면에 안 보이면 사용자는 버튼이 무시됐다고 여기고 잡은
+  // 계속 돈다. useCancelJob 은 요청 단위 훅 하나를 모든 잡 카드가 공유하므로,
+  // cancel.variables(마지막 mutate 인자 = jobId) 한정이 없으면 오류가 모든 카드에
+  // 도배된다 -- 다른 카드 부재까지 단언한다.
+  const MSG = "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다";
+  const twoJobs = [
+    { ...JOBS[0], state: "Executing", reason_code: null },
+    { ...JOBS[0], job_id: "j2", state: "Executing", reason_code: null },
+  ];
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Executing" })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json(twoJobs)),
+    http.post("/api/user/jobs/j1:cancel", () =>
+      HttpResponse.json({ detail: "cancel_failed" }, { status: 409 })),
+  );
+  renderAt();
+  const j1card = (await screen.findByText("j1")).closest(".bg-surface") as HTMLElement;
+  await userEvent.click(within(j1card).getByRole("button", { name: "취소" }));
+  expect(await within(j1card).findByText(MSG)).toBeInTheDocument();
+  const j2card = screen.getByText("j2").closest(".bg-surface") as HTMLElement;
+  expect(within(j2card).queryByText(MSG)).toBeNull();
+});
+
+test("잡 취소 성공 후 잡 목록이 즉시 갱신된다(무효화 접두 매칭의 실증 그물)", async () => {
+  // useCancelJob 의 onSettled 는 ["request", id] 무효화 하나로 잡 목록(["request",
+  // id, "jobs"])까지 접두 매칭으로 갱신해야 한다. 이 단언의 타임아웃(기본 1초)은
+  // useRequestJobs 의 2초 폴링보다 짧다 -- 폴링이 아니라 무효화가 갱신을 실어
+  // 나른다는 것을 시간축으로 구분한다(무효화를 전부 지우는 회귀가 여기서 빨개진다).
+  let cancelled = false;
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Executing" })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([
+      { ...JOBS[0], state: cancelled ? "Cancelled" : "Executing", reason_code: null },
+    ])),
+    http.post("/api/user/jobs/j1:cancel", () => {
+      cancelled = true;
+      return HttpResponse.json({ state: "Cancelling" });
+    }),
+  );
+  renderAt();
+  await userEvent.click(await screen.findByRole("button", { name: "취소" }));
+  expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+});
+
 test("실행 전이가 아직 없으면 제출 대기는 —", async () => {
   server.use(
     http.get("/api/user/requests/r1", () => HttpResponse.json({

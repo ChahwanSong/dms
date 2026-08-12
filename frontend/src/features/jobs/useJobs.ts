@@ -41,8 +41,8 @@ export function useConfirmJob(requestId: string) {
   return useMutation({
     mutationFn: (v: { jobId: string; fingerprint: string }) =>
       apiSend("POST", `/api/user/jobs/${v.jobId}:confirm`, { fingerprint: v.fingerprint }),
+    // ["request", id] 무효화가 접두 매칭으로 ["request", id, "jobs"] 쿼리를 이미 포함한다 — tanstack 기본 partial matching.
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] });
       qc.invalidateQueries({ queryKey: ["request", requestId] });
     },
   });
@@ -51,8 +51,8 @@ export function useCancelJob(requestId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (jobId: string) => apiSend("POST", `/api/user/jobs/${jobId}:cancel`),
+    // ["request", id] 무효화가 접두 매칭으로 ["request", id, "jobs"] 쿼리를 이미 포함한다 — tanstack 기본 partial matching.
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] });
       qc.invalidateQueries({ queryKey: ["request", requestId] });
     },
   });
@@ -62,10 +62,11 @@ export function useCancelRequest(requestId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiSend("POST", `/api/user/requests/${requestId}:cancel`),
+    // ["request", id] 무효화가 접두 매칭으로 ["request", id, "jobs"] 쿼리를 이미 포함한다 — tanstack 기본 partial matching.
+    // ["requests"](목록)는 ["request", id] 와 다른 키라 별도 무효화가 필요하다.
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["request", requestId] });
       qc.invalidateQueries({ queryKey: ["requests"] });
-      qc.invalidateQueries({ queryKey: ["request", requestId, "jobs"] });
     },
   });
 }

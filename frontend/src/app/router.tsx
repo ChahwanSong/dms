@@ -4,6 +4,8 @@ import { AppShell } from "./AppShell";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { RequireRole } from "./RequireRole";
 import { useMe } from "../features/auth/useAuth";
+import { Button } from "../components/ui/Button";
+import { ApiError } from "../lib/api";
 import { Login } from "../features/auth/Login";
 import { JobsList } from "../features/jobs/JobsList";
 import { SubmitJob } from "../features/jobs/SubmitJob";
@@ -29,6 +31,20 @@ import { ReleasesPage } from "../features/releases/ReleasesPage";
 function Home() {
   const me = useMe();
   if (me.isLoading) return <div className="p-6 text-muted">불러오는 중…</div>;
+  // §2.4-5: 일시 500/네트워크 오류를 /login 으로 흘려보내면 로그인된 관리자가 "세션
+  // 만료"로 오독하고 재로그인한다 -- 리다이렉트 없이 오류 문구 + 재시도를 렌더한다.
+  // 단 401(세션 없음)은 진짜 "로그인 필요"라 기존 리다이렉트에 맡긴다: 여기서
+  // 오류 화면을 띄우면 문구가 거짓말이 될 뿐 아니라, dms:unauthorized -> me 무효화
+  // -> 재조회 401 무한 루프가 된다(AuthContext 는 관찰자가 /login 이동으로
+  // 언마운트되어야 루프가 끊긴다 -- AuthContext.tsx 주석 참고).
+  if (me.isError && !(me.error instanceof ApiError && me.error.status === 401)) {
+    return (
+      <div className="p-6 space-y-3">
+        <p className="text-bad">세션 확인에 실패했습니다 — 서버 오류이거나 네트워크 문제일 수 있습니다</p>
+        <Button onClick={() => me.refetch()}>다시 시도</Button>
+      </div>
+    );
+  }
   if (me.data?.role === "admin") return <Navigate to="/admin/dashboard" replace />;
   return <Navigate to="/jobs" replace />;
 }

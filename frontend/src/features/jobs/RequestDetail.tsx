@@ -188,6 +188,12 @@ export function RequestDetail() {
               <div className="mt-2">
                 <Button variant="ghost" disabled={cancel.isPending}
                         onClick={() => cancel.mutate(j.job_id)}>취소</Button>
+                {/* useCancelJob 은 요청 단위 훅 하나를 모든 잡 카드가 공유한다 --
+                    variables(마지막 mutate 인자 = jobId)로 한정하지 않으면 한 잡의
+                    취소 실패가 모든 카드에 도배된다. */}
+                {cancel.isError && cancel.variables === j.job_id && (
+                  <p className="text-bad text-sm mt-1">{(cancel.error as ApiError).message}</p>
+                )}
               </div>
             )}
             <div className="mt-3">

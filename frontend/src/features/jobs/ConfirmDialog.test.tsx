@@ -44,6 +44,22 @@ test("shows error message on fingerprint mismatch", async () => {
   expect(await screen.findByText("미리보기가 변경되었습니다. 다시 확인해 주세요")).toBeInTheDocument();
 });
 
+test("닫았다 다시 열면 이전 확인 오류가 남지 않는다", async () => {
+  // Radix 는 "닫기" 버튼의 setOpen(false) 직접 호출에 onOpenChange 를 태우지 않는다
+  // -- reset 없이는 지문 만료/변경 409 오류가 재오픈에 그대로 남아 새 시도의 결과와
+  // 혼동된다(StoragesList DeleteButton 의 useEffect reset 선례와 같은 처방).
+  server.use(http.post("/api/user/jobs/j1:confirm",
+    () => HttpResponse.json({ detail: "fingerprint_mismatch" }, { status: 409 })));
+  wrap(<ConfirmDialog job={job as any} />);
+  await userEvent.click(screen.getByRole("button", { name: "미리보기 확인" }));
+  await userEvent.click(screen.getByRole("button", { name: "확인" }));
+  expect(await screen.findByText("미리보기가 변경되었습니다. 다시 확인해 주세요")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "닫기" }));
+  await userEvent.click(screen.getByRole("button", { name: "미리보기 확인" }));
+  expect(await screen.findByText(/abc123/)).toBeInTheDocument(); // 재오픈이 실제로 됐다
+  expect(screen.queryByText("미리보기가 변경되었습니다. 다시 확인해 주세요")).toBeNull();
+});
+
 test("rm job shows rm-specific dialog title", async () => {
   const rmJob = { ...job, operation: "rm" };
   wrap(<ConfirmDialog job={rmJob as any} />);
