@@ -126,7 +126,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_not_found: "빌드를 찾을 수 없습니다",
   build_failed: "빌드가 실패했습니다 — 로그를 확인하세요",
   submit_failed: "빌드 파드를 만들지 못했습니다",
-  poll_failed: "빌드 상태를 확인하지 못했습니다",
+  // 빌드 폴링과 잡 로그 조회 409(슬라이스 25 재사용)가 같은 코드를 낸다 --
+  // 공유 코드의 문구는 문맥 중립이어야 한다("빌드" 금지, §2.2).
+  poll_failed: "상태를 확인하지 못했습니다",
   unknown_build_node: "등록된 에이전트 노드 중에서 선택해 주세요",
   build_timeout: "빌드가 제한 시간을 넘겨 중단되었습니다",
   // 슬라이스 21 빌드 프리플라이트/회수 세분화. reasonCodes.json 과 같은 커밋 --

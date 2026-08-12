@@ -126,4 +126,12 @@ describe("reasonText", () => {
   it("접두도 매핑 없으면 원시 전체", () => {
     expect(reasonText("nope:whatever")).toBe("nope:whatever");
   });
+
+  it("poll_failed 는 빌드 전용 문구가 아니다 -- 잡 로그 조회 409 도 같은 코드를 재사용한다", () => {
+    // 슬라이스 25 가 vcjob 로그 list 실패(execution_volcano.py -> routes_artifacts.py
+    // 409)에 poll_failed 를 재사용했다("사유 코드 신설 0" 방침) -- 문구에 "빌드"가
+    // 들어가면 잡 로그 탭에서 거짓말이 된다. 공유 코드의 문구는 문맥 중립이어야 한다.
+    expect(reasonText("poll_failed")).toBe("상태를 확인하지 못했습니다");
+    expect(reasonText("poll_failed")).not.toMatch(/빌드/);
+  });
 });
