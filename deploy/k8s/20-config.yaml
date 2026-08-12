@@ -37,6 +37,14 @@ data:
   DMS_LDAP_URI: "ldap://10.10.10.30:389"
   DMS_LDAP_USER_BASE: "ou=People,dc=dms,dc=local"
   DMS_LDAP_GROUP_BASE: "ou=Groups,dc=dms,dc=local"
+  # 슬라이스 28: "true"면 DMS_LDAP_BIND_DN/PW(dms-secrets)가 비거나 자리표시자일 때
+  # api/controller/migrate 가 기동을 거부한다(SettingsError) -- 인증 바인드를
+  # 의도했는데 익명으로 조용히 도는 상태를 막는 스위치. 테스트베드 OpenLDAP 은
+  # 익명 바인드를 허용하므로(20-secret.example.yaml) 바인드 계정이 준비되기
+  # 전까지 "false"로 둔다 -- 전환 절차: 계정 발급 -> dms-secrets 에 DN/PW 주입
+  # -> 이 값을 "true"로. 순서를 어기면 제어면 전체가 CrashLoopBackOff 다(의도된
+  # 시끄러움이지만, 켜기 전에 자격증명부터).
+  DMS_LDAP_REQUIRE_AUTH_BIND: "false"
 
   # --- privileged-requester gate (routes_requests.py submit()) ---
   # 기본값: root/admin actor를 특권 요청자로 인정 → 이 id로 온 잡은 uid0/gid0(root)로

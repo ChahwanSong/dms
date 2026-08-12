@@ -87,3 +87,39 @@ def test_artifact_download_max_bytes_env_override():
     s = Settings.from_env(
         {**VALID, "DMS_ARTIFACT_DOWNLOAD_MAX_BYTES": "1048576"})
     assert s.artifact_download_max_bytes == 1048576
+
+
+def test_require_auth_bind_refuses_startup_without_credentials():
+    # 슬라이스 28(BACKLOG §2.3): 인증 바인드를 의도(플래그 true)했는데 자격증명이
+    # 없으면 익명으로 조용히 떨어지는 대신 기동을 거부한다 -- 운영자가 "인증
+    # 바인드로 돌고 있다"고 믿는 채 익명으로 도는 상태가 이 항목의 실체다.
+    with pytest.raises(SettingsError) as e:
+        Settings.from_env({**VALID, "DMS_LDAP_REQUIRE_AUTH_BIND": "true"})
+    text = str(e.value)
+    assert "DMS_LDAP_BIND_DN" in text
+    assert "DMS_LDAP_BIND_PW" in text
+
+
+def test_require_auth_bind_rejects_placeholder_credentials():
+    # 빈 값만 걸면 20-secret.example.yaml 의 CHANGE_ME 류가 실 DN 으로 흘러간다 --
+    # _is_placeholder 를 재사용해 결측과 자리표시자를 같은 구멍으로 본다(기존 규약).
+    with pytest.raises(SettingsError):
+        Settings.from_env({**VALID, "DMS_LDAP_REQUIRE_AUTH_BIND": "1",
+                           "DMS_LDAP_BIND_DN": "cn=CHANGE_ME_BIND_DN,dc=dms,dc=local",
+                           "DMS_LDAP_BIND_PW": "REPLACE_WITH_BIND_PW"})
+
+
+def test_require_auth_bind_passes_with_real_credentials():
+    s = Settings.from_env({**VALID, "DMS_LDAP_REQUIRE_AUTH_BIND": "true",
+                           "DMS_LDAP_BIND_DN": "cn=dms-svc,ou=People,dc=dms,dc=local",
+                           "DMS_LDAP_BIND_PW": "s3cret"})
+    assert s.ldap_require_auth_bind is True
+    assert s.ldap_bind_dn == "cn=dms-svc,ou=People,dc=dms,dc=local"
+
+
+def test_anonymous_bind_remains_the_default():
+    # 플래그 미설정이면 현행 유지 -- 테스트베드는 익명 바인드가 실 구성이다
+    # (20-secret.example.yaml). 기본값을 true 로 하면 이 배포 자체가 못 뜬다.
+    s = Settings.from_env(VALID)
+    assert s.ldap_require_auth_bind is False
+    assert s.ldap_bind_dn == ""

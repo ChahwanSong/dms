@@ -132,6 +132,10 @@ class Settings:
     ldap_group_base: str = ""
     ldap_bind_dn: str = ""
     ldap_bind_pw: str = ""
+    # 슬라이스 28: true 면 bind DN/PW 결측·자리표시자 시 기동 거부(fail-closed).
+    # 익명 바인드로의 침묵 강등을 막는 스위치다 -- identity_ldap 이 아니라 여기서
+    # 거부하는 이유는 발화 시점이 배포 순간(기동)이어야 운영자가 알아채기 때문.
+    ldap_require_auth_bind: bool = False
     execution_backend: str = "stub"
     job_image: str = ""
     k8s_namespace: str = "dms"
@@ -171,6 +175,19 @@ class Settings:
             port = 0
         extra = {field: _parse_int(environ, env_key, default, problems)
                  for env_key, field, default in _SERVER_INT_KEYS}
+        ldap_bind_dn = environ.get("DMS_LDAP_BIND_DN", "")
+        ldap_bind_pw = environ.get("DMS_LDAP_BIND_PW", "")
+        ldap_require_auth_bind = _parse_bool(environ, "DMS_LDAP_REQUIRE_AUTH_BIND")
+        if ldap_require_auth_bind:
+            # 인증 바인드를 의도했는데 자격증명이 없으면 identity_ldap 이 익명으로
+            # 조용히 떨어진다(bind_dn or None) -- 그 침묵을 기동 거부로 바꾼다.
+            # _is_placeholder 라 빈 값과 CHANGE_ME 류를 같은 구멍으로 본다.
+            for env_key, value in (("DMS_LDAP_BIND_DN", ldap_bind_dn),
+                                   ("DMS_LDAP_BIND_PW", ldap_bind_pw)):
+                if _is_placeholder(value):
+                    problems.append(
+                        f"DMS_LDAP_REQUIRE_AUTH_BIND is true but {env_key}"
+                        " is missing or a placeholder")
         if problems:
             raise SettingsError(problems)
         return cls(
@@ -191,8 +208,9 @@ class Settings:
             ldap_uri=environ.get("DMS_LDAP_URI", ""),
             ldap_user_base=environ.get("DMS_LDAP_USER_BASE", ""),
             ldap_group_base=environ.get("DMS_LDAP_GROUP_BASE", ""),
-            ldap_bind_dn=environ.get("DMS_LDAP_BIND_DN", ""),
-            ldap_bind_pw=environ.get("DMS_LDAP_BIND_PW", ""),
+            ldap_bind_dn=ldap_bind_dn,
+            ldap_bind_pw=ldap_bind_pw,
+            ldap_require_auth_bind=ldap_require_auth_bind,
             execution_backend=environ.get("DMS_EXECUTION_BACKEND", "stub"),
             job_image=environ.get("DMS_JOB_IMAGE", ""),
             k8s_namespace=environ.get("DMS_K8S_NAMESPACE", "dms"),
