@@ -170,7 +170,8 @@ def test_migrate_is_idempotent(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     migrate(db)  # 두 번 돌려도 에러 없음
-    assert len(ALL_TABLES) == 20
+    # 슬라이스 27: 死物 runs 제거(20 -> 19) -- 이 저장소 최초의 파괴적 마이그레이션.
+    assert len(ALL_TABLES) == 19
 
 
 def test_migrate_adds_columns_to_existing_data_jobs(db):
@@ -450,8 +451,51 @@ def test_diag_logs_is_declared_in_the_create_table_block():
     assert re.search(r"^\s*diag_logs\s+TEXT\s*,\s*$", sql, re.M)
 
 
-def test_all_tables_is_still_twenty_tables_not_columns():
-    # len(ALL_TABLES) == 20 은 **테이블** 수 계약이다 -- diag_logs 는 컬럼이라
-    # 여기 안 걸린다는 사실 자체를 명시로 남긴다(새 테이블 0 이 이 슬라이스의
-    # 계약이고, 이 단언이 그 계약의 그물이다).
-    assert len(ALL_TABLES) == 20
+def test_all_tables_is_nineteen_tables_not_columns():
+    # len(ALL_TABLES) 는 **테이블** 수 계약이다(슬라이스 25 가 20 으로 박제,
+    # 슬라이스 27 의 runs 제거로 19). 늘든 줄든 명시 결정 없이는 여기가 먼저
+    # 빨개진다 -- "새 테이블 0·삭제는 결정된 것만"의 그물.
+    assert len(ALL_TABLES) == 19
+
+
+def test_migrate_drops_runs_from_existing_db(db):
+    # 슬라이스 27: 기배포 DB 경로. 빈 DB 는 CREATE 목록에서 빠진 것으로 끝나지만
+    # 기존 DB 는 이미 만들어진 runs 를 DROP 이 지워야 한다 -- 두 경로는 다른
+    # 코드다(슬라이스 25 diag_logs 의 양쪽 규약과 같은 교훈, 방향만 삭제).
+    # IF NOT EXISTS 인 이유: RED 단계(현행 코드)에선 db 픽스처의 migrate 가 이미
+    # runs 를 만들어 두었고, GREEN 단계에선 없다 -- 양 단계 모두에서 "구형 DB 에
+    # runs 가 있는" 전제를 성립시킨 뒤 재-migrate 로 삭제를 판정한다.
+    db.execute("""CREATE TABLE IF NOT EXISTS runs (
+        run_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, request_id TEXT NOT NULL,
+        state TEXT NOT NULL, detail TEXT, started_at TEXT NOT NULL,
+        finished_at TEXT)""")
+    migrate(db)
+    assert "runs" not in _table_names(db)
+
+
+def test_fresh_migrate_never_creates_runs(tmp_path):
+    # 신규 DB 경로: CREATE 목록에서 빠졌으니 애초에 안 생긴다(DROP IF EXISTS 는
+    # 여기서 no-op -- 멱등). ALL_TABLES 부재도 함께 고정한다 --
+    # test_migrate_creates_all_tables 는 부분집합 검사라 "목록에서 빼먹음"은
+    # 잡아도 "목록에 남아 있음"은 못 잡는다.
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    assert "runs" not in _table_names(db)
+    assert "runs" not in ALL_TABLES
+
+
+def test_drop_runs_executes_after_the_create_loop():
+    # CREATE 문 삭제 후엔 DROP 의 위치가 기능 테스트로는 구분되지 않는다(어디
+    # 있든 지금은 runs 가 없다). 순서 계약의 실질은 미래다: 부활 CREATE 가
+    # 실수(머지·롤백)로 되돌아와도 "생성 후 삭제"는 '없음'으로 수렴하고, 역순이면
+    # 매 migrate 가 부활시킨다 -- 제거 결정이 조용히 뒤집힌다.
+    # CREATE 리터럴 위치 비교로는 부족하다: stmts 리스트 **정의**와 실행 **루프**
+    # 사이에 DROP 을 끼우면 텍스트로는 CREATE 들보다 뒤인데 실행은 앞이다.
+    # 그래서 실행 루프(for stmt in stmts) 대비 위치를 계약으로 건다(소스 계약
+    # 테스트는 슬라이스 25 test_diag_logs_is_declared... 와 같은 계열의 타협).
+    import inspect
+
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    assert "DROP TABLE IF EXISTS runs" in src
+    assert src.index("for stmt in stmts") < src.index("DROP TABLE IF EXISTS runs")

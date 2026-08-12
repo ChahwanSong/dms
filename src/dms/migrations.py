@@ -1,8 +1,8 @@
-"""전체 스키마. CREATE TABLE IF NOT EXISTS 선언 스크립트 — 스펙 §4 도메인 모델의 20개 테이블."""
+"""전체 스키마. CREATE TABLE IF NOT EXISTS 선언 스크립트 — 스펙 §4 도메인 모델의 테이블 19개(슬라이스 27 에서 死物 runs 제거)."""
 from .db import Database, iso_epoch, utc_now_iso
 
 ALL_TABLES = (
-    "requests", "plans", "runs", "results", "state_transitions",
+    "requests", "plans", "results", "state_transitions",
     "data_jobs", "storages", "policies",
     "identity_denylist", "identity_probe_targets",
     "agent_reports", "agent_nodes",
@@ -105,14 +105,6 @@ def _apply_migrations(db: Database) -> None:
             state TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
-        """CREATE TABLE IF NOT EXISTS runs (
-            run_id TEXT PRIMARY KEY,
-            plan_id TEXT NOT NULL,
-            request_id TEXT NOT NULL,
-            state TEXT NOT NULL,
-            detail TEXT,
-            started_at TEXT NOT NULL,
-            finished_at TEXT)""",
         """CREATE TABLE IF NOT EXISTS results (
             request_id TEXT PRIMARY KEY,
             terminal_state TEXT NOT NULL,
@@ -366,6 +358,17 @@ def _apply_migrations(db: Database) -> None:
     ]
     for stmt in stmts:
         db.execute(stmt)
+    # --- 死物 정리(슬라이스 27) --- 이 저장소 최초의 파괴적 마이그레이션.
+    # runs 는 초기 스키마가 만들었지만 전 소스·테스트에서 읽기/쓰기 0건인
+    # 死物이고, 슬라이스 17 이 부활을 명시 배제하고 data_jobs 파생 컬럼을 택했다
+    # (BACKLOG). 신규 DB 는 CREATE 목록에서 빠져 애초에 안 생기고, 기배포 DB 는
+    # 여기서 지운다 -- IF EXISTS 라 두 경로 모두 멱등이다. 반드시 CREATE 실행
+    # 루프 **뒤**에 둔다: 부활 CREATE 가 실수(머지·롤백)로 되돌아와도 "생성 후
+    # 삭제"는 '없음'으로 수렴하지만, 역순이면 매 migrate 가 부활시킨다 --
+    # tests/test_migrations.py 의 소스 순서 계약이 이 위치를 고정한다.
+    # 데이터 손실 없음: INSERT 경로가 애초에 없었고, 배포 절차가 삭제 전
+    # 행 수 0 을 실측 재확인한다(플랜 「배포·실증」 0단계).
+    db.execute("DROP TABLE IF EXISTS runs")
     _ensure_columns(db)
     _widen_count_columns(db)
     # requests.batch_id는 CREATE TABLE(신규 DB) 또는 _ensure_columns의 ALTER(구형 DB)로
