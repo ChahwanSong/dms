@@ -180,6 +180,26 @@ class JobStepper:
                 payload={"phase": phase, "ref": ref},
                 request_id=job.get("request_id"))
 
+    def _surface_failed_artifact(self, job, ref):
+        """실패 잡의 summary 표면화(설계 §2.4). 러너는 도구 비0 종료에도
+        summary.json 을 쓰고 exit 하므로(§1-7) returncode 가 카드에 뜬다.
+        read_summary 예외는 None(모름)으로 접는다 -- 실패 잡의 보강은 best-effort
+        고, 여기서 던지면 종단 전이 자체가 막혀 run_once 의 step_error 루프(매 틱
+        재시도)에 낀다. None 이면 기록하지 않는다 -- artifact_uri 를 지어내면
+        포탈이 존재하지 않는 디렉터리를 가리킨다. 비교가 `is not None` 인 것은
+        이 슬라이스의 규칙 그대로다: 빈 summary({})는 "러너가 쓰긴 썼다"는
+        정상값이라 모름과 뭉개지 않는다. metrics 는 오염되지 않는다(합계가
+        state='Succeeded' 필터 -- §1-12)."""
+        try:
+            summary = self._exec.read_summary(ref)
+        except Exception:
+            summary = None
+        if summary is not None:
+            self._repos.data_jobs.set_artifact(
+                job["job_id"],
+                artifact_uri=f"{self._artifact_base()}/{job['job_id']}",
+                result_summary=summary)
+
     def _reclaim_if_terminal(self, job, ref):
         """제출 직후 잡이 이미 종단이면(= claim과 제출 사이에 취소가 들어왔다) 방금 만든
         Pod/vcjob을 즉시 회수하고 현재 상태를 돌려준다. None이면 계속 진행해도 된다.
@@ -350,6 +370,7 @@ class JobStepper:
             return "Succeeded"
         target = (DataJobState.TIMED_OUT if status == ExecStatus.TIMED_OUT
                   else DataJobState.FAILED)
+        self._surface_failed_artifact(job, ref)
         self._finalize(job, target, reason_code="execution_failed",
                        diag=("execution", ref))
         return target.value
@@ -390,9 +411,11 @@ class JobStepper:
                                                 actor="stepper")
             return "ConfirmPending"
         if status == ExecStatus.TIMED_OUT:
+            self._surface_failed_artifact(job, ref)
             self._finalize(job, DataJobState.TIMED_OUT, reason_code="preview_timed_out",
                            diag=("preview", ref))
             return "TimedOut"
+        self._surface_failed_artifact(job, ref)
         self._finalize(job, DataJobState.FAILED, reason_code="preview_failed",
                        diag=("preview", ref))
         return "Failed"
