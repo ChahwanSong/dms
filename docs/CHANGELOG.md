@@ -54,6 +54,34 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 슬라이스 31 «포탈 디자인 개편 — DS Cloud 스타일» — **완료**(2026-08-13, d42)
+
+플랜 `docs/plans/2026-08-13-dms-portal-redesign-slice31.md`(새 문서 체계 첫 플랜).
+vitest **312 passed / 58 files**(기준선 266 +46) / tsc 0 / e2e 9 / **airgap 게이트 통과**
+(dist 외부 로드 0, 폰트 전부 `/assets/` 번들 — 라이브에서 폰트 서빙 200 확인).
+
+회사(DS Cloud) 디자인 언어로 전면 리스킨: ① 토큰 스왑(액센트 보라→DS 블루 #1a56db,
+네이비·연파랑·panel 신설, radius 12→6px, 그림자→보더) + Noto Sans KR 셀프호스팅
+② 셸 개편 — TopBar("AI Storage Portal" 네이비 브랜드), **데이터 기반 사이드바**
+(navigation.ts — DMS 최상위 + 작업/스토리지/운영/관리 4그룹 16링크 + NAS·Monitoring
+자리, 기본 펼침), Breadcrumb ③ 컴포넌트(Button 3계층·Stepper·BottomActionBar·
+InfoPanel·InfoCard, StoragePicker 공용 이사) ④ **재사용 위저드 프레임** + SubmitJob
+4스텝(연산→대상→옵션→확인, 제출 바디 계약 원문 보존) ⑤ 페이지 타이틀 격상 24곳.
+
+의존성 2건 신설(승인): `@fontsource/noto-sans-kr`(dist +13MB — airgap 의 의도된 비용,
+woff 폴백 제거는 후속 최적화 후보), `lucide-react`. e2e 불변식(사이드바 240px·L4)은
+전부 유지된 채 통과 — 스킨이 계약을 안 깨뜨렸다는 증거.
+
+구현 중 에이전트 판단: busy 색을 액센트와 구분(#1749b8 — 진행 배지≠링크), blocked
+가드가 위저드 canNext 뒤에서 관측 불가해지자 강제 submit 테스트로 이빨 복원,
+StoragePicker 사본 잔존 대신 진짜 이사(두 정의 갈라짐 방지).
+
+**남긴 다듬기 거리**: NavLink prefix 매칭으로 /jobs/new 에서 "내 작업"도 활성 표시
+(`end` 필요), woff 폴백 7.7MB 제거 검토. 디자인은 사용자 눈 실증으로 계속 반복.
+
+---
+
+
 ### ✅ 슬라이스 16 «배포 안전망» — **완료**(2026-08-10, d26 배포·§6 실증 6/6 통과)
 
 실증 결과: (1) 매니페스트-우선 관례대로 배포하니 드리프트 배지 없음. (2) 포탈로
