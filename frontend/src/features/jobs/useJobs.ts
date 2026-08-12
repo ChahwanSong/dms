@@ -25,7 +25,8 @@ export interface SubmitBody {
   storage?: string; target?: string;
   source_storage?: string; source?: string;
   destination_storage?: string; destination?: string;
-  options: Record<string, boolean | number>;
+  // string 개방이 chmod/chown 을 싣는 유일한 관문이다(고급 sync 옵션 — 슬라이스 26).
+  options: Record<string, boolean | number | string>;
   priority: string;
   owner_username?: string;
 }

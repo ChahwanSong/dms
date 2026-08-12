@@ -149,3 +149,86 @@ test("스토리지 목록 로드가 실패하면 오류 메시지가 뜨고 제�
   expect(await screen.findByText("storage_list_failed")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
 });
+
+// ---- 고급 sync 옵션(슬라이스 26 Task 5) ----------------------------------
+// 서버(domain.py _OPTION_SPECS SYNC)가 최종 심판이고, 폼은 노출+즉답 미러만 한다.
+// msw 로 request body 를 캡처해 "무엇이 실제로 전송되는가"를 단언한다 — 빈 값
+// 생략(truthy 검사 금지)과 number 변환이 계약이다.
+
+function captureSubmit() {
+  const captured: { body: any } = { body: null };
+  server.use(http.post("/api/user/requests", async ({ request }) => {
+    captured.body = await request.json();
+    return HttpResponse.json({ request_id: "rX", state: "Pending" }, { status: 202 });
+  }));
+  return captured;
+}
+
+// sync 필수 필드를 채우고 <details> 고급 옵션을 펼친다(기본 접힘 확인 겸).
+async function fillSyncFormAndOpenAdvanced() {
+  const sourceSelect = await screen.findByLabelText("소스 스토리지");
+  await within(sourceSelect).findByText("cephfs (Ready)");
+  await userEvent.selectOptions(sourceSelect, "cephfs");
+  await userEvent.type(screen.getByLabelText("소스 경로"), "a/b");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "cephfs-secondary");
+  await userEvent.type(screen.getByLabelText("목적지 경로"), "c/d");
+  await userEvent.click(screen.getByText("고급 옵션"));
+}
+
+test("고급 옵션 전부 미입력 제출이면 options에 고급 키 5종이 실리지 않는다", async () => {
+  const captured = captureSubmit();
+  renderPage();
+  await fillSyncFormAndOpenAdvanced();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  // 빈 문자열은 "미입력"이라 통째로 생략된다 — 기존 checkedOptions(bool 4종) 회귀 겸.
+  expect(captured.body.options).toEqual({});
+});
+
+test("open_noatime 체크는 options.open_noatime === true 로 전송된다", async () => {
+  const captured = captureSubmit();
+  renderPage();
+  await fillSyncFormAndOpenAdvanced();
+  await userEvent.click(screen.getByLabelText("open_noatime"));
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body.options).toEqual({ open_noatime: true });
+});
+
+test("chmod·chown 문자열이 그대로 전송된다", async () => {
+  const captured = captureSubmit();
+  renderPage();
+  await fillSyncFormAndOpenAdvanced();
+  await userEvent.type(screen.getByLabelText("chmod"), "D770,F660");
+  await userEvent.type(screen.getByLabelText("chown"), "alice:proj");
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body.options).toEqual({ chmod: "D770,F660", chown: "alice:proj" });
+});
+
+test("batch_files·bufsize 숫자 입력은 number 로 전송된다", async () => {
+  const captured = captureSubmit();
+  renderPage();
+  await fillSyncFormAndOpenAdvanced();
+  await userEvent.type(screen.getByLabelText("batch_files"), "1000");
+  await userEvent.type(screen.getByLabelText("bufsize"), "4096");
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body.options).toEqual({ batch_files: 1000, bufsize: 4096 });
+});
+
+test("잘못된 chmod는 제출을 차단하고 필드별 문구를 띄운다", async () => {
+  renderPage();
+  await fillSyncFormAndOpenAdvanced();
+  await userEvent.type(screen.getByLabelText("chmod"), "999x");
+  expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
+  expect(screen.getByText("chmod 형식이 올바르지 않습니다 (예: D770,F660)")).toBeInTheDocument();
+});
+
+test("범위 밖 bufsize는 제출을 차단한다", async () => {
+  renderPage();
+  await fillSyncFormAndOpenAdvanced();
+  await userEvent.type(screen.getByLabelText("bufsize"), "100");
+  expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
+  expect(screen.getByText("bufsize는 4096..1073741824 범위의 정수여야 합니다")).toBeInTheDocument();
+});
