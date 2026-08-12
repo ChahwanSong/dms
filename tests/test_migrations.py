@@ -537,3 +537,72 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         "idx_agent_reports_at", "idx_releases_component", "idx_audit_target",
         "idx_events_request", "idx_events_at",
     }
+
+
+def _ensure_pairs():
+    # _ensure_columns 의 (table, column, type) 목록은 함수 안 리터럴이라 import 로
+    # 닿을 수 없다 -- 소스 정규식으로 뽑는다(모듈 상수 승격은 소스 무접촉 원칙
+    # 밖: 소스 계약 추출은 슬라이스 25/27 계열의 타협이다).
+    import inspect
+    import re
+
+    from dms import migrations
+    src = inspect.getsource(migrations._ensure_columns)
+    return re.findall(r'\("(\w+)", "(\w+)", "(\w+)"\)', src)
+
+
+# 초기 배포(v1) 스키마의 컬럼 -- **역사적 사실이라 불변이다**(이 파일의 구형 재생성
+# 픽스처들과 현재 소스에서 실측·검산). 이후 태어난 모든 컬럼은 CREATE(신규 DB)와
+# _ensure_columns(기배포 DB) 양쪽에 있어야 한다는 이중 경로 규약(슬라이스 14 실
+# 500 교훈)의 기준선. 여기 컬럼을 추가하는 것은 "그 컬럼은 ensure 없이도 모든
+# 배포에 존재한다"는 주장이므로, 새 컬럼을 넣으려고 이 집합을 늘리면 안 된다.
+_V1_COLUMNS = {
+    "requests": {"request_id", "commit_order", "operation", "requester_id",
+                 "actor", "resource_key", "priority", "payload", "state",
+                 "created_at", "updated_at"},
+    "data_jobs": {"job_id", "request_id", "operation", "tool", "storage_name",
+                  "source_storage", "destination_storage", "source",
+                  "destination", "target", "options", "priority", "state",
+                  "reason_code", "preview_fingerprint", "preview_expires_at",
+                  "volcano_job_ref", "artifact_uri", "result_summary",
+                  "created_at", "updated_at"},
+    "control_state": {"id", "maintenance", "drain", "reason", "changed_by",
+                      "changed_at"},
+    "builds": {"build_id", "repo_url", "git_ref", "commit_sha", "images",
+               "node_name", "state", "reason_code", "log_uri", "created_at",
+               "finished_at"},
+    "releases": {"id", "component", "image", "tag", "digest", "state", "actor",
+                 "applied_at"},
+}
+
+
+def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
+    # 일반 그물(BACKLOG §2.5 "ALTER 경로 일반 회귀 커버리지 갭" -- 슬라이스 14 가
+    # 파킹했고 그 파킹이 실제 프로덕션 500 을 냈다): 컬럼별 구형 재생성 테스트는
+    # 이미 태어난 컬럼만 지킨다 -- CREATE 에만 넣고 _ensure_columns 를 잊는 미래
+    # 컬럼은 신규 DB(테스트 전부)에선 멀쩡하고 기배포 DB(라이브)에서만 없다.
+    # 등식: 현재 전체 컬럼 = v1 ∪ ensure 목록. 정상 진화(양쪽 추가)는 v1 무수정
+    # 으로 통과하고, 규율 위반과 무결정 삭제만 빨개진다.
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    pairs = _ensure_pairs()
+    assert len(pairs) == 23      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다
+    for table, v1 in _V1_COLUMNS.items():
+        cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
+        ensured = {c for t, c, _ in pairs if t == table}
+        assert cols == v1 | ensured, table
+
+
+def test_ensure_columns_types_match_create_declarations(tmp_path):
+    # 선언형 패리티의 일반화: files_count 계열(BIGINT/int4 실 사고)과 diag_logs 만
+    # 컬럼별 형 단언이 있었다. 신규 DB 의 선언형은 CREATE 산출물이므로 ensure
+    # 목록의 형과 전 컬럼 대조하면 두 경로가 같은 형으로 수렴함이 고정된다 --
+    # 다르면 기배포 DB 만 다른 형으로 굳는다(int4 천장 사고의 일반형).
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    pairs = _ensure_pairs()
+    # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
+    # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
+    assert len(pairs) == 23
+    for table, column, coltype in pairs:
+        assert _declared_type(db, table, column) == coltype, (table, column)
