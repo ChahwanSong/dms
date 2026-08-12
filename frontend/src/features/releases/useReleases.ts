@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import type { PillVariant } from "../../lib/jobState";
-import type { Releases, ReleaseTargets } from "../../lib/types";
+import type { Release, Releases, ReleaseTargets } from "../../lib/types";
 
 // Pending/Applying이 릴리스의 비종단 상태다 -- jobState.ts의 isTerminal은
 // Applied를 몰라서 쓸 수 없다(Applied가 비종단으로 읽혀 폴링이 안 멈춘다).
@@ -67,11 +67,15 @@ export const useRefreshTargetsOnSettle = (active: boolean, ready: boolean) => {
 };
 
 export interface SubmitReleasesBody { items: { component: string; tag: string }[] }
+// tag_verified 는 옵셔널이다 -- 구 서버(d38 이전)와 겹치는 배포 순간에 필드가
+// 없어도 배너 로직(false 일 때만 표시)이 조용히 꺼질 뿐 깨지지 않는다.
+export interface SubmitReleasesResult { items: Release[]; tag_verified?: boolean }
 
 export const useSubmitReleases = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (b: SubmitReleasesBody) => apiSend("POST", "/api/admin/releases", b),
+    mutationFn: (b: SubmitReleasesBody) =>
+      apiSend<SubmitReleasesResult>("POST", "/api/admin/releases", b),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["releases"] });
       qc.invalidateQueries({ queryKey: ["release-targets"] });

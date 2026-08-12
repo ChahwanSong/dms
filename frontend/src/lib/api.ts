@@ -155,6 +155,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 그래도 문구를 여기에 두는 이유: 화면이 한국어를 하드코딩하지 않는다는 규칙을
   // 릴리스 화면만 예외로 두면 문구가 두 곳으로 갈라진다.
   registry_unreachable: "레지스트리에 연결할 수 없어 태그 목록이 비어 있습니다",
+  // 프론트 전용 코드다(registry_unreachable 과 같은 관례) -- 백엔드는 detail 이
+  // 아니라 제출 202 응답의 tag_verified:false 필드로 알린다(슬라이스 28).
+  tag_unverified: "레지스트리가 응답하지 않아 태그 존재를 확인하지 못한 채 접수되었습니다 — 태그가 틀리면 ImagePullBackOff 로 드러납니다",
   // 아티팩트 base 설정(슬라이스 18). 정규화 3종 + 즉석 검증 3종 + 잠금 1종 --
   // reasonCodes.json 과 함께 갱신해야 양방향 커버리지 테스트가 초록이다.
   artifact_base_not_absolute: "아티팩트 경로는 절대 경로여야 합니다",

@@ -202,4 +202,29 @@ describe("ReleasesPage", () => {
     wrap(<ReleasesPage />);
     expect(await screen.findByRole("heading", { name: "릴리스" })).toBeInTheDocument();
   });
+
+  it("미검증 제출(tag_verified=false)은 경고 배너를 띄운다", async () => {
+    // 레지스트리 전면 다운이면 드롭다운이 비어 UI 제출 자체가 불가하다 --
+    // 이 배너가 잡는 실 창은 "목록 로드 후 제출 전 장애"(TOCTOU)와 리포별
+    // 부분 침묵이다. msw 로 그 결과(202 + tag_verified:false)만 재현한다.
+    server.use(http.post("/api/admin/releases", () =>
+      HttpResponse.json({ items: [], tag_verified: false }, { status: 202 })));
+    wrap(<ReleasesPage />);
+    await screen.findByRole("heading", { name: "릴리스" });
+    await userEvent.selectOptions(screen.getByLabelText("dms-api"), "d23");
+    await userEvent.click(screen.getByRole("button", { name: "롤아웃 시작" }));
+    expect(await screen.findByText(/태그 존재를 확인하지 못한 채/)).toBeInTheDocument();
+  });
+
+  it("검증된 제출(tag_verified=true)에는 경고 배너가 없다", async () => {
+    server.use(http.post("/api/admin/releases", () =>
+      HttpResponse.json({ items: [], tag_verified: true }, { status: 202 })));
+    wrap(<ReleasesPage />);
+    await screen.findByRole("heading", { name: "릴리스" });
+    await userEvent.selectOptions(screen.getByLabelText("dms-api"), "d23");
+    await userEvent.click(screen.getByRole("button", { name: "롤아웃 시작" }));
+    // 성공 시 선택이 비워지는 기존 거동을 settle 신호로 쓴다.
+    await waitFor(() => expect(screen.getByLabelText("dms-api")).toHaveValue(""));
+    expect(screen.queryByText(/태그 존재를 확인하지 못한 채/)).toBeNull();
+  });
 });

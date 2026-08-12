@@ -148,6 +148,15 @@ export function ReleasesPage() {
           )}
 
           {submit.isError && <p className="text-bad">{(submit.error as ApiError).message}</p>}
+          {/* fail-open 비침묵화(슬라이스 28): 서버가 태그 존재를 검증하지 못한 채
+              접수했다 -- 202 라서 성공처럼 보이는 바로 그 순간에 보여야 한다.
+              레지스트리 전면 다운이면 드롭다운이 비어 여기까지 못 오고, 이 배너가
+              잡는 실 창은 목록 로드 후 제출 전 장애(TOCTOU)와 리포별 부분 침묵이다. */}
+          {submit.data?.tag_verified === false && (
+            <p className="rounded-lg bg-busybg px-3 py-2 text-busy">
+              {reasonText("tag_unverified")}
+            </p>
+          )}
           <div className="flex justify-end pt-2">
             <Button onClick={start} disabled={items.length === 0 || submit.isPending}>
               롤아웃 시작
