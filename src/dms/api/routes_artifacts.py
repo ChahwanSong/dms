@@ -60,7 +60,9 @@ def get_job_logs(job_id: str, request: Request, phase: str = Query(default="pref
     except ExecutionError as e:
         raise HTTPException(status_code=409, detail=e.reason_code)
     out = []
-    for pod, log in entries:
+    # 3-튜플 (pod, log, waiting_reason) 계약(슬라이스 25 Task 2). waiting_reason 의
+    # 응답 노출은 Task 6 -- 여기서는 언팩만 맞춰 기존 응답 계약을 유지한다.
+    for pod, log, _waiting_reason in entries:
         if log is not None:
             if tail is not None:
                 log = tail_lines(log, tail)

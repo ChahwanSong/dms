@@ -65,6 +65,9 @@ class K8sClient(Protocol):
         """대상이 이미 없으면 조용히 무시(404 삼킴) — 멱등 종료 계약."""
         ...
     def read_pod_log(self, name: str, namespace: str) -> str: ...
+    # 슬라이스 25: vcjob 파드는 이름을 모르므로 라벨로 찾는다. 구현은 이미 있었지만
+    # Protocol 에 없어 계약 문서가 실제 의존을 숨기고 있었다(설계 §1-4).
+    def list_pod_briefs(self, namespace: str, label_selector: str) -> list: ...
 
 
 class VolcanoExecutionAdapter:
@@ -241,22 +244,55 @@ class VolcanoExecutionAdapter:
             raise ExecutionError("terminate_failed", str(exc)[:200]) from exc
 
     def read_log(self, ref):
-        # preflight는 파드 ref라 직접 읽는다. vcjob(launcher)은 파드 이름이 잡 이름과
-        # 달라 라벨 조회가 필요하고 잡 종료 후 사라진다 — 이 슬라이스 범위 밖이므로
-        # 명시적으로 거절하고, 호출자는 아티팩트 stdout/stderr로 유도한다.
+        """(pod, log, waiting_reason) 목록. log=None 은 "얻을 수 없었다"(파드 소실/
+        미기동)고, waiting_reason 은 왜 없는지의 별 채널이다(ImagePullBackOff 류)
+        -- null 을 합성 문자열로 뭉개지 않는다(설계 §2.1). 빈 문자열은 정상값이다
+        (launcher 는 대개 비어 있다 -- §1-3)."""
         prefix, name = ref.split("/", 1)
+        if prefix == "vcjob":
+            return self._read_vcjob_logs(name)
         if prefix not in ("pod", "pods"):
+            # 슬라이스 25 로 vcjob 이 열렸다 -- 이 거절은 미지 prefix 방어로만 남는다.
             raise ExecutionError("log_not_available", prefix)
         out = []
         for pod in name.split(","):
             try:
-                out.append((pod, self._k8s.read_pod_log(pod, self._namespace)))
+                out.append((pod, self._k8s.read_pod_log(pod, self._namespace), None))
             except Exception as exc:
                 # 파드가 이미 GC됐거나 아직 로그가 없다 — 그 항목만 비우고 계속한다.
                 # 다만 RBAC 거부·설정 오류·프로그래밍 버그도 여기로 떨어져 "GC됐다"와
                 # 똑같이 렌더된다. 반환 계약은 그대로 두고 흔적만 남긴다.
                 logger.warning("read_pod_log failed pod=%s: %s", pod, exc)
-                out.append((pod, None))
+                out.append((pod, None, None))
+        return out
+
+    def _read_vcjob_logs(self, name):
+        """vcjob 파드는 Volcano 자기 라벨(volcano.sh/job-name=<vcjob>)로 찾는다 --
+        launcher 는 dms.io 라벨이 없고(§1-4), ref 에 이름이 있어 vcjob GET 도
+        불요하다. launcher(이름 접미 -launcher-, §1-1 의 결정적 명명) 항상 +
+        그 외는 Failed 만: 성공 워커의 sshd 로그는 노이즈고 남는 파드는 실패
+        원인 파드다(§1-2). launcher 가 앞 -- 박제 상한(항목 4)이 잘라도
+        launcher 가 살아야 한다. per-pod 실패는 pod 경로와 같은 null 접기지만,
+        **list 호출 자체의 예외는 poll_failed 로 던진다**: 403 이 "로그 없음"으로
+        렌더되는 사고(:393-398 교훈)를 조회 계층에서 반복하지 않는다. 파드가
+        하나도 없으면 빈 목록이다 -- 이건 실패가 아니라 "0 항목"이라는 정보다."""
+        try:
+            briefs = self._k8s.list_pod_briefs(
+                self._namespace, f"volcano.sh/job-name={name}")
+        except Exception as exc:
+            raise ExecutionError("poll_failed", str(exc)[:200]) from exc
+        launchers = [b for b in briefs if "-launcher-" in b["name"]]
+        failed = [b for b in briefs
+                  if "-launcher-" not in b["name"] and b.get("phase") == "Failed"]
+        out = []
+        for brief in [*launchers, *failed]:
+            pod = brief["name"]
+            try:
+                out.append((pod, self._k8s.read_pod_log(pod, self._namespace),
+                            brief.get("waiting_reason")))
+            except Exception as exc:
+                logger.warning("read_pod_log failed pod=%s: %s", pod, exc)
+                out.append((pod, None, brief.get("waiting_reason")))
         return out
 
 

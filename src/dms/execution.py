@@ -43,7 +43,7 @@ class ExecutionAdapter(Protocol):
     def poll(self, ref: str) -> ExecStatus: ...
     def read_summary(self, ref: str) -> "dict | None": ...
     def terminate(self, ref: str) -> None: ...
-    def read_log(self, ref: str) -> "list[tuple[str, str | None]]": ...
+    def read_log(self, ref: str) -> "list[tuple[str, str | None, str | None]]": ...
 
 
 class StubExecutionAdapter:
@@ -82,7 +82,9 @@ class StubExecutionAdapter:
             self._jobs[ref]["terminated"] = True
 
     def read_log(self, ref: str):
-        return self._logs.get(ref, [(ref, "")])
+        # 3-튜플 (pod, log, waiting_reason) -- 실 어댑터와 같은 계약(설계 §4).
+        # 스텁은 클러스터가 없으므로 waiting_reason 을 알 수 없다 -- None.
+        return self._logs.get(ref, [(ref, "", None)])
 
     # --- test helpers ---
     def script(self, ref, statuses):

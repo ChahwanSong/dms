@@ -25,8 +25,9 @@ def _confirmpending_job(app_repos, requester="alice"):
 
 
 class _FakeK8s:
-    """VolcanoExecutionAdapter.read_log rejects non-pod refs before touching
-    k8s at all, so this stand-in never needs a real read_pod_log."""
+    """VolcanoExecutionAdapter.read_log 는 미지 prefix 를 k8s 에 손대기 전에
+    거절하므로(슬라이스 25 이후 vcjob 은 열렸고 이 방어만 남았다) 이 대역은
+    read_pod_log·list_pod_briefs 를 갖출 필요가 없다."""
 
 
 def _volcano_adapter():
@@ -41,7 +42,7 @@ def test_get_preflight_log_returns_entries(client):
     repos = client.app.state.repos
     rid, jid = _confirmpending_job(repos)
     repos.data_jobs.set_phase_ref(jid, "preflight", "pod/p1")
-    client.app.state.execution_adapter.set_log("pod/p1", [("p1", "hello preflight log")])
+    client.app.state.execution_adapter.set_log("pod/p1", [("p1", "hello preflight log", None)])
     _login(client, "alice")
     r = client.get(f"/api/user/jobs/{jid}/logs", params={"phase": "preflight"})
     assert r.status_code == 200
@@ -58,7 +59,7 @@ def test_exec_preflight_log_is_reachable(client):
     repos = client.app.state.repos
     rid, jid = _confirmpending_job(repos)
     repos.data_jobs.set_phase_ref(jid, "exec_preflight", "pod/p2")
-    client.app.state.execution_adapter.set_log("pod/p2", [("p2", "recheck failed: dst full")])
+    client.app.state.execution_adapter.set_log("pod/p2", [("p2", "recheck failed: dst full", None)])
     _login(client, "alice")
     r = client.get(f"/api/user/jobs/{jid}/logs", params={"phase": "exec_preflight"})
     assert r.status_code == 200
@@ -76,14 +77,14 @@ def test_missing_phase_ref_404(client):
     assert r.json()["detail"] == "log_ref_not_found"
 
 
-def test_vcjob_ref_409_log_not_available(client):
-    # StubExecutionAdapter.read_log never raises regardless of ref prefix (see
-    # tests/test_execution_read_log.py::test_stub_adapter_read_log) — only the real
-    # VolcanoExecutionAdapter enforces "vcjob refs are out of scope for this slice".
-    # Swap in a real adapter (with a fake k8s client) to exercise that path.
+def test_unknown_prefix_ref_409_log_not_available(client):
+    # 슬라이스 25 가 vcjob 로그를 열었다 -- 409 log_not_available 은 알 수 없는
+    # ref prefix 방어로만 남는다(설계 §2.5). 실 어댑터로 그 방어를 고정한다.
+    # (StubExecutionAdapter.read_log 는 prefix 와 무관하게 던지지 않으므로
+    #  실 VolcanoExecutionAdapter 로 갈아끼워야 이 경로가 실행된다.)
     repos = client.app.state.repos
     rid, jid = _confirmpending_job(repos)
-    repos.data_jobs.set_phase_ref(jid, "execution", "vcjob/j1")
+    repos.data_jobs.set_phase_ref(jid, "execution", "widget/j1")
     client.app.state.execution_adapter = _volcano_adapter()
     _login(client, "alice")
     r = client.get(f"/api/user/jobs/{jid}/logs", params={"phase": "execution"})
@@ -124,7 +125,7 @@ def test_multibyte_log_capped_at_max_bytes_stays_valid_text(client):
     unit_bytes = len(unit.encode("utf-8"))
     big_log = unit * ((MAX_BYTES // unit_bytes) + 100)
     assert len(big_log.encode("utf-8")) > MAX_BYTES
-    client.app.state.execution_adapter.set_log("pod/p1", [("p1", big_log)])
+    client.app.state.execution_adapter.set_log("pod/p1", [("p1", big_log, None)])
     _login(client, "alice")
     r = client.get(f"/api/user/jobs/{jid}/logs", params={"phase": "preflight"})
     assert r.status_code == 200
