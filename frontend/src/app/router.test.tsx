@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
@@ -200,3 +201,37 @@ test("user visiting /admin/policies is redirected to /jobs", async () => {
 // 테스트는 이제 RequestDetail을 vi.mock으로 "던지는 컴포넌트"로 바꿔치기한
 // 전용 파일에서 돈다(이 파일과 같이 두면 vi.mock이 파일 전체에 적용돼 다른
 // 라우팅 테스트가 실제 RequestDetail을 못 쓰게 된다).
+
+test("로그아웃 클릭은 즉시 로그인 화면으로 이동한다 -- me 재조회 루프 없이", async () => {
+  // 슬라이스 29(§2.2 🔴): qc.clear() 는 관찰자 타이머까지 죽여 "자동 재조회로 401 을
+  // 보게 되는" 통로가 없다 -- 명시 nav 가 유일한 전환 수단이다. me 호출 횟수 불변
+  // 단언이 루프 부재 증명이다: /login 은 쿼리 관찰자가 0(Login 은 mutation 뿐)이라
+  // dms:unauthorized -> me 무효화 -> 재조회 401 루프(슬라이스 26 계열)가 발화할
+  // 재료 자체가 없어야 한다.
+  let meCalls = 0;
+  let alive = true;
+  server.use(
+    http.get("/api/auth/me", () => {
+      meCalls += 1;
+      return alive
+        ? HttpResponse.json({ actor: "admin", role: "admin" })
+        : HttpResponse.json({ detail: "not_authenticated" }, { status: 401 });
+    }),
+    http.post("/api/auth/logout", () => {
+      alive = false;
+      return new HttpResponse(null, { status: 204 });
+    }),
+    http.get("/api/admin/identity-denylist", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/denylist");
+  await screen.findByRole("heading", { name: "denylist" });
+  const callsBeforeLogout = meCalls;
+
+  await userEvent.click(screen.getByRole("button", { name: "로그아웃" }));
+
+  // 클릭 즉시(하드 내비게이션 없이) 로그인 화면 -- 이것이 이번 수정의 계약이다.
+  expect(await screen.findByRole("button", { name: "로그인" })).toBeInTheDocument();
+  // 루프 부재: 정착 창을 두고도 me 재조회가 한 번도 안 일어난다.
+  await new Promise((r) => setTimeout(r, 150));
+  expect(meCalls).toBe(callsBeforeLogout);
+});

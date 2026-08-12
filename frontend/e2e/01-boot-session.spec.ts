@@ -30,17 +30,15 @@ test.describe("E1 부팅+세션", () => {
 
     // 로그아웃 왕복이 실제로 200 으로 끝난 것을 재료로 삼는다.
     //
-    // 여기서 「클릭 직후 /login 으로 튄다」를 단언하지 않는 이유는 실측이다: 현 앱은
-    // 로그아웃 후에도 화면이 /admin/dashboard 에 그대로 남는다(30s 관찰). useLogout 의
-    // onSettled 가 qc.clear() 로 me 쿼리를 **제거**하는데, 제거된 쿼리의 관찰자는
-    // 마지막 결과를 그대로 들고 있고 재조회도 폴링도 다시 걸리지 않아 RequireRole 이
-    // 401 을 볼 기회 자체가 없다. 즉 화면 전환은 다음 내비게이션/요청 때 일어난다.
-    // 이 사실을 단언으로 굳히지도(버그를 계약으로 만드는 짓) 없는 동작을 기대하지도
-    // 않는다 -- e2e 가 지켜야 할 계약은 **서버 세션이 죽었다**는 쪽이다.
+    // 슬라이스 29 가 「클릭 즉시 /login 도달」을 계약으로 만들었다(AppShell 의
+    // 명시 nav -- qc.clear() 는 관찰자 재조회·폴링까지 멈춰 자동 전환 통로가
+    // 없다는 실측이 근거). 아래 URL 단언이 그 계약이고, 서버 세션 파기는 그
+    // 다음의 하드 내비게이션 단언이 별도로 지킨다 -- 두 계약은 독립이다.
     const logoutDone = page.waitForResponse(
       (r) => r.url().endsWith("/api/auth/logout") && r.request().method() === "POST");
     await page.getByRole("button", { name: "로그아웃" }).click();
     expect((await logoutDone).status()).toBe(200);
+    await expect(page).toHaveURL(/\/login$/);
 
     // 세션이 클라이언트 캐시에서만 지워진 게 아니라 **서버에서** 죽었는지 본다 --
     // 새 하드 내비게이션이라 앞선 응답 캐시가 개입할 여지가 없다. msw 로는 절대
