@@ -2,21 +2,57 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-DMS를 **clean-slate로 재구현**하는 저장소다. 새 구현은 저장소 루트에서 시작한다.
+DMS: 여러 스토리지 백엔드(CephFS/GPFS/WekaFS)와 Kubernetes 클러스터에 걸친
+**스토리지 인벤토리**와 **데이터 잡**(scan/sync/rm)을 관리하는 시스템. FastAPI +
+PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-scheduled 잡 러너.
 
-DMS란: 여러 스토리지 백엔드(CephFS/GPFS/WekaFS 등)와 Kubernetes 클러스터에 걸친
-**스토리지 인벤토리**와 **데이터 잡**(scan/sync/rm)을 관리하는 시스템. 정확한 범위와
-요구사항은 새 설계에서 다시 정의한다.
+## 어디를 볼 것인가 (문서 지도)
+
+문서는 **성격별로 분리**돼 있다. 질문 종류에 따라 여기서 시작해라:
+
+| 알고 싶은 것 | 문서 |
+|---|---|
+| **지금 시스템이 어떻게 도는가** (유지보수 진입점) | [`ARCHITECTURE.md`](ARCHITECTURE.md) + 코드의 「왜」 주석 |
+| **어떻게 배포·운영하는가** | [`deploy/README.md`](deploy/README.md) |
+| **남은 일** | [`BACKLOG.md`](BACKLOG.md) |
+| **무엇을·언제·왜 지었나** (빌드 역사) | [`CHANGELOG.md`](CHANGELOG.md) |
+| **왜 그렇게 설계했나** (원문 근거, 동결) | [`docs/history/`](docs/history/) |
+
+**드리프트 규칙**: 현재 동작의 진실은 **코드 + 모듈 docstring**이 정의한다.
+`ARCHITECTURE.md`는 얇은 지도(모듈·불변식을 가리킴, 메커니즘 재서술 안 함)이고,
+`docs/history/`는 왜 그렇게 됐는지의 근거다. 코드를 바꿀 때 불변식(ARCHITECTURE.md
+의 「불변식」)이 걸리면 그 문서도 함께 갱신한다 — 나머지는 코드가 스스로 말한다.
+
+## 코드에서 반드시 지키는 규약 (위반하면 시스템이 깨진다)
+
+자세한 건 `ARCHITECTURE.md`에, 여기엔 가장 자주 밟는 것만:
+
+- **DB 가 신뢰 경계다.** `create_job` 은 무검증 INSERT 라, tool·경로가 변조될 수 있다는
+  전제로 방어한다(stepper 층1 `unknown_tool`, `_abs` fail-closed, 러너 allowlist).
+- **null(모름) ≠ 실패, 0 은 정상값.** truthy 검사(`if x:`)로 이 셋을 뭉개지 마라 —
+  카운트·로그·큐에서 특히. `is None` 으로 명시 비교.
+- **사유 코드는 양쪽 등록**: `frontend/src/lib/reasonCodes.json` 과 `api.ts`
+  REASON_MESSAGES 둘 다(양방향 계약 테스트). AST 추출기는 `reason_code=` **키워드
+  리터럴**만 읽는다 — 위치 인자로 넘기면 커버리지 밖.
+- **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
+  전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
+- **매니페스트-우선 배포**: 이미지 태그를 먼저 bump·커밋하고 **그 커밋에서** 빌드한다
+  (`Dockerfile.dms` 가 `deploy/k8s` 를 이미지에 COPY — 순서가 바뀌면 드리프트 배지).
+- **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를
+  거치면 다른 세션 커밋에 파일이 섞인다(실제 사고 있었음, BACKLOG §5).
+- **PYTHONPATH 함정**: venv 의 `dms` 편집설치는 **본 저장소** src 를 가리킨다. 워크트리
+  코드를 테스트·실행하려면 `PYTHONPATH=<워크트리>/src` 를 명시해야 한다.
 
 ## legacy/ — 읽기 전용, 설계 참고용
 
-`legacy/`에는 이전 DMS 구현 전체가 보존되어 있다 — 소스(`legacy/src/`), 테스트,
-설치/운영 문서(`legacy/install/`, `legacy/docs/`), 이전 CLAUDE.md(`legacy/CLAUDE.md`) 포함.
+`legacy/` 에는 이전 DMS 구현 전체가 보존돼 있다(소스·테스트·문서·이전 CLAUDE.md).
 
-규칙:
+- **읽기 전용.** `legacy/` 아래 어떤 파일도 수정·이동·삭제하지 않는다. 새 파일도 안 넣는다.
+- **설계 참고용으로만.** 도메인 지식·운영 제약·과거 결정의 출처다. 새 구현에서 legacy
+  코드를 import 하거나 복사하지 않는다 — 필요한 개념은 새로 설계해 구현한다.
 
-- **읽기 전용.** `legacy/` 아래의 어떤 파일도 수정·이동·삭제하지 않는다. 새 파일도 넣지 않는다.
-- **설계 참고용으로만 사용한다.** 도메인 지식, 요구사항, 운영 제약, 과거 설계 결정과
-  그 이유를 파악하는 출처다. 이전 구현의 전체 맥락은 `legacy/CLAUDE.md`부터 읽는다.
-- 새 구현에서 legacy 코드를 import하거나 복사해 재사용하지 않는다. 필요한 개념은
-  새로 설계해서 구현한다.
+## 테스트·검증
+
+- 백엔드: `PYTHONPATH=<워크트리>/src <venv>/bin/python -m pytest tests -q` (~7분, 1280+ passed)
+- 프론트: `cd frontend && npx vitest run` (266+ passed) · `npx tsc -b`
+- e2e(실 브라우저): `cd frontend && npm run test:e2e` (9 passed, ~25s) — **CI 없음, 수기 게이트**

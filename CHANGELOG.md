@@ -1,44 +1,58 @@
-# DMS 백로그
+# DMS 변경 이력 (슬라이스별 빌드 기록)
 
-이 저장소에는 로드맵 문서가 없었다. 범위는 원본 설계
-(`specs/2026-08-02-dms-clean-slate-design.md`)와 슬라이스별 design+plan 쌍에 흩어져
-있고, 미완 항목은 각 설계의 "이 슬라이스에서 하지 않는 것", 플랜의 "알려진 위험",
-SDD 레저의 `minor (deferred)`, `deploy/README.md`의 미해결 값에 흩어져 있었다.
+DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이스가 무엇을 만들었고
+어떤 실증을 통과했는지, 그리고 구현 중 잡은 플랜 결함·교훈을 담는다.
 
-**이 파일을 만든 이유**: SDD 레저(`.superpowers/sdd/*/progress.md`)는 `.gitignore`가
-`*`라 git에 들어가지 않는다. 실제로 **슬라이스 11·12·13의 레저가 이미 소실**됐고 —
-그 슬라이스들이 파킹한 마이너 항목 기록은 복구 불가다. 코드 내 TODO/FIXME는 사실상
-0건이라 백로그를 상기시켜 줄 장치가 아무것도 없었다. 앞으로 **파킹하는 항목은 레저가
-아니라 이 파일에 적는다.**
+- **지금 시스템이 어떻게 동작하는가**는 여기가 아니라 [`ARCHITECTURE.md`](ARCHITECTURE.md)
+  와 코드의 「왜」 주석을 봐라. 이 파일은 "무엇을·언제·왜 그렇게 지었나"의 역사다.
+- **왜 그렇게 설계했나**의 원문 근거는 동결된 설계문서 [`docs/history/specs/`](docs/history/specs/)에
+  있다(슬라이스별 design). 구현 플랜(TDD 스크립트)은 일회성이라 트리에서 지웠고 git
+  이력에만 남는다.
+- **남은 일**은 [`BACKLOG.md`](BACKLOG.md).
 
-갱신: 2026-08-11. 기준: 슬라이스 18~22 가 `origin/main` 에 병합됨(fast-forward,
-`beed7b2`). 로컬 `main` 체크아웃은 `git pull` 로 따라와야 한다 — 병합을 워크트리에서
-`git push origin HEAD:main` 으로 했기 때문이다(공유 체크아웃의 브랜치는 그 세션에서
-직접 갱신할 수 없다).
+## 빠른 인덱스
+
+배포 태그는 제어면 `dms:dNN` 기준이다(에이전트·잡 러너는 바뀐 슬라이스에서만 함께 오른다).
+
+| # | 슬라이스 | 태그 | 한 줄 |
+|---|---|---|---|
+| — | **Phase 1~3**(기반) | d23~ | core backend · agent/controller · planner · stepper · live-adapters · job-lifecycle |
+| 1~2 | 포탈 thin slice · 배치 | | 포탈 골격, 요청/배치 제출 |
+| 3 | 스토리지 관리 | | 스토리지 CRUD·리컨실 |
+| 4 | 운영 콘솔 | | ops 화면 |
+| 5 | 잡 관측성 | | 잡 상태·아티팩트 뷰(실행 로그는 슬라이스 25 까지 409) |
+| 6 | 제출 표면 | | scan/sync/rm 제출 폼 |
+| 7 | 취소·타임아웃 | | 잡 취소·정책 타임아웃 |
+| 8 | 사용자 스캔 경로 | | user scan paths |
+| 9 | 관리자 계정·노드 | | 계정·노드 관리 |
+| 10 | 운영 강화 | | pod GC·리텐션 |
+| 11 | 포탈 이미지 빌드 | | 포탈 주도 빌드(테스트베드에선 구조적 제약 — §21 에서 되살림) |
+| 12 | 포탈 위생 | | 이벤트 리텐션 등 |
+| 13 | 포탈 롤아웃 | | 포탈 주도 롤아웃 |
+| 14 | 모니터링 대시보드 | | 노드 메트릭·Sparkline |
+| 15 | 러너 카운트 | d27 | 네 도구(dscan·dsync·nsync·drm) 카운트 파서 |
+| 16 | 배포 안전망 | d26 | 매니페스트 드리프트 배지·migrate 락 |
+| 17 | 큐 가시성 | d28 | 대기 이력·커버링 인덱스 |
+| 18 | 아티팩트 경로 설정 | d29 | DB 가 env 를 이기는 artifact base |
+| 19 | 계정 위생 | d30/d31 | 토큰 actor 제한·fail-closed 신원 |
+| 20 | Volcano 대기 이력 | d32 | sched_wait 계측 |
+| 21 | 포탈 빌드 되살리기 | d33 | 빌드 노드 적합성 프리플라이트 |
+| 22 | DB 커넥션 재연결 | d34 | 죽은 커넥션 재연결·readyz 자기종료·connect_timeout |
+| 23 | 포탈 e2e | (무관) | Playwright E1~E6, 기하·세션·SPA fallback·풀스택 부팅 |
+| 24 | 파괴적 fail-open 봉인 | d35 | 미지 도구 3층 fail-closed·`/` 스토리지 거부·고아 스윕 격리 |
+| 25 | 실행 단계 진단 | d36 | vcjob 로그 개방 + 실패 종단 시 `diag_logs` 박제 |
+| 26 | 포탈 기능 잔여 | d37 | 아티팩트 다운로드(fd 재사용)·FAST-FOLLOW·고급 sync 옵션 |
+| 27 | DB 정합성 | d38 | 死物 `runs` 제거(최초 파괴적 마이그레이션)·finalize 원자화 |
+| 28 | 운영·보안 | d39 | 레지스트리 fail-open 비침묵화·LDAP fail-closed 플래그 |
+| 29 | 포탈 위생 | d40 | 로그아웃 URL·poll_failed 문구·denylist 인코딩 |
+| 30 | 테스트 부채 마감 | d41 | 전수 열거 그물·이중 경로 그물·planner 원자화 |
+
+> 아래 상세 기록은 **작성된 순서**(연대기와 다를 수 있음)로 쌓여 있다. 확정 연대는
+> 태그 순서 d26→d41 다. 각 항목은 실증 결과·구현 중 잡은 플랜 결함·교훈을 담는다.
 
 ---
 
-## 0. 현재 상태
-
-- **슬라이스 1~26 전부 완료.** 슬라이스로 묶인 계획은 더 없다 — 남은 것은 §2 의
-  미분류 백로그(위생·기능 확장)뿐이다.
-- 테스트베드 이미지: 제어면 `dms:d41`, 에이전트 `dms-agent:d35`,
-  잡 러너 `dms-mpifileutils:d35`. **태그가 갈리는 것은 정상이다** — 세 이미지는 같은
-  단일 dNN 체계를 쓰되(슬라이스 24 에서 d35 로 한 번 정렬), 매 슬라이스 **바뀐 것만**
-  올린다. 슬라이스 25 는 제어면만 바꿔서 `dms` 만 d36 이다. 반대로 슬라이스 24 는
-  층3 러너가 잡 이미지에 살아 세 개를 다 올려야 했다. 범프 판단의 기준은 태그 정렬이
-  아니라 `git diff` 로 확인한 실제 변경 범위다.
-- ✅ 슬라이스 15 nsync 카운트 파서 **실증 완료**(d27, 잡 ace0581d):
-  `{"files": 10, "bytes": 50}` + 컬럼 채워짐. 이로써 네 도구 전부(dsync·dscan·drm·
-  nsync) 검증됨. cephfs-third(w1-3) -> cephfs-secondary(w4-5) 는 노드가 겹치지 않아
-  placement 가 nsync 를 고른다 — 재현 시 목적지 이름을 매번 새로 잡아야 실제 복사가
-  일어나 카운트가 0 이 아니다.
-- 네트워크 지표는 **물리 인터페이스만** 합산으로 정정됨(설계 §2.6, d27 실증:
-  전체 2,806,890,347,761 vs 물리 2,802,248,354,570 — 가상 4.64GB 제외).
-
----
-
-## 1. 예정 슬라이스
+## 슬라이스별 상세 기록
 
 ### ✅ 슬라이스 16 «배포 안전망» — **완료**(2026-08-10, d26 배포·§6 실증 6/6 통과)
 
@@ -813,189 +827,3 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
 
 ---
 
-## 2. 미분류 백로그 (테마별)
-
-### 2.1 러너 / 실행
-- **nsync 실증 재확인**: 파서는 커밋됐으나 `job5` 재빌드 + 실 nsync 잡으로
-  `files/bytes` 채워짐 확인 필요.
-- ✅ ~~**vcjob 런처 파드 로그 열람 불가**~~ — 슬라이스 25 가 열었다(`volcano.sh/job-name`
-  셀렉터로 라이브 조회 + 실패 종단 시 `diag_logs` 박제). `409 log_not_available` 는
-  이제 미지 prefix 방어로만 남는다. 실행 단계 진단이 더는 아티팩트 전용이 아니다.
-- **dscan 총바이트 없음** — 리포트 스키마에 없다(크기 히스토그램뿐).
-  `bytes_total`은 sync 전용으로 남는다(`slice15-design.md:121`).
-- **소급 백필 없음**(슬라이스 15 이전 잡), **프리뷰 카운트 DB 미승격**,
-  **파일별 상세·에러 카운트·전송률 없음**.
-- ✅ **[슬라이스 24 에서 4건 전부 닫힘]** — 아래 §2.1-완료 참조.
-  - ~~`storages.managed_root = "/"` 허용 → `_abs`가 `//team/data` 생성 가능~~
-  - ~~`_abs()` 스토리지 결측 폴백이 로그를 안 남김~~
-  - ~~고아 복구 쿼리에 `LIMIT` 없음~~
-  - ~~`tool_argv` 미지 도구가 `drm` 분기로 흘러감~~
-- `imagePullPolicy: IfNotPresent` + 태그 재사용 = 노드 캐시 stale(phase3c `:88`).
-  고유 태그 관례로만 완화됨.
-- ✅ ~~**`finalize_from_job` 이 원자적이지 않다**~~ — 슬라이스 27 이 원자화했다. 단순히
-  `with transaction()` 으로 감싸는 건 불가능했다(set_state 가 이미 트랜잭션을 열어
-  중첩 → sqlite 즉사·PG 조용한 비원자). 전이 몸통을 무트랜잭션 `_apply_state` 로
-  추출해 set_state(단독)와 finalize(전이+results 합동)가 각자 경계를 소유하게 했다.
-  이제 크래시는 전부-또는-전무라 "results PK 중복(UniqueViolation)에 걸리는 재시도
-  창"도 함께 닫혔다. **planner 에 동종 비원자 쌍 2곳이 남는다**(`_reject`, conflict
-  경로) — `_apply_state` 덕에 후속이 각 2줄이다(§2.4 로 이관).
-
-### 2.2 포탈
-- ✅ **슬라이스 1 FAST-FOLLOW 7건 전부 종결**(6건은 슬라이스 26, RequestDetail 로딩은
-  그 전에). ~~StatusPill 스토리지 중립색~~(배지 색 분리)·~~api.ts 401 중복~~(분기 통합)·
-  ~~Login 무가드 캐스트~~(`instanceof`)·~~취소 오류 미표시~~(카드 한정)·~~다이얼로그 reset~~
-  (닫힘 reset)·~~Home me.isError~~(오류+재시도)·~~무효화 접두 중복~~(dedup).
-- 미구현 기능면(슬라이스 26 이 일부 종결): ~~아티팩트 **다운로드**~~(fd 재사용 스트리밍,
-  256MiB 413)·삭제·보존 UI; 배치 **CSV 업로드**(현재 프론트 파싱)·결과 내보내기·템플릿·
-  rm 배치; ~~고급 sync 옵션(`chmod`/`chown`/`bufsize`/`batch_files`) 폼 노출~~(슬라이스 26);
-  배치 생성 폼의 스토리지 드롭다운; 에이전트 설정 푸시; 알림/경보(슬라이스 14 비목표 —
-  "대시보드는 표시만"). **남은 것**: 아티팩트 삭제·보존, 배치 CSV 일체·rm 배치, 배치 폼
-  스토리지 드롭다운, 에이전트 설정 푸시, 알림/경보.
-- ✅ ~~Sparkline 유효점 1개면 bare `M` → 빈 SVG~~ — 슬라이스 26 이 circle 로 그린다.
-- ✅ ~~**`poll_failed` 문구가 빌드 전용이다**~~ — 슬라이스 29 가 "상태를 확인하지
-  못했습니다"로 일반화했다(빌드 폴링·잡 로그 409 가 공유하는 코드). 문구만 바꿔서
-  reasonCodes.json 무접촉(키 불변). 라이브 dist 번들에서 옛 문구 0건·새 문구 존재 실증.
-- ✅ ~~**`StoragesList.tsx:50` 의 flex td**~~ — 슬라이스 26 Task 6 이 수리했다(9fbef86
-  형태). 슬라이스 23 e2e 가 만들자마자 찾은 실물 결함이었고, 수리와 동시에 e2e 의
-  `knownNonTableCells: 1` 인자도 같은 커밋에서 제거했다 — 정확 개수 단언의 상환 구조가
-  실제로 작동해 "고치면 이 줄을 지우라"고 인도했다.
-- ✅ ~~**로그아웃이 URL 을 안 바꾼다**~~ — 슬라이스 29 가 고쳤다. `qc.clear()`(관찰자
-  타이머까지 죽여 자동 재조회로 401 을 볼 통로가 없다)는 유지하고, AppShell 의 로그아웃
-  버튼에 `logout.mutate(..., { onSettled: () => nav("/login", { replace: true }) })` 로
-  명시 이동을 얹었다. nav 를 훅이 아닌 AppShell 에 둔 이유: `useAuth.test` 가 Router
-  없이 훅을 렌더한다. 무한 루프(슬라이스 26 계열: me.isError 재조회 폭주)는 /login 이
-  쿼리 관찰자 0 이라 발화 재료가 없어 성립하지 않고, router.test 가 "로그아웃 전후 me
-  호출 횟수 불변"으로 못박았다. e2e E1 이 세션 파기만 단언하던 것을 `/login` URL 도달
-  까지 확장 고정했다. **이로써 포탈 🔴 이 전부 사라졌다.**
-- **의존성 권고(의도적 보류, `frontend/README.md`)**: react-router `GHSA-qwww-vcr4-c8h2`
-  high — 현재 어떤 `react-router-dom` 버전도 두 취약 범위를 동시에 피하지 못함.
-  재검토 조건: `react-router-dom@8.3.0` 이상 릴리스. vite/vitest 체인 critical 1건은
-  dev 전용이며 semver-major 업그레이드 필요(슬라이스 12 §7 범위 밖).
-  **`npm audit fix --force` 실행 금지.**
-
-### 2.3 운영 / 배포
-- **포탈 빌드(슬라이스 11)는 이 테스트베드에서 쓸 수 없다** — 빌드 파드가 빌드
-  노드(=dms 워커) 위에서 돌면서 GitHub·npm·PyPI·dl.k8s.io 로 나가야 하는데, 테스트베드
-  아키텍처가 "pkg-01 만 인터넷, dms 노드는 ssh 만"이다(`testbed/docs/ARCHITECTURE.md`
-  §15). 실제로 이 클러스터의 유일한 포탈 빌드 기록이 `build_failed` 다. 실 빌드 경로는
-  **pkg-01 에서 podman**(`deploy/docker/build-and-push.sh`)이며, 슬라이스 18 의 d29 도
-  그렇게 만들었다. 포탈 빌드를 살리려면 빌드 노드를 pkg-01 로 둘 수 있어야 하는데
-  pkg-01 은 어느 클러스터에도 join 하지 않으므로 에이전트가 없다 → `build_node_name`
-  후보에 뜨지 않는다. **구조적 미해결**이다.
-- **클러스터 내 registry 미구축** — 원본 설계 §246은 "클러스터 내 registry:2",
-  실제는 호스트 `pkg-01:5000`(슬라이스 11 비목표: "독립된 인프라 작업").
-- **`DMS_JOB_IMAGE`는 포탈 롤아웃 불가** — ConfigMap 갱신 + 소비자 재시작이라
-  슬라이스 13 범위 밖. 여전히 `20-config.yaml` 수기 편집.
-- **태그 동기화가 5파일 수기** — 템플릿 계층 없음(의도적, `deploy/README.md`).
-  "하나라도 빠지면 그 컴포넌트만 옛 이미지로 돈다." **슬라이스 16 이후 완화**:
-  라이브와 매니페스트가 갈라지면 대시보드 드리프트 배지가 표시하고,
-  api/controller 는 initContainer 와 본 컨테이너 이미지가 다르면 계약 테스트가
-  RED 다(그 divergence 는 배지가 못 잡는 유일한 구멍이라 테스트로 막았다).
-  여전히 못 잡는 것: 매니페스트를 아예 안 고친 채 포탈 롤아웃만 한 상태는
-  배지가 잡지만, 그걸 **무시하면** 다음 apply 가 되돌린다.
-- 빌드 레이어 캐시 미보존·멀티아치 없음(슬라이스 11 비목표). 빌드 노드는 **인터넷
-  egress 필요**(npm/dl.k8s.io/github/PyPI/Debian) — 격리망에서 실패.
-- **롤백 버튼 없음**(의도적 — 이력에서 옛 태그 재선택).
-- `/cephfs` hostPath `type: Directory` — 비-cephfs 노드가 스케줄 풀에 들어오면 파드
-  admission 실패.
-- 🟡 **`DMS_LDAP_BIND_DN`/`_PW` 공란(익명 바인드)** — 슬라이스 28 이 **코드 강화는
-  끝냈다**: `DMS_LDAP_REQUIRE_AUTH_BIND` 플래그를 켰는데 바인드 DN/PW 가 결측·자리표시자
-  면 api/controller/migrate 가 기동을 거부한다(SettingsError, fail-closed). "인증
-  바인드를 의도했는데 익명으로 조용히 도는" 상태를 배포 순간에 시끄럽게 드러낸다 —
-  실 파드 env 에서 발화 실증했다. **남은 것은 자격증명이 막는다**: 실제 인증 바인드
-  전환은 ① OpenLDAP(10.10.10.30) 바인드 서비스 계정(DN+PW) 발급 ② dms-secrets 에 주입
-  ③ 플래그 "false"→"true"(순서 엄수 — ③ 먼저면 CrashLoopBackOff). 절차는
-  `20-config.yaml` 주석에. **자격증명 준비되면 재개.**
-- ✅ ~~레지스트리 태그 검증 fail-open~~ — 슬라이스 28 이 **비침묵화**했다(tradeoff 는
-  유지). fail-closed 로 뒤집는 건 설계 §7 이 거부한 것(레지스트리 브리프 다운에도
-  롤아웃이 막힘 > ImagePullBackOff)이라, 대신 침묵만 걷었다: 레지스트리 미응답으로
-  검증을 건너뛴 제출은 202 응답에 `tag_verified: false` + `release_tag_unverified`
-  이벤트 + 포탈 경고 배너로 표시된다. 검증 강제는 1비트도 안 바뀐 거동 동치 재구성.
-- pod GC 86400s가 **프리플라이트 파드 로그(유일한 진단 사본)** 를 파괴
-  (슬라이스 10 Important 2). **부분 완화**: 슬라이스 25 가 실패 종단 시 diag_logs 로
-  박제하므로 실패 잡의 프리플라이트 로그는 더는 시한부가 아니다(성공·진행 중 잡의
-  라이브 열람만 이 창에 남는다).
-- ✅ ~~DaemonSet 롤아웃 **600s 타임아웃 미측정**~~ — 슬라이스 28 이 전제를 정정했다:
-  600s 는 "5노드 총 수렴 상한"이 아니라 **노드-단위 정체 상한**이다. `rollout_watcher`
-  의 `_note_daemonset_progress` 가 진행 틱마다 `applied_at` 을 재장전하므로, 5노드가
-  각각 600s 안에만 교체되면 총 소요가 얼마든 거짓 실패가 없다. 노드당 이미지 교체는
-  수 초~수십 초라 상한과 큰 여유. `DMS_ROLLOUT_TIMEOUT_SECONDS` 로 이미 설정 가능.
-- Prometheus/Grafana 배포는 **의도적 제외**(포탈 대시보드로 대체).
-
-### 2.4 데이터 모델
-- ✅ ~~`runs` 테이블 死物~~ — 슬라이스 27 이 제거했다(이 저장소 최초의 파괴적
-  마이그레이션 `DROP TABLE IF EXISTS runs`). `ALL_TABLES` 20→19, `len==20` 단언 2곳 +
-  모듈 docstring 갱신. 실 PostgreSQL 에서 기존 빈 테이블(0행)이 삭제됨을 실증했다.
-- ✅ ~~**planner 의 비원자 전이 쌍 2곳**~~ — 슬라이스 30 이 원자화했다. 레포에
-  `set_state_with_result`(`_apply_state` + `record_result` 를 한 트랜잭션)를 신설하고
-  `_reject`·conflict 경로를 그 단일 호출로 교체 — `record_result` 단독 호출이 src 전체
-  에서 0 이 됐다. 크래시 주입 테스트 3건이 원 결함(Rejected/Conflict 인데 results 없음
-  → 종단이라 고아 스윕 시야 밖 → 영구 결손)을 재현·봉쇄한다(finalize 와 동일 계열).
-- ✅ ~~**`ALL_TABLES` 는 전 테이블 목록이 아니다**~~ — 슬라이스 30 이 전수 열거 그물로
-  닫았다: 실 `sqlite_master`(sqlite_* 접두 제외) == `ALL_TABLES` ∪ {batches, batch_items,
-  schema_migrations} 양방향 등식 + 인덱스 16개 전수 등식(idx_requests_batch 포함). 이제
-  어느 테이블·인덱스가 실수로 추가·삭제되면 반드시 걸린다. `ALL_TABLES` 자체는 19 유지
-  (사용처가 테스트뿐이라 상수를 늘리지 않고 등식으로 3 을 명시).
-- ~~**`data_jobs.created_at` 인덱스 없음**~~ — 슬라이스 17이 커버링 인덱스
-  `idx_data_jobs_created (created_at, submit_wait_seconds)` 를 추가해 해소됨.
-- `by_storage`가 `COALESCE(storage_name, destination_storage)` — sync를 **도착지 기준**
-  으로 센다. 설계가 기준을 명시하지 않은 침묵의 해석.
-- KPI 의미 변화(요청 50건 즉석 계산 → 창 내 잡 집계) — 옛 화면과 숫자가 다르다.
-
-### 2.5 테스트 / CI
-- ✅ ~~**e2e 전무**(Playwright 없음)~~ — 슬라이스 23 이 `@playwright/test` 로 실 브라우저
-  e2e 6시나리오(E1~E6)를 만들었다. 단위가 구조적으로 못 보는 것(기하·세션·SPA
-  fallback·폴링·풀스택 부팅)만 잡는다. **다만 CI 는 여전히 없다** — 이 게이트는 수기이고
-  `deploy/README` 의 "이미지 빌드 전" 단계로 명문화만 됐다(기술적 강제 수단 부재).
-- ✅ ~~`KubernetesClient`가 `# pragma: no cover`~~ — 슬라이스 30 이 `threading.Lock`
-  이중검사(lazy-init)를 결정적 테스트 3건으로 커버했다(부분 실패 게이트·fast path·락
-  대기 후 재검사, sys.modules 대역이라 새 의존성 0). **실 k8s API 경로(create/get/…)는
-  pragma 유지** — 대역으로 감싸면 대역을 테스트하는 꼴이라 실증 대상으로 정직하게 남긴다.
-- ✅ ~~마이그레이션 **ALTER 경로 일반 회귀 커버리지 갭**~~ — 슬라이스 30 이 "이중 경로
-  일반 그물"로 닫았다: 현재 컬럼 == v1 ∪ `_ensure_columns` 등식 + 선언형 패리티. "CREATE
-  에만 넣고 ensure 를 잊는" 슬라이스 14 실 500 계열을 **미래형으로** 잡는다(신규 DB 만
-  보는 기존 그물은 못 잡던 것). 실 PG `ALTER COLUMN TYPE` 실행 경로는 sqlite 재현 불가라
-  배포 실증이 통과하는 것으로 남긴다(의도적).
-- ✅ ~~슬라이스 15 잔여~~ — 슬라이스 30 이 닫았다: `text or ""` 반쪽 약속(파서 3종+
-  `parse_hostfile` 의 None 입력 그물 — 기존은 `""` 만 봤다), `test_execution_volcano`
-  픽스처를 실 3키 summary 계약으로 현행화, `information_schema` 쿼리 2곳에
-  `table_schema = current_schema()` 한정(타 스키마 동명 테이블 오판 → ALTER 건너뜀 봉쇄).
-- ✅ ~~슬라이스 14 잔여~~(프론트분) — 슬라이스 29 가 보강: ~~Sparkline NaN/Infinity~~
-  (앱 코드는 슬라이스 26 이 이미 `Number.isFinite` 로 걸렀고 테스트만 추가), ~~by_state
-  비배열 truthy~~(`{}`·`"oops"` 생존 단언 — 플랜 스니펫이 무이빨이라 waitFor 로 관찰
-  창을 데이터 착지 뒤로 밀어 수리).
-- 슬라이스 9 Task 6은 진짜 RED 단계가 없었음(구현자 자진 신고) — 역사적 기록, 소급 불가.
-- **슬라이스 1~4 테스트 부채**(프론트분 대부분 슬라이스 29 가 닫음): ✅ ~~`jobState.test`의
-  `PreviewExpired`/`Planning`/`Scheduled` 누락~~, ✅ ~~`BatchDetail` 확인-POST 단언이
-  `waitFor` 밖~~, ✅ ~~`useDenylist` URL 미인코딩~~(encodeURIComponent — `#`/`?` wrong-target
-  봉쇄. subject 의 `/` 는 ASGI 가 라우팅 전 %2F 디코드라 여전히 백엔드 404, 근본 해결은
-  경로 재설계로 범위 밖). ~~`PolicyDialog` tool 필드 `aria-label` 없음~~ — 슬라이스 29 가
-  실측: `<label>도구 <input/></label>` 감싸기로 접근 가능한 이름이 이미 있어 결함 아님.
-  **남은 것**: `idx_requests_batch` 미단언(백엔드 마이그레이션 테스트 — 슬라이스 30).
-
-### 2.6 프로세스
-- **SDD 레저는 git에 없다**(`.superpowers/sdd/.gitignore` = `*`). 슬라이스 11·12·13
-  레저 소실. → 앞으로 파킹은 이 파일에 기록.
-- **한 워크트리에서 둘이 동시에 커밋하면 인덱스가 섞인다**(2026-08-11 실제 발생).
-  슬라이스 20 Task 2 가 `git add` 로 5개 파일을 스테이징한 사이, 같은 워크트리의 다른
-  세션이 `git commit` 을 쳐서 그 5개가 남의 커밋 `6bc2ecb`(원래는 AppShell 수정 1건)
-  안으로 통째로 들어갔다. **코드 손실은 없고** 히스토리만 섞였다 — 미푸시였지만 뒤에
-  5개 커밋이 쌓여 재작성은 위험 대비 이득이 없어 그대로 뒀다. 그래서 `6bc2ecb` 의
-  메시지는 그 안의 백엔드 변경(`mark_exec_submitted`, 스테퍼 훅, 테스트 3개)을 말하지
-  않는다 — **이 항목이 그 기록이다**.
-  **관례**: 워크트리를 공유하는 동안에는 `git add` 로 인덱스를 거치지 말고
-  `git commit -- <경로들>`(pathspec)로 커밋한다. 인덱스를 안 쓰면 남의 파일을 삼키지도
-  내 파일이 삼켜지지도 않는다.
-- **슬라이스 13 실증 체크리스트가 전부 미체크**(`deploy/README.md` §9, 8개 `[ ]`).
-  레저도 없어 컨트롤러 자기 갱신 수렴(핵심 실증)이 시연됐는지 확인 불가.
-- **포탈 빌드는 GitHub에 푸시된 커밋만 본다**(`--depth 1 --branch`) — 로컬 전용
-  커밋은 빌드 불가. 미푸시 상태와 겹치면 이 브랜치 자체를 빌드할 수 없다.
-
----
-
-## 3. 규약
-
-- 파킹할 항목은 **이 파일**에 적는다(레저는 워크트리와 함께 사라진다).
-- 각 항목은 근거를 `파일:줄`로 남긴다.
-- 의도적 보류(회원가입 메일 인증, Prometheus, 롤백 버튼, 템플릿 계층, cron 예약)는
-  "미구현"이 아니라 **결정**이므로 그렇게 표시한다.
