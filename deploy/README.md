@@ -24,6 +24,53 @@ truth):
 
 ---
 
+## 이미지 빌드 전 게이트: 로컬 풀스택 e2e (수기, 슬라이스 23)
+
+이미지를 만들기 **전에** 개발 머신에서 아래를 돌리고 초록을 확인한다 — §1(비상 빌드)
+이든 §8(포탈 빌드)이든 똑같이 적용된다. 빨강이면 빌드를 제출하지 않는다.
+
+```bash
+cd frontend && npm run test:e2e
+# = npm run build && tsc -p tsconfig.e2e.json && playwright test  (빌드까지 한 방)
+```
+
+싸다 — 시나리오 9건에 **약 30초**(빌드 포함, 2026-08-12 실측). 건너뛸 이유가 되는
+비용이 아니다. 하네스가 백엔드를 띄우고 끝나면 스스로 죽인다(tmp DB 포함 정리).
+
+**이 게이트는 수기다 — CI 는 없다.** 이 저장소에는 GitHub Actions 도, 이 스위트를
+자동으로 돌려주는 어떤 것도 없다. 아무도 대신 돌려주지 않으니 **사람이 빌드 전에
+돌리는 것**이 유일한 강제력이다(CI 구축은 별도 슬라이스 몫이다 — 그 사실을 숨기지
+않으려고 이 문단을 여기 둔다).
+
+**무엇을 잡는가.** 프론트 단위 테스트(`npx vitest run`, 228건)가 구조적으로 못 보는
+네 가지다:
+
+- **기하** — 넓은 표가 레이아웃을 밀어내는 유형의 회귀. 실제로 두 번 났다
+  (`9fbef86` 계정 표, `6bc2ecb` 사이드바 밀림). jsdom 에는 레이아웃이 없어 단위
+  테스트로는 영원히 안 잡힌다.
+- **실 HTTP 왕복** — 세션 쿠키 로그인, 그리고 **`dist` 서빙 + SPA fallback**
+  (`api/app.py`). vite dev 서버가 이 코드 경로를 가리므로 개발 중엔 절대 안 돈다.
+- **폴링** — 요청 목록의 수렴, 상세 잡의 **종단 뒤 중지**(안 멈추면 무한 폴링).
+- **풀스택 부팅** — `migrate` → `api` → `controller` → `agent` 리포트 → 스토리지
+  `Ready` 까지가 한 번에 서는지. 하네스가 이걸 못 세우면 스위트는 skip 이 아니라
+  실패한다.
+
+클러스터도 PostgreSQL 도 쓰지 않는다(tmp sqlite + `execution_backend=stub`). 그래서
+**§7 의 실 클러스터 시나리오를 대체하지 않는다** — 그 앞단에서 싸게 거르는 그물이다.
+
+**전제.**
+
+- 개발 머신에 **Google Chrome**. 러너는 시스템 크롬을 쓴다
+  (`frontend/playwright.config.ts` 의 `channel:"chrome"`) — 브라우저 다운로드 0 이
+  기본이다. 크롬이 없는 머신에서만 `npx playwright install chromium` 으로 번들
+  크로미엄을 받고, 채널을 **빈 값**으로 비워 실행한다:
+  `DMS_E2E_BROWSER_CHANNEL= npm run test:e2e`.
+- `frontend/node_modules`(`npm ci`)와 저장소 루트 `.venv` 의 `dms` 편집 설치 —
+  하네스가 `<repo>/.venv/bin/dms` 를 찾아 백엔드를 직접 띄운다.
+- **포트 8093 이 비어 있을 것.** 누가 듣고 있으면 하네스가 즉시 실패한다. 낡은 서버에
+  붙어 초록이 나는 것이 e2e 에서 가장 조용한 거짓말이라 의도적으로 거절한다 — 포트를
+  바꾸지 말고 이전 실행의 잔재(python/node)를 정리한 뒤 다시 돌린다.
+
 ## 0. Registry setup (once)
 
 On `pkg-01`, start the insecure registry and point every cluster node's
@@ -45,6 +92,9 @@ error with "http: server gave HTTP response to HTTPS client".
 > 슬라이스 21 부터 **평상시 빌드는 포탈**에서 한다(§8). 이 절은 **비상용**이다 —
 > 클러스터가 아직 없거나(최초 부트스트랩), 포탈/컨트롤러가 죽어 빌드를 제출할 수
 > 없을 때만 쓴다. 포탈 빌드와 달리 적합성 프리플라이트도, 리소스 봉투도 없다.
+
+빌드하기 전에 위 「이미지 빌드 전 게이트」(`cd frontend && npm run test:e2e`)를
+돌린다 — 비상 빌드라고 건너뛰지 않는다.
 
 Also on `pkg-01` (build context = repo root, run from anywhere in the repo):
 
@@ -286,6 +336,10 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 >
 > §1 의 pkg-01 podman 경로는 **비상용으로 남긴다** -- 클러스터가 없거나 포탈이 죽은
 > 상태에서 이미지를 만들어야 할 때만 쓴다. 평상시 빌드는 포탈에서 한다.
+
+**빌드를 제출하기 전에 위 「이미지 빌드 전 게이트」(`cd frontend && npm run test:e2e`)를
+돌린다.** 포탈 빌드는 GitHub 에 push 된 커밋을 대상으로 하지만(아래 1번), 그 커밋이
+게이트를 통과했는지 확인해 주는 CI 는 없다 — 제출자가 로컬에서 돌리는 것이 전부다.
 
 포탈이 `dms-mpifileutils`/`dms`/`dms-agent` 이미지를 빌드 노드 위 bare Pod로 빌드해
 `DMS_BUILD_REGISTRY`(기본 `pkg-01:5000`)로 push하는 기능. `20-config.yaml`의
