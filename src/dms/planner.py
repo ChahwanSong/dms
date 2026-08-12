@@ -71,10 +71,12 @@ class Planner:
         return results
 
     def _reject(self, rid, reason):
-        self._repos.requests.set_state(rid, RequestState.REJECTED,
-                                       reason_code=reason, actor="planner")
-        self._repos.requests.record_result(rid, RequestState.REJECTED,
-                                            reason_code=reason)
+        # 슬라이스 30: set_state + record_result 별도 커밋(비원자 쌍)을 레포의
+        # 원자 메서드로 -- 사이 크래시가 만들던 "Rejected 인데 results 없음"(고아
+        # 스윕 시야 밖의 영구 결손)이 전부-또는-전무가 된다. finalize(슬라이스
+        # 27, 실증 5/5)와 동일 처방.
+        self._repos.requests.set_state_with_result(
+            rid, RequestState.REJECTED, reason_code=reason, actor="planner")
         return f"rejected:{reason}"
 
     def _identity_grace_active(self, req, exc, now_iso):
@@ -128,11 +130,10 @@ class Planner:
         # 1. conflict: 앞선 비터미널 동일 resource_key
         prior = self._repos.requests.find_active(req["resource_key"])
         if prior is not None and prior["commit_order"] < req["commit_order"]:
-            self._repos.requests.set_state(rid, RequestState.CONFLICT,
-                                           reason_code="resource_conflict",
-                                           actor="planner")
-            self._repos.requests.record_result(rid, RequestState.CONFLICT,
-                                                reason_code="resource_conflict")
+            # 슬라이스 30: _reject 와 같은 원자화(비원자 쌍의 두 번째).
+            self._repos.requests.set_state_with_result(
+                rid, RequestState.CONFLICT, reason_code="resource_conflict",
+                actor="planner")
             return "conflict"
         # 2. requester 계정 admission: 계정 row가 존재 & disabled일 때만 거부한다.
         #    row가 없으면 "무판정" — 포탈 계정이 없는 LDAP 신원의 잡은 그대로 통과.

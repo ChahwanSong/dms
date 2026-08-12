@@ -185,6 +185,21 @@ class RequestsRepository:
             self.record_result(request_id, target, reason_code=reason_code,
                                summary=summary)
 
+    def set_state_with_result(self, request_id, to_state: RequestState, *,
+                              reason_code, actor):
+        """planner 의 종단 판정(Rejected/Conflict) 전용 -- 전이와 results INSERT
+        를 한 트랜잭션으로 묶는다(슬라이스 30, BACKLOG §2.4 -- finalize_from_job
+        과 동일 처방). 별도 커밋이면 사이 크래시가 "종단인데 results 없음"을
+        만들고, 종단 요청은 고아 스윕(terminal_jobs_with_live_request) 시야 밖이라
+        결손이 영구다. 원자화 후엔 둘 다 롤백 -> 요청이 Pending 으로 남아 다음 틱
+        list_pending 재계획이 완주한다. finalize 와 달리 멱등 가드가 없는 이유:
+        호출자는 list_pending 이 고른 Pending 요청만 넘기고 스윕류의 종단 후
+        재호출 경로가 없다 -- 가드를 흉내 내면 없는 경로를 있는 척하는 것이다."""
+        with self._db.transaction():
+            self._apply_state(request_id, to_state, reason_code=reason_code,
+                              actor=actor)
+            self.record_result(request_id, to_state, reason_code=reason_code)
+
     def has_active_for_requester(self, requester_id) -> bool:
         """이 requester 소유의 비종단(진행 중) 요청이 하나라도 있으면 True. 잡 신원은
         plan 시점에 구워져(설계 §1-6) 삭제가 소급되지 않으므로, 소유자 삭제 전에

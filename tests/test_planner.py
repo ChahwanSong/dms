@@ -562,3 +562,60 @@ def test_token_auth_root_request_never_runs_privileged(db):
     Planner(repos, resolver, settings=_PrivSettings()).run_once(now_iso=NOW)
     ident = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
     assert ident["uid"] == 5000 and ident["privileged"] is False
+
+
+def test_reject_crash_between_writes_leaves_request_pending(db):
+    """비원자 쌍(BACKLOG §2.4, 슬라이스 27 발견): set_state(REJECTED) 커밋 후
+    record_result 전에 죽으면 요청은 Rejected 인데 results 가 없다 -- Rejected 는
+    종단이라 고아 스윕 시야 밖, 결손이 영구다(finalize 의 슬라이스 24 실증과
+    동일 계열). 원자화 후엔 둘 다 롤백 -> Pending 잔존, run_once 의 요청별 예외
+    격리가 plan_error 로 남기고 다음 틱 재계획이 완주한다."""
+    repos = Repositories(db)
+    rid = _scan_request(repos)      # 스토리지 미시드 -> storage_missing 거부 경로
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("crash before record_result")
+
+    repos.requests.record_result = _boom     # 인스턴스 속성이 메서드를 가린다
+    _planner(repos).run_once(now_iso=NOW)    # 요청별 try/except 가 삼킨다(무전파)
+    del repos.requests.record_result         # 원복 -- 클래스 메서드가 되살아난다
+    # 전부-또는-전무: Pending 그대로, Rejected 전이도 results 도 없다.
+    assert repos.requests.get(rid)["state"] == "Pending"
+    assert all(t["to_state"] != "Rejected" for t in repos.requests.transitions(rid))
+    assert db.query("SELECT request_id FROM results WHERE request_id = :r",
+                    {"r": rid}) == []
+    # 다음 틱: 정상 완주 -- 거부 상태와 results 행이 함께 남는다.
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:storage_missing"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+    row = db.query_one("SELECT terminal_state, reason_code FROM results"
+                       " WHERE request_id = :r", {"r": rid})
+    assert (row["terminal_state"], row["reason_code"]) == ("Rejected",
+                                                           "storage_missing")
+
+
+def test_conflict_crash_between_writes_leaves_request_pending(db):
+    # 비원자 쌍의 두 번째(conflict 경로) -- _reject 와 같은 계약. 첫 요청은 정상
+    # 계획(planned 경로는 record_result 를 안 부른다), 둘째가 conflict 에서 크래시.
+    repos = Repositories(db)
+    _seed_storage(repos)
+    _seed_policy(repos)
+    _seed_report(repos)
+    first = _scan_request(repos)
+    second = _scan_request(repos)   # 같은 resource_key -- 뒤가 conflict
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("crash before record_result")
+
+    repos.requests.record_result = _boom
+    _planner(repos).run_once(now_iso=NOW)
+    del repos.requests.record_result
+    assert repos.requests.get(first)["state"] == "Planned"     # 격리: 옆은 무사
+    assert repos.requests.get(second)["state"] == "Pending"
+    assert db.query("SELECT request_id FROM results WHERE request_id = :r",
+                    {"r": second}) == []
+    assert _planner(repos).run_once(now_iso=NOW)[second] == "conflict"
+    assert repos.requests.get(second)["state"] == "Conflict"
+    row = db.query_one("SELECT terminal_state, reason_code FROM results"
+                       " WHERE request_id = :r", {"r": second})
+    assert (row["terminal_state"], row["reason_code"]) == ("Conflict",
+                                                           "resource_conflict")

@@ -94,3 +94,31 @@ def test_finalize_idempotent_return_opens_no_transaction(db):
     finally:
         del db.transaction
     assert repos.requests.get(rid)["state"] == "Succeeded"
+
+
+def test_set_state_with_result_is_atomic_and_retryable(db):
+    # planner 크래시 테스트의 하부 메커니즘을 레포 수준에서 직접 고정한다
+    # (finalize 크래시 테스트와 같은 골격 -- 같은 결함 계열의 같은 처방).
+    repos = Repositories(db)
+    rid = repos.requests.create(operation="scan", requester_id="alice",
+                                actor="alice", resource_key="k2", payload={},
+                                priority="mid")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("crash before record_result")
+
+    repos.requests.record_result = _boom
+    with pytest.raises(RuntimeError):
+        repos.requests.set_state_with_result(
+            rid, RequestState.REJECTED, reason_code="storage_missing",
+            actor="planner")
+    del repos.requests.record_result
+    assert repos.requests.get(rid)["state"] == "Pending"
+    assert all(t["to_state"] != "Rejected" for t in repos.requests.transitions(rid))
+    assert db.query("SELECT request_id FROM results WHERE request_id = :r",
+                    {"r": rid}) == []
+    repos.requests.set_state_with_result(
+        rid, RequestState.REJECTED, reason_code="storage_missing", actor="planner")
+    assert repos.requests.get(rid)["state"] == "Rejected"
+    assert len(db.query("SELECT request_id FROM results WHERE request_id = :r",
+                        {"r": rid})) == 1
