@@ -5,7 +5,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 - **지금 시스템이 어떻게 동작하는가**는 여기가 아니라 [`ARCHITECTURE.md`](ARCHITECTURE.md)
   와 코드의 「왜」 주석을 봐라. 이 파일은 "무엇을·언제·왜 그렇게 지었나"의 역사다.
-- **왜 그렇게 설계했나**의 원문 근거는 동결된 설계문서 [`docs/history/specs/`](docs/history/specs/)에
+- **왜 그렇게 설계했나**의 원문 근거는 동결된 설계문서 [`docs/history/specs/`](history/specs/)에
   있다(슬라이스별 design). 구현 플랜(TDD 스크립트)은 일회성이라 트리에서 지웠고 git
   이력에만 남는다.
 - **남은 일**은 [`BACKLOG.md`](BACKLOG.md).

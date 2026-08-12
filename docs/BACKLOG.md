@@ -2,7 +2,7 @@
 
 **남은 일만** 적는다. 완료된 것은 [`CHANGELOG.md`](CHANGELOG.md), 지금 동작은
 [`ARCHITECTURE.md`](ARCHITECTURE.md), 왜 그렇게 지었나는
-[`docs/history/specs/`](docs/history/specs/).
+[`docs/history/specs/`](history/specs/).
 
 각 항목은 근거를 `파일:줄`로, 성격을 아이콘으로 표시한다:
 🔧 착수 가능(결정만 하면 됨) · ⏸ 의도적 보류(결정이지 결함 아님) · 🔒 외부 자원에 막힘 · 📝 문서/알려진 해석.

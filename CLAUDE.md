@@ -12,16 +12,17 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 
 | 알고 싶은 것 | 문서 |
 |---|---|
-| **지금 시스템이 어떻게 도는가** (유지보수 진입점) | [`ARCHITECTURE.md`](ARCHITECTURE.md) + 코드의 「왜」 주석 |
+| **지금 시스템이 어떻게 도는가** (유지보수 진입점) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) + 코드의 「왜」 주석 |
 | **어떻게 배포·운영하는가** | [`deploy/README.md`](deploy/README.md) |
-| **남은 일** | [`BACKLOG.md`](BACKLOG.md) |
-| **무엇을·언제·왜 지었나** (빌드 역사) | [`CHANGELOG.md`](CHANGELOG.md) |
+| **남은 일** | [`docs/BACKLOG.md`](docs/BACKLOG.md) |
+| **무엇을·언제·왜 지었나** (빌드 역사) | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) |
 | **왜 그렇게 설계했나** (원문 근거, 동결) | [`docs/history/`](docs/history/) |
 
 **드리프트 규칙**: 현재 동작의 진실은 **코드 + 모듈 docstring**이 정의한다.
 `ARCHITECTURE.md`는 얇은 지도(모듈·불변식을 가리킴, 메커니즘 재서술 안 함)이고,
-`docs/history/`는 왜 그렇게 됐는지의 근거다. 코드를 바꿀 때 불변식(ARCHITECTURE.md
-의 「불변식」)이 걸리면 그 문서도 함께 갱신한다 — 나머지는 코드가 스스로 말한다.
+`docs/history/`는 왜 그렇게 됐는지의 근거다. 코드를 바꿀 때 불변식
+(`docs/ARCHITECTURE.md`의 「불변식」)이 걸리면 그 문서도 함께 갱신한다 — 나머지는
+코드가 스스로 말한다.
 
 ## 코드에서 반드시 지키는 규약 (위반하면 시스템이 깨진다)
 
