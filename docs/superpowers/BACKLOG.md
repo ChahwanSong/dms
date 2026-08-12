@@ -691,8 +691,9 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
 ### 2.1 러너 / 실행
 - **nsync 실증 재확인**: 파서는 커밋됐으나 `job5` 재빌드 + 실 nsync 잡으로
   `files/bytes` 채워짐 확인 필요.
-- **vcjob 런처 파드 로그 열람 불가** — 슬라이스 5 비목표(`409 log_not_available`).
-  실행 단계 진단이 10슬라이스째 아티팩트 전용.
+- ✅ ~~**vcjob 런처 파드 로그 열람 불가**~~ — 슬라이스 25 가 열었다(`volcano.sh/job-name`
+  셀렉터로 라이브 조회 + 실패 종단 시 `diag_logs` 박제). `409 log_not_available` 는
+  이제 미지 prefix 방어로만 남는다. 실행 단계 진단이 더는 아티팩트 전용이 아니다.
 - **dscan 총바이트 없음** — 리포트 스키마에 없다(크기 히스토그램뿐).
   `bytes_total`은 sync 전용으로 남는다(`slice15-design.md:121`).
 - **소급 백필 없음**(슬라이스 15 이전 잡), **프리뷰 카운트 DB 미승격**,
@@ -788,7 +789,10 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
 - KPI 의미 변화(요청 50건 즉석 계산 → 창 내 잡 집계) — 옛 화면과 숫자가 다르다.
 
 ### 2.5 테스트 / CI
-- **e2e 전무**(Playwright 없음) — 15슬라이스째 단위 테스트 + 수기 실증.
+- ✅ ~~**e2e 전무**(Playwright 없음)~~ — 슬라이스 23 이 `@playwright/test` 로 실 브라우저
+  e2e 6시나리오(E1~E6)를 만들었다. 단위가 구조적으로 못 보는 것(기하·세션·SPA
+  fallback·폴링·풀스택 부팅)만 잡는다. **다만 CI 는 여전히 없다** — 이 게이트는 수기이고
+  `deploy/README` 의 "이미지 빌드 전" 단계로 명문화만 됐다(기술적 강제 수단 부재).
 - `KubernetesClient`가 `# pragma: no cover` — 슬라이스 14가 추가한 `threading.Lock`
   이중검사가 무테스트 코드.
 - 마이그레이션 **ALTER 경로 일반 회귀 커버리지 갭** — 슬라이스 14가 파킹했고 그
