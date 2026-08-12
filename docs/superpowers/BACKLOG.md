@@ -22,7 +22,7 @@ SDD 레저의 `minor (deferred)`, `deploy/README.md`의 미해결 값에 흩어�
 
 - **슬라이스 1~26 전부 완료.** 슬라이스로 묶인 계획은 더 없다 — 남은 것은 §2 의
   미분류 백로그(위생·기능 확장)뿐이다.
-- 테스트베드 이미지: 제어면 `dms:d38`, 에이전트 `dms-agent:d35`,
+- 테스트베드 이미지: 제어면 `dms:d39`, 에이전트 `dms-agent:d35`,
   잡 러너 `dms-mpifileutils:d35`. **태그가 갈리는 것은 정상이다** — 세 이미지는 같은
   단일 dNN 체계를 쓰되(슬라이스 24 에서 d35 로 한 번 정렬), 매 슬라이스 **바뀐 것만**
   올린다. 슬라이스 25 는 제어면만 바꿔서 `dms` 만 d36 이다. 반대로 슬라이스 24 는
@@ -451,6 +451,34 @@ kwargs 를 URL 파라미터보다 우선하므로, 안 걸러내면 운영자 �
 
 ---
 
+### ✅ 슬라이스 28 «운영·보안» — **완료·실증 통과**(2026-08-12, d39)
+
+플랜 `plans/2026-08-12-dms-ops-security-slice28.md`. 백엔드 **1266 passed**(기준선
+1259 +7) / 프론트 **257**(255 +2) / tsc 0 / e2e 9. §2.3 의 세 항목을 다뤘다.
+
+**항목 1 — 레지스트리 fail-open 비침묵화(tradeoff 유지).** fail-closed 로 뒤집는 건
+설계 §7 이 거부한 것(레지스트리 브리프 다운에도 롤아웃이 막힘 > ImagePullBackOff)이라,
+"조용한 fail-open"을 "표시되는 fail-open"으로만 바꿨다: `tag_verified` 응답 플래그 +
+`release_tag_unverified` 이벤트(create_batch 성공 뒤에만 — 422/409 거절엔 유령 이벤트
+없음) + 포탈 경고 배너. 검증 강제는 1비트도 안 바뀐 거동 동치 재구성이다.
+
+**항목 3 — LDAP `DMS_LDAP_REQUIRE_AUTH_BIND` fail-closed(자격증명 없이 가능한 강화).**
+플래그를 켰는데 bind DN/PW 가 결측·자리표시자(CHANGE_ME 등)면 config 경계에서
+SettingsError 로 기동 거부. resolver 가 아닌 기동 시점 발화라 운영자가 배포 순간에
+"인증 바인드 의도했는데 익명으로 조용히 도는" 상태를 안다. **실 파드 env 에서 발화
+실증**했다(플래그만 켠 1회성 프로세스 → BIND_DN·BIND_PW 지목한 SettingsError).
+
+**낡은 전제 정정(항목 2).** DaemonSet 600s 는 총 수렴 상한이 아니라 노드-단위 정체
+상한이다(진행 틱마다 applied_at 재장전) — §2.3 참조. 순수 실증 항목이라 코드 0.
+
+**자격증명 블록(정직한 보고).** 실제 LDAP 인증 바인드 전환만 자격증명이 막는다:
+OpenLDAP 바인드 계정 발급 + dms-secrets 주입 + 플래그 "true" 전환(순서 엄수).
+코드·플래그·라이브 fail-closed 는 이 세션이 끝냈고, 전환은 자격증명 대기(§2.3).
+
+**배포**: dms 만 d39(러너·에이전트·스키마 무접촉), migrate 재실행 불요.
+
+---
+
 ### ✅ 슬라이스 27 «DB 정합성» — **완료·실증 통과**(2026-08-12, d38)
 
 플랜 `plans/2026-08-12-dms-db-integrity-slice27.md`(설계문서 없음 — 백로그가 「왜」).
@@ -804,13 +832,28 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
 - **롤백 버튼 없음**(의도적 — 이력에서 옛 태그 재선택).
 - `/cephfs` hostPath `type: Directory` — 비-cephfs 노드가 스케줄 풀에 들어오면 파드
   admission 실패.
-- `DMS_LDAP_BIND_DN`/`_PW` 공란(익명 바인드) 미해결.
-- 레지스트리 태그 검증 fail-open — 레지스트리 다운 시 `unknown_tag` 통과 →
-  `ImagePullBackOff`(`deploy/README.md` §9-7).
+- 🟡 **`DMS_LDAP_BIND_DN`/`_PW` 공란(익명 바인드)** — 슬라이스 28 이 **코드 강화는
+  끝냈다**: `DMS_LDAP_REQUIRE_AUTH_BIND` 플래그를 켰는데 바인드 DN/PW 가 결측·자리표시자
+  면 api/controller/migrate 가 기동을 거부한다(SettingsError, fail-closed). "인증
+  바인드를 의도했는데 익명으로 조용히 도는" 상태를 배포 순간에 시끄럽게 드러낸다 —
+  실 파드 env 에서 발화 실증했다. **남은 것은 자격증명이 막는다**: 실제 인증 바인드
+  전환은 ① OpenLDAP(10.10.10.30) 바인드 서비스 계정(DN+PW) 발급 ② dms-secrets 에 주입
+  ③ 플래그 "false"→"true"(순서 엄수 — ③ 먼저면 CrashLoopBackOff). 절차는
+  `20-config.yaml` 주석에. **자격증명 준비되면 재개.**
+- ✅ ~~레지스트리 태그 검증 fail-open~~ — 슬라이스 28 이 **비침묵화**했다(tradeoff 는
+  유지). fail-closed 로 뒤집는 건 설계 §7 이 거부한 것(레지스트리 브리프 다운에도
+  롤아웃이 막힘 > ImagePullBackOff)이라, 대신 침묵만 걷었다: 레지스트리 미응답으로
+  검증을 건너뛴 제출은 202 응답에 `tag_verified: false` + `release_tag_unverified`
+  이벤트 + 포탈 경고 배너로 표시된다. 검증 강제는 1비트도 안 바뀐 거동 동치 재구성.
 - pod GC 86400s가 **프리플라이트 파드 로그(유일한 진단 사본)** 를 파괴
-  (슬라이스 10 Important 2).
-- DaemonSet 롤아웃 **600s 타임아웃 미측정** — 5노드 순차가 넘기면 거짓 실패
-  (슬라이스 13 플랜 알려진 위험).
+  (슬라이스 10 Important 2). **부분 완화**: 슬라이스 25 가 실패 종단 시 diag_logs 로
+  박제하므로 실패 잡의 프리플라이트 로그는 더는 시한부가 아니다(성공·진행 중 잡의
+  라이브 열람만 이 창에 남는다).
+- ✅ ~~DaemonSet 롤아웃 **600s 타임아웃 미측정**~~ — 슬라이스 28 이 전제를 정정했다:
+  600s 는 "5노드 총 수렴 상한"이 아니라 **노드-단위 정체 상한**이다. `rollout_watcher`
+  의 `_note_daemonset_progress` 가 진행 틱마다 `applied_at` 을 재장전하므로, 5노드가
+  각각 600s 안에만 교체되면 총 소요가 얼마든 거짓 실패가 없다. 노드당 이미지 교체는
+  수 초~수십 초라 상한과 큰 여유. `DMS_ROLLOUT_TIMEOUT_SECONDS` 로 이미 설정 가능.
 - Prometheus/Grafana 배포는 **의도적 제외**(포탈 대시보드로 대체).
 
 ### 2.4 데이터 모델
