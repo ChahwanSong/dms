@@ -22,7 +22,7 @@ SDD 레저의 `minor (deferred)`, `deploy/README.md`의 미해결 값에 흩어�
 
 - **슬라이스 1~26 전부 완료.** 슬라이스로 묶인 계획은 더 없다 — 남은 것은 §2 의
   미분류 백로그(위생·기능 확장)뿐이다.
-- 테스트베드 이미지: 제어면 `dms:d40`, 에이전트 `dms-agent:d35`,
+- 테스트베드 이미지: 제어면 `dms:d41`, 에이전트 `dms-agent:d35`,
   잡 러너 `dms-mpifileutils:d35`. **태그가 갈리는 것은 정상이다** — 세 이미지는 같은
   단일 dNN 체계를 쓰되(슬라이스 24 에서 d35 로 한 번 정렬), 매 슬라이스 **바뀐 것만**
   올린다. 슬라이스 25 는 제어면만 바꿔서 `dms` 만 d36 이다. 반대로 슬라이스 24 는
@@ -450,6 +450,41 @@ kwargs 를 URL 파라미터보다 우선하므로, 안 걸러내면 운영자 �
    재연결이 있으면 원인과 무관하게 복구된다는 것이 이 항목의 요지다.
 
 ---
+
+### ✅ 슬라이스 30 «테스트 부채 마감» — **완료**(2026-08-13, d41) — 위생 슬라이스 연쇄 종결
+
+플랜 `plans/2026-08-12-dms-test-debt-slice30.md`. 백엔드 **1280 passed**(기준선 1266
++14) / 프론트 266 무변경 / e2e 무영향. **§2.5 의 행동 가능한 테스트 부채를 전량 소진**했다.
+
+**테스트 그물 4건**(앱 코드 무변경): ① **전수 열거 그물** — 실 sqlite_master ==
+ALL_TABLES ∪ 3(batches·batch_items·schema_migrations) 양방향 + 인덱스 16 등식. 슬라이스
+27 이 발견한 ALL_TABLES 사각지대를 닫아, 이제 테이블·인덱스 추가·삭제가 반드시 걸린다.
+② **이중 경로 일반 그물** — 현재 컬럼 == v1 ∪ ensure 등식으로 "CREATE 에만 넣고 ensure
+를 잊는" 슬라이스 14 실 500 계열을 미래형으로 잡는다. ③ **KubernetesClient lazy-init**
+이중검사 결정적 테스트(실 k8s 경로는 pragma 유지). ④ **슬라이스 15 잔여** — 파서 None
+입력 그물·summary 픽스처 현행화.
+
+**코드 위생 2건**: ⑤ `information_schema` 쿼리 2곳에 `current_schema()` 한정(타 스키마
+동명 테이블 오판 봉쇄). ⑥ **planner 비원자 쌍 2곳 원자화** — 슬라이스 27 의 `_apply_state`
+후속. `set_state_with_result`(전이+results 한 트랜잭션)로 `_reject`·conflict 를 교체해
+`record_result` 단독 호출을 src 에서 0 으로 만들었다. 크래시 시 "종단인데 results 없음
+→ 영구 결손"(finalize 계열)이 구조적으로 불가능해진다. **라이브 파드에서 코드 반영
+확인**(set_state_with_result 존재), /readyz 200.
+
+**구현 중 에이전트가 잡은 플랜 결함 2건**: T2 패리티 테스트가 정규식 0매치면 공허
+통과하는 구멍(`len(pairs)==23` 자기검증 추가), T3 fast path 단언이 안쪽 재검사로 초록
+유지되던 무이빨(`__enter__` 가 던지는 락으로 "락 없는 조기 반환"을 실제 단언).
+
+**실측으로 뺀 것**: KubernetesClient 전체 커버(대역을 테스트하는 꼴), 실 PG ALTER 하니스
+(위생 슬라이스 과잉) — 의도적 잔존. 완전 무효 판정은 0건(6후보 전부 부분 유효).
+
+---
+
+**🏁 위생 슬라이스 연쇄(27~30) 종결.** 남은 §2 백로그는 **결함이 아니라 기능 백로그·
+운영 결정·의도적 제약**뿐이다: CI 기술적 강제 부재(수기 게이트), 실 k8s API 경로(실증
+대상), LDAP 익명 바인드(자격증명 대기), 미구현 기능면(아티팩트 보존·배치 CSV 등),
+클러스터 내 registry·Prometheus(의도적 제외), by_storage 해석·KPI 의미(침묵의 해석
+기록), 프로세스 기록. 슬라이스로 묶을 결함은 더 없다.
 
 ### ✅ 슬라이스 29 «포탈 위생» — **완료·실증 통과**(2026-08-12, d40)
 
@@ -891,13 +926,16 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
 - ✅ ~~`runs` 테이블 死物~~ — 슬라이스 27 이 제거했다(이 저장소 최초의 파괴적
   마이그레이션 `DROP TABLE IF EXISTS runs`). `ALL_TABLES` 20→19, `len==20` 단언 2곳 +
   모듈 docstring 갱신. 실 PostgreSQL 에서 기존 빈 테이블(0행)이 삭제됨을 실증했다.
-- **planner 의 비원자 전이 쌍 2곳**(`planner.py` `_reject`·conflict 경로) — finalize 와
-  같은 "set_state + record_result 별도 커밋" 결함이다. 슬라이스 27 의 `_apply_state`
-  추출로 각각 2줄이면 원자화된다(finalize 와 동일 처방). 위생 슬라이스 감.
-- **`ALL_TABLES` 는 전 테이블 목록이 아니다** — `batches`·`batch_items`·
-  `schema_migrations` 는 CREATE 되지만 목록 밖(실 DB 22 테이블 = 19 + 3). "테이블 수
-  계약"(len==19) 그물의 사각지대라, 그 셋이 실수로 지워져도 안 잡힌다. 슬라이스 30 테스트
-  부채에 편입.
+- ✅ ~~**planner 의 비원자 전이 쌍 2곳**~~ — 슬라이스 30 이 원자화했다. 레포에
+  `set_state_with_result`(`_apply_state` + `record_result` 를 한 트랜잭션)를 신설하고
+  `_reject`·conflict 경로를 그 단일 호출로 교체 — `record_result` 단독 호출이 src 전체
+  에서 0 이 됐다. 크래시 주입 테스트 3건이 원 결함(Rejected/Conflict 인데 results 없음
+  → 종단이라 고아 스윕 시야 밖 → 영구 결손)을 재현·봉쇄한다(finalize 와 동일 계열).
+- ✅ ~~**`ALL_TABLES` 는 전 테이블 목록이 아니다**~~ — 슬라이스 30 이 전수 열거 그물로
+  닫았다: 실 `sqlite_master`(sqlite_* 접두 제외) == `ALL_TABLES` ∪ {batches, batch_items,
+  schema_migrations} 양방향 등식 + 인덱스 16개 전수 등식(idx_requests_batch 포함). 이제
+  어느 테이블·인덱스가 실수로 추가·삭제되면 반드시 걸린다. `ALL_TABLES` 자체는 19 유지
+  (사용처가 테스트뿐이라 상수를 늘리지 않고 등식으로 3 을 명시).
 - ~~**`data_jobs.created_at` 인덱스 없음**~~ — 슬라이스 17이 커버링 인덱스
   `idx_data_jobs_created (created_at, submit_wait_seconds)` 를 추가해 해소됨.
 - `by_storage`가 `COALESCE(storage_name, destination_storage)` — sync를 **도착지 기준**
@@ -909,13 +947,19 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
   e2e 6시나리오(E1~E6)를 만들었다. 단위가 구조적으로 못 보는 것(기하·세션·SPA
   fallback·폴링·풀스택 부팅)만 잡는다. **다만 CI 는 여전히 없다** — 이 게이트는 수기이고
   `deploy/README` 의 "이미지 빌드 전" 단계로 명문화만 됐다(기술적 강제 수단 부재).
-- `KubernetesClient`가 `# pragma: no cover` — 슬라이스 14가 추가한 `threading.Lock`
-  이중검사가 무테스트 코드.
-- 마이그레이션 **ALTER 경로 일반 회귀 커버리지 갭** — 슬라이스 14가 파킹했고 그
-  파킹 항목이 실제 프로덕션 500을 냈다. 슬라이스 15가 `_widen_count_columns`만 보강.
-- 슬라이스 15 잔여: `text or ""` 반쪽 약속 무검증; `test_execution_volcano` 픽스처가
-  구식 summary 모양; `information_schema` 쿼리에 `table_schema` 미필터(단일 스키마
-  배포에서만 안전).
+- ✅ ~~`KubernetesClient`가 `# pragma: no cover`~~ — 슬라이스 30 이 `threading.Lock`
+  이중검사(lazy-init)를 결정적 테스트 3건으로 커버했다(부분 실패 게이트·fast path·락
+  대기 후 재검사, sys.modules 대역이라 새 의존성 0). **실 k8s API 경로(create/get/…)는
+  pragma 유지** — 대역으로 감싸면 대역을 테스트하는 꼴이라 실증 대상으로 정직하게 남긴다.
+- ✅ ~~마이그레이션 **ALTER 경로 일반 회귀 커버리지 갭**~~ — 슬라이스 30 이 "이중 경로
+  일반 그물"로 닫았다: 현재 컬럼 == v1 ∪ `_ensure_columns` 등식 + 선언형 패리티. "CREATE
+  에만 넣고 ensure 를 잊는" 슬라이스 14 실 500 계열을 **미래형으로** 잡는다(신규 DB 만
+  보는 기존 그물은 못 잡던 것). 실 PG `ALTER COLUMN TYPE` 실행 경로는 sqlite 재현 불가라
+  배포 실증이 통과하는 것으로 남긴다(의도적).
+- ✅ ~~슬라이스 15 잔여~~ — 슬라이스 30 이 닫았다: `text or ""` 반쪽 약속(파서 3종+
+  `parse_hostfile` 의 None 입력 그물 — 기존은 `""` 만 봤다), `test_execution_volcano`
+  픽스처를 실 3키 summary 계약으로 현행화, `information_schema` 쿼리 2곳에
+  `table_schema = current_schema()` 한정(타 스키마 동명 테이블 오판 → ALTER 건너뜀 봉쇄).
 - ✅ ~~슬라이스 14 잔여~~(프론트분) — 슬라이스 29 가 보강: ~~Sparkline NaN/Infinity~~
   (앱 코드는 슬라이스 26 이 이미 `Number.isFinite` 로 걸렀고 테스트만 추가), ~~by_state
   비배열 truthy~~(`{}`·`"oops"` 생존 단언 — 플랜 스니펫이 무이빨이라 waitFor 로 관찰
