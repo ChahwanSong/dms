@@ -499,3 +499,41 @@ def test_drop_runs_executes_after_the_create_loop():
     src = inspect.getsource(migrations._apply_migrations)
     assert "DROP TABLE IF EXISTS runs" in src
     assert src.index("for stmt in stmts") < src.index("DROP TABLE IF EXISTS runs")
+
+
+def test_migrate_creates_exactly_the_expected_tables(tmp_path):
+    # 슬라이스 30(BACKLOG §2.4, 슬라이스 27 발견): ALL_TABLES(19)는 스펙 §4 도메인
+    # 모델 한정이라 batches·batch_items·schema_migrations 3개가 목록 밖이다(실 DB
+    # 22 테이블). len==19 그물과 부분집합 검사(test_migrate_creates_all_tables)는
+    # "목록 안"만 지켜, 그 셋이 실수로 지워져도 못 잡는다. 실제 CREATE 산출물
+    # 전체를 기대 집합과 **양방향 등식**으로 대조한다: 왼쪽만 크면 미결정 새
+    # 테이블, 오른쪽만 크면 실수 삭제 -- 어느 쪽도 명시 결정 없이는 통과 못 한다
+    # (runs 제거가 그랬듯, 파괴적 변경은 결정 + 테스트 갱신이 함께 가야 한다).
+    # sqlite_sequence 는 AUTOINCREMENT 가 만드는 sqlite 내부 테이블이라 제외한다
+    # (실측: 신규 migrate 직후 sqlite_master 에 이미 있다).
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    actual = {n for n in _table_names(db) if not n.startswith("sqlite_")}
+    assert actual == set(ALL_TABLES) | {"batches", "batch_items",
+                                        "schema_migrations"}
+
+
+def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
+    # 슬라이스 30(BACKLOG §2.5 슬라이스 1~4 부채): idx_requests_batch 가 CREATE
+    # 되는데 어떤 테스트도 단언하지 않았다 -- 인덱스명 단언은 idx_data_jobs_created
+    # 계열 2건뿐(전 테스트 실측). 인덱스는 지워져도 기능 테스트가 전부 초록인 채
+    # (풀스캔) 성능만 조용히 침몰하는 부류라 존재 단언이 유일한 그물이고, 개별
+    # 이름 추가는 두더지잡기라 테이블 전수와 같은 등식으로 16개 전부를 고정한다.
+    # sqlite_autoindex_* 는 PK/UNIQUE 의 내부 산물이라 제외한다.
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    rows = db.query("SELECT name FROM sqlite_master WHERE type = 'index'")
+    actual = {r["name"] for r in rows if not r["name"].startswith("sqlite_")}
+    assert actual == {
+        "idx_requests_resource", "idx_requests_requester", "idx_requests_state",
+        "idx_requests_batch", "idx_batches_status", "idx_batch_items_status",
+        "idx_transitions_entity", "idx_data_jobs_state", "idx_data_jobs_created",
+        "idx_data_jobs_created_sched", "idx_agent_reports_node",
+        "idx_agent_reports_at", "idx_releases_component", "idx_audit_target",
+        "idx_events_request", "idx_events_at",
+    }
