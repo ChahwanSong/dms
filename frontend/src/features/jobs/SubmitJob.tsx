@@ -7,30 +7,9 @@ import { useMe } from "../auth/useAuth";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
-import type { UserStorage } from "../../lib/types";
-
-export const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
-
-export function StoragePicker({ label, value, onChange, storages, loading }: {
-  label: string; value: string; onChange: (v: string) => void;
-  storages: UserStorage[]; loading: boolean;
-}) {
-  return (
-    <label className="text-sm">{label}
-      <select aria-label={label} className={field} value={value} disabled={loading}
-              onChange={(e) => onChange(e.target.value)}>
-        <option value="">{loading ? "불러오는 중…" : "선택하세요"}</option>
-        {storages.map((s) => (
-          <option key={s.storage_name} value={s.storage_name}>
-            {s.status === "Ready" || s.status === "Degraded"
-              ? `${s.storage_name} (${s.status})`
-              : `${s.storage_name} (${s.status} — 준비 안 됨)`}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
+// field·StoragePicker 는 formFields.tsx 로 이사(슬라이스 31 T3) -- T4 위저드화 때
+// 이 파일이 통째로 갈려도 SubmitScan·ScanPaths 가 흔들리지 않게 결합을 끊었다.
+import { StoragePicker, field } from "./formFields";
 
 type Operation = "sync" | "rm";
 

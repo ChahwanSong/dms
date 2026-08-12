@@ -3,7 +3,7 @@ import {
   useScanPaths, useAddScanPath, useDeleteScanPath, useScanPathStats,
 } from "./useScanPaths";
 import { useUserStorages } from "../storages/useUserStorages";
-import { StoragePicker, field } from "../jobs/SubmitJob";
+import { StoragePicker, field } from "../jobs/formFields";
 import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { Button } from "../../components/ui/Button";

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSubmitRequest } from "./useJobs";
 import type { SubmitBody } from "./useJobs";
-import { StoragePicker, field } from "./SubmitJob";
+import { StoragePicker, field } from "./formFields";
 import { useUserStorages } from "../storages/useUserStorages";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
