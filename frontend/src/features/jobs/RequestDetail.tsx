@@ -112,7 +112,7 @@ export function RequestDetail() {
   if (req.isLoading || jobs.isLoading) {
     return (
       <section className="space-y-4">
-        <h1 className="text-lg font-semibold">요청 {requestId}</h1>
+        <h1 className="text-2xl font-bold">요청 {requestId}</h1>
         <p className="text-muted">불러오는 중…</p>
       </section>
     );
@@ -123,7 +123,7 @@ export function RequestDetail() {
     const err = (req.isError ? req.error : jobs.error) as ApiError;
     return (
       <section className="space-y-4">
-        <h1 className="text-lg font-semibold">요청 {requestId}</h1>
+        <h1 className="text-2xl font-bold">요청 {requestId}</h1>
         <p className="text-bad">{err.message}</p>
       </section>
     );
@@ -145,7 +145,7 @@ export function RequestDetail() {
 
   return (
     <section className="space-y-4">
-      <h1 className="text-lg font-semibold">요청 {requestId}</h1>
+      <h1 className="text-2xl font-bold">요청 {requestId}</h1>
       <Card>
         <div className="flex items-center gap-3">
           <StatusPill state={data.state} />

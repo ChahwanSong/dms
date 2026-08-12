@@ -48,7 +48,7 @@ export function ArtifactBasePage() {
   const d = q.data;
   return (
     <section className="space-y-4">
-      <h1 className="text-lg font-semibold">아티팩트 경로</h1>
+      <h1 className="text-2xl font-bold">아티팩트 경로</h1>
       {q.isLoading ? (
         <p className="text-muted">불러오는 중…</p>
       ) : q.isError ? (

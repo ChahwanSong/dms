@@ -30,7 +30,7 @@ export function DenylistList() {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">denylist</h1>
+        <h1 className="text-2xl font-bold">denylist</h1>
         <DenyDialog trigger={<Button>대상 추가</Button>} />
       </div>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (

@@ -14,7 +14,7 @@ export function BatchDetail() {
   const b = q.data;
   return (
     <section className="space-y-4">
-      <h1 className="text-lg font-semibold">배치 {batchId.slice(0,12)}</h1>
+      <h1 className="text-2xl font-bold">배치 {batchId.slice(0,12)}</h1>
       <Card>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">

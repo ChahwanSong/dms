@@ -50,7 +50,7 @@ export function Dashboard() {
   const rs = Array.isArray(reqs.data) ? reqs.data : [];
   return (
     <section className="space-y-5">
-      <h1 className="text-lg font-semibold">대시보드</h1>
+      <h1 className="text-2xl font-bold">대시보드</h1>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <MetricTile label="실행 중" value={kpi.running} />
         <MetricTile label="대기" value={kpi.pending} />

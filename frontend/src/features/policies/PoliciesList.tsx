@@ -17,7 +17,7 @@ export function PoliciesList() {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">정책</h1>
+        <h1 className="text-2xl font-bold">정책</h1>
       </div>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>

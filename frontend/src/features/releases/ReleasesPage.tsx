@@ -80,7 +80,7 @@ export function ReleasesPage() {
   return (
     <section className="space-y-4">
       <div className="flex items-center gap-2">
-        <h1 className="text-lg font-semibold">릴리스</h1>
+        <h1 className="text-2xl font-bold">릴리스</h1>
         {active && (
           <span className="inline-flex rounded-full bg-busybg px-2.5 py-0.5 text-xs font-semibold text-busy">
             진행 중

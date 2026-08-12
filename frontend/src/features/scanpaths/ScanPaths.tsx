@@ -142,7 +142,7 @@ export function ScanPaths() {
 
   return (
     <section className="space-y-4">
-      <h1 className="text-lg font-semibold">내 스캔 경로</h1>
+      <h1 className="text-2xl font-bold">내 스캔 경로</h1>
 
       <Card>
         <form className="flex flex-wrap items-end gap-3" onSubmit={handleSubmit}>

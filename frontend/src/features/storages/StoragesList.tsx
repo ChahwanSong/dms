@@ -36,7 +36,7 @@ export function StoragesList() {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">스토리지</h1>
+        <h1 className="text-2xl font-bold">스토리지</h1>
         <StorageDialog mode="create" trigger={<Button>스토리지 등록</Button>} />
       </div>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (

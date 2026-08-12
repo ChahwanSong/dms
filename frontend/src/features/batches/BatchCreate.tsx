@@ -14,7 +14,7 @@ export function BatchCreate() {
   const { rows, errors } = parseBatchCsv(op, csv);
   return (
     <Card className="max-w-2xl">
-      <h1 className="text-lg font-semibold mb-4">배치 생성</h1>
+      <h1 className="text-2xl font-bold mb-5">배치 생성</h1>
       <form className="space-y-3" onSubmit={(e) => { e.preventDefault();
         if (errors.length || rows.length === 0) return;
         create.mutate({ operation: op, max_concurrency: mc, options: {}, note: note || null, items: rows },

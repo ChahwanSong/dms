@@ -34,7 +34,7 @@ export function BuildsPage() {
 
   return (
     <section className="space-y-4">
-      <h1 className="text-lg font-semibold">빌드</h1>
+      <h1 className="text-2xl font-bold">빌드</h1>
       {buildNodeName === null && (
         <p className="text-bad font-medium">{REASON_MESSAGES.build_node_not_set}</p>
       )}

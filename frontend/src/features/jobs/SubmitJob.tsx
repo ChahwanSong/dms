@@ -142,7 +142,7 @@ export function SubmitJob() {
 
   return (
     <Card className="max-w-xl">
-      <h1 className="text-lg font-semibold mb-4">작업 제출</h1>
+      <h1 className="text-2xl font-bold mb-5">작업 제출</h1>
       {/* form 소유는 화면 쪽(위저드 프레임 계약): 프레임 버튼이 전부 type="button"
           이라 Enter 는 정상 동선에서 새지 않고, 새더라도(회귀) onSubmit 의
           blocked 가드가 이중 방어한다 */}

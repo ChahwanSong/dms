@@ -8,7 +8,7 @@ export function BatchesList() {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">배치 작업</h1>
+        <h1 className="text-2xl font-bold">배치 작업</h1>
         <Link to="/admin/batches/new"><Button>배치 생성</Button></Link>
       </div>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (

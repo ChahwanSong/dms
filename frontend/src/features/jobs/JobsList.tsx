@@ -9,7 +9,7 @@ export function JobsList() {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">내 작업</h1>
+        <h1 className="text-2xl font-bold">내 작업</h1>
         <Link to="/jobs/new"><Button>작업 제출</Button></Link>
       </div>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (

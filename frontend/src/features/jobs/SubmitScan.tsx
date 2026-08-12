@@ -50,7 +50,7 @@ export function SubmitScan() {
 
   return (
     <Card className="max-w-xl">
-      <h1 className="text-lg font-semibold mb-4">scan 실행</h1>
+      <h1 className="text-2xl font-bold mb-5">scan 실행</h1>
       <p className="text-sm text-muted mb-3">
         scan은 미리보기 확인 단계가 없습니다 — 제출하면 바로 실행됩니다.
       </p>

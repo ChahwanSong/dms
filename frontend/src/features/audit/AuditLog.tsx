@@ -4,7 +4,7 @@ export function AuditLog() {
   const q = useAuditLog();
   return (
     <section className="space-y-4">
-      <h1 className="text-lg font-semibold">감사 로그</h1>
+      <h1 className="text-2xl font-bold">감사 로그</h1>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
         <Table>
           <thead><tr className="text-muted"><th className="py-2">클래스</th><th>시각</th><th>작업</th><th>대상</th><th>실행자</th></tr></thead>
