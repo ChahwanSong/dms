@@ -22,7 +22,7 @@ SDD 레저의 `minor (deferred)`, `deploy/README.md`의 미해결 값에 흩어�
 
 - **슬라이스 1~26 전부 완료.** 슬라이스로 묶인 계획은 더 없다 — 남은 것은 §2 의
   미분류 백로그(위생·기능 확장)뿐이다.
-- 테스트베드 이미지: 제어면 `dms:d37`, 에이전트 `dms-agent:d35`,
+- 테스트베드 이미지: 제어면 `dms:d38`, 에이전트 `dms-agent:d35`,
   잡 러너 `dms-mpifileutils:d35`. **태그가 갈리는 것은 정상이다** — 세 이미지는 같은
   단일 dNN 체계를 쓰되(슬라이스 24 에서 d35 로 한 번 정렬), 매 슬라이스 **바뀐 것만**
   올린다. 슬라이스 25 는 제어면만 바꿔서 `dms` 만 d36 이다. 반대로 슬라이스 24 는
@@ -451,7 +451,38 @@ kwargs 를 URL 파라미터보다 우선하므로, 안 걸러내면 운영자 �
 
 ---
 
-### ✅ 슬라이스 26 «포탈 기능 잔여» — **완료·실증 통과**(2026-08-12, d37) — 마지막 슬라이스
+### ✅ 슬라이스 27 «DB 정합성» — **완료·실증 통과**(2026-08-12, d38)
+
+플랜 `plans/2026-08-12-dms-db-integrity-slice27.md`(설계문서 없음 — 백로그가 「왜」).
+백엔드 **1259 passed**(기준선 1254 -5 정리 +5 신규 +... 순증) / 프론트 무변경 / e2e 9.
+남은 백로그(§2)에서 두 항목을 닫았다.
+
+**항목 A — 死物 `runs` 제거(이 저장소 최초의 파괴적 마이그레이션).** CREATE·`ALL_TABLES`
+삭제 + CREATE 실행 루프 **뒤에** `DROP TABLE IF EXISTS runs`(멱등 — 신규 DB no-op,
+기존 DB 빈 테이블 삭제). `len==20` 단언 2곳 + 모듈 docstring + `ALL_TABLES` 를 전부
+19 로 갱신. **실증**: 삭제 전 실 DB 의 runs 가 0행임을 확인(데이터 손실 없음) → migrate
+재실행 → `information_schema` 에서 runs 부재 확인(기존 DB 경로가 실제로 먹었다), 나머지
+테이블 무영향(22 = 19 + batches·batch_items·schema_migrations). 배포 후 `/readyz` 200.
+
+**항목 B — `finalize_from_job` 원자화(슬라이스 24 실증이 관측한 실 결함).** 전이는
+커밋됐는데 `record_result` 가 터지면 요청은 종단인데 results 행이 없고, 종단 요청은
+고아 스윕 시야 밖이라 결손이 영구였다. **함정**: 단순히 `with transaction()` 으로
+감싸는 건 불가능하다 — `set_state` 가 이미 트랜잭션을 열어 중첩이 되면 sqlite 는 즉사,
+PG autocommit 은 안쪽 COMMIT 이 바깥을 조기 커밋해 `record_result` 가 트랜잭션 밖에서
+도는 **조용한 비원자**(고치는 척만 하는 최악)가 된다. 전이 몸통을 무트랜잭션
+`_apply_state` 로 추출해 `set_state`(단독)와 `finalize`(전이+results 합동)가 각자 경계를
+소유하게 했다. 멱등 가드는 읽기 후 조기 반환이라 트랜잭션 밖(회귀 그물로 계약 고정).
+원자화로 "results 는 있는데 요청은 비종단"이 구조적으로 불가능해져 UniqueViolation
+재시도 창도 함께 닫혔다.
+
+**남긴 것**: planner 에 동종 비원자 쌍 2곳(`_reject`·conflict) — `_apply_state` 로 후속이
+각 2줄(§2.4). `ALL_TABLES` 가 batches/batch_items/schema_migrations 를 빠뜨리는 사각지대
+(§2.4→슬라이스 30). finalize 원자화는 크래시 인위 유발이 어려워 단위 테스트로 계약을
+고정했다(슬라이스 24 가 이미 그 결함을 실증한 바 있다).
+
+---
+
+### ✅ 슬라이스 26 «포탈 기능 잔여» — **완료·실증 통과**(2026-08-12, d37)
 
 설계 `specs/2026-08-11-dms-portal-features-slice26-design.md`, 플랜
 `plans/2026-08-11-dms-portal-features-slice26.md`.
@@ -503,8 +534,9 @@ kwargs 를 URL 파라미터보다 우선하므로, 안 걸러내면 운영자 �
 **배포**: `dms` 만 d37(프론트+API+설정 키 1개, 러너·에이전트·스키마 무접촉 — `git diff`
 확인). 스키마 무변경이라 **migrate 재실행 불요**.
 
-**이로써 슬라이스 1~26 이 전부 완료됐다.** 남은 백로그는 §2 의 미분류 항목들(위생·기능
-확장)이고, 슬라이스로 묶인 계획은 없다.
+**슬라이스 1~26 완료 후, 남은 §2 백로그를 위생·결함 슬라이스로 이어 처리 중이다**
+(사용자 결정: 신규 기능 보류, 결함·위생 먼저 — 슬라이스 27~30). 슬라이스 27(DB
+정합성)이 그 첫째다.
 
 ---
 
@@ -705,11 +737,13 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
   - ~~`tool_argv` 미지 도구가 `drm` 분기로 흘러감~~
 - `imagePullPolicy: IfNotPresent` + 태그 재사용 = 노드 캐시 stale(phase3c `:88`).
   고유 태그 관례로만 완화됨.
-- **`finalize_from_job` 이 원자적이지 않다**(슬라이스 24 실증에서 관찰). 상태 전이는
-  커밋되고 그 뒤 `record_result` 가 터질 수 있다 — 그러면 요청은 종단인데 results
-  행이 없다. 실 고아 경로(finalize 가 아예 안 돈 경우)엔 results 행이 없어 이 창이
-  안 생기지만, 두 쓰기를 한 트랜잭션으로 묶으면 구조적으로 닫힌다. 지금은 행 단위
-  격리(슬라이스 24 §2.3)가 이걸 이벤트로 표면화하므로 조용하지는 않다.
+- ✅ ~~**`finalize_from_job` 이 원자적이지 않다**~~ — 슬라이스 27 이 원자화했다. 단순히
+  `with transaction()` 으로 감싸는 건 불가능했다(set_state 가 이미 트랜잭션을 열어
+  중첩 → sqlite 즉사·PG 조용한 비원자). 전이 몸통을 무트랜잭션 `_apply_state` 로
+  추출해 set_state(단독)와 finalize(전이+results 합동)가 각자 경계를 소유하게 했다.
+  이제 크래시는 전부-또는-전무라 "results PK 중복(UniqueViolation)에 걸리는 재시도
+  창"도 함께 닫혔다. **planner 에 동종 비원자 쌍 2곳이 남는다**(`_reject`, conflict
+  경로) — `_apply_state` 덕에 후속이 각 2줄이다(§2.4 로 이관).
 
 ### 2.2 포탈
 - ✅ **슬라이스 1 FAST-FOLLOW 7건 전부 종결**(6건은 슬라이스 26, RequestDetail 로딩은
@@ -780,8 +814,16 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
 - Prometheus/Grafana 배포는 **의도적 제외**(포탈 대시보드로 대체).
 
 ### 2.4 데이터 모델
-- `runs` 테이블 死物 — 슬라이스 17이 **부활을 명시적으로 배제**하고 파생 컬럼을
-  택했다. 테이블은 여전히 읽기·쓰기 0건으로 남아 있다(제거 여부는 미결).
+- ✅ ~~`runs` 테이블 死物~~ — 슬라이스 27 이 제거했다(이 저장소 최초의 파괴적
+  마이그레이션 `DROP TABLE IF EXISTS runs`). `ALL_TABLES` 20→19, `len==20` 단언 2곳 +
+  모듈 docstring 갱신. 실 PostgreSQL 에서 기존 빈 테이블(0행)이 삭제됨을 실증했다.
+- **planner 의 비원자 전이 쌍 2곳**(`planner.py` `_reject`·conflict 경로) — finalize 와
+  같은 "set_state + record_result 별도 커밋" 결함이다. 슬라이스 27 의 `_apply_state`
+  추출로 각각 2줄이면 원자화된다(finalize 와 동일 처방). 위생 슬라이스 감.
+- **`ALL_TABLES` 는 전 테이블 목록이 아니다** — `batches`·`batch_items`·
+  `schema_migrations` 는 CREATE 되지만 목록 밖(실 DB 22 테이블 = 19 + 3). "테이블 수
+  계약"(len==19) 그물의 사각지대라, 그 셋이 실수로 지워져도 안 잡힌다. 슬라이스 30 테스트
+  부채에 편입.
 - ~~**`data_jobs.created_at` 인덱스 없음**~~ — 슬라이스 17이 커버링 인덱스
   `idx_data_jobs_created (created_at, submit_wait_seconds)` 를 추가해 해소됨.
 - `by_storage`가 `COALESCE(storage_name, destination_storage)` — sync를 **도착지 기준**
