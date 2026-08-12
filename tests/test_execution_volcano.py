@@ -305,3 +305,94 @@ def test_unknown_tool_submit_folds_into_submit_failed_with_the_tool_in_detail():
     assert e.value.reason_code == "submit_failed"
     assert "dwalk" in e.value.detail
     assert k8s.created == []
+
+
+# ---- 슬라이스 30 Task 3: KubernetesClient lazy-init 이중검사의 결정적 커버 ----
+# (클래스 pragma: no cover 는 유지 -- 표기는 실 k8s API 경로(실증 대상)의 것이고,
+#  여기서는 lazy-init 로직 3계약만 스레드 경주 없이 결정적으로 검증한다)
+
+def _fake_kubernetes(monkeypatch, *, fail_apps_once=False):
+    # kubernetes 는 venv 에 없다(실측) -- _ensure 안의 `import kubernetes` 가
+    # sys.modules 를 먼저 보는 것을 이용해 대역을 꽂는다(새 의존성 0).
+    import sys
+    from types import SimpleNamespace
+
+    state = {"load_calls": 0, "fail_apps": fail_apps_once}
+
+    def load_incluster_config():
+        state["load_calls"] += 1
+
+    def apps():
+        if state["fail_apps"]:
+            state["fail_apps"] = False       # 1회성 -- 일시 장애의 재현
+            raise RuntimeError("apps init failed")
+        return "apps"
+
+    fake = SimpleNamespace(
+        config=SimpleNamespace(load_incluster_config=load_incluster_config),
+        client=SimpleNamespace(CoreV1Api=lambda: "core",
+                               CustomObjectsApi=lambda: "custom",
+                               AppsV1Api=apps))
+    monkeypatch.setitem(sys.modules, "kubernetes", fake)
+    return state
+
+
+def test_k8s_client_partial_init_failure_keeps_the_gate_closed(monkeypatch):
+    # "_core 는 마지막에"(execution_volcano._ensure 주석)의 행동적 의미: 세 핸들
+    # 중 하나라도 못 만들면 게이트(_core)가 닫힌 채 남아야 다음 호출이 재시도한다.
+    # _core 를 먼저 대입하는 리팩터가 들어오면 게이트가 반쯤 초기화된 채 열려,
+    # 이후 _apps 사용처(예: 롤아웃 observe)가 None 으로 터진다 -- 슬라이스 14 가
+    # 이중검사를 넣은 바로 그 창의 순서 짝이다.
+    from dms.execution_volcano import KubernetesClient
+    state = _fake_kubernetes(monkeypatch, fail_apps_once=True)
+    c = KubernetesClient("dms")
+    with pytest.raises(RuntimeError):
+        c._ensure()
+    assert c._core is None                   # 게이트는 닫힌 채여야 한다
+    c._ensure()                              # 일시 장애가 걷히면 재시도가 완주한다
+    assert (c._core, c._custom, c._apps) == ("core", "custom", "apps")
+    assert state["load_calls"] == 2          # 실패 1 + 성공 1 -- 재시도의 증거
+
+
+def test_k8s_client_second_ensure_is_a_fast_path(monkeypatch):
+    # 바깥 검사(락 없는 조기 반환): 초기화 후의 매 호출이 락을 잡으면 안 된다 --
+    # 폴링 경로(틱마다 observe)가 전부 이 앞을 지난다. load_calls 만으로는 바깥
+    # 검사 삭제를 못 잡는다(안쪽 검사가 재초기화를 막아 초록으로 남는다) -- 두 번째
+    # 호출 전에 "잡히면 터지는" 락으로 갈아끼워 락 비접촉 자체를 단언한다.
+    from dms.execution_volcano import KubernetesClient
+
+    class _MustNotBeTaken:
+        def __enter__(self):
+            raise AssertionError("fast path 가 락을 잡았다 -- 바깥 검사가 사라졌다")
+
+        def __exit__(self, *args):
+            return False
+
+    state = _fake_kubernetes(monkeypatch)
+    c = KubernetesClient("dms")
+    c._ensure()
+    c._init_lock = _MustNotBeTaken()
+    c._ensure()
+    assert state["load_calls"] == 1
+
+
+def test_k8s_client_recheck_after_lock_wait_skips_reinit(monkeypatch):
+    # 이중검사의 **안쪽** 검사를 결정적으로 재현한다: "락 대기 중 다른 스레드가
+    # 초기화를 끝낸" 상황을, __enter__ 에서 핸들을 채우는 가짜 락으로 흉내 낸다
+    # (실 스레드 경주는 타이밍 비결정 -- flaky 를 만들지 않는다). 안쪽 검사가
+    # 없으면 두 번째 진입자가 이미 쓰이고 있는 핸들 셋을 통째로 갈아치운다.
+    from dms.execution_volcano import KubernetesClient
+    state = _fake_kubernetes(monkeypatch)
+    c = KubernetesClient("dms")
+
+    class _LockThatLosesTheRace:
+        def __enter__(self):
+            c._core, c._custom, c._apps = "core", "custom", "apps"
+
+        def __exit__(self, *args):
+            return False
+
+    c._init_lock = _LockThatLosesTheRace()
+    c._ensure()
+    assert state["load_calls"] == 0          # 재초기화 없음 -- 안쪽 검사가 이빨
+    assert (c._core, c._custom, c._apps) == ("core", "custom", "apps")
