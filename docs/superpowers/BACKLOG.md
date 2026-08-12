@@ -22,7 +22,7 @@ SDD 레저의 `minor (deferred)`, `deploy/README.md`의 미해결 값에 흩어�
 
 - **슬라이스 1~26 전부 완료.** 슬라이스로 묶인 계획은 더 없다 — 남은 것은 §2 의
   미분류 백로그(위생·기능 확장)뿐이다.
-- 테스트베드 이미지: 제어면 `dms:d39`, 에이전트 `dms-agent:d35`,
+- 테스트베드 이미지: 제어면 `dms:d40`, 에이전트 `dms-agent:d35`,
   잡 러너 `dms-mpifileutils:d35`. **태그가 갈리는 것은 정상이다** — 세 이미지는 같은
   단일 dNN 체계를 쓰되(슬라이스 24 에서 d35 로 한 번 정렬), 매 슬라이스 **바뀐 것만**
   올린다. 슬라이스 25 는 제어면만 바꿔서 `dms` 만 d36 이다. 반대로 슬라이스 24 는
@@ -451,6 +451,38 @@ kwargs 를 URL 파라미터보다 우선하므로, 안 걸러내면 운영자 �
 
 ---
 
+### ✅ 슬라이스 29 «포탈 위생» — **완료·실증 통과**(2026-08-12, d40)
+
+플랜 `plans/2026-08-12-dms-portal-hygiene-slice29.md`. 프론트 **266 passed**(기준선
+257 +9) / tsc 0 / e2e 9. 앱 코드는 3파일(AppShell·useDenylist·api.ts)만, 나머지는
+테스트다(백엔드·스키마 무접촉). **§2.2 의 남은 유일 포탈 🔴(로그아웃 URL)을 닫아
+포탈 🔴 이 전부 사라졌다.**
+
+- **로그아웃 URL** — qc.clear() 유지 + AppShell 명시 nav("/login"). nav 를 훅이 아닌
+  AppShell 에 둔 이유는 useAuth.test 가 Router 없이 훅을 렌더하기 때문. 무한 루프
+  (슬라이스 26 계열)는 /login 이 쿼리 관찰자 0 이라 성립 불가 — router.test 가 "me
+  호출 횟수 불변"으로 못박고, e2e E1 이 세션 파기만 단언하던 것을 `/login` URL 도달
+  까지 확장했다.
+- **poll_failed 문구 일반화** — "빌드 상태를…" → "상태를 확인하지 못했습니다"(빌드·잡
+  로그 공유 코드). reasonCodes.json 무접촉. **라이브 dist 번들에서 옛 문구 0건·새 문구
+  존재 실증**.
+- **useDenylist URL 인코딩** — encodeURIComponent 로 `#`(fragment 절단)·`?`(쿼리 흡수)
+  wrong-target 봉쇄. subject 의 `/` 는 ASGI %2F 디코드라 여전히 백엔드 404(근본 해결은
+  경로 재설계, 범위 밖).
+- **테스트 부채 4건** — jobState 잔여 상태·BatchDetail waitFor·Sparkline NaN/Infinity·
+  by_state 비배열. 앱 코드 무변경.
+
+**구현 중 에이전트가 잡은 플랜 결함**: by_state 테스트의 `findByText("잡 통계")` 즉시
+단언이 로딩 첫 렌더에도 존재해 데이터 착지 전 초록으로 끝나는 무이빨 단언이었다 —
+waitFor 로 관찰 창을 데이터 뒤로 밀어 이빨을 만들었다. **실측으로 2건은 뺐다**:
+PolicyDialog tool 필드는 label 감싸기로 이미 접근 가능(결함 아님), Sparkline NaN 은
+슬라이스 26 이 이미 필터(테스트만 추가).
+
+**배포**: dms d40 — 프론트만 바뀌었지만 Dockerfile.dms 가 dist 를 이미지에 COPY 하므로
+재빌드 필요(제어면이 포탈 dist 를 서빙). migrate 재실행 불요.
+
+---
+
 ### ✅ 슬라이스 28 «운영·보안» — **완료·실증 통과**(2026-08-12, d39)
 
 플랜 `plans/2026-08-12-dms-ops-security-slice28.md`. 백엔드 **1266 passed**(기준선
@@ -785,22 +817,21 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
   "대시보드는 표시만"). **남은 것**: 아티팩트 삭제·보존, 배치 CSV 일체·rm 배치, 배치 폼
   스토리지 드롭다운, 에이전트 설정 푸시, 알림/경보.
 - ✅ ~~Sparkline 유효점 1개면 bare `M` → 빈 SVG~~ — 슬라이스 26 이 circle 로 그린다.
-- **`poll_failed` 문구가 빌드 전용이다** — "빌드 상태를 확인하지 못했습니다"(`api.ts`).
-  슬라이스 25 가 vcjob 로그 조회의 list 실패에도 이 코드를 재사용하면서 잡 로그 탭에도
-  이 문구가 뜬다. 설계의 "사유 코드 신설 0" 방침을 지킨 결과라 코드가 틀린 건 아니고
-  **문구만 일반화**하면 된다("상태를 확인하지 못했습니다" 정도). 위생 슬라이스 감.
+- ✅ ~~**`poll_failed` 문구가 빌드 전용이다**~~ — 슬라이스 29 가 "상태를 확인하지
+  못했습니다"로 일반화했다(빌드 폴링·잡 로그 409 가 공유하는 코드). 문구만 바꿔서
+  reasonCodes.json 무접촉(키 불변). 라이브 dist 번들에서 옛 문구 0건·새 문구 존재 실증.
 - ✅ ~~**`StoragesList.tsx:50` 의 flex td**~~ — 슬라이스 26 Task 6 이 수리했다(9fbef86
   형태). 슬라이스 23 e2e 가 만들자마자 찾은 실물 결함이었고, 수리와 동시에 e2e 의
   `knownNonTableCells: 1` 인자도 같은 커밋에서 제거했다 — 정확 개수 단언의 상환 구조가
   실제로 작동해 "고치면 이 줄을 지우라"고 인도했다.
-- 🔴 **로그아웃이 URL 을 안 바꾼다** — 슬라이스 23 E1 이 실측했다: 로그아웃 후
-  `/admin/dashboard` 에 30초간 그대로 남는다. `useLogout` 의 `onSettled: qc.clear()` 가
-  `me` 쿼리를 제거하는데, 제거된 쿼리의 관찰자는 마지막 결과를 그대로 들고 재조회가
-  안 걸려 `RequireRole` 이 401 을 볼 기회가 없다. 세션 자체는 정상 파기된다(하드
-  내비게이션하면 재차단되고 쿠키도 사라진다 — e2e 가 그것만 단언한다). 즉 보안
-  결함은 아니고 **UX 결함**이다. 슬라이스 26 이 재검토했으나 **범위 밖 유지**로 판단했다 —
-  수리는 쿼리 캐시 수명주기(clear vs invalidate vs 명시 nav)의 별도 결정이 필요하고,
-  지금 안 고쳐도 e2e 가 빨개지지 않는다. 남는 유일한 포탈 🔴 다.
+- ✅ ~~**로그아웃이 URL 을 안 바꾼다**~~ — 슬라이스 29 가 고쳤다. `qc.clear()`(관찰자
+  타이머까지 죽여 자동 재조회로 401 을 볼 통로가 없다)는 유지하고, AppShell 의 로그아웃
+  버튼에 `logout.mutate(..., { onSettled: () => nav("/login", { replace: true }) })` 로
+  명시 이동을 얹었다. nav 를 훅이 아닌 AppShell 에 둔 이유: `useAuth.test` 가 Router
+  없이 훅을 렌더한다. 무한 루프(슬라이스 26 계열: me.isError 재조회 폭주)는 /login 이
+  쿼리 관찰자 0 이라 발화 재료가 없어 성립하지 않고, router.test 가 "로그아웃 전후 me
+  호출 횟수 불변"으로 못박았다. e2e E1 이 세션 파기만 단언하던 것을 `/login` URL 도달
+  까지 확장 고정했다. **이로써 포탈 🔴 이 전부 사라졌다.**
 - **의존성 권고(의도적 보류, `frontend/README.md`)**: react-router `GHSA-qwww-vcr4-c8h2`
   high — 현재 어떤 `react-router-dom` 버전도 두 취약 범위를 동시에 피하지 못함.
   재검토 조건: `react-router-dom@8.3.0` 이상 릴리스. vite/vitest 체인 critical 1건은
@@ -885,13 +916,18 @@ check-then-act 비원자성 — `_abs` fail-closed 가 최종 방어라는 것�
 - 슬라이스 15 잔여: `text or ""` 반쪽 약속 무검증; `test_execution_volcano` 픽스처가
   구식 summary 모양; `information_schema` 쿼리에 `table_schema` 미필터(단일 스키마
   배포에서만 안전).
-- 슬라이스 14 잔여: Sparkline NaN/Infinity 무검증; `by_state:null` 테스트가
-  `Array.isArray`와 `?? []`를 구분 못함.
-- 슬라이스 9 Task 6은 진짜 RED 단계가 없었음(구현자 자진 신고).
-- 슬라이스 1~4 테스트 부채 다수(`jobState.test`의 `PreviewExpired`/`Planning`/
-  `Scheduled` 누락, `idx_requests_batch` 미단언, `BatchDetail` 확인-POST 단언이
-  `waitFor` 밖이라 플레이키 위험, `PolicyDialog` tool 필드 `aria-label` 없음,
-  `useDenylist` URL 미인코딩 등).
+- ✅ ~~슬라이스 14 잔여~~(프론트분) — 슬라이스 29 가 보강: ~~Sparkline NaN/Infinity~~
+  (앱 코드는 슬라이스 26 이 이미 `Number.isFinite` 로 걸렀고 테스트만 추가), ~~by_state
+  비배열 truthy~~(`{}`·`"oops"` 생존 단언 — 플랜 스니펫이 무이빨이라 waitFor 로 관찰
+  창을 데이터 착지 뒤로 밀어 수리).
+- 슬라이스 9 Task 6은 진짜 RED 단계가 없었음(구현자 자진 신고) — 역사적 기록, 소급 불가.
+- **슬라이스 1~4 테스트 부채**(프론트분 대부분 슬라이스 29 가 닫음): ✅ ~~`jobState.test`의
+  `PreviewExpired`/`Planning`/`Scheduled` 누락~~, ✅ ~~`BatchDetail` 확인-POST 단언이
+  `waitFor` 밖~~, ✅ ~~`useDenylist` URL 미인코딩~~(encodeURIComponent — `#`/`?` wrong-target
+  봉쇄. subject 의 `/` 는 ASGI 가 라우팅 전 %2F 디코드라 여전히 백엔드 404, 근본 해결은
+  경로 재설계로 범위 밖). ~~`PolicyDialog` tool 필드 `aria-label` 없음~~ — 슬라이스 29 가
+  실측: `<label>도구 <input/></label>` 감싸기로 접근 가능한 이름이 이미 있어 결함 아님.
+  **남은 것**: `idx_requests_batch` 미단언(백엔드 마이그레이션 테스트 — 슬라이스 30).
 
 ### 2.6 프로세스
 - **SDD 레저는 git에 없다**(`.superpowers/sdd/.gitignore` = `*`). 슬라이스 11·12·13
