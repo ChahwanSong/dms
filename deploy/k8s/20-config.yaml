@@ -71,10 +71,12 @@ data:
   # updated_at이 AFTER_SECONDS보다 오래된 것만 매 INTERVAL_SECONDS마다 정리한다.
   # vcjob/은 대상이 아니다(위 TTL이 처리) -- 진행 중인 잡의 파드는 이 게이트로
   # 인해 절대 삭제되지 않는다(stepper 오인 방지).
-  # AFTER_SECONDS는 위 DMS_VCJOB_TTL_SECONDS와 같은 86400으로 맞춘다: preflight
-  # Pod은 dms_job_runner가 아니라 bare `sh -c`로 실행되어 아무 아티팩트도 쓰지
-  # 않으므로, DMS_PREFLIGHT_REASON 같은 진단 정보는 파드 로그에만 존재한다 --
-  # 짧은 GC 창은 운영자가 원인을 확인하기 전에 그 유일한 사본을 지워버린다.
+  # AFTER_SECONDS는 위 DMS_VCJOB_TTL_SECONDS와 같은 86400으로 맞춘다. 슬라이스 25
+  # 부터 실패 종단 잡의 파드 로그(DMS_PREFLIGHT_REASON 마커·러너 트레이스백)는
+  # 스테퍼가 data_jobs.diag_logs 에 박제하므로(파드당 16KB·총 64KB) 이 창은 더는
+  # "유일한 사본"의 수명이 아니다 -- 라이브 로그 열람의 여유 창일 뿐이다. 값을
+  # 줄일 이유도 없다: 박제는 실패 종단 잡만 덮고, 진행 중·성공 잡의 라이브
+  # 열람은 여전히 이 창에 산다.
   DMS_POD_GC_AFTER_SECONDS: "86400"
   DMS_POD_GC_INTERVAL_SECONDS: "600"
 
