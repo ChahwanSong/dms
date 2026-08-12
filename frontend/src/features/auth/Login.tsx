@@ -27,7 +27,13 @@ export function Login() {
                    value={password} onChange={(e) => setP(e.target.value)} />
           </label>
           {login.isError && (
-            <p className="text-bad text-sm">{(login.error as ApiError).message}</p>
+            <p className="text-bad text-sm">
+              {/* fetch 네트워크 단절은 TypeError 로 reject 된다 -- 무가드 캐스트는
+                  영어 원문("Failed to fetch")을 그대로 노출했다. */}
+              {login.error instanceof ApiError
+                ? login.error.message
+                : "로그인 요청에 실패했습니다 — 네트워크 상태를 확인하세요"}
+            </p>
           )}
           <Button type="submit" className="w-full" disabled={login.isPending}>로그인</Button>
         </form>

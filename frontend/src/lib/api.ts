@@ -199,21 +199,18 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401) {
-    window.dispatchEvent(new CustomEvent("dms:unauthorized"));
-    let code = "http_401";
-    try {
-      const detail = (await res.json()).detail;
-      code = typeof detail === "string" ? detail : "http_401";
-    } catch { /* noop */ }
-    throw new ApiError(401, code, reasonText(code));
-  }
   if (!res.ok) {
+    // 파싱은 한 벌이어야 한다 -- 과거 401 전용 분기가 같은 파싱을 복제해
+    // 폴백·문구가 구조적으로 갈라질 수 있었다. 비 JSON 본문(인그레스/프록시가
+    // 백엔드 앞에서 만든 401 등)은 detail 이 없으므로 http_<status> 를 합성한다.
     let code = `http_${res.status}`;
     try {
       const detail = (await res.json()).detail;
       code = typeof detail === "string" ? detail : `http_${res.status}`;
     } catch { /* noop */ }
+    // dms:unauthorized 는 401 전용 계약이다 -- AuthContext 가 me 쿼리를 무효화하는
+    // 소비자라, 403 등에서도 발화하면 권한 없는 화면마다 로그인으로 튕긴다.
+    if (res.status === 401) window.dispatchEvent(new CustomEvent("dms:unauthorized"));
     throw new ApiError(res.status, code, reasonText(code));
   }
   if (res.status === 204) return undefined as T;

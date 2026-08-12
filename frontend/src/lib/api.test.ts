@@ -34,6 +34,52 @@ test("401 dispatches auth-expired event", async () => {
   expect(spy).toHaveBeenCalledOnce();
 });
 
+test("401 + JSON detail: 파싱된 코드로 ApiError, 이벤트는 정확히 1회", async () => {
+  const spy = vi.fn();
+  window.addEventListener("dms:unauthorized", spy);
+  try {
+    server.use(http.get("/api/auth/me",
+      () => HttpResponse.json({ detail: "not_authenticated" }, { status: 401 })));
+    await expect(apiGet("/api/auth/me")).rejects.toMatchObject({
+      status: 401, code: "not_authenticated", message: "로그인이 필요합니다" });
+    expect(spy).toHaveBeenCalledOnce();
+  } finally {
+    window.removeEventListener("dms:unauthorized", spy);
+  }
+});
+
+test("인그레스 401(비 JSON 본문): http_401 합성 + 이벤트 발화", async () => {
+  // 인그레스/프록시가 백엔드 앞에서 만든 401 은 본문이 HTML 이라 detail 이 없다 --
+  // request() 가 http_401 을 합성하는 계약(api.ts REASON_MESSAGES 의 http_401 주석).
+  const spy = vi.fn();
+  window.addEventListener("dms:unauthorized", spy);
+  try {
+    server.use(http.get("/api/auth/me", () => new HttpResponse("<html>401</html>",
+      { status: 401, headers: { "Content-Type": "text/html" } })));
+    await expect(apiGet("/api/auth/me")).rejects.toMatchObject({
+      status: 401, code: "http_401", message: "인증이 필요합니다" });
+    expect(spy).toHaveBeenCalledOnce();
+  } finally {
+    window.removeEventListener("dms:unauthorized", spy);
+  }
+});
+
+test("403 은 dms:unauthorized 를 발화하지 않는다 -- 이벤트는 401 전용 계약", async () => {
+  // 401 분기를 !res.ok 로 통합할 때 조건이 소실되면 권한 없는 화면(403)마다
+  // AuthContext 가 me 를 무효화해 로그인으로 튕긴다 -- 그 오작동을 막는 못.
+  const spy = vi.fn();
+  window.addEventListener("dms:unauthorized", spy);
+  try {
+    server.use(http.get("/api/admin/x",
+      () => HttpResponse.json({ detail: "admin_required" }, { status: 403 })));
+    await expect(apiGet("/api/admin/x")).rejects.toMatchObject({
+      status: 403, code: "admin_required", message: "관리자 권한이 필요합니다" });
+    expect(spy).not.toHaveBeenCalled();
+  } finally {
+    window.removeEventListener("dms:unauthorized", spy);
+  }
+});
+
 test("401 with unmapped reason_code falls back to raw code, not a hardcoded password message", async () => {
   server.use(http.get("/api/auth/me", () => HttpResponse.json({ detail: "session_expired" }, { status: 401 })));
   await expect(apiGet("/api/auth/me")).rejects.toMatchObject({ status: 401, code: "session_expired",
