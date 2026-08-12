@@ -10,9 +10,11 @@
     "test:e2e": "npm run build && tsc -p tsconfig.e2e.json && playwright test"
   },
   "dependencies": {
+    "@fontsource/noto-sans-kr": "^5.3.0",
     "@radix-ui/react-dialog": "^1.1.2",
     "@radix-ui/react-select": "^2.1.2",
     "@tanstack/react-query": "^5.59.0",
+    "lucide-react": "^1.31.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.2"
