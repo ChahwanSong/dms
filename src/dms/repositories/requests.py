@@ -74,17 +74,28 @@ class RequestsRepository:
         return rows
 
     def set_state(self, request_id, to_state: RequestState, *, reason_code=None, actor):
-        now = utc_now_iso()
         with self._db.transaction():
-            current = self._db.query_one(
-                "SELECT state FROM requests WHERE request_id = :id", {"id": request_id})
-            if current is None:
-                raise KeyError(request_id)
-            self._db.execute(
-                "UPDATE requests SET state = :s, updated_at = :now WHERE request_id = :id",
-                {"s": to_state.value, "now": now, "id": request_id})
-            self._record_transition(request_id, RequestState(current["state"]),
-                                    to_state, reason_code, actor, now)
+            self._apply_state(request_id, to_state, reason_code=reason_code,
+                              actor=actor)
+
+    def _apply_state(self, request_id, to_state, *, reason_code, actor):
+        """상태 전이의 문장 몸통(현재 상태 읽기 + UPDATE + 전이 이력) --
+        트랜잭션은 **호출자가 소유한다**. db.transaction() 은 중첩을 모른다
+        (BEGIN 이 무조건 -- db.py): sqlite 는 중첩 BEGIN 에서 즉사하고, PG
+        (autocommit)는 경고만 낸 채 안쪽 COMMIT 이 바깥 트랜잭션을 조기 커밋해
+        **조용히** 비원자가 된다. 그래서 set_state 를 다른 트랜잭션 안에서
+        재사용하려면 경계(누가 BEGIN 하나)와 몸통(무슨 문장인가)을 분리하는
+        수밖에 없다(슬라이스 27 -- finalize_from_job 이 두 번째 소유자다)."""
+        now = utc_now_iso()
+        current = self._db.query_one(
+            "SELECT state FROM requests WHERE request_id = :id", {"id": request_id})
+        if current is None:
+            raise KeyError(request_id)
+        self._db.execute(
+            "UPDATE requests SET state = :s, updated_at = :now WHERE request_id = :id",
+            {"s": to_state.value, "now": now, "id": request_id})
+        self._record_transition(request_id, RequestState(current["state"]),
+                                to_state, reason_code, actor, now)
 
     def list_pending(self, limit: int = 50) -> list[dict]:
         rows = self._db.query(
@@ -158,9 +169,21 @@ class RequestsRepository:
         if current is None:
             raise KeyError(request_id)
         if RequestState(current["state"]) in TERMINAL_REQUEST_STATES:
-            return  # idempotent
-        self.set_state(request_id, target, reason_code=reason_code, actor=actor)
-        self.record_result(request_id, target, reason_code=reason_code, summary=summary)
+            # idempotent -- 읽기 후 조기 반환이라 트랜잭션 밖이다. 안에 넣으면
+            # 고아 스윕이 매 틱 재호출하는 no-op 마다 빈 BEGIN/COMMIT 이 열린다.
+            return
+        # 슬라이스 27(BACKLOG §2.1, 슬라이스 24 실증 관찰): 전이와 results INSERT
+        # 를 한 트랜잭션으로 묶는다. 별도 커밋이던 시절엔 사이 크래시가 "요청은
+        # 종단인데 results 행이 없다"를 만들었다 -- 종단 요청은 고아 스윕의 시야
+        # 밖이라 그 결손은 영구였다. 원자화 후엔 둘 다 롤백돼 요청이 비종단으로
+        # 남고 다음 틱 finalize 재시도가 완주한다. 덤: "results 는 있는데 요청은
+        # 비종단"도 구조적으로 불가능해져, 재시도가 results PK 중복
+        # (UniqueViolation -- 슬라이스 24 관측)에 걸릴 창도 함께 닫힌다.
+        with self._db.transaction():
+            self._apply_state(request_id, target, reason_code=reason_code,
+                              actor=actor)
+            self.record_result(request_id, target, reason_code=reason_code,
+                               summary=summary)
 
     def has_active_for_requester(self, requester_id) -> bool:
         """이 requester 소유의 비종단(진행 중) 요청이 하나라도 있으면 True. 잡 신원은
