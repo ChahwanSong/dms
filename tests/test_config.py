@@ -74,3 +74,16 @@ def test_readyz_exit_failures_default_and_env_override():
     assert Settings.from_env(VALID).readyz_exit_failures == 30
     assert Settings.from_env(
         {**VALID, "DMS_READYZ_EXIT_FAILURES": "0"}).readyz_exit_failures == 0
+
+
+def test_artifact_download_max_bytes_default():
+    # 슬라이스 26: 아티팩트 전체 다운로드 상한(뷰 256KB 와 별개). 기본 256MiB.
+    # 튜플에만 넣고 dataclass 필드를 빼먹으면 **extra 가 TypeError 로 기동 실패하고,
+    # 필드만 넣으면 env 가 조용히 무시된다 -- 양쪽 배선을 여기서 고정한다.
+    assert Settings.from_env(VALID).artifact_download_max_bytes == 268435456
+
+
+def test_artifact_download_max_bytes_env_override():
+    s = Settings.from_env(
+        {**VALID, "DMS_ARTIFACT_DOWNLOAD_MAX_BYTES": "1048576"})
+    assert s.artifact_download_max_bytes == 1048576

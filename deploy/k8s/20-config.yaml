@@ -25,6 +25,9 @@ data:
   #     summary.json under (execution_manifests.py::_artifact_dir,
   #     execution_volcano.py::_volumes) ---
   DMS_ARTIFACT_BASE_URI: "file:///cephfs/dms/artifacts"
+  # 아티팩트 전체 다운로드 상한(바이트). 뷰 256KB 꼬리와 별개. sparse 초대형
+  # 파일 공격을 여기서 끊는다 -- 초과는 413 artifact_too_large.
+  DMS_ARTIFACT_DOWNLOAD_MAX_BYTES: "268435456"
 
   # --- api server bind ---
   DMS_API_HOST: "0.0.0.0"

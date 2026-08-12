@@ -53,6 +53,10 @@ _SERVER_INT_KEYS = (
     # 600은 Deployment의 progressDeadlineSeconds와 같은 값 -- Deployment에는 이
     # 값의 3배를 최후 회수로만 쓴다(rollout_watcher.py 참고).
     ("DMS_ROLLOUT_TIMEOUT_SECONDS", "rollout_timeout_seconds", 600),
+    # 슬라이스 26: 아티팩트 **전체 다운로드** 상한(뷰 256KB 꼬리와 별개). 기본
+    # 256MiB. sparse 초대형 파일로 디스크·대역을 태우는 공격을 여기서 끊는다 --
+    # 초과는 413 artifact_too_large(판정은 봉쇄 통과 뒤에만, 크기 오라클 방지).
+    ("DMS_ARTIFACT_DOWNLOAD_MAX_BYTES", "artifact_download_max_bytes", 268435456),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -146,6 +150,7 @@ class Settings:
     event_retention_days: int = 30
     rollout_interval_seconds: int = 10
     rollout_timeout_seconds: int = 600
+    artifact_download_max_bytes: int = 268435456
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
