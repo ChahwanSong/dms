@@ -21,3 +21,14 @@ export function buildPillVariant(state: string): PillVariant {
   if (state === "Pending" || state === "Running") return "busy";
   return "neutral";
 }
+
+// 슬라이스 26: 스토리지 상태(Ready/Degraded/Unknown — reconciler.py:20-27)만을 위한
+// 별도 매핑이다. 공유 pillVariant를 고치면 잡/요청 배지까지 바뀌므로 건드리지 않는다
+// (buildPillVariant 와 같은 M5 관례). Degraded 를 bad(적색)가 아니라 busy(황색 주의)로
+// 두는 이유: planner 는 Degraded 스토리지에도 잡을 보낸다(planner.py:149) --
+// "죽음"이 아니라 "주의"가 정직하다. Unknown(증거 없음)은 그 외와 함께 neutral.
+export function storagePillVariant(status: string): PillVariant {
+  if (status === "Ready") return "ok";
+  if (status === "Degraded") return "busy";
+  return "neutral";
+}

@@ -21,6 +21,22 @@ test("lists storages and shows manage actions", async () => {
   expect(screen.getByRole("button", { name: "스토리지 등록" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "삭제" })).toBeInTheDocument();
 });
+test("storage badges: Ready=ok, Degraded=busy, and actions td is not a flex cell", async () => {
+  const ready = { ...S, storage_name: "st-ready", status: "Ready" };
+  const degraded = { ...S, storage_name: "st-degraded", status: "Degraded" };
+  server.use(http.get("/api/admin/storages", () => HttpResponse.json([ready, degraded])));
+  wrap();
+  // Ready 는 ok(녹색), Degraded 는 busy(황색 주의) -- planner 가 Degraded 에도 잡을
+  // 보내므로 bad(적색)가 아니라 주의가 정직하다(storagePillVariant 계약).
+  expect((await screen.findByText("Ready")).className).toContain("text-ok");
+  expect(screen.getByText("Degraded").className).toContain("text-busy");
+  // td 자체가 flex 면 표 레이아웃 계산에서 빠진다(9fbef86 구조 결함) -- flex 는
+  // td 안 div 가 진다. jsdom 은 기하를 못 재므로 className 으로 못박는다.
+  const row = screen.getByText("st-ready").closest("tr");
+  const actionsTd = row?.querySelector("td:last-child");
+  expect(actionsTd?.className ?? "").not.toMatch(/\bflex\b/);
+  expect(actionsTd?.querySelector("div")?.className ?? "").toMatch(/\bflex\b/);
+});
 test("delete shows in-use error on 409", async () => {
   server.use(
     http.get("/api/admin/storages", () => HttpResponse.json([S])),

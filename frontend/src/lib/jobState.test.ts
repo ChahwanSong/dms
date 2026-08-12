@@ -1,4 +1,4 @@
-import { buildPillVariant, isTerminal, pillVariant, TERMINAL_STATES } from "./jobState";
+import { buildPillVariant, isTerminal, pillVariant, storagePillVariant, TERMINAL_STATES } from "./jobState";
 import { test, expect } from "vitest";
 
 test("terminal states", () => {
@@ -16,6 +16,17 @@ test("pill variant mapping: green=ok, red=bad, violet=busy", () => {
   expect(pillVariant("Executing")).toBe("busy");
   expect(pillVariant("ConfirmPending")).toBe("busy");
   expect(pillVariant("Pending")).toBe("neutral");
+});
+
+test("storagePillVariant: Ready=ok, Degraded=busy(주의), 그 외(Unknown 포함)=neutral", () => {
+  expect(storagePillVariant("Ready")).toBe("ok");
+  // Degraded 는 bad(적색)가 아니라 busy(황색 주의)다 -- planner 는 Degraded
+  // 스토리지에도 잡을 보내므로(planner.py:149) "죽음"으로 칠하면 거짓말이 된다.
+  expect(storagePillVariant("Degraded")).toBe("busy");
+  expect(storagePillVariant("Unknown")).toBe("neutral");
+  expect(storagePillVariant("NotAStatus")).toBe("neutral");
+  // 공유 pillVariant 에 Ready 를 추가하는 잘못을 막는 못 -- 잡/요청 배지는 불변이다.
+  expect(pillVariant("Ready")).toBe("neutral");
 });
 
 test("M5: buildPillVariant marks Pending/Running as busy without touching job pillVariant", () => {

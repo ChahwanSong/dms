@@ -36,13 +36,10 @@ test.describe("E3 레이아웃 불변식", () => {
     await visit(page, "/jobs", "내 작업");
     await assertLayoutSane(page, { minTableCells: 4 });
 
-    // knownNonTableCells: StoragesList.tsx:50 의 작업 셀이 `<td className="flex ...">`
-    // 라 computed display 가 flex 다 -- 9fbef86 이 계정 표에서 걷어낸 것과 **같은
-    // 구조의 미수정 결함**이 여기 1건 남아 있다(실측). 이 슬라이스는 앱 코드를 한
-    // 줄도 바꾸지 않으므로 숨기지 않고 개수로 못박는다: 2가 되면(새 회귀) 빨개지고,
-    // 0이 되면(수리) 역시 빨개져 이 줄을 지우게 만든다.
+    // StoragesList 작업 셀의 flex td 결함(슬라이스 23 이 knownNonTableCells: 1 로
+    // 기록)은 슬라이스 26 이 수리했다 -- td 안 div 로 flex 이동(9fbef86 형태).
     await visit(page, "/admin/storages", "스토리지");
-    await assertLayoutSane(page, { minTableCells: 12, knownNonTableCells: 1 });
+    await assertLayoutSane(page, { minTableCells: 12 });
 
     await visit(page, "/admin/builds", "빌드");
     await assertLayoutSane(page, { minTableCells: 8 });

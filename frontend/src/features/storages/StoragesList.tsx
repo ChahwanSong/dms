@@ -6,6 +6,7 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { ApiError } from "../../lib/api";
+import { storagePillVariant } from "../../lib/jobState";
 import type { Storage } from "../../lib/types";
 
 function DeleteButton({ s }: { s: Storage }) {
@@ -45,12 +46,19 @@ export function StoragesList() {
             {(q.data ?? []).map((s) => (
               <tr key={s.storage_name} className="border-t border-black/5">
                 <td className="py-2">{s.storage_name}</td><td>{s.backend_type}</td>
-                <td className="text-muted">{s.mount_path}</td><td><StatusPill state={s.status} /></td>
+                {/* 스토리지 전용 storagePillVariant: Ready=ok, Degraded=busy(주의 --
+                    planner 가 Degraded 에도 잡을 보낸다), Unknown 등=neutral. */}
+                <td className="text-muted">{s.mount_path}</td><td><StatusPill state={s.status} variant={storagePillVariant(s.status)} /></td>
                 <td>{s.enabled === 1 ? "on" : "off"}</td>
-                <td className="flex gap-2 py-2">
-                  <StorageDialog mode="edit" storage={s} trigger={<Button variant="ghost">수정</Button>} />
-                  <Button variant="ghost" onClick={() => toggle(s)}>{s.enabled === 1 ? "비활성화" : "활성화"}</Button>
-                  <DeleteButton s={s} />
+                {/* td 를 flex 컨테이너로 만들지 않는다: td 가 flex 면 표 레이아웃 계산에서
+                    빠져나와 다른 열과 폭을 못 나눠 갖는다(9fbef86 이 계정 표에서 걷어낸
+                    구조 -- e2e L2 가 감시). flex 는 td 안 div 가 진다. */}
+                <td className="py-2">
+                  <div className="flex items-center gap-2 whitespace-nowrap">
+                    <StorageDialog mode="edit" storage={s} trigger={<Button variant="ghost">수정</Button>} />
+                    <Button variant="ghost" onClick={() => toggle(s)}>{s.enabled === 1 ? "비활성화" : "활성화"}</Button>
+                    <DeleteButton s={s} />
+                  </div>
                 </td>
               </tr>
             ))}
