@@ -1330,7 +1330,7 @@ def test_archived_entries_respect_tail_param(client):
     assert body["entries"][0]["log"] == "l3"
 ```
 
-(주의: `test_corrupt_diag_json_...` 의 `client.app.state.db` 배선은 conftest 의 app 조립을 먼저 확인하고, 없으면 `client.app.state.repos` 가 쥔 db 핸들 접근 관례를 기존 테스트에서 찾아 그대로 쓴다 — 이 저장소 API 테스트들이 `client.app.state.repos.<repo>._db` 대신 어떤 창구를 쓰는지 `grep -n "db.execute" tests/test_api_*.py` 로 실측해 맞출 것. 직접 UPDATE 한 줄이 요점이고 창구는 부차다.)
+(`client` 픽스처는 conftest 의 같은 `db` 픽스처로 조립된다(`tests/conftest.py:8-24` 실측) — `(client, db)` 두 인자를 받으면 같은 sqlite 를 직접 UPDATE 할 수 있다.)
 
 - [ ] **Step 2: 실패를 확인한다**
 
