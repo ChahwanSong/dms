@@ -17,6 +17,19 @@ _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
 # message에 남기므로 정보 손실은 없다.
 _KNOWN_COMPONENTS = frozenset({"stepper", "batch-orchestrator"})
 
+# 슬라이스 25 §2.2: 다행 조회가 diag_logs(행당 최대 64KB)를 절대 싣지 않기 위한
+# 명시 컬럼 목록 -- builds.list 의 I2 선례(5초 폴링 x 50행 x 64KB = 3.2MB 왕복).
+# get_job(단행)만 SELECT * 로 diag_logs 를 포함한다(/logs 박제 폴백이 그걸 읽는다).
+# 새 컬럼을 추가할 때는 migrations 양쪽 + 이 목록까지 세 곳이다 --
+# tests/test_repo_diag_logs.py 의 컬럼 패리티 계약이 누락을 잡는다.
+_ROW_COLUMNS_SANS_DIAG = (
+    "job_id, request_id, operation, tool, storage_name, source_storage, "
+    "destination_storage, source, destination, target, options, priority, state, "
+    "reason_code, preview_fingerprint, preview_expires_at, volcano_job_ref, "
+    "artifact_uri, result_summary, files_count, bytes_count, worker_pool, "
+    "precondition, confirmed_fingerprint, phase_refs, submit_wait_seconds, "
+    "exec_submitted_at, sched_wait_seconds, created_at, updated_at")
+
 
 def _guard_component(actor: str) -> str:
     return actor if actor in _KNOWN_COMPONENTS else "api"
@@ -108,21 +121,22 @@ class DataJobsRepository:
         set_job_state가 updated_at을 찍고, idx_data_jobs_state (state, updated_at)이
         이 정렬을 그대로 받아준다."""
         rows = self._db.query(
-            """SELECT * FROM data_jobs
-               WHERE operation = 'scan' AND state = :s AND storage_name = :sn
-               ORDER BY updated_at DESC, job_id DESC LIMIT :n""",
+            f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
+                WHERE operation = 'scan' AND state = :s AND storage_name = :sn
+                ORDER BY updated_at DESC, job_id DESC LIMIT :n""",
             {"s": DataJobState.SUCCEEDED.value, "sn": storage_name, "n": limit})
         return [self._hydrate(r) for r in rows]
 
     def list_jobs(self, *, request_id=None, limit=50):
         if request_id is None:
             rows = self._db.query(
-                "SELECT * FROM data_jobs ORDER BY created_at DESC, job_id DESC LIMIT :n",
+                f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
+                    ORDER BY created_at DESC, job_id DESC LIMIT :n""",
                 {"n": limit})
         else:
             rows = self._db.query(
-                """SELECT * FROM data_jobs WHERE request_id = :r
-                   ORDER BY created_at DESC, job_id DESC LIMIT :n""",
+                f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs WHERE request_id = :r
+                    ORDER BY created_at DESC, job_id DESC LIMIT :n""",
                 {"r": request_id, "n": limit})
         return [self._hydrate(r) for r in rows]
 
@@ -196,7 +210,8 @@ class DataJobsRepository:
         params["n"] = limit
         suffix = " FOR UPDATE SKIP LOCKED" if self._db.dialect == "postgresql" else ""
         rows = self._db.query(
-            f"""SELECT * FROM data_jobs WHERE state IN ({placeholders})
+            f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
+                WHERE state IN ({placeholders})
                 ORDER BY updated_at LIMIT :n{suffix}""", params)
         return [self._hydrate(r) for r in rows]
 
@@ -224,9 +239,29 @@ class DataJobsRepository:
                WHERE job_id = :j AND exec_submitted_at IS NULL""",
             {"now": utc_now_iso(), "j": job_id})
 
+    def archive_diag_logs(self, job_id, *, phase, entries) -> None:
+        """실패 종단 진단 로그 박제(슬라이스 25 §2.2). write-once 는 SQL 술어
+        (diag_logs IS NULL)가 강제한다 -- 박제 후 크래시하면 다음 틱의 finalize
+        재시도가 다시 부르지만 첫 사본은 불변이다(mark_exec_submitted 선례).
+        updated_at 은 건드리지 않는다: 같은 틱의 뒤따르는 set_job_state 가 어차피
+        시각을 찍고, 박제가 클레임 순서(ORDER BY updated_at)·GC 나이에 끼어들
+        이유가 없다(같은 선례). 상한(파드당 16KB·항목 4)은 호출자(stepper)의
+        몫이다 -- 이 계층은 저장만 한다.
+
+        entries 는 그대로 직렬화한다: 항목의 log 이 None 이면 JSON null 로 남고
+        ""(빈 로그)는 빈 문자열로 남는다 -- 모름과 정상값을 뭉개지 않는다."""
+        payload = dump_json({"phase": phase, "at": utc_now_iso(),
+                             "entries": entries})
+        self._db.execute(
+            """UPDATE data_jobs SET diag_logs = :d
+               WHERE job_id = :j AND diag_logs IS NULL""",
+            {"d": payload, "j": job_id})
+
     def record_sched_wait(self, job) -> None:
         """execution vcjob 의 첫 RUNNING 관측에서 스케줄 대기를 기록(슬라이스 20
-        설계 §2.3). job 은 claim_steppable 의 SELECT * 스냅샷이다 --
+        설계 §2.3). job 은 claim_steppable 의 행 스냅샷이다(슬라이스 25 부터
+        SELECT * 가 아니라 _ROW_COLUMNS_SANS_DIAG -- 여기가 읽는
+        sched_wait_seconds/exec_submitted_at 은 그 목록에 있다) --
         sched_wait_seconds 선독으로 이미 기록된 잡은 UPDATE 자체를 건너뛴다(매 틱
         0행 UPDATE 반복 방지). 진짜 write-once 강제는 SQL 술어(IS NULL)다: 스냅샷이
         낡아 선독을 통과해도 덮어쓰지 못한다. set_job_state 의 UPDATE 에 끼우지
@@ -321,8 +356,8 @@ class DataJobsRepository:
         params["threshold"] = threshold
         params["n"] = limit
         rows = self._db.query(
-            f"""SELECT * FROM data_jobs WHERE state IN ({placeholders})
-                   AND updated_at < :threshold
+            f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
+                WHERE state IN ({placeholders}) AND updated_at < :threshold
                 ORDER BY updated_at ASC, job_id ASC LIMIT :n""", params)
         return [self._hydrate(r) for r in rows]
 
