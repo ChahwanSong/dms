@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { ChevronDown } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMe } from "../features/auth/useAuth";
-import { NAVIGATION } from "./navigation";
+import { NAVIGATION, groupLabelFor } from "./navigation";
 import type { NavGroup, NavSection } from "./navigation";
 import { TopBar } from "./TopBar";
 import { Breadcrumb } from "./Breadcrumb";
@@ -45,9 +45,32 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const me = useMe();
   const isAdmin = me.data?.role === "admin";
   const { pathname } = useLocation();
-  // 접힘 상태는 그룹 단위·**기본 펼침**(빈 레코드 = 전부 펼침)이 계약이다 --
-  // 접힘 기본이면 e2e 04·router.test 의 사이드바 링크 클릭이 링크를 못 찾는다.
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  // 접힘 규칙(사용자 조정): defaultCollapsed 그룹은 접힘 기본 -- 단 **현재 경로가
+  // 속한 그룹은 항상 펼친다**(자동 펼침). 이 성질이 없으면 접힘 기본이 "사이드바
+  // 링크를 못 찾는" 사고가 된다(e2e 04·router.test 가 잡 화면에서 링크를 클릭한다).
+  // 상태 키는 렌더와 같은 `${section.label}:${group.label}` 이다 -- 맨 그룹 라벨을
+  // 쓰면 초기화가 렌더 조건과 어긋나 접힘 기본이 조용히 무시된다(실제로 겪었다).
+  const keysOf = (label: string | null) =>
+    NAVIGATION.flatMap((s) => (s.groups ?? [])
+      .filter((g) => g.label === label).map((g) => `${s.label}:${g.label}`));
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    const activeKeys = new Set(keysOf(groupLabelFor(pathname)));
+    const init: Record<string, boolean> = {};
+    for (const section of NAVIGATION)
+      for (const group of section.groups ?? []) {
+        const key = `${section.label}:${group.label}`;
+        if (group.defaultCollapsed === true && !activeKeys.has(key)) init[key] = true;
+      }
+    return init;
+  });
+  // 경로 이동으로 활성 그룹이 바뀌면 펼친다(자동 접기는 하지 않는다 -- 사용자가
+  // 손으로 연 그룹을 이동할 때마다 도로 닫으면 조작을 무시하는 셸이 된다).
+  useEffect(() => {
+    for (const key of keysOf(groupLabelFor(pathname)))
+      setCollapsed((prev) => (prev[key] ? { ...prev, [key]: false } : prev));
+    // keysOf 는 NAVIGATION(모듈 상수) 파생이라 pathname 만 의존성이면 충분하다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
 
   // adminOnly 는 그룹·항목 양쪽에서 걸러낸다. 항목이 다 걸러진 그룹은 헤더째
   // 숨긴다 -- 비관리자에게 빈 그룹 껍데기를 보이지 않기 위해서다(표시 게이트일

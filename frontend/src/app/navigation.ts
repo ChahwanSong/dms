@@ -1,8 +1,8 @@
 import { matchPath } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity, Ban, Boxes, Database, FilePlus, FolderCog, FolderSearch, Hammer,
-  HardDrive, Layers, LayoutDashboard, ListTodo, Play, Rocket, ScrollText,
+  Ban, Boxes, Database, FilePlus, FolderCog, FolderSearch, Hammer,
+  Layers, LayoutDashboard, ListTodo, Play, Rocket, ScrollText,
   Server, Shield, SlidersHorizontal, Users,
 } from "lucide-react";
 
@@ -11,36 +11,27 @@ import {
 // 진짜 차단은 라우터의 RequireRole(role="admin")과 서버가 한다.
 
 export interface NavItem { path: string; label: string; icon: LucideIcon; adminOnly?: boolean }
-export interface NavGroup { label: string; items: NavItem[]; adminOnly?: boolean }
-export interface NavSection {           // 최상위: DMS(그룹들) / NAS·Monitoring(자리)
+export interface NavGroup {
+  label: string; items: NavItem[]; adminOnly?: boolean;
+  // 접힘 기본(사용자 조정): 운영만 펼치고 나머지는 접는다. 단 AppShell 의 「활성
+  // 그룹 자동 펼침」(groupLabelFor)이 우선이라, 지금 보고 있는 화면의 그룹은 접힘
+  // 기본이어도 항상 열려 있다 -- 접힘이 "링크를 못 찾는" 사고가 되지 않는 이유다.
+  defaultCollapsed?: boolean;
+}
+export interface NavSection {           // 최상위: 지금은 DMS 뿐(NAS·Monitoring 추후 추가)
   label: string; icon: LucideIcon;
   groups?: NavGroup[];                  // DMS
-  path?: string;                        // placeholder 단일 링크(/nas, /monitoring)
+  path?: string;                        // 미래의 단일 링크 섹션용(현재 미사용)
 }
 
 // 항목 라벨은 기존 사이드바 문구 그대로다 -- router.test 가 「사이드바 라벨 = h1」
 // 짝을 단언하는 화면(릴리스 등)이 있어 문구를 바꾸면 화면까지 연쇄로 바꿔야 한다.
+// 그룹 순서·접힘(사용자 조정, 2026-08-13): 홈=대시보드(운영)와 짝 -- 로그인 직후
+// 화면의 그룹(운영)만 열려 있고 작업·스토리지·관리는 접힌다.
 export const NAVIGATION: NavSection[] = [
   {
     label: "DMS", icon: Boxes,
     groups: [
-      {
-        label: "작업",
-        items: [
-          { path: "/jobs", label: "내 작업", icon: ListTodo },
-          { path: "/jobs/new", label: "작업 제출", icon: FilePlus },
-          { path: "/scan-paths", label: "내 스캔 경로", icon: FolderSearch },
-          { path: "/admin/scan", label: "scan 실행", icon: Play, adminOnly: true },
-        ],
-      },
-      {
-        label: "스토리지", adminOnly: true,
-        items: [
-          { path: "/admin/storages", label: "스토리지", icon: Database },
-          { path: "/admin/nodes", label: "노드", icon: Server },
-          { path: "/admin/artifact-base", label: "아티팩트 경로", icon: FolderCog },
-        ],
-      },
       {
         label: "운영", adminOnly: true,
         items: [
@@ -52,7 +43,24 @@ export const NAVIGATION: NavSection[] = [
         ],
       },
       {
-        label: "관리", adminOnly: true,
+        label: "작업", defaultCollapsed: true,
+        items: [
+          { path: "/jobs", label: "내 작업", icon: ListTodo },
+          { path: "/jobs/new", label: "작업 제출", icon: FilePlus },
+          { path: "/scan-paths", label: "내 스캔 경로", icon: FolderSearch },
+          { path: "/admin/scan", label: "scan 실행", icon: Play, adminOnly: true },
+        ],
+      },
+      {
+        label: "스토리지", adminOnly: true, defaultCollapsed: true,
+        items: [
+          { path: "/admin/storages", label: "스토리지", icon: Database },
+          { path: "/admin/nodes", label: "노드", icon: Server },
+          { path: "/admin/artifact-base", label: "아티팩트 경로", icon: FolderCog },
+        ],
+      },
+      {
+        label: "관리", adminOnly: true, defaultCollapsed: true,
         items: [
           { path: "/admin/accounts", label: "계정", icon: Users },
           { path: "/admin/policies", label: "정책", icon: Shield },
@@ -62,8 +70,6 @@ export const NAVIGATION: NavSection[] = [
       },
     ],
   },
-  { label: "NAS", icon: HardDrive, path: "/nas" },
-  { label: "Monitoring", icon: Activity, path: "/monitoring" },
 ];
 
 // 사이드바 밖 상세 라우트 → 브레드크럼 부모 매핑(react-router matchPath 패턴).
@@ -75,6 +81,20 @@ export const DETAIL_ROUTES = [
   { pattern: "/admin/batches/:batchId", label: "배치 상세", parent: "/admin/batches" },
   { pattern: "/admin/builds/:buildId", label: "빌드 상세", parent: "/admin/builds" },
 ] as const;
+
+/** 경로가 속한 그룹 라벨(상세 라우트는 부모 항목의 그룹으로 귀속). 미지 경로는 null.
+    AppShell 의 「활성 그룹 자동 펼침」이 소비한다 -- 항목 스캔이 상세 패턴보다 먼저인
+    이유는 breadcrumbFor 와 같다(/jobs/new 가 :requestId 에도 매칭되므로). */
+export function groupLabelFor(pathname: string): string | null {
+  for (const section of NAVIGATION)
+    for (const group of section.groups ?? [])
+      for (const item of group.items)
+        if (matchPath(item.path, pathname) !== null) return group.label;
+  for (const detail of DETAIL_ROUTES)
+    if (matchPath(detail.pattern, pathname) !== null)
+      return groupLabelFor(detail.parent);
+  return null;
+}
 
 export interface Crumb { label: string; path?: string }
 

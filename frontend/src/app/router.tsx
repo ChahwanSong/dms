@@ -27,7 +27,6 @@ import { NodesList } from "../features/nodes/NodesList";
 import { BuildsPage } from "../features/builds/BuildsPage";
 import { BuildDetail } from "../features/builds/BuildDetail";
 import { ReleasesPage } from "../features/releases/ReleasesPage";
-import { PlaceholderPage } from "../features/placeholder/PlaceholderPage";
 
 function Home() {
   const me = useMe();
@@ -68,10 +67,6 @@ export function AppRouter() {
           <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitJob /></AppShell></RequireRole>} />
           <Route path="/jobs/:requestId" element={<RequireRole><AppShell><RequestDetail /></AppShell></RequireRole>} />
           <Route path="/scan-paths" element={<RequireRole><AppShell><ScanPaths /></AppShell></RequireRole>} />
-          {/* 슬라이스 31: 사이드바 최상위 placeholder(확정값 ③). 역할 무관 접근 --
-              사이드바에서 모든 역할에게 보이므로 클릭이 404 로 떨어지면 안 된다. */}
-          <Route path="/nas" element={<RequireRole><AppShell><PlaceholderPage title="NAS" /></AppShell></RequireRole>} />
-          <Route path="/monitoring" element={<RequireRole><AppShell><PlaceholderPage title="Monitoring" /></AppShell></RequireRole>} />
           <Route path="/admin/scan" element={<RequireRole role="admin"><AppShell><SubmitScan /></AppShell></RequireRole>} />
           <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
           <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />

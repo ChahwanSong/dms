@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { NAVIGATION, breadcrumbFor } from "./navigation";
+import { NAVIGATION, breadcrumbFor, groupLabelFor } from "./navigation";
 import type { NavItem } from "./navigation";
 
 // 메뉴는 데이터가 진실이다(슬라이스 31 T2) -- 이 파일은 그 데이터가 "기존 사이드바
@@ -35,9 +35,27 @@ test("adminOnly 표시가 기존 isAdmin 게이트와 일치한다", () => {
   expect(visibleToUser).toEqual(["/jobs", "/jobs/new", "/scan-paths"]);
 });
 
-test("placeholder 최상위 링크 /nas·/monitoring 이 데이터에 있다", () => {
-  const placeholderPaths = NAVIGATION.filter((s) => s.path !== undefined).map((s) => s.path);
-  expect(placeholderPaths).toEqual(["/nas", "/monitoring"]);
+test("최상위 섹션은 DMS 하나뿐이다(NAS·Monitoring 은 추후 추가 — 데이터에서 제거됨)", () => {
+  expect(NAVIGATION.map((s) => s.label)).toEqual(["DMS"]);
+});
+
+test("그룹 순서는 운영·작업·스토리지·관리, 기본 펼침은 운영만이다", () => {
+  // 홈=대시보드(운영)와 짝: 로그인 직후 화면의 그룹만 열려 있고 나머지는 접힌다.
+  const groups = NAVIGATION[0].groups ?? [];
+  expect(groups.map((g) => g.label)).toEqual(["운영", "작업", "스토리지", "관리"]);
+  expect(groups.map((g) => g.defaultCollapsed === true))
+    .toEqual([false, true, true, true]);
+});
+
+test("groupLabelFor: 경로가 속한 그룹을 찾고 상세 라우트는 부모로 귀속한다", () => {
+  // AppShell 의 「활성 그룹 자동 펼침」이 이 함수를 소비한다 -- 접힘 기본이어도
+  // 지금 보고 있는 화면의 그룹은 항상 열려 있어야 사이드바에서 자기 위치를 잃지
+  // 않는다(e2e 04 의 "내 작업" 클릭도 이 성질에 기댄다).
+  expect(groupLabelFor("/admin/dashboard")).toBe("운영");
+  expect(groupLabelFor("/jobs")).toBe("작업");
+  expect(groupLabelFor("/jobs/new")).toBe("작업");      // 상세 패턴보다 항목 우선
+  expect(groupLabelFor("/jobs/abc123")).toBe("작업");   // 상세 -> 부모 귀속
+  expect(groupLabelFor("/login")).toBeNull();
 });
 
 describe("breadcrumbFor", () => {
@@ -69,7 +87,7 @@ describe("breadcrumbFor", () => {
     expect(breadcrumbFor("/no-such-route")).toEqual([{ label: "HOME", path: "/" }]);
   });
 
-  test("placeholder: /nas = HOME>NAS", () => {
-    expect(breadcrumbFor("/nas").map((c) => c.label)).toEqual(["HOME", "NAS"]);
+  test("미지 경로는 HOME 만(placeholder 제거 후 /nas 도 미지다)", () => {
+    expect(breadcrumbFor("/nas").map((c) => c.label)).toEqual(["HOME"]);
   });
 });
