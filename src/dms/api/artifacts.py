@@ -33,6 +33,9 @@ NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
 MAX_BYTES = 256 * 1024
 MAX_TAIL_LINES = 5000
+# 다운로드 스트림의 청크 크기. 64KiB 는 os.read 시스템 콜 횟수와 스레드풀 왕복
+# (starlette 가 동기 제너레이터를 청크마다 to_thread 로 위임한다) 사이의 절충이다.
+DOWNLOAD_CHUNK = 64 * 1024
 # 사용자가 phase 디렉터리 소유자라 파일을 무한정 만들 수 있다 — 응답(과 stat 횟수)을 묶는다.
 MAX_ENTRIES = 1000
 # 응답 항목 수 상한만으로는 부족하다: 정규 파일이 하나도 없는 디렉터리(하위 디렉터리·
@@ -172,14 +175,22 @@ def tail_lines(text: str, n: int) -> str:
     return "\n".join(lines)
 
 
-def read_artifact(base: str, job_id: str, phase: str, name: str,
-                  tail: int | None = None) -> dict:
+def open_artifact_stream(base: str, job_id: str, phase: str, name: str,
+                         max_bytes: int | None) -> tuple[int, int]:
+    """봉쇄 사슬을 통과한 (fd, fstat 시점 size)를 돌려준다.
+
+    뷰(read_artifact)와 다운로드가 **이 함수 하나**를 공유한다 — 봉쇄 사슬이 두 벌
+    있으면 한쪽만 고치는 드리프트가 구조적으로 가능해진다. 검사 순서가 계약이다:
+    단일 open → fstat S_ISREG → fd 봉쇄 → **그 뒤에만** 크기 상한(max_bytes).
+    크기 검사가 봉쇄보다 앞서면 404/413 갈림이 봉쇄 밖 파일의 존재·크기를 캐는
+    오라클이 된다. 반환 전 어떤 실패든 열린 fd 는 여기서 닫는다 — 성공 반환 뒤의
+    fd 소유권은 호출자가 진다(다운로드는 stream_artifact_fd 에 즉시 넘긴다).
+    """
     path = resolve_artifact_path(base, job_id, phase, name)
-    truncated = False
     try:
         # 딱 한 번만 연다. O_NOFOLLOW는 마지막 컴포넌트가 심링크면 ELOOP로 실패시킨다.
         # 이후 stat/봉쇄 검사는 경로 문자열이 아니라 이 fd에 대해서만 한다 — 검사한
-        # 대상과 읽는 대상이 같은 inode임이 보장된다(TOCTOU 제거).
+        # 대상과 읽는(스트림하는) 대상이 같은 inode임이 보장된다(TOCTOU 제거).
         # O_NONBLOCK이 **필수**다: 사용자가 자기 phase 디렉터리 소유자라 아티팩트 이름으로
         # mkfifo를 걸 수 있는데, 이 플래그가 없으면 os.open이 writer를 기다리며 영원히
         # 블록한다(아래 S_ISREG 검사는 실행되지도 않는다). 스타레트는 이 동기 라우트를
@@ -200,7 +211,48 @@ def read_artifact(base: str, job_id: str, phase: str, name: str,
             # 아니라 '지금 손에 쥔 fd가 어디인지'를 묻는 것이라 바꿔치기에 영향받지 않는다.
             # (심링크된 phase 디렉터리처럼 마지막 컴포넌트가 아닌 탈출을 여기서 잡는다.)
             _assert_contained(base, job_id, os.path.realpath(f"/proc/self/fd/{fd}"))
-            size = st.st_size
+        except OSError:
+            raise ArtifactError("artifact_not_found", name)
+        if max_bytes is not None and st.st_size > max_bytes:
+            # 여기 도달했다는 것 자체가 봉쇄 통과의 증거다 — artifact_too_large 는
+            # 봉쇄 안 파일에 대해서만 나간다(위 docstring 의 순서 계약).
+            raise ArtifactError("artifact_too_large", str(st.st_size))
+        return fd, st.st_size
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def stream_artifact_fd(fd: int, size: int, chunk: int = DOWNLOAD_CHUNK):
+    """fd 소유권을 넘겨받아 fstat 시점 size 만큼만 내보내는 동기 제너레이터.
+
+    - size 캡: open 뒤 파일이 자라도(append) 전송량 불변 — 사용자가 자기 파일을
+      키워 Content-Length 를 넘는 응답을 무한정 늘리는 공격을 여기서 끊는다.
+    - 조기 EOF: 스트림 중 truncate 되면 그 지점에서 정직하게 끊는다. 0 채움으로
+      size 를 맞추면 클라이언트가 절단을 감지할 수 없다(조작된 완전한 파일로 보인다).
+    - fd 반납: starlette 1.3.1 은 body_iterator 를 명시적으로 close 하지 않는다(실측)
+      — 클라이언트 절단 시 GeneratorExit 가 도달하는 finally 가 유일한 방어다.
+    """
+    try:
+        remaining = size
+        while remaining > 0:
+            data = os.read(fd, min(chunk, remaining))
+            if not data:
+                break  # 조기 EOF(truncate) — 0 채움 금지, 여기서 정직하게 끊는다
+            remaining -= len(data)
+            yield data
+    finally:
+        os.close(fd)
+
+
+def read_artifact(base: str, job_id: str, phase: str, name: str,
+                  tail: int | None = None) -> dict:
+    # 봉쇄 사슬은 open_artifact_stream 과 공유한다. max_bytes=None 인 이유: 뷰는
+    # 큰 파일을 거절하는 게 아니라 꼬리 MAX_BYTES 로 잘라서 보여 준다(아래 lseek).
+    fd, size = open_artifact_stream(base, job_id, phase, name, max_bytes=None)
+    truncated = False
+    try:
+        try:
             if size > MAX_BYTES:
                 os.lseek(fd, size - MAX_BYTES, os.SEEK_SET)
                 truncated = True
@@ -219,5 +271,5 @@ def read_artifact(base: str, job_id: str, phase: str, name: str,
         if len(lines) > min(max(tail, 1), MAX_TAIL_LINES):
             truncated = True
         text = tail_lines(text, tail)
-    return {"phase": phase, "name": name, "size": st.st_size,
+    return {"phase": phase, "name": name, "size": size,
             "truncated": truncated, "content": text}
