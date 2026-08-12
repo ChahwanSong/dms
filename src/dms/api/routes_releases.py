@@ -114,6 +114,7 @@ def submit_releases(body: ReleaseBody, request: Request,
         raise HTTPException(status_code=409, detail="rollout_in_progress")
     tags_cache: dict = {}
     records = []
+    unverified: list[str] = []
     for item in body.items:
         spec = COMPONENTS[item.component]
         tag = (item.tag or "").strip()
@@ -122,7 +123,12 @@ def submit_releases(body: ReleaseBody, request: Request,
         tags = _tags_for(tags_cache, settings.build_registry, spec["repository"])
         # 레지스트리가 응답할 때만 강제한다 -- 응답 불가면 통과시키고 잘못된 태그는
         # patch 후 ImagePullBackOff로 드러나게 한다(잘못된 차단보다 낫다, 설계 §7).
-        if tags is not None and tag not in tags:
+        # 슬라이스 28: tradeoff 는 유지하되 침묵은 걷어낸다 -- 건너뛴 사실을
+        # 추적해 응답 플래그와 이벤트로 운영자에게 알린다(조용한 fail-open 은
+        # "검증됐다"와 구분이 안 된다는 것이 BACKLOG §2.3 항목의 실체다).
+        if tags is None:
+            unverified.append(item.component)
+        elif tag not in tags:
             raise HTTPException(status_code=422, detail="unknown_tag")
         image = f"{settings.build_registry}/{spec['repository']}:{tag}"
         # IfNotPresent 함정: 같은 태그 재적용은 아무 일도 안 일어나는데 롤아웃은
@@ -138,4 +144,14 @@ def submit_releases(body: ReleaseBody, request: Request,
     except DomainValidationError as e:
         # 사전 체크와 이 사이의 경합 창 -- 트랜잭션 안 가드가 잡는다.
         raise HTTPException(status_code=409, detail=e.reason_code)
-    return {"items": [_public(r) for r in rows]}
+    if unverified:
+        # create_batch 성공 **뒤에만** 기록한다 -- 거절된 제출(422/409)은 커밋된
+        # 것이 없으므로 "건너뛰고 통과시켰다"는 사실이 성립하지 않는다. 이벤트는
+        # 포탈에 안 뜨는 영속 흔적(관리자 이벤트 화면 없음 -- db_reconnected 와
+        # 같은 계층)이고, 즉시 가시 채널은 아래 tag_verified 플래그 + 포탈 배너다.
+        repos.observability.record_event(
+            component="api", severity="warning",
+            event_type="release_tag_unverified",
+            message=f"registry silent; unverified={','.join(unverified)}",
+            payload={"components": unverified})
+    return {"items": [_public(r) for r in rows], "tag_verified": not unverified}

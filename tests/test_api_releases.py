@@ -249,3 +249,54 @@ def test_releases_are_admin_only(client):
     assert client.get("/api/admin/releases").status_code in (401, 403)
     assert client.get("/api/admin/releases/targets").status_code in (401, 403)
     assert client.post("/api/admin/releases", json={"items": []}).status_code in (401, 403)
+
+
+def test_submit_reports_unverified_when_repo_is_silent(rollout_client, db,
+                                                       monkeypatch):
+    """슬라이스 28(BACKLOG §2.3): fail-open 은 유지하되 침묵을 걷어낸다.
+    리포별 부분 침묵(dms 는 응답, dms-agent 만 None)으로 검증의 리포 단위
+    granularity 까지 고정한다 -- 응답한 리포의 태그는 정상 검증되고(dev 태그가
+    목록에 있어 통과), 침묵 리포만 미검증으로 표시된다."""
+    monkeypatch.setattr(
+        "dms.api.routes_releases.fetch_repo_tags",
+        lambda registry, repo: {"dms": ["d22", "d23"]}.get(repo))  # dms-agent 는 None
+    r = rollout_client.post(
+        "/api/admin/releases",
+        json={"items": [{"component": "dms-api", "tag": "d23"},
+                        {"component": "dms-agent", "tag": "dev9"}]},
+        headers=ADMIN)
+    assert r.status_code == 202
+    assert r.json()["tag_verified"] is False
+    events = db.query(
+        "SELECT payload FROM events WHERE event_type = 'release_tag_unverified'")
+    assert len(events) == 1
+    assert "dms-agent" in events[0]["payload"]
+    assert "dms-api" not in events[0]["payload"]   # 검증된 컴포넌트는 안 싣는다
+
+
+def test_submit_verified_when_registry_answers(rollout_client, db):
+    # 정상 경로: 레지스트리가 답했고 태그가 존재 -- 플래그 true, 이벤트 0건.
+    # 이벤트가 정상 제출마다 쌓이면 "경고"의 의미가 죽는다(늑대 소년).
+    r = rollout_client.post("/api/admin/releases",
+                            json={"items": [{"component": "dms-api", "tag": "d23"}]},
+                            headers=ADMIN)
+    assert r.status_code == 202
+    assert r.json()["tag_verified"] is True
+    assert db.query("SELECT id FROM events"
+                    " WHERE event_type = 'release_tag_unverified'") == []
+
+
+def test_rejected_submit_leaves_no_unverified_event(rollout_client, db,
+                                                    monkeypatch):
+    # 레지스트리 침묵 + 형식 불량 태그 -> 422 거절. 거절엔 커밋된 것이 없으므로
+    # "건너뛰고 통과시켰다"는 사실 자체가 없다 -- 이벤트도 없어야 한다.
+    # (현행도 그렇다 -- 이 테스트는 이벤트 기록이 create_batch 앞으로 끌려가는
+    # 회귀를 막는 그물이다.)
+    monkeypatch.setattr("dms.api.routes_releases.fetch_repo_tags",
+                        lambda registry, repo: None)
+    r = rollout_client.post("/api/admin/releases",
+                            json={"items": [{"component": "dms-api", "tag": "has space"}]},
+                            headers=ADMIN)
+    assert r.status_code == 422
+    assert db.query("SELECT id FROM events"
+                    " WHERE event_type = 'release_tag_unverified'") == []
