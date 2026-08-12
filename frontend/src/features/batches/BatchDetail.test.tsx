@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -25,7 +25,8 @@ test("PreviewReady shows confirm button and posts confirm", async () => {
   server.use(http.post("/api/admin/batches/b1:confirm", () => { confirmed = true; return HttpResponse.json({status:"Running"}); }));
   renderAt("PreviewReady");
   await userEvent.click(await screen.findByRole("button", { name: "배치 확인" }));
-  expect(confirmed).toBe(true);
+  // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
+  await waitFor(() => expect(confirmed).toBe(true));
 });
 test("renders items table with status", async () => {
   renderAt("Running");
@@ -36,5 +37,6 @@ test("PreviewReady also shows cancel button and posts cancel", async () => {
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));
   renderAt("PreviewReady");
   await userEvent.click(await screen.findByRole("button", { name: "취소" }));
-  expect(cancelled).toBe(true);
+  // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
+  await waitFor(() => expect(cancelled).toBe(true));
 });

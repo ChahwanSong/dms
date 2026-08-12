@@ -86,6 +86,19 @@ test("잡 통계가 비배열로 와도 죽지 않는다", async () => {
   expect(running).toHaveTextContent("0");
 });
 
+test("잡 통계가 비배열 truthy({})로 와도 죽지 않는다 -- null 사례는 ?? [] 도 통과시킨다", async () => {
+  // 기존 by_state:null 테스트는 `x ?? []` 구현도 초록으로 만들었다(null 은 nullish).
+  // {} 는 Array.isArray 가드만 걸러낸다 -- 프록시/구버전 API 가 객체를 흘리는
+  // 경우의 실 구분 사례다.
+  renderDash({ jobs: { by_state: {} } });
+  // KPI 타일은 로딩 첫 렌더에도 0 으로 그려져 즉시 단언은 데이터 착지 전에
+  // 초록으로 끝난다 -- 로딩 문구 3곳(Queue/NodeMetrics/JobStats)의 소거를
+  // 기다려 관찰 창을 착지 뒤로 민다. 크래시하면 트리째 언마운트라 타일도 사라진다.
+  await waitFor(() => expect(screen.queryAllByText("불러오는 중…")).toHaveLength(0));
+  const running = screen.getByText("실행 중").parentElement!;
+  expect(running).toHaveTextContent("0");
+});
+
 const DRIFTED = {
   components: [
     { component: "dms-agent", kind: "DaemonSet", workload: "dms-agent",

@@ -16,6 +16,12 @@ describe("sparklinePath", () => {
   it("전부 null이면 빈 path", () => {
     expect(sparklinePath([null, null], 100, 20)).toBe("");
   });
+  it("NaN/Infinity 는 null 과 같은 절단이다 -- 좌표 문자열에 NaN 이 새지 않는다", () => {
+    // 메트릭 파이프라인이 0/0 이나 오버플로를 흘리면 path d="...NaN..." 이 되어
+    // SVG 가 통째로 안 그려진다 -- Number.isFinite 필터(슬라이스 26 통합분)의 그물.
+    expect(sparklinePath([0, NaN, 10], 100, 20)).toBe("M0,20M100,0");
+    expect(sparklinePath([Infinity, -Infinity], 100, 20)).toBe("");
+  });
 });
 
 describe("Sparkline", () => {
@@ -51,5 +57,11 @@ describe("Sparkline", () => {
       <Sparkline values={[1, 2]} width={100} height={20} />);
     expect(container.querySelector("path")).not.toBeNull();
     expect(container.querySelector("circle")).toBeNull();
+  });
+  it("NaN 옆의 유효점 1개도 circle 로 그린다 -- 좌표는 path 와 같은 step 공식", () => {
+    // [NaN, 7]: step = 120/(2-1) = 120, 유효점 인덱스 1 -> cx 120, span 0 -> 중앙선.
+    const { container } = render(<Sparkline values={[NaN, 7]} />);
+    expect(container.querySelector("circle")!.getAttribute("cx")).toBe("120");
+    expect(container.querySelector("circle")!.getAttribute("cy")).toBe("16");
   });
 });

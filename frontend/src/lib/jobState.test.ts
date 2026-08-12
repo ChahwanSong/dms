@@ -41,3 +41,11 @@ test("M5: buildPillVariant marks Pending/Running as busy without touching job pi
   expect(pillVariant("Pending")).toBe("neutral");
   expect(pillVariant("Running")).toBe("neutral");
 });
+
+test("잔여 상태 매핑(슬라이스 1~4 부채): PreviewExpired=bad, Planning/Scheduled=busy", () => {
+  // PreviewExpired 는 isTerminal 로만 단언돼 있었고 배지색은 무그물이었다.
+  // Planning/Scheduled 는 jobState.ts:10 이 다루는데 단언이 전무했다.
+  expect(pillVariant("PreviewExpired")).toBe("bad");
+  expect(pillVariant("Planning")).toBe("busy");
+  expect(pillVariant("Scheduled")).toBe("busy");
+});

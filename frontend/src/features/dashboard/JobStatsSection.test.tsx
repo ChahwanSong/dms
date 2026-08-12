@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
@@ -70,6 +70,15 @@ test("files/bytes가 NULL이면 — 로 우아하게 생략한다", async () => 
 test("응답이 비배열이어도 죽지 않는다", async () => {
   renderSection({ by_state: null });
   expect(await screen.findByText("잡 통계")).toBeInTheDocument();
+});
+
+test("by_state 가 비배열 truthy(\"oops\")여도 죽지 않는다 -- asArray 의 구분 사례", async () => {
+  renderSection({ by_state: "oops" });
+  // 헤더 "잡 통계"는 로딩 첫 렌더에도 그려져 즉시 단언은 데이터 착지 전에
+  // 초록으로 끝난다(뮤테이션 실측: `?? []` 구현도 통과) -- 로딩 문구 소거를
+  // 기다려 관찰 창을 착지 뒤로 민다. 크래시하면 트리째 언마운트라 헤더도 사라진다.
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  expect(screen.getByText("잡 통계")).toBeInTheDocument();
 });
 
 test("제출 대기 분포와 집계/제외 건수를 보여준다", async () => {
