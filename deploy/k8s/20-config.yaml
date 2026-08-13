@@ -52,7 +52,10 @@ data:
   # 일반 사용자는 owner_username을 조작해도 승격 불가(403). 특권을 완전히 끄려면
   # DMS_ALLOW_PRIVILEGED_REQUESTERS="false" 또는 DMS_PRIVILEGED_REQUESTERS=""(명시적 빈값).
   DMS_ALLOW_PRIVILEGED_REQUESTERS: "true"
-  DMS_PRIVILEGED_REQUESTERS: "root,admin"
+  # mason: 운영자 로컬 admin 계정(LDAP 밖 — mkadmin 생성). LDAP 에 없는 계정은
+  # planner 신원 해석에서 거부되므로, 특권 실행(owner_username 지정, root 실행)이
+  # 이 계정으로 잡을 돌릴 유일한 경로다. planner 가 세션 인증 + 이 목록을 재검증한다.
+  DMS_PRIVILEGED_REQUESTERS: "root,admin,mason"
 
   # --- controller loop intervals / retention / job-runner knobs (all have
   #     code defaults in config.py _SERVER_INT_KEYS -- set explicitly here so
