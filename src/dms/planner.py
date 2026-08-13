@@ -79,45 +79,53 @@ class Planner:
             rid, RequestState.REJECTED, reason_code=reason, actor="planner")
         return f"rejected:{reason}"
 
+    def _within_identity_grace(self, req, now_iso):
+        """신원 전파 유예 창 판정. 앵커는 요청 created_at -- placement 실패 경로
+        (_identity_grace_active)와 성공 경로의 요청 수 대기(A')가 같은 창을 쓴다.
+
+        grace 를 짧게(기본 300s -- 최악 전파 130s 의 2배 남짓) 두는 이유: 같은
+        resource_key 의 후속 요청이 find_active 에 걸려 Conflict 가 되므로 무한정
+        붙잡으면 안 된다."""
+        now = now_iso or utc_now_iso()
+        return now < iso_plus(req["created_at"],
+                              self._settings.planner_identity_grace_seconds)
+
     def _identity_grace_active(self, req, exc, now_iso):
         """설계 §2.3의 유예 조건: (a) 사유가 "후보 0"이고 (b) 탈락 사유가 정확히
         identity_not_ready_on_node 인 노드가 **하나라도** 있고 (c) 요청 나이 < grace.
         방향은 "증명되면 유예, 아니면 거부"다 -- rejections 가 비었거나(신선한 리포트
         0건) 신원 대기 노드가 없으면 유예하지 않는다. 알 수 없는 사유에 유예를 걸면
-        진짜 결격이 조용히 매달린다.
-
-        grace 를 짧게(기본 300s -- 최악 전파 130s 의 2배 남짓) 두는 이유: 같은
-        resource_key 의 후속 요청이 find_active 에 걸려 Conflict 가 되므로 무한정
-        붙잡으면 안 된다."""
+        진짜 결격이 조용히 매달린다."""
         if exc.reason_code not in _GRACE_REASONS:
             return False
         if not _identity_pending_nodes(exc.rejections):
             return False
-        now = now_iso or utc_now_iso()
-        return now < iso_plus(req["created_at"],
-                              self._settings.planner_identity_grace_seconds)
+        return self._within_identity_grace(req, now_iso)
 
-    def _record_identity_defer(self, rid, exc):
+    def _record_defer_event(self, rid, event_type, message, payload):
         """유예는 관측 가능해야 하지만, 틱마다(기본 10s) 남기면 grace 300s 동안 요청
         하나에 최대 30건이 쌓여 요청 상세의 이벤트 목록(limit 100)을 유예 잡음으로
         덮는다. 사유가 바뀔 때만(첫 유예 포함) 남긴다 -- 같은 사유의 연속 유예는
-        새 정보가 없다."""
-        payload = {"rejections": exc.rejections}
+        새 정보가 없다. identity_propagating 과 awaiting_requested_nodes 가 같은
+        관례를 공유한다(억제는 event_type 별로 따로 본다)."""
         try:
             prior = [e for e in self._repos.observability.events_for_request(rid)
-                     if e["event_type"] == "identity_propagating"]
+                     if e["event_type"] == event_type]
         except Exception:
             # 중복 억제는 진단 편의일 뿐이다 -- 조회가 실패했다고 유예 자체를 깨지
             # 않는다(record_event 가 절대 예외를 올리지 않는 것과 같은 이유).
             prior = []
         if prior and prior[-1]["payload"] == payload:
             return
-        nodes = ", ".join(sorted(_identity_pending_nodes(exc.rejections)))
         self._repos.observability.record_event(
-            component="planner", severity="info",
-            event_type="identity_propagating",
-            message=f"identity not ready on: {nodes}"[:500],
-            payload=payload, request_id=rid)
+            component="planner", severity="info", event_type=event_type,
+            message=message[:500], payload=payload, request_id=rid)
+
+    def _record_identity_defer(self, rid, exc):
+        nodes = ", ".join(sorted(_identity_pending_nodes(exc.rejections)))
+        self._record_defer_event(
+            rid, "identity_propagating", f"identity not ready on: {nodes}",
+            {"rejections": exc.rejections})
 
     def _plan_one(self, rid, now_iso):
         req = self._repos.requests.get(rid)
@@ -195,6 +203,37 @@ class Planner:
                                     requested_node_count=requested)
         except PlacementError as exc:
             return self._reject(rid, exc.reason_code)
+        # 6b. 요청 노드 수 유예 내 대기(A'): planner 는 적격 >= 1 이면 즉시 계획하는데,
+        #     신원 전파 왕복(~130s) 중 1대만 준비된 틱에 계획되면 요청 node_count=2
+        #     여도 1대로 박제된다(실측 사고). 세 조건 전부 만족일 때만 기다린다:
+        #     (a) 요청이 node_count 를 명시했고(미지정은 현행 즉시 계획 -- null != 0),
+        #     (b) 적격 수 < 목표 = min(요청, 정책 max_nodes) -- 정책이 허용 안 하는
+        #         수를 기다리지 않는다. sync 는 max_nodes 가 면당 상한(resolve_fanout)
+        #         이므로 목표도 면당 동일 규칙: 어느 면이든 부족하면 대기,
+        #     (c) 부족이 개선 가능 -- 탈락 사유에 identity_not_ready_on_node 가 하나
+        #         이상(마운트·도구 결손은 기다려도 안 늘어난다 -- 그 경우 즉시 계획).
+        #     유예 창은 placement 실패 경로와 같은 앵커(created_at + grace)다 --
+        #     만료 후 첫 틱엔 있는 만큼으로 계획한다(마감 있는 최선).
+        if requested is not None and self._within_identity_grace(req, now_iso):
+            target = min(requested, policy["max_nodes"])
+            cand = placement["candidates"]
+            if "primary" in cand:
+                eligible = len(cand["primary"])
+                short = eligible < target
+            else:
+                eligible = {"source": len(cand["source"]),
+                            "destination": len(cand["destination"])}
+                short = (eligible["source"] < target
+                         or eligible["destination"] < target)
+            not_ready = sorted(_identity_pending_nodes(placement["rejections"]))
+            if short and not_ready:
+                self._record_defer_event(
+                    rid, "awaiting_requested_nodes",
+                    f"eligible {eligible} < target {target}, "
+                    f"identity not ready on: {', '.join(not_ready)}",
+                    {"eligible": eligible, "target": target,
+                     "not_ready_nodes": not_ready})
+                return "deferred:awaiting_requested_nodes"
         # 7. emit
         identity_dict = {**asdict(identity), "groups": list(identity.groups)}
         cand = placement["candidates"]

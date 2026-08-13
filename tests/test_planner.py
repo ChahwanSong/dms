@@ -565,6 +565,152 @@ def test_repeated_defer_records_event_once_until_reason_changes(db):
     assert events[1]["payload"]["rejections"]["n2"] == "missing_target_mount"
 
 
+# --- 슬라이스 33(A'): node_count 명시 요청은 유예 창 안에서 요청 수를 기다린다 ---
+
+def _scan_request_with_count(repos, count, key="data.scan:s1:a:ff"):
+    return repos.requests.create(
+        operation="scan", requester_id="alice", actor="alice",
+        resource_key=key, payload={"storage": "s1", "target": "a", "options": {},
+                                   "owner_username": None, "node_count": count},
+        priority="mid")
+
+
+def test_requested_node_count_waits_within_grace(db):
+    # 적격 1 < 목표 2 인데 부족 사유가 신원 전파 대기 -- 유예 창 안에서는 있는
+    # 만큼으로 계획하지 않고 다음 틱을 기다린다(실측 사고: 전파 중 1대만 준비된
+    # 틱에 계획돼 요청 2대가 1대로 박제).
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_report(repos, node="n1")                     # 적격
+    _seed_identity_pending_report(repos, node="n2")    # 신원만 대기
+    rid = _scan_request_with_count(repos, 2)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")         # 나이 120s < grace 300s
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
+    assert repos.requests.get(rid)["state"] == "Pending"
+    assert repos.data_jobs.list_jobs(request_id=rid) == []
+    events = repos.observability.events_for_request(rid)
+    assert [e["event_type"] for e in events] == ["awaiting_requested_nodes"]
+    assert events[0]["severity"] == "info"
+    assert events[0]["payload"] == {"eligible": 1, "target": 2,
+                                    "not_ready_nodes": ["n2"]}
+    # identity_propagating 과 같은 중복 억제 관례 -- 같은 사유의 연속 유예는 1건만.
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
+    assert len(repos.observability.events_for_request(rid)) == 1
+
+
+def test_requested_node_count_grace_expired_plans_with_available(db):
+    # 마감 있는 최선: 유예 만료 후 첫 틱엔 있는 만큼으로 계획한다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_report(repos, node="n1")
+    _seed_identity_pending_report(repos, node="n2")
+    rid = _scan_request_with_count(repos, 2)
+    _backdate(db, rid, "2026-08-02T09:54:00Z")         # 나이 360s > grace 300s
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["node_count"] == 1
+    assert wp["candidates"]["primary"] == ["n1"]
+
+
+def test_requested_node_count_non_identity_shortage_plans_immediately(db):
+    # 부족하지만 신원 사유 노드가 0(미마운트만) -- 기다려도 늘어나지 않으므로
+    # grace 안이어도 즉시 계획한다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_report(repos, node="n1")
+    _seed_unmounted_report(repos, "n2")
+    rid = _scan_request_with_count(repos, 2)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["node_count"] == 1
+
+
+def test_unspecified_node_count_plans_immediately_despite_identity_pending(db):
+    # 회귀 금지: node_count 미지정이면 현행대로 적격 >= 1 에서 즉시 계획한다 --
+    # A' 분기는 요청이 수를 명시했을 때만 발동한다(null != 0).
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_report(repos, node="n1")
+    _seed_identity_pending_report(repos, node="n2")
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["node_count"] == 1
+
+
+def test_requested_node_count_target_is_policy_capped(db):
+    # 목표는 min(요청, 정책 max_nodes) -- 정책이 허용 안 하는 수(요청 8)를
+    # 기다리지 않는다. 적격 4 = 정책 캡 4 이므로 신원 대기 노드가 있어도 즉시 계획.
+    repos = Repositories(db)
+    _seed_storage(repos)
+    repos.control.upsert_policy("scan", max_nodes=4, procs_per_node=8,
+                                queue="dms-data", default_priority="mid",
+                                max_priority="high", preview_timeout_seconds=3600,
+                                execution_timeout_seconds=3600, enabled=True,
+                                actor="admin")
+    for node in ("n1", "n2", "n3", "n4"):
+        _seed_report(repos, node=node)
+    _seed_identity_pending_report(repos, node="n5")
+    rid = _scan_request_with_count(repos, 8)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")         # grace 안이어도
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["node_count"] == 4
+    assert wp["candidates"]["primary"] == ["n1", "n2", "n3", "n4"]
+
+
+def test_requested_node_count_plans_when_target_reached(db):
+    # 정상 종료 경로: 전파가 완료돼 적격이 목표에 도달하면 요청한 수로 계획한다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    _seed_report(repos, node="n1")
+    _seed_identity_pending_report(repos, node="n2")
+    rid = _scan_request_with_count(repos, 2)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
+    _seed_report(repos, node="n2")                     # 전파 완료
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["node_count"] == 2
+    assert wp["candidates"]["primary"] == ["n1", "n2"]
+
+
+def test_sync_requested_node_count_waits_per_side(db):
+    # sync 는 max_nodes 가 면당 상한이므로 목표도 면당 동일 규칙 -- source 는
+    # 충족(2)이어도 destination 이 부족(1<2)이고 그 사유가 신원 대기면 기다린다.
+    repos = Repositories(db)
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_policy(repos, "nsync")
+    _seed_sync_node(repos, "s1", "src", identity_ready=True)
+    _seed_sync_node(repos, "s2", "src", identity_ready=True)
+    _seed_sync_node(repos, "d1", "dst", identity_ready=True)
+    _seed_sync_node(repos, "d2", "dst", identity_ready=False)
+    rid = repos.requests.create(
+        operation="sync", requester_id="alice", actor="alice",
+        resource_key="data.sync:src:a:dst:b:ff",
+        payload={"source_storage": "src", "source": "a",
+                 "destination_storage": "dst", "destination": "b",
+                 "options": {}, "owner_username": None, "node_count": 2},
+        priority="mid")
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = _planner(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "deferred:awaiting_requested_nodes"
+    assert repos.requests.get(rid)["state"] == "Pending"
+    events = repos.observability.events_for_request(rid)
+    assert [e["event_type"] for e in events] == ["awaiting_requested_nodes"]
+    assert events[0]["payload"] == {
+        "eligible": {"source": 2, "destination": 1}, "target": 2,
+        "not_ready_nodes": ["d2"]}
+    _seed_sync_node(repos, "d2", "dst", identity_ready=True)  # 전파 완료
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["source_count"] == 2 and wp["destination_count"] == 2
+
+
 class _PrivSettings:
     agent_report_stale_seconds = 300
     allow_privileged_requesters = True
