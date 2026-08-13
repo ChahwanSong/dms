@@ -12,6 +12,8 @@ export const useBatch = (id: string) =>
 export interface CreateBatchBody {
   operation: string; max_concurrency: number; options: Record<string, unknown>;
   note: string | null; items: Record<string, string>[];
+  // 실행 제어(슬라이스 32): 미지정은 키 생략 = 서버 NULL(정책 기본) — null≠0.
+  priority?: string; node_count?: number;
 }
 export const useCreateBatch = () =>
   useMutation({ mutationFn: (b: CreateBatchBody) =>
