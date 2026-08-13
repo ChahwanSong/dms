@@ -62,7 +62,14 @@ class BatchOrchestrator:
     def _materialize(self, batch, item):
         payload, key = build_data_payload(batch["operation"], options=batch["options"],
                                           **item["payload"])
-        priority = resolve_priority(self._repos, batch["operation"], None)
+        # node_count 는 build_data_payload 에 넣지 않고 build 후 주입한다 — build 의
+        # 반환 payload 는 단건 제출 계약(정확 일치 테스트)이고 resource_key 산식에도
+        # 영향을 주면 안 된다(실행 제어값은 대상 식별자가 아니다).
+        # 미지정(None)은 키 자체를 싣지 않는다 — null(모름) ≠ 0, planner 는 키
+        # 부재 = 정책 기본으로 읽는다.
+        if batch.get("node_count") is not None:
+            payload["node_count"] = batch["node_count"]
+        priority = resolve_priority(self._repos, batch["operation"], batch.get("priority"))
         rid = self._repos.requests.create(
             operation=batch["operation"], requester_id=batch["requester_id"],
             actor=batch["actor"], resource_key=key, payload=payload,

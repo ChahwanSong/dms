@@ -21,6 +21,39 @@ def test_scan_throttles_materialize(db):
         assert repos.requests.get(it["request_id"])["state"]=="Pending"
         assert repos.requests.get(it["request_id"])["batch_id"]==bid
 
+# --- 슬라이스 32: 배치 실행 제어(priority/node_count)의 자식 전달 ---
+
+def test_batch_priority_flows_to_children(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running",
+        priority="high")
+    _orch(db).run_once()
+    it = repos.batches.list_items(bid)[0]
+    assert repos.requests.get(it["request_id"])["priority"] == "high"
+
+def test_batch_node_count_flows_to_child_payload(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running",
+        node_count=4)
+    _orch(db).run_once()
+    it = repos.batches.list_items(bid)[0]
+    assert repos.requests.get(it["request_id"])["payload"]["node_count"] == 4
+
+def test_batch_without_controls_keeps_legacy_child_shape(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running")
+    _orch(db).run_once()
+    it = repos.batches.list_items(bid)[0]
+    req = repos.requests.get(it["request_id"])
+    assert "node_count" not in req["payload"]   # 미지정 = 키 부재(null≠0)
+    assert req["priority"] == "mid"             # 정책 없음 폴백(기존 경로)
+
 def test_scan_aggregates_and_completes(db):
     repos = Repositories(db)
     bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
