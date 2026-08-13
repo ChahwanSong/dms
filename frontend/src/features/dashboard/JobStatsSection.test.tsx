@@ -3,7 +3,8 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { JobStatsSection } from "./JobStatsSection";
+import { JobStatsSection, successRate, rateTone } from "./JobStatsSection";
+import type { StateCount } from "../../lib/types";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -53,7 +54,7 @@ test("성공률·처리량·분해 표·실패 사유를 그린다", async () =>
   // 종단 43건 중 성공 20 = 47%
   expect(await screen.findByText(/47%/)).toBeInTheDocument();
   const chart = screen.getByRole("img", { name: "처리량" });
-  expect(chart.querySelectorAll("rect")).toHaveLength(2);
+  expect(chart.querySelectorAll("[title]")).toHaveLength(2);
   expect(screen.getByText("dscan")).toBeInTheDocument();
   expect(screen.getByText("cephfs-a")).toBeInTheDocument();
   expect(screen.getByText("alice")).toBeInTheDocument();
@@ -81,10 +82,46 @@ test("by_state 가 비배열 truthy(\"oops\")여도 죽지 않는다 -- asArray 
   expect(screen.getByText("잡 통계")).toBeInTheDocument();
 });
 
+test("성공률은 큰 % 숫자와 성공/비성공 스택 바로 그린다", async () => {
+  renderSection();
+  const pct = await screen.findByText("47%");
+  // 47% 는 절반 미만 -- bad 톤(임계: ≥80 ok, ≥50 busy, 미만 bad)
+  expect(pct.className).toContain("text-bad");
+  const bar = screen.getByRole("img", { name: "성공률" });
+  const segs = bar.querySelectorAll("[title]");
+  expect(segs).toHaveLength(2);
+  // 세그먼트 폭 = 실제 비율(20/43 = 46.51%) -- 반올림된 47% 표기와 별개로
+  // 바 기하는 원비율을 유지한다
+  expect((segs[0] as HTMLElement).style.width).toBe("46.51%");
+  expect(segs[0].getAttribute("title")).toBe("성공 20");
+  expect(segs[1].getAttribute("title")).toBe("비성공 23");
+  expect(screen.getByText(/성공 20 \/ 종단 43/)).toBeInTheDocument();
+});
+
+test("종단 잡이 없으면 0%/100% 로 뭉개지 않고 명시한다", async () => {
+  renderSection({ ...STATS, by_state: [{ state: "Pending", count: 2 }] });
+  expect(await screen.findByText(/종단 잡 없음/)).toBeInTheDocument();
+});
+
+test("successRate 문자열 계약 유지(기존 소비자 호환)", () => {
+  const byState = [
+    { state: "Succeeded", count: 1 }, { state: "Failed", count: 1 },
+  ] as StateCount[];
+  expect(successRate(byState)).toBe("50% (1/2)");
+  expect(successRate([])).toBe("—");
+});
+
+test("rateTone 임계: 80 이상 ok, 50 이상 busy, 미만 bad", () => {
+  expect(rateTone(80)).toBe("text-ok");
+  expect(rateTone(79)).toBe("text-busy");
+  expect(rateTone(50)).toBe("text-busy");
+  expect(rateTone(49)).toBe("text-bad");
+});
+
 test("제출 대기 분포와 집계/제외 건수를 보여준다", async () => {
   renderSection();
   const chart = await screen.findByRole("img", { name: "제출 대기 분포" });
-  expect(chart.querySelectorAll("rect")).toHaveLength(6);
+  expect(chart.querySelectorAll("[title]")).toHaveLength(6);
   // 제외 건수를 숨기지 않는다(설계 §3) + 수행시간과의 포함 관계 명시(설계 §2.4)
   expect(screen.getByText(/집계 3건 · 제외\(기록 없음\) 1건/)).toBeInTheDocument();
   expect(screen.getByText(/수행시간 분포는 이 대기를 포함/)).toBeInTheDocument();
@@ -93,7 +130,7 @@ test("제출 대기 분포와 집계/제외 건수를 보여준다", async () =>
 test("스케줄 대기(Volcano) 분포가 제출 대기와 구분돼 나온다", async () => {
   renderSection();
   const chart = await screen.findByRole("img", { name: "스케줄 대기(Volcano) 분포" });
-  expect(chart.querySelectorAll("rect")).toHaveLength(6);
+  expect(chart.querySelectorAll("[title]")).toHaveLength(6);
   // 두 대기의 라벨이 한 화면에서 구분된다 -- getByText 는 유일 매치를 강제하므로
   // 라벨이 같은 문자열로 뭉치면 여기서 터진다(설계 §3: 「제출 대기」 옆에
   // 나란히, 서로 다른 이름으로 -- 슬라이스 17 이 queue_wait 라벨을 정정한 교훈).

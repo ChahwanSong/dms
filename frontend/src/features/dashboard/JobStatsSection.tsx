@@ -3,7 +3,7 @@ import { useJobMetrics } from "./useMetrics";
 import { WindowSelect } from "./WindowSelect";
 import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
-import { BarChart } from "../../components/ui/BarChart";
+import { BarChart, r2 } from "../../components/ui/BarChart";
 import { reasonText } from "../../lib/api";
 import type { BreakdownRow, JobMetrics, StateCount } from "../../lib/types";
 
@@ -14,12 +14,59 @@ const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
 const TERMINAL = new Set(
   ["Succeeded", "Failed", "TimedOut", "Cancelled", "Rejected", "PreviewExpired"]);
 
-export function successRate(byState: StateCount[]): string {
+// 종단 잡이 없으면 null -- 0%(전패)도 100%(전승)도 아닌 "표본 없음"이다. 비율로
+// 뭉개면 화면이 거짓말한다(null ≠ 0 규약).
+export function successParts(byState: StateCount[]): { ok: number; terminal: number } | null {
   const terminal = byState.filter((r) => TERMINAL.has(r.state))
     .reduce((a, r) => a + r.count, 0);
-  if (terminal === 0) return "—";
+  if (terminal === 0) return null;
   const ok = byState.find((r) => r.state === "Succeeded")?.count ?? 0;
-  return `${Math.round((ok / terminal) * 100)}% (${ok}/${terminal})`;
+  return { ok, terminal };
+}
+
+// 문자열 계약("N% (ok/terminal)" 또는 "—")은 유지한다 -- 기존 소비자 호환.
+export function successRate(byState: StateCount[]): string {
+  const p = successParts(byState);
+  if (p === null) return "—";
+  return `${Math.round((p.ok / p.terminal) * 100)}% (${p.ok}/${p.terminal})`;
+}
+
+// 큰 % 숫자의 톤. 임계(80/50)는 배치 잡 운영 감각의 절단이다: 8할 이상이면
+// 건강(ok), 절반 이상이면 주의(busy), 절반 미만은 문제(bad). 클래스명
+// text-ok/text-busy/text-bad 는 DS 계약 -- 값(색)만 바꿀 수 있다.
+export function rateTone(pct: number): "text-ok" | "text-busy" | "text-bad" {
+  if (pct >= 80) return "text-ok";
+  if (pct >= 50) return "text-busy";
+  return "text-bad";
+}
+
+// 성공률 = 큰 % 숫자 + 성공/비성공 스택 미터(슬라이스 20 시절 텍스트 한 줄의
+// 대체). 세그먼트 폭은 반올림 전 원비율(r2) -- 표기 47% 와 기하 46.51% 는 다른
+// 정밀도를 가져도 된다. 세그먼트 사이 2px 틈은 표면색 구분자(테두리 금지).
+function SuccessRateBar({ byState }: { byState: StateCount[] }) {
+  const p = successParts(byState);
+  if (p === null) return <p className="text-muted text-sm">성공률 — 종단 잡 없음</p>;
+  const pct = Math.round((p.ok / p.terminal) * 100);
+  const okPct = r2((p.ok / p.terminal) * 100);
+  const failed = p.terminal - p.ok;
+  return (
+    <div className="max-w-md">
+      <p className="flex items-baseline gap-2">
+        <span className={`text-2xl font-semibold tabular-nums ${rateTone(pct)}`}>{pct}%</span>
+        {/* "비성공"에는 Failed 외에 TimedOut·Cancelled·Rejected·PreviewExpired 가
+            섞여 있어 "실패"라 쓰지 않는다 -- 분모 표기는 종단 총수. */}
+        <span className="text-xs text-muted">성공률 · 성공 {p.ok} / 종단 {p.terminal}</span>
+      </p>
+      <div role="img" aria-label="성공률"
+           className="mt-1 flex h-2 gap-0.5 overflow-hidden rounded-full">
+        {p.ok > 0 &&
+          <div className="bg-ok" style={{ width: `${okPct}%` }} title={`성공 ${p.ok}`} />}
+        {failed > 0 &&
+          <div className="bg-bad" style={{ width: `${r2(100 - okPct)}%` }}
+               title={`비성공 ${failed}`} />}
+      </div>
+    </div>
+  );
 }
 
 // NodesList.tsx의 humanBytes와 같은 로직의 국소 사본 -- 그쪽은 export하지 않고,
@@ -90,7 +137,9 @@ export function JobStatsSection() {
         <WindowSelect value={windowH} onChange={setWindowH} />
       </div>
       {q.isLoading && <p className="text-muted text-sm">불러오는 중…</p>}
-      <p className="text-sm">성공률 {successRate(byState)}</p>
+      {/* 로딩 중(d 없음)은 "모름"이라 성공률 블록 자체를 내지 않는다 -- 착지 후
+          종단 0건일 때만 "종단 잡 없음"(정상값)을 명시한다. */}
+      {d && <SuccessRateBar byState={byState} />}
       {/* 2×2 배치(슬라이스 20): 아래 행에 두 "대기" 분포가 나란히 온다 --
           「제출 대기」(created_at→첫 비-Pending, DMS 픽업 지연)와 「스케줄
           대기(Volcano)」(execution 제출→첫 RUNNING 관측)는 다른 것을 잰다(설계
