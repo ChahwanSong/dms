@@ -38,6 +38,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_max_concurrency: "동시 실행 수 값이 올바르지 않습니다",
   batch_storage_mixed: "배치의 스토리지가 섞여 있습니다 — 한 배치는 하나의 스토리지만",
   invalid_node_count: "노드 수 값이 올바르지 않습니다",
+  batch_not_rescannable: "재실행할 수 없는 상태의 배치입니다 — 완료·취소된 배치만 가능합니다",
   invalid_storage: "스토리지 설정이 올바르지 않습니다",
   invalid_node_name: "노드 이름이 올바르지 않습니다",
   agent_node_identity_mismatch: "에이전트 노드 신원이 일치하지 않습니다",

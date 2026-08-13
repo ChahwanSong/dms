@@ -81,6 +81,28 @@ def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(r
     return {"status": "Running", "requeued": n}
 
 
+@router.post("/api/admin/batches/{batch_id}:rescan")
+def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    b = repo.get(batch_id)
+    if b is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    # 종단 배치(Completed/Cancelled) 한정: 종단 배치 ⇒ 전 item 종단 ⇒ 살아있는
+    # 자식이 없다 — cancel 선례의 "실행면 먼저 종료" 단계가 공집합으로 성립한다
+    # (거짓 취소 방지 정합). 비종단에서 허용하면 활성 자식과 리셋 item 이 충돌
+    # (resource_conflict·이중 실행)하므로 fail-closed 거부. PreviewReady 는 자식
+    # ConfirmPending(활성)이라 제외 — 취소 후 rescan 이 정상 동선이다.
+    if b["status"] not in ("Completed", "Cancelled"):
+        raise HTTPException(status_code=409, detail="batch_not_rescannable")
+    # 성공 item 포함 전체 리셋: 용도가 성장 모니터링(같은 대상 재스캔)이라
+    # "실패만"이 아니라 전부를 다시 돌린다(:rerun-failed 와의 차이).
+    n = repo.reset_all_items(batch_id)
+    status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
+    repo.set_status(batch_id, status)
+    return {"status": status, "requeued": n}
+
+
 @router.post("/api/admin/batches/{batch_id}:cancel")
 def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
     repos = request.app.state.repos
