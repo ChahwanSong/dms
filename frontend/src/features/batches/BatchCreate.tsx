@@ -42,7 +42,8 @@ const initial = {
   // 실행 제어: priority "" = "(정책 기본)" = 바디에서 생략(null≠0).
   // nodeCount "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
   priority: "", nodeCount: "", mc: 2, note: "",
-  // 특권 실행: 빈값 = 바디에서 생략 = 비특권 현행(SubmitJob ownerUsername 미러).
+  // 소유자 기록: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자). 특권 여부와
+  // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
 };
 
@@ -154,7 +155,8 @@ export function BatchCreate() {
       // 미지정("")은 키 자체를 생략한다 — 서버 NULL(정책 기본), null≠0.
       ...(f.priority !== "" && { priority: f.priority }),
       ...(f.nodeCount.trim() !== "" && { node_count: Number(f.nodeCount.trim()) }),
-      // 특권 실행: 빈값 생략 = 비특권 현행(서버 게이트는 값이 있을 때만 발동).
+      // 소유자 기록: 빈값은 키 생략 = 서버 NULL(기본: 생성자) — 특권 게이트는
+      // owner 유무와 무관하게 항상 발동한다(통일 게이트).
       ...(f.ownerUsername.trim() !== "" && { owner_username: f.ownerUsername.trim() }),
     };
   }

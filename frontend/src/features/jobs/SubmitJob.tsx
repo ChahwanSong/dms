@@ -70,7 +70,7 @@ export function SubmitJob() {
   const chmodError = f.operation === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.operation === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
-    ? "chown 형식이 올바르지 않습니다 (예: user:group)" : null;
+    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 또는 cocoa.song:mig)" : null;
   const advancedError = batchFilesError ?? bufsizeError ?? chmodError ?? chownError;
   const blocked = submit.isPending || recursiveMissing || statLiteConflict || storagesQ.isError
     || advancedError !== null;
@@ -222,17 +222,22 @@ export function SubmitJob() {
                         <input aria-label="chmod" className={field} value={f.chmod} onChange={on("chmod")} />
                       </label>
                       {chmodError && <p className="text-bad text-sm">{chmodError}</p>}
-                      <label className="text-sm block">chown (user:group)
-                        <input aria-label="chown" className={field} value={f.chown} onChange={on("chown")} />
+                      <label className="text-sm block">chown (user:group 또는 uid:gid)
+                        <input aria-label="chown" className={field} value={f.chown}
+                               placeholder="예: 10003:10000 또는 cocoa.song:mig"
+                               onChange={on("chown")} />
                       </label>
                       {chownError && <p className="text-bad text-sm">{chownError}</p>}
                       {/* 함정 캡션(설계 §2.5): chown 명시 시 auto-chown 억제는
-                          execution_manifests.py:75-77("chown" in spec.options) — 실패는
-                          서버가 아니라 도구 실행 단계에서 나므로 여기서 미리 경고한다 */}
+                          execution_manifests.py("chown" in spec.options) — 실패는
+                          서버가 아니라 도구 실행 단계에서 나므로 여기서 미리 경고한다.
+                          "비우면" 기본도 특권 여부로 갈린다(_auto_chown): 특권은 소스
+                          소유권 보존, 비특권은 요청자 소유 자동 chown — 정직하게 병기 */}
                       <p className="text-muted text-xs">
-                        chown 을 지정하면 자동 chown 이 꺼집니다. 비특권 사용자가 타인 소유를
-                        지정하면 도구가 chown 권한이 없어 <strong>데이터는 복사되고 잡은 Failed 로
-                        끝납니다</strong>.
+                        비우면 원래 소유권 보존(특권 실행 기준 — 비특권 실행은 요청자 소유로
+                        자동 chown). chown 을 지정하면 자동 chown 이 꺼집니다. 비특권 사용자가
+                        타인 소유를 지정하면 도구가 chown 권한이 없어 <strong>데이터는 복사되고
+                        잡은 Failed 로 끝납니다</strong>.
                       </p>
                     </div>
                   </details>

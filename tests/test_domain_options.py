@@ -53,6 +53,28 @@ def test_sync_chmod_chown_ok():
     assert out["chmod"] == "D0750,F0640"
 
 
+@pytest.mark.parametrize("value", [
+    "10003", "10003:10000", "0:0", "10003:mig", "cocoa.song:10000",
+    ":10000", ":mig",
+])
+def test_sync_chown_numeric_and_mixed_ok(value):
+    # chown 파트는 「이름 또는 숫자 uid/gid」다 — dsync --chown 이 숫자를 받는 것은
+    # auto_chown 의 숫자(uid:gid) 주입이 증명한다(execution_manifests._auto_chown).
+    # "0:0" 은 dsync 의미상 root:root 로 유효. 혼합(숫자:이름)도 형식상 허용.
+    # ":gid" 꼴(빈 uid 파트)은 기존 정규식 의미 그대로 허용이다.
+    out = validate_options(Operation.SYNC, {"chown": value})
+    assert out["chown"] == value
+
+
+@pytest.mark.parametrize("value", ["", "10003:", "1.5:10", "10003abc"])
+def test_sync_chown_bad_shapes_rejected(value):
+    # 경계 고정: 빈 문자열·후행 콜론("user:" 꼴 빈 gid 파트)·소수·숫자+문자 붙임은
+    # 거부 — 숫자 확장이 기존 빈 파트 규칙과 이름 규칙(문자 시작)을 넓히지 않는다.
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SYNC, {"chown": value})
+    assert e.value.reason_code == "invalid_option"
+
+
 def test_rm_stat_lite_exclusive():
     with pytest.raises(DomainValidationError) as e:
         validate_options(Operation.RM, {"recursive": True, "stat": True, "lite": True})

@@ -110,7 +110,14 @@ def validate_owner_username(username: str) -> str:
 
 
 _CHMOD_ITEM_RE = re.compile(r"[DF]?[0-7]{1,4}$")
-_CHOWN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9._-]{0,63})?(:[A-Za-z_][A-Za-z0-9._-]{0,63})?$")
+# chown 파트는 「이름 또는 숫자 uid/gid」다. 숫자를 허용하는 근거: dsync --chown 은
+# 숫자를 받는다 — 특권 판정에 따른 자동 주입(execution_manifests._auto_chown)이
+# 이미 uid:gid 숫자를 넣는 것이 증명. 숫자 상한 10자리는 uid_t 32비트(최대 10자리)
+# 커버. 이름 규칙(문자 시작·최대 64자)과 빈 파트 규칙(":gid" 허용, "user:" 거부)은
+# 기존 정규식 의미 그대로 — 숫자 확장이 경계를 넓히지 않는다.
+# frontend/src/features/jobs/optionRules.ts 의 CHOWN_RE 가 이 정규식의 미러다(발산 금지).
+_CHOWN_PART = r"(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10})"
+_CHOWN_RE = re.compile(rf"({_CHOWN_PART})?(:{_CHOWN_PART})?$")
 
 _BOOL = ("bool",)
 _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {

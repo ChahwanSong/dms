@@ -301,6 +301,21 @@ test("chmod·chown 문자열이 그대로 전송된다", async () => {
   expect(captured.body.options).toEqual({ chmod: "D770,F660", chown: "alice:proj" });
 });
 
+test("숫자 uid:gid chown 이 즉답 오류 없이 그대로 전송된다", async () => {
+  // 서버 _CHOWN_RE 숫자 확장(domain.py)의 미러 검증 — optionRules CHOWN_RE 발산 금지.
+  const captured = captureSubmit();
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  expect(screen.getByLabelText("chown")).toHaveAttribute(
+    "placeholder", "예: 10003:10000 또는 cocoa.song:mig");
+  await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
+  expect(screen.queryByText(/chown 형식이 올바르지 않습니다/)).toBeNull();
+  await goToConfirm();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body.options).toEqual({ chown: "10003:10000" });
+});
+
 test("batch_files·bufsize 숫자 입력은 number 로 전송된다", async () => {
   const captured = captureSubmit();
   renderPage();
