@@ -37,6 +37,23 @@ def login(body: LoginBody, request: Request):
         raise HTTPException(status_code=401, detail="invalid_credentials")
     request.session.clear()
     request.session["username"] = body.username
+    # 슬라이스 33(H): 로그인 성공 시 프로브 타깃 조건부 선등록. 신원 전파는
+    # register_probe_target -> 에이전트 리포트 응답 -> 노드별 getpwnam 프로브 ->
+    # 다음 리포트 상행의 왕복(~130s)이라, 첫 데이터 요청 시점에 시작하면 그만큼
+    # 적격 노드가 늦게 늘어난다. 로그인 시점에 미리 시작해 예열한다.
+    # LDAP 에 해석되는 계정만 등록한다 -- 로컬 전용 계정(mason 류)을 넣으면 전
+    # 노드가 영원히 status Missing 프로브만 쌓는다(예열 이득 0, 프로브 낭비만).
+    resolver = request.app.state.identity_resolver
+    if resolver is not None:
+        try:
+            if resolver.resolve(body.username) is not None:
+                request.app.state.repos.control.register_probe_target(body.username)
+        except Exception:
+            # 선등록은 예열 최적화일 뿐 로그인의 전제가 아니다 -- LDAP 불가
+            # (IdentityUnavailable)를 포함한 어떤 실패도 로그인을 막으면 안 되므로
+            # 전부 삼킨다(fail-soft). 진짜 신원 판정은 planner 의
+            # resolve_job_identity 가 fail-closed 로 다시 한다.
+            pass
     return {"actor": body.username, "role": role}
 
 

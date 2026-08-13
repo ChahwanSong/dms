@@ -1,3 +1,6 @@
+from dms.identity import ResolvedIdentity, StubIdentityResolver
+
+
 def test_healthz_is_public(client):
     assert client.get("/healthz").json() == {"status": "ok"}
 
@@ -104,6 +107,39 @@ def test_non_ascii_token_is_rejected_not_500(client):
     r = client.post("/api/admin/accounts", json={"username": "x", "password": "p"},
                     headers={"x-admin-token": "caf\xe9".encode("latin-1")})
     assert r.status_code == 403
+
+
+def test_login_preregisters_probe_target_for_ldap_resolvable_account(client, db):
+    # 슬라이스 33(H): 로그인 시점 선등록 -- 첫 데이터 요청이 신원 전파 왕복(~130s)을
+    # 통째로 기다리지 않게, 로그인하자마자 노드 프로브를 예열한다.
+    client.app.state.identity_resolver = StubIdentityResolver(
+        {"alice": ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)})
+    client.post("/api/auth/signup", json={"username": "alice", "password": "pw"})
+    r = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
+    assert r.status_code == 200
+    rows = db.query("SELECT username FROM identity_probe_targets")
+    assert [row["username"] for row in rows] == ["alice"]
+
+
+def test_login_skips_probe_target_for_local_only_account(client, db):
+    # LDAP 에 해석 안 되는 로컬 전용 계정(mason 류)은 등록하지 않는다 -- 등록하면
+    # 전 노드가 영원히 Missing 프로브만 쌓는다(예열 이득 0, 프로브 낭비만).
+    client.app.state.identity_resolver = StubIdentityResolver({})  # alice 없음
+    client.post("/api/auth/signup", json={"username": "mason", "password": "pw"})
+    r = client.post("/api/auth/login", json={"username": "mason", "password": "pw"})
+    assert r.status_code == 200
+    assert db.query("SELECT username FROM identity_probe_targets") == []
+
+
+def test_login_succeeds_when_ldap_unavailable(client, db):
+    # 선등록은 예열 최적화일 뿐 로그인의 전제가 아니다 -- LDAP 이 죽어도
+    # (IdentityUnavailable) 로그인은 무조건 성공해야 한다(fail-soft).
+    client.app.state.identity_resolver = StubIdentityResolver({}, unavailable=True)
+    client.post("/api/auth/signup", json={"username": "alice", "password": "pw"})
+    r = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
+    assert r.status_code == 200
+    assert r.json() == {"actor": "alice", "role": "user"}
+    assert db.query("SELECT username FROM identity_probe_targets") == []
 
 
 def test_create_app_wires_the_reconnect_event_hook(client, db):
