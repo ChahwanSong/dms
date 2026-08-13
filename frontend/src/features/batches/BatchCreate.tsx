@@ -150,8 +150,8 @@ export function BatchCreate() {
   }
 
   function downloadCsv() {
-    // clipboard API 금지(전제 #10): 운영 포탈은 http 비보안 컨텍스트라
-    // navigator.clipboard 가 없다 — Blob 다운로드는 어디서나 동작한다.
+    // 클립보드 API 금지: 운영 포탈은 http(비 localhost) 비보안 컨텍스트라
+    // 브라우저 클립보드 API 가 부재한다 — Blob 다운로드는 어디서나 동작한다.
     const text = serializeItemsCsv(f.op, f.op === "scan"
       ? rows.map((r) => ({ target: r.a.trim() }))
       : rows.map((r) => ({ source: r.a.trim(), destination: r.b.trim() })));
