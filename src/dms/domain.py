@@ -228,7 +228,8 @@ def resolve_priority(repos, operation: str, requested: str | None) -> str:
 
 def validate_batch(operation, max_concurrency, items, *,
                    priority: str | None = None,
-                   node_count: int | None = None) -> None:
+                   node_count: int | None = None,
+                   procs_per_node: int | None = None) -> None:
     if operation not in (Operation.SCAN.value, Operation.SYNC.value):
         raise DomainValidationError("invalid_batch_operation", operation)
     # 상한 64: 임의 위생값(거대값이면 orchestrator 가 전 item 을 한 틱에 materialize).
@@ -257,3 +258,9 @@ def validate_batch(operation, max_concurrency, items, *,
             not isinstance(node_count, int) or isinstance(node_count, bool)
             or not 1 <= node_count <= 1024):
         raise DomainValidationError("invalid_node_count", repr(node_count))
+    # procs_per_node 도 node_count 와 같은 규칙 — 상한 1024 는 위생값일 뿐이고
+    # 실제 상한은 planner 가 min(정책 procs_per_node, 요청값) 으로 캡한다.
+    if procs_per_node is not None and (
+            not isinstance(procs_per_node, int) or isinstance(procs_per_node, bool)
+            or not 1 <= procs_per_node <= 1024):
+        raise DomainValidationError("invalid_procs_per_node", repr(procs_per_node))

@@ -69,6 +69,10 @@ class BatchOrchestrator:
         # 부재 = 정책 기본으로 읽는다.
         if batch.get("node_count") is not None:
             payload["node_count"] = batch["node_count"]
+        # procs_per_node 도 node_count 와 같은 규칙으로 build 후 주입 — 실행
+        # 제어값은 대상 식별자가 아니라 resource_key 산식에 못 들어간다.
+        if batch.get("procs_per_node") is not None:
+            payload["procs_per_node"] = batch["procs_per_node"]
         # 배치 특권 실행: owner_username 은 node_count 와 같은 규칙으로 build 후
         # 주입한다(단건 payload 계약·resource_key 산식 무영향). None(비특권)은 키
         # 자체를 싣지 않는다 -- null(모름) ≠ 0, 기존 자식 payload 모양 그대로.

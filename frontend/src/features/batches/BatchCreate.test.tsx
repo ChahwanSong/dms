@@ -186,6 +186,7 @@ test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => 
   expect(screen.getByLabelText("top_k")).toHaveAttribute("placeholder", "예: 100");
   expect(screen.getByLabelText("소유자 기록(선택)")).toHaveAttribute("placeholder", "예: cocoa.song");
   expect(screen.getByLabelText("노드 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
+  expect(screen.getByLabelText("노드당 프로세스 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
   expect(screen.getByLabelText("동시 실행 상한")).toHaveAttribute("placeholder", "예: 2");
   expect(screen.getByLabelText("메모")).toHaveAttribute("placeholder", "예: 8월 정기 스캔");
 });
@@ -254,6 +255,30 @@ test("정책 disabled 는 캡션에 그 사실이 표기된다", async () => {
   await toScanControls();
   expect(await screen.findByText(
     "정책 기본: 최대 4노드 · 노드당 8프로세스 · 비활성(잡 배치 거부)")).toBeInTheDocument();
+});
+
+// 노드당 프로세스 수 override: 노드 수 입력과 같은 관례의 미러(빈값 = 정책 기본).
+test("노드당 프로세스 수: 바디 조립·확인 요약", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await toScanControls();
+  await userEvent.type(screen.getByLabelText("노드당 프로세스 수"), "4");
+  await userEvent.click(next());                              // → 확인·제출
+  // 확인 스텝 요약 = 제출 바디 파생(화면 거짓말 금지). "4"는 위저드 스텝
+  // 배지(4스텝)에도 있어 행(dt+dd) 스코프로 단언한다.
+  expect(screen.getByText("노드당 프로세스").closest("div")).toHaveTextContent("4");
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body).toMatchObject({ procs_per_node: 4 });
+});
+
+test("노드당 프로세스 수 즉답 검증: 범위 밖이면 문구 + 다음 비활성", async () => {
+  renderPage();
+  await toScanControls();
+  await userEvent.type(screen.getByLabelText("노드당 프로세스 수"), "65");
+  expect(screen.getByText(
+    "노드당 프로세스 수는 1..64 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(next()).toBeDisabled();
 });
 
 test("동시 실행 상한 캡션: 배치 항목(잡) 수 의미 — 노드 수와 무관", async () => {

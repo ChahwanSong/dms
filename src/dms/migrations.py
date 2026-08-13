@@ -90,6 +90,9 @@ def _apply_migrations(db: Database) -> None:
             -- orchestrator 가 batch 행을 읽어 자식 request 에 전달한다.
             priority TEXT,
             node_count INTEGER,
+            -- 노드당 프로세스 수 override: node_count 와 같은 규칙의 미러 —
+            -- NULL = 미지정(정책 procs_per_node), planner 가 min(정책, 요청) 캡.
+            procs_per_node INTEGER,
             -- 배치 특권 실행: 단건 제출의 owner_username 경로 이식. NULL = 비특권
             -- 현행(자식 payload 에 키 자체가 실리지 않는다 — null≠0).
             owner_username TEXT,
@@ -532,6 +535,8 @@ def _ensure_columns(db):
         # 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
         ("batches", "owner_username", "TEXT"),
         ("batches", "auth_method", "TEXT"),
+        # 노드당 프로세스 수 override -- 위와 같은 이중 경로 규약(슬라이스 14 교훈).
+        ("batches", "procs_per_node", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

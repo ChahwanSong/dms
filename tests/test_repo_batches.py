@@ -85,6 +85,24 @@ def test_reset_all_items(db):
     # 감산이 아니라 0 리셋 — 전체 재시작이라 절대값이 진실
     assert b["succeeded_count"] == 0 and b["failed_count"] == 0
 
+# --- 노드당 프로세스 수 override: node_count 저장 관례의 미러 ---
+
+def test_create_stores_procs_per_node(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"s1","target":"a"}], status="Running",
+        procs_per_node=4)
+    assert repos.batches.get(bid)["procs_per_node"] == 4
+
+def test_create_defaults_procs_per_node_to_null(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"s1","target":"a"}], status="Running")
+    # null(모름) ≠ 0 — 미지정은 NULL(정책 기본)이어야 한다
+    assert repos.batches.get(bid)["procs_per_node"] is None
+
 def test_requests_create_with_batch_id(db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",

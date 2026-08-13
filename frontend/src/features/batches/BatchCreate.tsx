@@ -40,8 +40,8 @@ const initial = {
   delete: false, contents: false, direct: false,
   openNoatime: false, batchFiles: "", bufsize: "", chmod: "", chown: "",
   // 실행 제어: priority "" = "(정책 기본)" = 바디에서 생략(null≠0).
-  // nodeCount "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
-  priority: "", nodeCount: "", mc: 2, note: "",
+  // nodeCount/procsPerNode "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
+  priority: "", nodeCount: "", procsPerNode: "", mc: 2, note: "",
   // 소유자 기록: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자). 특권 여부와
   // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
@@ -87,12 +87,14 @@ export function BatchCreate() {
     ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 또는 cocoa.song:mig)" : null;
   // 1..64 는 서버 위생 상한(1024)의 보수적 부분집합 — 실제 캡은 정책 max_nodes.
   const nodeCountError = intFieldError("노드 수", f.nodeCount, 1, 64);
+  // 노드당 프로세스 수도 같은 부분집합 — 실제 캡은 정책 procs_per_node(min).
+  const procsPerNodeError = intFieldError("노드당 프로세스 수", f.procsPerNode, 1, 64);
   const mcError = !Number.isInteger(f.mc) || f.mc < 1 || f.mc > 64
     ? "동시 실행 상한은 1..64 범위의 정수여야 합니다" : null;
   const controlsInvalid = verboseQuietConflict || topKError !== null
     || batchFilesError !== null || bufsizeError !== null
     || chmodError !== null || chownError !== null
-    || nodeCountError !== null || mcError !== null;
+    || nodeCountError !== null || procsPerNodeError !== null || mcError !== null;
 
   const blocked = create.isPending || !itemsValid || controlsInvalid || storagesQ.isError;
 
@@ -155,6 +157,8 @@ export function BatchCreate() {
       // 미지정("")은 키 자체를 생략한다 — 서버 NULL(정책 기본), null≠0.
       ...(f.priority !== "" && { priority: f.priority }),
       ...(f.nodeCount.trim() !== "" && { node_count: Number(f.nodeCount.trim()) }),
+      ...(f.procsPerNode.trim() !== ""
+          && { procs_per_node: Number(f.procsPerNode.trim()) }),
       // 소유자 기록: 빈값은 키 생략 = 서버 NULL(기본: 생성자) — 특권 게이트는
       // owner 유무와 무관하게 항상 발동한다(통일 게이트).
       ...(f.ownerUsername.trim() !== "" && { owner_username: f.ownerUsername.trim() }),
@@ -426,10 +430,20 @@ export function BatchCreate() {
               <input aria-label="노드 수" type="number" min={1} max={64} className={field}
                      placeholder="비우면 정책 기본"
                      value={f.nodeCount} onChange={on("nodeCount")} />
-              {/* "정책 기본"의 실값 — 잡 하나가 몇 노드로 퍼지는가 */}
+              {/* "정책 기본"의 실값 — 잡 하나가 몇 노드로 퍼지는가. "노드당
+                  P프로세스"까지 병기돼 있어 아래 노드당 프로세스 수 입력과도 짝이다 */}
               <p className="text-muted text-xs mt-1">{policyCaption}</p>
             </label>
             {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
+
+            <label className="text-sm block">노드당 프로세스 수 (1..64, 빈값 = 정책 기본)
+              <input aria-label="노드당 프로세스 수" type="number" min={1} max={64}
+                     className={field} placeholder="비우면 정책 기본"
+                     value={f.procsPerNode} onChange={on("procsPerNode")} />
+              {/* 실값 캡션은 위 policyCaption 이 이미 "노드당 P프로세스"를 보여준다.
+                  요청은 정책을 줄일 수만 있다(planner min-캡) — 늘리려면 정책 수정 */}
+            </label>
+            {procsPerNodeError && <p className="text-bad text-sm">{procsPerNodeError}</p>}
 
             <label className="text-sm block">동시 실행 상한 (1..64)
               <input aria-label="동시 실행 상한" type="number" min={1} max={64} className={field}
@@ -478,6 +492,10 @@ export function BatchCreate() {
                   <div className="flex gap-2">
                     <dt className="w-28 shrink-0 text-muted">노드 수</dt>
                     <dd>{body.node_count ?? "(정책 기본)"}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-28 shrink-0 text-muted">노드당 프로세스</dt>
+                    <dd>{body.procs_per_node ?? "(정책 기본)"}</dd>
                   </div>
                   {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관), 소유자
                       기록 행은 값이 있을 때만(빈값 = 생성자 기본) */}

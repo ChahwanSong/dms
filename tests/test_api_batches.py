@@ -100,6 +100,35 @@ def test_create_without_priority_node_count_stores_null(client):
     assert b["priority"] is None and b["node_count"] is None
 
 
+# --- 노드당 프로세스 수 override: node_count 배선 관례의 미러 ---
+
+def test_create_with_procs_per_node(client):
+    _admin(client)
+    r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 2,
+        "options": {}, "note": None, "procs_per_node": 4,
+        "items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 202
+    b = client.app.state.repos.batches.get(r.json()["batch_id"])
+    assert b["procs_per_node"] == 4
+
+
+def test_create_rejects_bad_procs_per_node(client):
+    _admin(client)
+    r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "procs_per_node": 0,
+        "items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 422 and r.json()["detail"] == "invalid_procs_per_node"
+
+
+def test_create_without_procs_per_node_stores_null(client):
+    _admin(client)
+    r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 202  # 기존 바디 무수정 호환(옵션 필드)
+    # null(모름) ≠ 0 — 미지정은 NULL(정책 기본)
+    assert client.app.state.repos.batches.get(r.json()["batch_id"])["procs_per_node"] is None
+
+
 def test_confirm_requires_previewready(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,

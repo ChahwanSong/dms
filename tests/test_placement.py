@@ -187,6 +187,36 @@ def test_fanout_requested_caps_sync_per_side():
     assert out["node_count"] == 2 and out["process_count"] == 16
 
 
+# --- requested_procs_per_node min-캡: requested_node_count 와 같은 규칙의 미러 ---
+
+def test_fanout_requested_procs_per_node_caps_below_policy():
+    out = resolve_fanout(POLICY, {"primary": ["n1", "n2", "n3", "n4", "n5"]},
+                         priority="mid", requested_procs_per_node=4)
+    assert out["node_count"] == 3 and out["process_count"] == 12
+
+
+def test_fanout_requested_procs_above_policy_policy_wins():
+    # 요청은 정책을 줄일 수만 있다 — DB 변조로도 정책 초과 불가
+    out = resolve_fanout(POLICY, {"primary": ["n1", "n2", "n3", "n4", "n5"]},
+                         priority="mid", requested_procs_per_node=16)
+    assert out["node_count"] == 3 and out["process_count"] == 24
+
+
+def test_fanout_requested_procs_none_keeps_policy_behavior():
+    out = resolve_fanout(POLICY, {"primary": ["n1", "n2", "n3", "n4", "n5"]},
+                         priority="mid", requested_procs_per_node=None)
+    assert out["node_count"] == 3 and out["process_count"] == 24
+
+
+def test_fanout_requested_procs_caps_sync_both_sides():
+    # sync 도 per_node 는 한 자리(양면 공용) — process_count 산식에 그대로 반영
+    out = resolve_fanout(POLICY, {"source": ["n1", "n2", "n3", "n4"],
+                                  "destination": ["n5", "n6"]},
+                         priority="low", requested_procs_per_node=2)
+    assert out["source_count"] == 3 and out["destination_count"] == 2
+    assert out["node_count"] == 5 and out["process_count"] == 10
+
+
 def test_missing_and_disabled_policy():
     with pytest.raises(PlacementError) as e:
         resolve_fanout(None, {"primary": ["n1"]}, priority="mid")

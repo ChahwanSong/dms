@@ -197,10 +197,17 @@ class Planner:
                 not isinstance(requested, int) or isinstance(requested, bool)
                 or requested < 1):
             return self._reject(rid, "invalid_node_count")
+        # procs_per_node 도 같은 방어 — 있는데 비정상이면 fail-closed 거부.
+        requested_ppn = payload.get("procs_per_node")
+        if requested_ppn is not None and (
+                not isinstance(requested_ppn, int) or isinstance(requested_ppn, bool)
+                or requested_ppn < 1):
+            return self._reject(rid, "invalid_procs_per_node")
         try:
             fanout = resolve_fanout(policy, placement["candidates"],
                                     priority=req["priority"],
-                                    requested_node_count=requested)
+                                    requested_node_count=requested,
+                                    requested_procs_per_node=requested_ppn)
         except PlacementError as exc:
             return self._reject(rid, exc.reason_code)
         # 6b. 요청 노드 수 유예 내 대기(A'): planner 는 적격 >= 1 이면 즉시 계획하는데,

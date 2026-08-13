@@ -43,6 +43,17 @@ def test_batch_node_count_flows_to_child_payload(db):
     it = repos.batches.list_items(bid)[0]
     assert repos.requests.get(it["request_id"])["payload"]["node_count"] == 4
 
+def test_batch_procs_per_node_flows_to_child_payload(db):
+    # 노드당 프로세스 수 override: node_count 와 같은 build 후 주입 관례의 미러
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running",
+        procs_per_node=4)
+    _orch(db).run_once()
+    it = repos.batches.list_items(bid)[0]
+    assert repos.requests.get(it["request_id"])["payload"]["procs_per_node"] == 4
+
 def test_batch_without_controls_keeps_legacy_child_shape(db):
     repos = Repositories(db)
     bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
@@ -51,7 +62,8 @@ def test_batch_without_controls_keeps_legacy_child_shape(db):
     _orch(db).run_once()
     it = repos.batches.list_items(bid)[0]
     req = repos.requests.get(it["request_id"])
-    assert "node_count" not in req["payload"]   # 미지정 = 키 부재(null≠0)
+    assert "node_count" not in req["payload"]        # 미지정 = 키 부재(null≠0)
+    assert "procs_per_node" not in req["payload"]    # 미지정 = 키 부재(null≠0)
     assert req["priority"] == "mid"             # 정책 없음 폴백(기존 경로)
 
 # --- 배치 특권 실행: owner_username·auth_method 의 자식 상속 ---

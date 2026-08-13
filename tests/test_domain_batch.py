@@ -82,3 +82,15 @@ def test_validate_batch_node_count():
         assert exc.value.reason_code == "invalid_node_count"
     validate_batch("scan", 3, [{"storage": "s1", "target": "a"}], node_count=None)
     validate_batch("scan", 3, [{"storage": "s1", "target": "a"}], node_count=4)
+
+
+# --- 노드당 프로세스 수 override: node_count 와 같은 규칙의 미러 ---
+
+def test_validate_batch_procs_per_node():
+    for bad in (0, True, "4", -1, 1025):
+        with pytest.raises(DomainValidationError) as exc:
+            validate_batch("scan", 3, [{"storage": "s1", "target": "a"}],
+                           procs_per_node=bad)
+        assert exc.value.reason_code == "invalid_procs_per_node"
+    validate_batch("scan", 3, [{"storage": "s1", "target": "a"}], procs_per_node=None)
+    validate_batch("scan", 3, [{"storage": "s1", "target": "a"}], procs_per_node=4)

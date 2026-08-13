@@ -86,6 +86,8 @@ export interface Batch {
   note: string | null; created_at: string;
   // 실행 제어(슬라이스 32). 옵션 필드 — 기존 fixture 무수정 컴파일. null = 정책 기본.
   priority?: string | null; node_count?: number | null;
+  // 노드당 프로세스 수 override — node_count 와 같은 계약(null/부재 = 정책 기본).
+  procs_per_node?: number | null;
   // 배치 특권 실행. null/부재 = 비특권 현행 — 화면은 있을 때만 표시한다.
   owner_username?: string | null;
 }

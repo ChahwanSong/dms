@@ -110,7 +110,8 @@ def _clamp_priority(requested, policy_max):
     return policy_max
 
 
-def resolve_fanout(policy, candidates, *, priority, requested_node_count=None):
+def resolve_fanout(policy, candidates, *, priority, requested_node_count=None,
+                   requested_procs_per_node=None):
     if policy is None:
         raise PlacementError("missing_policy")
     if not policy.get("enabled"):
@@ -122,6 +123,10 @@ def resolve_fanout(policy, candidates, *, priority, requested_node_count=None):
     if requested_node_count is not None:
         max_nodes = min(max_nodes, requested_node_count)
     per_node = policy["procs_per_node"]
+    # procs_per_node 도 같은 min-캡 — per_node 는 단면(primary)·양면(sync) 공용
+    # 자리라 process_count 산식 양쪽에 그대로 반영된다. None(미지정)은 정책값.
+    if requested_procs_per_node is not None:
+        per_node = min(per_node, requested_procs_per_node)
     clamped = _clamp_priority(priority, policy["max_priority"])
     common = {"queue": policy["queue"], "priority_class": PRIORITY_CLASS[clamped]}
     if "primary" in candidates:
