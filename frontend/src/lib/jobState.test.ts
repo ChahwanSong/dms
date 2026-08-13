@@ -1,4 +1,5 @@
-import { buildPillVariant, isTerminal, pillVariant, storagePillVariant, TERMINAL_STATES } from "./jobState";
+import { buildPillVariant, isTerminal, pillVariant, storagePillVariant,
+         REQUEST_TERMINAL_STATES, TERMINAL_STATES } from "./jobState";
 import { test, expect } from "vitest";
 
 test("terminal states", () => {
@@ -6,6 +7,11 @@ test("terminal states", () => {
     .forEach((s) => expect(isTerminal(s)).toBe(true));
   expect(isTerminal("Executing")).toBe(false);
   expect(TERMINAL_STATES.has("Succeeded")).toBe(true);
+  // 요청 전용 셋: Conflict 는 요청에만 있는 종단이다(domain.TERMINAL_REQUEST_STATES).
+  // 공유 TERMINAL_STATES 에 넣으면 잡 화면의 종단 판정까지 바뀌므로 분리(M5 관례).
+  expect(REQUEST_TERMINAL_STATES.has("Conflict")).toBe(true);
+  expect(REQUEST_TERMINAL_STATES.has("Succeeded")).toBe(true);
+  expect(TERMINAL_STATES.has("Conflict")).toBe(false);  // 잡 셋은 불변(회귀 못)
 });
 
 test("pill variant mapping: green=ok, red=bad, violet=busy", () => {

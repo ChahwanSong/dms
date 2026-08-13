@@ -1,8 +1,8 @@
-import { useRequests } from "../jobs/useJobs";
 import { useInfraMetrics, useJobMetrics } from "./useMetrics";
 import { NodeMetricsSection } from "./NodeMetricsSection";
 import { JobStatsSection } from "./JobStatsSection";
 import { QueueSection } from "./QueueSection";
+import { RecentRequestsSection } from "./RecentRequestsSection";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -34,7 +34,6 @@ const VERDICT_VARIANT: Record<string, PillVariant> = {
 };
 
 export function Dashboard() {
-  const reqs = useRequests();
   const jobsQ = useJobMetrics(24);
   const infraQ = useInfraMetrics();
   // 방어적 정규화 -- 배열 아닌 페이로드 하나가 화면을 죽이면 안 된다
@@ -47,7 +46,6 @@ export function Dashboard() {
   // 어느 한쪽이 null 이면 비교하지 않는다 -- 추측 금지(설계 §4).
   const drifted = (c: InfraComponent) =>
     c.image != null && c.manifest_image != null && c.image !== c.manifest_image;
-  const rs = Array.isArray(reqs.data) ? reqs.data : [];
   return (
     <section className="space-y-5">
       <h1 className="text-2xl font-bold">대시보드</h1>
@@ -57,63 +55,55 @@ export function Dashboard() {
         <MetricTile label="성공(24h)" value={kpi.succeeded} />
         <MetricTile label="실패(24h)" value={kpi.failed} />
       </div>
-      <div className="grid md:grid-cols-2 gap-4">
-        <Card>
-          <h2 className="font-medium mb-3">컴포넌트</h2>
-          <ul className="space-y-2 text-sm">
-            {components.map((c) => (
-              <li key={c.component} className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="shrink-0">{c.component}</span>
-                  <span className="text-muted text-xs truncate grow">
-                    {c.image ?? "—"}
-                  </span>
-                  {/* neutral 이다: 드리프트는 포탈 롤아웃 직후 반드시 생기는 정상
-                      상태이고, 같은 행의 bad 는 이미 verdict=failed 를 뜻한다.
-                      빨강을 겹치면 정상 롤아웃마다 "고장" 으로 오독돼 알람 피로가
-                      구조적으로 생긴다. 긴급함은 아래 문장(미래형 + 되돌림 결과)이
-                      진다 -- 배지는 눈을 그 문장으로 끌기만 하면 된다. */}
-                  {drifted(c) && <StatusPill state="드리프트" variant="neutral" />}
-                  <span className="text-xs tabular-nums shrink-0">
-                    {`${c.ready ?? "—"}/${c.desired ?? "—"}`}
-                  </span>
-                  <StatusPill state={c.verdict ?? "unknown"}
-                              variant={c.verdict ? VERDICT_VARIANT[c.verdict] : "neutral"} />
-                </div>
-                {/* 롤아웃이 성공(applied)해도 뜨는 줄이다 -- 고장이 아니라 "매니페스트가
-                    아직 옛 태그"라는 뜻이며, 문장은 그 결과(다음 apply의 되돌림)를
-                    미래형으로 말한다. 한 개의 템플릿 리터럴 = 한 개의 텍스트 노드. */}
-                {drifted(c) && (
-                  <p className="text-xs text-bad">
-                    {`매니페스트 ${c.manifest_image} — 다음 kubectl apply가 이 태그로 되돌립니다`}
-                  </p>
-                )}
-              </li>
-            ))}
-          </ul>
-          {jobImage?.live && jobImage?.manifest && jobImage.live !== jobImage.manifest && (
-            <p className="mt-3 text-xs text-bad">
-              {`잡 이미지 ${jobImage.live} · 매니페스트 ${jobImage.manifest} — 다음 kubectl apply가 매니페스트 값으로 되돌립니다`}
-            </p>
-          )}
-        </Card>
-        <Card>
-          <h2 className="font-medium mb-3">최근 작업</h2>
-          <ul className="space-y-2 text-sm">
-            {rs.slice(0, 6).map((r) => (
-              <li key={r.request_id} className="flex items-center justify-between">
-                <span>{r.request_id} · {r.operation}</span>
-                <StatusPill state={r.state} />
-              </li>
-            ))}
-          </ul>
-        </Card>
-      </div>
+      {/* 최근 작업 카드가 표로 커져 맨 아래(RecentRequestsSection)로 내려갔다 --
+          grid 에 홀로 남은 컴포넌트 카드는 md 반폭이 어색해 전폭으로 편다. */}
+      <Card>
+        <h2 className="font-medium mb-3">컴포넌트</h2>
+        <ul className="space-y-2 text-sm">
+          {components.map((c) => (
+            <li key={c.component} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="shrink-0">{c.component}</span>
+                <span className="text-muted text-xs truncate grow">
+                  {c.image ?? "—"}
+                </span>
+                {/* neutral 이다: 드리프트는 포탈 롤아웃 직후 반드시 생기는 정상
+                    상태이고, 같은 행의 bad 는 이미 verdict=failed 를 뜻한다.
+                    빨강을 겹치면 정상 롤아웃마다 "고장" 으로 오독돼 알람 피로가
+                    구조적으로 생긴다. 긴급함은 아래 문장(미래형 + 되돌림 결과)이
+                    진다 -- 배지는 눈을 그 문장으로 끌기만 하면 된다. */}
+                {drifted(c) && <StatusPill state="드리프트" variant="neutral" />}
+                <span className="text-xs tabular-nums shrink-0">
+                  {`${c.ready ?? "—"}/${c.desired ?? "—"}`}
+                </span>
+                <StatusPill state={c.verdict ?? "unknown"}
+                            variant={c.verdict ? VERDICT_VARIANT[c.verdict] : "neutral"} />
+              </div>
+              {/* 롤아웃이 성공(applied)해도 뜨는 줄이다 -- 고장이 아니라 "매니페스트가
+                  아직 옛 태그"라는 뜻이며, 문장은 그 결과(다음 apply의 되돌림)를
+                  미래형으로 말한다. 한 개의 템플릿 리터럴 = 한 개의 텍스트 노드. */}
+              {drifted(c) && (
+                <p className="text-xs text-bad">
+                  {`매니페스트 ${c.manifest_image} — 다음 kubectl apply가 이 태그로 되돌립니다`}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+        {jobImage?.live && jobImage?.manifest && jobImage.live !== jobImage.manifest && (
+          <p className="mt-3 text-xs text-bad">
+            {`잡 이미지 ${jobImage.live} · 매니페스트 ${jobImage.manifest} — 다음 kubectl apply가 매니페스트 값으로 되돌립니다`}
+          </p>
+        )}
+      </Card>
       <NodeMetricsSection />
       {/* 설계 §3: 「잡 통계」 앞 자립형 카드 -- 잡 통계와 달리 DB 가 아니라
           라이브 PodGroup 을 본다 */}
       <QueueSection />
       <JobStatsSection />
+      {/* 맨 아래(2026-08-13 조정): 표(200건·페이지네이션)로 커져 개요(KPI·컴포넌트·
+          큐·통계) 아래가 자리다. 위에 두면 스크롤 한 화면을 표가 다 먹는다. */}
+      <RecentRequestsSection />
     </section>
   );
 }

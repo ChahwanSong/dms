@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from ..domain import (
     DataJobState, DomainValidationError, Operation, PRIORITIES, RequestState,
@@ -109,9 +109,14 @@ def submit(body: RequestBody, request: Request,
 
 
 @router.get("/api/user/requests")
-def list_requests(request: Request, identity: Identity = Depends(require_user)):
+def list_requests(request: Request, identity: Identity = Depends(require_user),
+                  # 대시보드 「최근 작업」이 200을 요청한다. 서버가 1..200으로 캡한다
+                  # -- 무제한이면 전량 SELECT 가 화면 하나에 끌려 나온다. 범위 밖은
+                  # FastAPI 기본 422(이 라우터의 도메인 422 는 detail=사유코드지만,
+                  # 쿼리 파라미터 검증은 프레임워크 몫이라 굳이 흉내내지 않는다).
+                  limit: int = Query(50, ge=1, le=200)):
     requester = None if identity.role == "admin" else identity.actor
-    return request.app.state.repos.requests.list(requester_id=requester)
+    return request.app.state.repos.requests.list(requester_id=requester, limit=limit)
 
 
 @router.get("/api/user/requests/{request_id}")

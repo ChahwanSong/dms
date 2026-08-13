@@ -173,3 +173,24 @@ def test_request_detail_events_exactly_at_the_display_cap_is_not_truncated(clien
     assert body["events_truncated"] is False
     assert messages[0] == "boom0"
     assert messages[-1] == "boom99"
+
+
+def test_list_limit_param_is_honored_and_capped(client):
+    # 대시보드 「최근 작업」(2026-08-13 조정): 최근 200건을 요청한다. limit 은
+    # 쿼리 파라미터로 열되 서버가 1..200 으로 캡한다 -- 무제한이면 전량 SELECT 가
+    # 화면 하나에 끌려 나온다. 정렬은 commit_order DESC(최신 요청순, 기존 계약).
+    _login(client, "alice")
+    rids = []
+    for i in range(3):
+        rids.append(client.post("/api/user/requests", json={
+            "operation": "rm", "storage": "s1", "target": f"t{i}",
+            "options": {"recursive": True}}).json()["request_id"])
+    rows = client.get("/api/user/requests", params={"limit": 2}).json()
+    assert [r["request_id"] for r in rows] == [rids[2], rids[1]]  # 최신순 + limit
+    assert client.get("/api/user/requests", params={"limit": 0}).status_code == 422
+    assert client.get("/api/user/requests", params={"limit": 201}).status_code == 422
+    # 표시에 쓰는 필드가 응답에 실려 있다(SELECT * 계약의 명시화).
+    row = rows[0]
+    for field in ("requester_id", "operation", "state", "created_at",
+                  "updated_at", "payload"):
+        assert field in row, field

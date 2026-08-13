@@ -3,6 +3,13 @@ export const TERMINAL_STATES = new Set([
 ]);
 export const isTerminal = (s: string) => TERMINAL_STATES.has(s);
 
+// 요청 전용 종단 셋(대시보드 「완료시간」 판정): 요청에는 잡에 없는 종단 Conflict 가
+// 있다(domain.TERMINAL_REQUEST_STATES). 공유 TERMINAL_STATES 에 Conflict 를 넣으면
+// isTerminal 을 쓰는 잡 화면의 판정(상세 폴링 중지 등)까지 바뀌므로 buildPillVariant
+// 와 같은 이유(M5 관례)로 별도 셋을 둔다. PreviewExpired 는 요청 상태엔 없지만
+// 합집합에 남아도 요청 상태 문자열과 겹치지 않아 무해하다.
+export const REQUEST_TERMINAL_STATES = new Set([...TERMINAL_STATES, "Conflict"]);
+
 export type PillVariant = "ok" | "bad" | "busy" | "neutral";
 export function pillVariant(state: string): PillVariant {
   if (state === "Succeeded") return "ok";
