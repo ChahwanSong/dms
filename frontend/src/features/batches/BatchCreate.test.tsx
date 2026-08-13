@@ -155,6 +155,44 @@ test("특권 입력이 빈값이면 요약 행도 owner_username 키도 없다",
   expect(captured.body).not.toHaveProperty("owner_username");
 });
 
+// placeholder 계약(희미한 힌트): 각 입력에 실값과 혼동되지 않는 예시가 떠야 한다.
+// 경로 예시는 스토리지 기준 상대경로(선행 슬래시 없음) 형태 — 도메인 계약의 가시화.
+test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => {
+  renderPage();
+  await userEvent.click(next());                              // → 대상·항목
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  expect(screen.getByLabelText("1행 경로")).toHaveAttribute("placeholder", "예: team/projects");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
+  expect(screen.getByLabelText("CSV")).toHaveAttribute("placeholder", "team\nprojects/alpha");
+  await userEvent.click(next());                              // → 실행 제어
+  expect(screen.getByLabelText("top_k")).toHaveAttribute("placeholder", "예: 100");
+  expect(screen.getByLabelText("관리자 특권 실행(root)")).toHaveAttribute("placeholder", "예: cocoa.song");
+  expect(screen.getByLabelText("노드 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
+  expect(screen.getByLabelText("동시 실행 상한")).toHaveAttribute("placeholder", "예: 2");
+  expect(screen.getByLabelText("메모")).toHaveAttribute("placeholder", "예: 8월 정기 스캔");
+});
+
+test("placeholder 힌트(sync): 소스·목적지·CSV(2열 멀티라인)·고급 옵션", async () => {
+  renderPage();
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  await userEvent.click(next());                              // → 대상·항목
+  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
+  expect(screen.getByLabelText("1행 소스")).toHaveAttribute("placeholder", "예: team/dataset");
+  expect(screen.getByLabelText("1행 목적지")).toHaveAttribute("placeholder", "예: backup/dataset");
+  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
+  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
+  await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
+  expect(screen.getByLabelText("CSV")).toHaveAttribute(
+    "placeholder", "team/dataset,backup/dataset\nprojects/alpha,backup/alpha");
+  await userEvent.click(next());                              // → 실행 제어
+  expect(screen.getByLabelText("batch_files")).toHaveAttribute("placeholder", "예: 1000");
+  expect(screen.getByLabelText("bufsize")).toHaveAttribute("placeholder", "예: 1048576");
+  expect(screen.getByLabelText("chmod")).toHaveAttribute("placeholder", "예: D770,F660");
+  expect(screen.getByLabelText("chown")).toHaveAttribute("placeholder", "예: cocoa.song:mig");
+});
+
 test("파일 업로드: 로컬 FileReader 로 파싱해 테이블에 반영", async () => {
   renderPage();
   await userEvent.click(next());

@@ -234,11 +234,15 @@ export function BatchCreate() {
                 {rows.map((r, i) => (
                   <div key={i} className="flex items-center gap-2">
                     <span className="text-muted text-xs w-8 shrink-0">{i + 1}</span>
+                    {/* placeholder 예시는 스토리지 기준 상대경로(선행 슬래시 없음) —
+                        경로가 스토리지 루트 기준임을 힌트로 드러낸다 */}
                     <input aria-label={`${i + 1}행 ${f.op === "scan" ? "경로" : "소스"}`}
+                           placeholder={f.op === "scan" ? "예: team/projects" : "예: team/dataset"}
                            className={field} value={r.a}
                            onChange={(e) => setRow(i, "a", e.target.value)} />
                     {f.op === "sync" && (
-                      <input aria-label={`${i + 1}행 목적지`} className={field} value={r.b}
+                      <input aria-label={`${i + 1}행 목적지`} placeholder="예: backup/dataset"
+                             className={field} value={r.b}
                              onChange={(e) => setRow(i, "b", e.target.value)} />
                     )}
                     <Button type="button" variant="ghost" aria-label={`${i + 1}행 삭제`}
@@ -259,6 +263,9 @@ export function BatchCreate() {
                 <label className="text-sm block">
                   CSV ({f.op === "scan" ? "행당 경로 1개" : "행당 source,destination"})
                   <textarea aria-label="CSV" className={`${field} h-40 font-mono`}
+                            placeholder={f.op === "scan"
+                              ? "team\nprojects/alpha"
+                              : "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"}
                             value={csvText} onChange={(e) => setCsvText(e.target.value)} />
                 </label>
                 <Button type="button" variant="outline"
@@ -288,6 +295,7 @@ export function BatchCreate() {
               <>
                 <label className="text-sm block">top_k
                   <input aria-label="top_k" type="number" min={1} max={1000000}
+                         placeholder="예: 100"
                          className={field} value={f.topK} onChange={on("topK")} />
                 </label>
                 {topKError && <p className="text-bad text-sm">{topKError}</p>}
@@ -329,21 +337,25 @@ export function BatchCreate() {
                              onChange={on("openNoatime")} /> open_noatime
                     </label>
                     <label className="text-sm block">batch_files (1..1,000,000)
-                      <input aria-label="batch_files" className={field} value={f.batchFiles}
+                      <input aria-label="batch_files" placeholder="예: 1000"
+                             className={field} value={f.batchFiles}
                              onChange={on("batchFiles")} />
                     </label>
                     {batchFilesError && <p className="text-bad text-sm">{batchFilesError}</p>}
                     <label className="text-sm block">bufsize (바이트, 4096..1,073,741,824)
-                      <input aria-label="bufsize" className={field} value={f.bufsize}
+                      <input aria-label="bufsize" placeholder="예: 1048576"
+                             className={field} value={f.bufsize}
                              onChange={on("bufsize")} />
                     </label>
                     {bufsizeError && <p className="text-bad text-sm">{bufsizeError}</p>}
                     <label className="text-sm block">chmod (예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
-                      <input aria-label="chmod" className={field} value={f.chmod} onChange={on("chmod")} />
+                      <input aria-label="chmod" placeholder="예: D770,F660"
+                             className={field} value={f.chmod} onChange={on("chmod")} />
                     </label>
                     {chmodError && <p className="text-bad text-sm">{chmodError}</p>}
                     <label className="text-sm block">chown (user:group)
-                      <input aria-label="chown" className={field} value={f.chown} onChange={on("chown")} />
+                      <input aria-label="chown" placeholder="예: cocoa.song:mig"
+                             className={field} value={f.chown} onChange={on("chown")} />
                     </label>
                     {chownError && <p className="text-bad text-sm">{chownError}</p>}
                     <p className="text-muted text-xs">
@@ -369,25 +381,29 @@ export function BatchCreate() {
                 라우트라 isAdmin 분기가 불필요하다 — 인가의 최종 심판은 서버 게이트
                 (403 privileged_not_authorized). */}
             <label className="text-sm block">관리자 특권 실행(root)
-              <input aria-label="관리자 특권 실행(root)" className={field}
+              <input aria-label="관리자 특권 실행(root)" placeholder="예: cocoa.song"
+                     className={field}
                      value={f.ownerUsername} onChange={on("ownerUsername")} />
               <p className="text-muted text-xs mt-1">root로 실행되며, 입력한 사용자는 소유자로 기록됩니다</p>
             </label>
 
             <label className="text-sm block">노드 수 (1..64, 빈값 = 정책 기본)
               <input aria-label="노드 수" type="number" min={1} max={64} className={field}
+                     placeholder="비우면 정책 기본"
                      value={f.nodeCount} onChange={on("nodeCount")} />
             </label>
             {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
 
             <label className="text-sm block">동시 실행 상한 (1..64)
               <input aria-label="동시 실행 상한" type="number" min={1} max={64} className={field}
+                     placeholder="예: 2"
                      value={f.mc} onChange={(e) => setF({ ...f, mc: Number(e.target.value) })} />
             </label>
             {mcError && <p className="text-bad text-sm">{mcError}</p>}
 
             <label className="text-sm block">메모
-              <input aria-label="메모" className={field} value={f.note} onChange={on("note")} />
+              <input aria-label="메모" placeholder="예: 8월 정기 스캔"
+                     className={field} value={f.note} onChange={on("note")} />
             </label>
           </div>
         )}
