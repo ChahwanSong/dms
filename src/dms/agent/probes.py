@@ -110,13 +110,24 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access):
 
 def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
                      net_dev_path="/proc/net/dev", virtual_net_path=""):
-    metrics = {"load1": None, "load5": None, "load15": None,
+    metrics = {"load1": None, "load5": None, "load15": None, "cpu_count": None,
                "memory_total_kb": None, "memory_available_kb": None,
                "disks": [], "network_rx_bytes": None, "network_tx_bytes": None}
     try:
         parts = read_text("/proc/loadavg").split()
         metrics["load1"], metrics["load5"], metrics["load15"] = (
             float(parts[0]), float(parts[1]), float(parts[2]))
+    except Exception:
+        pass
+    try:
+        # 대시보드 load 차트의 상한(코어 수). "processor" 키 라인 수 = 논리 CPU 수.
+        # /proc/cpuinfo 는 loadavg/meminfo 처럼 netns 와 무관한 호스트 값이라 파드
+        # 안에서 기본 경로 그대로 읽는다(추가 마운트 불필요). 라인이 0개면 서식이
+        # 예상 밖인 것 -- 0 코어는 존재할 수 없으니 None(모름)을 유지한다.
+        count = sum(1 for line in read_text("/proc/cpuinfo").splitlines()
+                    if line.partition(":")[0].strip() == "processor")
+        if count > 0:
+            metrics["cpu_count"] = count
     except Exception:
         pass
     try:

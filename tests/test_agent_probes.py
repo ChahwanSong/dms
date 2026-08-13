@@ -287,6 +287,39 @@ def test_probe_os_metrics_with_failures_are_soft():
     out = probe_os_metrics([], read_text=broken, statvfs=lambda p: Vfs())
     assert out["load1"] is None and out["memory_total_kb"] is None
     assert out["network_rx_bytes"] is None and out["disks"] == []
+    # cpuinfo 도 같은 fail-soft: 못 읽으면 0 이 아니라 None(모름)
+    assert out["cpu_count"] is None
+
+
+# x86 /proc/cpuinfo 실물 축약(테스트베드 워커 2코어 형상): 코어마다 "processor" 로
+# 시작하는 키-값 블록이 반복된다. loadavg/meminfo 처럼 네트워크 네임스페이스와
+# 무관한 호스트 값이라 파드 안에서 기본 경로 그대로 읽는다.
+CPUINFO = """\
+processor\t: 0
+vendor_id\t: GenuineIntel
+model name\t: Intel(R) Xeon(R) CPU E5-2680
+processor\t: 1
+vendor_id\t: GenuineIntel
+model name\t: Intel(R) Xeon(R) CPU E5-2680
+"""
+
+
+def test_probe_os_metrics_counts_cpus_from_cpuinfo():
+    # 대시보드 load 차트의 상한(코어 수) 데이터 -- "processor" 키 라인 수가 곧
+    # 논리 CPU 수다(ARM 계열도 processor 라인 자체는 공통).
+    files = {"/proc/loadavg": LOADAVG, "/proc/meminfo": MEMINFO,
+             "/proc/net/dev": NETDEV, "/proc/cpuinfo": CPUINFO}
+    out = probe_os_metrics([], read_text=lambda p: files[p], statvfs=lambda p: None)
+    assert out["cpu_count"] == 2
+
+
+def test_probe_os_metrics_cpuinfo_without_processor_lines_is_unknown():
+    # 0 코어는 존재할 수 없는 값이다 -- processor 라인이 하나도 없으면 서식이
+    # 예상 밖인 것이므로 0(거짓 정상값)이 아니라 None(모름)으로 낸다.
+    files = {"/proc/loadavg": LOADAVG, "/proc/meminfo": MEMINFO,
+             "/proc/net/dev": NETDEV, "/proc/cpuinfo": "flags\t: fpu vme\n"}
+    out = probe_os_metrics([], read_text=lambda p: files[p], statvfs=lambda p: None)
+    assert out["cpu_count"] is None
 
 
 def test_probe_os_metrics_reads_injected_net_dev_path():

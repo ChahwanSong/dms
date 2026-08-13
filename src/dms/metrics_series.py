@@ -94,6 +94,9 @@ def build_node_points(samples: list[dict]) -> list[dict]:
             dt = t - prev_t
             net_rx = _rate(prev_rx, rx, dt)
             net_tx = _rate(prev_tx, tx, dt)
+        # os.cpu_count 는 여기 싣지 않는다: 코어 수는 사실상 불변이라 프론트가
+        # 최신 리포트(/api/admin/nodes 의 report.os.cpu_count)에서 읽으면 충분하고,
+        # 포인트마다 실으면 시계열 응답 폭만 는다.
         points.append({
             "at": sample["reported_at"],
             "load1": _num(os_block.get("load1")),
