@@ -219,10 +219,34 @@ def resolve_priority(repos, operation: str, requested: str | None) -> str:
     return (policy or {}).get("default_priority") or "mid"
 
 
-def validate_batch(operation, max_concurrency, items) -> None:
+def validate_batch(operation, max_concurrency, items, *,
+                   priority: str | None = None,
+                   node_count: int | None = None) -> None:
     if operation not in (Operation.SCAN.value, Operation.SYNC.value):
         raise DomainValidationError("invalid_batch_operation", operation)
-    if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool) or max_concurrency < 1:
+    # 상한 64: 임의 위생값(거대값이면 orchestrator 가 전 item 을 한 틱에 materialize).
+    if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool) \
+            or not 1 <= max_concurrency <= 64:
         raise DomainValidationError("invalid_max_concurrency")
     if not items:
         raise DomainValidationError("empty_batch")
+    # 단일 스토리지 강제: legacy 운영 관례 — 한 배치는 한 스토리지 대상이 정상이고,
+    # 행별 혼합은 오입력(CSV 열 밀림 등) 신호다. 누락 storage(None)는 이후 item 별
+    # build_data_payload 의 missing_storage 가 잡는다 — 여기서는 종류 수만 본다.
+    if operation == Operation.SYNC.value:
+        pairs = {((i or {}).get("source_storage"), (i or {}).get("destination_storage"))
+                 for i in items}
+        if len(pairs) > 1:
+            raise DomainValidationError("batch_storage_mixed", f"{sorted(map(str, pairs))}")
+    else:
+        storages = {(i or {}).get("storage") for i in items}
+        if len(storages) > 1:
+            raise DomainValidationError("batch_storage_mixed", f"{sorted(map(str, storages))}")
+    if priority is not None and priority not in PRIORITIES:
+        raise DomainValidationError("invalid_priority", priority)
+    # node_count 상한 1024 는 API 위생 상한일 뿐 — 실제 상한은 planner 가
+    # min(정책 max_nodes, 요청값) 으로 캡한다(요청은 정책을 줄일 수만 있다).
+    if node_count is not None and (
+            not isinstance(node_count, int) or isinstance(node_count, bool)
+            or not 1 <= node_count <= 1024):
+        raise DomainValidationError("invalid_node_count", repr(node_count))
