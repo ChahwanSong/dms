@@ -69,7 +69,7 @@ spec:
       serviceAccountName: dms-agent
       containers:
         - name: agent
-          image: pkg-01:5000/dms-agent:d35
+          image: pkg-01:5000/dms-agent:d46
           imagePullPolicy: IfNotPresent
           # agent-entrypoint.sh brings up nslcd (LDAP NSS) then execs `dms agent`
           command: ["/usr/local/bin/agent-entrypoint.sh"]
