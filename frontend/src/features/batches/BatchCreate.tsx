@@ -5,6 +5,8 @@ import type { CreateBatchBody } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv } from "../../lib/csv";
 import type { ScanRow, SyncRow } from "../../lib/csv";
 import { useUserStorages } from "../storages/useUserStorages";
+import { usePolicies } from "../policies/usePolicies";
+import type { Policy } from "../../lib/types";
 import { StoragePicker, field } from "../jobs/formFields";
 import { CHMOD_RE, CHOWN_RE, intFieldError } from "../jobs/optionRules";
 import { Card } from "../../components/ui/Card";
@@ -48,6 +50,7 @@ export function BatchCreate() {
   const nav = useNavigate();
   const create = useCreateBatch();
   const storagesQ = useUserStorages();
+  const policiesQ = usePolicies();          // 정책 기본값 캡션(표시 전용 배선)
   // 폼 값은 위저드 밖 단일 useState(SubmitJob 관례) — 스텝을 오가도 값이 보존된다.
   const [f, setF] = useState(initial);
   const [step, setStep] = useState(0);
@@ -80,7 +83,7 @@ export function BatchCreate() {
   const chmodError = f.op === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.op === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
-    ? "chown 형식이 올바르지 않습니다 (예: user:group)" : null;
+    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 또는 cocoa.song:mig)" : null;
   // 1..64 는 서버 위생 상한(1024)의 보수적 부분집합 — 실제 캡은 정책 max_nodes.
   const nodeCountError = intFieldError("노드 수", f.nodeCount, 1, 64);
   const mcError = !Number.isInteger(f.mc) || f.mc < 1 || f.mc > 64
@@ -91,6 +94,32 @@ export function BatchCreate() {
     || nodeCountError !== null || mcError !== null;
 
   const blocked = create.isPending || !itemsValid || controlsInvalid || storagesQ.isError;
+
+  // --- 정책 기본값 캡션(백엔드 무변경 — 표시 배선만) ---
+  // 도구→정책 키는 placement.py TOOL_TO_POLICY 의 미러: scan→"scan", sync→공존
+  // 노드가 있으면 "dsync", 없으면 "nsync" 폴백. 어느 쪽이 걸릴지는 런타임(노드
+  // 상태)에야 갈리므로 sync 는 둘 다 실값으로 병기한다. 로딩·부재·비활성은
+  // "—" 로 뭉개지 않고 그대로 말한다 — null(모름)≠0≠실패. 비활성 문구의 근거:
+  // resolve_fanout 이 PlacementError("policy_disabled") 로 잡 배치를 거부한다.
+  const fmtPolicy = (p: Policy | undefined) => p === undefined ? "미조회"
+    : `최대 ${p.max_nodes}노드 · 노드당 ${p.procs_per_node}프로세스${
+        p.enabled === 1 ? "" : " · 비활성(잡 배치 거부)"}`;
+  const policyCaption = (() => {
+    if (policiesQ.isLoading) return "정책 조회 중…";
+    if (policiesQ.data === undefined) return "정책 미조회 — 정책 목록을 불러오지 못했습니다";
+    const byTool = new Map(policiesQ.data.map((p) => [p.tool, p]));
+    if (f.op === "scan") {
+      const p = byTool.get("scan");
+      return p === undefined ? "정책 미조회 — scan 정책 행이 없습니다"
+        : `정책 기본: ${fmtPolicy(p)}`;
+    }
+    const dsync = byTool.get("dsync");
+    const nsync = byTool.get("nsync");
+    if (dsync === undefined && nsync === undefined)
+      return "정책 미조회 — dsync/nsync 정책 행이 없습니다";
+    return `정책 기본(dsync): ${fmtPolicy(dsync)} — 공존 노드가 없으면 `
+      + `nsync 정책(${fmtPolicy(nsync)})이 적용됩니다`;
+  })();
 
   function buildOptions(): Record<string, unknown> {
     const options: Record<string, unknown> = {};
@@ -353,15 +382,17 @@ export function BatchCreate() {
                              className={field} value={f.chmod} onChange={on("chmod")} />
                     </label>
                     {chmodError && <p className="text-bad text-sm">{chmodError}</p>}
-                    <label className="text-sm block">chown (user:group)
-                      <input aria-label="chown" placeholder="예: cocoa.song:mig"
+                    <label className="text-sm block">chown (user:group 또는 uid:gid)
+                      <input aria-label="chown" placeholder="예: 10003:10000 또는 cocoa.song:mig"
                              className={field} value={f.chown} onChange={on("chown")} />
                     </label>
                     {chownError && <p className="text-bad text-sm">{chownError}</p>}
+                    {/* 배치는 통일 게이트로 전부 특권(root) 실행 — 단건(SubmitJob)의
+                        비특권 함정 캡션은 여기선 거짓이라 싣지 않는다. 특권 실행의
+                        "비우면" 기본은 소스 소유권 보존(_auto_chown 무개입 분기). */}
                     <p className="text-muted text-xs">
-                      chown 을 지정하면 자동 chown 이 꺼집니다. 비특권 사용자가 타인 소유를
-                      지정하면 도구가 chown 권한이 없어 <strong>데이터는 복사되고 잡은 Failed 로
-                      끝납니다</strong>.
+                      비우면 원래 소유권 보존(특권 실행 기준). 지정하면 자동 chown 이 꺼지고
+                      목적지가 그 소유자로 기록됩니다.
                     </p>
                   </div>
                 </details>
@@ -393,6 +424,8 @@ export function BatchCreate() {
               <input aria-label="노드 수" type="number" min={1} max={64} className={field}
                      placeholder="비우면 정책 기본"
                      value={f.nodeCount} onChange={on("nodeCount")} />
+              {/* "정책 기본"의 실값 — 잡 하나가 몇 노드로 퍼지는가 */}
+              <p className="text-muted text-xs mt-1">{policyCaption}</p>
             </label>
             {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
 
@@ -400,6 +433,10 @@ export function BatchCreate() {
               <input aria-label="동시 실행 상한" type="number" min={1} max={64} className={field}
                      placeholder="예: 2"
                      value={f.mc} onChange={(e) => setF({ ...f, mc: Number(e.target.value) })} />
+              {/* 노드 수 캡션과 대구: 위는 잡 하나의 폭, 이것은 잡 몇 개를 나란히 */}
+              <p className="text-muted text-xs mt-1">
+                동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다.
+              </p>
             </label>
             {mcError && <p className="text-bad text-sm">{mcError}</p>}
 

@@ -16,8 +16,20 @@ const STORAGES = [
   { storage_name: "s2", backend_type: "gpfs", status: "Ready" },
 ];
 
-function renderPage() {
+// 도구별로 값을 다르게 — 캡션이 "그 정책의 실값"을 읽는지 구분하기 위해.
+const policyRow = (tool: string, max_nodes: number, procs_per_node: number) => ({
+  tool, max_nodes, procs_per_node, queue: "dms-data",
+  default_priority: "mid", max_priority: "high",
+  preview_timeout_seconds: null, execution_timeout_seconds: 3600,
+  enabled: 1, updated_at: "2026-08-05T00:00:00Z", updated_by: "admin",
+});
+const POLICIES = [
+  policyRow("scan", 4, 8), policyRow("dsync", 6, 4), policyRow("nsync", 2, 2),
+];
+
+function renderPage(policies: object[] = POLICIES) {
   server.use(http.get("/api/user/storages", () => HttpResponse.json(STORAGES)));
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(policies)));
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
@@ -195,7 +207,60 @@ test("placeholder 힌트(sync): 소스·목적지·CSV(2열 멀티라인)·고�
   expect(screen.getByLabelText("batch_files")).toHaveAttribute("placeholder", "예: 1000");
   expect(screen.getByLabelText("bufsize")).toHaveAttribute("placeholder", "예: 1048576");
   expect(screen.getByLabelText("chmod")).toHaveAttribute("placeholder", "예: D770,F660");
-  expect(screen.getByLabelText("chown")).toHaveAttribute("placeholder", "예: cocoa.song:mig");
+  expect(screen.getByLabelText("chown")).toHaveAttribute(
+    "placeholder", "예: 10003:10000 또는 cocoa.song:mig");
+});
+
+// 정책 기본값 실값 캡션(실행 제어): 도구→정책 키는 placement.py TOOL_TO_POLICY 의
+// 미러 — scan→"scan", sync→공존 노드면 "dsync", 없으면 "nsync" 폴백. 실값이 떠야
+// "빈값 = 정책 기본"이 값 있는 말이 된다. 미조회·비활성은 숨기지 않는다(null≠0).
+async function toScanControls() {
+  await userEvent.click(next());                              // 연산(scan) → 대상·항목
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(next());                              // → 실행 제어
+}
+
+test("정책 캡션(scan): scan 정책 실값이 노드 수 아래에 뜬다", async () => {
+  renderPage();
+  await toScanControls();
+  expect(await screen.findByText(
+    "정책 기본: 최대 4노드 · 노드당 8프로세스")).toBeInTheDocument();
+});
+
+test("정책 캡션(sync): dsync 실값 + nsync 폴백 실값 병기", async () => {
+  renderPage();
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
+  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
+  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
+  await userEvent.click(next());                              // → 실행 제어
+  expect(await screen.findByText(
+    "정책 기본(dsync): 최대 6노드 · 노드당 4프로세스 — 공존 노드가 없으면 "
+    + "nsync 정책(최대 2노드 · 노드당 2프로세스)이 적용됩니다")).toBeInTheDocument();
+});
+
+test("정책 행이 없으면 생략·'—' 대신 정직한 미조회 문구", async () => {
+  renderPage([]);
+  await toScanControls();
+  expect(await screen.findByText(
+    "정책 미조회 — scan 정책 행이 없습니다")).toBeInTheDocument();
+});
+
+test("정책 disabled 는 캡션에 그 사실이 표기된다", async () => {
+  renderPage([{ ...POLICIES[0], enabled: 0 }]);
+  await toScanControls();
+  expect(await screen.findByText(
+    "정책 기본: 최대 4노드 · 노드당 8프로세스 · 비활성(잡 배치 거부)")).toBeInTheDocument();
+});
+
+test("동시 실행 상한 캡션: 배치 항목(잡) 수 의미 — 노드 수와 무관", async () => {
+  renderPage();
+  await toScanControls();
+  expect(screen.getByText(
+    "동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다.")).toBeInTheDocument();
 });
 
 test("파일 업로드: 로컬 FileReader 로 파싱해 테이블에 반영", async () => {
