@@ -13,6 +13,9 @@ import { ApiError } from "../../lib/api";
 // field·StoragePicker 는 formFields.tsx 로 이사(슬라이스 31 T3) -- T4 위저드화 때
 // 이 파일이 통째로 갈려도 SubmitScan·ScanPaths 가 흔들리지 않게 결합을 끊었다.
 import { StoragePicker, field } from "./formFields";
+// 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError)는 optionRules.ts 로 이사(슬라이스 32
+// T8) -- BatchCreate 옵션 스텝과 공유한다(사본이면 미러가 발산한다).
+import { CHMOD_RE, CHOWN_RE, intFieldError } from "./optionRules";
 
 type Operation = "sync" | "rm";
 
@@ -30,22 +33,6 @@ const initial = {
   priority: "mid",
   ownerUsername: "",
 };
-
-// 서버 검증의 클라이언트 미러(즉답용) — 최종 심판은 서버 422 invalid_option 이다.
-// domain.py:112-113(_CHMOD_ITEM_RE 콤마 항목별 fullmatch·_CHOWN_RE)의 미러.
-const CHMOD_RE = /^[DF]?[0-7]{1,4}(,[DF]?[0-7]{1,4})*$/;
-const CHOWN_RE = /^([A-Za-z_][A-Za-z0-9._-]{0,63})?(:[A-Za-z_][A-Za-z0-9._-]{0,63})?$/;
-
-// 정수 범위 미러(domain.py:127-128 — batch_files 1..1,000,000 / bufsize 4096..1GiB).
-// 빈 문자열은 "미입력"(생략 대상)이라 오류가 아니다.
-function intFieldError(label: string, raw: string, lo: number, hi: number): string | null {
-  const v = raw.trim();
-  if (v === "") return null;
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < lo || n > hi)
-    return `${label}는 ${lo}..${hi} 범위의 정수여야 합니다`;
-  return null;
-}
 
 function checkedOptions(opts: Record<string, boolean>): Record<string, boolean> {
   return Object.fromEntries(Object.entries(opts).filter(([, v]) => v));
