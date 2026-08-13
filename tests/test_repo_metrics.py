@@ -10,11 +10,12 @@ def repos(db):
 def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
               storage="s1", dest_storage=None, requester="alice",
               reason_code=None, updated_at=None, files=None, nbytes=None,
-              wait=None, sched=None):
+              wait=None, sched=None, exec_at=None):
     """data_jobs 한 행을 원하는 상태·시각으로 심는다. set_job_state는 updated_at을
     현재 시각으로 찍으므로 창(window) 테스트가 불가능하다 -- 정상 경로로 만들고
     시각·상태만 UPDATE로 덮는다. wait 는 submit_wait_seconds, sched 는
-    sched_wait_seconds(둘 다 기본 NULL -- 기록 없음/진행 중과 같은 모양)."""
+    sched_wait_seconds, exec_at 은 exec_submitted_at(셋 다 기본 NULL --
+    기록 없음/진행 중과 같은 모양)."""
     rid = repos.requests.create(
         operation="scan", requester_id=requester, actor=requester,
         resource_key=f"k:{created_at}:{tool}:{state}:{requester}", payload={},
@@ -27,11 +28,12 @@ def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
     db.execute(
         """UPDATE data_jobs SET state = :st, reason_code = :rc, created_at = :c,
                updated_at = :u, files_count = :f, bytes_count = :b,
-               submit_wait_seconds = :w, sched_wait_seconds = :sw
+               submit_wait_seconds = :w, sched_wait_seconds = :sw,
+               exec_submitted_at = :x
            WHERE job_id = :j""",
         {"st": state, "rc": reason_code, "c": created_at,
          "u": updated_at or created_at, "f": files, "b": nbytes, "w": wait,
-         "sw": sched, "j": job_id})
+         "sw": sched, "x": exec_at, "j": job_id})
     return job_id
 
 
@@ -190,6 +192,74 @@ def test_job_stats_sched_wait_excludes_null_and_surfaces_the_gap(db, repos):
                                     end="2026-08-09T23:59:59Z")
     assert sorted(stats["sched_wait_seconds"]) == [5, 45]
     assert stats["sched_wait_excluded"] == 1
+
+
+def test_job_stats_exec_runtime_derived_from_anchor_pair(db, repos):
+    # 실행시간(슬라이스 31, 방법 A: 파생 계산 -- 스키마 무변경):
+    #   epoch(updated_at) - epoch(exec_submitted_at) - sched_wait_seconds.
+    # 종단 & 두 재료 NOT NULL 인 행만 표본이다. 비종단(Pending)은 "아직 실행 중"
+    # 이지 표본도 제외 건수도 아니다 -- duration_seconds 의 종단 한정과 같은 규칙.
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z",
+              exec_at="2026-08-09T01:00:20Z", sched=5,
+              updated_at="2026-08-09T01:01:25Z")          # 65 - 5 = 60
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", state="Pending",
+              exec_at="2026-08-09T02:00:10Z", sched=3)    # 비종단 -- 표본 아님
+    _seed_job(db, repos, created_at="2026-07-01T00:00:00Z",
+              exec_at="2026-07-01T00:00:01Z", sched=0)    # 창 밖
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert stats["exec_runtime_seconds"] == [60.0]
+    assert stats["exec_runtime_excluded"] == 0
+
+
+def test_job_stats_exec_runtime_excludes_missing_anchor_or_sched(db, repos):
+    # 제외(정직 카운트) = 종단인데 재료가 없는 잡: 슬라이스 20 이전 잡(앵커 NULL),
+    # 실행 미도달(preflight/preview 실패 -- 앵커 NULL), 첫 RUNNING 관측 전에 끝난
+    # 한 틱 완료 잡(sched NULL). sched_wait 캡션의 「집계 N건 · 제외 M건」 관례.
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z",
+              exec_at="2026-08-09T01:00:10Z", sched=2,
+              updated_at="2026-08-09T01:00:30Z")          # 표본: 20 - 2 = 18
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", state="Failed",
+              reason_code="preflight_failed")             # 앵커·sched 둘 다 NULL
+    _seed_job(db, repos, created_at="2026-08-09T03:00:00Z",
+              exec_at="2026-08-09T03:00:10Z")             # 한 틱 완료: sched NULL
+    _seed_job(db, repos, created_at="2026-08-09T04:00:00Z", sched=1)  # 앵커만 NULL
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert stats["exec_runtime_seconds"] == [18.0]
+    assert stats["exec_runtime_excluded"] == 3
+
+
+def test_job_stats_exec_runtime_zero_is_a_value_and_negative_folds_to_zero(db, repos):
+    # 0 = 첫 RUNNING 관측 틱에 종단까지 간 잡(정상값 -- 표본에 남는다). 음수
+    # (시계 스큐)는 record_sched_wait 규칙 그대로 0 으로 접는다 -- 1초 해상도
+    # 세계에서 0 이 정직하고, 행을 버리면 표본이 조용히 준다.
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z",
+              exec_at="2026-08-09T01:00:10Z", sched=0,
+              updated_at="2026-08-09T01:00:10Z")          # 정확히 0
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z",
+              exec_at="2026-08-09T02:00:10Z", sched=30,
+              updated_at="2026-08-09T02:00:20Z")          # 10 - 30 = -20 -> 0
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert stats["exec_runtime_seconds"] == [0.0, 0.0]
+    assert stats["exec_runtime_excluded"] == 0
+
+
+def test_job_stats_exec_runtime_drops_only_the_corrupt_timestamp_row(db, repos):
+    # 시각 파싱 실패(iso_epoch ValueError)는 지어내지 않고 그 행만 버린다 --
+    # duration_seconds 의 fail-soft 와 같은 규칙(NULL 이 아니라 제외 카운트에도
+    # 안 잡힌다: 손상은 결측이 아니라 오염이다).
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z",
+              exec_at="broken-timestamp", sched=1,
+              updated_at="2026-08-09T01:00:30Z")
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z",
+              exec_at="2026-08-09T02:00:10Z", sched=2,
+              updated_at="2026-08-09T02:00:15Z")          # 5 - 2 = 3
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert stats["exec_runtime_seconds"] == [3.0]
+    assert stats["exec_runtime_excluded"] == 0
 
 
 def test_job_stats_sched_wait_zero_is_counted_not_excluded(db, repos):

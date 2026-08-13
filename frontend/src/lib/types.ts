@@ -201,6 +201,11 @@ export interface NodeMetrics {
 }
 export interface StateCount { state: string; count: number }
 export interface BreakdownRow { count: number; succeeded: number; failed: number }
+// 숫자 요약(슬라이스 31): 평균/중앙값(p50)/p95. p50·p95 는 nearest-rank 실측값
+// (백엔드 summarize_seconds -- 보간 없음). 응답에서 null = 표본 없음(0 아님).
+export interface SecondsSummary {
+  mean_seconds: number; p50_seconds: number; p95_seconds: number;
+}
 export interface JobMetrics {
   window_hours: number; bucket: "hour" | "day";
   by_state: StateCount[];
@@ -209,7 +214,11 @@ export interface JobMetrics {
   by_requester: ({ requester_id: string } & BreakdownRow)[];
   failure_reasons: { reason_code: string; count: number }[];
   throughput: { bucket: string; count: number }[];
+  // duration = created_at -> updated_at 의 **전체 수명**(제출·확인(사람)·스케줄
+  // 대기 + 실행 전부 합산)이다 -- 화면 라벨은 「전체 수명 분포」(슬라이스 31
+  // 라벨 정직화). 필드명은 소비자 호환으로 유지한다.
   duration_histogram: { bucket: string; count: number }[];
+  duration_summary: SecondsSummary | null;
   // 제출 대기(슬라이스 17): created_at -> 첫 비-Pending 전이. Volcano 큐 대기가
   // 아니라 DMS 내부 픽업 지연이다(설계 §2.4 -- 그래서 이름이 "제출 대기"다).
   // excluded = NULL(백필 불가분·아직 Pending)로 집계에서 빠진 건수.
@@ -224,6 +233,15 @@ export interface JobMetrics {
   sched_wait_histogram: { bucket: string; count: number }[];
   sched_wait_counted: number;
   sched_wait_excluded: number;
+  // 실행시간(슬라이스 31, 방법 A: 스키마 무변경 파생 계산): epoch(updated_at)
+  // - epoch(exec_submitted_at) - sched_wait_seconds = 첫 RUNNING 관측 -> 종단의
+  // **근사**(스테퍼 틱 오차 -- sched_wait 와 같은 규약). 버킷은 duration 과 같은
+  // 축(나란히 비교). excluded = 종단인데 재료 NULL 인 잡(슬라이스 20 이전 잡·
+  // 한 틱 완료·실행 미도달) -- 0 과 절대 같지 않다.
+  exec_runtime_histogram: { bucket: string; count: number }[];
+  exec_runtime_counted: number;
+  exec_runtime_excluded: number;
+  exec_runtime_summary: SecondsSummary | null;
   files_total: number | null; bytes_total: number | null;
 }
 export interface InfraComponent {

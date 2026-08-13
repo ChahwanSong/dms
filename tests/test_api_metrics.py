@@ -453,6 +453,43 @@ def test_metrics_jobs_sched_wait_distribution_and_counts(client, db):
     assert "sched_wait_seconds" not in body   # 원자료는 내보내지 않는다(duration 규칙)
 
 
+def test_metrics_jobs_exec_runtime_distribution_counts_and_summary(client, db):
+    # 실행시간(슬라이스 31): epoch(updated_at) - epoch(exec_submitted_at)
+    # - sched_wait_seconds 의 파생 계산. 버킷은 전체 수명(duration)과 같은 축 --
+    # 두 분포를 나란히 비교할 수 있어야 한다.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    rid = _seed_job(db, repos, created_at=iso_plus(now, -3600))
+    _seed_job(db, repos, created_at=iso_plus(now, -1800))     # 재료 NULL -> 제외
+    db.execute(
+        """UPDATE data_jobs SET exec_submitted_at = :x, sched_wait_seconds = 60,
+               updated_at = :u WHERE request_id = :r""",
+        {"x": iso_plus(now, -3000), "u": iso_plus(now, -2000), "r": rid})
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    hist = {b["bucket"]: b["count"] for b in body["exec_runtime_histogram"]}
+    assert list(hist) == ["<1m", "1-10m", "10-60m", "1-6h", "6-24h", ">24h"]
+    assert hist["10-60m"] == 1                # 1000 - 60 = 940초
+    assert body["exec_runtime_counted"] == 1
+    assert body["exec_runtime_excluded"] == 1  # 앵커 없는 종단 잡의 제외를 표면화
+    assert "exec_runtime_seconds" not in body  # 원자료는 내보내지 않는다(duration 규칙)
+    # 숫자 요약: 표본 1개면 평균=중앙값=p95. 원자료 없이 요약만 내려간다.
+    assert body["exec_runtime_summary"] == {
+        "mean_seconds": 940.0, "p50_seconds": 940.0, "p95_seconds": 940.0}
+    # 전체 수명 요약: 잡1 = 1600초(-3600 -> -2000), 잡2 = 0초(created=updated).
+    # p50/p95 는 nearest-rank 실측값(0, 1600) -- 보간하지 않는다.
+    assert body["duration_summary"] == {
+        "mean_seconds": 800.0, "p50_seconds": 0.0, "p95_seconds": 1600.0}
+
+
+def test_metrics_jobs_summaries_are_null_without_samples(client):
+    # 표본 없음은 null -- 0 요약으로 뭉개면 "즉시 끝났다"는 거짓말이 된다.
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    assert body["duration_summary"] is None
+    assert body["exec_runtime_summary"] is None
+    assert body["exec_runtime_counted"] == 0
+    assert body["exec_runtime_excluded"] == 0
+
+
 def test_metrics_jobs_sched_wait_zero_counts_toward_the_total(client, db):
     # 라우트 층의 falsy 함정(submit_wait 선례 그대로): counted 를
     # `len([w for w in ws if w])` 로 세거나 원자료를 truthy 로 거르면 0(같은 틱

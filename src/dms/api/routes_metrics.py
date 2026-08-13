@@ -10,7 +10,8 @@ from ..db import iso_epoch, iso_plus, utc_now_iso
 from ..manifest_tags import manifest_images, manifest_job_image
 from ..metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
                               bucket_chars_for, build_node_points,
-                              clamp_window_hours, duration_histogram)
+                              clamp_window_hours, duration_histogram,
+                              summarize_seconds)
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
 from ..rollout_status import assess_daemonset, assess_deployment
 from .auth import require_admin
@@ -58,8 +59,20 @@ def metrics_jobs(request: Request, window: int = Query(default=24)):
     chars = bucket_chars_for(hours)
     stats = repos.metrics.job_stats(start=start, end=end, bucket_chars=chars)
     # 원자료(초 목록)는 응답에 싣지 않는다 -- 프론트가 필요로 하는 것은 분포뿐이고,
-    # 창이 크면 행 수만큼 커진다.
-    stats["duration_histogram"] = duration_histogram(stats.pop("duration_seconds"))
+    # 창이 크면 행 수만큼 커진다. 숫자 요약(평균/중앙값/p95, 슬라이스 31)도 같은
+    # 이유로 여기서 접어 내린다 -- 원자료 없이 요약만. 표본 없으면 null(0 아님).
+    durations = stats.pop("duration_seconds")
+    stats["duration_histogram"] = duration_histogram(durations)
+    stats["duration_summary"] = summarize_seconds(durations)
+    # 실행시간 분포(슬라이스 31): repo 가 파생 계산한 원자료를 duration 과 같은
+    # 버킷으로 접는다(전체 수명과 같은 축 -- 두 분포를 나란히 비교). counted 는
+    # len() 그대로(0 = 첫 관측 틱에 종단까지 간 정상값이 truthy 필터로 새면 안
+    # 된다). excluded(앵커 없음·한 틱 완료·실행 미도달)는 repo 카운트 그대로
+    # 통과 -- 도입 직후 "집계 0건 · 제외 N건"이 정상 표시다(sched_wait 선례).
+    exec_runtimes = stats.pop("exec_runtime_seconds")
+    stats["exec_runtime_counted"] = len(exec_runtimes)
+    stats["exec_runtime_histogram"] = duration_histogram(exec_runtimes)
+    stats["exec_runtime_summary"] = summarize_seconds(exec_runtimes)
     # 제출 대기 분포(슬라이스 17): duration 과 같은 이유로 원자료 대신 분포만.
     # counted 는 NULL 제외 후 집계 대상 건수 -- excluded 와 함께 내 화면이 백필
     # 공백을 숨기지 못하게 한다(설계 §3). len() 그대로다: 0(같은 초 픽업)을 걸러

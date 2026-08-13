@@ -5,7 +5,7 @@ import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { BarChart, r2 } from "../../components/ui/BarChart";
 import { reasonText } from "../../lib/api";
-import type { BreakdownRow, JobMetrics, StateCount } from "../../lib/types";
+import type { BreakdownRow, JobMetrics, SecondsSummary, StateCount } from "../../lib/types";
 
 const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
 
@@ -82,6 +82,36 @@ function humanBytes(bytes: number | null): string {
   return `${bytes} B`;
 }
 
+// humanBytes 와 같은 국소 헬퍼(공용 모듈은 이르다) -- 요약 수치(초)를 사람
+// 단위로. 후행 .0 은 소음이라 떨군다("1.0h" 아닌 "1h").
+const fmt1 = (n: number) => {
+  const s = n.toFixed(1);
+  return s.endsWith(".0") ? s.slice(0, -2) : s;
+};
+export function humanSeconds(s: number | null | undefined): string {
+  // null/undefined = 표본 없음 -- 0("0s", 즉시 종료라는 정상값)과 뭉개지 않는다.
+  if (s === null || s === undefined || !Number.isFinite(s)) return "—";
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${fmt1(s / 60)}m`;
+  if (s < 86400) return `${fmt1(s / 3600)}h`;
+  return `${fmt1(s / 86400)}d`;
+}
+
+// 숫자 요약 한 행. summary 가 null(표본 없음)이면 세 칸 전부 "—" -- 0 요약으로
+// 뭉개면 "즉시 끝났다"는 거짓말이 된다(null ≠ 0 규약).
+function SummaryRow({ name, summary }: {
+  name: string; summary: SecondsSummary | null | undefined;
+}) {
+  return (
+    <tr className="border-t border-black/5">
+      <td className="py-1">{name}</td>
+      <td>{humanSeconds(summary?.mean_seconds ?? null)}</td>
+      <td>{humanSeconds(summary?.p50_seconds ?? null)}</td>
+      <td>{humanSeconds(summary?.p95_seconds ?? null)}</td>
+    </tr>
+  );
+}
+
 // "2026-08-09T01" -> "01시", "2026-08-09" -> "08-09"
 function bucketLabel(bucket: string, kind: "hour" | "day"): string {
   return kind === "hour" ? `${bucket.slice(11, 13)}시` : bucket.slice(5);
@@ -129,6 +159,8 @@ export function JobStatsSection() {
     .map((b) => ({ label: b.bucket, value: b.count }));
   const schedWaits = asArray<{ bucket: string; count: number }>(d?.sched_wait_histogram)
     .map((b) => ({ label: b.bucket, value: b.count }));
+  const execRuntimes = asArray<{ bucket: string; count: number }>(d?.exec_runtime_histogram)
+    .map((b) => ({ label: b.bucket, value: b.count }));
   const reasons = asArray<{ reason_code: string; count: number }>(d?.failure_reasons);
   return (
     <Card>
@@ -140,29 +172,36 @@ export function JobStatsSection() {
       {/* 로딩 중(d 없음)은 "모름"이라 성공률 블록 자체를 내지 않는다 -- 착지 후
           종단 0건일 때만 "종단 잡 없음"(정상값)을 명시한다. */}
       {d && <SuccessRateBar byState={byState} />}
-      {/* 2×2 배치(슬라이스 20): 아래 행에 두 "대기" 분포가 나란히 온다 --
-          「제출 대기」(created_at→첫 비-Pending, DMS 픽업 지연)와 「스케줄
-          대기(Volcano)」(execution 제출→첫 RUNNING 관측)는 다른 것을 잰다(설계
-          §2.2). 4열로 눌러 넣으면 md 폭에서 차트가 읽히지 않아 2열 줄바꿈을
-          택했다. */}
+      {/* 2열 × 3행 배치(슬라이스 31): 위 행 처리량|전체 수명, 중간 행 두 "대기"
+          분포(제출 대기 = created_at→첫 비-Pending DMS 픽업 지연, 스케줄
+          대기(Volcano) = execution 제출→첫 RUNNING 관측 -- 다른 것을 잰다, 설계
+          §2.2), 아래 행 실행시간|숫자 요약. 4열로 눌러 넣으면 md 폭에서 차트가
+          읽히지 않아 2열 줄바꿈을 유지한다(슬라이스 20 결정). */}
       <div className="grid md:grid-cols-2 gap-4 mt-3">
         <div>
           <h3 className="font-medium mb-2 text-sm">처리량</h3>
           <BarChart data={throughput} label="처리량" />
         </div>
         <div>
-          <h3 className="font-medium mb-2 text-sm">수행시간 분포</h3>
-          <BarChart data={durations} label="수행시간 분포" />
+          {/* 라벨 정직화(슬라이스 31): created_at→updated_at 는 실행이 아니라
+              제출·확인(사람)·스케줄 대기까지 전부 합산한 수명이다 -- 「수행시간」
+              이라 부르면 실행이 느려 보인다(확인 대기 며칠이 그대로 실린다).
+              API 필드명(duration_histogram)은 소비자 호환으로 유지, 이름만 정직하게. */}
+          <h3 className="font-medium mb-2 text-sm">전체 수명 분포</h3>
+          <BarChart data={durations} label="전체 수명 분포" />
+          <p className="text-muted text-xs mt-1">
+            {`created_at→updated_at 전체 수명 — 제출·확인(사람)·스케줄 대기를 모두 포함합니다. 실행시간 분포가 순수 실행 구간입니다`}
+          </p>
         </div>
         <div>
           <h3 className="font-medium mb-2 text-sm">제출 대기 분포</h3>
           <BarChart data={submitWaits} label="제출 대기 분포" />
-          {/* 수행시간(created_at -> updated_at)은 이 대기를 포함한 전체 수명이다 --
-              나란히 놓인 두 분포의 포함 관계를 화면에 명시한다(설계 §2.4). 제외
-              건수(NULL)는 백필 공백 -- 숨기지 않는다(설계 §3). 한 개의 템플릿
-              리터럴 = 한 개의 텍스트 노드(getByText 가 통으로 찾도록). */}
+          {/* 전체 수명(created_at -> updated_at)은 이 대기를 포함한다 -- 분포 간
+              포함 관계를 화면에 명시한다(설계 §2.4). 제외 건수(NULL)는 백필 공백
+              -- 숨기지 않는다(설계 §3). 한 개의 템플릿 리터럴 = 한 개의 텍스트
+              노드(getByText 가 통으로 찾도록). */}
           <p className="text-muted text-xs mt-1">
-            {`집계 ${d?.submit_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.submit_wait_excluded ?? 0}건 — 수행시간 분포는 이 대기를 포함합니다`}
+            {`집계 ${d?.submit_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.submit_wait_excluded ?? 0}건 — 전체 수명 분포는 이 대기를 포함합니다`}
           </p>
         </div>
         <div>
@@ -176,6 +215,38 @@ export function JobStatsSection() {
               "데이터 없음"으로 거짓말하지 않는다(설계 §2.6). */}
           <p className="text-muted text-xs mt-1">
             {`집계 ${d?.sched_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.sched_wait_excluded ?? 0}건 — 제출 대기(DMS 픽업 지연)와 달리 Volcano 큐 대기의 근사입니다(스테퍼 틱 5초 오차)`}
+          </p>
+        </div>
+        <div>
+          <h3 className="font-medium mb-2 text-sm">실행시간 분포</h3>
+          <BarChart data={execRuntimes} label="실행시간 분포" />
+          {/* 실행시간 = updated_at − exec_submitted_at − sched_wait 의 파생 계산
+              (스키마 무변경, 슬라이스 31) -- 순수 실행 구간의 근사다. sched_wait
+              캡션 관례 그대로 집계/제외를 명시한다: 제외에는 앵커 없는 과거 잡
+              (슬라이스 20 이전)·첫 RUNNING 관측 전에 끝난 한 틱 완료·실행 미도달
+              (preflight/preview 실패)이 들어간다 -- 도입 직후 "집계 0건 · 제외
+              N건"이 정상이고, 이 수가 보여야 공백이 숨지 않는다. */}
+          <p className="text-muted text-xs mt-1">
+            {`집계 ${d?.exec_runtime_counted ?? 0}건 · 제외(앵커 없음·한 틱 완료·실행 미도달) ${d?.exec_runtime_excluded ?? 0}건 — 첫 RUNNING 관측→종단의 근사입니다(스테퍼 틱 오차 ±10초)`}
+          </p>
+        </div>
+        <div>
+          <h3 className="font-medium mb-2 text-sm">숫자 요약</h3>
+          <Table>
+            <thead>
+              <tr className="text-muted">
+                <th className="py-1">구간</th><th>평균</th><th>중앙값</th><th>p95</th>
+              </tr>
+            </thead>
+            <tbody>
+              <SummaryRow name="전체 수명" summary={d?.duration_summary} />
+              <SummaryRow name="실행시간" summary={d?.exec_runtime_summary} />
+            </tbody>
+          </Table>
+          {/* p50/p95 는 백엔드 nearest-rank 실측값(보간 없음) -- 표본 없음(null)
+              은 위 SummaryRow 가 "—" 로 낸다(0 과 뭉개지 않는다). */}
+          <p className="text-muted text-xs mt-1">
+            각 분포와 같은 표본의 평균·중앙값·p95(실측값)입니다
           </p>
         </div>
       </div>

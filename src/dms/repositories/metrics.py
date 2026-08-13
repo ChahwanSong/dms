@@ -109,6 +109,39 @@ class MetricsRepository:
             if delta >= 0:
                 duration_seconds.append(delta)
 
+        # 실행시간(슬라이스 31, 방법 A: 스키마 무변경 파생 계산):
+        #   epoch(updated_at) - epoch(exec_submitted_at) - sched_wait_seconds
+        # = 첫 RUNNING 관측 -> 종단의 근사(오차는 스테퍼 틱 ±2회 -- sched_wait 의
+        # "근사" 규약과 동일). duration 과 같은 이유로 앱측에서 뺀다(시각 차의
+        # SQL 이식성 없음). 종단 & 두 재료 NOT NULL 인 행만 표본이다 -- 비종단은
+        # "아직 실행 중"이지 표본도 제외도 아니다(duration 의 종단 한정과 같은 규칙).
+        exec_rows = self._db.query(
+            f"""SELECT updated_at, exec_submitted_at, sched_wait_seconds
+                FROM data_jobs
+                WHERE created_at BETWEEN :s AND :e AND state IN ({term_ph})
+                  AND exec_submitted_at IS NOT NULL
+                  AND sched_wait_seconds IS NOT NULL
+                ORDER BY created_at ASC, job_id ASC""",
+            {**params, **term_params})
+        exec_runtime_seconds = []
+        for row in exec_rows:
+            try:
+                delta = (_epoch(row["updated_at"]) - _epoch(row["exec_submitted_at"])
+                         - row["sched_wait_seconds"])
+            except (TypeError, ValueError):
+                continue    # 시각이 깨진 행은 지어내지 않고 그 행만 버린다(duration 규칙)
+            # 음수(시계 스큐)는 record_sched_wait 규칙 그대로 0 으로 접는다 --
+            # 행을 버리면 표본이 조용히 줄고, 1초 해상도 세계에서 0 이 정직하다.
+            exec_runtime_seconds.append(max(0.0, delta))
+        # 제외(정직 카운트) = 종단인데 재료가 없는 잡: 슬라이스 20 이전 잡(앵커
+        # NULL)·실행 미도달(preflight/preview 실패)·한 틱 완료(sched NULL).
+        # 이 수를 내야 화면이 "집계 N건 · 제외 M건"으로 공백을 숨기지 못한다.
+        exec_excluded = self._db.query_one(
+            f"""SELECT COUNT(*) AS c FROM data_jobs
+                WHERE created_at BETWEEN :s AND :e AND state IN ({term_ph})
+                  AND (exec_submitted_at IS NULL OR sched_wait_seconds IS NULL)""",
+            {**params, **term_params})
+
         # 제출 대기(슬라이스 17 설계 §2.3): NULL(백필 불가분·아직 Pending)은 집계에서
         # 제외하고 제외 건수를 함께 낸다 -- 백필 공백을 화면에서 숨기지 않는다(설계
         # §3). 술어는 IS NOT NULL / IS NULL 이다: COALESCE(...,0) = 0 같은 falsy
@@ -163,6 +196,8 @@ class MetricsRepository:
             "throughput": [{"bucket": r["bucket"], "count": r["cnt"]}
                            for r in throughput],
             "duration_seconds": duration_seconds,
+            "exec_runtime_seconds": exec_runtime_seconds,
+            "exec_runtime_excluded": exec_excluded["c"],
             "submit_wait_seconds": [row["w"] for row in waits],
             "submit_wait_excluded": excluded["c"],
             "sched_wait_seconds": [row["w"] for row in sched_waits],

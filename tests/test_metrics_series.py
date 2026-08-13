@@ -180,6 +180,35 @@ def test_duration_histogram_counts_zero_as_a_real_value():
     assert sum(b["count"] for b in hist) == 2    # 음수·None 만 빠진다
 
 
+def test_summarize_seconds_mean_median_p95():
+    # 평균/중앙값/p95 요약(슬라이스 31). p50/p95 는 nearest-rank -- 실제 관측값만
+    # 낸다(보간으로 존재하지 않는 시간을 지어내지 않는다).
+    from dms.metrics_series import summarize_seconds
+    s = summarize_seconds(list(range(1, 21)))     # 1..20
+    assert s == {"mean_seconds": 10.5, "p50_seconds": 10, "p95_seconds": 19}
+
+
+def test_summarize_seconds_empty_is_none():
+    # 표본 없음은 None -- 0(정상값)으로 뭉개면 "즉시 끝났다"는 거짓말이 된다.
+    from dms.metrics_series import summarize_seconds
+    assert summarize_seconds([]) is None
+
+
+def test_summarize_seconds_zero_counts_and_junk_is_dropped():
+    # duration_histogram 과 같은 가드: 0 은 정상값(표본에 남는다), 음수·None 만
+    # 버린다. 전부 버려지면 None(표본 없음)이다.
+    from dms.metrics_series import summarize_seconds
+    assert summarize_seconds([0, -1, None]) == {
+        "mean_seconds": 0.0, "p50_seconds": 0, "p95_seconds": 0}
+    assert summarize_seconds([-1, None]) is None
+
+
+def test_summarize_seconds_single_sample():
+    from dms.metrics_series import summarize_seconds
+    assert summarize_seconds([42]) == {
+        "mean_seconds": 42.0, "p50_seconds": 42, "p95_seconds": 42}
+
+
 def test_sched_wait_reuses_submit_buckets_and_zero_lands_in_first_bucket():
     # 슬라이스 20 은 새 버킷을 짓지 않고 SUBMIT_WAIT_BUCKETS 를 재사용한다(설계
     # §2.7 -- 두 대기 분포를 같은 축으로 나란히 비교, 실분포는 실증 후 조정).

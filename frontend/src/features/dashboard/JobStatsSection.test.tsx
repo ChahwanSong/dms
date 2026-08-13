@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { JobStatsSection, successRate, rateTone } from "./JobStatsSection";
+import { JobStatsSection, successRate, rateTone, humanSeconds } from "./JobStatsSection";
 import type { StateCount } from "../../lib/types";
 
 const server = setupServer();
@@ -39,6 +39,13 @@ const STATS = {
     { bucket: "30-60s", count: 0 }, { bucket: "1-5m", count: 0 },
     { bucket: "5-30m", count: 0 }, { bucket: ">30m", count: 0 }],
   sched_wait_counted: 2, sched_wait_excluded: 4,
+  exec_runtime_histogram: [
+    { bucket: "<1m", count: 0 }, { bucket: "1-10m", count: 0 },
+    { bucket: "10-60m", count: 1 }, { bucket: "1-6h", count: 0 },
+    { bucket: "6-24h", count: 0 }, { bucket: ">24h", count: 0 }],
+  exec_runtime_counted: 1, exec_runtime_excluded: 2,
+  duration_summary: { mean_seconds: 800, p50_seconds: 42, p95_seconds: 1600 },
+  exec_runtime_summary: { mean_seconds: 940, p50_seconds: 940, p95_seconds: 940 },
   files_total: null, bytes_total: null,
 };
 
@@ -122,9 +129,66 @@ test("제출 대기 분포와 집계/제외 건수를 보여준다", async () =>
   renderSection();
   const chart = await screen.findByRole("img", { name: "제출 대기 분포" });
   expect(chart.querySelectorAll("[title]")).toHaveLength(6);
-  // 제외 건수를 숨기지 않는다(설계 §3) + 수행시간과의 포함 관계 명시(설계 §2.4)
+  // 제외 건수를 숨기지 않는다(설계 §3) + 전체 수명과의 포함 관계 명시(설계 §2.4)
   expect(screen.getByText(/집계 3건 · 제외\(기록 없음\) 1건/)).toBeInTheDocument();
-  expect(screen.getByText(/수행시간 분포는 이 대기를 포함/)).toBeInTheDocument();
+  expect(screen.getByText(/전체 수명 분포는 이 대기를 포함/)).toBeInTheDocument();
+});
+
+test("「수행시간」이 「전체 수명」으로 개명되고 실행시간 분포가 나란히 나온다", async () => {
+  renderSection();
+  // 라벨 정직화(슬라이스 31): created_at→updated_at 는 실행이 아니라 수명이다.
+  // 옛 라벨 「수행시간」이 화면 어디에도 남으면 안 된다 -- 두 이름이 공존하면
+  // 어느 쪽이 "진짜 실행"인지 화면이 거짓말한다.
+  const life = await screen.findByRole("img", { name: "전체 수명 분포" });
+  expect(life.querySelectorAll("[title]")).toHaveLength(6);
+  expect(screen.queryByText(/수행시간/)).toBeNull();
+  // 포함 관계 캡션: 전체 수명 ⊇ (제출·확인·스케줄 대기 + 실행)
+  expect(screen.getByText(/제출·확인\(사람\)·스케줄 대기를 모두 포함/)).toBeInTheDocument();
+  expect(screen.getByText(/실행시간 분포가 순수 실행 구간/)).toBeInTheDocument();
+  // 실행시간 분포(파생 계산): 집계/제외 캡션 + 근사 오차 명시 -- sched_wait
+  // 캡션 관례 그대로(제외 건수가 보여야 앵커 없는 과거 잡의 공백이 숨지 않는다).
+  const chart = screen.getByRole("img", { name: "실행시간 분포" });
+  expect(chart.querySelectorAll("[title]")).toHaveLength(6);
+  expect(screen.getByText(
+    /집계 1건 · 제외\(앵커 없음·한 틱 완료·실행 미도달\) 2건/)).toBeInTheDocument();
+  expect(screen.getByText(/첫 RUNNING 관측→종단의 근사/)).toBeInTheDocument();
+});
+
+test("숫자 요약: 전체 수명·실행시간의 평균/중앙값/p95 를 사람이 읽는 단위로", async () => {
+  renderSection();
+  // 헤딩 "숫자 요약"은 로딩 첫 렌더에도 그려진다(그리드는 d 없이 렌더) --
+  // 즉시 findByText 로 잡으면 데이터 착지 전의 "—" 를 본다. 로딩 문구 소거를
+  // 기다려 관찰 창을 착지 뒤로 민다(by_state 비배열 테스트의 선례).
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  const block = screen.getByText("숫자 요약").closest("div")!;
+  // 행 라벨은 분포 제목("… 분포")과 다른 정확 일치 텍스트 -- 두 구간이 구분된다.
+  expect(within(block).getByText("전체 수명")).toBeInTheDocument();
+  expect(within(block).getByText("실행시간")).toBeInTheDocument();
+  // duration_summary: 800s→13.3m, 42s, 1600s→26.7m
+  expect(within(block).getByText("13.3m")).toBeInTheDocument();
+  expect(within(block).getByText("42s")).toBeInTheDocument();
+  expect(within(block).getByText("26.7m")).toBeInTheDocument();
+  // exec_runtime_summary: 표본 1개라 평균=중앙값=p95 = 940s→15.7m
+  expect(within(block).getAllByText("15.7m")).toHaveLength(3);
+});
+
+test("요약 표본이 없으면(null) 0 으로 뭉개지 않고 — 로 표기한다", async () => {
+  renderSection({ ...STATS, duration_summary: null, exec_runtime_summary: null });
+  // 로딩 중 렌더도 "—" 라 즉시 단언은 헛초록이 된다 -- 착지 뒤를 관찰한다.
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  const block = screen.getByText("숫자 요약").closest("div")!;
+  // 2행 × 3열(평균/중앙값/p95) 전부 "—" -- null(표본 없음) ≠ 0(즉시 종료).
+  expect(within(block).getAllByText("—")).toHaveLength(6);
+});
+
+test("humanSeconds: 초→사람 단위, null 은 —(0 은 정상값 0s)", () => {
+  expect(humanSeconds(null)).toBe("—");
+  expect(humanSeconds(0)).toBe("0s");
+  expect(humanSeconds(42)).toBe("42s");
+  expect(humanSeconds(90)).toBe("1.5m");
+  expect(humanSeconds(3600)).toBe("1h");      // 후행 .0 은 소음 -- 떨군다
+  expect(humanSeconds(4320)).toBe("1.2h");
+  expect(humanSeconds(172800)).toBe("2d");
 });
 
 test("스케줄 대기(Volcano) 분포가 제출 대기와 구분돼 나온다", async () => {

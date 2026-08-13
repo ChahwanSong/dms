@@ -5,6 +5,8 @@ agent_reports의 report blob에서 노드 메트릭 포인트를 만든다. 계�
 - 네트워크는 부팅 이후 누적 카운터다 -- throughput은 인접 샘플 차분으로 여기서
   계산해 프론트가 카운터 의미를 몰라도 되게 한다(설계 §3). 카운터가 감소하면
   (리부팅 리셋) 그 구간은 null -- 음수 대역폭을 그리는 것보다 빈 구간이 정직하다."""
+import math
+
 # 사본이던 _epoch 를 db.iso_epoch 로 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
 from .db import iso_epoch as _epoch
 
@@ -120,6 +122,29 @@ DURATION_BUCKETS = (("<1m", 60), ("1-10m", 600), ("10-60m", 3600),
 SUBMIT_WAIT_BUCKETS = (("<10s", 10), ("10-30s", 30), ("30-60s", 60),
                        ("1-5m", 300), ("5-30m", 1800))
 SUBMIT_WAIT_OVERFLOW = ">30m"
+
+
+def summarize_seconds(seconds: list) -> "dict | None":
+    """평균/중앙값/p95 숫자 요약(슬라이스 31). 히스토그램은 분포의 모양을 주지만
+    "보통 얼마나 걸리나"는 버킷 폭에 뭉개진다 -- 원자료를 응답에 싣지 않는
+    규약(routes_metrics)을 지키면서 대표값만 내린다.
+
+    - 빈 표본은 None: 0 요약으로 뭉개면 "즉시 끝났다"는 거짓말이 된다(null ≠ 0).
+    - 가드는 duration_histogram 과 동일(`v is None or v < 0` -- truthy 금지):
+      0 은 정상값이라 표본에 남고, 음수·비수치만 버린다. 두 함수가 다른 가드를
+      쓰면 히스토그램 합계와 요약 표본 수가 어긋난다.
+    - p50/p95 는 nearest-rank: 실제 관측값만 낸다 -- 보간은 존재한 적 없는
+      시간을 지어내는 것이라 정직성 규약에 어긋난다."""
+    values = sorted(v for v in map(_num, seconds) if v is not None and v >= 0)
+    if not values:
+        return None
+
+    def pct(q):
+        # rank 는 1-기반 nearest-rank(ceil(q*n)) -- q 가 아무리 작아도 최소 1.
+        return values[max(1, math.ceil(q * len(values))) - 1]
+
+    return {"mean_seconds": round(sum(values) / len(values), 1),
+            "p50_seconds": pct(0.5), "p95_seconds": pct(0.95)}
 
 
 def duration_histogram(seconds: list, *, buckets=DURATION_BUCKETS,
