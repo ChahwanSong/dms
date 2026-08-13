@@ -32,6 +32,23 @@ test("renders items table with status", async () => {
   renderAt("Running");
   expect(await screen.findByText("Materialized")).toBeInTheDocument();
 });
+test("Completed 는 전체 재실행 버튼 노출 + :rescan 발사", async () => {
+  let rescanned = false;
+  server.use(http.post("/api/admin/batches/b1:rescan", () => { rescanned = true; return HttpResponse.json({status:"Running", requeued:1}); }));
+  renderAt("Completed");
+  await userEvent.click(await screen.findByRole("button", { name: "전체 재실행" }));
+  // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
+  await waitFor(() => expect(rescanned).toBe(true));
+});
+test("Cancelled 도 전체 재실행 버튼 노출", async () => {
+  renderAt("Cancelled");
+  expect(await screen.findByRole("button", { name: "전체 재실행" })).toBeInTheDocument();
+});
+test("Running 에선 전체 재실행 버튼 부재", async () => {
+  renderAt("Running");
+  await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언
+  expect(screen.queryByRole("button", { name: "전체 재실행" })).toBeNull();
+});
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));

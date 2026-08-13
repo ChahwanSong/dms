@@ -1,5 +1,5 @@
 import { useParams } from "react-router-dom";
-import { useBatch, useConfirmBatch, useRerunFailed, useCancelBatch } from "./useBatches";
+import { useBatch, useConfirmBatch, useRerunFailed, useCancelBatch, useRescanBatch } from "./useBatches";
 import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -11,6 +11,7 @@ export function BatchDetail() {
   const confirm = useConfirmBatch(batchId);
   const rerun = useRerunFailed(batchId);
   const cancel = useCancelBatch(batchId);
+  const rescan = useRescanBatch(batchId);
   const b = q.data;
   return (
     <section className="space-y-4">
@@ -24,6 +25,9 @@ export function BatchDetail() {
           <div className="flex gap-2">
             {b?.status === "PreviewReady" && <Button disabled={confirm.isPending} onClick={() => confirm.mutate()}>배치 확인</Button>}
             {b?.status === "Completed" && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
+            {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
+                전부 재큐잉(성장 모니터링). "실패분 재실행"(실패만)과 공존한다 */}
+            {(b?.status === "Completed" || b?.status === "Cancelled") && <Button disabled={rescan.isPending} onClick={() => rescan.mutate()}>전체 재실행</Button>}
             {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <Button variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</Button>}
           </div>
         </div>

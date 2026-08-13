@@ -29,3 +29,4 @@ function _action(id: string, verb: string) {
 export const useConfirmBatch = (id: string) => _action(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");
+export const useRescanBatch = (id: string) => _action(id, "rescan");

@@ -84,6 +84,8 @@ export interface Batch {
   batch_id: string; operation: string; status: string; max_concurrency: number;
   item_count: number; succeeded_count: number; failed_count: number;
   note: string | null; created_at: string;
+  // 실행 제어(슬라이스 32). 옵션 필드 — 기존 fixture 무수정 컴파일. null = 정책 기본.
+  priority?: string | null; node_count?: number | null;
 }
 export interface BatchItem {
   seq: number; payload: Record<string, unknown>; status: string;
