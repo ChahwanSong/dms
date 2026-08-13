@@ -138,34 +138,45 @@ export function BatchCreate() {
   const priorityDefaultLabel = defaultPolicy === undefined
     ? "(정책 기본)" : `(정책 기본: ${defaultPolicy.default_priority})`;
 
-  // 상한 캡션은 _clamp_priority(placement.py) 미러 — fanout 이 상한 초과 선택을
-  // **조용히** 상한으로 누른다. 그 침묵을 화면이 미리 말한다. 상한 판정은 실제
-  // 도구 정책이므로 sync 는 dsync·nsync 상한이 다르면 병기한다(노드 수 캡션 관례).
-  // 미조회·행 부재는 거짓값 대신 캡션 생략.
+  // 우선순위 캡션 — 상한부는 _clamp_priority(placement.py) 미러: fanout 이 상한
+  // 초과 선택을 **조용히** 상한으로 누르는 침묵을 화면이 미리 말한다. sync 는
+  // 도구별 묶음(기본+상한)으로 nsync 기본값도 **표기**하되, 기본값 **적용**은
+  // dsync 정책 단독(resolve_priority — 제출 시점 도구 미정이라 dsync 대표.
+  // nsync 폴백 실행이어도 요청에 박힌 기본값은 dsync 것)이고 nsync 는 상한만
+  // 실행 도구 기준으로 실제 적용됨을 문장으로 명시한다(화면 거짓말 금지 —
+  // 제출 바디=요약 동일 함수 관례와 같은 정직성 규약). 미조회·행 부재는 거짓값
+  // 대신 캡션 생략(null≠0).
   const priorityCapCaption = (() => {
     if (byTool === undefined) return null;
-    const rows = f.op === "scan" ? [["scan", byTool.get("scan")] as const]
-      : [["dsync", byTool.get("dsync")] as const, ["nsync", byTool.get("nsync")] as const];
-    const caps = rows.flatMap(([tool, p]) =>
-      p === undefined ? [] : [{ tool, cap: p.max_priority }]);
-    if (caps.length === 0) return null;
-    const capValues = [...new Set(caps.map((c) => c.cap))];
-    const head = capValues.length === 1 ? `정책 상한: ${capValues[0]}`
-      : `정책 상한: ${caps.map((c) => `${c.tool} ${c.cap}`).join(" · ")}`;
+    const tools = f.op === "scan" ? ["scan"] : ["dsync", "nsync"];
+    const rows = tools.flatMap((tool) => {
+      const p = byTool.get(tool);
+      return p === undefined ? []
+        : [{ tool, def: p.default_priority, cap: p.max_priority }];
+    });
+    if (rows.length === 0) return null;
     // 초과 선택 즉답 — 오류가 아니라 조정 예고이므로 톤(text-muted)은 유지하되
     // 실값으로 구체화한다. ""(정책 기본)는 rank -1 이라 절대 초과가 아니다.
-    const over = caps.filter((c) =>
-      (PRIORITY_RANK[f.priority] ?? -1) > (PRIORITY_RANK[c.cap] ?? Infinity));
-    const overValues = [...new Set(over.map((c) => c.cap))];
-    const tail = over.length === 0
-      ? "상한을 넘는 선택은 배치 시 상한으로 조정됩니다"
-      : over.length === caps.length && overValues.length === 1
-        ? `선택한 ${f.priority}는 상한 ${overValues[0]}로 조정됩니다`
-        // sync 에서 한쪽 상한만 넘거나 두 상한이 다른 경우 — 조정은 실제 배치
-        // 도구의 정책으로만 일어나므로 도구별로 정직하게 말한다.
-        : `선택한 ${f.priority}는 배치 시 ${
-            over.map((c) => `${c.tool} 상한 ${c.cap}`).join(" · ")}로 조정됩니다`;
-    return `${head} — ${tail}`;
+    const over = rows.filter((r) =>
+      (PRIORITY_RANK[f.priority] ?? -1) > (PRIORITY_RANK[r.cap] ?? Infinity));
+    const overValues = [...new Set(over.map((r) => r.cap))];
+    const overTail = over.length === rows.length && overValues.length === 1
+      ? `선택한 ${f.priority}는 상한 ${overValues[0]}로 조정됩니다`
+      // 한쪽 상한만 넘거나 두 상한이 다른 경우 — 조정은 실제 배치 도구의
+      // 정책으로만 일어나므로 넘는 도구만 정직하게 말한다.
+      : `선택한 ${f.priority}는 배치 시 ${
+          over.map((r) => `${r.tool} 상한 ${r.cap}`).join(" · ")}로 조정됩니다`;
+    if (f.op === "scan")
+      return `정책 상한: ${rows[0].cap} — ${over.length === 0
+        ? "상한을 넘는 선택은 배치 시 상한으로 조정됩니다" : overTail}`;
+    // sync: 기본·상한이 전부 같으면 한 묶음으로 축약(같은 값 반복은 소음).
+    const allSame = rows.length > 1
+      && rows.every((r) => r.def === rows[0].def && r.cap === rows[0].cap);
+    const head = allSame
+      ? `${rows.map((r) => r.tool).join("·")}: 기본 ${rows[0].def} · 상한 ${rows[0].cap}`
+      : rows.map((r) => `${r.tool}: 기본 ${r.def} · 상한 ${r.cap}`).join(" / ");
+    return `정책 — ${head}. 기본값 적용은 dsync 기준(제출 시점 도구 미정), ${
+      over.length === 0 ? "상한은 실행 도구 기준으로 조정됩니다" : overTail}`;
   })();
 
   function buildOptions(): Record<string, unknown> {

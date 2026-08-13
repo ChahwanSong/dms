@@ -225,6 +225,16 @@ async function toScanControls() {
   await userEvent.click(next());                              // → 실행 제어
 }
 
+async function toSyncControls() {
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  await userEvent.click(next());                              // 연산(sync) → 대상·항목
+  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
+  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
+  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
+  await userEvent.click(next());                              // → 실행 제어
+}
+
 test("정책 캡션(scan): scan 정책 실값이 노드 수 아래에 뜬다", async () => {
   renderPage();
   await toScanControls();
@@ -271,13 +281,9 @@ test("우선순위 기본 옵션(scan): scan 정책 default_priority 실값이 �
 
 test("우선순위 기본 옵션(sync): dsync 정책 대표의 default_priority 실값", async () => {
   renderPage();
-  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
-  await userEvent.click(next());
-  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
-  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
-  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
-  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
-  await userEvent.click(next());                              // → 실행 제어
+  await toSyncControls();
+  // 라벨은 **실제 적용값**만 — nsync 기본값은 요청 경로 어디에서도 적용되지
+  // 않으므로(resolve_priority 는 dsync 단독) 라벨에 섞지 않는다. 캡션 몫.
   expect(await screen.findByRole("option", { name: "(정책 기본: high)" })).toBeInTheDocument();
 });
 
@@ -288,17 +294,36 @@ test("우선순위 상한 캡션(scan): max_priority 실값 + 조정 예고", as
     "정책 상한: mid — 상한을 넘는 선택은 배치 시 상한으로 조정됩니다")).toBeInTheDocument();
 });
 
-test("우선순위 상한 캡션(sync): dsync·nsync 상한이 다르면 병기", async () => {
+// sync 캡션은 도구별 묶음(기본+상한) — nsync 기본값도 **표기**하되, 기본값
+// **적용**은 dsync 정책 단독(resolve_priority — 제출 시점 도구 미정이라 dsync
+// 대표. nsync 폴백 실행이어도 요청에 박힌 기본값은 dsync 것)이고 nsync 는
+// 상한(clamp)만 실행 도구 기준으로 실제 적용됨을 그대로 말한다(화면 거짓말 금지).
+test("우선순위 캡션(sync): dsync·nsync 기본·상한 도구별 묶음 + 적용 기준 명시", async () => {
   renderPage();
-  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
-  await userEvent.click(next());
-  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
-  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
-  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
-  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
-  await userEvent.click(next());                              // → 실행 제어
+  await toSyncControls();
   expect(await screen.findByText(
-    "정책 상한: dsync high · nsync mid — 상한을 넘는 선택은 배치 시 상한으로 조정됩니다"))
+    "정책 — dsync: 기본 high · 상한 high / nsync: 기본 mid · 상한 mid. "
+    + "기본값 적용은 dsync 기준(제출 시점 도구 미정), 상한은 실행 도구 기준으로 조정됩니다"))
+    .toBeInTheDocument();
+});
+
+test("정직성 계약(sync): '기본값 적용은 dsync 기준' 문구는 형식 개편에도 남는다", async () => {
+  renderPage();
+  await toSyncControls();
+  expect(await screen.findByText(/기본값 적용은 dsync 기준\(제출 시점 도구 미정\)/))
+    .toBeInTheDocument();
+});
+
+test("우선순위 캡션(sync): 기본·상한이 전부 같으면 dsync·nsync 한 묶음 축약", async () => {
+  renderPage([
+    policyRow("scan", 4, 8, "low", "mid"),
+    policyRow("dsync", 6, 4, "mid", "high"),
+    policyRow("nsync", 2, 2, "mid", "high"),
+  ]);
+  await toSyncControls();
+  expect(await screen.findByText(
+    "정책 — dsync·nsync: 기본 mid · 상한 high. "
+    + "기본값 적용은 dsync 기준(제출 시점 도구 미정), 상한은 실행 도구 기준으로 조정됩니다"))
     .toBeInTheDocument();
 });
 
@@ -316,6 +341,18 @@ test("상한 초과 선택 즉답: 같은 캡션 자리에 조정될 실값이 �
   // scan max_priority=mid — 오류가 아니라 조정 예고이므로 톤은 기존 캡션 그대로.
   expect(await screen.findByText(
     "정책 상한: mid — 선택한 high는 상한 mid로 조정됩니다")).toBeInTheDocument();
+});
+
+test("상한 초과 선택 즉답(sync): 넘는 도구만 실값으로 — 도구별 묶음 형식 유지", async () => {
+  renderPage();
+  await toSyncControls();
+  await userEvent.selectOptions(screen.getByLabelText("우선순위"), "high");
+  // dsync 상한 high 는 통과, nsync 상한 mid 만 초과 — 조정은 실제 배치 도구의
+  // 정책으로만 일어나므로 넘는 도구만 구체화한다(a4c0e3e 즉답 회귀 방지).
+  expect(await screen.findByText(
+    "정책 — dsync: 기본 high · 상한 high / nsync: 기본 mid · 상한 mid. "
+    + "기본값 적용은 dsync 기준(제출 시점 도구 미정), "
+    + "선택한 high는 배치 시 nsync 상한 mid로 조정됩니다")).toBeInTheDocument();
 });
 
 // 노드당 프로세스 수 override: 노드 수 입력과 같은 관례의 미러(빈값 = 정책 기본).
