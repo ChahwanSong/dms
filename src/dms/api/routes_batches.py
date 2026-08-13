@@ -16,13 +16,17 @@ class BatchBody(BaseModel):
     options: dict = {}
     note: str | None = None
     items: list[dict]
+    # 실행 제어(슬라이스 32). None = 미지정(정책 기본) — null≠0.
+    priority: str | None = None
+    node_count: int | None = None
 
 
 @router.post("/api/admin/batches", status_code=202)
 def create_batch(body: BatchBody, request: Request, identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
     try:
-        validate_batch(body.operation, body.max_concurrency, body.items)
+        validate_batch(body.operation, body.max_concurrency, body.items,
+                       priority=body.priority, node_count=body.node_count)
         for item in body.items:                       # 각 행 검증(조기 거부)
             build_data_payload(body.operation, options=body.options, **item)
     except (DomainValidationError, TypeError) as e:
@@ -31,7 +35,8 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
     bid = request.app.state.repos.batches.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
         max_concurrency=body.max_concurrency, options=body.options, note=body.note,
-        items=body.items, status=status)
+        items=body.items, status=status,
+        priority=body.priority, node_count=body.node_count)
     return {"batch_id": bid, "status": status}
 
 
