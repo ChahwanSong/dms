@@ -377,14 +377,16 @@ export function BatchCreate() {
               </select>
             </label>
 
-            {/* 단건 SubmitJob:279-281 미러(문구·캡션 동일). 이 화면은 admin 전용
-                라우트라 isAdmin 분기가 불필요하다 — 인가의 최종 심판은 서버 게이트
-                (403 privileged_not_authorized). */}
-            <label className="text-sm block">관리자 특권 실행(root)
-              <input aria-label="관리자 특권 실행(root)" placeholder="예: cocoa.song"
+            {/* 통일 특권 게이트(routes_batches.create_batch): 배치는 전부 관리자
+                특권(root) 실행이다 — owner 입력은 특권 스위치가 아니라 소유자
+                기록(선택)일 뿐이므로 안내문은 입력과 무관하게 고정이다. 인가의
+                최종 심판은 서버 게이트(403 privileged_not_authorized). */}
+            <p className="text-muted text-sm">이 배치는 관리자 특권(root)으로 실행됩니다.</p>
+            <label className="text-sm block">소유자 기록(선택)
+              <input aria-label="소유자 기록(선택)" placeholder="예: cocoa.song"
                      className={field}
                      value={f.ownerUsername} onChange={on("ownerUsername")} />
-              <p className="text-muted text-xs mt-1">root로 실행되며, 입력한 사용자는 소유자로 기록됩니다</p>
+              <p className="text-muted text-xs mt-1">root 로 실행되며, 입력한 사용자가 소유자로 기록됩니다. 비우면 생성자가 소유자입니다</p>
             </label>
 
             <label className="text-sm block">노드 수 (1..64, 빈값 = 정책 기본)
@@ -438,10 +440,15 @@ export function BatchCreate() {
                     <dt className="w-28 shrink-0 text-muted">노드 수</dt>
                     <dd>{body.node_count ?? "(정책 기본)"}</dd>
                   </div>
-                  {/* 소유자(특권) 행은 값이 있을 때만(SubmitJob 확인 스텝 미러) */}
+                  {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관), 소유자
+                      기록 행은 값이 있을 때만(빈값 = 생성자 기본) */}
+                  <div className="flex gap-2">
+                    <dt className="w-28 shrink-0 text-muted">실행 권한</dt>
+                    <dd>관리자 특권(root)</dd>
+                  </div>
                   {body.owner_username && (
                     <div className="flex gap-2">
-                      <dt className="w-28 shrink-0 text-muted">소유자(특권)</dt>
+                      <dt className="w-28 shrink-0 text-muted">소유자 기록</dt>
                       <dd>{body.owner_username}</dd>
                     </div>
                   )}

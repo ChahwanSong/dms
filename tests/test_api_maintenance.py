@@ -38,9 +38,13 @@ def test_batch_create_blocked_during_maintenance(client):
 
 
 def test_rerun_failed_blocked_during_maintenance(client):
+    # 배치 생성은 allowlist 세션 관례(통일 특권 게이트) — 토큰 생성은 403 이라
+    # 세션 admin("admin"은 기본 allowlist)으로 만든다. 유지보수 차단 검증 대상인
+    # :rerun-failed 호출 자체는 게이트 무관이라 기존 토큰 헤더 그대로다.
+    client.app.state.repos.accounts.create("admin", "pw", "admin", actor="t")
+    client.post("/api/auth/login", json={"username": "admin", "password": "pw"})
     r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 2,
-        "options": {}, "note": "n", "items": [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b"}]},
-        headers=ADMIN)
+        "options": {}, "note": "n", "items": [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b"}]})
     bid = r.json()["batch_id"]
     client.app.state.repos.batches.set_item_status(bid, 0, "Failed")
     _set(client, maintenance=True)

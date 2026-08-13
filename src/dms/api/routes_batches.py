@@ -27,21 +27,26 @@ class BatchBody(BaseModel):
 @router.post("/api/admin/batches", status_code=202)
 def create_batch(body: BatchBody, request: Request, identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
-    # 특권 게이트(단건 제출 routes_requests.py:86-94 미러): owner_username 이
-    # 요청자와 다르면 특권 의도 → 인가 필요. 단건의 3중(admin — require_admin 이
-    # 이미 보장 — + 기능 플래그 + allowlist)에 **세션 인증**을 더한다: 단건은
-    # planner 가 요청 auth_method 로 세션을 재검증하지만, 배치는 생성 시점 인증
-    # 방식을 행에 박제해 자식이 물려받으므로 박제 전에 여기서 끊어야 토큰 생성
-    # 배치가 특권을 실어 나르지 못한다.
+    # 왜 **모든** 배치 생성에 특권 게이트인가: 배치 메뉴는 관리자 운영 메뉴고,
+    # 사용자 결정은 "배치(scan/sync)는 전부 기본 관리자 특권(root) 실행"이다.
+    # 이전에는 owner_username 이 있을 때만 게이트를 열고 나머지는 조용히 비특권으로
+    # 강등했는데, allowlist 밖 admin·토큰 생성 배치가 LDAP 밖 계정이면 자식이
+    # ldap_identity_not_found 로 조용히 죽었다 — 강등 대신 여기서 명시 거부한다.
+    # 운영자 계정은 DMS_PRIVILEGED_REQUESTERS 로 관리한다. 게이트는 3중(기능 플래그
+    # + allowlist + 세션, admin 역할은 require_admin 이 이미 보장). 세션 조건이
+    # 필요한 이유: 배치는 생성 시점 인증 방식을 행에 박제해 자식이 물려받으므로
+    # 박제 전에 여기서 끊어야 토큰 생성 배치가 특권을 실어 나르지 못한다(단건은
+    # planner 가 요청 auth_method 로 재검증, routes_requests.py:86-94 참고).
+    settings = request.app.state.settings
+    authorized = (settings.allow_privileged_requesters
+                  and identity.actor in settings.privileged_requesters
+                  and identity.auth == "session")
+    if not authorized:
+        raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    # owner_username 은 소유자 기록(선택, 기본: 생성자=requester_id)이다 — 특권
+    # 여부는 위 게이트가 배치 전체에 판정했고, 이 값은 자식 payload 에 실려 실행
+    # 신원 해석과 감사에 쓰인다(orchestrator._materialize).
     owner = body.owner_username
-    if owner is not None and owner != identity.actor:
-        settings = request.app.state.settings
-        authorized = (identity.role == "admin"
-                      and settings.allow_privileged_requesters
-                      and identity.actor in settings.privileged_requesters
-                      and identity.auth == "session")
-        if not authorized:
-            raise HTTPException(status_code=403, detail="privileged_not_authorized")
     try:
         if owner is not None:
             validate_owner_username(owner)    # 단건 _validated_payload 와 같은 검증

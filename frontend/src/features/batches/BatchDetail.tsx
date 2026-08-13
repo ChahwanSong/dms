@@ -21,10 +21,14 @@ export function BatchDetail() {
           <div className="flex items-center gap-3">
             <StatusPill state={b?.status ?? "…"} />
             <span className="text-muted text-sm">{b?.operation} · 성공 {b?.succeeded_count}/실패 {b?.failed_count}/전체 {b?.item_count}</span>
-            {/* 있을 때만 -- null/부재 = 비특권 현행. 한 개의 템플릿 리터럴 = 한 개의
-                텍스트 노드(getByText 가 통으로 찾도록, 대시보드 관례). */}
+            {/* 특권 실행 문구는 로드되면 항상 -- 통일 게이트 후 배치는 전부 관리자
+                특권(root) 실행이다. 행별 auth_method/owner 유무로 재판정하지 않는다:
+                프론트는 allowlist 를 모르므로 판정 흉내가 더 큰 거짓말이 된다(구형
+                비특권 행에는 이 단순 표시가 과잉이지만, 거짓 판정보다 낫다).
+                한 개의 템플릿 리터럴 = 한 개의 텍스트 노드(getByText 관례). */}
+            {b && <span className="text-bad text-sm">특권 실행(root)</span>}
             {b?.owner_username && (
-              <span className="text-bad text-sm">{`소유자(특권) ${b.owner_username}`}</span>
+              <span className="text-muted text-sm">{`소유자 ${b.owner_username}`}</span>
             )}
           </div>
           <div className="flex gap-2">

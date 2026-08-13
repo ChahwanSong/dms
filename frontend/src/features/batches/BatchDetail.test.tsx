@@ -49,19 +49,23 @@ test("Running 에선 전체 재실행 버튼 부재", async () => {
   await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언
   expect(screen.queryByRole("button", { name: "전체 재실행" })).toBeNull();
 });
-test("owner_username 이 있으면 소유자(특권) 표시", async () => {
+test("owner_username 이 있으면 소유자 표시 + 특권 실행 문구", async () => {
   server.use(http.get("/api/admin/batches/b1",
     () => HttpResponse.json(batch({ owner_username: "alice" }))));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
   </MemoryRouter></QueryClientProvider>);
-  expect(await screen.findByText("소유자(특권) alice")).toBeInTheDocument();
+  expect(await screen.findByText("소유자 alice")).toBeInTheDocument();
+  expect(screen.getByText("특권 실행(root)")).toBeInTheDocument();
 });
-test("owner_username 이 없으면(비특권 현행) 소유자 표시 부재", async () => {
+test("owner_username 이 없어도 특권 실행 문구는 항상 — 소유자 행만 부재", async () => {
+  // 통일 게이트 후 배치는 전부 특권 실행이다. 행별 auth_method/owner 로 재판정하지
+  // 않는다(프론트는 allowlist 를 모른다 — 판정 흉내가 더 큰 거짓말).
   renderAt("Running");
   await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언
-  expect(screen.queryByText(/소유자\(특권\)/)).toBeNull();
+  expect(screen.getByText("특권 실행(root)")).toBeInTheDocument();
+  expect(screen.queryByText(/소유자/)).toBeNull();
 });
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;

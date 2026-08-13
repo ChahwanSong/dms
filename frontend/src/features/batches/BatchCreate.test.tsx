@@ -124,24 +124,28 @@ test("verbose+quiet 상충: 즉답 문구 + 다음 비활성", async () => {
   expect(next()).toBeDisabled();
 });
 
-test("관리자 특권 실행: owner_username 이 요약에 보이고 바디에 실린다", async () => {
+test("실행 제어 스텝: 특권 실행 고정 안내문 + 소유자 기록 입력이 바디·요약에 실린다", async () => {
   const captured = captureCreate();
   renderPage();
   await userEvent.click(next());
   await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
   await userEvent.type(screen.getByLabelText("1행 경로"), "a");
   await userEvent.click(next());                              // → 실행 제어
-  await userEvent.type(screen.getByLabelText("관리자 특권 실행(root)"), "alice");
+  // 통일 특권 게이트(routes_batches): 배치는 전부 관리자 특권(root) 실행 — 고정 안내
+  expect(screen.getByText("이 배치는 관리자 특권(root)으로 실행됩니다.")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("소유자 기록(선택)"), "alice");
   await userEvent.click(next());                              // → 확인·제출
-  // 확인 스텝 요약 = 제출 바디 파생(SubmitJob 소유자(특권) 행 미러)
-  expect(screen.getByText("소유자(특권)")).toBeInTheDocument();
+  // 확인 스텝 요약 = 제출 바디 파생 + 특권 실행 표시(고정 행)
+  expect(screen.getByText("실행 권한")).toBeInTheDocument();
+  expect(screen.getByText("관리자 특권(root)")).toBeInTheDocument();
+  expect(screen.getByText("소유자 기록")).toBeInTheDocument();
   expect(screen.getByText("alice")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
   expect(captured.body).toMatchObject({ owner_username: "alice" });
 });
 
-test("특권 입력이 빈값이면 요약 행도 owner_username 키도 없다", async () => {
+test("소유자 기록이 빈값이면 owner_username 키 부재 — 특권 실행 표시는 항상", async () => {
   const captured = captureCreate();
   renderPage();
   await userEvent.click(next());
@@ -149,7 +153,8 @@ test("특권 입력이 빈값이면 요약 행도 owner_username 키도 없다",
   await userEvent.type(screen.getByLabelText("1행 경로"), "a");
   await userEvent.click(next());
   await userEvent.click(next());
-  expect(screen.queryByText("소유자(특권)")).toBeNull();
+  expect(screen.queryByText("소유자 기록")).toBeNull();       // 빈값 = 요약 행 부재(기본: 생성자)
+  expect(screen.getByText("관리자 특권(root)")).toBeInTheDocument();  // 특권 표시는 고정
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
   expect(captured.body).not.toHaveProperty("owner_username");
@@ -167,7 +172,7 @@ test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => 
   expect(screen.getByLabelText("CSV")).toHaveAttribute("placeholder", "team\nprojects/alpha");
   await userEvent.click(next());                              // → 실행 제어
   expect(screen.getByLabelText("top_k")).toHaveAttribute("placeholder", "예: 100");
-  expect(screen.getByLabelText("관리자 특권 실행(root)")).toHaveAttribute("placeholder", "예: cocoa.song");
+  expect(screen.getByLabelText("소유자 기록(선택)")).toHaveAttribute("placeholder", "예: cocoa.song");
   expect(screen.getByLabelText("노드 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
   expect(screen.getByLabelText("동시 실행 상한")).toHaveAttribute("placeholder", "예: 2");
   expect(screen.getByLabelText("메모")).toHaveAttribute("placeholder", "예: 8월 정기 스캔");
