@@ -8,18 +8,20 @@ class BatchesRepository:
         self._db = db
 
     def create(self, *, operation, requester_id, actor, max_concurrency, options,
-               note, items, status) -> str:
+               note, items, status, priority=None, node_count=None) -> str:
+        # priority/node_count NULL = 미지정(정책 기본) — null≠0 (0은 유효값이 아님).
         bid = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
             self._db.execute(
                 """INSERT INTO batches (batch_id, operation, requester_id, actor, status,
                        max_concurrency, options, note, item_count, succeeded_count,
-                       failed_count, created_at, updated_at)
-                   VALUES (:id,:op,:req,:actor,:st,:mc,:opt,:note,:n,0,0,:now,:now)""",
+                       failed_count, created_at, updated_at, priority, node_count)
+                   VALUES (:id,:op,:req,:actor,:st,:mc,:opt,:note,:n,0,0,:now,:now,:pri,:nc)""",
                 {"id": bid, "op": operation, "req": requester_id, "actor": actor,
                  "st": status, "mc": max_concurrency, "opt": dump_json(options),
-                 "note": note, "n": len(items), "now": now})
+                 "note": note, "n": len(items), "now": now,
+                 "pri": priority, "nc": node_count})
             for seq, item in enumerate(items):
                 self._db.execute(
                     """INSERT INTO batch_items (batch_id, seq, payload, status, request_id,
@@ -81,6 +83,25 @@ class BatchesRepository:
             """UPDATE batches SET succeeded_count = succeeded_count + :s,
                    failed_count = failed_count + :f, updated_at = :now WHERE batch_id = :b""",
             {"s": succeeded, "f": failed, "now": utc_now_iso(), "b": batch_id})
+
+    def reset_all_items(self, batch_id) -> int:
+        # 전체 재실행(:rescan): 종단 item 전부를 Queued 로 되돌린다. 성공 item 도
+        # 포함하는 이유는 성장 모니터링(같은 대상 재스캔) 유스케이스. 비종단
+        # (Queued/Materialized) item 은 무접촉 — 활성 자식과의 충돌은 라우트의
+        # 종단 배치 가드가 막지만 repo 층에서도 종단만 만진다(이중 방어).
+        with self._db.transaction():
+            rows = self._db.query(
+                # IN 목록 = batch_orchestrator._ITEM_TERMINAL 과 같은 집합
+                "SELECT seq FROM batch_items WHERE batch_id = :b AND status IN "
+                "('Succeeded','Failed','Rejected','Cancelled')", {"b": batch_id})
+            for r in rows:
+                self.reset_item_to_queued(batch_id, r["seq"])
+            # 카운터는 감산이 아니라 0 리셋 — 전체 재시작이라 절대값이 진실이다.
+            self._db.execute(
+                """UPDATE batches SET succeeded_count = 0, failed_count = 0,
+                       updated_at = :now WHERE batch_id = :b""",
+                {"now": utc_now_iso(), "b": batch_id})
+        return len(rows)
 
     def reset_failed_items(self, batch_id) -> int:
         with self._db.transaction():

@@ -85,7 +85,11 @@ def _apply_migrations(db: Database) -> None:
             succeeded_count INTEGER NOT NULL DEFAULT 0,
             failed_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL)""",
+            updated_at TEXT NOT NULL,
+            -- 슬라이스 32 배치 실행 제어: NULL = 미지정(정책 기본) — null≠0.
+            -- orchestrator 가 batch 행을 읽어 자식 request 에 전달한다.
+            priority TEXT,
+            node_count INTEGER)""",
         "CREATE INDEX IF NOT EXISTS idx_batches_status ON batches (status, created_at)",
         """CREATE TABLE IF NOT EXISTS batch_items (
             batch_id TEXT NOT NULL,
@@ -510,6 +514,10 @@ def _ensure_columns(db):
         ("releases", "reason_code", "TEXT"),
         ("releases", "seq", "INTEGER"),
         ("releases", "progress", "INTEGER"),
+        # 슬라이스 32 배치 실행 제어 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스
+        # 14 의 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
+        ("batches", "priority", "TEXT"),
+        ("batches", "node_count", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
