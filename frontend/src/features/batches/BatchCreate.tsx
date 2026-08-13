@@ -27,6 +27,9 @@ const STEPS: WizardStep[] = [
 
 type InputTab = "table" | "paste" | "upload";
 
+// 우선순위 순서는 PRIORITIES(domain.py:61)의 미러 — 상한 초과 판정에 쓴다.
+const PRIORITY_RANK: Record<string, number> = { low: 0, mid: 1, high: 2 };
+
 // 행은 경로만 나른다(스토리지는 배치 레벨 선택) — a = target(scan)/source(sync),
 // b = destination(sync 전용). CSV 파서(ScanRow/SyncRow)와 제출 바디 조립의 중간형.
 interface RowPair { a: string; b: string }
@@ -107,10 +110,13 @@ export function BatchCreate() {
   const fmtPolicy = (p: Policy | undefined) => p === undefined ? "미조회"
     : `최대 ${p.max_nodes}노드 · 노드당 ${p.procs_per_node}프로세스${
         p.enabled === 1 ? "" : " · 비활성(잡 배치 거부)"}`;
+  // 도구→정책 행 인덱스 — 노드 수 캡션과 우선순위 라벨·상한 캡션이 공유한다
+  // (중복 조회 금지). undefined = 미조회(로딩·실패) — 거짓값 금지, null≠0.
+  const byTool = policiesQ.data === undefined
+    ? undefined : new Map(policiesQ.data.map((p) => [p.tool, p]));
   const policyCaption = (() => {
     if (policiesQ.isLoading) return "정책 조회 중…";
-    if (policiesQ.data === undefined) return "정책 미조회 — 정책 목록을 불러오지 못했습니다";
-    const byTool = new Map(policiesQ.data.map((p) => [p.tool, p]));
+    if (byTool === undefined) return "정책 미조회 — 정책 목록을 불러오지 못했습니다";
     if (f.op === "scan") {
       const p = byTool.get("scan");
       return p === undefined ? "정책 미조회 — scan 정책 행이 없습니다"
@@ -122,6 +128,44 @@ export function BatchCreate() {
       return "정책 미조회 — dsync/nsync 정책 행이 없습니다";
     return `정책 기본(dsync): ${fmtPolicy(dsync)} — 공존 노드가 없으면 `
       + `nsync 정책(${fmtPolicy(nsync)})이 적용됩니다`;
+  })();
+
+  // --- 우선순위: 정책 기본값 실값 + 상한 캡션 ---
+  // 기본 라벨은 resolve_priority(domain.py) 미러 — scan→"scan" 정책, sync 는
+  // 제출 시점에 도구(dsync/nsync)가 정해지지 않으므로 dsync 정책을 대표로 읽는다.
+  // 미조회·행 부재면 실값 없이 "(정책 기본)" — 거짓값 금지(null≠0).
+  const defaultPolicy = byTool?.get(f.op === "scan" ? "scan" : "dsync");
+  const priorityDefaultLabel = defaultPolicy === undefined
+    ? "(정책 기본)" : `(정책 기본: ${defaultPolicy.default_priority})`;
+
+  // 상한 캡션은 _clamp_priority(placement.py) 미러 — fanout 이 상한 초과 선택을
+  // **조용히** 상한으로 누른다. 그 침묵을 화면이 미리 말한다. 상한 판정은 실제
+  // 도구 정책이므로 sync 는 dsync·nsync 상한이 다르면 병기한다(노드 수 캡션 관례).
+  // 미조회·행 부재는 거짓값 대신 캡션 생략.
+  const priorityCapCaption = (() => {
+    if (byTool === undefined) return null;
+    const rows = f.op === "scan" ? [["scan", byTool.get("scan")] as const]
+      : [["dsync", byTool.get("dsync")] as const, ["nsync", byTool.get("nsync")] as const];
+    const caps = rows.flatMap(([tool, p]) =>
+      p === undefined ? [] : [{ tool, cap: p.max_priority }]);
+    if (caps.length === 0) return null;
+    const capValues = [...new Set(caps.map((c) => c.cap))];
+    const head = capValues.length === 1 ? `정책 상한: ${capValues[0]}`
+      : `정책 상한: ${caps.map((c) => `${c.tool} ${c.cap}`).join(" · ")}`;
+    // 초과 선택 즉답 — 오류가 아니라 조정 예고이므로 톤(text-muted)은 유지하되
+    // 실값으로 구체화한다. ""(정책 기본)는 rank -1 이라 절대 초과가 아니다.
+    const over = caps.filter((c) =>
+      (PRIORITY_RANK[f.priority] ?? -1) > (PRIORITY_RANK[c.cap] ?? Infinity));
+    const overValues = [...new Set(over.map((c) => c.cap))];
+    const tail = over.length === 0
+      ? "상한을 넘는 선택은 배치 시 상한으로 조정됩니다"
+      : over.length === caps.length && overValues.length === 1
+        ? `선택한 ${f.priority}는 상한 ${overValues[0]}로 조정됩니다`
+        // sync 에서 한쪽 상한만 넘거나 두 상한이 다른 경우 — 조정은 실제 배치
+        // 도구의 정책으로만 일어나므로 도구별로 정직하게 말한다.
+        : `선택한 ${f.priority}는 배치 시 ${
+            over.map((c) => `${c.tool} 상한 ${c.cap}`).join(" · ")}로 조정됩니다`;
+    return `${head} — ${tail}`;
   })();
 
   function buildOptions(): Record<string, unknown> {
@@ -407,11 +451,14 @@ export function BatchCreate() {
 
             <label className="text-sm block">우선순위
               <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
-                <option value="">(정책 기본)</option>
+                <option value="">{priorityDefaultLabel}</option>
                 <option value="low">low</option>
                 <option value="mid">mid</option>
                 <option value="high">high</option>
               </select>
+              {priorityCapCaption !== null && (
+                <p className="text-muted text-xs mt-1">{priorityCapCaption}</p>
+              )}
             </label>
 
             {/* 통일 특권 게이트(routes_batches.create_batch): 배치는 전부 관리자

@@ -17,14 +17,17 @@ const STORAGES = [
 ];
 
 // 도구별로 값을 다르게 — 캡션이 "그 정책의 실값"을 읽는지 구분하기 위해.
-const policyRow = (tool: string, max_nodes: number, procs_per_node: number) => ({
+const policyRow = (tool: string, max_nodes: number, procs_per_node: number,
+                   default_priority: string, max_priority: string) => ({
   tool, max_nodes, procs_per_node, queue: "dms-data",
-  default_priority: "mid", max_priority: "high",
+  default_priority, max_priority,
   preview_timeout_seconds: null, execution_timeout_seconds: 3600,
   enabled: 1, updated_at: "2026-08-05T00:00:00Z", updated_by: "admin",
 });
 const POLICIES = [
-  policyRow("scan", 4, 8), policyRow("dsync", 6, 4), policyRow("nsync", 2, 2),
+  policyRow("scan", 4, 8, "low", "mid"),
+  policyRow("dsync", 6, 4, "high", "high"),
+  policyRow("nsync", 2, 2, "mid", "mid"),
 ];
 
 function renderPage(policies: object[] = POLICIES) {
@@ -255,6 +258,64 @@ test("정책 disabled 는 캡션에 그 사실이 표기된다", async () => {
   await toScanControls();
   expect(await screen.findByText(
     "정책 기본: 최대 4노드 · 노드당 8프로세스 · 비활성(잡 배치 거부)")).toBeInTheDocument();
+});
+
+// 우선순위 정책 실값(슬라이스 32+): 기본 옵션 라벨은 resolve_priority(domain.py)
+// 미러 — scan→"scan" 정책, sync→dsync 대표(제출 시점 도구 미정). 상한 캡션은
+// _clamp_priority(placement.py) 미러 — 초과 선택을 조용히 누르는 침묵을 미리 말한다.
+test("우선순위 기본 옵션(scan): scan 정책 default_priority 실값이 라벨에 뜬다", async () => {
+  renderPage();
+  await toScanControls();
+  expect(await screen.findByRole("option", { name: "(정책 기본: low)" })).toBeInTheDocument();
+});
+
+test("우선순위 기본 옵션(sync): dsync 정책 대표의 default_priority 실값", async () => {
+  renderPage();
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
+  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
+  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
+  await userEvent.click(next());                              // → 실행 제어
+  expect(await screen.findByRole("option", { name: "(정책 기본: high)" })).toBeInTheDocument();
+});
+
+test("우선순위 상한 캡션(scan): max_priority 실값 + 조정 예고", async () => {
+  renderPage();
+  await toScanControls();
+  expect(await screen.findByText(
+    "정책 상한: mid — 상한을 넘는 선택은 배치 시 상한으로 조정됩니다")).toBeInTheDocument();
+});
+
+test("우선순위 상한 캡션(sync): dsync·nsync 상한이 다르면 병기", async () => {
+  renderPage();
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
+  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
+  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
+  await userEvent.click(next());                              // → 실행 제어
+  expect(await screen.findByText(
+    "정책 상한: dsync high · nsync mid — 상한을 넘는 선택은 배치 시 상한으로 조정됩니다"))
+    .toBeInTheDocument();
+});
+
+test("정책 부재 시 우선순위: 실값 없는 '(정책 기본)' + 상한 캡션 생략(거짓값 금지)", async () => {
+  renderPage([]);
+  await toScanControls();
+  expect(screen.getByRole("option", { name: "(정책 기본)" })).toBeInTheDocument();
+  expect(screen.queryByText(/정책 상한/)).toBeNull();
+});
+
+test("상한 초과 선택 즉답: 같은 캡션 자리에 조정될 실값이 뜬다", async () => {
+  renderPage();
+  await toScanControls();
+  await userEvent.selectOptions(screen.getByLabelText("우선순위"), "high");
+  // scan max_priority=mid — 오류가 아니라 조정 예고이므로 톤은 기존 캡션 그대로.
+  expect(await screen.findByText(
+    "정책 상한: mid — 선택한 high는 상한 mid로 조정됩니다")).toBeInTheDocument();
 });
 
 // 노드당 프로세스 수 override: 노드 수 입력과 같은 관례의 미러(빈값 = 정책 기본).
