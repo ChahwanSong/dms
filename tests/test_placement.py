@@ -157,6 +157,36 @@ def test_priority_clamped_to_policy_max():
     assert out["priority_class"] == "dms-mid"
 
 
+# --- 슬라이스 32: requested_node_count min-캡 ---
+
+def test_fanout_requested_node_count_caps_below_policy():
+    out = resolve_fanout(POLICY, {"primary": ["n1", "n2", "n3", "n4", "n5"]},
+                         priority="mid", requested_node_count=2)
+    assert out["node_count"] == 2 and out["process_count"] == 16
+
+
+def test_fanout_requested_above_policy_policy_wins():
+    # 요청은 정책을 줄일 수만 있다 — DB 변조로도 정책 초과 불가
+    out = resolve_fanout(POLICY, {"primary": ["n1", "n2", "n3", "n4", "n5"]},
+                         priority="mid", requested_node_count=10)
+    assert out["node_count"] == 3 and out["process_count"] == 24
+
+
+def test_fanout_requested_none_keeps_policy_behavior():
+    out = resolve_fanout(POLICY, {"primary": ["n1", "n2", "n3", "n4", "n5"]},
+                         priority="mid", requested_node_count=None)
+    assert out["node_count"] == 3 and out["process_count"] == 24
+
+
+def test_fanout_requested_caps_sync_per_side():
+    # sync 는 max_nodes 가 면당 상한 — 요청값도 면당 min-캡(의미 자리 동일)
+    out = resolve_fanout(POLICY, {"source": ["n1", "n2", "n3", "n4"],
+                                  "destination": ["n5", "n6"]},
+                         priority="low", requested_node_count=1)
+    assert out["source_count"] == 1 and out["destination_count"] == 1
+    assert out["node_count"] == 2 and out["process_count"] == 16
+
+
 def test_missing_and_disabled_policy():
     with pytest.raises(PlacementError) as e:
         resolve_fanout(None, {"primary": ["n1"]}, priority="mid")

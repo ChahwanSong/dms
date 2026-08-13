@@ -263,6 +263,47 @@ def test_policy_max_nodes_trims_sync_candidates(db):
     assert len(wp["candidates"]["destination"]) == wp["destination_count"] == 2
 
 
+# --- 슬라이스 32: payload.node_count — min(정책, 요청) 캡 + fail-closed 방어 ---
+
+def test_payload_node_count_caps_candidates(db):
+    repos = Repositories(db)
+    _seed_storage(repos)
+    _seed_policy(repos)  # max_nodes=3
+    for node in ("n1", "n2", "n3", "n4", "n5"):
+        _seed_report(repos, node=node)
+    rid = repos.requests.create(
+        operation="scan", requester_id="alice", actor="alice",
+        resource_key="data.scan:s1:a:ff",
+        payload={"storage": "s1", "target": "a", "options": {},
+                 "owner_username": None, "node_count": 2},
+        priority="mid")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    wp = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]
+    assert wp["node_count"] == 2                      # min(정책 3, 요청 2)
+    assert wp["candidates"]["primary"] == ["n1", "n2"]  # 슬라이스도 축소
+    assert wp["process_count"] == 16
+
+
+def test_payload_node_count_tampered_rejects(db):
+    # DB 는 신뢰 경계 — payload 는 무검증 INSERT 로 변조될 수 있다. 값이 있는데
+    # 비정상(str)이면 fail-closed 거부(stepper 층1 unknown_tool 관례).
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = repos.requests.create(
+        operation="scan", requester_id="alice", actor="alice",
+        resource_key="data.scan:s1:a:ff",
+        payload={"storage": "s1", "target": "a", "options": {},
+                 "owner_username": None, "node_count": "8"},
+        priority="mid")
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "rejected:invalid_node_count"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+    # _reject 는 set_state_with_result 경로 — results 행이 함께 남는다.
+    row = db.query_one("SELECT terminal_state, reason_code FROM results"
+                       " WHERE request_id = :r", {"r": rid})
+    assert (row["terminal_state"], row["reason_code"]) == ("Rejected",
+                                                           "invalid_node_count")
+
+
 def test_requester_disabled_account_rejects(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos)

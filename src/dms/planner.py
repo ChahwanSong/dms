@@ -181,9 +181,18 @@ class Planner:
             return self._reject(rid, exc.reason_code)
         # 6. policy fan-out
         policy = self._repos.control.get_policy(TOOL_TO_POLICY[placement["tool"]])
+        # payload 는 신뢰 경계 밖(DB 무검증 INSERT 전제) — node_count 가 **있는데**
+        # 비정상(비int·bool·<1)이면 fail-closed 거부한다(stepper 층1 unknown_tool
+        # 관례: 변조 증거를 조용히 삼키지 않는다). 키 부재(None)는 정상 — 정책값.
+        requested = payload.get("node_count")
+        if requested is not None and (
+                not isinstance(requested, int) or isinstance(requested, bool)
+                or requested < 1):
+            return self._reject(rid, "invalid_node_count")
         try:
             fanout = resolve_fanout(policy, placement["candidates"],
-                                    priority=req["priority"])
+                                    priority=req["priority"],
+                                    requested_node_count=requested)
         except PlacementError as exc:
             return self._reject(rid, exc.reason_code)
         # 7. emit

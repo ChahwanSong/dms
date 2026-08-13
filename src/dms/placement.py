@@ -110,12 +110,17 @@ def _clamp_priority(requested, policy_max):
     return policy_max
 
 
-def resolve_fanout(policy, candidates, *, priority):
+def resolve_fanout(policy, candidates, *, priority, requested_node_count=None):
     if policy is None:
         raise PlacementError("missing_policy")
     if not policy.get("enabled"):
         raise PlacementError("policy_disabled")
     max_nodes = policy["max_nodes"]
+    # 요청은 정책을 **줄일 수만** 있다(min) — payload 가 DB 변조로 부풀려져도 정책
+    # max_nodes 를 초과할 수 없다. sync 는 max_nodes 가 면당 상한이므로 요청값도
+    # 같은 의미 자리에서 면당 캡된다. None(미지정)은 정책 그대로 — null≠0.
+    if requested_node_count is not None:
+        max_nodes = min(max_nodes, requested_node_count)
     per_node = policy["procs_per_node"]
     clamped = _clamp_priority(priority, policy["max_priority"])
     common = {"queue": policy["queue"], "priority_class": PRIORITY_CLASS[clamped]}
