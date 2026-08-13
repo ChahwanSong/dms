@@ -217,6 +217,12 @@ export interface JobMetrics {
   by_storage: ({ storage: string | null } & BreakdownRow)[];
   by_requester: ({ requester_id: string } & BreakdownRow)[];
   failure_reasons: { reason_code: string; count: number }[];
+  // 계획 거부(results 집계): 계획 단계 거부는 data_jobs 가 생기기 전의 종단이라
+  // 위의 어떤 data_jobs 파생 필드에도 안 잡힌다 -- 별도 필드가 유일한 원천이다.
+  // failure_reasons(잡 실패)와 절대 섞지 않는다(라벨 거짓말 방지). 0 = 거부 없음
+  // (정상값 -- null 아님).
+  plan_rejected: number;
+  plan_rejection_reasons: { reason_code: string; count: number }[];
   throughput: { bucket: string; count: number }[];
   // duration = created_at -> updated_at 의 **전체 수명**(제출·확인(사람)·스케줄
   // 대기 + 실행 전부 합산)이다 -- 화면 라벨은 「전체 수명 분포」(슬라이스 31

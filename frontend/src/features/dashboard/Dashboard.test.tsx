@@ -22,6 +22,7 @@ const JOB_METRICS = {
   ],
   by_tool: [], by_storage: [], by_requester: [], failure_reasons: [],
   throughput: [], duration_histogram: [], files_total: null, bytes_total: null,
+  plan_rejected: 7, plan_rejection_reasons: [],
 };
 
 const INFRA = {
@@ -90,6 +91,21 @@ test("KPI 타일은 요청 목록 즉석 계산이 아니라 잡 통계 집계�
   expect(screen.getByText("대기").parentElement).toHaveTextContent("2");
   expect(screen.getByText("성공(24h)").parentElement).toHaveTextContent("20");
   expect(screen.getByText("실패(24h)").parentElement).toHaveTextContent("5"); // Failed+TimedOut
+});
+
+test("계획 거부 타일은 results 집계(잡 통계 밖 구간)를 보여준다", async () => {
+  // 계획 거부는 data_jobs 가 생기기 전의 종단이라 by_state 합산 어디에도 없다 --
+  // 별도 필드(plan_rejected)가 타일의 유일한 원천이다.
+  renderDash();
+  const tile = (await screen.findByText("계획 거부(24h)")).parentElement!;
+  await waitFor(() => expect(tile).toHaveTextContent("7"));
+});
+
+test("계획 거부 0건은 0 으로 표기한다(null≠0)", async () => {
+  renderDash({ jobs: { ...JOB_METRICS, plan_rejected: 0 } });
+  await waitFor(() => expect(screen.queryAllByText("불러오는 중…")).toHaveLength(0));
+  const tile = screen.getByText("계획 거부(24h)").parentElement!;
+  expect(tile).toHaveTextContent("0");
 });
 
 test("컴포넌트 카드가 이미지·ready·판정을 보여주고 null은 —", async () => {

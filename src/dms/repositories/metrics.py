@@ -179,6 +179,28 @@ class MetricsRepository:
                FROM data_jobs
                WHERE created_at BETWEEN :s AND :e AND state = 'Succeeded'""", params)
 
+        # 계획 거부: 계획 단계 거부는 data_jobs 행이 생기기 **전**의 종단이라 위의
+        # 어떤 data_jobs 집계(by_state·KPI 전부)에도 잡히지 않는다 -- 요청 종단이
+        # 남는 곳은 results 다(planner 의 set_state_with_result). 창은 completed_at
+        # (거부가 일어난 시각) 기준 -- 이 테이블에 created_at 은 없다. failure_reasons
+        # (data_jobs.reason_code, 잡 실패)와 **분리된 필드**다: 섞으면 「실패 사유」
+        # 라벨이 거짓말이 된다. 잡을 거쳐 Rejected 로 종단한 요청(preview_expired
+        # 계열의 REJECTED/PREVIEW_EXPIRED -> Rejected 매핑)도 이 수에 포함된다 --
+        # 정확히는 "Rejected 로 종단한 요청 수"이고 계획 거부가 지배적이다.
+        plan_rejected = self._db.query_one(
+            """SELECT COUNT(*) AS c FROM results
+               WHERE terminal_state = 'Rejected'
+                 AND completed_at BETWEEN :s AND :e""", params)
+        # 사유 상위는 failure_reasons 와 같은 모양(IS NOT NULL·상위 10) -- 사유 없는
+        # 거부는 표에서 빠지지만 총수(plan_rejected)에는 남는다(뭉개지 않는다).
+        plan_rejection_reasons = self._db.query(
+            """SELECT reason_code, COUNT(*) AS cnt FROM results
+               WHERE terminal_state = 'Rejected'
+                 AND completed_at BETWEEN :s AND :e
+                 AND reason_code IS NOT NULL
+               GROUP BY reason_code ORDER BY cnt DESC, reason_code ASC LIMIT 10""",
+            params)
+
         def fold(rows_, key_name):
             # COALESCE로 접은 ''를 None으로 되돌리고 내부 별칭을 응답 이름으로 바꾼다
             return [{key_name: (r["k"] or None), "count": r["cnt"],
@@ -193,6 +215,10 @@ class MetricsRepository:
                              for r in by_requester],
             "failure_reasons": [{"reason_code": r["reason_code"], "count": r["cnt"]}
                                 for r in failure_reasons],
+            "plan_rejected": plan_rejected["c"],
+            "plan_rejection_reasons": [
+                {"reason_code": r["reason_code"], "count": r["cnt"]}
+                for r in plan_rejection_reasons],
             "throughput": [{"bucket": r["bucket"], "count": r["cnt"]}
                            for r in throughput],
             "duration_seconds": duration_seconds,

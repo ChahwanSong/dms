@@ -49,11 +49,17 @@ export function Dashboard() {
   return (
     <section className="space-y-5">
       <h1 className="text-2xl font-bold">대시보드</h1>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      {/* 5타일: md 폭에서 5열은 타일당 ~130px -- MetricTile(라벨 한 줄 + 숫자)이
+          충분히 읽힌다(실측). 좁은 폭은 2열 그대로. */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <MetricTile label="실행 중" value={kpi.running} />
         <MetricTile label="대기" value={kpi.pending} />
         <MetricTile label="성공(24h)" value={kpi.succeeded} />
         <MetricTile label="실패(24h)" value={kpi.failed} />
+        {/* 계획 거부는 data_jobs 가 생기기 전의 종단이라 위 4타일(전부 by_state
+            = data_jobs 집계) 밖이다 -- results 집계 필드가 유일한 원천. 0 은
+            0 으로 표기한다(null≠0 -- 거부 없음은 정상값). */}
+        <MetricTile label="계획 거부(24h)" value={jobsQ.data?.plan_rejected ?? 0} />
       </div>
       {/* 최근 작업 카드가 표로 커져 맨 아래(RecentRequestsSection)로 내려갔다 --
           grid 에 홀로 남은 컴포넌트 카드는 md 반폭이 어색해 전폭으로 편다. */}

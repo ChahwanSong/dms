@@ -46,6 +46,10 @@ const STATS = {
   exec_runtime_counted: 1, exec_runtime_excluded: 2,
   duration_summary: { mean_seconds: 800, p50_seconds: 42, p95_seconds: 1600 },
   exec_runtime_summary: { mean_seconds: 940, p50_seconds: 940, p95_seconds: 940 },
+  plan_rejected: 3,
+  plan_rejection_reasons: [
+    { reason_code: "ldap_identity_not_found", count: 2 },
+    { reason_code: "storage_missing", count: 1 }],
   files_total: null, bytes_total: null,
 };
 
@@ -189,6 +193,25 @@ test("humanSeconds: 초→사람 단위, null 은 —(0 은 정상값 0s)", () =
   expect(humanSeconds(3600)).toBe("1h");      // 후행 .0 은 소음 -- 떨군다
   expect(humanSeconds(4320)).toBe("1.2h");
   expect(humanSeconds(172800)).toBe("2d");
+});
+
+test("계획 거부 사유 상위 표가 실패 사유와 분리돼 나오고 캡션이 구간을 정직화한다", async () => {
+  renderSection();
+  expect(await screen.findByText("계획 거부 사유 상위")).toBeInTheDocument();
+  // 실패 사유 상위(잡 실패)와 한 화면에 공존하되 다른 표다 -- 섞으면 라벨 거짓말.
+  expect(screen.getByText("실패 사유 상위")).toBeInTheDocument();
+  // 사유는 reasonText 매핑 재사용(실패 사유 표와 같은 한글화)
+  expect(screen.getByText("LDAP에서 사용자를 찾을 수 없습니다")).toBeInTheDocument();
+  expect(screen.getByText("등록되지 않은 스토리지입니다")).toBeInTheDocument();
+  // 캡션 정직화: 계획 거부는 data_jobs 가 없어 잡 통계 밖 -- 이 표가 그 구간이다.
+  expect(screen.getByText(/계획 거부 3건/)).toBeInTheDocument();
+  expect(screen.getByText(/계획 단계 거부는 잡이 되지 못해 잡 통계 밖/)).toBeInTheDocument();
+});
+
+test("계획 거부 사유가 없으면 표를 내지 않는다", async () => {
+  renderSection({ ...STATS, plan_rejected: 0, plan_rejection_reasons: [] });
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  expect(screen.queryByText("계획 거부 사유 상위")).toBeNull();
 });
 
 test("스케줄 대기(Volcano) 분포가 제출 대기와 구분돼 나온다", async () => {

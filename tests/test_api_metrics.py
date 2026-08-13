@@ -490,6 +490,33 @@ def test_metrics_jobs_summaries_are_null_without_samples(client):
     assert body["exec_runtime_excluded"] == 0
 
 
+def test_metrics_jobs_plan_rejected_fields(client, db):
+    # 계획 거부 지표(results 집계)의 응답 형태 -- data_jobs 집계(전부 위 필드)와
+    # 분리된 필드로 내려간다. 사유 목록은 failure_reasons 와 같은 모양.
+    from dms.domain import RequestState
+    repos = Repositories(db)
+    now = utc_now_iso()
+    rid = repos.requests.create(
+        operation="scan", requester_id="alice", actor="alice",
+        resource_key="k:rej:api", payload={}, priority="mid")
+    repos.requests.set_state_with_result(
+        rid, RequestState.REJECTED, reason_code="ldap_identity_not_found",
+        actor="planner")
+    db.execute("UPDATE results SET completed_at = :c WHERE request_id = :r",
+               {"c": iso_plus(now, -3600), "r": rid})
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    assert body["plan_rejected"] == 1
+    assert body["plan_rejection_reasons"] == [
+        {"reason_code": "ldap_identity_not_found", "count": 1}]
+
+
+def test_metrics_jobs_plan_rejected_zero_is_zero(client):
+    # 0 은 정상값(거부 없음)이다 -- null 로 뭉개지 않는다(null≠0).
+    body = client.get("/api/admin/metrics/jobs?window=24", headers=ADMIN).json()
+    assert body["plan_rejected"] == 0
+    assert body["plan_rejection_reasons"] == []
+
+
 def test_metrics_jobs_sched_wait_zero_counts_toward_the_total(client, db):
     # 라우트 층의 falsy 함정(submit_wait 선례 그대로): counted 를
     # `len([w for w in ws if w])` 로 세거나 원자료를 truthy 로 거르면 0(같은 틱

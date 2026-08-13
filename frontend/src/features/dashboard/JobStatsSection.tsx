@@ -162,6 +162,7 @@ export function JobStatsSection() {
   const execRuntimes = asArray<{ bucket: string; count: number }>(d?.exec_runtime_histogram)
     .map((b) => ({ label: b.bucket, value: b.count }));
   const reasons = asArray<{ reason_code: string; count: number }>(d?.failure_reasons);
+  const rejections = asArray<{ reason_code: string; count: number }>(d?.plan_rejection_reasons);
   return (
     <Card>
       <div className="flex items-center justify-between mb-2">
@@ -274,6 +275,32 @@ export function JobStatsSection() {
               ))}
             </tbody>
           </Table>
+        </div>
+      )}
+      {/* 계획 거부 사유 상위(results 집계): 실패 사유 상위(잡 실패)와 별도 표다 --
+          섞으면 라벨이 거짓말이 된다. 사유 한글화는 같은 reasonText 재사용. */}
+      {rejections.length > 0 && (
+        <div className="mt-4">
+          <h3 className="font-medium mb-2 text-sm">계획 거부 사유 상위</h3>
+          <Table>
+            <thead>
+              <tr className="text-muted"><th className="py-1">사유</th><th>건수</th></tr>
+            </thead>
+            <tbody>
+              {rejections.map((r) => (
+                <tr key={r.reason_code} className="border-t border-black/5">
+                  <td className="py-1">{reasonText(r.reason_code)}</td>
+                  <td>{r.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          {/* 정직화: 계획 거부는 data_jobs 가 생기기 전의 종단이라 위의 모든
+              분포·분해 표(전부 data_jobs 집계)에 안 잡힌다. 한 개의 템플릿
+              리터럴 = 한 개의 텍스트 노드. */}
+          <p className="text-muted text-xs mt-1">
+            {`계획 거부 ${d?.plan_rejected ?? 0}건 — 계획 단계 거부는 잡이 되지 못해 잡 통계 밖입니다. 이 표가 그 구간입니다`}
+          </p>
         </div>
       )}
       <p className="text-muted text-sm mt-4">

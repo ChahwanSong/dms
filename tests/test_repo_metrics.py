@@ -1,4 +1,5 @@
 import pytest
+from dms.domain import RequestState
 from dms.repositories import Repositories
 
 
@@ -35,6 +36,23 @@ def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
          "u": updated_at or created_at, "f": files, "b": nbytes, "w": wait,
          "sw": sched, "x": exec_at, "j": job_id})
     return job_id
+
+
+def _seed_rejected(db, repos, *, completed_at, reason="storage_missing",
+                   state=RequestState.REJECTED):
+    """계획 단계 종단(results 행)을 심는다. planner 의 set_state_with_result 와
+    같은 경로라 data_jobs 행이 없다 -- 잡 통계 집계 밖의 그 구간이다.
+    record_result 는 completed_at 을 벽시계로 찍으므로 창 테스트를 위해 UPDATE 로
+    덮는다(_seed_job 과 같은 타협)."""
+    rid = repos.requests.create(
+        operation="scan", requester_id="alice", actor="alice",
+        resource_key=f"k:rej:{completed_at}:{reason}:{state.value}", payload={},
+        priority="mid")
+    repos.requests.set_state_with_result(rid, state, reason_code=reason,
+                                         actor="planner")
+    db.execute("UPDATE results SET completed_at = :c WHERE request_id = :r",
+               {"c": completed_at, "r": rid})
+    return rid
 
 
 # ---- node_series ----
@@ -260,6 +278,54 @@ def test_job_stats_exec_runtime_drops_only_the_corrupt_timestamp_row(db, repos):
                                     end="2026-08-09T23:59:59Z")
     assert stats["exec_runtime_seconds"] == [3.0]
     assert stats["exec_runtime_excluded"] == 0
+
+
+def test_job_stats_plan_rejected_counts_and_reasons_by_completed_at(db, repos):
+    # 계획 거부는 data_jobs 행이 생기기 전의 종단이라 위의 어떤 data_jobs 집계에도
+    # 안 잡힌다 -- results(terminal_state='Rejected')에서 세고, 창은 completed_at
+    # (거부가 일어난 시각) 기준이다.
+    _seed_rejected(db, repos, completed_at="2026-08-09T01:00:00Z",
+                   reason="ldap_identity_not_found")
+    _seed_rejected(db, repos, completed_at="2026-08-09T02:00:00Z",
+                   reason="ldap_identity_not_found")
+    _seed_rejected(db, repos, completed_at="2026-08-09T03:00:00Z",
+                   reason="storage_missing")
+    _seed_rejected(db, repos, completed_at="2026-07-01T00:00:00Z",
+                   reason="storage_missing")                       # 창 밖
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert stats["plan_rejected"] == 3
+    assert stats["plan_rejection_reasons"] == [
+        {"reason_code": "ldap_identity_not_found", "count": 2},
+        {"reason_code": "storage_missing", "count": 1}]
+
+
+def test_job_stats_plan_rejected_separate_from_failure_reasons(db, repos):
+    # 잡 실패(data_jobs.reason_code)와 계획 거부(results.reason_code)를 한 필드로
+    # 섞으면 「실패 사유」 라벨이 거짓말이 된다 -- 두 집계는 분리된 필드다.
+    # Conflict 종단(results 행 있음)은 Rejected 가 아니므로 세지 않는다.
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", state="Failed",
+              reason_code="execution_failed")
+    _seed_rejected(db, repos, completed_at="2026-08-09T02:00:00Z",
+                   reason="ldap_identity_not_found")
+    _seed_rejected(db, repos, completed_at="2026-08-09T03:00:00Z",
+                   reason="resource_conflict", state=RequestState.CONFLICT)
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert stats["plan_rejected"] == 1
+    assert stats["plan_rejection_reasons"] == [
+        {"reason_code": "ldap_identity_not_found", "count": 1}]
+    assert stats["failure_reasons"] == [
+        {"reason_code": "execution_failed", "count": 1}]
+
+
+def test_job_stats_plan_rejected_zero_is_zero_not_none(db, repos):
+    # 거부 0건은 정상값 0 이다 -- null(모름)로 뭉개면 화면이 "값 없음"으로
+    # 거짓말한다(null≠0).
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert stats["plan_rejected"] == 0
+    assert stats["plan_rejection_reasons"] == []
 
 
 def test_job_stats_sched_wait_zero_is_counted_not_excluded(db, repos):
