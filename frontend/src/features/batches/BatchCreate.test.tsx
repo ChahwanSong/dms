@@ -124,6 +124,37 @@ test("verbose+quiet 상충: 즉답 문구 + 다음 비활성", async () => {
   expect(next()).toBeDisabled();
 });
 
+test("관리자 특권 실행: owner_username 이 요약에 보이고 바디에 실린다", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(next());                              // → 실행 제어
+  await userEvent.type(screen.getByLabelText("관리자 특권 실행(root)"), "alice");
+  await userEvent.click(next());                              // → 확인·제출
+  // 확인 스텝 요약 = 제출 바디 파생(SubmitJob 소유자(특권) 행 미러)
+  expect(screen.getByText("소유자(특권)")).toBeInTheDocument();
+  expect(screen.getByText("alice")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body).toMatchObject({ owner_username: "alice" });
+});
+
+test("특권 입력이 빈값이면 요약 행도 owner_username 키도 없다", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(next());
+  await userEvent.click(next());
+  expect(screen.queryByText("소유자(특권)")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body).not.toHaveProperty("owner_username");
+});
+
 test("파일 업로드: 로컬 FileReader 로 파싱해 테이블에 반영", async () => {
   renderPage();
   await userEvent.click(next());

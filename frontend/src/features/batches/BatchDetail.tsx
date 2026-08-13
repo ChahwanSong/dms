@@ -21,6 +21,11 @@ export function BatchDetail() {
           <div className="flex items-center gap-3">
             <StatusPill state={b?.status ?? "…"} />
             <span className="text-muted text-sm">{b?.operation} · 성공 {b?.succeeded_count}/실패 {b?.failed_count}/전체 {b?.item_count}</span>
+            {/* 있을 때만 -- null/부재 = 비특권 현행. 한 개의 템플릿 리터럴 = 한 개의
+                텍스트 노드(getByText 가 통으로 찾도록, 대시보드 관례). */}
+            {b?.owner_username && (
+              <span className="text-bad text-sm">{`소유자(특권) ${b.owner_username}`}</span>
+            )}
           </div>
           <div className="flex gap-2">
             {b?.status === "PreviewReady" && <Button disabled={confirm.isPending} onClick={() => confirm.mutate()}>배치 확인</Button>}

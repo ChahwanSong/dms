@@ -69,14 +69,26 @@ class BatchOrchestrator:
         # 부재 = 정책 기본으로 읽는다.
         if batch.get("node_count") is not None:
             payload["node_count"] = batch["node_count"]
+        # 배치 특권 실행: owner_username 은 node_count 와 같은 규칙으로 build 후
+        # 주입한다(단건 payload 계약·resource_key 산식 무영향). None(비특권)은 키
+        # 자체를 싣지 않는다 -- null(모름) ≠ 0, 기존 자식 payload 모양 그대로.
+        if batch.get("owner_username") is not None:
+            payload["owner_username"] = batch["owner_username"]
         priority = resolve_priority(self._repos, batch["operation"], batch.get("priority"))
+        # 자식의 auth_method 는 배치 생성 시점의 인증 방식(batches.auth_method)을
+        # 물려받는다 -- 기계 고정 "token" 은 세션 배치의 자식까지 비특권으로 눌러
+        # LDAP 밖 로컬 admin 배치를 전부 ldap_identity_not_found 로 거부시켰다
+        # (실사고). 특권 재검증은 여전히 planner 몫(allowlist + session)이라 이
+        # 상속만으로 승격되지 않는다. 구형 배치 행(컬럼 NULL)은 token 폴백 --
+        # null(모름) ≠ "session", 모름을 특권 쪽으로 읽지 않는다(fail-closed).
+        auth_method = batch.get("auth_method")
+        if auth_method is None:
+            auth_method = "token"
         rid = self._repos.requests.create(
             operation=batch["operation"], requester_id=batch["requester_id"],
             actor=batch["actor"], resource_key=key, payload=payload,
             priority=priority, batch_id=batch["batch_id"],
-            # 배치 자식은 기계가 materialize 하는 것이지 사람이 세션으로 낸 것이 아니다
-            # -- 특권 없이 실 신원(LDAP)로만 돈다(설계 §2.2-2, 비특권 안전 기본).
-            auth_method="token")
+            auth_method=auth_method)
         self._repos.batches.set_item_materialized(batch["batch_id"], item["seq"], rid)
 
     def _drive(self, batch):

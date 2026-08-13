@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import (DataJobState, DomainValidationError, Operation,
-                      TERMINAL_DATA_JOB_STATES, build_data_payload, validate_batch)
+                      TERMINAL_DATA_JOB_STATES, build_data_payload, validate_batch,
+                      validate_owner_username)
 from ..execution import ExecutionError
 from .auth import Identity, require_admin
 from .cancel import terminate_job
@@ -19,12 +20,31 @@ class BatchBody(BaseModel):
     # 실행 제어(슬라이스 32). None = 미지정(정책 기본) — null≠0.
     priority: str | None = None
     node_count: int | None = None
+    # 배치 특권 실행: 단건 제출(routes_requests)의 owner_username 이식. None = 비특권.
+    owner_username: str | None = None
 
 
 @router.post("/api/admin/batches", status_code=202)
 def create_batch(body: BatchBody, request: Request, identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
+    # 특권 게이트(단건 제출 routes_requests.py:86-94 미러): owner_username 이
+    # 요청자와 다르면 특권 의도 → 인가 필요. 단건의 3중(admin — require_admin 이
+    # 이미 보장 — + 기능 플래그 + allowlist)에 **세션 인증**을 더한다: 단건은
+    # planner 가 요청 auth_method 로 세션을 재검증하지만, 배치는 생성 시점 인증
+    # 방식을 행에 박제해 자식이 물려받으므로 박제 전에 여기서 끊어야 토큰 생성
+    # 배치가 특권을 실어 나르지 못한다.
+    owner = body.owner_username
+    if owner is not None and owner != identity.actor:
+        settings = request.app.state.settings
+        authorized = (identity.role == "admin"
+                      and settings.allow_privileged_requesters
+                      and identity.actor in settings.privileged_requesters
+                      and identity.auth == "session")
+        if not authorized:
+            raise HTTPException(status_code=403, detail="privileged_not_authorized")
     try:
+        if owner is not None:
+            validate_owner_username(owner)    # 단건 _validated_payload 와 같은 검증
         validate_batch(body.operation, body.max_concurrency, body.items,
                        priority=body.priority, node_count=body.node_count)
         for item in body.items:                       # 각 행 검증(조기 거부)
@@ -36,7 +56,10 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
         max_concurrency=body.max_concurrency, options=body.options, note=body.note,
         items=body.items, status=status,
-        priority=body.priority, node_count=body.node_count)
+        priority=body.priority, node_count=body.node_count,
+        # auth_method 박제는 특권 여부와 무관한 생성 시점 사실의 기록이다 --
+        # 자식 request 가 물려받는다(orchestrator._materialize).
+        owner_username=owner, auth_method=identity.auth)
     return {"batch_id": bid, "status": status}
 
 

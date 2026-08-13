@@ -751,6 +751,35 @@ def test_token_auth_root_request_never_runs_privileged(db):
     assert ident["uid"] == 5000 and ident["privileged"] is False
 
 
+def test_privileged_batch_child_plans_for_non_ldap_requester(db):
+    """배치 특권 실행의 종단 통합: LDAP 밖 로컬 admin 이 만든 세션 배치의 자식이
+    (a) 상속된 auth_method="session" + allowlist 로 특권을 얻어 root 로 계획되고
+    (b) placement 신원 게이트를 건너뛴다(placement.py -- privileged 는 노드 신원
+    전파와 무관). 이 성질이 없으면 실사고 그대로 ldap_identity_not_found 즉시
+    Rejected 다(배치 자식 token 고정 시절의 그 경로)."""
+    from dms.batch_orchestrator import BatchOrchestrator
+
+    class _AdminPrivSettings(_PrivSettings):
+        privileged_requesters = frozenset({"admin"})
+
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos)
+    # 신원 미전파 리포트(identities: []) -- 특권이 아니면 후보 0 이 되는 형상.
+    _seed_identity_pending_report(repos)
+    bid = repos.batches.create(
+        operation="scan", requester_id="admin", actor="admin", max_concurrency=1,
+        options={}, note=None, items=[{"storage": "s1", "target": "a"}],
+        status="Running", owner_username="alice", auth_method="session")
+    BatchOrchestrator(repos, settings=_AdminPrivSettings()).run_once()
+    rid = repos.batches.list_items(bid)[0]["request_id"]
+    resolver = StubIdentityResolver({})       # LDAP 에 admin 도 alice 도 없다
+    result = Planner(repos, resolver,
+                     settings=_AdminPrivSettings()).run_once(now_iso=NOW)
+    assert result[rid] == "planned"
+    ident = repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
+    assert (ident["username"], ident["uid"], ident["privileged"]) == ("alice", 0, True)
+
+
 def test_reject_crash_between_writes_leaves_request_pending(db):
     """비원자 쌍(BACKLOG §2.4, 슬라이스 27 발견): set_state(REJECTED) 커밋 후
     record_result 전에 죽으면 요청은 Rejected 인데 results 가 없다 -- Rejected 는

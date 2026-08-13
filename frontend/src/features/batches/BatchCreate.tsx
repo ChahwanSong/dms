@@ -40,6 +40,8 @@ const initial = {
   // 실행 제어: priority "" = "(정책 기본)" = 바디에서 생략(null≠0).
   // nodeCount "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
   priority: "", nodeCount: "", mc: 2, note: "",
+  // 특권 실행: 빈값 = 바디에서 생략 = 비특권 현행(SubmitJob ownerUsername 미러).
+  ownerUsername: "",
 };
 
 export function BatchCreate() {
@@ -123,6 +125,8 @@ export function BatchCreate() {
       // 미지정("")은 키 자체를 생략한다 — 서버 NULL(정책 기본), null≠0.
       ...(f.priority !== "" && { priority: f.priority }),
       ...(f.nodeCount.trim() !== "" && { node_count: Number(f.nodeCount.trim()) }),
+      // 특권 실행: 빈값 생략 = 비특권 현행(서버 게이트는 값이 있을 때만 발동).
+      ...(f.ownerUsername.trim() !== "" && { owner_username: f.ownerUsername.trim() }),
     };
   }
 
@@ -361,6 +365,15 @@ export function BatchCreate() {
               </select>
             </label>
 
+            {/* 단건 SubmitJob:279-281 미러(문구·캡션 동일). 이 화면은 admin 전용
+                라우트라 isAdmin 분기가 불필요하다 — 인가의 최종 심판은 서버 게이트
+                (403 privileged_not_authorized). */}
+            <label className="text-sm block">관리자 특권 실행(root)
+              <input aria-label="관리자 특권 실행(root)" className={field}
+                     value={f.ownerUsername} onChange={on("ownerUsername")} />
+              <p className="text-muted text-xs mt-1">root로 실행되며, 입력한 사용자는 소유자로 기록됩니다</p>
+            </label>
+
             <label className="text-sm block">노드 수 (1..64, 빈값 = 정책 기본)
               <input aria-label="노드 수" type="number" min={1} max={64} className={field}
                      value={f.nodeCount} onChange={on("nodeCount")} />
@@ -409,6 +422,13 @@ export function BatchCreate() {
                     <dt className="w-28 shrink-0 text-muted">노드 수</dt>
                     <dd>{body.node_count ?? "(정책 기본)"}</dd>
                   </div>
+                  {/* 소유자(특권) 행은 값이 있을 때만(SubmitJob 확인 스텝 미러) */}
+                  {body.owner_username && (
+                    <div className="flex gap-2">
+                      <dt className="w-28 shrink-0 text-muted">소유자(특권)</dt>
+                      <dd>{body.owner_username}</dd>
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <dt className="w-28 shrink-0 text-muted">동시 상한</dt>
                     <dd>{body.max_concurrency}</dd>

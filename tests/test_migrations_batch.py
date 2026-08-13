@@ -24,6 +24,24 @@ def test_batch_priority_node_count_backfilled_on_old_db(tmp_path):
     migrate(db)
     assert {"priority", "node_count"} <= _cols(db, "batches")
 
+def test_batch_owner_username_and_auth_method_columns(tmp_path):
+    # 배치 특권 실행: owner_username(NULL=비특권 현행) + auth_method(생성 시점 인증
+    # 방식 박제 — 자식 request 가 물려받을 근거).
+    db = Database.connect(f"sqlite:///{tmp_path}/m5.db"); migrate(db)
+    assert {"owner_username", "auth_method"} <= _cols(db, "batches")
+
+def test_batch_owner_auth_backfilled_on_old_db(tmp_path):
+    db = Database.connect(f"sqlite:///{tmp_path}/m6.db")
+    # 구형(슬라이스 32 형상): owner_username/auth_method 없이 만든 뒤 migrate 가
+    # ALTER 로 보강하는지 — 양쪽에 없으면 라이브에서만 컬럼이 없다(슬라이스 14 교훈).
+    db.execute("""CREATE TABLE batches (batch_id TEXT PRIMARY KEY, operation TEXT,
+        requester_id TEXT, actor TEXT, status TEXT, max_concurrency INTEGER,
+        options TEXT, note TEXT, item_count INTEGER, succeeded_count INTEGER,
+        failed_count INTEGER, created_at TEXT, updated_at TEXT,
+        priority TEXT, node_count INTEGER)""")
+    migrate(db)
+    assert {"owner_username", "auth_method"} <= _cols(db, "batches")
+
 def test_requests_has_batch_id(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/m2.db"); migrate(db)
     assert "batch_id" in _cols(db, "requests")

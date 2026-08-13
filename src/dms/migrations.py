@@ -89,7 +89,17 @@ def _apply_migrations(db: Database) -> None:
             -- 슬라이스 32 배치 실행 제어: NULL = 미지정(정책 기본) — null≠0.
             -- orchestrator 가 batch 행을 읽어 자식 request 에 전달한다.
             priority TEXT,
-            node_count INTEGER)""",
+            node_count INTEGER,
+            -- 배치 특권 실행: 단건 제출의 owner_username 경로 이식. NULL = 비특권
+            -- 현행(자식 payload 에 키 자체가 실리지 않는다 — null≠0).
+            owner_username TEXT,
+            -- 배치 생성 시점의 인증 방식(session/token) 박제 — 자식 request 의
+            -- auth_method 가 이 값을 물려받는다(requests.auth_method 선례와 같은
+            -- 「왜」: planner 가 특권 승격을 session 에만 허용하는 심층 방어의
+            -- 재료다. 기계 고정 "token" 시절엔 LDAP 밖 로컬 admin 의 배치 자식이
+            -- 전부 ldap_identity_not_found 로 즉시 거부됐다). NULL(구형 행)은
+            -- orchestrator 가 token 으로 접는다 — 모름은 특권 쪽으로 읽지 않는다.
+            auth_method TEXT)""",
         "CREATE INDEX IF NOT EXISTS idx_batches_status ON batches (status, created_at)",
         """CREATE TABLE IF NOT EXISTS batch_items (
             batch_id TEXT NOT NULL,
@@ -518,6 +528,10 @@ def _ensure_columns(db):
         # 14 의 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
         ("batches", "priority", "TEXT"),
         ("batches", "node_count", "INTEGER"),
+        # 배치 특권 실행 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스 14 의 실
+        # 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
+        ("batches", "owner_username", "TEXT"),
+        ("batches", "auth_method", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

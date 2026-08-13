@@ -14,6 +14,8 @@ export interface CreateBatchBody {
   note: string | null; items: Record<string, string>[];
   // 실행 제어(슬라이스 32): 미지정은 키 생략 = 서버 NULL(정책 기본) — null≠0.
   priority?: string; node_count?: number;
+  // 배치 특권 실행: 빈값은 키 생략 = 비특권 현행(단건 SubmitJob 관례 미러).
+  owner_username?: string;
 }
 export const useCreateBatch = () =>
   useMutation({ mutationFn: (b: CreateBatchBody) =>

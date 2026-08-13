@@ -49,6 +49,20 @@ test("Running 에선 전체 재실행 버튼 부재", async () => {
   await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언
   expect(screen.queryByRole("button", { name: "전체 재실행" })).toBeNull();
 });
+test("owner_username 이 있으면 소유자(특권) 표시", async () => {
+  server.use(http.get("/api/admin/batches/b1",
+    () => HttpResponse.json(batch({ owner_username: "alice" }))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByText("소유자(특권) alice")).toBeInTheDocument();
+});
+test("owner_username 이 없으면(비특권 현행) 소유자 표시 부재", async () => {
+  renderAt("Running");
+  await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언
+  expect(screen.queryByText(/소유자\(특권\)/)).toBeNull();
+});
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));

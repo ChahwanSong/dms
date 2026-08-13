@@ -8,20 +8,27 @@ class BatchesRepository:
         self._db = db
 
     def create(self, *, operation, requester_id, actor, max_concurrency, options,
-               note, items, status, priority=None, node_count=None) -> str:
+               note, items, status, priority=None, node_count=None,
+               owner_username=None, auth_method=None) -> str:
         # priority/node_count NULL = 미지정(정책 기본) — null≠0 (0은 유효값이 아님).
+        # owner_username NULL = 비특권 현행. auth_method 기본 None(모름) — 라우트가
+        # 늘 실값을 명시하고, 빠뜨린 새 호출자의 배치는 orchestrator 가 token 으로
+        # 접는다(requests.create 의 "token" 기본과 같은 fail-closed 방향).
         bid = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
             self._db.execute(
                 """INSERT INTO batches (batch_id, operation, requester_id, actor, status,
                        max_concurrency, options, note, item_count, succeeded_count,
-                       failed_count, created_at, updated_at, priority, node_count)
-                   VALUES (:id,:op,:req,:actor,:st,:mc,:opt,:note,:n,0,0,:now,:now,:pri,:nc)""",
+                       failed_count, created_at, updated_at, priority, node_count,
+                       owner_username, auth_method)
+                   VALUES (:id,:op,:req,:actor,:st,:mc,:opt,:note,:n,0,0,:now,:now,:pri,:nc,
+                       :own,:auth)""",
                 {"id": bid, "op": operation, "req": requester_id, "actor": actor,
                  "st": status, "mc": max_concurrency, "opt": dump_json(options),
                  "note": note, "n": len(items), "now": now,
-                 "pri": priority, "nc": node_count})
+                 "pri": priority, "nc": node_count,
+                 "own": owner_username, "auth": auth_method})
             for seq, item in enumerate(items):
                 self._db.execute(
                     """INSERT INTO batch_items (batch_id, seq, payload, status, request_id,

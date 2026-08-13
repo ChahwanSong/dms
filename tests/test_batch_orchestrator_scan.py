@@ -54,6 +54,43 @@ def test_batch_without_controls_keeps_legacy_child_shape(db):
     assert "node_count" not in req["payload"]   # 미지정 = 키 부재(null≠0)
     assert req["priority"] == "mid"             # 정책 없음 폴백(기존 경로)
 
+# --- 배치 특권 실행: owner_username·auth_method 의 자식 상속 ---
+
+def test_batch_owner_username_flows_to_child_payload(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running",
+        owner_username="alice", auth_method="session")
+    _orch(db).run_once()
+    it = repos.batches.list_items(bid)[0]
+    req = repos.requests.get(it["request_id"])
+    assert req["payload"]["owner_username"] == "alice"
+    assert req["auth_method"] == "session"   # planner 세션 재검증의 재료
+
+def test_batch_without_owner_keeps_payload_shape_but_inherits_auth(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running",
+        auth_method="session")
+    _orch(db).run_once()
+    it = repos.batches.list_items(bid)[0]
+    req = repos.requests.get(it["request_id"])
+    assert "owner_username" not in req["payload"]   # None = 키 부재(기존 그대로)
+    assert req["auth_method"] == "session"
+
+def test_legacy_batch_row_falls_back_to_token_auth(db):
+    # 구형 배치 행(auth_method 컬럼 NULL)은 기존 동작 그대로 token -- NULL(모름)을
+    # session 으로 읽으면 조용한 특권 승격 경로가 열린다(fail-closed).
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running")
+    _orch(db).run_once()
+    it = repos.batches.list_items(bid)[0]
+    assert repos.requests.get(it["request_id"])["auth_method"] == "token"
+
 def test_scan_aggregates_and_completes(db):
     repos = Repositories(db)
     bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
