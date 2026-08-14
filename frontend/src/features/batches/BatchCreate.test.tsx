@@ -437,6 +437,62 @@ test("동시 실행 상한 캡션: 배치 항목(잡) 수 의미 — 노드 수�
     "동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다.")).toBeInTheDocument();
 });
 
+// 배치 sync open_noatime 기본 ON(사용자 승인): 배치는 통일 게이트로 항상 특권
+// (root) 실행이라 O_NOATIME 권한 제약이 없고, 소스 atime 오염을 막아야 데이터
+// 온도(hot/cold) 통계가 정직해진다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)
+// 라 DMS 가 명시적으로 켠다. 단건 sync(SubmitJob)는 비특권 경로에서 타인 소유
+// 파일 O_NOATIME open 이 EPERM 이라 기본 OFF 유지 — 스코프 밖.
+test("sync 기본 제출: open_noatime 기본 ON — 바디에 true 명시, 확인 요약에도 보인다", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await toSyncControls();
+  // 고급 옵션 <details> 기본 접힘 그대로 — 상태 초기값이 진실(펼치지 않아도 실린다).
+  expect(screen.getByLabelText("open_noatime")).toBeChecked();
+  await userEvent.click(next());                              // → 확인·제출
+  expect(screen.getByText("옵션").closest("div")).toHaveTextContent("open_noatime");
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.options).toEqual({ open_noatime: true });
+});
+
+test("sync open_noatime 체크 해제: 키 생략(기존 bool 옵션 직렬화 관례)", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await toSyncControls();
+  await userEvent.click(screen.getByLabelText("open_noatime"));
+  await userEvent.click(next());
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.options).toEqual({});
+});
+
+test("scan 배치엔 open_noatime 무관 — options 에 키 부재(sync 전용)", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await toScanControls();
+  await userEvent.click(next());
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.options).toEqual({});
+});
+
+// nsync 면당 캡션(정직화): resolve_fanout 은 nsync(공존 노드 없음 폴백)에서
+// max_nodes·요청 node_count 를 출발·목적지 **각각**에 캡한다(placement.py:121-122
+// 면당 캡) — 총 노드는 최대 2배. dsync 는 공존 노드 단일 집합(primary)이라 무관.
+test("노드 수 면당 캡션(sync): nsync 폴백 시 면당 상한·총 최대 2배 문구", async () => {
+  renderPage();
+  await toSyncControls();
+  expect(screen.getByText(
+    "nsync 폴백 시 입력한 노드 수는 출발·목적지 각각(면당)의 상한이라 "
+    + "총 노드는 최대 2배가 될 수 있습니다.")).toBeInTheDocument();
+});
+
+test("노드 수 면당 캡션은 scan 에 없다(sync 전용)", async () => {
+  renderPage();
+  await toScanControls();
+  expect(screen.queryByText(/면당/)).toBeNull();
+});
+
 test("파일 업로드: 로컬 FileReader 로 파싱해 테이블에 반영", async () => {
   renderPage();
   await userEvent.click(next());

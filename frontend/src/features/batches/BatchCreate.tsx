@@ -41,9 +41,15 @@ const initial = {
   // 기능 삭제라 함께 제거). scanBatchFiles는 sync의 batchFiles와 별도 상태 —
   // 같은 옵션명이지만 범위가 다르다(scan 0..10억·0 = 배칭 끔, sync 1..100만).
   scanBatchFiles: "", brokenLimit: "", verbose: false, quiet: false,
-  // sync 옵션(SubmitJob 미러, 정규식·범위는 optionRules 공유)
+  // sync 옵션(SubmitJob 미러, 정규식·범위는 optionRules 공유). 단 open_noatime 은
+  // 배치만 기본 ON(사용자 승인): 배치는 통일 게이트로 항상 특권(root) 실행이라
+  // O_NOATIME 권한 제약이 없고, 소스 atime 오염을 막아야 데이터 온도(hot/cold)
+  // 통계가 정직해진다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)라 DMS 가
+  // 명시적으로 켠다. 단건 sync(SubmitJob)는 비특권 경로에서 타인 소유 파일
+  // O_NOATIME open 이 EPERM 이라 기본 OFF — 배치와 다른 게 맞다(고급 옵션
+  // <details> 기본 접힘이어도 바디에 실리는 진실은 이 초기값이다).
   delete: false, contents: false, direct: false,
-  openNoatime: false, batchFiles: "", bufsize: "", chmod: "", chown: "",
+  openNoatime: true, batchFiles: "", bufsize: "", chmod: "", chown: "",
   // 실행 제어: priority "" = "(정책 기본)" = 바디에서 생략(null≠0).
   // nodeCount/procsPerNode "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
   priority: "", nodeCount: "", procsPerNode: "", mc: 2, note: "", name: "",
@@ -446,6 +452,12 @@ export function BatchCreate() {
                       <input type="checkbox" aria-label="open_noatime" checked={f.openNoatime}
                              onChange={on("openNoatime")} /> open_noatime
                     </label>
+                    {/* 기본 ON 의 「왜」는 initial 의 openNoatime 주석 — 캡션은
+                        사용자에게 같은 근거를 요약해 준다(끄는 건 자유). */}
+                    <p className="text-muted text-xs">
+                      기본 켬 — 배치는 특권(root) 실행이라 O_NOATIME 권한 제약이 없고,
+                      소스 atime 오염을 막아 데이터 온도(hot/cold) 통계를 정직하게 유지합니다.
+                    </p>
                     <label className="text-sm block">batch_files (1..1,000,000)
                       <input aria-label="batch_files" placeholder="예: 1000"
                              className={field} value={f.batchFiles}
@@ -511,6 +523,17 @@ export function BatchCreate() {
               {/* "정책 기본"의 실값 — 잡 하나가 몇 노드로 퍼지는가. "노드당
                   P프로세스"까지 병기돼 있어 아래 노드당 프로세스 수 입력과도 짝이다 */}
               <p className="text-muted text-xs mt-1">{policyCaption}</p>
+              {f.op === "sync" && (
+                // nsync 면당 캡(placement.py:121-122): resolve_fanout 은 nsync
+                // (공존 노드 없음 폴백)에서 max_nodes·요청 node_count 를 출발·
+                // 목적지 **각각**에 min-캡한다 — 입력값이 면당 상한이라 총 노드는
+                // 최대 2배. dsync 는 공존 노드 단일 집합(primary)이라 해당 없음.
+                // 정책 조회 상태와 무관한 배치 메커니즘 사실이라 항상 표기한다.
+                <p className="text-muted text-xs mt-1">
+                  nsync 폴백 시 입력한 노드 수는 출발·목적지 각각(면당)의 상한이라
+                  총 노드는 최대 2배가 될 수 있습니다.
+                </p>
+              )}
             </label>
             {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
 
