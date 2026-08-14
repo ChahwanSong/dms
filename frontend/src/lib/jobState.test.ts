@@ -1,4 +1,5 @@
-import { buildPillVariant, isTerminal, pillVariant, storagePillVariant,
+import { batchPillVariant, buildPillVariant, isTerminal, pillVariant,
+         storagePillVariant,
          REQUEST_TERMINAL_STATES, TERMINAL_STATES } from "./jobState";
 import { test, expect } from "vitest";
 
@@ -46,6 +47,24 @@ test("M5: buildPillVariant marks Pending/Running as busy without touching job pi
   // 잡/요청 상태의 pillVariant는 그대로다(회귀 없음).
   expect(pillVariant("Pending")).toBe("neutral");
   expect(pillVariant("Running")).toBe("neutral");
+});
+
+test("M5: batchPillVariant — 배치 상태 전용 매핑, 공유 pillVariant 불변", () => {
+  // 배치 상태(Running/Previewing/PreviewReady/Completed/Cancelled)는 잡/요청
+  // 상태와 문자열이 겹친다(Running·Cancelled) — 공유 pillVariant 를 고치면
+  // 잡/요청 배지까지 바뀌므로 별도 함수(buildPillVariant 와 같은 M5 관례).
+  expect(batchPillVariant("Completed")).toBe("ok");
+  expect(batchPillVariant("Running")).toBe("busy");
+  expect(batchPillVariant("Previewing")).toBe("busy");
+  expect(batchPillVariant("PreviewReady")).toBe("busy");
+  // Cancelled 는 운영자의 의도된 중지지 실패가 아니다 — bad(적색)는 "실패"라는
+  // 거짓말이 된다(실패 수는 성공/실패 카운터가 따로 말한다). neutral.
+  expect(batchPillVariant("Cancelled")).toBe("neutral");
+  expect(batchPillVariant("NotAStatus")).toBe("neutral");
+  // 공유 pillVariant 는 불변(잡/요청 배지 회귀 없음) — 겹치는 문자열 재확인.
+  expect(pillVariant("Running")).toBe("neutral");
+  expect(pillVariant("Cancelled")).toBe("bad");
+  expect(pillVariant("Completed")).toBe("neutral");
 });
 
 test("잔여 상태 매핑(슬라이스 1~4 부채): PreviewExpired=bad, Planning/Scheduled=busy", () => {

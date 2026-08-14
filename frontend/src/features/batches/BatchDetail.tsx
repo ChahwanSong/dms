@@ -13,6 +13,7 @@ import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import { reasonText, ApiError } from "../../lib/api";
+import { batchPillVariant } from "../../lib/jobState";
 import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
 
 // NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
@@ -393,7 +394,11 @@ export function BatchDetail() {
       <Card>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <StatusPill state={b?.status ?? "…"} />
+            {/* 배치 상태 전용 색(batchPillVariant — Completed=초록·진행=busy·
+                Cancelled=neutral). 항목 pill 은 요청/잡 판정 축이라 기존 공유
+                pillVariant 를 그대로 쓴다(variant 미지정). */}
+            <StatusPill state={b?.status ?? "…"}
+                        variant={b ? batchPillVariant(b.status) : undefined} />
             <span className="text-muted text-sm">{b?.operation} · 성공 {b?.succeeded_count}/실패 {b?.failed_count}/전체 {b?.item_count}</span>
             {/* 특권 실행 문구는 로드되면 항상 -- 통일 게이트 후 배치는 전부 관리자
                 특권(root) 실행이다. 행별 auth_method/owner 유무로 재판정하지 않는다:
@@ -406,7 +411,10 @@ export function BatchDetail() {
             )}
           </div>
           <div className="flex gap-2">
-            {b && !editing && <Button variant="ghost" onClick={startEdit}>이름·메모 편집</Button>}
+            {/* 라벨은 "메모 편집"(사용자 지시 — "이름·메모"의 이름 축약). 폼은
+                여전히 이름·메모 둘 다 편집한다(PATCH {name, note} 계약 무변경) —
+                폼 안 입력 라벨("배치 이름"/"메모")이 실기능을 말한다. */}
+            {b && !editing && <Button variant="ghost" onClick={startEdit}>메모 편집</Button>}
             {b?.status === "PreviewReady" && <Button disabled={confirm.isPending} onClick={() => confirm.mutate()}>배치 확인</Button>}
             {b?.status === "Completed" && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함

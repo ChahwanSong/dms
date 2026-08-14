@@ -29,6 +29,20 @@ export function buildPillVariant(state: string): PillVariant {
   return "neutral";
 }
 
+// 배치 상태(Running/Previewing/PreviewReady/Completed/Cancelled)만을 위한 별도
+// 매핑이다. Running·Cancelled 는 잡/요청 상태와 문자열이 겹친다 — 공유 pillVariant
+// 를 고치면 잡/요청 배지까지 바뀌므로 별도 함수(buildPillVariant 와 같은 M5 관례).
+// Cancelled 를 bad(적색)가 아니라 neutral 로 두는 이유: 배치 취소는 운영자의
+// 의도된 중지지 실패가 아니다 — 적색은 "실패"라는 거짓말이 되고, 실제 실패 수는
+// 헤더의 성공/실패 카운터가 따로 말한다. 항목 상태(Queued/Materialized/Succeeded/
+// Failed/Cancelled — 요청/잡 판정 축)는 이 함수의 도메인이 아니다: 그쪽은 공유
+// pillVariant 를 그대로 쓴다(항목 Cancelled 는 실행이 끊긴 것이라 bad 가 정직).
+export function batchPillVariant(status: string): PillVariant {
+  if (status === "Completed") return "ok";
+  if (["Running", "Previewing", "PreviewReady"].includes(status)) return "busy";
+  return "neutral";
+}
+
 // 슬라이스 26: 스토리지 상태(Ready/Degraded/Unknown — reconciler.py:20-27)만을 위한
 // 별도 매핑이다. 공유 pillVariant를 고치면 잡/요청 배지까지 바뀌므로 건드리지 않는다
 // (buildPillVariant 와 같은 M5 관례). Degraded 를 bad(적색)가 아니라 busy(황색 주의)로

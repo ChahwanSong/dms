@@ -254,7 +254,9 @@ test("이름·메모 인라인 편집: 저장이 PATCH 를 쏘고 편집을 닫�
     return HttpResponse.json(batch({ name: "새 이름", note: "새 메모" }));
   }));
   renderAt("Running");
-  await userEvent.click(await screen.findByRole("button", { name: "이름·메모 편집" }));
+  // 버튼 라벨은 "메모 편집"(사용자 지시 — "이름·메모"의 이름 축약). 폼은 여전히
+  // 이름·메모 둘 다 편집한다(PATCH {name, note} 계약 무변경).
+  await userEvent.click(await screen.findByRole("button", { name: "메모 편집" }));
   await userEvent.type(screen.getByLabelText("배치 이름"), "새 이름");
   await userEvent.type(screen.getByLabelText("메모"), "새 메모");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
@@ -267,7 +269,7 @@ test("편집 취소는 PATCH 없이 닫힌다", async () => {
   server.use(http.patch("/api/admin/batches/b1", () => { patchCalls += 1;
     return HttpResponse.json(batch()); }));
   renderAt("Running");
-  await userEvent.click(await screen.findByRole("button", { name: "이름·메모 편집" }));
+  await userEvent.click(await screen.findByRole("button", { name: "메모 편집" }));
   // 배치 취소 버튼("취소")과 겹치지 않는 라벨 — 편집 취소는 별개 동작이다
   await userEvent.click(screen.getByRole("button", { name: "편집 취소" }));
   expect(screen.queryByLabelText("배치 이름")).toBeNull();
@@ -550,6 +552,28 @@ test("실행 설정: 미지정(null)은 '정책 기본' — 0·빈값으로 뭉�
     .toBe("없음");
   // 소유자 기록은 있을 때만 — 없으면 행 자체가 없다
   expect(screen.queryByText("소유자 기록")).toBeNull();
+});
+
+// --- 배치 상태 색: 헤더 pill 은 batchPillVariant, 항목 pill 은 공유 pillVariant ---
+// 항목 상태(Queued/Materialized/Succeeded/Failed/Cancelled — 요청/잡 판정 축)는
+// 배치 상태와 다른 도메인이라 각자 맞는 매핑을 쓴다.
+
+test("배치 헤더 pill: Completed=ok(초록) — 항목 pill(Materialized)은 공유 매핑 유지", async () => {
+  renderAt("Completed");
+  expect((await screen.findByText("Completed")).className).toContain("text-ok");
+  expect(screen.getByText("Materialized").className).toContain("text-muted");
+});
+
+test("배치 헤더 pill: Running=busy — 공유 pillVariant(neutral)와 다르다", async () => {
+  renderAt("Running");
+  expect((await screen.findByText("Running")).className).toContain("text-busy");
+});
+
+test("배치 헤더 pill: Cancelled 는 neutral — 취소는 실패가 아니다", async () => {
+  renderAt("Cancelled");
+  const pill = await screen.findByText("Cancelled");
+  expect(pill.className).toContain("text-muted");
+  expect(pill.className).not.toContain("text-bad");
 });
 
 test("PreviewReady also shows cancel button and posts cancel", async () => {
