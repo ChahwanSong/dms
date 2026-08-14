@@ -1,13 +1,25 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useBatch, useConfirmBatch, useRerunFailed, useCancelBatch, useRescanBatch,
          useUpdateBatch } from "./useBatches";
 import { Card } from "../../components/ui/Card";
-import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import { reasonText, ApiError } from "../../lib/api";
+
+// payload 필드 결손 방어 + 대상 요약: 대시보드 RecentRequestsSection 의 summarize
+// 관례 미러(scan/rm: storage:target, sync: src → dst). ?? 로만 접는다 — truthy
+// 검사는 ""(빈 경로)를 "모름"으로 뭉갠다.
+const part = (v: unknown) => String(v ?? "—");
+function summarizeItem(operation: string | undefined,
+                       p: Record<string, unknown>): string {
+  const body = operation === "sync"
+    ? `${part(p.source_storage)}:${part(p.source)} → ${part(p.destination_storage)}:${part(p.destination)}`
+    : `${part(p.storage)}:${part(p.target)}`;
+  return `${operation ?? "—"} · ${body}`;
+}
+
 export function BatchDetail() {
   const { batchId = "" } = useParams();
   const q = useBatch(batchId);
@@ -27,6 +39,9 @@ export function BatchDetail() {
   };
   const save = () => update.mutate({ name: nameDraft, note: noteDraft },
                                    { onSuccess: () => setEditing(false) });
+  // 항목 행 펼침: NodeMetricsSection 의 open 토글 관례 미러(단일 펼침) — 접힘이
+  // 기본이라 목록이 컴팩트하고, 상세는 펼친 행에만 렌더된다.
+  const [openSeq, setOpenSeq] = useState<number | null>(null);
   return (
     <section className="space-y-4">
       {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
@@ -84,18 +99,49 @@ export function BatchDetail() {
           </div>
         )}
       </Card>
-      <Table>
-        <thead><tr className="text-muted"><th className="py-2">#</th><th>대상</th><th>상태</th><th>사유</th></tr></thead>
-        <tbody>
-          {(b?.items ?? []).map((it) => (
-            <tr key={it.seq} className="border-t border-black/5">
-              <td className="py-2">{it.seq}</td>
-              <td className="text-muted font-mono text-xs">{JSON.stringify(it.payload)}</td>
-              <td><StatusPill state={it.status} /></td>
-              <td className="text-bad text-xs">{reasonText(it.reason_code)}</td>
-            </tr>))}
-        </tbody>
-      </Table>
+      {/* 항목: 표 대신 리스트 + 행 펼침. 표(td) 안에 버튼·flex 를 넣으면 e2e L2
+          (display=table-cell 불변식)가 무는 함정이라, 펼침 UI 는 표 밖 리스트가
+          구조적으로 안전하다. 기본 행은 컴팩트(순번·대상 요약·상태), 상세(사유·
+          파일 수·완료 시각·payload·요청 링크)는 펼친 행에만. */}
+      <Card>
+        <h2 className="font-medium">항목</h2>
+        {(b?.items ?? []).map((it) => (
+          <div key={it.seq} className="border-t border-black/5 py-2">
+            <button type="button" aria-label={`항목 ${it.seq} 상세`}
+                    aria-expanded={openSeq === it.seq}
+                    onClick={() => setOpenSeq(openSeq === it.seq ? null : it.seq)}
+                    className="flex w-full items-center gap-3 text-left">
+              <span className="w-8 shrink-0 text-muted text-xs tabular-nums">{it.seq}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                {summarizeItem(b?.operation, it.payload)}
+              </span>
+              <StatusPill state={it.status} />
+            </button>
+            {openSeq === it.seq && (
+              <dl className="mt-2 ml-11 grid grid-cols-[7rem_1fr] gap-y-1 text-sm">
+                {/* 요청 상태는 항목 상태(배치 시점 판정)와 다른 축 — 자식 요청의
+                    현재 상태다. null = 아직 materialize 안 됨. */}
+                <dt className="text-muted">요청 상태</dt>
+                <dd>{it.request_state ?? "—"}</dd>
+                <dt className="text-muted">사유</dt>
+                <dd className="text-bad">{it.reason_code ? reasonText(it.reason_code) : "—"}</dd>
+                {/* null = 모름(잡 없음/미기록) — 0(파일 없음)은 정상값으로 그대로
+                    표기한다(null≠0, ?? 로만 접는다). */}
+                <dt className="text-muted">파일 수</dt>
+                <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
+                <dt className="text-muted">완료 시각</dt>
+                <dd className="text-muted">{it.completed_at ?? "—"}</dd>
+                <dt className="text-muted">payload</dt>
+                <dd className="font-mono text-xs break-all">{JSON.stringify(it.payload)}</dd>
+                <dt className="text-muted">요청</dt>
+                <dd>{it.request_id
+                  ? <Link className="text-accent" to={`/jobs/${it.request_id}`}>요청 상세</Link>
+                  : "—"}</dd>
+              </dl>
+            )}
+          </div>
+        ))}
+      </Card>
     </section>
   );
 }

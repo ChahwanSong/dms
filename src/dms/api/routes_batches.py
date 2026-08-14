@@ -139,7 +139,9 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
-    b["items"] = repo.list_items(batch_id)
+    # 화면용 상세 조인(request_state/files_count/completed_at) — 실행 루프가 쓰는
+    # list_items 와 분리돼 있다(repo docstring 참고).
+    b["items"] = repo.list_items_detail(batch_id)
     return b
 
 

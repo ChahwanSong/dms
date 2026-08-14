@@ -1,3 +1,6 @@
+from dms.domain import DataJobState
+
+
 def _admin(client):  # 세션 로그인(admin) — 기존 test_api_auth 패턴 재사용
     client.app.state.repos.accounts.create("admin", "pw", "admin", actor="t")
     client.post("/api/auth/login", json={"username": "admin", "password": "pw"})
@@ -270,6 +273,58 @@ def test_rescan_blocked_during_maintenance(client):
                json={"maintenance": True, "drain": False, "reason": None})
     r = client.post(f"/api/admin/batches/{bid}:rescan")
     assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
+# --- 결과 항목 상세화: 배치 상세 items 의 자식 요청 조인 필드 ---
+
+def _materialize_child(repos, bid, seq, *, target="a"):
+    rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",
+        resource_key=f"data.scan:s1:{target}:admin",
+        payload={"storage": "s1", "target": target}, priority="mid", batch_id=bid)
+    repos.batches.set_item_materialized(bid, seq, rid)
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
+        storage_name="s1", target=target, options={}, tool="dscan", worker_pool={},
+        precondition={}, actor="planner")
+    return rid, jid
+
+
+def test_detail_items_join_child_request_fields(client):
+    _admin(client)
+    bid = _batch(client)
+    repos = client.app.state.repos
+    rid, jid = _materialize_child(repos, bid, 0)
+    repos.data_jobs.set_artifact(jid, artifact_uri=None,
+                                 result_summary={"files": 42, "bytes": 10})
+    repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
+    repos.requests.finalize_from_job(rid, DataJobState.SUCCEEDED, actor="stepper")
+    repos.batches.set_item_status(bid, 0, "Succeeded")
+    it = client.get(f"/api/admin/batches/{bid}").json()["items"][0]
+    assert it["request_state"] == "Succeeded"
+    assert it["files_count"] == 42
+    # 완료 시각은 results.completed_at(종단의 정직한 원천) — 값이 실존해야 한다
+    assert it["completed_at"]
+
+
+def test_detail_items_nonterminal_child_has_null_completed_at(client):
+    _admin(client)
+    bid = _batch(client)
+    repos = client.app.state.repos
+    _materialize_child(repos, bid, 0)
+    it = client.get(f"/api/admin/batches/{bid}").json()["items"][0]
+    # 비종단: 상태는 실값(Pending), 완료 시각·파일 수는 None(모름) — null≠0
+    assert it["request_state"] == "Pending"
+    assert it["completed_at"] is None
+    assert it["files_count"] is None
+
+
+def test_detail_items_without_request_have_null_join_fields(client):
+    _admin(client)
+    bid = _batch(client)
+    it = client.get(f"/api/admin/batches/{bid}").json()["items"][0]
+    assert it["request_state"] is None
+    assert it["completed_at"] is None
+    assert it["files_count"] is None
 
 
 # --- 배치 수정(메타데이터): PATCH {name?, note?} ---

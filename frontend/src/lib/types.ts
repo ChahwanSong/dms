@@ -96,6 +96,13 @@ export interface Batch {
 export interface BatchItem {
   seq: number; payload: Record<string, unknown>; status: string;
   request_id: string | null; reason_code: string | null;
+  // 자식 요청 조인 필드(결과 항목 상세화). 옵션(?) = 구형 서버 호환.
+  // request_state: 자식 요청의 현재 상태(null = 미 materialize).
+  // files_count: null = 모름(잡 없음/미기록) — 0(파일 없음)과 다르다(null≠0).
+  // completed_at: results.completed_at — 종단만 실값, 비종단 null.
+  request_state?: string | null;
+  files_count?: number | null;
+  completed_at?: string | null;
 }
 export interface BatchDetail extends Batch { items: BatchItem[] }
 export interface Policy {

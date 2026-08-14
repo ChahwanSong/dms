@@ -68,6 +68,33 @@ class BatchesRepository:
             r["payload"] = load_json(r["payload"])
         return rows
 
+    def list_items_detail(self, batch_id):
+        """배치 상세 화면용 items + 자식 요청 조인 필드. list_items 와 별도인 이유:
+        orchestrator 루프(5s 틱)는 이 조인이 필요 없다 — 화면 경로만 넓힌다.
+        - request_state: 자식 요청의 현재 상태(LEFT JOIN — 미 materialize 는 NULL).
+        - files_count: 자식 잡의 처리 파일 수(data_jobs 가 원천). 요청당 잡이
+          여럿일 수 있어(취소 경로 등) 최신 잡 하나를 스칼라 서브쿼리로 고른다.
+          NULL = 모름(잡 없음/미기록) — 0(파일 없음)과 다르다(null≠0).
+        - completed_at: results.completed_at — 종단 요청만 행이 있다(finalize 가
+          전이와 원자적으로 남긴다). 비종단은 NULL. updated_at("마지막 전이")을
+          완료 시각으로 쓰면 진행 중 요청에 거짓 완료 시각이 찍힌다
+          (RecentRequestsSection 의 같은 취지 결정 미러).
+        배치 1개의 items 라 LEFT JOIN·서브쿼리 비용은 무리 없다."""
+        rows = self._db.query(
+            """SELECT bi.*, r.state AS request_state,
+                      (SELECT d.files_count FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS files_count,
+                      res.completed_at AS completed_at
+                 FROM batch_items bi
+                 LEFT JOIN requests r ON r.request_id = bi.request_id
+                 LEFT JOIN results res ON res.request_id = bi.request_id
+                WHERE bi.batch_id = :b ORDER BY bi.seq""", {"b": batch_id})
+        for r in rows:
+            r["payload"] = load_json(r["payload"])
+        return rows
+
     def _touch_item(self, batch_id, seq, **fields):
         fields["updated_at"] = utc_now_iso()
         sets = ", ".join(f"{k} = :{k}" for k in fields)

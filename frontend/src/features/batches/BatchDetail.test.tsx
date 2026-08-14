@@ -28,9 +28,61 @@ test("PreviewReady shows confirm button and posts confirm", async () => {
   // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
   await waitFor(() => expect(confirmed).toBe(true));
 });
-test("renders items table with status", async () => {
+test("renders items list with status", async () => {
   renderAt("Running");
   expect(await screen.findByText("Materialized")).toBeInTheDocument();
+});
+
+// --- 결과 항목 상세화: 접힘 기본 → 펼침 상세 → 재클릭 접힘 ---
+const detailedBatch = () => batch({ operation: "scan", status: "Completed", items: [
+  { seq: 0, payload: { storage: "s1", target: "team" }, status: "Succeeded",
+    request_id: "r1", reason_code: null, request_state: "Succeeded",
+    files_count: 42, completed_at: "2026-08-14T01:00:00Z" },
+  { seq: 1, payload: { storage: "s1", target: "proj" }, status: "Failed",
+    request_id: "r2", reason_code: "execution_failed", request_state: "Failed",
+    files_count: null, completed_at: "2026-08-14T02:00:00Z" },
+]});
+
+function renderDetailed() {
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(detailedBatch())));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+test("항목 행은 접힘 기본: 순번·대상 요약·상태만 — 상세 미렌더", async () => {
+  renderDetailed();
+  // 대상 요약은 대시보드 summarize 관례 미러(scan: storage:target)
+  expect(await screen.findByText("scan · s1:team")).toBeInTheDocument();
+  expect(screen.getByText("Succeeded")).toBeInTheDocument();
+  expect(screen.queryByText("파일 수")).toBeNull();
+  expect(screen.queryByText("42")).toBeNull();
+});
+
+test("펼침: aria-expanded 토글 + 상세(사유·파일 수·완료 시각·요청 링크) → 재클릭 접힘", async () => {
+  renderDetailed();
+  const toggle = await screen.findByRole("button", { name: "항목 0 상세" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("파일 수")).toBeInTheDocument();
+  expect(screen.getByText("42")).toBeInTheDocument();
+  expect(screen.getByText("2026-08-14T01:00:00Z")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "요청 상세" }))
+    .toHaveAttribute("href", "/jobs/r1");
+  await userEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByText("파일 수")).toBeNull();
+});
+
+test("실패 항목 펼침: 사유는 reasonText 한글 문구, 파일 수 null 은 — (null≠0)", async () => {
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 1 상세" }));
+  expect(screen.getByText("실행에 실패했습니다")).toBeInTheDocument();
+  expect(screen.getByText("파일 수")).toBeInTheDocument();
+  const dd = screen.getByText("파일 수").nextElementSibling as HTMLElement;
+  expect(dd.textContent).toBe("—");
 });
 test("Completed 는 전체 재실행 버튼 노출 + :rescan 발사", async () => {
   let rescanned = false;
