@@ -181,6 +181,27 @@ class BatchesRepository:
             self._recount(batch_id)
         return seq
 
+    def replace_items(self, batch_id, items) -> None:
+        """항목 전량 교체(CSV 재업로드 동선): 기존 batch_items 전량 DELETE + 신규
+        INSERT(seq 0..n-1 재부여) + 카운터 절대값 재계산 — 한 트랜잭션. 단건
+        삭제(delete_item)는 seq 구멍을 유지하지만(남은 항목의 이력 사칭 방지)
+        여기는 **전량 신규**라 지킬 이력이 없다 — 0..n-1 재부여가 "CSV 행 순서 =
+        seq" 라는 생성(create)과 같은 계약을 복원한다. 전량 Queued 신규 ⇒ 종단
+        항목 0 ⇒ _recount 가 succeeded/failed 를 0 으로 되돌린다(절대값 정직 —
+        감산 분기 없음). 종단 배치 한정 가드는 라우트 몫(batch_items_not_replaceable).
+        배치 status 는 무접촉 — 교체가 곧 실행은 아니다(라우트 주석)."""
+        now = utc_now_iso()
+        with self._db.transaction():
+            self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
+                             {"b": batch_id})
+            for seq, item in enumerate(items):
+                self._db.execute(
+                    """INSERT INTO batch_items (batch_id, seq, payload, status, request_id,
+                           reason_code, created_at, updated_at)
+                       VALUES (:b,:s,:p,'Queued',NULL,NULL,:now,:now)""",
+                    {"b": batch_id, "s": seq, "p": dump_json(item), "now": now})
+            self._recount(batch_id)
+
     def _touch_item(self, batch_id, seq, **fields):
         fields["updated_at"] = utc_now_iso()
         sets = ", ".join(f"{k} = :{k}" for k in fields)

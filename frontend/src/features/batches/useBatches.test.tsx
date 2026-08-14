@@ -3,7 +3,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { useBatches, useUpdateBatch, useUpdateBatchItem } from "./useBatches";
+import { useBatches, useUpdateBatch, useUpdateBatchItem,
+         useReplaceBatchItems } from "./useBatches";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 test("useUpdateBatch PATCHes and invalidates batch queries", async () => {
@@ -42,6 +43,28 @@ test("useUpdateBatchItem PUTs item payload and invalidates batch queries", async
   result.current.mutate({ seq: 2, item: { storage: "s1", target: "edited" } });
   await waitFor(() => expect(sent).toEqual({ storage: "s1", target: "edited" }));
   // 저장 후 상세·목록 쿼리 무효화(onSettled) — 화면이 옛 payload 를 계속 그리면 안 된다
+  await waitFor(() => expect(spy.calls).toEqual(expect.arrayContaining([
+    expect.objectContaining({ queryKey: ["batch", "b1"] }),
+    expect.objectContaining({ queryKey: ["batches"] }),
+  ])));
+});
+
+test("useReplaceBatchItems PUTs {items} 컬렉션 and invalidates batch queries", async () => {
+  let sent: any = null;
+  server.use(http.put("/api/admin/batches/b1/items", async ({ request }) => {
+    sent = await request.json();
+    return HttpResponse.json({ replaced: 2 });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const spy = { calls: [] as unknown[] };
+  const origInvalidate = qc.invalidateQueries.bind(qc);
+  qc.invalidateQueries = ((opts: unknown) => { spy.calls.push(opts); return origInvalidate(opts as never); }) as never;
+  const { result } = renderHook(() => useReplaceBatchItems("b1"), { wrapper: ({children}) =>
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+  result.current.mutate([{ storage: "s1", target: "x" }, { storage: "s1", target: "y" }]);
+  await waitFor(() => expect(sent).toEqual({ items: [
+    { storage: "s1", target: "x" }, { storage: "s1", target: "y" }] }));
+  // 교체 후 상세·목록 쿼리 무효화(onSettled) — 화면이 옛 항목을 계속 그리면 안 된다
   await waitFor(() => expect(spy.calls).toEqual(expect.arrayContaining([
     expect.objectContaining({ queryKey: ["batch", "b1"] }),
     expect.objectContaining({ queryKey: ["batches"] }),

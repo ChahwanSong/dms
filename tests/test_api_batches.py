@@ -591,6 +591,127 @@ def test_post_item_404_and_maintenance(client):
     assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
 
 
+# --- 항목 전체 교체(CSV): 종단 배치만 — 전량 치환 + 카운터 절대값 리셋 ---
+
+def test_replace_items_on_completed_batch(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)          # 항목 2(Succeeded, Failed), 카운터 1/1
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [
+        {"storage": "s1", "target": "n0"}, {"storage": "s1", "target": "n1"},
+        {"storage": "s1", "target": "n2"}]})
+    assert r.status_code == 200 and r.json() == {"replaced": 3}
+    repo = client.app.state.repos.batches
+    # seq 0..n-1 재부여 + 전량 Queued 신규(request_id/사유 없음)
+    assert [(it["seq"], it["payload"]["target"], it["status"], it["request_id"])
+            for it in repo.list_items(bid)] == [
+        (0, "n0", "Queued", None), (1, "n1", "Queued", None), (2, "n2", "Queued", None)]
+    b = repo.get(bid)
+    # 교체 후에도 종단 유지(재실행은 :rescan 몫) — 카운터는 절대값 정직(전량 Queued)
+    assert b["status"] == "Completed"
+    assert b["item_count"] == 3
+    assert b["succeeded_count"] == 0 and b["failed_count"] == 0
+
+
+def test_replace_items_on_cancelled_batch_allowed(client):
+    _admin(client)
+    bid = _batch(client)
+    client.post(f"/api/admin/batches/{bid}:cancel")
+    r = client.put(f"/api/admin/batches/{bid}/items",
+                   json={"items": [{"storage": "s1", "target": "n0"}]})
+    assert r.status_code == 200
+    assert client.app.state.repos.batches.get(bid)["status"] == "Cancelled"
+
+
+def test_replace_items_sync_batch_stays_terminal(client):
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = client.post("/api/admin/batches", json={"operation": "sync", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"source_storage": "s1", "source": "a",
+        "destination_storage": "s2", "destination": "b"}]}).json()["batch_id"]
+    repo.set_item_status(bid, 0, "Succeeded")
+    repo.set_status(bid, "Completed")
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [
+        {"source_storage": "s1", "source": "c",
+         "destination_storage": "s2", "destination": "d"}]})
+    assert r.status_code == 200
+    # sync 도 종단 유지 — Previewing 재개는 :rescan(전체 재실행) 몫
+    assert repo.get(bid)["status"] == "Completed"
+
+
+def test_replace_items_on_active_batch_409(client):
+    _admin(client)
+    bid = _batch(client)                          # Running
+    r = client.put(f"/api/admin/batches/{bid}/items",
+                   json={"items": [{"storage": "s1", "target": "n0"}]})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "batch_items_not_replaceable"
+    # 무접촉 — 기존 항목 보존
+    assert client.app.state.repos.batches.list_items(bid)[0]["payload"]["target"] == "a"
+
+
+def test_replace_items_on_previewready_batch_409(client):
+    # PreviewReady 는 자식 ConfirmPending(활성) — 종단이 아니다(rescan 가드 미러)
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = client.post("/api/admin/batches", json={"operation": "sync", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"source_storage": "s1", "source": "a",
+        "destination_storage": "s2", "destination": "b"}]}).json()["batch_id"]
+    repo.set_status(bid, "PreviewReady")
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [
+        {"source_storage": "s1", "source": "c",
+         "destination_storage": "s2", "destination": "d"}]})
+    assert r.status_code == 409 and r.json()["detail"] == "batch_items_not_replaceable"
+
+
+def test_replace_items_rejects_empty(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": []})
+    assert r.status_code == 422 and r.json()["detail"] == "empty_batch"
+    # 검증 실패 시 무접촉
+    assert client.app.state.repos.batches.get(bid)["item_count"] == 2
+
+
+def test_replace_items_rejects_mixed_storage(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [
+        {"storage": "s1", "target": "n0"}, {"storage": "s2", "target": "n1"}]})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_storage_mixed"
+    assert client.app.state.repos.batches.get(bid)["item_count"] == 2
+
+
+def test_replace_items_rejects_bad_payload(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.put(f"/api/admin/batches/{bid}/items",
+                   json={"items": [{"storage": "s1", "target": "../bad"}]})
+    assert r.status_code == 422
+
+
+def test_replace_items_404_and_maintenance(client):
+    _admin(client)
+    r = client.put("/api/admin/batches/nope/items",
+                   json={"items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 404 and r.json()["detail"] == "batch_not_found"
+    bid = _completed_scan_batch(client)
+    client.put("/api/admin/control-state",
+               json={"maintenance": True, "drain": False, "reason": None})
+    r = client.put(f"/api/admin/batches/{bid}/items",
+                   json={"items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
+def test_replace_items_route_does_not_shadow_single_item_put(client):
+    # 라우트 충돌 실측: 컬렉션 PUT(…/items)과 단건 PUT(…/items/{seq})은 경로
+    # 세그먼트 수가 달라 starlette 매칭에서 겹치지 않는다 — 단건 PUT 이 그대로 동작
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.put(f"/api/admin/batches/{bid}/items/0",
+                   json={"storage": "s1", "target": "edited"})
+    assert r.status_code == 200 and r.json()["payload"]["target"] == "edited"
+
+
 # --- 배치 삭제: 종단 배치만 — 활성은 "취소 먼저"가 동선 ---
 
 def test_delete_completed_batch_removes_rows(client):

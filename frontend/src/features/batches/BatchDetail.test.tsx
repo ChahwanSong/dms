@@ -404,6 +404,58 @@ test("활성 배치: 배치 삭제 버튼 부재 — 취소 먼저가 동선", a
   expect(screen.queryByRole("button", { name: "배치 삭제" })).toBeNull();
 });
 
+// --- CSV 전체 교체: 종단 배치만 — 파스 미리보기(행 수·오류) → 교체 → PUT ---
+
+test("종단 배치: CSV 업로드 → 행 수 미리보기 → 교체가 PUT(스토리지 상속)을 쏜다", async () => {
+  let sent: any = null;
+  server.use(http.put("/api/admin/batches/b1/items", async ({ request }) => {
+    sent = await request.json();
+    return HttpResponse.json({ replaced: 2 });
+  }));
+  renderDetailed();                              // Completed scan 배치, storage s1
+  const file = new File(["target\nx/y\nz"], "items.csv", { type: "text/csv" });
+  await userEvent.upload(await screen.findByLabelText("교체 CSV 파일"), file);
+  // 파스 미리보기가 먼저 — 교체는 미리보기를 본 뒤의 확인 클릭이다
+  expect(await screen.findByText("2행 파싱됨")).toBeInTheDocument();
+  expect(sent).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "교체" }));
+  // 배치 레벨 스토리지는 첫 항목 payload 에서 상속(동질성 계약)
+  await waitFor(() => expect(sent).toEqual({ items: [
+    { storage: "s1", target: "x/y" }, { storage: "s1", target: "z" }] }));
+});
+
+test("sync 배치 교체: source,destination 2열 — 4필드 payload 로 PUT", async () => {
+  let sent: any = null;
+  server.use(http.put("/api/admin/batches/b1/items", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json({ replaced: 1 });
+  }));
+  renderBatch({ operation: "sync", status: "Completed", items: [
+    { seq: 0, payload: { source_storage: "s1", source: "a",
+        destination_storage: "s2", destination: "b" }, status: "Succeeded",
+      request_id: "r1", reason_code: null }] });
+  const file = new File(["source,destination\nc,d"], "items.csv", { type: "text/csv" });
+  await userEvent.upload(await screen.findByLabelText("교체 CSV 파일"), file);
+  await screen.findByText("1행 파싱됨");
+  await userEvent.click(screen.getByRole("button", { name: "교체" }));
+  await waitFor(() => expect(sent).toEqual({ items: [
+    { source_storage: "s1", source: "c",
+      destination_storage: "s2", destination: "d" }] }));
+});
+
+test("파스 오류가 있으면 교체 버튼 잠금 + 오류 나열", async () => {
+  renderDetailed();
+  const file = new File(["a,b\nokpath"], "items.csv", { type: "text/csv" });
+  await userEvent.upload(await screen.findByLabelText("교체 CSV 파일"), file);
+  expect(await screen.findByText(/1행: 경로 1개/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "교체" })).toBeDisabled();
+});
+
+test("활성 배치: CSV 전체 교체 UI 부재 — 종단 배치만", async () => {
+  renderAt("Running");
+  await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
+  expect(screen.queryByLabelText("교체 CSV 파일")).toBeNull();
+});
+
 // --- 실행 제어 설정 표시(읽기 전용): 생성 시 고른 값이 상세에서 보인다 ---
 
 test("실행 설정: 지정값 표시 + 옵션 키=값 요약 + 소유자 기록", async () => {

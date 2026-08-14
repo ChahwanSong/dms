@@ -232,6 +232,40 @@ def delete_batch_item(batch_id: str, seq: int, request: Request,
     return {"deleted": seq}
 
 
+class ReplaceItemsBody(BaseModel):
+    items: list[dict]
+
+
+@router.put("/api/admin/batches/{batch_id}/items")
+def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
+                        identity: Identity = Depends(require_admin)):
+    """항목 전체 교체(CSV 재업로드 동선) — **종단(Completed/Cancelled) 배치만**.
+    활성 배치는 409(batch_items_not_replaceable): 전량 DELETE+INSERT 는
+    Materialized/실행 중 항목의 기록까지 지우는 위조가 되고, 단건 편집의 Queued
+    원자 가드로는 "전체" 교체의 원자성을 지킬 수 없다(일부 행만 가드를 통과하면
+    부분 교체) — fail-closed 거부가 정직하다. 교체 후에도 배치는 **종단 유지** —
+    교체가 곧 실행은 아니다. 재실행은 기존 :rescan(전체 재실행) 몫: reset_all_items
+    는 종단 항목만 만지므로 신규 Queued 전량엔 무접촉으로 상태만 올리고,
+    orchestrator 가 Queued 를 집는다. 검증은 생성(create_batch)과 같은 두 겹 —
+    validate_batch(empty_batch·단일 스토리지 동질성 재사용) + item 별
+    build_data_payload(옵션은 배치 행의 것 — DB 신뢰 경계라 저장값도 재검증 대상).
+    라우트 충돌 없음(실측): …/items 와 …/items/{seq} 는 세그먼트 수가 달라
+    starlette 매칭에서 겹치지 않는다(test_replace_items_route_does_not_shadow_…)."""
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    if b["status"] not in _TERMINAL_BATCH:
+        raise HTTPException(status_code=409, detail="batch_items_not_replaceable")
+    try:
+        validate_batch(b["operation"], b["max_concurrency"], body.items)
+        for item in body.items:
+            build_data_payload(b["operation"], options=b["options"], **item)
+    except (DomainValidationError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=getattr(e, "reason_code", "invalid_batch"))
+    repo.replace_items(batch_id, body.items)
+    return {"replaced": len(body.items)}
+
+
 @router.post("/api/admin/batches/{batch_id}/items", status_code=202)
 def add_batch_item(batch_id: str, body: dict, request: Request,
                    identity: Identity = Depends(require_admin)):

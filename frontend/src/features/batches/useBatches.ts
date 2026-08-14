@@ -76,6 +76,11 @@ export const useDeleteBatchItem = (id: string) =>
 export const useAddBatchItem = (id: string) =>
   _itemMutation(id, (item: Record<string, unknown>) =>
     apiSend("POST", `/api/admin/batches/${id}/items`, item));
+// 항목 전체 교체(CSV): 컬렉션 PUT — 종단 배치만(서버 batch_items_not_replaceable
+// 가드). 교체는 실행이 아니다 — 배치는 종단 유지, 재실행은 :rescan 몫.
+export const useReplaceBatchItems = (id: string) =>
+  _itemMutation(id, (items: Record<string, unknown>[]) =>
+    apiSend("PUT", `/api/admin/batches/${id}/items`, { items }));
 // 배치 삭제(종단 배치만 — 서버 batch_not_deletable 가드). 성공 시 상세 쿼리는
 // invalidate 가 아니라 **제거**한다: 삭제된 배치의 상세를 다시 조회하면 404 를
 // 새로 받아 오류 화면이 되는데, 화면은 목록으로 떠난 뒤다(리페치가 소음).

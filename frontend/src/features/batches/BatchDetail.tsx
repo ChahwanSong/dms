@@ -2,7 +2,9 @@ import { Fragment, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
-         useUpdateBatchItem, useDeleteBatchItem, useAddBatchItem } from "./useBatches";
+         useUpdateBatchItem, useDeleteBatchItem, useAddBatchItem,
+         useReplaceBatchItems } from "./useBatches";
+import { parseItemsCsv, type ScanRow, type SyncRow } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -198,6 +200,68 @@ function ItemScanStats({ requestId, succeeded }: {
             : "파손 경로: 기록 없음(구형 리포트)"}
         </p>
       </div>
+    </div>
+  );
+}
+
+// CSV 파일로 항목 전체 교체(종단 배치만 노출 — 진짜 가드는 서버
+// batch_items_not_replaceable 409). 교체 후에도 배치는 종단 유지 — 교체가 곧
+// 실행은 아니다(재실행은 기존 「전체 재실행」 버튼 몫). 동선: 파일 선택(FileReader
+// 로컬 읽기 — airgap 무관) → 생성 위저드와 같은 parseItemsCsv 파싱 → 미리보기
+// (행 수·오류) → 「교체」 확인 클릭 → PUT. 오류가 하나라도 있으면 교체 버튼
+// 잠금(부분 반영 금지 — BatchCreate applyParsed 와 같은 계약).
+// 배치 레벨 스토리지: 배치 행엔 스토리지 메타가 없다(실측 — batches 테이블은
+// 실행 제어·옵션만). 종단 배치는 항목이 반드시 있으므로 첫 항목 payload 에서
+// 물려받는다(항목 추가 submitAdd 와 같은 동질성 계약) — 항목 0개면 호출측이
+// 이 컴포넌트 자체를 안 그린다(물려받을 스토리지가 없다).
+function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
+  batchId: string; operation: "scan" | "sync";
+  firstPayload: Record<string, unknown>;
+}) {
+  const replace = useReplaceBatchItems(batchId);
+  const [rows, setRows] = useState<(ScanRow | SyncRow)[]>([]);
+  const [errors, setErrors] = useState<string[]>([]);
+  // 파일을 읽었는가 — 미선택(false)과 "빈 파일을 읽음"(true·0행)을 구분한다
+  const [loaded, setLoaded] = useState(false);
+  function handleFile(file: File | undefined) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseItemsCsv(operation, String(reader.result ?? ""));
+      setRows(parsed.rows); setErrors(parsed.errors); setLoaded(true);
+      replace.reset();                 // 이전 시도의 오류·성공 잔상 제거
+    };
+    reader.readAsText(file);
+  }
+  const items = rows.map((r) => operation === "sync"
+    ? { source_storage: firstPayload.source_storage, source: (r as SyncRow).source,
+        destination_storage: firstPayload.destination_storage,
+        destination: (r as SyncRow).destination }
+    : { storage: firstPayload.storage, target: (r as ScanRow).target });
+  return (
+    <div className="border-t border-black/5 mt-2 pt-3 space-y-2 max-w-md">
+      <label className="text-sm block">CSV로 전체 교체
+        <input aria-label="교체 CSV 파일" type="file" accept=".csv,.txt" className={field}
+               onChange={(e) => handleFile(e.target.files?.[0])} />
+      </label>
+      {/* 미리보기(행 수)와 확인 버튼은 파일을 읽은 뒤에만 — 무엇으로 바꾸는지
+          보여주기 전의 교체 버튼은 오클릭 유도다. 0행(헤더만)도 잠금 — 서버
+          empty_batch 재확인 전에 화면에서 정직하게 막는다. */}
+      {loaded && (
+        <p className="text-sm text-muted">{`${rows.length}행 파싱됨`}</p>
+      )}
+      {errors.length > 0 && (
+        <ul className="text-bad text-sm space-y-1">
+          {errors.map((err, i) => <li key={i}>{err}</li>)}
+        </ul>
+      )}
+      {loaded && (
+        <Button disabled={errors.length > 0 || rows.length === 0 || replace.isPending}
+                onClick={() => replace.mutate(items)}>교체</Button>
+      )}
+      {replace.isError && (
+        <p className="text-bad text-sm">{(replace.error as ApiError).message}</p>
+      )}
     </div>
   );
 }
@@ -462,6 +526,13 @@ export function BatchDetail() {
         ) : (
           <p className="text-muted text-sm mt-2">항목이 없어 스토리지를 물려받을 수 없습니다 — 항목 추가는 새 배치로 하세요</p>
         ))}
+        {/* CSV 전체 교체: 종단 배치 + 항목 존재(스토리지 상속원)일 때만 —
+            종단 배치는 항목이 있는 게 정상이라 사실상 종단 게이트다. */}
+        {b && terminal && firstPayload && (
+          <ReplaceItemsCsv batchId={batchId}
+                           operation={isSync ? "sync" : "scan"}
+                           firstPayload={firstPayload} />
+        )}
       </Card>
     </section>
   );
