@@ -145,6 +145,94 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
     return b
 
 
+# --- 항목 편집(수정·삭제·추가) ---------------------------------------------
+# 허용 조건(fail-closed): 종단 배치(Completed/Cancelled)는 전 항목 — 전 item 종단
+# ⇒ 살아있는 자식 없음(rescan 과 같은 정합 논리)이라 "편집 후 재실행" 흐름이
+# 안전하다. 활성 배치는 **Queued 항목만** — Materialized/종단 항목을 바꾸면 이미
+# 실행됐(거나 실행 중인) 기록의 위조다. Queued 판정은 읽고-쓰기가 아니라 repo 의
+# SQL 원자 가드(WHERE status='Queued')다 — orchestrator materialize(5s 틱)와의
+# 경합에서 영향 행 0 이면 409. 특권 게이트는 편집엔 불요: 특권 여부는 생성 시점에
+# 배치 행(owner_username/auth_method/requester_id)에 박제됐고 항목 편집은 그
+# 재료를 건드리지 않는다(orchestrator._materialize 가 배치 행만 읽는다 — 실측).
+# 편집은 require_admin 뒤의 운영 행위라 생성 게이트를 재통과시킬 새 재료가 없다.
+
+_TERMINAL_BATCH = ("Completed", "Cancelled")
+
+
+def _get_batch_or_404(request, batch_id):
+    b = request.app.state.repos.batches.get(batch_id)
+    if b is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    return b
+
+
+def _validated_item(batch, items, new_item, *, replace_seq=None):
+    """항목 payload 검증(생성 create 와 같은 두 겹): ① build_data_payload 로 연산별
+    스키마·경로 검증, ② 배치 전체의 단일 스토리지 동질성. 동질성은 편집 후의
+    **전체 목록**을 validate_batch 에 그대로 넣어 판정한다 — 규칙을 여기서 다시
+    쓰면 validate_batch(스토리지 종류 수만 본다)와 어긋나는 두 벌이 된다."""
+    prospective = [it["payload"] for it in items if it["seq"] != replace_seq]
+    prospective.append(new_item)
+    try:
+        build_data_payload(batch["operation"], options=batch["options"], **new_item)
+        validate_batch(batch["operation"], batch["max_concurrency"], prospective)
+    except (DomainValidationError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=getattr(e, "reason_code", "invalid_batch"))
+
+
+@router.put("/api/admin/batches/{batch_id}/items/{seq}")
+def update_batch_item(batch_id: str, seq: int, body: dict, request: Request,
+                      identity: Identity = Depends(require_admin)):
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    items = repo.list_items(batch_id)
+    if not any(it["seq"] == seq for it in items):
+        raise HTTPException(status_code=404, detail="batch_item_not_found")
+    _validated_item(b, items, body, replace_seq=seq)
+    only_queued = b["status"] not in _TERMINAL_BATCH
+    if not repo.update_item_payload(batch_id, seq, body, only_queued=only_queued):
+        # 존재는 위에서 확인했으니 영향 행 0 = Queued 가드 패배(materialize 경합
+        # 포함) — 종단 배치 경로(가드 없음)에선 동시 삭제의 극소 창뿐이다.
+        raise HTTPException(status_code=409, detail="batch_item_not_editable")
+    return repo.get_item(batch_id, seq)
+
+
+@router.delete("/api/admin/batches/{batch_id}/items/{seq}")
+def delete_batch_item(batch_id: str, seq: int, request: Request,
+                      identity: Identity = Depends(require_admin)):
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    if repo.get_item(batch_id, seq) is None:
+        raise HTTPException(status_code=404, detail="batch_item_not_found")
+    only_queued = b["status"] not in _TERMINAL_BATCH
+    # 카운터(item/succeeded/failed)는 repo 가 삭제와 같은 트랜잭션에서 절대값
+    # 재계산한다(감산 분기 복제 대신 행이 진실 — repo._recount 주석).
+    if not repo.delete_item(batch_id, seq, only_queued=only_queued):
+        raise HTTPException(status_code=409, detail="batch_item_not_editable")
+    return {"deleted": seq}
+
+
+@router.post("/api/admin/batches/{batch_id}/items", status_code=202)
+def add_batch_item(batch_id: str, body: dict, request: Request,
+                   identity: Identity = Depends(require_admin)):
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    _validated_item(b, repo.list_items(batch_id), body)
+    seq = repo.add_item(batch_id, body)
+    status = b["status"]
+    if status in _TERMINAL_BATCH:
+        # 종단 배치에 추가 = 재활성화(rescan 의 상태 분기 재사용). 기존 종단
+        # 항목은 무접촉이라 orchestrator 는 신규 Queued 항목만 materialize 한다
+        # (_drive 는 종단 항목을 건너뛴다 — 재실행이 아니라 증분 실행).
+        # 활성 배치 추가는 상태 그대로 — 이미 도는 루프가 새 항목을 집는다.
+        status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
+        repo.set_status(batch_id, status)
+    return {"seq": seq, "status": status}
+
+
 @router.post("/api/admin/batches/{batch_id}:confirm")
 def confirm_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
     repo = request.app.state.repos.batches

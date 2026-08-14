@@ -119,3 +119,51 @@ def test_scan_aggregates_and_completes(db):
     assert b["status"]=="Completed" and b["succeeded_count"]==1 and b["failed_count"]==1
     sts = sorted(it["status"] for it in repos.batches.list_items(bid))
     assert sts==["Failed","Succeeded"]
+
+# --- 항목 추가로 재활성화된 배치: 신규 Queued 만 실행, 기존 종단 불변 ---
+
+def test_reactivated_batch_materializes_only_added_item_then_completes(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=5, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":"a"}], status="Running")
+    _orch(db).run_once()
+    old = repos.batches.list_items(bid)[0]
+    repos.requests.set_state(old["request_id"], RequestState.SUCCEEDED, actor="t")
+    _orch(db).run_once()
+    assert repos.batches.get(bid)["status"] == "Completed"
+    # 종단 배치에 항목 추가 + 재활성화(라우트 동작의 repo 절차 미러)
+    seq = repos.batches.add_item(bid, {"storage": "cephfs-dms", "target": "b"})
+    repos.batches.set_status(bid, "Running")
+    _orch(db).run_once()
+    items = repos.batches.list_items(bid)
+    # 기존 Succeeded 항목 불변(재실행 없음) — 신규 항목만 materialize
+    assert items[0]["status"] == "Succeeded"
+    assert items[1]["seq"] == seq and items[1]["status"] == "Materialized"
+    repos.requests.set_state(items[1]["request_id"], RequestState.SUCCEEDED, actor="t")
+    _orch(db).run_once()
+    b = repos.batches.get(bid)
+    # 카운터는 증분(bump) — 기존 1 + 신규 1. 항목 추가·재활성화가 이를 깨지 않는다
+    assert b["status"] == "Completed" and b["succeeded_count"] == 2
+
+def test_orchestrator_tolerates_seq_gap_from_deleted_item(db):
+    # 중간 삭제로 생긴 seq 구멍: 슬롯 산식·완료 판정은 목록 길이·상태만 본다 —
+    # seq 연속성 가정이 없어야 한다(실측 고정 테스트)
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=1, options={}, note=None,
+        items=[{"storage":"cephfs-dms","target":t} for t in ("a","b","c")],
+        status="Running")
+    assert repos.batches.delete_item(bid, 1, only_queued=True) is True
+    _orch(db).run_once()                     # 슬롯 1 → seq 0 만 materialize
+    items = repos.batches.list_items(bid)
+    assert [it["seq"] for it in items] == [0, 2]
+    assert [it["status"] for it in items] == ["Materialized", "Queued"]
+    repos.requests.set_state(items[0]["request_id"], RequestState.SUCCEEDED, actor="t")
+    _orch(db).run_once()                     # seq 0 집계 + seq 2 materialize
+    items = repos.batches.list_items(bid)
+    assert [it["status"] for it in items] == ["Succeeded", "Materialized"]
+    repos.requests.set_state(items[1]["request_id"], RequestState.SUCCEEDED, actor="t")
+    _orch(db).run_once()
+    b = repos.batches.get(bid)
+    assert b["status"] == "Completed" and b["succeeded_count"] == 2

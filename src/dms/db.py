@@ -160,6 +160,15 @@ class Database:
     def execute(self, sql: str, params: dict | None = None) -> None:
         self._run(sql, params)
 
+    def execute_count(self, sql: str, params: dict | None = None) -> int:
+        """UPDATE/DELETE 실행 + 영향 행 수 반환. execute 의 반환형을 바꾸지 않고
+        별도 메서드인 이유: 영향 행 수는 조건부 갱신의 원자 가드(영향 0 = 경합
+        패배 → 409) 소비처만 의미를 갖는다 — execute 전체에 반환값을 주면 모든
+        호출처가 그 의미를 갖는 것처럼 읽힌다. rowcount 는 sqlite3·psycopg 양쪽
+        커서 공통 계약이다."""
+        with self._lock:
+            return self._run(sql, params).rowcount
+
     def query(self, sql: str, params: dict | None = None) -> list[dict]:
         with self._lock:  # fetchall 까지 같은 락 -- 커서는 커넥션과 한 몸이다
             cur = self._run(sql, params)

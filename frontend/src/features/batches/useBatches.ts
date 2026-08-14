@@ -56,6 +56,26 @@ export const useUpdateBatch = (id: string) => {
                        qc.invalidateQueries({ queryKey: ["batches"] }); },
   });
 };
+// 항목 편집 3종(수정·삭제·추가): 화면의 버튼 노출은 표시 게이트일 뿐이고 진짜
+// 차단은 서버다(활성 배치 Queued 원자 가드 409·동질성 422). invalidate 는
+// _action 과 같은 계약(상세+목록) — 편집 결과·재활성화 상태를 폴링 전에 반영한다.
+function _itemMutation<A>(id: string, fn: (a: A) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSettled: () => { qc.invalidateQueries({ queryKey: ["batch", id] });
+                       qc.invalidateQueries({ queryKey: ["batches"] }); },
+  });
+}
+export const useUpdateBatchItem = (id: string) =>
+  _itemMutation(id, ({ seq, item }: { seq: number; item: Record<string, unknown> }) =>
+    apiSend("PUT", `/api/admin/batches/${id}/items/${seq}`, item));
+export const useDeleteBatchItem = (id: string) =>
+  _itemMutation(id, (seq: number) =>
+    apiSend("DELETE", `/api/admin/batches/${id}/items/${seq}`));
+export const useAddBatchItem = (id: string) =>
+  _itemMutation(id, (item: Record<string, unknown>) =>
+    apiSend("POST", `/api/admin/batches/${id}/items`, item));
 export const useConfirmBatch = (id: string) => _action(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");

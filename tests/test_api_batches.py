@@ -403,6 +403,194 @@ def test_patch_cannot_touch_items_or_execution_controls(client):
     assert [it["payload"] for it in items] == [{"storage": "s1", "target": "a"}]
 
 
+# --- 항목 수정·삭제·추가: 종단 배치는 전 항목, 활성 배치는 Queued 만 ---
+
+def test_put_item_on_terminal_batch_edits_any_item(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)          # 항목: Succeeded, Failed
+    r = client.put(f"/api/admin/batches/{bid}/items/0",
+                   json={"storage": "s1", "target": "edited"})
+    assert r.status_code == 200
+    it = r.json()
+    # 편집된 항목은 미실행(Queued)으로 리셋 — 새 payload 에 옛 결과를 씌우지 않는다
+    assert it["payload"] == {"storage": "s1", "target": "edited"}
+    assert it["status"] == "Queued" and it["request_id"] is None
+    b = client.app.state.repos.batches.get(bid)
+    assert b["status"] == "Completed"            # 편집은 재활성화가 아니다(rescan 몫)
+    assert b["succeeded_count"] == 0 and b["failed_count"] == 1
+
+
+def test_put_item_on_active_batch_edits_queued_item(client):
+    _admin(client)
+    bid = _batch(client)                          # Running, 항목 0 = Queued
+    r = client.put(f"/api/admin/batches/{bid}/items/0",
+                   json={"storage": "s1", "target": "edited"})
+    assert r.status_code == 200
+    it = client.app.state.repos.batches.list_items(bid)[0]
+    assert it["payload"]["target"] == "edited" and it["status"] == "Queued"
+
+
+def test_put_item_on_active_batch_rejects_materialized_item(client):
+    _admin(client)
+    bid = _batch(client)
+    client.app.state.repos.batches.set_item_materialized(bid, 0, "req-0")
+    r = client.put(f"/api/admin/batches/{bid}/items/0",
+                   json={"storage": "s1", "target": "edited"})
+    assert r.status_code == 409 and r.json()["detail"] == "batch_item_not_editable"
+    # 실행 기록 불변 — payload 무접촉
+    assert client.app.state.repos.batches.list_items(bid)[0]["payload"]["target"] == "a"
+
+
+def test_put_item_rejects_storage_mixed(client):
+    _admin(client)
+    bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None,
+        "items": [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b"}]
+        }).json()["batch_id"]
+    r = client.put(f"/api/admin/batches/{bid}/items/0",
+                   json={"storage": "s2", "target": "a"})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_storage_mixed"
+
+
+def test_put_item_rejects_bad_payload(client):
+    _admin(client)
+    bid = _batch(client)
+    r = client.put(f"/api/admin/batches/{bid}/items/0",
+                   json={"storage": "s1", "target": "../bad"})
+    assert r.status_code == 422
+
+
+def test_put_item_404s(client):
+    _admin(client)
+    r = client.put("/api/admin/batches/nope/items/0", json={"storage": "s1", "target": "a"})
+    assert r.status_code == 404 and r.json()["detail"] == "batch_not_found"
+    bid = _batch(client)
+    r = client.put(f"/api/admin/batches/{bid}/items/9", json={"storage": "s1", "target": "a"})
+    assert r.status_code == 404 and r.json()["detail"] == "batch_item_not_found"
+
+
+def test_put_item_blocked_during_maintenance(client):
+    _admin(client)
+    bid = _batch(client)
+    client.put("/api/admin/control-state",
+               json={"maintenance": True, "drain": False, "reason": None})
+    r = client.put(f"/api/admin/batches/{bid}/items/0",
+                   json={"storage": "s1", "target": "b"})
+    assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
+def test_delete_item_on_terminal_batch_recounts(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)          # 항목: Succeeded, Failed
+    r = client.request("DELETE", f"/api/admin/batches/{bid}/items/0")
+    assert r.status_code == 200 and r.json() == {"deleted": 0}
+    b = client.app.state.repos.batches.get(bid)
+    assert b["item_count"] == 1
+    assert b["succeeded_count"] == 0 and b["failed_count"] == 1
+
+
+def test_delete_item_on_active_batch_rejects_materialized_item(client):
+    _admin(client)
+    bid = _batch(client)
+    client.app.state.repos.batches.set_item_materialized(bid, 0, "req-0")
+    r = client.request("DELETE", f"/api/admin/batches/{bid}/items/0")
+    assert r.status_code == 409 and r.json()["detail"] == "batch_item_not_editable"
+    assert client.app.state.repos.batches.get(bid)["item_count"] == 1
+
+
+def test_delete_item_on_active_batch_deletes_queued_item(client):
+    _admin(client)
+    bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None,
+        "items": [{"storage": "s1", "target": "a"}, {"storage": "s1", "target": "b"}]
+        }).json()["batch_id"]
+    r = client.request("DELETE", f"/api/admin/batches/{bid}/items/1")
+    assert r.status_code == 200
+    repo = client.app.state.repos.batches
+    assert [it["seq"] for it in repo.list_items(bid)] == [0]
+    assert repo.get(bid)["item_count"] == 1
+
+
+def test_delete_item_404s_and_maintenance(client):
+    _admin(client)
+    r = client.request("DELETE", "/api/admin/batches/nope/items/0")
+    assert r.status_code == 404 and r.json()["detail"] == "batch_not_found"
+    bid = _batch(client)
+    r = client.request("DELETE", f"/api/admin/batches/{bid}/items/9")
+    assert r.status_code == 404 and r.json()["detail"] == "batch_item_not_found"
+    client.put("/api/admin/control-state",
+               json={"maintenance": True, "drain": False, "reason": None})
+    r = client.request("DELETE", f"/api/admin/batches/{bid}/items/0")
+    assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
+def test_post_item_appends_to_active_batch_without_status_change(client):
+    _admin(client)
+    bid = _batch(client)                          # Running
+    r = client.post(f"/api/admin/batches/{bid}/items",
+                    json={"storage": "s1", "target": "c"})
+    assert r.status_code == 202
+    assert r.json() == {"seq": 1, "status": "Running"}
+    b = client.app.state.repos.batches.get(bid)
+    assert b["status"] == "Running" and b["item_count"] == 2
+
+
+def test_post_item_reactivates_completed_scan_batch(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items",
+                    json={"storage": "s1", "target": "added"})
+    assert r.status_code == 202 and r.json()["status"] == "Running"
+    repo = client.app.state.repos.batches
+    b = repo.get(bid)
+    assert b["status"] == "Running" and b["item_count"] == 3
+    # 기존 종단 항목 불변 — 신규 Queued 항목만 실행된다
+    statuses = [it["status"] for it in repo.list_items(bid)]
+    assert statuses == ["Succeeded", "Failed", "Queued"]
+
+
+def test_post_item_reactivates_completed_sync_batch_to_previewing(client):
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = client.post("/api/admin/batches", json={"operation": "sync", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"source_storage": "s1", "source": "a",
+        "destination_storage": "s2", "destination": "b"}]}).json()["batch_id"]
+    repo.set_item_status(bid, 0, "Succeeded")
+    repo.set_status(bid, "Completed")
+    r = client.post(f"/api/admin/batches/{bid}/items",
+                    json={"source_storage": "s1", "source": "c",
+                          "destination_storage": "s2", "destination": "d"})
+    assert r.status_code == 202 and r.json()["status"] == "Previewing"
+    assert repo.get(bid)["status"] == "Previewing"
+
+
+def test_post_item_rejects_storage_mixed(client):
+    _admin(client)
+    bid = _batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items",
+                    json={"storage": "s2", "target": "c"})
+    assert r.status_code == 422 and r.json()["detail"] == "batch_storage_mixed"
+
+
+def test_post_item_rejects_bad_payload(client):
+    _admin(client)
+    bid = _batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items",
+                    json={"storage": "s1", "target": "../bad"})
+    assert r.status_code == 422
+
+
+def test_post_item_404_and_maintenance(client):
+    _admin(client)
+    r = client.post("/api/admin/batches/nope/items", json={"storage": "s1", "target": "a"})
+    assert r.status_code == 404 and r.json()["detail"] == "batch_not_found"
+    bid = _batch(client)
+    client.put("/api/admin/control-state",
+               json={"maintenance": True, "drain": False, "reason": None})
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "b"})
+    assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
 def test_cancel_running_batch_succeeds(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,

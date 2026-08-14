@@ -1,14 +1,15 @@
 import { Fragment, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
-         useCancelBatch, useRescanBatch, useUpdateBatch } from "./useBatches";
+         useCancelBatch, useRescanBatch, useUpdateBatch,
+         useUpdateBatchItem, useDeleteBatchItem, useAddBatchItem } from "./useBatches";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import { reasonText, ApiError } from "../../lib/api";
-import type { HistogramBucket } from "../../lib/types";
+import type { BatchItem, HistogramBucket } from "../../lib/types";
 
 // NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
 // 전역(B~TiB)이라 KiB 단을 포함한다(NodeMetricsSection 판과 같은 단위 집합).
@@ -179,6 +180,41 @@ export function BatchDetail() {
   // 행 안에서 그 항목(요청) 단위로만 조회·렌더한다 — 배치 합산은 제거됐다
   // (사용자 결정: 배치 전체 집계는 필요 없다).
   const [openSeq, setOpenSeq] = useState<number | null>(null);
+  // 항목 편집(수정·삭제·추가): 노출 조건은 표시 게이트일 뿐 — 진짜 차단은 서버다
+  // (활성 배치는 Queued 만 SQL 원자 가드로 허용, 경합 패배·비허용은 409). 종단
+  // 배치(Completed/Cancelled)는 전 항목 편집 가능 — legacy "편집 후 재실행" 흐름
+  // (전체 재실행과 결합)이다.
+  const terminal = b?.status === "Completed" || b?.status === "Cancelled";
+  const canEditItem = (it: BatchItem) => terminal || it.status === "Queued";
+  const isSync = b?.operation === "sync";
+  const updateItem = useUpdateBatchItem(batchId);
+  const deleteItem = useDeleteBatchItem(batchId);
+  const addItem = useAddBatchItem(batchId);
+  // 드래프트는 서버 상태와 분리(이름·메모 편집과 같은 이유 — 폴링 리페치가 입력을
+  // 덮지 않는다). pathDraft = scan target / sync source.
+  const [editSeq, setEditSeq] = useState<number | null>(null);
+  const [pathDraft, setPathDraft] = useState("");
+  const [dstDraft, setDstDraft] = useState("");
+  const [addPath, setAddPath] = useState("");
+  const [addDst, setAddDst] = useState("");
+  // 스토리지는 입력받지 않는다 — 배치는 단일 스토리지 동질성 계약이라 항목의
+  // 기존 payload(수정) 또는 첫 항목 payload(추가)에서 물려받는 것이 정직하다.
+  const itemBody = (p: Record<string, unknown>, path: string, dst: string) => isSync
+    ? { source_storage: p.source_storage, source: path,
+        destination_storage: p.destination_storage, destination: dst }
+    : { storage: p.storage, target: path };
+  const startItemEdit = (it: BatchItem) => {
+    setPathDraft(String((isSync ? it.payload.source : it.payload.target) ?? ""));
+    setDstDraft(String(it.payload.destination ?? ""));
+    setEditSeq(it.seq);
+  };
+  const saveItem = (it: BatchItem) => updateItem.mutate(
+    { seq: it.seq, item: itemBody(it.payload, pathDraft, dstDraft) },
+    { onSuccess: () => setEditSeq(null) });
+  const firstPayload = b?.items?.[0]?.payload;
+  const submitAdd = () => { if (firstPayload) addItem.mutate(
+    itemBody(firstPayload, addPath, addDst),
+    { onSuccess: () => { setAddPath(""); setAddDst(""); } }); };
   return (
     <section className="space-y-4">
       {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
@@ -275,6 +311,45 @@ export function BatchDetail() {
                   ? <Link className="text-accent" to={`/jobs/${it.request_id}`}>요청 상세</Link>
                   : "—"}</dd>
               </dl>
+              {/* 편집 가능(종단 배치 or Queued 항목)일 때만 버튼 — 불가 항목은
+                  버튼 자체가 없다(표시 게이트, 진짜 차단은 서버 409). */}
+              {canEditItem(it) && editSeq !== it.seq && (
+                <div className="mt-2 ml-11 flex gap-2">
+                  <Button variant="ghost" onClick={() => startItemEdit(it)}>수정</Button>
+                  <Button variant="ghost" disabled={deleteItem.isPending}
+                          onClick={() => deleteItem.mutate(it.seq)}>삭제</Button>
+                </div>
+              )}
+              {deleteItem.isError && (
+                <p className="text-bad text-sm mt-1 ml-11">{(deleteItem.error as ApiError).message}</p>
+              )}
+              {editSeq === it.seq && (
+                <div className="mt-2 ml-11 space-y-2 max-w-md">
+                  {isSync ? (<>
+                    <label className="text-sm block">소스 경로
+                      <input aria-label="소스 경로" className={field} value={pathDraft}
+                             onChange={(e) => setPathDraft(e.target.value)} />
+                    </label>
+                    <label className="text-sm block">목적지 경로
+                      <input aria-label="목적지 경로" className={field} value={dstDraft}
+                             onChange={(e) => setDstDraft(e.target.value)} />
+                    </label>
+                  </>) : (
+                    <label className="text-sm block">대상 경로
+                      <input aria-label="대상 경로" className={field} value={pathDraft}
+                             onChange={(e) => setPathDraft(e.target.value)} />
+                    </label>
+                  )}
+                  <div className="flex gap-2">
+                    <Button disabled={updateItem.isPending} onClick={() => saveItem(it)}>항목 저장</Button>
+                    {/* 배치 취소("취소")·이름 편집("편집 취소")과 라벨이 겹치지 않게 */}
+                    <Button variant="ghost" onClick={() => setEditSeq(null)}>항목 편집 취소</Button>
+                  </div>
+                  {updateItem.isError && (
+                    <p className="text-bad text-sm">{(updateItem.error as ApiError).message}</p>
+                  )}
+                </div>
+              )}
               {/* 항목별 데이터 온도: scan 배치만 — sync 항목엔 dscan 리포트가
                   존재할 수 없어 섹션 자체가 거짓 약속이 된다. */}
               {b?.operation === "scan" && (
@@ -283,6 +358,35 @@ export function BatchDetail() {
               )}
             </>)}
           </div>
+        ))}
+        {/* 항목 추가: 경로만 입력 — 스토리지는 첫 항목에서 물려받는다(동질성 계약).
+            종단 배치에 추가하면 서버가 재활성화(scan→Running/sync→Previewing)하고
+            신규 Queued 항목만 실행된다. 항목이 없으면 물려받을 스토리지가 없어
+            폼 대신 안내를 보인다(빈 배치는 삭제·재생성이 동선). */}
+        {b && ((b.items ?? []).length > 0 ? (
+          <div className="border-t border-black/5 mt-2 pt-3 space-y-2 max-w-md">
+            {isSync ? (<>
+              <label className="text-sm block">추가할 소스 경로
+                <input aria-label="추가할 소스 경로" className={field} value={addPath}
+                       onChange={(e) => setAddPath(e.target.value)} />
+              </label>
+              <label className="text-sm block">추가할 목적지 경로
+                <input aria-label="추가할 목적지 경로" className={field} value={addDst}
+                       onChange={(e) => setAddDst(e.target.value)} />
+              </label>
+            </>) : (
+              <label className="text-sm block">추가할 대상 경로
+                <input aria-label="추가할 대상 경로" className={field} value={addPath}
+                       onChange={(e) => setAddPath(e.target.value)} />
+              </label>
+            )}
+            <Button disabled={addItem.isPending} onClick={submitAdd}>항목 추가</Button>
+            {addItem.isError && (
+              <p className="text-bad text-sm">{(addItem.error as ApiError).message}</p>
+            )}
+          </div>
+        ) : (
+          <p className="text-muted text-sm mt-2">항목이 없어 스토리지를 물려받을 수 없습니다 — 항목 추가는 새 배치로 하세요</p>
         ))}
       </Card>
     </section>

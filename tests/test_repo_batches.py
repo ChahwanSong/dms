@@ -135,6 +135,97 @@ def test_update_meta_partial(db):
     b = repos.batches.get(bid)
     assert b["name"] is None and b["note"] is None
 
+# --- 항목 수정·삭제·추가(배치 항목 편집) ---
+
+def _edit_batch(repos, n=3, status="Running"):
+    return repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage": "s1", "target": f"t{i}"} for i in range(n)], status=status)
+
+
+def test_get_item_returns_row_with_parsed_payload(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=2)
+    it = repos.batches.get_item(bid, 1)
+    assert it["seq"] == 1 and it["payload"] == {"storage": "s1", "target": "t1"}
+    assert repos.batches.get_item(bid, 99) is None
+
+
+def test_update_item_payload_resets_to_queued_and_recounts(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=2, status="Completed")
+    repos.batches.set_item_materialized(bid, 0, "req-0")
+    repos.batches.set_item_status(bid, 0, "Succeeded")
+    repos.batches.bump_counts(bid, succeeded=1)
+    ok = repos.batches.update_item_payload(bid, 0, {"storage": "s1", "target": "new"},
+                                           only_queued=False)
+    assert ok is True
+    it = repos.batches.get_item(bid, 0)
+    # 편집 = 미실행 상태로 리셋 — 종단 상태·request_id 를 남기면 새 payload 가
+    # 옛 결과를 낸 것처럼 보이는 거짓 기록이 된다
+    assert it["payload"] == {"storage": "s1", "target": "new"}
+    assert it["status"] == "Queued"
+    assert it["request_id"] is None and it["reason_code"] is None
+    b = repos.batches.get(bid)
+    assert b["succeeded_count"] == 0 and b["item_count"] == 2
+
+
+def test_update_item_payload_only_queued_guard_rejects_materialized(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=1)
+    repos.batches.set_item_materialized(bid, 0, "req-0")
+    ok = repos.batches.update_item_payload(bid, 0, {"storage": "s1", "target": "new"},
+                                           only_queued=True)
+    assert ok is False
+    # 가드 패배 시 무접촉 — payload·status 그대로
+    it = repos.batches.get_item(bid, 0)
+    assert it["payload"] == {"storage": "s1", "target": "t0"}
+    assert it["status"] == "Materialized" and it["request_id"] == "req-0"
+
+
+def test_delete_item_recounts_absolute(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=3, status="Completed")
+    repos.batches.set_item_status(bid, 0, "Succeeded")
+    repos.batches.set_item_status(bid, 1, "Failed", reason_code="x")
+    repos.batches.bump_counts(bid, succeeded=1, failed=1)
+    assert repos.batches.delete_item(bid, 0, only_queued=False) is True
+    b = repos.batches.get(bid)
+    assert b["item_count"] == 2
+    assert b["succeeded_count"] == 0 and b["failed_count"] == 1
+    # seq 는 재부여하지 않는다(구멍 유지) — seq 는 식별자다
+    assert [it["seq"] for it in repos.batches.list_items(bid)] == [1, 2]
+
+
+def test_delete_item_only_queued_guard_rejects_materialized(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=1)
+    repos.batches.set_item_materialized(bid, 0, "req-0")
+    assert repos.batches.delete_item(bid, 0, only_queued=True) is False
+    assert repos.batches.get_item(bid, 0) is not None
+    assert repos.batches.get(bid)["item_count"] == 1
+
+
+def test_add_item_appends_max_seq_plus_one(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=3)
+    assert repos.batches.delete_item(bid, 1, only_queued=True) is True
+    # MAX(seq)+1 이지 COUNT 가 아니다 — 중간 삭제 후 COUNT(=2)로 매기면 살아있는
+    # seq 2 와 PK 충돌하거나 구멍(seq 1)을 재사용해 목록 순서 의미가 흐려진다
+    seq = repos.batches.add_item(bid, {"storage": "s1", "target": "added"})
+    assert seq == 3
+    it = repos.batches.get_item(bid, 3)
+    assert it["status"] == "Queued" and it["payload"]["target"] == "added"
+    assert repos.batches.get(bid)["item_count"] == 3
+
+
+def test_add_item_to_empty_batch_starts_at_zero(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=1)
+    assert repos.batches.delete_item(bid, 0, only_queued=True) is True
+    assert repos.batches.add_item(bid, {"storage": "s1", "target": "a"}) == 0
+
+
 def test_requests_create_with_batch_id(db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",

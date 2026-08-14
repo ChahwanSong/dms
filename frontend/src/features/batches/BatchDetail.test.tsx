@@ -272,6 +272,104 @@ test("편집 취소는 PATCH 없이 닫힌다", async () => {
   expect(screen.queryByLabelText("배치 이름")).toBeNull();
   expect(patchCalls).toBe(0);
 });
+// --- 항목 편집(수정·삭제·추가): 종단 배치는 전 항목, 활성 배치는 Queued 만 ---
+
+function renderBatch(over: any) {
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(over))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+test("종단 배치: 종단 항목 펼침에 수정·삭제 버튼 — 수정 저장이 PUT 을 쏜다", async () => {
+  let sent: any = null;
+  server.use(http.put("/api/admin/batches/b1/items/0", async ({ request }) => {
+    sent = await request.json();
+    return HttpResponse.json({ seq: 0, status: "Queued" });
+  }));
+  renderDetailed();                              // Completed scan 배치, 항목 0 = Succeeded
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  const input = screen.getByLabelText("대상 경로");
+  expect(input).toHaveValue("team");             // 현재 경로가 드래프트 초기값
+  await userEvent.clear(input);
+  await userEvent.type(input, "edited");
+  await userEvent.click(screen.getByRole("button", { name: "항목 저장" }));
+  // 스토리지는 배치 동질성 계약 — 기존 payload 의 storage 를 그대로 싣는다
+  await waitFor(() => expect(sent).toEqual({ storage: "s1", target: "edited" }));
+  await waitFor(() => expect(screen.queryByLabelText("대상 경로")).toBeNull());
+});
+
+test("종단 배치: 삭제 버튼이 DELETE 를 쏜다", async () => {
+  let deleted = false;
+  server.use(http.delete("/api/admin/batches/b1/items/1", () => {
+    deleted = true; return HttpResponse.json({ deleted: 1 });
+  }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 1 상세" }));
+  await userEvent.click(screen.getByRole("button", { name: "삭제" }));
+  await waitFor(() => expect(deleted).toBe(true));
+});
+
+test("활성 배치: Materialized 항목엔 수정·삭제 버튼이 없다", async () => {
+  renderAt("Running");                           // 항목 0 = Materialized
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByText("payload")).toBeInTheDocument();   // 펼침 완료
+  expect(screen.queryByRole("button", { name: "수정" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "삭제" })).toBeNull();
+});
+
+test("활성 배치: Queued 항목엔 수정·삭제 버튼이 있다", async () => {
+  renderBatch({ operation: "scan", status: "Running", items: [
+    { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
+      request_id: null, reason_code: null }] });
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByRole("button", { name: "수정" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "삭제" })).toBeInTheDocument();
+});
+
+test("항목 추가: 배치 스토리지를 물려받아 POST — 성공 시 입력 초기화", async () => {
+  let sent: any = null;
+  server.use(http.post("/api/admin/batches/b1/items", async ({ request }) => {
+    sent = await request.json();
+    return HttpResponse.json({ seq: 2, status: "Running" }, { status: 202 });
+  }));
+  renderDetailed();                              // scan 배치, storage s1
+  const input = await screen.findByLabelText("추가할 대상 경로");
+  await userEvent.type(input, "newpath");
+  await userEvent.click(screen.getByRole("button", { name: "항목 추가" }));
+  await waitFor(() => expect(sent).toEqual({ storage: "s1", target: "newpath" }));
+  await waitFor(() => expect(screen.getByLabelText("추가할 대상 경로")).toHaveValue(""));
+});
+
+test("sync 배치 항목 수정: 소스·목적지 경로 두 입력 — 4필드 payload 로 PUT", async () => {
+  let sent: any = null;
+  server.use(http.put("/api/admin/batches/b1/items/0", async ({ request }) => {
+    sent = await request.json();
+    return HttpResponse.json({ seq: 0, status: "Queued" });
+  }));
+  renderBatch({ operation: "sync", status: "Completed", items: [
+    { seq: 0, payload: { source_storage: "s1", source: "a",
+        destination_storage: "s2", destination: "b" }, status: "Succeeded",
+      request_id: "r1", reason_code: null }] });
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  const dst = screen.getByLabelText("목적지 경로");
+  expect(screen.getByLabelText("소스 경로")).toHaveValue("a");
+  await userEvent.clear(dst);
+  await userEvent.type(dst, "b2");
+  await userEvent.click(screen.getByRole("button", { name: "항목 저장" }));
+  await waitFor(() => expect(sent).toEqual({ source_storage: "s1", source: "a",
+    destination_storage: "s2", destination: "b2" }));
+});
+
+test("항목이 없으면 추가 폼 대신 안내 — 스토리지를 물려받을 항목이 없다", async () => {
+  renderBatch({ operation: "scan", status: "Completed", items: [] });
+  await screen.findByText(/항목이 없어/);
+  expect(screen.queryByRole("button", { name: "항목 추가" })).toBeNull();
+});
+
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));

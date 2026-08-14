@@ -95,6 +95,92 @@ class BatchesRepository:
             r["payload"] = load_json(r["payload"])
         return rows
 
+    def get_item(self, batch_id, seq):
+        row = self._db.query_one(
+            "SELECT * FROM batch_items WHERE batch_id = :b AND seq = :s",
+            {"b": batch_id, "s": seq})
+        if row is not None:
+            row["payload"] = load_json(row["payload"])
+        return row
+
+    def _recount(self, batch_id):
+        """카운터 절대값 재계산(항목 편집·삭제·추가 경로 전용). bump(증분) 대신
+        절대값인 이유: 편집·삭제는 임의 상태의 행을 리셋·제거하므로 증분 유지가
+        상태별 감산 분기(Succeeded→succeeded-1, Failed|Rejected→failed-1,
+        Cancelled→무접촉)를 여기서 또 복제해야 한다 — 분기 복제는 드리프트
+        원천이고, 행이 진실이므로 세는 것이 정직하다(reset_all_items 의 "절대값이
+        진실" 결정과 같은 방향). 집합 정의는 _record_terminal/bump 경로의 불변식
+        그대로: succeeded = Succeeded, failed = Failed|Rejected(Cancelled 는
+        어느 쪽도 아니다)."""
+        self._db.execute(
+            """UPDATE batches SET
+                   item_count = (SELECT COUNT(*) FROM batch_items WHERE batch_id = :b),
+                   succeeded_count = (SELECT COUNT(*) FROM batch_items
+                                       WHERE batch_id = :b AND status = 'Succeeded'),
+                   failed_count = (SELECT COUNT(*) FROM batch_items
+                                    WHERE batch_id = :b AND status IN ('Failed','Rejected')),
+                   updated_at = :now
+                 WHERE batch_id = :b""",
+            {"b": batch_id, "now": utc_now_iso()})
+
+    def update_item_payload(self, batch_id, seq, payload, *, only_queued: bool) -> bool:
+        """항목 편집 = payload 교체 + **Queued 리셋**(request_id/reason_code NULL).
+        종단 항목의 payload 만 바꾸면 "이 payload 가 그 결과를 냈다"는 거짓 기록이
+        된다(실행 기록 위조 금지) — 편집된 항목은 항상 미실행으로 되돌린다(리셋
+        모양은 reset_item_to_queued 와 동일).
+        only_queued=True(활성 배치): WHERE status='Queued' 원자 가드 — orchestrator
+        materialize(5s 틱)와의 경합에서 영향 행 0 이면 False(호출자가 409).
+        DB 가 신뢰 경계라 가드는 SQL 한 문장에 둔다 — 읽고 나서 쓰면 그 사이가
+        경합 창이다."""
+        guard = " AND status = 'Queued'" if only_queued else ""
+        with self._db.transaction():
+            n = self._db.execute_count(
+                f"""UPDATE batch_items SET payload = :p, status = 'Queued',
+                        request_id = NULL, reason_code = NULL, updated_at = :now
+                      WHERE batch_id = :b AND seq = :s{guard}""",
+                {"p": dump_json(payload), "now": utc_now_iso(),
+                 "b": batch_id, "s": seq})
+            if n == 0:
+                return False
+            self._recount(batch_id)
+        return True
+
+    def delete_item(self, batch_id, seq, *, only_queued: bool) -> bool:
+        """항목 삭제. seq 는 재부여하지 않는다(구멍 유지) — seq 는 항목 식별자라
+        재부여하면 남은 항목이 삭제된 항목의 이력(요청 링크·사유)을 사칭한다.
+        orchestrator 는 seq 연속성을 가정하지 않는다(목록 길이·상태만 본다 —
+        test_orchestrator_tolerates_seq_gap_from_deleted_item 이 고정).
+        only_queued 원자 가드는 update_item_payload 와 같은 이유."""
+        guard = " AND status = 'Queued'" if only_queued else ""
+        with self._db.transaction():
+            n = self._db.execute_count(
+                f"DELETE FROM batch_items WHERE batch_id = :b AND seq = :s{guard}",
+                {"b": batch_id, "s": seq})
+            if n == 0:
+                return False
+            self._recount(batch_id)
+        return True
+
+    def add_item(self, batch_id, payload) -> int:
+        """항목 추가: seq = MAX(seq)+1(빈 배치는 0). COUNT 가 아닌 이유: 중간
+        삭제로 구멍이 있으면 COUNT 는 살아있는 꼬리 seq 와 PK 충돌하거나 구멍을
+        재사용해 "seq = 등록 순서" 의미가 흐려진다(releases.seq 의 MAX+1 관례와
+        같은 결정). MAX 조회와 INSERT 는 한 트랜잭션 — 동시 추가가 같은 seq 를
+        받으면 PK(batch_id, seq) 충돌로 한쪽이 죽는 fail-closed."""
+        now = utc_now_iso()
+        with self._db.transaction():
+            row = self._db.query_one(
+                "SELECT COALESCE(MAX(seq) + 1, 0) AS next_seq FROM batch_items "
+                "WHERE batch_id = :b", {"b": batch_id})
+            seq = row["next_seq"]
+            self._db.execute(
+                """INSERT INTO batch_items (batch_id, seq, payload, status, request_id,
+                       reason_code, created_at, updated_at)
+                   VALUES (:b,:s,:p,'Queued',NULL,NULL,:now,:now)""",
+                {"b": batch_id, "s": seq, "p": dump_json(payload), "now": now})
+            self._recount(batch_id)
+        return seq
+
     def _touch_item(self, batch_id, seq, **fields):
         fields["updated_at"] = utc_now_iso()
         sets = ", ".join(f"{k} = :{k}" for k in fields)

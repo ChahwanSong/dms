@@ -21,6 +21,7 @@
   "empty_batch", "invalid_batch_operation", "invalid_max_concurrency",
   "batch_storage_mixed", "invalid_node_count", "invalid_procs_per_node",
   "batch_not_rescannable", "invalid_batch_name",
+  "batch_item_not_found", "batch_item_not_editable",
   "invalid_storage", "invalid_node_name", "agent_node_identity_mismatch",
   "terminate_failed", "invalid_job_id", "invalid_batch", "invalid_phase",
   "log_ref_not_found", "log_not_available", "artifact_not_found",
