@@ -75,16 +75,22 @@ DRM_STDOUT = """\
 [2026-08-04T02:31:08] Removed 1 items (0.482 items/sec) in 2.077 seconds
 """
 
-# 실측 dscan-report.json 스키마(잡 8464cdd4). 파서는 summary.total_entries만 읽지만
-# top-level 키를 실 스키마대로 유지해 픽스처가 실물을 대표하게 한다.
+# 실측 dscan-report.json 스키마(dscan 1b93d54 write_report): top_k·oldest 제거,
+# broken_paths_total(정확 총계)·broken_paths_limit·summary.scan_errors 신설.
+# 파서는 summary.total_entries만 읽지만 top-level 키를 실 스키마대로 유지해
+# 픽스처가 실물을 대표하게 한다 — 스키마 개편에도 파서가 무변경임을 증명한다.
 DSCAN_REPORT = {
     "directory": "/cephfs/dms/smoke-src",
     "generated_at_epoch": 1754273652,
-    "top_k": 10,
     "thresholds": {},
     "summary": {"total_entries": 10, "total_files": 7, "total_directories": 3,
-                "total_symlinks": 0, "total_other": 0},
+                "total_symlinks": 0, "total_other": 0, "scan_errors": 0},
     "file_size_histogram": [],
+    "time_histograms": {"atime": [], "mtime": [], "ctime": []},
+    "broken_paths_total": 1,
+    "broken_paths_limit": 100,
+    "broken_paths": [{"path": "/cephfs/dms/smoke-src/dangling",
+                      "reasons": ["missing"]}],
 }
 
 

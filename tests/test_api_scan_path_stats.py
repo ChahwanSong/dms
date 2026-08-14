@@ -1,6 +1,9 @@
 """GET /api/user/scan-paths/{id}/stats — 커버링 scan 리포트에서 뽑은 화이트리스트
-통계만 노출한다. dscan 리포트의 oldest(구체 파일 경로)·broken_paths·directory(절대
-마운트 경로)·thresholds·top_k는 절대 응답에 섞이면 안 된다(상위 스펙 §8)."""
+통계만 노출한다. dscan 리포트의 broken_paths(구체 파일 경로)·directory(절대
+마운트 경로)·thresholds는 절대 응답에 섞이면 안 된다. 구형 리포트의 oldest·top_k
+(신 dscan 1b93d54에서 스키마 삭제)도 금지 목록에 남긴다 — 아티팩트 디렉터리에는
+구형 리포트가 계속 존재한다(상위 스펙 §8). broken_paths_total/limit(숫자 총계)만
+신규 노출 — 구형 리포트(키 부재)는 None(미기록, null≠0)."""
 import json
 
 from dms.config import Settings
@@ -10,7 +13,28 @@ from dms.migrations import migrate
 from fastapi.testclient import TestClient
 
 
+# 실측 신 스키마(dscan 1b93d54): top_k·oldest 없음, broken_paths_total(정확 총계)·
+# broken_paths_limit·summary.scan_errors 신설. broken_paths 는 {path, reasons} 목록.
 REPORT = {
+    "directory": "/cephfs/dms/team",
+    "generated_at_epoch": 1785805962,
+    "thresholds": {"abnormal_size_bytes": 1},
+    "summary": {"total_entries": 10, "total_files": 7, "total_directories": 3,
+                "total_symlinks": 0, "total_other": 0, "scan_errors": 0},
+    "file_size_histogram": [{"bucket": "[0,4096]", "lower_inclusive": 0,
+                            "upper_inclusive": 4096, "count": 7}],
+    "time_histograms": {"atime": [{"bucket": "[0d,1d]", "min_age_days": 0,
+                                   "max_age_days": 1, "bytes": 50}],
+                        "mtime": [], "ctime": []},
+    "broken_paths_total": 3,
+    "broken_paths_limit": 100,
+    "broken_paths": [{"path": "/cephfs/dms/team/secret.txt",
+                      "reasons": ["missing"]}],
+}
+
+# 구형 리포트(top_k 시절 dscan) — 아티팩트에 그대로 남아 있다. stats 는 여전히
+# 동작해야 하고 broken 필드는 None(미기록)이어야 한다.
+OLD_REPORT = {
     "directory": "/cephfs/dms/team",
     "generated_at_epoch": 1785805962,
     "top_k": 10,
@@ -19,9 +43,7 @@ REPORT = {
                 "total_symlinks": 0, "total_other": 0},
     "file_size_histogram": [{"bucket": "[0,4096]", "lower_inclusive": 0,
                             "upper_inclusive": 4096, "count": 7}],
-    "time_histograms": {"atime": [{"bucket": "[0d,1d]", "min_age_days": 0,
-                                   "max_age_days": 1, "bytes": 50}],
-                        "mtime": [], "ctime": []},
+    "time_histograms": {"atime": [], "mtime": [], "ctime": []},
     "oldest": {"atime": [{"path": "/cephfs/dms/team/secret.txt", "type": "file",
                           "size_bytes": 1, "atime": 1, "mtime": 1, "ctime": 1}]},
     "broken_paths": ["/cephfs/dms/team/broken"],
@@ -112,10 +134,55 @@ def test_response_is_whitelisted_and_never_leaks_paths(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert set(body.keys()) == {"covered_by", "generated_at_epoch", "summary",
-                                "file_size_histogram", "time_histograms"}
+                                "file_size_histogram", "time_histograms",
+                                "broken_paths_total", "broken_paths_limit"}
+    # broken_paths(경로 목록)는 여전히 금지 — 총계(숫자)만 나간다. oldest·top_k는
+    # 신 스키마엔 없지만 구형 리포트 방어로 금지 목록에 남긴다.
     for forbidden_key in ("oldest", "broken_paths", "directory", "thresholds", "top_k"):
         assert forbidden_key not in body
 
+    raw = r.text
+    assert "secret.txt" not in raw
+    assert "/cephfs" not in raw
+
+
+def test_broken_totals_are_exposed_as_numbers(tmp_path):
+    """신 dscan(1b93d54)의 정확 총계·보관 상한은 숫자라 노출 계약("집계 통계뿐")
+    안이다 — 경로 표본(broken_paths)은 여전히 금지."""
+    art_base = tmp_path / "artifacts"
+    client, db = _client(tmp_path, art_base)
+    repos = client.app.state.repos
+    _login(client, "alice")
+    path_id = _register(client, "ceph-a", "team")
+    _scan_job(repos, db, storage_name="ceph-a", target="team", art_base=art_base)
+
+    r = client.get(f"/api/user/scan-paths/{path_id}/stats")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["broken_paths_total"] == 3
+    assert body["broken_paths_limit"] == 100
+
+
+def test_old_schema_report_still_serves_stats_with_broken_none(tmp_path):
+    """구형 리포트(top_k·oldest 시절)는 아티팩트에 계속 존재한다 — 통계는 여전히
+    나가고 broken 필드는 None(미기록). null≠0: 0은 "파손 없음"의 정상값이라
+    구형 리포트를 0으로 뭉개면 거짓말이다."""
+    art_base = tmp_path / "artifacts"
+    client, db = _client(tmp_path, art_base)
+    repos = client.app.state.repos
+    _login(client, "alice")
+    path_id = _register(client, "ceph-a", "team")
+    _scan_job(repos, db, storage_name="ceph-a", target="team", art_base=art_base,
+              report=OLD_REPORT)
+
+    r = client.get(f"/api/user/scan-paths/{path_id}/stats")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["summary"]["total_entries"] == 10
+    assert body["broken_paths_total"] is None
+    assert body["broken_paths_limit"] is None
+    for forbidden_key in ("oldest", "broken_paths", "top_k"):
+        assert forbidden_key not in body
     raw = r.text
     assert "secret.txt" not in raw
     assert "/cephfs" not in raw
@@ -167,9 +234,10 @@ def test_oversized_report_reports_503_not_a_false_no_covering_scan(tmp_path):
     _login(client, "alice")
     path_id = _register(client, "ceph-a", "team")
     big = json.loads(json.dumps(REPORT))
-    big["oldest"]["atime"] = [{"path": f"/cephfs/dms/team/f{i}", "type": "file",
-                               "size_bytes": 1, "atime": 1, "mtime": 1, "ctime": 1}
-                              for i in range(3000)]
+    # 신 스키마에서 리포트를 비대하게 만드는 건 broken_paths 표본이다(--broken-limit
+    # 을 크게 준 scan) — 경로 문자열이 그대로 실린다.
+    big["broken_paths"] = [{"path": f"/cephfs/dms/team/f{i}", "reasons": ["missing"]}
+                           for i in range(6000)]
     raw = json.dumps(big)
     assert len(raw.encode()) > 256 * 1024
     _scan_job(repos, db, storage_name="ceph-a", target="team", art_base=art_base,
@@ -237,7 +305,10 @@ def test_missing_or_wrong_shaped_fields_never_serve_null(tmp_path):
     path_id = _register(client, "ceph-a", "team")
     _scan_job(repos, db, storage_name="ceph-a", target="team", art_base=art_base,
               report={"summary": None, "file_size_histogram": "nope",
-                      "time_histograms": ["nope"], "generated_at_epoch": "nope"})
+                      "time_histograms": ["nope"], "generated_at_epoch": "nope",
+                      # 숫자 자리를 dscan이 문자열(경로일 수 있다)·bool로 채우면
+                      # 모양 투영이 걸러 None — 경로가 총계 행세로 새지 않는다.
+                      "broken_paths_total": "/cephfs/evil", "broken_paths_limit": True})
 
     r = client.get(f"/api/user/scan-paths/{path_id}/stats")
     assert r.status_code == 200, r.text
@@ -246,6 +317,9 @@ def test_missing_or_wrong_shaped_fields_never_serve_null(tmp_path):
     assert body["file_size_histogram"] == []
     assert body["time_histograms"] == {}
     assert body["generated_at_epoch"] is None
+    assert body["broken_paths_total"] is None
+    assert body["broken_paths_limit"] is None
+    assert "/cephfs" not in r.text
 
 
 def test_non_finite_numbers_do_not_break_serialization(tmp_path):

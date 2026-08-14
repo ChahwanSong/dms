@@ -151,6 +151,8 @@ def scan_path_stats(path_id: int, request: Request,
         if not isinstance(report, dict):
             continue            # null·[]·"x"도 유효한 JSON이다
         epoch = report.get("generated_at_epoch")
+        broken_total = report.get("broken_paths_total")
+        broken_limit = report.get("broken_paths_limit")
         return {
             # 세 필드는 절대 null이 되지 않는다 — 클라이언트 타입이 non-nullable이라
             # null 하나가 렌더 도중 예외가 되고, ErrorBoundary가 없어 화면 전체가 죽는다.
@@ -158,6 +160,12 @@ def scan_path_stats(path_id: int, request: Request,
             "file_size_histogram": _buckets(report.get("file_size_histogram")),
             "time_histograms": _time_histograms(report.get("time_histograms")),
             "generated_at_epoch": epoch if _is_number(epoch) else None,
+            # 신 dscan(1b93d54)의 파손 경로 정확 총계·보관 상한 — 숫자만 통과
+            # (모양 투영: 문자열이 오면 경로일 수 있다). 구형 리포트(키 부재)는
+            # None(미기록) — null≠0: 0은 "파손 없음"의 정상값이다. 경로 표본
+            # 자체(broken_paths)는 화이트리스트 밖 — 절대 노출하지 않는다.
+            "broken_paths_total": broken_total if _is_number(broken_total) else None,
+            "broken_paths_limit": broken_limit if _is_number(broken_limit) else None,
             "covered_by": {"target": posixpath.normpath(target),
                            "exact": covers(row["path"], target)},
         }

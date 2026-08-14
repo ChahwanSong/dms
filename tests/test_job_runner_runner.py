@@ -91,14 +91,17 @@ DRM_STDOUT = """\
 [2026-08-04T02:31:08] Removed 1 items (0.482 items/sec) in 2.077 seconds
 """
 
+# 신 스키마(dscan 1b93d54): top_k·oldest 없음, broken_paths_total/limit 신설.
 DSCAN_REPORT = {
     "directory": "/cephfs/dms/smoke-src",
     "generated_at_epoch": 1754273652,
-    "top_k": 10,
     "thresholds": {},
     "summary": {"total_entries": 10, "total_files": 7, "total_directories": 3,
-                "total_symlinks": 0, "total_other": 0},
+                "total_symlinks": 0, "total_other": 0, "scan_errors": 0},
     "file_size_histogram": [],
+    "broken_paths_total": 0,
+    "broken_paths_limit": 100,
+    "broken_paths": [],
 }
 
 
