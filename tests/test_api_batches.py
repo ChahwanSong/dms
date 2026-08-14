@@ -272,6 +272,82 @@ def test_rescan_blocked_during_maintenance(client):
     assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
 
 
+# --- 배치 수정(메타데이터): PATCH {name?, note?} ---
+
+def _batch(client, **extra):
+    body = {"operation": "scan", "max_concurrency": 1, "options": {}, "note": None,
+            "items": [{"storage": "s1", "target": "a"}], **extra}
+    return client.post("/api/admin/batches", json=body).json()["batch_id"]
+
+
+def test_patch_updates_name_and_note(client):
+    _admin(client)
+    bid = _batch(client, name="이전 이름", note="이전 메모")
+    r = client.patch(f"/api/admin/batches/{bid}",
+                     json={"name": "  새 이름  ", "note": "새 메모"})
+    assert r.status_code == 200
+    assert r.json()["name"] == "새 이름" and r.json()["note"] == "새 메모"
+    b = client.app.state.repos.batches.get(bid)
+    assert b["name"] == "새 이름" and b["note"] == "새 메모"
+
+
+def test_patch_partial_only_touches_sent_keys(client):
+    _admin(client)
+    bid = _batch(client, name="이름", note="메모")
+    r = client.patch(f"/api/admin/batches/{bid}", json={"note": "메모2"})
+    assert r.status_code == 200
+    b = client.app.state.repos.batches.get(bid)
+    # 키 부재 = 무접촉(부분 갱신) — name 이 지워지면 안 된다
+    assert b["name"] == "이름" and b["note"] == "메모2"
+
+
+def test_patch_empty_string_clears_to_null(client):
+    _admin(client)
+    bid = _batch(client, name="이름", note="메모")
+    r = client.patch(f"/api/admin/batches/{bid}", json={"name": "", "note": ""})
+    assert r.status_code == 200
+    b = client.app.state.repos.batches.get(bid)
+    # 지우기 계약: 빈 문자열 → NULL 저장(명시적 null 과 같은 결과로 단순화)
+    assert b["name"] is None and b["note"] is None
+
+
+def test_patch_rejects_overlong_name(client):
+    _admin(client)
+    bid = _batch(client)
+    r = client.patch(f"/api/admin/batches/{bid}", json={"name": "n" * 121})
+    assert r.status_code == 422 and r.json()["detail"] == "invalid_batch_name"
+
+
+def test_patch_missing_batch_404(client):
+    _admin(client)
+    r = client.patch("/api/admin/batches/nope", json={"name": "x"})
+    assert r.status_code == 404 and r.json()["detail"] == "batch_not_found"
+
+
+def test_patch_blocked_during_maintenance(client):
+    _admin(client)
+    bid = _batch(client)
+    client.put("/api/admin/control-state",
+               json={"maintenance": True, "drain": False, "reason": None})
+    r = client.patch(f"/api/admin/batches/{bid}", json={"name": "x"})
+    assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
+def test_patch_cannot_touch_items_or_execution_controls(client):
+    # 즉시 실행 모델: 자식이 이미 materialize 되므로 items·실행 제어는 수정 불가 —
+    # 바디에 실어 보내도 무시된다(메타데이터 두 키만 갱신).
+    _admin(client)
+    bid = _batch(client, priority="high")
+    r = client.patch(f"/api/admin/batches/{bid}",
+                     json={"name": "x", "priority": "low", "max_concurrency": 9,
+                           "items": [{"storage": "s1", "target": "evil"}]})
+    assert r.status_code == 200
+    b = client.app.state.repos.batches.get(bid)
+    assert b["priority"] == "high" and b["max_concurrency"] == 1
+    items = client.app.state.repos.batches.list_items(bid)
+    assert [it["payload"] for it in items] == [{"storage": "s1", "target": "a"}]
+
+
 def test_cancel_running_batch_succeeds(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,

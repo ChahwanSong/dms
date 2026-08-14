@@ -83,6 +83,18 @@ class BatchesRepository:
     def reset_item_to_queued(self, batch_id, seq):
         self._touch_item(batch_id, seq, status="Queued", request_id=None, reason_code=None)
 
+    def update_meta(self, batch_id, **fields):
+        """메타데이터 부분 갱신(name/note): **넘어온 키만** 만진다 — 키 부재는
+        무접촉이고, 명시적 None 은 NULL 로 지운다(호출자가 빈 문자열→None 접기를
+        끝낸 값만 넘긴다). items·실행 제어 컬럼은 여기로 못 들어온다 — 라우트가
+        메타 두 키만 추려 넘기는 계약(즉시 실행 모델, routes_batches 주석)."""
+        if not fields:
+            return
+        fields["updated_at"] = utc_now_iso()
+        sets = ", ".join(f"{k} = :{k}" for k in fields)
+        self._db.execute(f"UPDATE batches SET {sets} WHERE batch_id = :b",
+                         {**fields, "b": batch_id})
+
     def set_status(self, batch_id, status):
         self._db.execute(
             "UPDATE batches SET status = :s, updated_at = :now WHERE batch_id = :b",

@@ -81,6 +81,32 @@ test("이름이 없으면 기존 축약 batch_id 헤더 유지", async () => {
   renderAt("Running");
   expect(await screen.findByRole("heading", { name: "배치 b1" })).toBeInTheDocument();
 });
+test("이름·메모 인라인 편집: 저장이 PATCH 를 쏘고 편집을 닫는다", async () => {
+  let patched: any = null;
+  server.use(http.patch("/api/admin/batches/b1", async ({ request }) => {
+    patched = await request.json();
+    return HttpResponse.json(batch({ name: "새 이름", note: "새 메모" }));
+  }));
+  renderAt("Running");
+  await userEvent.click(await screen.findByRole("button", { name: "이름·메모 편집" }));
+  await userEvent.type(screen.getByLabelText("배치 이름"), "새 이름");
+  await userEvent.type(screen.getByLabelText("메모"), "새 메모");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(patched).toEqual({ name: "새 이름", note: "새 메모" }));
+  // 저장 성공 후 편집 종료(입력 부재)
+  await waitFor(() => expect(screen.queryByLabelText("배치 이름")).toBeNull());
+});
+test("편집 취소는 PATCH 없이 닫힌다", async () => {
+  let patchCalls = 0;
+  server.use(http.patch("/api/admin/batches/b1", () => { patchCalls += 1;
+    return HttpResponse.json(batch()); }));
+  renderAt("Running");
+  await userEvent.click(await screen.findByRole("button", { name: "이름·메모 편집" }));
+  // 배치 취소 버튼("취소")과 겹치지 않는 라벨 — 편집 취소는 별개 동작이다
+  await userEvent.click(screen.getByRole("button", { name: "편집 취소" }));
+  expect(screen.queryByLabelText("배치 이름")).toBeNull();
+  expect(patchCalls).toBe(0);
+});
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));

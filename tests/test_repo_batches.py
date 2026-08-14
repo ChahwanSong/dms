@@ -121,6 +121,20 @@ def test_create_defaults_name_to_null(db):
     # null = 이름 없음(미지정) — 빈 문자열로 뭉개지 않는다
     assert repos.batches.get(bid)["name"] is None
 
+def test_update_meta_partial(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note="메모",
+        items=[{"storage":"s1","target":"a"}], status="Running", name="이름")
+    before = repos.batches.get(bid)["updated_at"]
+    repos.batches.update_meta(bid, name="새 이름")           # note 무접촉(부분 갱신)
+    b = repos.batches.get(bid)
+    assert b["name"] == "새 이름" and b["note"] == "메모"
+    assert b["updated_at"] >= before
+    repos.batches.update_meta(bid, name=None, note=None)     # 명시적 지우기(NULL)
+    b = repos.batches.get(bid)
+    assert b["name"] is None and b["note"] is None
+
 def test_requests_create_with_batch_id(db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",

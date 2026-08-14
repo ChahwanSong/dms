@@ -98,6 +98,41 @@ def list_batches(request: Request, identity: Identity = Depends(require_admin)):
     return request.app.state.repos.batches.list()
 
 
+class BatchPatchBody(BaseModel):
+    # 부분 갱신 계약: 키 부재 = 무접촉(exclude_unset 으로 판별), 명시적 null·빈
+    # 문자열 = 지우기(NULL 저장으로 단순화). 두 키 밖의 입력은 pydantic 이 버린다.
+    name: str | None = None
+    note: str | None = None
+
+
+@router.patch("/api/admin/batches/{batch_id}")
+def patch_batch(batch_id: str, body: BatchPatchBody, request: Request,
+                identity: Identity = Depends(require_admin)):
+    """배치 메타데이터(name/note) 수정. **items·실행 제어(priority/node_count/
+    procs_per_node/max_concurrency/owner)는 수정 불가** — 배치는 즉시 실행
+    모델이라 생성 직후 orchestrator 가 자식 request 를 materialize 하기 시작하고,
+    이미 실린 자식은 배치 행을 다시 읽지 않는다. 실행 제어를 여기서 바꾸면 "일부
+    자식은 옛값, 일부는 새값"의 거짓 화면이 된다 — 바꾸려면 취소 후 재생성이
+    정직하다. 감사 기록은 기존 배치 mutation 라우트(:confirm/:cancel/:rescan)
+    관례를 미러: 별도 audit 행 없음(감사는 저장소가 남기는 도메인 — storages/
+    policies 처럼 repo 가 남기는 자원만 audit_entries 에 실린다)."""
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    if repo.get(batch_id) is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    fields = {}
+    sent = body.model_dump(exclude_unset=True)
+    if "name" in sent:
+        fields["name"] = normalized_batch_name(sent["name"])     # 생성과 같은 검증
+    if "note" in sent:
+        # note 도 name 과 같은 지우기 계약(trim 후 빈값 → NULL) — "이름 없음"이
+        # NULL/"" 두 표현으로 갈라지는 것을 막는 동일 규칙.
+        note = (sent["note"] or "").strip()
+        fields["note"] = note if note != "" else None
+    repo.update_meta(batch_id, **fields)
+    return repo.get(batch_id)
+
+
 @router.get("/api/admin/batches/{batch_id}")
 def get_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
     repo = request.app.state.repos.batches

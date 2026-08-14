@@ -32,6 +32,18 @@ function _action(id: string, verb: string) {
                        qc.invalidateQueries({ queryKey: ["batches"] }); },
   });
 }
+// 메타데이터 수정(name/note): 서버가 빈 문자열을 NULL(지움)로 접는다 — 값은 늘
+// 두 키를 실어 보내는 단순 계약(부분 갱신 판별을 화면이 흉내 내지 않는다).
+export interface UpdateBatchBody { name?: string; note?: string }
+export const useUpdateBatch = (id: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (b: UpdateBatchBody) =>
+      apiSend<Batch>("PATCH", `/api/admin/batches/${id}`, b),
+    onSettled: () => { qc.invalidateQueries({ queryKey: ["batch", id] });
+                       qc.invalidateQueries({ queryKey: ["batches"] }); },
+  });
+};
 export const useConfirmBatch = (id: string) => _action(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");
