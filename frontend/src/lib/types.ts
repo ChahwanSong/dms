@@ -169,6 +169,10 @@ export interface ScanPathStats {
   summary: Record<string, number>;
   file_size_histogram: HistogramBucket[];
   time_histograms: Record<string, HistogramBucket[]>;
+  // 신 dscan(1b93d54)의 파손 경로 정확 총계·보관 상한. null = 구형 리포트의
+  // "기록 없음"(null≠0 — 0은 파손 없음의 정상값), 옵션(?) = 구형 서버 호환.
+  broken_paths_total?: number | null;
+  broken_paths_limit?: number | null;
 }
 
 // 릴리스(롤아웃). 상태는 Pending → Applying → Applied/Failed 이고 잡/빌드의 종단

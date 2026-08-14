@@ -150,6 +150,65 @@ test("the stats panel names the registered path and the report's UTC timestamp",
   expect(screen.getByText(/2025-08-05 13:20:00 UTC/)).toBeInTheDocument();
 });
 
+// 신 dscan(1b93d54) 리포트의 파손 경로 총계·보관 상한. 0은 "파손 없음"의
+// 정상값이고 null은 구형 리포트의 "기록 없음"이다 — 화면이 둘을 구분해 말한다.
+test("broken totals from a new-schema report render as a count line", async () => {
+  server.use(
+    http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/user/scan-paths", () => HttpResponse.json([
+      { id: 1, storage_name: "s1", path: "/s1/alice", created_at: "2026-08-01T00:00:00Z" },
+    ])),
+    http.get("/api/user/scan-paths/1/stats", () => HttpResponse.json({
+      covered_by: { target: "/s1/alice", exact: true },
+      generated_at_epoch: 1754400000,
+      summary: {}, file_size_histogram: [], time_histograms: {},
+      broken_paths_total: 3, broken_paths_limit: 100,
+    })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "통계 보기" }));
+
+  expect(await screen.findByText("파손 경로 3건 · 보관 상한 100")).toBeInTheDocument();
+});
+
+test("broken total of zero renders as 0건, not as missing", async () => {
+  server.use(
+    http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/user/scan-paths", () => HttpResponse.json([
+      { id: 1, storage_name: "s1", path: "/s1/alice", created_at: "2026-08-01T00:00:00Z" },
+    ])),
+    http.get("/api/user/scan-paths/1/stats", () => HttpResponse.json({
+      covered_by: { target: "/s1/alice", exact: true },
+      generated_at_epoch: 1754400000,
+      summary: {}, file_size_histogram: [], time_histograms: {},
+      broken_paths_total: 0, broken_paths_limit: 100,
+    })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "통계 보기" }));
+
+  expect(await screen.findByText("파손 경로 0건 · 보관 상한 100")).toBeInTheDocument();
+});
+
+test("null broken totals (old-schema report) say 기록 없음 instead of a number", async () => {
+  server.use(
+    http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/user/scan-paths", () => HttpResponse.json([
+      { id: 1, storage_name: "s1", path: "/s1/alice", created_at: "2026-08-01T00:00:00Z" },
+    ])),
+    http.get("/api/user/scan-paths/1/stats", () => HttpResponse.json({
+      covered_by: { target: "/s1/alice", exact: true },
+      generated_at_epoch: 1754400000,
+      summary: {}, file_size_histogram: [], time_histograms: {},
+      broken_paths_total: null, broken_paths_limit: null,
+    })),
+  );
+  wrap();
+  await userEvent.click(await screen.findByRole("button", { name: "통계 보기" }));
+
+  expect(await screen.findByText("파손 경로: 기록 없음(구형 리포트)")).toBeInTheDocument();
+});
+
 test("shows the Korean no_covering_scan message on 404 with an admin-scan hint", async () => {
   server.use(
     http.get("/api/user/storages", () => HttpResponse.json(STORAGES)),

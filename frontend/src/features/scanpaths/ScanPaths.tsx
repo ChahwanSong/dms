@@ -74,6 +74,14 @@ function StatsPanel({ sp }: { sp: ScanPath }) {
           상위 경로 {stats.covered_by.target} 기준 집계입니다 — 이 경로만의 통계가 아닙니다
         </p>
       )}
+      {/* 파손 경로: 총계는 항상 정확(신 dscan), 보관 상한은 리포트에 실린 표본
+          수의 상한이다. null·부재는 구형 리포트의 "기록 없음" — 0(파손 없음)과
+          구분해 말한다(null≠0). */}
+      <p className="text-muted text-sm">
+        {typeof stats.broken_paths_total === "number"
+          ? `파손 경로 ${stats.broken_paths_total}건 · 보관 상한 ${stats.broken_paths_limit ?? "?"}`
+          : "파손 경로: 기록 없음(구형 리포트)"}
+      </p>
       <div>
         <h2 className="font-semibold mb-2">요약</h2>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
