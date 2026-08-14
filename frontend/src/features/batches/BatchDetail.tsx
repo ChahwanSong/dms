@@ -1,6 +1,6 @@
 import { Fragment, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { useBatch, useBatchScanStats, useConfirmBatch, useRerunFailed,
+import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch } from "./useBatches";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -31,13 +31,29 @@ function toBars(buckets: HistogramBucket[] | undefined,
       ? [{ label: b.bucket, value: b[key] as number }] : []);
 }
 
-// 시간축별 캡션: atime 만 근사 경고(relatime/open_noatime 는 접근이 atime 을
+// 시간축별 캡션: 색의 의미(왼쪽 빨강=hot, 오른쪽 파랑=cold)를 축마다 그 축의
+// 언어로 말한다. atime 만 근사 경고(relatime/open_noatime 는 접근이 atime 을
 // 안 갱신할 수 있다) -- mtime/ctime 은 마운트 옵션과 무관해 경고가 거짓이 된다.
 const TEMP_CAPTIONS: Record<string, string> = {
-  atime: "최근 접근(atime) 기준 용량 비중 — hot(왼쪽)일수록 최근 접근. relatime/open_noatime 환경에선 근사",
-  mtime: "수정 시각(mtime) 기준 용량 비중 — 왼쪽일수록 최근 수정",
-  ctime: "메타데이터 변경(ctime) 기준 용량 비중 — 왼쪽일수록 최근 변경",
+  atime: "왼쪽(빨강)=hot·최근 접근, 오른쪽(파랑)=cold — atime 기준 용량 비중. relatime/open_noatime 환경에선 근사",
+  mtime: "왼쪽(빨강)=최근 수정, 오른쪽(파랑)=오래됨 — mtime 기준 용량 비중",
+  ctime: "왼쪽(빨강)=최근 변경, 오른쪽(파랑)=오래됨 — ctime 기준 용량 비중",
 };
+
+// 9버킷 hot→cold 온도 팔레트(웜→쿨 자연 그라디언트). 정적 hex inline style --
+// airgap 무관(런타임 외부 로드가 아니라 그냥 번들 안 문자열이다).
+const TEMP_PALETTE = ["#dc2626", "#ea580c", "#f59e0b", "#eab308", "#84cc16",
+                      "#22c55e", "#06b6d4", "#3b82f6", "#6366f1"];
+// 첫 막대=빨강(hot)·끝 막대=파랑(cold)이 막대 수와 무관하게 유지되게 비례 사상
+// 한다 -- 팔레트 인덱스 직결이면 9 미만 히스토그램이 전부 웜톤이 된다.
+const tempColorOf = (n: number) => (i: number) =>
+  TEMP_PALETTE[n <= 1 ? 0 : Math.round((i / (n - 1)) * (TEMP_PALETTE.length - 1))];
+
+/** 리포트 생성 시각은 UTC로만 보여준다(ScanPaths 국소 사본 관례) — 스토리지·잡은
+ *  UTC로 기록되고, 로컬시간으로 바꾸면 운영자·사용자가 다른 시각을 말하게 된다. */
+function utcStamp(epoch: number) {
+  return `${new Date(epoch * 1000).toISOString().replace("T", " ").slice(0, 19)} UTC`;
+}
 
 // payload 필드 결손 방어 + 대상 요약: 대시보드 RecentRequestsSection 의 summarize
 // 관례 미러(scan/rm: storage:target, sync: src → dst). ?? 로만 접는다 — truthy
@@ -49,6 +65,84 @@ function summarizeItem(operation: string | undefined,
     ? `${part(p.source_storage)}:${part(p.source)} → ${part(p.destination_storage)}:${part(p.destination)}`
     : `${part(p.storage)}:${part(p.target)}`;
   return `${operation ?? "—"} · ${body}`;
+}
+
+// 항목별 데이터 온도 섹션: 펼친 항목에서만 마운트된다(= lazy 조회의 1차 게이트,
+// 훅 enabled 가 2차로 성공 요청만 통과시킨다). 성공 요청만 리포트를 가지므로
+// 미성공 항목은 조회 없이 "리포트 없음"이 정직하고, 404 no_scan_report(성공인데
+// 리포트 부재·유실)도 화면엔 같은 사실이라 같은 문구다 — 그 외 오류(503 등)는
+// 사유 문구를 그대로 보인다. 온도 토글 상태는 컴포넌트 지역(단일 펼침이라 행
+// 전환 시 atime 기본으로 리셋되는 게 자연스럽다).
+function ItemScanStats({ requestId, succeeded }: {
+  requestId: string | null; succeeded: boolean;
+}) {
+  const q = useRequestScanStats(requestId, succeeded);
+  const [tempKey, setTempKey] = useState("atime");
+  const noReport = !succeeded
+    || (q.isError && (q.error as ApiError).code === "no_scan_report");
+  if (noReport) return <p className="text-muted text-sm mt-3 ml-11">리포트 없음</p>;
+  if (q.isError) {
+    return <p className="text-bad text-sm mt-3 ml-11">{(q.error as ApiError).message}</p>;
+  }
+  const stats = q.data;
+  if (!stats) return null;               // 로딩 — 짧은 창이라 문구 없이 둔다
+  const tempKeys = ["atime", "mtime", "ctime"]
+    .filter((k) => stats.time_histograms[k] !== undefined);
+  const bars = toBars(stats.time_histograms[tempKey], "bytes");
+  return (
+    <div className="mt-3 ml-11 space-y-3">
+      <div>
+        <h3 className="font-medium text-sm">데이터 온도(hot/cold)</h3>
+        {/* 언제 찍힌 숫자인지 없이 보여주는 건 부정직이다(ScanPaths 관례 미러) */}
+        <p className="text-muted text-xs">
+          {typeof stats.generated_at_epoch === "number"
+            ? `scan 리포트 생성: ${utcStamp(stats.generated_at_epoch)}`
+            : "scan 리포트 생성 시각을 알 수 없습니다"}
+        </p>
+      </div>
+      <div>
+        <div className="flex gap-2 mb-2">
+          {tempKeys.map((k) => (
+            <Button key={k} type="button"
+                    variant={tempKey === k ? "outline" : "ghost"}
+                    onClick={() => setTempKey(k)}>{k}</Button>
+          ))}
+        </div>
+        <BarChart data={bars}
+                  label={`데이터 온도(${tempKey}) 히스토그램`}
+                  formatValue={humanBytes}
+                  colorOf={tempColorOf(bars.length)}
+                  emptyText="집계된 버킷 없음" />
+        {TEMP_CAPTIONS[tempKey] && (
+          <p className="text-muted text-xs mt-1">{TEMP_CAPTIONS[tempKey]}</p>
+        )}
+      </div>
+      <div>
+        {/* 크기 분포는 온도가 아니다 — 온도 색을 입히면 "작은 파일=hot"이라는
+            거짓 의미가 생겨 기본 accent 를 유지한다. */}
+        <h4 className="font-medium mb-2 text-sm">파일 크기 분포(개수)</h4>
+        <BarChart data={toBars(stats.file_size_histogram, "count")}
+                  label="파일 크기 분포" emptyText="집계된 버킷 없음" />
+      </div>
+      <div>
+        <h4 className="font-medium mb-2 text-sm">요약</h4>
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm max-w-md">
+          {Object.entries(stats.summary).map(([k, v]) => (
+            <Fragment key={k}>
+              <dt className="text-muted">{k}</dt>
+              <dd className="tabular-nums">{v}</dd>
+            </Fragment>
+          ))}
+        </dl>
+        {/* null = 구형 리포트(총계 미기록) — 0(파손 없음)과 구분해 말한다 */}
+        <p className="text-muted text-sm mt-2">
+          {typeof stats.broken_paths_total === "number"
+            ? `파손 경로 ${stats.broken_paths_total}건`
+            : "파손 경로: 기록 없음(구형 리포트)"}
+        </p>
+      </div>
+    </div>
+  );
 }
 
 export function BatchDetail() {
@@ -71,14 +165,10 @@ export function BatchDetail() {
   const save = () => update.mutate({ name: nameDraft, note: noteDraft },
                                    { onSuccess: () => setEditing(false) });
   // 항목 행 펼침: NodeMetricsSection 의 open 토글 관례 미러(단일 펼침) — 접힘이
-  // 기본이라 목록이 컴팩트하고, 상세는 펼친 행에만 렌더된다.
+  // 기본이라 목록이 컴팩트하고, 상세는 펼친 행에만 렌더된다. 데이터 온도도 펼친
+  // 행 안에서 그 항목(요청) 단위로만 조회·렌더한다 — 배치 합산은 제거됐다
+  // (사용자 결정: 배치 전체 집계는 필요 없다).
   const [openSeq, setOpenSeq] = useState<number | null>(null);
-  // 데이터 온도: scan 배치일 때만 조회(훅이 enabled 로 끊는다). 9버킷 × 3축을
-  // 나란히 두면 과밀이라 축(atime 기본/mtime/ctime)은 토글로 전환한다.
-  const stats = useBatchScanStats(batchId, b).data;
-  const [tempKey, setTempKey] = useState("atime");
-  const tempKeys = ["atime", "mtime", "ctime"]
-    .filter((k) => (stats?.time_histograms ?? {})[k] !== undefined);
   return (
     <section className="space-y-4">
       {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
@@ -136,58 +226,6 @@ export function BatchDetail() {
           </div>
         )}
       </Card>
-      {/* 데이터 온도(hot/cold): scan 배치 + 집계 ≥1 일 때만 — 집계 0 은 "아직
-          합산할 리포트가 없다"라 섹션 자체가 소음이다(skipped 만 있는 경우 포함). */}
-      {b?.operation === "scan" && stats && stats.aggregated >= 1 && (
-        <Card className="space-y-3">
-          <div>
-            <h2 className="font-medium">데이터 온도(hot/cold)</h2>
-            {/* 정직 카운트: 제외(못 읽은 리포트)를 숨기면 합산이 전체인 척한다.
-                한 개의 템플릿 리터럴 = 한 개의 텍스트 노드(getByText 관례). */}
-            <p className="text-muted text-xs">
-              {`합산 리포트 ${stats.aggregated}건 · 제외 ${stats.skipped}건`}
-            </p>
-          </div>
-          <div>
-            <div className="flex gap-2 mb-2">
-              {tempKeys.map((k) => (
-                <Button key={k} type="button"
-                        variant={tempKey === k ? "outline" : "ghost"}
-                        onClick={() => setTempKey(k)}>{k}</Button>
-              ))}
-            </div>
-            <BarChart data={toBars(stats.time_histograms[tempKey], "bytes")}
-                      label={`데이터 온도(${tempKey}) 히스토그램`}
-                      formatValue={humanBytes}
-                      emptyText="집계된 버킷 없음" />
-            {TEMP_CAPTIONS[tempKey] && (
-              <p className="text-muted text-xs mt-1">{TEMP_CAPTIONS[tempKey]}</p>
-            )}
-          </div>
-          <div>
-            <h3 className="font-medium mb-2 text-sm">파일 크기 분포(개수)</h3>
-            <BarChart data={toBars(stats.file_size_histogram, "count")}
-                      label="파일 크기 분포" emptyText="집계된 버킷 없음" />
-          </div>
-          <div>
-            <h3 className="font-medium mb-2 text-sm">요약 합계</h3>
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm max-w-md">
-              {Object.entries(stats.summary).map(([k, v]) => (
-                <Fragment key={k}>
-                  <dt className="text-muted">{k}</dt>
-                  <dd className="tabular-nums">{v}</dd>
-                </Fragment>
-              ))}
-            </dl>
-            {/* null = 전 리포트 구형(총계 미기록) — 0(파손 없음)과 구분해 말한다 */}
-            <p className="text-muted text-sm mt-2">
-              {typeof stats.broken_paths_total === "number"
-                ? `파손 경로 합계 ${stats.broken_paths_total}건`
-                : "파손 경로: 기록 없음(구형 리포트)"}
-            </p>
-          </div>
-        </Card>
-      )}
       {/* 항목: 표 대신 리스트 + 행 펼침. 표(td) 안에 버튼·flex 를 넣으면 e2e L2
           (display=table-cell 불변식)가 무는 함정이라, 펼침 UI 는 표 밖 리스트가
           구조적으로 안전하다. 기본 행은 컴팩트(순번·대상 요약·상태), 상세(사유·
@@ -206,7 +244,7 @@ export function BatchDetail() {
               </span>
               <StatusPill state={it.status} />
             </button>
-            {openSeq === it.seq && (
+            {openSeq === it.seq && (<>
               <dl className="mt-2 ml-11 grid grid-cols-[7rem_1fr] gap-y-1 text-sm">
                 {/* 요청 상태는 항목 상태(배치 시점 판정)와 다른 축 — 자식 요청의
                     현재 상태다. null = 아직 materialize 안 됨. */}
@@ -227,7 +265,13 @@ export function BatchDetail() {
                   ? <Link className="text-accent" to={`/jobs/${it.request_id}`}>요청 상세</Link>
                   : "—"}</dd>
               </dl>
-            )}
+              {/* 항목별 데이터 온도: scan 배치만 — sync 항목엔 dscan 리포트가
+                  존재할 수 없어 섹션 자체가 거짓 약속이 된다. */}
+              {b?.operation === "scan" && (
+                <ItemScanStats requestId={it.request_id}
+                               succeeded={it.request_state === "Succeeded"} />
+              )}
+            </>)}
           </div>
         ))}
       </Card>

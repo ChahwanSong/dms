@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
-import type { Batch, BatchDetail, BatchScanStats } from "../../lib/types";
+import type { Batch, BatchDetail, RequestScanStats } from "../../lib/types";
 
 const BATCH_TERMINAL = new Set(["Completed", "Cancelled"]);
 export const useBatches = () =>
@@ -32,15 +32,17 @@ function _action(id: string, verb: string) {
                        qc.invalidateQueries({ queryKey: ["batches"] }); },
   });
 }
-// scan 배치 hot/cold 집계: scan 배치일 때만 나간다(sync 는 서버가 422 — 요청
-// 자체를 만들지 않는 게 정직하다). 폴링 불요(1회 조회) — 집계 재료(성공 자식
-// 리포트)는 배치 status·succeeded_count 가 움직일 때만 늘어나므로, 두 값을 키에
-// 실어 그때만 재조회한다(별도 invalidate 배선보다 파생이 단순하다).
-export const useBatchScanStats = (id: string, batch: BatchDetail | undefined) =>
+// 항목별 데이터 온도(요청 단위 scan 리포트 통계): 항목을 펼쳤고(enabled 로 호출측
+// 이 전달) 성공 scan 요청일 때만 나간다 — 리포트가 없는 게 확실한 조회는 요청
+// 자체를 만들지 않는 게 정직하다(lazy 계약). staleTime Infinity: 성공 종단 요청의
+// 리포트는 불변 산출물이라 재펼침마다 재조회하는 건 공유 스토리지 I/O 낭비다.
+export const useRequestScanStats = (requestId: string | null, enabled: boolean) =>
   useQuery({
-    queryKey: ["batch-scan-stats", id, batch?.status, batch?.succeeded_count],
-    queryFn: () => apiGet<BatchScanStats>(`/api/admin/batches/${id}/scan-stats`),
-    enabled: batch?.operation === "scan",
+    queryKey: ["request-scan-stats", requestId],
+    queryFn: () =>
+      apiGet<RequestScanStats>(`/api/admin/requests/${requestId}/scan-stats`),
+    enabled: enabled && requestId !== null,
+    staleTime: Infinity,
   });
 // 메타데이터 수정(name/note): 서버가 빈 문자열을 NULL(지움)로 접는다 — 값은 늘
 // 두 키를 실어 보내는 단순 계약(부분 갱신 판별을 화면이 흉내 내지 않는다).

@@ -105,17 +105,18 @@ export interface BatchItem {
   completed_at?: string | null;
 }
 export interface BatchDetail extends Batch { items: BatchItem[] }
-// scan 배치 hot/cold 집계(성공 자식 dscan 리포트 합산). 서버가 모양 투영(숫자·
-// 구간 라벨만)을 거친 값만 준다 — ScanPathStats 와 같은 버킷 계약.
-export interface BatchScanStats {
-  // 정직 카운트: aggregated = 합산한 리포트 수, skipped = 못 읽은 리포트
-  // (부재·truncated·파싱 실패·캡 초과) — 조용한 절단 금지의 화면 재료.
-  aggregated: number; skipped: number;
+// 요청 단위 scan 리포트 통계(항목별 데이터 온도 — 배치 합산은 제거됐다). 서버가
+// 모양 투영(숫자·구간 라벨만)을 거친 값만 준다 — ScanPathStats 에서 covered_by
+// 를 뺀 같은 계약(단일 리포트 서빙, 합산 카운트 없음).
+export interface RequestScanStats {
+  // 리포트에 생성 시각이 없거나 수치가 아니면 null(경로가 섞여 드는 걸 막는다).
+  generated_at_epoch: number | null;
   summary: Record<string, number>;
   file_size_histogram: HistogramBucket[];
   time_histograms: Record<string, HistogramBucket[]>;
-  // null = 전 리포트가 구형(총계 미기록) — 0(파손 없음)과 다르다(null≠0).
+  // null = 구형 리포트(총계 미기록) — 0(파손 없음)과 다르다(null≠0).
   broken_paths_total: number | null;
+  broken_paths_limit: number | null;
 }
 export interface Policy {
   tool: string;
