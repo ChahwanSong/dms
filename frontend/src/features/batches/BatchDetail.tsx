@@ -4,7 +4,8 @@ import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useAddBatchItem,
          useReplaceBatchItems } from "./useBatches";
-import { parseItemsCsv, type ScanRow, type SyncRow } from "../../lib/csv";
+import { parseItemsCsv, serializeItemsCsv,
+         type ScanRow, type SyncRow } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -204,12 +205,15 @@ function ItemScanStats({ requestId, succeeded }: {
   );
 }
 
-// CSV 파일로 항목 전체 교체(종단 배치만 노출 — 진짜 가드는 서버
+// CSV 붙여넣기로 항목 전체 교체(종단 배치만 노출 — 진짜 가드는 서버
 // batch_items_not_replaceable 409). 교체 후에도 배치는 종단 유지 — 교체가 곧
-// 실행은 아니다(재실행은 기존 「전체 재실행」 버튼 몫). 동선: 파일 선택(FileReader
-// 로컬 읽기 — airgap 무관) → 생성 위저드와 같은 parseItemsCsv 파싱 → 미리보기
-// (행 수·오류) → 「교체」 확인 클릭 → PUT. 오류가 하나라도 있으면 교체 버튼
-// 잠금(부분 반영 금지 — BatchCreate applyParsed 와 같은 계약).
+// 실행은 아니다(재실행은 기존 「전체 재실행」 버튼 몫). 파일 업로드가 아니라
+// textarea 붙여넣기인 이유: 운영 환경 브라우저는 파일 업로드가 불가하다(환경
+// 제약) — 생성 위저드(BatchCreate)의 CSV 붙여넣기 패턴을 미러한다. 동선:
+// 붙여넣기 → parseItemsCsv 파싱(입력에서 즉시 파생) → 미리보기(행 수·오류) →
+// 「교체」 확인 클릭 → PUT. 오류가 하나라도 있으면 교체 버튼 잠금(부분 반영
+// 금지 — BatchCreate applyParsed 와 같은 계약). 빈 입력(초기 상태)은 미리보기·
+// 버튼 자체를 안 그린다 — "아직 안 붙여넣음"과 "0행 파싱"(헤더만)의 구분.
 // 배치 레벨 스토리지: 배치 행엔 스토리지 메타가 없다(실측 — batches 테이블은
 // 실행 제어·옵션만). 종단 배치는 항목이 반드시 있으므로 첫 항목 payload 에서
 // 물려받는다(항목 추가 submitAdd 와 같은 동질성 계약) — 항목 0개면 호출측이
@@ -219,20 +223,12 @@ function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
   firstPayload: Record<string, unknown>;
 }) {
   const replace = useReplaceBatchItems(batchId);
-  const [rows, setRows] = useState<(ScanRow | SyncRow)[]>([]);
-  const [errors, setErrors] = useState<string[]>([]);
-  // 파일을 읽었는가 — 미선택(false)과 "빈 파일을 읽음"(true·0행)을 구분한다
-  const [loaded, setLoaded] = useState(false);
-  function handleFile(file: File | undefined) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const parsed = parseItemsCsv(operation, String(reader.result ?? ""));
-      setRows(parsed.rows); setErrors(parsed.errors); setLoaded(true);
-      replace.reset();                 // 이전 시도의 오류·성공 잔상 제거
-    };
-    reader.readAsText(file);
-  }
+  const [text, setText] = useState("");
+  // 상태가 아니라 파생: 입력이 곧 진실이라 파싱 결과를 별도 상태로 들고 있으면
+  // 둘이 어긋날 수 있다. null = 빈 입력(미리보기 없음).
+  const parsed = text.trim() === "" ? null : parseItemsCsv(operation, text);
+  const rows = parsed?.rows ?? [];
+  const errors = parsed?.errors ?? [];
   const items = rows.map((r) => operation === "sync"
     ? { source_storage: firstPayload.source_storage, source: (r as SyncRow).source,
         destination_storage: firstPayload.destination_storage,
@@ -240,14 +236,20 @@ function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
     : { storage: firstPayload.storage, target: (r as ScanRow).target });
   return (
     <div className="border-t border-black/5 mt-2 pt-3 space-y-2 max-w-md">
-      <label className="text-sm block">CSV로 전체 교체
-        <input aria-label="교체 CSV 파일" type="file" accept=".csv,.txt" className={field}
-               onChange={(e) => handleFile(e.target.files?.[0])} />
+      <label className="text-sm block">
+        {`CSV로 전체 교체 (${operation === "scan" ? "행당 경로 1개" : "행당 source,destination"})`}
+        <textarea aria-label="교체 CSV" className={`${field} h-40 font-mono`}
+                  placeholder={operation === "scan"
+                    ? "team\nprojects/alpha"
+                    : "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"}
+                  value={text}
+                  onChange={(e) => { setText(e.target.value);
+                                     replace.reset(); /* 이전 시도 잔상 제거 */ }} />
       </label>
-      {/* 미리보기(행 수)와 확인 버튼은 파일을 읽은 뒤에만 — 무엇으로 바꾸는지
+      {/* 미리보기(행 수)와 확인 버튼은 입력이 있을 때만 — 무엇으로 바꾸는지
           보여주기 전의 교체 버튼은 오클릭 유도다. 0행(헤더만)도 잠금 — 서버
           empty_batch 재확인 전에 화면에서 정직하게 막는다. */}
-      {loaded && (
+      {parsed !== null && (
         <p className="text-sm text-muted">{`${rows.length}행 파싱됨`}</p>
       )}
       {errors.length > 0 && (
@@ -255,7 +257,7 @@ function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
           {errors.map((err, i) => <li key={i}>{err}</li>)}
         </ul>
       )}
-      {loaded && (
+      {parsed !== null && (
         <Button disabled={errors.length > 0 || rows.length === 0 || replace.isPending}
                 onClick={() => replace.mutate(items)}>교체</Button>
       )}
@@ -263,6 +265,29 @@ function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
         <p className="text-bad text-sm">{(replace.error as ApiError).message}</p>
       )}
     </div>
+  );
+}
+
+// 현재 항목 CSV(읽기 전용): 항목들을 serializeItemsCsv 텍스트로 노출해 사용자가
+// 직접 선택·복사한다. 「복사 버튼」이 아닌 이유: 운영 포탈은 http 비보안
+// 컨텍스트라 navigator.clipboard 가 부재한다(BatchCreate downloadCsv 와 같은
+// 제약 — clipboard API 금지). onFocus 전체 선택은 DOM Selection 이라 어디서나
+// 동작한다. 접이식 — 상시 참조 정보가 아니다(BatchSettings 관례). 헤더 포함
+// 직렬화라 교체 textarea 에 그대로 붙여넣으면 같은 항목이 복원된다(왕복 계약).
+function CurrentItemsCsv({ operation, items }: {
+  operation: "scan" | "sync"; items: BatchItem[];
+}) {
+  const text = serializeItemsCsv(operation, items.map((it) => operation === "sync"
+    ? { source: String(it.payload.source ?? ""),
+        destination: String(it.payload.destination ?? "") }
+    : { target: String(it.payload.target ?? "") }));
+  return (
+    <details className="mt-2">
+      <summary className="text-sm text-muted cursor-pointer">현재 항목 CSV</summary>
+      <textarea aria-label="현재 항목 CSV" readOnly value={text}
+                className={`${field} h-40 font-mono max-w-md`}
+                onFocus={(e) => e.currentTarget.select()} />
+    </details>
   );
 }
 
@@ -525,6 +550,11 @@ export function BatchDetail() {
             </>)}
           </div>
         ))}
+        {/* 현재 항목 CSV: 항목이 있을 때만 — 빈 목록의 헤더 한 줄 CSV 는 소음이다 */}
+        {b && (b.items ?? []).length > 0 && (
+          <CurrentItemsCsv operation={isSync ? "sync" : "scan"}
+                           items={b.items ?? []} />
+        )}
         {/* 항목 추가: 경로만 입력 — 스토리지는 첫 항목에서 물려받는다(동질성 계약).
             종단 배치에 추가하면 서버가 재활성화(scan→Running/sync→Previewing)하고
             신규 Queued 항목만 실행된다. 항목이 없으면 물려받을 스토리지가 없어

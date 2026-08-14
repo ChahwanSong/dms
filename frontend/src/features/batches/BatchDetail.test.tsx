@@ -6,6 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchDetail } from "./BatchDetail";
+import { parseItemsCsv } from "../../lib/csv";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 const batch = (over: any = {}) => ({ batch_id:"b1", operation:"sync", status:"PreviewReady",
@@ -426,17 +427,20 @@ test("활성 배치: 배치 삭제 버튼 부재 — 취소 먼저가 동선", a
   expect(screen.queryByRole("button", { name: "배치 삭제" })).toBeNull();
 });
 
-// --- CSV 전체 교체: 종단 배치만 — 파스 미리보기(행 수·오류) → 교체 → PUT ---
+// --- CSV 전체 교체: 종단 배치만 — 붙여넣기 → 파스 미리보기(행 수·오류) → 교체 → PUT ---
+// 파일 업로드가 아니라 textarea 붙여넣기다: 운영 환경 브라우저는 파일 업로드가
+// 불가하다(환경 제약) — 생성 위저드의 CSV 붙여넣기 패턴을 미러한다.
 
-test("종단 배치: CSV 업로드 → 행 수 미리보기 → 교체가 PUT(스토리지 상속)을 쏜다", async () => {
+test("종단 배치: CSV 붙여넣기 → 행 수 미리보기 → 교체가 PUT(스토리지 상속)을 쏜다", async () => {
   let sent: any = null;
   server.use(http.put("/api/admin/batches/b1/items", async ({ request }) => {
     sent = await request.json();
     return HttpResponse.json({ replaced: 2 });
   }));
   renderDetailed();                              // Completed scan 배치, storage s1
-  const file = new File(["target\nx/y\nz"], "items.csv", { type: "text/csv" });
-  await userEvent.upload(await screen.findByLabelText("교체 CSV 파일"), file);
+  const ta = await screen.findByLabelText("교체 CSV");
+  await userEvent.click(ta);
+  await userEvent.paste("target\nx/y\nz");
   // 파스 미리보기가 먼저 — 교체는 미리보기를 본 뒤의 확인 클릭이다
   expect(await screen.findByText("2행 파싱됨")).toBeInTheDocument();
   expect(sent).toBeNull();
@@ -455,8 +459,9 @@ test("sync 배치 교체: source,destination 2열 — 4필드 payload 로 PUT", 
     { seq: 0, payload: { source_storage: "s1", source: "a",
         destination_storage: "s2", destination: "b" }, status: "Succeeded",
       request_id: "r1", reason_code: null }] });
-  const file = new File(["source,destination\nc,d"], "items.csv", { type: "text/csv" });
-  await userEvent.upload(await screen.findByLabelText("교체 CSV 파일"), file);
+  const ta = await screen.findByLabelText("교체 CSV");
+  await userEvent.click(ta);
+  await userEvent.paste("source,destination\nc,d");
   await screen.findByText("1행 파싱됨");
   await userEvent.click(screen.getByRole("button", { name: "교체" }));
   await waitFor(() => expect(sent).toEqual({ items: [
@@ -466,16 +471,52 @@ test("sync 배치 교체: source,destination 2열 — 4필드 payload 로 PUT", 
 
 test("파스 오류가 있으면 교체 버튼 잠금 + 오류 나열", async () => {
   renderDetailed();
-  const file = new File(["a,b\nokpath"], "items.csv", { type: "text/csv" });
-  await userEvent.upload(await screen.findByLabelText("교체 CSV 파일"), file);
+  const ta = await screen.findByLabelText("교체 CSV");
+  await userEvent.click(ta);
+  await userEvent.paste("a,b\nokpath");
   expect(await screen.findByText(/1행: 경로 1개/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "교체" })).toBeDisabled();
+});
+
+test("빈 입력(초기 상태)엔 미리보기·교체 버튼 없음 — 파일 input 도 없다", async () => {
+  renderDetailed();
+  await screen.findByLabelText("교체 CSV");      // 렌더 완료 대기 후 부재 단언
+  expect(screen.queryByText(/행 파싱됨/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "교체" })).toBeNull();
+  // 파일 업로드 경로는 제거됐다(운영 브라우저 제약) — 회귀 못
+  expect(screen.queryByLabelText("교체 CSV 파일")).toBeNull();
 });
 
 test("활성 배치: CSV 전체 교체 UI 부재 — 종단 배치만", async () => {
   renderAt("Running");
   await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
-  expect(screen.queryByLabelText("교체 CSV 파일")).toBeNull();
+  expect(screen.queryByLabelText("교체 CSV")).toBeNull();
+});
+
+// --- 현재 항목 CSV(읽기 전용): 항목을 CSV 텍스트로 노출 — 직접 선택·복사 ---
+// clipboard API 는 안 쓴다: 운영 포탈은 http 비보안 컨텍스트라 navigator.clipboard
+// 가 부재한다(BatchCreate downloadCsv 와 같은 제약).
+
+test("현재 항목 CSV: serializeItemsCsv 텍스트를 읽기 전용으로 렌더 — 교체 파서와 왕복", async () => {
+  renderDetailed();                              // scan 배치, 항목 team·proj
+  const ta = await screen.findByLabelText("현재 항목 CSV");
+  expect(ta).toHaveValue("target\nteam\nproj");
+  expect(ta).toHaveAttribute("readonly");
+  expect(screen.getByText("현재 항목 CSV", { selector: "summary" })).toBeInTheDocument();
+  // 왕복 계약: 이 텍스트를 교체 textarea 에 넣으면 같은 항목이 복원된다
+  expect(parseItemsCsv("scan", "target\nteam\nproj").rows)
+    .toEqual([{ target: "team" }, { target: "proj" }]);
+});
+
+test("sync 배치의 현재 항목 CSV: source,destination 2열 — 왕복 계약", async () => {
+  renderBatch({ operation: "sync", status: "Completed", items: [
+    { seq: 0, payload: { source_storage: "s1", source: "a",
+        destination_storage: "s2", destination: "b" }, status: "Succeeded",
+      request_id: "r1", reason_code: null }] });
+  const ta = await screen.findByLabelText("현재 항목 CSV");
+  expect(ta).toHaveValue("source,destination\na,b");
+  expect(parseItemsCsv("sync", "source,destination\na,b").rows)
+    .toEqual([{ source: "a", destination: "b" }]);
 });
 
 // --- 실행 제어 설정 표시(읽기 전용): 생성 시 고른 값이 상세에서 보인다 ---
