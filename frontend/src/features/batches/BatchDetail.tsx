@@ -329,6 +329,12 @@ export function BatchDetail() {
   // 드래프트는 서버 상태와 분리(이름·메모 편집과 같은 이유 — 폴링 리페치가 입력을
   // 덮지 않는다). pathDraft = scan target / sync source.
   const [editSeq, setEditSeq] = useState<number | null>(null);
+  // 행 삭제 2단 확인: 1단 클릭이 armedSeq 를 무장시키고, 같은 행의 2단 클릭이
+  // DELETE 를 쏜다(오삭제 방지). 다른 행을 무장시키면 이전 무장은 자연 해제 —
+  // 단일 상태라 동시 무장이 구조적으로 불가능하다. 배치 삭제의 Dialog 관례
+  // 대신 2단 클릭을 쓴 이유: 행마다 Dialog 는 무겁고, 항목 삭제는 배치 삭제와
+  // 달리 행 요약(순번·대상)이 바로 옆에 보여 확인 문맥이 이미 화면에 있다.
+  const [armedSeq, setArmedSeq] = useState<number | null>(null);
   const [pathDraft, setPathDraft] = useState("");
   const [dstDraft, setDstDraft] = useState("");
   const [addPath, setAddPath] = useState("");
@@ -418,16 +424,40 @@ export function BatchDetail() {
         <h2 className="font-medium">항목</h2>
         {(b?.items ?? []).map((it) => (
           <div key={it.seq} className="border-t border-black/5 py-2">
-            <button type="button" aria-label={`항목 ${it.seq} 상세`}
-                    aria-expanded={openSeq === it.seq}
-                    onClick={() => setOpenSeq(openSeq === it.seq ? null : it.seq)}
-                    className="flex w-full items-center gap-3 text-left">
-              <span className="w-8 shrink-0 text-muted text-xs tabular-nums">{it.seq}</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                {summarizeItem(b?.operation, it.payload)}
-              </span>
-              <StatusPill state={it.status} />
-            </button>
+            {/* 행 = 펼침 토글 버튼 + 삭제 버튼의 flex 형제. 토글이 행 전체를 덮는
+                버튼이었는데, 버튼 안에 버튼은 불가(HTML)라 삭제를 행에 올리려면
+                토글을 flex-1 로 줄이고 삭제를 옆에 둔다. 항목은 표(Table)가 아니라
+                리스트 구조라(위 카드 주석 — d54 결정) e2e L2(td 안 flex/버튼
+                불변식)는 애초에 안 문다 — 실측: td 없음. */}
+            <div className="flex items-center gap-3">
+              <button type="button" aria-label={`항목 ${it.seq} 상세`}
+                      aria-expanded={openSeq === it.seq}
+                      onClick={() => setOpenSeq(openSeq === it.seq ? null : it.seq)}
+                      className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                <span className="w-8 shrink-0 text-muted text-xs tabular-nums">{it.seq}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                  {summarizeItem(b?.operation, it.payload)}
+                </span>
+                <StatusPill state={it.status} />
+              </button>
+              {/* 삭제는 펼치지 않아도 보이는 행 버튼(펼침 안에서 행으로 이동).
+                  노출 조건은 기존 canEditItem 재사용(표시 게이트 — 진짜 차단은
+                  서버 409). aria-label 로 행별 이름을 부여해 테스트·스크린리더가
+                  어느 항목인지 안다. */}
+              {canEditItem(it) && (armedSeq === it.seq
+                ? <Button aria-label={`항목 ${it.seq} 삭제 확인`}
+                          disabled={deleteItem.isPending}
+                          onClick={() => deleteItem.mutate(it.seq,
+                            { onSettled: () => setArmedSeq(null) })}>삭제 확인</Button>
+                : <Button variant="ghost" aria-label={`항목 ${it.seq} 삭제`}
+                          onClick={() => setArmedSeq(it.seq)}>삭제</Button>)}
+            </div>
+            {/* 삭제 실패 사유는 시도한 행 밑에만 — variables(마지막 mutate 의
+                seq)로 행을 특정한다(전 행에 도배하면 어느 삭제가 실패했는지
+                모른다). */}
+            {deleteItem.isError && deleteItem.variables === it.seq && (
+              <p className="text-bad text-sm mt-1 ml-11">{(deleteItem.error as ApiError).message}</p>
+            )}
             {openSeq === it.seq && (<>
               <dl className="mt-2 ml-11 grid grid-cols-[7rem_1fr] gap-y-1 text-sm">
                 {/* 요청 상태는 항목 상태(배치 시점 판정)와 다른 축 — 자식 요청의
@@ -449,17 +479,15 @@ export function BatchDetail() {
                   ? <Link className="text-accent" to={`/jobs/${it.request_id}`}>요청 상세</Link>
                   : "—"}</dd>
               </dl>
-              {/* 편집 가능(종단 배치 or Queued 항목)일 때만 버튼 — 불가 항목은
-                  버튼 자체가 없다(표시 게이트, 진짜 차단은 서버 409). */}
+              {/* 수정은 펼침에 남긴다(삭제만 행으로 이동 — 최소침습): 수정은
+                  payload 입력 폼이 필요해 펼침 패널의 공간이 자연스럽고, 어떤
+                  payload 를 고치는지 확인하려면 어차피 펼친다. 삭제는 행 요약
+                  (순번·대상)만으로 대상 확인이 충분해 행으로 올렸다. 노출 조건은
+                  기존 canEditItem 재사용(표시 게이트, 진짜 차단은 서버 409). */}
               {canEditItem(it) && editSeq !== it.seq && (
                 <div className="mt-2 ml-11 flex gap-2">
                   <Button variant="ghost" onClick={() => startItemEdit(it)}>수정</Button>
-                  <Button variant="ghost" disabled={deleteItem.isPending}
-                          onClick={() => deleteItem.mutate(it.seq)}>삭제</Button>
                 </div>
-              )}
-              {deleteItem.isError && (
-                <p className="text-bad text-sm mt-1 ml-11">{(deleteItem.error as ApiError).message}</p>
               )}
               {editSeq === it.seq && (
                 <div className="mt-2 ml-11 space-y-2 max-w-md">

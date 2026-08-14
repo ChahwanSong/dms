@@ -301,32 +301,54 @@ test("종단 배치: 종단 항목 펼침에 수정·삭제 버튼 — 수정 �
   await waitFor(() => expect(screen.queryByLabelText("대상 경로")).toBeNull());
 });
 
-test("종단 배치: 삭제 버튼이 DELETE 를 쏜다", async () => {
+test("종단 배치: 펼치지 않은 행의 삭제 버튼 → 확인 클릭이 DELETE 를 쏘고 재조회한다", async () => {
   let deleted = false;
-  server.use(http.delete("/api/admin/batches/b1/items/1", () => {
-    deleted = true; return HttpResponse.json({ deleted: 1 });
-  }));
-  renderDetailed();
-  await userEvent.click(await screen.findByRole("button", { name: "항목 1 상세" }));
-  await userEvent.click(screen.getByRole("button", { name: "삭제" }));
+  let gets = 0;
+  server.use(
+    http.get("/api/admin/batches/b1", () => { gets += 1;
+      return HttpResponse.json(detailedBatch()); }),
+    http.delete("/api/admin/batches/b1/items/1", () => {
+      deleted = true; return HttpResponse.json({ deleted: 1 });
+    }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  // 펼치지 않아도 행 자체에 삭제 버튼이 보인다(이동 확정)
+  await userEvent.click(await screen.findByRole("button", { name: "항목 1 삭제" }));
+  expect(deleted).toBe(false);         // 1단 클릭만으로는 안 쏜다(오삭제 방지 2단 확인)
+  const getsBefore = gets;
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
   await waitFor(() => expect(deleted).toBe(true));
+  // 삭제 후 invalidate — 상세를 재조회해 목록이 갱신된다(종단 배치는 폴링 없음)
+  await waitFor(() => expect(gets).toBeGreaterThan(getsBefore));
 });
 
-test("활성 배치: Materialized 항목엔 수정·삭제 버튼이 없다", async () => {
-  renderAt("Running");                           // 항목 0 = Materialized
+test("펼침 패널 안엔 삭제 버튼이 없다 — 삭제는 행으로 이동 확정", async () => {
+  renderDetailed();                              // 종단 배치 — 전 항목 삭제 가능
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
   expect(screen.getByText("payload")).toBeInTheDocument();   // 펼침 완료
-  expect(screen.queryByRole("button", { name: "수정" })).toBeNull();
+  // 행 버튼(항목 N 삭제)만 있고, 펼침 안의 무접두 "삭제" 버튼은 없다
   expect(screen.queryByRole("button", { name: "삭제" })).toBeNull();
+  expect(screen.getByRole("button", { name: "항목 0 삭제" })).toBeInTheDocument();
 });
 
-test("활성 배치: Queued 항목엔 수정·삭제 버튼이 있다", async () => {
+test("활성 배치: Materialized 항목엔 행 삭제 버튼도 펼침 수정 버튼도 없다", async () => {
+  renderAt("Running");                           // 항목 0 = Materialized
+  await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
+  expect(screen.queryByRole("button", { name: "항목 0 삭제" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByText("payload")).toBeInTheDocument();   // 펼침 완료
+  expect(screen.queryByRole("button", { name: "수정" })).toBeNull();
+});
+
+test("활성 배치: Queued 항목엔 행 삭제 버튼 + 펼침 수정 버튼", async () => {
   renderBatch({ operation: "scan", status: "Running", items: [
     { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
       request_id: null, reason_code: null }] });
-  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(await screen.findByRole("button", { name: "항목 0 삭제" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
   expect(screen.getByRole("button", { name: "수정" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "삭제" })).toBeInTheDocument();
 });
 
 test("항목 추가: 배치 스토리지를 물려받아 POST — 성공 시 입력 초기화", async () => {
