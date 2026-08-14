@@ -3,14 +3,18 @@ import { useNavigate } from "react-router-dom";
 import { useSubmitRequest } from "./useJobs";
 import type { SubmitBody } from "./useJobs";
 import { StoragePicker, field } from "./formFields";
+import { intFieldError } from "./optionRules";
 import { useUserStorages } from "../storages/useUserStorages";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
 
+// dscan(1b93d54) 실측 옵션 미러: batch_files 0..10억(0 = 배칭 끔), broken_limit
+// 0..10,000 — domain.py _OPTION_SPECS[SCAN]의 미러(발산 금지). 빈값 = 플래그
+// 생략 = 도구 기본(batch_files 1,000,000 / broken_limit 100).
 const initial = {
   storage: "", target: "",
-  topK: "", verbose: false, quiet: false,
+  batchFiles: "", brokenLimit: "", verbose: false, quiet: false,
   priority: "mid",
   ownerUsername: "",
 };
@@ -25,7 +29,11 @@ export function SubmitScan() {
   const loadingStorages = storagesQ.isLoading;
 
   const verboseQuietConflict = f.verbose && f.quiet;
-  const blocked = submit.isPending || verboseQuietConflict || storagesQ.isError;
+  // 즉답 미러(최종 심판은 서버 422 invalid_option) — 빈 문자열은 "미입력"이라 오류가 아니다.
+  const batchFilesError = intFieldError("batch_files", f.batchFiles, 0, 1_000_000_000);
+  const brokenLimitError = intFieldError("broken_limit", f.brokenLimit, 0, 10_000);
+  const blocked = submit.isPending || verboseQuietConflict || storagesQ.isError
+    || batchFilesError !== null || brokenLimitError !== null;
 
   const on = (k: keyof typeof initial) => (e: any) =>
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
@@ -36,7 +44,8 @@ export function SubmitScan() {
     const options: Record<string, boolean | number> = {};
     if (f.verbose) options.verbose = true;
     if (f.quiet) options.quiet = true;
-    if (f.topK.trim() !== "") options.top_k = Number(f.topK);
+    if (f.batchFiles.trim() !== "") options.batch_files = Number(f.batchFiles.trim());
+    if (f.brokenLimit.trim() !== "") options.broken_limit = Number(f.brokenLimit.trim());
 
     const body: SubmitBody = {
       operation: "scan",
@@ -66,10 +75,19 @@ export function SubmitScan() {
           </label>
         </div>
 
-        <label className="text-sm block">top_k
-          <input aria-label="top_k" type="number" min={1} max={1000000} className={field}
-                 value={f.topK} onChange={on("topK")} />
+        <label className="text-sm block">batch_files (0..1,000,000,000 · 0 = 배칭 끔)
+          <input aria-label="batch_files" type="number" min={0} max={1000000000}
+                 placeholder="기본 1000000 · 0 = 배칭 끔"
+                 className={field} value={f.batchFiles} onChange={on("batchFiles")} />
         </label>
+        {batchFilesError && <p className="text-bad text-sm">{batchFilesError}</p>}
+
+        <label className="text-sm block">broken_limit (0..10,000 · 리포트에 보관할 파손 경로 수)
+          <input aria-label="broken_limit" type="number" min={0} max={10000}
+                 placeholder="기본 100"
+                 className={field} value={f.brokenLimit} onChange={on("brokenLimit")} />
+        </label>
+        {brokenLimitError && <p className="text-bad text-sm">{brokenLimitError}</p>}
 
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" aria-label="verbose" checked={f.verbose} onChange={on("verbose")} /> verbose

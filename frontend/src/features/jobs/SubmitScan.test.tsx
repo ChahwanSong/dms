@@ -44,7 +44,7 @@ test("스토리지 드롭다운이 API 목록으로 채워진다", async () => {
   expect(within(storageSelect).getByText("cephfs-secondary (Ready)")).toBeInTheDocument();
 });
 
-test("top_k를 비우면 제출 바디에서 옵션이 빠진다", async () => {
+test("batch_files·broken_limit을 비우면 제출 바디에서 옵션이 빠진다(도구 기본)", async () => {
   let received: any = null;
   server.use(http.post("/api/user/requests", async ({ request }) => {
     received = await request.json();
@@ -55,6 +55,8 @@ test("top_k를 비우면 제출 바디에서 옵션이 빠진다", async () => {
   await within(storageSelect).findByText("cephfs (Ready)");
   await userEvent.selectOptions(storageSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("대상 경로"), "a/b");
+  // top_k는 신 dscan(1b93d54)에서 기능 삭제 — 입력 자체가 없어야 한다.
+  expect(screen.queryByLabelText("top_k")).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
 
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
@@ -66,7 +68,7 @@ test("top_k를 비우면 제출 바디에서 옵션이 빠진다", async () => {
   });
 });
 
-test("top_k에 5를 넣으면 옵션에 숫자 5로 들어간다", async () => {
+test("batch_files 0(배칭 끔)·broken_limit 500이 옵션에 숫자로 들어간다", async () => {
   let received: any = null;
   server.use(http.post("/api/user/requests", async ({ request }) => {
     received = await request.json();
@@ -77,17 +79,34 @@ test("top_k에 5를 넣으면 옵션에 숫자 5로 들어간다", async () => {
   await within(storageSelect).findByText("cephfs (Ready)");
   await userEvent.selectOptions(storageSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("대상 경로"), "a/b");
-  await userEvent.type(screen.getByLabelText("top_k"), "5");
+  await userEvent.type(screen.getByLabelText("batch_files"), "0");
+  await userEvent.type(screen.getByLabelText("broken_limit"), "500");
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
 
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(received.options.top_k).toBe(5);
   expect(received).toEqual({
     operation: "scan",
     storage: "cephfs", target: "a/b",
-    options: { top_k: 5 },
+    options: { batch_files: 0, broken_limit: 500 },
     priority: "mid",
   });
+});
+
+test("placeholder에 도구 기본값이 명시된다 — 빈값 = 플래그 생략 = 도구 기본", async () => {
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  expect(screen.getByLabelText("batch_files"))
+    .toHaveAttribute("placeholder", "기본 1000000 · 0 = 배칭 끔");
+  expect(screen.getByLabelText("broken_limit"))
+    .toHaveAttribute("placeholder", "기본 100");
+});
+
+test("broken_limit 범위 밖이면 즉답 문구 + 제출 비활성", async () => {
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  await userEvent.type(screen.getByLabelText("broken_limit"), "10001");
+  expect(screen.getByText("broken_limit는 0..10000 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
 });
 
 test("verbose와 quiet을 동시에 체크하면 제출 버튼이 비활성이다", async () => {
