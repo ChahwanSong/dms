@@ -330,7 +330,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 - 프로브 실패 시 detail을 마커(DMS_PREFLIGHT_REASON)보다 먼저 출력(build_manifests.py:97-103) — 64KB 로그 꼬리 박제에서 마커가 잘리면 사유가 build_preflight_failed로 뭉개진다.
 - 레지스트리가 평문 HTTP라 push --tls-verify=false만으론 부족 — dms-agent가 FROM pkg-01:5000/…를 pull하므로 registries.conf.d에 insecure 등록이 먼저다(build_manifests._SCRIPT:9-13). dms-agent 빌드는 --build-arg로 베이스 태그를 명시 고정 — 없으면 ARG 기본값 :dev로 엉뚱한 베이스에서 조용히 "성공"한다(:28-36).
 - nsync는 dsync 파서로 파싱 불가(별개 도구, Items:/bytes 미출력) — Planned actions 합계(블랙리스트 skipped-dst-only 제외)+planned/copied-volume 단위 환산, 모르는 단위면 이전 매치로 물러나지 않고 None(parsers.py:25-89).
-- dscan argv는 --output $DMS_SCAN_REPORT 항상 + --print는 quiet가 아닐 때만(--quiet와 상충, execution_manifests.tool_argv:43-48). $DMS_SCAN_REPORT 경로와 summary가 읽는 경로는 _scan_report_path 한 곳(runner.py:110-114) — 갈라지면 scan 카운트가 조용히 null.
+- dscan argv는 --output $DMS_SCAN_REPORT 항상 + --print는 quiet가 아닐 때만(--quiet와 상충, execution_manifests.tool_argv). 값 옵션은 batch_files/broken_limit 뿐(dscan 1b93d54 — top-k는 기능 삭제, --broken-limit은 롱네임뿐, 둘 다 0 허용: batch_files 0 = 배칭 끔). $DMS_SCAN_REPORT 경로와 summary가 읽는 경로는 _scan_report_path 한 곳(runner.py:110-114) — 갈라지면 scan 카운트가 조용히 null.
 - manifest_tags의 동봉본 경로는 개발 체크아웃(parents[2])→/app/deploy/k8s 폴백(:40-43); 롤아웃 직후 live!=manifest는 정상(포탈 롤아웃은 매니페스트를 안 고침 — 다음 kubectl apply가 되돌릴 위험의 표시가 목적). initContainer 이미지 드리프트는 배지에 안 뜬다 — 계약 테스트(init_container_image)가 그 침묵을 메운다(:217-227).
 - StubExecutionAdapter.read_log도 실 어댑터와 같은 3-튜플 (pod, log, waiting_reason) 계약(execution.py:84-87); log=None은 "얻을 수 없었다", 빈 문자열은 정상값(launcher는 대개 빈 로그).
 - BuildRunner.failure_reason은 구분 재료가 없으면(파드 GC·조회 실패) 지어내지 않고 build_failed 유지(build_runner.py:114-138) — Evicted는 파드 수준 reason, OOMKilled은 containerStatuses.terminated.reason.

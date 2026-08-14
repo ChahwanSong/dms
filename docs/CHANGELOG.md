@@ -54,6 +54,26 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ dscan 1b93d54 정합 — **완료**(2026-08-14)
+
+신 dscan(chahwansong/mpifileutils `1b93d54`, top-K 제거·스트리밍 재작성·
+`--batch-files`/`--broken-limit` 신설)에 전 계층을 정합했다. ① 도메인:
+scan 옵션 top_k 제거(unknown_option 거부 고정), batch_files 0..10억(실측:
+0 = 배칭 끔)·broken_limit 0..10,000(실측: 0 허용 — 표본 미보관, 총계는 정확)
+신설 — 상한은 DMS 위생 상한(도구 파싱 parse_uint64는 uint64 전체 수용).
+② 렌더: `_SCAN_VALUE_FLAGS` 교체(--broken-limit은 롱네임뿐). ③ 리포트:
+신 스키마(top_k·oldest 삭제, broken_paths_total/limit·summary.scan_errors
+신설)로 픽스처 전환 — 러너 파서(summary.total_entries만 읽음)는 무변경이고
+그 무변경이 안전함을 신 스키마 픽스처가 증명. stats 라우트는 broken 총계
+2필드(숫자만, 모양 투영)를 신규 노출하되 구형 리포트는 None(미기록, null≠0).
+④ 포탈: SubmitScan·BatchCreate에서 top_k 입력 제거, 두 신규 옵션 입력
+(빈값 = 플래그 생략 = 도구 기본, placeholder에 기본값 명시) + 통계 패널
+파손 경로 표시 한 줄. ⑤ Dockerfile.mpifileutils REF pin 갱신.
+검증: 손댄 영역 백엔드 218 passed / vitest 전체 398 passed / tsc 0 /
+e2e 9 passed(스캔 제출 흐름 E4 포함 — 무변경).
+
+---
+
 ### ✅ 슬라이스 31 «포탈 디자인 개편 — DS Cloud 스타일» — **완료**(2026-08-13, d42)
 
 플랜 `docs/plans/2026-08-13-dms-portal-redesign-slice31.md`(새 문서 체계 첫 플랜).

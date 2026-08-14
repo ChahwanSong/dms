@@ -17,7 +17,9 @@
 FROM debian:bookworm AS build
 
 ARG MPIFILEUTILS_REPO=https://github.com/chahwansong/mpifileutils.git
-ARG MPIFILEUTILS_REF=faefdaf05b8da9386671c2cee00db75efc0e9cd7
+# 1b93d54: dscan top-K 수집 제거·스트리밍 재작성, --batch-files/--broken-limit 신설
+# (리포트에 broken_paths_total/limit 추가, top_k/oldest 키 삭제).
+ARG MPIFILEUTILS_REF=1b93d5404d078c55b46194cdd02732417ed856dc
 ARG LWGRP_REF=v1.0.6
 ARG DTCMP_REF=v1.1.5
 ARG LIBCIRCLE_REF=v0.3
