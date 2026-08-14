@@ -76,23 +76,39 @@ test("scan: 테이블 2행 + 스토리지 → 제출 바디 조립·미지정 �
   });
 });
 
-test("scan 옵션: top_k·quiet·우선순위·노드 수가 바디에 실린다", async () => {
+test("scan 옵션: batch_files·broken_limit·quiet·우선순위·노드 수가 바디에 실린다", async () => {
   const captured = captureCreate();
   renderPage();
   await userEvent.click(next());
   await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
   await userEvent.type(screen.getByLabelText("1행 경로"), "a");
   await userEvent.click(next());
-  await userEvent.type(screen.getByLabelText("top_k"), "100");
+  // top_k는 신 dscan(1b93d54)에서 기능 삭제 — 입력 자체가 없어야 한다.
+  expect(screen.queryByLabelText("top_k")).toBeNull();
+  await userEvent.type(screen.getByLabelText("batch_files"), "0");
+  await userEvent.type(screen.getByLabelText("broken_limit"), "500");
   await userEvent.click(screen.getByLabelText("quiet"));
   await userEvent.selectOptions(screen.getByLabelText("우선순위"), "high");
   await userEvent.type(screen.getByLabelText("노드 수"), "4");
   await userEvent.click(next());
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
+  // batch_files 0 = 배칭 끔 — 0이 정상값으로 실려야 한다(빈값 생략과 구분, null≠0).
   expect(captured.body).toMatchObject({
-    options: { top_k: 100, quiet: true }, priority: "high", node_count: 4,
+    options: { batch_files: 0, broken_limit: 500, quiet: true },
+    priority: "high", node_count: 4,
   });
+});
+
+test("scan broken_limit 범위 밖이면 즉답 문구 + 다음 비활성", async () => {
+  renderPage();
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(next());
+  await userEvent.type(screen.getByLabelText("broken_limit"), "10001");
+  expect(screen.getByText("broken_limit는 0..10000 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(next()).toBeDisabled();
 });
 
 test("sync: CSV 붙여넣기 반영 → 소스/목적지 짝 조립", async () => {
@@ -186,7 +202,10 @@ test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => 
   await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
   expect(screen.getByLabelText("CSV")).toHaveAttribute("placeholder", "team\nprojects/alpha");
   await userEvent.click(next());                              // → 실행 제어
-  expect(screen.getByLabelText("top_k")).toHaveAttribute("placeholder", "예: 100");
+  // 빈값 = 플래그 생략 = 도구 기본 — placeholder가 그 기본값을 그대로 말한다.
+  expect(screen.getByLabelText("batch_files"))
+    .toHaveAttribute("placeholder", "기본 1000000 · 0 = 배칭 끔");
+  expect(screen.getByLabelText("broken_limit")).toHaveAttribute("placeholder", "기본 100");
   expect(screen.getByLabelText("소유자 기록(선택)")).toHaveAttribute("placeholder", "예: cocoa.song");
   expect(screen.getByLabelText("노드 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
   expect(screen.getByLabelText("노드당 프로세스 수")).toHaveAttribute("placeholder", "비우면 정책 기본");

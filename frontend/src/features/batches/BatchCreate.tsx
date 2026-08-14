@@ -37,8 +37,10 @@ interface RowPair { a: string; b: string }
 const initial = {
   op: "scan" as "scan" | "sync",
   storage: "", srcStorage: "", dstStorage: "",
-  // scan 옵션(SubmitScan 미러 — dscan 실측 전부)
-  topK: "", verbose: false, quiet: false,
+  // scan 옵션(SubmitScan 미러 — dscan 1b93d54 실측 전부. top_k는 신버전에서
+  // 기능 삭제라 함께 제거). scanBatchFiles는 sync의 batchFiles와 별도 상태 —
+  // 같은 옵션명이지만 범위가 다르다(scan 0..10억·0 = 배칭 끔, sync 1..100만).
+  scanBatchFiles: "", brokenLimit: "", verbose: false, quiet: false,
   // sync 옵션(SubmitJob 미러, 정규식·범위는 optionRules 공유)
   delete: false, contents: false, direct: false,
   openNoatime: false, batchFiles: "", bufsize: "", chmod: "", chown: "",
@@ -79,7 +81,10 @@ export function BatchCreate() {
 
   // --- 실행 제어 스텝 검증(즉답 미러 — 최종 심판은 서버 422) ---
   const verboseQuietConflict = f.op === "scan" && f.verbose && f.quiet;
-  const topKError = f.op === "scan" ? intFieldError("top_k", f.topK, 1, 1_000_000) : null;
+  const scanBatchFilesError = f.op === "scan"
+    ? intFieldError("batch_files", f.scanBatchFiles, 0, 1_000_000_000) : null;
+  const brokenLimitError = f.op === "scan"
+    ? intFieldError("broken_limit", f.brokenLimit, 0, 10_000) : null;
   const batchFilesError = f.op === "sync"
     ? intFieldError("batch_files", f.batchFiles, 1, 1_000_000) : null;
   const bufsizeError = f.op === "sync"
@@ -94,7 +99,8 @@ export function BatchCreate() {
   const procsPerNodeError = intFieldError("노드당 프로세스 수", f.procsPerNode, 1, 64);
   const mcError = !Number.isInteger(f.mc) || f.mc < 1 || f.mc > 64
     ? "동시 실행 상한은 1..64 범위의 정수여야 합니다" : null;
-  const controlsInvalid = verboseQuietConflict || topKError !== null
+  const controlsInvalid = verboseQuietConflict || scanBatchFilesError !== null
+    || brokenLimitError !== null
     || batchFilesError !== null || bufsizeError !== null
     || chmodError !== null || chownError !== null
     || nodeCountError !== null || procsPerNodeError !== null || mcError !== null;
@@ -184,7 +190,11 @@ export function BatchCreate() {
     if (f.op === "scan") {
       if (f.verbose) options.verbose = true;
       if (f.quiet) options.quiet = true;
-      if (f.topK.trim() !== "") options.top_k = Number(f.topK.trim());
+      // 빈값 = 키 생략 = 도구 기본. "0"은 정상 입력(배칭 끔)이라 생략과 다르다(null≠0).
+      if (f.scanBatchFiles.trim() !== "")
+        options.batch_files = Number(f.scanBatchFiles.trim());
+      if (f.brokenLimit.trim() !== "")
+        options.broken_limit = Number(f.brokenLimit.trim());
       return options;
     }
     if (f.delete) options.delete = true;
@@ -383,12 +393,20 @@ export function BatchCreate() {
           <div className="space-y-3">
             {f.op === "scan" ? (
               <>
-                <label className="text-sm block">top_k
-                  <input aria-label="top_k" type="number" min={1} max={1000000}
-                         placeholder="예: 100"
-                         className={field} value={f.topK} onChange={on("topK")} />
+                <label className="text-sm block">batch_files (0..1,000,000,000 · 0 = 배칭 끔)
+                  <input aria-label="batch_files" type="number" min={0} max={1000000000}
+                         placeholder="기본 1000000 · 0 = 배칭 끔"
+                         className={field} value={f.scanBatchFiles}
+                         onChange={on("scanBatchFiles")} />
                 </label>
-                {topKError && <p className="text-bad text-sm">{topKError}</p>}
+                {scanBatchFilesError && <p className="text-bad text-sm">{scanBatchFilesError}</p>}
+                <label className="text-sm block">broken_limit (0..10,000 · 리포트에 보관할 파손 경로 수)
+                  <input aria-label="broken_limit" type="number" min={0} max={10000}
+                         placeholder="기본 100"
+                         className={field} value={f.brokenLimit}
+                         onChange={on("brokenLimit")} />
+                </label>
+                {brokenLimitError && <p className="text-bad text-sm">{brokenLimitError}</p>}
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" aria-label="verbose" checked={f.verbose}
                          onChange={on("verbose")} /> verbose
