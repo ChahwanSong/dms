@@ -119,6 +119,47 @@ describe("BarChart 9버킷은 저밀도", () => {
   });
 });
 
+describe("BarChart colorOf(막대별 색 — 온도 그라디언트)", () => {
+  const TWO = [{ label: "[0d,1d]", value: 4 }, { label: "[1y,)", value: 1 }];
+  it("colorOf 미지정: 기존 accent 클래스 렌더 불변(하위호환)", () => {
+    const { container } = render(<BarChart data={TWO} label="기본색" />);
+    expect(container.getElementsByClassName("bg-accent")).toHaveLength(2);
+    expect(container.getElementsByClassName("bg-accent/10")).toHaveLength(2);
+  });
+  it("저밀도: 막대는 colorOf 색, 트랙은 같은 색의 저채도 판(rgba 0.1)", () => {
+    const { container } = render(
+      <BarChart data={TWO} label="온도색"
+                colorOf={(i) => ["#dc2626", "#3b82f6"][i]} />);
+    // colorOf 지정 시 accent 클래스 대신 inline 색 -- 정적 hex(airgap 무관)
+    expect(container.getElementsByClassName("bg-accent")).toHaveLength(0);
+    expect(container.getElementsByClassName("bg-accent/10")).toHaveLength(0);
+    const fills = container.getElementsByClassName("rounded-t");
+    expect(fills[0]).toHaveStyle({ backgroundColor: "#dc2626" });
+    expect(fills[1]).toHaveStyle({ backgroundColor: "#3b82f6" });
+    const tracks = container.getElementsByClassName("rounded-sm");
+    expect(tracks[0]).toHaveStyle({ backgroundColor: "rgba(220, 38, 38, 0.1)" });
+    expect(tracks[1]).toHaveStyle({ backgroundColor: "rgba(59, 130, 246, 0.1)" });
+  });
+  it("고밀도(>9버킷)에도 막대·트랙 색이 적용된다", () => {
+    const many = Array.from({ length: 12 }, (_, i) => (
+      { label: `${i}`, value: i }));
+    const { container } = render(
+      <BarChart data={many} label="온도밀집" colorOf={() => "#ea580c"} />);
+    const fills = container.getElementsByClassName("rounded-t");
+    expect(fills).toHaveLength(12);
+    expect(fills[3]).toHaveStyle({ backgroundColor: "#ea580c" });
+    expect(container.getElementsByClassName("rounded-sm")[0])
+      .toHaveStyle({ backgroundColor: "rgba(234, 88, 12, 0.1)" });
+    expect(container.getElementsByClassName("bg-accent")).toHaveLength(0);
+  });
+  it("colorOf 는 index 와 value 를 받는다", () => {
+    const seen: [number, number][] = [];
+    render(<BarChart data={TWO} label="인자"
+                     colorOf={(i, v) => { seen.push([i, v]); return "#dc2626"; }} />);
+    expect(seen).toEqual([[0, 4], [1, 1]]);
+  });
+});
+
 describe("BarChart 빈 상태", () => {
   it("— 대신 명시 문구", () => {
     render(<BarChart data={[]} />);
