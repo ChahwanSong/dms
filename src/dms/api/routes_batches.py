@@ -10,12 +10,32 @@ from .routes_requests import reject_when_maintenance
 
 router = APIRouter()
 
+# 배치 이름 상한: 목록 열·상세 헤더에 한 줄로 얹히는 식별용 자유 텍스트라 120자면
+# 충분하다(위생값 — DB 는 TEXT 라 제약이 없고, 여기가 유일한 심판이다).
+_MAX_BATCH_NAME = 120
+
+
+def normalized_batch_name(name: str | None) -> str | None:
+    """배치 이름 정규화(생성·수정 공용): trim 후 빈 문자열은 None(이름 없음)으로
+    접는다 — 빈 문자열을 저장하면 "이름 없음"이 두 가지 표현으로 갈라진다.
+    상한 초과는 422 — 잘라서 저장하면 조용한 절단이다."""
+    if name is None:
+        return None
+    name = name.strip()
+    if name == "":
+        return None
+    if len(name) > _MAX_BATCH_NAME:
+        raise HTTPException(status_code=422, detail="invalid_batch_name")
+    return name
+
 
 class BatchBody(BaseModel):
     operation: str
     max_concurrency: int
     options: dict = {}
     note: str | None = None
+    # 배치 이름(선택): 운영자 식별용. 빈값·미지정 = 이름 없음(NULL).
+    name: str | None = None
     items: list[dict]
     # 실행 제어(슬라이스 32). None = 미지정(정책 기본) — null≠0.
     priority: str | None = None
@@ -49,6 +69,7 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
     # 여부는 위 게이트가 배치 전체에 판정했고, 이 값은 자식 payload 에 실려 실행
     # 신원 해석과 감사에 쓰인다(orchestrator._materialize).
     owner = body.owner_username
+    name = normalized_batch_name(body.name)
     try:
         if owner is not None:
             validate_owner_username(owner)    # 단건 _validated_payload 와 같은 검증
@@ -63,7 +84,7 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
     bid = request.app.state.repos.batches.create(
         operation=body.operation, requester_id=identity.actor, actor=identity.actor,
         max_concurrency=body.max_concurrency, options=body.options, note=body.note,
-        items=body.items, status=status,
+        name=name, items=body.items, status=status,
         priority=body.priority, node_count=body.node_count,
         procs_per_node=body.procs_per_node,
         # auth_method 박제는 특권 여부와 무관한 생성 시점 사실의 기록이다 --

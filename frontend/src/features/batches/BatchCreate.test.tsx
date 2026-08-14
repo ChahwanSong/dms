@@ -191,6 +191,38 @@ test("소유자 기록이 빈값이면 owner_username 키 부재 — 특권 실�
   expect(captured.body).not.toHaveProperty("owner_username");
 });
 
+test("배치 이름: 입력이 바디·확인 요약에 실린다", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(next());                              // → 실행 제어
+  expect(screen.getByLabelText("배치 이름"))
+    .toHaveAttribute("placeholder", "예: 8월 정기 스캔 1차");
+  await userEvent.type(screen.getByLabelText("배치 이름"), "8월 정기 스캔 1차");
+  await userEvent.click(next());                              // → 확인·제출
+  expect(screen.getByText("이름")).toBeInTheDocument();
+  expect(screen.getByText("8월 정기 스캔 1차")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body).toMatchObject({ name: "8월 정기 스캔 1차" });
+});
+
+test("배치 이름 빈값이면 name 키 부재 — 요약 행도 없다", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(next());
+  await userEvent.click(next());
+  expect(screen.queryByText("이름")).toBeNull();              // 빈값 = 요약 행 부재
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body).not.toHaveProperty("name");
+});
+
 // placeholder 계약(희미한 힌트): 각 입력에 실값과 혼동되지 않는 예시가 떠야 한다.
 // 경로 예시는 스토리지 기준 상대경로(선행 슬래시 없음) 형태 — 도메인 계약의 가시화.
 test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => {

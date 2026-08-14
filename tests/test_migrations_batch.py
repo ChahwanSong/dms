@@ -54,6 +54,20 @@ def test_batch_procs_per_node_backfilled_on_old_db(tmp_path):
     migrate(db)
     assert "procs_per_node" in _cols(db, "batches")
 
+def test_batch_name_backfilled_on_old_db(tmp_path):
+    db = Database.connect(f"sqlite:///{tmp_path}/m8.db")
+    # 구형(procs_per_node 시점 형상): name 없이 만든 뒤 migrate 가 ALTER 로
+    # 보강하는지 — 양쪽에 없으면 라이브에서만 컬럼이 없다(슬라이스 14 교훈).
+    db.execute("""CREATE TABLE batches (batch_id TEXT PRIMARY KEY, operation TEXT,
+        requester_id TEXT, actor TEXT, status TEXT, max_concurrency INTEGER,
+        options TEXT, note TEXT, item_count INTEGER, succeeded_count INTEGER,
+        failed_count INTEGER, created_at TEXT, updated_at TEXT,
+        priority TEXT, node_count INTEGER, owner_username TEXT, auth_method TEXT,
+        procs_per_node INTEGER)""")
+    migrate(db)
+    assert "name" in _cols(db, "batches")
+
+
 def test_requests_has_batch_id(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/m2.db"); migrate(db)
     assert "batch_id" in _cols(db, "requests")

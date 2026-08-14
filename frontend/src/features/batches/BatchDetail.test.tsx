@@ -67,6 +67,20 @@ test("owner_username 이 없어도 특권 실행 문구는 항상 — 소유자 
   expect(screen.getByText("특권 실행(root)")).toBeInTheDocument();
   expect(screen.queryByText(/소유자/)).toBeNull();
 });
+test("이름이 있으면 헤더는 이름, 축약 batch_id 는 병기", async () => {
+  server.use(http.get("/api/admin/batches/b1",
+    () => HttpResponse.json(batch({ name: "8월 정기 스캔 1차" }))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByRole("heading", { name: "8월 정기 스캔 1차" })).toBeInTheDocument();
+  expect(screen.getByText("b1")).toBeInTheDocument();   // 식별자는 사라지지 않는다
+});
+test("이름이 없으면 기존 축약 batch_id 헤더 유지", async () => {
+  renderAt("Running");
+  expect(await screen.findByRole("heading", { name: "배치 b1" })).toBeInTheDocument();
+});
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));

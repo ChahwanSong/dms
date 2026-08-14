@@ -96,6 +96,9 @@ def _apply_migrations(db: Database) -> None:
             -- 배치 특권 실행: 단건 제출의 owner_username 경로 이식. NULL = 비특권
             -- 현행(자식 payload 에 키 자체가 실리지 않는다 — null≠0).
             owner_username TEXT,
+            -- 배치 이름(운영자 식별용 자유 텍스트, 선택). NULL = 이름 없음 —
+            -- 빈 문자열을 저장하지 않는다(라우트가 trim 후 빈값을 NULL 로 접는다).
+            name TEXT,
             -- 배치 생성 시점의 인증 방식(session/token) 박제 — 자식 request 의
             -- auth_method 가 이 값을 물려받는다(requests.auth_method 선례와 같은
             -- 「왜」: planner 가 특권 승격을 session 에만 허용하는 심층 방어의
@@ -537,6 +540,9 @@ def _ensure_columns(db):
         ("batches", "auth_method", "TEXT"),
         # 노드당 프로세스 수 override -- 위와 같은 이중 경로 규약(슬라이스 14 교훈).
         ("batches", "procs_per_node", "INTEGER"),
+        # 배치 이름 -- 위와 같은 이중 경로 규약(슬라이스 14 교훈: CREATE 만 고치면
+        # 기배포 DB 에서만 컬럼이 없다).
+        ("batches", "name", "TEXT"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

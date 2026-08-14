@@ -15,7 +15,12 @@ export function BatchDetail() {
   const b = q.data;
   return (
     <section className="space-y-4">
-      <h1 className="text-2xl font-bold">배치 {batchId.slice(0,12)}</h1>
+      {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
+          운영자가 로그·API 와 대조할 열쇠를 잃는다). 없으면 기존 헤더 유지. */}
+      <div className="flex items-baseline gap-3">
+        <h1 className="text-2xl font-bold">{b?.name ?? `배치 ${batchId.slice(0,12)}`}</h1>
+        {b?.name && <span className="text-muted text-sm font-mono">{batchId.slice(0,12)}</span>}
+      </div>
       <Card>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">

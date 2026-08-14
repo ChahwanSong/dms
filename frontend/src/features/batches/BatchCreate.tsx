@@ -46,7 +46,7 @@ const initial = {
   openNoatime: false, batchFiles: "", bufsize: "", chmod: "", chown: "",
   // 실행 제어: priority "" = "(정책 기본)" = 바디에서 생략(null≠0).
   // nodeCount/procsPerNode "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
-  priority: "", nodeCount: "", procsPerNode: "", mc: 2, note: "",
+  priority: "", nodeCount: "", procsPerNode: "", mc: 2, note: "", name: "",
   // 소유자 기록: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자). 특권 여부와
   // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
@@ -219,6 +219,8 @@ export function BatchCreate() {
     return {
       operation: f.op, max_concurrency: f.mc, options: buildOptions(),
       note: f.note || null, items,
+      // 배치 이름: 빈값은 키 생략 = 서버 NULL(이름 없음) — 아래 생략 계약의 미러.
+      ...(f.name.trim() !== "" && { name: f.name.trim() }),
       // 미지정("")은 키 자체를 생략한다 — 서버 NULL(정책 기본), null≠0.
       ...(f.priority !== "" && { priority: f.priority }),
       ...(f.nodeCount.trim() !== "" && { node_count: Number(f.nodeCount.trim()) }),
@@ -532,6 +534,13 @@ export function BatchCreate() {
             </label>
             {mcError && <p className="text-bad text-sm">{mcError}</p>}
 
+            {/* 이름은 목록·상세 헤더에 얹히는 식별자(선택), 메모는 자유 기록 —
+                역할이 달라 별도 입력이다. 빈값 = 이름 없음(키 생략, 서버 NULL). */}
+            <label className="text-sm block">배치 이름(선택)
+              <input aria-label="배치 이름" placeholder="예: 8월 정기 스캔 1차"
+                     maxLength={120} className={field} value={f.name} onChange={on("name")} />
+            </label>
+
             <label className="text-sm block">메모
               <input aria-label="메모" placeholder="예: 8월 정기 스캔"
                      className={field} value={f.note} onChange={on("note")} />
@@ -589,6 +598,12 @@ export function BatchCreate() {
                     <dt className="w-28 shrink-0 text-muted">동시 상한</dt>
                     <dd>{body.max_concurrency}</dd>
                   </div>
+                  {body.name && (
+                    <div className="flex gap-2">
+                      <dt className="w-28 shrink-0 text-muted">이름</dt>
+                      <dd>{body.name}</dd>
+                    </div>
+                  )}
                   {body.note && (
                     <div className="flex gap-2">
                       <dt className="w-28 shrink-0 text-muted">메모</dt>

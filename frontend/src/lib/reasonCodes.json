@@ -20,7 +20,7 @@
   "batch_not_confirmable", "no_failed_items", "no_preview_fingerprint",
   "empty_batch", "invalid_batch_operation", "invalid_max_concurrency",
   "batch_storage_mixed", "invalid_node_count", "invalid_procs_per_node",
-  "batch_not_rescannable",
+  "batch_not_rescannable", "invalid_batch_name",
   "invalid_storage", "invalid_node_name", "agent_node_identity_mismatch",
   "terminate_failed", "invalid_job_id", "invalid_batch", "invalid_phase",
   "log_ref_not_found", "log_not_available", "artifact_not_found",

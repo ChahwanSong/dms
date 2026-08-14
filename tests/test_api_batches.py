@@ -129,6 +129,48 @@ def test_create_without_procs_per_node_stores_null(client):
     assert client.app.state.repos.batches.get(r.json()["batch_id"])["procs_per_node"] is None
 
 
+# --- 배치 이름(name): 등록 시 설정 ---
+
+def test_create_with_name_stores_trimmed(client):
+    _admin(client)
+    r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "name": "  8월 정기 스캔 1차  ",
+        "items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 202
+    b = client.app.state.repos.batches.get(r.json()["batch_id"])
+    assert b["name"] == "8월 정기 스캔 1차"
+
+
+def test_create_name_blank_becomes_null(client):
+    _admin(client)
+    r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "name": "   ",
+        "items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 202
+    # 공백뿐인 이름은 "이름 없음"(NULL)이다 — 빈 문자열을 저장하지 않는다
+    assert client.app.state.repos.batches.get(r.json()["batch_id"])["name"] is None
+
+
+def test_create_without_name_stores_null(client):
+    _admin(client)
+    r = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"storage": "s1", "target": "a"}]})
+    assert r.status_code == 202  # 기존 바디 무수정 호환(옵션 필드)
+    assert client.app.state.repos.batches.get(r.json()["batch_id"])["name"] is None
+
+
+def test_create_name_at_limit_ok_over_limit_422(client):
+    _admin(client)
+    ok = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "name": "n" * 120,
+        "items": [{"storage": "s1", "target": "a"}]})
+    assert ok.status_code == 202
+    bad = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
+        "options": {}, "note": None, "name": "n" * 121,
+        "items": [{"storage": "s1", "target": "a"}]})
+    assert bad.status_code == 422 and bad.json()["detail"] == "invalid_batch_name"
+
+
 def test_confirm_requires_previewready(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,

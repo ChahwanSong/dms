@@ -84,6 +84,8 @@ export interface Batch {
   batch_id: string; operation: string; status: string; max_concurrency: number;
   item_count: number; succeeded_count: number; failed_count: number;
   note: string | null; created_at: string;
+  // 배치 이름(선택). 옵션 필드 — 기존 fixture 무수정 컴파일. null/부재 = 이름 없음.
+  name?: string | null;
   // 실행 제어(슬라이스 32). 옵션 필드 — 기존 fixture 무수정 컴파일. null = 정책 기본.
   priority?: string | null; node_count?: number | null;
   // 노드당 프로세스 수 override — node_count 와 같은 계약(null/부재 = 정책 기본).

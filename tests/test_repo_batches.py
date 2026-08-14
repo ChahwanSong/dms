@@ -103,6 +103,24 @@ def test_create_defaults_procs_per_node_to_null(db):
     # null(모름) ≠ 0 — 미지정은 NULL(정책 기본)이어야 한다
     assert repos.batches.get(bid)["procs_per_node"] is None
 
+# --- 배치 이름(name): note 저장 관례의 미러 ---
+
+def test_create_stores_name(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"s1","target":"a"}], status="Running",
+        name="8월 정기 스캔 1차")
+    assert repos.batches.get(bid)["name"] == "8월 정기 스캔 1차"
+
+def test_create_defaults_name_to_null(db):
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=2, options={}, note=None,
+        items=[{"storage":"s1","target":"a"}], status="Running")
+    # null = 이름 없음(미지정) — 빈 문자열로 뭉개지 않는다
+    assert repos.batches.get(bid)["name"] is None
+
 def test_requests_create_with_batch_id(db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",
