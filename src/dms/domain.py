@@ -121,11 +121,20 @@ _CHOWN_RE = re.compile(rf"({_CHOWN_PART})?(:{_CHOWN_PART})?$")
 
 _BOOL = ("bool",)
 _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {
-    # dscan(포크)이 실제 지원하는 플래그만 노출한다: --top-k <N>, --verbose, --quiet.
+    # dscan(포크 1b93d54)이 실제 지원하는 플래그만 노출한다: --batch-files <N>,
+    # --broken-limit <N>, --verbose, --quiet.
     # (이전의 summary_only/follow_symlinks/one_file_system/max_depth는 dscan에
-    #  대응 플래그가 없어 수락돼도 무효였으므로 제거 — unknown_option으로 거부된다.)
+    #  대응 플래그가 없어 수락돼도 무효였으므로 제거 — unknown_option으로 거부된다.
+    #  top_k도 같은 길: 신버전 dscan이 top-K 수집 기능 자체를 삭제했다(스트리밍
+    #  재작성, mpifileutils 커밋 a0ef9a7→1b93d54) — unknown_option으로 거부된다.)
+    # 실측(dscan.c:1283-1293): 두 값 옵션 다 0 허용 — batch_files 0 = 배칭 비활성,
+    # broken_limit 0 = 파손 경로 표본 미보관(broken_paths_total 총계는 항상 정확).
+    # 도구 파싱(parse_uint64)은 uint64 전체를 받으므로 상한은 DMS 위생 상한이다:
+    # batch_files 10억(진행 회계 단위 — 리포트를 키우지 않는다), broken_limit
+    # 10,000(경로 문자열이 리포트에 그대로 실린다 — stats 읽기 상한 256 KiB 위생).
     Operation.SCAN: {
-        "top_k": ("int", 1, 1_000_000),
+        "batch_files": ("int", 0, 1_000_000_000),
+        "broken_limit": ("int", 0, 10_000),
         "verbose": _BOOL, "quiet": _BOOL,
     },
     Operation.SYNC: {

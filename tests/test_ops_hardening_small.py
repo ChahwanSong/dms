@@ -50,13 +50,13 @@ def test_tail_lines_does_not_split_on_carriage_return():
 def test_batches_list_hydrates_options(db):
     repos = Repositories(db)
     bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
-        max_concurrency=2, options={"top_k": 5}, note=None,
+        max_concurrency=2, options={"broken_limit": 5}, note=None,
         items=[{"storage": "s1", "target": "a"}], status="Running")
 
     rows = repos.batches.list()
 
     row = next(r for r in rows if r["batch_id"] == bid)
-    assert row["options"] == {"top_k": 5}  # raw JSON 문자열이 아니라 dict
+    assert row["options"] == {"broken_limit": 5}  # raw JSON 문자열이 아니라 dict
 
 
 def test_reset_failed_items_is_transactional(db):

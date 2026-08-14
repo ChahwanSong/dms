@@ -33,10 +33,13 @@ def test_scan_argv():
 
 
 def test_scan_argv_with_options():
-    # top_k(값)/verbose(불리언)가 dscan 명령에 렌더된다. --print는 기본 유지.
-    spec = _spec(operation="scan", tool="dscan", options={"top_k": 25, "verbose": True})
+    # batch_files/broken_limit(값)·verbose(불리언)가 dscan 명령에 렌더된다.
+    # --print는 기본 유지. --broken-limit은 dscan에서 롱네임뿐(-B 없음)이다.
+    spec = _spec(operation="scan", tool="dscan",
+                 options={"batch_files": 0, "broken_limit": 500, "verbose": True})
     argv = tool_argv(spec, abs_paths={"target": "/cephfs/dms/t"})
-    assert argv == ["--directory", "/cephfs/dms/t", "--verbose", "--top-k", "25",
+    assert argv == ["--directory", "/cephfs/dms/t", "--verbose",
+                    "--batch-files", "0", "--broken-limit", "500",
                     "--output", "$DMS_SCAN_REPORT", "--print"]
 
 
@@ -49,9 +52,12 @@ def test_scan_argv_quiet_omits_print():
 
 
 def test_render_tool_flags_dscan():
-    assert render_tool_flags("dscan", {"top_k": 3}) == ["--top-k", "3"]
+    assert render_tool_flags("dscan", {"batch_files": 3}) == ["--batch-files", "3"]
+    assert render_tool_flags("dscan", {"broken_limit": 0}) == ["--broken-limit", "0"]
     assert render_tool_flags("dscan", {"verbose": True}) == ["--verbose"]
     assert render_tool_flags("dscan", {}) == []
+    # top_k는 신 dscan(1b93d54)에서 기능 삭제 — 렌더 맵에 남아 있으면 안 된다.
+    assert render_tool_flags("dscan", {"top_k": 3}) == []
 
 
 def test_sync_argv_with_dryrun():

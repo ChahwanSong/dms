@@ -19,13 +19,13 @@ def test_create_plan_and_job_links(db):
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     job_id = repos.data_jobs.create_job(
         rid, plan_id, operation="scan", priority="mid", storage_name="s1",
-        target="a", options={"top_k": 5}, tool="dscan",
+        target="a", options={"broken_limit": 5}, tool="dscan",
         worker_pool={"tool": "dscan", "candidates": {"primary": ["n1"]}},
         precondition={"job_id": "x"}, actor="planner")
     job = repos.data_jobs.get_job(job_id)
     assert job["state"] == "Pending"
     assert job["tool"] == "dscan"
-    assert job["options"] == {"top_k": 5}
+    assert job["options"] == {"broken_limit": 5}
     assert job["worker_pool"]["candidates"]["primary"] == ["n1"]
     plan = db.query_one("SELECT job_id, state FROM plans WHERE plan_id = :p", {"p": plan_id})
     assert plan["job_id"] == job_id and plan["state"] == "Planned"

@@ -6,9 +6,10 @@ from dms.domain import (
 
 
 def test_scan_options_ok():
-    # dscan이 실제 지원하는 옵션만 수락한다: top_k/verbose/quiet.
-    out = validate_options(Operation.SCAN, {"top_k": 5, "verbose": True})
-    assert out == {"top_k": 5, "verbose": True}
+    # dscan(1b93d54)이 실제 지원하는 옵션만 수락한다: batch_files/broken_limit/verbose/quiet.
+    out = validate_options(Operation.SCAN,
+                           {"batch_files": 500_000, "broken_limit": 200, "verbose": True})
+    assert out == {"batch_files": 500_000, "broken_limit": 200, "verbose": True}
 
 
 @pytest.mark.parametrize("key", ["summary_only", "follow_symlinks",
@@ -20,15 +21,47 @@ def test_scan_unsupported_options_rejected(key):
     assert e.value.reason_code == "unknown_option"
 
 
+def test_scan_top_k_removed():
+    # 신 dscan(1b93d54)은 --top-k 기능 자체를 삭제했다 — 이제 unknown_option.
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SCAN, {"top_k": 5})
+    assert e.value.reason_code == "unknown_option"
+
+
 def test_scan_verbose_quiet_exclusive():
     with pytest.raises(DomainValidationError) as e:
         validate_options(Operation.SCAN, {"verbose": True, "quiet": True})
     assert e.value.reason_code == "invalid_option"
 
 
-def test_scan_top_k_range():
+@pytest.mark.parametrize("value", [0, 1_000_000_000])
+def test_scan_batch_files_bounds_ok(value):
+    # dscan 실측(dscan.c:1283-1288): --batch-files 0 허용 — 0 = 배칭 비활성.
+    # 상한 10억은 DMS 위생 상한(도구는 uint64 전체 수용).
+    assert validate_options(Operation.SCAN, {"batch_files": value}) \
+        == {"batch_files": value}
+
+
+@pytest.mark.parametrize("value", [-1, 1_000_000_001, "5", True])
+def test_scan_batch_files_out_of_range(value):
     with pytest.raises(DomainValidationError) as e:
-        validate_options(Operation.SCAN, {"top_k": 0})
+        validate_options(Operation.SCAN, {"batch_files": value})
+    assert e.value.reason_code == "invalid_option"
+
+
+@pytest.mark.parametrize("value", [0, 10_000])
+def test_scan_broken_limit_bounds_ok(value):
+    # dscan 실측(dscan.c:1289-1293, acc_init): --broken-limit 0 허용 — 표본 미보관,
+    # broken_paths_total 총계는 항상 정확. 상한 10,000은 리포트 크기 위생
+    # (경로 문자열이 리포트에 그대로 실리고, stats 라우트 읽기 상한은 256 KiB).
+    assert validate_options(Operation.SCAN, {"broken_limit": value}) \
+        == {"broken_limit": value}
+
+
+@pytest.mark.parametrize("value", [-1, 10_001, "100", True])
+def test_scan_broken_limit_out_of_range(value):
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SCAN, {"broken_limit": value})
     assert e.value.reason_code == "invalid_option"
 
 

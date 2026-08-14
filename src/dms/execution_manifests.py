@@ -5,7 +5,9 @@ import json
 from .artifact_base import strip_scheme
 
 _SCAN_BOOL_FLAGS = {"verbose": "--verbose", "quiet": "--quiet"}
-_SCAN_VALUE_FLAGS = {"top_k": "--top-k"}
+# dscan(1b93d54): --broken-limit은 롱네임뿐(-B는 optstring에 없다). top_k는
+# 신버전에서 기능 삭제 — 렌더 맵에 남기면 미지 플래그로 dscan이 usage 종료한다.
+_SCAN_VALUE_FLAGS = {"batch_files": "--batch-files", "broken_limit": "--broken-limit"}
 _SYNC_BOOL_FLAGS = {"delete": "--delete", "contents": "--contents",
                     "direct": "--direct", "open_noatime": "--open-noatime",
                     "quiet": "--quiet"}

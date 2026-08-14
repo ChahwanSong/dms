@@ -18,7 +18,7 @@ def test_submit_scan_and_poll(client):
     # scan은 관리자 전용 제출이다 (test_scan_submission_is_admin_only 참고) — Bearer로 인증한다.
     r = client.post("/api/user/requests", headers=ADMIN, json={
         "operation": "scan", "storage": "ceph-a", "target": "team/data",
-        "options": {"top_k": 5}, "priority": "high"})
+        "options": {"broken_limit": 500}, "priority": "high"})
     assert r.status_code == 202
     rid = r.json()["request_id"]
     detail = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
