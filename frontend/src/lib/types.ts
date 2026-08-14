@@ -92,6 +92,9 @@ export interface Batch {
   procs_per_node?: number | null;
   // 배치 특권 실행. null/부재 = 비특권 현행 — 화면은 있을 때만 표시한다.
   owner_username?: string | null;
+  // 생성 시 실은 연산 옵션(서버는 늘 보낸다 — SELECT * + load_json). 옵션(?)은
+  // 기존 fixture 무수정 컴파일용일 뿐이다.
+  options?: Record<string, unknown>;
 }
 export interface BatchItem {
   seq: number; payload: Record<string, unknown>; status: string;

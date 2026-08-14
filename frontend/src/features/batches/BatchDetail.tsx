@@ -10,7 +10,7 @@ import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import { reasonText, ApiError } from "../../lib/api";
-import type { BatchItem, HistogramBucket } from "../../lib/types";
+import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
 
 // NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
 // 전역(B~TiB)이라 KiB 단을 포함한다(NodeMetricsSection 판과 같은 단위 집합).
@@ -67,6 +67,51 @@ function summarizeItem(operation: string | undefined,
     ? `${part(p.source_storage)}:${part(p.source)} → ${part(p.destination_storage)}:${part(p.destination)}`
     : `${part(p.storage)}:${part(p.target)}`;
   return `${operation ?? "—"} · ${body}`;
+}
+
+// 옵션 humanize: scan/sync 옵션은 평평한 스칼라 맵(batch_files 등)이라 키=값
+// 나열이 JSON 원문보다 읽기 쉽다. 비스칼라 값만 JSON 으로 접는다(방어 — 현행
+// 계약엔 없지만 [object Object] 를 찍는 것보다 낫다). 빈 옵션은 "없음" — 빈
+// 문자열·"{}" 는 화면에서 "모름"처럼 읽힌다. undefined 는 fixture 호환일 뿐,
+// 실서버는 options 를 늘 보낸다(types.ts Batch 주석).
+function humanizeOptions(options: Record<string, unknown> | undefined): string {
+  const entries = Object.entries(options ?? {});
+  if (entries.length === 0) return "없음";
+  return entries
+    .map(([k, v]) =>
+      `${k}=${typeof v === "object" && v !== null ? JSON.stringify(v) : String(v)}`)
+    .join(" · ");
+}
+
+// 실행 제어 설정(읽기 전용): 배치 생성 시 고른 값이 상세에서 안 보여 "무슨
+// 설정으로 돌았나"를 알 수 없었다. null = 정책 기본(null≠0) — 미지정을 0·빈값
+// 으로 뭉개지 않고 명시 문구로 말한다. 접이식(details)을 택한 이유: 상시 참조
+// 정보가 아니라(사후 확인용) 항상 펼치면 항목 목록이 설정 행수만큼 매번 밀린다
+// — 헤더 카드에 summary 한 줄로 접어 두고 필요할 때 연다. 실행 권한 표기는
+// 기존 헤더의 "특권 실행(root)" 문구 재사용 — 여기 중복하지 않는다.
+function BatchSettings({ b }: { b: Batch }) {
+  return (
+    <details className="mt-2">
+      <summary className="text-sm text-muted cursor-pointer">실행 설정</summary>
+      <dl className="mt-2 grid grid-cols-[9rem_1fr] gap-y-1 text-sm max-w-xl">
+        <dt className="text-muted">우선순위</dt>
+        <dd>{b.priority ?? "정책 기본"}</dd>
+        <dt className="text-muted">노드 수</dt>
+        <dd className="tabular-nums">{b.node_count ?? "정책 기본"}</dd>
+        <dt className="text-muted">노드당 프로세스</dt>
+        <dd className="tabular-nums">{b.procs_per_node ?? "정책 기본"}</dd>
+        <dt className="text-muted">동시 실행 상한</dt>
+        <dd className="tabular-nums">{b.max_concurrency}</dd>
+        <dt className="text-muted">옵션</dt>
+        <dd className="font-mono text-xs break-all">{humanizeOptions(b.options)}</dd>
+        {/* 소유자 기록은 있을 때만 — 없으면 행 생략(빈칸 소음 방지, 메모 관례) */}
+        {b.owner_username && (<>
+          <dt className="text-muted">소유자 기록</dt>
+          <dd>{b.owner_username}</dd>
+        </>)}
+      </dl>
+    </details>
+  );
 }
 
 // 항목별 데이터 온도 섹션: 펼친 항목에서만 마운트된다(= lazy 조회의 1차 게이트,
@@ -279,6 +324,7 @@ export function BatchDetail() {
         {/* 메모는 편집 밖에서도 보인다 — 없으면 행 자체 생략(빈칸 소음 방지).
             한 개의 템플릿 리터럴 = 한 개의 텍스트 노드(getByText 관례). */}
         {b?.note && !editing && <p className="text-muted text-sm mt-2">{`메모 ${b.note}`}</p>}
+        {b && <BatchSettings b={b} />}
         {editing && (
           <div className="mt-3 space-y-2 max-w-md">
             <label className="text-sm block">배치 이름

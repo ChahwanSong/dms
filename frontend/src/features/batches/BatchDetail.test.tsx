@@ -404,6 +404,39 @@ test("활성 배치: 배치 삭제 버튼 부재 — 취소 먼저가 동선", a
   expect(screen.queryByRole("button", { name: "배치 삭제" })).toBeNull();
 });
 
+// --- 실행 제어 설정 표시(읽기 전용): 생성 시 고른 값이 상세에서 보인다 ---
+
+test("실행 설정: 지정값 표시 + 옵션 키=값 요약 + 소유자 기록", async () => {
+  renderBatch({ operation: "scan", status: "Completed", priority: "high",
+    node_count: 4, procs_per_node: 2, max_concurrency: 8,
+    options: { batch_files: 1000 }, owner_username: "alice",
+    items: [{ seq: 0, payload: { storage: "s1", target: "a" }, status: "Succeeded",
+      request_id: "r1", reason_code: null }] });
+  expect(await screen.findByText("실행 설정")).toBeInTheDocument();
+  const dd = (label: string) =>
+    (screen.getByText(label).nextElementSibling as HTMLElement).textContent;
+  expect(dd("우선순위")).toBe("high");
+  expect(dd("노드 수")).toBe("4");
+  expect(dd("노드당 프로세스")).toBe("2");
+  expect(dd("동시 실행 상한")).toBe("8");
+  expect(dd("옵션")).toBe("batch_files=1000");
+  expect(dd("소유자 기록")).toBe("alice");
+});
+
+test("실행 설정: 미지정(null)은 '정책 기본' — 0·빈값으로 뭉개지 않는다(null≠0)", async () => {
+  renderBatch({ operation: "scan", status: "Completed", priority: null,
+    node_count: null, procs_per_node: null, options: {},
+    items: [{ seq: 0, payload: { storage: "s1", target: "a" }, status: "Succeeded",
+      request_id: "r1", reason_code: null }] });
+  await screen.findByText("실행 설정");
+  // priority/node_count/procs_per_node 세 항목 모두 "정책 기본"
+  expect(screen.getAllByText("정책 기본")).toHaveLength(3);
+  expect((screen.getByText("옵션").nextElementSibling as HTMLElement).textContent)
+    .toBe("없음");
+  // 소유자 기록은 있을 때만 — 없으면 행 자체가 없다
+  expect(screen.queryByText("소유자 기록")).toBeNull();
+});
+
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));
