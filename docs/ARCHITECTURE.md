@@ -171,7 +171,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 - diag 꼬리 자르기는 바이트 기준이고 UTF-8 경계 조각은 버린다(stepper.py:39-50): errors="replace"로 넘기면 U+FFFD 부풀림으로 상한(16KB x 4 = 64KB, builds.LOG_TEXT_MAX와 계약 테스트로 곱 고정)을 넘는다.
 - exec_preflight의 phase 이름이 초기 preflight와 다른 이유(stepper.py:429-432): 파드 이름이 phase를 포함해서, 같으면 초기 preflight 파드 잔존 시 AlreadyExists→submit_failed.
 - _build_spec에서 policy None은 크래시가 아니라 타임아웃 없음 관용(stepper.py:135-141) — 층1 가드 이후 policy None은 "정책 행이 지워진" 운영 조작뿐.
-- batch 자식은 auth_method="token"으로 생성(batch_orchestrator.py:66-73) — 기계 materialize라 특권 없이 실 LDAP 신원로만 돈다. planner의 특권 판정(session_authenticated)이 이 값에 걸린다.
+- batch 자식의 auth_method는 **배치 생성 시점의 인증 방식을 물려받는다**(batches.auth_method 박제 → batch_orchestrator._materialize 상속, 구형 NULL 행은 "token" 폴백). d51부터 배치 생성 자체가 세션+allowlist 특권 게이트로 통일돼 신규 배치의 자식은 특권(root)으로 계획된다 — planner의 특권 판정(session_authenticated + allowlist)이 이 상속값에 걸린다.
 - DaemonSet 진행 시계 리셋엔 세대 게이트 선행(rollout_watcher.py:99-105): 패치 직후 옛 세대 status의 updated==desired를 믿고 progress를 올리면 이후 진짜 진행이 시계를 한 번도 못 리셋한다.
 - Deployment에는 진행 시계 리셋을 하지 않는다(rollout_watcher.py:92-95): applied_at이 sticky PDE 판별 기준이라 앞당기면 진짜 PDE까지 stale로 읽혀 유일한 종단 수단이 사라진다. 대신 타임아웃 x3(_DEPLOY_TIMEOUT_FACTOR).
 - build 프로브 SUCCEEDED인데 OK 마커 미확인이면 실패를 지어내지 않고 다음 틱 재시도(build_watcher.py:131-135) — 로그 일시 결손 대비, 최후 회수는 preflight 타임아웃.
