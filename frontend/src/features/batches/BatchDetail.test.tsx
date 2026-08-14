@@ -370,6 +370,40 @@ test("항목이 없으면 추가 폼 대신 안내 — 스토리지를 물려받
   expect(screen.queryByRole("button", { name: "항목 추가" })).toBeNull();
 });
 
+// --- 배치 삭제: 종단 배치만 — 확인 다이얼로그 필수, 성공 시 목록으로 ---
+
+function renderWithList(over: any) {
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(over))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes>
+      <Route path="/admin/batches" element={<p>배치 목록 화면</p>} />
+      <Route path="/admin/batches/:batchId" element={<BatchDetail/>} />
+    </Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+test("종단 배치: 배치 삭제 버튼 → 확인 다이얼로그 → DELETE + 목록으로 이동", async () => {
+  let deleted = false;
+  server.use(http.delete("/api/admin/batches/b1", () => {
+    deleted = true; return HttpResponse.json({ deleted: "b1" });
+  }));
+  renderWithList({ status: "Completed" });
+  await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
+  // 트리거만으로는 안 쏜다 — 다이얼로그의 확인이 실제 발사다
+  expect(deleted).toBe(false);
+  await userEvent.click(await screen.findByRole("button", { name: "삭제 확인" }));
+  await waitFor(() => expect(deleted).toBe(true));
+  // 삭제된 배치 상세는 404 화면이 될 뿐 — 목록으로 보낸다
+  expect(await screen.findByText("배치 목록 화면")).toBeInTheDocument();
+});
+
+test("활성 배치: 배치 삭제 버튼 부재 — 취소 먼저가 동선", async () => {
+  renderAt("Running");
+  await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
+  expect(screen.queryByRole("button", { name: "배치 삭제" })).toBeNull();
+});
+
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));

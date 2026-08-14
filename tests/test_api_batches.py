@@ -591,6 +591,72 @@ def test_post_item_404_and_maintenance(client):
     assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
 
 
+# --- 배치 삭제: 종단 배치만 — 활성은 "취소 먼저"가 동선 ---
+
+def test_delete_completed_batch_removes_rows(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert r.status_code == 200 and r.json() == {"deleted": bid}
+    assert client.get(f"/api/admin/batches/{bid}").status_code == 404
+    assert client.app.state.repos.batches.list_items(bid) == []
+
+
+def test_delete_cancelled_batch_allowed(client):
+    _admin(client)
+    bid = _batch(client)
+    client.post(f"/api/admin/batches/{bid}:cancel")
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert r.status_code == 200
+
+
+def test_delete_active_batch_rejected(client):
+    # 실행면 정리 없는 삭제는 고아 자식·오케스트레이터 혼란 — 취소 먼저가 동선
+    _admin(client)
+    bid = _batch(client)                          # Running
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert r.status_code == 409 and r.json()["detail"] == "batch_not_deletable"
+    assert client.app.state.repos.batches.get(bid) is not None
+
+
+def test_delete_previewready_batch_rejected(client):
+    # PreviewReady 는 자식 ConfirmPending(활성) — 종단이 아니다
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = client.post("/api/admin/batches", json={"operation": "sync", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"source_storage": "s1", "source": "a",
+        "destination_storage": "s2", "destination": "b"}]}).json()["batch_id"]
+    repo.set_status(bid, "PreviewReady")
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert r.status_code == 409 and r.json()["detail"] == "batch_not_deletable"
+
+
+def test_delete_batch_preserves_child_requests(client):
+    _admin(client)
+    bid = _batch(client)
+    repos = client.app.state.repos
+    rid, jid = _materialize_child(repos, bid, 0)
+    repos.batches.set_item_status(bid, 0, "Succeeded")
+    repos.batches.set_status(bid, "Completed")
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert r.status_code == 200
+    # 자식 요청·잡은 감사 이력으로 보존 — batch_id 는 역사적 표식으로 남는다
+    req = repos.requests.get(rid)
+    assert req is not None and req["batch_id"] == bid
+    assert repos.data_jobs.get_job(jid) is not None
+
+
+def test_delete_batch_404_and_maintenance(client):
+    _admin(client)
+    r = client.request("DELETE", "/api/admin/batches/nope")
+    assert r.status_code == 404 and r.json()["detail"] == "batch_not_found"
+    bid = _completed_scan_batch(client)
+    client.put("/api/admin/control-state",
+               json={"maintenance": True, "drain": False, "reason": None})
+    r = client.request("DELETE", f"/api/admin/batches/{bid}")
+    assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
 def test_cancel_running_batch_succeeds(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,

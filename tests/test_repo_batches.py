@@ -226,6 +226,29 @@ def test_add_item_to_empty_batch_starts_at_zero(db):
     assert repos.batches.add_item(bid, {"storage": "s1", "target": "a"}) == 0
 
 
+# --- 배치 삭제: 배치 행 + 항목 행만, 자식은 보존 ---
+
+def test_delete_batch_removes_batch_and_items(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=2, status="Completed")
+    repos.batches.delete(bid)
+    assert repos.batches.get(bid) is None
+    assert repos.batches.list_items(bid) == []
+
+
+def test_delete_batch_preserves_child_requests(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=1, status="Completed")
+    rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",
+        resource_key="k", payload={"storage": "s1", "target": "t0"}, priority="mid",
+        batch_id=bid)
+    repos.batches.set_item_materialized(bid, 0, rid)
+    repos.batches.delete(bid)
+    # 자식 요청은 감사 이력 — batch_id 는 역사적 표식으로 남는다(역참조 404 수용)
+    req = repos.requests.get(rid)
+    assert req is not None and req["batch_id"] == bid
+
+
 def test_requests_create_with_batch_id(db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",

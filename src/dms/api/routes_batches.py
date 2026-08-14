@@ -133,6 +133,24 @@ def patch_batch(batch_id: str, body: BatchPatchBody, request: Request,
     return repo.get(batch_id)
 
 
+@router.delete("/api/admin/batches/{batch_id}")
+def delete_batch(batch_id: str, request: Request,
+                 identity: Identity = Depends(require_admin)):
+    """배치 삭제 — **종단(Completed/Cancelled) 배치만**. 활성 배치는 409: 실행면
+    정리 없는 삭제는 살아있는 자식(요청·잡)을 고아로 만들고 orchestrator 가
+    사라진 배치의 자식을 계속 굴리게 된다 — "취소 먼저"가 동선이다(cancel 이
+    실행면을 먼저 종료하고 종단화한다). 자식 요청·잡·results 는 보존(감사
+    이력 — repo.delete 주석). 유지보수 거부는 patch(메타 수정)와 같은 배치
+    mutation 관례를 미러한다(cancel 만 예외 — 취소는 언제나 가능해야 한다)."""
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    if b["status"] not in _TERMINAL_BATCH:
+        raise HTTPException(status_code=409, detail="batch_not_deletable")
+    repo.delete(batch_id)
+    return {"deleted": batch_id}
+
+
 @router.get("/api/admin/batches/{batch_id}")
 def get_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
     repo = request.app.state.repos.batches

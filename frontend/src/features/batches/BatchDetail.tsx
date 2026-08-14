@@ -1,9 +1,10 @@
-import { Fragment, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Fragment, useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
-         useCancelBatch, useRescanBatch, useUpdateBatch,
+         useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useAddBatchItem } from "./useBatches";
 import { Card } from "../../components/ui/Card";
+import { Dialog } from "../../components/ui/Dialog";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
@@ -156,6 +157,32 @@ function ItemScanStats({ requestId, succeeded }: {
   );
 }
 
+// 배치 삭제(종단 배치만 노출 — 진짜 가드는 서버 batch_not_deletable). 확인
+// 다이얼로그 필수: 배치 행·항목 행이 사라지는 비가역 동작이다(자식 요청·잡은
+// 감사 이력으로 보존 — repo.delete 주석). 성공 시 목록으로 이동 — 삭제된
+// 배치의 상세는 404 라 머무를 곳이 아니다.
+function DeleteBatchButton({ batchId }: { batchId: string }) {
+  const [open, setOpen] = useState(false);
+  const del = useDeleteBatch(batchId);
+  const navigate = useNavigate();
+  // 닫힐 때마다 에러를 비운다(StoragesList DeleteButton 선례) — "취소"는
+  // setOpen(false)를 직접 불러 Radix onOpenChange 가 발화하지 않는다.
+  useEffect(() => { if (!open) del.reset(); }, [open]);
+  return (
+    <Dialog open={open} onOpenChange={setOpen} title="배치 삭제"
+            trigger={<Button variant="ghost">배치 삭제</Button>}>
+      <p className="text-sm text-muted mb-3">배치와 항목 목록이 삭제됩니다. 자식 요청·잡 이력은 남습니다.</p>
+      {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={() => setOpen(false)}>취소</Button>
+        <Button disabled={del.isPending}
+                onClick={() => del.mutate(undefined,
+                  { onSuccess: () => navigate("/admin/batches") })}>삭제 확인</Button>
+      </div>
+    </Dialog>
+  );
+}
+
 export function BatchDetail() {
   const { batchId = "" } = useParams();
   const q = useBatch(batchId);
@@ -245,6 +272,7 @@ export function BatchDetail() {
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
                 전부 재큐잉(성장 모니터링). "실패분 재실행"(실패만)과 공존한다 */}
             {(b?.status === "Completed" || b?.status === "Cancelled") && <Button disabled={rescan.isPending} onClick={() => rescan.mutate()}>전체 재실행</Button>}
+            {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} />}
             {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <Button variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</Button>}
           </div>
         </div>

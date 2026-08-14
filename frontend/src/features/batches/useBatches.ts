@@ -76,6 +76,17 @@ export const useDeleteBatchItem = (id: string) =>
 export const useAddBatchItem = (id: string) =>
   _itemMutation(id, (item: Record<string, unknown>) =>
     apiSend("POST", `/api/admin/batches/${id}/items`, item));
+// 배치 삭제(종단 배치만 — 서버 batch_not_deletable 가드). 성공 시 상세 쿼리는
+// invalidate 가 아니라 **제거**한다: 삭제된 배치의 상세를 다시 조회하면 404 를
+// 새로 받아 오류 화면이 되는데, 화면은 목록으로 떠난 뒤다(리페치가 소음).
+export const useDeleteBatch = (id: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiSend("DELETE", `/api/admin/batches/${id}`),
+    onSuccess: () => { qc.removeQueries({ queryKey: ["batch", id] }); },
+    onSettled: () => { qc.invalidateQueries({ queryKey: ["batches"] }); },
+  });
+};
 export const useConfirmBatch = (id: string) => _action(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");

@@ -44,6 +44,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   // (reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
   batch_item_not_found: "배치 항목을 찾을 수 없습니다",
   batch_item_not_editable: "수정할 수 없는 항목입니다 — 이미 실행됐거나 실행 중입니다",
+  batch_not_deletable: "삭제할 수 없는 상태의 배치입니다 — 먼저 취소하세요",
   invalid_batch_name: "배치 이름이 올바르지 않습니다 — 120자 이하로 입력하세요",
   invalid_storage: "스토리지 설정이 올바르지 않습니다",
   invalid_node_name: "노드 이름이 올바르지 않습니다",

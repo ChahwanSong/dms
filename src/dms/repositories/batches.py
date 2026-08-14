@@ -208,6 +208,18 @@ class BatchesRepository:
         self._db.execute(f"UPDATE batches SET {sets} WHERE batch_id = :b",
                          {**fields, "b": batch_id})
 
+    def delete(self, batch_id):
+        """배치 삭제: batches 행 + batch_items 행만, 한 트랜잭션. 자식
+        requests/data_jobs/results 는 **보존**한다 — 실행 감사 이력이고,
+        requests.batch_id 는 역사적 표식으로 남는다(배치 역참조가 404 가 되는
+        것은 수용 — 화면 소비처 실측상 요청→배치 링크는 없다). 종단 배치 한정
+        가드는 라우트 몫(batch_not_deletable)."""
+        with self._db.transaction():
+            self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
+                             {"b": batch_id})
+            self._db.execute("DELETE FROM batches WHERE batch_id = :b",
+                             {"b": batch_id})
+
     def set_status(self, batch_id, status):
         self._db.execute(
             "UPDATE batches SET status = :s, updated_at = :now WHERE batch_id = :b",
