@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
-import type { Batch, BatchDetail } from "../../lib/types";
+import type { Batch, BatchDetail, BatchScanStats } from "../../lib/types";
 
 const BATCH_TERMINAL = new Set(["Completed", "Cancelled"]);
 export const useBatches = () =>
@@ -32,6 +32,16 @@ function _action(id: string, verb: string) {
                        qc.invalidateQueries({ queryKey: ["batches"] }); },
   });
 }
+// scan 배치 hot/cold 집계: scan 배치일 때만 나간다(sync 는 서버가 422 — 요청
+// 자체를 만들지 않는 게 정직하다). 폴링 불요(1회 조회) — 집계 재료(성공 자식
+// 리포트)는 배치 status·succeeded_count 가 움직일 때만 늘어나므로, 두 값을 키에
+// 실어 그때만 재조회한다(별도 invalidate 배선보다 파생이 단순하다).
+export const useBatchScanStats = (id: string, batch: BatchDetail | undefined) =>
+  useQuery({
+    queryKey: ["batch-scan-stats", id, batch?.status, batch?.succeeded_count],
+    queryFn: () => apiGet<BatchScanStats>(`/api/admin/batches/${id}/scan-stats`),
+    enabled: batch?.operation === "scan",
+  });
 // 메타데이터 수정(name/note): 서버가 빈 문자열을 NULL(지움)로 접는다 — 값은 늘
 // 두 키를 실어 보내는 단순 계약(부분 갱신 판별을 화면이 흉내 내지 않는다).
 export interface UpdateBatchBody { name?: string; note?: string }

@@ -88,6 +88,37 @@ describe("BarChart 고밀도(>8버킷)", () => {
   });
 });
 
+describe("BarChart formatValue(하위호환 사람 표기)", () => {
+  it("저밀도: 값 라벨·툴팁에 formatValue 를 쓴다", () => {
+    render(<BarChart data={[{ label: "[0d,1d]", value: 1024 }]} label="온도"
+                     formatValue={(n) => `${n / 1024} KiB`} />);
+    expect(screen.getByText("1 KiB")).toBeInTheDocument();
+    const chart = screen.getByRole("img", { name: "온도" });
+    expect(chart.querySelector("[title]")!.getAttribute("title"))
+      .toBe("[0d,1d]: 1 KiB");
+  });
+  it("고밀도: 최대값 눈금·툴팁에도 적용", () => {
+    const many = Array.from({ length: 24 }, (_, i) => (
+      { label: `${i}`, value: i === 0 ? 2048 : 0 }));
+    render(<BarChart data={many} label="온도밀집"
+                     formatValue={(n) => `${n / 1024} KiB`} />);
+    expect(screen.getByText("최대 2 KiB")).toBeInTheDocument();
+  });
+});
+
+describe("BarChart 9버킷은 저밀도", () => {
+  it("dscan 시간 히스토그램(9버킷)의 전 라벨·값이 보인다", () => {
+    // SPARSE_MAX 9 의 근거: 데이터 온도 히스토그램이 9버킷 — 고밀도로 떨어지면
+    // 라벨이 솎여 구간을 읽을 수 없다. 잡 통계(6버킷) 저밀도·24버킷 고밀도 무영향.
+    const nine = Array.from({ length: 9 }, (_, i) => (
+      { label: `b${i}`, value: i }));
+    render(<BarChart data={nine} label="아홉" />);
+    for (const d of nine) expect(screen.getByText(d.label)).toBeInTheDocument();
+    // 저밀도 증거: 최대값 눈금(고밀도 전용)이 없다
+    expect(screen.queryByText("최대 8")).toBeNull();
+  });
+});
+
 describe("BarChart 빈 상태", () => {
   it("— 대신 명시 문구", () => {
     render(<BarChart data={[]} />);

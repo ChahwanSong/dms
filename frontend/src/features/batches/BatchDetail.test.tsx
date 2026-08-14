@@ -119,6 +119,71 @@ test("owner_username 이 없어도 특권 실행 문구는 항상 — 소유자 
   expect(screen.getByText("특권 실행(root)")).toBeInTheDocument();
   expect(screen.queryByText(/소유자/)).toBeNull();
 });
+// --- 데이터 온도(hot/cold): scan 배치 + 집계 ≥1 일 때만 ---
+const scanStats = (over: any = {}) => ({ aggregated: 2, skipped: 1,
+  summary: { total_files: 12, total_entries: 20 },
+  file_size_histogram: [{ bucket: "[0,4096]", count: 11 }],
+  time_histograms: {
+    atime: [{ bucket: "[0d,1d]", bytes: 2048 }, { bucket: "[1d,7d]", bytes: 0 }],
+    mtime: [{ bucket: "[0d,1d]", bytes: 4096 }],
+    ctime: [] },
+  broken_paths_total: 4, ...over });
+
+function renderScanWithStats(stats: object = scanStats()) {
+  server.use(
+    http.get("/api/admin/batches/b1",
+      () => HttpResponse.json(batch({ operation: "scan", status: "Completed" }))),
+    http.get("/api/admin/batches/b1/scan-stats", () => HttpResponse.json(stats)));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+test("scan 배치: 데이터 온도 섹션 — atime bytes 기본·사람 표기·정직 카운트·캡션", async () => {
+  renderScanWithStats();
+  expect(await screen.findByText("데이터 온도(hot/cold)")).toBeInTheDocument();
+  // atime 기준 bytes 히스토그램이 기본 — 값은 사람 표기(humanBytes)
+  expect(screen.getByRole("img", { name: "데이터 온도(atime) 히스토그램" })).toBeInTheDocument();
+  expect(screen.getByText("2.0 KiB")).toBeInTheDocument();
+  expect(screen.getByText(/최근 접근\(atime\) 기준 용량 비중/)).toBeInTheDocument();
+  expect(screen.getByText(/relatime\/open_noatime 환경에선 근사/)).toBeInTheDocument();
+  // 정직 카운트: 합산·제외가 그대로 보인다(제외를 숨기면 조용한 절단)
+  expect(screen.getByText("합산 리포트 2건 · 제외 1건")).toBeInTheDocument();
+  // 파일 크기 분포(count)·summary 합계·파손 경로 합계도 같은 섹션에
+  expect(screen.getByRole("img", { name: "파일 크기 분포" })).toBeInTheDocument();
+  expect(screen.getByText("total_files")).toBeInTheDocument();
+  expect(screen.getByText("12")).toBeInTheDocument();
+  expect(screen.getByText(/파손 경로 합계 4건/)).toBeInTheDocument();
+});
+
+test("mtime 토글: atime 차트가 mtime 으로 바뀐다", async () => {
+  renderScanWithStats();
+  await screen.findByText("데이터 온도(hot/cold)");
+  await userEvent.click(screen.getByRole("button", { name: "mtime" }));
+  expect(screen.getByRole("img", { name: "데이터 온도(mtime) 히스토그램" })).toBeInTheDocument();
+  expect(screen.queryByRole("img", { name: "데이터 온도(atime) 히스토그램" })).toBeNull();
+  expect(screen.getByText("4.0 KiB")).toBeInTheDocument();
+});
+
+test("집계 0 이면 데이터 온도 섹션 부재", async () => {
+  renderScanWithStats(scanStats({ aggregated: 0, skipped: 3,
+    summary: {}, file_size_histogram: [], time_histograms: {},
+    broken_paths_total: null }));
+  await screen.findByText("Materialized");
+  expect(screen.queryByText("데이터 온도(hot/cold)")).toBeNull();
+});
+
+test("sync 배치는 scan-stats 요청 자체가 없다", async () => {
+  let statsCalls = 0;
+  server.use(http.get("/api/admin/batches/b1/scan-stats", () => {
+    statsCalls += 1; return HttpResponse.json(scanStats()); }));
+  renderAt("Running");                          // 기본 fixture 는 sync 배치
+  await screen.findByText("Materialized");
+  expect(statsCalls).toBe(0);
+  expect(screen.queryByText("데이터 온도(hot/cold)")).toBeNull();
+});
+
 test("이름이 있으면 헤더는 이름, 축약 batch_id 는 병기", async () => {
   server.use(http.get("/api/admin/batches/b1",
     () => HttpResponse.json(batch({ name: "8월 정기 스캔 1차" }))));

@@ -28,12 +28,19 @@ export function labelStep(n: number): number {
   return n <= 8 ? 1 : Math.ceil(n / 6);
 }
 
-const SPARSE_MAX = 8;        // 이하면 저밀도 모드(값 직표기 가능한 밀도)
+// 저밀도 상한 8→9 근거: dscan 시간 히스토그램(데이터 온도)이 9버킷 -- 고밀도로
+// 떨어지면 라벨이 솎여 구간을 읽을 수 없다. 기존 소비자 무영향: 잡 통계
+// 히스토그램(6버킷)은 원래 저밀도, 24h 처리량(24버킷)은 여전히 고밀도다.
+const SPARSE_MAX = 9;        // 이하면 저밀도 모드(값 직표기 가능한 밀도)
 const SPARSE_HEADROOM = 75;  // 저밀도 트랙 안 값 라벨 자리
 
-export function BarChart({ data, label, emptyText = "집계된 잡 없음" }: {
+export function BarChart({ data, label, emptyText = "집계된 잡 없음", formatValue }: {
   data: BarDatum[]; label?: string; emptyText?: string;
+  // 값의 사람 표기(bytes 등). 기본은 숫자 그대로 -- 기존 소비자(잡 통계) 무영향
+  // 인 하위호환 옵션이다.
+  formatValue?: (n: number) => string;
 }) {
+  const fmt = formatValue ?? ((n: number) => String(n));
   // 빈 배열은 "이 창에 집계된 잡이 0건"이라는 정상값 -- "—"(모름) 으로 뭉개지
   // 않고 명시한다(null ≠ 0 규약).
   if (data.length === 0) return <p className="text-muted text-xs">{emptyText}</p>;
@@ -45,13 +52,13 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음" }: {
       // 괴물 블록이 되는 것을 막고, 남는 폭은 오른쪽 여백으로 둔다.
       <div role="img" aria-label={label} className="flex items-start gap-1.5">
         {bars.map((b, i) => (
-          <div key={i} title={`${b.label}: ${b.value}`}
+          <div key={i} title={`${b.label}: ${fmt(b.value)}`}
                className="flex min-w-0 max-w-16 flex-1 flex-col items-center gap-1">
             {/* 트랙은 accent 의 연한 단(동일 계열) -- 값 0 버킷도 "빈 자리"가 아니라
                 트랙+0 으로 보인다. 막대 상단만 둥글게(데이터 끝), 밑변은 직각. */}
             <div className="relative h-20 w-full max-w-6 overflow-hidden rounded-sm bg-accent/10">
               <span className="absolute inset-x-0 text-center text-[10px] font-medium tabular-nums text-muted"
-                    style={{ bottom: `calc(${b.pct}% + 2px)` }}>{b.value}</span>
+                    style={{ bottom: `calc(${b.pct}% + 2px)` }}>{fmt(b.value)}</span>
               <div className="absolute inset-x-0 bottom-0 rounded-t bg-accent"
                    style={{ height: `${b.pct}%` }} />
             </div>
@@ -69,10 +76,10 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음" }: {
     <div role="img" aria-label={label} className="max-w-xl">
       {/* 막대 위 값 대신 y축 구실을 하는 최대값 한 점 -- 고밀도에서 매 막대 값은
           겹쳐서 소음이고, 개별 값은 툴팁이 든다. */}
-      <p className="mb-0.5 text-right text-[10px] tabular-nums text-muted">최대 {max}</p>
+      <p className="mb-0.5 text-right text-[10px] tabular-nums text-muted">최대 {fmt(max)}</p>
       <div className="flex items-end gap-0.5">
         {bars.map((b, i) => (
-          <div key={i} title={`${b.label}: ${b.value}`}
+          <div key={i} title={`${b.label}: ${fmt(b.value)}`}
                className="relative h-20 min-w-0 flex-1 overflow-hidden rounded-sm bg-accent/10">
             <div className="absolute inset-x-0 bottom-0 rounded-t bg-accent"
                  style={{ height: `${b.pct}%` }} />
