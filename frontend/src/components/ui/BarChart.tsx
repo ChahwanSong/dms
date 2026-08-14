@@ -1,3 +1,5 @@
+import { Fragment } from "react";
+
 // 손수 막대 차트(설계 §2.1) -- 라이브러리 없이, div+Tailwind 로 그린다. 이전 SVG
 // 구현은 preserveAspectRatio="none" 스트레치라 버킷 1~2개면 막대 하나가 화면
 // 반쪽짜리 회색 블록이 됐다(실화면 확인) -- div 는 좌표 왜곡이 없고 텍스트
@@ -34,6 +36,38 @@ export function labelStep(n: number): number {
 const SPARSE_MAX = 9;        // 이하면 저밀도 모드(값 직표기 가능한 밀도)
 const SPARSE_HEADROOM = 75;  // 저밀도 트랙 안 값 라벨 자리
 
+// --- 누적 데이터량(cumulative density) 오버레이: 산식·라벨 기하(순수 함수) ---
+
+// 왼쪽(hot)부터의 running sum 과 총합 대비 비중. 마지막 점 = 총합(100%).
+// 총합 0 이면 null -- 0 은 정상값이지만 비중(0/0)은 정의 불가라, 0% 나 거짓
+// 100% 선을 그리는 대신 오버레이 자체를 생략한다(null ≠ 0 규약의 오버레이 판).
+export interface CumulativePoint { sum: number; frac: number }
+export function cumulativeLayout(data: BarDatum[]): CumulativePoint[] | null {
+  const total = data.reduce((acc, d) => acc + d.value, 0);
+  if (total === 0) return null;
+  let run = 0;
+  return data.map((d) => { run += d.value; return { sum: run, frac: run / total }; });
+}
+
+// 누적 % 라벨의 세로 배치(트랙 하단 기준 %). 막대 값 라벨과 같은 열·같은 중앙
+// 정렬이라 세로 충돌만 판정하면 된다: 기본은 점 위, 막대 라벨(막대 위 2px 부터
+// 텍스트 높이 밴드)과 겹치면 점 아래, 아래가 트랙 밖이거나 그마저 겹치면(막대
+// 라벨이 점 바로 아래) 막대 라벨 위로 올린다. 상수는 트랙 h-20=80px 실측:
+// text-[10px] 한 줄 ≈ 13%, 점-라벨 간격 ≈ 3px ≈ 4%, 막대 라벨 들림 2px ≈ 2.5%.
+const CUM_LABEL_H = 13;
+const CUM_LABEL_PAD = 4;
+const BAR_LABEL_LIFT = 2.5;
+export function cumulativeLabelBottom(cumPct: number, barPct: number): number {
+  const barBottom = barPct + BAR_LABEL_LIFT;
+  const clash = (bottom: number) =>
+    bottom < barBottom + CUM_LABEL_H && barBottom < bottom + CUM_LABEL_H;
+  const above = cumPct + CUM_LABEL_PAD;
+  if (!clash(above)) return above;
+  const below = cumPct - CUM_LABEL_PAD - CUM_LABEL_H;
+  if (below >= 0 && !clash(below)) return below;
+  return barBottom + CUM_LABEL_H + 2;
+}
+
 // #rrggbb -> rgba(r,g,b,alpha). colorOf 계약은 정적 6자리 hex 다(airgap: 번들 밖
 // 리소스가 아니라 그냥 문자열이다). 트랙(연한 단)을 막대 색의 저채도 판으로
 // 파생하기 위한 헬퍼 -- 별도 트랙 색 prop 을 받는 것보다 "막대와 트랙은 같은
@@ -46,7 +80,7 @@ export function hexTint(hex: string, alpha: number): string {
 const TRACK_ALPHA = 0.1;
 
 export function BarChart({ data, label, emptyText = "집계된 잡 없음", formatValue,
-                           colorOf }: {
+                           colorOf, cumulative }: {
   data: BarDatum[]; label?: string; emptyText?: string;
   // 값의 사람 표기(bytes 등). 기본은 숫자 그대로 -- 기존 소비자(잡 통계) 무영향
   // 인 하위호환 옵션이다.
@@ -55,6 +89,10 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
   // 그대로(잡 통계 무영향인 하위호환 옵션). 지정 시 막대는 그 색, 트랙은 같은
   // 색의 저채도 판(hexTint)으로 통일한다.
   colorOf?: (index: number, value: number) => string;
+  // 누적 데이터량 오버레이(꺾은선+점+% 라벨) -- 저밀도 전용 하위호환 옵션(온도
+  // 히스토그램 ≤9버킷 소비자용, 고밀도는 점·라벨이 겹쳐 못 읽으니 범위 밖).
+  // format 은 툴팁의 누적값 사람 표기. 미지정 시 기존 렌더 완전 불변.
+  cumulative?: { format: (n: number) => string };
 }) {
   const fmt = formatValue ?? ((n: number) => String(n));
   // 트랙/막대의 클래스·inline 스타일 한 벌 -- 저밀도·고밀도 렌더가 같은 규칙을
@@ -72,10 +110,31 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
   const sparse = data.length <= SPARSE_MAX;
   const bars = barLayout(data, sparse ? SPARSE_HEADROOM : 100);
   if (sparse) {
+    const cum = cumulative ? cumulativeLayout(data) : null;
+    const n = bars.length;
+    // 점 x = 버킷 중심 근사((i+0.5)/n). gap-1.5 는 고정 px 라 % 사상과 최대 반
+    // gap(~3px) 어긋나지만 실측 대신 Sparkline 의 viewBox 정규화 선례를 따른다.
+    const cx = (i: number) => r2(((i + 0.5) / n) * 100);
+    // 점 y 스케일은 막대와 같은 75 헤드룸(SPARSE_HEADROOM) -- 100% 점 위에도
+    // 라벨 자리가 남고, 막대 라벨과의 충돌 판정이 같은 좌표계에서 된다.
+    const cumPct = (frac: number) => r2(frac * SPARSE_HEADROOM);
+    // 트랙(h-20=5rem) 안 bottom% -> 루트 기준 top 오프셋(rem). 오버레이는 열
+    // 밖(루트) absolute 라 트랙 % 를 직접 못 쓴다 -- 루트 아래엔 버킷 라벨
+    // 행이 더 있어 % 가 트랙과 안 맞는다.
+    const topRem = (bottomPct: number) => r2((100 - bottomPct) * 0.05);
     return (
       // 열 폭 상한(max-w-16)이 저밀도의 핵심 -- 버킷 1~2개가 컨테이너를 채우며
       // 괴물 블록이 되는 것을 막고, 남는 폭은 오른쪽 여백으로 둔다.
-      <div role="img" aria-label={label} className="flex items-start gap-1.5">
+      // 누적 오버레이 시엔 루트 폭도 열 상한 합(n×4rem + gap 0.375rem)으로
+      // 멈춘다 -- 열은 max-w-16 에서 멈추는데 루트가 더 넓으면 % 좌표 오버레이가
+      // 빈 오른쪽까지 늘어나 점이 막대를 벗어난다. 첫·끝 % 라벨(중앙 정렬,
+      // "100%" 반폭 ≈ 13px)도 반 열(≥16px) 안이라 컨테이너 넘침·가로 스크롤이
+      // 없다(e2e L1).
+      <div role="img" aria-label={label}
+           className={cum ? "relative flex items-start gap-1.5"
+                          : "flex items-start gap-1.5"}
+           // 4·0.375 는 2진 정확값이라 r2 불요(반올림하면 오히려 8.375→8.38 왜곡)
+           style={cum ? { maxWidth: `${n * 4 + (n - 1) * 0.375}rem` } : undefined}>
         {bars.map((b, i) => {
           const color = colorOf?.(i, b.value);
           return (
@@ -95,6 +154,41 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
           </div>
           );
         })}
+        {cum && (
+          <>
+            {/* 선·점은 currentColor(부모 text-ink 상속) -- 온도 그라디언트와
+                구분되는 중립 톤, 색은 부모가 정하는 Sparkline 관례. SVG 는 보조
+                그래픽이라 aria-hidden(차트 aria-label 계약은 루트 role img 가
+                유지)·pointer-events 없음(열 툴팁을 가리지 않는다). */}
+            <svg aria-hidden="true" viewBox="0 0 100 100" preserveAspectRatio="none"
+                 className="pointer-events-none absolute inset-x-0 top-0 h-20 w-full">
+              <polyline fill="none" stroke="currentColor" strokeWidth={1.5}
+                        opacity={0.55} vectorEffect="non-scaling-stroke"
+                        points={cum.map((p, i) =>
+                          `${cx(i)},${r2(100 - cumPct(p.frac))}`).join(" ")} />
+            </svg>
+            {cum.map((p, i) => {
+              const pct = Math.round(p.frac * 100);
+              return (
+                <Fragment key={i}>
+                  <span aria-hidden="true"
+                        className="pointer-events-none absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                        style={{ left: `${cx(i)}%`,
+                                 top: `${topRem(cumPct(p.frac))}rem` }} />
+                  {/* 라벨은 SVG 밖 HTML -- preserveAspectRatio="none" 아래의 SVG
+                      텍스트는 가로로 왜곡된다(Sparkline 캡션 선례). 세로 위치는
+                      막대 값 라벨과의 충돌 실측(cumulativeLabelBottom). */}
+                  <span title={`누적 ${cumulative!.format(p.sum)} (${pct}%)`}
+                        className="absolute -translate-x-1/2 -translate-y-full whitespace-nowrap text-[10px] font-medium tabular-nums"
+                        style={{ left: `${cx(i)}%`,
+                                 top: `${topRem(cumulativeLabelBottom(cumPct(p.frac), bars[i].pct))}rem` }}>
+                    {pct}%
+                  </span>
+                </Fragment>
+              );
+            })}
+          </>
+        )}
       </div>
     );
   }

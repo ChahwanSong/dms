@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -182,6 +182,25 @@ test("mtime 토글: 펼친 항목의 atime 차트가 mtime 으로 바뀐다", as
   expect(screen.getByRole("img", { name: "데이터 온도(mtime) 히스토그램" })).toBeInTheDocument();
   expect(screen.queryByRole("img", { name: "데이터 온도(atime) 히스토그램" })).toBeNull();
   expect(screen.getByText("4.0 KiB")).toBeInTheDocument();
+});
+
+test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량 — 크기 분포엔 없다", async () => {
+  server.use(statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await screen.findByText("데이터 온도(hot/cold)");
+  const chart = screen.getByRole("img", { name: "데이터 온도(atime) 히스토그램" });
+  // atime [2048, 0]: 첫 버킷에서 이미 총합 → 누적 100%·100% (running sum)
+  expect(chart.querySelector("polyline")).not.toBeNull();
+  const labels = within(chart).getAllByText("100%");
+  expect(labels).toHaveLength(2);
+  expect(labels[0].getAttribute("title")).toBe("누적 2.0 KiB (100%)");
+  // 캡션: 선의 의미 한 줄 + 총 용량 값
+  expect(screen.getByText("선 = hot쪽부터의 누적 용량 비중 · 총 2.0 KiB"))
+    .toBeInTheDocument();
+  // 파일 크기 분포(개수)는 범위 밖 — 오버레이 없음
+  expect(screen.getByRole("img", { name: "파일 크기 분포" }).querySelector("svg"))
+    .toBeNull();
 });
 
 test("실패 항목 펼침: 조회 없이 '리포트 없음' — 성공 요청만 리포트를 가진다", async () => {

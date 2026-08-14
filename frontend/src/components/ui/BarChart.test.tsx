@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { BarChart, barLayout, labelStep } from "./BarChart";
+import { BarChart, barLayout, labelStep, cumulativeLayout,
+         cumulativeLabelBottom } from "./BarChart";
 
 // 기하는 barLayout(순수 함수)으로 단언한다 -- 이전 barRects(SVG rect 좌표)와 같은
 // 정신이되, div 막대로 바뀌며 계약이 「트랙 대비 % 높이」로 단순해졌다.
@@ -157,6 +158,103 @@ describe("BarChart colorOf(막대별 색 — 온도 그라디언트)", () => {
     render(<BarChart data={TWO} label="인자"
                      colorOf={(i, v) => { seen.push([i, v]); return "#dc2626"; }} />);
     expect(seen).toEqual([[0, 4], [1, 1]]);
+  });
+});
+
+// 누적 산식은 순수 함수로 단언한다(barLayout 관례) -- 왼쪽(hot)부터 running sum,
+// 마지막 = 총합. 총합 0 은 null(비중이 정의 불가 -- 0 나눗셈·거짓 100% 방지).
+describe("cumulativeLayout", () => {
+  it("왼쪽부터 running sum + 총합 대비 비중(마지막 = 총합·100%)", () => {
+    expect(cumulativeLayout([
+      { label: "a", value: 1024 }, { label: "b", value: 0 },
+      { label: "c", value: 3072 },
+    ])).toEqual([
+      { sum: 1024, frac: 0.25 }, { sum: 1024, frac: 0.25 },
+      { sum: 4096, frac: 1 },
+    ]);
+  });
+  it("총합 0 이면 null — 0 은 정상값이되 비중(0/0)은 정의 불가", () => {
+    expect(cumulativeLayout([{ label: "a", value: 0 }, { label: "b", value: 0 }]))
+      .toBeNull();
+  });
+});
+
+// 누적 % 라벨의 세로 배치(트랙 하단 기준 %): 막대 값 라벨과 같은 열 중앙 정렬이라
+// 세로 충돌만 피하면 된다 -- 기본은 점 위, 겹치면 점 아래, 아래가 트랙 밖이거나
+// 그마저 겹치면 막대 라벨 위로 올린다.
+describe("cumulativeLabelBottom", () => {
+  it("기본: 점 위(막대 라벨과 안 겹치면)", () => {
+    expect(cumulativeLabelBottom(75, 2.5)).toBe(79);
+  });
+  it("점 위가 막대 라벨과 겹치면 점 아래", () => {
+    expect(cumulativeLabelBottom(75, 75)).toBe(58);
+  });
+  it("아래도 막대 라벨과 겹치면 막대 라벨 위로 회피", () => {
+    expect(cumulativeLabelBottom(20, 10)).toBe(27.5);
+  });
+  it("아래가 트랙 밖이면 막대 라벨 위로 회피", () => {
+    expect(cumulativeLabelBottom(10, 15)).toBe(32.5);
+  });
+});
+
+describe("BarChart cumulative(누적 데이터량 오버레이 — 저밀도)", () => {
+  // 산식 검증이 쉬운 2버킷: 총합 4096, 누적 25% → 100%
+  const DATA = [{ label: "[0d,1d]", value: 1024 }, { label: "[1d,7d]", value: 3072 }];
+  const kib = (n: number) => `${n / 1024} KiB`;
+  it("미지정: 오버레이 없음 — 기존 마크업 불변(잡 통계·크기 분포 무영향)", () => {
+    const { container } = render(<BarChart data={DATA} label="기본" />);
+    expect(container.querySelector("svg")).toBeNull();
+    expect(container.querySelector(".rounded-full")).toBeNull();
+    const chart = screen.getByRole("img", { name: "기본" });
+    expect(chart.className).toBe("flex items-start gap-1.5");
+    expect(chart.getAttribute("style")).toBeNull();
+  });
+  it("지정: 꺾은선+버킷별 점 — y=누적 비중(75 스케일), x=버킷 중심", () => {
+    const { container } = render(
+      <BarChart data={DATA} label="누적" cumulative={{ format: kib }} />);
+    const line = container.querySelector("polyline")!;
+    expect(line.getAttribute("points")).toBe("25,81.25 75,25");
+    expect(line.getAttribute("vector-effect")).toBe("non-scaling-stroke");
+    // 보조 그래픽 — 차트의 role img 계약(1개)을 침범하지 않는다
+    expect(container.querySelector("svg")!.getAttribute("aria-hidden")).toBe("true");
+    const dots = container.querySelectorAll(".rounded-full");
+    expect(dots).toHaveLength(2);
+    expect((dots[0] as HTMLElement).style.left).toBe("25%");
+    expect((dots[0] as HTMLElement).style.top).toBe("4.06rem");  // (100-18.75)·0.05
+    expect((dots[1] as HTMLElement).style.top).toBe("1.25rem");  // (100-75)·0.05
+  });
+  it("값 표기: 점마다 누적 % 라벨 + 툴팁(누적 용량·%)", () => {
+    render(<BarChart data={DATA} label="누적" cumulative={{ format: kib }} />);
+    expect(screen.getByText("25%").getAttribute("title")).toBe("누적 1 KiB (25%)");
+    expect(screen.getByText("100%").getAttribute("title")).toBe("누적 4 KiB (100%)");
+  });
+  it("% 라벨은 막대 값 라벨과의 충돌을 피해 위/아래로 갈린다", () => {
+    render(<BarChart data={DATA} label="누적" cumulative={{ format: kib }} />);
+    // 점1(18.75)은 막대1 라벨(25 위)과 겹쳐 점 아래(bottom 1.75 → top 4.91rem)
+    expect(screen.getByText("25%").style.top).toBe("4.91rem");
+    // 점2(75)는 막대2 라벨(75 위)과 겹쳐 점 아래(bottom 58 → top 2.1rem)
+    expect(screen.getByText("100%").style.top).toBe("2.1rem");
+  });
+  it("루트 폭을 열 상한 합에 맞춰 오버레이(% 좌표)가 막대를 벗어나지 않는다", () => {
+    render(<BarChart data={DATA} label="누적" cumulative={{ format: kib }} />);
+    const chart = screen.getByRole("img", { name: "누적" });
+    // 2열·gap 1개: 2×4rem + 1×0.375rem — 첫·끝 라벨도 이 폭 안(넘침 없음)
+    expect(chart.style.maxWidth).toBe("8.375rem");
+  });
+  it("총합 0 이면 오버레이 생략 — 기존 렌더 그대로(거짓 100% 없음)", () => {
+    const { container } = render(
+      <BarChart data={[{ label: "a", value: 0 }]} label="영"
+                cumulative={{ format: kib }} />);
+    expect(container.querySelector("svg")).toBeNull();
+    expect(screen.queryByText(/%/)).toBeNull();
+    expect(screen.getByRole("img", { name: "영" }).getAttribute("style")).toBeNull();
+  });
+  it("고밀도(>9버킷)는 범위 밖 — 오버레이를 그리지 않는다", () => {
+    const many = Array.from({ length: 12 }, (_, i) => (
+      { label: `${i}`, value: 1 }));
+    const { container } = render(
+      <BarChart data={many} label="밀집" cumulative={{ format: kib }} />);
+    expect(container.querySelector("svg")).toBeNull();
   });
 });
 

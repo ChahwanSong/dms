@@ -89,6 +89,7 @@ function ItemScanStats({ requestId, succeeded }: {
   const tempKeys = ["atime", "mtime", "ctime"]
     .filter((k) => stats.time_histograms[k] !== undefined);
   const bars = toBars(stats.time_histograms[tempKey], "bytes");
+  const cumTotal = bars.reduce((acc, b) => acc + b.value, 0);
   return (
     <div className="mt-3 ml-11 space-y-3">
       <div>
@@ -112,9 +113,18 @@ function ItemScanStats({ requestId, succeeded }: {
                   label={`데이터 온도(${tempKey}) 히스토그램`}
                   formatValue={humanBytes}
                   colorOf={tempColorOf(bars.length)}
+                  cumulative={{ format: humanBytes }}
                   emptyText="집계된 버킷 없음" />
         {TEMP_CAPTIONS[tempKey] && (
           <p className="text-muted text-xs mt-1">{TEMP_CAPTIONS[tempKey]}</p>
+        )}
+        {/* 누적 캡션은 오버레이와 같은 조건(총합>0)으로만 -- 총합 0 이면 선이
+            없는데 "선 = ..." 은 거짓 캡션이 된다. 총 용량 값(bars 합)도 여기서
+            함께 말한다(선의 100% 가 몇 바이트인지). */}
+        {cumTotal > 0 && (
+          <p className="text-muted text-xs mt-1">
+            {`선 = hot쪽부터의 누적 용량 비중 · 총 ${humanBytes(cumTotal)}`}
+          </p>
         )}
       </div>
       <div>
