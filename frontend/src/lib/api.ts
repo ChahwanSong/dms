@@ -108,6 +108,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   scan_path_not_found: "등록된 경로를 찾을 수 없습니다",
   no_covering_scan: "아직 이 경로를 커버하는 scan 결과가 없습니다",
   scan_report_too_large: "scan 리포트가 너무 커서 통계를 읽을 수 없습니다 — 관리자에게 문의하세요",
+  // 요청 단위 scan-stats(항목별 데이터 온도). reasonCodes.json 과 같은 커밋 --
+  // 양방향 계약(reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
+  no_scan_report: "이 요청의 scan 리포트가 없습니다",
   account_not_found: "계정을 찾을 수 없습니다",
   invalid_role: "역할 값이 올바르지 않습니다",
   cannot_lock_self: "자기 계정의 역할 변경·비활성화는 할 수 없습니다",

@@ -1,20 +1,12 @@
-import json
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from ..artifact_base import resolve_artifact_base
 from ..domain import (DataJobState, DomainValidationError, Operation,
                       TERMINAL_DATA_JOB_STATES, build_data_payload, validate_batch,
                       validate_owner_username)
 from ..execution import ExecutionError
-from .artifacts import ArtifactError, read_artifact, strip_scheme
 from .auth import Identity, require_admin
 from .cancel import terminate_job
 from .routes_requests import reject_when_maintenance
-# 모양 투영은 scan_path_stats 와 **한 벌**을 공유한다(routes_scan_paths.py:19-73 의
-# 「왜」: 키 화이트리스트만으로는 리포트 값 안의 경로 유출을 못 막는다 — 숫자와
-# 구간 라벨만 통과시킨다). 두 벌이 되면 한쪽만 고치는 드리프트가 생긴다.
-from .routes_scan_paths import _buckets, _is_number, _numbers, _time_histograms
 
 router = APIRouter()
 
@@ -151,119 +143,6 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
     # list_items 와 분리돼 있다(repo docstring 참고).
     b["items"] = repo.list_items_detail(batch_id)
     return b
-
-
-# 합산이 읽는 리포트 수 상한(캡 사유): 이 라우트는 동기라 스타레트 AnyIO
-# 스레드풀(~40)을 점유하고, 읽기는 건당 최대 256 KiB 의 공유 스토리지 I/O 다
-# (routes_scan_paths 가 같은 위험을 _MAX_READ_ATTEMPTS 로 기록해 둔 그 경로).
-# 무제한이면 항목 수천 개짜리 배치 하나가 요청 1건으로 API 를 묶어세운다.
-# 초과 후보는 읽지 않고 skipped 로 센다 — 조용한 절단 금지(응답이 "합산 N ·
-# 제외 M"으로 사실을 말한다).
-_SCAN_STATS_REPORT_CAP = 200
-
-
-def _merge_projected_buckets(acc: dict, order: list, buckets: list) -> None:
-    """투영을 통과한 히스토그램 버킷을 라벨 매칭으로 합산한다. 순서는 첫 관측
-    (= 첫 리포트) 기준 — 전 리포트가 같은 dscan 스키마라 순서가 같고, 신구 혼재
-    시엔 라벨 매칭이라 값이 어긋난 버킷에 섞이지 않는다(새 라벨은 뒤에 붙는다).
-    라벨을 잃은 버킷(모양 투영이 경로 의심 라벨을 버린 경우)은 리포트 간 대응이
-    불가능해 합산에서 뺀다 — 아무 버킷에나 섞는 것보다 정직하다."""
-    for bk in buckets:
-        label = bk.get("bucket")
-        if not isinstance(label, str):
-            continue
-        slot = acc.get(label)
-        if slot is None:
-            # 구간 경계(lower/upper/min/max…)는 첫 관측 유지 — 같은 라벨이면
-            # 같은 경계라는 dscan 스키마 전제(값 합산 대상이 아니다).
-            slot = {k: v for k, v in bk.items() if k not in ("count", "bytes")}
-            acc[label] = slot
-            order.append(label)
-        for key in ("count", "bytes"):
-            if _is_number(bk.get(key)):
-                slot[key] = slot.get(key, 0) + bk[key]
-
-
-@router.get("/api/admin/batches/{batch_id}/scan-stats")
-def batch_scan_stats(batch_id: str, request: Request,
-                     identity: Identity = Depends(require_admin)):
-    """scan 배치의 hot/cold 집계: 성공 자식들의 dscan-report.json 을 읽어
-    summary·file_size_histogram(count)·time_histograms(bytes)·broken_paths_total
-    을 합산한다. 모양 투영(숫자·구간 라벨만)은 scan_path_stats 와 공유 — 경로는
-    어떤 자리로도 새지 않는다. aggregated/skipped 는 정직 카운트: 못 읽은 리포트
-    (부재·truncated·파싱 실패·캡 초과)는 조용히 사라지지 않고 skipped 로 드러난다."""
-    repos = request.app.state.repos
-    b = repos.batches.get(batch_id)
-    if b is None:
-        raise HTTPException(status_code=404, detail="batch_not_found")
-    if b["operation"] != Operation.SCAN.value:
-        # sync 배치엔 dscan 리포트가 없다. 빈 집계(aggregated=0)로 답하면 "스캔
-        # 했는데 아직 데이터 없음"과 구분이 안 되므로 422 가 정직하다 — 코드는
-        # "배치로 지원하지 않는 연산" 기존 사유를 재사용한다(이 연산엔 이 통계가
-        # 없다는 같은 사실).
-        raise HTTPException(status_code=422, detail="invalid_batch_operation")
-    base = strip_scheme(resolve_artifact_base(repos.control,
-                                              request.app.state.settings))
-    aggregated = skipped = attempts = 0
-    summary_sum: dict = {}
-    size_acc: dict = {}
-    size_order: list = []
-    time_accs: dict = {}          # name -> (acc, order)
-    time_order: list = []
-    broken_sum = None             # 전 리포트 미기록이면 None 유지 — null≠0
-    for it in repos.batches.list_items(batch_id):
-        if it["status"] != "Succeeded" or not it.get("request_id"):
-            continue              # 후보가 아니다(성공 자식만 리포트를 가진다)
-        job = next((j for j in repos.data_jobs.list_jobs(request_id=it["request_id"])
-                    if j["state"] == DataJobState.SUCCEEDED.value), None)
-        if job is None:
-            skipped += 1          # 성공 item 인데 성공 잡이 없다 — 숨기지 않는다
-            continue
-        if attempts >= _SCAN_STATS_REPORT_CAP:
-            skipped += 1          # 캡 초과분(위 상수 주석) — 읽지 않고 센다
-            continue
-        attempts += 1
-        try:
-            f = read_artifact(base, job["job_id"], "execution", "dscan-report.json")
-        except ArtifactError:
-            skipped += 1
-            continue
-        if f["truncated"]:
-            # 꼬리만 온 리포트는 JSON 이 깨진다. 단일 리포트를 섬기는
-            # scan_path_stats 는 503 이 정직하지만 여기는 합산이라 "이 리포트는
-            # 빠졌다"(skipped)가 정직하다 — 나머지 집계는 유효하다.
-            skipped += 1
-            continue
-        try:
-            report = json.loads(f["content"])
-        except ValueError:
-            skipped += 1
-            continue
-        if not isinstance(report, dict):
-            skipped += 1          # null·[]·"x" 도 유효한 JSON 이다
-            continue
-        aggregated += 1
-        for k, v in _numbers(report.get("summary")).items():
-            summary_sum[k] = summary_sum.get(k, 0) + v
-        _merge_projected_buckets(size_acc, size_order,
-                                 _buckets(report.get("file_size_histogram")))
-        for name, buckets in _time_histograms(report.get("time_histograms")).items():
-            if name not in time_accs:
-                time_accs[name] = ({}, [])
-                time_order.append(name)
-            _merge_projected_buckets(*time_accs[name], buckets)
-        bt = report.get("broken_paths_total")
-        if _is_number(bt):
-            broken_sum = (broken_sum or 0) + bt
-    return {
-        "aggregated": aggregated, "skipped": skipped,
-        "summary": summary_sum,
-        "file_size_histogram": [size_acc[label] for label in size_order],
-        "time_histograms": {name: [time_accs[name][0][label]
-                                   for label in time_accs[name][1]]
-                            for name in time_order},
-        "broken_paths_total": broken_sum,
-    }
 
 
 @router.post("/api/admin/batches/{batch_id}:confirm")

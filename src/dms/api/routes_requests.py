@@ -1,14 +1,22 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from ..artifact_base import resolve_artifact_base
 from ..domain import (
     DataJobState, DomainValidationError, Operation, PRIORITIES, RequestState,
     TERMINAL_DATA_JOB_STATES, TERMINAL_REQUEST_STATES, build_data_payload,
     resolve_priority, validate_owner_username,
 )
 from ..execution import ExecutionError
-from .auth import Identity, require_user
+from .artifacts import ArtifactError, read_artifact, strip_scheme
+from .auth import Identity, require_admin, require_user
 from .cancel import terminate_job
 from .routes_jobs import _owned_request
+# 모양 투영은 scan_path_stats 와 **한 벌**을 공유한다(routes_scan_paths.py:19-73 의
+# 「왜」: 키 화이트리스트만으로는 리포트 값 안의 경로 유출을 못 막는다 — 숫자와
+# 구간 라벨만 통과시킨다). 두 벌이 되면 한쪽만 고치는 드리프트가 생긴다.
+from .routes_scan_paths import _buckets, _is_number, _numbers, _time_histograms
 
 router = APIRouter()
 
@@ -140,6 +148,62 @@ def get_request(request_id: str, request: Request,
     row["events_truncated"] = len(events) > display_limit
     row["events"] = events[-display_limit:]
     return row
+
+
+@router.get("/api/admin/requests/{request_id}/scan-stats")
+def request_scan_stats(request_id: str, request: Request,
+                       identity: Identity = Depends(require_admin)):
+    """이 요청의 성공 scan 잡 리포트 1건을 모양 투영해 서빙한다 — scan_path_stats
+    와 같은 단일 리포트 계약(합산 없음. 배치 합산 라우트는 제거됐다 — 사용자 결정:
+    온도는 배치 전체가 아니라 항목별로 본다). 소비자는 배치 항목 expand 지만
+    경로가 요청 단위라 단건 요청 상세(RequestDetail)에도 배선만으로 붙는다.
+
+    리포트가 애초에 없는 경우는 전부 404 no_scan_report 하나다: 비 scan 요청
+    (dscan 리포트가 존재할 수 없다)·성공 잡 없음·파일 부재·파싱 불가 — 화면엔
+    같은 사실("보여줄 리포트 없음")이다. 기존 no_covering_scan(경로 커버 탐색)·
+    invalid_batch_operation(배치 검증)은 다른 사실을 말하는 코드라 재사용하지
+    않는다. truncated 만 503 scan_report_too_large — 리포트가 "있는데 못 읽는"
+    상태는 운영자가 고칠 수 있어야 한다(scan_path_stats 선례)."""
+    repos = request.app.state.repos
+    row = repos.requests.get(request_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="request_not_found")
+    if row["operation"] != Operation.SCAN.value:
+        raise HTTPException(status_code=404, detail="no_scan_report")
+    job = next((j for j in repos.data_jobs.list_jobs(request_id=request_id)
+                if j["state"] == DataJobState.SUCCEEDED.value), None)
+    if job is None:
+        raise HTTPException(status_code=404, detail="no_scan_report")
+    # 슬라이스 18: DB 우선 해석(설계 §2.1) -- routes_artifacts._base 와 같은 이유.
+    base = strip_scheme(resolve_artifact_base(repos.control,
+                                              request.app.state.settings))
+    try:
+        f = read_artifact(base, job["job_id"], "execution", "dscan-report.json")
+    except ArtifactError:
+        raise HTTPException(status_code=404, detail="no_scan_report")
+    if f["truncated"]:
+        raise HTTPException(status_code=503, detail="scan_report_too_large")
+    try:
+        report = json.loads(f["content"])
+    except ValueError:
+        report = None
+    if not isinstance(report, dict):
+        # 파싱 불가·비 dict(null·[]·"x" 도 유효한 JSON)는 쓸 수 있는 리포트가
+        # 없다는 같은 사실이다.
+        raise HTTPException(status_code=404, detail="no_scan_report")
+    epoch = report.get("generated_at_epoch")
+    broken_total = report.get("broken_paths_total")
+    broken_limit = report.get("broken_paths_limit")
+    return {
+        "summary": _numbers(report.get("summary")),
+        "file_size_histogram": _buckets(report.get("file_size_histogram")),
+        "time_histograms": _time_histograms(report.get("time_histograms")),
+        "generated_at_epoch": epoch if _is_number(epoch) else None,
+        # 숫자만 통과(모양 투영: 문자열이 오면 경로일 수 있다). 구형 리포트(키
+        # 부재)는 None(미기록) — null≠0: 0 은 "파손 없음"의 정상값이다.
+        "broken_paths_total": broken_total if _is_number(broken_total) else None,
+        "broken_paths_limit": broken_limit if _is_number(broken_limit) else None,
+    }
 
 
 @router.post("/api/user/requests/{request_id}:cancel")
