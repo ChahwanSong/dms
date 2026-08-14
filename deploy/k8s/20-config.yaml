@@ -19,7 +19,7 @@ data:
   DMS_EXECUTION_BACKEND: "volcano"
   DMS_K8S_NAMESPACE: "dms"
   # Must match whatever build-and-push.sh TAG was actually pushed as.
-  DMS_JOB_IMAGE: "pkg-01:5000/dms-mpifileutils:d46"
+  DMS_JOB_IMAGE: "pkg-01:5000/dms-mpifileutils:d53"
 
   # --- artifact storage: shared-FS path job pods/controller/api write/read
   #     summary.json under (execution_manifests.py::_artifact_dir,
