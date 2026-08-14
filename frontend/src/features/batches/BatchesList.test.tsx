@@ -21,6 +21,13 @@ function renderList(rows: object[]) {
     </QueryClientProvider>);
 }
 
+test("상태 pill 은 batchPillVariant 색 — 상세 헤더와 동일 계약(Completed=ok·Running=busy)", async () => {
+  renderList([row({ status: "Completed" }),
+              row({ batch_id: "b2222222222222", status: "Running" })]);
+  expect((await screen.findByText("Completed")).className).toContain("text-ok");
+  expect(screen.getByText("Running").className).toContain("text-busy");
+});
+
 test("이름 컬럼: 있으면 이름, 없으면 — (빈칸으로 뭉개지 않는다)", async () => {
   renderList([row({ name: "8월 정기 스캔 1차" }),
               row({ batch_id: "b2222222222222", name: null })]);

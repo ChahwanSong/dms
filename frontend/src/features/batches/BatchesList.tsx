@@ -3,6 +3,7 @@ import { useBatches } from "./useBatches";
 import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
+import { batchPillVariant } from "../../lib/jobState";
 export function BatchesList() {
   const q = useBatches();
   return (
@@ -21,7 +22,9 @@ export function BatchesList() {
                 {/* null/부재 = 이름 없음 — 빈칸 대신 "—" 로 명시(모름과 구분할 값이
                     없는 단순 부재라 대시가 정직하다) */}
                 <td>{b.name ?? "—"}</td>
-                <td>{b.operation}</td><td><StatusPill state={b.status} /></td>
+                {/* 배치 상태 전용 색(batchPillVariant) — 상세 헤더와 동일 계약.
+                    공유 pillVariant 로는 배치 상태가 전부 neutral 로 죽는다. */}
+                <td>{b.operation}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} /></td>
                 <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
               </tr>))}
           </tbody>
