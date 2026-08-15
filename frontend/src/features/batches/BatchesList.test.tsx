@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -92,17 +92,59 @@ test("전체 선택은 선택 가능 행만 토글 — 일부만 선택되면 in
   expect(screen.queryByText(/개 선택됨/)).toBeNull();
 });
 
-test("액션 바는 선택 ≥1 일 때만 — N개 선택됨 · 선택 삭제 · 선택 해제", async () => {
+test("액션 바 내용: N개 선택됨 · 선택 삭제 · 선택 해제 — 해제하면 안내 문구로 되돌아온다", async () => {
   renderList(mixed());
   await screen.findByLabelText(`배치 ${ID1.slice(0, 12)} 선택`);
   expect(screen.queryByText(/개 선택됨/)).toBeNull();
-  expect(screen.queryByRole("button", { name: "선택 삭제" })).toBeNull();
   await selectBoth();
   expect(screen.getByText("2개 선택됨")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "선택 삭제" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "선택 삭제" })).toBeEnabled();
   await userEvent.click(screen.getByRole("button", { name: "선택 해제" }));
   expect(screen.queryByText(/개 선택됨/)).toBeNull();
   expect(box(ID1)).not.toBeChecked();
+});
+
+// --- T3 체크박스 표적 확대 --------------------------------------------------
+test("체크박스는 확대 표적(h-5 w-5 + cursor-pointer) — 헤더 전체선택·행이 같은 크기", async () => {
+  renderList(mixed());
+  const rowBox = await screen.findByLabelText(`배치 ${ID1.slice(0, 12)} 선택`);
+  const all = screen.getByLabelText("전체 선택");
+  for (const el of [all, rowBox]) {
+    expect(el.className).toMatch(/\bh-5\b/);
+    expect(el.className).toMatch(/\bw-5\b/);
+    expect(el.className).toMatch(/\bcursor-pointer\b/);
+  }
+});
+
+// --- T4 레이아웃 점프 0(액션 바 자리 예약) ----------------------------------
+const bar = () => screen.getByRole("toolbar", { name: "배치 일괄 작업" });
+
+test("액션 바는 미선택에도 자리를 지킨다 — 체크해도 표가 밀리지 않는다", async () => {
+  renderList(mixed());
+  await screen.findByLabelText(`배치 ${ID1.slice(0, 12)} 선택`);
+  const before = bar();
+  expect(before).toHaveTextContent("배치를 선택해 삭제할 수 있습니다");
+  // 버튼도 늘 렌더된다 — 바 높이가 버튼 높이로 **구조상** 고정되어 magic min-h 가
+  // 필요 없다. 미선택 시엔 disabled(누를 게 없다는 사실을 자리와 함께 남긴다).
+  expect(screen.getByRole("button", { name: "선택 삭제" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "선택 해제" })).toBeDisabled();
+  await userEvent.click(box(ID1));
+  // **같은 DOM 노드**가 그대로다 = 마운트/언마운트로 인한 재배치가 없다(점프 0).
+  expect(bar()).toBe(before);
+  expect(before).toHaveTextContent("1개 선택됨");
+  expect(screen.getByRole("button", { name: "선택 삭제" })).toBeEnabled();
+});
+
+test("삭제 결과는 예약된 바 **안에서** 교체된다 — 결과가 떠도 추가 점프가 없다", async () => {
+  server.use(http.delete("/api/admin/batches/:id",
+    () => new HttpResponse(null, { status: 204 })));
+  renderList(mixed());
+  await selectBoth();
+  const before = bar();
+  await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+  await userEvent.click(screen.getByRole("button", { name: "2개 삭제 확인" }));
+  await waitFor(() => expect(within(before).getByText("2개 삭제됨")).toBeInTheDocument());
+  expect(bar()).toBe(before);                  // 바는 사라지지도 새로 생기지도 않았다
 });
 
 test("2단 확인: 1단 클릭은 안 쏘고, 2단 「N개 삭제 확인」이 선택 수만큼 DELETE", async () => {
@@ -120,7 +162,7 @@ test("2단 확인: 1단 클릭은 안 쏘고, 2단 「N개 삭제 확인」이 �
   expect(deleted).toHaveLength(2);               // 활성 행(ID3)은 안 나갔다
 });
 
-test("일괄 삭제 완료 후 선택 초기화 — 액션 바가 사라지고 결과가 남는다", async () => {
+test("일괄 삭제 완료 후 선택 초기화 — 선택 문구가 결과로 바뀐다", async () => {
   server.use(http.delete("/api/admin/batches/:id",
     () => new HttpResponse(null, { status: 204 })));
   renderList(mixed());
