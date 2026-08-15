@@ -14,8 +14,14 @@ export const REASON_MESSAGES: Record<string, string> = {
   preview_timed_out: "미리보기가 제한 시간을 넘겼습니다",
   preview_failed: "미리보기에 실패했습니다",
   execution_recheck_failed: "실행 직전 재점검에 실패했습니다",
-  // preflight 스크립트(execution_manifests._preflight_script)가 찍는 마커 사유.
+  // preflight 스크립트(execution_manifests._preflight_script)가 찍는 마커 사유 —
+  // 스테퍼가 화이트리스트(PREFLIGHT_REASONS)로만 잡 사유로 승격한다. 승격이 없던
+  // 동안 이 다섯은 전부 preflight_failed 로 뭉개져 화면에서 구분되지 않았다.
+  source_not_readable: "원본 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   destination_not_directory: "목적지에 이미 파일이 있습니다 — sync 목적지는 디렉토리여야 합니다",
+  destination_parent_not_writable: "목적지의 상위 디렉토리가 없거나 쓸 수 없습니다",
+  parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
+  target_not_readable: "대상 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   // 복합 접두 (stepper.py 가 f"{prefix}:{ExecutionError.reason_code}" 형태로 발생시킨다)
   preflight_submit_failed: "사전 점검을 시작하지 못했습니다",
   execution_submit_failed: "실행을 시작하지 못했습니다",

@@ -3,7 +3,8 @@ import subprocess
 import pytest
 
 from dms.execution import JobSpec
-from dms.execution_manifests import render_tool_flags, tool_argv, build_volcano_job, build_preflight_pod
+from dms.execution_manifests import (PREFLIGHT_REASONS, render_tool_flags, tool_argv,
+                                     build_volcano_job, build_preflight_pod)
 
 
 def _spec(**kw):
@@ -502,3 +503,29 @@ def test_sync_preflight_destination_path_is_never_inlined_into_the_script(tmp_pa
     cmd = _preflight_command(_sync_spec("/cephfs/src", malicious))
     assert malicious not in cmd[2]
     assert malicious in cmd[4:]
+
+
+# ---- 마커 화이트리스트는 스크립트 실물과 어긋날 수 없다 ----
+
+def _emitted_markers():
+    """모든 preflight 스크립트(연산 x role)에서 실제로 찍히는 마커를 긁어온다."""
+    specs = [
+        (_spec(operation="scan", tool="dscan", paths={"target": "/x"}), None),
+        (_spec(operation="rm", tool="drm", paths={"target": "/x"}), None),
+        (_sync_spec("/s", "/d"), None),
+        (_sync_spec("/s", "/d"), "source"),
+        (_sync_spec("/s", "/d"), "destination"),
+    ]
+    found = set()
+    for spec, role in specs:
+        for chunk in _preflight_command(spec, role=role)[2].split(
+                "DMS_PREFLIGHT_REASON=")[1:]:
+            found.add(chunk.split(";")[0].strip())
+    return found
+
+
+def test_whitelist_matches_the_markers_the_scripts_actually_emit():
+    # 스테퍼는 PREFLIGHT_REASONS 밖 문자열을 사유로 쓰지 않는다(로그는 신뢰 입력이
+    # 아니다) -- 새 검사를 넣고 등록을 빠뜨리면 그 사유는 조용히 preflight_failed 로
+    # 뭉개져 아무도 모른다. 반대로 집합에만 남은 죽은 코드도 잡는다.
+    assert _emitted_markers() == set(PREFLIGHT_REASONS)

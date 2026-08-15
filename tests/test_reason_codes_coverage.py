@@ -112,3 +112,14 @@ def test_every_extracted_reason_code_literal_is_in_the_checked_in_list():
         f"{REASON_CODES_FILE.relative_to(REPO_ROOT)} 에 없다: {missing_by_file}\n"
         "frontend/src/lib/reasonCodes.json (및 필요하면 REASON_MESSAGES 한국어 매핑)"
         "을 갱신해라.")
+
+
+def test_preflight_marker_reasons_are_in_the_checked_in_list():
+    """AST 추출기는 reason_code= 키워드 리터럴만 읽는다 -- preflight 마커 사유는
+    frozenset 안의 문자열이라 위 그물에 안 걸린다. 스테퍼가 이 코드를 잡에 그대로
+    박으므로(execution_manifests.parse_preflight_reason -> reason_code) 매핑이
+    없으면 화면에 원문 코드가 뜬다 -- 별도 그물을 둔다."""
+    from dms.execution_manifests import PREFLIGHT_REASONS
+
+    known = set(json.loads(REASON_CODES_FILE.read_text()))
+    assert sorted(PREFLIGHT_REASONS - known) == []

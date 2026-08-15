@@ -8,6 +8,7 @@ from .artifact_base import resolve_artifact_base
 from .db import iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from .execution import ExecStatus, ExecutionError, JobSpec
+from .execution_manifests import parse_preflight_reason
 from .placement import TOOL_TO_POLICY
 
 
@@ -165,7 +166,14 @@ class JobStepper:
         """실패 종단 시점 파드 로그 박제(설계 §2.2). 어댑터가 launcher 를 앞에
         놓으므로 [:DIAG_MAX_ENTRIES] 상한이 잘라도 launcher 가 산다. 박제 실패는
         finalize 를 막지 않는다 -- 한 잡의 로그 때문에 종단 전이가 막히면 잡이
-        낀다 -- 대신 이벤트로 표면화한다(조용한 실패 금지, 설계 §4)."""
+        낀다 -- 대신 이벤트로 표면화한다(조용한 실패 금지, 설계 §4).
+
+        반환값은 read_log 원본(못 읽었으면 None)이다 -- preflight 경로가 같은
+        조회 결과에서 사유 마커까지 뽑는다(_preflight_reason). 두 번 읽으면
+        박제된 로그와 사유가 어긋날 수 있고(그 사이 파드 GC) k8s 조회도 공짜가
+        아니다. raw 를 먼저 잡아두는 이유: 박제(archive_diag_logs)만 실패해도
+        사유 승격은 살아야 한다."""
+        raw = None
         try:
             raw = self._exec.read_log(ref)
             entries = [_diag_entry(pod, log)
@@ -179,6 +187,28 @@ class JobStepper:
                 message=f"{type(exc).__name__}: {exc}"[:500],
                 payload={"phase": phase, "ref": ref},
                 request_id=job.get("request_id"))
+        return raw
+
+    def _preflight_reason(self, job, phase, ref, *, reason_code):
+        """preflight 실패의 사유 결정 + 진단 로그 박제(한 번의 read_log 로 둘 다).
+
+        인자 이름이 fallback 이 아니라 reason_code 인 이유: 사유 코드 커버리지
+        그물(tests/test_reason_codes_coverage.py)은 `reason_code=` 키워드 리터럴만
+        AST 로 추출한다 -- 이름을 바꾸면 폴백 두 코드가 그물 밖으로 빠진다.
+
+        스크립트가 찍은 DMS_PREFLIGHT_REASON= 마커를 잡 사유로 승격한다. 승격
+        경로가 없던 동안 모든 preflight 실패는 fallback 하나로 뭉개졌다 --
+        "목적지 부모가 없다"와 "소스를 읽을 수 없다"가 화면에서 구분되지 않아
+        운영자가 파드 로그를 직접 열어야 했고, 파드는 GC 로 시한부다.
+
+        마커가 없거나 화이트리스트(execution_manifests.PREFLIGHT_REASONS) 밖이면
+        넘어온 reason_code 로 접는다 -- 파드 로그는 신뢰 입력이 아니라(설계 §4)
+        임의 문자열을 사유에 박으면 프론트 매핑이 없어 원문 코드가 그대로
+        노출된다. 박제 순서는 그대로 유지된다: 여기서 박제한 뒤 _finalize 가
+        전이하므로 "박제 -> set_job_state" 계약이 깨지지 않는다."""
+        raw = self._archive_diag(job, phase, ref)
+        promoted = parse_preflight_reason(raw)
+        return reason_code if promoted is None else promoted
 
     def _surface_failed_artifact(self, job, ref):
         """실패 잡의 summary 표면화(설계 §2.4). 러너는 도구 비0 종료에도
@@ -310,8 +340,10 @@ class JobStepper:
             if job["operation"] == "scan":
                 return self._submit_execution(job, DataJobState.RUNNING)
             return self._submit_preview(job)  # Task 7에서 구현
-        self._finalize(job, DataJobState.REJECTED, reason_code="preflight_failed",
-                       diag=("preflight", ref))
+        # diag= 를 넘기지 않는 이유: _preflight_reason 이 이미 박제했다(전이 전).
+        reason = self._preflight_reason(job, "preflight", ref,
+                                        reason_code="preflight_failed")
+        self._finalize(job, DataJobState.REJECTED, reason_code=reason)
         return "Rejected"
 
     def _submit_execution(self, job, running_state):
@@ -446,6 +478,9 @@ class JobStepper:
             return "Executing"
         if status == ExecStatus.SUCCEEDED:
             return self._submit_execution(job, DataJobState.EXECUTING)
-        self._finalize(job, DataJobState.REJECTED, reason_code="execution_recheck_failed",
-                       diag=("exec_preflight", refs["exec_preflight"]))
+        # 재검증도 같은 preflight 스크립트다 -- 미리보기와 confirm 사이에 목적지가
+        # 파일로 바뀌는 TOCTOU 가 여기서 잡히므로 사유를 뭉개지 않는다.
+        reason = self._preflight_reason(job, "exec_preflight", refs["exec_preflight"],
+                                        reason_code="execution_recheck_failed")
+        self._finalize(job, DataJobState.REJECTED, reason_code=reason)
         return "Rejected"

@@ -312,6 +312,43 @@ def _preflight_script(spec, *, role=None):
     return script, [ap["target"]]
 
 
+PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
+# _preflight_script 가 낼 수 있는 사유의 **전수**. 스테퍼는 이 집합 밖 문자열을
+# 잡 reason_code 로 쓰지 않는다 — 파드 로그는 신뢰 입력이 아니고(설계 §4), 매핑
+# 없는 코드를 박으면 포탈이 원문 코드를 그대로 노출한다. 화이트리스트를 스크립트와
+# 같은 파일에 두는 이유: 새 검사를 추가하면서 등록을 빠뜨리는 드리프트를 한 화면에서
+# 막는다(계약 테스트가 스크립트 실물에서 마커를 추출해 이 집합과 대조한다). 여기에
+# 코드를 추가하면 frontend/src/lib/reasonCodes.json 과 api.ts REASON_MESSAGES 도
+# 같이 갱신해야 한다(양방향 계약 테스트).
+PREFLIGHT_REASONS = frozenset({
+    "source_not_readable", "destination_not_directory",
+    "destination_parent_not_writable", "parent_not_writable",
+    "target_not_readable"})
+
+
+def parse_preflight_reason(entries):
+    """preflight 파드 로그에서 사유 코드를 뽑는다 — 화이트리스트 밖이면 None.
+
+    entries 는 어댑터 read_log 계약 그대로 [(pod, log|None, waiting_reason)] 다.
+    로그 형식이 아니라 마커 관례 한 줄만 본다(build_watcher._marker_value 와 같은
+    문법이라 운영자가 하나만 알면 된다). nsync 는 소스·목적지 파드가 따로라 항목이
+    여럿이고 한쪽만 실패하는 것이 정상 경로다 — 전부 훑어 첫 유효 마커를 채택한다.
+    log=None("얻을 수 없었다")과 ""(정상 빈 로그)는 여기선 똑같이 "마커 없음"이라
+    None 을 돌려준다 — 사유를 지어내지 않고 호출자의 폴백으로 접힌다."""
+    for entry in entries or ():
+        log = entry[1]
+        if log is None:
+            continue
+        for line in log.split("\n"):
+            line = line.strip()
+            if not line.startswith(PREFLIGHT_REASON_MARKER):
+                continue
+            value = line[len(PREFLIGHT_REASON_MARKER):].strip()
+            if value in PREFLIGHT_REASONS:
+                return value
+    return None
+
+
 _PREFLIGHT_ROLE_SEG = {"source": "-src", "destination": "-dst"}
 
 

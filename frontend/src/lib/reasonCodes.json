@@ -10,7 +10,8 @@
   "build_stuck_pending", "build_preflight_timeout", "build_preflight_failed",
   "build_node_no_egress", "build_registry_unreachable", "build_node_disk_low",
 
-  "destination_not_directory",
+  "source_not_readable", "destination_not_directory",
+  "destination_parent_not_writable", "parent_not_writable", "target_not_readable",
 
   "preflight_submit_failed", "execution_submit_failed",
   "preview_submit_failed", "execution_recheck_submit_failed",
