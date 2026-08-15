@@ -521,38 +521,37 @@ test("sync 배치의 현재 항목 CSV: source,destination 2열 — 왕복 계�
     .toEqual([{ source: "a", destination: "b" }]);
 });
 
-// --- 실행 제어 설정 표시(읽기 전용): 사이드 패널의 읽기 칩 행 ---
-// 접이(details)에서 칩으로 재구성(레이아웃 개편): 값 자체의 계약(미지정=정책
-// 기본 명시, 옵션 키=값, 소유자 기록은 있을 때만)은 이전 dt/dd 테스트에서 그대로
-// 이관 — 형태만 칩 텍스트("우선순위 high" 한 텍스트 노드)로 바뀌었다.
+// --- 실행 제어 설정 표시(읽기 전용): 생성 시 고른 값이 상세에서 보인다 ---
 
-test("실행 설정 칩: 지정값 + 옵션 키=값 + root 실행 + 소유자 기록", async () => {
+test("실행 설정: 지정값 표시 + 옵션 키=값 요약 + 소유자 기록", async () => {
   renderBatch({ operation: "scan", status: "Completed", priority: "high",
     node_count: 4, procs_per_node: 2, max_concurrency: 8,
     options: { batch_files: 1000 }, owner_username: "alice",
     items: [{ seq: 0, payload: { storage: "s1", target: "a" }, status: "Succeeded",
       request_id: "r1", reason_code: null }] });
-  expect(await screen.findByRole("heading", { name: "실행 설정" })).toBeInTheDocument();
-  for (const chip of ["우선순위 high", "노드 4", "프로세스 2", "동시 8",
-                      "batch_files=1000", "root 실행", "소유자 기록 alice"]) {
-    expect(screen.getByText(chip)).toBeInTheDocument();
-  }
-  // 접이(details)는 제거됐다 — 칩 행은 항상 보인다
-  expect(screen.queryByText("실행 설정", { selector: "summary" })).toBeNull();
+  expect(await screen.findByText("실행 설정")).toBeInTheDocument();
+  const dd = (label: string) =>
+    (screen.getByText(label).nextElementSibling as HTMLElement).textContent;
+  expect(dd("우선순위")).toBe("high");
+  expect(dd("노드 수")).toBe("4");
+  expect(dd("노드당 프로세스")).toBe("2");
+  expect(dd("동시 실행 상한")).toBe("8");
+  expect(dd("옵션")).toBe("batch_files=1000");
+  expect(dd("소유자 기록")).toBe("alice");
 });
 
-test("실행 설정 칩: 미지정(null)은 '정책 기본' 명시, 빈 옵션은 '옵션 없음'(null≠0)", async () => {
+test("실행 설정: 미지정(null)은 '정책 기본' — 0·빈값으로 뭉개지 않는다(null≠0)", async () => {
   renderBatch({ operation: "scan", status: "Completed", priority: null,
     node_count: null, procs_per_node: null, options: {},
     items: [{ seq: 0, payload: { storage: "s1", target: "a" }, status: "Succeeded",
       request_id: "r1", reason_code: null }] });
-  await screen.findByRole("heading", { name: "실행 설정" });
-  expect(screen.getByText("우선순위 정책 기본")).toBeInTheDocument();
-  expect(screen.getByText("노드 정책 기본")).toBeInTheDocument();
-  expect(screen.getByText("프로세스 정책 기본")).toBeInTheDocument();
-  expect(screen.getByText("옵션 없음")).toBeInTheDocument();
-  // 소유자 기록은 있을 때만 — 없으면 칩 자체가 없다
-  expect(screen.queryByText(/소유자 기록/)).toBeNull();
+  await screen.findByText("실행 설정");
+  // priority/node_count/procs_per_node 세 항목 모두 "정책 기본"
+  expect(screen.getAllByText("정책 기본")).toHaveLength(3);
+  expect((screen.getByText("옵션").nextElementSibling as HTMLElement).textContent)
+    .toBe("없음");
+  // 소유자 기록은 있을 때만 — 없으면 행 자체가 없다
+  expect(screen.queryByText("소유자 기록")).toBeNull();
 });
 
 // --- 배치 상태 색: 헤더 pill 은 batchPillVariant, 항목 pill 은 공유 pillVariant ---
@@ -584,165 +583,4 @@ test("PreviewReady also shows cancel button and posts cancel", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "취소" }));
   // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
   await waitFor(() => expect(cancelled).toBe(true));
-});
-
-// === 레이아웃 개편(2단 그리드·페이지네이션·필터·진행 바·행 어포던스·위험 영역) ===
-
-// n개 Queued scan 항목 생성기 — 페이지네이션·필터 테스트 공용.
-const manyItems = (n: number) =>
-  Array.from({ length: n }, (_, i) => ({ seq: i,
-    payload: { storage: "s1", target: `t${i}` }, status: "Queued",
-    request_id: null, reason_code: null }));
-
-// 상태 실측 5종(성공/실패/거부/대기/구체화) 혼합 — 필터·보더 테스트 공용.
-const mixedItems = [
-  { seq: 0, payload: { storage: "s1", target: "ok1" }, status: "Succeeded", request_id: "r1", reason_code: null },
-  { seq: 1, payload: { storage: "s1", target: "f1" }, status: "Failed", request_id: "r2", reason_code: null },
-  { seq: 2, payload: { storage: "s1", target: "rj1" }, status: "Rejected", request_id: null, reason_code: null },
-  { seq: 3, payload: { storage: "s1", target: "q1" }, status: "Queued", request_id: null, reason_code: null },
-  { seq: 4, payload: { storage: "s1", target: "m1" }, status: "Materialized", request_id: "r5", reason_code: null },
-];
-
-test("2단 그리드: 좌측 항목 목록(col-span-2) + 사이드 패널(진행 요약→실행 설정→항목 편집→위험 영역)", async () => {
-  renderDetailed();                              // Completed scan — 위험 영역까지 전부 노출
-  await screen.findByText("scan · s1:team");
-  const aside = screen.getByRole("complementary");
-  expect(aside.parentElement!.className).toContain("lg:grid-cols-3");
-  expect(aside.parentElement!.className).toContain("gap-6");
-  expect((aside.previousElementSibling as HTMLElement).className).toContain("lg:col-span-2");
-  // 사이드 카드 순서 — h2 heading 나열이 곧 구조다
-  expect(within(aside).getAllByRole("heading").map((h) => h.textContent))
-    .toEqual(["진행 요약", "실행 설정", "항목 편집", "위험 영역"]);
-});
-
-test("항목 페이지네이션: 20개/페이지 + 이전/다음 + n / m 페이지", async () => {
-  renderBatch({ operation: "scan", status: "Running", items: manyItems(25) });
-  expect(await screen.findByText("scan · s1:t0")).toBeInTheDocument();
-  expect(screen.getByText("scan · s1:t19")).toBeInTheDocument();
-  expect(screen.queryByText("scan · s1:t20")).toBeNull();
-  expect(screen.getByText("1 / 2 페이지")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "이전" })).toBeDisabled();
-  await userEvent.click(screen.getByRole("button", { name: "다음" }));
-  expect(screen.getByText("scan · s1:t20")).toBeInTheDocument();
-  expect(screen.queryByText("scan · s1:t0")).toBeNull();
-  expect(screen.getByText("2 / 2 페이지")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
-});
-
-test("상태 필터: 실패=Failed·Rejected, 대기=Queued·Materialized, 성공=Succeeded", async () => {
-  renderBatch({ operation: "scan", status: "Running", items: mixedItems });
-  await screen.findByText("scan · s1:ok1");
-  await userEvent.click(screen.getByRole("button", { name: "실패" }));
-  expect(screen.getByText("scan · s1:f1")).toBeInTheDocument();
-  expect(screen.getByText("scan · s1:rj1")).toBeInTheDocument();
-  expect(screen.queryByText("scan · s1:ok1")).toBeNull();
-  expect(screen.queryByText("scan · s1:q1")).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "대기" }));
-  expect(screen.getByText("scan · s1:q1")).toBeInTheDocument();
-  expect(screen.getByText("scan · s1:m1")).toBeInTheDocument();
-  expect(screen.queryByText("scan · s1:f1")).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "성공" }));
-  expect(screen.getByText("scan · s1:ok1")).toBeInTheDocument();
-  expect(screen.queryByText("scan · s1:m1")).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "전체" }));
-  expect(screen.getByText("scan · s1:f1")).toBeInTheDocument();
-  expect(screen.getByText("scan · s1:q1")).toBeInTheDocument();
-});
-
-test("필터 변경 시 1페이지로 리셋 — 옛 페이지 번호는 무의미(대시보드 관례)", async () => {
-  const items = [...manyItems(21), { seq: 21, payload: { storage: "s1", target: "f0" },
-    status: "Failed", request_id: "r9", reason_code: null }];
-  renderBatch({ operation: "scan", status: "Running", items });
-  await screen.findByText("scan · s1:t0");
-  await userEvent.click(screen.getByRole("button", { name: "다음" }));
-  expect(screen.getByText("2 / 2 페이지")).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "실패" }));
-  expect(screen.getByText("1 / 1 페이지")).toBeInTheDocument();
-  expect(screen.getByText("scan · s1:f0")).toBeInTheDocument();
-});
-
-test("빈 필터 결과: 정직 문구 — 항목이 없는 게 아니라 해당 상태가 없다", async () => {
-  renderBatch({ operation: "scan", status: "Running", items: [
-    { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
-      request_id: null, reason_code: null }] });
-  await screen.findByText("scan · s1:a");
-  await userEvent.click(screen.getByRole("button", { name: "실패" }));
-  expect(screen.getByText("해당 상태의 항목이 없습니다")).toBeInTheDocument();
-  expect(screen.queryByText("scan · s1:a")).toBeNull();
-});
-
-test("진행 요약: 스택 바(성공 ok/실패 bad/대기 회색) + 단일 카운트 문구", async () => {
-  renderBatch({ operation: "scan", status: "Running", item_count: 4,
-    succeeded_count: 2, failed_count: 1, items: [
-      { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
-        request_id: null, reason_code: null }] });
-  expect(await screen.findByText("성공 2 · 실패 1 · 대기 1 / 전체 4")).toBeInTheDocument();
-  const bar = screen.getByRole("img", { name: "배치 진행" });
-  const segs = Array.from(bar.children) as HTMLElement[];
-  expect(segs.map((s) => s.className)).toEqual(["bg-ok", "bg-bad", "bg-line"]);
-  expect(segs[0].style.width).toBe("50%");
-  expect(segs[1].style.width).toBe("25%");
-  expect(segs[2].style.width).toBe("25%");
-});
-
-test("전체 0: 진행 바 생략 — 카운트 문구는 정상값 0 으로 유지(null≠0)", async () => {
-  renderBatch({ operation: "scan", status: "Completed", item_count: 0,
-    succeeded_count: 0, failed_count: 0, items: [] });
-  expect(await screen.findByText("성공 0 · 실패 0 · 대기 0 / 전체 0")).toBeInTheDocument();
-  expect(screen.queryByRole("img", { name: "배치 진행" })).toBeNull();
-});
-
-test("항목 행 어포던스: chevron 회전 + hover 배경 + 상태별 좌측 보더", async () => {
-  renderBatch({ operation: "scan", status: "Running", items: mixedItems });
-  const toggle = await screen.findByRole("button", { name: "항목 0 상세" });
-  // 사이드바 Group 토글의 ChevronDown 관례: 접힘 = -rotate-90(오른쪽), 펼침 = 아래
-  const chevron = toggle.querySelector("svg.lucide-chevron-down")!;
-  expect(chevron.classList.contains("-rotate-90")).toBe(true);
-  await userEvent.click(toggle);
-  expect(chevron.classList.contains("-rotate-90")).toBe(false);
-  const rows = within(screen.getByRole("list", { name: "배치 항목 목록" }))
-    .getAllByRole("listitem");
-  expect(rows[0].className).toContain("border-ok");    // Succeeded
-  expect(rows[1].className).toContain("border-bad");   // Failed
-  expect(rows[2].className).toContain("border-bad");   // Rejected
-  expect(rows[3].className).toContain("border-line");  // Queued(대기)
-  expect((rows[0].firstElementChild as HTMLElement).className).toContain("hover:bg-panel");
-});
-
-test("항목 편집 카드: 사이드 패널에 추가 → CSV 교체 → 현재 CSV 순서", async () => {
-  renderDetailed();                              // Completed scan — 세 도구 전부 노출
-  const add = await screen.findByLabelText("추가할 대상 경로");
-  const aside = screen.getByRole("complementary");
-  const replace = within(aside).getByLabelText("교체 CSV");
-  const current = within(aside).getByLabelText("현재 항목 CSV");
-  expect(aside.contains(add)).toBe(true);
-  const follows = (a: Element, b: Element) =>
-    Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-  expect(follows(add, replace)).toBe(true);
-  expect(follows(replace, current)).toBe(true);
-});
-
-test("위험 영역: 사이드 최하단 text-bad 라벨 아래 배치 삭제", async () => {
-  renderWithList({ status: "Completed" });
-  const heading = await screen.findByRole("heading", { name: "위험 영역" });
-  expect(heading.className).toContain("text-bad");
-  const aside = screen.getByRole("complementary");
-  expect(aside.contains(screen.getByRole("button", { name: "배치 삭제" }))).toBe(true);
-});
-
-test("활성 배치: 위험 영역 카드 자체가 없다 — 배치 삭제는 종단만", async () => {
-  renderAt("Running");
-  await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
-  expect(screen.queryByRole("heading", { name: "위험 영역" })).toBeNull();
-});
-
-test("헤더 버튼 위계: 실패분 재실행=primary, 전체 재실행=outline", async () => {
-  renderBatch({ operation: "scan", status: "Completed", failed_count: 1, items: [
-    { seq: 0, payload: { storage: "s1", target: "a" }, status: "Failed",
-      request_id: "r1", reason_code: null }] });
-  const rerunBtn = await screen.findByRole("button", { name: "실패분 재실행" });
-  expect(rerunBtn.className).toContain("bg-accent");
-  const rescanBtn = screen.getByRole("button", { name: "전체 재실행" });
-  expect(rescanBtn.className).toContain("border-accent");
-  expect(rescanBtn.className).toContain("bg-surface");
 });
