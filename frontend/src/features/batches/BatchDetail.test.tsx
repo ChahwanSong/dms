@@ -52,6 +52,14 @@ function renderDetailed() {
   </MemoryRouter></QueryClientProvider>);
 }
 
+// 항목 편집 도구 3종은 버튼+팝업이다 — 버튼을 눌러 모달을 열고 그 안에서 조작한다.
+// 팝업 안 요소는 within(dialog) 로만 집는다: 트리거 버튼과 팝업 안 실행 버튼이 같은
+// 이름을 쓸 수 있어(예 「항목 추가」) screen 전역 질의는 모호해질 수 있다.
+async function openDialog(name: string) {
+  await userEvent.click(await screen.findByRole("button", { name }));
+  return within(await screen.findByRole("dialog"));
+}
+
 test("항목 행은 접힘 기본: 순번·대상 요약·상태만 — 상세 미렌더", async () => {
   renderDetailed();
   // 대상 요약은 대시보드 summarize 관례 미러(scan: storage:target)
@@ -254,9 +262,9 @@ test("이름·메모 인라인 편집: 저장이 PATCH 를 쏘고 편집을 닫�
     return HttpResponse.json(batch({ name: "새 이름", note: "새 메모" }));
   }));
   renderAt("Running");
-  // 버튼 라벨은 "메모 편집"(사용자 지시 — "이름·메모"의 이름 축약). 폼은 여전히
-  // 이름·메모 둘 다 편집한다(PATCH {name, note} 계약 무변경).
-  await userEvent.click(await screen.findByRole("button", { name: "메모 편집" }));
+  // 버튼 라벨은 「편집」 하나로 통일(사용자 조정) — 폼이 이름·메모를 함께 고치므로
+  // "메모 편집"은 어색했다. PATCH {name, note} 계약은 무변경.
+  await userEvent.click(await screen.findByRole("button", { name: "편집" }));
   await userEvent.type(screen.getByLabelText("배치 이름"), "새 이름");
   await userEvent.type(screen.getByLabelText("메모"), "새 메모");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
@@ -269,8 +277,9 @@ test("편집 취소는 PATCH 없이 닫힌다", async () => {
   server.use(http.patch("/api/admin/batches/b1", () => { patchCalls += 1;
     return HttpResponse.json(batch()); }));
   renderAt("Running");
-  await userEvent.click(await screen.findByRole("button", { name: "메모 편집" }));
-  // 배치 취소 버튼("취소")과 겹치지 않는 라벨 — 편집 취소는 별개 동작이다
+  await userEvent.click(await screen.findByRole("button", { name: "편집" }));
+  // 배치 취소 버튼("취소")과 겹치지 않는 라벨 — 편집 취소는 별개 동작이다.
+  // 이름 매칭은 완전 일치라 「편집」이 「편집 취소」를 집지 않는다(양쪽 공존 계약).
   await userEvent.click(screen.getByRole("button", { name: "편집 취소" }));
   expect(screen.queryByLabelText("배치 이름")).toBeNull();
   expect(patchCalls).toBe(0);
@@ -354,18 +363,31 @@ test("활성 배치: Queued 항목엔 행 삭제 버튼 + 펼침 수정 버튼",
   expect(screen.getByRole("button", { name: "수정" })).toBeInTheDocument();
 });
 
-test("항목 추가: 배치 스토리지를 물려받아 POST — 성공 시 입력 초기화", async () => {
+test("항목 추가 팝업: 배치 스토리지를 물려받아 POST — 성공 시 팝업이 닫힌다", async () => {
   let sent: any = null;
   server.use(http.post("/api/admin/batches/b1/items", async ({ request }) => {
     sent = await request.json();
     return HttpResponse.json({ seq: 2, status: "Running" }, { status: 202 });
   }));
   renderDetailed();                              // scan 배치, storage s1
-  const input = await screen.findByLabelText("추가할 대상 경로");
-  await userEvent.type(input, "newpath");
-  await userEvent.click(screen.getByRole("button", { name: "항목 추가" }));
+  const d = await openDialog("항목 추가");
+  await userEvent.type(d.getByLabelText("추가할 대상 경로"), "newpath");
+  await userEvent.click(d.getByRole("button", { name: "항목 추가" }));
   await waitFor(() => expect(sent).toEqual({ storage: "s1", target: "newpath" }));
-  await waitFor(() => expect(screen.getByLabelText("추가할 대상 경로")).toHaveValue(""));
+  // 성공 = 팝업 닫힘. 드래프트는 닫힐 때 비워지므로 재오픈이 빈 입력이다.
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  const again = await openDialog("항목 추가");
+  expect(again.getByLabelText("추가할 대상 경로")).toHaveValue("");
+});
+
+test("sync 배치 항목 추가 팝업: 소스·목적지 두 입력", async () => {
+  renderBatch({ operation: "sync", status: "Completed", items: [
+    { seq: 0, payload: { source_storage: "s1", source: "a",
+        destination_storage: "s2", destination: "b" }, status: "Succeeded",
+      request_id: "r1", reason_code: null }] });
+  const d = await openDialog("항목 추가");
+  expect(d.getByLabelText("추가할 소스 경로")).toBeInTheDocument();
+  expect(d.getByLabelText("추가할 목적지 경로")).toBeInTheDocument();
 });
 
 test("sync 배치 항목 수정: 소스·목적지 경로 두 입력 — 4필드 payload 로 PUT", async () => {
@@ -433,23 +455,25 @@ test("활성 배치: 배치 삭제 버튼 부재 — 취소 먼저가 동선", a
 // 파일 업로드가 아니라 textarea 붙여넣기다: 운영 환경 브라우저는 파일 업로드가
 // 불가하다(환경 제약) — 생성 위저드의 CSV 붙여넣기 패턴을 미러한다.
 
-test("종단 배치: CSV 붙여넣기 → 행 수 미리보기 → 교체가 PUT(스토리지 상속)을 쏜다", async () => {
+test("종단 배치: CSV 붙여넣기 → 행 수 미리보기 → 교체가 PUT(스토리지 상속)을 쏘고 팝업이 닫힌다", async () => {
   let sent: any = null;
   server.use(http.put("/api/admin/batches/b1/items", async ({ request }) => {
     sent = await request.json();
     return HttpResponse.json({ replaced: 2 });
   }));
   renderDetailed();                              // Completed scan 배치, storage s1
-  const ta = await screen.findByLabelText("교체 CSV");
+  const d = await openDialog("CSV로 전체 교체");
+  const ta = d.getByLabelText("교체 CSV");
   await userEvent.click(ta);
   await userEvent.paste("target\nx/y\nz");
   // 파스 미리보기가 먼저 — 교체는 미리보기를 본 뒤의 확인 클릭이다
   expect(await screen.findByText("2행 파싱됨")).toBeInTheDocument();
   expect(sent).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "교체" }));
+  await userEvent.click(d.getByRole("button", { name: "교체" }));
   // 배치 레벨 스토리지는 첫 항목 payload 에서 상속(동질성 계약)
   await waitFor(() => expect(sent).toEqual({ items: [
     { storage: "s1", target: "x/y" }, { storage: "s1", target: "z" }] }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 test("sync 배치 교체: source,destination 2열 — 4필드 payload 로 PUT", async () => {
@@ -461,11 +485,12 @@ test("sync 배치 교체: source,destination 2열 — 4필드 payload 로 PUT", 
     { seq: 0, payload: { source_storage: "s1", source: "a",
         destination_storage: "s2", destination: "b" }, status: "Succeeded",
       request_id: "r1", reason_code: null }] });
-  const ta = await screen.findByLabelText("교체 CSV");
+  const d = await openDialog("CSV로 전체 교체");
+  const ta = d.getByLabelText("교체 CSV");
   await userEvent.click(ta);
   await userEvent.paste("source,destination\nc,d");
   await screen.findByText("1행 파싱됨");
-  await userEvent.click(screen.getByRole("button", { name: "교체" }));
+  await userEvent.click(d.getByRole("button", { name: "교체" }));
   await waitFor(() => expect(sent).toEqual({ items: [
     { source_storage: "s1", source: "c",
       destination_storage: "s2", destination: "d" }] }));
@@ -473,25 +498,27 @@ test("sync 배치 교체: source,destination 2열 — 4필드 payload 로 PUT", 
 
 test("파스 오류가 있으면 교체 버튼 잠금 + 오류 나열", async () => {
   renderDetailed();
-  const ta = await screen.findByLabelText("교체 CSV");
+  const d = await openDialog("CSV로 전체 교체");
+  const ta = d.getByLabelText("교체 CSV");
   await userEvent.click(ta);
   await userEvent.paste("a,b\nokpath");
   expect(await screen.findByText(/1행: 경로 1개/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "교체" })).toBeDisabled();
+  expect(d.getByRole("button", { name: "교체" })).toBeDisabled();
 });
 
 test("빈 입력(초기 상태)엔 미리보기·교체 버튼 없음 — 파일 input 도 없다", async () => {
   renderDetailed();
-  await screen.findByLabelText("교체 CSV");      // 렌더 완료 대기 후 부재 단언
-  expect(screen.queryByText(/행 파싱됨/)).toBeNull();
-  expect(screen.queryByRole("button", { name: "교체" })).toBeNull();
+  const d = await openDialog("CSV로 전체 교체");
+  expect(d.queryByText(/행 파싱됨/)).toBeNull();
+  expect(d.queryByRole("button", { name: "교체" })).toBeNull();
   // 파일 업로드 경로는 제거됐다(운영 브라우저 제약) — 회귀 못
-  expect(screen.queryByLabelText("교체 CSV 파일")).toBeNull();
+  expect(d.queryByLabelText("교체 CSV 파일")).toBeNull();
 });
 
-test("활성 배치: CSV 전체 교체 UI 부재 — 종단 배치만", async () => {
+test("활성 배치: CSV 전체 교체 버튼 부재 — 종단 배치만", async () => {
   renderAt("Running");
   await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
+  expect(screen.queryByRole("button", { name: "CSV로 전체 교체" })).toBeNull();
   expect(screen.queryByLabelText("교체 CSV")).toBeNull();
 });
 
@@ -499,12 +526,12 @@ test("활성 배치: CSV 전체 교체 UI 부재 — 종단 배치만", async ()
 // clipboard API 는 안 쓴다: 운영 포탈은 http 비보안 컨텍스트라 navigator.clipboard
 // 가 부재한다(BatchCreate downloadCsv 와 같은 제약).
 
-test("현재 항목 CSV: serializeItemsCsv 텍스트를 읽기 전용으로 렌더 — 교체 파서와 왕복", async () => {
+test("현재 항목 CSV 팝업: serializeItemsCsv 텍스트를 읽기 전용으로 렌더 — 교체 파서와 왕복", async () => {
   renderDetailed();                              // scan 배치, 항목 team·proj
-  const ta = await screen.findByLabelText("현재 항목 CSV");
+  const d = await openDialog("현재 항목 CSV");
+  const ta = d.getByLabelText("현재 항목 CSV");
   expect(ta).toHaveValue("target\nteam\nproj");
   expect(ta).toHaveAttribute("readonly");
-  expect(screen.getByText("현재 항목 CSV", { selector: "summary" })).toBeInTheDocument();
   // 왕복 계약: 이 텍스트를 교체 textarea 에 넣으면 같은 항목이 복원된다
   expect(parseItemsCsv("scan", "target\nteam\nproj").rows)
     .toEqual([{ target: "team" }, { target: "proj" }]);
@@ -515,10 +542,36 @@ test("sync 배치의 현재 항목 CSV: source,destination 2열 — 왕복 계�
     { seq: 0, payload: { source_storage: "s1", source: "a",
         destination_storage: "s2", destination: "b" }, status: "Succeeded",
       request_id: "r1", reason_code: null }] });
-  const ta = await screen.findByLabelText("현재 항목 CSV");
-  expect(ta).toHaveValue("source,destination\na,b");
+  const d = await openDialog("현재 항목 CSV");
+  expect(d.getByLabelText("현재 항목 CSV")).toHaveValue("source,destination\na,b");
   expect(parseItemsCsv("sync", "source,destination\na,b").rows)
     .toEqual([{ source: "a", destination: "b" }]);
+});
+
+// --- 도구 3종의 버튼 행: 인라인 영역은 팝업으로 이사했다(잔여물 없음) ---
+
+test("항목 카드에 도구 버튼 3종 — 열기 전엔 입력·textarea 가 화면에 없다", async () => {
+  renderDetailed();                              // 종단 scan 배치 + 항목 2개
+  expect(await screen.findByRole("button", { name: "현재 항목 CSV" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "항목 추가" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "CSV로 전체 교체" })).toBeInTheDocument();
+  // 팝업 밖 잔여물 부재 — 세 도구의 조작면은 전부 모달 안이다
+  expect(screen.queryByLabelText("현재 항목 CSV")).toBeNull();
+  expect(screen.queryByLabelText("추가할 대상 경로")).toBeNull();
+  expect(screen.queryByLabelText("교체 CSV")).toBeNull();
+});
+
+test("활성 배치에도 현재 항목 CSV·항목 추가 버튼은 그대로(조건부 규칙 보존)", async () => {
+  renderAt("Running");
+  expect(await screen.findByRole("button", { name: "현재 항목 CSV" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "항목 추가" })).toBeInTheDocument();
+});
+
+test("항목이 없으면 도구 버튼도 없다 — 물려받을 스토리지가 없다", async () => {
+  renderBatch({ operation: "scan", status: "Completed", items: [] });
+  await screen.findByText(/항목이 없어/);
+  expect(screen.queryByRole("button", { name: "현재 항목 CSV" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "CSV로 전체 교체" })).toBeNull();
 });
 
 // --- 실행 제어 설정 표시(읽기 전용): 생성 시 고른 값이 상세에서 보인다 ---
@@ -574,6 +627,94 @@ test("배치 헤더 pill: Cancelled 는 neutral — 취소는 실패가 아니�
   const pill = await screen.findByText("Cancelled");
   expect(pill.className).toContain("text-muted");
   expect(pill.className).not.toContain("text-bad");
+});
+
+// --- 항목 다중 선택 삭제: 목록 화면의 일괄 삭제와 같은 UX 언어(2단 확인·부분 실패) ---
+
+test("행 체크박스: 삭제 가능한 항목만 선택 가능 — 불가 항목은 disabled + 이유", async () => {
+  renderBatch({ operation: "scan", status: "Running", items: [
+    { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
+      request_id: null, reason_code: null },
+    { seq: 1, payload: { storage: "s1", target: "b" }, status: "Materialized",
+      request_id: "r2", reason_code: null }] });
+  const cb0 = await screen.findByLabelText("항목 0 선택");
+  expect(cb0).toBeEnabled();
+  const cb1 = screen.getByLabelText("항목 1 선택");
+  expect(cb1).toBeDisabled();
+  // disabled 로 끝내지 않고 이유·동선을 남긴다(목록 화면 ACTIVE_HINT 관례)
+  expect(cb1).toHaveAttribute("title", expect.stringContaining("Queued"));
+});
+
+test("전체 선택: 선택 가능한 항목만 켠다 — 불가 항목은 그대로", async () => {
+  renderBatch({ operation: "scan", status: "Running", items: [
+    { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
+      request_id: null, reason_code: null },
+    { seq: 1, payload: { storage: "s1", target: "b" }, status: "Materialized",
+      request_id: "r2", reason_code: null }] });
+  await userEvent.click(await screen.findByLabelText("전체 선택"));
+  expect(screen.getByLabelText("항목 0 선택")).toBeChecked();
+  expect(screen.getByLabelText("항목 1 선택")).not.toBeChecked();
+  expect(screen.getByText("1개 선택됨")).toBeInTheDocument();
+});
+
+test("액션 바는 자리를 예약한다 — 선택 전에도 컨테이너가 있어 레이아웃이 안 밀린다", async () => {
+  renderDetailed();
+  expect(await screen.findByText("항목을 선택하면 한 번에 삭제할 수 있습니다"))
+    .toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "선택 삭제" })).toBeNull();
+});
+
+test("선택 삭제: 2단 확인 후 선택 수만큼 DELETE — 부분 실패를 정직하게 말한다", async () => {
+  const hit: number[] = [];
+  server.use(
+    http.delete("/api/admin/batches/b1/items/0", () => {
+      hit.push(0); return HttpResponse.json({ deleted: 1 }); }),
+    http.delete("/api/admin/batches/b1/items/1", () => {
+      hit.push(1);
+      return HttpResponse.json({ detail: "batch_item_not_editable" }, { status: 409 }); }));
+  renderDetailed();                              // 종단 배치 — 두 항목 다 선택 가능
+  await userEvent.click(await screen.findByLabelText("항목 0 선택"));
+  await userEvent.click(screen.getByLabelText("항목 1 선택"));
+  expect(screen.getByText("2개 선택됨")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+  expect(hit).toEqual([]);                       // 1단 클릭만으로는 안 쏜다
+  await userEvent.click(screen.getByRole("button", { name: "2개 삭제 확인" }));
+  await waitFor(() => expect([...hit].sort()).toEqual([0, 1]));
+  // 부분 실패: 성공 수·실패 수·항목별 사유를 각각 말한다(전체 실패로 뭉개지 않는다)
+  expect(await screen.findByText("1개 삭제됨 · 1개 실패")).toBeInTheDocument();
+  expect(screen.getByText(/항목 1: 수정할 수 없는 항목입니다/)).toBeInTheDocument();
+  // 완료 후 선택 초기화 — 액션 바는 자리만 남는다
+  await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
+});
+
+test("체크박스 클릭은 행 펼침을 토글하지 않는다", async () => {
+  renderDetailed();
+  const toggle = await screen.findByRole("button", { name: "항목 0 상세" });
+  await userEvent.click(screen.getByLabelText("항목 0 선택"));
+  expect(screen.getByLabelText("항목 0 선택")).toBeChecked();
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByText("파일 수")).toBeNull();
+});
+
+test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 선택 방지)", async () => {
+  let deleted = false;
+  server.use(
+    http.get("/api/admin/batches/b1", () => {
+      const d = detailedBatch();
+      return HttpResponse.json(deleted
+        ? { ...d, items: d.items.filter((it: any) => it.seq !== 1) } : d); }),
+    http.delete("/api/admin/batches/b1/items/1", () => {
+      deleted = true; return HttpResponse.json({ deleted: 1 }); }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  await userEvent.click(await screen.findByLabelText("항목 1 선택"));
+  expect(screen.getByText("1개 선택됨")).toBeInTheDocument();
+  // 단건 행 삭제로 그 항목이 사라지면 선택도 함께 사라져야 한다
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제" }));
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
+  await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
 });
 
 test("PreviewReady also shows cancel button and posts cancel", async () => {

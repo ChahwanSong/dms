@@ -1,9 +1,9 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
-         useUpdateBatchItem, useDeleteBatchItem, useAddBatchItem,
-         useReplaceBatchItems } from "./useBatches";
+         useUpdateBatchItem, useDeleteBatchItem, useDeleteBatchItems,
+         useAddBatchItem, useReplaceBatchItems } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv,
          type ScanRow, type SyncRow } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
@@ -54,6 +54,24 @@ const TEMP_PALETTE = ["#dc2626", "#ea580c", "#f59e0b", "#eab308", "#84cc16",
 // 한다 -- 팔레트 인덱스 직결이면 9 미만 히스토그램이 전부 웜톤이 된다.
 const tempColorOf = (n: number) => (i: number) =>
   TEMP_PALETTE[n <= 1 ? 0 : Math.round((i / (n - 1)) * (TEMP_PALETTE.length - 1))];
+
+// 항목 행의 좌측 고정폭 합계 = 체크박스(w-5=1.25rem) + gap-3(0.75rem) +
+// 순번(w-8=2rem) + gap-3(0.75rem). 펼침 상세·행 오류 문구를 이만큼 들여써야 행
+// 요약 텍스트와 세로선이 맞는다 — 숫자를 각 자리에 흩뿌리면 열이 하나 늘 때마다
+// 어긋난 들여쓰기가 남는다(선택 체크박스 추가 때 실제로 밀렸다).
+const ITEM_INDENT = "ml-[4.75rem]";
+// 선택 불가 체크박스에 다는 사유(목록 화면 ACTIVE_HINT 관례 — disabled 로 끝내지
+// 않고 이유와 동선을 남긴다). 표시 게이트일 뿐이고 진짜 차단은 서버 409 다.
+const ITEM_LOCK_HINT = "진행 중인 배치에선 대기(Queued) 항목만 삭제할 수 있습니다";
+
+// 항목 payload 조립: 스토리지는 입력받지 않는다 — 배치는 단일 스토리지 동질성
+// 계약이라 기존 payload(수정) 또는 첫 항목 payload(추가·교체)에서 물려받는 것이
+// 정직하다. 추가 팝업과 행 수정이 같은 조립을 쓰도록 모듈 스코프에 둔다.
+const itemBody = (isSync: boolean, p: Record<string, unknown>,
+                  path: string, dst: string) => isSync
+  ? { source_storage: p.source_storage, source: path,
+      destination_storage: p.destination_storage, destination: dst }
+  : { storage: p.storage, target: path };
 
 /** 리포트 생성 시각은 UTC로만 보여준다(ScanPaths 국소 사본 관례) — 스토리지·잡은
  *  UTC로 기록되고, 로컬시간으로 바꾸면 운영자·사용자가 다른 시각을 말하게 된다. */
@@ -131,9 +149,9 @@ function ItemScanStats({ requestId, succeeded }: {
   const [tempKey, setTempKey] = useState("atime");
   const noReport = !succeeded
     || (q.isError && (q.error as ApiError).code === "no_scan_report");
-  if (noReport) return <p className="text-muted text-sm mt-3 ml-11">리포트 없음</p>;
+  if (noReport) return <p className={`text-muted text-sm mt-3 ${ITEM_INDENT}`}>리포트 없음</p>;
   if (q.isError) {
-    return <p className="text-bad text-sm mt-3 ml-11">{(q.error as ApiError).message}</p>;
+    return <p className={`text-bad text-sm mt-3 ${ITEM_INDENT}`}>{(q.error as ApiError).message}</p>;
   }
   const stats = q.data;
   if (!stats) return null;               // 로딩 — 짧은 창이라 문구 없이 둔다
@@ -142,7 +160,7 @@ function ItemScanStats({ requestId, succeeded }: {
   const bars = toBars(stats.time_histograms[tempKey], "bytes");
   const cumTotal = bars.reduce((acc, b) => acc + b.value, 0);
   return (
-    <div className="mt-3 ml-11 space-y-3">
+    <div className={`mt-3 ${ITEM_INDENT} space-y-3`}>
       <div>
         <h3 className="font-medium text-sm">데이터 온도(hot/cold)</h3>
         {/* 언제 찍힌 숫자인지 없이 보여주는 건 부정직이다(ScanPaths 관례 미러) */}
@@ -206,25 +224,37 @@ function ItemScanStats({ requestId, succeeded }: {
   );
 }
 
+// 항목 편집 도구 3종(현재 항목 CSV·항목 추가·CSV로 전체 교체)은 **버튼 + 팝업**
+// 이다(사용자 지시). 셋 다 가끔 쓰는 도구인데 인라인으로 카드 아래 세로로 늘어놓
+// 으면 접이식이어도 입력·textarea 가 상시 자리를 차지해 항목 목록이 그만큼 밀렸다.
+// 모달 프레임은 공용 Dialog 재사용(ConfirmDialog·DeleteBatchButton 선례) — 새
+// 프레임을 만들지 않는다. 노출 조건(교체=종단 배치, 나머지=항목 존재)은 인라인
+// 시절 그대로 트리거 버튼에 옮겨 붙였다: 표시 게이트일 뿐 진짜 차단은 서버다.
+
 // CSV 붙여넣기로 항목 전체 교체(종단 배치만 노출 — 진짜 가드는 서버
 // batch_items_not_replaceable 409). 교체 후에도 배치는 종단 유지 — 교체가 곧
 // 실행은 아니다(재실행은 기존 「전체 재실행」 버튼 몫). 파일 업로드가 아니라
 // textarea 붙여넣기인 이유: 운영 환경 브라우저는 파일 업로드가 불가하다(환경
 // 제약) — 생성 위저드(BatchCreate)의 CSV 붙여넣기 패턴을 미러한다. 동선:
 // 붙여넣기 → parseItemsCsv 파싱(입력에서 즉시 파생) → 미리보기(행 수·오류) →
-// 「교체」 확인 클릭 → PUT. 오류가 하나라도 있으면 교체 버튼 잠금(부분 반영
-// 금지 — BatchCreate applyParsed 와 같은 계약). 빈 입력(초기 상태)은 미리보기·
-// 버튼 자체를 안 그린다 — "아직 안 붙여넣음"과 "0행 파싱"(헤더만)의 구분.
+// 「교체」 확인 클릭 → PUT → 팝업 닫힘. 오류가 하나라도 있으면 교체 버튼 잠금
+// (부분 반영 금지 — BatchCreate applyParsed 와 같은 계약). 빈 입력(초기 상태)은
+// 미리보기·버튼 자체를 안 그린다 — "아직 안 붙여넣음"과 "0행 파싱"(헤더만)의 구분.
 // 배치 레벨 스토리지: 배치 행엔 스토리지 메타가 없다(실측 — batches 테이블은
 // 실행 제어·옵션만). 종단 배치는 항목이 반드시 있으므로 첫 항목 payload 에서
-// 물려받는다(항목 추가 submitAdd 와 같은 동질성 계약) — 항목 0개면 호출측이
-// 이 컴포넌트 자체를 안 그린다(물려받을 스토리지가 없다).
-function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
+// 물려받는다(항목 추가와 같은 동질성 계약) — 항목 0개면 호출측이 이 컴포넌트
+// 자체를 안 그린다(물려받을 스토리지가 없다).
+function ReplaceItemsCsvDialog({ batchId, operation, firstPayload }: {
   batchId: string; operation: "scan" | "sync";
   firstPayload: Record<string, unknown>;
 }) {
+  const [open, setOpen] = useState(false);
   const replace = useReplaceBatchItems(batchId);
   const [text, setText] = useState("");
+  // 닫힐 때마다 드래프트·오류를 비운다(DeleteBatchButton 선례) — "닫기"는
+  // setOpen(false) 를 직접 불러 Radix onOpenChange 가 발화하지 않는다. 재오픈이
+  // 지난 시도의 잔상(붙여넣은 CSV·실패 사유)으로 시작하면 오조작을 부른다.
+  useEffect(() => { if (!open) { setText(""); replace.reset(); } }, [open]);
   // 상태가 아니라 파생: 입력이 곧 진실이라 파싱 결과를 별도 상태로 들고 있으면
   // 둘이 어긋날 수 있다. null = 빈 입력(미리보기 없음).
   const parsed = text.trim() === "" ? null : parseItemsCsv(operation, text);
@@ -236,36 +266,44 @@ function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
         destination: (r as SyncRow).destination }
     : { storage: firstPayload.storage, target: (r as ScanRow).target });
   return (
-    <div className="border-t border-black/5 mt-2 pt-3 space-y-2 max-w-md">
-      <label className="text-sm block">
-        {`CSV로 전체 교체 (${operation === "scan" ? "행당 경로 1개" : "행당 source,destination"})`}
-        <textarea aria-label="교체 CSV" className={`${field} h-40 font-mono`}
-                  placeholder={operation === "scan"
-                    ? "team\nprojects/alpha"
-                    : "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"}
-                  value={text}
-                  onChange={(e) => { setText(e.target.value);
-                                     replace.reset(); /* 이전 시도 잔상 제거 */ }} />
-      </label>
-      {/* 미리보기(행 수)와 확인 버튼은 입력이 있을 때만 — 무엇으로 바꾸는지
-          보여주기 전의 교체 버튼은 오클릭 유도다. 0행(헤더만)도 잠금 — 서버
-          empty_batch 재확인 전에 화면에서 정직하게 막는다. */}
-      {parsed !== null && (
-        <p className="text-sm text-muted">{`${rows.length}행 파싱됨`}</p>
-      )}
-      {errors.length > 0 && (
-        <ul className="text-bad text-sm space-y-1">
-          {errors.map((err, i) => <li key={i}>{err}</li>)}
-        </ul>
-      )}
-      {parsed !== null && (
-        <Button disabled={errors.length > 0 || rows.length === 0 || replace.isPending}
-                onClick={() => replace.mutate(items)}>교체</Button>
-      )}
-      {replace.isError && (
-        <p className="text-bad text-sm">{(replace.error as ApiError).message}</p>
-      )}
-    </div>
+    <Dialog open={open} onOpenChange={setOpen} title="CSV로 전체 교체"
+            trigger={<Button variant="ghost">CSV로 전체 교체</Button>}>
+      <div className="space-y-2">
+        <p className="text-muted text-sm">기존 항목이 모두 사라지고 붙여넣은 CSV 로 대체됩니다.</p>
+        <label className="text-sm block">
+          {`행 형식 — ${operation === "scan" ? "행당 경로 1개" : "행당 source,destination"}`}
+          <textarea aria-label="교체 CSV" className={`${field} h-40 font-mono`}
+                    placeholder={operation === "scan"
+                      ? "team\nprojects/alpha"
+                      : "team/dataset,backup/dataset\nprojects/alpha,backup/alpha"}
+                    value={text}
+                    onChange={(e) => { setText(e.target.value);
+                                       replace.reset(); /* 이전 시도 잔상 제거 */ }} />
+        </label>
+        {/* 미리보기(행 수)와 확인 버튼은 입력이 있을 때만 — 무엇으로 바꾸는지
+            보여주기 전의 교체 버튼은 오클릭 유도다. 0행(헤더만)도 잠금 — 서버
+            empty_batch 재확인 전에 화면에서 정직하게 막는다. */}
+        {parsed !== null && (
+          <p className="text-sm text-muted">{`${rows.length}행 파싱됨`}</p>
+        )}
+        {errors.length > 0 && (
+          <ul className="text-bad text-sm space-y-1">
+            {errors.map((err, i) => <li key={i}>{err}</li>)}
+          </ul>
+        )}
+        {replace.isError && (
+          <p className="text-bad text-sm">{(replace.error as ApiError).message}</p>
+        )}
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
+          {parsed !== null && (
+            <Button disabled={errors.length > 0 || rows.length === 0 || replace.isPending}
+                    onClick={() => replace.mutate(items,
+                      { onSuccess: () => setOpen(false) })}>교체</Button>
+          )}
+        </div>
+      </div>
+    </Dialog>
   );
 }
 
@@ -273,22 +311,76 @@ function ReplaceItemsCsv({ batchId, operation, firstPayload }: {
 // 직접 선택·복사한다. 「복사 버튼」이 아닌 이유: 운영 포탈은 http 비보안
 // 컨텍스트라 navigator.clipboard 가 부재한다(BatchCreate downloadCsv 와 같은
 // 제약 — clipboard API 금지). onFocus 전체 선택은 DOM Selection 이라 어디서나
-// 동작한다. 접이식 — 상시 참조 정보가 아니다(BatchSettings 관례). 헤더 포함
-// 직렬화라 교체 textarea 에 그대로 붙여넣으면 같은 항목이 복원된다(왕복 계약).
-function CurrentItemsCsv({ operation, items }: {
+// 동작한다. 헤더 포함 직렬화라 교체 팝업에 그대로 붙여넣으면 같은 항목이
+// 복원된다(왕복 계약).
+function CurrentItemsCsvDialog({ operation, items }: {
   operation: "scan" | "sync"; items: BatchItem[];
 }) {
+  const [open, setOpen] = useState(false);
   const text = serializeItemsCsv(operation, items.map((it) => operation === "sync"
     ? { source: String(it.payload.source ?? ""),
         destination: String(it.payload.destination ?? "") }
     : { target: String(it.payload.target ?? "") }));
   return (
-    <details className="mt-2">
-      <summary className="text-sm text-muted cursor-pointer">현재 항목 CSV</summary>
-      <textarea aria-label="현재 항목 CSV" readOnly value={text}
-                className={`${field} h-40 font-mono max-w-md`}
-                onFocus={(e) => e.currentTarget.select()} />
-    </details>
+    <Dialog open={open} onOpenChange={setOpen} title="현재 항목 CSV"
+            trigger={<Button variant="ghost">현재 항목 CSV</Button>}>
+      <div className="space-y-2">
+        {/* 클릭 시 전체 선택되는 건 화면에 안 쓰면 모르는 동작이라 한 줄로 말한다 */}
+        <p className="text-muted text-sm">클릭하면 전체 선택됩니다 — 복사해서 「CSV로 전체 교체」에 그대로 붙여넣을 수 있습니다.</p>
+        <textarea aria-label="현재 항목 CSV" readOnly value={text}
+                  className={`${field} h-40 font-mono`}
+                  onFocus={(e) => e.currentTarget.select()} />
+        <div className="flex justify-end pt-1">
+          <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+// 항목 추가(경로만 입력 — 스토리지는 첫 항목에서 물려받는다). 종단 배치에
+// 추가하면 서버가 재활성화(scan→Running/sync→Previewing)하고 신규 Queued 항목만
+// 실행된다. 성공 시 팝업을 닫는다: 추가된 항목은 뒤의 목록에 나타나므로 화면에
+// 남아 있을 이유가 없다(invalidate 는 훅 onSettled 몫). 항목이 없으면 물려받을
+// 스토리지가 없어 호출측이 버튼 대신 안내를 보인다.
+function AddItemDialog({ batchId, isSync, firstPayload }: {
+  batchId: string; isSync: boolean; firstPayload: Record<string, unknown>;
+}) {
+  const [open, setOpen] = useState(false);
+  const add = useAddBatchItem(batchId);
+  const [path, setPath] = useState("");
+  const [dst, setDst] = useState("");
+  useEffect(() => { if (!open) { setPath(""); setDst(""); add.reset(); } }, [open]);
+  return (
+    <Dialog open={open} onOpenChange={setOpen} title="항목 추가"
+            trigger={<Button variant="ghost">항목 추가</Button>}>
+      <div className="space-y-2">
+        {isSync ? (<>
+          <label className="text-sm block">추가할 소스 경로
+            <input aria-label="추가할 소스 경로" className={field} value={path}
+                   onChange={(e) => setPath(e.target.value)} />
+          </label>
+          <label className="text-sm block">추가할 목적지 경로
+            <input aria-label="추가할 목적지 경로" className={field} value={dst}
+                   onChange={(e) => setDst(e.target.value)} />
+          </label>
+        </>) : (
+          <label className="text-sm block">추가할 대상 경로
+            <input aria-label="추가할 대상 경로" className={field} value={path}
+                   onChange={(e) => setPath(e.target.value)} />
+          </label>
+        )}
+        {add.isError && (
+          <p className="text-bad text-sm">{(add.error as ApiError).message}</p>
+        )}
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>
+          <Button disabled={add.isPending}
+                  onClick={() => add.mutate(itemBody(isSync, firstPayload, path, dst),
+                    { onSuccess: () => setOpen(false) })}>항목 추가</Button>
+        </div>
+      </div>
+    </Dialog>
   );
 }
 
@@ -351,7 +443,6 @@ export function BatchDetail() {
   const isSync = b?.operation === "sync";
   const updateItem = useUpdateBatchItem(batchId);
   const deleteItem = useDeleteBatchItem(batchId);
-  const addItem = useAddBatchItem(batchId);
   // 드래프트는 서버 상태와 분리(이름·메모 편집과 같은 이유 — 폴링 리페치가 입력을
   // 덮지 않는다). pathDraft = scan target / sync source.
   const [editSeq, setEditSeq] = useState<number | null>(null);
@@ -363,26 +454,55 @@ export function BatchDetail() {
   const [armedSeq, setArmedSeq] = useState<number | null>(null);
   const [pathDraft, setPathDraft] = useState("");
   const [dstDraft, setDstDraft] = useState("");
-  const [addPath, setAddPath] = useState("");
-  const [addDst, setAddDst] = useState("");
-  // 스토리지는 입력받지 않는다 — 배치는 단일 스토리지 동질성 계약이라 항목의
-  // 기존 payload(수정) 또는 첫 항목 payload(추가)에서 물려받는 것이 정직하다.
-  const itemBody = (p: Record<string, unknown>, path: string, dst: string) => isSync
-    ? { source_storage: p.source_storage, source: path,
-        destination_storage: p.destination_storage, destination: dst }
-    : { storage: p.storage, target: path };
   const startItemEdit = (it: BatchItem) => {
     setPathDraft(String((isSync ? it.payload.source : it.payload.target) ?? ""));
     setDstDraft(String(it.payload.destination ?? ""));
     setEditSeq(it.seq);
   };
   const saveItem = (it: BatchItem) => updateItem.mutate(
-    { seq: it.seq, item: itemBody(it.payload, pathDraft, dstDraft) },
+    { seq: it.seq, item: itemBody(isSync, it.payload, pathDraft, dstDraft) },
     { onSuccess: () => setEditSeq(null) });
   const firstPayload = b?.items?.[0]?.payload;
-  const submitAdd = () => { if (firstPayload) addItem.mutate(
-    itemBody(firstPayload, addPath, addDst),
-    { onSuccess: () => { setAddPath(""); setAddDst(""); } }); };
+  const hasItems = (b?.items ?? []).length > 0;
+  // --- 항목 다중 선택 삭제(목록 화면 일괄 삭제의 항목판 — 같은 UX 언어) ---
+  const bulkDelete = useDeleteBatchItems(batchId);
+  const [selected, setSelected] = useState<number[]>([]);
+  // 2단 확인: 1단이 무장하고 2단이 쏜다(행 삭제 armedSeq 와 같은 계약). 일괄
+  // 삭제는 비가역 폭이 넓어 오클릭 방어가 더 필요하다.
+  const [bulkArmed, setBulkArmed] = useState(false);
+  // b?.items 를 그대로 dep 에 쓴다(`?? []` 를 dep 으로 쓰면 매 렌더 새 배열이라
+  // 아래 정리 effect 가 무한 루프가 된다). react-query 의 구조적 공유 덕에 내용이
+  // 같은 리페치는 같은 참조를 돌려준다.
+  const deletableSeqs = useMemo(
+    () => (b?.items ?? []).filter(canEditItem).map((it) => it.seq), [b?.items, terminal]);
+  const liveSeqs = useMemo(
+    () => new Set((b?.items ?? []).map((it) => it.seq)), [b?.items]);
+  // 유령 선택 정리: 리페치로 사라진 항목(단건 삭제·다른 세션의 교체)을 선택에서
+  // 뺀다 — 안 그러면 화면에 없는 seq 에 DELETE 를 쏘고 404 를 "실패"로 보고한다.
+  // 부분집합이라 길이 비교로 동일성을 판정하고, 같으면 같은 참조를 돌려 재렌더
+  // 루프를 끊는다.
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = prev.filter((s) => liveSeqs.has(s));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [liveSeqs]);
+  const allChecked = deletableSeqs.length > 0 && selected.length === deletableSeqs.length;
+  // indeterminate 는 속성이 아니라 DOM 프로퍼티라 ref 로만 설정된다.
+  const allRef = useRef<HTMLInputElement>(null);
+  const someChecked = selected.length > 0 && !allChecked;
+  useEffect(() => { if (allRef.current) allRef.current.indeterminate = someChecked; },
+            [someChecked]);
+  // 선택이 바뀌면 무장을 풀고 직전 결과 문구도 지운다 — "2개 삭제 확인"이 무장된
+  // 채 선택만 3개로 늘면 사용자가 확인한 것과 다른 것을 지우게 된다. 진행 중에는
+  // reset 하지 않는다(비행 중인 mutation 의 결과를 삼킨다).
+  const disarm = () => { setBulkArmed(false); if (!bulkDelete.isPending) bulkDelete.reset(); };
+  const toggleRow = (seq: number) => {
+    disarm();
+    setSelected((p) => (p.includes(seq) ? p.filter((x) => x !== seq) : [...p, seq]));
+  };
+  const clearSelection = () => { setBulkArmed(false); setSelected([]); };
+  const bulkResult = bulkDelete.data;
   return (
     <section className="space-y-4">
       {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
@@ -411,10 +531,11 @@ export function BatchDetail() {
             )}
           </div>
           <div className="flex gap-2">
-            {/* 라벨은 "메모 편집"(사용자 지시 — "이름·메모"의 이름 축약). 폼은
-                여전히 이름·메모 둘 다 편집한다(PATCH {name, note} 계약 무변경) —
-                폼 안 입력 라벨("배치 이름"/"메모")이 실기능을 말한다. */}
-            {b && !editing && <Button variant="ghost" onClick={startEdit}>메모 편집</Button>}
+            {/* 라벨은 짧게 「편집」 — 무엇을 편집하는지는 폼 안 입력 라벨("배치
+                이름"/"메모")이 말한다(사용자 조정 2026-08-15). "메모 편집"은 폼이
+                이름까지 고치는데 메모만 말해 어색했고 "이름·메모 편집"은 길다.
+                PATCH {name, note} 계약·폼 구조는 무변경. */}
+            {b && !editing && <Button variant="ghost" onClick={startEdit}>편집</Button>}
             {b?.status === "PreviewReady" && <Button disabled={confirm.isPending} onClick={() => confirm.mutate()}>배치 확인</Button>}
             {b?.status === "Completed" && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
@@ -454,15 +575,96 @@ export function BatchDetail() {
           구조적으로 안전하다. 기본 행은 컴팩트(순번·대상 요약·상태), 상세(사유·
           파일 수·완료 시각·payload·요청 링크)는 펼친 행에만. */}
       <Card>
-        <h2 className="font-medium">항목</h2>
+        {/* 카드 헤더 = 전체 선택 + 제목 + 도구 버튼 3종. 도구가 헤더에 모여 있어야
+            항목 목록이 카드의 본문 전체를 쓴다(인라인 시절엔 목록 아래 세 영역이
+            자리를 먹었다). */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3">
+            {/* 전체 선택은 **선택 가능한 항목만** 토글한다 — 잠긴 항목까지 켜 두면
+                지울 수 없는 것을 골라 둔 셈이 되어 매번 409 를 만든다. */}
+            {hasItems && (
+              <input ref={allRef} type="checkbox" aria-label="전체 선택"
+                     className="h-5 w-5 shrink-0"
+                     checked={allChecked}
+                     disabled={deletableSeqs.length === 0 || bulkDelete.isPending}
+                     onChange={() => { disarm();
+                                       setSelected(allChecked ? [] : deletableSeqs); }} />
+            )}
+            <h2 className="font-medium">항목</h2>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {/* 노출 조건은 인라인 시절 그대로: CSV 계열·추가는 항목 존재(스토리지
+                상속원), 교체는 종단 배치 한정. */}
+            {b && hasItems && (
+              <CurrentItemsCsvDialog operation={isSync ? "sync" : "scan"}
+                                     items={b.items ?? []} />
+            )}
+            {b && firstPayload && (
+              <AddItemDialog batchId={batchId} isSync={isSync}
+                             firstPayload={firstPayload} />
+            )}
+            {b && terminal && firstPayload && (
+              <ReplaceItemsCsvDialog batchId={batchId}
+                                     operation={isSync ? "sync" : "scan"}
+                                     firstPayload={firstPayload} />
+            )}
+          </div>
+        </div>
+        {/* 액션 바 자리 예약: 선택 여부와 무관하게 같은 높이의 컨테이너를 늘 그리고
+            내용만 바꾼다 — 선택 순간에 바가 생기면 아래 목록이 통째로 밀려(레이아웃
+            점프) 방금 체크한 행이 커서 밑에서 사라진다. */}
+        {hasItems && (
+          <div className="mt-2 flex min-h-10 flex-wrap items-center gap-2 text-sm">
+            {selected.length > 0 ? (<>
+              <span className="mr-auto">{`${selected.length}개 선택됨`}</span>
+              {bulkArmed
+                ? <Button disabled={bulkDelete.isPending}
+                          onClick={() => bulkDelete.mutate(selected,
+                            { onSettled: clearSelection })}>
+                    {`${selected.length}개 삭제 확인`}
+                  </Button>
+                : <Button variant="outline" disabled={bulkDelete.isPending}
+                          onClick={() => setBulkArmed(true)}>선택 삭제</Button>}
+              <Button variant="ghost" disabled={bulkDelete.isPending}
+                      onClick={clearSelection}>선택 해제</Button>
+            </>) : (
+              <span className="text-muted">항목을 선택하면 한 번에 삭제할 수 있습니다</span>
+            )}
+          </div>
+        )}
+        {/* 일괄 삭제 결과는 액션 바 **밖**이다: 완료 시 선택이 비어 바가 안내 문구로
+            돌아가므로 바 안에 두면 결과가 같이 증발한다. 부분 실패를 뭉개지 않는 게
+            이 블록의 존재 이유 — 성공 수·실패 수·항목별 사유를 각각 말한다. */}
+        {bulkResult && (
+          <div className="mt-2 text-sm" role="status">
+            <p className={bulkResult.failed.length > 0 ? "text-bad" : "text-ok"}>
+              {bulkResult.failed.length > 0
+                ? `${bulkResult.ok.length}개 삭제됨 · ${bulkResult.failed.length}개 실패`
+                : `${bulkResult.ok.length}개 삭제됨`}
+            </p>
+            {bulkResult.failed.map((f) => (
+              <p key={f.seq} className="text-muted">{`항목 ${f.seq}: ${f.message}`}</p>
+            ))}
+          </div>
+        )}
         {(b?.items ?? []).map((it) => (
           <div key={it.seq} className="border-t border-black/5 py-2">
-            {/* 행 = 펼침 토글 버튼 + 삭제 버튼의 flex 형제. 토글이 행 전체를 덮는
-                버튼이었는데, 버튼 안에 버튼은 불가(HTML)라 삭제를 행에 올리려면
-                토글을 flex-1 로 줄이고 삭제를 옆에 둔다. 항목은 표(Table)가 아니라
+            {/* 행 = 선택 체크박스 + 펼침 토글 버튼 + 삭제 버튼의 flex 형제. 토글이
+                행 전체를 덮는 버튼이었는데, 버튼 안에 버튼은 불가(HTML)라 삭제를
+                행에 올리려면 토글을 flex-1 로 줄이고 삭제를 옆에 둔다. 체크박스도
+                토글의 **형제**라 체크 클릭이 펼침으로 새지 않는다(중첩이 아니라
+                구조로 막는다 — stopPropagation 불필요). 항목은 표(Table)가 아니라
                 리스트 구조라(위 카드 주석 — d54 결정) e2e L2(td 안 flex/버튼
                 불변식)는 애초에 안 문다 — 실측: td 없음. */}
             <div className="flex items-center gap-3">
+              {/* 삭제 가능한 항목만 선택 가능(canEditItem 재사용 — 행 삭제 버튼과
+                  같은 게이트). disabled 로 끝내지 않고 title 로 이유를 남긴다. */}
+              <input type="checkbox" aria-label={`항목 ${it.seq} 선택`}
+                     className="h-5 w-5 shrink-0"
+                     checked={selected.includes(it.seq)}
+                     disabled={!canEditItem(it) || bulkDelete.isPending}
+                     title={canEditItem(it) ? undefined : ITEM_LOCK_HINT}
+                     onChange={() => toggleRow(it.seq)} />
               <button type="button" aria-label={`항목 ${it.seq} 상세`}
                       aria-expanded={openSeq === it.seq}
                       onClick={() => setOpenSeq(openSeq === it.seq ? null : it.seq)}
@@ -476,7 +678,11 @@ export function BatchDetail() {
               {/* 삭제는 펼치지 않아도 보이는 행 버튼(펼침 안에서 행으로 이동).
                   노출 조건은 기존 canEditItem 재사용(표시 게이트 — 진짜 차단은
                   서버 409). aria-label 로 행별 이름을 부여해 테스트·스크린리더가
-                  어느 항목인지 안다. */}
+                  어느 항목인지 안다.
+                  다중 선택이 생긴 뒤에도 이 버튼을 남기는 이유: 한 건 지우기가
+                  체크(1)→선택 삭제(2)→N개 삭제 확인(3) 세 클릭이 되는데, 행
+                  버튼은 삭제(1)→삭제 확인(2) 두 클릭이다. 가장 흔한 조작이
+                  느려지는 건 정리가 아니라 퇴보라 중복을 감수한다. */}
               {canEditItem(it) && (armedSeq === it.seq
                 ? <Button aria-label={`항목 ${it.seq} 삭제 확인`}
                           disabled={deleteItem.isPending}
@@ -489,10 +695,10 @@ export function BatchDetail() {
                 seq)로 행을 특정한다(전 행에 도배하면 어느 삭제가 실패했는지
                 모른다). */}
             {deleteItem.isError && deleteItem.variables === it.seq && (
-              <p className="text-bad text-sm mt-1 ml-11">{(deleteItem.error as ApiError).message}</p>
+              <p className={`text-bad text-sm mt-1 ${ITEM_INDENT}`}>{(deleteItem.error as ApiError).message}</p>
             )}
             {openSeq === it.seq && (<>
-              <dl className="mt-2 ml-11 grid grid-cols-[7rem_1fr] gap-y-1 text-sm">
+              <dl className={`mt-2 ${ITEM_INDENT} grid grid-cols-[7rem_1fr] gap-y-1 text-sm`}>
                 {/* 요청 상태는 항목 상태(배치 시점 판정)와 다른 축 — 자식 요청의
                     현재 상태다. null = 아직 materialize 안 됨. */}
                 <dt className="text-muted">요청 상태</dt>
@@ -518,12 +724,12 @@ export function BatchDetail() {
                   (순번·대상)만으로 대상 확인이 충분해 행으로 올렸다. 노출 조건은
                   기존 canEditItem 재사용(표시 게이트, 진짜 차단은 서버 409). */}
               {canEditItem(it) && editSeq !== it.seq && (
-                <div className="mt-2 ml-11 flex gap-2">
+                <div className={`mt-2 ${ITEM_INDENT} flex gap-2`}>
                   <Button variant="ghost" onClick={() => startItemEdit(it)}>수정</Button>
                 </div>
               )}
               {editSeq === it.seq && (
-                <div className="mt-2 ml-11 space-y-2 max-w-md">
+                <div className={`mt-2 ${ITEM_INDENT} space-y-2 max-w-md`}>
                   {isSync ? (<>
                     <label className="text-sm block">소스 경로
                       <input aria-label="소스 경로" className={field} value={pathDraft}
@@ -558,46 +764,11 @@ export function BatchDetail() {
             </>)}
           </div>
         ))}
-        {/* 현재 항목 CSV: 항목이 있을 때만 — 빈 목록의 헤더 한 줄 CSV 는 소음이다 */}
-        {b && (b.items ?? []).length > 0 && (
-          <CurrentItemsCsv operation={isSync ? "sync" : "scan"}
-                           items={b.items ?? []} />
-        )}
-        {/* 항목 추가: 경로만 입력 — 스토리지는 첫 항목에서 물려받는다(동질성 계약).
-            종단 배치에 추가하면 서버가 재활성화(scan→Running/sync→Previewing)하고
-            신규 Queued 항목만 실행된다. 항목이 없으면 물려받을 스토리지가 없어
-            폼 대신 안내를 보인다(빈 배치는 삭제·재생성이 동선). */}
-        {b && ((b.items ?? []).length > 0 ? (
-          <div className="border-t border-black/5 mt-2 pt-3 space-y-2 max-w-md">
-            {isSync ? (<>
-              <label className="text-sm block">추가할 소스 경로
-                <input aria-label="추가할 소스 경로" className={field} value={addPath}
-                       onChange={(e) => setAddPath(e.target.value)} />
-              </label>
-              <label className="text-sm block">추가할 목적지 경로
-                <input aria-label="추가할 목적지 경로" className={field} value={addDst}
-                       onChange={(e) => setAddDst(e.target.value)} />
-              </label>
-            </>) : (
-              <label className="text-sm block">추가할 대상 경로
-                <input aria-label="추가할 대상 경로" className={field} value={addPath}
-                       onChange={(e) => setAddPath(e.target.value)} />
-              </label>
-            )}
-            <Button disabled={addItem.isPending} onClick={submitAdd}>항목 추가</Button>
-            {addItem.isError && (
-              <p className="text-bad text-sm">{(addItem.error as ApiError).message}</p>
-            )}
-          </div>
-        ) : (
+        {/* 항목 0개: 도구 버튼(추가·CSV)이 전부 사라진 자리에 왜 없는지를 남긴다 —
+            물려받을 스토리지가 없어 항목 추가 자체가 불가능하다(빈 배치는 삭제·
+            재생성이 동선). */}
+        {b && !hasItems && (
           <p className="text-muted text-sm mt-2">항목이 없어 스토리지를 물려받을 수 없습니다 — 항목 추가는 새 배치로 하세요</p>
-        ))}
-        {/* CSV 전체 교체: 종단 배치 + 항목 존재(스토리지 상속원)일 때만 —
-            종단 배치는 항목이 있는 게 정상이라 사실상 종단 게이트다. */}
-        {b && terminal && firstPayload && (
-          <ReplaceItemsCsv batchId={batchId}
-                           operation={isSync ? "sync" : "scan"}
-                           firstPayload={firstPayload} />
         )}
       </Card>
     </section>

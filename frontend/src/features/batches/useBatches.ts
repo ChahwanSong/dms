@@ -74,9 +74,37 @@ function _itemMutation<A>(id: string, fn: (a: A) => Promise<unknown>) {
 export const useUpdateBatchItem = (id: string) =>
   _itemMutation(id, ({ seq, item }: { seq: number; item: Record<string, unknown> }) =>
     apiSend("PUT", `/api/admin/batches/${id}/items/${seq}`, item));
+const _deleteItem = (id: string, seq: number) =>
+  apiSend("DELETE", `/api/admin/batches/${id}/items/${seq}`);
 export const useDeleteBatchItem = (id: string) =>
-  _itemMutation(id, (seq: number) =>
-    apiSend("DELETE", `/api/admin/batches/${id}/items/${seq}`));
+  _itemMutation(id, (seq: number) => _deleteItem(id, seq));
+// 항목 다중 선택 삭제. 목록의 useDeleteBatches 와 같은 계약이다 — 요청 함수만
+// 공유하고(URL·메서드 중복 없음), Promise.allSettled 로 **부분 실패를 데이터로**
+// 돌려준다(isError 가 아니라 data.failed 가 실패의 자리). 한 건이 409
+// (그 사이 materialize 된 항목)여도 나머지 삭제는 이미 일어났고 유효하다 — 첫
+// 거절에서 throw 하면 화면이 몇 건이 지워졌는지 못 말한다. seq 는 재번호되지
+// 않아(서버 계약) 구멍이 생기는 건 정상이고, 병렬 삭제도 서로를 밀지 않는다.
+export interface BulkDeleteItemsResult {
+  ok: number[]; failed: { seq: number; message: string }[];
+}
+export const useDeleteBatchItems = (id: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (seqs: number[]): Promise<BulkDeleteItemsResult> => {
+      const settled = await Promise.allSettled(seqs.map((s) => _deleteItem(id, s)));
+      const r: BulkDeleteItemsResult = { ok: [], failed: [] };
+      settled.forEach((s, i) => {
+        if (s.status === "fulfilled") r.ok.push(seqs[i]);
+        // ApiError.message 는 이미 reasonText(사유 코드) 를 거친 문구다.
+        else r.failed.push({ seq: seqs[i], message: s.reason instanceof ApiError
+                             ? s.reason.message : String(s.reason) });
+      });
+      return r;
+    },
+    onSettled: () => { qc.invalidateQueries({ queryKey: ["batch", id] });
+                       qc.invalidateQueries({ queryKey: ["batches"] }); },
+  });
+};
 export const useAddBatchItem = (id: string) =>
   _itemMutation(id, (item: Record<string, unknown>) =>
     apiSend("POST", `/api/admin/batches/${id}/items`, item));
