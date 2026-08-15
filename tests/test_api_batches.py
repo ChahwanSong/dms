@@ -712,6 +712,154 @@ def test_replace_items_route_does_not_shadow_single_item_put(client):
     assert r.status_code == 200 and r.json()["payload"]["target"] == "edited"
 
 
+# --- 항목 선택 재실행(items:rerun): 부분 성공 모델 — 가능한 것만 재큐잉하고
+#     나머지는 skipped 로 **보고**한다(조용한 성공 금지) ---
+
+def test_rerun_items_on_completed_batch_requeues_only_selected(client):
+    _admin(client)
+    bid = _completed_scan_batch(client, statuses=("Succeeded", "Failed", "Succeeded"))
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0, 2]})
+    assert r.status_code == 200
+    assert r.json() == {"requeued": 2, "skipped": [], "status": "Running"}
+    repo = client.app.state.repos.batches
+    statuses = [it["status"] for it in repo.list_items(bid)]
+    assert statuses == ["Queued", "Failed", "Queued"]      # 고르지 않은 항목은 무접촉
+    b = repo.get(bid)
+    # 카운터는 절대값 재계산 — Succeeded 2건이 빠졌고 Failed 1건은 그대로다
+    assert b["succeeded_count"] == 0 and b["failed_count"] == 1
+    assert b["status"] == "Running"                        # 종단 배치는 재활성화
+
+
+def test_rerun_items_clears_request_link_and_reason(client):
+    _admin(client)
+    bid = _completed_scan_batch(client, statuses=("Failed",))
+    repo = client.app.state.repos.batches
+    repo.set_item_materialized(bid, 0, "req-0")
+    repo.set_item_status(bid, 0, "Failed", reason_code="execution_failed")
+    client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0]})
+    it = repo.get_item(bid, 0)
+    # 재실행은 미실행으로 되돌리는 것 — 옛 요청·사유를 남기면 거짓 기록이다
+    assert it["status"] == "Queued"
+    assert it["request_id"] is None and it["reason_code"] is None
+
+
+def test_rerun_items_reactivates_completed_sync_batch_to_previewing(client):
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = client.post("/api/admin/batches", json={"operation": "sync", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"source_storage": "s1", "source": "a",
+        "destination_storage": "s2", "destination": "b"}]}).json()["batch_id"]
+    repo.set_item_status(bid, 0, "Succeeded")
+    repo.set_status(bid, "Completed")
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0]})
+    # :rescan 의 상태 분기 재사용 — sync 는 preview 부터 다시 탄다
+    assert r.status_code == 200 and r.json()["status"] == "Previewing"
+    assert repo.get(bid)["status"] == "Previewing"
+
+
+def test_rerun_items_on_previewready_batch_reactivates_preview(client):
+    # PreviewReady 는 orchestrator 가 굴리지 않는 상태(list_active 밖)라, 되돌린
+    # 항목이 영원히 Queued 로 남지 않게 preview 로 되돌린다
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = client.post("/api/admin/batches", json={"operation": "sync", "max_concurrency": 1,
+        "options": {}, "note": None, "items": [{"source_storage": "s1", "source": "a",
+        "destination_storage": "s2", "destination": "b"}]}).json()["batch_id"]
+    repo.set_item_status(bid, 0, "Rejected")
+    repo.set_status(bid, "PreviewReady")
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0]})
+    assert r.status_code == 200 and r.json()["status"] == "Previewing"
+    assert repo.get(bid)["status"] == "Previewing"
+
+
+def test_rerun_items_on_active_batch_keeps_status_and_skips_nonterminal(client):
+    # 부분 성공: 진행 중 항목이 섞였다고 전체를 막지 않는다(여러 개 고를 때 하나
+    # 때문에 전부 막히면 불편하다) — 되돌릴 수 있는 것만 되돌리고 나머지는 보고
+    _admin(client)
+    repo = client.app.state.repos.batches
+    bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 2,
+        "options": {}, "note": None, "items": [{"storage": "s1", "target": f"t{i}"}
+        for i in range(3)]}).json()["batch_id"]
+    repo.set_item_materialized(bid, 0, "req-0")
+    repo.set_item_status(bid, 0, "Failed", reason_code="execution_failed")
+    repo.bump_counts(bid, failed=1)
+    repo.set_item_materialized(bid, 1, "req-1")            # 진행 중
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0, 1, 2]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["requeued"] == 1
+    assert body["skipped"] == [{"seq": 1, "reason": "batch_item_not_rerunnable"},
+                               {"seq": 2, "reason": "batch_item_not_rerunnable"}]
+    assert body["status"] == "Running"                     # 이미 활성이면 상태 유지
+    items = repo.list_items(bid)
+    assert [it["status"] for it in items] == ["Queued", "Materialized", "Queued"]
+    assert repo.get(bid)["failed_count"] == 0
+
+
+def test_rerun_items_reports_missing_seq(client):
+    # 없는 seq 를 조용히 넘기면 "재실행됐다"는 거짓 성공이 된다 — 결과에 남긴다
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0, 99]})
+    assert r.status_code == 200
+    assert r.json()["requeued"] == 1
+    assert r.json()["skipped"] == [{"seq": 99, "reason": "batch_item_not_found"}]
+
+
+def test_rerun_items_all_skipped_keeps_batch_terminal(client):
+    # 아무것도 못 되돌렸으면 배치를 깨우지 않는다 — 돌 것이 없는데 Running 이면 거짓
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [99]})
+    assert r.status_code == 200 and r.json()["requeued"] == 0
+    assert r.json()["status"] == "Completed"
+    assert client.app.state.repos.batches.get(bid)["status"] == "Completed"
+
+
+def test_rerun_items_dedupes_repeated_seq(client):
+    # DB 가 신뢰 경계 — 같은 seq 를 두 번 보내도 한 번 센다(중복을 "실패"로 보고하면
+    # 사용자가 있지도 않은 문제를 본다)
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0, 0]})
+    assert r.status_code == 200
+    assert r.json() == {"requeued": 1, "skipped": [], "status": "Running"}
+
+
+def test_rerun_items_rejects_empty_selection(client):
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": []})
+    assert r.status_code == 422 and r.json()["detail"] == "empty_selection"
+    assert client.app.state.repos.batches.get(bid)["status"] == "Completed"
+
+
+def test_rerun_items_404_and_maintenance(client):
+    _admin(client)
+    r = client.post("/api/admin/batches/nope/items:rerun", json={"seqs": [0]})
+    assert r.status_code == 404 and r.json()["detail"] == "batch_not_found"
+    bid = _completed_scan_batch(client)
+    client.put("/api/admin/control-state",
+               json={"maintenance": True, "drain": False, "reason": None})
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [0]})
+    assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
+def test_rerun_items_requires_admin(client):
+    r = client.post("/api/admin/batches/b/items:rerun", json={"seqs": [0]})
+    assert r.status_code == 401
+
+
+def test_rerun_items_route_does_not_shadow_add_item(client):
+    # 라우트 충돌 실측: …/items:rerun 은 마지막 세그먼트가 리터럴 "items" 와 달라
+    # 항목 추가 POST(…/items)와 겹치지 않는다
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    r = client.post(f"/api/admin/batches/{bid}/items",
+                    json={"storage": "s1", "target": "added"})
+    assert r.status_code == 202 and r.json()["seq"] == 2
+
+
 # --- 배치 삭제: 종단 배치만 — 활성은 "취소 먼저"가 동선 ---
 
 def test_delete_completed_batch_removes_rows(client):

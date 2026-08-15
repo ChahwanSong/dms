@@ -249,6 +249,49 @@ def test_delete_batch_preserves_child_requests(db):
     assert req is not None and req["batch_id"] == bid
 
 
+# --- 선택 재실행: 호출자가 준 seq 목록 중 **종단 항목만** Queued 로 되돌린다 ---
+
+def test_reset_items_to_queued_only_terminal_and_recounts(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=4, status="Running")
+    repos.batches.set_item_materialized(bid, 0, "req-0")
+    repos.batches.set_item_status(bid, 0, "Succeeded")
+    repos.batches.set_item_materialized(bid, 1, "req-1")
+    repos.batches.set_item_status(bid, 1, "Failed", reason_code="x")
+    repos.batches.set_item_materialized(bid, 2, "req-2")          # 비종단
+    repos.batches.bump_counts(bid, succeeded=1, failed=1)
+    # seq 3 은 Queued(비종단), seq 2 는 Materialized(비종단) — 둘 다 걸러야 한다
+    done = repos.batches.reset_items_to_queued(bid, [0, 1, 2, 3])
+    assert done == [0, 1]
+    items = repos.batches.list_items(bid)
+    for it in items[:2]:
+        assert it["status"] == "Queued"
+        assert it["request_id"] is None and it["reason_code"] is None
+    assert items[2]["status"] == "Materialized" and items[2]["request_id"] == "req-2"
+    b = repos.batches.get(bid)
+    # 카운터는 감산 분기 복제가 아니라 절대값 재계산(_recount) — 행이 진실이다
+    assert b["succeeded_count"] == 0 and b["failed_count"] == 0
+    assert b["item_count"] == 4
+
+
+def test_reset_items_to_queued_ignores_missing_seq_and_leaves_counts(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=1, status="Completed")
+    repos.batches.set_item_status(bid, 0, "Succeeded")
+    repos.batches.bump_counts(bid, succeeded=1)
+    assert repos.batches.reset_items_to_queued(bid, [99]) == []
+    # 아무것도 안 되돌렸으면 카운터도 무접촉 — 없는 seq 가 카운터를 흔들면 안 된다
+    assert repos.batches.get(bid)["succeeded_count"] == 1
+
+
+def test_reset_items_to_queued_empty_list_is_noop(db):
+    repos = Repositories(db)
+    bid = _edit_batch(repos, n=1, status="Completed")
+    repos.batches.set_item_status(bid, 0, "Cancelled")
+    assert repos.batches.reset_items_to_queued(bid, []) == []
+    assert repos.batches.get_item(bid, 0)["status"] == "Cancelled"
+
+
 def test_requests_create_with_batch_id(db):
     repos = Repositories(db)
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin",

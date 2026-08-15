@@ -175,6 +175,9 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
 # 편집은 require_admin 뒤의 운영 행위라 생성 게이트를 재통과시킬 새 재료가 없다.
 
 _TERMINAL_BATCH = ("Completed", "Cancelled")
+# repositories.batches._ACTIVE 의 거울: orchestrator 가 실제로 굴리는 상태
+# (list_active). PreviewReady 는 여기 없다 — 확인 대기는 루프 밖이다.
+_ACTIVE_BATCH = ("Previewing", "Running")
 
 
 def _get_batch_or_404(request, batch_id):
@@ -283,6 +286,79 @@ def add_batch_item(batch_id: str, body: dict, request: Request,
         status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
         repo.set_status(batch_id, status)
     return {"seq": seq, "status": status}
+
+
+class RerunItemsBody(BaseModel):
+    seqs: list[int]
+
+
+# 항목 재실행 가능 집합 = batch_orchestrator._ITEM_TERMINAL(종단 item). 비종단
+# (Queued/Materialized)을 되돌리면 살아있는 자식과 이중 실행이 된다.
+_TERMINAL_ITEM = ("Succeeded", "Failed", "Rejected", "Cancelled")
+# skipped 사유(응답 **본문**의 데이터라 HTTPException detail 이 아니다 — 부분
+# 성공은 오류가 아니다). 화면이 reasonText 로 옮기므로 reasonCodes.json /
+# REASON_MESSAGES 양측 등록 대상이다(AST 추출기는 detail=/reason_code= 키워드만
+# 읽어 이 자리를 못 본다 — 등록은 수기).
+_SKIP_NOT_FOUND = "batch_item_not_found"
+_SKIP_NOT_RERUNNABLE = "batch_item_not_rerunnable"
+
+
+@router.post("/api/admin/batches/{batch_id}/items:rerun")
+def rerun_batch_items(batch_id: str, body: RerunItemsBody, request: Request,
+                      identity: Identity = Depends(require_admin)):
+    """항목 **선택** 재실행 — 고른 seq 만 Queued 로 되돌린다(:rerun-failed 는 실패
+    전부, :rescan 은 전체라 "이 몇 개만"을 표현할 수단이 없었다).
+
+    **부분 성공 모델**(전체 409 가 아니라): 진행 중(Queued/Materialized) 항목이나
+    없는 seq 가 섞이면 그 항목만 skipped 로 돌려주고 나머지는 되돌린다. 여러 개를
+    고르는 동선에서 하나 때문에 전부 막히면 사용자는 무엇이 문제인지도 모른 채
+    다시 고르게 되는데, 되돌릴 수 있는 것과 없는 것의 판정은 서버만 안다(화면은
+    낡은 폴링 스냅샷을 본다) — 그래서 "가능한 것은 하고, 못 한 것은 **말한다**".
+    없는 seq 를 조용히 넘기지 않는 것도 같은 이유다(조용한 성공 금지).
+    종단 판정은 읽고-쓰기가 아니라 repo 의 SQL 원자 가드(WHERE status IN 종단)다 —
+    orchestrator(5s 틱)와의 경합에서 진 항목도 skipped 로 떨어진다.
+
+    배치 상태: :rescan 의 분기를 그대로 재사용(scan→Running / sync→Previewing).
+    조건이 "종단 배치"가 아니라 "**활성이 아닌 배치**"인 이유는 PreviewReady 다 —
+    list_active 밖이라 orchestrator 가 굴리지 않으므로, 그대로 두면 되돌린 항목이
+    확인(:confirm) 전까지 Queued 인 채 방치된다. Previewing 으로 되돌리면 새
+    항목이 preview 를 다시 타고 전원 previewed 가 되면 orchestrator 가 스스로
+    PreviewReady 로 복귀시킨다(자기 치유). 이미 활성(Running/Previewing)이면
+    무접촉 — 도는 루프가 Queued 를 집는다(add_item 의 결정과 같다).
+    되돌린 것이 0 이면 상태도 안 건드린다: 돌 것이 없는데 Running 이면 거짓이다."""
+    reject_when_maintenance(request)
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    # 빈 선택은 422 — empty_batch("배치에 항목이 없습니다")를 재사용하지 않는 이유:
+    # 배치엔 항목이 있고 비어 있는 건 **선택**이라, 그 문구는 화면에서 거짓이 된다.
+    if len(body.seqs) == 0:
+        raise HTTPException(status_code=422, detail="empty_selection")
+    status_by_seq = {it["seq"]: it["status"] for it in repo.list_items(batch_id)}
+    # 중복 seq 는 접는다(순서 유지) — DB 가 신뢰 경계라 목록이 집합이라고 믿지
+    # 않는다. 접지 않으면 두 번째 UPDATE 가 (이미 Queued 라) 가드에 걸려 "재실행
+    # 불가"로 보고돼, 사용자가 있지도 않은 문제를 본다.
+    seqs = list(dict.fromkeys(body.seqs))
+    skipped, candidates = [], []
+    for seq in seqs:
+        st = status_by_seq.get(seq)
+        if st is None:
+            skipped.append({"seq": seq, "reason": _SKIP_NOT_FOUND})
+        elif st not in _TERMINAL_ITEM:
+            skipped.append({"seq": seq, "reason": _SKIP_NOT_RERUNNABLE})
+        else:
+            candidates.append(seq)
+    requeued = repo.reset_items_to_queued(batch_id, candidates)
+    # 위 스냅샷에선 종단이었는데 UPDATE 가 못 잡은 항목 = 그 사이 상태가 바뀐
+    # 경합 패배(또는 동시 삭제) — 성공으로 셀 수 없으니 같은 사유로 보고한다.
+    lost = set(candidates) - set(requeued)
+    if lost:
+        skipped = sorted(skipped + [{"seq": s, "reason": _SKIP_NOT_RERUNNABLE}
+                                    for s in lost], key=lambda d: d["seq"])
+    status = b["status"]
+    if len(requeued) > 0 and status not in _ACTIVE_BATCH:
+        status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
+        repo.set_status(batch_id, status)
+    return {"requeued": len(requeued), "skipped": skipped, "status": status}
 
 
 @router.post("/api/admin/batches/{batch_id}:confirm")

@@ -271,6 +271,41 @@ class BatchesRepository:
                 {"now": utc_now_iso(), "b": batch_id})
         return len(rows)
 
+    # 반환 annotation 이 문자열인 이유: 클래스 본문 스코프에서 `list` 는 이 클래스의
+    # list() 메서드라, 따옴표 없이 쓰면 def 시점에 'function' object is not
+    # subscriptable 로 죽는다(실측).
+    def reset_items_to_queued(self, batch_id, seqs) -> "list[int]":
+        """선택 재실행: 호출자가 준 seq 목록 중 **종단 항목만** Queued 로 되돌리고
+        실제로 되돌린 seq 를 돌려준다(부분 성공 모델 — 나머지의 사유 분류는
+        라우트 몫).
+        reset_all_items/reset_failed_items 와 달리 대상이 **필터가 아니라 목록**이라
+        종단 판정을 SELECT 로 미리 읽지 않고 UPDATE 의 WHERE 에 실어 원자적으로
+        건다 — 읽고 나서 쓰면 그 사이 orchestrator(5s 틱)가 항목을 materialize/
+        종단화할 수 있다(update_item_payload 의 only_queued 가드와 같은 이유,
+        방향만 반대다). 영향 행 0 = 없는 seq 이거나 비종단 — 호출자가 판별한다.
+        카운터는 bump(감산)가 아니라 _recount(절대값): 되돌린 항목이 Succeeded /
+        Failed|Rejected / Cancelled 중 무엇이었는지에 따라 감산 분기가 갈리는데,
+        그 분기를 여기서 또 복제하면 드리프트 원천이다(_recount docstring 의
+        "행이 진실" 결정 재사용). 전체 리셋(reset_all_items)의 0 리셋도 못 쓴다 —
+        고르지 않은 종단 항목의 카운트는 살아 있어야 한다.
+        되돌린 것이 하나도 없으면 _recount 도 건너뛴다: 카운터를 안 흔드는 것이
+        무접촉의 정의고, updated_at 만 튀는 것도 거짓 변경 기록이다."""
+        done = []
+        with self._db.transaction():
+            for seq in seqs:
+                n = self._db.execute_count(
+                    # IN 목록 = batch_orchestrator._ITEM_TERMINAL 과 같은 집합
+                    """UPDATE batch_items SET status = 'Queued', request_id = NULL,
+                           reason_code = NULL, updated_at = :now
+                         WHERE batch_id = :b AND seq = :s
+                           AND status IN ('Succeeded','Failed','Rejected','Cancelled')""",
+                    {"now": utc_now_iso(), "b": batch_id, "s": seq})
+                if n > 0:
+                    done.append(seq)
+            if len(done) > 0:
+                self._recount(batch_id)
+        return done
+
     def reset_failed_items(self, batch_id) -> int:
         with self._db.transaction():
             rows = self._db.query(
