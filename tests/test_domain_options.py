@@ -71,8 +71,26 @@ def test_unknown_option_rejected():
     assert e.value.reason_code == "unknown_option"
 
 
+@pytest.mark.parametrize("value", [1, 10_000_000])
+def test_sync_batch_files_bounds_ok(value):
+    # 상한 1,000만(사용자 조정 2026-08-16): 대규모 sync 에서 100만 단위 배치가 좁아
+    # 한 자리 열었다. 도구 파싱(parse_uint64)은 uint64 전체를 받으므로 이 상한은
+    # 도구 제약이 아니라 DMS 위생 상한이다.
+    assert validate_options(Operation.SYNC, {"batch_files": value}) \
+        == {"batch_files": value}
+
+
+@pytest.mark.parametrize("value", [0, 10_000_001, "5", True])
+def test_sync_batch_files_out_of_range(value):
+    # 하한 1 유지: dsync 의 0(=배칭 안 함)은 DMS 에서 **키 생략**으로 표현한다
+    # (표현이 둘이면 요약·화면이 갈린다). scan 의 batch_files 는 별개 스펙(0 허용).
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SYNC, {"batch_files": value})
+    assert e.value.reason_code == "invalid_option"
+
+
 @pytest.mark.parametrize("opts", [
-    {"batch_files": 0}, {"bufsize": 100}, {"delete": "yes"},
+    {"bufsize": 100}, {"delete": "yes"},
     {"chmod": "999999"}, {"chown": "bad name"},
 ])
 def test_sync_invalid_values(opts):

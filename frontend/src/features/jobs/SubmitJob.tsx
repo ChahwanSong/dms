@@ -13,9 +13,10 @@ import { ApiError } from "../../lib/api";
 // field·StoragePicker 는 formFields.tsx 로 이사(슬라이스 31 T3) -- T4 위저드화 때
 // 이 파일이 통째로 갈려도 SubmitScan·ScanPaths 가 흔들리지 않게 결합을 끊었다.
 import { StoragePicker, field } from "./formFields";
-// 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError)는 optionRules.ts 로 이사(슬라이스 32
-// T8) -- BatchCreate 옵션 스텝과 공유한다(사본이면 미러가 발산한다).
-import { CHMOD_RE, CHOWN_RE, intFieldError } from "./optionRules";
+// 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
+// optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션 스텝과 공유한다
+// (사본이면 미러가 발산한다).
+import { CHMOD_RE, CHOWN_RE, SYNC_INT_FIELDS, syncIntFieldError } from "./optionRules";
 
 type Operation = "sync" | "rm";
 
@@ -28,8 +29,12 @@ const initial = {
   recursive: true, stat: false, lite: false, quiet: false,
   // 고급 sync 옵션 — 숫자도 문자열로 들고, 빈 문자열("")일 때만 "미입력"으로 생략한다.
   // truthy 검사 금지: "0"은 미입력이 아니라 범위 밖 클라이언트 검증 오류다.
+  // batchFiles·bufsize 는 프리필(SYNC_INT_FIELDS.prefill — 「왜」는 그 주석):
+  // 값이 실려 있으니 손대지 않으면 바디에 그대로 나간다. 지우면 옛 계약대로 생략.
   openNoatime: false,
-  batchFiles: "", bufsize: "", chmod: "", chown: "",
+  batchFiles: SYNC_INT_FIELDS.batch_files.prefill,
+  bufsize: SYNC_INT_FIELDS.bufsize.prefill,
+  chmod: "", chown: "",
   priority: "mid",
   ownerUsername: "",
 };
@@ -64,9 +69,9 @@ export function SubmitJob() {
   const statLiteConflict = f.operation === "rm" && f.stat && f.lite;
   // 고급 옵션은 sync 전용이라 rm 으로 바꾸면(전송도 안 되므로) 차단 사유에서 빠진다.
   const batchFilesError = f.operation === "sync"
-    ? intFieldError("batch_files", f.batchFiles, 1, 1_000_000) : null;
+    ? syncIntFieldError("batch_files", f.batchFiles) : null;
   const bufsizeError = f.operation === "sync"
-    ? intFieldError("bufsize", f.bufsize, 4096, 1_073_741_824) : null;
+    ? syncIntFieldError("bufsize", f.bufsize) : null;
   const chmodError = f.operation === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.operation === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
@@ -208,21 +213,33 @@ export function SubmitJob() {
                         <input type="checkbox" aria-label="open_noatime" checked={f.openNoatime}
                                onChange={on("openNoatime")} /> open_noatime
                       </label>
-                      <label className="text-sm block">batch_files (1..1,000,000)
+                      {/* 프리필 계약: 값이 미리 채워져 있고(placeholder 가 아니다)
+                          비우면 키가 빠져 도구 기본으로 돌아간다 — placeholder 는
+                          "비웠을 때 무슨 일이 나는가"를, 캡션은 "지금 채워진 값이
+                          무엇인가"를 말한다(둘이 다른 정보다). */}
+                      <label className="text-sm block">batch_files (선택 · 1..10,000,000)
                         <input aria-label="batch_files" className={field} value={f.batchFiles}
+                               placeholder="비우면 배칭 안 함(도구 기본)"
                                onChange={on("batchFiles")} />
                       </label>
+                      <p className="text-muted text-xs">
+                        미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).
+                      </p>
                       {batchFilesError && <p className="text-bad text-sm">{batchFilesError}</p>}
-                      <label className="text-sm block">bufsize (바이트, 4096..1,073,741,824)
+                      <label className="text-sm block">bufsize (선택 · 바이트, 4096..1,073,741,824)
                         <input aria-label="bufsize" className={field} value={f.bufsize}
+                               placeholder="비우면 4 MiB(도구 기본)"
                                onChange={on("bufsize")} />
                       </label>
+                      <p className="text-muted text-xs">
+                        미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).
+                      </p>
                       {bufsizeError && <p className="text-bad text-sm">{bufsizeError}</p>}
-                      <label className="text-sm block">chmod (예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
+                      <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
                         <input aria-label="chmod" className={field} value={f.chmod} onChange={on("chmod")} />
                       </label>
                       {chmodError && <p className="text-bad text-sm">{chmodError}</p>}
-                      <label className="text-sm block">chown (user:group 또는 uid:gid)
+                      <label className="text-sm block">chown (선택 · user:group 또는 uid:gid)
                         <input aria-label="chown" className={field} value={f.chown}
                                placeholder="예: 10003:10000 또는 cocoa.song:mig"
                                onChange={on("chown")} />
@@ -267,10 +284,25 @@ export function SubmitJob() {
                 </select>
               </label>
 
+              {/* 라벨 정정(사용자 결정 2026-08-16): 이 값(owner_username)은 결과물의
+                  소유자 기록이 아니라 **잡의 실행 신원**이다 — identity.py
+                  resolve_job_identity 가 `owner = owner_username or requester_id`
+                  로 잡의 신원을 정하고, 그 신원이 runAsUser·DMS_JR_USERNAME·
+                  auto-chown 을 좌우한다. 캡션은 서버 게이트 두 개를 그대로 옮긴다:
+                  ① 요청자 본인과 다른 신원은 특권 인가가 있어야 한다(routes_requests
+                  403 privileged_not_authorized), ② 특권 경로는 LDAP 조회를 건너뛰고
+                  uid 0(root)로 실행한다 — LDAP 에 없는 계정을 신원으로 쓸 수 있는
+                  유일한 경로다. */}
               {isAdmin && (
-                <label className="text-sm block">관리자 특권 실행(root)
-                  <input aria-label="관리자 특권 실행(root)" className={field} value={f.ownerUsername} onChange={on("ownerUsername")} />
-                  <p className="text-muted text-xs mt-1">root로 실행되며, 입력한 사용자는 소유자로 기록됩니다</p>
+                <label className="text-sm block">실행 신원(선택)
+                  <input aria-label="실행 신원(선택)" className={field}
+                         placeholder="예: cocoa.song"
+                         value={f.ownerUsername} onChange={on("ownerUsername")} />
+                  <p className="text-muted text-xs mt-1">
+                    비우면 요청자 본인으로 실행됩니다. 다른 사용자를 지정하려면 특권
+                    요청자여야 하며, 그때 잡은 root 로 실행되고 지정한 사용자 신원으로
+                    파일을 다룹니다(LDAP 에 없는 계정도 지정할 수 있습니다).
+                  </p>
                   {f.operation === "rm" && (
                     <p className="text-bad text-xs">삭제가 root 권한으로 수행됩니다</p>
                   )}
@@ -317,7 +349,7 @@ export function SubmitJob() {
                   </div>
                   {isAdmin && f.ownerUsername.trim() !== "" && (
                     <div className="flex gap-2">
-                      <dt className="w-24 shrink-0 text-muted">소유자(특권)</dt>
+                      <dt className="w-24 shrink-0 text-muted">실행 신원</dt>
                       <dd>{f.ownerUsername.trim()}</dd>
                     </div>
                   )}

@@ -6,6 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { SubmitJob } from "./SubmitJob";
+import { SYNC_INT_FIELDS } from "./optionRules";
 import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
 
@@ -19,6 +20,14 @@ const storageRows: UserStorage[] = [
 ];
 const meUser: Me = { actor: "alice", role: "user" };
 const meAdmin: Me = { actor: "root", role: "admin" };
+
+// sync 고급 숫자 옵션의 프리필 기본값(사용자 조정 2026-08-16) — 폼이 값을 미리
+// 채우므로 바디에 **항상** 실린다. 리터럴이 아니라 단일 출처를 읽어 폼과 테스트가
+// 같은 값을 보게 한다(사본이면 프리필을 바꿀 때 테스트가 조용히 낡는다).
+const SYNC_NUM_DEFAULTS = {
+  batch_files: Number(SYNC_INT_FIELDS.batch_files.prefill),
+  bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill),
+};
 
 const server = setupServer(
   http.get("/api/auth/me", () => HttpResponse.json(meUser)),
@@ -124,7 +133,10 @@ test("sync 제출 바디가 정확하다", async () => {
     operation: "sync",
     source_storage: "cephfs", source: "a/b",
     destination_storage: "cephfs-secondary", destination: "c/d",
-    options: {},
+    // 계약 변경(사용자 조정 2026-08-16): batch_files·bufsize 는 폼이 **프리필**해
+    // 항상 명시 전송된다. 예전엔 빈값이라 키가 통째로 빠졌다 — 지우면 다시 빠진다
+    // (아래 "고급 숫자 옵션을 지우면…" 테스트가 그 성질을 지킨다).
+    options: SYNC_NUM_DEFAULTS,
     priority: "mid",
   });
 });
@@ -201,14 +213,17 @@ test("stat과 lite를 동시에 체크하면 다음이 비활성이고 강제 su
   expect(screen.queryByRole("heading", { name: "요청 상세" })).not.toBeInTheDocument();
 });
 
-test("특권 필드는 옵션 스텝에서 관리자에게만 보인다", async () => {
+// 라벨 정정(사용자 결정 2026-08-16): 이 값(owner_username)은 아티팩트 소유자가
+// 아니라 **잡의 실행 신원**을 정한다(identity.resolve_job_identity — owner =
+// owner_username or requester_id). 필드는 그대로, 라벨·캡션만 사실에 맞춘다.
+test("실행 신원 필드는 옵션 스텝에서 관리자에게만 보인다", async () => {
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   const { unmount } = renderPage();
   await screen.findByLabelText("연산");
   await clickNext();
   await goToOptions();
   await screen.findByLabelText("우선순위");
-  expect(screen.queryByLabelText("관리자 특권 실행(root)")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
   unmount();
 
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
@@ -216,7 +231,24 @@ test("특권 필드는 옵션 스텝에서 관리자에게만 보인다", async 
   await screen.findByLabelText("연산");
   await clickNext();
   await goToOptions();
-  expect(await screen.findByLabelText("관리자 특권 실행(root)")).toBeInTheDocument();
+  expect(await screen.findByLabelText("실행 신원(선택)")).toBeInTheDocument();
+  // 캡션은 "소유자 기록"이 아니라 실행 신원을 말한다 — 비우면 요청자 본인.
+  expect(screen.getByText(
+    "비우면 요청자 본인으로 실행됩니다. 다른 사용자를 지정하려면 특권 요청자여야 하며, "
+    + "그때 잡은 root 로 실행되고 지정한 사용자 신원으로 파일을 다룹니다"
+    + "(LDAP 에 없는 계정도 지정할 수 있습니다).",
+  )).toBeInTheDocument();
+});
+
+// 선택 필드 표기 통일(사용자 지시 2026-08-16): 비워도 되는 입력은 라벨에 (선택).
+test("비워도 되는 sync 옵션 입력은 라벨에 (선택) 이 붙는다", async () => {
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  expect(screen.getByText("batch_files (선택 · 1..10,000,000)")).toBeInTheDocument();
+  expect(screen.getByText("bufsize (선택 · 바이트, 4096..1,073,741,824)")).toBeInTheDocument();
+  expect(screen.getByText(
+    "chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)")).toBeInTheDocument();
+  expect(screen.getByText("chown (선택 · user:group 또는 uid:gid)")).toBeInTheDocument();
 });
 
 test("스토리지 목록 로드가 실패하면 대상 스텝에 오류가 뜨고 제출이 비활성이다", async () => {
@@ -267,14 +299,41 @@ async function goToOptionsAndOpenAdvanced() {
   await userEvent.click(screen.getByText("고급 옵션"));
 }
 
-test("고급 옵션 전부 미입력 제출이면 options에 고급 키 5종이 실리지 않는다", async () => {
+// 프리필 계약(사용자 조정 2026-08-16): batch_files·bufsize 는 placeholder 가 아니라
+// **실제 값**으로 미리 채워져 있고, 그래서 손대지 않아도 바디에 실린다.
+// batch_files 1,000,000 은 도구 기본(0 = 배칭 안 함)과 **다른 동작**이라 이건
+// 의도된 정책이고, bufsize 4194304 는 도구 기본(4 MiB)과 같은 값의 명시다.
+test("고급 숫자 옵션은 실제 값으로 프리필돼 있다(placeholder 아님)", async () => {
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  expect(screen.getByLabelText("batch_files")).toHaveValue(
+    SYNC_INT_FIELDS.batch_files.prefill);
+  expect(screen.getByLabelText("bufsize")).toHaveValue(
+    SYNC_INT_FIELDS.bufsize.prefill);
+  // 비웠을 때 무슨 일이 나는지는 placeholder·캡션이 말한다(빈값 = 도구 기본).
+  expect(screen.getByLabelText("batch_files"))
+    .toHaveAttribute("placeholder", "비우면 배칭 안 함(도구 기본)");
+  expect(screen.getByLabelText("bufsize"))
+    .toHaveAttribute("placeholder", "비우면 4 MiB(도구 기본)");
+  expect(screen.getByText(
+    "미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).",
+  )).toBeInTheDocument();
+  expect(screen.getByText(
+    "미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).",
+  )).toBeInTheDocument();
+});
+
+test("고급 숫자 옵션을 지우면 그 키가 바디에서 빠진다(도구 기본으로 복귀)", async () => {
   const captured = captureSubmit();
   renderPage();
   await goToOptionsAndOpenAdvanced();
+  await userEvent.clear(screen.getByLabelText("batch_files"));
+  await userEvent.clear(screen.getByLabelText("bufsize"));
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  // 빈 문자열은 "미입력"이라 통째로 생략된다 — 기존 checkedOptions(bool 4종) 회귀 겸.
+  // 빈 문자열은 "미입력"이라 통째로 생략된다 — 프리필이 생겨도 이 성질은 남는다
+  // (사용자가 배칭을 끄는 유일한 표현이다). bool 4종 checkedOptions 회귀 겸.
   expect(captured.body.options).toEqual({});
 });
 
@@ -286,7 +345,7 @@ test("open_noatime 체크는 options.open_noatime === true 로 전송된다", as
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual({ open_noatime: true });
+  expect(captured.body.options).toEqual({ ...SYNC_NUM_DEFAULTS, open_noatime: true });
 });
 
 test("chmod·chown 문자열이 그대로 전송된다", async () => {
@@ -298,7 +357,8 @@ test("chmod·chown 문자열이 그대로 전송된다", async () => {
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual({ chmod: "D770,F660", chown: "alice:proj" });
+  expect(captured.body.options).toEqual(
+    { ...SYNC_NUM_DEFAULTS, chmod: "D770,F660", chown: "alice:proj" });
 });
 
 test("숫자 uid:gid chown 이 즉답 오류 없이 그대로 전송된다", async () => {
@@ -313,19 +373,35 @@ test("숫자 uid:gid chown 이 즉답 오류 없이 그대로 전송된다", asy
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual({ chown: "10003:10000" });
+  expect(captured.body.options).toEqual({ ...SYNC_NUM_DEFAULTS, chown: "10003:10000" });
 });
 
 test("batch_files·bufsize 숫자 입력은 number 로 전송된다", async () => {
   const captured = captureSubmit();
   renderPage();
   await goToOptionsAndOpenAdvanced();
+  // 프리필 값을 지우고 사용자가 직접 넣는다 — 프리필은 기본이지 잠금이 아니다.
+  await userEvent.clear(screen.getByLabelText("batch_files"));
   await userEvent.type(screen.getByLabelText("batch_files"), "1000");
+  await userEvent.clear(screen.getByLabelText("bufsize"));
   await userEvent.type(screen.getByLabelText("bufsize"), "4096");
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(captured.body.options).toEqual({ batch_files: 1000, bufsize: 4096 });
+});
+
+test("batch_files 상한은 1,000만 — 그 값은 통과, 넘으면 즉답 문구 + 다음 비활성", async () => {
+  // 서버 _OPTION_SPECS[SYNC] 상한(사용자 조정 2026-08-16: 100만 → 1,000만)의 미러.
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  await userEvent.clear(screen.getByLabelText("batch_files"));
+  await userEvent.type(screen.getByLabelText("batch_files"), "10000000");
+  expect(screen.queryByText(/batch_files는/)).toBeNull();
+  await userEvent.type(screen.getByLabelText("batch_files"), "0");   // → 1,000만 초과
+  expect(screen.getByText("batch_files는 1..10000000 범위의 정수여야 합니다"))
+    .toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
 });
 
 test("잘못된 chmod는 다음을 비활성으로 막고 필드별 문구를 띄운다", async () => {
@@ -339,6 +415,7 @@ test("잘못된 chmod는 다음을 비활성으로 막고 필드별 문구를 �
 test("범위 밖 bufsize는 다음을 비활성으로 막는다", async () => {
   renderPage();
   await goToOptionsAndOpenAdvanced();
+  await userEvent.clear(screen.getByLabelText("bufsize"));
   await userEvent.type(screen.getByLabelText("bufsize"), "100");
   expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
   expect(screen.getByText("bufsize는 4096..1073741824 범위의 정수여야 합니다")).toBeInTheDocument();

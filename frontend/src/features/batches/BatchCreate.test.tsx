@@ -7,6 +7,14 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchCreate } from "./BatchCreate";
+import { SYNC_INT_FIELDS } from "../jobs/optionRules";
+
+// sync 고급 숫자 옵션의 프리필 기본값(사용자 조정 2026-08-16) — 단건 폼과 **같은**
+// 단일 출처(optionRules)를 읽는다. 프리필이라 sync 배치 바디엔 항상 실린다.
+const SYNC_NUM_DEFAULTS = {
+  batch_files: Number(SYNC_INT_FIELDS.batch_files.prefill),
+  bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill),
+};
 
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
@@ -155,7 +163,10 @@ test("verbose+quiet 상충: 즉답 문구 + 다음 비활성", async () => {
   expect(next()).toBeDisabled();
 });
 
-test("실행 제어 스텝: 특권 실행 고정 안내문 + 소유자 기록 입력이 바디·요약에 실린다", async () => {
+// 라벨 정정(사용자 결정 2026-08-16): owner_username 은 아티팩트 소유자 기록이
+// 아니라 **잡의 실행 신원**이다(identity.resolve_job_identity). 필드·계약은 그대로,
+// 라벨·캡션만 사실에 맞춘다 — 특권 실행 고정 안내문과 모순되지 않게.
+test("실행 제어 스텝: 특권 실행 고정 안내문 + 실행 신원 입력이 바디·요약에 실린다", async () => {
   const captured = captureCreate();
   renderPage();
   await userEvent.click(next());
@@ -164,19 +175,22 @@ test("실행 제어 스텝: 특권 실행 고정 안내문 + 소유자 기록 �
   await userEvent.click(next());                              // → 실행 제어
   // 통일 특권 게이트(routes_batches): 배치는 전부 관리자 특권(root) 실행 — 고정 안내
   expect(screen.getByText("이 배치는 관리자 특권(root)으로 실행됩니다.")).toBeInTheDocument();
-  await userEvent.type(screen.getByLabelText("소유자 기록(선택)"), "alice");
+  expect(screen.getByText(
+    "비우면 생성자 본인 신원으로 실행됩니다. 지정하면 그 사용자 신원으로 파일을 "
+    + "다룹니다(LDAP 에 없는 계정도 지정할 수 있습니다).")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "alice");
   await userEvent.click(next());                              // → 확인·제출
   // 확인 스텝 요약 = 제출 바디 파생 + 특권 실행 표시(고정 행)
   expect(screen.getByText("실행 권한")).toBeInTheDocument();
   expect(screen.getByText("관리자 특권(root)")).toBeInTheDocument();
-  expect(screen.getByText("소유자 기록")).toBeInTheDocument();
+  expect(screen.getByText("실행 신원")).toBeInTheDocument();
   expect(screen.getByText("alice")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
   expect(captured.body).toMatchObject({ owner_username: "alice" });
 });
 
-test("소유자 기록이 빈값이면 owner_username 키 부재 — 특권 실행 표시는 항상", async () => {
+test("실행 신원이 빈값이면 owner_username 키 부재 — 특권 실행 표시는 항상", async () => {
   const captured = captureCreate();
   renderPage();
   await userEvent.click(next());
@@ -184,7 +198,7 @@ test("소유자 기록이 빈값이면 owner_username 키 부재 — 특권 실�
   await userEvent.type(screen.getByLabelText("1행 경로"), "a");
   await userEvent.click(next());
   await userEvent.click(next());
-  expect(screen.queryByText("소유자 기록")).toBeNull();       // 빈값 = 요약 행 부재(기본: 생성자)
+  expect(screen.queryByText("실행 신원")).toBeNull();         // 빈값 = 요약 행 부재(기본: 생성자)
   expect(screen.getByText("관리자 특권(root)")).toBeInTheDocument();  // 특권 표시는 고정
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
@@ -238,7 +252,7 @@ test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => 
   expect(screen.getByLabelText("batch_files"))
     .toHaveAttribute("placeholder", "기본 1000000 · 0 = 배칭 끔");
   expect(screen.getByLabelText("broken_limit")).toHaveAttribute("placeholder", "기본 100");
-  expect(screen.getByLabelText("소유자 기록(선택)")).toHaveAttribute("placeholder", "예: cocoa.song");
+  expect(screen.getByLabelText("실행 신원(선택)")).toHaveAttribute("placeholder", "예: cocoa.song");
   expect(screen.getByLabelText("노드 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
   expect(screen.getByLabelText("노드당 프로세스 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
   expect(screen.getByLabelText("동시 실행 상한")).toHaveAttribute("placeholder", "예: 2");
@@ -259,8 +273,13 @@ test("placeholder 힌트(sync): 소스·목적지·CSV(2열 멀티라인)·고�
   expect(screen.getByLabelText("CSV")).toHaveAttribute(
     "placeholder", "team/dataset,backup/dataset\nprojects/alpha,backup/alpha");
   await userEvent.click(next());                              // → 실행 제어
-  expect(screen.getByLabelText("batch_files")).toHaveAttribute("placeholder", "예: 1000");
-  expect(screen.getByLabelText("bufsize")).toHaveAttribute("placeholder", "예: 1048576");
+  await userEvent.click(screen.getByText("고급 옵션"));
+  // 프리필이 생긴 뒤 placeholder 의 일은 "예시"가 아니라 **비웠을 때 무슨 일이
+  // 나는가"다(사용자 지시 2026-08-16) — 빈값의 의미를 그 자리에서 말한다.
+  expect(screen.getByLabelText("batch_files"))
+    .toHaveAttribute("placeholder", "비우면 배칭 안 함(도구 기본)");
+  expect(screen.getByLabelText("bufsize"))
+    .toHaveAttribute("placeholder", "비우면 4 MiB(도구 기본)");
   expect(screen.getByLabelText("chmod")).toHaveAttribute("placeholder", "예: D770,F660");
   expect(screen.getByLabelText("chown")).toHaveAttribute(
     "placeholder", "예: 10003:10000 또는 cocoa.song:mig");
@@ -452,7 +471,8 @@ test("sync 기본 제출: open_noatime 기본 ON — 바디에 true 명시, 확�
   expect(screen.getByText("옵션").closest("div")).toHaveTextContent("open_noatime");
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
-  expect(captured.body.options).toEqual({ open_noatime: true });
+  // 계약 변경(사용자 조정 2026-08-16): batch_files·bufsize 프리필이 함께 실린다.
+  expect(captured.body.options).toEqual({ ...SYNC_NUM_DEFAULTS, open_noatime: true });
 });
 
 test("sync open_noatime 체크 해제: 키 생략(기존 bool 옵션 직렬화 관례)", async () => {
@@ -463,7 +483,72 @@ test("sync open_noatime 체크 해제: 키 생략(기존 bool 옵션 직렬화 �
   await userEvent.click(next());
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
-  expect(captured.body.options).toEqual({});
+  expect(captured.body.options).toEqual(SYNC_NUM_DEFAULTS);
+});
+
+// 프리필 계약(사용자 조정 2026-08-16): 단건 폼과 동일 — 실제 값이 미리 채워지고,
+// 지우면 키가 빠져 도구 기본(배칭 안 함 / 4 MiB)으로 돌아간다.
+test("sync 고급 숫자 옵션 프리필 — 값·placeholder·캡션, 지우면 키가 빠진다", async () => {
+  const captured = captureCreate();
+  renderPage();
+  await toSyncControls();
+  await userEvent.click(screen.getByText("고급 옵션"));
+  expect(screen.getByLabelText("batch_files")).toHaveValue(
+    SYNC_INT_FIELDS.batch_files.prefill);
+  expect(screen.getByLabelText("bufsize")).toHaveValue(
+    SYNC_INT_FIELDS.bufsize.prefill);
+  expect(screen.getByText(
+    "미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).",
+  )).toBeInTheDocument();
+  expect(screen.getByText(
+    "미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).")).toBeInTheDocument();
+
+  await userEvent.clear(screen.getByLabelText("batch_files"));
+  await userEvent.clear(screen.getByLabelText("bufsize"));
+  await userEvent.click(next());
+  await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.options).toEqual({ open_noatime: true });
+});
+
+test("sync batch_files 상한 1,000만 — 넘으면 즉답 문구 + 다음 비활성", async () => {
+  renderPage();
+  await toSyncControls();
+  await userEvent.click(screen.getByText("고급 옵션"));
+  await userEvent.type(screen.getByLabelText("batch_files"), "0");   // 1000000 → 10000000
+  expect(screen.queryByText(/batch_files는/)).toBeNull();
+  await userEvent.type(screen.getByLabelText("batch_files"), "0");   // → 1,000만 초과
+  expect(screen.getByText("batch_files는 1..10000000 범위의 정수여야 합니다"))
+    .toBeInTheDocument();
+  expect(next()).toBeDisabled();
+});
+
+// 선택 필드 표기 통일(사용자 지시 2026-08-16): 비워도 되는 입력은 라벨에 (선택).
+test("실행 제어의 선택 입력들이 라벨에 (선택) 을 단다(scan)", async () => {
+  renderPage();
+  await toScanControls();
+  expect(screen.getByText("batch_files (선택 · 0..1,000,000,000 · 0 = 배칭 끔)"))
+    .toBeInTheDocument();
+  expect(screen.getByText(
+    "broken_limit (선택 · 0..10,000 · 리포트에 보관할 파손 경로 수)")).toBeInTheDocument();
+  expect(screen.getByText("노드 수 (선택 · 1..64, 빈값 = 정책 기본)")).toBeInTheDocument();
+  expect(screen.getByText("노드당 프로세스 수 (선택 · 1..64, 빈값 = 정책 기본)"))
+    .toBeInTheDocument();
+  expect(screen.getByText("배치 이름(선택)")).toBeInTheDocument();
+  expect(screen.getByText("메모(선택)")).toBeInTheDocument();
+  // 동시 실행 상한은 항상 바디에 실리는 값이라 (선택) 이 아니다 — 표기 남발 금지.
+  expect(screen.getByText("동시 실행 상한 (1..64)")).toBeInTheDocument();
+});
+
+test("실행 제어의 선택 입력들이 라벨에 (선택) 을 단다(sync 고급)", async () => {
+  renderPage();
+  await toSyncControls();
+  await userEvent.click(screen.getByText("고급 옵션"));
+  expect(screen.getByText("batch_files (선택 · 1..10,000,000)")).toBeInTheDocument();
+  expect(screen.getByText("bufsize (선택 · 바이트, 4096..1,073,741,824)")).toBeInTheDocument();
+  expect(screen.getByText(
+    "chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)")).toBeInTheDocument();
+  expect(screen.getByText("chown (선택 · user:group 또는 uid:gid)")).toBeInTheDocument();
 });
 
 test("scan 배치엔 open_noatime 무관 — options 에 키 부재(sync 전용)", async () => {

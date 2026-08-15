@@ -140,7 +140,17 @@ _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {
     Operation.SYNC: {
         "delete": _BOOL, "contents": _BOOL, "direct": _BOOL,
         "open_noatime": _BOOL, "quiet": _BOOL,
-        "batch_files": ("int", 1, 1_000_000),
+        # batch_files 상한 1,000만(사용자 조정 2026-08-16): 대규모 sync 에서 100만
+        # 단위 배치가 좁았다. 도구 파싱(parse_uint64)은 uint64 전체를 받으므로 이
+        # 상한은 도구 제약이 아니라 DMS 위생 상한이다. 하한 1 유지 — dsync 의
+        # 0(=배칭 안 함, mfu_flist_copy.c:3361 기본값)은 DMS 에서 **키 생략**으로
+        # 표현한다(표현이 둘이면 요약·화면이 갈린다). scan 의 batch_files 는 별개
+        # 스펙(dscan 0..10억, 0 허용)이라 이 조정과 무관하다.
+        #
+        # 기본값을 서버가 박지 않는 이유: 박는 순간 "빈값 = 플래그 생략 = 도구 기본"
+        # 이라는 표현 자체가 사라진다(사용자가 배칭을 끌 방법이 없어진다). 프리필은
+        # 폼(optionRules.SYNC_INT_FIELDS)이 하고, 서버는 받은 것만 검증한다.
+        "batch_files": ("int", 1, 10_000_000),
         "bufsize": ("int", 4096, 1_073_741_824),
         "chmod": ("chmod",), "chown": ("chown",),
     },

@@ -8,7 +8,9 @@ import { useUserStorages } from "../storages/useUserStorages";
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
 import { StoragePicker, field } from "../jobs/formFields";
-import { CHMOD_RE, CHOWN_RE, intFieldError } from "../jobs/optionRules";
+import {
+  CHMOD_RE, CHOWN_RE, SYNC_INT_FIELDS, intFieldError, syncIntFieldError,
+} from "../jobs/optionRules";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { InfoPanel } from "../../components/ui/InfoPanel";
@@ -39,7 +41,8 @@ const initial = {
   storage: "", srcStorage: "", dstStorage: "",
   // scan 옵션(SubmitScan 미러 — dscan 1b93d54 실측 전부. top_k는 신버전에서
   // 기능 삭제라 함께 제거). scanBatchFiles는 sync의 batchFiles와 별도 상태 —
-  // 같은 옵션명이지만 범위가 다르다(scan 0..10억·0 = 배칭 끔, sync 1..100만).
+  // 같은 옵션명이지만 범위도 프리필도 다르다(scan 0..10억·0 = 배칭 끔·프리필 없음,
+  // sync 1..1,000만·1,000,000 프리필).
   scanBatchFiles: "", brokenLimit: "", verbose: false, quiet: false,
   // sync 옵션(SubmitJob 미러, 정규식·범위는 optionRules 공유). 단 open_noatime 은
   // 배치만 기본 ON(사용자 승인): 배치는 통일 게이트로 항상 특권(root) 실행이라
@@ -48,12 +51,17 @@ const initial = {
   // 명시적으로 켠다. 단건 sync(SubmitJob)는 비특권 경로에서 타인 소유 파일
   // O_NOATIME open 이 EPERM 이라 기본 OFF — 배치와 다른 게 맞다(고급 옵션
   // <details> 기본 접힘이어도 바디에 실리는 진실은 이 초기값이다).
+  // batchFiles·bufsize 프리필은 단건 폼과 같은 단일 출처(SYNC_INT_FIELDS) —
+  // 「왜 도구 기본과 다른 값을 명시 전송하는가」는 그 주석에 있다.
   delete: false, contents: false, direct: false,
-  openNoatime: true, batchFiles: "", bufsize: "", chmod: "", chown: "",
+  openNoatime: true,
+  batchFiles: SYNC_INT_FIELDS.batch_files.prefill,
+  bufsize: SYNC_INT_FIELDS.bufsize.prefill,
+  chmod: "", chown: "",
   // 실행 제어: priority "" = "(정책 기본)" = 바디에서 생략(null≠0).
   // nodeCount/procsPerNode "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
   priority: "", nodeCount: "", procsPerNode: "", mc: 2, note: "", name: "",
-  // 소유자 기록: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자). 특권 여부와
+  // 실행 신원: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자 본인). 특권 여부와
   // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
 };
@@ -92,9 +100,9 @@ export function BatchCreate() {
   const brokenLimitError = f.op === "scan"
     ? intFieldError("broken_limit", f.brokenLimit, 0, 10_000) : null;
   const batchFilesError = f.op === "sync"
-    ? intFieldError("batch_files", f.batchFiles, 1, 1_000_000) : null;
+    ? syncIntFieldError("batch_files", f.batchFiles) : null;
   const bufsizeError = f.op === "sync"
-    ? intFieldError("bufsize", f.bufsize, 4096, 1_073_741_824) : null;
+    ? syncIntFieldError("bufsize", f.bufsize) : null;
   const chmodError = f.op === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.op === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
@@ -232,7 +240,7 @@ export function BatchCreate() {
       ...(f.nodeCount.trim() !== "" && { node_count: Number(f.nodeCount.trim()) }),
       ...(f.procsPerNode.trim() !== ""
           && { procs_per_node: Number(f.procsPerNode.trim()) }),
-      // 소유자 기록: 빈값은 키 생략 = 서버 NULL(기본: 생성자) — 특권 게이트는
+      // 실행 신원: 빈값은 키 생략 = 서버 NULL(기본: 생성자 본인) — 특권 게이트는
       // owner 유무와 무관하게 항상 발동한다(통일 게이트).
       ...(f.ownerUsername.trim() !== "" && { owner_username: f.ownerUsername.trim() }),
     };
@@ -401,14 +409,14 @@ export function BatchCreate() {
           <div className="space-y-3">
             {f.op === "scan" ? (
               <>
-                <label className="text-sm block">batch_files (0..1,000,000,000 · 0 = 배칭 끔)
+                <label className="text-sm block">batch_files (선택 · 0..1,000,000,000 · 0 = 배칭 끔)
                   <input aria-label="batch_files" type="number" min={0} max={1000000000}
                          placeholder="기본 1000000 · 0 = 배칭 끔"
                          className={field} value={f.scanBatchFiles}
                          onChange={on("scanBatchFiles")} />
                 </label>
                 {scanBatchFilesError && <p className="text-bad text-sm">{scanBatchFilesError}</p>}
-                <label className="text-sm block">broken_limit (0..10,000 · 리포트에 보관할 파손 경로 수)
+                <label className="text-sm block">broken_limit (선택 · 0..10,000 · 리포트에 보관할 파손 경로 수)
                   <input aria-label="broken_limit" type="number" min={0} max={10000}
                          placeholder="기본 100"
                          className={field} value={f.brokenLimit}
@@ -458,24 +466,34 @@ export function BatchCreate() {
                       기본 켬 — 배치는 특권(root) 실행이라 O_NOATIME 권한 제약이 없고,
                       소스 atime 오염을 막아 데이터 온도(hot/cold) 통계를 정직하게 유지합니다.
                     </p>
-                    <label className="text-sm block">batch_files (1..1,000,000)
-                      <input aria-label="batch_files" placeholder="예: 1000"
+                    {/* 프리필 계약(단건 폼과 동일 문구): 값이 미리 채워져 있고
+                        비우면 키가 빠져 도구 기본으로 돌아간다 — placeholder 는
+                        "비웠을 때", 캡션은 "지금 채워진 값"을 말한다. */}
+                    <label className="text-sm block">batch_files (선택 · 1..10,000,000)
+                      <input aria-label="batch_files"
+                             placeholder="비우면 배칭 안 함(도구 기본)"
                              className={field} value={f.batchFiles}
                              onChange={on("batchFiles")} />
                     </label>
+                    <p className="text-muted text-xs">
+                      미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).
+                    </p>
                     {batchFilesError && <p className="text-bad text-sm">{batchFilesError}</p>}
-                    <label className="text-sm block">bufsize (바이트, 4096..1,073,741,824)
-                      <input aria-label="bufsize" placeholder="예: 1048576"
+                    <label className="text-sm block">bufsize (선택 · 바이트, 4096..1,073,741,824)
+                      <input aria-label="bufsize" placeholder="비우면 4 MiB(도구 기본)"
                              className={field} value={f.bufsize}
                              onChange={on("bufsize")} />
                     </label>
+                    <p className="text-muted text-xs">
+                      미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).
+                    </p>
                     {bufsizeError && <p className="text-bad text-sm">{bufsizeError}</p>}
-                    <label className="text-sm block">chmod (예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
+                    <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
                       <input aria-label="chmod" placeholder="예: D770,F660"
                              className={field} value={f.chmod} onChange={on("chmod")} />
                     </label>
                     {chmodError && <p className="text-bad text-sm">{chmodError}</p>}
-                    <label className="text-sm block">chown (user:group 또는 uid:gid)
+                    <label className="text-sm block">chown (선택 · user:group 또는 uid:gid)
                       <input aria-label="chown" placeholder="예: 10003:10000 또는 cocoa.song:mig"
                              className={field} value={f.chown} onChange={on("chown")} />
                     </label>
@@ -505,18 +523,26 @@ export function BatchCreate() {
             </label>
 
             {/* 통일 특권 게이트(routes_batches.create_batch): 배치는 전부 관리자
-                특권(root) 실행이다 — owner 입력은 특권 스위치가 아니라 소유자
-                기록(선택)일 뿐이므로 안내문은 입력과 무관하게 고정이다. 인가의
-                최종 심판은 서버 게이트(403 privileged_not_authorized). */}
+                특권(root) 실행이다 — owner 입력은 특권 스위치가 아니므로 안내문은
+                입력과 무관하게 고정이다. 인가의 최종 심판은 서버 게이트
+                (403 privileged_not_authorized). */}
             <p className="text-muted text-sm">이 배치는 관리자 특권(root)으로 실행됩니다.</p>
-            <label className="text-sm block">소유자 기록(선택)
-              <input aria-label="소유자 기록(선택)" placeholder="예: cocoa.song"
+            {/* 라벨 정정(사용자 결정 2026-08-16): 이 값은 결과물의 소유자 기록이
+                아니라 **잡의 실행 신원**이다(identity.resolve_job_identity —
+                owner = owner_username or requester_id). 실행이 root 라는 사실은
+                위 고정 안내문이 이미 말하므로 여기선 반복하지 않는다 — 캡션은
+                "누구의 신원으로 파일을 다루는가"만 말한다(문구 중복 = 소음). */}
+            <label className="text-sm block">실행 신원(선택)
+              <input aria-label="실행 신원(선택)" placeholder="예: cocoa.song"
                      className={field}
                      value={f.ownerUsername} onChange={on("ownerUsername")} />
-              <p className="text-muted text-xs mt-1">root 로 실행되며, 입력한 사용자가 소유자로 기록됩니다. 비우면 생성자가 소유자입니다</p>
+              <p className="text-muted text-xs mt-1">
+                비우면 생성자 본인 신원으로 실행됩니다. 지정하면 그 사용자 신원으로
+                파일을 다룹니다(LDAP 에 없는 계정도 지정할 수 있습니다).
+              </p>
             </label>
 
-            <label className="text-sm block">노드 수 (1..64, 빈값 = 정책 기본)
+            <label className="text-sm block">노드 수 (선택 · 1..64, 빈값 = 정책 기본)
               <input aria-label="노드 수" type="number" min={1} max={64} className={field}
                      placeholder="비우면 정책 기본"
                      value={f.nodeCount} onChange={on("nodeCount")} />
@@ -537,7 +563,7 @@ export function BatchCreate() {
             </label>
             {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
 
-            <label className="text-sm block">노드당 프로세스 수 (1..64, 빈값 = 정책 기본)
+            <label className="text-sm block">노드당 프로세스 수 (선택 · 1..64, 빈값 = 정책 기본)
               <input aria-label="노드당 프로세스 수" type="number" min={1} max={64}
                      className={field} placeholder="비우면 정책 기본"
                      value={f.procsPerNode} onChange={on("procsPerNode")} />
@@ -557,14 +583,14 @@ export function BatchCreate() {
             </label>
             {mcError && <p className="text-bad text-sm">{mcError}</p>}
 
-            {/* 이름은 목록·상세 헤더에 얹히는 식별자(선택), 메모는 자유 기록 —
-                역할이 달라 별도 입력이다. 빈값 = 이름 없음(키 생략, 서버 NULL). */}
+            {/* 이름은 목록·상세 헤더에 얹히는 식별자, 메모는 자유 기록 — 역할이
+                달라 별도 입력이다. 둘 다 빈값 = 없음(이름은 키 생략, 메모는 null). */}
             <label className="text-sm block">배치 이름(선택)
               <input aria-label="배치 이름" placeholder="예: 8월 정기 스캔 1차"
                      maxLength={120} className={field} value={f.name} onChange={on("name")} />
             </label>
 
-            <label className="text-sm block">메모
+            <label className="text-sm block">메모(선택)
               <input aria-label="메모" placeholder="예: 8월 정기 스캔"
                      className={field} value={f.note} onChange={on("note")} />
             </label>
@@ -605,15 +631,15 @@ export function BatchCreate() {
                     <dt className="w-28 shrink-0 text-muted">노드당 프로세스</dt>
                     <dd>{body.procs_per_node ?? "(정책 기본)"}</dd>
                   </div>
-                  {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관), 소유자
-                      기록 행은 값이 있을 때만(빈값 = 생성자 기본) */}
+                  {/* 특권 실행 표시는 고정 행(통일 게이트 — 입력과 무관), 실행
+                      신원 행은 값이 있을 때만(빈값 = 생성자 본인) */}
                   <div className="flex gap-2">
                     <dt className="w-28 shrink-0 text-muted">실행 권한</dt>
                     <dd>관리자 특권(root)</dd>
                   </div>
                   {body.owner_username && (
                     <div className="flex gap-2">
-                      <dt className="w-28 shrink-0 text-muted">소유자 기록</dt>
+                      <dt className="w-28 shrink-0 text-muted">실행 신원</dt>
                       <dd>{body.owner_username}</dd>
                     </div>
                   )}
