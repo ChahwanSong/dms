@@ -137,6 +137,21 @@ class RequestsRepository:
              "m": message, "sum": dump_json(summary) if summary is not None else None,
              "now": utc_now_iso()})
 
+    def result(self, request_id) -> dict | None:
+        """이 요청의 종단 결과 1행(results). 없으면 None.
+
+        None 을 "사유 없음"으로 단정하면 안 된다 — 두 가지 다른 사실이 겹친다:
+        (a) 아직 종단이 아니다(정상), (b) 종단인데 결과 행이 없다(슬라이스 27/30
+        이전, 전이와 results 가 별도 커밋이던 시절 사이 크래시가 남긴 영구 결손 —
+        finalize_from_job docstring). 그래서 화면 경로는 (b)에 대비해 전이 이력의
+        사유로 폴백한다(routes_requests.get_request).
+        summary 는 TEXT(JSON) 컬럼이라 get()의 payload 관례대로 파싱해서 준다."""
+        row = self._db.query_one("SELECT * FROM results WHERE request_id = :id",
+                                 {"id": request_id})
+        if row:
+            row["summary"] = load_json(row["summary"])
+        return row
+
     def transitions(self, request_id) -> list[dict]:
         return self._db.query(
             """SELECT * FROM state_transitions

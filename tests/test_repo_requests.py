@@ -47,6 +47,31 @@ def test_record_result_and_list(db):
     assert repo.list(requester_id="bob") == []
 
 
+def test_result_returns_the_terminal_row_with_the_summary_parsed(db):
+    # 요청 상세가 「사유」를 그리려면 results 행을 읽을 수단이 있어야 한다 — 지금까지
+    # 이 테이블을 읽는 코드는 배치 items 조인(SQL)뿐이라 요청 단건 조회가 없었다.
+    repo = RequestsRepository(db)
+    rid = _create(repo)
+    repo.set_state(rid, RequestState.FAILED, reason_code="execution_failed", actor="stepper")
+    repo.record_result(rid, RequestState.FAILED, reason_code="execution_failed",
+                       message="boom", summary={"files": 0})
+    row = repo.result(rid)
+    assert row["terminal_state"] == "Failed"
+    assert row["reason_code"] == "execution_failed"
+    assert row["message"] == "boom"
+    # summary 는 TEXT(JSON) 컬럼이다 — get()의 payload 관례대로 파싱해서 돌려준다.
+    assert row["summary"] == {"files": 0}
+    assert row["completed_at"]
+
+
+def test_result_is_none_when_the_request_has_not_finished(db):
+    # None = "결과 행 없음"이지 "사유 없음"이 아니다(null≠0 규약의 같은 결) —
+    # 호출자가 비종단과 결손을 구분할 수 있어야 한다.
+    repo = RequestsRepository(db)
+    assert repo.result(_create(repo)) is None
+    assert repo.result("nope") is None
+
+
 def test_last_reason_code_returns_the_terminal_transitions_reason(db):
     repo = RequestsRepository(db)
     rid = _create(repo)

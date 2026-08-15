@@ -21,6 +21,14 @@ export interface RequestDetail extends RequestRow {
   // 아니거나 필드 자체가 없을 수 있어 프론트는 방어적으로 정규화해야 한다.
   events?: DiagEvent[];
   events_truncated?: boolean;
+  // 요청 **자신의** 종단 결과(results 행 투영, routes_requests._attach_terminal_result).
+  // 잡의 reason_code 와 다른 축이다 -- 잡이 생기기 전에 거부된 요청은 잡이 없다.
+  // null = 아직 종단이 아니거나 결과 행이 없음(≠ "사유 없음"). optional 인 이유는
+  // events 와 같다: 응답에 필드가 없어도 화면이 죽지 않아야 한다.
+  reason_code?: string | null;
+  reason_message?: string | null;
+  terminal_state?: string | null;
+  completed_at?: string | null;
 }
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;

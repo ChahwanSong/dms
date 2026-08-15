@@ -1,3 +1,5 @@
+from dms.domain import DataJobState, RequestState
+
 ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
@@ -173,6 +175,73 @@ def test_request_detail_events_exactly_at_the_display_cap_is_not_truncated(clien
     assert body["events_truncated"] is False
     assert messages[0] == "boom0"
     assert messages[-1] == "boom99"
+
+
+def test_request_detail_carries_the_reason_of_a_planning_stage_rejection(client):
+    # 잡이 만들어지기 **전** 거부(플래너 어드미션)는 잡 행이 아예 없다 -- 화면이
+    # 잡의 reason_code 만 읽던 동안 이 사유들은 통째로 사라졌다(사용자 보고:
+    # "사전 점검에 실패했습니다"만 보인다). 요청 자신이 사유를 실어야 한다.
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    repos.requests.set_state_with_result(
+        rid, RequestState.REJECTED, reason_code="ldap_identity_not_found",
+        actor="planner")
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    assert body["reason_code"] == "ldap_identity_not_found"
+    assert body["terminal_state"] == "Rejected"
+    assert body["completed_at"]
+
+
+def test_request_detail_carries_the_reason_of_a_preflight_rejection(client):
+    # 잡이 있는 경로(스테퍼 finalize)도 같은 자리에서 읽혀야 한다 -- 요청 정보의
+    # 「사유」가 잡 카드의 사유와 다른 소스를 보면 둘이 어긋난다.
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    repos.requests.finalize_from_job(
+        rid, DataJobState.REJECTED, reason_code="source_not_readable", actor="stepper")
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    assert body["reason_code"] == "source_not_readable"
+    assert body["terminal_state"] == "Rejected"
+
+
+def test_request_detail_has_no_reason_while_the_request_is_not_terminal(client):
+    # 비종단은 null(아직 모른다)이지 ""(사유 없음)가 아니다 -- 키를 빼지 않고
+    # null 로 실어야 프론트가 "아직"과 "없음"을 구분할 수 있다.
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    assert body["reason_code"] is None
+    assert body["terminal_state"] is None
+    assert body["completed_at"] is None
+    assert body["reason_message"] is None
+
+
+def test_request_detail_falls_back_to_the_terminal_transition_when_results_is_missing(client):
+    # 슬라이스 27/30 이전에 종단이 된 요청은 "Rejected 인데 results 행이 없다"가
+    # 될 수 있었다(전이와 results 가 별도 커밋이던 시절의 영구 결손). 그 요청의
+    # 상세에서도 사유가 사라지면 안 된다 -- 전이 이력이 여전히 사유를 들고 있다.
+    repos = client.app.state.repos
+    rid = _pending_request(repos)
+    repos.requests.set_state(rid, RequestState.REJECTED,
+                             reason_code="no_eligible_nodes", actor="planner")
+    body = client.get(f"/api/user/requests/{rid}", headers=ADMIN).json()
+    assert body["reason_code"] == "no_eligible_nodes"
+    # 결과 행 자체가 없다는 사실은 숨기지 않는다 -- 사유만 전이에서 되살린다.
+    assert body["terminal_state"] is None
+    assert body["completed_at"] is None
+
+
+def test_request_detail_reason_does_not_leak_to_another_user(client):
+    # 사유가 새 필드로 늘었어도 소유권 게이트는 그대로다(타인 요청은 404).
+    _login(client, "alice")
+    rid = client.post("/api/user/requests", json={
+        "operation": "rm", "storage": "s1", "target": "a",
+        "options": {"recursive": True}}).json()["request_id"]
+    client.app.state.repos.requests.set_state_with_result(
+        rid, RequestState.REJECTED, reason_code="identity_denied", actor="planner")
+    client.post("/api/auth/logout")
+    _login(client, "eve")
+    assert client.get(f"/api/user/requests/{rid}").status_code == 404
 
 
 def test_list_limit_param_is_honored_and_capped(client):

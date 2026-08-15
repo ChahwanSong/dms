@@ -3,12 +3,17 @@ export const REASON_MESSAGES: Record<string, string> = {
   identity_denied: "차단 목록에 있는 신원입니다",
   ldap_not_configured: "LDAP이 설정되지 않았습니다",
   ldap_unavailable: "LDAP에 연결할 수 없습니다",
-  ldap_identity_not_found: "LDAP에서 사용자를 찾을 수 없습니다",
+  // 이 셋은 계획 단계 거부라 잡이 없다 -- 요청 상세의 「사유」가 생기기 전엔 화면
+  // 어디에도 안 나왔다(2026-08-16). 이제 사용자가 직접 읽으므로 "무엇을 하면 되는가"
+  // 까지 말한다: 코드 이름을 한국어로 옮기기만 한 문구는 운영자에게만 통한다.
+  ldap_identity_not_found: "LDAP에서 요청자 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다",
   missing_policy: "해당 도구의 정책이 없습니다",
   policy_disabled: "해당 도구의 정책이 비활성 상태입니다",
   // stepper / controller
   orphan_recovery: "컨트롤러 재시작으로 상태를 복구했습니다",
-  preflight_failed: "사전 점검에 실패했습니다",
+  // 마커 승격(d66)이 못 알아본 나머지만 여기로 접힌다 -- 이 문구만 보이면 사용자는
+  // 다음에 무엇을 볼지 모른다("이렇게만 나온다"는 사용자 보고 2026-08-16).
+  preflight_failed: "사전 점검에 실패했습니다 — 사전 점검 로그에서 자세한 사유를 확인하세요",
   execution_failed: "실행에 실패했습니다",
   empty_preview: "대상이 없습니다",
   preview_timed_out: "미리보기가 제한 시간을 넘겼습니다",
@@ -69,7 +74,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   privileged_not_authorized: "권한 있는 요청자가 아닙니다",
   resource_conflict: "동일 대상에 진행 중인 작업이 있습니다",
   no_eligible_nodes: "실행 가능한 노드가 없습니다",
-  no_ready_sync_candidate: "실행 가능한 노드가 없습니다",
+  // sync 전용 -- "후보 0"의 이유가 다르다: 노드는 있는데 **한 노드가 소스와 목적지를
+  // 동시에** 만족하지 못한 것이다(placement.select_tool_and_candidates). 두 코드에
+  // 같은 문구를 쓰면 사용자가 두 상황을 구분할 수 없다.
+  no_ready_sync_candidate: "소스와 목적지를 함께 다룰 수 있는 노드가 없습니다",
   storage_exists: "이미 존재하는 스토리지입니다",
   storage_in_use: "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)",
   storage_not_found: "스토리지를 찾을 수 없습니다",

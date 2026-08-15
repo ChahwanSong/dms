@@ -157,6 +157,18 @@ export function RequestDetail() {
           <span className="text-muted text-sm">{data.operation}</span>
         </div>
         <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-3">
+          {/* 사유(사용자 보고 2026-08-16): 실패한 요청에서 사용자가 가장 먼저 찾는
+              값이라 dl 의 첫 줄이다(상태 pill 바로 아래 = 상태→사유 순). 소스는
+              **요청 자신의** 종단 사유(백엔드가 results 행에서, 없으면 마지막 전이
+              에서 싣는다) — 잡의 reason_code 가 아니다: 잡이 만들어지기 전에 거부된
+              요청(플래너 어드미션)은 잡이 아예 없어 사유를 실을 곳이 없었다.
+              없으면(비종단·사유 없는 종단·구버전 응답) 줄 자체를 그리지 않는다 --
+              "—" 도 거짓 표시다(BatchDetail 항목 패널은 표 정렬 때문에 "—" 를 쓰지만
+              여기 dl 은 줄 수가 가변이라 생략이 더 정직하다). */}
+          {data.reason_code && (<>
+            <dt className="text-muted">사유</dt>
+            <dd className="text-bad">{reasonText(data.reason_code)}</dd>
+          </>)}
           {/* 대상: payload 가 담은 그대로(스토리지:상대경로). 완료된 작업을 볼 때
               화면 어디에도 무엇을 대상으로 돌았는지 없었다(사용자 보고). */}
           <dt className="text-muted">대상</dt>

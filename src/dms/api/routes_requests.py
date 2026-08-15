@@ -127,6 +127,44 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
     return request.app.state.repos.requests.list(requester_id=requester, limit=limit)
 
 
+# 요청 상태 문자열의 종단 집합. RequestState(...) 로 열거형을 거치지 않는 이유:
+# state 는 DB 에서 온 값이고 DB 는 신뢰 경계다 — 모르는 문자열 하나가 상세 화면
+# 전체를 500 으로 만들면 안 된다. 집합 밖은 "비종단"으로 fail-closed 처리된다.
+_TERMINAL_REQUEST_STATE_VALUES = frozenset(s.value for s in TERMINAL_REQUEST_STATES)
+
+
+def _attach_terminal_result(repo, row: dict) -> None:
+    """요청 자신의 종단 사유를 상세 응답에 싣는다(배치 items 조인의 평평한 관례를
+    미러 — request_state/files_count/completed_at 처럼 최상위 키다).
+
+    이게 없던 동안 화면은 **잡의** reason_code 만 읽었다: 잡이 만들어지기 전에
+    거부된 요청(플래너 어드미션 — ldap_identity_not_found·no_eligible_nodes·
+    storage_missing 등)은 잡 행이 아예 없어 사유가 화면에서 통째로 사라졌고,
+    잡이 있어도 「요청 정보」에는 사유 자리가 없었다(사용자 보고).
+
+    사유의 소스는 results 행이 1순위다(전이와 원자적으로 기록된다 — 같은
+    reason_code 이므로 전이와 어긋날 수 없다). results 행이 없는데 요청은 종단인
+    경우에만 마지막 전이의 사유로 폴백한다: 슬라이스 27/30 이전에 종단이 된 요청은
+    "Rejected 인데 results 없음"이 될 수 있었고, 그 요청도 사유를 잃으면 안 된다.
+    폴백은 사유만 되살린다 — terminal_state/completed_at 은 null 로 남겨 "결과 행
+    자체가 없다"는 사실을 숨기지 않는다.
+
+    비종단은 전부 null 이다(키를 빼지 않는다): null 은 "아직 모른다"이지 "사유
+    없음"이 아니다 — 프론트가 둘을 구분할 수 있어야 한다(null≠0 규약의 같은 결)."""
+    result = repo.result(row["request_id"])
+    row["terminal_state"] = result["terminal_state"] if result else None
+    row["completed_at"] = result["completed_at"] if result else None
+    # results.message 는 사유 코드에 딸린 자유 텍스트다. 최상위 "message" 는 무엇에
+    # 대한 메시지인지 모호해서(요청? 이벤트?) reason_message 로 이름을 붙인다.
+    row["reason_message"] = result["message"] if result else None
+    if result is not None:
+        row["reason_code"] = result["reason_code"]
+    elif row["state"] in _TERMINAL_REQUEST_STATE_VALUES:
+        row["reason_code"] = repo.last_reason_code(row["request_id"])
+    else:
+        row["reason_code"] = None
+
+
 @router.get("/api/user/requests/{request_id}")
 def get_request(request_id: str, request: Request,
                 identity: Identity = Depends(require_user)):
@@ -136,6 +174,7 @@ def get_request(request_id: str, request: Request,
                        and row["requester_id"] != identity.actor):
         raise HTTPException(status_code=404, detail="request_not_found")
     row["transitions"] = repo.transitions(request_id)
+    _attach_terminal_result(repo, row)
     # events_for_request 기본 limit(100)이 조용히 잘리면 운영자가 눈치채지 못한다 --
     # 스택된 요청이 매 컨트롤러 틱마다 같은 예외로 실패를 반복하면 100건을 넘기는 것도
     # 현실적이다(plan_error/step_error는 정확히 이런 루프에서 기록된다). 표시 상한보다

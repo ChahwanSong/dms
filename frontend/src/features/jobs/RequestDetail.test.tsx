@@ -409,3 +409,60 @@ test("실행 전이가 아직 없으면 제출 대기는 —", async () => {
   const dt = await screen.findByText("제출 대기");
   expect(dt.nextElementSibling).toHaveTextContent("—");
 });
+
+// --- 「요청 정보」의 사유(사용자 보고 2026-08-16): "사전 점검 실패 등의 실패 사유도
+// 요청 정보의 사유에 나오면 좋겠다". 지금까지 사유는 **잡 카드**에만 있었다 --
+// 잡이 만들어지기 전 거부(플래너 어드미션)는 잡 자체가 없어 화면에서 사유가 통째로
+// 사라졌다. 백엔드가 요청 상세에 종단 사유를 싣고(routes_requests), 화면은 그것을
+// 요청 정보 dl 의 첫 줄로 그린다.
+test("요청 정보에 종단 사유가 한국어 문구로 뜬다", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST, state: "Rejected", reason_code: "source_not_readable",
+      terminal_state: "Rejected", completed_at: "2026-08-05T00:01:30Z",
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+  );
+  renderAt();
+  const dt = await screen.findByText("사유");
+  expect(dt.nextElementSibling).toHaveTextContent(
+    "원본 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요");
+});
+
+test("잡이 하나도 없는 계획 단계 거부도 사유가 보인다", async () => {
+  // 이 경로가 이번 결함의 핵심이다 -- 잡 카드가 없으니 사유를 그릴 자리가
+  // 요청 정보 말고는 없었다.
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST, state: "Rejected", reason_code: "ldap_identity_not_found",
+      terminal_state: "Rejected", completed_at: "2026-08-05T00:00:05Z",
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+  );
+  renderAt();
+  expect(await screen.findByText("LDAP에서 요청자 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다"))
+    .toBeInTheDocument();
+});
+
+test("사유가 없으면(비종단·사유 없는 종단) 사유 줄 자체가 없다 — 거짓 표시 금지", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({
+      ...REQUEST, state: "Pending", reason_code: null,
+      terminal_state: null, completed_at: null,
+    })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+  );
+  renderAt();
+  await screen.findByText("전이 이력");
+  expect(screen.queryByText("사유")).toBeNull();
+});
+
+test("백엔드가 사유 필드를 아예 안 실어도 죽지 않는다(구버전 응답 방어)", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
+  );
+  renderAt();
+  await screen.findByText("전이 이력");
+  expect(screen.queryByText("사유")).toBeNull();
+});

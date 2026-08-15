@@ -201,7 +201,7 @@ test("계획 거부 사유 상위 표가 실패 사유와 분리돼 나오고 �
   // 실패 사유 상위(잡 실패)와 한 화면에 공존하되 다른 표다 -- 섞으면 라벨 거짓말.
   expect(screen.getByText("실패 사유 상위")).toBeInTheDocument();
   // 사유는 reasonText 매핑 재사용(실패 사유 표와 같은 한글화)
-  expect(screen.getByText("LDAP에서 사용자를 찾을 수 없습니다")).toBeInTheDocument();
+  expect(screen.getByText("LDAP에서 요청자 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다")).toBeInTheDocument();
   expect(screen.getByText("등록되지 않은 스토리지입니다")).toBeInTheDocument();
   // 캡션 정직화: 계획 거부는 data_jobs 가 없어 잡 통계 밖 -- 이 표가 그 구간이다.
   expect(screen.getByText(/계획 거부 3건/)).toBeInTheDocument();
