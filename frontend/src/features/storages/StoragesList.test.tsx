@@ -21,6 +21,17 @@ test("lists storages and shows manage actions", async () => {
   expect(screen.getByRole("button", { name: "스토리지 등록" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "삭제" })).toBeInTheDocument();
 });
+// 관리 디렉토리 컬럼(사용자 보고 2026-08-15): 표에 마운트만 있고 관리 디렉토리가
+// 없어, 운영자가 스토리지↔경로 매핑의 기준점을 이 화면에서 얻을 수 없었다.
+// (작업 등록·조회 화면의 절대경로 표시가 이 값을 뿌리로 쓴다.)
+test("관리 디렉토리 컬럼: managed_root 를 마운트와 나란히 보여준다", async () => {
+  server.use(http.get("/api/admin/storages", () => HttpResponse.json([S])));
+  wrap();
+  expect(await screen.findByText("관리 디렉토리")).toBeInTheDocument();   // 헤더
+  expect(screen.getByText("/cephfs/dms")).toBeInTheDocument();
+  expect(screen.getByText("/cephfs")).toBeInTheDocument();               // 마운트는 그대로
+});
+
 test("storage badges: Ready=ok, Degraded=busy, and actions td is not a flex cell", async () => {
   const ready = { ...S, storage_name: "st-ready", status: "Ready" };
   const degraded = { ...S, storage_name: "st-degraded", status: "Degraded" };

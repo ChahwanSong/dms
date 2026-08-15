@@ -8,7 +8,11 @@ import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchDetail } from "./BatchDetail";
 import { BatchesList } from "./BatchesList";
 import { parseItemsCsv } from "../../lib/csv";
-const server = setupServer();
+// 기본 스토리지 목록은 **빈 배열**이다: 화면이 절대경로 조합용으로 이 목록을
+// 부르는데(useStorageRoots), 기본이 없으면 모든 테스트가 MSW 미처리 경고를 뿜는다.
+// 빈 배열 = 뿌리 모름 = 절대경로 표시 없음이라 기존 단언에는 영향이 없다.
+const server = setupServer(
+  http.get("/api/user/storages", () => HttpResponse.json([])));
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 const batch = (over: any = {}) => ({ batch_id:"b1", operation:"sync", status:"PreviewReady",
   max_concurrency:2, item_count:1, succeeded_count:0, failed_count:0, note:null, created_at:"",
@@ -856,6 +860,38 @@ test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 �
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제" }));
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
   await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
+});
+
+// --- 절대경로 표시(사용자 보고 2026-08-15: "완료된 작업을 볼 때도 관리 디렉토리가
+// 안 보여서 정확한 path 를 알 수 없다"). payload 는 상대경로만 담고(서버 계약
+// 무변경), 화면이 **지금의** managed_root 로 조합한다. 뿌리는 관리자 응답에만
+// 실려 오므로 비관리자에겐 아무것도 안 뜬다.
+function storagesHandler(rows: object[]) {
+  return http.get("/api/user/storages", () => HttpResponse.json(rows));
+}
+const ROOTED = [{ storage_name: "s1", backend_type: "cephfs", status: "Ready",
+                  managed_root: "/cephfs/dms" }];
+
+test("항목 펼침: payload 아래 절대경로 행 + 행 요약 title 에도 절대경로", async () => {
+  server.use(storagesHandler(ROOTED), statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  // 접힌 행에서도 title 로 절대경로를 준다(본문 길이는 그대로 — 레이아웃 불변)
+  const summary = await screen.findByText("scan · s1:team");
+  await waitFor(() => expect(summary).toHaveAttribute("title", "/cephfs/dms/team"));
+  await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByText("절대경로")).toBeInTheDocument();
+  expect(screen.getByText("/cephfs/dms/team")).toBeInTheDocument();
+});
+
+test("managed_root 를 못 읽으면 절대경로 행도 title 도 없다", async () => {
+  server.use(storagesHandler([{ storage_name: "s1", backend_type: "cephfs", status: "Ready" }]),
+             statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  const summary = await screen.findByText("scan · s1:team");
+  await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
+  expect(screen.getByText("payload")).toBeInTheDocument();      // 펼침 완료
+  expect(screen.queryByText("절대경로")).toBeNull();
+  expect(summary).not.toHaveAttribute("title");
 });
 
 // --- 삭제 후 화면 갱신(사용자 보고 2026-08-15: "삭제 후 새로고침이 안되고 화면에

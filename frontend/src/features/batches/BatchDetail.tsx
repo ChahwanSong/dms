@@ -13,6 +13,8 @@ import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import { reasonText, ApiError } from "../../lib/api";
+import { absSummary } from "../../lib/storagePaths";
+import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant } from "../../lib/jobState";
 import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
 
@@ -532,6 +534,12 @@ export function BatchDetail() {
   const saveItem = (it: BatchItem) => updateItem.mutate(
     { seq: it.seq, item: itemBody(isSync, it.payload, pathDraft, dstDraft) },
     { onSuccess: () => setEditSeq(null) });
+  // 절대경로 조합용 스토리지 뿌리 맵. payload 에는 상대경로만 남으므로(서버 계약
+  // 무변경) 화면이 **지금의** managed_root 로 조합한다 — 기록에 절대경로를 박아
+  // 두면 스토리지 경로를 바꾼 뒤 없는 경로를 사실처럼 보인다. 관리자 응답에만
+  // 뿌리가 실려 오므로 비관리자에겐 빈 맵 = 절대경로 표시 없음(거짓 경로 금지).
+  const roots = useStorageRoots();
+  const absOf = (it: BatchItem) => absSummary(b?.operation, it.payload, roots);
   const firstPayload = b?.items?.[0]?.payload;
   const hasItems = (b?.items ?? []).length > 0;
   // --- 항목 다중 선택 삭제(목록 화면 일괄 삭제의 항목판 — 같은 UX 언어) ---
@@ -746,7 +754,10 @@ export function BatchDetail() {
                     같은 단이다 — text-xs 로는 곁다리 메타처럼 작아 보였다(사용자
                     지적). 경로·스토리지라 font-mono 는 유지(구분자·유사문자를
                     또렷하게), 크기만 한 단 올린다. */}
-                <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                {/* 절대경로는 title 로만 — 본문에 이어 붙이면 한 줄이 두 배로
+                    길어져 truncate 가 정작 대상 경로를 먹는다(좁은 자리 규칙). */}
+                <span className="min-w-0 flex-1 truncate font-mono text-sm"
+                      title={absOf(it) ?? undefined}>
                   {summarizeItem(b?.operation, it.payload)}
                 </span>
                 <StatusPill state={it.status} />
@@ -834,6 +845,12 @@ export function BatchDetail() {
                     <dd className="text-muted">{it.completed_at ?? "—"}</dd>
                     <dt className="text-muted">payload</dt>
                     <dd className="font-mono text-xs break-all">{JSON.stringify(it.payload)}</dd>
+                    {/* payload 의 상대경로를 지금의 managed_root 로 해석한 결과.
+                        뿌리를 모르면 줄 자체가 없다(거짓 경로 금지 — absOf 주석). */}
+                    {absOf(it) !== null && (<>
+                      <dt className="text-muted">절대경로</dt>
+                      <dd className="font-mono text-xs break-all">{absOf(it)}</dd>
+                    </>)}
                     <dt className="text-muted">요청</dt>
                     <dd>{it.request_id
                       ? <Link className="text-accent" to={`/jobs/${it.request_id}`}>요청 상세</Link>

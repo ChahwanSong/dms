@@ -8,7 +8,10 @@ import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { Dashboard } from "./Dashboard";
 import type { RequestRow } from "../../lib/types";
 
-const server = setupServer();
+// 기본 스토리지 목록은 빈 배열(= 뿌리 모름 = 절대경로 표시 없음) — 최근 작업 표가
+// useStorageRoots 로 이 목록을 부르므로 기본이 없으면 MSW 미처리 경고가 난다.
+const server = setupServer(
+  http.get("/api/user/storages", () => HttpResponse.json([])));
 beforeAll(() => server.listen());
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
@@ -202,6 +205,23 @@ test("최근 작업 표가 요청자·작업내용·요청시간을 보여준다
   expect(screen.getByText("sync · ceph-a:team/a → weka-b:team/b")).toBeInTheDocument();
   expect(screen.getByText("scan · ceph-a:team/data")).toBeInTheDocument();
   expect(screen.getByText("2026-08-12T09:00:00Z")).toBeInTheDocument();
+});
+
+// 절대경로(사용자 보고 2026-08-15): 좁은 표라 본문은 그대로 두고 title 로만 준다 —
+// 본문에 이어 붙이면 작업 열이 두 배로 길어져 표가 가로로 밀린다.
+test("작업 요약 셀의 title 에 절대경로 — 본문 문구는 그대로", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "ceph-a", backend_type: "cephfs", status: "Ready",
+      managed_root: "/ceph/dms" }])));
+  renderDash({ requests: [reqRow("req-scan")] });
+  const cell = (await screen.findByText("scan · ceph-a:team/data")).closest("td")!;
+  await waitFor(() => expect(cell).toHaveAttribute("title", "/ceph/dms/team/data"));
+});
+
+test("managed_root 를 못 읽으면(비관리자) title 도 없다", async () => {
+  renderDash({ requests: [reqRow("req-scan")] });     // 기본 목록엔 managed_root 없음
+  const cell = (await screen.findByText("scan · ceph-a:team/data")).closest("td")!;
+  expect(cell).not.toHaveAttribute("title");
 });
 
 test("완료시간은 종단 상태(Conflict 포함)에서만 updated_at, 비종단은 —", async () => {

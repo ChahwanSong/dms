@@ -86,15 +86,32 @@ def audit_log(request: Request, limit: int = 50):
     return request.app.state.repos.control.audit_entries(limit)
 
 
-# 사용자용 읽기 전용 목록. 제출 폼 드롭다운이 유일한 소비자다 — 경로(mount_path/
-# managed_root)와 운영 내부 정보(status_detail)는 담지 않는다. 비활성 스토리지는
+# 사용자용 읽기 전용 목록. 제출 폼 드롭다운이 유일한 소비자다 — 마운트 경로
+# (mount_path)와 운영 내부 정보(status_detail)는 담지 않는다. 비활성 스토리지는
 # 고를 수 없어야 하므로 제외하고, Degraded는 남긴다(어드미션 판단은 planner의 몫).
+#
+# managed_root 만 예외로 **관리자에게만** 싣는다(사용자 보고 2026-08-15: "스토리지
+# 이름은 보이는데 관리 디렉토리가 표시가 안 돼서 정확한 path 를 알 수가 없다").
+# 근거: 이 목록을 쓰는 화면 중 배치 생성 위저드·scan/sync 제출은 관리자 전용인데,
+# **입력 경로가 managed_root 기준 상대경로**라 뿌리를 모르면 어떤 절대경로에
+# 작업이 나가는지 화면 어디에서도 알 수 없다. 별도 admin 목록(/api/admin/storages)
+# 을 화면마다 겹쳐 부르는 대신 여기서 신원별로 한 필드를 더 싣는 쪽을 택했다 —
+# 피커·조회 화면이 쿼리 하나만 쓰고, 비관리자에게는 종전 은닉이 그대로 남는다
+# (테스트로 고정: test_non_admin_never_sees_managed_root).
 user_router = APIRouter()
 
 
 @user_router.get("/api/user/storages")
 def list_user_storages(request: Request, identity: Identity = Depends(require_user)):
     rows = request.app.state.repos.storages.list()
-    return [{"storage_name": r["storage_name"], "backend_type": r["backend_type"],
-             "status": r["status"]}
-            for r in rows if r["enabled"] == 1]
+    is_admin = identity.role == "admin"
+    out = []
+    for r in rows:
+        if r["enabled"] != 1:
+            continue
+        item = {"storage_name": r["storage_name"], "backend_type": r["backend_type"],
+                "status": r["status"]}
+        if is_admin:
+            item["managed_root"] = r["managed_root"]
+        out.append(item)
+    return out

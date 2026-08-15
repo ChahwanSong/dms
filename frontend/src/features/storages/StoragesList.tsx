@@ -41,14 +41,19 @@ export function StoragesList() {
       </div>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
         <Table>
-          <thead><tr className="text-muted"><th className="py-2">이름</th><th>백엔드</th><th>마운트</th><th>상태</th><th>활성</th><th>작업</th></tr></thead>
+          {/* 관리 디렉토리(managed_root)는 마운트 옆에 둔다: 잡이 실제로 도는 뿌리는
+              마운트가 아니라 이쪽이고(입력 경로는 이 아래 상대경로다), 운영자가
+              스토리지↔경로 매핑을 이 표 한 줄에서 읽는 기준점이 된다. */}
+          <thead><tr className="text-muted"><th className="py-2">이름</th><th>백엔드</th><th>마운트</th><th>관리 디렉토리</th><th>상태</th><th>활성</th><th>작업</th></tr></thead>
           <tbody>
             {(q.data ?? []).map((s) => (
               <tr key={s.storage_name} className="border-t border-black/5">
                 <td className="py-2">{s.storage_name}</td><td>{s.backend_type}</td>
                 {/* 스토리지 전용 storagePillVariant: Ready=ok, Degraded=busy(주의 --
                     planner 가 Degraded 에도 잡을 보낸다), Unknown 등=neutral. */}
-                <td className="text-muted">{s.mount_path}</td><td><StatusPill state={s.status} variant={storagePillVariant(s.status)} /></td>
+                <td className="text-muted">{s.mount_path}</td>
+                <td className="text-muted break-all">{s.managed_root}</td>
+                <td><StatusPill state={s.status} variant={storagePillVariant(s.status)} /></td>
                 <td>{s.enabled === 1 ? "on" : "off"}</td>
                 {/* td 를 flex 컨테이너로 만들지 않는다: td 가 flex 면 표 레이아웃 계산에서
                     빠져나와 다른 열과 폭을 못 나눠 갖는다(9fbef86 이 계정 표에서 걷어낸

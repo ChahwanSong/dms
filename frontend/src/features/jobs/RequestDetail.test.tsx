@@ -7,7 +7,10 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { RequestDetail } from "./RequestDetail";
 
-const server = setupServer();
+// 기본 스토리지 목록은 빈 배열(= 뿌리 모름 = 절대경로 표시 없음) — 화면이
+// useStorageRoots 로 이 목록을 부르므로 기본이 없으면 MSW 미처리 경고가 난다.
+const server = setupServer(
+  http.get("/api/user/storages", () => HttpResponse.json([])));
 beforeAll(() => server.listen());
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
@@ -351,6 +354,45 @@ test("잡 취소 성공 후 잡 목록이 즉시 갱신된다(무효화 접두 �
   renderAt();
   await userEvent.click(await screen.findByRole("button", { name: "취소" }));
   expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+});
+
+// --- 대상·절대경로(사용자 보고 2026-08-15): "완료된 작업을 볼 때도 관리 디렉토리가
+// 안 보여서 정확한 path 를 알 수 없다". payload 는 상대경로만 담으므로(서버 계약
+// 무변경) 화면이 **지금의** managed_root 로 조합해 보여준다. 뿌리는 관리자 응답에만
+// 실려 오므로(routes_storages) 비관리자에겐 그 줄이 아예 없다.
+const SYNC_PAYLOAD = { source_storage: "cephfs", source: "team",
+                       destination_storage: "gpfs", destination: "backup" };
+function renderWithStorages(rows: object[], payload: object = SYNC_PAYLOAD) {
+  server.use(
+    http.get("/api/user/storages", () => HttpResponse.json(rows)),
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, payload })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])));
+  return renderAt();
+}
+
+test("대상과 절대경로: 상대경로 표기 옆에 지금의 managed_root 로 조합한 경로", async () => {
+  renderWithStorages([
+    { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/dms" },
+    { storage_name: "gpfs", backend_type: "gpfs", status: "Ready", managed_root: "/gpfs/dms" }]);
+  expect(await screen.findByText("cephfs:team → gpfs:backup")).toBeInTheDocument();
+  expect(await screen.findByText("/cephfs/dms/team → /gpfs/dms/backup")).toBeInTheDocument();
+});
+
+test("managed_root 를 못 읽으면(비관리자) 절대경로 줄 자체가 없다 — 거짓 경로 금지", async () => {
+  renderWithStorages([
+    { storage_name: "cephfs", backend_type: "cephfs", status: "Ready" },
+    { storage_name: "gpfs", backend_type: "gpfs", status: "Ready" }]);
+  expect(await screen.findByText("cephfs:team → gpfs:backup")).toBeInTheDocument();
+  expect(screen.queryByText("절대경로")).toBeNull();
+  expect(screen.queryByText(/\/cephfs\/dms/)).toBeNull();
+});
+
+test("한쪽 스토리지의 뿌리만 알면 sync 절대경로는 생략(반쪽 진실 금지)", async () => {
+  renderWithStorages([
+    { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/dms" },
+    { storage_name: "gpfs", backend_type: "gpfs", status: "Ready" }]);
+  expect(await screen.findByText("cephfs:team → gpfs:backup")).toBeInTheDocument();
+  expect(screen.queryByText("절대경로")).toBeNull();
 });
 
 test("실행 전이가 아직 없으면 제출 대기는 —", async () => {

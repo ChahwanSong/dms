@@ -145,7 +145,13 @@ export interface DenyEntry {
   reason: string | null;
 }
 
-export interface UserStorage { storage_name: string; backend_type: string; status: string }
+// managed_root(관리 디렉토리)는 **관리자 응답에만** 실린다(routes_storages
+// list_user_storages) — 비관리자·구형 서버에선 키 자체가 없다. 그래서 옵셔널이고,
+// 없으면 화면은 절대경로 줄을 아예 그리지 않는다(거짓 경로 금지).
+export interface UserStorage {
+  storage_name: string; backend_type: string; status: string;
+  managed_root?: string;
+}
 
 export interface ControlState {
   maintenance: number;

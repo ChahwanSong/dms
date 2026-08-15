@@ -66,3 +66,37 @@ def test_sorted_by_name(client, db):
 def test_admin_can_also_read(client):
     # 관리자 Bearer 로도 200
     assert client.get("/api/user/storages", headers=ADMIN).status_code == 200
+
+
+# --- 관리 디렉토리(managed_root) 노출: 관리자에게만 ---------------------------
+# 사용자 보고: "작업 등록할 때 스토리지 이름은 보이는데 그 스토리지들의 관리
+# 디렉토리가 표시가 안 돼서 정확한 path 를 알 수가 없다". 이 목록의 소비자인 배치
+# 생성 위저드·scan/sync 제출 화면은 **입력 경로가 managed_root 기준 상대경로**라,
+# 관리자가 그 뿌리를 모르면 절대경로를 조립할 수 없다. mount_path/status_detail 은
+# 계속 숨긴다 — 화면이 필요로 하는 것은 뿌리 하나뿐이고, 은닉 범위는 필요한 만큼만
+# 연다.
+def _make_storage(client, name="ceph-a"):
+    assert client.post("/api/admin/storages", json={
+        "storage_name": name, "mount_path": "/mnt/ceph",
+        "managed_root": "/mnt/ceph/dms", "backend_type": "cephfs"},
+        headers=ADMIN).status_code == 201
+
+
+def test_admin_sees_managed_root(client, db):
+    _make_storage(client)
+    rows = client.get("/api/user/storages", headers=ADMIN).json()
+    assert [r["managed_root"] for r in rows] == ["/mnt/ceph/dms"]
+    # 나머지 내부 경로·운영 정보는 관리자에게도 이 목록으로는 주지 않는다
+    for r in rows:
+        assert set(r) == {"storage_name", "backend_type", "status", "managed_root"}
+
+
+def test_non_admin_never_sees_managed_root(client, db):
+    _make_storage(client)
+    _login_user(client)
+    rows = client.get("/api/user/storages").json()
+    assert rows
+    for r in rows:
+        assert "managed_root" not in r
+        for f in FORBIDDEN_FIELDS:
+            assert f not in r

@@ -8,6 +8,8 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Timeline } from "./Timeline";
 import { JobViewer } from "./JobViewer";
 import { ApiError, reasonText } from "../../lib/api";
+import { absSummary, pathSummary } from "../../lib/storagePaths";
+import { useStorageRoots } from "../storages/useUserStorages";
 import type { RequestDetail as RequestDetailType } from "../../lib/types";
 
 // 요청 상태의 종단 집합은 잡 상태(jobState.ts의 isTerminal)와 다르다 —
@@ -108,6 +110,8 @@ export function RequestDetail() {
   const jobs = useRequestJobs(requestId);
   const cancel = useCancelJob(requestId);
   const cancelRequest = useCancelRequest(requestId);
+  // 스토리지 뿌리 맵(관리자 응답에만 managed_root 가 실린다 — 비관리자는 빈 맵)
+  const roots = useStorageRoots();
 
   if (req.isLoading || jobs.isLoading) {
     return (
@@ -131,6 +135,7 @@ export function RequestDetail() {
 
   const data = req.data;
   if (!data) return null;
+  const abs = absSummary(data.operation, data.payload, roots);
   // M5: 방어적 정규화 -- 배열이 아닌(또는 없는) transitions 페이로드 하나가 화면
   // 전체를 무방어 인덱싱(`transitions[len-1]`)으로 죽인 적이 있다. ErrorBoundary가
   // 있어도 애초에 안 죽는 편이 낫다(경계는 최후의 방어선이지 정상 경로가 아니다).
@@ -152,6 +157,19 @@ export function RequestDetail() {
           <span className="text-muted text-sm">{data.operation}</span>
         </div>
         <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-3">
+          {/* 대상: payload 가 담은 그대로(스토리지:상대경로). 완료된 작업을 볼 때
+              화면 어디에도 무엇을 대상으로 돌았는지 없었다(사용자 보고). */}
+          <dt className="text-muted">대상</dt>
+          <dd className="font-mono text-xs break-all">
+            {pathSummary(data.operation, data.payload)}
+          </dd>
+          {/* 절대경로는 **지금의** managed_root 로 조합한다 — payload 에 박아 두면
+              스토리지 경로가 바뀐 뒤 존재하지 않는 경로를 사실처럼 보인다. 뿌리를
+              모르면(비관리자·조회 실패) 줄 자체를 안 그린다(거짓 경로 금지). */}
+          {abs !== null && (<>
+            <dt className="text-muted">절대경로</dt>
+            <dd className="font-mono text-xs break-all text-muted">{abs}</dd>
+          </>)}
           <dt className="text-muted">요청자</dt><dd>{data.requester_id}</dd>
           <dt className="text-muted">제출 대기</dt>
           <dd>{durationText(data.created_at, firstPickup?.at)}</dd>

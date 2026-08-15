@@ -121,6 +121,33 @@ test("verbose와 quiet을 동시에 체크하면 제출 버튼이 비활성이�
   expect(screen.getByText("verbose와 quiet은 함께 쓸 수 없습니다")).toBeInTheDocument();
 });
 
+// --- 관리 디렉토리 캡션(사용자 보고 2026-08-15): 이름만 보이고 뿌리가 안 보여
+// 「정확한 path 를 알 수가 없다」던 문제. 서버가 managed_root 를 **관리자 응답에만**
+// 싣기 때문에(routes_storages), 없으면 캡션도 없다 — 화면이 역할을 흉내 내 판정하지
+// 않는다.
+test("스토리지를 고르면 관리 디렉토리와 「이 아래 상대경로」 안내가 뜬다", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "cephfs", backend_type: "cephfs", status: "Ready",
+      managed_root: "/cephfs/dms" }])));
+  renderPage();
+  const storageSelect = await screen.findByLabelText("스토리지");
+  await within(storageSelect).findByText("cephfs (Ready)");
+  // 고르기 전에는 캡션이 없다 — 어느 뿌리인지 아직 정해지지 않았다
+  expect(screen.queryByText(/관리 디렉토리/)).toBeNull();
+  await userEvent.selectOptions(storageSelect, "cephfs");
+  expect(screen.getByText(
+    "관리 디렉토리: /cephfs/dms — 입력 경로는 이 아래 상대경로입니다"))
+    .toBeInTheDocument();
+});
+
+test("managed_root 가 없으면(비관리자 응답) 캡션도 없다 — 경로가 새지 않는다", async () => {
+  renderPage();                                  // 기본 fixture 에는 managed_root 가 없다
+  const storageSelect = await screen.findByLabelText("스토리지");
+  await within(storageSelect).findByText("cephfs (Ready)");
+  await userEvent.selectOptions(storageSelect, "cephfs");
+  expect(screen.queryByText(/관리 디렉토리/)).toBeNull();
+});
+
 test("스토리지 목록 로드가 실패하면 오류 메시지가 뜨고 제출 버튼이 비활성화된다", async () => {
   server.use(http.get("/api/user/storages", () =>
     HttpResponse.json({ detail: "storage_list_failed" }, { status: 500 })));

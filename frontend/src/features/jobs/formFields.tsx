@@ -12,6 +12,15 @@ export function StoragePicker({ label, value, onChange, storages, loading }: {
   label: string; value: string; onChange: (v: string) => void;
   storages: UserStorage[]; loading: boolean;
 }) {
+  // 고른 스토리지의 관리 디렉토리(사용자 보고 2026-08-15: "스토리지 이름은 보이는데
+  // 관리 디렉토리가 표시가 안 돼서 정확한 path 를 알 수가 없다"). 옵션 텍스트가
+  // 아니라 **선택 아래 캡션**인 이유: 옵션에 경로까지 넣으면 드롭다운 한 줄이
+  // 길어져 이름·상태가 잘리는데, 정작 알아야 하는 건 "지금 고른 것"의 뿌리 하나다.
+  // 함께 적는 "이 아래 상대경로" 한 마디가 사용자가 못 알아냈던 사실 자체다 —
+  // 입력란에 절대경로를 적어야 하는지 상대경로를 적어야 하는지가 화면 어디에도
+  // 없었다. managed_root 는 관리자 응답에만 실려 오므로(서버 계약) 없으면 캡션도
+  // 없다 — 비관리자 화면에 내부 경로가 새지 않는다.
+  const root = storages.find((s) => s.storage_name === value)?.managed_root;
   return (
     <label className="text-sm">{label}
       <select aria-label={label} className={field} value={value} disabled={loading}
@@ -25,6 +34,11 @@ export function StoragePicker({ label, value, onChange, storages, loading }: {
           </option>
         ))}
       </select>
+      {root && (
+        <span className="mt-1 block text-xs text-muted break-all">
+          {`관리 디렉토리: ${root} — 입력 경로는 이 아래 상대경로입니다`}
+        </span>
+      )}
     </label>
   );
 }

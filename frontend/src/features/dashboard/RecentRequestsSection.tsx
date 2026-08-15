@@ -7,6 +7,8 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import { REQUEST_TERMINAL_STATES } from "../../lib/jobState";
+import { absSummary } from "../../lib/storagePaths";
+import { useStorageRoots } from "../storages/useUserStorages";
 import type { RequestRow } from "../../lib/types";
 
 // 최근 작업 카드(2026-08-13 조정): 요청자·작업내용·요청시간·완료시간 + 검색 +
@@ -31,6 +33,10 @@ function summarize(r: RequestRow): string {
 
 export function RecentRequestsSection() {
   const q = useRecentRequests();
+  // 스토리지 뿌리 맵(관리자 응답에만 managed_root — 비관리자는 빈 맵). 절대경로는
+  // 표 본문이 아니라 **title** 로만 붙인다: 작업 열 본문에 이어 붙이면 한 줄이 두
+  // 배로 길어져 표가 가로로 밀린다. 검색 대상도 본문 그대로 둔다(보이는 것만 찾는다).
+  const roots = useStorageRoots();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   // 방어적 정규화 -- 배열 아닌 페이로드 하나가 화면을 죽이면 안 된다(Dashboard 관례)
@@ -69,7 +75,8 @@ export function RecentRequestsSection() {
                 <td className="py-2"><Link className="text-accent"
                      to={`/jobs/${r.request_id}`}>{r.request_id}</Link></td>
                 <td>{r.requester_id}</td>
-                <td>{summarize(r)}</td>
+                <td title={absSummary(r.operation, r.payload, roots) ?? undefined}>
+                  {summarize(r)}</td>
                 <td><StatusPill state={r.state} /></td>
                 <td className="text-muted">{r.created_at}</td>
                 {/* updated_at 은 "마지막 전이 시각"일 뿐 -- 종단 상태에서만 완료시간
