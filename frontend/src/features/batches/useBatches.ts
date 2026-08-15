@@ -1,8 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiGet, apiSend } from "../../lib/api";
+import { ApiError, apiGet, apiSend } from "../../lib/api";
 import type { Batch, BatchDetail, RequestScanStats } from "../../lib/types";
 
+// 서버 routes_batches._TERMINAL_BATCH 의 거울. 상세 폴링 중지와 목록의 "삭제 가능"
+// 판정이 같은 한 벌을 쓴다 — 두 벌로 갈라지면 화면이 지우지 못할 배치를 지울 수
+// 있는 척한다(진짜 차단은 서버 409 batch_not_deletable).
 const BATCH_TERMINAL = new Set(["Completed", "Cancelled"]);
+export const isBatchTerminal = (status: string) => BATCH_TERMINAL.has(status);
 export const useBatches = () =>
   useQuery({ queryKey: ["batches"], queryFn: () => apiGet<Batch[]>("/api/admin/batches"),
             refetchInterval: 4000 });
@@ -84,11 +88,42 @@ export const useReplaceBatchItems = (id: string) =>
 // 배치 삭제(종단 배치만 — 서버 batch_not_deletable 가드). 성공 시 상세 쿼리는
 // invalidate 가 아니라 **제거**한다: 삭제된 배치의 상세를 다시 조회하면 404 를
 // 새로 받아 오류 화면이 되는데, 화면은 목록으로 떠난 뒤다(리페치가 소음).
+const _deleteBatch = (id: string) => apiSend("DELETE", `/api/admin/batches/${id}`);
 export const useDeleteBatch = (id: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => apiSend("DELETE", `/api/admin/batches/${id}`),
+    mutationFn: () => _deleteBatch(id),
     onSuccess: () => { qc.removeQueries({ queryKey: ["batch", id] }); },
+    onSettled: () => { qc.invalidateQueries({ queryKey: ["batches"] }); },
+  });
+};
+// 목록의 다중 선택 삭제. 단건 useDeleteBatch 를 재사용할 수 없는 이유는 훅이라서다
+// (id 를 훅 인자로 받아 루프에 넣을 수 없다) — 그래서 **요청 함수 _deleteBatch 를
+// 공유하는 래퍼**만 둔다(URL·메서드 중복 없음).
+//
+// Promise.allSettled 인 이유: 일괄 삭제의 부분 실패는 전체 실패가 아니다. 한 건이
+// 409(그 사이 재실행돼 활성이 된 배치)여도 나머지 삭제는 이미 일어났고 유효하다 —
+// 첫 거절에서 throw 하면 화면이 "실패"라고 거짓말하면서 몇 건이 지워졌는지 못
+// 말한다. 그래서 mutation 은 늘 성공하고 성공/실패 내역을 **데이터로** 돌려준다
+// (isError 가 아니라 data.failed 가 실패의 자리다).
+export interface BulkDeleteResult { ok: string[]; failed: { id: string; message: string }[] }
+export const useDeleteBatches = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (ids: string[]): Promise<BulkDeleteResult> => {
+      const settled = await Promise.allSettled(ids.map(_deleteBatch));
+      const r: BulkDeleteResult = { ok: [], failed: [] };
+      settled.forEach((s, i) => {
+        if (s.status === "fulfilled") r.ok.push(ids[i]);
+        // ApiError.message 는 이미 reasonText(사유 코드) 를 거친 문구다.
+        else r.failed.push({ id: ids[i], message: s.reason instanceof ApiError
+                             ? s.reason.message : String(s.reason) });
+      });
+      return r;
+    },
+    // 지워진 배치의 상세 캐시만 제거(단건과 같은 이유 — 404 리페치 소음 방지).
+    // 실패한 id 는 남긴다: 그 배치는 아직 살아 있다.
+    onSuccess: (r) => { for (const id of r.ok) qc.removeQueries({ queryKey: ["batch", id] }); },
     onSettled: () => { qc.invalidateQueries({ queryKey: ["batches"] }); },
   });
 };

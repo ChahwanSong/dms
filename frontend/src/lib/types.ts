@@ -84,6 +84,10 @@ export interface Batch {
   batch_id: string; operation: string; status: string; max_concurrency: number;
   item_count: number; succeeded_count: number; failed_count: number;
   note: string | null; created_at: string;
+  // 마지막 갱신 시각(batches.updated_at — 서버 NOT NULL 이라 실서버 응답엔 늘 있다).
+  // 옵션(?)은 기존 fixture 무수정 컴파일용일 뿐. 실행뿐 아니라 메타 수정·항목 편집·
+  // 취소 등 **모든 전이**가 이 값을 민다 — 그래서 화면 문구도 "수행"이 아닌 "갱신".
+  updated_at?: string | null;
   // 배치 이름(선택). 옵션 필드 — 기존 fixture 무수정 컴파일. null/부재 = 이름 없음.
   name?: string | null;
   // 실행 제어(슬라이스 32). 옵션 필드 — 기존 fixture 무수정 컴파일. null = 정책 기본.
