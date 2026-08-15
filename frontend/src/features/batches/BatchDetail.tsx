@@ -109,6 +109,15 @@ const ITEM_INDENT = "ml-[4.75rem]";
 // 항목 행의 border-black/5 보다 한 단 진해 "행 구분"과 "섹션 구분"이 안 섞인다.
 const PANEL_SECTION = "mt-4 border-t border-line pt-3";
 const PANEL_TITLE = "font-semibold text-sm mb-2";
+// 펼침 패널 안 dl(요청 정보·요약)의 정렬 기준 한 벌. 실측(d64): 요청 정보는
+// grid-cols-[7rem_1fr](고정폭 라벨 열)인데 요약은 grid-cols-2 + max-w-md 라 값
+// 열이 라벨에서 14rem 떨어진 자리 — 즉 패널 중앙 — 에서 시작했다. 히스토그램
+// 섹션들이 전부 패널 왼쪽 끝에서 시작하는데 요약만 값이 가운데로 밀려 보인
+// 이유다(사용자 지적). 라벨 열 폭은 9rem: 요약 키(total_entries 등 서버가 주는
+// 원문 키)가 7rem 을 넘어 줄바꿈되는 걸 막으면서, 헤더 카드의 실행 설정 dl
+// (grid-cols-[9rem_1fr])과도 같은 눈금이 된다. 두 dl 이 한 상수를 공유해야
+// 섹션이 늘어도 기준이 한 곳에 남는다(ITEM_INDENT·PANEL_SECTION 과 같은 규약).
+const PANEL_DL = "grid grid-cols-[9rem_1fr] gap-y-1 text-sm";
 // 선택 불가 체크박스에 다는 사유(목록 화면 ACTIVE_HINT 관례 — disabled 로 끝내지
 // 않고 이유와 동선을 남긴다). 표시 게이트일 뿐이고 진짜 차단은 서버 409 다.
 const ITEM_LOCK_HINT = "진행 중인 배치에선 대기(Queued) 항목만 삭제할 수 있습니다";
@@ -267,7 +276,7 @@ function ItemScanStats({ requestId, succeeded }: {
     </section>
     <section className={PANEL_SECTION}>
       <h3 className={PANEL_TITLE}>요약</h3>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm max-w-md">
+      <dl className={PANEL_DL}>
         {Object.entries(stats.summary).map(([k, v]) => (
           <Fragment key={k}>
             <dt className="text-muted">{k}</dt>
@@ -810,7 +819,7 @@ export function BatchDetail() {
               <div className={ITEM_INDENT}>
                 <section className={PANEL_SECTION}>
                   <h3 className={PANEL_TITLE}>요청 정보</h3>
-                  <dl className="grid grid-cols-[7rem_1fr] gap-y-1 text-sm">
+                  <dl className={PANEL_DL}>
                     {/* 요청 상태는 항목 상태(배치 시점 판정)와 다른 축 — 자식 요청의
                         현재 상태다. null = 아직 materialize 안 됨. */}
                     <dt className="text-muted">요청 상태</dt>

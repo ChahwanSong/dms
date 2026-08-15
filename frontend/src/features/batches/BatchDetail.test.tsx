@@ -819,6 +819,26 @@ test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 �
   await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
 });
 
+// --- 펼침 패널 dl 정렬(사용자 지시 2026-08-15): 「요약」도 히스토그램 섹션들과
+// 같은 왼쪽 정렬 기준을 쓴다. 이전 요약 dl 은 grid-cols-2(50/50 분할) + max-w-md
+// 라 값 열이 라벨에서 14rem 떨어진 화면 중앙에서 시작했고, 같은 패널의 「요청
+// 정보」(고정폭 라벨 열)와 눈으로 어긋났다. 두 dl 이 **같은 클래스 문자열**을
+// 쓰는지로 못 박는다 — 한쪽만 고치면 다시 갈라진다.
+test("펼침 패널의 요약·요청 정보 dl 은 같은 정렬 기준(고정폭 라벨 열·왼쪽 값)", async () => {
+  server.use(statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await screen.findByText("요약");
+  const dlOf = (title: string) =>
+    screen.getByText(title).closest("section")!.querySelector("dl")!;
+  const summary = dlOf("요약");
+  expect(summary.className).toBe(dlOf("요청 정보").className);
+  expect(summary.className).toContain("grid-cols-[9rem_1fr]");
+  // 50/50 분할·최대폭 제한은 값을 중앙으로 밀어낸 원인이라 되돌아오면 안 된다
+  expect(summary.className).not.toContain("grid-cols-2");
+  expect(summary.className).not.toContain("max-w-md");
+});
+
 test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));
