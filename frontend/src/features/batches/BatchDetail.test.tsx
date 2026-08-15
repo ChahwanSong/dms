@@ -129,10 +129,15 @@ test("owner_username 이 없어도 특권 실행 문구는 항상 — 소유자 
   expect(screen.queryByText(/소유자/)).toBeNull();
 });
 // --- 항목별 데이터 온도(hot/cold): expand 패널 안에서 그 항목의 리포트만 ---
+// 크기 버킷 fixture 는 서버 투영(routes_scan_paths._buckets)이 실제로 넘기는 모양:
+// 구간 라벨 + lower/upper_inclusive 바이트. 마지막 버킷은 상한 없음(열린 구간).
 const requestStats = (over: any = {}) => ({
   generated_at_epoch: 1785805962,
   summary: { total_files: 12, total_entries: 20 },
-  file_size_histogram: [{ bucket: "[0,4096]", count: 11 }],
+  file_size_histogram: [
+    { bucket: "[0,4096]", lower_inclusive: 0, upper_inclusive: 4096, count: 11 },
+    { bucket: "[4096,65536]", lower_inclusive: 4096, upper_inclusive: 65536, count: 5 },
+    { bucket: "[1073741824,)", lower_inclusive: 1073741824, count: 1 }],
   time_histograms: {
     atime: [{ bucket: "[0d,1d]", bytes: 2048 }, { bucket: "[1d,7d]", bytes: 0 }],
     mtime: [{ bucket: "[0d,1d]", bytes: 4096 }],
@@ -172,9 +177,10 @@ test("성공 scan 항목 펼침: 조회 발사 + 온도 섹션(사람 표기·�
   // 캡션이 색의 의미를 말한다
   expect(screen.getByText(/왼쪽\(빨강\)=hot·최근 접근, 오른쪽\(파랑\)=cold/)).toBeInTheDocument();
   expect(screen.getByText(/relatime\/open_noatime 환경에선 근사/)).toBeInTheDocument();
-  // 파일 크기 분포(count)는 온도가 아니다 — 기본 accent 유지
+  // 파일 크기 분포(count)는 온도가 아니다 — 온도 그라디언트 대신 단색 accent 유지
+  // (크기는 hot/cold 축이 아니라 같은 색을 쓰면 "작은 파일=hot"이라는 거짓 의미가 된다)
   const sizeChart = screen.getByRole("img", { name: "파일 크기 분포" });
-  expect(sizeChart.getElementsByClassName("bg-accent")).toHaveLength(1);
+  expect(sizeChart.getElementsByClassName("bg-accent")).toHaveLength(3);
   // 요약(그 항목의 것)·파손 경로 수·리포트 생성 시각
   expect(screen.getByText("total_files")).toBeInTheDocument();
   expect(screen.getByText("12")).toBeInTheDocument();
@@ -193,7 +199,7 @@ test("mtime 토글: 펼친 항목의 atime 차트가 mtime 으로 바뀐다", as
   expect(screen.getByText("4.0 KiB")).toBeInTheDocument();
 });
 
-test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량 — 크기 분포엔 없다", async () => {
+test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량", async () => {
   server.use(statsHandler("r1", { calls: 0 }));
   renderDetailed();
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
@@ -207,9 +213,42 @@ test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량 — 크�
   // 캡션: 선의 의미 한 줄 + 총 용량 값
   expect(screen.getByText("선 = hot쪽부터의 누적 용량 비중 · 총 2.0 KiB"))
     .toBeInTheDocument();
-  // 파일 크기 분포(개수)는 범위 밖 — 오버레이 없음
-  expect(screen.getByRole("img", { name: "파일 크기 분포" }).querySelector("svg"))
-    .toBeNull();
+});
+
+// --- 파일 크기 분포: 전 버킷 축약 라벨 + 개수 + 누적 % (온도 차트와 같은 문법) ---
+
+test("크기 분포: 버킷 라벨이 K/M/G 로 축약돼 전부 보인다 — 열린 마지막 구간은 '1G~'", async () => {
+  server.use(statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  const chart = within(await screen.findByRole("img", { name: "파일 크기 분포" }));
+  // 원본 라벨("[0,4096]")은 열 폭(max-w-16)에서 잘린다 — 축약 표기가 전 버킷에 보인다
+  expect(chart.getByText("0~4K")).toBeInTheDocument();
+  expect(chart.getByText("4K~64K")).toBeInTheDocument();
+  expect(chart.getByText("1G~")).toBeInTheDocument();
+  expect(screen.queryByText("[0,4096]")).toBeNull();
+  // 단위 문법(K=KiB, 1024단위)은 화면이 스스로 말한다 — 안 그러면 K 가 1000 으로 읽힌다
+  expect(screen.getByText(/K=KiB·M=MiB·G=GiB/)).toBeInTheDocument();
+});
+
+test("크기 분포: 값=파일 개수 + 누적 % 오버레이(온도 차트와 같은 옵션)", async () => {
+  server.use(statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  const el = await screen.findByRole("img", { name: "파일 크기 분포" });
+  const chart = within(el);
+  // 값 라벨 = 개수(정수 그대로 — 용량이 아니다)
+  expect(chart.getByText("11")).toBeInTheDocument();
+  expect(chart.getByText("5")).toBeInTheDocument();
+  // 누적 오버레이: 11·5·1 → 65%·94%·100%
+  expect(el.querySelector("polyline")).not.toBeNull();
+  expect(chart.getAllByText(/%$/).map((n) => n.textContent))
+    .toEqual(["65%", "94%", "100%"]);
+  // 툴팁의 누적값은 개수 표기(바이트가 아니다)
+  expect(chart.getByText("100%").getAttribute("title")).toBe("누적 17개 (100%)");
+  // 캡션: 선의 의미 + 총 개수(온도 차트 캡션과 같은 문법, 단위만 개수)
+  expect(screen.getByText("선 = 작은 파일부터의 누적 개수 비중 · 총 17개"))
+    .toBeInTheDocument();
 });
 
 test("실패 항목 펼침: 조회 없이 '리포트 없음' — 성공 요청만 리포트를 가진다", async () => {
@@ -272,6 +311,14 @@ test("이름·메모 인라인 편집: 저장이 PATCH 를 쏘고 편집을 닫�
   // 저장 성공 후 편집 종료(입력 부재)
   await waitFor(() => expect(screen.queryByLabelText("배치 이름")).toBeNull());
 });
+test("메모는 라벨 없이 내용만 — '메모 ' 접두는 붙지 않는다", async () => {
+  // 헤더 카드의 메모 줄은 문맥상 메모임이 자명하다(사용자 조정) — "메모 {내용}"은
+  // 내용 앞에 군더더기를 붙여 읽기를 방해했다.
+  renderBatch({ status: "Running", note: "8월 정기 스캔" });
+  expect(await screen.findByText("8월 정기 스캔")).toBeInTheDocument();
+  expect(screen.queryByText("메모 8월 정기 스캔")).toBeNull();
+});
+
 test("편집 취소는 PATCH 없이 닫힌다", async () => {
   let patchCalls = 0;
   server.use(http.patch("/api/admin/batches/b1", () => { patchCalls += 1;
@@ -294,15 +341,15 @@ function renderBatch(over: any) {
   </MemoryRouter></QueryClientProvider>);
 }
 
-test("종단 배치: 종단 항목 펼침에 수정·삭제 버튼 — 수정 저장이 PUT 을 쏜다", async () => {
+test("종단 배치: 행의 수정 버튼(펼치지 않아도) — 수정 저장이 PUT 을 쏜다", async () => {
   let sent: any = null;
   server.use(http.put("/api/admin/batches/b1/items/0", async ({ request }) => {
     sent = await request.json();
     return HttpResponse.json({ seq: 0, status: "Queued" });
   }));
   renderDetailed();                              // Completed scan 배치, 항목 0 = Succeeded
-  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
-  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  // 수정은 행 버튼이다(삭제와 같은 자리) — 펼치지 않아도 폼이 행 밑에 열린다
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 수정" }));
   const input = screen.getByLabelText("대상 경로");
   expect(input).toHaveValue("team");             // 현재 경로가 드래프트 초기값
   await userEvent.clear(input);
@@ -336,31 +383,67 @@ test("종단 배치: 펼치지 않은 행의 삭제 버튼 → 확인 클릭이 
   await waitFor(() => expect(gets).toBeGreaterThan(getsBefore));
 });
 
-test("펼침 패널 안엔 삭제 버튼이 없다 — 삭제는 행으로 이동 확정", async () => {
-  renderDetailed();                              // 종단 배치 — 전 항목 삭제 가능
+test("펼침 패널 안엔 수정·삭제 버튼이 없다 — 둘 다 행으로 이동 확정", async () => {
+  renderDetailed();                              // 종단 배치 — 전 항목 편집 가능
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
   expect(screen.getByText("payload")).toBeInTheDocument();   // 펼침 완료
-  // 행 버튼(항목 N 삭제)만 있고, 펼침 안의 무접두 "삭제" 버튼은 없다
+  // 행 버튼(항목 N 수정·삭제)만 있고, 펼침 안의 무접두 버튼은 없다
   expect(screen.queryByRole("button", { name: "삭제" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "수정" })).toBeNull();
   expect(screen.getByRole("button", { name: "항목 0 삭제" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "항목 0 수정" })).toBeInTheDocument();
 });
 
-test("활성 배치: Materialized 항목엔 행 삭제 버튼도 펼침 수정 버튼도 없다", async () => {
+test("행 버튼 순서: 상세 토글 → 수정 → 삭제(수정이 삭제 왼쪽)", async () => {
+  renderDetailed();
+  const toggle = await screen.findByRole("button", { name: "항목 0 상세" });
+  const row = toggle.parentElement as HTMLElement;
+  expect(within(row).getAllByRole("button")
+    .map((btn) => btn.getAttribute("aria-label") ?? btn.textContent))
+    .toEqual(["항목 0 상세", "항목 0 수정", "항목 0 삭제"]);
+});
+
+test("활성 배치: Materialized 항목엔 행 삭제·수정 버튼이 없다", async () => {
   renderAt("Running");                           // 항목 0 = Materialized
   await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
   expect(screen.queryByRole("button", { name: "항목 0 삭제" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "항목 0 수정" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
   expect(screen.getByText("payload")).toBeInTheDocument();   // 펼침 완료
   expect(screen.queryByRole("button", { name: "수정" })).toBeNull();
 });
 
-test("활성 배치: Queued 항목엔 행 삭제 버튼 + 펼침 수정 버튼", async () => {
+test("활성 배치: Queued 항목엔 행 삭제·수정 버튼", async () => {
   renderBatch({ operation: "scan", status: "Running", items: [
     { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
       request_id: null, reason_code: null }] });
   expect(await screen.findByRole("button", { name: "항목 0 삭제" })).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "항목 0 상세" }));
-  expect(screen.getByRole("button", { name: "수정" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "항목 0 수정" })).toBeInTheDocument();
+});
+
+test("항목 제목은 주변 글자(text-sm)와 같은 크기 — 체크박스보다 작아 보이지 않는다", async () => {
+  renderDetailed();
+  const title = await screen.findByText("scan · s1:team");
+  expect(title.className).toMatch(/\btext-sm\b/);
+  expect(title.className).not.toMatch(/\btext-xs\b/);
+});
+
+test("펼침 패널: 섹션마다 구분선·여백 — 정보 덩어리가 뭉쳐 보이지 않는다", async () => {
+  server.use(statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await screen.findByText("데이터 온도(hot/cold)");
+  // 네 덩어리(요청 정보 dl · 온도 · 크기 분포 · 요약)가 각각 제 섹션에 산다
+  for (const title of ["요청 정보", "데이터 온도(hot/cold)",
+                       "파일 크기 분포(개수)", "요약"]) {
+    const heading = screen.getByText(title);
+    const section = heading.closest("section");
+    expect(section, `${title} 섹션`).not.toBeNull();
+    expect(section!.className).toMatch(/border-t/);   // 구분선
+    expect(section!.className).toMatch(/\bpt-/);      // 선 아래 여백
+    expect(section!.className).toMatch(/\bmt-/);      // 선 위 여백
+    expect(heading.className).toMatch(/font-semibold/); // 소제목 강조
+  }
 });
 
 test("항목 추가 팝업: 배치 스토리지를 물려받아 POST — 성공 시 팝업이 닫힌다", async () => {
@@ -400,8 +483,7 @@ test("sync 배치 항목 수정: 소스·목적지 경로 두 입력 — 4필드
     { seq: 0, payload: { source_storage: "s1", source: "a",
         destination_storage: "s2", destination: "b" }, status: "Succeeded",
       request_id: "r1", reason_code: null }] });
-  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
-  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 수정" }));
   const dst = screen.getByLabelText("목적지 경로");
   expect(screen.getByLabelText("소스 경로")).toHaveValue("a");
   await userEvent.clear(dst);

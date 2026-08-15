@@ -31,10 +31,45 @@ function humanBytes(bytes: number): string {
 // 투영 버킷 -> BarChart 데이터. 라벨·값이 실존하는 버킷만 그린다 -- 값 없는
 // 버킷을 0 으로 그리면 "빈 버킷"(정상값 0)과 "모름"이 섞인다(null≠0).
 function toBars(buckets: HistogramBucket[] | undefined,
-                key: "bytes" | "count") {
+                key: "bytes" | "count",
+                labelOf: (b: HistogramBucket) => string = (b) => b.bucket as string) {
   return (buckets ?? []).flatMap((b) =>
     typeof b.bucket === "string" && typeof b[key] === "number"
-      ? [{ label: b.bucket, value: b[key] as number }] : []);
+      ? [{ label: labelOf(b), value: b[key] as number }] : []);
+}
+
+// 크기 버킷 축 라벨용 초단축 표기(1024 단위). humanBytes 와 같은 단위 체계지만
+// 소수·공백·"iB" 를 떼서 축 라벨 폭을 줄인다 -- 원본 라벨("[1073741824,4294967296]")
+// 은 열 폭(max-w-16 = 4rem)에서 잘려 어느 구간인지 못 읽는다(사용자 지적). 경계값이
+// 2의 거듭제곱이면 정수로 딱 떨어져 축약이 무손실이고(4096 = "4K"), 아니면 한 자리
+// 소수로 근사한다. 축약이 KiB 계열임은 차트 캡션이 말한다(K 를 1000 으로 읽는 오독 방지).
+const LABEL_UNITS: [string, number][] = [
+  ["T", 1024 ** 4], ["G", 1024 ** 3], ["M", 1024 ** 2], ["K", 1024],
+];
+function shortBytes(bytes: number): string {
+  for (const [unit, size] of LABEL_UNITS) {
+    if (bytes >= size) {
+      const v = bytes / size;
+      return `${Number.isInteger(v) ? v : v.toFixed(1)}${unit}`;
+    }
+  }
+  return String(Math.round(bytes));
+}
+// 하한·상한은 서버 투영이 넘기는 수치 필드가 1순위다(모양 검사를 통과한 숫자).
+// 없으면 구간 라벨("[0,4096]")에서 읽고, 그마저 아니면 원본 라벨을 그대로 둔다 --
+// 모르는 모양을 추측해 다시 쓰면 화면이 없는 사실을 지어낸다. 상한 없음(열린
+// 마지막 구간 "[1G,)")은 "1G~" -- 0(정상값)이나 임의 상한으로 뭉개지 않는다.
+const RANGE_RE = /^[[(]\s*(\d+)\s*,\s*(\d*)\s*[\])]$/;
+function sizeBucketLabel(b: HistogramBucket): string {
+  const raw = b.bucket as string;
+  const m = RANGE_RE.exec(raw);
+  const lower = typeof b.lower_inclusive === "number" ? b.lower_inclusive
+              : m ? Number(m[1]) : null;
+  if (lower === null) return raw;
+  const upper = typeof b.upper_inclusive === "number" ? b.upper_inclusive
+              : m && m[2] !== "" ? Number(m[2]) : null;
+  return upper === null ? `${shortBytes(lower)}~`
+                        : `${shortBytes(lower)}~${shortBytes(upper)}`;
 }
 
 // 시간축별 캡션: 색의 의미(왼쪽 빨강=hot, 오른쪽 파랑=cold)를 축마다 그 축의
@@ -60,6 +95,14 @@ const tempColorOf = (n: number) => (i: number) =>
 // 요약 텍스트와 세로선이 맞는다 — 숫자를 각 자리에 흩뿌리면 열이 하나 늘 때마다
 // 어긋난 들여쓰기가 남는다(선택 체크박스 추가 때 실제로 밀렸다).
 const ITEM_INDENT = "ml-[4.75rem]";
+// 펼침 패널의 섹션 구획: 요청 정보 dl · 데이터 온도 · 파일 크기 분포 · 요약이
+// 여백만으로 이어져 한 덩어리로 읽혔다(사용자 지적 — "구분이 안 된다"). 섹션마다
+// 위 구분선 + 상하 여백을 주고 소제목을 한 단 굵게 해서 경계를 눈으로 잡는다.
+// 첫 섹션의 선은 행 요약과 상세의 경계 구실도 하므로 예외를 두지 않는다(first:
+// 변형이 없어야 섹션이 늘어도 규칙이 그대로다). 선 색은 DS 토큰 border-line --
+// 항목 행의 border-black/5 보다 한 단 진해 "행 구분"과 "섹션 구분"이 안 섞인다.
+const PANEL_SECTION = "mt-4 border-t border-line pt-3";
+const PANEL_TITLE = "font-semibold text-sm mb-2";
 // 선택 불가 체크박스에 다는 사유(목록 화면 ACTIVE_HINT 관례 — disabled 로 끝내지
 // 않고 이유와 동선을 남긴다). 표시 게이트일 뿐이고 진짜 차단은 서버 409 다.
 const ITEM_LOCK_HINT = "진행 중인 배치에선 대기(Queued) 항목만 삭제할 수 있습니다";
@@ -149,9 +192,11 @@ function ItemScanStats({ requestId, succeeded }: {
   const [tempKey, setTempKey] = useState("atime");
   const noReport = !succeeded
     || (q.isError && (q.error as ApiError).code === "no_scan_report");
-  if (noReport) return <p className={`text-muted text-sm mt-3 ${ITEM_INDENT}`}>리포트 없음</p>;
+  if (noReport) {
+    return <section className={PANEL_SECTION}><p className="text-muted text-sm">리포트 없음</p></section>;
+  }
   if (q.isError) {
-    return <p className={`text-bad text-sm mt-3 ${ITEM_INDENT}`}>{(q.error as ApiError).message}</p>;
+    return <section className={PANEL_SECTION}><p className="text-bad text-sm">{(q.error as ApiError).message}</p></section>;
   }
   const stats = q.data;
   if (!stats) return null;               // 로딩 — 짧은 창이라 문구 없이 둔다
@@ -159,69 +204,79 @@ function ItemScanStats({ requestId, succeeded }: {
     .filter((k) => stats.time_histograms[k] !== undefined);
   const bars = toBars(stats.time_histograms[tempKey], "bytes");
   const cumTotal = bars.reduce((acc, b) => acc + b.value, 0);
-  return (
-    <div className={`mt-3 ${ITEM_INDENT} space-y-3`}>
-      <div>
-        <h3 className="font-medium text-sm">데이터 온도(hot/cold)</h3>
-        {/* 언제 찍힌 숫자인지 없이 보여주는 건 부정직이다(ScanPaths 관례 미러) */}
-        <p className="text-muted text-xs">
-          {typeof stats.generated_at_epoch === "number"
-            ? `scan 리포트 생성: ${utcStamp(stats.generated_at_epoch)}`
-            : "scan 리포트 생성 시각을 알 수 없습니다"}
+  const sizeBars = toBars(stats.file_size_histogram, "count", sizeBucketLabel);
+  const sizeTotal = sizeBars.reduce((acc, b) => acc + b.value, 0);
+  return (<>
+    <section className={PANEL_SECTION}>
+      <h3 className={PANEL_TITLE}>데이터 온도(hot/cold)</h3>
+      {/* 언제 찍힌 숫자인지 없이 보여주는 건 부정직이다(ScanPaths 관례 미러) */}
+      <p className="text-muted text-xs mb-2">
+        {typeof stats.generated_at_epoch === "number"
+          ? `scan 리포트 생성: ${utcStamp(stats.generated_at_epoch)}`
+          : "scan 리포트 생성 시각을 알 수 없습니다"}
+      </p>
+      <div className="flex gap-2 mb-2">
+        {tempKeys.map((k) => (
+          <Button key={k} type="button"
+                  variant={tempKey === k ? "outline" : "ghost"}
+                  onClick={() => setTempKey(k)}>{k}</Button>
+        ))}
+      </div>
+      <BarChart data={bars}
+                label={`데이터 온도(${tempKey}) 히스토그램`}
+                formatValue={humanBytes}
+                colorOf={tempColorOf(bars.length)}
+                cumulative={{ format: humanBytes }}
+                emptyText="집계된 버킷 없음" />
+      {TEMP_CAPTIONS[tempKey] && (
+        <p className="text-muted text-xs mt-1">{TEMP_CAPTIONS[tempKey]}</p>
+      )}
+      {/* 누적 캡션은 오버레이와 같은 조건(총합>0)으로만 -- 총합 0 이면 선이
+          없는데 "선 = ..." 은 거짓 캡션이 된다. 총 용량 값(bars 합)도 여기서
+          함께 말한다(선의 100% 가 몇 바이트인지). */}
+      {cumTotal > 0 && (
+        <p className="text-muted text-xs mt-1">
+          {`선 = hot쪽부터의 누적 용량 비중 · 총 ${humanBytes(cumTotal)}`}
         </p>
-      </div>
-      <div>
-        <div className="flex gap-2 mb-2">
-          {tempKeys.map((k) => (
-            <Button key={k} type="button"
-                    variant={tempKey === k ? "outline" : "ghost"}
-                    onClick={() => setTempKey(k)}>{k}</Button>
-          ))}
-        </div>
-        <BarChart data={bars}
-                  label={`데이터 온도(${tempKey}) 히스토그램`}
-                  formatValue={humanBytes}
-                  colorOf={tempColorOf(bars.length)}
-                  cumulative={{ format: humanBytes }}
-                  emptyText="집계된 버킷 없음" />
-        {TEMP_CAPTIONS[tempKey] && (
-          <p className="text-muted text-xs mt-1">{TEMP_CAPTIONS[tempKey]}</p>
-        )}
-        {/* 누적 캡션은 오버레이와 같은 조건(총합>0)으로만 -- 총합 0 이면 선이
-            없는데 "선 = ..." 은 거짓 캡션이 된다. 총 용량 값(bars 합)도 여기서
-            함께 말한다(선의 100% 가 몇 바이트인지). */}
-        {cumTotal > 0 && (
-          <p className="text-muted text-xs mt-1">
-            {`선 = hot쪽부터의 누적 용량 비중 · 총 ${humanBytes(cumTotal)}`}
-          </p>
-        )}
-      </div>
-      <div>
-        {/* 크기 분포는 온도가 아니다 — 온도 색을 입히면 "작은 파일=hot"이라는
-            거짓 의미가 생겨 기본 accent 를 유지한다. */}
-        <h4 className="font-medium mb-2 text-sm">파일 크기 분포(개수)</h4>
-        <BarChart data={toBars(stats.file_size_histogram, "count")}
-                  label="파일 크기 분포" emptyText="집계된 버킷 없음" />
-      </div>
-      <div>
-        <h4 className="font-medium mb-2 text-sm">요약</h4>
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm max-w-md">
-          {Object.entries(stats.summary).map(([k, v]) => (
-            <Fragment key={k}>
-              <dt className="text-muted">{k}</dt>
-              <dd className="tabular-nums">{v}</dd>
-            </Fragment>
-          ))}
-        </dl>
-        {/* null = 구형 리포트(총계 미기록) — 0(파손 없음)과 구분해 말한다 */}
-        <p className="text-muted text-sm mt-2">
-          {typeof stats.broken_paths_total === "number"
-            ? `파손 경로 ${stats.broken_paths_total}건`
-            : "파손 경로: 기록 없음(구형 리포트)"}
+      )}
+    </section>
+    <section className={PANEL_SECTION}>
+      {/* 온도 차트와 같은 문법(값 라벨·누적 오버레이)을 쓰되 **색은 안 물려받는다**:
+          크기는 hot/cold 축이 아니라 온도 그라디언트를 입히면 "작은 파일=hot"이라는
+          거짓 의미가 생긴다. 크기 자체를 색으로 다시 말할 이유도 없다 — 양은 막대
+          높이가, 순서는 x축이 이미 말한다. 그래서 단색 accent(BarChart 기본)다.
+          누적은 용량이 아니라 **개수** 비중이라 format 도 개수 표기다. */}
+      <h3 className={PANEL_TITLE}>파일 크기 분포(개수)</h3>
+      <BarChart data={sizeBars} label="파일 크기 분포"
+                cumulative={{ format: (n) => `${n}개` }}
+                emptyText="집계된 버킷 없음" />
+      {sizeBars.length > 0 && (
+        <p className="text-muted text-xs mt-1">가로축 = 파일 크기 구간(K=KiB·M=MiB·G=GiB, 1024 단위)</p>
+      )}
+      {sizeTotal > 0 && (
+        <p className="text-muted text-xs mt-1">
+          {`선 = 작은 파일부터의 누적 개수 비중 · 총 ${sizeTotal}개`}
         </p>
-      </div>
-    </div>
-  );
+      )}
+    </section>
+    <section className={PANEL_SECTION}>
+      <h3 className={PANEL_TITLE}>요약</h3>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm max-w-md">
+        {Object.entries(stats.summary).map(([k, v]) => (
+          <Fragment key={k}>
+            <dt className="text-muted">{k}</dt>
+            <dd className="tabular-nums">{v}</dd>
+          </Fragment>
+        ))}
+      </dl>
+      {/* null = 구형 리포트(총계 미기록) — 0(파손 없음)과 구분해 말한다 */}
+      <p className="text-muted text-sm mt-2">
+        {typeof stats.broken_paths_total === "number"
+          ? `파손 경로 ${stats.broken_paths_total}건`
+          : "파손 경로: 기록 없음(구형 리포트)"}
+      </p>
+    </section>
+  </>);
 }
 
 // 항목 편집 도구 3종(현재 항목 CSV·항목 추가·CSV로 전체 교체)은 **버튼 + 팝업**
@@ -546,8 +601,10 @@ export function BatchDetail() {
           </div>
         </div>
         {/* 메모는 편집 밖에서도 보인다 — 없으면 행 자체 생략(빈칸 소음 방지).
-            한 개의 템플릿 리터럴 = 한 개의 텍스트 노드(getByText 관례). */}
-        {b?.note && !editing && <p className="text-muted text-sm mt-2">{`메모 ${b.note}`}</p>}
+            라벨("메모 ")은 붙이지 않는다(사용자 조정 2026-08-15): 헤더 카드에서
+            이름 아래 한 줄은 문맥상 메모임이 자명한데, 접두어가 매번 내용 앞을
+            가로막았다. 행이 아예 없으면 메모 없음이라는 사실도 그대로 읽힌다. */}
+        {b?.note && !editing && <p className="text-muted text-sm mt-2">{b.note}</p>}
         {b && <BatchSettings b={b} />}
         {editing && (
           <div className="mt-3 space-y-2 max-w-md">
@@ -670,11 +727,25 @@ export function BatchDetail() {
                       onClick={() => setOpenSeq(openSeq === it.seq ? null : it.seq)}
                       className="flex min-w-0 flex-1 items-center gap-3 text-left">
                 <span className="w-8 shrink-0 text-muted text-xs tabular-nums">{it.seq}</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                {/* 항목 제목은 행의 주인공이라 주변 본문(text-sm)·체크박스(h-5)와
+                    같은 단이다 — text-xs 로는 곁다리 메타처럼 작아 보였다(사용자
+                    지적). 경로·스토리지라 font-mono 는 유지(구분자·유사문자를
+                    또렷하게), 크기만 한 단 올린다. */}
+                <span className="min-w-0 flex-1 truncate font-mono text-sm">
                   {summarizeItem(b?.operation, it.payload)}
                 </span>
                 <StatusPill state={it.status} />
               </button>
+              {/* 수정도 행 버튼이다(삭제 왼쪽 — 사용자 지시 2026-08-15): 펼침
+                  안에 있으면 한 건 고치기가 펼침(1)→수정(2) 이 되는데, 무엇을
+                  고치는지는 행 요약(순번·대상)이 이미 말한다. 편집 폼은 행 바로
+                  아래에 열려(펼침과 무관) 대상과 입력이 붙어 있다. 행별 aria-label
+                  은 삭제 버튼 관례 미러 — 행이 여럿이라 무접두 "수정"은 모호하다.
+                  노출 조건은 canEditItem 재사용(표시 게이트, 진짜 차단은 서버 409). */}
+              {canEditItem(it) && editSeq !== it.seq && (
+                <Button variant="ghost" aria-label={`항목 ${it.seq} 수정`}
+                        onClick={() => startItemEdit(it)}>수정</Button>
+              )}
               {/* 삭제는 펼치지 않아도 보이는 행 버튼(펼침 안에서 행으로 이동).
                   노출 조건은 기존 canEditItem 재사용(표시 게이트 — 진짜 차단은
                   서버 409). aria-label 로 행별 이름을 부여해 테스트·스크린리더가
@@ -697,71 +768,71 @@ export function BatchDetail() {
             {deleteItem.isError && deleteItem.variables === it.seq && (
               <p className={`text-bad text-sm mt-1 ${ITEM_INDENT}`}>{(deleteItem.error as ApiError).message}</p>
             )}
-            {openSeq === it.seq && (<>
-              <dl className={`mt-2 ${ITEM_INDENT} grid grid-cols-[7rem_1fr] gap-y-1 text-sm`}>
-                {/* 요청 상태는 항목 상태(배치 시점 판정)와 다른 축 — 자식 요청의
-                    현재 상태다. null = 아직 materialize 안 됨. */}
-                <dt className="text-muted">요청 상태</dt>
-                <dd>{it.request_state ?? "—"}</dd>
-                <dt className="text-muted">사유</dt>
-                <dd className="text-bad">{it.reason_code ? reasonText(it.reason_code) : "—"}</dd>
-                {/* null = 모름(잡 없음/미기록) — 0(파일 없음)은 정상값으로 그대로
-                    표기한다(null≠0, ?? 로만 접는다). */}
-                <dt className="text-muted">파일 수</dt>
-                <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
-                <dt className="text-muted">완료 시각</dt>
-                <dd className="text-muted">{it.completed_at ?? "—"}</dd>
-                <dt className="text-muted">payload</dt>
-                <dd className="font-mono text-xs break-all">{JSON.stringify(it.payload)}</dd>
-                <dt className="text-muted">요청</dt>
-                <dd>{it.request_id
-                  ? <Link className="text-accent" to={`/jobs/${it.request_id}`}>요청 상세</Link>
-                  : "—"}</dd>
-              </dl>
-              {/* 수정은 펼침에 남긴다(삭제만 행으로 이동 — 최소침습): 수정은
-                  payload 입력 폼이 필요해 펼침 패널의 공간이 자연스럽고, 어떤
-                  payload 를 고치는지 확인하려면 어차피 펼친다. 삭제는 행 요약
-                  (순번·대상)만으로 대상 확인이 충분해 행으로 올렸다. 노출 조건은
-                  기존 canEditItem 재사용(표시 게이트, 진짜 차단은 서버 409). */}
-              {canEditItem(it) && editSeq !== it.seq && (
-                <div className={`mt-2 ${ITEM_INDENT} flex gap-2`}>
-                  <Button variant="ghost" onClick={() => startItemEdit(it)}>수정</Button>
+            {/* 편집 폼은 펼침 **밖**이다 — 수정 버튼이 행으로 올라갔으니 폼도
+                행 바로 아래에 열린다(펼치지 않은 행에서 눌러도 보인다). 펼친
+                행에서 눌러도 같은 자리(행 밑, 상세 위)라 대상과 입력이 붙는다. */}
+            {editSeq === it.seq && (
+              <div className={`mt-2 ${ITEM_INDENT} space-y-2 max-w-md`}>
+                {isSync ? (<>
+                  <label className="text-sm block">소스 경로
+                    <input aria-label="소스 경로" className={field} value={pathDraft}
+                           onChange={(e) => setPathDraft(e.target.value)} />
+                  </label>
+                  <label className="text-sm block">목적지 경로
+                    <input aria-label="목적지 경로" className={field} value={dstDraft}
+                           onChange={(e) => setDstDraft(e.target.value)} />
+                  </label>
+                </>) : (
+                  <label className="text-sm block">대상 경로
+                    <input aria-label="대상 경로" className={field} value={pathDraft}
+                           onChange={(e) => setPathDraft(e.target.value)} />
+                  </label>
+                )}
+                <div className="flex gap-2">
+                  <Button disabled={updateItem.isPending} onClick={() => saveItem(it)}>항목 저장</Button>
+                  {/* 배치 취소("취소")·이름 편집("편집 취소")과 라벨이 겹치지 않게 */}
+                  <Button variant="ghost" onClick={() => setEditSeq(null)}>항목 편집 취소</Button>
                 </div>
-              )}
-              {editSeq === it.seq && (
-                <div className={`mt-2 ${ITEM_INDENT} space-y-2 max-w-md`}>
-                  {isSync ? (<>
-                    <label className="text-sm block">소스 경로
-                      <input aria-label="소스 경로" className={field} value={pathDraft}
-                             onChange={(e) => setPathDraft(e.target.value)} />
-                    </label>
-                    <label className="text-sm block">목적지 경로
-                      <input aria-label="목적지 경로" className={field} value={dstDraft}
-                             onChange={(e) => setDstDraft(e.target.value)} />
-                    </label>
-                  </>) : (
-                    <label className="text-sm block">대상 경로
-                      <input aria-label="대상 경로" className={field} value={pathDraft}
-                             onChange={(e) => setPathDraft(e.target.value)} />
-                    </label>
-                  )}
-                  <div className="flex gap-2">
-                    <Button disabled={updateItem.isPending} onClick={() => saveItem(it)}>항목 저장</Button>
-                    {/* 배치 취소("취소")·이름 편집("편집 취소")과 라벨이 겹치지 않게 */}
-                    <Button variant="ghost" onClick={() => setEditSeq(null)}>항목 편집 취소</Button>
-                  </div>
-                  {updateItem.isError && (
-                    <p className="text-bad text-sm">{(updateItem.error as ApiError).message}</p>
-                  )}
-                </div>
-              )}
-              {/* 항목별 데이터 온도: scan 배치만 — sync 항목엔 dscan 리포트가
-                  존재할 수 없어 섹션 자체가 거짓 약속이 된다. */}
-              {b?.operation === "scan" && (
-                <ItemScanStats requestId={it.request_id}
-                               succeeded={it.request_state === "Succeeded"} />
-              )}
-            </>)}
+                {updateItem.isError && (
+                  <p className="text-bad text-sm">{(updateItem.error as ApiError).message}</p>
+                )}
+              </div>
+            )}
+            {/* 펼침 패널: 들여쓰기는 컨테이너 한 곳에서만 준다(예전엔 섹션마다
+                ITEM_INDENT 를 되풀이했다) — 섹션이 늘어도 정렬이 한 곳에 남는다. */}
+            {openSeq === it.seq && (
+              <div className={ITEM_INDENT}>
+                <section className={PANEL_SECTION}>
+                  <h3 className={PANEL_TITLE}>요청 정보</h3>
+                  <dl className="grid grid-cols-[7rem_1fr] gap-y-1 text-sm">
+                    {/* 요청 상태는 항목 상태(배치 시점 판정)와 다른 축 — 자식 요청의
+                        현재 상태다. null = 아직 materialize 안 됨. */}
+                    <dt className="text-muted">요청 상태</dt>
+                    <dd>{it.request_state ?? "—"}</dd>
+                    <dt className="text-muted">사유</dt>
+                    <dd className="text-bad">{it.reason_code ? reasonText(it.reason_code) : "—"}</dd>
+                    {/* null = 모름(잡 없음/미기록) — 0(파일 없음)은 정상값으로 그대로
+                        표기한다(null≠0, ?? 로만 접는다). */}
+                    <dt className="text-muted">파일 수</dt>
+                    <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
+                    <dt className="text-muted">완료 시각</dt>
+                    <dd className="text-muted">{it.completed_at ?? "—"}</dd>
+                    <dt className="text-muted">payload</dt>
+                    <dd className="font-mono text-xs break-all">{JSON.stringify(it.payload)}</dd>
+                    <dt className="text-muted">요청</dt>
+                    <dd>{it.request_id
+                      ? <Link className="text-accent" to={`/jobs/${it.request_id}`}>요청 상세</Link>
+                      : "—"}</dd>
+                  </dl>
+                </section>
+                {/* 항목별 데이터 온도: scan 배치만 — sync 항목엔 dscan 리포트가
+                    존재할 수 없어 섹션 자체가 거짓 약속이 된다. */}
+                {b?.operation === "scan" && (
+                  <ItemScanStats requestId={it.request_id}
+                                 succeeded={it.request_state === "Succeeded"} />
+                )}
+              </div>
+            )}
           </div>
         ))}
         {/* 항목 0개: 도구 버튼(추가·CSV)이 전부 사라진 자리에 왜 없는지를 남긴다 —
