@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from dms.execution import JobSpec
@@ -396,3 +398,107 @@ def test_drm_dryrun_argv_is_unchanged_by_the_explicit_branch():
                  options={"recursive": True})
     assert tool_argv(spec, abs_paths={"target": "/cephfs/junk"}) == [
         "--dryrun", "/cephfs/junk"]
+
+
+# ---- sync 목적지 타입 검사: 기존 일반 파일 위로 sync 하면 데이터가 사라진다 ----
+#
+# 실증(d65): 목적지가 기존 **일반 파일**인 sync 는 preflight 를 통과했다 -- 부모
+# 쓰기 권한만 봤기 때문이다. 실행 단계의 dsync 는 `Removing 1 items` 로 목적지
+# 파일을 먼저 지우고 그 자리에 디렉토리를 만들지 못해(mkdir errno=2) 잡이 Failed
+# 로 끝났다. 원본은 복사되지 않았는데 목적지 파일은 지워진 순수 손실이다.
+# preflight 가 막아야 할 조건이라 여기서 계약으로 못박는다.
+
+def _preflight_command(spec, role=None, node="dms-w1"):
+    m = build_preflight_pod(spec, job_image="i", namespace="dms", volumes=_VOL,
+                            node=node, role=role)
+    return m["spec"]["containers"][0]["command"]
+
+
+def _sync_spec(source, destination):
+    return _spec(operation="sync", tool="dsync", phase="preflight",
+                 paths={"source": source, "source_storage": "s1",
+                        "destination": destination, "destination_storage": "s2"})
+
+
+def _run_preflight(cmd):
+    """실 셸로 preflight 스크립트를 돌린다 -- (returncode, stdout).
+
+    문자열 계약만으로는 `set -e` 와 `a || b || { ...; exit 1; }` 체인의 상호작용을
+    증명할 수 없다(errexit 이 || 좌변의 실패를 삼키는지, 마지막 블록이 정말
+    exit 1 하는지). 스크립트를 실제로 돌리는 것이 유일한 증명이다. 인자는 배포와
+    동일하게 positional 로만 넘어간다(cmd == ["sh", "-c", script, "sh", *paths])."""
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode, proc.stdout
+
+
+def test_sync_preflight_script_checks_destination_type(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    script = _preflight_command(_sync_spec(str(src), str(tmp_path / "dst")))[2]
+    assert "destination_not_directory" in script
+    # 순서: 타입 검사가 부모 쓰기 검사보다 **먼저**다. 목적지가 파일이면 부모는
+    # 반드시 존재하므로, 부모 검사를 먼저 두면 (부모가 쓰기 불가일 때) 데이터
+    # 손실의 진짜 원인인 "목적지가 파일"이 사유에서 사라진다.
+    assert script.index("destination_not_directory") < script.index(
+        "destination_parent_not_writable")
+
+
+def test_sync_preflight_passes_when_destination_is_absent_or_a_directory(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    rc, out = _run_preflight(
+        _preflight_command(_sync_spec(str(src), str(tmp_path / "nope"))))
+    assert (rc, "DMS_PREFLIGHT_OK" in out) == (0, True)
+    existing_dir = tmp_path / "dst"
+    existing_dir.mkdir()
+    rc, out = _run_preflight(
+        _preflight_command(_sync_spec(str(src), str(existing_dir))))
+    assert (rc, "DMS_PREFLIGHT_OK" in out) == (0, True)
+
+
+def test_sync_preflight_rejects_destination_that_is_an_existing_file(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    dest_file = tmp_path / "d65-destfile"
+    dest_file.write_text("사라지면 안 되는 데이터")
+    rc, out = _run_preflight(_preflight_command(_sync_spec(str(src), str(dest_file))))
+    assert rc == 1
+    assert "DMS_PREFLIGHT_REASON=destination_not_directory" in out
+    assert "DMS_PREFLIGHT_OK" not in out
+    assert dest_file.read_text() == "사라지면 안 되는 데이터"   # 검사가 지우지 않는다
+
+
+def test_sync_preflight_destination_role_checks_destination_type(tmp_path):
+    # nsync 는 목적지 노드에서 role="destination" 스크립트만 돈다 -- 통합
+    # 스크립트만 고치면 nsync 경로에 구멍이 그대로 남는다.
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    rc, out = _run_preflight(
+        _preflight_command(_sync_spec("/cephfs/src", str(dst)), role="destination"))
+    assert (rc, "DMS_PREFLIGHT_OK" in out) == (0, True)
+    dest_file = tmp_path / "file"
+    dest_file.write_text("x")
+    rc, out = _run_preflight(
+        _preflight_command(_sync_spec("/cephfs/src", str(dest_file)),
+                           role="destination"))
+    assert rc == 1
+    assert "DMS_PREFLIGHT_REASON=destination_not_directory" in out
+
+
+def test_sync_preflight_missing_destination_parent_still_reports_parent_marker(tmp_path):
+    # 중첩 경로(a/b/c 에서 a/b 부재)는 여전히 부모 마커로 막힌다 -- 타입 검사를
+    # 앞에 끼워 넣느라 이 사유를 잃으면 안 된다.
+    src = tmp_path / "src"
+    src.mkdir()
+    nested = tmp_path / "a" / "b" / "c"
+    rc, out = _run_preflight(_preflight_command(_sync_spec(str(src), str(nested))))
+    assert rc == 1
+    assert "DMS_PREFLIGHT_REASON=destination_parent_not_writable" in out
+
+
+def test_sync_preflight_destination_path_is_never_inlined_into_the_script(tmp_path):
+    # 타입 검사 추가가 positional 파라미터(셸 인젝션 차단) 관례를 깨지 않는다.
+    malicious = str(tmp_path / "$(touch pwned)")
+    cmd = _preflight_command(_sync_spec("/cephfs/src", malicious))
+    assert malicious not in cmd[2]
+    assert malicious in cmd[4:]

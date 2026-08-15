@@ -266,8 +266,19 @@ def _preflight_script(spec, *, role=None):
 
     role: nsync(소스/목적지가 disjoint 노드)는 한 노드에서 양쪽을 검사할 수 없다 —
     소스 노드엔 목적지가, 목적지 노드엔 소스가 마운트되지 않기 때문. role="source"는
-    소스 읽기만, role="destination"은 목적지 부모 쓰기만 검사한다(각각 해당 노드에서).
-    role=None(dsync 코로케이션/scan/rm)은 한 파드에서 전부 검사."""
+    소스 읽기만, role="destination"은 목적지(타입 + 부모 쓰기)만 검사한다(각각 해당
+    노드에서). role=None(dsync 코로케이션/scan/rm)은 한 파드에서 전부 검사.
+
+    목적지 타입 검사(destination_not_directory)가 부모 쓰기 검사보다 **앞**인 이유
+    (실증 d65): 목적지가 기존 일반 파일이면 부모 쓰기 검사는 통과해버려 sync 가
+    실행까지 갔고, dsync 가 목적지 파일을 먼저 지운 뒤(`Removing 1 items`) 그
+    자리에 디렉토리를 만들지 못해(mkdir errno=2) 실패했다 — 원본은 그대로인데
+    목적지 파일만 사라진 순수 데이터 손실이다. 또 목적지가 파일이면 부모는 반드시
+    존재하므로, 부모 검사를 먼저 두면 부모가 쓰기 불가일 때 진짜 원인(목적지가
+    파일)이 사유에서 사라진다 — 타입을 먼저 봐야 더 정확한 사유가 나온다.
+    `test ! -e "$2" || test -d "$2" || { ...; exit 1; }` 는 set -e 아래서도 안전하다:
+    AND-OR 목록의 좌변 실패는 errexit 대상이 아니고, 전부 실패했을 때만 마지막
+    블록이 명시적으로 exit 1 한다(기존 마커 관용구와 동일한 형태)."""
     ap = _abs_paths(spec)
     if spec.operation == "sync":
         if role == "source":
@@ -277,12 +288,14 @@ def _preflight_script(spec, *, role=None):
             return script, [ap["source"]]
         if role == "destination":
             script = ('set -e; '
+                      'test ! -e "$1" || test -d "$1" || { echo DMS_PREFLIGHT_REASON=destination_not_directory; exit 1; }; '
                       'dest_parent=$(dirname "$1"); '
                       'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
                       'echo DMS_PREFLIGHT_OK')
             return script, [ap["destination"]]
         script = ('set -e; '
                   'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
+                  'test ! -e "$2" || test -d "$2" || { echo DMS_PREFLIGHT_REASON=destination_not_directory; exit 1; }; '
                   'dest_parent=$(dirname "$2"); '
                   'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
                   'echo DMS_PREFLIGHT_OK')
