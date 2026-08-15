@@ -75,14 +75,17 @@ export function SubmitScan() {
           </label>
         </div>
 
-        <label className="text-sm block">batch_files (0..1,000,000,000 · 0 = 배칭 끔)
+        {/* scan 은 프리필하지 않는다(sync 와 다름): dscan 도구 기본이 이미
+            batch_files 1,000,000 이라 빈값 = 도구 기본이 곧 원하는 동작이고,
+            placeholder 가 그 값을 말한다. sync 쪽 프리필의 「왜」는 optionRules. */}
+        <label className="text-sm block">batch_files (선택 · 0..1,000,000,000 · 0 = 배칭 끔)
           <input aria-label="batch_files" type="number" min={0} max={1000000000}
                  placeholder="기본 1000000 · 0 = 배칭 끔"
                  className={field} value={f.batchFiles} onChange={on("batchFiles")} />
         </label>
         {batchFilesError && <p className="text-bad text-sm">{batchFilesError}</p>}
 
-        <label className="text-sm block">broken_limit (0..10,000 · 리포트에 보관할 파손 경로 수)
+        <label className="text-sm block">broken_limit (선택 · 0..10,000 · 리포트에 보관할 파손 경로 수)
           <input aria-label="broken_limit" type="number" min={0} max={10000}
                  placeholder="기본 100"
                  className={field} value={f.brokenLimit} onChange={on("brokenLimit")} />
@@ -105,9 +108,19 @@ export function SubmitScan() {
           </select>
         </label>
 
-        <label className="text-sm block">관리자 특권 실행(root)
-          <input aria-label="관리자 특권 실행(root)" className={field} value={f.ownerUsername} onChange={on("ownerUsername")} />
-          <p className="text-muted text-xs mt-1">root로 실행되며, 입력한 사용자는 소유자로 기록됩니다</p>
+        {/* 라벨 정정(사용자 결정 2026-08-16): owner_username 은 소유자 기록이 아니라
+            **잡의 실행 신원**이다(identity.resolve_job_identity: owner =
+            owner_username or requester_id). 캡션 문구는 SubmitJob 과 한 글자도
+            다르지 않게 유지한다 — 같은 필드가 화면마다 다른 말을 하면 그게 거짓말. */}
+        <label className="text-sm block">실행 신원(선택)
+          <input aria-label="실행 신원(선택)" className={field}
+                 placeholder="예: cocoa.song"
+                 value={f.ownerUsername} onChange={on("ownerUsername")} />
+          <p className="text-muted text-xs mt-1">
+            비우면 요청자 본인으로 실행됩니다. 다른 사용자를 지정하려면 특권
+            요청자여야 하며, 그때 잡은 root 로 실행되고 지정한 사용자 신원으로
+            파일을 다룹니다(LDAP 에 없는 계정도 지정할 수 있습니다).
+          </p>
         </label>
 
         {submit.isError && <p className="text-bad text-sm">{(submit.error as ApiError).message}</p>}

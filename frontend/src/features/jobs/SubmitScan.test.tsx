@@ -101,6 +101,34 @@ test("placeholder에 도구 기본값이 명시된다 — 빈값 = 플래그 생
     .toHaveAttribute("placeholder", "기본 100");
 });
 
+// 선택 필드 표기 통일(사용자 지시 2026-08-16): 비워도 되는 입력은 라벨에 (선택).
+// scan 은 프리필 대상이 아니다 — dscan 기본(batch_files 1,000,000)이 이미 원하는
+// 동작이라 빈값 = 도구 기본 계약을 그대로 둔다(sync 와 다른 게 맞다).
+test("비워도 되는 scan 입력은 라벨에 (선택) 이 붙는다", async () => {
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  expect(screen.getByText("batch_files (선택 · 0..1,000,000,000 · 0 = 배칭 끔)"))
+    .toBeInTheDocument();
+  expect(screen.getByText(
+    "broken_limit (선택 · 0..10,000 · 리포트에 보관할 파손 경로 수)")).toBeInTheDocument();
+  expect(screen.getByLabelText("batch_files")).toHaveValue(null);   // 프리필 없음
+});
+
+// 라벨 정정(사용자 결정 2026-08-16): owner_username 은 아티팩트 소유자가 아니라
+// **잡의 실행 신원**이다(identity.resolve_job_identity: owner = owner_username
+// or requester_id). 필드는 유지, 라벨·캡션만 사실에 맞춘다.
+test("실행 신원(선택) 라벨과 캡션이 실행 신원을 말한다", async () => {
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  expect(screen.getByLabelText("실행 신원(선택)")).toBeInTheDocument();
+  expect(screen.queryByLabelText("관리자 특권 실행(root)")).toBeNull();
+  expect(screen.getByText(
+    "비우면 요청자 본인으로 실행됩니다. 다른 사용자를 지정하려면 특권 요청자여야 하며, "
+    + "그때 잡은 root 로 실행되고 지정한 사용자 신원으로 파일을 다룹니다"
+    + "(LDAP 에 없는 계정도 지정할 수 있습니다).",
+  )).toBeInTheDocument();
+});
+
 test("broken_limit 범위 밖이면 즉답 문구 + 제출 비활성", async () => {
   renderPage();
   await screen.findByLabelText("스토리지");

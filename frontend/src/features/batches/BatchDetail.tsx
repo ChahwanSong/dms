@@ -190,9 +190,11 @@ function BatchSettings({ b }: { b: Batch }) {
         <dd className="tabular-nums">{b.max_concurrency}</dd>
         <dt className="text-muted">옵션</dt>
         <dd className="font-mono text-xs break-all">{humanizeOptions(b.options)}</dd>
-        {/* 소유자 기록은 있을 때만 — 없으면 행 생략(빈칸 소음 방지, 메모 관례) */}
+        {/* 실행 신원(라벨 정정 2026-08-16 — owner_username 은 소유자 기록이 아니라
+            잡의 실행 신원이다, identity.resolve_job_identity)은 있을 때만 —
+            없으면 행 생략(빈칸 소음 방지, 메모 관례) */}
         {b.owner_username && (<>
-          <dt className="text-muted">소유자 기록</dt>
+          <dt className="text-muted">실행 신원</dt>
           <dd>{b.owner_username}</dd>
         </>)}
       </dl>
@@ -631,7 +633,7 @@ export function BatchDetail() {
                 한 개의 템플릿 리터럴 = 한 개의 텍스트 노드(getByText 관례). */}
             {b && <span className="text-bad text-sm">특권 실행(root)</span>}
             {b?.owner_username && (
-              <span className="text-muted text-sm">{`소유자 ${b.owner_username}`}</span>
+              <span className="text-muted text-sm">{`실행 신원 ${b.owner_username}`}</span>
             )}
           </div>
           <div className="flex gap-2">

@@ -115,23 +115,23 @@ test("Running 에선 전체 재실행 버튼 부재", async () => {
   await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언
   expect(screen.queryByRole("button", { name: "전체 재실행" })).toBeNull();
 });
-test("owner_username 이 있으면 소유자 표시 + 특권 실행 문구", async () => {
+test("owner_username 이 있으면 실행 신원 표시 + 특권 실행 문구", async () => {
   server.use(http.get("/api/admin/batches/b1",
     () => HttpResponse.json(batch({ owner_username: "alice" }))));
   const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
     <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
   </MemoryRouter></QueryClientProvider>);
-  expect(await screen.findByText("소유자 alice")).toBeInTheDocument();
+  expect(await screen.findByText("실행 신원 alice")).toBeInTheDocument();
   expect(screen.getByText("특권 실행(root)")).toBeInTheDocument();
 });
-test("owner_username 이 없어도 특권 실행 문구는 항상 — 소유자 행만 부재", async () => {
+test("owner_username 이 없어도 특권 실행 문구는 항상 — 실행 신원 행만 부재", async () => {
   // 통일 게이트 후 배치는 전부 특권 실행이다. 행별 auth_method/owner 로 재판정하지
   // 않는다(프론트는 allowlist 를 모른다 — 판정 흉내가 더 큰 거짓말).
   renderAt("Running");
   await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언
   expect(screen.getByText("특권 실행(root)")).toBeInTheDocument();
-  expect(screen.queryByText(/소유자/)).toBeNull();
+  expect(screen.queryByText(/실행 신원/)).toBeNull();
 });
 // --- 항목별 데이터 온도(hot/cold): expand 패널 안에서 그 항목의 리포트만 ---
 // 크기 버킷 fixture 는 **라이브 dscan 리포트 실측**(d63)이다: 버킷 **10개**,
@@ -721,7 +721,7 @@ test("항목이 없으면 도구 버튼도 없다 — 물려받을 스토리지�
 
 // --- 실행 제어 설정 표시(읽기 전용): 생성 시 고른 값이 상세에서 보인다 ---
 
-test("실행 설정: 지정값 표시 + 옵션 키=값 요약 + 소유자 기록", async () => {
+test("실행 설정: 지정값 표시 + 옵션 키=값 요약 + 실행 신원", async () => {
   renderBatch({ operation: "scan", status: "Completed", priority: "high",
     node_count: 4, procs_per_node: 2, max_concurrency: 8,
     options: { batch_files: 1000 }, owner_username: "alice",
@@ -735,7 +735,7 @@ test("실행 설정: 지정값 표시 + 옵션 키=값 요약 + 소유자 기록
   expect(dd("노드당 프로세스")).toBe("2");
   expect(dd("동시 실행 상한")).toBe("8");
   expect(dd("옵션")).toBe("batch_files=1000");
-  expect(dd("소유자 기록")).toBe("alice");
+  expect(dd("실행 신원")).toBe("alice");
 });
 
 test("실행 설정: 미지정(null)은 '정책 기본' — 0·빈값으로 뭉개지 않는다(null≠0)", async () => {
@@ -748,8 +748,8 @@ test("실행 설정: 미지정(null)은 '정책 기본' — 0·빈값으로 뭉�
   expect(screen.getAllByText("정책 기본")).toHaveLength(3);
   expect((screen.getByText("옵션").nextElementSibling as HTMLElement).textContent)
     .toBe("없음");
-  // 소유자 기록은 있을 때만 — 없으면 행 자체가 없다
-  expect(screen.queryByText("소유자 기록")).toBeNull();
+  // 실행 신원은 있을 때만 — 없으면 행 자체가 없다
+  expect(screen.queryByText("실행 신원")).toBeNull();
 });
 
 // --- 배치 상태 색: 헤더 pill 은 batchPillVariant, 항목 pill 은 공유 pillVariant ---
