@@ -71,7 +71,7 @@ describe("BarChart 저밀도(≤8버킷)", () => {
   });
 });
 
-describe("BarChart 고밀도(>8버킷)", () => {
+describe("BarChart 고밀도(>10버킷)", () => {
   const hours = Array.from({ length: 24 }, (_, i) => (
     { label: `${String(i).padStart(2, "0")}시`, value: i === 3 ? 5 : 0 }));
   it("값 표기는 접고 라벨을 솎으며 최대값 눈금을 단다", () => {
@@ -107,16 +107,40 @@ describe("BarChart formatValue(하위호환 사람 표기)", () => {
   });
 });
 
-describe("BarChart 9버킷은 저밀도", () => {
+describe("BarChart 저밀도 상한(9·10버킷 저밀도 / 11버킷부터 고밀도)", () => {
   it("dscan 시간 히스토그램(9버킷)의 전 라벨·값이 보인다", () => {
-    // SPARSE_MAX 9 의 근거: 데이터 온도 히스토그램이 9버킷 — 고밀도로 떨어지면
-    // 라벨이 솎여 구간을 읽을 수 없다. 잡 통계(6버킷) 저밀도·24버킷 고밀도 무영향.
+    // 데이터 온도 히스토그램이 9버킷 — 고밀도로 떨어지면 라벨이 솎여 구간을
+    // 읽을 수 없다. 잡 통계(6버킷) 저밀도·24버킷 고밀도 무영향.
     const nine = Array.from({ length: 9 }, (_, i) => (
       { label: `b${i}`, value: i }));
     render(<BarChart data={nine} label="아홉" />);
     for (const d of nine) expect(screen.getByText(d.label)).toBeInTheDocument();
     // 저밀도 증거: 최대값 눈금(고밀도 전용)이 없다
     expect(screen.queryByText("최대 8")).toBeNull();
+  });
+  it("dscan 크기 히스토그램(10버킷)도 저밀도 — 전 라벨·값·누적 오버레이", () => {
+    // SPARSE_MAX 10 의 근거(실측 d63): dscan file_size_histogram 이 **10버킷**
+    // 이다(시간 히스토그램 9버킷과 다르다). 9 였을 땐 고밀도로 떨어져 값 라벨·
+    // 누적 오버레이가 통째로 사라지고 축 라벨이 절반만 남았는데, 캡션은 누적선을
+    // 설명하고 있어 화면이 거짓말을 했다.
+    const ten = Array.from({ length: 10 }, (_, i) => (
+      { label: `b${i}`, value: i + 1 }));
+    const { container } = render(
+      <BarChart data={ten} label="열" cumulative={{ format: (n) => `${n}개` }} />);
+    for (const d of ten) expect(screen.getByText(d.label)).toBeInTheDocument();
+    expect(screen.getByText("10")).toBeInTheDocument();       // 막대 값 라벨
+    expect(screen.queryByText(/^최대 /)).toBeNull();          // 고밀도 눈금 부재
+    expect(container.querySelector("polyline")).not.toBeNull();
+    expect(container.querySelectorAll(".rounded-full")).toHaveLength(10);
+  });
+  it("11버킷부터 고밀도 — 경계 반대편도 못으로 박는다", () => {
+    const eleven = Array.from({ length: 11 }, (_, i) => (
+      { label: `b${i}`, value: i + 1 }));
+    const { container } = render(
+      <BarChart data={eleven} label="열하나"
+                cumulative={{ format: (n) => `${n}개` }} />);
+    expect(screen.getByText("최대 11")).toBeInTheDocument();
+    expect(container.querySelector("polyline")).toBeNull();
   });
 });
 
@@ -141,7 +165,7 @@ describe("BarChart colorOf(막대별 색 — 온도 그라디언트)", () => {
     expect(tracks[0]).toHaveStyle({ backgroundColor: "rgba(220, 38, 38, 0.1)" });
     expect(tracks[1]).toHaveStyle({ backgroundColor: "rgba(59, 130, 246, 0.1)" });
   });
-  it("고밀도(>9버킷)에도 막대·트랙 색이 적용된다", () => {
+  it("고밀도(>10버킷)에도 막대·트랙 색이 적용된다", () => {
     const many = Array.from({ length: 12 }, (_, i) => (
       { label: `${i}`, value: i }));
     const { container } = render(
@@ -249,7 +273,7 @@ describe("BarChart cumulative(누적 데이터량 오버레이 — 저밀도)", 
     expect(screen.queryByText(/%/)).toBeNull();
     expect(screen.getByRole("img", { name: "영" }).getAttribute("style")).toBeNull();
   });
-  it("고밀도(>9버킷)는 범위 밖 — 오버레이를 그리지 않는다", () => {
+  it("고밀도(>10버킷)는 범위 밖 — 오버레이를 그리지 않는다", () => {
     const many = Array.from({ length: 12 }, (_, i) => (
       { label: `${i}`, value: 1 }));
     const { container } = render(

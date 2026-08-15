@@ -129,15 +129,30 @@ test("owner_username 이 없어도 특권 실행 문구는 항상 — 소유자 
   expect(screen.queryByText(/소유자/)).toBeNull();
 });
 // --- 항목별 데이터 온도(hot/cold): expand 패널 안에서 그 항목의 리포트만 ---
-// 크기 버킷 fixture 는 서버 투영(routes_scan_paths._buckets)이 실제로 넘기는 모양:
-// 구간 라벨 + lower/upper_inclusive 바이트. 마지막 버킷은 상한 없음(열린 구간).
+// 크기 버킷 fixture 는 **라이브 dscan 리포트 실측**(d63)이다: 버킷 **10개**,
+// 구간은 [직전 상한+1, 상한](첫 버킷만 하한 0), 마지막은 상한 없음(열린 구간).
+// 서버 투영(routes_scan_paths._buckets)이 구간 라벨 + lower/upper_inclusive 를
+// 그대로 넘긴다. 10 이라는 수 자체가 회귀 못이다 — BarChart 저밀도 상한이 9 였을
+// 때 이 차트만 고밀도로 떨어져 값 라벨·누적 오버레이가 통째로 사라졌다.
+const SIZE_BUCKETS: [number, number | null, number][] = [
+  [0, 4096, 3], [4097, 65536, 1], [65537, 1048576, 1],
+  [1048577, 16777216, 1], [16777217, 268435456, 1],
+  [268435457, 1073741824, 0], [1073741825, 17179869184, 0],
+  [17179869185, 274877906944, 0], [274877906945, 4398046511104, 0],
+  [4398046511105, null, 0]];
+// 축약 라벨 기대값(축 순서대로). 하한이 "상한+1"(4097 = 4K+1)이라 소수로 흘러
+// ".0" 이 붙기 쉬운데, 그 자리는 반올림해 붙지 않는다("4K~64K").
+const SIZE_LABELS = ["0~4K", "4K~64K", "64K~1M", "1M~16M", "16M~256M",
+                     "256M~1G", "1G~16G", "16G~256G", "256G~4T", "4T~"];
+const sizeHistogram = () => SIZE_BUCKETS.map(([lo, hi, count]) => ({
+  bucket: hi === null ? `[${lo},)` : `[${lo},${hi}]`,
+  lower_inclusive: lo, count,
+  ...(hi === null ? {} : { upper_inclusive: hi }) }));
+
 const requestStats = (over: any = {}) => ({
   generated_at_epoch: 1785805962,
   summary: { total_files: 12, total_entries: 20 },
-  file_size_histogram: [
-    { bucket: "[0,4096]", lower_inclusive: 0, upper_inclusive: 4096, count: 11 },
-    { bucket: "[4096,65536]", lower_inclusive: 4096, upper_inclusive: 65536, count: 5 },
-    { bucket: "[1073741824,)", lower_inclusive: 1073741824, count: 1 }],
+  file_size_histogram: sizeHistogram(),
   time_histograms: {
     atime: [{ bucket: "[0d,1d]", bytes: 2048 }, { bucket: "[1d,7d]", bytes: 0 }],
     mtime: [{ bucket: "[0d,1d]", bytes: 4096 }],
@@ -180,7 +195,7 @@ test("성공 scan 항목 펼침: 조회 발사 + 온도 섹션(사람 표기·�
   // 파일 크기 분포(count)는 온도가 아니다 — 온도 그라디언트 대신 단색 accent 유지
   // (크기는 hot/cold 축이 아니라 같은 색을 쓰면 "작은 파일=hot"이라는 거짓 의미가 된다)
   const sizeChart = screen.getByRole("img", { name: "파일 크기 분포" });
-  expect(sizeChart.getElementsByClassName("bg-accent")).toHaveLength(3);
+  expect(sizeChart.getElementsByClassName("bg-accent")).toHaveLength(10);
   // 요약(그 항목의 것)·파손 경로 수·리포트 생성 시각
   expect(screen.getByText("total_files")).toBeInTheDocument();
   expect(screen.getByText("12")).toBeInTheDocument();
@@ -217,37 +232,42 @@ test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량", async 
 
 // --- 파일 크기 분포: 전 버킷 축약 라벨 + 개수 + 누적 % (온도 차트와 같은 문법) ---
 
-test("크기 분포: 버킷 라벨이 K/M/G 로 축약돼 전부 보인다 — 열린 마지막 구간은 '1G~'", async () => {
-  server.use(statsHandler("r1", { calls: 0 }));
-  renderDetailed();
-  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
-  const chart = within(await screen.findByRole("img", { name: "파일 크기 분포" }));
-  // 원본 라벨("[0,4096]")은 열 폭(max-w-16)에서 잘린다 — 축약 표기가 전 버킷에 보인다
-  expect(chart.getByText("0~4K")).toBeInTheDocument();
-  expect(chart.getByText("4K~64K")).toBeInTheDocument();
-  expect(chart.getByText("1G~")).toBeInTheDocument();
-  expect(screen.queryByText("[0,4096]")).toBeNull();
-  // 단위 문법(K=KiB, 1024단위)은 화면이 스스로 말한다 — 안 그러면 K 가 1000 으로 읽힌다
-  expect(screen.getByText(/K=KiB·M=MiB·G=GiB/)).toBeInTheDocument();
-});
-
-test("크기 분포: 값=파일 개수 + 누적 % 오버레이(온도 차트와 같은 옵션)", async () => {
+test("크기 분포(10버킷): 축약 라벨이 하나도 안 솎이고 전부 보인다", async () => {
   server.use(statsHandler("r1", { calls: 0 }));
   renderDetailed();
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
   const el = await screen.findByRole("img", { name: "파일 크기 분포" });
   const chart = within(el);
-  // 값 라벨 = 개수(정수 그대로 — 용량이 아니다)
-  expect(chart.getByText("11")).toBeInTheDocument();
-  expect(chart.getByText("5")).toBeInTheDocument();
-  // 누적 오버레이: 11·5·1 → 65%·94%·100%
+  // 원본 라벨("[0,4096]")은 열 폭(max-w-16)에서 잘린다 — 축약 표기가 전 버킷에 보인다.
+  // 10버킷이 저밀도 상한(SPARSE_MAX) 안이라 라벨 솎기(labelStep)가 아예 없다.
+  for (const label of SIZE_LABELS) expect(chart.getByText(label)).toBeInTheDocument();
+  expect(screen.queryByText("[0,4096]")).toBeNull();
+  // 상한+1 하한(4097 = 4K+1)이 ".0" 으로 새지 않는다 — 축 라벨이 넓어질 뿐이다
+  expect(chart.queryByText(/\.0[KMGT]/)).toBeNull();
+  // 단위 문법(K=KiB, 1024단위)은 화면이 스스로 말한다 — 안 그러면 K 가 1000 으로 읽힌다
+  expect(screen.getByText(/K=KiB·M=MiB·G=GiB/)).toBeInTheDocument();
+});
+
+test("크기 분포(10버킷): 값=파일 개수 + 누적 % 오버레이(온도 차트와 같은 옵션)", async () => {
+  server.use(statsHandler("r1", { calls: 0 }));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  const el = await screen.findByRole("img", { name: "파일 크기 분포" });
+  const chart = within(el);
+  // 값 라벨 = 개수(정수 그대로 — 용량이 아니다). 3·1×4·0×5 = 10버킷 전부 표기.
+  expect(chart.getByText("3")).toBeInTheDocument();
+  expect(chart.getAllByText("1")).toHaveLength(4);
+  expect(chart.getAllByText("0")).toHaveLength(5);       // 0 은 정상값(빈 버킷)
+  // 누적 오버레이: 3·1·1·1·1·0… → 43%·57%·71%·86%·100%(이후 100% 유지)
   expect(el.querySelector("polyline")).not.toBeNull();
   expect(chart.getAllByText(/%$/).map((n) => n.textContent))
-    .toEqual(["65%", "94%", "100%"]);
+    .toEqual(["43%", "57%", "71%", "86%", "100%",
+              "100%", "100%", "100%", "100%", "100%"]);
   // 툴팁의 누적값은 개수 표기(바이트가 아니다)
-  expect(chart.getByText("100%").getAttribute("title")).toBe("누적 17개 (100%)");
+  expect(chart.getAllByText("100%")[0].getAttribute("title"))
+    .toBe("누적 7개 (100%)");
   // 캡션: 선의 의미 + 총 개수(온도 차트 캡션과 같은 문법, 단위만 개수)
-  expect(screen.getByText("선 = 작은 파일부터의 누적 개수 비중 · 총 17개"))
+  expect(screen.getByText("선 = 작은 파일부터의 누적 개수 비중 · 총 7개"))
     .toBeInTheDocument();
 });
 

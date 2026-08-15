@@ -40,9 +40,14 @@ function toBars(buckets: HistogramBucket[] | undefined,
 
 // 크기 버킷 축 라벨용 초단축 표기(1024 단위). humanBytes 와 같은 단위 체계지만
 // 소수·공백·"iB" 를 떼서 축 라벨 폭을 줄인다 -- 원본 라벨("[1073741824,4294967296]")
-// 은 열 폭(max-w-16 = 4rem)에서 잘려 어느 구간인지 못 읽는다(사용자 지적). 경계값이
-// 2의 거듭제곱이면 정수로 딱 떨어져 축약이 무손실이고(4096 = "4K"), 아니면 한 자리
-// 소수로 근사한다. 축약이 KiB 계열임은 차트 캡션이 말한다(K 를 1000 으로 읽는 오독 방지).
+// 은 열 폭(max-w-16 = 4rem)에서 잘려 어느 구간인지 못 읽는다(사용자 지적). 축약이
+// KiB 계열임은 차트 캡션이 말한다(K 를 1000 으로 읽는 오독 방지).
+//
+// 반올림 규칙: 한 자리 소수로 적되 그 자리가 "X.0" 이 될 값은 정수로 적는다.
+// 실측(d63) dscan 버킷은 [직전 상한+1, 상한] 이라 하한이 늘 2의 거듭제곱+1 이다
+// -- 그대로 한 자리로 적으면 "64.0K~1M" 처럼 의미 없는 .0 이 붙어 라벨만 넓어진다
+// (1 바이트 차이를 소수 한 자리로는 어차피 못 보인다). 진짜 중간값(1.5K)은 그대로
+// "1.5K" 로 남는다 -- 반올림 폭이 표기 해상도(0.05)를 넘지 않는 값만 접는다.
 const LABEL_UNITS: [string, number][] = [
   ["T", 1024 ** 4], ["G", 1024 ** 3], ["M", 1024 ** 2], ["K", 1024],
 ];
@@ -50,7 +55,8 @@ function shortBytes(bytes: number): string {
   for (const [unit, size] of LABEL_UNITS) {
     if (bytes >= size) {
       const v = bytes / size;
-      return `${Number.isInteger(v) ? v : v.toFixed(1)}${unit}`;
+      const round = Math.round(v);
+      return `${Math.abs(v - round) < 0.05 ? round : v.toFixed(1)}${unit}`;
     }
   }
   return String(Math.round(bytes));
@@ -251,7 +257,7 @@ function ItemScanStats({ requestId, succeeded }: {
                 cumulative={{ format: (n) => `${n}개` }}
                 emptyText="집계된 버킷 없음" />
       {sizeBars.length > 0 && (
-        <p className="text-muted text-xs mt-1">가로축 = 파일 크기 구간(K=KiB·M=MiB·G=GiB, 1024 단위)</p>
+        <p className="text-muted text-xs mt-1">가로축 = 파일 크기 구간(K=KiB·M=MiB·G=GiB·T=TiB, 1024 단위)</p>
       )}
       {sizeTotal > 0 && (
         <p className="text-muted text-xs mt-1">
