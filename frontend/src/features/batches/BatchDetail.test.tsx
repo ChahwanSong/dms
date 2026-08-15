@@ -3,9 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchDetail } from "./BatchDetail";
+import { BatchesList } from "./BatchesList";
 import { parseItemsCsv } from "../../lib/csv";
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
@@ -547,6 +548,44 @@ test("종단 배치: 배치 삭제 버튼 → 확인 다이얼로그 → DELETE 
   expect(await screen.findByText("배치 목록 화면")).toBeInTheDocument();
 });
 
+// 배치 자체 삭제는 앞의 셋과 조건이 다르다: 지운 뒤 이동할 **목록 쿼리는 그 시점에
+// 비활성**(상세 화면에 있으니까)이라 invalidate 는 재조회를 트리거하지 않는다 —
+// 표시만 stale 로 바뀐다. 그대로 이동하면 목록은 캐시에 남은 지워진 배치를 먼저
+// 그리고(로딩 표시도 없다 — 데이터가 있으니 isLoading 은 false 다) 마운트 후
+// 재조회가 착지해야 사라진다. 그래서 이 경로만 invalidate 가 아니라 refetch 를
+// **기다린 뒤** 이동한다.
+test("배치 삭제: 목록 화면에 도착한 순간 지워진 배치가 이미 없다(캐시 잔상 금지)", async () => {
+  const listRow = (id: string, name: string) => ({ batch_id: id, operation: "scan",
+    status: "Completed", max_concurrency: 2, item_count: 1, succeeded_count: 1,
+    failed_count: 0, note: null, created_at: "", updated_at: "2026-08-15T00:00:00Z",
+    name });
+  const state = { rows: [listRow("b1", "지울 배치"), listRow("b9", "남을 배치")] };
+  let listGets = 0;
+  server.use(
+    http.get("/api/admin/batches", async () => { listGets += 1;
+      if (listGets > 1) await delay(200);          // 삭제 후 재조회만 느리게
+      return HttpResponse.json(state.rows); }),
+    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "Completed" }))),
+    http.delete("/api/admin/batches/b1", () => {
+      state.rows = state.rows.filter((r) => r.batch_id !== "b1");
+      return HttpResponse.json({ deleted: "b1" }); }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches"]}>
+    <Routes>
+      <Route path="/admin/batches" element={<BatchesList/>} />
+      <Route path="/admin/batches/:batchId" element={<BatchDetail/>} />
+    </Routes>
+  </MemoryRouter></QueryClientProvider>);
+  // 실제 동선: 목록에서 들어간다 = 목록 캐시가 이미 채워진 상태로 삭제한다
+  await screen.findByText("지울 배치");
+  await userEvent.click(screen.getByRole("link", { name: "b1" }));
+  await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
+  await userEvent.click(await screen.findByRole("button", { name: "삭제 확인" }));
+  await screen.findByText("배치 작업");            // 목록 화면 도착
+  expect(screen.queryByText("지울 배치")).toBeNull();
+  expect(screen.getByText("남을 배치")).toBeInTheDocument();
+});
+
 test("활성 배치: 배치 삭제 버튼 부재 — 취소 먼저가 동선", async () => {
   renderAt("Running");
   await screen.findByText("Materialized");       // 렌더 완료 대기 후 부재 단언
@@ -817,6 +856,59 @@ test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 �
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제" }));
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
   await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
+});
+
+// --- 삭제 후 화면 갱신(사용자 보고 2026-08-15: "삭제 후 새로고침이 안되고 화면에
+// 남아있다") -------------------------------------------------------------------
+// 실측 결론: 무효화 키는 네 삭제 경로 모두 맞다(상세 ["batch", id] + 목록
+// ["batches"]). 어긋난 건 **시점**이다 — onSettled 가 invalidate 의 프라미스를
+// 돌려주지 않아 mutation 이 재조회가 끝나기 전에 "완료"를 선언했다. 그래서 확인
+// 버튼이 되돌아오고 팝업이 닫히고 목록으로 이동한 뒤에도 지운 것이 화면에 그대로
+// 남아 있고, 그동안 화면엔 아무 표시도 없다(재조회가 느릴수록 길어진다 —
+// 실배포는 DB 조인 + 네트워크다). 아래 테스트들은 **재조회를 느리게** 해서 그
+// 창을 열어 놓고, "끝났다고 말한 시점 = 화면이 갱신된 시점"을 못 박는다.
+// 낙관적 제거는 쓰지 않는다: 서버 재조회 결과만 화면의 진실이다.
+
+// 삭제 후 GET 만 느린 상세 렌더(첫 조회는 즉답 — 렌더 대기를 늘리지 않는다).
+// renderDetailed 를 쓰지 않는 이유: 그 헬퍼가 정적 GET 핸들러를 다시 등록해
+// (msw 는 나중 등록이 우선) 여기서 심은 상태 있는 핸들러를 덮는다.
+function renderSlowRefetch(deletedSeq: number) {
+  const state = { items: detailedBatch().items as any[] };
+  let gets = 0;
+  server.use(
+    http.get("/api/admin/batches/b1", async () => {
+      gets += 1;
+      if (gets > 1) await delay(200);
+      return HttpResponse.json({ ...detailedBatch(), items: state.items,
+                                 item_count: state.items.length }); }),
+    http.delete(`/api/admin/batches/b1/items/${deletedSeq}`, () => {
+      state.items = state.items.filter((it) => it.seq !== deletedSeq);
+      return HttpResponse.json({ deleted: deletedSeq }); }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+test("단건 항목 삭제: 삭제가 끝났다고 말하는 시점엔 이미 행이 사라져 있다", async () => {
+  renderSlowRefetch(1);
+  await screen.findByText("scan · s1:proj");
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제" }));
+  await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
+  // 「삭제 확인」이 「삭제」로 되돌아온 순간 = 화면이 mutation 종료를 말한 순간
+  await waitFor(() => expect(
+    screen.queryByRole("button", { name: "항목 1 삭제 확인" })).toBeNull());
+  expect(screen.queryByText("scan · s1:proj")).toBeNull();
+});
+
+test("다중 선택 항목 삭제: 결과 문구가 뜨는 시점엔 이미 행이 사라져 있다", async () => {
+  renderSlowRefetch(1);
+  await screen.findByText("scan · s1:proj");
+  await userEvent.click(screen.getByLabelText("항목 1 선택"));
+  await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+  await userEvent.click(screen.getByRole("button", { name: "1개 삭제 확인" }));
+  expect(await screen.findByText("1개 삭제됨")).toBeInTheDocument();
+  expect(screen.queryByText("scan · s1:proj")).toBeNull();
 });
 
 // --- 펼침 패널 dl 정렬(사용자 지시 2026-08-15): 「요약」도 히스토그램 섹션들과

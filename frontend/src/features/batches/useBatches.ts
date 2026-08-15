@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient,
+         type QueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
 import type { Batch, BatchDetail, RequestScanStats } from "../../lib/types";
 
@@ -28,12 +29,26 @@ export interface CreateBatchBody {
 export const useCreateBatch = () =>
   useMutation({ mutationFn: (b: CreateBatchBody) =>
     apiSend<{ batch_id: string; status: string }>("POST", "/api/admin/batches", b) });
+// 배치 mutation 뒤 화면 갱신 계약(사용자 보고 2026-08-15: "삭제 후 새로고침이
+// 안되고 화면에 남아있다"). 실측 결론: 무효화 **키**는 네 삭제 경로 모두 맞았고
+// (상세 ["batch", id] + 목록 ["batches"]) 어긋난 건 **시점**이다 — 콜백이
+// invalidate 의 프라미스를 돌려주지 않으면 mutation 은 재조회가 끝나기 전에 완료를
+// 선언한다. 그래서 2단 확인 버튼이 「삭제」로 되돌아오고 팝업이 닫히고 목록으로
+// 이동한 뒤에도 지운 것이 화면에 그대로 남고, 그동안 화면엔 아무 진행 표시도 없다
+// (재조회가 느릴수록 창이 길어진다 — 실배포는 DB 조인 + 네트워크다).
+//
+// 프라미스를 돌려주면 mutation 이 재조회 착지까지 isPending 을 유지한다: "끝났다고
+// 말한 시점 = 화면이 갱신된 시점". 낙관적 제거(캐시에서 행을 지우기)는 쓰지 않는다
+// — 서버 재조회 결과만 화면의 진실이다(부분 실패·경합에서 거짓말하지 않는다).
+const _refresh = (qc: QueryClient, id: string) =>
+  Promise.all([qc.invalidateQueries({ queryKey: ["batch", id] }),
+               qc.invalidateQueries({ queryKey: ["batches"] })]);
+
 function _action(id: string, verb: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiSend("POST", `/api/admin/batches/${id}:${verb}`),
-    onSettled: () => { qc.invalidateQueries({ queryKey: ["batch", id] });
-                       qc.invalidateQueries({ queryKey: ["batches"] }); },
+    onSettled: () => _refresh(qc, id),
   });
 }
 // 항목별 데이터 온도(요청 단위 scan 리포트 통계): 항목을 펼쳤고(enabled 로 호출측
@@ -56,20 +71,16 @@ export const useUpdateBatch = (id: string) => {
   return useMutation({
     mutationFn: (b: UpdateBatchBody) =>
       apiSend<Batch>("PATCH", `/api/admin/batches/${id}`, b),
-    onSettled: () => { qc.invalidateQueries({ queryKey: ["batch", id] });
-                       qc.invalidateQueries({ queryKey: ["batches"] }); },
+    onSettled: () => _refresh(qc, id),
   });
 };
 // 항목 편집 3종(수정·삭제·추가): 화면의 버튼 노출은 표시 게이트일 뿐이고 진짜
-// 차단은 서버다(활성 배치 Queued 원자 가드 409·동질성 422). invalidate 는
-// _action 과 같은 계약(상세+목록) — 편집 결과·재활성화 상태를 폴링 전에 반영한다.
+// 차단은 서버다(활성 배치 Queued 원자 가드 409·동질성 422). 갱신은 _action 과 같은
+// 계약(_refresh — 상세+목록, 재조회 착지까지 대기) — 편집 결과·재활성화 상태를
+// 폴링 전에 반영한다.
 function _itemMutation<A>(id: string, fn: (a: A) => Promise<unknown>) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: fn,
-    onSettled: () => { qc.invalidateQueries({ queryKey: ["batch", id] });
-                       qc.invalidateQueries({ queryKey: ["batches"] }); },
-  });
+  return useMutation({ mutationFn: fn, onSettled: () => _refresh(qc, id) });
 }
 export const useUpdateBatchItem = (id: string) =>
   _itemMutation(id, ({ seq, item }: { seq: number; item: Record<string, unknown> }) =>
@@ -101,8 +112,7 @@ export const useDeleteBatchItems = (id: string) => {
       });
       return r;
     },
-    onSettled: () => { qc.invalidateQueries({ queryKey: ["batch", id] });
-                       qc.invalidateQueries({ queryKey: ["batches"] }); },
+    onSettled: () => _refresh(qc, id),
   });
 };
 export const useAddBatchItem = (id: string) =>
@@ -116,13 +126,23 @@ export const useReplaceBatchItems = (id: string) =>
 // 배치 삭제(종단 배치만 — 서버 batch_not_deletable 가드). 성공 시 상세 쿼리는
 // invalidate 가 아니라 **제거**한다: 삭제된 배치의 상세를 다시 조회하면 404 를
 // 새로 받아 오류 화면이 되는데, 화면은 목록으로 떠난 뒤다(리페치가 소음).
+//
+// 목록은 이 경로만 invalidate 가 아니라 **refetch 를 기다린다**: 지우는 시점에
+// 화면은 상세라 목록 쿼리가 **비활성**이고, invalidate 는 활성 쿼리만 재조회한다
+// (비활성은 stale 표시만). 그대로 이동하면 목록은 캐시에 남은 지워진 배치를 먼저
+// 그리고 — 데이터가 있으니 isLoading 은 false 라 로딩 표시조차 없다 — 마운트 후
+// 재조회가 착지해야 사라진다. 훅 onSuccess 는 호출측 onSuccess(목록으로 이동)보다
+// 먼저 await 되므로, 여기서 기다리면 이동한 목록은 이미 갱신된 목록이다.
 const _deleteBatch = (id: string) => apiSend("DELETE", `/api/admin/batches/${id}`);
 export const useDeleteBatch = (id: string) => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => _deleteBatch(id),
-    onSuccess: () => { qc.removeQueries({ queryKey: ["batch", id] }); },
-    onSettled: () => { qc.invalidateQueries({ queryKey: ["batches"] }); },
+    onSuccess: async () => { qc.removeQueries({ queryKey: ["batch", id] });
+                             await qc.refetchQueries({ queryKey: ["batches"] }); },
+    // 실패(409 = 그 사이 재실행돼 활성이 됐다)는 화면이 낡았다는 뜻이라 양쪽을
+    // 다시 맞춘다 — 상세는 살아 있으므로 제거가 아니라 재조회다.
+    onError: () => _refresh(qc, id),
   });
 };
 // 목록의 다중 선택 삭제. 단건 useDeleteBatch 를 재사용할 수 없는 이유는 훅이라서다
@@ -152,7 +172,10 @@ export const useDeleteBatches = () => {
     // 지워진 배치의 상세 캐시만 제거(단건과 같은 이유 — 404 리페치 소음 방지).
     // 실패한 id 는 남긴다: 그 배치는 아직 살아 있다.
     onSuccess: (r) => { for (const id of r.ok) qc.removeQueries({ queryKey: ["batch", id] }); },
-    onSettled: () => { qc.invalidateQueries({ queryKey: ["batches"] }); },
+    // 목록 화면에서 쏘는 삭제라 목록 쿼리는 **활성**이다 — invalidate 로 재조회가
+    // 돌고, 프라미스를 돌려줘 그 착지까지 기다린다(_refresh 와 같은 시점 계약):
+    // 결과 문구("N개 삭제됨")가 뜨는 순간엔 표에서 그 행이 이미 사라져 있다.
+    onSettled: () => qc.invalidateQueries({ queryKey: ["batches"] }),
   });
 };
 export const useConfirmBatch = (id: string) => _action(id, "confirm");

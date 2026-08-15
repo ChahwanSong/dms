@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchesList } from "./BatchesList";
 const server = setupServer();
@@ -185,6 +185,35 @@ test("부분 실패는 정직하게: 성공 n·실패 m 과 사유(409 batch_not
   // 사유는 reasonText 매핑(api.ts REASON_MESSAGES) — 어느 배치가 실패했는지도 함께.
   expect(screen.getByText(new RegExp(`${ID2.slice(0, 12)}.*삭제할 수 없는 상태의 배치`)))
     .toBeInTheDocument();
+});
+
+// 삭제 후 화면 갱신(사용자 보고 2026-08-15): 무효화 키는 맞았고 어긋난 건 **시점**
+// 이었다 — onSettled 가 invalidate 의 프라미스를 안 돌려줘 재조회가 끝나기 전에
+// mutation 이 완료를 선언했다. 결과 문구("N개 삭제됨")가 뜬 뒤에도 지운 행이 남아
+// 있었고 화면엔 아무 표시도 없었다. 재조회를 느리게 해 그 창을 열어 놓고 못 박는다.
+test("일괄 삭제: 결과 문구가 뜨는 시점엔 이미 행이 사라져 있다", async () => {
+  // 이름이 있는 행이라야 "행이 화면에서 사라졌다"를 이름으로 단언할 수 있다
+  const state = { rows: [row({ batch_id: ID1, status: "Completed", name: "n1" }),
+                         row({ batch_id: ID2, status: "Cancelled", name: "n2" }),
+                         row({ batch_id: ID3, status: "Running", name: "n3" })] as
+                        { batch_id: string }[] };
+  let gets = 0;
+  server.use(
+    http.get("/api/admin/batches", async () => { gets += 1;
+      if (gets > 1) await delay(200);              // 삭제 후 재조회만 느리게
+      return HttpResponse.json(state.rows); }),
+    http.delete("/api/admin/batches/:id", ({ params }) => {
+      state.rows = state.rows.filter((r) => r.batch_id !== String(params.id));
+      return new HttpResponse(null, { status: 204 }); }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter><BatchesList /></MemoryRouter></QueryClientProvider>);
+  await screen.findByText("n1");
+  await selectBoth();
+  await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+  await userEvent.click(screen.getByRole("button", { name: "2개 삭제 확인" }));
+  expect(await screen.findByText("2개 삭제됨")).toBeInTheDocument();
+  expect(screen.queryByText("n1")).toBeNull();
+  expect(screen.queryByText("n2")).toBeNull();
 });
 
 test("리페치로 목록에서 사라진 배치는 선택에서 자동 제거(유령 선택 방지)", async () => {
