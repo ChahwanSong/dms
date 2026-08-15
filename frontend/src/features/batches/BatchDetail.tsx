@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useDeleteBatchItems,
-         useAddBatchItem, useReplaceBatchItems } from "./useBatches";
+         useAddBatchItem, useReplaceBatchItems, useRerunBatchItems } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv,
          type ScanRow, type SyncRow } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
@@ -123,6 +123,10 @@ const PANEL_DL = "grid grid-cols-[9rem_1fr] gap-y-1 text-sm";
 // 선택 불가 체크박스에 다는 사유(목록 화면 ACTIVE_HINT 관례 — disabled 로 끝내지
 // 않고 이유와 동선을 남긴다). 표시 게이트일 뿐이고 진짜 차단은 서버 409 다.
 const ITEM_LOCK_HINT = "진행 중인 배치에선 대기(Queued) 항목만 삭제할 수 있습니다";
+// 재실행 가능 항목 = 서버 routes_batches._TERMINAL_ITEM 의 거울(표시 게이트일
+// 뿐이고 진짜 판정은 서버의 SQL 원자 가드다 — 화면은 폴링 스냅샷을 본다).
+const RERUNNABLE_ITEM = new Set(["Succeeded", "Failed", "Rejected", "Cancelled"]);
+const RERUN_LOCK_HINT = "완료·실패·취소된 항목만 재실행할 수 있습니다";
 
 // 항목 payload 조립: 스토리지는 입력받지 않는다 — 배치는 단일 스토리지 동질성
 // 계약이라 기존 payload(수정) 또는 첫 항목 payload(추가·교체)에서 물려받는 것이
@@ -544,10 +548,16 @@ export function BatchDetail() {
   const hasItems = (b?.items ?? []).length > 0;
   // --- 항목 다중 선택 삭제(목록 화면 일괄 삭제의 항목판 — 같은 UX 언어) ---
   const bulkDelete = useDeleteBatchItems(batchId);
+  // 선택 재실행: 같은 선택·같은 액션 바를 쓰는 두 번째 일괄 동작. 삭제와 달리
+  // **종단 항목만** 대상이라(서버 부분 성공 모델) 대상이 하나도 없으면 잠근다.
+  const bulkRerun = useRerunBatchItems(batchId);
   const [selected, setSelected] = useState<number[]>([]);
   // 2단 확인: 1단이 무장하고 2단이 쏜다(행 삭제 armedSeq 와 같은 계약). 일괄
   // 삭제는 비가역 폭이 넓어 오클릭 방어가 더 필요하다.
-  const [bulkArmed, setBulkArmed] = useState(false);
+  // 불리언이 아니라 **어느 동작이 무장했는지**를 담는다: 바에 무장 버튼이 둘이
+  // 되면서, 상태가 하나여야 "삭제 확인"과 "재실행 확인"이 동시에 뜨는 것이
+  // 구조적으로 불가능해진다(행 삭제 armedSeq 가 단일 상태인 것과 같은 이유).
+  const [bulkArmed, setBulkArmed] = useState<null | "delete" | "rerun">(null);
   // b?.items 를 그대로 dep 에 쓴다(`?? []` 를 dep 으로 쓰면 매 렌더 새 배열이라
   // 아래 정리 effect 가 무한 루프가 된다). react-query 의 구조적 공유 덕에 내용이
   // 같은 리페치는 같은 참조를 돌려준다.
@@ -574,13 +584,29 @@ export function BatchDetail() {
   // 선택이 바뀌면 무장을 풀고 직전 결과 문구도 지운다 — "2개 삭제 확인"이 무장된
   // 채 선택만 3개로 늘면 사용자가 확인한 것과 다른 것을 지우게 된다. 진행 중에는
   // reset 하지 않는다(비행 중인 mutation 의 결과를 삼킨다).
-  const disarm = () => { setBulkArmed(false); if (!bulkDelete.isPending) bulkDelete.reset(); };
+  const disarm = () => {
+    setBulkArmed(null);
+    if (!bulkDelete.isPending) bulkDelete.reset();
+    if (!bulkRerun.isPending) bulkRerun.reset();
+  };
   const toggleRow = (seq: number) => {
     disarm();
     setSelected((p) => (p.includes(seq) ? p.filter((x) => x !== seq) : [...p, seq]));
   };
-  const clearSelection = () => { setBulkArmed(false); setSelected([]); };
+  const clearSelection = () => { setBulkArmed(null); setSelected([]); };
   const bulkResult = bulkDelete.data;
+  const rerunResult = bulkRerun.data;
+  // 일괄 동작이 도는 동안엔 선택 조작을 잠근다(삭제 관례 미러 — 비행 중에 선택이
+  // 바뀌면 결과 문구가 가리키는 대상이 화면과 어긋난다).
+  const bulkBusy = bulkDelete.isPending || bulkRerun.isPending;
+  // 선택 항목 중 재실행 가능한 것이 하나도 없으면 잠근다. 눌러도 서버가 전부
+  // skipped 로 돌려줄 버튼을 누르게 두는 건 헛클릭이다. 반대로 **하나라도** 있으면
+  // 선택 전부를 보낸다(가능한 것만 골라 보내면 나머지가 조용히 사라진다 — 못 한
+  // 것은 서버가 항목별 사유로 말해야 한다).
+  const rerunnableCount = useMemo(
+    () => (b?.items ?? []).filter((it) => selected.includes(it.seq)
+                                          && RERUNNABLE_ITEM.has(it.status)).length,
+    [b?.items, selected]);
   return (
     <section className="space-y-4">
       {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
@@ -666,7 +692,7 @@ export function BatchDetail() {
               <input ref={allRef} type="checkbox" aria-label="전체 선택"
                      className="h-5 w-5 shrink-0"
                      checked={allChecked}
-                     disabled={deletableSeqs.length === 0 || bulkDelete.isPending}
+                     disabled={deletableSeqs.length === 0 || bulkBusy}
                      onChange={() => { disarm();
                                        setSelected(allChecked ? [] : deletableSeqs); }} />
             )}
@@ -697,18 +723,31 @@ export function BatchDetail() {
           <div className="mt-2 flex min-h-10 flex-wrap items-center gap-2 text-sm">
             {selected.length > 0 ? (<>
               <span className="mr-auto">{`${selected.length}개 선택됨`}</span>
-              {bulkArmed
-                ? <Button disabled={bulkDelete.isPending}
+              {bulkArmed === "delete"
+                ? <Button disabled={bulkBusy}
                           onClick={() => bulkDelete.mutate(selected,
                             { onSettled: clearSelection })}>
                     {`${selected.length}개 삭제 확인`}
                   </Button>
-                : <Button variant="outline" disabled={bulkDelete.isPending}
-                          onClick={() => setBulkArmed(true)}>선택 삭제</Button>}
-              <Button variant="ghost" disabled={bulkDelete.isPending}
+                : <Button variant="outline" disabled={bulkBusy}
+                          onClick={() => setBulkArmed("delete")}>선택 삭제</Button>}
+              {/* 재실행도 삭제와 같은 2단 확인. 확인 라벨의 N 은 재실행 가능 수가
+                  아니라 **선택 수**다 — 실제로 보내는 것이 선택 전부라 그 숫자가
+                  사용자가 확인하는 대상과 일치한다(제외분은 결과가 말한다). */}
+              {bulkArmed === "rerun"
+                ? <Button disabled={bulkBusy}
+                          onClick={() => bulkRerun.mutate(selected,
+                            { onSettled: clearSelection })}>
+                    {`${selected.length}개 재실행 확인`}
+                  </Button>
+                : <Button variant="outline"
+                          disabled={bulkBusy || rerunnableCount === 0}
+                          title={rerunnableCount === 0 ? RERUN_LOCK_HINT : undefined}
+                          onClick={() => setBulkArmed("rerun")}>선택 재실행</Button>}
+              <Button variant="ghost" disabled={bulkBusy}
                       onClick={clearSelection}>선택 해제</Button>
             </>) : (
-              <span className="text-muted">항목을 선택하면 한 번에 삭제할 수 있습니다</span>
+              <span className="text-muted">항목을 선택하면 한 번에 삭제·재실행할 수 있습니다</span>
             )}
           </div>
         )}
@@ -727,6 +766,22 @@ export function BatchDetail() {
             ))}
           </div>
         )}
+        {/* 재실행 결과도 액션 바 밖(삭제 결과와 같은 이유). "요청됨"인 이유: 이
+            호출은 항목을 Queued 로 되돌릴 뿐이고 실제 실행은 orchestrator 가
+            집어 간다 — "재실행됨"은 아직 일어나지 않은 일을 말하는 것이다.
+            제외분은 서버가 준 사유 코드를 reasonText 로 옮긴다(원문 코드 노출 금지). */}
+        {rerunResult && (
+          <div className="mt-2 text-sm" role="status">
+            <p className={rerunResult.skipped.length > 0 ? "text-bad" : "text-ok"}>
+              {rerunResult.skipped.length > 0
+                ? `${rerunResult.requeued}개 재실행 요청됨 · ${rerunResult.skipped.length}개 제외`
+                : `${rerunResult.requeued}개 재실행 요청됨`}
+            </p>
+            {rerunResult.skipped.map((s) => (
+              <p key={s.seq} className="text-muted">{`항목 ${s.seq}: ${reasonText(s.reason)}`}</p>
+            ))}
+          </div>
+        )}
         {(b?.items ?? []).map((it) => (
           <div key={it.seq} className="border-t border-black/5 py-2">
             {/* 행 = 선택 체크박스 + 펼침 토글 버튼 + 삭제 버튼의 flex 형제. 토글이
@@ -742,7 +797,7 @@ export function BatchDetail() {
               <input type="checkbox" aria-label={`항목 ${it.seq} 선택`}
                      className="h-5 w-5 shrink-0"
                      checked={selected.includes(it.seq)}
-                     disabled={!canEditItem(it) || bulkDelete.isPending}
+                     disabled={!canEditItem(it) || bulkBusy}
                      title={canEditItem(it) ? undefined : ITEM_LOCK_HINT}
                      onChange={() => toggleRow(it.seq)} />
               <button type="button" aria-label={`항목 ${it.seq} 상세`}

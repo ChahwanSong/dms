@@ -78,7 +78,10 @@ export const useUpdateBatch = (id: string) => {
 // 차단은 서버다(활성 배치 Queued 원자 가드 409·동질성 422). 갱신은 _action 과 같은
 // 계약(_refresh — 상세+목록, 재조회 착지까지 대기) — 편집 결과·재활성화 상태를
 // 폴링 전에 반영한다.
-function _itemMutation<A>(id: string, fn: (a: A) => Promise<unknown>) {
+// R 을 열어 둔 이유(기본값 unknown = 기존 호출자 무변경): 선택 재실행만 응답
+// **본문**이 결과다(부분 성공을 데이터로 돌려준다) — 화면이 타입 없이 읽으면
+// requeued/skipped 가 any 로 새어 오탈자를 못 잡는다.
+function _itemMutation<A, R = unknown>(id: string, fn: (a: A) => Promise<R>) {
   const qc = useQueryClient();
   return useMutation({ mutationFn: fn, onSettled: () => _refresh(qc, id) });
 }
@@ -115,6 +118,18 @@ export const useDeleteBatchItems = (id: string) => {
     onSettled: () => _refresh(qc, id),
   });
 };
+// 항목 다중 선택 **재실행**. 삭제(useDeleteBatchItems)와 달리 Promise.allSettled
+// 로 N 요청을 병렬로 쏘지 않는다: 서버가 컬렉션 엔드포인트 하나로 부분 성공을
+// 계산해 준다(한 트랜잭션 + 카운터 절대값 재계산 — 클라이언트가 N 번 나눠 쏘면
+// 그 사이 카운터가 N 번 흔들린다). 부분 실패를 **데이터로** 돌려준다는 계약은
+// 같다 — isError 가 아니라 data.skipped 가 "못 한 것"의 자리다. 서버가 없는
+// seq 도 skipped 로 돌려주므로 화면이 미리 걸러 조용히 성공한 척하지 않는다.
+export interface RerunItemsResult {
+  requeued: number; skipped: { seq: number; reason: string }[]; status: string;
+}
+export const useRerunBatchItems = (id: string) =>
+  _itemMutation(id, (seqs: number[]) =>
+    apiSend<RerunItemsResult>("POST", `/api/admin/batches/${id}/items:rerun`, { seqs }));
 export const useAddBatchItem = (id: string) =>
   _itemMutation(id, (item: Record<string, unknown>) =>
     apiSend("POST", `/api/admin/batches/${id}/items`, item));

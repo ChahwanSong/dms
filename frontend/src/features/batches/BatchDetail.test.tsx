@@ -804,9 +804,10 @@ test("전체 선택: 선택 가능한 항목만 켠다 — 불가 항목은 그�
 
 test("액션 바는 자리를 예약한다 — 선택 전에도 컨테이너가 있어 레이아웃이 안 밀린다", async () => {
   renderDetailed();
-  expect(await screen.findByText("항목을 선택하면 한 번에 삭제할 수 있습니다"))
+  expect(await screen.findByText("항목을 선택하면 한 번에 삭제·재실행할 수 있습니다"))
     .toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "선택 삭제" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "선택 재실행" })).toBeNull();
 });
 
 test("선택 삭제: 2단 확인 후 선택 수만큼 DELETE — 부분 실패를 정직하게 말한다", async () => {
@@ -860,6 +861,80 @@ test("리페치로 사라진 항목은 선택에서 자동 제거된다(유령 �
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제" }));
   await userEvent.click(screen.getByRole("button", { name: "항목 1 삭제 확인" }));
   await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
+});
+
+// --- 항목 선택 재실행: 액션 바의 두 번째 일괄 동작(삭제와 같은 2단 확인 UX) ---
+
+test("선택 재실행: 2단 확인 후 POST {seqs} — 부분 결과를 항목별 사유로 말한다", async () => {
+  let sent: any = null;
+  server.use(http.post("/api/admin/batches/b1/items:rerun", async ({ request }) => {
+    sent = await request.json();
+    return HttpResponse.json({ requeued: 1, skipped: [
+      { seq: 1, reason: "batch_item_not_rerunnable" }], status: "Running" });
+  }));
+  renderDetailed();                              // 종단 배치 — 두 항목 다 종단
+  await userEvent.click(await screen.findByLabelText("항목 0 선택"));
+  await userEvent.click(screen.getByLabelText("항목 1 선택"));
+  await userEvent.click(screen.getByRole("button", { name: "선택 재실행" }));
+  expect(sent).toBeNull();                       // 1단 클릭만으로는 안 쏜다
+  await userEvent.click(screen.getByRole("button", { name: "2개 재실행 확인" }));
+  await waitFor(() => expect(sent).toEqual({ seqs: [0, 1] }));
+  // 부분 결과: 요청 수·제외 수·항목별 사유를 각각 말한다(조용한 성공 금지)
+  expect(await screen.findByText("1개 재실행 요청됨 · 1개 제외")).toBeInTheDocument();
+  expect(screen.getByText(/항목 1: 재실행할 수 없는 항목입니다/)).toBeInTheDocument();
+  // 완료 후 선택 초기화 — 액션 바는 자리만 남는다(삭제 경로와 같은 계약)
+  await waitFor(() => expect(screen.queryByText(/개 선택됨/)).toBeNull());
+});
+
+test("전부 재큐잉되면 제외 문구 없이 요청 수만 말한다", async () => {
+  server.use(http.post("/api/admin/batches/b1/items:rerun", () =>
+    HttpResponse.json({ requeued: 1, skipped: [], status: "Running" })));
+  renderDetailed();
+  await userEvent.click(await screen.findByLabelText("항목 0 선택"));
+  await userEvent.click(screen.getByRole("button", { name: "선택 재실행" }));
+  await userEvent.click(screen.getByRole("button", { name: "1개 재실행 확인" }));
+  expect(await screen.findByText("1개 재실행 요청됨")).toBeInTheDocument();
+});
+
+test("활성 배치: 고를 수 있는 건 Queued 뿐이라 재실행 버튼은 disabled + 이유", async () => {
+  renderBatch({ operation: "scan", status: "Running", items: [
+    { seq: 0, payload: { storage: "s1", target: "a" }, status: "Queued",
+      request_id: null, reason_code: null },
+    { seq: 1, payload: { storage: "s1", target: "b" }, status: "Materialized",
+      request_id: "r2", reason_code: null }] });
+  await userEvent.click(await screen.findByLabelText("항목 0 선택"));
+  // 삭제는 되지만(Queued) 재실행은 종단 항목만 — 눌러도 전부 skipped 인 버튼은
+  // 누르게 두지 않는다. disabled 로 끝내지 않고 title 로 이유를 남긴다.
+  expect(screen.getByRole("button", { name: "선택 삭제" })).toBeEnabled();
+  const rerun = screen.getByRole("button", { name: "선택 재실행" });
+  expect(rerun).toBeDisabled();
+  expect(rerun).toHaveAttribute("title", expect.stringContaining("재실행"));
+});
+
+test("선택 재실행: 결과 문구가 뜨는 시점엔 이미 재조회가 착지해 있다", async () => {
+  // 삭제 경로와 같은 시점 계약(직전 커밋의 결함): onSettled 가 invalidate 프라미스를
+  // 돌려주지 않으면 "끝났다"고 말한 뒤에도 화면은 옛 상태를 그린다.
+  const state = { items: detailedBatch().items as any[] };
+  let gets = 0;
+  server.use(
+    http.get("/api/admin/batches/b1", async () => {
+      gets += 1;
+      if (gets > 1) await delay(200);
+      return HttpResponse.json({ ...detailedBatch(), items: state.items }); }),
+    http.post("/api/admin/batches/b1/items:rerun", () => {
+      state.items = state.items.map((it) =>
+        it.seq === 0 ? { ...it, status: "Queued", reason_code: null } : it);
+      return HttpResponse.json({ requeued: 1, skipped: [], status: "Running" }); }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  await screen.findByText("Succeeded");
+  await userEvent.click(screen.getByLabelText("항목 0 선택"));
+  await userEvent.click(screen.getByRole("button", { name: "선택 재실행" }));
+  await userEvent.click(screen.getByRole("button", { name: "1개 재실행 확인" }));
+  expect(await screen.findByText("1개 재실행 요청됨")).toBeInTheDocument();
+  expect(screen.queryByText("Succeeded")).toBeNull();     // 이미 Queued 로 갱신됨
 });
 
 // --- 절대경로 표시(사용자 보고 2026-08-15: "완료된 작업을 볼 때도 관리 디렉토리가
