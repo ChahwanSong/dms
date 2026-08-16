@@ -423,10 +423,13 @@ DMS_IMAGE=$DMS_BUILD_REGISTRY/dms:$DMS_BUILD_TAG`/`MFU_IMAGE=...`로 **이 빌�
 
 **6) 동시 빌드는 하나로 제한된다.** 이미 진행 중(`Pending`/`Running`)인 빌드가 있는
 채로 `POST /api/admin/builds`를 부르면 `409 build_in_progress`. 새 빌드를 넣기
-전에 「빌드」 화면에서 이전 빌드가 종단 상태(`Succeeded`/`Failed`)인지 확인할 것.
+전에 「빌드 이력」에서 이전 빌드가 종단 상태(`Succeeded`/`Failed`)인지 확인할 것 —
+진행 중인 빌드가 있으면 「빌드하기」 화면 위에 배너로도 먼저 알려 준다.
 
-화면: 「빌드」(`/admin/builds`, 목록/제출) 와 빌드 상세(`/admin/builds/:buildId`,
-로그 뷰어 포함). 빌드 노드 지정은 「컨트롤 상태」 화면.
+화면: 「빌드」는 하위 페이지 둘이다 — 「빌드하기」(`/admin/builds`, 기본, 제출 폼)와
+「빌드 이력」(`/admin/builds/history`, 목록·상태 필터). 제출에 성공하면 이력으로
+넘어간다. 빌드 상세(`/admin/builds/:buildId`)에 로그 뷰어가 있고, 빌드 노드 지정은
+「컨트롤 상태」 화면.
 
 ## 9. 포탈에서 릴리스(롤아웃) (슬라이스 13)
 
