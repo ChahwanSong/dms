@@ -129,6 +129,29 @@ test("egress 실패 사유가 '인터넷을 아직 열지 않았을 수 있습�
   expect(screen.queryByText("build_node_no_egress")).not.toBeInTheDocument();
 });
 
+test("종단 빌드는 소요 시간을 보여준다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () => HttpResponse.json(buildRow({ state: "Succeeded" }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderPage();
+  expect(await screen.findByText("10분 0초")).toBeInTheDocument();
+  expect(screen.getByText(/소요 시간/)).toBeInTheDocument();
+});
+
+test("진행 중 빌드는 경과 시간을 보여준다(소요를 지어내지 않는다)", async () => {
+  const started = new Date(Date.now() - 192_500).toISOString();   // 3분 12초 전
+  server.use(
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json(buildRow({ state: "Running", created_at: started, finished_at: null }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "building\n" })),
+  );
+  renderPage();
+  expect(await screen.findByText("3분 12초")).toBeInTheDocument();
+  expect(screen.getByText(/경과 시간/)).toBeInTheDocument();
+  expect(screen.queryByText(/소요/)).not.toBeInTheDocument();
+});
+
 test("종단 빌드(Succeeded)는 로그를 더 폴링하지 않는다", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let logCalls = 0;

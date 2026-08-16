@@ -3,6 +3,7 @@ import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
 import { buildPillVariant, isTerminal } from "../../lib/jobState";
+import { formatDuration, spanMs } from "../../lib/duration";
 import { useBuild, useBuildLog } from "./useBuilds";
 
 export function BuildDetail() {
@@ -11,6 +12,10 @@ export function BuildDetail() {
   const b = q.data;
   const isActive = b !== undefined && !isTerminal(b.state);
   const logQ = useBuildLog(buildId, isActive);
+  // "지금"은 마지막 성공 조회 시각이다 -- 같은 데이터가 돌아오면 재렌더가 없어
+  // Date.now() 로는 경과가 멈춘 것처럼 보인다(BuildsPage 와 같은 이유).
+  const spent = b === undefined ? null
+    : spanMs(b.created_at, isActive ? q.dataUpdatedAt : b.finished_at);
 
   return (
     <section className="space-y-4">
@@ -42,6 +47,12 @@ export function BuildDetail() {
             </span></p>
             <p>생성 시각: <span className="text-ink">{b?.created_at ?? "—"}</span></p>
             <p>종료 시각: <span className="text-ink">{b?.finished_at ?? "—"}</span></p>
+            {/* 경과(진행 중)·소요(종단). 종단인데 finished_at 이 없으면 "—"다 --
+                지금 시각을 끝으로 삼아 이미 끝난 빌드의 시간을 불리지 않는다.
+                "지금"은 마지막 성공 조회 시각(3s 폴링)이라 최대 3초 뒤처진다. */}
+            <p>{isActive ? "경과" : "소요"} 시간: <span className="text-ink">
+              {spent === null ? "—" : formatDuration(spent)}
+            </span></p>
           </Card>
           <Card>
             <h2 className="font-medium mb-2">로그</h2>
