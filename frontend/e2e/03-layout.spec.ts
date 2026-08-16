@@ -17,7 +17,9 @@ async function visit(page: Page, path: string, heading: string): Promise<void> {
 //   /admin/accounts  th 6 + (admin 1 + e2ewide 3)행 × td 6 = 30 >= 24
 //   /jobs            th 4 + 0행(이 파일 시점엔 요청이 없다) = 4
 //   /admin/storages  th 6 + e2e-store 1행 × td 6 = 12
-//   /admin/builds    th 8(시각·ref·commit·이미지·노드·태그·상태·작업) + 0행 = 8
+//   /admin/builds    th 8(시각·ref·이미지·상태·사유·경과·태그·작업) + 0행 = 8
+//                    commit·노드는 상세로 밀었다(DS Cloud 재설계) -- 열을 더 줄이면
+//                    이 하한이 문다. 밀도를 낮추더라도 8열이 바닥이라는 뜻이다.
 //   /admin/dashboard 표는 잡 통계·큐 데이터가 있을 때만 그려진다 -> 하한 불가(0).
 //                    이 화면은 L1/L3/L4 가 진다.
 test.describe("E3 레이아웃 불변식", () => {

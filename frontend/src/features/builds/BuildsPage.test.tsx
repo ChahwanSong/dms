@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
+import { reasonText } from "../../lib/api";
 import { BuildsPage } from "./BuildsPage";
 
 const BUILD = {
@@ -151,9 +152,16 @@ describe("BuildsPage", () => {
   });
 
   // ── P2: 제출 전에 미리 막아 주는 것들 ───────────────────────────────────────
-  it("이미지 의존 관계를 캡션으로 알린다", async () => {
+  // DS Cloud 재설계: 의존성 안내는 상시 캡션이 아니라 **dms-agent 를 고른 사람에게만**
+  // 나타나는 한 줄이다. 안 고른 사람에게는 아무 의미 없는 줄이라 밀도만 올린다.
+  it("이미지 의존 관계는 dms-agent 를 골랐을 때만 한 줄로 알린다", async () => {
     wrap(<BuildsPage />);
-    expect(await screen.findByText(/dms-agent 는 dms·dms-mpifileutils 를 같은 태그로 FROM/))
+    await screen.findByText("b01234567");
+    expect(screen.queryByText(/dms-agent 는 dms·dms-mpifileutils 를 같은 태그로 FROM/))
+      .not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("dms-agent"));
+    await userEvent.click(screen.getByLabelText("dms-mpifileutils"));
+    expect(screen.getByText(/dms-agent 는 dms·dms-mpifileutils 를 같은 태그로 FROM/))
       .toBeInTheDocument();
   });
 
@@ -174,9 +182,12 @@ describe("BuildsPage", () => {
     expect(screen.queryByText(/이번 빌드에 없습니다/)).not.toBeInTheDocument();
   });
 
-  it("빌드 노드가 지정돼 있으면 폼에서 보여준다", async () => {
+  it("빌드 노드를 확인 박스에서 보여준다", async () => {
     wrap(<BuildsPage />);
-    expect(await screen.findByText(/빌드 노드 dms-w1/)).toBeInTheDocument();
+    // control-state 가 도착하기 전에는 미설정 안내가 서 있다 -- 노드 이름을 기다려야
+    // 확인 박스의 "설정됨" 경로를 실제로 지나간다.
+    expect(await screen.findByText("dms-w1")).toBeInTheDocument();
+    expect(screen.getByText(/빌드 노드/)).toBeInTheDocument();
   });
 
   it("빌드 노드가 없으면 컨트롤 상태 화면으로 가는 링크를 준다", async () => {
@@ -188,7 +199,7 @@ describe("BuildsPage", () => {
     expect(link).toHaveAttribute("href", "/admin/control");
   });
 
-  it("git ref 캡션이 커밋 SHA 불가를 알린다", async () => {
+  it("확인 박스가 커밋 SHA 불가를 알린다", async () => {
     wrap(<BuildsPage />);
     expect(await screen.findByText(/커밋 SHA 불가/)).toBeInTheDocument();
   });
@@ -222,9 +233,22 @@ describe("BuildsPage", () => {
     ])));
     wrap(<BuildsPage />);
     await screen.findByText("bok000001");
-    await userEvent.selectOptions(screen.getByLabelText("상태 필터"), "failed");
+    await userEvent.click(screen.getByRole("button", { name: "실패" }));
     expect(screen.getByText("bfail0001")).toBeInTheDocument();
     expect(screen.queryByText("bok000001")).not.toBeInTheDocument();
+  });
+
+  // 다른 화면(BatchDetail·JobViewer)은 전부 버튼 그룹이다 -- 이 화면만 select 였다.
+  it("상태 필터는 select 가 아니라 버튼 그룹이고 누른 것을 aria-pressed 로 알린다", async () => {
+    wrap(<BuildsPage />);
+    await screen.findByText("b01234567");
+    expect(screen.queryByRole("combobox", { name: "상태 필터" })).not.toBeInTheDocument();
+    const group = screen.getByRole("group", { name: "상태 필터" });
+    expect(group).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "전체" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(screen.getByRole("button", { name: "성공" }));
+    expect(screen.getByRole("button", { name: "성공" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "전체" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("20건 넘으면 페이지를 나눈다", async () => {
@@ -239,5 +263,57 @@ describe("BuildsPage", () => {
     expect(screen.getByText("1 / 2 페이지")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "다음" }));
     expect(screen.getByText("b00000020")).toBeInTheDocument();
+  });
+
+  // ── P4: DS Cloud 재설계 — "평소엔 최소, 원하면 클릭해서 전문" ────────────────
+  it("빌드 절차는 평소 2줄이고, 안내 카드를 눌러야 전문이 팝업으로 열린다", async () => {
+    wrap(<BuildsPage />);
+    await screen.findByText("b01234567");
+    // 평소 화면에는 요약만 -- 전문(배포 분리·프리플라이트 3검사)은 없다.
+    expect(screen.getByText(/프리플라이트 → 빌드 → push/)).toBeInTheDocument();
+    expect(screen.queryByText(/레지스트리 push 까지만/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /빌드 절차 안내/ }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText(/레지스트리 push 까지만/)).toBeInTheDocument();   // 배포는 별도
+    expect(screen.getByText(/egress/)).toBeInTheDocument();                   // 프리플라이트 3검사
+    expect(screen.getByText(/인터넷이 필요합니다/)).toBeInTheDocument();
+  });
+
+  it("목록의 사유는 한 줄로 자르고 전문은 title 에 담는다", async () => {
+    server.use(http.get("/api/admin/builds", () => HttpResponse.json([
+      { ...BUILD, state: "Failed", reason_code: "build_node_disk_low", finished_at: null },
+    ])));
+    wrap(<BuildsPage />);
+    const cell = await screen.findByText(/디스크 여유가 부족/);
+    // truncate = 한 줄 고정(행 높이가 사유 길이에 따라 들쭉날쭉해지지 않는다).
+    expect(cell.className).toContain("truncate");
+    expect(cell).toHaveAttribute("title", reasonText("build_node_disk_low"));
+  });
+
+  it("목록에서 commit·노드 열을 빼 상세로 민다", async () => {
+    wrap(<BuildsPage />);
+    await screen.findByText("b01234567");
+    expect(screen.queryByRole("columnheader", { name: "commit" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "노드" })).not.toBeInTheDocument();
+    expect(screen.queryByText("deadbeef")).not.toBeInTheDocument();
+    // 노드 이름은 확인 박스에만 남는다(표에서 매 행 반복하지 않는다).
+    expect(screen.getAllByText("dms-w1")).toHaveLength(1);
+    // e2e L2 하한(8셀)을 지키는 열 수는 유지한다.
+    expect(screen.getAllByRole("columnheader")).toHaveLength(8);
+  });
+
+  it("취소는 폼을 기본값으로 되돌린다", async () => {
+    wrap(<BuildsPage />);
+    await screen.findByText("b01234567");
+    await userEvent.clear(screen.getByLabelText("git ref"));
+    await userEvent.type(screen.getByLabelText("git ref"), "feat/x");
+    await userEvent.click(screen.getByLabelText("dms-agent"));
+    await userEvent.click(screen.getByRole("button", { name: "취소" }));
+    expect(screen.getByLabelText("git ref")).toHaveValue("main");
+    expect(screen.getByLabelText("dms-agent")).not.toBeChecked();
+    expect(screen.getByLabelText("dms")).toBeChecked();
   });
 });

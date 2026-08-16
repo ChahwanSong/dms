@@ -6,6 +6,21 @@ import { buildPillVariant, isTerminal } from "../../lib/jobState";
 import { formatDuration, spanMs } from "../../lib/duration";
 import { useBuild, useBuildLog } from "./useBuilds";
 
+// BuildsPage 와 같은 콘텐츠 컬럼. 목록에서 「상세」로 들어왔을 때 글줄 폭이 바뀌면
+// 다른 화면으로 튄 것처럼 읽힌다 -- 같은 폭이 "같은 흐름"을 말한다.
+const COLUMN = "mx-auto w-full max-w-3xl";
+
+// 메타 한 줄(dt/dd 짝). 목록에서 뺀 것들이 **여기로 모인다** -- 열을 지우기만 하고
+// 상세에 안 넣으면 밀도를 낮춘 게 아니라 정보를 잃은 것이다.
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex gap-3">
+      <dt className="w-24 shrink-0 text-muted">{label}</dt>
+      <dd className="min-w-0 break-all">{children}</dd>
+    </div>
+  );
+}
+
 export function BuildDetail() {
   const { buildId = "" } = useParams();
   const q = useBuild(buildId);
@@ -18,41 +33,57 @@ export function BuildDetail() {
     : spanMs(b.created_at, isActive ? q.dataUpdatedAt : b.finished_at);
 
   return (
-    <section className="space-y-4">
-      <h1 className="text-2xl font-bold">빌드 {buildId.slice(0, 8)}</h1>
+    <section className={`${COLUMN} space-y-4`}>
+      <header>
+        <h1 className="text-2xl font-bold">빌드 {buildId.slice(0, 8)}</h1>
+        <p className="text-muted mt-1">이 빌드의 대상·결과와 전체 로그입니다</p>
+      </header>
       {q.isLoading ? (
         <p className="text-muted">불러오는 중…</p>
       ) : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>
       ) : (
         <>
-          <Card className="space-y-2 text-sm">
+          <Card className="space-y-3 text-sm">
             <div className="flex items-center gap-3">
               <StatusPill state={b?.state ?? "—"} variant={b ? buildPillVariant(b.state) : undefined} />
-              <span className="text-muted">태그 {b?.tag ?? "—"}</span>
+              {/* 슬라이스 21 §3: Pending 은 적합성 확인(프리플라이트 프로브, 최대
+                  DMS_BUILD_PREFLIGHT_TIMEOUT_SECONDS=180s)을 포함한다 -- 별도 상태
+                  기계는 만들지 않는다. 실패는 어차피 고유 사유 코드로 드러난다. */}
+              {b?.state === "Pending" && (
+                <span className="text-muted">적합성 확인(프리플라이트) 포함 — 최대 약 3분</span>
+              )}
             </div>
-            {/* 슬라이스 21 §3: Pending 은 적합성 확인(프리플라이트 프로브, 최대
-                DMS_BUILD_PREFLIGHT_TIMEOUT_SECONDS=180s)을 포함한다 -- 별도 상태
-                기계는 만들지 않는다. 실패는 어차피 고유 사유 코드로 드러난다. */}
-            {b?.state === "Pending" && (
-              <p className="text-muted">적합성 확인(프리플라이트) 포함 — 최대 약 3분</p>
+            {/* 사유는 목록에선 한 줄로 잘린다 -- 전문의 집이 여기다. 자르지 않고,
+                메타 dl 안에 섞지도 않는다: 실패했다면 이 화면에서 가장 먼저 읽혀야
+                할 한 줄이다. null(사유 모름)이면 아예 그리지 않는다. */}
+            {b?.reason_code && (
+              <p className="text-bad font-medium">{reasonText(b.reason_code)}</p>
             )}
-            <p>저장소: <span className="text-ink">{b?.repo_url ?? "—"}</span></p>
-            <p>git ref: <span className="text-ink">{b?.git_ref ?? "—"}</span></p>
-            <p>commit: <span className="text-ink">{b?.commit_sha ? b.commit_sha.slice(0, 8) : "—"}</span></p>
-            <p>이미지: <span className="text-ink">{b && (b.images ?? []).length > 0 ? (b.images ?? []).join(", ") : "—"}</span></p>
-            <p>노드: <span className="text-ink">{b?.node_name ?? "—"}</span></p>
-            <p>사유: <span className="text-ink">
-              {b?.reason_code ? reasonText(b.reason_code) : "—"}
-            </span></p>
-            <p>생성 시각: <span className="text-ink">{b?.created_at ?? "—"}</span></p>
-            <p>종료 시각: <span className="text-ink">{b?.finished_at ?? "—"}</span></p>
-            {/* 경과(진행 중)·소요(종단). 종단인데 finished_at 이 없으면 "—"다 --
-                지금 시각을 끝으로 삼아 이미 끝난 빌드의 시간을 불리지 않는다.
-                "지금"은 마지막 성공 조회 시각(3s 폴링)이라 최대 3초 뒤처진다. */}
-            <p>{isActive ? "경과" : "소요"} 시간: <span className="text-ink">
-              {spent === null ? "—" : formatDuration(spent)}
-            </span></p>
+            <dl className="space-y-2">
+              <Row label="저장소">{b?.repo_url ?? "—"}</Row>
+              <Row label="git ref">{b?.git_ref ?? "—"}</Row>
+              <Row label="commit">
+                <span className="font-mono">{b?.commit_sha ? b.commit_sha.slice(0, 8) : "—"}</span>
+              </Row>
+              <Row label="이미지">
+                {b && (b.images ?? []).length > 0 ? (b.images ?? []).join(", ") : "—"}
+              </Row>
+              <Row label="노드">{b?.node_name ?? "—"}</Row>
+              {/* 배포 때 손으로 옮기는 값 -- airgap 이라 clipboard API 를 못 쓰므로
+                  클릭 한 번에 전체 선택되는 등폭 텍스트로 둔다(BuildsPage 와 같다). */}
+              <Row label="태그">
+                <span className="font-mono select-all">{b?.tag ?? "—"}</span>
+              </Row>
+              <Row label="생성 시각">{b?.created_at ?? "—"}</Row>
+              <Row label="종료 시각">{b?.finished_at ?? "—"}</Row>
+              {/* 경과(진행 중)·소요(종단). 종단인데 finished_at 이 없으면 "—"다 --
+                  지금 시각을 끝으로 삼아 이미 끝난 빌드의 시간을 불리지 않는다.
+                  "지금"은 마지막 성공 조회 시각(3s 폴링)이라 최대 3초 뒤처진다. */}
+              <Row label={isActive ? "경과 시간" : "소요 시간"}>
+                {spent === null ? "—" : formatDuration(spent)}
+              </Row>
+            </dl>
           </Card>
           <Card>
             <h2 className="font-medium mb-2">로그</h2>

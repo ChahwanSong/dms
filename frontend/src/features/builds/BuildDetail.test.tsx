@@ -152,6 +152,50 @@ test("진행 중 빌드는 경과 시간을 보여준다(소요를 지어내지 
   expect(screen.queryByText(/소요/)).not.toBeInTheDocument();
 });
 
+// DS Cloud 재설계: 목록에서 뺀 commit·노드는 **상세에 반드시** 있어야 한다 --
+// 빼고 안 넣으면 정보가 사라진 것이지 밀도를 낮춘 게 아니다.
+test("목록에서 뺀 commit·노드·이미지·태그·시각을 상세가 전부 담는다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () => HttpResponse.json(buildRow())),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderPage();
+  expect(await screen.findByText("deadbeef")).toBeInTheDocument();     // commit(앞 8자)
+  expect(screen.getByText("dms-w1")).toBeInTheDocument();              // 노드
+  expect(screen.getByText("dms")).toBeInTheDocument();                 // 이미지
+  expect(screen.getByText("b01234567")).toBeInTheDocument();           // 태그
+  expect(screen.getByText("2026-08-06T00:00:00Z")).toBeInTheDocument();  // 생성 시각
+  expect(screen.getByText("2026-08-06T00:10:00Z")).toBeInTheDocument();  // 종료 시각
+});
+
+test("메타는 dl 로 짝지어 두고, 태그는 클릭 한 번에 전체 선택된다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () => HttpResponse.json(buildRow())),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  const { container } = renderPage();
+  await screen.findByText("dms-w1");
+  expect(container.querySelector("dl")).not.toBeNull();
+  // 배포 때 손으로 옮기는 값이다 -- airgap 이라 clipboard API 를 못 쓴다(규약).
+  const tag = screen.getByText("b01234567");
+  expect(tag.className).toContain("select-all");
+  expect(tag.className).toContain("font-mono");
+});
+
+test("실패 사유는 전문 그대로, 눈에 띄게(text-bad) 보인다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json(buildRow({ state: "Failed", reason_code: "build_node_disk_low" }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "boom\n" })),
+  );
+  renderPage();
+  // 목록은 한 줄로 잘리지만 상세는 자르지 않는다 -- 여기가 전문의 집이다.
+  const reason = await screen.findByText(/디스크 여유가 부족/);
+  expect(reason.className).toContain("text-bad");
+  expect(reason.className).not.toContain("truncate");
+  expect(reason.textContent).toContain("로그에 있습니다");
+});
+
 test("종단 빌드(Succeeded)는 로그를 더 폴링하지 않는다", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let logCalls = 0;
