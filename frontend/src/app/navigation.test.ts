@@ -90,4 +90,24 @@ describe("breadcrumbFor", () => {
   test("미지 경로는 HOME 만(placeholder 제거 후 /nas 도 미지다)", () => {
     expect(breadcrumbFor("/nas").map((c) => c.label)).toEqual(["HOME"]);
   });
+
+  // 빌드는 사이드바 항목 하나(「빌드」) 아래 하위 페이지 둘(빌드하기·빌드 이력)이다 --
+  // 이력은 사이드바에 없으므로 DETAIL_ROUTES 를 타야 크럼과 그룹 펼침을 얻는다.
+  test("빌드 이력은 「빌드」 항목 아래 크럼을 단다", () => {
+    expect(breadcrumbFor("/admin/builds/history").map((c) => c.label))
+      .toEqual(["HOME", "DMS", "운영", "빌드", "빌드 이력"]);
+    expect(groupLabelFor("/admin/builds/history")).toBe("운영");
+  });
+
+  test("「history」가 :buildId 로 먹히지 않는다(DETAIL_ROUTES 순서)", () => {
+    // matchPath("/admin/builds/:buildId", "/admin/builds/history") 도 참이라 --
+    // 구체적인 쪽(history)이 먼저 물지 않으면 이력 화면이 "빌드 상세" 크럼을 단다
+    // (/admin/batches/new vs :batchId 와 같은 함정).
+    const last = (path: string) => {
+      const crumbs = breadcrumbFor(path);
+      return crumbs[crumbs.length - 1].label;
+    };
+    expect(last("/admin/builds/history")).toBe("빌드 이력");
+    expect(last("/admin/builds/abc123")).toBe("빌드 상세");
+  });
 });

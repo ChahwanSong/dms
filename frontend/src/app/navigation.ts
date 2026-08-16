@@ -79,6 +79,10 @@ export const DETAIL_ROUTES = [
   { pattern: "/jobs/:requestId", label: "요청 상세", parent: "/jobs" },
   { pattern: "/admin/batches/new", label: "배치 생성", parent: "/admin/batches" },
   { pattern: "/admin/batches/:batchId", label: "배치 상세", parent: "/admin/batches" },
+  // 빌드 이력은 사이드바 항목이 아니라 「빌드」의 하위 페이지(탭)다 -- 여기 있어야
+  // 크럼이 「… > 빌드 > 빌드 이력」이 되고 운영 그룹이 자동으로 펼쳐진다.
+  // ":buildId" 보다 앞인 것도 batches/new 와 같은 이유다("history" 가 매칭된다).
+  { pattern: "/admin/builds/history", label: "빌드 이력", parent: "/admin/builds" },
   { pattern: "/admin/builds/:buildId", label: "빌드 상세", parent: "/admin/builds" },
 ] as const;
 

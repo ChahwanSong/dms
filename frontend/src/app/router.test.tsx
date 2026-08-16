@@ -131,6 +131,19 @@ test("admin can open builds screen", async () => {
   expect(await screen.findByRole("heading", { name: "빌드" })).toBeInTheDocument();
 });
 
+// 빌드 하위 페이지: /admin/builds 는 빌드하기(기본), /admin/builds/history 는 이력.
+// 라우트 순서가 뒤집히면 "history" 가 :buildId 로 먹혀 상세 화면이 열린다
+// (/admin/batches/new vs :batchId 와 같은 함정) -- 그래서 부재 단언을 함께 건다.
+test("admin can open build history subpage", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
+    http.get("/api/admin/builds", () => HttpResponse.json([])),
+  );
+  renderAt("/admin/builds/history");
+  expect(await screen.findByRole("heading", { name: "빌드 이력" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "빌드 history" })).not.toBeInTheDocument();
+});
+
 test("admin can open build detail", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),

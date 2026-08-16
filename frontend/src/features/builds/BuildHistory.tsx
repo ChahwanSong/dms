@@ -1,0 +1,167 @@
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { Card } from "../../components/ui/Card";
+import { Button } from "../../components/ui/Button";
+import { Table } from "../../components/ui/Table";
+import { StatusPill } from "../../components/ui/StatusPill";
+import { ApiError, reasonText } from "../../lib/api";
+import { buildPillVariant, isTerminal } from "../../lib/jobState";
+import { formatDuration, spanMs } from "../../lib/duration";
+import { useBuilds } from "./useBuilds";
+import { BuildTabs } from "./BuildTabs";
+import type { Build } from "../../lib/types";
+
+const PAGE_SIZE = 20;
+
+// 상태 필터. 진행 중 판정은 jobState 의 종단 집합을 재사용한다(빌드 상태
+// Pending/Running/Succeeded/Failed 는 그 집합과 그대로 맞는다 — useBuilds 주석).
+const FILTERS: { key: string; label: string; match: (state: string) => boolean }[] = [
+  { key: "all", label: "전체", match: () => true },
+  { key: "active", label: "진행 중", match: (s) => !isTerminal(s) },
+  { key: "succeeded", label: "성공", match: (s) => s === "Succeeded" },
+  { key: "failed", label: "실패", match: (s) => s === "Failed" },
+];
+
+// 경과(진행 중)·소요(종단) 표기. now 는 호출자가 넘긴다.
+//
+// null(모름)을 "—"로 접는 자리가 여기다: 종단인데 finished_at 이 없으면(워처가
+// 종료 시각을 못 남긴 옛 행) 소요를 **지어내지 않는다** — 지금 시각을 끝으로
+// 쓰면 이미 끝난 빌드가 계속 자라는 거짓 숫자가 된다.
+function spentText(b: Build, now: number): string {
+  const terminal = isTerminal(b.state);
+  const ms = terminal ? spanMs(b.created_at, b.finished_at) : spanMs(b.created_at, now);
+  if (ms === null) return "—";
+  return `${formatDuration(ms)} ${terminal ? "소요" : "경과"}`;
+}
+
+/** 빌드 이력 — 「빌드」의 두 번째 하위 페이지(목록 전용). 폼은 BuildForm.
+ *
+ *  폭을 제한하지 않는다(전폭): 다른 목록 화면(BatchesList·JobsList·계정 등)이
+ *  전부 전폭이고, 8열 표는 좁히면 정보가 줄지 않고 **접히기만** 한다(bfc55fd 에서
+ *  3xl 로 눌러 봤을 때 시각·ref·이미지가 2~4줄로 접혀 행 높이가 들쭉날쭉해졌다).
+ *  가운데 정렬(mx-auto)도 쓰지 않는다 -- 이 앱의 모든 화면이 왼쪽 기준선이다.
+ */
+export function BuildHistory() {
+  const q = useBuilds();
+  const [filter, setFilter] = useState<string>("all");
+  const [page, setPage] = useState(1);
+
+  const builds = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
+
+  // "지금"은 Date.now() 가 아니라 **마지막 성공 조회 시각**이다. 목록은 진행 중
+  // 항목이 있을 때만 5초로 폴링하는데(useBuilds), 같은 데이터가 돌아오면 참조가
+  // 유지돼 재렌더가 안 일어난다 — dataUpdatedAt 을 읽으면 매 폴링마다 값이 바뀌어
+  // 경과 시간이 따라 올라간다. 별도 타이머(setInterval)를 두지 않는 이유이자,
+  // 표기가 "마지막 갱신 기준"이라는 뜻이기도 하다(최대 5초 뒤처짐).
+  const now = q.dataUpdatedAt;
+
+  const match = (FILTERS.find((f) => f.key === filter) ?? FILTERS[0]).match;
+  const filtered = useMemo(() => builds.filter((b) => match(b.state)), [builds, match]);
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  // 필터로 페이지 수가 줄면 마지막 페이지로 클램프(RecentRequestsSection 관례).
+  const current = Math.min(page, pages);
+  const visible = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
+
+  return (
+    <section className="space-y-4">
+      <header>
+        <h1 className="text-2xl font-bold">빌드 이력</h1>
+        <p className="text-muted mt-1">최근 빌드의 상태와 결과를 확인합니다</p>
+      </header>
+      <BuildTabs />
+
+      {q.isLoading ? (
+        <p className="text-muted">불러오는 중…</p>
+      ) : q.isError ? (
+        <p className="text-bad">{(q.error as ApiError).message}</p>
+      ) : (
+        <Card>
+          <div className="flex items-center justify-between gap-4 mb-3 text-sm">
+            {/* 필터는 버튼 그룹이다(BatchDetail·JobViewer 관례) -- select 는 눌러
+                열어야 선택지가 보인다. aria-pressed 로 "지금 무엇이 켜졌는지"를
+                시각 스타일 밖에서도 말한다. */}
+            <div role="group" aria-label="상태 필터" className="flex flex-wrap gap-2">
+              {FILTERS.map((f) => (
+                <Button key={f.key} type="button" aria-pressed={filter === f.key}
+                        variant={filter === f.key ? "outline" : "ghost"}
+                        className="px-2.5 py-1 text-xs"
+                        onClick={() => { setFilter(f.key); setPage(1); }}>{f.label}</Button>
+              ))}
+            </div>
+            <span className="text-muted tabular-nums shrink-0">{`${filtered.length}건`}</span>
+          </div>
+          <Table>
+            <thead>
+              {/* commit·노드는 상세로 밀었다: commit 은 실패 시 대개 —이고, 노드는
+                  빌드하기 화면의 확인 박스에 이미 있어 매 행 반복하면 밀도만 올린다.
+                  열 8개는 e2e L2 의 셀 하한(minTableCells: 8)이기도 하다. */}
+              <tr className="text-muted whitespace-nowrap">
+                <th className="py-2">시각</th><th>ref</th><th>이미지</th><th>상태</th>
+                <th>사유</th><th>경과</th><th>태그</th><th>작업</th>
+              </tr>
+            </thead>
+            {/* whitespace-nowrap: 셀이 접히면 행 높이가 내용 길이 따라 들쭉날쭉해진다
+                (긴 ref·이미지 3종). 넘치면 표 래퍼(overflow-x-auto)가 가로로 스크롤
+                한다 -- 행 높이를 일정하게 두는 쪽을 택한다. */}
+            <tbody>
+              {visible.map((b) => (
+                <tr key={b.build_id} className="border-t border-black/5 whitespace-nowrap">
+                  <td className="py-2">{b.created_at}</td>
+                  <td>{b.git_ref}</td>
+                  {/* 이미지 3종을 다 고르면 이 셀 하나가 220px 를 먹어 뒤쪽 태그·
+                      작업 열을 화면 밖으로 밀어낸다 -- 사유와 같은 방식으로 자르고
+                      전문은 title 에 둔다(상세에는 전체가 그대로 있다). */}
+                  <td className="max-w-[10rem]">
+                    <span className="block truncate" title={(b.images ?? []).join(", ")}>
+                      {(b.images ?? []).join(", ")}
+                    </span>
+                  </td>
+                  <td>
+                    <StatusPill state={b.state} variant={buildPillVariant(b.state)} />
+                    {/* 슬라이스 21 §3: 빌드의 Pending 은 "대기"가 아니라 적합성
+                        확인(프리플라이트)을 포함한다 — 상태 문자열만으로는 지금
+                        무엇을 하는 중인지 알 수 없어 한 줄 덧붙인다. */}
+                    {b.state === "Pending" && (
+                      <span className="block text-muted text-xs mt-0.5">적합성 확인 중</span>
+                    )}
+                  </td>
+                  {/* 실패 사유를 상세로 들어가야만 볼 수 있으면 목록의 "Failed" 는
+                      아무것도 말하지 않는 것과 같다. 다만 **한 줄로 자른다** — 사유
+                      길이에 따라 행 높이가 들쭉날쭉해지던 것이 직전 판의 문제였다.
+                      전문은 title(호버)과 상세에 있다. truncate 는 td 가 아니라 안쪽
+                      span 에 건다: td 의 display 를 바꾸면 e2e L2 가 문다. */}
+                  <td className={`max-w-[9rem] ${b.reason_code ? "text-bad" : "text-muted"}`}>
+                    <span className="block truncate"
+                          title={b.reason_code ? reasonText(b.reason_code) : undefined}>
+                      {b.reason_code ? reasonText(b.reason_code) : "—"}
+                    </span>
+                  </td>
+                  <td className="text-muted tabular-nums whitespace-nowrap">{spentText(b, now)}</td>
+                  {/* 태그는 배포 때 손으로 옮겨야 하는 값이다. 런타임 airgap·비보안
+                      컨텍스트라 clipboard API 를 못 쓰므로(규약), 클릭 한 번에 전체가
+                      선택되는 select-all 등폭 텍스트로 복사 부담을 줄인다. */}
+                  <td><span className="font-mono select-all">{b.tag ?? "—"}</span></td>
+                  {/* 행 전체를 링크로 만들지 않는다: stretched-link 는 td 에
+                      position 을 얹어야 하고, 표 안 텍스트(태그 select-all) 선택을
+                      가로챈다 — L2 를 지키면서 얻는 것보다 잃는 게 크다. */}
+                  <td className="py-2">
+                    <Link className="text-accent" to={`/admin/builds/${b.build_id}`}>상세</Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          {/* 페이지네이션은 표 밖(카드 안)이다 — td 안에 버튼·flex 를 넣으면 e2e L2
+              (display=table-cell 불변식)가 문다(RecentRequestsSection 관례). */}
+          <div className="flex items-center justify-end gap-3 mt-3 text-sm">
+            <Button variant="ghost" disabled={current <= 1}
+                    onClick={() => setPage(current - 1)}>이전</Button>
+            <span className="text-muted tabular-nums">{`${current} / ${pages} 페이지`}</span>
+            <Button variant="ghost" disabled={current >= pages}
+                    onClick={() => setPage(current + 1)}>다음</Button>
+          </div>
+        </Card>
+      )}
+    </section>
+  );
+}

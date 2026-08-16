@@ -24,7 +24,8 @@ import { ControlStatePage } from "../features/control/ControlStatePage";
 import { ArtifactBasePage } from "../features/control/ArtifactBasePage";
 import { AccountsList } from "../features/accounts/AccountsList";
 import { NodesList } from "../features/nodes/NodesList";
-import { BuildsPage } from "../features/builds/BuildsPage";
+import { BuildForm } from "../features/builds/BuildForm";
+import { BuildHistory } from "../features/builds/BuildHistory";
 import { BuildDetail } from "../features/builds/BuildDetail";
 import { ReleasesPage } from "../features/releases/ReleasesPage";
 
@@ -80,7 +81,11 @@ export function AppRouter() {
           <Route path="/admin/artifact-base" element={<RequireRole role="admin"><AppShell><ArtifactBasePage /></AppShell></RequireRole>} />
           <Route path="/admin/accounts" element={<RequireRole role="admin"><AppShell><AccountsList /></AppShell></RequireRole>} />
           <Route path="/admin/nodes" element={<RequireRole role="admin"><AppShell><NodesList /></AppShell></RequireRole>} />
-          <Route path="/admin/builds" element={<RequireRole role="admin"><AppShell><BuildsPage /></AppShell></RequireRole>} />
+          {/* 빌드는 하위 페이지 둘: 기본(/admin/builds)이 빌드하기, /history 가 이력.
+              「history」는 :buildId 패턴에도 매칭되므로 **먼저** 와야 한다
+              (/admin/batches/new vs :batchId 와 같은 함정 — navigation.ts 도 같은 순서). */}
+          <Route path="/admin/builds" element={<RequireRole role="admin"><AppShell><BuildForm /></AppShell></RequireRole>} />
+          <Route path="/admin/builds/history" element={<RequireRole role="admin"><AppShell><BuildHistory /></AppShell></RequireRole>} />
           <Route path="/admin/builds/:buildId" element={<RequireRole role="admin"><AppShell><BuildDetail /></AppShell></RequireRole>} />
           <Route path="/admin/releases" element={<RequireRole role="admin"><AppShell><ReleasesPage /></AppShell></RequireRole>} />
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -6,9 +6,11 @@ import { buildPillVariant, isTerminal } from "../../lib/jobState";
 import { formatDuration, spanMs } from "../../lib/duration";
 import { useBuild, useBuildLog } from "./useBuilds";
 
-// BuildsPage 와 같은 콘텐츠 컬럼. 목록에서 「상세」로 들어왔을 때 글줄 폭이 바뀌면
-// 다른 화면으로 튄 것처럼 읽힌다 -- 같은 폭이 "같은 흐름"을 말한다.
-const COLUMN = "mx-auto w-full max-w-3xl";
+// 콘텐츠 컬럼. 폭은 제한하되(로그·메타가 화면 끝까지 늘어지면 읽기 어렵다) **왼쪽
+// 기준선**이다 -- mx-auto 를 쓰던 것은 이 앱에서 빌드 화면들뿐이라, 이력에서
+// 「상세」로 들어오면 글줄이 혼자 가운데로 튀어 다른 화면처럼 읽혔다(사용자 지적).
+// 이제 빌드하기·이력·상세 셋 다 왼쪽에서 시작한다.
+const COLUMN = "w-full max-w-3xl";
 
 // 메타 한 줄(dt/dd 짝). 목록에서 뺀 것들이 **여기로 모인다** -- 열을 지우기만 하고
 // 상세에 안 넣으면 밀도를 낮춘 게 아니라 정보를 잃은 것이다.

@@ -17,9 +17,13 @@ async function visit(page: Page, path: string, heading: string): Promise<void> {
 //   /admin/accounts  th 6 + (admin 1 + e2ewide 3)행 × td 6 = 30 >= 24
 //   /jobs            th 4 + 0행(이 파일 시점엔 요청이 없다) = 4
 //   /admin/storages  th 6 + e2e-store 1행 × td 6 = 12
-//   /admin/builds    th 8(시각·ref·이미지·상태·사유·경과·태그·작업) + 0행 = 8
+//   /admin/builds    빌드하기(폼 전용) -- 표가 없다 -> 하한 0. L1/L3/L4 가 진다.
+//   /admin/builds/history
+//                    th 8(시각·ref·이미지·상태·사유·경과·태그·작업) + 0행 = 8
 //                    commit·노드는 상세로 밀었다(DS Cloud 재설계) -- 열을 더 줄이면
 //                    이 하한이 문다. 밀도를 낮추더라도 8열이 바닥이라는 뜻이다.
+//                    빌드 표는 하위 페이지 분리로 여기로 옮겨 왔다(d72) -- 표 불변식을
+//                    "빌드 화면"이 아니라 **표가 실제로 있는 화면**에 건다.
 //   /admin/dashboard 표는 잡 통계·큐 데이터가 있을 때만 그려진다 -> 하한 불가(0).
 //                    이 화면은 L1/L3/L4 가 진다.
 test.describe("E3 레이아웃 불변식", () => {
@@ -43,7 +47,13 @@ test.describe("E3 레이아웃 불변식", () => {
     await visit(page, "/admin/storages", "스토리지");
     await assertLayoutSane(page, { minTableCells: 12 });
 
+    // 빌드는 하위 페이지 둘이다(빌드하기·빌드 이력). 폼 화면에는 표가 없으므로
+    // 하한을 0 으로 두되 **순회에서 빼지는 않는다** -- L1(가로 오버플로)·L3·L4 는
+    // 여기서도 진다. 8셀 하한은 표를 실제로 가진 이력 화면이 이어받는다.
     await visit(page, "/admin/builds", "빌드");
+    await assertLayoutSane(page, { minTableCells: 0 });
+
+    await visit(page, "/admin/builds/history", "빌드 이력");
     await assertLayoutSane(page, { minTableCells: 8 });
   });
 
