@@ -32,7 +32,7 @@ spec:
       # 40-api.yaml 의 initContainer 와 동일 -- 근거 주석은 그쪽에.
       initContainers:
         - name: migrate
-          image: pkg-01:5000/dms:d68
+          image: pkg-01:5000/dms:d69
           imagePullPolicy: IfNotPresent
           command: ["dms", "migrate"]
           envFrom:
@@ -49,7 +49,7 @@ spec:
               memory: 512Mi
       containers:
         - name: controller
-          image: pkg-01:5000/dms:d68
+          image: pkg-01:5000/dms:d69
           imagePullPolicy: IfNotPresent
           command: ["dms", "controller"]
           envFrom:
