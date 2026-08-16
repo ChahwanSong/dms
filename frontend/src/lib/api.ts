@@ -172,8 +172,11 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_preflight_timeout: "빌드 적합성 확인이 제한 시간을 넘겼습니다 — 빌드 노드가 내려갔거나 프로브가 스케줄되지 못했을 수 있습니다",
   build_preflight_failed: "빌드 적합성 확인에 실패했습니다 — 로그를 확인하세요",
   build_node_no_egress: "빌드 노드에서 인터넷으로 나갈 수 없습니다 — 운영자가 인터넷을 아직 열지 않았을 수 있습니다",
-  build_registry_unreachable: "빌드 노드에서 이미지 레지스트리에 연결할 수 없습니다",
-  build_node_disk_low: "빌드 노드의 디스크 여유가 부족합니다 — 로그의 실측 수치를 확인하세요",
+  // 이 둘은 목록의 「사유」 열에서 그대로 읽히는 문구다 — 상세·로그로 한 번 더
+  // 들어가지 않고도 **무엇을 하면 되는지**까지 말한다(실측 수치는 로그에 남는다:
+  // build_manifests.py 프로브가 unreachable_registry=/avail_bytes= 를 찍는다).
+  build_registry_unreachable: "빌드 노드에서 이미지 레지스트리에 연결할 수 없습니다 — 레지스트리 주소·포트와 노드 방화벽을 확인하세요(대상은 로그에 있습니다)",
+  build_node_disk_low: "빌드 노드의 디스크 여유가 부족합니다 — 노드의 옛 이미지·임시 파일을 정리하거나 빌드 노드를 바꾸세요(여유/필요 바이트는 로그에 있습니다)",
   invalid_build_ref: "빌드 참조가 올바르지 않습니다 — 관리자에게 문의하세요",
   rollout_in_progress: "이미 진행 중인 롤아웃이 있습니다",
   patch_failed: "워크로드 패치에 실패했습니다 — 컨트롤러 RBAC/로그를 확인하세요",
