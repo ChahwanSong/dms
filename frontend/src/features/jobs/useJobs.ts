@@ -20,10 +20,15 @@ export const useRecentRequests = () =>
 export const useRequest = (id: string) =>
   useQuery({ queryKey: ["request", id], queryFn: () => apiGet<RequestDetail>(`/api/user/requests/${id}`) });
 
-export const useRequestJobs = (id: string) =>
+// enabled 기본 true(요청 상세는 늘 조회한다). 문을 연 이유: 배치 항목 펼침이
+// 실행 도구를 이 응답에서 읽는데(배치 API 에는 tool 이 없다) 펼치기 전엔 부르지
+// 않아야 한다(lazy — ItemScanStats 와 같은 계약). 쿼리키를 공유하므로 항목에서
+// 요청 상세로 이동하면 캐시가 이미 따뜻하다.
+export const useRequestJobs = (id: string, enabled = true) =>
   useQuery({
     queryKey: ["request", id, "jobs"],
     queryFn: () => apiGet<DataJob[]>(`/api/user/requests/${id}/jobs`),
+    enabled,
     refetchInterval: (q) => {
       const jobs = q.state.data as DataJob[] | undefined;
       return jobs && jobs.some((j) => !isTerminal(j.state)) ? 2000 : false;

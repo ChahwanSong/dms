@@ -466,3 +466,57 @@ test("백엔드가 사유 필드를 아예 안 실어도 죽지 않는다(구버
   await screen.findByText("전이 이력");
   expect(screen.queryByText("사유")).toBeNull();
 });
+
+// --- 실행 도구 표시: 화면 어디에도 **무엇이 실제로 돌았는지**가 없었다. sync 는
+// 제출 시점에 도구가 정해지지 않고 배치 때 갈린다(공존 노드가 있으면 dsync, 없으면
+// nsync 폴백 — placement.py) — 이 선택이 노드 수의 의미(dsync=전체 상한 /
+// nsync=면당 상한)·적용 정책·성능 특성을 바꾸는데 결과 화면이 침묵했다.
+const toolJob = (over: object) => ({ ...JOBS[0], ...over });
+
+test("잡 카드에 실제 실행 도구와 노드 수가 뜬다(dsync)", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([
+      toolJob({ tool: "dsync",
+                worker_pool: { node_count: 2, process_count: 8 } })])),
+  );
+  renderAt();
+  expect(await screen.findByText("dsync · 2 노드")).toBeInTheDocument();
+  // 상태는 여전히 pill 의 몫이다 — 도구가 상태 자리를 뺏지 않는다.
+  expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
+});
+
+test("nsync 잡은 양면 노드 수(소스+목적지)를 함께 말한다 — 총 노드가 2배인 이유", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([
+      toolJob({ tool: "nsync",
+                worker_pool: { source_count: 2, destination_count: 2,
+                               node_count: 4, process_count: 16 } })])),
+  );
+  renderAt();
+  expect(await screen.findByText("nsync · 소스 2 + 목적지 2 노드")).toBeInTheDocument();
+});
+
+test("tool 이 null(계획 전)이면 도구 표시를 생략한다 — 거짓 표시 금지", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([
+      toolJob({ state: "Pending", tool: null, worker_pool: null })])),
+  );
+  renderAt();
+  expect(await screen.findByText("j1")).toBeInTheDocument();
+  // 도구 라벨로 **시작하는** 요소만 본다 — 사유 문구("실행 가능한 노드가 없습니다")
+  // 처럼 "노드"를 품은 정상 텍스트를 도구 표시로 오인하지 않기 위함.
+  expect(screen.queryByText(/^(dsync|nsync|dscan|drm)\b/)).toBeNull();
+});
+
+test("worker_pool 이 없어도(구버전 응답) 도구 이름만은 보인다", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([
+      toolJob({ tool: "dscan" })])),
+  );
+  renderAt();
+  expect(await screen.findByText("dscan")).toBeInTheDocument();
+});

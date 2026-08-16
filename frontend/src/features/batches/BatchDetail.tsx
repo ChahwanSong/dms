@@ -12,8 +12,10 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
+import { useRequestJobs } from "../jobs/useJobs";
 import { reasonText, ApiError } from "../../lib/api";
 import { absSummary } from "../../lib/storagePaths";
+import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant } from "../../lib/jobState";
 import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
@@ -200,6 +202,25 @@ function BatchSettings({ b }: { b: Batch }) {
       </dl>
     </details>
   );
+}
+
+// 실행 도구 행(요청 정보 dl 안): 배치 API 는 tool 을 싣지 않는다 — list_items_detail
+// 의 조인은 요청 상태·파일 수·완료 시각뿐이다(실측). 그래서 **펼친 항목에 한해**
+// 자식 요청의 잡을 조회한다(ItemScanStats 와 같은 lazy 계약: 마운트가 1차 게이트,
+// enabled 가 2차). 요청당 잡이 여럿일 수 있어(취소·재실행 경로) 최신 잡을 읽는다 —
+// 서버 list_jobs 가 created_at DESC 정렬이라 [0] 이 최신이고, 이는 파일 수 조인이
+// 최신 잡을 고르는 기준과 같다.
+// 모름(계획 전·잡 없음·조회 실패)이면 행 자체를 안 그린다: 같은 dl 의 절대경로 행과
+// 같은 조건부 규약이고, 요청 상세 잡 카드와도 같은 규칙이다(null≠0 — "—" 는
+// "도구 없이 돌았다"로 읽히는 거짓 표시다).
+function ItemTool({ requestId }: { requestId: string | null }) {
+  const q = useRequestJobs(requestId ?? "", requestId !== null);
+  const text = toolSummary(q.data?.[0]);
+  if (text === null) return null;
+  return (<>
+    <dt className="text-muted">도구</dt>
+    <dd>{text}</dd>
+  </>);
 }
 
 // 항목별 데이터 온도 섹션: 펼친 항목에서만 마운트된다(= lazy 조회의 1차 게이트,
@@ -894,6 +915,10 @@ export function BatchDetail() {
                     <dd>{it.request_state ?? "—"}</dd>
                     <dt className="text-muted">사유</dt>
                     <dd className="text-bad">{it.reason_code ? reasonText(it.reason_code) : "—"}</dd>
+                    {/* 무엇으로 돌았는지(dscan/dsync/nsync/drm) — sync 는 배치
+                        시점에 도구가 갈리므로(공존 노드 없으면 nsync 폴백) 결과를
+                        볼 때 화면이 말해 주지 않으면 확인할 길이 없다. */}
+                    <ItemTool requestId={it.request_id} />
                     {/* null = 모름(잡 없음/미기록) — 0(파일 없음)은 정상값으로 그대로
                         표기한다(null≠0, ?? 로만 접는다). */}
                     <dt className="text-muted">파일 수</dt>

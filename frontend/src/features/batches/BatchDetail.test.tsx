@@ -11,8 +11,12 @@ import { parseItemsCsv } from "../../lib/csv";
 // 기본 스토리지 목록은 **빈 배열**이다: 화면이 절대경로 조합용으로 이 목록을
 // 부르는데(useStorageRoots), 기본이 없으면 모든 테스트가 MSW 미처리 경고를 뿜는다.
 // 빈 배열 = 뿌리 모름 = 절대경로 표시 없음이라 기존 단언에는 영향이 없다.
+// 자식 요청의 잡 목록도 기본은 **빈 배열**(= 도구 모름 = 도구 행 없음)이다: 펼친
+// 항목이 실행 도구를 이 엔드포인트에서 읽으므로(배치 API 엔 tool 이 없다) 기본이
+// 없으면 펼침 테스트마다 MSW 미처리 경고가 난다. 기존 단언에는 영향이 없다.
 const server = setupServer(
-  http.get("/api/user/storages", () => HttpResponse.json([])));
+  http.get("/api/user/storages", () => HttpResponse.json([])),
+  http.get("/api/user/requests/:rid/jobs", () => HttpResponse.json([])));
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 const batch = (over: any = {}) => ({ batch_id:"b1", operation:"sync", status:"PreviewReady",
   max_concurrency:2, item_count:1, succeeded_count:0, failed_count:0, note:null, created_at:"",
@@ -303,6 +307,47 @@ test("sync 배치 항목 펼침: 온도 섹션 자체가 없다(조회 없음)",
   expect(c.calls).toBe(0);
   expect(screen.queryByText("데이터 온도(hot/cold)")).toBeNull();
   expect(screen.queryByText("리포트 없음")).toBeNull();
+});
+
+// --- 항목 펼침의 실행 도구(요청 상세 잡 카드와 같은 값·같은 규칙). 배치 API 는
+// tool 을 싣지 않으므로(batch_items 조인 = 요청 상태·파일 수·완료 시각뿐) 펼친
+// 항목에 한해 자식 요청의 잡을 lazy 로 조회한다 — ItemScanStats 와 같은 계약.
+const jobRow = (over: object) => ({
+  job_id: "j1", request_id: "r1", operation: "scan", state: "Succeeded",
+  reason_code: null, preview_fingerprint: null, preview_expires_at: null,
+  result_summary: null, transitions: [], artifact_uri: null, ...over });
+
+test("펼침 전에는 잡 조회가 없다(lazy) — 펼치면 도구 행이 뜬다", async () => {
+  let calls = 0;
+  server.use(http.get("/api/user/requests/r1/jobs", () => {
+    calls += 1;
+    return HttpResponse.json([jobRow({ tool: "dscan",
+      worker_pool: { node_count: 3, process_count: 12 } })]);
+  }));
+  renderDetailed();
+  await screen.findByText("scan · s1:team");
+  expect(calls).toBe(0);
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(await screen.findByText("도구")).toBeInTheDocument();
+  expect(screen.getByText("dscan · 3 노드")).toBeInTheDocument();
+});
+
+test("nsync 항목은 양면 노드 수까지 — 요청 상세와 같은 문구", async () => {
+  server.use(http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([
+    jobRow({ operation: "sync", tool: "nsync",
+             worker_pool: { source_count: 2, destination_count: 2,
+                            node_count: 4, process_count: 16 } })])));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(await screen.findByText("nsync · 소스 2 + 목적지 2 노드")).toBeInTheDocument();
+});
+
+test("잡이 없으면(계획 전·미 materialize) 도구 행 자체를 생략한다", async () => {
+  server.use(http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  expect(await screen.findByText("파일 수")).toBeInTheDocument();   // 패널은 떴다
+  expect(screen.queryByText("도구")).toBeNull();
 });
 
 test("이름이 있으면 헤더는 이름, 축약 batch_id 는 병기", async () => {

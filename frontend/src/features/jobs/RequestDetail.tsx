@@ -9,8 +9,9 @@ import { Timeline } from "./Timeline";
 import { JobViewer } from "./JobViewer";
 import { ApiError, reasonText } from "../../lib/api";
 import { absSummary, pathSummary } from "../../lib/storagePaths";
+import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
-import type { RequestDetail as RequestDetailType } from "../../lib/types";
+import type { DataJob, RequestDetail as RequestDetailType } from "../../lib/types";
 
 // 요청 상태의 종단 집합은 잡 상태(jobState.ts의 isTerminal)와 다르다 —
 // "Conflict"를 포함하고 "PreviewExpired"는 포함하지 않는다.
@@ -81,6 +82,18 @@ function DiagnosticEvents({ req }: { req: RequestDetailType }) {
       </ul>
     </Card>
   );
+}
+
+// 실행 도구 라벨(잡 카드 헤더). **배지가 아니라 중립 텍스트**인 이유: 이 카드의
+// 배지 자리는 StatusPill 하나뿐이고 그 색은 상태 판정(ok/bad/busy) 계약이다 —
+// 도구에 배지를 하나 더 달면 색이 없는 판정을 만들고(어떤 도구가 "좋은" 도구인가?)
+// 두 배지가 서로 상태처럼 읽힌다. 요청 카드의 operation 라벨·배치 헤더의 메타
+// 문구와 같은 관례(text-muted 작은 라벨)로 식별자 옆에 붙인다.
+// 모름(계획 전)이면 아무것도 그리지 않는다 — "—" 도 거짓 표시다(null≠0).
+function ToolLabel({ job }: { job: DataJob }) {
+  const text = toolSummary(job);
+  if (text === null) return null;
+  return <span className="text-muted text-xs">{text}</span>;
 }
 
 function ResultSummary({ summary }: { summary: unknown }) {
@@ -205,8 +218,15 @@ export function RequestDetail() {
       <div className="space-y-2">
         {(jobs.data ?? []).map((j) => (
           <Card key={j.job_id}>
-            <div className="flex items-center justify-between">
-              <span className="text-sm">{j.job_id}</span><StatusPill state={j.state} />
+            {/* 헤더 = 식별자 · 실행 도구 · 상태pill. 도구·식별자 묶음은 flex-wrap
+                이다 — job_id(UUID)와 도구 문구가 좁은 폭에서 한 줄을 넘기면 문서
+                가로 스크롤(e2e L1)이 되므로 줄바꿈으로 흡수한다. */}
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <span className="text-sm">{j.job_id}</span>
+                <ToolLabel job={j} />
+              </div>
+              <StatusPill state={j.state} />
             </div>
             {j.reason_code && <p className="text-bad text-sm mt-1">{reasonText(j.reason_code)}</p>}
             {j.artifact_uri && (

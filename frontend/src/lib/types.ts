@@ -30,6 +30,19 @@ export interface RequestDetail extends RequestRow {
   terminal_state?: string | null;
   completed_at?: string | null;
 }
+// 플래너가 배치 시점에 확정한 워커 배치(planner.py: resolve_fanout 결과 + 후보·
+// 신원). 화면이 읽는 건 **수치 몇 개**뿐이라 그것만 선언한다(identity·candidates·
+// rejections 는 화면 계약이 아니다 — 필요해지면 그때 넓힌다).
+// node_count 는 전 도구 공통(총 노드), source_count/destination_count 는 양면
+// 배치(nsync)에서만 실린다 — resolve_fanout 의 두 분기가 그대로 모양이 된다.
+// 전부 옵셔널: 구버전 응답·미기록에서 키가 없을 수 있고, 없음(모름)과 0(정상값)은
+// 다른 사실이다(null≠0).
+export interface WorkerPool {
+  node_count?: number | null;
+  process_count?: number | null;
+  source_count?: number | null;
+  destination_count?: number | null;
+}
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
   reason_code: string | null; preview_fingerprint: string | null;
@@ -38,6 +51,11 @@ export interface DataJob {
   // phase -> 실행 ref("pod/<name>" 등). 로그를 실제로 조회할 수 있는 phase가 정확히
   // 이 키들이다 — 뷰어는 하드코딩된 "preflight"가 아니라 여기에 맞춰 탭을 만든다.
   phase_refs?: Record<string, string> | null;
+  // 실제로 무엇이 돌았는지(dscan/dsync/nsync/drm). null = 아직 계획 전(플래너가
+  // 도구를 고르기 전) — 서버는 늘 이 두 키를 보낸다(SELECT 명시 컬럼). 옵션(?)은
+  // 기존 fixture 무수정 컴파일용이다.
+  tool?: string | null;
+  worker_pool?: WorkerPool | null;
 }
 export interface ArtifactEntry { phase: string; name: string; size: number; modified_at: number }
 // 목록은 상한(MAX_ENTRIES)이 있어 배열이 아니라 truncated 플래그를 동반한 객체다.
