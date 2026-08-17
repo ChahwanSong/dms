@@ -22,7 +22,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: migrate
-          image: pkg-01:5000/dms:d73
+          image: pkg-01:5000/dms:d74
           imagePullPolicy: IfNotPresent
           command: ["dms", "migrate"]
           envFrom:
