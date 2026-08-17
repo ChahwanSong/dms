@@ -54,6 +54,38 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 슬라이스 33: 로컬 소스 빌드 — **완료**(2026-08-18, d73·d74)
+
+포탈 빌드를 git clone 에서 **빌드 노드의 로컬 소스 경로**로 완전 전환했다(사용자
+결정: 병행 없이 대체). 소스 경로는 빌드 노드처럼 컨트롤 상태(`build_source_path`)가
+단일 진실이고, 빌드 파드가 그 경로를 **같은 절대경로에 ro hostPath** 마운트해 tar
+스냅샷으로 `/src` 를 만든다 — **커밋·push 안 한 작업 트리도 빌드된다**(SHA 는
+마운트의 .git 에서 읽고 미커밋 변경은 `-dirty` 접미, 워크트리 등 읽기 불가면
+`unknown` 으로 정직하게 접는다). (선택) 태그 지정(`builds.tag` 컬럼)으로 관례
+태그(dNN)를 붙이면 매니페스트-우선 배포가 포탈로 완결된다. 프리플라이트에 소스
+센티널 검사(`deploy/docker/Dockerfile.dms` → `build_source_unavailable`)를 앞세웠고
+egress 는 quay.io·registry-1.docker.io 둘로 줄었다. 사유 코드 4 추가·2 제거
+(invalid_git_ref/invalid_repo_url), `build_repo_url` 설정·`repo_host()` 제거.
+전제 인프라: 테스트베드 호스트 `/home/mason/dms-dev` 를 ro NFS 로 워커에 동일
+절대경로 마운트(testbed 저장소 `make storage`, 별도 세션 작업).
+
+실증(d73·d74):
+- **양성**: 포탈 제출 → 프리플라이트 OK → 본 체크아웃(`faca75e`, 클린)에서 빌드,
+  `commit_sha=faca75e…`(접미 없음)·태그 `t-local1` 레지스트리 push 확인.
+- **도그푸딩**: d74 는 **워크트리 경로를 소스로 포탈에서 태그 d74 로 빌드**해
+  배포 — 배포 후 dms-api/controller `live == manifest == d74`, **드리프트 배지
+  없는 최초의 포탈 완결 배포**. 워크트리라 SHA 는 unknown(설계된 정직 폴백).
+- **음성**: 오타 경로는 프로브의 hostPath 자동 생성이 **ro NFS 부모에서 mkdir
+  실패** → 프로브가 못 떠 180s 뒤 `build_preflight_timeout` 으로 접혔다(실측).
+  쓰기 가능한 부모(실 클러스터 로컬 디스크)에서만 빈 디렉토리가 생겨
+  `build_source_unavailable` 로 즉답한다 — 이 한계를 코드 주석과 타임아웃 사유
+  문구(소스 경로 확인 안내)에 남겼다.
+
+교훈: 게스트 마운트 경로를 호스트와 일치시킨 것(테스트베드 결정)이 워크트리
+`gitdir:` 절대경로 해석을 살릴 뻔했지만, 파드가 **지정 경로만** 마운트하므로
+워크트리 SHA 는 여전히 unknown 이다 — 저장소 루트를 지정하는 것이 SHA 기록의
+정상 경로다.
+
 ### ✅ dscan 1b93d54 정합 — **완료**(2026-08-14)
 
 신 dscan(chahwansong/mpifileutils `1b93d54`, top-K 제거·스트리밍 재작성·
