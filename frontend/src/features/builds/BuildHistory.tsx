@@ -27,6 +27,17 @@ const FILTERS: { key: string; label: string; match: (state: string) => boolean }
 // null(모름)을 "—"로 접는 자리가 여기다: 종단인데 finished_at 이 없으면(워처가
 // 종료 시각을 못 남긴 옛 행) 소요를 **지어내지 않는다** — 지금 시각을 끝으로
 // 쓰면 이미 끝난 빌드가 계속 자라는 거짓 숫자가 된다.
+// 커밋 표기: 로컬 소스 빌드(git_ref === "local")는 SHA 앞 7자(+-dirty 접미 보존),
+// 파싱 전(빌드 중)·실패는 "—". 옛 git clone 시절 행은 브랜치명이 남아 그대로 보인다.
+function commitText(b: Build): string {
+  if (b.git_ref !== "local") return b.git_ref;
+  const sha = b.commit_sha;
+  if (typeof sha !== "string" || sha === "" || sha === "unknown") return "—";
+  const dirty = sha.endsWith("-dirty");
+  const head = (dirty ? sha.slice(0, -"-dirty".length) : sha).slice(0, 7);
+  return dirty ? `${head}-dirty` : head;
+}
+
 function spentText(b: Build, now: number): string {
   const terminal = isTerminal(b.state);
   const ms = terminal ? spanMs(b.created_at, b.finished_at) : spanMs(b.created_at, now);
@@ -96,7 +107,7 @@ export function BuildHistory() {
                   빌드하기 화면의 확인 박스에 이미 있어 매 행 반복하면 밀도만 올린다.
                   열 8개는 e2e L2 의 셀 하한(minTableCells: 8)이기도 하다. */}
               <tr className="text-muted whitespace-nowrap">
-                <th className="py-2">시각</th><th>ref</th><th>이미지</th><th>상태</th>
+                <th className="py-2">시각</th><th>커밋</th><th>이미지</th><th>상태</th>
                 <th>사유</th><th>경과</th><th>태그</th><th>작업</th>
               </tr>
             </thead>
@@ -107,7 +118,11 @@ export function BuildHistory() {
               {visible.map((b) => (
                 <tr key={b.build_id} className="border-t border-black/5 whitespace-nowrap">
                   <td className="py-2">{b.created_at}</td>
-                  <td>{b.git_ref}</td>
+                  {/* 로컬 소스 빌드는 브랜치가 없다 -- 무엇을 빌드했는지는 커밋이
+                      말한다(빌드 중엔 아직 파싱 전이라 —). -dirty 접미는 미커밋
+                      변경 포함 빌드 표시라 자르지 않고 보존한다. 옛 git 시절 행은
+                      브랜치명을 그대로 보여 준다(전체 경로·SHA 는 상세에). */}
+                  <td>{commitText(b)}</td>
                   {/* 이미지 3종을 다 고르면 이 셀 하나가 220px 를 먹어 뒤쪽 태그·
                       작업 열을 화면 밖으로 밀어낸다 -- 사유와 같은 방식으로 자르고
                       전문은 title 에 둔다(상세에는 전체가 그대로 있다). */}

@@ -21,10 +21,10 @@ _MARKER = "DMS_COMMIT_SHA="
 _PF_MARKER = "DMS_PREFLIGHT_REASON="
 _PF_OK = "DMS_PREFLIGHT_OK"
 # 프로브 로그는 신뢰 입력이 아니다(설계 §4) -- 마커가 이 화이트리스트 밖이면
-# 코드를 지어내지 않고 build_preflight_failed 로 접는다. 세 코드는 프로브 스크립트
+# 코드를 지어내지 않고 build_preflight_failed 로 접는다. 네 코드는 프로브 스크립트
 # (build_manifests._PROBE_SCRIPT)·frontend/src/lib/reasonCodes.json 과 같은 철자다.
 _PF_REASONS = frozenset({"build_node_no_egress", "build_registry_unreachable",
-                         "build_node_disk_low"})
+                         "build_node_disk_low", "build_source_unavailable"})
 _TERMINAL = (ExecStatus.SUCCEEDED, ExecStatus.FAILED, ExecStatus.TIMED_OUT)
 
 

@@ -346,32 +346,36 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 `DMS_BUILD_*` 4개 키가 이 기능의 설정 전부이고, 빌드 노드 자체는 ConfigMap에 **없다**
 (아래 참고).
 
-**0) 빌드 노드를 먼저 지정한다.** 포탈 「컨트롤 상태」 화면(`PUT
-/api/admin/control-state`, `build_node_name`)에서 지정하며, `control_state`
-테이블에 저장된다 — ConfigMap이 아니다, 운영자가 포탈에서 언제든 바꾸는 값이라
-재적용마다 되돌아가면 안 되기 때문이다. 지정 전에 「빌드」 화면에서 제출하면 API가
-`422 build_node_not_set`으로 거절한다.
+**0) 빌드 노드와 소스 경로를 먼저 지정한다.** 포탈 「컨트롤 상태」 화면(`PUT
+/api/admin/control-state`, `build_node_name`·`build_source_path`)에서 지정하며,
+`control_state` 테이블에 저장된다 — ConfigMap이 아니다, 운영자가 포탈에서 언제든
+바꾸는 값이라 재적용마다 되돌아가면 안 되기 때문이다. 지정 전에 「빌드」 화면에서
+제출하면 API가 `422 build_node_not_set`/`build_source_not_set`으로 거절한다.
 
-**1) 빌드는 GitHub에 push된 커밋만 대상이다.** 빌드 파드는 빌드 노드 위에서
-`git clone --depth 1 --branch "$DMS_BUILD_REF" "$DMS_BUILD_REPO"`로 소스를 가져온다
-(`src/dms/build_manifests.py`). `--depth 1 --branch`는 브랜치/태그 **이름**만
-받는다 — 임의의 커밋 SHA는 clone 대상이 될 수 없다. 즉 로컬에만 있는 커밋(이 저장소를
-포함해서)은 빌드되지 않는다: 먼저 `git push origin <branch>`로 GitHub에 올려야 포탈
-빌드가 그 내용을 볼 수 있다. 「빌드」 상세 화면이 clone 대상 ref와 실제로 해석된 commit
-SHA를 함께 보여주는 이유가 이것이다 — 화면에 보이는 SHA가 기대한 커밋인지 항상 확인할 것.
+**1) 빌드는 빌드 노드의 로컬 소스에서 뜬다(슬라이스 33).** 빌드 파드가
+`build_source_path`(예: `/home/mason/dms-dev/dms`)를 hostPath 로 **읽기 전용**
+마운트하고, 시작 시점에 tar 스냅샷을 떠 `/src` 에서 빌드한다
+(`src/dms/build_manifests.py`). git 연동이 없다 — **커밋·push 하지 않은 작업
+트리도 그대로 빌드된다.** 커밋 SHA 는 마운트의 `.git` 에서 읽어 기록하고, 작업
+트리에 미커밋 변경이 있으면 `-dirty` 접미를 붙인다(워크트리 경로처럼 SHA 를 읽을
+수 없으면 `unknown`). 테스트베드에서 이 경로는 호스트 작업 트리의 NFS ro 마운트다
+(`testbed` 저장소 `make storage`) — 실 클러스터에서는 빌드 노드의 로컬 체크아웃을
+그대로 지정하면 된다.
 
-**2) 빌드마다 새 태그가 나온다.** 태그는 `b<build_id 앞 8자>`(`build_tag()`,
-`src/dms/repositories/builds.py`) — 커밋 SHA가 아니라 빌드 고유 id에서 뽑는다(같은
-커밋을 두 번 빌드하는 것도 정상 동작이다). `30-migrate-job.yaml`/`40-api.yaml`/
-`41-controller.yaml`/`50-agent-daemonset.yaml`이 전부 `imagePullPolicy:
-IfNotPresent`이므로, **같은 태그를 다시 push해도 클러스터는 절대 새로 집어오지
-않는다** — 이미 그 태그의 이미지를 가진 노드는 로컬 캐시를 그대로 쓴다. 빌드마다 새
-태그가 나오는 이유가 바로 이것이다.
+**2) 태그는 지정하거나 파생된다.** 「빌드」 폼의 (선택) 태그 입력에 관례 태그
+(예: `d73`)를 지정하면 그 태그로 push 되고 — 로컬에서 `deploy/k8s` 를 같은 태그로
+bump 해 두면 **동봉 매니페스트와 live 가 일치해 드리프트 배지 없는 배포가 포탈로
+완결된다** — 비우면 `b<build_id 앞 8자>`(`build_tag()`,
+`src/dms/repositories/builds.py`)가 파생된다. 주의: `30-migrate-job.yaml`/
+`40-api.yaml`/`41-controller.yaml`/`50-agent-daemonset.yaml`이 전부
+`imagePullPolicy: IfNotPresent`이므로, **이미 노드에 있는 태그를 다시 push 해도
+클러스터는 새로 집어오지 않는다** — 태그 지정은 이 함정을 알고 쓰는 기능이다
+(재빌드는 새 태그로).
 
 **3) 빌드 노드는 인터넷 egress가 필요하다.** 빌드가 hermetic하지 않다 — Buildah
 빌드(privileged 컨테이너) 안에서 npm install(포탈 프론트엔드), `dl.k8s.io`(kubectl 등
-설치), `github.com`(소스 clone), PyPI(파이썬 의존성), Debian bookworm 미러(apt
-패키지)에 접근한다. **빌드할 때만 운영자가 그 워커에 인터넷을 열면 된다** — 상시
+설치), PyPI(파이썬 의존성), Debian bookworm 미러(apt 패키지), docker.io(베이스
+이미지)에 접근한다. **빌드할 때만 운영자가 그 워커에 인터넷을 열면 된다** — 상시
 개방이 아니어도 된다.
 
 **필요한 egress 는 전부 빌드 파드 경로다.** 빌더 이미지는
@@ -381,17 +385,20 @@ CRI-O)는 인터넷 없이도 빌더를 받는다. 슬라이스 21 실증에서 
 pull 은 **노드 네트워크**로 일어나, 노드 egress 만 막으면 프로브는 통과하고 빌드
 파드가 `ImagePullBackOff` 로 앉는다. 미러 갱신은 `20-config.yaml` 주석의 3줄.
 
-**3b) 착수 전에 적합성 프리플라이트가 돈다(슬라이스 21).** 제출하면 빌드 노드 위에
-단발 프로브 파드(`dms-build-pf-<build_id[:12]>`, job image 라 인터넷 없이도 뜬다)가
-세 가지를 검사하고 실패하면 **수 초~수십 초 안에** 고유 사유 코드로 끝낸다 — 2시간
-generic 타임아웃을 기다리지 않는다:
-- egress(저장소 호스트·`quay.io`·`registry-1.docker.io` TCP 443) → `build_node_no_egress`
+**3b) 착수 전에 적합성 프리플라이트가 돈다(슬라이스 21, 슬라이스 33에서 소스 검사
+추가).** 제출하면 빌드 노드 위에 단발 프로브 파드(`dms-build-pf-<build_id[:12]>`,
+job image 라 인터넷 없이도 뜬다)가 네 가지를 검사하고 실패하면 **수 초~수십 초
+안에** 고유 사유 코드로 끝낸다 — 2시간 generic 타임아웃을 기다리지 않는다:
+- 소스 경로에 `deploy/docker/Dockerfile.dms` 존재 → `build_source_unavailable`
+  (경로 오타·마운트 소실을 빌드 전에 잡는다)
+- egress(`quay.io`·`registry-1.docker.io` TCP 443) → `build_node_no_egress`
   (로그에 실패 호스트 전부)
 - `pkg-01:5000` 도달 → `build_registry_unreachable`
 - 노드 fs 여유(`avail ≥ 0.15·total + 12GiB`) → `build_node_disk_low`(실측 바이트 기록)
 
-실증: 인터넷을 막은 상태로 제출하니 **45초** 만에
-`build_node_no_egress` + `unreachable_443=github.com,quay.io,registry-1.docker.io`.
+실증(슬라이스 21 당시, 소스가 git 이던 시절): 인터넷을 막은 상태로 제출하니 **45초**
+만에 `build_node_no_egress` + `unreachable_443=github.com,quay.io,registry-1.docker.io`.
+지금 검사 대상은 `quay.io`·`registry-1.docker.io` 둘이다(소스는 로컬이라 빠졌다).
 
 **3c) 빌드는 데이터 잡과 같은 워커에서 동시에 돈다.** 빌드 노드를 잡 풀에서 빼지
 않는다. 빌드 파드는 봉투(cpu 250m/1000m, mem 128Mi/1Gi, eph 10Gi/12Gi)와

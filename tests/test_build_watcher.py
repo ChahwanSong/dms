@@ -72,7 +72,7 @@ def repos(tmp_path):
 
 
 def _mk(repos):
-    return repos.builds.create(repo_url="u", git_ref="main", images=["dms"],
+    return repos.builds.create(source_path="/home/mason/dms-dev/dms", images=["dms"],
                                node_name="dms-w1", actor="a")
 
 
@@ -468,7 +468,7 @@ def test_failed_build_records_the_runner_s_specific_reason(db):
     # 워처가 실패 사유를 runner 에 물어 그대로 박제하는지. 물어보지 않고
     # build_failed 를 하드코딩하면 OOM·축출이 영원히 구분되지 않는다.
     repos = Repositories(db)
-    bid = repos.builds.create(repo_url="u", git_ref="main", images=["dms"],
+    bid = repos.builds.create(source_path="/home/mason/dms-dev/dms", images=["dms"],
                               node_name="dms-w1", actor="ops")
     runner = _Runner(status=ExecStatus.FAILED)
     runner.failure = "build_oom_killed"

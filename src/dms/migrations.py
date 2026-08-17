@@ -293,9 +293,18 @@ def _apply_migrations(db: Database) -> None:
             -- 않고, NOT NULL도 NULL이 아닌 DEFAULT 없이는 못 붙인다 -- 두 경로가 같은
             -- 스키마로 수렴해야 하므로 제약은 애플리케이션(create()의 MAX(seq)+1)에 둔다.
             seq INTEGER,
+            -- repo_url: 로컬 소스 빌드 전환(슬라이스 33) 후에는 **빌드 노드의 소스
+            -- 절대 경로**를 담는다(git_ref 는 상수 'local'). 컬럼명을 바꾸지 않는
+            -- 이유: 두 컬럼 다 NOT NULL 이라 rename 없이는 구형 DB 와 신형 DB 가
+            -- 같은 스키마로 수렴할 수 없다(SQLite ALTER 제약, 위 seq 주석과 동일).
+            -- 옛 행(git clone 시절)은 URL·브랜치를 그대로 보존한다.
             repo_url TEXT NOT NULL,
             git_ref TEXT NOT NULL,
             commit_sha TEXT,
+            -- tag: 운영자 지정 이미지 태그(NULL = 파생 b+빌드ID 앞 8자). 관례 태그
+            -- (dNN)를 지정하면 매니페스트-우선 배포가 포탈 빌드로 완결된다 --
+            -- 동봉 매니페스트와 live 태그가 일치해 드리프트 배지가 뜨지 않는다.
+            tag TEXT,
             images TEXT,
             node_name TEXT NOT NULL,
             state TEXT NOT NULL,
@@ -333,6 +342,11 @@ def _apply_migrations(db: Database) -> None:
             drain INTEGER NOT NULL DEFAULT 0,
             reason TEXT,
             build_node_name TEXT,
+            -- 빌드 소스 경로(슬라이스 33): 빌드 노드에서 DMS 저장소가 있는 절대
+            -- 경로. NULL = 미설정 -> 빌드 제출이 422(build_source_not_set)로 거절.
+            -- build_node_name 과 같은 이유로 여기(운영자가 포탈에서 바꾸는 값)에
+            -- 둔다 -- ConfigMap 에 두면 재적용마다 되돌아간다.
+            build_source_path TEXT,
             -- 아티팩트 base(슬라이스 18 설계 §2.1). NULL = 미설정 -> env
             -- (DMS_ARTIFACT_BASE_URI) 사용 -- 기존 배포는 동작이 바뀌지 않는다
             -- (시드 불필요, 하위호환). ConfigMap 에 두지 않는 근거는
@@ -518,6 +532,10 @@ def _ensure_columns(db):
         # planner 의 req["auth_method"] 가 라이브에서만 없다(슬라이스 14 교훈).
         ("requests", "auth_method", "TEXT"),
         ("control_state", "build_node_name", "TEXT"),
+        # 슬라이스 33 로컬 소스 빌드 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스
+        # 14 의 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
+        ("control_state", "build_source_path", "TEXT"),
+        ("builds", "tag", "TEXT"),
         # 슬라이스 18 아티팩트 base -- 기배포 DB 는 CREATE 를 다시 안 탄다(위
         # submit_wait_seconds 와 같은 이유: 양쪽에 넣지 않으면 라이브에서만 없다).
         ("control_state", "artifact_base_uri", "TEXT"),

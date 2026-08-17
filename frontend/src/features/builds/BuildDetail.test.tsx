@@ -12,7 +12,8 @@ afterEach(() => { server.resetHandlers(); vi.useRealTimers(); });
 afterAll(() => server.close());
 
 const buildRow = (over: Record<string, unknown> = {}) => ({
-  build_id: "b1", repo_url: "u", git_ref: "main", commit_sha: "deadbeefcafebabe",
+  build_id: "b1", source_path: "/home/mason/dms-dev/dms", git_ref: "local",
+  commit_sha: "deadbeefcafebabe",
   images: ["dms"], node_name: "dms-w1", state: "Succeeded", reason_code: null,
   tag: "b01234567", created_at: "2026-08-06T00:00:00Z", finished_at: "2026-08-06T00:10:00Z",
   ...over,
@@ -29,16 +30,37 @@ function renderPage() {
   );
 }
 
-test("저장소 URL을 보여준다", async () => {
-  // I3: repo_url을 화면에 안 보여주면 commit SHA만으로는 어느 저장소의 커밋인지
-  // 알 수 없다 -- admin이 임의 저장소를 제출해도 운영자가 알아챌 방법이 없다.
+test("소스 경로를 보여준다", async () => {
+  // I3: 소스 경로를 화면에 안 보여주면 commit SHA만으로는 어느 소스의 빌드인지
+  // 알 수 없다 -- admin이 임의 경로를 제출해도 운영자가 알아챌 방법이 없다.
   server.use(
     http.get("/api/admin/builds/b1", () =>
-      HttpResponse.json(buildRow({ state: "Succeeded", repo_url: "https://example/r.git" }))),
+      HttpResponse.json(buildRow({ state: "Succeeded" }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderPage();
+  expect(await screen.findByText("/home/mason/dms-dev/dms")).toBeInTheDocument();
+});
+
+test("옛 git 시절 행은 저장소 URL 과 브랜치를 그대로 보여준다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json(buildRow({ source_path: "https://example/r.git", git_ref: "main" }))),
     http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
   );
   renderPage();
   expect(await screen.findByText("https://example/r.git")).toBeInTheDocument();
+  expect(screen.getByText(/\(main\)/)).toBeInTheDocument();
+});
+
+test("미커밋 변경 포함 빌드는 -dirty 접미를 자르지 않고 보여준다", async () => {
+  server.use(
+    http.get("/api/admin/builds/b1", () =>
+      HttpResponse.json(buildRow({ commit_sha: "deadbeefcafebabe-dirty" }))),
+    http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
+  );
+  renderPage();
+  expect(await screen.findByText("deadbeefcafebabe-dirty")).toBeInTheDocument();
 });
 
 test("로그가 렌더된다", async () => {
@@ -160,7 +182,7 @@ test("목록에서 뺀 commit·노드·이미지·태그·시각을 상세가 �
     http.get("/api/admin/builds/b1/log", () => HttpResponse.json({ build_id: "b1", log: "ok\n" })),
   );
   renderPage();
-  expect(await screen.findByText("deadbeef")).toBeInTheDocument();     // commit(앞 8자)
+  expect(await screen.findByText("deadbeefcafebabe")).toBeInTheDocument(); // commit 전체
   expect(screen.getByText("dms-w1")).toBeInTheDocument();              // 노드
   expect(screen.getByText("dms")).toBeInTheDocument();                 // 이미지
   expect(screen.getByText("b01234567")).toBeInTheDocument();           // 태그

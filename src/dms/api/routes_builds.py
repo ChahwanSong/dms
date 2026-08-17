@@ -3,25 +3,41 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from ..build_manifests import repo_host
 from ..build_runner import BUILD_REF_PREFIX
 from ..domain import DomainValidationError
-from ..repositories.builds import BUILD_IMAGES, build_pod_name, build_tag
+from ..repositories.builds import (BUILD_IMAGES, build_pod_name, effective_tag)
 from .artifacts import tail_lines
 from .auth import Identity, audit_actor, require_admin
 from .routes_requests import reject_when_maintenance
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
-# git ref: 공백·제어문자·'..'·선행 '-' 를 막는다. 이 값은 파드 env 로 흘러가
-# `git clone --branch "$DMS_BUILD_REF"` 에 쓰인다 -- 셸 인젝션/옵션 인젝션 표면이다.
-_REF_RE = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+# 소스 경로(컨트롤 상태에 저장된 값)의 제출 시점 재검증. 저장 시점에 같은 검사를
+# 하지만(routes_control) DB 는 신뢰 경계다 -- 변조된 행이 hostPath 로 흘러가기 전에
+# fail-closed 로 다시 막는다. 절대경로·'..' 금지·제어문자 금지. 셸 인젝션 표면은
+# 아니다(파드 env 로만 나르고 스크립트가 항상 따옴표로 감싼다) -- 이 검사는
+# hostPath 대상의 모양 검증이다.
+SOURCE_PATH_RE = re.compile(r"/[^\x00-\x1f]{0,299}")
+
+
+def validate_source_path(path) -> str | None:
+    """정규화된 경로를 돌려주고, 모양이 틀리면 None. routes_control(저장)과
+    여기(제출)가 **같은 함수**를 쓴다 -- 두 곳이 다르게 검사하면 "저장은 됐는데
+    제출이 거절되는"(또는 그 반대) 창이 생긴다."""
+    path = (path or "").strip()
+    if not SOURCE_PATH_RE.fullmatch(path) or ".." in path:
+        return None
+    return path
+
+
+# 운영자 지정 이미지 태그: 컨테이너 태그 문법의 보수적 부분집합. 파생 태그(b+8hex)
+# 도 이 정규식 안이다.
+_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
 class BuildBody(BaseModel):
-    git_ref: str
     images: list[str]
-    repo_url: str | None = None
+    tag: str | None = None
 
 
 def _detail(row):
@@ -32,7 +48,11 @@ def _detail(row):
     # seq도 내부 정렬용 컬럼이라 밖으로 새면 안 된다.
     out.pop("log_text", None)
     out.pop("seq", None)
-    out["tag"] = build_tag(row["build_id"])
+    out["tag"] = effective_tag(row)
+    # 화면 이름은 source_path 다 -- 컬럼명(repo_url)은 스키마 수렴 제약의 산물이라
+    # (repositories.builds.create 주석) API 경계에서 이름을 바로잡는다. 옛 git
+    # 시절 행은 URL 이 그대로 실린다(git_ref 로 판별 가능).
+    out["source_path"] = row.get("repo_url")
     return out
 
 
@@ -41,25 +61,27 @@ def submit_build(body: BuildBody, request: Request,
                  identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
     repos = request.app.state.repos
-    node = (repos.control.control_state() or {}).get("build_node_name")
+    state = repos.control.control_state() or {}
+    node = state.get("build_node_name")
     if not node:
         raise HTTPException(status_code=422, detail="build_node_not_set")
+    # 소스 경로도 빌드 노드처럼 컨트롤 상태가 단일 진실이다 -- 미설정이면 파드를
+    # 만들기 전에 즉답한다(고칠 화면이 어디인지 사유 문구가 안내한다).
+    source_path = validate_source_path(state.get("build_source_path"))
+    if state.get("build_source_path") in (None, ""):
+        raise HTTPException(status_code=422, detail="build_source_not_set")
+    if source_path is None:
+        # 저장 시점 검증(routes_control)을 통과한 값이면 여기 올 수 없다 -- 도달은
+        # DB 직접 변조뿐이고, hostPath 로 흘러가기 전에 fail-closed 로 막는다.
+        raise HTTPException(status_code=422, detail="invalid_source_path")
     # build_build_pod가 images를 BUILD_IMAGES와 교집합으로 필터링하므로, 하나도
     # 안 겹치면 빌드 파드가 아무것도 하지 않고 조용히 성공한다 -- 여기서 반드시 막는다.
     if not body.images or any(i not in BUILD_IMAGES for i in body.images):
         raise HTTPException(status_code=422, detail="unknown_image")
-    ref = (body.git_ref or "").strip()
-    if not _REF_RE.fullmatch(ref) or ".." in ref or ref.startswith("-"):
-        raise HTTPException(status_code=422, detail="invalid_git_ref")
+    tag = (body.tag or "").strip() or None
+    if tag is not None and not _TAG_RE.fullmatch(tag):
+        raise HTTPException(status_code=422, detail="invalid_build_tag")
     settings = request.app.state.settings
-    repo_url = body.repo_url or settings.build_repo_url
-    # 슬라이스 21 §2.5 동기 ①: 호스트를 못 뽑으면 egress 프로브 대상을 만들 수
-    # 없다 -- 프로브 파드를 띄우기 전에 즉답한다. 프로브 매니페스트와 같은 파서
-    # (build_manifests.repo_host)를 쓴다: 두 곳이 다르게 파싱하면 "제출은
-    # 통과했는데 프로브를 못 만드는" 창이 생긴다. scp 형(git@host:path)도 여기서
-    # 걸린다 -- 명시 거절이지 지원 축소가 아니다(빌드 스크립트는 https 전제).
-    if repo_host(repo_url) is None:
-        raise HTTPException(status_code=422, detail="invalid_repo_url")
     # 슬라이스 21 §2.5 동기 ②: 빌드 노드 리포트가 stale 이면 노드 다운일 공산이
     # 크다 -- 비동기 프로브(최대 180s 창)까지 가지 않고 제출 시점에 즉답한다.
     # fresh 판정은 agents.list_nodes 의 그것(reported_at > now - stale) 재사용 --
@@ -81,8 +103,8 @@ def submit_build(body: BuildBody, request: Request,
         build_id = repos.builds.create(
             # 위에서 확정한 값 재사용 -- 검증한 값과 저장하는 값이 갈리면
             # "검증은 통과했는데 프로브를 못 만드는" 창이 생긴다.
-            repo_url=repo_url,
-            git_ref=ref, images=list(body.images), node_name=node,
+            source_path=source_path, tag=tag,
+            images=list(body.images), node_name=node,
             actor=audit_actor(identity))
     except DomainValidationError as e:
         # 위 사전 체크와 이 사이의 경합 창에서 다른 요청이 먼저 활성 빌드를

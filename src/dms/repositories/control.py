@@ -97,16 +97,20 @@ class ControlRepository:
         return self._db.query_one("SELECT * FROM control_state WHERE id = 1")
 
     def set_control_state(self, *, maintenance, drain, reason, actor,
-                          build_node_name=None):
+                          build_node_name=None, build_source_path=None):
+        # build_source_path 도 build_node_name 과 같은 무조건 UPDATE 다 -- 인자를
+        # 생략한 호출이 기존 값을 NULL 로 지우는 함정까지 같다(아래 set_artifact_base
+        # 주석 참고). 라우트가 항상 넘기는 한 잠복 상태이며, 새 호출자는 반드시
+        # 현재 값을 읽어 되넘겨야 한다.
         before = self.control_state()
         with self._db.transaction():
             self._db.execute(
                 """UPDATE control_state SET maintenance = :m, drain = :d, reason = :r,
-                       build_node_name = :bn,
+                       build_node_name = :bn, build_source_path = :bsp,
                        changed_by = :actor, changed_at = :now WHERE id = 1""",
                 {"m": 1 if maintenance else 0, "d": 1 if drain else 0,
-                 "r": reason, "bn": build_node_name, "actor": actor,
-                 "now": utc_now_iso()})
+                 "r": reason, "bn": build_node_name, "bsp": build_source_path,
+                 "actor": actor, "now": utc_now_iso()})
             self._audit("control_state", "set", "control_state", before,
                         self.control_state(), actor)
 

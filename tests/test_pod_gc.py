@@ -161,7 +161,7 @@ def test_run_once_returns_total_deleted_count(db):
 
 
 def _make_build(repos, *, node="dms-w1"):
-    return repos.builds.create(repo_url="u", git_ref="main", images=["dms"],
+    return repos.builds.create(source_path="/home/mason/dms-dev/dms", images=["dms"],
                                node_name=node, actor="a")
 
 

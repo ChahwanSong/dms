@@ -1,9 +1,26 @@
 """빌드 파드 매니페스트. 순수 함수 -- k8s 클라이언트에 접근하지 않는다."""
-from urllib.parse import urlsplit
+from .repositories.builds import BUILD_IMAGES, build_pod_name, build_probe_pod_name
 
-from .repositories.builds import (BUILD_IMAGES, build_pod_name,
-                                  build_probe_pod_name, build_tag)
-
+# 로컬 소스 빌드(슬라이스 33): git clone 대신 빌드 노드의 소스 경로(hostPath, ro)에서
+# tar 스냅샷을 떠 /src 를 만든다. 스냅샷을 뜨는 이유: 마운트에서 직접 빌드하면 빌드
+# 중 개발자가 파일을 고칠 때 컨텍스트가 중간에 갈라진다 -- 시작 시점 한 번의 복사로
+# 창을 수 초로 좁힌다(원자적이진 않다 -- 정직한 한계).
+#
+# tar 제외 목록은 전송량 최적화 + .claude 재귀 방지("워크트리가 저장소 안에 있다")일
+# 뿐이고, 이미지 내용의 밀폐성은 저장소의 .dockerignore 가 단일 게이트로 지킨다 --
+# 목록을 여기 늘려 두 번째 진실을 만들지 않는다.
+#
+# 커밋 SHA: 복사본이 아니라 **마운트에서** 읽는다(.git 은 복사하지 않으므로).
+# - safe.directory: 소스는 개발자(비 root) 소유인데 파드는 root 라 git 이
+#   dubious ownership 으로 거부한다. 이 설정은 보호 구성(global/system)에서만
+#   읽히므로 -c 로는 안 되고 --global 로 넣는다(컨테이너 안 HOME 이라 부작용 없음).
+# - GIT_OPTIONAL_LOCKS=0: ro 마운트라 index.lock 을 만들 수 없다 -- 선택적 잠금을
+#   끄면 status 가 인덱스 갱신 없이 동작한다.
+# - 워크트리 경로가 지정된 경우 .git 파일의 gitdir: 절대경로가 마운트 밖을 가리키면
+#   rev-parse 가 실패한다 -- unknown 으로 정직하게 접는다(지어내지 않는다, 설계 §4).
+# - dirty 판정 실패(예: 권한)와 "깨끗함"을 구분하지 않는 건 의도다: 접미사가 없는
+#   SHA 는 "그 커밋일 공산이 크다"이지 증명이 아니다.
+#
 # 레지스트리가 평문 HTTP 라 pull 도 insecure 로 열어야 한다: dms-agent 이미지가
 # `FROM pkg-01:5000/...` 를 하기 때문이다. push 만 --tls-verify=false 로는 부족하다.
 _SCRIPT = r"""
@@ -12,9 +29,20 @@ mkdir -p /etc/containers/registries.conf.d
 printf '[[registry]]\nlocation = "%s"\ninsecure = true\n' "$DMS_BUILD_REGISTRY" \
   > /etc/containers/registries.conf.d/dms-insecure.conf
 
-git clone --depth 1 --branch "$DMS_BUILD_REF" "$DMS_BUILD_REPO" /src
+git config --global --add safe.directory '*'
+sha=$(GIT_OPTIONAL_LOCKS=0 git -C "$DMS_BUILD_SRC" rev-parse HEAD 2>/dev/null || echo unknown)
+if [ "$sha" != unknown ] && \
+   [ -n "$(GIT_OPTIONAL_LOCKS=0 git -C "$DMS_BUILD_SRC" status --porcelain 2>/dev/null | head -1)" ]; then
+  sha="$sha-dirty"
+fi
+echo "DMS_COMMIT_SHA=$sha"
+
+mkdir -p /src
+(cd "$DMS_BUILD_SRC" && tar -cf - \
+  --exclude=./.git --exclude=./.claude --exclude=./legacy \
+  --exclude=./.venv --exclude=./frontend/node_modules --exclude=./frontend/dist \
+  .) | (cd /src && tar -xf -)
 cd /src
-echo "DMS_COMMIT_SHA=$(git rev-parse HEAD)"
 
 for img in $DMS_BUILD_IMAGES; do
   ref="$DMS_BUILD_REGISTRY/$img:$DMS_BUILD_TAG"
@@ -55,20 +83,6 @@ BUILD_SIZELIMIT_GIB = 10
 BUILD_DISK_MARGIN_GIB = 2
 
 
-def repo_host(repo_url: str) -> str | None:
-    """repo_url 에서 egress 프로브 대상 호스트를 뽑는다. 파싱 불가면 None.
-
-    라우트(제출 시 422 invalid_repo_url)와 프로브 매니페스트가 **같은 함수**를
-    쓴다 -- 두 곳이 다르게 파싱하면 "제출은 통과했는데 프로브를 못 만드는" 창이
-    생긴다. scp 형(git@host:path)은 urlsplit 이 호스트를 못 뽑아 None 이다 --
-    지원 확대가 아니라 명시 거절이 목적이다(테스트베드는 https 만 쓴다)."""
-    try:
-        return urlsplit(repo_url or "").hostname
-    except ValueError:
-        # 잘못된 IPv6 브래킷 등 urlsplit 자체가 던지는 경우 -- 파싱 불가와 동치.
-        return None
-
-
 # 프리플라이트 프로브 스크립트(§2.5). 실행 preflight 의 마커 관례를 그대로 따른다
 # (execution_manifests._preflight_script: 실패 = DMS_PREFLIGHT_REASON=<code> +
 # exit 1, 성공 = DMS_PREFLIGHT_OK) -- 워처가 같은 파서 계열로 읽는다. 대상
@@ -103,6 +117,15 @@ def fail(reason, detail):
     sys.exit(1)
 
 
+# 소스 검사를 맨 앞에 둔다(가장 싸고 가장 구체적인 실패). Dockerfile.dms 를
+# 센티널로 쓴다: 경로가 "존재하지만 DMS 저장소가 아닌" 오설정(예: 상위 디렉토리를
+# 지정)이 여기서 잡힌다 -- isdir 만 보면 buildah 깊숙한 곳에서 no such Dockerfile
+# 로 죽어 사유가 뭉개진다. 경로 자체가 노드에 없으면 hostPath 자동 생성(빈 디렉토리,
+# 프로브 매니페스트 주석 참고)으로 마운트는 되고 이 검사가 잡는다.
+src = os.environ["DMS_PF_SRC"]
+if not os.path.isfile(os.path.join(src, "deploy", "docker", "Dockerfile.dms")):
+    fail("build_source_unavailable", "src=" + src)
+
 egress_hosts = os.environ["DMS_PF_EGRESS_HOSTS"].split()
 unreachable = [h for h in egress_hosts if not reachable(h, 443)]
 if unreachable:
@@ -132,21 +155,17 @@ print("DMS_PREFLIGHT_OK")
 # 고정 egress 대상(§2.5-①): quay.io 는 빌더 이미지(kubelet 이 pull), docker.io
 # 베이스 이미지(node:20-bookworm-slim -- Dockerfile.dms:13, python:3.11-slim-bookworm
 # -- Dockerfile.dms:24 / Dockerfile.mpifileutils:81, debian:bookworm --
-# Dockerfile.mpifileutils:17)는 registry-1.docker.io 에서 온다.
+# Dockerfile.mpifileutils:17)는 registry-1.docker.io 에서 온다. 소스가 로컬이 된
+# 뒤에도 이 둘은 남는다 -- 베이스 이미지·npm/pip 다운로드는 여전히 인터넷이다.
 _PROBE_STATIC_HOSTS = ("quay.io", "registry-1.docker.io")
 
 
-def build_probe_pod(*, build_id, repo_url, node, namespace, registry, job_image,
+def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_image,
                     timeout_seconds) -> dict:
-    host = repo_host(repo_url)
-    if not host:
-        # 라우트가 제출 시점에 invalid_repo_url 로 거른다 -- 여기 도달은 검증 전에
-        # 만들어진 구형 Pending 행뿐이고, BuildRunner 가 submit_failed 로 접는다.
-        raise ValueError(f"cannot parse repo host from {repo_url!r}")
-    hosts = [host] + [h for h in _PROBE_STATIC_HOSTS if h != host]
     env = {
-        "DMS_PF_EGRESS_HOSTS": " ".join(hosts),
+        "DMS_PF_EGRESS_HOSTS": " ".join(_PROBE_STATIC_HOSTS),
         "DMS_PF_REGISTRY": registry,
+        "DMS_PF_SRC": source_path,
         # 빌드 파드 봉투와 같은 상수(§2.4) -- 프리플라이트가 통과한 노드에서
         # sizeLimit 이 반드시 담길 수 있어야 두 방어가 한 공식이 된다.
         "DMS_PF_NEED_BYTES": str((BUILD_SIZELIMIT_GIB + BUILD_DISK_MARGIN_GIB)
@@ -175,18 +194,28 @@ def build_probe_pod(*, build_id, repo_url, node, namespace, registry, job_image,
                 # 유의미한 압박을 만들면 검사가 검사 대상을 오염시킨다.
                 "resources": {"requests": {"cpu": "50m", "memory": "32Mi"},
                               "limits": {"cpu": "200m", "memory": "128Mi"}},
+                "volumeMounts": [{"name": "src", "mountPath": source_path,
+                                  "readOnly": True}],
             }],
+            # 프로브의 hostPath 는 type 을 **비운다**(검사 없음): 경로가 노드에
+            # 없으면 kubelet 이 빈 디렉토리를 만들어서라도 파드를 띄운다 -- 오타
+            # 경로가 "Dockerfile 없음"으로 명확히 잡히게(build_source_unavailable)
+            # 하기 위해서다. type: Directory 면 FailedMount 로 파드가 영영
+            # Pending 이라 180s 뒤 build_preflight_timeout 으로 뭉개진다. 대가는
+            # 오타 경로에 빈 디렉토리 하나가 남는 것 -- 사유의 선명함이 더 크다.
+            "volumes": [{"name": "src", "hostPath": {"path": source_path}}],
         },
     }
 
 
-def build_build_pod(*, build_id, repo_url, git_ref, images, node, namespace,
+def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
                     registry, builder_image, timeout_seconds) -> dict:
     ordered = [i for i in BUILD_IMAGES if i in set(images)]
+    # tag 는 호출자(BuildRunner)가 effective_tag() 로 확정해 넘긴다 -- 여기서
+    # 재계산하면 "화면의 태그"와 "push 태그"가 갈라지는 두 번째 진실이 생긴다.
     env = {
-        "DMS_BUILD_REPO": repo_url,
-        "DMS_BUILD_REF": git_ref,
-        "DMS_BUILD_TAG": build_tag(build_id),
+        "DMS_BUILD_SRC": source_path,
+        "DMS_BUILD_TAG": tag,
         "DMS_BUILD_REGISTRY": registry,
         "DMS_BUILD_IMAGES": " ".join(ordered),
     }
@@ -227,11 +256,24 @@ def build_build_pod(*, build_id, repo_url, git_ref, images, node, namespace,
                                "ephemeral-storage":
                                    f"{BUILD_SIZELIMIT_GIB + BUILD_DISK_MARGIN_GIB}Gi"},
                 },
-                "volumeMounts": [{"name": "containers", "mountPath": "/var/lib/containers"}],
+                "volumeMounts": [
+                    {"name": "containers", "mountPath": "/var/lib/containers"},
+                    # 소스는 **호스트와 같은 절대경로**에 ro 마운트한다: 경로가
+                    # 저장소 루트면 그 안의 .git 이 그대로 보이고, 워크트리 경로가
+                    # 지정된 경우에도 gitdir: 절대경로 해석이 성립할 여지를 남긴다
+                    # (마운트 밖을 가리키면 SHA 가 unknown 으로 접힌다 -- 스크립트
+                    # 주석). ro 는 경계다: 특권 파드가 개발자의 작업 트리를 쓰기로
+                    # 오염시키는 길을 볼륨 단에서 막는다.
+                    {"name": "src", "mountPath": source_path, "readOnly": True},
+                ],
             }],
             # emptyDir 이므로 kubelet ephemeral-storage 회계 안이다(§1-2). 수치
-            # 근거는 위 BUILD_SIZELIMIT_GIB 주석.
+            # 근거는 위 BUILD_SIZELIMIT_GIB 주석. src 의 type: Directory 는
+            # 프로브와 다른 선택이다 -- 프로브가 존재를 이미 검증했으므로 여기서
+            # 없으면 그건 오설정이 아니라 사고(마운트 소실)라 시끄럽게 죽는 게 맞다.
             "volumes": [{"name": "containers",
-                        "emptyDir": {"sizeLimit": f"{BUILD_SIZELIMIT_GIB}Gi"}}],
+                         "emptyDir": {"sizeLimit": f"{BUILD_SIZELIMIT_GIB}Gi"}},
+                        {"name": "src",
+                         "hostPath": {"path": source_path, "type": "Directory"}}],
         },
     }

@@ -31,8 +31,11 @@ class _FakeK8s:
         return self.log
 
 
-BUILD = {"build_id": "0123456789abcdef0123456789abcdef", "repo_url": "u",
-         "git_ref": "main", "images": ["dms"], "node_name": "dms-w1"}
+# repo_url 컬럼이 소스 경로를 담는다(repositories.builds.create 주석). tag 없음 =
+# 파생 태그(effective_tag)가 쓰인다.
+BUILD = {"build_id": "0123456789abcdef0123456789abcdef",
+         "repo_url": "/home/mason/dms-dev/dms",
+         "git_ref": "local", "images": ["dms"], "node_name": "dms-w1"}
 
 
 def _runner(k8s, timeout_seconds=7200):
@@ -192,7 +195,7 @@ def _pf_runner(k8s):
                        preflight_timeout_seconds=180)
 
 
-PF_BUILD = {**BUILD, "repo_url": "https://github.com/ChahwanSong/dms.git"}
+PF_BUILD = dict(BUILD)
 
 
 def test_submit_preflight_creates_probe_pod_under_the_buildpod_ref():
@@ -220,12 +223,11 @@ def test_submit_preflight_is_idempotent_when_probe_already_exists():
     assert ref2 == ref1
 
 
-def test_submit_preflight_unparseable_repo_url_is_submit_failed():
-    # 라우트가 제출 시점에 invalid_repo_url 로 거르지만(§2.5 동기), 검증 전에
-    # 만들어진 구형 Pending 행이 남아 있을 수 있다 -- 원시 ValueError 가 아니라
+def test_submit_preflight_manifest_failure_is_submit_failed():
+    # 매니페스트 생성 실패(예: 구형 행의 결측 키)는 원시 예외가 아니라
     # ExecutionError(submit_failed)로 나와야 워처가 Failed 로 기록한다.
     with pytest.raises(ExecutionError) as e:
-        _pf_runner(_FakeK8s()).submit_preflight({**BUILD, "repo_url": "not a url"})
+        _pf_runner(_FakeK8s()).submit_preflight({"build_id": BUILD["build_id"]})
     assert e.value.reason_code == "submit_failed"
     assert e.value.detail.startswith("preflight:")   # 빌드 파드 제출 실패와 구분
 

@@ -27,7 +27,9 @@ def test_build_settings_defaults():
     s = Settings.from_env(VALID)
     assert s.build_registry == "pkg-01:5000"
     assert s.build_builder_image == "quay.io/buildah/stable:latest"
-    assert s.build_repo_url == "https://github.com/ChahwanSong/dms.git"
+    # build_repo_url 은 로컬 소스 빌드 전환(슬라이스 33)으로 제거됐다 -- 소스는
+    # 이제 control_state.build_source_path(포탈 설정)가 단일 진실이다.
+    assert not hasattr(s, "build_repo_url")
     assert s.build_watcher_interval_seconds == 15
     assert s.build_timeout_seconds == 7200
 
@@ -39,12 +41,10 @@ def test_build_settings_overrides_from_env():
     s = Settings.from_env({**VALID,
         "DMS_BUILD_REGISTRY": "reg.example:5000",
         "DMS_BUILD_BUILDER_IMAGE": "quay.io/buildah/stable:v2",
-        "DMS_BUILD_REPO_URL": "https://example.com/other.git",
         "DMS_BUILD_WATCHER_INTERVAL_SECONDS": "5",
         "DMS_BUILD_TIMEOUT_SECONDS": "600"})
     assert s.build_registry == "reg.example:5000"
     assert s.build_builder_image == "quay.io/buildah/stable:v2"
-    assert s.build_repo_url == "https://example.com/other.git"
     assert s.build_watcher_interval_seconds == 5
     assert s.build_timeout_seconds == 600
 

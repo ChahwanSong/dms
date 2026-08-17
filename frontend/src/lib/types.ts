@@ -184,6 +184,8 @@ export interface ControlState {
   drain: number;
   reason: string | null;
   build_node_name: string | null;
+  // 빌드 노드에서 DMS 저장소가 있는 절대 경로(로컬 소스 빌드). null = 미설정.
+  build_source_path: string | null;
   changed_by: string | null;
   changed_at: string | null;
 }
@@ -209,7 +211,10 @@ export interface ArtifactBaseInfo {
 }
 
 export interface Build {
-  build_id: string; repo_url: string; git_ref: string; commit_sha: string | null;
+  // source_path: 로컬 소스 빌드(슬라이스 33)의 소스 절대 경로. 옛 git 시절 행은
+  // 저장소 URL 이 그대로 실린다(git_ref === "local" 로 판별). commit_sha 는
+  // "-dirty" 접미가 붙을 수 있다(미커밋 변경이 있는 트리에서 빌드).
+  build_id: string; source_path: string; git_ref: string; commit_sha: string | null;
   images: string[]; node_name: string; state: string; reason_code: string | null;
   tag: string; created_at: string; finished_at: string | null;
 }

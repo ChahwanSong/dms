@@ -71,7 +71,9 @@ export const useBuildLog = (id: string, active: boolean) =>
     refetchInterval: active ? 3000 : false,
   });
 
-export interface SubmitBuildBody { git_ref: string; images: string[]; }
+// 소스는 본문에 없다 -- 빌드 노드처럼 컨트롤 상태(build_source_path)가 단일
+// 진실이다. tag 는 선택: null 이면 서버가 b+빌드ID 앞 8자를 파생한다.
+export interface SubmitBuildBody { images: string[]; tag: string | null; }
 
 export const useSubmitBuild = () => {
   const qc = useQueryClient();

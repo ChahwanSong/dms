@@ -15,7 +15,7 @@ const server = setupServer(
 );
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
-const CS = { maintenance: 1, drain: 0, reason: "점검", build_node_name: "dms-w1", changed_by: "ops", changed_at: "2026-08-05T00:00:00Z" };
+const CS = { maintenance: 1, drain: 0, reason: "점검", build_node_name: "dms-w1", build_source_path: "/home/mason/dms-dev/dms", changed_by: "ops", changed_at: "2026-08-05T00:00:00Z" };
 
 function wrap() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -43,7 +43,9 @@ test("toggling drain and saving sends the correct PUT body", async () => {
   await screen.findByLabelText("유지보수");
   await userEvent.click(screen.getByLabelText("드레인"));
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
-  expect(body).toEqual({ maintenance: true, drain: true, reason: "점검", build_node_name: "dms-w1" });
+  expect(body).toEqual({ maintenance: true, drain: true, reason: "점검",
+                         build_node_name: "dms-w1",
+                         build_source_path: "/home/mason/dms-dev/dms" });
 });
 
 test("빌드 노드는 자유 입력이 아니라 보고된 노드 중에서 고른다(select)", async () => {

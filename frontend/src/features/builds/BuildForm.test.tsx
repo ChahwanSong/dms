@@ -7,8 +7,10 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { BuildForm } from "./BuildForm";
 
+const SRC = "/home/mason/dms-dev/dms";
+
 const BUILD = {
-  build_id: "0123456789abcdef0123456789abcdef", repo_url: "u", git_ref: "main",
+  build_id: "0123456789abcdef0123456789abcdef", source_path: SRC, git_ref: "local",
   commit_sha: "deadbeef", images: ["dms"], node_name: "dms-w1",
   state: "Succeeded", reason_code: null, tag: "b01234567",
   created_at: "2026-08-06T00:00:00Z", finished_at: "2026-08-06T00:10:00Z",
@@ -17,7 +19,8 @@ const BUILD = {
 const server = setupServer(
   http.get("/api/admin/control-state", () =>
     HttpResponse.json({ maintenance: 0, drain: 0, reason: null,
-                        build_node_name: "dms-w1", changed_by: "ops",
+                        build_node_name: "dms-w1", build_source_path: SRC,
+                        changed_by: "ops",
                         changed_at: "2026-08-06T00:00:00Z" })),
   http.get("/api/admin/builds", () => HttpResponse.json([BUILD])),
 );
@@ -48,9 +51,20 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
   it("빌드 노드가 없으면 제출을 막고 안내한다", async () => {
     server.use(http.get("/api/admin/control-state", () =>
       HttpResponse.json({ maintenance: 0, drain: 0, reason: null,
-                          build_node_name: null, changed_by: null, changed_at: null })));
+                          build_node_name: null, build_source_path: SRC,
+                          changed_by: null, changed_at: null })));
     wrap();
     expect(await screen.findByText(/빌드 노드가 지정되지 않았습니다/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "빌드 시작" })).toBeDisabled();
+  });
+
+  it("소스 경로가 없으면 제출을 막고 컨트롤 상태로 안내한다", async () => {
+    server.use(http.get("/api/admin/control-state", () =>
+      HttpResponse.json({ maintenance: 0, drain: 0, reason: null,
+                          build_node_name: "dms-w1", build_source_path: null,
+                          changed_by: null, changed_at: null })));
+    wrap();
+    expect(await screen.findByText(/빌드 소스 경로가 지정되지 않았습니다/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "빌드 시작" })).toBeDisabled();
   });
 
@@ -70,7 +84,7 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
     wrap();
     await ready();
     await userEvent.click(screen.getByRole("button", { name: "빌드 시작" }));
-    await waitFor(() => expect(posted).toEqual({ git_ref: "main", images: ["dms"] }));
+    await waitFor(() => expect(posted).toEqual({ images: ["dms"], tag: null }));
   });
 
   // 목록이 다른 화면으로 나간 뒤의 핵심 계약: 제출 직후 알고 싶은 것은 "지금 어떻게
@@ -146,37 +160,39 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
     // control-state 가 도착하기 전에는 미설정 안내가 서 있다 -- 노드 이름을 기다려야
     // 확인 박스의 "설정됨" 경로를 실제로 지나간다.
     expect(await ready()).toBeInTheDocument();
-    expect(screen.getByText(/빌드 노드/)).toBeInTheDocument();
+    // "빌드 노드" 문구는 안내 카드에도 나온다 -- 확인 박스의 것 하나만 고집하지
+    // 않고 존재만 단언한다(노드 이름 자체는 ready() 가 이미 확인했다).
+    expect(screen.getAllByText(/빌드 노드/).length).toBeGreaterThan(0);
   });
 
   it("빌드 노드가 없으면 컨트롤 상태 화면으로 가는 링크를 준다", async () => {
     server.use(http.get("/api/admin/control-state", () =>
       HttpResponse.json({ maintenance: 0, drain: 0, reason: null,
-                          build_node_name: null, changed_by: null, changed_at: null })));
+                          build_node_name: null, build_source_path: SRC,
+                          changed_by: null, changed_at: null })));
     wrap();
     const link = await screen.findByRole("link", { name: /컨트롤 상태/ });
     expect(link).toHaveAttribute("href", "/admin/control");
   });
 
-  it("확인 박스가 커밋 SHA 불가를 알린다", async () => {
+  it("확인 박스가 로컬 소스 경로와 미커밋 포함을 알린다", async () => {
     wrap();
-    expect(await screen.findByText(/커밋 SHA 불가/)).toBeInTheDocument();
+    await ready();
+    expect(screen.getByText(SRC)).toBeInTheDocument();
+    expect(screen.getByText(/미커밋 변경 포함/)).toBeInTheDocument();
   });
 
-  it("최근 빌드에서 쓴 ref 를 빠른 선택 버튼으로 준다(최대 3개, 중복 제거)", async () => {
-    server.use(http.get("/api/admin/builds", () => HttpResponse.json([
-      { ...BUILD, build_id: "1".repeat(32), tag: "b11111111", git_ref: "feat/x" },
-      { ...BUILD, build_id: "2".repeat(32), tag: "b22222222", git_ref: "main" },
-      { ...BUILD, build_id: "3".repeat(32), tag: "b33333333", git_ref: "feat/x" },
-      { ...BUILD, build_id: "4".repeat(32), tag: "b44444444", git_ref: "v1.2.3" },
-      { ...BUILD, build_id: "5".repeat(32), tag: "b55555555", git_ref: "old" },
-    ])));
+  it("태그를 지정하면 본문에 실려 간다", async () => {
+    let posted: unknown = null;
+    server.use(http.post("/api/admin/builds", async ({ request }) => {
+      posted = await request.json();
+      return HttpResponse.json({ build_id: "x", state: "Pending" }, { status: 202 });
+    }));
     wrap();
-    // 목록이 없는 화면이라 "행이 그려졌다"로 기다릴 수 없다 -- 버튼 자체를 기다린다.
-    await screen.findByRole("button", { name: "v1.2.3" });
-    expect(screen.queryByRole("button", { name: "old" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "v1.2.3" }));
-    expect(screen.getByLabelText("git ref")).toHaveValue("v1.2.3");
+    await ready();
+    await userEvent.type(screen.getByLabelText("태그"), "d73");
+    await userEvent.click(screen.getByRole("button", { name: "빌드 시작" }));
+    await waitFor(() => expect(posted).toEqual({ images: ["dms"], tag: "d73" }));
   });
 
   it("프리플라이트가 먼저 돈다는 것을 폼에서 알린다", async () => {
@@ -203,11 +219,10 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
   it("취소는 화면을 떠나지 않고 폼을 기본값으로 되돌린다", async () => {
     wrap();
     await ready();
-    await userEvent.clear(screen.getByLabelText("git ref"));
-    await userEvent.type(screen.getByLabelText("git ref"), "feat/x");
+    await userEvent.type(screen.getByLabelText("태그"), "d73");
     await userEvent.click(screen.getByLabelText("dms-agent"));
     await userEvent.click(screen.getByRole("button", { name: "취소" }));
-    expect(screen.getByLabelText("git ref")).toHaveValue("main");
+    expect(screen.getByLabelText("태그")).toHaveValue("");
     expect(screen.getByLabelText("dms-agent")).not.toBeChecked();
     expect(screen.getByLabelText("dms")).toBeChecked();
   });

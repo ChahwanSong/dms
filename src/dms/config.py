@@ -146,7 +146,6 @@ class Settings:
     pod_gc_interval_seconds: int = 600
     build_registry: str = "pkg-01:5000"
     build_builder_image: str = "quay.io/buildah/stable:latest"
-    build_repo_url: str = "https://github.com/ChahwanSong/dms.git"
     build_watcher_interval_seconds: int = 15
     build_timeout_seconds: int = 7200
     build_preflight_timeout_seconds: int = 180
@@ -218,8 +217,6 @@ class Settings:
             build_registry=environ.get("DMS_BUILD_REGISTRY", "pkg-01:5000"),
             build_builder_image=environ.get(
                 "DMS_BUILD_BUILDER_IMAGE", "quay.io/buildah/stable:latest"),
-            build_repo_url=environ.get(
-                "DMS_BUILD_REPO_URL", "https://github.com/ChahwanSong/dms.git"),
         )
 
 

@@ -6,6 +6,7 @@ export const useControlState = () =>
 export interface ControlStateBody {
   maintenance: boolean; drain: boolean; reason: string | null;
   build_node_name: string | null;
+  build_source_path: string | null;
 }
 export const useSetControlState = () => {
   const qc = useQueryClient();

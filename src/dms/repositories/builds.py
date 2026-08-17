@@ -11,10 +11,19 @@ LOG_TEXT_MAX = 64 * 1024
 
 
 def build_tag(build_id: str) -> str:
-    """빌드마다 유일한 태그. 매니페스트가 전부 imagePullPolicy: IfNotPresent 라
-    같은 태그를 다시 push 하면 클러스터가 영영 집어오지 않는다 -- 그래서 커밋 SHA 가
-    아니라 빌드 고유 id 에서 뽑는다(같은 커밋을 두 번 빌드하는 건 정상 행위다)."""
+    """빌드마다 유일한 **기본** 태그(builds.tag 가 NULL 일 때의 파생값). 매니페스트가
+    전부 imagePullPolicy: IfNotPresent 라 같은 태그를 다시 push 하면 클러스터가 영영
+    집어오지 않는다 -- 그래서 커밋 SHA 가 아니라 빌드 고유 id 에서 뽑는다(같은 커밋을
+    두 번 빌드하는 건 정상 행위다). 운영자가 태그를 지정하면(예: d73) 그 위험을 알고
+    쓰는 것이다 -- 최종 태그는 effective_tag() 가 정한다."""
     return "b" + build_id[:8]
+
+
+def effective_tag(row) -> str:
+    """빌드 행의 최종 이미지 태그: 운영자 지정(tag 컬럼)이 있으면 그것, 없으면 파생.
+    러너(파드 env)와 API(_detail 표시)가 **같은 함수**를 쓴다 -- 두 곳이 각자
+    계산하면 화면의 태그와 실제 push 태그가 갈라지는 창이 생긴다."""
+    return row.get("tag") or build_tag(row["build_id"])
 
 
 def build_pod_name(build_id: str) -> str:
@@ -51,13 +60,17 @@ class BuildsRepository:
              "a": dump_json(after) if after is not None else None,
              "at": utc_now_iso()})
 
-    def create(self, *, repo_url, git_ref, images, node_name, actor) -> str:
+    def create(self, *, source_path, images, node_name, actor, tag=None) -> str:
+        """로컬 소스 빌드(슬라이스 33). source_path 는 repo_url 컬럼에 담긴다 --
+        컬럼 유지 이유는 migrations 의 builds CREATE 주석 참고(NOT NULL 이라 rename
+        없이 신구 DB 가 수렴 불가). git_ref 는 상수 'local'(옛 행과의 판별자).
+        tag=None 이면 파생 태그(build_tag)가 쓰인다."""
         build_id = uuid.uuid4().hex
         now = utc_now_iso()
-        # repo_url을 감사에 남긴다 -- 이게 빠지면 admin이 임의 저장소로 이미지를
-        # 만들어도(예: repo_url="https://evil/x.git") 감사 기록에 "어느 저장소의"
-        # 커밋인지가 안 남는다. commit SHA만으로는 저장소를 특정할 수 없다.
-        after = {"build_id": build_id, "repo_url": repo_url, "git_ref": git_ref,
+        # source_path 를 감사에 남긴다 -- 이게 빠지면 admin이 임의 경로로 이미지를
+        # 만들어도(예: 변조된 트리) 감사 기록에 "어느 소스의" 빌드인지가 안 남는다.
+        # commit SHA만으로는 소스 위치를 특정할 수 없다.
+        after = {"build_id": build_id, "source_path": source_path, "tag": tag,
                  "images": list(images), "node_name": node_name}
         with self._db.transaction():
             # "동시에 활성 빌드 하나만" 불변식의 진짜 가드는 여기다 -- active() 존재
@@ -78,10 +91,10 @@ class BuildsRepository:
             row = self._db.query_one("SELECT COALESCE(MAX(seq), 0) AS m FROM builds")
             seq = row["m"] + 1
             self._db.execute(
-                """INSERT INTO builds (build_id, seq, repo_url, git_ref, images, node_name,
-                       state, created_at)
-                   VALUES (:id, :seq, :url, :ref, :imgs, :node, 'Pending', :now)""",
-                {"id": build_id, "seq": seq, "url": repo_url, "ref": git_ref,
+                """INSERT INTO builds (build_id, seq, repo_url, git_ref, tag, images,
+                       node_name, state, created_at)
+                   VALUES (:id, :seq, :url, 'local', :tag, :imgs, :node, 'Pending', :now)""",
+                {"id": build_id, "seq": seq, "url": source_path, "tag": tag,
                  "imgs": dump_json(list(images)), "node": node_name, "now": now})
             self._audit("create", build_id, None, after, actor)
         return build_id
@@ -96,7 +109,7 @@ class BuildsRepository:
         # 로그는 전용 /log 엔드포인트가 따로 있어 목록에서 쓰이지 않는다. seq도
         # 내부 정렬용 컬럼이라 함께 뺀다(정렬 자체는 SELECT 목록에 없어도 동작한다).
         rows = self._db.query(
-            """SELECT build_id, repo_url, git_ref, commit_sha, images, node_name,
+            """SELECT build_id, repo_url, git_ref, commit_sha, tag, images, node_name,
                       state, reason_code, created_at, finished_at
                FROM builds ORDER BY seq DESC LIMIT :n""",
             {"n": limit})

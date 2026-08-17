@@ -1,13 +1,14 @@
 import re
 
-from dms.build_manifests import build_build_pod, build_probe_pod, repo_host
+from dms.build_manifests import build_build_pod, build_probe_pod
 
 BID = "0123456789abcdef0123456789abcdef"
+SRC = "/home/mason/dms-dev/dms"
 
 
-def _pod(images=("dms",), timeout_seconds=7200):
-    return build_build_pod(build_id=BID, repo_url="https://example/r.git",
-                           git_ref="main", images=list(images), node="dms-w1",
+def _pod(images=("dms",), timeout_seconds=7200, tag="b01234567", source_path=SRC):
+    return build_build_pod(build_id=BID, source_path=source_path, tag=tag,
+                           images=list(images), node="dms-w1",
                            namespace="dms", registry="pkg-01:5000",
                            builder_image="quay.io/buildah/stable:latest",
                            timeout_seconds=timeout_seconds)
@@ -34,14 +35,59 @@ def test_container_is_privileged_builder_with_container_storage_volume():
 def test_values_travel_as_env_not_interpolated_into_the_script():
     c = _pod()["spec"]["containers"][0]
     env = {e["name"]: e["value"] for e in c["env"]}
-    assert env["DMS_BUILD_REPO"] == "https://example/r.git"
-    assert env["DMS_BUILD_REF"] == "main"
+    assert env["DMS_BUILD_SRC"] == SRC
     assert env["DMS_BUILD_TAG"] == "b01234567"
     assert env["DMS_BUILD_REGISTRY"] == "pkg-01:5000"
     script = c["command"][2]
     # 값이 스크립트 본문에 박혀 있으면 주입 표면이 된다
-    assert "https://example/r.git" not in script
+    assert SRC not in script
     assert "b01234567" not in script
+
+
+def test_tag_is_taken_from_the_caller_not_rederived():
+    # 러너가 effective_tag() 로 확정해 넘긴다 -- 운영자 지정 태그(d73)가 그대로
+    # 흘러야 화면의 태그와 push 태그가 갈라지지 않는다.
+    c = _pod(tag="d73")["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in c["env"]}
+    assert env["DMS_BUILD_TAG"] == "d73"
+
+
+def test_source_is_mounted_readonly_at_the_same_absolute_path():
+    # 같은 절대경로: 경로가 저장소 루트면 .git 이 그대로 보이고, 워크트리의
+    # gitdir: 절대경로 해석도 성립할 여지가 남는다. ro 는 경계다 -- 특권 파드가
+    # 개발자의 작업 트리를 쓰기로 오염시키는 길을 볼륨 단에서 막는다.
+    pod = _pod()
+    mounts = pod["spec"]["containers"][0]["volumeMounts"]
+    src_mount = next(m for m in mounts if m["name"] == "src")
+    assert src_mount["mountPath"] == SRC
+    assert src_mount["readOnly"] is True
+    src_vol = next(v for v in pod["spec"]["volumes"] if v["name"] == "src")
+    # 빌드 파드는 type: Directory 다 -- 프로브가 존재를 이미 검증했으므로 여기서
+    # 없으면 오설정이 아니라 사고(마운트 소실)라 시끄럽게 죽는 게 맞다.
+    assert src_vol["hostPath"] == {"path": SRC, "type": "Directory"}
+
+
+def test_script_snapshots_the_source_instead_of_cloning():
+    script = _pod()["spec"]["containers"][0]["command"][2]
+    assert "git clone" not in script                  # 로컬 소스 빌드 -- git 미연동
+    assert "tar -cf -" in script and "tar -xf -" in script
+    # 전송량 + .claude 재귀(워크트리가 저장소 안에 있다) 방지 제외 목록. 이미지
+    # 내용의 밀폐성은 저장소 .dockerignore 가 지킨다 -- 여기 목록은 최소만.
+    for excl in ("./.git", "./.claude", "./legacy",
+                 "./.venv", "./frontend/node_modules"):
+        assert f"--exclude={excl}" in script, excl
+
+
+def test_script_reads_sha_from_the_mount_with_root_safe_git():
+    script = _pod()["spec"]["containers"][0]["command"][2]
+    # 소스는 개발자(비 root) 소유 + ro 마운트다 -- safe.directory 없이는 dubious
+    # ownership 거절, GIT_OPTIONAL_LOCKS=0 없이는 index.lock 생성 실패가 난다.
+    assert "safe.directory" in script
+    assert "GIT_OPTIONAL_LOCKS=0" in script
+    # 미커밋 변경 포함 빌드는 -dirty 로 정직하게 표시한다. rev-parse 실패(워크트리
+    # gitdir 이 마운트 밖)는 unknown 으로 접는다 -- 지어내지 않는다.
+    assert "-dirty" in script
+    assert "unknown" in script
 
 
 def test_images_are_forced_into_dependency_order():
@@ -140,8 +186,8 @@ def test_scheduling_shape_is_unchanged_nodeselector_and_default_scheduler():
 
 # ---- 슬라이스 21 §2.5: 적합성 프로브 파드 (매니페스트는 순수 함수) ----
 
-def _probe(repo_url="https://github.com/ChahwanSong/dms.git", timeout_seconds=180):
-    return build_probe_pod(build_id=BID, repo_url=repo_url, node="dms-w1",
+def _probe(source_path=SRC, timeout_seconds=180):
+    return build_probe_pod(build_id=BID, source_path=source_path, node="dms-w1",
                            namespace="dms", registry="pkg-01:5000",
                            job_image="pkg-01:5000/dms-mpifileutils:d27",
                            timeout_seconds=timeout_seconds)
@@ -162,7 +208,8 @@ def test_probe_identity_small_envelope_and_class():
     # job_image(캐시 존재·pull 은 pkg-01 만 필요)여야 프로브 기동 자체가 인터넷과
     # 무관하다 -- builder image(quay.io)면 위음성/위양성이 난다(설계 §2.5).
     assert c["image"] == "pkg-01:5000/dms-mpifileutils:d27"
-    # 작은 봉투: 소켓 3~4개와 statvfs 뿐 -- 프로브가 노드에 압박을 만들면 안 된다.
+    # 작은 봉투: 소켓 3~4개와 statvfs·isfile 뿐 -- 프로브가 노드에 압박을 만들면
+    # 안 된다.
     assert c["resources"] == {"requests": {"cpu": "50m", "memory": "32Mi"},
                               "limits": {"cpu": "200m", "memory": "128Mi"}}
 
@@ -170,15 +217,16 @@ def test_probe_identity_small_envelope_and_class():
 def test_probe_targets_travel_as_env_not_in_the_script():
     c = _probe()["spec"]["containers"][0]
     env = {e["name"]: e["value"] for e in c["env"]}
-    # repo 호스트(파싱) + quay.io(빌더 이미지) + registry-1.docker.io(베이스 이미지
-    # -- Dockerfile.dms:13,24 / Dockerfile.mpifileutils:17 이 전부 docker.io).
-    assert env["DMS_PF_EGRESS_HOSTS"] == "github.com quay.io registry-1.docker.io"
+    # 소스가 로컬이 된 뒤에도 quay.io(빌더 이미지)·registry-1.docker.io(베이스
+    # 이미지 -- Dockerfile.dms:13,24 / Dockerfile.mpifileutils:17)는 남는다.
+    assert env["DMS_PF_EGRESS_HOSTS"] == "quay.io registry-1.docker.io"
     assert env["DMS_PF_REGISTRY"] == "pkg-01:5000"
+    assert env["DMS_PF_SRC"] == SRC
     assert env["DMS_PF_NEED_BYTES"] == str(12 * 1024 ** 3)   # sizeLimit 10Gi + 마진 2Gi
     assert c["command"][:2] == ["python3", "-c"]
     script = c["command"][2]
-    # 값이 스크립트 본문에 박히면 repo_url 이 코드가 된다(빌드 파드와 같은 원칙).
-    assert "github.com" not in script
+    # 값이 스크립트 본문에 박히면 경로가 코드가 된다(빌드 파드와 같은 원칙).
+    assert SRC not in script
     assert "pkg-01:5000" not in script
 
 
@@ -188,23 +236,29 @@ def test_probe_script_follows_the_preflight_marker_convention():
     script = _probe()["spec"]["containers"][0]["command"][2]
     assert "DMS_PREFLIGHT_REASON=" in script
     assert "DMS_PREFLIGHT_OK" in script
-    for code in ("build_node_no_egress", "build_registry_unreachable",
-                 "build_node_disk_low"):
+    for code in ("build_source_unavailable", "build_node_no_egress",
+                 "build_registry_unreachable", "build_node_disk_low"):
         assert code in script, code
     assert "os.statvfs" in script and "0.15" in script   # eviction 미러 상수
 
 
-def test_probe_host_list_dedups_the_repo_host():
-    env = {e["name"]: e["value"]
-           for e in _probe(repo_url="https://quay.io/x.git")["spec"]["containers"][0]["env"]}
-    assert env["DMS_PF_EGRESS_HOSTS"] == "quay.io registry-1.docker.io"
+def test_probe_checks_the_source_sentinel_dockerfile():
+    # 경로가 "존재하지만 DMS 저장소가 아닌" 오설정(상위 디렉토리 지정 등)을
+    # isdir 이 아니라 Dockerfile.dms 센티널로 잡는다 -- isdir 만 보면 buildah
+    # 깊숙한 곳에서 no such Dockerfile 로 죽어 사유가 뭉개진다.
+    script = _probe()["spec"]["containers"][0]["command"][2]
+    assert "Dockerfile.dms" in script
 
 
-def test_repo_host_parses_https_and_rejects_unparseable():
-    assert repo_host("https://github.com/ChahwanSong/dms.git") == "github.com"
-    assert repo_host("http://pkg-01:8080/r.git") == "pkg-01"
-    assert repo_host("not a url") is None
-    assert repo_host("") is None
-    # scp 형(git@host:path)은 urlsplit 이 호스트를 못 뽑는다 -- 라우트가 422
-    # invalid_repo_url 로 명시 거절한다(조용한 오동작 대신).
-    assert repo_host("git@github.com:ChahwanSong/dms.git") is None
+def test_probe_mounts_the_source_without_a_hostpath_type():
+    # 프로브의 hostPath 는 type 을 비운다: 경로가 노드에 없으면 kubelet 이 빈
+    # 디렉토리를 만들어서라도 파드를 띄워, 오타 경로가 FailedMount 영구 Pending
+    # (-> 180s 뒤 build_preflight_timeout 으로 뭉개짐)이 아니라 Dockerfile 부재
+    # (build_source_unavailable)로 명확히 잡히게 한다.
+    pod = _probe()
+    src_vol = next(v for v in pod["spec"]["volumes"] if v["name"] == "src")
+    assert src_vol["hostPath"] == {"path": SRC}
+    mounts = pod["spec"]["containers"][0]["volumeMounts"]
+    src_mount = next(m for m in mounts if m["name"] == "src")
+    assert src_mount["mountPath"] == SRC
+    assert src_mount["readOnly"] is True

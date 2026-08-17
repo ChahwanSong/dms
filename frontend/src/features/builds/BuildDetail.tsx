@@ -63,10 +63,16 @@ export function BuildDetail() {
               <p className="text-bad font-medium">{reasonText(b.reason_code)}</p>
             )}
             <dl className="space-y-2">
-              <Row label="저장소">{b?.repo_url ?? "—"}</Row>
-              <Row label="git ref">{b?.git_ref ?? "—"}</Row>
+              {/* 로컬 소스 빌드는 소스가 경로다. 옛 git 시절 행(git_ref !== "local")
+                  은 저장소 URL·브랜치가 그대로 실린다 -- 라벨은 중립인 「소스」로. */}
+              <Row label="소스">
+                <span className="font-mono">{b?.source_path ?? "—"}</span>
+                {b && b.git_ref !== "local" ? ` (${b.git_ref})` : null}
+              </Row>
               <Row label="commit">
-                <span className="font-mono">{b?.commit_sha ? b.commit_sha.slice(0, 8) : "—"}</span>
+                {/* -dirty 접미는 미커밋 변경 포함 빌드의 표시다 -- 자르면 정보가
+                    사라지므로 전체를 그대로 둔다(등폭·select-all 로 복사 배려). */}
+                <span className="font-mono select-all">{b?.commit_sha ?? "—"}</span>
               </Row>
               <Row label="이미지">
                 {b && (b.images ?? []).length > 0 ? (b.images ?? []).join(", ") : "—"}

@@ -4,7 +4,8 @@ import logging
 
 from .build_manifests import build_build_pod, build_probe_pod
 from .execution import ExecStatus, ExecutionError
-from .repositories.builds import build_pod_name, build_probe_pod_name
+from .repositories.builds import (build_pod_name, build_probe_pod_name,
+                                  effective_tag)
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,10 @@ class BuildRunner:
 
     def submit(self, build) -> str:
         try:
+            # repo_url 컬럼이 소스 경로를 담는다(repositories.builds.create 주석).
             manifest = build_build_pod(
-                build_id=build["build_id"], repo_url=build["repo_url"],
-                git_ref=build["git_ref"], images=build["images"],
+                build_id=build["build_id"], source_path=build["repo_url"],
+                tag=effective_tag(build), images=build["images"],
                 node=build["node_name"], namespace=self._ns,
                 registry=self._registry, builder_image=self._builder_image,
                 timeout_seconds=self._timeout_seconds)
@@ -76,7 +78,7 @@ class BuildRunner:
         를 상태 저장 없이 한 호출로 접는 장치)이 안전하다."""
         try:
             manifest = build_probe_pod(
-                build_id=build["build_id"], repo_url=build["repo_url"],
+                build_id=build["build_id"], source_path=build["repo_url"],
                 node=build["node_name"], namespace=self._ns,
                 registry=self._registry, job_image=self._job_image,
                 timeout_seconds=self._preflight_timeout_seconds)

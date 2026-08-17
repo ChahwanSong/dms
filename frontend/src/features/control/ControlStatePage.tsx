@@ -15,6 +15,7 @@ export function ControlStatePage() {
   const [drain, setDrain] = useState(false);
   const [reason, setReason] = useState("");
   const [buildNodeName, setBuildNodeName] = useState("");
+  const [buildSourcePath, setBuildSourcePath] = useState("");
 
   useEffect(() => {
     if (!q.data) return;
@@ -22,6 +23,7 @@ export function ControlStatePage() {
     setDrain(q.data.drain === 1);
     setReason(q.data.reason ?? "");
     setBuildNodeName(q.data.build_node_name ?? "");
+    setBuildSourcePath(q.data.build_source_path ?? "");
   }, [q.data]);
 
   const submit = () => {
@@ -29,6 +31,7 @@ export function ControlStatePage() {
       maintenance, drain,
       reason: reason.trim() === "" ? null : reason,
       build_node_name: buildNodeName.trim() === "" ? null : buildNodeName,
+      build_source_path: buildSourcePath.trim() === "" ? null : buildSourcePath.trim(),
     });
   };
 
@@ -71,6 +74,18 @@ export function ControlStatePage() {
                     <option key={n.node_name} value={n.node_name}>{n.node_name}</option>
                   ))}
                 </select>
+              </label>
+              <label className="block">빌드 소스 경로
+                {/* 노드와 달리 목록 대조가 불가하다(서버는 빌드 노드의 파일시스템을
+                    못 본다) -- 모양(절대 경로)만 저장 시 검증하고, 실재는 빌드
+                    프리플라이트가 노드 위에서 검사한다. */}
+                <input aria-label="빌드 소스 경로" className={field} value={buildSourcePath}
+                       placeholder="/home/mason/dms-dev/dms"
+                       onChange={(e) => setBuildSourcePath(e.target.value)} />
+                <span className="block text-muted text-xs mt-1">
+                  빌드 노드에서 DMS 저장소가 있는 절대 경로 — 빌드는 이 경로의 로컬
+                  소스(미커밋 변경 포함)로 진행됩니다
+                </span>
               </label>
               {setControlState.isError && (
                 <p className="text-bad">{(setControlState.error as ApiError).message}</p>

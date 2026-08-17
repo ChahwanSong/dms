@@ -108,13 +108,14 @@ data:
   # 하는데, 적합성 프리플라이트는 **파드 네트워크로** egress 를 검사하므로 그 경로를
   # 검사하지 못한다 -- 실증에서 프로브는 통과했는데 빌드 파드가 ImagePullBackOff 로
   # 앉아 있는 상태를 실제로 만들었다(로그: quay.io:443 connection refused).
-  # 미러를 쓰면 노드가 인터넷 없이도 빌더를 받고, 남는 인터넷 수요(git clone·npm·
-  # PyPI·apt)가 전부 빌드 파드 안으로 모여 프로브가 검사하는 경로와 일치한다.
+  # 미러를 쓰면 노드가 인터넷 없이도 빌더를 받고, 남는 인터넷 수요(npm·PyPI·apt·
+  # 베이스 이미지)가 전부 빌드 파드 안으로 모여 프로브가 검사하는 경로와 일치한다.
   # 프리플라이트의 레지스트리 검사(build_registry_unreachable)가 이 경로까지 덮는다.
   # 미러 갱신: pkg-01 에서 podman pull quay.io/buildah/stable:latest &&
   #            podman tag … pkg-01:5000/buildah:stable && podman push --tls-verify=false …
+  # 빌드 소스는 여기 없다: 노드 위 경로(hostPath)라 운영자가 포탈 컨트롤 상태에서
+  # 설정한다(build_source_path) -- ConfigMap 에 두면 재적용마다 되돌아간다.
   DMS_BUILD_BUILDER_IMAGE: "pkg-01:5000/buildah:stable"
-  DMS_BUILD_REPO_URL: "https://github.com/ChahwanSong/dms.git"
   DMS_BUILD_WATCHER_INTERVAL_SECONDS: "15"
   # 빌드 파드 activeDeadlineSeconds + BuildWatcher 나이 기반 회수 창(초). 빌드
   # 노드 오타로 nodeSelector가 안 맞아 파드가 영구 Pending이 되는 등, 포탈 안에서

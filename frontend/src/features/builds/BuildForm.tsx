@@ -34,11 +34,6 @@ const IMAGES = ["dms-mpifileutils", "dms", "dms-agent"] as const;
 // 죽고, 사용자는 "왜 agent 만 실패하지"를 로그에서 찾아야 한다.
 const AGENT_DEPS = ["dms", "dms-mpifileutils"] as const;
 
-// 최근 ref 빠른 선택 개수. 목록 데이터에서 파생한다 — 신규 API 없이 "방금 쓰던
-// 브랜치"를 다시 치지 않게 하는 것이 전부라 3개면 족하다.
-const REF_SUGGESTIONS = 3;
-
-const DEFAULT_REF = "main";
 const DEFAULT_IMAGES = ["dms"];
 
 const HISTORY_PATH = "/admin/builds/history";
@@ -63,14 +58,17 @@ function ProcedureDialog({ open, onOpenChange }: {
         <li>
           <span className="font-medium">2. 빌드</span>
           <span className="block text-muted">
-            빌드 노드가 GitHub 에서 소스를 clone 해 이미지를 만듭니다. 이 단계에는
-            인터넷이 필요합니다 — 런타임(배포 환경)은 airgap 이라 빌드 때만 열립니다.
+            빌드 노드의 로컬 소스 경로에서 스냅샷을 떠 이미지를 만듭니다 — 커밋·push
+            하지 않은 변경도 포함됩니다(이력의 커밋에 -dirty 로 표시). 베이스 이미지·
+            의존성 다운로드에 인터넷이 필요합니다 — 런타임(배포 환경)은 airgap 이라
+            빌드 때만 열립니다.
           </span>
         </li>
         <li>
           <span className="font-medium">3. push</span>
           <span className="block text-muted">
-            만든 이미지를 사내 레지스트리로 올립니다. 태그는 b + 빌드ID 앞 8자입니다.
+            만든 이미지를 사내 레지스트리로 올립니다. 태그는 지정한 값, 지정하지
+            않으면 b + 빌드ID 앞 8자입니다.
           </span>
         </li>
       </ol>
@@ -97,15 +95,16 @@ export function BuildForm() {
   const controlQ = useControlState();
   const submitBuild = useSubmitBuild();
   const navigate = useNavigate();
-  const [gitRef, setGitRef] = useState(DEFAULT_REF);
+  const [tag, setTag] = useState("");
   const [images, setImages] = useState<string[]>(DEFAULT_IMAGES);
   const [guideOpen, setGuideOpen] = useState(false);
 
   const buildNodeName = controlQ.data?.build_node_name ?? null;
-  // 목록은 이 화면의 주인공이 아니라 **재료**다(빠른 ref·진행 중 배너). 조회가
+  const sourcePath = controlQ.data?.build_source_path ?? null;
+  // 목록은 이 화면의 주인공이 아니라 **재료**다(진행 중 배너). 조회가
   // 실패해도 폼은 막지 않는다 -- 제출은 목록과 무관하게 성립한다.
   const builds = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
-  const canSubmit = buildNodeName !== null && images.length > 0;
+  const canSubmit = buildNodeName !== null && sourcePath !== null && images.length > 0;
 
   // 백엔드는 동시 1건만 허용한다(build_in_progress 409). 제출 **전에** 알려 주면
   // 헛클릭 한 번과 빨간 오류 한 줄을 아낀다. 막지는 않는다: 목록은 최대 5초
@@ -116,24 +115,12 @@ export function BuildForm() {
   const wantsAgent = images.includes("dms-agent");
   const missingDeps = wantsAgent ? AGENT_DEPS.filter((d) => !images.includes(d)) : [];
 
-  // 최근 빌드가 실제로 쓴 ref (중복 제거, 최신 순). 목록 응답에서만 파생한다.
-  const recentRefs = useMemo(() => {
-    const out: string[] = [];
-    for (const b of builds) {
-      const ref = b.git_ref;
-      if (typeof ref !== "string" || ref === "" || out.includes(ref)) continue;
-      out.push(ref);
-      if (out.length >= REF_SUGGESTIONS) break;
-    }
-    return out;
-  }, [builds]);
-
   const toggleImage = (name: string) => {
     setImages((prev) => (prev.includes(name) ? prev.filter((i) => i !== name) : [...prev, name]));
   };
 
   const submit = () => {
-    submitBuild.mutate({ git_ref: gitRef, images }, {
+    submitBuild.mutate({ images, tag: tag.trim() === "" ? null : tag.trim() }, {
       // 제출 직후 알고 싶은 것은 "지금 어떻게 되고 있나"다. 목록이 이력으로 나간
       // 뒤로는 폼에 남는 것이 곧 **방금 만든 빌드가 어디에도 안 보이는** 상태라,
       // 성공하면 이력으로 옮겨 준다(방금 것이 맨 위에 선다).
@@ -146,7 +133,7 @@ export function BuildForm() {
   // 화면이라 되돌아갈 "이전 화면"이 없다(이력으로 튕기면 취소가 아니라 이동이다).
   // 지난 제출 오류도 함께 지운다(낡은 409 가 남지 않게).
   const cancel = () => {
-    setGitRef(DEFAULT_REF);
+    setTag("");
     setImages(DEFAULT_IMAGES);
     submitBuild.reset();
   };
@@ -206,27 +193,41 @@ export function BuildForm() {
               )}
             </li>
             <li className="flex items-start gap-2">
-              <Check className={`${ICON} mt-0.5 text-ok`} aria-hidden />
-              <span>
-                대상은 GitHub 에 push 된 브랜치·태그입니다 (커밋 SHA 불가)
-              </span>
+              {/* 소스 경로도 노드처럼 컨트롤 상태가 단일 진실이다 -- 미설정은 제출
+                  시 422(build_source_not_set)로 끝나므로 미리 말하고 고칠 화면으로
+                  보낸다. 경로의 실재 여부는 프리플라이트가 노드 위에서 검사한다. */}
+              {sourcePath === null ? (
+                <>
+                  <AlertTriangle className={`${ICON} mt-0.5 text-bad`} aria-hidden />
+                  <span className="text-bad">
+                    {REASON_MESSAGES.build_source_not_set}{" "}
+                    <Link className="text-accent underline" to="/admin/control">
+                      컨트롤 상태로 이동
+                    </Link>
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Check className={`${ICON} mt-0.5 text-ok`} aria-hidden />
+                  <span>
+                    로컬 소스 <span className="font-mono">{sourcePath}</span> 에서
+                    빌드합니다 (미커밋 변경 포함)
+                  </span>
+                </>
+              )}
             </li>
           </ul>
         </InfoPanel>
 
         <Card className="space-y-3">
-          <label className="block">git ref
-            <input aria-label="git ref" className={field} value={gitRef} placeholder="main"
-                   onChange={(e) => setGitRef(e.target.value)} /></label>
-          {recentRefs.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-muted text-xs">최근</span>
-              {recentRefs.map((r) => (
-                <Button key={r} type="button" variant="ghost" className="px-2 py-1 text-xs"
-                        onClick={() => setGitRef(r)}>{r}</Button>
-              ))}
-            </div>
-          )}
+          <label className="block">태그 (선택)
+            <input aria-label="태그" className={field} value={tag} placeholder="d73"
+                   onChange={(e) => setTag(e.target.value)} />
+            <span className="block text-muted text-xs mt-1">
+              비우면 b + 빌드ID 앞 8자로 자동 지정됩니다 — 이미 레지스트리에 있는
+              태그를 지정하면 덮어씁니다
+            </span>
+          </label>
           <div>
             <span className="block mb-1">이미지</span>
             <div className="space-y-1">
@@ -270,7 +271,7 @@ export function BuildForm() {
                 프리플라이트 → 빌드 → push 순서로 진행합니다.
               </span>
               <span className="block text-muted text-xs">
-                이미지 태그는 b + 빌드ID 앞 8자로 붙습니다.
+                빌드 노드의 로컬 소스에서 빌드합니다 — 미커밋 변경도 포함됩니다.
               </span>
             </span>
             <ChevronRight className={`${ICON} text-muted`} aria-hidden />
