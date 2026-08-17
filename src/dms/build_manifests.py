@@ -203,6 +203,10 @@ def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_ima
             # 하기 위해서다. type: Directory 면 FailedMount 로 파드가 영영
             # Pending 이라 180s 뒤 build_preflight_timeout 으로 뭉개진다. 대가는
             # 오타 경로에 빈 디렉토리 하나가 남는 것 -- 사유의 선명함이 더 크다.
+            # 정직한 한계(d73 실측): 오타 경로의 **부모가 읽기 전용**(테스트베드의
+            # ro NFS 마운트)이면 자동 생성 자체가 mkdir read-only file system 으로
+            # 실패해 결국 build_preflight_timeout 으로 접힌다 -- 그 문구가 소스
+            # 경로 확인을 함께 가리킨다(frontend REASON_MESSAGES).
             "volumes": [{"name": "src", "hostPath": {"path": source_path}}],
         },
     }

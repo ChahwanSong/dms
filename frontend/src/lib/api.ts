@@ -171,7 +171,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 슬라이스 21 빌드 프리플라이트/회수 세분화. reasonCodes.json 과 같은 커밋 --
   // 양방향 계약(reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
   build_stuck_pending: "빌드 파드가 스케줄되지 못한 채 제한 시간을 넘겼습니다 — 빌드 노드 상태·여유를 확인하세요",
-  build_preflight_timeout: "빌드 적합성 확인이 제한 시간을 넘겼습니다 — 빌드 노드가 내려갔거나 프로브가 스케줄되지 못했을 수 있습니다",
+  // 소스 경로 오타의 부모가 읽기 전용(예: ro NFS)이면 hostPath 자동 생성이 실패해
+  // 프로브가 못 뜨고 여기로 접힌다(실측: mkdir read-only file system) -- 문구가 그
+  // 경우를 함께 가리켜야 운영자가 컨트롤 상태를 의심할 수 있다.
+  build_preflight_timeout: "빌드 적합성 확인이 제한 시간을 넘겼습니다 — 빌드 노드가 내려갔거나, 프로브가 스케줄되지 못했거나, 소스 경로 마운트가 실패했을 수 있습니다(컨트롤 상태의 경로 확인)",
   build_preflight_failed: "빌드 적합성 확인에 실패했습니다 — 로그를 확인하세요",
   build_node_no_egress: "빌드 노드에서 인터넷으로 나갈 수 없습니다 — 운영자가 인터넷을 아직 열지 않았을 수 있습니다",
   // 이 둘은 목록의 「사유」 열에서 그대로 읽히는 문구다 — 상세·로그로 한 번 더
