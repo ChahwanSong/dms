@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiGet, apiSend } from "../../lib/api";
+import { ApiError, apiGet, apiSend } from "../../lib/api";
 import { isTerminal } from "../../lib/jobState";
 import type { Build } from "../../lib/types";
 
@@ -80,5 +80,31 @@ export const useSubmitBuild = () => {
   return useMutation({
     mutationFn: (b: SubmitBuildBody) => apiSend("POST", "/api/admin/builds", b),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["builds"] }),
+  });
+};
+
+// 빌드 이력 다중 선택 삭제. 배치 목록(useDeleteBatches)과 같은 계약 -- 부분 실패를
+// data.failed 로 돌려주고(isError 아님), 완료 후 목록을 재조회해 그 착지까지
+// 기다린다(결과 문구가 뜰 때 표에서 이미 사라져 있다). 종단 빌드만 삭제 가능이라
+// 한 건이 409(그 사이 안 끝난 빌드)여도 나머지 삭제는 유효하다.
+export interface BulkDeleteBuildsResult {
+  ok: string[]; failed: { id: string; message: string }[];
+}
+const _deleteBuild = (id: string) => apiSend("DELETE", `/api/admin/builds/${id}`);
+export const useDeleteBuilds = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (ids: string[]): Promise<BulkDeleteBuildsResult> => {
+      const settled = await Promise.allSettled(ids.map(_deleteBuild));
+      const r: BulkDeleteBuildsResult = { ok: [], failed: [] };
+      settled.forEach((s, i) => {
+        if (s.status === "fulfilled") r.ok.push(ids[i]);
+        else r.failed.push({ id: ids[i], message: s.reason instanceof ApiError
+                             ? s.reason.message : String(s.reason) });
+      });
+      return r;
+    },
+    onSuccess: (r) => { for (const id of r.ok) qc.removeQueries({ queryKey: ["builds", id] }); },
+    onSettled: () => qc.invalidateQueries({ queryKey: ["builds"] }),
   });
 };

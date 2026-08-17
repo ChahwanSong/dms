@@ -153,6 +153,19 @@ class BuildsRepository:
             {"st": state, "rc": reason_code, "sha": commit_sha, "log": log_text,
              "now": utc_now_iso(), "id": build_id})
 
+    def delete(self, build_id, actor) -> bool:
+        """종단 빌드 행을 이력에서 지운다(슬라이스 34). 활성 빌드는 지우지 않는다 --
+        라우트가 종단 검사 후에만 부른다(active() 가 읽는 행을 지우면 파드가 도는
+        중에 두 번째 빌드가 시작될 수 있다). 파드는 pod-gc 가 따로 수거하므로 여기선
+        DB 행만 지운다. 없으면 False(멱등 -- 라우트는 이미 404 로 걸렀다)."""
+        before = self.get(build_id)
+        if before is None:
+            return False
+        with self._db.transaction():
+            self._db.execute("DELETE FROM builds WHERE build_id = :id", {"id": build_id})
+            self._audit("delete", build_id, before, None, actor)
+        return True
+
     def terminal_older_than(self, seconds: int, *, limit: int = 200, now_iso=None):
         now = now_iso or utc_now_iso()
         cutoff = iso_plus(now, -seconds)

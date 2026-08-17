@@ -38,7 +38,11 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
 - **매니페스트-우선 배포**: 이미지 태그를 먼저 bump·커밋하고 **그 커밋에서** 빌드한다
-  (`Dockerfile.dms` 가 `deploy/k8s` 를 이미지에 COPY — 순서가 바뀌면 드리프트 배지).
+  (`Dockerfile.dms` 가 `deploy/k8s` 를 이미지에 COPY). 슬라이스 34부터 **빌드가 동봉
+  매니페스트를 빌드 태그로 자동 스탬프**하므로(빌드하는 이미지 줄만), 포탈에서 태그를
+  지정해 빌드하면 그 수동 bump 없이도 배포 시 live == manifest 가 되어 드리프트 배지가
+  안 뜬다 — 단 그 태그를 실제로 굴리려면 `deploy/k8s` 의 git 값도 그 태그로 맞춰야
+  `kubectl apply` 가 새 태그를 배포한다(자동 b태그는 릴리스 화면으로 굴린다).
 - **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를
   거치면 다른 세션 커밋에 파일이 섞인다(실제 사고 있었음, BACKLOG §5).
 - **PYTHONPATH 함정**: venv 의 `dms` 편집설치는 **본 저장소** src 를 가리킨다. 워크트리

@@ -161,6 +161,13 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_source_unavailable: "빌드 노드의 소스 경로에서 DMS 저장소를 찾을 수 없습니다 — 경로와 노드 마운트를 확인하세요(경로는 로그에 있습니다)",
   build_node_report_stale: "빌드 노드의 에이전트 리포트가 오래되었습니다 — 노드가 내려갔을 수 있습니다",
   build_not_found: "빌드를 찾을 수 없습니다",
+  build_not_deletable: "진행 중인 빌드는 삭제할 수 없습니다 — 종료된 뒤에 삭제하세요",
+  // 레지스트리 이미지 관리(슬라이스 34). reasonCodes.json 과 같은 커밋.
+  unknown_registry_repo: "알 수 없는 이미지 저장소입니다",
+  registry_tag_in_use: "지금 배포돼 사용 중인 태그는 삭제할 수 없습니다",
+  registry_tag_not_found: "레지스트리에서 해당 태그를 찾을 수 없습니다",
+  registry_delete_disabled: "레지스트리 삭제가 비활성화되어 있습니다 — 레지스트리에 삭제를 활성화하세요",
+  registry_error: "레지스트리 응답에 문제가 있습니다 — 잠시 후 다시 시도하세요",
   build_failed: "빌드가 실패했습니다 — 로그를 확인하세요",
   submit_failed: "빌드 파드를 만들지 못했습니다",
   // 빌드 폴링과 잡 로그 조회 409(슬라이스 25 재사용)가 같은 코드를 낸다 --

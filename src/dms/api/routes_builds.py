@@ -126,6 +126,25 @@ def get_build(build_id: str, request: Request):
     return _detail(row)
 
 
+# 종단 빌드만 지운다(슬라이스 34). 활성(Pending/Running) 빌드는 409 -- active() 가
+# 읽는 행을 지우면 파드가 도는 중에 두 번째 빌드가 시작될 수 있다("취소가 아니라
+# 삭제"라 실행면 정리 경로도 없다). 파드는 pod-gc 가 따로 수거하므로 DB 행만 지운다.
+_TERMINAL_BUILD = ("Succeeded", "Failed")
+
+
+@router.delete("/api/admin/builds/{build_id}")
+def delete_build(build_id: str, request: Request,
+                 identity: Identity = Depends(require_admin)):
+    repos = request.app.state.repos
+    row = repos.builds.get(build_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="build_not_found")
+    if row["state"] not in _TERMINAL_BUILD:
+        raise HTTPException(status_code=409, detail="build_not_deletable")
+    repos.builds.delete(build_id, actor=audit_actor(identity))
+    return {"deleted": build_id}
+
+
 @router.get("/api/admin/builds/{build_id}/log")
 def get_build_log(build_id: str, request: Request,
                   tail: int | None = Query(default=None, ge=1)):

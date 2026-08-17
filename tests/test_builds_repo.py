@@ -159,6 +159,21 @@ def test_list_includes_the_tag_column(repos):
     assert row["build_id"] == bid and row["tag"] == "d73"
 
 
+def test_delete_removes_row_and_audits(repos):
+    bid = repos.builds.create(source_path="/src/dms", images=["dms"],
+                              node_name="dms-w1", actor="a")
+    repos.builds.finish(bid, state="Succeeded")
+    assert repos.builds.delete(bid, actor="ops") is True
+    assert repos.builds.get(bid) is None
+    entries = repos.control.audit_entries(limit=5)
+    assert any(e["mutation_class"] == "build" and e["operation"] == "delete"
+               and e["actor"] == "ops" for e in entries)
+
+
+def test_delete_missing_is_false_and_idempotent(repos):
+    assert repos.builds.delete("nope", actor="a") is False
+
+
 def test_derived_names_are_deterministic_and_dns1123():
     bid = "0123456789abcdef0123456789abcdef"
     assert build_tag(bid) == "b01234567"

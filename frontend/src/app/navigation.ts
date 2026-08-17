@@ -83,6 +83,7 @@ export const DETAIL_ROUTES = [
   // 크럼이 「… > 빌드 > 빌드 이력」이 되고 운영 그룹이 자동으로 펼쳐진다.
   // ":buildId" 보다 앞인 것도 batches/new 와 같은 이유다("history" 가 매칭된다).
   { pattern: "/admin/builds/history", label: "빌드 이력", parent: "/admin/builds" },
+  { pattern: "/admin/builds/images", label: "이미지 관리", parent: "/admin/builds" },
   { pattern: "/admin/builds/:buildId", label: "빌드 상세", parent: "/admin/builds" },
 ] as const;
 

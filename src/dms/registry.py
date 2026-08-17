@@ -48,3 +48,59 @@ def fetch_repo_tags(registry: str, repository: str) -> "list[str] | None":
         return None
     # 정렬해 결정적으로 만든다 -- 레지스트리 응답 순서는 보장이 없다.
     return sorted(str(t) for t in tags)
+
+
+# 매니페스트 조회/삭제 Accept 헤더. buildah 가 만든 이미지는 OCI 매니페스트라
+# docker v2 헤더만으로는 404 가 난다(실측) -- OCI 와 docker 를 모두 받는다. 삭제는
+# 태그가 아니라 digest 를 대상으로 하므로(레지스트리 v2 계약), 먼저 digest 를 뽑는다.
+_MANIFEST_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+))
+
+
+def manifest_digest(registry: str, repository: str, tag: str) -> "str | None":
+    """태그의 content digest(sha256:...) 또는 None(응답 불가/없음). 삭제의 전제다."""
+    url = f"http://{registry}/v2/{repository}/manifests/{tag}"
+    try:
+        response = _head_manifest(url)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("registry digest fetch failed repo=%s tag=%s: %s",
+                       repository, tag, exc)
+        return None
+    return response.headers.get("Docker-Content-Digest")
+
+
+def _head_manifest(url: str):
+    # 테스트 심 -- HEAD 는 본문 없이 digest 헤더만 받는다(전송량 최소).
+    return httpx.head(url, headers={"Accept": _MANIFEST_ACCEPT}, timeout=_TIMEOUT)
+
+
+def delete_manifest(registry: str, repository: str, digest: str) -> str:
+    """digest 로 매니페스트를 삭제한다. 결과를 코드 문자열로 돌려준다(예외 아님):
+    'ok'(202/204), 'disabled'(405 -- storage.delete.enabled 꺼짐), 'not_found'(404),
+    'error'(그 외). 블롭 회수(garbage-collect)는 별개다 -- 여기선 태그를 지운다."""
+    url = f"http://{registry}/v2/{repository}/manifests/{digest}"
+    try:
+        response = _delete_manifest(url)
+    except Exception as exc:
+        logger.warning("registry delete failed repo=%s digest=%s: %s",
+                       repository, digest, exc)
+        return "error"
+    if response.status_code in (202, 204):
+        return "ok"
+    if response.status_code == 405:
+        return "disabled"
+    if response.status_code == 404:
+        return "not_found"
+    logger.warning("registry delete unexpected status=%s repo=%s digest=%s",
+                   response.status_code, repository, digest)
+    return "error"
+
+
+def _delete_manifest(url: str):
+    # 테스트 심.
+    return httpx.delete(url, timeout=_TIMEOUT)

@@ -362,15 +362,28 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 (`testbed` 저장소 `make storage`) — 실 클러스터에서는 빌드 노드의 로컬 체크아웃을
 그대로 지정하면 된다.
 
-**2) 태그는 지정하거나 파생된다.** 「빌드」 폼의 (선택) 태그 입력에 관례 태그
-(예: `d73`)를 지정하면 그 태그로 push 되고 — 로컬에서 `deploy/k8s` 를 같은 태그로
-bump 해 두면 **동봉 매니페스트와 live 가 일치해 드리프트 배지 없는 배포가 포탈로
-완결된다** — 비우면 `b<build_id 앞 8자>`(`build_tag()`,
-`src/dms/repositories/builds.py`)가 파생된다. 주의: `30-migrate-job.yaml`/
+**2) 태그는 지정하거나 파생된다(드리프트 방지 내장, 슬라이스 34).** 「빌드」 폼의
+(선택) 태그 입력에 관례 태그(예: `d75`)를 지정하면 그 태그로 push 된다. **빌드는
+빌드하는 이미지의 동봉 매니페스트(`deploy/k8s`) 태그를 이 빌드 태그로 자동
+스탬프**하므로(`build_manifests._SCRIPT`), 그 태그로 배포하면 **live == 동봉
+매니페스트가 되어 드리프트 배지가 안 뜬다** — 예전처럼 손으로 `deploy/k8s` 를 먼저
+bump 해 빌드하지 않아도 된다. 단 그 태그를 실제로 굴리려면 `deploy/k8s` 의 **git
+값**도 그 태그로 맞춰 `kubectl apply` 해야 새 태그가 배포된다(이미지 안 스탬프는
+드리프트 판정용, git 값은 apply 대상). 태그를 비우면 `b<build_id 앞 8자>`
+(`build_tag()`)가 파생된다 — 이 자동 태그도 스탬프되므로 릴리스 화면으로 굴리면
+드리프트가 없지만, 관례 태그(dNN)를 권한다. 주의: `30-migrate-job.yaml`/
 `40-api.yaml`/`41-controller.yaml`/`50-agent-daemonset.yaml`이 전부
 `imagePullPolicy: IfNotPresent`이므로, **이미 노드에 있는 태그를 다시 push 해도
-클러스터는 새로 집어오지 않는다** — 태그 지정은 이 함정을 알고 쓰는 기능이다
-(재빌드는 새 태그로).
+클러스터는 새로 집어오지 않는다** — 재빌드는 새 태그로.
+
+**2b) 이미지·이력 정리(슬라이스 34).** 「빌드 > 이미지 관리」 화면에서 레지스트리
+태그를 열람·삭제한다(`GET/DELETE /api/admin/registry/images`). **사용 중 태그**
+(지금 배포돼 도는 또는 매니페스트가 가리키는)는 서버가 409 로 막는다. 삭제는
+레지스트리의 태그(매니페스트)만 지운다 — 디스크 블롭 회수(`registry
+garbage-collect`)와 노드 pull 캐시(`crictl rmi`)는 별개의 운영자 작업이고, 시간
+기반 자동 GC 는 두지 않는다. 레지스트리 삭제가 `405` 면 pkg-01 의 registry 에
+`storage.delete.enabled`(env `REGISTRY_STORAGE_DELETE_ENABLED=true`)가 꺼진
+것이다. 빌드 이력 행은 「빌드 이력」 화면에서 다중 선택 삭제(종단 빌드만).
 
 **3) 빌드 노드는 인터넷 egress가 필요하다.** 빌드가 hermetic하지 않다 — Buildah
 빌드(privileged 컨테이너) 안에서 npm install(포탈 프론트엔드), `dl.k8s.io`(kubectl 등

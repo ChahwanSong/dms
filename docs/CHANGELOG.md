@@ -54,6 +54,45 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 슬라이스 34: 드리프트 방지 + 이미지·이력 관리 — **완료**(2026-08-18, d75)
+
+**① 드리프트 방지(빌드 시 매니페스트 스탬프).** 빌드 파드가 tar 스냅샷 뒤
+`$DMS_BUILD_IMAGES` 각 이미지의 `/src/deploy/k8s/*.yaml` 태그를 빌드 태그로
+sed 스탬프한다(콜론 구분 `/$img:` 로 dms 가 dms-agent 를 안 문다) — `Dockerfile.dms`
+가 그 스냅샷을 COPY 하므로 배포 시 live == 동봉 manifest 가 되어 드리프트 배지가
+안 뜬다. **빌드하는 이미지 줄만** 스탬프한다: dms 만 빌드하며 agent 줄까지 스탬프하면
+dms 이미지가 담은 매니페스트가 "agent 도 이 태그"라 거짓 주장해(드리프트는 그 값을
+dms-api 이미지에서 읽는다) 없던 드리프트를 만든다. 빌드 폼은 현재 적용 태그(인프라
+메트릭 live)를 보여주고 dNN 이면 d(N+1) 을 제안한다. 실증(d75): dms 를 태그 d75 로
+포탈 빌드→배포하니 dms-api·dms-controller `live=d75 manifest=d75 drift=no`(스탬프
+로그 `stamped deploy/k8s tags -> d75`). dms-agent 는 손대지 않아 기존 드리프트 유지.
+
+**② 빌드 이력 삭제.** `DELETE /api/admin/builds/{id}`(종단만 — 활성은 409
+build_not_deletable, active() 가 읽는 행을 지우면 파드 도는 중 두 번째 빌드가 뜬다).
+빌드 이력 화면에 다중 선택 삭제(BatchesList 관례: 늘 렌더 툴바로 체크 시 표가 안
+밀림, 2단 확인, 부분 실패를 data.failed 로).
+
+**③ 레지스트리 이미지 관리(신규 하위 페이지 「이미지 관리」).**
+`GET /api/admin/registry/images`(3종 리포 태그+in_use), `DELETE .../{repo}/{tag}`.
+**사용 중 태그 보호**: live(rollout observe) + manifest(동봉본) 태그를 모아 그 태그
+삭제를 레지스트리 건드리기 전 409(registry_tag_in_use)로 막는다 — 드리프트와 같은
+재료라 화면 간 두 번째 진실이 없다. 삭제는 태그(매니페스트)만 지운다: 블롭 회수
+(garbage-collect)·노드 캐시는 별개, 시간 기반 자동 GC 는 두지 않는다(사용자 결정).
+registry.py 에 OCI Accept 헤더로 digest HEAD 조회 + DELETE(405→disabled/404→not_found
+매핑) 추가.
+
+**④ 인프라(직접 수행).** pkg-01 의 docker `registry:2` 를 데이터 볼륨(`/opt/dms-registry`,
+4.7GB) 보존한 채 `-e REGISTRY_STORAGE_DELETE_ENABLED=true` 로 재생성 → DELETE 가
+405→404 로 바뀜(삭제 수용). 전 노드(6대) `crictl rmi` 로 pkg-01:5000 미사용 pull
+캐시 정리(사용 중은 crictl 이 거부, 노드당 ~1–1.5Gi 확보).
+
+실증(포탈 API 종단): 사용 중 d75 삭제 시도 → 409 보호. b99d97238 3종(dms·
+dms-mpifileutils·dms-agent) 삭제 → 200(digest 반환) → 재조회 부재 확인.
+
+한계/정직: 레지스트리는 ansible 미관리(수동 docker run)라 재생성이 수동이다 —
+idempotent 화하려면 별도 role 이 필요(BACKLOG 후보). 블롭은 태그를 지워도
+`registry garbage-collect` 전엔 디스크에 남는다(화면·문서에 명시).
+
 ### ✅ 슬라이스 33: 로컬 소스 빌드 — **완료**(2026-08-18, d73·d74)
 
 포탈 빌드를 git clone 에서 **빌드 노드의 로컬 소스 경로**로 완전 전환했다(사용자

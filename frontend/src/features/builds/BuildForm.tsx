@@ -9,6 +9,7 @@ import { Dialog } from "../../components/ui/Dialog";
 import { ApiError, REASON_MESSAGES } from "../../lib/api";
 import { isTerminal } from "../../lib/jobState";
 import { useControlState } from "../control/useControlState";
+import { useInfraMetrics } from "../dashboard/useMetrics";
 import { useBuilds, useSubmitBuild } from "./useBuilds";
 import { BuildTabs } from "./BuildTabs";
 
@@ -37,6 +38,22 @@ const AGENT_DEPS = ["dms", "dms-mpifileutils"] as const;
 const DEFAULT_IMAGES = ["dms"];
 
 const HISTORY_PATH = "/admin/builds/history";
+
+// 이미지 참조(pkg-01:5000/dms:d74)에서 태그만 뽑는다. 콜론이 레지스트리 포트에도
+// 있으므로 **마지막** 콜론 뒤가 태그다. 파싱 불가면 null(모름 -- 지어내지 않는다).
+function tagOf(image: string | null | undefined): string | null {
+  if (typeof image !== "string" || image === "") return null;
+  const at = image.lastIndexOf(":");
+  return at === -1 ? null : image.slice(at + 1) || null;
+}
+
+// 다음 태그 제안: 현재 태그가 dNN 관례면 d(N+1) 을 돌려준다(그 외 스킴은 제안 없음).
+// 자동 태그(b+8hex)나 임의 문자열엔 안전한 다음 값을 지어낼 수 없으므로 null.
+function nextTagSuggestion(tag: string | null): string | null {
+  if (tag === null) return null;
+  const m = /^d(\d+)$/.exec(tag);
+  return m ? `d${Number(m[1]) + 1}` : null;
+}
 
 // 파란 안내 카드가 여는 팝업. 카드에는 2줄만 두고 전문은 전부 여기 있다 --
 // "평소엔 최소, 원하면 클릭해서 전문"이 이 화면의 밀도 규칙이다. 이 글을 폼 옆에
@@ -71,6 +88,15 @@ function ProcedureDialog({ open, onOpenChange }: {
             않으면 b + 빌드ID 앞 8자입니다.
           </span>
         </li>
+        <li>
+          <span className="font-medium">드리프트 방지</span>
+          <span className="block text-muted">
+            빌드는 이번에 빌드하는 이미지의 동봉 매니페스트(deploy/k8s) 태그를 이
+            빌드 태그로 스탬프합니다 — 그 태그로 배포하면 live 와 매니페스트가 일치해
+            드리프트 배지가 뜨지 않습니다. 관례 태그(dNN)를 지정해 올리는 것을
+            권합니다.
+          </span>
+        </li>
       </ol>
       <div className="mt-4 space-y-2 border-t border-line pt-3 text-sm">
         <p className="text-muted">
@@ -93,6 +119,7 @@ function ProcedureDialog({ open, onOpenChange }: {
 export function BuildForm() {
   const q = useBuilds();
   const controlQ = useControlState();
+  const infraQ = useInfraMetrics();
   const submitBuild = useSubmitBuild();
   const navigate = useNavigate();
   const [tag, setTag] = useState("");
@@ -101,6 +128,16 @@ export function BuildForm() {
 
   const buildNodeName = controlQ.data?.build_node_name ?? null;
   const sourcePath = controlQ.data?.build_source_path ?? null;
+
+  // 현재 적용 중인 태그(드리프트 방지 안내용). dms-api = dms 이미지의 live 태그를
+  // 대표값으로 쓴다(api·controller 는 같은 dms 이미지라 태그가 같다). 조회 실패·
+  // 파싱 불가면 null 이고 그때는 안내를 그리지 않는다.
+  const currentTag = useMemo(() => {
+    const comps = Array.isArray(infraQ.data?.components) ? infraQ.data.components : [];
+    const api = comps.find((c) => c.component === "dms-api");
+    return tagOf(api?.image);
+  }, [infraQ.data]);
+  const suggestedTag = nextTagSuggestion(currentTag);
   // 목록은 이 화면의 주인공이 아니라 **재료**다(진행 중 배너). 조회가
   // 실패해도 폼은 막지 않는다 -- 제출은 목록과 무관하게 성립한다.
   const builds = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
@@ -223,9 +260,25 @@ export function BuildForm() {
           <label className="block">태그 (선택)
             <input aria-label="태그" className={field} value={tag} placeholder="d73"
                    onChange={(e) => setTag(e.target.value)} />
+            {/* 현재 적용 중 태그 + 다음 태그 제안 — 드리프트 없이 올리려면 관례
+                태그(dNN)를 지정한다. 빌드가 동봉 매니페스트를 이 태그로 스탬프하므로
+                배포 시 live == manifest 가 되어 배지가 뜨지 않는다. */}
+            {currentTag !== null && (
+              <span className="block text-muted text-xs mt-1">
+                현재 적용 중: <span className="font-mono text-ink">{currentTag}</span>
+                {suggestedTag !== null && (
+                  <>
+                    {" · "}
+                    <Button type="button" variant="ghost" className="px-1.5 py-0.5 text-xs"
+                            onClick={() => setTag(suggestedTag)}>{`다음 → ${suggestedTag}`}</Button>
+                  </>
+                )}
+              </span>
+            )}
             <span className="block text-muted text-xs mt-1">
-              비우면 b + 빌드ID 앞 8자로 자동 지정됩니다 — 이미 레지스트리에 있는
-              태그를 지정하면 덮어씁니다
+              지정한 태그로 빌드하면 배포 시 드리프트가 생기지 않습니다 — 동봉
+              매니페스트가 이 태그로 함께 스탬프됩니다. 비우면 b + 빌드ID 앞 8자로
+              자동 지정됩니다(테스트용).
             </span>
           </label>
           <div>

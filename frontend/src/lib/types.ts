@@ -339,6 +339,15 @@ export interface InfraMetrics {
   job_image: { live: string | null; manifest: string | null };
 }
 
+// 레지스트리 이미지 관리(슬라이스 34). in_use = 지금 배포돼 도는(또는 매니페스트가
+// 가리키는) 태그라 삭제가 막힌다. reachable=false 는 "조회 실패"로, tags=[](태그
+// 0개)와 다르다(null≠0).
+export interface RegistryTag { tag: string; in_use: boolean; }
+export interface RegistryRepo {
+  repository: string; reachable: boolean; tags: RegistryTag[];
+}
+export interface RegistryImages { registry: string; repositories: RegistryRepo[]; }
+
 // 큐 현황(슬라이스 17). null 은 서버가 "알 수 없음"(403/CRD 부재)을 명시적으로
 // 보낸 것이다 -- []("비었음")와 절대 같지 않다(설계 §4). 여기서 ?? [] 로 접으면
 // 권한 누락이 "큐가 한가함"으로 렌더된다.

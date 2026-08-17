@@ -44,6 +44,22 @@ mkdir -p /src
   .) | (cd /src && tar -xf -)
 cd /src
 
+# 드리프트 방지(슬라이스 34): 이미지에 COPY 될 동봉 매니페스트(/src/deploy/k8s)의
+# 이미지 태그를 **이번 빌드가 빌드하는 이미지에 한해** 이 빌드 태그로 스탬프한다.
+# Dockerfile.dms 가 deploy/k8s 를 이미지에 COPY 하므로, 이렇게 하면 "이 태그로
+# 빌드한 이미지"의 동봉 매니페스트가 그 태그를 가리켜 -- 배포 시 live == manifest,
+# 드리프트 배지가 뜨지 않는다(매니페스트-우선 bump 를 빌드가 자동 수행).
+#
+# 빌드하지 않는 이미지 줄은 건드리지 않는다: dms 만 빌드하면서 agent 줄까지
+# 스탬프하면, dms 이미지가 담은 매니페스트가 "agent 도 이 태그" 라고 거짓 주장해
+# (드리프트는 그 매니페스트를 dms-api 이미지에서 읽는다) 오히려 없던 드리프트를
+# 만든다. 콜론 구분(`/$img:`)이 dms 를 dms-agent/dms-mpifileutils 와 분리한다.
+for img in $DMS_BUILD_IMAGES; do
+  sed -i "s#\(${DMS_BUILD_REGISTRY}/${img}:\)[A-Za-z0-9._-]\{1,\}#\1${DMS_BUILD_TAG}#g" \
+    deploy/k8s/*.yaml
+done
+echo "=== stamped deploy/k8s tags -> $DMS_BUILD_TAG for: $DMS_BUILD_IMAGES ==="
+
 for img in $DMS_BUILD_IMAGES; do
   ref="$DMS_BUILD_REGISTRY/$img:$DMS_BUILD_TAG"
   echo "=== building $ref ==="

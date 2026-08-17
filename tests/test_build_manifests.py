@@ -78,6 +78,19 @@ def test_script_snapshots_the_source_instead_of_cloning():
         assert f"--exclude={excl}" in script, excl
 
 
+def test_script_stamps_manifest_tags_for_built_images_only():
+    # 드리프트 방지(슬라이스 34): 동봉 매니페스트의 태그를 빌드 태그로 스탬프해
+    # live == manifest 가 되게 한다. 스탬프는 $DMS_BUILD_IMAGES 순회 안에서
+    # 콜론 구분(/$img:)으로 이뤄져야 dms 가 dms-agent 를 잘못 물지 않는다.
+    script = _pod()["spec"]["containers"][0]["command"][2]
+    assert "deploy/k8s/*.yaml" in script
+    # 콜론 구분자로 이미지 경계를 정확히 잡는지(정규식 리터럴 존재).
+    assert "/${img}:" in script
+    assert "sed -i" in script
+    # 빌드 루프보다 **앞**에서 스탬프해야 buildah 가 스탬프된 매니페스트를 COPY 한다.
+    assert script.index("stamped deploy/k8s") < script.index("=== building ")
+
+
 def test_script_reads_sha_from_the_mount_with_root_safe_git():
     script = _pod()["spec"]["containers"][0]["command"][2]
     # 소스는 개발자(비 root) 소유 + ro 마운트다 -- safe.directory 없이는 dubious

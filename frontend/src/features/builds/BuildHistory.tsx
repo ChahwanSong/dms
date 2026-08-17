@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
@@ -7,11 +7,17 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
 import { buildPillVariant, isTerminal } from "../../lib/jobState";
 import { formatDuration, spanMs } from "../../lib/duration";
-import { useBuilds } from "./useBuilds";
+import { useBuilds, useDeleteBuilds } from "./useBuilds";
 import { BuildTabs } from "./BuildTabs";
 import type { Build } from "../../lib/types";
 
 const PAGE_SIZE = 20;
+
+// 진행 중 빌드 체크박스에 다는 사유. 서버(build_not_deletable)와 같은 동선을 가리킨다.
+const ACTIVE_HINT = "진행 중인 빌드는 삭제할 수 없습니다 — 종료된 뒤에 삭제하세요";
+const IDLE_HINT = "빌드를 선택해 이력에서 삭제할 수 있습니다";
+// 체크박스 표적 크기(BatchesList 와 같은 상수) -- td 안 래퍼 금지(L2)라 input 자신에게.
+const BOX = "h-5 w-5 cursor-pointer align-middle";
 
 // 상태 필터. 진행 중 판정은 jobState 의 종단 집합을 재사용한다(빌드 상태
 // Pending/Running/Succeeded/Failed 는 그 집합과 그대로 맞는다 — useBuilds 주석).
@@ -54,10 +60,48 @@ function spentText(b: Build, now: number): string {
  */
 export function BuildHistory() {
   const q = useBuilds();
+  const del = useDeleteBuilds();
   const [filter, setFilter] = useState<string>("all");
   const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState<string[]>([]);
+  // 2단 확인(BatchesList 관례): 1단 클릭이 무장, 2단이 쏜다.
+  const [armed, setArmed] = useState(false);
 
   const builds = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
+
+  // 삭제 가능(종단) 빌드 -- 필터·페이지와 무관하게 목록 전체 기준(전체 선택도 그 기준).
+  const deletableIds = useMemo(
+    () => builds.filter((b) => isTerminal(b.state)).map((b) => b.build_id),
+    [builds]);
+  const liveIds = useMemo(() => new Set(builds.map((b) => b.build_id)), [builds]);
+  // 유령 선택 정리: 폴링/삭제로 사라진 빌드를 선택에서 뺀다(없는 id 에 DELETE →
+  // 404 오보고 방지). 부분집합이라 길이로 동일성 판정, 같으면 같은 참조로 루프 차단.
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = prev.filter((id) => liveIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [liveIds]);
+
+  const allChecked = deletableIds.length > 0 && selected.length === deletableIds.length;
+  const someChecked = selected.length > 0 && !allChecked;
+  const allRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (allRef.current) allRef.current.indeterminate = someChecked; },
+            [someChecked]);
+
+  const disarm = () => { setArmed(false); if (!del.isPending) del.reset(); };
+  const toggleRow = (id: string) => {
+    disarm();
+    setSelected((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  };
+  const toggleAll = () => { disarm(); setSelected(allChecked ? [] : deletableIds); };
+  const dr = del.data;
+  const none = selected.length === 0;
+  const barText = !none ? `${selected.length}개 선택됨`
+    : dr ? (dr.failed.length > 0 ? `${dr.ok.length}개 삭제됨 · ${dr.failed.length}개 실패`
+                                 : `${dr.ok.length}개 삭제됨`)
+    : IDLE_HINT;
+  const barTone = !none ? "" : dr ? (dr.failed.length > 0 ? "text-bad" : "text-ok") : "text-muted";
 
   // "지금"은 Date.now() 가 아니라 **마지막 성공 조회 시각**이다. 목록은 진행 중
   // 항목이 있을 때만 5초로 폴링하는데(useBuilds), 같은 데이터가 돌아오면 참조가
@@ -101,12 +145,40 @@ export function BuildHistory() {
             </div>
             <span className="text-muted tabular-nums shrink-0">{`${filtered.length}건`}</span>
           </div>
+          {/* 일괄 삭제 툴바 — 늘 렌더(자리 예약)라 체크해도 표가 아래로 밀리지
+              않는다(BatchesList 관례). 표 밖이라 L2 사정권 밖이다. */}
+          <div role="toolbar" aria-label="빌드 이력 일괄 작업"
+               className="flex flex-wrap items-center gap-2 rounded-lg border border-line
+                          bg-surface px-3 py-2 text-sm mb-3">
+            <span role="status" className={`mr-auto ${barTone}`}>{barText}</span>
+            {armed
+              ? <Button disabled={del.isPending || none}
+                        onClick={() => del.mutate(selected,
+                          { onSettled: () => { setArmed(false); setSelected([]); } })}>
+                  {selected.length}개 삭제 확인
+                </Button>
+              : <Button variant="outline" disabled={del.isPending || none}
+                        onClick={() => setArmed(true)}>선택 삭제</Button>}
+            <Button variant="ghost" disabled={del.isPending || none}
+                    onClick={() => { setArmed(false); setSelected([]); }}>선택 해제</Button>
+          </div>
+          {dr && dr.failed.length > 0 && (
+            <div className="text-sm mb-3">
+              {dr.failed.map((f) => (
+                <p key={f.id} className="text-muted">{f.id.slice(0, 12)}: {f.message}</p>
+              ))}
+            </div>
+          )}
           <Table>
             <thead>
               {/* commit·노드는 상세로 밀었다: commit 은 실패 시 대개 —이고, 노드는
-                  빌드하기 화면의 확인 박스에 이미 있어 매 행 반복하면 밀도만 올린다.
-                  열 8개는 e2e L2 의 셀 하한(minTableCells: 8)이기도 하다. */}
+                  빌드하기 화면의 확인 박스에 이미 있어 매 행 반복하면 밀도만 올린다. */}
               <tr className="text-muted whitespace-nowrap">
+                {/* 전체 선택은 종단 빌드만 토글한다. td 안 래퍼 금지(L2)라 input 단독. */}
+                <th className="px-3 py-2 w-12"><input ref={allRef} type="checkbox" className={BOX}
+                    aria-label="전체 선택"
+                    checked={allChecked} disabled={deletableIds.length === 0 || del.isPending}
+                    onChange={toggleAll} /></th>
                 <th className="py-2">시각</th><th>커밋</th><th>이미지</th><th>상태</th>
                 <th>사유</th><th>경과</th><th>태그</th><th>작업</th>
               </tr>
@@ -117,6 +189,13 @@ export function BuildHistory() {
             <tbody>
               {visible.map((b) => (
                 <tr key={b.build_id} className="border-t border-black/5 whitespace-nowrap">
+                  {/* 종단 빌드만 선택 가능(표시 게이트 — 진짜 차단은 서버 409). */}
+                  <td className="px-3 py-2"><input type="checkbox" className={BOX}
+                       aria-label={`빌드 ${b.build_id.slice(0,12)} 선택`}
+                       checked={selected.includes(b.build_id)}
+                       disabled={!isTerminal(b.state) || del.isPending}
+                       title={isTerminal(b.state) ? undefined : ACTIVE_HINT}
+                       onChange={() => toggleRow(b.build_id)} /></td>
                   <td className="py-2">{b.created_at}</td>
                   {/* 로컬 소스 빌드는 브랜치가 없다 -- 무엇을 빌드했는지는 커밋이
                       말한다(빌드 중엔 아직 파싱 전이라 —). -dirty 접미는 미커밋

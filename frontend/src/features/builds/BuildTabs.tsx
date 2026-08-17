@@ -12,6 +12,7 @@ import { NavLink } from "react-router-dom";
 const TABS = [
   { to: "/admin/builds", label: "빌드하기", end: true },
   { to: "/admin/builds/history", label: "빌드 이력", end: false },
+  { to: "/admin/builds/images", label: "이미지 관리", end: false },
 ] as const;
 
 const tabCls = ({ isActive }: { isActive: boolean }) =>

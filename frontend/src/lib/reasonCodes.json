@@ -154,5 +154,11 @@
   "build_source_not_set",
   "invalid_source_path",
   "invalid_build_tag",
-  "build_source_unavailable"
+  "build_source_unavailable",
+  "build_not_deletable",
+  "unknown_registry_repo",
+  "registry_tag_in_use",
+  "registry_tag_not_found",
+  "registry_delete_disabled",
+  "registry_error"
 ]

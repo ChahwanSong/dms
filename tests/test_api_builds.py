@@ -133,6 +133,40 @@ def test_missing_build_is_404(client):
     assert client.get("/api/admin/builds/nope/log", headers=ADMIN).status_code == 404
 
 
+# ---- 빌드 이력 삭제(슬라이스 34) ----
+
+def test_delete_terminal_build_removes_the_row(client):
+    _set_build_node(client)
+    bid = client.post("/api/admin/builds", json={"images": ["dms"]},
+                      headers=ADMIN).json()["build_id"]
+    client.app.state.repos.builds.finish(bid, state="Succeeded", log_text="ok")
+    r = client.delete(f"/api/admin/builds/{bid}", headers=ADMIN)
+    assert r.status_code == 200 and r.json()["deleted"] == bid
+    assert client.get(f"/api/admin/builds/{bid}", headers=ADMIN).status_code == 404
+    assert client.get("/api/admin/builds", headers=ADMIN).json() == []
+
+
+def test_delete_active_build_is_409(client):
+    # 활성(Pending) 빌드를 지우면 active() 가 읽는 행이 사라져 두 번째 빌드가
+    # 파드가 도는 중에 시작될 수 있다 -- 종단 전에는 거절한다.
+    _set_build_node(client)
+    bid = client.post("/api/admin/builds", json={"images": ["dms"]},
+                      headers=ADMIN).json()["build_id"]
+    r = client.delete(f"/api/admin/builds/{bid}", headers=ADMIN)
+    assert r.status_code == 409 and r.json()["detail"] == "build_not_deletable"
+    assert client.get(f"/api/admin/builds/{bid}", headers=ADMIN).status_code == 200
+
+
+def test_delete_missing_build_is_404(client):
+    assert client.delete("/api/admin/builds/nope", headers=ADMIN).status_code == 404
+
+
+def test_delete_is_admin_only(client):
+    client.post("/api/auth/signup", json={"username": "u2", "password": "p"})
+    client.post("/api/auth/login", json={"username": "u2", "password": "p"})
+    assert client.delete("/api/admin/builds/x").status_code in (401, 403)
+
+
 def test_list_is_admin_only(client):
     client.post("/api/auth/signup", json={"username": "u1", "password": "p"})
     client.post("/api/auth/login", json={"username": "u1", "password": "p"})

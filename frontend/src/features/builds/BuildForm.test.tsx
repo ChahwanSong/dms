@@ -23,6 +23,15 @@ const server = setupServer(
                         changed_by: "ops",
                         changed_at: "2026-08-06T00:00:00Z" })),
   http.get("/api/admin/builds", () => HttpResponse.json([BUILD])),
+  // 빌드 폼이 현재 적용 태그를 인프라 메트릭에서 읽는다(드리프트 방지 안내).
+  http.get("/api/admin/metrics/infra", () => HttpResponse.json({
+    components: [
+      { component: "dms-api", kind: "Deployment", workload: "dms-api",
+        image: "pkg-01:5000/dms:d74", ready: 1, desired: 1, verdict: "applied",
+        detail: null, manifest_image: "pkg-01:5000/dms:d74" },
+    ],
+    job_image: { live: null, manifest: null },
+  })),
 );
 beforeAll(() => server.listen());
 afterEach(() => server.resetHandlers());
@@ -180,6 +189,21 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
     await ready();
     expect(screen.getByText(SRC)).toBeInTheDocument();
     expect(screen.getByText(/미커밋 변경 포함/)).toBeInTheDocument();
+  });
+
+  it("현재 적용 중 태그를 보여주고 다음 태그(dN+1)를 제안한다", async () => {
+    wrap();
+    await ready();
+    expect(await screen.findByText("d74")).toBeInTheDocument();       // 현재 적용
+    const chip = await screen.findByRole("button", { name: "다음 → d75" });
+    await userEvent.click(chip);
+    expect(screen.getByLabelText("태그")).toHaveValue("d75");
+  });
+
+  it("드리프트 방지 안내를 태그 입력 아래에 둔다", async () => {
+    wrap();
+    await ready();
+    expect(screen.getByText(/드리프트가 생기지 않습니다/)).toBeInTheDocument();
   });
 
   it("태그를 지정하면 본문에 실려 간다", async () => {

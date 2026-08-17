@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterEach, afterAll } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -193,8 +193,39 @@ describe("BuildHistory — 빌드 이력", () => {
     expect(screen.queryByText("deadbeef")).not.toBeInTheDocument();
     // 노드 이름은 빌드하기 화면의 확인 박스에만 남는다(표에서 매 행 반복하지 않는다).
     expect(screen.queryByText("dms-w1")).not.toBeInTheDocument();
-    // e2e L2 하한(8셀)을 지키는 열 수는 유지한다.
-    expect(screen.getAllByRole("columnheader")).toHaveLength(8);
+    // 체크박스 열 + 데이터 8열 = 9. e2e L2 하한(8셀) 이상을 유지한다.
+    expect(screen.getAllByRole("columnheader")).toHaveLength(9);
+  });
+
+  // ── 다중 선택 삭제(슬라이스 34) ──────────────────────────────────────────
+  it("종단 빌드를 선택해 2단 확인으로 삭제하고 목록을 재조회한다", async () => {
+    let deleted: string | null = null;
+    server.use(http.delete("/api/admin/builds/:id", ({ params }) => {
+      deleted = params.id as string; return HttpResponse.json({ deleted: params.id });
+    }));
+    wrap();
+    await userEvent.click(await screen.findByLabelText("빌드 0123456789ab 선택"));
+    await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+    await userEvent.click(screen.getByRole("button", { name: "1개 삭제 확인" }));
+    await waitFor(() => expect(deleted).toBe(BUILD.build_id));
+  });
+
+  it("진행 중 빌드는 체크박스가 잠겨 있다", async () => {
+    server.use(http.get("/api/admin/builds", () =>
+      HttpResponse.json([{ ...BUILD, state: "Running", finished_at: null }])));
+    wrap();
+    const box = await screen.findByLabelText("빌드 0123456789ab 선택");
+    expect(box).toBeDisabled();
+  });
+
+  it("삭제 실패는 사유를 바 아래에 남긴다", async () => {
+    server.use(http.delete("/api/admin/builds/:id", () =>
+      HttpResponse.json({ detail: "build_not_deletable" }, { status: 409 })));
+    wrap();
+    await userEvent.click(await screen.findByLabelText("빌드 0123456789ab 선택"));
+    await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+    await userEvent.click(screen.getByRole("button", { name: "1개 삭제 확인" }));
+    expect(await screen.findByText(/진행 중인 빌드는 삭제할 수 없습니다/)).toBeInTheDocument();
   });
 
   // ── 분리 계약: 폼은 이 화면의 것이 아니다 ───────────────────────────────────
