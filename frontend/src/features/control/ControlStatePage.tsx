@@ -51,15 +51,36 @@ export function ControlStatePage() {
             <p className="text-bad font-medium">드레인 중 — 진행 중인 작업이 더 전진하지 않습니다</p>
           )}
           <Card>
-            <form className="space-y-3 text-sm" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-              <label className="flex items-center gap-2">
-                <input type="checkbox" aria-label="유지보수" checked={maintenance}
-                       onChange={(e) => setMaintenance(e.target.checked)} /> 유지보수
-              </label>
-              <label className="flex items-center gap-2">
-                <input type="checkbox" aria-label="드레인" checked={drain}
-                       onChange={(e) => setDrain(e.target.checked)} /> 드레인
-              </label>
+            <form className="space-y-4 text-sm" onSubmit={(e) => { e.preventDefault(); submit(); }}>
+              {/* 토글마다 "무엇을 막고 무엇은 계속되는지"를 결정하는 자리(체크박스
+                  옆)에서 한 줄로 말한다 -- 별도 도움말 화면으로 밀면 켜기 전에
+                  안 읽는다. 캡션은 label 밖(체크박스 클릭 표적과 분리)이다. */}
+              <div>
+                <label className="flex items-center gap-2 font-medium">
+                  <input type="checkbox" aria-label="유지보수" checked={maintenance}
+                         onChange={(e) => setMaintenance(e.target.checked)} /> 유지보수
+                  <span className="text-muted text-xs font-normal">입구 차단</span>
+                </label>
+                <p className="text-muted text-xs mt-1 ml-6">
+                  신규 제출(잡·배치·빌드·릴리스)을 503 으로 막습니다 — 이미 접수돼
+                  진행 중인 작업은 완주합니다. 관리자도 예외 없음.
+                </p>
+              </div>
+              <div>
+                <label className="flex items-center gap-2 font-medium">
+                  <input type="checkbox" aria-label="드레인" checked={drain}
+                         onChange={(e) => setDrain(e.target.checked)} /> 드레인
+                  <span className="text-muted text-xs font-normal">진행 정지</span>
+                </label>
+                <p className="text-muted text-xs mt-1 ml-6">
+                  잡 진행(스테퍼)을 지금 자리에서 멈춥니다 — 떠 있는 파드는 죽이지
+                  않고, 끄면 멈춘 자리부터 재개됩니다.
+                </p>
+              </div>
+              <p className="text-muted text-xs border-t border-line pt-3">
+                완전 정지 = 둘 다 켜기 — 유지보수가 입구를, 드레인이 진행을 막습니다.
+                저장 즉시 적용됩니다(재시작 없음).
+              </p>
               <label className="block">사유
                 <input aria-label="사유" className={field} value={reason}
                        onChange={(e) => setReason(e.target.value)} /></label>
