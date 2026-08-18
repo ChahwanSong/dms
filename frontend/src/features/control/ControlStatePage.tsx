@@ -38,8 +38,9 @@ export function diffText(e: ControlHistoryEntry): string {
 }
 
 // 상대 시각: "3분 전". now 는 호출자가 넘긴다(렌더마다 자라는 숫자 방지 --
-// BuildHistory 의 dataUpdatedAt 관례).
-function relTime(iso: string | null | undefined, now: number): string {
+// BuildHistory 의 dataUpdatedAt 관례). export: ArtifactBasePage(같은 폴더)가
+// 검증 시각·노드 보고 시각에 같은 문구를 쓴다(슬라이스 38).
+export function relTime(iso: string | null | undefined, now: number): string {
   if (!iso) return "";
   const ms = now - Date.parse(iso);
   if (!Number.isFinite(ms) || ms < 0) return "";

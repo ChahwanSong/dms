@@ -158,6 +158,21 @@ class ControlRepository:
             {"uri": uri, "ok": 1 if ok else 0, "r": reason,
              "at": now_iso or utc_now_iso()})
 
+    def artifact_base_history(self, limit: int = 10) -> list[dict]:
+        """아티팩트 base 변경 이력(슬라이스 38) -- 감사 로그에서 artifact_base 만.
+        control_state_history 와 같은 재사용 원칙(같은 사실을 두 곳에 쓰지 않는다).
+        before 는 변경 전 control_state 전체 행(artifact_base_uri 가 NULL 이면
+        당시 env 가 유효했다는 뜻), after 는 set_artifact_base 가 남긴
+        {artifact_base_uri, forced, affected_jobs} -- 강제 통과의 대가(영향 잡
+        수)까지 화면이 그대로 그린다."""
+        rows = self._db.query(
+            """SELECT actor, before_state, after_state, at FROM audit_log
+               WHERE mutation_class = 'artifact_base'
+               ORDER BY id DESC LIMIT :n""", {"n": limit})
+        return [{"at": r["at"], "actor": r["actor"],
+                 "before": load_json(r["before_state"]),
+                 "after": load_json(r["after_state"])} for r in rows]
+
     # --- leases ---
     def try_acquire_lease(self, component, holder, lease_seconds,
                           now_iso: str | None = None) -> bool:

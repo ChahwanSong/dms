@@ -1,6 +1,6 @@
 """아티팩트 base 설정 API(슬라이스 18 설계 §2.5). 전부 admin 전용
 (routes_control.py 와 같은 라우터 수준 의존성)."""
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..artifact_base import (normalize_artifact_base, roundtrip_artifact_base,
@@ -92,6 +92,15 @@ def _payload(request: Request) -> dict:
 @router.get("/api/admin/artifact-base")
 def get_artifact_base(request: Request):
     return _payload(request)
+
+
+@router.get("/api/admin/artifact-base/history")
+def get_artifact_base_history(request: Request,
+                              limit: int = Query(default=10, ge=1, le=50)):
+    """변경 이력(슬라이스 38). 강제 변경은 affected_jobs 건의 아티팩트·로그
+    열람을 깨는 결정이라(설계 §2.3) "누가 언제 무엇→무엇, 강제였나"가 화면에
+    있어야 한다 -- control-state/history 와 같은 계약(diff 는 화면이 계산)."""
+    return request.app.state.repos.control.artifact_base_history(limit=limit)
 
 
 @router.post("/api/admin/artifact-base/validate")

@@ -169,3 +169,49 @@ def test_controller_loop_unblocks_api_controller_hop(client, db, tmp_path):
     ctl = client.get("/api/admin/artifact-base", headers=ADMIN).json()[
         "checks"]["controller"]
     assert ctl["pending"] is False and ctl["ok"] is True
+
+
+def test_history_requires_admin(client):
+    assert client.get("/api/admin/artifact-base/history").status_code == 401
+
+
+def test_history_empty_then_records_change_and_force(client, db, tmp_path):
+    # 변경 전: 이력 없음(지어내지 않는다)
+    assert client.get("/api/admin/artifact-base/history",
+                      headers=ADMIN).json() == []
+    # 1) 평시 변경: before 의 artifact_base_uri 는 NULL(당시 env 유효),
+    #    after 는 정규화된 값 + forced=False/affected=0
+    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}/"},
+               headers=ADMIN)
+    # 2) 강제 변경: 잡 1건 존재 -> forced=True/affected=1 이 이력에 남는다
+    repos = Repositories(db)
+    _make_rejected_job(repos)
+    sub = tmp_path / "next"
+    sub.mkdir()
+    client.put("/api/admin/artifact-base",
+               json={"uri": f"file://{sub}", "force": True}, headers=ADMIN)
+    hist = client.get("/api/admin/artifact-base/history", headers=ADMIN).json()
+    assert len(hist) == 2                      # 최신 우선(DESC)
+    forced, first = hist
+    assert forced["after"] == {"artifact_base_uri": f"file://{sub}",
+                               "forced": True, "affected_jobs": 1}
+    assert forced["before"]["artifact_base_uri"] == f"file://{tmp_path}"
+    assert first["after"] == {"artifact_base_uri": f"file://{tmp_path}",
+                              "forced": False, "affected_jobs": 0}
+    assert first["before"]["artifact_base_uri"] is None
+    assert all(e["actor"] and e["at"] for e in hist)
+
+
+def test_history_limit_bounds(client, db, tmp_path):
+    for i in range(3):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        client.put("/api/admin/artifact-base", json={"uri": f"file://{d}"},
+                   headers=ADMIN)
+    assert len(client.get("/api/admin/artifact-base/history?limit=2",
+                          headers=ADMIN).json()) == 2
+    # 경계 밖은 422(control-state/history 와 같은 계약)
+    assert client.get("/api/admin/artifact-base/history?limit=0",
+                      headers=ADMIN).status_code == 422
+    assert client.get("/api/admin/artifact-base/history?limit=51",
+                      headers=ADMIN).status_code == 422
