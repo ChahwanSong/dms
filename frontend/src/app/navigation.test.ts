@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { NAVIGATION, breadcrumbFor, groupLabelFor } from "./navigation";
+import { NAVIGATION, activeNavPath, breadcrumbFor, groupLabelFor } from "./navigation";
 import type { NavItem } from "./navigation";
 
 // 메뉴는 데이터가 진실이다(슬라이스 31 T2) -- 이 파일은 그 데이터가 "기존 사이드바
@@ -109,5 +109,24 @@ describe("breadcrumbFor", () => {
     };
     expect(last("/admin/builds/history")).toBe("빌드 이력");
     expect(last("/admin/builds/abc123")).toBe("빌드 상세");
+  });
+});
+
+describe("activeNavPath — 사이드바 활성은 최장 일치 하나", () => {
+  test("접두 형제(/jobs vs /jobs/new)에서 구체적인 쪽만 켠다(사용자 보고 결함)", () => {
+    expect(activeNavPath("/jobs/new")).toBe("/jobs/new");   // 내 작업이 함께 켜지면 안 됨
+    expect(activeNavPath("/jobs")).toBe("/jobs");
+  });
+
+  test("상세 경로에서는 부모 항목이 켜진다(end 방식이 잃는 성질)", () => {
+    expect(activeNavPath("/jobs/abc123")).toBe("/jobs");
+    expect(activeNavPath("/admin/batches/xyz")).toBe("/admin/batches");
+    expect(activeNavPath("/admin/builds/history")).toBe("/admin/builds");
+    expect(activeNavPath("/admin/builds/images")).toBe("/admin/builds");
+  });
+
+  test("경계 '/' 없는 유사 접두는 물지 않고, 무매칭은 null", () => {
+    expect(activeNavPath("/jobs-archive")).toBeNull();
+    expect(activeNavPath("/nowhere")).toBeNull();
   });
 });

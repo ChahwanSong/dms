@@ -90,6 +90,27 @@ export const DETAIL_ROUTES = [
 /** 경로가 속한 그룹 라벨(상세 라우트는 부모 항목의 그룹으로 귀속). 미지 경로는 null.
     AppShell 의 「활성 그룹 자동 펼침」이 소비한다 -- 항목 스캔이 상세 패턴보다 먼저인
     이유는 breadcrumbFor 와 같다(/jobs/new 가 :requestId 에도 매칭되므로). */
+// 사이드바 활성 항목: **최장 접두 일치 하나만**. NavLink 기본 판정(접두 일치)은
+// /jobs/new 에서 /jobs(내 작업)까지 함께 켠다(형제가 접두 관계인 유일한 쌍) --
+// end 를 달면 이번엔 상세(/jobs/:id, /admin/builds/history …)에서 부모 음영이
+// 꺼진다. "가장 구체적인 항목 하나"가 두 경우를 모두 맞춘다.
+export function activeNavPath(pathname: string): string | null {
+  let best: string | null = null;
+  const consider = (p: string | undefined) => {
+    // 경계 '/' 필수: /jobs 가 /jobs-archive 류를 잘못 물지 않게.
+    if (p !== undefined && (pathname === p || pathname.startsWith(p + "/"))) {
+      if (best === null || p.length > best.length) best = p;
+    }
+  };
+  for (const section of NAVIGATION) {
+    consider(section.path);   // 미래의 단일 링크 섹션(NAS 등)도 같은 규칙
+    for (const group of section.groups ?? []) {
+      for (const item of group.items) consider(item.path);
+    }
+  }
+  return best;
+}
+
 export function groupLabelFor(pathname: string): string | null {
   for (const section of NAVIGATION)
     for (const group of section.groups ?? [])

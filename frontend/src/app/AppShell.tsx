@@ -3,7 +3,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import { ChevronDown } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMe } from "../features/auth/useAuth";
-import { NAVIGATION, groupLabelFor } from "./navigation";
+import { NAVIGATION, activeNavPath, groupLabelFor } from "./navigation";
 import type { NavGroup, NavSection } from "./navigation";
 import { TopBar } from "./TopBar";
 import { Breadcrumb } from "./Breadcrumb";
@@ -12,21 +12,29 @@ import { ErrorBoundary } from "./ErrorBoundary";
 // L4(e2e layout.ts): 링크 높이 < 2×line-height. text-sm(20px)이면 한계 40px 라
 // DS 의 44px 항목이 위반이다 -- leading-6(24px)으로 한계를 48px 로 올리고
 // py-2.5(10px×2)+24px=44px 로 DS 높이와 L4 를 동시에 만족시킨다.
-const linkCls = ({ isActive }: { isActive: boolean }) =>
+const linkCls = (active: boolean) =>
   `flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm leading-6 ${
-    isActive ? "bg-infobg text-accent font-medium" : "text-ink hover:bg-panel"}`;
+    active ? "bg-infobg text-accent font-medium" : "text-ink hover:bg-panel"}`;
 
-/** 사이드바 항목 링크 -- 아이콘은 16px 인라인이라 L4 높이에 영향이 없다. */
-function NavItemLink({ path, label, icon: Icon }: { path: string; label: string; icon: LucideIcon }) {
+/** 사이드바 항목 링크 -- 아이콘은 16px 인라인이라 L4 높이에 영향이 없다.
+ *
+ *  활성 판정은 NavLink 의 isActive(접두 일치)가 아니라 activeNavPath(최장 일치
+ *  하나)다: /jobs/new 에서 /jobs(내 작업)까지 함께 음영되던 결함(사용자 보고)의
+ *  수리이고, 상세 경로(/jobs/:id 등)에서는 여전히 부모 항목이 켜진다. */
+function NavItemLink({ path, label, icon: Icon, active }: {
+  path: string; label: string; icon: LucideIcon; active: boolean;
+}) {
   return (
-    <NavLink to={path} className={linkCls}>
+    <NavLink to={path} className={linkCls(active)}>
       <Icon className="h-4 w-4 shrink-0" aria-hidden />
       {label}
     </NavLink>
   );
 }
 
-function Group({ group, collapsed, onToggle }: { group: NavGroup; collapsed: boolean; onToggle: () => void }) {
+function Group({ group, collapsed, onToggle, activePath }: {
+  group: NavGroup; collapsed: boolean; onToggle: () => void; activePath: string | null;
+}) {
   return (
     <div>
       {/* 그룹 헤더는 <a> 가 아니라 <button> -- e2e L4 의 `aside a` 셀렉터를
@@ -36,7 +44,9 @@ function Group({ group, collapsed, onToggle }: { group: NavGroup; collapsed: boo
         {group.label}
         <ChevronDown className={`h-3.5 w-3.5 transition-transform ${collapsed ? "-rotate-90" : ""}`} aria-hidden />
       </button>
-      {!collapsed && group.items.map((item) => <NavItemLink key={item.path} {...item} />)}
+      {!collapsed && group.items.map((item) => (
+        <NavItemLink key={item.path} {...item} active={item.path === activePath} />
+      ))}
     </div>
   );
 }
@@ -45,6 +55,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const me = useMe();
   const isAdmin = me.data?.role === "admin";
   const { pathname } = useLocation();
+  // 사이드바 활성 항목(최장 일치 하나) -- NavItemLink 주석 참고.
+  const activePath = activeNavPath(pathname);
   // 접힘 규칙(사용자 조정): defaultCollapsed 그룹은 접힘 기본 -- 단 **현재 경로가
   // 속한 그룹은 항상 펼친다**(자동 펼침). 이 성질이 없으면 접힘 기본이 "사이드바
   // 링크를 못 찾는" 사고가 된다(e2e 04·router.test 가 잡 화면에서 링크를 클릭한다).
@@ -91,7 +103,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <aside className="md:w-60 md:shrink-0 bg-surface md:border-r md:border-line p-3 space-y-1">
           {NAVIGATION.map((section) =>
             section.path !== undefined ? (
-              <NavItemLink key={section.label} path={section.path} label={section.label} icon={section.icon} />
+              <NavItemLink key={section.label} path={section.path} label={section.label}
+                           icon={section.icon} active={section.path === activePath} />
             ) : (
               <div key={section.label}>
                 {/* 섹션 헤더도 div -- 셸에 h1 금지(전제 #4), a 금지(L4 셀렉터). */}
@@ -103,6 +116,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   const key = `${section.label}:${group.label}`;
                   return (
                     <Group key={key} group={group} collapsed={collapsed[key] === true}
+                           activePath={activePath}
                            onToggle={() => setCollapsed((c) => ({ ...c, [key]: c[key] !== true }))} />
                   );
                 })}
