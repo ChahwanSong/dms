@@ -71,6 +71,41 @@ test("editing a policy sends the correct PUT body, including null preview timeou
   });
 });
 
+test("숫자 필드를 지우면 빈 칸(0 이 아님) + 인라인 오류 + 저장 비활성", async () => {
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  wrap();
+  const row = (await screen.findByText("scan")).closest("tr")!;
+  await userEvent.click(within(row).getByRole("button", { name: "수정" }));
+  const maxNodes = await screen.findByRole("spinbutton", { name: "최대 노드" });
+  await userEvent.clear(maxNodes);
+  // 결함 회귀 그물: number 상태 시절엔 Number("")=0 이 "0"으로 그려져 필드를
+  // 비우는 것 자체가 불가능했다.
+  expect(maxNodes).toHaveValue(null);
+  expect(screen.getByText("최대 노드: 값을 입력하세요")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  // 다시 치면 친 그대로 보인다("08" 잔류 없음 — 문자열 상태라 표시 = 상태)
+  await userEvent.type(maxNodes, "8");
+  expect(maxNodes).toHaveValue(8);
+  expect(screen.queryByText("최대 노드: 값을 입력하세요")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "저장" })).toBeEnabled();
+});
+
+test("0·음수는 서버까지 가기 전에 인라인 오류로 막는다(pydantic ge=1 미러)", async () => {
+  const calls: string[] = [];
+  server.use(
+    http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),
+    http.put("/api/admin/policies/:tool", () => { calls.push("put"); return HttpResponse.json(POLICIES[0]); }));
+  wrap();
+  const row = (await screen.findByText("scan")).closest("tr")!;
+  await userEvent.click(within(row).getByRole("button", { name: "수정" }));
+  const et = await screen.findByRole("spinbutton", { name: "실행 타임아웃(초)" });
+  await userEvent.clear(et);
+  await userEvent.type(et, "0");
+  expect(screen.getByText("실행 타임아웃: 1 이상의 정수여야 합니다")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  expect(calls).toEqual([]);   // 저장이 비활성이라 PUT 이 나가지 않았다
+});
+
 test("shows an inline message when the PUT returns 422 invalid_priority", async () => {
   server.use(
     http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),

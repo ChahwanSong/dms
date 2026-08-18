@@ -60,7 +60,10 @@ const initial = {
   chmod: "", chown: "",
   // 실행 제어: priority "" = "(정책 기본)" = 바디에서 생략(null≠0).
   // nodeCount/procsPerNode "" = 생략 = 정책값. mc 상한 64 는 서버 위생 상한의 미러.
-  priority: "", nodeCount: "", procsPerNode: "", mc: 2, note: "", name: "",
+  // mc 도 문자열 상태다: number 상태 + Number(e.target.value) 는 지우면 0 이
+  // 그려지고 이어 친 숫자가 "08"로 남는다(type=number 숫자 동등 비교) — 정책
+  // 다이얼로그에서 잡은 결함과 같은 유형. 변환은 제출 시점 한 곳.
+  priority: "", nodeCount: "", procsPerNode: "", mc: "2", note: "", name: "",
   // 실행 신원: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자 본인). 특권 여부와
   // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
@@ -111,8 +114,10 @@ export function BatchCreate() {
   const nodeCountError = intFieldError("노드 수", f.nodeCount, 1, 64);
   // 노드당 프로세스 수도 같은 부분집합 — 실제 캡은 정책 procs_per_node(min).
   const procsPerNodeError = intFieldError("노드당 프로세스 수", f.procsPerNode, 1, 64);
-  const mcError = !Number.isInteger(f.mc) || f.mc < 1 || f.mc > 64
-    ? "동시 실행 상한은 1..64 범위의 정수여야 합니다" : null;
+  // 필수 필드라 빈 값도 오류다 — intFieldError(빈 값 = 미입력 허용)와 다르다.
+  const mcError = f.mc.trim() === ""
+    ? "동시 실행 상한은 1..64 범위의 정수여야 합니다"
+    : intFieldError("동시 실행 상한", f.mc, 1, 64);
   const controlsInvalid = verboseQuietConflict || scanBatchFilesError !== null
     || brokenLimitError !== null
     || batchFilesError !== null || bufsizeError !== null
@@ -231,7 +236,7 @@ export function BatchCreate() {
       : rows.map((r) => ({ source_storage: f.srcStorage, source: r.a.trim(),
                            destination_storage: f.dstStorage, destination: r.b.trim() }));
     return {
-      operation: f.op, max_concurrency: f.mc, options: buildOptions(),
+      operation: f.op, max_concurrency: Number(f.mc), options: buildOptions(),
       note: f.note || null, items,
       // 배치 이름: 빈값은 키 생략 = 서버 NULL(이름 없음) — 아래 생략 계약의 미러.
       ...(f.name.trim() !== "" && { name: f.name.trim() }),
@@ -575,7 +580,7 @@ export function BatchCreate() {
             <label className="text-sm block">동시 실행 상한 (1..64)
               <input aria-label="동시 실행 상한" type="number" min={1} max={64} className={field}
                      placeholder="예: 2"
-                     value={f.mc} onChange={(e) => setF({ ...f, mc: Number(e.target.value) })} />
+                     value={f.mc} onChange={(e) => setF({ ...f, mc: e.target.value })} />
               {/* 노드 수 캡션과 대구: 위는 잡 하나의 폭, 이것은 잡 몇 개를 나란히 */}
               <p className="text-muted text-xs mt-1">
                 동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다.

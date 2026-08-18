@@ -456,6 +456,21 @@ test("동시 실행 상한 캡션: 배치 항목(잡) 수 의미 — 노드 수�
     "동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다.")).toBeInTheDocument();
 });
 
+test("동시 실행 상한을 지우면 빈 칸(0 아님) + 오류 + 다음 비활성", async () => {
+  renderPage();
+  await toScanControls();
+  const mc = screen.getByLabelText("동시 실행 상한");
+  await userEvent.clear(mc);
+  // 결함 회귀 그물(정책 다이얼로그와 같은 유형): number 상태 시절엔 지우는
+  // 순간 Number("")=0 이 "0"으로 그려졌다.
+  expect(mc).toHaveValue(null);
+  expect(screen.getByText("동시 실행 상한은 1..64 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(next()).toBeDisabled();
+  await userEvent.type(mc, "8");
+  expect(mc).toHaveValue(8);
+  expect(next()).toBeEnabled();
+});
+
 // 배치 sync open_noatime 기본 ON(사용자 승인): 배치는 통일 게이트로 항상 특권
 // (root) 실행이라 O_NOATIME 권한 제약이 없고, 소스 atime 오염을 막아야 데이터
 // 온도(hot/cold) 통계가 정직해진다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)
