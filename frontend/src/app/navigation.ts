@@ -11,13 +11,10 @@ import {
 // 진짜 차단은 라우터의 RequireRole(role="admin")과 서버가 한다.
 
 export interface NavItem { path: string; label: string; icon: LucideIcon; adminOnly?: boolean }
-export interface NavGroup {
-  label: string; items: NavItem[]; adminOnly?: boolean;
-  // 접힘 기본(사용자 조정): 운영만 펼치고 나머지는 접는다. 단 AppShell 의 「활성
-  // 그룹 자동 펼침」(groupLabelFor)이 우선이라, 지금 보고 있는 화면의 그룹은 접힘
-  // 기본이어도 항상 열려 있다 -- 접힘이 "링크를 못 찾는" 사고가 되지 않는 이유다.
-  defaultCollapsed?: boolean;
-}
+// 접힘은 아코디언(사용자 결정 2026-08-19): 한 번에 한 그룹만 열린다. 어느 그룹이
+// 열리는지는 AppShell 이 현재 경로(groupLabelFor)로 정하므로 그룹별 접힘 기본
+// 필드는 없다 -- 로그인 직후엔 홈 리다이렉트 화면의 그룹(운영자는 운영)이 열린다.
+export interface NavGroup { label: string; items: NavItem[]; adminOnly?: boolean }
 export interface NavSection {           // 최상위: 지금은 DMS 뿐(NAS·Monitoring 추후 추가)
   label: string; icon: LucideIcon;
   groups?: NavGroup[];                  // DMS
@@ -26,8 +23,7 @@ export interface NavSection {           // 최상위: 지금은 DMS 뿐(NAS·Mon
 
 // 항목 라벨은 기존 사이드바 문구 그대로다 -- router.test 가 「사이드바 라벨 = h1」
 // 짝을 단언하는 화면(릴리스 등)이 있어 문구를 바꾸면 화면까지 연쇄로 바꿔야 한다.
-// 그룹 순서·접힘(사용자 조정, 2026-08-13): 홈=대시보드(운영)와 짝 -- 로그인 직후
-// 화면의 그룹(운영)만 열려 있고 작업·스토리지·관리는 접힌다.
+// 그룹 순서(사용자 조정, 2026-08-13): 홈=대시보드(운영)와 짝.
 export const NAVIGATION: NavSection[] = [
   {
     label: "DMS", icon: Boxes,
@@ -49,21 +45,23 @@ export const NAVIGATION: NavSection[] = [
         // 슬라이스 37(사용자 결정): 「작업 제출」→「단일 작업」(배치 작업과 같은
         // 성격의 단일 항목 제출). 「내 스캔 경로」·「scan 실행」 메뉴는 제거 --
         // scan 은 단일 작업 위저드(운영자 전용 연산)로 흡수됐다.
-        label: "작업", defaultCollapsed: true,
+        // 순서(사용자 결정 2026-08-19): 단일 작업(제출)이 내 작업(목록)보다 위 --
+        // 운영 그룹의 배치 작업(제출 동선)과 대구.
+        label: "작업",
         items: [
-          { path: "/jobs", label: "내 작업", icon: ListTodo },
           { path: "/jobs/new", label: "단일 작업", icon: FilePlus },
+          { path: "/jobs", label: "내 작업", icon: ListTodo },
         ],
       },
       {
-        label: "스토리지", adminOnly: true, defaultCollapsed: true,
+        label: "스토리지", adminOnly: true,
         items: [
           { path: "/admin/storages", label: "스토리지", icon: Database },
           { path: "/admin/nodes", label: "노드", icon: Server },
         ],
       },
       {
-        label: "관리", adminOnly: true, defaultCollapsed: true,
+        label: "관리", adminOnly: true,
         items: [
           { path: "/admin/accounts", label: "계정", icon: Users },
           { path: "/admin/policies", label: "정책", icon: Shield },

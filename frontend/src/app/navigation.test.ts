@@ -39,12 +39,16 @@ test("최상위 섹션은 DMS 하나뿐이다(NAS·Monitoring 은 추후 추가 
   expect(NAVIGATION.map((s) => s.label)).toEqual(["DMS"]);
 });
 
-test("그룹 순서는 운영·작업·스토리지·관리, 기본 펼침은 운영만이다", () => {
-  // 홈=대시보드(운영)와 짝: 로그인 직후 화면의 그룹만 열려 있고 나머지는 접힌다.
+test("그룹 순서는 운영·작업·스토리지·관리다(접힘은 AppShell 아코디언이 정한다)", () => {
+  // 홈=대시보드(운영)와 짝: 로그인 직후엔 활성 그룹(운영)만 열린다 -- 열림
+  // 상태는 데이터가 아니라 AppShell 의 아코디언(경로 기반)이라 여기선 순서만.
   const groups = NAVIGATION[0].groups ?? [];
   expect(groups.map((g) => g.label)).toEqual(["운영", "작업", "스토리지", "관리"]);
-  expect(groups.map((g) => g.defaultCollapsed === true))
-    .toEqual([false, true, true, true]);
+});
+
+test("작업 그룹은 단일 작업(제출)이 내 작업(목록)보다 위다(사용자 결정 2026-08-19)", () => {
+  const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
+  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "내 작업"]);
 });
 
 test("groupLabelFor: 경로가 속한 그룹을 찾고 상세 라우트는 부모로 귀속한다", () => {

@@ -57,30 +57,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   // 사이드바 활성 항목(최장 일치 하나) -- NavItemLink 주석 참고.
   const activePath = activeNavPath(pathname);
-  // 접힘 규칙(사용자 조정): defaultCollapsed 그룹은 접힘 기본 -- 단 **현재 경로가
-  // 속한 그룹은 항상 펼친다**(자동 펼침). 이 성질이 없으면 접힘 기본이 "사이드바
-  // 링크를 못 찾는" 사고가 된다(e2e 04·router.test 가 잡 화면에서 링크를 클릭한다).
-  // 상태 키는 렌더와 같은 `${section.label}:${group.label}` 이다 -- 맨 그룹 라벨을
-  // 쓰면 초기화가 렌더 조건과 어긋나 접힘 기본이 조용히 무시된다(실제로 겪었다).
-  const keysOf = (label: string | null) =>
+  // 접힘 규칙 = 아코디언(사용자 결정 2026-08-19): **한 번에 한 그룹만** 연다.
+  // 열린 그룹은 openKey 하나로 표현되고 -- 현재 경로가 속한 그룹이 초기값이라
+  // 로그인 직후(운영자 홈 = 대시보드)엔 운영만 열려 있다. 경로 이동은 그 화면의
+  // 그룹을 열고(다른 그룹은 구조상 닫힌다), 열린 헤더 재클릭은 닫는다. 이
+  // 자동 펼침이 없으면 접힘이 "사이드바 링크를 못 찾는" 사고가 된다(e2e 04·
+  // router.test 가 잡 화면에서 링크를 클릭한다). 상태 키는 렌더와 같은
+  // `${section.label}:${group.label}` 이다 -- 맨 라벨을 쓰면 초기화가 렌더
+  // 조건과 어긋나 조용히 무시된다(실제로 겪었다).
+  const keyOf = (label: string | null) =>
     NAVIGATION.flatMap((s) => (s.groups ?? [])
-      .filter((g) => g.label === label).map((g) => `${s.label}:${g.label}`));
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
-    const activeKeys = new Set(keysOf(groupLabelFor(pathname)));
-    const init: Record<string, boolean> = {};
-    for (const section of NAVIGATION)
-      for (const group of section.groups ?? []) {
-        const key = `${section.label}:${group.label}`;
-        if (group.defaultCollapsed === true && !activeKeys.has(key)) init[key] = true;
-      }
-    return init;
-  });
-  // 경로 이동으로 활성 그룹이 바뀌면 펼친다(자동 접기는 하지 않는다 -- 사용자가
-  // 손으로 연 그룹을 이동할 때마다 도로 닫으면 조작을 무시하는 셸이 된다).
+      .filter((g) => g.label === label).map((g) => `${s.label}:${g.label}`))[0] ?? null;
+  const [openKey, setOpenKey] = useState<string | null>(
+    () => keyOf(groupLabelFor(pathname)));
   useEffect(() => {
-    for (const key of keysOf(groupLabelFor(pathname)))
-      setCollapsed((prev) => (prev[key] ? { ...prev, [key]: false } : prev));
-    // keysOf 는 NAVIGATION(모듈 상수) 파생이라 pathname 만 의존성이면 충분하다.
+    const key = keyOf(groupLabelFor(pathname));
+    if (key !== null) setOpenKey(key);
+    // keyOf 는 NAVIGATION(모듈 상수) 파생이라 pathname 만 의존성이면 충분하다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
@@ -115,9 +108,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {visibleGroups(section).map((group) => {
                   const key = `${section.label}:${group.label}`;
                   return (
-                    <Group key={key} group={group} collapsed={collapsed[key] === true}
+                    <Group key={key} group={group} collapsed={openKey !== key}
                            activePath={activePath}
-                           onToggle={() => setCollapsed((c) => ({ ...c, [key]: c[key] !== true }))} />
+                           onToggle={() => setOpenKey((cur) => (cur === key ? null : key))} />
                   );
                 })}
               </div>
