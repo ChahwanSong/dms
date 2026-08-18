@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useAccounts, useSetRole, useSetDisabled } from "./useAccounts";
 import { useMe } from "../auth/useAuth";
 import { Table } from "../../components/ui/Table";
@@ -11,6 +12,9 @@ export function AccountsList() {
   const me = useMe();
   const setRole = useSetRole();
   const setDisabled = useSetDisabled();
+  // 아이디 검색(사용자 요청 2026-08-19): 서버가 전체 목록을 주므로(페이징 없음)
+  // 클라이언트 필터가 맞다 — 즉답이고 API 무변경. 대소문자 무시 부분 일치.
+  const [search, setSearch] = useState("");
 
   const mutationError = setRole.isError
     ? (setRole.error as ApiError).message
@@ -24,15 +28,28 @@ export function AccountsList() {
   // 활성 관리자(role=admin AND disabled=0). 하나뿐이면 그 행의 삭제를 막는다 --
   // 서버가 last_active_admin(409)으로 다시 강제하지만, 화면에서 미리 사유를 낸다.
   // 목록이 낡으면 어긋날 수 있는 클라이언트 계산이라 힌트일 뿐이다.
+  // **전체** rows 로 계산한다: 검색으로 좁힌 화면 기준이면 "마지막 관리자"
+  // 판정이 검색어에 따라 달라진다.
   const activeAdmins = rows.filter((a) => a.role === "admin" && a.disabled === 0);
+  const needle = search.trim().toLowerCase();
+  const visible = needle === "" ? rows
+    : rows.filter((a) => a.username.toLowerCase().includes(needle));
 
   return (
     <section className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">계정</h1>
+        <input aria-label="아이디 검색" placeholder="아이디 검색"
+               className="w-56 rounded-lg border border-black/10 px-3 py-2 text-sm"
+               value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>
+      ) : visible.length === 0 ? (
+        // 검색 무일치와 "계정 없음"을 구분한다 — 문구가 다르면 원인이 보인다.
+        <p className="text-muted">
+          {needle !== "" ? `'${search.trim()}' 와 일치하는 계정이 없습니다` : "등록된 계정이 없습니다"}
+        </p>
       ) : (
         <Table>
           <thead>
@@ -41,7 +58,7 @@ export function AccountsList() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((a) => {
+            {visible.map((a) => {
               const isSelf = me.data?.actor === a.username;
               const isLastActiveAdmin = a.role === "admin" && a.disabled === 0
                 && activeAdmins.length === 1;

@@ -105,3 +105,28 @@ test("subject 의 ? 는 인코딩되어 정확한 대상에 DELETE 된다 -- 쿼
   await userEvent.click(await screen.findByRole("button", { name: "해제 확인" }));
   await waitFor(() => expect(seenSubject).toBe("x?y"));
 });
+
+test("유형 의미 설명: 목록 상단 패널에 3유형 전부 + kill-switch 특성", async () => {
+  server.use(http.get("/api/admin/identity-denylist", () => HttpResponse.json([])));
+  wrap();
+  await screen.findByText("등재된 대상이 없습니다");
+  // 판정 시점·우선순위(identity.resolve_job_identity 의 미러)
+  expect(screen.getByText(/제출 시점에 판정하며, 특권 실행 경로보다 먼저/)).toBeInTheDocument();
+  // 세 유형의 구분(제출 계정 vs 실행 신원 vs LDAP 그룹)이 화면에 있다
+  expect(screen.getByText(/작업을 제출한 계정 기준/)).toBeInTheDocument();
+  expect(screen.getByText(/파일을 다루는 실행 신원 기준/)).toBeInTheDocument();
+  expect(screen.getByText(/실행 신원이 속한 LDAP 그룹 기준/)).toBeInTheDocument();
+});
+
+test("추가 다이얼로그: 유형 선택을 바꾸면 설명 캡션이 따라 바뀐다", async () => {
+  server.use(http.get("/api/admin/identity-denylist", () => HttpResponse.json([])));
+  wrap();
+  await screen.findByText("등재된 대상이 없습니다");
+  await userEvent.click(screen.getByRole("button", { name: "대상 추가" }));
+  const dialog = await screen.findByRole("dialog");
+  // 기본 requester 의 설명이 떠 있다
+  expect(within(dialog).getByText(/작업을 제출한 계정 기준/)).toBeInTheDocument();
+  await userEvent.selectOptions(within(dialog).getByLabelText("대상 유형"), "group");
+  expect(within(dialog).getByText(/실행 신원이 속한 LDAP 그룹 기준/)).toBeInTheDocument();
+  expect(within(dialog).queryByText(/작업을 제출한 계정 기준/)).not.toBeInTheDocument();
+});

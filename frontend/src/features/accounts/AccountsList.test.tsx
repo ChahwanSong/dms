@@ -143,3 +143,26 @@ test("사용자명 재입력이 일치해야 삭제가 전송된다", async () =
   await userEvent.click(confirm);
   await waitFor(() => expect(deleted).toBe(true));
 });
+
+test("아이디 검색: 대소문자 무시 부분 일치로 좁히고, 지우면 전체 복원", async () => {
+  stubMe("admin");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)));
+  wrap();
+  await screen.findByText("alice");
+  const search = screen.getByLabelText("아이디 검색");
+  await userEvent.type(search, "ALI");
+  expect(screen.getByText("alice")).toBeInTheDocument();
+  expect(screen.queryByText("admin", { selector: "td" })).not.toBeInTheDocument();
+  await userEvent.clear(search);
+  expect(screen.getByText("admin", { selector: "td" })).toBeInTheDocument();
+  expect(screen.getByText("alice")).toBeInTheDocument();
+});
+
+test("아이디 검색: 무일치는 검색어를 밝힌 전용 문구 — 계정 없음과 구분", async () => {
+  stubMe("admin");
+  server.use(http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)));
+  wrap();
+  await screen.findByText("alice");
+  await userEvent.type(screen.getByLabelText("아이디 검색"), "zzz");
+  expect(screen.getByText("'zzz' 와 일치하는 계정이 없습니다")).toBeInTheDocument();
+});
