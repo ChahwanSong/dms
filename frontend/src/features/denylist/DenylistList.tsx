@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useDenylist, useAllow } from "./useDenylist";
 import { DenyDialog, SUBJECT_TYPES } from "./DenyDialog";
 import { Table } from "../../components/ui/Table";
+import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { InfoPanel } from "../../components/ui/InfoPanel";
@@ -50,6 +51,8 @@ export function DenylistList() {
           ))}
         </dl>
       </InfoPanel>
+      {/* Card 구획(2026-08-19): 운영 화면들과 같은 서피스 — 관리 그룹 일관화 */}
+      <Card>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>
       ) : (q.data ?? []).length === 0 ? (
@@ -69,6 +72,7 @@ export function DenylistList() {
           </tbody>
         </Table>
       )}
+      </Card>
     </section>
   );
 }

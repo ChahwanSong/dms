@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStorages, useUpdateStorage, useDeleteStorage } from "./useStorages";
 import { StorageDialog } from "./StorageDialog";
 import { Table } from "../../components/ui/Table";
+import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
@@ -39,6 +40,8 @@ export function StoragesList() {
         <h1 className="text-2xl font-bold">스토리지</h1>
         <StorageDialog mode="create" trigger={<Button>스토리지 등록</Button>} />
       </div>
+      {/* Card 구획(2026-08-19): 대시보드·릴리스 등과 같은 서피스 — 목록 화면 일관화 */}
+      <Card>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
         <Table>
           {/* 관리 디렉토리(managed_root)는 마운트 옆에 둔다: 잡이 실제로 도는 뿌리는
@@ -71,6 +74,7 @@ export function StoragesList() {
         </Table>
       )}
       {update.isError && <p className="text-bad text-sm mt-2">{(update.error as ApiError).message}</p>}
+      </Card>
     </section>
   );
 }

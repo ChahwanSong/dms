@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useAccounts, useSetRole, useSetDisabled } from "./useAccounts";
 import { useMe } from "../auth/useAuth";
 import { Table } from "../../components/ui/Table";
+import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
 import { ApiError } from "../../lib/api";
@@ -43,6 +44,8 @@ export function AccountsList() {
                className="w-56 rounded-lg border border-black/10 px-3 py-2 text-sm"
                value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
+      {/* Card 구획(2026-08-19): 운영 화면들과 같은 서피스 — 관리 그룹 일관화 */}
+      <Card>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>
       ) : visible.length === 0 ? (
@@ -109,6 +112,7 @@ export function AccountsList() {
         </Table>
       )}
       {mutationError && <p className="text-bad text-sm mt-2">{mutationError}</p>}
+      </Card>
     </section>
   );
 }

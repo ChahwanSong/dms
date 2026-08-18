@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { isBatchTerminal, useBatches, useDeleteBatches } from "./useBatches";
 import { Table } from "../../components/ui/Table";
+import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { batchPillVariant } from "../../lib/jobState";
@@ -120,6 +121,8 @@ export function BatchesList() {
           ))}
         </div>
       )}
+      {/* Card 구획(2026-08-19): 대시보드·릴리스 등과 같은 서피스 — 목록 화면 일관화 */}
+      <Card>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
         <Table>
           <thead><tr className="text-muted">
@@ -165,6 +168,7 @@ export function BatchesList() {
               </tr>))}
           </tbody>
         </Table>)}
+      </Card>
     </section>
   );
 }

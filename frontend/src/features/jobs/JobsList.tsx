@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { useRequests } from "./useJobs";
 import { Table } from "../../components/ui/Table";
+import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 
@@ -12,6 +13,8 @@ export function JobsList() {
         <h1 className="text-2xl font-bold">내 작업</h1>
         <Link to="/jobs/new"><Button>작업 제출</Button></Link>
       </div>
+      {/* Card 구획(2026-08-19): 요청 상세·운영 화면들과 같은 서피스 — 목록 일관화 */}
+      <Card>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
         <Table>
           <thead><tr className="text-muted"><th className="py-2">요청</th><th>작업</th><th>상태</th><th>생성</th></tr></thead>
@@ -26,6 +29,7 @@ export function JobsList() {
           </tbody>
         </Table>
       )}
+      </Card>
     </section>
   );
 }

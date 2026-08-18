@@ -1,6 +1,7 @@
 import { usePolicies } from "./usePolicies";
 import { PolicyDialog } from "./PolicyDialog";
 import { Table } from "../../components/ui/Table";
+import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
 
@@ -19,6 +20,8 @@ export function PoliciesList() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">정책</h1>
       </div>
+      {/* Card 구획(2026-08-19): 운영 화면들과 같은 서피스 — 관리 그룹 일관화 */}
+      <Card>
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (
         <p className="text-bad">{(q.error as ApiError).message}</p>
       ) : (
@@ -48,6 +51,7 @@ export function PoliciesList() {
           </tbody>
         </Table>
       )}
+      </Card>
     </section>
   );
 }
