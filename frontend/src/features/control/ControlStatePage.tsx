@@ -45,7 +45,7 @@ export function ControlStatePage() {
       ) : (
         <>
           {q.data?.maintenance === 1 && (
-            <p className="text-bad font-medium">유지보수 중 — 새 작업 제출이 차단됩니다. 이미 접수된 배치는 계속 물질화되므로, 클러스터 작업을 완전히 멈추려면 드레인도 함께 켜세요</p>
+            <p className="text-bad font-medium">유지보수 중 — 새 작업 제출이 차단됩니다. 이미 접수된 배치의 작업은 계속 진행되므로, 클러스터 작업을 완전히 멈추려면 드레인도 함께 켜세요</p>
           )}
           {q.data?.drain === 1 && (
             <p className="text-bad font-medium">드레인 중 — 진행 중인 작업이 더 전진하지 않습니다</p>
