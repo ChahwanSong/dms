@@ -187,10 +187,11 @@ export function ControlStatePage() {
                 </p>
               );
             })()}
+            {/* 항목당 한 줄 -- 소스 경로가 길어 한 줄에 붙이면 좁은 폭에서 임의
+                위치로 접힌다(사용자 지적). */}
             <div className="text-sm text-muted space-y-1 border-t border-line pt-3">
-              <p>빌드 노드: <span className="text-ink font-medium">{q.data?.build_node_name ?? "—"}</span>
-                 <span className="mx-2">·</span>
-                 소스 경로: <span className="text-ink font-mono">{q.data?.build_source_path ?? "—"}</span></p>
+              <p>빌드 노드: <span className="text-ink font-medium">{q.data?.build_node_name ?? "—"}</span></p>
+              <p>소스 경로: <span className="text-ink font-mono">{q.data?.build_source_path ?? "—"}</span></p>
               <p>마지막 변경: <span className="text-ink font-medium">{q.data?.changed_by ?? "—"}</span>
                  {" · "}{q.data?.changed_at ?? "—"}
                  {q.data?.changed_at && (
