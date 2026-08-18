@@ -142,6 +142,27 @@ def test_resource_keys():
     fp = "f" * 64
     assert build_resource_key(Operation.SCAN, storage="s1", target="a/b", fingerprint=fp) \
         == f"data.scan:s1:a/b:{fp}"
+    # 슬라이스 36: 파괴적 op 는 옵션 지문이 키에 없다 -- 같은 대상 데이터의 sync/rm
+    # 은 옵션이 달라도 같은 자원 경쟁이라 Conflict 여야 한다(비파괴 scan 만 지문 유지).
     assert build_resource_key(
         Operation.SYNC, source_storage="s1", source="a", destination_storage="s2",
-        destination="b", fingerprint=fp) == f"data.sync:s1:a:s2:b:{fp}"
+        destination="b", fingerprint=fp) == "data.sync:s1:a:s2:b"
+    assert build_resource_key(Operation.RM, storage="s1", target="a/b",
+                              fingerprint=fp) == "data.rm:s1:a/b"
+
+
+def test_destructive_keys_ignore_option_differences():
+    # 계약의 핵심을 직접 고정한다: 옵션이 달라도(지문 상이) sync/rm 키는 같고,
+    # scan 키는 갈린다.
+    k1 = build_resource_key(Operation.SYNC, source_storage="s1", source="a",
+                            destination_storage="s2", destination="b",
+                            fingerprint="1" * 64)
+    k2 = build_resource_key(Operation.SYNC, source_storage="s1", source="a",
+                            destination_storage="s2", destination="b",
+                            fingerprint="2" * 64)
+    assert k1 == k2
+    s1 = build_resource_key(Operation.SCAN, storage="s1", target="a",
+                            fingerprint="1" * 64)
+    s2 = build_resource_key(Operation.SCAN, storage="s1", target="a",
+                            fingerprint="2" * 64)
+    assert s1 != s2

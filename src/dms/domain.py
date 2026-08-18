@@ -196,9 +196,16 @@ def option_fingerprint(options: dict) -> str:
 def build_resource_key(operation, *, storage=None, source_storage=None,
                        destination_storage=None, source=None, destination=None,
                        target=None, fingerprint: str) -> str:
+    """충돌 판정 키. 파괴적 op(sync·rm)는 **옵션 지문을 넣지 않는다**(슬라이스 36):
+    같은 대상 데이터를 쓰는 두 sync 는 옵션(chown·bufsize 등)이 달라도 같은 자원을
+    놓고 경쟁한다 -- 지문이 키를 갈라놓으면 동시 실행돼 서로의 쓰기를 간섭한다.
+    scan 은 비파괴(읽기 전용)라 옵션이 다른 동시 실행이 무해하고, 결과 리포트도
+    옵션에 따라 다르므로 지문을 유지한다(동일 스캔의 중복만 막는다)."""
     op = Operation(operation)
     if op is Operation.SYNC:
-        return f"data.sync:{source_storage}:{source}:{destination_storage}:{destination}:{fingerprint}"
+        return f"data.sync:{source_storage}:{source}:{destination_storage}:{destination}"
+    if op is Operation.RM:
+        return f"data.rm:{storage}:{target}"
     return f"data.{op.value}:{storage}:{target}:{fingerprint}"
 
 
