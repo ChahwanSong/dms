@@ -154,6 +154,9 @@ export function NodesList() {
   return (
     <section className="space-y-4">
       <h1 className="text-2xl font-bold">노드</h1>
+      {/* Card 구획(2026-08-19): 아래 노드 상세 카드·다른 목록 화면들과 같은
+          서피스 — 이 목록 표만 맨 표라 화면 안에서도 어긋나 있었다 */}
+      <Card>
       {q.isLoading ? (
         <p className="text-muted">불러오는 중…</p>
       ) : q.isError ? (
@@ -181,6 +184,7 @@ export function NodesList() {
           </tbody>
         </Table>
       )}
+      </Card>
       {selected && <NodeDetail key={selected.node_name} node={selected} />}
     </section>
   );
