@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from .auth import Identity, audit_actor, require_admin
 from .routes_builds import validate_source_path
@@ -17,6 +17,16 @@ class ControlStateBody(BaseModel):
 @router.get("/api/admin/control-state")
 def get_control_state(request: Request):
     return request.app.state.repos.control.control_state()
+
+
+@router.get("/api/admin/control-state/history")
+def get_control_state_history(request: Request,
+                              limit: int = Query(default=10, ge=1, le=50)):
+    """컨트롤 상태 변경 이력(슬라이스 36). 유지보수·드레인은 "누가 언제 왜"가
+    본질인 운영 스위치라 마지막 1건(changed_by/changed_at)만으로는 부족하다 --
+    감사 로그의 before/after 스냅샷을 그대로 내보내고 diff 는 화면이 계산한다
+    (서버가 문구를 만들면 표시 언어가 API 계약에 박힌다)."""
+    return request.app.state.repos.control.control_state_history(limit=limit)
 
 
 @router.put("/api/admin/control-state")

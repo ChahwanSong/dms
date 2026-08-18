@@ -1,4 +1,4 @@
-from ..db import Database, dump_json, iso_plus, utc_now_iso
+from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
 from ..domain import DomainValidationError
 
 POLICY_TOOLS = ("scan", "dsync", "nsync", "rm")
@@ -207,3 +207,16 @@ class ControlRepository:
     def audit_entries(self, limit: int = 50) -> list[dict]:
         return self._db.query(
             "SELECT * FROM audit_log ORDER BY id DESC LIMIT :n", {"n": limit})
+
+    def control_state_history(self, limit: int = 10) -> list[dict]:
+        """컨트롤 상태 변경 이력(슬라이스 36) -- 감사 로그에서 control_state 변경만.
+        before/after 는 set_control_state 가 남긴 전체 행 스냅샷이라, 화면이 diff
+        (유지보수 ON→OFF 등)를 계산할 재료가 전부 들어 있다. 새 테이블이 아니라
+        감사 로그 재사용인 이유: 같은 사실을 두 곳에 쓰면 언젠가 갈라진다."""
+        rows = self._db.query(
+            """SELECT actor, before_state, after_state, at FROM audit_log
+               WHERE mutation_class = 'control_state'
+               ORDER BY id DESC LIMIT :n""", {"n": limit})
+        return [{"at": r["at"], "actor": r["actor"],
+                 "before": load_json(r["before_state"]),
+                 "after": load_json(r["after_state"])} for r in rows]

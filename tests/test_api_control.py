@@ -129,3 +129,36 @@ def test_whitespace_only_actor_header_audit_is_not_bare_prefix(client, db):
     assert r.status_code == 200
     rows = db.query("SELECT * FROM audit_log WHERE mutation_class = 'control_state'")
     assert rows[-1]["actor"] == "token:shared-token"
+
+
+# ---- 컨트롤 상태 변경 이력(슬라이스 36) ----
+
+def test_control_state_history_returns_before_after_snapshots(client):
+    client.put("/api/admin/control-state", headers=ADMIN,
+               json={"maintenance": True, "drain": False, "reason": "점검"})
+    client.put("/api/admin/control-state", headers=ADMIN,
+               json={"maintenance": False, "drain": False, "reason": None})
+    rows = client.get("/api/admin/control-state/history", headers=ADMIN).json()
+    assert len(rows) == 2
+    # 최신 우선 -- 마지막 변경(해제)이 맨 앞이다.
+    assert rows[0]["before"]["maintenance"] == 1
+    assert rows[0]["after"]["maintenance"] == 0
+    assert rows[1]["before"]["maintenance"] == 0   # 최초 저장 전 시드(0/0)
+    assert rows[1]["after"]["reason"] == "점검"
+    assert rows[0]["actor"].startswith("token:")
+    assert rows[0]["at"]
+
+
+def test_control_state_history_respects_limit(client):
+    for i in range(4):
+        client.put("/api/admin/control-state", headers=ADMIN,
+                   json={"maintenance": bool(i % 2), "drain": False, "reason": None})
+    rows = client.get("/api/admin/control-state/history?limit=2",
+                      headers=ADMIN).json()
+    assert len(rows) == 2
+
+
+def test_control_state_history_is_admin_only(client):
+    client.post("/api/auth/signup", json={"username": "u9", "password": "p"})
+    client.post("/api/auth/login", json={"username": "u9", "password": "p"})
+    assert client.get("/api/admin/control-state/history").status_code in (401, 403)

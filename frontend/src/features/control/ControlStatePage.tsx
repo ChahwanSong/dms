@@ -1,15 +1,61 @@
 import { useEffect, useState } from "react";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
+import { Table } from "../../components/ui/Table";
+import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError } from "../../lib/api";
 import { useNodes } from "../nodes/useNodes";
-import { useControlState, useSetControlState } from "./useControlState";
+import { useJobMetrics } from "../dashboard/useMetrics";
+import { kpiFromStates } from "../dashboard/Dashboard";
+import { useControlState, useControlHistory, useSetControlState } from "./useControlState";
+import type { ControlState } from "../../lib/types";
+import type { ControlHistoryEntry } from "./useControlState";
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
+
+// 이력 diff 대상 필드와 한국어 라벨. before/after 전체 스냅샷에서 이 다섯만 비교한다
+// -- changed_by/changed_at 등 메타까지 diff 에 넣으면 매 행이 "변경 시각이 바뀜"이 된다.
+const DIFF_FIELDS: { key: keyof ControlState; label: string;
+                     fmt: (v: unknown) => string }[] = [
+  { key: "maintenance", label: "유지보수", fmt: (v) => (v ? "ON" : "OFF") },
+  { key: "drain", label: "드레인", fmt: (v) => (v ? "ON" : "OFF") },
+  { key: "reason", label: "사유", fmt: (v) => (v ? `'${v}'` : "—") },
+  { key: "build_node_name", label: "빌드 노드", fmt: (v) => String(v ?? "—") },
+  { key: "build_source_path", label: "소스 경로", fmt: (v) => String(v ?? "—") },
+];
+
+// 한 이력 행의 변경 내용 요약: "유지보수 OFF→ON · 사유 —→'점검'". 변한 게 없으면
+// (동일 저장 재클릭) "변경 없음" -- 지어내지 않는다.
+export function diffText(e: ControlHistoryEntry): string {
+  if (!e.before) return "초기 설정";
+  const parts: string[] = [];
+  for (const f of DIFF_FIELDS) {
+    const b = e.before?.[f.key]; const a = e.after?.[f.key];
+    // 0/null/undefined 정규화: maintenance 0 과 null 은 화면상 같은 OFF 다.
+    if (f.fmt(b) !== f.fmt(a)) parts.push(`${f.label} ${f.fmt(b)}→${f.fmt(a)}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "변경 없음";
+}
+
+// 상대 시각: "3분 전". now 는 호출자가 넘긴다(렌더마다 자라는 숫자 방지 --
+// BuildHistory 의 dataUpdatedAt 관례).
+function relTime(iso: string | null | undefined, now: number): string {
+  if (!iso) return "";
+  const ms = now - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "방금";
+  if (m < 60) return `${m}분 전`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}시간 전` : `${Math.floor(h / 24)}일 전`;
+}
 
 export function ControlStatePage() {
   const q = useControlState();
   const nodesQ = useNodes();
+  const historyQ = useControlHistory();
+  // 영향 요약 재료: 대시보드와 같은 잡 집계(24h 창의 by_state 에서 실행/대기).
+  const jobsQ = useJobMetrics(24);
   const setControlState = useSetControlState();
   const [maintenance, setMaintenance] = useState(false);
   const [drain, setDrain] = useState(false);
@@ -116,10 +162,69 @@ export function ControlStatePage() {
               </div>
             </form>
           </Card>
+          <Card className="space-y-3">
+            <h2 className="font-medium">현재 상태</h2>
+            {/* 위 폼은 "편집 중 값"이라 저장 전엔 실제와 갈릴 수 있다 -- 이 카드가
+                서버의 **적용값**을 말한다(폼과 분리된 진실 표시). */}
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <StatusPill state={q.data?.maintenance === 1 ? "유지보수 ON" : "유지보수 OFF"}
+                          variant={q.data?.maintenance === 1 ? "bad" : "ok"} />
+              <StatusPill state={q.data?.drain === 1 ? "드레인 ON" : "드레인 OFF"}
+                          variant={q.data?.drain === 1 ? "bad" : "ok"} />
+              {q.data?.reason && (
+                <span className="text-muted">사유: <span className="text-ink">{q.data.reason}</span></span>
+              )}
+            </div>
+            {/* 영향 요약: 드레인을 켜면 무엇이 멈추는지(켠 상태면 무엇이 동결 중인지)
+                의 재료. null(집계 실패)은 표시하지 않는다 -- 0 과 모름을 섞지 않는다. */}
+            {Array.isArray(jobsQ.data?.by_state) && (() => {
+              const kpi = kpiFromStates(jobsQ.data.by_state);
+              return (
+                <p className="text-sm text-muted">
+                  진행 중 작업: 실행 중 <span className="text-ink font-medium tabular-nums">{kpi.running}</span>
+                  {" · "}대기 <span className="text-ink font-medium tabular-nums">{kpi.pending}</span>
+                  {q.data?.drain === 1 && <span className="text-bad"> — 드레인으로 동결 중</span>}
+                </p>
+              );
+            })()}
+            <div className="text-sm text-muted space-y-1 border-t border-line pt-3">
+              <p>빌드 노드: <span className="text-ink font-medium">{q.data?.build_node_name ?? "—"}</span>
+                 <span className="mx-2">·</span>
+                 소스 경로: <span className="text-ink font-mono">{q.data?.build_source_path ?? "—"}</span></p>
+              <p>마지막 변경: <span className="text-ink font-medium">{q.data?.changed_by ?? "—"}</span>
+                 {" · "}{q.data?.changed_at ?? "—"}
+                 {q.data?.changed_at && (
+                   <span> ({relTime(q.data.changed_at, q.dataUpdatedAt)})</span>
+                 )}</p>
+            </div>
+          </Card>
           <Card>
-            <h2 className="font-medium mb-2">현재 상태</h2>
-            <p className="text-sm text-muted">변경자: <span className="text-ink font-medium">{q.data?.changed_by ?? "—"}</span></p>
-            <p className="text-sm text-muted">변경 시각: <span className="text-ink font-medium">{q.data?.changed_at ?? "—"}</span></p>
+            <h2 className="font-medium mb-3">변경 이력</h2>
+            {historyQ.isError ? (
+              <p className="text-bad text-sm">{(historyQ.error as ApiError).message}</p>
+            ) : (historyQ.data ?? []).length === 0 ? (
+              <p className="text-muted text-sm">이력 없음</p>
+            ) : (
+              <Table>
+                <thead>
+                  <tr className="text-muted whitespace-nowrap">
+                    <th className="py-2">시각</th><th>변경자</th><th>변경 내용</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(historyQ.data ?? []).map((e, i) => (
+                    <tr key={`${e.at}-${i}`} className="border-t border-black/5">
+                      <td className="py-2 text-muted whitespace-nowrap">{e.at}</td>
+                      <td className="whitespace-nowrap">{e.actor ?? "—"}</td>
+                      {/* diff 가 길 수 있다(여러 필드 동시 변경) -- 행 높이를 지키러
+                          자르지 않는다: 이 표는 폴링이 없고 행이 최대 10개라 접힘의
+                          비용이 낮고, 무엇이 바뀌었는지가 이 화면의 존재 이유다. */}
+                      <td className="text-muted">{diffText(e)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
           </Card>
         </>
       )}

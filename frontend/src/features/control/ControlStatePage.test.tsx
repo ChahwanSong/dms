@@ -12,6 +12,9 @@ const server = setupServer(
   http.get("/api/admin/nodes", () => HttpResponse.json([
     { node_name: "dms-w1", reported_at: "2026-08-05T00:00:00Z", fresh: true, report: {} },
   ])),
+  // 슬라이스 36: 현재 상태 카드의 영향 요약(잡 집계)·변경 이력 기본 응답.
+  http.get("/api/admin/metrics/jobs", () => HttpResponse.json({ by_state: [] })),
+  http.get("/api/admin/control-state/history", () => HttpResponse.json([])),
 );
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
@@ -83,4 +86,47 @@ test("renders no warning banners when both flags are off", async () => {
   await screen.findByLabelText("유지보수");
   expect(screen.queryByText((_, node) => Boolean(node?.textContent?.startsWith("유지보수 중")))).not.toBeInTheDocument();
   expect(screen.queryByText("드레인 중 — 진행 중인 작업이 더 전진하지 않습니다")).not.toBeInTheDocument();
+});
+
+// ── 슬라이스 36: 현재 상태 카드(적용값 배지·영향 요약) + 변경 이력 ──────────────
+
+test("현재 상태 카드가 적용값 배지·사유·영향 요약을 보여준다", async () => {
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.get("/api/admin/metrics/jobs", () => HttpResponse.json({
+      by_state: [{ state: "Running", count: 2 }, { state: "Pending", count: 3 }] })),
+  );
+  wrap();
+  expect(await screen.findByText("유지보수 ON")).toBeInTheDocument();   // 적용값 배지
+  expect(screen.getByText("드레인 OFF")).toBeInTheDocument();
+  expect(screen.getByText("점검")).toBeInTheDocument();                  // 사유
+  expect(screen.getByText("2")).toBeInTheDocument();                     // 실행 중
+  expect(screen.getByText("3")).toBeInTheDocument();                     // 대기
+});
+
+test("변경 이력이 diff 요약으로 나열된다", async () => {
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.get("/api/admin/control-state/history", () => HttpResponse.json([
+      { at: "2026-08-18T08:33:42Z", actor: "mason",
+        before: { ...CS, maintenance: 0, reason: null },
+        after: { ...CS, maintenance: 1, reason: "테스트" } },
+      { at: "2026-08-18T08:00:00Z", actor: "ops", before: null, after: CS },
+    ])),
+  );
+  wrap();
+  expect(await screen.findByText("유지보수 OFF→ON · 사유 —→'테스트'")).toBeInTheDocument();
+  expect(screen.getByText("초기 설정")).toBeInTheDocument();   // before 없음
+  expect(screen.getByText("mason")).toBeInTheDocument();
+});
+
+test("동일 값 재저장은 「변경 없음」으로 정직하게 표기한다", async () => {
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.get("/api/admin/control-state/history", () => HttpResponse.json([
+      { at: "2026-08-18T08:40:00Z", actor: "mason", before: CS, after: CS },
+    ])),
+  );
+  wrap();
+  expect(await screen.findByText("변경 없음")).toBeInTheDocument();
 });
