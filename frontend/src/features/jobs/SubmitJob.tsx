@@ -16,9 +16,16 @@ import { StoragePicker, field } from "./formFields";
 // 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션 스텝과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, CHOWN_RE, SYNC_INT_FIELDS, syncIntFieldError } from "./optionRules";
+import { CHMOD_RE, CHOWN_RE, SYNC_INT_FIELDS, intFieldError,
+         syncIntFieldError } from "./optionRules";
+// 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
+import { usePolicies } from "../policies/usePolicies";
+import type { Policy } from "../../lib/types";
 
-type Operation = "sync" | "rm";
+// 슬라이스 37: 단일 작업(구 「작업 제출」) — 배치 작업과 같은 성격의 단일 항목
+// 제출이다. 운영자는 scan 까지 세 연산 전부(서버 게이트 미러: scan 제출은 admin
+// 전용 403), 비관리자는 기존대로 sync·rm.
+type Operation = "sync" | "scan" | "rm";
 
 const initial = {
   operation: "sync" as Operation,
@@ -27,6 +34,11 @@ const initial = {
   storage: "", target: "",
   delete: false, contents: false, direct: false,
   recursive: true, stat: false, lite: false, quiet: false,
+  // scan 옵션(구 SubmitScan 미러 — dscan 1b93d54 실측): batch_files 0..10억
+  // (0 = 배칭 끔), broken_limit 0..10,000. 프리필하지 않는다 — 도구 기본
+  // (batch_files 100만/broken_limit 100)이 이미 원하는 값이라 생략 = 도구 기본.
+  // sync 의 batchFiles 와 별도 상태인 이유: 같은 옵션명이지만 범위·프리필이 다르다.
+  scanBatchFiles: "", brokenLimit: "", verbose: false,
   // 고급 sync 옵션 — 숫자도 문자열로 들고, 빈 문자열("")일 때만 "미입력"으로 생략한다.
   // truthy 검사 금지: "0"은 미입력이 아니라 범위 밖 클라이언트 검증 오류다.
   // batchFiles·bufsize 는 프리필(SYNC_INT_FIELDS.prefill — 「왜」는 그 주석):
@@ -35,7 +47,9 @@ const initial = {
   batchFiles: SYNC_INT_FIELDS.batch_files.prefill,
   bufsize: SYNC_INT_FIELDS.bufsize.prefill,
   chmod: "", chown: "",
-  priority: "mid",
+  // "" = (정책 기본) = 바디에서 생략 — resolve_priority 가 정책 default_priority 로
+  // 해석한다(BatchCreate 와 같은 계약, null≠0).
+  priority: "",
   ownerUsername: "",
 };
 
@@ -67,6 +81,12 @@ export function SubmitJob() {
 
   const recursiveMissing = f.operation === "rm" && !f.recursive;
   const statLiteConflict = f.operation === "rm" && f.stat && f.lite;
+  // scan 국소 검증(BatchCreate 옵션 스텝 미러).
+  const verboseQuietConflict = f.operation === "scan" && f.verbose && f.quiet;
+  const scanBatchFilesError = f.operation === "scan"
+    ? intFieldError("batch_files", f.scanBatchFiles, 0, 1_000_000_000) : null;
+  const brokenLimitError = f.operation === "scan"
+    ? intFieldError("broken_limit", f.brokenLimit, 0, 10_000) : null;
   // 고급 옵션은 sync 전용이라 rm 으로 바꾸면(전송도 안 되므로) 차단 사유에서 빠진다.
   const batchFilesError = f.operation === "sync"
     ? syncIntFieldError("batch_files", f.batchFiles) : null;
@@ -76,13 +96,41 @@ export function SubmitJob() {
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.operation === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
     ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 또는 cocoa.song:mig)" : null;
-  const advancedError = batchFilesError ?? bufsizeError ?? chmodError ?? chownError;
+  const advancedError = batchFilesError ?? bufsizeError ?? chmodError ?? chownError
+    ?? scanBatchFilesError ?? brokenLimitError;
   const blocked = submit.isPending || recursiveMissing || statLiteConflict || storagesQ.isError
-    || advancedError !== null;
+    || verboseQuietConflict || advancedError !== null;
   // 옵션 스텝 국소 검증: 오류를 그 스텝에서 보게 하고 "다음"을 잠근다.
   // blocked 와 별도인 이유: storagesQ.isError 등은 옵션 스텝 잘못이 아니라
   // 여기서 잠그면 사용자가 원인 없는 잠김을 본다 -- 최종 차단은 제출 버튼 몫.
-  const optionsInvalid = recursiveMissing || statLiteConflict || advancedError !== null;
+  const optionsInvalid = recursiveMissing || statLiteConflict || verboseQuietConflict
+    || advancedError !== null;
+
+  // --- 정책 기본값 캡션(슬라이스 37: BatchCreate 미러 — 표시 배선만) ---
+  const policiesQ = usePolicies();
+  const fmtPolicy = (p: Policy | undefined) => p === undefined ? "미조회"
+    : `최대 ${p.max_nodes}노드 · 노드당 ${p.procs_per_node}프로세스${
+        p.enabled === 1 ? "" : " · 비활성(잡 배치 거부)"}`;
+  const byTool = policiesQ.data === undefined
+    ? undefined : new Map(policiesQ.data.map((p) => [p.tool, p]));
+  const policyCaption = (() => {
+    if (policiesQ.isLoading) return "정책 조회 중…";
+    if (byTool === undefined) return "정책 미조회 — 정책 목록을 불러오지 못했습니다";
+    if (f.operation === "sync") {
+      const dsync = byTool.get("dsync"); const nsync = byTool.get("nsync");
+      if (dsync === undefined && nsync === undefined)
+        return "정책 미조회 — dsync/nsync 정책 행이 없습니다";
+      return `정책 기본(dsync): ${fmtPolicy(dsync)} — 공존 노드가 없으면 `
+        + `nsync 정책(${fmtPolicy(nsync)})이 적용됩니다`;
+    }
+    const p = byTool.get(f.operation);   // scan→"scan", rm→"rm"(TOOL_TO_POLICY 미러)
+    return p === undefined ? `정책 미조회 — ${f.operation} 정책 행이 없습니다`
+      : `정책 기본: ${fmtPolicy(p)}`;
+  })();
+  // 우선순위 "" = (정책 기본): resolve_priority 미러 — sync 는 dsync 정책 대표.
+  const defaultPolicy = byTool?.get(f.operation === "sync" ? "dsync" : f.operation);
+  const priorityDefaultLabel = defaultPolicy === undefined
+    ? "(정책 기본)" : `(정책 기본: ${defaultPolicy.default_priority})`;
 
   const on = (k: keyof typeof initial) => (e: any) =>
     setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
@@ -103,6 +151,18 @@ export function SubmitJob() {
 
   // 제출 버튼은 위저드 프레임의 type="button" onClick 이라 form 이벤트가 없을 수
   // 있다 -- e 는 옵션으로 받고, form 경유(Enter 유출 등) 때만 기본 동작을 막는다.
+  function scanOptions(): SubmitBody["options"] {
+    const options: SubmitBody["options"] = checkedOptions({
+      verbose: f.verbose, quiet: f.quiet });
+    if (f.scanBatchFiles.trim() !== "") options.batch_files = Number(f.scanBatchFiles.trim());
+    if (f.brokenLimit.trim() !== "") options.broken_limit = Number(f.brokenLimit.trim());
+    return options;
+  }
+
+  function rmOptions(): SubmitBody["options"] {
+    return checkedOptions({ recursive: f.recursive, stat: f.stat, lite: f.lite, quiet: f.quiet });
+  }
+
   function handleSubmit(e?: React.SyntheticEvent) {
     e?.preventDefault();
     if (blocked) return;
@@ -112,14 +172,14 @@ export function SubmitJob() {
           source_storage: f.sourceStorage, source: f.sourcePath,
           destination_storage: f.destStorage, destination: f.destPath,
           options: syncOptions(),
-          priority: f.priority,
         }
       : {
-          operation: "rm",
+          operation: f.operation,
           storage: f.storage, target: f.target,
-          options: checkedOptions({ recursive: f.recursive, stat: f.stat, lite: f.lite, quiet: f.quiet }),
-          priority: f.priority,
+          options: f.operation === "scan" ? scanOptions() : rmOptions(),
         };
+    // "" = (정책 기본) = 생략 — resolve_priority 가 정책값으로 해석(null≠0).
+    if (f.priority !== "") body.priority = f.priority;
     if (isAdmin && f.ownerUsername.trim()) body.owner_username = f.ownerUsername.trim();
     submit.mutate(body, { onSuccess: (r) => nav(`/jobs/${r.request_id}`) });
   }
@@ -134,7 +194,9 @@ export function SubmitJob() {
 
   return (
     <Card className="max-w-xl">
-      <h1 className="text-2xl font-bold mb-5">작업 제출</h1>
+      {/* 개명(사용자 결정 2026-08-18): 「작업 제출」→「단일 작업」 — 배치 작업과
+          같은 성격의 단일 항목 제출임을 이름이 말한다. */}
+      <h1 className="text-2xl font-bold mb-5">단일 작업</h1>
       {/* form 소유는 화면 쪽(위저드 프레임 계약): 프레임 버튼이 전부 type="button"
           이라 Enter 는 정상 동선에서 새지 않고, 새더라도(회귀) onSubmit 의
           blocked 가드가 이중 방어한다 */}
@@ -150,6 +212,9 @@ export function SubmitJob() {
                 <select aria-label="연산" className={field} value={f.operation}
                         onChange={(e) => setF({ ...f, operation: e.target.value as Operation })}>
                   <option value="sync">sync</option>
+                  {/* scan 제출은 서버가 admin 전용(403)이다 — 표시 게이트일 뿐,
+                      진짜 차단은 서버 몫(navigation.ts 관례와 동일). */}
+                  {isAdmin && <option value="scan">scan</option>}
                   <option value="rm">rm</option>
                 </select>
               </label>
@@ -178,6 +243,7 @@ export function SubmitJob() {
                   </label>
                 </div>
               ) : (
+                /* scan·rm 공용: 스토리지 하나 + 대상 경로(상대). */
                 <div className="grid grid-cols-2 gap-3">
                   <StoragePicker label="스토리지" value={f.storage}
                     onChange={(v) => setF({ ...f, storage: v })} storages={storages} loading={loadingStorages} />
@@ -259,6 +325,31 @@ export function SubmitJob() {
                     </div>
                   </details>
                 </>
+              ) : f.operation === "scan" ? (
+                /* scan 옵션(구 SubmitScan 미러): 생략 = 도구 기본. */
+                <>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" aria-label="verbose" checked={f.verbose} onChange={on("verbose")} /> verbose
+                  </label>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
+                  </label>
+                  {verboseQuietConflict && (
+                    <p className="text-bad text-sm">verbose와 quiet는 함께 쓸 수 없습니다</p>
+                  )}
+                  <label className="text-sm block">batch_files (선택 · 0..1,000,000,000)
+                    <input aria-label="batch_files" className={field} value={f.scanBatchFiles}
+                           placeholder="비우면 1,000,000(도구 기본) · 0 = 배칭 안 함"
+                           onChange={on("scanBatchFiles")} />
+                  </label>
+                  {scanBatchFilesError && <p className="text-bad text-sm">{scanBatchFilesError}</p>}
+                  <label className="text-sm block">broken_limit (선택 · 0..10,000)
+                    <input aria-label="broken_limit" className={field} value={f.brokenLimit}
+                           placeholder="비우면 100(도구 기본) · 파손 경로 표본 보관 상한"
+                           onChange={on("brokenLimit")} />
+                  </label>
+                  {brokenLimitError && <p className="text-bad text-sm">{brokenLimitError}</p>}
+                </>
               ) : (
                 <>
                   <label className="flex items-center gap-2 text-sm">
@@ -278,8 +369,13 @@ export function SubmitJob() {
                 </>
               )}
 
+              {/* 정책 기본값 캡션(BatchCreate 미러) — 노드 수·프로세스 수는 단일
+                  작업에선 정책이 정한다(배치 레벨 override 없음)는 사실을 여기서
+                  말한다. */}
+              <p className="text-muted text-xs">{policyCaption}</p>
               <label className="text-sm block">우선순위
                 <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
+                  <option value="">{priorityDefaultLabel}</option>
                   <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
                 </select>
               </label>
@@ -341,11 +437,11 @@ export function SubmitJob() {
                   <div className="flex gap-2">
                     <dt className="w-24 shrink-0 text-muted">옵션</dt>
                     <dd>{JSON.stringify(f.operation === "sync" ? syncOptions()
-                      : checkedOptions({ recursive: f.recursive, stat: f.stat, lite: f.lite, quiet: f.quiet }))}</dd>
+                      : f.operation === "scan" ? scanOptions() : rmOptions())}</dd>
                   </div>
                   <div className="flex gap-2">
                     <dt className="w-24 shrink-0 text-muted">우선순위</dt>
-                    <dd>{f.priority}</dd>
+                    <dd>{f.priority === "" ? priorityDefaultLabel : f.priority}</dd>
                   </div>
                   {isAdmin && f.ownerUsername.trim() !== "" && (
                     <div className="flex gap-2">

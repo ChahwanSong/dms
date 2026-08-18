@@ -1,8 +1,8 @@
 import { matchPath } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
-  Ban, Boxes, Database, FilePlus, FolderCog, FolderSearch, Hammer,
-  Layers, LayoutDashboard, ListTodo, Play, Rocket, ScrollText,
+  Ban, Boxes, Database, FilePlus, FolderCog, Hammer,
+  Layers, LayoutDashboard, ListTodo, Rocket, ScrollText,
   Server, Shield, SlidersHorizontal, Users,
 } from "lucide-react";
 
@@ -40,15 +40,19 @@ export const NAVIGATION: NavSection[] = [
           { path: "/admin/builds", label: "빌드", icon: Hammer },
           { path: "/admin/releases", label: "릴리스", icon: Rocket },
           { path: "/admin/control", label: "컨트롤 상태", icon: SlidersHorizontal },
+          // 스토리지 그룹에서 이동(사용자 결정 2026-08-18): 아티팩트 경로는 잡
+          // 산출물 저장 위치라 스토리지 등록보다 운영 설정에 가깝다.
+          { path: "/admin/artifact-base", label: "아티팩트 경로", icon: FolderCog },
         ],
       },
       {
+        // 슬라이스 37(사용자 결정): 「작업 제출」→「단일 작업」(배치 작업과 같은
+        // 성격의 단일 항목 제출). 「내 스캔 경로」·「scan 실행」 메뉴는 제거 --
+        // scan 은 단일 작업 위저드(운영자 전용 연산)로 흡수됐다.
         label: "작업", defaultCollapsed: true,
         items: [
           { path: "/jobs", label: "내 작업", icon: ListTodo },
-          { path: "/jobs/new", label: "작업 제출", icon: FilePlus },
-          { path: "/scan-paths", label: "내 스캔 경로", icon: FolderSearch },
-          { path: "/admin/scan", label: "scan 실행", icon: Play, adminOnly: true },
+          { path: "/jobs/new", label: "단일 작업", icon: FilePlus },
         ],
       },
       {
@@ -56,7 +60,6 @@ export const NAVIGATION: NavSection[] = [
         items: [
           { path: "/admin/storages", label: "스토리지", icon: Database },
           { path: "/admin/nodes", label: "노드", icon: Server },
-          { path: "/admin/artifact-base", label: "아티팩트 경로", icon: FolderCog },
         ],
       },
       {

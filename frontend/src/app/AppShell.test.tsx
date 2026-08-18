@@ -37,12 +37,12 @@ function renderShell(role: "user" | "admin", at = "/jobs") {
 
 // 구 AppShell 실측 16링크(작업4+스토리지3+운영5+관리4). 라벨은 기존 문구 그대로.
 const ADMIN_ONLY_LABELS = [
-  "scan 실행", "스토리지", "노드", "아티팩트 경로", "대시보드", "배치 작업",
+  "스토리지", "노드", "아티팩트 경로", "대시보드", "배치 작업",
   "빌드", "릴리스", "컨트롤 상태", "계정", "정책", "denylist", "감사 로그",
 ];
-const USER_LABELS = ["내 작업", "작업 제출", "내 스캔 경로"];
+const USER_LABELS = ["내 작업", "단일 작업"];
 
-test("user 는 작업 그룹 3링크만 보이고 admin 전용 그룹은 없다", async () => {
+test("user 는 작업 그룹 2링크만 보이고 admin 전용 그룹은 없다", async () => {
   renderShell("user");
   // me 도착을 먼저 기다린다 -- 기다리지 않으면 "adminOnly 부재" 단언이 로딩 중
   // 화면을 보고 공허하게 통과한다(데이터가 오기 전엔 누구든 user 로 보인다).
@@ -94,18 +94,18 @@ test("활성 그룹 자동 펼침: /jobs 마운트면 접힘 기본인 작업 �
   // 지금 보고 있는 화면의 그룹은 항상 열려 있어 자기 위치를 잃지 않는다.
   renderShell("admin", "/jobs");
   expect(await screen.findByRole("link", { name: "내 작업" })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "작업 제출" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
   // 비활성 접힘 그룹은 여전히 닫혀 있다.
   expect(screen.queryByRole("link", { name: "계정" })).toBeNull();
 });
 
 test("그룹 접기 토글: 클릭 시 그룹 링크가 사라지고 재클릭이 복원한다", async () => {
   renderShell("admin", "/jobs");
-  await screen.findByRole("link", { name: "작업 제출" });
+  await screen.findByRole("link", { name: "단일 작업" });
   await userEvent.click(screen.getByRole("button", { name: "작업" }));
-  expect(screen.queryByRole("link", { name: "작업 제출" })).toBeNull();
+  expect(screen.queryByRole("link", { name: "단일 작업" })).toBeNull();
   // 다른 그룹은 접히지 않는다 -- 상태가 그룹 단위임을 함께 못 박는다(운영은 기본 펼침).
   expect(screen.getByRole("link", { name: "대시보드" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "작업" }));
-  expect(screen.getByRole("link", { name: "작업 제출" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
 });

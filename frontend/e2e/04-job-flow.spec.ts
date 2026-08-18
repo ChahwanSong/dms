@@ -19,8 +19,11 @@ test.describe("E4 잡 종단 흐름", () => {
     // admin 으로 들어간다: 특권 요청자(root/admin 기본값)라야 LDAP 없는 이 환경에서
     // placement 의 신원 검사를 건너뛰고 후보 선정까지 간다(설계 §1-8).
     await apiLogin(page);
-    await page.goto("/admin/scan");
-    await expect(page.getByRole("heading", { name: "scan 실행" })).toBeVisible();
+    // 슬라이스 37: scan 은 단일 작업 위저드(연산 스텝의 운영자 전용 옵션)로 흡수됐다.
+    await page.goto("/jobs/new");
+    await expect(page.getByRole("heading", { name: "단일 작업" })).toBeVisible();
+    await page.getByLabel("연산").selectOption("scan");
+    await page.getByRole("button", { name: "다음" }).click();
 
     // 스토리지 목록이 폼까지 도착했는지를 먼저 못박는다. 이게 없으면 아래
     // selectOption 이 타임아웃했을 때 "폼이 깨졌나 / 시드가 안 실렸나"가 뭉개진다.
@@ -36,9 +39,12 @@ test.describe("E4 잡 종단 흐름", () => {
     // **달라야** 한다: 같은 requester+storage+target+options 는 resource_key 가
     // 같아 활성 요청이 있으면 Conflict 로 떨어진다.
     await page.getByLabel("대상 경로").fill("e4-scan");
+    // 옵션 스텝(기본값 그대로) → 확인 스텝 → 제출.
+    await page.getByRole("button", { name: "다음" }).click();
+    await page.getByRole("button", { name: "다음" }).click();
     await page.getByRole("button", { name: "제출", exact: true }).click();
 
-    // 202 수리와 상세 자동 이동(SubmitScan.tsx 의 onSuccess nav)을 URL 하나로
+    // 202 수리와 상세 자동 이동(SubmitJob onSuccess nav)을 URL 하나로
     // 단언한다 -- 서버가 4xx 를 주면 SPA 는 이 화면에 머무르므로 여기서 빨개진다.
     await expect(page).toHaveURL(/\/jobs\/[0-9a-f-]+$/);
     const match = new URL(page.url()).pathname.match(/^\/jobs\/([0-9a-f-]+)$/);

@@ -137,7 +137,7 @@ test("sync 제출 바디가 정확하다", async () => {
     // 항상 명시 전송된다. 예전엔 빈값이라 키가 통째로 빠졌다 — 지우면 다시 빠진다
     // (아래 "고급 숫자 옵션을 지우면…" 테스트가 그 성질을 지킨다).
     options: SYNC_NUM_DEFAULTS,
-    priority: "mid",
+    // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
   });
 });
 
@@ -159,7 +159,7 @@ test("rm 제출 바디에 options.recursive가 true로 들어간다", async () =
     operation: "rm",
     storage: "cephfs", target: "a/b",
     options: { recursive: true },
-    priority: "mid",
+    // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
   });
 });
 
@@ -419,4 +419,54 @@ test("범위 밖 bufsize는 다음을 비활성으로 막는다", async () => {
   await userEvent.type(screen.getByLabelText("bufsize"), "100");
   expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
   expect(screen.getByText("bufsize는 4096..1073741824 범위의 정수여야 합니다")).toBeInTheDocument();
+});
+
+// ---- 슬라이스 37: scan 연산(운영자 전용) ------------------------------------
+
+test("비관리자에게는 scan 연산이 보이지 않는다(표시 게이트 — 진짜 차단은 서버 403)", async () => {
+  renderPage();
+  const select = (await screen.findByLabelText("연산")) as HTMLSelectElement;
+  expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync", "rm"]);
+});
+
+test("admin scan 제출 바디가 정확하다(옵션 생략 = 도구 기본)", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
+  let posted: unknown = null;
+  server.use(http.post("/api/user/requests", async ({ request }) => {
+    posted = await request.json();
+    return HttpResponse.json({ request_id: "r1", state: "Pending" }, { status: 202 });
+  }));
+  renderPage();
+  const select = (await screen.findByLabelText("연산")) as HTMLSelectElement;
+  // admin 은 세 연산 전부 -- scan 은 sync 와 rm 사이.
+  await screen.findByRole("option", { name: "scan" });
+  expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync", "scan", "rm"]);
+  await userEvent.selectOptions(select, "scan");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.selectOptions(screen.getByLabelText("스토리지"), "cephfs");
+  await userEvent.type(screen.getByLabelText("대상 경로"), "team/data");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.type(screen.getByLabelText("broken_limit"), "500");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(posted).toEqual({
+    operation: "scan", storage: "cephfs", target: "team/data",
+    options: { broken_limit: 500 },
+  });
+});
+
+test("scan 의 verbose·quiet 동시는 다음을 잠근다", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
+  renderPage();
+  await screen.findByRole("option", { name: "scan" });
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "scan");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.selectOptions(screen.getByLabelText("스토리지"), "cephfs");
+  await userEvent.type(screen.getByLabelText("대상 경로"), "a");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.click(screen.getByLabelText("verbose"));
+  await userEvent.click(screen.getByLabelText("quiet"));
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
+  expect(screen.getByText("verbose와 quiet는 함께 쓸 수 없습니다")).toBeInTheDocument();
 });

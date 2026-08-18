@@ -42,7 +42,8 @@ export interface SubmitBody {
   destination_storage?: string; destination?: string;
   // string 개방이 chmod/chown 을 싣는 유일한 관문이다(고급 sync 옵션 — 슬라이스 26).
   options: Record<string, boolean | number | string>;
-  priority: string;
+  // 생략 = (정책 기본) — resolve_priority 가 정책 default_priority 로 해석(슬라이스 37).
+  priority?: string;
   owner_username?: string;
 }
 export const useSubmitRequest = () =>

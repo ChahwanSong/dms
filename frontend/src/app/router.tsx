@@ -9,10 +9,8 @@ import { ApiError } from "../lib/api";
 import { Login } from "../features/auth/Login";
 import { JobsList } from "../features/jobs/JobsList";
 import { SubmitJob } from "../features/jobs/SubmitJob";
-import { SubmitScan } from "../features/jobs/SubmitScan";
 import { RequestDetail } from "../features/jobs/RequestDetail";
 import { StoragesList } from "../features/storages/StoragesList";
-import { ScanPaths } from "../features/scanpaths/ScanPaths";
 import { Dashboard } from "../features/dashboard/Dashboard";
 import { BatchesList } from "../features/batches/BatchesList";
 import { BatchCreate } from "../features/batches/BatchCreate";
@@ -68,8 +66,6 @@ export function AppRouter() {
           <Route path="/jobs" element={<RequireRole><AppShell><JobsList /></AppShell></RequireRole>} />
           <Route path="/jobs/new" element={<RequireRole><AppShell><SubmitJob /></AppShell></RequireRole>} />
           <Route path="/jobs/:requestId" element={<RequireRole><AppShell><RequestDetail /></AppShell></RequireRole>} />
-          <Route path="/scan-paths" element={<RequireRole><AppShell><ScanPaths /></AppShell></RequireRole>} />
-          <Route path="/admin/scan" element={<RequireRole role="admin"><AppShell><SubmitScan /></AppShell></RequireRole>} />
           <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
           <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
           <Route path="/admin/batches" element={<RequireRole role="admin"><AppShell><BatchesList /></AppShell></RequireRole>} />

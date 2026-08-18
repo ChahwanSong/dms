@@ -82,23 +82,19 @@ test("admin can open control state", async () => {
   expect(await screen.findByRole("heading", { name: "컨트롤 상태" })).toBeInTheDocument();
 });
 
-test("admin can open scan screen", async () => {
+// 슬라이스 37: /admin/scan·/scan-paths 라우트 제거(scan 은 단일 작업으로 흡수) --
+// 미지 경로가 됐으므로 홈 리다이렉트로 귀결돼야 한다(catch-all 계약).
+test("removed routes (/admin/scan, /scan-paths) fall through to home redirect", async () => {
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json({ actor: "admin", role: "admin" })),
-    http.get("/api/user/storages", () => HttpResponse.json([])),
+    http.get("/api/admin/metrics/jobs", () => HttpResponse.json({ by_state: [] })),
+    http.get("/api/admin/metrics/infra", () => HttpResponse.json({ components: [], job_image: { live: null, manifest: null } })),
+    http.get("/api/admin/metrics/queue", () => HttpResponse.json({ queue: null, podgroups: null })),
+    http.get("/api/admin/metrics/nodes", () => HttpResponse.json({ nodes: [] })),
+    http.get("/api/user/requests", () => HttpResponse.json([])),
   );
   renderAt("/admin/scan");
-  expect(await screen.findByRole("heading", { name: "scan 실행" })).toBeInTheDocument();
-});
-
-test("non-admin user can open my scan paths (not admin-gated)", async () => {
-  server.use(
-    http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })),
-    http.get("/api/user/scan-paths", () => HttpResponse.json([])),
-    http.get("/api/user/storages", () => HttpResponse.json([])),
-  );
-  renderAt("/scan-paths");
-  expect(await screen.findByRole("heading", { name: "내 스캔 경로" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "대시보드" })).toBeInTheDocument();
 });
 
 test("admin can open accounts list", async () => {

@@ -103,7 +103,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   node_not_found: "노드를 찾을 수 없습니다",
   requester_disabled: "요청자 계정이 비활성화되었습니다",
   // 브리프 BACKEND_CODES 목록에는 없지만 src/dms/ grep으로 확인한, 현재도 실제로
-  // 발생하는 코드들 -- 삭제하면 ScanPaths.test.tsx / AccountsList.test.tsx 가
+  // 발생하는 코드들 -- 삭제하면 AccountsList.test.tsx 가
   // 깨진다(no_covering_scan, cannot_lock_self는 기존 테스트가 한국어 문구를 직접
   // 단언하고 있었다). 브리프의 목록이 백엔드 실제 코드 전수조사와 어긋나 있어
   // "죽은 키" 판정에서 제외했다 -- task-1-report.md 참고.
