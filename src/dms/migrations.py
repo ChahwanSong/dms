@@ -353,6 +353,11 @@ def _apply_migrations(db: Database) -> None:
             -- 20-config.yaml 이 build_node_name 으로 이미 명문화한 그것:
             -- 운영자가 포탈에서 바꾸는 값을 ConfigMap 에 두면 재적용마다 되돌아간다.
             artifact_base_uri TEXT,
+            -- 잡 이미지 오버라이드(슬라이스 35): 포탈 릴리스의 job-image 행이 쓴다.
+            -- NULL = 미설정 -> env(DMS_JOB_IMAGE). artifact_base_uri 와 같은 패턴
+            -- (DB 가 env 를 이긴다) -- 잡 파드 생성 시점마다 해석되므로 재시작 없이
+            -- 다음 잡부터 반영된다(resolve_job_image).
+            job_image TEXT,
             -- 컨트롤러 관점 검증(설계 §2.4c): 컨트롤러는 read_summary 로 실제
             -- 읽기를 하는 유일한 프로세스라, 마운트가 없으면 "SUCCEEDED 인데
             -- 요약이 없는" 조용한 실패가 난다(stepper 의 summary_unavailable) --
@@ -539,6 +544,8 @@ def _ensure_columns(db):
         # 슬라이스 18 아티팩트 base -- 기배포 DB 는 CREATE 를 다시 안 탄다(위
         # submit_wait_seconds 와 같은 이유: 양쪽에 넣지 않으면 라이브에서만 없다).
         ("control_state", "artifact_base_uri", "TEXT"),
+        # 슬라이스 35 잡 이미지 오버라이드 -- 이중 경로 규약(슬라이스 14 교훈).
+        ("control_state", "job_image", "TEXT"),
         ("control_state", "artifact_base_check_uri", "TEXT"),
         ("control_state", "artifact_base_check_ok", "INTEGER"),
         ("control_state", "artifact_base_check_reason", "TEXT"),

@@ -591,7 +591,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 31      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다
+    assert len(pairs) == 32      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -608,7 +608,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 31
+    assert len(pairs) == 32
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 

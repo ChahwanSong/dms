@@ -168,6 +168,15 @@ test("라이브가 동봉 매니페스트와 다르면 드리프트 배지와 �
   )).toBeInTheDocument();
 });
 
+test("잡 이미지 소스가 db(릴리스 오버라이드)면 되돌림 대신 우선을 말한다", async () => {
+  // 슬라이스 35: DB 오버라이드는 apply 로 되돌아가지 않는다 -- env 시절 문구를
+  // 그대로 쓰면 거짓 경고가 된다.
+  renderDash({ infra: { ...DRIFTED,
+    job_image: { ...DRIFTED.job_image, source: "db" } } });
+  expect(await screen.findByText(/릴리스 오버라이드가 우선이라/)).toBeInTheDocument();
+  expect(screen.queryByText(/매니페스트 값으로 되돌립니다/)).not.toBeInTheDocument();
+});
+
 test("일치하거나 매니페스트가 null이면 아무 배지도 내지 않는다", async () => {
   // 기본 INFRA: dms-agent 일치 + dms-api null + job_image null -- 전부 무배지(설계 §3/§4)
   renderDash();

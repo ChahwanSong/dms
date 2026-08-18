@@ -74,7 +74,11 @@ class VolcanoExecutionAdapter:
     def __init__(self, k8s, *, job_image, namespace, storages_lookup, read_text,
                  artifact_base):
         self._k8s = k8s
-        self._job_image = job_image
+        # job_image 도 artifact_base 와 같은 계약(슬라이스 35): str(고정값) 또는
+        # 0-인자 callable(호출 시점 해석). 생성자 캡처를 피해야 포탈 릴리스의
+        # job-image 오버라이드가 재시작 없이 다음 잡부터 반영된다.
+        self._job_image_fn = (job_image if callable(job_image)
+                              else (lambda: job_image))
         self._namespace = namespace
         self._storages = storages_lookup
         self._read_text = read_text
@@ -130,7 +134,7 @@ class VolcanoExecutionAdapter:
 
     def _preflight_pod(self, spec, node, role):
         return build_preflight_pod(
-            spec, job_image=self._job_image, namespace=self._namespace,
+            spec, job_image=self._job_image_fn(), namespace=self._namespace,
             volumes=self._volumes(spec, role=role), node=node, role=role)
 
     def submit(self, spec) -> str:
@@ -154,7 +158,7 @@ class VolcanoExecutionAdapter:
                 prefix = "pod"
             else:
                 manifest = build_volcano_job(
-                    spec, job_image=self._job_image, namespace=self._namespace,
+                    spec, job_image=self._job_image_fn(), namespace=self._namespace,
                     volumes=self._volumes(spec))
                 prefix = "vcjob"
             self._k8s.create(manifest)

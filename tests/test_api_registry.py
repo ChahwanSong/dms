@@ -14,8 +14,16 @@ class _FakeRunner:
 
 @pytest.fixture
 def reg_client(client, monkeypatch):
-    # live: dms d74(api·controller), agent be9168b17. 매니페스트(동봉본)는 파일에서
-    # 읽으므로 실 deploy/k8s 값(dms d74·agent d53·job mfu d53)이 in_use 에 함께 든다.
+    # live: dms d74(api·controller), agent be9168b17. 매니페스트(동봉본)는 실
+    # deploy/k8s 파일이 아니라 **고정 목**으로 준다 -- 실 파일을 읽게 두면 배포
+    # 태그 bump 커밋마다 이 테스트가 깨진다(d80 정렬에서 실제로 깨졌다). 여기서
+    # 고정하는 값이 아래 in_use 단언의 유일한 근거다: dms d74·agent d53·mfu d53.
+    monkeypatch.setattr("dms.api.routes_registry.manifest_images",
+                        lambda: {"dms-api": "pkg-01:5000/dms:d74",
+                                 "dms-controller": "pkg-01:5000/dms:d74",
+                                 "dms-agent": "pkg-01:5000/dms-agent:d53"})
+    monkeypatch.setattr("dms.api.routes_registry.manifest_job_image",
+                        lambda: "pkg-01:5000/dms-mpifileutils:d53")
     client.app.state.rollout_runner = _FakeRunner({
         ("Deployment", "dms-api"): {"api": "pkg-01:5000/dms:d74"},
         ("Deployment", "dms-controller"): {"controller": "pkg-01:5000/dms:d74"},

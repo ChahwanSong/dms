@@ -31,7 +31,8 @@ def rollout_client(client, monkeypatch):
     monkeypatch.setattr(
         "dms.api.routes_releases.fetch_repo_tags",
         lambda registry, repo: {"dms": ["d22", "d23"],
-                                "dms-agent": ["dev5", "dev6"]}.get(repo))
+                                "dms-agent": ["dev5", "dev6"],
+                                "dms-mpifileutils": ["d53", "d80"]}.get(repo))
     client.app.state.rollout_runner = _FakeRunner({
         ("Deployment", "dms-api"): {"api": "pkg-01:5000/dms:d22"},
         ("Deployment", "dms-controller"): {"controller": "pkg-01:5000/dms:d22"},
@@ -46,7 +47,8 @@ def test_targets_expose_current_image_and_tags(rollout_client):
     body = r.json()
     assert body["registry_ok"] is True
     by_comp = {t["component"]: t for t in body["targets"]}
-    assert list(by_comp) == ["dms-agent", "dms-api", "dms-controller"]
+    # 넷째 행 job-image(슬라이스 35): 워크로드 뒤에 온다.
+    assert list(by_comp) == ["dms-agent", "dms-api", "dms-controller", "job-image"]
     assert by_comp["dms-agent"]["current_image"] == "pkg-01:5000/dms-agent:dev5"
     assert by_comp["dms-agent"]["tags"] == ["dev5", "dev6"]
     assert by_comp["dms-controller"]["container"] == "controller"
@@ -62,7 +64,8 @@ def test_targets_query_registry_once_per_repository(rollout_client, monkeypatch)
         return ["d22", "d23"]
     monkeypatch.setattr("dms.api.routes_releases.fetch_repo_tags", counting)
     rollout_client.get("/api/admin/releases/targets", headers=ADMIN)
-    assert sorted(calls) == ["dms", "dms-agent"]
+    # job-image 행(mfu 리포) 몫이 하나 늘지만, 같은 리포 중복 조회는 여전히 없다.
+    assert sorted(calls) == ["dms", "dms-agent", "dms-mpifileutils"]
 
 
 def test_targets_survive_registry_outage(rollout_client, monkeypatch):
@@ -80,6 +83,8 @@ def test_targets_survive_workload_read_failure(rollout_client):
     rollout_client.app.state.rollout_runner.fail_observe = True
     r = rollout_client.get("/api/admin/releases/targets", headers=ADMIN)
     assert r.status_code == 200
+    # job-image 의 current 는 observe 가 아니라 resolve(DB→env)라 이 실패와 무관 --
+    # conftest 는 env(job_image)가 비어 있어 None 으로 접힌다(결과적으로 전 행 None).
     assert all(t["current_image"] is None for t in r.json()["targets"])
 
 

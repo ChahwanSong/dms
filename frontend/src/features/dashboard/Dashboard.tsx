@@ -98,7 +98,11 @@ export function Dashboard() {
         </ul>
         {jobImage?.live && jobImage?.manifest && jobImage.live !== jobImage.manifest && (
           <p className="mt-3 text-xs text-bad">
-            {`잡 이미지 ${jobImage.live} · 매니페스트 ${jobImage.manifest} — 다음 kubectl apply가 매니페스트 값으로 되돌립니다`}
+            {/* source=db(릴리스의 job-image 오버라이드)면 apply 는 되돌리지 못한다
+                -- 같은 문구를 쓰면 거짓 경고가 된다(슬라이스 35). */}
+            {jobImage.source === "db"
+              ? `잡 이미지 ${jobImage.live} · 매니페스트 ${jobImage.manifest} — 릴리스 오버라이드가 우선이라 kubectl apply 로 되돌아가지 않습니다`
+              : `잡 이미지 ${jobImage.live} · 매니페스트 ${jobImage.manifest} — 다음 kubectl apply가 매니페스트 값으로 되돌립니다`}
           </p>
         )}
       </Card>

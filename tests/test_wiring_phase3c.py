@@ -34,18 +34,18 @@ def test_ldap_resolver_built_when_configured(db):
     assert r is not None and hasattr(r, "resolve")
 
 
-def test_build_runner_is_stub_when_backend_is_not_volcano():
+def test_build_runner_is_stub_when_backend_is_not_volcano(db):
     settings = Settings.from_env(BASE)
-    assert isinstance(build_build_runner(settings), StubBuildRunner)
+    assert isinstance(build_build_runner(settings, Repositories(db)), StubBuildRunner)
 
 
-def test_build_runner_reads_timeout_from_settings():
+def test_build_runner_reads_timeout_from_settings(db):
     # C2(a): wiring이 settings.build_timeout_seconds를 BuildRunner에 실제로
     # 전달하는지 -- 빠지면 파드에 activeDeadlineSeconds가 안 실린다.
     settings = Settings.from_env({**BASE, "DMS_EXECUTION_BACKEND": "volcano",
                                   "DMS_JOB_IMAGE": "reg/img:1",
                                   "DMS_BUILD_TIMEOUT_SECONDS": "111"})
-    runner = build_build_runner(settings)
+    runner = build_build_runner(settings, Repositories(db))
     assert isinstance(runner, BuildRunner)
     assert runner._timeout_seconds == 111
 

@@ -64,7 +64,7 @@ def main(argv=None) -> int:
         holder = f"controller-{os.getpid()}"
         identity_resolver = build_identity_resolver(settings)
         execution_adapter = build_execution_adapter(settings, repos)
-        build_runner = build_build_runner(settings)
+        build_runner = build_build_runner(settings, repos)
         rollout_runner = build_rollout_runner(settings)
         if args.once:
             loops = build_loops(settings, repos, identity_resolver=identity_resolver,

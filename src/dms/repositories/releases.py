@@ -93,6 +93,29 @@ class ReleasesRepository:
                 {"s": first_seq})
         return [dict(r) for r in rows]
 
+    def record_applied(self, *, component, image, tag, actor) -> dict:
+        """즉시 적용 완료된 릴리스 행(슬라이스 35: job-image). 워크로드 패치가 아니라
+        DB 오버라이드 한 줄이라 컨트롤러 롤아웃을 거치지 않는다 -- Pending 을 만들면
+        rollout_watcher 가 COMPONENTS 에 없는 컴포넌트를 만나 죽으므로, 처음부터
+        Applied 로 넣어 이력·current 에만 남긴다. active() 가드 밖인 것도 의도다:
+        진행 중 워크로드 롤아웃과 잡 이미지 변경은 서로를 막을 이유가 없다."""
+        now = utc_now_iso()
+        with self._db.transaction():
+            row = self._db.query_one("SELECT COALESCE(MAX(seq), 0) AS m FROM releases")
+            seq = row["m"] + 1
+            self._db.execute(
+                """INSERT INTO releases (component, image, tag, digest, state,
+                       reason_code, seq, actor, applied_at)
+                   VALUES (:c, :img, :tag, NULL, 'Applied', NULL, :seq, :actor, :now)""",
+                {"c": component, "img": image, "tag": tag, "seq": seq,
+                 "actor": actor, "now": now})
+            self._audit("create", f"seq:{seq}", None,
+                        {"items": [{"component": component, "image": image,
+                                    "tag": tag, "state": "Applied"}]}, actor)
+            rows = self._db.query(
+                f"SELECT * FROM releases WHERE seq = :s {_ORDER}", {"s": seq})
+        return dict(rows[0])
+
     def get(self, release_id):
         row = self._db.query_one("SELECT * FROM releases WHERE id = :id",
                                  {"id": release_id})

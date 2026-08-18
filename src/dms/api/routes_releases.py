@@ -5,10 +5,19 @@ from pydantic import BaseModel
 
 from ..domain import DomainValidationError
 from ..execution import ExecutionError
+from ..job_image import resolve_job_image
 from ..registry import fetch_repo_tags
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
 from .auth import Identity, audit_actor, require_admin
 from .routes_requests import reject_when_maintenance
+
+# 잡 이미지(슬라이스 35): 워크로드가 아니라 "다음 잡 파드가 쓸 이미지"의 DB
+# 오버라이드다(control_state.job_image, resolve_job_image 가 env 를 이긴다).
+# COMPONENTS 에 넣지 않는 이유: 그 표는 patch/observe/ROLLOUT_ORDER 를 구동하는
+# 워크로드 좌표라, 여기 섞으면 컨트롤러가 존재하지 않는 워크로드를 patch 하려
+# 든다. 릴리스 화면에서는 넷째 행으로 함께 보이고, 적용은 즉시(재시작 없음)다.
+JOB_IMAGE_COMPONENT = "job-image"
+_JOB_IMAGE_REPO = "dms-mpifileutils"
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -90,6 +99,21 @@ def release_targets(request: Request):
             "current_image": _current_image(runner, spec),
             "tags": tags or [],
         })
+    # 넷째 행: 잡 이미지(슬라이스 35). current 는 유효값(DB→env) -- 화면의 "현재"가
+    # 실제 다음 잡이 쓸 이미지와 갈리면 same_tag 검사가 거짓말을 한다.
+    ji_tags = _tags_for(tags_cache, settings.build_registry, _JOB_IMAGE_REPO)
+    if ji_tags is None:
+        registry_ok = False
+    targets.append({
+        "component": JOB_IMAGE_COMPONENT, "kind": "ConfigOverride",
+        "workload": "control_state", "container": "-",
+        "repository": _JOB_IMAGE_REPO,
+        # 빈 문자열(env 미설정·DB 미설정)은 None 으로 접는다 -- metrics 의
+        # job_image.live 와 같은 규칙("비교 불가"와 "빈 값"을 섞지 않는다).
+        "current_image": resolve_job_image(request.app.state.repos.control,
+                                           settings) or None,
+        "tags": ji_tags or [],
+    })
     return {"targets": targets, "registry_ok": registry_ok}
 
 
@@ -102,20 +126,45 @@ def submit_releases(body: ReleaseBody, request: Request,
     runner = request.app.state.rollout_runner
     if not body.items:
         raise HTTPException(status_code=422, detail="unknown_component")
+    # 잡 이미지 항목(슬라이스 35)은 워크로드 배치와 갈라 처리한다 -- 아래 워크로드
+    # 경로(create_batch→컨트롤러 patch)에 태우면 ROLLOUT_ORDER 정렬에서 죽는다.
+    job_image_items = [i for i in body.items if i.component == JOB_IMAGE_COMPONENT]
+    workload_items = [i for i in body.items if i.component != JOB_IMAGE_COMPONENT]
     seen = set()
     for item in body.items:
         # 중복 component도 여기로 -- 한 배치에 같은 워크로드 패치 2건은 뒤가 앞을
         # 조용히 덮어 순서 의미가 깨진다.
-        if item.component not in COMPONENTS or item.component in seen:
+        if ((item.component not in COMPONENTS
+             and item.component != JOB_IMAGE_COMPONENT)
+                or item.component in seen):
             raise HTTPException(status_code=422, detail="unknown_component")
         seen.add(item.component)
     # 빠른 거절(fail-fast) -- 진짜 가드는 create_batch의 트랜잭션 안에 있다.
+    # 잡 이미지 단독 제출에도 이 가드를 유지한다: 진행 중 롤아웃과 기술적 충돌은
+    # 없지만, "릴리스 화면의 적용은 한 번에 하나"라는 운영 규칙을 단순하게 지킨다.
     if repos.releases.active():
         raise HTTPException(status_code=409, detail="rollout_in_progress")
     tags_cache: dict = {}
-    records = []
     unverified: list[str] = []
-    for item in body.items:
+    # --- 잡 이미지 검증(워크로드와 같은 규칙: 태그 형식·레지스트리 존재·same_tag) ---
+    job_image_records = []
+    for item in job_image_items:
+        tag = (item.tag or "").strip()
+        if not _TAG_RE.fullmatch(tag):
+            raise HTTPException(status_code=422, detail="unknown_tag")
+        tags = _tags_for(tags_cache, settings.build_registry, _JOB_IMAGE_REPO)
+        if tags is None:
+            unverified.append(JOB_IMAGE_COMPONENT)
+        elif tag not in tags:
+            raise HTTPException(status_code=422, detail="unknown_tag")
+        image = f"{settings.build_registry}/{_JOB_IMAGE_REPO}:{tag}"
+        # same_tag 는 유효값(DB→env) 기준 -- 화면의 "현재"와 같은 값이라 사용자가
+        # 보는 것과 검사가 갈리지 않는다.
+        if resolve_job_image(repos.control, settings) == image:
+            raise HTTPException(status_code=422, detail="same_tag")
+        job_image_records.append({"image": image, "tag": tag})
+    records = []
+    for item in workload_items:
         spec = COMPONENTS[item.component]
         tag = (item.tag or "").strip()
         if not _TAG_RE.fullmatch(tag):
@@ -137,13 +186,23 @@ def submit_releases(body: ReleaseBody, request: Request,
         if _current_image(runner, spec) == image:
             raise HTTPException(status_code=422, detail="same_tag")
         records.append({"component": item.component, "image": image, "tag": tag})
-    try:
-        # 감사 로그는 create_batch가 트랜잭션 안에서 직접 쓴다(mutation_class="release")
-        # -- 여기서 또 쓰면 같은 제출이 감사 로그에 두 번 나타난다.
-        rows = repos.releases.create_batch(items=records, actor=audit_actor(identity))
-    except DomainValidationError as e:
-        # 사전 체크와 이 사이의 경합 창 -- 트랜잭션 안 가드가 잡는다.
-        raise HTTPException(status_code=409, detail=e.reason_code)
+    rows = []
+    if records:
+        try:
+            # 감사 로그는 create_batch가 트랜잭션 안에서 직접 쓴다(mutation_class="release")
+            # -- 여기서 또 쓰면 같은 제출이 감사 로그에 두 번 나타난다.
+            rows = repos.releases.create_batch(items=records, actor=audit_actor(identity))
+        except DomainValidationError as e:
+            # 사전 체크와 이 사이의 경합 창 -- 트랜잭션 안 가드가 잡는다.
+            raise HTTPException(status_code=409, detail=e.reason_code)
+    # 잡 이미지는 워크로드 배치가 **성립한 뒤** 적용한다 -- 배치가 409 로 거절되면
+    # 아무것도 변하지 않아야 한다("반은 적용된 제출"을 만들지 않는다). DB UPDATE 라
+    # 여기서 실패할 실질 경로가 없고, 적용 즉시 다음 잡부터 새 이미지다.
+    for rec in job_image_records:
+        repos.control.set_job_image(rec["image"], actor=audit_actor(identity))
+        rows.append(repos.releases.record_applied(
+            component=JOB_IMAGE_COMPONENT, image=rec["image"], tag=rec["tag"],
+            actor=audit_actor(identity)))
     if unverified:
         # create_batch 성공 **뒤에만** 기록한다 -- 거절된 제출(422/409)은 커밋된
         # 것이 없으므로 "건너뛰고 통과시켰다"는 사실이 성립하지 않는다. 이벤트는

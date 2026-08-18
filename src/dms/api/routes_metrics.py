@@ -183,9 +183,14 @@ def metrics_infra(request: Request):
     # 잡 이미지도 같은 위험이다(설계 §2.1): api 가 실제로 든 env 값(live) vs 동봉
     # 20-config.yaml 값(manifest). 빈 문자열(미설정)은 None 으로 접어 프론트가
     # "비교 불가"와 "불일치"를 헷갈리지 않게 한다.
+    # live 는 유효값(슬라이스 35: DB 오버라이드 → env) -- 다음 잡이 실제로 쓸
+    # 이미지다. source 를 함께 실어 프론트가 "다음 kubectl apply 가 되돌립니다"
+    # 문구를 정직하게 가른다: DB 오버라이드는 apply 로 되돌아가지 않는다.
+    db_job_image = (request.app.state.repos.control.control_state() or {}).get("job_image")
     return {"components": components,
-            "job_image": {"live": settings.job_image or None,
-                          "manifest": manifest_job_image()}}
+            "job_image": {"live": db_job_image or settings.job_image or None,
+                          "manifest": manifest_job_image(),
+                          "source": "db" if db_job_image else "env"}}
 
 
 @router.get("/api/admin/metrics/queue")

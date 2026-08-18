@@ -2,6 +2,7 @@
 from .artifact_base import resolve_artifact_base
 from .execution import StubExecutionAdapter
 from .identity_ldap import build_ldap_resolver
+from .job_image import resolve_job_image
 
 
 def build_identity_resolver(settings):
@@ -22,14 +23,17 @@ def build_execution_adapter(settings, repos):
 
     return VolcanoExecutionAdapter(
         KubernetesClient(settings.k8s_namespace),
-        job_image=settings.job_image, namespace=settings.k8s_namespace,
+        # 생성자 캡처 금지(artifact_base 와 같은 이유, 슬라이스 35): 포탈 릴리스의
+        # job-image 오버라이드(DB)가 재시작 없이 다음 잡부터 반영돼야 한다.
+        job_image=lambda: resolve_job_image(repos.control, settings),
+        namespace=settings.k8s_namespace,
         storages_lookup=lambda n: repos.storages.get(n), read_text=read_text,
         # 생성자 캡처 금지(설계 §2.1/§1-7): base 변경 후 컨트롤러가 재시작해도
         # 호출 시점의 DB 값으로 summary 경로를 재구성한다.
         artifact_base=lambda: resolve_artifact_base(repos.control, settings))
 
 
-def build_build_runner(settings):
+def build_build_runner(settings, repos):
     if settings.execution_backend != "volcano":
         from .build_runner import StubBuildRunner
         return StubBuildRunner()
@@ -42,8 +46,9 @@ def build_build_runner(settings):
                        timeout_seconds=settings.build_timeout_seconds,
                        # 프로브는 job_image(§2.5): 워커 캐시 존재 + pull 은
                        # pkg-01 만 필요 -- 프로브 기동이 인터넷과 무관해야
-                       # "인터넷만 없는 노드"를 정확히 판별한다.
-                       job_image=settings.job_image,
+                       # "인터넷만 없는 노드"를 정확히 판별한다. resolve 클로저
+                       # (슬라이스 35) -- 릴리스의 job-image 가 프로브에도 반영.
+                       job_image=lambda: resolve_job_image(repos.control, settings),
                        preflight_timeout_seconds=settings.build_preflight_timeout_seconds)
 
 

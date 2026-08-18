@@ -264,7 +264,8 @@ def test_metrics_infra_reports_manifest_image_and_job_image(client, monkeypatch)
     assert by["dms-api"]["manifest_image"] == "pkg-01:5000/dms:d99"
     assert by["dms-controller"]["manifest_image"] is None    # null -> 프론트 무배지
     # conftest 의 settings 는 job_image="" (기본) -- 빈 문자열은 None 으로 접는다
-    assert body["job_image"] == {"live": None,
+    # source(슬라이스 35): DB 오버라이드 미설정이면 env 가 원천이다.
+    assert body["job_image"] == {"live": None, "source": "env",
                                  "manifest": "pkg-01:5000/dms-mpifileutils:job9"}
 
 
@@ -276,7 +277,7 @@ def test_metrics_infra_manifest_fail_soft_all_none(client, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert all(c["manifest_image"] is None for c in body["components"])
-    assert body["job_image"] == {"live": None, "manifest": None}
+    assert body["job_image"] == {"live": None, "manifest": None, "source": "env"}
 
 
 class _FakeQueueReader:

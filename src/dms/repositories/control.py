@@ -114,6 +114,19 @@ class ControlRepository:
             self._audit("control_state", "set", "control_state", before,
                         self.control_state(), actor)
 
+    def set_job_image(self, image, *, actor):
+        """잡 이미지 오버라이드 전용 UPDATE(슬라이스 35). set_control_state 에 얹지
+        않는 이유는 set_artifact_base 주석의 그것(무조건 UPDATE 의 NULL 함정 복제
+        금지). 포탈 릴리스의 job-image 행이 부른다 -- 다음 잡 제출부터
+        resolve_job_image 가 이 값을 읽는다(재시작 불필요)."""
+        before = self.control_state()
+        with self._db.transaction():
+            self._db.execute(
+                "UPDATE control_state SET job_image = :img WHERE id = 1",
+                {"img": image})
+            self._audit("job_image", "set", "job_image", before,
+                        {"job_image": image}, actor)
+
     def set_artifact_base(self, uri, *, actor, forced=False, affected_jobs=0):
         """아티팩트 base 전용 UPDATE(슬라이스 18 설계 §2.1). set_control_state 에
         얹지 않는다: 그 UPDATE 는 build_node_name = :bn 을 **무조건** 쓰므로 인자를

@@ -54,6 +54,29 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 슬라이스 35: 잡 이미지 릴리스 통합 — **완료**(2026-08-18, d81)
+
+d80 실증에서 남은 마지막 구멍을 닫았다: mfu 를 빌드·릴리스해도 잡은 옛 이미지로
+돌았다(릴리스는 워크로드 3종만 패치, `DMS_JOB_IMAGE` 는 ConfigMap env 라 재시작
+필요). **artifact_base 선례(슬라이스 18 "DB 가 env 를 이긴다") 그대로** 잡 이미지를
+DB 오버라이드로 승격했다:
+
+- `control_state.job_image`(신규 컬럼) + `resolve_job_image(control, settings)` --
+  DB 값 우선, NULL 이면 env. 소비자(VolcanoAdapter 의 잡·프리플라이트 매니페스트,
+  BuildRunner 프로브)는 str|callable 계약(artifact_base 와 동일)으로 **호출
+  시점마다** 해석 -- 릴리스 즉시 다음 잡부터 새 이미지, 재시작·파드 churn 없음.
+- 릴리스 화면 넷째 행 `job-image`: targets 가 유효값·mfu 태그 목록을 실어 주고,
+  제출 시 워크로드 배치와 갈라 `set_job_image`(감사) + releases 에 즉시 Applied
+  행(`record_applied`)으로 남긴다. 검증은 워크로드와 같은 규칙(태그 형식·레지스트리
+  존재·same_tag -- same_tag 는 유효값 기준). COMPONENTS 에 넣지 않은 이유:
+  그 표는 patch/observe/ROLLOUT_ORDER 좌표라 섞으면 컨트롤러가 없는 워크로드를
+  patch 하려 든다.
+- 드리프트 보정: metrics 의 job_image.live = 유효값 + `source`(db|env). source=db 면
+  "다음 kubectl apply 가 되돌립니다"가 거짓이 되므로 대시보드 문구를 가른다
+  ("릴리스 오버라이드가 우선이라 되돌아가지 않습니다").
+- 교훈(테스트): registry in_use 테스트가 실 deploy/k8s 를 읽어 태그 bump 커밋마다
+  깨졌다 -- 동봉본을 목으로 고정해 저장소 상태 의존을 끊었다.
+
 ### ✅ 슬라이스 34: 드리프트 방지 + 이미지·이력 관리 — **완료**(2026-08-18, d75)
 
 **① 드리프트 방지(빌드 시 매니페스트 스탬프).** 빌드 파드가 tar 스냅샷 뒤

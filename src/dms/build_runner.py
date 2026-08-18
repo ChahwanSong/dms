@@ -36,8 +36,11 @@ class BuildRunner:
         # 슬라이스 21 §2.5: 프로브는 builder image 가 아니라 job_image 로 띄운다 --
         # 워커에 캐시돼 있고 pull 도 pkg-01 만 필요해 프로브 기동이 인터넷과
         # 무관하다. 기본값은 기존 생성 호출(테스트 다수) 무변경용이고, 실제 배선
-        # (wiring.py)은 항상 settings 값을 명시한다.
-        self._job_image = job_image
+        # (wiring.py)은 resolve 클로저를 넘긴다. str 또는 0-인자 callable 을 받는
+        # 계약은 VolcanoExecutionAdapter 의 job_image/artifact_base 와 동일(슬라이스
+        # 35) -- 릴리스의 job-image 오버라이드가 프로브 이미지에도 재시작 없이 반영.
+        self._job_image_fn = (job_image if callable(job_image)
+                              else (lambda: job_image))
         self._preflight_timeout_seconds = preflight_timeout_seconds
 
     def submit(self, build) -> str:
@@ -80,7 +83,7 @@ class BuildRunner:
             manifest = build_probe_pod(
                 build_id=build["build_id"], source_path=build["repo_url"],
                 node=build["node_name"], namespace=self._ns,
-                registry=self._registry, job_image=self._job_image,
+                registry=self._registry, job_image=self._job_image_fn(),
                 timeout_seconds=self._preflight_timeout_seconds)
         except Exception as exc:
             # 프로브 생성 실패는 기존 submit_failed 재사용(§4) -- "preflight:"

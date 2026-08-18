@@ -336,7 +336,9 @@ export interface InfraComponent {
 }
 export interface InfraMetrics {
   components: InfraComponent[];
-  job_image: { live: string | null; manifest: string | null };
+  // live = 유효값(DB 오버라이드 → env). source 가 "db" 면 릴리스의 job-image 가
+  // 설정한 값이라 kubectl apply 로 되돌아가지 않는다(문구 분기 근거).
+  job_image: { live: string | null; manifest: string | null; source?: "db" | "env" };
 }
 
 // 레지스트리 이미지 관리(슬라이스 34). in_use = 지금 배포돼 도는(또는 매니페스트가

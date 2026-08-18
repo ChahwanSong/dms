@@ -43,7 +43,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.state.repos = Repositories(db)
     app.state.identity_resolver = build_identity_resolver(settings)
     app.state.execution_adapter = build_execution_adapter(settings, app.state.repos)
-    app.state.build_runner = build_build_runner(settings)
+    app.state.build_runner = build_build_runner(settings, app.state.repos)
     # targets/same_tag 엔드포인트가 클러스터 현재 이미지를 읽기 전용으로 관찰하는 데
     # 쓴다(설계 §5/§7, 1f5f4e5) -- observe()만 쓰고 patch_image()는 호출하지 않는다.
     app.state.rollout_runner = build_rollout_runner(settings)

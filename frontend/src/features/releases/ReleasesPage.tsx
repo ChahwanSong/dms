@@ -93,6 +93,14 @@ export function ReleasesPage() {
           {/* dms-controller를 고른 순간 이 경고는 "참고"가 아니라 "지금 일어날 일"이
               된다 -- 문구를 두 번 쓰지 않고 강조만 바꾼다. */}
           <ControllerCaution strong={controllerPicked} />
+          {/* job-image 행(슬라이스 35): 워크로드가 아니라 "다음 잡 파드가 쓸
+              이미지"의 오버라이드다 -- 적용 즉시(재시작·파드 교체 없음) 다음
+              잡부터 반영된다. 이 구분을 말하지 않으면 "왜 얘만 롤아웃이 안
+              보이지"가 된다. */}
+          <p className="text-muted text-xs">
+            job-image 는 잡 실행 이미지(dms-mpifileutils)입니다 — 적용 즉시 다음
+            잡부터 반영되며 파드 재시작이 없습니다.
+          </p>
           {targetsQ.data && targetsQ.data.registry_ok === false && (
             <p className="text-bad">{reasonText("registry_unreachable")}</p>
           )}
