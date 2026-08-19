@@ -17,14 +17,16 @@ import { AppShell } from "./AppShell";
 
 const server = setupServer();
 beforeAll(() => server.listen());
-afterEach(() => server.resetHandlers());
+// sessionStorage: 접힘 상태가 셸 리마운트를 넘도록 저장된다 -- 테스트 간에도
+// 넘어가 버리므로 매 테스트 후 비운다(안 비우면 앞 테스트의 접힘이 샌다).
+afterEach(() => { server.resetHandlers(); sessionStorage.clear(); });
 afterAll(() => server.close());
 
 function renderShell(role: "user" | "admin", at = "/jobs") {
   const actor = role === "admin" ? "admin" : "alice";
   server.use(http.get("/api/auth/me", () => HttpResponse.json({ actor, role })));
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const view = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[at]}>
         <AppShell>
@@ -33,7 +35,8 @@ function renderShell(role: "user" | "admin", at = "/jobs") {
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  return { actor };
+  // unmount 를 함께 돌려준다 -- 리마운트 유지 테스트가 "경로 이동 = 셸 재마운트"를 모사한다.
+  return { actor, ...view };
 }
 
 // 구 AppShell 실측 16링크(작업4+스토리지3+운영5+관리4). 라벨은 기존 문구 그대로.
@@ -100,6 +103,22 @@ test("초기 상태: /jobs 마운트면 작업 그룹만 열려 있다", async (
   expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "계정" })).toBeNull();
   expect(screen.queryByRole("link", { name: "대시보드" })).toBeNull();
+});
+
+test("열어둔 그룹은 셸 리마운트(경로 이동)에도 유지된다", async () => {
+  // AppRouter 의 <ErrorBoundary key={pathname}> 가 경로마다 셸을 리마운트한다 --
+  // sessionStorage 유지가 없으면 이동할 때마다 접힘이 초기화된다(사용자 보고:
+  // "클릭하면 해당 메뉴 빼고 나머지가 자동으로 접힌다").
+  const first = renderShell("admin", "/admin/dashboard");
+  await screen.findByRole("button", { name: "관리" });
+  await userEvent.click(screen.getByRole("button", { name: "관리" }));
+  expect(screen.getByRole("link", { name: "계정" })).toBeInTheDocument();
+  first.unmount();                    // 경로 이동 = 리마운트 모사
+  renderShell("admin", "/jobs");
+  // 이전에 열어둔 관리가 그대로 열려 있다(+ 새 활성 그룹 작업도 열림).
+  // findByRole: 관리 그룹은 admin 전용이라 me 도착 후에야 그려진다.
+  expect(await screen.findByRole("link", { name: "계정" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
 });
 
 test("열린 그룹 헤더 재클릭은 닫고, 다시 클릭이 복원한다 -- 다른 그룹은 무영향", async () => {

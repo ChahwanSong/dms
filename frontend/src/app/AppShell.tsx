@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, HardDrive } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMe } from "../features/auth/useAuth";
 import { NAVIGATION, activeNavPath, groupLabelFor } from "./navigation";
 import type { NavGroup, NavSection } from "./navigation";
-import { TopBar } from "./TopBar";
+import { UserPanel } from "./UserPanel";
 import { Breadcrumb } from "./Breadcrumb";
 import { ErrorBoundary } from "./ErrorBoundary";
 
@@ -57,19 +57,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   // 사이드바 활성 항목(최장 일치 하나) -- NavItemLink 주석 참고.
   const activePath = activeNavPath(pathname);
-  // 접힘 규칙(사용자 결정 2026-08-19 재조정): 그룹 토글은 **서로 독립**이다 --
-  // 한 번에 하나만 열리는 아코디언 제약은 도로 없앴다(같은 날 도입했다가 사용자
-  // 요청으로 해제). 남는 규칙 둘: ① 초기엔 현재 경로가 속한 그룹만 열려 있다
-  // (로그인 직후 운영자 홈 = 대시보드 → 운영만 열림). ② 경로 이동은 그 화면의
-  // 그룹을 **열기만** 한다(사용자가 손으로 연 다른 그룹을 닫지 않는다). 이 자동
-  // 펼침이 없으면 접힘이 "사이드바 링크를 못 찾는" 사고가 된다(e2e 04 가 잡
-  // 화면에서 링크를 클릭한다). 상태 키는 렌더와 같은
-  // `${section.label}:${group.label}` 이다 -- 맨 라벨을 쓰면 초기화가 렌더
-  // 조건과 어긋나 조용히 무시된다(실제로 겪었다).
+  // 접힘 규칙(사용자 결정 2026-08-19 재조정): 그룹 토글은 **서로 독립**이고,
+  // 열어둔 그룹은 화면을 이동해도 유지된다. 남는 규칙 둘: ① 첫 진입(새 탭)엔
+  // 현재 경로가 속한 그룹만 열려 있다(로그인 직후 운영자 홈 = 대시보드 → 운영만).
+  // ② 경로 이동은 그 화면의 그룹을 **열기만** 한다 -- 이 자동 펼침이 없으면
+  // 접힘이 "사이드바 링크를 못 찾는" 사고가 된다(e2e 04 가 잡 화면에서 링크를
+  // 클릭한다).
+  //
+  // sessionStorage 인 이유: AppRouter 가 <ErrorBoundary key={pathname}> 로 경로마다
+  // 셸을 **통째로 리마운트**하므로(에러 상태 리셋용 -- router.tsx 주석) useState 만
+  // 으로는 이동할 때마다 접힘이 초기화된다(사용자 보고: "클릭하면 나머지가 자동으로
+  // 접힌다"). 컴포넌트 밖에 남겨야 리마운트를 넘고, 탭 단위(session)라 새 접속의
+  // 초기 규칙 ①도 산다 -- localStorage 면 ①이 죽는다.
+  // 상태 키는 렌더와 같은 `${section.label}:${group.label}` 이다 -- 맨 라벨을
+  // 쓰면 초기화가 렌더 조건과 어긋나 조용히 무시된다(실제로 겪었다).
   const keysOf = (label: string | null) =>
     NAVIGATION.flatMap((s) => (s.groups ?? [])
       .filter((g) => g.label === label).map((g) => `${s.label}:${g.label}`));
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("dms.nav.collapsed") ?? "");
+      if (saved && typeof saved === "object") return saved as Record<string, boolean>;
+    } catch { /* 저장분 없음/파싱 불가/스토리지 차단 -- 초기 규칙으로 */ }
     const activeKeys = new Set(keysOf(groupLabelFor(pathname)));
     const init: Record<string, boolean> = {};
     for (const section of NAVIGATION)
@@ -79,6 +88,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       }
     return init;
   });
+  useEffect(() => {
+    try { sessionStorage.setItem("dms.nav.collapsed", JSON.stringify(collapsed)); }
+    catch { /* 스토리지 차단 환경이면 유지 없이 초기 규칙만 -- 기능은 산다 */ }
+  }, [collapsed]);
   useEffect(() => {
     for (const key of keysOf(groupLabelFor(pathname)))
       setCollapsed((prev) => (prev[key] ? { ...prev, [key]: false } : prev));
@@ -96,13 +109,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .filter((g) => g.items.length > 0);
 
   return (
-    <div className="min-h-full flex flex-col">
-      <TopBar />
-      <div className="flex-1 md:flex">
-        {/* shrink-0: 넓은 표(계정·잡·릴리스…)가 있는 화면에서 사이드바가 쪼그라들어
-            메뉴 글자가 줄바꿈되던 것을 막는다 -- 폭 15rem 은 고정이어야 한다.
-            (md:w-60 = 240px 는 e2e L3 의 상수다 -- 바꾸면 SIDEBAR_WIDTH_PX 도 함께.) */}
-        <aside className="md:w-60 md:shrink-0 bg-surface md:border-r md:border-line p-3 space-y-1">
+    <div className="min-h-full md:flex">
+      {/* 사이드바(2026-08-19 개편, 사용자 결정): 구 TopBar 를 없애고 브랜드는
+          사이드바 상단에 크게, 사용자·로그아웃은 하단(UserPanel)에 둔다.
+          md:h-screen + sticky: 본문이 길어도 사이드바(와 하단 사용자 패널)는
+          화면에 고정 -- nav 만 자체 스크롤한다.
+          shrink-0: 넓은 표(계정·잡·릴리스…)가 있는 화면에서 사이드바가 쪼그라들어
+          메뉴 글자가 줄바꿈되던 것을 막는다 -- 폭 15rem 은 고정이어야 한다.
+          (md:w-60 = 240px 는 e2e L3 의 상수다 -- 바꾸면 SIDEBAR_WIDTH_PX 도 함께.) */}
+      <aside className="md:w-60 md:shrink-0 bg-surface md:border-r md:border-line
+                        flex flex-col md:h-screen md:sticky md:top-0">
+        {/* 브랜드 블록 -- div 다: 셸에 h1 을 두면 e2e visit() 의 heading level:1
+            매칭이 흐려진다(화면이 h1 을 소유한다, 전제 #4). */}
+        <div className="bg-navy text-white px-5 py-4 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <HardDrive className="h-6 w-6 shrink-0 text-white/85" aria-hidden />
+            <div className="min-w-0">
+              <div className="text-base font-bold tracking-wide leading-tight whitespace-nowrap">AI Storage Portal</div>
+              <div className="text-[11px] text-white/60 leading-tight mt-0.5">Data Management System</div>
+            </div>
+          </div>
+        </div>
+        <nav className="flex-1 overflow-y-auto p-3 space-y-1">
           {NAVIGATION.map((section) =>
             section.path !== undefined ? (
               <NavItemLink key={section.label} path={section.path} label={section.label}
@@ -124,18 +152,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 })}
               </div>
             ))}
-        </aside>
-        {/* min-w-0: flex 자식의 기본 min-width 는 auto 라 콘텐츠보다 좁아지지 못한다.
-            그래서 안쪽 표의 overflow-x-auto 가 발동하지 못하고 레이아웃 전체가 넓어져
-            사이드바를 밀어냈다 -- 이 한 줄이 표를 자기 컨테이너 안에서 스크롤하게 만든다. */}
-        <div className="flex-1 min-w-0">
-          <main className="p-5">
-            <Breadcrumb />
-            {/* key 가 없으면 AppShell 은 모든 보호 라우트에서 같은 위치의 같은 컴포넌트라
-                한 번 에러 상태에 빠지면 화면을 옮겨도 풀리지 않는다. */}
-            <ErrorBoundary key={pathname}>{children}</ErrorBoundary>
-          </main>
-        </div>
+        </nav>
+        <UserPanel />
+      </aside>
+      {/* min-w-0: flex 자식의 기본 min-width 는 auto 라 콘텐츠보다 좁아지지 못한다.
+          그래서 안쪽 표의 overflow-x-auto 가 발동하지 못하고 레이아웃 전체가 넓어져
+          사이드바를 밀어냈다 -- 이 한 줄이 표를 자기 컨테이너 안에서 스크롤하게 만든다. */}
+      <div className="flex-1 min-w-0">
+        <main className="p-5">
+          <Breadcrumb />
+          {/* key 가 없으면 AppShell 은 모든 보호 라우트에서 같은 위치의 같은 컴포넌트라
+              한 번 에러 상태에 빠지면 화면을 옮겨도 풀리지 않는다. */}
+          <ErrorBoundary key={pathname}>{children}</ErrorBoundary>
+        </main>
       </div>
     </div>
   );
