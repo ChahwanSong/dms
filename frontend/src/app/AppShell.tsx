@@ -122,12 +122,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* 브랜드 블록 -- div 다: 셸에 h1 을 두면 e2e visit() 의 heading level:1
             매칭이 흐려진다(화면이 h1 을 소유한다, 전제 #4). */}
         <div className="bg-navy text-white px-5 py-4 shrink-0">
+          {/* 서브텍스트 없음(사용자 결정 2026-08-20): 타이틀 한 줄 + 아이콘만 */}
           <div className="flex items-center gap-2.5">
             <HardDrive className="h-6 w-6 shrink-0 text-white/85" aria-hidden />
-            <div className="min-w-0">
-              <div className="text-base font-bold tracking-wide leading-tight whitespace-nowrap">AI Storage Portal</div>
-              <div className="text-[11px] text-white/60 leading-tight mt-0.5">Data Management System</div>
-            </div>
+            <div className="text-base font-bold tracking-wide leading-tight whitespace-nowrap">AI Storage Portal</div>
           </div>
         </div>
         <nav className="flex-1 overflow-y-auto p-3 space-y-1">
