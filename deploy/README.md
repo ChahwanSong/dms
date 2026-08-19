@@ -586,9 +586,18 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
 4. 앱: 20-config 의 `DMS_SESSION_COOKIE_SECURE: "true"`(세션 쿠키 Secure) 적용
    후 api 롤아웃. 평문 NodePort 서비스는 제거됐다(구 45-api-nodeport.yaml) —
    자동화·비상 접근은 Bearer 토큰(shared/admin) 또는 https://dms.local.
-5. 클라이언트 DNS/hosts 에 `10.20.20.100 dms.local`. (테스트베드에선 luminous 가
-   상위 라우팅을 모사한다: `ip route replace 10.20.20.100/32 dev dmsbr0` —
-   onlink 라우트라 luminous 가 dmsbr0 에서 VIP 를 ARP 로 찾는다.)
+5. 접속 주소: **IP 직접 https 가 1급 경로다** — Ingress 는 host 무제한
+   (catch-all)이고 컨트롤러에 `--default-ssl-certificate=dms/dms-portal-tls`
+   (SAN 에 IP 포함)를 지정해 SNI 없는 IP 접속도 정식 인증서를 받는다.
+   `force-ssl-redirect` 명시 필수 — catch-all 은 tls 항목과 매칭되지 않아 기본
+   ssl-redirect 가 발동하지 않는다(없으면 http 가 조용히 평문 서빙되어 Secure
+   쿠키 로그인이 소리 없이 깨진다). dms.local 로 접속하려면 hosts/DNS 에
+   `10.20.20.100 dms.local`. (테스트베드에선 luminous 가 상위 라우팅을 모사:
+   `ip route replace 10.20.20.100/32 dev dmsbr0` — onlink 라우트라 dmsbr0 에서
+   VIP 를 ARP 로 찾는다. 외부 PC·Tailscale 사용자의 옛 주소 호환용으로
+   luminous iptables 가 자기 IP 의 80/443/8080 을 VIP 로 DNAT 한다 — 재부팅
+   시 재적용 필요, 규칙은 `~/.claude/jobs/b182a2ed/tmp/setup-relay.sh`·
+   `relay-tailscale.sh`·`relay-8080.sh`.)
 6. 검증(전부 실증됨): `curl --cacert ca.crt https://dms.local/` = 200(검증
    통과), `http://` = 308, 로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA
    딥링크 https 로 200, `ip neigh show 10.20.20.100` = 선출 노드 MAC.

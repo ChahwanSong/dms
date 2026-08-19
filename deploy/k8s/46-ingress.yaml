@@ -36,14 +36,22 @@ metadata:
     # 먼저 끊지 않게 읽기/보내기 타임아웃을 넉넉히.
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # catch-all(host 없는 규칙)은 tls 항목과 매칭되지 않아 기본 ssl-redirect 가
+    # 발동하지 않는다 — 명시로 강제해야 http(옛 주소 포함)가 308 로 https 에
+    # 오른다. 이게 없으면 http 접속이 조용히 평문 서빙되어 Secure 쿠키 로그인이
+    # 소리 없이 깨진다(실제로 겪은 결함).
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   tls:
     - hosts: [dms.local]
       secretName: dms-portal-tls
+  # host 무제한(catch-all): 사용자는 도메인이 아니라 **VIP(IP)로 직접** 들어올 수
+  # 있다(사용자 확인 — hosts/DNS 강제 불가). IP 접속은 SNI 가 없어 tls 항목과
+  # 매칭되지 않으므로 컨트롤러의 --default-ssl-certificate(dms/dms-portal-tls,
+  # SAN 에 IP 포함)가 짝이다 — 이 플래그 없이는 IP https 가 가짜 인증서를 받는다.
   rules:
-    - host: dms.local
-      http:
+    - http:
         paths:
           - path: /
             pathType: Prefix
