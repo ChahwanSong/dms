@@ -123,3 +123,11 @@ def test_anonymous_bind_remains_the_default():
     s = Settings.from_env(VALID)
     assert s.ldap_require_auth_bind is False
     assert s.ldap_bind_dn == ""
+
+
+def test_session_cookie_secure_parses_and_defaults_off():
+    # TLS 종단(ingress) 배포 대비 게이트. 기본 false 인 이유는 테스트베드의
+    # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문.
+    assert Settings.from_env(VALID).session_cookie_secure is False
+    assert Settings.from_env(
+        {**VALID, "DMS_SESSION_COOKIE_SECURE": "true"}).session_cookie_secure is True

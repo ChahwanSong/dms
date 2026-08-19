@@ -136,6 +136,11 @@ class Settings:
     # 익명 바인드로의 침묵 강등을 막는 스위치다 -- identity_ldap 이 아니라 여기서
     # 거부하는 이유는 발화 시점이 배포 순간(기동)이어야 운영자가 알아채기 때문.
     ldap_require_auth_bind: bool = False
+    # 프로덕션 노출(ingress+TLS) 대비: true 면 세션 쿠키에 Secure 플래그가 붙어
+    # 평문 HTTP 로는 쿠키가 실리지 않는다. 기본 false 인 이유는 테스트베드의
+    # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문 -- TLS 를
+    # 앞단에 세운 배포에서만 env 로 켠다(deploy/k8s/46-ingress.yaml 주석).
+    session_cookie_secure: bool = False
     execution_backend: str = "stub"
     job_image: str = ""
     k8s_namespace: str = "dms"
@@ -210,6 +215,8 @@ class Settings:
             ldap_bind_dn=ldap_bind_dn,
             ldap_bind_pw=ldap_bind_pw,
             ldap_require_auth_bind=ldap_require_auth_bind,
+            session_cookie_secure=_parse_bool(
+                environ, "DMS_SESSION_COOKIE_SECURE"),
             execution_backend=environ.get("DMS_EXECUTION_BACKEND", "stub"),
             job_image=environ.get("DMS_JOB_IMAGE", ""),
             k8s_namespace=environ.get("DMS_K8S_NAMESPACE", "dms"),

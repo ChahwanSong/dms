@@ -52,8 +52,11 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.state.queue_reader = build_queue_reader(settings)
     # 슬라이스 22 §2.6: 재연결 성공의 영속 흔적(events.db_reconnected) 훅.
     wire_reconnect_event(db, app.state.repos)
+    # https_only(→ Secure 플래그): TLS 종단(ingress) 뒤 배포에서만 켠다 --
+    # config.Settings.session_cookie_secure 주석 참고.
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,
-                       session_cookie="dms_session")
+                       session_cookie="dms_session",
+                       https_only=settings.session_cookie_secure)
 
     @app.get("/healthz")
     def healthz():

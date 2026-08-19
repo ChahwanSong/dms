@@ -142,6 +142,23 @@ def test_login_succeeds_when_ldap_unavailable(client, db):
     assert db.query("SELECT username FROM identity_probe_targets") == []
 
 
+def test_session_cookie_secure_flag_follows_settings(client, db, settings):
+    # TLS 종단 뒤 배포(DMS_SESSION_COOKIE_SECURE=true)에서만 Secure 가 붙고,
+    # 기본(테스트베드 HTTP 경로)에서는 붙지 않는다 -- 붙으면 NodePort/port-forward
+    # 평문 접속의 로그인이 조용히 깨진다.
+    from dataclasses import replace
+    from fastapi.testclient import TestClient
+    from dms.api.app import create_app
+    client.post("/api/auth/signup", json={"username": "sec", "password": "pw"})
+    r = client.post("/api/auth/login", json={"username": "sec", "password": "pw"})
+    assert "secure" not in r.headers.get("set-cookie", "").lower()
+    secure_client = TestClient(
+        create_app(replace(settings, session_cookie_secure=True), db))
+    r2 = secure_client.post("/api/auth/login",
+                            json={"username": "sec", "password": "pw"})
+    assert "secure" in r2.headers.get("set-cookie", "").lower()
+
+
 def test_create_app_wires_the_reconnect_event_hook(client, db):
     # 슬라이스 22 §2.6: client 픽스처가 create_app 을 이미 통과했다 -- 훅이
     # 배선되어 실제 events 행을 남기는지 행동으로 고정한다(배선 회귀 가드).
