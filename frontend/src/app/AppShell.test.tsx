@@ -9,10 +9,11 @@ import { AppShell } from "./AppShell";
 
 // 셸의 「데이터 → 렌더」 계약(슬라이스 31 T2, 사용자 조정 반영): 사이드바는
 // navigation.ts 의 함수이고 adminOnly 필터·접힘 상태가 여기서 고정된다.
-// 접힘 규칙 = 아코디언(사용자 결정 2026-08-19): **한 번에 한 그룹만** 열린다.
-// 현재 경로가 속한 그룹이 초기·자동으로 열리고(로그인 직후 운영자는 운영),
-// 다른 그룹 헤더를 열면 이전 그룹은 닫히며, 열린 헤더 재클릭은 닫는다. 자동
-// 펼침 덕에 e2e 04 의 "사이드바 링크 클릭"이 접힘에서도 링크를 찾는다.
+// 접힘 규칙(사용자 결정 2026-08-19 재조정): 그룹 토글은 **서로 독립** --
+// 아코디언(하나만 열림)은 같은 날 도입했다가 해제됐다. 초기엔 현재 경로의
+// 그룹만 열리고(로그인 직후 운영자는 운영), 경로 이동은 그 그룹을 열기만 하며
+// 사용자가 연 다른 그룹을 닫지 않는다. 자동 펼침 덕에 e2e 04 의 "사이드바
+// 링크 클릭"이 접힘에서도 링크를 찾는다.
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -69,14 +70,14 @@ test("대시보드 마운트: 운영 5링크만 보이고 접힘 그룹(작업·
     expect(screen.getByRole("button", { name: group })).toBeInTheDocument();
 });
 
-test("아코디언: 대시보드에서 스토리지를 열면 노드가 보이고 운영은 닫힌다", async () => {
+test("독립 토글: 대시보드에서 스토리지를 열어도 운영은 열린 채다", async () => {
   renderShell("admin", "/admin/dashboard");
   await screen.findByRole("link", { name: "대시보드" });
   expect(screen.queryByRole("link", { name: "노드" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "스토리지" }));
   expect(screen.getByRole("link", { name: "노드" })).toBeInTheDocument();
-  // 한 번에 한 그룹만 -- 스토리지가 열리며 운영(이전 열림)은 닫힌다.
-  expect(screen.queryByRole("link", { name: "대시보드" })).toBeNull();
+  // 아코디언 아님(사용자 결정) -- 다른 그룹을 열어도 기존 열림은 유지된다.
+  expect(screen.getByRole("link", { name: "대시보드" })).toBeInTheDocument();
 });
 
 test("최상위 섹션은 DMS 뿐 -- NAS·Monitoring 링크는 없다(추후 추가)", async () => {
@@ -91,10 +92,9 @@ test("로그아웃 버튼 접근성 이름은 '로그아웃'이다(e2e 01·route
   expect(await screen.findByRole("button", { name: "로그아웃" })).toBeInTheDocument();
 });
 
-test("활성 그룹 자동 펼침: /jobs 마운트면 작업 그룹만 열려 있다", async () => {
+test("초기 상태: /jobs 마운트면 작업 그룹만 열려 있다", async () => {
   // e2e 04 의 "사이드바 링크 클릭"이 기대는 성질 -- 지금 보고 있는 화면의
-  // 그룹은 항상 열려 있어 자기 위치를 잃지 않는다. 아코디언이라 나머지
-  // (운영·스토리지·관리)는 전부 닫혀 있다.
+  // 그룹은 항상 열려 있어 자기 위치를 잃지 않는다. 나머지는 초기 접힘.
   renderShell("admin", "/jobs");
   expect(await screen.findByRole("link", { name: "내 작업" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
@@ -102,11 +102,17 @@ test("활성 그룹 자동 펼침: /jobs 마운트면 작업 그룹만 열려 �
   expect(screen.queryByRole("link", { name: "대시보드" })).toBeNull();
 });
 
-test("열린 그룹 헤더 재클릭은 닫는다(전부 닫힌 상태 허용), 다시 클릭이 복원한다", async () => {
+test("열린 그룹 헤더 재클릭은 닫고, 다시 클릭이 복원한다 -- 다른 그룹은 무영향", async () => {
   renderShell("admin", "/jobs");
-  await screen.findByRole("link", { name: "단일 작업" });
+  // 운영 헤더는 admin 전용이라 me 도착 후에야 그려진다 -- 공용 링크(단일 작업)만
+  // 기다리면 이 버튼이 아직 없다.
+  await screen.findByRole("button", { name: "운영" });
+  // 다른 그룹(운영)을 먼저 열어 둔다 -- 작업 토글이 이것을 건드리면 안 된다.
+  await userEvent.click(screen.getByRole("button", { name: "운영" }));
+  expect(screen.getByRole("link", { name: "대시보드" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "작업" }));
   expect(screen.queryByRole("link", { name: "단일 작업" })).toBeNull();
+  expect(screen.getByRole("link", { name: "대시보드" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "작업" }));
   expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
 });
