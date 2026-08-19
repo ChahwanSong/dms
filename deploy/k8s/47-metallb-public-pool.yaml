@@ -38,3 +38,13 @@ metadata:
 spec:
   ipAddressPools:
     - dms-public-pool
+  # 공인 존 제약(2026-08-20, 사용자 확인): 공인 IP 라우팅은 특정 세그먼트의
+  # 노드들(network-zone=public 라벨, 테스트베드에선 w1·w2)에만 닿는다. 비공인
+  # 노드가 VIP 광고자로 선출되면 ARP 응답을 라우터가 못 들어 **VIP 블랙홀**
+  # (전부 Healthy 로 보이는 조용한 장애)이 된다 -- 광고 자격 자체를 라벨로
+  # 제한해 스케줄링이 어긋나도 구조적으로 불가능하게 한다(ingress 컨트롤러
+  # nodeSelector 와 2중 안전망). 백엔드 파드(dms-api 등)는 제약 불필요 --
+  # 입구 노드 도착 후엔 파드 네트워크(내부망)로 어느 노드든 닿는다.
+  nodeSelectors:
+    - matchLabels:
+        network-zone: public

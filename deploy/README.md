@@ -581,6 +581,19 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
 2. `kubectl apply -f deploy/k8s/47-metallb-public-pool.yaml` (공인 풀
    autoAssign=false + L2Advertisement) + ingress svc 에 풀 지정:
    `kubectl -n ingress-nginx annotate svc ingress-nginx-controller metallb.io/address-pool=dms-public-pool`
+
+   **공인 존 제약**(2026-08-20, 사용자 확인: 공인 IP 라우팅은 특정 세그먼트
+   노드에만 닿는다): 입구만 고정하면 되고 백엔드 파드는 자유 배치다.
+   - 노드 라벨: `kubectl label node dms-w1 dms-w2 network-zone=public`
+   - VIP 광고 자격: 47 의 `L2Advertisement.nodeSelectors` (비공인 노드가
+     선출되면 ARP 를 라우터가 못 들어 VIP 블랙홀 — 구조적으로 차단)
+   - ingress 컨트롤러 고정·분산(업스트림 설치본이라 kubectl 패치, 재설치 시 재적용):
+     `nodeSelector: network-zone=public` + `topologySpreadConstraints`(hostname,
+     maxSkew 1, DoNotSchedule — preferred anti-affinity 는 실측에서 한 노드에
+     몰렸다) + `strategy.rollingUpdate: {maxSurge: 0, maxUnavailable: 1}`
+     (2노드-2레플리카에서 서지 파드가 낄 자리가 없다)
+   - 실증: 3레플리카 확장 시 전부 public 노드로만, w2 차단(cordon)+파드 삭제 시
+     대체 파드는 비공인으로 가지 않고 w1 로, 광고자 w2→w1 자동 재선출·무중단.
 3. `kubectl apply -f deploy/k8s/46-ingress.yaml` — 어노테이션(20m 바디·300s
    타임아웃)은 그 파일 주석에.
 4. 앱: 20-config 의 `DMS_SESSION_COOKIE_SECURE: "true"`(세션 쿠키 Secure) 적용
