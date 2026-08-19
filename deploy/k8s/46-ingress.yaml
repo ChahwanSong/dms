@@ -1,13 +1,14 @@
-# 포탈 프로덕션 노출(2026-08-19, BGP 전환 완료): nginx ingress + TLS 종단.
+# 포탈 프로덕션 노출(2026-08-19, 공인 VIP·L2 모드 — 사용자 결정으로 BGP 미사용):
+# nginx ingress + TLS 종단.
 #
-#   브라우저 → https://dms.local (공인 VIP 10.20.20.100 — 노드와 다른 서브넷)
-#     → 라우터가 BGP 로 학습한 경로로 노드에 전달(ECMP·노드 장애 시 경로 자동
-#       철회 — 47-metallb-bgp.yaml)
+#   브라우저 → https://dms.local (공인 VIP 10.20.20.100)
+#     → 상위 라우팅이 VIP 를 노드 세그먼트로 배달, MetalLB L2 가 ARP 응답
+#       (47-metallb-public-pool.yaml — 페일오버 실측 ~11s)
 #     → ingress-nginx(v1.15.1, replicas 2)가 TLS 종단 후 이 Ingress 규칙으로
 #     → svc dms-api:8080 (FastAPI 가 SPA+API 서빙 — 앱 구조 무변경)
 #
 # 선행 조건(클러스터에 설치돼 있어야 함, 이미지는 pkg-01:5000 미러):
-#   - MetalLB v0.16.0 + 47-metallb-bgp.yaml (공인 풀·BGPPeer·BGPAdvertisement)
+#   - MetalLB v0.16.0 + 47-metallb-public-pool.yaml (공인 풀 + L2Advertisement)
 #     + ingress-nginx svc 에 어노테이션 metallb.io/address-pool: dms-public-pool
 #   - ingress-nginx v1.15.1 (IngressClass "nginx")
 #   - TLS secret (git 에 넣지 않는다 — 개인키):
@@ -18,8 +19,8 @@
 #     평문 NodePort(구 45-api-nodeport.yaml)는 제거됐다 — 자동화·비상 접근은
 #     Bearer 토큰 또는 https://dms.local.
 #
-# 실환경 이관 시 바꿀 값: 47 의 peerAddress/ASN(네트워크팀), VIP 주소,
-# TLS secret(사내 PKI). 이 Ingress 자체는 무변경.
+# 실환경 이관 시 바꿀 값: 47 의 VIP 주소, TLS secret(사내 PKI). 이 Ingress
+# 자체는 무변경.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

@@ -1,0 +1,40 @@
+# 공인 VIP 를 MetalLB L2 모드로 소유(2026-08-19, 사용자 결정 — BGP 미사용).
+#
+# 전제(사용자 확인): 공인 VIP 10.20.20.100 은 상위 라우팅이 이미 노드 세그먼트로
+# 배달한다 — "노드 인터페이스에 VIP 를 얹으면 그대로 동작"하는 환경. 즉 마지막
+# 홉 라우터가 이 세그먼트에서 **ARP 로 VIP 주인을 찾는다**. MetalLB L2 모드가
+# 하는 일이 정확히 그것(선출된 노드가 VIP 의 ARP 에 응답)이라, VIP 가 노드와
+# 다른 서브넷이어도 BGP 없이 동작한다.
+#
+#   외부 → (상위 라우팅: VIP → 노드 세그먼트) → ARP: "10.20.20.100 누구?"
+#     → MetalLB speaker(선출 1노드)가 응답 → ingress-nginx → dms-api
+#
+# BGP 대비 트레이드오프(포탈 트래픽 규모에선 무해):
+#   - 진입이 선출 노드 1대(ECMP 없음), 페일오버는 GARP 재광고로 수 초.
+#   - ingress svc 가 externalTrafficPolicy=Local 이라 선출은 컨트롤러 파드가
+#     있는 노드 중에서만 일어난다(파드 죽으면 다른 레플리카 노드로 재선출).
+# BGP 가 필요해지는 경우는 단 하나 — 마지막 홉이 ARP 가 아니라 next-hop 경로를
+# 요구할 때. 그땐 이 파일의 L2Advertisement 를 BGPPeer+BGPAdvertisement 로
+# 바꾼다(git 이력 c127c1f 의 47-metallb-bgp.yaml 이 검증된 원본).
+#
+# autoAssign: false — 공인 VIP 는 귀한 자원이라 아무 LoadBalancer 서비스가
+# 자동으로 물어가면 안 된다. 쓰려는 서비스가 어노테이션으로 명시 요청한다:
+#   metallb.io/address-pool: dms-public-pool   (ingress-nginx svc 에 부여)
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: dms-public-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.20.20.100/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: dms-public-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - dms-public-pool

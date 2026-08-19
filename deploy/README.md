@@ -555,17 +555,22 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
 
 ---
 
-## 10. 포탈 HTTPS 노출 — nginx ingress + TLS + BGP VIP (2026-08-19 프로덕션 자세 완증)
+## 10. 포탈 HTTPS 노출 — nginx ingress + TLS + 공인 VIP(L2) (2026-08-19 완증)
 
-경로: `브라우저 → https://dms.local (공인 VIP 10.20.20.100, 노드와 다른 서브넷)
-→ 라우터(BGP 학습 경로, ECMP) → 노드 → ingress-nginx(TLS 종단, replicas 2) →
-svc dms-api:8080`. 앱 구조 무변경 — FastAPI 가 지금처럼 SPA+API 를 서빙하고
-ingress 는 프록시만 한다.
+경로: `브라우저 → https://dms.local (공인 VIP 10.20.20.100) → 상위 라우팅이
+노드 세그먼트로 배달 → MetalLB L2 가 ARP 응답(선출 노드) → ingress-nginx(TLS
+종단, replicas 2) → svc dms-api:8080`. 앱 구조 무변경 — FastAPI 가 지금처럼
+SPA+API 를 서빙하고 ingress 는 프록시만 한다.
+
+**BGP 미사용(사용자 결정)**: 이 환경은 상위 라우팅이 공인 VIP 를 노드
+세그먼트로 배달하고 마지막 홉이 ARP 로 주인을 찾는다("노드에 VIP 를 얹으면
+동작"하는 환경) — MetalLB L2 모드가 정확히 그 ARP 에 응답하므로 VIP 가 노드와
+다른 서브넷이어도 BGP 가 필요 없다. BGP 가 필요해지는 유일한 경우(마지막 홉이
+next-hop 경로를 요구)의 검증된 구성은 git 이력 c127c1f(47-metallb-bgp.yaml +
+luminous FRR)에 있다.
 
 선행 컴포넌트(설치 완료, 이미지는 pkg-01:5000 미러): MetalLB v0.16.0,
-ingress-nginx v1.15.1(IngressClass `nginx`). 테스트베드의 "라우터"는
-luminous(10.10.10.1)의 FRR(AS 64500, listen range 10.10.10.0/24) — 실환경에선
-네트워크팀 라우터와 피어링만 바꾼다.
+ingress-nginx v1.15.1(IngressClass `nginx`).
 
 절차:
 
@@ -573,24 +578,23 @@ luminous(10.10.10.1)의 FRR(AS 64500, listen range 10.10.10.0/24) — 실환경�
    `kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key`
    (SAN: DNS dms.local + IP 10.20.20.100. 리허설 CA·인증서 사본:
    luminous `~/.claude/jobs/b182a2ed/tmp/tls/`)
-2. `kubectl apply -f deploy/k8s/47-metallb-bgp.yaml` (공인 풀 autoAssign=false ·
-   BGPPeer · BGPAdvertisement) + ingress svc 에 풀 지정:
+2. `kubectl apply -f deploy/k8s/47-metallb-public-pool.yaml` (공인 풀
+   autoAssign=false + L2Advertisement) + ingress svc 에 풀 지정:
    `kubectl -n ingress-nginx annotate svc ingress-nginx-controller metallb.io/address-pool=dms-public-pool`
 3. `kubectl apply -f deploy/k8s/46-ingress.yaml` — 어노테이션(20m 바디·300s
    타임아웃)은 그 파일 주석에.
 4. 앱: 20-config 의 `DMS_SESSION_COOKIE_SECURE: "true"`(세션 쿠키 Secure) 적용
    후 api 롤아웃. 평문 NodePort 서비스는 제거됐다(구 45-api-nodeport.yaml) —
    자동화·비상 접근은 Bearer 토큰(shared/admin) 또는 https://dms.local.
-5. 클라이언트 DNS/hosts 에 `10.20.20.100 dms.local`.
-6. 검증(전부 실증됨): FRR `show bgp summary` = 노드 6 피어 Established,
-   `ip route show 10.20.20.100` = BGP ECMP(컨트롤러 노드 2개 next-hop —
-   svc 가 externalTrafficPolicy=Local 이라 컨트롤러 있는 노드만 광고),
-   `curl --cacert ca.crt https://dms.local/` = 200(검증 통과), `http://` = 308,
-   로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA 딥링크 https 로 200.
-
-ingress-nginx 컨트롤러가 죽거나 노드가 내려가면 그 노드의 VIP 광고가 BGP 로
-자동 철회되고 남은 레플리카 노드로만 라우팅된다 — L2 모드의 ARP 재광고보다
-빠르고 결정적이다.
+5. 클라이언트 DNS/hosts 에 `10.20.20.100 dms.local`. (테스트베드에선 luminous 가
+   상위 라우팅을 모사한다: `ip route replace 10.20.20.100/32 dev dmsbr0` —
+   onlink 라우트라 luminous 가 dmsbr0 에서 VIP 를 ARP 로 찾는다.)
+6. 검증(전부 실증됨): `curl --cacert ca.crt https://dms.local/` = 200(검증
+   통과), `http://` = 308, 로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA
+   딥링크 https 로 200, `ip neigh show 10.20.20.100` = 선출 노드 MAC.
+   **페일오버 실측**: 광고 노드의 컨트롤러 파드 강제 종료 → 11 초 다운 후 남은
+   레플리카 노드로 ARP 재선출·자동 복구(svc 가 externalTrafficPolicy=Local 이라
+   선출은 컨트롤러 파드가 있는 노드 중에서만).
 
 ---
 
