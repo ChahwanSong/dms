@@ -555,33 +555,42 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
 
 ---
 
-## 10. 포탈 HTTPS 노출 — nginx ingress + TLS (2026-08-19 리허설 완료)
+## 10. 포탈 HTTPS 노출 — nginx ingress + TLS + BGP VIP (2026-08-19 프로덕션 자세 완증)
 
-경로: `브라우저 → https://dms.local (VIP 10.10.10.200) → MetalLB(L2) →
-ingress-nginx(TLS 종단) → svc dms-api:8080`. 앱 구조 무변경 — FastAPI 가
-지금처럼 SPA+API 를 서빙하고 ingress 는 프록시만 한다.
+경로: `브라우저 → https://dms.local (공인 VIP 10.20.20.100, 노드와 다른 서브넷)
+→ 라우터(BGP 학습 경로, ECMP) → 노드 → ingress-nginx(TLS 종단, replicas 2) →
+svc dms-api:8080`. 앱 구조 무변경 — FastAPI 가 지금처럼 SPA+API 를 서빙하고
+ingress 는 프록시만 한다.
 
-선행 컴포넌트(설치 완료 상태, 이미지는 pkg-01:5000 미러): MetalLB v0.16.0
-(IPAddressPool `dms-pool` 10.10.10.200-210 + L2Advertisement), ingress-nginx
-v1.15.1(IngressClass `nginx`, svc type=LoadBalancer 에 VIP .200 부착).
+선행 컴포넌트(설치 완료, 이미지는 pkg-01:5000 미러): MetalLB v0.16.0,
+ingress-nginx v1.15.1(IngressClass `nginx`). 테스트베드의 "라우터"는
+luminous(10.10.10.1)의 FRR(AS 64500, listen range 10.10.10.0/24) — 실환경에선
+네트워크팀 라우터와 피어링만 바꾼다.
 
 절차:
 
 1. TLS secret (git 밖 — 개인키). 리허설은 자체 CA, 프로덕션은 사내 PKI 발급분:
    `kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key`
-   (SAN 에 도메인 + 필요시 VIP. 리허설 CA·인증서 생성 스크립트가 남긴 사본:
+   (SAN: DNS dms.local + IP 10.20.20.100. 리허설 CA·인증서 사본:
    luminous `~/.claude/jobs/b182a2ed/tmp/tls/`)
-2. `kubectl apply -f deploy/k8s/46-ingress.yaml` — 어노테이션(20m 바디·300s
-   타임아웃)과 프로덕션 전환 노트는 그 파일 주석에.
-3. 클라이언트 DNS/hosts 에 `10.10.10.200 dms.local`.
-4. 검증: `curl --cacert ca.crt https://dms.local/` = 200(검증 통과),
-   `http://` = 308 → https, 로그인·admin API·SPA 딥링크 전부 https 로 200.
+2. `kubectl apply -f deploy/k8s/47-metallb-bgp.yaml` (공인 풀 autoAssign=false ·
+   BGPPeer · BGPAdvertisement) + ingress svc 에 풀 지정:
+   `kubectl -n ingress-nginx annotate svc ingress-nginx-controller metallb.io/address-pool=dms-public-pool`
+3. `kubectl apply -f deploy/k8s/46-ingress.yaml` — 어노테이션(20m 바디·300s
+   타임아웃)은 그 파일 주석에.
+4. 앱: 20-config 의 `DMS_SESSION_COOKIE_SECURE: "true"`(세션 쿠키 Secure) 적용
+   후 api 롤아웃. 평문 NodePort 서비스는 제거됐다(구 45-api-nodeport.yaml) —
+   자동화·비상 접근은 Bearer 토큰(shared/admin) 또는 https://dms.local.
+5. 클라이언트 DNS/hosts 에 `10.20.20.100 dms.local`.
+6. 검증(전부 실증됨): FRR `show bgp summary` = 노드 6 피어 Established,
+   `ip route show 10.20.20.100` = BGP ECMP(컨트롤러 노드 2개 next-hop —
+   svc 가 externalTrafficPolicy=Local 이라 컨트롤러 있는 노드만 광고),
+   `curl --cacert ca.crt https://dms.local/` = 200(검증 통과), `http://` = 308,
+   로그인 Set-Cookie 에 `Secure`, 로그인·admin API·SPA 딥링크 https 로 200.
 
-프로덕션(다른 서브넷의 라우팅되는 공인 VIP) 전환: **L2 는 같은 세그먼트에서만
-동작**하므로 MetalLB 를 BGP 모드(BGPPeer — 네트워크팀 피어링, 정석)로 바꾸거나
-라우터 static route(임시)를 쓴다 — Ingress·secret 은 무변경. TLS 전용 배포에선
-`DMS_SESSION_COOKIE_SECURE=true`(세션 쿠키 Secure)를 켜고 `45-api-nodeport.yaml`
-(평문 백도어)을 제외한다.
+ingress-nginx 컨트롤러가 죽거나 노드가 내려가면 그 노드의 VIP 광고가 BGP 로
+자동 철회되고 남은 레플리카 노드로만 라우팅된다 — L2 모드의 ARP 재광고보다
+빠르고 결정적이다.
 
 ---
 

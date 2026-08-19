@@ -32,6 +32,11 @@ data:
   # --- api server bind ---
   DMS_API_HOST: "0.0.0.0"
   DMS_API_PORT: "8080"
+  # 프로덕션 자세(2026-08-19): 접속은 ingress+TLS(46-ingress.yaml) 경유뿐이라
+  # 세션 쿠키에 Secure 를 붙인다. 이걸 켠 뒤로 평문 HTTP 로그인(포트포워딩 등)은
+  # 쿠키가 실리지 않아 동작하지 않는다 -- 자동화·비상 접근은 Bearer 토큰 경로
+  # (shared/admin token)를 쓰거나 https://dms.local 로 간다.
+  DMS_SESSION_COOKIE_SECURE: "true"
 
   # --- LDAP identity resolution (identity_ldap.py) ---
   DMS_LDAP_URI: "ldap://10.10.10.30:389"

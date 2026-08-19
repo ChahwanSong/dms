@@ -1,28 +1,25 @@
-# 포탈 프로덕션 노출(2026-08-19): nginx ingress + TLS 종단.
+# 포탈 프로덕션 노출(2026-08-19, BGP 전환 완료): nginx ingress + TLS 종단.
 #
-#   브라우저 → https://dms.local (VIP 10.10.10.200)
-#     → MetalLB(L2, dms-pool 10.10.10.200-210)가 VIP 를 ingress-nginx svc 에 부착
-#     → ingress-nginx(v1.15.1)가 TLS 종단 후 이 Ingress 규칙으로
+#   브라우저 → https://dms.local (공인 VIP 10.20.20.100 — 노드와 다른 서브넷)
+#     → 라우터가 BGP 로 학습한 경로로 노드에 전달(ECMP·노드 장애 시 경로 자동
+#       철회 — 47-metallb-bgp.yaml)
+#     → ingress-nginx(v1.15.1, replicas 2)가 TLS 종단 후 이 Ingress 규칙으로
 #     → svc dms-api:8080 (FastAPI 가 SPA+API 서빙 — 앱 구조 무변경)
 #
-# 선행 조건(클러스터에 설치돼 있어야 함 — 17d 전 설치 확인, 이미지는 pkg-01:5000 미러):
-#   - MetalLB v0.16.0 (metallb-system ns, IPAddressPool dms-pool + L2Advertisement)
-#   - ingress-nginx v1.15.1 (ingress-nginx ns, IngressClass "nginx")
+# 선행 조건(클러스터에 설치돼 있어야 함, 이미지는 pkg-01:5000 미러):
+#   - MetalLB v0.16.0 + 47-metallb-bgp.yaml (공인 풀·BGPPeer·BGPAdvertisement)
+#     + ingress-nginx svc 에 어노테이션 metallb.io/address-pool: dms-public-pool
+#   - ingress-nginx v1.15.1 (IngressClass "nginx")
 #   - TLS secret (git 에 넣지 않는다 — 개인키):
 #       kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key
-#     리허설은 자체 CA 발급(SAN: DNS dms.local + IP 10.10.10.200),
+#     리허설은 자체 CA 발급(SAN: DNS dms.local + IP 10.20.20.100),
 #     프로덕션은 사내 PKI 발급분으로 같은 이름만 교체.
+#   - 앱: 20-config 의 DMS_SESSION_COOKIE_SECURE=true (세션 쿠키 Secure).
+#     평문 NodePort(구 45-api-nodeport.yaml)는 제거됐다 — 자동화·비상 접근은
+#     Bearer 토큰 또는 https://dms.local.
 #
-# ── 프로덕션(다른 서브넷의 라우팅되는 공인 VIP) 전환 노트 ─────────────────
-# L2 모드는 같은 브로드캐스트 도메인에서만 ARP 응답하므로 그대로 못 쓴다. 두 길:
-#   a) MetalLB BGP 모드(정석): BGPPeer + BGPAdvertisement 로 노드들이 VIP 를
-#      광고 — 네트워크팀 피어링 협조 필요, 페일오버·ECMP 자동.
-#   b) 라우터 static route(VIP → 노드 IP) + 현행 L2: 간단하지만 next-hop 노드
-#      장애 시 라우팅 수동 전환 — 임시 구성으로만.
-# 이 Ingress 자체와 TLS secret 은 어느 모드든 무변경이다.
-# 앱 쪽: TLS 로만 접속하는 배포에선 20-config 에 DMS_SESSION_COOKIE_SECURE=true 를
-# 켜 세션 쿠키에 Secure 를 붙인다(테스트베드는 NodePort 30080 평문 경로가 살아
-# 있어 기본 false). 45-api-nodeport.yaml(평문 백도어)은 프로덕션에서 제외한다.
+# 실환경 이관 시 바꿀 값: 47 의 peerAddress/ASN(네트워크팀), VIP 주소,
+# TLS secret(사내 PKI). 이 Ingress 자체는 무변경.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
