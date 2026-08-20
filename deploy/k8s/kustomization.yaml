@@ -1,0 +1,20 @@
+# kustomize base(2026-08-20): prod 오버레이(deploy/overlays/prod)가 이 디렉터리를
+# 참조한다. 20-secret.example.yaml 은 제외한다 -- Secret 은 out-of-band 로 만든다.
+#
+# 테스트베드 흐름은 이 파일과 무관하다: deploy/README 는 개별 파일을 순서대로
+# `kubectl apply -f deploy/k8s/30-… -f …` 로 적용하며, 개별 파일 apply 는
+# kustomization.yaml 을 읽지 않는다. (디렉터리 전체를 `apply -f deploy/k8s/` 로
+# 올리는 방식은 테스트베드 절차가 아니다 -- 그건 `apply -k` 로 간다.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespace.yaml
+  - 05-volcano-queue-priorityclass.yaml
+  - 10-rbac.yaml
+  - 20-config.yaml
+  - 30-migrate-job.yaml
+  - 40-api.yaml
+  - 41-controller.yaml
+  - 46-ingress.yaml
+  - 47-metallb-public-pool.yaml
+  - 50-agent-daemonset.yaml

@@ -1,0 +1,14 @@
+# 공인 VIP 만 사내 값으로. autoAssign:false(명시 요청만)·L2Advertisement 의
+# nodeSelectors(network-zone=public 공인 존 제약)는 base 그대로 산다.
+#
+# 전제: (1) MetalLB(L2 모드)가 클러스터에 설치돼 있어야 한다. (2) 공인 라우팅이
+# 닿는 노드에 `kubectl label node <노드> network-zone=public` 을 붙인다.
+# (3) ingress-nginx svc 에 어노테이션 metallb.io/address-pool: dms-public-pool.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: dms-public-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - REPLACE_PORTAL_VIP/32          # 예: 203.0.113.10/32 (사내 공인 서비스 VIP)

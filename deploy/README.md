@@ -555,6 +555,17 @@ fail-open이라(설계 §7) 존재하지 않는 태그가 통과할 수 있다. 
 
 ---
 
+## 프로덕션 배포 — kustomize 오버레이
+
+사내 클러스터 배포는 **`deploy/overlays/prod`** 를 쓴다. 테스트베드 매니페스트를
+base 로 두고 사이트별 값(레지스트리·태그·공유 FS 경로·LDAP·이메일 도메인·포탈
+도메인·VIP)만 오버레이에서 덮는다 -- 자리표시자를 채우고 `kubectl apply -k`.
+전제조건·값 표·Secret/TLS 생성·적용 순서는 **`deploy/overlays/prod/README.md`**.
+이 §(테스트베드 개별 파일 apply)는 그대로 유효하다 -- 오버레이는 base 를 건드리지
+않는다.
+
+---
+
 ## 10. 포탈 HTTPS 노출 — nginx ingress + TLS + 공인 VIP(L2) (2026-08-19 완증)
 
 경로: `브라우저 → https://dms.local (공인 VIP 10.20.20.100) → 상위 라우팅이
