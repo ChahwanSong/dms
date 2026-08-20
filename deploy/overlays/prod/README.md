@@ -9,6 +9,20 @@ kubectl kustomize deploy/overlays/prod     # 렌더 미리보기(값 확인)
 kubectl apply -k deploy/overlays/prod      # 적용
 ```
 
+## 먼저: 클러스터 프리플라이트
+
+배포 전에 대상 클러스터를 점검한다(READ-ONLY -- 아무것도 바꾸지 않는다):
+
+```
+PORTAL_VIP=<사내 VIP> sh deploy/preflight-cluster.sh
+```
+
+Volcano/MetalLB/ingress-nginx 설치·모드·충돌·PSA·노드 라벨을 PASS/WARN/FAIL 로
+보고한다. 특히 잡아주는 것: MetalLB 가 BGP-only(우리는 L2)인지, pool 제한 없는
+L2Advertisement 가 공인존 제약을 무력화하는지, ingress-nginx 가 공유라서 우리
+catch-all 규칙이 다른 앱 트래픽을 가로챌지, `--default-ssl-certificate` 유무,
+`dms` 네임스페이스 PSA 가 privileged 를 허용하는지. INGRESS_NS/DMS_NS 로 조정.
+
 ## 0. 선행조건 (오버레이 적용 전에 클러스터에 있어야 함)
 
 | 항목 | 확인 |
