@@ -95,7 +95,9 @@ export function Login() {
   const nav = useNavigate();
   return (
     <div className="min-h-full grid place-items-center p-6">
-      <div className="w-full max-w-sm">
+      {/* max-w-md(448px, 사용자 요청 2026-08-20): 구 max-w-sm(384px)보다 살짝
+          넓게 -- 3탭·인증번호 안내 문구가 덜 답답하다. */}
+      <div className="w-full max-w-md">
         {/* 브랜드 블록은 div 다 -- h1 은 화면이 소유하고 브랜드가 h1 이 되면
             접근성 트리가 흐려진다. */}
         <div className="rounded-t-card bg-navy px-5 py-4 text-white text-sm font-semibold">
