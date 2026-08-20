@@ -277,6 +277,18 @@ def _apply_migrations(db: Database) -> None:
             email TEXT,
             disabled INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL)""",
+        # 계정 셀프서비스 인증번호(2026-08-20): 4자리·5분 TTL. (username, purpose)
+        # 당 최신 1개만 유효(발급이 upsert). attempts 는 4자리 무차별 대입을 막는
+        # 시도 카운터(상한 초과 시 코드 무효). 새 테이블이라 _ensure_columns 보강은
+        # 불필요 -- CREATE IF NOT EXISTS 가 기배포 DB 에도 그대로 생성한다.
+        """CREATE TABLE IF NOT EXISTS verification_codes (
+            username TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            code TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (username, purpose))""",
         f"""CREATE TABLE IF NOT EXISTS user_scan_paths (
             id {auto_pk},
             username TEXT NOT NULL,

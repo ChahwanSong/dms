@@ -62,6 +62,8 @@ export function backendEnv(dbPath: string, extra: Record<string, string> = {})
     DMS_SHARED_TOKEN: SHARED_TOKEN,
     DMS_ADMIN_TOKEN: ADMIN_TOKEN,
     DMS_SESSION_SECRET: SESSION_SECRET,
+    // 하니스는 무인증 signup 으로 계정을 시딩한다(인증번호 흐름은 vitest 몫).
+    DMS_ACCOUNT_VERIFICATION_REQUIRED: "false",
     ...extra,
   };
 }

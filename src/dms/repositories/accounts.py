@@ -2,11 +2,24 @@ import hashlib
 import hmac
 import os
 import re
-from ..db import Database, dump_json, utc_now_iso
+import secrets
+from ..db import Database, dump_json, iso_plus, utc_now_iso
 from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
 
 _USERNAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}$")
 _N, _R, _P = 16384, 8, 1
+
+# 계정 셀프서비스 인증번호(2026-08-20): 4자리·5분. 4자리는 사용자 결정(사내
+# 이메일 수신 전제) -- 무차별 대입은 시도 상한(5회)으로 막는다: 10^4 공간을
+# 5회로는 0.05% 확률이고, 초과 시 코드가 무효라 재발급 전엔 진행 불가.
+VERIFICATION_TTL_SECONDS = 300
+VERIFICATION_MAX_ATTEMPTS = 5
+VERIFICATION_PURPOSES = ("signup", "password_reset")
+
+
+def valid_username(username: str) -> bool:
+    """회사 아이디 형식(cocoa.song 류). 라우트가 이메일 파생 전에 재사용한다."""
+    return _USERNAME_RE.fullmatch(username) is not None
 
 
 def _hash_password(password: str) -> str:
@@ -61,6 +74,77 @@ class AccountsRepository:
     def set_password(self, username, password):
         self._db.execute("UPDATE accounts SET password_hash = :h WHERE username = :u",
                          {"h": _hash_password(password), "u": username})
+
+    def reset_password(self, username, password, *, actor):
+        """인증번호 검증을 통과한 비밀번호 변경(셀프서비스). set_password 와 달리
+        존재 확인 + 감사를 남긴다 -- 누가 언제 바꿨는지가 계정 변경의 본질이다.
+        해시는 감사에 싣지 않는다."""
+        with self._db.transaction():
+            before = self.get(username)
+            if before is None:
+                raise DomainValidationError("account_not_found", username)
+            self._db.execute(
+                "UPDATE accounts SET password_hash = :h WHERE username = :u",
+                {"h": _hash_password(password), "u": username})
+            self._audit_account("password_reset", username,
+                                {"username": username}, {"username": username},
+                                actor, utc_now_iso())
+
+    # --- 인증번호(계정 셀프서비스) ---
+    def issue_verification_code(self, username, purpose) -> str:
+        """4자리 코드 발급(upsert -- (username, purpose)당 최신 1개만 유효).
+        재발급은 이전 코드를 무효화한다: 시도 카운터 우회를 막고 '마지막으로
+        받은 메일의 코드가 유효'라는 사용자 직관과 일치한다."""
+        if purpose not in VERIFICATION_PURPOSES:
+            raise DomainValidationError("invalid_verification_purpose", purpose)
+        code = f"{secrets.randbelow(10000):04d}"
+        now = utc_now_iso()
+        with self._db.transaction():
+            self._db.execute(
+                """DELETE FROM verification_codes
+                   WHERE username = :u AND purpose = :p""",
+                {"u": username, "p": purpose})
+            self._db.execute(
+                """INSERT INTO verification_codes
+                       (username, purpose, code, expires_at, attempts, created_at)
+                   VALUES (:u, :p, :c, :e, 0, :now)""",
+                {"u": username, "p": purpose, "c": code,
+                 "e": iso_plus(now, VERIFICATION_TTL_SECONDS), "now": now})
+        return code
+
+    def consume_verification_code(self, username, purpose, code,
+                                  now_iso=None) -> "str | None":
+        """검증 성공이면 None(코드는 소비되어 삭제), 실패면 reason_code.
+        만료·시도 초과 행은 그 자리에서 지운다 -- 남겨두면 사용자가 왜 안 되는지
+        재발급 전까지 영원히 같은 오류만 본다."""
+        now = now_iso or utc_now_iso()
+        with self._db.transaction():
+            row = self._db.query_one(
+                """SELECT code, expires_at, attempts FROM verification_codes
+                   WHERE username = :u AND purpose = :p""",
+                {"u": username, "p": purpose})
+            if row is None:
+                return "verification_not_found"
+            if row["expires_at"] <= now:
+                self._db.execute(
+                    "DELETE FROM verification_codes WHERE username = :u AND purpose = :p",
+                    {"u": username, "p": purpose})
+                return "verification_expired"
+            if row["attempts"] >= VERIFICATION_MAX_ATTEMPTS:
+                self._db.execute(
+                    "DELETE FROM verification_codes WHERE username = :u AND purpose = :p",
+                    {"u": username, "p": purpose})
+                return "verification_too_many_attempts"
+            if not hmac.compare_digest(str(row["code"]), str(code)):
+                self._db.execute(
+                    """UPDATE verification_codes SET attempts = attempts + 1
+                       WHERE username = :u AND purpose = :p""",
+                    {"u": username, "p": purpose})
+                return "verification_invalid"
+            self._db.execute(
+                "DELETE FROM verification_codes WHERE username = :u AND purpose = :p",
+                {"u": username, "p": purpose})
+            return None
 
     def get(self, username):
         row = self._db.query_one(

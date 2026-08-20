@@ -6,7 +6,10 @@ def _client_with(db, **overrides):
     from fastapi.testclient import TestClient
     from dms.api.app import create_app
     base = {"DMS_DATABASE_URL": "unused", "DMS_SHARED_TOKEN": "tok-shared",
-            "DMS_ADMIN_TOKEN": "tok-admin", "DMS_SESSION_SECRET": "sess", **overrides}
+            "DMS_ADMIN_TOKEN": "tok-admin", "DMS_SESSION_SECRET": "sess",
+            # from_env 는 인증번호 게이트가 기본 켜짐(운영 fail-closed) -- 이
+            # 파일의 무인증 signup 픽스처를 위해 명시로 끈다(conftest 관례).
+            "DMS_ACCOUNT_VERIFICATION_REQUIRED": "false", **overrides}
     settings = Settings.from_env(base)
     return TestClient(create_app(settings, db))
 

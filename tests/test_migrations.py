@@ -519,8 +519,11 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     actual = {n for n in _table_names(db) if not n.startswith("sqlite_")}
+    # verification_codes(2026-08-20): 계정 셀프서비스 인증번호(4자리·5분 TTL) --
+    # 스펙 §4 도메인 모델 밖의 인증 보조 테이블이라 batches 류처럼 명시 추가.
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
-                                        "schema_migrations"}
+                                        "schema_migrations",
+                                        "verification_codes"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):

@@ -40,6 +40,12 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_actor: "요청자 표기(x-dms-actor)가 올바르지 않습니다",
   account_exists: "이미 존재하는 계정입니다",
   invalid_username: "사용자명이 올바르지 않습니다",
+  verification_required: "인증번호가 필요합니다 — 먼저 인증번호를 받으세요",
+  invalid_verification_purpose: "인증 목적이 올바르지 않습니다",
+  verification_not_found: "발급된 인증번호가 없습니다 — 인증번호를 다시 받으세요",
+  verification_expired: "인증번호가 만료됐습니다(유효 5분) — 다시 받으세요",
+  verification_invalid: "인증번호가 일치하지 않습니다",
+  verification_too_many_attempts: "시도 횟수를 초과했습니다 — 인증번호를 다시 받으세요",
   // job / batch
   job_not_found: "잡을 찾을 수 없습니다",
   batch_not_found: "배치를 찾을 수 없습니다",

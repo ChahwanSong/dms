@@ -1,12 +1,61 @@
-import { useState } from "react";
-import { useAccounts, useSetRole, useSetDisabled } from "./useAccounts";
+import { useEffect, useState } from "react";
+import { useAccounts, useCreateAccount, useSetRole, useSetDisabled } from "./useAccounts";
 import { useMe } from "../auth/useAuth";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
+import { Dialog } from "../../components/ui/Dialog";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
 import { ApiError } from "../../lib/api";
 import type { Account } from "../../lib/types";
+
+const dlgField = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
+
+// 운영자 계정 생성(2026-08-20, 사용자 결정): 인증번호 없이 즉시 생성(관리자
+// 권한이 곧 승인) -- 셀프서비스 생성(로그인 화면)과 달리 역할도 고를 수 있다.
+function CreateAccountDialog() {
+  const [open, setOpen] = useState(false);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState("user");
+  const create = useCreateAccount();
+  useEffect(() => {
+    if (!open) { create.reset(); return; }
+    setUsername(""); setPassword(""); setRole("user");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  return (
+    <Dialog open={open} onOpenChange={setOpen} title="계정 생성"
+            trigger={<Button>계정 생성</Button>}>
+      <form className="space-y-3 text-sm"
+            onSubmit={(e) => {
+              e.preventDefault();
+              create.mutate({ username: username.trim(), password, role },
+                            { onSuccess: () => setOpen(false) });
+            }}>
+        <label className="block">회사 아이디
+          <input aria-label="회사 아이디" className={dlgField} value={username}
+                 placeholder="예: cocoa.song"
+                 onChange={(e) => setUsername(e.target.value)} /></label>
+        <p className="text-xs text-muted">이메일은 아이디@samsung.com 으로 자동 저장됩니다.</p>
+        <label className="block">비밀번호
+          <input aria-label="비밀번호" type="password" className={dlgField} value={password}
+                 onChange={(e) => setPassword(e.target.value)} /></label>
+        <label className="block">역할
+          <select aria-label="역할" className={dlgField} value={role}
+                  onChange={(e) => setRole(e.target.value)}>
+            <option value="user">user</option><option value="admin">admin</option>
+          </select></label>
+        {create.isError && <p className="text-bad">{(create.error as ApiError).message}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="ghost" type="button" onClick={() => setOpen(false)}>취소</Button>
+          <Button type="submit"
+                  disabled={create.isPending || username.trim() === "" || password === ""}>생성</Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
 
 export function AccountsList() {
   const q = useAccounts();
@@ -40,9 +89,12 @@ export function AccountsList() {
     <section className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">계정</h1>
-        <input aria-label="아이디 검색" placeholder="아이디 검색"
-               className="w-56 rounded-lg border border-black/10 px-3 py-2 text-sm"
-               value={search} onChange={(e) => setSearch(e.target.value)} />
+        <div className="flex items-center gap-2">
+          <input aria-label="아이디 검색" placeholder="아이디 검색"
+                 className="w-56 rounded-lg border border-black/10 px-3 py-2 text-sm"
+                 value={search} onChange={(e) => setSearch(e.target.value)} />
+          <CreateAccountDialog />
+        </div>
       </div>
       {/* Card 구획(2026-08-19): 운영 화면들과 같은 서피스 — 관리 그룹 일관화 */}
       <Card>

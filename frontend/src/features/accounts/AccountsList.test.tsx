@@ -144,6 +144,47 @@ test("사용자명 재입력이 일치해야 삭제가 전송된다", async () =
   await waitFor(() => expect(deleted).toBe(true));
 });
 
+test("운영자 계정 생성: 다이얼로그에서 아이디·비밀번호·역할을 POST 한다", async () => {
+  stubMe("admin");
+  let captured: unknown;
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)),
+    http.post("/api/admin/accounts", async ({ request }) => {
+      captured = await request.json();
+      return HttpResponse.json({ username: "new.user", role: "user" }, { status: 201 });
+    }),
+  );
+  wrap();
+  await screen.findByText("alice");
+  await userEvent.click(screen.getByRole("button", { name: "계정 생성" }));
+  const dialog = await screen.findByRole("dialog");
+  // 파생 이메일 규칙이 화면에 보인다
+  expect(within(dialog).getByText(/아이디@samsung\.com 으로 자동 저장/)).toBeInTheDocument();
+  await userEvent.type(within(dialog).getByLabelText("회사 아이디"), "new.user");
+  await userEvent.type(within(dialog).getByLabelText("비밀번호"), "pw1");
+  await userEvent.selectOptions(within(dialog).getByLabelText("역할"), "admin");
+  await userEvent.click(within(dialog).getByRole("button", { name: "생성" }));
+  await waitFor(() => expect(captured).toEqual(
+    { username: "new.user", password: "pw1", role: "admin" }));
+});
+
+test("운영자 계정 생성: 중복 409 는 다이얼로그 안 한국어 사유로 남는다", async () => {
+  stubMe("admin");
+  server.use(
+    http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)),
+    http.post("/api/admin/accounts", () =>
+      HttpResponse.json({ detail: "account_exists" }, { status: 409 })),
+  );
+  wrap();
+  await screen.findByText("alice");
+  await userEvent.click(screen.getByRole("button", { name: "계정 생성" }));
+  const dialog = await screen.findByRole("dialog");
+  await userEvent.type(within(dialog).getByLabelText("회사 아이디"), "alice");
+  await userEvent.type(within(dialog).getByLabelText("비밀번호"), "pw");
+  await userEvent.click(within(dialog).getByRole("button", { name: "생성" }));
+  expect(await within(dialog).findByText("이미 존재하는 계정입니다")).toBeInTheDocument();
+});
+
 test("아이디 검색: 대소문자 무시 부분 일치로 좁히고, 지우면 전체 복원", async () => {
   stubMe("admin");
   server.use(http.get("/api/admin/accounts", () => HttpResponse.json(ACCOUNTS)));

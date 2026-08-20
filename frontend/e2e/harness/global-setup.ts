@@ -172,15 +172,16 @@ export default async function globalSetup(): Promise<void> {
       }),
     }, 201);
 
-    // 긴 이메일 계정 3건: 공백 없는 단일 토큰이라 줄바꿈이 불가능해 계정 표를
-    // 강제로 넓힌다 -- E3 의 기하 단언이 볼 재료다(이메일은 무검증 기록이다).
+    // 긴 계정 3건: 공백 없는 단일 토큰이라 줄바꿈이 불가능해 계정 표를 강제로
+    // 넓힌다 -- E3 의 기하 단언이 볼 재료다. 2026-08-20 부터 signup 의 email 은
+    // <아이디>@도메인 **파생 저장**이라(입력 무시) 넓히는 수단은 username 길이다
+    // (상한 64자 -> 파생 이메일 ~76자, 사용자명·이메일 두 열이 함께 넓어진다).
     for (const n of [1, 2, 3]) {
       await seed(`사용자 e2ewide${n}`, `${BASE_URL}/api/auth/signup`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          username: `e2ewide${n}`, password: `e2e-user-pw-${n}`,
-          email: `long-${"x".repeat(96)}-${n}@e2e.example.com`,
+          username: `e2ewide${n}-${"x".repeat(55)}`, password: `e2e-user-pw-${n}`,
         }),
       }, 201);
     }

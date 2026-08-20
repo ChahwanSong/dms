@@ -141,6 +141,21 @@ class Settings:
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문 -- TLS 를
     # 앞단에 세운 배포에서만 env 로 켠다(deploy/k8s/46-ingress.yaml 주석).
     session_cookie_secure: bool = False
+    # 계정 셀프서비스(2026-08-20, 사용자 결정): 계정 생성·비밀번호 변경은 4자리
+    # 인증번호(5분 TTL)를 사내 이메일로 보내 검증한다. 이메일은 항상
+    # <회사아이디>@<도메인> 파생이다. 전송 백엔드는 지금 stub 뿐(사내 메일 연동
+    # 불가) -- stub 이면 발급 응답에 코드를 에코해 화면에서 흐름을 완주할 수
+    # 있다(실메일 백엔드로 바꾸면 에코가 사라지는 것이 계약).
+    # verification_required=false 는 코드 없이 signup 을 허용한다.
+    # 기본값이 **두 층**인 이유: 운영 경로(from_env)는 default=True(fail-closed --
+    # 라이브는 항상 인증번호 필수), dataclass 직접 생성은 False. 직접 생성은
+    # 테스트 전용 관례라(수십 개 테스트 파일이 자체 Settings 로 무인증 signup
+    # 픽스처를 쓴다) True 기본이면 전부가 조용히 401 로 무너진다 -- 실제로 40건
+    # 이 그렇게 깨져서 이 분리를 박았다. 인증 흐름 자체는 test_api_auth 가
+    # 게이트를 명시로 켠 앱으로 검증한다.
+    account_verification_required: bool = False
+    account_email_domain: str = "samsung.com"
+    mailer_backend: str = "stub"
     execution_backend: str = "stub"
     job_image: str = ""
     k8s_namespace: str = "dms"
@@ -217,6 +232,11 @@ class Settings:
             ldap_require_auth_bind=ldap_require_auth_bind,
             session_cookie_secure=_parse_bool(
                 environ, "DMS_SESSION_COOKIE_SECURE"),
+            account_verification_required=_parse_bool(
+                environ, "DMS_ACCOUNT_VERIFICATION_REQUIRED", default=True),
+            account_email_domain=environ.get(
+                "DMS_ACCOUNT_EMAIL_DOMAIN", "samsung.com"),
+            mailer_backend=environ.get("DMS_MAILER_BACKEND", "stub"),
             execution_backend=environ.get("DMS_EXECUTION_BACKEND", "stub"),
             job_image=environ.get("DMS_JOB_IMAGE", ""),
             k8s_namespace=environ.get("DMS_K8S_NAMESPACE", "dms"),

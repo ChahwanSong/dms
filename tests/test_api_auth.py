@@ -53,8 +53,11 @@ def test_duplicate_signup_409(client):
 
 
 def test_admin_account_creation_requires_ops_token(client):
+    # 2026-08-20 계약 조정: 무토큰·무세션은 401(미인증) -- 토큰을 제시했는데
+    # 틀린 경우만 403(아래 non_ascii 테스트). 세션 admin 경로는
+    # test_admin_session_creates_account 가 고정한다.
     assert client.post("/api/admin/accounts", json={
-        "username": "boss", "password": "pw"}).status_code == 403
+        "username": "boss", "password": "pw"}).status_code == 401
     assert client.post("/api/admin/accounts", json={
         "username": "boss", "password": "pw"},
         headers={"x-admin-token": "tok-admin"}).status_code == 201
@@ -157,6 +160,135 @@ def test_session_cookie_secure_flag_follows_settings(client, db, settings):
     r2 = secure_client.post("/api/auth/login",
                             json={"username": "sec", "password": "pw"})
     assert "secure" in r2.headers.get("set-cookie", "").lower()
+
+
+def _verified_client(db, settings):
+    """인증번호 게이트를 켠 앱(라이브 기본) -- conftest 픽스처는 편의상 꺼져 있다."""
+    from dataclasses import replace
+    from fastapi.testclient import TestClient
+    from dms.api.app import create_app
+    return TestClient(create_app(
+        replace(settings, account_verification_required=True), db))
+
+
+def test_verification_code_issue_signup_flow(client, db, settings):
+    vc = _verified_client(db, settings)
+    # 코드 없이 signup 은 막힌다(게이트 기본 켜짐 = fail-closed)
+    r = vc.post("/api/auth/signup", json={"username": "cocoa.song", "password": "pw"})
+    assert (r.status_code, r.json()["detail"]) == (422, "verification_required")
+    # 발급: 이메일은 <아이디>@samsung.com 파생, stub 메일러라 코드가 에코된다
+    r = vc.post("/api/auth/verification-codes",
+                json={"username": "cocoa.song", "purpose": "signup"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["email"] == "cocoa.song@samsung.com"
+    assert body["expires_in_seconds"] == 300
+    code = body["stub_code"]
+    assert len(code) == 4 and code.isdigit()
+    # 더미 전송 흔적(이벤트)은 남고 코드는 실리지 않는다
+    ev = db.query_one("SELECT event_type, message FROM events "
+                      "WHERE event_type = 'verification_email_stub'")
+    assert "cocoa.song@samsung.com" in ev["message"] and code not in ev["message"]
+    # 올바른 코드로 생성 -> 로그인 가능, 이메일 파생 저장
+    r = vc.post("/api/auth/signup",
+                json={"username": "cocoa.song", "password": "pw", "code": code})
+    assert r.status_code == 201
+    assert vc.post("/api/auth/login", json={
+        "username": "cocoa.song", "password": "pw"}).status_code == 200
+    row = db.query_one("SELECT email FROM accounts WHERE username = 'cocoa.song'")
+    assert row["email"] == "cocoa.song@samsung.com"
+    # 코드는 소비됐다 -- 재사용 불가
+    r = vc.post("/api/auth/signup",
+                json={"username": "cocoa.song", "password": "pw", "code": code})
+    assert r.json()["detail"] in ("verification_not_found", "account_exists")
+
+
+def test_verification_code_issue_guards(client, db, settings):
+    vc = _verified_client(db, settings)
+    client.post("/api/auth/signup", json={"username": "taken", "password": "pw"})
+    # signup: 이미 있는 계정이면 발급 자체를 409 로 막는다
+    assert vc.post("/api/auth/verification-codes",
+                   json={"username": "taken", "purpose": "signup"}).status_code == 409
+    # reset: 없는 계정이면 404
+    assert vc.post("/api/auth/verification-codes",
+                   json={"username": "ghost", "purpose": "password_reset"}
+                   ).status_code == 404
+    # 형식 위반
+    assert vc.post("/api/auth/verification-codes",
+                   json={"username": "Bad:Name", "purpose": "signup"}).status_code == 422
+    assert vc.post("/api/auth/verification-codes",
+                   json={"username": "ok.name", "purpose": "hack"}).status_code == 422
+
+
+def test_verification_wrong_code_attempts_and_expiry(client, db, settings):
+    from dms.repositories import Repositories
+    from dms.repositories.accounts import VERIFICATION_MAX_ATTEMPTS
+    vc = _verified_client(db, settings)
+    code = vc.post("/api/auth/verification-codes",
+                   json={"username": "newbie", "purpose": "signup"}).json()["stub_code"]
+    wrong = "0000" if code != "0000" else "1111"
+    # 오입력은 attempts 를 올리고, 상한 도달 후엔 코드가 무효(정답도 거부)
+    for _ in range(VERIFICATION_MAX_ATTEMPTS):
+        r = vc.post("/api/auth/signup",
+                    json={"username": "newbie", "password": "pw", "code": wrong})
+        assert r.json()["detail"] == "verification_invalid"
+    r = vc.post("/api/auth/signup",
+                json={"username": "newbie", "password": "pw", "code": code})
+    assert r.json()["detail"] == "verification_too_many_attempts"
+    # 만료: repo 수준에서 미래 시각으로 판정
+    repos = Repositories(db)
+    repos.accounts.issue_verification_code("newbie", "signup")
+    assert repos.accounts.consume_verification_code(
+        "newbie", "signup", "9999", now_iso="2099-01-01T00:00:00Z"
+    ) == "verification_expired"
+
+
+def test_password_reset_flow(client, db, settings):
+    vc = _verified_client(db, settings)
+    client.post("/api/auth/signup", json={"username": "rst.user", "password": "old"})
+    code = vc.post("/api/auth/verification-codes",
+                   json={"username": "rst.user", "purpose": "password_reset"}
+                   ).json()["stub_code"]
+    # 잘못된 코드는 변경을 막는다
+    assert vc.post("/api/auth/password-reset", json={
+        "username": "rst.user", "password": "new", "code": "wrong"}).status_code == 422
+    assert vc.post("/api/auth/password-reset", json={
+        "username": "rst.user", "password": "new", "code": code}).status_code == 200
+    assert vc.post("/api/auth/login", json={
+        "username": "rst.user", "password": "old"}).status_code == 401
+    assert vc.post("/api/auth/login", json={
+        "username": "rst.user", "password": "new"}).status_code == 200
+    # 감사가 남는다(해시 없이)
+    row = db.query_one("SELECT operation FROM audit_log "
+                       "WHERE mutation_class = 'account' AND operation = 'password_reset'")
+    assert row is not None
+
+
+def test_admin_session_creates_account(client, db):
+    # 운영자 포탈 경로(2026-08-20): 세션 admin 이 계정을 만든다(역할 선택 가능)
+    client.post("/api/auth/signup", json={"username": "boss", "password": "pw"})
+    from dms.repositories import Repositories
+    Repositories(db).accounts.set_role("boss", "admin", actor="test")
+    client.post("/api/auth/login", json={"username": "boss", "password": "pw"})
+    r = client.post("/api/admin/accounts",
+                    json={"username": "made.byadmin", "password": "pw"})
+    assert (r.status_code, r.json()["role"]) == (201, "user")
+    r = client.post("/api/admin/accounts",
+                    json={"username": "made.admin", "password": "pw", "role": "admin"})
+    assert (r.status_code, r.json()["role"]) == (201, "admin")
+    assert client.post("/api/admin/accounts", json={
+        "username": "made.byadmin", "password": "pw"}).status_code == 409
+    assert client.post("/api/admin/accounts", json={
+        "username": "x.y", "password": "pw", "role": "root"}).status_code == 422
+    # 이메일 파생 저장
+    row = db.query_one("SELECT email FROM accounts WHERE username = 'made.byadmin'")
+    assert row["email"] == "made.byadmin@samsung.com"
+    # 비관리자 세션은 403
+    client.post("/api/auth/logout")
+    client.post("/api/auth/signup", json={"username": "pleb", "password": "pw"})
+    client.post("/api/auth/login", json={"username": "pleb", "password": "pw"})
+    assert client.post("/api/admin/accounts", json={
+        "username": "nope", "password": "pw"}).status_code == 403
 
 
 def test_create_app_wires_the_reconnect_event_hook(client, db):

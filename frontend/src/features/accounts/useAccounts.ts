@@ -3,6 +3,15 @@ import { apiGet, apiSend } from "../../lib/api";
 import type { Account } from "../../lib/types";
 export const useAccounts = () =>
   useQuery({ queryKey: ["accounts"], queryFn: () => apiGet<Account[]>("/api/admin/accounts") });
+// 운영자 계정 생성(2026-08-20, 사용자 결정): 세션 admin 경로 -- 인증번호 없이
+// 즉시 생성(관리자 권한이 곧 승인), 이메일은 서버가 <아이디>@도메인 파생 저장.
+export const useCreateAccount = () => {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (v: { username: string; password: string; role: string }) =>
+    apiSend("POST", "/api/admin/accounts", v),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }) });
+};
+
 export const useSetRole = () => {
   const qc = useQueryClient();
   return useMutation({ mutationFn: (v: { username: string; role: string }) =>

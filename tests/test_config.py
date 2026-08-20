@@ -125,6 +125,15 @@ def test_anonymous_bind_remains_the_default():
     assert s.ldap_bind_dn == ""
 
 
+def test_account_verification_env_defaults_on():
+    # 운영 경로(from_env)는 fail-closed: 명시로 끄지 않는 한 인증번호 필수.
+    # (dataclass 직접 생성 기본은 False -- 테스트 전용 관례, config.py 주석.)
+    assert Settings.from_env(VALID).account_verification_required is True
+    assert Settings.from_env({**VALID, "DMS_ACCOUNT_VERIFICATION_REQUIRED": "false"}
+                             ).account_verification_required is False
+    assert Settings.from_env(VALID).account_email_domain == "samsung.com"
+
+
 def test_session_cookie_secure_parses_and_defaults_off():
     # TLS 종단(ingress) 배포 대비 게이트. 기본 false 인 이유는 테스트베드의
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문.
