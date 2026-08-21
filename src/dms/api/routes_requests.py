@@ -84,16 +84,22 @@ def _validated_payload(body: RequestBody, priority: str) -> tuple[dict, str]:
 def submit(body: RequestBody, request: Request,
            identity: Identity = Depends(require_user)):
     reject_when_maintenance(request)
-    # scan 제출은 관리자 전용이다 (설계 결정 레코드) — /admin/scan이 admin 라우트라는
-    # 사실만으로는 강제되지 않으므로 여기서 명시적으로 게이트한다.
-    # 원시 문자열로 비교한다 — Operation(...)은 알 수 없는 값에 ValueError를 던지는데
-    # 이 지점은 그것을 422로 바꿔주는 try 블록 밖이라 500이 되어 버린다.
-    if body.operation == Operation.SCAN.value and identity.role != "admin":
-        raise HTTPException(status_code=403, detail="scan_admin_only")
+    # 사용자 연산 allowlist(2026-08-20, 사용자 결정): 비운영자는 settings.
+    # user_allowed_operations(기본 {sync}) 밖의 연산을 제출할 수 없다 -- rm·scan 은
+    # 일단 잠긴다. admin 은 무관하게 전부 가능. 원시 문자열로 비교한다(Operation(...)
+    # 은 알 수 없는 값에 ValueError 를 던지는데 여기는 그것을 422 로 바꾸는 try 밖이라
+    # 500 이 되어 버린다). 표시 게이트(SubmitJob isAdmin)와 짝인 서버 강제다.
+    settings = request.app.state.settings
+    # **알려진** 연산 중 미허용만 403 -- 알 수 없는 연산(bogus)은 이 게이트를
+    # 통과시켜 아래 try 의 422 invalid_operation 으로 흘린다("bogus 는 admin 전용"이
+    # 아니라 "그런 연산이 없다"가 맞다). 알려진 집합은 Operation enum 이 단일 진실.
+    known_ops = {o.value for o in Operation}
+    if (identity.role != "admin" and body.operation in known_ops
+            and body.operation not in settings.user_allowed_operations):
+        raise HTTPException(status_code=403, detail="operation_admin_only")
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요
     owner = body.owner_username
     if owner is not None and owner != identity.actor:
-        settings = request.app.state.settings
         authorized = (identity.role == "admin"
                       and settings.allow_privileged_requesters
                       and identity.actor in settings.privileged_requesters)

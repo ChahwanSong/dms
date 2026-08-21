@@ -125,6 +125,14 @@ def test_anonymous_bind_remains_the_default():
     assert s.ldap_bind_dn == ""
 
 
+def test_user_allowed_operations_default_and_override():
+    # 기본 {sync} -- 사용자는 sync 만, rm·scan 은 잠김(2026-08-20).
+    assert Settings.from_env(VALID).user_allowed_operations == frozenset({"sync"})
+    # env 로 넓히면 잠금 해제(예: rm 도 허용)
+    s = Settings.from_env({**VALID, "DMS_USER_ALLOWED_OPERATIONS": "sync,rm"})
+    assert s.user_allowed_operations == frozenset({"sync", "rm"})
+
+
 def test_account_verification_env_defaults_on():
     # 운영 경로(from_env)는 fail-closed: 명시로 끄지 않는 한 인증번호 필수.
     # (dataclass 직접 생성 기본은 False -- 테스트 전용 관례, config.py 주석.)

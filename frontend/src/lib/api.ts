@@ -104,7 +104,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   log_ref_not_found: "이 단계의 로그 참조가 없습니다",
   log_not_available: "이 단계는 파드 로그를 제공하지 않습니다 — 아티팩트를 확인하세요",
   unsafe_path: "경로가 올바르지 않습니다",
-  scan_admin_only: "scan 실행은 관리자만 가능합니다",
+  operation_admin_only: "이 연산은 관리자만 가능합니다",
   account_disabled: "계정이 비활성화되었습니다",
   node_not_found: "노드를 찾을 수 없습니다",
   requester_disabled: "요청자 계정이 비활성화되었습니다",

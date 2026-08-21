@@ -29,8 +29,11 @@ const SYNC_NUM_DEFAULTS = {
   bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill),
 };
 
+// 기본 me = admin(2026-08-20): rm·scan·고급옵션·우선순위·실행신원은 운영자
+// 전용이라, 그 기능들을 다루는 대다수 테스트는 admin 컨텍스트여야 한다. 사용자
+// 제약(sync 만·옵션 단순화)은 meUser 를 명시한 테스트가 따로 고정한다.
 const server = setupServer(
-  http.get("/api/auth/me", () => HttpResponse.json(meUser)),
+  http.get("/api/auth/me", () => HttpResponse.json(meAdmin)),
   http.get("/api/user/storages", () => HttpResponse.json(storageRows)),
 );
 beforeAll(() => server.listen());
@@ -73,8 +76,10 @@ async function fillSyncTarget() {
 }
 
 // 연산 스텝(초기)에서 rm 을 고르고 → 대상 스텝에서 스토리지·경로를 채운다.
+// rm 은 이제 admin 전용이라 me 로드 후에야 옵션이 생긴다 -- 옵션을 기다린 뒤 고른다.
 async function fillRmTarget() {
-  await userEvent.selectOptions(await screen.findByLabelText("연산"), "rm");
+  await screen.findByRole("option", { name: "rm" });
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
   await clickNext();
   const storageSelect = screen.getByLabelText("스토리지");
   await within(storageSelect).findByText("cephfs (Ready)");
@@ -105,6 +110,7 @@ test("연산을 rm으로 바꾸면 대상 스텝의 필드 구성이 바뀐다",
   // "이전"으로 연산 스텝에 돌아가 rm 전환 -- 위저드에서도 값 상태는 스텝 밖
   // 단일 useState 라 전환 정책(현행 유지)이 그대로 적용된다.
   await userEvent.click(screen.getByRole("button", { name: "이전" }));
+  await screen.findByRole("option", { name: "rm" });   // rm 은 admin 로드 후 등장
   await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
   expect(screen.getByText(
     "삭제는 되돌릴 수 없습니다. 미리보기에서 대상을 확인한 뒤 확인해야 실행됩니다.",
@@ -222,7 +228,7 @@ test("실행 신원 필드는 옵션 스텝에서 관리자에게만 보인다",
   await screen.findByLabelText("연산");
   await clickNext();
   await goToOptions();
-  await screen.findByLabelText("우선순위");
+  await screen.findByLabelText("delete");   // 사용자 옵션 스텝의 앵커(우선순위는 숨김)
   expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
   unmount();
 
@@ -423,10 +429,29 @@ test("범위 밖 bufsize는 다음을 비활성으로 막는다", async () => {
 
 // ---- 슬라이스 37: scan 연산(운영자 전용) ------------------------------------
 
-test("비관리자에게는 scan 연산이 보이지 않는다(표시 게이트 — 진짜 차단은 서버 403)", async () => {
+test("비관리자에겐 sync 만 — scan·rm 은 숨김(표시 게이트 · 서버 403 이 진짜 차단)", async () => {
+  // 사용자 연산 allowlist(2026-08-20, 사용자 결정): 사용자는 sync 만. scan·rm 은
+  // 운영자 전용이라 드롭다운에서 빠진다.
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   renderPage();
   const select = (await screen.findByLabelText("연산")) as HTMLSelectElement;
-  expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync", "rm"]);
+  expect(Array.from(select.options).map((o) => o.value)).toEqual(["sync"]);
+});
+
+test("비관리자 sync 옵션은 delete·contents 만 — direct·quiet·고급·우선순위 숨김", async () => {
+  // 사용자 결정(2026-08-20): 사용자 단일작업 sync 폼은 최소만 노출한다.
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+  renderPage();
+  await screen.findByLabelText("연산");
+  await clickNext();
+  await goToOptions();
+  expect(screen.getByLabelText("delete")).toBeInTheDocument();
+  expect(screen.getByLabelText("contents")).toBeInTheDocument();
+  expect(screen.queryByLabelText("direct")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("quiet")).not.toBeInTheDocument();
+  expect(screen.queryByText("고급 옵션")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("우선순위")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
 });
 
 test("admin scan 제출 바디가 정확하다(옵션 생략 = 도구 기본)", async () => {

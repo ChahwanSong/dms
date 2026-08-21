@@ -32,11 +32,8 @@ def test_submit_scan_and_poll(client):
 
 def test_validation_maps_to_422(client):
     _login(client, "bob")
+    # 사용자 allowlist(2026-08-20): 사용자는 sync 만 -- sync 검증 오류만 여기서.
     cases = [
-        ({"operation": "rm", "storage": "s", "target": "a", "options": {}},
-         "rm_recursive_required"),
-        ({"operation": "rm", "storage": None, "target": "a",
-          "options": {"recursive": True}}, "missing_storage"),
         ({"operation": "sync", "source_storage": "s", "source": "a",
           "destination_storage": "s", "destination": "a/b"},
          "sync_destination_inside_source"),
@@ -47,8 +44,12 @@ def test_validation_maps_to_422(client):
         r = client.post("/api/user/requests", json=body)
         assert r.status_code == 422 and r.json()["detail"] == reason, body
 
-    # scan은 관리자 전용 제출이라 admin 인증으로 검증 오류를 확인한다.
+    # scan·rm 은 관리자 전용 제출이라 admin 인증으로 검증 오류를 확인한다.
     admin_cases = [
+        ({"operation": "rm", "storage": "s", "target": "a", "options": {}},
+         "rm_recursive_required"),
+        ({"operation": "rm", "storage": None, "target": "a",
+          "options": {"recursive": True}}, "missing_storage"),
         ({"operation": "scan", "storage": "s", "target": "/abs"}, "unsafe_path"),
         ({"operation": "scan", "target": "a"}, "missing_storage"),
         ({"operation": "scan", "storage": "s", "target": "a",
@@ -63,9 +64,11 @@ def test_validation_maps_to_422(client):
 
 def test_isolation_between_users_and_admin_sees_all(client):
     _login(client, "alice")
+    # sync 로 요청 생성 -- 사용자 allowlist 는 sync 만(rm 은 403). 이 테스트의
+    # 관심사는 소유권 격리이지 연산 종류가 아니다.
     rid = client.post("/api/user/requests", json={
-        "operation": "rm", "storage": "s1", "target": "a",
-        "options": {"recursive": True}}).json()["request_id"]
+        "operation": "sync", "source_storage": "s1", "source": "a",
+        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
     client.post("/api/auth/logout")
     _login(client, "eve")
     assert client.get(f"/api/user/requests/{rid}").status_code == 404
@@ -83,22 +86,23 @@ def test_unknown_operation_is_422_not_500(client):
 
 
 def test_scan_submission_is_admin_only(client):
+    # 사용자 연산 allowlist(2026-08-20): 비운영자는 sync 만. scan·rm 은 403.
     _login(client, "carol")
-    r = client.post("/api/user/requests", json={
-        "operation": "scan", "storage": "s1", "target": "a"})
-    assert r.status_code == 403
-    assert r.json()["detail"] == "scan_admin_only"
+    for op, payload in (("scan", {"operation": "scan", "storage": "s1", "target": "a"}),
+                        ("rm", {"operation": "rm", "storage": "s1", "target": "a",
+                                "options": {"recursive": True}})):
+        r = client.post("/api/user/requests", json=payload)
+        assert (r.status_code, r.json()["detail"]) == (403, "operation_admin_only"), op
 
+    # admin 은 allowlist 와 무관하게 scan·rm 모두 가능
     r = client.post("/api/user/requests", headers=ADMIN, json={
         "operation": "scan", "storage": "s1", "target": "a"})
     assert r.status_code == 202
-
-    # sync와 rm은 non-admin에게 여전히 영향받지 않는다.
-    r = client.post("/api/user/requests", json={
-        "operation": "rm", "storage": "s1", "target": "a",
-        "options": {"recursive": True}})
+    r = client.post("/api/user/requests", headers=ADMIN, json={
+        "operation": "rm", "storage": "s1", "target": "b", "options": {"recursive": True}})
     assert r.status_code == 202
 
+    # sync 는 non-admin 에게 그대로 열려 있다(allowlist 기본값).
     r = client.post("/api/user/requests", json={
         "operation": "sync", "source_storage": "s1", "source": "a",
         "destination_storage": "s2", "destination": "b"})
@@ -235,8 +239,8 @@ def test_request_detail_reason_does_not_leak_to_another_user(client):
     # 사유가 새 필드로 늘었어도 소유권 게이트는 그대로다(타인 요청은 404).
     _login(client, "alice")
     rid = client.post("/api/user/requests", json={
-        "operation": "rm", "storage": "s1", "target": "a",
-        "options": {"recursive": True}}).json()["request_id"]
+        "operation": "sync", "source_storage": "s1", "source": "a",
+        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
     client.app.state.repos.requests.set_state_with_result(
         rid, RequestState.REJECTED, reason_code="identity_denied", actor="planner")
     client.post("/api/auth/logout")
@@ -252,8 +256,8 @@ def test_list_limit_param_is_honored_and_capped(client):
     rids = []
     for i in range(3):
         rids.append(client.post("/api/user/requests", json={
-            "operation": "rm", "storage": "s1", "target": f"t{i}",
-            "options": {"recursive": True}}).json()["request_id"])
+            "operation": "sync", "source_storage": "s1", "source": f"t{i}",
+            "destination_storage": "s1", "destination": f"d{i}"}).json()["request_id"])
     rows = client.get("/api/user/requests", params={"limit": 2}).json()
     assert [r["request_id"] for r in rows] == [rids[2], rids[1]]  # 최신순 + limit
     assert client.get("/api/user/requests", params={"limit": 0}).status_code == 422

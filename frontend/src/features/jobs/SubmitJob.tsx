@@ -212,10 +212,11 @@ export function SubmitJob() {
                 <select aria-label="연산" className={field} value={f.operation}
                         onChange={(e) => setF({ ...f, operation: e.target.value as Operation })}>
                   <option value="sync">sync</option>
-                  {/* scan 제출은 서버가 admin 전용(403)이다 — 표시 게이트일 뿐,
-                      진짜 차단은 서버 몫(navigation.ts 관례와 동일). */}
+                  {/* 사용자 연산 allowlist(2026-08-20, 사용자 결정): 비운영자는
+                      sync 만. scan·rm 은 admin 전용 -- 표시 게이트일 뿐 진짜 차단은
+                      서버(routes_requests operation_admin_only 403). */}
                   {isAdmin && <option value="scan">scan</option>}
-                  <option value="rm">rm</option>
+                  {isAdmin && <option value="rm">rm</option>}
                 </select>
               </label>
               {f.operation === "rm" && rmWarning}
@@ -265,13 +266,23 @@ export function SubmitJob() {
                   <label className="flex items-center gap-2 text-sm">
                     <input type="checkbox" aria-label="contents" checked={f.contents} onChange={on("contents")} /> contents
                   </label>
+                  {/* direct·quiet·고급옵션·우선순위는 운영자 전용(2026-08-20, 사용자
+                      결정): 사용자 sync 폼은 delete·contents 만 남긴다. 숨겨도 제출
+                      payload 는 동일하다 -- checkedOptions 가 기본값(false)을 이미
+                      생략하고, 고급 프리필(batch_files·bufsize)은 도구 기본값이라
+                      운영자가 고급을 안 펼친 것과 결과가 같다. */}
+                  {isAdmin && (
                   <label className="flex items-center gap-2 text-sm">
                     <input type="checkbox" aria-label="direct" checked={f.direct} onChange={on("direct")} /> direct
                   </label>
+                  )}
+                  {isAdmin && (
                   <label className="flex items-center gap-2 text-sm">
                     <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
                   </label>
+                  )}
                   {/* 기본 접힘 — 기존 동선(단순 sync 제출)을 바꾸지 않기 위해 <details> 로 숨긴다 */}
+                  {isAdmin && (
                   <details className="rounded-lg border border-line p-3">
                     <summary className="cursor-pointer text-sm font-medium">고급 옵션</summary>
                     <div className="mt-3 space-y-3">
@@ -324,6 +335,7 @@ export function SubmitJob() {
                       </p>
                     </div>
                   </details>
+                  )}
                 </>
               ) : f.operation === "scan" ? (
                 /* scan 옵션(구 SubmitScan 미러): 생략 = 도구 기본. */
@@ -369,16 +381,20 @@ export function SubmitJob() {
                 </>
               )}
 
-              {/* 정책 기본값 캡션(BatchCreate 미러) — 노드 수·프로세스 수는 단일
-                  작업에선 정책이 정한다(배치 레벨 override 없음)는 사실을 여기서
-                  말한다. */}
-              <p className="text-muted text-xs">{policyCaption}</p>
-              <label className="text-sm block">우선순위
-                <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
-                  <option value="">{priorityDefaultLabel}</option>
-                  <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
-                </select>
-              </label>
+              {/* 정책 기본값 캡션·우선순위는 운영자 전용(2026-08-20, 사용자 결정):
+                  사용자 폼에선 우선순위를 정책 기본에 맡긴다(생략 = resolve_priority
+                  가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다. */}
+              {isAdmin && (
+                <>
+                  <p className="text-muted text-xs">{policyCaption}</p>
+                  <label className="text-sm block">우선순위
+                    <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
+                      <option value="">{priorityDefaultLabel}</option>
+                      <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
+                    </select>
+                  </label>
+                </>
+              )}
 
               {/* 라벨 정정(사용자 결정 2026-08-16): 이 값(owner_username)은 결과물의
                   소유자 기록이 아니라 **잡의 실행 신원**이다 — identity.py

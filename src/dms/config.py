@@ -127,6 +127,11 @@ class Settings:
     artifact_base_uri: str = "file:///artifacts/dms"
     allow_privileged_requesters: bool = True
     privileged_requesters: frozenset = frozenset({"root", "admin"})
+    # 비운영자(role=user)가 제출할 수 있는 연산 allowlist(2026-08-20, 사용자 결정:
+    # 사용자에겐 sync 만 열고 rm·scan 은 일단 잠근다). admin 은 이 목록과 무관하게
+    # 전부 가능. "일단"이라 나중에 rm/scan 을 풀 때는 env 로 목록만 넓히면 된다
+    # (DMS_USER_ALLOWED_OPERATIONS="sync,rm" 등). routes_requests.submit 이 강제한다.
+    user_allowed_operations: frozenset = frozenset({"sync"})
     ldap_uri: str = ""
     ldap_user_base: str = ""
     ldap_group_base: str = ""
@@ -224,6 +229,9 @@ class Settings:
             privileged_requesters=_parse_csv_set(
                 environ, "DMS_PRIVILEGED_REQUESTERS",
                 default=frozenset({"root", "admin"})),
+            user_allowed_operations=_parse_csv_set(
+                environ, "DMS_USER_ALLOWED_OPERATIONS",
+                default=frozenset({"sync"})),
             ldap_uri=environ.get("DMS_LDAP_URI", ""),
             ldap_user_base=environ.get("DMS_LDAP_USER_BASE", ""),
             ldap_group_base=environ.get("DMS_LDAP_GROUP_BASE", ""),
