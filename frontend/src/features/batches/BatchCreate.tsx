@@ -44,13 +44,12 @@ const initial = {
   // 같은 옵션명이지만 범위도 프리필도 다르다(scan 0..10억·0 = 배칭 끔·프리필 없음,
   // sync 1..1,000만·1,000,000 프리필).
   scanBatchFiles: "", brokenLimit: "", verbose: false, quiet: false,
-  // sync 옵션(SubmitJob 미러, 정규식·범위는 optionRules 공유). 단 open_noatime 은
-  // 배치만 기본 ON(사용자 승인): 배치는 통일 게이트로 항상 특권(root) 실행이라
-  // O_NOATIME 권한 제약이 없고, 소스 atime 오염을 막아야 데이터 온도(hot/cold)
-  // 통계가 정직해진다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)라 DMS 가
-  // 명시적으로 켠다. 단건 sync(SubmitJob)는 비특권 경로에서 타인 소유 파일
-  // O_NOATIME open 이 EPERM 이라 기본 OFF — 배치와 다른 게 맞다(고급 옵션
-  // <details> 기본 접힘이어도 바디에 실리는 진실은 이 초기값이다).
+  // sync 옵션(SubmitJob 미러, 정규식·범위는 optionRules 공유). open_noatime 은
+  // 단건·배치 모두 기본 ON 으로 통일했다(사용자 결정 2026-08-22 — 소스 atime
+  // 오염 방지). 배치는 통일 게이트로 항상 특권(root) 실행이라 O_NOATIME 권한
+  // 제약이 없다. dsync 도구 기본은 off(mfu_flist_copy.c:3344)라 DMS 가 명시적으로
+  // 켠다. (단건 sync 는 비특권 실행이라 타인 소유 파일 O_NOATIME 이 EPERM 일 수
+  // 있다는 캐비엇이 SubmitJob 쪽 초기값 주석에 있다.)
   // batchFiles·bufsize 프리필은 단건 폼과 같은 단일 출처(SYNC_INT_FIELDS) —
   // 「왜 도구 기본과 다른 값을 명시 전송하는가」는 그 주석에 있다.
   delete: false, contents: false, direct: false,

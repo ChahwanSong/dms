@@ -43,7 +43,13 @@ const initial = {
   // truthy 검사 금지: "0"은 미입력이 아니라 범위 밖 클라이언트 검증 오류다.
   // batchFiles·bufsize 는 프리필(SYNC_INT_FIELDS.prefill — 「왜」는 그 주석):
   // 값이 실려 있으니 손대지 않으면 바디에 그대로 나간다. 지우면 옛 계약대로 생략.
-  openNoatime: false,
+  // 기본 ON(사용자 결정 2026-08-22): 단건·배치, 사용자·운영자 모두 open_noatime
+  // 을 기본으로 켠다(소스 atime 오염 방지 — 데이터 온도 통계 정직성). 배치는
+  // 이미 ON 이었고 단건만 OFF 였던 걸 통일했다. 단, 단건 sync 는 비특권(요청자)
+  // 실행이라 **타인 소유 파일**에 O_NOATIME open 이 EPERM 이 될 수 있다(자기 소유
+  // 파일은 무해) -- 그 경우 잡이 Failed 로 끝난다. 사용자 폼은 이 옵션이 숨겨져
+  // 있어 항상 ON 이고, 운영자는 고급 옵션에서 끌 수 있다.
+  openNoatime: true,
   batchFiles: SYNC_INT_FIELDS.batch_files.prefill,
   bufsize: SYNC_INT_FIELDS.bufsize.prefill,
   chmod: "", chown: "",

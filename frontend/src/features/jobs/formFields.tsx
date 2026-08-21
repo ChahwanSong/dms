@@ -26,11 +26,12 @@ export function StoragePicker({ label, value, onChange, storages, loading }: {
       <select aria-label={label} className={field} value={value} disabled={loading}
               onChange={(e) => onChange(e.target.value)}>
         <option value="">{loading ? "불러오는 중…" : "선택하세요"}</option>
+        {/* 상태 접미(Ready/Degraded 등)는 표시하지 않는다(사용자 결정 2026-08-22):
+            작업 제출 화면에선 스토리지 이름만 필요하다 -- 상태는 스토리지 관리
+            화면의 몫이다. 옵션은 이름만 노출한다. */}
         {storages.map((s) => (
           <option key={s.storage_name} value={s.storage_name}>
-            {s.status === "Ready" || s.status === "Degraded"
-              ? `${s.storage_name} (${s.status})`
-              : `${s.storage_name} (${s.status} — 준비 안 됨)`}
+            {s.storage_name}
           </option>
         ))}
       </select>

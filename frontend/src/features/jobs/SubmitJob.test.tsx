@@ -28,6 +28,8 @@ const SYNC_NUM_DEFAULTS = {
   batch_files: Number(SYNC_INT_FIELDS.batch_files.prefill),
   bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill),
 };
+// pristine sync 폼이 항상 싣는 옵션(2026-08-22): open_noatime 기본 ON + 숫자 프리필.
+const SYNC_DEFAULT_OPTS = { open_noatime: true, ...SYNC_NUM_DEFAULTS };
 
 // 기본 me = admin(2026-08-20): rm·scan·고급옵션·우선순위·실행신원은 운영자
 // 전용이라, 그 기능들을 다루는 대다수 테스트는 admin 컨텍스트여야 한다. 사용자
@@ -68,7 +70,9 @@ async function fillSyncTarget() {
   await screen.findByLabelText("연산");
   await clickNext();
   const sourceSelect = await screen.findByLabelText("소스 스토리지");
-  await within(sourceSelect).findByText("cephfs (Ready)");
+  // 옵션 텍스트는 이름만(상태 접미 제거, 2026-08-22) -- 정확 매칭으로 기다린다
+  // (cephfs 는 cephfs-secondary 의 부분 문자열이라 exact 필수).
+  await within(sourceSelect).findByRole("option", { name: "cephfs" });
   await userEvent.selectOptions(sourceSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("소스 경로"), "a/b");
   await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "cephfs-secondary");
@@ -82,7 +86,7 @@ async function fillRmTarget() {
   await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
   await clickNext();
   const storageSelect = screen.getByLabelText("스토리지");
-  await within(storageSelect).findByText("cephfs (Ready)");
+  await within(storageSelect).findByRole("option", { name: "cephfs" });
   await userEvent.selectOptions(storageSelect, "cephfs");
   await userEvent.type(screen.getByLabelText("대상 경로"), "a/b");
 }
@@ -95,8 +99,11 @@ test("스토리지 드롭다운이 API 목록으로 채워진다", async () => {
   await screen.findByLabelText("연산");
   await clickNext();
   const sourceSelect = await screen.findByLabelText("소스 스토리지");
-  expect(await within(sourceSelect).findByText("cephfs (Ready)")).toBeInTheDocument();
-  expect(within(sourceSelect).getByText("cephfs-secondary (Ready)")).toBeInTheDocument();
+  // 이름만(상태 접미 없음). 정확 매칭으로 두 옵션을 구분.
+  expect(await within(sourceSelect).findByRole("option", { name: "cephfs" })).toBeInTheDocument();
+  expect(within(sourceSelect).getByRole("option", { name: "cephfs-secondary" })).toBeInTheDocument();
+  // 상태 접미(Ready/Degraded)는 더 이상 노출되지 않는다.
+  expect(within(sourceSelect).queryByText(/\(Ready\)|\(Degraded\)/)).not.toBeInTheDocument();
 });
 
 test("연산을 rm으로 바꾸면 대상 스텝의 필드 구성이 바뀐다", async () => {
@@ -139,10 +146,9 @@ test("sync 제출 바디가 정확하다", async () => {
     operation: "sync",
     source_storage: "cephfs", source: "a/b",
     destination_storage: "cephfs-secondary", destination: "c/d",
-    // 계약 변경(사용자 조정 2026-08-16): batch_files·bufsize 는 폼이 **프리필**해
-    // 항상 명시 전송된다. 예전엔 빈값이라 키가 통째로 빠졌다 — 지우면 다시 빠진다
-    // (아래 "고급 숫자 옵션을 지우면…" 테스트가 그 성질을 지킨다).
-    options: SYNC_NUM_DEFAULTS,
+    // 계약: batch_files·bufsize 프리필 + open_noatime 기본 ON(2026-08-22) 이
+    // 항상 실린다. 숫자는 지우면 빠지고(아래 테스트), open_noatime 은 해제하면 빠진다.
+    options: SYNC_DEFAULT_OPTS,
     // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
   });
 });
@@ -338,20 +344,23 @@ test("고급 숫자 옵션을 지우면 그 키가 바디에서 빠진다(도구
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  // 빈 문자열은 "미입력"이라 통째로 생략된다 — 프리필이 생겨도 이 성질은 남는다
-  // (사용자가 배칭을 끄는 유일한 표현이다). bool 4종 checkedOptions 회귀 겸.
-  expect(captured.body.options).toEqual({});
+  // 빈 문자열은 "미입력"이라 batch_files·bufsize 는 통째로 생략된다. open_noatime
+  // 은 기본 ON(2026-08-22)이라 손대지 않으면 남는다 -- 숫자 생략과 독립.
+  expect(captured.body.options).toEqual({ open_noatime: true });
 });
 
-test("open_noatime 체크는 options.open_noatime === true 로 전송된다", async () => {
+test("open_noatime 은 기본 ON 이라 손대지 않으면 true 로 실리고, 해제하면 빠진다", async () => {
+  // 사용자 결정(2026-08-22): 단건 sync 도 open_noatime 기본 ON. 운영자는 고급
+  // 옵션에서 끌 수 있고, 끄면 checkedOptions 가 false 를 생략한다.
   const captured = captureSubmit();
   renderPage();
   await goToOptionsAndOpenAdvanced();
-  await userEvent.click(screen.getByLabelText("open_noatime"));
+  expect(screen.getByLabelText("open_noatime")).toBeChecked();
+  await userEvent.click(screen.getByLabelText("open_noatime"));  // 해제
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual({ ...SYNC_NUM_DEFAULTS, open_noatime: true });
+  expect(captured.body.options).toEqual(SYNC_NUM_DEFAULTS);   // open_noatime 빠짐
 });
 
 test("chmod·chown 문자열이 그대로 전송된다", async () => {
@@ -364,7 +373,7 @@ test("chmod·chown 문자열이 그대로 전송된다", async () => {
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(captured.body.options).toEqual(
-    { ...SYNC_NUM_DEFAULTS, chmod: "D770,F660", chown: "alice:proj" });
+    { ...SYNC_DEFAULT_OPTS, chmod: "D770,F660", chown: "alice:proj" });
 });
 
 test("숫자 uid:gid chown 이 즉답 오류 없이 그대로 전송된다", async () => {
@@ -379,7 +388,7 @@ test("숫자 uid:gid chown 이 즉답 오류 없이 그대로 전송된다", asy
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual({ ...SYNC_NUM_DEFAULTS, chown: "10003:10000" });
+  expect(captured.body.options).toEqual({ ...SYNC_DEFAULT_OPTS, chown: "10003:10000" });
 });
 
 test("batch_files·bufsize 숫자 입력은 number 로 전송된다", async () => {
@@ -394,7 +403,7 @@ test("batch_files·bufsize 숫자 입력은 number 로 전송된다", async () =
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual({ batch_files: 1000, bufsize: 4096 });
+  expect(captured.body.options).toEqual({ open_noatime: true, batch_files: 1000, bufsize: 4096 });
 });
 
 test("batch_files 상한은 1,000만 — 그 값은 통과, 넘으면 즉답 문구 + 다음 비활성", async () => {
