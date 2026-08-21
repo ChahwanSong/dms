@@ -260,12 +260,20 @@ export function SubmitJob() {
             <div className="space-y-3">
               {f.operation === "sync" ? (
                 <>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" aria-label="delete" checked={f.delete} onChange={on("delete")} /> delete
-                  </label>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" aria-label="contents" checked={f.contents} onChange={on("contents")} /> contents
-                  </label>
+                  {/* 옵션 설명(2026-08-20, 사용자 요청): dsync --delete / --contents.
+                      ml-6 은 체크박스+간격 폭이라 설명이 라벨 글자 아래로 정렬된다. */}
+                  <div>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" aria-label="delete" checked={f.delete} onChange={on("delete")} /> delete
+                    </label>
+                    <p className="text-muted text-xs ml-6">원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화).</p>
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" aria-label="contents" checked={f.contents} onChange={on("contents")} /> contents
+                    </label>
+                    <p className="text-muted text-xs ml-6">크기·수정시각 대신 파일 내용을 바이트 단위로 비교합니다(더 느리지만 정확).</p>
+                  </div>
                   {/* direct·quiet·고급옵션·우선순위는 운영자 전용(2026-08-20, 사용자
                       결정): 사용자 sync 폼은 delete·contents 만 남긴다. 숨겨도 제출
                       payload 는 동일하다 -- checkedOptions 가 기본값(false)을 이미
