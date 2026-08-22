@@ -50,7 +50,7 @@ test("user 는 작업 그룹 2링크만 보이고 admin 전용 그룹은 없다"
   renderShell("user");
   // me 도착을 먼저 기다린다 -- 기다리지 않으면 "adminOnly 부재" 단언이 로딩 중
   // 화면을 보고 공허하게 통과한다(데이터가 오기 전엔 누구든 user 로 보인다).
-  await screen.findByText("alice · user");
+  await screen.findByText("alice");   // me 로드 앵커(UserPanel 아이디)
   for (const label of USER_LABELS)
     expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
   for (const label of ADMIN_ONLY_LABELS)
@@ -85,7 +85,7 @@ test("독립 토글: 대시보드에서 스토리지를 열어도 운영은 열�
 
 test("최상위 섹션은 DMS 뿐 -- NAS·Monitoring 링크는 없다(추후 추가)", async () => {
   renderShell("user");
-  await screen.findByText("alice · user");
+  await screen.findByText("alice");   // me 로드 앵커(UserPanel 아이디)
   expect(screen.queryByRole("link", { name: "NAS" })).toBeNull();
   expect(screen.queryByRole("link", { name: "Monitoring" })).toBeNull();
 });

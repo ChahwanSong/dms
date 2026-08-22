@@ -7,11 +7,26 @@ export function UserPanel() {
   const me = useMe();
   const logout = useLogout();
   const nav = useNavigate();
+  const role = me.data?.role;
+  // 역할 라벨·색을 분리(사용자 결정 2026-08-22): 아이디는 강조, 역할은 배지로 --
+  // "mason · admin" 한 줄보다 계정과 권한이 한눈에 구분된다. 라벨은 한국어로.
+  const roleLabel = role === "admin" ? "관리자" : role === "user" ? "사용자" : role;
+  const roleCls = role === "admin"
+    ? "bg-infobg text-accent" : "bg-black/5 text-muted";
   return (
     <div className="border-t border-line p-3 flex items-center justify-between gap-2">
       {/* min-w-0 + truncate: 사용자명이 길면 말줄임 -- 패널이 늘어나면 사이드바
-          240px(e2e L3)이 밀린다. */}
-      <div className="text-sm text-muted truncate min-w-0">{me.data?.actor} · {me.data?.role}</div>
+          240px(e2e L3)이 밀린다. 아이디(강조)+역할(배지) 2줄. */}
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-ink truncate" title={me.data?.actor}>
+          {me.data?.actor}
+        </div>
+        {role && (
+          <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${roleCls}`}>
+            {roleLabel}
+          </span>
+        )}
+      </div>
       {/* 슬라이스 29(§2.2 🔴): qc.clear()(useLogout onSettled, 유지)는 me 쿼리를
           제거해 관찰자 재조회·폴링이 전부 멈춘다 -- RequireRole 이 401 을 볼
           통로가 없어 명시 nav 가 유일한 전환 수단이다. nav 가 훅이 아니라 여기
