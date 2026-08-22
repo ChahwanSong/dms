@@ -39,7 +39,7 @@ test.describe("E3 레이아웃 불변식", () => {
     await assertTableOverflows(page);
     await assertLayoutSane(page, { minTableCells: 24 });
 
-    await visit(page, "/jobs", "내 작업");
+    await visit(page, "/jobs", "전체 작업");
     await assertLayoutSane(page, { minTableCells: 4 });
 
     // StoragesList 작업 셀의 flex td 결함(슬라이스 23 이 knownNonTableCells: 1 로
@@ -66,7 +66,7 @@ test.describe("E3 레이아웃 불변식", () => {
     await assertTableOverflows(page);
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 24 });
 
-    await visit(page, "/jobs", "내 작업");
+    await visit(page, "/jobs", "전체 작업");
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 4 });
   });
 });

@@ -69,7 +69,7 @@ test.describe("E4 잡 종단 흐름", () => {
 
     // 사이드바 클릭 = 클라이언트 내비. aside 로 스코프해 목록 화면의 동명 heading 과
     // 섞이지 않게 한다.
-    await page.locator("aside").getByRole("link", { name: "내 작업" }).click();
+    await page.locator("aside").getByRole("link", { name: "전체 작업" }).click();
     await expect(page).toHaveURL(/\/jobs$/);
 
     const row = page.getByRole("row").filter({ hasText: rid });

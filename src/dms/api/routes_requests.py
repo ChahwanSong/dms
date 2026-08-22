@@ -128,9 +128,20 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
                   # -- 무제한이면 전량 SELECT 가 화면 하나에 끌려 나온다. 범위 밖은
                   # FastAPI 기본 422(이 라우터의 도메인 422 는 detail=사유코드지만,
                   # 쿼리 파라미터 검증은 프레임워크 몫이라 굳이 흉내내지 않는다).
-                  limit: int = Query(50, ge=1, le=200)):
-    requester = None if identity.role == "admin" else identity.actor
-    return request.app.state.repos.requests.list(requester_id=requester, limit=limit)
+                  limit: int = Query(50, ge=1, le=200),
+                  # 필터·커서(슬라이스 39, 전체 작업 화면). operation·state 는 값
+                  # 검증을 서버에서 하지 않는다 -- 미지 값은 결과 0건이라 무해하고,
+                  # enum 강제는 화면 select 가 이미 한다. before 는 무한 스크롤 커서.
+                  operation: str | None = Query(None),
+                  state: str | None = Query(None),
+                  requester: str | None = Query(None),
+                  before: int | None = Query(None, ge=1)):
+    # 비운영자는 requester 를 자기 자신으로 **강제**한다 -- requester 파라미터로
+    # 남의 작업을 넓혀 볼 수 없다(격리). 운영자만 requester 필터를 존중한다.
+    req = (requester or None) if identity.role == "admin" else identity.actor
+    return request.app.state.repos.requests.list(
+        requester_id=req, operation=operation, state=state,
+        before=before, limit=limit)
 
 
 # 요청 상태 문자열의 종단 집합. RequestState(...) 로 열거형을 거치지 않는 이유:

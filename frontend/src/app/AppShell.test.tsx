@@ -44,7 +44,7 @@ const ADMIN_ONLY_LABELS = [
   "스토리지", "노드", "아티팩트 경로", "대시보드", "배치 작업",
   "빌드", "릴리스", "컨트롤 상태", "계정", "정책", "denylist", "감사 로그",
 ];
-const USER_LABELS = ["내 작업", "단일 작업"];
+const USER_LABELS = ["전체 작업", "단일 작업"];
 
 test("user 는 작업 그룹 2링크만 보이고 admin 전용 그룹은 없다", async () => {
   renderShell("user");
@@ -67,7 +67,7 @@ test("대시보드 마운트: 운영 5링크만 보이고 접힘 그룹(작업·
   for (const label of ["배치 작업", "빌드", "릴리스", "컨트롤 상태"])
     expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
   // 접힘 기본 그룹의 링크는 렌더되지 않는다 -- 헤더(버튼)만 남는다.
-  for (const label of ["내 작업", "스토리지", "계정"])
+  for (const label of ["전체 작업", "스토리지", "계정"])
     expect(screen.queryByRole("link", { name: label })).toBeNull();
   for (const group of ["작업", "스토리지", "관리"])
     expect(screen.getByRole("button", { name: group })).toBeInTheDocument();
@@ -99,7 +99,7 @@ test("초기 상태: /jobs 마운트면 작업 그룹만 열려 있다", async (
   // e2e 04 의 "사이드바 링크 클릭"이 기대는 성질 -- 지금 보고 있는 화면의
   // 그룹은 항상 열려 있어 자기 위치를 잃지 않는다. 나머지는 초기 접힘.
   renderShell("admin", "/jobs");
-  expect(await screen.findByRole("link", { name: "내 작업" })).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "전체 작업" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "계정" })).toBeNull();
   expect(screen.queryByRole("link", { name: "대시보드" })).toBeNull();

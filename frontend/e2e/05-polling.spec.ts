@@ -43,7 +43,7 @@ test.describe("E5 폴링 수렴", () => {
     // 때만 렌더되므로(JobsList.tsx) 표가 보인다 = 마운트 fetch 는 이미 응답을
     // 받았다는 뜻이다. 이게 없으면 "마운트 fetch 가 우연히 제출 뒤에 도착"한
     // 경우까지 초록이 되어, 폴링이 죽어 있어도 통과하는 공허한 단언이 된다.
-    await expect(page.getByRole("heading", { name: "내 작업" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "전체 작업" })).toBeVisible();
     await expect(page.getByRole("table")).toBeVisible();
 
     // 「새로고침 없이」의 증거. window 는 문서 내비게이션에서 통째로 교체되므로

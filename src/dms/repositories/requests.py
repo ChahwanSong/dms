@@ -60,15 +60,27 @@ class RequestsRepository:
             row["payload"] = load_json(row["payload"])
         return row
 
-    def list(self, requester_id=None, limit: int = 50) -> list[dict]:
-        if requester_id is None:
-            rows = self._db.query(
-                "SELECT * FROM requests ORDER BY commit_order DESC LIMIT :n", {"n": limit})
-        else:
-            rows = self._db.query(
-                """SELECT * FROM requests WHERE requester_id = :req
-                   ORDER BY commit_order DESC LIMIT :n""",
-                {"req": requester_id, "n": limit})
+    def list(self, requester_id=None, *, operation=None, state=None,
+             before=None, limit: int = 50) -> list[dict]:
+        """요청 목록(commit_order DESC). 필터·커서(슬라이스 39): operation·state·
+        requester_id 는 AND 로 좁히고, before(commit_order)면 그보다 오래된 것만
+        -- 무한 스크롤이 마지막 행의 commit_order 를 before 로 넘겨 다음 쪽을
+        받는다. commit_order 는 단조 증가라 페이지 경계가 안정적이다(offset 과
+        달리 새 행이 끼어도 중복·누락이 없다)."""
+        where = []
+        params: dict = {"n": limit}
+        if requester_id is not None:
+            where.append("requester_id = :req"); params["req"] = requester_id
+        if operation is not None:
+            where.append("operation = :op"); params["op"] = operation
+        if state is not None:
+            where.append("state = :st"); params["st"] = state
+        if before is not None:
+            where.append("commit_order < :before"); params["before"] = before
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = self._db.query(
+            f"SELECT * FROM requests{clause} ORDER BY commit_order DESC LIMIT :n",
+            params)
         for row in rows:
             row["payload"] = load_json(row["payload"])
         return rows

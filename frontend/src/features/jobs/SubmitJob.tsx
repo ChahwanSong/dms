@@ -104,8 +104,15 @@ export function SubmitJob() {
     ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 또는 cocoa.song:mig)" : null;
   const advancedError = batchFilesError ?? bufsizeError ?? chmodError ?? chownError
     ?? scanBatchFilesError ?? brokenLimitError;
+  // 대상 스텝 sanity(슬라이스 39, 사용자 결정): 스토리지 미선택·경로 공백이면
+  // 다음으로 못 넘어간다. sync 는 소스·목적지 4필드, scan/rm 은 스토리지+대상.
+  // trim() 로 공백만 있는 입력도 미입력으로 본다.
+  const targetInvalid = f.operation === "sync"
+    ? (f.sourceStorage === "" || f.sourcePath.trim() === ""
+       || f.destStorage === "" || f.destPath.trim() === "")
+    : (f.storage === "" || f.target.trim() === "");
   const blocked = submit.isPending || recursiveMissing || statLiteConflict || storagesQ.isError
-    || verboseQuietConflict || advancedError !== null;
+    || verboseQuietConflict || advancedError !== null || targetInvalid;
   // 옵션 스텝 국소 검증: 오류를 그 스텝에서 보게 하고 "다음"을 잠근다.
   // blocked 와 별도인 이유: storagesQ.isError 등은 옵션 스텝 잘못이 아니라
   // 여기서 잠그면 사용자가 원인 없는 잠김을 본다 -- 최종 차단은 제출 버튼 몫.
@@ -213,7 +220,8 @@ export function SubmitJob() {
           blocked 가드가 이중 방어한다 */}
       <form onSubmit={handleSubmit}>
         <Wizard steps={STEPS} current={step} onNavigate={setStep}
-                canNext={STEPS[step].id === "options" ? !optionsInvalid : true}
+                canNext={STEPS[step].id === "target" ? !targetInvalid
+                         : STEPS[step].id === "options" ? !optionsInvalid : true}
                 onCancel={() => nav("/jobs")}
                 submitLabel="제출" submitDisabled={blocked}
                 onSubmit={handleSubmit}>
@@ -263,6 +271,14 @@ export function SubmitJob() {
                     <input aria-label="대상 경로" className={field} value={f.target} onChange={on("target")} />
                   </label>
                 </div>
+              )}
+              {/* sanity 안내(슬라이스 39): 스토리지·경로가 비면 다음이 잠긴다. */}
+              {targetInvalid && (
+                <p className="text-bad text-sm">
+                  {f.operation === "sync"
+                    ? "소스·목적지 스토리지와 경로를 모두 입력하세요"
+                    : "스토리지와 대상 경로를 입력하세요"}
+                </p>
               )}
             </div>
           )}

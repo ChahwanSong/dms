@@ -94,6 +94,39 @@ async function fillRmTarget() {
 async function goToOptions() { await clickNext(); }  // 대상 → 옵션
 async function goToConfirm() { await clickNext(); }  // 옵션 → 확인·제출
 
+test("대상 sanity: sync 경로가 비면 다음이 잠기고 문구가 뜬다(운영자/사용자 공통)", async () => {
+  // 사용자 결정(2026-08-22): 스토리지·경로 미입력이면 다음으로 못 넘어간다.
+  renderPage();
+  await screen.findByLabelText("연산");
+  await clickNext();                                  // → 대상 스텝
+  await screen.findByLabelText("소스 스토리지");
+  // 아무것도 안 채운 상태: 다음 비활성 + 안내
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
+  expect(screen.getByText("소스·목적지 스토리지와 경로를 모두 입력하세요")).toBeInTheDocument();
+  // 스토리지만 고르고 경로는 비움 → 여전히 잠김
+  const srcSel = screen.getByLabelText("소스 스토리지");
+  await within(srcSel).findByRole("option", { name: "cephfs" });   // 목록 로드 대기(스코프)
+  await userEvent.selectOptions(srcSel, "cephfs");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "cephfs-secondary");
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
+  // 경로까지 채우면 풀린다
+  await userEvent.type(screen.getByLabelText("소스 경로"), "a");
+  await userEvent.type(screen.getByLabelText("목적지 경로"), "b");
+  expect(screen.getByRole("button", { name: "다음" })).toBeEnabled();
+});
+
+test("대상 sanity: rm 은 대상 경로가 비면 다음이 잠긴다", async () => {
+  renderPage();
+  await screen.findByRole("option", { name: "rm" });
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "rm");
+  await clickNext();
+  await userEvent.selectOptions(screen.getByLabelText("스토리지"), "cephfs");
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
+  expect(screen.getByText("스토리지와 대상 경로를 입력하세요")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("대상 경로"), "x");
+  expect(screen.getByRole("button", { name: "다음" })).toBeEnabled();
+});
+
 test("스토리지 드롭다운이 API 목록으로 채워진다", async () => {
   renderPage();
   await screen.findByLabelText("연산");
@@ -231,8 +264,7 @@ test("stat과 lite를 동시에 체크하면 다음이 비활성이고 강제 su
 test("실행 신원 필드는 옵션 스텝에서 관리자에게만 보인다", async () => {
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   const { unmount } = renderPage();
-  await screen.findByLabelText("연산");
-  await clickNext();
+  await fillSyncTarget();   // 대상 sanity: 경로를 채워야 옵션 스텝으로 넘어간다
   await goToOptions();
   await screen.findByLabelText("delete");   // 사용자 옵션 스텝의 앵커(우선순위는 숨김)
   expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
@@ -240,8 +272,7 @@ test("실행 신원 필드는 옵션 스텝에서 관리자에게만 보인다",
 
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
   renderPage();
-  await screen.findByLabelText("연산");
-  await clickNext();
+  await fillSyncTarget();
   await goToOptions();
   expect(await screen.findByLabelText("실행 신원(선택)")).toBeInTheDocument();
   // 캡션은 "소유자 기록"이 아니라 실행 신원을 말한다 — 비우면 요청자 본인.
@@ -271,10 +302,9 @@ test("스토리지 목록 로드가 실패하면 대상 스텝에 오류가 뜨�
   await clickNext();
   await screen.findByLabelText("소스 스토리지");
   expect(await screen.findByText("storage_list_failed")).toBeInTheDocument();
-  // 대상·옵션 스텝은 통과 가능(차단은 기존 blocked 그대로 제출 지점에서).
-  await goToOptions();
-  await goToConfirm();
-  expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
+  // 스토리지를 못 고르니 대상 sanity(스토리지·경로 필수)가 대상 스텝에서 다음을
+  // 잠근다 -- 목록 실패가 곧 진행 불가로 이어진다(2026-08-22 sanity 게이트).
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
 });
 
 test("확인 스텝 요약에 rm 경고와 대상이 노출된다", async () => {
@@ -451,8 +481,7 @@ test("비관리자 sync 옵션은 delete·contents 만 — direct·quiet·고급
   // 사용자 결정(2026-08-20): 사용자 단일작업 sync 폼은 최소만 노출한다.
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
   renderPage();
-  await screen.findByLabelText("연산");
-  await clickNext();
+  await fillSyncTarget();   // 대상 sanity 통과 후 옵션 스텝
   await goToOptions();
   expect(screen.getByLabelText("delete")).toBeInTheDocument();
   expect(screen.getByLabelText("contents")).toBeInTheDocument();

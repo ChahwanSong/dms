@@ -45,7 +45,7 @@ const INFRA = {
 function reqRow(id: string, over: Partial<RequestRow> = {}): RequestRow {
   return {
     request_id: id, operation: "scan", state: "Pending", priority: "mid",
-    requester_id: "alice", resource_key: "k",
+    requester_id: "alice", resource_key: "k", commit_order: 1,
     created_at: "2026-08-13T00:00:00Z", updated_at: "2026-08-13T00:30:00Z",
     payload: { storage: "ceph-a", target: "team/data" },
     ...over,
@@ -73,7 +73,7 @@ function renderDash(overrides: Record<string, unknown> = {}) {
       return HttpResponse.json(overrides.requests ?? [
         { request_id: "r1", operation: "sync", state: "Executing", priority: "mid",
           created_at: "", updated_at: "", requester_id: "a", resource_key: "k",
-          payload: {} }]);
+          commit_order: 1, payload: {} }]);
     }),
     http.get("/api/admin/nodes", () => HttpResponse.json([
       { node_name: "w1", reported_at: "2026-08-09T00:00:00Z", fresh: true,

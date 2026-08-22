@@ -48,7 +48,7 @@ test("그룹 순서는 운영·작업·스토리지·관리다(접힘은 AppShel
 
 test("작업 그룹은 단일 작업(제출)이 내 작업(목록)보다 위다(사용자 결정 2026-08-19)", () => {
   const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
-  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "내 작업"]);
+  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "전체 작업"]);
 });
 
 test("groupLabelFor: 경로가 속한 그룹을 찾고 상세 라우트는 부모로 귀속한다", () => {
@@ -65,7 +65,7 @@ test("groupLabelFor: 경로가 속한 그룹을 찾고 상세 라우트는 부�
 describe("breadcrumbFor", () => {
   test("상세 라우트: /jobs/abc = HOME>DMS>작업>내 작업>요청 상세", () => {
     expect(breadcrumbFor("/jobs/abc").map((c) => c.label))
-      .toEqual(["HOME", "DMS", "작업", "내 작업", "요청 상세"]);
+      .toEqual(["HOME", "DMS", "작업", "전체 작업", "요청 상세"]);
   });
 
   test("사이드바 항목: /admin/storages = HOME>DMS>스토리지>스토리지", () => {
@@ -84,7 +84,7 @@ describe("breadcrumbFor", () => {
     const crumbs = breadcrumbFor("/jobs/abc");
     expect(crumbs[0]).toEqual({ label: "HOME", path: "/" });
     // 부모 항목("내 작업")은 되돌아갈 링크 경로를 가진다.
-    expect(crumbs[3]).toEqual({ label: "내 작업", path: "/jobs" });
+    expect(crumbs[3]).toEqual({ label: "전체 작업", path: "/jobs" });
   });
 
   test("미지 경로는 HOME 만", () => {

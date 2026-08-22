@@ -33,7 +33,7 @@ test("user visiting admin route is redirected to /jobs", async () => {
     http.get("/api/user/requests", () => HttpResponse.json([])),
   );
   renderAt("/admin/dashboard");
-  expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
 });
 
 test("admin can open batches list", async () => {
@@ -179,7 +179,7 @@ test("me 500 이면 / 는 오류 문구 + 재시도를 렌더하고 어디로도
   expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
   // 리다이렉트 없음: /login 의 로그인 버튼도 /jobs 의 목록 헤딩도 렌더되지 않는다.
   expect(screen.queryByRole("button", { name: "로그인" })).toBeNull();
-  expect(screen.queryByRole("heading", { name: "내 작업" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "전체 작업" })).toBeNull();
 });
 
 test("me 401 이면 / 는 여전히 로그인으로 보낸다(오류 화면이 아니다)", async () => {
@@ -201,7 +201,7 @@ test("user visiting /admin/policies is redirected to /jobs", async () => {
     http.get("/api/user/requests", () => HttpResponse.json([])),
   );
   renderAt("/admin/policies");
-  expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
 });
 
 // 이 두 테스트는 router.innerBoundary.test.tsx로 옮겼다 -- RequestDetail의

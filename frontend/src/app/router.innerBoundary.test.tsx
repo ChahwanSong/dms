@@ -41,7 +41,7 @@ test("기능 화면이 크래시해도 사이드바가 살아 있다", async () 
   server.use(http.get("/api/auth/me", () => HttpResponse.json({ actor: "alice", role: "user" })));
   renderAt("/jobs/r1");
   expect(await screen.findByText("화면을 표시하지 못했습니다")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "내 작업" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "전체 작업" })).toBeInTheDocument();
 });
 
 // 이 테스트가 이 태스크의 요점이다 -- AppShell이 key 없이 ErrorBoundary를 마운트하면
@@ -57,8 +57,8 @@ test("다른 경로로 이동하면 안쪽 경계가 스스로 풀린다", async
   renderAt("/jobs/r1");
   expect(await screen.findByText("화면을 표시하지 못했습니다")).toBeInTheDocument();
 
-  await userEvent.click(screen.getByRole("link", { name: "내 작업" }));
+  await userEvent.click(screen.getByRole("link", { name: "전체 작업" }));
 
-  expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
   expect(screen.queryByText("화면을 표시하지 못했습니다")).not.toBeInTheDocument();
 });

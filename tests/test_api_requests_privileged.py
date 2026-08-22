@@ -9,7 +9,11 @@ def _client_with(db, **overrides):
             "DMS_ADMIN_TOKEN": "tok-admin", "DMS_SESSION_SECRET": "sess",
             # from_env 는 인증번호 게이트가 기본 켜짐(운영 fail-closed) -- 이
             # 파일의 무인증 signup 픽스처를 위해 명시로 끈다(conftest 관례).
-            "DMS_ACCOUNT_VERIFICATION_REQUIRED": "false", **overrides}
+            "DMS_ACCOUNT_VERIFICATION_REQUIRED": "false",
+            # 이 파일의 관심사는 **특권/owner 게이트**이지 사용자 연산 allowlist 가
+            # 아니다 -- rm/scan 을 사용자로 제출해 owner 게이트를 검증하려면
+            # allowlist 를 넓혀 그 게이트가 먼저 가로채지 않게 한다(2026-08-22).
+            "DMS_USER_ALLOWED_OPERATIONS": "sync,scan,rm", **overrides}
     settings = Settings.from_env(base)
     return TestClient(create_app(settings, db))
 

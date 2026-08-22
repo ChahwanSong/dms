@@ -5,10 +5,24 @@
 도구(dsync/nsync)가 미정이므로 dsync 정책을 대표로 읽는다. 배치가 materialize하는
 자식 요청도 같은 규칙을 따른다.
 """
+import pytest
 from dms.batch_orchestrator import BatchOrchestrator
+from dms.config import Settings
 from dms.repositories import Repositories
 
 ADMIN = {"Authorization": "Bearer tok-shared"}
+
+
+@pytest.fixture
+def settings():
+    # 이 파일은 연산별 우선순위 해석을 검증한다 -- rm/scan 을 사용자로 제출해야
+    # 하므로 conftest 기본 allowlist({sync})를 넓힌다(allowlist 강제 자체는
+    # test_api_requests 가 따로 고정한다). conftest 의 settings 를 오버라이드하면
+    # client 픽스처가 이 설정으로 앱을 만든다.
+    return Settings(database_url="unused", shared_token="tok-shared",
+                    admin_token="tok-admin", session_secret="sess-secret",
+                    account_verification_required=False,
+                    user_allowed_operations=frozenset({"sync", "scan", "rm"}))
 
 POLICY_BODY = {"max_nodes": 3, "procs_per_node": 8, "queue": "dms-data",
                "max_priority": "high", "preview_timeout_seconds": 3600,

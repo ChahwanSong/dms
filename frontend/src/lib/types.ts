@@ -7,6 +7,8 @@ export interface Transition {
 export interface RequestRow {
   request_id: string; operation: string; requester_id: string; resource_key: string;
   priority: string; state: string; created_at: string; updated_at: string; payload: Record<string, unknown>;
+  // 무한 스크롤 커서(슬라이스 39): 단조 증가. 다음 쪽은 ?before=<이 값>.
+  commit_order: number;
 }
 // events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
 // 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).

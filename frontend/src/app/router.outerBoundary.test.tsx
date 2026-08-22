@@ -41,7 +41,7 @@ test("바깥 ErrorBoundary가 AppShell 밖(/login) 크래시를 잡는다", asyn
   renderAt("/login");
   expect(await screen.findByText("화면을 표시하지 못했습니다")).toBeInTheDocument();
   // 바깥 경계에는 AppShell(사이드바)이 없다 -- 안쪽 경계와 구분되는 지점이다.
-  expect(screen.queryByRole("link", { name: "내 작업" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "전체 작업" })).not.toBeInTheDocument();
 });
 
 // M6: 바깥 경계에 fallback UI 안에는 내비게이션(사이드바)이 없으므로 "다시 시도"가
@@ -80,6 +80,6 @@ test("경로가 바뀌면 바깥 경계도 '다시 시도' 없이 스스로 풀�
 
   await userEvent.click(screen.getByRole("button", { name: "이동" }));
 
-  expect(await screen.findByRole("heading", { name: "내 작업" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "전체 작업" })).toBeInTheDocument();
   expect(screen.queryByText("화면을 표시하지 못했습니다")).not.toBeInTheDocument();
 });

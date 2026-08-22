@@ -262,8 +262,69 @@ def test_list_limit_param_is_honored_and_capped(client):
     assert [r["request_id"] for r in rows] == [rids[2], rids[1]]  # 최신순 + limit
     assert client.get("/api/user/requests", params={"limit": 0}).status_code == 422
     assert client.get("/api/user/requests", params={"limit": 201}).status_code == 422
-    # 표시에 쓰는 필드가 응답에 실려 있다(SELECT * 계약의 명시화).
+    # 표시에 쓰는 필드가 응답에 실려 있다(SELECT * 계약의 명시화). commit_order 는
+    # 무한 스크롤 커서라 반드시 실려야 한다(슬라이스 39).
     row = rows[0]
     for field in ("requester_id", "operation", "state", "created_at",
-                  "updated_at", "payload"):
+                  "updated_at", "payload", "commit_order"):
         assert field in row, field
+
+
+def test_list_before_cursor_paginates_without_overlap(client):
+    # 무한 스크롤(슬라이스 39): before=commit_order 로 그보다 오래된 것만.
+    _login(client, "alice")
+    rids = []
+    for i in range(5):
+        rids.append(client.post("/api/user/requests", json={
+            "operation": "sync", "source_storage": "s1", "source": f"t{i}",
+            "destination_storage": "s1", "destination": f"d{i}"}).json()["request_id"])
+    page1 = client.get("/api/user/requests", params={"limit": 2}).json()
+    assert [r["request_id"] for r in page1] == [rids[4], rids[3]]
+    cursor = page1[-1]["commit_order"]
+    page2 = client.get("/api/user/requests",
+                       params={"limit": 2, "before": cursor}).json()
+    assert [r["request_id"] for r in page2] == [rids[2], rids[1]]   # 겹침·누락 없음
+    page3 = client.get("/api/user/requests",
+                       params={"limit": 2, "before": page2[-1]["commit_order"]}).json()
+    assert [r["request_id"] for r in page3] == [rids[0]]            # 마지막 쪽
+
+
+def test_list_filters_by_operation_and_state(client, db):
+    from dms.domain import RequestState
+    _login(client, "alice")
+    sync_rid = client.post("/api/user/requests", json={
+        "operation": "sync", "source_storage": "s1", "source": "a",
+        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
+    client.post("/api/user/requests", json={
+        "operation": "sync", "source_storage": "s1", "source": "c",
+        "destination_storage": "s1", "destination": "d"})
+    # operation 필터
+    rows = client.get("/api/user/requests", params={"operation": "sync"}).json()
+    assert len(rows) == 2 and all(r["operation"] == "sync" for r in rows)
+    assert client.get("/api/user/requests", params={"operation": "rm"}).json() == []
+    # state 필터: 하나를 종단 상태로 옮긴다
+    client.app.state.repos.requests.set_state(
+        sync_rid, RequestState.SUCCEEDED, actor="test")
+    done = client.get("/api/user/requests", params={"state": "Succeeded"}).json()
+    assert [r["request_id"] for r in done] == [sync_rid]
+
+
+def test_list_requester_filter_is_admin_only(client):
+    # 운영자만 requester 로 남의 작업을 필터할 수 있다. 사용자는 파라미터를 줘도
+    # 자기 것만 본다(격리).
+    _login(client, "alice")
+    a_rid = client.post("/api/user/requests", json={
+        "operation": "sync", "source_storage": "s1", "source": "a",
+        "destination_storage": "s1", "destination": "b"}).json()["request_id"]
+    client.post("/api/auth/logout")
+    _login(client, "bob")
+    b_rid = client.post("/api/user/requests", json={
+        "operation": "sync", "source_storage": "s1", "source": "c",
+        "destination_storage": "s1", "destination": "d"}).json()["request_id"]
+    # bob 이 requester=alice 를 줘도 자기 것만(격리)
+    rows = client.get("/api/user/requests", params={"requester": "alice"}).json()
+    assert [r["request_id"] for r in rows] == [b_rid]
+    # admin 은 requester 로 alice 것만 골라 본다
+    rows = client.get("/api/user/requests", headers=ADMIN,
+                      params={"requester": "alice"}).json()
+    assert [r["request_id"] for r in rows] == [a_rid]

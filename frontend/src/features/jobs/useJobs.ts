@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import { isTerminal } from "../../lib/jobState";
 import type { RequestRow, RequestDetail, DataJob } from "../../lib/types";
@@ -6,6 +6,35 @@ import type { RequestRow, RequestDetail, DataJob } from "../../lib/types";
 export const useRequests = () =>
   useQuery({ queryKey: ["requests"], queryFn: () => apiGet<RequestRow[]>("/api/user/requests"),
             refetchInterval: 3000 });
+
+// 전체 작업 화면(슬라이스 39): 커서 무한 스크롤 + 필터. 한 쪽 PAGE_SIZE 건,
+// 다음 쪽은 마지막 행의 commit_order 를 before 로 넘긴다. refetchInterval 3s 는
+// 구 useRequests 의 목록 폴링 계약을 잇는다(e2e E5) -- 첫 쪽이 재조회되어 새
+// 제출이 위에 나타난다. 필터는 쿼리 키에 들어가 바뀌면 캐시가 갈린다.
+export interface RequestFilters { operation?: string; state?: string; requester?: string }
+export const REQUESTS_PAGE_SIZE = 50;
+
+function requestsUrl(f: RequestFilters, before?: number): string {
+  const p = new URLSearchParams({ limit: String(REQUESTS_PAGE_SIZE) });
+  if (f.operation) p.set("operation", f.operation);
+  if (f.state) p.set("state", f.state);
+  if (f.requester && f.requester.trim() !== "") p.set("requester", f.requester.trim());
+  if (before !== undefined) p.set("before", String(before));
+  return `/api/user/requests?${p.toString()}`;
+}
+
+export const useInfiniteRequests = (filters: RequestFilters) =>
+  useInfiniteQuery({
+    queryKey: ["requests", "infinite", filters],
+    queryFn: ({ pageParam }) =>
+      apiGet<RequestRow[]>(requestsUrl(filters, pageParam as number | undefined)),
+    initialPageParam: undefined as number | undefined,
+    // 마지막 쪽이 꽉 찼을 때만 다음 커서가 있다 -- 덜 찼으면 끝(undefined).
+    getNextPageParam: (lastPage) =>
+      lastPage.length === REQUESTS_PAGE_SIZE
+        ? lastPage[lastPage.length - 1].commit_order : undefined,
+    refetchInterval: 3000,
+  });
 
 // 대시보드 「최근 작업」 전용(2026-08-13 조정): 최근 200건. useRequests(목록 화면,
 // 3s 폴링·서버 기본 limit 50)와 쿼리키를 분리한다 -- 같은 키를 쓰면 50건/200건
