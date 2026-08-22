@@ -43,12 +43,12 @@ const initial = {
   // truthy 검사 금지: "0"은 미입력이 아니라 범위 밖 클라이언트 검증 오류다.
   // batchFiles·bufsize 는 프리필(SYNC_INT_FIELDS.prefill — 「왜」는 그 주석):
   // 값이 실려 있으니 손대지 않으면 바디에 그대로 나간다. 지우면 옛 계약대로 생략.
-  // 기본 ON(사용자 결정 2026-08-22): 단건·배치, 사용자·운영자 모두 open_noatime
-  // 을 기본으로 켠다(소스 atime 오염 방지 — 데이터 온도 통계 정직성). 배치는
-  // 이미 ON 이었고 단건만 OFF 였던 걸 통일했다. 단, 단건 sync 는 비특권(요청자)
-  // 실행이라 **타인 소유 파일**에 O_NOATIME open 이 EPERM 이 될 수 있다(자기 소유
-  // 파일은 무해) -- 그 경우 잡이 Failed 로 끝난다. 사용자 폼은 이 옵션이 숨겨져
-  // 있어 항상 ON 이고, 운영자는 고급 옵션에서 끌 수 있다.
+  // 초기값 ON = **운영자 기본**(사용자 결정 2026-08-22, 재조정): 운영자 단건
+  // sync 는 open_noatime 기본 켜짐(소스 atime 오염 방지)이고 고급 옵션에서 끌 수
+  // 있다. **사용자 요청은 기본 OFF** 다 -- 단건은 비특권 실행이라 타인 소유 파일
+  // O_NOATIME 이 EPERM 이 될 수 있어서다(syncOptions 가 isAdmin 으로 끊는다 --
+  // 사용자 폼은 이 옵션이 숨겨져 어차피 이 초기값을 못 바꾼다). 배치는 항상
+  // 특권 실행이라 BatchCreate 가 별도로 기본 ON 을 유지한다.
   openNoatime: true,
   batchFiles: SYNC_INT_FIELDS.batch_files.prefill,
   bufsize: SYNC_INT_FIELDS.bufsize.prefill,
@@ -144,7 +144,12 @@ export function SubmitJob() {
   function syncOptions(): SubmitBody["options"] {
     const options: SubmitBody["options"] = checkedOptions({
       delete: f.delete, contents: f.contents, direct: f.direct, quiet: f.quiet,
-      open_noatime: f.openNoatime,
+      // open_noatime 은 **운영자 요청만** 실린다(사용자 결정 2026-08-22): 사용자
+      // 단건 sync 는 비특권 실행이라 타인 소유 파일 O_NOATIME 이 EPERM 이 될 수
+      // 있어 기본 OFF 로 되돌렸다. 사용자 폼은 이 옵션이 숨겨져 토글 불가라,
+      // 제출 시점에 isAdmin 으로 끊는 게 곧 "사용자 기본 OFF"다(운영자는 초기값
+      // ON·고급옵션에서 토글).
+      open_noatime: isAdmin && f.openNoatime,
     });
     // 빈 문자열일 때만 생략 — 빈 chmod/chown 을 그대로 실으면 서버 fullmatch 가
     // 422 invalid_option 으로 거부한다(빈 값은 "옵션 없음"이지 "빈 값 지정"이 아니다).

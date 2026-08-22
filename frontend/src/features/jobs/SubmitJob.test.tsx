@@ -463,6 +463,22 @@ test("비관리자 sync 옵션은 delete·contents 만 — direct·quiet·고급
   expect(screen.queryByLabelText("실행 신원(선택)")).not.toBeInTheDocument();
 });
 
+test("사용자 sync 제출은 open_noatime 을 싣지 않는다(기본 OFF — 운영자만 ON)", async () => {
+  // 사용자 결정(2026-08-22): 사용자 요청은 open_noatime 기본 OFF(비특권 실행의
+  // EPERM 회피). 사용자 폼엔 이 옵션이 숨겨져 있고 제출 시 isAdmin 으로 끊긴다.
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+  const captured = captureSubmit();
+  renderPage();
+  await fillSyncTarget();
+  await goToOptions();
+  await goToConfirm();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  // 숫자 프리필(batch_files·bufsize)은 실리되 open_noatime 은 빠진다.
+  expect(captured.body.options).toEqual(SYNC_NUM_DEFAULTS);
+  expect(captured.body.options.open_noatime).toBeUndefined();
+});
+
 test("admin scan 제출 바디가 정확하다(옵션 생략 = 도구 기본)", async () => {
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
   let posted: unknown = null;
