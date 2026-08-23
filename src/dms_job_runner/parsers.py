@@ -94,10 +94,18 @@ def parse_rm_counts(stdout: str) -> "tuple[int | None, None]":
     return _last_int(_RM_ITEMS, stdout), None
 
 
-def parse_scan_counts(report_path: str) -> "tuple[int | None, None]":
-    """dscan-report.json -> (summary.total_entries, None). 총 바이트는 리포트에
-    없다(크기 히스토그램뿐 -- 설계 §8, 스키마 확장은 별도 슬라이스). 파일 없음/
-    JSON 깨짐/키 없음/타입 이상 -> None. bool·음수 배제는 승격 경로 _as_count와
+def parse_scan_counts(report_path: str) -> "tuple[int | None, int | None]":
+    """dscan-report.json -> (summary.total_entries, 총 바이트=실 사용량).
+
+    리포트에 총 바이트 필드는 없지만 time_histograms 의 각 히스토그램(atime/
+    mtime/ctime)은 **버킷별 bytes** 를 담고, 파일마다 타임스탬프가 정확히 한
+    버킷에 떨어지므로 한 히스토그램의 bytes 합 == 스캔 트리의 파일 크기 합이다
+    (2026-08-23 실측: atime/mtime/ctime 세 합이 모두 일치). dscan 스키마를
+    바꾸지 않고 실 사용량을 얻는 경로라 mtime -> atime -> ctime 순으로 첫
+    "온전한" 히스토그램을 쓴다 -- 버킷 하나라도 bytes 가 수상하면(비정수·bool·
+    음수) 그 히스토그램은 총량 출처로 부적격이라 다음 후보로 넘어간다(부분합은
+    nsync 미지 단위와 같은 이유로 금지: 조용한 과소 보고). 파일 없음/JSON 깨짐/
+    키 없음/타입 이상 -> 해당 값 None. bool·음수 배제는 승격 경로 _as_count와
     같은 원칙 -- 여기서 먼저 걸러 summary 자체를 깨끗하게 유지한다."""
     try:
         # encoding 명시: 로케일 기본 인코딩(비 UTF-8 컨테이너)에서 한글 경로가
@@ -106,8 +114,30 @@ def parse_scan_counts(report_path: str) -> "tuple[int | None, None]":
             report = json.load(f)
     except Exception:  # noqa: BLE001 -- 계약이 "절대 예외 없음"(설계 §4)이라 문자 그대로 지킨다
         return None, None
-    summary = report.get("summary") if isinstance(report, dict) else None
+    if not isinstance(report, dict):
+        return None, None
+    summary = report.get("summary")
     entries = summary.get("total_entries") if isinstance(summary, dict) else None
     if isinstance(entries, bool) or not isinstance(entries, int) or entries < 0:
-        return None, None
-    return entries, None
+        entries = None
+    return entries, _scan_total_bytes(report.get("time_histograms"))
+
+
+def _scan_total_bytes(time_histograms) -> "int | None":
+    """time_histograms -> 첫 온전한 히스토그램의 bytes 합. 없으면 None."""
+    if not isinstance(time_histograms, dict):
+        return None
+    for key in ("mtime", "atime", "ctime"):
+        buckets = time_histograms.get(key)
+        if not isinstance(buckets, list) or not buckets:
+            continue
+        total = 0
+        for bucket in buckets:
+            value = bucket.get("bytes") if isinstance(bucket, dict) else None
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                total = None
+                break
+            total += value
+        if total is not None:
+            return total
+    return None

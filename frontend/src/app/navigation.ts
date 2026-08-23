@@ -3,7 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Ban, Boxes, Database, FilePlus, FolderCog, Hammer,
   Layers, LayoutDashboard, ListTodo, Rocket, ScrollText,
-  Server, Shield, SlidersHorizontal, Users,
+  Server, Shield, SlidersHorizontal, TrendingUp, Users,
 } from "lucide-react";
 
 // 메뉴는 **데이터가 진실**이다(슬라이스 31 T2): 항목 추가·이동은 아래 배열 한 줄이고,
@@ -34,6 +34,9 @@ export const NAVIGATION: NavSection[] = [
         items: [
           { path: "/admin/dashboard", label: "대시보드", icon: LayoutDashboard },
           { path: "/admin/batches", label: "배치 작업", icon: Layers },
+          // 사용량 분석(2026-08-23): 디렉터리별 scan 이력(실 사용량·데이터 온도)
+          // 시계열 — 전 요청자 통합이라 운영 그룹(admin 전용)이다.
+          { path: "/admin/usage", label: "사용량 분석", icon: TrendingUp },
           { path: "/admin/builds", label: "빌드", icon: Hammer },
           { path: "/admin/releases", label: "릴리스", icon: Rocket },
           { path: "/admin/control", label: "컨트롤 상태", icon: SlidersHorizontal },

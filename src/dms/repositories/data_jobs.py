@@ -127,6 +127,42 @@ class DataJobsRepository:
             {"s": DataJobState.SUCCEEDED.value, "sn": storage_name, "n": limit})
         return [self._hydrate(r) for r in rows]
 
+    def scan_targets(self, *, q: "str | None" = None, limit: int = 100) -> list[dict]:
+        """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
+        분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). q 는 경로·
+        스토리지 부분 문자열 검색이고 LIKE 와일드카드는 리터럴로 이스케이프한다
+        (검색어 '100%' 가 전부 매치로 새면 검색이 거짓말이 된다). 정렬은 최근
+        스캔이 위 — 화면의 기본 질문이 "요즘 뭘 스캔했나"다."""
+        params: dict = {"s": DataJobState.SUCCEEDED.value, "n": limit}
+        where = "operation = 'scan' AND state = :s AND target IS NOT NULL"
+        if q:
+            esc = q.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+            where += r" AND (target LIKE :q ESCAPE '\' OR storage_name LIKE :q ESCAPE '\')"
+            params["q"] = f"%{esc}%"
+        return self._db.query(
+            f"""SELECT storage_name, target, COUNT(*) AS scan_count,
+                       MAX(updated_at) AS last_scan_at
+                FROM data_jobs WHERE {where}
+                GROUP BY storage_name, target
+                ORDER BY last_scan_at DESC, storage_name, target LIMIT :n""",
+            params)
+
+    def succeeded_scans_for_target(self, storage_name: str, target: str,
+                                   *, limit: int = 30) -> list[dict]:
+        """한 (storage, target)의 성공 scan 이력 — 완료 최신순(succeeded_scans 와
+        같은 updated_at 근거). 사용량 분석의 시계열 원천: 호출자가 각 잡의
+        dscan-report.json 을 읽어 포인트로 투영한다. target 은 저장 시점에 이미
+        정규화된 값이라 문자열 동등으로 족하다(covers() 류 포함 관계를 쓰면
+        부모·자식 경로의 이력이 한 시계열로 섞인다)."""
+        rows = self._db.query(
+            f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
+                WHERE operation = 'scan' AND state = :s AND storage_name = :sn
+                      AND target = :t
+                ORDER BY updated_at DESC, job_id DESC LIMIT :n""",
+            {"s": DataJobState.SUCCEEDED.value, "sn": storage_name,
+             "t": target, "n": limit})
+        return [self._hydrate(r) for r in rows]
+
     def list_jobs(self, *, request_id=None, limit=50):
         if request_id is None:
             rows = self._db.query(
@@ -306,8 +342,11 @@ class DataJobsRepository:
         # files/bytes 승격(설계 §2.3): summary에 키가 있으면 typed 컬럼에 채운다.
         # 슬라이스 15부터 runner가 mpifileutils 출력을 파싱해 이 키를 실제로 채운다.
         # files는 "항목(items)" 의미로 통일했고(dsync/nsync Items, drm Removed N
-        # items, dscan summary.total_entries), scan/rm은 설계상 바이트를 보고하지
-        # 않으므로 bytes는 NULL이다 -- 파싱 실패도 fail-soft로 NULL이 된다.
+        # items, dscan summary.total_entries). bytes 의 의미는 도구별로 다르다
+        # (2026-08-23): sync 는 "옮긴 바이트", scan 은 "관측한 트리의 총 용량"
+        # (실 사용량 -- 시간 히스토그램 합, parsers.parse_scan_counts), rm 은
+        # 도구가 미보고라 NULL 이다. 그래서 처리량 지표(metrics job_stats)는
+        # scan 을 SUM 에서 제외한다 -- 파싱 실패는 여전히 fail-soft NULL.
         files_count = bytes_count = None
         if isinstance(result_summary, dict):
             files_count = _as_count(result_summary.get("files"))

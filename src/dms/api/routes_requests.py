@@ -16,7 +16,8 @@ from .routes_jobs import _owned_request
 # 모양 투영은 scan_path_stats 와 **한 벌**을 공유한다(routes_scan_paths.py:19-73 의
 # 「왜」: 키 화이트리스트만으로는 리포트 값 안의 경로 유출을 못 막는다 — 숫자와
 # 구간 라벨만 통과시킨다). 두 벌이 되면 한쪽만 고치는 드리프트가 생긴다.
-from .routes_scan_paths import _buckets, _is_number, _numbers, _time_histograms
+from .routes_scan_paths import (_buckets, _is_number, _numbers,
+                                _time_histograms, _total_bytes)
 
 router = APIRouter()
 
@@ -250,10 +251,13 @@ def request_scan_stats(request_id: str, request: Request,
     epoch = report.get("generated_at_epoch")
     broken_total = report.get("broken_paths_total")
     broken_limit = report.get("broken_paths_limit")
+    hists = _time_histograms(report.get("time_histograms"))
     return {
         "summary": _numbers(report.get("summary")),
         "file_size_histogram": _buckets(report.get("file_size_histogram")),
-        "time_histograms": _time_histograms(report.get("time_histograms")),
+        "time_histograms": hists,
+        # 실 사용량(2026-08-23): null == 모름(구형·오염 리포트) ≠ 0(빈 트리).
+        "total_bytes": _total_bytes(hists),
         "generated_at_epoch": epoch if _is_number(epoch) else None,
         # 숫자만 통과(모양 투영: 문자열이 오면 경로일 수 있다). 구형 리포트(키
         # 부재)는 None(미기록) — null≠0: 0 은 "파손 없음"의 정상값이다.

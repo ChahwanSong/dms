@@ -149,9 +149,35 @@ export interface RequestScanStats {
   summary: Record<string, number>;
   file_size_histogram: HistogramBucket[];
   time_histograms: Record<string, HistogramBucket[]>;
+  // 실 사용량(스캔 트리 파일 크기 합, 2026-08-23). null = 모름(구형·오염
+  // 리포트) — 0(빈 트리)과 다르다(null≠0). 옵션(?) = 구형 서버 호환.
+  total_bytes?: number | null;
   // null = 구형 리포트(총계 미기록) — 0(파손 없음)과 다르다(null≠0).
   broken_paths_total: number | null;
   broken_paths_limit: number | null;
+}
+// 사용량 분석(2026-08-23): 전 요청자 통합 scan 이력. 서버 routes_usage.py 계약.
+export interface ScanTargetRow {
+  storage_name: string; target: string; scan_count: number;
+  last_scan_at: string | null;
+}
+export interface UsagePoint {
+  job_id: string; request_id: string; finished_at: string | null;
+  generated_at_epoch: number | null;
+  // 실 사용량. null = 모름(구형·오염 리포트) ≠ 0(빈 트리) — 차트는 이 포인트를
+  // 0 으로 그리지 않고 제외 + 개수 고지한다.
+  total_bytes: number | null;
+  summary: Record<string, number>;
+  time_histograms: Record<string, HistogramBucket[]>;
+  requester: string | null;
+}
+export interface UsageHistory {
+  storage_name: string; target: string; points: UsagePoint[];
+  skipped_unreadable: number;
+  // 이력은 최신 window_limit 건 창이다. window_full 이면 그 너머가 있을 수 있어
+  // 화면이 "전체 이력"인 척하지 않도록 고지한다(타깃 목록의 전수 scan_count 와
+  // 한 화면에서 모순되지 않게). 옵션(?) = 구형 서버 호환.
+  window_limit?: number; window_full?: boolean;
 }
 export interface Policy {
   tool: string;
@@ -237,6 +263,9 @@ export interface ScanPathStats {
   summary: Record<string, number>;
   file_size_histogram: HistogramBucket[];
   time_histograms: Record<string, HistogramBucket[]>;
+  // 실 사용량(스캔 트리 파일 크기 합, 2026-08-23). RequestScanStats 와 같은
+  // 계약: null = 모름 ≠ 0(빈 트리), 옵션(?) = 구형 서버 호환.
+  total_bytes?: number | null;
   // 신 dscan(1b93d54)의 파손 경로 정확 총계·보관 상한. null = 구형 리포트의
   // "기록 없음"(null≠0 — 0은 파손 없음의 정상값), 옵션(?) = 구형 서버 호환.
   broken_paths_total?: number | null;

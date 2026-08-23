@@ -96,6 +96,15 @@ function ToolLabel({ job }: { job: DataJob }) {
   return <span className="text-muted text-xs">{text}</span>;
 }
 
+// NodesList/JobStats 관례의 국소 사본(공용 모듈은 이르다) — 요약의 bytes 를
+// 사람 표기로. scan 도 이제 bytes(실 사용량)를 낸다(2026-08-23 파서 확장).
+function humanBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let v = bytes, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
+
 function ResultSummary({ summary }: { summary: unknown }) {
   if (summary == null) return null;
   if (typeof summary === "object") {
@@ -106,9 +115,13 @@ function ResultSummary({ summary }: { summary: unknown }) {
         {entries.map(([k, v]) => (
           <div key={k} className="contents">
             <dt className="text-muted">{k}</dt>
-            {/* String(null)은 "null" -- scan/rm은 설계상 bytes가 없어 매번 null이
-                들어온다. 대시보드와 같은 "—" 규약으로 비운다. */}
-            <dd>{v === null ? "—" : String(v)}</dd>
+            {/* String(null)은 "null" -- rm 은 설계상 bytes 가 없어(도구가 미보고)
+                null 이 정상이다. 대시보드와 같은 "—" 규약으로 비운다. bytes 는
+                사람 표기 + 원값(정밀도 손실 없이 검증 가능하게). */}
+            <dd>{v === null ? "—"
+              : k === "bytes" && typeof v === "number"
+                ? `${humanBytes(v)} (${v} B)`
+                : String(v)}</dd>
           </div>
         ))}
       </dl>

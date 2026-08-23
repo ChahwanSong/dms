@@ -225,3 +225,67 @@ test("리페치로 목록에서 사라진 배치는 선택에서 자동 제거(�
   await act(async () => { await qc.refetchQueries({ queryKey: ["batches"] }); });
   expect(await screen.findByText("1개 선택됨")).toBeInTheDocument();
 });
+
+// --- 작업 종류 탭(2026-08-23): sync/scan/rm 을 따로 모아 본다 -----------------
+
+const opsMix = () => [
+  row({ batch_id: ID1, operation: "sync", status: "Completed", name: "s-sync" }),
+  row({ batch_id: ID2, operation: "scan", status: "Completed", name: "s-scan1" }),
+  row({ batch_id: ID3, operation: "scan", status: "Completed", name: "s-scan2" }),
+];
+
+test("작업 종류 탭: 건수 라벨 + 기본은 전체", async () => {
+  renderList(opsMix());
+  await screen.findByText("s-sync");
+  expect(screen.getByRole("tab", { name: "전체 (3)" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tab", { name: "sync (1)" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "scan (2)" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "rm (0)" })).toBeInTheDocument();
+  expect(screen.getByText("s-scan1")).toBeInTheDocument();     // 전체 탭엔 다 보인다
+});
+
+test("scan 탭: scan 배치만 남고 sync 는 사라진다", async () => {
+  renderList(opsMix());
+  await screen.findByText("s-sync");
+  await userEvent.click(screen.getByRole("tab", { name: "scan (2)" }));
+  expect(screen.getByText("s-scan1")).toBeInTheDocument();
+  expect(screen.getByText("s-scan2")).toBeInTheDocument();
+  expect(screen.queryByText("s-sync")).toBeNull();
+});
+
+test("빈 탭은 빈 표 대신 문구", async () => {
+  renderList(opsMix());
+  await screen.findByText("s-sync");
+  await userEvent.click(screen.getByRole("tab", { name: "rm (0)" }));
+  expect(screen.getByText("rm 배치가 없습니다")).toBeInTheDocument();
+});
+
+test("탭 전환은 선택을 비운다 — 안 보이는 행을 지우는 사고 방지", async () => {
+  renderList(opsMix());
+  await screen.findByText("s-sync");
+  await userEvent.click(screen.getByLabelText(`배치 ${ID2.slice(0, 12)} 선택`));
+  expect(screen.getByText("1개 선택됨")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "sync (1)" }));
+  expect(screen.getByText("배치를 선택해 삭제할 수 있습니다")).toBeInTheDocument();
+});
+
+test("전체 선택은 현재 탭의 행만 담는다", async () => {
+  renderList(opsMix());
+  await screen.findByText("s-sync");
+  await userEvent.click(screen.getByRole("tab", { name: "scan (2)" }));
+  await userEvent.click(screen.getByLabelText("전체 선택"));
+  // sync(Completed·삭제 가능)까지 담기면 3개가 된다 — 보이는 scan 2개만이 계약
+  expect(screen.getByText("2개 선택됨")).toBeInTheDocument();
+});
+
+test("조회 오류는 사유를 보이고 「배치가 없습니다」로 접지 않는다 (오류≠빈 상태)", async () => {
+  server.use(http.get("/api/admin/batches",
+    () => HttpResponse.json({ detail: "http_500" }, { status: 500 })));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter><BatchesList /></MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByText("서버 오류가 발생했습니다")).toBeInTheDocument();
+  expect(screen.queryByText("배치가 없습니다")).toBeNull();
+  // 건수도 지어내지 않는다: 오류 중 탭 라벨에 (0) 이 붙으면 "없다"는 거짓말이다
+  expect(screen.getByRole("tab", { name: "전체" })).toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "전체 (0)" })).toBeNull();
+});

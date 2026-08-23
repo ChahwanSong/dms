@@ -9,21 +9,23 @@ def repos(db):
 
 
 def _seed_job(db, repos, *, created_at, state="Succeeded", tool="dscan",
-              storage="s1", dest_storage=None, requester="alice",
-              reason_code=None, updated_at=None, files=None, nbytes=None,
-              wait=None, sched=None, exec_at=None):
+              operation="sync", storage="s1", dest_storage=None,
+              requester="alice", reason_code=None, updated_at=None, files=None,
+              nbytes=None, wait=None, sched=None, exec_at=None):
     """data_jobs 한 행을 원하는 상태·시각으로 심는다. set_job_state는 updated_at을
     현재 시각으로 찍으므로 창(window) 테스트가 불가능하다 -- 정상 경로로 만들고
     시각·상태만 UPDATE로 덮는다. wait 는 submit_wait_seconds, sched 는
     sched_wait_seconds, exec_at 은 exec_submitted_at(셋 다 기본 NULL --
-    기록 없음/진행 중과 같은 모양)."""
+    기록 없음/진행 중과 같은 모양). operation 기본은 sync -- 처리량 합계가
+    scan(관측)을 제외하므로(2026-08-23), 합계에 잡히는 쪽이 기본이어야 기존
+    시나리오들이 의미를 유지한다."""
     rid = repos.requests.create(
-        operation="scan", requester_id=requester, actor=requester,
+        operation=operation, requester_id=requester, actor=requester,
         resource_key=f"k:{created_at}:{tool}:{state}:{requester}", payload={},
         priority="mid")
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     job_id = repos.data_jobs.create_job(
-        rid, plan_id, operation="scan", priority="mid", storage_name=storage,
+        rid, plan_id, operation=operation, priority="mid", storage_name=storage,
         destination_storage=dest_storage, target="a", options={}, tool=tool,
         worker_pool={}, precondition={}, actor="planner")
     db.execute(
@@ -157,6 +159,18 @@ def test_job_stats_files_bytes_sum_only_succeeded_and_null_safe(db, repos):
     _seed_job(db, repos, created_at="2026-08-09T02:00:00Z")            # NULL
     _seed_job(db, repos, created_at="2026-08-09T03:00:00Z", state="Failed",
               reason_code="execution_failed", files=5, nbytes=50)      # 실패분 제외
+    stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
+                                    end="2026-08-09T23:59:59Z")
+    assert (stats["files_total"], stats["bytes_total"]) == (10, 100)
+
+
+def test_job_stats_sums_exclude_scan_observation(db, repos):
+    # scan 의 bytes_count 는 "관측한 트리 총 용량"(실 사용량, 2026-08-23)이지
+    # 처리량이 아니다 -- 100 TiB 트리를 스캔만 해도 「처리 바이트」가 부풀면
+    # sync 처리량이 스캔 관측량에 파묻힌다(반복 스캔은 사용량 분석의 정상 사용).
+    _seed_job(db, repos, created_at="2026-08-09T01:00:00Z", files=10, nbytes=100)
+    _seed_job(db, repos, created_at="2026-08-09T02:00:00Z", operation="scan",
+              files=7, nbytes=10 ** 12)
     stats = repos.metrics.job_stats(start="2026-08-09T00:00:00Z",
                                     end="2026-08-09T23:59:59Z")
     assert (stats["files_total"], stats["bytes_total"]) == (10, 100)

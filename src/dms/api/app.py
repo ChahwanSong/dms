@@ -29,6 +29,7 @@ from .routes_builds import router as builds_router
 from .routes_registry import router as registry_router
 from .routes_releases import router as releases_router
 from .routes_metrics import router as metrics_router
+from .routes_usage import router as usage_router
 
 
 def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
@@ -112,6 +113,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(registry_router)
     app.include_router(releases_router)
     app.include_router(metrics_router)
+    app.include_router(usage_router)
 
     static_dir = settings.static_dir
     if static_dir and os.path.isdir(static_dir):

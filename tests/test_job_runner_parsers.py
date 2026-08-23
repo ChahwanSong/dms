@@ -77,8 +77,15 @@ DRM_STDOUT = """\
 
 # 실측 dscan-report.json 스키마(dscan 1b93d54 write_report): top_k·oldest 제거,
 # broken_paths_total(정확 총계)·broken_paths_limit·summary.scan_errors 신설.
-# 파서는 summary.total_entries만 읽지만 top-level 키를 실 스키마대로 유지해
-# 픽스처가 실물을 대표하게 한다 — 스키마 개편에도 파서가 무변경임을 증명한다.
+# 시간 히스토그램은 버킷별 bytes 를 담고 한 히스토그램의 합 == 트리 파일 크기 합
+# (2026-08-23 실측, 실 사용량의 출처) — top-level 키를 실 스키마대로 유지해
+# 픽스처가 실물을 대표하게 한다.
+def _age_buckets(bytes_by_bucket):
+    return [{"bucket": f"[{lo}d,{hi}d]", "min_age_days": lo, "max_age_days": hi,
+             "bytes": b}
+            for (lo, hi), b in zip(((0, 1), (2, 7), (8, 30)), bytes_by_bucket)]
+
+
 DSCAN_REPORT = {
     "directory": "/cephfs/dms/smoke-src",
     "generated_at_epoch": 1754273652,
@@ -86,7 +93,10 @@ DSCAN_REPORT = {
     "summary": {"total_entries": 10, "total_files": 7, "total_directories": 3,
                 "total_symlinks": 0, "total_other": 0, "scan_errors": 0},
     "file_size_histogram": [],
-    "time_histograms": {"atime": [], "mtime": [], "ctime": []},
+    # 세 히스토그램의 합은 항상 같다(파일마다 각 타임스탬프가 정확히 한 버킷).
+    "time_histograms": {"atime": _age_buckets([50, 0, 0]),
+                        "mtime": _age_buckets([30, 20, 0]),
+                        "ctime": _age_buckets([0, 50, 0])},
     "broken_paths_total": 1,
     "broken_paths_limit": 100,
     "broken_paths": [{"path": "/cephfs/dms/smoke-src/dangling",
@@ -229,8 +239,45 @@ def _write_report(tmp_path, payload) -> str:
     return str(path)
 
 
-def test_scan_real_report_total_entries(tmp_path):
-    assert parse_scan_counts(_write_report(tmp_path, DSCAN_REPORT)) == (10, None)
+def test_scan_real_report_entries_and_total_bytes(tmp_path):
+    # 실 사용량 = 첫 온전한 히스토그램(mtime 우선)의 bytes 합 = 50
+    assert parse_scan_counts(_write_report(tmp_path, DSCAN_REPORT)) == (10, 50)
+
+
+def test_scan_bytes_prefers_mtime_histogram(tmp_path):
+    # mtime 이 온전하면 atime 과 합이 달라도 mtime 이 출처다(우선순위 고정 --
+    # 흔들리면 (3) 사용량 분석의 시계열이 스캔마다 다른 출처로 요동한다).
+    report = {**DSCAN_REPORT,
+              "time_histograms": {"atime": _age_buckets([999, 0, 0]),
+                                  "mtime": _age_buckets([30, 20, 0])}}
+    assert parse_scan_counts(_write_report(tmp_path, report)) == (10, 50)
+
+
+def test_scan_bytes_falls_back_when_histogram_tainted(tmp_path):
+    # 버킷 하나라도 bytes 가 수상하면(비int·bool·음수) 그 히스토그램 전체가
+    # 부적격 -- 부분합(과소 보고) 대신 다음 후보(atime)로 넘어간다.
+    for bad in ("x", True, -1, 1.5, None):
+        tainted = _age_buckets([30, 20, 0])
+        tainted[1]["bytes"] = bad
+        report = {**DSCAN_REPORT,
+                  "time_histograms": {"mtime": tainted,
+                                      "atime": _age_buckets([50, 0, 0])}}
+        assert parse_scan_counts(_write_report(tmp_path, report)) == (10, 50)
+
+
+def test_scan_bytes_none_when_no_usable_histogram(tmp_path):
+    # 전 히스토그램 부재·빈 목록·전부 오염 -> bytes 는 None(모름), entries 는 산다
+    for hists in (None, "oops", {}, {"atime": [], "mtime": []},
+                  {"mtime": [{"bucket": "[0d,1d]", "bytes": "x"}]}):
+        report = {**DSCAN_REPORT, "time_histograms": hists}
+        assert parse_scan_counts(_write_report(tmp_path, report)) == (10, None)
+
+
+def test_scan_entries_and_bytes_decoupled(tmp_path):
+    # summary 가 깨져도 히스토그램이 온전하면 bytes 는 산다(반대도 성립) --
+    # 한쪽 오염이 다른 쪽 값을 끌고 내려가면 조용한 정보 손실이다.
+    report = {**DSCAN_REPORT, "summary": {"total_entries": "10"}}
+    assert parse_scan_counts(_write_report(tmp_path, report)) == (None, 50)
 
 
 def test_scan_missing_report_file(tmp_path):

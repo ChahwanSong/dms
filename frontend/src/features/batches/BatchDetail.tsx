@@ -259,6 +259,15 @@ function ItemScanStats({ requestId, succeeded }: {
           ? `scan 리포트 생성: ${utcStamp(stats.generated_at_epoch)}`
           : "scan 리포트 생성 시각을 알 수 없습니다"}
       </p>
+      {/* 실 사용량(2026-08-23): 서버가 온도 히스토그램에서 투영한 파일 크기 합.
+          클라이언트 재합산(cumTotal)과 출처는 같지만 서버 한 값을 믿는다 --
+          화면마다 다시 더하면 규칙(mtime 우선·오염 부적격)이 흩어진다.
+          null/부재는 모름(구형 서버·오염 리포트)이라 "—"(null≠0). */}
+      <p className="text-sm mb-2">
+        실 사용량(파일 크기 합):{" "}
+        <strong>{typeof stats.total_bytes === "number"
+          ? humanBytes(stats.total_bytes) : "—"}</strong>
+      </p>
       <div className="flex gap-2 mb-2">
         {tempKeys.map((k) => (
           <Button key={k} type="button"

@@ -166,6 +166,8 @@ const requestStats = (over: any = {}) => ({
     atime: [{ bucket: "[0d,1d]", bytes: 2048 }, { bucket: "[1d,7d]", bytes: 0 }],
     mtime: [{ bucket: "[0d,1d]", bytes: 4096 }],
     ctime: [] },
+  // 실 사용량: 서버 투영 규칙(mtime 우선)대로 mtime 합과 같은 값이어야 실물이다
+  total_bytes: 4096,
   broken_paths_total: 4, broken_paths_limit: 100, ...over });
 
 // 요청 단위 엔드포인트 계약: 항목의 자식 요청(request_id) 별로 나간다.
@@ -210,6 +212,19 @@ test("성공 scan 항목 펼침: 조회 발사 + 온도 섹션(사람 표기·�
   expect(screen.getByText("12")).toBeInTheDocument();
   expect(screen.getByText(/파손 경로 4건/)).toBeInTheDocument();
   expect(screen.getByText("scan 리포트 생성: 2026-08-04 01:12:42 UTC")).toBeInTheDocument();
+  // 실 사용량(2026-08-23): 서버 투영값(total_bytes=4096)의 사람 표기
+  expect(screen.getByText(/실 사용량\(파일 크기 합\):/)).toBeInTheDocument();
+  expect(screen.getByText("4.0 KiB")).toBeInTheDocument();
+});
+
+test("실 사용량: total_bytes 부재(구형 서버)·null(모름)은 — 로 비운다(null≠0)", async () => {
+  const { total_bytes: _drop, ...withoutTotal } = requestStats();
+  server.use(statsHandler("r1", { calls: 0 }, withoutTotal));
+  renderDetailed();
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
+  await screen.findByText("데이터 온도(hot/cold)");
+  const label = screen.getByText(/실 사용량\(파일 크기 합\):/);
+  expect(label).toHaveTextContent("—");
 });
 
 test("mtime 토글: 펼친 항목의 atime 차트가 mtime 으로 바뀐다", async () => {
@@ -218,9 +233,10 @@ test("mtime 토글: 펼친 항목의 atime 차트가 mtime 으로 바뀐다", as
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
   await screen.findByText("데이터 온도(hot/cold)");
   await userEvent.click(screen.getByRole("button", { name: "mtime" }));
-  expect(screen.getByRole("img", { name: "데이터 온도(mtime) 히스토그램" })).toBeInTheDocument();
+  const mtimeChart = screen.getByRole("img", { name: "데이터 온도(mtime) 히스토그램" });
   expect(screen.queryByRole("img", { name: "데이터 온도(atime) 히스토그램" })).toBeNull();
-  expect(screen.getByText("4.0 KiB")).toBeInTheDocument();
+  // 차트 범위로 좁힌다 -- 실 사용량 라인(4.0 KiB, mtime 합과 동일 출처)과 겹친다
+  expect(within(mtimeChart).getByText("4.0 KiB")).toBeInTheDocument();
 });
 
 test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량", async () => {

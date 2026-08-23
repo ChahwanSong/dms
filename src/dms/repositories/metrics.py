@@ -174,10 +174,17 @@ class MetricsRepository:
                WHERE created_at BETWEEN :s AND :e
                  AND sched_wait_seconds IS NULL""", params)
 
+        # scan 제외(2026-08-23): scan 의 bytes_count 는 이제 "관측한 트리의 총
+        # 용량"(실 사용량, 사용량 분석의 원천)이라 이동·삭제 처리량이 아니다 --
+        # 100 TiB 트리를 스캔만 해도 「처리 바이트」가 +100 TiB 되는 오염을 여기서
+        # 막는다(반복 스캔은 사용량 분석이 유도하는 정상 사용이다). files_count 도
+        # 같은 이유로 함께 제외한다 -- 지표 라벨(처리 항목/바이트)의 의미는 "잡이
+        # 만진 것"이고, scan 은 아무것도 만지지 않는다.
         sums = self._db.query_one(
             """SELECT SUM(files_count) AS files_total, SUM(bytes_count) AS bytes_total
                FROM data_jobs
-               WHERE created_at BETWEEN :s AND :e AND state = 'Succeeded'""", params)
+               WHERE created_at BETWEEN :s AND :e AND state = 'Succeeded'
+                 AND operation != 'scan'""", params)
 
         # 계획 거부: 계획 단계 거부는 data_jobs 행이 생기기 **전**의 종단이라 위의
         # 어떤 data_jobs 집계(by_state·KPI 전부)에도 잡히지 않는다 -- 요청 종단이

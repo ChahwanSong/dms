@@ -97,6 +97,44 @@ def test_serves_single_report_projection(tmp_path):
     assert body["generated_at_epoch"] == 1785805962
     assert body["broken_paths_total"] == 3
     assert body["broken_paths_limit"] == 100
+    # 실 사용량: mtime 이 비어 atime 합(50)으로 폴백 -- 파서와 같은 우선순위
+    assert body["total_bytes"] == 50
+
+
+def test_total_bytes_prefers_mtime_and_fails_closed(tmp_path):
+    art_base = tmp_path / "artifacts"
+    client = _client(tmp_path, art_base)
+    _admin(client)
+    # mtime 이 온전하면 atime 과 달라도 mtime 합이 답이다
+    report = _report()
+    report["time_histograms"]["mtime"] = [
+        {"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "bytes": 30},
+        {"bucket": "[2d,7d]", "min_age_days": 2, "max_age_days": 7, "bytes": 20}]
+    rid = _request(client)
+    _succeed_job(client, rid, art_base=art_base, report=report)
+    assert client.get(
+        f"/api/admin/requests/{rid}/scan-stats").json()["total_bytes"] == 50
+    # bytes 가 빠진(비수치라 투영에서 탈락한) 버킷이 있으면 그 히스토그램은
+    # 부적격 -- 부분합(과소 보고) 대신 다음 후보로, 후보가 없으면 null(모름).
+    report2 = _report()
+    report2["time_histograms"] = {
+        "mtime": [{"bucket": "[0d,1d]", "bytes": 30},
+                  {"bucket": "[2d,7d]", "bytes": "oops"}]}
+    rid2 = _request(client, target="team2")
+    _succeed_job(client, rid2, art_base=art_base, report=report2, target="team2")
+    assert client.get(
+        f"/api/admin/requests/{rid2}/scan-stats").json()["total_bytes"] is None
+    # 음수·실수 bytes 도 부적격이다(러너 파서와 문자 그대로 같은 규칙) -- 투영
+    # (_is_number)은 통과시키므로 여기서 걸러야 음수 사용량이 화면에 안 샌다.
+    report3 = _report()
+    report3["time_histograms"] = {
+        "mtime": [{"bucket": "[0d,1d]", "bytes": -100},
+                  {"bucket": "[2d,7d]", "bytes": 30}],
+        "atime": [{"bucket": "[0d,1d]", "bytes": 77}]}
+    rid3 = _request(client, target="team3")
+    _succeed_job(client, rid3, art_base=art_base, report=report3, target="team3")
+    assert client.get(
+        f"/api/admin/requests/{rid3}/scan-stats").json()["total_bytes"] == 77
 
 
 def test_missing_request_404(tmp_path):

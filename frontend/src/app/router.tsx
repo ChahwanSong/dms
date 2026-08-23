@@ -13,6 +13,7 @@ import { RequestDetail } from "../features/jobs/RequestDetail";
 import { StoragesList } from "../features/storages/StoragesList";
 import { Dashboard } from "../features/dashboard/Dashboard";
 import { BatchesList } from "../features/batches/BatchesList";
+import { UsageAnalysis } from "../features/usage/UsageAnalysis";
 import { BatchCreate } from "../features/batches/BatchCreate";
 import { BatchDetail } from "../features/batches/BatchDetail";
 import { AuditLog } from "../features/audit/AuditLog";
@@ -69,6 +70,7 @@ export function AppRouter() {
           <Route path="/admin/storages" element={<RequireRole role="admin"><AppShell><StoragesList /></AppShell></RequireRole>} />
           <Route path="/admin/dashboard" element={<RequireRole role="admin"><AppShell><Dashboard /></AppShell></RequireRole>} />
           <Route path="/admin/batches" element={<RequireRole role="admin"><AppShell><BatchesList /></AppShell></RequireRole>} />
+          <Route path="/admin/usage" element={<RequireRole role="admin"><AppShell><UsageAnalysis /></AppShell></RequireRole>} />
           <Route path="/admin/batches/new" element={<RequireRole role="admin"><AppShell><BatchCreate /></AppShell></RequireRole>} />
           <Route path="/admin/batches/:batchId" element={<RequireRole role="admin"><AppShell><BatchDetail /></AppShell></RequireRole>} />
           <Route path="/admin/audit" element={<RequireRole role="admin"><AppShell><AuditLog /></AppShell></RequireRole>} />

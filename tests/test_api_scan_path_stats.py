@@ -135,7 +135,11 @@ def test_response_is_whitelisted_and_never_leaks_paths(tmp_path):
     body = r.json()
     assert set(body.keys()) == {"covered_by", "generated_at_epoch", "summary",
                                 "file_size_histogram", "time_histograms",
-                                "broken_paths_total", "broken_paths_limit"}
+                                "broken_paths_total", "broken_paths_limit",
+                                "total_bytes"}
+    # 실 사용량(2026-08-23): mtime 이 비어 atime 합(50)으로 폴백 -- 숫자 하나라
+    # 화이트리스트("집계 통계뿐") 안이다
+    assert body["total_bytes"] == 50
     # broken_paths(경로 목록)는 여전히 금지 — 총계(숫자)만 나간다. oldest·top_k는
     # 신 스키마엔 없지만 구형 리포트 방어로 금지 목록에 남긴다.
     for forbidden_key in ("oldest", "broken_paths", "directory", "thresholds", "top_k"):

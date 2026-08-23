@@ -19,6 +19,14 @@ const IDLE_HINT = "배치를 선택해 삭제할 수 있습니다";
 // 크기는 input 자신에게 준다.
 const BOX = "h-5 w-5 cursor-pointer align-middle";
 
+// 작업 종류 탭(2026-08-23, 사용자 요청: sync/scan/rm 을 따로 모아 본다).
+// 라우트가 아니라 화면 상태다 — BuildTabs 는 "다른 화면"을 가르지만 이건 같은
+// 목록의 필터라, URL 을 쪼개면 뒤로가기·새로고침 의미만 복잡해진다.
+const OP_TABS = ["all", "sync", "scan", "rm"] as const;
+type OpTab = (typeof OP_TABS)[number];
+const OP_LABEL: Record<OpTab, string> = {
+  all: "전체", sync: "sync", scan: "scan", rm: "rm" };
+
 export function BatchesList() {
   const q = useBatches();
   const del = useDeleteBatches();
@@ -26,13 +34,26 @@ export function BatchesList() {
   // 2단 확인(BatchDetail 의 항목 삭제 armedSeq 관례): 1단 클릭이 무장하고 2단이
   // 쏜다. 일괄 삭제는 단건보다 비가역 폭이 넓어 오클릭 방어가 더 필요하다.
   const [armed, setArmed] = useState(false);
+  const [opTab, setOpTab] = useState<OpTab>("all");
 
   // q.data 를 그대로 dep 에 쓴다(`?? []` 를 dep 으로 쓰면 매 렌더 새 배열이라 아래
   // 정리 effect 가 무한 루프가 된다). react-query 의 구조적 공유 덕에 내용이 같은
   // 리페치는 같은 참조를 돌려준다.
+  const rows = useMemo(
+    () => (q.data ?? []).filter((b) => opTab === "all" || b.operation === opTab),
+    [q.data, opTab]);
+  // 탭 라벨의 건수는 **전체 목록** 기준이다 — 탭에 들어가기 전에 어느 종류가
+  // 몇 개인지 보여야 탭이 내비게이션 구실을 한다.
+  const opCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const b of q.data ?? []) c[b.operation] = (c[b.operation] ?? 0) + 1;
+    return c;
+  }, [q.data]);
+  // 전체선택·삭제 대상은 **보이는(현재 탭) 행**만이다 — 숨은 탭의 배치까지
+  // 골라지면 사용자가 확인한 것과 다른 것을 지우게 된다(armed 재확인과 같은 원칙).
   const deletableIds = useMemo(
-    () => (q.data ?? []).filter((b) => isBatchTerminal(b.status)).map((b) => b.batch_id),
-    [q.data]);
+    () => rows.filter((b) => isBatchTerminal(b.status)).map((b) => b.batch_id),
+    [rows]);
   const liveIds = useMemo(() => new Set((q.data ?? []).map((b) => b.batch_id)), [q.data]);
   // 유령 선택 정리: 4s 폴링 리페치로 목록에서 사라진 배치(다른 세션이 지웠거나
   // 100건 창 밖으로 밀렸거나)를 선택에서 뺀다 — 안 그러면 화면에 없는 id 에
@@ -61,6 +82,13 @@ export function BatchesList() {
     setSelected((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
   };
   const toggleAll = () => { disarm(); setSelected(allChecked ? [] : deletableIds); };
+  // 탭 전환은 선택을 통째로 비운다 — 이전 탭에서 고른(이제 안 보이는) 행이
+  // 선택에 남으면 "1개 선택됨"이 유령이 되고 삭제가 보이지 않는 것을 지운다.
+  const switchTab = (t: OpTab) => {
+    if (t === opTab) return;
+    setOpTab(t); setArmed(false); setSelected([]);
+    if (!del.isPending) del.reset();
+  };
   const r = del.data;
   const none = selected.length === 0;
   // 예약된 바의 한 줄은 셋 중 하나다(우선순위: 선택 > 직전 결과 > 안내). 선택이
@@ -78,6 +106,25 @@ export function BatchesList() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">배치 작업</h1>
         <Link to="/admin/batches/new"><Button>배치 생성</Button></Link>
+      </div>
+      {/* 작업 종류 탭(BuildTabs 시각 관례 차용 — 단 이건 라우트가 아니라 필터라
+          NavLink 대신 button+tablist). 건수는 전체 목록 기준(위 opCounts 주석). */}
+      <div role="tablist" aria-label="작업 종류별 보기"
+           className="flex gap-1 border-b border-line">
+        {OP_TABS.map((t) => (
+          <button key={t} role="tab" type="button"
+                  aria-selected={opTab === t}
+                  onClick={() => switchTab(t)}
+                  className={`-mb-px border-b-2 px-3 py-2 text-sm leading-6 ${
+                    opTab === t
+                      ? "border-accent text-accent font-medium"
+                      : "border-transparent text-muted hover:text-ink"}`}>
+            {/* 건수는 데이터가 도착했을 때만 -- 로딩·오류 중 (0) 은 "없다"는
+                거짓말이다(모름 ≠ 0, 리뷰 확인). */}
+            {OP_LABEL[t]}{q.data
+              ? ` (${t === "all" ? q.data.length : opCounts[t] ?? 0})` : ""}
+          </button>
+        ))}
       </div>
       {/* 액션 바는 **늘 렌더된다**(자리 예약). 조건부로 나타나게 두면 체크 한 번에
           바 높이만큼 아래 표 전체가 밀려 내려가, 방금 조준한 행이 커서 밑에서
@@ -123,7 +170,17 @@ export function BatchesList() {
       )}
       {/* Card 구획(2026-08-19): 대시보드·릴리스 등과 같은 서피스 — 목록 화면 일관화 */}
       <Card>
-      {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
+      {q.isLoading ? <p className="text-muted">불러오는 중…</p>
+       : q.isError ? (
+        // 오류 ≠ 빈 상태(리뷰 확인): 조회 실패를 "배치가 없습니다"로 접으면
+        // 운영자가 장애를 무소식으로 오독한다. RequestDetail 관례대로 사유 표시.
+        <p className="text-bad text-sm">{(q.error as Error).message}</p>
+       ) : rows.length === 0 ? (
+        // 빈 탭은 빈 표 대신 문구다 — 헤더만 남은 표는 "로딩 실패"처럼 읽힌다.
+        <p className="text-muted">
+          {opTab === "all" ? "배치가 없습니다" : `${OP_LABEL[opTab]} 배치가 없습니다`}
+        </p>
+       ) : (
         <Table>
           <thead><tr className="text-muted">
             {/* 전체 선택은 **선택 가능한 행만** 토글한다 — 활성 배치까지 켜 두면
@@ -144,7 +201,7 @@ export function BatchesList() {
             <th>최근 갱신</th>
           </tr></thead>
           <tbody>
-            {(q.data ?? []).map((b) => (
+            {rows.map((b) => (
               <tr key={b.batch_id} className="border-t border-black/5">
                 {/* 종단 배치만 선택 가능(표시 게이트 — 진짜 차단은 서버 409).
                     disabled 로 끝내지 않고 title 로 이유와 동선을 남긴다. */}

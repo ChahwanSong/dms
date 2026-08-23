@@ -73,6 +73,30 @@ def _time_histograms(d) -> dict:
             if isinstance(k, str) and _HISTOGRAM_NAME_RE.fullmatch(k)}
 
 
+def _total_bytes(time_histograms: dict) -> "int | None":
+    """모양 투영된 time_histograms -> 실 사용량(총 파일 크기 합). 없으면 None.
+
+    파일마다 각 타임스탬프가 정확히 한 버킷에 떨어지므로 한 히스토그램의 bytes
+    합 == 스캔 트리의 파일 크기 합이다. 러너 파서(parsers._scan_total_bytes)와
+    같은 규칙(mtime→atime→ctime 우선, bytes 가 빠진 버킷이 하나라도 있으면 그
+    히스토그램 통째 부적격 — 부분합은 조용한 과소 보고)을 투영된 모양 위에서
+    적용한다. 서버가 한 값으로 답해 화면들(배치 상세·요청 상세)이 버킷 재합산
+    없이 같은 숫자를 보게 한다."""
+    for key in ("mtime", "atime", "ctime"):
+        buckets = time_histograms.get(key) or []
+        if not buckets:
+            continue
+        values = [b.get("bytes") for b in buckets]
+        # 러너와 **문자 그대로 같은** 판정(int·비음수·bool 배제): _is_number 는
+        # 유한 float·음수도 통과시켜, 오염 리포트에서 러너(result_summary)와 이
+        # 라우트(total_bytes)가 다른 숫자·음수 사용량을 보인 실측이 있다
+        # (2026-08-23 리뷰). 하나라도 어긋나면 그 히스토그램은 통째 부적격이다.
+        if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+               for v in values):
+            return sum(values)
+    return None
+
+
 class ScanPathBody(BaseModel):
     storage_name: str
     path: str
@@ -153,12 +177,15 @@ def scan_path_stats(path_id: int, request: Request,
         epoch = report.get("generated_at_epoch")
         broken_total = report.get("broken_paths_total")
         broken_limit = report.get("broken_paths_limit")
+        hists = _time_histograms(report.get("time_histograms"))
         return {
             # 세 필드는 절대 null이 되지 않는다 — 클라이언트 타입이 non-nullable이라
             # null 하나가 렌더 도중 예외가 되고, ErrorBoundary가 없어 화면 전체가 죽는다.
             "summary": _numbers(report.get("summary")),
             "file_size_histogram": _buckets(report.get("file_size_histogram")),
-            "time_histograms": _time_histograms(report.get("time_histograms")),
+            "time_histograms": hists,
+            # 실 사용량(2026-08-23): null == 모름(구형·오염 리포트) ≠ 0(빈 트리).
+            "total_bytes": _total_bytes(hists),
             "generated_at_epoch": epoch if _is_number(epoch) else None,
             # 신 dscan(1b93d54)의 파손 경로 정확 총계·보관 상한 — 숫자만 통과
             # (모양 투영: 문자열이 오면 경로일 수 있다). 구형 리포트(키 부재)는
