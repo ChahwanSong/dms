@@ -141,6 +141,14 @@ class Settings:
     # 익명 바인드로의 침묵 강등을 막는 스위치다 -- identity_ldap 이 아니라 여기서
     # 거부하는 이유는 발화 시점이 배포 순간(기동)이어야 운영자가 알아채기 때문.
     ldap_require_auth_bind: bool = False
+    # 프로덕션 LDAP 호환(2026-08-22, 사용자 sssd.conf 실측):
+    # - group_member_attr: 그룹 멤버십 속성. "memberUid"(기본, rfc2307 posixGroup
+    #   -- uid 로 매칭) 또는 "uniqueMember"/"member"(rfc2307bis -- 사용자 DN 으로
+    #   매칭). sssd 의 ldap_schema+ldap_group_member 를 속성명 하나로 접었다.
+    # - use_start_tls: sssd ldap_id_use_start_tls 미러(389 에서 TLS 승격, 인증서
+    #   검증은 reqcert=never 미러로 생략). ldap_uri 는 콤마 목록(페일오버)도 받는다.
+    ldap_group_member_attr: str = "memberUid"
+    ldap_use_start_tls: bool = False
     # 프로덕션 노출(ingress+TLS) 대비: true 면 세션 쿠키에 Secure 플래그가 붙어
     # 평문 HTTP 로는 쿠키가 실리지 않는다. 기본 false 인 이유는 테스트베드의
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문 -- TLS 를
@@ -238,6 +246,9 @@ class Settings:
             ldap_bind_dn=ldap_bind_dn,
             ldap_bind_pw=ldap_bind_pw,
             ldap_require_auth_bind=ldap_require_auth_bind,
+            ldap_group_member_attr=environ.get(
+                "DMS_LDAP_GROUP_MEMBER_ATTR", "memberUid"),
+            ldap_use_start_tls=_parse_bool(environ, "DMS_LDAP_USE_START_TLS"),
             session_cookie_secure=_parse_bool(
                 environ, "DMS_SESSION_COOKIE_SECURE"),
             account_verification_required=_parse_bool(

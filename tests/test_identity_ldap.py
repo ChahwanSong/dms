@@ -1,7 +1,8 @@
 import pytest
 from types import SimpleNamespace
 from dms.identity import IdentityUnavailable, ResolvedIdentity
-from dms.identity_ldap import LdapIdentityResolver, build_ldap_resolver, _escape_filter
+from dms.identity_ldap import (LdapIdentityResolver, build_ldap_resolver,
+                               _escape_filter, _parse_uris)
 
 
 class _FakeEntry:
@@ -103,6 +104,83 @@ def test_already_unavailable_not_double_wrapped():
     with pytest.raises(IdentityUnavailable) as e:
         r.resolve("alice")
     assert "upstream" in str(e.value)
+
+
+# ── rfc2307bis: 그룹 멤버십을 사용자 DN 으로 검색(uniqueMember/member) ──
+
+class _BisConn:
+    """user 검색은 entry_dn 있는 엔트리를, 그룹 검색은 필터를 캡처해 응답."""
+    def __init__(self, dn, groups_by_dn):
+        self._dn = dn
+        self._groups = groups_by_dn  # {필터에 든 DN 문자열: [cn,...]}
+        self.filters = []
+        self.entries = []
+
+    def search(self, base, filt, attributes=None):
+        self.filters.append(filt)
+        if filt.startswith("(uid="):
+            entry = _FakeEntry({"uidNumber": 20001, "gidNumber": 20000})
+            entry.entry_dn = self._dn
+            self.entries = [entry]
+        else:
+            dn = filt.split("=", 1)[1].rstrip(")")
+            self.entries = [_FakeEntry({"cn": cn})
+                            for cn in self._groups.get(dn, [])]
+        return bool(self.entries)
+
+
+def test_rfc2307bis_group_search_uses_user_dn():
+    dn = "uid=alice,ou=People,dc=dms,dc=local"
+    conn = _BisConn(dn, {dn: ["bisgroup"]})
+    r = LdapIdentityResolver(connect=lambda: conn,
+        user_base="ou=People,dc=dms,dc=local",
+        group_base="ou=Groups,dc=dms,dc=local",
+        group_member_attr="uniqueMember")
+    out = r.resolve("alice")
+    assert out == ResolvedIdentity("alice", 20001, 20000, ("bisgroup",), False)
+    # 그룹 필터가 uid 가 아니라 **사용자 전체 DN** 으로 나갔는지
+    assert conn.filters[1] == f"(uniqueMember={dn})"
+
+
+def test_rfc2307bis_dn_with_metachars_is_escaped():
+    dn = r"uid=we(ird,ou=Peo*ple,dc=dms,dc=local"
+    conn = _BisConn(dn, {})
+    r = LdapIdentityResolver(connect=lambda: conn,
+        user_base="ou=People", group_base="ou=Groups",
+        group_member_attr="member")
+    out = r.resolve("weird")
+    assert out.groups == ()
+    assert r"\28" in conn.filters[1] and r"\2a" in conn.filters[1]
+
+
+def test_default_attr_stays_rfc2307_and_never_touches_entry_dn():
+    # 기본(memberUid) 경로는 entry_dn 이 없는 엔트리로도 동작해야 한다 --
+    # rfc2307bis 지원이 기존 rfc2307 경로에 새 요구를 얹지 않았음을 고정.
+    r = _resolver({"alice": (10001, 10000)}, {"alice": ["dmsusers"]})
+    assert r.resolve("alice").groups == ("dmsusers",)
+
+
+def test_parse_uris_sssd_style():
+    # sssd ldap_uri 관례: 콤마 목록 + 후행 '/'
+    assert _parse_uris("ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/") == \
+        ["ldap://ldap_p1", "ldap://ldap_r3", "ldap://ldaps"]
+    assert _parse_uris("ldap://10.10.10.30:389") == ["ldap://10.10.10.30:389"]
+    assert _parse_uris(" ldap://a , , ldap://b ") == ["ldap://a", "ldap://b"]
+
+
+def test_build_resolver_passes_group_member_attr():
+    r = build_ldap_resolver(_settings(ldap_uri="ldap://x:389",
+        ldap_user_base="ou=People,dc=dms,dc=local",
+        ldap_group_base="ou=Groups,dc=dms,dc=local",
+        ldap_group_member_attr="uniqueMember"))
+    assert r._group_member_attr == "uniqueMember"
+
+
+def test_build_resolver_defaults_to_member_uid():
+    r = build_ldap_resolver(_settings(ldap_uri="ldap://x:389",
+        ldap_user_base="ou=People,dc=dms,dc=local",
+        ldap_group_base="ou=Groups,dc=dms,dc=local"))
+    assert r._group_member_attr == "memberUid"
 
 
 def test_injection_attempt_is_escaped():

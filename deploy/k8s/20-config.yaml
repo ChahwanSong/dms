@@ -50,6 +50,15 @@ data:
   # -> 이 값을 "true"로. 순서를 어기면 제어면 전체가 CrashLoopBackOff 다(의도된
   # 시끄러움이지만, 켜기 전에 자격증명부터).
   DMS_LDAP_REQUIRE_AUTH_BIND: "false"
+  # 프로덕션 LDAP 호환 3종(2026-08-22, 실 sssd.conf 대응 -- identity_ldap.py):
+  # - GROUP_MEMBER_ATTR: "memberUid"(rfc2307 posixGroup, 테스트베드 기본) 또는
+  #   "uniqueMember"/"member"(rfc2307bis -- 사용자 DN 으로 그룹 매칭).
+  #   프로덕션 sssd 는 ldap_schema=rfc2307bis + ldap_group_member=uniqueMember.
+  # - USE_START_TLS: "true"면 389 에서 TLS 승격 후 bind(인증서 검증은 sssd
+  #   reqcert=never 미러로 생략). URI 는 콤마 목록도 받는다(순서대로 페일오버):
+  #   예) "ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/"
+  DMS_LDAP_GROUP_MEMBER_ATTR: "memberUid"
+  DMS_LDAP_USE_START_TLS: "false"
 
   # --- privileged-requester gate (routes_requests.py submit()) ---
   # 기본값: root/admin actor를 특권 요청자로 인정 → 이 id로 온 잡은 uid0/gid0(root)로

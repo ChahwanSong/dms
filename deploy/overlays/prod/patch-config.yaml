@@ -25,11 +25,20 @@ data:
 
   # LDAP: 사내 디렉터리 엔드포인트·베이스 DN. 익명 바인드가 아니면 자격증명은
   # Secret(dms-secrets)에 넣고 DMS_LDAP_REQUIRE_AUTH_BIND 를 켠다(아래).
-  DMS_LDAP_URI: "ldap://REPLACE_LDAP_HOST:389"
-  DMS_LDAP_USER_BASE: "REPLACE_LDAP_USER_BASE"     # 예: ou=People,dc=corp,dc=example
-  DMS_LDAP_GROUP_BASE: "REPLACE_LDAP_GROUP_BASE"   # 예: ou=Groups,dc=corp,dc=example
+  # 값들은 노드 sssd.conf 에서 그대로 옮기면 된다(ldap_uri/ldap_search_base 류):
+  # URI 는 sssd 처럼 콤마 목록(순서대로 페일오버).
+  DMS_LDAP_URI: "ldap://REPLACE_LDAP_HOST:389"     # 예: ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/
+  DMS_LDAP_USER_BASE: "REPLACE_LDAP_USER_BASE"     # 예: dc=supercom,dc=samsung
+  DMS_LDAP_GROUP_BASE: "REPLACE_LDAP_GROUP_BASE"   # 예: dc=supercom,dc=samsung
   # 바인드 계정을 준비했다면 "true"(fail-closed). 익명 바인드면 "false" 유지.
+  # sssd 의 ldap_default_bind_dn/ldap_default_authtok 이 있으면 그 값을
+  # dms-secrets 의 DMS_LDAP_BIND_DN/PW 로 옮기고 이 스위치를 켠다.
   DMS_LDAP_REQUIRE_AUTH_BIND: "false"
+  # 그룹 스키마: sssd ldap_schema=rfc2307bis + ldap_group_member=uniqueMember 인
+  # 사이트는 "uniqueMember"(사용자 DN 매칭). rfc2307(posixGroup)이면 "memberUid".
+  DMS_LDAP_GROUP_MEMBER_ATTR: "uniqueMember"
+  # sssd ldap_id_use_start_tls=true 미러(인증서 검증은 reqcert=never 미러로 생략).
+  DMS_LDAP_USE_START_TLS: "true"
 
   # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). 사내 메일러 연동 전엔 stub.
   DMS_ACCOUNT_EMAIL_DOMAIN: "REPLACE_EMAIL_DOMAIN"     # 예: corp.example
