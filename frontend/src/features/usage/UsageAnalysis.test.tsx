@@ -160,7 +160,7 @@ test("atime 이 없는 이력은 첫 가용 축(mtime)으로 자동 대체 -- '�
   expect(screen.queryByText("이 축의 온도 분포가 있는 스캔이 없습니다")).toBeNull();
 });
 
-test("창이 꽉 차면(window_full) 최근 N건 창 고지가 뜬다", async () => {
+test("창 안내는 상시 + window_full 이면 그 이전 이력 존재까지 말한다", async () => {
   server.use(
     http.get("/api/admin/usage/scan-targets", () => HttpResponse.json(TARGETS)),
     http.get("/api/admin/usage/scan-history", () =>
@@ -173,7 +173,37 @@ test("창이 꽉 차면(window_full) 최근 N건 창 고지가 뜬다", async ()
         <UsageAnalysis />
       </MemoryRouter>
     </QueryClientProvider>);
-  expect(await screen.findByText(/최근 30건 창 기준/)).toBeInTheDocument();
+  // 안내는 데이터 도착 전에도(폴백 30) 뜨므로, 접미문 자체를 기다린다.
+  const note = await screen.findByText(/그 이전 스캔 이력도 있습니다/);
+  expect(note).toHaveTextContent("최근 30건까지만 표시합니다");
+});
+
+test("표시 창 선택: 최근 60건 클릭 -> limit=60 으로 재조회", async () => {
+  const limits: (string | null)[] = [];
+  server.use(
+    http.get("/api/admin/usage/scan-targets", () => HttpResponse.json(TARGETS)),
+    http.get("/api/admin/usage/scan-history", ({ request }) => {
+      limits.push(new URL(request.url).searchParams.get("limit"));
+      return HttpResponse.json({ ...HISTORY,
+                                 window_limit: Number(limits[limits.length - 1]),
+                                 window_full: false });
+    }),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/admin/usage?storage=cephfs-dms&target=artifacts"]}>
+        <UsageAnalysis />
+      </MemoryRouter>
+    </QueryClientProvider>);
+  // 기본 30 으로 첫 조회(데이터 도착까지 대기) + 상시 안내(접미문 없음)
+  await screen.findByText("최신 실 사용량");
+  expect(limits).toEqual(["30"]);
+  const note = screen.getByText(/최근 30건까지만 표시합니다/);
+  expect(note).not.toHaveTextContent("그 이전 스캔 이력도");
+  await userEvent.click(screen.getByRole("button", { name: "최근 60건" }));
+  await screen.findByText(/최근 60건까지만 표시합니다/);
+  await waitFor(() => expect(limits).toEqual(["30", "60"]));
 });
 
 test("검색어가 쿼리로 나간다(디바운스 후)", async () => {

@@ -15,13 +15,15 @@ export const useScanTargets = (q: string) =>
 // 이력: 선택된 타깃에서만 나간다(enabled). 아티팩트 읽기(포인트당 최대 256KiB
 // I/O)가 뒤에 있으므로 staleTime 을 길게 -- 성공 종단 잡의 리포트는 불변이고,
 // 새 스캔이 끝나 목록의 last_scan_at 이 변하면 사용자가 타깃을 다시 고르는
-// 동선에서 자연히 재조회된다.
-export const useScanHistory = (storage: string | null, target: string | null) =>
+// 동선에서 자연히 재조회된다. limit(표시 창)은 쿼리키에 들어가 창별로 캐시된다
+// -- 30→60→30 왕복이 재조회 없이 즉시다.
+export const useScanHistory = (storage: string | null, target: string | null,
+                               limit = 30) =>
   useQuery({
-    queryKey: ["usage-history", storage, target],
+    queryKey: ["usage-history", storage, target, limit],
     queryFn: () => apiGet<UsageHistory>(
       `/api/admin/usage/scan-history?storage=${encodeURIComponent(storage as string)}`
-      + `&target=${encodeURIComponent(target as string)}`),
+      + `&target=${encodeURIComponent(target as string)}&limit=${limit}`),
     enabled: storage !== null && target !== null,
     staleTime: 60_000,
   });

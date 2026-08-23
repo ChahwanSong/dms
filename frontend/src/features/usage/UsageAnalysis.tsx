@@ -75,6 +75,10 @@ const TEMP_PALETTE = ["#dc2626", "#ea580c", "#f59e0b", "#eab308", "#84cc16",
 const tempColorOf = (n: number) => (i: number) =>
   TEMP_PALETTE[n <= 1 ? 0 : Math.round((i / (n - 1)) * (TEMP_PALETTE.length - 1))];
 
+// 이력 표시 창 선택지(사용자 요청 2026-08-24). 서버 상한 60(routes_usage
+// _MAX_POINTS)과 발맞춘 고정 선택지 -- 자유 입력 없음(WindowSelect 관례).
+const HISTORY_WINDOWS = [30, 60] as const;
+
 const TEMP_CAPTIONS: Record<string, string> = {
   atime: "각 열 = 스캔 1회. 위(빨강)=hot·최근 접근, 아래(파랑)=cold — atime 기준 용량 비중. relatime/open_noatime 환경에선 근사",
   mtime: "각 열 = 스캔 1회. 위(빨강)=최근 수정, 아래(파랑)=오래됨 — mtime 기준 용량 비중",
@@ -137,7 +141,8 @@ export function UsageAnalysis() {
   }, [input]);
 
   const targets = useScanTargets(q);
-  const history = useScanHistory(storage, target);
+  const [windowLimit, setWindowLimit] = useState<number>(HISTORY_WINDOWS[0]);
+  const history = useScanHistory(storage, target, windowLimit);
 
   const select = (s: string, t: string) =>
     setParams({ storage: s, target: t });
@@ -223,22 +228,38 @@ export function UsageAnalysis() {
 
       {storage !== null && target !== null && (
         <Card>
-          <h2 className="text-lg font-semibold">
-            {storage}<span className="text-muted">:</span>{target}
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">
+              {storage}<span className="text-muted">:</span>{target}
+            </h2>
+            {/* 표시 창 선택(WindowSelect 시각 관례의 국소판 -- 그쪽은 시간 단위라
+                재사용 대신 건수 선택지로 새로 둔다). */}
+            <div className="flex items-center gap-1" role="group"
+                 aria-label="이력 표시 창">
+              {HISTORY_WINDOWS.map((n) => (
+                <button key={n} type="button"
+                        onClick={() => setWindowLimit(n)}
+                        className={`rounded px-2 py-1 text-xs border ${
+                          windowLimit === n
+                            ? "font-semibold border-black/30"
+                            : "text-muted border-black/10"}`}>
+                  최근 {n}건
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* 상시 창 안내(사용자 요청 2026-08-24): 조건부(창 꽉 참)로만 말하면
+              "이게 전체 이력"이라는 오독이 기본값이 된다 -- 항상 말한다. */}
+          <p className="text-muted text-xs mt-1">
+            최근 {history.data?.window_limit ?? windowLimit}건까지만 표시합니다
+            {history.data?.window_full === true
+              && " — 이 타깃은 그 이전 스캔 이력도 있습니다(목록의 스캔 횟수가 전수)"}
+          </p>
           {history.isLoading ? <p className="text-muted mt-2">이력 불러오는 중…</p>
            : history.isError ? <p className="text-bad text-sm mt-2">{(history.error as ApiError).message}</p>
            : points.length === 0 ? (
             <p className="text-muted text-sm mt-2">이 타깃의 성공 scan 이 없습니다</p>
           ) : (<>
-            {/* 창 절단 고지(리뷰): 이 화면의 이력은 최신 창이다 -- 타깃 목록의
-                스캔 횟수(전수)와 다를 수 있음을 화면이 먼저 말한다. */}
-            {history.data?.window_full === true && (
-              <p className="text-muted text-xs mt-1">
-                최근 {history.data.window_limit}건 창 기준 — 이 타깃의 전체 스캔
-                이력이 아닐 수 있습니다(목록의 스캔 횟수는 전수).
-              </p>
-            )}
             <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
               {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
               <MetricTile label="최신 실 사용량"
