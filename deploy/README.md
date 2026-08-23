@@ -161,8 +161,7 @@ kubectl -n dms create secret generic dms-secrets \
   --from-literal=DMS_SHARED_TOKEN="$(openssl rand -hex 24)" \
   --from-literal=DMS_ADMIN_TOKEN="$(openssl rand -hex 24)" \
   --from-literal=DMS_SESSION_SECRET="$(openssl rand -base64 32)" \
-  --from-literal=DMS_LDAP_BIND_DN='' \
-  --from-literal=DMS_LDAP_BIND_PW=''
+  --from-literal=DMS_LDAP_BIND_PW='<LDAP_SEARCH_PASSWORD>'
 ```
 
 `DMS_SHARED_TOKEN` grants `role=admin` on every API call (`Bearer <token>`),
@@ -633,13 +632,16 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
 
 ## Unresolved values to fill in during live validation
 
-- **`DMS_LDAP_BIND_DN` / `DMS_LDAP_BIND_PW`** (Secret `dms-secrets`, shape in
-  `deploy/k8s/20-secret.example.yaml`): empty (anonymous bind). Only `DMS_LDAP_URI`,
-  `DMS_LDAP_USER_BASE`, `DMS_LDAP_GROUP_BASE` were given as testbed facts --
-  the bind account/password for `ldap://10.10.10.30:389` needs the real
-  value. A wrong value fails soft (`IdentityRejected`/`IdentityUnavailable`
-  at plan time, not a container crash), so this can be fixed and rolled out
-  without redeploying anything else.
+- **`DMS_LDAP_BIND_PW`** (Secret `dms-secrets`, shape in
+  `deploy/k8s/20-secret.example.yaml`): the LDAP search-account password
+  (2026-08-23: auth bind is the default -- the DN lives in the ConfigMap as
+  `DMS_LDAP_BIND_DN`, testbed account `search_dms` provisioned by
+  testbed/roles/openldap_server, password `ldap_search_password` in testbed
+  group_vars). With `DMS_LDAP_REQUIRE_AUTH_BIND="true"` a missing/placeholder
+  password fails LOUD at startup (SettingsError -> CrashLoopBackOff), so
+  inject the secret before applying config. A wrong (but present) password
+  fails soft at plan time (`IdentityUnavailable`), fixable without
+  redeploying anything else.
 - **`DMS_ALLOW_PRIVILEGED_REQUESTERS` / `DMS_PRIVILEGED_REQUESTERS`**
   (`deploy/k8s/20-config.yaml`, ConfigMap): **default is `true` /
   `root,admin`** (also the code default in `src/dms/config.py`). A request

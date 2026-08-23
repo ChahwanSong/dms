@@ -23,22 +23,24 @@ data:
   # 이 경로의 <base>/dms/artifacts 는 미리 mkdir 되어 있어야 한다.
   DMS_ARTIFACT_BASE_URI: "file:///REPLACE_SHARED_FS/dms/artifacts"
 
-  # LDAP: 사내 디렉터리 엔드포인트·베이스 DN. 익명 바인드가 아니면 자격증명은
-  # Secret(dms-secrets)에 넣고 DMS_LDAP_REQUIRE_AUTH_BIND 를 켠다(아래).
-  # 값들은 노드 sssd.conf 에서 그대로 옮기면 된다(ldap_uri/ldap_search_base 류):
-  # URI 는 sssd 처럼 콤마 목록(순서대로 페일오버).
+  # LDAP: 사내 디렉터리 엔드포인트·베이스 DN·검색 계정 DN. 값들은 노드
+  # sssd.conf 에서 그대로 옮기면 된다(ldap_uri/ldap_search_base/
+  # ldap_default_bind_dn). URI 는 sssd 처럼 콤마 목록(순서대로 페일오버).
+  # 그룹 스키마(uniqueMember)·StartTLS 는 코드 기본값이 이미 프로덕션 sssd 값
+  # (ldap_schema=rfc2307bis + ldap_group_member=uniqueMember,
+  # ldap_id_use_start_tls=true 미러)이라 여기서 덮을 게 없다 -- rfc2307-only·
+  # 평문 사이트만 DMS_LDAP_GROUP_MEMBER_ATTR: "memberUid" /
+  # DMS_LDAP_USE_START_TLS: "false" 로 명시해 내린다.
   DMS_LDAP_URI: "ldap://REPLACE_LDAP_HOST:389"     # 예: ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/
   DMS_LDAP_USER_BASE: "REPLACE_LDAP_USER_BASE"     # 예: dc=supercom,dc=samsung
   DMS_LDAP_GROUP_BASE: "REPLACE_LDAP_GROUP_BASE"   # 예: dc=supercom,dc=samsung
-  # 바인드 계정을 준비했다면 "true"(fail-closed). 익명 바인드면 "false" 유지.
-  # sssd 의 ldap_default_bind_dn/ldap_default_authtok 이 있으면 그 값을
-  # dms-secrets 의 DMS_LDAP_BIND_DN/PW 로 옮기고 이 스위치를 켠다.
-  DMS_LDAP_REQUIRE_AUTH_BIND: "false"
-  # 그룹 스키마: sssd ldap_schema=rfc2307bis + ldap_group_member=uniqueMember 인
-  # 사이트는 "uniqueMember"(사용자 DN 매칭). rfc2307(posixGroup)이면 "memberUid".
-  DMS_LDAP_GROUP_MEMBER_ATTR: "uniqueMember"
-  # sssd ldap_id_use_start_tls=true 미러(인증서 검증은 reqcert=never 미러로 생략).
-  DMS_LDAP_USE_START_TLS: "true"
+  # 검색 계정 DN(sssd ldap_default_bind_dn 대응 -- 비밀이 아니라 ConfigMap).
+  # 비밀번호(sssd ldap_default_authtok)만 dms-secrets 의 DMS_LDAP_BIND_PW 로.
+  # 주의: envFrom 순서상 Secret 이 ConfigMap 을 덮으니 DN 키를 Secret 에 두지 마라.
+  DMS_LDAP_BIND_DN: "REPLACE_LDAP_BIND_DN"         # 예: uid=search_sc,ou=user,ou=ldap_user,dc=supercom,dc=samsung
+  # 인증 바인드 fail-closed(기본). PW 결측·자리표시자면 기동 거부 --
+  # dms-secrets 주입이 먼저다. 익명 바인드 사이트만 "false"(위 DN 도 "" 로).
+  DMS_LDAP_REQUIRE_AUTH_BIND: "true"
 
   # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). 사내 메일러 연동 전엔 stub.
   DMS_ACCOUNT_EMAIL_DOMAIN: "REPLACE_EMAIL_DOMAIN"     # 예: corp.example

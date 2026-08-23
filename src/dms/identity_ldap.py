@@ -1,6 +1,9 @@
 """ldap3 기반 실행 신원 resolver. LDAP 접근은 주입된 connection factory 뒤에 있다.
 
-프로덕션 호환 3종(2026-08-22, 사용자 sssd.conf 실측 — supercom.samsung):
+프로덕션 호환 3종(2026-08-22, 사용자 sssd.conf 실측 — supercom.samsung.
+2026-08-23 사용자 결정: sssd.conf 값이 **기본값**이다 — uniqueMember·StartTLS 가
+기본이고, rfc2307(memberUid)·평문 LDAP 쪽이 env 로 명시하는 예외다. 테스트베드
+LDAP 도 프로덕션 미러(rfc2307bis 이중 그룹·StartTLS·검색 계정)로 맞춰져 있다):
 - 그룹 스키마: rfc2307(posixGroup, memberUid=<uid>)만 알던 것을
   rfc2307bis(groupOfUniqueNames 류, uniqueMember=<사용자 DN>)도 해석한다.
   스위치는 group_member_attr 하나다 -- "memberUid" 면 uid 로, 그 외(member/
@@ -30,7 +33,7 @@ def _parse_uris(uri: str) -> list[str]:
 
 class LdapIdentityResolver:
     def __init__(self, *, connect, user_base, group_base,
-                 group_member_attr="memberUid"):
+                 group_member_attr="uniqueMember"):
         self._connect = connect
         self._user_base = user_base
         self._group_base = group_base
@@ -71,8 +74,10 @@ def build_ldap_resolver(settings):
     group_base = getattr(settings, "ldap_group_base", None)
     if _is_placeholder(uri) or _is_placeholder(user_base) or _is_placeholder(group_base):
         return None
-    use_start_tls = bool(getattr(settings, "ldap_use_start_tls", False))
-    group_member_attr = getattr(settings, "ldap_group_member_attr", "") or "memberUid"
+    # 결측 폴백도 프로덕션 기본과 같은 방향(uniqueMember/StartTLS) -- 기본값이
+    # 곧 sssd.conf 값이라는 원칙을 duck-typed settings 에도 일관 적용.
+    use_start_tls = bool(getattr(settings, "ldap_use_start_tls", True))
+    group_member_attr = getattr(settings, "ldap_group_member_attr", "") or "uniqueMember"
 
     def connect():
         import ldap3

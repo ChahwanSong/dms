@@ -43,10 +43,13 @@ class _FakeConn:
 
 
 def _resolver(users, groups, *, broken=False):
+    # rfc2307 경로를 고정하는 픽스처 -- 기본값은 uniqueMember(rfc2307bis)로
+    # 승격됐으므로(2026-08-23) memberUid 는 명시적으로 지정한다.
     return LdapIdentityResolver(
         connect=lambda: _FakeConn(users, groups, broken=broken),
         user_base="ou=People,dc=dms,dc=local",
-        group_base="ou=Groups,dc=dms,dc=local")
+        group_base="ou=Groups,dc=dms,dc=local",
+        group_member_attr="memberUid")
 
 
 def test_resolve_hit():
@@ -153,11 +156,18 @@ def test_rfc2307bis_dn_with_metachars_is_escaped():
     assert r"\28" in conn.filters[1] and r"\2a" in conn.filters[1]
 
 
-def test_default_attr_stays_rfc2307_and_never_touches_entry_dn():
-    # 기본(memberUid) 경로는 entry_dn 이 없는 엔트리로도 동작해야 한다 --
+def test_member_uid_mode_never_touches_entry_dn():
+    # memberUid(rfc2307) 경로는 entry_dn 이 없는 엔트리로도 동작해야 한다 --
     # rfc2307bis 지원이 기존 rfc2307 경로에 새 요구를 얹지 않았음을 고정.
     r = _resolver({"alice": (10001, 10000)}, {"alice": ["dmsusers"]})
     assert r.resolve("alice").groups == ("dmsusers",)
+
+
+def test_constructor_default_is_unique_member():
+    # 2026-08-23 사용자 결정: 기본값이 곧 프로덕션 sssd.conf 값(rfc2307bis).
+    r = LdapIdentityResolver(connect=lambda: None,
+                             user_base="ou=People", group_base="ou=Groups")
+    assert r._group_member_attr == "uniqueMember"
 
 
 def test_parse_uris_sssd_style():
@@ -176,10 +186,19 @@ def test_build_resolver_passes_group_member_attr():
     assert r._group_member_attr == "uniqueMember"
 
 
-def test_build_resolver_defaults_to_member_uid():
+def test_build_resolver_defaults_to_unique_member():
+    # 속성 결측 폴백도 프로덕션 기본(uniqueMember)과 같은 방향.
     r = build_ldap_resolver(_settings(ldap_uri="ldap://x:389",
         ldap_user_base="ou=People,dc=dms,dc=local",
         ldap_group_base="ou=Groups,dc=dms,dc=local"))
+    assert r._group_member_attr == "uniqueMember"
+
+
+def test_build_resolver_member_uid_opt_down():
+    r = build_ldap_resolver(_settings(ldap_uri="ldap://x:389",
+        ldap_user_base="ou=People,dc=dms,dc=local",
+        ldap_group_base="ou=Groups,dc=dms,dc=local",
+        ldap_group_member_attr="memberUid"))
     assert r._group_member_attr == "memberUid"
 
 

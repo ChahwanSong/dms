@@ -39,26 +39,31 @@ data:
   DMS_SESSION_COOKIE_SECURE: "true"
 
   # --- LDAP identity resolution (identity_ldap.py) ---
+  # 2026-08-23: 테스트베드 LDAP(pkg-01 slapd)를 프로덕션 미러로 재구성했다 --
+  # rfc2307bis 이중 그룹(posixGroup 보조 + groupOfUniqueNames), StartTLS(자가서명,
+  # 검증은 reqcert=never 미러로 생략), 전용 검색 계정(testbed/roles/openldap_server).
+  # 코드 기본값도 같은 값(uniqueMember/StartTLS true)이라 아래 두 스위치는
+  # 문서화를 위한 명시다. rfc2307-only·평문 사이트만 "memberUid"/"false"로 내린다.
+  # URI 는 sssd ldap_uri 처럼 콤마 목록도 받는다(순서대로 페일오버):
+  #   예) "ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/"
   DMS_LDAP_URI: "ldap://10.10.10.30:389"
   DMS_LDAP_USER_BASE: "ou=People,dc=dms,dc=local"
   DMS_LDAP_GROUP_BASE: "ou=Groups,dc=dms,dc=local"
-  # 슬라이스 28: "true"면 DMS_LDAP_BIND_DN/PW(dms-secrets)가 비거나 자리표시자일 때
-  # api/controller/migrate 가 기동을 거부한다(SettingsError) -- 인증 바인드를
-  # 의도했는데 익명으로 조용히 도는 상태를 막는 스위치. 테스트베드 OpenLDAP 은
-  # 익명 바인드를 허용하므로(20-secret.example.yaml) 바인드 계정이 준비되기
-  # 전까지 "false"로 둔다 -- 전환 절차: 계정 발급 -> dms-secrets 에 DN/PW 주입
-  # -> 이 값을 "true"로. 순서를 어기면 제어면 전체가 CrashLoopBackOff 다(의도된
-  # 시끄러움이지만, 켜기 전에 자격증명부터).
-  DMS_LDAP_REQUIRE_AUTH_BIND: "false"
-  # 프로덕션 LDAP 호환 3종(2026-08-22, 실 sssd.conf 대응 -- identity_ldap.py):
-  # - GROUP_MEMBER_ATTR: "memberUid"(rfc2307 posixGroup, 테스트베드 기본) 또는
-  #   "uniqueMember"/"member"(rfc2307bis -- 사용자 DN 으로 그룹 매칭).
-  #   프로덕션 sssd 는 ldap_schema=rfc2307bis + ldap_group_member=uniqueMember.
-  # - USE_START_TLS: "true"면 389 에서 TLS 승격 후 bind(인증서 검증은 sssd
-  #   reqcert=never 미러로 생략). URI 는 콤마 목록도 받는다(순서대로 페일오버):
-  #   예) "ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/"
-  DMS_LDAP_GROUP_MEMBER_ATTR: "memberUid"
-  DMS_LDAP_USE_START_TLS: "false"
+  DMS_LDAP_GROUP_MEMBER_ATTR: "uniqueMember"
+  DMS_LDAP_USE_START_TLS: "true"
+  # 바인드 DN 은 비밀이 아니라 ConfigMap 에 둔다(프로덕션 sssd 의
+  # ldap_default_bind_dn 대응). 비밀번호만 dms-secrets 의 DMS_LDAP_BIND_PW 로
+  # (sssd ldap_default_authtok 대응). 주의: envFrom 은 Secret 이 ConfigMap 뒤에
+  # 와서 같은 키가 Secret 에도 있으면 Secret 이 이긴다 -- DN 키를 Secret 에
+  # 두지 마라(빈 값이면 이 DN 을 "" 로 덮어 기동 거부가 난다).
+  DMS_LDAP_BIND_DN: "uid=search_dms,ou=Services,dc=dms,dc=local"
+  # 슬라이스 28: "true"면 BIND_DN/PW 가 비거나 자리표시자일 때 api/controller/
+  # migrate 가 기동을 거부한다(SettingsError) -- 인증 바인드를 의도했는데
+  # 익명으로 조용히 도는 상태를 막는 fail-closed 스위치. 테스트베드도 이제
+  # 검색 계정으로 인증 바인드가 기본이다(비밀번호는 dms-secrets 에만). 익명
+  # 바인드 사이트만 "false"로 내린다. 켜기 전에 자격증명부터 -- 순서를 어기면
+  # 제어면 전체가 CrashLoopBackOff 다(의도된 시끄러움).
+  DMS_LDAP_REQUIRE_AUTH_BIND: "true"
 
   # --- privileged-requester gate (routes_requests.py submit()) ---
   # 기본값: root/admin actor를 특권 요청자로 인정 → 이 id로 온 잡은 uid0/gid0(root)로

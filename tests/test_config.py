@@ -126,16 +126,16 @@ def test_anonymous_bind_remains_the_default():
 
 
 def test_ldap_prod_compat_defaults_and_override():
-    # 기본은 현행 유지: rfc2307(memberUid)·평문·단일 URI 그대로.
+    # 기본값이 곧 프로덕션 sssd.conf 값(2026-08-23 승격): rfc2307bis + StartTLS.
     s = Settings.from_env(VALID)
-    assert s.ldap_group_member_attr == "memberUid"
-    assert s.ldap_use_start_tls is False
-    # 프로덕션 sssd.conf 매핑(rfc2307bis + StartTLS + 다중 URI)
-    s = Settings.from_env({**VALID,
-        "DMS_LDAP_GROUP_MEMBER_ATTR": "uniqueMember",
-        "DMS_LDAP_USE_START_TLS": "true"})
     assert s.ldap_group_member_attr == "uniqueMember"
     assert s.ldap_use_start_tls is True
+    # rfc2307-only·평문 사이트는 env 로 명시해서 내린다(예외 쪽이 opt-in).
+    s = Settings.from_env({**VALID,
+        "DMS_LDAP_GROUP_MEMBER_ATTR": "memberUid",
+        "DMS_LDAP_USE_START_TLS": "false"})
+    assert s.ldap_group_member_attr == "memberUid"
+    assert s.ldap_use_start_tls is False
 
 
 def test_user_allowed_operations_default_and_override():
