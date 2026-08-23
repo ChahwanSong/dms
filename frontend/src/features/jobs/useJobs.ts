@@ -36,15 +36,8 @@ export const useInfiniteRequests = (filters: RequestFilters) =>
     refetchInterval: 3000,
   });
 
-// 대시보드 「최근 작업」 전용(2026-08-13 조정): 최근 200건. useRequests(목록 화면,
-// 3s 폴링·서버 기본 limit 50)와 쿼리키를 분리한다 -- 같은 키를 쓰면 50건/200건
-// 응답이 한 캐시 슬롯을 서로 덮어써 두 화면이 함께 깜빡이고, e2e E5 가 고정한
-// 목록 3s 폴링 계약도 흔들린다. 폴링 10s: 200행 재조회를 3s 로 돌리는 건 과하고,
-// 대시보드는 개요 화면이라 이 지연이 정직하다.
-export const useRecentRequests = () =>
-  useQuery({ queryKey: ["requests", "recent"],
-             queryFn: () => apiGet<RequestRow[]>("/api/user/requests?limit=200"),
-             refetchInterval: 10_000 });
+// 「최근 작업」(대시보드) 전용이던 useRecentRequests 는 그 카드와 함께 제거됐다
+// (2026-08-23 사용자 결정 -- 전체 작업 화면과 중복).
 
 export const useRequest = (id: string) =>
   useQuery({ queryKey: ["request", id], queryFn: () => apiGet<RequestDetail>(`/api/user/requests/${id}`) });

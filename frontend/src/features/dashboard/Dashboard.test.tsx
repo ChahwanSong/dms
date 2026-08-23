@@ -1,15 +1,13 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { Dashboard } from "./Dashboard";
-import type { RequestRow } from "../../lib/types";
 
-// 기본 스토리지 목록은 빈 배열(= 뿌리 모름 = 절대경로 표시 없음) — 최근 작업 표가
-// useStorageRoots 로 이 목록을 부르므로 기본이 없으면 MSW 미처리 경고가 난다.
+// 「최근 작업」 카드는 제거됐다(2026-08-23 사용자 결정 -- 전체 작업 화면과 중복).
+// 그 카드의 표·검색·페이지네이션 테스트도 함께 걷어냈다.
 const server = setupServer(
   http.get("/api/user/storages", () => HttpResponse.json([])));
 beforeAll(() => server.listen());
@@ -41,23 +39,7 @@ const INFRA = {
   job_image: { live: null, manifest: null },
 };
 
-// 최근 작업 픽스처 빌더 -- 표가 그리는 필드(요청자·payload·시각)를 전부 싣는다.
-function reqRow(id: string, over: Partial<RequestRow> = {}): RequestRow {
-  return {
-    request_id: id, operation: "scan", state: "Pending", priority: "mid",
-    requester_id: "alice", resource_key: "k", commit_order: 1,
-    created_at: "2026-08-13T00:00:00Z", updated_at: "2026-08-13T00:30:00Z",
-    payload: { storage: "ceph-a", target: "team/data" },
-    ...over,
-  };
-}
-
-// limit=200 전송 단언용 -- msw 는 쿼리스트링과 무관하게 경로를 매칭하므로,
-// 실제로 어떤 URL 이 나갔는지는 핸들러가 직접 기록해야 보인다.
-let requestsUrls: string[] = [];
-
 function renderDash(overrides: Record<string, unknown> = {}) {
-  requestsUrls = [];
   server.use(
     http.get("/api/admin/metrics/jobs",
              () => HttpResponse.json(overrides.jobs ?? JOB_METRICS)),
@@ -68,13 +50,6 @@ function renderDash(overrides: Record<string, unknown> = {}) {
                { queue: { name: "dms-data", state: "Open" }, podgroups: [] })),
     http.get("/api/admin/metrics/nodes",
              () => HttpResponse.json({ window_hours: 24, start: "", end: "", nodes: [] })),
-    http.get("/api/user/requests", ({ request }) => {
-      requestsUrls.push(request.url);
-      return HttpResponse.json(overrides.requests ?? [
-        { request_id: "r1", operation: "sync", state: "Executing", priority: "mid",
-          created_at: "", updated_at: "", requester_id: "a", resource_key: "k",
-          commit_order: 1, payload: {} }]);
-    }),
     http.get("/api/admin/nodes", () => HttpResponse.json([
       { node_name: "w1", reported_at: "2026-08-09T00:00:00Z", fresh: true,
         report: {} }])),
@@ -194,112 +169,3 @@ test("큐 현황 카드가 잡 통계 앞에 뜬다", async () => {
          & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
-// ---- 최근 작업 카드 개편(2026-08-13): 요청자·작업내용·시각 + 검색 + 페이지네이션 ----
-
-test("최근 작업 표가 요청자·작업내용·요청시간을 보여준다", async () => {
-  renderDash({ requests: [
-    reqRow("req-sync", {
-      operation: "sync", requester_id: "alice", state: "Executing",
-      created_at: "2026-08-12T09:00:00Z",
-      payload: { source_storage: "ceph-a", source: "team/a",
-                 destination_storage: "weka-b", destination: "team/b" } }),
-    reqRow("req-scan", {
-      operation: "scan", requester_id: "bob",
-      created_at: "2026-08-12T08:00:00Z" }),
-  ] });
-  expect(await screen.findByText("req-sync")).toBeInTheDocument();
-  expect(screen.getByText("alice")).toBeInTheDocument();
-  // 작업내용 요약: sync 는 source → destination, scan/rm 은 storage:target.
-  // 한 개의 템플릿 리터럴 = 한 개의 텍스트 노드(컴포넌트 카드와 같은 규율).
-  expect(screen.getByText("sync · ceph-a:team/a → weka-b:team/b")).toBeInTheDocument();
-  expect(screen.getByText("scan · ceph-a:team/data")).toBeInTheDocument();
-  expect(screen.getByText("2026-08-12T09:00:00Z")).toBeInTheDocument();
-});
-
-// 절대경로(사용자 보고 2026-08-15): 좁은 표라 본문은 그대로 두고 title 로만 준다 —
-// 본문에 이어 붙이면 작업 열이 두 배로 길어져 표가 가로로 밀린다.
-test("작업 요약 셀의 title 에 절대경로 — 본문 문구는 그대로", async () => {
-  server.use(http.get("/api/user/storages", () => HttpResponse.json([
-    { storage_name: "ceph-a", backend_type: "cephfs", status: "Ready",
-      managed_root: "/ceph/dms" }])));
-  renderDash({ requests: [reqRow("req-scan")] });
-  const cell = (await screen.findByText("scan · ceph-a:team/data")).closest("td")!;
-  await waitFor(() => expect(cell).toHaveAttribute("title", "/ceph/dms/team/data"));
-});
-
-test("managed_root 를 못 읽으면(비관리자) title 도 없다", async () => {
-  renderDash({ requests: [reqRow("req-scan")] });     // 기본 목록엔 managed_root 없음
-  const cell = (await screen.findByText("scan · ceph-a:team/data")).closest("td")!;
-  expect(cell).not.toHaveAttribute("title");
-});
-
-test("완료시간은 종단 상태(Conflict 포함)에서만 updated_at, 비종단은 —", async () => {
-  // updated_at 은 "마지막 전이 시각"일 뿐이라 비종단에서 완료시간으로 보여주면
-  // 거짓말이다 -- 시각 문자열 자체의 존재/부재로 단언한다("—"는 화면 곳곳에 있다).
-  renderDash({ requests: [
-    reqRow("req-done", { state: "Succeeded", updated_at: "2026-08-10T11:11:11Z" }),
-    reqRow("req-conflict", { state: "Conflict", updated_at: "2026-08-10T22:22:22Z" }),
-    reqRow("req-live", { state: "Executing", updated_at: "2026-08-10T20:20:20Z" }),
-  ] });
-  expect(await screen.findByText("2026-08-10T11:11:11Z")).toBeInTheDocument();
-  // Conflict 는 잡 종단 셋(TERMINAL_STATES)엔 없지만 요청 종단이다 --
-  // REQUEST_TERMINAL_STATES 가 필요한 이유 그 자체.
-  expect(screen.getByText("2026-08-10T22:22:22Z")).toBeInTheDocument();
-  expect(screen.queryByText("2026-08-10T20:20:20Z")).toBeNull();
-});
-
-test("페이지네이션: 20건/페이지, 경계에서 버튼 비활성", async () => {
-  const rows = Array.from({ length: 25 }, (_, i) =>
-    reqRow(`req-${String(i + 1).padStart(2, "0")}`));
-  renderDash({ requests: rows });
-  expect(await screen.findByText("req-01")).toBeInTheDocument();
-  expect(screen.getByText("req-20")).toBeInTheDocument();
-  expect(screen.queryByText("req-21")).toBeNull();     // 21건째는 2페이지
-  expect(screen.getByText("1 / 2 페이지")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "이전" })).toBeDisabled();
-
-  await userEvent.click(screen.getByRole("button", { name: "다음" }));
-  expect(screen.getByText("req-21")).toBeInTheDocument();
-  expect(screen.getByText("req-25")).toBeInTheDocument();
-  expect(screen.queryByText("req-01")).toBeNull();
-  expect(screen.getByText("2 / 2 페이지")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
-});
-
-test("검색이 필터링하고 페이지를 1로 리셋한다", async () => {
-  const rows = Array.from({ length: 25 }, (_, i) =>
-    reqRow(`req-${String(i + 1).padStart(2, "0")}`,
-           { requester_id: i % 2 === 0 ? "alice" : "bob" }));
-  renderDash({ requests: rows });
-  expect(await screen.findByText("req-01")).toBeInTheDocument();
-  // 2페이지로 간 뒤 검색 -- 결과가 1페이지로 리셋되지 않으면 빈 화면이 된다.
-  await userEvent.click(screen.getByRole("button", { name: "다음" }));
-  expect(screen.getByText("req-21")).toBeInTheDocument();
-  const input = screen.getByPlaceholderText("요청자·ID·작업·상태 검색");
-  await userEvent.type(input, "req-03");
-  expect(screen.getByText("req-03")).toBeInTheDocument();
-  expect(screen.queryByText("req-21")).toBeNull();
-  expect(screen.getByText("1 / 1 페이지")).toBeInTheDocument();
-  // 요청자 검색: 대소문자 무시 부분일치.
-  await userEvent.clear(input);
-  await userEvent.type(input, "BOB");
-  expect(screen.getByText("req-02")).toBeInTheDocument();
-  expect(screen.queryByText("req-03")).toBeNull();     // alice 행은 사라진다
-});
-
-test("최근 작업 카드는 잡 통계 뒤(문서 맨 아래)에 온다", async () => {
-  renderDash();
-  const jobStats = await screen.findByText("잡 통계");
-  const recent = await screen.findByText("최근 작업");
-  // DOM 순서 단언 -- 큐 현황/잡 통계 테스트와 같은 방식.
-  expect(jobStats.compareDocumentPosition(recent)
-         & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-});
-
-test("최근 작업은 limit=200 으로 요청한다", async () => {
-  renderDash();
-  await screen.findByText("최근 작업");
-  await waitFor(() => expect(requestsUrls.length).toBeGreaterThan(0));
-  expect(requestsUrls.some(
-    (u) => new URL(u).searchParams.get("limit") === "200")).toBe(true);
-});

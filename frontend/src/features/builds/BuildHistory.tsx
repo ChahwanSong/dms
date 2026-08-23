@@ -113,7 +113,7 @@ export function BuildHistory() {
   const match = (FILTERS.find((f) => f.key === filter) ?? FILTERS[0]).match;
   const filtered = useMemo(() => builds.filter((b) => match(b.state)), [builds, match]);
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  // 필터로 페이지 수가 줄면 마지막 페이지로 클램프(RecentRequestsSection 관례).
+  // 필터로 페이지 수가 줄면 마지막 페이지로 클램프(구 RecentRequestsSection 관례 -- 카드는 제거됐지만 규칙은 유지).
   const current = Math.min(page, pages);
   const visible = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
 
@@ -246,7 +246,7 @@ export function BuildHistory() {
             </tbody>
           </Table>
           {/* 페이지네이션은 표 밖(카드 안)이다 — td 안에 버튼·flex 를 넣으면 e2e L2
-              (display=table-cell 불변식)가 문다(RecentRequestsSection 관례). */}
+              (display=table-cell 불변식)가 문다(구 RecentRequestsSection 관례 -- 카드는 제거됐지만 규칙은 유지). */}
           <div className="flex items-center justify-end gap-3 mt-3 text-sm">
             <Button variant="ghost" disabled={current <= 1}
                     onClick={() => setPage(current - 1)}>이전</Button>

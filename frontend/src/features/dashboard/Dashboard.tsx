@@ -2,7 +2,6 @@ import { useInfraMetrics, useJobMetrics } from "./useMetrics";
 import { NodeMetricsSection } from "./NodeMetricsSection";
 import { JobStatsSection } from "./JobStatsSection";
 import { QueueSection } from "./QueueSection";
-import { RecentRequestsSection } from "./RecentRequestsSection";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -61,8 +60,7 @@ export function Dashboard() {
             0 으로 표기한다(null≠0 -- 거부 없음은 정상값). */}
         <MetricTile label="계획 거부(24h)" value={jobsQ.data?.plan_rejected ?? 0} />
       </div>
-      {/* 최근 작업 카드가 표로 커져 맨 아래(RecentRequestsSection)로 내려갔다 --
-          grid 에 홀로 남은 컴포넌트 카드는 md 반폭이 어색해 전폭으로 편다. */}
+      {/* grid 에 홀로 남은 컴포넌트 카드는 md 반폭이 어색해 전폭으로 편다. */}
       <Card>
         <h2 className="font-medium mb-3">컴포넌트</h2>
         <ul className="space-y-2 text-sm">
@@ -111,9 +109,9 @@ export function Dashboard() {
           라이브 PodGroup 을 본다 */}
       <QueueSection />
       <JobStatsSection />
-      {/* 맨 아래(2026-08-13 조정): 표(200건·페이지네이션)로 커져 개요(KPI·컴포넌트·
-          큐·통계) 아래가 자리다. 위에 두면 스크롤 한 화면을 표가 다 먹는다. */}
-      <RecentRequestsSection />
+      {/* 「최근 작업」 카드는 제거됐다(2026-08-23 사용자 결정): 작업 메뉴의
+          「전체 작업」 화면(요청자 열·필터·무한 스크롤)과 중복이었다 -- 대시보드는
+          개요(KPI·컴포넌트·큐·통계)만 남긴다. */}
     </section>
   );
 }

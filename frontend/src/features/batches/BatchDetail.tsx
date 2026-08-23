@@ -145,7 +145,7 @@ function utcStamp(epoch: number) {
   return `${new Date(epoch * 1000).toISOString().replace("T", " ").slice(0, 19)} UTC`;
 }
 
-// payload 필드 결손 방어 + 대상 요약: 대시보드 RecentRequestsSection 의 summarize
+// payload 필드 결손 방어 + 대상 요약: 구 대시보드 최근 작업 카드의 summarize
 // 관례 미러(scan/rm: storage:target, sync: src → dst). ?? 로만 접는다 — truthy
 // 검사는 ""(빈 경로)를 "모름"으로 뭉갠다.
 const part = (v: unknown) => String(v ?? "—");

@@ -22,8 +22,10 @@ function humanBytes(bytes: number): string {
 function utcStamp(epoch: number) {
   return `${new Date(epoch * 1000).toISOString().replace("T", " ").slice(0, 19)} UTC`;
 }
-const shortStamp = (epoch: number) =>
-  new Date(epoch * 1000).toISOString().slice(5, 16).replace("T", " ");
+// 온도 열 축 라벨: MM-DD 만 -- 열 폭(max-w-12)에 "MM-DD HH:MM" 은 잘려서
+// "08-23 1…" 이 됐다(실화면 확인). 분 단위는 열 title 툴팁이 든다.
+const dayStamp = (epoch: number) =>
+  new Date(epoch * 1000).toISOString().slice(5, 10);
 
 // 포인트의 대표 시각(초). 리포트 생성 시각(스캔이 본 파일시스템의 시점)이 1순위,
 // 결측(구형 리포트)이면 잡 완료 시각 -- 순서는 서버 정렬과 같은 근거다.
@@ -91,7 +93,9 @@ function TemperatureTrend({ points, tempKey }: {
     <div role="img" aria-label={`데이터 온도 추이(${tempKey})`}
          className={`flex items-end ${cols.length > 20 ? "gap-0.5" : "gap-1.5"}`}>
       {cols.map((c, i) => (
-        <div key={i} className="flex min-w-0 max-w-12 flex-1 flex-col items-center gap-1">
+        <div key={i}
+             title={c.epoch === null ? undefined : utcStamp(c.epoch)}
+             className="flex min-w-0 max-w-12 flex-1 flex-col items-center gap-1">
           {c.stack === null ? (
             // 분포 없음(빈 트리·구형 리포트) -- 0% 스택으로 그리면 거짓이라 빈 트랙
             <div title="온도 분포 없음"
@@ -105,7 +109,7 @@ function TemperatureTrend({ points, tempKey }: {
             </div>
           )}
           <span className="w-full truncate text-center text-[10px] text-muted">
-            {c.epoch === null ? "—" : shortStamp(c.epoch)}
+            {c.epoch === null ? "—" : dayStamp(c.epoch)}
           </span>
         </div>
       ))}
@@ -281,8 +285,12 @@ export function UsageAnalysis() {
             <h3 className="mt-5 font-semibold text-sm">스캔 이력</h3>
             <Table>
               <thead><tr className="text-muted">
-                <th className="py-2">시각</th><th>실 사용량</th><th>파일 수</th>
-                <th>hot 비율</th><th>요청자</th><th>요청</th>
+                {/* nowrap: 좁은 폭에서 「파일 수」가 세로로 꺾여 표가 흔들린다 */}
+                <th className="py-2 whitespace-nowrap">시각</th>
+                <th className="whitespace-nowrap">실 사용량</th>
+                <th className="whitespace-nowrap">파일 수</th>
+                <th className="whitespace-nowrap">hot 비율</th>
+                <th className="whitespace-nowrap">요청자</th><th>요청</th>
               </tr></thead>
               <tbody>
                 {[...points].reverse().map((p) => {
@@ -293,7 +301,9 @@ export function UsageAnalysis() {
                       <td className="py-2 whitespace-nowrap">
                         {epoch === null ? "—" : utcStamp(epoch)}
                       </td>
-                      <td>{p.total_bytes === null ? "—" : humanBytes(p.total_bytes)}</td>
+                      <td className="whitespace-nowrap">
+                        {p.total_bytes === null ? "—" : humanBytes(p.total_bytes)}
+                      </td>
                       <td>{p.summary["total_files"] ?? "—"}</td>
                       <td>{hot === null ? "—" : `${Math.round(hot * 100)}%`}</td>
                       <td className="text-muted">{p.requester ?? "—"}</td>

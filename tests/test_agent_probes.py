@@ -225,6 +225,7 @@ def test_probe_tools_found_and_missing():
         return f"/opt/bin/{name}" if name != "nsync" else None
 
     class Proc:
+        returncode = 0
         stdout = "dsync 0.12-dms\nextra"
         stderr = ""
 
@@ -241,6 +242,24 @@ def test_probe_tools_version_failure_is_soft():
     out = probe_tools(["drm"], which=lambda n: "/opt/bin/drm", run=boom)
     assert out[0]["status"] == "Ready" and out[0]["version"] is None
     assert out[0]["reason"].startswith("version_probe_failed:")
+
+
+def test_probe_tools_nonzero_rc_output_is_not_a_version():
+    # 실측(2026-08-23, 사용자 보고): 호스트에 MPI 런타임이 없으면 --version 이
+    # rc≠0 으로 죽으며 stderr 에 "error while loading shared libraries:
+    # libmpi.so.40 …" 를 남긴다 -- 이 오류 문구가 버전 칸에 그대로 떴다.
+    # rc≠0 의 출력은 버전이 아니다: 버전은 모름(null), 사유에 rc 를 남긴다.
+    class Proc:
+        returncode = 127
+        stdout = ""
+        stderr = ("/opt/mpifileutils/bin/dscan: error while loading shared "
+                  "libraries: libmpi.so.40: cannot open shared object file")
+
+    out = probe_tools(["dscan"], which=lambda n: "/opt/mpifileutils/bin/dscan",
+                      run=lambda *a, **k: Proc())
+    assert out[0]["status"] == "Ready"          # 존재 자체는 사실이다
+    assert out[0]["version"] is None            # 오류 문구를 버전인 척 않는다
+    assert out[0]["reason"] == "version_probe_failed:rc=127"
 
 
 def test_probe_identities():

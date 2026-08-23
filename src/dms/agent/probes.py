@@ -60,8 +60,18 @@ def probe_tools(names, *, which=shutil.which, run=subprocess.run):
         version, reason = None, None
         try:
             proc = run([path, "--version"], capture_output=True, text=True, timeout=5)
-            first_line = (proc.stdout or proc.stderr or "").splitlines()
-            version = first_line[0].strip() if first_line else None
+            if proc.returncode != 0:
+                # rc≠0 의 출력은 버전이 아니라 오류다(실측 2026-08-23: 호스트에
+                # MPI 런타임이 없으면 "error while loading shared libraries:
+                # libmpi.so.40 …" 가 stderr 로 나오고, 이게 그대로 버전 칸에
+                # 떠서 화면이 고장 문구를 버전인 척 보였다). 버전은 모름(null)
+                # 으로 두고 사유에 rc 를 남긴다 -- 도구 실행은 잡 파드(잡
+                # 이미지) 안에서 하므로 호스트에서 --version 이 안 도는 것
+                # 자체는 결함이 아니다(존재 확인이 이 프로브의 본분).
+                reason = f"version_probe_failed:rc={proc.returncode}"
+            else:
+                first_line = (proc.stdout or proc.stderr or "").splitlines()
+                version = first_line[0].strip() if first_line else None
         except Exception as exc:  # fail-soft: 버전 실패가 도구 존재를 부정하지 않는다
             reason = f"version_probe_failed:{type(exc).__name__}"
         results.append({"name": name, "status": "Ready", "path": path,

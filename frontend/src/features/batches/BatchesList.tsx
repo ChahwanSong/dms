@@ -220,7 +220,7 @@ export function BatchesList() {
                 <td>{b.operation}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} /></td>
                 <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
                 {/* 시각은 저장소 관례대로 ISO 원문 그대로(AccountsList·JobsList·
-                    RecentRequestsSection 과 같은 표기). 값 없음은 "—". */}
+                    구 최근 작업 카드와 같은 표기). 값 없음은 "—". */}
                 <td className="text-muted whitespace-nowrap">{b.updated_at ?? "—"}</td>
               </tr>))}
           </tbody>
