@@ -74,12 +74,16 @@ kubectl -n dms create secret generic dms-secrets \
   --from-literal=DMS_SHARED_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=DMS_ADMIN_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=DMS_SESSION_SECRET="$(openssl rand -hex 32)" \
-  --from-literal=DMS_LDAP_BIND_DN='' \
-  --from-literal=DMS_LDAP_BIND_PW=''
+  --from-literal=DMS_LDAP_BIND_PW='<LDAP 검색 계정 비밀번호>'
 ```
 
-바인드 계정을 쓰면 DN/PW 를 채우고 patch-config.yaml 의 `DMS_LDAP_REQUIRE_AUTH_BIND` 를
-`"true"` 로. 순서: 계정 발급 → Secret 주입 → 값 true (거꾸로 하면 제어면 CrashLoop).
+LDAP 바인드(2026-08-23, 인증 바인드가 기본): **바인드 DN 은 비밀이 아니라
+patch-config.yaml 의 `DMS_LDAP_BIND_DN`**(sssd `ldap_default_bind_dn` 그대로)에
+두고, Secret 에는 **비밀번호(`DMS_LDAP_BIND_PW`, sssd `ldap_default_authtok`)만**
+넣는다. DN 키를 Secret 에 두면 envFrom 순서상 Secret 이 ConfigMap 을 덮어 빈
+값이 DN 을 지운다 — 두지 마라. `DMS_LDAP_REQUIRE_AUTH_BIND` 는 오버레이 기본
+"true"(fail-closed): Secret 주입이 apply 보다 먼저다(거꾸로 하면 제어면
+CrashLoop). 익명 바인드 사이트만 PW 를 비우고 REQUIRE 를 "false"·DN 을 "" 로.
 
 ## 4. TLS 인증서 (out-of-band)
 
