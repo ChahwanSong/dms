@@ -38,10 +38,14 @@ export function pointEpoch(p: UsagePoint): number | null {
   return null;
 }
 
-// hot 비율: 나이 ≤7일 버킷 bytes / 전체 bytes. 전체 0 은 비율 정의 불가(null --
-// cumulativeLayout 의 0-나눗셈 규약). bytes 가 실린 버킷의 나이 필드 결측도
-// null 이다 -- 그 바이트를 hot 도 cold 도 아니라고 말할 근거가 없는데 cold 로
-// 접으면(분모에만 넣으면) 비율이 조용히 내려간다(모름 ≠ 0, 2026-08-23 리뷰).
+// hot 판정 나이 상한(일). 180 = 사용자 결정(2026-08-24, 7일에서 상향) -- dscan
+// 나이 버킷 경계([91d,180d] 상한)와 일치해 버킷이 잘리지 않고 통째로 들어간다.
+export const HOT_AGE_MAX_DAYS = 180;
+
+// hot 비율: 나이 ≤HOT_AGE_MAX_DAYS 버킷 bytes / 전체 bytes. 전체 0 은 비율 정의
+// 불가(null -- cumulativeLayout 의 0-나눗셈 규약). bytes 가 실린 버킷의 나이 필드
+// 결측도 null 이다 -- 그 바이트를 hot 도 cold 도 아니라고 말할 근거가 없는데
+// cold 로 접으면(분모에만 넣으면) 비율이 조용히 내려간다(모름 ≠ 0, 리뷰).
 export function hotRatio(buckets: HistogramBucket[] | undefined): number | null {
   if (!buckets || buckets.length === 0) return null;
   let hot = 0, total = 0;
@@ -49,7 +53,8 @@ export function hotRatio(buckets: HistogramBucket[] | undefined): number | null 
     if (typeof b.bytes !== "number") return null;
     if (b.bytes > 0 && typeof b.max_age_days !== "number") return null;
     total += b.bytes;
-    if (typeof b.max_age_days === "number" && b.max_age_days <= 7) hot += b.bytes;
+    if (typeof b.max_age_days === "number"
+        && b.max_age_days <= HOT_AGE_MAX_DAYS) hot += b.bytes;
   }
   return total === 0 ? null : hot / total;
 }
@@ -241,7 +246,7 @@ export function UsageAnalysis() {
               <MetricTile label="직전 스캔 대비"
                           value={delta === null ? "—"
                             : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
-              <MetricTile label="hot 비율(atime ≤7d)"
+              <MetricTile label={`hot 비율(atime ≤${HOT_AGE_MAX_DAYS}d)`}
                           value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
               <MetricTile label="스캔 이력 수" value={points.length} />
             </div>

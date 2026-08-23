@@ -18,11 +18,12 @@ const buckets = (vals: (number | undefined)[], ages = true) =>
                         ...(ages ? { min_age_days: i, max_age_days: i + 1 } : {}),
                         ...(b === undefined ? {} : { bytes: b }) }));
 
-test("hotRatio: ≤7일 버킷 비중 / 전체 0·bytes 결측은 null(모름 ≠ 0)", () => {
-  // 나이 0-1d(hot) 30 + 1-2d(hot) 30 + 8-9d ... max_age 1,2 는 ≤7 -- 60/100
-  const b = [{ bucket: "a", min_age_days: 0, max_age_days: 1, bytes: 30 },
-             { bucket: "b", min_age_days: 2, max_age_days: 7, bytes: 30 },
-             { bucket: "c", min_age_days: 8, max_age_days: 30, bytes: 40 }];
+test("hotRatio: ≤180일(HOT_AGE_MAX_DAYS) 버킷 비중 / 전체 0·bytes 결측은 null(모름 ≠ 0)", () => {
+  // 기준 180일(2026-08-24 사용자 결정, 7일에서 상향): [91,180] 까지 hot(30+30),
+  // [181,365] 는 cold(40) -- 60/100. 경계값 180 자체가 hot 에 포함됨을 고정한다.
+  const b = [{ bucket: "a", min_age_days: 0, max_age_days: 7, bytes: 30 },
+             { bucket: "b", min_age_days: 91, max_age_days: 180, bytes: 30 },
+             { bucket: "c", min_age_days: 181, max_age_days: 365, bytes: 40 }];
   expect(hotRatio(b)).toBeCloseTo(0.6);
   expect(hotRatio(buckets([0, 0, 0]))).toBeNull();       // 전체 0: 비율 정의 불가
   expect(hotRatio(buckets([10, undefined]))).toBeNull(); // bytes 결측: 모름
@@ -111,7 +112,7 @@ test("타깃 선택 → 요약 타일·추이 차트·미상 고지·이력 표"
     (await screen.findByText(label)).nextElementSibling;
   expect(await tile("최신 실 사용량")).toHaveTextContent("3.0 KiB");
   expect(await tile("직전 스캔 대비")).toHaveTextContent("+2.0 KiB");
-  expect(await tile("hot 비율(atime ≤7d)")).toHaveTextContent("100%");
+  expect(await tile("hot 비율(atime ≤180d)")).toHaveTextContent("100%");
   expect(await tile("스캔 이력 수")).toHaveTextContent("3");
   // 차트: 용량 아는 2점만(j2 는 미상), 고지 문구가 사실을 말한다
   expect(screen.getByRole("group", { name: "실 사용량 추이" })).toBeInTheDocument();
