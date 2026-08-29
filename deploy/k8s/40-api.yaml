@@ -64,7 +64,7 @@ spec:
       # 건다 -- 손편집으로 어긋나면 배지가 아니라 그 테스트가 빨간불이 된다.
       initContainers:
         - name: migrate
-          image: pkg-01:5000/dms:d113
+          image: pkg-01:5000/dms:d114
           imagePullPolicy: IfNotPresent
           command: ["dms", "migrate"]
           envFrom:
@@ -81,7 +81,7 @@ spec:
               memory: 512Mi
       containers:
         - name: api
-          image: pkg-01:5000/dms:d113
+          image: pkg-01:5000/dms:d114
           imagePullPolicy: IfNotPresent
           command: ["dms", "api"]
           env:
