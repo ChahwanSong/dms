@@ -82,8 +82,11 @@ export function TimeSeriesChart({ points, label, formatY, formatX, emptyText,
         최대 {formatY(realMax)}
       </p>
       <div className="relative h-40">
+        {/* pointer-events-none 필수: SVG 가 트랙 전면을 덮어 실제 마우스 호버가
+            점 버튼 대신 SVG 에 잡히면 툴팁이 안 뜬다(실화면 확인). 보조 그래픽이라
+            이벤트 대상이 아니다. */}
         <svg aria-hidden="true" viewBox="0 0 100 100" preserveAspectRatio="none"
-             className="absolute inset-0 h-full w-full text-accent">
+             className="pointer-events-none absolute inset-0 h-full w-full text-accent">
           {/* 중간 눈금(최대의 절반 자리). HEADROOM 좌표계 -- 점·선과 같은 척도 */}
           <line x1="0" x2="100" y1={100 - HEADROOM / 2} y2={100 - HEADROOM / 2}
                 stroke="currentColor" strokeWidth={0.5} opacity={0.15}
