@@ -276,8 +276,14 @@ export function UsageAnalysis() {
               label="실 사용량 추이"
               points={charted.map((c) => ({
                 t: c.epoch, y: c.bytes,
+                // aria-label(폴백)은 한 줄, 호버 툴팁은 구조화 3행(시간·요청자·용량)
                 label: `${kstStampEpoch(c.epoch)} · ${humanBytes(c.bytes)}`
                   + (c.point.requester ? ` · ${c.point.requester}` : ""),
+                tooltip: [
+                  { k: "시간", v: kstStampEpoch(c.epoch) },
+                  { k: "요청자", v: c.point.requester ?? "—" },
+                  { k: "실 사용량", v: humanBytes(c.bytes) },
+                ],
               }))}
               formatY={humanBytes} formatX={kstStampEpoch}
               emptyText="용량을 아는 포인트가 없습니다"

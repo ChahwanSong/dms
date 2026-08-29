@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
-import { TimeSeriesChart, seriesLayout } from "./TimeSeriesChart";
+import { TimeSeriesChart, seriesLayout, tooltipTranslateX,
+         tooltipPlaceBelow } from "./TimeSeriesChart";
 
 // ---- seriesLayout (순수 기하 -- barLayout 테스트 선례) ----
 
@@ -49,6 +50,59 @@ test("점은 라벨 달린 버튼, 클릭이 인덱스로 온다", async () => {
   const dot = screen.getByRole("button", { name: "p2: 2.0 KiB" });
   await userEvent.click(dot);
   expect(onClick).toHaveBeenCalledWith(1);
+});
+
+// ---- 즉시 호버 툴팁(2026-08-29) ----
+
+test("tooltipTranslateX: 끝점은 끝맞춤, 그 외 중앙 (넘침 방지)", () => {
+  expect(tooltipTranslateX(0)).toBe("0%");     // 왼끝
+  expect(tooltipTranslateX(10)).toBe("0%");
+  expect(tooltipTranslateX(50)).toBe("-50%");  // 중앙
+  expect(tooltipTranslateX(90)).toBe("-100%"); // 오른끝
+  expect(tooltipTranslateX(100)).toBe("-100%");
+});
+
+test("tooltipPlaceBelow: 위쪽 점(값 큰 쪽)은 툴팁을 아래로 (상단 클리핑 방지)", () => {
+  expect(tooltipPlaceBelow(90)).toBe(true);   // 최고점 부근 -> 아래
+  expect(tooltipPlaceBelow(20)).toBe(false);  // 낮은 점 -> 위
+});
+
+const TP = [
+  { t: 1000, y: 1024, label: "p1",
+    tooltip: [{ k: "시간", v: "2026-08-04 10:12:42 KST" },
+              { k: "요청자", v: "alice" }, { k: "실 사용량", v: "1.0 KiB" }] },
+  { t: 2000, y: 2048, label: "p2",
+    tooltip: [{ k: "시간", v: "2026-08-05 10:12:42 KST" },
+              { k: "요청자", v: "bob" }, { k: "실 사용량", v: "2.0 KiB" }] },
+];
+
+test("호버 즉시 구조화 툴팁(시간·요청자·용량) 표시, 벗어나면 사라진다", async () => {
+  render(<TimeSeriesChart points={TP} label="추이" formatY={String} emptyText="-" />);
+  // 호버 전엔 툴팁 없음
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  const dot = screen.getByRole("button", { name: "p1" });
+  await userEvent.hover(dot);
+  const tip = screen.getByRole("tooltip");
+  expect(tip).toHaveTextContent("시간");
+  expect(tip).toHaveTextContent("2026-08-04 10:12:42 KST");
+  expect(tip).toHaveTextContent("요청자");
+  expect(tip).toHaveTextContent("alice");
+  expect(tip).toHaveTextContent("실 사용량");
+  expect(tip).toHaveTextContent("1.0 KiB");
+  await userEvent.unhover(dot);
+  expect(screen.queryByRole("tooltip")).toBeNull();
+});
+
+test("키보드 포커스도 툴팁을 띄운다(마우스 없는 접근성)", () => {
+  render(<TimeSeriesChart points={TP} label="추이" formatY={String} emptyText="-" />);
+  fireEvent.focus(screen.getByRole("button", { name: "p2" }));
+  expect(screen.getByRole("tooltip")).toHaveTextContent("bob");
+});
+
+test("tooltip 미지정이면 label 한 줄로 폴백", async () => {
+  render(<TimeSeriesChart points={P} label="추이" formatY={String} emptyText="-" />);
+  await userEvent.hover(screen.getByRole("button", { name: "p1: 1.0 KiB" }));
+  expect(screen.getByRole("tooltip")).toHaveTextContent("p1: 1.0 KiB");
 });
 
 test("전부 0 인 시계열은 최대 0 을 말하고 눈금을 지어내지 않는다", () => {
