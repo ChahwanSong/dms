@@ -8,6 +8,7 @@ import { useNodes } from "../nodes/useNodes";
 import { useJobMetrics } from "../dashboard/useMetrics";
 import { kpiFromStates } from "../dashboard/Dashboard";
 import { useControlState, useControlHistory, useSetControlState } from "./useControlState";
+import { kstStampOrDash, kstStamp } from "../../lib/datetime";
 import type { ControlState } from "../../lib/types";
 import type { ControlHistoryEntry } from "./useControlState";
 
@@ -194,7 +195,7 @@ export function ControlStatePage() {
               <p>빌드 노드: <span className="text-ink font-medium">{q.data?.build_node_name ?? "—"}</span></p>
               <p>소스 경로: <span className="text-ink font-mono">{q.data?.build_source_path ?? "—"}</span></p>
               <p>마지막 변경: <span className="text-ink font-medium">{q.data?.changed_by ?? "—"}</span>
-                 {" · "}{q.data?.changed_at ?? "—"}
+                 {" · "}{kstStampOrDash(q.data?.changed_at)}
                  {q.data?.changed_at && (
                    <span> ({relTime(q.data.changed_at, q.dataUpdatedAt)})</span>
                  )}</p>
@@ -216,7 +217,7 @@ export function ControlStatePage() {
                 <tbody>
                   {(historyQ.data ?? []).map((e, i) => (
                     <tr key={`${e.at}-${i}`} className="border-t border-black/5">
-                      <td className="py-2 text-muted whitespace-nowrap">{e.at}</td>
+                      <td className="py-2 text-muted whitespace-nowrap">{kstStamp(e.at)}</td>
                       <td className="whitespace-nowrap">{e.actor ?? "—"}</td>
                       {/* diff 가 길 수 있다(여러 필드 동시 변경) -- 행 높이를 지키러
                           자르지 않는다: 이 표는 폴링이 없고 행이 최대 10개라 접힘의

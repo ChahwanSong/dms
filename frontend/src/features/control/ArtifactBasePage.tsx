@@ -7,6 +7,7 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
 import type { ArtifactBaseInfo, ArtifactBaseNodeCheck } from "../../lib/types";
 import { relTime } from "./ControlStatePage";
+import { kstStamp } from "../../lib/datetime";
 import { useArtifactBase, useArtifactBaseHistory, useSetArtifactBase,
          useValidateArtifactBase } from "./useArtifactBase";
 import type { ArtifactBaseHistoryEntry } from "./useArtifactBase";
@@ -208,7 +209,7 @@ export function ArtifactBasePage() {
                 <tbody>
                   {(historyQ.data ?? []).map((e, i) => (
                     <tr key={`${e.at}-${i}`} className="border-t border-black/5">
-                      <td className="py-2 text-muted whitespace-nowrap">{e.at}</td>
+                      <td className="py-2 text-muted whitespace-nowrap">{kstStamp(e.at)}</td>
                       <td className="whitespace-nowrap">{e.actor ?? "—"}</td>
                       <td className="text-muted">
                         <span className="font-mono">{histText(e)}</span>

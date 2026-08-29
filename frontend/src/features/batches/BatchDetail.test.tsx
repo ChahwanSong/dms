@@ -86,7 +86,7 @@ test("펼침: aria-expanded 토글 + 상세(사유·파일 수·완료 시각·�
   expect(toggle).toHaveAttribute("aria-expanded", "true");
   expect(screen.getByText("파일 수")).toBeInTheDocument();
   expect(screen.getByText("42")).toBeInTheDocument();
-  expect(screen.getByText("2026-08-14T01:00:00Z")).toBeInTheDocument();
+  expect(screen.getByText("2026-08-14 10:00:00 KST")).toBeInTheDocument();  // 완료시각(KST=+9h)
   expect(screen.getByRole("link", { name: "요청 상세" }))
     .toHaveAttribute("href", "/jobs/r1");
   await userEvent.click(toggle);
@@ -211,7 +211,7 @@ test("성공 scan 항목 펼침: 조회 발사 + 온도 섹션(사람 표기·�
   expect(screen.getByText("total_files")).toBeInTheDocument();
   expect(screen.getByText("12")).toBeInTheDocument();
   expect(screen.getByText(/파손 경로 4건/)).toBeInTheDocument();
-  expect(screen.getByText("scan 리포트 생성: 2026-08-04 01:12:42 UTC")).toBeInTheDocument();
+  expect(screen.getByText("scan 리포트 생성: 2026-08-04 10:12:42 KST")).toBeInTheDocument();
   // 실 사용량(2026-08-23): 서버 투영값(total_bytes=4096)의 사람 표기
   expect(screen.getByText(/실 사용량\(파일 크기 합\):/)).toBeInTheDocument();
   expect(screen.getByText("4.0 KiB")).toBeInTheDocument();

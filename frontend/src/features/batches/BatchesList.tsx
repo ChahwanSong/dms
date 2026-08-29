@@ -6,6 +6,7 @@ import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { batchPillVariant } from "../../lib/jobState";
+import { kstStampOrDash } from "../../lib/datetime";
 
 // 활성 배치 체크박스에 다는 사유. 서버 문구("먼저 취소하세요")와 같은 동선을 가리킨다
 // — 활성은 Previewing 도 포함이라 "실행 중"보다 "진행 중"이 정직하다.
@@ -221,7 +222,7 @@ export function BatchesList() {
                 <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
                 {/* 시각은 저장소 관례대로 ISO 원문 그대로(AccountsList·JobsList·
                     구 최근 작업 카드와 같은 표기). 값 없음은 "—". */}
-                <td className="text-muted whitespace-nowrap">{b.updated_at ?? "—"}</td>
+                <td className="text-muted whitespace-nowrap">{kstStampOrDash(b.updated_at)}</td>
               </tr>))}
           </tbody>
         </Table>)}

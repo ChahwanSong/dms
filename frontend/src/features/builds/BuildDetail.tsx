@@ -4,6 +4,7 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
 import { buildPillVariant, isTerminal } from "../../lib/jobState";
 import { formatDuration, spanMs } from "../../lib/duration";
+import { kstStampOrDash } from "../../lib/datetime";
 import { useBuild, useBuildLog } from "./useBuilds";
 
 // 콘텐츠 컬럼. 폭은 제한하되(로그·메타가 화면 끝까지 늘어지면 읽기 어렵다) **왼쪽
@@ -83,8 +84,8 @@ export function BuildDetail() {
               <Row label="태그">
                 <span className="font-mono select-all">{b?.tag ?? "—"}</span>
               </Row>
-              <Row label="생성 시각">{b?.created_at ?? "—"}</Row>
-              <Row label="종료 시각">{b?.finished_at ?? "—"}</Row>
+              <Row label="생성 시각">{kstStampOrDash(b?.created_at)}</Row>
+              <Row label="종료 시각">{kstStampOrDash(b?.finished_at)}</Row>
               {/* 경과(진행 중)·소요(종단). 종단인데 finished_at 이 없으면 "—"다 --
                   지금 시각을 끝으로 삼아 이미 끝난 빌드의 시간을 불리지 않는다.
                   "지금"은 마지막 성공 조회 시각(3s 폴링)이라 최대 3초 뒤처진다. */}

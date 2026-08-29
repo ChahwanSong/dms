@@ -7,6 +7,7 @@ import { TimeSeriesChart } from "../../components/ui/TimeSeriesChart";
 import { Button } from "../../components/ui/Button";
 import type { ApiError } from "../../lib/api";
 import type { HistogramBucket, UsagePoint } from "../../lib/types";
+import { kstStampEpoch, kstDay, kstStampOrDash } from "../../lib/datetime";
 import { useScanHistory, useScanTargets } from "./useUsage";
 
 // NodesList/JobStats/RequestDetail 의 humanBytes 국소 사본 관례.
@@ -17,15 +18,9 @@ function humanBytes(bytes: number): string {
   return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
-// BatchDetail utcStamp 국소 사본(UTC 고정 -- 로컬시간 표기는 운영자·사용자가
-// 다른 시각을 말하게 한다).
-function utcStamp(epoch: number) {
-  return `${new Date(epoch * 1000).toISOString().replace("T", " ").slice(0, 19)} UTC`;
-}
-// 온도 열 축 라벨: MM-DD 만 -- 열 폭(max-w-12)에 "MM-DD HH:MM" 은 잘려서
-// "08-23 1…" 이 됐다(실화면 확인). 분 단위는 열 title 툴팁이 든다.
-const dayStamp = (epoch: number) =>
-  new Date(epoch * 1000).toISOString().slice(5, 10);
+// 절대 시각은 공유 datetime 헬퍼(KST)로 통일했다 -- kstStampEpoch(초 -> KST 벽시계),
+// kstDay(초 -> KST MM-DD). 온도 열 축 라벨은 폭(max-w-12) 때문에 MM-DD 만 쓰고
+// 분 단위는 열 title 툴팁이 든다(실화면 확인).
 
 // 포인트의 대표 시각(초). 리포트 생성 시각(스캔이 본 파일시스템의 시점)이 1순위,
 // 결측(구형 리포트)이면 잡 완료 시각 -- 순서는 서버 정렬과 같은 근거다.
@@ -103,7 +98,7 @@ function TemperatureTrend({ points, tempKey }: {
          className={`flex items-end ${cols.length > 20 ? "gap-0.5" : "gap-1.5"}`}>
       {cols.map((c, i) => (
         <div key={i}
-             title={c.epoch === null ? undefined : utcStamp(c.epoch)}
+             title={c.epoch === null ? undefined : kstStampEpoch(c.epoch)}
              className="flex min-w-0 max-w-12 flex-1 flex-col items-center gap-1">
           {c.stack === null ? (
             // 분포 없음(빈 트리·구형 리포트) -- 0% 스택으로 그리면 거짓이라 빈 트랙
@@ -118,7 +113,7 @@ function TemperatureTrend({ points, tempKey }: {
             </div>
           )}
           <span className="w-full truncate text-center text-[10px] text-muted">
-            {c.epoch === null ? "—" : dayStamp(c.epoch)}
+            {c.epoch === null ? "—" : kstDay(c.epoch)}
           </span>
         </div>
       ))}
@@ -217,7 +212,7 @@ export function UsageAnalysis() {
                       {r.target}
                     </button></td>
                     <td>{r.scan_count}</td>
-                    <td className="text-muted whitespace-nowrap">{r.last_scan_at ?? "—"}</td>
+                    <td className="text-muted whitespace-nowrap">{kstStampOrDash(r.last_scan_at)}</td>
                   </tr>
                 );
               })}
@@ -281,10 +276,10 @@ export function UsageAnalysis() {
               label="실 사용량 추이"
               points={charted.map((c) => ({
                 t: c.epoch, y: c.bytes,
-                label: `${utcStamp(c.epoch)} · ${humanBytes(c.bytes)}`
+                label: `${kstStampEpoch(c.epoch)} · ${humanBytes(c.bytes)}`
                   + (c.point.requester ? ` · ${c.point.requester}` : ""),
               }))}
-              formatY={humanBytes} formatX={utcStamp}
+              formatY={humanBytes} formatX={kstStampEpoch}
               emptyText="용량을 아는 포인트가 없습니다"
               onPointClick={(i) => navigate(`/jobs/${charted[i].point.request_id}`)} />
             {(unknownCount > 0 || (history.data?.skipped_unreadable ?? 0) > 0) && (
@@ -325,7 +320,7 @@ export function UsageAnalysis() {
                   return (
                     <tr key={p.job_id} className="border-t border-black/5">
                       <td className="py-2 whitespace-nowrap">
-                        {epoch === null ? "—" : utcStamp(epoch)}
+                        {epoch === null ? "—" : kstStampEpoch(epoch)}
                       </td>
                       <td className="whitespace-nowrap">
                         {p.total_bytes === null ? "—" : humanBytes(p.total_bytes)}

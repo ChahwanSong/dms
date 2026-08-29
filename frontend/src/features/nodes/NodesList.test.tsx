@@ -171,7 +171,8 @@ test("clicking 최근 리포트 loads and shows report history", async () => {
 
   await userEvent.click(screen.getByRole("button", { name: "최근 리포트" }));
 
-  expect(await screen.findByText("2026-08-06T10:00:00Z")).toBeInTheDocument();
-  expect(screen.getByText("2026-08-05T22:00:00Z")).toBeInTheDocument();
+  // KST(+9h): 10:00Z→19:00, 22:00Z→다음날 07:00(날짜 경계 넘어감)
+  expect(await screen.findByText("2026-08-06 19:00:00 KST")).toBeInTheDocument();
+  expect(screen.getByText("2026-08-06 07:00:00 KST")).toBeInTheDocument();
   expect(reportsCalls).toBe(1);
 });

@@ -8,6 +8,7 @@ import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
+import { kstStamp } from "../../lib/datetime";
 import { pathSummary } from "../../lib/storagePaths";
 
 const field = "rounded-lg border border-line px-3 py-2 text-sm";
@@ -104,8 +105,8 @@ export function JobsList() {
                   <td className="text-muted break-all">{pathSummary(r.operation, r.payload)}</td>
                   <td className="text-muted">{r.priority}</td>
                   <td><StatusPill state={r.state} /></td>
-                  <td className="text-muted whitespace-nowrap">{r.created_at}</td>
-                  <td className="text-muted whitespace-nowrap">{r.updated_at}</td>
+                  <td className="text-muted whitespace-nowrap">{kstStamp(r.created_at)}</td>
+                  <td className="text-muted whitespace-nowrap">{kstStamp(r.updated_at)}</td>
                 </tr>
               ))}
             </tbody>

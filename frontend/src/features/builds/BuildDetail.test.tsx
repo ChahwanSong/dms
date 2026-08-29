@@ -186,8 +186,8 @@ test("목록에서 뺀 commit·노드·이미지·태그·시각을 상세가 �
   expect(screen.getByText("dms-w1")).toBeInTheDocument();              // 노드
   expect(screen.getByText("dms")).toBeInTheDocument();                 // 이미지
   expect(screen.getByText("b01234567")).toBeInTheDocument();           // 태그
-  expect(screen.getByText("2026-08-06T00:00:00Z")).toBeInTheDocument();  // 생성 시각
-  expect(screen.getByText("2026-08-06T00:10:00Z")).toBeInTheDocument();  // 종료 시각
+  expect(screen.getByText("2026-08-06 09:00:00 KST")).toBeInTheDocument();  // 생성 시각(KST=+9h)
+  expect(screen.getByText("2026-08-06 09:10:00 KST")).toBeInTheDocument();  // 종료 시각(KST=+9h)
 });
 
 test("메타는 dl 로 짝지어 두고, 태그는 클릭 한 번에 전체 선택된다", async () => {

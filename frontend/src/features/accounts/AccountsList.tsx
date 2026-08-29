@@ -7,6 +7,7 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
 import { ApiError } from "../../lib/api";
+import { kstStamp } from "../../lib/datetime";
 import type { Account } from "../../lib/types";
 
 const dlgField = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
@@ -133,7 +134,7 @@ export function AccountsList() {
                   </td>
                   <td className="text-muted">{a.email ?? "—"}</td>
                   <td className="whitespace-nowrap">{a.disabled === 1 ? "비활성" : "활성"}</td>
-                  <td className="text-muted whitespace-nowrap">{a.created_at}</td>
+                  <td className="text-muted whitespace-nowrap">{kstStamp(a.created_at)}</td>
                   {/* td 를 flex 컨테이너로 만들지 않는다: 셀 안에 div 를 두고 그 div 만
                       flex 로 둔다. td 자체가 flex 면 표 레이아웃 계산에서 빠져 나와
                       다른 열과 폭을 나눠 갖지 못하고, 사유 문구가 길어지는 자기 계정

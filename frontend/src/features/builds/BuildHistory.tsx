@@ -7,6 +7,7 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
 import { buildPillVariant, isTerminal } from "../../lib/jobState";
 import { formatDuration, spanMs } from "../../lib/duration";
+import { kstStamp } from "../../lib/datetime";
 import { useBuilds, useDeleteBuilds } from "./useBuilds";
 import { BuildTabs } from "./BuildTabs";
 import type { Build } from "../../lib/types";
@@ -196,7 +197,7 @@ export function BuildHistory() {
                        disabled={!isTerminal(b.state) || del.isPending}
                        title={isTerminal(b.state) ? undefined : ACTIVE_HINT}
                        onChange={() => toggleRow(b.build_id)} /></td>
-                  <td className="py-2">{b.created_at}</td>
+                  <td className="py-2">{kstStamp(b.created_at)}</td>
                   {/* 로컬 소스 빌드는 브랜치가 없다 -- 무엇을 빌드했는지는 커밋이
                       말한다(빌드 중엔 아직 파싱 전이라 —). -dirty 접미는 미커밋
                       변경 포함 빌드 표시라 자르지 않고 보존한다. 옛 git 시절 행은

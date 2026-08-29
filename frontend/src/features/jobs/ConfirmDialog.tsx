@@ -4,6 +4,7 @@ import { useConfirmJob } from "./useJobs";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
+import { kstStampOrDash } from "../../lib/datetime";
 
 export function ConfirmDialog({ job }: { job: DataJob }) {
   const [open, setOpen] = useState(false);
@@ -23,7 +24,7 @@ export function ConfirmDialog({ job }: { job: DataJob }) {
             : JSON.stringify(job.result_summary, null, 2)
         }</pre>
         <p className="text-muted">지문(fingerprint): <code>{job.preview_fingerprint}</code></p>
-        <p className="text-muted">만료: {job.preview_expires_at}</p>
+        <p className="text-muted">만료: {kstStampOrDash(job.preview_expires_at)}</p>
         {confirm.isError && <p className="text-bad">{(confirm.error as ApiError).message}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" onClick={() => setOpen(false)}>닫기</Button>

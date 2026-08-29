@@ -4,6 +4,7 @@ import { Button } from "../../components/ui/Button";
 import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
+import { kstStampOrDash } from "../../lib/datetime";
 import type { Release, ReleaseTarget } from "../../lib/types";
 import { RELEASE_ACTIVE_STATES, releasePillVariant, useRefreshTargetsOnSettle,
          useReleases, useReleaseTargets, useSubmitReleases } from "./useReleases";
@@ -195,7 +196,7 @@ export function ReleasesPage() {
             <tbody>
               {history.map((r) => (
                 <tr key={r.id} className="border-t border-black/5">
-                  <td className="py-2">{r.applied_at ?? "—"}</td>
+                  <td className="py-2">{kstStampOrDash(r.applied_at)}</td>
                   <td>{r.component}</td>
                   <td>{r.tag ?? "—"}</td>
                   <td><StatusPill state={r.state} variant={releasePillVariant(r.state)} /></td>

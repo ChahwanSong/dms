@@ -4,6 +4,7 @@ import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
 import { isTerminal } from "../../lib/jobState";
+import { kstStamp } from "../../lib/datetime";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Timeline } from "./Timeline";
 import { JobViewer } from "./JobViewer";
@@ -71,7 +72,7 @@ function DiagnosticEvents({ req }: { req: RequestDetailType }) {
         {events.map((e) => (
           <li key={e.id}>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-muted tabular-nums">{e.at}</span>
+              <span className="text-muted tabular-nums">{kstStamp(e.at)}</span>
               <span className={eventSeverityClass(e.severity)}>{e.event_type}</span>
               <span className="text-muted text-xs">({e.component})</span>
             </div>

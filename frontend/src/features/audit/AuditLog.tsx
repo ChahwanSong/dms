@@ -3,6 +3,7 @@ import { useAuditLog } from "./useAudit";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
+import { kstStamp } from "../../lib/datetime";
 import type { AuditEntry } from "../../lib/types";
 
 /** 확장 상세(사용자 요청 2026-08-19): before/after 스냅샷에서 **변경된 필드만**
@@ -72,7 +73,7 @@ export function AuditLog() {
               <Fragment key={e.id}>
                 <tr className="border-t border-black/5">
                   <td className="py-2">{e.mutation_class}</td>
-                  <td className="text-muted">{e.at}</td><td>{e.operation}</td>
+                  <td className="text-muted">{kstStamp(e.at)}</td><td>{e.operation}</td>
                   <td>{e.target_key}</td><td className="text-muted">{e.actor}</td>
                   <td className="py-1">
                     <Button variant="ghost" aria-expanded={openId === e.id}

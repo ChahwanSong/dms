@@ -4,6 +4,7 @@ import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
+import { kstStamp } from "../../lib/datetime";
 import type { NodeInfo, NodeMount, NodeTool, NodeDisk, NodeReport } from "../../lib/types";
 
 // 에이전트 리포트는 스키마 검증 없이 저장된다 — 배열이어야 할 필드가 배열이
@@ -133,7 +134,7 @@ function NodeDetail({ node }: { node: NodeInfo }) {
               <tbody>
                 {asArray<NodeReport>(reportsQ.data).map((r, i) => (
                   <tr key={i} className="border-t border-black/5">
-                    <td className="py-2">{r.reported_at}</td>
+                    <td className="py-2">{kstStamp(r.reported_at)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -173,7 +174,7 @@ export function NodesList() {
               <tr key={n.node_name} className="border-t border-black/5">
                 <td className="py-2">{n.node_name}</td>
                 <td>{n.fresh ? "fresh" : <span className="text-bad">stale</span>}</td>
-                <td className="text-muted">{n.reported_at}</td>
+                <td className="text-muted">{kstStamp(n.reported_at)}</td>
                 <td>{readyRatio(n.report?.mounts)}</td>
                 <td>{readyRatio(n.report?.tools)}</td>
                 <td className="py-2">

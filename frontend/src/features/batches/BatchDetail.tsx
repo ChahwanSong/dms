@@ -18,6 +18,7 @@ import { absSummary } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant } from "../../lib/jobState";
+import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
 import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
 
 // NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
@@ -139,11 +140,6 @@ const itemBody = (isSync: boolean, p: Record<string, unknown>,
       destination_storage: p.destination_storage, destination: dst }
   : { storage: p.storage, target: path };
 
-/** 리포트 생성 시각은 UTC로만 보여준다(ScanPaths 국소 사본 관례) — 스토리지·잡은
- *  UTC로 기록되고, 로컬시간으로 바꾸면 운영자·사용자가 다른 시각을 말하게 된다. */
-function utcStamp(epoch: number) {
-  return `${new Date(epoch * 1000).toISOString().replace("T", " ").slice(0, 19)} UTC`;
-}
 
 // payload 필드 결손 방어 + 대상 요약: 구 대시보드 최근 작업 카드의 summarize
 // 관례 미러(scan/rm: storage:target, sync: src → dst). ?? 로만 접는다 — truthy
@@ -256,7 +252,7 @@ function ItemScanStats({ requestId, succeeded }: {
       {/* 언제 찍힌 숫자인지 없이 보여주는 건 부정직이다(ScanPaths 관례 미러) */}
       <p className="text-muted text-xs mb-2">
         {typeof stats.generated_at_epoch === "number"
-          ? `scan 리포트 생성: ${utcStamp(stats.generated_at_epoch)}`
+          ? `scan 리포트 생성: ${kstStampEpoch(stats.generated_at_epoch)}`
           : "scan 리포트 생성 시각을 알 수 없습니다"}
       </p>
       {/* 실 사용량(2026-08-23): 서버가 온도 히스토그램에서 투영한 파일 크기 합.
@@ -933,7 +929,7 @@ export function BatchDetail() {
                     <dt className="text-muted">파일 수</dt>
                     <dd className="tabular-nums">{it.files_count ?? "—"}</dd>
                     <dt className="text-muted">완료 시각</dt>
-                    <dd className="text-muted">{it.completed_at ?? "—"}</dd>
+                    <dd className="text-muted">{kstStampOrDash(it.completed_at)}</dd>
                     <dt className="text-muted">payload</dt>
                     <dd className="font-mono text-xs break-all">{JSON.stringify(it.payload)}</dd>
                     {/* payload 의 상대경로를 지금의 managed_root 로 해석한 결과.

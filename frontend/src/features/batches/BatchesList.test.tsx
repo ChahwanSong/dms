@@ -48,11 +48,11 @@ const ID2 = "b222222222222bbb";
 const ID3 = "b333333333333ccc";
 
 // --- T2 「최근 갱신」 컬럼 ---------------------------------------------------
-test("최근 갱신 컬럼: updated_at 원문 그대로, 값 없으면 —", async () => {
+test("최근 갱신 컬럼: updated_at 을 KST 로 표기, 값 없으면 —", async () => {
   renderList([row({ batch_id: ID1, name: "n1", updated_at: "2026-08-15T03:04:05Z" }),
               row({ batch_id: ID2, name: "n2", updated_at: null })]);
   expect(await screen.findByText("최근 갱신")).toBeInTheDocument();   // 헤더
-  expect(screen.getByText("2026-08-15T03:04:05Z")).toBeInTheDocument();
+  expect(screen.getByText("2026-08-15 12:04:05 KST")).toBeInTheDocument();  // +9h
   expect(screen.getByText("—")).toBeInTheDocument();                  // 갱신 시각 없음
 });
 
