@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { NodesList } from "./NodesList";
+import { NodesList, toolReasonText } from "./NodesList";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -175,4 +175,14 @@ test("clicking 최근 리포트 loads and shows report history", async () => {
   expect(await screen.findByText("2026-08-06 19:00:00 KST")).toBeInTheDocument();
   expect(screen.getByText("2026-08-06 07:00:00 KST")).toBeInTheDocument();
   expect(reportsCalls).toBe(1);
+});
+
+test("toolReasonText: 프로브 사유를 운영자 문구로(원문은 title 보존)", () => {
+  expect(toolReasonText(null)).toBe("—");
+  expect(toolReasonText("tool_not_found")).toBe("노드에 없음");
+  // 호스트에 MPI 런타임이 없어 --version 이 죽는 정상 경우 -- 크립틱 코드 대신 설명
+  expect(toolReasonText("version_probe_failed:rc=127"))
+    .toBe("버전 조회 불가 — 도구는 잡 파드에서 실행됩니다");
+  // 미지 사유는 원문 그대로(지어내지 않음)
+  expect(toolReasonText("something_else")).toBe("something_else");
 });

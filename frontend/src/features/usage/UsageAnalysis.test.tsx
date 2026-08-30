@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -136,6 +136,21 @@ test("온도 추이: atime 기본 + mtime 토글", async () => {
   await userEvent.click(screen.getByRole("button", { name: "mtime" }));
   expect(screen.getByRole("img", { name: "데이터 온도 추이(mtime)" }))
     .toBeInTheDocument();
+});
+
+test("온도 추이 열 호버 즉시 툴팁(시간·요청자·용량)", async () => {
+  renderAt("/admin/usage?storage=cephfs-dms&target=artifacts");
+  const chart = await screen.findByRole("img", { name: "데이터 온도 추이(atime)" });
+  expect(screen.queryByRole("tooltip")).toBeNull();     // 호버 전엔 없음
+  // 첫 열 버튼(차트 내부)에 호버 -> 즉시 툴팁
+  const col = within(chart).getAllByRole("button")[0];
+  await userEvent.hover(col);
+  const tip = screen.getByRole("tooltip");
+  expect(tip).toHaveTextContent("시간");
+  expect(tip).toHaveTextContent("요청자");
+  expect(tip).toHaveTextContent("실 사용량");
+  await userEvent.unhover(col);
+  expect(screen.queryByRole("tooltip")).toBeNull();
 });
 
 test("atime 이 없는 이력은 첫 가용 축(mtime)으로 자동 대체 -- '분포 없음' 거짓 방지", async () => {

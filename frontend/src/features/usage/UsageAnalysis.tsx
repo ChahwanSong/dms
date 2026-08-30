@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Card } from "../../components/ui/Card";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Table } from "../../components/ui/Table";
-import { TimeSeriesChart } from "../../components/ui/TimeSeriesChart";
+import { TimeSeriesChart, tooltipTranslateX } from "../../components/ui/TimeSeriesChart";
 import { Button } from "../../components/ui/Button";
 import type { ApiError } from "../../lib/api";
 import type { HistogramBucket, UsagePoint } from "../../lib/types";
@@ -81,42 +81,83 @@ const TEMP_CAPTIONS: Record<string, string> = {
 };
 
 // 온도 추이: 스캔별 100% 스택 열(위=hot). 시간순 정렬은 부모(서버 정렬)가 보장.
+// 호버/포커스 즉시 툴팁(2026-08-29 사용자 요청): 열에 커서를 대면 시간·요청자·
+// 용량이 바로 뜬다(라인 차트와 같은 규약 -- 기본 title 지연 제거).
 function TemperatureTrend({ points, tempKey }: {
   points: UsagePoint[]; tempKey: string;
 }) {
+  const [active, setActive] = useState<number | null>(null);
   const cols = points.map((p) => ({
     epoch: pointEpoch(p),
     stack: stackLayout(p.time_histograms[tempKey]),
+    point: p,
   }));
   if (cols.every((c) => c.stack === null)) {
     return <p className="text-muted text-xs">이 축의 온도 분포가 있는 스캔이 없습니다</p>;
   }
+  const n = cols.length;
+  const tipRows = (c: typeof cols[number]) => [
+    { k: "시간", v: c.epoch === null ? "—" : kstStampEpoch(c.epoch) },
+    { k: "요청자", v: c.point.requester ?? "—" },
+    { k: "실 사용량", v: typeof c.point.total_bytes === "number"
+        ? humanBytes(c.point.total_bytes) : "—" },
+    ...(c.stack === null ? [{ k: "온도", v: "분포 없음" }] : []),
+  ];
   return (
-    // 고밀도(>20열)는 gap 을 줄인다 -- 고정 gap 합이 컨테이너를 넘으면 가로
-    // 스크롤(e2e L1 금지)이 생긴다. 열 자체는 flex-1+min-w-0 으로 줄어든다.
-    <div role="img" aria-label={`데이터 온도 추이(${tempKey})`}
-         className={`flex items-end ${cols.length > 20 ? "gap-0.5" : "gap-1.5"}`}>
-      {cols.map((c, i) => (
-        <div key={i}
-             title={c.epoch === null ? undefined : kstStampEpoch(c.epoch)}
-             className="flex min-w-0 max-w-12 flex-1 flex-col items-center gap-1">
-          {c.stack === null ? (
-            // 분포 없음(빈 트리·구형 리포트) -- 0% 스택으로 그리면 거짓이라 빈 트랙
-            <div title="온도 분포 없음"
-                 className="h-24 w-full max-w-5 rounded-sm bg-accent/10" />
-          ) : (
-            <div className="flex h-24 w-full max-w-5 flex-col overflow-hidden rounded-sm">
-              {c.stack.map((s, bi) => (
-                <div key={bi} style={{ height: `${s.pct}%`,
-                                       backgroundColor: tempColorOf(c.stack!.length)(bi) }} />
-              ))}
-            </div>
-          )}
-          <span className="w-full truncate text-center text-[10px] text-muted">
-            {c.epoch === null ? "—" : kstDay(c.epoch)}
-          </span>
-        </div>
-      ))}
+    <div className="relative">
+      {/* 고밀도(>20열)는 gap 을 줄인다 -- 고정 gap 합이 컨테이너를 넘으면 가로
+          스크롤(e2e L1 금지)이 생긴다. 열 자체는 flex-1+min-w-0 으로 줄어든다. */}
+      <div role="img" aria-label={`데이터 온도 추이(${tempKey})`}
+           className={`flex items-end ${n > 20 ? "gap-0.5" : "gap-1.5"}`}>
+        {cols.map((c, i) => (
+          // 열은 버튼(호버·포커스 즉시 툴팁). 기본 title 은 지연이라 제거.
+          <button key={i} type="button"
+                  aria-label={`${c.epoch === null ? "" : kstStampEpoch(c.epoch) + " · "}`
+                    + `${c.point.requester ?? "—"}`}
+                  onMouseEnter={() => setActive(i)}
+                  onMouseLeave={() => setActive((a) => (a === i ? null : a))}
+                  onFocus={() => setActive(i)}
+                  onBlur={() => setActive((a) => (a === i ? null : a))}
+                  className="flex min-w-0 max-w-12 flex-1 cursor-default flex-col
+                             items-center gap-1">
+            {c.stack === null ? (
+              // 분포 없음(빈 트리·구형 리포트) -- 0% 스택으로 그리면 거짓이라 빈 트랙
+              <div className={`h-24 w-full max-w-5 rounded-sm bg-accent/10
+                               ${active === i ? "ring-2 ring-accent/40" : ""}`} />
+            ) : (
+              <div className={`flex h-24 w-full max-w-5 flex-col overflow-hidden
+                               rounded-sm ${active === i ? "ring-2 ring-accent/40" : ""}`}>
+                {c.stack.map((s, bi) => (
+                  <div key={bi} style={{ height: `${s.pct}%`,
+                                         backgroundColor: tempColorOf(c.stack!.length)(bi) }} />
+                ))}
+              </div>
+            )}
+            <span className="w-full truncate text-center text-[10px] text-muted">
+              {c.epoch === null ? "—" : kstDay(c.epoch)}
+            </span>
+          </button>
+        ))}
+      </div>
+      {/* 즉시 툴팁: active 일 때만(지연 0). 열 중심 x 에 앵커(끝열 넘침 방지),
+          바 위에 띄운다. pointer-events-none 이라 호버를 가로채지 않는다. */}
+      {active !== null && (() => {
+        const cx = ((active + 0.5) / n) * 100;
+        return (
+          <div role="tooltip"
+               className="pointer-events-none absolute bottom-full z-10 mb-1
+                          whitespace-nowrap rounded-md border border-line bg-surface
+                          px-2.5 py-1.5 text-xs shadow-soft"
+               style={{ left: `${cx}%`, transform: `translateX(${tooltipTranslateX(cx)})` }}>
+            {tipRows(cols[active]).map((r, ri) => (
+              <div key={ri} className="flex items-baseline gap-2">
+                <span className="text-muted">{r.k}</span>
+                <span className="ml-auto tabular-nums font-medium">{r.v}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
