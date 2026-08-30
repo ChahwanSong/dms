@@ -11,9 +11,8 @@
 # 단 배포 순서(migrate 완료 대기 등)는 deploy/overlays/prod/README.md 참고 --
 # apply -k 는 한 번에 다 올리므로, 그룹별로 나눠 적용하려면 README 의 render+split.
 #
-# 채워야 할 자리표시자(REPLACE_ / prod- 접두)는 아래와 patch-*.yaml, 그리고
-# out-of-band Secret(README §Secret). grep -rn REPLACE_ deploy/overlays/prod 로
-# 남은 자리를 한 번에 확인할 수 있다.
+# 자리표시자는 손으로 고치지 말고 values.env.example → values.env 를 채운 뒤
+# render.sh 가 이 템플릿에 넣게 한다(설치는 install.sh). 상세는 README.md.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

@@ -1,5 +1,10 @@
 # DMS testbed deployment runbook
 
+> **프로덕션 설치는 이 파일(716줄, 테스트베드 런북)을 읽지 마세요.**
+> `deploy/overlays/prod/README.md` **하나**만 보면 됩니다 — 프리플라이트 →
+> `values.env` 채우기 → 시크릿/TLS → `deploy/install.sh` → `deploy/verify.sh`.
+> 이 문서는 테스트베드(개별 파일 apply)·시나리오·HTTPS 원리의 상세 참고용입니다.
+
 Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
 `dms agent`, execution backend = Volcano) onto the `dms` testbed. All
 manifests here are written against the **new** CLI/config (`src/dms/cli.py`,

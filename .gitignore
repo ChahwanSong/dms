@@ -20,3 +20,7 @@ frontend/test-results/
 # scratch UI screenshots dropped in repo root during manual testing
 /*.png
 /*.jpeg
+
+# 프로덕션 오버레이 렌더 산출물(values.env → render.sh, 커밋 안 함)
+deploy/overlays/.prod-rendered/
+deploy/overlays/prod/values.env
