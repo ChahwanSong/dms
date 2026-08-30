@@ -11,18 +11,14 @@ import type { NodeInfo, NodeMount, NodeTool, NodeDisk, NodeReport } from "../../
 // 아닌 값(예: {})으로 와도 여기서 걸러야 목록 화면 전체가 죽지 않는다.
 const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
 
-// 도구 프로브 사유를 운영자 언어로. 에이전트가 `<도구> --version` 을 노드에서
-// 돌려본 결과인데, mpifileutils 도구는 **잡 파드(dms-mpifileutils 이미지)에서만
-// 실행**되고 노드(에이전트 이미지)엔 MPI 런타임(libmpi.so.40)이 없어 호스트에선
-// --version 이 rc≠0(공유 라이브러리 로드 실패)로 죽는다. 이건 정상이다 --
-// 이 프로브의 본분은 "바이너리 존재 확인"(status=Ready)이지 노드에서의 실행이
-// 아니다(2026-08-29 사용자 문의). 원문 코드는 title 로 보존한다.
-export function toolReasonText(reason: string | null | undefined): string {
-  if (!reason) return "—";
-  if (reason === "tool_not_found") return "노드에 없음";
-  if (reason.startsWith("version_probe_failed"))
-    return "버전 조회 불가 — 도구는 잡 파드에서 실행됩니다";
-  return reason;
+// 노드 도구는 **존재 확인만** 표시한다(2026-08-30 사용자 결정). 도구는 노드가
+// 아니라 잡 파드(dms-mpifileutils 이미지)에서 실행되므로, 노드에선 바이너리가
+// 설치돼 있는지만 의미가 있다 -- 버전·실행 프로브는 제거했다. status 와이어 값
+// (Ready/Missing, placement 게이트 계약)을 화면 문구로만 옮긴다.
+export function toolStatusText(status: string): string {
+  if (status === "Ready") return "설치됨";
+  if (status === "Missing") return "없음";
+  return status;
 }
 
 // TiB/GiB/MiB만 다룬다 — 디스크 총량·사용량은 늘 MiB를 넘는다. 소수점 1자리.
@@ -84,20 +80,20 @@ function NodeDetail({ node }: { node: NodeInfo }) {
 
       <div>
         <h3 className="font-medium mb-2">도구</h3>
+        {/* 노드엔 바이너리 설치 여부만 표시한다 -- 실제 실행은 잡 파드에서.
+            버전·실행 프로브는 노드에서 의미가 없어 제거했다(2026-08-30). */}
+        <p className="text-muted text-xs mb-2">
+          도구는 잡 파드에서 실행됩니다 — 여기선 노드에 설치돼 있는지만 확인합니다.
+        </p>
         <Table>
           <thead>
-            <tr className="text-muted"><th className="py-2">이름</th><th>상태</th><th>버전</th><th>사유</th></tr>
+            <tr className="text-muted"><th className="py-2">이름</th><th>상태</th></tr>
           </thead>
           <tbody>
             {tools.map((t, i) => (
               <tr key={i} className="border-t border-black/5">
                 <td className="py-2">{t.name}</td>
-                <td>{t.status}</td>
-                <td className="text-muted">{t.version ?? "—"}</td>
-                {/* 원문 사유는 title 로 보존(디버깅용), 표시는 운영자 문구로 */}
-                <td className="text-muted" title={t.reason ?? undefined}>
-                  {toolReasonText(t.reason)}
-                </td>
+                <td>{toolStatusText(t.status)}</td>
               </tr>
             ))}
           </tbody>

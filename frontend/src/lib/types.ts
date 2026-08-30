@@ -95,7 +95,10 @@ export interface NodeMount {
   exists?: boolean; is_mountpoint?: boolean; readable?: boolean; reason?: string | null;
 }
 export interface NodeTool {
-  name: string; status: string; path?: string; version?: string; reason?: string | null;
+  // 노드 도구는 존재 확인만 한다(2026-08-30): status Ready/Missing(=바이너리
+  // 존재/없음, placement 게이트 계약) + path. 버전은 노드에서 확인 불가라
+  // (도구는 잡 파드에서 실행) 필드 자체를 뺐다. reason 은 Missing 진단용.
+  name: string; status: string; path?: string; reason?: string | null;
 }
 export interface NodeDisk { storage_name: string; total_bytes: number; used_bytes: number }
 export interface NodeReportBody {

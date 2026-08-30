@@ -3,7 +3,6 @@ import grp
 import os
 import pwd
 import shutil
-import subprocess
 
 _OCTAL_ESCAPES = {"\\040": " ", "\\011": "\t", "\\012": "\n", "\\134": "\\"}
 
@@ -49,33 +48,25 @@ def probe_mounts(storages, *, mountinfo_text, isdir=os.path.isdir, access=os.acc
     return results
 
 
-def probe_tools(names, *, which=shutil.which, run=subprocess.run):
+def probe_tools(names, *, which=shutil.which):
+    """노드 도구 프로브는 **존재 확인만** 한다(2026-08-30 사용자 결정). 도구는
+    노드가 아니라 잡 파드(dms-mpifileutils 이미지, MPI 런타임 포함)에서 실행되고,
+    에이전트 이미지엔 MPI 런타임(libmpi.so.40)이 없어 `--version` 은 노드에서
+    항상 실패한다 -- 성공할 수 없는 실행을 시도해 크립틱한 사유를 만드는 대신,
+    which 로 바이너리 존재만 본다(버전 개념 자체를 뺀다).
+
+    status 값("Ready"/"Missing")은 표시용이 아니라 계약이다: placement._tool_ready
+    가 노드 적격성 게이트로 이 값을 읽으므로 문자열을 그대로 유지한다(화면은
+    "설치됨/없음"으로 relabel 하지만 와이어 값은 안 바꾼다)."""
     results = []
     for name in names:
         path = which(name)
-        if not path:
-            results.append({"name": name, "status": "Missing", "path": None,
-                            "version": None, "reason": "tool_not_found"})
-            continue
-        version, reason = None, None
-        try:
-            proc = run([path, "--version"], capture_output=True, text=True, timeout=5)
-            if proc.returncode != 0:
-                # rc≠0 의 출력은 버전이 아니라 오류다(실측 2026-08-23: 호스트에
-                # MPI 런타임이 없으면 "error while loading shared libraries:
-                # libmpi.so.40 …" 가 stderr 로 나오고, 이게 그대로 버전 칸에
-                # 떠서 화면이 고장 문구를 버전인 척 보였다). 버전은 모름(null)
-                # 으로 두고 사유에 rc 를 남긴다 -- 도구 실행은 잡 파드(잡
-                # 이미지) 안에서 하므로 호스트에서 --version 이 안 도는 것
-                # 자체는 결함이 아니다(존재 확인이 이 프로브의 본분).
-                reason = f"version_probe_failed:rc={proc.returncode}"
-            else:
-                first_line = (proc.stdout or proc.stderr or "").splitlines()
-                version = first_line[0].strip() if first_line else None
-        except Exception as exc:  # fail-soft: 버전 실패가 도구 존재를 부정하지 않는다
-            reason = f"version_probe_failed:{type(exc).__name__}"
-        results.append({"name": name, "status": "Ready", "path": path,
-                        "version": version, "reason": reason})
+        results.append({
+            "name": name,
+            "status": "Ready" if path else "Missing",
+            "path": path,
+            "reason": None if path else "tool_not_found",
+        })
     return results
 
 

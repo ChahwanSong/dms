@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { NodesList, toolReasonText } from "./NodesList";
+import { NodesList, toolStatusText } from "./NodesList";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -81,7 +81,8 @@ test("clicking 상세 reveals mounts, tools and disk tables", async () => {
   expect(await screen.findByText("/mnt/vol1")).toBeInTheDocument();
   expect(screen.getByText("not mounted")).toBeInTheDocument();
   expect(screen.getByText("rsync")).toBeInTheDocument();
-  expect(screen.getByText("3.2.7")).toBeInTheDocument();
+  // 도구는 존재 확인만 -- status 는 "설치됨"으로 표기(버전 컬럼 제거)
+  expect(screen.getByText("설치됨")).toBeInTheDocument();
   // 512 GiB used / 1 TiB total = 50.0%
   expect(screen.getByText("512.0 GiB")).toBeInTheDocument();
   expect(screen.getByText("1.0 TiB")).toBeInTheDocument();
@@ -177,12 +178,9 @@ test("clicking 최근 리포트 loads and shows report history", async () => {
   expect(reportsCalls).toBe(1);
 });
 
-test("toolReasonText: 프로브 사유를 운영자 문구로(원문은 title 보존)", () => {
-  expect(toolReasonText(null)).toBe("—");
-  expect(toolReasonText("tool_not_found")).toBe("노드에 없음");
-  // 호스트에 MPI 런타임이 없어 --version 이 죽는 정상 경우 -- 크립틱 코드 대신 설명
-  expect(toolReasonText("version_probe_failed:rc=127"))
-    .toBe("버전 조회 불가 — 도구는 잡 파드에서 실행됩니다");
-  // 미지 사유는 원문 그대로(지어내지 않음)
-  expect(toolReasonText("something_else")).toBe("something_else");
+test("toolStatusText: 존재 확인만 -- Ready→설치됨, Missing→없음", () => {
+  expect(toolStatusText("Ready")).toBe("설치됨");
+  expect(toolStatusText("Missing")).toBe("없음");
+  // 미지 값은 원문 그대로(지어내지 않음)
+  expect(toolStatusText("weird")).toBe("weird");
 });

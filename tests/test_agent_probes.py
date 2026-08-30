@@ -220,46 +220,26 @@ def test_pod_sysfs_collision_hits_any_host_nic_name_not_only_eth0(tmp_path):
     assert _net_of(NETDEV_CALICO, virtual_net_path=pod_sysfs) == (400 + 70, 600 + 90)
 
 
-def test_probe_tools_found_and_missing():
+def test_probe_tools_presence_only():
+    # 존재 확인만(2026-08-30 사용자 결정): which 로 바이너리 존재만 본다 --
+    # --version 실행/버전 개념 자체를 뺐다(에이전트엔 MPI 런타임이 없어 항상
+    # 실패했고, 도구는 잡 파드에서 실행된다). version 키는 더 이상 없다.
     def which(name):
         return f"/opt/bin/{name}" if name != "nsync" else None
 
-    class Proc:
-        returncode = 0
-        stdout = "dsync 0.12-dms\nextra"
-        stderr = ""
-
-    out = probe_tools(["dsync", "nsync"], which=which, run=lambda *a, **k: Proc())
-    assert out[0] == {"name": "dsync", "status": "Ready", "path": "/opt/bin/dsync",
-                      "version": "dsync 0.12-dms", "reason": None}
-    assert out[1]["status"] == "Missing" and out[1]["reason"] == "tool_not_found"
+    out = probe_tools(["dsync", "nsync"], which=which)
+    assert out[0] == {"name": "dsync", "status": "Ready",
+                      "path": "/opt/bin/dsync", "reason": None}
+    assert "version" not in out[0]              # 버전 개념 제거
+    assert out[1] == {"name": "nsync", "status": "Missing",
+                      "path": None, "reason": "tool_not_found"}
 
 
-def test_probe_tools_version_failure_is_soft():
-    def boom(*a, **k):
-        raise OSError("exec failed")
-
-    out = probe_tools(["drm"], which=lambda n: "/opt/bin/drm", run=boom)
-    assert out[0]["status"] == "Ready" and out[0]["version"] is None
-    assert out[0]["reason"].startswith("version_probe_failed:")
-
-
-def test_probe_tools_nonzero_rc_output_is_not_a_version():
-    # 실측(2026-08-23, 사용자 보고): 호스트에 MPI 런타임이 없으면 --version 이
-    # rc≠0 으로 죽으며 stderr 에 "error while loading shared libraries:
-    # libmpi.so.40 …" 를 남긴다 -- 이 오류 문구가 버전 칸에 그대로 떴다.
-    # rc≠0 의 출력은 버전이 아니다: 버전은 모름(null), 사유에 rc 를 남긴다.
-    class Proc:
-        returncode = 127
-        stdout = ""
-        stderr = ("/opt/mpifileutils/bin/dscan: error while loading shared "
-                  "libraries: libmpi.so.40: cannot open shared object file")
-
-    out = probe_tools(["dscan"], which=lambda n: "/opt/mpifileutils/bin/dscan",
-                      run=lambda *a, **k: Proc())
-    assert out[0]["status"] == "Ready"          # 존재 자체는 사실이다
-    assert out[0]["version"] is None            # 오류 문구를 버전인 척 않는다
-    assert out[0]["reason"] == "version_probe_failed:rc=127"
+def test_probe_tools_status_value_is_wire_contract():
+    # status 문자열은 표시용이 아니라 계약이다: placement._tool_ready 가 "Ready"
+    # 로 노드 적격성을 판정한다. 화면 relabel(설치됨/없음)과 무관하게 유지.
+    out = probe_tools(["drm"], which=lambda n: "/opt/bin/drm")
+    assert out[0]["status"] == "Ready"
 
 
 def test_probe_identities():
