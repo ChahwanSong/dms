@@ -18,7 +18,7 @@ truth):
 |---|---|
 | build/registry node | `pkg-01` (10.10.10.30), has `podman` |
 | registry | `pkg-01:5000`, insecure |
-| PostgreSQL | `postgresql://dmsapp:AppPass123!@10.10.10.30:5432/dmsdb` |
+| PostgreSQL | `postgresql://dmsapp:<PW>@10.10.10.30:5432/dmsdb` — PW 는 testbed `secrets.yml`(gitignored, 2026-08-30 보안 정리) |
 | LDAP | `ldap://10.10.10.30:389`, base `dc=dms,dc=local` |
 | CephFS `cephfs-dms` | `/cephfs`, mounted on w1-5 |
 | CephFS `cephfs-third` | `/cephfs-third`, mounted on w1-3 |
@@ -641,8 +641,10 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
   `deploy/k8s/20-secret.example.yaml`): the LDAP search-account password
   (2026-08-23: auth bind is the default -- the DN lives in the ConfigMap as
   `DMS_LDAP_BIND_DN`, testbed account `search_dms` provisioned by
-  testbed/roles/openldap_server, password `ldap_search_password` in testbed
-  group_vars). With `DMS_LDAP_REQUIRE_AUTH_BIND="true"` a missing/placeholder
+  testbed/roles/openldap_server, password `ldap_search_password` in the
+  testbed repo's gitignored `secrets.yml` -- group_vars holds only a
+  CHANGEME marker since 2026-08-30). With
+  `DMS_LDAP_REQUIRE_AUTH_BIND="true"` a missing/placeholder
   password fails LOUD at startup (SettingsError -> CrashLoopBackOff), so
   inject the secret before applying config. A wrong (but present) password
   fails soft at plan time (`IdentityUnavailable`), fixable without
