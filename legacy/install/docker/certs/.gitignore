@@ -1,6 +1,0 @@
-# Corporate CA certs are staged here at build time by build-images.sh (CA_CERT=...)
-# and removed on exit. Never commit an actual cert — keep only these two files tracked
-# so the directory always exists (the Dockerfiles COPY it into each image trust store).
-*
-!.gitignore
-!.gitkeep

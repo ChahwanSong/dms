@@ -8,8 +8,8 @@
 Deploys the clean-slate DMS control plane (`dms api` / `dms controller` /
 `dms agent`, execution backend = Volcano) onto the `dms` testbed. All
 manifests here are written against the **new** CLI/config (`src/dms/cli.py`,
-`src/dms/config.py`) -- do not confuse with `legacy/install/`, which targets
-the old implementation and is read-only design reference only.
+`src/dms/config.py`). (The old implementation's `legacy/install/` was removed
+from the tree 2026-08-30 -- see git history if needed.)
 
 Testbed facts baked into these assets (see repo `CLAUDE.md` for the source of
 truth):
@@ -668,9 +668,9 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
   currently `d23`), `pkg-01:5000/dms-agent:<tag>` (agent DaemonSet, `dev5`),
   `pkg-01:5000/dms-mpifileutils:<tag>` (`DMS_JOB_IMAGE` ConfigMap value,
   `job3`). Keep `build-and-push.sh`'s `TAG` and the manifests' tags in sync
-  manually (no templating layer here by design -- see CLAUDE.md's
-  "legacy/install/ 미러 금지" instruction, which ruled out introducing e.g.
-  Helm/kustomize for this pass). Portal-driven rollout (§9) patches the live
+  manually (no templating layer here by design -- the old "legacy/install/
+  미러 금지" rule, from the since-removed legacy tree's CLAUDE.md, ruled out
+  introducing e.g. Helm/kustomize for this pass). Portal-driven rollout (§9) patches the live
   `dms:` and `dms-agent:` workloads but does NOT rewrite these files, so after
   a rollout you must hand-edit the tag here to keep repo and cluster aligned.
 - **`/cephfs` scheduling assumption on `dms-api`/`dms-controller`**: both

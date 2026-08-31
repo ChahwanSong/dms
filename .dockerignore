@@ -30,7 +30,6 @@ tests
 .git
 
 # --- Design-reference-only tree; never needed in the image ---
-legacy
 
 # --- Agent/tooling scratch state, not part of the app ---
 .claude
