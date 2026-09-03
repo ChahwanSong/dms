@@ -1,0 +1,26 @@
+# 정적 매니페스트로 ingress-nginx 를 설치한 경우(helm 미사용)의 컨트롤러 패치.
+# SSC "웹 노드 hostNetwork 엣지" 모드로 전환한다(values-hostnetwork.yaml 의 helm 대응판).
+#
+# 적용:
+#   kubectl label node <웹노드> dms.io/web-node=true
+#   kubectl -n ingress-nginx patch deploy ingress-nginx-controller \
+#     --type merge --patch-file deploy/addons/ingress-nginx/controller-hostnetwork-patch.yaml
+#   # 그리고 컨트롤러 Service 를 LoadBalancer -> ClusterIP 로(MetalLB VIP 불필요):
+#   kubectl -n ingress-nginx patch svc ingress-nginx-controller -p '{"spec":{"type":"ClusterIP"}}'
+#
+# 주의: 컨트롤러 args 에 --default-ssl-certificate=dms/dms-portal-tls 가 있어야
+# IP 직접 https 접속이 정식 인증서를 받는다. 정적 매니페스트에 이 플래그가 없으면
+# Deployment 의 컨테이너 args 에 추가할 것(merge 패치로는 배열 요소 추가가 안 되니
+# `kubectl edit` 또는 kustomize args 패치를 쓴다).
+spec:
+  replicas: 1
+  template:
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        dms.io/web-node: "true"
+      tolerations:
+        - key: dms.io/web-node
+          operator: Exists
+          effect: NoSchedule

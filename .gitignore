@@ -21,6 +21,8 @@ frontend/test-results/
 /*.png
 /*.jpeg
 
-# 프로덕션 오버레이 렌더 산출물(values.env → render.sh, 커밋 안 함)
+# 오버레이 렌더 산출물 + 채운 값 파일(values.env → render.sh, 커밋 안 함)
 deploy/overlays/.prod-rendered/
 deploy/overlays/prod/values.env
+deploy/overlays/.ssc-rendered/
+deploy/overlays/ssc/values.env

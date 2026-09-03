@@ -1,0 +1,58 @@
+# DMS SSC 오버레이 — "웹 노드 hostNetwork 엣지" 모드(2026-08-30).
+#
+# overlays/prod 와 같은 base(deploy/k8s)를 쓰되, **MetalLB 를 쓰지 않는다**:
+# public IP 가 웹 노드 호스트 NIC 에 직접 설정돼 있고(사용자 검증 완료), 커널이
+# 그 IP 의 ARP 를 담당하므로 LB 광고(VIP)가 불필요하다. 노출은 그 노드에 고정된
+# ingress-nginx(hostNetwork)가 호스트 :80/:443 로 직접 한다 -- 컨트롤러 설정은
+# 오버레이 밖 애드온이다(deploy/addons/ingress-nginx/, 업스트림 컨트롤러 패치
+# 관례와 동일). 따라서 이 오버레이는 base 에서 MetalLB 두 객체만 제거하고,
+# Ingress(46) 규칙은 그대로 둔다(catch-all → dms-api:8080, TLS 종단·강제 리다이렉트).
+#
+# 렌더/적용:  sh deploy/overlays/ssc/install.sh --dry-run  →  sh .../install.sh
+# 값:  overlays/ssc/values.env.example → values.env (render.sh 가 채운다)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../k8s
+
+# 워크로드 image 필드(dms·dms-agent)를 사내 레지스트리/태그로. ConfigMap 안의
+# 이미지 문자열은 patch-config 가 따로 덮는다(prod 와 동일).
+images:
+  - name: pkg-01:5000/dms
+    newName: REPLACE_REGISTRY/dms
+    newTag: REPLACE_DMS_TAG
+  - name: pkg-01:5000/dms-agent
+    newName: REPLACE_REGISTRY/dms-agent
+    newTag: REPLACE_DMS_AGENT_TAG
+
+patches:
+  # 사이트별 값(ConfigMap)·포탈 도메인(Ingress tls.hosts)
+  - path: patch-config.yaml
+  - path: patch-ingress.yaml
+  # MetalLB 제거: SSC 는 MetalLB CRD 자체가 없다. base 의 두 객체를 렌더 산출물에서
+  # 삭제해 apply 가 MetalLB 종류를 클러스터에 보내지 않게 한다($patch: delete).
+  - target:
+      group: metallb.io
+      version: v1beta1
+      kind: IPAddressPool
+      name: dms-public-pool
+    patch: |
+      $patch: delete
+      apiVersion: metallb.io/v1beta1
+      kind: IPAddressPool
+      metadata:
+        name: dms-public-pool
+        namespace: metallb-system
+  - target:
+      group: metallb.io
+      version: v1beta1
+      kind: L2Advertisement
+      name: dms-public-l2
+    patch: |
+      $patch: delete
+      apiVersion: metallb.io/v1beta1
+      kind: L2Advertisement
+      metadata:
+        name: dms-public-l2
+        namespace: metallb-system

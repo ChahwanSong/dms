@@ -1,0 +1,16 @@
+# 포탈 도메인만 사내 값으로. catch-all(host 없는 규칙)·어노테이션·강제 리다이렉트
+# 는 base 그대로 산다(IP 직접 접속도 계속 지원). tls.hosts 만 사내 도메인으로
+# 바꿔 그 호스트의 SNI 접속이 dms-portal-tls 인증서와 매칭되게 한다.
+#
+# 인증서(dms-portal-tls, ns dms)의 SAN 에 이 도메인 + VIP 를 반드시 포함할 것 --
+# 사내 PKI 발급분으로 out-of-band 생성(README).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dms-portal
+  namespace: dms
+spec:
+  tls:
+    - hosts:
+        - REPLACE_PORTAL_DOMAIN        # 예: dms.corp.example
+      secretName: dms-portal-tls
