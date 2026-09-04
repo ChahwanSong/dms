@@ -2,8 +2,9 @@
 #
 # 이 모드는 MetalLB 를 쓰지 않는다. public IP 는 웹 노드 호스트 NIC 에 직접 설정돼
 # 있고(사용자 검증 완료), 커널이 그 IP 의 ARP 를 담당한다 — LB 광고 장치가 불필요.
-# 컨트롤러를 그 노드에 고정(nodeSelector)하고 hostNetwork 로 호스트 :80/:443 를
-# 직접 리슨해, 사용자가 https://<public IP> 로 바로 닿게 한다.
+# 컨트롤러를 그 노드에 고정(nodeSelector)하고 hostNetwork 로 호스트 포트를 직접
+# 리슨해, 사용자가 https://<public IP>:<PORT> 로 바로 닿게 한다(PORT 는 방화벽이
+# 연 포트 -- 아래 containerPort.https, 예 30080. 표준 443 이면 그 블록 삭제).
 #
 # 설치:
 #   kubectl label node <웹노드> dms.io/web-node=true
@@ -18,7 +19,7 @@
 controller:
   kind: Deployment
   replicaCount: 1                      # 웹 노드 1대 — hostNetwork 라 노드당 1 파드
-  hostNetwork: true                    # 호스트 :80/:443 직접 리슨(Service LB 불필요)
+  hostNetwork: true                    # 호스트 포트 직접 리슨(Service LB 불필요; 포트는 아래 containerPort)
   dnsPolicy: ClusterFirstWithHostNet   # 필수: 없으면 호스트 DNS 로 dms-api.dms.svc 해석 실패(최다 함정)
   nodeSelector:
     dms.io/web-node: "true"            # public IP 가 있는 웹 노드에 고정
@@ -37,10 +38,14 @@ controller:
   extraArgs:
     # IP 직접(SNI 없음) https 접속도 정식 인증서를 받게 하는 짝(46-ingress 주석 참조).
     default-ssl-certificate: dms/dms-portal-tls
-  # 방화벽이 표준 443/80 이 아닌 포트를 열어줬다면 여기서 호스트 리슨 포트를 바꾼다
-  # (hostNetwork 라 NodePort 30000-32767 제약이 없다):
-  #   containerPort: { http: 80, https: 443 }   # 이 값이 곧 호스트 리슨 포트
-  # 웹 노드에 내부 IP 도 있어 그쪽 노출이 싫으면 public IP 만 바인딩:
+  # 호스트 리슨 포트. hostNetwork 라 containerPort 값이 곧 호스트 포트다(NodePort
+  # 30000-32767 제약 없음). 방화벽이 연 HTTPS 포트에 맞춘다 -- 아래는 30080 예시로,
+  # values.env 의 PORTAL_PORT 와 반드시 같아야 install.sh 게이트를 통과한다.
+  # 표준 443 을 쓰면 이 블록을 지우면 된다(차트 기본이 80/443).
+  containerPort:
+    http: 80
+    https: 30080        # ← 방화벽이 연 포트로. 사용자 접속: https://<public IP>:30080
+  # 웹 노드에 내부 IP 도 따로 있어 그쪽 노출이 싫으면 public IP 만 바인딩:
   #   config: { bind-address: "<public IP>" }
   admissionWebhooks:
     enabled: true

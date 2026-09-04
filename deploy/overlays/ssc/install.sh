@@ -55,6 +55,16 @@ kubectl -n "$INGRESS_NS" get pod "$CPOD" -o jsonpath='{.spec.containers[0].args}
   | grep -q default-ssl-certificate \
   && ok "--default-ssl-certificate 설정됨(IP 직접 https 지원)" \
   || warn "--default-ssl-certificate 미설정 — IP 직접 https 접속에 필요(도메인만 쓰면 생략 가능)"
+# https 리슨 포트가 방화벽이 연 포트(PORTAL_PORT)와 같은가. hostNetwork 라
+# containerPort == 호스트 포트. 다르면 사용자가 그 포트로 못 닿는다(방화벽 30080 등).
+PPORT="${PORTAL_PORT:-443}"
+HPORT=$(kubectl -n "$INGRESS_NS" get pod "$CPOD" \
+  -o jsonpath='{.spec.containers[0].ports[?(@.name=="https")].containerPort}' 2>/dev/null || true)
+if [ -n "$HPORT" ] && [ "$HPORT" != "$PPORT" ]; then
+  warn "ingress-nginx https 리슨 포트($HPORT) != PORTAL_PORT($PPORT) — 애드온 values 의 containerPort.https 를 $PPORT 로 맞추세요"
+else
+  ok "https 리슨 포트 = ${HPORT:-$PPORT} (사용자 접속: https://${PORTAL_PUBLIC_IP:-<IP>}:$PPORT)"
+fi
 
 # --- 시크릿 · TLS (prod 와 동일) ---
 kubectl -n "$NS" get secret dms-secrets >/dev/null 2>&1 \
@@ -104,5 +114,5 @@ kubectl -n "$NS" rollout status deploy/dms-controller --timeout=180s
 kubectl -n "$NS" rollout status ds/dms-agent --timeout=180s
 
 # MetalLB address-pool 어노테이션 단계 없음 — 노출은 웹 노드 hostNetwork 가 한다.
-printf '\n설치 완료. 검증:  PORTAL_PUBLIC_IP=%s PORTAL_DOMAIN=%s CACERT=<사내CA> sh deploy/overlays/ssc/verify.sh\n' \
-  "${PORTAL_PUBLIC_IP:-<IP>}" "${PORTAL_DOMAIN:-<도메인>}"
+printf '\n설치 완료. 사용자 접속: https://%s:%s\n검증: PORTAL_PUBLIC_IP=%s PORTAL_PORT=%s PORTAL_DOMAIN=%s CACERT=<사내CA> sh deploy/overlays/ssc/verify.sh\n' \
+  "${PORTAL_PUBLIC_IP:-<IP>}" "${PORTAL_PORT:-443}" "${PORTAL_PUBLIC_IP:-<IP>}" "${PORTAL_PORT:-443}" "${PORTAL_DOMAIN:-<도메인>}"

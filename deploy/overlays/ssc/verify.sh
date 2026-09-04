@@ -13,6 +13,7 @@ NS="${DMS_NS:-dms}"
 INGRESS_NS="${INGRESS_NS:-ingress-nginx}"
 PUBIP="${PORTAL_PUBLIC_IP:-}"
 DOMAIN="${PORTAL_DOMAIN:-}"
+PORT="${PORTAL_PORT:-443}"     # ingress-nginx https 리슨 포트(방화벽이 연 포트, 예: 30080)
 CACERT="${CACERT:-}"
 p=0; f=0
 P(){ printf '  [PASS] %s\n' "$1"; p=$((p+1)); }
@@ -45,7 +46,7 @@ else
   F "ingress-nginx 컨트롤러 파드를 못 찾음 ($INGRESS_NS)"
 fi
 
-H "3. 포탈 (public IP · readyz 는 DB 까지 확인)"
+H "3. 포탈 (public IP:$PORT · readyz 는 DB 까지 확인)"
 # CACERT 있으면 인증서 체인까지 검증, 없으면 -k 로 도달성만 확인한다(사내 PKI 를
 # 시스템 신뢰저장소가 모르므로, CACERT 없이 검증하면 건강한 포탈도 거짓 FAIL 이
 # 난다 -- 리뷰 LOW-2). curl 은 실패해도 -w 로 000 을 찍으므로 별도 || echo 000 은
@@ -55,18 +56,19 @@ else cc="-k"; I "CACERT 미설정 — 인증서 검증 생략(-k), 도달성만 
 hc(){ c=$(curl -s $cc -m5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null); printf '%s' "${c:-000}"; }
 if [ -n "$PUBIP" ]; then
   # SNI 없는 IP 직접 접속 — 컨트롤러 --default-ssl-certificate 가 인증서를 준다.
-  code=$(hc "https://$PUBIP/readyz")
-  [ "$code" = "200" ] && P "https://$PUBIP/readyz 200 (DB 도달)" || F "https://$PUBIP/readyz $code"
-  rc=$(hc "http://$PUBIP/readyz")
-  case "$rc" in 301|302|307|308) P "http→https 리다이렉트 ($rc)";; *) I "http readyz $rc";; esac
+  # 포트는 방화벽이 연 https 포트($PORT, 예 30080). DMS 는 HTTPS 전용.
+  code=$(hc "https://$PUBIP:$PORT/readyz")
+  [ "$code" = "200" ] && P "https://$PUBIP:$PORT/readyz 200 (DB 도달)" \
+                      || F "https://$PUBIP:$PORT/readyz $code"
 else
   I "PORTAL_PUBLIC_IP 미설정 — IP 접속 검증 건너뜀"
 fi
 if [ -n "$DOMAIN" ]; then
   # 도메인 접속(SNI 매칭). CACERT 로 검증하려면 DNS 가 PUBIP 로 풀려야 한다.
-  dcode=$(curl -s $cc --resolve "$DOMAIN:443:${PUBIP:-127.0.0.1}" -m5 -o /dev/null \
-    -w '%{http_code}' "https://$DOMAIN/readyz" 2>/dev/null); dcode=${dcode:-000}
-  [ "$dcode" = "200" ] && P "https://$DOMAIN/readyz 200 (SNI)" || I "domain readyz $dcode (DNS/SAN 확인)"
+  dcode=$(curl -s $cc --resolve "$DOMAIN:$PORT:${PUBIP:-127.0.0.1}" -m5 -o /dev/null \
+    -w '%{http_code}' "https://$DOMAIN:$PORT/readyz" 2>/dev/null); dcode=${dcode:-000}
+  [ "$dcode" = "200" ] && P "https://$DOMAIN:$PORT/readyz 200 (SNI)" \
+                       || I "domain readyz $dcode (DNS/SAN 확인)"
 fi
 
 printf '\n== 요약 ==  PASS=%d  FAIL=%d\n' "$p" "$f"
