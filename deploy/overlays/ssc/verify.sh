@@ -13,7 +13,7 @@ NS="${DMS_NS:-dms}"
 INGRESS_NS="${INGRESS_NS:-ingress-nginx}"
 PUBIP="${PORTAL_PUBLIC_IP:-}"
 DOMAIN="${PORTAL_DOMAIN:-}"
-PORT="${PORTAL_PORT:-443}"     # ingress-nginx https 리슨 포트(방화벽이 연 포트, 예: 30080)
+PORT="${PORTAL_PORT:-443}"     # ingress-nginx https 리슨 포트(표준 443 기본; 비표준이면 값 파일과 동일하게)
 CACERT="${CACERT:-}"
 p=0; f=0
 P(){ printf '  [PASS] %s\n' "$1"; p=$((p+1)); }
@@ -56,7 +56,7 @@ else cc="-k"; I "CACERT 미설정 — 인증서 검증 생략(-k), 도달성만 
 hc(){ c=$(curl -s $cc -m5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null); printf '%s' "${c:-000}"; }
 if [ -n "$PUBIP" ]; then
   # SNI 없는 IP 직접 접속 — 컨트롤러 --default-ssl-certificate 가 인증서를 준다.
-  # 포트는 방화벽이 연 https 포트($PORT, 예 30080). DMS 는 HTTPS 전용.
+  # 포트는 https 리슨 포트($PORT, 표준 443 기본). DMS 는 HTTPS 전용.
   code=$(hc "https://$PUBIP:$PORT/readyz")
   [ "$code" = "200" ] && P "https://$PUBIP:$PORT/readyz 200 (DB 도달)" \
                       || F "https://$PUBIP:$PORT/readyz $code"

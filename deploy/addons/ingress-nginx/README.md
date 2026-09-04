@@ -2,9 +2,10 @@
 
 DMS 는 ingress-nginx 컨트롤러를 트리에 두지 않는다(업스트림 애드온, 관례상
 out-of-band 설치·패치). SSC 엣지 모드에서는 컨트롤러를 **웹 노드에 hostNetwork 로**
-올려 그 노드의 public IP 의 **방화벽이 연 포트**(values-hostnetwork.yaml 의
-containerPort.https, 예 30080; 표준이면 443)를 직접 리슨하게 한다(MetalLB 불필요).
-그 포트는 overlays/ssc 의 values.env `PORTAL_PORT` 와 같아야 install.sh 게이트를 통과한다.
+올려 그 노드의 public IP :80/:443 를 직접 리슨하게 한다(MetalLB 불필요) — 사용자
+접속 `https://<public IP>`. 방화벽이 443 이 아닌 비표준 포트만 여는 사이트만
+values-hostnetwork.yaml 의 containerPort.https 를 그 포트로 바꾸고, overlays/ssc 의
+values.env `PORTAL_PORT` 도 같은 값으로 맞춘다(install.sh 게이트가 일치를 확인).
 
 이 디렉터리:
 - `values-hostnetwork.yaml` — helm chart(ingress-nginx) 값. helm 설치용.
@@ -47,9 +48,9 @@ default-ssl-certificate)를 apply 전에 게이트로 재확인한다.
 
 ## 왜 이렇게 (요점)
 
-- **hostNetwork**: Service LoadBalancer/MetalLB 없이 호스트 포트(containerPort.https,
-  예 30080)를 직접 노출. public IP 가 노드 NIC 에 있으니 커널이 ARP 를 담당 — 광고
-  장치가 불필요. containerPort 가 곧 호스트 리슨 포트라 NodePort 대역 제약도 없다.
+- **hostNetwork**: Service LoadBalancer/MetalLB 없이 호스트 :80/:443 를 직접 노출.
+  public IP 가 노드 NIC 에 있으니 커널이 ARP 를 담당 — 광고 장치가 불필요.
+  (containerPort 가 곧 호스트 리슨 포트라, 비표준 포트가 필요해도 NodePort 대역 제약이 없다.)
 - **dnsPolicy: ClusterFirstWithHostNet** (최다 함정): 이게 없으면 hostNetwork 파드가
   호스트 DNS 를 써 `dms-api.dms.svc` 클러스터 서비스명을 해석하지 못한다.
 - **nodeSelector dms.io/web-node=true + replicas 1**: public IP 가 있는 그 노드에만.

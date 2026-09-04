@@ -2,26 +2,25 @@
 
 **모드 요약**: MetalLB 를 쓰지 않는다. public IP 는 웹 노드 호스트 NIC 에 직접
 설정돼 있고(사용자 검증 완료 — 방화벽 통과 확인), 그 노드에 고정된 ingress-nginx
-가 hostNetwork 로 **방화벽이 연 HTTPS 포트**(`PORTAL_PORT`, 예 30080; 표준이면 443)
-를 직접 리슨한다. 사용자는 `https://<public IP>:<PORT>` 로 바로 포탈에 닿는다.
-DMS 는 Secure 쿠키·강제 리다이렉트라 **HTTPS 전용**이다(평문 HTTP 포트는 로그인이
-조용히 깨진다).
+가 hostNetwork 로 호스트 :80/:443 를 직접 리슨한다. 사용자는 표준 HTTPS로
+`https://<public IP>` 에 바로 닿는다. DMS 는 Secure 쿠키·강제 리다이렉트라
+**HTTPS 전용**이다(평문 HTTP 는 로그인이 조용히 깨진다).
 
 ```
-사용자 → https://<public IP>:<PORT>   (예: https://203.0.113.10:30080)
+사용자 → https://<public IP>   (443)
   → 웹 노드 커널(호스트 IP, 네이티브 — MetalLB/VIP 광고 없음)
-  → ingress-nginx [hostNetwork, 웹 노드 고정] : 그 포트로 https 리슨, TLS 종단(dms-portal-tls), 라우팅
+  → ingress-nginx [hostNetwork, 웹 노드 고정] : TLS 종단(dms-portal-tls) · 80→443 · 라우팅
   → dms-api Service(ClusterIP) → dms-api 파드(아무 노드나)
 ```
 
 overlays/prod(MetalLB VIP) 와 같은 base·앱을 쓰고, 다른 것은 **노출 방식뿐**이다.
+(방화벽이 443 이 아닌 비표준 포트만 여는 사이트만 `PORTAL_PORT` + 애드온
+`containerPort.https` 를 그 포트로 맞춘다 — hostNetwork 라 NodePort 대역 제약이 없다.)
 
 > **보안(웹 노드의 public IP 가 곧 노드 IP 인 경우 필수)**: ion2110 처럼 노드의
 > 유일 IP 가 public 이면 그 인터페이스에 kubelet(10250)·NodePort(30000–32767)·
 > (제어면이면 6443/etcd) 등 클러스터 포트가 함께 뜬다. 방화벽에서 public 쪽은
-> **PORTAL_PORT(예 30080) 만** 허용하고 나머지는 전부 차단할 것. 30080 이 NodePort
-> 대역이라, kube-proxy 가 그 번호를 NodePort 로 가져가 충돌하지 않도록 hostNetwork
-> 로 직접 바인딩한다(이 모드가 그렇게 한다).
+> **443(과 80→443 리다이렉트용 80)만** 허용하고 나머지는 전부 차단할 것.
 
 ## 절차
 
@@ -29,16 +28,15 @@ overlays/prod(MetalLB VIP) 와 같은 base·앱을 쓰고, 다른 것은 **노�
 # 1) 웹 노드 라벨 (public IP 가 있는 노드)
 kubectl label node <WEB_NODE> dms.io/web-node=true
 
-# 2) ingress-nginx 를 hostNetwork 로 설치(웹 노드 고정, 방화벽 포트로 https 리슨) — 애드온
-#    values-hostnetwork.yaml 의 controller.containerPort.https 를 PORTAL_PORT(예 30080)로 맞출 것
+# 2) ingress-nginx 를 hostNetwork 로 설치(웹 노드 고정, 표준 :443 리슨) — 애드온, 오버레이 밖
 #    helm:  helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx \
 #             --create-namespace -f deploy/addons/ingress-nginx/values-hostnetwork.yaml
 #    정적:  기존 컨트롤러에 deploy/addons/ingress-nginx/controller-hostnetwork-patch.yaml 패치
 #    (자세히: deploy/addons/ingress-nginx/README.md)
 
-# 3) 값 채우기 — 파일 하나 (PORTAL_VIP 없음; WEB_NODE·PORTAL_PUBLIC_IP·PORTAL_PORT)
+# 3) 값 채우기 — 파일 하나 (PORTAL_VIP 없음; WEB_NODE·PORTAL_PUBLIC_IP 추가, PORTAL_PORT 는 443 기본)
 cp deploy/overlays/ssc/values.env.example deploy/overlays/ssc/values.env
-$EDITOR deploy/overlays/ssc/values.env   # PORTAL_PORT=30080, WEB_NODE=ion2110, PORTAL_PUBLIC_IP=<bond0 IP>
+$EDITOR deploy/overlays/ssc/values.env   # WEB_NODE=ion2110, PORTAL_PUBLIC_IP=<bond0 public IP>
 
 # 4) 이미지 4종(dms·dms-agent·dms-mpifileutils·buildah) 사내 레지스트리에 push (1회, 설치와 분리)
 
@@ -55,9 +53,8 @@ kubectl -n dms create secret tls dms-portal-tls --cert=tls.crt --key=tls.key   #
 sh deploy/overlays/ssc/install.sh --dry-run
 sh deploy/overlays/ssc/install.sh
 
-# 7) 검증 — PASS/FAIL 한 줄씩 (사용자 접속: https://<public IP>:<PORTAL_PORT>)
-PORTAL_PUBLIC_IP=<public IP> PORTAL_PORT=30080 PORTAL_DOMAIN=<도메인> CACERT=<사내CA> \
-  sh deploy/overlays/ssc/verify.sh
+# 7) 검증 — PASS/FAIL 한 줄씩 (사용자 접속: https://<public IP>)
+PORTAL_PUBLIC_IP=<public IP> PORTAL_DOMAIN=<도메인> CACERT=<사내CA> sh deploy/overlays/ssc/verify.sh
 ```
 
 `install.sh` 가 apply 전에 막아주는 것(전부 한 줄 사유): Volcano/ingress-nginx 미설치,
@@ -74,8 +71,8 @@ PORTAL_PUBLIC_IP=<public IP> PORTAL_PORT=30080 PORTAL_DOMAIN=<도메인> CACERT=
 | public IP 소유 | MetalLB VIP → ingress svc(LoadBalancer) | 웹 노드 호스트 NIC(직접) → ingress hostNetwork |
 | 선행 애드온 | Volcano + MetalLB + ingress-nginx | Volcano + ingress-nginx |
 | ingress-nginx | Deployment(replicas 2), Service LoadBalancer | Deployment(replicas 1), hostNetwork, 웹 노드 고정 |
-| 값 | PORTAL_VIP + PORTAL_DOMAIN | PORTAL_PUBLIC_IP + PORTAL_PORT + WEB_NODE + PORTAL_DOMAIN |
-| 접속 포트 | 443(VIP) | PORTAL_PORT(방화벽이 연 포트, 예 30080) |
+| 값 | PORTAL_VIP + PORTAL_DOMAIN | PORTAL_PUBLIC_IP + WEB_NODE + PORTAL_DOMAIN (+PORTAL_PORT, 기본 443) |
+| 접속 | https://VIP (443) | https://public IP (443) |
 | 페일오버 | VIP 재광고(노드 죽어도 자동, ~11s) | **없음 — 웹 노드가 단일 장애점** |
 
 ## 트레이드오프 (정직히)

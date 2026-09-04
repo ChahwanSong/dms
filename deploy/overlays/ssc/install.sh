@@ -56,7 +56,7 @@ kubectl -n "$INGRESS_NS" get pod "$CPOD" -o jsonpath='{.spec.containers[0].args}
   && ok "--default-ssl-certificate 설정됨(IP 직접 https 지원)" \
   || warn "--default-ssl-certificate 미설정 — IP 직접 https 접속에 필요(도메인만 쓰면 생략 가능)"
 # https 리슨 포트가 방화벽이 연 포트(PORTAL_PORT)와 같은가. hostNetwork 라
-# containerPort == 호스트 포트. 다르면 사용자가 그 포트로 못 닿는다(방화벽 30080 등).
+# containerPort == 호스트 포트. 다르면 사용자가 그 포트로 못 닿는다(표준 443 기본).
 PPORT="${PORTAL_PORT:-443}"
 HPORT=$(kubectl -n "$INGRESS_NS" get pod "$CPOD" \
   -o jsonpath='{.spec.containers[0].ports[?(@.name=="https")].containerPort}' 2>/dev/null || true)
