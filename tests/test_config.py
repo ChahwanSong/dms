@@ -155,6 +155,26 @@ def test_account_verification_env_defaults_on():
     assert Settings.from_env(VALID).account_email_domain == "samsung.com"
 
 
+def test_password_encryption_env_defaults_on_and_dataclass_defaults_off():
+    # 웹 인증 하드닝(2026-09-07): 라이브(from_env)는 봉인 필수(fail-closed), 직접
+    # 생성(테스트 픽스처)은 평문 허용 -- account_verification_required 와 같은 두 층.
+    assert Settings.from_env(VALID).password_encryption_required is True
+    assert Settings.from_env({**VALID, "DMS_PASSWORD_ENCRYPTION_REQUIRED": "false"}
+                             ).password_encryption_required is False
+    assert Settings(database_url="u", shared_token="s", admin_token="a",
+                    session_secret="x").password_encryption_required is False
+
+
+def test_login_rate_limit_env_parsing_and_defaults():
+    s = Settings.from_env(VALID)
+    assert (s.login_rate_limit_attempts, s.login_rate_limit_window_seconds) == (10, 60)
+    s = Settings.from_env({**VALID, "DMS_LOGIN_RATE_LIMIT_ATTEMPTS": "0",
+                           "DMS_LOGIN_RATE_LIMIT_WINDOW_SECONDS": "120"})
+    assert (s.login_rate_limit_attempts, s.login_rate_limit_window_seconds) == (0, 120)
+    with pytest.raises(SettingsError):
+        Settings.from_env({**VALID, "DMS_LOGIN_RATE_LIMIT_ATTEMPTS": "ten"})
+
+
 def test_session_cookie_secure_parses_and_defaults_off():
     # TLS 종단(ingress) 배포 대비 게이트. 기본 false 인 이유는 테스트베드의
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문.

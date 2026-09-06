@@ -78,6 +78,16 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_job_id: "잡 ID가 올바르지 않습니다",
   invalid_batch: "배치 값이 올바르지 않습니다",
   invalid_credentials: "사용자명 또는 비밀번호가 올바르지 않습니다",
+  // 웹 인증 하드닝(2026-09-07). 로그인 감속(사용자명·IP 별 1분 10회 실패) 429 와
+  // 비밀번호 전송 봉인(passwordTransport.ts ↔ api/password_transport.py) 422 들.
+  login_rate_limited: "로그인 시도가 너무 많습니다 — 1분 뒤 다시 시도하세요",
+  password_missing: "비밀번호가 없습니다",
+  password_encryption_required: "이 서버는 봉인되지 않은 비밀번호를 받지 않습니다 — HTTPS 로 접속한 포탈에서 다시 시도하세요",
+  password_encryption_invalid: "비밀번호 봉인을 열 수 없습니다 — 페이지를 새로고침한 뒤 다시 시도하세요",
+  password_encryption_key_mismatch: "서버 키가 바뀌었습니다 — 페이지를 새로고침한 뒤 다시 시도하세요",
+  // 프론트 전용 코드다(registry_unreachable 과 같은 관례): 브라우저에 WebCrypto 가
+  // 없으면(HTTPS/localhost 가 아닌 평문 접속) 포탈은 평문을 보내는 대신 여기서 멈춘다.
+  password_encryption_unavailable: "이 연결에서는 비밀번호를 암호화할 수 없습니다 — HTTPS 주소로 접속하세요",
   fingerprint_mismatch: "미리보기가 변경되었습니다. 다시 확인해 주세요",
   preview_expired: "미리보기가 만료되었습니다. 다시 제출해 주세요",
   not_confirmable: "이미 처리된 작업입니다",

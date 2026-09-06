@@ -28,9 +28,16 @@ BATCH = {"operation": "scan", "max_concurrency": 1, "options": {}, "note": None,
 
 
 def _admin_login(client, username="ops"):
+    # from_env 앱은 라이브 자세(비밀번호 봉인 필수, 2026-09-07)라 로그인은 봉인해
+    # 보낸다 -- 토큰 부트스트랩은 평문 허용.
+    from dms.api.password_transport import seal_with_info
     client.post("/api/admin/accounts", json={"username": username, "password": "p"},
                 headers={"x-admin-token": "tok-admin"})
-    client.post("/api/auth/login", json={"username": username, "password": "p"})
+    info = client.get("/api/auth/transport-key").json()
+    r = client.post("/api/auth/login", json={
+        "username": username,
+        "password_enc": seal_with_info(info, "p", purpose="login", username=username)})
+    assert r.status_code == 200, r.text
 
 
 def test_allowlist_session_admin_without_owner_accepted(db):

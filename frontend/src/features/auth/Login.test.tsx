@@ -1,14 +1,20 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
-import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
+import { beforeAll, beforeEach, afterAll, afterEach, test, expect } from "vitest";
 import { Login } from "./Login";
+import { forgetTransportKey } from "../../lib/passwordTransport";
+import { isSealed, makeServerKey, openSealed, transportKeyHandler, type TestServerKey } from "../../test/transportKey";
 
 const server = setupServer();
-beforeAll(() => server.listen());
+// 비밀번호를 보내는 폼은 전부 먼저 서버 키를 받아 봉인한다(2026-09-07) -- 핸들러가
+// 없으면 키 조회가 네트워크 오류로 죽어 모든 제출 테스트가 "네트워크" 문구로 빗나간다.
+let serverKey: TestServerKey;
+beforeAll(async () => { server.listen(); serverKey = await makeServerKey(); });
+beforeEach(() => { forgetTransportKey(); server.use(transportKeyHandler(serverKey)); });
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
@@ -84,10 +90,39 @@ test("계정 생성 흐름: 인증번호 발급(stub 에코 안내) → 생성 �
   // 성공 시 로그인 탭으로 복귀 + 안내
   expect(await screen.findByText("계정이 생성됐습니다 — 로그인하세요")).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "로그인" })).toBeInTheDocument();
-  expect(bodies).toEqual([
-    { username: "cocoa.song", purpose: "signup" },
-    { username: "cocoa.song", password: "pw1", code: "1234" },
-  ]);
+  expect(bodies[0]).toEqual({ username: "cocoa.song", purpose: "signup" });
+  // 비밀번호는 봉인돼 실린다 -- 평문 password 필드는 와이어에 없다.
+  const signupBody = bodies[1] as { username: string; code: string; password?: string; password_enc: unknown };
+  expect(signupBody.username).toBe("cocoa.song");
+  expect(signupBody.code).toBe("1234");
+  expect(signupBody.password).toBeUndefined();
+  expect(isSealed(signupBody.password_enc)).toBe(true);
+  expect(await openSealed(serverKey, signupBody.password_enc as never, "signup", "cocoa.song")).toBe("pw1");
+});
+
+test("로그인 429(감속)는 한국어 문구로 보인다", async () => {
+  server.use(http.post("/api/auth/login",
+    () => HttpResponse.json({ detail: "login_rate_limited" }, { status: 429, headers: { "Retry-After": "42" } })));
+  renderLogin();
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "pw");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  expect(await screen.findByText("로그인 시도가 너무 많습니다 — 1분 뒤 다시 시도하세요")).toBeInTheDocument();
+});
+
+test("로그인 본문은 봉인된 비밀번호를 싣는다", async () => {
+  let body: { username: string; password?: string; password_enc: unknown } | null = null;
+  server.use(http.post("/api/auth/login", async ({ request }) => {
+    body = await request.json() as typeof body;
+    return HttpResponse.json({ actor: "alice", role: "user" });
+  }));
+  renderLogin();
+  await userEvent.type(screen.getByLabelText("사용자명"), "alice");
+  await userEvent.type(screen.getByLabelText("비밀번호"), "s3cret");
+  await userEvent.click(screen.getByRole("button", { name: "로그인" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body!.password).toBeUndefined();
+  expect(await openSealed(serverKey, body!.password_enc as never, "login", "alice")).toBe("s3cret");
 });
 
 test("비밀번호 변경: 잘못된 인증번호는 한국어 사유로 거부된다", async () => {

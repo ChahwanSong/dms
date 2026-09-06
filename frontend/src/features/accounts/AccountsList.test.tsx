@@ -3,11 +3,17 @@ import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
-import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
+import { beforeAll, beforeEach, afterAll, afterEach, test, expect } from "vitest";
 import { AccountsList } from "./AccountsList";
+import { forgetTransportKey } from "../../lib/passwordTransport";
+import { isSealed, makeServerKey, openSealed, transportKeyHandler, type TestServerKey } from "../../test/transportKey";
 
 const server = setupServer();
-beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
+// 계정 생성 다이얼로그는 비밀번호를 봉인해 보낸다(2026-09-07) -- 서버 키 핸들러 필수.
+let serverKey: TestServerKey;
+beforeAll(async () => { server.listen(); serverKey = await makeServerKey(); });
+beforeEach(() => { forgetTransportKey(); server.use(transportKeyHandler(serverKey)); });
+afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
 const ACCOUNTS = [
   { username: "admin", role: "admin", email: "admin@example.com", disabled: 0, created_at: "2026-08-05T00:00:00Z" },
@@ -164,8 +170,13 @@ test("운영자 계정 생성: 다이얼로그에서 아이디·비밀번호·�
   await userEvent.type(within(dialog).getByLabelText("비밀번호"), "pw1");
   await userEvent.selectOptions(within(dialog).getByLabelText("역할"), "admin");
   await userEvent.click(within(dialog).getByRole("button", { name: "생성" }));
-  await waitFor(() => expect(captured).toEqual(
-    { username: "new.user", password: "pw1", role: "admin" }));
+  await waitFor(() => expect(captured).not.toBeUndefined());
+  const body = captured as { username: string; role: string; password?: string; password_enc: unknown };
+  expect({ username: body.username, role: body.role }).toEqual({ username: "new.user", role: "admin" });
+  // 평문 password 는 와이어에 없다 -- 봉인을 열면 입력한 값이다.
+  expect(body.password).toBeUndefined();
+  expect(isSealed(body.password_enc)).toBe(true);
+  expect(await openSealed(serverKey, body.password_enc as never, "admin_create", "new.user")).toBe("pw1");
 });
 
 test("운영자 계정 생성: 중복 409 는 다이얼로그 안 한국어 사유로 남는다", async () => {

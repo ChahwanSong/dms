@@ -64,6 +64,10 @@ export function backendEnv(dbPath: string, extra: Record<string, string> = {})
     DMS_SESSION_SECRET: SESSION_SECRET,
     // 하니스는 무인증 signup 으로 계정을 시딩한다(인증번호 흐름은 vitest 몫).
     DMS_ACCOUNT_VERIFICATION_REQUIRED: "false",
+    // 시드·apiLogin 은 Node fetch 로 평문 password 를 보낸다(라이브 기본은 봉인 필수).
+    // 브라우저 UI 로그인(E1)은 이 스위치와 무관하게 항상 봉인해 보내므로 실제
+    // 브라우저 WebCrypto ↔ 파이썬 서버의 상호운용은 E1 이 그대로 검증한다.
+    DMS_PASSWORD_ENCRYPTION_REQUIRED: "false",
     ...extra,
   };
 }
