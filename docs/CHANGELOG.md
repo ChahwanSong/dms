@@ -84,7 +84,20 @@ create·set_password·reset_password) — 갭은 **전송**이었다. 브라우�
 - **422 에코 차단**: RequestValidationError 핸들러가 `type/loc/msg` 만 남긴다.
 - 사유 코드 6종 추가(양방향 계약), ConfigMap 키 3종, e2e E1 이 실브라우저 봉인
   본문(평문 없음)을 단언, Python↔WebCrypto 상호운용은 e2e + 테스트베드로 실증.
-- 실증(테스트베드 d119): 아래 「실증」 참조.
+- **실증(테스트베드, dms:d119 = 커밋 2d7a6d2, 에이전트 d118 유지)** — 적용 전 임시
+  파드로 이미지 검증(cryptography 50.0.1·새 모듈 import·번들에 transport-key·
+  동봉 매니페스트 새 키). 라이브 `https://dms.local`:
+  1. 평문 로그인(정답) → **422 `password_encryption_required`**
+  2. 봉인 로그인(파이썬 `seal_with_info`) → **200** + `Set-Cookie dms_session … secure`
+  3. 봉인 오답 10회 → 401 ×10, 11번째 **정답** → **429 `login_rate_limited`,
+     `Retry-After: 60`**; 형식 오류 422 응답에 본문 문자열 에코 없음
+  4. 61초 뒤 봉인 정답 → 200(창 만료로 자동 해제)
+  5. 실 Chrome(playwright, vite dev → port-forward → 라이브 파드): 로그인 폼 제출
+     본문 키 = `username, password_enc`(평문 `password` 키 없음, kid = 라이브 키
+     `7215cbe0…`), 요청 순서 transport-key → login(200) → me, 대시보드 도달; 별도
+     컨텍스트에서 오답 10회 후 정답 → 429 + 화면에 "로그인 시도가 너무 많습니다 —
+     1분 뒤 다시 시도하세요" 표시.
+  게이트: backend 전체 스위트(1656) · vitest 676 · tsc · e2e 9/9 · dist 외부 URL 0.
 
 ### ✅ 슬라이스 35: 잡 이미지 릴리스 통합 — **완료**(2026-08-18, d81)
 
