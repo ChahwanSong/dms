@@ -57,6 +57,11 @@ _SERVER_INT_KEYS = (
     # 256MiB. sparse 초대형 파일로 디스크·대역을 태우는 공격을 여기서 끊는다 --
     # 초과는 413 artifact_too_large(판정은 봉쇄 통과 뒤에만, 크기 오라클 방지).
     ("DMS_ARTIFACT_DOWNLOAD_MAX_BYTES", "artifact_download_max_bytes", 268435456),
+    # 로그인 무차별 대입 감속(2026-09-07, 사용자 결정: 1분 10회). 사용자명·클라이언트
+    # IP 각각 창 안 **실패** 상한 -- 초과는 429 login_rate_limited(Retry-After).
+    # 어느 하나라도 0 이면 명시적 비활성(api/login_limiter.py).
+    ("DMS_LOGIN_RATE_LIMIT_ATTEMPTS", "login_rate_limit_attempts", 10),
+    ("DMS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "login_rate_limit_window_seconds", 60),
 )
 # 재시도 설정은 두지 않는다: 상위 스펙에 재시도 요구가 없고, 실패한 rm/sync 를 자동으로
 # 재실행하는 것은 파괴적이다. 재실행은 배치 :rerun-failed 와 사용자 재제출로 한다.
@@ -169,6 +174,15 @@ class Settings:
     # 이 그렇게 깨져서 이 분리를 박았다. 인증 흐름 자체는 test_api_auth 가
     # 게이트를 명시로 켠 앱으로 검증한다.
     account_verification_required: bool = False
+    # 비밀번호 전송 봉인(2026-09-07, api/password_transport.py): true 면 비밀번호를
+    # 받는 엔드포인트(login/signup/password-reset/admin accounts 세션 경로)가 평문
+    # `password` 를 422 password_encryption_required 로 거절하고 `password_enc`
+    # (브라우저 WebCrypto 봉인)만 받는다. 포탈은 항상 봉인해 보내므로 사용자에겐
+    # 보이지 않는 스위치다. 기본이 **두 층**인 이유는 account_verification_required 와
+    # 같다: from_env(라이브)는 True(fail-closed), dataclass 직접 생성(테스트)은
+    # False -- 기존 테스트 수백 곳이 평문 password 픽스처를 쓴다. x-admin-token
+    # 부트스트랩 경로만 정책과 무관하게 평문을 허용한다(운영자 curl, routes_auth).
+    password_encryption_required: bool = False
     account_email_domain: str = "samsung.com"
     mailer_backend: str = "stub"
     execution_backend: str = "stub"
@@ -189,6 +203,9 @@ class Settings:
     rollout_interval_seconds: int = 10
     rollout_timeout_seconds: int = 600
     artifact_download_max_bytes: int = 268435456
+    # 로그인 감속(2026-09-07): 사용자명·IP 별 창 안 실패 상한. 0 은 명시적 비활성.
+    login_rate_limit_attempts: int = 10
+    login_rate_limit_window_seconds: int = 60
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "Settings":
@@ -256,6 +273,8 @@ class Settings:
                 environ, "DMS_SESSION_COOKIE_SECURE"),
             account_verification_required=_parse_bool(
                 environ, "DMS_ACCOUNT_VERIFICATION_REQUIRED", default=True),
+            password_encryption_required=_parse_bool(
+                environ, "DMS_PASSWORD_ENCRYPTION_REQUIRED", default=True),
             account_email_domain=environ.get(
                 "DMS_ACCOUNT_EMAIL_DOMAIN", "samsung.com"),
             mailer_backend=environ.get("DMS_MAILER_BACKEND", "stub"),

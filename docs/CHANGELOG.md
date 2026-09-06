@@ -54,6 +54,38 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 웹 인증 하드닝: 로그인 감속 + 비밀번호 전송 봉인 — **완료·실증**(2026-09-07, d119)
+
+웹 보안 검토(2026-09-07, dms-ssc 기준)에서 남은 두 갭을 닫았다. 사용자 결정:
+"로그인 rate limiting(1분 10회) + 사용자 비밀번호 암호화, 전 코드베이스 정밀 적용".
+
+**전수 감사 결과(구현 전)**: 저장은 이미 전 경로 scrypt(`accounts._hash_password`:
+create·set_password·reset_password) — 갭은 **전송**이었다. 브라우저→API 본문의
+`password` 가 평문이고 TLS 는 ingress 에서 끝나 클러스터 내부 hop·TLS 검사 프록시·
+인증서 경고를 무시한 접속에서 그대로 보인다. 부수 누출: FastAPI 기본 422 가 오류
+항목 `input` 에 본문(비밀번호 포함)을 에코.
+
+- **전송 봉인** (`api/password_transport.py` ↔ `lib/passwordTransport.ts`): 서버
+  P-256 키를 `DMS_SESSION_SECRET` 에서 HKDF 로 결정적 유도(레플리카 동일·DB 없음·
+  시크릿 회전 = 키 회전) → 브라우저 임시 키 ECDH → HKDF-SHA256 → AES-256-GCM,
+  AAD 에 용도|사용자명 바인딩. 비밀번호를 받는 **네 경로 전부**(login/signup/
+  password-reset/admin accounts) 가 `_password_from` 하나를 거치고, 프런트 훅 넷은
+  `postWithSealedPassword` 하나를 거친다(평문 `password` 는 와이어에 실리지 않음).
+  라이브 정책 `DMS_PASSWORD_ENCRYPTION_REQUIRED=true`(from_env 기본) 는 평문을 422
+  `password_encryption_required` 로 거절; x-admin-token 부트스트랩만 평문 허용.
+  kid 불일치는 별도 사유(프런트가 키 재수신 후 1회 재시도), 나머지 실패는 한 사유
+  (복호 오라클 방지). WebCrypto 없는 평문 접속은 평문으로 떨어지지 않고
+  `password_encryption_unavailable` 로 멈춘다. 의존성 `cryptography` 추가(빌드 타임).
+- **로그인 감속** (`api/login_limiter.py`): 사용자명·클라이언트 IP 키별 슬라이딩
+  60s/10회 **실패** 계수, 상한이면 검증 **전에** 429 `login_rate_limited` +
+  `Retry-After`. 거절된 시도·봉인 오류는 세지 않는다(영구 잠금 DoS 방지), 성공은
+  user 키를 비운다. 상한 도달 시 키당 1회 `events(auth/login_rate_limited)`. IP 는
+  X-Real-IP → XFF 마지막 → 소켓(첫 항목은 위조 가능). 0 = 명시적 비활성.
+- **422 에코 차단**: RequestValidationError 핸들러가 `type/loc/msg` 만 남긴다.
+- 사유 코드 6종 추가(양방향 계약), ConfigMap 키 3종, e2e E1 이 실브라우저 봉인
+  본문(평문 없음)을 단언, Python↔WebCrypto 상호운용은 e2e + 테스트베드로 실증.
+- 실증(테스트베드 d119): 아래 「실증」 참조.
+
 ### ✅ 슬라이스 35: 잡 이미지 릴리스 통합 — **완료**(2026-08-18, d81)
 
 d80 실증에서 남은 마지막 구멍을 닫았다: mfu 를 빌드·릴리스해도 잡은 옛 이미지로

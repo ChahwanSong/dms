@@ -166,5 +166,11 @@
   "registry_tag_in_use",
   "registry_tag_not_found",
   "registry_delete_disabled",
-  "registry_error"
+  "registry_error",
+  "login_rate_limited",
+  "password_missing",
+  "password_encryption_required",
+  "password_encryption_invalid",
+  "password_encryption_key_mismatch",
+  "password_encryption_unavailable"
 ]

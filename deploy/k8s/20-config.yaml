@@ -37,6 +37,20 @@ data:
   # 쿠키가 실리지 않아 동작하지 않는다 -- 자동화·비상 접근은 Bearer 토큰 경로
   # (shared/admin token)를 쓰거나 https://dms.local 로 간다.
   DMS_SESSION_COOKIE_SECURE: "true"
+  # --- 웹 인증 하드닝(2026-09-07) ---
+  # 비밀번호 전송 봉인 필수: 로그인/계정 생성/비밀번호 변경/운영자 계정 생성이
+  # 평문 `password` 를 422 로 거절하고 포탈이 WebCrypto 로 봉인한 `password_enc`
+  # 만 받는다(src/dms/api/password_transport.py). 코드 기본(from_env)도 true 라
+  # 문서화를 위한 명시다. x-admin-token 부트스트랩(첫 관리자 curl)만 평문 허용.
+  # 서버 키는 DMS_SESSION_SECRET 에서 유도된다 -- 시크릿 회전 = 키 회전(포탈은
+  # 키 불일치를 받으면 키를 다시 받아 재시도하므로 사용자 조치 없음).
+  DMS_PASSWORD_ENCRYPTION_REQUIRED: "true"
+  # 로그인 감속(사용자 결정: 1분 10회): 사용자명·클라이언트 IP 각각 창 안 **실패**
+  # 상한. 초과는 429 login_rate_limited + Retry-After, 창이 지나면 저절로 풀린다
+  # (잠금 아님). 프로세스 메모리라 dms-api 레플리카 수만큼 실효 상한이 곱해진다.
+  # ATTEMPTS 를 0 으로 두면 명시적 비활성(관찰 전용).
+  DMS_LOGIN_RATE_LIMIT_ATTEMPTS: "10"
+  DMS_LOGIN_RATE_LIMIT_WINDOW_SECONDS: "60"
 
   # --- LDAP identity resolution (identity_ldap.py) ---
   # 2026-08-23: 테스트베드 LDAP(pkg-01 slapd)를 프로덕션 미러로 재구성했다 --

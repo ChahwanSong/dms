@@ -18,7 +18,18 @@ test.describe("E1 부팅+세션", () => {
     await page.goto("/login");
     await page.getByLabel("사용자명").fill(ADMIN.username);
     await page.getByLabel("비밀번호").fill(ADMIN.password);
+    // 비밀번호 전송 봉인(2026-09-07)의 유일한 실브라우저 증거: 실제 Chrome 의
+    // WebCrypto 가 봉인한 본문을 실제 파이썬 서버가 열어 200 을 준다. 와이어에
+    // 평문 password 가 없다는 것도 여기서 본다(msw 단위 테스트는 서버를 흉내낼 뿐).
+    const loginReq = page.waitForRequest(
+      (r) => r.url().endsWith("/api/auth/login") && r.method() === "POST");
     await page.getByRole("button", { name: "로그인" }).click();
+    const loginBody = (await loginReq).postDataJSON() as
+      { username: string; password?: string; password_enc?: { version: number; kid: string } };
+    expect(loginBody.username).toBe(ADMIN.username);
+    expect(loginBody.password).toBeUndefined();
+    expect(loginBody.password_enc?.version).toBe(1);
+    expect((await loginReq).postData()).not.toContain(ADMIN.password);
 
     // Home 이 admin 을 /admin/dashboard 로 보낸다(router.tsx Home). URL 단언이라
     // 셀렉터가 아무것도 못 찾고도 통과하는 공허한 초록이 원리상 불가능하다.

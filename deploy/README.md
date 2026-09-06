@@ -633,6 +633,24 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
    레플리카 노드로 ARP 재선출·자동 복구(svc 가 externalTrafficPolicy=Local 이라
    선출은 컨트롤러 파드가 있는 노드 중에서만).
 
+7. **웹 인증 하드닝(2026-09-07, d119)** — 20-config 의 세 키가 라이브 자세다:
+   - `DMS_PASSWORD_ENCRYPTION_REQUIRED: "true"` — 포탈은 비밀번호를 WebCrypto 로
+     봉인해(`password_enc`, ECDH P-256 + HKDF + AES-256-GCM) 보내고 서버는 평문
+     `password` 를 422 로 거절한다. 서버 키는 `DMS_SESSION_SECRET` 에서 유도되므로
+     시크릿 회전 = 키 회전(포탈이 자동 재수신). **첫 관리자 부트스트랩**(x-admin-token
+     curl)만 평문 허용: `curl -H 'x-admin-token: <ADMIN_TOKEN>' -d '{"username":..,
+     "password":..}' https://<포탈>/api/admin/accounts`. 자동화가 로그인 세션이
+     필요하면 `python -c 'from dms.api.password_transport import seal_with_info'`
+     로 봉인해 보낸다(예: `~/.claude/jobs/.../tmp/login-sealed.py`).
+   - `DMS_LOGIN_RATE_LIMIT_ATTEMPTS: "10"` / `..._WINDOW_SECONDS: "60"` — 사용자명·
+     IP 별 실패 10회/분 초과 시 429 + Retry-After(창이 지나면 자동 해제, 잠금 아님).
+     ingress-nginx 가 X-Real-IP 를 채우므로 IP 키가 정확하다. 관찰만 하려면 ATTEMPTS
+     를 0 으로.
+   - 검증(실증 절차): 평문 로그인 `curl -d '{"username":"u","password":"p"}'
+     /api/auth/login` = 422 `password_encryption_required`; 봉인 로그인 = 200 +
+     Set-Cookie; 틀린 비밀번호 봉인 10회 후 11번째(정답) = 429; 포탈 화면 로그인
+     정상 + 개발자도구 네트워크 탭 본문에 `password` 없음.
+
 ---
 
 ## Unresolved values to fill in during live validation

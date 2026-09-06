@@ -2,6 +2,7 @@ import os
 import signal
 import sys
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.staticfiles import StaticFiles
@@ -11,6 +12,8 @@ from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
                      build_identity_resolver, build_queue_reader,
                      build_rollout_runner, wire_reconnect_event)
+from .login_limiter import LoginRateLimiter
+from .password_transport import PasswordTransport
 from .routes_accounts import router as accounts_router
 from .routes_auth import router as auth_router
 from .routes_storages import router as storages_router, user_router as user_storages_router
@@ -53,6 +56,21 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.state.queue_reader = build_queue_reader(settings)
     # 슬라이스 22 §2.6: 재연결 성공의 영속 흔적(events.db_reconnected) 훅.
     wire_reconnect_event(db, app.state.repos)
+    # 2026-09-07 웹 인증 하드닝: 로그인 감속기(프로세스 메모리)와 비밀번호 전송
+    # 봉인기(세션 시크릿에서 유도한 P-256 키 -- 레플리카·재시작에 걸쳐 동일).
+    app.state.login_limiter = LoginRateLimiter(
+        settings.login_rate_limit_attempts, settings.login_rate_limit_window_seconds)
+    app.state.password_transport = PasswordTransport(settings.session_secret)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request, exc: RequestValidationError):
+        # FastAPI 기본 422 는 오류 항목마다 `input`(본문 원문)을 되돌린다 -- 비밀번호
+        # 필드가 실린 요청이 형식 오류를 내면 그 값이 응답으로 에코돼 프록시 응답
+        # 로그에 남는다. 위치·종류·메시지만 남긴다(프런트 request() 는 detail 이
+        # 문자열이 아니면 http_422 로 합성하므로 화면 계약 무영향).
+        return JSONResponse(status_code=422, content={"detail": [
+            {k: v for k, v in err.items() if k in ("type", "loc", "msg")}
+            for err in exc.errors()]})
     # https_only(→ Secure 플래그): TLS 종단(ingress) 뒤 배포에서만 켠다 --
     # config.Settings.session_cookie_secure 주석 참고.
     app.add_middleware(SessionMiddleware, secret_key=settings.session_secret,

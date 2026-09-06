@@ -368,7 +368,9 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
 |---|---|
 | `src/dms/api/app.py` | create_app: 라우터 18개 조립, SessionMiddleware(쿠키 dms_session), /healthz, /readyz(DB SELECT 1 + 연속 실패 30회 시 exit_fn=SIGTERM 자기종료, 성공 1회면 카운터 리셋), dist 정적 서빙(/assets mount)+spa_fallback(존재하는 파일이면 FileResponse, 아니면 index.html) |
 | `src/dms/api/auth.py` | Identity(actor,role,auth) 네임드튜플, current_identity(): Bearer 공유토큰(x-dms-actor는 node:<DNS-1123>만, 빈값→shared-token, 그 외 400) vs 세션(요청마다 계정 disabled 재검사), require_user/require_admin, audit_actor()(token: 접두 표시용) |
-| `src/dms/api/routes_auth.py` | signup(무인증, email 검증 더미)/login(세션 재발급)/logout/me + x-admin-token 헤더로 admin 계정 부트스트랩(감사 actor=token:admin-token) |
+| `src/dms/api/routes_auth.py` | signup/login/password-reset/admin accounts — 비밀번호를 받는 네 경로 전부 `_password_from()` 하나로 평문을 얻는다(password_enc 봉인 해제 또는 정책 허용 시 평문; 토큰 부트스트랩만 평문 상시 허용), login 은 검증 **전에** 감속기(429 login_rate_limited+Retry-After, 실패만 계수·성공 시 user 키 clear), GET /api/auth/transport-key(무인증 공개키), logout/me, x-admin-token 부트스트랩(감사 actor=token:admin-token) |
+| `src/dms/api/password_transport.py` | 비밀번호 전송 봉인(2026-09-07): DMS_SESSION_SECRET→HKDF→P-256 정적 키(결정적, 레플리카 동일), 브라우저 임시 키와 ECDH→HKDF-SHA256→AES-256-GCM, AAD=`dms-password-transport-v1\|<purpose>\|<username>`, kid 불일치만 key_mismatch 로 구분·나머지는 invalid 한 사유(복호 오라클 방지), seal()/seal_with_info()는 테스트·운영 스크립트용 브라우저 판 |
+| `src/dms/api/login_limiter.py` | LoginRateLimiter: 사용자명·IP 키별 슬라이딩 창 실패 deque(기본 10회/60s), 상한 뒤 요청은 검증 전에 429 이고 실패로 세지 않음(영구 잠금 DoS 방지), record_failure 는 상한 도달 키만 반환(이벤트 1회), attempts/window 0 = 명시적 비활성, 프로세스 메모리(레플리카 N 배 실효) |
 | `src/dms/api/routes_requests.py` | 제출(202; maintenance 503, scan은 admin 전용 403, owner_username 특권 게이트, 422 reason 세분화), 목록(admin은 전체), 상세(events 101건 조회로 잘림 판별), 취소(전 잡 종단이면 거짓 취소 대신 finalize_from_job 화해 후 409) |
 | `src/dms/api/routes_jobs.py` | _owned_request/_owned_job 소유권 검사(비소유는 404로 뭉갬), confirm(fingerprint 대조·preview 만료 처리), job 단위 cancel |
 | `src/dms/api/cancel.py` | terminate_job(): 종단이면 no-op, phase_refs 전부 adapter.terminate — 종료 성공 후에만 DB Cancelled(거짓 취소 금지)의 실행부 |
@@ -385,6 +387,11 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
 ### 불변식 (위반하면 깨진다)
 
 - reasonCodes.json 단일 파일 양방향 계약: 백엔드에 새 detail=/reason_code= 리터럴을 추가하면 frontend/src/lib/reasonCodes.json과 api.ts REASON_MESSAGES를 같은 커밋에 갱신해야 한다 — reasonCodes.test.ts(전 코드 매핑+죽은 키 금지)와 tests/test_reason_codes_coverage.py(src/dms AST 추출)가 같은 JSON을 대조한다
+- 비밀번호는 평문으로 저장·전송되지 않는다(2026-09-07): 저장은 accounts.py `_hash_password`(scrypt) 한 곳, 전송은 프런트 `postWithSealedPassword`(passwordTransport.ts) ↔ 백엔드 `_password_from`(routes_auth.py) 한 쌍 — 비밀번호를 받는 새 엔드포인트/훅은 반드시 이 두 통로를 거친다(우회하면 그 경로만 평문이 되고 아무 테스트도 빨간불이 아니다; test_api_auth_hardening 이 현재 네 경로를 전수 고정). 라이브(from_env)는 `password_encryption_required=True` 로 평문 422 거절, dataclass 직접 생성(테스트)은 False — account_verification_required 와 같은 두 층
+- 봉인 상수(HKDF salt/info·AAD 접두·버전·곡선)는 password_transport.py 와 passwordTransport.ts 가 바이트 단위로 동일해야 한다(test_password_transport.test_constants_mirror_the_frontend_module 가 원문 대조) — 한쪽만 바꾸면 전 로그인이 password_encryption_invalid
+- 로그인 감속은 비밀번호 검증 **전에** 판정하고, 거절(429)된 시도는 실패로 세지 않는다(login_limiter.py docstring) — 뒤집으면 검증이 오라클이 되거나 공격자가 1분에 한 번 찔러 계정을 영구히 잠근다(DoS); 봉인 오류(422)도 실패로 세지 않는다(추측이 아니다)
+- 클라이언트 IP 는 X-Real-IP → X-Forwarded-For **마지막** 항목 → 소켓 순(auth.py client_ip) — XFF 첫 항목은 클라이언트가 심을 수 있다(ingress-nginx 는 덧붙인다); IP 키는 보조 축이고 사용자명 키가 주 방어
+- 422 검증 오류 응답은 `type/loc/msg` 만 싣는다(app.py RequestValidationError 핸들러) — FastAPI 기본의 `input` 에코는 비밀번호 필드가 실린 형식 오류 요청의 평문을 응답(프록시 로그)에 되돌린다
 - Identity.auth에 기본값 없음(auth.py:27) — 새 생성 지점이 필드를 빠뜨리면 조용한 session 오분류 대신 TypeError로 즉시 터지는 것이 의도; Identity.actor는 절대 변형 금지(에이전트 인증·특권 판정·소유권 검사가 원값 비교), 표시용은 audit_actor()만(auth.py:30)
 - _NODE_NAME_RE 정의는 auth.py:15 한 곳 — routes_agent.py:6이 import; 두 곳으로 갈라지면 토큰 게이트가 통과시킨 node:<이름>을 ingest_report가 거절한다
 - 아티팩트 봉쇄 사슬은 open_artifact_stream 하나(artifacts.py:178) — 뷰·다운로드 공유, 검사 순서 계약: 단일 open→fstat S_ISREG→fd 봉쇄(_assert_contained)→그 뒤에만 크기 상한(순서가 바뀌면 404/413 갈림이 존재·크기 오라클)

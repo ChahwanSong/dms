@@ -12,6 +12,10 @@ dependencies = [
     "uvicorn>=0.30",
     "itsdangerous>=2.1",
     "httpx>=0.27",
+    # 비밀번호 전송 봉인(api/password_transport.py): P-256 ECDH + HKDF + AES-GCM.
+    # 표준 라이브러리에는 비대칭 암호·AEAD 가 없어 자체 구현 대신 이 검증된
+    # 패키지를 쓴다(빌드 타임 PyPI, manylinux wheel -- 런타임 airgap 무관).
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

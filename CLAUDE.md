@@ -35,6 +35,12 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 - **사유 코드는 양쪽 등록**: `frontend/src/lib/reasonCodes.json` 과 `api.ts`
   REASON_MESSAGES 둘 다(양방향 계약 테스트). AST 추출기는 `reason_code=` **키워드
   리터럴**만 읽는다 — 위치 인자로 넘기면 커버리지 밖.
+- **비밀번호는 평문으로 저장·전송·에코하지 않는다.** 저장은 `accounts._hash_password`
+  (scrypt), 전송은 프런트 `postWithSealedPassword` ↔ 백엔드 `_password_from`
+  (password_enc 봉인, 라이브는 평문 422 거절). 비밀번호를 받는 새 훅·엔드포인트는
+  반드시 이 통로를 거친다 — `apiSend` 에 password 를 직접 실으면 그 경로만 평문이
+  되고 아무 테스트도 빨간불이 아니다. 봉인 상수는 `password_transport.py` 와
+  `passwordTransport.ts` 가 바이트 단위로 같아야 한다(대조 테스트 있음).
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
 - **매니페스트-우선 배포**: 이미지 태그를 먼저 bump·커밋하고 **그 커밋에서** 빌드한다

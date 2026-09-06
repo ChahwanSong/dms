@@ -34,6 +34,23 @@ def audit_actor(identity: Identity) -> str:
     return identity.actor if identity.auth == "session" else f"{_RESERVED_ACTOR_PREFIX}{identity.actor}"
 
 
+def client_ip(request: Request) -> str:
+    """로그인 감속 키용 클라이언트 IP(2026-09-07). dms-api 는 ClusterIP 뒤에만 있어
+    요청은 ingress-nginx 를 거쳐 온다: X-Real-IP 는 nginx 가 $remote_addr 로
+    **덮어쓰므로** 클라이언트가 못 속인다. X-Forwarded-For 는 nginx 가 기존 값에
+    **덧붙이므로**(proxy_add_x_forwarded_for) 첫 항목은 클라이언트가 심을 수 있다
+    -- 쓴다면 마지막 항목(신뢰 프록시가 덧붙인 것). 둘 다 없으면 소켓 피어.
+    프록시 없이 직접 닿는 배치(port-forward·테스트)에선 헤더를 클라이언트가 심을
+    수 있지만, IP 키는 보조 축이고 사용자명 키가 주 방어라 감속 자체는 유지된다."""
+    real = (request.headers.get("x-real-ip") or "").strip()
+    if real:
+        return real
+    forwarded = (request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded:
+        return forwarded.rsplit(",", 1)[-1].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
+
+
 def tokens_match(supplied: str, expected: str) -> bool:
     return hmac.compare_digest(
         supplied.encode("utf-8", "surrogateescape"),

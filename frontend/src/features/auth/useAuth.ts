@@ -1,15 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
+import { postWithSealedPassword } from "../../lib/passwordTransport";
 import type { Me } from "../../lib/types";
 
 export const useMe = () =>
   useQuery({ queryKey: ["auth", "me"], queryFn: () => apiGet<Me>("/api/auth/me") });
 
+// 비밀번호를 보내는 훅은 전부 postWithSealedPassword 를 쓴다(2026-09-07 전송 봉인)
+// -- 평문 password 는 와이어에 실리지 않는다. 429 login_rate_limited 는 request()
+// 가 ApiError 로 올리고 화면이 reasonText 로 보여준다(별도 처리 없음).
 export function useLogin() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (b: { username: string; password: string }) =>
-      apiSend<Me>("POST", "/api/auth/login", b),
+      postWithSealedPassword<Me>("/api/auth/login", "login", b),
     onSuccess: () => qc.clear(),
   });
 }
@@ -27,13 +31,14 @@ export const useRequestCode = () =>
 export const useSignup = () =>
   useMutation({
     mutationFn: (b: { username: string; password: string; code: string }) =>
-      apiSend<{ username: string }>("POST", "/api/auth/signup", b),
+      postWithSealedPassword<{ username: string }>("/api/auth/signup", "signup", b),
   });
 
 export const usePasswordReset = () =>
   useMutation({
     mutationFn: (b: { username: string; password: string; code: string }) =>
-      apiSend<{ username: string }>("POST", "/api/auth/password-reset", b),
+      postWithSealedPassword<{ username: string }>(
+        "/api/auth/password-reset", "password_reset", b),
   });
 
 export function useLogout() {
