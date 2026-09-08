@@ -343,6 +343,47 @@ def test_migrate_adds_artifact_base_columns_to_existing_control_state(db):
     assert row["artifact_base_uri"] is None
 
 
+def test_no_migration_statement_smuggles_a_named_placeholder_in_comments():
+    """d120 실사고(2026-09-08): CREATE TABLE 안의 SQL 주석에 적은 `user:pass@` 를
+    PostgreSQL 어댑터(db._NAMED → %(name)s)가 `:pass` 파라미터로 읽어 migrate 가
+    "query parameter missing: pass" 로 죽었다 -- SQLite 는 주석을 그대로 넘겨 테스트가
+    전부 초록이었다. 파라미터 없이 실행되는 모든 마이그레이션 문장에 `:name` 토큰이
+    없어야 한다(주석 포함)."""
+    from dms import migrations
+    from dms.db import _NAMED
+
+    class Rec:
+        dialect = "postgresql"
+
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params=None):
+            self.calls.append((sql, params))
+
+        def query(self, sql, params=None):
+            self.calls.append((sql, params))
+            # information_schema(컬럼·타입 조회)만 행을 준다 -- 나머지(백필)는 빈 결과.
+            if "information_schema" in sql:
+                return [{"data_type": "bigint"}]
+            return []
+
+        def query_one(self, sql, params=None):
+            rows = self.query(sql, params)
+            return rows[0] if rows else None
+
+        def transaction(self):
+            import contextlib
+            return contextlib.nullcontext()
+
+    rec = Rec()
+    migrations._apply_migrations(rec)
+    assert len(rec.calls) > 30                       # 추출 자기 검증
+    offenders = [(sql.strip()[:60], _NAMED.findall(sql)) for sql, params in rec.calls
+                 if not params and _NAMED.findall(sql)]
+    assert offenders == []
+
+
 def test_migrate_adds_build_proxy_columns_to_existing_control_state(db):
     # 빌드 노드 프록시(2026-09-08) -- 같은 이중 경로 규약: 기배포 DB 는 CREATE 를
     # 다시 안 타므로 _ensure_columns 가 세 컬럼을 보태야 한다(NULL = 프록시 없음).

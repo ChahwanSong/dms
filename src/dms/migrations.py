@@ -361,7 +361,7 @@ def _apply_migrations(db: Database) -> None:
             build_source_path TEXT,
             -- 빌드 노드 프록시(2026-09-08): 에어갭 사이트에서 특정 노드만 프록시로
             -- 인터넷에 닿는다. 빌드·프리플라이트 파드 env(HTTP(S)_PROXY/NO_PROXY)로
-            -- 실린다. NULL = 프록시 없음. 자격증명(user:pass@)은 저장 거부 --
+            -- 실린다. NULL = 프록시 없음. 자격증명이 든 URL 은 저장 거부(routes_control) --
             -- 평문 비밀번호를 DB·이력·화면에 두지 않는다(CLAUDE.md 규약).
             build_http_proxy TEXT,
             build_https_proxy TEXT,
