@@ -97,22 +97,35 @@ class ControlRepository:
         return self._db.query_one("SELECT * FROM control_state WHERE id = 1")
 
     def set_control_state(self, *, maintenance, drain, reason, actor,
-                          build_node_name=None, build_source_path=None):
-        # build_source_path 도 build_node_name 과 같은 무조건 UPDATE 다 -- 인자를
-        # 생략한 호출이 기존 값을 NULL 로 지우는 함정까지 같다(아래 set_artifact_base
-        # 주석 참고). 라우트가 항상 넘기는 한 잠복 상태이며, 새 호출자는 반드시
-        # 현재 값을 읽어 되넘겨야 한다.
+                          build_node_name=None, build_source_path=None,
+                          build_http_proxy=None, build_https_proxy=None,
+                          build_no_proxy=None):
+        # build_source_path·프록시 3종도 build_node_name 과 같은 무조건 UPDATE 다 --
+        # 인자를 생략한 호출이 기존 값을 NULL 로 지우는 함정까지 같다(아래
+        # set_artifact_base 주석 참고). 라우트가 항상 넘기는 한 잠복 상태이며, 새
+        # 호출자는 반드시 현재 값을 읽어 되넘겨야 한다.
         before = self.control_state()
         with self._db.transaction():
             self._db.execute(
                 """UPDATE control_state SET maintenance = :m, drain = :d, reason = :r,
                        build_node_name = :bn, build_source_path = :bsp,
+                       build_http_proxy = :hp, build_https_proxy = :sp,
+                       build_no_proxy = :np,
                        changed_by = :actor, changed_at = :now WHERE id = 1""",
                 {"m": 1 if maintenance else 0, "d": 1 if drain else 0,
                  "r": reason, "bn": build_node_name, "bsp": build_source_path,
+                 "hp": build_http_proxy, "sp": build_https_proxy, "np": build_no_proxy,
                  "actor": actor, "now": utc_now_iso()})
             self._audit("control_state", "set", "control_state", before,
                         self.control_state(), actor)
+
+    def build_proxy(self) -> dict:
+        """빌드 노드 프록시(2026-09-08) -- BuildRunner 가 제출 시점마다 읽는다.
+        전부 None 이면 프록시 없음(build_manifests.proxy_env 가 빈 env 를 준다)."""
+        row = self.control_state() or {}
+        return {"http_proxy": row.get("build_http_proxy"),
+                "https_proxy": row.get("build_https_proxy"),
+                "no_proxy": row.get("build_no_proxy")}
 
     def set_job_image(self, image, *, actor):
         """잡 이미지 오버라이드 전용 UPDATE(슬라이스 35). set_control_state 에 얹지

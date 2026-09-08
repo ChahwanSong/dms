@@ -32,6 +32,13 @@ const server = setupServer(
     ],
     job_image: { live: null, manifest: null },
   })),
+  // 제안 태그 재료(2026-09-08): 레지스트리 dms 태그. 기본 스텁은 라이브(d74)보다
+  // 낮은 태그만 있어 제안이 그대로 d75 다.
+  http.get("/api/admin/registry/images", () => HttpResponse.json({
+    registry: "pkg-01:5000",
+    repositories: [{ repository: "dms", reachable: true,
+                     tags: [{ tag: "d70", in_use: false }, { tag: "b0123abcd", in_use: false }] }],
+  })),
 );
 beforeAll(() => server.listen());
 afterEach(() => server.resetHandlers());
@@ -198,6 +205,54 @@ describe("BuildForm — 빌드하기(기본 하위 페이지)", () => {
     const chip = await screen.findByRole("button", { name: "다음 → d75" });
     await userEvent.click(chip);
     expect(screen.getByLabelText("태그")).toHaveValue("d75");
+  });
+
+  it("신규 사이트(라이브 관례 태그·레지스트리·이력 없음)는 d1 을 제안한다", async () => {
+    // 부트스트랩 이미지가 임의 태그(v1)라 라이브에서 dNN 을 못 읽고, 레지스트리에도
+    // dNN 이 없고, 포탈 빌드 이력도 없다 -- 다른 사이트 번호를 잇지 않고 d1.
+    server.use(
+      http.get("/api/admin/metrics/infra", () => HttpResponse.json({
+        components: [{ component: "dms-api", kind: "Deployment", workload: "dms-api",
+                       image: "reg.ssc.example:5000/dms:v1", ready: 1, desired: 1,
+                       verdict: "applied", detail: null, manifest_image: null }],
+        job_image: { live: null, manifest: null },
+      })),
+      http.get("/api/admin/registry/images", () => HttpResponse.json({
+        registry: "reg.ssc.example:5000",
+        repositories: [{ repository: "dms", reachable: true, tags: [{ tag: "v1", in_use: true }] }],
+      })),
+      http.get("/api/admin/builds", () => HttpResponse.json([])),
+    );
+    wrap();
+    await ready();
+    expect(await screen.findByText("v1")).toBeInTheDocument();     // 라이브는 정직하게 v1
+    const chip = await screen.findByRole("button", { name: "다음 → d1" });
+    await userEvent.click(chip);
+    expect(screen.getByLabelText("태그")).toHaveValue("d1");
+  });
+
+  it("제안은 라이브·레지스트리·이력 중 가장 큰 dNN 의 다음이다", async () => {
+    // 라이브는 d74 지만 레지스트리에 d90 이 이미 있다(다른 운영자가 빌드만 해 둔 태그)
+    // -- d75 를 제안하면 push 가 기존 태그를 덮어쓴다(IfNotPresent 캐시 stale).
+    server.use(
+      http.get("/api/admin/registry/images", () => HttpResponse.json({
+        registry: "pkg-01:5000",
+        repositories: [{ repository: "dms", reachable: true,
+                         tags: [{ tag: "d90", in_use: false }, { tag: "d74", in_use: true }] },
+                       { repository: "dms-agent", reachable: true, tags: [{ tag: "d95", in_use: false }] }],
+      })),
+    );
+    wrap();
+    await ready();
+    expect(await screen.findByRole("button", { name: "다음 → d91" })).toBeInTheDocument();
+  });
+
+  it("레지스트리 조회가 실패해도 라이브 태그로 제안한다(fail-soft)", async () => {
+    server.use(http.get("/api/admin/registry/images", () =>
+      HttpResponse.json({ detail: "registry_error" }, { status: 502 })));
+    wrap();
+    await ready();
+    expect(await screen.findByRole("button", { name: "다음 → d75" })).toBeInTheDocument();
   });
 
   it("드리프트 방지 안내를 태그 입력 아래에 둔다", async () => {

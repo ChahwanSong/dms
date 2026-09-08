@@ -54,6 +54,32 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 빌드 프록시 + 신규 사이트 태그 누출 차단 — **완료·실증**(2026-09-08, d120/d121)
+
+사용자 보고(프로덕션 SSC 클러스터에서 dms-ssc 셋업 후): "빌드 화면에 이미지 태그가
+d119 로 나온다 — 신규면 d1 이 맞다", "빌드 노드가 프록시로만 인터넷에 닿는다 —
+http_proxy/https_proxy 를 포탈에서 설정하게 하고 빌드로 실증해 달라".
+
+**태그 누출 원인**: 이미지에 동봉된 `deploy/k8s` 는 소스 트리의 값이라, 포탈 밖에서
+부트스트랩한 이미지는 테스트베드 커밋값 `pkg-01:5000/dms:d119` 를 그대로 담는다.
+서버는 그것을 "이 사이트의 매니페스트 기준"으로 읽어 드리프트 배지·레지스트리
+"사용 중"에 남의 태그를 실었고, 포탈 빌드의 스탬프 sed 는 `$DMS_BUILD_REGISTRY/img:`
+로만 맞춰 다른 레지스트리 사이트에서는 한 줄도 안 맞아 **조용히 무동작**이었다.
+빌드 화면의 제안 태그는 라이브 태그 하나만 봤다.
+
+- `manifest_tags.site_image`: 동봉 이미지의 레지스트리 ≠ `DMS_BUILD_REGISTRY` 면
+  None(모름) — routes_metrics(드리프트)·routes_registry(사용 중) 적용. 스탬프는
+  `[registry]/<img>:<tag>` 전체 치환(dms/dms-agent 콜론 경계 유지, 테스트가 sh 로
+  실제 sed 를 실행해 고정). 빌드 화면 제안 = 라이브·레지스트리 dms 태그·빌드 이력의
+  dNN 최대+1, 없으면 **d1**; 라이브 태그는 정직하게 그대로 표시.
+- **빌드 프록시**: `control_state.build_http_proxy/https_proxy/no_proxy`(CREATE +
+  _ensure_columns, 전수 그물 32→35), PUT control-state 검증(`invalid_proxy_url`:
+  http(s)://host[:port] 만·자격증명 거부, `invalid_no_proxy`), 컨트롤 화면 입력 3종
+  + 현재 상태·이력 diff, BuildRunner 가 제출 시점 콜러블로 읽어 빌드·프로브 파드
+  env(HTTP(S)_PROXY/NO_PROXY 대소문자, NO_PROXY 에 레지스트리·localhost 자동), 프로브
+  egress 는 CONNECT 터널 검사·`build_proxy_unreachable`.
+- 실증: 아래 「실증」.
+
 ### ✅ 웹 인증 하드닝: 로그인 감속 + 비밀번호 전송 봉인 — **완료·실증**(2026-09-07, d119)
 
 웹 보안 검토(2026-09-07, dms-ssc 기준)에서 남은 두 갭을 닫았다. 사용자 결정:

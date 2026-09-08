@@ -289,11 +289,11 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 | `src/dms/placement.py` | 순수 함수: 신선한 에이전트 리포트로 도구 선택(scan→dscan, rm→drm, sync→dsync 코로케이션 우선·nsync 폴백)·후보 노드·노드별 rejections 산출, resolve_fanout(큐/priority clamp/node·process 수) |
 | `src/dms/execution_manifests.py` | 순수 빌더: Volcano Job(launcher+worker sshd)·preflight Pod 매니페스트, tool_argv(allowlist 층2), 비특권 sync --chown 자동주입, task별 activeDeadlineSeconds, required podAntiAffinity 산개 |
 | `src/dms/execution_volcano.py` | VolcanoExecutionAdapter(ref prefix pod/pods/vcjob 라우팅, TimedOut 판정, summary 경로 재구성, vcjob 라벨 기반 로그) + 실 KubernetesClient(lazy in-cluster init, workload patch/get, queue/podgroup 조회) |
-| `src/dms/build_manifests.py` | 순수 빌더: buildah 빌드 Pod(privileged, 자원 봉투·emptyDir sizeLimit)와 적합성 프로브 Pod(egress 443 TCP + 레지스트리 + 노드 디스크 statvfs 검사) |
+| `src/dms/build_manifests.py` | 순수 빌더: buildah 빌드 Pod(privileged, 자원 봉투·emptyDir sizeLimit)와 적합성 프로브 Pod(egress 443 TCP + 레지스트리 + 노드 디스크 statvfs 검사). proxy_env(2026-09-08): control_state 의 http/https/no_proxy → 대소문자 두 벌 env, NO_PROXY 에 레지스트리 호스트·localhost 자동 추가; 프로브는 프록시가 있으면 CONNECT 터널로 egress 검사(build_proxy_unreachable). 스탬프 sed 는 레지스트리까지 치환(신규 사이트에서 무동작이던 결함 수정) |
 | `src/dms/build_runner.py` | BuildRunner: 멱등 submit/submit_preflight(AlreadyExists=자기 파드), poll, failure_reason(OOMKilled/Evicted 구분), read_log, terminate + StubBuildRunner(클러스터 없는 경로) |
 | `src/dms/rollout_runner.py` | RolloutRunner: image_patch_body(strategic merge, initContainer 조건부) patch_image / observe(정규화 dict) / pod_briefs(best-effort 진단) + StubRolloutRunner |
 | `src/dms/rollout_status.py` | 순수 함수: snake/camel 정규화(normalize_deployment/daemonset) + 수렴 판정 assess_deployment(세대 게이트→수렴→stale 필터된 PDE→ReplicaFailure 노출)/assess_daemonset(실패 확정은 워처 벽시계 몫) |
-| `src/dms/manifest_tags.py` | PyYAML 없는 부분집합 YAML 파서로 동봉 deploy/k8s 매니페스트의 이미지 태그·DMS_JOB_IMAGE를 읽음(드리프트 배지용, 런타임 조회 전면 fail-soft / 계약 테스트 헬퍼는 assert) |
+| `src/dms/manifest_tags.py` | PyYAML 없는 부분집합 YAML 파서로 동봉 deploy/k8s 매니페스트의 이미지 태그·DMS_JOB_IMAGE를 읽음(드리프트 배지용, 런타임 조회 전면 fail-soft / 계약 테스트 헬퍼는 assert). site_image(2026-09-08): 동봉 이미지의 레지스트리가 settings.build_registry 와 다르면 None — 다른 사이트(테스트베드) 태그가 신규 사이트의 기준값으로 새지 않게 routes_metrics·routes_registry 가 이 필터를 거친다 |
 | `src/dms/wiring.py` | settings.execution_backend=="volcano" 여부로 실/스텁 어댑터·러너·큐리더 선택; artifact_base는 호출 시점 해석 클로저로 주입 |
 | `src/dms_job_runner/runner.py` | launcher 오케스트레이션: 층3 ALLOWED_TOOLS 가드 → passwd 물질화 → ssh 키 복사 → hostfile 대기(nsync는 src/dst 각각) → getent IP 해석 → ssh barrier → rank.sh 생성 → artifact_dir chown → runuser mpirun → stdout/stderr/summary.json 기록 |
 | `src/dms_job_runner/commands.py` | 순수 명령 빌더: mpirun(env+runuser --preserve-environment, ob1/tcp), ssh 키 복사(positional 인자로 인젝션 차단), ssh probe, getent hosts, nsync role-map |
@@ -301,6 +301,8 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 
 ### 불변식 (위반하면 깨진다)
 
+- 동봉 매니페스트 값은 site_image(manifest_tags.py) 를 거쳐서만 화면·판정에 쓴다 — 레지스트리가 사이트와 다른 동봉값(포탈 밖 부트스트랩 이미지가 실어 온 테스트베드 태그)은 None(모름)이지 기준값이 아니다; 빌드 스탬프는 `[registry]/<img>:<tag>` 전체를 치환해 첫 포탈 빌드부터 동봉값이 그 사이트 것이 된다(build_manifests.py 스탬프 루프)
+- 빌드 프록시는 control_state(DB) 가 진실이고 BuildRunner 가 제출 시점마다 콜러블로 읽는다(wiring.py) — ConfigMap 에 두면 재적용마다 되돌아간다(build_node_name 과 같은 이유); 프록시 URL 은 자격증명 없이 저장(routes_control.validate_proxy_url, invalid_proxy_url) — 평문 비밀번호 금지 규약; NO_PROXY 는 항상 사이트 레지스트리를 품는다(proxy_env) — 빠지면 push 가 프록시로 나가 사내 레지스트리에 못 닿는다
 - tool allowlist 3층이 전부 살아 있어야 한다: 층1 stepper._step_one(stepper.py:258, TOOL_TO_POLICY 밖 tool→fail_closed unknown_tool), 층2 execution_manifests.tool_argv(:61, 미지 도구는 argv를 지어내지 않고 ValueError→어댑터가 submit_failed로 접음), 층3 dms_job_runner/runner.py:21,36 ALLOWED_TOOLS(exec·부작용 전 종단). ALLOWED_TOOLS는 dms.config.AGENT_TOOL_NAMES(config.py:7)와 동일 값이어야 하며 dms_job_runner가 독립 패키지라 중복 정의 — tests/test_job_runner_runner.py 계약 테스트가 동일성을 강제한다.
 - activeDeadlineSeconds는 반드시 task 템플릿의 PodSpec에 건다(execution_manifests._apply_task_deadlines:207) — Volcano v1.15.0 CRD가 Job.spec의 미지 필드를 조용히 prune해 타임아웃이 영원히 미발화한다. 반대로 ttlSecondsAfterFinished는 Job.spec 허용 필드라 거기 얹는다(_apply_ttl:223).
 - artifact_base의 스킴 제거는 접두사 전용 strip_scheme만 — 전체 replace는 경로 중간의 file://까지 지워 러너 기록 위치와 마운트 계산·읽기 라우트가 갈라진다(execution_manifests._artifact_dir:180, execution_volcano._volumes:109-112, _reconstruct_summary_path:233).

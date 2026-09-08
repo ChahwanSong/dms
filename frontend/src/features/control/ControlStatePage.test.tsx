@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
@@ -48,7 +48,50 @@ test("toggling drain and saving sends the correct PUT body", async () => {
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   expect(body).toEqual({ maintenance: true, drain: true, reason: "점검",
                          build_node_name: "dms-w1",
-                         build_source_path: "/home/mason/dms-dev/dms" });
+                         build_source_path: "/home/mason/dms-dev/dms",
+                         build_http_proxy: null, build_https_proxy: null, build_no_proxy: null });
+});
+
+test("빌드 프록시 3종을 입력해 저장하면 PUT 본문에 실리고 현재 상태에 보인다", async () => {
+  let body: any = null;
+  // 저장 뒤 훅이 control-state 를 무효화해 다시 GET 한다 -- 서버 상태를 흉내낸다.
+  let state: any = CS;
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(state)),
+    http.put("/api/admin/control-state", async ({ request }) => {
+      body = await request.json();
+      state = { ...CS, build_http_proxy: "http://proxy.corp:3128",
+                build_https_proxy: null, build_no_proxy: ".corp.example" };
+      return HttpResponse.json(state);
+    }));
+  wrap();
+  await screen.findByLabelText("유지보수");
+  await userEvent.type(screen.getByLabelText("HTTP 프록시"), "http://proxy.corp:3128");
+  await userEvent.type(screen.getByLabelText("프록시 제외"), ".corp.example");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body.build_http_proxy).toBe("http://proxy.corp:3128");
+  expect(body.build_https_proxy).toBeNull();
+  expect(body.build_no_proxy).toBe(".corp.example");
+  expect(await screen.findByText("http://proxy.corp:3128 / — (제외: .corp.example)")).toBeInTheDocument();
+});
+
+test("프록시 주소가 거절되면(invalid_proxy_url) 한국어 사유를 보여준다", async () => {
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.put("/api/admin/control-state", () =>
+      HttpResponse.json({ detail: "invalid_proxy_url" }, { status: 422 })));
+  wrap();
+  await screen.findByLabelText("유지보수");
+  await userEvent.type(screen.getByLabelText("HTTPS 프록시"), "user:pw@proxy");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  expect(await screen.findByText(/프록시 주소는 http\(s\):\/\/호스트/)).toBeInTheDocument();
+});
+
+test("프록시가 없으면 현재 상태에 「없음(직접 연결)」로 표시한다", async () => {
+  server.use(http.get("/api/admin/control-state", () => HttpResponse.json(CS)));
+  wrap();
+  expect(await screen.findByText("없음(직접 연결)")).toBeInTheDocument();
 });
 
 test("빌드 노드는 자유 입력이 아니라 보고된 노드 중에서 고른다(select)", async () => {

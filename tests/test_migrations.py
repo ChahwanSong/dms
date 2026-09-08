@@ -343,6 +343,23 @@ def test_migrate_adds_artifact_base_columns_to_existing_control_state(db):
     assert row["artifact_base_uri"] is None
 
 
+def test_migrate_adds_build_proxy_columns_to_existing_control_state(db):
+    # 빌드 노드 프록시(2026-09-08) -- 같은 이중 경로 규약: 기배포 DB 는 CREATE 를
+    # 다시 안 타므로 _ensure_columns 가 세 컬럼을 보태야 한다(NULL = 프록시 없음).
+    db.execute("DROP TABLE control_state")
+    db.execute("""CREATE TABLE control_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        maintenance INTEGER NOT NULL DEFAULT 0,
+        drain INTEGER NOT NULL DEFAULT 0,
+        reason TEXT, build_node_name TEXT, changed_by TEXT, changed_at TEXT)""")
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    for column in ("build_http_proxy", "build_https_proxy", "build_no_proxy"):
+        assert _column_exists(db, "control_state", column), column
+    row = db.query_one("SELECT * FROM control_state WHERE id = 1")
+    assert (row["build_http_proxy"], row["build_https_proxy"], row["build_no_proxy"]) == (None, None, None)
+
+
 def test_migrate_adds_auth_method_to_existing_requests(db):
     # 구형 requests 를 흉내: auth_method 컬럼을 빼고 재생성. 한쪽(CREATE)만 넣으면
     # 기배포 DB 는 이 컬럼이 없어 planner 의 req["auth_method"] 조회가 라이브에서만
@@ -594,7 +611,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 32      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다
+    assert len(pairs) == 35      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 컬럼 포함)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -611,7 +628,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 32
+    assert len(pairs) == 35
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 

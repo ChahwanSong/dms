@@ -1,9 +1,44 @@
+import re
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from .auth import Identity, audit_actor, require_admin
 from .routes_builds import validate_source_path
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+
+# no_proxy 항목: 호스트/도메인(.corp.example)/IP/CIDR/host:port. 쉼표로 나눈 뒤 각
+# 항목이 이 모양이어야 한다 -- 공백·따옴표·셸 문자가 파드 env 로 새지 않게.
+_NO_PROXY_ITEM_RE = re.compile(r"^[A-Za-z0-9.*_-]+(:\d{1,5})?(/\d{1,3})?$")
+
+
+def validate_proxy_url(value: str) -> "str | None":
+    """빌드 프록시 URL: http(s)://host[:port] 만. 사용자정보(user:pass@)·경로·쿼리는
+    거부한다 -- 자격증명이 평문으로 DB·감사 이력·화면에 남는 길을 막는다(인증
+    프록시는 미지원, 프록시 쪽에서 IP allowlist 로 푸는 것이 운영 관례)."""
+    v = value.strip()
+    try:
+        u = urlsplit(v)
+    except ValueError:
+        return None
+    if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password:
+        return None
+    if u.path not in ("", "/") or u.query or u.fragment:
+        return None
+    try:
+        port = u.port
+    except ValueError:
+        return None
+    return f"{u.scheme}://{u.hostname}" + (f":{port}" if port else "")
+
+
+def validate_no_proxy(value: str) -> "str | None":
+    items = [x.strip() for x in value.split(",")]
+    items = [x for x in items if x]
+    if any(_NO_PROXY_ITEM_RE.match(x) is None for x in items):
+        return None
+    return ",".join(items) or None
 
 
 class ControlStateBody(BaseModel):
@@ -12,6 +47,10 @@ class ControlStateBody(BaseModel):
     reason: str | None = None
     build_node_name: str | None = None
     build_source_path: str | None = None
+    # 빌드 노드 프록시(2026-09-08). 빈 문자열/None = 없음.
+    build_http_proxy: str | None = None
+    build_https_proxy: str | None = None
+    build_no_proxy: str | None = None
 
 
 @router.get("/api/admin/control-state")
@@ -55,8 +94,29 @@ def put_control_state(body: ControlStateBody, request: Request,
         build_source_path = validate_source_path(build_source_path)
         if build_source_path is None:
             raise HTTPException(status_code=422, detail="invalid_source_path")
+    # 프록시 3종: 모양만 저장 시 거른다(도달 여부는 빌드 프리플라이트가 노드 위에서
+    # CONNECT 로 검사한다 -- build_proxy_unreachable).
+    proxies = {}
+    for key in ("build_http_proxy", "build_https_proxy"):
+        raw = (getattr(body, key) or "").strip()
+        if raw:
+            normalized = validate_proxy_url(raw)
+            if normalized is None:
+                raise HTTPException(status_code=422, detail="invalid_proxy_url")
+            proxies[key] = normalized
+        else:
+            proxies[key] = None
+    raw = (body.build_no_proxy or "").strip()
+    no_proxy = None
+    if raw:
+        no_proxy = validate_no_proxy(raw)
+        if no_proxy is None:
+            raise HTTPException(status_code=422, detail="invalid_no_proxy")
     control.set_control_state(maintenance=body.maintenance, drain=body.drain,
                               reason=body.reason, build_node_name=build_node_name,
                               build_source_path=build_source_path,
+                              build_http_proxy=proxies["build_http_proxy"],
+                              build_https_proxy=proxies["build_https_proxy"],
+                              build_no_proxy=no_proxy,
                               actor=audit_actor(identity))
     return control.control_state()

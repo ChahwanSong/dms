@@ -359,6 +359,13 @@ def _apply_migrations(db: Database) -> None:
             -- build_node_name 과 같은 이유로 여기(운영자가 포탈에서 바꾸는 값)에
             -- 둔다 -- ConfigMap 에 두면 재적용마다 되돌아간다.
             build_source_path TEXT,
+            -- 빌드 노드 프록시(2026-09-08): 에어갭 사이트에서 특정 노드만 프록시로
+            -- 인터넷에 닿는다. 빌드·프리플라이트 파드 env(HTTP(S)_PROXY/NO_PROXY)로
+            -- 실린다. NULL = 프록시 없음. 자격증명(user:pass@)은 저장 거부 --
+            -- 평문 비밀번호를 DB·이력·화면에 두지 않는다(CLAUDE.md 규약).
+            build_http_proxy TEXT,
+            build_https_proxy TEXT,
+            build_no_proxy TEXT,
             -- 아티팩트 base(슬라이스 18 설계 §2.1). NULL = 미설정 -> env
             -- (DMS_ARTIFACT_BASE_URI) 사용 -- 기존 배포는 동작이 바뀌지 않는다
             -- (시드 불필요, 하위호환). ConfigMap 에 두지 않는 근거는
@@ -552,6 +559,10 @@ def _ensure_columns(db):
         # 슬라이스 33 로컬 소스 빌드 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스
         # 14 의 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
         ("control_state", "build_source_path", "TEXT"),
+        # 빌드 노드 프록시(2026-09-08) -- 이중 경로 규약(슬라이스 14 교훈).
+        ("control_state", "build_http_proxy", "TEXT"),
+        ("control_state", "build_https_proxy", "TEXT"),
+        ("control_state", "build_no_proxy", "TEXT"),
         ("builds", "tag", "TEXT"),
         # 슬라이스 18 아티팩트 base -- 기배포 DB 는 CREATE 를 다시 안 탄다(위
         # submit_wait_seconds 와 같은 이유: 양쪽에 넣지 않으면 라이브에서만 없다).

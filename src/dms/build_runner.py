@@ -27,7 +27,7 @@ def _name(ref: str) -> str:
 
 class BuildRunner:
     def __init__(self, k8s, *, namespace, registry, builder_image, timeout_seconds,
-                 job_image="", preflight_timeout_seconds=180):
+                 job_image="", preflight_timeout_seconds=180, proxy=None):
         self._k8s = k8s
         self._ns = namespace
         self._registry = registry
@@ -42,6 +42,10 @@ class BuildRunner:
         self._job_image_fn = (job_image if callable(job_image)
                               else (lambda: job_image))
         self._preflight_timeout_seconds = preflight_timeout_seconds
+        # 빌드 노드 프록시(2026-09-08): control_state 의 {http_proxy, https_proxy,
+        # no_proxy}. job_image 와 같은 계약(dict/None 또는 0-인자 callable) --
+        # 운영자가 포탈에서 바꾼 값이 다음 빌드부터 재시작 없이 반영된다.
+        self._proxy_fn = proxy if callable(proxy) else (lambda: proxy)
 
     def submit(self, build) -> str:
         try:
@@ -51,7 +55,7 @@ class BuildRunner:
                 tag=effective_tag(build), images=build["images"],
                 node=build["node_name"], namespace=self._ns,
                 registry=self._registry, builder_image=self._builder_image,
-                timeout_seconds=self._timeout_seconds)
+                timeout_seconds=self._timeout_seconds, proxy=self._proxy_fn())
         except Exception as exc:
             raise ExecutionError("submit_failed", str(exc)[:200]) from exc
         name = manifest["metadata"]["name"]
@@ -84,7 +88,8 @@ class BuildRunner:
                 build_id=build["build_id"], source_path=build["repo_url"],
                 node=build["node_name"], namespace=self._ns,
                 registry=self._registry, job_image=self._job_image_fn(),
-                timeout_seconds=self._preflight_timeout_seconds)
+                timeout_seconds=self._preflight_timeout_seconds,
+                proxy=self._proxy_fn())
         except Exception as exc:
             # 프로브 생성 실패는 기존 submit_failed 재사용(§4) -- "preflight:"
             # detail 접두가 빌드 파드 제출 실패와 구분한다(새 코드를 만들지 않는다).
