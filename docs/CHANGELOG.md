@@ -78,7 +78,37 @@ http_proxy/https_proxy 를 포탈에서 설정하게 하고 빌드로 실증해 
   + 현재 상태·이력 diff, BuildRunner 가 제출 시점 콜러블로 읽어 빌드·프로브 파드
   env(HTTP(S)_PROXY/NO_PROXY 대소문자, NO_PROXY 에 레지스트리·localhost 자동), 프로브
   egress 는 CONNECT 터널 검사·`build_proxy_unreachable`.
-- 실증: 아래 「실증」.
+- **d120 실사고와 교훈**: 프록시 컬럼의 CREATE TABLE 주석에 적은 `user:pass@` 를
+  PostgreSQL 어댑터(`db._NAMED` → `%(name)s`)가 `:pass` 파라미터로 읽어 migrate 가
+  "query parameter missing: pass" 로 죽었다(SQLite 는 주석을 그대로 넘겨 전 테스트
+  초록). 구 파드(d119)가 계속 서비스해 무중단이었고 d121 로 재빌드. 회귀 그물:
+  파라미터 없이 실행되는 모든 마이그레이션 문장(주석 포함)에 `:name` 토큰이 없음을
+  PostgreSQL 방언 대역으로 고정(`test_no_migration_statement_smuggles_a_named_placeholder_in_comments`).
+- **워처 관용(d122)**: 프로브 create 의 일시 오류(파드는 생겼는데 응답만 잃음)를 즉시
+  Failed 로 못박아 실제 프로브가 찍은 `build_proxy_unreachable` 대신 `submit_failed`
+  가 남은 실측 → poll 오류와 같은 I6 관용구(경고 로그 + 다음 틱 재시도, 영구 오류는
+  프리플라이트 타임아웃 회수). 빌드 파드 제출 실패는 k8s 오류 문구를 log_text 로 박제.
+- **실증(테스트베드, 컨트롤러 d121, 프록시 = luminous `proxy.py` 10.10.10.1:3128)**:
+  1. 부정: 프록시를 닿지 않는 `:3129` 로 저장 → 빌드 제출 30초 만에
+     `build_proxy_unreachable`(프로브 로그 `proxy=http://10.10.10.1:3129`).
+  2. 긍정: `:3128` 로 저장 → 3이미지(dms-mpifileutils·dms·dms-agent, 태그 px1) 빌드
+     **성공 260초**. 빌드 파드 env = `HTTP_PROXY/HTTPS_PROXY=http://10.10.10.1:3128`,
+     `NO_PROXY=pkg-01:5000,pkg-01,localhost,127.0.0.1`(+소문자), 프로브 env
+     `DMS_PF_PROXY`. 프록시 액세스 로그(클라이언트 = 빌드 노드 10.10.10.11):
+     `CONNECT registry-1.docker.io/auth.docker.io/production.cloudfront.docker.com`
+     (buildah 베이스 pull) · `CONNECT registry.npmjs.org`(npm ci) · `CONNECT
+     pypi.org/files.pythonhosted.org`(pip) · `GET deb.debian.org:80/...`(apt, 평문) ·
+     `CONNECT github.com`(mpifileutils 의존 git clone) · `CONNECT dl.k8s.io`(kubectl
+     curl) · `CONNECT quay.io`(프리플라이트). **pkg-01 항목 0건** — push/pull 은
+     NO_PROXY 로 프록시를 우회했다. 즉 buildah 가 자기 env 를 RUN 컨테이너·pull 에
+     전파하므로 **HTTP_PROXY/HTTPS_PROXY/NO_PROXY(대소문자) 만으로 충분**하다는 것이
+     클라이언트 종류별로 확인됐다(사용자 질문 "http_proxy, https_proxy 만 하면
+     되는지"에 대한 답: 그 둘 + no_proxy 에 사내 레지스트리, 그리고 서버가 자동으로
+     보탠다).
+  3. d122(dms) 도 프록시 상태로 빌드해 두 번째 확인 후 프록시 해제·적용.
+  정직한 한계: 테스트베드는 직접 egress 도 열려 있어 "프록시 없이는 실패한다"는
+  증명이 아니라 "모든 클라이언트가 프록시 env 를 따른다"는 증명이다. 인증 프록시
+  (Basic)는 미지원(평문 자격증명 저장 금지) — 프록시 쪽 IP allowlist 로 푼다.
 
 ### ✅ 웹 인증 하드닝: 로그인 감속 + 비밀번호 전송 봉인 — **완료·실증**(2026-09-07, d119)
 
