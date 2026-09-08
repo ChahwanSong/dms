@@ -109,11 +109,14 @@ class BuildWatcher:
                 # "없음→생성"과 "진행 중→대기"가 상태 저장 없이 한 호출로 접힌다.
                 self._runner.submit_preflight(build)
             except ExecutionError as exc:
-                # 프로브 생성 실패(k8s API 오류)는 기존 submit_failed 재사용(§4) --
-                # detail 의 "preflight:" 접두가 빌드 파드 제출 실패와 구분한다.
-                self._repos.builds.finish(build_id, state="Failed",
-                                          reason_code=exc.reason_code)
-                finished += 1
+                # I6 관용구(아래 poll 오류와 동일, 2026-09-08 d121 실측): 프로브 생성의
+                # 일시 오류 -- create 응답만 잃고 파드는 생긴 경우 등 -- 하나로 Failed
+                # 를 못박으면, 실제로는 프로브가 돌아 정확한 사유(build_proxy_unreachable)
+                # 를 찍었는데 포탈은 submit_failed 만 보여준다. 로그를 남기고 다음 틱이
+                # 재시도한다(존재하면 AlreadyExists 관용으로 붙는다). 영구 오류(잘못된
+                # 매니페스트 등)는 위 프리플라이트 타임아웃이 회수한다.
+                logger.warning("build preflight submit error build_id=%s: %s: %s",
+                               build_id, exc.reason_code, exc)
                 continue
             try:
                 status = self._runner.poll(pf_ref)
@@ -137,8 +140,14 @@ class BuildWatcher:
                 try:
                     self._runner.submit(build)
                 except ExecutionError as exc:
-                    self._repos.builds.finish(build_id, state="Failed",
-                                              reason_code=exc.reason_code)
+                    # 빌드 파드 제출 실패는 그대로 Failed -- 단 상세(k8s 오류 문구)를
+                    # 로그로 박제해 포탈 /log 에서 "왜"가 보이게 한다(사유 코드만으론
+                    # submit_failed 가 무엇에 막혔는지 알 수 없다).
+                    logger.warning("build submit error build_id=%s: %s: %s",
+                                   build_id, exc.reason_code, exc)
+                    self._repos.builds.finish(
+                        build_id, state="Failed", reason_code=exc.reason_code,
+                        log_text=f"build pod submit failed: {exc}")
                     finished += 1
                     continue
                 self._repos.builds.mark_running(build_id)

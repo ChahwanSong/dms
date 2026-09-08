@@ -348,14 +348,23 @@ def test_probe_success_without_ok_marker_waits_for_next_tick(repos):
     assert out == {"submitted": 0, "finished": 0}
 
 
-def test_probe_submit_failure_is_recorded_as_failed(repos):
-    # 프로브 생성 실패(k8s API 오류)는 기존 submit_failed 재사용(설계 §4).
+def test_probe_submit_failure_is_retried_next_tick_not_failed(repos):
+    # 2026-09-08 d121 실측: 프로브 create 의 일시 오류(파드는 생겼는데 응답만 잃음)
+    # 를 즉시 Failed 로 못박아, 실제 프로브가 찍은 build_proxy_unreachable 대신
+    # submit_failed 가 포탈에 남았다. poll 오류와 같은 I6 관용구 -- Pending 유지,
+    # 다음 틱 재시도. 영구 오류는 프리플라이트 타임아웃이 회수한다.
     bid = _mk(repos)
     runner = _Runner()
     runner.fail_submit_preflight = "submit_failed"
+    out = BuildWatcher(repos, runner).run_once()
+    row = repos.builds.get(bid)
+    assert (row["state"], row["reason_code"]) == ("Pending", None)
+    assert out == {"submitted": 0, "finished": 0}
+    # 다음 틱에 프로브 생성이 되면 정상 경로로 이어진다
+    runner.fail_submit_preflight = None
     BuildWatcher(repos, runner).run_once()
     row = repos.builds.get(bid)
-    assert (row["state"], row["reason_code"]) == ("Failed", "submit_failed")
+    assert row["state"] != "Failed" and row["reason_code"] is None
 
 
 def test_transient_probe_poll_error_leaves_build_pending(repos):
