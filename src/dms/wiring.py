@@ -49,7 +49,10 @@ def build_build_runner(settings, repos):
                        # "인터넷만 없는 노드"를 정확히 판별한다. resolve 클로저
                        # (슬라이스 35) -- 릴리스의 job-image 가 프로브에도 반영.
                        job_image=lambda: resolve_job_image(repos.control, settings),
-                       preflight_timeout_seconds=settings.build_preflight_timeout_seconds)
+                       preflight_timeout_seconds=settings.build_preflight_timeout_seconds,
+                       # 빌드 노드 프록시(2026-09-08): 포탈 컨트롤 상태의 값을 제출
+                       # 시점마다 읽는다 -- job_image 와 같은 "DB 가 진실" 클로저.
+                       proxy=lambda: repos.control.build_proxy())
 
 
 def build_rollout_runner(settings):

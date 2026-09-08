@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db import iso_epoch, iso_plus, utc_now_iso
-from ..manifest_tags import manifest_images, manifest_job_image
+from ..manifest_tags import manifest_images, manifest_job_image, site_image
 from ..metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
                               bucket_chars_for, build_node_points,
                               clamp_window_hours, duration_histogram,
@@ -147,8 +147,12 @@ def metrics_infra(request: Request):
                  "workload": spec["workload"], "image": None, "ready": None,
                  "desired": None, "verdict": None, "detail": None,
                  # 비교는 프론트가 한다 -- 서버는 "이 이미지를 만든 소스 트리의
-                 # 매니페스트" 값을 정직하게 실어줄 뿐이다(설계 §2.1/§3).
-                 "manifest_image": manifest.get(component)}
+                 # 매니페스트" 값을 정직하게 실어줄 뿐이다(설계 §2.1/§3). 단 다른
+                 # 사이트의 레지스트리를 가리키는 동봉값(포탈 밖 부트스트랩 빌드가
+                 # 실어 온 테스트베드 태그)은 이 사이트의 기준이 아니라 None 으로
+                 # 접는다(manifest_tags.site_image).
+                 "manifest_image": site_image(manifest.get(component),
+                                              settings.build_registry)}
         try:
             # future.result()는 워커가 던진 예외(observe는 ExecutionError로 감싼다)를
             # 재던진다 -- 컴포넌트별 try/except로 잡아 그 하나만 null 강등하고 나머지
@@ -189,7 +193,8 @@ def metrics_infra(request: Request):
     db_job_image = (request.app.state.repos.control.control_state() or {}).get("job_image")
     return {"components": components,
             "job_image": {"live": db_job_image or settings.job_image or None,
-                          "manifest": manifest_job_image(),
+                          "manifest": site_image(manifest_job_image(),
+                                                 settings.build_registry),
                           "source": "db" if db_job_image else "env"}}
 
 

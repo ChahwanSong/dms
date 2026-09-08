@@ -11,6 +11,7 @@ import { isTerminal } from "../../lib/jobState";
 import { useControlState } from "../control/useControlState";
 import { useInfraMetrics } from "../dashboard/useMetrics";
 import { useBuilds, useSubmitBuild } from "./useBuilds";
+import { useRegistryImages } from "./useRegistry";
 import { BuildTabs } from "./BuildTabs";
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
@@ -47,12 +48,21 @@ function tagOf(image: string | null | undefined): string | null {
   return at === -1 ? null : image.slice(at + 1) || null;
 }
 
-// 다음 태그 제안: 현재 태그가 dNN 관례면 d(N+1) 을 돌려준다(그 외 스킴은 제안 없음).
-// 자동 태그(b+8hex)나 임의 문자열엔 안전한 다음 값을 지어낼 수 없으므로 null.
-function nextTagSuggestion(tag: string | null): string | null {
-  if (tag === null) return null;
+// dNN 관례 태그의 N. 자동 태그(b+8hex)·임의 문자열은 null.
+function seqOf(tag: string | null | undefined): number | null {
+  if (typeof tag !== "string") return null;
   const m = /^d(\d+)$/.exec(tag);
-  return m ? `d${Number(m[1]) + 1}` : null;
+  return m ? Number(m[1]) : null;
+}
+
+// 다음 태그 제안(2026-09-08 개정): 이 사이트에 **존재하는** dNN 들 -- 라이브 적용
+// 태그, 레지스트리의 dms 태그, 포탈 빌드 이력 -- 중 최대 N 의 다음(d(N+1)). 하나도
+// 없으면 신규 사이트다: **d1**. 이전 판은 라이브 태그 하나만 봐서, 신규 사이트가
+// 포탈 밖에서 부트스트랩한 이미지 태그를 그대로 잇거나(임의 태그면 제안 자체가
+// 없었다) 다른 사이트의 번호를 이어받는 것처럼 보였다.
+export function nextTagSuggestion(tags: (string | null | undefined)[]): string {
+  const seqs = tags.map(seqOf).filter((n): n is number => n !== null);
+  return seqs.length === 0 ? "d1" : `d${Math.max(...seqs) + 1}`;
 }
 
 // 파란 안내 카드가 여는 팝업. 카드에는 2줄만 두고 전문은 전부 여기 있다 --
@@ -120,6 +130,7 @@ export function BuildForm() {
   const q = useBuilds();
   const controlQ = useControlState();
   const infraQ = useInfraMetrics();
+  const registryQ = useRegistryImages();
   const submitBuild = useSubmitBuild();
   const navigate = useNavigate();
   const [tag, setTag] = useState("");
@@ -137,10 +148,17 @@ export function BuildForm() {
     const api = comps.find((c) => c.component === "dms-api");
     return tagOf(api?.image);
   }, [infraQ.data]);
-  const suggestedTag = nextTagSuggestion(currentTag);
   // 목록은 이 화면의 주인공이 아니라 **재료**다(진행 중 배너). 조회가
   // 실패해도 폼은 막지 않는다 -- 제출은 목록과 무관하게 성립한다.
   const builds = useMemo(() => (Array.isArray(q.data) ? q.data : []), [q.data]);
+  // 제안 재료: 라이브 태그 + 레지스트리 dms 태그(조회 실패·미도달이면 빈 배열) +
+  // 빌드 이력 태그. 셋 다 비면 d1(신규 사이트).
+  const suggestedTag = useMemo(() => {
+    const repos = Array.isArray(registryQ.data?.repositories) ? registryQ.data.repositories : [];
+    const registryTags = repos.filter((r) => r.repository === "dms")
+      .flatMap((r) => (Array.isArray(r.tags) ? r.tags.map((t) => t.tag) : []));
+    return nextTagSuggestion([currentTag, ...registryTags, ...builds.map((b) => b.tag)]);
+  }, [currentTag, registryQ.data, builds]);
   const canSubmit = buildNodeName !== null && sourcePath !== null && images.length > 0;
 
   // 백엔드는 동시 1건만 허용한다(build_in_progress 409). 제출 **전에** 알려 주면
@@ -263,18 +281,13 @@ export function BuildForm() {
             {/* 현재 적용 중 태그 + 다음 태그 제안 — 드리프트 없이 올리려면 관례
                 태그(dNN)를 지정한다. 빌드가 동봉 매니페스트를 이 태그로 스탬프하므로
                 배포 시 live == manifest 가 되어 배지가 뜨지 않는다. */}
-            {currentTag !== null && (
-              <span className="block text-muted text-xs mt-1">
-                현재 적용 중: <span className="font-mono text-ink">{currentTag}</span>
-                {suggestedTag !== null && (
-                  <>
-                    {" · "}
-                    <Button type="button" variant="ghost" className="px-1.5 py-0.5 text-xs"
-                            onClick={() => setTag(suggestedTag)}>{`다음 → ${suggestedTag}`}</Button>
-                  </>
-                )}
-              </span>
-            )}
+            <span className="block text-muted text-xs mt-1">
+              {currentTag !== null
+                ? <>현재 적용 중: <span className="font-mono text-ink">{currentTag}</span>{" · "}</>
+                : <>현재 적용 중인 관례 태그 없음(신규 사이트 또는 임의 태그){" · "}</>}
+              <Button type="button" variant="ghost" className="px-1.5 py-0.5 text-xs"
+                      onClick={() => setTag(suggestedTag)}>{`다음 → ${suggestedTag}`}</Button>
+            </span>
             <span className="block text-muted text-xs mt-1">
               지정한 태그로 빌드하면 배포 시 드리프트가 생기지 않습니다 — 동봉
               매니페스트가 이 태그로 함께 스탬프됩니다. 비우면 b + 빌드ID 앞 8자로

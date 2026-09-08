@@ -172,5 +172,8 @@
   "password_encryption_required",
   "password_encryption_invalid",
   "password_encryption_key_mismatch",
-  "password_encryption_unavailable"
+  "password_encryption_unavailable",
+  "invalid_proxy_url",
+  "invalid_no_proxy",
+  "build_proxy_unreachable"
 ]

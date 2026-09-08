@@ -217,6 +217,10 @@ export interface ControlState {
   build_node_name: string | null;
   // 빌드 노드에서 DMS 저장소가 있는 절대 경로(로컬 소스 빌드). null = 미설정.
   build_source_path: string | null;
+  // 빌드 노드 프록시(2026-09-08): 빌드·프리플라이트 파드 env 로 실린다. null = 없음.
+  build_http_proxy?: string | null;
+  build_https_proxy?: string | null;
+  build_no_proxy?: string | null;
   changed_by: string | null;
   changed_at: string | null;
 }

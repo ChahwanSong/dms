@@ -23,6 +23,9 @@ const DIFF_FIELDS: { key: keyof ControlState; label: string;
   { key: "reason", label: "사유", fmt: (v) => (v ? `'${v}'` : "—") },
   { key: "build_node_name", label: "빌드 노드", fmt: (v) => String(v ?? "—") },
   { key: "build_source_path", label: "소스 경로", fmt: (v) => String(v ?? "—") },
+  { key: "build_http_proxy", label: "HTTP 프록시", fmt: (v) => String(v ?? "—") },
+  { key: "build_https_proxy", label: "HTTPS 프록시", fmt: (v) => String(v ?? "—") },
+  { key: "build_no_proxy", label: "프록시 제외", fmt: (v) => String(v ?? "—") },
 ];
 
 // 한 이력 행의 변경 내용 요약: "유지보수 OFF→ON · 사유 —→'점검'". 변한 게 없으면
@@ -64,6 +67,9 @@ export function ControlStatePage() {
   const [reason, setReason] = useState("");
   const [buildNodeName, setBuildNodeName] = useState("");
   const [buildSourcePath, setBuildSourcePath] = useState("");
+  const [httpProxy, setHttpProxy] = useState("");
+  const [httpsProxy, setHttpsProxy] = useState("");
+  const [noProxy, setNoProxy] = useState("");
 
   useEffect(() => {
     if (!q.data) return;
@@ -72,6 +78,9 @@ export function ControlStatePage() {
     setReason(q.data.reason ?? "");
     setBuildNodeName(q.data.build_node_name ?? "");
     setBuildSourcePath(q.data.build_source_path ?? "");
+    setHttpProxy(q.data.build_http_proxy ?? "");
+    setHttpsProxy(q.data.build_https_proxy ?? "");
+    setNoProxy(q.data.build_no_proxy ?? "");
   }, [q.data]);
 
   const submit = () => {
@@ -80,6 +89,9 @@ export function ControlStatePage() {
       reason: reason.trim() === "" ? null : reason,
       build_node_name: buildNodeName.trim() === "" ? null : buildNodeName,
       build_source_path: buildSourcePath.trim() === "" ? null : buildSourcePath.trim(),
+      build_http_proxy: httpProxy.trim() === "" ? null : httpProxy.trim(),
+      build_https_proxy: httpsProxy.trim() === "" ? null : httpsProxy.trim(),
+      build_no_proxy: noProxy.trim() === "" ? null : noProxy.trim(),
     });
   };
 
@@ -156,6 +168,31 @@ export function ControlStatePage() {
                   소스(미커밋 변경 포함)로 진행됩니다
                 </span>
               </label>
+              {/* 빌드 노드 프록시(2026-09-08): 에어갭 사이트에서 빌드 노드만 프록시로
+                  인터넷에 닿는 경우. 값은 빌드·프리플라이트 파드의 HTTP(S)_PROXY/
+                  NO_PROXY env 가 되고, 레지스트리 호스트·localhost 는 서버가 제외
+                  목록에 자동으로 보탠다. 자격증명(user:pass@)은 저장이 거절된다. */}
+              <label className="block">HTTP 프록시
+                <input aria-label="HTTP 프록시" className={field} value={httpProxy}
+                       placeholder="http://proxy.corp.example:3128"
+                       onChange={(e) => setHttpProxy(e.target.value)} />
+              </label>
+              <label className="block">HTTPS 프록시
+                <input aria-label="HTTPS 프록시" className={field} value={httpsProxy}
+                       placeholder="비우면 HTTP 프록시와 같은 값"
+                       onChange={(e) => setHttpsProxy(e.target.value)} />
+              </label>
+              <label className="block">프록시 제외 (no_proxy)
+                <input aria-label="프록시 제외" className={field} value={noProxy}
+                       placeholder="예: .corp.example,10.0.0.0/8"
+                       onChange={(e) => setNoProxy(e.target.value)} />
+                <span className="block text-muted text-xs mt-1">
+                  빌드 노드가 프록시를 거쳐야만 인터넷(베이스 이미지·npm·PyPI·apt)에 닿는
+                  에어갭 사이트에서 지정 — 빌드·프리플라이트 파드에 HTTP(S)_PROXY 로
+                  실립니다. 사내 레지스트리와 localhost 는 자동으로 제외됩니다.
+                  비우면 프록시 없이 직접 연결합니다.
+                </span>
+              </label>
               {setControlState.isError && (
                 <p className="text-bad">{(setControlState.error as ApiError).message}</p>
               )}
@@ -194,6 +231,12 @@ export function ControlStatePage() {
             <div className="text-sm text-muted space-y-1 border-t border-line pt-3">
               <p>빌드 노드: <span className="text-ink font-medium">{q.data?.build_node_name ?? "—"}</span></p>
               <p>소스 경로: <span className="text-ink font-mono">{q.data?.build_source_path ?? "—"}</span></p>
+              <p>빌드 프록시: <span className="text-ink font-mono">
+                {q.data?.build_http_proxy || q.data?.build_https_proxy
+                  ? `${q.data?.build_http_proxy ?? "—"} / ${q.data?.build_https_proxy ?? "—"}`
+                    + (q.data?.build_no_proxy ? ` (제외: ${q.data.build_no_proxy})` : "")
+                  : "없음(직접 연결)"}
+              </span></p>
               <p>마지막 변경: <span className="text-ink font-medium">{q.data?.changed_by ?? "—"}</span>
                  {" · "}{kstStampOrDash(q.data?.changed_at)}
                  {q.data?.changed_at && (

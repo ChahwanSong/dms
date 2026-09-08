@@ -7,6 +7,9 @@ export interface ControlStateBody {
   maintenance: boolean; drain: boolean; reason: string | null;
   build_node_name: string | null;
   build_source_path: string | null;
+  build_http_proxy: string | null;
+  build_https_proxy: string | null;
+  build_no_proxy: string | null;
 }
 export const useSetControlState = () => {
   const qc = useQueryClient();

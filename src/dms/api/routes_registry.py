@@ -11,7 +11,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import registry as registry_mod
-from ..manifest_tags import manifest_images, manifest_job_image
+from ..manifest_tags import manifest_images, manifest_job_image, site_image
 from ..repositories.builds import BUILD_IMAGES
 from ..repositories.releases import COMPONENTS
 from .auth import Identity, audit_actor, require_admin
@@ -36,6 +36,7 @@ def _in_use_tags(request) -> "dict[str, set]":
     fail-safe 방향으로 '모르면 보호 안 함'이 아니라 아래 라우트가 digest 부재 시
     거절하므로 실질 위험은 없다)."""
     runner = request.app.state.rollout_runner
+    registry = request.app.state.settings.build_registry
     in_use = {r: set() for r in _REPOS}
     for component, spec in COMPONENTS.items():
         repo = spec["repository"]
@@ -44,12 +45,14 @@ def _in_use_tags(request) -> "dict[str, set]":
         except Exception:
             obs = None
         live = (obs.get("images") or {}).get(spec["container"]) if obs else None
-        for t in (_tag_of(live), _tag_of(manifest_images().get(component))):
+        # 동봉값은 이 사이트 레지스트리의 것만(다른 사이트 태그가 "사용 중"으로 새지 않게).
+        for t in (_tag_of(live),
+                  _tag_of(site_image(manifest_images().get(component), registry))):
             if t is not None:
                 in_use[repo].add(t)
     # 잡 이미지(dms-mpifileutils)는 워크로드가 아니라 config 값이다 -- 매니페스트가
     # 가리키는 태그를 보호한다(api 가 이 이미지로 잡을 띄운다).
-    job_tag = _tag_of(manifest_job_image())
+    job_tag = _tag_of(site_image(manifest_job_image(), registry))
     if job_tag is not None and "dms-mpifileutils" in in_use:
         in_use["dms-mpifileutils"].add(job_tag)
     return in_use

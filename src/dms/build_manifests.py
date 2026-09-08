@@ -36,6 +36,11 @@ if [ "$sha" != unknown ] && \
   sha="$sha-dirty"
 fi
 echo "DMS_COMMIT_SHA=$sha"
+# 프록시(2026-09-08, 에어갭 사이트의 빌드 노드 프록시): 값은 파드 env 로 온다.
+# buildah 는 자기 환경의 http(s)_proxy/no_proxy 를 RUN 단계 컨테이너에 그대로
+# 넘기고(--http-proxy 기본 true) 베이스 이미지 pull 에도 쓴다 -- npm/pip/apt/
+# curl/VCS 클라이언트 전부 같은 env 를 읽는다. 어느 프록시로 나갔는지 로그에 남긴다.
+echo "DMS_BUILD_PROXY http_proxy=${http_proxy:-} https_proxy=${https_proxy:-} no_proxy=${no_proxy:-}"
 
 mkdir -p /src
 (cd "$DMS_BUILD_SRC" && tar -cf - \
@@ -54,8 +59,14 @@ cd /src
 # 스탬프하면, dms 이미지가 담은 매니페스트가 "agent 도 이 태그" 라고 거짓 주장해
 # (드리프트는 그 매니페스트를 dms-api 이미지에서 읽는다) 오히려 없던 드리프트를
 # 만든다. 콜론 구분(`/$img:`)이 dms 를 dms-agent/dms-mpifileutils 와 분리한다.
+#
+# 레지스트리도 함께 치환한다(2026-09-08): 소스 트리의 매니페스트는 테스트베드
+# 레지스트리(pkg-01:5000)를 담고 있어, 다른 사이트에서 "$DMS_BUILD_REGISTRY/$img:"
+# 로만 맞추면 한 줄도 안 맞아 스탬프가 조용히 무동작이었다 -- 그 사이트 이미지의
+# 동봉 매니페스트가 영원히 남의 태그를 가리켰다. 레지스트리 조각은
+# host[:port](점·콜론 허용)이고 그 뒤 "/$img:" 콜론 경계는 그대로다.
 for img in $DMS_BUILD_IMAGES; do
-  sed -i "s#\(${DMS_BUILD_REGISTRY}/${img}:\)[A-Za-z0-9._-]\{1,\}#\1${DMS_BUILD_TAG}#g" \
+  sed -i "s#[A-Za-z0-9._-]\{1,\}\(:[0-9]\{1,\}\)\{0,1\}/${img}:[A-Za-z0-9._-]\{1,\}#${DMS_BUILD_REGISTRY}/${img}:${DMS_BUILD_TAG}#g" \
     deploy/k8s/*.yaml
 done
 echo "=== stamped deploy/k8s tags -> $DMS_BUILD_TAG for: $DMS_BUILD_IMAGES ==="
@@ -142,8 +153,40 @@ src = os.environ["DMS_PF_SRC"]
 if not os.path.isfile(os.path.join(src, "deploy", "docker", "Dockerfile.dms")):
     fail("build_source_unavailable", "src=" + src)
 
+def via_proxy(proxy, host, port):
+    # 프록시가 설정된 사이트(에어갭 + 프록시 노드)는 직접 443 이 원래 막혀 있다 --
+    # 빌드가 실제로 가는 길(HTTP CONNECT 터널)로 검사해야 "프록시 너머 인터넷이
+    # 열렸는가"를 판별한다. 2xx 응답이면 터널 성립.
+    from urllib.parse import urlsplit
+    u = urlsplit(proxy)
+    try:
+        with socket.create_connection((u.hostname, u.port or 3128), timeout=5.0) as s:
+            s.sendall(("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n"
+                       % (host, port, host, port)).encode())
+            s.settimeout(10.0)
+            line = b""
+            while not line.endswith(b"\r\n") and len(line) < 512:
+                ch = s.recv(1)
+                if not ch:
+                    break
+                line += ch
+            parts = line.decode("latin-1").split()
+            return len(parts) >= 2 and parts[1].startswith("2")
+    except (OSError, ValueError):
+        return False
+
+
 egress_hosts = os.environ["DMS_PF_EGRESS_HOSTS"].split()
-unreachable = [h for h in egress_hosts if not reachable(h, 443)]
+proxy = os.environ.get("DMS_PF_PROXY", "")
+if proxy:
+    from urllib.parse import urlsplit
+    pu = urlsplit(proxy)
+    if not pu.hostname or not reachable(pu.hostname, pu.port or 3128):
+        fail("build_proxy_unreachable", "proxy=" + proxy)
+    unreachable = [h for h in egress_hosts if not via_proxy(proxy, h, 443)]
+    print("egress via proxy " + proxy)
+else:
+    unreachable = [h for h in egress_hosts if not reachable(h, 443)]
 if unreachable:
     # 실패 호스트 전부를 로그로 -- "어느 호스트가 막혔나"가 운영자의 첫 질문이다.
     fail("build_node_no_egress", "unreachable_443=" + ",".join(unreachable))
@@ -176,8 +219,36 @@ print("DMS_PREFLIGHT_OK")
 _PROBE_STATIC_HOSTS = ("quay.io", "registry-1.docker.io")
 
 
+def _registry_host(registry: str) -> str:
+    return (registry or "").split("/", 1)[0].rsplit(":", 1)[0]
+
+
+def proxy_env(proxy, registry) -> dict:
+    """빌드·프로브 파드에 실을 프록시 env(2026-09-08). proxy 는 control_state 의
+    {http_proxy, https_proxy, no_proxy}(전부 None 가능). 대소문자 두 벌을 다 싣는다
+    -- curl/pip/npm 은 소문자, Go(buildah·containers/image)는 대문자를 우선한다.
+    한쪽만 설정되면 다른 쪽도 그 값을 쓴다. NO_PROXY 에는 사이트 레지스트리
+    호스트(포트 유무 둘 다)와 localhost 를 항상 보탠다: push 가 프록시로 나가면
+    사내 레지스트리는 대개 프록시 너머에 없다."""
+    proxy = proxy or {}
+    http_p = (proxy.get("http_proxy") or "").strip()
+    https_p = (proxy.get("https_proxy") or "").strip() or http_p
+    http_p = http_p or https_p
+    if not http_p and not https_p:
+        return {}
+    items = [x.strip() for x in (proxy.get("no_proxy") or "").split(",") if x.strip()]
+    for extra in (registry, _registry_host(registry), "localhost", "127.0.0.1"):
+        if extra and extra not in items:
+            items.append(extra)
+    no_p = ",".join(items)
+    env = {"HTTP_PROXY": http_p, "HTTPS_PROXY": https_p, "NO_PROXY": no_p}
+    env.update({k.lower(): v for k, v in env.items()})
+    return env
+
+
 def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_image,
-                    timeout_seconds) -> dict:
+                    timeout_seconds, proxy=None) -> dict:
+    penv = proxy_env(proxy, registry)
     env = {
         "DMS_PF_EGRESS_HOSTS": " ".join(_PROBE_STATIC_HOSTS),
         "DMS_PF_REGISTRY": registry,
@@ -186,6 +257,8 @@ def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_ima
         # sizeLimit 이 반드시 담길 수 있어야 두 방어가 한 공식이 된다.
         "DMS_PF_NEED_BYTES": str((BUILD_SIZELIMIT_GIB + BUILD_DISK_MARGIN_GIB)
                                  * 1024 ** 3),
+        # 프록시 사이트는 egress 를 CONNECT 터널로 검사한다(프로브 스크립트).
+        "DMS_PF_PROXY": penv.get("HTTPS_PROXY", ""),
     }
     return {
         "apiVersion": "v1", "kind": "Pod",
@@ -229,7 +302,7 @@ def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_ima
 
 
 def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
-                    registry, builder_image, timeout_seconds) -> dict:
+                    registry, builder_image, timeout_seconds, proxy=None) -> dict:
     ordered = [i for i in BUILD_IMAGES if i in set(images)]
     # tag 는 호출자(BuildRunner)가 effective_tag() 로 확정해 넘긴다 -- 여기서
     # 재계산하면 "화면의 태그"와 "push 태그"가 갈라지는 두 번째 진실이 생긴다.
@@ -238,6 +311,8 @@ def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
         "DMS_BUILD_TAG": tag,
         "DMS_BUILD_REGISTRY": registry,
         "DMS_BUILD_IMAGES": " ".join(ordered),
+        # 프록시(있을 때만): buildah 가 RUN 컨테이너·pull 에 그대로 전파한다.
+        **proxy_env(proxy, registry),
     }
     return {
         "apiVersion": "v1", "kind": "Pod",

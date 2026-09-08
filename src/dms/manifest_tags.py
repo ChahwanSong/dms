@@ -280,3 +280,32 @@ def manifest_job_image(root=None) -> "str | None":
         return _unquote(_value(data[key_at])) or None
     except _READ_ERRORS:
         return None
+
+
+# --- 사이트 귀속 필터(2026-09-08) ---------------------------------------------
+# 동봉 매니페스트는 "이 이미지를 만든 소스 트리"의 값이라, 다른 사이트(예: 테스트베드
+# pkg-01:5000/dms:d119)에서 빌드·커밋된 값이 신규 사이트 이미지에 그대로 실려 온다
+# (부트스트랩을 포탈 밖에서 빌드하면 스탬프가 없다). 그 값은 이 사이트의 배포
+# 기준이 아니다 -- 라이브와 비교하면 없는 드리프트를 만들고, 빌드 화면·레지스트리
+# "사용 중" 판정에 남의 태그가 샌다. 규칙: 동봉 이미지의 레지스트리가 이 사이트의
+# 빌드 레지스트리(DMS_BUILD_REGISTRY)와 같을 때만 기준값으로 쓰고, 다르면 None(모름).
+
+def image_registry(image: str) -> "str | None":
+    """이미지 참조의 레지스트리 부분. 첫 경로 조각이 '.'/':' 을 품거나 localhost 일
+    때만 레지스트리다(docker.io 관례) -- 아니면 None."""
+    if not isinstance(image, str) or "/" not in image:
+        return None
+    first = image.split("/", 1)[0]
+    if "." in first or ":" in first or first == "localhost":
+        return first
+    return None
+
+
+def site_image(image: "str | None", registry: "str | None") -> "str | None":
+    """이 사이트에 귀속된 동봉 이미지만 돌려준다(레지스트리 일치). 아니면 None."""
+    if not image or not registry:
+        return None
+    mine = image_registry(image)
+    if mine is None or mine.lower() != registry.strip().lower():
+        return None
+    return image

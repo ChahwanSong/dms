@@ -1,3 +1,4 @@
+import pytest
 ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
@@ -162,3 +163,57 @@ def test_control_state_history_is_admin_only(client):
     client.post("/api/auth/signup", json={"username": "u9", "password": "p"})
     client.post("/api/auth/login", json={"username": "u9", "password": "p"})
     assert client.get("/api/admin/control-state/history").status_code in (401, 403)
+
+
+# --- 빌드 노드 프록시(2026-09-08) ---
+
+def _put(client, **extra):
+    body = {"maintenance": False, "drain": False, "reason": None, **extra}
+    return client.put("/api/admin/control-state", json=body, headers=ADMIN)
+
+
+def test_build_proxy_is_stored_normalized_and_returned(client, db):
+    r = _put(client, build_http_proxy=" http://proxy.corp:3128/ ",
+             build_https_proxy="", build_no_proxy=" .corp.example , 10.0.0.0/8,, ")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["build_http_proxy"] == "http://proxy.corp:3128"
+    assert body["build_https_proxy"] is None          # 빈 값 = 없음(HTTP 값을 따른다)
+    assert body["build_no_proxy"] == ".corp.example,10.0.0.0/8"
+    # 감사 이력(before/after 스냅샷)에 실린다
+    hist = client.get("/api/admin/control-state/history", headers=ADMIN).json()
+    assert hist[0]["after"]["build_http_proxy"] == "http://proxy.corp:3128"
+    # BuildRunner 가 읽는 모양
+    assert client.app.state.repos.control.build_proxy() == {
+        "http_proxy": "http://proxy.corp:3128", "https_proxy": None,
+        "no_proxy": ".corp.example,10.0.0.0/8"}
+
+
+def test_build_proxy_defaults_to_none_and_clears_when_omitted(client):
+    assert _put(client, build_http_proxy="http://p:1").status_code == 200
+    body = _put(client).json()                        # 프록시 필드 생략 = 해제(무조건 UPDATE)
+    assert (body["build_http_proxy"], body["build_https_proxy"],
+            body["build_no_proxy"]) == (None, None, None)
+    assert client.app.state.repos.control.build_proxy() == {
+        "http_proxy": None, "https_proxy": None, "no_proxy": None}
+
+
+@pytest.mark.parametrize("bad", [
+    "proxy.corp:3128",                    # 스킴 없음
+    "socks5://proxy.corp:1080",           # http(s) 만
+    "http://user:secret@proxy.corp:3128", # 자격증명 평문 저장 금지
+    "http://proxy.corp:3128/path",
+    "http://proxy.corp:notaport",
+    "http://",
+])
+def test_invalid_proxy_url_is_rejected_without_saving(client, bad):
+    r = _put(client, build_https_proxy=bad)
+    assert (r.status_code, r.json()["detail"]) == (422, "invalid_proxy_url")
+    assert client.get("/api/admin/control-state",
+                      headers=ADMIN).json()["build_https_proxy"] is None
+
+
+@pytest.mark.parametrize("bad", ["a b", "host;rm", "'x'", "$(id)"])
+def test_invalid_no_proxy_is_rejected(client, bad):
+    r = _put(client, build_no_proxy=bad)
+    assert (r.status_code, r.json()["detail"]) == (422, "invalid_no_proxy")
