@@ -7,7 +7,7 @@ import { ApiError } from "../../lib/api";
 import { useNodes } from "../nodes/useNodes";
 import { useJobMetrics } from "../dashboard/useMetrics";
 import { kpiFromStates } from "../dashboard/Dashboard";
-import { useControlState, useControlHistory, useSetControlState } from "./useControlState";
+import { useControlState, useControlHistory, useProxyHints, useSetControlState } from "./useControlState";
 import { kstStampOrDash, kstStamp } from "../../lib/datetime";
 import type { ControlState } from "../../lib/types";
 import type { ControlHistoryEntry } from "./useControlState";
@@ -69,6 +69,7 @@ export function ControlStatePage() {
   const q = useControlState();
   const nodesQ = useNodes();
   const historyQ = useControlHistory();
+  const hintsQ = useProxyHints();
   // 영향 요약 재료: 대시보드와 같은 잡 집계(24h 창의 by_state 에서 실행/대기).
   const jobsQ = useJobMetrics(24);
   const setControlState = useSetControlState();
@@ -208,6 +209,26 @@ export function ControlStatePage() {
                   실립니다. 사내 레지스트리와 localhost 는 자동으로 제외됩니다.
                   비우면 프록시 없이 직접 연결합니다.
                 </span>
+                {/* 힌트(2026-09-09, 사용자 요청): 이 사이트의 실제 값 -- 레지스트리
+                    호스트·host:port·localhost·127.0.0.1·.svc·.cluster.local·워커 노드 IP.
+                    서버가 자동으로 보태는 항목은 표시만 하고, 「권장 값 채우기」는
+                    전체를 입력에 넣는다(중복은 서버가 무해하게 접는다). */}
+                {hintsQ.data && (
+                  <span className="block text-muted text-xs mt-1" data-testid="no-proxy-hint">
+                    권장 값: <span className="font-mono text-ink break-all">{hintsQ.data.suggested_no_proxy.join(",")}</span>
+                    {" "}
+                    <Button type="button" variant="ghost" className="px-1.5 py-0.5 text-xs"
+                            onClick={() => setNoProxy(hintsQ.data!.suggested_no_proxy.join(","))}>
+                      권장 값 채우기
+                    </Button>
+                    <span className="block">
+                      (레지스트리·localhost 는 저장 시 자동으로 보태집니다
+                      {hintsQ.data.nodes_known
+                        ? ` · 워커 노드 ${hintsQ.data.nodes.length}대`
+                        : " · 워커 노드 IP 는 클러스터 조회 실패로 생략"})
+                    </span>
+                  </span>
+                )}
               </label>
               {/* 호스트 네트워크(2026-09-09): 파드는 자기 네트워크 네임스페이스를
                   가져 127.0.0.1 이 파드 자신이다 -- 빌드 노드 호스트의 loopback 에만

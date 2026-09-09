@@ -1,10 +1,14 @@
+import logging
 import re
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from ..build_manifests import auto_no_proxy
 from .auth import Identity, audit_actor, require_admin
 from .routes_builds import validate_source_path
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -71,6 +75,34 @@ class ControlStateBody(BaseModel):
 @router.get("/api/admin/control-state")
 def get_control_state(request: Request):
     return request.app.state.repos.control.control_state()
+
+
+@router.get("/api/admin/control-state/proxy-hints")
+def get_proxy_hints(request: Request):
+    """컨트롤 상태 화면의 프록시 제외(no_proxy) 힌트(2026-09-09, 사용자 요청): 이
+    사이트의 실제 값 -- 레지스트리 호스트·host:port·localhost·127.0.0.1·클러스터
+    DNS 접미(.svc/.cluster.local)·워커 노드 IP. 노드 조회는 fail-soft: 실패하면
+    nodes_known=false 로 정직하게 알리고 나머지 힌트는 그대로 준다."""
+    settings = request.app.state.settings
+    registry = settings.build_registry
+    host = (registry or "").split("/", 1)[0].rsplit(":", 1)[0]
+    nodes = None
+    try:
+        nodes = list(request.app.state.node_lister() or [])
+    except Exception as exc:
+        logger.warning("proxy hints: node listing failed: %s", exc)
+    workers = [n for n in (nodes or [])
+               if not n.get("control_plane") and n.get("ip")]
+    suggested = []
+    for item in (host, registry, "localhost", "127.0.0.1", ".svc", ".cluster.local",
+                 *[n["ip"] for n in workers]):
+        if item and item not in suggested:
+            suggested.append(item)
+    return {"registry": registry, "registry_host": host,
+            "nodes": [{"name": n.get("name"), "ip": n["ip"]} for n in workers],
+            "nodes_known": nodes is not None,
+            "suggested_no_proxy": suggested,
+            "auto_added": auto_no_proxy(registry)}
 
 
 @router.get("/api/admin/control-state/history")

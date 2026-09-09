@@ -1,7 +1,9 @@
 # ServiceAccounts + namespaced RBAC for the three DMS workloads. All
-# resources this file grants are namespace-scoped (dms) except two
-# ClusterRoles: the agent's (Nodes are cluster-scoped) and the api's
-# dms-api-queue-readonly (Volcano Queues are cluster-scoped; named GET only).
+# resources this file grants are namespace-scoped (dms) except three
+# ClusterRoles: the agent's (Nodes are cluster-scoped), the api's
+# dms-api-queue-readonly (Volcano Queues are cluster-scoped; named GET only)
+# and the api's dms-api-nodes-readonly (Node addresses for the control-state
+# no_proxy hint, 2026-09-09; get/list, no resourceNames -- see its comment).
 ---
 # dms-controller (dms controller, deploy/k8s/41-controller.yaml): the only
 # process that SUBMITS work. stepper.py's JobStepper calls
@@ -171,6 +173,33 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: dms-api-queue-readonly
+subjects:
+  - kind: ServiceAccount
+    name: dms-api
+    namespace: dms
+---
+# 2026-09-09: 컨트롤 상태 화면의 프록시 제외(no_proxy) 힌트가 워커 노드 IP 를
+# 보여준다(routes_control.proxy_hints -> KubernetesClient.list_node_addresses).
+# Node 는 cluster-scoped 라 ClusterRole 이 필요하고, 이름을 미리 알 수 없어
+# list 가 실제 동사다(resourceNames 는 list 에 적용되지 않으므로 붙이지 않는다).
+# 읽는 값은 이름·라벨(control-plane 판별)·InternalIP 뿐이며 쓰기는 없다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dms-api-nodes-readonly
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dms-api-nodes-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dms-api-nodes-readonly
 subjects:
   - kind: ServiceAccount
     name: dms-api

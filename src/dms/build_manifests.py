@@ -303,6 +303,16 @@ def _registry_host(registry: str) -> str:
     return (registry or "").split("/", 1)[0].rsplit(":", 1)[0]
 
 
+def auto_no_proxy(registry) -> list:
+    """서버가 NO_PROXY 에 항상 보태는 항목(사이트 레지스트리 host:port·host·localhost).
+    컨트롤 상태 힌트가 같은 목록을 "자동 추가됨"으로 보여준다."""
+    out = []
+    for extra in (registry, _registry_host(registry), "localhost", "127.0.0.1"):
+        if extra and extra not in out:
+            out.append(extra)
+    return out
+
+
 def proxy_env(proxy, registry) -> dict:
     """빌드·프로브 파드에 실을 프록시 env(2026-09-08). proxy 는 control_state 의
     {http_proxy, https_proxy, no_proxy}(전부 None 가능). 대소문자 두 벌을 다 싣는다
@@ -317,8 +327,8 @@ def proxy_env(proxy, registry) -> dict:
     if not http_p and not https_p:
         return {}
     items = [x.strip() for x in (proxy.get("no_proxy") or "").split(",") if x.strip()]
-    for extra in (registry, _registry_host(registry), "localhost", "127.0.0.1"):
-        if extra and extra not in items:
+    for extra in auto_no_proxy(registry):
+        if extra not in items:
             items.append(extra)
     no_p = ",".join(items)
     env = {"HTTP_PROXY": http_p, "HTTPS_PROXY": https_p, "NO_PROXY": no_p}

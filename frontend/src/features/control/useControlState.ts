@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
-import type { ControlState } from "../../lib/types";
+import type { ControlState, ProxyHints } from "../../lib/types";
 export const useControlState = () =>
   useQuery({ queryKey: ["control-state"], queryFn: () => apiGet<ControlState>("/api/admin/control-state") });
 export interface ControlStateBody {
@@ -21,6 +21,12 @@ export const useSetControlState = () => {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["control-state"] });
                        qc.invalidateQueries({ queryKey: ["control-history"] }); } });
 };
+
+// 프록시 제외 힌트(2026-09-09): 사이트 실제 값(레지스트리·클러스터 DNS·워커 노드 IP).
+// 폴링하지 않는다 -- 노드 IP 는 화면을 여는 사이 바뀌지 않는다.
+export const useProxyHints = () =>
+  useQuery({ queryKey: ["control-proxy-hints"],
+    queryFn: () => apiGet<ProxyHints>("/api/admin/control-state/proxy-hints") });
 
 // 변경 이력(슬라이스 36): 감사 로그의 control_state before/after 스냅샷.
 // diff 문구는 화면(ControlStatePage.diffText)이 계산한다.
