@@ -54,6 +54,26 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 빌드 파드 호스트 네트워크 모드(loopback 프록시) — **완료·실증**(2026-09-09, d123)
+
+사용자 보고: 프록시를 `ssh -R` 리버스 터널로 빌드 노드 호스트의 `localhost:7227`
+에 걸어 쓰는데, 빌드 파드는 자기 네트워크 네임스페이스라 파드 안의 127.0.0.1 이
+파드 자신이어서 닿지 않는다 — hostNetwork 우회 검토·구현 요청.
+
+- 검토: 파드 `hostNetwork` 만으로는 부족하다. buildah 의 RUN 단계는 기본
+  `--network=private` 로 자기 netns 를 또 만들어 npm/pip/apt 가 보는 localhost 는
+  RUN 컨테이너 자신이다. 프리플라이트 프로브도 같은 네트워크여야 CONNECT 검사가
+  거짓 실패하지 않는다.
+- 구현: `host_network_for(proxy)` — 프록시 호스트가 loopback(`localhost`/`127.0.0.1`/
+  `::1`)이면 자동, 아니면 `control_state.build_host_network` 스위치(컨트롤 상태
+  체크박스). 켜지면 빌드·프로브 파드 `hostNetwork: true` + `dnsPolicy:
+  ClusterFirstWithHostNet`(NO_PROXY 대상인 사내 레지스트리 이름을 클러스터 DNS 로
+  풀기 위해) + 빌드 스크립트 `buildah bud --network=host`(env
+  `DMS_BUILD_NETWORK=host`). 컬럼 1(CREATE + _ensure_columns, 전수 그물 35→36).
+  현재 상태 카드가 "호스트 네트워크(자동 — 프록시가 127.0.0.1)" / "(스위치)" /
+  "파드 네트워크" 로 판정 근거를 보여준다.
+- 실증(테스트베드): 아래 「실증」.
+
 ### ✅ 빌드 프록시 + 신규 사이트 태그 누출 차단 — **완료·실증**(2026-09-08, d120/d121)
 
 사용자 보고(프로덕션 SSC 클러스터에서 dms-ssc 셋업 후): "빌드 화면에 이미지 태그가

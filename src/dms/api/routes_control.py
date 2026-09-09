@@ -51,6 +51,9 @@ class ControlStateBody(BaseModel):
     build_http_proxy: str | None = None
     build_https_proxy: str | None = None
     build_no_proxy: str | None = None
+    # 빌드 파드 호스트 네트워크(2026-09-09). loopback 프록시는 자동이라 이 스위치는
+    # 그 밖의 경우(호스트에서만 닿는 주소) 용이다.
+    build_host_network: bool = False
 
 
 @router.get("/api/admin/control-state")
@@ -118,5 +121,6 @@ def put_control_state(body: ControlStateBody, request: Request,
                               build_http_proxy=proxies["build_http_proxy"],
                               build_https_proxy=proxies["build_https_proxy"],
                               build_no_proxy=no_proxy,
+                              build_host_network=body.build_host_network,
                               actor=audit_actor(identity))
     return control.control_state()

@@ -26,7 +26,16 @@ const DIFF_FIELDS: { key: keyof ControlState; label: string;
   { key: "build_http_proxy", label: "HTTP 프록시", fmt: (v) => String(v ?? "—") },
   { key: "build_https_proxy", label: "HTTPS 프록시", fmt: (v) => String(v ?? "—") },
   { key: "build_no_proxy", label: "프록시 제외", fmt: (v) => String(v ?? "—") },
+  { key: "build_host_network", label: "호스트 네트워크", fmt: (v) => (v ? "ON" : "OFF") },
 ];
+
+// 서버 build_manifests.host_network_for 의 거울: 프록시 호스트가 loopback 이면 자동
+// 호스트 네트워크. 화면은 판정을 흉내내 "왜 켜졌는지"를 보여줄 뿐 결정은 서버가 한다.
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+export function proxyHostOf(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try { return new URL(url).hostname.toLowerCase() || null; } catch { return null; }
+}
 
 // 한 이력 행의 변경 내용 요약: "유지보수 OFF→ON · 사유 —→'점검'". 변한 게 없으면
 // (동일 저장 재클릭) "변경 없음" -- 지어내지 않는다.
@@ -70,6 +79,7 @@ export function ControlStatePage() {
   const [httpProxy, setHttpProxy] = useState("");
   const [httpsProxy, setHttpsProxy] = useState("");
   const [noProxy, setNoProxy] = useState("");
+  const [hostNetwork, setHostNetwork] = useState(false);
 
   useEffect(() => {
     if (!q.data) return;
@@ -81,6 +91,7 @@ export function ControlStatePage() {
     setHttpProxy(q.data.build_http_proxy ?? "");
     setHttpsProxy(q.data.build_https_proxy ?? "");
     setNoProxy(q.data.build_no_proxy ?? "");
+    setHostNetwork(q.data.build_host_network === 1);
   }, [q.data]);
 
   const submit = () => {
@@ -92,6 +103,7 @@ export function ControlStatePage() {
       build_http_proxy: httpProxy.trim() === "" ? null : httpProxy.trim(),
       build_https_proxy: httpsProxy.trim() === "" ? null : httpsProxy.trim(),
       build_no_proxy: noProxy.trim() === "" ? null : noProxy.trim(),
+      build_host_network: hostNetwork,
     });
   };
 
@@ -193,6 +205,23 @@ export function ControlStatePage() {
                   비우면 프록시 없이 직접 연결합니다.
                 </span>
               </label>
+              {/* 호스트 네트워크(2026-09-09): 파드는 자기 네트워크 네임스페이스를
+                  가져 127.0.0.1 이 파드 자신이다 -- 빌드 노드 호스트의 loopback 에만
+                  묶인 프록시(ssh -R 리버스 터널 등)는 파드 hostNetwork + buildah
+                  --network=host 로만 닿는다. loopback 주소면 서버가 자동으로 켜고,
+                  이 스위치는 그 밖의 "호스트에서만 닿는 주소"용이다. */}
+              <label className="flex items-start gap-2">
+                <input type="checkbox" aria-label="빌드 파드 호스트 네트워크" className="mt-1"
+                       checked={hostNetwork} onChange={(e) => setHostNetwork(e.target.checked)} />
+                <span className="text-sm">빌드 파드 호스트 네트워크
+                  <span className="block text-muted text-xs">
+                    빌드·프리플라이트 파드가 빌드 노드의 네트워크 네임스페이스를 그대로 쓰고
+                    buildah RUN 단계도 호스트 네트워크로 돕니다 — 파드 안의 localhost 가 빌드
+                    노드 호스트가 됩니다. 프록시 주소가 localhost/127.0.0.1 이면 이 스위치와
+                    무관하게 자동으로 켜집니다.
+                  </span>
+                </span>
+              </label>
               {setControlState.isError && (
                 <p className="text-bad">{(setControlState.error as ApiError).message}</p>
               )}
@@ -236,6 +265,15 @@ export function ControlStatePage() {
                   ? `${q.data?.build_http_proxy ?? "—"} / ${q.data?.build_https_proxy ?? "—"}`
                     + (q.data?.build_no_proxy ? ` (제외: ${q.data.build_no_proxy})` : "")
                   : "없음(직접 연결)"}
+              </span></p>
+              <p>빌드 파드 네트워크: <span className="text-ink font-medium">
+                {(() => {
+                  const host = proxyHostOf(q.data?.build_https_proxy || q.data?.build_http_proxy);
+                  const loop = host !== null && LOOPBACK.has(host);
+                  return q.data?.build_host_network === 1
+                    ? "호스트 네트워크(스위치)"
+                    : loop ? `호스트 네트워크(자동 — 프록시가 ${host})` : "파드 네트워크";
+                })()}
               </span></p>
               <p>마지막 변경: <span className="text-ink font-medium">{q.data?.changed_by ?? "—"}</span>
                  {" · "}{kstStampOrDash(q.data?.changed_at)}
