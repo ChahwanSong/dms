@@ -222,7 +222,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   // registry_ok=false 로만 알린다(태그 목록은 빈 배열이 되고 존재 검증이 꺼진다).
   // 그래도 문구를 여기에 두는 이유: 화면이 한국어를 하드코딩하지 않는다는 규칙을
   // 릴리스 화면만 예외로 두면 문구가 두 곳으로 갈라진다.
-  registry_unreachable: "레지스트리에 연결할 수 없어 태그 목록이 비어 있습니다",
+  registry_unreachable: "레지스트리에 연결할 수 없어 태그 목록이 비어 있습니다 — 레지스트리 주소(DMS_BUILD_REGISTRY)·네트워크를 확인하세요 (리포가 아직 없는 신규 사이트는 이 오류가 아니라 빈 목록으로 보입니다)",
   // 프론트 전용 코드다(registry_unreachable 과 같은 관례) -- 백엔드는 detail 이
   // 아니라 제출 202 응답의 tag_verified:false 필드로 알린다(슬라이스 28).
   tag_unverified: "레지스트리가 응답하지 않아 태그 존재를 확인하지 못한 채 접수되었습니다 — 태그가 틀리면 ImagePullBackOff 로 드러납니다",
