@@ -85,6 +85,12 @@ def resolve_job_identity(control, resolver, *, requester_id, owner_username,
                                groups=list(resolved.groups))
     if denied:
         raise IdentityRejected("identity_denied", denied)
+    if resolved.uid == 0:
+        # 비특권 경로가 uid 0 을 얻는 유일한 방법은 디렉터리의 uidNumber=0 항목이다
+        # (예: posix root 를 LDAP 에 실은 사이트). root 실행은 특권 요청자 게이트
+        # (privileged) 만의 권한이라 계획 시점에 정확한 사유로 거부한다 -- stepper 의
+        # identity_problem(privileged_flag_mismatch) 은 변조 행용 백스톱이다.
+        raise IdentityRejected("identity_root_without_privilege", owner)
     control.register_probe_target(owner)
     return ResolvedIdentity(owner, resolved.uid, resolved.gid,
                             tuple(resolved.groups), False)

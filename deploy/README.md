@@ -140,6 +140,50 @@ mkdir -p /cephfs-third/managed /cephfs-secondary/managed
 a subdirectory of it. `dms-controller`/`dms-api` need `/cephfs/dms/artifacts`
 readable -- see `DMS_ARTIFACT_BASE_URI`.)
 
+## 2b. 제어면 root 전제 (2026-09-09)
+
+`dms-api`·`dms-controller` 컨테이너는 **uid 0** 으로 돈다(`40-api.yaml`·
+`41-controller.yaml` 컨테이너 securityContext: capabilities 전부 drop, 이미지 fs
+읽기 전용; `migrate` initContainer·`30-migrate-job` 은 이미지 USER 65532 그대로).
+운영 아티팩트 base(`/cephfs/dms/artifacts`)가 `root:root` 라 65532 로는 3홉 쓰기
+왕복 검증이 항상 실패했기 때문이다. 이 결정에 따라오는 **배포 전제** 세 가지:
+
+1. **base 와 `<base>/<job_id>` 는 root:root · 비-world-writable** (`chmod 755`, 권장
+   `700`). 러너가 `<job_id>` 를 root 로 만들고 `<phase>` 만 요청자에게 chown 한다.
+   base 가 world-writable 이면 요청자가 `<job_id>` 를 미리 만들어 봉쇄 기준을 옮길 수
+   있다. 3홉 검증이 이를 **강제**한다: 소유자가 제어면 euid(root)가 아니면
+   `artifact_base_not_owned`, `o+w` 면 `artifact_base_world_writable` (sticky 여도).
+   (테스트베드 base 는 65532 시절의 777 을 d128 에서 755 로 정정했다.)
+2. **`fs.protected_hardlinks=1` · `fs.protected_symlinks=1`** — 공유 FS 를 마운트하고
+   사용자가 `link(2)` 를 부를 수 있는 **모든** 호스트(k8s 워커뿐 아니라 로그인·계산
+   노드 포함). 하드링크 허용 여부는 **링크를 만드는 쪽 커널**이 결정하므로(MDS 는
+   검사하지 않는다) 워커만 켜 두면 충분조건이 아니다. 에이전트 프로브는 k8s 워커만
+   본다. 확인: `sysctl fs.protected_hardlinks fs.protected_symlinks` (둘 다 1).
+   코드는 nlink>1·남의 소유 파일을 404 로 거르지만(`src/dms/artifact_files.py`) 이
+   sysctl 이 근본 방어다.
+3. **`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`**(`20-config.yaml`, 기본 `/cephfs`; 오버레이는
+   `/<SHARED_FS>`) — 포탈에서 고를 수 있는 base 를 파드가 실제로 마운트한 공유 FS 로
+   묶는다. root 라 파일시스템이 더는 경로를 걸러 주지 않는다. 허용 밖 경로는 422
+   `artifact_base_outside_allowlist`, 이미 저장된 base 가 밖이면 3홉 화면의 API·컨트롤러
+   홉이 같은 사유로 실패를 낸다.
+
+**적용 방법 주의**: securityContext 는 매니페스트 필드라 포탈 릴리스(이미지 patch)만으로는
+실리지 않는다 — d128 이상으로 올릴 때 `kubectl apply -f deploy/k8s/40-api.yaml -f
+deploy/k8s/41-controller.yaml` 을 한 번 반드시 거친다(드리프트 배지는 이미지만 비교한다).
+
+배포 후 확인:
+
+```bash
+kubectl -n dms exec deploy/dms-api -c api -- sh -c 'id; grep -E "^Cap(Eff|Bnd)" /proc/1/status; touch /app/.w'
+# uid=0(root) gid=0(root) / CapEff: 0000000000000000 / touch: Read-only file system
+kubectl -n dms get pod -l app.kubernetes.io/name=dms-api \
+  -o jsonpath='{.items[0].spec.initContainers[0].securityContext}{"\n"}'   # {} (migrate 는 65532)
+```
+
+되돌리기(비root 로): 운영 노드에서 `chown 65532 <artifact_base>` 로 base 소유자를
+바꾸고 40/41 의 컨테이너 securityContext 를 제거한다(계약 테스트도 함께 뒤집어야
+한다). 그 상태에선 root:root base 마다 `artifact_base_not_writable` 이 난다.
+
 ## 3. Apply manifests, in order
 
 ```bash

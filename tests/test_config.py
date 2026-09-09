@@ -181,3 +181,26 @@ def test_session_cookie_secure_parses_and_defaults_off():
     assert Settings.from_env(VALID).session_cookie_secure is False
     assert Settings.from_env(
         {**VALID, "DMS_SESSION_COOKIE_SECURE": "true"}).session_cookie_secure is True
+
+
+def test_artifact_base_allowed_prefixes_parsing():
+    # 미설정·빈 값 = 무제한(()); 콤마 목록은 후행 슬래시 제거·정렬·중복 제거.
+    assert Settings.from_env(VALID).artifact_base_allowed_prefixes == ()
+    assert Settings.from_env({**VALID, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES": ""}
+                             ).artifact_base_allowed_prefixes == ()
+    s = Settings.from_env({**VALID, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES":
+                           "/cephfs/, /gpfs,/cephfs"})
+    assert s.artifact_base_allowed_prefixes == ("/cephfs", "/gpfs")
+    # '.'·'//' 는 정규화로 접는다('..' 는 정규화 전에 거부 -- 아래 테스트)
+    s = Settings.from_env({**VALID, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES": "/cephfs/./,/gpfs//x"})
+    assert s.artifact_base_allowed_prefixes == ("/cephfs", "/gpfs/x")
+
+
+@pytest.mark.parametrize("bad", ["cephfs", "/", "//", "/cephfs,relative",
+                                 "/.", "/..", "/./", "/cephfs/..", "/cephfs/../etc",
+                                 "/cephfs/x/../.."])
+def test_artifact_base_allowed_prefixes_reject_relative_and_root(bad):
+    # "/" 는 allowlist 를 켠 척하면서 아무것도 막지 않는 값 -- 기동 거부.
+    with pytest.raises(SettingsError) as e:
+        Settings.from_env({**VALID, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES": bad})
+    assert "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES" in str(e.value)

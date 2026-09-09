@@ -19,12 +19,36 @@
 # The same partial unique index treatment is needed for releases with state IN
 # ('Pending','Applying') before replicas > 1.
 #
-# /cephfs hostPath: app.state.execution_adapter (built in api/app.py exactly
-# like the controller's) currently only ever calls .terminate() from the
-# cancel route, which is DB+k8s only and needs no filesystem access. This
-# mount is here for parity with the controller and forward-compatibility
-# (e.g. a future artifact/log read route) per the design review; if it never
-# gains a filesystem-reading route it is inert.
+# /cephfs hostPath is REQUIRED and read-write: routes_artifact_base.py creates
+# and unlinks a probe file under the artifact base (3-hop check), and
+# routes_artifacts.py / routes_scan_paths.py / routes_usage.py read files in
+# the requester-owned <base>/<job_id>/<phase>/ directories.
+#
+# root (2026-09-09): the `api` container runs as uid 0 (container-level
+# securityContext below). Production artifact bases are root:root, so 65532
+# could never pass the write round-trip. Consequences the code relies on:
+#   * filesystem permissions are NOT a second line of defence any more --
+#     authorization is DB-only (_owned_job/require_admin) plus the fd
+#     containment chain in src/dms/artifact_files.py (owner uid + nlink +
+#     /proc/self/fd realpath). See docs/ARCHITECTURE.md "root 제어면".
+#   * capabilities are dropped (drop ALL): uid 0 owns the base so no
+#     CAP_DAC_OVERRIDE is needed, and without it root is gated by the OWNER
+#     mode bits like any uid (other uids' 0600 stay EACCES). If EACCES shows
+#     up: on the write probe it means the base is not root-owned -> fix
+#     ownership (chown root:root), never add a capability; on reads of a
+#     requester-owned <phase> dir it means the runner umask changed -> fix the
+#     runner, never add DAC_READ_SEARCH (it would defeat the owner barrier).
+#     Never runAsNonRoot/65532 either (reintroduces artifact_base_not_writable
+#     on every production base).
+#   * there is deliberately NO writable /tmp (no emptyDir): tempfile and any
+#     disk-spooling (multipart uploads, subprocess) are forbidden in api/
+#     controller code -- tempfile.gettempdir() would raise under this spec.
+#   * readOnlyRootFilesystem: the image tree (/app/static, /app/deploy/k8s,
+#     site-packages) is root:root, so uid 0 could write it -- this flag is
+#     the only thing keeping the image immutable at runtime.
+#   * the `migrate` initContainer keeps the image USER (65532): it is DB-only
+#     and must not inherit root, hence container-level, not pod-level.
+# tests/test_release_manifest_contract.py pins all of the above.
 #
 # NOTE: `type: Directory` means this pod FAILS to start on any node without a
 # real /cephfs mount. That's fine as long as dms-api only schedules onto the
@@ -84,6 +108,15 @@ spec:
           image: pkg-01:5000/dms:d127
           imagePullPolicy: IfNotPresent
           command: ["dms", "api"]
+          # root, no capabilities, immutable image fs -- rationale in the header
+          # comment. Pinned by tests/test_release_manifest_contract.py.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           env:
             # Portal SPA static dir baked into the image (see
             # deploy/docker/Dockerfile.dms "web" stage); the image ENV

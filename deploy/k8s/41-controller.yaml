@@ -4,14 +4,23 @@
 # run_all_once() takes a DB lease per loop so more replicas would be safe
 # (hot standby), but one is enough to validate the scenarios.
 #
-# /cephfs hostPath is REQUIRED (not optional, unlike dms-api): JobStepper
-# calls execution_adapter.read_summary(ref) (stepper.py, preview + execution
-# phases), which does a plain local open() on
-# <DMS_ARTIFACT_BASE_URI>/<job_id>/<phase>/summary.json with the file:// "
-# scheme stripped (execution_volcano.py::read_summary / wiring.py's
-# read_text closure) -- i.e. it expects that path to exist on the
-# CONTROLLER'S OWN filesystem, not through the k8s API. Without this mount
-# every preview/execution phase would read back None and jobs would stall.
+# /cephfs hostPath is REQUIRED (same as dms-api): JobStepper calls
+# execution_adapter.read_summary(ref) (stepper.py, preview + execution
+# phases), which opens <DMS_ARTIFACT_BASE_URI>/<job_id>/<phase>/summary.json
+# with the file:// scheme stripped (execution_volcano.py::read_summary /
+# wiring.py::build_summary_reader) -- i.e. it expects that path to exist on
+# the CONTROLLER'S OWN filesystem, not through the k8s API. Without this
+# mount every preview/execution phase would read back None and jobs would
+# stall. controller_check_once (artifact_base.py) also writes a probe file.
+#
+# root (2026-09-09): the `controller` container runs as uid 0 with all
+# capabilities dropped and a read-only image fs -- same rationale and same
+# contract test as 40-api.yaml (see its header). The summary read goes
+# through the same fd containment chain as the API (artifact_files.py:
+# O_NOFOLLOW + S_ISREG + owner uid + nlink + realpath + 1MiB cap) because a
+# requester owns <base>/<job_id>/<phase>/ and a root open() would follow a
+# planted symlink straight into the requester's job detail. The `migrate`
+# initContainer keeps the image USER (65532).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +61,15 @@ spec:
           image: pkg-01:5000/dms:d127
           imagePullPolicy: IfNotPresent
           command: ["dms", "controller"]
+          # root, no capabilities, immutable image fs -- rationale in the header
+          # comment. Pinned by tests/test_release_manifest_contract.py.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - configMapRef:
                 name: dms-config

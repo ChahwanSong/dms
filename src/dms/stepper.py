@@ -63,6 +63,41 @@ class StorageMissingAtStep(Exception):
         super().__init__(f"storage {storage_name!r} missing at step time")
 
 
+class IdentityMissingAtStep(Exception):
+    """worker_pool.identity 가 없거나 모양이 틀렸다(2026-09-09, 제어면 root 전환의
+    검토에서 나온 "null ≠ 0" 규칙의 uid 판). execution_manifests 는 uid/gid 부재를
+    0 으로, username 부재를 "root" 로 기본값 처리하므로(_worker_env/_launcher_env/
+    build_preflight_pod) 변조된 행(candidates 는 있고 identity 는 없음)은 preflight
+    를 uid 0 으로, mpirun 을 runuser root 로 돌린다. 정상 producer(planner)는
+    항상 채우므로 도달 경로는 DB 직접 쓰기뿐이지만 unknown_tool/_abs 와 같은 위협
+    클래스(DB 가 신뢰 경계)라 같은 층에서 종단시킨다. **uid 0 자체는 거부하지
+    않는다** -- 특권 요청자(identity.py, privileged=True)는 정당한 0 이다."""
+
+    def __init__(self, problem):
+        self.problem = problem
+        super().__init__(f"identity {problem} at step time")
+
+
+def identity_problem(ident) -> "str | None":
+    """실행 신원의 모양 검사. 정상 = planner 가 ResolvedIdentity 를 asdict 한 것:
+    uid/gid 는 int(bool 제외), username 은 비어 있지 않은 str, privileged 는
+    uid == 0 과 일치. 문제가 있으면 짧은 설명(이벤트 메시지), 없으면 None."""
+    if not isinstance(ident, dict):
+        return "identity_missing"
+    for key in ("uid", "gid"):
+        value = ident.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"{key}_missing"
+        if value < 0:
+            return f"{key}_negative"     # k8s 가 거부하기 전에, 정확한 사유로
+    username = ident.get("username")
+    if not isinstance(username, str) or not username:
+        return "username_missing"
+    if bool(ident.get("privileged")) != (ident["uid"] == 0):
+        return "privileged_flag_mismatch"
+    return None
+
+
 class JobStepper:
     def __init__(self, repos, execution_adapter, *, settings):
         self._repos = repos
@@ -117,7 +152,15 @@ class JobStepper:
         return resolve_artifact_base(self._repos.control, self._settings)
 
     def _build_spec(self, job, phase, dryrun):
-        wp = job["worker_pool"] or {}
+        # 비-dict worker_pool(변조 행)도 identity_missing 경로로 -- AttributeError 로
+        # 새면 run_once 의 step_error 루프(매 틱 재시도)에 영구히 낀다.
+        wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
+        # 신원 가드(IdentityMissingAtStep docstring): 어댑터가 uid/gid 를 0 으로
+        # 기본값 처리하기 **전에** 끊는다. 모든 제출 경로(preflight/preview/
+        # exec_preflight/execution)가 이 함수를 지나므로 여기가 단일 관문이다.
+        problem = identity_problem(wp.get("identity"))
+        if problem is not None:
+            raise IdentityMissingAtStep(problem)
         op = job["operation"]
         if op == "sync":
             paths = {"source": self._abs(job["source_storage"], job["source"]),
@@ -299,6 +342,15 @@ class JobStepper:
                 message=f"storage={exc.storage_name} job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="storage_missing_at_step")
+        except IdentityMissingAtStep as exc:
+            # 같은 신뢰 경계 위반(변조 행)의 신원 판 -- 어댑터의 0/root 기본값이
+            # 도달 불능이 되도록 제출 전에 종단시킨다.
+            self._repos.observability.record_event(
+                component="stepper", severity="error",
+                event_type="identity_missing_at_step",
+                message=f"{exc.problem} job={job['job_id']}",
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="identity_missing_at_step")
 
     def _dispatch(self, job) -> str:
         state = job["state"]

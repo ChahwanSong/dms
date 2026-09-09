@@ -136,3 +136,16 @@ def test_privileged_requires_session_auth(db):
                              session_authenticated=False)
     # 특권을 안 쓰므로 resolver=None 인 LDAP 경로로 떨어진다.
     assert e.value.reason_code == "ldap_not_configured"
+
+
+def test_non_privileged_uid_zero_is_rejected_at_plan_time(db):
+    # 디렉터리가 uidNumber=0 을 돌려주는 비특권 요청(2026-09-09 리뷰): stepper 의
+    # privileged_flag_mismatch(변조 행 백스톱)보다 먼저, 계획 시점에 정확한 사유로.
+    control = _control(db)
+    rooty = ResolvedIdentity("rooty", 0, 0, (), False)
+    with pytest.raises(IdentityRejected) as e:
+        resolve_job_identity(control, StubIdentityResolver({"rooty": rooty}),
+                             requester_id="rooty", owner_username=None,
+                             allow_privileged=False, privileged_requesters=frozenset())
+    assert e.value.reason_code == "identity_root_without_privilege"
+    assert control.probe_targets(ttl_seconds=3600) == []   # 프로브 등록 전에 거부

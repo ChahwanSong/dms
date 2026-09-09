@@ -45,7 +45,9 @@ def _confirmpending_job(app_repos, requester="alice"):
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="sync", priority="mid",
         source_storage="src", source="a", destination_storage="dst", destination="b",
-        options={}, tool="dsync", worker_pool={}, precondition={}, actor="planner")
+        options={}, tool="dsync",
+        worker_pool={"identity": {"uid": os.getuid(), "gid": os.getgid(), "username": "alice"}},
+        precondition={}, actor="planner")
     repos.data_jobs.set_preview(jid, fingerprint="sha256:abc",
         expires_at="2099-01-01T00:00:00Z", artifact_uri="file:///art/j")
     repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")

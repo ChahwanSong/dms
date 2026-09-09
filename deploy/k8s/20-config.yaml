@@ -25,6 +25,11 @@ data:
   #     summary.json under (execution_manifests.py::_artifact_dir,
   #     execution_volcano.py::_volumes) ---
   DMS_ARTIFACT_BASE_URI: "file:///cephfs/dms/artifacts"
+  # 관리자가 포탈에서 고를 수 있는 base 의 경로 접두 allowlist(콤마 목록,
+  # 2026-09-09 제어면 root 전환). api/controller 가 root 라 파일시스템이 더는
+  # 경로를 걸러 주지 않는다 -- 파드가 마운트한 공유 FS(40/41 의 hostPath) 로
+  # 묶는다. 허용 밖 경로는 422 artifact_base_outside_allowlist. 빈 값이면 무제한.
+  DMS_ARTIFACT_BASE_ALLOWED_PREFIXES: "/cephfs"
   # 아티팩트 전체 다운로드 상한(바이트). 뷰 256KB 꼬리와 별개. sparse 초대형
   # 파일 공격을 여기서 끊는다 -- 초과는 413 artifact_too_large.
   DMS_ARTIFACT_DOWNLOAD_MAX_BYTES: "268435456"

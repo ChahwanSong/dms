@@ -128,8 +128,10 @@ export function ArtifactBasePage() {
                           variant={hopSummary(d.checks).variant} />
             </div>
             <p className="text-xs text-muted mb-3">
-              같은 경로를 세 관점에서 실제 쓰기 왕복으로 확인합니다 — API
-              파드(조회 시 즉석) · 컨트롤러(30초 주기) · 노드 에이전트(60초 주기)
+              같은 경로를 세 관점에서 확인합니다 — API 파드(조회 시 즉석, 쓰기 왕복) ·
+              컨트롤러(30초 주기, 쓰기 왕복) · 노드 에이전트(60초 주기, 디렉터리 존재·쓰기
+              권한). API·컨트롤러는 root(uid 0, 권한 없음)로 돌므로 root:root 경로가 정상이며,
+              허용 접두(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES) 밖 경로는 저장되지 않습니다.
             </p>
             <dl className="text-sm space-y-1">
               <div className="flex gap-2">

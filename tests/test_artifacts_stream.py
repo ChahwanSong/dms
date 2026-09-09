@@ -31,7 +31,7 @@ def _mkfile(tmp_path, content: bytes, name: str = "stdout.log"):
 def test_open_stream_returns_fd_and_fstat_size(tmp_path):
     _mkfile(tmp_path, b"hello world")
     fd, size = open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                                    max_bytes=None)
+                                    max_bytes=None, owner_uid=None)
     try:
         assert size == 11
         # 반환된 것은 경로가 아니라 열린 fd 다 — 그대로 읽어서 내용이 일치해야 한다.
@@ -48,7 +48,7 @@ def test_open_stream_symlink_name_is_not_found(tmp_path):
     os.symlink(outside, d / "stdout.log")
     with pytest.raises(ArtifactError) as e:
         open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                             max_bytes=None)
+                             max_bytes=None, owner_uid=None)
     # O_NOFOLLOW 의 ELOOP 도 단순 미존재와 구별되면 안 된다(존재 오라클 차단).
     assert e.value.reason_code == "artifact_not_found"
 
@@ -65,7 +65,7 @@ def test_open_stream_fifo_returns_promptly_not_found(tmp_path):
     def call():
         try:
             fd, _ = open_artifact_stream(str(tmp_path), JOB, "execution",
-                                         "stdout.log", max_bytes=None)
+                                         "stdout.log", max_bytes=None, owner_uid=None)
         except ArtifactError as exc:
             result["reason"] = exc.reason_code
         except BaseException as exc:  # 진단용 — 예상 못 한 예외도 기록해 둔다
@@ -93,7 +93,7 @@ def test_open_stream_swapped_phase_dir_is_not_found_not_too_large(tmp_path):
     os.symlink(outside_dir, tmp_path / JOB / "execution")
     with pytest.raises(ArtifactError) as e:
         open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                             max_bytes=cap)
+                             max_bytes=cap, owner_uid=None)
     assert e.value.reason_code != "artifact_too_large"
     # artifact_forbidden 은 내부 구분용 — 라우트에서 artifact_not_found 와 같은 404 로
     # 합쳐진다(routes_artifacts.py). 어느 쪽이든 오라클은 닫혀 있다.
@@ -106,7 +106,7 @@ def test_open_stream_too_large_is_rejected_and_fd_closed(tmp_path):
     before = len(os.listdir("/proc/self/fd"))
     with pytest.raises(ArtifactError) as e:
         open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                             max_bytes=cap)
+                             max_bytes=cap, owner_uid=None)
     assert e.value.reason_code == "artifact_too_large"
     assert e.value.detail == str(cap + 1)
     # 거절 경로에서 fd 가 새면 요청 반복만으로 프로세스 fd 예산이 소진된다.
@@ -117,7 +117,7 @@ def test_zero_byte_artifact_streams_empty_not_error(tmp_path):
     # 0 바이트는 정상값이다(빈 파일) — 404 로 뭉개지 않는다. 0·빈문자열 truthy 함정.
     _mkfile(tmp_path, b"")
     fd, size = open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                                    max_bytes=1024)
+                                    max_bytes=1024, owner_uid=None)
     assert size == 0
     assert b"".join(stream_artifact_fd(fd, size)) == b""
 
@@ -127,7 +127,7 @@ def test_stream_sends_exactly_fstat_size_when_file_grows(tmp_path):
     전송량은 fstat 시점 size 로 캡돼야 한다(Content-Length 일치)."""
     p = _mkfile(tmp_path, b"A" * 100)
     fd, size = open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                                    max_bytes=None)
+                                    max_bytes=None, owner_uid=None)
     assert size == 100
     with open(p, "ab") as f:
         f.write(b"B" * 500)
@@ -140,7 +140,7 @@ def test_stream_truncate_causes_early_honest_eof(tmp_path):
     클라이언트가 절단을 감지할 수 없다. 무한 루프도 없어야 한다."""
     p = _mkfile(tmp_path, b"C" * 1000)
     fd, size = open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                                    max_bytes=None)
+                                    max_bytes=None, owner_uid=None)
     os.truncate(p, 300)
     out = b"".join(stream_artifact_fd(fd, size, chunk=128))
     assert out == b"C" * 300  # 잘린 내용 그대로, 0 채움 없음
@@ -150,7 +150,7 @@ def test_stream_truncate_causes_early_honest_eof(tmp_path):
 def test_stream_closes_fd_on_completion(tmp_path):
     _mkfile(tmp_path, b"D" * 10)
     fd, size = open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                                    max_bytes=None)
+                                    max_bytes=None, owner_uid=None)
     assert b"".join(stream_artifact_fd(fd, size)) == b"D" * 10
     with pytest.raises(OSError):  # EBADF — 완주 후 fd 반납
         os.fstat(fd)
@@ -161,7 +161,7 @@ def test_stream_closes_fd_on_early_close(tmp_path):
     close 하지 않는다(실측) — 제너레이터의 try/finally 만이 fd 를 반납한다."""
     _mkfile(tmp_path, b"E" * 300)
     fd, size = open_artifact_stream(str(tmp_path), JOB, "execution", "stdout.log",
-                                    max_bytes=None)
+                                    max_bytes=None, owner_uid=None)
     gen = stream_artifact_fd(fd, size, chunk=100)
     assert next(gen) == b"E" * 100
     gen.close()  # GeneratorExit → finally

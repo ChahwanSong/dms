@@ -3,8 +3,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from ..artifact_base import (normalize_artifact_base, roundtrip_artifact_base,
-                             strip_scheme)
+from ..artifact_base import (allowlist_reason, normalize_artifact_base,
+                             roundtrip_artifact_base, strip_scheme)
 from ..domain import DomainValidationError
 from .auth import Identity, audit_actor, require_admin
 
@@ -64,6 +64,15 @@ def _node_checks(repos, settings, effective_path) -> list[dict]:
     return nodes
 
 
+def _check_path(path: str, settings) -> "str | None":
+    """(a) 즉석 검증 = allowlist → 쓰기 왕복. 컨트롤러 홉(artifact_base.
+    controller_check_once)과 같은 순서·같은 두 함수라 두 홉의 판정이 갈리지 않는다.
+    api/controller 가 root 로 돌아 파일시스템이 더는 경로를 걸러 주지 않으므로
+    allowlist(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES)가 그 역할을 대신한다."""
+    return (allowlist_reason(path, settings.artifact_base_allowed_prefixes)
+            or roundtrip_artifact_base(path))
+
+
 def _payload(request: Request) -> dict:
     repos = request.app.state.repos
     settings = request.app.state.settings
@@ -73,8 +82,9 @@ def _payload(request: Request) -> dict:
     path = strip_scheme(effective)
     # (a) API 즉석 홉은 GET 에서도 실파일 왕복으로 산다 -- 저장 시점 스냅숏이
     # 아니라 "지금 이 파드에서 되는가"가 화면이 답할 질문이다(설계 §2.4).
-    # 왕복은 임시 파일 1개라 10s 폴링에도 무해하다.
-    api_reason = roundtrip_artifact_base(path)
+    # 왕복은 임시 파일 1개라 10s 폴링에도 무해하다. allowlist(2026-09-09, root
+    # 전환)는 왕복보다 먼저 -- 허용 밖 경로에는 프로브 파일도 만들지 않는다.
+    api_reason = _check_path(path, settings)
     return {
         "effective": effective,
         "source": "db" if db_value else "env",
@@ -110,7 +120,7 @@ def validate_artifact_base(body: ValidateBody, request: Request):
         normalized = normalize_artifact_base(body.uri)
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
-    reason = roundtrip_artifact_base(strip_scheme(normalized))
+    reason = _check_path(strip_scheme(normalized), request.app.state.settings)
     if reason is not None:
         raise HTTPException(status_code=422, detail=reason)
     return {"normalized": normalized, "ok": True}
@@ -133,7 +143,7 @@ def put_artifact_base(body: ArtifactBaseBody, request: Request,
         # http_409 로 접는다(frontend/src/lib/api.ts). N 건은 GET 의
         # locked_by_jobs 가 이미 화면에 나른다.
         raise HTTPException(status_code=409, detail="artifact_base_locked")
-    reason = roundtrip_artifact_base(strip_scheme(normalized))
+    reason = _check_path(strip_scheme(normalized), request.app.state.settings)
     if reason is not None:
         # 즉석 검증 실패면 저장하지 않는다(설계 §2.4a) -- 422 가 곧 "저장 안 됨".
         raise HTTPException(status_code=422, detail=reason)
