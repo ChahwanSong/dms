@@ -1,5 +1,6 @@
 import posixpath
 import re
+from ..artifact_base import ARTIFACT_MOUNT
 from ..db import Database, dump_json, utc_now_iso
 from ..domain import DomainValidationError
 
@@ -32,6 +33,11 @@ def _validate(storage_name, mount_path, managed_root, backend_type):
     if root != mount and not root.startswith(mount + "/"):
         raise DomainValidationError("invalid_storage",
                                     "managed_root must be under mount_path")
+    if mount == ARTIFACT_MOUNT or mount.startswith(ARTIFACT_MOUNT + "/"):
+        # 잡 파드가 아티팩트 base 를 이 경로에 전용 마운트한다(artifact_base 주석) --
+        # 같은 mountPath 가 둘이면 파드 스펙이 거부되거나 한쪽이 가려진다.
+        raise DomainValidationError("invalid_storage",
+                                    f"mount_path collides with {ARTIFACT_MOUNT}")
 
 
 class StoragesRepository:

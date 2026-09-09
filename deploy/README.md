@@ -146,7 +146,7 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
 `41-controller.yaml` 컨테이너 securityContext: capabilities 전부 drop, 이미지 fs
 읽기 전용; `migrate` initContainer·`30-migrate-job` 은 이미지 USER 65532 그대로).
 운영 아티팩트 base(`/cephfs/dms/artifacts`)가 `root:root` 라 65532 로는 3홉 쓰기
-왕복 검증이 항상 실패했기 때문이다. 이 결정에 따라오는 **배포 전제** 세 가지:
+왕복 검증이 항상 실패했기 때문이다. 이 결정에 따라오는 **배포 전제** 네 가지:
 
 1. **base 와 `<base>/<job_id>` 는 root:root · 비-world-writable** (`chmod 755`, 권장
    `700`). 러너가 `<job_id>` 를 root 로 만들고 `<phase>` 만 요청자에게 chown 한다.
@@ -161,7 +161,16 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
    본다. 확인: `sysctl fs.protected_hardlinks fs.protected_symlinks` (둘 다 1).
    코드는 nlink>1·남의 소유 파일을 404 로 거르지만(`src/dms/artifact_files.py`) 이
    sysctl 이 근본 방어다.
-3. **`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`**(`20-config.yaml`, 기본 `/cephfs`; 오버레이는
+3. **공용 디렉터리(base 의 부모, 예 `/cephfs/dms`)는 root:root `770` 까지 잠글 수 있다**
+   (2026-09-09, d129). 제어면·에이전트·러너(launcher)는 root 라 통과하고, 요청자 uid 로
+   도는 도구(dscan/dsync)·rank.sh 는 잡 파드가 base 를 **전용 hostPath 볼륨**
+   (`/dms-artifact-base`, `artifact_base.ARTIFACT_MOUNT`)으로 받아 그 부모를 지나가지
+   않는다. 단 **스토리지의 `managed_root`(사용자 데이터 root)는 공용 디렉터리 아래에
+   두지 마라** -- preflight 가 요청자 uid 로 `test -r/-w` 하므로 `source_not_readable`
+   류로 거부된다(테스트베드는 §6 시드대로 `cephfs-dms` 의 managed_root 가
+   `/cephfs/managed` 여야 한다; `/cephfs/dms` 로 드리프트해 있던 것을 d129 실증에서
+   되돌렸다). 실증: `/cephfs/dms` 770 + 데이터 `/cephfs/managed` 에서 alice sync Succeeded.
+4. **`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`**(`20-config.yaml`, 기본 `/cephfs`; 오버레이는
    `/<SHARED_FS>`) — 포탈에서 고를 수 있는 base 를 파드가 실제로 마운트한 공유 FS 로
    묶는다. root 라 파일시스템이 더는 경로를 걸러 주지 않는다. 허용 밖 경로는 422
    `artifact_base_outside_allowlist`, 이미 저장된 base 가 밖이면 3홉 화면의 API·컨트롤러

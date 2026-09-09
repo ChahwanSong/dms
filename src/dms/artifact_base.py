@@ -13,6 +13,18 @@ import uuid
 from .domain import DomainValidationError
 
 
+# 잡 파드 **안**에서 아티팩트 base 가 보이는 고정 경로(2026-09-09). 공용 디렉터리(base 의
+# 부모, 예 /cephfs/dms)를 root:root 770 으로 잠가도 잡이 돌아야 한다: 러너(launcher)는
+# root 지만 도구(dscan/dsync)와 rank.sh 는 요청자 uid 로 돌아 <base>/<job>/<phase> 까지의
+# 모든 부모를 통과(x)해야 한다. base 를 **전용 hostPath 볼륨**으로 이 경로에 마운트하면
+# 커널은 마운트 루트 위의 호스트 부모(/cephfs/dms)를 검사하지 않는다 -- 요청자는 마운트
+# 루트(= base 자체, root:root 755)부터 내려간다. 호스트 경로(제어면 읽기·artifact_uri)는
+# 그대로 <base>/... 이고, 파드 안 경로만 이 값으로 바뀐다(execution_manifests._artifact_dir,
+# execution_volcano._volumes). 스토리지 mount_path 가 이 경로와 겹치면 invalid_storage
+# (repositories/storages._validate) -- 같은 mountPath 두 개는 파드 스펙이 깨진다.
+ARTIFACT_MOUNT = "/dms-artifact-base"
+
+
 def strip_scheme(base_uri: str) -> str:
     # api/artifacts.py 에 있던 것을 그대로 승격 -- 실행 계열(execution_*.py)이
     # FastAPI 계층(api/)을 임포트하지 않도록 중립 모듈로 옮겼다. api/artifacts.py

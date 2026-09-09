@@ -145,8 +145,11 @@ def test_artifact_dir_strips_file_scheme():
     launcher = next(t for t in m["spec"]["tasks"] if t["name"] == "launcher")
     env = {e["name"]: e["value"]
            for e in launcher["template"]["spec"]["containers"][0]["env"]}
-    # file:// 스킴 제거된 파일시스템 경로 (job-runner가 open()하는 경로)
-    assert env["DMS_JR_ARTIFACT_DIR"] == "/cephfs/dms/artifacts/j1/execution"
+    # 파드 안 경로: base 는 전용 볼륨으로 ARTIFACT_MOUNT 에 마운트된다(2026-09-09) --
+    # 호스트 경로(/cephfs/dms/artifacts/j1/execution)와 같은 디렉터리지만 요청자 uid
+    # 도구가 공용 디렉터리(/cephfs/dms)를 통과하지 않는다.
+    from dms.artifact_base import ARTIFACT_MOUNT
+    assert env["DMS_JR_ARTIFACT_DIR"] == f"{ARTIFACT_MOUNT}/j1/execution"
 
 
 def test_job_name_format():

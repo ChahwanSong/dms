@@ -246,14 +246,25 @@ def test_poll_vcjob_inqueue_maps_to_pending():
     assert a.poll(ref) == ExecStatus.PENDING
 
 
-def test_volumes_dedup_nested_artifact_under_storage():
-    """artifact_base가 storage mount 하위면 중첩 생략."""
+def test_volumes_mount_artifact_base_dedicated_even_when_nested_under_storage():
+    """artifact_base 가 storage mount 하위여도 **전용 볼륨**으로 ARTIFACT_MOUNT 에
+    마운트한다(2026-09-09). 예전의 '중첩 생략'은 파드 안 경로를 <storage>/.../artifacts
+    로 만들어 요청자 uid 도구가 공용 디렉터리(base 의 부모)를 통과해야 했다 -- 그
+    부모가 root:root 770 이면 rank.sh/리포트가 EACCES. 호스트 마운트 자체는 두 개
+    (/cephfs 와 /cephfs/dms/artifacts)지만 파드 안에서는 다른 경로라 중첩이 아니다."""
+    from dms.artifact_base import ARTIFACT_MOUNT
     k8s = _FakeK8s()
     a = _adapter(k8s)  # mount_path=/cephfs, artifact=/cephfs/dms/artifacts (nested)
     ref = a.submit(_spec(phase="execution"))
-    volumes = k8s.created[0]["spec"]["tasks"][0]["template"]["spec"]["volumes"]
-    paths = [v["hostPath"]["path"] for v in volumes]
-    assert paths == ["/cephfs"], f"Expected ['/cephfs'], got {paths}"
+    pod = k8s.created[0]["spec"]["tasks"][0]["template"]["spec"]
+    by_host = {v["hostPath"]["path"]: v for v in pod["volumes"]}
+    assert set(by_host) == {"/cephfs", "/cephfs/dms/artifacts"}, by_host
+    mounts = {m["mountPath"]: m["name"] for m in pod["containers"][0]["volumeMounts"]}
+    assert mounts["/cephfs"] == "cephfs"
+    assert mounts[ARTIFACT_MOUNT] == "dms-artifact-base"
+    assert by_host["/cephfs/dms/artifacts"]["name"] == "dms-artifact-base"
+    env = {e["name"]: e["value"] for e in pod["containers"][0]["env"]}
+    assert env["DMS_JR_ARTIFACT_DIR"].startswith(ARTIFACT_MOUNT + "/")
 
 
 def test_volumes_include_artifact_base_when_independent():

@@ -95,6 +95,24 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 공용 디렉터리 root:root 770 지원 — 잡 파드의 아티팩트 base 전용 마운트 — **완료**(2026-09-09, d129)
+
+사용자 요청: DMS 공용 디렉터리(`/cephfs/dms`)를 root:root 770 으로 만들고 DMS 가 정상
+셋업·동작하는지 확인. 실험(d128, 770 적용): 제어면·에이전트(전부 root)는 3홉 포함 정상
+이지만 요청자 uid 로 도는 부분이 막힌다 — (1) 테스트베드는 `cephfs-dms` 의 managed_root
+가 `/cephfs/dms` 로 드리프트해 있어(README §6 시드는 `/cephfs/managed`) alice sync 가
+preflight 에서 10초 만에 `source_not_readable`, (2) 데이터가 밖이어도 잡 파드가 `/cephfs`
+전체를 마운트해 rank.sh 실행·dscan 리포트 쓰기가 `/cephfs/dms` 를 통과해야 한다(에이전트
+파드 `runuser -u alice` 프로브: dms-BLOCKED·artifact-BLOCKED). (2)는 DMS 설계 문제라
+고쳤다: `execution_volcano._volumes` 가 아티팩트 base 를 스토리지 마운트와 별개의
+**전용 hostPath 볼륨**으로 `/dms-artifact-base`(`artifact_base.ARTIFACT_MOUNT`)에 붙이고
+`execution_manifests._artifact_dir` 이 그 파드 안 경로를 러너에 준다 — 마운트 루트 위의
+호스트 부모 권한은 커널이 검사하지 않으므로 공용 디렉터리를 770 으로 잠가도 잡이 돈다.
+호스트 경로(제어면 읽기·artifact_uri)는 그대로. 스토리지 mount_path 가 그 경로와 겹치면
+`invalid_storage`. (1)은 배포 전제로 문서화(README §2b-3): 데이터 root 는 공용 디렉터리
+밖. 잡 이미지 변경 없음(러너는 env 경로만 쓴다).
+- 실증: 아래 「실증(d129)」.
+
 ### ✅ 제어면(api·컨트롤러) root 전환 + 봉쇄 사슬 강화 — **완료**(2026-09-09, d128)
 
 사용자 지시: 운영 공용 디렉터리(아티팩트 base)가 `root:root` 라 3홉 검증이 비root
