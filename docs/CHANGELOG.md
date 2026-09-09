@@ -97,7 +97,22 @@ build_manifests.py 에 있어야 한다.
   `DMS_BUILD_NETWORK=host`). 컬럼 1(CREATE + _ensure_columns, 전수 그물 35→36).
   현재 상태 카드가 "호스트 네트워크(자동 — 프록시가 127.0.0.1)" / "(스위치)" /
   "파드 네트워크" 로 판정 근거를 보여준다.
-- 실증(테스트베드): 아래 「실증」.
+- **실증(테스트베드, 사용자 구성 재현)**: luminous 의 proxy.py(127.0.0.1:3128) 를
+  `ssh -R 7227:127.0.0.1:3128 dms-w1` 로 빌드 노드에 걸어 dms-w1 에는
+  `127.0.0.1:7227`/`[::1]:7227` 만 리슨(sshd 기본 GatewayPorts=no).
+  1. Before(d122): 프록시 `http://127.0.0.1:7227` → 30초 만에 `build_proxy_unreachable`
+     (프로브 파드 hostNetwork 없음) — 사용자 증상 그대로.
+  2. After(d124): 같은 설정 → 프로브·빌드 파드 `hostNetwork=true`,
+     `dnsPolicy=ClusterFirstWithHostNet`, podIP = 노드 IP 10.10.10.11, 빌드 파드 env
+     `DMS_BUILD_NETWORK=host`; dms 이미지 빌드 **성공 135초**. 프록시 액세스 로그
+     (클라이언트 = 터널의 luminous 쪽 127.0.0.1)에 registry-1.docker.io·npmjs·
+     pypi·deb.debian.org·dl.k8s.io — 즉 buildah pull 과 RUN 단계(npm/pip/apt/curl)
+     모두 호스트 loopback 의 터널을 탔다(파드 hostNetwork + `--network=host` 조합의
+     증명).
+  3. 부수 실측 — d123 태그 충돌: 전날 포탈에서 같은 태그(d123)로 3이미지 빌드·릴리스가
+     있었고 제 d123 빌드가 레지스트리를 덮어썼지만 노드 캐시(IfNotPresent)의 옛 d123
+     이 그대로 떴다(BACKLOG 의 "태그 재사용 = stale" 그대로). d124 로 재빌드. 커밋
+     5ef2cee 메시지의 "체크아웃 경합" 서술은 오진이며 이 항목이 정정본이다.
 
 ### ✅ 빌드 프록시 + 신규 사이트 태그 누출 차단 — **완료·실증**(2026-09-08, d120/d121)
 
