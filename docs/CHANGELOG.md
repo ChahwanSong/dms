@@ -88,7 +88,22 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   **RBAC ClusterRole `dms-api-nodes-readonly`(nodes get/list)** 추가. 기배포 사이트는
   `10-rbac.yaml` 재적용(오버레이 apply) 필요 — 없으면 힌트가 노드 IP 만 생략한다.
 - 화면: 프록시 제외 입력 아래 "권장 값: …" + 「권장 값 채우기」 버튼 + 워커 노드 수.
-- 실증: 아래 「실증」.
+- 실증(테스트베드 d126): RBAC 적용 후 `kubectl auth can-i list nodes --as=
+  system:serviceaccount:dms:dms-api` = yes; `GET /api/admin/control-state/proxy-hints`
+  = registry pkg-01:5000 / host pkg-01, nodes = dms-w1~w5(10.10.10.11~15, dms-cp1
+  제외), suggested = pkg-01,pkg-01:5000,localhost,127.0.0.1,.svc,.cluster.local,
+  10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
+  입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
+
+### ✅ 스토리지 등록 백엔드 선택 목록 — **완료**(2026-09-09, d127)
+
+사용자 보고: 스토리지 등록에서 이름 gpu1·마운트 /home/gpu1·관리 루트 /home/gpu1·
+백엔드 "IBM GPFS" 로 저장하니 "스토리지 설정이 올바르지 않습니다". 원인: 서버
+(`repositories/storages._BACKENDS`)는 `cephfs`·`gpfs`·`wekafs` 식별자만 받는데 화면의
+백엔드 칸이 자유 입력이라 표시명이 그대로 갔다(이름·경로는 규칙 통과). 수정: 백엔드를
+선택 목록(CephFS / IBM GPFS (Storage Scale) / WekaFS → 식별자)으로, 기존 행의 알 수
+없는 값은 편집 시 옵션으로 보존, `invalid_storage` 문구에 이름·경로·관리 루트·백엔드
+규칙 명시. (즉시 우회: 백엔드에 `gpfs` 입력.)
 
 ### ✅ 사내 프록시 CA(TLS 가로채기 프록시) — **완료·실증**(2026-09-09, d125)
 
