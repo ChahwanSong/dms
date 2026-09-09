@@ -38,7 +38,10 @@ kubectl label node <WEB_NODE> dms.io/web-node=true
 cp deploy/overlays/ssc/values.env.example deploy/overlays/ssc/values.env
 $EDITOR deploy/overlays/ssc/values.env   # WEB_NODE=ion2110, PORTAL_PUBLIC_IP=<bond0 public IP>
 
-# 4) 이미지 4종(dms·dms-agent·dms-mpifileutils·buildah) 사내 레지스트리에 push (1회, 설치와 분리)
+# 4) 이미지 4종(dms·dms-agent·dms-mpifileutils·buildah)을 이 호스트의 podman/docker 에 준비
+#    -- push 는 install.sh 1b 단계가 REGISTRY 로 자동 수행(실패·로컬 이미지 없음은 WARN:
+#       노드에 반입된 이미지면 파드 구동 무관, 포탈 레지스트리/릴리스/빌드만 영향).
+#       평문 레지스트리면 values.env REGISTRY_TLS_VERIFY=false.
 
 # 5) 시크릿 · TLS (out-of-band) — 인증서 SAN 에 PORTAL_PUBLIC_IP 를 반드시 포함
 kubectl -n dms create secret generic dms-secrets \

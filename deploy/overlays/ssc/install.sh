@@ -27,6 +27,47 @@ VALS="${VALUES_ENV:-$HERE/values.env}"
 # shellcheck disable=SC1090
 . "$VALS"
 
+# --- 이미지 push (2026-09-09, 사용자 보고: 초기 구축에 push 단계가 없어 레지스트리가
+#     비어 포탈 레지스트리/릴리스 화면이 오류를 보였다) ---
+# 이 호스트의 podman/docker 에 있는 4종(dms·dms-agent·dms-mpifileutils·buildah)을
+# values.env 의 REGISTRY/태그로 push 한다. **실패는 WARN 이고 설치는 계속된다**:
+# 파드 구동은 노드에 반입(import)된 이미지로도 되므로(IfNotPresent) push 실패가
+# 파드를 막지 않는다 -- 대신 포탈의 레지스트리/릴리스 화면과 포탈 빌드(FROM 이
+# 레지스트리를 pull)는 push 가 있어야 정상이다. 로컬에 이미지가 없으면(반입만 한
+# 경우) 그것도 WARN 으로 알리고 건너뛴다.
+push_images(){
+  tool=""
+  command -v podman >/dev/null 2>&1 && tool=podman
+  [ -z "$tool" ] && command -v docker >/dev/null 2>&1 && tool=docker
+  if [ -z "$tool" ]; then
+    warn "podman/docker 없음 — push 생략. 노드에 반입된 이미지면 파드 구동엔 영향 없음; 포탈 레지스트리 화면은 첫 push 전까지 비어 있음"
+    return 0
+  fi
+  tlsv=""
+  if [ "$tool" = podman ] && [ "${REGISTRY_TLS_VERIFY:-true}" = false ]; then tlsv="--tls-verify=false"; fi
+  for spec in "dms:${DMS_TAG:-}" "dms-agent:${DMS_AGENT_TAG:-}" "dms-mpifileutils:${MFU_TAG:-}" "buildah:stable"; do
+    case "$spec" in *:) warn "태그 미설정 — $spec 건너뜀"; continue;; esac
+    ref="${REGISTRY:-}/$spec"
+    if [ "$tool" = podman ]; then have=$(podman image exists "$ref" >/dev/null 2>&1 && echo 1 || echo 0)
+    else have=$(docker image inspect "$ref" >/dev/null 2>&1 && echo 1 || echo 0); fi
+    if [ "$have" != 1 ]; then
+      warn "로컬 이미지 없음 $ref — push 생략(반입만 한 경우 정상; 파드 구동 무관, 포탈 빌드가 첫 push 를 만든다)"
+      continue
+    fi
+    if [ "$DRY" = 1 ]; then ok "(dry-run) push 대상 $ref"; continue; fi
+    if $tool push $tlsv "$ref" >/dev/null 2>&1; then
+      ok "push $ref"
+    else
+      warn "push 실패 $ref — 레지스트리 도달/TLS(REGISTRY_TLS_VERIFY) 확인. 노드에 반입된 이미지면 파드 구동엔 영향 없음(포탈 레지스트리/빌드만 영향)"
+    fi
+  done
+  # 레지스트리 시점 확인(정보): 리포별 태그 존재. 실패해도 설치는 계속.
+  for repo in dms dms-agent dms-mpifileutils; do
+    tags=$(curl -s -m5 "http://${REGISTRY:-}/v2/$repo/tags/list" 2>/dev/null | tr -d '\n' | cut -c1-120)
+    case "$tags" in *'"tags":['*) ok "레지스트리 $repo: $tags";; *) warn "레지스트리 $repo 태그 없음/미도달(${tags:-no response}) — 포탈 레지스트리 화면이 비어 보일 수 있음";; esac
+  done
+}
+
 step "1. 게이트 (apply 전 치명 오류 차단 — MetalLB 없음, hostNetwork 엣지)"
 kubectl version >/dev/null 2>&1 || die "kubectl 이 클러스터에 못 붙음 — kubeconfig 확인"
 kubectl get crd jobs.batch.volcano.sh >/dev/null 2>&1 \
@@ -80,6 +121,9 @@ ok "dms-secrets: 필수 키 존재 · 자리표시자 없음"
 kubectl -n "$NS" get secret dms-portal-tls >/dev/null 2>&1 \
   || die "dms-portal-tls(TLS) 없음 — SAN 에 PORTAL_PUBLIC_IP 포함해 생성(README)"
 ok "dms-portal-tls 존재"
+
+step "1b. 이미지 push (레지스트리 ${REGISTRY:-?} — 실패해도 설치 계속, WARN 으로 구분)"
+push_images
 
 step "2. 렌더 (values.env → .ssc-rendered)"
 R=$(sh "$HERE/render.sh") || { printf '%s\n' "$R" >&2; die "render 실패(위 사유)"; }
