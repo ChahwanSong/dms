@@ -22,7 +22,7 @@ test("create posts the four fields", async () => {
   await userEvent.type(screen.getByLabelText("스토리지 이름"), "s1");
   await userEvent.type(screen.getByLabelText("마운트 경로"), "/s1");
   await userEvent.type(screen.getByLabelText("관리 루트"), "/s1/dms");
-  await userEvent.type(screen.getByLabelText("백엔드"), "cephfs");
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "cephfs");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await screen.findByText(/./);
   expect(body).toEqual({ storage_name: "s1", mount_path: "/s1", managed_root: "/s1/dms", backend_type: "cephfs" });
@@ -59,4 +59,23 @@ test("edit seeds from storage, disables name, and PUTs the updated body", async 
   expect(body).toEqual({
     mount_path: "/cephfs-new", managed_root: S.managed_root, backend_type: S.backend_type, enabled: true,
   });
+});
+
+
+test("백엔드는 표시명으로 고르고 서버 식별자로 보낸다 -- 'IBM GPFS' 자유 입력 사고 재발 방지", async () => {
+  let body: any = null;
+  server.use(http.post("/api/admin/storages", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json(body, { status: 201 }); }));
+  wrap(<StorageDialog mode="create" trigger={<Button>등록</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "등록" }));
+  await userEvent.type(screen.getByLabelText("스토리지 이름"), "gpu1");
+  await userEvent.type(screen.getByLabelText("마운트 경로"), "/home/gpu1");
+  await userEvent.type(screen.getByLabelText("관리 루트"), "/home/gpu1");
+  const select = screen.getByLabelText("백엔드") as HTMLSelectElement;
+  expect(select.tagName).toBe("SELECT");
+  await userEvent.selectOptions(select, "IBM GPFS (Storage Scale)");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await screen.findByText(/./);
+  expect(body).toEqual({ storage_name: "gpu1", mount_path: "/home/gpu1", managed_root: "/home/gpu1",
+                         backend_type: "gpfs" });
 });

@@ -4,6 +4,13 @@ import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
 import { useCreateStorage, useUpdateStorage } from "./useStorages";
 import type { Storage } from "../../lib/types";
+// 서버 식별자 ↔ 표시명(src/dms/repositories/storages.py _BACKENDS 와 같은 셋).
+export const BACKENDS = [
+  { value: "cephfs", label: "CephFS" },
+  { value: "gpfs", label: "IBM GPFS (Storage Scale)" },
+  { value: "wekafs", label: "WekaFS" },
+];
+
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
 export function StorageDialog({ mode, storage, trigger }: {
   mode: "create" | "edit"; storage?: Storage; trigger: React.ReactNode;
@@ -41,7 +48,21 @@ export function StorageDialog({ mode, storage, trigger }: {
         <label className="block">관리 루트
           <input aria-label="관리 루트" className={field} value={root} onChange={(e) => setRoot(e.target.value)} /></label>
         <label className="block">백엔드
-          <input aria-label="백엔드" className={field} value={backend} onChange={(e) => setBackend(e.target.value)} /></label>
+          {/* 2026-09-09 사용자 보고: 자유 입력에 "IBM GPFS" 를 넣어 invalid_storage.
+              서버(repositories/storages._BACKENDS)는 식별자 셋만 받는다 -- 표시명은
+              사람에게, 값은 식별자로. 기존 행의 알 수 없는 값(구형 "ceph" 류)은 편집
+              화면에서 잃지 않도록 그대로 한 옵션으로 둔다. */}
+          <select aria-label="백엔드" className={field} value={backend}
+                  onChange={(e) => setBackend(e.target.value)}>
+            <option value="">선택</option>
+            {BACKENDS.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
+            {backend !== "" && !BACKENDS.some((b) => b.value === backend) && (
+              <option value={backend}>{`${backend} (알 수 없는 값)`}</option>
+            )}
+          </select>
+          <span className="block text-muted text-xs mt-1">
+            서버가 받는 값은 cephfs · gpfs · wekafs 세 식별자입니다 — IBM Storage Scale(GPFS)은 gpfs
+          </span></label>
         {mode === "edit" && (
           <label className="flex items-center gap-2"><input type="checkbox" checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)} /> 활성</label>)}
