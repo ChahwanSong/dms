@@ -12,25 +12,26 @@ realpath 봉쇄를 추가로 건다 (상위 스펙 §5).
   - 목록은 lstat만 쓴다(심링크를 따라가지 않는다).
   - 읽기·목록 모두 상한(MAX_BYTES / MAX_ENTRIES)을 강제한다.
   - 탈출 시도와 단순 미존재를 호출자에게 구별시키지 않는다(존재 오라클 차단).
+
+2026-09-09(제어면 root 전환): 봉쇄 사슬의 **실체는 중립 모듈 `dms.artifact_files`**
+(open_artifact_fd / inode_allowed) 로 승격했다 -- 컨트롤러의 summary.json 읽기(wiring)가
+같은 사슬을 쓴다. 이 모듈은 그 위에 API 전용 계층(목록·꼬리 뷰·다운로드 스트림·크기
+상한)만 얹는다. API 가 root 로 돌므로 파일시스템 mode 는 더는 장벽이 아니고, 소유자
+(st_uid ∈ {0, 요청자 uid})·nlink==1 검사가 그 자리를 대신한다 -- 라우트는 반드시
+`owner_uid=job_owner_uid(job)` 를 넘긴다(None 이면 fail-closed 404). owner_uid 는 네
+공개 함수 모두 기본값 없는 키워드 인자다(생략 = 즉시 TypeError).
 """
 import os
-import re
-import stat
 
+from ..artifact_files import (ArtifactError, JOB_ID_RE, NAME_RE, PHASES,  # noqa: F401
+                              artifact_dir, assert_contained, inode_allowed,
+                              job_owner_uid, name_of, open_artifact_fd,
+                              read_capped, resolve_artifact_path)
 # strip_scheme 은 중립 모듈(artifact_base.py)로 승격했다(슬라이스 18 설계 §2.2) --
 # 실행 계열(execution_*.py)이 FastAPI 계층(api/)을 임포트하지 않게 하기 위해서다.
 # 기존 임포트 경로(from .artifacts import strip_scheme)를 위해 여기서 재수출한다.
 from ..artifact_base import strip_scheme  # noqa: F401
 
-# stepper가 실제로 쓰는 phase 전부. "exec_preflight"는 confirm 후 execution 직전의
-# 재검증(stepper._poll_or_submit_execution, execution_volcano._PREFLIGHT_PHASES)이다 —
-# 실패하면 잡이 execution_recheck_failed로 거절되고 phase_refs에 pod/<name>이 남는데,
-# 여기 빠져 있으면 그 로그·아티팩트가 422로 막혀 운영자가 진단할 방법이 없어진다.
-PHASES = ("preflight", "preview", "exec_preflight", "execution")
-# fullmatch로만 쓴다: re의 '$'는 문자열 끝의 개행 *앞*에서도 매칭되므로 "..\n" 같은 이름이
-# 앵커를 통과해 버린다(그리고 set("..\n")은 {"."}의 부분집합이 아니라 점-전용 가드도 피한다).
-NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
-JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
 MAX_BYTES = 256 * 1024
 MAX_TAIL_LINES = 5000
 # 다운로드 스트림의 청크 크기. 64KiB 는 os.read 시스템 콜 횟수와 스레드풀 왕복
@@ -43,52 +44,12 @@ MAX_ENTRIES = 1000
 # 사용자가 만든 dirent 수만큼 늘어난다. 타입과 무관하게 "검사한 dirent" 자체를 묶는다.
 MAX_SCAN = 10 * MAX_ENTRIES
 
-
-class ArtifactError(Exception):
-    def __init__(self, reason_code: str, detail: str = ""):
-        self.reason_code = reason_code
-        self.detail = detail
-        super().__init__(reason_code)
+# 예전 이름 호환(테스트·주석이 참조): 봉쇄 판정은 artifact_files.assert_contained 하나다.
+_assert_contained = assert_contained
+_read_capped = read_capped
 
 
-def artifact_dir(base: str, job_id: str) -> str:
-    if not JOB_ID_RE.fullmatch(job_id or ""):
-        raise ArtifactError("invalid_job_id", job_id or "")
-    return os.path.join(base, job_id)
-
-
-def resolve_artifact_path(base: str, job_id: str, phase: str, name: str) -> str:
-    root = artifact_dir(base, job_id)
-    if phase not in PHASES:
-        raise ArtifactError("invalid_phase", phase or "")
-    # NAME_RE의 문자 집합은 '.'을 포함하므로 "."·".."처럼 점으로만 이루어진
-    # 이름도 정규식은 통과한다 — 이런 이름은 디렉터리 자기참조/상위참조로 해석되어
-    # "구성으로 불가능하게" 원칙을 깨므로 별도로 막는다.
-    if not NAME_RE.fullmatch(name or "") or set(name) <= {"."}:
-        raise ArtifactError("invalid_artifact_name", name or "")
-    return os.path.join(root, phase, name)
-
-
-def _assert_contained(base: str, job_id: str, real: str) -> None:
-    """이미 해석된(realpath) 경로가 잡 디렉터리 안인지 확인한다.
-
-    한계(정직하게 기록): **하드 링크는 이 검사로 막을 수 없다.** 하드 링크는 해석할
-    심링크가 없어 realpath가 그대로 base 안의 경로를 돌려주지만 inode는 바깥 파일이다.
-    완화 요인은 같은 파일시스템(디바이스) 안에서만 만들 수 있다는 점과 리눅스의
-    fs.protected_hardlinks(기본 1)가 자기 소유·쓰기 가능한 파일에만 링크를 허용한다는
-    점뿐이다. 애플리케이션 층에서 고칠 수 없고, 배포 측에서 아티팩트 마운트를 별도
-    파일시스템으로 두고 protected_hardlinks를 켜서 다뤄야 한다.
-    """
-    root = os.path.realpath(artifact_dir(base, job_id))
-    if real != root and not real.startswith(root + os.sep):
-        raise ArtifactError("artifact_forbidden", name_of(real))
-
-
-def name_of(path: str) -> str:
-    return os.path.basename(path)
-
-
-def list_artifacts(base: str, job_id: str) -> dict:
+def list_artifacts(base: str, job_id: str, *, owner_uid: "int | None") -> dict:
     """{"entries": [...], "truncated": bool}. 심링크는 항목이든 phase 디렉터리든 건너뛴다.
 
     read_artifact와 같은 원칙을 목록에도 적용한다 — **경로 문자열을 두 번 해석하지 않는다.**
@@ -97,6 +58,9 @@ def list_artifacts(base: str, job_id: str) -> dict:
     뒤이은 os.lstat(d/name)도 바뀐 중간 컴포넌트를 통해 해석돼 임의 디렉터리의 이름·크기·
     mtime이 새어 나갔다(리뷰어 재현). 이제 phase 디렉터리를 fd로 한 번만 열어 고정하고
     이후 스캔·stat은 전부 그 fd 기준(scandir(dfd) + fstatat)이라 바꿔치기가 통하지 않는다.
+
+    항목 판정은 열기(open_artifact_fd)와 **같은 inode_allowed** 다 -- 하드링크(nlink>1)·
+    남의 소유(rename 으로 들여온 파일)는 목록에서도 빠져 "목록엔 있는데 404" 가 없다.
 
     작업량도 두 축으로 묶는다: 수락한 항목은 MAX_ENTRIES, **검사한 dirent**는 MAX_SCAN.
     디렉터리 소유자가 사용자이므로 둘 중 하나라도 없으면 요청당 메모리·시스템 콜을
@@ -118,7 +82,7 @@ def list_artifacts(base: str, job_id: str) -> dict:
         try:
             # O_NOFOLLOW는 마지막 컴포넌트만 본다 — 상위(<job_id>)가 바꿔치기된 경우는
             # 지금 손에 쥔 fd가 실제로 어디인지 물어서(/proc/self/fd) 봉쇄한다.
-            _assert_contained(base, job_id, os.path.realpath(f"/proc/self/fd/{dfd}"))
+            assert_contained(base, job_id, os.path.realpath(f"/proc/self/fd/{dfd}"))
             scanned = 0
             with os.scandir(dfd) as it:
                 for entry in it:
@@ -136,7 +100,7 @@ def list_artifacts(base: str, job_id: str) -> dict:
                         st = entry.stat(follow_symlinks=False)
                     except OSError:
                         continue
-                    if not stat.S_ISREG(st.st_mode):
+                    if not inode_allowed(st, owner_uid):
                         continue
                     entries.append({"phase": phase, "name": entry.name, "size": st.st_size,
                                     "modified_at": int(st.st_mtime)})
@@ -148,18 +112,6 @@ def list_artifacts(base: str, job_id: str) -> dict:
     # 응답 순서를 결정론적으로 만든다. phase 순서는 PHASES를 따른다.
     entries.sort(key=lambda r: (PHASES.index(r["phase"]), r["name"]))
     return {"entries": entries, "truncated": truncated}
-
-
-def _read_capped(fd: int, limit: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = limit
-    while remaining > 0:
-        chunk = os.read(fd, remaining)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
 
 
 def tail_lines(text: str, n: int) -> str:
@@ -176,43 +128,20 @@ def tail_lines(text: str, n: int) -> str:
 
 
 def open_artifact_stream(base: str, job_id: str, phase: str, name: str,
-                         max_bytes: int | None) -> tuple[int, int]:
+                         max_bytes: int | None, *,
+                         owner_uid: "int | None") -> tuple[int, int]:
     """봉쇄 사슬을 통과한 (fd, fstat 시점 size)를 돌려준다.
 
     뷰(read_artifact)와 다운로드가 **이 함수 하나**를 공유한다 — 봉쇄 사슬이 두 벌
     있으면 한쪽만 고치는 드리프트가 구조적으로 가능해진다. 검사 순서가 계약이다:
-    단일 open → fstat S_ISREG → fd 봉쇄 → **그 뒤에만** 크기 상한(max_bytes).
-    크기 검사가 봉쇄보다 앞서면 404/413 갈림이 봉쇄 밖 파일의 존재·크기를 캐는
-    오라클이 된다. 반환 전 어떤 실패든 열린 fd 는 여기서 닫는다 — 성공 반환 뒤의
-    fd 소유권은 호출자가 진다(다운로드는 stream_artifact_fd 에 즉시 넘긴다).
+    단일 open → fstat S_ISREG → nlink/소유자 → fd 봉쇄 → **그 뒤에만** 크기 상한
+    (max_bytes). 크기 검사가 봉쇄보다 앞서면 404/413 갈림이 봉쇄 밖 파일의 존재·
+    크기를 캐는 오라클이 된다. 반환 전 어떤 실패든 열린 fd 는 여기서 닫는다 —
+    성공 반환 뒤의 fd 소유권은 호출자가 진다(다운로드는 stream_artifact_fd 에 즉시
+    넘긴다). 사슬 자체는 artifact_files.open_artifact_fd(컨트롤러와 공유).
     """
-    path = resolve_artifact_path(base, job_id, phase, name)
+    fd, st = open_artifact_fd(base, job_id, phase, name, owner_uid=owner_uid)
     try:
-        # 딱 한 번만 연다. O_NOFOLLOW는 마지막 컴포넌트가 심링크면 ELOOP로 실패시킨다.
-        # 이후 stat/봉쇄 검사는 경로 문자열이 아니라 이 fd에 대해서만 한다 — 검사한
-        # 대상과 읽는(스트림하는) 대상이 같은 inode임이 보장된다(TOCTOU 제거).
-        # O_NONBLOCK이 **필수**다: 사용자가 자기 phase 디렉터리 소유자라 아티팩트 이름으로
-        # mkfifo를 걸 수 있는데, 이 플래그가 없으면 os.open이 writer를 기다리며 영원히
-        # 블록한다(아래 S_ISREG 검사는 실행되지도 않는다). 스타레트는 이 동기 라우트를
-        # AnyIO 스레드풀(~40)에서 돌리므로 그런 요청 40번이면 dms-api가 SPA까지 포함해
-        # 전부 멈추고, 클라이언트가 끊어도 스레드는 돌아오지 않는다(팟 재시작 전까지).
-        # 리눅스에서 정규 파일에는 아무 영향이 없고, FIFO는 즉시 돌아와 S_ISREG에서 걸린다.
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        # ELOOP/ENOENT/EACCES/ENAMETOOLONG/EISDIR… 전부 같은 응답으로 뭉갠다 —
-        # errno나 경로가 새어 나가면 그 자체가 존재 오라클이 된다.
-        raise ArtifactError("artifact_not_found", name)
-    try:
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
-                raise ArtifactError("artifact_not_found", name)
-            # /proc/self/fd/<fd>는 열린 inode의 실제 경로다. 경로를 다시 해석하는 게
-            # 아니라 '지금 손에 쥔 fd가 어디인지'를 묻는 것이라 바꿔치기에 영향받지 않는다.
-            # (심링크된 phase 디렉터리처럼 마지막 컴포넌트가 아닌 탈출을 여기서 잡는다.)
-            _assert_contained(base, job_id, os.path.realpath(f"/proc/self/fd/{fd}"))
-        except OSError:
-            raise ArtifactError("artifact_not_found", name)
         if max_bytes is not None and st.st_size > max_bytes:
             # 여기 도달했다는 것 자체가 봉쇄 통과의 증거다 — artifact_too_large 는
             # 봉쇄 안 파일에 대해서만 나간다(위 docstring 의 순서 계약).
@@ -246,17 +175,18 @@ def stream_artifact_fd(fd: int, size: int, chunk: int = DOWNLOAD_CHUNK):
 
 
 def read_artifact(base: str, job_id: str, phase: str, name: str,
-                  tail: int | None = None) -> dict:
+                  tail: int | None = None, *, owner_uid: "int | None") -> dict:
     # 봉쇄 사슬은 open_artifact_stream 과 공유한다. max_bytes=None 인 이유: 뷰는
     # 큰 파일을 거절하는 게 아니라 꼬리 MAX_BYTES 로 잘라서 보여 준다(아래 lseek).
-    fd, size = open_artifact_stream(base, job_id, phase, name, max_bytes=None)
+    fd, size = open_artifact_stream(base, job_id, phase, name, max_bytes=None,
+                                    owner_uid=owner_uid)
     truncated = False
     try:
         try:
             if size > MAX_BYTES:
                 os.lseek(fd, size - MAX_BYTES, os.SEEK_SET)
                 truncated = True
-            raw = _read_capped(fd, MAX_BYTES)
+            raw = read_capped(fd, MAX_BYTES)
         except OSError:
             raise ArtifactError("artifact_not_found", name)
     finally:

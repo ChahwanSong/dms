@@ -227,6 +227,100 @@ def init_container_image(doc: "list[str]", container: str) -> "str | None":
     return _image_in(doc, "initContainers", container)
 
 
+# --- securityContext 리더(2026-09-09, 제어면 root 전환의 계약 테스트 전용) --------
+# 매니페스트의 컨테이너별 securityContext 를 읽는다. **bare _find(doc, "securityContext")
+# 금지**: 첫 등장만 잡아 블록이 여럿(파드 수준 + 컨테이너 수준, 50-agent 처럼)이면
+# 엉뚱한 것을 집는다. _image_in 처럼 containers 블록을 `- name:` 항목 단위로 걷고
+# 그 항목 안의 필드 들여쓰기에서만 찾는다. 런타임 경로가 아니라 assert 계열이 아닌
+# None 반환으로 "없음"을 표현하되, 호출자(계약 테스트)가 부재를 단언한다.
+
+def _scalar_or_seq(value: str):
+    """`["ALL"]`·`[ALL]`·`[a, b]` 흐름 시퀀스는 list 로, 나머지는 따옴표 벗긴 문자열."""
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        return [_unquote(v.strip()) for v in inner.split(",") if v.strip()] if inner else []
+    return _unquote(value)
+
+
+def _mapping(lines: "list[str]"):
+    """들여쓰기 블록 → 중첩 dict(또는 블록 시퀀스면 list). 값이 비면(`capabilities:`)
+    하위 블록을 재귀로. `drop: ["ALL"]`(흐름)과 `drop:\n  - ALL`(블록) 은 같은
+    ['ALL'] 로 정규화한다 -- kubectl 이 내보내는 모양을 붙여 넣어도 계약 테스트가
+    "철자 차이"를 "계약 위반"으로 오독하지 않게."""
+    if not lines:
+        return {}
+    top = min(_indent(line) for line in lines)
+    tops = [line for line in lines if _indent(line) == top]
+    if tops and all(line.strip().startswith("- ") for line in tops):
+        return [_scalar_or_seq(line.strip()[2:].strip()) for line in tops]
+    out: dict = {}
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if _indent(line) != top:
+            idx += 1
+            continue
+        key, _, value = line.strip().partition(":")
+        value = value.strip()
+        if value:
+            out[key] = _scalar_or_seq(value)
+            idx += 1
+            continue
+        body = _block(lines, idx)
+        out[key] = _mapping(body)
+        idx += 1 + len(body)
+    return out
+
+
+def _security_context_in(doc: "list[str]", block_key: str,
+                         container: str) -> "dict | None":
+    at = _find(doc, block_key)
+    if at is None:
+        return None
+    body = _block(doc, at)
+    if not body:
+        return None
+    item_indent = min(_indent(line) for line in body)
+    current = None
+    for idx, line in enumerate(body):
+        stripped = line.strip()
+        if _indent(line) == item_indent and stripped.startswith("- name:"):
+            current = _value(stripped[2:])
+        elif (current == container and stripped.startswith("securityContext:")
+              and _indent(line) == item_indent + 2):
+            return _mapping(_block(body, idx))
+    return None
+
+
+def container_security_context(doc: "list[str]", container: str) -> "dict | None":
+    """containers 블록에서 이름이 container 인 항목의 securityContext. 없으면 None."""
+    return _security_context_in(doc, "containers", container)
+
+
+def init_container_security_context(doc: "list[str]", container: str) -> "dict | None":
+    return _security_context_in(doc, "initContainers", container)
+
+
+def pod_security_context(doc: "list[str]") -> "dict | None":
+    """파드 템플릿 수준(spec.template.spec.securityContext)의 블록. containers 와
+    같은 깊이에 있는 securityContext 만 본다 -- 컨테이너 수준은 더 깊다."""
+    at = _find(doc, "containers")
+    if at is None:
+        return None
+    depth = _indent(doc[at])
+    for idx, line in enumerate(doc):
+        if _indent(line) == depth and line.strip().startswith("securityContext:"):
+            return _mapping(_block(doc, idx))
+    return None
+
+
+def mentions_security_context(path: Path) -> bool:
+    """주석을 벗긴 뒤 securityContext: 키가 한 번이라도 나오는가(30-migrate-job 등
+    "어디에도 없어야 한다" 단언용)."""
+    return any(line.strip().startswith("securityContext:")
+               for doc in documents(path) for line in doc)
+
+
 def _root(root=None) -> "Path | None":
     if root is not None:
         root = Path(root)

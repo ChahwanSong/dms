@@ -71,6 +71,27 @@
   관례(dNN 단조 증가)로만 완화. 같은 태그 재빌드는 노드가 옛 이미지를 쓸 수 있다.
 - 📝 **`/cephfs` hostPath `type: Directory`** — 비-cephfs 노드가 스케줄 풀에 들어오면
   파드 admission 실패.
+- 🔧 **러너 root 쓰기가 심링크를 따라간다**(`src/dms_job_runner/runner.py` `main().write_text`
+  → `open(path, "w")`; 2026-09-09 root 전환 검토에서 확인, 전환과 무관한 기존 결함) —
+  요청자가 chown 이후 자기 phase 디렉터리에 `stdout.log`/`summary.json` 심링크를 심으면
+  root 가 그 잡의 스토리지 마운트·artifact base 아래 임의 경로를 truncate/덮어쓴다(내용은
+  도구 stdout). 처방: chown 전에 phase dirfd 를 잡아 `os.open(name, O_WRONLY|O_CREAT|O_EXCL|
+  O_NOFOLLOW, dir_fd=dfd)` 로 쓰고, 마지막 쓰기 뒤 그 세 파일을 요청자로 chown. 그러면 API
+  소유자 검사(`artifact_files.inode_allowed`, 현재 `{0, 요청자}`)를 `== 요청자` 로 좁힐 수
+  있다. **잡 이미지(dms-mpifileutils) 재빌드가 필요**해 제어면 root 전환(d128)과 분리했다.
+  같은 계열: `parsers.py` 의 dscan-report.json following open(카운트만 파싱, fail-soft).
+- 🔧 **securityContext 드리프트는 배지가 못 본다** — 포탈 롤아웃(`rollout_runner.
+  image_patch_body`)은 name/image 만 patch 하고 드리프트 배지(`manifest_tags.manifest_images`
+  ↔ `rollout_status._images`)도 이미지만 비교한다. 40/41 을 `kubectl apply` 하지 않은
+  사이트는 d128 이미지를 65532 로 굴리게 되고(3홉 `artifact_base_not_writable` 로만 드러남)
+  아무 배지도 안 뜬다. 처방: rollout_status 가 dms-api/dms-controller 의
+  `containers[].securityContext.runAsUser` 를 관측해 매니페스트 값과 다르면 배지.
+- 📝 **하드링크는 코드로 못 막는 부분이 있다** — `fs.protected_hardlinks=1`(+symlinks)은
+  공유 FS 를 마운트하고 사용자가 link(2) 를 부를 수 있는 **모든** 호스트의 배포 전제
+  (`deploy/README.md` §2b). 코드 측(nlink>1·남의 소유 거부)은 보완일 뿐이다.
+- 📝 **아티팩트 소유자 검사의 `0` 허용** — 러너가 chown 뒤 root 로 쓰는 세 파일 때문.
+  요청자가 w+x 를 가진 비-sticky 디렉터리의 **root 소유** 0600 파일을 `mv` 로 자기 phase
+  디렉터리에 들여오면(드묾) 읽힌다. 위 러너 항목이 닫히면 함께 닫힌다.
 - 📝 **pod GC 86400s** — 성공·진행 중 잡의 프리플라이트/실행 파드 로그 라이브 열람 창.
   실패 잡은 슬라이스 25 가 `diag_logs` 로 박제해 시한부가 아니다(부분 완화).
 - 📝 **로그인 감속은 프로세스 메모리**(2026-09-07, `api/login_limiter.py`) — dms-api

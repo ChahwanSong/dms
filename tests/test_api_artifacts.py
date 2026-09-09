@@ -1,3 +1,4 @@
+import pytest
 import os
 
 from dms.config import Settings
@@ -34,7 +35,9 @@ def _confirmpending_job(app_repos, requester="alice"):
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="sync", priority="mid",
         source_storage="src", source="a", destination_storage="dst", destination="b",
-        options={}, tool="dsync", worker_pool={}, precondition={}, actor="planner")
+        options={}, tool="dsync",
+        worker_pool={"identity": {"uid": os.getuid(), "gid": os.getgid(), "username": "alice"}},
+        precondition={}, actor="planner")
     repos.data_jobs.set_preview(jid, fingerprint="sha256:abc",
         expires_at="2099-01-01T00:00:00Z", artifact_uri="file:///art/j")
     repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING, actor="stepper")
@@ -248,7 +251,11 @@ def test_read_response_never_exceeds_max_bytes(tmp_path):
     assert body["truncated"] is True
 
 
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root 는 자기 소유 파일의 mode 000 을 무시해 EACCES 분기를 재현할 수 없다")
 def test_unreadable_file_is_404_not_500(tmp_path):
+    # 배포(root)에선 도달 불가 분기 -- test_artifacts_paths.test_unreadable_file_is_not_found
+    # 의 docstring 참고. 비root 에서 errno 가 500 으로 새지 않는 계약은 유지한다.
     client, jid, _, d = _job_with_artifacts(tmp_path)
     f = d / "stdout.log"
     f.write_text("hello")

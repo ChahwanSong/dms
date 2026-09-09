@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from ..artifact_base import resolve_artifact_base
 from ..domain import DomainValidationError, validate_relative_path
 from ..repositories.scan_paths import covers
-from .artifacts import ArtifactError, read_artifact, strip_scheme
+from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, require_user
 
 router = APIRouter()
@@ -157,11 +157,15 @@ def scan_path_stats(path_id: int, request: Request,
         target = job["target"] or ""
         if not covers(target, row["path"]):
             continue            # 파일을 열지도 않았다 — 읽기 예산을 쓰지 않는다
+        owner_uid = job_owner_uid(job)
+        if owner_uid is None:
+            continue            # 요청자 uid 없는 잡은 열지 않는다(fail-closed) -- 예산 밖
         if attempts >= _MAX_READ_ATTEMPTS:
             break               # 예산 소진: 더 뒤지지 않고 "없음"으로 답한다
         attempts += 1
         try:
-            f = read_artifact(base, job["job_id"], "execution", "dscan-report.json")
+            f = read_artifact(base, job["job_id"], "execution", "dscan-report.json",
+                              owner_uid=owner_uid)
         except ArtifactError:
             continue            # 이 후보는 읽을 수 없다 — 다음 후보로
         if f["truncated"]:

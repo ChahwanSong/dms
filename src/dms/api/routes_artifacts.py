@@ -4,9 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from ..artifact_base import resolve_artifact_base
 from ..execution import ExecutionError
-from .artifacts import (ArtifactError, MAX_BYTES, PHASES, list_artifacts,
-                        open_artifact_stream, read_artifact, strip_scheme,
-                        stream_artifact_fd, tail_lines)
+from .artifacts import (ArtifactError, MAX_BYTES, PHASES, job_owner_uid,
+                        list_artifacts, open_artifact_stream, read_artifact,
+                        strip_scheme, stream_artifact_fd, tail_lines)
 from .auth import Identity, require_user
 from .routes_jobs import _owned_job
 
@@ -21,14 +21,26 @@ def _base(request: Request) -> str:
                                               request.app.state.settings))
 
 
+def _owner_uid(job) -> int:
+    """아티팩트 소유자 검사의 기준 uid(artifact_files 모듈 docstring). API 가 root
+    로 돌아 mode 비트가 장벽이 아니므로, 요청자 uid 가 없는 잡(변조 행 -- 정상
+    잡은 planner 가 항상 채우고 stepper 가드가 없는 잡을 종단시킨다)은 열지 않는다
+    (fail-closed 404). admin 호출자도 **잡의 요청자** uid 로 비교한다 -- admin 의
+    uid 가 아니다."""
+    uid = job_owner_uid(job)
+    if uid is None:
+        raise HTTPException(status_code=404, detail="artifact_not_found")
+    return uid
+
+
 @router.get("/api/user/jobs/{job_id}/artifacts")
 def list_job_artifacts(job_id: str, request: Request,
                        identity: Identity = Depends(require_user)):
-    _owned_job(request, job_id, identity)
+    job = _owned_job(request, job_id, identity)
     try:
         # {"entries": [...], "truncated": bool} — 사용자가 phase 디렉터리 소유자라
         # 항목 수를 묶어야 한다(MAX_ENTRIES). 잘렸는지는 호출자가 알 수 있어야 한다.
-        return list_artifacts(_base(request), job_id)
+        return list_artifacts(_base(request), job_id, owner_uid=_owner_uid(job))
     except ArtifactError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
 
@@ -37,9 +49,10 @@ def list_job_artifacts(job_id: str, request: Request,
 def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
                      tail: int | None = Query(default=None, ge=1),
                      identity: Identity = Depends(require_user)):
-    _owned_job(request, job_id, identity)
+    job = _owned_job(request, job_id, identity)
     try:
-        return read_artifact(_base(request), job_id, phase, name, tail=tail)
+        return read_artifact(_base(request), job_id, phase, name, tail=tail,
+                             owner_uid=_owner_uid(job))
     except ArtifactError as e:
         if e.reason_code in ("artifact_not_found", "artifact_forbidden"):
             # 봉쇄 실패(탈출 시도)와 단순 미존재는 클라이언트에게 완전히 같아야 한다 —
@@ -52,13 +65,14 @@ def get_job_artifact(job_id: str, phase: str, name: str, request: Request,
 @router.get("/api/user/jobs/{job_id}/artifacts/{phase}/{name}/download")
 def download_job_artifact(job_id: str, phase: str, name: str, request: Request,
                           identity: Identity = Depends(require_user)):
-    _owned_job(request, job_id, identity)
+    job = _owned_job(request, job_id, identity)
     try:
         # 봉쇄 사슬은 뷰(read_artifact)와 같은 함수 하나다 — 검사를 통과한 fd 를
         # 그대로 스트림해야 TOCTOU 가 없다(경로 문자열을 두 번 해석하지 않는다).
         fd, size = open_artifact_stream(
             _base(request), job_id, phase, name,
-            max_bytes=request.app.state.settings.artifact_download_max_bytes)
+            max_bytes=request.app.state.settings.artifact_download_max_bytes,
+            owner_uid=_owner_uid(job))
     except ArtifactError as e:
         if e.reason_code == "artifact_too_large":
             # open_artifact_stream 이 봉쇄 통과 뒤에만 이 코드를 내므로(순서 계약),

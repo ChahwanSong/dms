@@ -215,3 +215,58 @@ def test_history_limit_bounds(client, db, tmp_path):
                       headers=ADMIN).status_code == 422
     assert client.get("/api/admin/artifact-base/history?limit=51",
                       headers=ADMIN).status_code == 422
+
+
+# --- 경로 접두 allowlist(2026-09-09, 제어면 root 전환) -------------------------
+
+def _allow_client(db, tmp_path, prefixes):
+    from dms.api.app import create_app
+    from dms.config import Settings
+    from fastapi.testclient import TestClient
+    settings = Settings(database_url="unused", shared_token="tok-shared",
+                        admin_token="tok-admin", session_secret="sess-secret",
+                        artifact_base_allowed_prefixes=tuple(prefixes))
+    return TestClient(create_app(settings, db))
+
+
+def test_validate_and_put_reject_paths_outside_allowlist(db, tmp_path):
+    allowed = tmp_path / "cephfs"
+    allowed.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    client = _allow_client(db, tmp_path, [str(allowed)])
+    r = client.post("/api/admin/artifact-base/validate",
+                    json={"uri": f"file://{outside}"}, headers=ADMIN)
+    assert r.status_code == 422 and r.json()["detail"] == "artifact_base_outside_allowlist"
+    # 허용 밖 경로에는 프로브 파일도 만들지 않는다(allowlist 가 왕복보다 먼저)
+    assert not list(outside.glob(".dms-base-check-*"))
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{outside}"},
+                   headers=ADMIN)
+    assert r.status_code == 422 and r.json()["detail"] == "artifact_base_outside_allowlist"
+    assert db.query_one("SELECT artifact_base_uri FROM control_state WHERE id = 1"
+                        )["artifact_base_uri"] is None
+    # 허용 접두 아래는 그대로 통과한다
+    inner = allowed / "dms" / "artifacts"
+    inner.mkdir(parents=True)
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{inner}"},
+                   headers=ADMIN)
+    assert r.status_code == 200 and r.json()["checks"]["api"] == {"ok": True, "reason": None}
+
+
+def test_get_surfaces_allowlist_violation_of_the_effective_base(db, tmp_path):
+    # env 만 좁힌 뒤 저장돼 있던 옛 base 가 allowlist 밖이면 API 홉이 그 사실을 낸다.
+    repos = Repositories(db)
+    repos.control.set_artifact_base(f"file://{tmp_path}", actor="ops")
+    client = _allow_client(db, tmp_path, [str(tmp_path / "cephfs")])
+    body = client.get("/api/admin/artifact-base", headers=ADMIN).json()
+    assert body["checks"]["api"] == {"ok": False, "reason": "artifact_base_outside_allowlist"}
+
+
+def test_put_rejects_world_writable_base(client, db, tmp_path):
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    loose.chmod(0o777)
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{loose}"}, headers=ADMIN)
+    assert r.status_code == 422 and r.json()["detail"] == "artifact_base_world_writable"
+    assert db.query_one("SELECT artifact_base_uri FROM control_state WHERE id = 1"
+                        )["artifact_base_uri"] is None

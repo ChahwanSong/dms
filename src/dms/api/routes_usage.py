@@ -14,7 +14,7 @@ import json
 
 from fastapi import APIRouter, Depends, Query, Request
 from ..artifact_base import resolve_artifact_base
-from .artifacts import ArtifactError, read_artifact, strip_scheme
+from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import require_admin
 from .routes_scan_paths import (_is_number, _numbers, _time_histograms,
                                 _total_bytes)
@@ -77,8 +77,12 @@ def _project_point(base: str, row: dict) -> "dict | None":
 
     truncated(256KiB 초과)도 못 읽는 것으로 접는다: 꼬리만 온 JSON 은 어차피
     파싱이 깨지고, 여기서 503 을 던지면 병든 리포트 하나가 이력 전체를 막는다."""
+    owner_uid = job_owner_uid(row)
+    if owner_uid is None:
+        return None             # 요청자 uid 없는 잡은 열지 않는다(fail-closed)
     try:
-        f = read_artifact(base, row["job_id"], "execution", "dscan-report.json")
+        f = read_artifact(base, row["job_id"], "execution", "dscan-report.json",
+                          owner_uid=owner_uid)
     except ArtifactError:
         return None
     if f["truncated"]:

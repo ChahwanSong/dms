@@ -58,6 +58,22 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   포함**돼야 한다 — CDN `<link>`·외부 fetch 금지. 폰트는 @fontsource 류 셀프호스팅,
   아이콘은 번들되는 라이브러리(lucide-react)나 인라인 SVG. 프론트 빌드 후
   `dist/index.html` 에 외부 URL 참조가 없는지 확인하는 것이 배포 게이트다.
+- **제어면(api·controller)은 root 로 돈다 — 파일시스템 권한은 2차 방어가 아니다**
+  (2026-09-09; 운영 아티팩트 base 가 root:root 라 uid 0, cap 전부 drop, 이미지 fs
+  읽기 전용). 인가는 DB(`_owned_job`/`require_admin`)와 코드 봉쇄뿐이다:
+  - artifact base 아래 파일을 여는 코드는 API·컨트롤러 모두 **반드시**
+    `artifact_files.open_artifact_fd`(단일 open O_NOFOLLOW|O_NONBLOCK → S_ISREG →
+    nlink==1 → 소유자 st_uid∈{0, 요청자 uid} → fd realpath 봉쇄 → 크기 상한)를 거치고
+    `owner_uid=job_owner_uid(job)` 를 넘긴다(None 은 fail-closed 404). `open(path)`·
+    `os.path.exists`·`os.access`·subprocess 로 사용자 영향권 경로를 만지지 마라.
+  - 관리자가 주는 경로는 역할 게이트 + prefix allowlist(`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`,
+    `artifact_base.allowlist_reason`) + realpath 검사 셋 다.
+  - uid/gid 부재를 0 으로 기본값 처리하지 않는다 — 부재는 거부(`stepper.identity_problem`,
+    `identity_missing_at_step`). uid 0 자체는 privileged 짝이 맞으면 정당.
+  - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
+    65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
+    "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.
+  - 전체 규칙은 `docs/ARCHITECTURE.md` §7 「root 제어면」.
 
 ## legacy (제거됨 — git 히스토리에서 열람)
 

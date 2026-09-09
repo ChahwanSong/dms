@@ -2,6 +2,7 @@
 
 픽스처 관례는 test_api_request_scan_stats 를 따른다(성공 잡 materialize +
 execution/dscan-report.json 직접 기록)."""
+import os
 import json
 
 from fastapi.testclient import TestClient
@@ -56,8 +57,8 @@ def _scan_job(client, *, storage="s1", target="team", requester="alice",
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="scan",
         priority="mid", storage_name=storage, target=target, options={},
-        tool="dscan", worker_pool={"identity": {"username": owner, "uid": 1,
-                                                "gid": 1}},
+        tool="dscan", worker_pool={"identity": {"username": owner, "uid": os.getuid(),
+                                                "gid": os.getgid()}},
         precondition={}, actor="planner")
     repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
     repos.requests.finalize_from_job(rid, DataJobState.SUCCEEDED, actor="stepper")

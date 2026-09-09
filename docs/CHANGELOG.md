@@ -95,6 +95,62 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 제어면(api·컨트롤러) root 전환 + 봉쇄 사슬 강화 — **완료**(2026-09-09, d128)
+
+사용자 지시: 운영 공용 디렉터리(아티팩트 base)가 `root:root` 라 3홉 검증이 비root
+(65532)에서 실패한다 — api·컨트롤러를 root 로 돌리되 포탈 API 에 취약점이 생기지 않게
+코드 에이전트 문서에 규칙을 박고, 구현 전 모든 케이스(preflight·아티팩트/로그 읽기
+권한 등)를 실제 코드로 검토하라. 검토는 6영역(아티팩트 읽기·artifact base·정적/입력·
+컨트롤러 fs·이미지/매니페스트·os.access/subprocess) 리뷰 + 발견마다 2렌즈 반박 검증
+(에이전트 61개)으로 했고, 결과 MUST-FIX 를 전부 같은 커밋에 넣었다:
+
+- **매니페스트**(`40-api.yaml`·`41-controller.yaml`): 컨테이너 수준 securityContext
+  `runAsUser 0·runAsGroup 0·allowPrivilegeEscalation false·readOnlyRootFilesystem true·
+  capabilities drop ALL`. 파드 수준이 아니라 migrate initContainer 는 65532 유지, Dockerfile
+  `USER 65532` 유지(root 는 매니페스트만이 진실). 계약 테스트(`test_release_manifest_contract`
+  root 절 7건 + `manifest_tags` securityContext 리더)가 모양·오버레이 우회까지 고정.
+- **봉쇄 사슬 공용화**(`src/dms/artifact_files.py`, 신규): 단일 open(O_NOFOLLOW|O_NONBLOCK)
+  → S_ISREG → **nlink==1** → **소유자 st_uid∈{0, 요청자 uid}** → fd realpath 봉쇄 → 크기
+  상한. 65532 시절 EACCES 가 조용히 하던 3번째 장벽(rename/하드링크로 들여온 남의 파일)을
+  소유자·nlink 검사가 대체한다. API 라우트 6곳(목록·뷰·다운로드·scan 통계 3종)이
+  `owner_uid=job_owner_uid(job)` 를 넘기고(None 은 fail-closed 404), 목록도 같은 판정.
+- **컨트롤러 summary.json**(`wiring.build_summary_reader`): 예전 `open(path).read()` 는 root
+  로 심링크를 따라가 남의 파일을 요청자 잡 상세(result_summary)에 그대로 노출하고, mkfifo
+  면 단일 스레드 컨트롤러 전체 정지, 다GB 면 OOM 크래시 루프, 비-UTF-8 이면 매 틱
+  step_error 였다 — 같은 사슬로 열고 1MiB 상한·ValueError 도 None(summary_unavailable).
+- **artifact base allowlist**(`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`, 기본 `/cephfs`): root 면
+  존재하는 모든 디렉터리가 저장 가능해지므로 validate/PUT/GET 즉석 홉·컨트롤러 홉 모두
+  allowlist → 쓰기 왕복 순. 새 사유 `artifact_base_outside_allowlist`(양쪽 등록).
+- **신원 가드**(`stepper.identity_problem`): uid/gid 부재를 0 으로 기본값 처리하던
+  execution_manifests 경로를 제출 전에 끊는다 — `identity_missing_at_step`(양쪽 등록).
+  uid 0 은 privileged 짝이 맞으면 정당.
+- **테스트**: root 로 pytest 하면 도달 불가한 EACCES 분기 2건 skipif(삭제 아님), 신규
+  `test_artifact_files.py`(소유자·하드링크·심링크·FIFO·크기·비-UTF-8·경로 모양, 실제
+  wiring 클로저 대상). 아티팩트를 읽는 API 테스트 픽스처는 요청자 uid 를 싣는다.
+- **문서**: CLAUDE.md 규약 1개, ARCHITECTURE §3-11 + §7 「root 제어면」 14규칙, deploy/README
+  §2b(배포 전제: base root:root 비-world-writable, 모든 호스트 protected_hardlinks/symlinks,
+  allowlist, 검증 명령, 롤백), 40/41/00 매니페스트 주석 정정.
+- **구현 후 적대적 리뷰(5렌즈 + 반박 검증, 세션 한도로 일부 검증은 직접 판정)** 반영:
+  allowlist 파서가 `..`/`.` 성분을 정규화 전에 거부(`/cephfs/..` 가 realpath `/` 로
+  allowlist 를 무력화하던 것, 검증됨) · base 는 **프로세스 euid 소유·비-world-writable**
+  이어야 통과(`artifact_base_not_owned`/`artifact_base_world_writable`; root 면 allowlist
+  아래 777 디렉터리가 그대로 통과했다 — 테스트베드 base 777 도 755 로 정정) · 컨트롤러
+  리더 배선 고정 테스트(wiring 한 줄을 옛 open() 으로 되돌려도 초록이던 것, 검증됨) ·
+  디렉터리가 uid 0 을 주는 비특권 요청은 계획 시점 `identity_root_without_privilege`
+  (stepper 가드는 변조 행 백스톱) · `owner_uid` 를 네 공개 함수의 기본값 없는 키워드
+  인자로(생략 = TypeError) · 매니페스트 파서가 흐름/블록 시퀀스를 같은 list 로 정규화
+  (kubectl 출력 붙여넣기 호환) · 오버레이 그물을 모든 YAML + kustomization inline 까지 ·
+  음수 uid·비-dict worker_pool 도 fail-closed · 문구(root 는 cap 없이 소유자 mode 의
+  지배를 받는다, DAC_READ_SEARCH 금지, /tmp 없음) 정정.
+- **배포 주의**: securityContext 는 매니페스트 필드라 **포탈 롤아웃(이미지 patch)만으로는
+  실리지 않는다** — d128 은 `kubectl apply -f deploy/k8s/40-api.yaml -f 41-controller.yaml`
+  을 한 번 반드시 거쳐야 하고, 드리프트 배지는 이미지만 비교하므로 이 어긋남을 못 본다
+  (BACKLOG: securityContext.runAsUser 드리프트 관측).
+- **보류(BACKLOG)**: 러너의 root 쓰기 심링크 추종(`runner.write_text`)과 root 산출물 3종
+  chown — 잡 이미지 재빌드가 필요해 이번 범위 밖. 그때 API 소유자 검사를 `== 요청자` 로
+  좁힌다.
+- 실증: 아래 「실증(d128)」.
+
 ### ✅ 스토리지 등록 백엔드 선택 목록 — **완료**(2026-09-09, d127)
 
 사용자 보고: 스토리지 등록에서 이름 gpu1·마운트 /home/gpu1·관리 루트 /home/gpu1·

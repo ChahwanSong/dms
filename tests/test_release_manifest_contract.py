@@ -117,3 +117,94 @@ def test_every_rollout_component_has_a_manifest():
     # ROLLOUT_ORDER 에만 컴포넌트를 더하고 매니페스트 매핑을 빠뜨리면 위 파라미터라이즈가
     # KeyError 로 죽는 대신 여기서 명시적으로 걸린다.
     assert set(MANIFESTS) == set(ROLLOUT_ORDER) == set(COMPONENTS)
+
+
+# --- 제어면 root 전환(2026-09-09) 계약 ------------------------------------------
+# WHY: 운영 아티팩트 base 는 root:root 라 65532 로는 쓰기 왕복(3홉 검증)이 항상
+# 실패했다. api/controller 를 uid 0 으로 돌리되 capabilities 는 전부 버리고 이미지
+# fs 는 읽기 전용으로 둔다. 이 결정은 매니페스트 5줄이 전부라 계약 테스트가 없으면
+# "강화" 한답시고 runAsNonRoot/65532 를 넣거나(운영 base 즉시 회귀) 파드 수준으로
+# 옮겨 migrate 까지 root 로 만드는 변경이 조용히 통과한다. 파일시스템 권한이 2차
+# 방어가 아니게 되므로(docs/ARCHITECTURE.md 「root 제어면」) 이 모양 자체가 보안
+# 불변식의 일부다.
+from dms.manifest_tags import (container_security_context, documents,  # noqa: E402
+                               init_container_security_context,
+                               mentions_security_context, pod_security_context)
+
+ROOT_CONTROL_PLANE = {"dms-api": "api", "dms-controller": "controller"}
+_EXPECTED_ROOT_SC = {"runAsUser": "0", "runAsGroup": "0",
+                     "allowPrivilegeEscalation": "false",
+                     "readOnlyRootFilesystem": "true",
+                     "capabilities": {"drop": ["ALL"]}}   # 흐름/블록 시퀀스 모두 list 로 정규화
+
+
+@pytest.mark.parametrize("component", sorted(ROOT_CONTROL_PLANE))
+def test_control_plane_containers_run_as_root_without_capabilities(component):
+    spec = COMPONENTS[component]
+    doc = workload_doc(MANIFESTS[component], spec["kind"], spec["workload"])
+    sc = container_security_context(doc, ROOT_CONTROL_PLANE[component])
+    assert sc == _EXPECTED_ROOT_SC, (
+        f"{MANIFESTS[component].name} 의 컨테이너 '{ROOT_CONTROL_PLANE[component]}' "
+        f"securityContext 가 {sc} 다 -- root(uid 0)·cap drop ALL·readOnlyRootFilesystem "
+        f"이 계약이다(운영 base 는 root:root; 이미지 fs 보호는 이 플래그뿐)")
+
+
+@pytest.mark.parametrize("component", sorted(ROOT_CONTROL_PLANE))
+def test_migrate_init_container_and_pod_level_stay_non_root(component):
+    # 파드 수준으로 두면 migrate initContainer(DB 전용)까지 root 가 된다.
+    spec = COMPONENTS[component]
+    doc = workload_doc(MANIFESTS[component], spec["kind"], spec["workload"])
+    sc = init_container_security_context(doc, "migrate")
+    # 의미 단언: 없거나(이미지 USER 65532 상속), 있어도 비root 여야 한다 -- 비root
+    # 강화(runAsNonRoot/readOnlyRootFilesystem)를 막는 테스트가 되면 안 된다.
+    assert sc is None or (sc.get("runAsUser") in (None, "65532")
+                          and sc.get("runAsNonRoot") != "false"), (
+        f"{MANIFESTS[component].name} 의 migrate initContainer securityContext 가 {sc} "
+        f"-- migrate 는 이미지 USER(65532) 를 유지해야 한다(root 금지)")
+    assert pod_security_context(doc) is None, (
+        f"{MANIFESTS[component].name} 에 파드 수준 securityContext 가 있다 -- root 는 "
+        f"컨테이너 수준에만 둔다(migrate 가 상속받지 않도록)")
+
+
+def test_one_shot_migrate_job_has_no_security_context():
+    path = REPO_ROOT / "deploy" / "k8s" / "30-migrate-job.yaml"
+    assert path.is_file()
+    assert not mentions_security_context(path), (
+        "30-migrate-job.yaml 에 securityContext 가 생겼다 -- migrate 는 DB 전용이라 "
+        "이미지 USER(65532) 그대로 돈다")
+
+
+def test_agent_daemonset_keeps_root_at_container_level():
+    doc = workload_doc(MANIFESTS["dms-agent"], "DaemonSet", "dms-agent")
+    sc = container_security_context(doc, "agent")
+    assert sc is not None and sc.get("runAsUser") == "0", sc
+
+
+def test_image_user_stays_non_root_so_root_is_a_manifest_decision_only():
+    # Dockerfile 을 root 로 바꾸면 30-migrate-job·디버그 파드까지 root 가 되고 어떤
+    # 매니페스트 계약 테스트도 그것을 잡지 못한다 -- root 는 매니페스트만이 진실.
+    dockerfile = (REPO_ROOT / "deploy" / "docker" / "Dockerfile.dms").read_text()
+    assert "\nUSER 65532:65532\n" in dockerfile
+
+
+def test_overlays_do_not_patch_control_plane_deployments():
+    # 이 파일의 테스트는 base 만 파싱한다 -- 오버레이가 Deployment 를 패치해
+    # securityContext 를 바꾸면 여기서는 안 보인다. 그 우회를 별도로 막는다.
+    overlays = REPO_ROOT / "deploy" / "overlays"
+    offenders = []
+    # 파일명이 patch-* 가 아니어도(예: sc.yaml) 오버레이 디렉터리의 모든 YAML 문서를
+    # 본다. kustomization.yaml 은 inline patch(`patch: |`)·json6902 `target:` 이
+    # 별도 파일 없이 Deployment 를 겨냥할 수 있어 원문에서 'kind: Deployment' 를 찾는다.
+    for path in sorted(overlays.glob("*/*.yaml")):
+        if path.name == "kustomization.yaml":
+            if "kind: Deployment" in path.read_text():
+                offenders.append(str(path.relative_to(REPO_ROOT)))
+            continue
+        for doc in documents(path):
+            kinds = [line for line in doc if line.strip().startswith("kind:")
+                     and line.split(":", 1)[1].strip() == "Deployment"]
+            if kinds:
+                offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert offenders == [], (
+        f"오버레이가 Deployment 를 패치한다: {offenders} -- dms-api/dms-controller 의 "
+        f"securityContext 는 base 가 유일한 진실이어야 한다")

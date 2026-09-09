@@ -117,6 +117,12 @@ API POST /api/user/requests
     한다. dms-controller 자기 패치면 곧 SIGTERM 이라 이후 관찰·DB 쓰기를 신뢰 못 하고,
     완료 판정은 **오직 클러스터 관찰**(다음 틱/후임 파드)로만 한다.
 
+11. **제어면(api·controller)은 root 다 — 파일시스템 권한은 2차 방어가 아니다**
+    (2026-09-09). 운영 아티팩트 base 가 root:root 라 uid 0 으로 돌린다(capabilities 전부
+    drop, 이미지 fs 읽기 전용, `deploy/k8s/40-api.yaml`·`41-controller.yaml` 컨테이너
+    수준). "커널이 거부할 것"은 근거가 아니다 — 인가는 DB(`_owned_job`/`require_admin`)와
+    코드 봉쇄(`artifact_files.py`)에만 있다. 규칙 전체는 §7 「root 제어면」.
+
 ---
 ## 4. 제어면 루프 (Control-plane loops)
 
@@ -145,6 +151,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 - 리스 획득은 의도적으로 per-loop try 밖(controller.py:114-127, run_all_once): 지속 DB 장애 시 예외 전파로 프로세스가 죽어야 한다(crash-restart = HTTP 헬스 없는 컨트롤러의 자기 종료 동등물). try 안으로 옮기면 조용히 도는 정지가 된다 — test_persistent_lease_death_still_crashes_the_controller가 집행부.
 - 리스 규약(repositories/control.py:145 try_acquire_lease): 같은 holder는 항상 갱신, 다른 holder는 expires_at 경과 후에만 탈취. lease_seconds = max(interval*3, 30) (controller.py:122-124). 리스는 틱 중 갱신되지 않으므로 모든 루프 본체는 즉시 반환해야 한다(rollout_watcher.py:5-7 주석이 명문화).
 - stepper 층1 가드(stepper.py:258, _step_one): tool이 TOOL_TO_POLICY 밖이면 제출 전 _fail_closed(unknown_tool) — DB가 신뢰 경계(create_job은 무검증 INSERT)이고, fall-through하면 drm 꼴 argv(파괴적)로 실행된다.
+- 신원 가드(stepper._build_spec → identity_problem, 2026-09-09): worker_pool.identity 의 uid/gid 가 int(bool 제외)·username 비어 있지 않음·privileged==(uid==0) 이 아니면 제출 전 _fail_closed(identity_missing_at_step) — execution_manifests 의 uid/gid 0·username root 기본값이 변조 행에서 도달 불능이 된다. 모든 제출 경로(preflight/preview/exec_preflight/execution)가 _build_spec 을 지나므로 단일 관문.
 - _abs는 posixpath.join + rel.lstrip("/")(stepper.py:91-109): lstrip 없으면 join이 절대경로 둘째 인자에서 root를 버려 변조된 절대 target이 managed_root 밖을 지운다. root 결측은 StorageMissingAtStep으로 fail-closed(폴백 금지 — 예전 폴백은 조용한 데이터 증발).
 - diag 박제는 종단 전이 **전**(stepper.py:151-157, _finalize): 박제 후 크래시면 다음 틱이 finalize 재시도(archive는 IS NULL이 중복 방지), 역순이면 종단 잡은 다시 스텝되지 않아 박제 기회가 영영 사라진다.
 - preflight 실패 사유는 파드 로그의 DMS_PREFLIGHT_REASON= 마커를 화이트리스트로만 승격(stepper.py:192-211 _preflight_reason; preflight→preflight_failed, exec_preflight→execution_recheck_failed 폴백): 로그는 신뢰 입력이 아니라 밖의 문자열을 reason_code에 박으면 프론트 매핑 없는 원문 코드가 화면에 뜬다. 박제와 사유는 **한 번의** read_log에서 나온다(_archive_diag가 raw 반환) — 두 번 읽으면 그 사이 파드 GC로 박제 로그와 사유가 어긋난다.
@@ -301,6 +308,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 
 ### 불변식 (위반하면 깨진다)
 
+- 제어면 root 는 매니페스트 컨테이너 수준에만(40-api.yaml api / 41-controller.yaml controller: runAsUser 0·runAsGroup 0·allowPrivilegeEscalation false·readOnlyRootFilesystem true·capabilities drop ALL; migrate initContainer·파드 수준·30-migrate-job 은 securityContext 없음; Dockerfile.dms USER 65532 유지; 오버레이는 Deployment 를 패치하지 않음) — tests/test_release_manifest_contract.py 의 root 절이 전부 고정한다(manifest_tags.container_security_context 는 `- name:` 항목 단위 탐색 — bare _find(securityContext) 금지, 50-agent 처럼 블록이 여럿이면 엉뚱한 것을 집는다)
 - 동봉 매니페스트 값은 site_image(manifest_tags.py) 를 거쳐서만 화면·판정에 쓴다 — 레지스트리가 사이트와 다른 동봉값(포탈 밖 부트스트랩 이미지가 실어 온 테스트베드 태그)은 None(모름)이지 기준값이 아니다; 빌드 스탬프는 `[registry]/<img>:<tag>` 전체를 치환해 첫 포탈 빌드부터 동봉값이 그 사이트 것이 된다(build_manifests.py 스탬프 루프)
 - 사내 프록시 CA 는 두 층에 실려야 한다(build_manifests 스크립트 ca_args): 파드의 buildah(Go, SSL_CERT_FILE)와 RUN 단계 컨테이너(-v 마운트 + 클라이언트별 --env) — 한쪽만 주면 pull 은 되는데 npm/pip 이 죽거나 그 반대; 번들은 시스템 CA + 사내 CA 합본(사내 CA 단독은 비-가로채기 사이트에서 진짜 인증서를 깨뜨림); --unsetenv 로 최종 이미지에서 제거(런타임에 없는 경로가 남으면 TLS 전체 붕괴); 프로브는 부모 디렉토리 마운트(파일이 없어도 떠서 build_proxy_ca_missing), 빌드 파드는 type File
 - 호스트 네트워크 모드는 세 곳이 한 스위치다(build_manifests.host_network_for → 파드 hostNetwork + ClusterFirstWithHostNet + 빌드 스크립트 `--network=host`, 프로브 파드도 동일) — 파드만 켜면 buildah RUN 단계의 localhost 가 RUN 컨테이너 자신이라 loopback 프록시에 못 닿고, 프로브만 빠지면 build_proxy_unreachable 거짓 실패; loopback 프록시 호스트는 자동, 그 외는 control_state.build_host_network
@@ -378,7 +386,8 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
 | `src/dms/api/routes_requests.py` | 제출(202; maintenance 503, scan은 admin 전용 403, owner_username 특권 게이트, 422 reason 세분화), 목록(admin은 전체), 상세(events 101건 조회로 잘림 판별), 취소(전 잡 종단이면 거짓 취소 대신 finalize_from_job 화해 후 409) |
 | `src/dms/api/routes_jobs.py` | _owned_request/_owned_job 소유권 검사(비소유는 404로 뭉갬), confirm(fingerprint 대조·preview 만료 처리), job 단위 cancel |
 | `src/dms/api/cancel.py` | terminate_job(): 종단이면 no-op, phase_refs 전부 adapter.terminate — 종료 성공 후에만 DB Cancelled(거짓 취소 금지)의 실행부 |
-| `src/dms/api/artifacts.py` | fd 기반 TOCTOU 제거 아티팩트 읽기/목록/스트림: O_NOFOLLOW\|O_NONBLOCK 단일 open→fstat→/proc/self/fd 봉쇄→크기 상한, 목록은 scandir(dfd)+MAX_ENTRIES/MAX_SCAN, tail_lines는 \n 전용 분할 |
+| `src/dms/artifact_files.py` | **API·컨트롤러 공용** 봉쇄 사슬(2026-09-09 root 전환): open_artifact_fd(단일 open O_NOFOLLOW\|O_NONBLOCK→fstat S_ISREG→nlink==1→소유자 st_uid∈{0,요청자}→/proc/self/fd 봉쇄), inode_allowed(목록·열기 동일 판정), job_owner_uid(잡 행의 요청자 uid, bool/str 거부), read_contained_text(컨트롤러 summary 읽기: 크기 상한 1MiB·비-UTF-8 도 None), PHASES/NAME_RE/JOB_ID_RE 화이트리스트 |
+| `src/dms/api/artifacts.py` | artifact_files 위의 API 층: 목록(scandir(dfd)+MAX_ENTRIES/MAX_SCAN, inode_allowed 로 하드링크·남의 소유 제외), 뷰(꼬리 MAX_BYTES), 다운로드 스트림(fstat 시점 size 캡), open_artifact_stream(봉쇄 통과 뒤에만 크기 상한), tail_lines는 \n 전용 분할; 라우트는 owner_uid=job_owner_uid(job) 필수 |
 | `src/dms/api/routes_artifacts.py` | 잡 아티팩트 목록/뷰(tail)/다운로드(octet-stream+attachment+nosniff), /logs: 라이브 우선 + diag_logs 박제 폴백(빈 문자열은 폴백 조건 아님), 봉쇄 실패·미존재는 동일 404(존재 오라클 차단) |
 | `src/dms/api/routes_agent.py` | /api/agent/report: actor==node:<node_name> 일치 검증 후 ingest, 응답에 enabled storages·probe targets·report 주기·artifact_base_path(스킴 제거) 하달 |
 | `src/dms/api/routes_storages.py 외 admin 계열(accounts/nodes/policies/denylist/batches/control/artifact_base/builds/releases/metrics)` | 전부 APIRouter(dependencies=[Depends(require_admin)]) 또는 라우트별 require_admin; storages만 user_router(/api/user/storages, require_user) 별도 |
@@ -398,7 +407,7 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
 - 422 검증 오류 응답은 `type/loc/msg` 만 싣는다(app.py RequestValidationError 핸들러) — FastAPI 기본의 `input` 에코는 비밀번호 필드가 실린 형식 오류 요청의 평문을 응답(프록시 로그)에 되돌린다
 - Identity.auth에 기본값 없음(auth.py:27) — 새 생성 지점이 필드를 빠뜨리면 조용한 session 오분류 대신 TypeError로 즉시 터지는 것이 의도; Identity.actor는 절대 변형 금지(에이전트 인증·특권 판정·소유권 검사가 원값 비교), 표시용은 audit_actor()만(auth.py:30)
 - _NODE_NAME_RE 정의는 auth.py:15 한 곳 — routes_agent.py:6이 import; 두 곳으로 갈라지면 토큰 게이트가 통과시킨 node:<이름>을 ingest_report가 거절한다
-- 아티팩트 봉쇄 사슬은 open_artifact_stream 하나(artifacts.py:178) — 뷰·다운로드 공유, 검사 순서 계약: 단일 open→fstat S_ISREG→fd 봉쇄(_assert_contained)→그 뒤에만 크기 상한(순서가 바뀌면 404/413 갈림이 존재·크기 오라클)
+- 아티팩트 봉쇄 사슬은 artifact_files.open_artifact_fd 하나(API 의 open_artifact_stream/read_artifact/list_artifacts 와 컨트롤러의 wiring.build_summary_reader 가 공유) — 검사 순서 계약: 단일 open(O_NOFOLLOW|O_NONBLOCK)→fstat S_ISREG→nlink==1→소유자(st_uid∈{0, 요청자 uid})→fd 봉쇄(assert_contained)→그 뒤에만 크기 상한(순서가 바뀌면 404/413 갈림이 존재·크기 오라클). 라우트는 owner_uid=job_owner_uid(job) 를 반드시 넘긴다(None → fail-closed 404)
 - artifact_not_found/artifact_forbidden은 뷰·다운로드 라우트 모두 body까지 동일한 404(routes_artifacts.py:44-49, 67-70) — 라우트 간 응답이 갈리면 그 차이가 존재 오라클
 - 취소는 terminate 성공 후에만 DB를 Cancelled로 기록(cancel.py 모듈 docstring; routes_requests.py:140-174) — 전 잡 종단+요청 비종단 창에서는 취소 기록 대신 finalize_from_job(orphan_recovery)으로 화해 후 409(거짓 취소 금지)
 - dms:unauthorized 이벤트는 401 전용(api.ts:216-218) — 403 등에서 발화하면 권한 없는 화면마다 로그인으로 튕긴다; AuthContext는 me를 invalidate만 한다(clear는 pending 리셋→401 무한 루프, AuthContext.tsx:5-9)
@@ -406,11 +415,30 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
 - /readyz 503 본문 {"status":"degraded"} 및 상태 코드는 프로브 계약으로 불변(app.py:84-85); 연속 실패 카운터는 성공 1회에 리셋(app.py:86), limit(기본 30)에서 exit_fn 발화
 - spa_fallback은 라우터 include 뒤에 등록(app.py:92-119) — /api·/healthz·/docs가 먼저 매칭된다는 순서가 SPA 서빙의 전제; static_root 밖 normpath 결과는 index.html 폴백
 
+### root 제어면 (2026-09-09 — 위반하면 취약점이 된다)
+
+dms-api/dms-controller 는 uid 0 이다(40-api.yaml·41-controller.yaml 컨테이너 securityContext: runAsUser 0, capabilities drop ALL, readOnlyRootFilesystem, allowPrivilegeEscalation false; migrate initContainer·30-migrate-job·Dockerfile USER 65532 는 그대로 — tests/test_release_manifest_contract.py 가 이 모양을 고정). 이유: 운영 아티팩트 base 가 root:root 라 65532 로는 3홉 쓰기 왕복이 항상 실패했다. 그 대가로 아래가 **유일한** 방어다:
+
+1. **파일시스템 권한은 2차 방어가 아니다.** 인가는 DB(`_owned_job` routes_jobs.py, `require_admin` auth.py, scan_paths `get_owned`+covers)와 코드 봉쇄뿐. "커널이 거부할 것"을 근거로 검사를 생략하지 마라. (cap 을 버려 남의 0600 은 여전히 EACCES 지만 root 소유 파일은 mode 와 무관하게 열린다 — 이 차이에 기대는 코드도 쓰지 마라.)
+2. **artifact base 아래를 여는 모든 코드(api·controller)는 artifact_files.open_artifact_fd 사슬을 쓴다**: 단일 open(O_RDONLY|O_NOFOLLOW|O_NONBLOCK) → fstat S_ISREG → nlink==1 → 소유자 st_uid∈{0, 요청자 uid} → realpath(/proc/self/fd/N) 봉쇄 → 크기 상한 → 모든 OSError/ValueError 를 artifact_not_found/None 으로. 경로 문자열을 두 번 해석하지 않는다. 새 읽기 라우트는 open_artifact_stream/read_artifact/list_artifacts 에 owner_uid=job_owner_uid(job) 를 넘기고 그 앞에 _owned_job 또는 require_admin 을 둔다. DB 행의 artifact_uri 를 그대로 열지 말고 job_id 에서 재조립한다(JOB_ID_RE/PHASES/NAME_RE).
+3. **소유자 검사가 0 을 함께 허용하는 이유**는 러너가 chown **뒤에** root 로 stdout.log/stderr.log/summary.json 을 쓰기 때문(dms_job_runner/runner.py) — 러너가 그 셋을 요청자로 chown 하면 `== 요청자` 로 좁힌다(BACKLOG). st_uid==0 만 허용하는 게이트는 쓰지 마라(요청자가 미리 만든 정규 파일을 root 의 open("w") 가 재사용하면 요청자 소유).
+4. **root 가 요청자 소유 디렉터리(<base>/<job_id>/<phase>, chown 이후)에 경로로 open("w")/os.chmod/os.path.exists 를 하지 않는다.** 쓰기는 dirfd + O_CREAT|O_EXCL|O_NOFOLLOW, 또는 chown 하지 않는 root 소유 디렉터리에(현재 제어면엔 그런 쓰기가 0건 — 러너의 write_text 가 남은 결함, BACKLOG).
+5. **<base> 와 <base>/<job_id> 는 요청자 쓰기 불가**(root:root·비-world-writable; 러너는 <job_id> 를 root 로 만들고 <phase> 만 chown). 깨지면 assert_contained 의 기준(realpath(<base>/<job_id>))을 요청자가 심링크로 옮길 수 있다. 테스트베드 777 은 테스트베드 전용.
+6. **하드링크는 코드로 못 막는 부분이 있다** — fs.protected_hardlinks=1(+symlinks) 은 공유 FS 를 마운트하고 사용자가 link(2) 를 부를 수 있는 모든 호스트의 배포 전제(deploy/README §2b). 코드 측 보완은 규칙 2 의 nlink/소유자.
+7. **api/controller 는 셸을 띄우거나 os.access 를 쓰지 않는다.** 권한 질문은 fd 에 연산을 시도해서 답한다(roundtrip_artifact_base). 프로세스가 필요하면 파드 스펙 + env(스크립트 본문에 사용자 값 보간 금지). 현재 src/dms(agent 제외)에 subprocess/shutil/tempfile/os.access/chown/chmod 0건 — 유지.
+8. **관리자·사용자 제공 경로는 (1) 역할 게이트 (2) prefix allowlist (3) realpath 아래 검사 (4) 소유자·mode** 넷 다(routes_artifact_base.py `_check_path` = allowlist_reason → roundtrip_artifact_base(소유자 == euid, o+w 거부, 그 뒤 쓰기 왕복); controller_check_once 도 같은 순서). root 면 allowlist 아래 어떤 디렉터리에도 프로브를 쓸 수 있으므로 (4) 가 "base 는 root:root 비-world-writable" 전제를 실제로 강제한다. `realpath != path` 거부는 쓰지 마라(base 접두 심링크는 의도적 허용). allowlist 파서는 `..` 성분을 정규화 **전**에 거부한다(normpath 가 `/cephfs/..` 를 `/` 로 접어 무제한이 된다).
+9. **uid/gid 를 0 으로 기본값 처리하지 않는다 — 부재는 거부.** stepper._build_spec 의 identity_problem 가드(identity_missing_at_step; 음수·비-dict worker_pool 포함)가 execution_manifests 의 0/root 기본값을 도달 불능으로 만든다. uid 0 은 privileged 플래그와 짝이 맞으면 정당(특권 요청자); 디렉터리가 비특권 사용자에게 uid 0 을 주면 계획 시점에 identity_root_without_privilege(identity.py) 로 거부 — stepper 가드는 변조 행 백스톱이다.
+10. **artifact-base 3홉 "정상"의 뜻**: 세 홉 모두 uid 0 관점 — 마운트 존재 + rw + root_squash/EROFS/ENOSPC 아님. 어떤 비root uid 의 쓰기 권한도 증명하지 않는다(요청자 권한은 preflight 가 요청자 uid 로 검사).
+11. **이미지 fs 는 이미지 빌드만 채운다.** /app/static·/app/deploy/k8s·site-packages 는 root:root 라 uid 0 이 쓸 수 있다 — readOnlyRootFilesystem 이 유일한 보호. DMS_STATIC_DIR 을 hostPath/emptyDir/공유 FS 로 돌리지 마라(spa_fallback 은 문자열 prefix 봉쇄라 트리가 이미지 고정일 때만 안전).
+12. **securityContext 를 "강화"한답시고 runAsNonRoot/runAsUser 65532 를 (오버레이 포함) 넣지 마라** — 운영 base 에서 즉시 artifact_base_not_writable 회귀. 반대로 capabilities 를 더하면(DAC_OVERRIDE) 남의 mode 비트 게이트까지 사라진다 — 주면 사유를 주석에.
+13. **컨트롤러 루프는 파일시스템에서 아무것도 삭제하지 않는다**(pod_gc/retention 은 k8s API + SQL). 아티팩트 보존 정책을 넣으면 dir_fd 상대 삭제 + 규칙 2 의 봉쇄.
+14. **admin 은 신뢰 앵커다.** admin 은 이미 특권 잡·빌드 소스 경로·privileged 빌드 파드로 클러스터 root 상당 — root 전환 후 admin 이 요청자 잡의 root 소유 아티팩트를 읽는 것은 의도된 동작.
+
 ### 함정 (모르면 밟는다)
 
 - submit의 scan 게이트는 원시 문자열 비교(routes_requests.py:80-84) — Operation(...) 변환은 422 변환 try 밖이라 여기서 ValueError가 나면 500이 된다
 - artifacts open의 O_NONBLOCK은 필수(artifacts.py:194-199) — 사용자가 자기 phase 디렉터리에 mkfifo를 걸면 open이 영원히 블록, AnyIO 스레드풀(~40) 고갈로 SPA까지 전체 정지하고 팟 재시작 전까지 안 돌아온다
-- 하드 링크는 봉쇄로 못 막는다(artifacts.py:72-80 docstring) — 앱 층 해결 불가, 배포에서 별도 파일시스템+fs.protected_hardlinks로 다뤄야 한다
+- 하드 링크는 realpath 봉쇄로 못 잡는다(artifact_files.assert_contained docstring) — 앱 층은 nlink>1 거부 + 소유자 검사로 보완하고, 근본 방어는 /cephfs 를 마운트한 **모든** 호스트(로그인·계산 노드 포함)의 fs.protected_hardlinks=1·protected_symlinks=1(링커 커널의 may_linkat 에서 검사, MDS 는 안 함 — 배포 전제, deploy/README §2b). 커널 내장 기본은 0 이고 배포판 sysctl.d 가 1 을 넣는다
 - tail_lines는 '\n'으로만 분할(artifacts.py:165-175) — splitlines()는 \r에서도 쪼개 rsync류 진행률 로그의 tail=N이 N줄이 아니게 된다
 - registry_unreachable·tag_unverified는 프론트 전용 코드(api.ts:155-162) — 백엔드는 detail로 내지 않고 targets 응답 registry_ok=false / 202의 tag_verified:false로 알린다; 죽은 키 테스트의 허용 예외는 http_401/422/500/503뿐(reasonCodes.test.ts:25)
 - reasonText는 복합 코드(prefix:suffix)를 접두 번역+접미 병기로 처리(api.ts:182-192) — stepper가 f"{prefix}:{reason_code}"를 합성하므로 정확 일치 조회만으로는 영원히 미번역
@@ -502,10 +530,10 @@ env를 기동 시점에 전수 검증해 frozen Settings/AgentSettings로 만들
 
 | 파일 | 책임 |
 |---|---|
-| `src/dms/config.py` | Settings/AgentSettings frozen dataclass + from_env 전수 검증(_SERVER_INT_KEYS 25개 int 키 테이블, _is_placeholder 부분일치, SettingsError.problems 누적), LDAP require-auth-bind fail-closed(config.py:181-190) |
-| `src/dms/wiring.py` | execution_backend(stub/volcano)에 따른 어댑터 선택: build_execution_adapter·build_build_runner·build_rollout_runner·build_queue_reader 4개 팩토리 + build_identity_resolver(LDAP) + wire_reconnect_event(DB 재연결 이벤트 훅, api·controller 공용) |
+| `src/dms/config.py` | Settings/AgentSettings frozen dataclass + from_env 전수 검증(_SERVER_INT_KEYS 25개 int 키 테이블, _is_placeholder 부분일치, SettingsError.problems 누적), LDAP require-auth-bind fail-closed(config.py:181-190), artifact_base_allowed_prefixes(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES: 절대경로 접두 튜플, 상대경로·"/"·".." 성분은 기동 거부, "."·"//" 는 normpath 로 접음, 빈 값 = 무제한) |
+| `src/dms/wiring.py` | execution_backend(stub/volcano)에 따른 어댑터 선택: build_execution_adapter·build_build_runner·build_rollout_runner·build_queue_reader 4개 팩토리 + build_identity_resolver(LDAP) + wire_reconnect_event(DB 재연결 이벤트 훅, api·controller 공용) + build_summary_reader(컨트롤러 summary.json 읽기 — 어댑터가 조립한 <base>/<job_id>/<phase>/summary.json 을 조각으로 되돌려 artifact_files.read_contained_text 로, 소유자 uid 는 잡 행에서) |
 | `src/dms/cli.py` | argparse 진입점: agent(서버 Settings 없이 AgentSettings만) / migrate / api(uvicorn+create_app) / controller(Repositories+4팩토리 조립, --once는 run_all_once, 아니면 run_forever). SettingsError는 stderr 출력 후 exit 2 |
-| `src/dms/artifact_base.py` | 아티팩트 base 단일 진실 원천: strip_scheme(접두사만), resolve_artifact_base(DB 우선→env), normalize_artifact_base(정규형 file:///abs, 422용 DomainValidationError), roundtrip_artifact_base(실제 쓰기 왕복 프로브), controller_check_once(주기 검증 결과를 control_state에 기록) |
+| `src/dms/artifact_base.py` | 아티팩트 base 단일 진실 원천: strip_scheme(접두사만), resolve_artifact_base(DB 우선→env), normalize_artifact_base(정규형 file:///abs, 422용 DomainValidationError), allowlist_reason(prefix allowlist, realpath 기준, artifact_base_outside_allowlist), roundtrip_artifact_base(실제 쓰기 왕복 프로브 — uid 0 관점), controller_check_once(allowlist→왕복 순으로 주기 검증 결과를 control_state에 기록) |
 | `src/dms/registry.py` | 레지스트리 v2 태그 조회 fetch_repo_tags: 모든 실패를 None으로 접는 fail-soft(registry.py:39-48), 캐시 없음, 정렬 반환, 타임아웃 3s/connect 2s |
 | `src/dms/metrics_series.py` | DB/HTTP 없는 순수 시계열 조립: build_node_points(샘플 단위 fail-soft, 네트워크 카운터 차분), clamp_window_hours, bucket_chars_for(SUBSTR 접두 절단), duration_histogram + DURATION_BUCKETS/SUBMIT_WAIT_BUCKETS |
 

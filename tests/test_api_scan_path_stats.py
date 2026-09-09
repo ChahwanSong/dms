@@ -4,6 +4,7 @@
 (신 dscan 1b93d54에서 스키마 삭제)도 금지 목록에 남긴다 — 아티팩트 디렉터리에는
 구형 리포트가 계속 존재한다(상위 스펙 §8). broken_paths_total/limit(숫자 총계)만
 신규 노출 — 구형 리포트(키 부재)는 None(미기록, null≠0)."""
+import os
 import json
 
 from dms.config import Settings
@@ -79,7 +80,8 @@ def _scan_job(repos, db, *, storage_name, target, requester="alice",
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(
         rid, plan_id, operation="scan", priority="mid", storage_name=storage_name,
-        target=target, options={}, tool="dscan", worker_pool={}, precondition={},
+        target=target, options={}, tool="dscan",
+        worker_pool={"identity": {"uid": os.getuid(), "gid": os.getgid(), "username": "alice"}}, precondition={},
         actor="planner")
     repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
     if created_at is not None:

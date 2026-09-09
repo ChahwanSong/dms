@@ -9,7 +9,7 @@ from ..domain import (
     resolve_priority, validate_owner_username,
 )
 from ..execution import ExecutionError
-from .artifacts import ArtifactError, read_artifact, strip_scheme
+from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, require_admin, require_user
 from .cancel import terminate_job
 from .routes_jobs import _owned_request
@@ -234,8 +234,12 @@ def request_scan_stats(request_id: str, request: Request,
     # 슬라이스 18: DB 우선 해석(설계 §2.1) -- routes_artifacts._base 와 같은 이유.
     base = strip_scheme(resolve_artifact_base(repos.control,
                                               request.app.state.settings))
+    owner_uid = job_owner_uid(job)
+    if owner_uid is None:
+        raise HTTPException(status_code=404, detail="no_scan_report")
     try:
-        f = read_artifact(base, job["job_id"], "execution", "dscan-report.json")
+        f = read_artifact(base, job["job_id"], "execution", "dscan-report.json",
+                          owner_uid=owner_uid)
     except ArtifactError:
         raise HTTPException(status_code=404, detail="no_scan_report")
     if f["truncated"]:

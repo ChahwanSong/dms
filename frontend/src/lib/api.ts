@@ -142,6 +142,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 계약(reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
   unknown_tool: "허용되지 않은 도구입니다 — 관리자에게 문의하세요",
   storage_missing_at_step: "잡 진행 중 스토리지 정의가 사라졌습니다 — 관리자에게 문의하세요",
+  identity_missing_at_step: "잡의 실행 신원(uid/gid)이 없거나 올바르지 않습니다 — 관리자에게 문의하세요",
+  identity_root_without_privilege: "디렉터리가 이 사용자에게 uid 0 을 줍니다 — root 실행은 특권 요청자만 가능합니다",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",
   request_not_found: "요청을 찾을 수 없습니다",
@@ -235,6 +237,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   artifact_base_not_directory: "경로가 디렉터리가 아닙니다",
   artifact_base_not_writable: "경로에 쓸 수 없습니다",
   artifact_base_locked: "잡 이력이 있어 아티팩트 경로를 바꿀 수 없습니다",
+  artifact_base_outside_allowlist: "허용된 공유 FS 경로(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES) 밖입니다",
+  artifact_base_not_owned: "아티팩트 경로의 소유자가 제어면 프로세스(root)가 아닙니다 — chown root:root",
+  artifact_base_world_writable: "아티팩트 경로가 world-writable 입니다 — chmod 755 (요청자가 잡 디렉터리를 바꿔치기할 수 있음)",
   // 빌드 실패 세분화(슬라이스 21 잔여). 지금까지 전부 build_failed 로 뭉개져
   // 운영자가 로그 단절만 보고 OOM 을 추측해야 했다 — 대응이 서로 다르다.
   build_oom_killed: "빌드가 메모리 한도를 넘어 종료됐습니다 — 빌드 봉투를 늘리거나 빌드를 줄이세요",

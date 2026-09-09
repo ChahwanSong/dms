@@ -4,6 +4,7 @@
 배치 전체가 아니라 항목별 리포트로 본다. 단일 리포트 계약이라 truncated 는 503
 scan_report_too_large(scan_path_stats 선례), 리포트가 애초에 없는 경우(비 scan·
 성공 잡 없음·파일 부재·파싱 불가)는 전부 404 no_scan_report 다."""
+import os
 import json
 
 from dms.config import Settings
@@ -65,7 +66,8 @@ def _succeed_job(client, rid, *, operation="scan", target="team",
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(rid, plan_id, operation=operation,
         priority="mid", storage_name="s1", target=target, options={},
-        tool="dscan", worker_pool={}, precondition={}, actor="planner")
+        tool="dscan", worker_pool={"identity": {"uid": os.getuid(), "gid": os.getgid(), "username": "alice"}},
+        precondition={}, actor="planner")
     repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
     repos.requests.finalize_from_job(rid, DataJobState.SUCCEEDED, actor="stepper")
     if write_report:

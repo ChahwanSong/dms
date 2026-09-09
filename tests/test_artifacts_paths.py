@@ -55,7 +55,7 @@ def test_symlink_escaping_base_is_rejected(tmp_path):
     outside.write_text("secret")
     os.symlink(outside, base / JOB / "execution" / "stdout.log")
     with pytest.raises(ArtifactError) as e:
-        read_artifact(str(base), JOB, "execution", "stdout.log")
+        read_artifact(str(base), JOB, "execution", "stdout.log", owner_uid=None)
     # 탈출 시도와 단순 미존재는 호출자에게 구별되면 안 된다(존재 오라클).
     assert e.value.reason_code == "artifact_not_found"
 
@@ -70,7 +70,7 @@ def test_symlinked_phase_dir_escaping_base_is_rejected(tmp_path):
     (outside_dir / "stdout.log").write_text("TOP-SECRET")
     os.symlink(outside_dir, base / JOB / "execution")
     with pytest.raises(ArtifactError) as e:
-        read_artifact(str(base), JOB, "execution", "stdout.log")
+        read_artifact(str(base), JOB, "execution", "stdout.log", owner_uid=None)
     assert e.value.reason_code in ("artifact_forbidden", "artifact_not_found")
 
 
@@ -91,14 +91,20 @@ def test_symlink_swapped_after_containment_check_does_not_leak(tmp_path, monkeyp
 
     monkeypatch.setattr(os.path, "realpath", stale_realpath)
     try:
-        out = read_artifact(str(base), JOB, "execution", "stdout.log")
+        out = read_artifact(str(base), JOB, "execution", "stdout.log", owner_uid=None)
     except ArtifactError as e:
         assert e.reason_code == "artifact_not_found"
     else:
         pytest.fail(f"leaked outside content: {out['content']!r}")
 
 
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root 는 자기 소유 파일의 mode 000 을 무시해 EACCES 분기를 재현할 수 없다")
 def test_unreadable_file_is_not_found(tmp_path):
+    """비root 개발 환경의 errno 비노출 계약(EACCES → artifact_not_found). 배포는 root
+    (제어면 root 전환, 2026-09-09)라 이 분기에 도달하지 않는다 -- 아티팩트 인가는
+    _owned_job + artifact_files 의 fd 봉쇄 사슬(소유자·nlink·realpath)이지 파일
+    mode 가 아니다. 삭제하지 말 것: 비root 에서 errno 가 새지 않는 계약은 유지된다."""
     d = tmp_path / JOB / "execution"
     d.mkdir(parents=True)
     f = d / "stdout.log"
@@ -106,21 +112,21 @@ def test_unreadable_file_is_not_found(tmp_path):
     os.chmod(f, 0o000)
     try:
         with pytest.raises(ArtifactError) as e:
-            read_artifact(str(tmp_path), JOB, "execution", "stdout.log")
+            read_artifact(str(tmp_path), JOB, "execution", "stdout.log", owner_uid=None)
         assert e.value.reason_code == "artifact_not_found"
     finally:
         os.chmod(f, 0o600)
 
 
 def test_list_is_empty_when_base_missing(tmp_path):
-    assert list_artifacts(str(tmp_path / "nope"), JOB) == {"entries": [], "truncated": False}
+    assert list_artifacts(str(tmp_path / "nope"), JOB, owner_uid=None) == {"entries": [], "truncated": False}
 
 
 def test_list_returns_phase_and_name(tmp_path):
     d = tmp_path / JOB / "execution"
     d.mkdir(parents=True)
     (d / "stdout.log").write_text("hello")
-    out = list_artifacts(str(tmp_path), JOB)
+    out = list_artifacts(str(tmp_path), JOB, owner_uid=None)
     assert out["truncated"] is False
     assert [(r["phase"], r["name"], r["size"]) for r in out["entries"]] == \
         [("execution", "stdout.log", 5)]
@@ -133,7 +139,7 @@ def test_list_skips_symlinked_file(tmp_path):
     outside.write_text("TOP-SECRET-AND-LARGE")
     os.symlink(outside, d / "stdout.log")
     (d / "real.log").write_text("ok")
-    out = list_artifacts(str(tmp_path), JOB)
+    out = list_artifacts(str(tmp_path), JOB, owner_uid=None)
     assert [r["name"] for r in out["entries"]] == ["real.log"]
 
 
@@ -144,7 +150,7 @@ def test_list_does_not_follow_symlinked_phase_dir(tmp_path):
     for n in ("a.conf", "b.conf"):
         (outside_dir / n).write_text("x")
     os.symlink(outside_dir, tmp_path / JOB / "execution")
-    out = list_artifacts(str(tmp_path), JOB)
+    out = list_artifacts(str(tmp_path), JOB, owner_uid=None)
     assert out["entries"] == []
 
 
@@ -155,7 +161,7 @@ def test_list_caps_entries(tmp_path):
     d.mkdir(parents=True)
     for i in range(MAX_ENTRIES + 50):
         (d / f"f{i:05d}.log").write_text("x")
-    out = list_artifacts(str(tmp_path), JOB)
+    out = list_artifacts(str(tmp_path), JOB, owner_uid=None)
     assert len(out["entries"]) == MAX_ENTRIES
     assert out["truncated"] is True
 
@@ -164,7 +170,7 @@ def test_read_truncates_large_file_from_the_end(tmp_path):
     d = tmp_path / JOB / "execution"
     d.mkdir(parents=True)
     (d / "stdout.log").write_text("A" * (MAX_BYTES + 100) + "TAIL")
-    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log")
+    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log", owner_uid=None)
     assert out["truncated"] is True
     assert out["content"].endswith("TAIL")
     assert len(out["content"].encode()) <= MAX_BYTES
@@ -178,7 +184,7 @@ def test_read_is_capped_even_if_size_changes_after_stat(tmp_path, monkeypatch):
     d.mkdir(parents=True)
     (d / "stdout.log").write_bytes(b"B" * (MAX_BYTES * 4))
     monkeypatch.setattr(os.path, "getsize", lambda p, *a, **k: 10)
-    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log")
+    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log", owner_uid=None)
     assert len(out["content"].encode()) <= MAX_BYTES
 
 
@@ -186,7 +192,7 @@ def test_read_tail_lines(tmp_path):
     d = tmp_path / JOB / "execution"
     d.mkdir(parents=True)
     (d / "stdout.log").write_text("\n".join(f"line{i}" for i in range(100)))
-    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log", tail=3)
+    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log", tail=3, owner_uid=None)
     assert out["content"].split("\n") == ["line97", "line98", "line99"]
 
 
@@ -196,13 +202,13 @@ def test_read_tail_does_not_split_carriage_return_progress(tmp_path):
     d = tmp_path / JOB / "execution"
     d.mkdir(parents=True)
     (d / "stdout.log").write_text("start\n10%\r20%\r30%\rdone\n")
-    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log", tail=2)
+    out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log", tail=2, owner_uid=None)
     assert out["content"] == "start\n10%\r20%\r30%\rdone"
 
 
 def test_read_missing_file(tmp_path):
     with pytest.raises(ArtifactError) as e:
-        read_artifact(str(tmp_path), JOB, "execution", "nope.log")
+        read_artifact(str(tmp_path), JOB, "execution", "nope.log", owner_uid=None)
     assert e.value.reason_code == "artifact_not_found"
 
 
@@ -225,7 +231,7 @@ def test_read_fifo_returns_promptly_instead_of_blocking(tmp_path):
 
     def call():
         try:
-            out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log")
+            out = read_artifact(str(tmp_path), JOB, "execution", "stdout.log", owner_uid=None)
         except ArtifactError as exc:
             result["reason"] = exc.reason_code
         except BaseException as exc:  # 진단용 — 예상 못 한 예외도 기록해 둔다
@@ -262,7 +268,7 @@ def test_list_phase_dir_swapped_after_check_does_not_leak(tmp_path, monkeypatch)
         return stale if str(path) == str(link) else real_lstat(path, *a, **k)
 
     monkeypatch.setattr(os, "lstat", stale_lstat)
-    out = list_artifacts(str(tmp_path), JOB)
+    out = list_artifacts(str(tmp_path), JOB, owner_uid=None)
     assert [r["name"] for r in out["entries"]] == []
 
 
@@ -274,7 +280,7 @@ def test_list_of_many_directories_reports_no_entries(tmp_path):
     d.mkdir(parents=True)
     for i in range(60):
         (d / f"d{i:03d}").mkdir()
-    assert list_artifacts(str(tmp_path), JOB) == {"entries": [], "truncated": False}
+    assert list_artifacts(str(tmp_path), JOB, owner_uid=None) == {"entries": [], "truncated": False}
 
 
 def test_list_stops_at_the_dirent_scan_budget(tmp_path, monkeypatch):
@@ -285,6 +291,6 @@ def test_list_stops_at_the_dirent_scan_budget(tmp_path, monkeypatch):
     for i in range(60):
         (d / f"d{i:03d}").mkdir()
     monkeypatch.setattr(artifacts_mod, "MAX_SCAN", 10)
-    out = list_artifacts(str(tmp_path), JOB)
+    out = list_artifacts(str(tmp_path), JOB, owner_uid=None)
     assert out["entries"] == []
     assert out["truncated"] is True

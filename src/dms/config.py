@@ -1,5 +1,6 @@
 """env 기반 설정. 기동 시 전부 검증하고, placeholder가 통과하는 구멍을 만들지 않는다."""
 import socket
+import os
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -111,6 +112,27 @@ def _parse_csv_set(environ, key, default=frozenset()):
     return frozenset(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _parse_path_prefixes(environ, key, problems):
+    """절대경로 접두 목록(콤마). 후행 슬래시는 벗기고 정렬해 튜플로 -- 미설정·빈
+    값은 () (무제한). 상대경로나 루트("/")는 기동 거부: "/" 는 allowlist 를 켠 척
+    하면서 아무것도 막지 않는 값이라 오타로만 나온다."""
+    out = []
+    for item in _parse_csv_set(environ, key):
+        # '..' 성분은 **정규화 전** 원문에서 거부한다(normalize_artifact_base 와 같은
+        # 규칙): normpath 는 '/cephfs/..' 를 '/' 로, '/cephfs/../etc' 를 '/etc' 로
+        # 접어 버려 아래 '/' 검사를 통과시키고 allowlist 를 조용히 무력화한다
+        # (리뷰 재현). normpath 는 '.'·'//' 만 접기 위해 그 뒤에 쓴다.
+        if ".." in item.split("/"):
+            problems.append(f"{key} entries must not contain '..': {item!r}")
+            continue
+        value = os.path.normpath(item).rstrip("/")
+        if not value.startswith("/") or not value:
+            problems.append(f"{key} entries must be absolute paths (not '/'): {item!r}")
+            continue
+        out.append(value)
+    return tuple(sorted(set(out)))
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -130,6 +152,12 @@ class Settings:
     stepper_interval_seconds: int = 5
     preview_ttl_seconds: int = 86400
     artifact_base_uri: str = "file:///artifacts/dms"
+    # 관리자가 포탈에서 고를 수 있는 아티팩트 base 의 경로 접두 allowlist(2026-09-09,
+    # 제어면 root 전환). 65532 시절엔 파일시스템이 사실상의 allowlist 였다(대부분의
+    # 경로가 쓰기 불가 → 422). root 면 존재하는 모든 디렉터리가 저장 가능해지고 그
+    # 아래에 잡 파드가 <job_id>/<phase> 를 mkdir/chown 한다 -- 공유 FS 마운트로
+    # 묶는다. 빈 튜플은 무제한(테스트·로컬); 배포는 20-config.yaml 이 /cephfs 를 준다.
+    artifact_base_allowed_prefixes: tuple = ()
     allow_privileged_requesters: bool = True
     privileged_requesters: frozenset = frozenset({"root", "admin"})
     # 비운영자(role=user)가 제출할 수 있는 연산 allowlist(2026-08-20, 사용자 결정:
@@ -226,6 +254,8 @@ class Settings:
             port = 0
         extra = {field: _parse_int(environ, env_key, default, problems)
                  for env_key, field, default in _SERVER_INT_KEYS}
+        artifact_base_allowed_prefixes = _parse_path_prefixes(
+            environ, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES", problems)
         ldap_bind_dn = environ.get("DMS_LDAP_BIND_DN", "")
         ldap_bind_pw = environ.get("DMS_LDAP_BIND_PW", "")
         ldap_require_auth_bind = _parse_bool(environ, "DMS_LDAP_REQUIRE_AUTH_BIND")
@@ -251,6 +281,7 @@ class Settings:
             **extra,
             artifact_base_uri=environ.get("DMS_ARTIFACT_BASE_URI",
                                           "file:///artifacts/dms"),
+            artifact_base_allowed_prefixes=artifact_base_allowed_prefixes,
             allow_privileged_requesters=_parse_bool(
                 environ, "DMS_ALLOW_PRIVILEGED_REQUESTERS", default=True),
             privileged_requesters=_parse_csv_set(

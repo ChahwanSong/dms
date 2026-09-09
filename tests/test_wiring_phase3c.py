@@ -77,3 +77,50 @@ def test_queue_reader_builds_volcano_reader_when_volcano():
     assert isinstance(reader, VolcanoQueueReader)
     assert reader._namespace == settings.k8s_namespace
     assert reader._queue == "dms-data"
+
+
+# --- 제어면 root 전환(2026-09-09): 컨트롤러 summary 읽기가 봉쇄 사슬로 배선돼 있는가 ----
+# 배선은 wiring.build_execution_adapter 의 한 줄(read_text = build_summary_reader(repos))
+# 이다. 예전 open(path).read() 헬퍼로 되돌리면 root 컨트롤러가 심링크를 따라가고
+# FIFO 에 멈추는데 다른 어떤 테스트도 빨간불이 아니다(리뷰 재현) -- 여기서 고정한다.
+import os  # noqa: E402
+
+import dms.wiring as wiring_mod  # noqa: E402
+from dms.domain import RequestState  # noqa: E402
+
+VOLCANO = {**BASE, "DMS_EXECUTION_BACKEND": "volcano", "DMS_JOB_IMAGE": "reg/img:1"}
+
+
+def test_volcano_adapter_reads_summaries_through_the_contained_reader(db, monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(wiring_mod, "build_summary_reader", lambda repos: sentinel)
+    adapter = build_execution_adapter(Settings.from_env(VOLCANO), Repositories(db))
+    assert adapter._read_text is sentinel
+
+
+def test_volcano_adapter_summary_symlink_is_none_and_regular_file_is_parsed(db, tmp_path):
+    repos = Repositories(db)
+    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
+        resource_key="k", payload={"storage": "s1", "target": "a"}, priority="mid")
+    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
+        storage_name="s1", target="a", options={}, tool="dscan",
+        worker_pool={"identity": {"uid": os.getuid(), "gid": os.getgid(),
+                                  "username": "alice"}, "candidates": {"primary": ["n1"]}},
+        precondition={}, actor="planner")
+    settings = Settings.from_env({**VOLCANO, "DMS_ARTIFACT_BASE_URI": f"file://{tmp_path}"})
+    adapter = build_execution_adapter(settings, repos)
+    d = tmp_path / jid / "execution"
+    d.mkdir(parents=True)
+    path = f"{tmp_path}/{jid}/execution/summary.json"
+    adapter._summary_paths["vcjob/x"] = path        # k8s 를 건드리지 않는 빠른 경로
+    # 양성 대조군: 정규 summary 는 파싱된다(항상 None 인 리더가 통과하지 못하도록)
+    (d / "summary.json").write_text('{"returncode": 0, "files": 1, "bytes": 2}')
+    assert adapter.read_summary("vcjob/x") == {"returncode": 0, "files": 1, "bytes": 2}
+    # 심링크는 root 여도 따라가지 않는다
+    (d / "summary.json").unlink()
+    victim = tmp_path / "victim.json"
+    victim.write_text('{"secret": "TOP-SECRET"}')
+    os.symlink(victim, d / "summary.json")
+    assert adapter.read_summary("vcjob/x") is None

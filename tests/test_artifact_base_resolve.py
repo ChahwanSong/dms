@@ -4,6 +4,8 @@
 떨어진다(하위호환 -- 기존 배포 무변화). 소비자가 설정 스냅숏을 캡처해 두면 base
 변경이 재시작 전까지 반영되지 않는다(설계 §1-7) -- 어댑터에는 가변 callable 을
 주입해 호출 시점 해석을, stepper 에는 DB 값 주입으로 스냅숏 부재를 단언한다."""
+import os
+
 import json
 
 from dms.artifact_base import resolve_artifact_base, strip_scheme
@@ -65,7 +67,8 @@ def _scan_job(repos):
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     return repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
         storage_name="s1", target="a", options={}, tool="dscan",
-        worker_pool={"identity": {}, "candidates": {"primary": ["n1"]},
+        worker_pool={"identity": {"uid": 1, "gid": 1, "username": "alice"},
+                     "candidates": {"primary": ["n1"]},
                      "process_count": 1, "queue": "dms-data",
                      "priority_class": "dms-mid"},
         precondition={}, actor="planner")
@@ -162,7 +165,9 @@ def test_scan_path_stats_reads_under_db_base(client, db, tmp_path):
     plan_id = repos.data_jobs.create_plan(rid, actor="planner")
     jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
         storage_name="ceph-a", target="team", options={}, tool="dscan",
-        worker_pool={}, precondition={}, actor="planner")
+        worker_pool={"identity": {"uid": os.getuid(), "gid": os.getgid(),
+                                  "username": "alice"}},
+        precondition={}, actor="planner")
     repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
     d = tmp_path / jid / "execution"
     d.mkdir(parents=True)

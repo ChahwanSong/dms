@@ -1,5 +1,9 @@
 """설정 기반 live 어댑터/리졸버 선택. cli/app 공용."""
+import os
+
 from .artifact_base import resolve_artifact_base
+from .artifact_files import (JOB_ID_RE, PHASES, SUMMARY_MAX_BYTES, job_owner_uid,
+                             read_contained_text)
 from .execution import StubExecutionAdapter
 from .identity_ldap import build_ldap_resolver
 from .job_image import resolve_job_image
@@ -9,17 +13,40 @@ def build_identity_resolver(settings):
     return build_ldap_resolver(settings)
 
 
+def build_summary_reader(repos):
+    """컨트롤러의 summary.json 읽기(execution_volcano.read_summary 의 read_text).
+
+    제어면이 root 로 돌므로(2026-09-09) 평범한 open(path).read() 는 요청자가 자기
+    phase 디렉터리에 심은 심링크(summary.json → /cephfs/<남>/x.json)를 따라가
+    남의 파일을 **요청자 잡 상세(result_summary)로 그대로 노출**하고, mkfifo 면
+    단일 스레드 컨트롤러 전체가 멈추며, 다GB 파일이면 OOM 크래시 루프다. API 와
+    같은 봉쇄 사슬(artifact_files)로 열되, 경로는 어댑터가 <base>/<job_id>/<phase>/
+    summary.json 으로 조립한 것이라 조각으로 되돌려 검증한다(job_id·phase 화이트
+    리스트에 어긋나면 사슬이 None). 소유자 기준 uid 는 잡 행(planner 저장)에서
+    읽는다 -- 없으면 0(러너가 root 로 쓴 summary 만 허용)."""
+    def read_text(path):
+        head, name = os.path.split(path)
+        head, phase = os.path.split(head)
+        base, job_id = os.path.split(head)
+        # 모양 검사가 DB 조회보다 먼저 -- 라벨에서 재구성한 경로(execution_volcano.
+        # _reconstruct_summary_path)가 엉뚱해도 쿼리를 쓰지 않는다. 어댑터는
+        # summary.json 만 읽으므로 이름도 고정한다.
+        if (name != "summary.json" or phase not in PHASES
+                or not JOB_ID_RE.fullmatch(job_id or "")):
+            return None
+        uid = job_owner_uid(repos.data_jobs.get_job(job_id))
+        return read_contained_text(base, job_id, phase, name,
+                                   max_bytes=SUMMARY_MAX_BYTES,
+                                   owner_uid=0 if uid is None else uid)
+    return read_text
+
+
 def build_execution_adapter(settings, repos):
     if settings.execution_backend != "volcano":
         return StubExecutionAdapter()
     from .execution_volcano import KubernetesClient, VolcanoExecutionAdapter
 
-    def read_text(path):
-        try:
-            with open(path) as f:
-                return f.read()
-        except OSError:
-            return None
+    read_text = build_summary_reader(repos)
 
     return VolcanoExecutionAdapter(
         KubernetesClient(settings.k8s_namespace),
