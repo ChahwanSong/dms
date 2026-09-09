@@ -111,7 +111,27 @@ preflight 에서 10초 만에 `source_not_readable`, (2) 데이터가 밖이어�
 호스트 경로(제어면 읽기·artifact_uri)는 그대로. 스토리지 mount_path 가 그 경로와 겹치면
 `invalid_storage`. (1)은 배포 전제로 문서화(README §2b-3): 데이터 root 는 공용 디렉터리
 밖. 잡 이미지 변경 없음(러너는 env 경로만 쓴다).
-- 실증: 아래 「실증(d129)」.
+- 실증(테스트베드, 2026-09-09): 게이트 백엔드 1769 passed(신규 5). 순서대로 —
+  ① `/cephfs/dms` 를 root:root 770 으로(에이전트 root 셸 `chown 0:0; chmod 770`), 요청자
+  프로브 `runuser -u alice`: dms-BLOCKED·data-BLOCKED·artifact-BLOCKED. 제어면 3홉(API·
+  컨트롤러·노드 5대)·readyz 는 전부 정상(root). ② d128(구 마운트) + 데이터 root
+  `/cephfs/dms`: alice sync → 10s 만에 `source_not_readable`(preflight, 요청자 uid).
+  ③ 픽스처를 `/cephfs/managed/ldap-e2e` 로 복사(cp -a, 소유권·mode 보존)하고 `cephfs-dms`
+  managed_root 를 `/cephfs/managed` 로 PUT(README §6 시드 복원) → d128 에서 다시: preflight
+  통과, preview 가 30s 만에 `preview_failed` — stderr "Open RTE was unable to open the
+  hostfile: /cephfs/dms/artifacts/<job>/preview/mpi-hostfile"(요청자로 도는 mpirun 이 770
+  부모를 통과 못 함). ④ d129 롤아웃(root·cap 0 유지) 후 같은 잡: preview → 확인 →
+  **Succeeded**(files 2·bytes 10), 목적지 `/cephfs/managed/ldap-e2e/dest/rootcheck-d129b/
+  g1.txt` 생성, vcjob(preview·execution) 파드 스펙 = 볼륨 `cephfs:/cephfs` +
+  `dms-artifact-base:/cephfs/dms/artifacts→/dms-artifact-base`, `DMS_JR_ARTIFACT_DIR=
+  /dms-artifact-base/<job>/<phase>`; 호스트 쪽 산출물은 그대로 `/cephfs/dms/artifacts/<job>/
+  execution`(phase alice:dmsusers 755, root 산출물 3종 0644). 열람 매트릭스 alice 200·
+  mason 200·cocoa.song 404, root 전용 부정 케이스(심링크·하드링크·rename·FIFO·mode 000 →
+  404, allowlist 422, root:root 755 validate 200) 전부 유지, 트레이스백 0. `/cephfs/dms` 는
+  770 root:root 로 **유지**한다(테스트베드 = 운영 조건).
+- 관찰(BACKLOG): d129 롤아웃 직후 첫 잡은 옛 컨트롤러 파드가 종료 유예 중 마지막 스텝
+  (preview vcjob 제출, 새 파드의 preflight 파드 2초 뒤)을 옛 코드로 수행해 구 마운트로
+  실패했다 — 재실행은 성공. 롤아웃 겹침 창의 일반 현상이지 이 변경의 결함이 아니다.
 
 ### ✅ 제어면(api·컨트롤러) root 전환 + 봉쇄 사슬 강화 — **완료**(2026-09-09, d128)
 

@@ -80,6 +80,12 @@
   소유자 검사(`artifact_files.inode_allowed`, 현재 `{0, 요청자}`)를 `== 요청자` 로 좁힐 수
   있다. **잡 이미지(dms-mpifileutils) 재빌드가 필요**해 제어면 root 전환(d128)과 분리했다.
   같은 계열: `parsers.py` 의 dscan-report.json following open(카운트만 파싱, fail-soft).
+- 📝 **컨트롤러 롤아웃 겹침 창** — Deployment 롤아웃 직후 옛 파드가 종료 유예(30s) 안에
+  마지막 틱을 마치며 옛 코드로 잡을 스텝할 수 있다(2026-09-09 d129 실증: 새 파드의
+  preflight 파드 2초 뒤 옛 파드가 preview vcjob 을 구 마운트로 제출 → 그 잡만 실패,
+  재실행 성공). 리스는 틱 시작에만 확인되고 TTL 30s 라 구조적으로 남는 창이다. 처방
+  후보: 컨트롤러 preStop 에서 루프 중단 후 대기, 또는 리스 재확인 뒤 제출. 파드 스펙을
+  바꾸는 릴리스 직후 첫 잡은 재실행이 필요할 수 있음을 운영 절차에 적어 둔다.
 - 🔧 **securityContext 드리프트는 배지가 못 본다** — 포탈 롤아웃(`rollout_runner.
   image_patch_body`)은 name/image 만 patch 하고 드리프트 배지(`manifest_tags.manifest_images`
   ↔ `rollout_status._images`)도 이미지만 비교한다. 40/41 을 `kubectl apply` 하지 않은
