@@ -7,7 +7,7 @@ import tempfile
 
 import pytest
 from dms.build_manifests import (_SCRIPT, build_build_pod, build_probe_pod,
-                                 proxy_env)
+                                 host_network_for, proxy_env)
 from dms.build_runner import BuildRunner
 
 PROXY = {"http_proxy": "http://proxy.corp:3128", "https_proxy": None, "no_proxy": None}
@@ -134,3 +134,47 @@ def test_stamp_rewrites_registry_and_tag_of_built_images_only():
                    '  DMS_JOB_IMAGE: "reg.ssc.example:5000/dms-mpifileutils:d1"',
                    '  DMS_BUILD_BUILDER_IMAGE: "pkg-01:5000/buildah:stable"',
                    "          image: reg.ssc.example:5000/dms:d1"]
+
+
+# --- 호스트 네트워크 모드(2026-09-09): loopback 프록시(ssh -R 터널) ---
+
+@pytest.mark.parametrize("proxy,expected", [
+    (None, False),
+    ({"http_proxy": "http://10.0.0.1:3128"}, False),
+    ({"https_proxy": "http://localhost:7227"}, True),
+    ({"http_proxy": "http://127.0.0.1:7227"}, True),
+    ({"http_proxy": "http://[::1]:7227"}, True),
+    ({"http_proxy": "http://LOCALHOST:7227"}, True),
+    ({"http_proxy": "http://10.0.0.1:3128", "host_network": True}, True),
+    ({"host_network": True}, True),
+    ({"http_proxy": "http://proxy.corp:3128", "host_network": False}, False),
+])
+def test_host_network_is_automatic_for_loopback_proxies_or_the_switch(proxy, expected):
+    assert host_network_for(proxy) is expected
+
+
+def test_host_network_mode_shapes_both_pods_and_the_buildah_network_flag():
+    loop = {"http_proxy": "http://127.0.0.1:7227", "https_proxy": None, "no_proxy": None}
+    pod = _pod(proxy=loop)
+    assert pod["spec"]["hostNetwork"] is True
+    # hostNetwork 파드의 기본 DNS 는 호스트 resolv.conf -- 클러스터 이름을 그대로
+    # 쓰려면 ClusterFirstWithHostNet(SSC ingress-nginx 애드온과 같은 함정).
+    assert pod["spec"]["dnsPolicy"] == "ClusterFirstWithHostNet"
+    assert _env(pod)["DMS_BUILD_NETWORK"] == "host"
+    assert _env(pod)["HTTPS_PROXY"] == "http://127.0.0.1:7227"
+    probe = _probe(proxy=loop)
+    assert probe["spec"]["hostNetwork"] is True
+    assert probe["spec"]["dnsPolicy"] == "ClusterFirstWithHostNet"
+    assert _env(probe)["DMS_PF_PROXY"] == "http://127.0.0.1:7227"
+    # 파드 hostNetwork 만으로는 부족하다: buildah RUN 단계는 기본 --network=private 라
+    # 자기 netns 의 localhost 를 본다 -- 같은 스위치로 --network=host 를 건다.
+    assert 'net_flag="--network=host"' in _SCRIPT
+    assert _SCRIPT.count("buildah bud $net_flag") == 3
+
+
+def test_pod_network_stays_default_without_the_mode():
+    pod = _pod(proxy=PROXY)                       # 비-loopback 프록시
+    assert "hostNetwork" not in pod["spec"] and "dnsPolicy" not in pod["spec"]
+    assert "DMS_BUILD_NETWORK" not in _env(pod)
+    assert "hostNetwork" not in _probe(proxy=PROXY)["spec"]
+    assert "hostNetwork" not in _pod()["spec"]

@@ -10,6 +10,7 @@ export interface ControlStateBody {
   build_http_proxy: string | null;
   build_https_proxy: string | null;
   build_no_proxy: string | null;
+  build_host_network: boolean;
 }
 export const useSetControlState = () => {
   const qc = useQueryClient();

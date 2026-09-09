@@ -49,7 +49,40 @@ test("toggling drain and saving sends the correct PUT body", async () => {
   expect(body).toEqual({ maintenance: true, drain: true, reason: "점검",
                          build_node_name: "dms-w1",
                          build_source_path: "/home/mason/dms-dev/dms",
-                         build_http_proxy: null, build_https_proxy: null, build_no_proxy: null });
+                         build_http_proxy: null, build_https_proxy: null, build_no_proxy: null,
+                         build_host_network: false });
+});
+
+test("호스트 네트워크 스위치를 켜 저장하면 본문에 실리고 현재 상태에 보인다", async () => {
+  let body: any = null;
+  let state: any = CS;
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(state)),
+    http.put("/api/admin/control-state", async ({ request }) => {
+      body = await request.json();
+      state = { ...CS, build_host_network: 1 };
+      return HttpResponse.json(state);
+    }));
+  wrap();
+  await screen.findByLabelText("유지보수");
+  await userEvent.click(screen.getByLabelText("빌드 파드 호스트 네트워크"));
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body.build_host_network).toBe(true);
+  expect(await screen.findByText("호스트 네트워크(스위치)")).toBeInTheDocument();
+});
+
+test("프록시가 localhost 면 스위치 없이도 「호스트 네트워크(자동)」로 표시한다", async () => {
+  server.use(http.get("/api/admin/control-state", () =>
+    HttpResponse.json({ ...CS, build_http_proxy: "http://127.0.0.1:7227", build_host_network: 0 })));
+  wrap();
+  expect(await screen.findByText("호스트 네트워크(자동 — 프록시가 127.0.0.1)")).toBeInTheDocument();
+});
+
+test("프록시가 없으면 「파드 네트워크」다", async () => {
+  server.use(http.get("/api/admin/control-state", () => HttpResponse.json(CS)));
+  wrap();
+  expect(await screen.findByText("파드 네트워크")).toBeInTheDocument();
 });
 
 test("빌드 프록시 3종을 입력해 저장하면 PUT 본문에 실리고 현재 상태에 보인다", async () => {

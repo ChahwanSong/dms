@@ -431,6 +431,22 @@ job image 라 인터넷 없이도 뜬다)가 네 가지를 검사하고 실패�
 프록시 쪽 IP allowlist 로 푼다). 실증(테스트베드, luminous 의 proxy.py 3128):
 아래 CHANGELOG 「빌드 프록시」 항목.
 
+**프록시가 빌드 노드의 localhost 에만 있는 경우(ssh -R 리버스 터널, 2026-09-09).**
+빌드 파드는 자기 네트워크 네임스페이스를 가져 파드 안의 `127.0.0.1` 은 파드
+자신이다 — 빌드 노드 호스트에서 `ssh -R 7227:...` 로 건 터널(sshd 기본
+`GatewayPorts no` 라 호스트 loopback 에만 바인드)에는 원리상 닿지 못한다. 그래서
+프록시 호스트가 `localhost`/`127.0.0.1`/`::1` 이면 서버가 **자동으로 호스트 네트워크
+모드**를 켠다: 빌드·프리플라이트 파드 `hostNetwork: true` + `dnsPolicy:
+ClusterFirstWithHostNet` + `buildah bud --network=host`. 셋이 한 스위치인 이유:
+파드만 hostNetwork 여도 buildah 의 `RUN` 단계는 기본(`--network=private`)으로
+자기 netns 를 또 만들어 거기서 보는 localhost 는 RUN 컨테이너 자신이다. loopback 이
+아니지만 호스트에서만 닿는 주소(호스트 전용 인터페이스 등)는 컨트롤 상태의 「빌드
+파드 호스트 네트워크」 스위치로 켠다. 노출 표면: 빌드 파드는 원래 privileged 라
+늘지 않고, 프로브 파드(비특권)가 호스트 loopback 서비스에 닿게 되는 점만 인지할 것.
+대안은 터널을 노드 IP 에 바인드(`GatewayPorts yes` 또는 `-R 10.x.x.x:7227:...`)해
+파드 네트워크에서 `http://<노드 IP>:7227` 로 닿게 하는 것 — 프록시 포트가 다른
+노드에도 열리는 대신 hostNetwork 가 필요 없다.
+
 **3b-2) 신규 사이트의 매니페스트 기준값(2026-09-08).** 이미지에 동봉된
 `deploy/k8s` 는 "그 이미지를 만든 소스 트리"의 값이라, 포탈 밖에서 부트스트랩한
 이미지는 테스트베드 태그(`pkg-01:5000/dms:d119`)를 담고 있다. 동봉 이미지의

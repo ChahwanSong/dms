@@ -41,6 +41,14 @@ echo "DMS_COMMIT_SHA=$sha"
 # 넘기고(--http-proxy 기본 true) 베이스 이미지 pull 에도 쓴다 -- npm/pip/apt/
 # curl/VCS 클라이언트 전부 같은 env 를 읽는다. 어느 프록시로 나갔는지 로그에 남긴다.
 echo "DMS_BUILD_PROXY http_proxy=${http_proxy:-} https_proxy=${https_proxy:-} no_proxy=${no_proxy:-}"
+# 호스트 네트워크 모드(2026-09-09): 파드가 hostNetwork 여도 buildah 의 RUN 단계는
+# 기본(--network=private)으로 **자기** 네트워크 네임스페이스를 또 만든다 -- 거기서
+# 보는 localhost 는 RUN 컨테이너 자신이라, 호스트 loopback 에 묶인 프록시(ssh -R
+# 터널 등)에 닿지 못한다. 그래서 파드 hostNetwork 와 buildah --network=host 를
+# 한 스위치로 같이 켠다(env DMS_BUILD_NETWORK=host, build_build_pod 가 싣는다).
+net_flag=""
+[ "${DMS_BUILD_NETWORK:-}" = host ] && net_flag="--network=host"
+echo "DMS_BUILD_NETWORK=${DMS_BUILD_NETWORK:-pod}"
 
 mkdir -p /src
 (cd "$DMS_BUILD_SRC" && tar -cf - \
@@ -76,16 +84,16 @@ for img in $DMS_BUILD_IMAGES; do
   echo "=== building $ref ==="
   case "$img" in
     dms-mpifileutils)
-      buildah bud -f deploy/docker/Dockerfile.mpifileutils -t "$ref" . ;;
+      buildah bud $net_flag -f deploy/docker/Dockerfile.mpifileutils -t "$ref" . ;;
     dms)
-      buildah bud -f deploy/docker/Dockerfile.dms -t "$ref" . ;;
+      buildah bud $net_flag -f deploy/docker/Dockerfile.dms -t "$ref" . ;;
     dms-agent)
       # dms-agent는 dms/dms-mpifileutils를 FROM한다(Dockerfile.agent). --build-arg
       # 없이 buildah를 돌리면 Dockerfile의 ARG 기본값(:dev, 손으로 만든 옛 이미지)이
       # 조용히 쓰여 엉뚱한 베이스에서 "성공"한다 -- 이 빌드가 push할 태그로 명시
       # 고정한다. 같은 빌드 안에 앞의 둘이 있거나 그 태그가 이미 레지스트리에
       # 있어야 하고, 없으면 buildah가 pull에 실패해 시끄럽게 죽는다(의도된 동작).
-      buildah bud -f deploy/docker/Dockerfile.agent \
+      buildah bud $net_flag -f deploy/docker/Dockerfile.agent \
         --build-arg "DMS_IMAGE=$DMS_BUILD_REGISTRY/dms:$DMS_BUILD_TAG" \
         --build-arg "MFU_IMAGE=$DMS_BUILD_REGISTRY/dms-mpifileutils:$DMS_BUILD_TAG" \
         -t "$ref" . ;;
@@ -246,6 +254,48 @@ def proxy_env(proxy, registry) -> dict:
     return env
 
 
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
+
+
+def proxy_host(proxy) -> "str | None":
+    """설정된 프록시(https 우선)의 호스트 부분. 없으면 None."""
+    from urllib.parse import urlsplit
+    proxy = proxy or {}
+    url = (proxy.get("https_proxy") or proxy.get("http_proxy") or "").strip()
+    if not url:
+        return None
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+def host_network_for(proxy) -> bool:
+    """빌드·프로브 파드를 호스트 네트워크로 띄울지(2026-09-09).
+
+    운영자 스위치(control_state.build_host_network)가 켜져 있거나, 프록시 호스트가
+    loopback 이면 자동으로 켠다: 파드는 자기 네트워크 네임스페이스를 가져
+    127.0.0.1 이 파드 자신이므로, 호스트 loopback 에만 묶인 프록시(예: 빌드 노드에
+    `ssh -R 7227:...` 로 건 리버스 터널, sshd 기본 GatewayPorts=no)는 hostNetwork
+    없이는 원리상 닿을 수 없다 -- 그 조합을 저장하게 두면 프리플라이트가 매번
+    build_proxy_unreachable 로 끝난다. 자동 판정이 그 함정을 없앤다."""
+    proxy = proxy or {}
+    if proxy.get("host_network"):
+        return True
+    host = proxy_host(proxy)
+    return host is not None and host.lower() in _LOOPBACK_HOSTS
+
+
+def _host_network_spec(enabled: bool) -> dict:
+    # dnsPolicy: hostNetwork 파드의 기본 DNS 는 호스트 resolv.conf 다 -- 클러스터
+    # 이름(CoreDNS)을 그대로 쓰려면 ClusterFirstWithHostNet 이 필요하다(SSC 의
+    # ingress-nginx 애드온과 같은 함정). 프록시 경유 요청은 이름을 프록시가 풀지만,
+    # NO_PROXY 대상(사내 레지스트리)은 파드가 직접 풀어야 한다.
+    if not enabled:
+        return {}
+    return {"hostNetwork": True, "dnsPolicy": "ClusterFirstWithHostNet"}
+
+
 def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_image,
                     timeout_seconds, proxy=None) -> dict:
     penv = proxy_env(proxy, registry)
@@ -272,6 +322,9 @@ def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_ima
             # Pending 프로브는 워처의 created_at 기반 회수만 잡는다.
             "activeDeadlineSeconds": timeout_seconds,
             "nodeSelector": {"kubernetes.io/hostname": node},
+            # 호스트 네트워크 모드는 빌드 파드와 반드시 같아야 한다 -- 프로브만 파드
+            # 네트워크면 loopback 프록시 검사가 거짓 실패(build_proxy_unreachable).
+            **_host_network_spec(host_network_for(proxy)),
             # 빌드와 같은 클래스(§2.3): 프로브도 데이터 잡보다 먼저 죽고 아무도
             # 선점하지 않는다. 미적용 클러스터에서는 admission 거절 -- 배포 순서 참고.
             "priorityClassName": "dms-build",
@@ -313,6 +366,8 @@ def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
         "DMS_BUILD_IMAGES": " ".join(ordered),
         # 프록시(있을 때만): buildah 가 RUN 컨테이너·pull 에 그대로 전파한다.
         **proxy_env(proxy, registry),
+        # 호스트 네트워크 모드면 RUN 단계도 호스트 네트워크(스크립트의 --network=host).
+        **({"DMS_BUILD_NETWORK": "host"} if host_network_for(proxy) else {}),
     }
     return {
         "apiVersion": "v1", "kind": "Pod",
@@ -323,6 +378,10 @@ def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
             "restartPolicy": "Never",
             "activeDeadlineSeconds": timeout_seconds,
             "nodeSelector": {"kubernetes.io/hostname": node},
+            # 호스트 네트워크 모드(host_network_for): 파드가 호스트 netns 를 공유해
+            # localhost 가 빌드 노드 호스트가 된다. 파드는 이미 privileged 라 노출
+            # 표면이 늘지 않는다(호스트 loopback 서비스 접근은 원래 가능).
+            **_host_network_spec(host_network_for(proxy)),
             # §2.3: 값 10 < dms-low 50 -- kubelet 축출 랭킹 ②priority 에서 빌드가
             # 어떤 데이터 잡보다 먼저 죽는다. 미적용 클러스터에서는 admission
             # 거절이므로 05-volcano-queue-priorityclass.yaml 을 먼저 apply 할 것.

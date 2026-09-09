@@ -186,7 +186,16 @@ def test_build_proxy_is_stored_normalized_and_returned(client, db):
     # BuildRunner 가 읽는 모양
     assert client.app.state.repos.control.build_proxy() == {
         "http_proxy": "http://proxy.corp:3128", "https_proxy": None,
-        "no_proxy": ".corp.example,10.0.0.0/8"}
+        "no_proxy": ".corp.example,10.0.0.0/8", "host_network": False}
+
+
+def test_build_host_network_switch_is_stored_and_exposed_to_the_runner(client):
+    r = _put(client, build_http_proxy="http://10.9.9.9:3128", build_host_network=True)
+    assert r.status_code == 200 and r.json()["build_host_network"] == 1
+    assert client.app.state.repos.control.build_proxy()["host_network"] is True
+    r = _put(client, build_http_proxy="http://10.9.9.9:3128")        # 생략 = 끔
+    assert r.json()["build_host_network"] == 0
+    assert client.app.state.repos.control.build_proxy()["host_network"] is False
 
 
 def test_build_proxy_defaults_to_none_and_clears_when_omitted(client):
@@ -195,7 +204,7 @@ def test_build_proxy_defaults_to_none_and_clears_when_omitted(client):
     assert (body["build_http_proxy"], body["build_https_proxy"],
             body["build_no_proxy"]) == (None, None, None)
     assert client.app.state.repos.control.build_proxy() == {
-        "http_proxy": None, "https_proxy": None, "no_proxy": None}
+        "http_proxy": None, "https_proxy": None, "no_proxy": None, "host_network": False}
 
 
 @pytest.mark.parametrize("bad", [
