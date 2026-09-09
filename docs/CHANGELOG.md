@@ -77,7 +77,33 @@ build_manifests.py 에 있어야 한다.
   type"(FeatureNotSupported)으로 영원히 실패해 control_state 를 읽는 모든 요청이
   500 이었다(같은 태그 재적용으로 롤아웃이 없어 11시간 방치). db.py 죽음 판정에
   세 번째 모드로 추가: 커넥션은 살아 있어도 재연결(빈 캐시) + 1회 재시도.
-- 실증: 아래 「실증」.
+- **실증(테스트베드, d125)** — luminous 에 TLS 가로채기 프록시(proxy.py
+  `--ca-key-file/--ca-cert-file/--ca-signing-key-file`, 자체 생성 CA "DMS Test
+  Intercepting Proxy CA")를 세우고 `ssh -R 7229:127.0.0.1:3129 dms-w1` 로 빌드 노드
+  loopback 에 걸었다(호스트 네트워크 모드와 결합). 노드에서 `curl -x
+  http://127.0.0.1:7229 https://pypi.org` = CA 없이 exit 60(TLS 실패), `--cacert` 로 200.
+  1. Before(d124, CA 미지정): 빌드 45초 만에 `build_failed` — buildah 가 베이스
+     이미지(node:20-bookworm-slim) pull 의 `registry-1.docker.io` 인증서 검증에서
+     죽음(사용자가 예상한 정확한 증상).
+  2. After(d125, CA 경로 `/home/ubuntu/dms-proxy-ca.pem`): 프리플라이트 로그 `tls via
+     proxy ok host=quay.io issuer=DMS Test Intercepting Proxy CA`; 빌드 파드에
+     `proxy-ca` hostPath(type File) → `/etc/dms-proxy-ca/ca.crt`, env
+     `DMS_BUILD_PROXY_CA`; 스크립트 `bundle_certs=147`(시스템 146 + 사내 1); dms
+     이미지 **빌드 성공 195초**. 가로채기 프록시 로그에 registry-1.docker.io·
+     auth.docker.io·cloudfront(buildah pull) + registry.npmjs.org(npm ci) +
+     pypi.org/files.pythonhosted.org(pip) + dl.k8s.io(curl) + deb.debian.org(apt) —
+     즉 buildah 자신과 RUN 단계 컨테이너 모두 재서명된 인증서를 사내 CA 로 통과했다
+     (`--env` 가 RUN 단계에 적용됨을 실증).
+  3. 최종 이미지 검사(`kubectl run pkg-01:5000/dms:ca-after`): CA 관련 env 0개,
+     `/etc/dms-proxy-ca` 없음, 파이썬 기본 신뢰 저장소 정상 — `--unsetenv` 가
+     런타임 이미지를 오염시키지 않았다.
+  4. 부정: 없는 경로 `/home/ubuntu/no-such-ca.pem` → 25초 만에
+     `build_proxy_ca_missing`; 다른 CA(테스트베드 포탈 CA) → 30초 만에
+     `build_proxy_tls_failed`(프로브가 그 CA 로 핸드셰이크를 검증하므로 "CA 가
+     틀렸다"를 빌드 전에 알린다).
+  정직한 한계: 인증 프록시(Basic)는 미지원. apt 는 http(deb.debian.org)라 CA 와 무관.
+  git 은 이번 dms 단독 빌드에 없었으나 `GIT_SSL_CAINFO` 로 같은 번들을 받는다
+  (mpifileutils 빌드 시 github.com clone).
 
 ### ✅ 빌드 파드 호스트 네트워크 모드(loopback 프록시) — **완료·실증**(2026-09-09, d123)
 
