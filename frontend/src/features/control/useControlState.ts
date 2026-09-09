@@ -11,6 +11,7 @@ export interface ControlStateBody {
   build_https_proxy: string | null;
   build_no_proxy: string | null;
   build_host_network: boolean;
+  build_proxy_ca_path: string | null;
 }
 export const useSetControlState = () => {
   const qc = useQueryClient();

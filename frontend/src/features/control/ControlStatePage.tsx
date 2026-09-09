@@ -27,6 +27,7 @@ const DIFF_FIELDS: { key: keyof ControlState; label: string;
   { key: "build_https_proxy", label: "HTTPS 프록시", fmt: (v) => String(v ?? "—") },
   { key: "build_no_proxy", label: "프록시 제외", fmt: (v) => String(v ?? "—") },
   { key: "build_host_network", label: "호스트 네트워크", fmt: (v) => (v ? "ON" : "OFF") },
+  { key: "build_proxy_ca_path", label: "프록시 CA", fmt: (v) => String(v ?? "—") },
 ];
 
 // 서버 build_manifests.host_network_for 의 거울: 프록시 호스트가 loopback 이면 자동
@@ -80,6 +81,7 @@ export function ControlStatePage() {
   const [httpsProxy, setHttpsProxy] = useState("");
   const [noProxy, setNoProxy] = useState("");
   const [hostNetwork, setHostNetwork] = useState(false);
+  const [proxyCaPath, setProxyCaPath] = useState("");
 
   useEffect(() => {
     if (!q.data) return;
@@ -92,6 +94,7 @@ export function ControlStatePage() {
     setHttpsProxy(q.data.build_https_proxy ?? "");
     setNoProxy(q.data.build_no_proxy ?? "");
     setHostNetwork(q.data.build_host_network === 1);
+    setProxyCaPath(q.data.build_proxy_ca_path ?? "");
   }, [q.data]);
 
   const submit = () => {
@@ -104,6 +107,7 @@ export function ControlStatePage() {
       build_https_proxy: httpsProxy.trim() === "" ? null : httpsProxy.trim(),
       build_no_proxy: noProxy.trim() === "" ? null : noProxy.trim(),
       build_host_network: hostNetwork,
+      build_proxy_ca_path: proxyCaPath.trim() === "" ? null : proxyCaPath.trim(),
     });
   };
 
@@ -210,6 +214,21 @@ export function ControlStatePage() {
                   묶인 프록시(ssh -R 리버스 터널 등)는 파드 hostNetwork + buildah
                   --network=host 로만 닿는다. loopback 주소면 서버가 자동으로 켜고,
                   이 스위치는 그 밖의 "호스트에서만 닿는 주소"용이다. */}
+              <label className="block">프록시 CA 파일 경로 (빌드 노드)
+                {/* 사내 프록시 CA(2026-09-09): TLS 를 가로채는 프록시가 재서명한
+                    인증서를 빌드가 신뢰하게 한다. 파일은 빌드 노드에만 있으면 된다 --
+                    hostPath 로 빌드·프리플라이트 파드에 실리고, 프리플라이트가 존재·
+                    PEM·프록시 너머 TLS 핸드셰이크를 노드 위에서 검사한다. */}
+                <input aria-label="프록시 CA 파일 경로" className={field} value={proxyCaPath}
+                       placeholder="/etc/pki/corp-proxy-ca.pem"
+                       onChange={(e) => setProxyCaPath(e.target.value)} />
+                <span className="block text-muted text-xs mt-1">
+                  사내 프록시가 TLS 를 가로채(재서명) 베이스 이미지 pull·npm·pip 이 인증서
+                  오류로 실패하는 사이트만 지정 — 빌드 노드 위 PEM 파일의 절대 경로.
+                  buildah(pull)와 RUN 단계(npm·pip·curl·git)에 시스템 번들과 합쳐 실리고
+                  최종 이미지에는 남지 않습니다.
+                </span>
+              </label>
               <label className="flex items-start gap-2">
                 <input type="checkbox" aria-label="빌드 파드 호스트 네트워크" className="mt-1"
                        checked={hostNetwork} onChange={(e) => setHostNetwork(e.target.checked)} />
@@ -266,6 +285,7 @@ export function ControlStatePage() {
                     + (q.data?.build_no_proxy ? ` (제외: ${q.data.build_no_proxy})` : "")
                   : "없음(직접 연결)"}
               </span></p>
+              <p>프록시 CA: <span className="text-ink font-mono">{q.data?.build_proxy_ca_path || "없음"}</span></p>
               <p>빌드 파드 네트워크: <span className="text-ink font-medium">
                 {(() => {
                   const host = proxyHostOf(q.data?.build_https_proxy || q.data?.build_http_proxy);

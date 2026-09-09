@@ -6,8 +6,8 @@ import subprocess
 import tempfile
 
 import pytest
-from dms.build_manifests import (_SCRIPT, build_build_pod, build_probe_pod,
-                                 host_network_for, proxy_env)
+from dms.build_manifests import (PROBE_CA_DIR, PROXY_CA_FILE, _SCRIPT, build_build_pod,
+                                 build_probe_pod, host_network_for, proxy_env)
 from dms.build_runner import BuildRunner
 
 PROXY = {"http_proxy": "http://proxy.corp:3128", "https_proxy": None, "no_proxy": None}
@@ -178,3 +178,58 @@ def test_pod_network_stays_default_without_the_mode():
     assert "DMS_BUILD_NETWORK" not in _env(pod)
     assert "hostNetwork" not in _probe(proxy=PROXY)["spec"]
     assert "hostNetwork" not in _pod()["spec"]
+
+
+# --- 사내 프록시 CA(2026-09-09): TLS 가로채기 프록시 ---
+
+CA = {"http_proxy": "http://10.0.0.1:3128", "https_proxy": None, "no_proxy": None,
+      "ca_path": "/etc/pki/corp-proxy-ca.pem"}
+
+
+def test_build_pod_mounts_the_ca_file_and_tells_the_script():
+    pod = _pod(proxy=CA)
+    env = _env(pod)
+    assert env["DMS_BUILD_PROXY_CA"] == PROXY_CA_FILE
+    mounts = pod["spec"]["containers"][0]["volumeMounts"]
+    vols = pod["spec"]["volumes"]
+    assert {"name": "proxy-ca", "mountPath": PROXY_CA_FILE, "readOnly": True} in mounts
+    # 빌드 파드는 파일 자체를 type File 로(프로브가 존재를 이미 검증)
+    assert {"name": "proxy-ca", "hostPath": {"path": "/etc/pki/corp-proxy-ca.pem",
+                                             "type": "File"}} in vols
+    # 없으면 아무 흔적도 없다
+    assert "DMS_BUILD_PROXY_CA" not in _env(_pod(proxy=PROXY))
+    assert all(m["name"] != "proxy-ca" for m in _pod(proxy=PROXY)["spec"]["containers"][0]["volumeMounts"])
+
+
+def test_probe_mounts_the_ca_parent_directory_without_a_type():
+    # 파일이 없어도 파드가 떠서 build_proxy_ca_missing 으로 선명하게 끝나야 한다 --
+    # type File 이면 FailedMount 로 영원히 Pending(프리플라이트 타임아웃으로 뭉개짐).
+    probe = _probe(proxy=CA)
+    assert _env(probe)["DMS_PF_PROXY_CA"] == PROBE_CA_DIR + "/corp-proxy-ca.pem"
+    vols = probe["spec"]["volumes"]
+    assert {"name": "proxy-ca", "hostPath": {"path": "/etc/pki"}} in vols
+    assert {"name": "proxy-ca", "mountPath": PROBE_CA_DIR, "readOnly": True} \
+        in probe["spec"]["containers"][0]["volumeMounts"]
+    assert "DMS_PF_PROXY_CA" not in _env(_probe(proxy=PROXY))
+
+
+def test_script_builds_a_combined_bundle_and_passes_it_to_buildah_and_run_steps():
+    # (1) buildah 자신(Go): SSL_CERT_FILE=시스템 번들+사내 CA (2) RUN 단계: -v 마운트 +
+    # 클라이언트별 --env, (3) 최종 이미지엔 --unsetenv 로 남기지 않는다.
+    assert "export SSL_CERT_FILE=/tmp/dms-proxy-ca/bundle.pem" in _SCRIPT
+    assert 'ca_args="-v /tmp/dms-proxy-ca:/etc/dms-proxy-ca:ro"' in _SCRIPT
+    for k in ("NODE_EXTRA_CA_CERTS", "npm_config_cafile", "PIP_CERT", "REQUESTS_CA_BUNDLE",
+              "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
+        assert k in _SCRIPT
+    assert "--env $k=$bundle --unsetenv $k" in _SCRIPT
+    assert _SCRIPT.count("buildah bud $net_flag $ca_args") == 3
+    # 시스템 번들 후보(Fedora buildah 이미지 / Debian) 둘 다 본다
+    assert "/etc/pki/tls/certs/ca-bundle.crt" in _SCRIPT and "/etc/ssl/certs/ca-certificates.crt" in _SCRIPT
+
+
+def test_probe_script_checks_ca_presence_and_tls_through_the_proxy():
+    script = _probe()["spec"]["containers"][0]["command"][2]
+    assert "build_proxy_ca_missing" in script and "build_proxy_tls_failed" in script
+    assert "BEGIN CERTIFICATE" in script
+    # 시스템 CA + 사내 CA 합집합으로 검증(빌드 번들과 같은 의미)
+    assert "ssl.create_default_context()" in script and "load_verify_locations(cafile=cafile)" in script

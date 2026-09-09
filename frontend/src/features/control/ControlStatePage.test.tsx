@@ -50,7 +50,26 @@ test("toggling drain and saving sends the correct PUT body", async () => {
                          build_node_name: "dms-w1",
                          build_source_path: "/home/mason/dms-dev/dms",
                          build_http_proxy: null, build_https_proxy: null, build_no_proxy: null,
-                         build_host_network: false });
+                         build_host_network: false, build_proxy_ca_path: null });
+});
+
+test("프록시 CA 경로를 입력해 저장하면 본문에 실리고 현재 상태에 보인다", async () => {
+  let body: any = null;
+  let state: any = CS;
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(state)),
+    http.put("/api/admin/control-state", async ({ request }) => {
+      body = await request.json();
+      state = { ...CS, build_proxy_ca_path: "/etc/pki/corp-proxy-ca.pem" };
+      return HttpResponse.json(state);
+    }));
+  wrap();
+  await screen.findByLabelText("유지보수");
+  await userEvent.type(screen.getByLabelText("프록시 CA 파일 경로"), "/etc/pki/corp-proxy-ca.pem");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body.build_proxy_ca_path).toBe("/etc/pki/corp-proxy-ca.pem");
+  expect(await screen.findByText("/etc/pki/corp-proxy-ca.pem")).toBeInTheDocument();
 });
 
 test("호스트 네트워크 스위치를 켜 저장하면 본문에 실리고 현재 상태에 보인다", async () => {

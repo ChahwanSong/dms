@@ -99,7 +99,8 @@ class ControlRepository:
     def set_control_state(self, *, maintenance, drain, reason, actor,
                           build_node_name=None, build_source_path=None,
                           build_http_proxy=None, build_https_proxy=None,
-                          build_no_proxy=None, build_host_network=False):
+                          build_no_proxy=None, build_host_network=False,
+                          build_proxy_ca_path=None):
         # build_source_path·프록시 3종도 build_node_name 과 같은 무조건 UPDATE 다 --
         # 인자를 생략한 호출이 기존 값을 NULL 로 지우는 함정까지 같다(아래
         # set_artifact_base 주석 참고). 라우트가 항상 넘기는 한 잠복 상태이며, 새
@@ -111,11 +112,12 @@ class ControlRepository:
                        build_node_name = :bn, build_source_path = :bsp,
                        build_http_proxy = :hp, build_https_proxy = :sp,
                        build_no_proxy = :np, build_host_network = :hn,
+                       build_proxy_ca_path = :cap,
                        changed_by = :actor, changed_at = :now WHERE id = 1""",
                 {"m": 1 if maintenance else 0, "d": 1 if drain else 0,
                  "r": reason, "bn": build_node_name, "bsp": build_source_path,
                  "hp": build_http_proxy, "sp": build_https_proxy, "np": build_no_proxy,
-                 "hn": 1 if build_host_network else 0,
+                 "hn": 1 if build_host_network else 0, "cap": build_proxy_ca_path,
                  "actor": actor, "now": utc_now_iso()})
             self._audit("control_state", "set", "control_state", before,
                         self.control_state(), actor)
@@ -129,7 +131,9 @@ class ControlRepository:
                 "no_proxy": row.get("build_no_proxy"),
                 # 호스트 네트워크 스위치(2026-09-09) -- build_manifests.host_network_for
                 # 가 loopback 프록시 자동 판정과 OR 로 합친다.
-                "host_network": bool(row.get("build_host_network"))}
+                "host_network": bool(row.get("build_host_network")),
+                # 사내 프록시 CA 경로(빌드 노드, 2026-09-09) -- 파드 hostPath 마운트 재료.
+                "ca_path": row.get("build_proxy_ca_path")}
 
     def set_job_image(self, image, *, actor):
         """잡 이미지 오버라이드 전용 UPDATE(슬라이스 35). set_control_state 에 얹지

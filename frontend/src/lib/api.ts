@@ -242,6 +242,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_proxy_url: "프록시 주소는 http(s)://호스트[:포트] 형식이어야 합니다 — 사용자명·비밀번호·경로는 넣을 수 없습니다",
   invalid_no_proxy: "프록시 제외 목록은 쉼표로 구분한 호스트·도메인·IP·CIDR 이어야 합니다",
   build_proxy_unreachable: "빌드 노드에서 프록시에 연결할 수 없습니다 — 컨트롤 상태의 프록시 주소와 노드→프록시 경로를 확인하세요",
+  // 사내 프록시 CA(2026-09-09)
+  invalid_proxy_ca_path: "프록시 CA 경로는 빌드 노드 위 PEM 파일의 절대 경로여야 합니다",
+  build_proxy_ca_missing: "빌드 노드에서 프록시 CA 파일을 읽을 수 없거나 PEM 이 아닙니다 — 컨트롤 상태의 CA 경로와 파일을 확인하세요",
+  build_proxy_tls_failed: "프록시 너머 TLS 검증에 실패했습니다 — 가로채기 프록시의 CA 가 맞는지(컨트롤 상태의 프록시 CA 경로) 확인하세요",
   build_evicted: "빌드가 노드에서 축출됐습니다 — 빌드 노드의 디스크·메모리를 확인하세요",
 };
 

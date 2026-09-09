@@ -11,6 +11,16 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 # no_proxy 항목: 호스트/도메인(.corp.example)/IP/CIDR/host:port. 쉼표로 나눈 뒤 각
 # 항목이 이 모양이어야 한다 -- 공백·따옴표·셸 문자가 파드 env 로 새지 않게.
 _NO_PROXY_ITEM_RE = re.compile(r"^[A-Za-z0-9.*_-]+(:\d{1,5})?(/\d{1,3})?$")
+# 프록시 CA 파일 경로(빌드 노드): 절대 경로, 셸·공백 문자 없음, .. 금지. 실재 여부는
+# 프리플라이트 프로브가 노드 위에서 검사한다(build_proxy_ca_missing).
+_CA_PATH_RE = re.compile(r"^/[A-Za-z0-9._@+/-]{1,400}$")
+
+
+def validate_proxy_ca_path(value: str) -> "str | None":
+    v = value.strip()
+    if not _CA_PATH_RE.match(v) or ".." in v or v.endswith("/"):
+        return None
+    return v
 
 
 def validate_proxy_url(value: str) -> "str | None":
@@ -54,6 +64,8 @@ class ControlStateBody(BaseModel):
     # 빌드 파드 호스트 네트워크(2026-09-09). loopback 프록시는 자동이라 이 스위치는
     # 그 밖의 경우(호스트에서만 닿는 주소) 용이다.
     build_host_network: bool = False
+    # 사내 프록시 CA(2026-09-09): 빌드 노드 위 PEM 파일 절대 경로. 빈 값 = 없음.
+    build_proxy_ca_path: str | None = None
 
 
 @router.get("/api/admin/control-state")
@@ -115,6 +127,12 @@ def put_control_state(body: ControlStateBody, request: Request,
         no_proxy = validate_no_proxy(raw)
         if no_proxy is None:
             raise HTTPException(status_code=422, detail="invalid_no_proxy")
+    ca_path = None
+    raw = (body.build_proxy_ca_path or "").strip()
+    if raw:
+        ca_path = validate_proxy_ca_path(raw)
+        if ca_path is None:
+            raise HTTPException(status_code=422, detail="invalid_proxy_ca_path")
     control.set_control_state(maintenance=body.maintenance, drain=body.drain,
                               reason=body.reason, build_node_name=build_node_name,
                               build_source_path=build_source_path,
@@ -122,5 +140,6 @@ def put_control_state(body: ControlStateBody, request: Request,
                               build_https_proxy=proxies["build_https_proxy"],
                               build_no_proxy=no_proxy,
                               build_host_network=body.build_host_network,
+                              build_proxy_ca_path=ca_path,
                               actor=audit_actor(identity))
     return control.control_state()

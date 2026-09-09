@@ -54,6 +54,31 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 사내 프록시 CA(TLS 가로채기 프록시) — **완료·실증**(2026-09-09, d125)
+
+사용자 요청: 빌드 이미지에서 사내 프록시를 쓰려면 CA 가 필요하다 — 사내 CA 경로를
+포탈에서 입력하면 반영되게. (확인: CA 파일·경로는 빌드 노드에만 있으면 된다.)
+사용자 지적: `--tls-verify=false` 는 push 전용이라 해결책이 아니고, 파드 스펙은
+코드가 생성하므로 밖에서 `-v pip.conf` 류를 끼워 넣을 수 없다 — 즉 CA 주입 경로가
+build_manifests.py 에 있어야 한다.
+
+- `control_state.build_proxy_ca_path`(CREATE + _ensure_columns, 전수 그물 36→37),
+  PUT 검증 `invalid_proxy_ca_path`(절대 경로·셸 문자 없음), 컨트롤 상태 화면 입력.
+- 빌드 파드: 파일 hostPath(type File) → `/etc/dms-proxy-ca/ca.crt`; 스크립트가
+  시스템 번들(Fedora `/etc/pki/tls/certs/ca-bundle.crt` 또는 Debian) + 사내 CA 합본을
+  만들어 buildah 자신은 `SSL_CERT_FILE`, RUN 단계는 `-v /tmp/dms-proxy-ca:
+  /etc/dms-proxy-ca:ro` + `--env`(SSL_CERT_FILE·NODE_EXTRA_CA_CERTS·npm_config_cafile·
+  PIP_CERT·REQUESTS_CA_BUNDLE·CURL_CA_BUNDLE·GIT_SSL_CAINFO) + 같은 키 `--unsetenv`.
+- 프로브: 부모 디렉토리 hostPath(type 없음) → 존재·PEM 검사
+  `build_proxy_ca_missing`, 프록시 CONNECT 위 TLS 핸드셰이크(시스템 CA + 사내 CA)
+  `build_proxy_tls_failed`(발급자 로그).
+- 부수: 2026-09-09 실사고 재발 방지 — 롤링 중 새 파드의 migrate 가 컬럼을 더하면
+  옛 파드의 psycopg 준비 문장(`SELECT *`)이 "cached plan must not change result
+  type"(FeatureNotSupported)으로 영원히 실패해 control_state 를 읽는 모든 요청이
+  500 이었다(같은 태그 재적용으로 롤아웃이 없어 11시간 방치). db.py 죽음 판정에
+  세 번째 모드로 추가: 커넥션은 살아 있어도 재연결(빈 캐시) + 1회 재시도.
+- 실증: 아래 「실증」.
+
 ### ✅ 빌드 파드 호스트 네트워크 모드(loopback 프록시) — **완료·실증**(2026-09-09, d123)
 
 사용자 보고: 프록시를 `ssh -R` 리버스 터널로 빌드 노드 호스트의 `localhost:7227`

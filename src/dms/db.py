@@ -10,6 +10,16 @@ from datetime import datetime, timedelta, timezone
 
 _NAMED = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 
+_STALE_PLAN_TEXT = "cached plan must not change result type"
+
+
+def _is_stale_plan_error(psycopg, exc) -> bool:
+    """PostgreSQL 0A000: 스키마 변경으로 준비된 문장의 결과 형이 바뀐 경우
+    (psycopg.errors.FeatureNotSupported). 대역 모듈에 errors 가 없으면 False."""
+    errors = getattr(psycopg, "errors", None)
+    cls = getattr(errors, "FeatureNotSupported", None)
+    return cls is not None and isinstance(exc, cls) and _STALE_PLAN_TEXT in str(exc)
+
 # PostgreSQL 접속 시도의 상한(초). 슬라이스 22 실증(2026-08-11)이 찾은 결함:
 # 타임아웃이 없으면 libpq 가 TCP 재시도로 수 분씩 매달리고, 단일 커넥션 RLock
 # 뒤라 /readyz 핸들러가 락을 쥔 채 응답을 못 한다 -- kubelet 프로브가 503 대신
@@ -105,6 +115,16 @@ class Database:
         if self.dialect != "postgresql" or self._url is None:
             return False
         import psycopg  # 게이트 통과 시점에만 필요 -- sqlite 경로는 영원히 안 든다
+        if _is_stale_plan_error(psycopg, exc):
+            # 세 번째 죽음 모드(2026-09-09 실사고): 커넥션은 **살아 있지만** 쓸모없다.
+            # 롤링 배포 중 새 파드의 initContainer 가 컬럼을 추가하면, 옛 파드가
+            # 준비해 둔 `SELECT *`(psycopg 자동 prepare, 5회 이후)의 결과 형이
+            # 바뀌어 PostgreSQL 이 "cached plan must not change result type" 을
+            # 낸다 -- 그 문장은 재시도해도 영원히 실패하고, 옛 파드가 종료될
+            # 때까지(같은 태그 재적용처럼 롤아웃이 없으면 무기한) control_state 를
+            # 읽는 모든 요청이 500 이었다. psycopg 3 은 캐시를 비우는 공개 API 가
+            # 없으므로 재연결(새 커넥션 = 빈 캐시)이 정확한 처방이다.
+            return True
         if not isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError)):
             return False
         return bool(getattr(self._conn, "closed", False))
