@@ -40,6 +40,12 @@ class FakeProgrammingError(FakeDatabaseError):
     pass
 
 
+# psycopg.errors.FeatureNotSupported(SQLSTATE 0A000) -- NotSupportedError 계열이라
+# Operational/Interface 게이트 밖이고 커넥션도 closed 가 아니다(2026-09-09 실사고).
+class FakeFeatureNotSupported(FakeDatabaseError):
+    pass
+
+
 def _fake_psycopg_module():
     mod = types.ModuleType("psycopg")
     mod.Error = FakePsycopgError
@@ -47,6 +53,7 @@ def _fake_psycopg_module():
     mod.DatabaseError = FakeDatabaseError
     mod.OperationalError = FakeOperationalError
     mod.ProgrammingError = FakeProgrammingError
+    mod.errors = types.SimpleNamespace(FeatureNotSupported=FakeFeatureNotSupported)
     return mod
 
 
@@ -164,6 +171,31 @@ def test_operational_error_on_a_live_connection_is_not_retried(monkeypatch):
     with pytest.raises(FakeOperationalError):
         db.execute("INSERT INTO t (a) VALUES (1)")
     assert len(conn.executed) == 1
+    assert db.reconnect_count == 0
+
+
+def test_stale_cached_plan_on_a_live_connection_reconnects_and_retries(monkeypatch):
+    # 2026-09-09 실사고: 다른 파드의 migrate 가 control_state 에 컬럼을 더한 뒤 옛
+    # 파드의 준비된 `SELECT *` 가 "cached plan must not change result type" 으로
+    # 영원히 실패했다(커넥션은 살아 있음). 재연결(빈 캐시)이 처방이고, 같은 문장을
+    # 새 커넥션에서 1회 재시도해 성공해야 한다.
+    old = _FakePgConn(fail_on=["SELECT"], mark_closed=False,
+                      exc=lambda: FakeFeatureNotSupported(
+                          "cached plan must not change result type"))
+    new = _FakePgConn(rows=[{"id": 1}])
+    db = _pg_db(monkeypatch, old, [new])
+    assert db.query("SELECT * FROM control_state WHERE id = 1") == [{"id": 1}]
+    assert db.reconnect_count == 1
+    assert old.close_calls == 1 and len(new.executed) == 1
+
+
+def test_other_feature_not_supported_errors_are_not_retried(monkeypatch):
+    # 같은 클래스라도 캐시 플랜 문구가 아니면(진짜 미지원 기능) 재연결하지 않는다.
+    conn = _FakePgConn(fail_on=["SELECT"], mark_closed=False,
+                       exc=lambda: FakeFeatureNotSupported("not implemented"))
+    db = _pg_db(monkeypatch, conn, [])
+    with pytest.raises(FakeFeatureNotSupported):
+        db.query("SELECT 1")
     assert db.reconnect_count == 0
 
 

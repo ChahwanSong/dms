@@ -371,6 +371,11 @@ def _apply_migrations(db: Database) -> None:
             -- 프록시 호스트가 loopback 이면 스위치와 무관하게 자동으로 켜진다.
             -- NULL/0 = 파드 네트워크.
             build_host_network INTEGER,
+            -- 사내 프록시 CA(2026-09-09): 빌드 노드 위의 PEM 파일 절대 경로. TLS 를
+            -- 가로채는 프록시(사내 방화벽)가 재서명한 인증서를 빌드 안의 buildah
+            -- pull 과 RUN 단계(npm/pip/curl/VCS)가 신뢰하게 hostPath 로 싣는다.
+            -- NULL = 없음.
+            build_proxy_ca_path TEXT,
             -- 아티팩트 base(슬라이스 18 설계 §2.1). NULL = 미설정 -> env
             -- (DMS_ARTIFACT_BASE_URI) 사용 -- 기존 배포는 동작이 바뀌지 않는다
             -- (시드 불필요, 하위호환). ConfigMap 에 두지 않는 근거는
@@ -569,6 +574,7 @@ def _ensure_columns(db):
         ("control_state", "build_https_proxy", "TEXT"),
         ("control_state", "build_no_proxy", "TEXT"),
         ("control_state", "build_host_network", "INTEGER"),
+        ("control_state", "build_proxy_ca_path", "TEXT"),
         ("builds", "tag", "TEXT"),
         # 슬라이스 18 아티팩트 base -- 기배포 DB 는 CREATE 를 다시 안 탄다(위
         # submit_wait_seconds 와 같은 이유: 양쪽에 넣지 않으면 라이브에서만 없다).

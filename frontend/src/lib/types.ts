@@ -224,6 +224,8 @@ export interface ControlState {
   // 빌드 파드 호스트 네트워크 스위치(2026-09-09). loopback 프록시는 서버가 자동으로
   // 호스트 네트워크를 켜므로, 이 값은 그 밖의 경우용이다. 1 = 켬.
   build_host_network?: number | null;
+  // 사내 프록시 CA(2026-09-09): 빌드 노드 위 PEM 파일 절대 경로. null = 없음.
+  build_proxy_ca_path?: string | null;
   changed_by: string | null;
   changed_at: string | null;
 }

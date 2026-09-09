@@ -186,7 +186,7 @@ def test_build_proxy_is_stored_normalized_and_returned(client, db):
     # BuildRunner 가 읽는 모양
     assert client.app.state.repos.control.build_proxy() == {
         "http_proxy": "http://proxy.corp:3128", "https_proxy": None,
-        "no_proxy": ".corp.example,10.0.0.0/8", "host_network": False}
+        "no_proxy": ".corp.example,10.0.0.0/8", "host_network": False, "ca_path": None}
 
 
 def test_build_host_network_switch_is_stored_and_exposed_to_the_runner(client):
@@ -198,13 +198,25 @@ def test_build_host_network_switch_is_stored_and_exposed_to_the_runner(client):
     assert client.app.state.repos.control.build_proxy()["host_network"] is False
 
 
+def test_build_proxy_ca_path_is_stored_and_validated(client):
+    r = _put(client, build_http_proxy="http://10.9.9.9:3128",
+             build_proxy_ca_path=" /etc/pki/corp-proxy-ca.pem ")
+    assert r.status_code == 200 and r.json()["build_proxy_ca_path"] == "/etc/pki/corp-proxy-ca.pem"
+    assert client.app.state.repos.control.build_proxy()["ca_path"] == "/etc/pki/corp-proxy-ca.pem"
+    for bad in ("relative/ca.pem", "/etc/../root/ca.pem", "/etc/ca dir/ca.pem", "/etc/pki/", "/etc/$(id).pem"):
+        r = _put(client, build_proxy_ca_path=bad)
+        assert (r.status_code, r.json()["detail"]) == (422, "invalid_proxy_ca_path"), bad
+    assert _put(client).json()["build_proxy_ca_path"] is None       # 생략 = 해제
+
+
 def test_build_proxy_defaults_to_none_and_clears_when_omitted(client):
     assert _put(client, build_http_proxy="http://p:1").status_code == 200
     body = _put(client).json()                        # 프록시 필드 생략 = 해제(무조건 UPDATE)
     assert (body["build_http_proxy"], body["build_https_proxy"],
             body["build_no_proxy"]) == (None, None, None)
     assert client.app.state.repos.control.build_proxy() == {
-        "http_proxy": None, "https_proxy": None, "no_proxy": None, "host_network": False}
+        "http_proxy": None, "https_proxy": None, "no_proxy": None, "host_network": False,
+        "ca_path": None}
 
 
 @pytest.mark.parametrize("bad", [

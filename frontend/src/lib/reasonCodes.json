@@ -175,5 +175,8 @@
   "password_encryption_unavailable",
   "invalid_proxy_url",
   "invalid_no_proxy",
-  "build_proxy_unreachable"
+  "build_proxy_unreachable",
+  "invalid_proxy_ca_path",
+  "build_proxy_ca_missing",
+  "build_proxy_tls_failed"
 ]

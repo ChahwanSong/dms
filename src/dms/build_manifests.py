@@ -49,6 +49,29 @@ echo "DMS_BUILD_PROXY http_proxy=${http_proxy:-} https_proxy=${https_proxy:-} no
 net_flag=""
 [ "${DMS_BUILD_NETWORK:-}" = host ] && net_flag="--network=host"
 echo "DMS_BUILD_NETWORK=${DMS_BUILD_NETWORK:-pod}"
+# 사내 프록시 CA(2026-09-09): TLS 를 가로채는 프록시(사내 방화벽)는 모든 https 를
+# 자기 CA 로 재서명한다. 두 층이 그 CA 를 알아야 한다 -- (1) 이 파드의 buildah
+# 자신(베이스 이미지 pull, Go 는 SSL_CERT_FILE 을 읽는다) (2) RUN 단계 컨테이너
+# (npm/pip/curl/git 은 파드 파일시스템을 못 본다 -- -v 로 마운트하고 클라이언트별
+# env 를 --env 로 준다). 시스템 번들 + 사내 CA 를 합친 번들을 쓰는 이유: 가로채지
+# 않는 프록시 사이트에서 사내 CA 만 주면 진짜 인증서 검증이 깨진다. --unsetenv 로
+# 최종 이미지에서 걷어낸다 -- 런타임엔 그 경로가 없어 남으면 TLS 전체가 깨진다.
+ca_args=""
+if [ -n "${DMS_BUILD_PROXY_CA:-}" ]; then
+  mkdir -p /tmp/dms-proxy-ca
+  : > /tmp/dms-proxy-ca/bundle.pem
+  for b in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
+    if [ -f "$b" ]; then cat "$b" >> /tmp/dms-proxy-ca/bundle.pem; break; fi
+  done
+  cat "$DMS_BUILD_PROXY_CA" >> /tmp/dms-proxy-ca/bundle.pem
+  export SSL_CERT_FILE=/tmp/dms-proxy-ca/bundle.pem
+  bundle=/etc/dms-proxy-ca/bundle.pem
+  ca_args="-v /tmp/dms-proxy-ca:/etc/dms-proxy-ca:ro"
+  for k in SSL_CERT_FILE NODE_EXTRA_CA_CERTS npm_config_cafile PIP_CERT REQUESTS_CA_BUNDLE CURL_CA_BUNDLE GIT_SSL_CAINFO; do
+    ca_args="$ca_args --env $k=$bundle --unsetenv $k"
+  done
+  echo "DMS_BUILD_PROXY_CA=$DMS_BUILD_PROXY_CA bundle_certs=$(grep -c 'BEGIN CERTIFICATE' /tmp/dms-proxy-ca/bundle.pem)"
+fi
 
 mkdir -p /src
 (cd "$DMS_BUILD_SRC" && tar -cf - \
@@ -84,16 +107,16 @@ for img in $DMS_BUILD_IMAGES; do
   echo "=== building $ref ==="
   case "$img" in
     dms-mpifileutils)
-      buildah bud $net_flag -f deploy/docker/Dockerfile.mpifileutils -t "$ref" . ;;
+      buildah bud $net_flag $ca_args -f deploy/docker/Dockerfile.mpifileutils -t "$ref" . ;;
     dms)
-      buildah bud $net_flag -f deploy/docker/Dockerfile.dms -t "$ref" . ;;
+      buildah bud $net_flag $ca_args -f deploy/docker/Dockerfile.dms -t "$ref" . ;;
     dms-agent)
       # dms-agent는 dms/dms-mpifileutils를 FROM한다(Dockerfile.agent). --build-arg
       # 없이 buildah를 돌리면 Dockerfile의 ARG 기본값(:dev, 손으로 만든 옛 이미지)이
       # 조용히 쓰여 엉뚱한 베이스에서 "성공"한다 -- 이 빌드가 push할 태그로 명시
       # 고정한다. 같은 빌드 안에 앞의 둘이 있거나 그 태그가 이미 레지스트리에
       # 있어야 하고, 없으면 buildah가 pull에 실패해 시끄럽게 죽는다(의도된 동작).
-      buildah bud $net_flag -f deploy/docker/Dockerfile.agent \
+      buildah bud $net_flag $ca_args -f deploy/docker/Dockerfile.agent \
         --build-arg "DMS_IMAGE=$DMS_BUILD_REGISTRY/dms:$DMS_BUILD_TAG" \
         --build-arg "MFU_IMAGE=$DMS_BUILD_REGISTRY/dms-mpifileutils:$DMS_BUILD_TAG" \
         -t "$ref" . ;;
@@ -199,6 +222,55 @@ if unreachable:
     # 실패 호스트 전부를 로그로 -- "어느 호스트가 막혔나"가 운영자의 첫 질문이다.
     fail("build_node_no_egress", "unreachable_443=" + ",".join(unreachable))
 
+
+def tls_via_proxy(proxy, host, port, cafile):
+    # 프록시 CONNECT 터널 위에서 TLS 핸드셰이크를 "시스템 CA + 사내 CA" 로 검증한다
+    # -- 빌드가 쓰는 번들과 같은 의미. 가로채기 프록시면 사내 CA 가 발급자라 이것이
+    # 통과해야 npm/pip 도 통과한다. 오류 문구를 그대로 돌려준다(None = 성공).
+    import ssl
+    from urllib.parse import urlsplit
+    u = urlsplit(proxy)
+    try:
+        s = socket.create_connection((u.hostname, u.port or 3128), timeout=5.0)
+        s.sendall(("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n"
+                   % (host, port, host, port)).encode())
+        s.settimeout(10.0)
+        buf = b""
+        while b"\r\n\r\n" not in buf and len(buf) < 4096:
+            ch = s.recv(1)
+            if not ch:
+                break
+            buf += ch
+        parts = buf.split(b"\r\n", 1)[0].decode("latin-1").split()
+        if len(parts) < 2 or not parts[1].startswith("2"):
+            return "connect_status=" + " ".join(parts[:2])
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(cafile=cafile)
+        with ctx.wrap_socket(s, server_hostname=host) as tls:
+            issuer = tls.getpeercert().get("issuer")
+            print("tls via proxy ok host=%s issuer=%s" % (host, issuer))
+        return None
+    except (OSError, ValueError) as e:
+        return type(e).__name__ + ": " + str(e)[:160]
+
+
+ca = os.environ.get("DMS_PF_PROXY_CA", "")
+if ca:
+    # 빌드 노드 위 CA 파일: 존재·읽기·PEM 모양. 파드는 부모 디렉토리를 마운트해
+    # 파일이 없어도 뜬다(type File 이면 FailedMount 로 영원히 Pending).
+    try:
+        with open(ca, "rb") as f:
+            pem = f.read()
+    except OSError as e:
+        fail("build_proxy_ca_missing", "ca=%s err=%s" % (ca, e))
+    if b"BEGIN CERTIFICATE" not in pem:
+        fail("build_proxy_ca_missing", "ca=%s not_pem" % ca)
+    if proxy:
+        host = egress_hosts[0] if egress_hosts else "registry-1.docker.io"
+        err = tls_via_proxy(proxy, host, 443, ca)
+        if err:
+            fail("build_proxy_tls_failed", "host=%s ca=%s err=%s" % (host, ca, err))
+
 registry = os.environ["DMS_PF_REGISTRY"]
 reg_host, _, reg_port = registry.partition(":")
 if not reachable(reg_host, int(reg_port or "443")):
@@ -255,6 +327,16 @@ def proxy_env(proxy, registry) -> dict:
 
 
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]")
+# 사내 프록시 CA 마운트 위치(2026-09-09). 빌드 파드는 파일 자체(type File --
+# 프로브가 존재를 이미 검증), 프로브는 **부모 디렉토리**(type 없음 -- 파일이 없어도
+# 파드가 떠서 build_proxy_ca_missing 으로 선명하게 끝나게).
+PROXY_CA_FILE = "/etc/dms-proxy-ca/ca.crt"
+PROBE_CA_DIR = "/etc/dms-proxy-ca-dir"
+
+
+def proxy_ca_path(proxy) -> "str | None":
+    v = ((proxy or {}).get("ca_path") or "").strip()
+    return v or None
 
 
 def proxy_host(proxy) -> "str | None":
@@ -310,6 +392,14 @@ def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_ima
         # 프록시 사이트는 egress 를 CONNECT 터널로 검사한다(프로브 스크립트).
         "DMS_PF_PROXY": penv.get("HTTPS_PROXY", ""),
     }
+    ca_path = proxy_ca_path(proxy)
+    ca_mounts, ca_volumes = [], []
+    if ca_path:
+        import posixpath
+        env["DMS_PF_PROXY_CA"] = posixpath.join(PROBE_CA_DIR, posixpath.basename(ca_path))
+        ca_mounts = [{"name": "proxy-ca", "mountPath": PROBE_CA_DIR, "readOnly": True}]
+        ca_volumes = [{"name": "proxy-ca",
+                       "hostPath": {"path": posixpath.dirname(ca_path) or "/"}}]
     return {
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": build_probe_pod_name(build_id), "namespace": namespace,
@@ -337,7 +427,7 @@ def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_ima
                 "resources": {"requests": {"cpu": "50m", "memory": "32Mi"},
                               "limits": {"cpu": "200m", "memory": "128Mi"}},
                 "volumeMounts": [{"name": "src", "mountPath": source_path,
-                                  "readOnly": True}],
+                                  "readOnly": True}, *ca_mounts],
             }],
             # 프로브의 hostPath 는 type 을 **비운다**(검사 없음): 경로가 노드에
             # 없으면 kubelet 이 빈 디렉토리를 만들어서라도 파드를 띄운다 -- 오타
@@ -349,7 +439,7 @@ def build_probe_pod(*, build_id, source_path, node, namespace, registry, job_ima
             # ro NFS 마운트)이면 자동 생성 자체가 mkdir read-only file system 으로
             # 실패해 결국 build_preflight_timeout 으로 접힌다 -- 그 문구가 소스
             # 경로 확인을 함께 가리킨다(frontend REASON_MESSAGES).
-            "volumes": [{"name": "src", "hostPath": {"path": source_path}}],
+            "volumes": [{"name": "src", "hostPath": {"path": source_path}}, *ca_volumes],
         },
     }
 
@@ -368,7 +458,15 @@ def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
         **proxy_env(proxy, registry),
         # 호스트 네트워크 모드면 RUN 단계도 호스트 네트워크(스크립트의 --network=host).
         **({"DMS_BUILD_NETWORK": "host"} if host_network_for(proxy) else {}),
+        # 사내 프록시 CA(hostPath 파일 마운트 -- 스크립트가 번들을 만들어 buildah 와
+        # RUN 단계에 준다).
+        **({"DMS_BUILD_PROXY_CA": PROXY_CA_FILE} if proxy_ca_path(proxy) else {}),
     }
+    ca_path = proxy_ca_path(proxy)
+    ca_mounts = ([{"name": "proxy-ca", "mountPath": PROXY_CA_FILE, "readOnly": True}]
+                 if ca_path else [])
+    ca_volumes = ([{"name": "proxy-ca", "hostPath": {"path": ca_path, "type": "File"}}]
+                  if ca_path else [])
     return {
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": build_pod_name(build_id), "namespace": namespace,
@@ -419,6 +517,7 @@ def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
                     # 주석). ro 는 경계다: 특권 파드가 개발자의 작업 트리를 쓰기로
                     # 오염시키는 길을 볼륨 단에서 막는다.
                     {"name": "src", "mountPath": source_path, "readOnly": True},
+                    *ca_mounts,
                 ],
             }],
             # emptyDir 이므로 kubelet ephemeral-storage 회계 안이다(§1-2). 수치
@@ -428,6 +527,7 @@ def build_build_pod(*, build_id, source_path, tag, images, node, namespace,
             "volumes": [{"name": "containers",
                          "emptyDir": {"sizeLimit": f"{BUILD_SIZELIMIT_GIB}Gi"}},
                         {"name": "src",
-                         "hostPath": {"path": source_path, "type": "Directory"}}],
+                         "hostPath": {"path": source_path, "type": "Directory"}},
+                        *ca_volumes],
         },
     }
