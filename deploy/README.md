@@ -126,13 +126,31 @@ make cephfs-nsync   # or whatever combination of cephfs-* targets mounts
                      # cephfs-dms/cephfs-third/cephfs-secondary on w1-5/w1-3/w4-5
 ```
 
-Then, on any node with `/cephfs` mounted, create the directories the
-manifests/seed step below assume exist:
+Then create the shared-FS layout the manifests/seed step below assume exist.
+On the testbed this is **codified** (idempotent Ansible, uses the testbed's
+inventory; the testbed's own `make ceph` only mounts CephFS):
 
 ```bash
-mkdir -p /cephfs/dms/artifacts /cephfs/managed
-mkdir -p /cephfs-third/managed /cephfs-secondary/managed
+ANSIBLE_CONFIG=~/dms-dev/testbed/ansible.cfg ansible-playbook \
+  -e ansible_ssh_private_key_file=$HOME/dms-dev/testbed/files/id_ed25519 \
+  deploy/testbed/dms-shared-fs.yml
 ```
+
+which produces (see the playbook header for the rationale, §2b for the rules):
+
+```bash
+# by hand, on any node with /cephfs mounted (root):
+mkdir -p /cephfs/dms/artifacts /cephfs/managed
+chown root:root /cephfs/dms /cephfs/dms/artifacts /cephfs/managed
+chmod 770 /cephfs/dms            # DMS common dir -- requesters must NOT traverse it (§2b-3)
+chmod 755 /cephfs/dms/artifacts  # artifact base -- 3-hop rejects o+w / non-root owner (§2b-1)
+chmod 755 /cephfs/managed        # data root (managed_root of cephfs-dms) -- OUTSIDE the common dir
+mkdir -p /cephfs-third/managed /cephfs-secondary/managed   # only with `make cephfs-nsync`
+```
+
+The playbook also lays down the LDAP e2e fixtures under `/cephfs/managed/ldap-e2e`
+(alice/bob/cocoa.song private/shared trees, growth files) that the portal
+verification scripts use.
 
 (`managed_root` for each registered storage below lives under its
 `mount_path` -- `StoragesRepository._validate` in
@@ -175,6 +193,14 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
    묶는다. root 라 파일시스템이 더는 경로를 걸러 주지 않는다. 허용 밖 경로는 422
    `artifact_base_outside_allowlist`, 이미 저장된 base 가 밖이면 3홉 화면의 API·컨트롤러
    홉이 같은 사유로 실패를 낸다.
+
+**재기동·재프로비저닝 영속성**(2026-09-09 실증): 위 레이아웃은 CephFS(pkg-01 OSD 볼륨)에
+있어 VM 재부팅·`make vm-down/vm-up` 에도 남고(k8s 노드 6대 + pkg-01 동시 재부팅 뒤 마운트·
+권한·DMS 파드·3홉·스토리지 전부 그대로 복귀), 스토리지 managed_root 등 DB 상태는 PostgreSQL
+(pkg-01)에 있어 DMS 재기동(`kubectl rollout restart`)과 무관하다. **사라지는 경우는 `make
+destroy` 로 Ceph 를 새로 만들 때뿐**이며 그때는 `deploy/testbed/dms-shared-fs.yml`(§2) →
+§3~§6(README §6 시드는 이미 `/cephfs/managed`) 순으로 되돌린다. 재부팅 직후 첫 잡은 에이전트
+첫 보고(30s)·프로브(60s) 전이면 `no_ready_sync_candidate` 로 거부될 수 있다 — 1~2분 뒤 재제출.
 
 **적용 방법 주의**: securityContext 는 매니페스트 필드라 포탈 릴리스(이미지 patch)만으로는
 실리지 않는다 — d128 이상으로 올릴 때 `kubectl apply -f deploy/k8s/40-api.yaml -f

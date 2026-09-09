@@ -1,0 +1,184 @@
+---
+# DMS 공유 FS 레이아웃 + LDAP e2e 픽스처 (테스트베드 전용, 멱등).
+#
+# 테스트베드 IaC(~/dms-dev/testbed, `make ceph`)는 CephFS 를 /cephfs 에 마운트할 뿐 그 안의
+# 디렉터리는 만들지 않는다 -- 아래 레이아웃은 손으로 만들어져 있었고(2026-08-23 e2e 픽스처,
+# 2026-09-09 root 전환·770 실증) 재프로비저닝(`make destroy && make all`)이면 사라진다.
+# 이 플레이북이 그 상태를 코드로 고정한다. VM 재부팅·`make vm-down/vm-up` 은 CephFS 데이터
+# (pkg-01 의 OSD 볼륨)가 살아 있어 이 플레이북 없이도 유지된다.
+#
+#   /cephfs/dms             root:root 0770  DMS 공용 디렉터리. 요청자 uid 는 통과 불가 --
+#                                           제어면·에이전트·러너(launcher)는 root 이고 잡 파드는
+#                                           base 를 전용 마운트(/dms-artifact-base)로 받으므로
+#                                           770 이 안전하다(dms d129, deploy/README.md §2b-3).
+#   /cephfs/dms/artifacts   root:root 0755  아티팩트 base. 3홉 검증이 world-writable /
+#                                           비-root 소유를 거부한다(§2b-1).
+#   /cephfs/managed         root:root 0755  데이터 root = 스토리지 cephfs-dms 의 managed_root
+#                                           (README §6 시드). 공용 디렉터리 **밖**이어야 한다
+#                                           (preflight 가 요청자 uid 로 test -r/-w).
+#   /cephfs/managed/ldap-e2e                LDAP e2e 픽스처(uid/gid 는 테스트베드 openldap 역할:
+#                                           alice 10001, bob 10002, cocoa.song 10003,
+#                                           dmsusers 10000, dmsproj 10010).
+#   /cephfs-third/managed, /cephfs-secondary/managed  (선택, make cephfs-nsync 뒤에만)
+#
+# 실행(테스트베드의 ansible.cfg/인벤토리를 그대로 쓴다 -- cfg 의 상대경로는 cfg 위치 기준):
+#   ANSIBLE_CONFIG=~/dms-dev/testbed/ansible.cfg ansible-playbook deploy/testbed/dms-shared-fs.yml
+# 테스트베드 Makefile 에 넣으려면:
+#   dms-shared-fs:
+#   > $(ANSIBLE) $(DMS_REPO)/deploy/testbed/dms-shared-fs.yml     # ceph: ... cephfs-dms dms-shared-fs
+#
+# 파일 내용·소유권·mode 는 2026-09-09 시점 실물에서 옮겼다(find -printf). growth/*.bin 은
+# 사용량 분석 픽스처: old-* 는 고정 과거 mtime(항상 "오래됨"), fresh-* 는 생성 시각.
+
+- name: DMS shared-FS layout + e2e fixtures on the base CephFS (cephfs-dms)
+  hosts: dms_workers[0]
+  become: true
+  gather_facts: false
+  vars:
+    dms_common_dir: "{{ cephfs_mount_point | default('/cephfs') }}/dms"
+    dms_common_mode: "0770"
+    dms_artifact_base: "{{ dms_common_dir }}/artifacts"
+    dms_data_root: "{{ cephfs_mount_point | default('/cephfs') }}/managed"
+    dms_fixture_root: "{{ dms_data_root }}/ldap-e2e"
+    uid_alice: 10001
+    uid_bob: 10002
+    uid_cocoa: 10003
+    gid_dmsusers: 10000
+    gid_dmsproj: 10010
+    fixture_dirs:
+      - { path: "",                      owner: 0,               group: 0,                mode: "0755" }
+      - { path: "alice-private",         owner: "{{ uid_alice }}", group: "{{ gid_dmsusers }}", mode: "0700" }
+      - { path: "bob-private",           owner: "{{ uid_bob }}",   group: "{{ gid_dmsusers }}", mode: "0700" }
+      - { path: "group-shared",          owner: 0,               group: "{{ gid_dmsusers }}", mode: "0770" }
+      - { path: "proj-shared",           owner: 0,               group: "{{ gid_dmsproj }}",  mode: "0770" }
+      - { path: "growth",                owner: 0,               group: 0,                mode: "0755" }
+      - { path: "victim-cocoa",          owner: "{{ uid_cocoa }}", group: "{{ gid_dmsusers }}", mode: "0755" }
+      - { path: "victim-protected",      owner: 0,               group: 0,                mode: "0755" }
+      - { path: "victim-protected/data", owner: 0,               group: 0,                mode: "0755" }
+      - { path: "dest",                  owner: 0,               group: 0,                mode: "0777" }   # sync 목적지(요청자가 하위 생성)
+    fixture_files:
+      - { path: "alice-private/f1.txt",         content: "alice-secret-1\n", owner: "{{ uid_alice }}", group: "{{ gid_dmsusers }}", mode: "0600" }
+      - { path: "alice-private/f2.txt",         content: "alice-secret-2\n", owner: "{{ uid_alice }}", group: "{{ gid_dmsusers }}", mode: "0600" }
+      - { path: "bob-private/b1.txt",           content: "bob-secret\n",     owner: "{{ uid_bob }}",   group: "{{ gid_dmsusers }}", mode: "0600" }
+      - { path: "group-shared/g1.txt",          content: "team-file\n",      owner: 0,               group: "{{ gid_dmsusers }}", mode: "0660" }
+      - { path: "proj-shared/p1.txt",           content: "proj-file\n",      owner: 0,               group: "{{ gid_dmsproj }}",  mode: "0660" }
+      - { path: "victim-cocoa/v1.txt",          content: "delete-me\n",      owner: "{{ uid_cocoa }}", group: "{{ gid_dmsusers }}", mode: "0644" }
+      - { path: "victim-protected/data/k1.txt", content: "protected-d\n",    owner: 0,               group: 0,                mode: "0644" }
+      - { path: "victim-protected/keep.txt",    content: "protected\n",      owner: 0,               group: 0,                mode: "0644" }
+    growth_files:
+      - { name: "fresh-1.bin", mib: 2, old: false }
+      - { name: "fresh-3.bin", mib: 6, old: false }
+      - { name: "old-a.bin",   mib: 4, old: true }
+      - { name: "old-b.bin",   mib: 4, old: true }
+    growth_old_mtime: "202601010000.00"     # YYYYMMDDhhmm.ss -- 항상 30일 이상 과거
+  tasks:
+    - name: Base CephFS must be mounted here
+      ansible.builtin.command: "findmnt -n -T {{ cephfs_mount_point | default('/cephfs') }} -o FSTYPE"
+      register: base_fs
+      changed_when: false
+      failed_when: base_fs.stdout.strip() != "ceph"
+
+    - name: DMS common dir (root:root, requesters cannot traverse)
+      ansible.builtin.file:
+        path: "{{ dms_common_dir }}"
+        state: directory
+        owner: 0
+        group: 0
+        mode: "{{ dms_common_mode }}"
+
+    - name: Artifact base (root:root 0755 -- 3-hop rejects world-writable / non-root)
+      ansible.builtin.file:
+        path: "{{ dms_artifact_base }}"
+        state: directory
+        owner: 0
+        group: 0
+        mode: "0755"
+
+    - name: Data root (managed_root of storage cephfs-dms; outside the common dir)
+      ansible.builtin.file:
+        path: "{{ dms_data_root }}"
+        state: directory
+        owner: 0
+        group: 0
+        mode: "0755"
+
+    - name: e2e fixture directories
+      ansible.builtin.file:
+        path: "{{ dms_fixture_root }}/{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ fixture_dirs }}"
+      loop_control:
+        label: "{{ item.path | default('.', true) }} {{ item.owner }}:{{ item.group }} {{ item.mode }}"
+
+    - name: e2e fixture files
+      ansible.builtin.copy:
+        dest: "{{ dms_fixture_root }}/{{ item.path }}"
+        content: "{{ item.content }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ fixture_files }}"
+      loop_control:
+        label: "{{ item.path }} {{ item.owner }}:{{ item.group }} {{ item.mode }}"
+
+    - name: growth fixtures (usage analysis) -- create once
+      ansible.builtin.command:
+        cmd: "dd if=/dev/zero of={{ dms_fixture_root }}/growth/{{ item.name }} bs=1M count={{ item.mib }} status=none"
+        creates: "{{ dms_fixture_root }}/growth/{{ item.name }}"
+      loop: "{{ growth_files }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.mib }}MiB"
+
+    - name: growth fixtures -- ownership/mode, old-* pinned to a past mtime
+      ansible.builtin.file:
+        path: "{{ dms_fixture_root }}/growth/{{ item.name }}"
+        state: file
+        owner: 0
+        group: 0
+        mode: "0644"
+        modification_time: "{{ growth_old_mtime if item.old else omit }}"
+        modification_time_format: "%Y%m%d%H%M.%S"
+      loop: "{{ growth_files }}"
+      loop_control:
+        label: "{{ item.name }} old={{ item.old }}"
+
+- name: nsync SOURCE storage managed dir (only when make cephfs-nsync was applied)
+  hosts: dms_source_workers[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Is {{ cephfs_nsync_source.mount | default('/cephfs-third') }} mounted here?
+      ansible.builtin.command: "findmnt -n -M {{ cephfs_nsync_source.mount | default('/cephfs-third') }} -o FSTYPE"
+      register: src_fs
+      changed_when: false
+      failed_when: false
+    - name: managed dir on the nsync source storage
+      ansible.builtin.file:
+        path: "{{ cephfs_nsync_source.mount | default('/cephfs-third') }}/managed"
+        state: directory
+        owner: 0
+        group: 0
+        mode: "0755"
+      when: src_fs.rc == 0 and src_fs.stdout.strip() == "ceph"
+
+- name: nsync DESTINATION storage managed dir (only when make cephfs-nsync was applied)
+  hosts: dms_destination_workers[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Is {{ cephfs_nsync_destination.mount | default('/cephfs-secondary') }} mounted here?
+      ansible.builtin.command: "findmnt -n -M {{ cephfs_nsync_destination.mount | default('/cephfs-secondary') }} -o FSTYPE"
+      register: dst_fs
+      changed_when: false
+      failed_when: false
+    - name: managed dir on the nsync destination storage
+      ansible.builtin.file:
+        path: "{{ cephfs_nsync_destination.mount | default('/cephfs-secondary') }}/managed"
+        state: directory
+        owner: 0
+        group: 0
+        mode: "0755"
+      when: dst_fs.rc == 0 and dst_fs.stdout.strip() == "ceph"

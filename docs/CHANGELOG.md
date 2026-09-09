@@ -95,6 +95,26 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 테스트베드·DMS 재기동 영속성 — 공유 FS 레이아웃 코드화 + 재부팅 실증 — **완료**(2026-09-09)
+
+사용자 요청: 테스트베드·DMS 를 재기동해도 현재 상태(공용 디렉터리 770, base 755, 데이터
+root `/cephfs/managed` + e2e 픽스처, 스토리지 managed_root)가 그대로이도록. 조사: 테스트베드
+IaC(`make ceph`)는 CephFS 마운트만 하고 그 안의 디렉터리·픽스처는 손으로 만든 것이라
+`make destroy` 재프로비저닝이면 사라진다(VM 재부팅·`vm-down/up` 은 OSD 볼륨이 남아 유지).
+DB 상태(스토리지·control_state)는 PostgreSQL(pkg-01)에 있어 DMS 재기동과 무관.
+- `deploy/testbed/dms-shared-fs.yml`(신규, 멱등): `/cephfs/dms` 770 · `artifacts` 755 ·
+  `managed` 755 · `ldap-e2e` 픽스처(소유자·mode·내용 실물 그대로, growth old-* 는 고정 과거
+  mtime) · nsync managed 디렉터리(마운트 있을 때만). 테스트베드의 ansible.cfg/인벤토리를 그대로
+  쓴다(테스트베드 저장소는 이 세션의 워크트리 격리로 편집 불가 — Makefile 타겟 한 줄은
+  플레이북 헤더에 스니펫). README §2 의 수동 mkdir 을 권한 포함으로 정정, §2b 에 영속성 절.
+- 실증: 드라이런 = 현재 상태와 전부 일치(유일한 변경 old-*.bin mtime 고정) → 적용
+  changed=2(mtime 2건 + nsync managed 2곳 생성) → 재실행 changed=0. DMS `rollout restart`
+  (api·controller·agent) 정상. k8s 노드 6대 동시 재부팅(30초 내 복귀, fstab CephFS 자동
+  마운트, 770/755/755 그대로, kubelet·crio active) → pkg-01 재부팅(14초 복귀, PostgreSQL·
+  slapd·registry(restart=always)·ceph(cephadm systemd) 자동 기동, 볼륨 healthy) → 노드 Ready
+  6대, DMS 파드 전부 Running(재시작 1회), readyz ok, 3홉 정상, 스토리지 `cephfs-dms=
+  /cephfs/managed` Ready, control-state 유지. 재부팅 후 alice sync 잡(에이전트 첫 보고·프로브 뒤 제출) preview → 확인 → **Succeeded**(files 2·bytes 10), 열람 매트릭스 alice 200·mason 200·cocoa.song 404, 노드 홉 5대 정상.
+
 ### ✅ 공용 디렉터리 root:root 770 지원 — 잡 파드의 아티팩트 base 전용 마운트 — **완료**(2026-09-09, d129)
 
 사용자 요청: DMS 공용 디렉터리(`/cephfs/dms`)를 root:root 770 으로 만들고 DMS 가 정상
