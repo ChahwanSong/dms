@@ -149,7 +149,24 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 - **보류(BACKLOG)**: 러너의 root 쓰기 심링크 추종(`runner.write_text`)과 root 산출물 3종
   chown — 잡 이미지 재빌드가 필요해 이번 범위 밖. 그때 API 소유자 검사를 `== 요청자` 로
   좁힌다.
-- 실증: 아래 「실증(d128)」.
+- 실증(테스트베드 d128, 2026-09-09): 게이트 백엔드 1764 passed(신규 50)·vitest 689·tsc·
+  dist 외부 URL 0. 배포: base `/cephfs/dms/artifacts` 를 777→`root:root 755` 로 정정 후
+  `kubectl apply`(00/20/30/40/41) — api·controller 파드 `uid=0(root)`, CapPrm/Eff/Bnd 전부
+  `0000000000000000`, `/app`·`/tmp` touch → Read-only file system, migrate initContainer
+  securityContext 없음(65532)·Completed, ConfigMap `DMS_ARTIFACT_BASE_ALLOWED_PREFIXES=/cephfs`.
+  3홉: API(즉석)·컨트롤러·노드 5대 전부 정상(실 Chrome 「모두 정상」 + 새 문구, 캡처
+  `d128-artifact-base.png`). 잡: alice sync(ldap-e2e/group-shared → dest/rootcheck-d128)
+  Planned 100s → ConfirmPending → confirm → **Succeeded**(files 2·bytes 10 — 컨트롤러가
+  root 로 summary.json 을 봉쇄 사슬로 읽음); 열람 매트릭스 alice 200 · mason(admin) 200 ·
+  cocoa.song 404 job_not_found(아티팩트·실행 로그·프리플라이트 로그 동일). 잡 디렉터리는
+  root:root, phase 는 alice(10001:10000) 755, root 산출물 3종 0644. root 전용 부정 케이스
+  (에이전트 root 셸로 alice 의 execution 디렉터리에 심음): 심링크→/etc/shadow ·
+  하드링크(타인 1001 소유 0600, nlink 2) · rename(타인 0600, nlink 1) · FIFO · 자기 소유
+  mode 000 → 전부 **404 artifact_not_found, 0.0s**, 목록에서 leak 제외, 다운로드도 404;
+  root 소유 0644 와 stdout.log 는 200. allowlist: validate `file:///tmp`·`/etc`·`/cephfs2`
+  → 422 artifact_base_outside_allowlist(readOnlyRootFilesystem 의 EROFS 보다 먼저),
+  `/cephfs/dms/../dms/artifacts` → 422 artifact_base_traversal; root:root 755 디렉터리
+  validate → 200 ok, 프로브 잔여 0. API·컨트롤러 로그 트레이스백 0, HTTP 500 0.
 
 ### ✅ 스토리지 등록 백엔드 선택 목록 — **완료**(2026-09-09, d127)
 
