@@ -31,13 +31,25 @@ def _get_json(url: str, timeout):
     return response.json()
 
 
+def _is_not_found(exc) -> bool:
+    # httpx.HTTPStatusError(raise_for_status) 의 404 -- 리포가 아직 없다(v2 NAME_UNKNOWN).
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 404
+
+
 def fetch_repo_tags(registry: str, repository: str) -> "list[str] | None":
     # 레지스트리는 평문 HTTP다(빌드 스크립트가 --tls-verify=false를 쓰는 그 레지스트리).
     url = f"http://{registry}/v2/{repository}/tags/list"
     try:
         data = _get_json(url, _TIMEOUT)
     except Exception as exc:
-        # 여기서 넓게 삼키는 것이 이 모듈의 존재 이유다 -- 연결 실패/타임아웃/404/
+        if _is_not_found(exc):
+            # 2026-09-09 사용자 보고(신규 사이트): 레지스트리는 살아 있는데 아직 아무
+            # 이미지도 push 되지 않아 리포가 없다(404 NAME_UNKNOWN). 이것을 "연결
+            # 불가"로 접으면 포탈이 첫 빌드 전까지 잘못된 오류를 보인다 -- 도달은
+            # 됐고 태그가 0개인 것이므로 빈 목록이다(None ≠ [] 규약).
+            return []
+        # 여기서 넓게 삼키는 것이 이 모듈의 존재 이유다 -- 연결 실패/타임아웃/
         # 비JSON 본문 중 무엇이든 호출자에게는 "레지스트리가 답하지 않았다" 하나다.
         logger.warning("registry tags fetch failed repo=%s: %s", repository, exc)
         return None

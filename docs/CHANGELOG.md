@@ -54,6 +54,26 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 설치기 이미지 push 단계 + 신규 사이트 "레지스트리 연결 불가" 오진 수정 — **완료**(2026-09-09, d126)
+
+사용자 보고: 초기 구축 시 install(-ssc).sh 에 push 단계가 없어 레지스트리에 이미지가
+없고, 포탈이 "레지스트리 연결 불가"를 보였다. 요청: 설치기에 push 를 넣되(반입과
+별개로 자동), 실패해도 파드 구동엔 영향 없다는 것을 WARN 으로 구분해 알릴 것.
+
+- `deploy/install.sh`(prod)·`deploy/overlays/ssc/install.sh`(dms-ssc) 1b 단계
+  `push_images`: 이 호스트의 podman/docker 에 있는 dms·dms-agent·dms-mpifileutils·
+  buildah 를 values.env 의 REGISTRY/태그로 push. 로컬 이미지 없음·push 실패·
+  podman/docker 없음은 전부 **WARN**(설치 계속) — 노드에 반입된 이미지면 파드 구동은
+  무관하고 포탈 레지스트리/릴리스/빌드(FROM pull)만 영향이라는 문구를 붙인다.
+  끝에 레지스트리 시점의 리포별 태그를 조회해 OK/WARN 으로 보여준다(정보).
+  `REGISTRY_TLS_VERIFY=false`(values.env) 면 podman push `--tls-verify=false`.
+  `--dry-run` 은 push 대상만 나열.
+- 오진 수정: `registry.fetch_repo_tags` 가 404(리포 없음, v2 NAME_UNKNOWN)를
+  "연결 불가"(None)로 접던 것을 빈 목록(`[]`)으로 — 신규 사이트의 릴리스 화면
+  `registry_ok=false` 오류·레지스트리 화면 "조회 실패"가 사라지고 "태그 없음"으로
+  정직하게 보인다. 연결 실패·5xx 는 여전히 None. 문구도 "주소·네트워크 확인 /
+  신규 사이트는 빈 목록" 으로 구체화.
+
 ### ✅ 컨트롤 상태 no_proxy 힌트(사이트 실제 값) — **완료·실증**(2026-09-09, d126)
 
 사용자 요청: 컨트롤 상태 화면의 no_proxy 힌트로 레지스트리 주소·주소:포트·localhost·

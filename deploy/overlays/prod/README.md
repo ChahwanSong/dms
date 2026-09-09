@@ -12,9 +12,11 @@ PORTAL_VIP=<서비스 VIP> sh deploy/preflight-cluster.sh
 cp deploy/overlays/prod/values.env.example deploy/overlays/prod/values.env
 $EDITOR deploy/overlays/prod/values.env          # REPLACE_* 를 실값으로
 
-# 3) 이미지 4종 빌드·push (한 번만. 설치와 분리 — 매 설치마다 빌드하지 않는다)
-#    dms · dms-agent · dms-mpifileutils · buildah:stable  →  values.env 의 REGISTRY 로
-#    deploy/docker/build-and-push.sh 참고. (이미 push 돼 있으면 건너뜀)
+# 3) 이미지 4종 준비 (한 번만. 설치와 분리 — 매 설치마다 빌드하지 않는다)
+#    dms · dms-agent · dms-mpifileutils · buildah:stable  (deploy/docker/build-and-push.sh 참고)
+#    push 는 install.sh 1b 단계가 이 호스트의 podman/docker 에서 REGISTRY 로 자동 수행한다
+#    (실패·로컬 이미지 없음은 WARN — 노드에 반입된 이미지면 파드 구동 무관, 포탈
+#     레지스트리/릴리스/빌드만 영향). 평문 레지스트리면 values.env REGISTRY_TLS_VERIFY=false.
 
 # 4) 시크릿·TLS (out-of-band — git 밖, 오버레이가 만들지 않는다)
 kubectl -n dms create secret generic dms-secrets \

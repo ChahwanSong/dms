@@ -49,3 +49,29 @@ def test_request_always_carries_a_timeout(monkeypatch):
     timeout = seen["timeout"]
     assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (
         2.0, 3.0, 3.0, 3.0)
+
+
+def test_missing_repository_404_is_an_empty_list_not_unreachable(monkeypatch):
+    # 신규 사이트: 레지스트리는 살아 있고 리포만 아직 없다(push 전). 포탈이 "연결
+    # 불가"라고 말하면 안 된다 -- 도달됐고 태그 0개다(None ≠ []).
+    import httpx
+    from dms.registry import fetch_repo_tags
+
+    def not_found(url, timeout):
+        req = httpx.Request("GET", url)
+        raise httpx.HTTPStatusError("404", request=req,
+                                    response=httpx.Response(404, request=req))
+    monkeypatch.setattr("dms.registry._get_json", not_found)
+    assert fetch_repo_tags("reg.example:5000", "dms") == []
+
+
+def test_other_http_errors_are_still_unreachable(monkeypatch):
+    import httpx
+    from dms.registry import fetch_repo_tags
+
+    def server_error(url, timeout):
+        req = httpx.Request("GET", url)
+        raise httpx.HTTPStatusError("500", request=req,
+                                    response=httpx.Response(500, request=req))
+    monkeypatch.setattr("dms.registry._get_json", server_error)
+    assert fetch_repo_tags("reg.example:5000", "dms") is None
