@@ -4,7 +4,7 @@ import logging
 import threading
 from typing import Protocol
 
-from .artifact_base import strip_scheme
+from .artifact_base import ARTIFACT_MOUNT, strip_scheme
 from .execution import ExecStatus, ExecutionError
 from .execution_manifests import build_preflight_pod, build_volcano_job
 
@@ -131,10 +131,6 @@ class VolcanoExecutionAdapter:
         for sname in snames:
             if sname:
                 mount_paths.append(self._storages(sname)["mount_path"])
-        # summary.json 기록 위치 — 스킴 제거한 artifact base 도 반드시 마운트.
-        # 접두사만 벗긴다(설계 §2.2): 전체 치환은 경로 중간의 file:// 까지 지워,
-        # 읽기 계열(strip_scheme)과 다른 디렉터리를 마운트하게 된다.
-        mount_paths.append(strip_scheme(spec.artifact_base))
         # 다른 경로가 상위(ancestor)면 하위 경로는 커버되므로 생략 — 중첩 마운트 방지.
         # 후행 슬래시로 "/cephfs" 가 "/cephfs-third" 를 잘못 삼키지 않게 함.
         minimal = []
@@ -144,8 +140,19 @@ class VolcanoExecutionAdapter:
             if covered or p in minimal:
                 continue
             minimal.append(p)
-        return [{"name": mp.strip("/").replace("/", "-") or "root",
-                 "hostPath": {"path": mp}, "mountPath": mp} for mp in minimal]
+        volumes = [{"name": mp.strip("/").replace("/", "-") or "root",
+                    "hostPath": {"path": mp}, "mountPath": mp} for mp in minimal]
+        # 아티팩트 base 는 **항상 전용 볼륨**으로 ARTIFACT_MOUNT 에(2026-09-09,
+        # artifact_base.ARTIFACT_MOUNT 주석). 예전엔 스토리지 마운트가 base 의 상위면
+        # 생략했는데(중첩 방지), 그러면 파드 안 경로가 <storage>/.../artifacts 라
+        # 요청자 uid 도구가 공용 디렉터리(base 의 부모)를 통과해야 했다 -- 그 부모를
+        # root:root 770 으로 잠그면 rank.sh 실행·리포트 쓰기가 EACCES 로 죽는다.
+        # 전용 마운트는 마운트 루트가 base 자체라 부모 권한을 보지 않는다. hostPath 는
+        # 접두사만 벗긴 base(설계 §2.2: 전체 치환은 경로 중간 file:// 까지 지운다).
+        volumes.append({"name": "dms-artifact-base",
+                        "hostPath": {"path": strip_scheme(spec.artifact_base)},
+                        "mountPath": ARTIFACT_MOUNT})
+        return volumes
 
     # phases that run as a single preflight Pod (not a Volcano Job): the initial
     # preflight AND the post-confirm re-validation. Both must route to

@@ -2,7 +2,7 @@
 
 import json
 
-from .artifact_base import strip_scheme
+from .artifact_base import ARTIFACT_MOUNT
 
 _SCAN_BOOL_FLAGS = {"verbose": "--verbose", "quiet": "--quiet"}
 # dscan(1b93d54): --broken-limit은 롱네임뿐(-B는 optstring에 없다). top_k는
@@ -180,10 +180,12 @@ def _pod_volumes(volumes):
 
 
 def _artifact_dir(spec):
-    # artifact_base는 URI(file:///cephfs/...) — 파드 안 파일 연산용으로 스킴 제거.
-    # 접두사만 벗긴다(설계 §2.2): 전체 치환(replace)은 경로 중간의 file:// 까지
-    # 지워, 러너가 쓰는 위치가 마운트 계산·읽기 라우트와 갈라질 수 있다.
-    return f"{strip_scheme(spec.artifact_base)}/{spec.job_id}/{spec.phase}"
+    # 파드 **안** 경로다(2026-09-09): base 는 execution_volcano._volumes 가 전용
+    # hostPath 볼륨으로 ARTIFACT_MOUNT 에 마운트한다(artifact_base.ARTIFACT_MOUNT 주석
+    # -- 공용 디렉터리 770 허용의 근거). 호스트 경로(<base>/<job>/<phase>)는 제어면
+    # 읽기(execution_volcano.read_summary, api)와 artifact_uri 가 쓰고, 러너는 이
+    # 경로로만 쓴다 -- 두 경로는 같은 디렉터리다(같은 hostPath).
+    return f"{ARTIFACT_MOUNT}/{spec.job_id}/{spec.phase}"
 
 
 def _launcher_env(spec):

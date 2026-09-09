@@ -40,15 +40,20 @@ def test_volumes_mount_keeps_mid_path_scheme():
     assert "/data/x" not in paths
 
 
-def test_launcher_artifact_dir_keeps_mid_path_scheme():
-    # execution_manifests._artifact_dir: 러너가 summary.json 을 쓰는 위치다 --
-    # 마운트 계산(_volumes)과 다른 계열로 해석되면 쓰는 곳과 읽는 곳이 갈라진다.
+def test_launcher_artifact_dir_is_the_dedicated_mount_and_volume_keeps_scheme():
+    # 2026-09-09: 러너의 쓰기 위치는 파드 안 전용 마운트(ARTIFACT_MOUNT)로 고정됐고,
+    # base 의 문자열 해석은 **볼륨의 hostPath** 한 곳에만 남는다 -- 거기서 전체
+    # 치환이면 잡 파드가 실제 base(/data/file://x)와 다른 디렉터리를 받는다.
+    from dms.artifact_base import ARTIFACT_MOUNT
+    volumes = _adapter()._volumes(_spec())
+    art = [v for v in volumes if v["mountPath"] == ARTIFACT_MOUNT]
+    assert len(art) == 1 and art[0]["hostPath"]["path"] == "/data/file://x"
     manifest = build_volcano_job(_spec(), job_image="img", namespace="dms",
-                                 volumes=[])
+                                 volumes=volumes)
     launcher = manifest["spec"]["tasks"][0]
     env = {e["name"]: e["value"]
            for e in launcher["template"]["spec"]["containers"][0]["env"]}
-    assert env["DMS_JR_ARTIFACT_DIR"] == f"/data/file://x/{'a' * 32}/execution"
+    assert env["DMS_JR_ARTIFACT_DIR"] == f"{ARTIFACT_MOUNT}/{'a' * 32}/execution"
 
 
 def test_submit_summary_path_keeps_mid_path_scheme():
