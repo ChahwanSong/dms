@@ -65,6 +65,16 @@ def build_rollout_runner(settings):
                          namespace=settings.k8s_namespace)
 
 
+def build_node_lister(settings):
+    """컨트롤 상태 no_proxy 힌트의 워커 노드 IP 조회(2026-09-09). 스텁 백엔드는
+    빈 목록 -- 힌트는 fail-soft 라 로컬·CI 에서 라우트가 500 이 되지 않는다."""
+    if settings.execution_backend != "volcano":
+        return lambda: []
+    from .execution_volcano import KubernetesClient
+    client = KubernetesClient(settings.k8s_namespace)
+    return client.list_node_addresses
+
+
 def build_queue_reader(settings):
     # StubRolloutRunner 와 같은 선택 규칙(설계 §2.5): 기본 백엔드(stub)에서 스텁
     # 페어가 없으면 /api/admin/metrics/queue 가 모든 로컬·CI 에서 500 이다.

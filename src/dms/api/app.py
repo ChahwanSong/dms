@@ -10,7 +10,7 @@ from ..config import Settings
 from ..db import Database
 from ..repositories import Repositories
 from ..wiring import (build_build_runner, build_execution_adapter,
-                     build_identity_resolver, build_queue_reader,
+                     build_identity_resolver, build_node_lister, build_queue_reader,
                      build_rollout_runner, wire_reconnect_event)
 from .login_limiter import LoginRateLimiter
 from .password_transport import PasswordTransport
@@ -54,6 +54,8 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     # 슬라이스 17: /api/admin/metrics/queue 가 쓴다. 기본 백엔드(stub)에선
     # StubQueueReader 라 클러스터 없이도 라우트가 산다(설계 §2.5).
     app.state.queue_reader = build_queue_reader(settings)
+    # 컨트롤 상태 no_proxy 힌트의 워커 노드 IP(2026-09-09) -- 실패는 힌트 생략.
+    app.state.node_lister = build_node_lister(settings)
     # 슬라이스 22 §2.6: 재연결 성공의 영속 흔적(events.db_reconnected) 훅.
     wire_reconnect_event(db, app.state.repos)
     # 2026-09-07 웹 인증 하드닝: 로그인 감속기(프로세스 메모리)와 비밀번호 전송

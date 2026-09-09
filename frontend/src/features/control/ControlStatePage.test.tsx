@@ -15,6 +15,15 @@ const server = setupServer(
   // 슬라이스 36: 현재 상태 카드의 영향 요약(잡 집계)·변경 이력 기본 응답.
   http.get("/api/admin/metrics/jobs", () => HttpResponse.json({ by_state: [] })),
   http.get("/api/admin/control-state/history", () => HttpResponse.json([])),
+  // 프록시 제외 힌트(2026-09-09) 기본 응답 -- 사이트 실제 값.
+  http.get("/api/admin/control-state/proxy-hints", () => HttpResponse.json({
+    registry: "pkg-01:5000", registry_host: "pkg-01",
+    nodes: [{ name: "dms-w1", ip: "10.10.10.11" }, { name: "dms-w2", ip: "10.10.10.12" }],
+    nodes_known: true,
+    suggested_no_proxy: ["pkg-01", "pkg-01:5000", "localhost", "127.0.0.1", ".svc", ".cluster.local",
+                         "10.10.10.11", "10.10.10.12"],
+    auto_added: ["pkg-01:5000", "pkg-01", "localhost", "127.0.0.1"],
+  })),
 );
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
@@ -96,6 +105,39 @@ test("프록시가 localhost 면 스위치 없이도 「호스트 네트워크(�
     HttpResponse.json({ ...CS, build_http_proxy: "http://127.0.0.1:7227", build_host_network: 0 })));
   wrap();
   expect(await screen.findByText("호스트 네트워크(자동 — 프록시가 127.0.0.1)")).toBeInTheDocument();
+});
+
+test("프록시 제외 힌트에 레지스트리·클러스터 DNS·워커 노드 IP 가 보이고 한 번에 채울 수 있다", async () => {
+  let body: any = null;
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.put("/api/admin/control-state", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json(CS);
+    }));
+  wrap();
+  const hint = await screen.findByTestId("no-proxy-hint");
+  expect(hint).toHaveTextContent("pkg-01,pkg-01:5000,localhost,127.0.0.1,.svc,.cluster.local,10.10.10.11,10.10.10.12");
+  expect(hint).toHaveTextContent("워커 노드 2대");
+  await userEvent.click(screen.getByRole("button", { name: "권장 값 채우기" }));
+  expect(screen.getByLabelText("프록시 제외")).toHaveValue(
+    "pkg-01,pkg-01:5000,localhost,127.0.0.1,.svc,.cluster.local,10.10.10.11,10.10.10.12");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body.build_no_proxy).toBe("pkg-01,pkg-01:5000,localhost,127.0.0.1,.svc,.cluster.local,10.10.10.11,10.10.10.12");
+});
+
+test("노드 조회가 실패하면 힌트가 노드 IP 없이 그 사실을 말한다", async () => {
+  server.use(
+    http.get("/api/admin/control-state", () => HttpResponse.json(CS)),
+    http.get("/api/admin/control-state/proxy-hints", () => HttpResponse.json({
+      registry: "pkg-01:5000", registry_host: "pkg-01", nodes: [], nodes_known: false,
+      suggested_no_proxy: ["pkg-01", "pkg-01:5000", "localhost", "127.0.0.1", ".svc", ".cluster.local"],
+      auto_added: ["pkg-01:5000", "pkg-01", "localhost", "127.0.0.1"],
+    })));
+  wrap();
+  const hint = await screen.findByTestId("no-proxy-hint");
+  expect(hint).toHaveTextContent("클러스터 조회 실패로 생략");
 });
 
 test("프록시가 없으면 「파드 네트워크」다", async () => {

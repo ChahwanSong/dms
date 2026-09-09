@@ -70,6 +70,27 @@ class K8sClient(Protocol):
     def list_pod_briefs(self, namespace: str, label_selector: str) -> list: ...
 
 
+_CONTROL_PLANE_LABELS = ("node-role.kubernetes.io/control-plane",
+                         "node-role.kubernetes.io/master")
+
+
+def node_addresses_from(node_list: dict) -> list:
+    """V1NodeList.to_dict() -> [{"name", "ip", "control_plane"}]. 순수 함수(테스트용).
+    InternalIP 가 없는 노드는 ip=None 으로 남긴다(모름 ≠ 없음 -- 지어내지 않는다)."""
+    out = []
+    for item in (node_list or {}).get("items") or []:
+        meta = item.get("metadata") or {}
+        labels = meta.get("labels") or {}
+        ip = None
+        for addr in ((item.get("status") or {}).get("addresses") or []):
+            if addr.get("type") == "InternalIP" and addr.get("address"):
+                ip = addr["address"]
+                break
+        out.append({"name": meta.get("name"), "ip": ip,
+                    "control_plane": any(k in labels for k in _CONTROL_PLANE_LABELS)})
+    return out
+
+
 class VolcanoExecutionAdapter:
     def __init__(self, k8s, *, job_image, namespace, storages_lookup, read_text,
                  artifact_base):
@@ -436,6 +457,13 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
         if getattr(exc, "status", None) == 403:
             logger.error("workload %s forbidden(403, RBAC?) %s %s/%s",
                          verb, kind, namespace, name)
+
+    def list_node_addresses(self) -> list:
+        """클러스터 노드의 이름·InternalIP·control-plane 여부(2026-09-09, 컨트롤
+        상태의 no_proxy 힌트용). 읽기 전용 -- ClusterRole dms-api-nodes-readonly."""
+        self._ensure()
+        nodes = self._core.list_node(_request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
+        return node_addresses_from(nodes.to_dict())
 
     def list_pod_briefs(self, namespace, label_selector):
         self._ensure()

@@ -464,6 +464,14 @@ ClusterFirstWithHostNet` + `buildah bud --network=host`. 셋이 한 스위치인
   최종 이미지에서 걷어낸다(런타임에 없는 경로가 남으면 TLS 전체가 깨진다).
 - 인증 프록시(Basic)는 여전히 미지원. 실증: CHANGELOG 「사내 프록시 CA」.
 
+**no_proxy 힌트(2026-09-09).** 컨트롤 상태의 프록시 제외 입력 아래에 이 사이트의
+실제 값 — 레지스트리 host / host:port, localhost, 127.0.0.1, .svc, .cluster.local,
+워커 노드 InternalIP — 이 「권장 값」으로 뜨고 버튼 하나로 채워진다. 노드 IP 는 API
+가 k8s Node 를 읽어 오므로 `10-rbac.yaml` 의 ClusterRole
+`dms-api-nodes-readonly` 가 적용돼 있어야 한다(없으면 노드 IP 만 생략하고 그 사실을
+표시). 레지스트리·localhost 는 저장 시 서버가 자동으로 보태므로 힌트를 그대로 넣어도
+중복은 무해하다.
+
 **3b-2) 신규 사이트의 매니페스트 기준값(2026-09-08).** 이미지에 동봉된
 `deploy/k8s` 는 "그 이미지를 만든 소스 트리"의 값이라, 포탈 밖에서 부트스트랩한
 이미지는 테스트베드 태그(`pkg-01:5000/dms:d119`)를 담고 있다. 동봉 이미지의

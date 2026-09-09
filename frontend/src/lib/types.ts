@@ -230,6 +230,16 @@ export interface ControlState {
   changed_at: string | null;
 }
 
+// 컨트롤 상태의 프록시 제외(no_proxy) 힌트(2026-09-09). nodes_known=false 는 노드
+// 조회 실패(권한·클러스터) -- 노드 IP 만 빠지고 나머지 힌트는 유효하다.
+export interface ProxyHints {
+  registry: string; registry_host: string;
+  nodes: { name: string | null; ip: string }[];
+  nodes_known: boolean;
+  suggested_no_proxy: string[];
+  auto_added: string[];
+}
+
 export interface ArtifactBaseNodeCheck {
   node_name: string; reported_at: string; fresh: boolean;
   // pending = 이 노드가 아직 현재 base 를 프로브하지 않았다("확인 대기 중") --

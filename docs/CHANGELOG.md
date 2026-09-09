@@ -54,6 +54,22 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
 
 ## 슬라이스별 상세 기록
 
+### ✅ 컨트롤 상태 no_proxy 힌트(사이트 실제 값) — **완료·실증**(2026-09-09, d126)
+
+사용자 요청: 컨트롤 상태 화면의 no_proxy 힌트로 레지스트리 주소·주소:포트·localhost·
+127.0.0.1·.svc·.cluster.local·워커 노드 주소를 포탈에 보여 달라.
+
+- `GET /api/admin/control-state/proxy-hints`(admin): `DMS_BUILD_REGISTRY` 에서
+  host/host:port, 고정 항목(localhost·127.0.0.1·.svc·.cluster.local), 워커 노드
+  InternalIP(control-plane 라벨 제외, IP 모르는 노드 생략). 노드 조회는 fail-soft
+  (`nodes_known=false`). `auto_added` 로 서버가 저장 시 자동으로 보태는 항목도 함께.
+- 노드 IP 출처: 에이전트 보고에는 IP 가 없어 API 가 k8s Node 를 읽는다 —
+  `KubernetesClient.list_node_addresses`(순수 파서 `node_addresses_from`) +
+  **RBAC ClusterRole `dms-api-nodes-readonly`(nodes get/list)** 추가. 기배포 사이트는
+  `10-rbac.yaml` 재적용(오버레이 apply) 필요 — 없으면 힌트가 노드 IP 만 생략한다.
+- 화면: 프록시 제외 입력 아래 "권장 값: …" + 「권장 값 채우기」 버튼 + 워커 노드 수.
+- 실증: 아래 「실증」.
+
 ### ✅ 사내 프록시 CA(TLS 가로채기 프록시) — **완료·실증**(2026-09-09, d125)
 
 사용자 요청: 빌드 이미지에서 사내 프록시를 쓰려면 CA 가 필요하다 — 사내 CA 경로를

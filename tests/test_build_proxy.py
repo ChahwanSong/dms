@@ -233,3 +233,29 @@ def test_probe_script_checks_ca_presence_and_tls_through_the_proxy():
     assert "BEGIN CERTIFICATE" in script
     # 시스템 CA + 사내 CA 합집합으로 검증(빌드 번들과 같은 의미)
     assert "ssl.create_default_context()" in script and "load_verify_locations(cafile=cafile)" in script
+
+
+# --- no_proxy 힌트 재료(2026-09-09) ---
+
+def test_node_addresses_from_parses_internal_ip_and_control_plane_label():
+    from dms.execution_volcano import node_addresses_from
+    nodes = {"items": [
+        {"metadata": {"name": "cp1", "labels": {"node-role.kubernetes.io/control-plane": ""}},
+         "status": {"addresses": [{"type": "Hostname", "address": "cp1"},
+                                  {"type": "InternalIP", "address": "10.0.0.10"}]}},
+        {"metadata": {"name": "w1", "labels": {}},
+         "status": {"addresses": [{"type": "InternalIP", "address": "10.0.0.11"}]}},
+        {"metadata": {"name": "w2"}, "status": {}},                       # 주소 없음 -> ip None
+    ]}
+    assert node_addresses_from(nodes) == [
+        {"name": "cp1", "ip": "10.0.0.10", "control_plane": True},
+        {"name": "w1", "ip": "10.0.0.11", "control_plane": False},
+        {"name": "w2", "ip": None, "control_plane": False}]
+    assert node_addresses_from({}) == [] and node_addresses_from(None) == []
+
+
+def test_auto_no_proxy_matches_what_proxy_env_adds():
+    from dms.build_manifests import auto_no_proxy
+    assert auto_no_proxy("pkg-01:5000") == ["pkg-01:5000", "pkg-01", "localhost", "127.0.0.1"]
+    env = proxy_env(PROXY, "pkg-01:5000")
+    assert env["NO_PROXY"].split(",") == auto_no_proxy("pkg-01:5000")

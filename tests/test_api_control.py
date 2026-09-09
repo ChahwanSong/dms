@@ -209,6 +209,43 @@ def test_build_proxy_ca_path_is_stored_and_validated(client):
     assert _put(client).json()["build_proxy_ca_path"] is None       # 생략 = 해제
 
 
+def test_proxy_hints_list_site_values_and_worker_node_ips(client):
+    client.app.state.node_lister = lambda: [
+        {"name": "dms-cp1", "ip": "10.10.10.10", "control_plane": True},
+        {"name": "dms-w1", "ip": "10.10.10.11", "control_plane": False},
+        {"name": "dms-w2", "ip": None, "control_plane": False},      # IP 모름 -> 생략
+        {"name": "dms-w3", "ip": "10.10.10.13", "control_plane": False},
+    ]
+    body = client.get("/api/admin/control-state/proxy-hints", headers=ADMIN).json()
+    assert body["registry"] == "pkg-01:5000" and body["registry_host"] == "pkg-01"
+    assert body["nodes"] == [{"name": "dms-w1", "ip": "10.10.10.11"},
+                             {"name": "dms-w3", "ip": "10.10.10.13"}]
+    assert body["nodes_known"] is True
+    assert body["suggested_no_proxy"] == ["pkg-01", "pkg-01:5000", "localhost", "127.0.0.1",
+                                          ".svc", ".cluster.local", "10.10.10.11", "10.10.10.13"]
+    assert body["auto_added"] == ["pkg-01:5000", "pkg-01", "localhost", "127.0.0.1"]
+
+
+def test_proxy_hints_survive_node_listing_failure(client):
+    def boom():
+        raise RuntimeError("forbidden")
+    client.app.state.node_lister = boom
+    body = client.get("/api/admin/control-state/proxy-hints", headers=ADMIN).json()
+    assert body["nodes"] == [] and body["nodes_known"] is False
+    assert body["suggested_no_proxy"][:6] == ["pkg-01", "pkg-01:5000", "localhost", "127.0.0.1",
+                                              ".svc", ".cluster.local"]
+
+
+def test_proxy_hints_stub_backend_has_no_nodes(client):
+    # conftest 앱은 스텁 백엔드 -- 노드 조회가 빈 목록(모름이 아니라 "없음")이다.
+    body = client.get("/api/admin/control-state/proxy-hints", headers=ADMIN).json()
+    assert body["nodes"] == [] and body["nodes_known"] is True
+
+
+def test_proxy_hints_is_admin_only(client):
+    assert client.get("/api/admin/control-state/proxy-hints").status_code == 401
+
+
 def test_build_proxy_defaults_to_none_and_clears_when_omitted(client):
     assert _put(client, build_http_proxy="http://p:1").status_code == 200
     body = _put(client).json()                        # 프록시 필드 생략 = 해제(무조건 UPDATE)
