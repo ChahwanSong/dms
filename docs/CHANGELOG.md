@@ -95,6 +95,18 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 사용량 분석 — 타깃 상세를 클릭한 행 아래 펼침(expand) — **완료·실증**(2026-09-14, d131)
+
+사용자 요청: 항목을 클릭하면 상세가 모든 항목 아래(별도 카드)에 나오던 것을 expand 형태로.
+`TargetDetail`(요약 타일·실 사용량 추이·온도 추이·스캔 이력)을 분리해 선택한 행 바로 아래
+펼침 행(colSpan, 왼쪽 강조선, 회전 chevron)으로 렌더. 한 번에 하나: 같은 행 재클릭 = 접기
+(URL 파라미터 제거), 다른 행 클릭 = 펼침 이동. URL(storage/target)이 그대로 진실이라 딥링크·
+새로고침·뒤로가기 유지; 행 버튼 aria-expanded/aria-controls, 펼침 영역 role=region. 표시
+창·온도 축 state 는 상세 국소(타깃 전환 시 초기화). 선택 타깃이 현재 목록(검색 결과)에 없으면
+표 아래 폴백 카드(제목 포함). 테스트 2건 추가(펼침 이동·접기·다음 형제 행, 폴백), vitest
+691·tsc·빌드 외부 URL 0.
+- 실증(테스트베드 d131, 실 Chrome): main 푸시 → cron 동기화 → 포탈 빌드 d131(자리표시자 base, commit e1b8e79) → 포탈 릴리스 dms-api·dms-controller Applied → 배지 live == manifest d131 → 오버레이 newTag d131 bump 커밋 → Job 삭제·가드 통과·apply -k → diff 0. 화면: 타깃 5개 중 `ldap-e2e/growth` 클릭 → 그 행 **바로 아래** region(좌표 대조)·aria-expanded=true·URL `?storage=…&target=ldap-e2e%2Fgrowth`, 나머지 타깃은 펼침 아래에 이어짐(캡처 d131-usage-expanded-1.png); `ldap-e2e/group-shared` 클릭 → 펼침 이동(region 1개, 첫 항목 false; 캡처 -2.png); 재클릭 → region 0·URL `/admin/usage`.
+
 ### ✅ base 매니페스트 사이트 중립화 + 오버레이 apply 이미지 가드 — **완료·실증**(2026-09-14, d130)
 
 사용자 보고(프로덕션): 소스를 git pull 하면 소스에 커밋된 테스트베드 태그(d1xx)가 배포를
