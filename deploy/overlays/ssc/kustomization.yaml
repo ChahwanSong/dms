@@ -19,10 +19,10 @@ resources:
 # 워크로드 image 필드(dms·dms-agent)를 사내 레지스트리/태그로. ConfigMap 안의
 # 이미지 문자열은 patch-config 가 따로 덮는다(prod 와 동일).
 images:
-  - name: pkg-01:5000/dms
+  - name: set-by-overlay.invalid/dms
     newName: REPLACE_REGISTRY/dms
     newTag: REPLACE_DMS_TAG
-  - name: pkg-01:5000/dms-agent
+  - name: set-by-overlay.invalid/dms-agent
     newName: REPLACE_REGISTRY/dms-agent
     newTag: REPLACE_DMS_AGENT_TAG
 
