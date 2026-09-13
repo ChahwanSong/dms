@@ -1,0 +1,10 @@
+# 테스트베드 ConfigMap 패치(전략적 머지): base 의 자리표시자 DMS_JOB_IMAGE 만 실 값으로.
+# 라이브 잡 이미지는 포탈 릴리스의 DB 오버라이드(control_state.job_image)가 이 값을
+# 이긴다 -- 여기 값은 "오버라이드가 없을 때의 기본" 이자 배지의 매니페스트 기준이다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-config
+  namespace: dms
+data:
+  DMS_JOB_IMAGE: "pkg-01:5000/dms-mpifileutils:d110"

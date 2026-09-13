@@ -1,0 +1,27 @@
+# DMS 테스트베드 오버레이(2026-09-14). base(deploy/k8s)의 image:·DMS_JOB_IMAGE 는 사이트
+# 중립 자리표시자(set-by-overlay.invalid/<img>:set-by-overlay)만 담는다 -- 실 레지스트리·
+# 태그는 사이트 오버레이가 넣는다. 이 파일이 테스트베드의 "매니페스트-우선 배포" 단일
+# 진실이다: 태그 bump = 아래 newTag(+ patch-config.yaml 의 DMS_JOB_IMAGE) 를 고치는 커밋.
+# 20-config.yaml 의 나머지 값(LDAP·레지스트리·간격 등)은 그 자체가 테스트베드 값이라
+# 여기서 덮을 것이 없다.
+#
+# 적용:  kubectl apply -k deploy/overlays/testbed      (raw `apply -f deploy/k8s` 금지)
+# 확인:  kubectl kustomize deploy/overlays/testbed | grep image:
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../k8s
+
+# name 은 base 의 자리표시자 이름과 정확히 같아야 한다(태그 무관 매칭). dms 계보(api·
+# controller 본체 + migrate initContainer + 30-migrate-job)는 한 항목이 전부 바꾼다.
+images:
+  - name: set-by-overlay.invalid/dms
+    newName: pkg-01:5000/dms
+    newTag: d129
+  - name: set-by-overlay.invalid/dms-agent
+    newName: pkg-01:5000/dms-agent
+    newTag: d123
+
+patches:
+  - path: patch-config.yaml

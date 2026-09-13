@@ -203,8 +203,8 @@ destroy` 로 Ceph 를 새로 만들 때뿐**이며 그때는 `deploy/testbed/dms
 첫 보고(30s)·프로브(60s) 전이면 `no_ready_sync_candidate` 로 거부될 수 있다 — 1~2분 뒤 재제출.
 
 **적용 방법 주의**: securityContext 는 매니페스트 필드라 포탈 릴리스(이미지 patch)만으로는
-실리지 않는다 — d128 이상으로 올릴 때 `kubectl apply -f deploy/k8s/40-api.yaml -f
-deploy/k8s/41-controller.yaml` 을 한 번 반드시 거친다(드리프트 배지는 이미지만 비교한다).
+실리지 않는다 — d128 이상으로 올릴 때 사이트 오버레이 `kubectl apply -k
+deploy/overlays/<site>` 를 한 번 반드시 거친다(드리프트 배지는 이미지만 비교한다).
 
 배포 후 확인:
 
@@ -261,23 +261,20 @@ kubectl -n dms get secret dms-secrets \
   -o jsonpath='{.data.DMS_SHARED_TOKEN}' | base64 -d; echo
 ```
 
-## 4. Migrate
+## 4. Migrate / 5. Bring up api / controller / agent (testbed overlay)
+
+`deploy/k8s` 의 `image:`·`DMS_JOB_IMAGE` 는 **사이트 중립 자리표시자**
+(`set-by-overlay.invalid/<img>:set-by-overlay`, 2026-09-14)다 -- 실 레지스트리·태그는 오버레이가 넣는다.
+테스트베드는 `deploy/overlays/testbed`(newTag = 이 테스트베드의 태그, 태그 bump 는 이
+파일 커밋), 프로덕션은 `deploy/overlays/prod|ssc`(values.env). **base 를 raw 로
+`kubectl apply -f deploy/k8s/…` 하지 마라** -- 자리표시자 이미지라 pull 에서 즉시
+실패한다(다른 사이트 값을 조용히 배포하던 사고를 막기 위한 의도된 실패).
 
 ```bash
-kubectl apply -f deploy/k8s/30-migrate-job.yaml
+kubectl -n dms delete job dms-migrate --ignore-not-found   # Job 은 불변이라 재실행 전 삭제
+kubectl apply -k deploy/overlays/testbed                   # migrate + api + controller + agent (+ config/rbac/ingress)
 kubectl wait --for=condition=complete job/dms-migrate -n dms --timeout=120s
 kubectl logs job/dms-migrate -n dms   # expect: "migrated"
-```
-
-Re-running: `kubectl delete job/dms-migrate -n dms` then re-apply (Job specs
-are immutable, so a stale completed Job blocks re-apply).
-
-## 5. Bring up api / controller / agent
-
-```bash
-kubectl apply -f deploy/k8s/40-api.yaml
-kubectl apply -f deploy/k8s/41-controller.yaml
-kubectl apply -f deploy/k8s/50-agent-daemonset.yaml
 
 kubectl -n dms rollout status deployment/dms-api
 kubectl -n dms rollout status deployment/dms-controller
@@ -450,9 +447,10 @@ kubectl -n dms get vcjob,pods -l "dms.io/job-id=$JOB_ID"
 빌드하는 이미지의 동봉 매니페스트(`deploy/k8s`) 태그를 이 빌드 태그로 자동
 스탬프**하므로(`build_manifests._SCRIPT`), 그 태그로 배포하면 **live == 동봉
 매니페스트가 되어 드리프트 배지가 안 뜬다** — 예전처럼 손으로 `deploy/k8s` 를 먼저
-bump 해 빌드하지 않아도 된다. 단 그 태그를 실제로 굴리려면 `deploy/k8s` 의 **git
-값**도 그 태그로 맞춰 `kubectl apply` 해야 새 태그가 배포된다(이미지 안 스탬프는
-드리프트 판정용, git 값은 apply 대상). 태그를 비우면 `b<build_id 앞 8자>`
+bump 해 빌드하지 않아도 된다. 단 그 태그를 실제로 굴리려면 **사이트 오버레이의 태그**
+(테스트베드 `deploy/overlays/testbed/kustomization.yaml` 의 `newTag`, prod/ssc 는
+values.env 의 `DMS_TAG`)도 그 태그로 맞춰 `kubectl apply -k` 해야 새 태그가 배포된다
+(이미지 안 스탬프는 드리프트 판정용, 오버레이 값은 apply 대상; base 는 자리표시자). 태그를 비우면 `b<build_id 앞 8자>`
 (`build_tag()`)가 파생된다 — 이 자동 태그도 스탬프되므로 릴리스 화면으로 굴리면
 드리프트가 없지만, 관례 태그(dNN)를 권한다. 주의: `30-migrate-job.yaml`/
 `40-api.yaml`/`41-controller.yaml`/`50-agent-daemonset.yaml`이 전부
@@ -632,12 +630,14 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
 
 **4) 롤아웃 성공 후 매니페스트의 `image:`를 손으로 맞춰야 한다(설계 §9).** 정적 YAML이
 여전히 **선언적 진실**이다. 롤아웃은 살아 있는 클러스터 오브젝트만 바꾸므로, 파일을
-그대로 두면 다음 `kubectl apply -f deploy/k8s/`가 클러스터를 옛 태그로 **되돌린다.**
-성공한 배치마다:
+그대로 두면 다음 `kubectl apply -k deploy/overlays/<site>`가 클러스터를 옛 태그로
+**되돌린다.** 성공한 배치마다 사이트 오버레이의 태그를 맞춘다(base `deploy/k8s` 는
+자리표시자라 손대지 않는다):
 
-- `dms` 계보: `30-migrate-job.yaml`/`40-api.yaml`/`41-controller.yaml` 세 파일 모두
-  (하나라도 빠지면 그 컴포넌트만 옛 이미지로 돈다)
-- `dms-agent` 계보: `50-agent-daemonset.yaml`
+- 테스트베드: `deploy/overlays/testbed/kustomization.yaml` 의 `newTag`(dms 계보 = api·
+  controller·migrate 가 한 항목, dms-agent 계보 = 다른 항목) + `patch-config.yaml` 의
+  `DMS_JOB_IMAGE`
+- prod/ssc: `values.env` 의 `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`
 
 이 슬라이스는 파일을 자동으로 고치지 않는다 — 컨트롤러 파드 안에 저장소가 없다.
 어긋남을 화면에 표시하는 것은 슬라이스 14 대시보드의 몫이다. Helm/kustomize는 도입하지

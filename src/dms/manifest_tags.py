@@ -384,6 +384,23 @@ def manifest_job_image(root=None) -> "str | None":
 # "사용 중" 판정에 남의 태그가 샌다. 규칙: 동봉 이미지의 레지스트리가 이 사이트의
 # 빌드 레지스트리(DMS_BUILD_REGISTRY)와 같을 때만 기준값으로 쓰고, 다르면 None(모름).
 
+# base(deploy/k8s)의 이미지 참조는 사이트 중립 자리표시자다(2026-09-14): 특정 사이트
+# (테스트베드)의 실 레지스트리·태그가 커밋되면 git pull 한 다른 사이트에서 raw apply·
+# 드리프트 배지·레지스트리 "사용 중" 판정이 남의 값을 쓴다. 실 값은 오버레이가 넣고
+# (deploy/overlays/*), 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프한다. 동봉값이
+# 자리표시자면 "이 사이트의 기준값" 이 아니라 None(모름) 이다 -- 레지스트리가 .invalid
+# 라 site_image 의 레지스트리 대조로도 걸리지만, 아래 is_placeholder_image 가 명시적
+# 규칙이다(계약 테스트가 base 전 줄을 이 값으로 고정한다).
+PLACEHOLDER_REGISTRY = "set-by-overlay.invalid"
+PLACEHOLDER_TAG = "set-by-overlay"
+
+
+def is_placeholder_image(image) -> bool:
+    if not isinstance(image, str):
+        return False
+    return image.startswith(PLACEHOLDER_REGISTRY + "/") or image.endswith(":" + PLACEHOLDER_TAG)
+
+
 def image_registry(image: str) -> "str | None":
     """이미지 참조의 레지스트리 부분. 첫 경로 조각이 '.'/':' 을 품거나 localhost 일
     때만 레지스트리다(docker.io 관례) -- 아니면 None."""
@@ -397,7 +414,7 @@ def image_registry(image: str) -> "str | None":
 
 def site_image(image: "str | None", registry: "str | None") -> "str | None":
     """이 사이트에 귀속된 동봉 이미지만 돌려준다(레지스트리 일치). 아니면 None."""
-    if not image or not registry:
+    if not image or not registry or is_placeholder_image(image):
         return None
     mine = image_registry(image)
     if mine is None or mine.lower() != registry.strip().lower():
