@@ -111,6 +111,12 @@ if [ "$DRY" = 1 ]; then
   exit 0
 fi
 
+# 이미지 변경 가드(2026-09-14): 포탈 릴리스 뒤 values.env 태그를 안 맞춘 채 install.sh 를
+# 다시 돌리면 라이브 이미지가 옛 태그로 되돌아간다 -- 렌더 이미지 != 라이브면 거부한다.
+# 의도한 이미지 변경(업그레이드)은 ALLOW_IMAGE_CHANGE=1 sh install.sh 로 명시한다.
+step "2b. 이미지 변경 가드 (렌더 이미지 == 라이브가 아니면 거부; ALLOW_IMAGE_CHANGE=1 로 허용)"
+sh "$HERE/overlays/guard-images.sh" "$DIR" || die "가드 거부 -- values.env 의 DMS_TAG/DMS_AGENT_TAG 를 라이브에 맞추거나 ALLOW_IMAGE_CHANGE=1 로 재실행"
+
 step "3. 적용 (kubectl apply -k)"
 # migrate Job 은 spec 불변이라 이미지 태그가 바뀌면 apply 가 못 고친다 — 재실행
 # 시 새 이미지로 다시 돌도록 먼저 지운다(멱등, 없으면 무시).
