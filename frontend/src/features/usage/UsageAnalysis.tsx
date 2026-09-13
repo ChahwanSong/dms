@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { ChevronRight } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Table } from "../../components/ui/Table";
@@ -162,26 +163,16 @@ function TemperatureTrend({ points, tempKey }: {
   );
 }
 
-export function UsageAnalysis() {
+// 타깃 1건의 상세(요약 타일·실 사용량 추이·온도 추이·스캔 이력). 2026-09-14 부터
+// 목록의 **선택한 행 바로 아래에 펼쳐진다**(expand). 표시 창·온도 축 state 는 여기
+// 국소라 타깃을 바꾸면 초기화된다 -- 다른 타깃의 잔류 선택이 새 타깃에 묻어 가지
+// 않는다. showTitle 은 목록 밖 폴백 카드(선택 타깃이 현재 목록에 없을 때)에서만 켠다.
+function TargetDetail({ storage, target, showTitle }: {
+  storage: string; target: string; showTitle: boolean;
+}) {
   const navigate = useNavigate();
-  // 선택 타깃은 URL 이 진실이다 -- 새로고침·딥링크에서 같은 화면이 나온다.
-  const [params, setParams] = useSearchParams();
-  const storage = params.get("storage");
-  const target = params.get("target");
-  const [input, setInput] = useState("");
-  const [q, setQ] = useState("");
-  // 검색 디바운스 300ms: 타이핑마다 GROUP BY 를 쏘지 않는다.
-  useEffect(() => {
-    const t = setTimeout(() => setQ(input.trim()), 300);
-    return () => clearTimeout(t);
-  }, [input]);
-
-  const targets = useScanTargets(q);
   const [windowLimit, setWindowLimit] = useState<number>(HISTORY_WINDOWS[0]);
   const history = useScanHistory(storage, target, windowLimit);
-
-  const select = (s: string, t: string) =>
-    setParams({ storage: s, target: t });
 
   const points = history.data?.points ?? [];
   // 차트는 용량을 아는 포인트만 -- null(모름)을 0 으로 그리면 거짓 절벽이 된다.
@@ -213,11 +204,175 @@ export function UsageAnalysis() {
     ? tempKey : (tempKeys[0] ?? tempKey);
 
   return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {showTitle ? (
+          <h2 className="text-lg font-semibold">
+            {storage}<span className="text-muted">:</span>{target}
+          </h2>
+        ) : (
+          // 펼침 행 안에서는 행 자체가 제목이다 -- 창 안내만 왼쪽에 둔다.
+          <p className="text-muted text-xs">
+            최근 {history.data?.window_limit ?? windowLimit}건까지만 표시합니다
+            {history.data?.window_full === true
+              && " — 이 타깃은 그 이전 스캔 이력도 있습니다(목록의 스캔 횟수가 전수)"}
+          </p>
+        )}
+        {/* 표시 창 선택(WindowSelect 시각 관례의 국소판 -- 그쪽은 시간 단위라
+            재사용 대신 건수 선택지로 새로 둔다). */}
+        <div className="flex items-center gap-1" role="group"
+             aria-label="이력 표시 창">
+          {HISTORY_WINDOWS.map((n) => (
+            <button key={n} type="button"
+                    onClick={() => setWindowLimit(n)}
+                    className={`rounded px-2 py-1 text-xs border ${
+                      windowLimit === n
+                        ? "font-semibold border-black/30"
+                        : "text-muted border-black/10"}`}>
+              최근 {n}건
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* 상시 창 안내(사용자 요청 2026-08-24): 조건부(창 꽉 참)로만 말하면
+          "이게 전체 이력"이라는 오독이 기본값이 된다 -- 항상 말한다(제목형은 여기). */}
+      {showTitle && (
+        <p className="text-muted text-xs mt-1">
+          최근 {history.data?.window_limit ?? windowLimit}건까지만 표시합니다
+          {history.data?.window_full === true
+            && " — 이 타깃은 그 이전 스캔 이력도 있습니다(목록의 스캔 횟수가 전수)"}
+        </p>
+      )}
+      {history.isLoading ? <p className="text-muted mt-2">이력 불러오는 중…</p>
+       : history.isError ? <p className="text-bad text-sm mt-2">{(history.error as ApiError).message}</p>
+       : points.length === 0 ? (
+        <p className="text-muted text-sm mt-2">이 타깃의 성공 scan 이 없습니다</p>
+      ) : (<>
+        <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+          {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
+          <MetricTile label="최신 실 사용량"
+                      value={latest !== null ? humanBytes(latest.bytes) : "—"} />
+          <MetricTile label="직전 스캔 대비"
+                      value={delta === null ? "—"
+                        : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
+          <MetricTile label={`hot 비율(atime ≤${HOT_AGE_MAX_DAYS}d)`}
+                      value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
+          <MetricTile label="스캔 이력 수" value={points.length} />
+        </div>
+
+        <h3 className="mt-5 font-semibold text-sm">실 사용량 추이</h3>
+        <p className="text-muted text-xs mb-2">
+          점 = 성공 scan 1회(클릭하면 해당 요청 상세). x 축은 시간 비례 —
+          점 간격이 곧 스캔 간격입니다.
+        </p>
+        <TimeSeriesChart
+          label="실 사용량 추이"
+          points={charted.map((c) => ({
+            t: c.epoch, y: c.bytes,
+            // aria-label(폴백)은 한 줄, 호버 툴팁은 구조화 3행(시간·요청자·용량)
+            label: `${kstStampEpoch(c.epoch)} · ${humanBytes(c.bytes)}`
+              + (c.point.requester ? ` · ${c.point.requester}` : ""),
+            tooltip: [
+              { k: "시간", v: kstStampEpoch(c.epoch) },
+              { k: "요청자", v: c.point.requester ?? "—" },
+              { k: "실 사용량", v: humanBytes(c.bytes) },
+            ],
+          }))}
+          formatY={humanBytes} formatX={kstStampEpoch}
+          emptyText="용량을 아는 포인트가 없습니다"
+          onPointClick={(i) => navigate(`/jobs/${charted[i].point.request_id}`)} />
+        {(unknownCount > 0 || (history.data?.skipped_unreadable ?? 0) > 0) && (
+          <p className="text-muted text-xs mt-1">
+            {unknownCount > 0 && `용량 미상 ${unknownCount}건은 차트에서 제외. `}
+            {(history.data?.skipped_unreadable ?? 0) > 0
+              && `리포트를 읽지 못한 스캔 ${history.data!.skipped_unreadable}건 제외.`}
+          </p>
+        )}
+
+        <h3 className="mt-5 font-semibold text-sm">데이터 온도 추이</h3>
+        <div className="my-2 flex gap-2">
+          {tempKeys.map((k) => (
+            <Button key={k} type="button"
+                    variant={effectiveTempKey === k ? "outline" : "ghost"}
+                    onClick={() => setTempKey(k)}>{k}</Button>
+          ))}
+        </div>
+        <TemperatureTrend points={points} tempKey={effectiveTempKey} />
+        {TEMP_CAPTIONS[effectiveTempKey] && (
+          <p className="text-muted text-xs mt-2">{TEMP_CAPTIONS[effectiveTempKey]}</p>
+        )}
+
+        <h3 className="mt-5 font-semibold text-sm">스캔 이력</h3>
+        <Table>
+          <thead><tr className="text-muted">
+            {/* nowrap: 좁은 폭에서 「파일 수」가 세로로 꺾여 표가 흔들린다 */}
+            <th className="py-2 whitespace-nowrap">시각</th>
+            <th className="whitespace-nowrap">실 사용량</th>
+            <th className="whitespace-nowrap">파일 수</th>
+            <th className="whitespace-nowrap">hot 비율</th>
+            <th className="whitespace-nowrap">요청자</th><th>요청</th>
+          </tr></thead>
+          <tbody>
+            {[...points].reverse().map((p) => {
+              const epoch = pointEpoch(p);
+              const hot = hotRatio(p.time_histograms["atime"]);
+              return (
+                <tr key={p.job_id} className="border-t border-black/5">
+                  <td className="py-2 whitespace-nowrap">
+                    {epoch === null ? "—" : kstStampEpoch(epoch)}
+                  </td>
+                  <td className="whitespace-nowrap">
+                    {p.total_bytes === null ? "—" : humanBytes(p.total_bytes)}
+                  </td>
+                  <td>{p.summary["total_files"] ?? "—"}</td>
+                  <td>{hot === null ? "—" : `${Math.round(hot * 100)}%`}</td>
+                  <td className="text-muted">{p.requester ?? "—"}</td>
+                  <td><Link className="text-accent" to={`/jobs/${p.request_id}`}>
+                    {p.request_id.slice(0, 12)}
+                  </Link></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      </>)}
+    </div>
+  );
+}
+
+const DETAIL_ID = "usage-target-detail";
+
+export function UsageAnalysis() {
+  // 선택 타깃은 URL 이 진실이다 -- 새로고침·딥링크에서 같은 화면이 나온다.
+  const [params, setParams] = useSearchParams();
+  const storage = params.get("storage");
+  const target = params.get("target");
+  const [input, setInput] = useState("");
+  const [q, setQ] = useState("");
+  // 검색 디바운스 300ms: 타이핑마다 GROUP BY 를 쏘지 않는다.
+  useEffect(() => {
+    const t = setTimeout(() => setQ(input.trim()), 300);
+    return () => clearTimeout(t);
+  }, [input]);
+
+  const targets = useScanTargets(q);
+  const rows = targets.data ?? [];
+  const activeKey = storage !== null && target !== null ? `${storage}:${target}` : null;
+  // 펼침은 한 번에 하나(사용자 요청 2026-09-14): 같은 행 재클릭 = 접기(URL 파라미터
+  // 제거), 다른 행 클릭 = 펼침 이동. URL 이 진실이라 뒤로가기·새로고침도 같은 상태.
+  const toggle = (s: string, t: string) =>
+    (s === storage && t === target) ? setParams({}) : setParams({ storage: s, target: t });
+  // 딥링크·검색 필터로 선택 타깃 행이 지금 목록에 없으면 펼칠 행이 없다 -- 표 아래
+  // 카드로 폴백해 링크가 죽지 않게 한다(목록 로딩 중엔 깜빡임 방지로 보류).
+  const listed = rows.some((r) => `${r.storage_name}:${r.target}` === activeKey);
+  const fallback = activeKey !== null && !targets.isLoading && !listed;
+
+  return (
     <section className="space-y-4">
       <h1 className="text-2xl font-bold">사용량 분석</h1>
       <p className="text-muted text-sm">
         디렉터리별 scan 이력의 실 사용량·데이터 온도 변화 — 요청자와 무관하게
-        모든 성공 scan 을 모아 봅니다.
+        모든 성공 scan 을 모아 봅니다. 경로를 클릭하면 그 아래에 상세가 펼쳐집니다.
       </p>
       <Card>
         <div className="mb-3 flex items-center gap-2">
@@ -229,7 +384,7 @@ export function UsageAnalysis() {
         </div>
         {targets.isLoading ? <p className="text-muted">불러오는 중…</p>
          : targets.isError ? <p className="text-bad text-sm">{(targets.error as ApiError).message}</p>
-         : (targets.data ?? []).length === 0 ? (
+         : rows.length === 0 ? (
           <p className="text-muted text-sm">
             {q ? "검색과 일치하는 scan 타깃이 없습니다" : "성공한 scan 이 아직 없습니다"}
           </p>
@@ -240,21 +395,44 @@ export function UsageAnalysis() {
               <th>스캔 횟수</th><th>최근 스캔</th>
             </tr></thead>
             <tbody>
-              {(targets.data ?? []).map((r) => {
-                const active = r.storage_name === storage && r.target === target;
+              {rows.map((r) => {
+                const key = `${r.storage_name}:${r.target}`;
+                const active = key === activeKey;
                 return (
-                  <tr key={`${r.storage_name}:${r.target}`}
-                      className={`border-t border-black/5 ${active ? "bg-accent/5" : ""}`}>
-                    <td className="py-2 text-muted">{r.storage_name}</td>
-                    {/* 선택은 버튼이다 -- 행 onClick 만 두면 키보드로 못 고른다 */}
-                    <td><button type="button"
-                                className={`text-left ${active ? "text-accent font-medium" : "text-accent"}`}
-                                onClick={() => select(r.storage_name, r.target)}>
-                      {r.target}
-                    </button></td>
-                    <td>{r.scan_count}</td>
-                    <td className="text-muted whitespace-nowrap">{kstStampOrDash(r.last_scan_at)}</td>
-                  </tr>
+                  <Fragment key={key}>
+                    <tr className={`border-t border-black/5 ${active ? "bg-accent/5" : ""}`}>
+                      <td className="py-2 text-muted">{r.storage_name}</td>
+                      {/* 선택은 버튼이다 -- 행 onClick 만 두면 키보드로 못 고른다.
+                          aria-expanded/controls 로 "펼침 버튼"임을 보조기기에 알린다. */}
+                      <td><button type="button"
+                                  aria-expanded={active}
+                                  aria-controls={active ? DETAIL_ID : undefined}
+                                  className={`inline-flex items-center gap-1 text-left ${
+                                    active ? "text-accent font-medium" : "text-accent"}`}
+                                  onClick={() => toggle(r.storage_name, r.target)}>
+                        <ChevronRight aria-hidden="true"
+                                      className={`h-3.5 w-3.5 shrink-0 transition-transform ${
+                                        active ? "rotate-90" : ""}`} />
+                        {r.target}
+                      </button></td>
+                      <td>{r.scan_count}</td>
+                      <td className="text-muted whitespace-nowrap">{kstStampOrDash(r.last_scan_at)}</td>
+                    </tr>
+                    {active && (
+                      // 펼침 행: 선택 행 바로 아래, 표 전체 폭. 왼쪽 강조선이 "이 행에
+                      // 속한 상세"임을 시각적으로 묶는다.
+                      <tr className="border-t border-black/5 bg-accent/[0.03]">
+                        <td colSpan={4} className="p-0">
+                          <div id={DETAIL_ID} role="region"
+                               aria-label={`${r.storage_name}:${r.target} 상세`}
+                               className="border-l-2 border-accent/40 px-4 py-3">
+                            <TargetDetail storage={r.storage_name} target={r.target}
+                                          showTitle={false} />
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -262,128 +440,14 @@ export function UsageAnalysis() {
         )}
       </Card>
 
-      {storage !== null && target !== null && (
+      {fallback && storage !== null && target !== null && (
         <Card>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-lg font-semibold">
-              {storage}<span className="text-muted">:</span>{target}
-            </h2>
-            {/* 표시 창 선택(WindowSelect 시각 관례의 국소판 -- 그쪽은 시간 단위라
-                재사용 대신 건수 선택지로 새로 둔다). */}
-            <div className="flex items-center gap-1" role="group"
-                 aria-label="이력 표시 창">
-              {HISTORY_WINDOWS.map((n) => (
-                <button key={n} type="button"
-                        onClick={() => setWindowLimit(n)}
-                        className={`rounded px-2 py-1 text-xs border ${
-                          windowLimit === n
-                            ? "font-semibold border-black/30"
-                            : "text-muted border-black/10"}`}>
-                  최근 {n}건
-                </button>
-              ))}
-            </div>
-          </div>
-          {/* 상시 창 안내(사용자 요청 2026-08-24): 조건부(창 꽉 참)로만 말하면
-              "이게 전체 이력"이라는 오독이 기본값이 된다 -- 항상 말한다. */}
-          <p className="text-muted text-xs mt-1">
-            최근 {history.data?.window_limit ?? windowLimit}건까지만 표시합니다
-            {history.data?.window_full === true
-              && " — 이 타깃은 그 이전 스캔 이력도 있습니다(목록의 스캔 횟수가 전수)"}
+          <p className="text-muted text-xs mb-2">
+            선택한 타깃이 현재 목록(검색 결과)에 없어 아래에 표시합니다.
           </p>
-          {history.isLoading ? <p className="text-muted mt-2">이력 불러오는 중…</p>
-           : history.isError ? <p className="text-bad text-sm mt-2">{(history.error as ApiError).message}</p>
-           : points.length === 0 ? (
-            <p className="text-muted text-sm mt-2">이 타깃의 성공 scan 이 없습니다</p>
-          ) : (<>
-            <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
-              {/* null ≠ 0: 모름은 "—" -- 0 B 로 그리면 "다 지워졌다"는 거짓이 된다 */}
-              <MetricTile label="최신 실 사용량"
-                          value={latest !== null ? humanBytes(latest.bytes) : "—"} />
-              <MetricTile label="직전 스캔 대비"
-                          value={delta === null ? "—"
-                            : `${delta >= 0 ? "+" : "−"}${humanBytes(Math.abs(delta))}`} />
-              <MetricTile label={`hot 비율(atime ≤${HOT_AGE_MAX_DAYS}d)`}
-                          value={latestHot === null ? "—" : `${Math.round(latestHot * 100)}%`} />
-              <MetricTile label="스캔 이력 수" value={points.length} />
-            </div>
-
-            <h3 className="mt-5 font-semibold text-sm">실 사용량 추이</h3>
-            <p className="text-muted text-xs mb-2">
-              점 = 성공 scan 1회(클릭하면 해당 요청 상세). x 축은 시간 비례 —
-              점 간격이 곧 스캔 간격입니다.
-            </p>
-            <TimeSeriesChart
-              label="실 사용량 추이"
-              points={charted.map((c) => ({
-                t: c.epoch, y: c.bytes,
-                // aria-label(폴백)은 한 줄, 호버 툴팁은 구조화 3행(시간·요청자·용량)
-                label: `${kstStampEpoch(c.epoch)} · ${humanBytes(c.bytes)}`
-                  + (c.point.requester ? ` · ${c.point.requester}` : ""),
-                tooltip: [
-                  { k: "시간", v: kstStampEpoch(c.epoch) },
-                  { k: "요청자", v: c.point.requester ?? "—" },
-                  { k: "실 사용량", v: humanBytes(c.bytes) },
-                ],
-              }))}
-              formatY={humanBytes} formatX={kstStampEpoch}
-              emptyText="용량을 아는 포인트가 없습니다"
-              onPointClick={(i) => navigate(`/jobs/${charted[i].point.request_id}`)} />
-            {(unknownCount > 0 || (history.data?.skipped_unreadable ?? 0) > 0) && (
-              <p className="text-muted text-xs mt-1">
-                {unknownCount > 0 && `용량 미상 ${unknownCount}건은 차트에서 제외. `}
-                {(history.data?.skipped_unreadable ?? 0) > 0
-                  && `리포트를 읽지 못한 스캔 ${history.data!.skipped_unreadable}건 제외.`}
-              </p>
-            )}
-
-            <h3 className="mt-5 font-semibold text-sm">데이터 온도 추이</h3>
-            <div className="my-2 flex gap-2">
-              {tempKeys.map((k) => (
-                <Button key={k} type="button"
-                        variant={effectiveTempKey === k ? "outline" : "ghost"}
-                        onClick={() => setTempKey(k)}>{k}</Button>
-              ))}
-            </div>
-            <TemperatureTrend points={points} tempKey={effectiveTempKey} />
-            {TEMP_CAPTIONS[effectiveTempKey] && (
-              <p className="text-muted text-xs mt-2">{TEMP_CAPTIONS[effectiveTempKey]}</p>
-            )}
-
-            <h3 className="mt-5 font-semibold text-sm">스캔 이력</h3>
-            <Table>
-              <thead><tr className="text-muted">
-                {/* nowrap: 좁은 폭에서 「파일 수」가 세로로 꺾여 표가 흔들린다 */}
-                <th className="py-2 whitespace-nowrap">시각</th>
-                <th className="whitespace-nowrap">실 사용량</th>
-                <th className="whitespace-nowrap">파일 수</th>
-                <th className="whitespace-nowrap">hot 비율</th>
-                <th className="whitespace-nowrap">요청자</th><th>요청</th>
-              </tr></thead>
-              <tbody>
-                {[...points].reverse().map((p) => {
-                  const epoch = pointEpoch(p);
-                  const hot = hotRatio(p.time_histograms["atime"]);
-                  return (
-                    <tr key={p.job_id} className="border-t border-black/5">
-                      <td className="py-2 whitespace-nowrap">
-                        {epoch === null ? "—" : kstStampEpoch(epoch)}
-                      </td>
-                      <td className="whitespace-nowrap">
-                        {p.total_bytes === null ? "—" : humanBytes(p.total_bytes)}
-                      </td>
-                      <td>{p.summary["total_files"] ?? "—"}</td>
-                      <td>{hot === null ? "—" : `${Math.round(hot * 100)}%`}</td>
-                      <td className="text-muted">{p.requester ?? "—"}</td>
-                      <td><Link className="text-accent" to={`/jobs/${p.request_id}`}>
-                        {p.request_id.slice(0, 12)}
-                      </Link></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </Table>
-          </>)}
+          <div id={DETAIL_ID} role="region" aria-label={`${storage}:${target} 상세`}>
+            <TargetDetail storage={storage} target={target} showTitle />
+          </div>
         </Card>
       )}
     </section>
