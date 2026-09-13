@@ -18,8 +18,11 @@ data:
   #     adapter, which never touches k8s at all) ---
   DMS_EXECUTION_BACKEND: "volcano"
   DMS_K8S_NAMESPACE: "dms"
-  # Must match whatever build-and-push.sh TAG was actually pushed as.
-  DMS_JOB_IMAGE: "pkg-01:5000/dms-mpifileutils:d110"
+  # 사이트 중립 자리표시자(2026-09-14): 실 값은 오버레이가 넣는다(테스트베드는
+  # deploy/overlays/testbed/patch-config.yaml, prod/ssc 는 patch-config + values.env).
+  # base 를 raw 로 apply 하면 잡이 이 이미지를 pull 하다 즉시 실패한다(의도). 라이브는
+  # 포탈 릴리스의 DB 오버라이드(control_state.job_image)가 이 값을 이긴다.
+  DMS_JOB_IMAGE: "set-by-overlay.invalid/dms-mpifileutils:set-by-overlay"
 
   # --- artifact storage: shared-FS path job pods/controller/api write/read
   #     summary.json under (execution_manifests.py::_artifact_dir,

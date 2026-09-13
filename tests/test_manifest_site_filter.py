@@ -28,6 +28,12 @@ def test_site_image_keeps_only_this_sites_registry():
     assert site_image("python:3.11-slim", "pkg-01:5000") is None
     assert site_image(None, "pkg-01:5000") is None
     assert site_image("pkg-01:5000/dms:d119", "") is None
+    # 자리표시자(base 커밋값)는 레지스트리가 같아 보여도 기준값이 아니다(2026-09-14)
+    from dms.manifest_tags import PLACEHOLDER_REGISTRY, PLACEHOLDER_TAG, is_placeholder_image
+    ph = f"{PLACEHOLDER_REGISTRY}/dms:{PLACEHOLDER_TAG}"
+    assert is_placeholder_image(ph) and site_image(ph, PLACEHOLDER_REGISTRY) is None
+    assert site_image(f"pkg-01:5000/dms:{PLACEHOLDER_TAG}", "pkg-01:5000") is None
+    assert not is_placeholder_image("pkg-01:5000/dms:d119")
 
 
 def test_infra_metrics_hide_a_foreign_sites_manifest(client, monkeypatch, settings, db):

@@ -208,3 +208,46 @@ def test_overlays_do_not_patch_control_plane_deployments():
     assert offenders == [], (
         f"오버레이가 Deployment 를 패치한다: {offenders} -- dms-api/dms-controller 의 "
         f"securityContext 는 base 가 유일한 진실이어야 한다")
+
+
+# --- 사이트 중립 base(2026-09-14) ------------------------------------------------
+# WHY: base 에 테스트베드의 실 레지스트리·태그(pkg-01:5000/dms:d129)가 커밋되면 git pull
+# 한 프로덕션에서 raw apply(`kubectl apply -f deploy/k8s`)·`apply -k deploy/k8s`(images
+# 변환 없음)가 그 값을 그대로 배포하고, 드리프트 배지·레지스트리 "사용 중" 판정이 남의
+# 태그를 기준으로 삼는다(2026-09-14 실사고). base 는 자리표시자만 담고 오버레이가 실 값을
+# 넣는다. 이 테스트가 "누가 다시 실 태그를 커밋하는" 회귀를 막는다.
+from dms.manifest_tags import (PLACEHOLDER_REGISTRY, PLACEHOLDER_TAG,  # noqa: E402
+                               _unquote, _value)
+
+_IMAGE_KEYS = ("image:", "DMS_JOB_IMAGE:")
+
+
+def _image_lines(path):
+    for doc in documents(path):
+        for line in doc:
+            s = line.strip()
+            if any(s.startswith(k) for k in _IMAGE_KEYS):
+                yield _unquote(_value(line))
+
+
+def test_base_manifests_carry_only_the_site_neutral_placeholder():
+    seen = 0
+    for path in sorted((REPO_ROOT / "deploy" / "k8s").glob("*.yaml")):
+        for value in _image_lines(path):
+            seen += 1
+            assert value.startswith(PLACEHOLDER_REGISTRY + "/") and value.endswith(":" + PLACEHOLDER_TAG), (
+                f"{path.name}: {value!r} -- base 에는 실 레지스트리·태그를 커밋하지 않는다. "
+                f"실 태그는 deploy/overlays/<site>(테스트베드는 overlays/testbed) 의 newTag 로")
+    assert seen >= 7, seen          # api·controller 본체+migrate init, migrate job, agent, DMS_JOB_IMAGE
+
+
+def test_every_overlay_maps_the_placeholder_image_names():
+    # 오버레이 images.name 이 자리표시자 이름과 다르면 변환이 조용히 무동작이라 자리표시자가
+    # 그대로 배포된다 -- 렌더 후 apply 가 pull 에서 죽는다. 이름을 여기서 고정한다.
+    overlays = sorted((REPO_ROOT / "deploy" / "overlays").glob("*/kustomization.yaml"))
+    assert overlays, "오버레이가 없다"
+    for kust in overlays:
+        names = [line.split(":", 1)[1].strip() for doc in documents(kust) for line in doc
+                 if line.strip().startswith("- name:")]
+        assert set(names) >= {f"{PLACEHOLDER_REGISTRY}/dms", f"{PLACEHOLDER_REGISTRY}/dms-agent"}, (
+            f"{kust.relative_to(REPO_ROOT)}: images.name={names}")

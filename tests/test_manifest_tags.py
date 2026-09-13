@@ -3,8 +3,8 @@
 바뀌므로 리포 접두사만 단언한다 -- 태그 핀 자체는 배포 절차(플랜 이후 절)의 몫이다."""
 from pathlib import Path
 
-from dms.manifest_tags import (container_image, manifest_images, manifest_job_image,
-                               workload_doc)
+from dms.manifest_tags import (PLACEHOLDER_REGISTRY, PLACEHOLDER_TAG, container_image,
+                               manifest_images, manifest_job_image, workload_doc)
 
 REPO_K8S = Path(__file__).resolve().parent.parent / "deploy" / "k8s"
 
@@ -13,9 +13,10 @@ def test_manifest_images_parses_all_four_workloads():
     images = manifest_images(REPO_K8S)
     assert set(images) == {"dms-api", "dms-controller", "dms-agent", "dms-migrate"}
     # api/controller/migrate 는 같은 dms 이미지 계보다(COMPONENTS.repository 실측)
+    # base 는 사이트 중립 자리표시자만 담는다(2026-09-14) -- 실 태그는 오버레이가 넣는다.
     for comp in ("dms-api", "dms-controller", "dms-migrate"):
-        assert images[comp].startswith("pkg-01:5000/dms:"), images
-    assert images["dms-agent"].startswith("pkg-01:5000/dms-agent:")
+        assert images[comp] == f"{PLACEHOLDER_REGISTRY}/dms:{PLACEHOLDER_TAG}", images
+    assert images["dms-agent"] == f"{PLACEHOLDER_REGISTRY}/dms-agent:{PLACEHOLDER_TAG}"
 
 
 def test_manifest_images_default_root_resolves_in_checkout():
@@ -26,7 +27,7 @@ def test_manifest_images_default_root_resolves_in_checkout():
 
 def test_manifest_job_image_reads_quoted_configmap_value():
     image = manifest_job_image(REPO_K8S)
-    assert image.startswith("pkg-01:5000/dms-mpifileutils:")
+    assert image == f"{PLACEHOLDER_REGISTRY}/dms-mpifileutils:{PLACEHOLDER_TAG}"
     assert '"' not in image                       # 20-config.yaml 값의 따옴표는 벗긴다
 
 

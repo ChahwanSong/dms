@@ -27,10 +27,12 @@ resources:
 # 주의: ConfigMap 안의 이미지 문자열(DMS_JOB_IMAGE·DMS_BUILD_*)은 이 변환이
 # 건드리지 못한다 -- patch-config.yaml 에서 따로 덮는다.
 images:
-  - name: pkg-01:5000/dms
+  # base 의 이미지 이름은 사이트 중립 자리표시자(set-by-overlay.invalid/…)다(2026-09-14) --
+  # name 은 그 자리표시자와 정확히 같아야 치환된다(태그 무관).
+  - name: set-by-overlay.invalid/dms
     newName: REPLACE_REGISTRY/dms          # 예: registry.corp.example/dms
     newTag: REPLACE_DMS_TAG                 # 예: d99 (실제 push 한 태그)
-  - name: pkg-01:5000/dms-agent
+  - name: set-by-overlay.invalid/dms-agent
     newName: REPLACE_REGISTRY/dms-agent
     newTag: REPLACE_DMS_AGENT_TAG           # 예: d80
 

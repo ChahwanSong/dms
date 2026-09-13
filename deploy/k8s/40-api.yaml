@@ -50,6 +50,13 @@
 #     and must not inherit root, hence container-level, not pod-level.
 # tests/test_release_manifest_contract.py pins all of the above.
 #
+# image: lines are SITE-NEUTRAL PLACEHOLDERS (set-by-overlay.invalid/<img>:set-by-overlay, 2026-09-14).
+# The real registry/tag is set by an overlay: deploy/overlays/testbed (this
+# testbed), deploy/overlays/prod|ssc (sites, via values.env). Applying this file
+# raw (`kubectl apply -f`) deploys an unpullable image on purpose -- always
+# `kubectl apply -k deploy/overlays/<site>`. The portal build stamps the copy
+# baked into the image (build_manifests), never this checkout.
+#
 # NOTE: `type: Directory` means this pod FAILS to start on any node without a
 # real /cephfs mount. That's fine as long as dms-api only schedules onto the
 # w1-5 workers (all of which mount cephfs-dms per the testbed) -- if the
@@ -88,7 +95,7 @@ spec:
       # 건다 -- 손편집으로 어긋나면 배지가 아니라 그 테스트가 빨간불이 된다.
       initContainers:
         - name: migrate
-          image: pkg-01:5000/dms:d129
+          image: set-by-overlay.invalid/dms:set-by-overlay
           imagePullPolicy: IfNotPresent
           command: ["dms", "migrate"]
           envFrom:
@@ -105,7 +112,7 @@ spec:
               memory: 512Mi
       containers:
         - name: api
-          image: pkg-01:5000/dms:d129
+          image: set-by-overlay.invalid/dms:set-by-overlay
           imagePullPolicy: IfNotPresent
           command: ["dms", "api"]
           # root, no capabilities, immutable image fs -- rationale in the header

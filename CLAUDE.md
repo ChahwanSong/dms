@@ -43,12 +43,15 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   `passwordTransport.ts` 가 바이트 단위로 같아야 한다(대조 테스트 있음).
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
-- **매니페스트-우선 배포**: 이미지 태그를 먼저 bump·커밋하고 **그 커밋에서** 빌드한다
-  (`Dockerfile.dms` 가 `deploy/k8s` 를 이미지에 COPY). 슬라이스 34부터 **빌드가 동봉
-  매니페스트를 빌드 태그로 자동 스탬프**하므로(빌드하는 이미지 줄만), 포탈에서 태그를
-  지정해 빌드하면 그 수동 bump 없이도 배포 시 live == manifest 가 되어 드리프트 배지가
-  안 뜬다 — 단 그 태그를 실제로 굴리려면 `deploy/k8s` 의 git 값도 그 태그로 맞춰야
-  `kubectl apply` 가 새 태그를 배포한다(자동 b태그는 릴리스 화면으로 굴린다).
+- **base 매니페스트는 사이트 중립, 실 태그는 오버레이에**(2026-09-14). `deploy/k8s` 의
+  `image:`·`DMS_JOB_IMAGE` 는 자리표시자(`set-by-overlay.invalid/<img>:set-by-overlay`)뿐이고 계약 테스트가
+  고정한다 — 여기에 실 레지스트리·태그를 커밋하면 git pull 한 다른 사이트가 그 값을
+  배포한다(실사고). 태그 bump 는 테스트베드 `deploy/overlays/testbed/kustomization.yaml`
+  의 `newTag`(+`patch-config.yaml` 의 `DMS_JOB_IMAGE`), 사이트는 `values.env`. 적용은
+  항상 `kubectl apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
+  pull 에서 실패하도록 돼 있다. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
+  (`build_manifests`) 포탈에서 태그를 지정해 빌드·릴리스하면 live == 동봉 매니페스트라
+  드리프트 배지가 안 뜨고, 동봉값이 자리표시자·타 레지스트리면 배지는 "모름"(None) 이다.
 - **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를
   거치면 다른 세션 커밋에 파일이 섞인다(실제 사고 있었음, BACKLOG §5).
 - **PYTHONPATH 함정**: venv 의 `dms` 편집설치는 **본 저장소** src 를 가리킨다. 워크트리
