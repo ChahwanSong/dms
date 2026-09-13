@@ -122,6 +122,51 @@ test("타깃 선택 → 요약 타일·추이 차트·미상 고지·이력 표"
   expect(screen.getByRole("link", { name: "r3" })).toHaveAttribute("href", "/jobs/r3");
   // 요청자는 포인트 3건 모두 alice — 이력 표에 행 수만큼 나온다
   expect(screen.getAllByText("alice")).toHaveLength(HISTORY.points.length);
+  // 상세는 별도 카드가 아니라 **선택한 행 바로 아래 펼침 행**에 있다(2026-09-14)
+  expect(screen.getByRole("button", { name: "artifacts" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("region", { name: "cephfs-dms:artifacts 상세" })).toBeInTheDocument();
+});
+
+test("펼침은 한 번에 하나: 재클릭 = 접기, 다른 행 클릭 = 펼침 이동, 행 바로 아래에 렌더", async () => {
+  renderAt();
+  const artifacts = await screen.findByRole("button", { name: "artifacts" });
+  const team = screen.getByRole("button", { name: "team" });
+  expect(artifacts).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("region")).toBeNull();
+  await userEvent.click(artifacts);
+  const region = await screen.findByRole("region", { name: "cephfs-dms:artifacts 상세" });
+  // 펼침 행은 선택 행의 **다음 형제 행**이다(목록 아래 별도 카드가 아님)
+  const row = artifacts.closest("tr")!;
+  expect(row.nextElementSibling).toContainElement(region);
+  expect(team).toHaveAttribute("aria-expanded", "false");
+  // 다른 행 클릭 -> 펼침이 옮겨 가고 region 은 하나뿐
+  await userEvent.click(team);
+  await screen.findByRole("region", { name: "cephfs-dms:team 상세" });
+  expect(screen.getAllByRole("region")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "artifacts" })).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByRole("button", { name: "team" })).toHaveAttribute("aria-expanded", "true");
+  // 같은 행 재클릭 -> 접힘(URL 파라미터 제거)
+  await userEvent.click(screen.getByRole("button", { name: "team" }));
+  expect(screen.queryByRole("region")).toBeNull();
+  expect(screen.getByRole("button", { name: "team" })).toHaveAttribute("aria-expanded", "false");
+});
+
+test("딥링크 타깃이 현재 목록에 없으면 표 아래 폴백 카드로 표시한다", async () => {
+  server.use(
+    http.get("/api/admin/usage/scan-targets", () => HttpResponse.json([TARGETS[1]])),  // team 만
+    http.get("/api/admin/usage/scan-history", () => HttpResponse.json(HISTORY)),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/admin/usage?storage=cephfs-dms&target=artifacts"]}>
+        <UsageAnalysis />
+      </MemoryRouter>
+    </QueryClientProvider>);
+  expect(await screen.findByText(/현재 목록\(검색 결과\)에 없어/)).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "cephfs-dms:artifacts 상세" })).toBeInTheDocument();
+  expect(await screen.findByText("최신 실 사용량")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: /cephfs-dms.*artifacts/ })).toBeInTheDocument();
 });
 
 test("URL 파라미터 딥링크로 바로 상세가 열린다", async () => {
