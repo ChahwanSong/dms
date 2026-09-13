@@ -42,6 +42,9 @@ $EDITOR deploy/overlays/ssc/values.env   # WEB_NODE=ion2110, PORTAL_PUBLIC_IP=<b
 #    -- push 는 install.sh 1b 단계가 REGISTRY 로 자동 수행(실패·로컬 이미지 없음은 WARN:
 #       노드에 반입된 이미지면 파드 구동 무관, 포탈 레지스트리/릴리스/빌드만 영향).
 #       평문 레지스트리면 values.env REGISTRY_TLS_VERIFY=false.
+#    -- 업그레이드(이미지 태그 변경) 재실행은 ALLOW_IMAGE_CHANGE=1 sh install.sh: install.sh 는
+#       렌더 이미지가 라이브와 다르면 거부한다(포탈 릴리스를 옛 values.env 로 되돌리는 사고 방지).
+#       포탈로 릴리스했으면 values.env 의 DMS_TAG/DMS_AGENT_TAG/MFU_TAG 도 그 태그로 맞춘다.
 
 # 5) 시크릿 · TLS (out-of-band) — 인증서 SAN 에 PORTAL_PUBLIC_IP 를 반드시 포함
 kubectl -n dms create secret generic dms-secrets \
