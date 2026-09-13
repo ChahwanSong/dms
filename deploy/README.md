@@ -272,6 +272,7 @@ kubectl -n dms get secret dms-secrets \
 
 ```bash
 kubectl -n dms delete job dms-migrate --ignore-not-found   # Job 은 불변이라 재실행 전 삭제
+sh deploy/overlays/guard-images.sh deploy/overlays/testbed # 렌더 이미지 != 라이브면 거부(포탈 릴리스 되돌림 방지)
 kubectl apply -k deploy/overlays/testbed                   # migrate + api + controller + agent (+ config/rbac/ingress)
 kubectl wait --for=condition=complete job/dms-migrate -n dms --timeout=120s
 kubectl logs job/dms-migrate -n dms   # expect: "migrated"
@@ -631,8 +632,10 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
 **4) 롤아웃 성공 후 매니페스트의 `image:`를 손으로 맞춰야 한다(설계 §9).** 정적 YAML이
 여전히 **선언적 진실**이다. 롤아웃은 살아 있는 클러스터 오브젝트만 바꾸므로, 파일을
 그대로 두면 다음 `kubectl apply -k deploy/overlays/<site>`가 클러스터를 옛 태그로
-**되돌린다.** 성공한 배치마다 사이트 오버레이의 태그를 맞춘다(base `deploy/k8s` 는
-자리표시자라 손대지 않는다):
+**되돌린다.** 2026-09-14 부터 `deploy/overlays/guard-images.sh`(install.sh 가 apply 직전에
+부른다; 테스트베드는 §4/§5 절차)가 "렌더 이미지 != 라이브" 면 apply 를 거부하므로 조용히
+되돌아가지는 않는다 -- 의도한 이미지 변경은 `ALLOW_IMAGE_CHANGE=1`. 성공한 배치마다
+사이트 오버레이의 태그를 맞춘다(base `deploy/k8s` 는 자리표시자라 손대지 않는다):
 
 - 테스트베드: `deploy/overlays/testbed/kustomization.yaml` 의 `newTag`(dms 계보 = api·
   controller·migrate 가 한 항목, dms-agent 계보 = 다른 항목) + `patch-config.yaml` 의

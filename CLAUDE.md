@@ -49,7 +49,9 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   배포한다(실사고). 태그 bump 는 테스트베드 `deploy/overlays/testbed/kustomization.yaml`
   의 `newTag`(+`patch-config.yaml` 의 `DMS_JOB_IMAGE`), 사이트는 `values.env`. 적용은
   항상 `kubectl apply -k deploy/overlays/<site>` — raw `kubectl apply -f deploy/k8s` 는
-  pull 에서 실패하도록 돼 있다. 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
+  pull 에서 실패하도록 돼 있다. apply 전 `deploy/overlays/guard-images.sh` 가 "렌더 이미지
+  != 라이브" 면 거부한다(포탈 릴리스 뒤 오버레이 태그를 안 맞춘 재적용이 되돌리는 사고
+  방지; 의도한 변경은 `ALLOW_IMAGE_CHANGE=1`). 포탈 빌드는 이미지에 COPY 되는 사본만 스탬프하므로
   (`build_manifests`) 포탈에서 태그를 지정해 빌드·릴리스하면 live == 동봉 매니페스트라
   드리프트 배지가 안 뜨고, 동봉값이 자리표시자·타 레지스트리면 배지는 "모름"(None) 이다.
 - **워크트리 공유 중 커밋은 `git commit -- <경로>`**(pathspec). `git add` 로 인덱스를
