@@ -95,6 +95,41 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ base 매니페스트 사이트 중립화 + 오버레이 apply 이미지 가드 — **완료·실증**(2026-09-14, d130)
+
+사용자 보고(프로덕션): 소스를 git pull 하면 소스에 커밋된 테스트베드 태그(d1xx)가 배포를
+덮어써 이미지 태그 문제가 난다. 진단: 포탈 빌드·릴리스 경로는 원래 사이트 값으로 일관됐고
+(빌드는 이미지에 COPY 되는 사본만 스탬프, 릴리스는 build_registry + 레지스트리 실태그),
+오염 경로는 base(`deploy/k8s`)에 커밋된 테스트베드 실 레지스트리·태그를 raw
+`kubectl apply -f`·`apply -k deploy/k8s`(images 변환 없음)·낡은 values.env 로 재적용하는
+것뿐이었다. 두 층으로 닫았다:
+- **B: base 는 사이트 중립 자리표시자만**(`set-by-overlay.invalid/<img>:set-by-overlay`,
+  image 6줄 + DMS_JOB_IMAGE). 실 태그는 오버레이가 넣는다 — 신규 `deploy/overlays/testbed`
+  (테스트베드의 매니페스트-우선 단일 진실: newTag d130/d123 + DMS_JOB_IMAGE d110), prod/ssc
+  는 `images.name` 을 자리표시자로. `.invalid` 라 raw apply 는 ErrImagePull 로 즉시 실패
+  하고 `site_image` 가 동봉 자리표시자를 None(모름)으로 접는다. 계약 테스트 2건(base 전
+  이미지 줄 자리표시자, 오버레이 images.name 일치).
+- **가드**(`deploy/overlays/guard-images.sh`, `deploy/install.sh`·ssc install.sh 가 apply 직전
+  호출): 렌더된 Deployment/DaemonSet 이미지가 라이브와 다르면 exit 3 거부, 의도한 변경은
+  `ALLOW_IMAGE_CHANGE=1`, 첫 설치는 통과 — 포탈 릴리스 뒤 오버레이 태그를 안 맞춘 재적용이
+  라이브를 옛 태그로 되돌리는 잔여 사고(C)를 막는다.
+- 사전 dry-run(2026-09-14): testbed 오버레이 kustomize → 라이브 diff 0·서버 dry-run 통과;
+  ssc/prod 샘플 values 렌더 → migrate·initContainer·DMS_JOB_IMAGE 포함 전부 사이트 값,
+  자리표시자·pkg-01 잔여 0; 빌드 스탬프 sed 가 빌드 대상만 치환; pytest 1771. 부수 발견:
+  테스트베드 agent 커밋값 d118 ≠ 라이브 d123(포탈 릴리스 후 bump 누락 — 같은 사고 유형).
+- 실증(2026-09-14): main 푸시 → cron 동기화 → **포탈 빌드 d130**(자리표시자 base 에서;
+  동봉 매니페스트 = dms 계보 5줄 d130, agent·잡 이미지 자리표시자 → site_image None) →
+  **포탈 릴리스** dms-api·dms-controller Applied(migrate init 포함 d130) → 배지 원천:
+  api/controller live == manifest d130, agent·job_image manifest 모름. 릴리스 직후 오버레이
+  (d129)로 `kubectl diff -k` → 4곳 d130→d129 되돌림 예정(C 재현) → 가드가 exit 3 으로
+  거부(두 Deployment 나열), 플래그 시 허용 → 오버레이 d130 bump 커밋·푸시 → Job 삭제 →
+  가드 통과 → `apply -k` → diff 0. **raw `kubectl apply -f deploy/k8s/40-api.yaml` 실 재현**:
+  새 파드 `ErrImagePull`(set-by-overlay.invalid DNS 실패)로 Pending, 기존 d130 파드가 계속
+  서비스(readyz 200 유지), 오버레이 apply 로 d130 복구·롤아웃 완료. d130 에서 alice sync
+  Succeeded·열람 매트릭스·3홉 정상. 완료된 migrate Job 은 불변이라 오버레이 태그 변경 뒤
+  `kubectl diff -k` 가 exit 2 를 낸다 — README 절차대로 apply 전 Job 삭제(가드는 Job 을
+  보지 않는다).
+
 ### ✅ 테스트베드·DMS 재기동 영속성 — 공유 FS 레이아웃 코드화 + 재부팅 실증 — **완료**(2026-09-09)
 
 사용자 요청: 테스트베드·DMS 를 재기동해도 현재 상태(공용 디렉터리 770, base 755, 데이터
