@@ -18,7 +18,7 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5000/dms
-    newTag: d131
+    newTag: d132
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5000/dms-agent
     newTag: d123
