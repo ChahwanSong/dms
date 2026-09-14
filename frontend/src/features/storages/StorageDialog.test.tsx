@@ -79,3 +79,24 @@ test("백엔드는 표시명으로 고르고 서버 식별자로 보낸다 -- 'I
   expect(body).toEqual({ storage_name: "gpu1", mount_path: "/home/gpu1", managed_root: "/home/gpu1",
                          backend_type: "gpfs" });
 });
+
+
+test("추가 백엔드(DDN Lustre·Pure Storage·NetApp)도 표시명으로 고르고 식별자로 보낸다", async () => {
+  let body: any = null;
+  server.use(http.post("/api/admin/storages", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json(body, { status: 201 }); }));
+  wrap(<StorageDialog mode="create" trigger={<Button>등록</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "등록" }));
+  const select = screen.getByLabelText("백엔드") as HTMLSelectElement;
+  const labels = Array.from(select.options).map((o) => o.textContent);
+  expect(labels).toEqual(expect.arrayContaining(
+    ["DDN Lustre (EXAScaler)", "Pure Storage (FlashBlade)", "NetApp (ONTAP)"]));
+  await userEvent.type(screen.getByLabelText("스토리지 이름"), "lfs1");
+  await userEvent.type(screen.getByLabelText("마운트 경로"), "/lustre");
+  await userEvent.type(screen.getByLabelText("관리 루트"), "/lustre/dms");
+  await userEvent.selectOptions(select, "DDN Lustre (EXAScaler)");
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await screen.findByText(/./);
+  expect(body).toEqual({ storage_name: "lfs1", mount_path: "/lustre", managed_root: "/lustre/dms",
+                         backend_type: "lustre" });
+});

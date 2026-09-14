@@ -5,7 +5,11 @@ from ..db import Database, dump_json, utc_now_iso
 from ..domain import DomainValidationError
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}$")
-_BACKENDS = ("cephfs", "gpfs", "wekafs")
+# 백엔드 식별자는 검증·저장·표시용 라벨이다 -- 마운트 프로브·잡 볼륨·경로 해석은 전부
+# mount_path/managed_root 만 보고 백엔드별 분기가 없다(2026-09-15 확인). 값을 더할 때는
+# 프런트 StorageDialog.BACKENDS(표시명)와 api.ts invalid_storage 문구도 같이 --
+# tests/test_storage_backends.py 가 두 셋의 일치를 고정한다.
+_BACKENDS = ("cephfs", "gpfs", "wekafs", "lustre", "purestorage", "netapp")
 
 
 def _validate(storage_name, mount_path, managed_root, backend_type):
