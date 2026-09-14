@@ -303,8 +303,9 @@ export DMS_SHARED_TOKEN=$(kubectl -n dms get secret dms-secrets \
 export API=http://localhost:8080
 AUTH=(-H "Authorization: Bearer $DMS_SHARED_TOKEN" -H "x-dms-actor: seed-script")
 
-# storages (backend_type must be one of cephfs/gpfs/wekafs; managed_root
-# must be mount_path or a subdirectory of it)
+# storages (backend_type must be one of cephfs/gpfs/wekafs/lustre/purestorage/netapp
+# -- a label only, every backend is mounted on nodes as a plain POSIX path;
+# managed_root must be mount_path or a subdirectory of it)
 curl -sf -X POST "$API/api/admin/storages" "${AUTH[@]}" -H 'content-type: application/json' -d '{
   "storage_name": "cephfs-dms", "mount_path": "/cephfs",
   "managed_root": "/cephfs/managed", "backend_type": "cephfs"}'

@@ -4,11 +4,15 @@ import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
 import { useCreateStorage, useUpdateStorage } from "./useStorages";
 import type { Storage } from "../../lib/types";
-// 서버 식별자 ↔ 표시명(src/dms/repositories/storages.py _BACKENDS 와 같은 셋).
+// 서버 식별자 ↔ 표시명(src/dms/repositories/storages.py _BACKENDS 와 같은 셋 --
+// tests/test_storage_backends.py 가 value 집합의 일치를 고정한다).
 export const BACKENDS = [
   { value: "cephfs", label: "CephFS" },
   { value: "gpfs", label: "IBM GPFS (Storage Scale)" },
   { value: "wekafs", label: "WekaFS" },
+  { value: "lustre", label: "DDN Lustre (EXAScaler)" },
+  { value: "purestorage", label: "Pure Storage (FlashBlade)" },
+  { value: "netapp", label: "NetApp (ONTAP)" },
 ];
 
 const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
@@ -61,7 +65,7 @@ export function StorageDialog({ mode, storage, trigger }: {
             )}
           </select>
           <span className="block text-muted text-xs mt-1">
-            서버가 받는 값은 cephfs · gpfs · wekafs 세 식별자입니다 — IBM Storage Scale(GPFS)은 gpfs
+            서버가 받는 값은 cephfs · gpfs · wekafs · lustre · purestorage · netapp 식별자입니다 — IBM Storage Scale(GPFS)은 gpfs, DDN EXAScaler 는 lustre
           </span></label>
         {mode === "edit" && (
           <label className="flex items-center gap-2"><input type="checkbox" checked={enabled}

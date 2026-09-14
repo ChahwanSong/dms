@@ -2,7 +2,8 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-DMS: 여러 스토리지 백엔드(CephFS/GPFS/WekaFS)와 Kubernetes 클러스터에 걸친
+DMS: 여러 스토리지 백엔드(CephFS/GPFS/WekaFS/DDN Lustre/Pure Storage/NetApp — 등록
+라벨일 뿐 런타임은 mount_path 만 본다)와 Kubernetes 클러스터에 걸친
 **스토리지 인벤토리**와 **데이터 잡**(scan/sync/rm)을 관리하는 시스템. FastAPI +
 PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-scheduled 잡 러너.
 
