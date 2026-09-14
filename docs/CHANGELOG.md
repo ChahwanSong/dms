@@ -95,6 +95,19 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 스토리지 백엔드 식별자 추가 — DDN Lustre·Pure Storage·NetApp — **완료·실증**(2026-09-15, d132)
+
+사용자 요청: 등록 백엔드에 DDN Lustre, Pure Storage("everpure" 로 표기), NetApp 추가. 사전
+확인 결과 `backend_type` 은 검증(`_BACKENDS`)·저장·표시·진행 중 잡 변경 가드(409
+storage_in_use)에만 쓰이는 라벨이고 마운트 프로브(mountinfo 마운트포인트 집합)·잡 볼륨
+(hostPath=mount_path)·경로 해석(stepper._abs)은 백엔드를 보지 않는다 — 그래서 값만 더했고
+런타임 분기·마이그레이션(컬럼에 CHECK 없음)은 없다. 식별자는 기존 관례(소문자 제품명)로
+`lustre`·`purestorage`·`netapp`, 표시명은 DDN Lustre (EXAScaler) / Pure Storage (FlashBlade) /
+NetApp (ONTAP). 셋을 함께 움직여야 하는 세 곳(서버 상수·프런트 BACKENDS·api.ts invalid_storage
+문구)은 `tests/test_storage_backends.py` 가 순서열 일치로 고정한다. pytest 1787·vitest 692·
+tsc·빌드 외부 URL 0.
+- 실증(테스트베드 d132, 2026-09-15): 포탈 빌드 d132(commit 5372fd4) → 릴리스 dms-api·dms-controller Applied(live==manifest, 배지 applied). 라이브 API 로 lustre·purestorage·netapp 각각 create 201 → 목록에 식별자 그대로 → delete 200, cephfs→netapp update 200, 'everpure'·'Lustre'·'nfs' 는 422 invalid_storage, 잔재 없음(17/17 PASS, verify-backends.py). 서빙 번들(index-BPbKFE7N.js)에 세 표시명 포함. 오버레이 testbed newTag d132 로 bump.
+
 ### ✅ 사용량 분석 — 타깃 상세를 클릭한 행 아래 펼침(expand) — **완료·실증**(2026-09-14, d131)
 
 사용자 요청: 항목을 클릭하면 상세가 모든 항목 아래(별도 카드)에 나오던 것을 expand 형태로.
