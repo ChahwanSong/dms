@@ -18,10 +18,10 @@ resources:
 images:
   - name: set-by-overlay.invalid/dms
     newName: pkg-01:5000/dms
-    newTag: d133
+    newTag: d134
   - name: set-by-overlay.invalid/dms-agent
     newName: pkg-01:5000/dms-agent
-    newTag: d123
+    newTag: d134
 
 patches:
   - path: patch-config.yaml
