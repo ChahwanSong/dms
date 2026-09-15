@@ -22,19 +22,93 @@ def parse_mountinfo(text: str) -> set[str]:
     return points
 
 
-def probe_mounts(storages, *, mountinfo_text, isdir=os.path.isdir, access=os.access):
+def parse_mount_table(text: str) -> dict:
+    """mountinfo → {mount_point: {"opts", "fstype", "sb_opts"}}. 같은 지점에 여러
+    마운트(overmount)면 나중 줄(위에 쌓인 것)이 이긴다 -- 커널이 그 순서로 나열한다.
+    옵션은 writable 판정(_mount_rw)에 쓴다: 6열은 per-mount 옵션(바인드 ro 등),
+    '-' 뒤 세 번째는 슈퍼블록 옵션(fs 전체 ro)이다."""
+    table: dict = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 6:
+            continue
+        fstype = sb_opts = ""
+        if "-" in fields[6:]:
+            sep = fields.index("-", 6)
+            rest = fields[sep + 1:]
+            fstype = rest[0] if rest else ""
+            sb_opts = rest[2] if len(rest) > 2 else ""
+        table[_unescape(fields[4])] = {"opts": fields[5], "fstype": fstype,
+                                       "sb_opts": sb_opts}
+    return table
+
+
+def _mount_rw(entry) -> bool:
+    return ("ro" not in entry["opts"].split(",")
+            and "ro" not in entry["sb_opts"].split(","))
+
+
+def _covering_mount(table, path):
+    """path 를 덮는 가장 깊은 마운트 지점(없으면 None). 아티팩트 base 처럼 마운트
+    지점 아래 하위 디렉터리의 쓰기 가능 여부는 그 마운트의 옵션이 정한다."""
+    best = None
+    for point in table:
+        if path == point or path.startswith(point.rstrip("/") + "/"):
+            if best is None or len(point) > len(best):
+                best = point
+    return best
+
+
+def host_path(host_root: str, path: str) -> str:
+    """호스트 경로 → 에이전트 컨테이너 안 프로브 경로. host_root 가 비면 그대로
+    (레거시: 스토리지마다 hostPath 를 같은 경로에 붙이던 매니페스트)."""
+    if not host_root:
+        return path
+    return host_root.rstrip("/") + "/" + path.lstrip("/")
+
+
+def probe_mounts(storages, *, mountinfo_text, isdir=os.path.isdir, access=os.access,
+                 host_root="", self_mountinfo_text=""):
+    """스토리지 마운트 프로브. 마운트포인트 여부는 **호스트** PID 1 의 mountinfo 로,
+    존재·접근은 컨테이너 안 경로로 본다 -- host_root(방안 A, 2026-09-16)가 있으면
+    그 접두로 번역해 보고, 없으면 종전처럼 같은 경로를 직접 본다.
+
+    host_root 모드의 writable 은 os.access(W_OK) 가 아니라 호스트 mountinfo 의
+    마운트 옵션(rw/ro)이다: 에이전트는 root 라 W_OK 는 사실상 "마운트가 rw 인가"
+    만 답하고, 호스트 루트는 읽기 전용으로 붙이므로 W_OK 를 쓰면 전부 False 가 되어
+    placement(require_writable)가 sync 목적지 노드를 전부 배제한다. 의미는 종전과
+    같고 루트 마운트는 ro 로 남는다(최소 권한).
+
+    self_mountinfo_text(에이전트 자신의 /proc/self/mountinfo)가 오면 전파 자가
+    진단: 호스트엔 마운트포인트인데 host_root 아래에서 안 보이면 HostToContainer
+    전파가 안 된 것(호스트 `/` 가 shared 가 아니거나 파드가 마운트보다 먼저 떴는데
+    전파 없음) -- `propagation_stale` 로 Missing. 못 읽어서 빈 문자열이면 검사를
+    건너뛴다(거짓 stale 금지). host_root 자체가 없으면 전부 `host_root_missing`."""
     points = parse_mountinfo(mountinfo_text)
+    table = parse_mount_table(mountinfo_text) if host_root else {}
+    self_points = parse_mountinfo(self_mountinfo_text) if (host_root and self_mountinfo_text) else None
+    root_missing = bool(host_root) and not isdir(host_root)
     results = []
     for storage in storages:
         path = storage["mount_path"]
-        exists = bool(isdir(path))
+        probe = host_path(host_root, path)
+        exists = (not root_missing) and bool(isdir(probe))
         is_mountpoint = path in points
-        readable = exists and bool(access(path, os.R_OK)) and bool(access(path, os.X_OK))
-        writable = exists and bool(access(path, os.W_OK))
-        if not exists:
+        readable = exists and bool(access(probe, os.R_OK)) and bool(access(probe, os.X_OK))
+        if host_root:
+            entry = table.get(path)
+            writable = exists and is_mountpoint and entry is not None and _mount_rw(entry)
+        else:
+            writable = exists and bool(access(probe, os.W_OK))
+        propagated = (self_points is None) or (host_path(host_root, path) in self_points)
+        if root_missing:
+            status, reason = "Missing", "host_root_missing"
+        elif not exists:
             status, reason = "Missing", "missing_mount_path"
         elif not is_mountpoint:
             status, reason = "Missing", "not_a_mountpoint"
+        elif not propagated:
+            status, reason = "Missing", "propagation_stale"
         elif not readable:
             status, reason = "Missing", "not_readable"
         else:
@@ -90,7 +164,8 @@ def probe_identities(usernames, *, getpwnam=pwd.getpwnam, getgrall=grp.getgrall)
     return results
 
 
-def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access):
+def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
+                        host_root="", mountinfo_text=""):
     """아티팩트 base 프로브(슬라이스 18 설계 §2.4b). **mounts 배열에 섞지 않는다**:
     reconciler 가 mounts 를 storage_name 기준으로 storages.status 에 매핑하므로
     섞으면 스토리지 판정이 오염된다 -- 리포트 최상위의 별도 필드로만 나른다
@@ -104,13 +179,22 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access):
     이 두 필드를 직접 본다."""
     if not path:
         return None    # 서버가 아직 대상을 내리지 않았다(부트스트랩) -- 모름
-    exists = bool(isdir(path))
-    return {"path": path, "exists": exists,
-            "writable": exists and bool(access(path, os.W_OK))}
+    probe = host_path(host_root, path)
+    exists = bool(isdir(probe))
+    if host_root:
+        # 호스트 루트는 ro 바인드라 W_OK 는 항상 거짓 -- base 를 덮는 마운트의
+        # 옵션(rw/ro)이 답이다(probe_mounts 와 같은 이유). 덮는 마운트를 못 찾으면
+        # ("/" 조차 없는 mountinfo) 모른다고 지어내지 않고 False.
+        table = parse_mount_table(mountinfo_text)
+        cover = _covering_mount(table, path)
+        writable = exists and cover is not None and _mount_rw(table[cover])
+    else:
+        writable = exists and bool(access(probe, os.W_OK))
+    return {"path": path, "exists": exists, "writable": writable}
 
 
 def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
-                     net_dev_path="/proc/net/dev", virtual_net_path=""):
+                     net_dev_path="/proc/net/dev", virtual_net_path="", host_root=""):
     metrics = {"load1": None, "load5": None, "load15": None, "cpu_count": None,
                "memory_total_kb": None, "memory_available_kb": None,
                "disks": [], "network_rx_bytes": None, "network_tx_bytes": None}
@@ -141,7 +225,7 @@ def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
         pass
     for storage in storages:
         try:
-            vfs = statvfs(storage["mount_path"])
+            vfs = statvfs(host_path(host_root, storage["mount_path"]))
             total = vfs.f_frsize * vfs.f_blocks
             used = vfs.f_frsize * (vfs.f_blocks - vfs.f_bavail)
             metrics["disks"].append({"storage_name": storage["storage_name"],

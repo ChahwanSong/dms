@@ -8,7 +8,7 @@
 # DMS_ADMIN_TOKEN/DMS_SESSION_SECRET/etc -- only DMS_AGENT_API_URL,
 # DMS_SHARED_TOKEN, DMS_AGENT_NODE_NAME, DMS_AGENT_INTERVAL_SECONDS,
 # DMS_AGENT_MOUNTINFO_PATH, DMS_AGENT_NET_DEV_PATH,
-# DMS_AGENT_VIRTUAL_NET_PATH. Blanket envFrom would
+# DMS_AGENT_VIRTUAL_NET_PATH, DMS_AGENT_HOST_ROOT. Blanket envFrom would
 # needlessly expose DMS_DATABASE_URL/DMS_ADMIN_TOKEN on every node.
 #
 # Volume mounts:
@@ -33,19 +33,24 @@
 #  /proc paths already reflect the host -- mounting the entire host filesystem
 #  was pure attack surface. /proc/net/* IS netns-scoped though: the in-pod
 #  value is the veth's, so net/dev alone is bind-mounted below, like mountinfo.)
-#   cephfs-dms / cephfs-third / cephfs-secondary: probe_mounts() (probes.py)
-#     checks os.path.isdir()/os.access() on the LITERAL storage["mount_path"]
-#     value returned by the API (e.g. "/cephfs"), not a /host-prefixed path
-#     -- so each real storage mount point must be bind-mounted at that EXACT
-#     absolute path inside the agent container too (mirrors how job pods
-#     mount storages in execution_volcano.py::_volumes). type:
-#     DirectoryOrCreate (not Directory) because cephfs-third only exists on
-#     w1-3 and cephfs-secondary only on w4-5 -- on a node lacking one of
-#     these, DirectoryOrCreate shadows it with an empty local dir instead of
-#     crash-looping the pod, and probe_mounts correctly reports that storage
-#     Missing/not_a_mountpoint on that node (the true state). Mounted
-#     read-write (not readOnly) so os.access(path, os.W_OK) reports real
-#     writability -- the agent itself never writes there.
+#   host-root: the host's `/` bind-mounted READ-ONLY at /host/root with
+#     mountPropagation: HostToContainer (2026-09-16). probe_mounts()/
+#     probe_artifact_base()/probe_os_metrics() translate every storage
+#     mount_path to /host/root<mount_path> (DMS_AGENT_HOST_ROOT), so a storage
+#     registered in the portal is probed on every node with NO manifest edit.
+#     Before this, each storage needed its own hostPath listed here (cephfs,
+#     cephfs-third, cephfs-secondary) and every newly registered storage sat
+#     at Missing/missing_mount_path until someone hand-added it (production,
+#     2026-09-16). Mounts created on the host AFTER the pod started are still
+#     seen because the kubelet mounts HostToContainer volumes rslave -- that
+#     needs the host `/` to be a shared mount (systemd default); if it is not,
+#     the agent reports propagation_stale for that storage instead of lying.
+#     readOnly: writability comes from the host mountinfo options (rw/ro),
+#     not os.access(W_OK) -- the agent is root, so W_OK only ever answered
+#     "is the mount rw", and a read-only bind of the host filesystem is the
+#     least privilege that still answers every probe. NEVER make this mount
+#     read-write (the agent never writes) and NEVER re-add per-storage
+#     hostPaths -- test_agent_daemonset_contract.py pins both.
 #
 # hostPID is deliberately NOT set: probe_identities() resolves usernames via
 # pwd.getpwnam()/grp.getgrall() against the CONTAINER's own /etc/passwd,
@@ -99,6 +104,8 @@ spec:
               value: "/host/proc/1/net/dev"
             - name: DMS_AGENT_VIRTUAL_NET_PATH
               value: "/host/sys/devices/virtual/net"
+            - name: DMS_AGENT_HOST_ROOT
+              value: "/host/root"
             - name: DMS_AGENT_NODE_NAME
               valueFrom:
                 fieldRef:
@@ -123,14 +130,9 @@ spec:
             - name: sys-virtual-net
               mountPath: /host/sys/devices/virtual/net
               readOnly: true
-            - name: cephfs-dms
-              mountPath: /cephfs
-              mountPropagation: HostToContainer
-            - name: cephfs-third
-              mountPath: /cephfs-third
-              mountPropagation: HostToContainer
-            - name: cephfs-secondary
-              mountPath: /cephfs-secondary
+            - name: host-root
+              mountPath: /host/root
+              readOnly: true
               mountPropagation: HostToContainer
           resources:
             requests:
@@ -152,15 +154,7 @@ spec:
           hostPath:
             path: /sys/devices/virtual/net
             type: Directory
-        - name: cephfs-dms
+        - name: host-root
           hostPath:
-            path: /cephfs
-            type: DirectoryOrCreate
-        - name: cephfs-third
-          hostPath:
-            path: /cephfs-third
-            type: DirectoryOrCreate
-        - name: cephfs-secondary
-          hostPath:
-            path: /cephfs-secondary
-            type: DirectoryOrCreate
+            path: /
+            type: Directory

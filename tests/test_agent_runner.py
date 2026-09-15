@@ -205,7 +205,7 @@ def test_build_report_carries_artifact_base_outside_mounts():
         identities_fn=lambda users, **k: [],
         os_fn=lambda storages, **k: {},
         artifact_base_path="/cephfs/dms/artifacts",
-        artifact_base_fn=lambda p: {"path": p, "exists": True, "writable": True})
+        artifact_base_fn=lambda p, **k: {"path": p, "exists": True, "writable": True})
     assert report["artifact_base"] == {"path": "/cephfs/dms/artifacts",
                                        "exists": True, "writable": True}
     assert report["mounts"] == []          # mounts 에 섞이지 않았다

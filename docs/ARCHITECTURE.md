@@ -319,6 +319,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 - activeDeadlineSeconds는 반드시 task 템플릿의 PodSpec에 건다(execution_manifests._apply_task_deadlines:207) — Volcano v1.15.0 CRD가 Job.spec의 미지 필드를 조용히 prune해 타임아웃이 영원히 미발화한다. 반대로 ttlSecondsAfterFinished는 Job.spec 허용 필드라 거기 얹는다(_apply_ttl:223).
 - 잡 파드 안의 아티팩트 경로는 항상 ARTIFACT_MOUNT(/dms-artifact-base, artifact_base.py) 아래다 — execution_volcano._volumes 가 base 를 스토리지 마운트와 별개의 전용 hostPath 볼륨으로 붙이고 execution_manifests._artifact_dir 이 그 경로를 러너에 준다(DMS_JR_ARTIFACT_DIR). 예전처럼 스토리지 마운트가 상위라고 생략하면 요청자 uid 도구가 공용 디렉터리(base 의 부모)를 통과해야 해 770 잠금이 잡을 죽인다. 스토리지 mount_path 가 이 경로와 겹치면 invalid_storage(storages._validate). 호스트 경로(<base>/<job>/<phase>)는 제어면 읽기·artifact_uri 전용.
 - hostPath 볼륨 이름은 execution_volcano.volume_name(mount_path) 만 만든다 — RFC 1123 label(소문자·숫자·'-', 63자) + 경로 해시 8자(충돌 방지). 경로 문자열을 그대로 이름에 쓰면 밑줄·대문자·점이 있는 사이트(/mgmt_storage, 2026-09-15 프로덕션)에서 apiserver 가 422 로 거부해 모든 잡이 submit_failed 가 된다. 제출 실패의 원문(exc.detail)은 stepper._record_submit_failure 가 이벤트(submit_failed)와 diag_logs 합성 항목(pod="submit:<phase>")으로 남기고, API get_job_logs 는 ref 없이도 그 박제를 돌려준다 — 코드만 남기고 원문을 삼키지 마라.
+- 에이전트 마운트 프로브의 writable 은 host_root 모드에서 **호스트 mountinfo 옵션**(per-mount·superblock rw/ro)이다(probes.parse_mount_table/_mount_rw) — 에이전트는 root 라 os.access(W_OK) 는 "마운트가 rw 인가" 만 답했고, 호스트 루트를 ro 로 붙인 뒤 W_OK 를 쓰면 전부 False 가 되어 placement(require_writable) 가 sync 목적지 노드를 전부 배제한다. 전파 자가 진단(`propagation_stale`: 호스트엔 마운트포인트인데 /host/root 아래에 없음 — 호스트 `/` 가 shared 가 아님)과 `host_root_missing` 은 조용한 Missing 을 금지한다. DMS_AGENT_HOST_ROOT 미설정은 레거시 직접 경로 모드(롤아웃은 이미지 → 매니페스트 순).
 - artifact_base의 스킴 제거는 접두사 전용 strip_scheme만 — 전체 replace는 경로 중간의 file://까지 지워 러너 기록 위치와 마운트 계산·읽기 라우트가 갈라진다(execution_manifests._artifact_dir:180, execution_volcano._volumes:109-112, _reconstruct_summary_path:233).
 - 어댑터의 artifact_base는 생성자 캡처 금지, 호출 시점 해석 callable(execution_volcano.py:82-88; wiring.py:23-29) — base 변경 후 컨트롤러 재시작 시 in-flight 잡 summary를 옛 경로에서 찾는 사고 방지.
 - worker의 required podAntiAffinity(같은 job·같은 task, execution_manifests._worker_affinity:244)는 resolve_fanout의 node_count=min(len(candidates),max_nodes)(placement.py:123) 전제 위에서만 안전 — 레플리카가 후보 노드 수를 넘지 않아 산개 불가 영구 Pending이 구조적으로 없다. 셀렉터를 넓히거나 fanout 공식을 바꾸면 이 짝이 깨진다.
@@ -437,6 +438,7 @@ dms-api/dms-controller 는 uid 0 이다(40-api.yaml·41-controller.yaml 컨테�
 12. **securityContext 를 "강화"한답시고 runAsNonRoot/runAsUser 65532 를 (오버레이 포함) 넣지 마라** — 운영 base 에서 즉시 artifact_base_not_writable 회귀. 반대로 capabilities 를 더하면(DAC_OVERRIDE) 남의 mode 비트 게이트까지 사라진다 — 주면 사유를 주석에.
 13. **컨트롤러 루프는 파일시스템에서 아무것도 삭제하지 않는다**(pod_gc/retention 은 k8s API + SQL). 아티팩트 보존 정책을 넣으면 dir_fd 상대 삭제 + 규칙 2 의 봉쇄.
 14. **admin 은 신뢰 앵커다.** admin 은 이미 특권 잡·빌드 소스 경로·privileged 빌드 파드로 클러스터 root 상당 — root 전환 후 admin 이 요청자 잡의 root 소유 아티팩트를 읽는 것은 의도된 동작.
+15. **에이전트는 호스트 파일시스템 전체를 읽기 전용으로 본다**(2026-09-16). DaemonSet 이 호스트 `/` 를 `/host/root` 에 `readOnly`·`HostToContainer` 로 붙이고 프로브가 mount_path 를 그 접두로 번역한다(`DMS_AGENT_HOST_ROOT`) — 스토리지마다 hostPath 를 나열하지 않는다(등록만 하면 모든 노드에서 프로브). 에이전트는 root 이지만 파일 내용을 서빙하는 코드가 없고 stat/statvfs/access 뿐이다. 이 마운트를 rw 로 바꾸거나 스토리지별 hostPath 를 다시 넣지 마라 — `test_agent_daemonset_contract.py` 가 둘 다 고정한다.
 
 ### 함정 (모르면 밟는다)
 
@@ -505,7 +507,7 @@ dms-api/dms-controller 는 uid 0 이다(40-api.yaml·41-controller.yaml 컨테�
 - run_once 응답 처리에서 artifact_base_path 는 body.get(..., 기존값) — 구버전 서버 응답에 키가 없으면 기존 값을 유지한다. 이 폴백을 지우면 다음 리포트부터 프로브가 사라져 화면이 영구 '확인 대기 중'이 된다(runner.py:77-82). 에이전트는 ConfigMap envFrom 을 안 받아 base 를 아는 유일한 경로가 이 응답 필드다.
 - DMS_AGENT_VIRTUAL_NET_PATH 기본은 반드시 미설정 — 파드 안의 /sys/devices/virtual/net 은 파드 netns 의 가상 인터페이스라, 마운트 없이 기본 경로를 쓰면 이름이 겹치는 호스트 물리 NIC 가 가상으로 오판돼 지표에서 빠진다(config.py:234-240). 설정됐는데 못 읽으면 필터를 끄고 lo 제외 전량 합을 유지한다(probes.py:149-154, 지표를 잃는 쪽이 더 나쁜 실패).
 - /proc/net/* 는 netns 범위라 파드에서 기본 경로를 읽으면 veth 값이 나온다 — 네트워크만 DaemonSet 이 마운트한 /host/proc/1/net/dev 를 주입받고, loadavg/meminfo 는 네임스페이스되지 않아 기본 경로가 이미 호스트 값이다(probes.py:156-159).
-- probe_artifact_base 의 writable 은 에이전트 프로세스 uid 기준 W_OK 지 잡 파드 요청자 uid 가 아니다 — 정직한 한계로 화면이 문구로 표기한다(probes.py:100-103). exists 가 핵심 신호: 잡 파드 hostPath 가 type: Directory 강제라 디렉터리 없는 노드에선 파드 기동 자체가 실패한다.
+- probe_artifact_base 의 writable 은 잡 파드 요청자 uid 기준이 아니다 — 레거시(직접 경로) 모드에선 에이전트 프로세스 uid 의 W_OK, host_root 모드(2026-09-16 이후 기본)에선 base 를 덮는 호스트 마운트의 rw/ro 옵션이다. 정직한 한계로 화면이 문구로 표기한다(probes.py probe_artifact_base). exists 가 핵심 신호: 잡 파드 hostPath 가 type: Directory 강제라 디렉터리 없는 노드에선 파드 기동 자체가 실패한다.
 - build_ldap_resolver 의 bind_dn/bind_pw 는 빈 문자열이면 None 으로 강등돼 익명 바인드가 된다(identity_ldap.py:51-54) — 이 침묵 강등을 막는 유일한 장치가 DMS_LDAP_REQUIRE_AUTH_BIND(기본 false)다.
 - planner 는 req.auth_method 컬럼으로 session 여부를 판정하는데 기배포 DB 의 구형 행은 NULL 이라 자동으로 비특권이다(planner.py:160-162 주석) — 특권이 안 붙는다고 버그가 아니다.
 - probe_tools 는 --version 실패를 fail-soft 처리한다: 도구 status 는 Ready 유지, reason=version_probe_failed:<타입>(probes.py:65-66). Missing 은 shutil.which 실패(tool_not_found)일 때만이다.

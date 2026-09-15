@@ -334,6 +334,12 @@ class AgentSettings:
     # 무엇이든 가상으로 오판돼 빠진다(eth0 이 가장 흔한 충돌일 뿐, 규칙 자체는 이름을
     # 보지 않는다). 미설정이면 필터 없이 기존대로 lo 만 뺀다.
     virtual_net_path: str = ""
+    # 호스트 루트 접두(2026-09-16, 방안 A). DaemonSet 이 호스트 `/` 를 읽기 전용·
+    # HostToContainer 로 /host/root 에 한 번만 붙이고, 프로브는 mount_path 를 이
+    # 접두로 번역해 본다 -- 스토리지마다 hostPath 를 손으로 나열하던 관행(등록만
+    # 하면 Missing)을 없앤다. 미설정("")이면 종전처럼 컨테이너 안 경로를 직접 본다
+    # (레거시 모드: 새 이미지를 옛 매니페스트에 먼저 올려도 동작한다).
+    host_root: str = ""
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "AgentSettings":
@@ -355,4 +361,5 @@ class AgentSettings:
             mountinfo_path=environ.get("DMS_AGENT_MOUNTINFO_PATH", "/proc/1/mountinfo"),
             net_dev_path=environ.get("DMS_AGENT_NET_DEV_PATH", "/proc/net/dev"),
             virtual_net_path=environ.get("DMS_AGENT_VIRTUAL_NET_PATH", ""),
+            host_root=environ.get("DMS_AGENT_HOST_ROOT", "").rstrip("/"),
         )
