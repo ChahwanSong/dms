@@ -95,6 +95,24 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 에이전트 호스트 루트 단일 마운트 — 스토리지 등록만으로 자동 프로브 — **완료·실증**(2026-09-16, dms-agent d124)
+
+**프로덕션 보고**: 스토리지를 등록하고 노드에 마운트해도 포탈은 Missing — 에이전트 DaemonSet 이
+스토리지마다 hostPath 를 손으로 나열해야 프로브(`isdir/access/statvfs`)가 그 경로를 볼 수 있었다
+(마운트포인트 여부만 호스트 mountinfo 로 봤다). 방안 비교 후 A 채택: 호스트 `/` 를 `/host/root` 에
+**읽기 전용·HostToContainer** 로 한 번만 붙이고 프로브가 `mount_path` 를 그 접두로 번역
+(`DMS_AGENT_HOST_ROOT`). 컨트롤러가 DaemonSet 을 패치하는 B(라이브·git 분기, 스토리지마다 재시작)와
+`hostPID`+`/proc/1/root` C(CAP_SYS_PTRACE)는 기각.
+- writable 은 `os.access(W_OK)` 대신 호스트 mountinfo 옵션(per-mount·superblock rw/ro) — 에이전트는
+  root 라 W_OK 는 "마운트가 rw 인가" 만 답했고, ro 바인드 아래 W_OK 는 전부 False 라 placement
+  (`require_writable`)가 sync 목적지를 전부 배제하는 함정을 피했다. 아티팩트 base 는 덮는 마운트 옵션.
+- 전파 자가 진단 `propagation_stale`(호스트 `/` 가 shared 아님)·`host_root_missing`; 보고에 `probe_mode`.
+- 레거시 모드(env 미설정 = 직접 경로) 로 이미지 → 매니페스트 순 무중단 롤아웃.
+- 계약 `test_agent_daemonset_contract`: hostPath 는 `/`·`/proc/*`·`/sys/*` 만(스토리지별 hostPath 재도입
+  차단), host-root readOnly+HostToContainer, env==mountPath. 단위 `test_agent_host_root` 10건.
+  pytest 전체·ARCHITECTURE §6/§7·README §2.
+- 실증(테스트베드, 2026-09-16): 포탈 빌드 d134(dms-mpifileutils·dms·dms-agent 한 빌드 — agent 는 같은 태그의 dms/mfu 를 FROM 하므로 단독 빌드 불가, d124 단독 시도는 manifest unknown 으로 실패) → 릴리스 3종 Applied(새 이미지+옛 매니페스트 = 레거시 모드로 무중단) → apply -k 로 DaemonSet 볼륨이 host-root 하나로 교체·5/5 롤아웃. 기준선: 전 노드 probe_mode=host_root, cephfs-dms Ready 5, cephfs-third/secondary 는 설계대로 Degraded 3/5·2/5(w1-3/w4-5), writable True(옵션 기반), artifact_base exists+writable. 파드 기동 **후** 노드 5대에 /cephfs-alt 바인드 마운트 → 포탈 등록만으로(DaemonSet 무수정) Ready ready_nodes=5. w5 umount → 60초 내 Degraded 4/5, w5 사유 not_a_mountpoint·writable False → 재마운트 → Ready 5. alice sync cephfs-dms→cephfs-alt preview→confirm→Succeeded(files=2). 실측: readOnly 는 최상위 바인드만 — 파드 안 touch /host/root/cephfs/x 성공(전파된 하위 마운트는 호스트 옵션 rw 유지, recursiveReadOnly 는 HostToContainer 와 병용 불가) → 문서·주석을 그 의미로 정정. 정리(스토리지 삭제·바인드 해제) 완료, guard exit 0.
+
 ### ✅ hostPath 볼륨 이름 RFC 1123 정규화 + 제출 실패 원문 보존 — **완료·실증**(2026-09-15, d133)
 
 **프로덕션 사고**: mount_path=`/mgmt_storage` 사이트에서 첫 sync 요청이 `preflight_submit_failed:
