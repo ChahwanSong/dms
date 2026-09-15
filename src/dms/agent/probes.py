@@ -75,9 +75,10 @@ def probe_mounts(storages, *, mountinfo_text, isdir=os.path.isdir, access=os.acc
 
     host_root 모드의 writable 은 os.access(W_OK) 가 아니라 호스트 mountinfo 의
     마운트 옵션(rw/ro)이다: 에이전트는 root 라 W_OK 는 사실상 "마운트가 rw 인가"
-    만 답하고, 호스트 루트는 읽기 전용으로 붙이므로 W_OK 를 쓰면 전부 False 가 되어
-    placement(require_writable)가 sync 목적지 노드를 전부 배제한다. 의미는 종전과
-    같고 루트 마운트는 ro 로 남는다(최소 권한).
+    만 답하고, 호스트 루트 바인드 아래에선 경로가 최상위(readOnly, 호스트 루트 fs)
+    인지 HostToContainer 로 전파된 하위 마운트(호스트 옵션 유지, 보통 rw)인지에
+    따라 값이 갈린다 -- ro 쪽이면 placement(require_writable)가 sync 목적지 노드를
+    전부 배제한다. mountinfo 옵션은 어느 쪽이든 같은 답을 주고 의미는 종전과 같다.
 
     self_mountinfo_text(에이전트 자신의 /proc/self/mountinfo)가 오면 전파 자가
     진단: 호스트엔 마운트포인트인데 host_root 아래에서 안 보이면 HostToContainer

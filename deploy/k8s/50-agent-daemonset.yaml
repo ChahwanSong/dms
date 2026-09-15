@@ -45,11 +45,18 @@
 #     seen because the kubelet mounts HostToContainer volumes rslave -- that
 #     needs the host `/` to be a shared mount (systemd default); if it is not,
 #     the agent reports propagation_stale for that storage instead of lying.
-#     readOnly: writability comes from the host mountinfo options (rw/ro),
-#     not os.access(W_OK) -- the agent is root, so W_OK only ever answered
-#     "is the mount rw", and a read-only bind of the host filesystem is the
-#     least privilege that still answers every probe. NEVER make this mount
-#     read-write (the agent never writes) and NEVER re-add per-storage
+#     readOnly applies to the TOP bind only (the host root filesystem: /etc,
+#     /usr, ...). Submounts that HostToContainer propagates -- the storages
+#     themselves -- keep their host options (rw), because Kubernetes'
+#     recursiveReadOnly cannot be combined with HostToContainer (verified
+#     2026-09-16: `touch /host/root/cephfs/x` in the pod succeeds). That is
+#     the same privilege the previous per-storage rw hostPaths granted; the
+#     delta is read access to the rest of the host fs. Writability is
+#     derived from the host mountinfo options (rw/ro), not os.access(W_OK)
+#     -- the agent is root, so W_OK only ever answered "is the mount rw",
+#     and W_OK is false under the ro top bind but true under a propagated
+#     submount, i.e. it would depend on where the path sits. NEVER drop
+#     readOnly (the agent never writes) and NEVER re-add per-storage
 #     hostPaths -- test_agent_daemonset_contract.py pins both.
 #
 # hostPID is deliberately NOT set: probe_identities() resolves usernames via

@@ -119,7 +119,8 @@ these are static manifests, not templated.
 ## 2. Mount CephFS on the worker nodes
 
 > **에이전트 DaemonSet 은 스토리지마다 hostPath 를 나열하지 않는다**(2026-09-16).
-> `50-agent-daemonset.yaml` 은 호스트 `/` 를 `/host/root` 에 읽기 전용·
+> `50-agent-daemonset.yaml` 은 호스트 `/` 를 `/host/root` 에 `readOnly`(최상위 바인드 =
+> 호스트 루트 fs; 전파된 스토리지 하위 마운트는 종전 hostPath 처럼 호스트 옵션 rw 유지)·
 > `mountPropagation: HostToContainer` 로 한 번만 붙이고, 프로브가 `mount_path` 를 그
 > 접두로 번역한다(`DMS_AGENT_HOST_ROOT`). 새 스토리지는 **노드에 마운트 + 포탈 등록**
 > 만으로 1~2 보고 주기 안에 Ready 가 된다 — 매니페스트를 고치지 마라(계약 테스트가
