@@ -1,6 +1,8 @@
 """Volcano/k8s 실행 어댑터. k8s 접근은 주입된 K8sClient 뒤, 아티팩트 읽기는 read_text 뒤."""
+import hashlib
 import json
 import logging
+import re
 import threading
 from typing import Protocol
 
@@ -20,6 +22,27 @@ _VCJOB_PHASE = {"Pending": ExecStatus.PENDING, "Running": ExecStatus.RUNNING,
                 "Aborting": ExecStatus.RUNNING, "Terminating": ExecStatus.RUNNING,
                 "Restarting": ExecStatus.RUNNING}
 _KIND = {"pod": "Pod", "vcjob": "Job"}
+
+# k8s 볼륨 이름 = RFC 1123 label(소문자·숫자·'-', 63자 이하, 양끝 영숫자). 2026-09-15
+# 프로덕션 사고: 이름을 mount_path 에서 슬래시만 '-' 로 바꿔 만들어 /mgmt_storage 가
+# "mgmt_storage"(밑줄) 로 남았고 apiserver 가 422(spec.volumes[0].name Invalid value)로
+# 거부 -> 모든 잡이 preflight submit_failed. 테스트베드(/cephfs)에선 드러나지 않았다.
+_VOLUME_NAME_MAX = 63
+_VOLUME_NAME_RE = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+
+def volume_name(mount_path: str) -> str:
+    """mount_path -> 결정적·RFC 1123 준수 볼륨 이름. 허용 밖 문자 연속은 '-' 하나로
+    접고(밑줄·대문자·점·비ASCII 전부), 경로 sha256 앞 8자를 **항상** 덧붙인다 --
+    슬러그만 쓰면 /data_1 과 /data-1 이 같은 이름으로 충돌해 한 파드 안에서 apiserver
+    가 중복 이름을 거부한다. 길이 상한은 슬러그 쪽을 잘라 지킨다. 이름은 스펙 내부
+    (volumes ↔ volumeMounts 짝) 에서만 쓰여 바깥 계약이 없다."""
+    slug = re.sub(r"[^a-z0-9]+", "-", mount_path.lower()).strip("-")
+    digest = hashlib.sha256(mount_path.encode()).hexdigest()[:8]
+    slug = slug[:_VOLUME_NAME_MAX - len(digest) - 1].rstrip("-") or "root"
+    name = f"{slug}-{digest}"
+    assert _VOLUME_NAME_RE.fullmatch(name) and len(name) <= _VOLUME_NAME_MAX, name
+    return name
 
 # 롤아웃 apiserver 호출의 요청 상한(초). urllib3 기본값은 무제한이라 apiserver 가 멈추면
 # 틱이 영원히 블록된다 -- 이 저장소의 리스는 갱신되지 않으므로(controller.run_all_once 가
@@ -140,7 +163,7 @@ class VolcanoExecutionAdapter:
             if covered or p in minimal:
                 continue
             minimal.append(p)
-        volumes = [{"name": mp.strip("/").replace("/", "-") or "root",
+        volumes = [{"name": volume_name(mp),
                     "hostPath": {"path": mp}, "mountPath": mp} for mp in minimal]
         # 아티팩트 base 는 **항상 전용 볼륨**으로 ARTIFACT_MOUNT 에(2026-09-09,
         # artifact_base.ARTIFACT_MOUNT 주석). 예전엔 스토리지 마운트가 base 의 상위면

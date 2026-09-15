@@ -260,7 +260,8 @@ def test_volumes_mount_artifact_base_dedicated_even_when_nested_under_storage():
     by_host = {v["hostPath"]["path"]: v for v in pod["volumes"]}
     assert set(by_host) == {"/cephfs", "/cephfs/dms/artifacts"}, by_host
     mounts = {m["mountPath"]: m["name"] for m in pod["containers"][0]["volumeMounts"]}
-    assert mounts["/cephfs"] == "cephfs"
+    from dms.execution_volcano import volume_name
+    assert mounts["/cephfs"] == volume_name("/cephfs")  # RFC 1123 이름(2026-09-15)
     assert mounts[ARTIFACT_MOUNT] == "dms-artifact-base"
     assert by_host["/cephfs/dms/artifacts"]["name"] == "dms-artifact-base"
     env = {e["name"]: e["value"] for e in pod["containers"][0]["env"]}

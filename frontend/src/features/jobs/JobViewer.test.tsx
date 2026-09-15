@@ -21,11 +21,12 @@ const ARTIFACTS = {
 
 const REFS = { preflight: "pod/p1" };
 
-function wrap(phaseRefs: Record<string, string> | null = REFS, jobId = "j1") {
+function wrap(phaseRefs: Record<string, string> | null = REFS, jobId = "j1",
+              reasonCode: string | null = null) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <JobViewer jobId={jobId} phaseRefs={phaseRefs} />
+      <JobViewer jobId={jobId} phaseRefs={phaseRefs} reasonCode={reasonCode} />
     </QueryClientProvider>,
   );
 }
@@ -50,6 +51,36 @@ test("renders one log tab per phase that actually has a ref, including exec_pref
 test("renders no log tab when the job has no phase_refs", async () => {
   server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)));
   wrap({});
+  await screen.findByRole("button", { name: "execution/stdout.log" });
+  expect(screen.queryByRole("button", { name: /로그$/ })).not.toBeInTheDocument();
+});
+
+test("submit-failed job (no phase_refs) gets a log tab from reason_code and shows the archived detail", async () => {
+  // 2026-09-15 프로덕션 사고: preflight 제출이 apiserver 422 로 실패하면 파드가 없어
+  // phase_refs 가 비고, 포탈은 코드만 보여줬다. stepper 가 박제한 원문을 여기서 연다.
+  const asked: string[] = [];
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", ({ request }) => {
+      asked.push(new URL(request.url).searchParams.get("phase") ?? "");
+      return HttpResponse.json({
+        phase: "preflight", ref: null, source: "archived",
+        entries: [{ pod: "submit:preflight",
+                    log: 'submit_failed: 422: spec.volumes[0].name: Invalid value: "mgmt_storage"',
+                    truncated: false }],
+      });
+    }),
+  );
+  wrap({}, "j1", "preflight_submit_failed:submit_failed");
+  await userEvent.click(await screen.findByRole("button", { name: "preflight 로그" }));
+  expect(await screen.findByText(/Invalid value: "mgmt_storage"/)).toBeInTheDocument();
+  expect(screen.getByText("submit:preflight")).toBeInTheDocument();
+  expect(asked).toEqual(["preflight"]);
+});
+
+test("reason_code without a submit_failed prefix adds no log tab", async () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)));
+  wrap({}, "j1", "preflight_failed:dst_not_writable");
   await screen.findByRole("button", { name: "execution/stdout.log" });
   expect(screen.queryByRole("button", { name: /로그$/ })).not.toBeInTheDocument();
 });

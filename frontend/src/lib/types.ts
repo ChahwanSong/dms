@@ -66,7 +66,8 @@ export interface ArtifactFile {
   phase: string; name: string; size: number; truncated: boolean; content: string;
 }
 export interface JobLogs {
-  phase: string; ref: string;
+  // ref=null: 제출 자체가 실패해 파드가 없고 박제 사본(submit:<phase> 합성 항목)만 있는 경우.
+  phase: string; ref: string | null;
   // 슬라이스 25: live = 지금 파드에서 읽음, archived = 실패 종단 시점의 박제 사본.
   source: "live" | "archived";
   entries: {

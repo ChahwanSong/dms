@@ -25,12 +25,30 @@ function humanBytes(bytes: number | null): string {
   return `${bytes} B`;
 }
 
+// 제출 자체가 실패한 잡은 phase_refs 가 비어 있다(파드가 안 만들어졌다). stepper 는 그
+// 원문을 diag_logs 에 합성 항목으로 박제하고 API 는 ref 없이도 박제 사본을 돌려주므로
+// (2026-09-15 프로덕션 사고: apiserver 422 사유가 포탈 어디에도 없었다) reason_code 의
+// `<phase>_submit_failed:` 접두사에서 그 phase 를 되살려 로그 탭을 만든다.
+const SUBMIT_FAILED_PHASE: Record<string, string> = {
+  preflight_submit_failed: "preflight",
+  execution_submit_failed: "execution",
+  preview_submit_failed: "preview",
+  execution_recheck_submit_failed: "exec_preflight",
+};
+export function submitFailedPhase(reasonCode: string | null | undefined): string | null {
+  if (!reasonCode) return null;
+  const head = reasonCode.split(":")[0];
+  return SUBMIT_FAILED_PHASE[head] ?? null;
+}
+
 export function JobViewer({
   jobId,
   phaseRefs,
+  reasonCode,
 }: {
   jobId: string;
   phaseRefs?: Record<string, string> | null;
+  reasonCode?: string | null;
 }) {
   const [selected, setSelected] = useState<Tab | null>(null);
   const artifacts = useArtifacts(jobId);
@@ -68,6 +86,8 @@ export function JobViewer({
   const logPhases = Object.entries(phaseRefs ?? {})
     .filter(([, ref]) => Boolean(ref))
     .map(([phase]) => phase);
+  const failedPhase = submitFailedPhase(reasonCode);
+  if (failedPhase !== null && !logPhases.includes(failedPhase)) logPhases.push(failedPhase);
 
   const tabs: Tab[] = [
     ...entries.map((e) => ({ kind: "artifact" as const, phase: e.phase, name: e.name })),

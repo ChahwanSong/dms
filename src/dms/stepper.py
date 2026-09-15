@@ -1,6 +1,7 @@
 """job-stepper: 계획된 data_job을 비블로킹 스텝으로 전진시키는 루프 본체. 실행은 어댑터 뒤."""
 import hashlib
 import json
+import logging
 import posixpath
 import sys
 
@@ -10,6 +11,8 @@ from .domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import parse_preflight_reason
 from .placement import TOOL_TO_POLICY
+
+logger = logging.getLogger(__name__)
 
 
 def _summary_fingerprint(summary):
@@ -205,6 +208,28 @@ class JobStepper:
             job["request_id"], job_state, reason_code=reason_code, summary=summary,
             actor="stepper")
 
+    def _record_submit_failure(self, job, phase, exc):
+        """제출 실패 원문 보존(2026-09-15 프로덕션 사고: apiserver 422 의 causes --
+        볼륨 이름 RFC 1123 위반 -- 가 어디에도 남지 않아 컨트롤러 파드 안에서 제출
+        경로를 재현해야 원인을 알 수 있었다). 어댑터가 blanket except 로 접은
+        str(exc)[:200] 이 exc.detail 이다. (1) 관측 이벤트(submit_failed)로 운영
+        콘솔에, (2) diag_logs 에 합성 항목(pod="submit:<phase>")으로 박제해 요청
+        상세의 진단 로그 자리에 보이게 한다 -- 파드가 만들어지지 않았으니 박제할
+        파드 로그는 없고 이 원문이 유일한 진단이다. 기록 실패는 finalize 를 막지
+        않는다(_archive_diag 와 같은 원칙)."""
+        try:
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="submit_failed",
+                message=f"{phase}: {exc.detail}"[:500],
+                payload={"phase": phase, "reason_code": exc.reason_code},
+                request_id=job.get("request_id"))
+            self._repos.data_jobs.archive_diag_logs(
+                job["job_id"], phase=phase,
+                entries=[{"pod": f"submit:{phase}",
+                          "log": f"{exc.reason_code}: {exc.detail}", "truncated": False}])
+        except Exception as inner:  # noqa: BLE001 -- 진단 기록이 종단을 막으면 잡이 낀다
+            logger.warning("submit failure record failed job=%s: %s", job["job_id"], inner)
+
     def _archive_diag(self, job, phase, ref):
         """실패 종단 시점 파드 로그 박제(설계 §2.2). 어댑터가 launcher 를 앞에
         놓으므로 [:DIAG_MAX_ENTRIES] 상한이 잘라도 launcher 가 산다. 박제 실패는
@@ -371,6 +396,7 @@ class JobStepper:
         try:
             ref = self._exec.submit(self._build_spec(job, "preflight", dryrun=False))
         except ExecutionError as exc:
+            self._record_submit_failure(job, "preflight", exc)
             self._finalize(job, DataJobState.REJECTED,
                            reason_code=f"preflight_submit_failed:{exc.reason_code}")
             return "Rejected"
@@ -403,6 +429,7 @@ class JobStepper:
         try:
             ref = self._exec.submit(self._build_spec(job, "execution", dryrun=False))
         except ExecutionError as exc:
+            self._record_submit_failure(job, "execution", exc)
             self._finalize(job, DataJobState.FAILED,
                            reason_code=f"execution_submit_failed:{exc.reason_code}")
             return "Failed"
@@ -464,6 +491,7 @@ class JobStepper:
         try:
             ref = self._exec.submit(self._build_spec(job, "preview", dryrun=True))
         except ExecutionError as exc:
+            self._record_submit_failure(job, "preview", exc)
             self._finalize(job, DataJobState.FAILED,
                            reason_code=f"preview_submit_failed:{exc.reason_code}")
             return "Failed"
@@ -517,6 +545,7 @@ class JobStepper:
             try:
                 ref = self._exec.submit(self._build_spec(job, "exec_preflight", dryrun=False))
             except ExecutionError as exc:
+                self._record_submit_failure(job, "exec_preflight", exc)
                 self._finalize(job, DataJobState.FAILED,
                                reason_code=f"execution_recheck_submit_failed:{exc.reason_code}")
                 return "Failed"
