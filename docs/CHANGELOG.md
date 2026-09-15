@@ -95,6 +95,26 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ hostPath 볼륨 이름 RFC 1123 정규화 + 제출 실패 원문 보존 — **완료·실증**(2026-09-15, d133)
+
+**프로덕션 사고**: mount_path=`/mgmt_storage` 사이트에서 첫 sync 요청이 `preflight_submit_failed:
+submit_failed` 로 즉시 Rejected. 원인은 `execution_volcano._volumes` 가 볼륨 이름을 경로에서
+슬래시만 `-` 로 바꿔 만들어 `mgmt_storage`(밑줄) 가 되고 apiserver 가 422(`spec.volumes[0].name:
+Invalid value … RFC 1123 label`, `volumeMounts[0].name: Not found`)로 거부한 것. 테스트베드
+(`/cephfs`)에선 드러나지 않았다. 진단은 더 나빴다 — 컨트롤러가 예외를 삼켜 코드만 남고 원문은
+로그·events·DB 어디에도 없어 컨트롤러 파드 안에서 제출 경로를 재현해야 했다.
+- `volume_name(mount_path)`: 허용 밖 문자 연속 → `-`, 소문자화, 경로 sha256 앞 8자 **항상**
+  덧붙임(`/data_1` vs `/data-1` 충돌 방지), 63자 상한. volumeMounts 는 같은 이름을 파생.
+- 원문 보존: `stepper._record_submit_failure` 가 4개 제출 지점에서 관측 이벤트 `submit_failed`
+  (message=원문) + `diag_logs` 합성 항목(`pod="submit:<phase>"`)을 남김(기록 실패는 종단을 안
+  막음). API `get_job_logs` 는 phase_ref 없이도 박제를 200(archived, ref=null)으로 돌려주고,
+  포탈 `JobViewer` 는 reason_code 의 `<phase>_submit_failed:` 접두사로 로그 탭을 만들어 그
+  자리에서 원문을 보여준다.
+- 테스트: `test_volume_name`(규칙·결정성·충돌·`/mgmt_storage` 로 Pod/vcjob 렌더 + 마운트 짝),
+  `test_stepper_submit_failure_record`, `test_api_job_logs` 폴백, JobViewer 탭 2건. pytest 1803·
+  vitest 694·tsc·빌드 외부 URL 0. ARCHITECTURE §6 불변식 추가.
+- 실증(테스트베드 d133, 2026-09-15): 워크트리 코드로 /mgmt_storage 스토리지의 preflight Pod·Volcano Job(sync/scan 4종)을 렌더해 apiserver 서버측 dry-run 수용(rc=0), 볼륨 이름을 옛 방식 mgmt_storage 로 되돌리면 프로덕션과 동일한 422(RFC 1123; vcjob 은 Volcano admission 거부) 재현. 포탈 빌드 d133(commit 2555693) → 릴리스 dms-api·dms-controller Applied(live==manifest) → alice sync 회귀 잡 preview→confirm→Succeeded(files=2), 접근 매트릭스 소유자/관리자 200·타인 404. 오버레이 testbed newTag d133, guard exit 0. dms-ssc 에 체리픽·푸시(프로덕션은 git pull 후 포탈 빌드·릴리스로 반영).
+
 ### ✅ 스토리지 백엔드 식별자 추가 — DDN Lustre·Pure Storage·NetApp — **완료·실증**(2026-09-15, d132)
 
 사용자 요청: 등록 백엔드에 DDN Lustre, Pure Storage("everpure" 로 표기), NetApp 추가. 사전
