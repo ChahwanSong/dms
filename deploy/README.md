@@ -118,6 +118,15 @@ these are static manifests, not templated.
 
 ## 2. Mount CephFS on the worker nodes
 
+> **에이전트 DaemonSet 은 스토리지마다 hostPath 를 나열하지 않는다**(2026-09-16).
+> `50-agent-daemonset.yaml` 은 호스트 `/` 를 `/host/root` 에 읽기 전용·
+> `mountPropagation: HostToContainer` 로 한 번만 붙이고, 프로브가 `mount_path` 를 그
+> 접두로 번역한다(`DMS_AGENT_HOST_ROOT`). 새 스토리지는 **노드에 마운트 + 포탈 등록**
+> 만으로 1~2 보고 주기 안에 Ready 가 된다 — 매니페스트를 고치지 마라(계약 테스트가
+> 막는다). 전제: 호스트 `/` 가 shared 마운트(systemd 기본, `findmnt -no PROPAGATION /`).
+> 아니면 그 노드는 `propagation_stale` 을 보고한다(`mount --make-rshared /` 뒤 에이전트
+> 재시작). 기존에 손으로 넣은 스토리지 hostPath 패치가 있으면 제거한다.
+
 If not already mounted (testbed IaC target):
 
 ```bash

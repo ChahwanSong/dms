@@ -20,7 +20,8 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
                  tool_names=AGENT_TOOL_NAMES, mounts_fn=None, tools_fn=None,
                  identities_fn=None, os_fn=None, read_text=None,
                  net_dev_path="/proc/net/dev", virtual_net_path="",
-                 artifact_base_path=None, artifact_base_fn=None) -> dict:
+                 artifact_base_path=None, artifact_base_fn=None,
+                 host_root="", self_mountinfo_text="") -> dict:
     mounts_fn = mounts_fn or probe_mounts
     tools_fn = tools_fn or probe_tools
     identities_fn = identities_fn or probe_identities
@@ -33,15 +34,20 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
     return {
         "node_name": node_name,
         "probed_at": utc_now_iso(),
-        "mounts": mounts_fn(storages, mountinfo_text=mountinfo_text),
+        # 방안 A(2026-09-16): host_root 가 있으면 경로 프로브는 전부 그 접두 아래를
+        # 본다. 화면·진단이 어느 모드로 잰 값인지 알도록 모드를 함께 싣는다.
+        "probe_mode": "host_root" if host_root else "direct",
+        "mounts": mounts_fn(storages, mountinfo_text=mountinfo_text,
+                            host_root=host_root, self_mountinfo_text=self_mountinfo_text),
         "tools": tools_fn(list(tool_names)),
         "identities": identities_fn(probe_targets),
         "os": os_fn(storages, read_text=read_text, net_dev_path=net_dev_path,
-                    virtual_net_path=virtual_net_path),
+                    virtual_net_path=virtual_net_path, host_root=host_root),
         # 슬라이스 18: mounts 와 **별도** 최상위 필드 -- reconciler 가 mounts 를
         # storages.status 로 매핑하므로 거기 섞으면 스토리지 판정이 오염된다.
         # 대상 경로가 아직 없으면(부트스트랩) None.
-        "artifact_base": artifact_base_fn(artifact_base_path),
+        "artifact_base": artifact_base_fn(artifact_base_path, host_root=host_root,
+                                          mountinfo_text=mountinfo_text),
     }
 
 
@@ -55,11 +61,21 @@ class AgentRunner:
             mountinfo_text = _read_text(self._settings.mountinfo_path)
         except OSError:
             mountinfo_text = ""
+        # 전파 자가 진단용 자기 마운트 표 -- host_root 모드에서만 의미가 있고, 못
+        # 읽으면 빈 문자열(검사 생략, 거짓 stale 금지 -- probes.probe_mounts).
+        self_mountinfo_text = ""
+        if self._settings.host_root:
+            try:
+                self_mountinfo_text = _read_text("/proc/self/mountinfo")
+            except OSError:
+                self_mountinfo_text = ""
         report = build_report(self._settings.node_name, state["storages"],
                               state["probe_targets"], mountinfo_text=mountinfo_text,
                               net_dev_path=self._settings.net_dev_path,
                               virtual_net_path=self._settings.virtual_net_path,
-                              artifact_base_path=state.get("artifact_base_path"))
+                              artifact_base_path=state.get("artifact_base_path"),
+                              host_root=self._settings.host_root,
+                              self_mountinfo_text=self_mountinfo_text)
         try:
             response = self._client.post(
                 "/api/agent/report", json=report,
