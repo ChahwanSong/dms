@@ -263,7 +263,7 @@ export function RequestDetail() {
             <div className="mt-3">
               <Timeline transitions={j.transitions} />
             </div>
-            <JobViewer jobId={j.job_id} phaseRefs={j.phase_refs} />
+            <JobViewer jobId={j.job_id} phaseRefs={j.phase_refs} reasonCode={j.reason_code} />
           </Card>
         ))}
       </div>

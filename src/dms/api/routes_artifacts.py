@@ -152,6 +152,12 @@ def get_job_logs(job_id: str, request: Request, phase: str = Query(default="pref
         raise HTTPException(status_code=422, detail="invalid_phase")
     ref = (job["phase_refs"] or {}).get(phase)
     if not ref:
+        # 제출 자체가 실패하면 ref 가 없다(파드가 안 만들어졌다). 그 경우 stepper 가
+        # 원문을 diag_logs 에 합성 항목(pod="submit:<phase>")으로 박제하므로(2026-09-15
+        # 프로덕션 사고: apiserver 422 사유가 어디에도 없었다) 404 전에 그쪽을 본다.
+        archived = _archived_entries(request, job, phase, tail)
+        if archived is not None:
+            return {"phase": phase, "ref": None, "source": "archived", "entries": archived}
         raise HTTPException(status_code=404, detail="log_ref_not_found")
     try:
         entries = request.app.state.execution_adapter.read_log(ref)

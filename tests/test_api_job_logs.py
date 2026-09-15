@@ -80,6 +80,30 @@ def test_missing_phase_ref_404(client):
     assert r.json()["detail"] == "log_ref_not_found"
 
 
+def test_missing_phase_ref_falls_back_to_archived_submit_failure(client):
+    # 2026-09-15 프로덕션 사고: 제출 자체가 실패하면 ref 가 없고(파드 없음) apiserver 의
+    # 422 사유가 포탈 어디에도 없었다. stepper 가 diag_logs 에 합성 항목으로 박제한
+    # 원문을 ref 없이도 돌려준다 -- 404 는 "박제도 없을 때"만.
+    repos = client.app.state.repos
+    rid, jid = _confirmpending_job(repos)
+    repos.data_jobs.archive_diag_logs(jid, phase="preflight", entries=[
+        {"pod": "submit:preflight",
+         "log": 'submit_failed: 422: spec.volumes[0].name: Invalid value: "mgmt_storage"',
+         "truncated": False}])
+    _login(client, "alice")
+    r = client.get(f"/api/user/jobs/{jid}/logs", params={"phase": "preflight"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "archived" and body["ref"] is None
+    assert body["entries"] == [{
+        "pod": "submit:preflight",
+        "log": 'submit_failed: 422: spec.volumes[0].name: Invalid value: "mgmt_storage"',
+        "truncated": False}]
+    # 다른 phase 자리에는 내밀지 않는다(박제는 실패한 그 phase 하나뿐).
+    r = client.get(f"/api/user/jobs/{jid}/logs", params={"phase": "execution"})
+    assert r.status_code == 404
+
+
 def test_unknown_prefix_ref_409_log_not_available(client):
     # 슬라이스 25 가 vcjob 로그를 열었다 -- 409 log_not_available 은 알 수 없는
     # ref prefix 방어로만 남는다(설계 §2.5). 실 어댑터로 그 방어를 고정한다.
