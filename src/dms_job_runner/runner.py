@@ -7,7 +7,7 @@ from .commands import (
     getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
 from .parsers import (parse_nsync_counts, parse_rm_counts, parse_scan_counts,
-                      parse_sync_counts)
+                      parse_sync_counts, parse_sync_dryrun_counts)
 
 _SSH_READY_MAX_ATTEMPTS = 90  # legacy _mpiexec_line 이식: 워커당 ~90s 상한
 
@@ -100,9 +100,12 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     write_text(f"{artifact_dir}/stdout.log", proc.stdout or "")
     write_text(f"{artifact_dir}/stderr.log", proc.stderr or "")
 
-    # 8. summary — 도구별 파싱(설계 §3). preview/execution 공통: phase 분기가
-    #    없어 preview의 files/bytes도 dryrun 예상치로 실린다(set_preview는 무시).
-    summary = _build_summary(tool, proc.stdout, proc.returncode, artifact_dir)
+    # 8. summary — 도구별 파싱(설계 §3). preview/execution 공통 계약(3키)이되,
+    #    dsync --dryrun 은 복사 요약을 찍지 않아 walk 항목 수로 대신한다(parsers
+    #    .parse_sync_dryrun_counts). 제어면은 이 사본을 preview_summary 로 저장하고
+    #    지문도 이 객체의 해시다(2026-09-17) -- null 이면 지문이 상수가 된다.
+    summary = _build_summary(tool, proc.stdout, proc.returncode, artifact_dir,
+                             dryrun="--dryrun" in argv)
     write_text(f"{artifact_dir}/summary.json", json.dumps(summary))
     return proc.returncode
 
@@ -132,7 +135,7 @@ def _wait_ssh_ready(hosts, *, run, sleep, max_attempts=_SSH_READY_MAX_ATTEMPTS):
             sleep(1)
 
 
-def _build_summary(tool, stdout, returncode, artifact_dir):
+def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False):
     """summary.json은 항상 정확히 3키 {"returncode", "files", "bytes"} -- 모르면
     null(설계 §2.3). 기존 "마지막 줄 JSON" 계약은 실 mpifileutils가 JSON을 찍지
     않아 사문이라 제거했다. 파싱이 잡을 죽이는 경로는 없다(설계 §4): 어떤 예외든
@@ -140,7 +143,10 @@ def _build_summary(tool, stdout, returncode, artifact_dir):
     _as_count(bool·비int·음수 거부)가 2차 방어로 이미 배포되어 있다(d24)."""
     files = nbytes = None
     try:
-        if tool == "dsync":
+        if tool == "dsync" and dryrun:
+            # 미리보기: 복사 요약이 없으므로 소스 walk 항목 수(바이트는 null).
+            files, nbytes = parse_sync_dryrun_counts(stdout or "")
+        elif tool == "dsync":
             files, nbytes = parse_sync_counts(stdout or "")
         elif tool == "nsync":
             # nsync는 mpifileutils가 아니라 역할 기반 별도 도구라 출력 형식이

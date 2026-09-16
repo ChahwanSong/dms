@@ -399,3 +399,36 @@ def test_runner_allowlist_matches_the_control_plane_tool_names():
     from dms.config import AGENT_TOOL_NAMES
     from dms_job_runner.runner import ALLOWED_TOOLS
     assert ALLOWED_TOOLS == AGENT_TOOL_NAMES
+
+
+
+# 2026-09-17: dsync --dryrun(미리보기)은 복사 요약을 찍지 않아 files/bytes 가 항상
+# null 이었다(컨펌 창 "(요약 없음)" 조사에서 발견) -- 지문이 이 요약의 해시라 사실상
+# 상수였다. dryrun 이면 소스 walk 항목 수를 files 로, bytes 는 정직하게 null.
+DSYNC_DRYRUN_STDOUT = """\
+[ts] Walking source path
+[ts] Walked 2 items in 0.003 secs (780.071 items/sec) ...
+[ts] Walked 2 items in 0.004 seconds (453.712 items/sec)
+[ts] Walking destination path
+[ts] Walked 0 items in 0.001 secs (0.000 items/sec) ...
+[ts] Walked 0 items in 0.001 seconds (0.000 items/sec)
+[ts] Items     : 0
+[ts] Completed sync
+"""
+
+
+def test_build_summary_dsync_dryrun_uses_source_walk_items():
+    assert _build_summary("dsync", DSYNC_DRYRUN_STDOUT, 0, "/tmp/x", dryrun=True) == {
+        "returncode": 0, "files": 2, "bytes": None}
+    # dryrun 이 아니면(실행) 같은 출력은 여전히 모름 -- 복사 요약이 없으니 지어내지 않는다
+    assert _build_summary("dsync", DSYNC_DRYRUN_STDOUT, 0, "/tmp/x") == {
+        "returncode": 0, "files": None, "bytes": None}
+
+
+def test_run_job_detects_dryrun_from_argv_and_fills_preview_files():
+    rec = _Recorder(rc=0, stdout=DSYNC_DRYRUN_STDOUT)
+    rc = _run(rec, _env(DMS_JR_TOOL="dsync", DMS_JR_OPERATION="sync", DMS_JR_PHASE="preview",
+                        DMS_JR_ARGV=json.dumps(["--batch-files", "1000000", "--dryrun",
+                                                "/cephfs/managed/a", "/cephfs/managed/b"])))
+    assert rc == 0
+    assert _summary(rec) == {"returncode": 0, "files": 2, "bytes": None}

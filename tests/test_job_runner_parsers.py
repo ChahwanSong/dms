@@ -318,3 +318,48 @@ def test_parsers_accept_none_stdout():
     assert parse_sync_counts(None) == (None, None)
     assert parse_nsync_counts(None) == (None, None)
     assert parse_rm_counts(None) == (None, None)
+
+
+
+# ---- parse_sync_dryrun_counts (2026-09-17) ----
+# 실측 캡처(테스트베드 d135, dsync --dryrun): 복사 요약("Items: N"·"(N bytes)")이 없고
+# 소스·목적지 walk 요약만 있다. 진행 줄("secs ...")은 배제, 최종 줄("seconds (")의 첫
+# 매치가 소스 항목 수. 목적지가 없으면 stat 실패 + "Walked 0 items" 가 뒤따른다.
+DSYNC_DRYRUN_STDOUT = """\
+[2026-09-16T23:00:22] Overriding destination ownership: uid=set gid=set
+[2026-09-16T23:00:22] Walking source path
+[2026-09-16T23:00:22] Walking /cephfs/managed/ldap-e2e/group-shared
+[2026-09-16T23:00:22] Walked 2 items in 0.003 secs (780.071 items/sec) ...
+[2026-09-16T23:00:22] Walked 2 items in 0.004 seconds (453.712 items/sec)
+[2026-09-16T23:00:22] Walking destination path
+[2026-09-16T23:00:22] Walking /cephfs/managed/ldap-e2e/dest/def-d135a
+[2026-09-16T23:00:22] [0] [mfu_flist_walk.c:516] ERROR: Failed to stat: '/cephfs/managed/ldap-e2e/dest/def-d135a' (errno=2 No such file or directory)
+[2026-09-16T23:00:22] Walked 0 items in 0.001 secs (0.000 items/sec) ...
+[2026-09-16T23:00:22] Walked 0 items in 0.001 seconds (0.000 items/sec)
+[2026-09-16T23:00:22] Started   : Sep-16-2026, 23:00:22
+[2026-09-16T23:00:22] Completed : Sep-16-2026, 23:00:22
+[2026-09-16T23:00:22] Seconds   : 0.000
+[2026-09-16T23:00:22] Items     : 0
+[2026-09-16T23:00:22] Item Rate : 0 items in 0.000193 seconds (0.000000 items/sec)
+[2026-09-16T23:00:22] Completed updating timestamps
+[2026-09-16T23:00:22] Completed sync
+"""
+
+
+def test_sync_dryrun_uses_source_walk_items_and_null_bytes():
+    from dms_job_runner.parsers import parse_sync_dryrun_counts
+    assert parse_sync_counts(DSYNC_DRYRUN_STDOUT) == (None, None)     # 실행 파서는 여전히 모름
+    assert parse_sync_dryrun_counts(DSYNC_DRYRUN_STDOUT) == (2, None)  # 소스 walk = 2, 목적지 0 아님
+
+
+def test_sync_dryrun_prefers_copy_summary_when_present():
+    # 도구가 언젠가 dry-run 에서도 복사 요약을 찍으면 실행 파서와 같은 값을 쓴다.
+    from dms_job_runner.parsers import parse_sync_dryrun_counts
+    assert parse_sync_dryrun_counts(DSYNC_STDOUT) == (10, 50)
+
+
+def test_sync_dryrun_without_any_walk_line_is_null():
+    from dms_job_runner.parsers import parse_sync_dryrun_counts
+    assert parse_sync_dryrun_counts("[ts] Completed sync\n") == (None, None)
+    # 진행 줄("secs ...")만 있고 최종 줄이 없으면 매치하지 않는다
+    assert parse_sync_dryrun_counts("[ts] Walked 5 items in 0.1 secs (50 items/sec) ...\n") == (None, None)

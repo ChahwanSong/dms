@@ -20,6 +20,12 @@ _SYNC_ITEMS = re.compile(r"Items: (\d+)\s*$", re.MULTILINE)
 # 앵커가 없으면 경로에 박힌 "(999 bytes)"(예: /backup (999 bytes)/f.bin)가
 # 총량 행세를 할 수 있다.
 _SYNC_BYTES = re.compile(r"\((\d+) bytes\)\s*$", re.MULTILINE)
+# dsync --dryrun(미리보기)은 복사 요약("Items: N"·"(N bytes)")을 찍지 않는다 -- 소스·
+# 목적지 **walk** 요약만 남긴다(실측 2026-09-17: 소스 "Walked 2 items in 0.004 seconds
+# (...)" 뒤에 목적지 "Walked 0 items ..."). 그래서 미리보기 files/bytes 가 항상 null
+# 이었고 지문(summary 해시)이 사실상 상수였다. 최종 walk 줄("seconds", 진행 줄의
+# "secs ..."는 배제)의 **첫** 매치 = 소스 항목 수. 바이트는 walk 가 찍지 않아 null.
+_SYNC_WALKED = re.compile(r"Walked (\d+) items in [\d.]+ seconds \(", re.MULTILINE)
 _RM_ITEMS = re.compile(r"Removed (\d+) items")
 
 # nsync는 stock mpifileutils가 아니라 역할 기반(src/dst rank) 별도 도구라 Items:/
@@ -49,6 +55,16 @@ def _last_int(pattern: "re.Pattern[str]", text: str) -> "int | None":
 def parse_sync_counts(stdout: str) -> "tuple[int | None, int | None]":
     """dsync/nsync stdout -> (최종 items, 최종 bytes). 매치 없으면 해당 값 None."""
     return _last_int(_SYNC_ITEMS, stdout), _last_int(_SYNC_BYTES, stdout)
+
+
+def parse_sync_dryrun_counts(stdout: str) -> "tuple[int | None, int | None]":
+    """dsync --dryrun stdout -> (소스 walk 항목 수, None). 복사 요약이 있으면(도구가
+    언젠가 dry-run 요약을 찍게 되면) 그쪽이 우선 -- 실행 파서와 같은 값 체계."""
+    files, nbytes = parse_sync_counts(stdout)
+    if files is None:
+        matches = _SYNC_WALKED.findall(stdout or "")
+        files = int(matches[0]) if matches else None
+    return files, nbytes
 
 
 def parse_nsync_counts(stdout: str) -> "tuple[int | None, int | None]":
