@@ -79,7 +79,7 @@ test("scan: 테이블 2행 + 스토리지 → 제출 바디 조립·미지정 �
   expect(await screen.findByRole("heading", { name: "배치 b9" })).toBeInTheDocument();
   // 정확 일치: priority/node_count 미지정 = 키 부재(생략 계약, null≠0)
   expect(captured.body).toEqual({
-    operation: "scan", max_concurrency: 2, options: {}, note: null,
+    operation: "scan", max_concurrency: 2, options: { batch_files: 1000000, broken_limit: 100 }, note: null,   // scan 프리필 = 서버 기본(2026-09-17)
     items: [{ storage: "s1", target: "a" }, { storage: "s1", target: "b" }],
   });
 });
@@ -93,7 +93,9 @@ test("scan 옵션: batch_files·broken_limit·quiet·우선순위·노드 수가
   await userEvent.click(next());
   // top_k는 신 dscan(1b93d54)에서 기능 삭제 — 입력 자체가 없어야 한다.
   expect(screen.queryByLabelText("top_k")).toBeNull();
+  await userEvent.clear(screen.getByLabelText("batch_files"));   // 프리필(1,000,000) 지우고 0 명시
   await userEvent.type(screen.getByLabelText("batch_files"), "0");
+  await userEvent.clear(screen.getByLabelText("broken_limit"));
   await userEvent.type(screen.getByLabelText("broken_limit"), "500");
   await userEvent.click(screen.getByLabelText("quiet"));
   await userEvent.selectOptions(screen.getByLabelText("우선순위"), "high");
@@ -114,6 +116,7 @@ test("scan broken_limit 범위 밖이면 즉답 문구 + 다음 비활성", asyn
   await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
   await userEvent.type(screen.getByLabelText("1행 경로"), "a");
   await userEvent.click(next());
+  await userEvent.clear(screen.getByLabelText("broken_limit"));
   await userEvent.type(screen.getByLabelText("broken_limit"), "10001");
   expect(screen.getByText("broken_limit는 0..10000 범위의 정수여야 합니다")).toBeInTheDocument();
   expect(next()).toBeDisabled();
@@ -248,10 +251,10 @@ test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => 
   await userEvent.click(screen.getByRole("button", { name: "CSV 붙여넣기" }));
   expect(screen.getByLabelText("CSV")).toHaveAttribute("placeholder", "team\nprojects/alpha");
   await userEvent.click(next());                              // → 실행 제어
-  // 빈값 = 플래그 생략 = 도구 기본 — placeholder가 그 기본값을 그대로 말한다.
+  // 프리필 = 서버 기본(2026-09-17) — placeholder 는 비웠을 때 같은 기본이 적용됨을 말한다.
   expect(screen.getByLabelText("batch_files"))
-    .toHaveAttribute("placeholder", "기본 1000000 · 0 = 배칭 끔");
-  expect(screen.getByLabelText("broken_limit")).toHaveAttribute("placeholder", "기본 100");
+    .toHaveAttribute("placeholder", "비우면 기본 1,000,000 적용 · 0 = 배칭 끔");
+  expect(screen.getByLabelText("broken_limit")).toHaveAttribute("placeholder", "비우면 기본 100 적용");
   expect(screen.getByLabelText("실행 신원(선택)")).toHaveAttribute("placeholder", "예: cocoa.song");
   expect(screen.getByLabelText("노드 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
   expect(screen.getByLabelText("노드당 프로세스 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
@@ -277,9 +280,9 @@ test("placeholder 힌트(sync): 소스·목적지·CSV(2열 멀티라인)·고�
   // 프리필이 생긴 뒤 placeholder 의 일은 "예시"가 아니라 **비웠을 때 무슨 일이
   // 나는가"다(사용자 지시 2026-08-16) — 빈값의 의미를 그 자리에서 말한다.
   expect(screen.getByLabelText("batch_files"))
-    .toHaveAttribute("placeholder", "비우면 배칭 안 함(도구 기본)");
+    .toHaveAttribute("placeholder", "비우면 기본 1,000,000 적용 · 0 = 배칭 끔");
   expect(screen.getByLabelText("bufsize"))
-    .toHaveAttribute("placeholder", "비우면 4 MiB(도구 기본)");
+    .toHaveAttribute("placeholder", "비우면 기본 4 MiB 적용");
   expect(screen.getByLabelText("chmod")).toHaveAttribute("placeholder", "예: D770,F660");
   expect(screen.getByLabelText("chown")).toHaveAttribute(
     "placeholder", "예: 10003:10000 또는 cocoa.song:mig");
@@ -502,7 +505,7 @@ test("sync open_noatime 체크 해제: 키 생략(기존 bool 옵션 직렬화 �
 });
 
 // 프리필 계약(사용자 조정 2026-08-16): 단건 폼과 동일 — 실제 값이 미리 채워지고,
-// 지우면 키가 빠져 도구 기본(배칭 안 함 / 4 MiB)으로 돌아간다.
+// 지우면 키가 빠지고 서버가 같은 기본값(1,000,000 / 4 MiB)을 박는다(2026-09-17).
 test("sync 고급 숫자 옵션 프리필 — 값·placeholder·캡션, 지우면 키가 빠진다", async () => {
   const captured = captureCreate();
   renderPage();
@@ -513,10 +516,10 @@ test("sync 고급 숫자 옵션 프리필 — 값·placeholder·캡션, 지우�
   expect(screen.getByLabelText("bufsize")).toHaveValue(
     SYNC_INT_FIELDS.bufsize.prefill);
   expect(screen.getByText(
-    "미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).",
+    "미리 채운 1,000,000 = 서버 기본 배치 사이즈. 비워도 같은 값이 적용되며, 배칭을 끄려면 0 을 입력하세요.",
   )).toBeInTheDocument();
   expect(screen.getByText(
-    "미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).")).toBeInTheDocument();
+    "미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다.")).toBeInTheDocument();
 
   await userEvent.clear(screen.getByLabelText("batch_files"));
   await userEvent.clear(screen.getByLabelText("bufsize"));
@@ -533,7 +536,7 @@ test("sync batch_files 상한 1,000만 — 넘으면 즉답 문구 + 다음 비�
   await userEvent.type(screen.getByLabelText("batch_files"), "0");   // 1000000 → 10000000
   expect(screen.queryByText(/batch_files는/)).toBeNull();
   await userEvent.type(screen.getByLabelText("batch_files"), "0");   // → 1,000만 초과
-  expect(screen.getByText("batch_files는 1..10000000 범위의 정수여야 합니다"))
+  expect(screen.getByText("batch_files는 0..10000000 범위의 정수여야 합니다"))
     .toBeInTheDocument();
   expect(next()).toBeDisabled();
 });
@@ -559,7 +562,7 @@ test("실행 제어의 선택 입력들이 라벨에 (선택) 을 단다(sync �
   renderPage();
   await toSyncControls();
   await userEvent.click(screen.getByText("고급 옵션"));
-  expect(screen.getByText("batch_files (선택 · 1..10,000,000)")).toBeInTheDocument();
+  expect(screen.getByText("batch_files (선택 · 0..10,000,000)")).toBeInTheDocument();
   expect(screen.getByText("bufsize (선택 · 바이트, 4096..1,073,741,824)")).toBeInTheDocument();
   expect(screen.getByText(
     "chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)")).toBeInTheDocument();
@@ -573,7 +576,7 @@ test("scan 배치엔 open_noatime 무관 — options 에 키 부재(sync 전용)
   await userEvent.click(next());
   await userEvent.click(screen.getByRole("button", { name: "배치 생성" }));
   await screen.findByRole("heading", { name: "배치 b9" });
-  expect(captured.body.options).toEqual({});
+  expect(captured.body.options).toEqual({ batch_files: 1000000, broken_limit: 100 });   // scan 프리필 = 서버 기본(2026-09-17)
 });
 
 // nsync 면당 캡션(정직화): resolve_fanout 은 nsync(공존 노드 없음 폴백)에서

@@ -6,7 +6,7 @@ import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { SubmitJob } from "./SubmitJob";
-import { SYNC_INT_FIELDS } from "./optionRules";
+import { SCAN_INT_FIELDS, SYNC_INT_FIELDS } from "./optionRules";
 import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
 
@@ -287,7 +287,7 @@ test("실행 신원 필드는 옵션 스텝에서 관리자에게만 보인다",
 test("비워도 되는 sync 옵션 입력은 라벨에 (선택) 이 붙는다", async () => {
   renderPage();
   await goToOptionsAndOpenAdvanced();
-  expect(screen.getByText("batch_files (선택 · 1..10,000,000)")).toBeInTheDocument();
+  expect(screen.getByText("batch_files (선택 · 0..10,000,000)")).toBeInTheDocument();
   expect(screen.getByText("bufsize (선택 · 바이트, 4096..1,073,741,824)")).toBeInTheDocument();
   expect(screen.getByText(
     "chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)")).toBeInTheDocument();
@@ -352,16 +352,16 @@ test("고급 숫자 옵션은 실제 값으로 프리필돼 있다(placeholder �
     SYNC_INT_FIELDS.batch_files.prefill);
   expect(screen.getByLabelText("bufsize")).toHaveValue(
     SYNC_INT_FIELDS.bufsize.prefill);
-  // 비웠을 때 무슨 일이 나는지는 placeholder·캡션이 말한다(빈값 = 도구 기본).
+  // 비웠을 때 무슨 일이 나는지는 placeholder·캡션이 말한다(빈값 = 서버 기본, 2026-09-17).
   expect(screen.getByLabelText("batch_files"))
-    .toHaveAttribute("placeholder", "비우면 배칭 안 함(도구 기본)");
+    .toHaveAttribute("placeholder", "비우면 기본 1,000,000 적용 · 0 = 배칭 끔");
   expect(screen.getByLabelText("bufsize"))
-    .toHaveAttribute("placeholder", "비우면 4 MiB(도구 기본)");
+    .toHaveAttribute("placeholder", "비우면 기본 4 MiB 적용");
   expect(screen.getByText(
-    "미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).",
+    "미리 채운 1,000,000 = 서버 기본 배치 사이즈. 비워도 같은 값이 적용되며, 배칭을 끄려면 0 을 입력하세요.",
   )).toBeInTheDocument();
   expect(screen.getByText(
-    "미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).",
+    "미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다.",
   )).toBeInTheDocument();
 });
 
@@ -444,7 +444,7 @@ test("batch_files 상한은 1,000만 — 그 값은 통과, 넘으면 즉답 문
   await userEvent.type(screen.getByLabelText("batch_files"), "10000000");
   expect(screen.queryByText(/batch_files는/)).toBeNull();
   await userEvent.type(screen.getByLabelText("batch_files"), "0");   // → 1,000만 초과
-  expect(screen.getByText("batch_files는 1..10000000 범위의 정수여야 합니다"))
+  expect(screen.getByText("batch_files는 0..10000000 범위의 정수여야 합니다"))
     .toBeInTheDocument();
   expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
 });
@@ -508,7 +508,7 @@ test("사용자 sync 제출은 open_noatime 을 싣지 않는다(기본 OFF — 
   expect(captured.body.options.open_noatime).toBeUndefined();
 });
 
-test("admin scan 제출 바디가 정확하다(옵션 생략 = 도구 기본)", async () => {
+test("admin scan 제출 바디가 정확하다(프리필 batch_files + 입력 broken_limit)", async () => {
   server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
   let posted: unknown = null;
   server.use(http.post("/api/user/requests", async ({ request }) => {
@@ -525,13 +525,14 @@ test("admin scan 제출 바디가 정확하다(옵션 생략 = 도구 기본)", 
   await userEvent.selectOptions(screen.getByLabelText("스토리지"), "cephfs");
   await userEvent.type(screen.getByLabelText("대상 경로"), "team/data");
   await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.clear(screen.getByLabelText("broken_limit"));
   await userEvent.type(screen.getByLabelText("broken_limit"), "500");
   await userEvent.click(screen.getByRole("button", { name: "다음" }));
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(posted).toEqual({
     operation: "scan", storage: "cephfs", target: "team/data",
-    options: { broken_limit: 500 },
+    options: { batch_files: 1000000, broken_limit: 500 },   // batch_files 는 프리필(서버 기본과 같은 값)
   });
 });
 
@@ -548,4 +549,32 @@ test("scan 의 verbose·quiet 동시는 다음을 잠근다", async () => {
   await userEvent.click(screen.getByLabelText("quiet"));
   expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
   expect(screen.getByText("verbose와 quiet는 함께 쓸 수 없습니다")).toBeInTheDocument();
+});
+
+
+// scan 프리필 계약(사용자 결정 2026-09-17): batch_files 1,000,000·broken_limit 100 이
+// 미리 채워져 있고 손대지 않으면 그대로 전송된다 — 같은 값이 서버 기본
+// (domain._OPTION_DEFAULTS)이라 비워도 결과는 같지만, 요청 상세에 명시적으로 남는다.
+test("scan 옵션은 batch_files 1,000,000·broken_limit 100 이 프리필돼 그대로 전송된다", async () => {
+  let posted: any = null;
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json(meAdmin)),
+    http.post("/api/user/requests", async ({ request }) => {
+      posted = await request.json();
+      return HttpResponse.json({ request_id: "r-scan-prefill", state: "Pending" }, { status: 202 });
+    }),
+  );
+  renderPage();
+  await screen.findByRole("option", { name: "scan" });
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "scan");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.selectOptions(screen.getByLabelText("스토리지"), "cephfs");
+  await userEvent.type(screen.getByLabelText("대상 경로"), "team/data");
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  expect(screen.getByLabelText("batch_files")).toHaveValue(SCAN_INT_FIELDS.batch_files.prefill);
+  expect(screen.getByLabelText("broken_limit")).toHaveValue(SCAN_INT_FIELDS.broken_limit.prefill);
+  await userEvent.click(screen.getByRole("button", { name: "다음" }));
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(posted.options).toEqual({ batch_files: 1000000, broken_limit: 100 });
 });

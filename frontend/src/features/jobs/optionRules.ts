@@ -15,16 +15,33 @@ export const CHOWN_RE = /^(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10})?(?::(?:[
 //   - batch_files 1,000,000: dsync·nsync 도구 기본은 **0 = 배칭 안 함**
 //     (mfu_flist_copy.c:3361). 대규모 sync 의 메모리 안정성을 위해 DMS 는 배칭을
 //     기본으로 켠다 — 즉 이 프리필은 도구 기본과 **다른 동작**을 명시 전송하는
-//     정책 결정이다(예전 "빈값 = 플래그 생략 = 도구 기본" 계약의 의도된 변경).
+//     정책 결정이다.
 //   - bufsize 4194304: 도구 기본(MFU_BUFFER_SIZE 4 MiB)과 **같은 값**이라 동작
 //     변화는 없다. 명시만 한다.
-// 사용자가 입력을 비우면 예전처럼 키가 통째로 빠져 도구 기본으로 돌아간다 — 그
-// 성질이 배칭을 끄는 유일한 표현이라 폼·테스트가 함께 지킨다. 서버가 기본값을
-// 박지 않는 이유도 같다(domain.py 의 「왜」 주석).
+// 2026-09-17(사용자 결정): 같은 값이 **서버 기본값**이기도 하다(domain.py
+// _OPTION_DEFAULTS) — 입력을 비워 키가 빠지면 서버가 이 값을 박는다(API 직접 제출도
+// 동일). 그래서 배칭을 끄는 표현은 "비우기"가 아니라 **0 명시**뿐이고 하한이 0 이다.
+// prefill 과 서버 기본은 같은 숫자여야 한다(test_domain_option_defaults 가 고정).
 export const SYNC_INT_FIELDS = {
-  batch_files: { lo: 1, hi: 10_000_000, prefill: "1000000" },
+  batch_files: { lo: 0, hi: 10_000_000, prefill: "1000000" },
   bufsize: { lo: 4096, hi: 1_073_741_824, prefill: "4194304" },
 } as const;
+
+// scan 숫자 옵션(dscan 1b93d54 실측: batch_files 0..10억, 0 = 배칭 끔; broken_limit
+// 0..10,000). 2026-09-17 부터 프리필 + 서버 기본(domain.py _OPTION_DEFAULTS) —
+// 둘 다 dscan 자체 기본(100만 / 100)과 같은 값이라 동작은 종전과 같고, 요청 상세에
+// 어떤 값으로 돌았는지 명시적으로 남는다. 비우면 서버 기본으로 돌아간다.
+export const SCAN_INT_FIELDS = {
+  batch_files: { lo: 0, hi: 1_000_000_000, prefill: "1000000" },
+  broken_limit: { lo: 0, hi: 10_000, prefill: "100" },
+} as const;
+
+export function scanIntFieldError(
+  key: keyof typeof SCAN_INT_FIELDS, raw: string,
+): string | null {
+  const { lo, hi } = SCAN_INT_FIELDS[key];
+  return intFieldError(key, raw, lo, hi);
+}
 
 // 라벨은 서버 오류 문구와 같은 키 이름을 쓴다(batch_files/bufsize) — 화면 문구와
 // 서버 422 detail 이 같은 단어를 가리켜야 사용자가 둘을 잇는다.

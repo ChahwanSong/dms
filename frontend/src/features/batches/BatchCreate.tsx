@@ -9,7 +9,8 @@ import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
 import { StoragePicker, field } from "../jobs/formFields";
 import {
-  CHMOD_RE, CHOWN_RE, SYNC_INT_FIELDS, intFieldError, syncIntFieldError,
+  CHMOD_RE, CHOWN_RE, SCAN_INT_FIELDS, SYNC_INT_FIELDS, intFieldError,
+  scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
@@ -41,9 +42,10 @@ const initial = {
   storage: "", srcStorage: "", dstStorage: "",
   // scan 옵션(SubmitScan 미러 — dscan 1b93d54 실측 전부. top_k는 신버전에서
   // 기능 삭제라 함께 제거). scanBatchFiles는 sync의 batchFiles와 별도 상태 —
-  // 같은 옵션명이지만 범위도 프리필도 다르다(scan 0..10억·0 = 배칭 끔·프리필 없음,
-  // sync 1..1,000만·1,000,000 프리필).
-  scanBatchFiles: "", brokenLimit: "", verbose: false, quiet: false,
+  // 같은 옵션명이지만 범위가 다르다(scan 0..10억, sync 0..1,000만). 2026-09-17 부터
+  // 둘 다 프리필 = 서버 기본(SCAN_INT_FIELDS/SYNC_INT_FIELDS ↔ domain._OPTION_DEFAULTS).
+  scanBatchFiles: SCAN_INT_FIELDS.batch_files.prefill,
+  brokenLimit: SCAN_INT_FIELDS.broken_limit.prefill, verbose: false, quiet: false,
   // sync 옵션(SubmitJob 미러, 정규식·범위는 optionRules 공유). open_noatime 은
   // 단건·배치 모두 기본 ON 으로 통일했다(사용자 결정 2026-08-22 — 소스 atime
   // 오염 방지). 배치는 통일 게이트로 항상 특권(root) 실행이라 O_NOATIME 권한
@@ -98,9 +100,9 @@ export function BatchCreate() {
   // --- 실행 제어 스텝 검증(즉답 미러 — 최종 심판은 서버 422) ---
   const verboseQuietConflict = f.op === "scan" && f.verbose && f.quiet;
   const scanBatchFilesError = f.op === "scan"
-    ? intFieldError("batch_files", f.scanBatchFiles, 0, 1_000_000_000) : null;
+    ? scanIntFieldError("batch_files", f.scanBatchFiles) : null;
   const brokenLimitError = f.op === "scan"
-    ? intFieldError("broken_limit", f.brokenLimit, 0, 10_000) : null;
+    ? scanIntFieldError("broken_limit", f.brokenLimit) : null;
   const batchFilesError = f.op === "sync"
     ? syncIntFieldError("batch_files", f.batchFiles) : null;
   const bufsizeError = f.op === "sync"
@@ -208,7 +210,8 @@ export function BatchCreate() {
     if (f.op === "scan") {
       if (f.verbose) options.verbose = true;
       if (f.quiet) options.quiet = true;
-      // 빈값 = 키 생략 = 도구 기본. "0"은 정상 입력(배칭 끔)이라 생략과 다르다(null≠0).
+      // 빈값 = 키 생략 = 서버 기본(domain._OPTION_DEFAULTS, 프리필과 같은 값). "0"은
+      // 정상 입력(배칭 끔)이라 생략과 다르다(null≠0).
       if (f.scanBatchFiles.trim() !== "")
         options.batch_files = Number(f.scanBatchFiles.trim());
       if (f.brokenLimit.trim() !== "")
@@ -413,19 +416,23 @@ export function BatchCreate() {
           <div className="space-y-3">
             {f.op === "scan" ? (
               <>
+                {/* 프리필 = 서버 기본(domain._OPTION_DEFAULTS, 2026-09-17). 비우면 키가
+                    빠지고 서버가 같은 값을 박는다 -- placeholder 는 그 사실을 말한다. */}
                 <label className="text-sm block">batch_files (선택 · 0..1,000,000,000 · 0 = 배칭 끔)
                   <input aria-label="batch_files" type="number" min={0} max={1000000000}
-                         placeholder="기본 1000000 · 0 = 배칭 끔"
+                         placeholder="비우면 기본 1,000,000 적용 · 0 = 배칭 끔"
                          className={field} value={f.scanBatchFiles}
                          onChange={on("scanBatchFiles")} />
                 </label>
+                <p className="text-muted text-xs">미리 채운 1,000,000 = 서버 기본. 비워도 같은 값이 적용됩니다.</p>
                 {scanBatchFilesError && <p className="text-bad text-sm">{scanBatchFilesError}</p>}
                 <label className="text-sm block">broken_limit (선택 · 0..10,000 · 리포트에 보관할 파손 경로 수)
                   <input aria-label="broken_limit" type="number" min={0} max={10000}
-                         placeholder="기본 100"
+                         placeholder="비우면 기본 100 적용"
                          className={field} value={f.brokenLimit}
                          onChange={on("brokenLimit")} />
                 </label>
+                <p className="text-muted text-xs">미리 채운 100 = 서버 기본. 비워도 같은 값이 적용됩니다.</p>
                 {brokenLimitError && <p className="text-bad text-sm">{brokenLimitError}</p>}
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" aria-label="verbose" checked={f.verbose}
@@ -470,26 +477,27 @@ export function BatchCreate() {
                       기본 켬 — 배치는 특권(root) 실행이라 O_NOATIME 권한 제약이 없고,
                       소스 atime 오염을 막아 데이터 온도(hot/cold) 통계를 정직하게 유지합니다.
                     </p>
-                    {/* 프리필 계약(단건 폼과 동일 문구): 값이 미리 채워져 있고
-                        비우면 키가 빠져 도구 기본으로 돌아간다 — placeholder 는
-                        "비웠을 때", 캡션은 "지금 채워진 값"을 말한다. */}
-                    <label className="text-sm block">batch_files (선택 · 1..10,000,000)
+                    {/* 프리필 계약(단건 폼과 동일 문구, 2026-09-17): 값이 미리 채워져
+                        있고 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 — 배칭을
+                        끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때", 캡션은
+                        "지금 채워진 값"을 말한다. */}
+                    <label className="text-sm block">batch_files (선택 · 0..10,000,000)
                       <input aria-label="batch_files"
-                             placeholder="비우면 배칭 안 함(도구 기본)"
+                             placeholder="비우면 기본 1,000,000 적용 · 0 = 배칭 끔"
                              className={field} value={f.batchFiles}
                              onChange={on("batchFiles")} />
                     </label>
                     <p className="text-muted text-xs">
-                      미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).
+                      미리 채운 1,000,000 = 서버 기본 배치 사이즈. 비워도 같은 값이 적용되며, 배칭을 끄려면 0 을 입력하세요.
                     </p>
                     {batchFilesError && <p className="text-bad text-sm">{batchFilesError}</p>}
                     <label className="text-sm block">bufsize (선택 · 바이트, 4096..1,073,741,824)
-                      <input aria-label="bufsize" placeholder="비우면 4 MiB(도구 기본)"
+                      <input aria-label="bufsize" placeholder="비우면 기본 4 MiB 적용"
                              className={field} value={f.bufsize}
                              onChange={on("bufsize")} />
                     </label>
                     <p className="text-muted text-xs">
-                      미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).
+                      미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다.
                     </p>
                     {bufsizeError && <p className="text-bad text-sm">{bufsizeError}</p>}
                     <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)

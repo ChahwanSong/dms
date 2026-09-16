@@ -38,8 +38,9 @@ def test_scan_verbose_quiet_exclusive():
 def test_scan_batch_files_bounds_ok(value):
     # dscan 실측(dscan.c:1283-1288): --batch-files 0 허용 — 0 = 배칭 비활성.
     # 상한 10억은 DMS 위생 상한(도구는 uint64 전체 수용).
+    # 생략된 broken_limit 은 서버 기본(100)으로 채워진다(2026-09-17, _OPTION_DEFAULTS).
     assert validate_options(Operation.SCAN, {"batch_files": value}) \
-        == {"batch_files": value}
+        == {"batch_files": value, "broken_limit": 100}
 
 
 @pytest.mark.parametrize("value", [-1, 1_000_000_001, "5", True])
@@ -55,7 +56,7 @@ def test_scan_broken_limit_bounds_ok(value):
     # broken_paths_total 총계는 항상 정확. 상한 10,000은 리포트 크기 위생
     # (경로 문자열이 리포트에 그대로 실리고, stats 라우트 읽기 상한은 256 KiB).
     assert validate_options(Operation.SCAN, {"broken_limit": value}) \
-        == {"broken_limit": value}
+        == {"broken_limit": value, "batch_files": 1_000_000}
 
 
 @pytest.mark.parametrize("value", [-1, 10_001, "100", True])
@@ -71,19 +72,19 @@ def test_unknown_option_rejected():
     assert e.value.reason_code == "unknown_option"
 
 
-@pytest.mark.parametrize("value", [1, 10_000_000])
+@pytest.mark.parametrize("value", [0, 1, 10_000_000])
 def test_sync_batch_files_bounds_ok(value):
     # 상한 1,000만(사용자 조정 2026-08-16): 대규모 sync 에서 100만 단위 배치가 좁아
     # 한 자리 열었다. 도구 파싱(parse_uint64)은 uint64 전체를 받으므로 이 상한은
-    # 도구 제약이 아니라 DMS 위생 상한이다.
+    # 도구 제약이 아니라 DMS 위생 상한이다. 하한 0(2026-09-17): 서버 기본값(100만)이
+    # 생겨 "키 생략 = 배칭 안 함" 표현이 사라졌으므로 0 명시가 배칭을 끄는 유일한 표현.
+    # 생략된 bufsize 는 서버 기본(4 MiB)으로 채워진다.
     assert validate_options(Operation.SYNC, {"batch_files": value}) \
-        == {"batch_files": value}
+        == {"batch_files": value, "bufsize": 4_194_304}
 
 
-@pytest.mark.parametrize("value", [0, 10_000_001, "5", True])
+@pytest.mark.parametrize("value", [-1, 10_000_001, "5", True])
 def test_sync_batch_files_out_of_range(value):
-    # 하한 1 유지: dsync 의 0(=배칭 안 함)은 DMS 에서 **키 생략**으로 표현한다
-    # (표현이 둘이면 요약·화면이 갈린다). scan 의 batch_files 는 별개 스펙(0 허용).
     with pytest.raises(DomainValidationError) as e:
         validate_options(Operation.SYNC, {"batch_files": value})
     assert e.value.reason_code == "invalid_option"

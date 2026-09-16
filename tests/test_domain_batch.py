@@ -3,7 +3,9 @@ from dms.domain import build_data_payload, validate_batch, DomainValidationError
 
 def test_build_data_payload_scan():
     payload, key = build_data_payload("scan", storage="s1", target="a/b", options={})
-    assert payload == {"storage": "s1", "target": "a/b", "options": {}}
+    # 생략된 옵션은 서버 기본으로 채워져 payload 에 실린다(2026-09-17, domain._OPTION_DEFAULTS).
+    assert payload == {"storage": "s1", "target": "a/b",
+                       "options": {"batch_files": 1_000_000, "broken_limit": 100}}
     assert key.startswith("data.scan:s1:a/b:")
 
 def test_build_data_payload_sync():
@@ -11,7 +13,8 @@ def test_build_data_payload_sync():
         destination_storage="s2", destination="b", options={"delete": True})
     assert payload == {"source_storage": "s1", "source": "a",
                        "destination_storage": "s2", "destination": "b",
-                       "options": {"delete": True}}
+                       "options": {"delete": True, "batch_files": 1_000_000,
+                                   "bufsize": 4_194_304}}
     # 슬라이스 36: 파괴적 op 키에는 옵션 지문이 없다(같은 대상 = 같은 키).
     assert key == "data.sync:s1:a:s2:b"
 
