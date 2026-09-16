@@ -159,6 +159,10 @@ def _apply_migrations(db: Database) -> None:
             reason_code TEXT,
             preview_fingerprint TEXT,
             preview_expires_at TEXT,
+            -- 미리보기(dry-run) summary.json 사본(2026-09-17): 지문은 이 객체의 해시라
+            -- 컨펌 창이 "무엇을 컨펌하는지"(개수·크기)를 보여줄 수 있다. result_summary
+            -- 는 실행 종단 결과라 컨펌 시점엔 항상 NULL 이었다("(요약 없음)" 사고).
+            preview_summary TEXT,
             volcano_job_ref TEXT,
             artifact_uri TEXT,
             result_summary TEXT,
@@ -561,6 +565,8 @@ def _ensure_columns(db):
         # 슬라이스 25 진단 로그 박제 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스
         # 14 의 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
         ("data_jobs", "diag_logs", "TEXT"),
+        # 2026-09-17 미리보기 요약 사본 -- 같은 이유로 양쪽 선언.
+        ("data_jobs", "preview_summary", "TEXT"),
         ("requests", "batch_id", "TEXT"),
         # 슬라이스 19: 기배포 DB 는 CREATE 를 다시 안 탄다 -- 양쪽에 넣지 않으면
         # planner 의 req["auth_method"] 가 라이브에서만 없다(슬라이스 14 교훈).

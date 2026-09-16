@@ -517,8 +517,11 @@ class JobStepper:
                 return "Rejected"
             expires = iso_plus(utc_now_iso(), self._settings.preview_ttl_seconds)
             artifact = f"{self._artifact_base()}/{jid}"
+            # 요약 사본도 함께 남긴다(2026-09-17) -- 컨펌 창이 "무엇을 컨펌하는지"
+            # (dry-run 개수·크기)를 보여준다. 지문은 바로 이 객체의 해시다.
             self._repos.data_jobs.set_preview(jid, fingerprint=fingerprint,
-                                              expires_at=expires, artifact_uri=artifact)
+                                              expires_at=expires, artifact_uri=artifact,
+                                              summary=summary)
             self._repos.data_jobs.set_job_state(jid, DataJobState.CONFIRM_PENDING,
                                                 actor="stepper")
             return "ConfirmPending"

@@ -49,6 +49,10 @@ export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
   reason_code: string | null; preview_fingerprint: string | null;
   preview_expires_at: string | null; result_summary: unknown;
+  // 미리보기(dry-run) summary.json 사본(2026-09-17): 러너 계약대로 정확히
+  // {returncode, files, bytes} 이고 개수는 모르면 null. 지문(preview_fingerprint)이
+  // 이 객체의 해시라 컨펌 창이 "무엇을 컨펌하는지" 를 보여줄 수 있다. 이전 잡은 null.
+  preview_summary?: { returncode?: number | null; files?: number | null; bytes?: number | null } | null;
   transitions: Transition[]; artifact_uri: string | null;
   // phase -> 실행 ref("pod/<name>" 등). 로그를 실제로 조회할 수 있는 phase가 정확히
   // 이 키들이다 — 뷰어는 하드코딩된 "preflight"가 아니라 여기에 맞춰 탭을 만든다.

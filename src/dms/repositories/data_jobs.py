@@ -6,7 +6,7 @@ from ..domain import (DataJobState, RequestState, TERMINAL_DATA_JOB_STATES,
 from .observability import ObservabilityRepository
 
 _JSON_COLUMNS = ("options", "worker_pool", "precondition", "result_summary",
-                 "volcano_job_ref", "phase_refs")
+                 "preview_summary", "volcano_job_ref", "phase_refs")
 
 # set_job_state는 stepper.py(actor="stepper")와 batch_orchestrator.py
 # (actor="batch-orchestrator") 말고도 API 라우트(actor=identity.actor, 즉 실제
@@ -25,7 +25,7 @@ _KNOWN_COMPONENTS = frozenset({"stepper", "batch-orchestrator"})
 _ROW_COLUMNS_SANS_DIAG = (
     "job_id, request_id, operation, tool, storage_name, source_storage, "
     "destination_storage, source, destination, target, options, priority, state, "
-    "reason_code, preview_fingerprint, preview_expires_at, volcano_job_ref, "
+    "reason_code, preview_fingerprint, preview_expires_at, preview_summary, volcano_job_ref, "
     "artifact_uri, result_summary, files_count, bytes_count, worker_pool, "
     "precondition, confirmed_fingerprint, phase_refs, submit_wait_seconds, "
     "exec_submitted_at, sched_wait_seconds, created_at, updated_at")
@@ -325,12 +325,17 @@ class DataJobsRepository:
                WHERE job_id = :j AND sched_wait_seconds IS NULL""",
             {"w": wait, "j": job["job_id"]})
 
-    def set_preview(self, job_id, *, fingerprint, expires_at, artifact_uri):
+    def set_preview(self, job_id, *, fingerprint, expires_at, artifact_uri, summary=None):
+        # summary = 미리보기 summary.json 사본(2026-09-17). 지문이 이 객체의 해시라
+        # 둘을 같은 UPDATE 로 남긴다 -- 따로 쓰면 크래시 창에서 지문만 있고 요약이
+        # 없는 행이 생긴다. None 은 "모름"(구 호출자·읽기 실패)이라 NULL 그대로.
         self._db.execute(
             """UPDATE data_jobs SET preview_fingerprint = :f, preview_expires_at = :e,
+                   preview_summary = :s,
                    artifact_uri = COALESCE(:a, artifact_uri), updated_at = :now
                WHERE job_id = :j""",
             {"f": fingerprint, "e": expires_at, "a": artifact_uri,
+             "s": dump_json(summary) if summary is not None else None,
              "now": utc_now_iso(), "j": job_id})
 
     def set_confirmed(self, job_id, fingerprint):

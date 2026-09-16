@@ -128,3 +128,20 @@ def test_admin_bearer_can_access_others_jobs(client):
     r = client.post(f"/api/user/jobs/{jid}:confirm",
                     json={"fingerprint": "sha256:abc"}, headers=ADMIN)
     assert r.status_code == 200 and r.json()["state"] == "Executing"
+
+
+
+def test_job_payload_carries_preview_summary_as_dict(client):
+    # 2026-09-17: 컨펌 창은 result_summary(실행 종단 결과, 컨펌 시점엔 항상 null)가
+    # 아니라 미리보기 summary.json 사본을 보여준다 -- API 가 JSON 컬럼을 dict 로 편다.
+    repos = client.app.state.repos
+    rid, jid = _confirmpending_job(repos, requester="alice")
+    repos.data_jobs.set_preview(jid, fingerprint="sha256:abc",
+                                expires_at="2099-01-01T00:00:00Z", artifact_uri=None,
+                                summary={"returncode": 0, "files": 3, "bytes": 12582912})
+    _login(client, "alice")
+    r = client.get(f"/api/user/requests/{rid}/jobs")
+    assert r.status_code == 200
+    job = next(j for j in r.json() if j["job_id"] == jid)
+    assert job["preview_summary"] == {"returncode": 0, "files": 3, "bytes": 12582912}
+    assert job["result_summary"] is None
