@@ -95,6 +95,29 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 잡 옵션 서버 기본값 + "작업 컨펌" 창의 미리보기 요약 — **완료·실증**(2026-09-17, d135)
+
+**사용자 요청 1**: sync `batch_files 1,000,000`·`bufsize 4,194,304`, scan `batch_files 1,000,000`·
+`broken_limit 100` 을 포탈 프리필이면서 **서버 기본값**으로. 조사(같은 날)에서 "안 골랐는데
+적용되는 값"은 비특권 sync 의 `--chown uid:gid` 자동 주입, 관리자/배치 sync `open_noatime` ON,
+sync 프리필뿐이었고 서버는 기본값을 박지 않았다(빈값 = 도구 기본). `domain._OPTION_DEFAULTS` 가
+검증 뒤 생략 키를 채우고(rm 은 없음 — recursive 는 동의 게이트), payload/요청 상세에 그대로
+남는다. sync `batch_files` 하한 1→0: 서버 기본값이 생기며 "키 생략 = 배칭 끔" 표현이 사라져
+0 명시가 유일한 표현. 포탈은 `SCAN_INT_FIELDS` 로 scan 도 프리필하고 placeholder/캡션이
+"비우면 기본 N 적용 · 0 = 배칭 끔" 을 말한다. `test_domain_option_defaults` 가 프리필 == 서버
+기본(optionRules.ts 파싱)과 범위 안임을 고정.
+
+**사용자 요청 2**: ConfirmPending 의 "미리보기 확인" → **"작업 컨펌"**(버튼·제목, 확인 버튼
+"컨펌"). "(요약 없음)" 원인: 창이 `result_summary`(실행 **종단** 결과)를 읽어 컨펌 시점엔
+항상 NULL 이었고 `_poll_preview` 는 dry-run summary.json 을 지문에만 쓰고 버렸다. 흐름은
+Pending → Planned(planner) → **Preflight**(요청자 신원으로 경로 접근 검사 파드) →
+**PreviewRunning**(dsync/drm `--dryrun` Volcano 잡) → **ConfirmPending**(지문 저장) → 컨펌 →
+Executing(exec_preflight 재검증) → Running → Succeeded. 이제 `data_jobs.preview_summary`
+(CREATE + `_ensure_columns`, JSON) 에 지문과 같은 UPDATE 로 사본을 남기고 창이 "복사 대상
+N개 · 12.0 MiB"(rm 은 삭제 대상, null=모름·0 정상값 구분) 로 보여준다. 구 잡은 그 사실을
+말한다. 마이그레이션 열거 그물 38.
+- 실증(테스트베드, 2026-09-17): 포탈 빌드 d135(commit f2db73f) → 릴리스 dms-api·dms-controller Applied(migrate 가 preview_summary 컬럼 보강). 옵션 생략 sync(alice): 요청·잡 options = {batch_files 1000000, bufsize 4194304}, preview/execution vcjob argv 에 --batch-files 1000000 --bufsize 4194304(+비특권 --chown), 컨펌 → Succeeded(files 2). 옵션 생략 scan(admin): options = {batch_files 1000000, broken_limit 100}, argv --batch-files 1000000 --broken-limit 100, Succeeded. batch_files 0 명시 sync: options {batch_files 0, bufsize 4194304}, argv --batch-files 0 → 취소. 서빙 번들에 '작업 컨펌' 포함·'미리보기 확인' 0건. **추가 발견·수정**: 첫 실증에서 preview_summary 가 {returncode 0, files null, bytes null} — dsync --dryrun 은 복사 요약을 찍지 않고 walk 요약만 남겨 러너 파서가 개수를 못 뽑았고, 그래서 지문(summary 해시)이 사실상 상수라 fingerprint_mismatch 보호가 무력했다(기존 결함). runner: dryrun 이면 소스 walk 항목 수를 files 로(parsers.parse_sync_dryrun_counts, bytes 는 null) → dms-mpifileutils d135 빌드·잡 이미지 오버라이드 전환(job-image 릴리스, Applied) → 재실증: preview_summary {files 2, bytes null, rc 0}, 지문 == sha256(preview_summary), 컨펌 → d135 잡 이미지에서 Succeeded, 실행 요약 files 2·bytes 10 불변. 오버레이 testbed dms newTag d135, guard exit 0. (DMS_JOB_IMAGE patch-config 는 종전대로 d110 유지 — DB 오버라이드가 진실.)
+
 ### ✅ 에이전트 호스트 루트 단일 마운트 — 스토리지 등록만으로 자동 프로브 — **완료·실증**(2026-09-16, dms-agent d124)
 
 **프로덕션 보고**: 스토리지를 등록하고 노드에 마운트해도 포탈은 Missing — 에이전트 DaemonSet 이
