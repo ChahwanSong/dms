@@ -16,8 +16,8 @@ import { StoragePicker, field } from "./formFields";
 // 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션 스텝과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, CHOWN_RE, SYNC_INT_FIELDS, intFieldError,
-         syncIntFieldError } from "./optionRules";
+import { CHMOD_RE, CHOWN_RE, SCAN_INT_FIELDS, SYNC_INT_FIELDS, intFieldError,
+         scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
@@ -35,14 +35,17 @@ const initial = {
   delete: false, contents: false, direct: false,
   recursive: true, stat: false, lite: false, quiet: false,
   // scan 옵션(구 SubmitScan 미러 — dscan 1b93d54 실측): batch_files 0..10억
-  // (0 = 배칭 끔), broken_limit 0..10,000. 프리필하지 않는다 — 도구 기본
-  // (batch_files 100만/broken_limit 100)이 이미 원하는 값이라 생략 = 도구 기본.
-  // sync 의 batchFiles 와 별도 상태인 이유: 같은 옵션명이지만 범위·프리필이 다르다.
-  scanBatchFiles: "", brokenLimit: "", verbose: false,
+  // (0 = 배칭 끔), broken_limit 0..10,000. 2026-09-17 부터 프리필(SCAN_INT_FIELDS
+  // .prefill) = 서버 기본(domain._OPTION_DEFAULTS) — 값이 dscan 기본과 같아 동작은
+  // 종전과 같고, 요청 상세에 어떤 값으로 돌았는지 명시적으로 남는다.
+  // sync 의 batchFiles 와 별도 상태인 이유: 같은 옵션명이지만 범위가 다르다.
+  scanBatchFiles: SCAN_INT_FIELDS.batch_files.prefill,
+  brokenLimit: SCAN_INT_FIELDS.broken_limit.prefill, verbose: false,
   // 고급 sync 옵션 — 숫자도 문자열로 들고, 빈 문자열("")일 때만 "미입력"으로 생략한다.
-  // truthy 검사 금지: "0"은 미입력이 아니라 범위 밖 클라이언트 검증 오류다.
+  // truthy 검사 금지: "0"은 미입력이 아니라 정상 입력(배칭 끔, 2026-09-17 하한 0)이다.
   // batchFiles·bufsize 는 프리필(SYNC_INT_FIELDS.prefill — 「왜」는 그 주석):
-  // 값이 실려 있으니 손대지 않으면 바디에 그대로 나간다. 지우면 옛 계약대로 생략.
+  // 값이 실려 있으니 손대지 않으면 바디에 그대로 나간다. 지우면 키가 빠지고 서버가
+  // 같은 기본값을 박는다(domain._OPTION_DEFAULTS).
   // 초기값 ON = **운영자 기본**(사용자 결정 2026-08-22, 재조정): 운영자 단건
   // sync 는 open_noatime 기본 켜짐(소스 atime 오염 방지)이고 고급 옵션에서 끌 수
   // 있다. **사용자 요청은 기본 OFF** 다 -- 단건은 비특권 실행이라 타인 소유 파일
@@ -90,9 +93,9 @@ export function SubmitJob() {
   // scan 국소 검증(BatchCreate 옵션 스텝 미러).
   const verboseQuietConflict = f.operation === "scan" && f.verbose && f.quiet;
   const scanBatchFilesError = f.operation === "scan"
-    ? intFieldError("batch_files", f.scanBatchFiles, 0, 1_000_000_000) : null;
+    ? scanIntFieldError("batch_files", f.scanBatchFiles) : null;
   const brokenLimitError = f.operation === "scan"
-    ? intFieldError("broken_limit", f.brokenLimit, 0, 10_000) : null;
+    ? scanIntFieldError("broken_limit", f.brokenLimit) : null;
   // 고급 옵션은 sync 전용이라 rm 으로 바꾸면(전송도 안 되므로) 차단 사유에서 빠진다.
   const batchFilesError = f.operation === "sync"
     ? syncIntFieldError("batch_files", f.batchFiles) : null;
@@ -325,26 +328,26 @@ export function SubmitJob() {
                         <input type="checkbox" aria-label="open_noatime" checked={f.openNoatime}
                                onChange={on("openNoatime")} /> open_noatime
                       </label>
-                      {/* 프리필 계약: 값이 미리 채워져 있고(placeholder 가 아니다)
-                          비우면 키가 빠져 도구 기본으로 돌아간다 — placeholder 는
-                          "비웠을 때 무슨 일이 나는가"를, 캡션은 "지금 채워진 값이
-                          무엇인가"를 말한다(둘이 다른 정보다). */}
-                      <label className="text-sm block">batch_files (선택 · 1..10,000,000)
+                      {/* 프리필 계약(2026-09-17): 값이 미리 채워져 있고(placeholder 가
+                          아니다) 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 —
+                          배칭을 끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때
+                          무슨 일이 나는가"를, 캡션은 "지금 채워진 값"을 말한다. */}
+                      <label className="text-sm block">batch_files (선택 · 0..10,000,000)
                         <input aria-label="batch_files" className={field} value={f.batchFiles}
-                               placeholder="비우면 배칭 안 함(도구 기본)"
+                               placeholder="비우면 기본 1,000,000 적용 · 0 = 배칭 끔"
                                onChange={on("batchFiles")} />
                       </label>
                       <p className="text-muted text-xs">
-                        미리 채운 1,000,000 = 기본 배치 사이즈 100만. 비우면 배칭 안 함(도구 기본).
+                        미리 채운 1,000,000 = 서버 기본 배치 사이즈. 비워도 같은 값이 적용되며, 배칭을 끄려면 0 을 입력하세요.
                       </p>
                       {batchFilesError && <p className="text-bad text-sm">{batchFilesError}</p>}
                       <label className="text-sm block">bufsize (선택 · 바이트, 4096..1,073,741,824)
                         <input aria-label="bufsize" className={field} value={f.bufsize}
-                               placeholder="비우면 4 MiB(도구 기본)"
+                               placeholder="비우면 기본 4 MiB 적용"
                                onChange={on("bufsize")} />
                       </label>
                       <p className="text-muted text-xs">
-                        미리 채운 4194304 = 4 MiB. 비우면 4 MiB(도구 기본).
+                        미리 채운 4194304 = 4 MiB(서버 기본). 비워도 같은 값이 적용됩니다.
                       </p>
                       {bufsizeError && <p className="text-bad text-sm">{bufsizeError}</p>}
                       <label className="text-sm block">chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)
@@ -384,17 +387,25 @@ export function SubmitJob() {
                   {verboseQuietConflict && (
                     <p className="text-bad text-sm">verbose와 quiet는 함께 쓸 수 없습니다</p>
                   )}
+                  {/* 프리필 = 서버 기본(domain._OPTION_DEFAULTS, 2026-09-17). 비우면 키가
+                      빠지고 서버가 같은 값을 박는다 -- placeholder 는 그 사실을 말한다. */}
                   <label className="text-sm block">batch_files (선택 · 0..1,000,000,000)
                     <input aria-label="batch_files" className={field} value={f.scanBatchFiles}
-                           placeholder="비우면 1,000,000(도구 기본) · 0 = 배칭 안 함"
+                           placeholder="비우면 기본 1,000,000 적용 · 0 = 배칭 안 함"
                            onChange={on("scanBatchFiles")} />
                   </label>
+                  <p className="text-muted text-xs">
+                    미리 채운 1,000,000 = 서버 기본. 비워도 같은 값이 적용됩니다.
+                  </p>
                   {scanBatchFilesError && <p className="text-bad text-sm">{scanBatchFilesError}</p>}
                   <label className="text-sm block">broken_limit (선택 · 0..10,000)
                     <input aria-label="broken_limit" className={field} value={f.brokenLimit}
-                           placeholder="비우면 100(도구 기본) · 파손 경로 표본 보관 상한"
+                           placeholder="비우면 기본 100 적용 · 파손 경로 표본 보관 상한"
                            onChange={on("brokenLimit")} />
                   </label>
+                  <p className="text-muted text-xs">
+                    미리 채운 100 = 서버 기본(리포트에 보관할 파손 경로 수). 비워도 같은 값이 적용됩니다.
+                  </p>
                   {brokenLimitError && <p className="text-bad text-sm">{brokenLimitError}</p>}
                 </>
               ) : (

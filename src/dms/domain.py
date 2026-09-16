@@ -142,20 +142,40 @@ _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {
         "open_noatime": _BOOL, "quiet": _BOOL,
         # batch_files 상한 1,000만(사용자 조정 2026-08-16): 대규모 sync 에서 100만
         # 단위 배치가 좁았다. 도구 파싱(parse_uint64)은 uint64 전체를 받으므로 이
-        # 상한은 도구 제약이 아니라 DMS 위생 상한이다. 하한 1 유지 — dsync 의
-        # 0(=배칭 안 함, mfu_flist_copy.c:3361 기본값)은 DMS 에서 **키 생략**으로
-        # 표현한다(표현이 둘이면 요약·화면이 갈린다). scan 의 batch_files 는 별개
-        # 스펙(dscan 0..10억, 0 허용)이라 이 조정과 무관하다.
+        # 상한은 도구 제약이 아니라 DMS 위생 상한이다.
         #
-        # 기본값을 서버가 박지 않는 이유: 박는 순간 "빈값 = 플래그 생략 = 도구 기본"
-        # 이라는 표현 자체가 사라진다(사용자가 배칭을 끌 방법이 없어진다). 프리필은
-        # 폼(optionRules.SYNC_INT_FIELDS)이 하고, 서버는 받은 것만 검증한다.
-        "batch_files": ("int", 1, 10_000_000),
+        # 하한 0(2026-09-17): 서버가 기본값(_OPTION_DEFAULTS, 생략 = 100만)을 박기
+        # 시작하면서 "키 생략 = 배칭 안 함" 표현이 사라졌다 -- 배칭을 끄는 유일한
+        # 표현은 이제 dsync 의미 그대로 **0 명시**(mfu_flist_copy.c:3361 기본값)다.
+        # 예전엔 하한 1 + 키 생략으로 표현했다(표현이 둘이면 요약·화면이 갈린다는
+        # 이유였고, 이제는 명시 0 하나뿐이라 같은 원칙이 유지된다).
+        "batch_files": ("int", 0, 10_000_000),
         "bufsize": ("int", 4096, 1_073_741_824),
         "chmod": ("chmod",), "chown": ("chown",),
     },
     Operation.RM: {"recursive": _BOOL, "stat": _BOOL, "lite": _BOOL, "quiet": _BOOL},
 }
+
+# 서버 기본값(사용자 결정 2026-09-17): 키가 **생략**되면 여기 값이 옵션에 박혀 잡에
+# 실린다 -- 포탈 프리필(optionRules.SYNC_INT_FIELDS/SCAN_INT_FIELDS)과 같은 값이라
+# 폼을 거치든 API 를 직접 치든 같은 동작이다. 값의 「왜」:
+#   sync  batch_files 1,000,000 -- 도구 기본(0 = 배칭 안 함)과 **다른** 정책 결정
+#         (대규모 sync 메모리 안정성). 끄려면 0 을 명시한다(하한 0).
+#         bufsize 4,194,304 -- 도구 기본(MFU_BUFFER_SIZE 4 MiB)과 같은 값의 명시.
+#   scan  batch_files 1,000,000 · broken_limit 100 -- 둘 다 dscan 기본과 같은 값의
+#         명시(dscan.c:1283-1293). 요청 상세·리포트에 어떤 값으로 돌았는지 남는다.
+# 검증(_OPTION_SPECS) **뒤에** 채운다 -- 기본값 자체가 스펙 범위 안임을 아래
+# 테스트(test_domain_option_defaults)가 고정한다. rm 은 기본값이 없다(recursive 는
+# 동의 게이트라 기본으로 박으면 안 된다 -- validate_rm_target).
+_OPTION_DEFAULTS: dict[Operation, dict] = {
+    Operation.SCAN: {"batch_files": 1_000_000, "broken_limit": 100},
+    Operation.SYNC: {"batch_files": 1_000_000, "bufsize": 4_194_304},
+    Operation.RM: {},
+}
+
+
+def option_defaults(operation) -> dict:
+    return dict(_OPTION_DEFAULTS[Operation(operation)])
 
 
 def validate_options(operation: Operation, options: dict) -> dict:
@@ -185,6 +205,8 @@ def validate_options(operation: Operation, options: dict) -> dict:
         raise DomainValidationError("invalid_option", "stat and lite are mutually exclusive")
     if Operation(operation) is Operation.SCAN and out.get("verbose") and out.get("quiet"):
         raise DomainValidationError("invalid_option", "verbose and quiet are mutually exclusive")
+    for key, value in _OPTION_DEFAULTS[Operation(operation)].items():
+        out.setdefault(key, value)
     return out
 
 
