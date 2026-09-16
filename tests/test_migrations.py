@@ -653,7 +653,7 @@ def test_every_post_v1_column_rides_both_migration_paths(tmp_path):
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
     pairs = _ensure_pairs()
-    assert len(pairs) == 37      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1)
+    assert len(pairs) == 38      # 추출 자기 검증 -- 0 매치면 등식이 공허해진다(프록시 3 + 호스트 네트워크 1 + CA 1)
     for table, v1 in _V1_COLUMNS.items():
         cols = {r["name"] for r in db.query(f"PRAGMA table_info({table})")}
         ensured = {c for t, c, _ in pairs if t == table}
@@ -670,7 +670,7 @@ def test_ensure_columns_types_match_create_declarations(tmp_path):
     pairs = _ensure_pairs()
     # 추출 자기 검증을 이 테스트에도 둔다 -- 위 등식 테스트가 지워지거나 홀로
     # 실행될 때 정규식이 0 매치면 아래 루프가 공허하게 통과하기 때문이다.
-    assert len(pairs) == 37
+    assert len(pairs) == 38
     for table, column, coltype in pairs:
         assert _declared_type(db, table, column) == coltype, (table, column)
 
@@ -699,3 +699,39 @@ def test_widen_count_columns_scopes_to_current_schema():
     assert len(fake.queries) == 2            # files_count·bytes_count 각 1회
     assert all("table_schema = current_schema()" in sql
                for sql, _ in fake.queries)
+
+
+
+def test_migrate_adds_preview_summary_to_existing_data_jobs(db):
+    # 2026-09-17: 미리보기 요약 사본. 기배포 DB 는 CREATE 를 다시 안 타므로
+    # _ensure_columns 쪽이 빠지면 첫 ConfirmPending 전이의 set_preview UPDATE 가
+    # 라이브에서만 500 을 낸다(diag_logs·files_count 와 같은 재현 시나리오).
+    db.execute("DROP TABLE data_jobs")
+    db.execute("""CREATE TABLE data_jobs (job_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL, operation TEXT NOT NULL, tool TEXT,
+        storage_name TEXT, source_storage TEXT, destination_storage TEXT,
+        source TEXT, destination TEXT, target TEXT, options TEXT NOT NULL,
+        priority TEXT NOT NULL, state TEXT NOT NULL, reason_code TEXT,
+        preview_fingerprint TEXT, preview_expires_at TEXT, volcano_job_ref TEXT,
+        artifact_uri TEXT, result_summary TEXT, files_count BIGINT,
+        bytes_count BIGINT, worker_pool TEXT, precondition TEXT,
+        confirmed_fingerprint TEXT, phase_refs TEXT, submit_wait_seconds BIGINT,
+        exec_submitted_at TEXT, sched_wait_seconds BIGINT, diag_logs TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    from dms.migrations import _column_exists, migrate
+    migrate(db)
+    assert _column_exists(db, "data_jobs", "preview_summary")
+    assert _declared_type(db, "data_jobs", "preview_summary") == "TEXT"
+
+
+def test_preview_summary_is_declared_in_the_create_table_block():
+    # diag_logs 와 같은 이유: 신규 DB 에선 CREATE 누락을 _ensure_columns 가 흡수해
+    # PRAGMA 로는 두 경로를 구분할 수 없다 -- CREATE 쪽 선언은 소스로 고정한다.
+    import inspect
+    import re
+    from dms import migrations
+    src = inspect.getsource(migrations._apply_migrations)
+    block = re.search(r'CREATE TABLE IF NOT EXISTS data_jobs.*?"""', src, re.S)
+    assert block is not None
+    sql = re.sub(r"--[^\n]*", "", block.group(0))
+    assert re.search(r"^\s*preview_summary\s+TEXT\s*,\s*$", sql, re.M)

@@ -39,12 +39,19 @@ def test_set_preview_and_confirmed(db):
     jid = _job(repos)
     repos.data_jobs.set_preview(jid, fingerprint="sha256:abc",
                                 expires_at="2026-08-03T10:00:00Z",
-                                artifact_uri="file:///art/j")
+                                artifact_uri="file:///art/j",
+                                summary={"returncode": 0, "files": 3, "bytes": 12})
     repos.data_jobs.set_confirmed(jid, "sha256:abc")
     job = repos.data_jobs.get_job(jid)
     assert job["preview_fingerprint"] == "sha256:abc"
     assert job["confirmed_fingerprint"] == "sha256:abc"
     assert job["preview_expires_at"] == "2026-08-03T10:00:00Z"
+    # 2026-09-17: 미리보기 요약 사본은 JSON 컬럼(_JSON_COLUMNS)이라 dict 로 돌아온다.
+    assert job["preview_summary"] == {"returncode": 0, "files": 3, "bytes": 12}
+    # summary 생략(구 호출자·읽기 실패)은 NULL = 모름 -- 지어내지 않는다.
+    repos.data_jobs.set_preview(jid, fingerprint="sha256:def",
+                                expires_at="2026-08-03T11:00:00Z", artifact_uri=None)
+    assert repos.data_jobs.get_job(jid)["preview_summary"] is None
 
 
 def test_set_artifact(db):
