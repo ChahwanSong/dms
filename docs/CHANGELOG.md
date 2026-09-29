@@ -95,6 +95,39 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 에이전트 nslcd LDAP bind 계정·StartTLS·URI 정규화 — **완료·실증**(2026-09-29, dms-agent d137)
+
+**프로덕션 사고**(요청 b07e68d0, yo.hong, sync gpfs-mirr24-test): 마운트가 있는 ion2106~2109 전부
+`identity_not_ready_on_node` → 5분 뒤 Rejected. 현장 진단: dms-agent 컨테이너에 `DMS_LDAP_BIND_DN/PW`
+가 주입되지 않아 nslcd 가 **익명 바인드** — 사내 LDAP 은 익명에게 rootDSE 만 보여주고 사용자 검색은
+막아 cocoa.song 까지 아무도 해석되지 않았다(파드 안에서 binddn/bindpw 만 넣자 즉시 해석). 부수로
+sssd 식 콤마 URI 가 nslcd `uri` 에 그대로 들어가 한 덩어리 호스트명(gaierror)이 되어 페일오버가 없었다.
+테스트베드 slapd 는 익명 읽기를 허용해 둘 다 가려졌다(사전 실측: `uri` 1줄, `ldap_simple_bind_s(NULL,NULL)`).
+
+권장안(DaemonSet 에 bind 자격 주입 + URI 정규화)에 **원론 보강 하나**: 제어면은 StartTLS 를 bind **전에**
+올리는데 에이전트 nslcd 엔 StartTLS 설정 자체가 없었다 — bind 계정만 넣었다면 검색 계정 비밀번호가 평문
+389 로 나갔을 것이다. 그래서 엔트리포인트가 제어면 리졸버(`identity_ldap.py`)를 통째로 미러한다:
+- `50-agent-daemonset.yaml`: `DMS_LDAP_BIND_DN`·`DMS_LDAP_USE_START_TLS` ← dms-config,
+  `DMS_LDAP_BIND_PW` ← dms-secrets **키 하나만**(secretKeyRef; envFrom 금지 원칙 유지), `optional: true`.
+- `agent-entrypoint.sh`: URI 콤마/공백 분해·후행 `/` 제거 → `uri` 한 줄씩; StartTLS(미설정=true,
+  `_parse_bool` 미러)면 `ssl start_tls` + `tls_reqcert never`; umask 077 로 처음부터 0600; 값의 개행은
+  설정 주입 방지로 거부(값 비노출); DN 만 있고 PW 없으면 경고 후 익명; 앞뒤 공백 PW 경고; 기동 로그에
+  `dms-agent: nslcd uri=N server(s) start_tls=on bind=dn=… (password set)` 한 줄(비밀번호 없이) —
+  이번 사고엔 이런 신호가 없었다. `--render-nslcd-conf <path>` 렌더 전용 모드.
+- 테스트: `test_agent_nslcd_conf` 21건(엔트리포인트 실제 실행), `test_agent_daemonset_contract` +4
+  (자격 출처, secret 키는 SHARED_TOKEN·BIND_PW 둘뿐, envFrom 금지, ConfigMap 키 존재, **엔트리포인트가
+  읽는 `DMS_LDAP_*` == DaemonSet 이 주는 변수 양방향** — 옛 매니페스트면 BIND_DN/BIND_PW/USE_START_TLS
+  누락으로 실패함을 확인). pytest 1853(+렌더 5건 별도 21/21). ARCHITECTURE §6 불변식.
+- 실증(테스트베드): 포탈 빌드 d137(mfu+dms+agent, commit d02fead) → **1단계** 릴리스 dms-agent d137
+  (새 이미지+옛 매니페스트 = 프로덕션 롤아웃 전환 구간): 5노드 모두 StartTLS 수행(이전 0회)·익명·해석
+  정상·진단 줄 `bind=anonymous` (40/40) → **2단계** 오버레이 agent newTag d137 + guard exit 0 + `apply -k`:
+  5노드 모두 `binddn/bindpw` + `ldap_simple_bind_s("uid=search_dms,…")` over StartTLS, `getent`
+  alice·cocoa.song 정상, nslcd.conf 0600, 비밀번호가 `kubectl logs` 에 없음(45/45). alice sync
+  end-to-end: 신원 준비 → Planned(100s) → preview → 컨펌 → Succeeded(files 2), 타인 404.
+- 프로덕션 적용: `git pull`(dms-ssc) → 포탈 빌드 images=[dms-mpifileutils, dms, dms-agent] 새 태그 →
+  릴리스 dms-agent(이미지 먼저) → `deploy/overlays/ssc` 태그 맞춘 뒤 guard + `apply -k`(env 적용).
+  기동 로그에서 `bind=dn=uid=search_sc,…` 확인.
+
 ### ✅ 사용자 포탈 스토리지 피커에 관리 루트(managed_root) 표시 — **완료·실증**(2026-09-29, d136)
 
 사용자 보고: 단일 작업 요청에서 스토리지를 고르면 운영자 포탈엔 "관리 디렉토리: …" 캡션이
