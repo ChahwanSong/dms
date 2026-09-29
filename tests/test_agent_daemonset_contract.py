@@ -67,3 +67,63 @@ def test_env_points_probes_at_the_host_root_mount():
     assert m and m.group(1) == "/host/root"
     mp = re.search(r'name: host-root\s*\n\s*mountPath: ([^\s]+)', text)
     assert mp and mp.group(1) == m.group(1), "env 와 mountPath 가 같은 경로여야 한다"
+
+
+
+# --- LDAP 자격 주입(프로덕션 2026-09-29) ------------------------------------------
+# 엔트리포인트는 DMS_LDAP_BIND_DN 이 있을 때만 nslcd 에 binddn 을 쓰는데 DaemonSet 이 그
+# 변수를 주입하지 않아 nslcd 가 익명으로 돌았다(사내 LDAP 은 익명 사용자 검색 불허 → 전
+# 요청 identity_not_ready_on_node). "엔트리포인트가 읽는 변수 == DaemonSet 이 주입하는
+# 변수" 를 양방향으로 고정해 같은 부류의 누락을 막는다.
+ENTRYPOINT = REPO_ROOT / "deploy" / "docker" / "agent-entrypoint.sh"
+BASE_CONFIG = REPO_ROOT / "deploy" / "k8s" / "20-config.yaml"
+
+
+def _code(path):
+    return "\n".join(ln for ln in path.read_text(encoding="utf-8").splitlines()
+                     if not ln.lstrip().startswith("#"))
+
+
+def _env_refs():
+    """env 항목 -> (kind, source, key, optional). 흐름형·블록형 둘 다."""
+    text = _code(DS)
+    refs = {}
+    flow = re.compile(r"- name: (\S+)\s*\n\s*valueFrom:\s*\n\s*(configMapKeyRef|secretKeyRef):"
+                      r" \{name: ([\w-]+), key: (\w+)(?:, optional: (true))?\}")
+    block = re.compile(r"- name: (\S+)\s*\n\s*valueFrom:\s*\n\s*(configMapKeyRef|secretKeyRef):\s*\n"
+                       r"\s*name: ([\w-]+)\s*\n\s*key: (\w+)")
+    for m in flow.finditer(text):
+        refs[m.group(1)] = (m.group(2), m.group(3), m.group(4), m.group(5) == "true")
+    for m in block.finditer(text):
+        refs[m.group(1)] = (m.group(2), m.group(3), m.group(4), False)
+    return refs
+
+
+def test_ldap_bind_account_and_tls_policy_come_from_the_control_plane_sources():
+    refs = _env_refs()
+    assert refs["DMS_LDAP_BIND_DN"] == ("configMapKeyRef", "dms-config", "DMS_LDAP_BIND_DN", True)
+    assert refs["DMS_LDAP_BIND_PW"] == ("secretKeyRef", "dms-secrets", "DMS_LDAP_BIND_PW", True)
+    assert refs["DMS_LDAP_USE_START_TLS"] == (
+        "configMapKeyRef", "dms-config", "DMS_LDAP_USE_START_TLS", True)
+
+
+def test_agent_pulls_only_named_secret_keys_never_envfrom():
+    # envFrom 은 DMS_DATABASE_URL·DMS_ADMIN_TOKEN 까지 모든 노드에 노출한다(헤더 주석).
+    assert "envFrom:" not in _code(DS)
+    secret_keys = {v[2] for v in _env_refs().values() if v[0] == "secretKeyRef"}
+    assert secret_keys == {"DMS_SHARED_TOKEN", "DMS_LDAP_BIND_PW"}
+
+
+def test_every_configmap_key_the_agent_reads_exists_in_base_config():
+    cfg = BASE_CONFIG.read_text(encoding="utf-8")
+    for name, (kind, source, key, _opt) in _env_refs().items():
+        if kind == "configMapKeyRef":
+            assert source == "dms-config"
+            assert re.search(rf"^  {key}:", cfg, re.M), f"{name}: dms-config 에 {key} 없음"
+
+
+def test_entrypoint_ldap_vars_and_daemonset_env_match_both_ways():
+    read = set(re.findall(r"DMS_LDAP_[A-Z_]+", _code(ENTRYPOINT)))
+    injected = {n for n in _env_refs() if n.startswith("DMS_LDAP_")}
+    assert read - injected == set(), f"엔트리포인트가 읽는데 DaemonSet 이 안 주는 변수: {read - injected}"
+    assert injected - read == set(), f"DaemonSet 이 주는데 엔트리포인트가 무시하는 변수: {injected - read}"

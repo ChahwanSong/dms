@@ -8,7 +8,9 @@
 # DMS_ADMIN_TOKEN/DMS_SESSION_SECRET/etc -- only DMS_AGENT_API_URL,
 # DMS_SHARED_TOKEN, DMS_AGENT_NODE_NAME, DMS_AGENT_INTERVAL_SECONDS,
 # DMS_AGENT_MOUNTINFO_PATH, DMS_AGENT_NET_DEV_PATH,
-# DMS_AGENT_VIRTUAL_NET_PATH, DMS_AGENT_HOST_ROOT. Blanket envFrom would
+# DMS_AGENT_VIRTUAL_NET_PATH, DMS_AGENT_HOST_ROOT, plus the DMS_LDAP_* keys
+# agent-entrypoint.sh templates into nslcd.conf (incl. the search account's
+# DMS_LDAP_BIND_PW, by its own secretKeyRef). Blanket envFrom would
 # needlessly expose DMS_DATABASE_URL/DMS_ADMIN_TOKEN on every node.
 #
 # Volume mounts:
@@ -91,9 +93,16 @@ spec:
           securityContext:
             runAsUser: 0
           env:
-            # LDAP endpoint for nslcd (node NSS) -- same directory the API/
-            # controller feed the DMS identity resolver. Anonymous bind
-            # (DMS_LDAP_BIND_DN empty), so no bind creds needed here.
+            # LDAP for nslcd (node NSS) -- the SAME directory, TLS policy and
+            # search account the API/controller feed the DMS identity resolver
+            # (agent-entrypoint.sh mirrors identity_ldap.py). The bind account
+            # is required wherever the directory refuses anonymous user
+            # searches: prod 2026-09-29 ran nslcd anonymously and resolved
+            # nobody -> every request identity_not_ready_on_node. The password
+            # is pulled by ONE secretKeyRef (not envFrom -- see the header).
+            # optional: a site without these keys still starts (anonymous /
+            # resolver default StartTLS on) instead of CreateContainerConfigError.
+            # tests/test_agent_daemonset_contract.py pins all of this.
             - name: DMS_LDAP_URI
               valueFrom:
                 configMapKeyRef: {name: dms-config, key: DMS_LDAP_URI}
@@ -103,6 +112,15 @@ spec:
             - name: DMS_LDAP_GROUP_BASE
               valueFrom:
                 configMapKeyRef: {name: dms-config, key: DMS_LDAP_GROUP_BASE}
+            - name: DMS_LDAP_USE_START_TLS
+              valueFrom:
+                configMapKeyRef: {name: dms-config, key: DMS_LDAP_USE_START_TLS, optional: true}
+            - name: DMS_LDAP_BIND_DN
+              valueFrom:
+                configMapKeyRef: {name: dms-config, key: DMS_LDAP_BIND_DN, optional: true}
+            - name: DMS_LDAP_BIND_PW
+              valueFrom:
+                secretKeyRef: {name: dms-secrets, key: DMS_LDAP_BIND_PW, optional: true}
             - name: DMS_AGENT_API_URL
               value: "http://dms-api:8080"
             - name: DMS_AGENT_MOUNTINFO_PATH
