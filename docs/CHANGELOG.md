@@ -95,6 +95,32 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 방안 A — 디렉터리 설정을 보고 응답으로 하달, 포탈 이미지 릴리스만으로 에이전트 수렴 — **완료·실증**(2026-09-29, d138)
+
+사용자 질문: "2단계(apply -k)가 꼭 필요한가 / 1단계만으로 충분해질 방법은?" — 포탈 릴리스는 DaemonSet
+**이미지만** 패치하므로(rollout_runner.image_patch_body) env 로 배선한 bind 계정은 apply 없이는 파드에
+들어가지 않는다. 방안 비교(API 하달 / 볼륨 마운트 / 포탈의 매니페스트 apply / SA 로 Secret 직접 읽기)
+끝에 **A 채택**: 제어면이 자기 LDAP 설정을 `/api/agent/report` 응답 `directory` 로 내려주고 에이전트가
+nslcd 를 수렴시킨다. DaemonSet env 는 첫 보고 전 부트스트랩일 뿐이다.
+- 단일 추출점 `identity_ldap.ldap_directory_config` 를 리졸버(`build_ldap_resolver`)와 하달 블록
+  (`agent_directory.directory_block`)이 함께 쓴다 — 같은 설정을 두 배선으로 나눴다가 한쪽이 빠진
+  이번 사고 유형 자체를 제거.
+- 비밀번호 노출 최소화: 보고에 `directory` 객체를 실은(능력 선언) 에이전트에게만, 에이전트가
+  보고한 해시와 HMAC(session_secret, 설정)이 **다를 때만** 전체 블록(비밀번호 포함), 같으면
+  `{hash}` 만. 옛 에이전트엔 키 자체가 없다. 보고·로그·오류 문구엔 비밀번호가 없다.
+- 에이전트 `agent/directory.NslcdDirectory`: 같은 엔트리포인트 렌더러(`--render-nslcd-conf`)로
+  `.dms-new` 에 렌더 → 내용이 같고 nslcd 가 건강하면 해시만 기록, 아니면 원자적 교체 + nslcd 재기동
+  (부트스트랩 nslcd 를 PID 파일로 정지·거둠, `/proc/<pid>/comm` 확인으로 PID 재사용 보호, 잔여 소켓
+  제거). 렌더 거부·기동 실패는 오류로 보고하고 해시를 올리지 않아 다음 주기에 재시도. 관리 여부는
+  엔트리포인트가 nslcd 를 띄운 컨테이너에서만(`DMS_AGENT_NSLCD_MANAGED=1`).
+- 테스트 `test_agent_directory` 38건(서버 능력 게이트·해시 게이트·HMAC·미구성 null·리졸버와 같은
+  추출·DB 에 비밀번호 없음 / 실제 렌더러로 수렴·무변경 무재기동·죽은 nslcd 재기동·렌더 거부 시
+  보존·소켓 타임아웃 재시도·잔여 소켓·PID 재사용·잘못된 블록·비관리 / 러너 능력 선언·비밀번호
+  미전송·apply 예외 격리 / 설정·엔트리포인트). ARCHITECTURE §6, BACKLOG(에이전트 채널 TLS, nslcd
+  그룹 멤버 속성).
+- 적대적 리뷰(워크플로, 5개 관점 → 발견마다 독립 반박 검증): 23 에이전트, 18건 발견 중 17건 생존 → 중복을 합쳐 7개 결함, 전부 반영: [중] A dash echo 가 백슬래시를 해석해 'Q7\cz'→'Q7'·'\\' 절반·리터럴 '\n' 이 개행 가드 우회(d02fead 렌더러 결함 실측, 에이전트는 성공 보고) → printf '%s'; B 수렴 뒤 해시만 오는 주기엔 nslcd 생존 미확인·좀비를 산 것으로 판정 → 생존 확인 + waitpid(WNOHANG)/stat; C 실패해도 옛 해시 유지로 설정 되돌리면 고착 → 실패 시 해시 비움. [하] D 비밀번호 전송 빈도 문서 과소서술 정정; E pidfile 이 nslcd 소유 /run/nslcd(심볼릭 링크 유도) → root 전용 /run/dms-agent + O_NOFOLLOW; F 수렴·실패가 kubectl logs 에 안 보임 → 상태 변화마다 한 줄; G 단일 추출 테스트 동어반복 → 가짜 ldap3 로 리졸버 실제 인자 고정. 보강: nslcd 최소 env(공유 토큰이 데몬 environ 에 남지 않게). 뮤테이션 점검: 각 버그를 되살리면 해당 테스트 실패 7/7. pytest 1912.
+- 실증(테스트베드 d138, 2026-09-29~30): ① 라이브 DaemonSet 에서 bind env 제거(kubectl set env …-, 프로덕션 모양) → d137 5노드 모두 익명 바인드 확인(40/40). ② **포탈 릴리스만**(dms-agent·dms-api·dms-controller d138, apply 없음): 5노드 모두 env 에 bind 가 없는데도 nslcd.conf 에 binddn/bindpw(API 하달), ldap_simple_bind_s("uid=search_dms,…") over StartTLS, getent 정상, 보고 directory source=api·error None, 비밀번호가 로그·보고에 없음, 75초 안정 구간 동안 재기동 없음(PID·시작 횟수 불변); kubectl logs 에 'directory applied source=api … bind=dn=… restarted=yes'. ③ dms-w1 nslcd SIGKILL → 다음 해시만 오는 주기에 'nslcd not running … restarting' → 'nslcd restarted', 새 PID, alice 해석 복구, 좀비 0. ④ alice sync end-to-end(bind env 없는 DaemonSet): 신원 준비 → Planned(110s) → preview → 컨펌 → Succeeded(files 2), 타인 404. ⑤ 복원: 오버레이 dms·agent newTag d138 + guard exit 0 + apply -k → env 부트스트랩이 API 설정과 같아 5노드 모두 재기동 없이 해시 채택(시작 1회, 'restarted=no'), 75초 안정(45/45). 릴리스 3종 Applied.
+
 ### ✅ 에이전트 nslcd LDAP bind 계정·StartTLS·URI 정규화 — **완료·실증**(2026-09-29, dms-agent d137)
 
 **프로덕션 사고**(요청 b07e68d0, yo.hong, sync gpfs-mirr24-test): 마운트가 있는 ion2106~2109 전부
