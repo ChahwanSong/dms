@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from ..agent_directory import directory_block
 from ..artifact_base import resolve_artifact_base, strip_scheme
 # 노드 이름 규칙은 auth 가 유일 출처다 -- 토큰 경로의 actor 게이트가 통과시킨
 # node:<이름> 을 여기서 다시 검증하므로 두 규칙이 갈라지면 안 된다(슬라이스 19).
@@ -22,7 +23,7 @@ def ingest_report(body: dict, request: Request,
     storages = [{"storage_name": s["storage_name"], "mount_path": s["mount_path"],
                  "managed_root": s["managed_root"]}
                 for s in repos.storages.list() if s["enabled"]]
-    return {
+    response = {
         "storages": storages,
         "identity_probe_targets": repos.control.probe_targets(
             ttl_seconds=settings.identity_probe_ttl_seconds),
@@ -33,3 +34,12 @@ def ingest_report(body: dict, request: Request,
         "artifact_base_path": strip_scheme(
             resolve_artifact_base(repos.control, settings)),
     }
+    # 2026-09-29: LDAP 디렉터리 설정(agent_directory 모듈 docstring). 보고 본문에
+    # "directory" 객체를 실은 에이전트(nslcd 를 관리하는 새 에이전트)에게만 준다 --
+    # 옛 에이전트에겐 키 자체가 없어 비밀번호가 가지 않는다. 해시가 같으면 {"hash"} 만.
+    reported = body.get("directory")
+    if isinstance(reported, dict):
+        reported_hash = reported.get("hash")
+        response["directory"] = directory_block(
+            settings, reported_hash if isinstance(reported_hash, str) else None)
+    return response

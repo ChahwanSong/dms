@@ -61,6 +61,21 @@
 
 ## 4. 알려진 해석·잔여 리스크 (문서)
 
+- 📝 **에이전트↔API 채널이 클러스터 내부 평문 HTTP**(`http://dms-api:8080`, 2026-09-29 기록).
+  관리자급 공유 토큰이 매 보고 주기마다, LDAP 검색 계정 비밀번호가 (`agent_directory` 해시
+  게이트로 줄였지만) 노드마다 에이전트 (재)시작 시 1회·설정/session_secret 변경 시·적용이 계속
+  실패하는 동안 매 주기 평문으로 지난다. 파드 네트워크 스니핑이 가능한 공격자는 이미 공유 토큰을
+  얻으므로 방안 A 가 경계를 넓히진 않았지만, 채널 TLS(또는 CNI 암호화)는 둘 다에 대한 근본
+  해법이다. 실패 지속 시 재전송을 줄이려면 에이전트가 받은 블록을 메모리에 들고 로컬 백오프로
+  재시도하고 서버엔 "보류 해시" 만 알리는 방식이 있다(현재는 실패가 로그·directory.error 로
+  즉시 보이는 쪽을 택함).
+- 📝 **nslcd 그룹 멤버 속성 미러 안 함** — 에이전트 nslcd 는 기본(memberUid + member)으로
+  그룹을 푼다. 제어면은 `DMS_LDAP_GROUP_MEMBER_ATTR`(기본 uniqueMember)로 푼다. 신원 준비
+  판정은 **이름 해석만** 보고(`placement._identity_ready`) 잡 파드의 보조 그룹은 플래너
+  리졸버 값이라 실행에는 영향이 없지만, 노드 화면이 보여주는 그룹은 uniqueMember 전용
+  디렉터리에서 비어 보일 수 있다. 필요하면 `map group member uniqueMember` 를 렌더러·
+  하달 블록에 함께 추가.
+
 - 📝 **`by_storage` 가 `COALESCE(storage_name, destination_storage)`** — sync 를 도착지
   기준으로 센다. 설계가 기준을 명시하지 않은 침묵의 해석(`repositories/metrics.py`).
 - 📝 **KPI 의미 변화** — 요청 50건 즉석 계산 → 창 내 잡 집계. 옛 화면과 숫자가 다르다.

@@ -103,6 +103,11 @@ spec:
             # optional: a site without these keys still starts (anonymous /
             # resolver default StartTLS on) instead of CreateContainerConfigError.
             # tests/test_agent_daemonset_contract.py pins all of this.
+            # These are only the BOOTSTRAP config for the first report cycle:
+            # the API returns its own LDAP settings in every report response and
+            # the agent converges nslcd to them (src/dms/agent/directory.py), so
+            # an image-only portal release fixes an agent even where this block
+            # was never applied (prod 2026-09-29).
             - name: DMS_LDAP_URI
               valueFrom:
                 configMapKeyRef: {name: dms-config, key: DMS_LDAP_URI}
