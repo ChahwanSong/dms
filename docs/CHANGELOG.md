@@ -95,6 +95,16 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 사용자 포탈 스토리지 피커에 관리 루트(managed_root) 표시 — **완료·실증**(2026-09-29, d136)
+
+사용자 보고: 단일 작업 요청에서 스토리지를 고르면 운영자 포탈엔 "관리 디렉토리: …" 캡션이
+뜨는데 사용자 화면엔 없다. 원인은 `/api/user/storages` 가 2026-08-15 결정으로 managed_root 를
+**관리자에게만** 실었기 때문(당시 소비 화면이 관리자 전용). 사용자 셀프서비스 sync 도 같은
+`StoragePicker` 를 쓰고 입력 경로가 managed_root 기준 상대경로라 같은 이유로 뿌리가 필요하다 →
+역할 무관으로 싣는다(사용자 결정). `mount_path`·`status_detail` 은 계속 숨김. 프런트는 무변경
+(서버가 주면 캡션을 그림). 계약 테스트 갱신.
+- 실증(테스트베드 d136, 2026-09-29): 포탈 빌드 d136(commit 8002cac) → 릴리스 dms-api·dms-controller Applied. API: 비관리자 alice·관리자 mason 모두 /api/user/storages 3행에 managed_root(/cephfs/managed 등) 포함, mount_path·status_detail 없음(6/6 PASS). 실 브라우저(Playwright, alice 세션): /jobs/new → 다음 → 소스 스토리지 cephfs-dms 선택 시 캡션 '관리 디렉토리: /cephfs/managed — 입력 경로는 이 아래 상대경로입니다' 표시(role user). 오버레이 testbed dms newTag d136, guard exit 0. pytest 1833·vitest(jobs) 90·tsc.
+
 ### ✅ 잡 옵션 서버 기본값 + "작업 컨펌" 창의 미리보기 요약 — **완료·실증**(2026-09-17, d135)
 
 **사용자 요청 1**: sync `batch_files 1,000,000`·`bufsize 4,194,304`, scan `batch_files 1,000,000`·
