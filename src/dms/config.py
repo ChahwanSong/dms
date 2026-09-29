@@ -340,6 +340,10 @@ class AgentSettings:
     # 하면 Missing)을 없앤다. 미설정("")이면 종전처럼 컨테이너 안 경로를 직접 본다
     # (레거시 모드: 새 이미지를 옛 매니페스트에 먼저 올려도 동작한다).
     host_root: str = ""
+    # nslcd 관리(2026-09-29). 엔트리포인트가 nslcd 를 띄운 컨테이너에서만 export 한다 --
+    # 그때만 에이전트가 제어면이 내려준 디렉터리 설정으로 nslcd.conf 를 다시 렌더·재기동
+    # 하고(agent/directory.py), 보고에 "directory" 를 실어 그 능력을 선언한다.
+    nslcd_managed: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping) -> "AgentSettings":
@@ -362,4 +366,5 @@ class AgentSettings:
             net_dev_path=environ.get("DMS_AGENT_NET_DEV_PATH", "/proc/net/dev"),
             virtual_net_path=environ.get("DMS_AGENT_VIRTUAL_NET_PATH", ""),
             host_root=environ.get("DMS_AGENT_HOST_ROOT", "").rstrip("/"),
+            nslcd_managed=_parse_bool(environ, "DMS_AGENT_NSLCD_MANAGED"),
         )

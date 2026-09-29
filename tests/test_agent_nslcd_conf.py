@@ -123,6 +123,27 @@ def test_ordinary_password_does_not_warn(tmp_path):
     assert "WARNING" not in proc.stderr
 
 
+@pytest.mark.parametrize("pw", [r"Q7\cz", r"a\nb", r"p\\q", r"x\0101y", r"t\tz", "tail\\"])
+def test_backslashes_are_written_byte_for_byte(tmp_path, pw):
+    # 적대적 리뷰(2026-09-29): dash 의 echo 는 백슬래시 이스케이프를 해석한다 -- '\c' 는
+    # 출력을 잘라 'Q7' 로, '\\' 는 하나로, '\0101' 은 'A' 로, 리터럴 '\n' 은 진짜 개행이
+    # 되어 개행 가드를 우회했다. 제어면(ldap3)은 원래 값으로 bind 하므로 노드만 다른
+    # 비밀번호가 되고 에이전트는 성공을 보고했다. 값은 printf '%s' 로 그대로 써야 한다.
+    dn = r"cn=svc\2Cdms,dc=d"
+    base = r"ou=A\5Cb,dc=d"
+    proc, out = _render(tmp_path, DMS_LDAP_URI="ldap://h", DMS_LDAP_USER_BASE=base,
+                        DMS_LDAP_GROUP_BASE=base, DMS_LDAP_BIND_DN=dn, DMS_LDAP_BIND_PW=pw)
+    assert proc.returncode == 0, proc.stderr
+    raw = out.read_bytes()
+    lines = raw.decode().split("\n")
+    assert f"bindpw {pw}" in lines and f"binddn {dn}" in lines
+    assert f"base passwd {base}" in lines and f"base group {base}" in lines
+    # uid gid uri base×2 ssl tls binddn bindpw = 9 줄, 끝은 개행 -- 잘림·추가 줄 없음
+    assert raw.endswith(b"\n") and len(raw.decode().splitlines()) == 9
+    assert pw not in proc.stderr and pw not in proc.stdout
+    assert f"bind=dn={dn} (password set)" in proc.stderr
+
+
 def test_empty_uri_list_is_refused(tmp_path):
     proc, out = _render(tmp_path, DMS_LDAP_URI=" , ,")
     assert proc.returncode == 64

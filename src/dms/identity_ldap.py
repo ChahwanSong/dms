@@ -67,7 +67,15 @@ class LdapIdentityResolver:
         return ResolvedIdentity(username, uid, gid, groups, False)
 
 
-def build_ldap_resolver(settings):
+def ldap_directory_config(settings):
+    """LDAP 디렉터리 설정의 **유일한 추출점**(2026-09-29). 제어면 리졸버
+    (build_ldap_resolver)와 에이전트 nslcd(agent_directory.directory_block 이 보고
+    응답으로 내려준다)가 둘 다 이 함수의 결과만 쓴다 -- 같은 설정을 두 경로로 따로
+    배선했다가(API 는 envFrom, 에이전트는 개별 env) 에이전트 쪽에서 bind 계정이 빠져
+    프로덕션 전 요청이 identity_not_ready_on_node 가 된 사고의 재발 방지다. 플래너는
+    에이전트 보고로 신원 준비를 판정하므로 둘은 같은 디렉터리·같은 계정이어야 한다.
+
+    None = 미구성(엔드포인트·베이스 중 하나라도 자리표시자/빈 값, fail-closed)."""
     from .config import _is_placeholder  # local import to avoid cycle
     uri = getattr(settings, "ldap_uri", None)
     user_base = getattr(settings, "ldap_user_base", None)
@@ -76,13 +84,29 @@ def build_ldap_resolver(settings):
         return None
     # 결측 폴백도 프로덕션 기본과 같은 방향(uniqueMember/StartTLS) -- 기본값이
     # 곧 sssd.conf 값이라는 원칙을 duck-typed settings 에도 일관 적용.
-    use_start_tls = bool(getattr(settings, "ldap_use_start_tls", True))
-    group_member_attr = getattr(settings, "ldap_group_member_attr", "") or "uniqueMember"
+    return {
+        # 콤마 목록 → 페일오버 목록(sssd ldap_uri 형식 미러).
+        "uris": _parse_uris(uri),
+        "user_base": user_base,
+        "group_base": group_base,
+        "start_tls": bool(getattr(settings, "ldap_use_start_tls", True)),
+        "bind_dn": getattr(settings, "ldap_bind_dn", "") or None,
+        "bind_pw": getattr(settings, "ldap_bind_pw", "") or None,
+        "group_member_attr": getattr(settings, "ldap_group_member_attr", "") or "uniqueMember",
+    }
+
+
+def build_ldap_resolver(settings):
+    cfg = ldap_directory_config(settings)
+    if cfg is None:
+        return None
+    user_base, group_base = cfg["user_base"], cfg["group_base"]
+    use_start_tls = cfg["start_tls"]
+    group_member_attr = cfg["group_member_attr"]
 
     def connect():
         import ldap3
-        # 콤마 목록 → 페일오버 풀(sssd ldap_uri 형식 미러).
-        uris = _parse_uris(uri)
+        uris = cfg["uris"]
         tls = None
         if use_start_tls:
             import ssl
@@ -91,8 +115,8 @@ def build_ldap_resolver(settings):
         servers = [ldap3.Server(u, tls=tls) for u in uris]
         server = servers[0] if len(servers) == 1 else ldap3.ServerPool(
             servers, ldap3.FIRST, active=True, exhaust=True)
-        bind_dn = getattr(settings, "ldap_bind_dn", "") or None
-        bind_pw = getattr(settings, "ldap_bind_pw", "") or None
+        bind_dn = cfg["bind_dn"]
+        bind_pw = cfg["bind_pw"]
         # StartTLS 는 bind **전에** 올라가야 자격증명이 평문으로 새지 않는다 --
         # ldap3 의 AUTO_BIND_TLS_BEFORE_BIND 가 그 순서를 보장한다.
         auto_bind = ldap3.AUTO_BIND_TLS_BEFORE_BIND if use_start_tls else True

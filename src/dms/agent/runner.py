@@ -7,6 +7,7 @@ import httpx
 
 from ..config import AGENT_TOOL_NAMES, AgentSettings
 from ..db import utc_now_iso
+from .directory import NslcdDirectory
 from .probes import (probe_artifact_base, probe_identities, probe_mounts,
                      probe_os_metrics, probe_tools)
 
@@ -21,7 +22,7 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
                  identities_fn=None, os_fn=None, read_text=None,
                  net_dev_path="/proc/net/dev", virtual_net_path="",
                  artifact_base_path=None, artifact_base_fn=None,
-                 host_root="", self_mountinfo_text="") -> dict:
+                 host_root="", self_mountinfo_text="", directory_status=None) -> dict:
     mounts_fn = mounts_fn or probe_mounts
     tools_fn = tools_fn or probe_tools
     identities_fn = identities_fn or probe_identities
@@ -31,7 +32,7 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
     # 호출은 전부 try/except Exception 이라 예외가 삼켜지고 **OS 지표 전체가
     # 조용히 null** 이 된다(테스트는 os_fn 을 주입하므로 초록을 유지한다).
     read_text = read_text or _read_text
-    return {
+    report = {
         "node_name": node_name,
         "probed_at": utc_now_iso(),
         # 방안 A(2026-09-16): host_root 가 있으면 경로 프로브는 전부 그 접두 아래를
@@ -49,12 +50,20 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
         "artifact_base": artifact_base_fn(artifact_base_path, host_root=host_root,
                                           mountinfo_text=mountinfo_text),
     }
+    # 2026-09-29: nslcd 를 관리하는 에이전트만 싣는다 -- 이 키가 곧 "디렉터리 설정을
+    # 받아 적용할 수 있다"는 능력 선언이고(서버는 키가 없으면 비밀번호를 보내지 않는다),
+    # 값은 비밀 없는 적용 상태(해시·출처·bind 모드·오류)다.
+    if directory_status is not None:
+        report["directory"] = directory_status
+    return report
 
 
 class AgentRunner:
-    def __init__(self, settings: AgentSettings, client: httpx.Client):
+    def __init__(self, settings: AgentSettings, client: httpx.Client,
+                 directory: Optional[NslcdDirectory] = None):
         self._settings = settings
         self._client = client
+        self._directory = directory or NslcdDirectory(managed=settings.nslcd_managed)
 
     def run_once(self, state: dict) -> dict:
         try:
@@ -75,7 +84,8 @@ class AgentRunner:
                               virtual_net_path=self._settings.virtual_net_path,
                               artifact_base_path=state.get("artifact_base_path"),
                               host_root=self._settings.host_root,
-                              self_mountinfo_text=self_mountinfo_text)
+                              self_mountinfo_text=self_mountinfo_text,
+                              directory_status=self._directory.report())
         try:
             response = self._client.post(
                 "/api/agent/report", json=report,
@@ -106,6 +116,14 @@ class AgentRunner:
         except Exception as exc:
             print(f"agent report failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             return state
+        # 디렉터리 설정(2026-09-29): 나머지 응답 처리와 독립 -- 적용 실패는 directory.
+        # status.error 로 다음 보고에 실리고 스토리지·프로브 대상 갱신을 막지 않는다.
+        # 예외 메시지는 찍지 않는다(블록에 비밀번호가 있다 -- 유형만).
+        if "directory" in body:
+            try:
+                self._directory.apply(body["directory"])
+            except Exception as exc:  # noqa: BLE001 -- apply 는 원래 안 던진다; 최후 방어
+                print(f"agent directory apply failed: {type(exc).__name__}", file=sys.stderr)
         return new_state
 
 

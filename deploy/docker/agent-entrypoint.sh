@@ -26,6 +26,13 @@
 # and every request died with identity_not_ready_on_node. The testbed slapd
 # allows anonymous reads, which hid it.
 #
+# The env above is only the BOOTSTRAP config (first report cycle). The API is
+# authoritative: every report response carries the control plane's own LDAP
+# settings (src/dms/agent_directory.py) and the agent re-renders this file
+# through --render-nslcd-conf and restarts nslcd when it changes
+# (src/dms/agent/directory.py). So an image-only portal release is enough even
+# on a DaemonSet that never injected the bind env.
+#
 # `agent-entrypoint.sh --render-nslcd-conf <path>` only templates the config
 # (to <path>) and exits -- used by tests/test_agent_nslcd_conf.py.
 set -eu
@@ -95,16 +102,21 @@ esac
     echo "uid nslcd"
     echo "gid nslcd"
     printf '%s\n' "$uris" | sed 's/^/uri /'
-    echo "base passwd ${DMS_LDAP_USER_BASE:-$default_base}"
-    echo "base group ${DMS_LDAP_GROUP_BASE:-$default_base}"
+    # Values go through printf '%s', NEVER echo: dash's echo interprets
+    # backslash escapes, so a password like 'Q7\cz' was truncated to 'Q7', '\\'
+    # halved and a literal '\n' turned into a real newline past the guard above
+    # -- nslcd then bound with a different secret than the control plane while
+    # the agent reported success (review 2026-09-29, test_agent_nslcd_conf).
+    printf 'base passwd %s\n' "${DMS_LDAP_USER_BASE:-$default_base}"
+    printf 'base group %s\n' "${DMS_LDAP_GROUP_BASE:-$default_base}"
     if [ -n "$start_tls" ]; then
       # StartTLS precedes the bind, so the password never crosses in clear.
       echo "ssl start_tls"
       echo "tls_reqcert never"
     fi
     if [ -n "$bind_dn" ]; then
-      echo "binddn ${bind_dn}"
-      echo "bindpw ${bind_pw}"
+      printf 'binddn %s\n' "$bind_dn"
+      printf 'bindpw %s\n' "$bind_pw"
     fi
   } > "$conf"
 )
@@ -115,7 +127,8 @@ chmod 0600 "$conf"
 n_uris=$(printf '%s\n' "$uris" | grep -c .)
 if [ -n "$bind_dn" ]; then bind_desc="dn=${bind_dn} (password set)"; else bind_desc="anonymous"; fi
 if [ -n "$start_tls" ]; then tls_desc=on; else tls_desc=off; fi
-echo "dms-agent: nslcd uri=${n_uris} server(s) start_tls=${tls_desc} bind=${bind_desc}" >&2
+printf 'dms-agent: nslcd uri=%s server(s) start_tls=%s bind=%s\n' \
+  "$n_uris" "$tls_desc" "$bind_desc" >&2
 
 [ -z "$render_only" ] || exit 0
 
@@ -131,7 +144,22 @@ chown nslcd:nslcd /run/nslcd 2>/dev/null || true
 # gets the child's readiness byte), while foreground mode connects to LDAP and
 # serves the NSS socket fine. Logs go to a file so they don't interleave with
 # the agent's own stdout. nslcd becomes a child of the agent (PID 1) after exec.
-nslcd -d > /var/log/nslcd.log 2>&1 &
+# `env -i`: nslcd needs no environment, and inheriting ours would put the
+# admin-level DMS_SHARED_TOKEN (and the bind password) into the environ of a
+# daemon that parses network input -- readable by the nslcd user.
+env -i PATH="$PATH" nslcd -d > /var/log/nslcd.log 2>&1 &
+# The agent re-renders nslcd.conf from the directory config the API returns and
+# restarts nslcd when it changes or dies (src/dms/agent/directory.py) -- the env
+# above is only the BOOTSTRAP config for the first report cycle. It needs this
+# PID to stop the bootstrap nslcd (a child of the agent after exec, so it reaps
+# it), and DMS_AGENT_NSLCD_MANAGED=1 is what lets it manage nslcd at all. The
+# pidfile lives in a ROOT-ONLY directory, not the nslcd-owned /run/nslcd: the
+# root agent writes/reads it, and a compromised nslcd must not be able to swap
+# it for a symlink to a file root would then truncate.
+mkdir -p /run/dms-agent
+chmod 0700 /run/dms-agent
+echo "$!" > /run/dms-agent/nslcd.pid
+export DMS_AGENT_NSLCD_MANAGED=1
 
 # Wait (bounded) for the NSS socket so the agent's first probe cycle can already
 # resolve LDAP users instead of reporting them Missing for one interval.
