@@ -67,6 +67,22 @@ def test_audit_entries_returns_latest_first(db):
     assert repo.audit_entries(limit=1)[0]["mutation_class"] == "control_state"
 
 
+def test_audit_entries_pages_backwards_with_a_keyset_cursor(db):
+    # 무한 스크롤(2026-09-30): before = 이전 쪽 마지막 id. 쪽 사이에 새 기록이 끼어도 다음 쪽은
+    # 그 커서보다 오래된 것만이라 중복·누락이 없다(offset 이면 한 칸 밀려 중복이 난다).
+    repo = ControlRepository(db)
+    for i in range(5):
+        repo.deny("requester", f"u{i}", reason=None, actor="admin")
+    first = repo.audit_entries(limit=2)
+    assert [e["target_key"] for e in first] == ["requester:u4", "requester:u3"]
+    repo.deny("requester", "late", reason=None, actor="admin")          # 쪽 사이에 새 기록
+    second = repo.audit_entries(limit=2, before=first[-1]["id"])
+    third = repo.audit_entries(limit=2, before=second[-1]["id"])
+    assert [e["target_key"] for e in second + third] == [
+        "requester:u2", "requester:u1", "requester:u0"]                # 이어짐, 겹침·누락 없음
+    assert repo.audit_entries(limit=2, before=third[-1]["id"]) == []   # 끝
+
+
 def test_set_artifact_base_touches_only_its_column(db):
     # 설계 §2.1: set_control_state 의 UPDATE 는 build_node_name = :bn 을 무조건
     # 쓴다 -- 인자를 생략한 호출이 기존 값을 조용히 NULL 로 지우는 함정이다(지금은

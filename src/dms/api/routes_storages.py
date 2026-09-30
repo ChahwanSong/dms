@@ -1,5 +1,5 @@
 import posixpath
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
 from ..repositories.storages import storage_open_to_users
@@ -90,8 +90,14 @@ def delete_storage(name: str, request: Request,
 
 
 @router.get("/api/admin/audit-log")
-def audit_log(request: Request, limit: int = 50):
-    return request.app.state.repos.control.audit_entries(limit)
+def audit_log(request: Request,
+              # 감사 로그 무한 스크롤(2026-09-30 사용자 요청: "수십 개만 보인다 -- 스크롤하면 계속"):
+              # 한 쪽 limit 건(1..200 -- 무제한이면 전량 SELECT 가 화면 하나에 끌려 나온다), before 는
+              # 이전 쪽 마지막 행의 id(키셋 커서, ControlRepository.audit_entries). 둘 다 생략하면
+              # 예전처럼 최신 50건 -- 목록 응답 모양은 그대로다.
+              limit: int = Query(50, ge=1, le=200),
+              before: int | None = Query(None, ge=1)):
+    return request.app.state.repos.control.audit_entries(limit, before=before)
 
 
 # 사용자용 읽기 전용 목록. 제출 폼 드롭다운이 유일한 소비자다 — 마운트 경로

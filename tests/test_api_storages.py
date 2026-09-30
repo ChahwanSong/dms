@@ -29,3 +29,9 @@ def test_crud_flow(client):
         "enabled": True}, headers=ADMIN).status_code == 404
     audit = client.get("/api/admin/audit-log", headers=ADMIN).json()
     assert [a["operation"] for a in audit[:3]] == ["delete", "update", "create"]
+    # 무한 스크롤 커서(2026-09-30): 한 쪽씩 뒤로 -- 이어 붙이면 전체와 같다.
+    page1 = client.get("/api/admin/audit-log?limit=2", headers=ADMIN).json()
+    page2 = client.get(f"/api/admin/audit-log?limit=2&before={page1[-1]['id']}", headers=ADMIN).json()
+    assert [a["id"] for a in page1 + page2] == [a["id"] for a in audit[:4]]
+    for bad in ("limit=0", "limit=201", "before=0", "before=x"):
+        assert client.get(f"/api/admin/audit-log?{bad}", headers=ADMIN).status_code == 422
