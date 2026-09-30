@@ -9,6 +9,7 @@ from ..domain import (
     resolve_priority, validate_owner_username,
 )
 from ..execution import ExecutionError
+from ..repositories.storages import storage_open_to_users
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, can_run_as_root, require_admin, require_user
 from .cancel import terminate_job
@@ -109,6 +110,14 @@ def submit(body: RequestBody, request: Request,
     if (identity.role != "admin" and body.operation in known_ops
             and body.operation not in settings.user_allowed_operations):
         raise HTTPException(status_code=403, detail="operation_admin_only")
+    # 관리자 전용 스토리지(2026-09-30 사용 범위, storage_open_to_users): 비관리자 피커에서
+    # 빠지는 건 표시일 뿐이라 여기서 막는다(planner 가 계획 시점에 다시 본다 -- 대기 중
+    # 관리자 전용으로 바뀐 요청). 완전 비활성(enabled=0)은 종전대로 planner storage_disabled.
+    if identity.role != "admin":
+        for storage_name in (body.storage, body.source_storage, body.destination_storage):
+            row = request.app.state.repos.storages.get(storage_name) if storage_name else None
+            if row is not None and row["enabled"] == 1 and not storage_open_to_users(row):
+                raise HTTPException(status_code=403, detail="storage_admin_only")
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요.
     # 다른 사용자로 실행하는 것 자체가 특권이다 -- 2026-09-30 부터 그 실행은 기본이
     # **그 사용자의 uid/gid** 다(run_as_root 를 명시해야 root -- 포탈은 이 경우 체크박스를 끈다).

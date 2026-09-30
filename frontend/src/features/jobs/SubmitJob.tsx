@@ -13,6 +13,7 @@ import { ApiError } from "../../lib/api";
 // field·StoragePicker 는 formFields.tsx 로 이사(슬라이스 31 T3) -- T4 위저드화 때
 // 이 파일이 통째로 갈려도 SubmitScan·ScanPaths 가 흔들리지 않게 결합을 끊었다.
 import { StoragePicker, field } from "./formFields";
+import { destinationParent } from "../../lib/storagePaths";
 // 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션 스텝과 공유한다
 // (사본이면 미러가 발산한다).
@@ -101,6 +102,9 @@ export function SubmitJob() {
   // root 로 받고 생략은 비 root 라(routes_requests.submit), 기본값 규칙(다른 실행 신원이 없으면
   // root)은 여기서 정해 확정값을 바디에 명시로 싣는다 -- 화면의 "실행 권한" 과 서버가 어긋날 수 없다.
   const rootEffective = canRoot && (f.runAsRoot ?? !otherOwner);
+  // sync 목적지의 상위 디렉토리(쓰기 권한이 필요한 곳) -- 관리 디렉토리를 알면 절대경로로.
+  const destRoot = storages.find((s) => s.storage_name === f.destStorage)?.managed_root;
+  const destParentAbs = f.destPath.trim() === "" ? null : destinationParent(destRoot, f.destPath.trim());
 
   const recursiveMissing = f.operation === "rm" && !f.recursive;
   const statLiteConflict = f.operation === "rm" && f.stat && f.lite;
@@ -281,6 +285,28 @@ export function SubmitJob() {
                   <label className="text-sm">목적지 경로
                     <input aria-label="목적지 경로" className={field} value={f.destPath} onChange={on("destPath")} />
                   </label>
+                  {/* 목적지 권한 조건(2026-09-30 사용자 요청: "상위 디렉토리에 쓰기 권한이 있어야
+                      하는 조건을 분명히"). 근거: preflight _DEST_CHECK -- 목적지가 있으면 목적지
+                      자체(쓰기·진입, 비 root 는 소유), 그리고 **항상** 상위 디렉토리 쓰기(dsync 가
+                      목적지 존재와 무관하게 요구하고, 없으면 아무것도 복사하지 않는다). 권한이 필요한
+                      상위 디렉토리를 실제 절대경로로 보여 준다(관리 디렉토리를 모르면 상대 표기). */}
+                  <InfoCard className="col-span-2" role="note" aria-label="목적지 권한 조건">
+                    <p className="font-medium">목적지 권한 조건 — 실행 신원(uid/gid) 기준</p>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+                      <li>
+                        목적지의 <strong>상위 디렉토리가 이미 있고, 그 디렉토리에 쓰기 권한</strong>이 있어야
+                        합니다 — 목적지가 이미 있어도 마찬가지입니다(sync 도구의 요구, 중간 디렉토리는 만들지 않습니다).
+                        {destParentAbs !== null && (
+                          <> 이 요청에서는 <code className="rounded bg-surface px-1 break-all">{destParentAbs}</code> 에
+                            쓰기 권한이 필요합니다.</>
+                        )}
+                      </li>
+                      <li>목적지가 이미 있으면 그 디렉토리에 쓰기·진입할 수 있어야 하고, root 실행이 아니면
+                        실행 신원 소유여야 합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문).</li>
+                      <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
+                      {canRoot && <li>root 권한으로 실행하면 권한 검사는 우회됩니다(옵션 단계에서 선택).</li>}
+                    </ul>
+                  </InfoCard>
                 </div>
               ) : (
                 /* scan·rm 공용: 스토리지 하나 + 대상 경로(상대). */
@@ -538,6 +564,14 @@ export function SubmitJob() {
                         <dt className="w-24 shrink-0 text-muted">목적지</dt>
                         <dd>{f.destStorage}:{f.destPath}</dd>
                       </div>
+                      {/* 제출 직전 재노출(대상 스텝의 목적지 권한 조건) -- root 실행이면 권한
+                          검사가 우회되므로 대신 그 결과(실행 권한 행)를 본다. */}
+                      {!rootEffective && (
+                        <div className="flex gap-2">
+                          <dt className="w-24 shrink-0 text-muted">목적지 조건</dt>
+                          <dd>{`상위 디렉토리 ${destParentAbs ?? "(목적지 경로의 상위)"} 가 있어야 하고 실행 신원의 쓰기 권한 필요`}</dd>
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="flex gap-2">

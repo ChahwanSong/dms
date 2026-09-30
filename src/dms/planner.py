@@ -5,6 +5,7 @@ from dataclasses import asdict
 from .db import iso_plus, utc_now_iso
 from .domain import Operation, RequestState
 from .identity import IdentityRejected, privilege_policy, resolve_job_identity
+from .repositories.storages import storage_open_to_users
 from .placement import (
     PlacementError, TOOL_TO_POLICY, resolve_fanout, select_tool_and_candidates)
 
@@ -155,6 +156,18 @@ class Planner:
                 return self._reject(rid, "storage_missing")
             if not storage["enabled"]:
                 return self._reject(rid, "storage_disabled")
+            # 관리자 전용(2026-09-30 사용 범위): 비관리자 요청은 계획 시점에도 거부 -- 제출
+            # 게이트(routes_requests)를 통과한 뒤 대기 중에 관리자 전용으로 바뀐 요청·DB 직접
+            # 삽입(신뢰 경계) 방어. 관리자 판정은 지금의 계정 역할, 또는 API 가 실제로 만드는
+            # 토큰 요청의 모양(auth_method=token + requester shared-token/node:*)뿐이다 --
+            # "token" 표식만으로 통과시키면 API 가 만들 수 없는 조합(token + alice)이 샌다.
+            # 계정 행이 없으면 비관리자로 본다(fail-closed).
+            token_admin = (req.get("auth_method") == "token"
+                           and (req["requester_id"] == "shared-token"
+                                or str(req["requester_id"]).startswith("node:")))
+            if not storage_open_to_users(storage) and not (
+                    token_admin or (account is not None and account["role"] == "admin")):
+                return self._reject(rid, "storage_admin_only")
             if storage["status"] not in ("Ready", "Degraded"):
                 return self._reject(rid, "storage_not_ready")
         # 4. identity

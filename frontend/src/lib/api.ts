@@ -134,6 +134,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   invalid_option: "옵션 값이 올바르지 않습니다",
   storage_missing: "등록되지 않은 스토리지입니다",
   storage_disabled: "비활성 스토리지입니다",
+  storage_admin_only: "관리자 전용 스토리지입니다 — 사용자 작업에는 쓸 수 없습니다(관리자에게 사용 범위를 문의하세요)",
   storage_not_ready: "스토리지가 준비되지 않았습니다",
   missing_storage: "스토리지를 선택하세요",
   missing_source_storage: "소스 스토리지를 선택하세요",

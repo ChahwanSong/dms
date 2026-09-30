@@ -228,3 +228,30 @@ test("스케줄 대기(Volcano) 분포가 제출 대기와 구분돼 나온다",
   expect(screen.getByText(/집계 2건 · 제외\(기록 없음\) 4건/)).toBeInTheDocument();
   expect(screen.getByText(/Volcano 큐 대기의 근사/)).toBeInTheDocument();
 });
+
+// ---- 2026-09-30 사용자 보고: "내용별 구분이 안 돼 헷갈리고 테이블 boundary 도 없어 보인다" ----
+
+test("내용별 구획(처리량·소요 시간 / 대기 시간 / 분해 / 사유)으로 나뉘고 각 블록이 테두리 박스다", async () => {
+  renderSection();
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  for (const group of ["처리량 · 소요 시간", "대기 시간", "분해", "사유"])
+    expect(screen.getByRole("region", { name: group })).toBeInTheDocument();
+  // 두 대기 분포는 "대기 시간" 구획 안에, 처리량은 "처리량 · 소요 시간" 구획 안에 있다.
+  const waits = screen.getByRole("region", { name: "대기 시간" });
+  expect(within(waits).getByText("제출 대기 분포")).toBeInTheDocument();
+  expect(within(waits).getByText("스케줄 대기(Volcano) 분포")).toBeInTheDocument();
+  expect(within(screen.getByRole("region", { name: "처리량 · 소요 시간" }))
+    .getByRole("img", { name: "처리량" })).toBeInTheDocument();
+  // 블록 = 테두리 박스, 표 = 테두리(boxed) -- 경계가 보인다.
+  const toolBox = screen.getByText("도구별").closest("div")!;
+  expect(toolBox.className).toMatch(/\bborder\b/);
+  expect(within(toolBox).getByRole("table").parentElement!.className).toMatch(/\bborder\b/);
+});
+
+test("요약 타일: 성공률·상태별 잡 수·처리 항목·계획 거부가 맨 위에 모인다", async () => {
+  renderSection();
+  await waitFor(() => expect(screen.queryByText("불러오는 중…")).toBeNull());
+  expect(screen.getByText("상태별 잡 수")).toBeInTheDocument();
+  expect(screen.getByText("계획 거부")).toBeInTheDocument();
+  expect(screen.getByRole("img", { name: "성공률" })).toBeInTheDocument();
+});

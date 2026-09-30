@@ -342,6 +342,13 @@ export function BatchCreate() {
                 <StoragePicker label="목적지 스토리지" value={f.dstStorage}
                   onChange={(v) => setF({ ...f, dstStorage: v })}
                   storages={storages} loading={loadingStorages} />
+                {/* 목적지 권한 조건(2026-09-30, SubmitJob 과 같은 규칙 -- preflight _DEST_CHECK).
+                    배치는 자격 있는 관리자면 root 라 우회되지만, 자격이 없으면 비 root 로 돈다. */}
+                <p className="col-span-2 text-xs text-muted">
+                  root 가 아닌 실행이면 각 목적지의 <strong>상위 디렉토리가 이미 있고 실행 신원의 쓰기 권한</strong>이
+                  있어야 합니다(목적지가 이미 있어도 마찬가지) — 이미 있는 목적지는 실행 신원 소유여야 합니다. 조건이
+                  맞지 않는 항목은 미리보기 전에 거부됩니다.
+                </p>
               </div>
             )}
 

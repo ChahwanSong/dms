@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from ..db import utc_now_iso
 from ..execution import ExecutionError
+from ..repositories.storages import storage_open_to_users
 from .auth import Identity, require_user
 from .cancel import terminate_job
 
@@ -63,6 +64,16 @@ def confirm_job(job_id: str, body: ConfirmBody, request: Request,
         raise HTTPException(status_code=409, detail="preview_expired")
     if body.fingerprint != job["preview_fingerprint"]:
         raise HTTPException(status_code=409, detail="fingerprint_mismatch")
+    # 관리자 전용 스토리지(2026-09-30 사용 범위): 미리보기까지 끝난 사용자 잡이 그 사이 관리자
+    # 전용으로 바뀐 스토리지를 쓰면 컨펌(= 실행 시작)을 막는다 -- 제출 게이트·planner 만으로는
+    # ConfirmPending(최대 preview TTL) 동안 남은 잡이 사용자 손으로 실행된다(리뷰 발견).
+    # 완전 비활성은 종전대로 진행 중 잡을 막지 않는다(화면 문구 "진행 중 작업은 그대로").
+    if identity.role != "admin":
+        for name in (job.get("storage_name"), job.get("source_storage"),
+                     job.get("destination_storage")):
+            row = repos.storages.get(name) if name else None
+            if row is not None and row["enabled"] == 1 and not storage_open_to_users(row):
+                raise HTTPException(status_code=403, detail="storage_admin_only")
     repos.data_jobs.set_confirmed(job_id, body.fingerprint)
     repos.data_jobs.set_job_state(job_id, DataJobState.EXECUTING, actor=identity.actor)
     return {"state": "Executing"}

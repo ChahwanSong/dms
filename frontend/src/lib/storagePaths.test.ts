@@ -1,5 +1,15 @@
 import { test, expect } from "vitest";
-import { absolutePath, absSummary, pathSummary } from "./storagePaths";
+import { absolutePath, absSummary, destinationParent, pathSummary } from "./storagePaths";
+
+test("destinationParent: sync 목적지의 상위 디렉토리 절대경로(쓰기 권한이 필요한 곳)", () => {
+  expect(destinationParent("/cephfs/managed", "dms_test/dst")).toBe("/cephfs/managed/dms_test");
+  expect(destinationParent("/cephfs/managed", "dst")).toBe("/cephfs/managed");
+  expect(destinationParent("/cephfs/managed", "/a/b/c/")).toBe("/cephfs/managed/a/b");
+  expect(destinationParent("/cephfs/managed", "")).toBe("/cephfs");       // 목적지 = 관리 디렉토리
+  expect(destinationParent("/data", "")).toBe("/");
+  expect(destinationParent(undefined, "a/b")).toBeNull();                // 뿌리 모름 -- 지어내지 않음
+  expect(destinationParent("/cephfs/managed", undefined)).toBeNull();
+});
 
 test("절대경로 조합: 뿌리 + 상대경로, 슬래시 중복 없이", () => {
   expect(absolutePath("/cephfs/dms", "team/alpha")).toBe("/cephfs/dms/team/alpha");

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
@@ -57,20 +57,54 @@ test("delete shows in-use error on 409", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "삭제 확인" }));
   expect(await screen.findByText("사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)")).toBeInTheDocument();
 });
-test("toggling a storage sends the correct PUT body", async () => {
-  let capturedBody: unknown;
+test("사용 범위 셀렉트: 관리자 전용·완전 비활성을 고르면 즉시 PUT 한다", async () => {
+  // 옛 "비활성화/활성화" 토글의 자리(2026-09-30): 비활성이 두 종류다. 완전 비활성은
+  // user_enabled 를 생략해(서버 = 현재 값 유지) 다시 켤 때 이전 범위가 돌아온다.
+  const bodies: unknown[] = [];
   server.use(
     http.get("/api/admin/storages", () => HttpResponse.json([S])),
     http.put("/api/admin/storages/:name", async ({ request }) => {
-      capturedBody = await request.json();
-      return HttpResponse.json({ ...S, enabled: 0 });
+      bodies.push(await request.json());
+      return HttpResponse.json(S);
     }));
   wrap();
-  await userEvent.click(await screen.findByRole("button", { name: "비활성화" }));
-  await screen.findByRole("button", { name: "비활성화" });
-  expect(capturedBody).toEqual({
-    mount_path: S.mount_path, managed_root: S.managed_root, backend_type: S.backend_type, enabled: false,
-  });
+  const sel = await screen.findByLabelText("cephfs 사용 범위") as HTMLSelectElement;
+  expect(sel.value).toBe("all");
+  await userEvent.selectOptions(sel, "관리자 전용");
+  await userEvent.selectOptions(sel, "완전 비활성");
+  const base = { mount_path: S.mount_path, managed_root: S.managed_root, backend_type: S.backend_type };
+  await screen.findByLabelText("cephfs 사용 범위");
+  expect(bodies).toEqual([
+    { ...base, enabled: true, user_enabled: false },
+    { ...base, enabled: false },
+  ]);
+});
+
+test("사용 범위: 행 상태를 셀렉트로, 범례에 세 상태의 개수를 보인다", async () => {
+  server.use(http.get("/api/admin/storages", () => HttpResponse.json([
+    S, { ...S, storage_name: "adm", user_enabled: 0 }, { ...S, storage_name: "off", enabled: 0 },
+  ])));
+  wrap();
+  expect(((await screen.findByLabelText("adm 사용 범위")) as HTMLSelectElement).value).toBe("admin");
+  expect((screen.getByLabelText("off 사용 범위") as HTMLSelectElement).value).toBe("off");
+  expect((screen.getByLabelText("cephfs 사용 범위") as HTMLSelectElement).value).toBe("all");
+  const legend = screen.getByLabelText("사용 범위 안내");
+  expect(legend.textContent).toMatch(/전체 사용1/);
+  expect(legend.textContent).toMatch(/관리자 전용1/);
+  expect(legend.textContent).toMatch(/완전 비활성1/);
+  expect(legend.textContent).toMatch(/사용자에게만 비활성/);
+});
+
+test("완전 비활성 행은 DB 에 남은 이전 범위(관리자 전용)를 보인다", async () => {
+  server.use(http.get("/api/admin/storages", () => HttpResponse.json([
+    { ...S, storage_name: "off-adm", enabled: 0, user_enabled: 0 },
+    { ...S, storage_name: "off-all", enabled: 0, user_enabled: 1 },
+  ])));
+  wrap();
+  const offAdm = (await screen.findByText("off-adm")).closest("tr")!;
+  expect(within(offAdm).getByText("이전 설정: 관리자 전용")).toBeInTheDocument();
+  const offAll = screen.getByText("off-all").closest("tr")!;
+  expect(within(offAll).queryByText(/이전 설정/)).toBeNull();
 });
 test("cancelling the delete dialog clears the stale 409 error", async () => {
   server.use(

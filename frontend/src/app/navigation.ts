@@ -12,9 +12,9 @@ import {
 
 export interface NavItem { path: string; label: string; icon: LucideIcon; adminOnly?: boolean }
 // 접힘: 그룹 토글은 서로 독립(사용자 결정 2026-08-19 — 아코디언은 같은 날
-// 도입했다가 해제). 초기엔 현재 경로의 그룹만 열리므로(AppShell) 그룹별 접힘
-// 기본 필드는 없다 -- 로그인 직후엔 홈 리다이렉트 화면의 그룹(운영자는 운영)만
-// 열려 있고, 이후 사용자가 연 그룹은 경로를 옮겨도 닫히지 않는다.
+// 도입했다가 해제). 초기엔 **모든 그룹이 펼쳐져** 있으므로(AppShell, 2026-09-30 사용자
+// 요청) 그룹별 접힘 기본 필드는 없다 -- 사용자가 접은 그룹은 경로를 옮겨도 접힌 채고,
+// 그 그룹의 화면으로 이동하면 자동으로 열린다.
 export interface NavGroup { label: string; items: NavItem[]; adminOnly?: boolean }
 export interface NavSection {           // 최상위: 지금은 DMS 뿐(NAS·Monitoring 추후 추가)
   label: string; icon: LucideIcon;

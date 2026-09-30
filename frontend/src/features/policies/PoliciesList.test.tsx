@@ -51,7 +51,7 @@ test("editing a policy sends the correct PUT body, including null preview timeou
       return HttpResponse.json({ ...POLICIES[1], max_nodes: 16, preview_timeout_seconds: null });
     }));
   wrap();
-  const row = (await screen.findByText("dsync")).closest("tr")!;
+  const row = (await screen.findByText("dsync")).closest("article")!;
   await userEvent.click(within(row).getByRole("button", { name: "수정" }));
 
   const maxNodes = await screen.findByRole("spinbutton", { name: "최대 노드" });
@@ -74,7 +74,7 @@ test("editing a policy sends the correct PUT body, including null preview timeou
 test("숫자 필드를 지우면 빈 칸(0 이 아님) + 인라인 오류 + 저장 비활성", async () => {
   server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
   wrap();
-  const row = (await screen.findByText("scan")).closest("tr")!;
+  const row = (await screen.findByText("scan")).closest("article")!;
   await userEvent.click(within(row).getByRole("button", { name: "수정" }));
   const maxNodes = await screen.findByRole("spinbutton", { name: "최대 노드" });
   await userEvent.clear(maxNodes);
@@ -96,7 +96,7 @@ test("0·음수는 서버까지 가기 전에 인라인 오류로 막는다(pyda
     http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),
     http.put("/api/admin/policies/:tool", () => { calls.push("put"); return HttpResponse.json(POLICIES[0]); }));
   wrap();
-  const row = (await screen.findByText("scan")).closest("tr")!;
+  const row = (await screen.findByText("scan")).closest("article")!;
   await userEvent.click(within(row).getByRole("button", { name: "수정" }));
   const et = await screen.findByRole("spinbutton", { name: "실행 타임아웃(초)" });
   await userEvent.clear(et);
@@ -111,8 +111,48 @@ test("shows an inline message when the PUT returns 422 invalid_priority", async 
     http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),
     http.put("/api/admin/policies/:tool", () => HttpResponse.json({ detail: "invalid_priority" }, { status: 422 })));
   wrap();
-  const row = (await screen.findByText("scan")).closest("tr")!;
+  const row = (await screen.findByText("scan")).closest("article")!;
   await userEvent.click(within(row).getByRole("button", { name: "수정" }));
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   expect(await screen.findByText("우선순위 값이 올바르지 않습니다")).toBeInTheDocument();
+});
+
+// ---- 2026-09-30 정책 UI 개선: 도구별 카드 + 값의 뜻 ------------------------------------
+
+test("도구별 카드: 용도 설명·병렬도(노드×프로세스=최대)·타임아웃 없음을 사람이 읽게 보인다", async () => {
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  wrap();
+  const scan = await screen.findByRole("article", { name: "scan 정책" });
+  expect(within(scan).getByText("스캔")).toBeInTheDocument();
+  expect(within(scan).getByText(/파일 수·용량·데이터 온도/)).toBeInTheDocument();
+  expect(within(scan).getByText("4노드 × 8프로세스")).toBeInTheDocument();
+  expect(within(scan).getByText("최대 32개 프로세스")).toBeInTheDocument();
+  expect(within(scan).getByText("없음")).toBeInTheDocument();          // 미리보기 타임아웃 null
+  // dsync 와 nsync 의 차이가 화면에 있다(같은 노드 공존 vs 노드 간).
+  const nsync = screen.getByRole("article", { name: "nsync 정책" });
+  expect(within(nsync).getByText(/함께 마운트한 노드가 없을 때/)).toBeInTheDocument();
+  // nsync 의 최대 노드는 면당(소스·목적지 각각) -- 합계는 2배(placement.resolve_fanout).
+  expect(within(nsync).getByText("병렬 실행(소스·목적지 각각)")).toBeInTheDocument();
+  expect(within(nsync).getByText("양쪽 합계 최대 16노드 · 128개 프로세스")).toBeInTheDocument();
+});
+
+test("비활성 정책은 카드에 거부 결과를 경고한다", async () => {
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(
+    [{ ...POLICIES[3], enabled: 0 }])));
+  wrap();
+  const rm = await screen.findByRole("article", { name: "rm 정책" });
+  expect(within(rm).getByText("비활성")).toBeInTheDocument();
+  expect(within(rm).getByText(/계획 단계에서 거부됩니다\(policy_disabled\)/)).toBeInTheDocument();
+});
+
+test("수정 다이얼로그는 병렬 자원·스케줄링·타임아웃·상태로 묶이고, 초를 사람 단위로 보조 표기한다", async () => {
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  wrap();
+  const card = (await screen.findByText("dsync")).closest("article")!;
+  await userEvent.click(within(card).getByRole("button", { name: "수정" }));
+  for (const g of ["병렬 자원", "스케줄링", "타임아웃", "상태"])
+    expect(await screen.findByRole("group", { name: g })).toBeInTheDocument();
+  expect(screen.getByText("최대 64개 프로세스로 실행됩니다")).toBeInTheDocument();
+  expect(screen.getByText("= 3일")).toBeInTheDocument();               // 259200s
+  expect(screen.getByText("= 1시간")).toBeInTheDocument();             // 3600s
 });

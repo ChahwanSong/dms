@@ -25,6 +25,22 @@ export function absolutePath(root: string | null | undefined,
   return `${base === "" ? "" : base}/${tail}`;
 }
 
+/** sync 목적지의 **상위 디렉토리** 절대경로(2026-09-30 "상위 디렉토리 쓰기 권한 조건을 분명히").
+ *  sync 도구(dsync)는 목적지가 이미 있어도 그 상위에 실행 신원의 쓰기 권한을 요구한다 --
+ *  제출 화면이 "어느 디렉토리에" 권한이 필요한지 실제 경로로 보여 주는 데 쓴다.
+ *  목적지 상대경로가 비면(목적지 = 관리 디렉토리 자신) 상위는 관리 디렉토리의 부모다.
+ *  뿌리를 모르면 null(absolutePath 와 같은 규칙 -- 지어내지 않는다). */
+export function destinationParent(root: string | null | undefined, rel: unknown): string | null {
+  if (typeof root !== "string" || root === "" || typeof rel !== "string") return null;
+  const parts = rel.split("/").filter((p) => p !== "" && p !== ".");
+  if (parts.length === 0) {
+    const base = root.replace(/\/+$/, "");
+    const up = base.replace(/\/[^/]*$/, "");
+    return up === "" ? "/" : up;
+  }
+  return absolutePath(root, parts.slice(0, -1).join("/"));
+}
+
 export type StorageRoots = Record<string, string | undefined>;
 
 const _root = (roots: StorageRoots, storage: unknown) =>
