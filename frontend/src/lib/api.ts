@@ -135,6 +135,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   storage_missing: "등록되지 않은 스토리지입니다",
   storage_disabled: "비활성 스토리지입니다",
   storage_admin_only: "관리자 전용 스토리지입니다 — 사용자 작업에는 쓸 수 없습니다(관리자에게 사용 범위를 문의하세요)",
+  sync_pair_not_allowed: "허용되지 않은 스토리지 조합입니다 — 관리자가 허용한 소스→목적지 쌍만 sync 할 수 있습니다(관리자에게 요청하세요)",
+  sync_pair_not_found: "등록되지 않은 허용 쌍입니다",
   storage_not_ready: "스토리지가 준비되지 않았습니다",
   missing_storage: "스토리지를 선택하세요",
   missing_source_storage: "소스 스토리지를 선택하세요",

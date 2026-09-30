@@ -6,6 +6,7 @@ from .db import iso_plus, utc_now_iso
 from .domain import Operation, RequestState
 from .identity import IdentityRejected, privilege_policy, resolve_job_identity
 from .repositories.storages import storage_open_to_users
+from .repositories.sync_pairs import sync_pair_allowed
 from .placement import (
     PlacementError, TOOL_TO_POLICY, resolve_fanout, select_tool_and_candidates)
 
@@ -149,6 +150,20 @@ class Planner:
         account = self._repos.accounts.get(req["requester_id"])
         if account is not None and account["disabled"]:
             return self._reject(rid, "requester_disabled")
+        # 요청자가 관리자인가(2026-09-30 스토리지 사용 범위): 지금의 계정 역할, 또는 API 가 실제로
+        # 만드는 토큰 요청의 모양(auth_method=token + requester shared-token/node:*)뿐이다 --
+        # "token" 표식만으로 통과시키면 API 가 만들 수 없는 조합(token + alice, DB 직접 삽입)이
+        # 샌다. 계정 행이 없으면 비관리자로 본다(fail-closed). 배치 자식은 배치 행의 생성 시점
+        # auth_method 를 물려받으므로(batch_orchestrator._materialize) 같은 규칙으로 판정된다.
+        token_admin = (req.get("auth_method") == "token"
+                       and (req["requester_id"] == "shared-token"
+                            or str(req["requester_id"]).startswith("node:")))
+        requester_is_admin = token_admin or (account is not None and account["role"] == "admin")
+        # sync 허용 쌍의 면제(3b)는 여기에 배치 자식을 더한다: 쌍 정책은 "사용자" 규칙이고 배치는
+        # 관리자 전용 라우트(routes_batches, require_admin)에서만 생긴다 -- 생성자 계정이 뒤에
+        # 바뀌어도 이미 만든 배치 항목이 사용자 규칙에 걸리지 않게. 관리자 전용 스토리지 판정은
+        # 이 면제를 쓰지 않는다(d142 불변식: 계정 역할 기준 -- 강등된 생성자의 배치는 거부).
+        pair_exempt = requester_is_admin or bool(req.get("batch_id"))
         # 3. storage admission
         for name in _required_storages(req["operation"], payload):
             storage = self._repos.storages.get(name)
@@ -158,18 +173,17 @@ class Planner:
                 return self._reject(rid, "storage_disabled")
             # 관리자 전용(2026-09-30 사용 범위): 비관리자 요청은 계획 시점에도 거부 -- 제출
             # 게이트(routes_requests)를 통과한 뒤 대기 중에 관리자 전용으로 바뀐 요청·DB 직접
-            # 삽입(신뢰 경계) 방어. 관리자 판정은 지금의 계정 역할, 또는 API 가 실제로 만드는
-            # 토큰 요청의 모양(auth_method=token + requester shared-token/node:*)뿐이다 --
-            # "token" 표식만으로 통과시키면 API 가 만들 수 없는 조합(token + alice)이 샌다.
-            # 계정 행이 없으면 비관리자로 본다(fail-closed).
-            token_admin = (req.get("auth_method") == "token"
-                           and (req["requester_id"] == "shared-token"
-                                or str(req["requester_id"]).startswith("node:")))
-            if not storage_open_to_users(storage) and not (
-                    token_admin or (account is not None and account["role"] == "admin")):
+            # 삽입(신뢰 경계) 방어.
+            if not storage_open_to_users(storage) and not requester_is_admin:
                 return self._reject(rid, "storage_admin_only")
             if storage["status"] not in ("Ready", "Degraded"):
                 return self._reject(rid, "storage_not_ready")
+        # 3b. 사용자 sync 허용 스토리지 쌍(2026-09-30, repositories/sync_pairs.py): 기본 전부 불가.
+        #     제출 게이트를 통과한 뒤 대기 중에 허용이 빠진 요청·DB 직접 삽입을 계획 시점에 거부.
+        if (req["operation"] == Operation.SYNC.value and not pair_exempt
+                and not sync_pair_allowed(self._repos, payload.get("source_storage"),
+                                          payload.get("destination_storage"))):
+            return self._reject(rid, "sync_pair_not_allowed")
         # 4. identity
         # (포탈의 "관리자 기본 root" 도 제출 바디의 명시 run_as_root: true 로 온다 -- 서버는 생략을
         #  root 로 읽지 않는다, routes_requests.submit.)

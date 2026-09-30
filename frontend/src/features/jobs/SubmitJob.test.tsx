@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
+import { QueryClientProvider, QueryClient, focusManager } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
@@ -39,9 +39,14 @@ const SYNC_DEFAULT_OPTS = { open_noatime: true, ...SYNC_NUM_DEFAULTS };
 // 기본 me = admin(2026-08-20): rm·scan·고급옵션·우선순위·실행신원은 운영자
 // 전용이라, 그 기능들을 다루는 대다수 테스트는 admin 컨텍스트여야 한다. 사용자
 // 제약(sync 만·옵션 단순화)은 meUser 를 명시한 테스트가 따로 고정한다.
+// 사용자 sync 허용 쌍(2026-09-30, 기본 전부 불가): 사용자 테스트의 fillSyncTarget 조합
+// (cephfs → cephfs-secondary)을 허용해 둔다. 관리자는 조회하지 않는다(제한 없음).
+const userPairs = { restricted: true, pairs: [
+  { source_storage: "cephfs", destination_storage: "cephfs-secondary" }] };
 const server = setupServer(
   http.get("/api/auth/me", () => HttpResponse.json(meAdmin)),
   http.get("/api/user/storages", () => HttpResponse.json(storageRows)),
+  http.get("/api/user/sync-pairs", () => HttpResponse.json(userPairs)),
 );
 beforeAll(() => server.listen());
 afterEach(() => server.resetHandlers());
@@ -744,4 +749,116 @@ test("root 자격 없는 관리자에겐 체크박스 대신 안내 — run_as_r
   // 관리자는 확정값을 항상 명시 -- 서버의 생략 기본값(비 root)이나 me 판정 시점에 기대지 않는다.
   expect(captured.body.run_as_root).toBe(false);
   expect(captured.body.options.open_noatime).toBeUndefined();
+});
+
+// ---- 사용자 sync 허용 쌍(2026-09-30): 소스·목적지 상호 필터 ------------------------------
+
+const threeStorages: UserStorage[] = [
+  { storage_name: "ceph-a", backend_type: "cephfs", status: "Ready" },
+  { storage_name: "ceph-b", backend_type: "cephfs", status: "Ready" },
+  { storage_name: "ceph-c", backend_type: "cephfs", status: "Ready" },
+];
+const optionNames = (label: string) =>
+  Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map((o) => o.value);
+
+async function openUserTarget(pairs: { source_storage: string; destination_storage: string }[]) {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json(meUser)),
+    http.get("/api/user/storages", () => HttpResponse.json(threeStorages)),
+    http.get("/api/user/sync-pairs", () => HttpResponse.json({ restricted: true, pairs })),
+  );
+  renderPage();
+  await screen.findByLabelText("연산");
+  await clickNext();
+  await screen.findByRole("note", { name: "허용된 스토리지 조합" });
+}
+
+test("사용자: 한쪽을 고르면 다른 쪽 선택지에서 허용되지 않은 스토리지가 빠진다(양방향)", async () => {
+  await openUserTarget([
+    { source_storage: "ceph-a", destination_storage: "ceph-b" },
+    { source_storage: "ceph-a", destination_storage: "ceph-c" },
+    { source_storage: "ceph-c", destination_storage: "ceph-c" },
+  ]);
+  // 아무것도 안 골랐을 때: 쌍에 나오는 스토리지만(ceph-b 는 소스로 허용된 적이 없다)
+  expect(optionNames("소스 스토리지")).toEqual(["", "ceph-a", "ceph-c"]);
+  expect(optionNames("목적지 스토리지")).toEqual(["", "ceph-b", "ceph-c"]);
+  expect(screen.getByRole("note", { name: "허용된 스토리지 조합" })).toHaveTextContent("(3개)");
+  // 소스 ceph-c → 목적지는 ceph-c 만
+  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "ceph-c");
+  expect(optionNames("목적지 스토리지")).toEqual(["", "ceph-c"]);
+  // 소스를 비우고 목적지 ceph-b → 소스는 ceph-a 만
+  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "ceph-b");
+  expect(optionNames("소스 스토리지")).toEqual(["", "ceph-a"]);
+});
+
+test("사용자: 허용 쌍이 없으면 선택지가 비고 안내가 뜨며 다음이 잠긴다", async () => {
+  await openUserTarget([]);
+  expect(screen.getByRole("note", { name: "허용된 스토리지 조합" }))
+    .toHaveTextContent("관리자가 허용한 sync 스토리지 조합이 없어");
+  expect(optionNames("소스 스토리지")).toEqual([""]);
+  expect(optionNames("목적지 스토리지")).toEqual([""]);
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
+});
+
+test("사용자: 허용 조합을 고르면 제출 바디가 그대로 나간다", async () => {
+  const captured = captureSubmit();
+  await openUserTarget([{ source_storage: "ceph-b", destination_storage: "ceph-a" }]);
+  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "ceph-b");
+  await userEvent.type(screen.getByLabelText("소스 경로"), "x");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "ceph-a");
+  await userEvent.type(screen.getByLabelText("목적지 경로"), "y");
+  await goToOptions();
+  await goToConfirm();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body).toMatchObject({ operation: "sync", source_storage: "ceph-b",
+                                        destination_storage: "ceph-a" });
+});
+
+test("사용자: 허용 목록 조회가 실패하면 sync 선택지를 비우고 사유를 보인다", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json(meUser)),
+    http.get("/api/user/sync-pairs", () => HttpResponse.json({ detail: "boom" }, { status: 500 })),
+  );
+  renderPage();
+  await screen.findByLabelText("연산");
+  await clickNext();
+  expect(await screen.findByText(/허용된 스토리지 조합을 불러오지 못했습니다/)).toBeInTheDocument();
+  expect(optionNames("소스 스토리지")).toEqual([""]);
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
+});
+
+test("관리자는 허용 쌍과 무관하게 모든 스토리지가 양쪽에 보인다(조회도 하지 않는다)", async () => {
+  let asked = false;
+  server.use(http.get("/api/user/sync-pairs", () => { asked = true; return HttpResponse.json(userPairs); }));
+  renderPage();
+  await screen.findByLabelText("연산");
+  await clickNext();
+  const src = await screen.findByLabelText("소스 스토리지");
+  await within(src).findByRole("option", { name: "cephfs" });
+  await userEvent.selectOptions(src, "cephfs");
+  expect(optionNames("목적지 스토리지")).toEqual(["", "cephfs", "cephfs-secondary"]);
+  expect(screen.queryByRole("note", { name: "허용된 스토리지 조합" })).not.toBeInTheDocument();
+  expect(asked).toBe(false);
+});
+
+test("사용자: 확인 단계에 있는 동안 허용이 해제되면 그 자리에서 이유를 보이고 제출이 잠긴다", async () => {
+  let pairs = [{ source_storage: "ceph-b", destination_storage: "ceph-a" }];
+  server.use(http.get("/api/user/sync-pairs", () => HttpResponse.json({ restricted: true, pairs })));
+  await openUserTarget(pairs);
+  server.use(http.get("/api/user/sync-pairs", () => HttpResponse.json({ restricted: true, pairs })));
+  await userEvent.selectOptions(screen.getByLabelText("소스 스토리지"), "ceph-b");
+  await userEvent.type(screen.getByLabelText("소스 경로"), "x");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "ceph-a");
+  await userEvent.type(screen.getByLabelText("목적지 경로"), "y");
+  await goToOptions();
+  await goToConfirm();
+  expect(screen.getByRole("button", { name: "제출" })).toBeEnabled();
+  // 관리자가 쌍을 해제 -- 창 포커스 재조회(react-query refetchOnWindowFocus)로 도착한다
+  pairs = [];
+  act(() => { focusManager.setFocused(false); focusManager.setFocused(true); });
+  expect(await screen.findByRole("alert")).toHaveTextContent("허용되지 않은 소스 → 목적지 조합입니다");
+  expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
+  act(() => { focusManager.setFocused(undefined); });
 });

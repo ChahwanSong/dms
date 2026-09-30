@@ -9,6 +9,15 @@ def _login(client, name="alice"):
 
 def _confirmpending_job(app_repos, requester="alice"):
     repos = app_repos
+    # 사용자 sync 허용 쌍(2026-09-30, 기본 전부 불가): 컨펌 게이트가 쌍을 다시 본다 -- 이 파일은
+    # 컨펌·격리가 관심사라 src -> dst 를 허용해 둔다(쌍 게이트는 test_sync_pairs 가 고정). 쌍은
+    # 등록된 스토리지끼리만 된다(SyncPairsRepository.add).
+    for name in ("src", "dst"):
+        if repos.storages.get(name) is None:
+            repos.storages.create(storage_name=name, mount_path=f"/mnt/{name}",
+                                  managed_root=f"/mnt/{name}/dms", backend_type="cephfs",
+                                  actor="test")
+    repos.sync_pairs.add("src", "dst", actor="test")
     rid = repos.requests.create(operation="sync", requester_id=requester, actor=requester,
         resource_key="k", payload={"source_storage": "src", "source": "a",
         "destination_storage": "dst", "destination": "b"}, priority="mid")

@@ -22,6 +22,14 @@ def _seed_storage(repos, name="s1", status="Ready"):
     repos.storages.set_status(name, status, "ready_nodes=1")
 
 
+def _seed_sync_storages(repos):
+    # alice(비관리자)의 src -> dst sync 가 계획되려면 그 쌍이 허용돼 있어야 한다(2026-09-30 사용자
+    # sync 허용 쌍, 기본 전부 불가). 이 파일의 sync 테스트는 배치·신원 대기가 관심사라 허용해 둔다
+    # -- 게이트 자체는 test_sync_pairs 가 고정한다.
+    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    repos.sync_pairs.add("src", "dst", actor="admin")
+
+
 def _seed_policy(repos, tool="scan"):
     repos.control.upsert_policy(tool, max_nodes=3, procs_per_node=8, queue="dms-data",
                                 default_priority="mid", max_priority="high",
@@ -178,7 +186,7 @@ def test_no_candidates_when_no_fresh_report(db):
 
 def test_sync_selects_nsync(db):
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
     repos.agents.ingest("n1", {"node_name": "n1",
         "mounts": [{"storage_name": "src", "mount_path": "/mnt/src",
@@ -234,7 +242,7 @@ def test_policy_max_nodes_trims_scan_candidates(db):
 
 def test_policy_max_nodes_trims_sync_candidates(db):
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")  # max_nodes=3, procs_per_node=8
     for node in ("s1", "s2", "s3", "s4"):
         repos.agents.ingest(node, {"node_name": node,
@@ -488,7 +496,7 @@ def test_sync_identity_pending_defers_and_plans_after_propagation(db):
     # 슬라이스 15 실증에서 실제로 났던 전이(Rejected / no_ready_sync_candidate)가
     # 이 형상이다 -- sync 도 유예 대상이어야 한다(설계 §2.3 정정).
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
     _seed_sync_reports(repos, identities=[])          # 신원 미전파
     rid = _sync_request(repos)
@@ -517,7 +525,7 @@ def test_sync_defers_when_only_destination_has_identity_pending(db):
     # _identity_pending_nodes 가 source dict 만 훑도록 좁아지면 이 요청은 즉시
     # 거부되고, 그게 이 태스크가 없애려던 과잉 거부다.
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
     _seed_sync_node(repos, "n1", "src", identity_ready=True)
     _seed_sync_node(repos, "n2", "dst", identity_ready=False)
@@ -541,7 +549,7 @@ def test_sync_defers_when_only_destination_has_identity_pending(db):
 def test_sync_defers_when_only_source_has_identity_pending(db):
     # 위의 거울상 -- 합집합의 source 절반을 고정한다(destination 쪽만 훑는 회귀를 잡는다).
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
     _seed_sync_node(repos, "n1", "src", identity_ready=False)
     _seed_sync_node(repos, "n2", "dst", identity_ready=True)
@@ -564,7 +572,7 @@ def test_sync_defers_when_only_source_has_identity_pending(db):
 def test_sync_without_identity_pending_rejects_immediately(db):
     # 양쪽 합집합에 신원 사유 노드가 0 -- 전파돼도 적격이 될 노드가 없으므로 즉시 거부.
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
     _seed_unmounted_report(repos, "n1", tool="nsync")
     _seed_unmounted_report(repos, "n2", tool="nsync")
@@ -576,7 +584,7 @@ def test_sync_without_identity_pending_rejects_immediately(db):
 
 def test_sync_identity_grace_expired_rejects(db):
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
     _seed_sync_reports(repos, identities=[])
     rid = _sync_request(repos)
@@ -723,7 +731,7 @@ def test_sync_requested_node_count_waits_per_side(db):
     # sync 는 max_nodes 가 면당 상한이므로 목표도 면당 동일 규칙 -- source 는
     # 충족(2)이어도 destination 이 부족(1<2)이고 그 사유가 신원 대기면 기다린다.
     repos = Repositories(db)
-    _seed_storage(repos, "src"); _seed_storage(repos, "dst")
+    _seed_sync_storages(repos)
     _seed_policy(repos, "nsync")
     _seed_sync_node(repos, "s1", "src", identity_ready=True)
     _seed_sync_node(repos, "s2", "src", identity_ready=True)

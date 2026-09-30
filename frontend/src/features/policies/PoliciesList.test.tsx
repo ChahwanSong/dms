@@ -6,7 +6,12 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { PoliciesList } from "./PoliciesList";
 
-const server = setupServer();
+// 허용 쌍 편집기(SyncPairsPanel, 2026-09-30)가 같은 화면에 있다 -- 이 파일은 도구 정책이 관심사라
+// 빈 목록만 준다(편집기 자체는 SyncPairsPanel.test 가 고정).
+const server = setupServer(
+  http.get("/api/admin/storages", () => HttpResponse.json([])),
+  http.get("/api/admin/sync-pairs", () => HttpResponse.json([])),
+);
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
 const POLICIES = [

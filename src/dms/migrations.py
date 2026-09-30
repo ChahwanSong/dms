@@ -294,6 +294,17 @@ def _apply_migrations(db: Database) -> None:
             attempts INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             PRIMARY KEY (username, purpose))""",
+        # 사용자 sync 허용 스토리지 쌍(2026-09-30 사용자 결정: "기본 전부 불가에 허용 쌍을
+        # 추가"). 방향이 있다(소스 -> 목적지). 행이 없으면 비관리자 sync 는 전부 거부된다
+        # (repositories/sync_pairs.py). 새 테이블이라 _ensure_columns 보강은 불필요 --
+        # CREATE IF NOT EXISTS 가 기배포 DB 에도 그대로 생성한다. PK 가 조회 경로라 별도
+        # 인덱스는 없다(목록은 스토리지 수의 제곱 이하로 작다).
+        """CREATE TABLE IF NOT EXISTS sync_pairs (
+            source_storage TEXT NOT NULL,
+            destination_storage TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            PRIMARY KEY (source_storage, destination_storage))""",
         f"""CREATE TABLE IF NOT EXISTS user_scan_paths (
             id {auto_pk},
             username TEXT NOT NULL,

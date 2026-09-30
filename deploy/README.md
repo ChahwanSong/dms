@@ -346,9 +346,23 @@ for tool in scan dsync nsync rm; do
     "execution_timeout_seconds": 3600, "enabled": true}'
 done
 
+# 사용자 sync 허용 스토리지 쌍(2026-09-30, d143~) -- **기본 전부 불가**라, 쌍이 하나도 없으면
+# 일반 사용자의 sync 는 전부 거부된다(sync_pair_not_allowed; 관리자·배치는 제한 없음). 방향이
+# 있다(A->B 와 B->A 는 별개, A->A 도 한 쌍). 포탈 관리 -> 정책 화면의 매트릭스로도 편집한다.
+curl -sf -X POST "$API/api/admin/sync-pairs" "${AUTH[@]}" -H 'content-type: application/json' -d '{
+  "source_storage": "cephfs-dms", "destination_storage": "cephfs-dms"}'
+
 curl -sf "$API/api/admin/storages" "${AUTH[@]}" | python3 -m json.tool
 curl -sf "$API/api/admin/policies" "${AUTH[@]}" | python3 -m json.tool
+curl -sf "$API/api/admin/sync-pairs" "${AUTH[@]}" | python3 -m json.tool
 ```
+
+> **업그레이드 주의(d143, 2026-09-30)**: 이 버전부터 사용자 sync 는 관리자가 허용한 스토리지 쌍
+> 안에서만 된다. 기배포 사이트는 업그레이드 직후 허용 쌍이 비어 있어 **일반 사용자의 sync 제출이
+> 전부 403 `sync_pair_not_allowed`** 가 된다(이미 계획된 사용자 잡도 컨펌 단계에서 막힌다) --
+> 롤아웃 직후 포탈 관리 → 정책의 「사용자 Sync 허용 스토리지 쌍」에서 필요한 조합을 허용하라.
+> 롤아웃 시점에 **대기(Pending) 중이던 사용자 sync** 는 새 planner 의 첫 틱에서 `sync_pair_not_allowed`
+> 로 종단(Rejected)된다 -- 새 API 가 뜨기 전에는 쌍을 미리 넣을 수 없으니, 쌍을 허용한 뒤 재제출하라.
 
 ## 7. Scenarios
 

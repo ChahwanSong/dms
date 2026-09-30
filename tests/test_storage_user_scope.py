@@ -122,6 +122,7 @@ def test_fully_disabled_storage_keeps_the_planner_rejection_path(client):
     assert client.post("/api/admin/storages", json=BODY, headers=ADMIN).status_code == 201
     client.put("/api/admin/storages/ceph-a", json={**PUT, "enabled": False,
                                                    "user_enabled": False}, headers=ADMIN)
+    client.app.state.repos.sync_pairs.add("ceph-a", "ceph-a", actor="test")   # 쌍 게이트는 통과
     _login_user(client)
     assert client.post("/api/user/requests", json=SYNC).status_code == 202
 
@@ -145,7 +146,7 @@ class _Settings:
 ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 
 
-def _plan(db, *, requester, role, auth="session"):
+def _plan(db, *, requester, role, auth="session", batch_id=None):
     repos = Repositories(db)
     repos.storages.create(storage_name="s1", mount_path="/mnt/s1", managed_root="/mnt/s1/dms",
                           backend_type="cephfs", actor="a", user_enabled=False)
@@ -163,11 +164,12 @@ def _plan(db, *, requester, role, auth="session"):
         reported_at="2026-08-02T09:59:00Z")
     if role is not None:
         repos.accounts.create(requester, "pw", role)
+    kw = {"batch_id": batch_id} if batch_id else {}
     rid = repos.requests.create(operation="scan", requester_id=requester, actor=requester,
                                 resource_key=f"k-{requester}",
                                 payload={"storage": "s1", "target": "a", "options": {},
                                          "owner_username": "alice"},
-                                priority="mid", auth_method=auth)
+                                priority="mid", auth_method=auth, **kw)
     Planner(repos, StubIdentityResolver({"alice": ALICE}),
             settings=_Settings()).run_once(now_iso="2026-08-02T10:00:00Z")
     return repos.requests.get(rid)["state"], repos.requests.last_reason_code(rid)
@@ -195,6 +197,17 @@ def test_planner_token_admin_only_for_the_shapes_the_api_creates(db):
 
 def test_planner_does_not_trust_the_token_mark_on_a_human_requester(db):
     assert _plan(db, requester="alice", role="user", auth="token") == ("Rejected", "storage_admin_only")
+
+
+def test_batch_children_follow_the_creators_current_role_for_admin_only_storages(db):
+    # 관리자 전용 판정은 계정 역할 기준이다 -- 배치 자식이라는 사실만으로 면제하지 않는다(생성자가
+    # 강등된 배치는 거부). sync 허용 쌍의 배치 면제(planner pair_exempt)가 이 판정으로 번지면 안 된다.
+    assert _plan(db, requester="demoted", role="user", batch_id="b-1") == ("Rejected", "storage_admin_only")
+
+
+def test_batch_children_of_a_current_admin_pass_the_admin_only_check(db):
+    state, reason = _plan(db, requester="ops", role="admin", batch_id="b-2")
+    assert reason != "storage_admin_only" and state == "Planned"
 
 
 def test_submit_gate_checks_the_destination_storage_too(client):

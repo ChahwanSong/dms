@@ -1,5 +1,6 @@
 import { usePolicies } from "./usePolicies";
 import { PolicyDialog } from "./PolicyDialog";
+import { SyncPairsPanel } from "./SyncPairsPanel";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
@@ -108,6 +109,7 @@ export function PoliciesList() {
           {(q.data ?? []).map((p) => <PolicyCard key={p.tool} p={p} />)}
         </div>
       )}
+      <SyncPairsPanel />
     </section>
   );
 }

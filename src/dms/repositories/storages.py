@@ -120,6 +120,22 @@ class StoragesRepository:
         if before is None:
             raise KeyError(storage_name)
         with self._db.transaction():
+            # 사용자 sync 허용 쌍(repositories/sync_pairs.py)도 같은 트랜잭션에서 지운다 -- 같은
+            # 이름으로 다시 등록된 스토리지가 옛 허용을 물려받지 않게. 트랜잭션이 중첩되지 않아
+            # (db.transaction) SyncPairsRepository.remove 대신 여기서 직접 지우고 감사를 남긴다.
+            pairs = self._db.query(
+                """SELECT * FROM sync_pairs
+                   WHERE source_storage = :n OR destination_storage = :n""", {"n": storage_name})
+            self._db.execute(
+                "DELETE FROM sync_pairs WHERE source_storage = :n OR destination_storage = :n",
+                {"n": storage_name})
+            for p in pairs:
+                self._db.execute(
+                    """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                           before_state, after_state, at)
+                       VALUES ('sync_pair', 'remove', :key, :actor, :b, NULL, :at)""",
+                    {"key": f"{p['source_storage']}->{p['destination_storage']}",
+                     "actor": actor, "b": dump_json(p), "at": utc_now_iso()})
             self._db.execute("DELETE FROM storages WHERE storage_name = :n",
                              {"n": storage_name})
             self._audit("delete", storage_name, before, None, actor)
