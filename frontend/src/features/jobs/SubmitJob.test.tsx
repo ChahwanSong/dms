@@ -28,8 +28,10 @@ const SYNC_NUM_DEFAULTS = {
   batch_files: Number(SYNC_INT_FIELDS.batch_files.prefill),
   bufsize: Number(SYNC_INT_FIELDS.bufsize.prefill),
 };
-// pristine sync 폼이 항상 싣는 옵션(2026-08-22): open_noatime 기본 ON + 숫자 프리필.
-const SYNC_DEFAULT_OPTS = { open_noatime: true, ...SYNC_NUM_DEFAULTS };
+// pristine sync 폼이 항상 싣는 옵션: 숫자 프리필뿐. open_noatime(기본 ON)은 2026-09-30
+// 부터 'root 권한으로 실행' 을 켰을 때만 실린다 -- 비 root 실행의 O_NOATIME 은 타인
+// 소유 파일에서 EPERM 이다(아래 open_noatime 테스트).
+const SYNC_DEFAULT_OPTS = { ...SYNC_NUM_DEFAULTS };
 
 // 기본 me = admin(2026-08-20): rm·scan·고급옵션·우선순위·실행신원은 운영자
 // 전용이라, 그 기능들을 다루는 대다수 테스트는 admin 컨텍스트여야 한다. 사용자
@@ -179,8 +181,8 @@ test("sync 제출 바디가 정확하다", async () => {
     operation: "sync",
     source_storage: "cephfs", source: "a/b",
     destination_storage: "cephfs-secondary", destination: "c/d",
-    // 계약: batch_files·bufsize 프리필 + open_noatime 기본 ON(2026-08-22) 이
-    // 항상 실린다. 숫자는 지우면 빠지고(아래 테스트), open_noatime 은 해제하면 빠진다.
+    // 계약: batch_files·bufsize 프리필이 항상 실린다(지우면 빠진다 -- 아래 테스트).
+    // open_noatime 은 root 실행에서만 실린다(2026-09-30).
     options: SYNC_DEFAULT_OPTS,
     // priority 생략 = (정책 기본) — 슬라이스 37, resolve_priority 가 정책값 해석
   });
@@ -275,12 +277,12 @@ test("실행 신원 필드는 옵션 스텝에서 관리자에게만 보인다",
   await fillSyncTarget();
   await goToOptions();
   expect(await screen.findByLabelText("실행 신원(선택)")).toBeInTheDocument();
-  // 캡션은 "소유자 기록"이 아니라 실행 신원을 말한다 — 비우면 요청자 본인.
-  expect(screen.getByText(
-    "비우면 요청자 본인으로 실행됩니다. 다른 사용자를 지정하려면 특권 요청자여야 하며, "
-    + "그때 잡은 root 로 실행되고 지정한 사용자 신원으로 파일을 다룹니다"
-    + "(LDAP 에 없는 계정도 지정할 수 있습니다).",
-  )).toBeInTheDocument();
+  // 캡션은 "소유자 기록"이 아니라 실행 신원을 말한다 — 비우면 요청자 본인의 uid/gid,
+  // 지정하면 그 사용자의 uid/gid(2026-09-30 정정: 예전 "root 로 실행되고 지정한 사용자
+  // 신원으로 파일을 다룹니다" 는 사실이 아니었다 -- 실제론 무조건 root 였다).
+  expect(screen.getByText((_, el) => el?.tagName === "P"
+    && (el.textContent ?? "").startsWith("비우면 요청자 본인의 LDAP 계정(uid/gid)으로 실행됩니다.")
+    && (el.textContent ?? "").includes("그 사용자의 uid/gid 로 실행되어"))).toBeInTheDocument();
 });
 
 // 선택 필드 표기 통일(사용자 지시 2026-08-16): 비워도 되는 입력은 라벨에 (선택).
@@ -375,17 +377,46 @@ test("고급 숫자 옵션을 지우면 그 키가 바디에서 빠진다(도구
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   // 빈 문자열은 "미입력"이라 batch_files·bufsize 는 통째로 생략된다. open_noatime
-  // 은 기본 ON(2026-08-22)이라 손대지 않으면 남는다 -- 숫자 생략과 독립.
-  expect(captured.body.options).toEqual({ open_noatime: true });
+  // 은 root 실행이 아니라 싣지 않는다(2026-09-30) -- 숫자 생략과 독립.
+  expect(captured.body.options).toEqual({});
 });
 
-test("open_noatime 은 기본 ON 이라 손대지 않으면 true 로 실리고, 해제하면 빠진다", async () => {
-  // 사용자 결정(2026-08-22): 단건 sync 도 open_noatime 기본 ON. 운영자는 고급
-  // 옵션에서 끌 수 있고, 끄면 checkedOptions 가 false 를 생략한다.
+test("open_noatime 은 root 실행 전용 — 비 root 면 잠기고 싣지 않는다", async () => {
+  // 2026-09-30: 운영자 단건도 기본은 실행 신원 uid 다. 비 root 의 O_NOATIME 은 타인
+  // 소유 파일에서 EPERM(mpifileutils 폴백 없음 → 부분 복사 뒤 Failed)이라 잠근다.
   const captured = captureSubmit();
   renderPage();
   await goToOptionsAndOpenAdvanced();
+  expect(screen.getByLabelText("open_noatime")).toBeDisabled();
+  expect(screen.getByLabelText("open_noatime")).not.toBeChecked();
+  expect(screen.getByText(/open_noatime 은 'root 권한으로 실행' 에서만 적용됩니다/)).toBeInTheDocument();
+  await goToConfirm();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(captured.body.options).toEqual(SYNC_NUM_DEFAULTS);
+  expect(captured.body.run_as_root).toBeUndefined();
+});
+
+test("root 실행이면 open_noatime 이 기본 ON 으로 실리고, 해제하면 빠진다", async () => {
+  // 사용자 결정(2026-08-22)의 root 실행 기본 ON 은 유지 — 끄면 checkedOptions 가
+  // false 를 생략한다.
+  const rootOn = captureSubmit();
+  const first = renderPage();
+  await goToOptionsAndOpenAdvanced();
+  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));
+  expect(screen.getByLabelText("open_noatime")).toBeEnabled();
   expect(screen.getByLabelText("open_noatime")).toBeChecked();
+  await goToConfirm();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
+  expect(rootOn.body.options).toEqual({ open_noatime: true, ...SYNC_NUM_DEFAULTS });
+  expect(rootOn.body.run_as_root).toBe(true);
+  first.unmount();
+
+  const captured = captureSubmit();
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));
   await userEvent.click(screen.getByLabelText("open_noatime"));  // 해제
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
@@ -433,7 +464,7 @@ test("batch_files·bufsize 숫자 입력은 number 로 전송된다", async () =
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
-  expect(captured.body.options).toEqual({ open_noatime: true, batch_files: 1000, bufsize: 4096 });
+  expect(captured.body.options).toEqual({ batch_files: 1000, bufsize: 4096 });
 });
 
 test("batch_files 상한은 1,000만 — 그 값은 통과, 넘으면 즉답 문구 + 다음 비활성", async () => {
@@ -577,4 +608,50 @@ test("scan 옵션은 batch_files 1,000,000·broken_limit 100 이 프리필돼 �
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(posted.options).toEqual({ batch_files: 1000000, broken_limit: 100 });
+});
+
+
+// ---- root 실행은 명시적 opt-in(2026-09-30 프로덕션 사고) -------------------------
+// 관리자 계정이 "실행 신원 = 일반 사용자" 로 낸 sync 가 무조건 root 로 돌아, 그 사용자가
+// 쓸 수 없는 남의 700 목적지를 소스 소유로 덮어쓰며 성공했다. 이제 root 는 체크박스로만
+// 켜지고(기본 꺼짐) 바디에 run_as_root: true 가 실릴 때만 서버가 승격을 검토한다.
+
+test("root 체크박스는 관리자에게만 보이고 기본은 꺼져 있어 run_as_root 를 싣지 않는다", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meUser)));
+  const { unmount } = renderPage();
+  await fillSyncTarget();
+  await goToOptions();
+  await screen.findByLabelText("delete");
+  expect(screen.queryByLabelText("root 권한으로 실행")).not.toBeInTheDocument();
+  unmount();
+
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
+  const captured = captureSubmit();
+  renderPage();
+  await fillSyncTarget();
+  await goToOptions();
+  const box = await screen.findByLabelText("root 권한으로 실행") as HTMLInputElement;
+  expect(box.checked).toBe(false);
+  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "alice");
+  await goToConfirm();
+  expect(screen.getByText("실행 신원의 uid/gid(권한 그대로 적용)")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
+  expect(captured.body.owner_username).toBe("alice");
+  expect("run_as_root" in captured.body).toBe(false);
+});
+
+test("root 체크박스를 켜면 run_as_root: true 를 싣고 확인 스텝이 결과를 경고한다", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdmin)));
+  const captured = captureSubmit();
+  renderPage();
+  await fillSyncTarget();
+  await goToOptions();
+  await userEvent.click(await screen.findByLabelText("root 권한으로 실행"));
+  await goToConfirm();
+  expect(screen.getByText(/^root\(특권\) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤$/))
+    .toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "제출" }));
+  await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
+  expect(captured.body.run_as_root).toBe(true);
 });

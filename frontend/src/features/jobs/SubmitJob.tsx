@@ -46,12 +46,12 @@ const initial = {
   // batchFiles·bufsize 는 프리필(SYNC_INT_FIELDS.prefill — 「왜」는 그 주석):
   // 값이 실려 있으니 손대지 않으면 바디에 그대로 나간다. 지우면 키가 빠지고 서버가
   // 같은 기본값을 박는다(domain._OPTION_DEFAULTS).
-  // 초기값 ON = **운영자 기본**(사용자 결정 2026-08-22, 재조정): 운영자 단건
-  // sync 는 open_noatime 기본 켜짐(소스 atime 오염 방지)이고 고급 옵션에서 끌 수
-  // 있다. **사용자 요청은 기본 OFF** 다 -- 단건은 비특권 실행이라 타인 소유 파일
-  // O_NOATIME 이 EPERM 이 될 수 있어서다(syncOptions 가 isAdmin 으로 끊는다 --
-  // 사용자 폼은 이 옵션이 숨겨져 어차피 이 초기값을 못 바꾼다). 배치는 항상
-  // 특권 실행이라 BatchCreate 가 별도로 기본 ON 을 유지한다.
+  // 초기값 ON = **root 실행의 기본**(사용자 결정 2026-08-22 → 2026-09-30 재조정):
+  // O_NOATIME 은 root(또는 파일 소유자)만 쓸 수 있어 비 root 실행에선 타인 소유
+  // 파일 open 이 EPERM 이다(mpifileutils 는 폴백 없이 실패). 2026-09-30 부터 운영자
+  // 단건도 기본은 실행 신원 uid 라, 이 값은 'root 권한으로 실행' 을 켰을 때만
+  // 실린다(syncOptions). 사용자 폼은 옵션이 숨겨져 어차피 못 바꾼다. 배치는
+  // (자격 있으면) root 라 BatchCreate 가 별도로 기본 ON 을 유지한다.
   openNoatime: true,
   batchFiles: SYNC_INT_FIELDS.batch_files.prefill,
   bufsize: SYNC_INT_FIELDS.bufsize.prefill,
@@ -60,6 +60,9 @@ const initial = {
   // 해석한다(BatchCreate 와 같은 계약, null≠0).
   priority: "",
   ownerUsername: "",
+  // root 실행은 명시적 opt-in(2026-09-30 프로덕션 사고): 끄면(기본) 관리자라도 실행 신원의
+  // LDAP uid/gid 로 돌아 그 사용자의 파일 권한이 그대로 적용된다.
+  runAsRoot: false,
 };
 
 function checkedOptions(opts: Record<string, boolean>): Record<string, boolean> {
@@ -154,12 +157,11 @@ export function SubmitJob() {
   function syncOptions(): SubmitBody["options"] {
     const options: SubmitBody["options"] = checkedOptions({
       delete: f.delete, contents: f.contents, direct: f.direct, quiet: f.quiet,
-      // open_noatime 은 **운영자 요청만** 실린다(사용자 결정 2026-08-22): 사용자
-      // 단건 sync 는 비특권 실행이라 타인 소유 파일 O_NOATIME 이 EPERM 이 될 수
-      // 있어 기본 OFF 로 되돌렸다. 사용자 폼은 이 옵션이 숨겨져 토글 불가라,
-      // 제출 시점에 isAdmin 으로 끊는 게 곧 "사용자 기본 OFF"다(운영자는 초기값
-      // ON·고급옵션에서 토글).
-      open_noatime: isAdmin && f.openNoatime,
+      // open_noatime 은 **root 실행에만** 실린다(2026-09-30): 비 root 실행에서
+      // 타인 소유 파일 O_NOATIME 은 EPERM 이라 부분 복사 뒤 Failed 가 된다. 예전엔
+      // 운영자 단건 = 항상 root 라 isAdmin 만으로 충분했지만, 이제 root 는
+      // 명시적 opt-in(runAsRoot)이다. 체크박스 값은 root 를 다시 켤 때를 위해 보존한다.
+      open_noatime: isAdmin && f.runAsRoot && f.openNoatime,
     });
     // 빈 문자열일 때만 생략 — 빈 chmod/chown 을 그대로 실으면 서버 fullmatch 가
     // 422 invalid_option 으로 거부한다(빈 값은 "옵션 없음"이지 "빈 값 지정"이 아니다).
@@ -202,6 +204,8 @@ export function SubmitJob() {
     // "" = (정책 기본) = 생략 — resolve_priority 가 정책값으로 해석(null≠0).
     if (f.priority !== "") body.priority = f.priority;
     if (isAdmin && f.ownerUsername.trim()) body.owner_username = f.ownerUsername.trim();
+    // 체크했을 때만 싣는다 -- 생략 = root 아님(서버는 `is True` 로만 승격, 자격은 서버 게이트).
+    if (isAdmin && f.runAsRoot) body.run_as_root = true;
     submit.mutate(body, { onSuccess: (r) => nav(`/jobs/${r.request_id}`) });
   }
 
@@ -325,9 +329,16 @@ export function SubmitJob() {
                     <summary className="cursor-pointer text-sm font-medium">고급 옵션</summary>
                     <div className="mt-3 space-y-3">
                       <label className="flex items-center gap-2 text-sm">
-                        <input type="checkbox" aria-label="open_noatime" checked={f.openNoatime}
+                        <input type="checkbox" aria-label="open_noatime"
+                               checked={f.runAsRoot && f.openNoatime} disabled={!f.runAsRoot}
                                onChange={on("openNoatime")} /> open_noatime
                       </label>
+                      {!f.runAsRoot && (
+                        <p className="text-muted text-xs">
+                          open_noatime 은 'root 권한으로 실행' 에서만 적용됩니다 — 일반 실행 신원은
+                          남의 파일을 O_NOATIME 으로 열 수 없어(EPERM) 복사가 실패합니다.
+                        </p>
+                      )}
                       {/* 프리필 계약(2026-09-17): 값이 미리 채워져 있고(placeholder 가
                           아니다) 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 —
                           배칭을 끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때
@@ -363,13 +374,14 @@ export function SubmitJob() {
                       {/* 함정 캡션(설계 §2.5): chown 명시 시 auto-chown 억제는
                           execution_manifests.py("chown" in spec.options) — 실패는
                           서버가 아니라 도구 실행 단계에서 나므로 여기서 미리 경고한다.
-                          "비우면" 기본도 특권 여부로 갈린다(_auto_chown): 특권은 소스
-                          소유권 보존, 비특권은 요청자 소유 자동 chown — 정직하게 병기 */}
+                          "비우면" 기본도 root 여부로 갈린다(_auto_chown): root 는 소스
+                          소유권 보존, 아니면 **실행 신원**(요청자가 아니다 — 운영자가 실행
+                          신원을 지정하면 그 사용자) 소유 자동 chown — 정직하게 병기 */}
                       <p className="text-muted text-xs">
-                        비우면 원래 소유권 보존(특권 실행 기준 — 비특권 실행은 요청자 소유로
-                        자동 chown). chown 을 지정하면 자동 chown 이 꺼집니다. 비특권 사용자가
-                        타인 소유를 지정하면 도구가 chown 권한이 없어 <strong>데이터는 복사되고
-                        잡은 Failed 로 끝납니다</strong>.
+                        비우면: root 실행은 원래 소유권 보존, 일반 실행(기본)은 실행 신원의
+                        uid:gid 소유로 자동 chown. chown 을 지정하면 자동 chown 이 꺼집니다. root 가
+                        아닌데 타인 소유를 지정하면 도구가 chown 권한이 없어 <strong>데이터는
+                        복사되고 잡은 Failed 로 끝납니다</strong>.
                       </p>
                     </div>
                   </details>
@@ -445,25 +457,40 @@ export function SubmitJob() {
               {/* 라벨 정정(사용자 결정 2026-08-16): 이 값(owner_username)은 결과물의
                   소유자 기록이 아니라 **잡의 실행 신원**이다 — identity.py
                   resolve_job_identity 가 `owner = owner_username or requester_id`
-                  로 잡의 신원을 정하고, 그 신원이 runAsUser·DMS_JR_USERNAME·
-                  auto-chown 을 좌우한다. 캡션은 서버 게이트 두 개를 그대로 옮긴다:
-                  ① 요청자 본인과 다른 신원은 특권 인가가 있어야 한다(routes_requests
-                  403 privileged_not_authorized), ② 특권 경로는 LDAP 조회를 건너뛰고
-                  uid 0(root)로 실행한다 — LDAP 에 없는 계정을 신원으로 쓸 수 있는
-                  유일한 경로다. */}
+                  로 잡의 신원을 정한다. 2026-09-30(프로덕션 사고): 예전 캡션("지정하면
+                  root 로 실행되고 지정한 사용자 신원으로 파일을 다룹니다")과 달리 실제로는
+                  특권 요청자면 **무조건 root** 였고, root 로 돈 sync 가 남의 700 목적지를
+                  소스 소유로 덮어썼다. 이제 root 는 아래 체크박스로만(명시적) 켜지고,
+                  끄면 관리자라도 실행 신원의 uid/gid 로 돈다 -- 캡션은 그 사실을 그대로
+                  말한다. 서버 게이트: 다른 신원·root 둘 다 특권 인가(403
+                  privileged_not_authorized). */}
               {isAdmin && (
                 <label className="text-sm block">실행 신원(선택)
                   <input aria-label="실행 신원(선택)" className={field}
                          placeholder="예: cocoa.song"
                          value={f.ownerUsername} onChange={on("ownerUsername")} />
                   <p className="text-muted text-xs mt-1">
-                    비우면 요청자 본인으로 실행됩니다. 다른 사용자를 지정하려면 특권
-                    요청자여야 하며, 그때 잡은 root 로 실행되고 지정한 사용자 신원으로
-                    파일을 다룹니다(LDAP 에 없는 계정도 지정할 수 있습니다).
+                    비우면 요청자 본인의 LDAP 계정(uid/gid)으로 실행됩니다. 다른 사용자를
+                    지정하면(특권 요청자만) <strong>그 사용자의 uid/gid</strong> 로 실행되어
+                    그 사용자의 파일 권한이 그대로 적용됩니다 — 그 사용자가 쓸 수 없는
+                    목적지는 실패합니다.
                   </p>
-                  {f.operation === "rm" && (
-                    <p className="text-bad text-xs">삭제가 root 권한으로 수행됩니다</p>
-                  )}
+                </label>
+              )}
+              {isAdmin && (
+                <label className="flex items-start gap-2 text-sm">
+                  <input type="checkbox" aria-label="root 권한으로 실행" className="mt-1"
+                         checked={f.runAsRoot} onChange={on("runAsRoot")} />
+                  <span>root 권한으로 실행(관리자 데이터 이관·정리용)
+                    <span className="block text-muted text-xs mt-1">
+                      특권 요청자만 가능합니다. 켜면 잡이 root 로 실행되어 파일 권한 검사를
+                      우회하고, <strong>sync 는 목적지(이미 있는 디렉토리 포함)의 소유자·권한을
+                      소스와 같게 바꿉니다.</strong> 끄면(기본) 실행 신원의 권한으로만 동작합니다.
+                    </span>
+                    {f.runAsRoot && f.operation === "rm" && (
+                      <span className="block text-bad text-xs mt-1">삭제가 root 권한으로 수행됩니다</span>
+                    )}
+                  </span>
                 </label>
               )}
             </div>
@@ -509,6 +536,15 @@ export function SubmitJob() {
                     <div className="flex gap-2">
                       <dt className="w-24 shrink-0 text-muted">실행 신원</dt>
                       <dd>{f.ownerUsername.trim()}</dd>
+                    </div>
+                  )}
+                  {isAdmin && (
+                    <div className="flex gap-2">
+                      <dt className="w-24 shrink-0 text-muted">실행 권한</dt>
+                      <dd className={f.runAsRoot ? "text-bad" : undefined}>
+                        {f.runAsRoot ? "root(특권) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤"
+                          : "실행 신원의 uid/gid(권한 그대로 적용)"}
+                      </dd>
                     </div>
                   )}
                 </dl>

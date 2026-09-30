@@ -178,9 +178,10 @@ test("실행 제어 스텝: 특권 실행 고정 안내문 + 실행 신원 입�
   await userEvent.click(next());                              // → 실행 제어
   // 통일 특권 게이트(routes_batches): 배치는 전부 관리자 특권(root) 실행 — 고정 안내
   expect(screen.getByText("이 배치는 관리자 특권(root)으로 실행됩니다.")).toBeInTheDocument();
-  expect(screen.getByText(
-    "비우면 생성자 본인 신원으로 실행됩니다. 지정하면 그 사용자 신원으로 파일을 "
-    + "다룹니다(LDAP 에 없는 계정도 지정할 수 있습니다).")).toBeInTheDocument();
+  // 2026-09-30 정정: 배치는 root 로 돌고 실행 신원은 기록용 이름이다(파일 권한 검사 없음).
+  expect(screen.getByText((_, el) => el?.tagName === "P"
+    && (el.textContent ?? "").startsWith("배치는 관리자 이관·정리용이라 root 로 실행됩니다")
+    && (el.textContent ?? "").includes("실행 신원은 기록용"))).toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "alice");
   await userEvent.click(next());                              // → 확인·제출
   // 확인 스텝 요약 = 제출 바디 파생 + 특권 실행 표시(고정 행)

@@ -758,18 +758,20 @@ class _PrivSettings:
     planner_identity_grace_seconds = 300
 
 
-def _root_request(repos, key, auth_method):
+def _root_request(repos, key, auth_method, run_as_root=False):
+    payload = {"storage": "s1", "target": "a", "options": {}, "owner_username": None}
+    if run_as_root:
+        payload["run_as_root"] = True
     return repos.requests.create(
         operation="scan", requester_id="root", actor="root", resource_key=key,
-        payload={"storage": "s1", "target": "a", "options": {},
-                 "owner_username": None},
+        payload=payload,
         priority="mid", auth_method=auth_method)
 
 
 def test_session_auth_root_request_runs_privileged(db):
     repos = Repositories(db)
     _seed_storage(repos); _seed_policy(repos); _seed_report(repos, user="root")
-    rid = _root_request(repos, "k-session", "session")
+    rid = _root_request(repos, "k-session", "session", run_as_root=True)
     resolver = StubIdentityResolver(
         {"root": ResolvedIdentity("root", 5000, 5000, (), False)})
     Planner(repos, resolver, settings=_PrivSettings()).run_once(now_iso=NOW)

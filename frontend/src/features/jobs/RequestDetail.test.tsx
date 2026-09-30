@@ -453,7 +453,7 @@ test("잡이 하나도 없는 계획 단계 거부도 사유가 보인다", asyn
     http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
   );
   renderAt();
-  expect(await screen.findByText("LDAP에서 요청자 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다"))
+  expect(await screen.findByText(/^LDAP에서 실행 신원 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다/))
     .toBeInTheDocument();
 });
 

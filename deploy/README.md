@@ -826,14 +826,24 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
   redeploying anything else.
 - **`DMS_ALLOW_PRIVILEGED_REQUESTERS` / `DMS_PRIVILEGED_REQUESTERS`**
   (`deploy/k8s/20-config.yaml`, ConfigMap): **default is `true` /
-  `root,admin`** (also the code default in `src/dms/config.py`). A request
-  whose authenticated `requester_id` (x-dms-actor) is `root` or `admin` runs
-  as **uid 0/gid 0 (root)** and skips the LDAP node-identity check; everyone
-  else runs as their own resolved LDAP identity. The gate keys on the
-  authenticated `requester_id`, NOT the client-supplied `owner_username`, so a
-  normal user cannot escalate (owner_username != actor -> 403
-  `privileged_not_authorized`). Note the shared-token lets a caller set
-  x-dms-actor freely, so a shared-token holder can pick `root`/`admin` and get
+  `root,admin`** (also the code default in `src/dms/config.py`). Being in the
+  list is **eligibility only** (2026-09-30 incident: an admin's sync with
+  "실행 신원 = a user" ran as root and rewrote another user's 700 destination
+  to the source owner). A single request runs as **uid 0/gid 0 (root)** --
+  skipping the LDAP node-identity check -- only when it explicitly asks
+  (`run_as_root: true`, the portal's 'root 권한으로 실행' checkbox) AND the
+  authenticated requester is eligible (session auth + in the list; otherwise
+  403 `privileged_not_authorized`). Without the flag even an eligible admin
+  runs as the run identity's LDAP uid/gid (`owner_username`, else the
+  requester) -- so a local admin account that is not in LDAP must either set
+  실행 신원 or tick root, or the request is Rejected `ldap_identity_not_found`.
+  Batch children keep "root if the batch creator is eligible". The stepper
+  re-checks every root job against its request before each submission and
+  fails it closed (`privilege_not_requested`) if neither `run_as_root` nor a
+  batch is behind it (jobs planned before the rule change). The gate keys on
+  the authenticated `requester_id`, NOT the client-supplied `owner_username`,
+  so a normal user cannot escalate (owner_username != actor -> 403
+  `privileged_not_authorized`). Token-authenticated requests are never
   root -- use session-based actors in production, and keep the allowlist
   minimal. To disable entirely: `DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"`
   (or `DMS_PRIVILEGED_REQUESTERS: ""` -- an explicit empty string overrides

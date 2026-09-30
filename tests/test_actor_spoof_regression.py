@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import dms.api.auth as auth_mod
 import dms.api.routes_agent as agent_mod
 from dms.config import Settings
-from dms.identity import resolve_job_identity
+from dms.identity import PRIVILEGE_REQUESTED, resolve_job_identity
 from dms.repositories.control import ControlRepository
 
 
@@ -43,7 +43,8 @@ def test_privileged_requester_synthesizes_root_uid_zero(db):
         control, None, requester_id="root", owner_username=None,
         allow_privileged=True,
         privileged_requesters=frozenset({"root", "admin"}),
-        session_authenticated=True)
+        session_authenticated=True,
+        privilege=PRIVILEGE_REQUESTED)   # 2026-09-30: root 는 명시적 요청일 때만
     assert ident.uid == 0 and ident.gid == 0 and ident.privileged is True
 
 

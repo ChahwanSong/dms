@@ -1,5 +1,6 @@
 import pytest
 from dms.identity import (
+    PRIVILEGE_IF_ELIGIBLE, PRIVILEGE_NEVER, PRIVILEGE_REQUESTED,
     IdentityRejected, IdentityUnavailable, ResolvedIdentity, StubIdentityResolver,
     resolve_job_identity)
 from dms.repositories.control import ControlRepository
@@ -71,13 +72,23 @@ def test_privileged_path_synthesizes_root(db):
     out = resolve_job_identity(control, None, requester_id="ops",
                                owner_username="victim", allow_privileged=True,
                                privileged_requesters=frozenset({"ops"}),
-                               session_authenticated=True)
+                               session_authenticated=True,
+                               privilege=PRIVILEGE_REQUESTED)
     assert out.privileged and out.uid == 0 and out.gid == 0
 
 
 def test_privileged_gates_on_requester_not_owner(db):
     control = _control(db)
-    # requester는 allowlist에 없고, owner_username만 allowlist 멤버 → root 금지, LDAP 경로로
+    # requester는 allowlist에 없고, owner_username만 allowlist 멤버 → root 금지.
+    # 명시적 root 요청이면 조용히 낮추지 않고 거부한다(2026-09-30).
+    with pytest.raises(IdentityRejected) as e:
+        resolve_job_identity(control, None, requester_id="mallory",
+                             owner_username="ops", allow_privileged=True,
+                             privileged_requesters=frozenset({"ops"}),
+                             session_authenticated=True,
+                             privilege=PRIVILEGE_REQUESTED)
+    assert e.value.reason_code == "privileged_not_authorized"
+    # 기본 정책(root 미요청)이면 LDAP 경로 -- resolver None 이라 ldap_not_configured.
     with pytest.raises(IdentityRejected) as e:
         resolve_job_identity(control, None, requester_id="mallory",
                              owner_username="ops", allow_privileged=True,
@@ -88,7 +99,8 @@ def test_privileged_gates_on_requester_not_owner(db):
     out = resolve_job_identity(control, None, requester_id="ops",
                                owner_username="victim", allow_privileged=True,
                                privileged_requesters=frozenset({"ops"}),
-                               session_authenticated=True)
+                               session_authenticated=True,
+                               privilege=PRIVILEGE_REQUESTED)
     assert out.privileged and out.uid == 0
 
 
@@ -127,13 +139,15 @@ def test_privileged_requires_session_auth(db):
     out = resolve_job_identity(control, None, requester_id="ops",
                                owner_username="victim", allow_privileged=True,
                                privileged_requesters=frozenset({"ops"}),
-                               session_authenticated=True)
+                               session_authenticated=True,
+                               privilege=PRIVILEGE_REQUESTED)
     assert out.privileged and out.uid == 0
     with pytest.raises(IdentityRejected) as e:
         resolve_job_identity(control, None, requester_id="ops",
                              owner_username="victim", allow_privileged=True,
                              privileged_requesters=frozenset({"ops"}),
-                             session_authenticated=False)
+                             session_authenticated=False,
+                               privilege=PRIVILEGE_IF_ELIGIBLE)
     # 특권을 안 쓰므로 resolver=None 인 LDAP 경로로 떨어진다.
     assert e.value.reason_code == "ldap_not_configured"
 

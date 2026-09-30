@@ -10,6 +10,7 @@ from .db import iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import parse_preflight_reason
+from .identity import PRIVILEGE_NEVER, privilege_policy
 from .placement import TOOL_TO_POLICY
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,20 @@ class IdentityMissingAtStep(Exception):
     def __init__(self, problem):
         self.problem = problem
         super().__init__(f"identity {problem} at step time")
+
+
+class PrivilegeNotRequestedAtStep(Exception):
+    """root(privileged) 신원을 실은 잡인데 요청에 그 근거(run_as_root 명시·배치 자식)가
+    없다(2026-09-30). 신원은 planner 가 한 번 정해 worker_pool 에 얼리므로, 규칙이
+    바뀌기 전에 계획된 잡(예: ConfirmPending 으로 최대 preview TTL 동안 대기 중인
+    "관리자가 실행 신원=일반 사용자로 낸 sync")은 배포 뒤에도 uid 0 으로 exec_preflight
+    ·dsync 를 돈다 -- 사고 경로 그대로다. 변조 행(worker_pool 에 privileged 를 써 넣음)
+    도 같은 클래스다. 매 제출 직전(_build_spec)에 요청 행을 다시 읽어
+    identity.privilege_policy 로 재확인하고, 근거가 없으면 제출 전에 종단시킨다."""
+
+    def __init__(self, request_id):
+        self.request_id = request_id
+        super().__init__(f"privileged identity without run_as_root/batch (request {request_id})")
 
 
 def identity_problem(ident) -> "str | None":
@@ -164,6 +179,13 @@ class JobStepper:
         problem = identity_problem(wp.get("identity"))
         if problem is not None:
             raise IdentityMissingAtStep(problem)
+        # root 근거 재확인(PrivilegeNotRequestedAtStep docstring). identity_problem 을
+        # 통과했으면 identity 는 dict 이고 privileged == (uid == 0) 이다. 비특권 잡은
+        # 요청 행을 읽지 않는다(추가 조회는 root 잡에만).
+        if wp["identity"].get("privileged"):
+            req = self._repos.requests.get(job["request_id"])
+            if privilege_policy(req) == PRIVILEGE_NEVER:
+                raise PrivilegeNotRequestedAtStep(job["request_id"])
         op = job["operation"]
         if op == "sync":
             paths = {"source": self._abs(job["source_storage"], job["source"]),
@@ -376,6 +398,15 @@ class JobStepper:
                 message=f"{exc.problem} job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="identity_missing_at_step")
+        except PrivilegeNotRequestedAtStep:
+            # 규칙 변경 전에 얼린 root 신원·변조 행 -- root 로 한 번이라도 제출되기 전에
+            # 끊는다(재계획은 하지 않는다: 요청자가 의도를 다시 정해 새로 내야 한다).
+            self._repos.observability.record_event(
+                component="stepper", severity="error",
+                event_type="privilege_not_requested",
+                message=f"privileged identity without run_as_root/batch job={job['job_id']}",
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="privilege_not_requested")
 
     def _dispatch(self, job) -> str:
         state = job["state"]

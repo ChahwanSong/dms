@@ -76,6 +76,10 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
     `artifact_base.allowlist_reason`) + realpath 검사 셋 다.
   - uid/gid 부재를 0 으로 기본값 처리하지 않는다 — 부재는 거부(`stepper.identity_problem`,
     `identity_missing_at_step`). uid 0 자체는 privileged 짝이 맞으면 정당.
+  - **잡의 root 실행은 명시적일 때만**(2026-09-30): 특권 목록에 있다는 것만으로 root 가
+    되지 않는다 — 단건은 `run_as_root: true` + 자격, 배치 자식만 "자격 있으면 root"
+    (`identity.PRIVILEGE_*`). 기본(생략)은 실행 신원의 LDAP uid/gid 다. 암묵적 root 는
+    남의 디렉터리 소유권을 소스 소유로 덮어쓴 프로덕션 사고의 원인이다.
   - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
     65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
     "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.

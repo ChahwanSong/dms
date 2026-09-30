@@ -1,8 +1,9 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from ..artifact_base import resolve_artifact_base
+from ..identity import privilege_eligible
 from ..domain import (
     DataJobState, DomainValidationError, Operation, PRIORITIES, RequestState,
     TERMINAL_DATA_JOB_STATES, TERMINAL_REQUEST_STATES, build_data_payload,
@@ -41,6 +42,9 @@ class RequestBody(BaseModel):
     options: dict = {}
     priority: str | None = None
     owner_username: str | None = None
+    # root 실행 명시(2026-09-30). StrictBool -- "yes"·1 같은 값이 root 로 승격되지 않게.
+    # 생략/False = 실행 신원의 LDAP uid/gid(관리자라도). identity.resolve_job_identity.
+    run_as_root: StrictBool = False
 
 
 def _require(value: str | None, reason: str) -> str:
@@ -78,6 +82,10 @@ def _validated_payload(body: RequestBody, priority: str) -> tuple[dict, str]:
         payload, key = build_data_payload(
             "scan", storage=storage, target=body.target, options=body.options)
     payload["owner_username"] = body.owner_username
+    # 명시한 경우에만 키를 싣는다 -- 생략은 "root 아님" 이고 planner 는 `is True` 로만
+    # 승격한다(모름을 특권 쪽으로 읽지 않는다).
+    if body.run_as_root:
+        payload["run_as_root"] = True
     return payload, key
 
 
@@ -98,7 +106,9 @@ def submit(body: RequestBody, request: Request,
     if (identity.role != "admin" and body.operation in known_ops
             and body.operation not in settings.user_allowed_operations):
         raise HTTPException(status_code=403, detail="operation_admin_only")
-    # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요
+    # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요.
+    # 다른 사용자로 실행하는 것 자체가 특권이다 -- 2026-09-30 부터 그 실행은 root 가
+    # 아니라 **그 사용자의 uid/gid** 로 돈다(run_as_root 를 따로 명시해야 root).
     owner = body.owner_username
     if owner is not None and owner != identity.actor:
         authorized = (identity.role == "admin"
@@ -106,6 +116,15 @@ def submit(body: RequestBody, request: Request,
                       and identity.actor in settings.privileged_requesters)
         if not authorized:
             raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    # root 실행 게이트: planner 와 같은 자격(세션 인증 포함)을 제출 시점에 즉시 확인한다
+    # -- 통과 못 할 요청을 Pending 으로 받아 뒀다가 계획 때 거부하지 않는다. planner 도
+    # 다시 확인한다(DB 가 신뢰 경계라 payload 변조·설정 변경을 막는 2차 방어).
+    if body.run_as_root and not (identity.role == "admin" and privilege_eligible(
+            requester_id=identity.actor,
+            allow_privileged=settings.allow_privileged_requesters,
+            privileged_requesters=settings.privileged_requesters,
+            session_authenticated=(identity.auth == "session"))):
+        raise HTTPException(status_code=403, detail="privileged_not_authorized")
 
     repos = request.app.state.repos
     priority = resolve_priority(repos, body.operation, body.priority)

@@ -6,7 +6,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 이 셋은 계획 단계 거부라 잡이 없다 -- 요청 상세의 「사유」가 생기기 전엔 화면
   // 어디에도 안 나왔다(2026-08-16). 이제 사용자가 직접 읽으므로 "무엇을 하면 되는가"
   // 까지 말한다: 코드 이름을 한국어로 옮기기만 한 문구는 운영자에게만 통한다.
-  ldap_identity_not_found: "LDAP에서 요청자 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다",
+  ldap_identity_not_found: "LDAP에서 실행 신원 계정을 찾을 수 없습니다 — 노드에 그 계정이 없어 실행할 수 없습니다(LDAP 에 없는 관리자 계정이면 '실행 신원'을 지정하거나 'root 권한으로 실행'을 선택하세요)",
   missing_policy: "해당 도구의 정책이 없습니다",
   policy_disabled: "해당 도구의 정책이 비활성 상태입니다",
   // stepper / controller
@@ -25,6 +25,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   source_not_readable: "원본 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   destination_not_directory: "목적지에 이미 파일이 있습니다 — sync 목적지는 디렉토리여야 합니다",
   destination_parent_not_writable: "목적지의 상위 디렉토리가 없거나 쓸 수 없습니다",
+  destination_not_writable: "목적지 디렉토리에 쓸 수 없습니다 — 실행 신원에게 목적지의 쓰기·진입 권한이 없습니다",
+  destination_not_owned: "목적지 디렉토리가 실행 신원의 소유가 아닙니다 — sync 는 목적지 최상위의 권한·시각을 소스에 맞추므로 남의 디렉토리에는 부분 복사 뒤 실패합니다. 본인 소유 디렉토리나 새 경로를 지정하세요",
   parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
   target_not_readable: "대상 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   // 복합 접두 (stepper.py 가 f"{prefix}:{ExecutionError.reason_code}" 형태로 발생시킨다)
@@ -143,6 +145,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   unknown_tool: "허용되지 않은 도구입니다 — 관리자에게 문의하세요",
   storage_missing_at_step: "잡 진행 중 스토리지 정의가 사라졌습니다 — 관리자에게 문의하세요",
   identity_missing_at_step: "잡의 실행 신원(uid/gid)이 없거나 올바르지 않습니다 — 관리자에게 문의하세요",
+  privilege_not_requested: "root 로 계획됐지만 요청에 root 실행 근거가 없어 실행 전에 중단했습니다 — 규칙 변경 전에 계획된 잡일 수 있습니다. 필요하면 'root 권한으로 실행'을 명시해 다시 신청하세요",
   identity_root_without_privilege: "디렉터리가 이 사용자에게 uid 0 을 줍니다 — root 실행은 특권 요청자만 가능합니다",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",

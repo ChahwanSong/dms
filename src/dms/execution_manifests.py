@@ -263,6 +263,23 @@ def _worker_affinity(spec, task_name, nodes):
                 "topologyKey": "kubernetes.io/hostname"}]}}
 
 
+# sync 목적지 검사 조각(_preflight_script docstring). $D = 목적지, $M = "user"|"root".
+_DEST_TYPE_CHECK = (
+    'test ! -e "$D" || test -d "$D" || '
+    '{ echo DMS_PREFLIGHT_REASON=destination_not_directory; exit 1; }; ')
+_DEST_CHECK = (
+    'if [ -e "$D" ]; then '
+    '{ test -w "$D" && test -x "$D"; } || '
+    '{ echo DMS_PREFLIGHT_REASON=destination_not_writable; exit 1; }; '
+    'if [ "$M" != root ] && [ "$(stat -c %u "$D")" != "$(id -u)" ]; then '
+    'echo DMS_PREFLIGHT_REASON=destination_not_owned; exit 1; fi; '
+    'else '
+    'dest_parent=$(dirname "$D"); '
+    'test -w "$dest_parent" || '
+    '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
+    'fi; ')
+
+
 def _preflight_script(spec, *, role=None):
     """(script, path_args) — 경로는 positional 파라미터로 넘겨 셸 인젝션을 원천 차단.
 
@@ -280,8 +297,20 @@ def _preflight_script(spec, *, role=None):
     파일)이 사유에서 사라진다 — 타입을 먼저 봐야 더 정확한 사유가 나온다.
     `test ! -e "$2" || test -d "$2" || { ...; exit 1; }` 는 set -e 아래서도 안전하다:
     AND-OR 목록의 좌변 실패는 errexit 대상이 아니고, 전부 실패했을 때만 마지막
-    블록이 명시적으로 exit 1 한다(기존 마커 관용구와 동일한 형태)."""
+    블록이 명시적으로 exit 1 한다(기존 마커 관용구와 동일한 형태).
+
+    목적지 권한 검사(2026-09-30 프로덕션 사고, _DEST_CHECK): 예전엔 목적지가 이미 있어도
+    **부모**의 쓰기만 봤다. 그래서 (a) root 755 부모 아래 **본인 소유** 목적지로의 sync 가
+    거부됐고(오탐), (b) 부모가 쓰기 가능하면 남의 700 목적지도 통과시켜 실행 단계에서야
+    실패했다. 이제 목적지가 있으면 **목적지 자체**를 본다: 쓰기·진입(-w -x) 불가면
+    destination_not_writable, 비특권 실행이면 소유자가 실행 uid 인지까지(아니면
+    destination_not_owned). 소유를 요구하는 이유(실측): dsync 는 소스 최상위의 권한·시각
+    (특권이면 소유까지)을 **기존 목적지 디렉터리에 적용**한다 -- 남 소유면 비특권은
+    chmod()/utime() EPERM 으로 데이터를 다 복사한 뒤 Failed(부분 복사)가 되고, root 는
+    남의 디렉터리를 소스 소유로 덮어쓴다. 목적지가 없을 때만 부모 쓰기(만들 자리)를 본다.
+    실행 모드("user"/"root")는 경로와 같이 positional 로 넘긴다(셸 인젝션 차단 관례)."""
     ap = _abs_paths(spec)
+    mode = "root" if (spec.identity or {}).get("privileged") else "user"
     if spec.operation == "sync":
         if role == "source":
             script = ('set -e; '
@@ -289,19 +318,13 @@ def _preflight_script(spec, *, role=None):
                       'echo DMS_PREFLIGHT_OK')
             return script, [ap["source"]]
         if role == "destination":
-            script = ('set -e; '
-                      'test ! -e "$1" || test -d "$1" || { echo DMS_PREFLIGHT_REASON=destination_not_directory; exit 1; }; '
-                      'dest_parent=$(dirname "$1"); '
-                      'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
-                      'echo DMS_PREFLIGHT_OK')
-            return script, [ap["destination"]]
-        script = ('set -e; '
+            script = ('set -e; D="$1"; M="$2"; ' + _DEST_TYPE_CHECK + _DEST_CHECK
+                      + 'echo DMS_PREFLIGHT_OK')
+            return script, [ap["destination"], mode]
+        script = ('set -e; D="$2"; M="$3"; '
                   'test -r "$1" || { echo DMS_PREFLIGHT_REASON=source_not_readable; exit 1; }; '
-                  'test ! -e "$2" || test -d "$2" || { echo DMS_PREFLIGHT_REASON=destination_not_directory; exit 1; }; '
-                  'dest_parent=$(dirname "$2"); '
-                  'test -w "$dest_parent" || { echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
-                  'echo DMS_PREFLIGHT_OK')
-        return script, [ap["source"], ap["destination"]]
+                  + _DEST_TYPE_CHECK + _DEST_CHECK + 'echo DMS_PREFLIGHT_OK')
+        return script, [ap["source"], ap["destination"], mode]
     if spec.operation == "rm":
         script = ('set -e; '
                   'parent=$(dirname "$1"); '
@@ -324,7 +347,8 @@ PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
 # 같이 갱신해야 한다(양방향 계약 테스트).
 PREFLIGHT_REASONS = frozenset({
     "source_not_readable", "destination_not_directory",
-    "destination_parent_not_writable", "parent_not_writable",
+    "destination_parent_not_writable", "destination_not_writable",
+    "destination_not_owned", "parent_not_writable",
     "target_not_readable"})
 
 
