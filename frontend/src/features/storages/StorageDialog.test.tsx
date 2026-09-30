@@ -25,7 +25,9 @@ test("create posts the four fields", async () => {
   await userEvent.selectOptions(screen.getByLabelText("백엔드"), "cephfs");
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await screen.findByText(/./);
-  expect(body).toEqual({ storage_name: "s1", mount_path: "/s1", managed_root: "/s1/dms", backend_type: "cephfs" });
+  // 사용 범위 기본 = 전체 사용(2026-09-30) -- 두 플래그가 명시로 실린다.
+  expect(body).toEqual({ storage_name: "s1", mount_path: "/s1", managed_root: "/s1/dms", backend_type: "cephfs",
+                         enabled: true, user_enabled: true });
 });
 
 test("edit seeds from storage, disables name, and PUTs the updated body", async () => {
@@ -58,6 +60,7 @@ test("edit seeds from storage, disables name, and PUTs the updated body", async 
   expect(urlName).toBe(S.storage_name);
   expect(body).toEqual({
     mount_path: "/cephfs-new", managed_root: S.managed_root, backend_type: S.backend_type, enabled: true,
+    user_enabled: true,
   });
 });
 
@@ -77,7 +80,7 @@ test("백엔드는 표시명으로 고르고 서버 식별자로 보낸다 -- 'I
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await screen.findByText(/./);
   expect(body).toEqual({ storage_name: "gpu1", mount_path: "/home/gpu1", managed_root: "/home/gpu1",
-                         backend_type: "gpfs" });
+                         backend_type: "gpfs", enabled: true, user_enabled: true });
 });
 
 
@@ -98,5 +101,43 @@ test("추가 백엔드(DDN Lustre·Pure Storage·NetApp)도 표시명으로 고�
   await userEvent.click(screen.getByRole("button", { name: "저장" }));
   await screen.findByText(/./);
   expect(body).toEqual({ storage_name: "lfs1", mount_path: "/lustre", managed_root: "/lustre/dms",
-                         backend_type: "lustre" });
+                         backend_type: "lustre", enabled: true, user_enabled: true });
+});
+
+
+// 사용 범위(2026-09-30 사용자 요청: 완전 비활성 / 사용자에게만 비활성) -------------------
+
+test("등록 때 관리자 전용을 고르면 user_enabled: false 로 보낸다", async () => {
+  let body: any = null;
+  server.use(http.post("/api/admin/storages", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json(body, { status: 201 }); }));
+  wrap(<StorageDialog mode="create" trigger={<Button>등록</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "등록" }));
+  expect(screen.getByLabelText("전체 사용")).toBeChecked();          // 기본
+  await userEvent.type(screen.getByLabelText("스토리지 이름"), "s2");
+  await userEvent.type(screen.getByLabelText("마운트 경로"), "/s2");
+  await userEvent.type(screen.getByLabelText("관리 루트"), "/s2");
+  await userEvent.selectOptions(screen.getByLabelText("백엔드"), "cephfs");
+  await userEvent.click(screen.getByLabelText("관리자 전용"));
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await screen.findByText(/./);
+  expect(body).toMatchObject({ storage_name: "s2", enabled: true, user_enabled: false });
+});
+
+test("수정: 관리자 전용 행은 그 라디오로 시작하고, 완전 비활성은 user_enabled 를 생략한다", async () => {
+  // 생략 = 서버가 현재 값 유지 -- 다시 켤 때 관리자 전용 설정이 그대로 돌아온다.
+  const S: Storage = {
+    storage_name: "s3", mount_path: "/s3", managed_root: "/s3", backend_type: "cephfs",
+    enabled: 1, user_enabled: 0, status: "Ready", status_detail: null,
+  };
+  let body: any = null;
+  server.use(http.put("/api/admin/storages/:name", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json({ ...S, ...body }, { status: 200 }); }));
+  wrap(<StorageDialog mode="edit" storage={S} trigger={<Button>수정</Button>} />);
+  await userEvent.click(screen.getByRole("button", { name: "수정" }));
+  expect(screen.getByLabelText("관리자 전용")).toBeChecked();
+  await userEvent.click(screen.getByLabelText("완전 비활성"));
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  await screen.findByText(/./);
+  expect(body).toEqual({ mount_path: "/s3", managed_root: "/s3", backend_type: "cephfs", enabled: false });
 });

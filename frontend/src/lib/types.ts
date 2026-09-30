@@ -86,7 +86,9 @@ export interface JobLogs {
 }
 export interface Storage {
   storage_name: string; mount_path: string; managed_root: string; backend_type: string;
-  enabled: number; status: string; status_detail: string | null;
+  // 사용 범위(2026-09-30): enabled=0 완전 비활성, user_enabled=0 관리자 전용(사용자에게만
+  // 비활성). user_enabled 부재·null(옛 서버·컬럼 이전 행)은 사용자 공개로 읽는다.
+  enabled: number; user_enabled?: number | null; status: string; status_detail: string | null;
 }
 export interface AuditEntry {
   id: number; mutation_class: string; operation: string; target_key: string;
@@ -215,6 +217,8 @@ export interface DenyEntry {
 export interface UserStorage {
   storage_name: string; backend_type: string; status: string;
   managed_root?: string;
+  // 관리자 전용(2026-09-30) -- 비관리자 응답엔 관리자 전용이 아예 없어 항상 false.
+  admin_only?: boolean;
 }
 
 export interface ControlState {

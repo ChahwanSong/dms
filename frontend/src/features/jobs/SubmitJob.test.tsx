@@ -144,6 +144,42 @@ test("스토리지 드롭다운이 API 목록으로 채워진다", async () => {
   expect(within(sourceSelect).queryByText(/\(Ready\)|\(Degraded\)/)).not.toBeInTheDocument();
 });
 
+test("sync 대상 스텝은 목적지 상위 디렉토리 쓰기 권한 조건을 실제 경로로 보이고, 확인 스텝이 재노출한다", async () => {
+  // 2026-09-30 사용자 요청: "목적지의 상위 디렉토리에 쓰기 권한이 있어야 하는 조건을 분명히".
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json(meUser)),
+    http.get("/api/user/storages", () => HttpResponse.json([
+      { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed" },
+      { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready",
+        managed_root: "/cephfs2/managed" }])));
+  renderPage();
+  await fillSyncTarget();                     // 목적지 cephfs-secondary : c/d
+  const card = screen.getByLabelText("목적지 권한 조건");
+  expect(card).toHaveAttribute("role", "note");
+  expect(card).toHaveTextContent("상위 디렉토리가 이미 있고, 그 디렉토리에 쓰기 권한");
+  expect(card).toHaveTextContent("목적지가 이미 있어도 마찬가지");
+  expect(within(card).getByText("/cephfs2/managed/c")).toBeInTheDocument();   // c/d 의 상위
+  expect(card).not.toHaveTextContent("root 권한으로 실행하면");                // 사용자에겐 root 안내 없음
+  await goToOptions();
+  await goToConfirm();
+  expect(screen.getByText("상위 디렉토리 /cephfs2/managed/c 가 있어야 하고 실행 신원의 쓰기 권한 필요"))
+    .toBeInTheDocument();
+});
+
+test("관리자 전용 스토리지는 관리자 피커에 (관리자 전용) 으로 구분된다", async () => {
+  // 2026-09-30 사용 범위: 비관리자 응답엔 아예 없고(서버), 관리자에겐 admin_only 표식이 온다.
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    ...storageRows, { storage_name: "adm-only", backend_type: "cephfs", status: "Ready",
+                      admin_only: true }])));
+  renderPage();
+  await screen.findByLabelText("연산");
+  await clickNext();
+  const sourceSelect = await screen.findByLabelText("소스 스토리지");
+  expect(await within(sourceSelect).findByRole("option", { name: "adm-only (관리자 전용)" }))
+    .toBeInTheDocument();
+  expect(within(sourceSelect).getByRole("option", { name: "cephfs" })).toBeInTheDocument();
+});
+
 test("연산을 rm으로 바꾸면 대상 스텝의 필드 구성이 바뀐다", async () => {
   renderPage();
   await screen.findByLabelText("연산");

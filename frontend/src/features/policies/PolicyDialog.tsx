@@ -4,7 +4,7 @@ import { Button } from "../../components/ui/Button";
 import { ApiError } from "../../lib/api";
 import { useUpsertPolicy } from "./usePolicies";
 import type { Policy } from "../../lib/types";
-const field = "mt-1 w-full rounded-lg border border-black/10 px-3 py-2";
+const field = "mt-1 w-full rounded-lg border border-line px-3 py-2";
 
 /** 필수 정수(≥1) 검증. 서버 계약(pydantic ge=1)의 미러 — 상한은 지어내지
     않는다(정책이 곧 캡이라 서버에 상한이 없다). 빈 값은 intFieldError(선택
@@ -20,6 +20,27 @@ export function requiredIntError(label: string, raw: string): string | null {
 /** 선택 정수(비우면 없음). 미리보기 타임아웃 전용 — null 은 "타임아웃 없음". */
 export function optionalIntError(label: string, raw: string): string | null {
   return raw.trim() === "" ? null : requiredIntError(label, raw);
+}
+
+/** 입력 중인 초를 사람 단위로(입력 옆 보조 표기) -- 잘못된 값이면 아무것도 안 보인다. */
+export function secondsHint(raw: string): string | null {
+  const n = Number(raw.trim());
+  if (raw.trim() === "" || !Number.isInteger(n) || n < 1) return null;
+  const d = Math.floor(n / 86400), h = Math.floor((n % 86400) / 3600), m = Math.floor((n % 3600) / 60);
+  const parts = [d ? `${d}일` : "", h ? `${h}시간` : "", m ? `${m}분` : "", n % 60 ? `${n % 60}초` : ""];
+  return `= ${parts.filter(Boolean).join(" ")}`;
+}
+
+function Group({ title, caption, children }: { title: string; caption: string; children: React.ReactNode }) {
+  // 정책 수정 묶음(2026-09-30 UI 개선): 9개 필드를 한 줄로 늘어놓던 폼을 병렬 자원 / 스케줄링 /
+  // 타임아웃 / 상태로 묶고 묶음마다 무엇에 쓰이는 값인지 한 줄 설명을 단다.
+  return (
+    <fieldset className="rounded-lg border border-line px-3 pb-3 pt-1">
+      <legend className="px-1 text-sm font-semibold">{title}</legend>
+      <p className="mb-2 text-xs text-muted">{caption}</p>
+      {children}
+    </fieldset>
+  );
 }
 
 export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: React.ReactNode }) {
@@ -56,6 +77,7 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
     executionTimeout: requiredIntError("실행 타임아웃", executionTimeout),
   };
   const invalid = Object.values(errors).some((e) => e !== null);
+  const totalProcs = errors.maxNodes || errors.procsPerNode ? null : Number(maxNodes) * Number(procsPerNode);
   const submit = () => {
     if (invalid) return;
     m.mutate({
@@ -68,43 +90,68 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
       },
     }, { onSuccess: () => setOpen(false) });
   };
+  const hint = (raw: string) => {
+    const h = secondsHint(raw);
+    return h && <span className="block text-xs text-muted mt-1">{h}</span>;
+  };
   return (
-    <Dialog open={open} onOpenChange={setOpen} title={`${policy.tool} 정책 수정`} trigger={trigger}>
+    <Dialog open={open} onOpenChange={setOpen} title={`${policy.tool} 정책 수정`} trigger={trigger} size="lg">
       <form className="space-y-3 text-sm" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-        <label className="block">도구
-          <input className={field} value={policy.tool} disabled /></label>
-        <label className="block">최대 노드
-          <input aria-label="최대 노드" type="number" min={1} className={field} value={maxNodes}
-                 onChange={(e) => setMaxNodes(e.target.value)} /></label>
-        {errors.maxNodes && <p className="text-bad">{errors.maxNodes}</p>}
-        <label className="block">노드당 프로세스
-          <input aria-label="노드당 프로세스" type="number" min={1} className={field} value={procsPerNode}
-                 onChange={(e) => setProcsPerNode(e.target.value)} /></label>
-        {errors.procsPerNode && <p className="text-bad">{errors.procsPerNode}</p>}
-        <label className="block">큐
-          <input aria-label="큐" className={field} value={queue} onChange={(e) => setQueue(e.target.value)} /></label>
-        <label className="block">기본 우선순위
-          <select aria-label="기본 우선순위" className={field} value={defaultPriority}
-                  onChange={(e) => setDefaultPriority(e.target.value)}>
-            <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
-          </select></label>
-        <label className="block">최대 우선순위
-          <select aria-label="최대 우선순위" className={field} value={maxPriority}
-                  onChange={(e) => setMaxPriority(e.target.value)}>
-            <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
-          </select></label>
-        <label className="block">미리보기 타임아웃(초) — 비우면 타임아웃 없음
-          <input aria-label="미리보기 타임아웃(초)" type="number" min={1} className={field} value={previewTimeout}
-                 onChange={(e) => setPreviewTimeout(e.target.value)} /></label>
-        {errors.previewTimeout && <p className="text-bad">{errors.previewTimeout}</p>}
-        <label className="block">실행 타임아웃(초)
-          <input aria-label="실행 타임아웃(초)" type="number" min={1} className={field} value={executionTimeout}
-                 onChange={(e) => setExecutionTimeout(e.target.value)} /></label>
-        {errors.executionTimeout && <p className="text-bad">{errors.executionTimeout}</p>}
-        <label className="flex items-center gap-2"><input type="checkbox" checked={enabled}
-          onChange={(e) => setEnabled(e.target.checked)} /> 활성</label>
+        <Group title="병렬 자원" caption={policy.tool === "nsync"
+          ? "소스·목적지 각각이 쓸 수 있는 최대 노드 수(면당)와 노드당 MPI 프로세스 수입니다 — 양쪽 합계는 2배입니다."
+          : "작업 하나가 쓸 수 있는 최대 노드 수와 노드당 MPI 프로세스 수입니다."}>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">최대 노드
+              <input aria-label="최대 노드" type="number" min={1} className={field} value={maxNodes}
+                     onChange={(e) => setMaxNodes(e.target.value)} />
+              {errors.maxNodes && <span className="block text-bad mt-1">{errors.maxNodes}</span>}</label>
+            <label className="block">노드당 프로세스
+              <input aria-label="노드당 프로세스" type="number" min={1} className={field} value={procsPerNode}
+                     onChange={(e) => setProcsPerNode(e.target.value)} />
+              {errors.procsPerNode && <span className="block text-bad mt-1">{errors.procsPerNode}</span>}</label>
+          </div>
+          {totalProcs !== null && (
+            <p className="mt-2 text-xs text-muted">{policy.tool === "nsync"
+              ? `면당 최대 ${totalProcs}개, 양쪽 합계 최대 ${2 * totalProcs}개 프로세스로 실행됩니다`
+              : `최대 ${totalProcs}개 프로세스로 실행됩니다`}</p>
+          )}
+        </Group>
+        <Group title="스케줄링" caption="Volcano 큐와 우선순위입니다 — 요청이 최대보다 높은 우선순위를 원하면 최대로 낮춰집니다.">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <label className="block">큐
+              <input aria-label="큐" className={field} value={queue} onChange={(e) => setQueue(e.target.value)} /></label>
+            <label className="block">기본 우선순위
+              <select aria-label="기본 우선순위" className={field} value={defaultPriority}
+                      onChange={(e) => setDefaultPriority(e.target.value)}>
+                <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
+              </select></label>
+            <label className="block">최대 우선순위
+              <select aria-label="최대 우선순위" className={field} value={maxPriority}
+                      onChange={(e) => setMaxPriority(e.target.value)}>
+                <option value="low">low</option><option value="mid">mid</option><option value="high">high</option>
+              </select></label>
+          </div>
+        </Group>
+        <Group title="타임아웃" caption="단계별 제한 시간(초)입니다 — 넘기면 작업이 TimedOut 으로 끝납니다.">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">미리보기 타임아웃(초) — 비우면 타임아웃 없음
+              <input aria-label="미리보기 타임아웃(초)" type="number" min={1} className={field} value={previewTimeout}
+                     onChange={(e) => setPreviewTimeout(e.target.value)} />
+              {hint(previewTimeout)}
+              {errors.previewTimeout && <span className="block text-bad mt-1">{errors.previewTimeout}</span>}</label>
+            <label className="block">실행 타임아웃(초)
+              <input aria-label="실행 타임아웃(초)" type="number" min={1} className={field} value={executionTimeout}
+                     onChange={(e) => setExecutionTimeout(e.target.value)} />
+              {hint(executionTimeout)}
+              {errors.executionTimeout && <span className="block text-bad mt-1">{errors.executionTimeout}</span>}</label>
+          </div>
+        </Group>
+        <Group title="상태" caption="끄면 이 도구의 새 작업이 계획 단계에서 거부됩니다(진행 중 작업은 그대로).">
+          <label className="flex items-center gap-2"><input type="checkbox" checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)} /> 활성</label>
+        </Group>
         {m.isError && <p className="text-bad">{(m.error as ApiError).message}</p>}
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" type="button" onClick={() => setOpen(false)}>취소</Button>
           <Button type="submit" disabled={m.isPending || invalid}>저장</Button>
         </div>

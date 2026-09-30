@@ -3,8 +3,15 @@ import { apiGet, apiSend } from "../../lib/api";
 import type { Storage } from "../../lib/types";
 export const useStorages = () =>
   useQuery({ queryKey: ["storages"], queryFn: () => apiGet<Storage[]>("/api/admin/storages") });
-export interface StorageCreateBody { storage_name: string; mount_path: string; managed_root: string; backend_type: string; }
-export interface StorageUpdateBody { mount_path: string; managed_root: string; backend_type: string; enabled: boolean; }
+// 사용 범위 플래그(storageScope.flagsFor). user_enabled 생략 = 서버가 현재 값 유지.
+export interface StorageCreateBody {
+  storage_name: string; mount_path: string; managed_root: string; backend_type: string;
+  enabled?: boolean; user_enabled?: boolean;
+}
+export interface StorageUpdateBody {
+  mount_path: string; managed_root: string; backend_type: string; enabled: boolean;
+  user_enabled?: boolean;
+}
 export const useCreateStorage = () => {
   const qc = useQueryClient();
   return useMutation({ mutationFn: (b: StorageCreateBody) => apiSend("POST", "/api/admin/storages", b),

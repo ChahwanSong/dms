@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from ..artifact_base import resolve_artifact_base
 from ..domain import DomainValidationError, validate_relative_path
 from ..repositories.scan_paths import covers
+from ..repositories.storages import storage_open_to_users
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, require_user
 
@@ -102,9 +103,12 @@ class ScanPathBody(BaseModel):
     path: str
 
 
-def _active_storage_names(request: Request) -> set[str]:
+def _active_storage_names(request: Request, identity: Identity) -> set[str]:
+    # 관리자 전용 스토리지(2026-09-30 사용 범위)는 비관리자가 스캔 경로로 등록할 수 없다 --
+    # 사용자 피커(/api/user/storages)와 같은 규칙(storage_open_to_users).
     return {r["storage_name"] for r in request.app.state.repos.storages.list()
-            if r["enabled"] == 1}
+            if r["enabled"] == 1
+            and (identity.role == "admin" or storage_open_to_users(r))}
 
 
 @router.get("/api/user/scan-paths")
@@ -119,7 +123,7 @@ def add_scan_path(body: ScanPathBody, request: Request,
         path = validate_relative_path(body.path)
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
-    if body.storage_name not in _active_storage_names(request):
+    if body.storage_name not in _active_storage_names(request, identity):
         raise HTTPException(status_code=422, detail="storage_missing")
     try:
         pid = request.app.state.repos.scan_paths.add(

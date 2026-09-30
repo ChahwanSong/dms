@@ -172,3 +172,24 @@ test("3홉 요약 배지: 실패 없이 대기만 있으면 「확인 대기 N�
   // BASE: api ok·컨트롤러 ok·w1 ok·w2 pending -- 대기 1, 실패 0
   expect(await screen.findByText("확인 대기 1건")).toBeInTheDocument();
 });
+
+test("경로 변경 주의점은 경고 툴팁 -- 트리거가 aria-describedby 로 내용을 가리키고 클릭으로 열린다", async () => {
+  // 2026-09-30 사용자 요청: "아티팩트의 경로변경에 대한 주의점을 툴팁으로 경고성으로".
+  server.use(http.get("/api/admin/artifact-base", () => HttpResponse.json(BASE)));
+  wrap();
+  const trigger = await screen.findByRole("button", { name: "변경 전 주의" });
+  const tip = document.getElementById(trigger.getAttribute("aria-describedby")!)!;
+  expect(tip).toHaveAttribute("role", "tooltip");
+  expect(tip.className).toMatch(/\bhidden\b/);                 // 평소엔 숨김(hover·focus 로 열림)
+  // 실제 동작에 근거한 주의점 -- 기존 기록 비이동, other x 필수, 공유 마운트, 허용 접두.
+  expect(tip).toHaveTextContent("옮겨지지 않습니다");
+  expect(tip).toHaveTextContent("다른 사용자 실행(x) 권한 필수(711 또는 755)");
+  expect(tip).toHaveTextContent("모든 노드에 같은 경로로 마운트된 공유 스토리지");
+  expect(tip).toHaveTextContent("DMS_ARTIFACT_BASE_ALLOWED_PREFIXES");
+  await userEvent.click(trigger);                                // 터치·클릭으로 열림
+  expect(trigger).toHaveAttribute("aria-expanded", "true");
+  expect(tip.className).not.toMatch(/\bhidden\b/);
+  await userEvent.keyboard("{Escape}");                          // WCAG 1.4.13: Esc 로 닫힌다
+  expect(trigger).toHaveAttribute("aria-expanded", "false");
+  expect(tip.className).toMatch(/\bhidden\b/);
+});

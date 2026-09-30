@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { NodesList, toolStatusText } from "./NodesList";
+import { NodesList, toolStatusText, ageText, clockSkewSeconds } from "./NodesList";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -183,4 +183,59 @@ test("toolStatusText: 존재 확인만 -- Ready→설치됨, Missing→없음", 
   expect(toolStatusText("Missing")).toBe("없음");
   // 미지 값은 원문 그대로(지어내지 않음)
   expect(toolStatusText("weird")).toBe("weird");
+});
+
+
+// ---- 2026-09-30 사용자 요청: 상세는 창(모달), 마지막 리포트는 맨 끝 열, 오래되면 빨강 --------
+
+test("마지막 리포트는 맨 끝 열이고, 상세는 표 아래가 아니라 모달 창으로 뜬다", async () => {
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(NODES)));
+  wrap();
+  await screen.findByText("node-a");
+  const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
+  expect(headers[headers.length - 1]).toBe("마지막 리포트");
+  expect(headers).toEqual(["노드", "상태", "마운트", "도구", "CPU · 부하", "메모리", "상세", "마지막 리포트"]);
+  const rowA = screen.getByText("node-a").closest("tr")!;
+  const listTable = rowA.closest("table")!;
+  await userEvent.click(within(rowA).getByRole("button", { name: "상세" }));
+  const dialog = await screen.findByRole("dialog", { name: "node-a 상세" });
+  expect(within(dialog).getByText("/mnt/vol1")).toBeInTheDocument();
+  // 목록 표 안에는 상세 내용이 끼어들지 않는다 -- 모달(포털)에만 있다.
+  expect(within(listTable).queryByText("/mnt/vol1")).toBeNull();
+});
+
+test("리포트가 지연된 노드는 마지막 리포트가 빨간 경고로 보이고 상단에 지연 대수가 뜬다", async () => {
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(NODES)));
+  wrap();
+  const rowB = (await screen.findByText("node-b")).closest("tr")!;
+  const last = within(rowB).getByText(/리포트 지연/);
+  expect(last.closest("div")!.parentElement!.className).toContain("text-bad");
+  expect(screen.getByText("리포트 지연 1대 / 전체 2대")).toBeInTheDocument();
+});
+
+test("노드 시각과 서버 수신 시각이 2분 넘게 다르면 fresh 라도 빨간 경고 -- 음수는 원인을 단정하지 않는다", async () => {
+  // probed_at 은 프로브 시작 전에 찍혀 음수 차이는 노드 시계가 늦거나 프로브가 오래 걸린 것(리뷰) --
+  // 양수(노드 시계가 빠름)는 프로브 지연으로 생기지 않아 "노드 시계" 로 단정한다.
+  const behind = { ...NODES[0], node_name: "node-behind", reported_at: "2026-08-06T00:10:00Z",
+                   report: { ...NODES[0].report, probed_at: "2026-08-06T00:00:00Z" } };
+  const ahead = { ...NODES[0], node_name: "node-ahead", reported_at: "2026-08-06T00:00:00Z",
+                  report: { ...NODES[0].report, probed_at: "2026-08-06T00:05:00Z" } };
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json([behind, ahead])));
+  wrap();
+  const b = (await screen.findByText("node-behind")).closest("tr")!;
+  expect(within(b).getByText(/시각 차이 -10분\(시계 또는 프로브 지연\)/)).toBeInTheDocument();
+  const a = screen.getByText("node-ahead").closest("tr")!;
+  expect(within(a).getByText(/노드 시계 \+5분/)).toBeInTheDocument();
+});
+
+test("ageText·clockSkewSeconds: 상대시각과 시계 차이 계산", () => {
+  const now = Date.parse("2026-08-06T00:10:00Z");
+  expect(ageText("2026-08-06T00:09:55Z", now)).toBe("방금");
+  expect(ageText("2026-08-06T00:09:00Z", now)).toBe("1분 전");
+  expect(ageText("2026-08-05T23:10:00Z", now)).toBe("1시간 전");
+  expect(ageText("2026-08-06T00:20:00Z", now)).toBe("방금");      // 브라우저 시계가 늦음 -- 음수 나이 없음
+  expect(ageText("garbage", now)).toBeNull();
+  expect(clockSkewSeconds({ reported_at: "2026-08-06T00:00:30Z",
+                            report: { probed_at: "2026-08-06T00:00:00Z" } })).toBe(-30);
+  expect(clockSkewSeconds({ reported_at: "2026-08-06T00:00:30Z", report: {} })).toBeNull();
 });

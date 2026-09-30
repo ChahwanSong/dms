@@ -30,9 +30,11 @@ export function StoragePicker({ label, value, onChange, storages, loading }: {
         {/* 상태 접미(Ready/Degraded 등)는 표시하지 않는다(사용자 결정 2026-08-22):
             작업 제출 화면에선 스토리지 이름만 필요하다 -- 상태는 스토리지 관리
             화면의 몫이다. 옵션은 이름만 노출한다. */}
+        {/* 관리자 전용(2026-09-30 사용 범위)은 관리자에게만 오는 행이다 -- 이름 옆에 표시해
+            사용자에게 보이지 않는 스토리지임을 안다(비관리자 응답엔 아예 없다). */}
         {storages.map((s) => (
           <option key={s.storage_name} value={s.storage_name}>
-            {s.storage_name}
+            {s.admin_only ? `${s.storage_name} (관리자 전용)` : s.storage_name}
           </option>
         ))}
       </select>

@@ -12,6 +12,8 @@ import { ErrorBoundary } from "./ErrorBoundary";
 // L4(e2e layout.ts): 링크 높이 < 2×line-height. text-sm(20px)이면 한계 40px 라
 // DS 의 44px 항목이 위반이다 -- leading-6(24px)으로 한계를 48px 로 올리고
 // py-2.5(10px×2)+24px=44px 로 DS 높이와 L4 를 동시에 만족시킨다.
+export const NAV_COLLAPSED_KEY = "dms.nav.collapsed.v2";
+
 const linkCls = (active: boolean) =>
   `flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm leading-6 ${
     active ? "bg-infobg text-accent font-medium" : "text-ink hover:bg-panel"}`;
@@ -57,12 +59,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   // 사이드바 활성 항목(최장 일치 하나) -- NavItemLink 주석 참고.
   const activePath = activeNavPath(pathname);
-  // 접힘 규칙(사용자 결정 2026-08-19 재조정): 그룹 토글은 **서로 독립**이고,
-  // 열어둔 그룹은 화면을 이동해도 유지된다. 남는 규칙 둘: ① 첫 진입(새 탭)엔
-  // 현재 경로가 속한 그룹만 열려 있다(로그인 직후 운영자 홈 = 대시보드 → 운영만).
-  // ② 경로 이동은 그 화면의 그룹을 **열기만** 한다 -- 이 자동 펼침이 없으면
-  // 접힘이 "사이드바 링크를 못 찾는" 사고가 된다(e2e 04 가 잡 화면에서 링크를
-  // 클릭한다).
+  // 접힘 규칙(사용자 결정 2026-08-19 재조정 → 2026-09-30 "왼쪽 메뉴 전체를 기본 다
+  // 펼쳐져 있도록"): 그룹 토글은 **서로 독립**이고, 사용자가 접거나 연 상태는 화면을
+  // 이동해도 유지된다. 규칙 둘: ① 첫 진입(새 탭)엔 **모든 그룹이 펼쳐져** 있다.
+  // ② 경로 이동은 그 화면의 그룹을 **열기만** 한다 -- 사용자가 접어 둔 그룹의 화면으로
+  // 가면 자기 위치가 보이게 연다(e2e 04 가 잡 화면에서 사이드바 링크를 클릭한다).
   //
   // sessionStorage 인 이유: AppRouter 가 <ErrorBoundary key={pathname}> 로 경로마다
   // 셸을 **통째로 리마운트**하므로(에러 상태 리셋용 -- router.tsx 주석) useState 만
@@ -74,22 +75,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const keysOf = (label: string | null) =>
     NAVIGATION.flatMap((s) => (s.groups ?? [])
       .filter((g) => g.label === label).map((g) => `${s.label}:${g.label}`));
+  // 키 v2(2026-09-30): 옛 규칙(현재 그룹만 열림)이 저장한 접힘 맵을 버린다 -- 배포 뒤에도
+  // 이미 열려 있던 탭이 옛 접힘을 끌고 오면 "기본 전부 펼침" 이 그 탭에선 안 보인다.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
-      const saved = JSON.parse(sessionStorage.getItem("dms.nav.collapsed") ?? "");
+      const saved = JSON.parse(sessionStorage.getItem(NAV_COLLAPSED_KEY) ?? "");
       if (saved && typeof saved === "object") return saved as Record<string, boolean>;
     } catch { /* 저장분 없음/파싱 불가/스토리지 차단 -- 초기 규칙으로 */ }
-    const activeKeys = new Set(keysOf(groupLabelFor(pathname)));
-    const init: Record<string, boolean> = {};
-    for (const section of NAVIGATION)
-      for (const group of section.groups ?? []) {
-        const key = `${section.label}:${group.label}`;
-        if (!activeKeys.has(key)) init[key] = true;
-      }
-    return init;
+    return {};   // 규칙 ①: 모두 펼침(접힘 맵이 비어 있으면 어떤 그룹도 접히지 않는다)
   });
   useEffect(() => {
-    try { sessionStorage.setItem("dms.nav.collapsed", JSON.stringify(collapsed)); }
+    try { sessionStorage.setItem(NAV_COLLAPSED_KEY, JSON.stringify(collapsed)); }
     catch { /* 스토리지 차단 환경이면 유지 없이 초기 규칙만 -- 기능은 산다 */ }
   }, [collapsed]);
   useEffect(() => {

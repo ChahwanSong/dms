@@ -50,7 +50,7 @@ function SuccessRateBar({ byState }: { byState: StateCount[] }) {
   const okPct = r2((p.ok / p.terminal) * 100);
   const failed = p.terminal - p.ok;
   return (
-    <div className="max-w-md">
+    <div>
       <p className="flex items-baseline gap-2">
         <span className={`text-2xl font-semibold tabular-nums ${rateTone(pct)}`}>{pct}%</span>
         {/* "비성공"에는 Failed 외에 TimedOut·Cancelled·Rejected·PreviewExpired 가
@@ -98,16 +98,16 @@ export function humanSeconds(s: number | null | undefined): string {
 }
 
 // 숫자 요약 한 행. summary 가 null(표본 없음)이면 세 칸 전부 "—" -- 0 요약으로
-// 뭉개면 "즉시 끝났다"는 거짓말이 된다(null ≠ 0 규약).
+// 뭉개면 "즉시 끝났다"는 거짓말이 된다(null ≠ 0 규약). 행 구분선·여백은 boxed 표가 준다.
 function SummaryRow({ name, summary }: {
   name: string; summary: SecondsSummary | null | undefined;
 }) {
   return (
-    <tr className="border-t border-black/5">
-      <td className="py-1">{name}</td>
-      <td>{humanSeconds(summary?.mean_seconds ?? null)}</td>
-      <td>{humanSeconds(summary?.p50_seconds ?? null)}</td>
-      <td>{humanSeconds(summary?.p95_seconds ?? null)}</td>
+    <tr>
+      <td className="font-medium">{name}</td>
+      <td className="tabular-nums">{humanSeconds(summary?.mean_seconds ?? null)}</td>
+      <td className="tabular-nums">{humanSeconds(summary?.p50_seconds ?? null)}</td>
+      <td className="tabular-nums">{humanSeconds(summary?.p95_seconds ?? null)}</td>
     </tr>
   );
 }
@@ -117,31 +117,110 @@ function bucketLabel(bucket: string, kind: "hour" | "day"): string {
   return kind === "hour" ? `${bucket.slice(11, 13)}시` : bucket.slice(5);
 }
 
+// 대시보드 잡 통계 레이아웃(2026-09-30 사용자 보고: "내용별 구분이 안 돼 헷갈리고
+// 테이블 boundary 도 없어 보인다"): ① 요약 타일(성공률·상태별·처리 항목·계획 거부)
+// ② 내용별 구획(처리량·소요 시간 / 대기 시간 / 분해 / 사유) -- 구획마다 제목과 한 줄 설명
+// ③ 차트·표 하나하나를 테두리 박스(Box)로 감싸고 표는 boxed(머리줄 배경·행 구분선).
+// Box 는 제목(h3)을 첫 자식으로 가진 div 라 "제목의 가장 가까운 div = 그 블록" 이 성립한다.
+function Box({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-card border border-line bg-surface p-4">
+      <h3 className="font-medium mb-3 text-sm">{title}</h3>
+      {children}
+    </div>
+  );
+}
+
+function Group({ title, caption, children }: {
+  title: string; caption: string; children: React.ReactNode;
+}) {
+  return (
+    <section className="mt-6" aria-label={title}>
+      <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-line pb-2">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <span className="h-4 w-1 rounded bg-accent" aria-hidden />{title}
+        </h3>
+        <p className="text-xs text-muted">{caption}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function StatTile({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-card border border-line bg-panel/60 px-4 py-3">
+      <div className="text-xs text-muted">{label}</div>
+      <div className="mt-1">{children}</div>
+    </div>
+  );
+}
+
+// 상태별 잡 수(선택한 기간): 많은 순 상위 6개. 성공 초록, 비성공 종단 빨강, 진행·대기 파랑 --
+// "무엇이 쌓였나" 의 요약이다(전 상태 목록은 전체 작업 화면의 몫).
+function StateCounts({ byState }: { byState: StateCount[] }) {
+  if (byState.length === 0) return <p className="text-sm text-muted">잡 없음</p>;
+  const rows = [...byState].sort((a, b) => b.count - a.count).slice(0, 6);
+  const tone = (s: string) =>
+    (s === "Succeeded" ? "text-ok" : TERMINAL.has(s) ? "text-bad" : "text-busy");
+  return (
+    <ul className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+      {rows.map((r) => (
+        <li key={r.state} className="flex justify-between gap-2">
+          <span className={tone(r.state)}>{r.state}</span>
+          <span className="tabular-nums font-semibold">{r.count}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Breakdown<R extends BreakdownRow>({ title, rows, nameOf }: {
   title: string;
   rows: R[];
   nameOf: (r: R) => string | null;
 }) {
-  if (rows.length === 0) return null;
   return (
-    <div>
-      <h3 className="font-medium mb-2 text-sm">{title}</h3>
-      <Table>
-        <thead>
-          <tr className="text-muted">
-            <th className="py-1">이름</th><th>총</th><th>성공</th><th>실패</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} className="border-t border-black/5">
-              <td className="py-1">{nameOf(r) ?? "—"}</td>
-              <td>{r.count}</td><td>{r.succeeded}</td><td>{r.failed}</td>
+    <Box title={title}>
+      {rows.length === 0 ? <p className="text-sm text-muted">해당 기간 잡 없음</p> : (
+        <Table boxed>
+          <thead>
+            <tr className="text-muted">
+              <th>이름</th><th className="text-right">총</th>
+              <th className="text-right">성공</th><th className="text-right">실패</th>
             </tr>
-          ))}
-        </tbody>
-      </Table>
-    </div>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td className="font-medium">{nameOf(r) ?? "—"}</td>
+                <td className="text-right tabular-nums">{r.count}</td>
+                <td className="text-right tabular-nums text-ok">{r.succeeded}</td>
+                <td className={`text-right tabular-nums ${r.failed > 0 ? "text-bad" : ""}`}>{r.failed}</td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+    </Box>
+  );
+}
+
+function ReasonTable({ rows }: { rows: { reason_code: string; count: number }[] }) {
+  return (
+    <Table boxed>
+      <thead>
+        <tr className="text-muted"><th>사유</th><th className="text-right whitespace-nowrap w-16">건수</th></tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.reason_code}>
+            <td>{reasonText(r.reason_code)}</td>
+            <td className="text-right tabular-nums align-top">{r.count}</td>
+          </tr>
+        ))}
+      </tbody>
+    </Table>
   );
 }
 
@@ -165,148 +244,136 @@ export function JobStatsSection() {
   const rejections = asArray<{ reason_code: string; count: number }>(d?.plan_rejection_reasons);
   return (
     <Card>
-      <div className="flex items-center justify-between mb-2">
-        <h2 className="font-medium">잡 통계</h2>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="font-medium">잡 통계</h2>
+          <p className="text-xs text-muted">선택한 기간에 생성된 잡 기준 — 오른쪽에서 기간을 바꿉니다</p>
+        </div>
         <WindowSelect value={windowH} onChange={setWindowH} />
       </div>
-      {q.isLoading && <p className="text-muted text-sm">불러오는 중…</p>}
-      {/* 로딩 중(d 없음)은 "모름"이라 성공률 블록 자체를 내지 않는다 -- 착지 후
+      {q.isLoading && <p className="text-muted text-sm mt-3">불러오는 중…</p>}
+      {/* ① 요약. 로딩 중(d 없음)은 "모름"이라 요약 블록 자체를 내지 않는다 -- 착지 후
           종단 0건일 때만 "종단 잡 없음"(정상값)을 명시한다. */}
-      {d && <SuccessRateBar byState={byState} />}
-      {/* 2열 × 3행 배치(슬라이스 31): 위 행 처리량|전체 수명, 중간 행 두 "대기"
-          분포(제출 대기 = created_at→첫 비-Pending DMS 픽업 지연, 스케줄
-          대기(Volcano) = execution 제출→첫 RUNNING 관측 -- 다른 것을 잰다, 설계
-          §2.2), 아래 행 실행시간|숫자 요약. 4열로 눌러 넣으면 md 폭에서 차트가
-          읽히지 않아 2열 줄바꿈을 유지한다(슬라이스 20 결정). */}
-      <div className="grid md:grid-cols-2 gap-4 mt-3">
-        <div>
-          <h3 className="font-medium mb-2 text-sm">처리량</h3>
-          <BarChart data={throughput} label="처리량" />
-        </div>
-        <div>
-          {/* 라벨 정직화(슬라이스 31): created_at→updated_at 는 실행이 아니라
-              제출·확인(사람)·스케줄 대기까지 전부 합산한 수명이다 -- 「수행시간」
-              이라 부르면 실행이 느려 보인다(확인 대기 며칠이 그대로 실린다).
-              API 필드명(duration_histogram)은 소비자 호환으로 유지, 이름만 정직하게. */}
-          <h3 className="font-medium mb-2 text-sm">전체 수명 분포</h3>
-          <BarChart data={durations} label="전체 수명 분포" />
-          <p className="text-muted text-xs mt-1">
-            {`created_at→updated_at 전체 수명 — 제출·확인(사람)·스케줄 대기를 모두 포함합니다. 실행시간 분포가 순수 실행 구간입니다`}
-          </p>
-        </div>
-        <div>
-          <h3 className="font-medium mb-2 text-sm">제출 대기 분포</h3>
-          <BarChart data={submitWaits} label="제출 대기 분포" />
-          {/* 전체 수명(created_at -> updated_at)은 이 대기를 포함한다 -- 분포 간
-              포함 관계를 화면에 명시한다(설계 §2.4). 제외 건수(NULL)는 백필 공백
-              -- 숨기지 않는다(설계 §3). 한 개의 템플릿 리터럴 = 한 개의 텍스트
-              노드(getByText 가 통으로 찾도록). */}
-          <p className="text-muted text-xs mt-1">
-            {`집계 ${d?.submit_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.submit_wait_excluded ?? 0}건 — 전체 수명 분포는 이 대기를 포함합니다`}
-          </p>
-        </div>
-        <div>
-          <h3 className="font-medium mb-2 text-sm">스케줄 대기(Volcano) 분포</h3>
-          <BarChart data={schedWaits} label="스케줄 대기(Volcano) 분포" />
-          {/* 제출 대기와 같은 캡션 패턴(집계/제외 -- 설계 §3) + 근사 오차 명시
-              (설계 §2.2: 스테퍼 틱 5s + vcjob status 지연이 더해진 근사이지
-              PodGroup 이 보고하는 값이 아니다). 제외(기록 없음)에는 과거 잡(백필
-              없음 §2.5)·Running 미도달·한 틱 완료·스텁 백엔드가 모두 들어간다 --
-              도입 직후 "집계 0건 · 제외 N건"이 정상이며, 이 수가 보여야 화면이
-              "데이터 없음"으로 거짓말하지 않는다(설계 §2.6). */}
-          <p className="text-muted text-xs mt-1">
-            {`집계 ${d?.sched_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.sched_wait_excluded ?? 0}건 — 제출 대기(DMS 픽업 지연)와 달리 Volcano 큐 대기의 근사입니다(스테퍼 틱 5초 오차)`}
-          </p>
-        </div>
-        <div>
-          <h3 className="font-medium mb-2 text-sm">실행시간 분포</h3>
-          <BarChart data={execRuntimes} label="실행시간 분포" />
-          {/* 실행시간 = updated_at − exec_submitted_at − sched_wait 의 파생 계산
-              (스키마 무변경, 슬라이스 31) -- 순수 실행 구간의 근사다. sched_wait
-              캡션 관례 그대로 집계/제외를 명시한다: 제외에는 앵커 없는 과거 잡
-              (슬라이스 20 이전)·첫 RUNNING 관측 전에 끝난 한 틱 완료·실행 미도달
-              (preflight/preview 실패)이 들어간다 -- 도입 직후 "집계 0건 · 제외
-              N건"이 정상이고, 이 수가 보여야 공백이 숨지 않는다. */}
-          <p className="text-muted text-xs mt-1">
-            {`집계 ${d?.exec_runtime_counted ?? 0}건 · 제외(앵커 없음·한 틱 완료·실행 미도달) ${d?.exec_runtime_excluded ?? 0}건 — 첫 RUNNING 관측→종단의 근사입니다(스테퍼 틱 오차 ±10초)`}
-          </p>
-        </div>
-        <div>
-          <h3 className="font-medium mb-2 text-sm">숫자 요약</h3>
-          <Table>
-            <thead>
-              <tr className="text-muted">
-                <th className="py-1">구간</th><th>평균</th><th>중앙값</th><th>p95</th>
-              </tr>
-            </thead>
-            <tbody>
-              <SummaryRow name="전체 수명" summary={d?.duration_summary} />
-              <SummaryRow name="실행시간" summary={d?.exec_runtime_summary} />
-            </tbody>
-          </Table>
-          {/* p50/p95 는 백엔드 nearest-rank 실측값(보간 없음) -- 표본 없음(null)
-              은 위 SummaryRow 가 "—" 로 낸다(0 과 뭉개지 않는다). */}
-          <p className="text-muted text-xs mt-1">
-            각 분포와 같은 표본의 평균·중앙값·p95(실측값)입니다
-          </p>
-        </div>
-      </div>
-      <div className="grid md:grid-cols-3 gap-4 mt-4">
-        <Breakdown title="도구별" rows={asArray<JobMetrics["by_tool"][number]>(d?.by_tool)}
-                   nameOf={(r) => r.tool} />
-        <Breakdown title="스토리지별" rows={asArray<JobMetrics["by_storage"][number]>(d?.by_storage)}
-                   nameOf={(r) => r.storage} />
-        <Breakdown title="사용자별" rows={asArray<JobMetrics["by_requester"][number]>(d?.by_requester)}
-                   nameOf={(r) => r.requester_id} />
-      </div>
-      {reasons.length > 0 && (
-        <div className="mt-4">
-          <h3 className="font-medium mb-2 text-sm">실패 사유 상위</h3>
-          <Table>
-            <thead>
-              <tr className="text-muted"><th className="py-1">사유</th><th>건수</th></tr>
-            </thead>
-            <tbody>
-              {reasons.map((r) => (
-                <tr key={r.reason_code} className="border-t border-black/5">
-                  <td className="py-1">{reasonText(r.reason_code)}</td>
-                  <td>{r.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
+      {d && (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatTile label="성공률"><SuccessRateBar byState={byState} /></StatTile>
+          <StatTile label="상태별 잡 수"><StateCounts byState={byState} /></StatTile>
+          <div className="rounded-card border border-line bg-panel/60 px-4 py-3">
+            <div className="text-xs text-muted">처리 항목/바이트</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">
+              {d?.files_total ?? "—"} / {humanBytes(d?.bytes_total ?? null)}
+            </div>
+          </div>
+          <StatTile label="계획 거부">
+            <span className="text-lg font-semibold tabular-nums">{d?.plan_rejected ?? 0}</span>
+            <span className="ml-1 text-xs text-muted">건 — 잡이 되기 전 거부(아래 사유)</span>
+          </StatTile>
         </div>
       )}
-      {/* 계획 거부 사유 상위(results 집계): 실패 사유 상위(잡 실패)와 별도 표다 --
-          섞으면 라벨이 거짓말이 된다. 사유 한글화는 같은 reasonText 재사용. */}
-      {rejections.length > 0 && (
-        <div className="mt-4">
-          <h3 className="font-medium mb-2 text-sm">계획 거부 사유 상위</h3>
-          <Table>
-            <thead>
-              <tr className="text-muted"><th className="py-1">사유</th><th>건수</th></tr>
-            </thead>
-            <tbody>
-              {rejections.map((r) => (
-                <tr key={r.reason_code} className="border-t border-black/5">
-                  <td className="py-1">{reasonText(r.reason_code)}</td>
-                  <td>{r.count}</td>
+
+      {/* ② 처리량·소요 시간. 라벨 정직화(슬라이스 31): created_at→updated_at 는 실행이
+          아니라 제출·확인(사람)·스케줄 대기까지 전부 합산한 수명이다 -- 「수행시간」이라
+          부르면 실행이 느려 보인다. API 필드명(duration_histogram)은 소비자 호환으로 유지. */}
+      <Group title="처리량 · 소요 시간" caption="얼마나 처리했고, 잡 하나가 끝나기까지 얼마나 걸렸나">
+        <div className="grid md:grid-cols-2 gap-4">
+          <Box title="처리량">
+            <BarChart data={throughput} label="처리량" />
+          </Box>
+          <Box title="전체 수명 분포">
+            <BarChart data={durations} label="전체 수명 분포" />
+            <p className="text-muted text-xs mt-2">
+              {`created_at→updated_at 전체 수명 — 제출·확인(사람)·스케줄 대기를 모두 포함합니다. 실행시간 분포가 순수 실행 구간입니다`}
+            </p>
+          </Box>
+          <Box title="실행시간 분포">
+            <BarChart data={execRuntimes} label="실행시간 분포" />
+            {/* 실행시간 = updated_at − exec_submitted_at − sched_wait 의 파생 계산(스키마
+                무변경, 슬라이스 31) -- 순수 실행 구간의 근사. 제외에는 앵커 없는 과거 잡·
+                첫 RUNNING 관측 전에 끝난 한 틱 완료·실행 미도달이 들어간다 -- 도입 직후
+                "집계 0건 · 제외 N건"이 정상이고, 이 수가 보여야 공백이 숨지 않는다. */}
+            <p className="text-muted text-xs mt-2">
+              {`집계 ${d?.exec_runtime_counted ?? 0}건 · 제외(앵커 없음·한 틱 완료·실행 미도달) ${d?.exec_runtime_excluded ?? 0}건 — 첫 RUNNING 관측→종단의 근사입니다(스테퍼 틱 오차 ±10초)`}
+            </p>
+          </Box>
+          <Box title="숫자 요약">
+            <Table boxed>
+              <thead>
+                <tr className="text-muted">
+                  <th>구간</th><th>평균</th><th>중앙값</th><th>p95</th>
                 </tr>
-              ))}
-            </tbody>
-          </Table>
-          {/* 정직화: 계획 거부는 data_jobs 가 생기기 전의 종단이라 위의 모든
-              분포·분해 표(전부 data_jobs 집계)에 안 잡힌다. 한 개의 템플릿
-              리터럴 = 한 개의 텍스트 노드. */}
-          <p className="text-muted text-xs mt-1">
-            {`계획 거부 ${d?.plan_rejected ?? 0}건 — 계획 단계 거부는 잡이 되지 못해 잡 통계 밖입니다. 이 표가 그 구간입니다`}
-          </p>
+              </thead>
+              <tbody>
+                <SummaryRow name="전체 수명" summary={d?.duration_summary} />
+                <SummaryRow name="실행시간" summary={d?.exec_runtime_summary} />
+              </tbody>
+            </Table>
+            {/* p50/p95 는 백엔드 nearest-rank 실측값(보간 없음) -- 표본 없음(null)은
+                SummaryRow 가 "—" 로 낸다(0 과 뭉개지 않는다). */}
+            <p className="text-muted text-xs mt-2">
+              각 분포와 같은 표본의 평균·중앙값·p95(실측값)입니다
+            </p>
+          </Box>
         </div>
+      </Group>
+
+      {/* ③ 대기 시간: 두 "대기" 는 다른 것을 잰다(설계 §2.2) -- 제출 대기 = created_at→첫
+          비-Pending(DMS 픽업 지연), 스케줄 대기(Volcano) = execution 제출→첫 RUNNING. */}
+      <Group title="대기 시간" caption="잡이 실제로 돌기 전에 어디서 기다렸나 — DMS 픽업 지연과 Volcano 큐 대기">
+        <div className="grid md:grid-cols-2 gap-4">
+          <Box title="제출 대기 분포">
+            <BarChart data={submitWaits} label="제출 대기 분포" />
+            {/* 전체 수명(created_at -> updated_at)은 이 대기를 포함한다(설계 §2.4). 제외
+                건수(NULL)는 백필 공백 -- 숨기지 않는다(설계 §3). 한 개의 템플릿 리터럴 =
+                한 개의 텍스트 노드(getByText 가 통으로 찾도록). */}
+            <p className="text-muted text-xs mt-2">
+              {`집계 ${d?.submit_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.submit_wait_excluded ?? 0}건 — 전체 수명 분포는 이 대기를 포함합니다`}
+            </p>
+          </Box>
+          <Box title="스케줄 대기(Volcano) 분포">
+            <BarChart data={schedWaits} label="스케줄 대기(Volcano) 분포" />
+            {/* 근사 오차 명시(설계 §2.2: 스테퍼 틱 5s + vcjob status 지연이 더해진 근사).
+                제외에는 과거 잡·Running 미도달·한 틱 완료·스텁 백엔드가 모두 들어간다. */}
+            <p className="text-muted text-xs mt-2">
+              {`집계 ${d?.sched_wait_counted ?? 0}건 · 제외(기록 없음) ${d?.sched_wait_excluded ?? 0}건 — 제출 대기(DMS 픽업 지연)와 달리 Volcano 큐 대기의 근사입니다(스테퍼 틱 5초 오차)`}
+            </p>
+          </Box>
+        </div>
+      </Group>
+
+      <Group title="분해" caption="도구·스토리지·사용자별 잡 수와 성공/실패">
+        <div className="grid md:grid-cols-3 gap-4">
+          <Breakdown title="도구별" rows={asArray<JobMetrics["by_tool"][number]>(d?.by_tool)}
+                     nameOf={(r) => r.tool} />
+          <Breakdown title="스토리지별" rows={asArray<JobMetrics["by_storage"][number]>(d?.by_storage)}
+                     nameOf={(r) => r.storage} />
+          <Breakdown title="사용자별" rows={asArray<JobMetrics["by_requester"][number]>(d?.by_requester)}
+                     nameOf={(r) => r.requester_id} />
+        </div>
+      </Group>
+
+      {/* 실패 사유(잡 실패)와 계획 거부 사유(results 집계)는 별도 표다 -- 섞으면 라벨이
+          거짓말이 된다. 사유 한글화는 같은 reasonText 재사용. */}
+      {(reasons.length > 0 || rejections.length > 0) && (
+        <Group title="사유" caption="무엇 때문에 실패하거나 거부됐나 — 많은 순">
+          <div className="grid md:grid-cols-2 gap-4">
+            {reasons.length > 0 && (
+              <Box title="실패 사유 상위">
+                <ReasonTable rows={reasons} />
+              </Box>
+            )}
+            {rejections.length > 0 && (
+              <Box title="계획 거부 사유 상위">
+                <ReasonTable rows={rejections} />
+                {/* 정직화: 계획 거부는 data_jobs 가 생기기 전의 종단이라 위의 모든 분포·
+                    분해 표(전부 data_jobs 집계)에 안 잡힌다. 한 개의 템플릿 리터럴. */}
+                <p className="text-muted text-xs mt-2">
+                  {`계획 거부 ${d?.plan_rejected ?? 0}건 — 계획 단계 거부는 잡이 되지 못해 잡 통계 밖입니다. 이 표가 그 구간입니다`}
+                </p>
+              </Box>
+            )}
+          </div>
+        </Group>
       )}
-      <p className="text-muted text-sm mt-4">
-        <span className="font-medium">처리 항목/바이트</span>{" "}
-        {d?.files_total ?? "—"} / {humanBytes(d?.bytes_total ?? null)}
-      </p>
     </Card>
   );
 }

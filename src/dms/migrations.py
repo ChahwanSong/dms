@@ -236,6 +236,7 @@ def _apply_migrations(db: Database) -> None:
             managed_root TEXT NOT NULL,
             backend_type TEXT NOT NULL,
             enabled INTEGER NOT NULL DEFAULT 1,
+            user_enabled INTEGER NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'Unknown',
             status_detail TEXT,
             created_at TEXT NOT NULL,
@@ -442,6 +443,7 @@ def _apply_migrations(db: Database) -> None:
     # 행 수 0 을 실측 재확인한다(플랜 「배포·실증」 0단계).
     db.execute("DROP TABLE IF EXISTS runs")
     _ensure_columns(db)
+    _backfill_storage_user_enabled(db)
     _widen_count_columns(db)
     # requests.batch_id는 CREATE TABLE(신규 DB) 또는 _ensure_columns의 ALTER(구형 DB)로
     # 보강된 뒤에만 존재가 보장되므로, 이 인덱스는 그 이후에 생성한다.
@@ -609,9 +611,20 @@ def _ensure_columns(db):
         # 배치 이름 -- 위와 같은 이중 경로 규약(슬라이스 14 교훈: CREATE 만 고치면
         # 기배포 DB 에서만 컬럼이 없다).
         ("batches", "name", "TEXT"),
+        # 스토리지 사용자 공개(2026-09-30, 0 = 관리자 전용) -- 이중 경로 규약. 기배포 행은
+        # ALTER 로 NULL 이 되므로 migrate 가 _backfill_storage_user_enabled 로 1(종전 동작:
+        # 활성 스토리지는 누구나)을 채운다. 코드도 NULL 을 1 로 읽는다(모름 ≠ 거부).
+        ("storages", "user_enabled", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
+def _backfill_storage_user_enabled(db):
+    """기배포 storages 행의 user_enabled NULL(ALTER 직후) → 1. 기능 이전엔 활성 스토리지를
+    누구나 썼으므로 그 동작을 그대로 옮긴다. NULL 행만 건드려 멱등이다(0 = 관리자가
+    정한 관리자 전용은 절대 덮지 않는다)."""
+    db.execute("UPDATE storages SET user_enabled = 1 WHERE user_enabled IS NULL")
 
 
 def _backfill_submit_wait(db):

@@ -44,6 +44,16 @@ def _validate(storage_name, mount_path, managed_root, backend_type):
                                     f"mount_path collides with {ARTIFACT_MOUNT}")
 
 
+def storage_open_to_users(row) -> bool:
+    """일반 사용자 작업에 쓸 수 있나(2026-09-30 사용 범위). 세 상태:
+      - enabled=1, user_enabled=1 → 전체 사용
+      - enabled=1, user_enabled=0 → 관리자 전용("사용자에게만 비활성")
+      - enabled=0                 → 완전 비활성(누구도 새 작업 불가, planner storage_disabled)
+    user_enabled NULL 은 컬럼 이전(기배포 ALTER 직후) 행이다 -- 종전 동작(활성이면 누구나)으로
+    읽는다(migrations._backfill_storage_user_enabled 가 곧 1 로 채운다; 모름 ≠ 거부)."""
+    return row["enabled"] == 1 and row.get("user_enabled") != 0
+
+
 class StoragesRepository:
     def __init__(self, db: Database):
         self._db = db
@@ -57,7 +67,8 @@ class StoragesRepository:
              "b": dump_json(before) if before else None,
              "a": dump_json(after) if after else None, "at": utc_now_iso()})
 
-    def create(self, *, storage_name, mount_path, managed_root, backend_type, actor):
+    def create(self, *, storage_name, mount_path, managed_root, backend_type, actor,
+               enabled: bool = True, user_enabled: bool = True):
         _validate(storage_name, mount_path, managed_root, backend_type)
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
@@ -67,30 +78,38 @@ class StoragesRepository:
                 raise DomainValidationError("storage_exists", storage_name)
             self._db.execute(
                 """INSERT INTO storages (storage_name, mount_path, managed_root,
-                       backend_type, enabled, status, created_at, updated_at, updated_by)
-                   VALUES (:n, :m, :r, :b, 1, 'Unknown', :now, :now, :actor)""",
+                       backend_type, enabled, user_enabled, status, created_at,
+                       updated_at, updated_by)
+                   VALUES (:n, :m, :r, :b, :e, :u, 'Unknown', :now, :now, :actor)""",
                 {"n": storage_name, "m": mount_path, "r": managed_root,
-                 "b": backend_type, "now": now, "actor": actor})
+                 "b": backend_type, "e": 1 if enabled else 0,
+                 "u": 1 if user_enabled else 0, "now": now, "actor": actor})
             after = self.get(storage_name)
             self._audit("create", storage_name, None, after, actor)
         return after
 
     def update(self, storage_name, *, mount_path, managed_root, backend_type,
-               enabled: bool, actor):
+               enabled: bool, actor, user_enabled: bool | None = None):
+        """user_enabled=None 은 "건드리지 않음"(현재 값 유지) -- 필드를 모르는 옛 클라이언트가
+        경로만 고치는 PUT 이 관리자 전용 스토리지를 조용히 사용자에게 다시 열지 않게 한다."""
         _validate(storage_name, mount_path, managed_root, backend_type)
         mount_path = posixpath.normpath(mount_path)
         managed_root = posixpath.normpath(managed_root)
         before = self.get(storage_name)
         if before is None:
             raise KeyError(storage_name)
+        if user_enabled is None:
+            user_flag = 0 if before.get("user_enabled") == 0 else 1
+        else:
+            user_flag = 1 if user_enabled else 0
         with self._db.transaction():
             self._db.execute(
                 """UPDATE storages SET mount_path = :m, managed_root = :r,
-                       backend_type = :b, enabled = :e, updated_at = :now,
-                       updated_by = :actor
+                       backend_type = :b, enabled = :e, user_enabled = :u,
+                       updated_at = :now, updated_by = :actor
                    WHERE storage_name = :n""",
                 {"m": mount_path, "r": managed_root, "b": backend_type,
-                 "e": 1 if enabled else 0, "now": utc_now_iso(),
+                 "e": 1 if enabled else 0, "u": user_flag, "now": utc_now_iso(),
                  "actor": actor, "n": storage_name})
             after = self.get(storage_name)
             self._audit("update", storage_name, before, after, actor)

@@ -2,6 +2,7 @@ import posixpath
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError
+from ..repositories.storages import storage_open_to_users
 from .auth import Identity, audit_actor, require_admin, require_user
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -12,6 +13,10 @@ class StorageCreate(BaseModel):
     mount_path: str
     managed_root: str
     backend_type: str
+    # 사용 범위(2026-09-30): 전체(기본) / 관리자 전용(user_enabled=False) / 완전 비활성
+    # (enabled=False). repositories.storages.storage_open_to_users 가 세 상태의 정의다.
+    enabled: bool = True
+    user_enabled: bool = True
 
 
 class StorageUpdate(BaseModel):
@@ -19,6 +24,8 @@ class StorageUpdate(BaseModel):
     managed_root: str
     backend_type: str
     enabled: bool
+    # None = 현재 값 유지(필드를 모르는 옛 클라이언트의 PUT 이 관리자 전용을 풀지 않게).
+    user_enabled: bool | None = None
 
 
 @router.get("/api/admin/storages")
@@ -33,6 +40,7 @@ def create_storage(body: StorageCreate, request: Request,
         return request.app.state.repos.storages.create(
             storage_name=body.storage_name, mount_path=body.mount_path,
             managed_root=body.managed_root, backend_type=body.backend_type,
+            enabled=body.enabled, user_enabled=body.user_enabled,
             actor=audit_actor(identity))
     except DomainValidationError as e:
         raise HTTPException(
@@ -63,7 +71,7 @@ def update_storage(name: str, body: StorageUpdate, request: Request,
         return repos.storages.update(
             name, mount_path=body.mount_path, managed_root=body.managed_root,
             backend_type=body.backend_type, enabled=body.enabled,
-            actor=audit_actor(identity))
+            user_enabled=body.user_enabled, actor=audit_actor(identity))
     except DomainValidationError as e:
         raise HTTPException(status_code=422, detail=e.reason_code)
     except KeyError:
@@ -99,16 +107,24 @@ def audit_log(request: Request, limit: int = 50):
 # 사용자 결정으로 역할과 무관하게 싣는다. mount_path(노드 마운트 지점)·status_detail
 # (운영 내부 정보)은 계속 숨긴다 -- 은닉 범위는 필요한 만큼만 연다(테스트로 고정:
 # test_non_admin_sees_managed_root_but_not_mount_path).
+#
+# 사용 범위(2026-09-30): 관리자 전용(user_enabled=0) 스토리지는 **비관리자 응답에서 뺀다**
+# (피커에 안 보임). 표시만의 문제가 아니라 제출 게이트(routes_requests.submit)와 planner 가
+# storage_admin_only 로 다시 막는다. 관리자에겐 admin_only 표식을 실어 피커에 구분해 보인다.
 user_router = APIRouter()
 
 
 @user_router.get("/api/user/storages")
 def list_user_storages(request: Request, identity: Identity = Depends(require_user)):
     rows = request.app.state.repos.storages.list()
+    is_admin = identity.role == "admin"
     out = []
     for r in rows:
         if r["enabled"] != 1:
             continue
+        if not is_admin and not storage_open_to_users(r):
+            continue
         out.append({"storage_name": r["storage_name"], "backend_type": r["backend_type"],
-                    "status": r["status"], "managed_root": r["managed_root"]})
+                    "status": r["status"], "managed_root": r["managed_root"],
+                    "admin_only": not storage_open_to_users(r)})
     return out

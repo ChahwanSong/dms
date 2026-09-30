@@ -4,6 +4,7 @@ import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
+import { WarnTooltip } from "../../components/ui/WarnTooltip";
 import { ApiError, reasonText } from "../../lib/api";
 import type { ArtifactBaseInfo, ArtifactBaseNodeCheck } from "../../lib/types";
 import { relTime } from "./ControlStatePage";
@@ -166,7 +167,24 @@ export function ArtifactBasePage() {
             <p className="text-xs text-muted mt-2">쓰기 가능 여부는 에이전트 프로세스(uid) 기준입니다 — 잡 파드 요청자 권한과 다를 수 있습니다</p>
           </Card>
           <Card>
-            <h2 className="font-medium mb-2">경로 변경</h2>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <h2 className="font-medium">경로 변경</h2>
+              {/* 경로 변경 주의점(2026-09-30 사용자 요청: "툴팁으로 경고성으로"). 각 항목은
+                  실제 동작 근거가 있다: 열람은 **현재** base 기준(api/artifacts) · stepper 는
+                  단계마다 base 를 새로 읽는다 · 잡 파드는 base 를 hostPath 로 받는다 · 비 root
+                  잡의 도구는 요청자 uid 로 base 를 통과한다(preflight artifact_base_not_traversable)
+                  · 3홉의 소유자·o+w 검사와 허용 접두(routes_artifact_base). */}
+              <WarnTooltip label="변경 전 주의">
+                <p className="font-semibold text-bad mb-1">아티팩트 경로를 바꾸기 전에 확인하세요</p>
+                <ul className="list-disc space-y-1 pl-4">
+                  <li>기존 잡의 로그(stdout·stderr)·스캔 리포트는 <strong>옮겨지지 않습니다</strong> — 열람은 새 경로를 보므로 이전 잡의 기록이 보이지 않게 됩니다(참조 잡이 있으면 강제 확인).</li>
+                  <li>진행 중인 잡이 없을 때 바꾸세요 — 실행 중인 잡은 이후 단계의 기록을 새 경로에 써서 기록이 두 곳으로 흩어집니다.</li>
+                  <li>새 경로는 <strong>모든 노드에 같은 경로로 마운트된 공유 스토리지</strong>여야 합니다(잡 파드가 노드의 그 경로를 그대로 씁니다) — 저장 후 3홉 검증에서 노드별 존재·쓰기를 확인하세요.</li>
+                  <li>디렉토리는 root 소유·world-writable 금지, 그리고 <strong>다른 사용자 실행(x) 권한 필수(711 또는 755)</strong> — 700/750/770 이면 일반 사용자 작업이 artifact_base_not_traversable 로 거부됩니다.</li>
+                  <li>허용 접두(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES) 밖 경로는 저장되지 않습니다.</li>
+                </ul>
+              </WarnTooltip>
+            </div>
             <form className="space-y-3 text-sm" onSubmit={(e) => { e.preventDefault(); save(false); }}>
               <label className="block">새 경로 (file:///절대경로)
                 <input aria-label="새 경로" className={field} value={uri}

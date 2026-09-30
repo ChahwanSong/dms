@@ -131,6 +131,7 @@
   "invalid_option",
   "storage_missing",
   "storage_disabled",
+  "storage_admin_only",
   "storage_not_ready",
   "missing_storage",
   "missing_source_storage",

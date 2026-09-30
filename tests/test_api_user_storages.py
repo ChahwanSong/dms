@@ -2,7 +2,9 @@ ADMIN = {"Authorization": "Bearer tok-shared"}
 # managed_root 는 2026-09-29 부터 모든 로그인 사용자에게 실린다(제출 화면의 입력 경로가
 # 그 아래 상대경로라 뿌리를 알아야 한다). 노드 마운트 지점·운영 상세는 계속 숨긴다.
 FORBIDDEN_FIELDS = ("mount_path", "status_detail")
-USER_FIELDS = {"storage_name", "backend_type", "status", "managed_root"}
+# admin_only(2026-09-30 사용 범위): 비관리자에겐 관리자 전용이 아예 빠지므로 항상 false 다 --
+# 관리자 피커가 "(관리자 전용)" 을 구분해 보이는 표식(test_storage_user_scope).
+USER_FIELDS = {"storage_name", "backend_type", "status", "managed_root", "admin_only"}
 
 
 def _login_user(client):
