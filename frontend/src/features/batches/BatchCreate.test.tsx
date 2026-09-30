@@ -79,7 +79,7 @@ test("scan: 테이블 2행 + 스토리지 → 제출 바디 조립·미지정 �
   expect(await screen.findByRole("heading", { name: "배치 b9" })).toBeInTheDocument();
   // 정확 일치: priority/node_count 미지정 = 키 부재(생략 계약, null≠0)
   expect(captured.body).toEqual({
-    operation: "scan", max_concurrency: 2, options: { batch_files: 1000000, broken_limit: 100 }, note: null,   // scan 프리필 = 서버 기본(2026-09-17)
+    operation: "scan", max_concurrency: 32, options: { batch_files: 1000000, broken_limit: 100 }, note: null,   // scan 프리필 = 서버 기본(2026-09-17), 동시 상한 프리필 32(2026-10-01)
     items: [{ storage: "s1", target: "a" }, { storage: "s1", target: "b" }],
   });
 });
@@ -259,7 +259,7 @@ test("placeholder 힌트(scan): 경로·CSV·실행 제어 필드", async () => 
   expect(screen.getByLabelText("실행 신원(선택)")).toHaveAttribute("placeholder", "예: cocoa.song");
   expect(screen.getByLabelText("노드 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
   expect(screen.getByLabelText("노드당 프로세스 수")).toHaveAttribute("placeholder", "비우면 정책 기본");
-  expect(screen.getByLabelText("동시 실행 상한")).toHaveAttribute("placeholder", "예: 2");
+  expect(screen.getByLabelText("동시 실행 상한")).toHaveAttribute("placeholder", "예: 32");
   expect(screen.getByLabelText("메모")).toHaveAttribute("placeholder", "예: 8월 정기 스캔");
 });
 
