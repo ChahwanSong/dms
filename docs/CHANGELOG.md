@@ -95,6 +95,51 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ sync 가 목적지 소유권을 바꾸던 사고 — root 실행 명시 opt-in + 목적지 권한 preflight — **완료·실증**(2026-09-30, d139→d140)
+
+사용자 보고(프로덕션): `dms_test`(root 755) 아래 사용자 903436(gid 104)이 쓸 수 없는
+`dst_fail`(903333 소유, 700)로 `src → dst_fail` sync 를 냈는데 실패하지 않고 `dst_fail` 소유가
+903436:104 로 바뀌며 성공했다. 원인(코드 + 테스트베드 재현): `identity.resolve_job_identity` 가
+특권 목록의 세션 요청자면 owner_username·화면과 무관하게 **무조건 uid 0** 을 줬다 → preflight 가
+root 로 통과, 비특권이면 붙는 `--chown` 도 빠짐, root dsync 는 소스 최상위 디렉터리의
+소유·권한·시각을 **기존 목적지에 적용**한다. 테스트베드에서 mason(특권)·owner=alice 로 같은 구조를
+만들어 identity uid 0, `dst_fail` bob(10002) → alice(10001) 를 재현했다.
+- **root 는 명시적일 때만**: `identity.privilege_policy` 단일 규칙 — 단건은 `run_as_root: true`
+  (StrictBool, admin + 자격(세션) 아니면 403 `privileged_not_authorized`), 배치 자식만 "자격 있으면
+  root", 그 외(기본)는 실행 신원의 LDAP uid/gid. 포탈에 관리자 전용 'root 권한으로 실행' 체크박스
+  (기본 꺼짐, 확인 스텝에 실행 권한 표시), `open_noatime` 은 root 실행에서만.
+- **stepper 재확인**: 신원은 계획 시 worker_pool 에 얼기 때문에 규칙 변경 전에 계획된 root 잡이
+  배포 뒤에도 root 로 돈다 — 매 제출 직전 요청 행을 다시 읽어 근거가 없으면
+  `privilege_not_requested` 로 종단.
+- **preflight 목적지 검사**: 목적지가 있으면 목적지 자체의 쓰기·진입(`destination_not_writable`),
+  비 root 면 소유자 == 실행 uid(`destination_not_owned` — 남의 그룹 쓰기 디렉터리는 dsync 가
+  데이터를 복사한 뒤 최상위 chmod/utime EPERM 으로 부분 복사 Failed 였다, 실측), 그다음 항상 부모 쓰기.
+- 적대적 리뷰(워크플로 19 에이전트, 14건 중 8건 생존 → 5개 결함) 반영: 얼린 root 신원 재확인,
+  관리자 단건 `open_noatime` EPERM(비 root 인데 기본 ON), e2e E4/E6(LDAP 없는 하네스가 암묵 root 에
+  기댐), 운영 문서(deploy/README·20-config), chown 캡션.
+- **d139 실증에서 잡은 회귀 → d140**: d139 는 "목적지가 있으면 부모 대신 목적지만" 보도록 바꿨는데,
+  root 755 부모 아래 alice 본인 `dst` 로의 sync 가 **Succeeded 인데 복사 0건**이었다. 포크 dsync 는
+  목적지 존재와 무관하게 부모 W_OK 를 요구하고 실패 시 `rc` 초기값 0 인 채 `goto ERROR` 로 **종료
+  코드 0** 이다(dry-run 은 경고만이라 미리보기도 정상). 예전 부모 검사는 오탐이 아니라 도구의 실제
+  요구였다 → 부모 검사를 항상 유지(d140). dsync rc 0 자체는 BACKLOG §4(포크 패치 필요).
+
+실증(테스트베드, `repro-owner.py` 가 제출·컨펌·종단 후 `dms_test` 소유·목록 스냅숏 전후 비교):
+- 얼린 잡(d138 에서 mason owner=alice → dst_fail 을 계획해 ConfirmPending, identity uid 0) → d139
+  릴리스 후 컨펌 → exec_preflight 전에 **Failed `privilege_not_requested`**, 변화 없음.
+- d140 스위트 10/10: V1 mason owner=alice→dst_fail `destination_not_writable`(사고 경로, 변화 없음) ·
+  V2 alice→dst_fail 동일 · V3 alice→dst/grp(bob 770, 그룹원) `destination_not_owned`(복사 0) · V4
+  alice→dst(부모 root 755) `destination_parent_not_writable` · V4b alice→dst/mine(본인·부모 본인)
+  **Succeeded, 파일 복사·소유 10001:10000 700 불변** · V5 mason owner=alice→dst/mine alice uid 로
+  Succeeded · V6 mason root 명시→신규 dst_new root 로 Succeeded · V7 alice root 요청 403 · V8 mason
+  (LDAP 밖) 생략 `ldap_identity_not_found` · V9 mason root 명시→dst_fail 은 경고대로 소유가 소스에 맞춰짐.
+- 라이브 브라우저(d139): 관리자 옵션 스텝에 체크박스(기본 꺼짐)·open_noatime 잠금+캡션, 확인 스텝
+  "실행 신원의 uid/gid(권한 그대로 적용)" / root 선택 시 경고 문구, 사용자(alice)에겐 체크박스 없음.
+- 테스트: 백엔드 1958 passed, 프런트 699 passed + tsc + 빌드(외부 URL 0), e2e 9 passed.
+
+운영 영향: 특권 목록의 **LDAP 밖 로컬 관리자 계정**은 이제 '실행 신원'을 지정하거나 'root 권한으로
+실행'을 체크해야 잡이 돈다(아니면 `ldap_identity_not_found`). 관리자의 단건 scan 도 기본은 실행
+신원 권한이라 전체를 훑으려면 root 체크.
+
 ### ✅ 방안 A — 디렉터리 설정을 보고 응답으로 하달, 포탈 이미지 릴리스만으로 에이전트 수렴 — **완료·실증**(2026-09-29, d138)
 
 사용자 질문: "2단계(apply -k)가 꼭 필요한가 / 1단계만으로 충분해질 방법은?" — 포탈 릴리스는 DaemonSet
