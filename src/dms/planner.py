@@ -4,7 +4,7 @@ from dataclasses import asdict
 
 from .db import iso_plus, utc_now_iso
 from .domain import Operation, RequestState
-from .identity import IdentityRejected, resolve_job_identity
+from .identity import IdentityRejected, privilege_policy, resolve_job_identity
 from .placement import (
     PlacementError, TOOL_TO_POLICY, resolve_fanout, select_tool_and_candidates)
 
@@ -158,6 +158,12 @@ class Planner:
             if storage["status"] not in ("Ready", "Degraded"):
                 return self._reject(rid, "storage_not_ready")
         # 4. identity
+        # root 실행은 명시적일 때만(2026-09-30 프로덕션 사고, identity.resolve_job_identity
+        # docstring): 단건 요청은 payload 의 run_as_root 가 True 일 때만 root 를 요구하고
+        # (자격 없으면 거부), 없으면 실행 신원의 LDAP uid/gid 로 돈다 -- 관리자 계정이라도.
+        # 배치 자식(관리자 전용 화면)만 종전대로 "자격 있으면 root". 규칙은
+        # identity.privilege_policy 하나 -- stepper 가 제출 직전에 같은 함수로 재확인한다.
+        privilege = privilege_policy(req)
         try:
             identity = resolve_job_identity(
                 self._repos.control, self._resolver,
@@ -167,7 +173,8 @@ class Planner:
                 privileged_requesters=self._settings.privileged_requesters,
                 # 요청을 만든 인증 방식. token(또는 컬럼 미채움/NULL)은 특권을 못
                 # 얻는다 -- 기배포 DB 의 구형 행은 NULL 이라 자동으로 비특권이다.
-                session_authenticated=(req.get("auth_method") == "session"))
+                session_authenticated=(req.get("auth_method") == "session"),
+                privilege=privilege)
         except IdentityRejected as exc:
             return self._reject(rid, exc.reason_code)
         # 5. tool + candidates

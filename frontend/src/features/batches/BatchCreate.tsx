@@ -548,9 +548,15 @@ export function BatchCreate() {
               <input aria-label="실행 신원(선택)" placeholder="예: cocoa.song"
                      className={field}
                      value={f.ownerUsername} onChange={on("ownerUsername")} />
+              {/* 2026-09-30 정정: 예전 "지정하면 그 사용자 신원으로 파일을 다룹니다" 는
+                  사실이 아니었다 -- 배치 자식은 생성자가 특권 요청자면 root 로 돌고
+                  (identity.PRIVILEGE_IF_ELIGIBLE), 실행 신원은 기록용 이름일 뿐 파일 권한
+                  검사는 적용되지 않는다(sync 는 목적지 소유·권한을 소스에 맞춘다). */}
               <p className="text-muted text-xs mt-1">
-                비우면 생성자 본인 신원으로 실행됩니다. 지정하면 그 사용자 신원으로
-                파일을 다룹니다(LDAP 에 없는 계정도 지정할 수 있습니다).
+                배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용
+                이름이며 파일 권한 검사는 적용되지 않고, sync 는 목적지(이미 있는 디렉토리
+                포함)의 소유자·권한을 소스와 같게 바꿉니다. 사용자 권한 그대로 실행하려면
+                단일 작업에서 실행 신원을 지정하세요.
               </p>
             </label>
 

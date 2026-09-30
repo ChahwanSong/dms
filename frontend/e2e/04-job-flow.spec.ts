@@ -17,7 +17,9 @@ import { assertLayoutSane } from "./helpers/layout";
 test.describe("E4 잡 종단 흐름", () => {
   test("UI scan 제출 -> 리로드 없이 목록이 Succeeded 로 수렴한다", async ({ page }) => {
     // admin 으로 들어간다: 특권 요청자(root/admin 기본값)라야 LDAP 없는 이 환경에서
-    // placement 의 신원 검사를 건너뛰고 후보 선정까지 간다(설계 §1-8).
+    // placement 의 신원 검사를 건너뛰고 후보 선정까지 간다(설계 §1-8). 2026-09-30 부터
+    // 자격만으론 root 가 아니다 -- 옵션 스텝에서 'root 권한으로 실행' 을 켜야 한다(끄면
+    // LDAP 없는 이 하네스에선 ldap_not_configured 로 Rejected).
     await apiLogin(page);
     // 슬라이스 37: scan 은 단일 작업 위저드(연산 스텝의 운영자 전용 옵션)로 흡수됐다.
     await page.goto("/jobs/new");
@@ -39,8 +41,9 @@ test.describe("E4 잡 종단 흐름", () => {
     // **달라야** 한다: 같은 requester+storage+target+options 는 resource_key 가
     // 같아 활성 요청이 있으면 Conflict 로 떨어진다.
     await page.getByLabel("대상 경로").fill("e4-scan");
-    // 옵션 스텝(기본값 그대로) → 확인 스텝 → 제출.
+    // 옵션 스텝(기본값 + root 실행 명시) → 확인 스텝 → 제출.
     await page.getByRole("button", { name: "다음" }).click();
+    await page.getByLabel("root 권한으로 실행").check();
     await page.getByRole("button", { name: "다음" }).click();
     await page.getByRole("button", { name: "제출", exact: true }).click();
 

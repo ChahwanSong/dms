@@ -67,6 +67,8 @@ export interface SubmitBody {
   // 생략 = (정책 기본) — resolve_priority 가 정책 default_priority 로 해석(슬라이스 37).
   priority?: string;
   owner_username?: string;
+  // 명시적 root 실행(2026-09-30). 생략 = 실행 신원의 uid/gid. 자격은 서버가 판정(403).
+  run_as_root?: boolean;
 }
 export const useSubmitRequest = () =>
   useMutation({

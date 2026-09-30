@@ -16,11 +16,13 @@ import { apiLogin } from "./helpers/session";
 // 제출 헬퍼. target 은 시나리오마다 달라야 한다: 같은
 // requester+storage+target+options 는 resource_key 가 같아 활성 요청이 있으면
 // Conflict 로 떨어진다(E4 는 e4-scan, 여기는 e5-scan/e6-scan).
+// run_as_root: LDAP 없는 하네스에서 잡이 종단까지 가려면 root 여야 하고, 2026-09-30
+// 부터 root 는 명시적일 때만이다(자격 있는 admin 이라도 생략하면 LDAP 신원 경로).
 async function submitScan(page: Page, target: string): Promise<string> {
   const response = await page.request.post("/api/user/requests", {
     data: {
       operation: "scan", storage: STORAGE_NAME, target,
-      options: {}, priority: "mid",
+      options: {}, priority: "mid", run_as_root: true,
     },
   });
   expect(response.status(), await response.text()).toBe(202);

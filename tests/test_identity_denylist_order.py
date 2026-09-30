@@ -1,5 +1,6 @@
 import pytest
-from dms.identity import IdentityRejected, ResolvedIdentity, StubIdentityResolver, resolve_job_identity
+from dms.identity import (PRIVILEGE_REQUESTED, IdentityRejected, ResolvedIdentity,
+                          StubIdentityResolver, resolve_job_identity)
 from dms.repositories import Repositories
 
 
@@ -21,7 +22,8 @@ def test_privileged_path_needs_no_resolver_when_no_group_denies(db):
     identity = resolve_job_identity(repos.control, None,
                                     requester_id="admin", owner_username="alice",
                                     allow_privileged=True, privileged_requesters=("admin",),
-                                    session_authenticated=True)
+                                    session_authenticated=True,
+                                    privilege=PRIVILEGE_REQUESTED)
     assert identity.privileged is True
     assert identity.uid == 0
 
@@ -74,6 +76,7 @@ def test_group_denylist_privileged_path_treats_missing_ldap_entry_as_groupless(d
     identity = resolve_job_identity(repos.control, resolver,
                                     requester_id="admin", owner_username="ghost",
                                     allow_privileged=True, privileged_requesters=("admin",),
-                                    session_authenticated=True)
+                                    session_authenticated=True,
+                                    privilege=PRIVILEGE_REQUESTED)
     assert identity.privileged is True
     assert identity.groups == ()

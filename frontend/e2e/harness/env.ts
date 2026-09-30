@@ -16,7 +16,8 @@ export const ADMIN_TOKEN = "e2e-admin-token";
 export const SESSION_SECRET = "e2e-session-secret";
 
 // username 은 반드시 "admin" 이다 -- 기본 privileged_requesters={root,admin} 에
-// 들어야 E4 의 특권 경로(LDAP 없이 신원 검사 생략)가 성립한다.
+// 들어야 E4~E6 의 특권 경로(LDAP 없이 신원 검사 생략)가 성립한다. 자격만으론 root 가
+// 아니다(2026-09-30): 시나리오가 run_as_root 를 명시한다(E4 체크박스, E5/E6 바디).
 export const ADMIN = { username: "admin", password: "e2e-admin-pw" };
 
 // 시드 스토리지 이름. 시드(global-setup)와 시나리오가 같은 값을 봐야 한다.
