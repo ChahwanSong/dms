@@ -33,6 +33,11 @@ type InputTab = "table" | "paste" | "upload";
 // 우선순위 순서는 PRIORITIES(domain.py:61)의 미러 — 상한 초과 판정에 쓴다.
 const PRIORITY_RANK: Record<string, number> = { low: 0, mid: 1, high: 2 };
 
+// 동시 실행 상한 프리필(사용자 결정 2026-10-01: 2 → 32). 서버엔 기본값이 없다(필수 필드,
+// domain.validate_batch 1..64) -- 기본은 이 화면이 정해 바디에 늘 싣는다. 배치 하나가 동시에
+// 미리보기·실행하는 항목(잡) 수이고, 자원이 모자라면 잡은 Volcano 큐에서 기다린다.
+export const DEFAULT_MAX_CONCURRENCY = 32;
+
 // 행은 경로만 나른다(스토리지는 배치 레벨 선택) — a = target(scan)/source(sync),
 // b = destination(sync 전용). CSV 파서(ScanRow/SyncRow)와 제출 바디 조립의 중간형.
 interface RowPair { a: string; b: string }
@@ -64,7 +69,7 @@ const initial = {
   // mc 도 문자열 상태다: number 상태 + Number(e.target.value) 는 지우면 0 이
   // 그려지고 이어 친 숫자가 "08"로 남는다(type=number 숫자 동등 비교) — 정책
   // 다이얼로그에서 잡은 결함과 같은 유형. 변환은 제출 시점 한 곳.
-  priority: "", nodeCount: "", procsPerNode: "", mc: "2", note: "", name: "",
+  priority: "", nodeCount: "", procsPerNode: "", mc: String(DEFAULT_MAX_CONCURRENCY), note: "", name: "",
   // 실행 신원: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자 본인). 특권 여부와
   // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
@@ -599,7 +604,7 @@ export function BatchCreate() {
 
             <label className="text-sm block">동시 실행 상한 (1..64)
               <input aria-label="동시 실행 상한" type="number" min={1} max={64} className={field}
-                     placeholder="예: 2"
+                     placeholder={`예: ${DEFAULT_MAX_CONCURRENCY}`}
                      value={f.mc} onChange={(e) => setF({ ...f, mc: e.target.value })} />
               {/* 노드 수 캡션과 대구: 위는 잡 하나의 폭, 이것은 잡 몇 개를 나란히 */}
               <p className="text-muted text-xs mt-1">

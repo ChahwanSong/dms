@@ -49,7 +49,7 @@ test("그룹 순서는 운영·작업·스토리지·관리다(접힘은 AppShel
 
 test("작업 그룹은 단일 작업(제출)이 내 작업(목록)보다 위다(사용자 결정 2026-08-19)", () => {
   const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
-  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "전체 작업"]);
+  expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "배치 작업", "전체 작업"]);
 });
 
 describe("breadcrumbFor", () => {
@@ -123,4 +123,17 @@ describe("activeNavPath — 사이드바 활성은 최장 일치 하나", () => 
     expect(activeNavPath("/jobs-archive")).toBeNull();
     expect(activeNavPath("/nowhere")).toBeNull();
   });
+});
+
+test("배치 작업은 작업 그룹의 관리자 전용 항목이다(사용자 결정 2026-10-01: 운영 → 작업)", () => {
+  const groups = NAVIGATION[0].groups ?? [];
+  const jobs = groups.find((g) => g.label === "작업")!;
+  const ops = groups.find((g) => g.label === "운영")!;
+  expect(jobs.adminOnly).toBeUndefined();              // 그룹은 모두에게 보인다
+  expect(jobs.items.find((i) => i.path === "/admin/batches")?.adminOnly).toBe(true);
+  expect(ops.items.map((i) => i.path)).not.toContain("/admin/batches");
+  // 크럼도 새 자리를 따른다(상세 라우트는 부모 항목으로 귀속)
+  expect(breadcrumbFor("/admin/batches").map((c) => c.label)).toEqual(["HOME", "DMS", "작업", "배치 작업"]);
+  expect(breadcrumbFor("/admin/batches/abc").map((c) => c.label))
+    .toEqual(["HOME", "DMS", "작업", "배치 작업", "배치 상세"]);
 });

@@ -33,7 +33,6 @@ export const NAVIGATION: NavSection[] = [
         label: "운영", adminOnly: true,
         items: [
           { path: "/admin/dashboard", label: "대시보드", icon: LayoutDashboard },
-          { path: "/admin/batches", label: "배치 작업", icon: Layers },
           // 사용량 분석(2026-08-23): 디렉터리별 scan 이력(실 사용량·데이터 온도)
           // 시계열 — 전 요청자 통합이라 운영 그룹(admin 전용)이다.
           { path: "/admin/usage", label: "사용량 분석", icon: TrendingUp },
@@ -49,13 +48,16 @@ export const NAVIGATION: NavSection[] = [
         // 슬라이스 37(사용자 결정): 「작업 제출」→「단일 작업」(배치 작업과 같은
         // 성격의 단일 항목 제출). 「내 스캔 경로」·「scan 실행」 메뉴는 제거 --
         // scan 은 단일 작업 위저드(운영자 전용 연산)로 흡수됐다.
-        // 순서(사용자 결정 2026-08-19): 단일 작업(제출)이 전체 작업(목록)보다 위 --
-        // 운영 그룹의 배치 작업(제출 동선)과 대구. 「전체 작업」(구 「내 작업」,
-        // 개명 2026-08-22): 운영자는 전 요청, 사용자는 자기 요청 -- 요청자 열·필터·
-        // 무한 스크롤이 붙었다.
+        // 순서: 제출 동선 둘(단일 작업·배치 작업) 다음에 목록(전체 작업) -- 단일이 전체보다
+        // 위(사용자 결정 2026-08-19), 배치 작업은 운영 그룹에서 이리로(사용자 결정 2026-10-01
+        // "작업 밑에 둬야"). 배치는 관리자 전용 화면(/admin/batches, RequireRole)이라 항목에
+        // adminOnly -- 그룹은 모두에게 보이고 사용자에겐 단일·전체 두 항목만 남는다.
+        // 「전체 작업」(구 「내 작업」, 개명 2026-08-22): 운영자는 전 요청, 사용자는 자기
+        // 요청 -- 요청자 열·필터·무한 스크롤이 붙었다.
         label: "작업",
         items: [
           { path: "/jobs/new", label: "단일 작업", icon: FilePlus },
+          { path: "/admin/batches", label: "배치 작업", icon: Layers, adminOnly: true },
           { path: "/jobs", label: "전체 작업", icon: ListTodo },
         ],
       },

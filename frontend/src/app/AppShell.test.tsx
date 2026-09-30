@@ -46,7 +46,7 @@ const ADMIN_ONLY_LABELS = [
 ];
 const USER_LABELS = ["전체 작업", "단일 작업"];
 
-test("user 는 작업 그룹 2링크만 보이고 admin 전용 그룹은 없다", async () => {
+test("user 는 작업 그룹 2링크만 보이고 admin 전용 그룹은 없다(작업 그룹의 배치 작업도 숨김)", async () => {
   renderShell("user");
   // me 도착을 먼저 기다린다 -- 기다리지 않으면 "adminOnly 부재" 단언이 로딩 중
   // 화면을 보고 공허하게 통과한다(데이터가 오기 전엔 누구든 user 로 보인다).
@@ -147,4 +147,14 @@ test("열린 그룹 헤더 재클릭은 닫고, 다시 클릭이 복원한다 --
   expect(screen.getByRole("link", { name: "대시보드" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "작업" }));
   expect(screen.getByRole("link", { name: "단일 작업" })).toBeInTheDocument();
+});
+
+test("배치 작업은 작업 그룹 안에 있다 -- 운영을 접어도 보이고, 작업을 접으면 함께 숨는다", async () => {
+  // 사용자 결정(2026-10-01): 배치 작업 메뉴를 운영 → 작업 그룹으로.
+  renderShell("admin", "/admin/dashboard");
+  await screen.findByRole("link", { name: "배치 작업" });
+  await userEvent.click(screen.getByRole("button", { name: "운영" }));
+  expect(screen.getByRole("link", { name: "배치 작업" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "작업" }));
+  expect(screen.queryByRole("link", { name: "배치 작업" })).toBeNull();
 });
