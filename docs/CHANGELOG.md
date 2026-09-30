@@ -95,6 +95,41 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 관리자 기본 root(포탈) + artifact 쓰기 감사·preflight base 통과 검사 — **완료·실증**(2026-09-30, d141)
+
+사용자 요청: "관리자는 기본 root로 실행하도록 해줘" / "artifact 가 공용 스토리지인데 디렉토리가 루트
+소유권·접근권한이라 예전 수정 때 root 로 실행되도록 됐던 것 같다 — artifact 쓰기 이슈가 없는지 확인".
+- **관리자 기본 root**: 포탈 SubmitJob 이 유일한 구현 지점 — 자격(`/api/auth/me` `can_run_as_root` =
+  관리자 + 특권 목록 + 세션) 있는 관리자는 'root 권한으로 실행' 기본 켜짐, 실행 신원에 **다른 사용자**를
+  적으면 기본 꺼짐(같은 날 사고 경로를 기본값으로 되살리지 않음), 관리자에겐 확정값을 항상 명시.
+  서버는 명시 true 만 root(생략 = 비 root). 적대적 리뷰(13 에이전트)가 "서버 생략 = root" 초안을 잡았다:
+  오늘 배포된 d140 포탈 탭(생략 = 비 root 라고 표시)이 새로고침 전까지 화면과 다른 root 로 돈다.
+- **artifact 쓰기 감사**(워크플로 21 에이전트 — 코드·라이브·이력 → 반박 검증 → 종합): 관리자 root 로
+  새로 생기는 문제는 없다. "root 로 바꿨던 것" 은 d128 **제어면**(api/controller, base 가 root:root 라
+  65532 로는 3홉 쓰기 실패) 이야기이고 잡 launcher/worker 는 원래 root, 도구만 요청자 신원이다. 살아
+  있는 조건 하나: 도구가 요청자 uid·**주 gid 만**으로 `<base>/<job>/<phase>` 의 mpi-hostfile·rank.sh 를
+  읽고 dscan 리포트를 쓰므로 **base 자체에 other x 가 필요**(711/755) — 그런데 README 는 "권장 700" 이었다.
+  → preflight `_ARTIFACT_BASE_CHECK`(실행 신원으로 `test -x /dms-artifact-base`,
+  `artifact_base_not_traversable`), README·ARCHITECTURE 불변식 정정, BACKLOG(러너 chown 반환코드).
+
+실증(테스트베드):
+- 기준선(d140): base 700 + alice 비 root sync → preflight 통과 후 **preview_failed**("Open RTE was unable
+  to open the hostfile").
+- d141, base 700: alice 비 root sync·mason owner=alice 비 root scan → preflight **artifact_base_not_traversable**,
+  mason root sync(run_as_root: true) → Succeeded(root 잡은 base mode 무관). base 711: 비 root sync·scan
+  Succeeded, dscan-report.json 10001:10000 0644·API 200. 끝나면 base 755 원복 확인.
+- API: mason 생략 → 비 root → ldap_identity_not_found(옛 탭·스크립트가 조용히 root 가 되지 않음),
+  true → root 성공, owner=alice + false → dst_fail destination_not_writable, alice root → 403.
+- 라이브 브라우저: me.can_run_as_root=true, 체크박스 기본 켜짐 → 실제 제출 바디 run_as_root: true →
+  잡 identity uid 0(확인 후 취소), 실행 신원 alice → 자동 꺼짐·확인 스텝 "실행 신원의 uid/gid", 사용자는
+  체크박스 없음.
+- 테스트: 백엔드 1981 passed, 프런트 700 passed + tsc + 빌드(외부 URL 0), e2e 9 passed.
+- 잔여: 체크박스 캡션 `</strong>` 뒤 공백 누락(HEAD 에서 수정, 다음 빌드에 포함).
+
+운영 확인 권고: 운영 artifact base 의 mode·ACL — `stat -c '%a %U:%G' <base>` 가 700/750/770 이면 비 root
+잡(일반 사용자 전부, 실행 신원을 지정한 관리자 잡)이 d141 부터 `artifact_base_not_traversable` 로
+거부된다(그 전엔 preview 에서 hostfile 오류) — `chmod 711`(또는 755). 부모 디렉터리 770 은 그대로 둬도 된다.
+
 ### ✅ sync 가 목적지 소유권을 바꾸던 사고 — root 실행 명시 opt-in + 목적지 권한 preflight — **완료·실증**(2026-09-30, d139→d140)
 
 사용자 보고(프로덕션): `dms_test`(root 755) 아래 사용자 903436(gid 104)이 쓸 수 없는
