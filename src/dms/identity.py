@@ -39,8 +39,8 @@ class IdentityRejected(Exception):
         super().__init__(f"{reason_code}: {detail}" if detail else reason_code)
 
 
-PRIVILEGE_NEVER = "never"            # 단건 작업 신청 기본: 실행 신원의 LDAP uid/gid
-PRIVILEGE_REQUESTED = "requested"    # 요청이 명시적으로 root 실행을 원함(run_as_root)
+PRIVILEGE_NEVER = "never"            # payload 에 root 근거 없음(fail-closed): 실행 신원의 LDAP uid/gid
+PRIVILEGE_REQUESTED = "requested"    # payload run_as_root is True(포탈의 관리자 기본 root 도 명시로 온다)
 PRIVILEGE_IF_ELIGIBLE = "if_eligible"  # 배치 자식(관리자 전용 화면): 자격 있으면 root
 
 

@@ -27,6 +27,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   destination_parent_not_writable: "목적지의 상위 디렉토리가 없거나 실행 신원이 쓸 수 없습니다 — sync 도구는 목적지가 이미 있어도 상위 디렉토리 쓰기 권한을 요구합니다(권한이 없으면 아무것도 복사하지 않습니다)",
   destination_not_writable: "목적지 디렉토리에 쓸 수 없습니다 — 실행 신원에게 목적지의 쓰기·진입 권한이 없습니다",
   destination_not_owned: "목적지 디렉토리가 실행 신원의 소유가 아닙니다 — sync 는 목적지 최상위의 권한·시각을 소스에 맞추므로 남의 디렉토리에는 부분 복사 뒤 실패합니다. 본인 소유 디렉토리나 새 경로를 지정하세요",
+  artifact_base_not_traversable: "작업 기록(artifact) 저장소에 실행 신원이 들어갈 수 없습니다 — 관리자에게 문의하세요(artifact base 디렉토리에 다른 사용자 실행(x) 권한이 필요합니다: 711 또는 755)",
   parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
   target_not_readable: "대상 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   // 복합 접두 (stepper.py 가 f"{prefix}:{ExecutionError.reason_code}" 형태로 발생시킨다)

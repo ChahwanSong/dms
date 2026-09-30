@@ -263,6 +263,20 @@ def _worker_affinity(spec, task_name, nodes):
                 "topologyKey": "kubernetes.io/hostname"}]}}
 
 
+# 아티팩트 base 통과 검사(2026-09-30 아티팩트 쓰기 감사). 러너(launcher root)는 base 아래에
+# <job>(0755)·<phase>(요청자로 chown)를 만들고, 도구는 **요청자 uid·주 gid 만**(러너가
+# /etc/passwd 한 줄만 물질화 -- 보조 그룹 없음)으로 mpi-hostfile·rank.sh 를 읽고 dscan 리포트를
+# 쓴다. 전용 마운트(ARTIFACT_MOUNT)는 base 의 **부모** 권한을 건너뛰지만 마운트 루트인 base
+# 자체의 x 는 커널이 그대로 본다 -- base 가 root 700/750/770 이면 비 root 잡은 preview/execution
+# 에서야 "unable to open the hostfile" 로 죽고, 제어면 3홉 검사(artifact_base)는 root 관점이라
+# 못 본다. preflight 파드는 같은 uid·gid(보조 그룹 없음)로 돌므로 여기서 먼저 명확한 사유로
+# 거부한다. 경로는 상수라 인라인해도 안전하다(사용자 입력 아님). base 볼륨을 실제로 마운트한
+# 파드에만 붙인다(build_preflight_pod) -- 마운트가 없으면 검사할 대상이 없다.
+_ARTIFACT_BASE_CHECK = (
+    f'test -x {ARTIFACT_MOUNT} || '
+    '{ echo DMS_PREFLIGHT_REASON=artifact_base_not_traversable; exit 1; }; ')
+
+
 # sync 목적지 검사 조각(_preflight_script docstring). $D = 목적지, $M = "user"|"root".
 _DEST_TYPE_CHECK = (
     'test ! -e "$D" || test -d "$D" || '
@@ -353,7 +367,7 @@ PREFLIGHT_REASONS = frozenset({
     "source_not_readable", "destination_not_directory",
     "destination_parent_not_writable", "destination_not_writable",
     "destination_not_owned", "parent_not_writable",
-    "target_not_readable"})
+    "target_not_readable", "artifact_base_not_traversable"})
 
 
 def parse_preflight_reason(entries):
@@ -385,6 +399,10 @@ _PREFLIGHT_ROLE_SEG = {"source": "-src", "destination": "-dst"}
 def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None):
     ident = spec.identity or {}
     script, path_args = _preflight_script(spec, role=role)
+    # 아티팩트 base 통과(_ARTIFACT_BASE_CHECK 주석)를 경로 검사보다 **먼저** -- base 가 막혀
+    # 있으면 경로를 고쳐도 모든 비 root 잡이 죽는다(운영 설정 문제를 먼저 드러낸다).
+    if any(v.get("mountPath") == ARTIFACT_MOUNT for v in volumes):
+        script = _ARTIFACT_BASE_CHECK + script
     role_seg = _PREFLIGHT_ROLE_SEG.get(role, "")
     pod_spec = {"restartPolicy": "Never",
                 "nodeSelector": {"kubernetes.io/hostname": node},

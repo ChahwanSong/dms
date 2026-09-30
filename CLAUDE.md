@@ -76,10 +76,16 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
     `artifact_base.allowlist_reason`) + realpath 검사 셋 다.
   - uid/gid 부재를 0 으로 기본값 처리하지 않는다 — 부재는 거부(`stepper.identity_problem`,
     `identity_missing_at_step`). uid 0 자체는 privileged 짝이 맞으면 정당.
-  - **잡의 root 실행은 명시적일 때만**(2026-09-30): 특권 목록에 있다는 것만으로 root 가
-    되지 않는다 — 단건은 `run_as_root: true` + 자격, 배치 자식만 "자격 있으면 root"
-    (`identity.PRIVILEGE_*`). 기본(생략)은 실행 신원의 LDAP uid/gid 다. 암묵적 root 는
-    남의 디렉터리 소유권을 소스 소유로 덮어쓴 프로덕션 사고의 원인이다.
+  - **잡의 root 여부는 제출 시점에 확정돼 payload `run_as_root` 로만 흐른다**(2026-09-30):
+    planner·stepper 는 `identity.privilege_policy`(`run_as_root is True` 또는 배치 자식)만
+    본다 — 특권 목록에 있다는 것만으로 root 가 되지 않는다. 서버(`routes_requests.submit`)는
+    **명시 `run_as_root: true` 만** root(자격 필요, 없으면 403), 생략·false 는 비 root 다.
+    "관리자 기본 root" 는 **포탈**(SubmitJob `rootEffective`)이 정해 관리자에겐 확정값을 항상
+    명시로 싣는다: 자격 있는 관리자는 기본 root, 단 **다른 실행 신원**(owner_username)을
+    지정하면 기본은 그 사용자의 LDAP uid/gid. "관리자 + 실행 신원 = 일반 사용자" 가 무조건
+    root 로 돌아 남의 디렉터리 소유권을 소스 소유로 덮어쓴 프로덕션 사고가 이 규칙의 이유다 —
+    그 경로를 기본 root 로 되돌리지 말고, 서버의 생략 기본값을 root 로 바꾸지 마라(옛 포탈
+    탭·me 판정 불일치가 화면에 없던 root 로 돈다).
   - root 는 매니페스트 **컨테이너 수준**(40-api/41-controller)에만 — Dockerfile `USER
     65532`·migrate 는 유지하고 `test_release_manifest_contract.py` 가 모양을 고정한다.
     "강화" 한답시고 runAsNonRoot/65532 를 넣으면 운영 base 에서 즉시 회귀한다.

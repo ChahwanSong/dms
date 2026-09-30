@@ -66,7 +66,8 @@ def test_token_actor_node_form_is_accepted(db):
                    headers={"Authorization": "Bearer tok-shared",
                             "x-dms-actor": "node:n1"})
     assert r.status_code == 200
-    assert r.json() == {"actor": "node:n1", "role": "admin"}
+    # 토큰 인증은 root 자격이 없다(세션만) -- can_run_as_root 도 여기서 함께 고정한다.
+    assert r.json() == {"actor": "node:n1", "role": "admin", "can_run_as_root": False}
 
 
 def test_token_actor_empty_normalizes_to_shared_token(db):
@@ -77,7 +78,7 @@ def test_token_actor_empty_normalizes_to_shared_token(db):
         if value is not None:
             headers["x-dms-actor"] = value
         assert client.get("/api/auth/me", headers=headers).json() == {
-            "actor": "shared-token", "role": "admin"}
+            "actor": "shared-token", "role": "admin", "can_run_as_root": False}
 
 
 def test_node_regex_has_single_source_of_truth():

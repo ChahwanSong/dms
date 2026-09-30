@@ -3,7 +3,6 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictBool
 from ..artifact_base import resolve_artifact_base
-from ..identity import privilege_eligible
 from ..domain import (
     DataJobState, DomainValidationError, Operation, PRIORITIES, RequestState,
     TERMINAL_DATA_JOB_STATES, TERMINAL_REQUEST_STATES, build_data_payload,
@@ -11,7 +10,7 @@ from ..domain import (
 )
 from ..execution import ExecutionError
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
-from .auth import Identity, require_admin, require_user
+from .auth import Identity, can_run_as_root, require_admin, require_user
 from .cancel import terminate_job
 from .routes_jobs import _owned_request
 # 모양 투영은 scan_path_stats 와 **한 벌**을 공유한다(routes_scan_paths.py:19-73 의
@@ -42,9 +41,12 @@ class RequestBody(BaseModel):
     options: dict = {}
     priority: str | None = None
     owner_username: str | None = None
-    # root 실행 명시(2026-09-30). StrictBool -- "yes"·1 같은 값이 root 로 승격되지 않게.
-    # 생략/False = 실행 신원의 LDAP uid/gid(관리자라도). identity.resolve_job_identity.
-    run_as_root: StrictBool = False
+    # root 실행(2026-09-30). True = root(자격 필요, 없으면 403), False/생략 = 실행 신원의 LDAP
+    # uid/gid. "관리자 기본 root" 는 **포탈**이 정해 확정값을 명시로 싣는다(SubmitJob
+    # rootEffective) -- 서버의 생략 기본값을 root 로 두면 옛 포탈 탭(생략 = 비 root 라고
+    # 표시)·me 판정이 어긋난 화면이 표시와 다른 root 로 돈다(적대적 리뷰). StrictBool --
+    # "yes"·1 같은 값이 root 로 승격되지 않게.
+    run_as_root: StrictBool | None = None
 
 
 def _require(value: str | None, reason: str) -> str:
@@ -53,7 +55,8 @@ def _require(value: str | None, reason: str) -> str:
     return value
 
 
-def _validated_payload(body: RequestBody, priority: str) -> tuple[dict, str]:
+def _validated_payload(body: RequestBody, priority: str,
+                       run_as_root: bool) -> tuple[dict, str]:
     op = Operation(body.operation)
     if priority not in PRIORITIES:
         raise DomainValidationError("invalid_priority", priority)
@@ -82,9 +85,9 @@ def _validated_payload(body: RequestBody, priority: str) -> tuple[dict, str]:
         payload, key = build_data_payload(
             "scan", storage=storage, target=body.target, options=body.options)
     payload["owner_username"] = body.owner_username
-    # 명시한 경우에만 키를 싣는다 -- 생략은 "root 아님" 이고 planner 는 `is True` 로만
-    # 승격한다(모름을 특권 쪽으로 읽지 않는다).
-    if body.run_as_root:
+    # 확정된 root 일 때만 키를 싣는다 -- 키 부재는 "root 아님" 이고 planner 는 `is True`
+    # 로만 승격한다(모름을 특권 쪽으로 읽지 않는다).
+    if run_as_root:
         payload["run_as_root"] = True
     return payload, key
 
@@ -107,8 +110,8 @@ def submit(body: RequestBody, request: Request,
             and body.operation not in settings.user_allowed_operations):
         raise HTTPException(status_code=403, detail="operation_admin_only")
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요.
-    # 다른 사용자로 실행하는 것 자체가 특권이다 -- 2026-09-30 부터 그 실행은 root 가
-    # 아니라 **그 사용자의 uid/gid** 로 돈다(run_as_root 를 따로 명시해야 root).
+    # 다른 사용자로 실행하는 것 자체가 특권이다 -- 2026-09-30 부터 그 실행은 기본이
+    # **그 사용자의 uid/gid** 다(run_as_root 를 명시해야 root -- 포탈은 이 경우 체크박스를 끈다).
     owner = body.owner_username
     if owner is not None and owner != identity.actor:
         authorized = (identity.role == "admin"
@@ -119,17 +122,18 @@ def submit(body: RequestBody, request: Request,
     # root 실행 게이트: planner 와 같은 자격(세션 인증 포함)을 제출 시점에 즉시 확인한다
     # -- 통과 못 할 요청을 Pending 으로 받아 뒀다가 계획 때 거부하지 않는다. planner 도
     # 다시 확인한다(DB 가 신뢰 경계라 payload 변조·설정 변경을 막는 2차 방어).
-    if body.run_as_root and not (identity.role == "admin" and privilege_eligible(
-            requester_id=identity.actor,
-            allow_privileged=settings.allow_privileged_requesters,
-            privileged_requesters=settings.privileged_requesters,
-            session_authenticated=(identity.auth == "session"))):
+    # 서버는 **명시한 True 만** root 로 받는다 -- 생략·False 는 비 root(fail-closed). "관리자는
+    # 기본 root"(사용자 결정 2026-09-30)와 "다른 실행 신원이면 기본 그 사용자 권한"은 포탈이
+    # 정해 확정값을 명시로 싣는다(SubmitJob rootEffective). 생략을 root 로 읽으면 옛 포탈 탭·
+    # 판정이 어긋난 화면이 "비 root" 라고 표시한 채 root 로 돈다.
+    run_as_root = body.run_as_root is True
+    if run_as_root and not can_run_as_root(identity, settings):
         raise HTTPException(status_code=403, detail="privileged_not_authorized")
 
     repos = request.app.state.repos
     priority = resolve_priority(repos, body.operation, body.priority)
     try:
-        payload, resource_key = _validated_payload(body, priority)
+        payload, resource_key = _validated_payload(body, priority, run_as_root)
     except (DomainValidationError, ValueError) as e:
         reason = getattr(e, "reason_code", "invalid_operation")
         raise HTTPException(status_code=422, detail=reason)

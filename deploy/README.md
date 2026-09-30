@@ -176,8 +176,17 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
 운영 아티팩트 base(`/cephfs/dms/artifacts`)가 `root:root` 라 65532 로는 3홉 쓰기
 왕복 검증이 항상 실패했기 때문이다. 이 결정에 따라오는 **배포 전제** 네 가지:
 
-1. **base 와 `<base>/<job_id>` 는 root:root · 비-world-writable** (`chmod 755`, 권장
-   `700`). 러너가 `<job_id>` 를 root 로 만들고 `<phase>` 만 요청자에게 chown 한다.
+1. **base 와 `<base>/<job_id>` 는 root:root · 비-world-writable, 단 base 는 other 실행(x)
+   필수** (`chmod 755` 또는 `711`; **700/750/770 금지** — 2026-09-30 감사 정정, 예전
+   "권장 700" 은 틀렸다). 러너가 `<job_id>` 를 root 로 만들고 `<phase>` 만 요청자에게 chown 하며,
+   도구는 요청자 uid·**주 gid 만**(보조 그룹 없음)으로 `<phase>` 의 mpi-hostfile·rank.sh 를
+   읽고 dscan 리포트를 쓴다 — base 를 x 로 통과하지 못하면 비 root 잡(일반 사용자 전부,
+   실행 신원을 지정한 관리자 잡)이 preview/execution 에서 "unable to open the hostfile" 로
+   죽는다. 잡 파드는 base 를 전용 마운트하므로 base 의 **부모**(공용 디렉터리)는 770 으로
+   잠가도 된다. preflight 가 실행 신원 uid 로 `test -x` 해 `artifact_base_not_traversable`
+   로 먼저 거부한다(3홉 검증은 root 관점이라 이 조건을 못 본다). 그룹으로 여는 750/770 은
+   그룹이 **모든 요청자의 주 gid** 일 때만 통한다. 상속 default ACL(POSIX/GPFS/NFSv4)이
+   `<job_id>`·`<phase>` 를 좁히면 요청자 통과와 제어면의 other 읽기가 함께 깨지므로 확인할 것.
    base 가 world-writable 이면 요청자가 `<job_id>` 를 미리 만들어 봉쇄 기준을 옮길 수
    있다. 3홉 검증이 이를 **강제**한다: 소유자가 제어면 euid(root)가 아니면
    `artifact_base_not_owned`, `o+w` 면 `artifact_base_world_writable` (sticky 여도).
@@ -830,13 +839,17 @@ ingress-nginx v1.15.1(IngressClass `nginx`).
   list is **eligibility only** (2026-09-30 incident: an admin's sync with
   "실행 신원 = a user" ran as root and rewrote another user's 700 destination
   to the source owner). A single request runs as **uid 0/gid 0 (root)** --
-  skipping the LDAP node-identity check -- only when it explicitly asks
-  (`run_as_root: true`, the portal's 'root 권한으로 실행' checkbox) AND the
-  authenticated requester is eligible (session auth + in the list; otherwise
-  403 `privileged_not_authorized`). Without the flag even an eligible admin
-  runs as the run identity's LDAP uid/gid (`owner_username`, else the
-  requester) -- so a local admin account that is not in LDAP must either set
-  실행 신원 or tick root, or the request is Rejected `ldap_identity_not_found`.
+  skipping the LDAP node-identity check -- only when the body says
+  `run_as_root: true` AND the authenticated requester is eligible (admin +
+  session auth + in the list; otherwise 403 `privileged_not_authorized`). An
+  omitted or false `run_as_root` is non-root on the server. The "admins run as
+  root by default" rule lives in the **portal**: for an eligible admin the
+  'root 권한으로 실행' checkbox starts ticked, EXCEPT when 실행 신원
+  (`owner_username`) names another user -- then it starts unticked and the job
+  runs as that user's LDAP uid/gid (the incident path); the portal always sends
+  the resolved value explicitly for admins. `GET /api/auth/me` returns
+  `can_run_as_root` so the portal only offers/defaults root to eligible admins.
+  API scripts that want root must send `run_as_root: true` over a session.
   Batch children keep "root if the batch creator is eligible". The stepper
   re-checks every root job against its request before each submission and
   fails it closed (`privilege_not_requested`) if neither `run_as_root` nor a

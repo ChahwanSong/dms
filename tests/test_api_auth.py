@@ -24,7 +24,7 @@ def test_shared_token_grants_admin(client):
     # 정규화된다(임의 actor 지정은 이제 400 -- test_actor_spoof_regression 이 고정).
     r = client.get("/api/auth/me", headers={"Authorization": "Bearer tok-shared"})
     assert r.status_code == 200
-    assert r.json() == {"actor": "shared-token", "role": "admin"}
+    assert r.json() == {"actor": "shared-token", "role": "admin", "can_run_as_root": False}
 
 
 def test_wrong_token_rejected(client):
