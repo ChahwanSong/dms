@@ -205,6 +205,19 @@ export interface Policy {
   updated_by: string;
 }
 
+// 사용자 sync 허용 스토리지 쌍(2026-09-30, 서버 repositories/sync_pairs.py). 방향이 있다
+// (소스 → 목적지; A → B 와 B → A 는 별개, A → A 도 하나의 쌍). 기본 전부 불가.
+export interface SyncPair {
+  source_storage: string; destination_storage: string;
+  created_at?: string; created_by?: string;
+}
+// /api/user/sync-pairs: restricted=false 면 제한 없음(관리자 -- 화면은 거르지 않는다).
+// 사용자에겐 자기가 고를 수 있는 스토리지(활성 + 사용자 공개)끼리의 쌍만 온다.
+export interface UserSyncPairs {
+  restricted: boolean;
+  pairs: { source_storage: string; destination_storage: string }[];
+}
+
 export interface DenyEntry {
   subject_type: string;
   subject: string;

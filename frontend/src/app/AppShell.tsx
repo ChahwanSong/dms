@@ -3,17 +3,16 @@ import { NavLink, useLocation } from "react-router-dom";
 import { ChevronDown, HardDrive } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMe } from "../features/auth/useAuth";
-import { NAVIGATION, activeNavPath, groupLabelFor } from "./navigation";
+import { NAVIGATION, activeNavPath } from "./navigation";
 import type { NavGroup, NavSection } from "./navigation";
 import { UserPanel } from "./UserPanel";
 import { Breadcrumb } from "./Breadcrumb";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { loadNavCollapsed, saveNavCollapsed } from "../lib/navState";
 
 // L4(e2e layout.ts): 링크 높이 < 2×line-height. text-sm(20px)이면 한계 40px 라
 // DS 의 44px 항목이 위반이다 -- leading-6(24px)으로 한계를 48px 로 올리고
 // py-2.5(10px×2)+24px=44px 로 DS 높이와 L4 를 동시에 만족시킨다.
-export const NAV_COLLAPSED_KEY = "dms.nav.collapsed.v2";
-
 const linkCls = (active: boolean) =>
   `flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm leading-6 ${
     active ? "bg-infobg text-accent font-medium" : "text-ink hover:bg-panel"}`;
@@ -37,13 +36,29 @@ function NavItemLink({ path, label, icon: Icon, active }: {
 function Group({ group, collapsed, onToggle, activePath }: {
   group: NavGroup; collapsed: boolean; onToggle: () => void; activePath: string | null;
 }) {
+  // 접힌 그룹이 지금 화면을 품고 있으면 헤더로 위치를 알린다(2026-09-30): 경로 이동이 접힘을
+  // 풀지 않으므로(사용자 결정 "접힘 상태 유지") 대신 헤더가 "여기 있다"를 말한다.
+  const hidesActive = collapsed && group.items.some((it) => it.path === activePath);
   return (
     <div>
       {/* 그룹 헤더는 <a> 가 아니라 <button> -- e2e L4 의 `aside a` 셀렉터를
-          오염시키지 않으면서 접기 토글을 제공한다. */}
+          오염시키지 않으면서 접기 토글을 제공한다. 접근성 이름은 내용에서 나오는 그룹 라벨
+          그대로 -- "현재 화면" 표식은 aria-hidden 으로 이름에서 빼고 aria-describedby 로만
+          덧붙인다(이름이 바뀌면 토글을 찾는 테스트·보조기술 사용자가 헷갈린다). aria-label 을
+          달지 않는 이유: 라벨 속성은 getByLabel 류가 폼 필드와 같이 줍는다 -- "스토리지" 그룹
+          버튼이 단일 작업 폼의 "스토리지" 셀렉트와 겹쳐 e2e(E4)가 strict 위반으로 깨졌다. */}
       <button type="button" onClick={onToggle} aria-expanded={!collapsed}
-              className="w-full flex items-center justify-between px-3 pt-3 pb-1 text-xs font-medium text-muted">
-        {group.label}
+              aria-describedby={hidesActive ? `nav-here-${group.label}` : undefined}
+              className={`w-full flex items-center justify-between px-3 pt-3 pb-1 text-xs font-medium ${
+                hidesActive ? "text-accent" : "text-muted"}`}>
+        <span className="flex items-center gap-1.5">
+          {group.label}
+          {hidesActive && (
+            <span id={`nav-here-${group.label}`} aria-hidden className="inline-flex items-center gap-1 font-normal">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent" />현재 화면
+            </span>
+          )}
+        </span>
         <ChevronDown className={`h-3.5 w-3.5 transition-transform ${collapsed ? "-rotate-90" : ""}`} aria-hidden />
       </button>
       {!collapsed && group.items.map((item) => (
@@ -59,41 +74,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   // 사이드바 활성 항목(최장 일치 하나) -- NavItemLink 주석 참고.
   const activePath = activeNavPath(pathname);
-  // 접힘 규칙(사용자 결정 2026-08-19 재조정 → 2026-09-30 "왼쪽 메뉴 전체를 기본 다
-  // 펼쳐져 있도록"): 그룹 토글은 **서로 독립**이고, 사용자가 접거나 연 상태는 화면을
-  // 이동해도 유지된다. 규칙 둘: ① 첫 진입(새 탭)엔 **모든 그룹이 펼쳐져** 있다.
-  // ② 경로 이동은 그 화면의 그룹을 **열기만** 한다 -- 사용자가 접어 둔 그룹의 화면으로
-  // 가면 자기 위치가 보이게 연다(e2e 04 가 잡 화면에서 사이드바 링크를 클릭한다).
+  // 접힘 규칙(사용자 결정 2026-09-30 "처음 로그인했을 때 전부 펼치고, 그 후 메뉴를 오갈 때는
+  // 접힘 상태 유지"): 그룹 토글은 **서로 독립**이고 ① 로그인 직후엔 **모든 그룹이 펼쳐져**
+  // 있다(useLogin 성공이 저장분을 지운다 -- lib/navState) ② 그 뒤 사용자가 접거나 연 상태는
+  // 화면 이동·새로고침·새 탭에서도 **그대로**다 -- 경로 이동이 그룹을 자동으로 열지 않는다
+  // (예전 자동 펼침은 "유지" 를 깼다). 접힌 그룹이 지금 화면을 품으면 헤더가 "현재 화면" 으로
+  // 위치를 알린다(Group).
   //
-  // sessionStorage 인 이유: AppRouter 가 <ErrorBoundary key={pathname}> 로 경로마다
-  // 셸을 **통째로 리마운트**하므로(에러 상태 리셋용 -- router.tsx 주석) useState 만
-  // 으로는 이동할 때마다 접힘이 초기화된다(사용자 보고: "클릭하면 나머지가 자동으로
-  // 접힌다"). 컴포넌트 밖에 남겨야 리마운트를 넘고, 탭 단위(session)라 새 접속의
-  // 초기 규칙 ①도 산다 -- localStorage 면 ①이 죽는다.
-  // 상태 키는 렌더와 같은 `${section.label}:${group.label}` 이다 -- 맨 라벨을
-  // 쓰면 초기화가 렌더 조건과 어긋나 조용히 무시된다(실제로 겪었다).
-  const keysOf = (label: string | null) =>
-    NAVIGATION.flatMap((s) => (s.groups ?? [])
-      .filter((g) => g.label === label).map((g) => `${s.label}:${g.label}`));
-  // 키 v2(2026-09-30): 옛 규칙(현재 그룹만 열림)이 저장한 접힘 맵을 버린다 -- 배포 뒤에도
-  // 이미 열려 있던 탭이 옛 접힘을 끌고 오면 "기본 전부 펼침" 이 그 탭에선 안 보인다.
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
-    try {
-      const saved = JSON.parse(sessionStorage.getItem(NAV_COLLAPSED_KEY) ?? "");
-      if (saved && typeof saved === "object") return saved as Record<string, boolean>;
-    } catch { /* 저장분 없음/파싱 불가/스토리지 차단 -- 초기 규칙으로 */ }
-    return {};   // 규칙 ①: 모두 펼침(접힘 맵이 비어 있으면 어떤 그룹도 접히지 않는다)
-  });
-  useEffect(() => {
-    try { sessionStorage.setItem(NAV_COLLAPSED_KEY, JSON.stringify(collapsed)); }
-    catch { /* 스토리지 차단 환경이면 유지 없이 초기 규칙만 -- 기능은 산다 */ }
-  }, [collapsed]);
-  useEffect(() => {
-    for (const key of keysOf(groupLabelFor(pathname)))
-      setCollapsed((prev) => (prev[key] ? { ...prev, [key]: false } : prev));
-    // keysOf 는 NAVIGATION(모듈 상수) 파생이라 pathname 만 의존성이면 충분하다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname]);
+  // 컴포넌트 밖(localStorage)에 두는 이유: AppRouter 가 라우트마다 셸을 **통째로 리마운트**
+  // 하므로(<ErrorBoundary key={pathname}>, router.tsx) useState 만으로는 이동할 때마다
+  // 초기화된다(사용자 보고: "클릭하면 나머지가 자동으로 접힌다").
+  // 상태 키는 렌더와 같은 `${section.label}:${group.label}` 이다.
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadNavCollapsed);
+  useEffect(() => { saveNavCollapsed(collapsed); }, [collapsed]);
 
   // adminOnly 는 그룹·항목 양쪽에서 걸러낸다. 항목이 다 걸러진 그룹은 헤더째
   // 숨긴다 -- 비관리자에게 빈 그룹 껍데기를 보이지 않기 위해서다(표시 게이트일

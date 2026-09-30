@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import { postWithSealedPassword } from "../../lib/passwordTransport";
+import { resetNavCollapsed } from "../../lib/navState";
 import type { Me } from "../../lib/types";
 
 export const useMe = () =>
@@ -14,7 +15,8 @@ export function useLogin() {
   return useMutation({
     mutationFn: (b: { username: string; password: string }) =>
       postWithSealedPassword<Me>("/api/auth/login", "login", b),
-    onSuccess: () => qc.clear(),
+    // 사이드바 접힘 리셋(2026-09-30): 로그인 직후엔 메뉴가 전부 펼쳐진다(lib/navState).
+    onSuccess: () => { qc.clear(); resetNavCollapsed(); },
   });
 }
 
@@ -45,6 +47,6 @@ export function useLogout() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiSend("POST", "/api/auth/logout"),
-    onSettled: () => qc.clear(),
+    onSettled: () => { qc.clear(); resetNavCollapsed(); },
   });
 }

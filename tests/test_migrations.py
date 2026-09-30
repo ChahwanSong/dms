@@ -580,9 +580,11 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     actual = {n for n in _table_names(db) if not n.startswith("sqlite_")}
     # verification_codes(2026-08-20): 계정 셀프서비스 인증번호(4자리·5분 TTL) --
     # 스펙 §4 도메인 모델 밖의 인증 보조 테이블이라 batches 류처럼 명시 추가.
+    # sync_pairs(2026-09-30): 사용자 sync 허용 스토리지 쌍 -- 스펙 §4 밖의 정책 보조 테이블이라
+    # verification_codes 처럼 명시 추가(ALL_TABLES 19 계약은 그대로).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
-                                        "verification_codes"}
+                                        "verification_codes", "sync_pairs"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):

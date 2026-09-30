@@ -4,6 +4,7 @@ from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from ..db import utc_now_iso
 from ..execution import ExecutionError
 from ..repositories.storages import storage_open_to_users
+from ..repositories.sync_pairs import sync_pair_allowed
 from .auth import Identity, require_user
 from .cancel import terminate_job
 
@@ -74,6 +75,11 @@ def confirm_job(job_id: str, body: ConfirmBody, request: Request,
             row = repos.storages.get(name) if name else None
             if row is not None and row["enabled"] == 1 and not storage_open_to_users(row):
                 raise HTTPException(status_code=403, detail="storage_admin_only")
+        # 사용자 sync 허용 쌍(repositories/sync_pairs.py): 컨펌 대기 중 허용이 빠진 사용자 sync 도
+        # 실행 시작을 막는다(같은 이유 -- 제출·계획 게이트만으로는 preview TTL 동안 샌다).
+        if job["operation"] == "sync" and not sync_pair_allowed(
+                repos, job.get("source_storage"), job.get("destination_storage")):
+            raise HTTPException(status_code=403, detail="sync_pair_not_allowed")
     repos.data_jobs.set_confirmed(job_id, body.fingerprint)
     repos.data_jobs.set_job_state(job_id, DataJobState.EXECUTING, actor=identity.actor)
     return {"state": "Executing"}

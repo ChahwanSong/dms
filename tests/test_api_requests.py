@@ -1,6 +1,21 @@
+import pytest
+
 from dms.domain import DataJobState, RequestState
 
 ADMIN = {"Authorization": "Bearer tok-shared"}
+
+
+@pytest.fixture(autouse=True)
+def _allow_user_sync_pairs(client):
+    # 사용자 sync 허용 쌍(2026-09-30, 기본 전부 불가): 이 파일의 사용자 sync 는 목록·격리·필터·
+    # 검증이 관심사라 쓰는 쌍을 미리 허용한다(게이트 자체는 test_sync_pairs 가 고정한다). 쌍은
+    # 등록된 스토리지끼리만 되므로(SyncPairsRepository.add) 스토리지부터 둔다.
+    repos = client.app.state.repos
+    for name in ("s1", "s2", "s"):
+        repos.storages.create(storage_name=name, mount_path=f"/mnt/{name}",
+                              managed_root=f"/mnt/{name}/dms", backend_type="cephfs", actor="test")
+    for source, destination in (("s1", "s1"), ("s1", "s2"), ("s", "s")):
+        repos.sync_pairs.add(source, destination, actor="test")
 
 
 def _login(client, name):
@@ -32,6 +47,8 @@ def test_submit_scan_and_poll(client):
 
 def test_validation_maps_to_422(client):
     _login(client, "bob")
+    # 사용자 sync 허용 쌍(2026-09-30): 정책 게이트(403 sync_pair_not_allowed)는 다른 게이트들처럼
+    # 형식 검증보다 앞이라, 검증 경로는 파일 픽스처가 허용해 둔 s -> s 로 본다.
     # 사용자 allowlist(2026-08-20): 사용자는 sync 만 -- sync 검증 오류만 여기서.
     cases = [
         ({"operation": "sync", "source_storage": "s", "source": "a",

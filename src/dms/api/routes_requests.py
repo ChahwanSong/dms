@@ -10,6 +10,7 @@ from ..domain import (
 )
 from ..execution import ExecutionError
 from ..repositories.storages import storage_open_to_users
+from ..repositories.sync_pairs import sync_pair_allowed
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, can_run_as_root, require_admin, require_user
 from .cancel import terminate_job
@@ -118,6 +119,15 @@ def submit(body: RequestBody, request: Request,
             row = request.app.state.repos.storages.get(storage_name) if storage_name else None
             if row is not None and row["enabled"] == 1 and not storage_open_to_users(row):
                 raise HTTPException(status_code=403, detail="storage_admin_only")
+    # 사용자 sync 허용 스토리지 쌍(2026-09-30, repositories/sync_pairs.py): 기본 전부 불가 --
+    # 관리자가 허용한 (소스 -> 목적지) 쌍만. 포탈의 후보 필터는 표시일 뿐이라 여기서 막는다
+    # (planner·컨펌이 다시 본다 -- 대기 중 허용이 빠진 요청). 스토리지 필드가 빠진 요청은
+    # 아래 검증이 정확한 422(missing_*)를 내도록 쌍 검사를 건너뛴다.
+    if (identity.role != "admin" and body.operation == Operation.SYNC.value
+            and body.source_storage and body.destination_storage
+            and not sync_pair_allowed(request.app.state.repos, body.source_storage,
+                                      body.destination_storage)):
+        raise HTTPException(status_code=403, detail="sync_pair_not_allowed")
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요.
     # 다른 사용자로 실행하는 것 자체가 특권이다 -- 2026-09-30 부터 그 실행은 기본이
     # **그 사용자의 uid/gid** 다(run_as_root 를 명시해야 root -- 포탈은 이 경우 체크박스를 끈다).

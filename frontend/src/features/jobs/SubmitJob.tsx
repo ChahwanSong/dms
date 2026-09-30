@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useSubmitRequest } from "./useJobs";
 import type { SubmitBody } from "./useJobs";
 import { useUserStorages } from "../storages/useUserStorages";
+import { useUserSyncPairs } from "../policies/useSyncPairs";
 import { useMe } from "../auth/useAuth";
 import { Card } from "../../components/ui/Card";
 import { InfoCard } from "../../components/ui/InfoCard";
@@ -14,6 +15,7 @@ import { ApiError } from "../../lib/api";
 // 이 파일이 통째로 갈려도 SubmitScan·ScanPaths 가 흔들리지 않게 결합을 끊었다.
 import { StoragePicker, field } from "./formFields";
 import { destinationParent } from "../../lib/storagePaths";
+import { pairAllowed, syncChoices } from "../../lib/syncPairs";
 // 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션 스텝과 공유한다
 // (사본이면 미러가 발산한다).
@@ -105,6 +107,22 @@ export function SubmitJob() {
   // sync 목적지의 상위 디렉토리(쓰기 권한이 필요한 곳) -- 관리 디렉토리를 알면 절대경로로.
   const destRoot = storages.find((s) => s.storage_name === f.destStorage)?.managed_root;
   const destParentAbs = f.destPath.trim() === "" ? null : destinationParent(destRoot, f.destPath.trim());
+  // 사용자 sync 허용 쌍(2026-09-30 사용자 결정: 기본 전부 불가 + 관리자가 허용한 소스 → 목적지 쌍).
+  // 관리자는 제한이 없어 조회하지 않는다. 선택지 필터는 표시일 뿐 -- 제출·계획·컨펌이 서버에서 다시
+  // 본다(sync_pair_not_allowed). 신원·허용 목록을 알기 전에는 sync 선택지를 비운다: 거르기 전 목록이
+  // 잠깐 보였다 사라지면 그 사이 고른 값이 허용 밖일 수 있다.
+  const needPairs = me.data !== undefined && !isAdmin;
+  const pairsQ = useUserSyncPairs(needPairs);
+  const pairsError = needPairs && pairsQ.data === undefined && pairsQ.isError;
+  const pairsPending = me.data === undefined || (needPairs && pairsQ.data === undefined && !pairsQ.isError);
+  // null = 제한 없음(관리자, 또는 서버가 restricted=false 라고 한 경우 -- 서버 판정이 진실).
+  const allowedPairs = needPairs && pairsQ.data?.restricted ? pairsQ.data.pairs : null;
+  const { sources: sourceChoices, destinations: destChoices } = pairsPending || pairsError
+    ? { sources: [], destinations: [] }
+    : allowedPairs === null ? { sources: storages, destinations: storages }
+    : syncChoices(storages, allowedPairs, f.sourceStorage, f.destStorage);
+  const pairBlocked = allowedPairs !== null && f.sourceStorage !== "" && f.destStorage !== ""
+    && !pairAllowed(allowedPairs, f.sourceStorage, f.destStorage);
 
   const recursiveMissing = f.operation === "rm" && !f.recursive;
   const statLiteConflict = f.operation === "rm" && f.stat && f.lite;
@@ -130,9 +148,10 @@ export function SubmitJob() {
   // trim() 로 공백만 있는 입력도 미입력으로 본다.
   const targetInvalid = f.operation === "sync"
     ? (f.sourceStorage === "" || f.sourcePath.trim() === ""
-       || f.destStorage === "" || f.destPath.trim() === "")
+       || f.destStorage === "" || f.destPath.trim() === "" || pairBlocked)
     : (f.storage === "" || f.target.trim() === "");
   const blocked = submit.isPending || recursiveMissing || statLiteConflict || storagesQ.isError
+    || (f.operation === "sync" && pairsError)
     || verboseQuietConflict || advancedError !== null || targetInvalid;
   // 옵션 스텝 국소 검증: 오류를 그 스텝에서 보게 하고 "다음"을 잠근다.
   // blocked 와 별도인 이유: storagesQ.isError 등은 옵션 스텝 잘못이 아니라
@@ -273,18 +292,38 @@ export function SubmitJob() {
               {storagesQ.isError && (
                 <p className="text-bad text-sm">{(storagesQ.error as ApiError).message}</p>
               )}
+              {f.operation === "sync" && pairsError && (
+                <p className="text-bad text-sm">
+                  {`허용된 스토리지 조합을 불러오지 못했습니다: ${(pairsQ.error as ApiError).message}`}
+                </p>
+              )}
               {f.operation === "sync" ? (
                 <div className="grid grid-cols-2 gap-3">
                   <StoragePicker label="소스 스토리지" value={f.sourceStorage}
-                    onChange={(v) => setF({ ...f, sourceStorage: v })} storages={storages} loading={loadingStorages} />
+                    onChange={(v) => setF({ ...f, sourceStorage: v })} storages={sourceChoices}
+                    loading={loadingStorages || pairsPending} />
                   <label className="text-sm">소스 경로
                     <input aria-label="소스 경로" className={field} value={f.sourcePath} onChange={on("sourcePath")} />
                   </label>
                   <StoragePicker label="목적지 스토리지" value={f.destStorage}
-                    onChange={(v) => setF({ ...f, destStorage: v })} storages={storages} loading={loadingStorages} />
+                    onChange={(v) => setF({ ...f, destStorage: v })} storages={destChoices}
+                    loading={loadingStorages || pairsPending} />
                   <label className="text-sm">목적지 경로
                     <input aria-label="목적지 경로" className={field} value={f.destPath} onChange={on("destPath")} />
                   </label>
+                  {/* 허용 조합 안내(사용자에게만): 선택지가 왜 줄었는지와 다른 조합을 보는 법. */}
+                  {allowedPairs !== null && (allowedPairs.length === 0 ? (
+                    <p className="col-span-2 text-sm text-bad" role="note" aria-label="허용된 스토리지 조합">
+                      관리자가 허용한 sync 스토리지 조합이 없어 지금은 sync 를 요청할 수 없습니다 — 관리자에게
+                      필요한 소스 → 목적지 조합의 허용을 요청하세요.
+                    </p>
+                  ) : (
+                    <p className="col-span-2 text-xs text-muted" role="note" aria-label="허용된 스토리지 조합">
+                      관리자가 허용한 소스 → 목적지 조합({allowedPairs.length}개)만 선택지에 보입니다 — 한쪽을
+                      고르면 다른 쪽은 그와 짝이 되는 스토리지만 남습니다. 다른 조합을 보려면 한쪽을
+                      「선택하세요」로 되돌리세요.
+                    </p>
+                  ))}
                   {/* 목적지 권한 조건(2026-09-30 사용자 요청: "상위 디렉토리에 쓰기 권한이 있어야
                       하는 조건을 분명히"). 근거: preflight _DEST_CHECK -- 목적지가 있으면 목적지
                       자체(쓰기·진입, 비 root 는 소유), 그리고 **항상** 상위 디렉토리 쓰기(dsync 가
@@ -321,9 +360,9 @@ export function SubmitJob() {
               {/* sanity 안내(슬라이스 39): 스토리지·경로가 비면 다음이 잠긴다. */}
               {targetInvalid && (
                 <p className="text-bad text-sm">
-                  {f.operation === "sync"
-                    ? "소스·목적지 스토리지와 경로를 모두 입력하세요"
-                    : "스토리지와 대상 경로를 입력하세요"}
+                  {f.operation !== "sync" ? "스토리지와 대상 경로를 입력하세요"
+                    : pairBlocked ? "허용되지 않은 소스 → 목적지 조합입니다 — 관리자가 허용한 조합만 sync 할 수 있습니다"
+                    : "소스·목적지 스토리지와 경로를 모두 입력하세요"}
                 </p>
               )}
             </div>
@@ -606,6 +645,14 @@ export function SubmitJob() {
                 </dl>
               </InfoPanel>
               {f.operation === "rm" && rmWarning}
+              {/* 허용 목록은 이 단계에 있는 동안에도 다시 읽힌다(포커스·staleTime) -- 관리자가 쌍을
+                  해제하면 제출이 잠기는데, 대상 단계의 문구만으로는 여기서 이유가 안 보인다. */}
+              {f.operation === "sync" && pairBlocked && (
+                <p className="text-bad text-sm" role="alert">
+                  허용되지 않은 소스 → 목적지 조합입니다(관리자가 허용을 해제했을 수 있습니다) — 대상 단계에서
+                  다시 고르세요.
+                </p>
+              )}
               {submit.isError && <p className="text-bad text-sm">{(submit.error as ApiError).message}</p>}
             </div>
           )}

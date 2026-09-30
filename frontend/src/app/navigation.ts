@@ -12,9 +12,9 @@ import {
 
 export interface NavItem { path: string; label: string; icon: LucideIcon; adminOnly?: boolean }
 // 접힘: 그룹 토글은 서로 독립(사용자 결정 2026-08-19 — 아코디언은 같은 날
-// 도입했다가 해제). 초기엔 **모든 그룹이 펼쳐져** 있으므로(AppShell, 2026-09-30 사용자
-// 요청) 그룹별 접힘 기본 필드는 없다 -- 사용자가 접은 그룹은 경로를 옮겨도 접힌 채고,
-// 그 그룹의 화면으로 이동하면 자동으로 열린다.
+// 도입했다가 해제). 로그인 직후엔 **모든 그룹이 펼쳐져** 있고 이후 사용자가 접고 편 상태는
+// 화면을 오가도 유지되므로(AppShell·lib/navState, 2026-09-30 사용자 결정) 그룹별 접힘 기본
+// 필드는 없다 -- 경로 이동은 그룹을 자동으로 열지 않는다(접힌 그룹은 헤더에 "현재 화면" 표식).
 export interface NavGroup { label: string; items: NavItem[]; adminOnly?: boolean }
 export interface NavSection {           // 최상위: 지금은 DMS 뿐(NAS·Monitoring 추후 추가)
   label: string; icon: LucideIcon;
@@ -87,16 +87,13 @@ export const DETAIL_ROUTES = [
   { pattern: "/admin/batches/new", label: "배치 생성", parent: "/admin/batches" },
   { pattern: "/admin/batches/:batchId", label: "배치 상세", parent: "/admin/batches" },
   // 빌드 이력은 사이드바 항목이 아니라 「빌드」의 하위 페이지(탭)다 -- 여기 있어야
-  // 크럼이 「… > 빌드 > 빌드 이력」이 되고 운영 그룹이 자동으로 펼쳐진다.
+  // 크럼이 「… > 빌드 > 빌드 이력」이 되고 사이드바가 「빌드」를 활성으로 칠한다.
   // ":buildId" 보다 앞인 것도 batches/new 와 같은 이유다("history" 가 매칭된다).
   { pattern: "/admin/builds/history", label: "빌드 이력", parent: "/admin/builds" },
   { pattern: "/admin/builds/images", label: "이미지 관리", parent: "/admin/builds" },
   { pattern: "/admin/builds/:buildId", label: "빌드 상세", parent: "/admin/builds" },
 ] as const;
 
-/** 경로가 속한 그룹 라벨(상세 라우트는 부모 항목의 그룹으로 귀속). 미지 경로는 null.
-    AppShell 의 「활성 그룹 자동 펼침」이 소비한다 -- 항목 스캔이 상세 패턴보다 먼저인
-    이유는 breadcrumbFor 와 같다(/jobs/new 가 :requestId 에도 매칭되므로). */
 // 사이드바 활성 항목: **최장 접두 일치 하나만**. NavLink 기본 판정(접두 일치)은
 // /jobs/new 에서 /jobs(내 작업)까지 함께 켠다(형제가 접두 관계인 유일한 쌍) --
 // end 를 달면 이번엔 상세(/jobs/:id, /admin/builds/history …)에서 부모 음영이
@@ -116,17 +113,6 @@ export function activeNavPath(pathname: string): string | null {
     }
   }
   return best;
-}
-
-export function groupLabelFor(pathname: string): string | null {
-  for (const section of NAVIGATION)
-    for (const group of section.groups ?? [])
-      for (const item of group.items)
-        if (matchPath(item.path, pathname) !== null) return group.label;
-  for (const detail of DETAIL_ROUTES)
-    if (matchPath(detail.pattern, pathname) !== null)
-      return groupLabelFor(detail.parent);
-  return null;
 }
 
 export interface Crumb { label: string; path?: string }

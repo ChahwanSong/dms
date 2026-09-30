@@ -79,7 +79,15 @@ def _client_with(db, **overrides):
             "DMS_PASSWORD_ENCRYPTION_REQUIRED": "false",
             "DMS_ALLOW_PRIVILEGED_REQUESTERS": "true", "DMS_PRIVILEGED_REQUESTERS": "ops",
             **overrides}
-    return TestClient(create_app(Settings.from_env(base), db))
+    client = TestClient(create_app(Settings.from_env(base), db))
+    # 사용자 sync 허용 쌍(2026-09-30, 기본 전부 불가): 이 파일은 root 게이트가 관심사라 SYNC 가 쓰는
+    # s1 -> s1 을 허용해 둔다(쌍 게이트 자체는 test_sync_pairs 가 고정한다; 쌍은 등록된 스토리지끼리만).
+    repos = client.app.state.repos
+    if repos.storages.get("s1") is None:
+        repos.storages.create(storage_name="s1", mount_path="/mnt/s1", managed_root="/mnt/s1/dms",
+                              backend_type="cephfs", actor="test")
+    repos.sync_pairs.add("s1", "s1", actor="test")
+    return client
 
 
 SYNC = {"operation": "sync", "source_storage": "s1", "source": "src",

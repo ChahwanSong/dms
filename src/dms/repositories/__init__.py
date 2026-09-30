@@ -11,6 +11,7 @@ from .builds import BuildsRepository
 from .observability import ObservabilityRepository
 from .releases import ReleasesRepository
 from .metrics import MetricsRepository
+from .sync_pairs import SyncPairsRepository
 
 
 class Repositories:
@@ -29,3 +30,4 @@ class Repositories:
         self.observability = ObservabilityRepository(db)
         self.releases = ReleasesRepository(db)
         self.metrics = MetricsRepository(db)
+        self.sync_pairs = SyncPairsRepository(db)

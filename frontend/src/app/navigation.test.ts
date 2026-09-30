@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { NAVIGATION, activeNavPath, breadcrumbFor, groupLabelFor } from "./navigation";
+import { NAVIGATION, activeNavPath, breadcrumbFor } from "./navigation";
 import type { NavItem } from "./navigation";
 
 // 메뉴는 데이터가 진실이다(슬라이스 31 T2) -- 이 파일은 그 데이터가 "현행 사이드바
@@ -42,7 +42,7 @@ test("최상위 섹션은 DMS 하나뿐이다(NAS·Monitoring 은 추후 추가 
 
 test("그룹 순서는 운영·작업·스토리지·관리다(접힘은 AppShell 아코디언이 정한다)", () => {
   // 홈=대시보드(운영)와 짝: 로그인 직후엔 활성 그룹(운영)만 열린다 -- 열림
-  // 상태는 데이터가 아니라 AppShell 의 아코디언(경로 기반)이라 여기선 순서만.
+  // 접힘 상태는 데이터가 아니라 AppShell(lib/navState -- 사용자 토글 유지)의 몫이라 여기선 순서만.
   const groups = NAVIGATION[0].groups ?? [];
   expect(groups.map((g) => g.label)).toEqual(["운영", "작업", "스토리지", "관리"]);
 });
@@ -50,17 +50,6 @@ test("그룹 순서는 운영·작업·스토리지·관리다(접힘은 AppShel
 test("작업 그룹은 단일 작업(제출)이 내 작업(목록)보다 위다(사용자 결정 2026-08-19)", () => {
   const jobs = (NAVIGATION[0].groups ?? []).find((g) => g.label === "작업")!;
   expect(jobs.items.map((i) => i.label)).toEqual(["단일 작업", "전체 작업"]);
-});
-
-test("groupLabelFor: 경로가 속한 그룹을 찾고 상세 라우트는 부모로 귀속한다", () => {
-  // AppShell 의 「활성 그룹 자동 펼침」이 이 함수를 소비한다 -- 접힘 기본이어도
-  // 지금 보고 있는 화면의 그룹은 항상 열려 있어야 사이드바에서 자기 위치를 잃지
-  // 않는다(e2e 04 의 "내 작업" 클릭도 이 성질에 기댄다).
-  expect(groupLabelFor("/admin/dashboard")).toBe("운영");
-  expect(groupLabelFor("/jobs")).toBe("작업");
-  expect(groupLabelFor("/jobs/new")).toBe("작업");      // 상세 패턴보다 항목 우선
-  expect(groupLabelFor("/jobs/abc123")).toBe("작업");   // 상세 -> 부모 귀속
-  expect(groupLabelFor("/login")).toBeNull();
 });
 
 describe("breadcrumbFor", () => {
@@ -97,11 +86,11 @@ describe("breadcrumbFor", () => {
   });
 
   // 빌드는 사이드바 항목 하나(「빌드」) 아래 하위 페이지 둘(빌드하기·빌드 이력)이다 --
-  // 이력은 사이드바에 없으므로 DETAIL_ROUTES 를 타야 크럼과 그룹 펼침을 얻는다.
+  // 이력은 사이드바에 없으므로 DETAIL_ROUTES 를 타야 크럼과 활성 항목(「빌드」)을 얻는다.
   test("빌드 이력은 「빌드」 항목 아래 크럼을 단다", () => {
     expect(breadcrumbFor("/admin/builds/history").map((c) => c.label))
       .toEqual(["HOME", "DMS", "운영", "빌드", "빌드 이력"]);
-    expect(groupLabelFor("/admin/builds/history")).toBe("운영");
+    expect(activeNavPath("/admin/builds/history")).toBe("/admin/builds");
   });
 
   test("「history」가 :buildId 로 먹히지 않는다(DETAIL_ROUTES 순서)", () => {

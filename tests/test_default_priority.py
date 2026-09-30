@@ -73,6 +73,13 @@ def test_missing_policy_falls_back_to_mid(client, db):
 
 
 def test_rm_uses_rm_policy_and_sync_uses_dsync_policy(client):
+    # 사용자 sync 허용 쌍(2026-09-30, 기본 전부 불가) -- 우선순위가 관심사라 s1 -> s2 를 허용해 둔다
+    # (쌍은 등록된 스토리지끼리만 -- SyncPairsRepository.add).
+    repos = client.app.state.repos
+    for name in ("s1", "s2"):
+        repos.storages.create(storage_name=name, mount_path=f"/mnt/{name}",
+                              managed_root=f"/mnt/{name}/dms", backend_type="cephfs", actor="test")
+    repos.sync_pairs.add("s1", "s2", actor="test")
     _login(client, "dave")
     _set_default_priority(client, "rm", "low")
     _set_default_priority(client, "dsync", "high")
