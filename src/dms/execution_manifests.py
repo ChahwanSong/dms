@@ -273,11 +273,10 @@ _DEST_CHECK = (
     '{ echo DMS_PREFLIGHT_REASON=destination_not_writable; exit 1; }; '
     'if [ "$M" != root ] && [ "$(stat -c %u "$D")" != "$(id -u)" ]; then '
     'echo DMS_PREFLIGHT_REASON=destination_not_owned; exit 1; fi; '
-    'else '
+    'fi; '
     'dest_parent=$(dirname "$D"); '
     'test -w "$dest_parent" || '
-    '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; '
-    'fi; ')
+    '{ echo DMS_PREFLIGHT_REASON=destination_parent_not_writable; exit 1; }; ')
 
 
 def _preflight_script(spec, *, role=None):
@@ -300,14 +299,19 @@ def _preflight_script(spec, *, role=None):
     블록이 명시적으로 exit 1 한다(기존 마커 관용구와 동일한 형태).
 
     목적지 권한 검사(2026-09-30 프로덕션 사고, _DEST_CHECK): 예전엔 목적지가 이미 있어도
-    **부모**의 쓰기만 봤다. 그래서 (a) root 755 부모 아래 **본인 소유** 목적지로의 sync 가
-    거부됐고(오탐), (b) 부모가 쓰기 가능하면 남의 700 목적지도 통과시켜 실행 단계에서야
-    실패했다. 이제 목적지가 있으면 **목적지 자체**를 본다: 쓰기·진입(-w -x) 불가면
+    **부모**의 쓰기만 봐서, 부모가 쓰기 가능하면 남의 목적지도 통과시켜 실행 단계에서야
+    실패했다. 이제 목적지가 있으면 **목적지 자체**를 먼저 본다: 쓰기·진입(-w -x) 불가면
     destination_not_writable, 비특권 실행이면 소유자가 실행 uid 인지까지(아니면
     destination_not_owned). 소유를 요구하는 이유(실측): dsync 는 소스 최상위의 권한·시각
     (특권이면 소유까지)을 **기존 목적지 디렉터리에 적용**한다 -- 남 소유면 비특권은
     chmod()/utime() EPERM 으로 데이터를 다 복사한 뒤 Failed(부분 복사)가 되고, root 는
-    남의 디렉터리를 소스 소유로 덮어쓴다. 목적지가 없을 때만 부모 쓰기(만들 자리)를 본다.
+    남의 디렉터리를 소스 소유로 덮어쓴다.
+    부모 쓰기는 목적지가 **있어도** 본다(순서상 목적지 자체 다음): dsync(mpifileutils
+    포크 dsync.c "Destination parent directory is not writable")가 목적지 존재와 무관하게
+    부모 W_OK 를 요구하고, 실패하면 아무것도 복사하지 않은 채 **종료 코드 0** 으로 끝난다
+    (rc 초기값 0 인 채 goto ERROR; dry-run 에선 경고만이라 미리보기는 멀쩡해 보인다).
+    목적지가 있다고 부모 검사를 건너뛰면 "root 755 부모 아래 본인 디렉터리" sync 가 복사
+    0건 Succeeded 로 끝난다(2026-09-30 d139 실증에서 잡음 -- 그 판에서 한때 건너뛰었다).
     실행 모드("user"/"root")는 경로와 같이 positional 로 넘긴다(셸 인젝션 차단 관례)."""
     ap = _abs_paths(spec)
     mode = "root" if (spec.identity or {}).get("privileged") else "user"

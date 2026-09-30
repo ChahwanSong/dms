@@ -6,9 +6,10 @@ src → dst_fail(다른 사용자 903333 소유, 700) sync 를 냈다. 잡은 ui
 적용해 dst_fail 의 소유자가 903436:104 로 바뀐 채 성공했다. 그 사용자 권한으로는 들어갈 수도
 없는 디렉터리다. 테스트베드에서 같은 구조로 재현(identity uid 0, dst_fail bob→alice).
 
-부수 결함 두 개(같은 조사): preflight 가 기존 목적지에서도 **부모** 쓰기만 봐서 (a) root 755
-부모 아래 본인 소유 목적지로의 sync 를 거부했고, (b) 그룹 쓰기 가능한 남의 목적지는 통과시켜
-데이터를 복사한 뒤 chmod()/utime() EPERM 으로 Failed(부분 복사)가 됐다(실측).
+부수 결함(같은 조사): preflight 가 기존 목적지에서도 **부모** 쓰기만 봐서 그룹 쓰기 가능한 남의
+목적지는 통과시켜, 데이터를 복사한 뒤 chmod()/utime() EPERM 으로 Failed(부분 복사)가 됐다(실측).
+부모 쓰기 검사 자체는 목적지가 있어도 유지한다 -- dsync 가 부모 W_OK 를 요구하고 실패하면 복사
+0건·종료 코드 0 이다(d139 실증에서 한때 건너뛰었다가 "아무것도 안 한 Succeeded" 로 잡음).
 """
 import os
 import subprocess
@@ -213,7 +214,16 @@ _VOL = [{"name": "cephfs", "hostPath": {"path": "/cephfs"}, "mountPath": "/cephf
 root_user = pytest.mark.skipif(os.geteuid() == 0, reason="root 는 권한 검사를 우회한다")
 
 
-def _preflight(src, dst, *, privileged=False, role=None):
+def _preflight(src, dst, *, privileged=False, role=None, fake_owner=None, bindir=None):
+    """실제 셸로 preflight 스크립트를 돌린다. fake_owner: PATH 앞에 `stat` 대역을 둬서
+    목적지 소유 uid 를 흉내 낸다 -- 비 root 테스트 러너는 "쓰기 가능한 부모 아래 남 소유
+    디렉터리"를 만들 수 없어서다(스크립트는 `stat -c %u "$D"` 만 쓴다)."""
+    env = None
+    if fake_owner is not None:
+        fake = bindir / "stat"
+        fake.write_text(f"#!/bin/sh\necho {fake_owner}\n")
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
     spec = JobSpec(job_id="j1", phase="preflight", operation="sync", tool="dsync",
                    dryrun=False,
                    identity={"uid": 0 if privileged else os.getuid(),
@@ -226,7 +236,7 @@ def _preflight(src, dst, *, privileged=False, role=None):
                    artifact_base="file:///cephfs/dms/artifacts")
     cmd = build_preflight_pod(spec, job_image="i", namespace="dms", volumes=_VOL,
                               node="n1", role=role)["spec"]["containers"][0]["command"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     return proc.returncode, proc.stdout
 
 
@@ -239,8 +249,11 @@ def _marker(out):
 
 @root_user
 @pytest.mark.parametrize("role", [None, "destination"])
-def test_own_destination_under_a_non_writable_parent_now_passes(tmp_path, role):
-    # 사고 조사 (a): 부모(root 755 흉내 = 0555) 아래 **본인 소유** 목적지는 통과해야 한다.
+def test_own_destination_under_a_non_writable_parent_is_still_rejected(tmp_path, role):
+    # dsync 는 목적지가 있어도 부모 W_OK 를 요구하고, 실패하면 복사 0건으로 **종료 코드 0**
+    # 이다(포크 dsync.c "Destination parent directory is not writable"). 목적지가 있다고
+    # 부모 검사를 건너뛰면 이 경우가 "Succeeded(아무것도 안 함)" 가 된다 -- d139 실증에서
+    # alice 의 본인 dst(부모 dms_test = root 755) sync 가 정확히 그렇게 끝났다.
     src = tmp_path / "src"; src.mkdir()
     parent = tmp_path / "dms_test"; parent.mkdir()
     dst = parent / "dst"; dst.mkdir()
@@ -249,7 +262,7 @@ def test_own_destination_under_a_non_writable_parent_now_passes(tmp_path, role):
         rc, out = _preflight(str(src), str(dst), role=role)
     finally:
         parent.chmod(0o755)
-    assert (rc, _marker(out)) == (0, "OK")
+    assert (rc, _marker(out)) == (1, "destination_parent_not_writable")
 
 
 @root_user
@@ -270,18 +283,39 @@ def test_existing_destination_without_write_permission_is_rejected(tmp_path, rol
 def test_writable_destination_owned_by_someone_else_is_rejected_for_a_user(tmp_path, role):
     # 사고 조사 (b): 그룹/모두 쓰기 가능한 남의 디렉터리(여기선 root 소유 1777 인 /tmp) --
     # 비특권 sync 는 데이터를 복사한 뒤 최상위 chmod/utime EPERM 으로 Failed 가 된다.
+    # 목적지 자체 검사가 부모 검사보다 앞이라 /tmp 의 부모(/, 쓰기 불가)보다 소유가 먼저 걸린다.
     assert os.stat("/tmp").st_uid != os.getuid()
     src = tmp_path / "src"; src.mkdir()
     rc, out = _preflight(str(src), "/tmp", role=role)
     assert (rc, _marker(out)) == (1, "destination_not_owned")
 
 
+def _foreign_grp(tmp_path):
+    # 쓰기 가능한 부모 아래, 쓰기 가능한 목적지 -- 소유만 남(fake_owner)으로 흉내 낸다.
+    src = tmp_path / "src"; src.mkdir()
+    dst = tmp_path / "dst" / "grp"; dst.mkdir(parents=True)
+    bindir = tmp_path / "bin"; bindir.mkdir()
+    return src, dst, bindir
+
+
+@pytest.mark.parametrize("role", [None, "destination"])
+def test_group_writable_foreign_destination_is_rejected_for_a_user(tmp_path, role):
+    # d139 실증 V3 의 단위 등가물(bob 소유 770 dst/grp, alice 는 그룹원).
+    src, dst, bindir = _foreign_grp(tmp_path)
+    rc, out = _preflight(str(src), str(dst), role=role, fake_owner=os.getuid() + 4242,
+                         bindir=bindir)
+    assert (rc, _marker(out)) == (1, "destination_not_owned")
+    rc, out = _preflight(str(src), str(dst), role=role, fake_owner=os.getuid(), bindir=bindir)
+    assert (rc, _marker(out)) == (0, "OK")
+
+
 @pytest.mark.parametrize("role", [None, "destination"])
 def test_root_mode_skips_the_owner_check(tmp_path, role):
     # 명시적 root 실행은 소유 검사를 하지 않는다(root 는 어느 디렉터리든 다룬다 -- 화면이
     # 그 결과를 경고한다). 여기선 실행 사용자가 root 가 아니어도 모드만 본다.
-    src = tmp_path / "src"; src.mkdir()
-    rc, out = _preflight(str(src), "/tmp", privileged=True, role=role)
+    src, dst, bindir = _foreign_grp(tmp_path)
+    rc, out = _preflight(str(src), str(dst), privileged=True, role=role,
+                         fake_owner=os.getuid() + 4242, bindir=bindir)
     assert (rc, _marker(out)) == (0, "OK")
 
 
