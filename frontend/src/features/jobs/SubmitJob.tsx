@@ -499,7 +499,7 @@ export function SubmitJob() {
                   <span>root 권한으로 실행(관리자 기본)
                     <span className="block text-muted text-xs mt-1">
                       켜면 잡이 root 로 실행되어 파일 권한 검사를 우회하고, <strong>sync 는
-                      목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다.</strong>
+                      목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다.</strong>{" "}
                       실행 신원에 다른 사용자를 적으면 기본으로 꺼지고(그 사용자 권한으로 실행),
                       끄면 실행 신원의 권한으로만 동작합니다.
                     </span>
