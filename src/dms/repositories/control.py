@@ -240,9 +240,16 @@ class ControlRepository:
         return [r["username"] for r in rows]
 
     # --- audit ---
-    def audit_entries(self, limit: int = 50) -> list[dict]:
+    def audit_entries(self, limit: int = 50, before: "int | None" = None) -> list[dict]:
+        """최신순 감사 기록 한 쪽. before 는 키셋 커서(이전 쪽 마지막 행의 id) -- 그보다 오래된
+        기록만 준다(2026-09-30 감사 로그 무한 스크롤). offset 이 아닌 이유: 화면을 보는 동안 새
+        기록이 위에 쌓이면 offset 쪽 경계가 밀려 중복·누락이 생긴다. id 는 PK 라 범위 조회가 싸다."""
+        if before is None:
+            return self._db.query(
+                "SELECT * FROM audit_log ORDER BY id DESC LIMIT :n", {"n": limit})
         return self._db.query(
-            "SELECT * FROM audit_log ORDER BY id DESC LIMIT :n", {"n": limit})
+            "SELECT * FROM audit_log WHERE id < :before ORDER BY id DESC LIMIT :n",
+            {"before": before, "n": limit})
 
     def control_state_history(self, limit: int = 10) -> list[dict]:
         """컨트롤 상태 변경 이력(슬라이스 36) -- 감사 로그에서 control_state 변경만.

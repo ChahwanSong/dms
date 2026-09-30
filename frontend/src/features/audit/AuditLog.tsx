@@ -1,8 +1,9 @@
-import { Fragment, useState } from "react";
-import { useAuditLog } from "./useAudit";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { AUDIT_PAGE_SIZE, useInfiniteAuditLog } from "./useAudit";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
+import { ApiError } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
 import type { AuditEntry } from "../../lib/types";
 
@@ -56,20 +57,46 @@ function DetailRow({ e }: { e: AuditEntry }) {
 }
 
 export function AuditLog() {
-  const q = useAuditLog();
+  const q = useInfiniteAuditLog();
+  const rows = q.data?.pages.flat() ?? [];
   // 한 번에 하나만 펼친다 -- 여러 diff 가 쌓이면 어느 행의 것인지 흐려진다.
   const [openId, setOpenId] = useState<number | null>(null);
+
+  // 무한 스크롤(2026-09-30): 표 끝 감시 노드가 보이면(바닥 200px 전) 이전 기록 한 쪽을 더 당긴다
+  // -- 전체 작업 화면과 같은 IntersectionObserver 방식. 다음 쪽이 실패하면 자동으로 다시 당기지
+  // 않는다: 감시 노드가 계속 보이는 채라 관찰자가 다시 붙을 때마다 실패 요청이 연달아 나간다
+  // -- 재시도는 버튼으로만.
+  const { hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage } = q;
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage && !isFetchNextPageError)
+        fetchNextPage();
+    }, { rootMargin: "200px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage, rows.length]);
+
   return (
     <section className="space-y-4">
-      <h1 className="text-2xl font-bold">감사 로그</h1>
+      <div>
+        <h1 className="text-2xl font-bold">감사 로그</h1>
+        <p className="mt-1 text-sm text-muted">
+          최근 기록부터 {AUDIT_PAGE_SIZE}건씩 보입니다 — 아래로 스크롤하면 이전 기록을 이어서 불러옵니다.
+        </p>
+      </div>
       {/* Card 구획(2026-08-19): 운영 화면들과 같은 서피스 — 회색 페이지 배경 위
           맨 표는 경계가 없어 관리 그룹만 다른 화면처럼 보였다 */}
       <Card>
-      {q.isLoading ? <p className="text-muted">불러오는 중…</p> : (
+      {q.isLoading ? <p className="text-muted">불러오는 중…</p>
+       : q.isError && rows.length === 0 ? <p className="text-bad">{(q.error as ApiError).message}</p> : (
+        <>
         <Table>
           <thead><tr className="text-muted"><th className="py-2">클래스</th><th>시각</th><th>작업</th><th>대상</th><th>실행자</th><th>상세</th></tr></thead>
           <tbody>
-            {(q.data ?? []).map((e) => (
+            {rows.map((e) => (
               <Fragment key={e.id}>
                 <tr className="border-t border-black/5">
                   <td className="py-2">{e.mutation_class}</td>
@@ -87,6 +114,24 @@ export function AuditLog() {
             ))}
           </tbody>
         </Table>
+        {rows.length === 0 ? <p className="text-muted pt-3">기록이 없습니다</p> : (
+          /* 무한 스크롤 감시 노드 + 상태 문구. 다음 쪽 실패는 여기서 알리고 버튼으로만 다시 시도. */
+          <div ref={sentinel} className="pt-3 text-center text-xs text-muted" aria-live="polite">
+            {isFetchNextPageError ? (
+              <span className="text-bad">
+                {`이전 기록을 더 불러오지 못했습니다: ${(q.error as ApiError).message} `}
+                <Button variant="ghost" onClick={() => fetchNextPage()}>다시 시도</Button>
+              </span>
+            ) : isFetchingNextPage ? "더 불러오는 중…"
+              : hasNextPage ? `${rows.length}건 표시 — 스크롤하면 더 불러옵니다`
+              : `마지막 기록입니다 — 전체 ${rows.length}건`}
+            {/* 창 포커스 등의 재조회 실패: 받아 둔 목록은 그대로(react-query 가 이전 data 유지) 두고 알린다. */}
+            {q.isRefetchError && (
+              <p className="text-bad">{`최신 기록을 다시 읽지 못했습니다(표시는 직전 값): ${(q.error as ApiError).message}`}</p>
+            )}
+          </div>
+        )}
+        </>
       )}
       </Card>
     </section>
