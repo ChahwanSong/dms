@@ -158,7 +158,9 @@ class Planner:
             if storage["status"] not in ("Ready", "Degraded"):
                 return self._reject(rid, "storage_not_ready")
         # 4. identity
-        # root 실행은 명시적일 때만(2026-09-30 프로덕션 사고, identity.resolve_job_identity
+        # (포탈의 "관리자 기본 root" 도 제출 바디의 명시 run_as_root: true 로 온다 -- 서버는 생략을
+        #  root 로 읽지 않는다, routes_requests.submit.)
+        # root 실행은 payload 가 명시할 때만(2026-09-30 프로덕션 사고, identity.resolve_job_identity
         # docstring): 단건 요청은 payload 의 run_as_root 가 True 일 때만 root 를 요구하고
         # (자격 없으면 거부), 없으면 실행 신원의 LDAP uid/gid 로 돈다 -- 관리자 계정이라도.
         # 배치 자식(관리자 전용 화면)만 종전대로 "자격 있으면 root". 규칙은

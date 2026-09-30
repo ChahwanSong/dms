@@ -67,7 +67,8 @@ export interface SubmitBody {
   // 생략 = (정책 기본) — resolve_priority 가 정책 default_priority 로 해석(슬라이스 37).
   priority?: string;
   owner_username?: string;
-  // 명시적 root 실행(2026-09-30). 생략 = 실행 신원의 uid/gid. 자격은 서버가 판정(403).
+  // root 실행(2026-09-30). 서버는 true 만 root(자격 없으면 403), false/생략 = 실행 신원의
+  // uid/gid. "관리자 기본 root" 는 SubmitJob 이 정해 관리자에겐 항상 확정값을 싣는다.
   run_as_root?: boolean;
 }
 export const useSubmitRequest = () =>

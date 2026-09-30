@@ -18,8 +18,9 @@ test.describe("E4 잡 종단 흐름", () => {
   test("UI scan 제출 -> 리로드 없이 목록이 Succeeded 로 수렴한다", async ({ page }) => {
     // admin 으로 들어간다: 특권 요청자(root/admin 기본값)라야 LDAP 없는 이 환경에서
     // placement 의 신원 검사를 건너뛰고 후보 선정까지 간다(설계 §1-8). 2026-09-30 부터
-    // 자격만으론 root 가 아니다 -- 옵션 스텝에서 'root 권한으로 실행' 을 켜야 한다(끄면
-    // LDAP 없는 이 하네스에선 ldap_not_configured 로 Rejected).
+    // root 는 옵션 스텝의 'root 권한으로 실행'(자격 있는 관리자 기본 켜짐)이 정한다 --
+    // 끄면 LDAP 없는 이 하네스에선 ldap_not_configured 로 Rejected. check() 는 기본값이
+    // 켜져 있다는 가정 없이도 root 를 보장한다(이미 켜져 있으면 무동작).
     await apiLogin(page);
     // 슬라이스 37: scan 은 단일 작업 위저드(연산 스텝의 운영자 전용 옵션)로 흡수됐다.
     await page.goto("/jobs/new");

@@ -143,6 +143,61 @@ def test_run_as_root_must_be_a_real_boolean(db, value):
     assert r.status_code == 422
 
 
+# --- 관리자 기본 root(사용자 결정 2026-09-30)는 포탈이 명시로 싣는다 ------------------------
+# 서버는 **명시 True 만** root(자격 필요). 생략·False = 비 root -- 생략을 root 로 읽으면 옛 포탈
+# 탭(생략 = 비 root 라고 표시)이나 me 판정이 어긋난 화면이 표시와 다른 root 로 돈다(적대적 리뷰).
+# "관리자 기본 root / 다른 실행 신원이면 기본 그 사용자 권한" 은 SubmitJob 테스트가 고정한다.
+
+@pytest.mark.parametrize("extra, expect_root", [
+    ({}, False),                                        # 생략 = 비 root(자격 있는 관리자라도)
+    ({"owner_username": "ops"}, False),
+    ({"owner_username": "alice"}, False),
+    ({"run_as_root": True}, True),                      # 포탈의 관리자 기본값(명시)
+    ({"owner_username": "alice", "run_as_root": True}, True),
+    ({"run_as_root": False}, False),
+])
+def test_eligible_admin_is_root_only_when_the_body_says_true(db, extra, expect_root):
+    client = _client_with(db)
+    _login_admin(client)
+    r = client.post("/api/user/requests", json={**SYNC, **extra})
+    assert r.status_code == 202, r.text
+    assert (_stored_payload(db).get("run_as_root") is True) is expect_root
+
+
+@pytest.mark.parametrize("who", ["user", "admin_not_listed", "token"])
+def test_default_is_silently_non_root_without_eligibility(db, who):
+    # 자격 없는 로그인의 **생략**은 403 이 아니라 비 root -- 명시 True 만 거부한다.
+    client = _client_with(db, DMS_PRIVILEGED_REQUESTERS="ops,shared-token")
+    headers = {}
+    if who == "user":
+        client.post("/api/auth/signup", json={"username": "mallory", "password": "p"})
+        client.post("/api/auth/login", json={"username": "mallory", "password": "p"})
+    elif who == "admin_not_listed":
+        _login_admin(client, name="ops2")
+    else:
+        headers = {"Authorization": "Bearer tok-shared"}
+    r = client.post("/api/user/requests", json=SYNC, headers=headers)
+    assert r.status_code == 202, r.text
+    assert "run_as_root" not in _stored_payload(db)
+
+
+@pytest.mark.parametrize("who, expected", [
+    ("ops", True), ("ops2", False), ("user", False), ("token", False)])
+def test_me_tells_the_portal_whether_root_is_available(db, who, expected):
+    # 포탈은 이 값으로 체크박스를 보이고 기본으로 켠다 -- 자격 없는 관리자에게 기본 root 를
+    # 켜 두면 제출이 403 이 된다. 판정은 제출 게이트와 같은 함수(api.auth.can_run_as_root).
+    client = _client_with(db, DMS_PRIVILEGED_REQUESTERS="ops,shared-token")
+    headers = {}
+    if who == "user":
+        client.post("/api/auth/signup", json={"username": "mallory", "password": "p"})
+        client.post("/api/auth/login", json={"username": "mallory", "password": "p"})
+    elif who == "token":
+        headers = {"Authorization": "Bearer tok-shared"}
+    else:
+        _login_admin(client, name=who)
+    assert client.get("/api/auth/me", headers=headers).json()["can_run_as_root"] is expected
+
+
 # --- planner ---------------------------------------------------------------------
 
 class _PrivSettings:

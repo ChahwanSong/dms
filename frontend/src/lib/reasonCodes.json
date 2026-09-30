@@ -31,6 +31,7 @@
   "destination_parent_not_writable",
   "destination_not_writable",
   "destination_not_owned",
+  "artifact_base_not_traversable",
   "parent_not_writable",
   "target_not_readable",
   "preflight_submit_failed",

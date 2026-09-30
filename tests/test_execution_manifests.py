@@ -412,8 +412,8 @@ def test_drm_dryrun_argv_is_unchanged_by_the_explicit_branch():
 # 로 끝났다. 원본은 복사되지 않았는데 목적지 파일은 지워진 순수 손실이다.
 # preflight 가 막아야 할 조건이라 여기서 계약으로 못박는다.
 
-def _preflight_command(spec, role=None, node="dms-w1"):
-    m = build_preflight_pod(spec, job_image="i", namespace="dms", volumes=_VOL,
+def _preflight_command(spec, role=None, node="dms-w1", volumes=_VOL):
+    m = build_preflight_pod(spec, job_image="i", namespace="dms", volumes=volumes,
                             node=node, role=role)
     return m["spec"]["containers"][0]["command"]
 
@@ -519,9 +519,13 @@ def _emitted_markers():
         (_sync_spec("/s", "/d"), "source"),
         (_sync_spec("/s", "/d"), "destination"),
     ]
+    # 실제 파드처럼 아티팩트 base 전용 볼륨까지 실어야 base 통과 검사(artifact_base_not_
+    # traversable)도 긁힌다 -- execution_volcano._volumes 는 항상 그것을 붙인다.
+    vols = _VOL + [{"name": "dms-artifact-base", "hostPath": {"path": "/cephfs/dms/artifacts"},
+                    "mountPath": "/dms-artifact-base"}]
     found = set()
     for spec, role in specs:
-        for chunk in _preflight_command(spec, role=role)[2].split(
+        for chunk in _preflight_command(spec, role=role, volumes=vols)[2].split(
                 "DMS_PREFLIGHT_REASON=")[1:]:
             found.add(chunk.split(";")[0].strip())
     return found

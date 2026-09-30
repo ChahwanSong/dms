@@ -15,7 +15,8 @@ from pydantic import BaseModel
 from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
 from ..repositories.accounts import (VERIFICATION_PURPOSES,
                                      VERIFICATION_TTL_SECONDS, valid_username)
-from .auth import Identity, client_ip, require_admin, require_user, tokens_match
+from .auth import (Identity, can_run_as_root, client_ip, require_admin, require_user,
+                   tokens_match)
 from .password_transport import PasswordTransportError
 
 router = APIRouter()
@@ -222,8 +223,11 @@ def logout(request: Request):
 
 
 @router.get("/api/auth/me")
-def me(identity: Identity = Depends(require_user)):
-    return {"actor": identity.actor, "role": identity.role}
+def me(request: Request, identity: Identity = Depends(require_user)):
+    # can_run_as_root: 포탈이 'root 권한으로 실행' 을 보여 주고 관리자 기본값(root)을 켤지
+    # 정하는 근거(2026-09-30). 자격 없는 관리자에게 기본 root 를 켜 두면 제출이 403 이 된다.
+    return {"actor": identity.actor, "role": identity.role,
+            "can_run_as_root": can_run_as_root(identity, request.app.state.settings)}
 
 
 class AdminCreateBody(_PasswordBody):

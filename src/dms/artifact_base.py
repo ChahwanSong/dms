@@ -96,8 +96,11 @@ def roundtrip_artifact_base(path: str) -> "str | None":
     않음 + EROFS/ENOSPC/EDQUOT 아님. cap 이 없으므로 root 도 **소유자 mode 비트**
     의 지배를 받는다(root 소유 0400 은 root 도 못 쓴다; 남의 0600 은 EACCES) --
     운영 base 는 root:root 0755 라 소유자로서 쓴다. 어떤 비root uid 의 쓰기 권한도
-    증명하지 않는다 -- 노드 홉(에이전트 os.access, root)도 마찬가지고, 잡 파드의
-    요청자 권한은 preflight 가 요청자 uid 로 따로 검사한다.
+    증명하지 않는다 -- 노드 홉(에이전트 os.access, root)도 마찬가지다. 잡 파드의
+    요청자 관점 중 base 에 대해 preflight 가 보는 것은 **통과(x)** 하나다
+    (execution_manifests._ARTIFACT_BASE_CHECK, artifact_base_not_traversable) -- 그 아래
+    <job_id>(root 0755)·<phase>(요청자로 chown)는 러너가 만들므로 x 만 있으면 된다.
+    base 가 700/750/770 이면 여기선 초록인데 비 root 잡은 전부 실패한다(deploy/README §2b).
 
     소유권·mode 전제(2026-09-09 리뷰): base 는 **이 프로세스의 euid 소유**(운영은
     root)이고 world-writable 이 아니어야 한다 -- artifact_files.assert_contained 의
