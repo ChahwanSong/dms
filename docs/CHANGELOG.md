@@ -95,6 +95,45 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 사용자 sync 허용 스토리지 쌍(기본 전부 불가) + 메뉴 접힘 상태 유지 — **완료·실증**(2026-09-30, d143)
+
+사용자 요청 2건: ① 왼쪽 메뉴는 처음 로그인했을 때 전부 펼치고, 그 후 화면을 오갈 때는 접힘 상태 유지
+② 사용자 sync 가능한 스토리지 쌍 policy -- 기본 전부 불가에 허용 쌍을 추가, 사용자가 소스 또는 목적지를
+고르면 다른 쪽 선택지에서 불가 항목을 뺀다.
+- **메뉴**: `lib/navState`(localStorage `dms.nav.collapsed.v3`) -- 셸이 라우트마다 리마운트돼도·새로고침·
+  새 탭에서도 유지. 로그인 성공·로그아웃이 저장분을 지워 로그인 직후는 전부 펼침. d142 의 경로 이동 자동
+  펼침은 "유지"를 깨서 제거하고, 접힌 그룹이 현재 화면을 품으면 헤더에 "현재 화면" 표식(aria-describedby).
+  e2e 가 잡은 회귀: 그룹 버튼에 aria-label 을 달자 `getByLabel("스토리지")` 가 단일 작업 폼 셀렉트와 겹쳐
+  E4 strict 위반 → 이름은 내용에서, 표식은 aria-hidden + 설명으로.
+- **허용 쌍**: `sync_pairs`(방향 있음 -- A→B·B→A 별개, A→A 도 한 쌍) + `SyncPairsRepository`(멱등 추가·
+  삭제·감사, 존재 확인은 삽입과 같은 트랜잭션). 강제는 `sync_pair_allowed` 하나로 제출 403·planner 재확인
+  (`pair_exempt` = 관리자 계정·토큰 모양·배치 자식)·컨펌 게이트. 스토리지 삭제는 같은 트랜잭션에서 쌍 정리.
+  API `/api/admin/sync-pairs`(목록·추가·삭제), `/api/user/sync-pairs`(restricted + 사용자가 고를 수 있는
+  스토리지끼리의 쌍만).
+- **포탈**: 관리 → 정책에 「사용자 Sync 허용 스토리지 쌍」 매트릭스(행 소스 × 열 목적지, 체크 = 즉시 저장,
+  관리자 전용·비활성이 낀 칸은 회색 "사용자 미적용", 허용 쌍 칩 목록, 적용 쌍 0개 경고). 단일 작업 화면은
+  사용자에게 허용 조합만 보인다(`lib/syncPairs.syncChoices` -- 한쪽을 고르면 다른 쪽이 그 짝만, 현재
+  선택은 목록에서 빠져도 남겨 비울 수 있게, 허용 밖 조합은 대상·확인 단계에서 이유와 함께 잠금). 관리자는
+  조회·필터 없음.
+- 독립 리뷰(에이전트 1): high/medium 0, low 6건 전부 반영 -- 배치 면제가 d142 관리자 전용 판정으로 번진 것
+  분리(`pair_exempt`), 존재 확인 트랜잭션화, 업그레이드 노트(롤아웃 시점 Pending 사용자 sync 는 Rejected),
+  확인 단계 문구, 삭제 시 쌍 캐시 무효화, 재조회 실패에도 매트릭스 유지, 죽은 `groupLabelFor` 제거.
+- **업그레이드 주의**(deploy/README §6): 허용 쌍이 비어 있으면 일반 사용자 sync 가 전부 403 -- 롤아웃 직후
+  관리 → 정책에서 조합을 허용해야 한다.
+
+실증(테스트베드 d143): 빌드 96d9c8af(커밋 793fa18) → dms-api·controller 릴리스 applied, 가드 "이미지 변경
+없음". API 13항목 ALL OK -- 쌍 0개: alice 조회 restricted·빈 목록, alice sync 403 `sync_pair_not_allowed`, 관리자
+조회 restricted=false / 쌍 추가 201 → alice 조회에 보임, 반대 방향 403 / **planner 게이트**: 제출 202 직후 쌍
+해제 → Rejected `sync_pair_not_allowed` / **컨펌 게이트**: ConfirmPending 중 해제 → alice 컨펌 403, 잡은
+ConfirmPending 유지 → 취소 / 관리자는 비허용 조합도 202(취소). 감사 로그에 sync_pair add·remove 11행.
+실 Chrome(페이지 오류 0): alice 선택지 처음 소스·목적지 [cephfs-dms, cephfs-third](쌍 없는 cephfs-secondary
+제외) → 소스 cephfs-third 선택 시 목적지 [cephfs-third] → 목적지 cephfs-dms 선택 시 소스 [cephfs-dms];
+mason 정책 매트릭스 9칸·체크 3·"허용된 쌍 3개"; 메뉴는 저장분 없는 새 컨텍스트에서 전부 펼침 → 운영 접기 →
+사이드바 링크 이동·운영 화면 직접 이동·새로고침에도 접힘 유지 + 헤더 "현재 화면". 테스트베드에는 alice
+흐름용으로 **cephfs-dms → cephfs-dms 쌍 하나**를 남겼다.
+
+테스트: 백엔드 2018 passed, 프런트 737 passed + tsc + 빌드(외부 URL 0), e2e 9 passed.
+
 ### ✅ 포탈 개선 7종 — 스토리지 사용 범위(관리자 전용)·노드 상세 모달·메뉴 펼침·잡 통계·아티팩트 툴팁·정책·sync 조건 — **완료·실증**(2026-09-30, d142)
 
 사용자 요청 7건: ① 스토리지를 관리자에게만/사용자에게도 노출할지 설정(비활성 두 종류: 완전 비활성 ·
