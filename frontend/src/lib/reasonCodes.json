@@ -190,5 +190,22 @@
   "build_proxy_unreachable",
   "invalid_proxy_ca_path",
   "build_proxy_ca_missing",
-  "build_proxy_tls_failed"
+  "build_proxy_tls_failed",
+  "mailer_misconfigured",
+  "verification_rate_limited",
+  "verification_locked",
+  "verification_client_locked",
+  "mail_settings_changed",
+  "verification_email_failed",
+  "invalid_mail_backend",
+  "invalid_mail_relay_scheme",
+  "invalid_mail_relay_host",
+  "invalid_mail_relay_port",
+  "invalid_mail_timeout",
+  "invalid_mail_service_name",
+  "invalid_mail_relay_token",
+  "mail_relay_token_conflict",
+  "invalid_mail_recipient",
+  "mail_settings_session_required",
+  "mail_relay_token_required"
 ]

@@ -96,6 +96,17 @@ def _parse_int(environ, key, default, problems):
         return default
 
 
+def _parse_float(environ, key, default, problems):
+    raw = environ.get(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        problems.append(f"{key} is not a number: {raw!r}")
+        return default
+
+
 def _parse_bool(environ, key, default=False):
     value = environ.get(key)
     if value is None:
@@ -212,7 +223,15 @@ class Settings:
     # 부트스트랩 경로만 정책과 무관하게 평문을 허용한다(운영자 curl, routes_auth).
     password_encryption_required: bool = False
     account_email_domain: str = "samsung.com"
+    # 인증 메일 발송(2026-10-01, api/mailer.py): "stub"(발송 없음, 응답에 코드 에코) | "knox_relay"
+    # (메신저 서버의 knox_mail_dms_certi 릴레이 경유 Knox 메일). 아래 네 값과 함께 **env 기본값**이다
+    # -- 포탈 관리 → 메일 설정(DB, mail_settings)에 값이 있으면 그 값이 이긴다(mail_config.resolve_mail_config).
     mailer_backend: str = "stub"
+    mail_relay_url: str = ""                 # "http://<메신저 서버 IP>:8025" (릴레이 env 의 RELAY_PORT)
+    mail_relay_token: str = ""               # 릴레이 env 의 RELAY_TOKEN 과 같은 값
+    # 릴레이 env 의 KNOX_CONNECT_TIMEOUT_SECONDS(3) + KNOX_TIMEOUT_SECONDS(10) 보다 길게.
+    mail_relay_timeout_seconds: float = 20.0
+    mail_service_name: str = "Supercom 포털"  # 메일 제목·본문에 표시할 서비스명
     execution_backend: str = "stub"
     job_image: str = ""
     k8s_namespace: str = "dms"
@@ -256,6 +275,13 @@ class Settings:
                  for env_key, field, default in _SERVER_INT_KEYS}
         artifact_base_allowed_prefixes = _parse_path_prefixes(
             environ, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES", problems)
+        # if problems 검사보다 앞에서 파싱해야 잘못된 값이 조용히 기본값으로 바뀌지 않는다.
+        mail_relay_timeout_seconds = _parse_float(
+            environ, "DMS_MAIL_RELAY_TIMEOUT_SECONDS", 20.0, problems)
+        # 포탈 검증(mail_config.validate_timeout)과 같은 범위 -- nan·inf·음수가 urllib 에서 엉뚱하게 터지지 않게.
+        if not (1 <= mail_relay_timeout_seconds <= 120):
+            problems.append("DMS_MAIL_RELAY_TIMEOUT_SECONDS must be between 1 and 120 seconds: "
+                            f"{environ.get('DMS_MAIL_RELAY_TIMEOUT_SECONDS')!r}")
         ldap_bind_dn = environ.get("DMS_LDAP_BIND_DN", "")
         ldap_bind_pw = environ.get("DMS_LDAP_BIND_PW", "")
         ldap_require_auth_bind = _parse_bool(environ, "DMS_LDAP_REQUIRE_AUTH_BIND")
@@ -309,6 +335,10 @@ class Settings:
             account_email_domain=environ.get(
                 "DMS_ACCOUNT_EMAIL_DOMAIN", "samsung.com"),
             mailer_backend=environ.get("DMS_MAILER_BACKEND", "stub"),
+            mail_relay_url=environ.get("DMS_MAIL_RELAY_URL", ""),
+            mail_relay_token=environ.get("DMS_MAIL_RELAY_TOKEN", ""),
+            mail_relay_timeout_seconds=mail_relay_timeout_seconds,
+            mail_service_name=environ.get("DMS_MAIL_SERVICE_NAME", "Supercom 포털"),
             execution_backend=environ.get("DMS_EXECUTION_BACKEND", "stub"),
             job_image=environ.get("DMS_JOB_IMAGE", ""),
             k8s_namespace=environ.get("DMS_K8S_NAMESPACE", "dms"),

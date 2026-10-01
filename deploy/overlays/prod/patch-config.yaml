@@ -45,7 +45,11 @@ data:
   # dms-secrets 주입이 먼저다. 익명 바인드 사이트만 "false"(위 DN 도 "" 로).
   DMS_LDAP_REQUIRE_AUTH_BIND: "true"
 
-  # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). 사내 메일러 연동 전엔 stub.
+  # 계정 셀프서비스 이메일 도메인(<아이디>@도메인). 인증 메일 발송(2026-10-01, deploy/README §11)은 포탈
+  # 관리 → 메일 설정에서 Knox 릴레이(knox_relay)의 IP·포트·인증 키를 넣는다(포탈 값이 env 를 이긴다).
+  # 발송 방식 env 기본값(DMS_MAILER_BACKEND)은 코드 기본 stub -- stub 은 인증번호를 화면에 돌려줘 아이디만
+  # 알면 누구나 가입·비밀번호 재설정을 할 수 있으니, 릴레이 연결을 확인한 뒤에는 여기에도
+  # DMS_MAILER_BACKEND: "knox_relay" 를 넣어 포탈 칸을 비워도 stub 으로 돌아가지 않게 한다.
   DMS_ACCOUNT_EMAIL_DOMAIN: "REPLACE_EMAIL_DOMAIN"     # 예: corp.example
   DMS_ACCOUNT_VERIFICATION_REQUIRED: "true"
 

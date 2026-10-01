@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useAccounts, useCreateAccount, useSetRole, useSetDisabled } from "./useAccounts";
 import { useMe } from "../auth/useAuth";
+import { useMailInfo } from "../mail/useMailSettings";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
@@ -20,6 +21,7 @@ function CreateAccountDialog() {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("user");
   const create = useCreateAccount();
+  const mailInfo = useMailInfo();   // 받는 도메인은 서버 설정(DMS_ACCOUNT_EMAIL_DOMAIN) -- 하드코딩하지 않는다
   useEffect(() => {
     if (!open) { create.reset(); return; }
     setUsername(""); setPassword(""); setRole("user");
@@ -38,7 +40,9 @@ function CreateAccountDialog() {
           <input aria-label="회사 아이디" className={dlgField} value={username}
                  placeholder="예: cocoa.song"
                  onChange={(e) => setUsername(e.target.value)} /></label>
-        <p className="text-xs text-muted">이메일은 아이디@samsung.com 으로 자동 저장됩니다.</p>
+        <p className="text-xs text-muted">
+          {`이메일은 아이디@${mailInfo.data?.email_domain ?? "(메일 도메인)"} 으로 자동 저장됩니다.`}
+        </p>
         <label className="block">비밀번호
           <input aria-label="비밀번호" type="password" className={dlgField} value={password}
                  onChange={(e) => setPassword(e.target.value)} /></label>

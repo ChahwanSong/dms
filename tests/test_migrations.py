@@ -582,9 +582,12 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # 스펙 §4 도메인 모델 밖의 인증 보조 테이블이라 batches 류처럼 명시 추가.
     # sync_pairs(2026-09-30): 사용자 sync 허용 스토리지 쌍 -- 스펙 §4 밖의 정책 보조 테이블이라
     # verification_codes 처럼 명시 추가(ALL_TABLES 19 계약은 그대로).
+    # mail_settings(2026-10-01): 포탈 메일(Knox 릴레이) 설정 단일 행 -- 같은 이유로 명시 추가.
+    # verification_failures(2026-10-01): 인증번호 누적 실패(재발급으로 초기화되지 않는 무차별 대입 상한).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
-                                        "verification_codes", "sync_pairs"}
+                                        "verification_codes", "sync_pairs",
+                                        "mail_settings", "verification_failures"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):

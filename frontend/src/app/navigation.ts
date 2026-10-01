@@ -2,7 +2,7 @@ import { matchPath } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   Ban, Boxes, Database, FilePlus, FolderCog, Hammer,
-  Layers, LayoutDashboard, ListTodo, Rocket, ScrollText,
+  Layers, LayoutDashboard, ListTodo, Mail, Rocket, ScrollText,
   Server, Shield, SlidersHorizontal, TrendingUp, Users,
 } from "lucide-react";
 
@@ -75,6 +75,8 @@ export const NAVIGATION: NavSection[] = [
           { path: "/admin/policies", label: "정책", icon: Shield },
           { path: "/admin/denylist", label: "denylist", icon: Ban },
           { path: "/admin/audit", label: "감사 로그", icon: ScrollText },
+          // 메일 설정(2026-10-01): 인증 메일(Knox 릴레이) 연결값 -- 계정 셀프서비스의 운영 설정이라 관리 그룹.
+          { path: "/admin/mail", label: "메일 설정", icon: Mail },
         ],
       },
     ],
