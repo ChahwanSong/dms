@@ -72,12 +72,17 @@ test("기간 버튼이 window 파라미터로 재조회한다", async () => {
   await waitFor(() => expect(calls).toContain("1"));
 });
 
-test("드릴다운에 스토리지별 디스크와 증거 스냅샷이 나온다", async () => {
+test("노드당 한 줄: Load(1분평균)·메모리·수신·송신만, 펼침 없음(2026-10-01)", async () => {
   renderSection();
-  await userEvent.click(await screen.findByRole("button", { name: "w1" }));
-  expect(await screen.findByText("s1")).toBeInTheDocument();
-  expect(screen.getByText(/마운트 1\/1/)).toBeInTheDocument();
-  expect(screen.getByText(/도구 1\/2/)).toBeInTheDocument();
+  await screen.findByText("w1");
+  for (const title of ["Load (1분평균)", "메모리 사용%", "수신 B/s", "송신 B/s"])
+    expect(screen.getByText(title)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "w1" })).not.toBeInTheDocument();   // 노드 이름은 펼침 버튼이 아니다
+  for (const gone of [/load1/, /load5/, /load15/, /사용%/, /마운트/, /도구/, /계정/]) {
+    const hits = screen.queryAllByText(gone).filter((el) => el.textContent !== "메모리 사용%");
+    expect(hits).toEqual([]);
+  }
+  expect(screen.queryByText("s1")).not.toBeInTheDocument();                       // 스토리지 사용% 없음
 });
 
 test("현재값 · 창 내 최대값을 병기한다", async () => {
@@ -85,14 +90,14 @@ test("현재값 · 창 내 최대값을 병기한다", async () => {
   await screen.findByText("w1");
   // 메모리: 마지막 점 52%, 창 최대 55% -- 현재와 최대가 구분된다
   expect(screen.getByText("52% · 최대 55%")).toBeInTheDocument();
-  // load1: 마지막 0.6, 최대 0.7
+  // Load(1분평균): 마지막 0.6, 최대 0.7
   expect(screen.getByText("0.6 · 최대 0.7")).toBeInTheDocument();
   // 네트워크는 humanBytes 표기 + /s -- 수신 2048 B/s = 2.0 KiB/s
   expect(screen.getByText("2.0 KiB/s · 최대 2.0 KiB/s")).toBeInTheDocument();
   expect(screen.getByText("20 B/s · 최대 20 B/s")).toBeInTheDocument();
 });
 
-test("상한 라벨: 메모리는 100%, load1 은 리포트의 코어 수", async () => {
+test("상한 라벨: 메모리는 100%, Load(1분평균) 는 리포트의 코어 수", async () => {
   renderSection();
   await screen.findByText("w1");
   expect(screen.getAllByText("상한 100%").length).toBeGreaterThan(0);
@@ -113,7 +118,7 @@ test("cpu_count 가 없거나 오염된 구형 리포트는 코어 라벨 없이
     <QueryClientProvider client={qc}><NodeMetricsSection /></QueryClientProvider>);
   await screen.findByText("w1");
   expect(screen.queryByText(/코어/)).not.toBeInTheDocument();
-  // 폴백에서도 load1 차트 자체는 그려진다(창 최대 스케일)
+  // 폴백에서도 Load(1분평균) 차트 자체는 그려진다(창 최대 스케일)
   await waitFor(() =>
     expect(container.querySelectorAll("svg path").length).toBeGreaterThan(0));
 });
