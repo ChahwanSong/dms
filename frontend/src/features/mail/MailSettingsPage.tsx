@@ -90,8 +90,8 @@ const mergeDraft = (draft: Draft, prev: Draft, next: Draft): Draft =>
 
 function SourceTag({ source }: { source: "portal" | "env" | undefined }) {
   return source === "portal"
-    ? <span className="ml-2 rounded-full bg-infobg px-2 py-0.5 text-[11px] font-medium text-accent">포탈 설정</span>
-    : <span className="ml-2 rounded-full bg-panel px-2 py-0.5 text-[11px] text-muted">환경변수·기본값</span>;
+    ? <span className="ml-2 whitespace-nowrap rounded-full bg-infobg px-2 py-0.5 text-[11px] font-medium text-accent">포탈 설정</span>
+    : <span className="ml-2 whitespace-nowrap rounded-full bg-panel px-2 py-0.5 text-[11px] text-muted">환경변수·기본값</span>;
 }
 
 function intError(raw: string, min: number, max: number, label: string): string | null {
@@ -266,7 +266,8 @@ export function MailSettingsPage() {
         )}
 
         <h2 className="pt-2 text-lg font-semibold">릴레이 서버(메신저 서버)</h2>
-        <div className="grid gap-3 sm:grid-cols-[8rem_1fr_8rem]">
+        {/* 프로토콜·포트 칸은 제목 + 출처 태그("환경변수·기본값")가 한 줄에 들어가는 폭(11rem) */}
+        <div className="grid gap-3 sm:grid-cols-[11rem_1fr_11rem]">
           <label className="text-sm">프로토콜 <SourceTag source={s.sources.relay_scheme} />
             <select aria-label="프로토콜" className={field} value={draft.relay_scheme} onChange={set("relay_scheme")}>
               <option value="">{`기본 (${s.env.relay_scheme})`}</option>
