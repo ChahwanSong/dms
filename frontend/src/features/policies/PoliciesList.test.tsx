@@ -128,7 +128,10 @@ test("도구별 카드: 용도 설명·병렬도(노드×프로세스=최대)·�
   server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
   wrap();
   const scan = await screen.findByRole("article", { name: "scan 정책" });
-  expect(within(scan).getByText("스캔")).toBeInTheDocument();
+  // 제목은 정책 키(사용자 결정 2026-10-01: 한국어 이름 대신 dsync·nsync 등) -- 도구명이 다른 scan 만 옆에 dscan
+  expect(within(scan).getByText("scan")).toBeInTheDocument();
+  expect(within(scan).getByText("dscan")).toBeInTheDocument();
+  expect(within(scan).queryByText("스캔")).not.toBeInTheDocument();
   expect(within(scan).getByText(/파일 수·용량·데이터 온도/)).toBeInTheDocument();
   expect(within(scan).getByText("4노드 × 8프로세스")).toBeInTheDocument();
   expect(within(scan).getByText("최대 32개 프로세스")).toBeInTheDocument();
@@ -160,4 +163,22 @@ test("수정 다이얼로그는 병렬 자원·스케줄링·타임아웃·상�
   expect(screen.getByText("최대 64개 프로세스로 실행됩니다")).toBeInTheDocument();
   expect(screen.getByText("= 3일")).toBeInTheDocument();               // 259200s
   expect(screen.getByText("= 1시간")).toBeInTheDocument();             // 3600s
+});
+
+test("카드는 한 줄에 하나씩, 제목은 정책 키(dsync·nsync 등) -- 한국어 이름 없음(사용자 결정 2026-10-01)", async () => {
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  wrap();
+  const cards = await screen.findAllByRole("article");
+  expect(cards).toHaveLength(4);
+  // 한 열: 카드들의 부모가 격자(2열)가 아니라 세로 스택
+  const list = cards[0].parentElement!;
+  expect(list.className).toContain("space-y-4");
+  expect(list.className).not.toMatch(/grid-cols/);
+  for (const ko of ["동기화", "노드 간 동기화", "삭제", "스캔"])
+    expect(screen.queryByText(ko)).not.toBeInTheDocument();
+  const dsync = screen.getByRole("article", { name: "dsync 정책" });
+  expect(within(dsync).getByText("dsync")).toBeInTheDocument();
+  expect(within(dsync).queryByText(/^도구/)).not.toBeInTheDocument();    // 키 = 도구명이면 덧붙이지 않는다
+  const rm = screen.getByRole("article", { name: "rm 정책" });
+  expect(within(rm).getByText("drm")).toBeInTheDocument();
 });

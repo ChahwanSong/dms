@@ -16,6 +16,7 @@ import { ApiError } from "../../lib/api";
 import { StoragePicker, field } from "./formFields";
 import { destinationParent } from "../../lib/storagePaths";
 import { pairAllowed, syncChoices } from "../../lib/syncPairs";
+import { CHOWN_NAME_WARNING, chownHasName, syncOwnership } from "../../lib/syncOwnership";
 // 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션 스텝과 공유한다
 // (사본이면 미러가 발산한다).
@@ -107,6 +108,11 @@ export function SubmitJob() {
   // sync 목적지의 상위 디렉토리(쓰기 권한이 필요한 곳) -- 관리 디렉토리를 알면 절대경로로.
   const destRoot = storages.find((s) => s.storage_name === f.destStorage)?.managed_root;
   const destParentAbs = f.destPath.trim() === "" ? null : destinationParent(destRoot, f.destPath.trim());
+  // 결과(목적지) 소유권 안내 -- 바디와 같은 값(chown 옵션·rootEffective·실행 신원)에서 파생한다
+  // (lib/syncOwnership = 서버 _auto_chown 미러). 사용자는 언제나 "요청자 본인 uid:gid".
+  const ownership = syncOwnership({
+    chown: f.chown, chmod: f.chmod, root: rootEffective,
+    runAs: otherOwner ? ownerTrim : (me.data?.actor ?? null), self: !otherOwner });
   // 사용자 sync 허용 쌍(2026-09-30 사용자 결정: 기본 전부 불가 + 관리자가 허용한 소스 → 목적지 쌍).
   // 관리자는 제한이 없어 조회하지 않는다. 선택지 필터는 표시일 뿐 -- 제출·계획·컨펌이 서버에서 다시
   // 본다(sync_pair_not_allowed). 신원·허용 목록을 알기 전에는 sync 선택지를 비운다: 거르기 전 목록이
@@ -140,7 +146,7 @@ export function SubmitJob() {
   const chmodError = f.operation === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.operation === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
-    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 또는 cocoa.song:mig)" : null;
+    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 — 숫자 uid:gid)" : null;
   const advancedError = batchFilesError ?? bufsizeError ?? chmodError ?? chownError
     ?? scanBatchFilesError ?? brokenLimitError;
   // 대상 스텝 sanity(슬라이스 39, 사용자 결정): 스토리지 미선택·경로 공백이면
@@ -324,26 +330,53 @@ export function SubmitJob() {
                       「선택하세요」로 되돌리세요.
                     </p>
                   ))}
-                  {/* 목적지 권한 조건(2026-09-30 사용자 요청: "상위 디렉토리에 쓰기 권한이 있어야
-                      하는 조건을 분명히"). 근거: preflight _DEST_CHECK -- 목적지가 있으면 목적지
-                      자체(쓰기·진입, 비 root 는 소유), 그리고 **항상** 상위 디렉토리 쓰기(dsync 가
-                      목적지 존재와 무관하게 요구하고, 없으면 아무것도 복사하지 않는다). 권한이 필요한
-                      상위 디렉토리를 실제 절대경로로 보여 준다(관리 디렉토리를 모르면 상대 표기). */}
-                  <InfoCard className="col-span-2" role="note" aria-label="목적지 권한 조건">
-                    <p className="font-medium">목적지 권한 조건 — 실행 신원(uid/gid) 기준</p>
+                  {/* 목적지 조건과 소유권(2026-09-30 "상위 디렉토리 쓰기 권한 조건을 분명히", 2026-10-01
+                      "목적지가 없는 경우" + "기본적으로 목적지는 요청자 본인 uid:gid" 추가). 근거:
+                      preflight _DEST_TYPE_CHECK·_DEST_CHECK -- 목적지가 없으면 상위 디렉토리 쓰기만 보고
+                      sync 가 목적지를 한 단계 만든다(상위가 없으면 test -w 가 실패 -- root 도 마찬가지),
+                      목적지가 있으면 디렉토리여야 하고 쓰기·진입(비 root 는 소유) + 상위 쓰기. 소유권은
+                      lib/syncOwnership(_auto_chown 미러). 권한이 필요한 상위 디렉토리는 실제 절대경로로. */}
+                  <InfoCard className="col-span-2" role="note" aria-label="목적지 조건과 소유권">
+                    <p className="font-medium">
+                      {`목적지 조건과 소유권 — ${isAdmin ? "실행 신원" : "요청자 본인 계정"}(uid/gid) 기준`}
+                    </p>
                     <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
                       <li>
-                        목적지의 <strong>상위 디렉토리가 이미 있고, 그 디렉토리에 쓰기 권한</strong>이 있어야
-                        합니다 — 목적지가 이미 있어도 마찬가지입니다(sync 도구의 요구, 중간 디렉토리는 만들지 않습니다).
-                        {destParentAbs !== null && (
+                        <strong>목적지가 없는 경우</strong>: sync 가 목적지 디렉토리를 새로 만듭니다. 목적지의{" "}
+                        {rootEffective
+                          ? <><strong>상위 디렉토리는 이미 있어야</strong> 합니다(root 실행 — 쓰기 권한 검사 우회)</>
+                          : <><strong>상위 디렉토리는 이미 있고 그 디렉토리에 쓰기 권한</strong>이 있어야 합니다</>}
+                        {" "}— 중간 디렉토리는 만들지 않습니다.
+                        {destParentAbs !== null && (rootEffective ? (
+                          <> 이 요청에서는 <code className="rounded bg-surface px-1 break-all">{destParentAbs}</code> 가
+                            이미 있어야 합니다.</>
+                        ) : (
                           <> 이 요청에서는 <code className="rounded bg-surface px-1 break-all">{destParentAbs}</code> 에
                             쓰기 권한이 필요합니다.</>
-                        )}
+                        ))}
                       </li>
-                      <li>목적지가 이미 있으면 그 디렉토리에 쓰기·진입할 수 있어야 하고, root 실행이 아니면
-                        실행 신원 소유여야 합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문).</li>
+                      <li>
+                        <strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 거부).{" "}
+                        {rootEffective
+                          ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
+                          : <>쓰기·진입할 수 있어야 하며,{" "}
+                              {canRoot ? "root 실행이 아니면 실행 신원 소유여야" : isAdmin ? "실행 신원 소유여야" : "요청자 본인 소유여야"}{" "}
+                              합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문). 상위 디렉토리 쓰기 권한도 마찬가지로
+                              필요합니다.</>}
+                      </li>
+                      <li><strong>소유권</strong>: {ownership.long}</li>
+                      {/* 보조 그룹 미적용(검증 워크플로 2026-10-01): preflight·도구는 실행 uid + LDAP 주 gid
+                          만으로 돈다(supplementalGroups 없음, 잡 컨테이너에 LDAP NSS 없음). */}
+                      <li>
+                        {canRoot ? "root 가 아닌 실행에서 권한은" : "권한은"} {isAdmin ? "실행 신원" : "본인 계정"}의 uid·LDAP 주 그룹(그리고 기타
+                        사용자 권한) 기준으로만 판정됩니다 — <strong>보조 그룹으로 받은 권한은 인정되지 않습니다</strong>(소스
+                        읽기도 마찬가지).
+                      </li>
                       <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
-                      {canRoot && <li>root 권한으로 실행하면 권한 검사는 우회됩니다(옵션 단계에서 선택).</li>}
+                      {canRoot && (
+                        <li>root 권한으로 실행하면 권한·소유 검사는 우회됩니다(옵션 단계에서 선택) — 상위 디렉토리는
+                          그래도 이미 있어야 합니다.</li>
+                      )}
                     </ul>
                   </InfoCard>
                 </div>
@@ -443,12 +476,17 @@ export function SubmitJob() {
                         <input aria-label="chmod" className={field} value={f.chmod} onChange={on("chmod")} />
                       </label>
                       {chmodError && <p className="text-bad text-sm">{chmodError}</p>}
-                      <label className="text-sm block">chown (선택 · user:group 또는 uid:gid)
+                      <label className="text-sm block">chown (선택 · 숫자 uid:gid)
                         <input aria-label="chown" className={field} value={f.chown}
-                               placeholder="예: 10003:10000 또는 cocoa.song:mig"
+                               placeholder="예: 10003:10000"
                                onChange={on("chown")} />
                       </label>
                       {chownError && <p className="text-bad text-sm">{chownError}</p>}
+                      {/* 이름은 잡 컨테이너에서 풀리지 않는다(lib/syncOwnership 주석) -- 서버 검증은 이름을
+                          받지만(형식만 본다) 실행이 실패하거나 root 에선 uid 0 으로 풀려, 여기서 경고한다. */}
+                      {!chownError && chownHasName(f.chown) && (
+                        <p className="text-bad text-sm">{CHOWN_NAME_WARNING}</p>
+                      )}
                       {/* 함정 캡션(설계 §2.5): chown 명시 시 auto-chown 억제는
                           execution_manifests.py("chown" in spec.options) — 실패는
                           서버가 아니라 도구 실행 단계에서 나므로 여기서 미리 경고한다.
@@ -457,10 +495,11 @@ export function SubmitJob() {
                           신원을 지정하면 그 사용자) 소유 자동 chown — 정직하게 병기 */}
                       <p className="text-muted text-xs">
                         {rootEffective
-                          ? "비우면 원래 소유권을 보존합니다(지금 root 실행). "
-                          : "비우면 실행 신원의 uid:gid 소유로 자동 chown 됩니다(지금 root 아님). "}
-                        chown 을 지정하면 자동 chown 이 꺼집니다. root 가 아닌데 타인 소유를 지정하면
-                        도구가 chown 권한이 없어 <strong>데이터는 복사되고 잡은 Failed 로 끝납니다</strong>.
+                          ? "비우면 원래(소스) 소유권을 보존합니다(지금 root 실행). chown 을 지정하면 목적지와 복사본이 그 값으로 셋업됩니다."
+                          : <>비우면 실행 신원의 uid:gid 소유로 자동 chown 됩니다(지금 root 아님). chown 을 지정하면 자동
+                              chown 이 꺼지는데, 본인 uid·주 gid 가 아닌 값이면 도구에 권한이 없어{" "}
+                              <strong>dsync 는 데이터를 복사한 뒤 Failed 로 끝나고, nsync 는 소유 변경이 적용되지 않습니다</strong>.</>}
+                        {" "}uid·gid 는 둘 다 숫자로 적으세요 — 한쪽을 비우면 그쪽은 소스 값이 유지됩니다.
                       </p>
                     </div>
                   </details>
@@ -564,7 +603,8 @@ export function SubmitJob() {
                   <span>root 권한으로 실행(관리자 기본)
                     <span className="block text-muted text-xs mt-1">
                       켜면 잡이 root 로 실행되어 파일 권한 검사를 우회하고, <strong>sync 는
-                      목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다.</strong>{" "}
+                      목적지(이미 있는 디렉토리 포함)의 소유자·권한을 소스와 같게 바꿉니다</strong>(chown·chmod 를
+                      지정하면 그 값).{" "}
                       실행 신원에 다른 사용자를 적으면 기본으로 꺼지고(그 사용자 권한으로 실행),
                       끄면 실행 신원의 권한으로만 동작합니다.
                     </span>
@@ -603,14 +643,18 @@ export function SubmitJob() {
                         <dt className="w-24 shrink-0 text-muted">목적지</dt>
                         <dd>{f.destStorage}:{f.destPath}</dd>
                       </div>
-                      {/* 제출 직전 재노출(대상 스텝의 목적지 권한 조건) -- root 실행이면 권한
-                          검사가 우회되므로 대신 그 결과(실행 권한 행)를 본다. */}
-                      {!rootEffective && (
-                        <div className="flex gap-2">
-                          <dt className="w-24 shrink-0 text-muted">목적지 조건</dt>
-                          <dd>{`상위 디렉토리 ${destParentAbs ?? "(목적지 경로의 상위)"} 가 있어야 하고 실행 신원의 쓰기 권한 필요`}</dd>
-                        </div>
-                      )}
+                      {/* 제출 직전 재노출(대상 스텝의 목적지 조건과 소유권). root 실행이면 권한 검사가
+                          우회되지만 상위 디렉토리 존재는 여전히 필요하다(preflight test -w). */}
+                      <div className="flex gap-2">
+                        <dt className="w-24 shrink-0 text-muted">목적지 조건</dt>
+                        <dd>{rootEffective
+                          ? `상위 디렉토리 ${destParentAbs ?? "(목적지 경로의 상위)"} 가 있어야 함(root 실행 — 권한 검사 우회). 목적지가 없으면 새로 만듦`
+                          : `상위 디렉토리 ${destParentAbs ?? "(목적지 경로의 상위)"} 가 있어야 하고 ${isAdmin ? "실행 신원" : "요청자 본인"}의 쓰기 권한 필요. 목적지가 없으면 새로 만들고, 이미 있으면 ${isAdmin ? "실행 신원" : "요청자 본인"} 소유·쓰기 가능해야 함`}</dd>
+                      </div>
+                      <div className="flex gap-2">
+                        <dt className="w-24 shrink-0 text-muted">목적지 소유</dt>
+                        <dd>{ownership.short}</dd>
+                      </div>
                     </>
                   ) : (
                     <div className="flex gap-2">
@@ -637,7 +681,7 @@ export function SubmitJob() {
                     <div className="flex gap-2">
                       <dt className="w-24 shrink-0 text-muted">실행 권한</dt>
                       <dd className={rootEffective ? "text-bad" : undefined}>
-                        {rootEffective ? "root(특권) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤"
+                        {rootEffective ? "root(특권) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤(chown·chmod 지정 시 그 값)"
                           : "실행 신원의 uid/gid(권한 그대로 적용)"}
                       </dd>
                     </div>

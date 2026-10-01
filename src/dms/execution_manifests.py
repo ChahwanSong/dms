@@ -64,15 +64,18 @@ def tool_argv(spec, *, abs_paths: dict) -> list[str]:
 
 
 def _auto_chown(spec) -> list[str]:
-    """비특권 요청자의 sync는 목적지를 요청자(uid:gid) 소유로 강제한다(--chown).
+    """비 root(비특권) 실행의 sync는 목적지를 **실행 신원**(owner_username 이 있으면 그 사용자, 없으면
+    요청자)의 uid:LDAP 주 gid 소유로 강제한다(--chown). 포탈 안내 lib/syncOwnership.ts 가 이 규칙의 미러다.
 
     dsync/nsync는 기본적으로 소스의 소유권을 목적지에 재현(chown)하려 하는데, 도구는
-    요청자 신원(runuser)으로 실행되므로 소스가 남(예: root) 소유면 목적지를 그 소유자로
-    chown할 권한이 없어 메타데이터 적용이 실패한다(데이터는 복사되지만 잡은 Failed).
-    비특권 요청자에겐 `--chown <uid>:<gid>`를 주입해 "복사본은 요청자 소유"로 만들어
-    (요청자는 자기 소유로 chown 가능) 실패를 없앤다. 특권(root)이면 root가 어떤 소유자로도
+    실행 신원(runuser)으로 실행되므로 소스가 남(예: root) 소유면 목적지를 그 소유자로
+    chown할 권한이 없어 메타데이터 적용이 실패한다 -- dsync 는 데이터를 복사한 뒤 잡이 Failed,
+    nsync 는 EPERM 을 무시 가능 오류로 보고 소유 변경만 건너뛴 채 Succeeded(포크 nsync.c).
+    비 root 실행에는 `--chown <uid>:<gid>`를 주입해 "복사본은 실행 신원 소유"로 만들어
+    (실행 신원은 자기 uid·주 gid 로 chown 가능) 이를 없앤다. 특권(root)이면 root가 어떤 소유자로도
     chown 가능하므로 소스 소유권을 그대로 보존한다(개입 안 함). 사용자가 chown 옵션을
-    명시했으면 그 값이 우선(중복 주입 안 함)."""
+    명시했으면 그 값이 우선(중복 주입 안 함). 어느 경우든 dsync/nsync 의 기본 비교(UID·GID·PERM·
+    MTIME)가 목적지에 이미 있던 같은 경로 항목의 메타데이터도 이 값(root 면 소스 값)으로 다시 맞춘다."""
     ident = spec.identity or {}
     if ident.get("privileged") or "chown" in (spec.options or {}):
         return []
