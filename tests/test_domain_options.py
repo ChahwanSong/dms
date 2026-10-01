@@ -101,24 +101,31 @@ def test_sync_invalid_values(opts):
 
 
 def test_sync_chmod_chown_ok():
-    out = validate_options(Operation.SYNC, {"chmod": "D0750,F0640", "chown": "alice:dev"})
-    assert out["chmod"] == "D0750,F0640"
+    out = validate_options(Operation.SYNC, {"chmod": "D0750,F0640", "chown": "10003:10000"})
+    assert out["chmod"] == "D0750,F0640" and out["chown"] == "10003:10000"
 
 
-@pytest.mark.parametrize("value", [
-    "10003", "10003:10000", "0:0", "10003:mig", "cocoa.song:10000",
-    ":10000", ":mig",
-])
-def test_sync_chown_numeric_and_mixed_ok(value):
-    # chown 파트는 「이름 또는 숫자 uid/gid」다 — dsync --chown 이 숫자를 받는 것은
-    # auto_chown 의 숫자(uid:gid) 주입이 증명한다(execution_manifests._auto_chown).
-    # "0:0" 은 dsync 의미상 root:root 로 유효. 혼합(숫자:이름)도 형식상 허용.
-    # ":gid" 꼴(빈 uid 파트)은 기존 정규식 의미 그대로 허용이다.
+@pytest.mark.parametrize("value", ["10003", "10003:10000", "0:0", ":10000", "4294967295:0"])
+def test_sync_chown_numeric_ok(value):
+    # chown 은 숫자 uid/gid 만(2026-10-01 사용자 결정, domain.chown_problem). "0:0" 은 dsync 의미상 root:root 로
+    # 유효(명시적 숫자 지정). ":gid" 꼴(빈 uid 파트)·uid 만도 허용 -- 비운 쪽은 소스 값 유지.
     out = validate_options(Operation.SYNC, {"chown": value})
     assert out["chown"] == value
 
 
-@pytest.mark.parametrize("value", ["", "10003:", "1.5:10", "10003abc"])
+@pytest.mark.parametrize("value", [
+    "alice:dev", "alice", "root", "root:root", "10003:mig", "cocoa.song:10000", ":mig", "users",
+])
+def test_sync_chown_names_are_rejected_with_their_own_reason(value):
+    # 이름은 잡 컨테이너(LDAP NSS 없음)에서 제대로 풀리지 않는다 -- 못 찾으면 미리보기 실패, users 같은 이름은
+    # 데비안 기본 gid, root 실행이면 실행 신원 이름이 uid 0 으로 풀려 목적지가 조용히 root 소유가 됐다.
+    # 형식 오류(invalid_option)와 구분된 사유로 "숫자로 고치라"를 말한다.
+    with pytest.raises(DomainValidationError) as e:
+        validate_options(Operation.SYNC, {"chown": value})
+    assert e.value.reason_code == "chown_name_not_supported"
+
+
+@pytest.mark.parametrize("value", ["", "10003:", "1.5:10", "10003abc", "a b", ":", "1:2:3", 10003])
 def test_sync_chown_bad_shapes_rejected(value):
     # 경계 고정: 빈 문자열·후행 콜론("user:" 꼴 빈 gid 파트)·소수·숫자+문자 붙임은
     # 거부 — 숫자 확장이 기존 빈 파트 규칙과 이름 규칙(문자 시작)을 넓히지 않는다.

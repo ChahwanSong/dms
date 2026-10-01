@@ -652,12 +652,17 @@ test("sync 배치: chown 을 지정하면 소유 안내가 그 값이 된다", a
   expect(note).not.toHaveTextContent("결과는 실행 신원의 uid:gid(주 그룹) 소유가 됩니다");
 });
 
-test("sync 배치: chown 에 이름을 쓰면 해석되지 않는다고 경고한다", async () => {
+test("sync 배치: chown 에 이름을 쓰면 오류로 막는다(숫자 uid:gid 만 -- 서버 chown_name_not_supported)", async () => {
   await toSyncItems();
   await userEvent.click(next());
   await userEvent.click(screen.getByText("고급 옵션"));
   await userEvent.type(screen.getByLabelText("chown"), "cocoa.song:mig");
-  expect(screen.getByText(/chown 의 이름은 작업 컨테이너에서 해석되지 않습니다/)).toBeInTheDocument();
+  expect(screen.getByText(/chown 은 숫자 uid:gid 만 지정할 수 있습니다/)).toBeInTheDocument();
+  expect(next()).toBeDisabled();
+  await userEvent.clear(screen.getByLabelText("chown"));
+  await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
+  expect(screen.queryByText(/chown 은 숫자 uid:gid 만/)).not.toBeInTheDocument();
+  expect(next()).toBeEnabled();
 });
 
 test("scan 배치 확인 단계엔 목적지 소유 행이 없다", async () => {

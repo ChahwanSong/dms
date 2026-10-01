@@ -497,12 +497,12 @@ test("chmod·chown 문자열이 그대로 전송된다", async () => {
   renderPage();
   await goToOptionsAndOpenAdvanced();
   await userEvent.type(screen.getByLabelText("chmod"), "D770,F660");
-  await userEvent.type(screen.getByLabelText("chown"), "alice:proj");
+  await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
   expect(captured.body.options).toEqual(
-    { ...SYNC_DEFAULT_OPTS, chmod: "D770,F660", chown: "alice:proj" });
+    { ...SYNC_DEFAULT_OPTS, chmod: "D770,F660", chown: "10003:10000" });
 });
 
 test("숫자 uid:gid chown 이 즉답 오류 없이 그대로 전송된다", async () => {
@@ -959,11 +959,20 @@ test("비 root 에서 chown 을 지정하면 본인 uid:gid 가 아니면 실패
     .toBeInTheDocument();
 });
 
-test("chown 에 이름을 쓰면 해석되지 않는다고 경고한다(잡 컨테이너엔 LDAP 이 없다)", async () => {
+test("고급 옵션 오류는 스텝을 오가도 펼쳐진 채 보인다(잠긴 '다음'의 이유가 숨지 않게)", async () => {
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  await userEvent.type(screen.getByLabelText("chown"), "alice:users");
+  await userEvent.click(screen.getByRole("button", { name: "이전" }));
+  await clickNext();                                                   // 다시 옵션 스텝(패널 재마운트)
+  expect(screen.getByText(/chown 은 숫자 uid:gid 만 지정할 수 있습니다/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
+});
+
+test("chown 에 이름을 쓰면 오류로 막는다(잡 컨테이너엔 LDAP 이 없다 -- 서버 chown_name_not_supported)", async () => {
   renderPage();
   await goToOptionsAndOpenAdvanced();
   await userEvent.type(screen.getByLabelText("chown"), "cocoa.song:mig");
-  expect(screen.getByText(/chown 의 이름은 작업 컨테이너에서 해석되지 않습니다/)).toBeInTheDocument();
-  await goToConfirm();
-  expect(screen.getByText("chown cocoa.song:mig — 이름은 해석되지 않음(숫자로 지정)")).toBeInTheDocument();
+  expect(screen.getByText(/chown 은 숫자 uid:gid 만 지정할 수 있습니다/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
 });

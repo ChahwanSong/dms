@@ -142,6 +142,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   mailer_misconfigured: "인증 메일 발송 설정이 잘못되어 인증번호를 보낼 수 없습니다 — 관리자에게 문의하세요",
   verification_rate_limited: "인증 메일 요청이 너무 잦거나 발송이 몰렸습니다 — 잠시 후 다시 시도하세요(이미 받은 인증번호가 있으면 그대로 입력하세요)",
   verification_locked: "인증번호를 여러 번 틀려 이 아이디의 인증이 잠겼습니다 — 첫 실패부터 24시간 뒤 다시 시도하세요(로그인은 그대로 됩니다)",
+  chown_name_not_supported: "chown 은 숫자 uid:gid 만 지정할 수 있습니다(예: 10003:10000) — 이름은 작업 컨테이너에서 해석되지 않습니다",
   verification_client_locked: "이 접속 위치에서 인증번호를 너무 여러 번 틀렸습니다 — 잠시 후(최대 24시간) 다시 시도하거나 관리자에게 문의하세요",
   mail_settings_changed: "그 사이 다른 관리자가 릴레이 주소를 바꿔 설정을 다시 불러왔습니다 — 바뀐 주소를 확인한 뒤 다시 저장하세요(입력한 인증 키는 칸에 남아 있습니다)",
   verification_email_failed: "인증 메일을 보내지 못했습니다 — 잠시 후 다시 시도하고, 계속되면 관리자에게 문의하세요",

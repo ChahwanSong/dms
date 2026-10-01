@@ -9,7 +9,7 @@ import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
 import { StoragePicker, field } from "../jobs/formFields";
 import {
-  CHMOD_RE, CHOWN_RE, SCAN_INT_FIELDS, SYNC_INT_FIELDS, intFieldError,
+  CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, intFieldError,
   scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Card } from "../../components/ui/Card";
@@ -18,7 +18,7 @@ import { InfoPanel } from "../../components/ui/InfoPanel";
 import { Wizard } from "../../components/wizard/Wizard";
 import type { WizardStep } from "../../components/wizard/Wizard";
 import { ApiError } from "../../lib/api";
-import { CHOWN_NAME_WARNING, chownHasName, syncOwnership } from "../../lib/syncOwnership";
+import { syncOwnership } from "../../lib/syncOwnership";
 
 // 4스텝 위저드(슬라이스 32 T9): SubmitJob 관례(연산→대상→옵션→확인)를 배치에
 // 그대로 얹는다 — 위저드 프레임은 배치 생성 재사용을 명시 설계(Wizard.tsx 주석).
@@ -84,6 +84,8 @@ export function BatchCreate() {
   // 폼 값은 위저드 밖 단일 useState(SubmitJob 관례) — 스텝을 오가도 값이 보존된다.
   const [f, setF] = useState(initial);
   const [step, setStep] = useState(0);
+  // 고급 옵션 펼침은 스텝 밖 상태(SubmitJob 과 같은 이유) -- 안의 오류로 '다음'이 잠기면 항상 펼친다.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [rows, setRows] = useState<RowPair[]>([{ a: "", b: "" }]);
   const [tab, setTab] = useState<InputTab>("table");
   const [csvText, setCsvText] = useState("");
@@ -115,8 +117,7 @@ export function BatchCreate() {
     ? syncIntFieldError("bufsize", f.bufsize) : null;
   const chmodError = f.op === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
-  const chownError = f.op === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
-    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 — 숫자 uid:gid)" : null;
+  const chownError = f.op === "sync" ? chownFieldError(f.chown) : null;
   // 1..64 는 서버 위생 상한(1024)의 보수적 부분집합 — 실제 캡은 정책 max_nodes.
   const nodeCountError = intFieldError("노드 수", f.nodeCount, 1, 64);
   // 노드당 프로세스 수도 같은 부분집합 — 실제 캡은 정책 procs_per_node(min).
@@ -494,7 +495,10 @@ export function BatchCreate() {
                   <input type="checkbox" aria-label="quiet" checked={f.quiet}
                          onChange={on("quiet")} /> quiet
                 </label>
-                <details className="rounded-lg border border-line p-3">
+                <details className="rounded-lg border border-line p-3"
+                         open={advancedOpen || batchFilesError !== null || bufsizeError !== null
+                           || chmodError !== null || chownError !== null}
+                         onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}>
                   <summary className="cursor-pointer text-sm font-medium">고급 옵션</summary>
                   <div className="mt-3 space-y-3">
                     <label className="flex items-center gap-2 text-sm">
@@ -540,9 +544,6 @@ export function BatchCreate() {
                              className={field} value={f.chown} onChange={on("chown")} />
                     </label>
                     {chownError && <p className="text-bad text-sm">{chownError}</p>}
-                    {!chownError && chownHasName(f.chown) && (
-                      <p className="text-bad text-sm">{CHOWN_NAME_WARNING}</p>
-                    )}
                     {/* 배치는 통일 게이트로 전부 특권(root) 실행 — 단건(SubmitJob)의
                         비특권 함정 캡션은 여기선 거짓이라 싣지 않는다. 특권 실행의
                         "비우면" 기본은 소스 소유권 보존(_auto_chown 무개입 분기). */}

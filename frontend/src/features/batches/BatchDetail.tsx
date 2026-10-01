@@ -18,7 +18,7 @@ import { absSummary } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant } from "../../lib/jobState";
-import { syncOwnership } from "../../lib/syncOwnership";
+import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
 import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
 import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
 
@@ -697,6 +697,17 @@ export function BatchDetail() {
             라벨("메모 ")은 붙이지 않는다(사용자 조정 2026-08-15): 헤더 카드에서
             이름 아래 한 줄은 문맥상 메모임이 자명한데, 접두어가 매번 내용 앞을
             가로막았다. 행이 아예 없으면 메모 없음이라는 사실도 그대로 읽힌다. */}
+        {/* 확인·실패분 재실행·전체 재실행의 거부(409·422)를 말한다 -- 말하지 않으면 버튼이 죽은 것처럼 보였다
+            (2026-10-01: 이름 chown 옛 배치는 이 셋이 모두 422 chown_name_not_supported). */}
+        {[confirm, rerun, rescan].filter((m) => m.isError).map((m, i) => (
+          <p key={i} role="alert" className="text-bad text-sm mt-2">{(m.error as ApiError).message}</p>
+        ))}
+        {b?.operation === "sync" && chownHasName(String(b?.options?.chown ?? "")) && (
+          <p role="alert" aria-label="이름 chown 배치" className="mt-2 rounded-lg border border-bad px-3 py-2 text-sm text-bad">
+            {`이 배치는 chown 에 이름(${String(b.options?.chown)})이 들어 있어 더 이상 실행할 수 없습니다 — 확인·재실행·`
+              + "항목 추가와 남은 항목은 거부됩니다. 숫자 uid:gid 로 새 배치를 만드세요(이름은 작업 컨테이너에서 해석되지 않습니다)."}
+          </p>
+        )}
         {b?.note && !editing && <p className="text-muted text-sm mt-2">{b.note}</p>}
         {b && <BatchSettings b={b} />}
         {editing && (
@@ -825,6 +836,10 @@ export function BatchDetail() {
               <p key={s.seq} className="text-muted">{`항목 ${s.seq}: ${reasonText(s.reason)}`}</p>
             ))}
           </div>
+        )}
+        {/* 선택 재실행 자체가 거부된 경우(422 등) -- 선택은 지워져도 사유는 남긴다(액션 바 밖) */}
+        {bulkRerun.isError && (
+          <p role="alert" className="mt-2 text-sm text-bad">{(bulkRerun.error as ApiError).message}</p>
         )}
         {(b?.items ?? []).map((it) => (
           <div key={it.seq} className="border-t border-black/5 py-2">

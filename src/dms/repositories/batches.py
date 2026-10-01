@@ -214,6 +214,19 @@ class BatchesRepository:
     def set_item_status(self, batch_id, seq, status, *, reason_code=None):
         self._touch_item(batch_id, seq, status=status, reason_code=reason_code)
 
+    def reject_queued_item(self, batch_id, seq, *, reason_code) -> bool:
+        """자식을 만들기 전에 거부된 항목(orchestrator _materialize 의 재검증 실패) -> Rejected + 실패 1.
+        **아직 Queued 일 때만**(원자 가드): orchestrator 가 읽은 목록 뒤에 관리자가 항목을 지웠거나 바꿨으면
+        0행이고 집계도 하지 않는다 -- 무조건 bump 하면 지워진 항목 몫이 failed_count 에 남았다(2026-10-01 리뷰)."""
+        with self._db.transaction():
+            changed = self._db.execute_count(
+                """UPDATE batch_items SET status = 'Rejected', reason_code = :r, updated_at = :now
+                   WHERE batch_id = :b AND seq = :s AND status = 'Queued'""",
+                {"r": reason_code, "now": utc_now_iso(), "b": batch_id, "s": seq})
+            if changed == 1:
+                self.bump_counts(batch_id, failed=1)
+        return changed == 1
+
     def reset_item_to_queued(self, batch_id, seq):
         self._touch_item(batch_id, seq, status="Queued", request_id=None, reason_code=None)
 

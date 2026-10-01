@@ -7,7 +7,7 @@ import sys
 
 from .artifact_base import resolve_artifact_base
 from .db import iso_plus, utc_now_iso
-from .domain import DataJobState, TERMINAL_DATA_JOB_STATES
+from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import parse_preflight_reason
 from .identity import PRIVILEGE_NEVER, privilege_policy
@@ -94,6 +94,17 @@ class PrivilegeNotRequestedAtStep(Exception):
     def __init__(self, request_id):
         self.request_id = request_id
         super().__init__(f"privileged identity without run_as_root/batch (request {request_id})")
+
+
+class ChownNameAtStep(Exception):
+    """제출 직전 chown 재검사(2026-10-01, domain.chown_problem 주석). 이름 chown 은 제출 검증이 막지만, 규칙
+    전에 만들어진 대기 잡·DB 직접 쓰기는 그대로 dsync/nsync --chown 으로 간다 -- root 실행이면 실행 신원
+    이름이 uid 0 으로 풀려 목적지가 조용히 root 소유가 된다. 모든 제출 경로가 지나는 _build_spec 에서
+    끊어 종단시킨다(identity_missing_at_step 과 같은 fail-closed)."""
+
+    def __init__(self, problem):
+        self.problem = problem
+        super().__init__(problem)
 
 
 def identity_problem(ident) -> "str | None":
@@ -186,6 +197,11 @@ class JobStepper:
             req = self._repos.requests.get(job["request_id"])
             if privilege_policy(req) == PRIVILEGE_NEVER:
                 raise PrivilegeNotRequestedAtStep(job["request_id"])
+        options = job["options"] if isinstance(job["options"], dict) else {}
+        if job["tool"] in ("dsync", "nsync") and "chown" in options:
+            problem = chown_problem(options["chown"])
+            if problem is not None:
+                raise ChownNameAtStep(problem)
         op = job["operation"]
         if op == "sync":
             paths = {"source": self._abs(job["source_storage"], job["source"]),
@@ -398,6 +414,13 @@ class JobStepper:
                 message=f"{exc.problem} job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="identity_missing_at_step")
+        except ChownNameAtStep as exc:
+            # 규칙(숫자 uid:gid 만) 전에 만들어진 잡 -- root 로 이름이 uid 0 으로 풀리기 전에 끊는다.
+            self._repos.observability.record_event(
+                component="stepper", severity="error", event_type="chown_name_at_step",
+                message=f"{exc.problem} job={job['job_id']}",
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="chown_name_not_supported")
         except PrivilegeNotRequestedAtStep:
             # 규칙 변경 전에 얼린 root 신원·변조 행 -- root 로 한 번이라도 제출되기 전에
             # 끊는다(재계획은 하지 않는다: 요청자가 의도를 다시 정해 새로 내야 한다).
