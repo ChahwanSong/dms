@@ -12,6 +12,7 @@ from .observability import ObservabilityRepository
 from .releases import ReleasesRepository
 from .metrics import MetricsRepository
 from .sync_pairs import SyncPairsRepository
+from .mail_settings import MailSettingsRepository
 
 
 class Repositories:
@@ -31,3 +32,4 @@ class Repositories:
         self.releases = ReleasesRepository(db)
         self.metrics = MetricsRepository(db)
         self.sync_pairs = SyncPairsRepository(db)
+        self.mail_settings = MailSettingsRepository(db)

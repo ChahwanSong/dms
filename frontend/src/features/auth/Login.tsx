@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useLogin, useRequestCode, useSignup, usePasswordReset } from "./useAuth";
+import { useMailInfo } from "../mail/useMailSettings";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { ApiError } from "../../lib/api";
@@ -15,9 +16,10 @@ function errText(e: unknown, fallback: string): string {
 
 /** 계정 생성·비밀번호 변경 공용 폼(2026-08-20, 사용자 결정): 흐름이 동일하다 --
     아이디 입력 → 인증번호 받기(4자리·5분, 사내 이메일 <아이디>@도메인) →
-    인증번호 + 새 비밀번호 → 완료. 이메일 전송은 지금 stub 이라(사내 메일 연동
-    불가) 발급 응답의 stub_code 를 화면에 안내한다 -- 실메일 전환 시 이 안내는
-    서버가 stub_code 를 빼는 것만으로 함께 사라진다. */
+    인증번호 + 새 비밀번호 → 완료. 메일러가 stub 이면 발급 응답의 stub_code 를 화면에
+    안내하고, 사내 Knox 메일(knox_relay, 2026-10-01)이면 서버가 stub_code 를 빼므로 이
+    안내는 저절로 사라진다. 도메인은 서버 설정(GET /api/auth/mail-info)에서 읽는다 --
+    예전엔 @samsung.com 하드코딩이라 DMS_ACCOUNT_EMAIL_DOMAIN 을 바꾼 사이트에서 틀렸다. */
 function VerifiedForm({ purpose, submitLabel, doneText, onDone }: {
   purpose: "signup" | "password_reset";
   submitLabel: string; doneText: string; onDone: () => void;
@@ -26,6 +28,8 @@ function VerifiedForm({ purpose, submitLabel, doneText, onDone }: {
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const request = useRequestCode();
+  const mailInfo = useMailInfo();
+  const domain = mailInfo.data?.email_domain;
   const signup = useSignup();
   const reset = usePasswordReset();
   const submit = purpose === "signup" ? signup : reset;
@@ -43,7 +47,7 @@ function VerifiedForm({ purpose, submitLabel, doneText, onDone }: {
       </label>
       <div className="flex items-end gap-2">
         <p className="text-xs text-muted flex-1 min-w-0 truncate">
-          인증번호가 {username.trim() === "" ? "회사 이메일" : `${username.trim()}@samsung.com`} 로 전송됩니다
+          인증번호가 {username.trim() === "" || !domain ? "회사 이메일" : `${username.trim()}@${domain}`} 로 전송됩니다
         </p>
         <Button type="button" variant="outline" className="shrink-0"
                 disabled={request.isPending || username.trim() === ""}
@@ -55,6 +59,11 @@ function VerifiedForm({ purpose, submitLabel, doneText, onDone }: {
       {issued && (
         <p className="text-ok text-sm">
           {`${issued.email} 로 인증번호를 보냈습니다 (유효 ${Math.round(issued.expires_in_seconds / 60)}분)`}
+          {issued.delivery_uncertain && (
+            <span className="block text-muted">
+              메일 서버의 발송 확인이 늦어지고 있습니다 — 몇 분 안에 메일이 오지 않으면 인증번호를 다시 요청하세요.
+            </span>
+          )}
           {issued.stub_code !== undefined && (
             // 사내 메일 연동 전 임시 안내 -- 서버 메일러가 stub 일 때만 온다
             <span className="block text-muted">개발용 안내: 인증번호 {issued.stub_code}</span>

@@ -1,5 +1,6 @@
 import os
 import signal
+import threading
 import sys
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -15,7 +16,12 @@ from ..wiring import (build_build_runner, build_execution_adapter,
 from .login_limiter import LoginRateLimiter
 from .password_transport import PasswordTransport
 from .routes_accounts import router as accounts_router
-from .routes_auth import router as auth_router
+from .routes_auth import (router as auth_router, VERIFICATION_GUESS_PER_CLIENT_LIMIT,
+                          VERIFICATION_GUESS_WINDOW_SECONDS, VERIFICATION_MAIL_CONCURRENCY,
+                          VERIFICATION_MAIL_GLOBAL_LIMIT, VERIFICATION_MAIL_LIMIT,
+                          VERIFICATION_MAIL_PER_CLIENT_LIMIT, VERIFICATION_MAIL_WINDOW_SECONDS)
+from .routes_mail_settings import router as mail_settings_router
+from .mailer import SendThrottle
 from .routes_storages import router as storages_router, user_router as user_storages_router
 from .routes_scan_paths import router as scan_paths_router
 from .routes_sync_pairs import router as sync_pairs_router, user_router as user_sync_pairs_router
@@ -64,6 +70,21 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.state.login_limiter = LoginRateLimiter(
         settings.login_rate_limit_attempts, settings.login_rate_limit_window_seconds)
     app.state.password_transport = PasswordTransport(settings.session_secret)
+    # 2026-10-01 Knox 메일 릴레이: 수신자별 인증 메일 상한(프로세스 메모리 -- 릴레이 쪽 상한이 최후 방어선).
+    app.state.mail_throttle = SendThrottle(VERIFICATION_MAIL_LIMIT, VERIFICATION_MAIL_WINDOW_SECONDS)
+    app.state.mail_throttle_client = SendThrottle(VERIFICATION_MAIL_PER_CLIENT_LIMIT,
+                                                  VERIFICATION_MAIL_WINDOW_SECONDS)
+    app.state.mail_throttle_global = SendThrottle(VERIFICATION_MAIL_GLOBAL_LIMIT,
+                                                  VERIFICATION_MAIL_WINDOW_SECONDS)
+    app.state.mail_send_slots = threading.BoundedSemaphore(VERIFICATION_MAIL_CONCURRENCY)
+    # 세 상한을 "모두 통과할 때만 모두 기록"하는 peek~record 구간의 락, 그리고 거절 이벤트를 (상한, 키)마다
+    # 창에 한 번만 남기는 기록표(routes_auth.request_verification_code).
+    app.state.mail_throttle_lock = threading.Lock()
+    app.state.mail_throttle_notes = SendThrottle(1, VERIFICATION_MAIL_WINDOW_SECONDS)
+    # 접속 IP 별 틀린 인증번호 상한(routes_auth._consume_code) -- 아이디별 누적 잠금(DB)과 별개 축.
+    app.state.verification_guess_limiter = LoginRateLimiter(
+        VERIFICATION_GUESS_PER_CLIENT_LIMIT, VERIFICATION_GUESS_WINDOW_SECONDS)
+    app.state.verification_guess_lock = threading.Lock()   # 검사 -> 소비 -> 기록을 원자로(_consume_code)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request, exc: RequestValidationError):
@@ -121,6 +142,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(user_storages_router)
     app.include_router(scan_paths_router)
     app.include_router(sync_pairs_router)
+    app.include_router(mail_settings_router)
     app.include_router(user_sync_pairs_router)
     app.include_router(requests_router)
     app.include_router(jobs_router)

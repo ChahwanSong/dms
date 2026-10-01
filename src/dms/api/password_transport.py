@@ -43,7 +43,9 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 VERSION = 1
 # 비밀번호를 받는 엔드포인트마다 하나 -- AAD 로 묶여 다른 용도로 재사용이 안 된다.
-PURPOSES = ("login", "signup", "password_reset", "admin_create")
+# mail_relay_token(2026-10-01): 포탈 메일 설정의 릴레이 토큰(routes_mail_settings) -- 비밀번호는 아니지만
+# 같은 통로로 봉인해 평문으로 오가지 않게 한다.
+PURPOSES = ("login", "signup", "password_reset", "admin_create", "mail_relay_token")
 
 _CURVE = ec.SECP256R1()
 # P-256 군의 위수(n). 유도한 32 바이트를 [1, n-1] 로 접어 유효한 개인키 스칼라로 만든다.

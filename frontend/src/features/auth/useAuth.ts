@@ -23,7 +23,11 @@ export function useLogin() {
 // 계정 셀프서비스(2026-08-20): 인증번호(4자리·5분 TTL) 발급 -> 검증 -> 완료.
 // 이메일은 <아이디>@도메인 파생이라 서버가 계산해 돌려준다. stub 메일러(현행)
 // 에선 stub_code 가 에코된다 -- 실메일 백엔드로 바뀌면 이 필드가 사라진다.
-export interface CodeIssued { email: string; expires_in_seconds: number; stub_code?: string }
+// delivery_uncertain(2026-10-01): 릴레이에 요청은 갔는데 응답을 못 받음 -- 서버는 코드를 저장했고 메일이 늦게
+// 도착할 수 있다(오지 않으면 다시 요청).
+export interface CodeIssued {
+  email: string; expires_in_seconds: number; stub_code?: string; delivery_uncertain?: boolean;
+}
 export const useRequestCode = () =>
   useMutation({
     mutationFn: (b: { username: string; purpose: "signup" | "password_reset" }) =>

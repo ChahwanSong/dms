@@ -14,7 +14,12 @@ const server = setupServer();
 // 없으면 키 조회가 네트워크 오류로 죽어 모든 제출 테스트가 "네트워크" 문구로 빗나간다.
 let serverKey: TestServerKey;
 beforeAll(async () => { server.listen(); serverKey = await makeServerKey(); });
-beforeEach(() => { forgetTransportKey(); server.use(transportKeyHandler(serverKey)); });
+beforeEach(() => {
+  forgetTransportKey();
+  // 안내 문구의 도메인은 서버 설정(GET /api/auth/mail-info, 2026-10-01)에서 온다.
+  server.use(transportKeyHandler(serverKey),
+             http.get("/api/auth/mail-info", () => HttpResponse.json({ email_domain: "samsung.com", delivery: "stub" })));
+});
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
@@ -161,4 +166,53 @@ test("navigates to / on successful login", async () => {
   await userEvent.type(screen.getByLabelText("비밀번호"), "good");
   await userEvent.click(screen.getByRole("button", { name: "로그인" }));
   expect(await screen.findByRole("heading", { name: "홈" })).toBeInTheDocument();
+});
+
+test("인증번호 안내의 도메인은 서버 설정을 따른다(하드코딩 아님) -- Knox 메일이면 개발용 코드 안내가 없다", async () => {
+  server.use(
+    http.get("/api/auth/mail-info", () => HttpResponse.json({ email_domain: "corp.example", delivery: "knox_relay" })),
+    http.post("/api/auth/verification-codes", () =>
+      HttpResponse.json({ email: "lee.k@corp.example", expires_in_seconds: 300 })));
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "lee.k");
+  expect(await screen.findByText(/lee\.k@corp\.example 로 전송됩니다/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  expect(await screen.findByText(/lee\.k@corp\.example 로 인증번호를 보냈습니다/)).toBeInTheDocument();
+  expect(screen.queryByText(/개발용 안내/)).not.toBeInTheDocument();
+});
+
+test("발송 확인이 늦으면(delivery_uncertain) 그렇게 알리고 인증번호 입력은 그대로", async () => {
+  server.use(http.post("/api/auth/verification-codes", () =>
+    HttpResponse.json({ email: "a.b@samsung.com", expires_in_seconds: 300, delivery_uncertain: true })));
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "a.b");
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  expect(await screen.findByText(/발송 확인이 늦어지고 있습니다/)).toBeInTheDocument();
+  expect(screen.getByLabelText("인증번호")).toBeEnabled();
+});
+
+test("누적 실패 잠금은 429 verification_locked 의 한국어 사유로 보인다", async () => {
+  server.use(http.post("/api/auth/verification-codes", () =>
+    HttpResponse.json({ detail: "verification_locked" }, { status: 429, headers: { "Retry-After": "86000" } })));
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "a.b");
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  expect(await screen.findByText(/인증번호를 여러 번 틀려 이 아이디의 인증이 잠겼습니다/)).toBeInTheDocument();
+});
+
+test("인증 메일 실패·상한은 한국어 사유로 보인다", async () => {
+  server.use(http.post("/api/auth/verification-codes", () =>
+    HttpResponse.json({ detail: "verification_rate_limited" }, { status: 429, headers: { "Retry-After": "120" } })));
+  renderLogin();
+  await userEvent.click(screen.getByRole("tab", { name: "계정 생성" }));
+  await userEvent.type(screen.getByLabelText("회사 아이디"), "a.b");
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  expect(await screen.findByText(/인증 메일 요청이 너무 잦거나 발송이 몰렸습니다/)).toBeInTheDocument();
+  server.use(http.post("/api/auth/verification-codes", () =>
+    HttpResponse.json({ detail: "verification_email_failed" }, { status: 502 })));
+  await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
+  expect(await screen.findByText(/인증 메일을 보내지 못했습니다/)).toBeInTheDocument();
 });

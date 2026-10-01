@@ -13,11 +13,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
-from ..repositories.accounts import (VERIFICATION_PURPOSES,
-                                     VERIFICATION_TTL_SECONDS, valid_username)
+from ..repositories.accounts import (VERIFICATION_FAILURE_LIMIT, VERIFICATION_FAILURE_WINDOW_SECONDS,
+                                     VERIFICATION_PURPOSES, VERIFICATION_TTL_SECONDS,
+                                     new_verification_code, valid_username)
 from .auth import (Identity, can_run_as_root, client_ip, require_admin, require_user,
                    tokens_match)
 from .password_transport import PasswordTransportError
+from ..mail_config import MAILER_BACKENDS, resolve_mail_config
+from .mailer import MailerError, render_verification_email, send_mail_via_relay
 
 router = APIRouter()
 
@@ -96,15 +99,63 @@ def transport_key(request: Request):
     return request.app.state.password_transport.public_info()
 
 
+# 수신자별 인증 메일 상한(knox_relay 에만 적용). 프로세스 메모리라 워커가 여럿이면 워커별로 센다.
+# 감속기 인스턴스는 app.state.mail_throttle(create_app) -- 모듈 전역이면 테스트·앱 인스턴스 사이로 새어 나간다.
+VERIFICATION_MAIL_LIMIT = 5
+VERIFICATION_MAIL_WINDOW_SECONDS = 600
+# 비로그인 엔드포인트의 추가 상한(2026-10-01 리뷰): 수신자별만 있으면 한 클라이언트가 사번을 돌며 전 직원에게
+# 회사 Knox 발신으로 메일을 쏘거나, 남의 재설정 몫을 소진할 수 있다 -- 클라이언트 IP 별·전체 상한을 더한다.
+# 동시 발송(릴레이 호출, 최대 타임아웃만큼 스레드를 잡는다)은 슬롯 수로 막는다 -- 공유 스레드풀(healthz·login)
+# 이 릴레이 장애에 끌려가지 않게. 셋 다 프로세스 메모리(app.state, create_app).
+VERIFICATION_MAIL_PER_CLIENT_LIMIT = 20
+VERIFICATION_MAIL_GLOBAL_LIMIT = 300
+VERIFICATION_MAIL_CONCURRENCY = 8
+# 접속 IP 별 틀린 인증번호 상한(2026-10-01 3차 리뷰, _consume_code): 하루 20회 -- 한 IP 가 여러 계정에 추측을
+# 나눠도 맞힐 확률이 하루 0.2% 를 넘지 않는다. 같은 IP 뒤의 정상 사용자(공용 프록시)도 함께 막힐 수 있다는 것이 대가.
+VERIFICATION_GUESS_PER_CLIENT_LIMIT = 20
+VERIFICATION_GUESS_WINDOW_SECONDS = 86400
+
+
+@router.get("/api/auth/mail-info")
+def mail_info(request: Request):
+    """로그인 전 화면(가입·비밀번호 재설정)이 "인증번호가 <아이디>@<도메인> 으로 전송됩니다" 를 그리는 재료
+    (2026-10-01). 예전엔 화면이 도메인을 하드코딩해 DMS_ACCOUNT_EMAIL_DOMAIN 을 바꾼 사이트에서 틀렸다.
+    비밀은 없다 -- 도메인과 발송 방식(stub = 화면에 코드가 보이는 개발 모드)만."""
+    settings = request.app.state.settings
+    cfg = resolve_mail_config(request.app.state.repos, settings)
+    return {"email_domain": settings.account_email_domain,
+            "delivery": cfg.backend if cfg.backend in MAILER_BACKENDS else "unknown"}
+
+
 @router.post("/api/auth/verification-codes")
 def request_verification_code(body: VerificationBody, request: Request):
     """계정 셀프서비스 인증번호 발급(2026-08-20). 4자리·5분 TTL 을 만들어 사내
-    이메일(<아이디>@도메인 파생)로 보낸다. 지금 메일러는 stub 뿐(사내 메일 연동
-    불가) -- stub 이면 응답에 코드를 에코해 화면이 흐름을 완주한다. 실메일
-    백엔드가 생기면 에코가 빠지는 것이 계약이고, 이벤트(verification_email_stub)
-    는 코드 없이 수신자·목적만 남긴다."""
+    이메일(<아이디>@도메인 파생)로 보낸다. 메일러 백엔드(mail_config.resolve_mail_config --
+    포탈 메일 설정 > env DMS_MAILER_BACKEND):
+
+    - "stub": 실제 발송 없음. 응답에 코드를 에코(stub_code)해 화면이 흐름을 완주한다.
+    - "knox_relay"(2026-10-01): 메신저 서버의 knox_mail_dms_certi 를 거쳐 Knox 메일로 HTML
+      인증 메일을 TO 로 보낸다. 실메일 백엔드이므로 계약대로 에코가 빠진다.
+      - 수신자별 상한(5통/10분)은 코드를 발급하기 *전에* 검사해 429
+        (verification_rate_limited, Retry-After)로 알린다. 발급 뒤에 막으면 새 코드가
+        이전 코드를 대체해 메일함의 코드까지 죽일 수 있기 때문.
+      - 발송에 실패하면 보낸 척하지 않고 502(verification_email_failed). 릴레이 쪽
+        상한(최후 방어선)에 걸린 경우는 429. 요청은 나갔는데 응답을 못 받은 경우(relay_no_response
+        -- 메일이 갔을 수도 있다)는 코드를 저장하고 200 + delivery_uncertain 으로 알린다(저장하지 않으면
+        도착한 메일의 코드가 영영 안 맞는다).
+
+    누적 실패 잠금(accounts.VERIFICATION_FAILURE_LIMIT -- 재발급으로 초기화되지 않는 무차별 대입 상한)이면
+    어느 백엔드든 발급 전에 429(verification_locked, Retry-After).
+
+    이벤트(verification_email_stub / _sent / _uncertain / _throttled / _failed)는 어느 쪽이든 코드 없이
+    수신자·목적(실패면 사유)만 남긴다. _throttled 는 같은 (상한, 키)에 창마다 한 번만 -- 무인증 경로라
+    거절마다 쓰면 상한에 걸린 요청이 events 테이블을 무제한으로 채운다."""
     repos = request.app.state.repos
     settings = request.app.state.settings
+    cfg = resolve_mail_config(repos, settings)
+    if cfg.backend not in MAILER_BACKENDS:
+        # 설정 오타가 조용히 "보낸 척"으로 이어지지 않게, 코드를 발급하기 전에 막는다.
+        raise HTTPException(status_code=500, detail="mailer_misconfigured")
     if body.purpose not in VERIFICATION_PURPOSES:
         raise HTTPException(status_code=422, detail="invalid_verification_purpose")
     if not valid_username(body.username):
@@ -116,15 +167,149 @@ def request_verification_code(body: VerificationBody, request: Request):
         raise HTTPException(status_code=409, detail="account_exists")
     if body.purpose == "password_reset" and not exists:
         raise HTTPException(status_code=404, detail="account_not_found")
-    code = repos.accounts.issue_verification_code(body.username, body.purpose)
+    locked = repos.accounts.verification_lock_seconds(body.username, body.purpose)
+    if locked is not None:
+        raise HTTPException(status_code=429, detail="verification_locked",
+                            headers={"Retry-After": str(locked)})
     email = _derived_email(settings, body.username)
-    repos.observability.record_event(
-        component="mailer", severity="info", event_type="verification_email_stub",
-        message=f"{email} ({body.purpose}) -- stub, not actually sent")
     out = {"email": email, "expires_in_seconds": VERIFICATION_TTL_SECONDS}
-    if settings.mailer_backend == "stub":
+
+    if cfg.backend == "stub":
+        code = repos.accounts.issue_verification_code(body.username, body.purpose)
+        repos.observability.record_event(
+            component="mailer", severity="info", event_type="verification_email_stub",
+            message=f"{email} ({body.purpose}) -- stub, not actually sent")
         out["stub_code"] = code
+        return out
+
+    # knox_relay -- 상한은 코드를 만들기 *전에*. 발송 슬롯을 먼저 잡고, 세 상한(수신자별·클라이언트 IP 별·
+    # 전체)은 한 락 아래 **모두 통과할 때만 모두 기록**한다(2026-10-01 리뷰: 앞 상한을 기록한 뒤 뒤 상한·슬롯에서
+    # 거절하면, 자기 IP 상한을 다 쓴 공격자가 메일 한 통 없이 남의 수신자 몫을 태워 재설정을 막았다).
+    state = request.app.state
+    if not state.mail_send_slots.acquire(blocking=False):
+        _note_throttled(state, repos, "busy", "*",
+                        f"{email} ({body.purpose}) -- {VERIFICATION_MAIL_CONCURRENCY} relay calls in flight")
+        raise HTTPException(status_code=429, detail="verification_rate_limited",
+                            headers={"Retry-After": "10"})
+    try:
+        checks = ((state.mail_throttle, "recipient", email, f"over {VERIFICATION_MAIL_LIMIT} mails per recipient"),
+                  (state.mail_throttle_client, "client", client_ip(request),
+                   f"over {VERIFICATION_MAIL_PER_CLIENT_LIMIT} mails per client"),
+                  (state.mail_throttle_global, "global", "*",
+                   f"over {VERIFICATION_MAIL_GLOBAL_LIMIT} mails in total"))
+        blocked = None
+        with state.mail_throttle_lock:
+            for throttle, kind, key, what in checks:
+                retry_after = throttle.peek(key)
+                if retry_after:
+                    blocked = (kind, key, what, retry_after)
+                    break
+            if blocked is None:
+                for throttle, _kind, key, _what in checks:
+                    throttle.record(key)
+        if blocked is not None:
+            kind, key, what, retry_after = blocked
+            _note_throttled(state, repos, kind, key,
+                            f"{email} ({body.purpose}) -- {what} "
+                            f"per {VERIFICATION_MAIL_WINDOW_SECONDS}s, retry in {retry_after}s")
+            raise HTTPException(status_code=429, detail="verification_rate_limited",
+                                headers={"Retry-After": str(retry_after)})
+        # 코드는 메일이 릴레이에 접수된 **뒤에** 저장한다(2026-10-01 리뷰, 참고 구현은 발급 후 발송): 발송이
+        # 실패하면(릴레이 429·Knox 거부·연결 실패) 메일함에 있던 이전 코드가 그대로 유효하다 -- 수신자별 상한을
+        # 발급 전에 보는 것과 같은 이유. 인증번호는 HTML 본문에만 들어간다(제목·이벤트·예외 메시지에는 없음).
+        code = new_verification_code()
+        subject, html_body = render_verification_email(
+            code=code, purpose=body.purpose, username=body.username,
+            ttl_seconds=VERIFICATION_TTL_SECONDS, service_name=cfg.service_name)
+        try:
+            if cfg.token_unreadable:
+                # 포탈에 저장된 봉인을 열 수 없다(세션 시크릿 교체 등) -- 빈 토큰으로 보내 401 을 받는 대신
+                # 원인을 그대로 남긴다(관리 → 메일 설정에서 인증 키를 다시 입력).
+                raise MailerError("relay_misconfigured", "stored relay token cannot be decrypted -- re-enter it")
+            send_mail_via_relay(
+                relay_url=cfg.relay_url, token=cfg.relay_token,
+                to=email, subject=subject, body=html_body, content_type="HTML",
+                timeout=cfg.timeout_seconds)
+        except MailerError as exc:
+            if exc.reason == "relay_no_response":
+                # 요청은 나갔고 응답만 못 받았다 -- 메일이 갔을 수 있으니 코드를 저장한다(보낸 척은 아니다:
+                # 화면이 "확인이 늦어지고 있다"고 알린다).
+                repos.accounts.issue_verification_code(body.username, body.purpose, code=code)
+                repos.observability.record_event(
+                    component="mailer", severity="warning", event_type="verification_email_uncertain",
+                    message=f"{email} ({body.purpose}) -- {exc}")
+                return {**out, "delivery_uncertain": True}
+            repos.observability.record_event(
+                component="mailer", severity="error", event_type="verification_email_failed",
+                message=f"{email} ({body.purpose}) -- {exc}")
+            if exc.reason == "rate_limited":
+                raise HTTPException(
+                    status_code=429, detail="verification_rate_limited",
+                    headers={"Retry-After": str(exc.retry_after or 60)}) from None
+            raise HTTPException(status_code=502, detail="verification_email_failed") from None
+    finally:
+        state.mail_send_slots.release()
+    repos.accounts.issue_verification_code(body.username, body.purpose, code=code)
+    repos.observability.record_event(
+        component="mailer", severity="info", event_type="verification_email_sent",
+        message=f"{email} ({body.purpose}) -- sent via knox_relay")
     return out
+
+
+def _note_throttled(state, repos, kind: str, key: str, message: str) -> None:
+    """verification_email_throttled 이벤트를 (상한 종류, 키)마다 창(10분)에 한 번만 남긴다 -- 무인증 경로의
+    거절마다 쓰면 상한에 걸린 공격자도 events 를 무제한으로 채운다(2026-10-01 리뷰). 메시지에 [종류=키]를 싣는다
+    -- 클라이언트 상한이면 차단할 IP 가 운영자에게 보여야 한다."""
+    if state.mail_throttle_notes.acquire(f"{kind}:{key}") == 0:
+        repos.observability.record_event(
+            component="mailer", severity="warning", event_type="verification_email_throttled",
+            message=f"{message} [{kind}={key}] (same limit+key not logged again for "
+                    f"{VERIFICATION_MAIL_WINDOW_SECONDS}s)")
+
+
+def _consume_code(request: Request, username: str, purpose: str, code) -> None:
+    """signup·password-reset 의 인증번호 소비. 실패면 HTTPException.
+
+    접속 IP 별 틀린 코드 상한(2026-10-01 3차 리뷰): 아이디별 누적 잠금만으로는 한 IP 가 메일 상한(20통/10분)
+    안에서 여러 계정에 추측을 나눠 던져(계정당 2통 x 5회) 하루 ~1.4 계정을 맞힌다. 같은 IP 의 틀린 코드를
+    VERIFICATION_GUESS_PER_CLIENT_LIMIT 회/24시간으로 묶는다(로그인 감속기와 같은 LoginRateLimiter, 프로세스
+    메모리). 상한이면 코드를 비교하지도 않고 429 verification_client_locked -- 틀린 코드(verification_invalid)만
+    센다(만료·없음은 추측이 아니다). 성공은 지우지 않는다(자기 계정 성공으로 남의 계정 추측 몫을 되살리지 않게).
+    검사 -> 소비 -> 기록은 verification_guess_lock 하나 아래에서 한다(4차 리뷰: 따로 하면 동시 요청이 모두 검사를
+    통과한 뒤 비교돼, 한 번의 몰아치기로 상한의 2~3배를 실제로 비교했다). DB 호출은 어차피 Database 의 RLock 으로
+    한 줄로 서므로 처리량 손실이 없고, 그 락을 잡은 채 이 락을 잡는 경로가 없어 교착도 없다."""
+    repos = request.app.state.repos
+    limiter = request.app.state.verification_guess_limiter
+    ip_key = f"ip:{client_ip(request)}"
+    with request.app.state.verification_guess_lock:
+        retry = limiter.retry_after(ip_key)
+        if retry is not None:
+            raise HTTPException(status_code=429, detail="verification_client_locked",
+                                headers={"Retry-After": str(retry)})
+        reason = repos.accounts.consume_verification_code(username, purpose, code)
+        if reason is None:
+            return
+        reached = reason == "verification_invalid" and limiter.record_failure(ip_key)
+    if reached:
+        repos.observability.record_event(
+            component="accounts", severity="warning", event_type="verification_client_locked",
+            message=f"{ip_key} -- {VERIFICATION_GUESS_PER_CLIENT_LIMIT} wrong verification codes "
+                    f"(last: {username} {purpose}), blocked for {VERIFICATION_GUESS_WINDOW_SECONDS}s")
+    raise _verification_failed(repos, username, purpose, reason)
+
+
+def _verification_failed(repos, username: str, purpose: str, reason: str):
+    """인증번호 소비 실패 -> HTTPException. 누적 실패 잠금은 429 + Retry-After(언제 다시 되는지), 나머지는 422.
+    이번 실패로 잠금에 막 들어갔으면 운영 신호를 한 번 남긴다."""
+    if reason == "verification_locked":
+        retry = repos.accounts.verification_lock_seconds(username, purpose) or 60
+        return HTTPException(status_code=429, detail="verification_locked", headers={"Retry-After": str(retry)})
+    if reason == "verification_invalid" and repos.accounts.verification_lock_seconds(username, purpose):
+        repos.observability.record_event(
+            component="accounts", severity="warning", event_type="verification_locked",
+            message=f"{username} ({purpose}) -- {VERIFICATION_FAILURE_LIMIT} wrong codes, "
+                    f"locked for up to {VERIFICATION_FAILURE_WINDOW_SECONDS}s")
+    return HTTPException(status_code=422, detail=reason)
 
 
 @router.post("/api/auth/signup", status_code=201)
@@ -139,10 +324,7 @@ def signup(body: SignupBody, request: Request):
     if settings.account_verification_required:
         if not body.code:
             raise HTTPException(status_code=422, detail="verification_required")
-        reason = repos.accounts.consume_verification_code(
-            body.username, "signup", body.code)
-        if reason is not None:
-            raise HTTPException(status_code=422, detail=reason)
+        _consume_code(request, body.username, "signup", body.code)
     try:
         repos.accounts.create(
             body.username, password, ROLE_USER,
@@ -160,10 +342,7 @@ def password_reset(body: PasswordResetBody, request: Request):
     repos = request.app.state.repos
     # signup 과 같은 순서 이유: 코드 소비 전에 봉인을 연다.
     password = _password_from(request, body, purpose="password_reset")
-    reason = repos.accounts.consume_verification_code(
-        body.username, "password_reset", body.code)
-    if reason is not None:
-        raise HTTPException(status_code=422, detail=reason)
+    _consume_code(request, body.username, "password_reset", body.code)
     try:
         repos.accounts.reset_password(body.username, password, actor=body.username)
     except DomainValidationError as e:

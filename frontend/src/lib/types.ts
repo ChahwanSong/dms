@@ -442,3 +442,35 @@ export interface QueueMetrics {
   queue: { name: string; state: string | null } | null;
   podgroups: QueuePodgroup[] | null;
 }
+
+// 포탈 메일 설정(2026-10-01, GET /api/admin/mail-settings). 적용값 = 포탈 > env > 기본값(칸별).
+// 릴레이 토큰 값은 절대 오지 않는다 -- token 은 상태만.
+export type MailBackend = "stub" | "knox_relay";
+export interface MailSettingsFields {
+  backend: string | null; relay_scheme: string | null; relay_host: string | null;
+  relay_port: number | null; timeout_seconds: number | null; service_name: string | null;
+}
+export interface MailSettings {
+  backend: string; relay_scheme: string; relay_host: string; relay_port: number;
+  relay_url: string; timeout_seconds: number; service_name: string;
+  sources: Record<string, "portal" | "env">;
+  portal: MailSettingsFields;           // 포탈에 저장된 값(null = 그 칸은 env·기본값)
+  env: { backend: string; relay_scheme: string; relay_host: string | null; relay_port: number;
+         timeout_seconds: number; service_name: string;
+         relay_url: string };          // env DMS_MAIL_RELAY_URL 원문(포탈 주소 칸이 다 비면 이것을 그대로 쓴다)
+  token: { configured: boolean; source: "portal" | "env" | null; unreadable: boolean;
+           env_configured: boolean;
+           env_unbound: boolean };      // env 키가 있지만 포탈이 주소를 정해 env 키를 쓰지 않는 중
+  // 릴레이 주소를 포탈 칸으로 조합했나("portal") env DMS_MAIL_RELAY_URL 그대로인가("env").
+  endpoint_source: "portal" | "env";
+  email_domain: string;
+  backends: string[];
+  updated_at: string | null; updated_by: string | null;
+}
+// 연결 확인·테스트 메일 결과 -- 실패도 200 + ok:false + reason(mailer.MailerError 사유).
+export interface MailCheckResult {
+  ok: boolean; reason?: string; detail?: string; retry_after?: number | null;
+  relay_url?: string; to?: string;
+}
+// 로그인 전 화면용(GET /api/auth/mail-info) -- 비밀 없음.
+export interface MailInfo { email_domain: string; delivery: string }

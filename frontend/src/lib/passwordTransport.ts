@@ -23,7 +23,7 @@ export const SESSION_KEY_INFO = "dms-password-transport-v1/aes-256-gcm";
 export const AAD_PREFIX = "dms-password-transport-v1";
 
 /** 비밀번호를 받는 엔드포인트마다 하나 -- 서버 PURPOSES 와 같은 값. */
-export type Purpose = "login" | "signup" | "password_reset" | "admin_create";
+export type Purpose = "login" | "signup" | "password_reset" | "admin_create" | "mail_relay_token";
 
 export interface TransportKey { version: number; kid: string; public_key: string }
 export interface EncryptedPassword {
@@ -116,6 +116,35 @@ export async function postWithSealedPassword<T>(
     const key = await fetchTransportKey();
     const password_enc = await encryptWithKey(key, password, purpose, body.username);
     return apiSend<T>("POST", path, { ...rest, password_enc });
+  };
+  try {
+    return await attempt();
+  } catch (e) {
+    if (e instanceof ApiError && e.code === "password_encryption_key_mismatch") {
+      forgetTransportKey();
+      return attempt();
+    }
+    throw e;
+  }
+}
+
+/**
+ * 비밀번호가 아닌 비밀(포탈 메일 설정의 릴레이 토큰, 2026-10-01)을 같은 봉인 통로로 보낸다 -- `secret` 은
+ * `field`(예: relay_token_enc) 자리에 봉인돼 실리고 평문은 본문 어디에도 없다. AAD 의 사용자명 자리에는
+ * `subject`(서버와 약속한 고정값, 예: "mail_settings")가 들어간다. 키 교체(key_mismatch)면 한 번 재시도.
+ */
+export async function sendWithSealedSecret<T>(
+  method: string, path: string, purpose: Purpose, subject: string,
+  field: string, secret: string, body: Record<string, unknown>,
+): Promise<T> {
+  if (!transportAvailable()) {
+    throw new ApiError(0, "password_encryption_unavailable",
+                       reasonText("password_encryption_unavailable"));
+  }
+  const attempt = async (): Promise<T> => {
+    const key = await fetchTransportKey();
+    const sealed = await encryptWithKey(key, secret, purpose, subject);
+    return apiSend<T>(method, path, { ...body, [field]: sealed });
   };
   try {
     return await attempt();

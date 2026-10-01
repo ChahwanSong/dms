@@ -294,6 +294,17 @@ def _apply_migrations(db: Database) -> None:
             attempts INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             PRIMARY KEY (username, purpose))""",
+        # 인증번호 누적 실패(2026-10-01 리뷰): verification_codes.attempts 는 코드 한 개의 상한이라
+        # 재발급마다 0 으로 돌아간다 -- 그것만으로는 "5번 틀리고 재발급"을 반복해 4자리를 하루 ~30%
+        # 확률로 맞힌다. (username, purpose)별 실패를 window_start 부터 하루 동안 누적해 상한을 넘으면
+        # 발급·소비를 모두 막는다(repositories/accounts.py). 코드 행과 달리 재발급·만료에 지워지지 않고,
+        # 성공한 소비만 지운다. 새 테이블이라 _ensure_columns 불필요.
+        """CREATE TABLE IF NOT EXISTS verification_failures (
+            username TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            failures INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (username, purpose))""",
         # 사용자 sync 허용 스토리지 쌍(2026-09-30 사용자 결정: "기본 전부 불가에 허용 쌍을
         # 추가"). 방향이 있다(소스 -> 목적지). 행이 없으면 비관리자 sync 는 전부 거부된다
         # (repositories/sync_pairs.py). 새 테이블이라 _ensure_columns 보강은 불필요 --
@@ -305,6 +316,20 @@ def _apply_migrations(db: Database) -> None:
             created_at TEXT NOT NULL,
             created_by TEXT NOT NULL,
             PRIMARY KEY (source_storage, destination_storage))""",
+        # 포탈 메일 설정(2026-10-01, repositories/mail_settings.py): 단일 행(id=1). NULL 칸은 env 기본값
+        # (Settings.mailer_backend·mail_relay_*·mail_service_name)을 쓴다(mail_config.resolve_mail_config).
+        # 릴레이 토큰은 평문이 아니라 secret_box 봉인(v1:...)으로만 둔다. 새 테이블이라 _ensure_columns 불필요.
+        """CREATE TABLE IF NOT EXISTS mail_settings (
+            id INTEGER PRIMARY KEY,
+            backend TEXT,
+            relay_scheme TEXT,
+            relay_host TEXT,
+            relay_port INTEGER,
+            relay_token_enc TEXT,
+            timeout_seconds REAL,
+            service_name TEXT,
+            updated_at TEXT,
+            updated_by TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS user_scan_paths (
             id {auto_pk},
             username TEXT NOT NULL,

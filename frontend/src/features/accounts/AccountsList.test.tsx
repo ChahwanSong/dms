@@ -12,7 +12,12 @@ const server = setupServer();
 // 계정 생성 다이얼로그는 비밀번호를 봉인해 보낸다(2026-09-07) -- 서버 키 핸들러 필수.
 let serverKey: TestServerKey;
 beforeAll(async () => { server.listen(); serverKey = await makeServerKey(); });
-beforeEach(() => { forgetTransportKey(); server.use(transportKeyHandler(serverKey)); });
+beforeEach(() => {
+  forgetTransportKey();
+  // 받는 도메인은 서버 설정(mail-info)에서 -- 하드코딩된 samsung.com 이 아님을 보이려 다른 도메인을 준다.
+  server.use(transportKeyHandler(serverKey),
+             http.get("/api/auth/mail-info", () => HttpResponse.json({ email_domain: "corp.example", delivery: "stub" })));
+});
 afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
 const ACCOUNTS = [
@@ -165,7 +170,7 @@ test("운영자 계정 생성: 다이얼로그에서 아이디·비밀번호·�
   await userEvent.click(screen.getByRole("button", { name: "계정 생성" }));
   const dialog = await screen.findByRole("dialog");
   // 파생 이메일 규칙이 화면에 보인다
-  expect(within(dialog).getByText(/아이디@samsung\.com 으로 자동 저장/)).toBeInTheDocument();
+  expect(await within(dialog).findByText(/아이디@corp\.example 으로 자동 저장/)).toBeInTheDocument();
   await userEvent.type(within(dialog).getByLabelText("회사 아이디"), "new.user");
   await userEvent.type(within(dialog).getByLabelText("비밀번호"), "pw1");
   await userEvent.selectOptions(within(dialog).getByLabelText("역할"), "admin");
