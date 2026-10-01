@@ -195,6 +195,7 @@
   "verification_rate_limited",
   "verification_locked",
   "verification_client_locked",
+  "chown_name_not_supported",
   "mail_settings_changed",
   "verification_email_failed",
   "invalid_mail_backend",

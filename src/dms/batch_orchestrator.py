@@ -12,7 +12,7 @@ ConfirmPending 자식을 쓰로틀 confirm(`_confirm_child`)한다. preview가 �
 Queued로 재시도(reset)된다.
 """
 from .db import utc_now_iso
-from .domain import (Operation, RequestState, TERMINAL_REQUEST_STATES,
+from .domain import (DomainValidationError, Operation, RequestState, TERMINAL_REQUEST_STATES,
                      DataJobState, build_data_payload, resolve_priority)
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
@@ -60,8 +60,20 @@ class BatchOrchestrator:
                 self._repos.batches.bump_counts(batch_id, failed=1)
 
     def _materialize(self, batch, item):
-        payload, key = build_data_payload(batch["operation"], options=batch["options"],
-                                          **item["payload"])
+        # 자식 생성 시점의 재검증 실패(규칙이 바뀐 뒤 남은 옛 배치 -- 2026-10-01 chown 이름 거부가 첫 사례)는
+        # 그 항목만 Rejected 로 종단한다. 예외를 올리면 run_once 가 배치마다 돌다 멈춰 **모든 배치**가 매 틱
+        # 막히고, 조용히 건너뛰면 항목이 Queued 로 영원히 남는다. 사유는 항목 reason_code 와 이벤트로.
+        try:
+            payload, key = build_data_payload(batch["operation"], options=batch["options"],
+                                              **item["payload"])
+        except DomainValidationError as exc:
+            if not self._repos.batches.reject_queued_item(batch["batch_id"], item["seq"],
+                                                          reason_code=exc.reason_code):
+                return          # 그 사이 지워졌거나 더는 Queued 가 아니다 -- 손대지 않는다
+            self._repos.observability.record_event(
+                component="batch-orchestrator", severity="warning", event_type="batch_item_rejected",
+                message=f"batch {batch['batch_id']} item {item['seq']}: {exc.reason_code} -- {exc}"[:500])
+            return
         # node_count 는 build_data_payload 에 넣지 않고 build 후 주입한다 — build 의
         # 반환 payload 는 단건 제출 계약(정확 일치 테스트)이고 resource_key 산식에도
         # 영향을 주면 안 된다(실행 제어값은 대상 식별자가 아니다).

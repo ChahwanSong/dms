@@ -22,8 +22,9 @@
 //   - chown 에서 "10003"(uid 만)·":10000"(gid 만)은 빈 쪽이 소스 값으로 유지된다(dsync.c set_uid/set_gid).
 //     "10003:"(끝 콜론)은 도구가 "empty group" 으로 거부하는 형식이라 포탈·서버 정규식이 받지 않는다.
 //   - chown 의 **이름**은 잡 컨테이너(LDAP NSS 없음, /etc/passwd 에 실행 신원 한 줄 -- root 실행이면 uid 0)
-//     안에서 getpwnam/getgrnam 으로 풀린다 → 대부분 "unknown user/group" 으로 미리보기 실패, root 실행에선
-//     실행 신원 이름이 uid 0 으로 풀린다. 그래서 안내는 숫자 uid:gid 를 요구한다(서버 검증은 형식만 본다).
+//     안에서 getpwnam/getgrnam 으로 풀린다 → LDAP 이름은 "unknown user/group" 으로 미리보기 실패, users 같은
+//     이름은 데비안 기본 gid, root 실행에선 실행 신원 이름이 uid 0 으로 풀린다. 그래서 2026-10-01 부터 서버가
+//     숫자 uid:gid 만 받는다(chown_name_not_supported -- domain.chown_problem). 폼은 이름을 오류로 막는다.
 export interface OwnershipInput {
   chown: string;          // 옵션 값(빈 문자열 = 미지정)
   chmod?: string;         // 옵션 값(빈 문자열·생략 = 미지정) -- 권한 비트 문구만 바꾼다
@@ -32,7 +33,8 @@ export interface OwnershipInput {
   self: boolean;          // 실행 신원이 요청자 본인인가
 }
 
-/** chown 값에 이름(숫자가 아닌 파트)이 있나 -- 잡 컨테이너에서 해석되지 않는다(위 주석). */
+/** chown 값에 이름(숫자가 아닌 파트)이 있나 -- 잡 컨테이너에서 해석되지 않아 서버가 거부한다(위 주석,
+    chown_name_not_supported). 새 입력은 폼이 막고, 이 판정은 그 문구와 이름이 든 기존 배치의 안내에 쓴다. */
 export function chownHasName(chown: string): boolean {
   return chown.trim().split(":").some((p) => p !== "" && !/^[0-9]+$/.test(p));
 }
@@ -47,9 +49,10 @@ export function chownIsPartial(chown: string): boolean {
   return u === "" && g !== "";
 }
 
-export const CHOWN_NAME_WARNING =
-  "chown 의 이름은 작업 컨테이너에서 해석되지 않습니다 — 미리보기가 실패하거나 root 실행에서는 uid 0 으로 "
-  + "잘못 해석됩니다. 숫자 uid:gid 로 지정하세요.";
+// 이름은 잡 컨테이너(LDAP NSS 없음)에서 제대로 풀리지 않는다 -- 못 찾으면 미리보기 실패, users 같은 이름은
+// 엉뚱한 기본 gid, root 실행이면 실행 신원 이름이 uid 0 으로 풀린다. 그래서 서버가 거부한다(2026-10-01).
+export const CHOWN_NAME_ERROR =
+  "chown 은 숫자 uid:gid 만 지정할 수 있습니다(예: 10003:10000) — 이름은 작업 컨테이너에서 해석되지 않습니다.";
 
 // 비 root 에서 남의 소유로 못 바꿀 때의 결과(도구별) -- 같은 노드 sync 는 dsync, 노드 간은 nsync(planner).
 // 비 root 에서 남의 소유로 chown 할 때(새 복사본 기준): dsync 는 실패, nsync 는 소유 변경을 건너뛴다.
@@ -63,9 +66,9 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self }: Ownershi
   const modeText = m !== "" ? `권한 비트는 chmod 지정값(${m}), 수정 시각은 소스 그대로입니다.`
     : "권한 비트·수정 시각은 소스 그대로입니다.";
   if (c !== "") {
-    if (chownHasName(c))
-      return { short: `chown ${c} — 이름은 해석되지 않음(숫자로 지정)`,
-               long: `chown 에 이름(${c})을 지정했습니다 — ${CHOWN_NAME_WARNING}` };
+    if (chownHasName(c))   // 입력 중인 폼(서버가 거부할 값)·규칙 전에 만든 배치의 표시 -- 배치 문맥 안내는 BatchDetail 이
+      return { short: `chown ${c} — 이름은 지원하지 않음(숫자 uid:gid 로 지정)`,
+               long: `chown 에 이름(${c})을 지정했습니다 — ${CHOWN_NAME_ERROR}` };
     const partial = chownIsPartial(c) ? " uid·gid 중 비워 둔 쪽은 소스 값이 유지됩니다." : "";
     const lead = `chown 옵션으로 지정한 ${c} 소유로 셋업됩니다${root ? "" : "(자동 소유 지정은 꺼집니다)"} — `
       + "목적지에 이미 있던 같은 경로의 항목도 이 소유로 바뀝니다.";

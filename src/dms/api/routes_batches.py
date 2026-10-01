@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import (DataJobState, DomainValidationError, Operation,
                       TERMINAL_DATA_JOB_STATES, build_data_payload, validate_batch,
-                      validate_owner_username)
+                      validate_options, validate_owner_username)
 from ..execution import ExecutionError
 from .auth import Identity, require_admin
 from .cancel import terminate_job
@@ -201,6 +201,18 @@ def _validated_item(batch, items, new_item, *, replace_seq=None):
         raise HTTPException(status_code=422, detail=getattr(e, "reason_code", "invalid_batch"))
 
 
+def _reject_stale_options(batch) -> None:
+    """배치 옵션을 지금 규칙으로 재검증한다 -- 다시 돌리는 동작(확인·항목 재실행·실패 재실행·재스캔) 전에.
+    규칙이 바뀐 뒤 남은 옛 배치(2026-10-01 chown 이름 거부가 첫 사례)를 422 로 바로 알린다. 그냥 두면 항목이
+    Queued 로 돌아간 뒤 orchestrator 가 자식 생성 시점에 하나씩 Rejected 로 떨어뜨린다(배치 오케스트레이터
+    _materialize) -- 결과는 같지만 사용자는 "돌렸는데 전부 거부"를 나중에야 본다. 항목 추가·수정·교체는 이미
+    _validated_item(build_data_payload)이 배치 옵션까지 재검증한다."""
+    try:
+        validate_options(batch["operation"], batch["options"])
+    except DomainValidationError as e:
+        raise HTTPException(status_code=422, detail=e.reason_code)
+
+
 @router.put("/api/admin/batches/{batch_id}/items/{seq}")
 def update_batch_item(batch_id: str, seq: int, body: dict, request: Request,
                       identity: Identity = Depends(require_admin)):
@@ -329,6 +341,7 @@ def rerun_batch_items(batch_id: str, body: RerunItemsBody, request: Request,
     reject_when_maintenance(request)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_stale_options(b)
     # 빈 선택은 422 — empty_batch("배치에 항목이 없습니다")를 재사용하지 않는 이유:
     # 배치엔 항목이 있고 비어 있는 건 **선택**이라, 그 문구는 화면에서 거짓이 된다.
     if len(body.seqs) == 0:
@@ -369,6 +382,7 @@ def confirm_batch(batch_id: str, request: Request, identity: Identity = Depends(
         raise HTTPException(status_code=404, detail="batch_not_found")
     if b["status"] != "PreviewReady":
         raise HTTPException(status_code=409, detail="batch_not_confirmable")
+    _reject_stale_options(b)
     repo.set_status(batch_id, "Running")
     return {"status": "Running"}
 
@@ -380,6 +394,7 @@ def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(r
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    _reject_stale_options(b)
     n = repo.reset_failed_items(batch_id)
     if n == 0:
         raise HTTPException(status_code=409, detail="no_failed_items")
@@ -401,6 +416,7 @@ def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     # ConfirmPending(활성)이라 제외 — 취소 후 rescan 이 정상 동선이다.
     if b["status"] not in ("Completed", "Cancelled"):
         raise HTTPException(status_code=409, detail="batch_not_rescannable")
+    _reject_stale_options(b)
     # 성공 item 포함 전체 리셋: 용도가 성장 모니터링(같은 대상 재스캔)이라
     # "실패만"이 아니라 전부를 다시 돌린다(:rerun-failed 와의 차이).
     n = repo.reset_all_items(batch_id)

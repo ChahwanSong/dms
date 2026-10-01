@@ -110,14 +110,33 @@ def validate_owner_username(username: str) -> str:
 
 
 _CHMOD_ITEM_RE = re.compile(r"[DF]?[0-7]{1,4}$")
-# chown 파트는 「이름 또는 숫자 uid/gid」다. 숫자를 허용하는 근거: dsync --chown 은
-# 숫자를 받는다 — 특권 판정에 따른 자동 주입(execution_manifests._auto_chown)이
-# 이미 uid:gid 숫자를 넣는 것이 증명. 숫자 상한 10자리는 uid_t 32비트(최대 10자리)
-# 커버. 이름 규칙(문자 시작·최대 64자)과 빈 파트 규칙(":gid" 허용, "user:" 거부)은
-# 기존 정규식 의미 그대로 — 숫자 확장이 경계를 넓히지 않는다.
-# frontend/src/features/jobs/optionRules.ts 의 CHOWN_RE 가 이 정규식의 미러다(발산 금지).
-_CHOWN_PART = r"(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10})"
-_CHOWN_RE = re.compile(rf"({_CHOWN_PART})?(:{_CHOWN_PART})?$")
+# chown 은 **숫자 uid/gid 만**(2026-10-01 사용자 결정). 이름은 잡 컨테이너에서 LDAP 으로 풀리지 않는다 -- 잡
+# 이미지에 LDAP NSS 가 없어 dsync/nsync 의 getpwnam/getgrnam 이 컨테이너 자체 파일만 본다:
+#   - LDAP 사용자 이름은 못 찾아 도구가 종료(미리보기가 사유 없는 preview_failed),
+#   - users·staff 같은 이름은 데비안 기본 gid(100·50)로 풀려 미리보기는 통과하고 실행에서 실패/무시,
+#   - root 실행은 실행 신원 이름을 uid 0 으로 /etc/passwd 에 덧붙이므로(execution_manifests 의 passwd 줄)
+#     그 이름을 chown 에 쓰면 목적지가 **조용히 root 소유**가 된다.
+# 숫자 상한 10자리는 uid_t 32비트 커버, 빈 파트 규칙(":gid" 허용, "user:" 거부)은 그대로. 이름 모양
+# (_CHOWN_NAMED_RE 에만 맞음)은 형식 오류(invalid_option)와 구분해 chown_name_not_supported 로 알린다 --
+# 무엇을 고치면 되는지(숫자로) 사유가 말하게. 판정은 chown_problem 하나: 제출 검증(validate_options)·
+# 배치 자식 생성(build_data_payload 경유)·stepper 제출 관문(_build_spec)이 모두 이걸 쓴다.
+# frontend/src/features/jobs/optionRules.ts 의 CHOWN_RE 가 _CHOWN_RE 의 미러다(발산 금지).
+_CHOWN_NUM = r"[0-9]{1,10}"
+_CHOWN_RE = re.compile(rf"({_CHOWN_NUM})?(:{_CHOWN_NUM})?$")
+_CHOWN_NAME_OR_NUM = r"(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10})"
+_CHOWN_NAMED_RE = re.compile(rf"({_CHOWN_NAME_OR_NUM})?(:{_CHOWN_NAME_OR_NUM})?$")
+
+
+def chown_problem(value) -> "str | None":
+    """chown 옵션 값 -> None(숫자 uid:gid 정상) 또는 사유 코드. 이름이 섞이면 chown_name_not_supported,
+    그 밖의 모양(빈 값·비문자열·잘못된 구분)은 invalid_option."""
+    if not isinstance(value, str) or not value:
+        return "invalid_option"
+    if _CHOWN_RE.fullmatch(value):
+        return None
+    if _CHOWN_NAMED_RE.fullmatch(value):
+        return "chown_name_not_supported"
+    return "invalid_option"
 
 _BOOL = ("bool",)
 _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {
@@ -198,7 +217,11 @@ def validate_options(operation: Operation, options: dict) -> dict:
                     _CHMOD_ITEM_RE.fullmatch(p) for p in value.split(",")):
                 raise DomainValidationError("invalid_option", f"bad chmod {value!r}")
         elif kind == "chown":
-            if not isinstance(value, str) or not value or not _CHOWN_RE.fullmatch(value):
+            problem = chown_problem(value)
+            if problem == "chown_name_not_supported":
+                raise DomainValidationError("chown_name_not_supported",
+                                            f"chown must be numeric uid:gid, got {value!r}")
+            if problem is not None:
                 raise DomainValidationError("invalid_option", f"bad chown {value!r}")
         out[key] = value
     if Operation(operation) is Operation.RM and out.get("stat") and out.get("lite"):

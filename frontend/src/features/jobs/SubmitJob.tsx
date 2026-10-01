@@ -16,11 +16,11 @@ import { ApiError } from "../../lib/api";
 import { StoragePicker, field } from "./formFields";
 import { destinationParent } from "../../lib/storagePaths";
 import { pairAllowed, syncChoices } from "../../lib/syncPairs";
-import { CHOWN_NAME_WARNING, chownHasName, syncOwnership } from "../../lib/syncOwnership";
-// 옵션 미러(CHMOD_RE·CHOWN_RE·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
+import { syncOwnership } from "../../lib/syncOwnership";
+// 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션 스텝과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, CHOWN_RE, SCAN_INT_FIELDS, SYNC_INT_FIELDS, intFieldError,
+import { CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, intFieldError,
          scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
@@ -92,6 +92,9 @@ export function SubmitJob() {
   // 필드 초기화 정책(전환해도 초기화하지 않음)도 현행 그대로다.
   const [f, setF] = useState(initial);
   const [step, setStep] = useState(0);
+  // 고급 옵션 펼침은 스텝 밖 상태 -- 스텝을 오가면 패널이 다시 마운트돼 접히면서, 그 안의 오류(예: 이름 chown)로
+  // '다음'이 잠긴 이유가 숨었다. 오류가 있으면 항상 펼친다(아래 details open).
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const storages = storagesQ.data ?? [];
   const loadingStorages = storagesQ.isLoading;
@@ -145,8 +148,7 @@ export function SubmitJob() {
     ? syncIntFieldError("bufsize", f.bufsize) : null;
   const chmodError = f.operation === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
-  const chownError = f.operation === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
-    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 — 숫자 uid:gid)" : null;
+  const chownError = f.operation === "sync" ? chownFieldError(f.chown) : null;
   const advancedError = batchFilesError ?? bufsizeError ?? chmodError ?? chownError
     ?? scanBatchFilesError ?? brokenLimitError;
   // 대상 스텝 sanity(슬라이스 39, 사용자 결정): 스토리지 미선택·경로 공백이면
@@ -436,7 +438,9 @@ export function SubmitJob() {
                   )}
                   {/* 기본 접힘 — 기존 동선(단순 sync 제출)을 바꾸지 않기 위해 <details> 로 숨긴다 */}
                   {isAdmin && (
-                  <details className="rounded-lg border border-line p-3">
+                  <details className="rounded-lg border border-line p-3"
+                           open={advancedOpen || advancedError !== null}
+                           onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}>
                     <summary className="cursor-pointer text-sm font-medium">고급 옵션</summary>
                     <div className="mt-3 space-y-3">
                       <label className="flex items-center gap-2 text-sm">
@@ -482,11 +486,6 @@ export function SubmitJob() {
                                onChange={on("chown")} />
                       </label>
                       {chownError && <p className="text-bad text-sm">{chownError}</p>}
-                      {/* 이름은 잡 컨테이너에서 풀리지 않는다(lib/syncOwnership 주석) -- 서버 검증은 이름을
-                          받지만(형식만 본다) 실행이 실패하거나 root 에선 uid 0 으로 풀려, 여기서 경고한다. */}
-                      {!chownError && chownHasName(f.chown) && (
-                        <p className="text-bad text-sm">{CHOWN_NAME_WARNING}</p>
-                      )}
                       {/* 함정 캡션(설계 §2.5): chown 명시 시 auto-chown 억제는
                           execution_manifests.py("chown" in spec.options) — 실패는
                           서버가 아니라 도구 실행 단계에서 나므로 여기서 미리 경고한다.

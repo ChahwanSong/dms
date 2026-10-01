@@ -1,11 +1,23 @@
+import { CHOWN_NAME_ERROR } from "../../lib/syncOwnership";
 // 서버 검증의 클라이언트 미러(즉답용) — 최종 심판은 서버 422 invalid_option 이다.
 // SubmitJob(단건 sync)과 BatchCreate(배치 옵션 스텝)가 공유한다(슬라이스 32 T8) —
 // 파일별 사본이면 미러가 발산한다(슬라이스 31 T3 formFields 이사와 같은 이유).
-// domain.py:112(_CHMOD_ITEM_RE 콤마 항목별 fullmatch)·119-120(_CHOWN_PART/_CHOWN_RE)의 미러.
-// chown 파트는 「이름 또는 숫자 uid/gid」(dsync --chown 이 숫자를 받는다 —
-// auto_chown 의 uid:gid 숫자 주입이 증명). 빈 파트 규칙(":gid" 허용, "user:" 거부) 동일.
+// domain.py 의 _CHMOD_ITEM_RE(콤마 항목별 fullmatch)·_CHOWN_RE 의 미러.
+// chown 은 **숫자 uid/gid 만**(2026-10-01 사용자 결정 -- 이름은 잡 컨테이너에서 LDAP 으로 풀리지 않아 미리보기
+// 실패·엉뚱한 gid·root 실행 시 uid 0 이 됐다; domain.chown_problem 주석). 빈 파트 규칙(":gid" 허용, "user:" 거부) 동일.
 export const CHMOD_RE = /^[DF]?[0-7]{1,4}(,[DF]?[0-7]{1,4})*$/;
-export const CHOWN_RE = /^(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10})?(?::(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10}))?$/;
+export const CHOWN_RE = /^(?:[0-9]{1,10})?(?::[0-9]{1,10})?$/;
+// 이름 모양(서버 _CHOWN_NAMED_RE 미러) -- 이것에만 맞으면 "이름은 안 된다", 둘 다 아니면 형식 오류.
+const CHOWN_NAMED_RE =
+  /^(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10})?(?::(?:[A-Za-z_][A-Za-z0-9._-]{0,63}|[0-9]{1,10}))?$/;
+
+/** chown 칸 오류 문구(빈 값 = 미지정 = 정상). 서버 domain.chown_problem 과 같은 분류: 숫자 = 정상, 이름 모양 =
+    chown_name_not_supported 와 같은 뜻, 그 밖 = 형식 오류. SubmitJob(단건)·BatchCreate(배치)가 이 한 곳을 읽는다. */
+export function chownFieldError(raw: string): string | null {
+  const c = raw.trim();
+  if (c === "" || CHOWN_RE.test(c)) return null;
+  return CHOWN_NAMED_RE.test(c) ? CHOWN_NAME_ERROR : "chown 형식이 올바르지 않습니다 (예: 10003:10000 — 숫자 uid:gid)";
+}
 
 // sync 숫자 옵션의 범위 + 폼 프리필 값. domain.py `_OPTION_SPECS[SYNC]` 의 미러이고,
 // SubmitJob(단건)·BatchCreate(배치)가 **이 한 곳**을 읽는다 — 파일별 리터럴이면

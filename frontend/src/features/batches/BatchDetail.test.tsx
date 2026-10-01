@@ -1127,3 +1127,49 @@ test("PreviewReady also shows cancel button and posts cancel", async () => {
   // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
   await waitFor(() => expect(cancelled).toBe(true));
 });
+
+
+// 2026-10-01: chown 은 숫자 uid:gid 만 -- 이름이 든 옛 배치는 확인·재실행이 422 chown_name_not_supported 다. 버튼이
+// 죽은 것처럼 보이지 않게 거부 사유를 보이고, 헤더에 "더 이상 실행할 수 없다"를 미리 알린다.
+function renderLegacy(over: any) {
+  server.use(http.get("/api/admin/batches/b1", () =>
+    HttpResponse.json(batch({ options: { chown: "alice:users" }, ...over }))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+test("이름 chown 옛 배치: 헤더 안내 + 배치 확인 422 사유가 보인다", async () => {
+  server.use(http.post("/api/admin/batches/b1:confirm", () =>
+    HttpResponse.json({ detail: "chown_name_not_supported" }, { status: 422 })));
+  renderLegacy({ status: "PreviewReady" });
+  expect(await screen.findByRole("alert", { name: "이름 chown 배치" }))
+    .toHaveTextContent("더 이상 실행할 수 없습니다");
+  await userEvent.click(screen.getByRole("button", { name: "배치 확인" }));
+  await waitFor(() => expect(screen.getAllByRole("alert").some((a) =>
+    /chown 은 숫자 uid:gid 만 지정할 수 있습니다\(예: 10003:10000\)/.test(a.textContent ?? ""))).toBe(true));
+});
+
+test("이름 chown 옛 배치: 실패분 재실행·전체 재실행 422 사유도 보인다", async () => {
+  server.use(
+    http.post("/api/admin/batches/b1:rerun-failed", () =>
+      HttpResponse.json({ detail: "chown_name_not_supported" }, { status: 422 })),
+    http.post("/api/admin/batches/b1:rescan", () =>
+      HttpResponse.json({ detail: "chown_name_not_supported" }, { status: 422 })));
+  renderLegacy({ status: "Completed", failed_count: 1,
+                 items: [{ seq: 0, payload: { source: "a" }, status: "Rejected", request_id: null,
+                           reason_code: "chown_name_not_supported" }] });
+  await userEvent.click(await screen.findByRole("button", { name: "실패분 재실행" }));
+  await waitFor(() => expect(screen.getAllByRole("alert").filter((a) =>
+    /\(예: 10003:10000\)/.test(a.textContent ?? "")).length).toBe(1));
+  await userEvent.click(screen.getByRole("button", { name: "전체 재실행" }));
+  await waitFor(() => expect(screen.getAllByRole("alert").filter((a) =>
+    /\(예: 10003:10000\)/.test(a.textContent ?? "")).length).toBe(2));
+});
+
+test("숫자 chown 배치엔 이름 안내가 없다", async () => {
+  renderLegacy({ status: "PreviewReady", options: { chown: "10003:10000" } });
+  await screen.findByRole("button", { name: "배치 확인" });
+  expect(screen.queryByRole("alert", { name: "이름 chown 배치" })).not.toBeInTheDocument();
+});

@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
-import { chownHasName, chownIsPartial, syncOwnership } from "./syncOwnership";
+import { CHOWN_NAME_ERROR, chownHasName, chownIsPartial, syncOwnership } from "./syncOwnership";
+import { chownFieldError } from "../features/jobs/optionRules";
 
 // 서버 execution_manifests._auto_chown 의 세 갈래 미러(chown 명시 > root 보존 > 실행 신원 uid:gid) +
 // 검증 워크플로 2회(2026-10-01, 포크 소스·테스트베드 실측)가 확인한 도구 동작.
@@ -66,14 +67,23 @@ test("chown 한쪽만: 비워 둔 쪽은 소스 값이 유지된다고 말한다
     .toContain("uid·gid 중 비워 둔 쪽은 소스 값이 유지됩니다.");
 });
 
-test("chown 의 이름은 잡 컨테이너에서 풀리지 않는다 -- 소유가 셋업된다고 말하지 않는다", () => {
+test("chown 의 이름은 지원하지 않는다(서버 거부) -- 문구는 상황 중립(단건·새 배치 폼에도 쓰인다)", () => {
   expect(chownHasName("10003:10000")).toBe(false);
   expect(chownHasName(":10000")).toBe(false);
   expect(chownHasName("cocoa.song:mig")).toBe(true);
   expect(chownHasName("10003:mig")).toBe(true);
   expect(chownHasName("")).toBe(false);
   const o = syncOwnership({ chown: "alice:10000", root: true, runAs: "alice", self: true });
-  expect(o.short).toBe("chown alice:10000 — 이름은 해석되지 않음(숫자로 지정)");
-  expect(o.long).toContain("root 실행에서는 uid 0 으로 잘못 해석됩니다");
+  expect(o.short).toBe("chown alice:10000 — 이름은 지원하지 않음(숫자 uid:gid 로 지정)");
+  expect(o.long).toContain("숫자 uid:gid 만 지정할 수 있습니다");
+  expect(o.long).not.toMatch(/배치|남은 항목/);              // 배치 문맥 안내는 BatchDetail 몫
   expect(o.long).not.toContain("소유로 셋업됩니다");
+});
+
+test("chownFieldError: 숫자는 통과, 이름은 이름 문구, 그 밖의 모양은 형식 문구", () => {
+  for (const ok of ["", "  ", "10003", "10003:10000", ":10000", "0:0"]) expect(chownFieldError(ok)).toBeNull();
+  for (const name of ["alice", "alice:users", "10003:mig", ":mig", "root"])
+    expect(chownFieldError(name)).toBe(CHOWN_NAME_ERROR);
+  for (const bad of ["10003:", "1.5:10", "a b", "1:2:3"])
+    expect(chownFieldError(bad)).toContain("형식이 올바르지 않습니다");
 });
