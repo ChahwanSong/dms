@@ -18,6 +18,7 @@ import { absSummary } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
 import { batchPillVariant } from "../../lib/jobState";
+import { syncOwnership } from "../../lib/syncOwnership";
 import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
 import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
 
@@ -348,9 +349,9 @@ function ItemScanStats({ requestId, succeeded }: {
 // 실행 제어·옵션만). 종단 배치는 항목이 반드시 있으므로 첫 항목 payload 에서
 // 물려받는다(항목 추가와 같은 동질성 계약) — 항목 0개면 호출측이 이 컴포넌트
 // 자체를 안 그린다(물려받을 스토리지가 없다).
-function ReplaceItemsCsvDialog({ batchId, operation, firstPayload }: {
+function ReplaceItemsCsvDialog({ batchId, operation, firstPayload, chown }: {
   batchId: string; operation: "scan" | "sync";
-  firstPayload: Record<string, unknown>;
+  firstPayload: Record<string, unknown>; chown: string;
 }) {
   const [open, setOpen] = useState(false);
   const replace = useReplaceBatchItems(batchId);
@@ -374,6 +375,7 @@ function ReplaceItemsCsvDialog({ batchId, operation, firstPayload }: {
             trigger={<Button variant="ghost">CSV로 전체 교체</Button>}>
       <div className="space-y-2">
         <p className="text-muted text-sm">기존 항목이 모두 사라지고 붙여넣은 CSV 로 대체됩니다.</p>
+        {operation === "sync" && <SyncDestHint chown={chown} />}
         <label className="text-sm block">
           {`행 형식 — ${operation === "scan" ? "행당 경로 1개" : "행당 source,destination"}`}
           <textarea aria-label="교체 CSV" className={`${field} h-40 font-mono`}
@@ -442,13 +444,26 @@ function CurrentItemsCsvDialog({ operation, items }: {
   );
 }
 
+// sync 항목의 목적지 조건·소유 한 줄(2026-10-01 "목적지가 없는 경우" + 소유 안내를 운영자 화면 전부에 --
+// 배치 생성(BatchCreate) 안내와 같은 규칙: preflight _DEST_CHECK, 소유는 lib/syncOwnership. 배치는 root 라
+// chown 미지정이면 소스 그대로). 항목 추가·수정·CSV 교체가 모두 새 목적지를 정하는 곳이라 같은 줄을 단다.
+function SyncDestHint({ chown }: { chown: string }) {
+  // short 문구만 쓴다(chmod 는 short 에 나타나지 않는다) -- 상세 규칙은 배치 생성 화면의 안내가 말한다.
+  return (
+    <p className="text-xs text-muted" role="note" aria-label="목적지 조건과 소유권">
+      목적지가 없으면 새로 만듭니다(상위 디렉토리는 이미 있어야 하고, 중간 디렉토리는 만들지 않음) · 소유:{" "}
+      {syncOwnership({ chown, root: true, runAs: null, self: true }).short}
+    </p>
+  );
+}
+
 // 항목 추가(경로만 입력 — 스토리지는 첫 항목에서 물려받는다). 종단 배치에
 // 추가하면 서버가 재활성화(scan→Running/sync→Previewing)하고 신규 Queued 항목만
 // 실행된다. 성공 시 팝업을 닫는다: 추가된 항목은 뒤의 목록에 나타나므로 화면에
 // 남아 있을 이유가 없다(invalidate 는 훅 onSettled 몫). 항목이 없으면 물려받을
 // 스토리지가 없어 호출측이 버튼 대신 안내를 보인다.
-function AddItemDialog({ batchId, isSync, firstPayload }: {
-  batchId: string; isSync: boolean; firstPayload: Record<string, unknown>;
+function AddItemDialog({ batchId, isSync, firstPayload, chown }: {
+  batchId: string; isSync: boolean; firstPayload: Record<string, unknown>; chown: string;
 }) {
   const [open, setOpen] = useState(false);
   const add = useAddBatchItem(batchId);
@@ -468,6 +483,7 @@ function AddItemDialog({ batchId, isSync, firstPayload }: {
             <input aria-label="추가할 목적지 경로" className={field} value={dst}
                    onChange={(e) => setDst(e.target.value)} />
           </label>
+          <SyncDestHint chown={chown} />
         </>) : (
           <label className="text-sm block">추가할 대상 경로
             <input aria-label="추가할 대상 경로" className={field} value={path}
@@ -735,12 +751,12 @@ export function BatchDetail() {
             )}
             {b && firstPayload && (
               <AddItemDialog batchId={batchId} isSync={isSync}
-                             firstPayload={firstPayload} />
+                             firstPayload={firstPayload} chown={String(b.options?.chown ?? "")} />
             )}
             {b && terminal && firstPayload && (
               <ReplaceItemsCsvDialog batchId={batchId}
                                      operation={isSync ? "sync" : "scan"}
-                                     firstPayload={firstPayload} />
+                                     firstPayload={firstPayload} chown={String(b.options?.chown ?? "")} />
             )}
           </div>
         </div>
@@ -891,6 +907,7 @@ export function BatchDetail() {
                     <input aria-label="목적지 경로" className={field} value={dstDraft}
                            onChange={(e) => setDstDraft(e.target.value)} />
                   </label>
+                  <SyncDestHint chown={String(b?.options?.chown ?? "")} />
                 </>) : (
                   <label className="text-sm block">대상 경로
                     <input aria-label="대상 경로" className={field} value={pathDraft}

@@ -286,7 +286,7 @@ test("placeholder 힌트(sync): 소스·목적지·CSV(2열 멀티라인)·고�
     .toHaveAttribute("placeholder", "비우면 기본 4 MiB 적용");
   expect(screen.getByLabelText("chmod")).toHaveAttribute("placeholder", "예: D770,F660");
   expect(screen.getByLabelText("chown")).toHaveAttribute(
-    "placeholder", "예: 10003:10000 또는 cocoa.song:mig");
+    "placeholder", "예: 10003:10000");
 });
 
 // 정책 기본값 실값 캡션(실행 제어): 도구→정책 키는 placement.py TOOL_TO_POLICY 의
@@ -567,7 +567,7 @@ test("실행 제어의 선택 입력들이 라벨에 (선택) 을 단다(sync �
   expect(screen.getByText("bufsize (선택 · 바이트, 4096..1,073,741,824)")).toBeInTheDocument();
   expect(screen.getByText(
     "chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)")).toBeInTheDocument();
-  expect(screen.getByText("chown (선택 · user:group 또는 uid:gid)")).toBeInTheDocument();
+  expect(screen.getByText("chown (선택 · 숫자 uid:gid)")).toBeInTheDocument();
 });
 
 test("scan 배치엔 open_noatime 무관 — options 에 키 부재(sync 전용)", async () => {
@@ -606,4 +606,67 @@ test("파일 업로드: 로컬 FileReader 로 파싱해 테이블에 반영", as
   await userEvent.upload(screen.getByLabelText("CSV 파일"), file);
   // 파싱 성공 → 테이블 편집 탭으로 복귀, 행이 반영돼 있다
   expect(await screen.findByDisplayValue("x/y")).toBeInTheDocument();
+});
+
+// ---- sync 목적지 조건과 소유권(2026-10-01: "목적지가 없는 경우" + 기본 소유 안내) -------------
+
+async function toSyncItems() {
+  renderPage();
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("소스 스토리지"), "s1");
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), "s2");
+  await userEvent.type(screen.getByLabelText("1행 소스"), "a");
+  await userEvent.type(screen.getByLabelText("1행 목적지"), "b");
+}
+
+test("sync 배치: 목적지가 없는 경우·있는 경우와 root 소유권(소스 그대로)을 안내하고 확인 단계에 소유를 보인다", async () => {
+  await toSyncItems();
+  const note = screen.getByRole("note", { name: "목적지 조건과 소유권" });
+  expect(note).toHaveTextContent("목적지가 없는 경우: sync 가 목적지 디렉토리를 새로 만듭니다");
+  expect(note).toHaveTextContent("상위 디렉토리는 이미 있어야 합니다");
+  expect(note).toHaveTextContent("목적지가 이미 있는 경우: 디렉토리여야 합니다");
+  // 배치는 root(생성 게이트 + IF_ELIGIBLE) -- 요청자 uid:gid 가 아니라 소스 소유 그대로
+  expect(note).toHaveTextContent("root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지");
+  expect(note).toHaveTextContent("실행 제어 단계의 고급 옵션 chown 에 숫자 uid:gid 를 지정하세요");
+  expect(note).toHaveTextContent("보조 그룹 권한은 인정되지 않음");
+  expect(note).toHaveTextContent("결과는 실행 신원의 uid:gid(주 그룹) 소유");      // 자격이 빠진 드문 경우
+  await userEvent.click(next());                     // → 실행 제어
+  await userEvent.click(next());                     // → 확인·제출
+  expect(screen.getByText("소스의 소유자·그룹 그대로(root 실행)")).toBeInTheDocument();
+});
+
+test("sync 배치: chown 을 지정하면 소유 안내가 그 값이 된다", async () => {
+  await toSyncItems();
+  await userEvent.click(next());                     // → 실행 제어
+  await userEvent.click(screen.getByText("고급 옵션"));
+  await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
+  await userEvent.click(next());                     // → 확인·제출
+  expect(screen.getByText("chown 지정값 10003:10000")).toBeInTheDocument();
+  // 되돌아가면 안내의 비 root 폴백도 chown 기준으로 바뀐다(같은 카드 안 모순 금지)
+  await userEvent.click(screen.getByRole("button", { name: "이전" }));
+  await userEvent.click(screen.getByRole("button", { name: "이전" }));
+  const note = screen.getByRole("note", { name: "목적지 조건과 소유권" });
+  expect(note).toHaveTextContent("chown 옵션으로 지정한 10003:10000 소유로 셋업됩니다");
+  expect(note).toHaveTextContent("chown 값이 실행 신원 본인의 uid·주 그룹이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)");
+  expect(note).not.toHaveTextContent("결과는 실행 신원의 uid:gid(주 그룹) 소유가 됩니다");
+});
+
+test("sync 배치: chown 에 이름을 쓰면 해석되지 않는다고 경고한다", async () => {
+  await toSyncItems();
+  await userEvent.click(next());
+  await userEvent.click(screen.getByText("고급 옵션"));
+  await userEvent.type(screen.getByLabelText("chown"), "cocoa.song:mig");
+  expect(screen.getByText(/chown 의 이름은 작업 컨테이너에서 해석되지 않습니다/)).toBeInTheDocument();
+});
+
+test("scan 배치 확인 단계엔 목적지 소유 행이 없다", async () => {
+  renderPage();
+  await userEvent.click(next());
+  await userEvent.selectOptions(await screen.findByLabelText("스토리지"), "s1");
+  await userEvent.type(screen.getByLabelText("1행 경로"), "a");
+  await userEvent.click(next());
+  await userEvent.click(next());
+  expect(screen.getByRole("button", { name: "배치 생성" })).toBeInTheDocument();   // 확인 단계에 도달
+  expect(screen.queryByText("목적지 소유")).not.toBeInTheDocument();
 });

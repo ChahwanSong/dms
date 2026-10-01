@@ -18,6 +18,7 @@ import { InfoPanel } from "../../components/ui/InfoPanel";
 import { Wizard } from "../../components/wizard/Wizard";
 import type { WizardStep } from "../../components/wizard/Wizard";
 import { ApiError } from "../../lib/api";
+import { CHOWN_NAME_WARNING, chownHasName, syncOwnership } from "../../lib/syncOwnership";
 
 // 4스텝 위저드(슬라이스 32 T9): SubmitJob 관례(연산→대상→옵션→확인)를 배치에
 // 그대로 얹는다 — 위저드 프레임은 배치 생성 재사용을 명시 설계(Wizard.tsx 주석).
@@ -115,7 +116,7 @@ export function BatchCreate() {
   const chmodError = f.op === "sync" && f.chmod.trim() !== "" && !CHMOD_RE.test(f.chmod.trim())
     ? "chmod 형식이 올바르지 않습니다 (예: D770,F660)" : null;
   const chownError = f.op === "sync" && f.chown.trim() !== "" && !CHOWN_RE.test(f.chown.trim())
-    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 또는 cocoa.song:mig)" : null;
+    ? "chown 형식이 올바르지 않습니다 (예: 10003:10000 — 숫자 uid:gid)" : null;
   // 1..64 는 서버 위생 상한(1024)의 보수적 부분집합 — 실제 캡은 정책 max_nodes.
   const nodeCountError = intFieldError("노드 수", f.nodeCount, 1, 64);
   // 노드당 프로세스 수도 같은 부분집합 — 실제 캡은 정책 procs_per_node(min).
@@ -347,13 +348,30 @@ export function BatchCreate() {
                 <StoragePicker label="목적지 스토리지" value={f.dstStorage}
                   onChange={(v) => setF({ ...f, dstStorage: v })}
                   storages={storages} loading={loadingStorages} />
-                {/* 목적지 권한 조건(2026-09-30, SubmitJob 과 같은 규칙 -- preflight _DEST_CHECK).
-                    배치는 자격 있는 관리자면 root 라 우회되지만, 자격이 없으면 비 root 로 돈다. */}
-                <p className="col-span-2 text-xs text-muted">
-                  root 가 아닌 실행이면 각 목적지의 <strong>상위 디렉토리가 이미 있고 실행 신원의 쓰기 권한</strong>이
-                  있어야 합니다(목적지가 이미 있어도 마찬가지) — 이미 있는 목적지는 실행 신원 소유여야 합니다. 조건이
-                  맞지 않는 항목은 미리보기 전에 거부됩니다.
-                </p>
+                {/* 목적지 조건과 소유권(2026-09-30 상위 디렉토리 조건, 2026-10-01 "목적지가 없는 경우" +
+                    소유권 추가 -- SubmitJob 과 같은 규칙: preflight _DEST_TYPE_CHECK·_DEST_CHECK, 소유권은
+                    lib/syncOwnership). 배치는 생성 게이트(routes_batches: 특권 목록 + 세션)를 통과한
+                    관리자만 만들고 자식은 자격이 있으면 root(identity.PRIVILEGE_IF_ELIGIBLE) -- 그래서
+                    소유권 기본은 "소스 그대로"다. 자격이 계획 시점에 빠진 드문 경우만 비 root 로 돈다. */}
+                <div className="col-span-2 rounded-card bg-infobg p-3 text-xs" role="note"
+                     aria-label="목적지 조건과 소유권">
+                  <p className="font-medium text-sm">목적지 조건과 소유권</p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                    <li><strong>목적지가 없는 경우</strong>: sync 가 목적지 디렉토리를 새로 만듭니다 — 각 목적지의
+                      상위 디렉토리는 이미 있어야 합니다(중간 디렉토리는 만들지 않습니다).</li>
+                    <li><strong>목적지가 이미 있는 경우</strong>: 디렉토리여야 합니다(파일이면 그 항목은 거부).</li>
+                    <li><strong>소유권</strong>: {syncOwnership({ chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true }).long}
+                      {f.chown.trim() === "" && " 특정 사용자 소유로 맞추려면 실행 제어 단계의 고급 옵션 chown 에 숫자 uid:gid 를 지정하세요."}</li>
+                    {/* 자격이 계획 시점에 빠진 드문 비 root 폴백 -- 결과 소유는 chown 유무로 갈린다
+                        (_auto_chown: chown 이 있으면 자동 주입 없음). 권한은 uid·주 gid 만(보조 그룹 미적용). */}
+                    <li>관리자 특권 자격이 빠져 비 root 로 실행되면 단일 작업과 같은 권한 조건(상위 디렉토리 쓰기,
+                      이미 있는 목적지는 실행 신원 소유 — 보조 그룹 권한은 인정되지 않음)이 적용되고,{" "}
+                      {f.chown.trim() === ""
+                        ? "결과는 실행 신원의 uid:gid(주 그룹) 소유가 됩니다."
+                        : "chown 값이 실행 신원 본인의 uid·주 그룹이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)."}</li>
+                    <li>조건이 맞지 않는 항목은 미리보기 전에 거부됩니다 — 그 항목은 아무것도 복사되지 않습니다.</li>
+                  </ul>
+                </div>
               </div>
             )}
 
@@ -517,17 +535,20 @@ export function BatchCreate() {
                              className={field} value={f.chmod} onChange={on("chmod")} />
                     </label>
                     {chmodError && <p className="text-bad text-sm">{chmodError}</p>}
-                    <label className="text-sm block">chown (선택 · user:group 또는 uid:gid)
-                      <input aria-label="chown" placeholder="예: 10003:10000 또는 cocoa.song:mig"
+                    <label className="text-sm block">chown (선택 · 숫자 uid:gid)
+                      <input aria-label="chown" placeholder="예: 10003:10000"
                              className={field} value={f.chown} onChange={on("chown")} />
                     </label>
                     {chownError && <p className="text-bad text-sm">{chownError}</p>}
+                    {!chownError && chownHasName(f.chown) && (
+                      <p className="text-bad text-sm">{CHOWN_NAME_WARNING}</p>
+                    )}
                     {/* 배치는 통일 게이트로 전부 특권(root) 실행 — 단건(SubmitJob)의
                         비특권 함정 캡션은 여기선 거짓이라 싣지 않는다. 특권 실행의
                         "비우면" 기본은 소스 소유권 보존(_auto_chown 무개입 분기). */}
                     <p className="text-muted text-xs">
-                      비우면 원래 소유권 보존(특권 실행 기준). 지정하면 자동 chown 이 꺼지고
-                      목적지가 그 소유자로 기록됩니다.
+                      비우면 원래(소스) 소유권을 보존합니다(root 실행). 지정하면 목적지와 복사본이 그 소유로
+                      셋업됩니다 — 숫자 uid:gid 로 지정하세요.
                     </p>
                   </div>
                 </details>
@@ -567,7 +588,7 @@ export function BatchCreate() {
               <p className="text-muted text-xs mt-1">
                 배치는 관리자 이관·정리용이라 root 로 실행됩니다 — 실행 신원은 기록용
                 이름이며 파일 권한 검사는 적용되지 않고, sync 는 목적지(이미 있는 디렉토리
-                포함)의 소유자·권한을 소스와 같게 바꿉니다. 사용자 권한 그대로 실행하려면
+                포함)의 소유자·권한을 소스와 같게 바꿉니다(chown·chmod 지정 시 그 값). 사용자 권한 그대로 실행하려면
                 단일 작업에서 실행 신원을 지정하세요.
               </p>
             </label>
@@ -667,6 +688,15 @@ export function BatchCreate() {
                     <dt className="w-28 shrink-0 text-muted">실행 권한</dt>
                     <dd>관리자 특권(root)</dd>
                   </div>
+                  {/* sync 결과 소유(2026-10-01): 배치는 root 라 chown 미지정이면 소스 그대로. */}
+                  {body.operation === "sync" && (
+                    <div className="flex gap-2">
+                      <dt className="w-28 shrink-0 text-muted">목적지 소유</dt>
+                      <dd>{syncOwnership({ chown: String(body.options?.chown ?? ""),
+                                          chmod: String(body.options?.chmod ?? ""), root: true,
+                                          runAs: null, self: true }).short}</dd>
+                    </div>
+                  )}
                   {body.owner_username && (
                     <div className="flex gap-2">
                       <dt className="w-28 shrink-0 text-muted">실행 신원</dt>

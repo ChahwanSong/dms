@@ -16,16 +16,18 @@ export function humanSeconds(s: number | null): string {
 }
 
 // 도구별 용도(2026-09-30 정책 화면 개선): 정책 키(placement.TOOL_TO_POLICY)마다 무엇을 하는
-// 도구인지 한 줄로 -- 표의 "scan / dsync / nsync / rm" 만으로는 운영자가 dsync 와 nsync 의
-// 차이(같은 노드 공존 vs 노드 간)를 화면에서 알 수 없었다.
-export const TOOL_INFO: Record<string, { title: string; binary: string; help: string }> = {
-  scan: { title: "스캔", binary: "dscan",
+// 도구인지 한 줄로 -- "scan / dsync / nsync / rm" 만으로는 운영자가 dsync 와 nsync 의 차이
+// (같은 노드 공존 vs 노드 간)를 화면에서 알 수 없었다. 카드 제목은 정책 키 그대로다(사용자 결정
+// 2026-10-01: "동기화·노드 간 동기화 등의 이름 대신 dsync, nsync 등으로") -- 수정 창 제목·감사
+// 로그 대상과 같은 이름. 실행 도구 이름이 키와 다른 scan(dscan)·rm(drm)만 옆에 도구명을 단다.
+export const TOOL_INFO: Record<string, { binary: string; help: string }> = {
+  scan: { binary: "dscan",
           help: "디렉토리를 훑어 파일 수·용량·데이터 온도 리포트를 만듭니다." },
-  dsync: { title: "동기화", binary: "dsync",
+  dsync: { binary: "dsync",
            help: "소스·목적지를 함께 마운트한 노드가 있을 때 쓰는 sync 입니다(기본)." },
-  nsync: { title: "노드 간 동기화", binary: "nsync",
+  nsync: { binary: "nsync",
            help: "소스·목적지를 함께 마운트한 노드가 없을 때, 서로 다른 노드 사이로 옮기는 sync 입니다." },
-  rm: { title: "삭제", binary: "drm",
+  rm: { binary: "drm",
         help: "대상 디렉토리를 병렬로 지웁니다 — 미리보기 확인 뒤에만 실행됩니다." },
 };
 
@@ -48,8 +50,10 @@ function PolicyCard({ p }: { p: Policy }) {
       <header className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-base font-semibold">{info?.title ?? p.tool}</span>
-            <code className="rounded bg-panel px-1.5 py-0.5 text-xs">{p.tool}</code>
+            <span className="font-mono text-base font-semibold">{p.tool}</span>
+            {info && info.binary !== p.tool && (
+              <span className="text-xs text-muted">도구 <code className="rounded bg-panel px-1.5 py-0.5">{info.binary}</code></span>
+            )}
             <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
               on ? "text-ok bg-okbg" : "text-bad bg-badbg"}`}>{on ? "활성" : "비활성"}</span>
           </div>
@@ -105,7 +109,8 @@ export function PoliciesList() {
       {q.isLoading ? <p className="text-muted">불러오는 중…</p> : q.isError ? (
         <Card><p className="text-bad">{(q.error as ApiError).message}</p></Card>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-2">
+        /* 한 줄에 카드 하나(사용자 결정 2026-10-01) -- 두 열 격자는 카드 높이가 달라 눈이 지그재그로 돈다. */
+        <div className="space-y-4">
           {(q.data ?? []).map((p) => <PolicyCard key={p.tool} p={p} />)}
         </div>
       )}

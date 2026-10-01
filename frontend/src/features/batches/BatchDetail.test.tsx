@@ -557,6 +557,22 @@ test("sync 배치 항목 추가 팝업: 소스·목적지 두 입력", async () 
   const d = await openDialog("항목 추가");
   expect(d.getByLabelText("추가할 소스 경로")).toBeInTheDocument();
   expect(d.getByLabelText("추가할 목적지 경로")).toBeInTheDocument();
+  // 2026-10-01: 운영자 화면 전부에 목적지 조건·소유 안내(배치는 root -- chown 없으면 소스 그대로)
+  const hint = d.getByRole("note", { name: "목적지 조건과 소유권" });
+  expect(hint).toHaveTextContent("목적지가 없으면 새로 만듭니다(상위 디렉토리는 이미 있어야 하고");
+  expect(hint).toHaveTextContent("소유: 소스의 소유자·그룹 그대로(root 실행)");
+});
+
+test("sync 배치 항목 수정·CSV 교체에도 목적지 조건·소유 안내 -- 배치 chown 이 있으면 그 값", async () => {
+  renderBatch({ operation: "sync", status: "Completed", options: { chown: "10003:10000" }, items: [
+    { seq: 0, payload: { source_storage: "s1", source: "a",
+        destination_storage: "s2", destination: "b" }, status: "Succeeded",
+      request_id: "r1", reason_code: null }] });
+  await userEvent.click(await screen.findByRole("button", { name: "항목 0 수정" }));
+  expect(screen.getByRole("note", { name: "목적지 조건과 소유권" }))
+    .toHaveTextContent("소유: chown 지정값 10003:10000");
+  const d = await openDialog("CSV로 전체 교체");
+  expect(d.getByRole("note", { name: "목적지 조건과 소유권" })).toHaveTextContent("소유: chown 지정값 10003:10000");
 });
 
 test("sync 배치 항목 수정: 소스·목적지 경로 두 입력 — 4필드 payload 로 PUT", async () => {

@@ -149,8 +149,9 @@ test("스토리지 드롭다운이 API 목록으로 채워진다", async () => {
   expect(within(sourceSelect).queryByText(/\(Ready\)|\(Degraded\)/)).not.toBeInTheDocument();
 });
 
-test("sync 대상 스텝은 목적지 상위 디렉토리 쓰기 권한 조건을 실제 경로로 보이고, 확인 스텝이 재노출한다", async () => {
+test("sync 대상 스텝은 목적지 조건(없는 경우·있는 경우)과 소유권을 보이고, 확인 스텝이 재노출한다(사용자)", async () => {
   // 2026-09-30 사용자 요청: "목적지의 상위 디렉토리에 쓰기 권한이 있어야 하는 조건을 분명히".
+  // 2026-10-01 사용자 요청: "목적지가 없는 경우" + "기본적으로 목적지는 요청자 본인 uid:gid 로 셋업".
   server.use(
     http.get("/api/auth/me", () => HttpResponse.json(meUser)),
     http.get("/api/user/storages", () => HttpResponse.json([
@@ -159,16 +160,32 @@ test("sync 대상 스텝은 목적지 상위 디렉토리 쓰기 권한 조건�
         managed_root: "/cephfs2/managed" }])));
   renderPage();
   await fillSyncTarget();                     // 목적지 cephfs-secondary : c/d
-  const card = screen.getByLabelText("목적지 권한 조건");
+  const card = screen.getByLabelText("목적지 조건과 소유권");
   expect(card).toHaveAttribute("role", "note");
-  expect(card).toHaveTextContent("상위 디렉토리가 이미 있고, 그 디렉토리에 쓰기 권한");
-  expect(card).toHaveTextContent("목적지가 이미 있어도 마찬가지");
+  expect(card).toHaveTextContent("목적지가 없는 경우: sync 가 목적지 디렉토리를 새로 만듭니다");
+  expect(card).toHaveTextContent("상위 디렉토리는 이미 있고 그 디렉토리에 쓰기 권한");
+  expect(card).toHaveTextContent("중간 디렉토리는 만들지 않습니다");
+  expect(card).toHaveTextContent("목적지가 이미 있는 경우: 디렉토리여야 합니다(파일이면 거부). 쓰기·진입할 수 있어야 하며");
+  expect(card).toHaveTextContent("목적지 조건과 소유권 — 요청자 본인 계정(uid/gid) 기준");
+  expect(card).toHaveTextContent("요청자 본인 소유여야 합니다");
+  expect(card).toHaveTextContent("권한은 본인 계정의 uid·LDAP 주 그룹");
+  expect(card).toHaveTextContent("보조 그룹으로 받은 권한은 인정되지 않습니다");
+  expect(card).toHaveTextContent("권한 비트·수정 시각은 소스 그대로라 소스의 그룹 권한이 이 주 그룹에 적용");
+  // 검증 2차(2026-10-01): 이미 있던 남의 소유 항목은 못 바꾼다 -- dsync 실패 / nsync 건너뜀(도구별로 다르다)
+  expect(card).toHaveTextContent("그 안에 다른 사용자 소유 항목이 있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다");
+  expect(card).not.toHaveTextContent("실행 신원");                             // 사용자에겐 없는 개념
+  expect(card).toHaveTextContent("상위 디렉토리 쓰기 권한도 마찬가지로 필요");
   expect(within(card).getByText("/cephfs2/managed/c")).toBeInTheDocument();   // c/d 의 상위
-  expect(card).not.toHaveTextContent("root 권한으로 실행하면");                // 사용자에겐 root 안내 없음
+  // 소유권: 사용자는 언제나 요청자 본인 uid:gid(_auto_chown) -- 소스 소유자와 무관
+  expect(card).toHaveTextContent(
+    "소유권: 기본적으로 목적지(새로 만드는 경우 포함)와 복사된 파일·디렉토리는 요청자 본인(alice)의 uid:gid");
+  expect(card).toHaveTextContent("소스 소유자와 관계없습니다");
+  expect(card).not.toHaveTextContent("root");                                  // 사용자에겐 root 안내 없음
   await goToOptions();
   await goToConfirm();
-  expect(screen.getByText("상위 디렉토리 /cephfs2/managed/c 가 있어야 하고 실행 신원의 쓰기 권한 필요"))
-    .toBeInTheDocument();
+  expect(screen.getByText("상위 디렉토리 /cephfs2/managed/c 가 있어야 하고 요청자 본인의 쓰기 권한 필요. "
+    + "목적지가 없으면 새로 만들고, 이미 있으면 요청자 본인 소유·쓰기 가능해야 함")).toBeInTheDocument();
+  expect(screen.getByText("요청자 본인(alice)의 uid:gid(주 그룹)")).toBeInTheDocument();
 });
 
 test("관리자 전용 스토리지는 관리자 피커에 (관리자 전용) 으로 구분된다", async () => {
@@ -340,7 +357,7 @@ test("비워도 되는 sync 옵션 입력은 라벨에 (선택) 이 붙는다", 
   expect(screen.getByText("bufsize (선택 · 바이트, 4096..1,073,741,824)")).toBeInTheDocument();
   expect(screen.getByText(
     "chmod (선택 · 예: D770,F660 — 콤마 구분, D=디렉터리 F=파일)")).toBeInTheDocument();
-  expect(screen.getByText("chown (선택 · user:group 또는 uid:gid)")).toBeInTheDocument();
+  expect(screen.getByText("chown (선택 · 숫자 uid:gid)")).toBeInTheDocument();
 });
 
 test("스토리지 목록 로드가 실패하면 대상 스텝에 오류가 뜨고 제출이 비활성이다", async () => {
@@ -457,7 +474,7 @@ test("root 실행(관리자 기본)이면 open_noatime 이 기본 ON 으로 실�
   expect(screen.getByLabelText("root 권한으로 실행")).toBeChecked();
   expect(screen.getByLabelText("open_noatime")).toBeEnabled();
   expect(screen.getByLabelText("open_noatime")).toBeChecked();
-  expect(screen.getByText(/비우면 원래 소유권을 보존합니다\(지금 root 실행\)/)).toBeInTheDocument();
+  expect(screen.getByText(/비우면 원래\(소스\) 소유권을 보존합니다\(지금 root 실행\)/)).toBeInTheDocument();
   await goToConfirm();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
@@ -493,8 +510,7 @@ test("숫자 uid:gid chown 이 즉답 오류 없이 그대로 전송된다", asy
   const captured = captureSubmit();
   renderPage();
   await goToOptionsAndOpenAdvanced();
-  expect(screen.getByLabelText("chown")).toHaveAttribute(
-    "placeholder", "예: 10003:10000 또는 cocoa.song:mig");
+  expect(screen.getByLabelText("chown")).toHaveAttribute("placeholder", "예: 10003:10000");
   await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
   expect(screen.queryByText(/chown 형식이 올바르지 않습니다/)).toBeNull();
   await goToConfirm();
@@ -686,7 +702,7 @@ test("root 체크박스는 관리자에게 기본 켜짐 — run_as_root: true, 
   const box = await screen.findByLabelText("root 권한으로 실행") as HTMLInputElement;
   expect(box.checked).toBe(true);
   await goToConfirm();
-  expect(screen.getByText(/^root\(특권\) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤$/))
+  expect(screen.getByText(/^root\(특권\) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤\(chown·chmod 지정 시 그 값\)$/))
     .toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "제출" }));
   await screen.findByRole("heading", { name: "요청 상세" }).catch(() => null);
@@ -861,4 +877,93 @@ test("사용자: 확인 단계에 있는 동안 허용이 해제되면 그 자�
   expect(await screen.findByRole("alert")).toHaveTextContent("허용되지 않은 소스 → 목적지 조합입니다");
   expect(screen.getByRole("button", { name: "제출" })).toBeDisabled();
   act(() => { focusManager.setFocused(undefined); });
+});
+
+// ---- 목적지 소유권 안내(2026-10-01): 관리자는 실제 설정(root·실행 신원·chown)대로 ---------------
+
+const ownershipCard = () => screen.getByLabelText("목적지 조건과 소유권");
+
+test("관리자 기본(root 실행): 소유권은 소스 그대로 -- 상위 디렉토리는 그래도 있어야 한다", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "cephfs", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs/managed" },
+    { storage_name: "cephfs-secondary", backend_type: "cephfs", status: "Ready", managed_root: "/cephfs2/managed" }])));
+  renderPage();
+  await fillSyncTarget();
+  expect(ownershipCard()).toHaveTextContent(
+    "소유권: root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지합니다");
+  expect(ownershipCard()).toHaveTextContent("상위 디렉토리는 그래도 이미 있어야 합니다");
+  // root 실행엔 "쓰기 권한이 필요" 가 아니라 "이미 있어야" -- 확인 단계 문구와 같은 사실
+  expect(ownershipCard()).toHaveTextContent("상위 디렉토리는 이미 있어야 합니다(root 실행 — 쓰기 권한 검사 우회)");
+  expect(ownershipCard()).toHaveTextContent("/cephfs2/managed/c 가 이미 있어야 합니다");
+  expect(ownershipCard()).not.toHaveTextContent(/쓰기 권한(이|도)[^.]*필요/);
+  // root 는 최상위뿐 아니라 이미 있던 같은 경로 항목 전부를 소스 소유로(dsync 기본 비교) -- 범위를 축소하지 않는다
+  expect(ownershipCard()).toHaveTextContent("그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)");
+  expect(ownershipCard()).toHaveTextContent("목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로");
+  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹");
+  await goToOptions();
+  await goToConfirm();
+  expect(screen.getByText("소스의 소유자·그룹 그대로(root 실행)")).toBeInTheDocument();
+  expect(screen.getByText(/상위 디렉토리 .* 가 있어야 함\(root 실행 — 권한 검사 우회\)/)).toBeInTheDocument();
+});
+
+test("관리자가 root 를 끄면 본인 uid:gid, 다른 실행 신원을 적으면 그 사용자 uid:gid", async () => {
+  const first = renderPage();
+  await fillSyncTarget();
+  await goToOptions();
+  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));          // 끔
+  // 대상 단계로 돌아가면 카드도 비 root 기준(쓰기 권한·실행 신원 소유)으로 바뀐다
+  await userEvent.click(screen.getByRole("button", { name: "이전" }));
+  expect(ownershipCard()).toHaveTextContent("root 실행이 아니면 실행 신원 소유여야 합니다");
+  expect(ownershipCard()).toHaveTextContent(/쓰기 권한이 있어야 합니다/);
+  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹");
+  await goToOptions();
+  await goToConfirm();
+  expect(screen.getByText("요청자 본인(root)의 uid:gid(주 그룹)")).toBeInTheDocument();   // meAdmin.actor
+  first.unmount();
+
+  renderPage();
+  await fillSyncTarget();
+  await goToOptions();
+  await userEvent.type(screen.getByLabelText("실행 신원(선택)"), "cocoa.song");  // root 기본 꺼짐
+  await goToConfirm();
+  expect(screen.getByText("실행 신원 cocoa.song의 uid:gid(주 그룹)")).toBeInTheDocument();
+});
+
+test("chown 을 지정하면 소유권 안내가 그 값으로 바뀐다", async () => {
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
+  await goToConfirm();
+  expect(screen.getByText("chown 지정값 10003:10000")).toBeInTheDocument();
+});
+
+test("root 자격 없는 관리자: root 언급 없이 실행 신원 기준, 소유는 본인 uid:gid", async () => {
+  server.use(http.get("/api/auth/me", () => HttpResponse.json(meAdminNoRoot)));
+  renderPage();
+  await fillSyncTarget();
+  expect(ownershipCard()).toHaveTextContent("목적지 조건과 소유권 — 실행 신원(uid/gid) 기준");
+  expect(ownershipCard()).toHaveTextContent("실행 신원 소유여야 합니다");
+  expect(ownershipCard()).not.toHaveTextContent("root");
+  await goToOptions();
+  await goToConfirm();
+  expect(screen.getByText("요청자 본인(ops2)의 uid:gid(주 그룹)")).toBeInTheDocument();
+});
+
+test("비 root 에서 chown 을 지정하면 본인 uid:gid 가 아니면 실패한다고 경고한다", async () => {
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  await userEvent.click(screen.getByLabelText("root 권한으로 실행"));          // 끔
+  await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
+  await goToConfirm();
+  expect(screen.getByText("chown 지정값 10003:10000 — 비 root: 본인 uid:gid 가 아니면 적용 안 됨(dsync 는 실패)"))
+    .toBeInTheDocument();
+});
+
+test("chown 에 이름을 쓰면 해석되지 않는다고 경고한다(잡 컨테이너엔 LDAP 이 없다)", async () => {
+  renderPage();
+  await goToOptionsAndOpenAdvanced();
+  await userEvent.type(screen.getByLabelText("chown"), "cocoa.song:mig");
+  expect(screen.getByText(/chown 의 이름은 작업 컨테이너에서 해석되지 않습니다/)).toBeInTheDocument();
+  await goToConfirm();
+  expect(screen.getByText("chown cocoa.song:mig — 이름은 해석되지 않음(숫자로 지정)")).toBeInTheDocument();
 });
