@@ -52,13 +52,6 @@ function pick(points: NodeMetricPoint[], f: (p: NodeMetricPoint) => number | nul
   return points.map(f);
 }
 
-// 증거 스냅샷(설계 §4.2): Ready n/전체 요약. 원본 표는 노드 화면(/admin/nodes)에
-// 이미 있으므로 여기서는 비율만 -- 상세가 필요하면 그 화면으로 간다.
-function readyCount(items: unknown): string {
-  const arr = asArray<{ status?: string }>(items);
-  return `${arr.filter((i) => i.status === "Ready").length}/${arr.length}`;
-}
-
 function Metric({ title, values, label, fmt, domain, capLabel }: {
   title: ReactNode; values: (number | null)[]; label: string;
   fmt: (v: number) => string; domain?: SparklineDomain; capLabel?: string;
@@ -84,9 +77,11 @@ function Metric({ title, values, label, fmt, domain, capLabel }: {
   );
 }
 
+// 노드당 한 줄: Load(1분평균)·메모리·수신·송신(2026-10-01 사용자 요청 -- 펼침(load5/load15·스토리지 사용%·
+// 마운트/도구/계정 요약)을 없앴다. 스토리지 사용%는 공유 FS 라 노드마다 같은 값이었고, 마운트·도구·계정 상세는
+// 노드 화면(/admin/nodes)에 있다).
 export function NodeMetricsSection() {
   const [windowH, setWindowH] = useState(24);
-  const [open, setOpen] = useState<string | null>(null);
   const metricsQ = useNodeMetrics(windowH);
   const nodesQ = useNodes();
   const series = asArray<NodeMetricSeries>(metricsQ.data?.nodes);
@@ -102,9 +97,6 @@ export function NodeMetricsSection() {
       {series.map((n) => {
         const points = asArray<NodeMetricPoint>(n.points);
         const report = reports.get(n.node_name);
-        // 스토리지 이름은 포인트마다 다를 수 있다(스토리지 추가/제거) -- 합집합으로 그린다
-        const diskNames = [...new Set(points.flatMap(
-          (p) => asArray<{ storage_name: string }>(p.disks).map((d) => d.storage_name)))];
         // 코어 수는 사실상 불변이라 시계열이 아닌 최신 리포트에서 읽는다
         // (metrics_series.py 의 같은 취지 주석). load 는 코어 수를 넘을 수 있으므로
         // 상한이 아니라 기준선이다 -- Sparkline 이 스케일을 max(코어수, 창 최대)로
@@ -115,16 +107,13 @@ export function NodeMetricsSection() {
         return (
           <div key={n.node_name} className="border-t border-black/5 py-3">
             <div className="flex items-center justify-between">
-              <button className="font-medium" onClick={() =>
-                setOpen(open === n.node_name ? null : n.node_name)}>
-                {n.node_name}
-              </button>
+              <span className="font-medium">{n.node_name}</span>
               <span className={`text-xs ${n.fresh ? "text-ok" : "text-bad"}`}>
                 {n.fresh ? "정상" : "지연"} · {ageText(n.reported_at)}
               </span>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
-              <Metric title="load1" label={`${n.node_name} load1`} fmt={fmtLoad}
+              <Metric title="Load (1분평균)" label={`${n.node_name} Load (1분평균)`} fmt={fmtLoad}
                       domain={loadDomain} capLabel={loadCap}
                       values={pick(points, (p) => p.load1)} />
               <Metric title="메모리 사용%" label={`${n.node_name} 메모리`} fmt={fmtPct}
@@ -137,33 +126,6 @@ export function NodeMetricsSection() {
               <Metric title="송신 B/s" label={`${n.node_name} 송신`} fmt={fmtBps}
                       values={pick(points, (p) => p.net_tx_bps)} />
             </div>
-            {open === n.node_name && (
-              <div className="mt-3 space-y-3">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <Metric title="load5" label={`${n.node_name} load5`} fmt={fmtLoad}
-                          domain={loadDomain} capLabel={loadCap}
-                          values={pick(points, (p) => p.load5)} />
-                  <Metric title="load15" label={`${n.node_name} load15`} fmt={fmtLoad}
-                          domain={loadDomain} capLabel={loadCap}
-                          values={pick(points, (p) => p.load15)} />
-                  {diskNames.map((name) => (
-                    <Metric key={name} title={<><span>{name}</span> 사용%</>}
-                            label={`${n.node_name} ${name} 디스크`} fmt={fmtPct}
-                            domain={PCT_DOMAIN} capLabel="상한 100%"
-                            values={points.map((p) =>
-                              asArray<{ storage_name: string; used_pct: number | null }>(p.disks)
-                                .find((d) => d.storage_name === name)?.used_pct ?? null)} />
-                  ))}
-                </div>
-                {report != null && (
-                  <p className="text-muted text-xs">
-                    마운트 {readyCount((report as { mounts?: unknown }).mounts)} ·
-                    도구 {readyCount((report as { tools?: unknown }).tools)} ·
-                    계정 {readyCount((report as { identities?: unknown }).identities)}
-                  </p>
-                )}
-              </div>
-            )}
           </div>
         );
       })}
