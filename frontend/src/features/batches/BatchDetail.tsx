@@ -12,6 +12,7 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
+import { BatchExecutionSettingsDialog } from "./BatchExecutionSettingsDialog";
 import { useRequestJobs } from "../jobs/useJobs";
 import { reasonText, ApiError } from "../../lib/api";
 import { absSummary } from "../../lib/storagePaths";
@@ -197,6 +198,9 @@ function BatchSettings({ b }: { b: Batch }) {
           <dd>{b.owner_username}</dd>
         </>)}
       </dl>
+      {/* 2026-10-02 부터 종단 배치는 실행 설정을 바꿀 수 있어(실행 설정 변경) 이 값이 이미 끝난 항목이 실제로 돈 값과
+          다를 수 있다(적대적 리뷰) — 항목별 실제 값은 자식 요청 payload 에 남는다. 언제나 참인 문장으로 말한다. */}
+      <p className="mt-1 text-xs text-muted">다음 실행에 쓰이는 값입니다 — 항목별 실제 실행 값은 각 요청 상세에 남습니다.</p>
     </details>
   );
 }
@@ -697,6 +701,9 @@ export function BatchDetail() {
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
                 전부 재큐잉(성장 모니터링). "실패분 재실행"(실패만)과 공존한다 */}
             {(b?.status === "Completed" || b?.status === "Cancelled") && <Button disabled={rescan.isPending} onClick={() => rescan.mutate()}>전체 재실행</Button>}
+            {/* 실행 설정 변경(2026-10-02): 재실행 버튼들과 같은 종단 게이트(서버 409 batch_settings_locked 미러) --
+                취소·완료 뒤 노드·프로세스 수·옵션을 바꾸고 다시 돌리는 동선 */}
+            {b && terminal && <BatchExecutionSettingsDialog b={b} />}
             {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} />}
             {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <Button variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</Button>}
           </div>
@@ -712,8 +719,9 @@ export function BatchDetail() {
         ))}
         {b?.operation === "sync" && chownHasName(String(b?.options?.chown ?? "")) && (
           <p role="alert" aria-label="이름 chown 배치" className="mt-2 rounded-lg border border-bad px-3 py-2 text-sm text-bad">
-            {`이 배치는 chown 에 이름(${String(b.options?.chown)})이 들어 있어 더 이상 실행할 수 없습니다 — 확인·재실행·`
-              + "항목 추가와 남은 항목은 거부됩니다. 숫자 uid:gid 로 새 배치를 만드세요(이름은 작업 컨테이너에서 해석되지 않습니다)."}
+            {`이 배치는 chown 에 이름(${String(b.options?.chown)})이 들어 있어 이대로는 실행할 수 없습니다 — 확인·재실행·`
+              + "항목 추가와 남은 항목은 거부됩니다(이름은 작업 컨테이너에서 해석되지 않습니다). 배치를 취소(진행 중이면)한 뒤 "
+              + "「실행 설정 변경」에서 chown 을 숫자 uid:gid 로 고치면 다시 실행할 수 있습니다."}
           </p>
         )}
         {b?.note && !editing && <p className="text-muted text-sm mt-2">{b.note}</p>}

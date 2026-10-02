@@ -73,6 +73,7 @@
   "batch_item_not_editable",
   "batch_not_deletable",
   "batch_items_not_replaceable",
+  "batch_settings_locked",
   "batch_item_not_rerunnable",
   "empty_selection",
   "invalid_storage",

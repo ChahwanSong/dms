@@ -74,6 +74,20 @@ export const useUpdateBatch = (id: string) => {
     onSettled: () => _refresh(qc, id),
   });
 };
+// 실행 설정 변경(종단 배치 한정 — 서버 409 batch_settings_locked 가 진짜 차단). 화면은 늘 다섯 키를 다 싣는다
+// (지금 원하는 전체 상태): null = 정책 기본(priority/node_count/procs_per_node), options 는 통째 교체.
+export interface BatchExecutionBody {
+  max_concurrency: number; priority: string | null; node_count: number | null;
+  procs_per_node: number | null; options: Record<string, unknown>;
+}
+export const useUpdateBatchExecution = (id: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (b: BatchExecutionBody) =>
+      apiSend<Batch>("PATCH", `/api/admin/batches/${id}/execution`, b),
+    onSettled: () => _refresh(qc, id),
+  });
+};
 // 항목 편집 3종(수정·삭제·추가): 화면의 버튼 노출은 표시 게이트일 뿐이고 진짜
 // 차단은 서버다(활성 배치 Queued 원자 가드 409·동질성 422). 갱신은 _action 과 같은
 // 계약(_refresh — 상세+목록, 재조회 착지까지 대기) — 편집 결과·재활성화 상태를

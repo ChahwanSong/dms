@@ -1150,7 +1150,9 @@ test("이름 chown 옛 배치: 헤더 안내 + 배치 확인 422 사유가 보�
     HttpResponse.json({ detail: "chown_name_not_supported" }, { status: 422 })));
   renderLegacy({ status: "PreviewReady" });
   expect(await screen.findByRole("alert", { name: "이름 chown 배치" }))
-    .toHaveTextContent("더 이상 실행할 수 없습니다");
+    .toHaveTextContent("이대로는 실행할 수 없습니다");
+  // 고칠 길을 말한다(2026-10-02 실행 설정 변경)
+  expect(screen.getByRole("alert", { name: "이름 chown 배치" })).toHaveTextContent("「실행 설정 변경」에서 chown 을 숫자 uid:gid 로");
   await userEvent.click(screen.getByRole("button", { name: "배치 확인" }));
   await waitFor(() => expect(screen.getAllByRole("alert").some((a) =>
     /chown 은 숫자 uid:gid 만 지정할 수 있습니다\(예: 10003:10000\)/.test(a.textContent ?? ""))).toBe(true));
@@ -1177,4 +1179,151 @@ test("숫자 chown 배치엔 이름 안내가 없다", async () => {
   renderLegacy({ status: "PreviewReady", options: { chown: "10003:10000" } });
   await screen.findByRole("button", { name: "배치 확인" });
   expect(screen.queryByRole("alert", { name: "이름 chown 배치" })).not.toBeInTheDocument();
+});
+
+
+// --- 실행 설정 변경(2026-10-02): 종단 배치만, 다음 재실행부터 적용 ---
+function renderExec(over: any) {
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch(over))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+const scanExec = { operation: "scan", status: "Cancelled", priority: "high", node_count: 4, procs_per_node: null,
+                   options: { broken_limit: 50, verbose: true },
+                   items: [{ seq: 0, payload: { storage: "s1", target: "a" }, status: "Cancelled",
+                             request_id: null, reason_code: null }] };
+
+test.each(["Completed", "Cancelled"])("%s 배치에 실행 설정 변경 버튼", async (status) => {
+  renderExec({ ...scanExec, status });
+  expect(await screen.findByRole("button", { name: "실행 설정 변경" })).toBeInTheDocument();
+});
+
+test.each(["Running", "Previewing", "PreviewReady"])("%s 배치엔 실행 설정 변경 버튼 없음(서버 409 미러)", async (status) => {
+  renderExec({ ...scanExec, status });
+  // 배치가 로드된 뒤에 단언한다 — "항목" 제목은 로딩 전 첫 렌더에도 있어, 그걸 기다리면 b 가 없어서 버튼이 없는
+  // 것과 구분이 안 됐다(리뷰: 게이트를 지워도 통과). 로드 증거 = 활성 배치의 「취소」 버튼.
+  await screen.findByRole("button", { name: "취소" });
+  expect(screen.queryByRole("button", { name: "실행 설정 변경" })).toBeNull();
+});
+
+test("실행 설정 변경: 지금 값으로 채워지고, 바꾼 전체 상태를 PATCH /execution 으로 보낸 뒤 닫힌다", async () => {
+  let sent: any = null;
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    sent = await request.json();
+    return HttpResponse.json(batch(scanExec));
+  }));
+  renderExec(scanExec);
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const dlg = await screen.findByRole("dialog", { name: "실행 설정 변경" });
+  const q = within(dlg);
+  // 지금 값 프리필: null 은 빈칸(= 정책 기본), 키 없는 정수 옵션도 빈칸(= 서버 기본)
+  expect(q.getByLabelText("동시 실행 상한")).toHaveValue("2");
+  expect(q.getByLabelText("우선순위")).toHaveValue("high");
+  expect(q.getByLabelText("노드 수")).toHaveValue("4");
+  expect(q.getByLabelText("노드당 프로세스 수")).toHaveValue("");
+  expect(q.getByLabelText("broken_limit")).toHaveValue("50");
+  expect(q.getByLabelText("batch_files")).toHaveValue("");
+  expect(q.getByLabelText("verbose")).toBeChecked();
+  // 바뀐 것이 없으면 저장 잠김
+  expect(q.getByRole("button", { name: "변경 없음" })).toBeDisabled();
+  await userEvent.clear(q.getByLabelText("노드 수"));
+  await userEvent.type(q.getByLabelText("노드 수"), "2");
+  await userEvent.type(q.getByLabelText("노드당 프로세스 수"), "8");
+  await userEvent.selectOptions(q.getByLabelText("우선순위"), "");
+  await userEvent.click(q.getByLabelText("verbose"));
+  await userEvent.clear(q.getByLabelText("broken_limit"));
+  await userEvent.type(q.getByLabelText("batch_files"), "0");     // 0 은 정상값(배칭 끔) -- 생략과 다르다
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent).toEqual({ max_concurrency: 2, priority: null, node_count: 2,
+                                             procs_per_node: 8, options: { batch_files: 0 } }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "실행 설정 변경" })).toBeNull());
+});
+
+test("실행 설정 변경: 서버가 거부하는 옛 옵션 키(top_k)는 '저장하면 빠집니다'로 보이고 실제로 뺀다", async () => {
+  // 화면의 키 집합 = 서버 옵션 스펙(계약 테스트) — 그 밖의 키는 남겨 보내면 늘 422 unknown_option 이라, 이 창이 옛
+  // 배치를 다시 돌릴 수 있게 고치는 길이 된다. 서버 흉내: 옛 키가 실리면 422, 아니면 200.
+  const bodies: any[] = [];
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    const body: any = await request.json();
+    bodies.push(body);
+    return "top_k" in body.options
+      ? HttpResponse.json({ detail: "unknown_option" }, { status: 422 })
+      : HttpResponse.json(batch());
+  }));
+  renderExec({ operation: "scan", status: "Completed", options: { top_k: 10, broken_limit: 100 } });
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  expect(q.getByRole("note", { name: "지원하지 않는 옵션" })).toHaveTextContent("저장하면 빠집니다");
+  expect(q.getByRole("note", { name: "지원하지 않는 옵션" })).toHaveTextContent("top_k=10");
+  // 아무것도 안 건드려도 저장할 것이 있다(옛 키 제거)
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(bodies).toHaveLength(1));
+  expect(bodies[0].options).toEqual({ broken_limit: 100 });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "실행 설정 변경" })).toBeNull());
+});
+
+test("실행 설정 변경: 저장된 명시 false 는 키 없음과 같다 — 손대지 않은 폼은 '변경 없음'", async () => {
+  renderExec({ operation: "sync", status: "Completed", options: { delete: true, open_noatime: false } });
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  expect(q.getByLabelText("open_noatime")).not.toBeChecked();
+  expect(q.getByRole("button", { name: "변경 없음" })).toBeDisabled();
+});
+
+test("실행 설정 변경: 노드 칸의 숫자 아닌 글자는 오류(빈칸 = 정책 기본으로 조용히 바뀌지 않는다)", async () => {
+  renderExec(scanExec);
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  await userEvent.clear(q.getByLabelText("노드 수"));
+  await userEvent.type(q.getByLabelText("노드 수"), "8e");
+  expect(q.getByText("노드 수는 1..64 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
+});
+
+test("실행 설정 변경: 저장된 64 초과 노드 수(API 생성)는 그대로 두면 다른 설정 저장을 막지 않는다", async () => {
+  let sent: any = null;
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    sent = await request.json(); return HttpResponse.json(batch());
+  }));
+  renderExec({ ...scanExec, node_count: 100, procs_per_node: 128 });
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  await userEvent.click(q.getByLabelText("quiet"));
+  await userEvent.click(q.getByLabelText("verbose"));        // verbose+quiet 충돌 피하기
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent.node_count).toBe(100);
+  expect(sent.procs_per_node).toBe(128);
+  // 새로 64 를 넘기면 화면 상한(생성 폼과 같은 1..64)
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q2 = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  await userEvent.clear(q2.getByLabelText("노드 수"));
+  await userEvent.type(q2.getByLabelText("노드 수"), "99");
+  expect(q2.getByRole("button", { name: "저장" })).toBeDisabled();
+});
+
+test("실행 설정 변경: 이름 chown(옛 배치)·빈 동시 실행 상한은 즉답 오류로 저장 잠김, 숫자로 고치면 풀린다", async () => {
+  renderExec({ operation: "sync", status: "Cancelled", options: { chown: "alice:staff" } });
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.clear(q.getByLabelText("chown"));
+  await userEvent.type(q.getByLabelText("chown"), "1000:1000");
+  expect(q.getByRole("button", { name: "저장" })).toBeEnabled();
+  await userEvent.clear(q.getByLabelText("동시 실행 상한"));
+  expect(q.getByText("동시 실행 상한은 1..64 범위의 정수여야 합니다")).toBeInTheDocument();
+  expect(q.getByRole("button", { name: "저장" })).toBeDisabled();
+});
+
+test("실행 설정 변경: 서버 거부(409 그 사이 재실행 시작)는 창 안에 사유로 보인다", async () => {
+  server.use(http.patch("/api/admin/batches/b1/execution", () =>
+    HttpResponse.json({ detail: "batch_settings_locked" }, { status: 409 })));
+  renderExec(scanExec);
+  await userEvent.click(await screen.findByRole("button", { name: "실행 설정 변경" }));
+  const q = within(await screen.findByRole("dialog", { name: "실행 설정 변경" }));
+  await userEvent.type(q.getByLabelText("노드당 프로세스 수"), "4");
+  await userEvent.click(q.getByRole("button", { name: "저장" }));
+  expect(await q.findByRole("alert")).toHaveTextContent("완료·취소된 배치만 가능합니다");
 });
