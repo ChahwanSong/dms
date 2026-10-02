@@ -461,7 +461,9 @@ export function UsageAnalysis() {
               <th className="whitespace-nowrap text-right" title={`atime 기준 ${HOT_AGE_MAX_DAYS}일 이내 용량 비중`}>
                 {`hot 비율(${HOT_AGE_MAX_DAYS}일)`}</th>
               <th className="whitespace-nowrap text-right">스캔 횟수</th>
-              <th className="whitespace-nowrap" aria-sort={order === "desc" ? "descending" : "ascending"}>
+              {/* pl-6: 바로 왼쪽 「스캔 횟수」가 오른쪽 정렬이라 여백 없이 붙으면 "4"+"1시간 전"이 "41시간 전"으로
+                  읽혔다(실 Chrome 확인 d156). */}
+              <th className="whitespace-nowrap pl-6" aria-sort={order === "desc" ? "descending" : "ascending"}>
                 {/* 정렬 토글(오름·내림). 서버가 정렬하므로 limit 밖의 오래된 타깃도 오름차순에서 보인다. */}
                 <button type="button" aria-label={`최근 스캔 정렬: ${order === "desc" ? "최신순" : "오래된순"}`}
                         onClick={() => setOrder((o) => (o === "desc" ? "asc" : "desc"))}
@@ -517,7 +519,7 @@ export function UsageAnalysis() {
                       </td>
                       <td className="text-right tabular-nums">{r.scan_count}</td>
                       {/* 경과(2026-10-02): 지금부터 얼마나 전인지 + 30일 주황 · 90일 빨강. 정확한 시각은 옆에. */}
-                      <td className="whitespace-nowrap">
+                      <td className="whitespace-nowrap pl-6">
                         <span className={staleClass(age)} aria-label="최근 스캔 경과">
                           {agoText(r.last_scan_at, now)}</span>
                         <span className="ml-2 text-xs text-muted">{kstStampOrDash(r.last_scan_at)}</span>
