@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { HoverTip, useHoverAnchor } from "./HoverTip";
 
 // 손수 막대 차트(설계 §2.1) -- 라이브러리 없이, div+Tailwind 로 그린다. 이전 SVG
 // 구현은 preserveAspectRatio="none" 스트레치라 버킷 1~2개면 막대 하나가 화면
@@ -106,6 +107,14 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
   valueLabels?: boolean;
 }) {
   const fmt = formatValue ?? ((n: number) => String(n));
+  // 막대 즉시 툴팁(2026-10-02 사용자 요청: 브라우저 title 툴팁은 몇 초 기다려야 떴다). 열마다 data-tip 에 같은
+  // 한 줄 요약을 남긴다(테스트·디버깅용 -- title 로 두면 기본 툴팁이 늦게 겹쳐 뜬다).
+  const tip = useHoverAnchor<number>();
+  // 마우스를 올려 둔 채 데이터가 줄면(대시보드 처리량 5초 폴링 -- 창이 밀려 막대가 빠진다) 사라진 막대는
+  // mouseleave 를 내지 않는다 -- 범위 밖 인덱스는 툴팁 없음(리뷰: bars[i] undefined 로 페이지 전체가 죽었다).
+  const hovered = tip.active !== null && tip.active.key < data.length ? tip.active : null;
+  const total = data.reduce((acc, d) => acc + d.value, 0);
+  const sharePct = (v: number) => (total > 0 ? Math.round((v / total) * 100) : null);
   // 트랙/막대의 클래스·inline 스타일 한 벌 -- 저밀도·고밀도 렌더가 같은 규칙을
   // 공유해야 색 지원이 한쪽만 되는 드리프트가 안 생긴다. colorOf 는 막대당 1회만
   // 부른다(트랙 색은 그 반환값에서 파생).
@@ -133,8 +142,7 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
     // 밖(루트) absolute 라 트랙 % 를 직접 못 쓴다 -- 루트 아래엔 버킷 라벨
     // 행이 더 있어 % 가 트랙과 안 맞는다.
     const topRem = (bottomPct: number) => r2((100 - bottomPct) * 0.05);
-    const total = data.reduce((acc, d) => acc + d.value, 0);
-    const share = (v: number) => (total > 0 ? ` (${Math.round((v / total) * 100)}%)` : "");
+    const share = (v: number) => { const p = sharePct(v); return p === null ? "" : ` (${p}%)`; };
     const columnTitle = (b: { label: string; value: number }) =>
       valueLabels ? `${b.label}: ${fmt(b.value)}` : `${b.label}: ${fmt(b.value)}${share(b.value)}`;
     return (
@@ -153,7 +161,7 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
         {bars.map((b, i) => {
           const color = colorOf?.(i, b.value);
           return (
-          <div key={i} title={columnTitle(b)}
+          <div key={i} data-tip={columnTitle(b)} {...tip.bind(i)}
                className="flex min-w-0 max-w-16 flex-1 flex-col items-center gap-1">
             {/* 트랙은 막대 색의 연한 단(동일 계열: 기본 accent/10, colorOf 시
                 hexTint) -- 값 0 버킷도 "빈 자리"가 아니라 트랙+0 으로 보인다.
@@ -195,8 +203,9 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
                   {/* 라벨은 SVG 밖 HTML -- preserveAspectRatio="none" 아래의 SVG
                       텍스트는 가로로 왜곡된다(Sparkline 캡션 선례). 세로 위치는
                       막대 값 라벨과의 충돌 실측(cumulativeLabelBottom). */}
-                  <span title={`누적 ${cumulative!.format(p.sum)} (${pct}%)`}
-                        className="absolute -translate-x-1/2 -translate-y-full whitespace-nowrap text-[10px] font-medium tabular-nums"
+                  {/* 누적값은 열 툴팁이 함께 말한다 -- 라벨은 포인터를 막지 않는다(열 호버를 가리지 않게). */}
+                  <span data-tip={`누적 ${cumulative!.format(p.sum)} (${pct}%)`}
+                        className="pointer-events-none absolute -translate-x-1/2 -translate-y-full whitespace-nowrap text-[10px] font-medium tabular-nums"
                         // 막대 위 값 글자가 없으면(valueLabels=false) 피할 라벨도 없다 -- 점 바로 위에 둔다.
                         style={{ left: `${cx(i)}%`,
                                  top: `${topRem(valueLabels
@@ -208,6 +217,14 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
               );
             })}
           </>
+        )}
+        {hovered !== null && (
+          <ColumnTip label={bars[hovered.key].label} value={fmt(bars[hovered.key].value)}
+                     share={sharePct(bars[hovered.key].value)}
+                     cum={cum && cumulative
+                       ? `${cumulative.format(cum[hovered.key].sum)} (${Math.round(cum[hovered.key].frac * 100)}%)`
+                       : null}
+                     anchor={hovered.rect} onClose={tip.close} />
         )}
       </div>
     );
@@ -225,7 +242,7 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
         {bars.map((b, i) => {
           const color = colorOf?.(i, b.value);
           return (
-          <div key={i} title={`${b.label}: ${fmt(b.value)}`}
+          <div key={i} data-tip={`${b.label}: ${fmt(b.value)}`} {...tip.bind(i)}
                className={trackClass("relative h-20 min-w-0 flex-1 overflow-hidden rounded-sm")}
                style={trackStyle(color)}>
             <div className={`absolute inset-x-0 bottom-0 rounded-t${fillClass}`}
@@ -243,6 +260,32 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
                 style={{ left: `${r2((i / data.length) * 100)}%` }}>{b.label}</span>
         ))}
       </div>
+      {hovered !== null && (
+        <ColumnTip label={bars[hovered.key].label} value={fmt(bars[hovered.key].value)}
+                   share={sharePct(bars[hovered.key].value)} cum={null}
+                   anchor={hovered.rect} onClose={tip.close} />
+      )}
     </div>
+  );
+}
+
+// 막대 툴팁 내용: 구간(굵게) · 값 · 전체 대비 비중 · (누적선이 있으면) 누적. 비중은 전체 0 이면 생략(0/0 정의 불가).
+function ColumnTip({ label, value, share, cum, anchor, onClose }: {
+  label: string; value: string; share: number | null; cum: string | null;
+  anchor: { left: number; right: number; top: number; bottom: number }; onClose: () => void;
+}) {
+  return (
+    <HoverTip anchor={anchor} onClose={onClose}>
+      <div className="font-semibold">{label}</div>
+      <div className="mt-0.5 grid grid-cols-[auto_auto] gap-x-3 tabular-nums">
+        <span className="text-muted">값</span><span className="text-right font-medium">{value}</span>
+        {share !== null && (<>
+          <span className="text-muted">비중</span><span className="text-right">{`${share}%`}</span>
+        </>)}
+        {cum !== null && (<>
+          <span className="text-muted">누적</span><span className="text-right">{cum}</span>
+        </>)}
+      </div>
+    </HoverTip>
   );
 }

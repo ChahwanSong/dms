@@ -65,7 +65,7 @@ test("성공률·처리량·분해 표·실패 사유를 그린다", async () =>
   // 종단 43건 중 성공 20 = 47%
   expect(await screen.findByText(/47%/)).toBeInTheDocument();
   const chart = screen.getByRole("img", { name: "처리량" });
-  expect(chart.querySelectorAll("[title]")).toHaveLength(2);
+  expect(chart.querySelectorAll("[data-tip]")).toHaveLength(2);
   expect(screen.getByText("dscan")).toBeInTheDocument();
   expect(screen.getByText("cephfs-a")).toBeInTheDocument();
   expect(screen.getByText("alice")).toBeInTheDocument();
@@ -132,7 +132,7 @@ test("rateTone 임계: 80 이상 ok, 50 이상 busy, 미만 bad", () => {
 test("제출 대기 분포와 집계/제외 건수를 보여준다", async () => {
   renderSection();
   const chart = await screen.findByRole("img", { name: "제출 대기 분포" });
-  expect(chart.querySelectorAll("[title]")).toHaveLength(6);
+  expect(chart.querySelectorAll("[data-tip]")).toHaveLength(6);
   // 제외 건수를 숨기지 않는다(설계 §3) + 전체 수명과의 포함 관계 명시(설계 §2.4)
   expect(screen.getByText(/집계 3건 · 제외\(기록 없음\) 1건/)).toBeInTheDocument();
   expect(screen.getByText(/전체 수명 분포는 이 대기를 포함/)).toBeInTheDocument();
@@ -144,7 +144,7 @@ test("「수행시간」이 「전체 수명」으로 개명되고 실행시간 
   // 옛 라벨 「수행시간」이 화면 어디에도 남으면 안 된다 -- 두 이름이 공존하면
   // 어느 쪽이 "진짜 실행"인지 화면이 거짓말한다.
   const life = await screen.findByRole("img", { name: "전체 수명 분포" });
-  expect(life.querySelectorAll("[title]")).toHaveLength(6);
+  expect(life.querySelectorAll("[data-tip]")).toHaveLength(6);
   expect(screen.queryByText(/수행시간/)).toBeNull();
   // 포함 관계 캡션: 전체 수명 ⊇ (제출·확인·스케줄 대기 + 실행)
   expect(screen.getByText(/제출·확인\(사람\)·스케줄 대기를 모두 포함/)).toBeInTheDocument();
@@ -152,7 +152,7 @@ test("「수행시간」이 「전체 수명」으로 개명되고 실행시간 
   // 실행시간 분포(파생 계산): 집계/제외 캡션 + 근사 오차 명시 -- sched_wait
   // 캡션 관례 그대로(제외 건수가 보여야 앵커 없는 과거 잡의 공백이 숨지 않는다).
   const chart = screen.getByRole("img", { name: "실행시간 분포" });
-  expect(chart.querySelectorAll("[title]")).toHaveLength(6);
+  expect(chart.querySelectorAll("[data-tip]")).toHaveLength(6);
   expect(screen.getByText(
     /집계 1건 · 제외\(앵커 없음·한 틱 완료·실행 미도달\) 2건/)).toBeInTheDocument();
   expect(screen.getByText(/첫 RUNNING 관측→종단의 근사/)).toBeInTheDocument();
@@ -217,7 +217,7 @@ test("계획 거부 사유가 없으면 표를 내지 않는다", async () => {
 test("스케줄 대기(Volcano) 분포가 제출 대기와 구분돼 나온다", async () => {
   renderSection();
   const chart = await screen.findByRole("img", { name: "스케줄 대기(Volcano) 분포" });
-  expect(chart.querySelectorAll("[title]")).toHaveLength(6);
+  expect(chart.querySelectorAll("[data-tip]")).toHaveLength(6);
   // 두 대기의 라벨이 한 화면에서 구분된다 -- getByText 는 유일 매치를 강제하므로
   // 라벨이 같은 문자열로 뭉치면 여기서 터진다(설계 §3: 「제출 대기」 옆에
   // 나란히, 서로 다른 이름으로 -- 슬라이스 17 이 queue_wait 라벨을 정정한 교훈).
