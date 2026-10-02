@@ -378,7 +378,12 @@ def test_nsync_workers_get_task_scoped_anti_affinity():
         assert task["template"]["metadata"]["labels"]["dms.io/task"] == task_name
     launcher = next(t for t in m["spec"]["tasks"] if t["name"] == "launcher")
     assert "metadata" not in launcher["template"]
-    assert "affinity" not in launcher["template"]["spec"]   # nsync 런처는 원래 affinity 없음
+    # 런처는 후보(출발 ∪ 목적지) 안에 -- 2026-10-02 노드 배치 제외: 예전 "affinity 없음"이면 막힌 노드에 앉을 수 있었다
+    terms = launcher["template"]["spec"]["affinity"]["nodeAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    assert terms[0]["matchExpressions"][0]["values"] == sorted(
+        set(spec.candidates["source"]) | set(spec.candidates["destination"]))
+    assert "podAntiAffinity" not in launcher["template"]["spec"]["affinity"]
 
 
 # ---- 슬라이스 24 §2.1 층2: 미지 도구는 drm 꼴 argv 로 흘러가면 안 된다 ----

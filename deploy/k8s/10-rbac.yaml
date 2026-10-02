@@ -205,12 +205,14 @@ subjects:
     name: dms-api
     namespace: dms
 ---
-# dms-agent (dms agent, deploy/k8s/50-agent-daemonset.yaml): current
-# src/dms/agent/probes.py makes NO in-cluster API calls at all (mounts/tools/
-# identities/os metrics are all local file/subprocess checks). This
-# ClusterRole is a minimal, currently-UNUSED placeholder kept because it is
-# called out explicitly as "nodes get, if needed" -- safe to drop later if it
-# stays unused.
+# dms-agent (dms agent, deploy/k8s/50-agent-daemonset.yaml): mounts/tools/
+# identities/os metrics are local file/subprocess checks. The ONE in-cluster
+# API call is `nodes get` on the agent's OWN node (2026-10-02,
+# src/dms/agent/probes.probe_k8s_node): it reports cordon / NoSchedule /
+# NoExecute taints as report.k8s_node so the planner and stepper stop placing
+# DMS jobs there (DMS jobs have no tolerations; a cordoned candidate would keep
+# the gang Pending forever). Do NOT drop this rule -- without it the probe
+# fails open (schedulable=null) and cordon is silently ignored again.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

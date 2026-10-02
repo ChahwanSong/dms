@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
@@ -194,7 +194,7 @@ test("마지막 리포트는 맨 끝 열이고, 상세는 표 아래가 아니�
   await screen.findByText("node-a");
   const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
   expect(headers[headers.length - 1]).toBe("마지막 리포트");
-  expect(headers).toEqual(["노드", "상태", "마운트", "도구", "CPU · 부하", "메모리", "상세", "마지막 리포트"]);
+  expect(headers).toEqual(["노드", "상태", "배치", "마운트", "도구", "CPU · 부하", "메모리", "상세", "마지막 리포트"]);
   const rowA = screen.getByText("node-a").closest("tr")!;
   const listTable = rowA.closest("table")!;
   await userEvent.click(within(rowA).getByRole("button", { name: "상세" }));
@@ -238,4 +238,90 @@ test("ageText·clockSkewSeconds: 상대시각과 시계 차이 계산", () => {
   expect(clockSkewSeconds({ reported_at: "2026-08-06T00:00:30Z",
                             report: { probed_at: "2026-08-06T00:00:00Z" } })).toBe(-30);
   expect(clockSkewSeconds({ reported_at: "2026-08-06T00:00:30Z", report: {} })).toBeNull();
+});
+
+
+// ---- 노드 배치 제외·다시 포함·cordon(2026-10-02) ----
+
+function renderPlacement(nodes: unknown[], on?: { put?: (body: unknown, name: string) => void; del?: (name: string) => void }) {
+  server.use(
+    http.get("/api/admin/nodes", () => HttpResponse.json(nodes)),
+    http.put("/api/admin/nodes/:name/exclusion", async ({ request, params }) => {
+      const body = await request.json();
+      on?.put?.(body, String(params.name));
+      return HttpResponse.json({ node_name: params.name, reason: (body as { reason: string | null }).reason,
+                                 created_by: "admin", created_at: "2026-10-02T00:00:00Z" });
+    }),
+    http.delete("/api/admin/nodes/:name/exclusion", ({ params }) => {
+      on?.del?.(String(params.name));
+      return HttpResponse.json({ included: params.name });
+    }),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><NodesList /></QueryClientProvider>);
+}
+
+test("배치 제외: 사유를 적어 제외하면 PUT 바디에 사유가 실린다", async () => {
+  const puts: [unknown, string][] = [];
+  renderPlacement(NODES, { put: (b, n) => puts.push([b, n]) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-a 배치 제외" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-a 배치 제외" });
+  expect(dlg).toHaveTextContent("실행 중인 작업은 건드리지 않습니다");
+  await userEvent.type(within(dlg).getByLabelText("제외 사유"), "디스크 오류");
+  await userEvent.click(within(dlg).getByRole("button", { name: "배치에서 제외" }));
+  await waitFor(() => expect(puts).toEqual([[{ reason: "디스크 오류" }, "node-a"]]));
+});
+
+test("배치 제외: 빈 사유는 null 로 보낸다", async () => {
+  const puts: unknown[] = [];
+  renderPlacement(NODES, { put: (b) => puts.push(b) });
+  await userEvent.click(await screen.findByRole("button", { name: "node-b 배치 제외" }));
+  await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "배치에서 제외" }));
+  await waitFor(() => expect(puts).toEqual([{ reason: null }]));
+});
+
+test("제외된 노드: 배지(사유 툴팁) + 다시 포함 -> DELETE, 머리글에 대수", async () => {
+  const dels: string[] = [];
+  const excluded = [{ ...NODES[0], exclusion: { node_name: "node-a", reason: "점검", created_by: "ops",
+                                                 created_at: "2026-10-02T00:00:00Z" } }, NODES[1]];
+  renderPlacement(excluded, { del: (n) => dels.push(n) });
+  const badge = await screen.findByText("배치 제외", { selector: "span" });
+  expect(badge).toHaveAttribute("title", expect.stringContaining("사유: 점검 · ops"));
+  expect(screen.getByText(/배치 제외·cordon 1대/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "node-a 다시 포함" }));
+  const dlg = await screen.findByRole("dialog", { name: "node-a 다시 포함" });
+  expect(dlg).toHaveTextContent("제외 사유: 점검");
+  await userEvent.click(within(dlg).getByRole("button", { name: "다시 포함" }));
+  await waitFor(() => expect(dels).toEqual(["node-a"]));
+  // 제외되지 않은 노드엔 다시 포함 버튼이 없다
+  expect(screen.queryByRole("button", { name: "node-b 다시 포함" })).toBeNull();
+});
+
+test("cordon 된 노드: k8s 보고(schedulable=false)면 cordon 배지(사유 툴팁), 포탈 해제 버튼은 없다", async () => {
+  const cordoned = [{ ...NODES[0], report: { ...NODES[0].report,
+                                             k8s_node: { schedulable: false, reason: "cordoned" } } }];
+  renderPlacement(cordoned);
+  const badge = await screen.findByText("cordon");
+  expect(badge).toHaveAttribute("title", expect.stringContaining("cordoned"));
+  expect(badge).toHaveAttribute("title", expect.stringContaining("kubectl uncordon"));
+  expect(screen.getByRole("button", { name: "node-a 배치 제외" })).toBeInTheDocument();
+});
+
+
+test("일시 조건(압박 등)은 cordon 이 아니라 '일시 불가' 배지 -- 머리글 대수에도 안 센다", async () => {
+  const pressured = [{ ...NODES[0], report: { ...NODES[0].report, k8s_node: {
+    schedulable: false, reason: "taint node.kubernetes.io/disk-pressure:NoSchedule", transient: true } } }];
+  renderPlacement(pressured);
+  const badge = await screen.findByText("일시 불가");
+  expect(badge).toHaveAttribute("title", expect.stringContaining("이미 계획된 작업은 상태가 풀릴 때까지 기다립니다"));
+  expect(screen.queryByText("cordon")).toBeNull();
+  expect(screen.queryByText(/배치 제외·cordon/)).toBeNull();
+});
+
+test("cordon 된 노드를 다시 포함할 때는 uncordon 전까지 배치되지 않는다고 말한다", async () => {
+  const both = [{ ...NODES[0], report: { ...NODES[0].report, k8s_node: { schedulable: false, reason: "cordoned" } },
+                  exclusion: { node_name: "node-a", reason: null, created_by: "ops", created_at: "2026-10-02T00:00:00Z" } }];
+  renderPlacement(both);
+  await userEvent.click(await screen.findByRole("button", { name: "node-a 다시 포함" }));
+  expect(await screen.findByRole("dialog", { name: "node-a 다시 포함" })).toHaveTextContent("uncordon 전까지는");
 });

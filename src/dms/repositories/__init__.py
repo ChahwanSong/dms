@@ -14,6 +14,7 @@ from .metrics import MetricsRepository
 from .sync_pairs import SyncPairsRepository
 from .mail_settings import MailSettingsRepository
 from .scan_digests import ScanDigestsRepository
+from .node_exclusions import NodeExclusionsRepository
 
 
 class Repositories:
@@ -35,3 +36,4 @@ class Repositories:
         self.sync_pairs = SyncPairsRepository(db)
         self.mail_settings = MailSettingsRepository(db)
         self.scan_digests = ScanDigestsRepository(db)
+        self.node_exclusions = NodeExclusionsRepository(db)

@@ -585,11 +585,12 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # mail_settings(2026-10-01): 포탈 메일(Knox 릴레이) 설정 단일 행 -- 같은 이유로 명시 추가.
     # verification_failures(2026-10-01): 인증번호 누적 실패(재발급으로 초기화되지 않는 무차별 대입 상한).
     # scan_report_digests(2026-10-02): 사용량 분석의 scan 리포트 요약 캐시(잡 단위, 불변 리포트의 투영).
+    # node_exclusions(2026-10-02): 관리자 노드 배치 제외 목록(행 = 제외 중).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
                                         "mail_settings", "verification_failures",
-                                        "scan_report_digests"}
+                                        "scan_report_digests", "node_exclusions"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):

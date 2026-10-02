@@ -127,3 +127,19 @@ def test_entrypoint_ldap_vars_and_daemonset_env_match_both_ways():
     injected = {n for n in _env_refs() if n.startswith("DMS_LDAP_")}
     assert read - injected == set(), f"엔트리포인트가 읽는데 DaemonSet 이 안 주는 변수: {read - injected}"
     assert injected - read == set(), f"DaemonSet 이 주는데 엔트리포인트가 무시하는 변수: {injected - read}"
+
+
+def test_agent_tolerates_noexecute_only_and_keeps_its_node_rbac():
+    # 노드 배치 제외의 cordon 자동 반영(2026-10-02): 에이전트는 자기 노드의 cordon·taint 를 보고해야 한다.
+    # NoExecute taint 에 쫓겨나면 보고가 끊기고 마지막 schedulable=true 가 남는다 -- NoExecute 는 견딘다.
+    # NoSchedule 까지 견디면 control-plane 같은 원래 에이전트가 없던 taint 노드에 새로 뜬다(후보 오염 위험).
+    text = DS.read_text(encoding="utf-8")
+    m = re.search(r"\n      tolerations:\n((?:        .*\n)+)", text)
+    assert m, "에이전트 DaemonSet 에 tolerations 블록이 없다"
+    block = m.group(1)
+    assert "operator: Exists" in block and "effect: NoExecute" in block
+    assert "NoSchedule" not in block
+    assert "serviceAccountName: dms-agent" in text
+    rbac = (REPO_ROOT / "deploy" / "k8s" / "10-rbac.yaml").read_text(encoding="utf-8")
+    role = re.search(r"name: dms-agent-readonly\nrules:\n((?:  .*\n)+)", rbac)
+    assert role and 'resources: ["nodes"]' in role.group(1) and 'verbs: ["get"]' in role.group(1)
