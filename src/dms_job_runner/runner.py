@@ -1,4 +1,5 @@
 """잡 파드 launcher에서 도는 오케스트레이션. 모든 I/O는 주입 — main()이 실제 구현을 넣는다."""
+import ipaddress
 import json
 import os
 import sys
@@ -9,7 +10,17 @@ from .commands import (
 from .parsers import (parse_nsync_counts, parse_rm_counts, parse_scan_counts,
                       parse_sync_counts, parse_sync_dryrun_counts)
 
-_SSH_READY_MAX_ATTEMPTS = 90  # legacy _mpiexec_line 이식: 워커당 ~90s 상한
+# 워커 준비 대기(2026-10-02 프로덕션 간헐 실패 수리): 모든 워커가 "IP 로 풀리고 + 그 IP 로 ssh 가 되는" 상태가
+# 될 때까지 기다리는 **전체** 제한 시간. 예전엔 getent 를 한 번만 하고 실패하면 DNS 이름을 그대로 hostfile 에
+# 썼고(ssh 대기는 워커당 90회 시도 뒤 조용히 통과), mpirun 시점의 이름 조회가 한 번 더 실패하면 rc 255 로 잡이
+# 죽었다. launcher 는 워커보다 먼저 Ready 가 되고 Volcano svc 서비스는 Ready 파드만 DNS 에 올린다(실측: 성공
+# 잡의 hostfile 에도 이름이 섞여 있었다). 이미지 pull 이 느린 노드를 감안해 넉넉히 -- 넘기면 mpirun 없이 사유
+# 마커를 남기고 끝낸다(WORKERS_UNREACHABLE).
+WORKER_READY_TIMEOUT_SECONDS = 300
+# 제어면(stepper)이 실행 실패 사유로 승격하는 마커(execution_manifests.EXECUTION_REASON_MARKER 와 같은 값 --
+# dms_job_runner 는 dms 를 import 하지 않는 독립 패키지라 중복 정의, 계약 테스트가 둘을 잇는다).
+EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
+WORKERS_UNREACHABLE = "workers_unreachable"
 
 # 슬라이스 24 §2.1 층3: 러너가 exec 할 수 있는 도구의 최종 allowlist.
 # dms 패키지의 config.AGENT_TOOL_NAMES 와 같은 값이어야 하지만 dms_job_runner 는
@@ -22,7 +33,7 @@ ALLOWED_TOOLS = ("dscan", "dsync", "nsync", "drm")
 
 
 def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
-            make_executable=lambda path: None) -> int:
+            make_executable=lambda path: None, clock=None) -> int:
     username = env["DMS_JR_USERNAME"]
     uid = int(env["DMS_JR_UID"])
     gid = int(env["DMS_JR_GID"])
@@ -59,17 +70,31 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     else:
         ordered_hosts, _ = wait_hostfile()
 
-    # 4. 원시 호스트명을 getent로 IP 해석 + slots=<procs_per_node> 첨부한 새 hostfile 생성
-    #    (legacy _mpi_hostfile_lines 개념 — Volcano svc plugin의 DNS 전파를 기다린다).
-    resolved_hosts = [_resolve_host(h, run=run) for h in ordered_hosts]
+    # 4~5. 워커 준비 대기: 원시 호스트명(Volcano svc 의 <pod>.<svc>)을 getent 로 **IP 가 나올 때까지** 풀고, 그
+    #    IP 로 ssh 가 될 때까지 기다린다(전체 제한 WORKER_READY_TIMEOUT_SECONDS). hostfile 에는 **IP 만** 쓴다 --
+    #    mpirun(orted 기동 ssh) 시점에 DNS 를 전혀 쓰지 않는다. 제한 안에 준비되지 않으면 mpirun 을 돌리지 않고
+    #    사유 마커(stepper 가 workers_unreachable 로 승격)와 summary 를 남기고 끝낸다 -- 예전처럼 이름을 남긴 채
+    #    진행해 "Could not resolve hostname" rc 255 로 죽게 두지 않는다.
+    if clock is None:
+        clock = _VirtualClock(sleep)
+        sleep = clock.sleep
+    ips, problem = _wait_workers_ready(ordered_hosts, run=run, sleep=sleep, clock=clock,
+                                       timeout=_ready_timeout(env))
+    if problem is not None:
+        host, stage, waited = problem
+        lines = (f"{EXECUTION_REASON_MARKER}{WORKERS_UNREACHABLE}\n"
+                 f"DMS_JR_WORKER_UNREACHABLE host={host} stage={stage} waited={waited}s "
+                 f"ready={len(ips)}/{len(ordered_hosts)}\n")
+        sys.stdout.write(lines)
+        sys.stdout.flush()
+        write_text(f"{artifact_dir}/stderr.log", lines)
+        # 도구는 실행되지 않았다 -- returncode 는 모름(null), 3키 계약은 유지(설계 §2.3).
+        write_text(f"{artifact_dir}/summary.json",
+                   json.dumps({"returncode": None, "files": None, "bytes": None}))
+        return 1
     hostfile_path = f"{artifact_dir}/mpi-hostfile"
     write_text(hostfile_path,
-              "".join(f"{h} slots={procs_per_node}\n" for h in resolved_hosts))
-
-    # 5. SSH-readiness barrier: 모든 worker가 SSH를 수락할 때까지 bounded 대기.
-    #    준비되지 않아도 job을 막지 않고 경고 후 진행(legacy와 동일 — mpirun 자체의
-    #    재시도/타임아웃에 맡긴다).
-    _wait_ssh_ready(resolved_hosts, run=run, sleep=sleep)
+              "".join(f"{ip} slots={procs_per_node}\n" for ip in ips))
 
     # 6. rank script — scan은 리포트 경로 치환, nsync는 role-map 인자를 삽입.
     #    role_map은 계획 시점의 소스/목적지 노드 수(DMS_JR_SOURCE_NODES/DEST_NODES,
@@ -117,22 +142,69 @@ def _scan_report_path(artifact_dir):
     return f"{artifact_dir}/dscan-report.json"
 
 
-def _resolve_host(host, *, run):
+class _VirtualClock:
+    """시계를 주입하지 않은 호출(테스트)용 -- sleep 한 만큼만 시간이 흐른다. 실제 실행(main)은 time.monotonic
+    을 넘긴다: getent·ssh 시도 자체가 수 초씩 걸릴 수 있어(DNS 타임아웃, ConnectTimeout) 실제 경과를 재야 한다."""
+
+    def __init__(self, sleep):
+        self._sleep = sleep
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self._sleep(seconds)
+        self.now += seconds
+
+
+def _ready_timeout(env):
+    """DMS_JR_WORKER_READY_TIMEOUT_SECONDS 로 덮어쓸 수 있다(양의 정수만, 그 밖은 기본값)."""
+    raw = env.get("DMS_JR_WORKER_READY_TIMEOUT_SECONDS")
+    try:
+        value = int(raw) if raw is not None else WORKER_READY_TIMEOUT_SECONDS
+    except ValueError:
+        return WORKER_READY_TIMEOUT_SECONDS
+    return value if value > 0 else WORKER_READY_TIMEOUT_SECONDS
+
+
+def _getent_ip(host, *, run):
+    """getent hosts 의 첫 칸이 IP 면 그 IP, 아니면 None(못 풂). 이름을 IP 대신 돌려주지 않는다."""
     proc = run(getent_hosts_command(host))
-    stdout = getattr(proc, "stdout", "") or ""
-    parts = stdout.split()
-    return parts[0] if parts else host
+    if getattr(proc, "returncode", 1) != 0:
+        return None
+    parts = (getattr(proc, "stdout", "") or "").split()
+    if not parts:
+        return None
+    try:
+        return str(ipaddress.ip_address(parts[0]))
+    except ValueError:
+        return None
 
 
-def _wait_ssh_ready(hosts, *, run, sleep, max_attempts=_SSH_READY_MAX_ATTEMPTS):
+def _wait_workers_ready(hosts, *, run, sleep, clock, timeout):
+    """호스트마다 IP 로 풀릴 때까지(getent), 그 IP 로 ssh 가 될 때까지 재시도한다. 제한 시간은 전체 공유.
+
+    반환 (ips, None) = 전원 준비(호스트 순서 보존 -- nsync 의 rank 순서가 이 순서다), 또는 (지금까지의 ips,
+    (host, stage, waited초)) = 제한 초과. stage 는 "resolve"(IP 를 못 받음) | "ssh"(IP 는 있는데 접속 불가).
+    한 번 받은 IP 는 다시 풀지 않는다(파드 IP 는 파드 수명 동안 고정)."""
+    start = clock()
+    deadline = start + timeout
+    ips = []
     for host in hosts:
-        attempts = 0
-        while attempts < max_attempts:
-            proc = run(ssh_probe_command(host))
-            if getattr(proc, "returncode", 1) == 0:
+        ip = None
+        while True:
+            if ip is None:
+                ip = _getent_ip(host, run=run)
+            if ip is not None and getattr(run(ssh_probe_command(ip)), "returncode", 1) == 0:
                 break
-            attempts += 1
+            if clock() >= deadline:
+                return ips, (host, "resolve" if ip is None else "ssh", int(clock() - start))
             sleep(1)
+        ips.append(ip)
+        # launcher 로그에 남는다(실패 박제 시 진단) -- 어느 워커가 얼마나 늦었는지.
+        print(f"DMS_JR_WORKER_READY host={host} ip={ip} waited={int(clock() - start)}s", flush=True)
+    return ips, None
 
 
 def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False):
@@ -213,4 +285,4 @@ def main():  # pragma: no cover - 실증에서 실행
 
     sys.exit(run_job(dict(os.environ), run=run, write_text=write_text,
                      read_text=read_text, sleep=time.sleep, wait_hostfile=wait_hostfile,
-                     make_executable=make_executable))
+                     make_executable=make_executable, clock=time.monotonic))

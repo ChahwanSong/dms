@@ -373,6 +373,37 @@ PREFLIGHT_REASONS = frozenset({
     "target_not_readable", "artifact_base_not_traversable"})
 
 
+# 실행·미리보기(mpirun 을 돌리는 launcher) 실패의 사유 마커(2026-10-02). 러너(dms_job_runner.runner)가 워커
+# 준비(IP 해석 + ssh)를 제한 시간 안에 못 끝내면 mpirun 없이 이 마커를 찍고 끝낸다 -- 예전엔 이름이 남은
+# hostfile 로 mpirun 이 돌아 "Could not resolve hostname" rc 255 = 사유 없는 execution_failed 였다. 문법은
+# preflight 마커와 같고(한 줄 접두), 승격은 화이트리스트로만(파드 로그는 신뢰 입력이 아니다). 러너는 dms 를
+# import 하지 않아 같은 값을 따로 정의한다 -- tests/test_job_runner_runner.py 의 계약 테스트가 둘을 잇는다.
+# 여기에 코드를 추가하면 frontend/src/lib/reasonCodes.json 과 api.ts REASON_MESSAGES 도 함께.
+EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
+EXECUTION_REASONS = frozenset({"workers_unreachable"})
+
+
+def _parse_marker(entries, marker, allowed):
+    for entry in entries or ():
+        log = entry[1]
+        if log is None:
+            continue
+        for line in log.split("\n"):
+            line = line.strip()
+            if not line.startswith(marker):
+                continue
+            value = line[len(marker):].strip()
+            if value in allowed:
+                return value
+    return None
+
+
+def parse_execution_reason(entries):
+    """launcher(와 실패 워커) 로그에서 실행 실패 사유를 뽑는다 -- 화이트리스트 밖이면 None
+    (parse_preflight_reason 과 같은 계약: entries = read_log 의 [(pod, log|None, waiting_reason)])."""
+    return _parse_marker(entries, EXECUTION_REASON_MARKER, EXECUTION_REASONS)
+
+
 def parse_preflight_reason(entries):
     """preflight 파드 로그에서 사유 코드를 뽑는다 — 화이트리스트 밖이면 None.
 
@@ -382,18 +413,7 @@ def parse_preflight_reason(entries):
     여럿이고 한쪽만 실패하는 것이 정상 경로다 — 전부 훑어 첫 유효 마커를 채택한다.
     log=None("얻을 수 없었다")과 ""(정상 빈 로그)는 여기선 똑같이 "마커 없음"이라
     None 을 돌려준다 — 사유를 지어내지 않고 호출자의 폴백으로 접힌다."""
-    for entry in entries or ():
-        log = entry[1]
-        if log is None:
-            continue
-        for line in log.split("\n"):
-            line = line.strip()
-            if not line.startswith(PREFLIGHT_REASON_MARKER):
-                continue
-            value = line[len(PREFLIGHT_REASON_MARKER):].strip()
-            if value in PREFLIGHT_REASONS:
-                return value
-    return None
+    return _parse_marker(entries, PREFLIGHT_REASON_MARKER, PREFLIGHT_REASONS)
 
 
 _PREFLIGHT_ROLE_SEG = {"source": "-src", "destination": "-dst"}

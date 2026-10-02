@@ -1,4 +1,7 @@
 import json
+
+import pytest
+
 from dms_job_runner.runner import _build_summary, run_job
 
 
@@ -25,6 +28,12 @@ class _Recorder:
         self.ran.append(command)
         if self._run_fn is not None:
             return self._run_fn(command)
+        # 기본: 워커는 곧바로 준비된다 -- getent 는 IP 를, ssh 탐침은 성공을 돌려준다(2026-10-02 부터 러너는
+        # IP 가 나오고 ssh 가 될 때까지 기다리므로, 도구 rc 를 흉내 내는 self._rc 를 여기에 섞지 않는다).
+        if command[0] == "getent":
+            return _R(returncode=0, stdout=f"10.0.0.{len(self.ran)}   {command[-1]}\n")
+        if command[0] == "ssh":
+            return _R(returncode=0)
         class R:
             returncode = self._rc
             stdout = self._stdout
@@ -275,24 +284,183 @@ def test_run_job_ssh_readiness_barrier_probes_before_mpirun():
     assert all(i < mpirun_idx for i in ssh_probe_calls)
 
 
-def test_run_job_ssh_barrier_gives_up_after_bounded_attempts():
-    # ssh probe는 절대 성공하지 않음 -> barrier가 job을 막지 않고 결국 mpirun까지 진행
-    slept = []
+# ---- 2026-10-02 프로덕션 간헐 실패 수리: hostfile 은 IP 만, 워커 준비 실패는 mpirun 없이 사유 마커 ----
+# 예전 러너는 getent 를 한 번만 하고 실패하면 DNS 이름(<pod>.<svc>)을 그대로 hostfile 에 썼고, ssh 대기는
+# 끝까지 안 돼도 조용히 mpirun 으로 넘어갔다. launcher 가 워커보다 먼저 Ready 가 되면(실측) 앞 번호 워커가
+# 이름으로 남고, mpirun 시점의 이름 조회가 한 번 더 실패하면 "Could not resolve hostname" rc 255 로 죽었다.
+
+def _hostfile(rec, artifact_dir="/cephfs/dms/artifacts/j1/execution"):
+    return rec.writes.get(f"{artifact_dir}/mpi-hostfile")
+
+
+def test_hostfile_waits_until_every_worker_resolves_to_an_ip():
+    # 첫 워커는 처음 두 번 못 풀린다(DNS 레코드가 아직 없음) -- 이름으로 쓰지 않고 IP 가 나올 때까지 기다린다.
+    tries = {"w0.job": 0}
 
     def run_fn(cmd):
-        if cmd[0] == "ssh":
-            return _R(returncode=1)
         if cmd[0] == "getent":
-            return _R(returncode=1, stdout="")
+            host = cmd[-1]
+            if host == "w0.job":
+                tries[host] += 1
+                if tries[host] <= 2:
+                    return _R(returncode=2, stdout="")
+                return _R(returncode=0, stdout="10.42.6.10   w0.job\n")
+            return _R(returncode=0, stdout="10.42.6.11   w1.job\n")
+        if cmd[0] == "ssh":
+            return _R(returncode=0)
         return _R(returncode=0, stdout="ok")
     rec = _Recorder(run_fn=run_fn)
-    rc = run_job(_env(), run=rec.run, write_text=rec.write_text,
-                 read_text=rec.read_text, sleep=lambda s: slept.append(s),
-                 wait_hostfile=lambda: (["dms-w1"], "/tmp/hostfile"),
-                 make_executable=rec.make_executable)
-    assert rc == 0  # barrier 포기 후에도 mpirun은 실행됨 (legacy: proceeding)
+    rc = _run(rec, _env(), wait_hostfile=lambda: (["w0.job", "w1.job"], "/tmp/hostfile"))
+    assert rc == 0
+    assert _hostfile(rec) == "10.42.6.10 slots=8\n10.42.6.11 slots=8\n"
+    assert tries["w0.job"] == 3
+    # ssh 탐침은 이름이 아니라 IP 로 한다(mpirun 과 같은 경로)
+    probed = [cmd[-2] for cmd in rec.ran if cmd[0] == "ssh"]
+    assert set(probed) == {"10.42.6.10", "10.42.6.11"}
     assert any("runuser" in cmd for cmd in rec.ran)
-    assert slept  # bounded 재시도 동안 sleep이 호출됨
+
+
+def test_getent_output_that_is_not_an_ip_is_not_used():
+    # getent 첫 칸이 IP 가 아니면(이상 출력) 못 푼 것으로 본다 -- 이름·쓰레기를 hostfile 에 싣지 않는다.
+    calls = {"n": 0}
+
+    def run_fn(cmd):
+        if cmd[0] == "getent":
+            calls["n"] += 1
+            return _R(returncode=0, stdout="not-an-ip w0\n" if calls["n"] == 1 else "10.0.9.9 w0\n")
+        if cmd[0] == "ssh":
+            return _R(returncode=0)
+        return _R(returncode=0, stdout="ok")
+    rec = _Recorder(run_fn=run_fn)
+    assert _run(rec, _env(), wait_hostfile=lambda: (["w0"], "/tmp/hostfile")) == 0
+    assert _hostfile(rec) == "10.0.9.9 slots=8\n"
+
+
+def _never(stage):
+    def run_fn(cmd):
+        if cmd[0] == "getent":
+            return _R(returncode=2, stdout="") if stage == "resolve" else _R(returncode=0, stdout="10.1.1.1 w\n")
+        if cmd[0] == "ssh":
+            return _R(returncode=255)
+        return _R(returncode=0, stdout="ok")
+    return run_fn
+
+
+def test_unresolvable_worker_fails_with_marker_and_no_mpirun(capsys, tmp_path):
+    rec = _Recorder(run_fn=_never("resolve"))
+    slept = []
+    rc = run_job(_env(DMS_JR_ARTIFACT_DIR=str(tmp_path)), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: slept.append(s),
+                 wait_hostfile=lambda: (["w0.job", "w1.job"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable)
+    assert rc == 1
+    assert not any("runuser" in cmd for cmd in rec.ran)                 # mpirun 을 돌리지 않았다
+    assert f"{tmp_path}/mpi-hostfile" not in rec.writes                 # 이름이 든 hostfile 을 만들지 않았다
+    out = capsys.readouterr().out
+    assert "DMS_EXEC_REASON=workers_unreachable" in out                 # 스테퍼가 사유로 승격하는 마커
+    assert "DMS_JR_WORKER_UNREACHABLE host=w0.job stage=resolve" in out
+    assert "ready=0/2" in out
+    assert "DMS_JR_WORKER_UNREACHABLE host=w0.job stage=resolve" in rec.writes[f"{tmp_path}/stderr.log"]
+    # 도구가 돌지 않았다 -- returncode 는 모름(null), 3키 계약 유지
+    assert json.loads(rec.writes[f"{tmp_path}/summary.json"]) == {"returncode": None, "files": None, "bytes": None}
+    # 기다린 시간은 기본 제한(300초) 근처 -- 1초 간격 재시도
+    assert 290 <= sum(slept) <= 301
+
+
+def test_worker_resolved_but_ssh_never_ready_reports_ssh_stage(capsys):
+    rec = _Recorder(run_fn=_never("ssh"))
+    rc = _run(rec, _env(DMS_JR_WORKER_READY_TIMEOUT_SECONDS="5"),
+              wait_hostfile=lambda: (["w0.job"], "/tmp/hostfile"))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "DMS_JR_WORKER_UNREACHABLE host=w0.job stage=ssh" in out
+    assert not any("runuser" in cmd for cmd in rec.ran)
+
+
+def test_timeout_is_shared_across_workers_not_per_worker(capsys):
+    # 제한은 전체 공유다 -- 워커당 제한이면 N 개가 모두 늦을 때 N 배를 기다린다(예전 90회 x 워커 수).
+    # w0 은 8초 뒤에야 풀리고 w1 은 끝내 안 풀린다: 공유 제한(10초)이면 w1 에 2초만 남아 합계 ~10초,
+    # 워커당 제한이면 w1 이 다시 10초를 받아 합계 ~18초가 된다(리뷰 뮤테이션으로 확인한 구분선).
+    tries = {"w0": 0}
+
+    def run_fn(cmd):
+        if cmd[0] == "getent":
+            if cmd[-1] == "w0":
+                tries["w0"] += 1
+                return _R(returncode=0, stdout="10.0.0.1 w0\n") if tries["w0"] > 8 else _R(returncode=2)
+            return _R(returncode=2)
+        if cmd[0] == "ssh":
+            return _R(returncode=0)
+        return _R(returncode=0, stdout="ok")
+    slept = []
+    rec = _Recorder(run_fn=run_fn)
+    rc = run_job(_env(DMS_JR_WORKER_READY_TIMEOUT_SECONDS="10"), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: slept.append(s),
+                 wait_hostfile=lambda: (["w0", "w1", "w2", "w3"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "DMS_JR_WORKER_READY host=w0 ip=10.0.0.1" in out
+    assert "host=w1 stage=resolve" in out and "ready=1/4" in out
+    assert sum(slept) <= 11
+
+
+def test_main_passes_the_real_monotonic_clock(monkeypatch):
+    # main 이 실제 시계를 넘기지 않으면 제한이 sleep 만 세는 가상 시계로 접혀, getent·ssh 안에서 보낸 시간
+    # (airgap DNS 타임아웃 등)이 빠진다 -- 300초가 실제로는 수십 분이 된다(리뷰 뮤테이션으로 확인).
+    import time
+    from dms_job_runner import runner
+    seen = {}
+
+    def fake_run_job(env, **kw):
+        seen.update(kw)
+        return 0
+    monkeypatch.setattr(runner, "run_job", fake_run_job)
+    with pytest.raises(SystemExit) as e:
+        runner.main()
+    assert e.value.code == 0
+    assert seen["clock"] is time.monotonic and seen["sleep"] is time.sleep
+
+
+def test_real_clock_counts_time_spent_inside_probes():
+    # main 은 time.monotonic 을 넘긴다: getent·ssh 자체가 오래 걸리면(DNS 타임아웃) 그 시간도 제한에 든다.
+    now = {"t": 0.0}
+
+    def run_fn(cmd):
+        if cmd[0] == "getent":
+            now["t"] += 4.0                       # 한 번의 조회가 4초 걸린다
+            return _R(returncode=2, stdout="")
+        return _R(returncode=0, stdout="ok")
+    rec = _Recorder(run_fn=run_fn)
+    rc = run_job(_env(DMS_JR_WORKER_READY_TIMEOUT_SECONDS="20"), run=rec.run, write_text=rec.write_text,
+                 read_text=rec.read_text, sleep=lambda s: now.__setitem__("t", now["t"] + s),
+                 wait_hostfile=lambda: (["w0"], "/tmp/hostfile"),
+                 make_executable=rec.make_executable, clock=lambda: now["t"])
+    assert rc == 1
+    assert len([c for c in rec.ran if c[0] == "getent"]) <= 5      # 20초 / (4+1)초
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", ""])
+def test_bad_timeout_override_falls_back_to_default(raw):
+    from dms_job_runner.runner import WORKER_READY_TIMEOUT_SECONDS, _ready_timeout
+    assert _ready_timeout({"DMS_JR_WORKER_READY_TIMEOUT_SECONDS": raw}) == WORKER_READY_TIMEOUT_SECONDS
+    assert _ready_timeout({}) == WORKER_READY_TIMEOUT_SECONDS == 300
+
+
+def test_ready_lines_name_each_worker_ip(capsys):
+    rec = _Recorder()
+    assert _run(rec, _env(), wait_hostfile=lambda: (["w0.job", "w1.job"], "/tmp/hostfile")) == 0
+    out = capsys.readouterr().out
+    assert "DMS_JR_WORKER_READY host=w0.job ip=10.0.0." in out and "DMS_JR_WORKER_READY host=w1.job" in out
+
+
+def test_runner_execution_marker_matches_the_control_plane():
+    # 러너는 dms 를 import 하지 않는다 -- 마커 문자열과 사유가 제어면의 화이트리스트와 갈라지면 스테퍼가 사유를
+    # 승격하지 못하고 다시 execution_failed 로 뭉갠다.
+    from dms.execution_manifests import EXECUTION_REASON_MARKER, EXECUTION_REASONS
+    from dms_job_runner import runner
+    assert runner.EXECUTION_REASON_MARKER == EXECUTION_REASON_MARKER
+    assert runner.WORKERS_UNREACHABLE in EXECUTION_REASONS
 
 
 def _nsync_env(**kw):
@@ -432,3 +600,23 @@ def test_run_job_detects_dryrun_from_argv_and_fills_preview_files():
                                                 "/cephfs/managed/a", "/cephfs/managed/b"])))
     assert rc == 0
     assert _summary(rec) == {"returncode": 0, "files": 2, "bytes": None}
+
+
+def test_nsync_hostfile_keeps_source_then_destination_order_as_ips():
+    # 입력 순서·IP 순서·정렬 순서가 서로 다르게 -- 정렬·중복 제거 같은 재배열이 끼면 rank 의 역할(src/dst)이
+    # 뒤집힌다(commands.nsync_role_map 은 위치로 역할을 준다). 정렬된 입력이면 그런 회귀를 못 잡는다.
+    ips = {"dms-w5": "10.0.1.9", "dms-w2": "10.0.1.3", "dms-w0": "10.0.1.7"}
+
+    def wait_hostfile(role=None):
+        return (["dms-w5", "dms-w2"], "/tmp/s") if role == "source" else (["dms-w0"], "/tmp/d")
+
+    def run_fn(cmd):
+        if cmd[0] == "getent":
+            return _R(returncode=0, stdout=f"{ips[cmd[-1]]} {cmd[-1]}\n")
+        if cmd[0] == "ssh":
+            return _R(returncode=0)
+        return _R(returncode=0, stdout="ok")
+    rec = _Recorder(run_fn=run_fn)
+    rc = _run(rec, _nsync_env(), wait_hostfile=wait_hostfile)
+    assert rc == 0
+    assert _hostfile(rec) == "10.0.1.9 slots=2\n10.0.1.3 slots=2\n10.0.1.7 slots=2\n"

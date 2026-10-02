@@ -9,7 +9,7 @@ from .artifact_base import resolve_artifact_base
 from .db import iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem
 from .execution import ExecStatus, ExecutionError, JobSpec
-from .execution_manifests import parse_preflight_reason
+from .execution_manifests import parse_execution_reason, parse_preflight_reason
 from .identity import PRIVILEGE_NEVER, privilege_policy
 from .placement import TOOL_TO_POLICY
 
@@ -316,6 +316,15 @@ class JobStepper:
         promoted = parse_preflight_reason(raw)
         return reason_code if promoted is None else promoted
 
+    def _run_failure_reason(self, job, phase, ref, *, reason_code):
+        """미리보기·실행(launcher 가 mpirun 을 돌리는 단계) 실패의 사유 결정 + 진단 로그 박제(read_log 한 번).
+        _preflight_reason 과 같은 구조: 러너가 찍은 DMS_EXEC_REASON= 마커(화이트리스트
+        execution_manifests.EXECUTION_REASONS)를 잡 사유로 승격하고, 없으면 넘어온 reason_code 로 접는다.
+        2026-10-02: 워커 준비 실패(workers_unreachable)가 첫 마커 -- 예전엔 사유 없는 execution_failed 였다."""
+        raw = self._archive_diag(job, phase, ref)
+        promoted = parse_execution_reason(raw)
+        return reason_code if promoted is None else promoted
+
     def _surface_failed_artifact(self, job, ref):
         """실패 잡의 summary 표면화(설계 §2.4). 러너는 도구 비0 종료에도
         summary.json 을 쓰고 exit 하므로(§1-7) returncode 가 카드에 뜬다.
@@ -533,12 +542,15 @@ class JobStepper:
                 result_summary=summary)
             self._finalize(job, DataJobState.SUCCEEDED, summary=summary)
             return "Succeeded"
-        target = (DataJobState.TIMED_OUT if status == ExecStatus.TIMED_OUT
-                  else DataJobState.FAILED)
         self._surface_failed_artifact(job, ref)
-        self._finalize(job, target, reason_code="execution_failed",
-                       diag=("execution", ref))
-        return target.value
+        if status == ExecStatus.TIMED_OUT:
+            self._finalize(job, DataJobState.TIMED_OUT, reason_code="execution_failed",
+                           diag=("execution", ref))
+            return DataJobState.TIMED_OUT.value
+        # 박제는 _run_failure_reason 이 했다(전이 전) -- diag= 를 다시 넘기지 않는다.
+        reason = self._run_failure_reason(job, "execution", ref, reason_code="execution_failed")
+        self._finalize(job, DataJobState.FAILED, reason_code=reason)
+        return DataJobState.FAILED.value
 
     def _submit_preview(self, job):
         jid = job["job_id"]
@@ -585,8 +597,9 @@ class JobStepper:
                            diag=("preview", ref))
             return "TimedOut"
         self._surface_failed_artifact(job, ref)
-        self._finalize(job, DataJobState.FAILED, reason_code="preview_failed",
-                       diag=("preview", ref))
+        # 박제는 _run_failure_reason 이 했다(전이 전) -- diag= 를 다시 넘기지 않는다(_preflight_reason 과 같은 규칙).
+        reason = self._run_failure_reason(job, "preview", ref, reason_code="preview_failed")
+        self._finalize(job, DataJobState.FAILED, reason_code=reason)
         return "Failed"
 
     def _poll_or_submit_execution(self, job):

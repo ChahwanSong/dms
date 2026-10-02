@@ -142,6 +142,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   mailer_misconfigured: "인증 메일 발송 설정이 잘못되어 인증번호를 보낼 수 없습니다 — 관리자에게 문의하세요",
   verification_rate_limited: "인증 메일 요청이 너무 잦거나 발송이 몰렸습니다 — 잠시 후 다시 시도하세요(이미 받은 인증번호가 있으면 그대로 입력하세요)",
   verification_locked: "인증번호를 여러 번 틀려 이 아이디의 인증이 잠겼습니다 — 첫 실패부터 24시간 뒤 다시 시도하세요(로그인은 그대로 됩니다)",
+  workers_unreachable: "작업 노드(워커)가 제한 시간 안에 준비되지 않아 실행하지 못했습니다 — 워커 이름을 IP로 풀지 못했거나 ssh 접속이 되지 않았습니다. 대개 일시적이니 다시 실행하고, 반복되면 실행 로그의 DMS_JR_WORKER_UNREACHABLE 줄(호스트·단계)을 확인하세요",
   invalid_portal_subtitle: "서브네임은 40자 이하의 한 줄 문자열이어야 합니다(줄바꿈·탭·보이지 않는 문자 불가)",
   chown_name_not_supported: "chown 은 숫자 uid:gid 만 지정할 수 있습니다(예: 10003:10000) — 이름은 작업 컨테이너에서 해석되지 않습니다",
   verification_client_locked: "이 접속 위치에서 인증번호를 너무 여러 번 틀렸습니다 — 잠시 후(최대 24시간) 다시 시도하거나 관리자에게 문의하세요",

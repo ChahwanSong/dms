@@ -123,3 +123,12 @@ def test_preflight_marker_reasons_are_in_the_checked_in_list():
 
     known = set(json.loads(REASON_CODES_FILE.read_text()))
     assert sorted(PREFLIGHT_REASONS - known) == []
+
+
+def test_execution_marker_reasons_are_in_the_checked_in_list():
+    """실행·미리보기 실패 마커(execution_manifests.EXECUTION_REASONS, 2026-10-02)도 frozenset 안의 문자열이라
+    AST 그물 밖이다 -- 스테퍼가 잡 사유로 그대로 박으므로 매핑이 있어야 한다(preflight 그물과 같은 이유)."""
+    from dms.execution_manifests import EXECUTION_REASONS
+
+    known = set(json.loads(REASON_CODES_FILE.read_text()))
+    assert sorted(EXECUTION_REASONS - known) == []
