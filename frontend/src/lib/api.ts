@@ -69,6 +69,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   batch_item_not_editable: "수정할 수 없는 항목입니다 — 이미 실행됐거나 실행 중입니다",
   batch_not_deletable: "삭제할 수 없는 상태의 배치입니다 — 먼저 취소하세요",
   batch_items_not_replaceable: "항목을 교체할 수 없는 상태의 배치입니다 — 완료·취소된 배치만 가능합니다",
+  batch_settings_locked: "실행 설정을 바꿀 수 없는 상태의 배치입니다 — 완료·취소된 배치만 가능합니다(진행 중이면 먼저 취소하세요)",
   // 선택 재실행. batch_item_not_rerunnable 은 오류 detail 이 아니라 **부분 성공
   // 응답 본문**의 skipped 사유다(전체가 실패한 게 아니다) — 화면이 항목별로
   // reasonText 를 태워 그대로 보여준다.

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import (DataJobState, DomainValidationError, Operation,
                       TERMINAL_DATA_JOB_STATES, build_data_payload, validate_batch,
-                      validate_options, validate_owner_username)
+                      validate_batch_controls, validate_options, validate_owner_username)
 from ..execution import ExecutionError
 from .auth import Identity, require_admin
 from .cancel import terminate_job
@@ -46,6 +46,18 @@ class BatchBody(BaseModel):
     owner_username: str | None = None
 
 
+def _require_batch_privilege(request: Request, identity: Identity) -> None:
+    """배치 특권 3중 게이트(기능 플래그 + allowlist + 세션; admin 역할은 require_admin 이 보장). 생성과 실행 설정
+    변경이 같은 게이트를 쓴다 -- 실행 설정(옵션 delete·chown, 노드 수)은 root 로 도는 재실행의 행동을 바꾸므로
+    생성 게이트를 통과하지 못하는 관리자가 바꿀 수 있으면 생성 게이트를 우회하는 셈이다."""
+    settings = request.app.state.settings
+    authorized = (settings.allow_privileged_requesters
+                  and identity.actor in settings.privileged_requesters
+                  and identity.auth == "session")
+    if not authorized:
+        raise HTTPException(status_code=403, detail="privileged_not_authorized")
+
+
 @router.post("/api/admin/batches", status_code=202)
 def create_batch(body: BatchBody, request: Request, identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
@@ -59,12 +71,7 @@ def create_batch(body: BatchBody, request: Request, identity: Identity = Depends
     # 필요한 이유: 배치는 생성 시점 인증 방식을 행에 박제해 자식이 물려받으므로
     # 박제 전에 여기서 끊어야 토큰 생성 배치가 특권을 실어 나르지 못한다(단건은
     # planner 가 요청 auth_method 로 재검증, routes_requests.py:86-94 참고).
-    settings = request.app.state.settings
-    authorized = (settings.allow_privileged_requesters
-                  and identity.actor in settings.privileged_requesters
-                  and identity.auth == "session")
-    if not authorized:
-        raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    _require_batch_privilege(request, identity)
     # owner_username 은 소유자 기록(선택, 기본: 생성자=requester_id)이다 — 특권
     # 여부는 위 게이트가 배치 전체에 판정했고, 이 값은 자식 payload 에 실려 실행
     # 신원 해석과 감사에 쓰인다(orchestrator._materialize).
@@ -109,11 +116,11 @@ class BatchPatchBody(BaseModel):
 def patch_batch(batch_id: str, body: BatchPatchBody, request: Request,
                 identity: Identity = Depends(require_admin)):
     """배치 메타데이터(name/note) 수정. **items·실행 제어(priority/node_count/
-    procs_per_node/max_concurrency/owner)는 수정 불가** — 배치는 즉시 실행
+    procs_per_node/max_concurrency/owner)는 여기서 수정 불가** — 배치는 즉시 실행
     모델이라 생성 직후 orchestrator 가 자식 request 를 materialize 하기 시작하고,
-    이미 실린 자식은 배치 행을 다시 읽지 않는다. 실행 제어를 여기서 바꾸면 "일부
-    자식은 옛값, 일부는 새값"의 거짓 화면이 된다 — 바꾸려면 취소 후 재생성이
-    정직하다. 감사 기록은 기존 배치 mutation 라우트(:confirm/:cancel/:rescan)
+    이미 실린 자식은 배치 행을 다시 읽지 않는다. 활성 배치의 실행 제어를 바꾸면 "일부
+    자식은 옛값, 일부는 새값"의 거짓 화면이 된다 — 실행 제어(owner 제외)는 **종단
+    배치에서만** 별도 라우트(patch_batch_execution)로 바꾼다. 감사 기록은 기존 배치 mutation 라우트(:confirm/:cancel/:rescan)
     관례를 미러: 별도 audit 행 없음(감사는 저장소가 남기는 도메인 — storages/
     policies 처럼 repo 가 남기는 자원만 audit_entries 에 실린다)."""
     reject_when_maintenance(request)
@@ -130,6 +137,58 @@ def patch_batch(batch_id: str, body: BatchPatchBody, request: Request,
         note = (sent["note"] or "").strip()
         fields["note"] = note if note != "" else None
     repo.update_meta(batch_id, **fields)
+    return repo.get(batch_id)
+
+
+class BatchExecutionBody(BaseModel):
+    # 부분 갱신: 키 부재 = 무접촉(exclude_unset). priority/node_count/procs_per_node 의 null = 정책 기본으로 되돌리기
+    # (생성과 같은 null≠0 계약). max_concurrency·options 는 null 이 뜻을 갖지 않는다 -- 각각 422.
+    # options 는 **통째 교체**다(키 단위 병합이 아니다): 병합이면 옵션을 끄는(키를 빼는) 표현이 없다.
+    max_concurrency: int | None = None
+    priority: str | None = None
+    node_count: int | None = None
+    procs_per_node: int | None = None
+    options: dict | None = None
+
+
+@router.patch("/api/admin/batches/{batch_id}/execution")
+def patch_batch_execution(batch_id: str, body: BatchExecutionBody, request: Request,
+                          identity: Identity = Depends(require_admin)):
+    """종단(Completed/Cancelled) 배치의 실행 설정(동시 실행 상한·우선순위·노드 수·노드당 프로세스 수·연산 옵션)
+    변경 -- 사용자 요청(2026-10-02): 배치를 취소한 뒤 재실행할 때 실행 환경을 바꿀 수 있어야 한다.
+
+    왜 종단만인가: 종단 배치 ⇒ 전 항목 종단 ⇒ 살아 있는 자식이 없다(:rescan 과 같은 정합 논리). orchestrator 는
+    자식을 만들 때(_materialize) 배치 행을 읽으므로 바뀐 값은 **다음 재실행**(전체·실패분·선택 재실행, 항목 추가)의
+    자식부터 그대로 적용되고, 이미 끝난 항목의 기록(자식 요청 payload)은 옛값 그대로 남는다(기록 위조 아님).
+    활성·PreviewReady(자식 ConfirmPending 이 옛 옵션으로 미리보기를 끝냈다)는 409 batch_settings_locked -- 취소 후
+    바꾸는 것이 동선이다. 바꿀 수 없는 것: 실행 신원(owner_username)·연산·항목(항목은 항목 편집 라우트 몫).
+
+    특권: 생성과 같은 3중 게이트(_require_batch_privilege). 검증: 생성과 같은 규칙(validate_batch_controls +
+    validate_options) -- 옛 규칙의 옵션(이름 chown 등)이 남은 배치도 여기서 고치면 다시 돌릴 수 있다. 바뀐 키가
+    없으면 쓰지 않는다(updated_at 만 튀는 것도 거짓 변경 기록). 바뀌면 audit_log 에 before/after(repo)."""
+    reject_when_maintenance(request)
+    _require_batch_privilege(request, identity)
+    repo = request.app.state.repos.batches
+    b = _get_batch_or_404(request, batch_id)
+    if b["status"] not in _TERMINAL_BATCH:
+        raise HTTPException(status_code=409, detail="batch_settings_locked")
+    sent = body.model_dump(exclude_unset=True)
+    if "options" in sent and sent["options"] is None:
+        raise HTTPException(status_code=422, detail="invalid_option")
+    merged = {k: (sent[k] if k in sent else b[k]) for k in _EXECUTION_SETTINGS}
+    try:
+        # 보내지 않은 키도 DB 값으로 다시 검증한다(DB 가 신뢰 경계) -- 결과로 남을 설정 전체가 지금 규칙에 맞아야 한다.
+        validate_batch_controls(merged["max_concurrency"], priority=merged["priority"],
+                                node_count=merged["node_count"],
+                                procs_per_node=merged["procs_per_node"])
+        validate_options(b["operation"], merged["options"])
+    except DomainValidationError as e:
+        raise HTTPException(status_code=422, detail=e.reason_code)
+    changed = {k: merged[k] for k in sent if merged[k] != b[k]}
+    if changed and not repo.update_execution_settings(
+            batch_id, changed, before={k: b[k] for k in changed}, actor=identity.actor):
+        # 위에서 종단을 봤는데 가드가 0 행 = 그 사이 재실행이 시작됐다(또는 동시 삭제의 극소 창).
+        raise HTTPException(status_code=409, detail="batch_settings_locked")
     return repo.get(batch_id)
 
 
@@ -175,6 +234,8 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
 # 편집은 require_admin 뒤의 운영 행위라 생성 게이트를 재통과시킬 새 재료가 없다.
 
 _TERMINAL_BATCH = ("Completed", "Cancelled")
+# patch_batch_execution 이 바꿀 수 있는 키 = repositories.batches._SETTINGS_COLUMNS 의 거울(repo 가 밖의 키를 거부).
+_EXECUTION_SETTINGS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options")
 # repositories.batches._ACTIVE 의 거울: orchestrator 가 실제로 굴리는 상태
 # (list_active). PreviewReady 는 여기 없다 — 확인 대기는 루프 밖이다.
 _ACTIVE_BATCH = ("Previewing", "Running")
@@ -398,8 +459,15 @@ def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(r
     n = repo.reset_failed_items(batch_id)
     if n == 0:
         raise HTTPException(status_code=409, detail="no_failed_items")
-    repo.set_status(batch_id, "Running")
-    return {"status": "Running", "requeued": n}
+    # 상태 분기는 :rescan·items:rerun 과 같다(2026-10-02 적대적 리뷰): 활성이 아니면 scan→Running, **sync→Previewing**.
+    # 예전엔 무조건 Running 이라 sync 실패분이 배치 미리보기·운영자 확인(:confirm) 없이 orchestrator 의 자동 확인으로
+    # 곧장 실행됐다 -- 실행 설정 변경(patch_batch_execution)으로 delete·chown 을 바꾼 뒤라면 바뀐 옵션이 root 로
+    # 확인 없이 돈다. 이미 활성이면 무접촉(도는 루프가 Queued 를 집는다).
+    status = b["status"]
+    if status not in _ACTIVE_BATCH:
+        status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
+        repo.set_status(batch_id, status)
+    return {"status": status, "requeued": n}
 
 
 @router.post("/api/admin/batches/{batch_id}:rescan")

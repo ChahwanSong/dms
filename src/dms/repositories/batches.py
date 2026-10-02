@@ -2,6 +2,9 @@ import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
 
 _ACTIVE = ("Previewing", "Running")
+# 종단 배치에서 바꿀 수 있는 실행 설정(update_execution_settings). owner_username·operation·items·auth_method 는
+# 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫).
+_SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options")
 
 class BatchesRepository:
     def __init__(self, db: Database):
@@ -241,6 +244,37 @@ class BatchesRepository:
         sets = ", ".join(f"{k} = :{k}" for k in fields)
         self._db.execute(f"UPDATE batches SET {sets} WHERE batch_id = :b",
                          {**fields, "b": batch_id})
+
+    def update_execution_settings(self, batch_id, fields, *, before, actor) -> bool:
+        """종단 배치의 실행 설정(_SETTINGS_COLUMNS) 부분 갱신 + 감사 행, 한 트랜잭션.
+
+        가드는 SQL 한 문장(WHERE status IN 종단)이다 -- 라우트가 읽은 뒤 :rescan·항목 추가가 배치를 다시 돌리기
+        시작하면 영향 행 0 = False(호출자 409). 읽고 나서 쓰면 그 사이가 경합 창이고, 이미 materialize 된 자식은
+        배치 행을 다시 읽지 않아 "일부 자식은 옛값, 일부는 새값"이 된다(patch_batch docstring 의 이유).
+        감사: 메타(name/note) 수정과 달리 audit_log 에 남긴다(mutation_class 'batch') -- 옵션(delete·chown)·노드
+        수는 root 로 도는 다음 재실행이 무엇을 하는지를 바꾸므로 누가 무엇을 바꿨는지가 남아야 한다. before/after 는
+        바뀐 키만 담는다(호출자가 실제로 달라진 키만 넘긴다)."""
+        unknown = set(fields) - set(_SETTINGS_COLUMNS)
+        if unknown or not fields:
+            # 컬럼명은 SQL 문자열로 조립되므로 허용 목록 밖 키는 여기서 끊는다(호출자 버그 = 조용한 무시 금지).
+            raise ValueError(f"bad execution settings fields: {sorted(unknown) or 'empty'}")
+        params = {k: (dump_json(v) if k == "options" else v) for k, v in fields.items()}
+        sets = ", ".join(f"{k} = :{k}" for k in fields)
+        now = utc_now_iso()
+        with self._db.transaction():
+            n = self._db.execute_count(
+                f"""UPDATE batches SET {sets}, updated_at = :now
+                      WHERE batch_id = :b AND status IN ('Completed', 'Cancelled')""",
+                {**params, "now": now, "b": batch_id})
+            if n == 0:
+                return False
+            self._db.execute(
+                """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                       before_state, after_state, at)
+                   VALUES ('batch', 'execution_settings', :key, :actor, :b, :a, :at)""",
+                {"key": batch_id, "actor": actor, "b": dump_json(before),
+                 "a": dump_json(fields), "at": now})
+        return True
 
     def delete(self, batch_id):
         """배치 삭제: batches 행 + batch_items 행만, 한 트랜잭션. 자식

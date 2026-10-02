@@ -16,6 +16,8 @@ from .domain import (DomainValidationError, Operation, RequestState, TERMINAL_RE
                      DataJobState, build_data_payload, resolve_priority)
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
+# repositories.batches._ACTIVE(list_active 가 고르는 상태)의 거울 -- _drive 의 재확인용.
+_BATCH_ACTIVE = {"Previewing", "Running"}
 _REQ_TERMINAL = {s.value for s in TERMINAL_REQUEST_STATES}
 
 
@@ -109,6 +111,14 @@ class BatchOrchestrator:
 
     def _drive(self, batch):
         bid = batch["batch_id"]
+        # 틱 스냅샷(list_active)은 앞 배치들을 굴리는 동안 낡는다 -- 그 사이 API 가 취소 → 실행 설정 변경(종단 배치
+        # 한정, routes_batches.patch_batch_execution) → 재실행을 끝냈으면, 스냅샷의 옛 동시 실행 상한·옵션·노드 수로
+        # 자식을 만들게 된다(적대적 리뷰 2026-10-02 재현). 그래서 굴리기 직전에 배치 행을 다시 읽고, 이미 활성이
+        # 아니면(그 사이 취소됨) 건드리지 않는다 -- 낡은 스냅샷으로 취소된 배치를 Completed 로 덮던 창도 함께 좁힌다.
+        fresh = self._repos.batches.get(bid)
+        if fresh is None or fresh["status"] not in _BATCH_ACTIVE:
+            return
+        batch = fresh
         items = self._repos.batches.list_items(bid)
         queued, in_flight, previewed, terminal = [], [], [], 0
         for item in items:
