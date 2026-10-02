@@ -13,6 +13,7 @@ from .releases import ReleasesRepository
 from .metrics import MetricsRepository
 from .sync_pairs import SyncPairsRepository
 from .mail_settings import MailSettingsRepository
+from .scan_digests import ScanDigestsRepository
 
 
 class Repositories:
@@ -33,3 +34,4 @@ class Repositories:
         self.metrics = MetricsRepository(db)
         self.sync_pairs = SyncPairsRepository(db)
         self.mail_settings = MailSettingsRepository(db)
+        self.scan_digests = ScanDigestsRepository(db)

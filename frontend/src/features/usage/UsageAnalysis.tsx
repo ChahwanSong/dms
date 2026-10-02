@@ -1,95 +1,129 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ChevronRight } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronRight, Download } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Table } from "../../components/ui/Table";
-import { TimeSeriesChart, tooltipTranslateX } from "../../components/ui/TimeSeriesChart";
+import { TimeSeriesChart } from "../../components/ui/TimeSeriesChart";
 import { Button } from "../../components/ui/Button";
+import { HoverTip, placeBeside, useHoverAnchor, type Rect } from "../../components/ui/HoverTip";
 import type { ApiError } from "../../lib/api";
 import type { HistogramBucket, UsagePoint } from "../../lib/types";
-import { kstStampEpoch, kstDay, kstStampOrDash } from "../../lib/datetime";
-import { useScanHistory, useScanTargets } from "./useUsage";
+import { agoText, ageDays, kstStampEpoch, kstDay, kstStampOrDash } from "../../lib/datetime";
+import { downloadCsv, toCsv } from "../../lib/csvExport";
+import { useStorages } from "../storages/useStorages";
+import { fetchUsageExport, useScanHistory, useScanStorages, useScanTargets, type TargetFilter } from "./useUsage";
+import {
+  AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
+} from "./usageStats";
+import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
 
-// NodesList/JobStats/RequestDetail 의 humanBytes 국소 사본 관례.
-function humanBytes(bytes: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-  let v = bytes, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
-  return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
-}
+// 순수 규칙은 usageStats(화면·CSV 공용 한 벌, 2026-10-02 분리) -- 기존 import 경로 호환을 위해 다시 내보낸다.
+export { HOT_AGE_MAX_DAYS, hotRatio, pointEpoch, stackLayout } from "./usageStats";
 
 // 절대 시각은 공유 datetime 헬퍼(KST)로 통일했다 -- kstStampEpoch(초 -> KST 벽시계),
 // kstDay(초 -> KST MM-DD). 온도 열 축 라벨은 폭(max-w-12) 때문에 MM-DD 만 쓰고
-// 분 단위는 열 title 툴팁이 든다(실화면 확인).
-
-// 포인트의 대표 시각(초). 리포트 생성 시각(스캔이 본 파일시스템의 시점)이 1순위,
-// 결측(구형 리포트)이면 잡 완료 시각 -- 순서는 서버 정렬과 같은 근거다.
-export function pointEpoch(p: UsagePoint): number | null {
-  if (typeof p.generated_at_epoch === "number") return p.generated_at_epoch;
-  if (p.finished_at) {
-    const ms = Date.parse(p.finished_at);
-    if (!Number.isNaN(ms)) return Math.floor(ms / 1000);
-  }
-  return null;
-}
-
-// hot 판정 나이 상한(일). 180 = 사용자 결정(2026-08-24, 7일에서 상향) -- dscan
-// 나이 버킷 경계([91d,180d] 상한)와 일치해 버킷이 잘리지 않고 통째로 들어간다.
-export const HOT_AGE_MAX_DAYS = 180;
-
-// hot 비율: 나이 ≤HOT_AGE_MAX_DAYS 버킷 bytes / 전체 bytes. 전체 0 은 비율 정의
-// 불가(null -- cumulativeLayout 의 0-나눗셈 규약). bytes 가 실린 버킷의 나이 필드
-// 결측도 null 이다 -- 그 바이트를 hot 도 cold 도 아니라고 말할 근거가 없는데
-// cold 로 접으면(분모에만 넣으면) 비율이 조용히 내려간다(모름 ≠ 0, 리뷰).
-export function hotRatio(buckets: HistogramBucket[] | undefined): number | null {
-  if (!buckets || buckets.length === 0) return null;
-  let hot = 0, total = 0;
-  for (const b of buckets) {
-    if (typeof b.bytes !== "number") return null;
-    if (b.bytes > 0 && typeof b.max_age_days !== "number") return null;
-    total += b.bytes;
-    if (typeof b.max_age_days === "number"
-        && b.max_age_days <= HOT_AGE_MAX_DAYS) hot += b.bytes;
-  }
-  return total === 0 ? null : hot / total;
-}
-
-// 100% 스택 열: 버킷별 bytes 비중. 전체 0 이면 null(빈 트리의 온도는 정의 불가).
-export function stackLayout(buckets: HistogramBucket[] | undefined) {
-  if (!buckets || buckets.length === 0) return null;
-  const vals = buckets.map((b) => (typeof b.bytes === "number" ? b.bytes : null));
-  if (vals.some((v) => v === null)) return null;
-  const total = (vals as number[]).reduce((a, v) => a + v, 0);
-  if (total === 0) return null;
-  return (vals as number[]).map((v) => ({ pct: (v / total) * 100 }));
-}
-
-// BatchDetail TEMP_PALETTE/tempColorOf 국소 사본(hot→cold 비례 사상).
-const TEMP_PALETTE = ["#dc2626", "#ea580c", "#f59e0b", "#eab308", "#84cc16",
-                      "#22c55e", "#06b6d4", "#3b82f6", "#6366f1"];
-const tempColorOf = (n: number) => (i: number) =>
-  TEMP_PALETTE[n <= 1 ? 0 : Math.round((i / (n - 1)) * (TEMP_PALETTE.length - 1))];
+// 분 단위는 툴팁이 든다(실화면 확인).
 
 // 이력 표시 창 선택지(사용자 요청 2026-08-24). 서버 상한 60(routes_usage
 // _MAX_POINTS)과 발맞춘 고정 선택지 -- 자유 입력 없음(WindowSelect 관례).
 const HISTORY_WINDOWS = [30, 60] as const;
 
 const TEMP_CAPTIONS: Record<string, string> = {
-  atime: "각 열 = 스캔 1회. 위(빨강)=hot·최근 접근, 아래(파랑)=cold — atime 기준 용량 비중. relatime/open_noatime 환경에선 근사",
-  mtime: "각 열 = 스캔 1회. 위(빨강)=최근 수정, 아래(파랑)=오래됨 — mtime 기준 용량 비중",
-  ctime: "각 열 = 스캔 1회. 위(빨강)=최근 변경, 아래(파랑)=오래됨 — ctime 기준 용량 비중",
+  atime: "각 열 = 스캔 1회. 위(빨강)=hot·최근 접근, 아래(파랑)=cold — atime 기준 용량 비중. relatime/open_noatime 환경에선 근사. 열에 마우스를 올리면 구간별 용량",
+  mtime: "각 열 = 스캔 1회. 위(빨강)=최근 수정, 아래(파랑)=오래됨 — mtime 기준 용량 비중. 열에 마우스를 올리면 구간별 용량",
+  ctime: "각 열 = 스캔 1회. 위(빨강)=최근 변경, 아래(파랑)=오래됨 — ctime 기준 용량 비중. 열에 마우스를 올리면 구간별 용량",
 };
 
+// 최근 스캔 경과 색(2026-10-02 사용자 결정): 30일 지나면 주황, 90일 지나면 빨강. 모름은 기본색.
+export function staleClass(days: number | null): string {
+  if (days === null) return "text-muted";
+  if (days >= 90) return "text-bad font-medium";
+  if (days >= 30) return "text-orange-600 font-medium";
+  return "text-ink";
+}
+
+const pctText = (p: number) =>
+  p === 0 ? "0%" : p < 0.1 ? "<0.1%" : p < 10 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`;
+
+// 온도 열 툴팁(2026-10-02). 예전엔 열 번호 비율(i/n)로 **차트 전체 폭** 위에 놓았는데, 열은 폭 상한(max-w-12)
+// 때문에 왼쪽에 몰려 있어 툴팁이 열에서 수백 px 떨어진 곳에 떴다(실측: 첫 열 x=299 인데 툴팁 x=407, 끝 열 x=515 인데
+// 1082). 이제 열의 실제 화면 사각형 옆(HoverTip placeBeside -- 키가 큰 범례라 위보다 옆)에 붙고, 펼친 행 안(표
+// 래퍼 overflow-x-auto)에 갇혀 잘리지 않게 포털로 뜬다.
+function TempTooltip({ point, buckets, tempKey, anchor, onClose }: {
+  point: UsagePoint; buckets: HistogramBucket[]; tempKey: string;
+  anchor: Rect; onClose: () => void;
+}) {
+  const epoch = pointEpoch(point);
+  const stack = stackLayout(buckets);
+  // 비율 두 가지(리뷰): 지금 보는 축의 180일 이내 비중, 그리고 목록·타일·CSV 와 같은 정의의 hot 비율(atime).
+  // 축이 atime 이면 둘은 같은 수라 한 행만.
+  const axisRecent = hotRatio(buckets);
+  const atimeHot = hotRatio(point.time_histograms["atime"]);
+  const files = point.summary?.["total_files"];
+  const color = tempColorOf(buckets.length);
+  const lastHot = buckets.reduce((acc, b, i) =>
+    (typeof b.max_age_days === "number" && b.max_age_days <= HOT_AGE_MAX_DAYS ? i : acc), -1);
+  return (
+    <HoverTip anchor={anchor} onClose={onClose} place={placeBeside} className="w-72 p-3">
+      <div className="font-semibold">{epoch === null ? "시각 모름" : kstStampEpoch(epoch)}</div>
+      <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        <dt className="text-muted">요청자</dt>
+        <dd className="text-right">{point.requester ?? "—"}</dd>
+        <dt className="text-muted">실 사용량</dt>
+        <dd className="text-right tabular-nums font-medium">
+          {typeof point.total_bytes === "number" ? humanBytes(point.total_bytes) : "—"}</dd>
+        <dt className="text-muted">파일 수</dt>
+        <dd className="text-right tabular-nums">
+          {typeof files === "number" ? `${files.toLocaleString("ko-KR")}개` : "—"}</dd>
+        <dt className="text-muted">{`hot 비율(atime ${HOT_AGE_MAX_DAYS}일)`}</dt>
+        <dd className="text-right tabular-nums font-medium">
+          {atimeHot === null ? "—" : pctText(atimeHot * 100)}</dd>
+        {tempKey !== "atime" && (<>
+          <dt className="text-muted">{`${tempKey} ${HOT_AGE_MAX_DAYS}일 이내`}</dt>
+          <dd className="text-right tabular-nums">{axisRecent === null ? "—" : pctText(axisRecent * 100)}</dd>
+        </>)}
+      </dl>
+      {stack === null ? (
+        <p className="mt-2 border-t border-line pt-2 text-muted">이 축의 온도 분포 없음</p>
+      ) : (
+        <div className="mt-2 border-t border-line pt-2">
+          <p className="mb-1 text-muted">{`${tempKey}(${AXIS_MEANING[tempKey] ?? tempKey}) 기준 나이별 용량`}</p>
+          {/* 색 = 막대의 그 칸. 위(빨강)가 최근, 아래(파랑)로 갈수록 오래됨 -- 사용자 요청 2026-10-02 "빨강/초록/
+              파랑이 뭔지와 구체적인 수치". 180일 경계 아래에 점선(hot 비율의 기준). */}
+          <div className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-x-2 gap-y-0.5"
+               aria-label="구간별 용량">
+            {buckets.map((b, bi) => (
+              <Fragment key={bi}>
+                <span aria-hidden className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color(bi) }} />
+                <span>{ageLabel(b)}</span>
+                <span className="text-right tabular-nums">
+                  {typeof b.bytes === "number" ? humanBytes(b.bytes) : "—"}</span>
+                <span className="w-12 text-right tabular-nums text-muted">{pctText(stack[bi].pct)}</span>
+                {bi === lastHot && bi < buckets.length - 1 && (
+                  <span aria-hidden className="col-span-4 my-0.5 border-t border-dashed border-line" />
+                )}
+              </Fragment>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[10px] text-muted">
+            {`빨강 → 파랑 = 최근 → 오래됨 · 점선 위 = ${HOT_AGE_MAX_DAYS}일 이내`}</p>
+        </div>
+      )}
+    </HoverTip>
+  );
+}
+
 // 온도 추이: 스캔별 100% 스택 열(위=hot). 시간순 정렬은 부모(서버 정렬)가 보장.
-// 호버/포커스 즉시 툴팁(2026-08-29 사용자 요청): 열에 커서를 대면 시간·요청자·
-// 용량이 바로 뜬다(라인 차트와 같은 규약 -- 기본 title 지연 제거).
+// 호버/포커스 즉시 툴팁(2026-08-29 사용자 요청): 열에 커서를 대면 바로 뜬다(기본 title 지연 제거).
+// 2026-10-02: 툴팁을 열 옆에 붙이고(placeTooltip), 시각·요청자·용량·파일 수·hot 비율 + 색별 구간·용량·비중 범례.
 function TemperatureTrend({ points, tempKey }: {
   points: UsagePoint[]; tempKey: string;
 }) {
-  const [active, setActive] = useState<number | null>(null);
+  const { active, bind, close } = useHoverAnchor<number>();
   const cols = points.map((p) => ({
     epoch: pointEpoch(p),
+    buckets: p.time_histograms[tempKey] ?? [],
     stack: stackLayout(p.time_histograms[tempKey]),
     point: p,
   }));
@@ -97,15 +131,10 @@ function TemperatureTrend({ points, tempKey }: {
     return <p className="text-muted text-xs">이 축의 온도 분포가 있는 스캔이 없습니다</p>;
   }
   const n = cols.length;
-  const tipRows = (c: typeof cols[number]) => [
-    { k: "시간", v: c.epoch === null ? "—" : kstStampEpoch(c.epoch) },
-    { k: "요청자", v: c.point.requester ?? "—" },
-    { k: "실 사용량", v: typeof c.point.total_bytes === "number"
-        ? humanBytes(c.point.total_bytes) : "—" },
-    ...(c.stack === null ? [{ k: "온도", v: "분포 없음" }] : []),
-  ];
+  // 창 전환(30↔60)·재조회로 열이 줄면 사라진 열은 mouseleave 를 내지 않는다 -- 범위 밖이면 툴팁 없음(BarChart 와 같은 가드).
+  const hovered = active !== null && active.key < n ? active : null;
   return (
-    <div className="relative">
+    <div>
       {/* 고밀도(>20열)는 gap 을 줄인다 -- 고정 gap 합이 컨테이너를 넘으면 가로
           스크롤(e2e L1 금지)이 생긴다. 열 자체는 flex-1+min-w-0 으로 줄어든다. */}
       <div role="img" aria-label={`데이터 온도 추이(${tempKey})`}
@@ -115,19 +144,16 @@ function TemperatureTrend({ points, tempKey }: {
           <button key={i} type="button"
                   aria-label={`${c.epoch === null ? "" : kstStampEpoch(c.epoch) + " · "}`
                     + `${c.point.requester ?? "—"}`}
-                  onMouseEnter={() => setActive(i)}
-                  onMouseLeave={() => setActive((a) => (a === i ? null : a))}
-                  onFocus={() => setActive(i)}
-                  onBlur={() => setActive((a) => (a === i ? null : a))}
+                  {...bind(i)}
                   className="flex min-w-0 max-w-12 flex-1 cursor-default flex-col
                              items-center gap-1">
             {c.stack === null ? (
               // 분포 없음(빈 트리·구형 리포트) -- 0% 스택으로 그리면 거짓이라 빈 트랙
               <div className={`h-24 w-full max-w-5 rounded-sm bg-accent/10
-                               ${active === i ? "ring-2 ring-accent/40" : ""}`} />
+                               ${active?.key === i ? "ring-2 ring-accent/40" : ""}`} />
             ) : (
               <div className={`flex h-24 w-full max-w-5 flex-col overflow-hidden
-                               rounded-sm ${active === i ? "ring-2 ring-accent/40" : ""}`}>
+                               rounded-sm ${active?.key === i ? "ring-2 ring-accent/40" : ""}`}>
                 {c.stack.map((s, bi) => (
                   <div key={bi} style={{ height: `${s.pct}%`,
                                          backgroundColor: tempColorOf(c.stack!.length)(bi) }} />
@@ -140,25 +166,10 @@ function TemperatureTrend({ points, tempKey }: {
           </button>
         ))}
       </div>
-      {/* 즉시 툴팁: active 일 때만(지연 0). 열 중심 x 에 앵커(끝열 넘침 방지),
-          바 위에 띄운다. pointer-events-none 이라 호버를 가로채지 않는다. */}
-      {active !== null && (() => {
-        const cx = ((active + 0.5) / n) * 100;
-        return (
-          <div role="tooltip"
-               className="pointer-events-none absolute bottom-full z-10 mb-1
-                          whitespace-nowrap rounded-md border border-line bg-surface
-                          px-2.5 py-1.5 text-xs shadow-soft"
-               style={{ left: `${cx}%`, transform: `translateX(${tooltipTranslateX(cx)})` }}>
-            {tipRows(cols[active]).map((r, ri) => (
-              <div key={ri} className="flex items-baseline gap-2">
-                <span className="text-muted">{r.k}</span>
-                <span className="ml-auto tabular-nums font-medium">{r.v}</span>
-              </div>
-            ))}
-          </div>
-        );
-      })()}
+      {hovered !== null && (
+        <TempTooltip point={cols[hovered.key].point} buckets={cols[hovered.key].buckets}
+                     tempKey={tempKey} anchor={hovered.rect} onClose={close} />
+      )}
     </div>
   );
 }
@@ -347,16 +358,27 @@ export function UsageAnalysis() {
   const [params, setParams] = useSearchParams();
   const storage = params.get("storage");
   const target = params.get("target");
+  // 필터(2026-10-02 사용자 요청 "스토리지 또는 경로 → 두 개 다"): 스토리지(정확히 일치)와 경로(부분 문자열)가
+  // 함께 걸린다. 경로 입력은 300ms 디바운스 -- 타이핑마다 GROUP BY 를 쏘지 않는다.
+  const [storageFilter, setStorageFilter] = useState("");
   const [input, setInput] = useState("");
-  const [q, setQ] = useState("");
-  // 검색 디바운스 300ms: 타이핑마다 GROUP BY 를 쏘지 않는다.
+  const [pathQ, setPathQ] = useState("");
+  // 최근 스캔 정렬(2026-10-02): 기본 내림차순(최근 것 위). 서버가 limit 전에 정렬한다(useUsage 주석).
+  const [order, setOrder] = useState<"desc" | "asc">("desc");
   useEffect(() => {
-    const t = setTimeout(() => setQ(input.trim()), 300);
+    const t = setTimeout(() => setPathQ(input.trim()), 300);
     return () => clearTimeout(t);
   }, [input]);
+  const filter: TargetFilter = { storage: storageFilter, path: pathQ, order };
 
-  const targets = useScanTargets(q);
+  const targets = useScanTargets(filter);
+  const storagesQ = useStorages();
+  const scanStoragesQ = useScanStorages();
+  // 선택지 = 등록 스토리지 ∪ 스캔 기록이 남은 이름(삭제·개명된 스토리지의 이력도 좁힐 수 있게, 리뷰). 미등록은 표시.
+  const registered = new Set((storagesQ.data ?? []).map((s) => s.storage_name));
+  const storageOptions = [...new Set([...registered, ...(scanStoragesQ.data ?? [])])].sort();
   const rows = targets.data ?? [];
+  const now = Date.now();
   const activeKey = storage !== null && target !== null ? `${storage}:${target}` : null;
   // 펼침은 한 번에 하나(사용자 요청 2026-09-14): 같은 행 재클릭 = 접기(URL 파라미터
   // 제거), 다른 행 클릭 = 펼침 이동. URL 이 진실이라 뒤로가기·새로고침도 같은 상태.
@@ -366,6 +388,29 @@ export function UsageAnalysis() {
   // 카드로 폴백해 링크가 죽지 않게 한다(목록 로딩 중엔 깜빡임 방지로 보류).
   const listed = rows.some((r) => `${r.storage_name}:${r.target}` === activeKey);
   const fallback = activeKey !== null && !targets.isLoading && !listed;
+  const filtered = storageFilter !== "" || pathQ !== "";
+  const COLS = 7;
+
+  // CSV 내보내기(2026-10-02 "사용량 분석 전체의 모든 정보, 항목당 한 줄"): 지금 필터·정렬 그대로, 행 상한 없이
+  // (서버 상한을 넘으면 잘렸다고 말한다). 조립은 usageCsv(화면과 같은 hot 비율·구간 규칙).
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const exportCsv = async () => {
+    setExporting(true); setExportMsg(null);
+    try {
+      const body = await fetchUsageExport(filter);
+      const at = Date.now();
+      const { columns, records } = buildUsageCsv(body.rows, storagesQ.data, at);
+      downloadCsv(usageCsvFilename(at), toCsv(columns, records));
+      setExportMsg({ ok: true, text: body.truncated
+        ? `상한 ${body.count.toLocaleString("ko-KR")}개까지만 내보냈습니다 — 필터로 범위를 좁히세요`
+        : `${body.count.toLocaleString("ko-KR")}개 항목을 내보냈습니다` });
+    } catch (e) {
+      setExportMsg({ ok: false, text: (e as ApiError).message ?? "내보내기에 실패했습니다" });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <section className="space-y-4">
@@ -375,29 +420,67 @@ export function UsageAnalysis() {
         모든 성공 scan 을 모아 봅니다. 경로를 클릭하면 그 아래에 상세가 펼쳐집니다.
       </p>
       <Card>
-        <div className="mb-3 flex items-center gap-2">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <select aria-label="스토리지 필터" value={storageFilter}
+                  onChange={(e) => setStorageFilter(e.target.value)}
+                  className="rounded-lg border border-line bg-surface px-3 py-1.5 text-sm">
+            <option value="">전체 스토리지</option>
+            {storageOptions.map((name) => (
+              <option key={name} value={name}>
+                {registered.has(name) || storagesQ.data === undefined ? name : `${name} (미등록)`}</option>
+            ))}
+          </select>
           <input value={input} onChange={(e) => setInput(e.target.value)}
                  aria-label="경로 검색"
-                 placeholder="스토리지·경로 검색…"
-                 className="w-72 rounded-lg border border-line bg-surface px-3 py-1.5 text-sm" />
+                 placeholder="경로 검색…"
+                 className="w-72 max-w-full rounded-lg border border-line bg-surface px-3 py-1.5 text-sm" />
           {targets.isFetching && <span className="text-muted text-xs">검색 중…</span>}
+          <Button type="button" variant="outline" className="ml-auto" disabled={exporting}
+                  onClick={() => { void exportCsv(); }}>
+            <Download aria-hidden className="mr-1 inline h-4 w-4" />
+            {exporting ? "내보내는 중…" : "CSV 내보내기"}
+          </Button>
         </div>
+        {exportMsg && (
+          <p role={exportMsg.ok ? "status" : "alert"}
+             className={`mb-2 text-sm ${exportMsg.ok ? "text-muted" : "text-bad"}`}>{exportMsg.text}</p>
+        )}
         {targets.isLoading ? <p className="text-muted">불러오는 중…</p>
          : targets.isError ? <p className="text-bad text-sm">{(targets.error as ApiError).message}</p>
          : rows.length === 0 ? (
           <p className="text-muted text-sm">
-            {q ? "검색과 일치하는 scan 타깃이 없습니다" : "성공한 scan 이 아직 없습니다"}
+            {filtered ? "검색과 일치하는 scan 타깃이 없습니다" : "성공한 scan 이 아직 없습니다"}
           </p>
         ) : (
           <Table>
             <thead><tr className="text-muted">
               <th className="py-2">스토리지</th><th>경로</th>
-              <th>스캔 횟수</th><th>최근 스캔</th>
+              {/* 2026-10-02 목록 컬럼: 최신 성공 scan 기준(서버 latest). 모름은 "—"(null≠0). */}
+              <th className="whitespace-nowrap text-right">실 사용량</th>
+              <th className="whitespace-nowrap text-right">파일 수</th>
+              <th className="whitespace-nowrap text-right" title={`atime 기준 ${HOT_AGE_MAX_DAYS}일 이내 용량 비중`}>
+                {`hot 비율(${HOT_AGE_MAX_DAYS}일)`}</th>
+              <th className="whitespace-nowrap text-right">스캔 횟수</th>
+              <th className="whitespace-nowrap" aria-sort={order === "desc" ? "descending" : "ascending"}>
+                {/* 정렬 토글(오름·내림). 서버가 정렬하므로 limit 밖의 오래된 타깃도 오름차순에서 보인다. */}
+                <button type="button" aria-label={`최근 스캔 정렬: ${order === "desc" ? "최신순" : "오래된순"}`}
+                        onClick={() => setOrder((o) => (o === "desc" ? "asc" : "desc"))}
+                        className="inline-flex items-center gap-1 hover:text-ink">
+                  최근 스캔
+                  {order === "desc"
+                    ? <ArrowDown aria-hidden className="h-3.5 w-3.5" />
+                    : <ArrowUp aria-hidden className="h-3.5 w-3.5" />}
+                </button>
+              </th>
             </tr></thead>
             <tbody>
               {rows.map((r) => {
                 const key = `${r.storage_name}:${r.target}`;
                 const active = key === activeKey;
+                const p = r.latest ?? null;
+                const files = p?.summary?.["total_files"];
+                const hot = hotRatio(p?.time_histograms?.["atime"]);
+                const age = ageDays(r.last_scan_at, now);
                 return (
                   <Fragment key={key}>
                     <tr className={`border-t border-black/5 ${active ? "bg-accent/5" : ""}`}>
@@ -415,14 +498,36 @@ export function UsageAnalysis() {
                                         active ? "rotate-90" : ""}`} />
                         {r.target}
                       </button></td>
-                      <td>{r.scan_count}</td>
-                      <td className="text-muted whitespace-nowrap">{kstStampOrDash(r.last_scan_at)}</td>
+                      <td className="whitespace-nowrap text-right tabular-nums"
+                          title={typeof p?.total_bytes === "number"
+                            ? `${p.total_bytes.toLocaleString("ko-KR")} B` : undefined}>
+                        {typeof p?.total_bytes === "number" ? humanBytes(p.total_bytes) : "—"}
+                        {/* 리포트를 못 읽은 최신 스캔: 용량은 러너가 DB 에 남긴 값(같은 규칙)이고 파일 수·hot 은 모름이다.
+                            펼친 상세의 "최신" 타일은 읽을 수 있는 리포트 기준이라 다를 수 있다 -- 그 사실을 표시한다(리뷰). */}
+                        {p?.report_readable === false && typeof p.total_bytes === "number" && (
+                          <span className="ml-1 text-[10px] text-muted"
+                                title="최신 스캔 리포트를 읽지 못해 잡 기록(DB)의 용량을 표시합니다">(DB)</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap text-right tabular-nums">
+                        {typeof files === "number" ? files.toLocaleString("ko-KR") : "—"}
+                      </td>
+                      <td className="whitespace-nowrap text-right tabular-nums">
+                        {hot === null ? "—" : `${Math.round(hot * 100)}%`}
+                      </td>
+                      <td className="text-right tabular-nums">{r.scan_count}</td>
+                      {/* 경과(2026-10-02): 지금부터 얼마나 전인지 + 30일 주황 · 90일 빨강. 정확한 시각은 옆에. */}
+                      <td className="whitespace-nowrap">
+                        <span className={staleClass(age)} aria-label="최근 스캔 경과">
+                          {agoText(r.last_scan_at, now)}</span>
+                        <span className="ml-2 text-xs text-muted">{kstStampOrDash(r.last_scan_at)}</span>
+                      </td>
                     </tr>
                     {active && (
                       // 펼침 행: 선택 행 바로 아래, 표 전체 폭. 왼쪽 강조선이 "이 행에
                       // 속한 상세"임을 시각적으로 묶는다.
                       <tr className="border-t border-black/5 bg-accent/[0.03]">
-                        <td colSpan={4} className="p-0">
+                        <td colSpan={COLS} className="p-0">
                           <div id={DETAIL_ID} role="region"
                                aria-label={`${r.storage_name}:${r.target} 상세`}
                                className="border-l-2 border-accent/40 px-4 py-3">
@@ -438,6 +543,10 @@ export function UsageAnalysis() {
             </tbody>
           </Table>
         )}
+        <p className="mt-2 text-xs text-muted">
+          {`실 사용량·파일 수·hot 비율 = 최근 성공 scan 기준(hot = atime ${HOT_AGE_MAX_DAYS}일 이내 용량 비중). `
+            + "최근 스캔이 30일 지나면 주황, 90일 지나면 빨강."}
+        </p>
       </Card>
 
       {fallback && storage !== null && target !== null && (

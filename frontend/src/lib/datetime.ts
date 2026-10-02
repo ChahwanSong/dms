@@ -37,3 +37,24 @@ export function kstStampEpoch(epochSec: number): string {
 export function kstDay(epochSec: number): string {
   return kstIso(epochSec * 1000).slice(5, 10);
 }
+
+// ISO-8601 UTC -> 지금(nowMs)부터의 경과 일수(소수 포함). 파싱 불가·null 이면 null(모름 ≠ 0일).
+// 사용량 분석의 "최근 스캔 얼마나 지났나"(2026-10-02) -- 색 임계(30일·90일)가 이 값을 본다.
+export function ageDays(iso: string | null | undefined, nowMs: number): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return null;
+  return Math.max(0, nowMs - ms) / 86_400_000;
+}
+
+// 경과 시간 한국어: 1분 미만 "방금", 1시간 미만 "N분 전", 하루 미만 "N시간 전", 그 이상은 **일 단위**("N일 전")
+// -- 화면의 색 임계(30·90일)와 같은 단위라 "몇 개월 전" 보다 바로 비교된다. 모르면 "—".
+export function agoText(iso: string | null | undefined, nowMs: number): string {
+  const d = ageDays(iso, nowMs);
+  if (d === null) return "—";
+  const minutes = Math.floor(d * 1440);
+  if (minutes < 1) return "방금";
+  if (minutes < 60) return `${minutes}분 전`;
+  if (d < 1) return `${Math.floor(d * 24)}시간 전`;
+  return `${Math.floor(d).toLocaleString("ko-KR")}일 전`;
+}
