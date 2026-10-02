@@ -95,6 +95,27 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 잡 러너 mpi-hostfile IP 전용(워커 준비 재시도) + `workers_unreachable` — **완료·실증**(2026-10-02, d154)
+
+프로덕션 간헐 실패: dscan rc 255, stderr `ssh: Could not resolve hostname <job>-worker-0.<job>: Temporary failure in name
+resolution`, hostfile 에 worker-0 만 이름·나머지는 IP. 원인 — 러너가 호스트당 getent 를 **한 번만** 하고 실패하면 DNS 이름을
+그대로 hostfile 에 썼고, ssh 대기는 90회 뒤 조용히 통과했다. Volcano svc 는 Ready 파드만 DNS 에 올리는데(publishNotReady-
+Addresses 없음) launcher 가 워커보다 먼저 Ready 가 되는 일이 흔해, 성공한 테스트베드 잡의 hostfile 에도 앞 번호 워커가 이름으로
+남아 있었다 — mpirun 시점 이름 조회가 한 번 더 실패하면(airgap 업스트림 SERVFAIL → EAI_AGAIN) 잡이 죽었다.
+- 러너 `_wait_workers_ready`: 호스트마다 getent 가 **IP 를 줄 때까지** + 그 IP 로 ssh 가 될 때까지 재시도, 전체 공유 제한
+  300초(`DMS_JR_WORKER_READY_TIMEOUT_SECONDS`). hostfile 은 **IP 만**(이름 폴백 제거 — ARCHITECTURE 불변식). 워커별
+  `DMS_JR_WORKER_READY host= ip= waited=` 줄.
+- 제한 초과면 mpirun 없이 `DMS_EXEC_REASON=workers_unreachable` + `DMS_JR_WORKER_UNREACHABLE host= stage=resolve|ssh` 를
+  남기고 summary returncode null. stepper 가 표식을 사유 코드 `workers_unreachable` 로 승격(폴백 preview_failed/
+  execution_failed, TIMED_OUT 무변경), 사유 코드 양쪽 등록.
+
+실증(d154 빌드 9ff1b82f / 커밋 41fe294, 잡 이미지 dms-mpifileutils:d154 릴리스): 테스트베드 scan 4회(dms_test·ldap-e2e 교대,
+4노드) 전부 Succeeded, mpi-hostfile 16줄 전부 IP, 워커 16개 중 15개가 IP 를 받기까지 1~2초 대기(옛 코드라면 이름으로 남았을
+워커). 실패 경로는 실 d154 이미지로 — 풀리지 않는 워커 이름 + 제한 6초: mpirun 없이 7초 뒤 exit 1, 표식·`stage=resolve
+ready=0/1` 줄, summary `returncode: null`, mpi-hostfile 미생성.
+
+테스트: 백엔드 2154 passed(러너 재시도·공유 제한·실패 표식·stepper 승격·사유 코드 커버리지), 적대적 리뷰 반영(뮤테이션 4/4 검출).
+
 ### ✅ 정책 카드 지표 한 줄 정렬 — **완료·실증**(2026-10-02, d152·d153)
 
 사용자 요청: 정책의 작업 종류별 카드(dsync·nsync 등)에서 병렬 실행·우선순위·큐 등이 두 줄에 걸쳐 있는데 한 줄에
