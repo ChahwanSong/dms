@@ -95,6 +95,30 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 포탈 서브네임(운영자 설정) + 탭 아이콘 — **완료·실증**(2026-10-02, d150·d151)
+
+사용자 요청 2건: ① 브라우저 탭 아이콘을 마블 '닥터 둠'으로 ② 포탈 메인 이름의 서브네임을 운영자가 설정(예:
+"AI Storage Portal - SSC", DAI-CAE, DAI-OA).
+- **서브네임**: `control_state.portal_subtitle`(CREATE + `_ensure_columns`), GET `/api/portal-info`(공개 — 로그인
+  화면도 그린다), PUT `/api/admin/portal-settings`(관리자, 감사 `portal_settings`, 40자·제어/서식 문자 거부 →
+  `invalid_portal_subtitle`). 관리 → **포탈 설정** 화면(미리보기·저장·지우기). 사이드바는 이름 아래 한 줄(240px 폭에
+  "메인 - 서브" 한 줄은 넘친다), 로그인 화면·브라우저 탭 제목은 "AI Storage Portal - SSC". 2026-08-20 의 "서브텍스트
+  없음" 결정을 이번 요청으로 바꿨다.
+- **탭 아이콘**: `frontend/public/favicon.svg`(번들 — 런타임 airgap, 외부 URL 0). 닥터 둠은 마블의 저작권·상표
+  캐릭터라 그 도안을 옮기지 않고 **오리지널 "강철 가면" 아이콘**을 넣었다 — 사용 허가된 이미지가 있으면 이 파일만
+  교체하면 된다(포탈 설정 화면에 안내).
+- **d150 실증에서 잡은 결함**: 서버는 200 image/svg+xml 을 줬는데 아이콘이 깨져 보였다 — SVG 주석 안의 `--` 가
+  XML 위반이라 브라우저 파싱 실패(빌드·타입검사·단위 테스트 어느 것도 못 잡음). d151 에서 고치고 `tests/test_favicon.py`
+  가 SVG 를 XML 로 읽고 외부 참조가 없음을 고정한다.
+
+실증(테스트베드 d150 빌드 104c82b6 / 커밋 07ba1fc → d151 빌드 8744be66 / 커밋 a0781ea): 실 Chrome(페이지 오류 0) —
+포탈 설정에서 "SSC" 저장 → 미리보기·사이드바 두 번째 줄 "SSC"·탭 제목 "AI Storage Portal - SSC"(대시보드로 이동해도
+유지)·쿠키 없는 로그인 화면 브랜드와 탭 제목 "AI Storage Portal - SSC" → 지우기로 원복(서브네임 없음, 탭 제목 "AI
+Storage Portal"). d151: /favicon.svg 200 image/svg+xml, 탭 아이콘·화면 미리보기 요청 둘 다 200, 이미지 naturalWidth
+150(그려짐), 16·32·64·128px 렌더 확인.
+
+테스트: 백엔드 2129 passed(d150) + test_favicon 3, 프런트 798 passed + tsc + 빌드(외부 URL 0), e2e 9 passed.
+
 ### ✅ sync chown 숫자 uid:gid 전용(이름·옛 배치 거부) + 대시보드 노드/리소스 한 줄 — **완료·실증**(2026-10-01, d149)
 
 사용자 결정 2건: ① chown 이름 처리는 "1번 — 서버가 숫자 아닌 chown 을 거부", 이름이 든 기존 배치도 거부 ② 대시보드
