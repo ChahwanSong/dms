@@ -81,6 +81,14 @@ spec:
         app.kubernetes.io/part-of: dms
     spec:
       serviceAccountName: dms-agent
+      # NoExecute taint 를 견딘다(2026-10-02 노드 배치 제외의 cordon 자동 반영): 관리자가 노드에 NoExecute taint 를
+      # 걸면 toleration 없는 에이전트는 즉시 쫓겨나 그 taint 를 보고하지 못하고, 마지막 보고(schedulable=true)가 남아
+      # DMS 가 그 노드로 계속 계획했다(적대적 리뷰). 에이전트는 자기 노드 상태(report.k8s_node)를 보고해야 하므로
+      # 남는다. NoSchedule 은 견디지 않는다 -- 그러면 control-plane 처럼 원래 에이전트가 없던 taint 노드에 새로
+      # 뜬다(cordon·NoSchedule 은 이미 도는 파드를 쫓아내지 않으므로 보고는 계속된다).
+      tolerations:
+        - operator: Exists
+          effect: NoExecute
       containers:
         - name: agent
           image: set-by-overlay.invalid/dms-agent:set-by-overlay

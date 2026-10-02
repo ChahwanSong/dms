@@ -339,6 +339,15 @@ def _apply_migrations(db: Database) -> None:
             job_id TEXT PRIMARY KEY,
             digest TEXT NOT NULL,
             created_at TEXT NOT NULL)""",
+        # 노드 배치 제외(2026-10-02, repositories/node_exclusions.py): 관리자가 고른 노드를 DMS 잡 배치 후보에서 뺀다.
+        # 행 = 제외 중. 빈 테이블 = 제외 없음(업그레이드 무해 -- sync_pairs 의 "빈 테이블 = 전부 거부"와 반대 방향).
+        # agent_nodes 에 플래그를 두지 않는 이유: 그 행은 보고마다 지우고 다시 넣는다(agents.ingest). 새 테이블이라
+        # _ensure_columns 불필요.
+        """CREATE TABLE IF NOT EXISTS node_exclusions (
+            node_name TEXT PRIMARY KEY,
+            reason TEXT,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL)""",
         f"""CREATE TABLE IF NOT EXISTS user_scan_paths (
             id {auto_pk},
             username TEXT NOT NULL,

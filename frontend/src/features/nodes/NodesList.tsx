@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { useNodes, useNodeReports } from "./useNodes";
+import { PlacementBadges, PlacementCell, k8sNodeState } from "./NodePlacement";
 import { Card } from "../../components/ui/Card";
 import { Table } from "../../components/ui/Table";
 import { Button } from "../../components/ui/Button";
@@ -187,9 +188,22 @@ function NodeDetail({ node }: { node: NodeInfo }) {
       {/* 상태 줄: 신선도·마지막 리포트(지연·시계 차이 경고)·프로브 방식 */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <Pill tone={node.fresh ? "ok" : "bad"}>{node.fresh ? "정상 보고" : "리포트 지연"}</Pill>
+        <PlacementBadges node={node} />
         <LastReport node={node} nowMs={nowMs} />
         {typeof probeMode === "string" && <span className="text-xs text-muted">프로브: {probeMode}</span>}
       </div>
+      {/* 배치 상태(2026-10-02): 관리자 배치 제외(사유·누가·언제)와 k8s 스케줄 가능 여부(에이전트 보고). k8s 를
+          모르면(조회 실패·옛 에이전트) "모름" -- 막지 않는다(서버 fail-open). */}
+      <p className="text-xs text-muted">
+        {`배치: ${node.exclusion
+          ? `제외됨 — 사유 ${node.exclusion.reason ?? "(없음)"} · ${node.exclusion.created_by} · ${kstStamp(node.exclusion.created_at)}`
+          : "포함"} · k8s 스케줄: ${(() => {
+            const k = k8sNodeState(node);
+            return k.schedulable === true ? "가능"
+              : k.schedulable === false ? `${k.transient ? "일시 불가" : "불가"}(${k.reason ?? "사유 모름"})`
+              : `모름${k.reason ? `(${k.reason})` : ""}`;
+          })()}`}
+      </p>
 
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
         <Tile label="CPU" value={num(os.cpu_count) !== null ? `${os.cpu_count}코어` : "—"} />
@@ -336,6 +350,8 @@ export function NodesList() {
   const nodes = q.data ?? [];
   const nowMs = Date.now();
   const staleCount = nodes.filter((n) => !n.fresh).length;
+  const excludedCount = nodes.filter((n) => n.exclusion
+    || (k8sNodeState(n).schedulable === false && !k8sNodeState(n).transient)).length;
 
   return (
     <section className="space-y-4">
@@ -344,6 +360,7 @@ export function NodesList() {
         {!q.isLoading && !q.isError && (
           <p className={`text-sm ${staleCount > 0 ? "text-bad font-medium" : "text-muted"}`}>
             {staleCount > 0 ? `리포트 지연 ${staleCount}대 / 전체 ${nodes.length}대` : `전체 ${nodes.length}대 정상 보고`}
+            {excludedCount > 0 && ` · 배치 제외·cordon ${excludedCount}대`}
           </p>
         )}
       </div>
@@ -360,7 +377,7 @@ export function NodesList() {
         <Table>
           <thead>
             <tr className="text-muted">
-              <th className="py-2">노드</th><th>상태</th><th>마운트</th><th>도구</th>
+              <th className="py-2">노드</th><th>상태</th><th>배치</th><th>마운트</th><th>도구</th>
               <th>CPU · 부하</th><th>메모리</th><th>상세</th><th>마지막 리포트</th>
             </tr>
           </thead>
@@ -373,6 +390,8 @@ export function NodesList() {
                   <td>{n.fresh
                     ? <Pill tone="ok">fresh</Pill>
                     : <span className="text-bad font-semibold">stale</span>}</td>
+                  {/* 배치 제외·다시 포함·cordon(NodePlacement) */}
+                  <td className="pr-3"><PlacementCell node={n} /></td>
                   <td><ReadyRatio items={asObject(n.report).mounts} /></td>
                   <td><ReadyRatio items={asObject(n.report).tools} /></td>
                   <td className="whitespace-nowrap tabular-nums">
@@ -396,6 +415,12 @@ export function NodesList() {
           빨간색 = 에이전트 리포트가 기준 시간(DMS_AGENT_REPORT_STALE_SECONDS, 기본 5분)을 넘겨 오지 않았거나,
           노드가 찍은 시각과 서버 수신 시각이 {CLOCK_SKEW_WARN_SECONDS / 60}분 넘게 다른 노드입니다(노드 시계 오차 또는
           프로브가 오래 걸림) — 리포트가 지연된 노드엔 잡이 배치되지 않습니다.
+        </p>
+        <p className="mt-1 text-xs text-muted">
+          배치 제외 = 관리자가 이 화면에서 뺀 노드(다시 포함으로 해제). cordon = k8s 에서 스케줄 불가(cordon·taint)로 보고된
+          노드(kubectl uncordon 으로 해제). 둘 다 새 작업이 배치되지 않고, 이미 그 노드로 계획됐거나 대기 중인 작업은
+          종료되며, 그 노드에서 이미 실행 중인 작업은 그대로 둡니다. 일시 불가 = 노드 압박·준비 안 됨 같은 k8s 일시
+          상태 — 새 작업만 다른 노드로 보내고 이미 계획된 작업은 기다립니다.
         </p>
         </>
       )}

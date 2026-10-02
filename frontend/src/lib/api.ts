@@ -122,6 +122,13 @@ export const REASON_MESSAGES: Record<string, string> = {
   operation_admin_only: "이 연산은 관리자만 가능합니다",
   account_disabled: "계정이 비활성화되었습니다",
   node_not_found: "노드를 찾을 수 없습니다",
+  // 노드 배치 제외(2026-10-02, repositories/node_exclusions.py). nodes_excluded = 계획 거부(쓸 수 있는 노드가 전부
+  // 막힘), node_excluded_at_step = 계획 뒤 배정 노드가 막혀 종단, node_excluded = 컨펌 시점에 같은 이유로 종단.
+  nodes_excluded: "실행할 수 있는 노드가 모두 배치에서 제외(또는 cordon)되어 있습니다 — 관리자에게 노드 상태를 확인하세요",
+  node_excluded_at_step: "이 작업이 배정된 노드가 배치에서 제외(또는 cordon)되어 종료했습니다 — 다시 제출하면 남은 노드로 실행됩니다",
+  node_excluded: "이 작업이 배정된 노드가 배치에서 제외(또는 cordon)되어 실행할 수 없어 종료했습니다 — 다시 제출하세요",
+  node_exclusion_not_found: "배치에서 제외된 노드가 아닙니다",
+  invalid_exclusion_reason: "제외 사유는 500자 이하여야 합니다",
   requester_disabled: "요청자 계정이 비활성화되었습니다",
   // 브리프 BACKEND_CODES 목록에는 없지만 src/dms/ grep으로 확인한, 현재도 실제로
   // 발생하는 코드들 -- 삭제하면 AccountsList.test.tsx 가

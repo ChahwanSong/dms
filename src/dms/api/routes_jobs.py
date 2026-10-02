@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from ..db import utc_now_iso
 from ..execution import ExecutionError
+from ..repositories.node_exclusions import blocked_nodes
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
 from .auth import Identity, require_user
@@ -65,6 +66,17 @@ def confirm_job(job_id: str, body: ConfirmBody, request: Request,
         raise HTTPException(status_code=409, detail="preview_expired")
     if body.fingerprint != job["preview_fingerprint"]:
         raise HTTPException(status_code=409, detail="fingerprint_mismatch")
+    # 노드 배치 제외·k8s 스케줄 불가(repositories/node_exclusions.py): 미리보기 뒤 후보 노드가 막혔으면 실행을 시작하지
+    # 않고 **이 자리에서 종단**한다 -- ConfirmPending 은 stepper 가 건드리지 않아, 409 만 주면 잡이 미리보기 유효기간
+    # (최대 24h) 동안 컨펌 불가인 채 남는다. preview_expired 분기와 같은 모양(종단 + 요청 화해 + 409). 관리자도 예외 없다.
+    wp = job["worker_pool"] if isinstance(job.get("worker_pool"), dict) else {}
+    blocked = blocked_nodes(repos, wp.get("candidates"))
+    if blocked:
+        repos.data_jobs.set_job_state(job_id, DataJobState.REJECTED,
+                                      reason_code="node_excluded_at_step", actor=identity.actor)
+        repos.requests.finalize_from_job(job["request_id"], DataJobState.REJECTED,
+                                         reason_code="node_excluded_at_step", actor=identity.actor)
+        raise HTTPException(status_code=409, detail="node_excluded")
     # 관리자 전용 스토리지(2026-09-30 사용 범위): 미리보기까지 끝난 사용자 잡이 그 사이 관리자
     # 전용으로 바뀐 스토리지를 쓰면 컨펌(= 실행 시작)을 막는다 -- 제출 게이트·planner 만으로는
     # ConfirmPending(최대 preview TTL) 동안 남은 잡이 사용자 손으로 실행된다(리뷰 발견).

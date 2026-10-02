@@ -270,3 +270,58 @@ def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
     except Exception:
         pass
     return metrics
+
+
+# --- k8s 노드 스케줄 가능 여부(2026-10-02 노드 배치 제외의 cordon 자동 반영) -------------------------------------
+# DMS 잡 파드는 tolerations 가 없다(execution_manifests) -- 그래서 cordon(spec.unschedulable) 이나 NoSchedule/NoExecute
+# taint 가 걸린 노드에는 잡이 서지 못하고, planner 가 그 노드를 후보로 고르면 gang 이 안 서서 Pending 에 멈춘다.
+# 에이전트(DaemonSet)는 cordon 을 자동 허용받아 계속 보고하므로, 자기 노드 상태를 보고에 실어 planner·stepper 가
+# 피하게 한다(repositories/node_exclusions.k8s_unschedulable). PreferNoSchedule 은 "가능하면 피함"이라 막지 않는다.
+_BLOCKING_TAINT_EFFECTS = ("NoSchedule", "NoExecute")
+_K8S_TIMEOUT_SECONDS = 3
+
+
+# kubelet·노드 수명주기 컨트롤러가 상태에 따라 붙였다 떼는 조건 taint -- 대개 저절로 풀린다(압박·준비 안 됨).
+# node.kubernetes.io/unschedulable 은 cordon 의 짝이라 여기 없다(관리자 조치).
+_CONDITION_TAINTS = frozenset(f"node.kubernetes.io/{k}" for k in (
+    "not-ready", "unreachable", "memory-pressure", "disk-pressure", "pid-pressure", "network-unavailable"))
+
+
+def k8s_schedulability(node: dict) -> dict:
+    """{"unschedulable": bool, "taints": [{key, value, effect}]} -> {"schedulable", "reason", "transient"}. 순수 함수.
+    transient=True 는 막는 taint 가 **전부** kubelet 조건 taint 일 때다 -- planner 는 피하지만 이미 계획된 잡은
+    종단하지 않는다(node_exclusions.k8s_hard_block: 일시 압박 하나에 계획된 잡들을 죽이지 않게, 리뷰)."""
+    if node.get("unschedulable"):
+        return {"schedulable": False, "reason": "cordoned", "transient": False}
+    blocking = [t for t in (node.get("taints") or [])
+                if isinstance(t, dict) and t.get("effect") in _BLOCKING_TAINT_EFFECTS]
+    if blocking:
+        text = ", ".join(f"{t.get('key')}{'=' + str(t['value']) if t.get('value') else ''}:{t.get('effect')}"
+                         for t in blocking)
+        transient = all(t.get("key") in _CONDITION_TAINTS for t in blocking)
+        return {"schedulable": False, "reason": f"taint {text}"[:200], "transient": transient}
+    return {"schedulable": True, "reason": None, "transient": False}
+
+
+def _read_node_incluster(node_name: str) -> dict:
+    # 지연 import: kubernetes 클라이언트는 dms 이미지에 있다(Dockerfile.dms '.[kubernetes]', 에이전트 이미지는 그 위).
+    import kubernetes
+    kubernetes.config.load_incluster_config()
+    node = kubernetes.client.CoreV1Api().read_node(node_name, _request_timeout=_K8S_TIMEOUT_SECONDS)
+    spec = node.spec
+    return {"unschedulable": bool(spec.unschedulable),
+            "taints": [{"key": t.key, "value": t.value, "effect": t.effect} for t in (spec.taints or [])]}
+
+
+def probe_k8s_node(node_name: str, *, read_node=None, environ=os.environ) -> dict:
+    """자기 노드의 k8s 스케줄 가능 여부. 모르면 schedulable=None(클러스터 밖·권한 없음·API 오류) -- planner 는
+    None 을 막지 않는다(fail-open: 조회 문제가 전 노드를 배치 불가로 만들면 안 된다). 권한은 dms-agent 의
+    ClusterRole nodes get(deploy/k8s/10-rbac.yaml)."""
+    if read_node is None:
+        if not environ.get("KUBERNETES_SERVICE_HOST"):
+            return {"schedulable": None, "reason": "not_in_cluster"}
+        read_node = _read_node_incluster
+    try:
+        return k8s_schedulability(read_node(node_name))
+    except Exception as exc:  # noqa: BLE001 -- 프로브는 보고를 막지 않는다(다른 프로브와 같은 계약)
+        return {"schedulable": None, "reason": f"probe_failed:{type(exc).__name__}"}

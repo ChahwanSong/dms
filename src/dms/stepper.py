@@ -12,6 +12,7 @@ from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import parse_execution_reason, parse_preflight_reason
 from .identity import PRIVILEGE_NEVER, privilege_policy
 from .placement import TOOL_TO_POLICY
+from .repositories.node_exclusions import blocked_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,17 @@ class ChownNameAtStep(Exception):
         super().__init__(problem)
 
 
+class NodeBlockedAtStep(Exception):
+    """제출 직전 노드 재검사(2026-10-02, repositories/node_exclusions.py). 후보 노드는 계획 시점에 worker_pool 에
+    굳는다 -- 그 뒤 관리자가 노드를 배치에서 빼거나 k8s 에서 cordon/taint 하면, 막힌 노드로 다음 단계를 제출하는
+    대신 여기서 끊어 종단시킨다(남은 노드로 다시 계획하지 않는다: 노드 수·프로세스 수·신원이 함께 굳어 있다).
+    k8s 쪽은 그대로 두면 gang 이 안 서서 Pending 에 영원히 멈춘다."""
+
+    def __init__(self, blocked: dict):
+        self.blocked = blocked
+        super().__init__(", ".join(f"{n}={r}" for n, r in sorted(blocked.items())))
+
+
 def identity_problem(ident) -> "str | None":
     """실행 신원의 모양 검사. 정상 = planner 가 ResolvedIdentity 를 asdict 한 것:
     uid/gid 는 int(bool 제외), username 은 비어 있지 않은 str, privileged 는
@@ -197,6 +209,9 @@ class JobStepper:
             req = self._repos.requests.get(job["request_id"])
             if privilege_policy(req) == PRIVILEGE_NEVER:
                 raise PrivilegeNotRequestedAtStep(job["request_id"])
+        # 노드 배치 제외·k8s 스케줄 불가(NodeBlockedAtStep docstring) -- 모든 제출 경로가 여기를 지난다. 제출 뒤
+        # 아직 스케줄 전(PENDING)인 단계는 폴링이 다시 본다(_raise_if_blocked).
+        self._raise_if_blocked(job)
         options = job["options"] if isinstance(job["options"], dict) else {}
         if job["tool"] in ("dsync", "nsync") and "chown" in options:
             problem = chown_problem(options["chown"])
@@ -430,6 +445,14 @@ class JobStepper:
                 message=f"{exc.problem} job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="chown_name_not_supported")
+        except NodeBlockedAtStep as exc:
+            # 계획 뒤 막힌 노드(관리자 배치 제외·cordon) -- 어느 노드가 왜 막혔는지는 이벤트로 남긴다(종단 사유
+            # 코드만으론 노드가 안 보인다). 배치 항목도 이 종단을 그대로 받는다(사용자 결정 2026-10-02: 종료).
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="node_excluded_at_step",
+                message=f"{exc} job={job['job_id']}", payload={"blocked": exc.blocked},
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="node_excluded_at_step")
         except PrivilegeNotRequestedAtStep:
             # 규칙 변경 전에 얼린 root 신원·변조 행 -- root 로 한 번이라도 제출되기 전에
             # 끊는다(재계획은 하지 않는다: 요청자가 의도를 다시 정해 새로 내야 한다).
@@ -470,10 +493,22 @@ class JobStepper:
         self._repos.data_jobs.set_job_state(jid, DataJobState.PREFLIGHT, actor="stepper")
         return "Preflight"
 
+    def _raise_if_blocked(self, job):
+        """제출됐지만 아직 스케줄되지 않은(PENDING) 단계의 노드 재검사(2026-10-02 적대적 리뷰). 제출 직전 검사만으로는
+        Volcano 큐·gang 대기 중에 막힌 노드를 못 본다 -- cordon 이면 gang 이 안 서서 영원히 멈추고, 배치 제외만이면
+        큐가 풀리는 순간 그 노드에 앉는다. 도구가 아직 시작 전이라 종단해도 잃을 작업이 없다(RUNNING 은 건드리지
+        않는다 -- 노드에서 이미 도는 잡은 그대로)."""
+        wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
+        blocked = blocked_nodes(self._repos, wp.get("candidates"))
+        if blocked:
+            raise NodeBlockedAtStep(blocked)
+
     def _poll_preflight(self, job):
         jid = job["job_id"]
         ref = (job["phase_refs"] or {}).get("preflight")
         status = self._exec.poll(ref)
+        if status == ExecStatus.PENDING:
+            self._raise_if_blocked(job)
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return "Preflight"
         if status == ExecStatus.SUCCEEDED:
@@ -521,6 +556,8 @@ class JobStepper:
             # 격리되고 다음 틱의 RUNNING 관측이 재시도한다(설계 §4). Completing
             # 등도 RUNNING 으로 접히므로(_VCJOB_PHASE) 이 값은 근사다(설계 §2.2).
             self._repos.data_jobs.record_sched_wait(job)
+        if status == ExecStatus.PENDING:
+            self._raise_if_blocked(job)
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return job["state"]
         if status == ExecStatus.SUCCEEDED:
@@ -573,6 +610,8 @@ class JobStepper:
         jid = job["job_id"]
         ref = (job["phase_refs"] or {}).get("preview")
         status = self._exec.poll(ref)
+        if status == ExecStatus.PENDING:
+            self._raise_if_blocked(job)
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return "PreviewRunning"
         if status == ExecStatus.SUCCEEDED:
@@ -625,6 +664,8 @@ class JobStepper:
                 return reclaimed
             return "Executing"
         status = self._exec.poll(refs["exec_preflight"])
+        if status == ExecStatus.PENDING:
+            self._raise_if_blocked(job)
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return "Executing"
         if status == ExecStatus.SUCCEEDED:

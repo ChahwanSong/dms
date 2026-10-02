@@ -118,6 +118,11 @@ export interface NodeReportBody {
 }
 export interface NodeInfo {
   node_name: string; reported_at: string; fresh: boolean; report: NodeReportBody;
+  // 노드 배치 제외(2026-10-02): 관리자가 뺀 노드면 사유·누가·언제, 아니면 null. 옵션(?) = 구형 서버·fixture 호환.
+  exclusion?: NodeExclusion | null;
+}
+export interface NodeExclusion {
+  node_name: string; reason: string | null; created_by: string; created_at: string;
 }
 export interface NodeReport { reported_at: string; report: NodeReportBody }
 export interface Batch {

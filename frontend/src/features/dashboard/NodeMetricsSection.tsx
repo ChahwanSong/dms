@@ -5,7 +5,8 @@ import { useNodes } from "./useDashboard";
 import { WindowSelect } from "./WindowSelect";
 import { Card } from "../../components/ui/Card";
 import { Sparkline, type SparklineDomain } from "../../components/ui/Sparkline";
-import type { Node, NodeMetricPoint, NodeMetricSeries } from "../../lib/types";
+import type { Node, NodeInfo, NodeMetricPoint, NodeMetricSeries } from "../../lib/types";
+import { PlacementBadges } from "../nodes/NodePlacement";
 import { kstStampEpoch } from "../../lib/datetime";
 
 // 에이전트 리포트는 스키마 검증 없이 저장된다 -- NodesList.tsx와 같은 방어 관용구
@@ -89,6 +90,8 @@ export function NodeMetricsSection() {
   const series = asArray<NodeMetricSeries>(metricsQ.data?.nodes);
   const reports = new Map(
     asArray<Node>(nodesQ.data).map((n) => [n.node_name, n.report] as const));
+  // 배치 제외·cordon 배지(2026-10-02) -- 노드 목록 응답의 exclusion·report.k8s_node 를 그대로 쓴다.
+  const nodeInfo = new Map(asArray<NodeInfo>(nodesQ.data).map((n) => [n.node_name, n] as const));
   return (
     <Card>
       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -126,7 +129,10 @@ export function NodeMetricsSection() {
         return (
           <div key={n.node_name} className="border-t border-black/5 py-3">
             <div className="flex items-center justify-between">
-              <span className="font-medium">{n.node_name}</span>
+              <span className="flex items-center gap-2">
+                <span className="font-medium">{n.node_name}</span>
+                {nodeInfo.has(n.node_name) && <PlacementBadges node={nodeInfo.get(n.node_name)!} />}
+              </span>
               <span className={`text-xs ${n.fresh ? "text-ok" : "text-bad"}`}>
                 {n.fresh ? "정상" : "지연"} · {ageText(n.reported_at)}
               </span>

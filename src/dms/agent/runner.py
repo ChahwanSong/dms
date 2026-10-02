@@ -8,7 +8,7 @@ import httpx
 from ..config import AGENT_TOOL_NAMES, AgentSettings
 from ..db import utc_now_iso
 from .directory import NslcdDirectory
-from .probes import (probe_artifact_base, probe_identities, probe_mounts,
+from .probes import (probe_artifact_base, probe_identities, probe_k8s_node, probe_mounts,
                      probe_os_metrics, probe_tools)
 
 
@@ -22,12 +22,14 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
                  identities_fn=None, os_fn=None, read_text=None,
                  net_dev_path="/proc/net/dev", virtual_net_path="",
                  artifact_base_path=None, artifact_base_fn=None,
-                 host_root="", self_mountinfo_text="", directory_status=None) -> dict:
+                 host_root="", self_mountinfo_text="", directory_status=None,
+                 k8s_node_fn=None) -> dict:
     mounts_fn = mounts_fn or probe_mounts
     tools_fn = tools_fn or probe_tools
     identities_fn = identities_fn or probe_identities
     os_fn = os_fn or probe_os_metrics
     artifact_base_fn = artifact_base_fn or probe_artifact_base
+    k8s_node_fn = k8s_node_fn or probe_k8s_node
     # 이 폴백을 지우면 probe_os_metrics 가 read_text=None 을 받는다 -- 그 안의
     # 호출은 전부 try/except Exception 이라 예외가 삼켜지고 **OS 지표 전체가
     # 조용히 null** 이 된다(테스트는 os_fn 을 주입하므로 초록을 유지한다).
@@ -49,6 +51,10 @@ def build_report(node_name, storages, probe_targets, *, mountinfo_text,
         # 대상 경로가 아직 없으면(부트스트랩) None.
         "artifact_base": artifact_base_fn(artifact_base_path, host_root=host_root,
                                           mountinfo_text=mountinfo_text),
+        # 2026-10-02 노드 배치 제외의 cordon 자동 반영(probes.probe_k8s_node): 자기 노드가 k8s 에서 스케줄 불가
+        # (cordon·NoSchedule/NoExecute taint)면 schedulable=False -- planner·stepper 가 이 노드를 후보에서 뺀다.
+        # null 은 모름(조회 실패) -- 막지 않는다.
+        "k8s_node": k8s_node_fn(node_name),
     }
     # 2026-09-29: nslcd 를 관리하는 에이전트만 싣는다 -- 이 키가 곧 "디렉터리 설정을
     # 받아 적용할 수 있다"는 능력 선언이고(서버는 키가 없으면 비밀번호를 보내지 않는다),

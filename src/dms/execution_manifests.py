@@ -463,8 +463,13 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
     env = _launcher_env(spec)
     env["DMS_JR_SOURCE_NODES"] = json.dumps(src_nodes)
     env["DMS_JR_DEST_NODES"] = json.dumps(dst_nodes)
+    # 런처도 후보 노드(출발 ∪ 목적지) 안에 둔다(2026-10-02 노드 배치 제외): 예전엔 affinity 가 없어 아무 노드에나
+    # 놓였다 -- 관리자가 배치에서 뺀(그러나 cordon 은 안 한) 노드에 런처가 앉을 수 있었다. primary 런처와 같은 규칙
+    # (워커와 같은 노드에 함께 있어도 된다 -- 산개는 워커 task 끼리만).
+    launcher_nodes = sorted(set(src_nodes) | set(dst_nodes))
     launcher = {"name": "launcher", "replicas": 1, "template": {"spec": {
         "restartPolicy": "Never",
+        "affinity": _node_affinity(launcher_nodes) if launcher_nodes else {},
         "containers": [_container("launcher", job_image,
             ["/usr/local/bin/dms-job-runner"], env, volumes)],
         "volumes": _pod_volumes(volumes)}}}

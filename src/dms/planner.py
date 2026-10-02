@@ -210,11 +210,15 @@ class Planner:
         fresh = self._repos.agents.fresh_reports(
             stale_seconds=self._settings.agent_report_stale_seconds, now_iso=now_iso)
         try:
+            # 노드 배치 제외(repositories/node_exclusions.py): 관리자가 막은 노드는 후보에서 빠진다(k8s 스케줄 불가는
+            # 보고의 k8s_node 에서 placement 가 직접 읽는다). 일부만 남으면 남은 노드로 바로 계획하고, 0대면
+            # nodes_excluded 로 즉시 거부한다 -- 기다려도 풀리지 않는 사유라 유예하지 않는다(_GRACE_REASONS 밖).
             placement = select_tool_and_candidates(
                 req["operation"], fresh, storage_name=payload.get("storage"),
                 source_storage=payload.get("source_storage"),
                 destination_storage=payload.get("destination_storage"),
-                owner=identity.username, privileged=identity.privileged)
+                owner=identity.username, privileged=identity.privileged,
+                excluded_nodes=self._repos.node_exclusions.excluded_names())
         except PlacementError as exc:
             # 신원 전파를 기다리면 적격이 될 노드가 있고 grace 안이면 아무 상태도
             # 바꾸지 않는다 -- 요청은 Pending 으로 남아 다음 틱(list_pending)에

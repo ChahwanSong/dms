@@ -37,6 +37,19 @@ class AgentsRepository:
         return [n for n in self.list_nodes(stale_seconds=stale_seconds, now_iso=now_iso)
                 if n["fresh"]]
 
+    def latest_reports(self, node_names) -> list[dict]:
+        """노드별 최신 보고(agent_nodes, 신선도 무관) -- 노드 배치 제외의 k8s 스케줄 불가 판정(node_exclusions.
+        blocked_nodes)이 후보 노드만 읽는다."""
+        names = list(dict.fromkeys(node_names))
+        if not names:
+            return []
+        params = {f"n{i}": n for i, n in enumerate(names)}
+        rows = self._db.query(
+            f"SELECT node_name, report, reported_at FROM agent_nodes WHERE node_name IN "
+            f"({', '.join(':' + k for k in params)})", params)
+        return [{"node_name": r["node_name"], "reported_at": r["reported_at"],
+                 "report": load_json(r["report"])} for r in rows]
+
     def node_exists(self, node_name: str) -> bool:
         return self._db.query_one(
             "SELECT 1 AS x FROM agent_nodes WHERE node_name = :n",
