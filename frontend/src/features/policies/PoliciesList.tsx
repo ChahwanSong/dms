@@ -33,7 +33,8 @@ export const TOOL_INFO: Record<string, { binary: string; help: string }> = {
 
 function Metric({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-line px-3 py-2">
+    // break-keep: 칸이 좁아지면 한국어가 낱자 단위로 끊겼다("낮춰집/니다", "프로세/스") -- 단어 사이에서만 줄바꿈.
+    <div className="rounded-lg border border-line px-3 py-2 break-keep">
       <div className="text-xs text-muted">{label}</div>
       <div className="mt-0.5 font-semibold tabular-nums">{value}</div>
       {sub && <div className="text-xs text-muted mt-0.5">{sub}</div>}
