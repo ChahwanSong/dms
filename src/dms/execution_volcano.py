@@ -301,8 +301,8 @@ class VolcanoExecutionAdapter:
     def read_log(self, ref):
         """(pod, log, waiting_reason) 목록. log=None 은 "얻을 수 없었다"(파드 소실/
         미기동)고, waiting_reason 은 왜 없는지의 별 채널이다(ImagePullBackOff 류)
-        -- null 을 합성 문자열로 뭉개지 않는다(설계 §2.1). 빈 문자열은 정상값이다
-        (launcher 는 대개 비어 있다 -- §1-3)."""
+        -- null 을 합성 문자열로 뭉개지 않는다(설계 §2.1). 빈 문자열은 정상값이다(러너가 그 지점까지 못 감 --
+        2026-10-02 부터 정상 launcher 로그엔 워커마다 DMS_JR_WORKER_READY 줄, 준비 실패 시 DMS_EXEC_REASON= 마커)."""
         prefix, name = ref.split("/", 1)
         if prefix == "vcjob":
             return self._read_vcjob_logs(name)
