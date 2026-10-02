@@ -216,3 +216,11 @@ test("인증 메일 실패·상한은 한국어 사유로 보인다", async () =
   await userEvent.click(screen.getByRole("button", { name: "인증번호 받기" }));
   expect(await screen.findByText(/인증 메일을 보내지 못했습니다/)).toBeInTheDocument();
 });
+
+
+test("로그인 화면 브랜드에 서브네임이 붙는다(AI Storage Portal - SSC)", async () => {
+  server.use(http.get("/api/portal-info", () => HttpResponse.json({ subtitle: "SSC" })));
+  renderLogin();
+  expect(await screen.findByText("AI Storage Portal - SSC")).toBeInTheDocument();
+  await waitFor(() => expect(document.title).toBe("AI Storage Portal - SSC"));
+});

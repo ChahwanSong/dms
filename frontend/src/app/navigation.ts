@@ -3,7 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Ban, Boxes, Database, FilePlus, FolderCog, Hammer,
   Layers, LayoutDashboard, ListTodo, Mail, Rocket, ScrollText,
-  Server, Shield, SlidersHorizontal, TrendingUp, Users,
+  Server, Settings, Shield, SlidersHorizontal, TrendingUp, Users,
 } from "lucide-react";
 
 // 메뉴는 **데이터가 진실**이다(슬라이스 31 T2): 항목 추가·이동은 아래 배열 한 줄이고,
@@ -77,6 +77,8 @@ export const NAVIGATION: NavSection[] = [
           { path: "/admin/audit", label: "감사 로그", icon: ScrollText },
           // 메일 설정(2026-10-01): 인증 메일(Knox 릴레이) 연결값 -- 계정 셀프서비스의 운영 설정이라 관리 그룹.
           { path: "/admin/mail", label: "메일 설정", icon: Mail },
+          // 포탈 설정(2026-10-02): 포탈 이름의 서브네임(사이트 표시 이름).
+          { path: "/admin/portal", label: "포탈 설정", icon: Settings },
         ],
       },
     ],

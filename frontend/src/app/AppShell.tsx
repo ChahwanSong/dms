@@ -9,6 +9,7 @@ import { UserPanel } from "./UserPanel";
 import { Breadcrumb } from "./Breadcrumb";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { loadNavCollapsed, saveNavCollapsed } from "../lib/navState";
+import { PORTAL_NAME, usePortalDocumentTitle } from "../features/portal/usePortal";
 
 // L4(e2e layout.ts): 링크 높이 < 2×line-height. text-sm(20px)이면 한계 40px 라
 // DS 의 44px 항목이 위반이다 -- leading-6(24px)으로 한계를 48px 로 올리고
@@ -70,6 +71,7 @@ function Group({ group, collapsed, onToggle, activePath }: {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const me = useMe();
+  const subtitle = usePortalDocumentTitle();
   const isAdmin = me.data?.role === "admin";
   const { pathname } = useLocation();
   // 사이드바 활성 항목(최장 일치 하나) -- NavItemLink 주석 참고.
@@ -111,10 +113,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* 브랜드 블록 -- div 다: 셸에 h1 을 두면 e2e visit() 의 heading level:1
             매칭이 흐려진다(화면이 h1 을 소유한다, 전제 #4). */}
         <div className="bg-navy text-white px-5 py-4 shrink-0">
-          {/* 서브텍스트 없음(사용자 결정 2026-08-20): 타이틀 한 줄 + 아이콘만 */}
+          {/* 타이틀 + 아이콘, 운영자가 정한 서브네임이 있으면 그 아래 한 줄(2026-10-02 사용자 요청 -- 2026-08-20 의
+              "서브텍스트 없음" 을 바꿨다). 사이드바 폭(240px)에 "메인 - 서브" 한 줄은 넘쳐 두 줄로 그리고, 탭 제목·
+              로그인 화면은 "AI Storage Portal - SSC" 한 줄이다. */}
           <div className="flex items-center gap-2.5">
             <HardDrive className="h-6 w-6 shrink-0 text-white/85" aria-hidden />
-            <div className="text-base font-bold tracking-wide leading-tight whitespace-nowrap">AI Storage Portal</div>
+            <div className="min-w-0">
+              <div className="text-base font-bold tracking-wide leading-tight whitespace-nowrap">{PORTAL_NAME}</div>
+              {subtitle && (
+                <div aria-label="포탈 서브네임" className="mt-0.5 truncate text-xs font-medium text-white/80" title={subtitle}>
+                  {subtitle}
+                </div>
+              )}
+            </div>
           </div>
         </div>
         <nav className="flex-1 overflow-y-auto p-3 space-y-1">

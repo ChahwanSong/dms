@@ -148,6 +148,17 @@ class ControlRepository:
             self._audit("job_image", "set", "job_image", before,
                         {"job_image": image}, actor)
 
+    def set_portal_subtitle(self, subtitle, *, actor):
+        """포탈 서브네임 전용 UPDATE(2026-10-02). set_job_image 와 같은 분리 원칙(무조건 UPDATE 의 NULL 함정
+        복제 금지, changed_by/at 무접촉). 감사에는 이 값만 싣는다(control_state 전체 행이 아니라)."""
+        before = self.control_state() or {}
+        with self._db.transaction():
+            self._db.execute(
+                "UPDATE control_state SET portal_subtitle = :s WHERE id = 1", {"s": subtitle})
+            self._audit("portal_settings", "set", "portal_subtitle",
+                        {"portal_subtitle": before.get("portal_subtitle")},
+                        {"portal_subtitle": subtitle}, actor)
+
     def set_artifact_base(self, uri, *, actor, forced=False, affected_jobs=0):
         """아티팩트 base 전용 UPDATE(슬라이스 18 설계 §2.1). set_control_state 에
         얹지 않는다: 그 UPDATE 는 build_node_name = :bn 을 **무조건** 쓰므로 인자를

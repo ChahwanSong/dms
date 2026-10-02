@@ -439,6 +439,9 @@ def _apply_migrations(db: Database) -> None:
             artifact_base_check_ok INTEGER,
             artifact_base_check_reason TEXT,
             artifact_base_check_at TEXT,
+            -- 포탈 서브네임(2026-10-02): "AI Storage Portal - SSC" 의 "SSC" 같은 사이트 표시 이름.
+            -- NULL = 없음(메인 이름만). 운영자가 포탈(관리 → 포탈 설정)에서 바꾸는 값이라 여기.
+            portal_subtitle TEXT,
             changed_by TEXT,
             changed_at TEXT)""",
         f"""CREATE TABLE IF NOT EXISTS audit_log (
@@ -629,6 +632,8 @@ def _ensure_columns(db):
         ("control_state", "artifact_base_check_ok", "INTEGER"),
         ("control_state", "artifact_base_check_reason", "TEXT"),
         ("control_state", "artifact_base_check_at", "TEXT"),
+        # 포탈 서브네임(2026-10-02) -- 이중 경로 규약.
+        ("control_state", "portal_subtitle", "TEXT"),
         ("builds", "log_text", "TEXT"),
         ("builds", "seq", "INTEGER"),
         ("releases", "reason_code", "TEXT"),
