@@ -182,3 +182,13 @@ test("카드는 한 줄에 하나씩, 제목은 정책 키(dsync·nsync 등) -- 
   const rm = screen.getByRole("article", { name: "rm 정책" });
   expect(within(rm).getByText("drm")).toBeInTheDocument();
 });
+
+test("지표 다섯 칸(병렬·우선순위·큐·타임아웃 둘)은 한 격자 -- 넓으면 한 줄, 좁으면 자연 줄바꿈(2026-10-02)", async () => {
+  server.use(http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)));
+  wrap();
+  const dsync = await screen.findByRole("article", { name: "dsync 정책" });
+  const grid = within(dsync).getByLabelText("정책 지표");
+  expect(grid.className).toContain("grid-cols-[repeat(auto-fit,minmax(11rem,1fr))]");
+  const labels = Array.from(grid.children).map((c) => c.firstElementChild?.textContent);
+  expect(labels).toEqual(["병렬 실행", "우선순위(기본 / 최대)", "큐", "미리보기 타임아웃", "실행 타임아웃"]);
+});

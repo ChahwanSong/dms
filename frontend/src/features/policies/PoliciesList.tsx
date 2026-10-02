@@ -64,7 +64,10 @@ function PolicyCard({ p }: { p: Policy }) {
         </div>
         <PolicyDialog policy={p} trigger={<Button variant="ghost">수정</Button>} />
       </header>
-      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+      {/* 지표 다섯 칸(병렬·우선순위·큐·타임아웃 둘)은 한 격자(사용자 요청 2026-10-02: "한 줄에 다 들어갈 것 같은데
+          두 줄에 걸쳐 있다 -- 부족하면 자연스럽게 두 줄로"). auto-fit + 최소 폭 11rem: 넓으면 한 줄 다섯 칸,
+          좁아지면 칸 수가 줄며 줄바꿈된다(고정 3열+2열 두 격자였다). */}
+      <div aria-label="정책 지표" className="mt-3 grid gap-2 grid-cols-[repeat(auto-fit,minmax(11rem,1fr))]">
         {/* nsync 는 최대 노드가 **면당**(소스·목적지 각각) 상한이다(placement.resolve_fanout) --
             합계는 2배. dsync·scan·rm 은 한 노드 집합이라 1배. */}
         {p.tool === "nsync" ? (
@@ -79,8 +82,6 @@ function PolicyCard({ p }: { p: Policy }) {
         <Metric label="우선순위(기본 / 최대)" value={`${p.default_priority} / ${p.max_priority}`}
                 sub="요청이 최대보다 높으면 최대로 낮춰집니다" />
         <Metric label="큐" value={p.queue} sub="Volcano 큐" />
-      </div>
-      <div className="mt-2 grid gap-2 sm:grid-cols-2">
         <Metric label="미리보기 타임아웃"
                 value={p.preview_timeout_seconds === null ? "없음" : humanSeconds(p.preview_timeout_seconds)} />
         <Metric label="실행 타임아웃" value={humanSeconds(p.execution_timeout_seconds)} />
