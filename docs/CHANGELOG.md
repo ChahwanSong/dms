@@ -95,6 +95,37 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 노드 배치 제외 + 다시 포함 + k8s cordon 자동 반영 — **완료·실증**(2026-10-02, d158)
+
+사용자 요청: "특정 노드를 스케줄러에서 제외 -- 문제가 생긴 노드에 더 이상 job 이 안 들어가게" → 조사(DMS 는 노드를 k8s 가
+아니라 planner 가 에이전트 보고로 골라 required affinity 로 고정 -- `kubectl cordon` 만으로는 막히지 않고 그 노드가 낀 잡은
+gang 이 안 서서 Pending 에 영원히 멈췄다) → 결정 "포탈 배치 제외 후 cordon 자동 반영, 배치 항목은 종료, 다시 포함도".
+- 포탈 노드 화면 「배치」 열: 「배치 제외」(사유)·「다시 포함」, 배지(배치 제외·cordon·일시 불가), 대시보드 배지, 감사
+  `node_exclusion`. 새 테이블 `node_exclusions`.
+- 에이전트가 자기 노드의 cordon·NoSchedule/NoExecute taint 를 `report.k8s_node` 로 보고(kubelet 조건 taint 는 transient --
+  새 계획만 피함). 에이전트 DaemonSet 은 NoExecute taint 를 견딘다.
+- 강제: planner 후보(남은 노드로 계획, 막힘이 원인일 때만 0대 → `nodes_excluded`), 제출 직전·제출 뒤 스케줄 전(PENDING)
+  재검사 → `node_excluded_at_step` 종단(배치 항목도 종료), 컨펌 409 `node_excluded` + 종단. 노드에서 이미 실행 중인 잡은
+  그대로. nsync 런처도 후보 안으로.
+- 적대적 리뷰(19 에이전트): 제출됐지만 스케줄 전 단계 미검사, NoExecute 에 에이전트가 쫓겨나 반영 실패, 일시 조건 taint 로
+  계획된 잡을 죽이던 것, sync 거부 사유 오귀속, PostgreSQL NUL 500 등 반영.
+
+배포: d158(빌드 412f7522 / 커밋 21438af, dms-mpifileutils+dms+dms-agent 세 이미지). 릴리스 dms-api·dms-controller·
+dms-agent·job-image d158, 에이전트 DaemonSet 의 NoExecute toleration 은 렌더한 오버레이의 DaemonSet 문서만 `kubectl apply`
+(diff 가 toleration 추가 하나뿐임을 확인 -- 전체 `apply -k` 는 불변 migrate Job 때문에 실패).
+
+실증(실 Chrome·API, 페이지 오류 0): 에이전트 5대 모두 실제 read_node 로 `schedulable: true` 보고(null 아님). 기준 scan
+후보 w1~w4 → 포탈에서 dms-w1 배치 제외(사유 입력) → 배지·머리글 "배치 제외·cordon 1대"·감사 → scan 후보 w2~w5 →
+sync 를 ConfirmPending 까지 보낸 뒤 첫 후보 dms-w2 제외 → 컨펌 409 `node_excluded`·잡/요청 Rejected(`node_excluded_at_step`)
+→ 다시 포함 → scan 후보 w1~w4 복귀. `kubectl cordon dms-w1` → 에이전트 보고 `schedulable: false (cordoned)` → 포탈 cordon
+배지 → scan 이 w1 을 피해 w2~w5 로 Succeeded(예전엔 영원히 Pending) → uncordon → 복귀.
+
+참고(기존 동작): 에이전트 재시작 직후 첫 보고는 마운트 목록이 비어(부트스트랩) 그 노드가 잠시(다음 보고까지 ≤60초) 후보에서
+빠진다 -- 에이전트 롤아웃 직후 scan 후보가 3대로 줄어든 것으로 확인.
+
+테스트: 백엔드 2237 passed(노드 제외 29: placement·planner·stepper 제출 직전/PENDING/RUNNING·컨펌·API·감사·에이전트 프로브·
+배치 항목, DaemonSet toleration·RBAC 계약), 프런트 847 passed + tsc + 빌드(외부 URL 0), e2e 9 passed.
+
 ### ✅ 사용량 분석 개선(목록 컬럼·필터·정렬·온도 툴팁·CSV) + 히스토그램 즉시 툴팁 — **완료·실증**(2026-10-02, d156·d157)
 
 사용자 요청 다섯 가지 + 작업 중 추가 두 가지("막대에 마우스 올리면 바로 -- 지금은 몇 초 기다려야", "배치작업의 히스토그램도").
