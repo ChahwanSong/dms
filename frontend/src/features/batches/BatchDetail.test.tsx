@@ -195,7 +195,10 @@ test("성공 scan 항목 펼침: 조회 발사 + 온도 섹션(사람 표기·�
   expect(c.calls).toBe(1);
   // atime 기준 bytes 히스토그램이 기본 — 값은 사람 표기(humanBytes)
   const chart = screen.getByRole("img", { name: "데이터 온도(atime) 히스토그램" });
-  expect(screen.getByText("2.0 KiB")).toBeInTheDocument();
+  // 막대 위 용량 글자는 없고(잘리던 문제, 2026-10-02) 값은 툴팁 -- 사람 표기(humanBytes) + 비중
+  expect(within(chart).queryByText("2.0 KiB")).toBeNull();
+  expect(chart.querySelector('[title="[0d,1d]: 2.0 KiB (100%)"]')).not.toBeNull();
+  expect(chart.querySelector('[title="[1d,7d]: 0 B (0%)"]')).not.toBeNull();
   // 온도 색: 첫 막대(hot)=빨강, 끝 막대(cold)=파랑 — 막대 수와 무관한 비례 사상
   const fills = chart.getElementsByClassName("rounded-t");
   expect(fills[0]).toHaveStyle({ backgroundColor: "#dc2626" });
@@ -235,8 +238,8 @@ test("mtime 토글: 펼친 항목의 atime 차트가 mtime 으로 바뀐다", as
   await userEvent.click(screen.getByRole("button", { name: "mtime" }));
   const mtimeChart = screen.getByRole("img", { name: "데이터 온도(mtime) 히스토그램" });
   expect(screen.queryByRole("img", { name: "데이터 온도(atime) 히스토그램" })).toBeNull();
-  // 차트 범위로 좁힌다 -- 실 사용량 라인(4.0 KiB, mtime 합과 동일 출처)과 겹친다
-  expect(within(mtimeChart).getByText("4.0 KiB")).toBeInTheDocument();
+  // 값은 툴팁(막대 위 글자 없음)
+  expect(mtimeChart.querySelector('[title="[0d,1d]: 4.0 KiB (100%)"]')).not.toBeNull();
 });
 
 test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량", async () => {
@@ -250,8 +253,8 @@ test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량", async 
   const labels = within(chart).getAllByText("100%");
   expect(labels).toHaveLength(2);
   expect(labels[0].getAttribute("title")).toBe("누적 2.0 KiB (100%)");
-  // 캡션: 선의 의미 한 줄 + 총 용량 값
-  expect(screen.getByText("선 = hot쪽부터의 누적 용량 비중 · 총 2.0 KiB"))
+  // 캡션: 선의 의미 한 줄 + 총 용량 값 + 툴팁 안내
+  expect(screen.getByText("선 = hot쪽부터의 누적 용량 비중 · 총 2.0 KiB · 막대에 마우스를 올리면 구간별 용량"))
     .toBeInTheDocument();
 });
 
@@ -279,10 +282,11 @@ test("크기 분포(10버킷): 값=파일 개수 + 누적 % 오버레이(온도 
   await userEvent.click(await screen.findByRole("button", { name: "항목 0 상세" }));
   const el = await screen.findByRole("img", { name: "파일 크기 분포" });
   const chart = within(el);
-  // 값 라벨 = 개수(정수 그대로 — 용량이 아니다). 3·1×4·0×5 = 10버킷 전부 표기.
-  expect(chart.getByText("3")).toBeInTheDocument();
-  expect(chart.getAllByText("1")).toHaveLength(4);
-  expect(chart.getAllByText("0")).toHaveLength(5);       // 0 은 정상값(빈 버킷)
+  // 막대 위 개수 글자는 없다(2026-10-02) -- 개수는 툴팁: 정수 그대로 + 비중(3/7=43%), 0 은 정상값(빈 버킷)
+  expect(chart.queryByText("3")).toBeNull();
+  expect(el.querySelector('[title="0~4K: 3 (43%)"]')).not.toBeNull();
+  expect(el.querySelector('[title="4K~64K: 1 (14%)"]')).not.toBeNull();
+  expect(el.querySelector('[title="4T~: 0 (0%)"]')).not.toBeNull();
   // 누적 오버레이: 3·1·1·1·1·0… → 43%·57%·71%·86%·100%(이후 100% 유지)
   expect(el.querySelector("polyline")).not.toBeNull();
   expect(chart.getAllByText(/%$/).map((n) => n.textContent))
@@ -291,8 +295,9 @@ test("크기 분포(10버킷): 값=파일 개수 + 누적 % 오버레이(온도 
   // 툴팁의 누적값은 개수 표기(바이트가 아니다)
   expect(chart.getAllByText("100%")[0].getAttribute("title"))
     .toBe("누적 7개 (100%)");
-  // 캡션: 선의 의미 + 총 개수(온도 차트 캡션과 같은 문법, 단위만 개수)
-  expect(screen.getByText("선 = 작은 파일부터의 누적 개수 비중 · 총 7개"))
+  // 총 개수는 제목에(회색 캡션에 묻히지 않게), 캡션은 선의 의미 + 툴팁 안내
+  expect(screen.getByRole("heading", { name: "파일 크기 분포(개수) · 총 7개" })).toBeInTheDocument();
+  expect(screen.getByText("선 = 작은 파일부터의 누적 개수 비중 · 막대에 마우스를 올리면 구간별 개수"))
     .toBeInTheDocument();
 });
 
@@ -521,7 +526,7 @@ test("펼침 패널: 섹션마다 구분선·여백 — 정보 덩어리가 뭉�
   await screen.findByText("데이터 온도(hot/cold)");
   // 네 덩어리(요청 정보 dl · 온도 · 크기 분포 · 요약)가 각각 제 섹션에 산다
   for (const title of ["요청 정보", "데이터 온도(hot/cold)",
-                       "파일 크기 분포(개수)", "요약"]) {
+                       "파일 크기 분포(개수) · 총 7개", "요약"]) {
     const heading = screen.getByText(title);
     const section = heading.closest("section");
     expect(section, `${title} 섹션`).not.toBeNull();

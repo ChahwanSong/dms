@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { render, screen, within } from "@testing-library/react";
+import { describe, expect, it, test } from "vitest";
 import { BarChart, barLayout, labelStep, cumulativeLayout,
          cumulativeLabelBottom } from "./BarChart";
 
@@ -287,4 +287,21 @@ describe("BarChart 빈 상태", () => {
     render(<BarChart data={[]} />);
     expect(screen.getByText("집계된 잡 없음")).toBeInTheDocument();
   });
+});
+
+
+test("valueLabels=false: 막대 위 값 글자 없이 툴팁에 값 + 비중(%)(2026-10-02)", () => {
+  render(<BarChart data={[{ label: "a", value: 3 }, { label: "b", value: 1 }]} label="v"
+                   formatValue={(n) => `${n} GiB`} valueLabels={false} />);
+  const chart = screen.getByRole("img", { name: "v" });
+  expect(within(chart).queryByText("3 GiB")).toBeNull();
+  expect(chart.querySelector('[title="a: 3 GiB (75%)"]')).not.toBeNull();
+  expect(chart.querySelector('[title="b: 1 GiB (25%)"]')).not.toBeNull();
+});
+
+test("valueLabels 기본(true)은 기존 그대로 -- 값 글자 + 비중 없는 툴팁", () => {
+  render(<BarChart data={[{ label: "a", value: 3 }]} label="d" formatValue={(n) => `${n} GiB`} />);
+  const chart = screen.getByRole("img", { name: "d" });
+  expect(within(chart).getByText("3 GiB")).toBeInTheDocument();
+  expect(chart.querySelector('[title="a: 3 GiB"]')).not.toBeNull();
 });
