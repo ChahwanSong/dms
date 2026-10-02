@@ -178,7 +178,7 @@ def scan_path_stats(path_id: int, request: Request,
             raise HTTPException(status_code=503, detail="scan_report_too_large")
         try:
             report = json.loads(f["content"])
-        except ValueError:
+        except (ValueError, RecursionError):     # 깊은 중첩 리포트(routes_usage._read_digest 주석)
             continue
         if not isinstance(report, dict):
             continue            # null·[]·"x"도 유효한 JSON이다

@@ -31,6 +31,10 @@ _ROW_COLUMNS_SANS_DIAG = (
     "exec_submitted_at, sched_wait_seconds, created_at, updated_at")
 
 
+# recent_scans_by_target 의 (storage, target) 쌍 묶음 크기 -- 한 문장의 자리표시자 600 개.
+_PAIR_CHUNK = 300
+
+
 def _guard_component(actor: str) -> str:
     return actor if actor in _KNOWN_COMPONENTS else "api"
 
@@ -127,25 +131,103 @@ class DataJobsRepository:
             {"s": DataJobState.SUCCEEDED.value, "sn": storage_name, "n": limit})
         return [self._hydrate(r) for r in rows]
 
-    def scan_targets(self, *, q: "str | None" = None, limit: int = 100) -> list[dict]:
-        """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
-        분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). q 는 경로·
-        스토리지 부분 문자열 검색이고 LIKE 와일드카드는 리터럴로 이스케이프한다
-        (검색어 '100%' 가 전부 매치로 새면 검색이 거짓말이 된다). 정렬은 최근
-        스캔이 위 — 화면의 기본 질문이 "요즘 뭘 스캔했나"다."""
-        params: dict = {"s": DataJobState.SUCCEEDED.value, "n": limit}
+    @staticmethod
+    def _scan_target_where(params: dict, *, q=None, storage=None, path=None) -> str:
+        """사용량 분석 타깃 필터(목록·내보내기·최근 잡 조회가 같은 한 벌). q = 경로·스토리지 어느 쪽이든 부분 문자열
+        (구 단일 검색), storage = 스토리지 **정확히 일치**, path = 경로 부분 문자열 -- storage 와 path 는 함께 걸린다
+        (2026-10-02 사용자 요청: "두 개 다 필터"). LIKE 와일드카드는 리터럴로 이스케이프한다(검색어 '100%' 가 전부
+        매치로 새면 검색이 거짓말이 된다)."""
+        params["s"] = DataJobState.SUCCEEDED.value
         where = "operation = 'scan' AND state = :s AND target IS NOT NULL"
+
+        def like(v):
+            return "%" + v.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_") + "%"
         if q:
-            esc = q.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
             where += r" AND (target LIKE :q ESCAPE '\' OR storage_name LIKE :q ESCAPE '\')"
-            params["q"] = f"%{esc}%"
+            params["q"] = like(q)
+        if storage:
+            where += " AND storage_name = :sn"
+            params["sn"] = storage
+        if path:
+            where += r" AND target LIKE :p ESCAPE '\'"
+            params["p"] = like(path)
+        return where
+
+    def scan_targets(self, *, q: "str | None" = None, storage: "str | None" = None,
+                     path: "str | None" = None, order: str = "desc",
+                     limit: "int | None" = 100) -> list[dict]:
+        """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
+        분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). 필터는
+        _scan_target_where. 정렬은 최근 스캔 기준 — 기본 내림차순(화면의 기본 질문이
+        "요즘 뭘 스캔했나"), order="asc" 면 오래된 것부터(2026-10-02: 오래 안 본
+        타깃 찾기). 정렬은 반드시 SQL 에서 한다 -- limit 뒤에 화면이 뒤집으면 "최근 N개
+        중 가장 오래된 것"이 되어 진짜 오래된 타깃이 안 보인다. limit=None 은 전부
+        (CSV 내보내기). first_scan_at = 최초 성공 스캔 완료 시각."""
+        params: dict = {}
+        where = self._scan_target_where(params, q=q, storage=storage, path=path)
+        direction = "ASC" if order == "asc" else "DESC"
+        tail = ""
+        if limit is not None:
+            tail = " LIMIT :n"
+            params["n"] = limit
         return self._db.query(
             f"""SELECT storage_name, target, COUNT(*) AS scan_count,
+                       MIN(updated_at) AS first_scan_at,
                        MAX(updated_at) AS last_scan_at
                 FROM data_jobs WHERE {where}
                 GROUP BY storage_name, target
-                ORDER BY last_scan_at DESC, storage_name, target LIMIT :n""",
+                ORDER BY last_scan_at {direction}, storage_name, target{tail}""",
             params)
+
+    def scan_storage_names(self) -> list[str]:
+        """성공 scan 기록이 있는 storage_name 전부(사용량 분석 스토리지 필터의 선택지 -- 등록이 지워진 이름 포함)."""
+        rows = self._db.query(
+            """SELECT DISTINCT storage_name FROM data_jobs
+               WHERE operation = 'scan' AND state = :s AND target IS NOT NULL
+                     AND storage_name IS NOT NULL
+               ORDER BY storage_name""",
+            {"s": DataJobState.SUCCEEDED.value})
+        return [r["storage_name"] for r in rows]
+
+    def recent_scans_by_target(self, *, per_target: int = 1, q: "str | None" = None,
+                               storage: "str | None" = None, path: "str | None" = None,
+                               pairs: "list[tuple[str, str]] | None" = None) -> dict:
+        """(storage_name, target) -> 그 타깃의 최근 성공 scan 잡 행 목록(최신순, 최대 per_target 개). 사용량 분석
+        목록(최신 1건의 용량·파일 수·hot 비율)과 내보내기(최신 + 직전 1건의 증감)가 쓴다. 최신 판정은
+        succeeded_scans_for_target 과 같은 근거(updated_at DESC, job_id DESC). pairs 를 주면 그 타깃만(목록이
+        보이는 행만 읽게) -- 빈 목록은 빈 결과."""
+        if pairs is not None:
+            # 큰 목록(내보내기 수천 타깃)은 묶음으로 나눠 묻는다 -- 한 문장에 자리표시자 수천 개를 싣지 않고, 필터에
+            # 걸린 전 타깃이 아니라 **고른** 타깃의 잡만 읽는다(잘린 내보내기가 상한 밖 타깃까지 끌어오지 않게, 리뷰).
+            out: dict = {}
+            for i in range(0, len(pairs), _PAIR_CHUNK):
+                out.update(self._recent_scans(per_target, pairs=pairs[i:i + _PAIR_CHUNK]))
+            return out
+        return self._recent_scans(per_target, q=q, storage=storage, path=path)
+
+    def _recent_scans(self, per_target, *, q=None, storage=None, path=None, pairs=None) -> dict:
+        params: dict = {"k": per_target}
+        where = self._scan_target_where(params, q=q, storage=storage, path=path)
+        if pairs is not None:
+            ors = []
+            for i, (sn, t) in enumerate(pairs):
+                ors.append(f"(storage_name = :ps{i} AND target = :pt{i})")
+                params[f"ps{i}"], params[f"pt{i}"] = sn, t
+            where += f" AND ({' OR '.join(ors)})"
+        rows = self._db.query(
+            f"""SELECT * FROM (
+                    SELECT {_ROW_COLUMNS_SANS_DIAG},
+                           ROW_NUMBER() OVER (PARTITION BY storage_name, target
+                                              ORDER BY updated_at DESC, job_id DESC) AS rn
+                    FROM data_jobs WHERE {where}) ranked
+                WHERE rn <= :k ORDER BY storage_name, target, rn""",
+            params)
+        out: dict = {}
+        for r in rows:
+            r.pop("rn", None)
+            job = self._hydrate(r)
+            out.setdefault((job["storage_name"], job["target"]), []).append(job)
+        return out
 
     def succeeded_scans_for_target(self, storage_name: str, target: str,
                                    *, limit: int = 30) -> list[dict]:

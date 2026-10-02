@@ -172,6 +172,19 @@ export interface RequestScanStats {
 export interface ScanTargetRow {
   storage_name: string; target: string; scan_count: number;
   last_scan_at: string | null;
+  // 2026-10-02: 최초 성공 스캔 시각 + 최신 성공 scan 1건(목록 컬럼 실 사용량·파일 수·hot 비율의 원천).
+  // 옵션(?) = 구형 서버·기존 fixture 호환. latest null = 성공 scan 잡을 못 찾음(경합).
+  first_scan_at?: string | null;
+  latest?: UsagePoint | null;
+}
+// 사용량 분석 전체 내보내기(GET /api/admin/usage/export). previous = 최신 직전 성공 scan(증감 계산용).
+export interface UsageExportRow extends ScanTargetRow {
+  latest: UsagePoint | null;
+  // 직전 성공 scan -- 증감용 값만(서버가 행 크기를 줄인다). total_bytes null = 모름.
+  previous: { job_id: string; request_id: string; finished_at: string | null; total_bytes: number | null } | null;
+}
+export interface UsageExport {
+  generated_at: string; count: number; truncated: boolean; rows: UsageExportRow[];
 }
 export interface UsagePoint {
   job_id: string; request_id: string; finished_at: string | null;
@@ -182,6 +195,12 @@ export interface UsagePoint {
   summary: Record<string, number>;
   time_histograms: Record<string, HistogramBucket[]>;
   requester: string | null;
+  // 2026-10-02(리포트 요약 캐시와 함께): 옵션(?) = 구형 서버 호환. report_readable=false 면 리포트를 못 읽어
+  // summary·히스토그램이 비고 total_bytes 는 DB 값(러너 bytes_count)으로 대신한다.
+  file_size_histogram?: HistogramBucket[];
+  broken_paths_total?: number | null;
+  broken_paths_limit?: number | null;
+  report_readable?: boolean;
 }
 export interface UsageHistory {
   storage_name: string; target: string; points: UsagePoint[];

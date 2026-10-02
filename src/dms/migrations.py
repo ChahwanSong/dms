@@ -330,6 +330,15 @@ def _apply_migrations(db: Database) -> None:
             service_name TEXT,
             updated_at TEXT,
             updated_by TEXT)""",
+        # 사용량 분석 리포트 요약 캐시(2026-10-02, repositories/scan_digests.py): 성공 scan 잡 1건의 dscan-report.json
+        # 을 **모양 투영한 결과**(routes_usage._project_report)를 잡 단위로 둔다. 리포트는 성공 종단 잡의 불변 산출물이라
+        # 한 번 읽으면 끝이다 -- 목록(타깃마다 최신 스캔의 용량·파일 수·hot 비율)·내보내기(전 타깃)가 매번 아티팩트를
+        # 수백 건 열지 않게 한다. 투영 뒤 값만 저장하므로(경로 문자열 배제) 원본 리포트의 신뢰 경계를 넘지 않는다.
+        # 새 테이블이라 _ensure_columns 불필요.
+        """CREATE TABLE IF NOT EXISTS scan_report_digests (
+            job_id TEXT PRIMARY KEY,
+            digest TEXT NOT NULL,
+            created_at TEXT NOT NULL)""",
         f"""CREATE TABLE IF NOT EXISTS user_scan_paths (
             id {auto_pk},
             username TEXT NOT NULL,

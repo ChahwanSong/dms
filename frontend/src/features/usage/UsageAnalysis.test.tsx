@@ -4,9 +4,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
-import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
-import { UsageAnalysis, hotRatio, pointEpoch, stackLayout } from "./UsageAnalysis";
+import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
+import { UsageAnalysis, hotRatio, pointEpoch, stackLayout, staleClass } from "./UsageAnalysis";
 import type { UsagePoint } from "../../lib/types";
+import { downloadCsv } from "../../lib/csvExport";
+
+// 다운로드(Blob·a.click)는 jsdom 밖 동작이라 가로챈다 -- 직렬화(toCsv)는 진짜를 쓴다.
+vi.mock("../../lib/csvExport", async (orig) => ({
+  ...(await orig<typeof import("../../lib/csvExport")>()), downloadCsv: vi.fn() }));
 
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
@@ -83,8 +88,13 @@ const HISTORY = {
   skipped_unreadable: 1,
 };
 
+const STORAGES = [{ storage_name: "cephfs-dms", mount_path: "/cephfs", managed_root: "/cephfs/dms",
+                   backend_type: "cephfs", enabled: 1, status: "Ready", status_detail: null }];
+
 function renderAt(path = "/admin/usage") {
   server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/admin/usage/scan-storages", () => HttpResponse.json(["cephfs-dms"])),
     http.get("/api/admin/usage/scan-targets", () => HttpResponse.json(TARGETS)),
     http.get("/api/admin/usage/scan-history", () => HttpResponse.json(HISTORY)),
   );
@@ -191,9 +201,16 @@ test("온도 추이 열 호버 즉시 툴팁(시간·요청자·용량)", async 
   const col = within(chart).getAllByRole("button")[0];
   await userEvent.hover(col);
   const tip = screen.getByRole("tooltip");
-  expect(tip).toHaveTextContent("시간");
-  expect(tip).toHaveTextContent("요청자");
-  expect(tip).toHaveTextContent("실 사용량");
+  // 2026-10-02: 시각(제목)·요청자·실 사용량·파일 수·hot 비율 + 색별 구간 범례(구간·용량·비중)
+  expect(tip).toHaveTextContent("2026-08-22 21:00:00 KST");     // j1 generated_at_epoch 1787400000
+  expect(tip).toHaveTextContent("요청자alice");
+  expect(tip).toHaveTextContent("실 사용량1.0 KiB");
+  expect(tip).toHaveTextContent("파일 수7개");
+  expect(tip).toHaveTextContent("hot 비율(atime 180일)100%");
+  const legend = within(tip).getByLabelText("구간별 용량");
+  expect(legend).toHaveTextContent("1일 이내1.0 KiB100%");      // [0d,1d] 버킷: 사람 말 구간 + 용량 + 비중
+  expect(legend).toHaveTextContent("1~2일0 B0%");
+  expect(tip).toHaveTextContent("빨강 → 파랑 = 최근 → 오래됨");
   await userEvent.unhover(col);
   expect(screen.queryByRole("tooltip")).toBeNull();
 });
@@ -266,11 +283,13 @@ test("표시 창 선택: 최근 60건 클릭 -> limit=60 으로 재조회", asyn
   await waitFor(() => expect(limits).toEqual(["30", "60"]));
 });
 
-test("검색어가 쿼리로 나간다(디바운스 후)", async () => {
+test("경로 검색어가 path 파라미터로 나간다(디바운스 후)", async () => {
   let lastQ: string | null = null;
   server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/admin/usage/scan-storages", () => HttpResponse.json([])),
     http.get("/api/admin/usage/scan-targets", ({ request }) => {
-      lastQ = new URL(request.url).searchParams.get("q");
+      lastQ = new URL(request.url).searchParams.get("path");
       return HttpResponse.json([]);
     }),
   );
@@ -282,4 +301,154 @@ test("검색어가 쿼리로 나간다(디바운스 후)", async () => {
   await userEvent.type(screen.getByLabelText("경로 검색"), "artif");
   await waitFor(() => expect(lastQ).toBe("artif"));
   expect(screen.getByText("검색과 일치하는 scan 타깃이 없습니다")).toBeInTheDocument();
+});
+
+
+// ---- 2026-10-02: 목록 컬럼·경과 색·정렬·필터 조합·CSV 내보내기 ----
+
+const DAY = 86_400_000;
+const isoAgo = (days: number) => new Date(Date.now() - days * DAY).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+function renderList(rows: unknown[], onTargets?: (u: URL) => void, onExport?: (u: URL) => unknown,
+                    scanStorages: string[] = ["cephfs-dms"]) {
+  server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/admin/usage/scan-storages", () => HttpResponse.json(scanStorages)),
+    http.get("/api/admin/usage/scan-targets", ({ request }) => {
+      onTargets?.(new URL(request.url));
+      return HttpResponse.json(rows);
+    }),
+    http.get("/api/admin/usage/export", ({ request }) =>
+      HttpResponse.json(onExport?.(new URL(request.url)) ?? { generated_at: "", count: 0, truncated: false, rows: [] })),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter><UsageAnalysis /></MemoryRouter></QueryClientProvider>);
+}
+
+const LIST = [
+  { storage_name: "cephfs-dms", target: "fresh", scan_count: 2, last_scan_at: isoAgo(2),
+    latest: point({ total_bytes: 3 * 1024 * 1024, summary: { total_files: 12345 },
+                    time_histograms: { atime: [
+                      { bucket: "[0d,1d]", min_age_days: 0, max_age_days: 1, bytes: 30 },
+                      { bucket: "[181d,365d]", min_age_days: 181, max_age_days: 365, bytes: 70 }] } }) },
+  { storage_name: "cephfs-dms", target: "stale", scan_count: 1, last_scan_at: isoAgo(45), latest: null },
+  { storage_name: "cephfs-dms", target: "ancient", scan_count: 1, last_scan_at: isoAgo(100),
+    latest: point({ total_bytes: null, summary: {}, time_histograms: {}, report_readable: false }) },
+];
+
+test("목록 컬럼: 실 사용량·파일 수·hot 비율(최신 scan) -- 모름은 —", async () => {
+  renderList(LIST);
+  const row = (await screen.findByRole("button", { name: "fresh" })).closest("tr")!;
+  expect(row).toHaveTextContent("3.0 MiB");
+  expect(row).toHaveTextContent("12,345");
+  expect(row).toHaveTextContent("30%");                         // atime ≤180일 30/(30+70)
+  for (const t of ["stale", "ancient"]) {
+    const r = screen.getByRole("button", { name: t }).closest("tr")!;
+    expect(within(r).getAllByText("—")).toHaveLength(3);         // 용량·파일 수·hot 모두 모름(0 아님)
+  }
+  expect(screen.getByRole("columnheader", { name: "hot 비율(180일)" })).toBeInTheDocument();
+});
+
+test("최근 스캔 경과: N일 전 + 30일 주황 · 90일 빨강", async () => {
+  renderList(LIST);
+  await screen.findByRole("button", { name: "fresh" });
+  const ago = (t: string) =>
+    within(screen.getByRole("button", { name: t }).closest("tr")!).getByLabelText("최근 스캔 경과");
+  expect(ago("fresh")).toHaveTextContent("2일 전");
+  expect(ago("fresh").className).not.toMatch(/orange|text-bad/);
+  expect(ago("stale")).toHaveTextContent("45일 전");
+  expect(ago("stale").className).toMatch(/text-orange-600/);
+  expect(ago("ancient")).toHaveTextContent("100일 전");
+  expect(ago("ancient").className).toMatch(/text-bad/);
+  expect(staleClass(29.9)).not.toMatch(/orange/);
+  expect(staleClass(30)).toMatch(/orange/);
+  expect(staleClass(90)).toMatch(/text-bad/);
+  expect(staleClass(null)).toBe("text-muted");
+});
+
+test("최근 스캔 정렬 토글: 서버 order 파라미터(desc ↔ asc) + aria-sort", async () => {
+  const orders: (string | null)[] = [];
+  renderList(LIST, (u) => orders.push(u.searchParams.get("order")));
+  const sortBtn = await screen.findByRole("button", { name: "최근 스캔 정렬: 최신순" });
+  expect(sortBtn.closest("th")).toHaveAttribute("aria-sort", "descending");
+  await userEvent.click(sortBtn);
+  await waitFor(() => expect(orders[orders.length - 1]).toBe("asc"));
+  expect(screen.getByRole("button", { name: "최근 스캔 정렬: 오래된순" }).closest("th"))
+    .toHaveAttribute("aria-sort", "ascending");
+  expect(orders[0]).toBe("desc");
+});
+
+test("스토리지 필터와 경로 검색이 함께 걸린다", async () => {
+  let last: URL | null = null;
+  renderList(LIST, (u) => { last = u; });
+  await screen.findByRole("button", { name: "fresh" });
+  await userEvent.selectOptions(screen.getByLabelText("스토리지 필터"), "cephfs-dms");
+  await userEvent.type(screen.getByLabelText("경로 검색"), "proj");
+  await waitFor(() => {
+    expect(last!.searchParams.get("storage")).toBe("cephfs-dms");
+    expect(last!.searchParams.get("path")).toBe("proj");
+  });
+});
+
+test("CSV 내보내기: 지금 필터·정렬로 export 를 받아 항목당 한 줄 CSV 를 내려받는다", async () => {
+  let exportUrl: URL | null = null;
+  const exportBody = {
+    generated_at: "2026-10-02T00:00:00Z", count: 1, truncated: false,
+    rows: [{ ...LIST[0], first_scan_at: isoAgo(10),
+             previous: point({ job_id: "j0", total_bytes: 2 * 1024 * 1024 }) }],
+  };
+  renderList(LIST, undefined, (u) => { exportUrl = u; return exportBody; });
+  await screen.findByRole("button", { name: "fresh" });
+  await userEvent.click(screen.getByRole("button", { name: /최근 스캔 정렬/ }));       // asc 로 바꾼 뒤 내보내기
+  await userEvent.click(screen.getByRole("button", { name: "CSV 내보내기" }));
+  await waitFor(() => expect(downloadCsv).toHaveBeenCalledTimes(1));
+  expect(exportUrl!.searchParams.get("order")).toBe("asc");
+  const [filename, text] = vi.mocked(downloadCsv).mock.calls[0];
+  expect(filename).toMatch(/^dms-usage-\d{8}-\d{4}\.csv$/);
+  const [header, line] = (text as string).split("\r\n");
+  const cols = header.split(",");
+  const val = (c: string) => line.split(",")[cols.indexOf(c)];
+  expect(val("abs_path")).toBe("/cephfs/dms/fresh");
+  expect(val("total_bytes")).toBe(String(3 * 1024 * 1024));
+  expect(val("delta_bytes_vs_previous")).toBe(String(1024 * 1024));
+  expect(val("hot_ratio_atime_180d_pct")).toBe("30");
+  expect(val("total_files")).toBe("12345");
+  expect(val("atime_bytes_181d-365d")).toBe("70");
+  expect(await screen.findByRole("status")).toHaveTextContent("1개 항목을 내보냈습니다");
+});
+
+test("CSV 내보내기: 서버 상한을 넘으면 잘렸다고 말한다", async () => {
+  vi.mocked(downloadCsv).mockClear();
+  renderList(LIST, undefined, () => ({ generated_at: "", count: 1, truncated: true, rows: [LIST[0]] }));
+  await screen.findByRole("button", { name: "fresh" });
+  await userEvent.click(screen.getByRole("button", { name: "CSV 내보내기" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("상한 1개까지만 내보냈습니다");
+});
+
+
+test("스토리지 선택지 = 등록 ∪ 스캔 기록 이름(삭제된 스토리지는 '미등록' 표시)", async () => {
+  renderList(LIST, undefined, undefined, ["cephfs-dms", "old-gpfs"]);
+  await screen.findByRole("button", { name: "fresh" });
+  const sel = screen.getByLabelText("스토리지 필터");
+  await waitFor(() => expect(within(sel).getByRole("option", { name: "old-gpfs (미등록)" })).toBeInTheDocument());
+  expect(within(sel).getByRole("option", { name: "cephfs-dms" })).toBeInTheDocument();
+});
+
+test("최신 리포트를 못 읽은 행: 용량은 DB 기록값임을 표시, 파일 수·hot 은 —", async () => {
+  renderList([{ storage_name: "cephfs-dms", target: "dbonly", scan_count: 1, last_scan_at: isoAgo(1),
+                latest: point({ total_bytes: 2048, summary: {}, time_histograms: {}, report_readable: false }) }]);
+  const row = (await screen.findByRole("button", { name: "dbonly" })).closest("tr")!;
+  expect(row).toHaveTextContent("2.0 KiB(DB)");
+  expect(within(row).getAllByText("—")).toHaveLength(2);
+});
+
+test("온도 툴팁: mtime 축이면 그 축의 180일 이내 비중과 atime hot 비율을 따로 말한다", async () => {
+  renderAt("/admin/usage?storage=cephfs-dms&target=artifacts");
+  await screen.findByRole("img", { name: "데이터 온도 추이(atime)" });
+  await userEvent.click(screen.getByRole("button", { name: "mtime" }));
+  const chart = await screen.findByRole("img", { name: "데이터 온도 추이(mtime)" });
+  await userEvent.hover(within(chart).getAllByRole("button")[0]);
+  const tip = screen.getByRole("tooltip");
+  expect(tip).toHaveTextContent("hot 비율(atime 180일)100%");   // atime [1024, 0]
+  expect(tip).toHaveTextContent("mtime 180일 이내100%");         // mtime [512, 512] 둘 다 ≤2일
 });

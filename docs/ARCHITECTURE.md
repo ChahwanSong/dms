@@ -227,6 +227,7 @@ controller.run_forever가 monotonic 스케줄로 루프별 리스(loop:<name>)�
 | `/home/mason/dms-dev/dms/.claude/worktrees/dms-slice22plus/src/dms/repositories/accounts.py` | accounts: scrypt 해시(_hash/_verify_password), create/set_role/set_disabled/delete 전부 감사 동반 트랜잭션, delete는 user_scan_paths 동반 삭제, active_admin_count(마지막 관리자 잠금 방지 재료). |
 | `/home/mason/dms-dev/dms/.claude/worktrees/dms-slice22plus/src/dms/repositories/agents.py` | agent_reports(이력)+agent_nodes(노드별 최신 1행)를 ingest 한 트랜잭션으로 동기 유지, fresh 판정은 문자열 시각 비교, prune_reports 배치 소진 루프. |
 | `/home/mason/dms-dev/dms/.claude/worktrees/dms-slice22plus/src/dms/repositories/batches.py` | batches+batch_items: create(헤더+항목 N행 원자 INSERT), 항목 상태 전이(_touch_item), bump_counts 증분 갱신, reset_failed_items(재시도용 Queued 복귀+카운트 차감). |
+| `src/dms/repositories/scan_digests.py` + `src/dms/api/routes_usage.py` | 사용량 분석 리포트 요약 캐시(2026-10-02): 성공 scan 잡 1건의 dscan-report.json **투영 결과**를 job_id 단위로 `scan_report_digests` 에 둔다(리포트는 불변이라 무효화 없음, 못 읽은 리포트는 두지 않음, 읽을 때마다 재투영 -- DB 신뢰 경계). 목록(`scan-targets`: 타깃마다 최신 1건 = 실 사용량·파일 수·hot 비율 컬럼)·내보내기(`export`: 전 타깃 최신+직전)·이력이 같은 캐시를 쓴다. 필터 storage(정확)·path(부분)·정렬 order 는 SQL 에서 limit 전에 건다(`DataJobsRepository._scan_target_where`). |
 | `/home/mason/dms-dev/dms/.claude/worktrees/dms-slice22plus/src/dms/repositories/scan_paths.py` | user_scan_paths: covers() 조상-경로 커버 판정(순수 함수), add(사전 존재 확인→INSERT→id 재조회), get_owned/delete_owned 소유자 스코프 강제. |
 
 ### 불변식 (위반하면 깨진다)
