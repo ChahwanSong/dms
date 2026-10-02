@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <!-- AI Storage Portal 탭 아이콘(2026-10-02): 오리지널 "강철 가면" 도안. 특정 캐릭터의 디자인을 옮긴 것이
-       아니다. 바꾸려면 이 파일을 교체하고 포탈 이미지를 다시 빌드한다(런타임 airgap -- 외부 URL 금지). -->
+       아니다. 바꾸려면 이 파일을 교체하고 포탈 이미지를 다시 빌드한다(런타임 airgap: 외부 URL 금지).
+       주의: XML 주석 안에는 하이픈 두 개를 연달아 쓸 수 없다(쓰면 브라우저가 아이콘을 못 그린다). -->
   <defs>
     <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#f1f5f9"/>
