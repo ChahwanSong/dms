@@ -87,7 +87,7 @@ export function hexTint(hex: string, alpha: number): string {
 const TRACK_ALPHA = 0.1;
 
 export function BarChart({ data, label, emptyText = "집계된 잡 없음", formatValue,
-                           colorOf, cumulative }: {
+                           colorOf, cumulative, valueLabels = true }: {
   data: BarDatum[]; label?: string; emptyText?: string;
   // 값의 사람 표기(bytes 등). 기본은 숫자 그대로 -- 기존 소비자(잡 통계) 무영향
   // 인 하위호환 옵션이다.
@@ -100,6 +100,10 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
   // 히스토그램 ≤9버킷 소비자용, 고밀도는 점·라벨이 겹쳐 못 읽으니 범위 밖).
   // format 은 툴팁의 누적값 사람 표기. 미지정 시 기존 렌더 완전 불변.
   cumulative?: { format: (n: number) => string };
+  // 저밀도 막대 위 값 글자(2026-10-02 사용자 요청: 배치 scan 의 용량·개수 글자가 길면 좁은 열에서 잘리거나 안
+  // 보였다). false 면 막대 위 글자를 빼고 값은 마우스를 올렸을 때(툴팁)만 -- 툴팁에 전체 대비 비중(%)도 싣는다.
+  // 기본 true(기존 소비자 무변경).
+  valueLabels?: boolean;
 }) {
   const fmt = formatValue ?? ((n: number) => String(n));
   // 트랙/막대의 클래스·inline 스타일 한 벌 -- 저밀도·고밀도 렌더가 같은 규칙을
@@ -129,6 +133,10 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
     // 밖(루트) absolute 라 트랙 % 를 직접 못 쓴다 -- 루트 아래엔 버킷 라벨
     // 행이 더 있어 % 가 트랙과 안 맞는다.
     const topRem = (bottomPct: number) => r2((100 - bottomPct) * 0.05);
+    const total = data.reduce((acc, d) => acc + d.value, 0);
+    const share = (v: number) => (total > 0 ? ` (${Math.round((v / total) * 100)}%)` : "");
+    const columnTitle = (b: { label: string; value: number }) =>
+      valueLabels ? `${b.label}: ${fmt(b.value)}` : `${b.label}: ${fmt(b.value)}${share(b.value)}`;
     return (
       // 열 폭 상한(max-w-16)이 저밀도의 핵심 -- 버킷 1~2개가 컨테이너를 채우며
       // 괴물 블록이 되는 것을 막고, 남는 폭은 오른쪽 여백으로 둔다.
@@ -145,15 +153,17 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
         {bars.map((b, i) => {
           const color = colorOf?.(i, b.value);
           return (
-          <div key={i} title={`${b.label}: ${fmt(b.value)}`}
+          <div key={i} title={columnTitle(b)}
                className="flex min-w-0 max-w-16 flex-1 flex-col items-center gap-1">
             {/* 트랙은 막대 색의 연한 단(동일 계열: 기본 accent/10, colorOf 시
                 hexTint) -- 값 0 버킷도 "빈 자리"가 아니라 트랙+0 으로 보인다.
                 막대 상단만 둥글게(데이터 끝), 밑변은 직각. */}
             <div className={trackClass("relative h-20 w-full max-w-6 overflow-hidden rounded-sm")}
                  style={trackStyle(color)}>
-              <span className="absolute inset-x-0 text-center text-[10px] font-medium tabular-nums text-muted"
-                    style={{ bottom: `calc(${b.pct}% + 2px)` }}>{fmt(b.value)}</span>
+              {valueLabels && (
+                <span className="absolute inset-x-0 text-center text-[10px] font-medium tabular-nums text-muted"
+                      style={{ bottom: `calc(${b.pct}% + 2px)` }}>{fmt(b.value)}</span>
+              )}
               <div className={`absolute inset-x-0 bottom-0 rounded-t${fillClass}`}
                    style={{ height: `${b.pct}%`, ...fillStyle(color) }} />
             </div>
@@ -187,8 +197,11 @@ export function BarChart({ data, label, emptyText = "집계된 잡 없음", form
                       막대 값 라벨과의 충돌 실측(cumulativeLabelBottom). */}
                   <span title={`누적 ${cumulative!.format(p.sum)} (${pct}%)`}
                         className="absolute -translate-x-1/2 -translate-y-full whitespace-nowrap text-[10px] font-medium tabular-nums"
+                        // 막대 위 값 글자가 없으면(valueLabels=false) 피할 라벨도 없다 -- 점 바로 위에 둔다.
                         style={{ left: `${cx(i)}%`,
-                                 top: `${topRem(cumulativeLabelBottom(cumPct(p.frac), bars[i].pct))}rem` }}>
+                                 top: `${topRem(valueLabels
+                                   ? cumulativeLabelBottom(cumPct(p.frac), bars[i].pct)
+                                   : cumPct(p.frac) + 4)}rem` }}>
                     {pct}%
                   </span>
                 </Fragment>

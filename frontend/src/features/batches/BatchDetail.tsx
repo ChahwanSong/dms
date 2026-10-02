@@ -272,11 +272,14 @@ function ItemScanStats({ requestId, succeeded }: {
                   onClick={() => setTempKey(k)}>{k}</Button>
         ))}
       </div>
+      {/* 막대 위 용량 글자는 빼고 누적 % 만(2026-10-02 사용자 요청 -- 용량 글자가 길면 좁은 열에서 잘리거나
+          안 보였다). 버킷별 용량·비중은 막대에 마우스를 올리면 보인다(BarChart valueLabels=false 툴팁). */}
       <BarChart data={bars}
                 label={`데이터 온도(${tempKey}) 히스토그램`}
                 formatValue={humanBytes}
                 colorOf={tempColorOf(bars.length)}
                 cumulative={{ format: humanBytes }}
+                valueLabels={false}
                 emptyText="집계된 버킷 없음" />
       {TEMP_CAPTIONS[tempKey] && (
         <p className="text-muted text-xs mt-1">{TEMP_CAPTIONS[tempKey]}</p>
@@ -286,7 +289,7 @@ function ItemScanStats({ requestId, succeeded }: {
           함께 말한다(선의 100% 가 몇 바이트인지). */}
       {cumTotal > 0 && (
         <p className="text-muted text-xs mt-1">
-          {`선 = hot쪽부터의 누적 용량 비중 · 총 ${humanBytes(cumTotal)}`}
+          {`선 = hot쪽부터의 누적 용량 비중 · 총 ${humanBytes(cumTotal)} · 막대에 마우스를 올리면 구간별 용량`}
         </p>
       )}
     </section>
@@ -296,16 +299,21 @@ function ItemScanStats({ requestId, succeeded }: {
           거짓 의미가 생긴다. 크기 자체를 색으로 다시 말할 이유도 없다 — 양은 막대
           높이가, 순서는 x축이 이미 말한다. 그래서 단색 accent(BarChart 기본)다.
           누적은 용량이 아니라 **개수** 비중이라 format 도 개수 표기다. */}
-      <h3 className={PANEL_TITLE}>파일 크기 분포(개수)</h3>
+      {/* 총 개수는 제목에(2026-10-02 사용자 요청 -- 히스토그램 밑 회색 캡션에 묻혀 있었다), 버킷별 개수는 막대에
+          마우스를 올리면(온도 차트와 같은 valueLabels=false). */}
+      <h3 className={PANEL_TITLE}>
+        {sizeTotal > 0 ? `파일 크기 분포(개수) · 총 ${sizeTotal.toLocaleString("ko-KR")}개` : "파일 크기 분포(개수)"}
+      </h3>
       <BarChart data={sizeBars} label="파일 크기 분포"
-                cumulative={{ format: (n) => `${n}개` }}
+                cumulative={{ format: (n) => `${n.toLocaleString("ko-KR")}개` }}
+                valueLabels={false}
                 emptyText="집계된 버킷 없음" />
       {sizeBars.length > 0 && (
         <p className="text-muted text-xs mt-1">가로축 = 파일 크기 구간(K=KiB·M=MiB·G=GiB·T=TiB, 1024 단위)</p>
       )}
       {sizeTotal > 0 && (
         <p className="text-muted text-xs mt-1">
-          {`선 = 작은 파일부터의 누적 개수 비중 · 총 ${sizeTotal}개`}
+          선 = 작은 파일부터의 누적 개수 비중 · 막대에 마우스를 올리면 구간별 개수
         </p>
       )}
     </section>
