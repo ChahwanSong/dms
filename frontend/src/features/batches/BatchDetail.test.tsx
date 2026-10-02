@@ -197,8 +197,8 @@ test("성공 scan 항목 펼침: 조회 발사 + 온도 섹션(사람 표기·�
   const chart = screen.getByRole("img", { name: "데이터 온도(atime) 히스토그램" });
   // 막대 위 용량 글자는 없고(잘리던 문제, 2026-10-02) 값은 툴팁 -- 사람 표기(humanBytes) + 비중
   expect(within(chart).queryByText("2.0 KiB")).toBeNull();
-  expect(chart.querySelector('[title="[0d,1d]: 2.0 KiB (100%)"]')).not.toBeNull();
-  expect(chart.querySelector('[title="[1d,7d]: 0 B (0%)"]')).not.toBeNull();
+  expect(chart.querySelector('[data-tip="[0d,1d]: 2.0 KiB (100%)"]')).not.toBeNull();
+  expect(chart.querySelector('[data-tip="[1d,7d]: 0 B (0%)"]')).not.toBeNull();
   // 온도 색: 첫 막대(hot)=빨강, 끝 막대(cold)=파랑 — 막대 수와 무관한 비례 사상
   const fills = chart.getElementsByClassName("rounded-t");
   expect(fills[0]).toHaveStyle({ backgroundColor: "#dc2626" });
@@ -239,7 +239,7 @@ test("mtime 토글: 펼친 항목의 atime 차트가 mtime 으로 바뀐다", as
   const mtimeChart = screen.getByRole("img", { name: "데이터 온도(mtime) 히스토그램" });
   expect(screen.queryByRole("img", { name: "데이터 온도(atime) 히스토그램" })).toBeNull();
   // 값은 툴팁(막대 위 글자 없음)
-  expect(mtimeChart.querySelector('[title="[0d,1d]: 4.0 KiB (100%)"]')).not.toBeNull();
+  expect(mtimeChart.querySelector('[data-tip="[0d,1d]: 4.0 KiB (100%)"]')).not.toBeNull();
 });
 
 test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량", async () => {
@@ -252,7 +252,7 @@ test("온도 차트에 누적 오버레이(선+값) + 캡션 총 용량", async 
   expect(chart.querySelector("polyline")).not.toBeNull();
   const labels = within(chart).getAllByText("100%");
   expect(labels).toHaveLength(2);
-  expect(labels[0].getAttribute("title")).toBe("누적 2.0 KiB (100%)");
+  expect(labels[0].getAttribute("data-tip")).toBe("누적 2.0 KiB (100%)");
   // 캡션: 선의 의미 한 줄 + 총 용량 값 + 툴팁 안내
   expect(screen.getByText("선 = hot쪽부터의 누적 용량 비중 · 총 2.0 KiB · 막대에 마우스를 올리면 구간별 용량"))
     .toBeInTheDocument();
@@ -284,16 +284,16 @@ test("크기 분포(10버킷): 값=파일 개수 + 누적 % 오버레이(온도 
   const chart = within(el);
   // 막대 위 개수 글자는 없다(2026-10-02) -- 개수는 툴팁: 정수 그대로 + 비중(3/7=43%), 0 은 정상값(빈 버킷)
   expect(chart.queryByText("3")).toBeNull();
-  expect(el.querySelector('[title="0~4K: 3 (43%)"]')).not.toBeNull();
-  expect(el.querySelector('[title="4K~64K: 1 (14%)"]')).not.toBeNull();
-  expect(el.querySelector('[title="4T~: 0 (0%)"]')).not.toBeNull();
+  expect(el.querySelector('[data-tip="0~4K: 3 (43%)"]')).not.toBeNull();
+  expect(el.querySelector('[data-tip="4K~64K: 1 (14%)"]')).not.toBeNull();
+  expect(el.querySelector('[data-tip="4T~: 0 (0%)"]')).not.toBeNull();
   // 누적 오버레이: 3·1·1·1·1·0… → 43%·57%·71%·86%·100%(이후 100% 유지)
   expect(el.querySelector("polyline")).not.toBeNull();
   expect(chart.getAllByText(/%$/).map((n) => n.textContent))
     .toEqual(["43%", "57%", "71%", "86%", "100%",
               "100%", "100%", "100%", "100%", "100%"]);
   // 툴팁의 누적값은 개수 표기(바이트가 아니다)
-  expect(chart.getAllByText("100%")[0].getAttribute("title"))
+  expect(chart.getAllByText("100%")[0].getAttribute("data-tip"))
     .toBe("누적 7개 (100%)");
   // 총 개수는 제목에(회색 캡션에 묻히지 않게), 캡션은 선의 의미 + 툴팁 안내
   expect(screen.getByRole("heading", { name: "파일 크기 분포(개수) · 총 7개" })).toBeInTheDocument();

@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, test } from "vitest";
 import { BarChart, barLayout, labelStep, cumulativeLayout,
          cumulativeLabelBottom } from "./BarChart";
@@ -48,9 +48,9 @@ describe("BarChart 저밀도(≤8버킷)", () => {
   it("버킷마다 트랙·accent 막대·값·라벨·툴팁을 그린다", () => {
     const { container } = render(<BarChart data={HIST} label="제출 대기 분포" />);
     const chart = screen.getByRole("img", { name: "제출 대기 분포" });
-    const cols = chart.querySelectorAll("[title]");
+    const cols = chart.querySelectorAll("[data-tip]");
     expect(cols).toHaveLength(6);
-    expect(cols[1].getAttribute("title")).toBe("10-30s: 1");
+    expect(cols[1].getAttribute("data-tip")).toBe("10-30s: 1");
     // 히스토그램 라벨은 솎지 않는다 -- 전 버킷이 축에 보인다
     for (const d of HIST) expect(screen.getByText(d.label)).toBeInTheDocument();
     // 잉크색 회색 대신 accent 막대가 연한 동일 계열 트랙 위에 선다
@@ -77,7 +77,7 @@ describe("BarChart 고밀도(>10버킷)", () => {
   it("값 표기는 접고 라벨을 솎으며 최대값 눈금을 단다", () => {
     render(<BarChart data={hours} label="처리량" />);
     const chart = screen.getByRole("img", { name: "처리량" });
-    expect(chart.querySelectorAll("[title]")).toHaveLength(24);
+    expect(chart.querySelectorAll("[data-tip]")).toHaveLength(24);
     // 라벨은 4간격 6개만 -- 24개를 다 쓰면 겹쳐서 아무것도 못 읽는다
     expect(screen.getByText("00시")).toBeInTheDocument();
     expect(screen.getByText("04시")).toBeInTheDocument();
@@ -95,7 +95,7 @@ describe("BarChart formatValue(하위호환 사람 표기)", () => {
                      formatValue={(n) => `${n / 1024} KiB`} />);
     expect(screen.getByText("1 KiB")).toBeInTheDocument();
     const chart = screen.getByRole("img", { name: "온도" });
-    expect(chart.querySelector("[title]")!.getAttribute("title"))
+    expect(chart.querySelector("[data-tip]")!.getAttribute("data-tip"))
       .toBe("[0d,1d]: 1 KiB");
   });
   it("고밀도: 최대값 눈금·툴팁에도 적용", () => {
@@ -249,8 +249,8 @@ describe("BarChart cumulative(누적 데이터량 오버레이 — 저밀도)", 
   });
   it("값 표기: 점마다 누적 % 라벨 + 툴팁(누적 용량·%)", () => {
     render(<BarChart data={DATA} label="누적" cumulative={{ format: kib }} />);
-    expect(screen.getByText("25%").getAttribute("title")).toBe("누적 1 KiB (25%)");
-    expect(screen.getByText("100%").getAttribute("title")).toBe("누적 4 KiB (100%)");
+    expect(screen.getByText("25%").getAttribute("data-tip")).toBe("누적 1 KiB (25%)");
+    expect(screen.getByText("100%").getAttribute("data-tip")).toBe("누적 4 KiB (100%)");
   });
   it("% 라벨은 막대 값 라벨과의 충돌을 피해 위/아래로 갈린다", () => {
     render(<BarChart data={DATA} label="누적" cumulative={{ format: kib }} />);
@@ -295,13 +295,52 @@ test("valueLabels=false: 막대 위 값 글자 없이 툴팁에 값 + 비중(%)(
                    formatValue={(n) => `${n} GiB`} valueLabels={false} />);
   const chart = screen.getByRole("img", { name: "v" });
   expect(within(chart).queryByText("3 GiB")).toBeNull();
-  expect(chart.querySelector('[title="a: 3 GiB (75%)"]')).not.toBeNull();
-  expect(chart.querySelector('[title="b: 1 GiB (25%)"]')).not.toBeNull();
+  expect(chart.querySelector('[data-tip="a: 3 GiB (75%)"]')).not.toBeNull();
+  expect(chart.querySelector('[data-tip="b: 1 GiB (25%)"]')).not.toBeNull();
 });
 
 test("valueLabels 기본(true)은 기존 그대로 -- 값 글자 + 비중 없는 툴팁", () => {
   render(<BarChart data={[{ label: "a", value: 3 }]} label="d" formatValue={(n) => `${n} GiB`} />);
   const chart = screen.getByRole("img", { name: "d" });
   expect(within(chart).getByText("3 GiB")).toBeInTheDocument();
-  expect(chart.querySelector('[title="a: 3 GiB"]')).not.toBeNull();
+  expect(chart.querySelector('[data-tip="a: 3 GiB"]')).not.toBeNull();
+});
+
+
+// 2026-10-02 사용자 요청: "막대에 마우스 올리면 바로 내용 뜨도록 -- 지금은 몇 초 기다려야 뜬다"(브라우저 title 지연).
+// 진입 즉시(타이머·대기 없이 같은 동기 렌더에서) 자체 툴팁이 뜨고, 기본 title 은 남기지 않는다(늦게 겹쳐 뜨지 않게).
+test("막대 즉시 툴팁: 진입 즉시 구간·값·비중·누적, 이탈하면 닫힘, title 없음", () => {
+  render(<BarChart data={[{ label: "[0d,1d]", value: 1024 }, { label: "[2d,7d]", value: 3072 }]}
+                   label="온도" formatValue={(n) => `${n / 1024} KiB`} valueLabels={false}
+                   cumulative={{ format: (n) => `${n / 1024} KiB` }} />);
+  const chart = screen.getByRole("img", { name: "온도" });
+  expect(chart.querySelector("[title]")).toBeNull();
+  const col = chart.querySelectorAll("[data-tip]")[1] as HTMLElement;
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  fireEvent.mouseEnter(col);
+  const tip = screen.getByRole("tooltip");                 // 기다림 없이(find* 아님) 바로 있다
+  expect(tip).toHaveTextContent("[2d,7d]");
+  expect(tip).toHaveTextContent("값3 KiB");
+  expect(tip).toHaveTextContent("비중75%");
+  expect(tip).toHaveTextContent("누적4 KiB (100%)");
+  fireEvent.mouseLeave(col);
+  expect(screen.queryByRole("tooltip")).toBeNull();
+});
+
+test("막대 즉시 툴팁: 고밀도(>10버킷)도 같다", () => {
+  const hours = Array.from({ length: 24 }, (_, i) => ({ label: `${i}시`, value: i === 3 ? 5 : 1 }));
+  render(<BarChart data={hours} label="처리량" />);
+  const col = screen.getByRole("img", { name: "처리량" }).querySelectorAll("[data-tip]")[3] as HTMLElement;
+  fireEvent.mouseEnter(col);
+  expect(screen.getByRole("tooltip")).toHaveTextContent("3시값5비중18%");
+});
+
+
+test("막대 즉시 툴팁: 올려 둔 채 막대가 줄어도(폴링) 죽지 않고 툴팁만 사라진다", () => {
+  const three = [{ label: "a", value: 1 }, { label: "b", value: 2 }, { label: "c", value: 3 }];
+  const { rerender } = render(<BarChart data={three} label="처리량" />);
+  fireEvent.mouseEnter(screen.getByRole("img", { name: "처리량" }).querySelectorAll("[data-tip]")[2]);
+  expect(screen.getByRole("tooltip")).toHaveTextContent("c");
+  rerender(<BarChart data={three.slice(1)} label="처리량" />);    // 리뷰 재현: TypeError 로 페이지 전체가 죽었다
+  expect(screen.queryByRole("tooltip")).toBeNull();
 });
