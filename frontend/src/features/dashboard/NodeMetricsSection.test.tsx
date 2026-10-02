@@ -133,3 +133,25 @@ test("nodes가 비배열이어도 죽지 않는다", async () => {
   render(<QueryClientProvider client={qc}><NodeMetricsSection /></QueryClientProvider>);
   expect(await screen.findByText("노드/리소스")).toBeInTheDocument();
 });
+
+
+test("새로고침 버튼이 노드 메트릭(같은 기간)과 노드 목록을 다시 조회한다(2026-10-02)", async () => {
+  const calls: (string | null)[] = [];
+  let nodeCalls = 0;
+  server.use(
+    http.get("/api/admin/metrics/nodes", ({ request }) => {
+      calls.push(new URL(request.url).searchParams.get("window"));
+      return HttpResponse.json(METRICS);
+    }),
+    http.get("/api/admin/nodes", () => { nodeCalls += 1; return HttpResponse.json(NODES); }),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><NodeMetricsSection /></QueryClientProvider>);
+  await screen.findByText("w1");
+  expect(screen.getByLabelText("마지막 갱신")).toHaveTextContent(/^갱신 \d\d:\d\d:\d\d$/);
+  const before = calls.length, nodesBefore = nodeCalls;
+  await userEvent.click(screen.getByRole("button", { name: "노드/리소스 새로고침" }));
+  await waitFor(() => expect(calls.length).toBe(before + 1));
+  expect(calls[calls.length - 1]).toBe("24");                 // 지금 고른 기간 그대로
+  await waitFor(() => expect(nodeCalls).toBeGreaterThan(nodesBefore));
+});
