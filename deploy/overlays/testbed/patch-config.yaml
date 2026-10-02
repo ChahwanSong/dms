@@ -7,4 +7,4 @@ metadata:
   name: dms-config
   namespace: dms
 data:
-  DMS_JOB_IMAGE: "pkg-01:5000/dms-mpifileutils:d154"
+  DMS_JOB_IMAGE: "pkg-01:5000/dms-mpifileutils:d158"
