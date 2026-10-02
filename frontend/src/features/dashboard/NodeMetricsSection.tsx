@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from "react";
+import { RefreshCw } from "lucide-react";
 import { useNodeMetrics } from "./useMetrics";
 import { useNodes } from "./useDashboard";
 import { WindowSelect } from "./WindowSelect";
 import { Card } from "../../components/ui/Card";
 import { Sparkline, type SparklineDomain } from "../../components/ui/Sparkline";
 import type { Node, NodeMetricPoint, NodeMetricSeries } from "../../lib/types";
+import { kstStampEpoch } from "../../lib/datetime";
 
 // 에이전트 리포트는 스키마 검증 없이 저장된다 -- NodesList.tsx와 같은 방어 관용구
 const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
@@ -89,9 +91,26 @@ export function NodeMetricsSection() {
     asArray<Node>(nodesQ.data).map((n) => [n.node_name, n.report] as const));
   return (
     <Card>
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
         <h2 className="font-medium">노드/리소스</h2>
-        <WindowSelect value={windowH} onChange={setWindowH} />
+        {/* 새로고침(2026-10-02 사용자 요청): 시계열은 기간 재조회 위주라 폴링이 없다(useMetrics) -- 지금 값을
+            보고 싶을 때 누른다. 노드 목록(신선도·코어 수)도 함께 다시 읽는다. 마지막 갱신 시각을 옆에 둔다. */}
+        <div className="flex items-center gap-2">
+          {metricsQ.dataUpdatedAt > 0 && (
+            <span className="text-xs text-muted" aria-label="마지막 갱신">
+              {`갱신 ${kstStampEpoch(Math.floor(metricsQ.dataUpdatedAt / 1000)).slice(11, 19)}`}
+            </span>
+          )}
+          <button type="button" aria-label="노드/리소스 새로고침" title="새로고침"
+                  disabled={metricsQ.isFetching}
+                  onClick={() => { void metricsQ.refetch(); void nodesQ.refetch(); }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-line bg-panel px-2.5 py-1
+                             text-xs text-muted hover:text-ink disabled:opacity-60">
+            <RefreshCw className={`h-3.5 w-3.5 ${metricsQ.isFetching ? "animate-spin" : ""}`} aria-hidden />
+            새로고침
+          </button>
+          <WindowSelect value={windowH} onChange={setWindowH} />
+        </div>
       </div>
       {metricsQ.isLoading && <p className="text-muted text-sm">불러오는 중…</p>}
       {series.map((n) => {
