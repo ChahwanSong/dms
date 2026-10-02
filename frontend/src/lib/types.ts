@@ -474,3 +474,5 @@ export interface MailCheckResult {
 }
 // 로그인 전 화면용(GET /api/auth/mail-info) -- 비밀 없음.
 export interface MailInfo { email_domain: string; delivery: string }
+// 포탈 서브네임(2026-10-02, GET /api/portal-info -- 공개). null = 서브네임 없음.
+export interface PortalInfo { subtitle: string | null }

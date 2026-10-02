@@ -16,12 +16,12 @@ function dmsItems(): { group: string; groupAdminOnly: boolean; item: NavItem }[]
     g.items.map((item) => ({ group: g.label, groupAdminOnly: g.adminOnly === true, item })));
 }
 
-test("현행 사이드바 16링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
+test("현행 사이드바 17링크가 전부 데이터에 있다(전수 -- 초과도 누락도 없다)", () => {
   const paths = dmsItems().map((x) => x.item.path).sort();
   expect(paths).toEqual([
     "/admin/accounts", "/admin/artifact-base", "/admin/audit", "/admin/batches",
     "/admin/builds", "/admin/control", "/admin/dashboard", "/admin/denylist", "/admin/mail",
-    "/admin/nodes", "/admin/policies", "/admin/releases",
+    "/admin/nodes", "/admin/policies", "/admin/portal", "/admin/releases",
     "/admin/storages", "/admin/usage", "/jobs", "/jobs/new",
   ].sort());
 });

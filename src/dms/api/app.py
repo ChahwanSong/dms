@@ -21,6 +21,7 @@ from .routes_auth import (router as auth_router, VERIFICATION_GUESS_PER_CLIENT_L
                           VERIFICATION_MAIL_GLOBAL_LIMIT, VERIFICATION_MAIL_LIMIT,
                           VERIFICATION_MAIL_PER_CLIENT_LIMIT, VERIFICATION_MAIL_WINDOW_SECONDS)
 from .routes_mail_settings import router as mail_settings_router
+from .routes_portal import public_router as portal_public_router, router as portal_router
 from .mailer import SendThrottle
 from .routes_storages import router as storages_router, user_router as user_storages_router
 from .routes_scan_paths import router as scan_paths_router
@@ -143,6 +144,8 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(scan_paths_router)
     app.include_router(sync_pairs_router)
     app.include_router(mail_settings_router)
+    app.include_router(portal_public_router)
+    app.include_router(portal_router)
     app.include_router(user_sync_pairs_router)
     app.include_router(requests_router)
     app.include_router(jobs_router)

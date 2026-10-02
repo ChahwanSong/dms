@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- AI Storage Portal 탭 아이콘(2026-10-02): 오리지널 "강철 가면" 도안. 특정 캐릭터의 디자인을 옮긴 것이
+       아니다. 바꾸려면 이 파일을 교체하고 포탈 이미지를 다시 빌드한다(런타임 airgap -- 외부 URL 금지). -->
+  <defs>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f1f5f9"/>
+      <stop offset="0.5" stop-color="#a3b1c2"/>
+      <stop offset="1" stop-color="#4b5a6e"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#0d2b88"/>
+  <path d="M32 7 C45 7 53 15 53 27 L53 36 C53 47 44 56 32 58 C20 56 11 47 11 36 L11 27 C11 15 19 7 32 7 Z"
+        fill="url(#steel)" stroke="#0f172a" stroke-width="2"/>
+  <path d="M32 9 L32 42" stroke="#5b6b80" stroke-width="2.4"/>
+  <path d="M15 28 L28 30.5 L28 35 L16 33 Z" fill="#0f172a"/>
+  <path d="M49 28 L36 30.5 L36 35 L48 33 Z" fill="#0f172a"/>
+  <path d="M24 46 H40 M26 51 H38" stroke="#0f172a" stroke-width="2.8" stroke-linecap="round"/>
+  <circle cx="16.5" cy="21" r="1.8" fill="#334155"/>
+  <circle cx="47.5" cy="21" r="1.8" fill="#334155"/>
+</svg>

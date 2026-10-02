@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useLogin, useRequestCode, useSignup, usePasswordReset } from "./useAuth";
 import { useMailInfo } from "../mail/useMailSettings";
+import { portalTitle, usePortalDocumentTitle } from "../portal/usePortal";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { ApiError } from "../../lib/api";
@@ -102,6 +103,7 @@ export function Login() {
   const [notice, setNotice] = useState<string | null>(null);
   const login = useLogin();
   const nav = useNavigate();
+  const subtitle = usePortalDocumentTitle();
   return (
     <div className="min-h-full grid place-items-center p-6">
       {/* max-w-md(448px, 사용자 요청 2026-08-20): 구 max-w-sm(384px)보다 살짝
@@ -110,7 +112,7 @@ export function Login() {
         {/* 브랜드 블록은 div 다 -- h1 은 화면이 소유하고 브랜드가 h1 이 되면
             접근성 트리가 흐려진다. */}
         <div className="rounded-t-card bg-navy px-5 py-4 text-white text-sm font-semibold">
-          AI Storage Portal
+          {portalTitle(subtitle)}
         </div>
         {/* rounded-t-none: 브랜드 블록과 한 덩어리로 붙인다(사이 여백·이중 라운드 제거). */}
         <Card className="rounded-t-none">

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -157,4 +157,22 @@ test("배치 작업은 작업 그룹 안에 있다 -- 운영을 접어도 보이
   expect(screen.getByRole("link", { name: "배치 작업" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "작업" }));
   expect(screen.queryByRole("link", { name: "배치 작업" })).toBeNull();
+});
+
+
+// 포탈 서브네임(2026-10-02): 사이드바 이름 아래 한 줄 + 브라우저 탭 제목 "메인 - 서브". 없으면 메인 이름만.
+test("서브네임이 있으면 사이드바 이름 아래 줄과 탭 제목에 쓰인다", async () => {
+  server.use(http.get("/api/portal-info", () => HttpResponse.json({ subtitle: "DAI-CAE" })));
+  renderShell("admin");
+  expect(await screen.findByLabelText("포탈 서브네임")).toHaveTextContent("DAI-CAE");
+  expect(screen.getByText("AI Storage Portal")).toBeInTheDocument();
+  await waitFor(() => expect(document.title).toBe("AI Storage Portal - DAI-CAE"));
+});
+
+test("서브네임이 없거나 조회가 실패하면 메인 이름만", async () => {
+  server.use(http.get("/api/portal-info", () => HttpResponse.json({ detail: "x" }, { status: 500 })));
+  renderShell("user");
+  expect(await screen.findByText("AI Storage Portal")).toBeInTheDocument();
+  await waitFor(() => expect(document.title).toBe("AI Storage Portal"));
+  expect(screen.queryByLabelText("포탈 서브네임")).not.toBeInTheDocument();
 });

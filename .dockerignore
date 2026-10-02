@@ -9,7 +9,7 @@
 # what makes the multi-stage split actually mean something.
 #
 # Do NOT exclude anything Dockerfile.dms COPYs: pyproject.toml, src/, deploy/k8s, or
-# frontend/ (package.json, package-lock.json, index.html, src/, vite/tailwind/
+# frontend/ (package.json, package-lock.json, index.html, src/, public/ -- favicon, vite/tailwind/
 # tsconfig configs) -- those must remain in the build context.
 
 # --- Node / frontend build artifacts (must not shadow a clean `npm ci`) ---

@@ -18,6 +18,7 @@ import { BatchCreate } from "../features/batches/BatchCreate";
 import { BatchDetail } from "../features/batches/BatchDetail";
 import { AuditLog } from "../features/audit/AuditLog";
 import { MailSettingsPage } from "../features/mail/MailSettingsPage";
+import { PortalSettingsPage } from "../features/portal/PortalSettingsPage";
 import { PoliciesList } from "../features/policies/PoliciesList";
 import { DenylistList } from "../features/denylist/DenylistList";
 import { ControlStatePage } from "../features/control/ControlStatePage";
@@ -76,6 +77,7 @@ export function AppRouter() {
           <Route path="/admin/batches/:batchId" element={<RequireRole role="admin"><AppShell><BatchDetail /></AppShell></RequireRole>} />
           <Route path="/admin/audit" element={<RequireRole role="admin"><AppShell><AuditLog /></AppShell></RequireRole>} />
           <Route path="/admin/mail" element={<RequireRole role="admin"><AppShell><MailSettingsPage /></AppShell></RequireRole>} />
+          <Route path="/admin/portal" element={<RequireRole role="admin"><AppShell><PortalSettingsPage /></AppShell></RequireRole>} />
           <Route path="/admin/policies" element={<RequireRole role="admin"><AppShell><PoliciesList /></AppShell></RequireRole>} />
           <Route path="/admin/denylist" element={<RequireRole role="admin"><AppShell><DenylistList /></AppShell></RequireRole>} />
           <Route path="/admin/control" element={<RequireRole role="admin"><AppShell><ControlStatePage /></AppShell></RequireRole>} />
