@@ -142,6 +142,30 @@ test("연산을 고르면 옆에 무엇이 일어나는지 한 줄로 말하고,
   expect(screen.getByRole("heading", { level: 2, name: "삭제 대상" })).toBeInTheDocument();
 });
 
+test("사용자 화면은 관리자 전용 정책 API 를 부르지 않는다(403 잡음 없음) — 우선순위 요약은 정책 기본", async () => {
+  let asked = 0;
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json(meUser)),
+    http.get("/api/admin/policies", () => { asked += 1; return HttpResponse.json({ detail: "forbidden" }, { status: 403 }); }));
+  renderPage();
+  await fillSyncTarget();
+  expect(screen.getByText("우선순위").closest("div")).toHaveTextContent("(정책 기본)");
+  expect(asked).toBe(0);
+});
+
+test("관리자 화면은 정책을 조회해 우선순위 기본값 실값을 보인다", async () => {
+  let asked = 0;
+  server.use(http.get("/api/admin/policies", () => {
+    asked += 1;
+    return HttpResponse.json([{ tool: "dsync", max_nodes: 6, procs_per_node: 4, queue: "dms-data",
+      default_priority: "high", max_priority: "high", preview_timeout_seconds: null,
+      execution_timeout_seconds: 3600, enabled: 1, updated_at: "2026-08-05T00:00:00Z", updated_by: "admin" }]);
+  }));
+  renderPage();
+  expect(await screen.findByRole("option", { name: "(정책 기본: high)" })).toBeInTheDocument();
+  expect(asked).toBeGreaterThan(0);
+});
+
 test("입력 칸에서 Enter 를 눌러도 제출되지 않는다(요약을 보기 전 조기 제출 방지)", async () => {
   // 관리자 기본이 root 이고 rm 도 있다 -- 경로 입력 중 Enter 한 번에 요청이 나가면 안 된다.
   // 제출 버튼은 type="button" + onClick 이라 form 에 submit 버튼이 없다.
