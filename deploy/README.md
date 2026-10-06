@@ -675,6 +675,15 @@ RolloutWatcher가 그 seq 순서대로 하나씩 patch → 수렴 확인 → 다
   controller·migrate 가 한 항목, dms-agent 계보 = 다른 항목) + `patch-config.yaml` 의
   `DMS_JOB_IMAGE`
 - prod/ssc: `values.env` 의 `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`
+  - 설치 뒤로는 셋 중 무엇이든 `live` 로 둘 수 있다(2026-10-06): `render.sh` 가 지금 클러스터에서
+    도는 태그를 읽어 채운다(DMS_TAG←deploy/dms-api, DMS_AGENT_TAG←ds/dms-agent,
+    MFU_TAG←ConfigMap dms-config 의 DMS_JOB_IMAGE). 포탈 릴리스는 `values.env` 를 읽지 않으므로
+    평소엔 이 파일을 안 고쳐도 되고, 재-apply(설정 변경 등) 때도 `live` 면 렌더 이미지=라이브라
+    가드를 통과해 옛 태그로 되돌리지 않는다. 첫 설치는 라이브 워크로드가 없어 명시 태그를 써야
+    한다(render.sh 가 자리표시자/부재를 감지해 거부). MFU `live` 는 ConfigMap(apply 가 쓰는
+    부트스트랩 기본값)을 읽는다 -- 포탈의 잡 이미지 릴리스는 DB 를 바꾸고 런타임은 그 DB 값을
+    쓰므로, MFU `live` 는 "ConfigMap 을 재-apply 로 되돌리지 않는다"는 뜻이지 런타임 잡 이미지와
+    항상 같다는 뜻은 아니다(가드는 워크로드 이미지만 보고 ConfigMap 은 보지 않는다).
 
 이 슬라이스는 파일을 자동으로 고치지 않는다 — 컨트롤러 파드 안에 저장소가 없다.
 어긋남을 화면에 표시하는 것은 슬라이스 14 대시보드의 몫이다. Helm/kustomize는 도입하지
