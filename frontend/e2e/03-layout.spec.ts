@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { apiLogin } from "./helpers/session";
 import { assertLayoutSane, assertTableOverflows } from "./helpers/layout";
+import { STORAGE_NAME } from "./harness/env";
 
 // E3 — 화면 순회 × 2 뷰포트. 이 슬라이스의 회귀 방어 본체다: 9fbef86·6bc2ecb 두
 // 결함은 jsdom 이 기하를 계산하지 않는 탓에 단위 테스트 228건을 통과했고, 그래서
@@ -11,6 +12,32 @@ import { assertLayoutSane, assertTableOverflows } from "./helpers/layout";
 async function visit(page: Page, path: string, heading: string): Promise<void> {
   await page.goto(path);
   await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
+}
+
+// 단일 작업 화면에 200자 무공백 경로를 넣는다(제출하지 않음 -- resource_key·검증과 무관).
+// 긴 토큰이 1fr 열을 밀어내던 유형(6bc2ecb)의 재현 재료다: minmax(0,1fr) 이 빠지면 문서가 넘치고(L1),
+// 요약 dd·"실제 경로" 줄의 overflow-wrap 이 빠지면 그 칸만 넘친다 -- xl 의 요약 본문은 자기 스크롤
+// 상자라 문서 L1 엔 안 보이므로 아래 assertTextContained 가 칸 단위로 잰다.
+async function fillLongScanTarget(page: Page): Promise<void> {
+  await page.getByLabel("연산", { exact: true }).selectOption("scan");
+  const storage = page.getByLabel("스토리지", { exact: true });
+  await expect(storage.locator(`option[value="${STORAGE_NAME}"]`)).toHaveCount(1);
+  await storage.selectOption(STORAGE_NAME);
+  await page.getByLabel("대상 경로", { exact: true }).fill("x".repeat(200));
+}
+
+async function assertTextContained(page: Page): Promise<void> {
+  const leaks = await page.evaluate(() => {
+    const els = [
+      ...Array.from(document.querySelectorAll("main dd")),
+      ...Array.from(document.querySelectorAll("main dl")).map((dl) => dl.parentElement!),
+      ...Array.from(document.querySelectorAll("main p")).filter(
+        (p) => (p.textContent ?? "").startsWith("실제 경로: ")),
+    ];
+    return els.filter((el) => el.scrollWidth > el.clientWidth + 1)
+      .map((el) => `${el.tagName} ${el.scrollWidth}>${el.clientWidth}: ${(el.textContent ?? "").slice(0, 40)}`);
+  });
+  expect(leaks, "긴 무공백 경로가 요약 칸·실제 경로 줄을 넘쳤다(overflow-wrap/minmax(0,1fr) 회귀)").toEqual([]);
 }
 
 // 각 화면의 minTableCells 는 **소스 실측치**다(완화가 아니라 실측으로 정한다):
@@ -55,6 +82,17 @@ test.describe("E3 레이아웃 불변식", () => {
 
     await visit(page, "/admin/builds/history", "빌드 이력");
     await assertLayoutSane(page, { minTableCells: 8 });
+
+    // 제출 화면 둘(2026-10-06 단일 페이지화): 시트 + 오른쪽 sticky 요약 2열은 xl(1280)부터다.
+    // 표가 없으므로 하한 0 -- L1(가로 넘침)·L3(사이드바 240, 요약이 <aside> 가 아님)·L4 가 진다.
+    await visit(page, "/jobs/new", "단일 작업");
+    await assertLayoutSane(page, { minTableCells: 0 });
+    await fillLongScanTarget(page);
+    await assertLayoutSane(page, { minTableCells: 0 });
+    await assertTextContained(page);
+
+    await visit(page, "/admin/batches/new", "배치 생성");
+    await assertLayoutSane(page, { minTableCells: 0 });
   });
 
   test("375x667 모바일 spot check", async ({ page }) => {
@@ -68,5 +106,22 @@ test.describe("E3 레이아웃 불변식", () => {
 
     await visit(page, "/jobs", "전체 작업");
     await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 4 });
+
+    // 제출 화면은 1열(시트 → 요약)로 접힌다 -- sync 경로 줄·항목 표가 375 에서 넘치지 않아야 한다.
+    await visit(page, "/jobs/new", "단일 작업");
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    await fillLongScanTarget(page);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    await assertTextContained(page);
+
+    await visit(page, "/admin/batches/new", "배치 생성");
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
+    // 입력 방식 세그먼트는 좁은 폭에서도 라벨이 음절 중간에서 접히지 않는다(통째로 다음 줄로).
+    // L4 는 aside a·table button 만 보므로 여기서 직접 잰다(한 줄 = 높이 < 줄 높이 2배).
+    const wrapped = await page.locator("button[aria-pressed]").evaluateAll((bs) => bs
+      .filter((b) => b.getBoundingClientRect().height
+        >= 2 * parseFloat(getComputedStyle(b).lineHeight) + 1)
+      .map((b) => b.textContent));
+    expect(wrapped, "입력 방식 세그먼트 라벨이 두 줄로 접혔다").toEqual([]);
   });
 });

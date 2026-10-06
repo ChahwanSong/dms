@@ -18,19 +18,19 @@ test.describe("E4 잡 종단 흐름", () => {
   test("UI scan 제출 -> 리로드 없이 목록이 Succeeded 로 수렴한다", async ({ page }) => {
     // admin 으로 들어간다: 특권 요청자(root/admin 기본값)라야 LDAP 없는 이 환경에서
     // placement 의 신원 검사를 건너뛰고 후보 선정까지 간다(설계 §1-8). 2026-09-30 부터
-    // root 는 옵션 스텝의 'root 권한으로 실행'(자격 있는 관리자 기본 켜짐)이 정한다 --
+    // root 는 실행 설정 구획의 'root 권한으로 실행'(자격 있는 관리자 기본 켜짐)이 정한다 --
     // 끄면 LDAP 없는 이 하네스에선 ldap_not_configured 로 Rejected. check() 는 기본값이
     // 켜져 있다는 가정 없이도 root 를 보장한다(이미 켜져 있으면 무동작).
     await apiLogin(page);
-    // 슬라이스 37: scan 은 단일 작업 위저드(연산 스텝의 운영자 전용 옵션)로 흡수됐다.
+    // 슬라이스 37: scan 은 단일 작업(운영자 전용 연산)으로 흡수됐다. 2026-10-06 부터 위저드가
+    // 아니라 한 장짜리 시트 + 오른쪽 제출 요약이다 -- "다음" 없이 한 화면에서 채우고 제출한다.
     await page.goto("/jobs/new");
     await expect(page.getByRole("heading", { name: "단일 작업" })).toBeVisible();
-    await page.getByLabel("연산").selectOption("scan");
-    await page.getByRole("button", { name: "다음" }).click();
+    await page.getByLabel("연산", { exact: true }).selectOption("scan");
 
     // 스토리지 목록이 폼까지 도착했는지를 먼저 못박는다. 이게 없으면 아래
     // selectOption 이 타임아웃했을 때 "폼이 깨졌나 / 시드가 안 실렸나"가 뭉개진다.
-    const storage = page.getByLabel("스토리지");
+    const storage = page.getByLabel("스토리지", { exact: true });
     await expect(
       storage.locator(`option[value="${STORAGE_NAME}"]`),
       `시드 스토리지 ${STORAGE_NAME} 가 스토리지 선택지에 없다 -- ` +
@@ -41,11 +41,13 @@ test.describe("E4 잡 종단 흐름", () => {
     // 상대경로여야 한다(scan target 은 validate_relative_path). 그리고 E5/E6 과
     // **달라야** 한다: 같은 requester+storage+target+options 는 resource_key 가
     // 같아 활성 요청이 있으면 Conflict 로 떨어진다.
-    await page.getByLabel("대상 경로").fill("e4-scan");
-    // 옵션 스텝(기본값 + root 실행 명시) → 확인 스텝 → 제출.
-    await page.getByRole("button", { name: "다음" }).click();
-    await page.getByLabel("root 권한으로 실행").check();
-    await page.getByRole("button", { name: "다음" }).click();
+    await page.getByLabel("대상 경로", { exact: true }).fill("e4-scan");
+    // 옵션은 기본값 + root 실행 명시 → 제출(버튼은 화면에 붙은 요약 패널에 있다).
+    await page.getByLabel("root 권한으로 실행", { exact: true }).check();
+    // 제출 직전 기하: 값이 찬 시트 + sticky 요약 2열에서 L1/L3/L4(표가 없어 하한 0). 짧은 입력이라
+    // 긴 무공백 토큰 회귀(minmax(0,1fr)·overflow-wrap)는 여기서 못 잡는다 -- 그 그물은 E3 의
+    // /jobs/new 순회(200자 경로 + 요약 칸 봉쇄 단언)가 맡는다.
+    await assertLayoutSane(page, { minTableCells: 0 });
     await page.getByRole("button", { name: "제출", exact: true }).click();
 
     // 202 수리와 상세 자동 이동(SubmitJob onSuccess nav)을 URL 하나로

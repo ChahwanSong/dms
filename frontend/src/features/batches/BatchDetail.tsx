@@ -352,7 +352,7 @@ function ItemScanStats({ requestId, succeeded }: {
 // batch_items_not_replaceable 409). 교체 후에도 배치는 종단 유지 — 교체가 곧
 // 실행은 아니다(재실행은 기존 「전체 재실행」 버튼 몫). 파일 업로드가 아니라
 // textarea 붙여넣기인 이유: 운영 환경 브라우저는 파일 업로드가 불가하다(환경
-// 제약) — 생성 위저드(BatchCreate)의 CSV 붙여넣기 패턴을 미러한다. 동선:
+// 제약) — 배치 생성(BatchCreate)의 CSV 붙여넣기 패턴을 미러한다. 동선:
 // 붙여넣기 → parseItemsCsv 파싱(입력에서 즉시 파생) → 미리보기(행 수·오류) →
 // 「교체」 확인 클릭 → PUT → 팝업 닫힘. 오류가 하나라도 있으면 교체 버튼 잠금
 // (부분 반영 금지 — BatchCreate applyParsed 와 같은 계약). 빈 입력(초기 상태)은
