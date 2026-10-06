@@ -194,7 +194,8 @@ export function SubmitJob() {
     || optionsInvalid || targetInvalid;
 
   // --- 정책 기본값 캡션(슬라이스 37: BatchCreate 미러 — 표시 배선만) ---
-  const policiesQ = usePolicies();
+  // 정책은 관리자 전용 API -- 사용자에겐 캡션·우선순위가 없으니 조회하지 않는다(요약은 "(정책 기본)").
+  const policiesQ = usePolicies(isAdmin);
   const fmtPolicy = (p: Policy | undefined) => p === undefined ? "미조회"
     : `최대 ${p.max_nodes}노드 · 노드당 ${p.procs_per_node}프로세스${
         p.enabled === 1 ? "" : " · 비활성(잡 배치 거부)"}`;
