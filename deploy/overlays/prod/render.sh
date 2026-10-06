@@ -24,26 +24,35 @@ VALS="${VALUES_ENV:-$HERE/values.env}"
 # 쓰면 종전과 같다. 첫 설치는 라이브 워크로드가 없어 'live' 를 못 쓴다(아래 에러로 안내).
 # 해석 결과는 stderr 로만 알린다 -- stdout 의 마지막 `RENDERED:` 줄 파싱(install.sh)을 흐리지 않게.
 NS="${DMS_NS:-dms}"
-_resolve_live() {   # $1=변수명  $2=사람이 읽는 이름  $3..=kubectl get 인자(이미지 ref 하나를 출력)
-  _var=$1; _human=$2; shift 2
-  _cur=$(eval "printf '%s' \"\${$_var:-}\"")
-  [ "$_cur" = "live" ] || return 0
+# 라이브 이미지의 태그를 echo 한다(실패는 stderr + return 1; 서브셸이라 exit 가 부모를 못 끊으므로
+# 호출측이 '|| exit 2' 로 받는다). eval 을 쓰지 않는다 -- 변수명·값이 전부 코드로만 흐르고, 외부에서
+# 온 값(kubectl 이 준 이미지 문자열)은 case·파라미터 확장·따옴표 echo 로만 다룬다(명령으로 재파싱
+# 되는 경로가 없다; 적대적 태그 주입 실측으로 확인). 태그당 if 블록이라 간접 변수 접근도 필요 없다.
+_live_tag() {   # $1=사람이 읽는 이름  $2..=kubectl get 인자(이미지 ref 하나를 출력)
+  _human=$1; shift
   _img=$(kubectl -n "$NS" get "$@" 2>/dev/null || true)
   case "$_img" in
-    "") echo "FAIL: $_human 태그가 'live' 인데 클러스터에서 라이브 이미지를 읽지 못했습니다"
-        echo "  (첫 설치면 명시 태그(예: d118)를 쓰세요; 아니면 kubectl 접근과 네임스페이스 '$NS' 를 확인)"
-        exit 2 ;;
-    *set-by-overlay*) echo "FAIL: $_human 라이브가 아직 자리표시자입니다($_img) — 오버레이 미적용(첫 설치) 상태라 'live' 를 쓸 수 없습니다. 명시 태그를 쓰세요"
-        exit 2 ;;
-    *:*) _tag=${_img##*:} ;;
-    *) echo "FAIL: $_human 라이브 이미지 '$_img' 에 태그(:) 가 없습니다"; exit 2 ;;
+    "") echo "FAIL: $_human 태그가 'live' 인데 클러스터에서 라이브 이미지를 읽지 못했습니다" >&2
+        echo "  (첫 설치면 명시 태그(예: d118)를 쓰세요; 아니면 kubectl 접근과 네임스페이스 '$NS' 를 확인)" >&2
+        return 1 ;;
+    *set-by-overlay*) echo "FAIL: $_human 라이브가 아직 자리표시자입니다($_img) — 오버레이 미적용(첫 설치) 상태라 'live' 를 쓸 수 없습니다. 명시 태그를 쓰세요" >&2
+        return 1 ;;
+    *:*) printf '%s' "${_img##*:}" ;;
+    *) echo "FAIL: $_human 라이브 이미지 '$_img' 에 태그(:) 가 없습니다" >&2; return 1 ;;
   esac
-  eval "$_var=\$_tag"
-  echo "live: $_var=$_tag ($_img)" >&2
 }
-_resolve_live DMS_TAG       "dms(api·controller)"       deploy    dms-api    -o 'jsonpath={.spec.template.spec.containers[0].image}'
-_resolve_live DMS_AGENT_TAG "dms-agent"                 ds        dms-agent  -o 'jsonpath={.spec.template.spec.containers[0].image}'
-_resolve_live MFU_TAG       "dms-mpifileutils(잡 이미지)" configmap dms-config -o 'jsonpath={.data.DMS_JOB_IMAGE}'
+if [ "${DMS_TAG:-}" = "live" ]; then
+  DMS_TAG=$(_live_tag "dms(api·controller)" deploy dms-api -o 'jsonpath={.spec.template.spec.containers[0].image}') || exit 2
+  echo "live: DMS_TAG=$DMS_TAG" >&2
+fi
+if [ "${DMS_AGENT_TAG:-}" = "live" ]; then
+  DMS_AGENT_TAG=$(_live_tag "dms-agent" ds dms-agent -o 'jsonpath={.spec.template.spec.containers[0].image}') || exit 2
+  echo "live: DMS_AGENT_TAG=$DMS_AGENT_TAG" >&2
+fi
+if [ "${MFU_TAG:-}" = "live" ]; then
+  MFU_TAG=$(_live_tag "dms-mpifileutils(잡 이미지)" configmap dms-config -o 'jsonpath={.data.DMS_JOB_IMAGE}') || exit 2
+  echo "live: MFU_TAG=$MFU_TAG" >&2
+fi
 
 KEYS="REGISTRY DMS_TAG DMS_AGENT_TAG MFU_TAG SHARED_FS LDAP_HOST LDAP_USER_BASE \
 LDAP_GROUP_BASE LDAP_BIND_DN EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN PORTAL_VIP"
