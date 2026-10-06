@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { absolutePath, absSummary, destinationParent, pathSummary } from "./storagePaths";
+import { absolutePath, absSummary, destinationParent, pathSummary, relativePathProblem } from "./storagePaths";
 
 test("destinationParent: sync 목적지의 상위 디렉토리 절대경로(쓰기 권한이 필요한 곳)", () => {
   expect(destinationParent("/cephfs/managed", "dms_test/dst")).toBe("/cephfs/managed/dms_test");
@@ -54,4 +54,22 @@ test("빈 맵(비관리자·조회 실패)에선 절대경로가 아예 없다",
   expect(absSummary("sync", { source_storage: "cephfs-dms", source: "a",
                               destination_storage: "gpfs-dms", destination: "b" }, {}))
     .toBeNull();
+});
+
+test("relativePathProblem: domain.validate_relative_path(422 unsafe_path) 의 즉답 미러", () => {
+  // 통과: 상대경로·중복 슬래시·끝 슬래시·"./" 접두(정규화하면 하위 경로)
+  for (const ok of ["a", "a/b", "a//b/", "./a", "team/data.v2", "a/.../b"])
+    expect(relativePathProblem(ok)).toBeNull();
+  // 미입력은 sanity(호출측) 몫 -- 여기선 문제 아님
+  expect(relativePathProblem("")).toBeNull();
+  expect(relativePathProblem("   ")).toBeNull();
+  // 공백은 거부가 아니다(서버는 다듬지 않고 그대로 이름으로 쓴다)
+  expect(relativePathProblem("backup/x ")).toBeNull();
+  // 거부: "/" 시작, ".." 구성요소, 관리 디렉토리 자신(정규화 ".")
+  expect(relativePathProblem("/team/data")).toMatch(/"\/" 로 시작할 수 없습니다/);
+  expect(relativePathProblem("a/../b")).toMatch(/"\.\." 은 쓸 수 없습니다/);
+  expect(relativePathProblem("..")).toMatch(/"\.\." 은 쓸 수 없습니다/);
+  expect(relativePathProblem(".")).toMatch(/관리 디렉토리 자신/);
+  expect(relativePathProblem("./")).toMatch(/관리 디렉토리 자신/);
+  expect(relativePathProblem("./.")).toMatch(/관리 디렉토리 자신/);
 });

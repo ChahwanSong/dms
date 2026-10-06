@@ -41,6 +41,23 @@ export function destinationParent(root: string | null | undefined, rel: unknown)
   return absolutePath(root, parts.slice(0, -1).join("/"));
 }
 
+/** 제출 경로(관리 디렉토리 아래 상대경로)가 서버에서 거부될 이유 -- domain.validate_relative_path
+ *  (422 unsafe_path) 의 즉답 미러. 서버가 최종 심판이고 이건 표시·제출 잠금용이다.
+ *  거부: "/" 로 시작, ".." 구성요소, 정규화하면 "." (관리 디렉토리 자신 -- rm 은 rm_root_forbidden).
+ *  빈 입력은 null(미입력 안내는 호출측 sanity 몫). 공백은 **거부가 아니다** -- 서버는 다듬지 않고
+ *  그대로 이름으로 쓴다(그래서 화면도 다듬은 값으로 경로를 지어 보이면 안 된다). */
+export function relativePathProblem(rel: string): string | null {
+  if (rel.trim() === "") return null;
+  if (rel.startsWith("/"))
+    return "\"/\" 로 시작할 수 없습니다 — 관리 디렉토리 아래 상대경로로 적으세요";
+  const parts = rel.split("/");
+  if (parts.some((p) => p === ".."))
+    return "\"..\" 은 쓸 수 없습니다 — 관리 디렉토리 밖을 가리킬 수 없습니다";
+  if (parts.every((p) => p === "" || p === "."))
+    return "관리 디렉토리 자신(.)은 지정할 수 없습니다 — 그 아래 경로를 적으세요";
+  return null;
+}
+
 export type StorageRoots = Record<string, string | undefined>;
 
 const _root = (roots: StorageRoots, storage: unknown) =>

@@ -23,7 +23,8 @@ export interface CreateBatchBody {
   priority?: string; node_count?: number;
   // 노드당 프로세스 수 override: node_count 와 같은 생략 계약의 미러.
   procs_per_node?: number;
-  // 배치 특권 실행: 빈값은 키 생략 = 비특권 현행(단건 SubmitJob 관례 미러).
+  // 실행 신원(기록용 이름): 빈값은 키 생략 = 서버 NULL(생성자 본인). 특권 스위치가 아니다 --
+  // 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행이다.
   owner_username?: string;
 }
 export const useCreateBatch = () =>

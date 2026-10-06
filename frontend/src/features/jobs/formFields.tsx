@@ -1,12 +1,13 @@
 import type { UserStorage } from "../../lib/types";
 
 // SubmitJob 에 살던 공용 폼 조각의 이사처(슬라이스 31 T3, 전제 재확인 #2).
-// SubmitScan·ScanPaths 가 SubmitJob 을 import 한 채로 T4 위저드화를 하면 화면
-// 하나를 고칠 때 세 화면이 흔들린다 -- 위저드화 전에 결합을 끊는다.
+// 제출 화면(SubmitJob)을 통째로 갈아도 다른 임포터(BatchCreate)가 흔들리지 않게
+// 결합을 끊어 둔다(위저드화 T4, 단일 페이지화 2026-10-06 모두 이 덕에 이 파일의 렌더 계약은 그대로).
 // 렌더 결과(aria-label·옵션 문구)는 원문 그대로: 임포터 테스트 무수정 초록이 계약.
 
 // 보더만 border-black/10 → border-line 토큰으로 스왑(전제 #7 -- field 는 한 곳).
-export const field = "mt-1 w-full rounded-lg border border-line px-3 py-2";
+// bg-surface(2026-10-06): select 는 UA 기본 회색 배경이라 같은 줄의 입력 상자(흰색)와 톤이 갈렸다.
+export const field = "mt-1 w-full rounded-lg border border-line bg-surface px-3 py-2";
 
 export function StoragePicker({ label, value, onChange, storages, loading }: {
   label: string; value: string; onChange: (v: string) => void;
