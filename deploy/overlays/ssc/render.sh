@@ -15,6 +15,33 @@ VALS="${VALUES_ENV:-$HERE/values.env}"
 # shellcheck disable=SC1090
 . "$VALS"
 
+# live 태그 자동 해석(2026-10-06, prod/render.sh 와 같은 로직): values.env 의 DMS_TAG/
+# DMS_AGENT_TAG/MFU_TAG 를 'live' 로 두면 지금 클러스터에서 도는 이미지 태그를 읽어 채운다 --
+# 포탈 빌드·릴리스로 이미지를 올린 뒤 values.env 를 안 고쳐도, 재-apply(설정 변경 등)가 가드를
+# 통과하고 라이브를 옛 태그로 되돌리지 않는다. 명시 태그(dNN)는 종전과 같다. 첫 설치는 라이브
+# 워크로드가 없어 'live' 를 못 쓴다(아래 에러). 해석 결과는 stderr 로만 알린다(RENDERED: 파싱 보존).
+NS="${DMS_NS:-dms}"
+_resolve_live() {   # $1=변수명  $2=사람이 읽는 이름  $3..=kubectl get 인자(이미지 ref 하나를 출력)
+  _var=$1; _human=$2; shift 2
+  _cur=$(eval "printf '%s' \"\${$_var:-}\"")
+  [ "$_cur" = "live" ] || return 0
+  _img=$(kubectl -n "$NS" get "$@" 2>/dev/null || true)
+  case "$_img" in
+    "") echo "FAIL: $_human 태그가 'live' 인데 클러스터에서 라이브 이미지를 읽지 못했습니다"
+        echo "  (첫 설치면 명시 태그(예: d118)를 쓰세요; 아니면 kubectl 접근과 네임스페이스 '$NS' 를 확인)"
+        exit 2 ;;
+    *set-by-overlay*) echo "FAIL: $_human 라이브가 아직 자리표시자입니다($_img) — 오버레이 미적용(첫 설치) 상태라 'live' 를 쓸 수 없습니다. 명시 태그를 쓰세요"
+        exit 2 ;;
+    *:*) _tag=${_img##*:} ;;
+    *) echo "FAIL: $_human 라이브 이미지 '$_img' 에 태그(:) 가 없습니다"; exit 2 ;;
+  esac
+  eval "$_var=\$_tag"
+  echo "live: $_var=$_tag ($_img)" >&2
+}
+_resolve_live DMS_TAG       "dms(api·controller)"       deploy    dms-api    -o 'jsonpath={.spec.template.spec.containers[0].image}'
+_resolve_live DMS_AGENT_TAG "dms-agent"                 ds        dms-agent  -o 'jsonpath={.spec.template.spec.containers[0].image}'
+_resolve_live MFU_TAG       "dms-mpifileutils(잡 이미지)" configmap dms-config -o 'jsonpath={.data.DMS_JOB_IMAGE}'
+
 # 매니페스트 템플릿에 실제로 들어가는 토큰만 검증한다(12개; PORTAL_VIP 없음).
 KEYS="REGISTRY DMS_TAG DMS_AGENT_TAG MFU_TAG SHARED_FS LDAP_HOST LDAP_USER_BASE \
 LDAP_GROUP_BASE LDAP_BIND_DN EMAIL_DOMAIN LOCAL_ADMIN PORTAL_DOMAIN"
