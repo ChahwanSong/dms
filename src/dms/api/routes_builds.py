@@ -7,7 +7,7 @@ from ..build_runner import BUILD_REF_PREFIX
 from ..domain import DomainValidationError
 from ..repositories.builds import (BUILD_IMAGES, build_pod_name, effective_tag)
 from .artifacts import tail_lines
-from .auth import Identity, audit_actor, require_admin
+from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_requests import reject_when_maintenance
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -58,7 +58,7 @@ def _detail(row):
 
 @router.post("/api/admin/builds", status_code=202)
 def submit_build(body: BuildBody, request: Request,
-                 identity: Identity = Depends(require_admin)):
+                 identity: Identity = Depends(require_session_admin)):
     reject_when_maintenance(request)
     repos = request.app.state.repos
     state = repos.control.control_state() or {}
@@ -134,7 +134,7 @@ _TERMINAL_BUILD = ("Succeeded", "Failed")
 
 @router.delete("/api/admin/builds/{build_id}")
 def delete_build(build_id: str, request: Request,
-                 identity: Identity = Depends(require_admin)):
+                 identity: Identity = Depends(require_session_admin)):
     repos = request.app.state.repos
     row = repos.builds.get(build_id)
     if row is None:

@@ -228,10 +228,22 @@ def get_batch(batch_id: str, request: Request, identity: Identity = Depends(requ
 # 안전하다. 활성 배치는 **Queued 항목만** — Materialized/종단 항목을 바꾸면 이미
 # 실행됐(거나 실행 중인) 기록의 위조다. Queued 판정은 읽고-쓰기가 아니라 repo 의
 # SQL 원자 가드(WHERE status='Queued')다 — orchestrator materialize(5s 틱)와의
-# 경합에서 영향 행 0 이면 409. 특권 게이트는 편집엔 불요: 특권 여부는 생성 시점에
-# 배치 행(owner_username/auth_method/requester_id)에 박제됐고 항목 편집은 그
-# 재료를 건드리지 않는다(orchestrator._materialize 가 배치 행만 읽는다 — 실측).
-# 편집은 require_admin 뒤의 운영 행위라 생성 게이트를 재통과시킬 새 재료가 없다.
+# 경합에서 영향 행 0 이면 409.
+#
+# 특권 게이트(2026-10-07 적대적 조사, 예전 "편집엔 불요" 결정을 뒤집는다): 자식은 배치 행의 requester_id·
+# auth_method(세션)를 물려받아 planner 에서 root 자격을 얻는다(orchestrator._materialize). 그래서 **새 경로를
+# 실행시키는** 라우트(항목 추가·수정·교체, 선택·실패분·전체 재실행, 확인)는 생성과 같은 3중 게이트를 다시
+# 통과해야 한다 -- 그렇지 않으면 공유 토큰(role admin, 모든 노드 에이전트가 보유)이나 allowlist 밖 관리자가
+# 기존 특권 배치에 경로를 넣고 확인해 root 실행(delete 옵션이면 root 미러 삭제)을 일으킬 수 있었다. 실행을 줄이기만
+# 하는 라우트(항목 삭제·배치 취소·배치 삭제·메타 수정)는 require_admin 그대로다.
+#
+# sync 재확인(같은 조사): sync 는 "미리보기를 운영자가 보고 확인해야 실행" 이 계약인데, 이미 Running(또는
+# PreviewReady)인 배치에 Queued 가 새로 생기면 그 항목은 미리보기 뒤 orchestrator 가 사람 확인 없이 자동 컨펌했다.
+# 그래서 sync 배치에 Queued 를 새로 만드는 변경은 배치를 Previewing 으로 되돌린다(_reopen_after_new_queued) --
+# 새 항목이 미리보기를 끝내면 orchestrator 가 PreviewReady 로 돌려놓고, 운영자가 다시 확인해야 실행된다. 둑은 세
+# 겹이다: ① 라우트의 Previewing 복귀(새 Queued 커밋 **뒤** CAS), ② orchestrator 의 PreviewReady 전이는 Queued 가
+# 없을 때만(mark_preview_ready), Running sync 배치에 Queued 가 보이면 materialize 대신 Previewing 복귀, ③ 확인
+# 자체도 Queued 가 있으면 0 행(BatchesRepository.confirm).
 
 _TERMINAL_BATCH = ("Completed", "Cancelled")
 # patch_batch_execution 이 바꿀 수 있는 키 = repositories.batches._SETTINGS_COLUMNS 의 거울(repo 가 밖의 키를 거부).
@@ -246,6 +258,40 @@ def _get_batch_or_404(request, batch_id):
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
     return b
+
+
+def _reopen_after_new_queued(repo, batch, *, reactivate: bool = True) -> str:
+    """Queued 항목을 새로 만든 변경(추가·수정·재실행)이 **커밋된 뒤** 배치 상태를 맞추고, 지금 상태를 돌려준다.
+
+    scan: 확인 단계가 없다 -- 종단이면 Running(재활성화), 활성이면 무접촉(도는 루프가 Queued 를 집는다).
+    sync: Previewing 으로(종단·PreviewReady·Running 모두) -- 새 항목은 미리보기를 거쳐 PreviewReady 에서 운영자가
+    다시 확인해야 실행된다. Running 에서 되돌리면 생기는 일(UI 안내문도 같은 말을 한다): 이미 Executing 인 자식은
+    그대로 끝까지 돈다(슬롯은 차지하지만 확인 대기 전이를 막지 않는다 -- batch_orchestrator._drive). 확인을 받고 슬롯을
+    기다리던 ConfirmPending 자식은 다시 확인할 때까지 시작되지 않는다(Previewing 은 아무것도 컨펌하지 않는다 -- 운영자는
+    배치 전체를 다시 본다). 새 항목의 미리보기가 끝나면 곧바로 확인 대기(PreviewReady, 확인 회차 +1)가 되고, 다시
+    확인하면 기다리던 자식이 슬롯대로 이어서 실행된다. 그 사이에도 미리보기 만료 시계(preview_ttl_seconds)는 가서,
+    기다리던 자식이 만료되면 stepper 가 Rejected(preview_expired, 실패 집계)로 끝낸다(다시 돌리려면 :rerun-failed).
+
+    전이는 CAS(set_status_if)다 -- 앞에서 읽은 batch 이후 다른 쓰기가 끼었을 수 있다:
+    - 읽을 때 종단이었으면 그 종단 상태에서만 되살린다(취소·완료된 배치에 추가 = 의도한 재활성화. 활성 배치에만
+      걸리는 취소와는 경합하지 않는다). reactivate=False(종단 배치의 항목 수정 -- 재실행이 아니다)면 손대지 않는다.
+    - 읽을 때 활성(또는 PreviewReady)이었으면 Completed 도 되살린다 -- 새 항목 커밋 전 스냅샷으로 orchestrator 가
+      완료시켰으면 새 항목이 종단 배치에 갇힌다. Cancelled 는 되살리지 않는다(그 사이 취소는 운영자 의도).
+    - sync 는 Running·PreviewReady 를 늘 포함한다: 그 사이 확인(PreviewReady→Running)이나 orchestrator 의
+      PreviewReady 전이가 끼어도 새 항목은 다시 확인받는다."""
+    observed = batch["status"]
+    if observed in _TERMINAL_BATCH:
+        if not reactivate:
+            return observed
+        revive = (observed,)
+    else:
+        revive = ("Completed",)
+    if batch["operation"] == Operation.SCAN.value:
+        repo.set_status_if(batch["batch_id"], "Running", from_states=revive)
+    else:
+        repo.set_status_if(batch["batch_id"], "Previewing", from_states=("Running", "PreviewReady") + revive)
+    fresh = repo.get(batch["batch_id"])
+    return observed if fresh is None else fresh["status"]
 
 
 def _validated_item(batch, items, new_item, *, replace_seq=None):
@@ -278,6 +324,7 @@ def _reject_stale_options(batch) -> None:
 def update_batch_item(batch_id: str, seq: int, body: dict, request: Request,
                       identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
+    _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
     items = repo.list_items(batch_id)
@@ -289,6 +336,9 @@ def update_batch_item(batch_id: str, seq: int, body: dict, request: Request,
         # 존재는 위에서 확인했으니 영향 행 0 = Queued 가드 패배(materialize 경합
         # 포함) — 종단 배치 경로(가드 없음)에선 동시 삭제의 극소 창뿐이다.
         raise HTTPException(status_code=409, detail="batch_item_not_editable")
+    # 활성·확인 대기 sync 배치에서 바꾼 Queued 항목은 새 경로다 -- 미리보기를 다시 확인받는다(블록 주석).
+    # 종단 배치의 수정은 재실행이 아니므로(재실행 라우트 몫) 상태를 건드리지 않는다(reactivate=False).
+    _reopen_after_new_queued(repo, b, reactivate=False)
     return repo.get_item(batch_id, seq)
 
 
@@ -328,6 +378,7 @@ def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
     라우트 충돌 없음(실측): …/items 와 …/items/{seq} 는 세그먼트 수가 달라
     starlette 매칭에서 겹치지 않는다(test_replace_items_route_does_not_shadow_…)."""
     reject_when_maintenance(request)
+    _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
     if b["status"] not in _TERMINAL_BATCH:
@@ -346,19 +397,15 @@ def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
 def add_batch_item(batch_id: str, body: dict, request: Request,
                    identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
+    _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
     _validated_item(b, repo.list_items(batch_id), body)
     seq = repo.add_item(batch_id, body)
-    status = b["status"]
-    if status in _TERMINAL_BATCH:
-        # 종단 배치에 추가 = 재활성화(rescan 의 상태 분기 재사용). 기존 종단
-        # 항목은 무접촉이라 orchestrator 는 신규 Queued 항목만 materialize 한다
-        # (_drive 는 종단 항목을 건너뛴다 — 재실행이 아니라 증분 실행).
-        # 활성 배치 추가는 상태 그대로 — 이미 도는 루프가 새 항목을 집는다.
-        status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
-        repo.set_status(batch_id, status)
-    return {"seq": seq, "status": status}
+    # 종단 배치에 추가 = 재활성화. 기존 종단 항목은 무접촉이라 orchestrator 는 신규 Queued 항목만 materialize
+    # 한다(_drive 는 종단 항목을 건너뛴다 — 재실행이 아니라 증분 실행). scan 활성 배치는 상태 그대로(도는 루프가
+    # 집는다). sync 는 Running·PreviewReady 여도 Previewing 으로 -- 새 경로의 미리보기를 다시 확인받는다.
+    return {"seq": seq, "status": _reopen_after_new_queued(repo, b)}
 
 
 class RerunItemsBody(BaseModel):
@@ -391,15 +438,13 @@ def rerun_batch_items(batch_id: str, body: RerunItemsBody, request: Request,
     종단 판정은 읽고-쓰기가 아니라 repo 의 SQL 원자 가드(WHERE status IN 종단)다 —
     orchestrator(5s 틱)와의 경합에서 진 항목도 skipped 로 떨어진다.
 
-    배치 상태: :rescan 의 분기를 그대로 재사용(scan→Running / sync→Previewing).
-    조건이 "종단 배치"가 아니라 "**활성이 아닌 배치**"인 이유는 PreviewReady 다 —
-    list_active 밖이라 orchestrator 가 굴리지 않으므로, 그대로 두면 되돌린 항목이
-    확인(:confirm) 전까지 Queued 인 채 방치된다. Previewing 으로 되돌리면 새
-    항목이 preview 를 다시 타고 전원 previewed 가 되면 orchestrator 가 스스로
-    PreviewReady 로 복귀시킨다(자기 치유). 이미 활성(Running/Previewing)이면
-    무접촉 — 도는 루프가 Queued 를 집는다(add_item 의 결정과 같다).
+    배치 상태(_reopen_after_new_queued): scan 은 활성이 아니면 Running(활성이면 무접촉 — 도는 루프가 집는다).
+    sync 는 언제나 Previewing -- PreviewReady 는 list_active 밖이라 그대로 두면 되돌린 항목이 확인 전까지 방치되고,
+    Running 이면 되돌린 항목이 미리보기 뒤 사람 확인 없이 자동 컨펌됐다(2026-10-07). Previewing 으로 되돌리면 새
+    항목이 preview 를 다시 타고, 실행 중 자식이 끝나고 전원 previewed 가 되면 orchestrator 가 PreviewReady 로 복귀시킨다.
     되돌린 것이 0 이면 상태도 안 건드린다: 돌 것이 없는데 Running 이면 거짓이다."""
     reject_when_maintenance(request)
+    _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
     _reject_stale_options(b)
@@ -429,28 +474,62 @@ def rerun_batch_items(batch_id: str, body: RerunItemsBody, request: Request,
         skipped = sorted(skipped + [{"seq": s, "reason": _SKIP_NOT_RERUNNABLE}
                                     for s in lost], key=lambda d: d["seq"])
     status = b["status"]
-    if len(requeued) > 0 and status not in _ACTIVE_BATCH:
-        status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
-        repo.set_status(batch_id, status)
+    if len(requeued) > 0:
+        status = _reopen_after_new_queued(repo, b)
     return {"requeued": len(requeued), "skipped": skipped, "status": status}
 
 
+class ConfirmBatchBody(BaseModel):
+    # 운영자가 확인 대화상자를 연 확인 회차(GET 배치 응답의 preview_round). 생략·null 은 422 -- 무엇을 봤는지
+    # 말하지 않는 확인(옛 포탈 탭·스크립트)은 받지 않는다(fail-closed).
+    preview_round: int | None = None
+
+
 @router.post("/api/admin/batches/{batch_id}:confirm")
-def confirm_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
+def confirm_batch(batch_id: str, request: Request, body: ConfirmBatchBody | None = None,
+                  identity: Identity = Depends(require_admin)):
+    """sync 배치 확인: PreviewReady → Running. 그 뒤 orchestrator 가 ConfirmPending 자식을 슬롯만큼씩 자동 컨펌한다
+    (자식마다의 컨펌은 없다 -- 운영자의 이 1회 확인이 미리보기를 마친 자식 전부를 대표한다).
+
+    확인 회차(본문 preview_round): 운영자가 대화상자를 연 회차. 다르면 409 batch_preview_changed -- 확인 대기 →
+    다시 미리보기 → 확인 대기(ABA) 사이에 생긴 항목을 운영자가 본 적 없이 확인하지 않는다(2026-10-07 리뷰).
+    특권: 생성과 같은 3중 게이트(블록 주석 -- 확인이 곧 root 실행 시작이다). 전이는 저장소의 원자 갱신
+    (WHERE status='PreviewReady' AND Queued 항목 없음)이라, 읽은 뒤 그 사이 항목 추가 등으로 Previewing 으로
+    되돌아갔거나 미리보기 안 된 항목이 있으면 0 행 = 409 -- 운영자가 본 화면과 다른 배치를 확인하지 않는다. 확인은 감사 행으로 남는다(누가·언제·무엇을 확인했나 --
+    자식 전이 actor 는 batch-orchestrator 뿐이라 이것이 없으면 확인자가 어디에도 없다)."""
+    _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    if body is None or body.preview_round is None:
+        raise HTTPException(status_code=422, detail="preview_round_required")
     if b["status"] != "PreviewReady":
         raise HTTPException(status_code=409, detail="batch_not_confirmable")
+    if b["preview_round"] != body.preview_round:
+        raise HTTPException(status_code=409, detail="batch_preview_changed")
     _reject_stale_options(b)
-    repo.set_status(batch_id, "Running")
+    items = repo.list_items_detail(batch_id)
+    summary = {
+        "previewed": sum(1 for it in items if it.get("job_state") == DataJobState.CONFIRM_PENDING.value),
+        "items": len(items),
+        "options": b["options"],
+    }
+    if not repo.confirm(batch_id, actor=identity.actor, summary=summary, expected_round=body.preview_round):
+        # 0 행 = 그 사이 상태가 바뀌었거나(항목 추가·재실행으로 Previewing 복귀, 취소) 회차가 바뀌었거나 Queued 항목이
+        # 있다. Queued 로 확인 대기에 갇히지 않게 Previewing 으로 되돌린다(미리보기 뒤 다시 확인 대기가 된다).
+        repo.reopen_if_queued(batch_id)
+        fresh = repo.get(batch_id)
+        if fresh is not None and fresh["status"] == "PreviewReady" and fresh["preview_round"] != body.preview_round:
+            raise HTTPException(status_code=409, detail="batch_preview_changed")
+        raise HTTPException(status_code=409, detail="batch_not_confirmable")
     return {"status": "Running"}
 
 
 @router.post("/api/admin/batches/{batch_id}:rerun-failed")
 def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
+    _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = repo.get(batch_id)
     if b is None:
@@ -459,20 +538,16 @@ def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(r
     n = repo.reset_failed_items(batch_id)
     if n == 0:
         raise HTTPException(status_code=409, detail="no_failed_items")
-    # 상태 분기는 :rescan·items:rerun 과 같다(2026-10-02 적대적 리뷰): 활성이 아니면 scan→Running, **sync→Previewing**.
-    # 예전엔 무조건 Running 이라 sync 실패분이 배치 미리보기·운영자 확인(:confirm) 없이 orchestrator 의 자동 확인으로
-    # 곧장 실행됐다 -- 실행 설정 변경(patch_batch_execution)으로 delete·chown 을 바꾼 뒤라면 바뀐 옵션이 root 로
-    # 확인 없이 돈다. 이미 활성이면 무접촉(도는 루프가 Queued 를 집는다).
-    status = b["status"]
-    if status not in _ACTIVE_BATCH:
-        status = "Running" if b["operation"] == Operation.SCAN.value else "Previewing"
-        repo.set_status(batch_id, status)
-    return {"status": status, "requeued": n}
+    # 상태 분기는 items:rerun 과 같다(_reopen_after_new_queued): scan 은 활성이 아니면 Running, sync 는 언제나
+    # Previewing. 2026-10-02 에 "종단이면 sync→Previewing" 을 고쳤고(예전엔 무조건 Running 이라 실패분이 확인 없이
+    # 자동 컨펌됐다), 2026-10-07 에 Running 중 재실행도 같은 이유로 Previewing 으로 되돌린다.
+    return {"status": _reopen_after_new_queued(repo, b), "requeued": n}
 
 
 @router.post("/api/admin/batches/{batch_id}:rescan")
 def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
     reject_when_maintenance(request)
+    _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = repo.get(batch_id)
     if b is None:

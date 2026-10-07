@@ -14,6 +14,11 @@ class _FakeRunner:
 
 @pytest.fixture
 def reg_client(client, monkeypatch):
+    # 레지스트리 태그 삭제는 세션 관리자만(admin_session_required, 2026-10-07) -- 공유 토큰은 모든 노드
+    # 에이전트가 쥔 자격이다. 세션 관리자로 로그인해 두고 삭제 호출엔 Bearer 헤더를 싣지 않는다(헤더가
+    # 세션보다 우선). 목록 조회는 토큰 그대로 둔다(토큰 조회는 계속 된다).
+    client.app.state.repos.accounts.create("opadm", "p", "admin", actor="t")
+    assert client.post("/api/auth/login", json={"username": "opadm", "password": "p"}).status_code == 200
     # live: dms d74(api·controller), agent be9168b17. 매니페스트(동봉본)는 실
     # deploy/k8s 파일이 아니라 **고정 목**으로 준다 -- 실 파일을 읽게 두면 배포
     # 태그 bump 커밋마다 이 테스트가 깨진다(d80 정렬에서 실제로 깨졌다). 여기서
@@ -74,14 +79,14 @@ def test_delete_refuses_in_use_tag_before_touching_registry(reg_client, monkeypa
                         lambda *a: called.__setitem__("digest", called["digest"] + 1))
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
                         lambda *a: called.__setitem__("delete", called["delete"] + 1))
-    r = reg_client.delete("/api/admin/registry/images/dms/d74", headers=ADMIN)
+    r = reg_client.delete("/api/admin/registry/images/dms/d74")
     assert r.status_code == 409 and r.json()["detail"] == "registry_tag_in_use"
     # 레지스트리를 아예 건드리지 않고 거절한다.
     assert called == {"digest": 0, "delete": 0}
 
 
 def test_delete_unknown_repo_is_422(reg_client):
-    r = reg_client.delete("/api/admin/registry/images/nope/b99d97238", headers=ADMIN)
+    r = reg_client.delete("/api/admin/registry/images/nope/b99d97238")
     assert r.status_code == 422 and r.json()["detail"] == "unknown_registry_repo"
 
 
@@ -93,7 +98,7 @@ def test_delete_unused_tag_resolves_digest_then_deletes(reg_client, monkeypatch)
         seen["digest"] = digest
         return "ok"
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest", _del)
-    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238", headers=ADMIN)
+    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
     assert r.status_code == 200
     assert r.json()["deleted"] == "dms:b99d97238"
     assert seen["digest"] == "sha256:" + "a" * 64
@@ -104,14 +109,14 @@ def test_delete_maps_registry_delete_disabled_to_409(reg_client, monkeypatch):
                         lambda *a: "sha256:" + "b" * 64)
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.delete_manifest",
                         lambda *a: "disabled")
-    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238", headers=ADMIN)
+    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
     assert r.status_code == 409 and r.json()["detail"] == "registry_delete_disabled"
 
 
 def test_delete_missing_tag_is_404(reg_client, monkeypatch):
     monkeypatch.setattr("dms.api.routes_registry.registry_mod.manifest_digest",
                         lambda *a: None)
-    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238", headers=ADMIN)
+    r = reg_client.delete("/api/admin/registry/images/dms/b99d97238")
     assert r.status_code == 404 and r.json()["detail"] == "registry_tag_not_found"
 
 

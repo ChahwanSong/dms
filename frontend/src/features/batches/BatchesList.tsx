@@ -5,7 +5,7 @@ import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Button } from "../../components/ui/Button";
-import { batchPillVariant } from "../../lib/jobState";
+import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { kstStampOrDash } from "../../lib/datetime";
 
 // 활성 배치 체크박스에 다는 사유. 서버 문구("먼저 취소하세요")와 같은 동선을 가리킨다
@@ -218,7 +218,7 @@ export function BatchesList() {
                 <td>{b.name ?? "—"}</td>
                 {/* 배치 상태 전용 색(batchPillVariant) — 상세 헤더와 동일 계약.
                     공유 pillVariant 로는 배치 상태가 전부 neutral 로 죽는다. */}
-                <td>{b.operation}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} /></td>
+                <td>{b.operation}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)} /></td>
                 <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
                 {/* 시각은 저장소 관례대로 ISO 원문 그대로(AccountsList·JobsList·
                     구 최근 작업 카드와 같은 표기). 값 없음은 "—". */}

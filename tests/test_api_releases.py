@@ -27,6 +27,11 @@ class _FakeRunner:
 
 @pytest.fixture
 def rollout_client(client, monkeypatch):
+    # 릴리스 제출·컨트롤 상태 PUT 은 세션 관리자만(admin_session_required, 2026-10-07) -- 공유 토큰은
+    # 모든 노드 에이전트가 쥔 자격이라 그것으로 수정 전 이미지로 롤백할 수 있으면 안 된다. 세션 관리자로
+    # 로그인해 두고 변경 호출엔 Bearer 헤더를 싣지 않는다(헤더가 세션보다 우선). 조회는 토큰 그대로 둔다.
+    client.app.state.repos.accounts.create("opadm", "p", "admin", actor="t")
+    assert client.post("/api/auth/login", json={"username": "opadm", "password": "p"}).status_code == 200
     # 레지스트리: dms/dms-agent 둘 다 응답. 개별 테스트가 monkeypatch로 덮는다.
     monkeypatch.setattr(
         "dms.api.routes_releases.fetch_repo_tags",
@@ -92,8 +97,7 @@ def test_submit_orders_components_server_side(rollout_client):
     r = rollout_client.post(
         "/api/admin/releases",
         json={"items": [{"component": "dms-controller", "tag": "d23"},
-                        {"component": "dms-agent", "tag": "dev6"}]},
-        headers=ADMIN)
+                        {"component": "dms-agent", "tag": "dev6"}]})
     assert r.status_code == 202
     items = r.json()["items"]
     assert [i["component"] for i in items] == ["dms-agent", "dms-controller"]
@@ -103,40 +107,37 @@ def test_submit_orders_components_server_side(rollout_client):
 
 def test_unknown_component_and_duplicates_rejected(rollout_client):
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "nope", "tag": "t"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "nope", "tag": "t"}]})
     assert r.status_code == 422 and r.json()["detail"] == "unknown_component"
     r = rollout_client.post(
         "/api/admin/releases",
         json={"items": [{"component": "dms-api", "tag": "d23"},
-                        {"component": "dms-api", "tag": "d23"}]},
-        headers=ADMIN)
+                        {"component": "dms-api", "tag": "d23"}]})
     assert r.status_code == 422 and r.json()["detail"] == "unknown_component"
-    r = rollout_client.post("/api/admin/releases", json={"items": []}, headers=ADMIN)
+    r = rollout_client.post("/api/admin/releases", json={"items": []})
     assert r.status_code == 422 and r.json()["detail"] == "unknown_component"
 
 
 def test_rejected_submits_write_nothing(rollout_client):
     # 거절은 릴리스 행을 남기면 안 된다 -- 남으면 active()가 비지 않아 다음 롤아웃이
     # rollout_in_progress로 영원히 막힌다.
-    rollout_client.post("/api/admin/releases",
-                        json={"items": [{"component": "dms-api", "tag": "d22"}]},
-                        headers=ADMIN)
+    r = rollout_client.post("/api/admin/releases",
+                            json={"items": [{"component": "dms-api", "tag": "d22"}]})
+    # 거절 사유까지 고정한다 -- 인증 403 으로 거절돼도 "아무것도 안 남음"은 참이라 그대로면 공허해진다.
+    assert r.status_code == 422 and r.json()["detail"] == "same_tag"
     body = rollout_client.get("/api/admin/releases", headers=ADMIN).json()
     assert body["history"] == [] and body["current"] == {}
 
 
 def test_unknown_tag_enforced_only_when_registry_answers(rollout_client, monkeypatch):
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "ghost"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "ghost"}]})
     assert r.status_code == 422 and r.json()["detail"] == "unknown_tag"
     # 레지스트리 침묵 -> 통과시키고 ImagePullBackOff로 드러나게 한다(잘못된 차단보다 낫다)
     monkeypatch.setattr("dms.api.routes_releases.fetch_repo_tags",
                         lambda registry, repo: None)
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "ghost"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "ghost"}]})
     assert r.status_code == 202
 
 
@@ -149,15 +150,14 @@ def test_malformed_tag_is_rejected_even_when_registry_is_silent(rollout_client,
     for bad in ("", "  ", "-lead", "has space", "a" * 200, "tag:extra", "../evil"):
         r = rollout_client.post(
             "/api/admin/releases",
-            json={"items": [{"component": "dms-api", "tag": bad}]}, headers=ADMIN)
+            json={"items": [{"component": "dms-api", "tag": bad}]})
         assert r.status_code == 422 and r.json()["detail"] == "unknown_tag", bad
 
 
 def test_same_tag_is_rejected(rollout_client):
     # IfNotPresent 함정: 같은 태그 재적용은 아무 일도 안 일어난다
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "d22"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "d22"}]})
     assert r.status_code == 422 and r.json()["detail"] == "same_tag"
 
 
@@ -165,8 +165,7 @@ def test_same_tag_skipped_when_current_unreadable(rollout_client):
     # 워크로드를 못 읽으면(observe None) fail-open -- 레지스트리와 같은 원칙
     rollout_client.app.state.rollout_runner = _FakeRunner()
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "d22"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "d22"}]})
     assert r.status_code == 202
 
 
@@ -174,35 +173,29 @@ def test_same_tag_skipped_when_observe_fails(rollout_client):
     # observe가 ExecutionError로 죽어도 같은 강등 -- 제출 자체가 막히면 안 된다
     rollout_client.app.state.rollout_runner.fail_observe = True
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "d22"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "d22"}]})
     assert r.status_code == 202
 
 
 def test_concurrent_rollout_is_409(rollout_client):
     rollout_client.post("/api/admin/releases",
-                        json={"items": [{"component": "dms-api", "tag": "d23"}]},
-                        headers=ADMIN)
+                        json={"items": [{"component": "dms-api", "tag": "d23"}]})
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-agent", "tag": "dev6"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-agent", "tag": "dev6"}]})
     assert r.status_code == 409 and r.json()["detail"] == "rollout_in_progress"
 
 
 def test_submit_rejected_during_maintenance(rollout_client):
     rollout_client.put("/api/admin/control-state",
-                       json={"maintenance": True, "drain": False, "reason": "정비"},
-                       headers=ADMIN)
+                       json={"maintenance": True, "drain": False, "reason": "정비"})
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "d23"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "d23"}]})
     assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
 
 
 def test_list_carries_current_and_history(rollout_client):
     rollout_client.post("/api/admin/releases",
-                        json={"items": [{"component": "dms-api", "tag": "d23"}]},
-                        headers=ADMIN)
+                        json={"items": [{"component": "dms-api", "tag": "d23"}]})
     r = rollout_client.get("/api/admin/releases", headers=ADMIN)
     assert r.status_code == 200
     body = r.json()
@@ -216,8 +209,7 @@ def test_internal_columns_never_leave_the_api(rollout_client):
     # 그대로 나가면 내부 컬럼이 조용히 공개 스키마가 된다.
     posted = rollout_client.post(
         "/api/admin/releases",
-        json={"items": [{"component": "dms-api", "tag": "d23"}]},
-        headers=ADMIN).json()
+        json={"items": [{"component": "dms-api", "tag": "d23"}]}).json()
     body = rollout_client.get("/api/admin/releases", headers=ADMIN).json()
     rows = (posted["items"] + body["history"] + list(body["current"].values()))
     assert rows, "검사할 행이 없으면 이 테스트는 아무것도 증명하지 못한다"
@@ -228,13 +220,12 @@ def test_internal_columns_never_leave_the_api(rollout_client):
 
 def test_submit_writes_release_audit_with_actor(rollout_client):
     rollout_client.post("/api/admin/releases",
-                        json={"items": [{"component": "dms-api", "tag": "d23"}]},
-                        headers=ADMIN)
+                        json={"items": [{"component": "dms-api", "tag": "d23"}]})
     entries = rollout_client.app.state.repos.control.audit_entries(limit=3)
     entry = next(e for e in entries if e["mutation_class"] == "release")
-    # 공유 토큰 인증은 token: 접두(슬라이스 12 audit_actor). 슬라이스 19 에서
-    # x-dms-actor 를 헤더에서 지운 뒤 토큰 actor 는 shared-token 으로 정규화된다.
-    assert entry["actor"] == "token:shared-token"
+    # 릴리스는 세션 관리자만 낼 수 있으므로(2026-10-07) 감사 actor 는 그 로그인 이름 그대로다(접두 없음).
+    # 토큰 actor 의 token: 접두 의미는 test_api_control 이 토큰이 되는 감사 경로로 고정한다.
+    assert entry["actor"] == "opadm"
 
 
 def test_submit_writes_exactly_one_release_audit_row(rollout_client):
@@ -242,8 +233,7 @@ def test_submit_writes_exactly_one_release_audit_row(rollout_client):
     # 같은 제출이 감사 로그에 두 번 나타난다.
     rollout_client.post("/api/admin/releases",
                         json={"items": [{"component": "dms-api", "tag": "d23"},
-                                        {"component": "dms-agent", "tag": "dev6"}]},
-                        headers=ADMIN)
+                                        {"component": "dms-agent", "tag": "dev6"}]})
     entries = rollout_client.app.state.repos.control.audit_entries(limit=20)
     assert len([e for e in entries if e["mutation_class"] == "release"]) == 1
 
@@ -268,8 +258,7 @@ def test_submit_reports_unverified_when_repo_is_silent(rollout_client, db,
     r = rollout_client.post(
         "/api/admin/releases",
         json={"items": [{"component": "dms-api", "tag": "d23"},
-                        {"component": "dms-agent", "tag": "dev9"}]},
-        headers=ADMIN)
+                        {"component": "dms-agent", "tag": "dev9"}]})
     assert r.status_code == 202
     assert r.json()["tag_verified"] is False
     events = db.query(
@@ -283,8 +272,7 @@ def test_submit_verified_when_registry_answers(rollout_client, db):
     # 정상 경로: 레지스트리가 답했고 태그가 존재 -- 플래그 true, 이벤트 0건.
     # 이벤트가 정상 제출마다 쌓이면 "경고"의 의미가 죽는다(늑대 소년).
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "d23"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "d23"}]})
     assert r.status_code == 202
     assert r.json()["tag_verified"] is True
     assert db.query("SELECT id FROM events"
@@ -300,8 +288,7 @@ def test_rejected_submit_leaves_no_unverified_event(rollout_client, db,
     monkeypatch.setattr("dms.api.routes_releases.fetch_repo_tags",
                         lambda registry, repo: None)
     r = rollout_client.post("/api/admin/releases",
-                            json={"items": [{"component": "dms-api", "tag": "has space"}]},
-                            headers=ADMIN)
+                            json={"items": [{"component": "dms-api", "tag": "has space"}]})
     assert r.status_code == 422
     assert db.query("SELECT id FROM events"
                     " WHERE event_type = 'release_tag_unverified'") == []

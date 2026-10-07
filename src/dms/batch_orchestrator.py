@@ -6,19 +6,50 @@ materialize하고, 자식 request가 종단이면 item을 종단화 + counts를 
 전 item이 종단이면 배치를 Completed로 전이한다.
 
 sync 경로: Previewing 배치에서 Queued item을 쓰로틀 materialize해 preview를 진행시키고,
-전 item이 previewed(ConfirmPending)/종단이면 배치를 PreviewReady로 전이한다. 운영자가
-배치를 Running으로 confirm하면, 남은 Queued item을 materialize한 뒤 남은 슬롯만큼
-ConfirmPending 자식을 쓰로틀 confirm(`_confirm_child`)한다. preview가 만료된 자식은
-Queued로 재시도(reset)된다.
+Queued 도 미리보기 단계 자식도 없고 확인할 미리보기(ConfirmPending)가 하나라도 있으면 배치를
+PreviewReady로 전이한다(mark_preview_ready -- 한 문장 CAS + 확인 회차 +1). 이미 확인받아 실행 중인
+자식(Executing)은 PreviewReady 를 막지 않는다 -- Running 에서 항목 추가 등으로 Previewing 에 돌아온
+배치가 가장 긴 자식이 끝날 때까지 재확인조차 못 하던 정체(2026-10-07 리뷰). 확인할 미리보기 없이
+실행 중 자식만 남았으면(추가한 항목이 지워졌거나 미리보기가 거부됨) 확인 대기가 아니라 Running 으로
+돌려 마저 기록·완료한다. 슬롯은 실행 중 자식도 차지한다(동시 실행 상한 유지). 확인 대기(PreviewReady)
+배치도 루프가 **기록만** 하러 돈다(list_awaiting_confirm): 그 사이 끝난 실행 중 자식을 항목에 남기고 전부
+끝났으면 완료한다 -- 확인 대기는 사람이 누를 때까지 길어서, 기록하지 않으면 실제로 돈 자식이 Materialized
+로 남아 실패분 재실행·완료가 막히고 취소가 "취소됨" 으로 덮었다. 운영자가 배치를 Running으로 confirm하면(확인 회차 CAS + 그 순간의
+ConfirmPending 자식에 확인 도장) 남은 슬롯만큼 **도장이 지금 미리보기와 같은** 자식을 쓰로틀
+confirm(`_confirm_child`)한다 -- 새 미리보기는 하나도 만들지 않는다: Running sync 배치에 Queued·미리보기
+단계 자식·도장 없는 미리보기가 보이면(라우트의 Previewing 복귀를 놓친 경합, 업그레이드 전 옛 코드가 남긴
+행) 아무것도 컨펌하지 않고 배치를 Previewing 으로 되돌린다(사람이 보지 않은 미리보기의 자동 컨펌 차단).
+
+미리보기 만료: 배치 자식도 stepper expire_previews 가 PreviewExpired → 요청 Rejected(preview_expired)로
+끝내고, 다음 틱 _record_terminal 이 항목을 Rejected·실패 1 로 센다(Previewing·PreviewReady·Running 모두 --
+stepper 가 같은 컨트롤러 패스에서 먼저 돈다). 다시 미리보기는 자동으로 하지 않는다: 재실행은 :rerun-failed
+→ Previewing → 재확인. Running 에선 만료된 미리보기를 컨펌하지 않는다(슬롯도 차지하지 않는다).
 """
-from .db import utc_now_iso
+from .db import load_json, utc_now_iso
 from .domain import (DomainValidationError, Operation, RequestState, TERMINAL_REQUEST_STATES,
                      DataJobState, build_data_payload, resolve_priority)
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
-# repositories.batches._ACTIVE(list_active 가 고르는 상태)의 거울 -- _drive 의 재확인용.
+# repositories.batches._ACTIVE(list_active 가 고르는 상태) + 확인 대기(기록만) -- _drive 의 재확인용.
 _BATCH_ACTIVE = {"Previewing", "Running"}
+_BATCH_DRIVEN = _BATCH_ACTIVE | {"PreviewReady"}
 _REQ_TERMINAL = {s.value for s in TERMINAL_REQUEST_STATES}
+# 자식 잡이 아직 미리보기(dry-run) 단계인 상태. 이 밖의 비종단 자식(Executing, scan 의 Running, 잡은 종단인데
+# 요청 종단화 전)은 "실행 중" 이다 -- 미리보기 단계만 PreviewReady 를 막는다.
+_PREVIEW_PHASE = {DataJobState.PENDING.value, DataJobState.PREFLIGHT.value, DataJobState.PREVIEW_RUNNING.value}
+
+
+class _ClaimLost(Exception):
+    """자식 요청 INSERT 뒤 항목 claim 이 0 행 -- 트랜잭션을 롤백시키는 신호(밖으로 새지 않는다)."""
+
+
+def _preview_expired(job, now) -> bool:
+    return bool(job.get("preview_expires_at")) and job["preview_expires_at"] < now
+
+
+def _stamped(job) -> bool:
+    """배치 확인 도장이 지금 미리보기 지문과 같은가(None 은 도장 없음 -- 확인 전이거나 옛 코드가 만든 미리보기)."""
+    return job.get("confirmed_fingerprint") is not None and job["confirmed_fingerprint"] == job.get("preview_fingerprint")
 
 
 class BatchOrchestrator:
@@ -27,20 +58,25 @@ class BatchOrchestrator:
         self._settings = settings
 
     def run_once(self):
-        for batch in self._repos.batches.list_active():
+        for batch in self._repos.batches.list_active() + self._repos.batches.list_awaiting_confirm():
             self._drive(batch)
 
     def _child_state(self, request_id):
+        """("terminal", 요청 상태) | ("previewed", 잡) | ("previewing", 잡|None) | ("executing", 잡).
+        previewing = 잡이 아직 없거나(계획 전) 미리보기 단계. 요청 행이 없으면(모름) previewing 으로 -- 확인으로
+        넘어가지 못하게 보수적으로 읽는다."""
         req = self._repos.requests.get(request_id)
         if req is None:
-            return ("in_flight", None)
+            return ("previewing", None)
         if req["state"] in _REQ_TERMINAL:
             return ("terminal", req["state"])
         jobs = self._repos.data_jobs.list_jobs(request_id=request_id)
         job = jobs[0] if jobs else None
-        if job is not None and job["state"] == DataJobState.CONFIRM_PENDING.value:
+        if job is None or job["state"] in _PREVIEW_PHASE:
+            return ("previewing", job)
+        if job["state"] == DataJobState.CONFIRM_PENDING.value:
             return ("previewed", job)
-        return ("in_flight", None)
+        return ("executing", job)
 
     def _record_terminal(self, batch_id, item, req_state):
         with self._repos.db.transaction():
@@ -70,8 +106,9 @@ class BatchOrchestrator:
                                               **item["payload"])
         except DomainValidationError as exc:
             if not self._repos.batches.reject_queued_item(batch["batch_id"], item["seq"],
-                                                          reason_code=exc.reason_code):
-                return          # 그 사이 지워졌거나 더는 Queued 가 아니다 -- 손대지 않는다
+                                                          reason_code=exc.reason_code,
+                                                          expected_payload=item["payload"]):
+                return          # 그 사이 지워졌거나 고쳐졌거나 더는 Queued 가 아니다 -- 다음 틱이 새 값으로 판정
             self._repos.observability.record_event(
                 component="batch-orchestrator", severity="warning", event_type="batch_item_rejected",
                 message=f"batch {batch['batch_id']} item {item['seq']}: {exc.reason_code} -- {exc}"[:500])
@@ -102,12 +139,25 @@ class BatchOrchestrator:
         auth_method = batch.get("auth_method")
         if auth_method is None:
             auth_method = "token"
-        rid = self._repos.requests.create(
-            operation=batch["operation"], requester_id=batch["requester_id"],
-            actor=batch["actor"], resource_key=key, payload=payload,
-            priority=priority, batch_id=batch["batch_id"],
-            auth_method=auth_method)
-        self._repos.batches.set_item_materialized(batch["batch_id"], item["seq"], rid)
+        # 자식 요청 INSERT 와 항목 claim(→ Materialized)은 한 트랜잭션이다(2026-10-07 리뷰). 스냅샷(list_items)
+        # 뒤 관리자가 항목을 고쳤거나 지웠으면 옛 payload 로 자식을 만들고 항목은 새 payload 를 보이는 기록 불일치가
+        # 났다 -- 운영자는 화면의 새 경로를 보고 옛 경로의 미리보기를 확인하게 된다. 그래서 트랜잭션 안에서 저장값을
+        # 다시 읽어 스냅샷과 같을 때만 만들고, claim 은 같은 저장값 + Queued 가드로 한다(0 행 = 롤백, 다음 틱이 새 값).
+        try:
+            with self._repos.db.transaction():
+                raw = self._repos.batches.queued_item_payload_raw(batch["batch_id"], item["seq"])
+                if raw is None or load_json(raw) != item["payload"]:
+                    return
+                rid = self._repos.requests.insert_pending(
+                    operation=batch["operation"], requester_id=batch["requester_id"],
+                    actor=batch["actor"], resource_key=key, payload=payload,
+                    priority=priority, batch_id=batch["batch_id"],
+                    auth_method=auth_method)
+                if not self._repos.batches.claim_queued_item(batch["batch_id"], item["seq"], rid,
+                                                             payload_raw=raw):
+                    raise _ClaimLost()
+        except _ClaimLost:
+            return
 
     def _drive(self, batch):
         bid = batch["batch_id"]
@@ -116,11 +166,11 @@ class BatchOrchestrator:
         # 자식을 만들게 된다(적대적 리뷰 2026-10-02 재현). 그래서 굴리기 직전에 배치 행을 다시 읽고, 이미 활성이
         # 아니면(그 사이 취소됨) 건드리지 않는다 -- 낡은 스냅샷으로 취소된 배치를 Completed 로 덮던 창도 함께 좁힌다.
         fresh = self._repos.batches.get(bid)
-        if fresh is None or fresh["status"] not in _BATCH_ACTIVE:
+        if fresh is None or fresh["status"] not in _BATCH_DRIVEN:
             return
         batch = fresh
         items = self._repos.batches.list_items(bid)
-        queued, in_flight, previewed, terminal = [], [], [], 0
+        queued, previewing, executing, previewed, terminal = [], [], [], [], 0
         for item in items:
             st = item["status"]
             if st in _ITEM_TERMINAL:
@@ -132,35 +182,56 @@ class BatchOrchestrator:
                 self._record_terminal(bid, item, info); terminal += 1
             elif kind == "previewed":
                 previewed.append((item, info))
+            elif kind == "executing":
+                executing.append(item)
             else:
-                in_flight.append(item)
+                previewing.append(item)
         total = len(items)
+        busy = len(previewing) + len(executing)        # 슬롯을 차지하는 자식(미리보기 중 + 실행 중)
+        # 상태 전이는 전부 CAS 다(2026-10-07 리뷰): 판정은 위 스냅샷이지만, 그 뒤 API 가 항목을 추가·재실행했거나
+        # 배치를 취소했으면 무조건 쓰기가 그것을 덮는다(Queued 를 둔 채 완료·확인 대기가 되면 그 항목은 아무도 집지
+        # 않거나, 확인에 묻어 미리보기 없이 실행된다). 0 행이면 다음 틱이 새 스냅샷으로 다시 판정한다.
         if terminal == total:
-            self._repos.batches.set_status(bid, "Completed")
+            self._repos.batches.complete_if_all_terminal(bid, from_status=batch["status"])
             return
+        if batch["status"] == "PreviewReady":
+            return                                    # 확인 대기: 위 기록·완료만(만들기·컨펌·전이 없음)
         now = utc_now_iso()
         if batch["status"] == "Previewing":
-            if not queued and not in_flight:          # 전원 previewed(또는 종단)
-                self._repos.batches.set_status(bid, "PreviewReady")
+            if not queued and not previewing:         # 전원 previewed·실행 중(또는 종단)
+                if previewed:                         # 확인할 미리보기가 있다 → 확인 대기
+                    self._repos.batches.mark_preview_ready(bid)
+                else:
+                    # 확인할 것 없이 이미 확인된 실행 중 자식만 남았다 -- Running 으로 돌려 마저 기록·완료한다.
+                    # 안전하다: Running sync 분기는 도장 찍힌 미리보기만 컨펌하고, 새것이 보이면 다시 Previewing.
+                    self._repos.batches.set_status_if(bid, "Running", from_states=("Previewing",))
                 return
-            slots = batch["max_concurrency"] - len(in_flight)
+            slots = batch["max_concurrency"] - busy
             for item in queued[:max(0, slots)]:
                 self._materialize(batch, item)
-            for item, job in previewed:               # preview 만료 재시도
-                if job.get("preview_expires_at") and job["preview_expires_at"] < now:
-                    self._repos.batches.reset_item_to_queued(bid, item["seq"])
             return
         if batch["status"] == "Running":
-            slots = batch["max_concurrency"] - len(in_flight)
-            for item in queued[:max(0, slots)]:
-                self._materialize(batch, item); slots -= 1
-            if batch["operation"] == "sync":
-                for item, job in previewed[:max(0, slots)]:
+            if batch["operation"] == Operation.SYNC.value:
+                unstamped = [job for _, job in previewed if not _stamped(job)]
+                if queued or previewing or unstamped:
+                    # 확인된 sync 배치에 Queued·미리보기 단계 자식·도장 없는 미리보기 = 아무도 보지 않은 경로. 컨펌하면
+                    # root 로 돈다 -- 라우트가 이미 Previewing 으로 돌렸어야 하지만(_reopen_after_new_queued) 그 사이
+                    # 경합·업그레이드 전 옛 행을 위해 루프가 마지막으로 되돌린다. 실행 중 자식은 그대로 끝까지 돈다.
+                    self._repos.batches.set_status_if(bid, "Previewing", from_states=("Running",))
+                    return
+                slots = batch["max_concurrency"] - busy
+                # 만료된 미리보기는 컨펌하지 않고(슬롯도 차지하지 않는다) stepper 가 Rejected 로 끝내게 둔다.
+                live = [(item, job) for item, job in previewed if not _preview_expired(job, now)]
+                for item, job in live[:max(0, slots)]:
                     self._confirm_child(item, job, now)
+                return
+            slots = batch["max_concurrency"] - busy
+            for item in queued[:max(0, slots)]:
+                self._materialize(batch, item)
 
     def _confirm_child(self, item, job, now):
-        if job.get("preview_expires_at") and job["preview_expires_at"] < now:
-            self._repos.batches.reset_item_to_queued(item["batch_id"], item["seq"])
+        # 운영자의 배치 확인이 찍은 도장(BatchesRepository.confirm)이 지금 미리보기와 같은 자식만 실행한다 -- 지문을
+        # 여기서 새로 찍지 않는다(예전엔 지금 지문을 그대로 찍어 "본 적 없는 미리보기" 와 구별이 없었다).
+        if _preview_expired(job, now) or not _stamped(job):
             return
-        self._repos.data_jobs.set_confirmed(job["job_id"], job["preview_fingerprint"])
         self._repos.data_jobs.set_job_state(job["job_id"], DataJobState.EXECUTING, actor="batch-orchestrator")

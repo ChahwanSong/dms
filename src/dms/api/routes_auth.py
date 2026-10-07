@@ -19,6 +19,7 @@ from ..repositories.accounts import (VERIFICATION_FAILURE_LIMIT, VERIFICATION_FA
 from .auth import (Identity, can_run_as_root, client_ip, require_admin, require_user,
                    tokens_match)
 from .password_transport import PasswordTransportError
+from .routes_accounts import guard_privileged_account
 from ..mail_config import MAILER_BACKENDS, resolve_mail_config
 from .mailer import MailerError, render_verification_email, send_mail_via_relay
 
@@ -160,6 +161,8 @@ def request_verification_code(body: VerificationBody, request: Request):
         raise HTTPException(status_code=422, detail="invalid_verification_purpose")
     if not valid_username(body.username):
         raise HTTPException(status_code=422, detail="invalid_username")
+    if body.purpose == "password_reset":
+        _refuse_privileged_reset(request.app.state.settings, body.username)
     exists = repos.accounts.get(body.username) is not None
     # 존재 여부를 발급 시점에 정직하게 알린다(사내 포탈 -- 계정 열거 방어보다
     # "왜 안 되는지"가 우선): signup 은 이미 있으면 409, reset 은 없으면 404.
@@ -335,11 +338,23 @@ def signup(body: SignupBody, request: Request):
     return {"username": body.username}
 
 
+def _refuse_privileged_reset(settings, username: str) -> None:
+    """특권 목록 이름의 계정은 셀프 비밀번호 재설정(메일 인증번호)을 쓰지 않는다(2026-10-07 리뷰). 비밀번호 변경도
+    특권 계정의 변경인데(guard_privileged_account 는 생성·역할·비활성화·삭제), 메일 경로는 아무 세션 관리자나
+    바꿀 수 있어(메일 설정 stub·릴레이 주소) 목록 밖 관리자가 "root" 의 재설정 코드를 받아 그 세션으로 root 자격을
+    얻었다. 이 계정의 비밀번호는 특권 세션 관리자가 계정을 지우고 다시 만들어 바꾼다. 특권 실행이 꺼져 있으면 보통
+    계정과 같다."""
+    if settings.allow_privileged_requesters and username in settings.privileged_requesters:
+        raise HTTPException(status_code=403, detail="privileged_account_protected")
+
+
 @router.post("/api/auth/password-reset")
 def password_reset(body: PasswordResetBody, request: Request):
     """인증번호 검증 후 비밀번호 변경(셀프서비스). 코드는 항상 필수 -- 이 흐름
     자체가 코드 기반이라 verification_required 게이트와 무관하다."""
     repos = request.app.state.repos
+    # 발급 전에 막았어도 업그레이드 전에 발급된 코드가 있을 수 있다 -- 소비·추측 카운터보다 먼저 거부한다.
+    _refuse_privileged_reset(request.app.state.settings, body.username)
     # signup 과 같은 순서 이유: 코드 소비 전에 봉인을 연다.
     password = _password_from(request, body, purpose="password_reset")
     _consume_code(request, body.username, "password_reset", body.code)
@@ -426,6 +441,14 @@ def create_admin_account(body: AdminCreateBody, request: Request):
         # 토큰 미제시 = 포탈 세션 admin 경로(2026-08-20, 사용자 결정: 운영자
         # 화면의 계정 생성). require_admin 이 401/403 을 그대로 나른다.
         identity = require_admin(request)
+        # 토큰 미제시 + 공유 Bearer 토큰(노드 에이전트 보유)은 여기서 거부한다 -- 토큰으로 allowlist 이름의 관리자
+        # 계정을 만들면 그 세션이 배치 특권 게이트를 통과한다(routes_accounts._require_session 와 같은 이유).
+        # 첫 관리자 부트스트랩은 별도 비밀인 x-admin-token 경로(아래)라 영향 없다.
+        if identity.auth != "session":
+            raise HTTPException(status_code=403, detail="accounts_session_required")
+        # 특권 목록 이름("root"·"admin" 등)의 계정은 특권 세션 관리자만 만든다(역할 무관 -- user 로 만든 뒤 승격하는
+        # 길도 같은 가드가 set_role 에서 막는다). routes_accounts.guard_privileged_account 주석.
+        guard_privileged_account(request, identity, body.username)
         if body.role not in (ROLE_USER, ROLE_ADMIN):
             raise HTTPException(status_code=422, detail="invalid_role")
         password = _password_from(request, body, purpose="admin_create")

@@ -54,6 +54,14 @@ def _mock_registry(monkeypatch, tags=("d53", "d80")):
                         lambda registry, repo: list(tags))
 
 
+@pytest.fixture
+def session_admin(client):
+    # 릴리스 제출은 세션 관리자만(admin_session_required, 2026-10-07) -- 공유 토큰은 모든 노드 에이전트가
+    # 쥔 자격이다. 로그인해 두고 제출엔 Bearer 헤더를 싣지 않는다(헤더가 세션보다 우선). 조회는 토큰 그대로.
+    client.app.state.repos.accounts.create("opadm", "p", "admin", actor="t")
+    assert client.post("/api/auth/login", json={"username": "opadm", "password": "p"}).status_code == 200
+
+
 def test_targets_include_job_image_row(client, monkeypatch):
     _mock_registry(monkeypatch)
     body = client.get("/api/admin/releases/targets", headers=ADMIN).json()
@@ -67,11 +75,10 @@ def test_targets_include_job_image_row(client, monkeypatch):
     assert row["tags"] == ["d53", "d80"]
 
 
-def test_release_job_image_applies_immediately(client, monkeypatch):
+def test_release_job_image_applies_immediately(client, monkeypatch, session_admin):
     _mock_registry(monkeypatch)
     r = client.post("/api/admin/releases",
-                    json={"items": [{"component": "job-image", "tag": "d80"}]},
-                    headers=ADMIN)
+                    json={"items": [{"component": "job-image", "tag": "d80"}]})
     assert r.status_code == 202, r.text
     items = r.json()["items"]
     assert len(items) == 1
@@ -85,22 +92,19 @@ def test_release_job_image_applies_immediately(client, monkeypatch):
     assert cur["job-image"]["tag"] == "d80"
 
 
-def test_release_job_image_same_tag_is_422(client, monkeypatch):
+def test_release_job_image_same_tag_is_422(client, monkeypatch, session_admin):
     _mock_registry(monkeypatch)
     client.post("/api/admin/releases",
-                json={"items": [{"component": "job-image", "tag": "d80"}]},
-                headers=ADMIN)
+                json={"items": [{"component": "job-image", "tag": "d80"}]})
     r = client.post("/api/admin/releases",
-                    json={"items": [{"component": "job-image", "tag": "d80"}]},
-                    headers=ADMIN)
+                    json={"items": [{"component": "job-image", "tag": "d80"}]})
     assert r.status_code == 422 and r.json()["detail"] == "same_tag"
 
 
-def test_release_job_image_unknown_tag_is_422(client, monkeypatch):
+def test_release_job_image_unknown_tag_is_422(client, monkeypatch, session_admin):
     _mock_registry(monkeypatch, tags=("d53",))
     r = client.post("/api/admin/releases",
-                    json={"items": [{"component": "job-image", "tag": "nope"}]},
-                    headers=ADMIN)
+                    json={"items": [{"component": "job-image", "tag": "nope"}]})
     assert r.status_code == 422 and r.json()["detail"] == "unknown_tag"
 
 

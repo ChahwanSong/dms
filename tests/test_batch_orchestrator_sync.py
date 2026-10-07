@@ -39,8 +39,11 @@ def test_sync_running_confirms_children(db):
     _orch(db).run_once()
     it = repos.batches.list_items(bid)[0]
     jid = _make_confirmpending(repos, it["request_id"], fp="fp-9")
-    _orch(db).run_once()                                  # PreviewReady
-    repos.batches.set_status(bid, "Running")              # 운영자 배치 confirm 시뮬
-    _orch(db).run_once()                                  # 자식 confirm
+    _orch(db).run_once()                                  # PreviewReady(확인 회차 1)
+    assert repos.batches.get(bid)["preview_round"] == 1
+    # 운영자 배치 확인 = 회차 CAS + 그 순간 ConfirmPending 자식에 확인 도장(confirmed_fingerprint = 미리보기 지문)
+    assert repos.batches.confirm(bid, actor="admin", summary={}, expected_round=1) is True
+    assert repos.data_jobs.get_job(jid)["confirmed_fingerprint"] == "fp-9"
+    _orch(db).run_once()                                  # 도장 찍힌 자식만 실행
     job = repos.data_jobs.get_job(jid)
     assert job["state"]=="Executing" and job["confirmed_fingerprint"]=="fp-9"

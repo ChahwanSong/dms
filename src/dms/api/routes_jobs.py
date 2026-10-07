@@ -52,6 +52,13 @@ def confirm_job(job_id: str, body: ConfirmBody, request: Request,
                 identity: Identity = Depends(require_user)):
     repos = request.app.state.repos
     job = _owned_job(request, job_id, identity)
+    # 배치 항목은 배치 단위로만 확인한다(2026-10-07): 배치 자식은 배치 행의 세션 인증·요청자를 물려받아 root 로
+    # 돈다. 배치 확인(:confirm)은 특권 3중 게이트를 요구하는데, 여기서 자식 하나를 컨펌할 수 있으면 공유 토큰(role
+    # admin)이나 allowlist 밖 관리자가 그 게이트를 우회해 root 실행을 시작한다. 배치 자식의 실행 시작은 배치 확인 →
+    # orchestrator 자동 컨펌 경로 하나뿐이다.
+    req = repos.requests.get(job["request_id"])
+    if req is not None and req.get("batch_id"):
+        raise HTTPException(status_code=409, detail="batch_child_confirm_via_batch")
     if job["state"] != DataJobState.CONFIRM_PENDING.value:
         raise HTTPException(status_code=409, detail="not_confirmable")
     if not job["preview_fingerprint"]:

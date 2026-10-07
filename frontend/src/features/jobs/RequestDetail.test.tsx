@@ -533,3 +533,33 @@ test("worker_pool 이 없어도(구버전 응답) 도구 이름만은 보인다"
   renderAt();
   expect(await screen.findByText("dscan")).toBeInTheDocument();
 });
+
+// 배치 자식은 단건 컨펌을 못 한다(서버 409 batch_child_confirm_via_batch, 2026-10-07) -- 컨펌 버튼 대신 배치 확인 안내.
+const CONFIRM_JOB = { job_id: "j9", request_id: "r1", operation: "sync", state: "ConfirmPending", reason_code: null,
+  preview_fingerprint: "sha256:fp", preview_expires_at: "2099-01-01T00:00:00Z", result_summary: null,
+  transitions: [], artifact_uri: null, phase_refs: {} };
+
+test("배치 자식의 ConfirmPending 잡: 컨펌 버튼 대신 배치 상세의 「배치 확인」으로 안내한다", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Planned", batch_id: "b77" })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([CONFIRM_JOB])),
+  );
+  renderAt();
+  const link = await screen.findByRole("link", { name: "배치 상세" });
+  expect(link).toHaveAttribute("href", "/admin/batches/b77");
+  // 배치 상태와 관계없이 참인 문구(확인 대기·이미 확인됨 두 경우를 모두 말한다 -- 리뷰: Running 배치엔 확인 버튼이 없다).
+  expect(link.closest("p")).toHaveTextContent("배치 항목입니다 — 실행 확인은 항목별이 아니라 배치 상세에서 배치 단위로 합니다.");
+  expect(link.closest("p")).toHaveTextContent("이미 확인된 배치면 동시 실행 상한만큼씩 차례로 실행됩니다.");
+  expect(screen.queryByRole("button", { name: /컨펌|확인/ })).toBeNull();
+});
+
+test("단건(배치 아님) ConfirmPending 잡은 종전대로 컨펌할 수 있다", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Planned", batch_id: null })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([CONFIRM_JOB])),
+  );
+  renderAt();
+  await screen.findByText("j9");
+  expect(screen.queryByRole("link", { name: "배치 상세" })).toBeNull();
+  expect(screen.getAllByRole("button").length).toBeGreaterThan(0);   // ConfirmDialog 트리거가 있다
+});

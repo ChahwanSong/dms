@@ -178,7 +178,7 @@ def test_confirm_requires_previewready(client):
     _admin(client)
     bid = client.post("/api/admin/batches", json={"operation": "scan", "max_concurrency": 1,
         "options": {}, "note": None, "items": [{"storage": "s1", "target": "a"}]}).json()["batch_id"]
-    r = client.post(f"/api/admin/batches/{bid}:confirm")     # scan은 Running이라 confirm 불가
+    r = client.post(f"/api/admin/batches/{bid}:confirm", json={"preview_round": 0})   # scan은 Running이라 confirm 불가
     assert r.status_code == 409
 
 

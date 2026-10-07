@@ -14,7 +14,7 @@ from .. import registry as registry_mod
 from ..manifest_tags import manifest_images, manifest_job_image, site_image
 from ..repositories.builds import BUILD_IMAGES
 from ..repositories.releases import COMPONENTS
-from .auth import Identity, audit_actor, require_admin
+from .auth import Identity, audit_actor, require_admin, require_session_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -76,7 +76,7 @@ def list_registry_images(request: Request):
 
 @router.delete("/api/admin/registry/images/{repository}/{tag}")
 def delete_registry_image(repository: str, tag: str, request: Request,
-                          identity: Identity = Depends(require_admin)):
+                          identity: Identity = Depends(require_session_admin)):
     if repository not in _REPOS:
         raise HTTPException(status_code=422, detail="unknown_registry_repo")
     registry = request.app.state.settings.build_registry

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from ..artifact_base import (allowlist_reason, normalize_artifact_base,
                              roundtrip_artifact_base, strip_scheme)
 from ..domain import DomainValidationError
-from .auth import Identity, audit_actor, require_admin
+from .auth import Identity, audit_actor, require_admin, require_session_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -128,7 +128,7 @@ def validate_artifact_base(body: ValidateBody, request: Request):
 
 @router.put("/api/admin/artifact-base")
 def put_artifact_base(body: ArtifactBaseBody, request: Request,
-                      identity: Identity = Depends(require_admin)):
+                      identity: Identity = Depends(require_session_admin)):
     repos = request.app.state.repos
     # 순서(설계 §2.5): 정규화 -> 잠금 -> 즉석 검증 -> 저장+감사. 잠금이 검증보다
     # 먼저다 -- 잠긴 상태에서 "경로가 없다"부터 보이면 운영자가 디렉터리를 만든

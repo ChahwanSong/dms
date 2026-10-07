@@ -59,6 +59,7 @@
   "job_not_found",
   "batch_not_found",
   "batch_not_confirmable",
+  "batch_child_confirm_via_batch",
   "no_failed_items",
   "no_preview_fingerprint",
   "empty_batch",
@@ -216,5 +217,10 @@
   "mail_relay_token_conflict",
   "invalid_mail_recipient",
   "mail_settings_session_required",
+  "accounts_session_required",
+  "privileged_account_protected",
+  "admin_session_required",
+  "preview_round_required",
+  "batch_preview_changed",
   "mail_relay_token_required"
 ]
