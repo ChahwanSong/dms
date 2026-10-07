@@ -22,3 +22,15 @@ export const useStorageRoots = (): StorageRoots => {
       typeof s.managed_root === "string" && s.managed_root !== ""
         ? [[s.storage_name, s.managed_root] as const] : [])), [q.data]);
 };
+
+// 스토리지 이름 → backend_type(등록 라벨) 맵 -- 보조 그룹 주의문(lib/groupCaveats)이 잡·폼의 스토리지 이름에서
+// 종류를 찾는다. 같은 쿼리 키라 요청이 늘지 않는다. 비관리자 응답엔 관리자 전용 스토리지가 아예 없어
+// (routes_storages.list_user_storages) 그 이름은 맵에 없다 -- 호출자(groupCaveatsFor)는 그 경우를 "모름" 으로
+// 다뤄 일반 주의문으로 떨어뜨린다. 조회 실패·로딩 중도 같은 빈 맵이다.
+export const useStorageBackends = (): Record<string, string> => {
+  const q = useUserStorages();
+  return useMemo(() => Object.fromEntries(
+    (q.data ?? []).flatMap((s) =>
+      typeof s.backend_type === "string" && s.backend_type !== ""
+        ? [[s.storage_name, s.backend_type] as const] : [])), [q.data]);
+};

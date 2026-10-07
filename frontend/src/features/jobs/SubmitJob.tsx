@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
 import { useSubmitRequest } from "./useJobs";
 import type { SubmitBody } from "./useJobs";
-import { useUserStorages } from "../storages/useUserStorages";
+import { useStorageBackends, useUserStorages } from "../storages/useUserStorages";
 import { useUserSyncPairs } from "../policies/useSyncPairs";
 import { useMe } from "../auth/useAuth";
 import { Button } from "../../components/ui/Button";
@@ -18,6 +18,7 @@ import { StoragePicker, field } from "./formFields";
 import { absolutePath, destinationParent, relativePathProblem } from "../../lib/storagePaths";
 import { pairAllowed, syncChoices } from "../../lib/syncPairs";
 import { syncOwnership } from "../../lib/syncOwnership";
+import { groupCaveat, groupCaveatsFor } from "../../lib/groupCaveats";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
@@ -132,6 +133,11 @@ export function SubmitJob() {
   // root)은 여기서 정해 확정값을 바디에 명시로 싣는다 -- 화면의 "실행 권한" 과 서버가 어긋날 수 없다.
   const rootEffective = canRoot && (f.runAsRoot ?? !otherOwner);
   const rootOf = (name: string) => storages.find((s) => s.storage_name === name)?.managed_root;
+  // 보조 그룹 주의문(2026-10-07 D15): 고른 소스·목적지의 등록 종류(backend_type)별 한 줄. 일반 주의문은 아래
+  // 권한 안내 문장이 이미 말하므로 빼고, 종류별로 더 할 말이 있는 스토리지(NFS·Lustre)만 덧붙인다.
+  const backends = useStorageBackends();
+  const syncGroupCaveats = groupCaveatsFor([f.sourceStorage, f.destStorage], backends)
+    .filter((c) => c !== groupCaveat(undefined));
   // sync 목적지의 상위 디렉토리(쓰기 권한이 필요한 곳) -- 관리 디렉토리를 알면 절대경로로.
   const destRoot = rootOf(f.destStorage);
   const destParentAbs = f.destPath.trim() === "" ? null : destinationParent(destRoot, f.destPath.trim());
@@ -418,16 +424,19 @@ export function SubmitJob() {
                     ? "root 실행이라 쓰기·소유 검사는 우회되고, 그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)."
                     : <>쓰기·진입할 수 있어야 하며,{" "}
                         {canRoot ? "root 실행이 아니면 실행 신원 소유여야" : isAdmin ? "실행 신원 소유여야" : "요청자 본인 소유여야"}{" "}
-                        합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문). 상위 디렉토리 쓰기 권한도 마찬가지로
-                        필요합니다.</>}
+                        합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문) — 그룹 쓰기 권한만으로는 부족합니다.
+                        상위 디렉토리 쓰기 권한도 마찬가지로 필요합니다.</>}
                 </li>
                 <li><strong>소유권</strong>: {ownership.long}</li>
-                {/* 보조 그룹 미적용(검증 워크플로 2026-10-01): preflight·도구는 실행 uid + LDAP 주 gid
-                    만으로 돈다(supplementalGroups 없음, 잡 컨테이너에 LDAP NSS 없음). */}
+                {/* 보조 그룹 인정(2026-10-07 D15 -- 조건부 문구): preflight·도구가 실행 uid + LDAP 주 gid + 계획
+                    시점에 얼린 LDAP 보조 gid(supplementalGroups·워커 /etc/group)로 돈다. "인정된다" 를 무조건으로
+                    말하지 않는다 -- 계획 시점 확정·gidNumber 그룹만·중첩 제외·스토리지 서버가 최종 판정(D10·D1). */}
                 <li>
-                  {canRoot ? "root 가 아닌 실행에서 권한은" : "권한은"} {isAdmin ? "실행 신원" : "본인 계정"}의 uid·LDAP 주 그룹(그리고 기타
-                  사용자 권한) 기준으로만 판정됩니다 — <strong>보조 그룹으로 받은 권한은 인정되지 않습니다</strong>(소스
-                  읽기도 마찬가지).
+                  {canRoot ? "root 가 아닌 실행에서 권한은" : "권한은"} {isAdmin ? "실행 신원" : "본인 계정"}의 uid·LDAP 주
+                  그룹·LDAP 보조 그룹 기준으로 판정됩니다. 보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는
+                  그룹만, 중첩 그룹 제외), 그 뒤 그룹에서 빠지면 실행 전에 중단되며 새로 들어간 그룹은 다시 신청해야
+                  반영됩니다. 실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.
+                  {syncGroupCaveats.map((c) => <span key={c} className="block">{c}</span>)}
                 </li>
                 <li>조건이 맞지 않으면 미리보기 전에 거부되고 사유가 표시됩니다 — 아무것도 복사되지 않습니다.</li>
                 {canRoot && (
@@ -555,8 +564,9 @@ export function SubmitJob() {
                     help={<>
                       {rootEffective
                         ? "비우면 원래(소스) 소유권을 보존합니다(지금 root 실행). chown 을 지정하면 목적지와 복사본이 그 값으로 셋업됩니다."
-                        : <>비우면 실행 신원의 uid:gid 소유로 자동 chown 됩니다(지금 root 아님). chown 을 지정하면 자동
-                            chown 이 꺼지는데, 본인 uid·주 gid 가 아닌 값이면 도구에 권한이 없어{" "}
+                        : <>비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다(지금 root 아님) — 프로젝트(보조)
+                            그룹 소유로 남기려면 uid:&lt;그룹 gid&gt; 를 지정하세요. gid 가 실행 신원이 속한 그룹(주·보조)이
+                            아니면 계획 단계에서 거부되고(chown_group_not_member), uid 가 본인이 아니면 도구에 권한이 없어{" "}
                             <strong>dsync 는 데이터를 복사한 뒤 Failed 로 끝나고, nsync 는 소유 변경이 적용되지 않습니다</strong>.</>}
                       {" "}uid·gid 는 둘 다 숫자로 적으세요 — 한쪽을 비우면 그쪽은 소스 값이 유지됩니다.
                     </>} />

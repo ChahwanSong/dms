@@ -390,12 +390,14 @@ export function BatchCreate() {
                 <li><strong>소유권</strong>: {syncOwnership({ chown: f.chown, chmod: f.chmod, root: true, runAs: null, self: true }).long}
                   {f.chown.trim() === "" && " 특정 사용자 소유로 맞추려면 아래 실행 옵션의 고급 옵션 chown 에 숫자 uid:gid 를 지정하세요."}</li>
                 {/* 자격이 계획 시점에 빠진 드문 비 root 폴백 -- 결과 소유는 chown 유무로 갈린다
-                    (_auto_chown: chown 이 있으면 자동 주입 없음). 권한은 uid·주 gid 만(보조 그룹 미적용). */}
+                    (_auto_chown: chown 이 있으면 자동 주입 없음). chown 의 gid 는 계획 시점 멤버십 검증
+                    (chown_group_not_member)이 먼저 거른다. */}
                 <li>관리자 특권 자격이 빠져 비 root 로 실행되면 단일 작업과 같은 권한 조건(상위 디렉토리 쓰기,
-                  이미 있는 목적지는 실행 신원 소유 — 보조 그룹 권한은 인정되지 않음)이 적용되고,{" "}
+                  이미 있는 목적지는 실행 신원 소유 — 그룹 쓰기 권한만으로는 부족, 권한은 uid·주 그룹·계획 시점
+                  LDAP 보조 그룹)이 적용되고,{" "}
                   {f.chown.trim() === ""
                     ? "결과는 실행 신원의 uid:gid(주 그룹) 소유가 됩니다."
-                    : "chown 값이 실행 신원 본인의 uid·주 그룹이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)."}</li>
+                    : "chown 의 gid 가 실행 신원이 속한 그룹(주·보조)이 아니면 계획 단계에서 거부되고, uid 가 본인이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)."}</li>
                 <li>조건이 맞지 않는 항목은 미리보기 전에 거부됩니다 — 그 항목은 아무것도 복사되지 않습니다.</li>
               </ul>
             </div>

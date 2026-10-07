@@ -4,7 +4,9 @@
 //   - root 실행이면 개입하지 않는다 → 소스의 소유자·그룹이 그대로
 //   - 그 외엔 `--chown <실행 신원 uid>:<주 그룹 gid>` → 새로 만든 목적지·복사본 전부 실행 신원 소유
 // 실행 신원 = 운영자가 실행 신원(owner_username)을 지정했으면 그 사용자, 아니면 요청자 본인
-// (identity.resolve_job_identity). gid 는 LDAP 계정의 **주 그룹**이다(러너가 보조 그룹 없이 물질화) --
+// (identity.resolve_job_identity). gid 는 LDAP 계정의 **주 그룹**이다(자동 chown 정책상 주 그룹 -- 잡은 보조
+// 그룹도 달고 돌지만 자동 지정은 주 그룹이고, 보조 그룹 소유는 명시 chown 으로만 -- 그 gid 는 계획 시점에 실행
+// 신원의 소속(주·보조)인지 검증된다: identity.check_chown_group, chown_group_not_member) --
 // 상위 디렉토리의 setgid 그룹을 물려받지 않는다.
 //
 // 2026-10-01 검증 워크플로 2회가 포크 소스(mpifileutils 1b93d54)와 테스트베드 실측으로 잡은 사실:
@@ -13,8 +15,10 @@
 //   - dsync/nsync 의 **기본 비교**(UID·GID·PERM·ATIME·MTIME DIFFER, DMS 는 -o 를 넘기지 않는다)가 목적지에
 //     이미 있던 같은 경로 항목의 메타데이터를 소스(또는 --chown/--chmod 값)로 다시 맞춘다 -- 최상위만이 아니다.
 //     root 실행이면 그 항목들이 전부 소스 소유·권한·시각이 된다(2026-09-30 프로덕션 사고의 범위).
-//   - 비 root 에서 본인(uid·주 gid) 외의 소유로 바꾸는 chown 은 EPERM: dsync 는 데이터를 복사한 뒤 작업이
-//     실패하고, nsync 는 EPERM 을 무시 가능 오류로 보고 소유 변경을 건너뛴 채 성공한다(새 복사본은 실행 신원 소유).
+//   - 비 root 에서 uid 를 본인 외로 바꾸는 chown 은 EPERM: dsync 는 데이터를 복사한 뒤 작업이 실패하고, nsync 는
+//     EPERM 을 무시 가능 오류로 보고 소유 변경을 건너뛴 채 성공한다(새 복사본은 실행 신원 소유). gid 는 프로세스가
+//     속한 그룹(주 + 잡에 실린 보조 그룹, 2026-10-07)이면 커널이 허용하고, 그 밖의 gid 는 EPERM 에 닿기 전에 계획
+//     단계가 거부한다(chown_group_not_member -- 스토리지 서버가 보조 그룹을 인정하지 않으면 거기서 EPERM 일 수 있다).
 //   - 목적지에 이미 있던 **남의 소유** 항목은 비 root 가 소유·권한·시각을 못 바꾼다 -- 결과는 도구·항목에 따라
 //     갈린다(dsync 는 실패, nsync 는 메타데이터 변경을 건너뛰되 내용이 바뀐 파일은 제자리 쓰기라 쓰기 권한이 없으면
 //     실패; dsync 는 내용이 바뀐 파일을 지우고 새로 복사). 그래서 안내는 "실패하거나 일부가 안 바뀔 수 있다" 로만
@@ -72,9 +76,9 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self }: Ownershi
     const partial = chownIsPartial(c) ? " uid·gid 중 비워 둔 쪽은 소스 값이 유지됩니다." : "";
     const lead = `chown 옵션으로 지정한 ${c} 소유로 셋업됩니다${root ? "" : "(자동 소유 지정은 꺼집니다)"} — `
       + "목적지에 이미 있던 같은 경로의 항목도 이 소유로 바뀝니다.";
-    const nonRoot = root ? "" : ` root 실행이 아니면 실행 신원 본인의 uid·주 그룹 gid 외의 값으로는 바꿀 권한이 없어, ${NON_ROOT_CHOWN_EPERM}.`;
+    const nonRoot = root ? "" : ` root 실행이 아니면 gid 는 실행 신원이 속한 그룹(주·보조)이어야 하고(아니면 계획 단계에서 거부), uid 가 실행 신원 본인이 아니면 바꿀 권한이 없어 ${NON_ROOT_CHOWN_EPERM}.`;
     return {
-      short: `chown 지정값 ${c}${root ? "" : " — 비 root: 본인 uid:gid 가 아니면 적용 안 됨(dsync 는 실패)"}`,
+      short: `chown 지정값 ${c}${root ? "" : " — 비 root: uid 는 본인, gid 는 소속 그룹만(아니면 거부·실패)"}`,
       long: `${lead}${partial}${nonRoot} ${modeText}`,
     };
   }
@@ -89,5 +93,6 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self }: Ownershi
                + "(LDAP 계정의 주 그룹)로 셋업됩니다 — 소스 소유자와 관계없습니다. "
                + (m !== "" ? modeText : "권한 비트·수정 시각은 소스 그대로라 소스의 그룹 권한이 이 주 그룹에 적용됩니다.")
                + " 목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 맞춰지므로, 그 안에 다른 사용자 소유 항목이 "
-               + "있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다." };
+               + "있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다."
+               + " 프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹)." };
 }

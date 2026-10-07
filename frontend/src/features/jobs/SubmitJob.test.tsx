@@ -334,8 +334,13 @@ test("sync 는 목적지 조건(없는 경우·있는 경우)과 소유권을 �
   expect(card).toHaveTextContent("목적지가 이미 있는 경우: 디렉토리여야 합니다(파일이면 거부). 쓰기·진입할 수 있어야 하며");
   expect(card).toHaveTextContent("목적지 조건과 소유권 — 요청자 본인 계정(uid/gid) 기준");
   expect(card).toHaveTextContent("요청자 본인 소유여야 합니다");
-  expect(card).toHaveTextContent("권한은 본인 계정의 uid·LDAP 주 그룹");
-  expect(card).toHaveTextContent("보조 그룹으로 받은 권한은 인정되지 않습니다");
+  // 보조 그룹 인정(2026-10-07 D15): 조건부 문구 -- 계획 시점 확정·gidNumber 그룹만·중첩 제외·스토리지에 따라 다름
+  expect(card).toHaveTextContent("권한은 본인 계정의 uid·LDAP 주 그룹·LDAP 보조 그룹 기준으로 판정됩니다");
+  expect(card).toHaveTextContent("보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는 그룹만, 중첩 그룹 제외)");
+  expect(card).toHaveTextContent("그 뒤 그룹에서 빠지면 실행 전에 중단되며 새로 들어간 그룹은 다시 신청해야 반영됩니다");
+  expect(card).toHaveTextContent("실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.");
+  expect(card).not.toHaveTextContent("보조 그룹으로 받은 권한은 인정되지 않습니다");
+  expect(card).toHaveTextContent("요청자 본인 소유여야 합니다(sync 가 최상위의 권한·시각을 소스에 맞추기 때문) — 그룹 쓰기 권한만으로는 부족합니다.");
   expect(card).toHaveTextContent("권한 비트·수정 시각은 소스 그대로라 소스의 그룹 권한이 이 주 그룹에 적용");
   // 검증 2차(2026-10-01): 이미 있던 남의 소유 항목은 못 바꾼다 -- dsync 실패 / nsync 건너뜀(도구별로 다르다)
   expect(card).toHaveTextContent("그 안에 다른 사용자 소유 항목이 있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다");
@@ -350,6 +355,44 @@ test("sync 는 목적지 조건(없는 경우·있는 경우)과 소유권을 �
   expect(screen.getByText("상위 디렉토리 /cephfs2/managed/c 가 있어야 하고 요청자 본인의 쓰기 권한 필요. "
     + "목적지가 없으면 새로 만들고, 이미 있으면 요청자 본인 소유·쓰기 가능해야 함")).toBeInTheDocument();
   expect(screen.getByText("요청자 본인(alice)의 uid:gid(주 그룹)")).toBeInTheDocument();
+});
+
+// 보조 그룹 주의문(2026-10-07 D15): 고른 소스·목적지의 등록 종류별 한 줄. 일반 주의문은 권한 문장이 이미 말한다.
+const NFS_CAVEAT = "NFS 스토리지(등록 종류 기준): 보조 그룹은 최대 16개까지만 전달되거나, 서버가 그룹을 자체 조회하면 인정되지 않을 수 있습니다.";
+const LUSTRE_CAVEAT = "Lustre(등록 종류 기준): 서버(MDS) 설정에 따라 서버가 그룹을 다시 판정하므로 보조 그룹이 인정되지 않을 수 있습니다.";
+const GENERIC_CAVEAT = "실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다(등록된 스토리지 종류 기준 안내).";
+
+async function pickSync(source: string, dest: string) {
+  const sourceSelect = await screen.findByLabelText("소스 스토리지");
+  await within(sourceSelect).findByRole("option", { name: source });
+  await userEvent.selectOptions(sourceSelect, source);
+  await userEvent.selectOptions(screen.getByLabelText("목적지 스토리지"), dest);
+}
+
+test("sync 권한 안내에 고른 스토리지 종류별 보조 그룹 주의문이 붙는다(netapp·lustre·cephfs)", async () => {
+  server.use(http.get("/api/user/storages", () => HttpResponse.json([
+    { storage_name: "nas", backend_type: "netapp", status: "Ready" },
+    { storage_name: "exa", backend_type: "lustre", status: "Ready" },
+    { storage_name: "ceph", backend_type: "cephfs", status: "Ready" },
+    { storage_name: "ceph2", backend_type: "cephfs", status: "Ready" }])));
+  renderPage();
+  // 아직 아무것도 안 골랐으면 종류별 줄이 없다(일반 문장만)
+  await screen.findByLabelText("소스 스토리지");
+  expect(ownershipCard()).toHaveTextContent("실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.");
+  expect(within(ownershipCard()).queryByText(NFS_CAVEAT)).toBeNull();
+
+  await pickSync("nas", "exa");
+  expect(within(ownershipCard()).getByText(NFS_CAVEAT)).toBeInTheDocument();
+  expect(within(ownershipCard()).getByText(LUSTRE_CAVEAT)).toBeInTheDocument();
+
+  await pickSync("ceph", "ceph2");
+  // cephfs 는 일반 주의문뿐이고 권한 문장이 이미 그 말을 한다 -- 같은 말을 두 번 하지 않는다
+  expect(within(ownershipCard()).queryByText(NFS_CAVEAT)).toBeNull();
+  expect(within(ownershipCard()).queryByText(LUSTRE_CAVEAT)).toBeNull();
+  expect(ownershipCard()).not.toHaveTextContent(GENERIC_CAVEAT);
+
+  await pickSync("ceph", "nas");
+  expect(within(ownershipCard()).getAllByText(NFS_CAVEAT)).toHaveLength(1);
 });
 
 test("관리자 전용 스토리지는 관리자 피커에 (관리자 전용) 으로 구분된다", async () => {
@@ -619,7 +662,7 @@ test("open_noatime 은 root 실행 전용 — root 를 끄면 잠기고 싣지 �
   expect(screen.getByLabelText("open_noatime")).not.toBeChecked();
   expect(screen.getByText(/open_noatime 은 root 실행에서만 적용됩니다/)).toBeInTheDocument();
   // chown 캡션도 지금 모드를 말한다(root 아님 → 실행 신원 소유로 자동 chown).
-  expect(screen.getByText(/비우면 실행 신원의 uid:gid 소유로 자동 chown 됩니다\(지금 root 아님\)/))
+  expect(screen.getByText(/비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다\(지금 root 아님\)/))
     .toBeInTheDocument();
   await userEvent.click(submitButton());
   expect(await screen.findByRole("heading", { name: "요청 상세" })).toBeInTheDocument();
@@ -1043,7 +1086,7 @@ test("관리자 기본(root 실행): 소유권은 소스 그대로 -- 상위 디
   // root 는 최상위뿐 아니라 이미 있던 같은 경로 항목 전부를 소스 소유로(dsync 기본 비교) -- 범위를 축소하지 않는다
   expect(ownershipCard()).toHaveTextContent("그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)");
   expect(ownershipCard()).toHaveTextContent("목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로");
-  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹");
+  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹 기준");
   expect(ownershipCard()).toHaveTextContent("root 권한으로 실행하면 권한·소유 검사는 우회됩니다(아래 실행 설정에서 선택)");
   expect(screen.getByText("소스의 소유자·그룹 그대로(root 실행)")).toBeInTheDocument();
   expect(screen.getByText(/상위 디렉토리 .* 가 있어야 함\(root 실행 — 권한 검사 우회\)/)).toBeInTheDocument();
@@ -1056,7 +1099,7 @@ test("관리자가 root 를 끄면 카드가 그 자리에서 비 root 기준으
   // 같은 화면의 카드가 즉시 비 root 기준(쓰기 권한·실행 신원 소유)으로 바뀐다
   expect(ownershipCard()).toHaveTextContent("root 실행이 아니면 실행 신원 소유여야 합니다");
   expect(ownershipCard()).toHaveTextContent(/쓰기 권한이 있어야 합니다/);
-  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹");
+  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹 기준");
   expect(screen.getByText("요청자 본인(root)의 uid:gid(주 그룹)")).toBeInTheDocument();   // meAdmin.actor
   first.unmount();
 
@@ -1083,12 +1126,18 @@ test("root 자격 없는 관리자: root 언급 없이 실행 신원 기준, 소
   expect(screen.getByText("요청자 본인(ops2)의 uid:gid(주 그룹)")).toBeInTheDocument();
 });
 
-test("비 root 에서 chown 을 지정하면 본인 uid:gid 가 아니면 실패한다고 경고한다", async () => {
+test("비 root 에서 chown 을 지정하면 uid 는 본인, gid 는 소속 그룹만이라고 경고한다", async () => {
   renderPage();
   await fillAndOpenAdvanced();
   await userEvent.click(screen.getByLabelText("root 권한으로 실행"));          // 끔
+  // chown 캡션: 자동은 주 그룹, 프로젝트(보조) 그룹 소유는 명시 chown -- gid 는 계획 시점 멤버십 검증(D7)
+  const help = screen.getByText(/비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown/);   // FieldRow 도움말 <p>
+  expect(help).toHaveTextContent("비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다(지금 root 아님) — "
+    + "프로젝트(보조) 그룹 소유로 남기려면 uid:<그룹 gid> 를 지정하세요.");
+  expect(help).toHaveTextContent("gid 가 실행 신원이 속한 그룹(주·보조)이 아니면 계획 단계에서 거부되고(chown_group_not_member)");
+  expect(help).toHaveTextContent("uid 가 본인이 아니면 도구에 권한이 없어 dsync 는 데이터를 복사한 뒤 Failed 로 끝나고, nsync 는 소유 변경이 적용되지 않습니다");
   await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
-  expect(screen.getByText("chown 지정값 10003:10000 — 비 root: 본인 uid:gid 가 아니면 적용 안 됨(dsync 는 실패)"))
+  expect(screen.getByText("chown 지정값 10003:10000 — 비 root: uid 는 본인, gid 는 소속 그룹만(아니면 거부·실패)"))
     .toBeInTheDocument();
 });
 

@@ -11,7 +11,8 @@ import { JobViewer } from "./JobViewer";
 import { ApiError, reasonText } from "../../lib/api";
 import { absSummary, pathSummary } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
-import { useStorageRoots } from "../storages/useUserStorages";
+import { useStorageBackends, useStorageRoots } from "../storages/useUserStorages";
+import { groupCaveatsFor, supplementaryGroupsText } from "../../lib/groupCaveats";
 import type { DataJob, RequestDetail as RequestDetailType } from "../../lib/types";
 
 // 요청 상태의 종단 집합은 잡 상태(jobState.ts의 isTerminal)와 다르다 —
@@ -106,6 +107,27 @@ function humanBytes(bytes: number): string {
   return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
 }
 
+// 보조 그룹(gid) 행(2026-10-07 D15): 계획 시점에 얼린 스냅숏(worker_pool.identity 4키)을 그대로 보인다 --
+// 잡이 실제로 어떤 그룹을 달고 도는지(또는 왜 안 다는지)를 사용자가 볼 유일한 자리다. 상태 키가 없는 잡(기능
+// 배포 전에 계획됨)은 행을 그리지 않는다(모름 ≠ 없음 -- 사유 줄과 같은 "생략이 더 정직" 규약). 실렸을 때만
+// 스토리지 종류별 주의문을 붙인다(실제 인정은 스토리지 서버가 정한다 -- lib/groupCaveats).
+function SupplementaryGroupsRow({ job, backends }: { job: DataJob; backends: Record<string, string> }) {
+  const ident = job.worker_pool?.identity;
+  const text = supplementaryGroupsText(ident);
+  if (text === null) return null;
+  const caveats = ident?.supplementary_gids_status === "applied"
+    ? groupCaveatsFor([job.storage_name, job.source_storage, job.destination_storage], backends) : [];
+  return (
+    <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-2">
+      <dt className="text-muted">보조 그룹(gid)</dt>
+      <dd>
+        {text}
+        {caveats.map((c) => <span key={c} className="block text-muted text-xs">{c}</span>)}
+      </dd>
+    </dl>
+  );
+}
+
 function ResultSummary({ summary }: { summary: unknown }) {
   if (summary == null) return null;
   if (typeof summary === "object") {
@@ -139,6 +161,8 @@ export function RequestDetail() {
   const cancelRequest = useCancelRequest(requestId);
   // 스토리지 뿌리 맵(관리자 응답에만 managed_root 가 실린다 — 비관리자는 빈 맵)
   const roots = useStorageRoots();
+  // 이름 → backend_type(같은 쿼리 -- 요청 추가 없음). 보조 그룹 주의문용.
+  const backends = useStorageBackends();
 
   if (req.isLoading || jobs.isLoading) {
     return (
@@ -246,6 +270,7 @@ export function RequestDetail() {
             {j.artifact_uri && (
               <p className="text-muted text-xs mt-1 break-all">아티팩트 {j.artifact_uri}</p>
             )}
+            <SupplementaryGroupsRow job={j} backends={backends} />
             <ResultSummary summary={j.result_summary} />
             {/* 배치 자식은 단건 컨펌을 못 한다(서버 409 batch_child_confirm_via_batch, 2026-10-07) -- 배치 확인 1회가
                 자식 전부를 대표하고 특권 게이트도 그쪽에 있다. 컨펌 버튼 대신 어디서 확인하는지를 말한다. */}

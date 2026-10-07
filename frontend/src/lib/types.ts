@@ -38,8 +38,9 @@ export interface RequestDetail extends RequestRow {
   completed_at?: string | null;
 }
 // 플래너가 배치 시점에 확정한 워커 배치(planner.py: resolve_fanout 결과 + 후보·
-// 신원). 화면이 읽는 건 **수치 몇 개**뿐이라 그것만 선언한다(identity·candidates·
-// rejections 는 화면 계약이 아니다 — 필요해지면 그때 넓힌다).
+// 신원). 화면이 읽는 건 **수치 몇 개**와 identity 의 보조 그룹 4키(잡 상세 '보조
+// 그룹(gid)' 행)뿐이라 그것만 선언한다(identity 의 나머지·candidates·rejections 는
+// 화면 계약이 아니다 — 필요해지면 그때 넓힌다).
 // node_count 는 전 도구 공통(총 노드), source_count/destination_count 는 양면
 // 배치(nsync)에서만 실린다 — resolve_fanout 의 두 분기가 그대로 모양이 된다.
 // 전부 옵셔널: 구버전 응답·미기록에서 키가 없을 수 있고, 없음(모름)과 0(정상값)은
@@ -49,6 +50,19 @@ export interface WorkerPool {
   process_count?: number | null;
   source_count?: number | null;
   destination_count?: number | null;
+  identity?: WorkerPoolIdentity | null;
+}
+// 계획 시점 보조 그룹 판정(identity.resolve_job_identity 의 SUPP_* -- 서버 어휘 그대로).
+// string 도 받는 이유: 서버가 어휘를 넓혀도 화면이 타입 오류로 죽지 않게(모르는 값은 행을 숨긴다).
+export type SupplementaryGidsStatus = "applied" | "none" | "over_limit" | "disabled" | "privileged";
+export interface WorkerPoolIdentity {
+  username?: string; uid?: number; gid?: number; privileged?: boolean;
+  // 보조 그룹 기능 배포(2026-10-07) 전에 계획된 잡은 이 키들이 없다(행을 숨긴다) -- 없음(모름)과
+  // [](없음 확정)은 다른 사실이다. found 는 null(보지 않았다 -- 기능 꺼짐·root)과 0(없음 확정)이 다르다.
+  supplementary_gids?: number[] | null;
+  supplementary_gids_status?: SupplementaryGidsStatus | string | null;
+  supplementary_gids_excluded?: number[] | null;
+  supplementary_gids_found?: number | null;
 }
 export interface DataJob {
   job_id: string; request_id: string; operation: string; state: string;
@@ -67,6 +81,13 @@ export interface DataJob {
   // 기존 fixture 무수정 컴파일용이다.
   tool?: string | null;
   worker_pool?: WorkerPool | null;
+  // 서버가 이미 보내는 잡 컬럼(data_jobs._ROW_COLUMNS_SANS_DIAG). scan·rm 은 storage_name, sync 는
+  // source_storage·destination_storage 가 차고 나머지는 null -- 잡 상세의 스토리지 종류별 주의문과
+  // 컨펌 창의 삭제 경고(options.delete)가 읽는다. 옵션(?)은 기존 fixture 무수정 컴파일용.
+  storage_name?: string | null;
+  source_storage?: string | null;
+  destination_storage?: string | null;
+  options?: Record<string, unknown> | null;
 }
 export interface ArtifactEntry { phase: string; name: string; size: number; modified_at: number }
 // 목록은 상한(MAX_ENTRIES)이 있어 배열이 아니라 truncated 플래그를 동반한 객체다.

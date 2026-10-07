@@ -2,7 +2,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   // planner / identity / placement
   identity_denied: "차단 목록에 있는 신원입니다",
   ldap_not_configured: "LDAP이 설정되지 않았습니다",
-  ldap_unavailable: "LDAP에 연결할 수 없습니다",
+  // 보조 그룹 재확인(2026-10-07 D2): 제출 직전·큐 대기 재확인의 LDAP 장애는 상태를 바꾸지 않고 보류한 뒤 60초 이상
+  // 간격으로 3번 더 시도하고, 그래도 안 되면 이 사유로 끝난다(stepper). 계획 단계 거부도 같은 코드라 괄호로만 덧붙인다.
+  ldap_unavailable: "LDAP에 연결할 수 없습니다(보조 그룹 재확인은 약 3분간 3번 재시도 뒤 중단)",
   // 이 셋은 계획 단계 거부라 잡이 없다 -- 요청 상세의 「사유」가 생기기 전엔 화면
   // 어디에도 안 나왔다(2026-08-16). 이제 사용자가 직접 읽으므로 "무엇을 하면 되는가"
   // 까지 말한다: 코드 이름을 한국어로 옮기기만 한 문구는 운영자에게만 통한다.
@@ -25,9 +27,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   source_not_readable: "원본 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
   destination_not_directory: "목적지에 이미 파일이 있습니다 — sync 목적지는 디렉토리여야 합니다",
   // 세 문구는 사용자·운영자 공용이다 -- "실행 신원"(운영자 전용 개념) 대신 실행하는 계정으로 쓴다(2026-10-01).
-  destination_parent_not_writable: "목적지의 상위 디렉토리가 없거나 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)이 쓸 수 없습니다 — DMS 는 목적지가 이미 있어도 상위 디렉토리 쓰기 권한을 요구합니다(같은 노드 sync 도구 dsync 는 권한이 없으면 아무것도 복사하지 않습니다). 보조 그룹으로 받은 권한은 인정되지 않습니다",
-  destination_not_writable: "목적지 디렉토리에 쓸 수 없습니다 — 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)에게 목적지의 쓰기·진입 권한이 없습니다(보조 그룹 권한은 인정되지 않습니다)",
-  destination_not_owned: "목적지 디렉토리가 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)의 소유가 아닙니다 — sync 는 목적지 최상위의 소유·권한·시각을 맞추는데 남의 디렉토리에는 그럴 수 없어(dsync 는 부분 복사 뒤 실패) 미리 거부합니다. 본인 소유 디렉토리나 새 경로를 지정하세요",
+  destination_parent_not_writable: "목적지의 상위 디렉토리가 없거나 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)이 쓸 수 없습니다 — DMS 는 목적지가 이미 있어도 상위 디렉토리 쓰기 권한을 요구합니다(같은 노드 sync 도구 dsync 는 권한이 없으면 아무것도 복사하지 않습니다). 권한은 실행 계정의 uid·주 그룹·LDAP 보조 그룹(작업 계획 시점 기준)으로 판정하며, 스토리지 설정에 따라 보조 그룹이 인정되지 않을 수 있습니다",
+  destination_not_writable: "목적지 디렉토리에 쓸 수 없습니다 — 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)에게 목적지의 쓰기·진입 권한이 없습니다(uid·주 그룹·계획 시점 LDAP 보조 그룹 기준 — 스토리지에 따라 보조 그룹이 인정되지 않을 수 있음)",
+  destination_not_owned: "목적지 디렉토리가 작업을 실행하는 계정(요청자 본인 또는 지정된 실행 신원)의 소유가 아닙니다 — sync 는 목적지 최상위의 소유·권한·시각을 맞추는데 남의 디렉토리에는 그럴 수 없어(dsync 는 부분 복사 뒤 실패) 미리 거부합니다. 그룹 쓰기 권한이 있어도 소유자가 아니면 거부합니다. 본인 소유 디렉토리나 새 경로를 지정하세요",
   artifact_base_not_traversable: "작업 기록(artifact) 저장소에 실행 신원이 들어갈 수 없습니다 — 관리자에게 문의하세요(artifact base 디렉토리에 다른 사용자 실행(x) 권한이 필요합니다: 711 또는 755)",
   parent_not_writable: "대상의 상위 디렉토리에 쓸 수 없습니다",
   target_not_readable: "대상 경로를 읽을 수 없습니다 — 경로와 권한을 확인하세요",
@@ -185,7 +187,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 계약(reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
   unknown_tool: "허용되지 않은 도구입니다 — 관리자에게 문의하세요",
   storage_missing_at_step: "잡 진행 중 스토리지 정의가 사라졌습니다 — 관리자에게 문의하세요",
-  identity_missing_at_step: "잡의 실행 신원(uid/gid)이 없거나 올바르지 않습니다 — 관리자에게 문의하세요",
+  identity_missing_at_step: "잡의 실행 신원(uid/gid/보조 그룹)이 없거나 올바르지 않습니다 — 관리자에게 문의하세요",
   privilege_not_requested: "root 로 계획됐지만 요청에 root 실행 근거가 없어 실행 전에 중단했습니다 — 규칙 변경 전에 계획된 잡일 수 있습니다. 필요하면 'root 권한으로 실행'을 명시해 다시 신청하세요",
   identity_root_without_privilege: "디렉터리가 이 사용자에게 uid 0 을 줍니다 — root 실행은 특권 요청자만 가능합니다",
   // 보조 그룹 인정(2026-10-07, identity.resolve_job_identity·check_chown_group). reasonCodes.json 과 같은 커밋.

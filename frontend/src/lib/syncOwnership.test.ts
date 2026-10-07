@@ -15,6 +15,8 @@ test("사용자(비 root·chown 없음): 요청자 본인 uid:gid(주 그룹), �
   expect(o.long).toContain("목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 맞춰지므로, 그 안에 다른 사용자 소유 항목이 "
     + "있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다.");
   expect(o.long).not.toContain("실행 신원");
+  // 자동 지정은 주 그룹 -- 프로젝트(보조) 그룹 소유는 명시 chown(2026-10-07 D7)
+  expect(o.long).toContain("프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹).");
 });
 
 test("비 root + chmod: 권한 비트는 chmod 값이라고 말한다(소스 그룹 권한 문구 대신)", () => {
@@ -37,6 +39,7 @@ test("root 실행: 소스 소유 보존 -- 이미 있던 같은 경로 항목 �
   const o = syncOwnership({ chown: "", root: true, runAs: "mason", self: true });
   expect(o.short).toBe("소스의 소유자·그룹 그대로(root 실행)");
   expect(o.long).toContain("목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로 바뀝니다");
+  expect(o.long).not.toContain("프로젝트(보조) 그룹");                  // root 는 소스 그룹을 보존 -- 안내 불필요
   expect(syncOwnership({ chown: "", chmod: "F640", root: true, runAs: null, self: true }).long)
     .toContain("(권한 비트는 chmod 지정값 F640)");
 });
@@ -50,10 +53,15 @@ test("chown(숫자) + root: 그 값으로 셋업, 기존 같은 경로 항목도
     .toBe("요청자 본인(alice)의 uid:gid(주 그룹)");
 });
 
-test("chown + 비 root: 본인 uid·주 gid 가 아니면 dsync 는 실패, nsync 는 건너뜀", () => {
+test("chown + 비 root: gid 는 소속 그룹(주·보조)만(계획 단계 거부), uid 가 본인이 아니면 dsync 는 실패, nsync 는 건너뜀", () => {
   const o = syncOwnership({ chown: "10003:10000", root: false, runAs: "alice", self: true });
-  expect(o.short).toBe("chown 지정값 10003:10000 — 비 root: 본인 uid:gid 가 아니면 적용 안 됨(dsync 는 실패)");
+  expect(o.short).toBe("chown 지정값 10003:10000 — 비 root: uid 는 본인, gid 는 소속 그룹만(아니면 거부·실패)");
   expect(o.long).toContain("(자동 소유 지정은 꺼집니다)");
+  expect(o.long).toContain("root 실행이 아니면 gid 는 실행 신원이 속한 그룹(주·보조)이어야 하고(아니면 계획 단계에서 거부), "
+    + "uid 가 실행 신원 본인이 아니면 바꿀 권한이 없어 ");
+  expect(o.long).not.toContain("주 그룹 gid 외의 값");
+  // 프로젝트 그룹 안내는 기본(자동 지정) 문구의 몫 -- chown 을 이미 적었으면 붙지 않는다
+  expect(o.long).not.toContain("프로젝트(보조) 그룹 소유로 남기려면");
   expect(o.long).toContain("dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다");
 });
 
