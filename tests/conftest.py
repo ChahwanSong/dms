@@ -23,6 +23,19 @@ def settings():
 
 
 @pytest.fixture
+def artifact_base_dir(tmp_path):
+    # 아티팩트 base 로 쓸 디렉터리. tmp_path 를 그대로 base 로 쓰면 안 된다: pytest 의
+    # tmp_path 는 0700(other-x 없음 → artifact_base_not_traversable)이고 이 호스트의
+    # umask 002 로 만든 하위 디렉터리는 0775(g+w → artifact_base_group_writable)라
+    # roundtrip_artifact_base 가 둘 다 거부한다(2026-10-07 D6/D12). 운영 base 와 같은
+    # 755 로 고정해 umask·pytest 버전과 무관하게 한다.
+    base = tmp_path / "artifacts"
+    base.mkdir()
+    base.chmod(0o755)
+    return base
+
+
+@pytest.fixture
 def client(db, settings):
     from dms.api.app import create_app
     return TestClient(create_app(settings, db))

@@ -175,6 +175,7 @@
   "artifact_base_outside_allowlist",
   "artifact_base_not_owned",
   "artifact_base_world_writable",
+  "artifact_base_group_writable",
   "build_oom_killed",
   "build_evicted",
   "build_source_not_set",

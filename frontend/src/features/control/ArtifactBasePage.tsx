@@ -173,14 +173,17 @@ export function ArtifactBasePage() {
                   실제 동작 근거가 있다: 열람은 **현재** base 기준(api/artifacts) · stepper 는
                   단계마다 base 를 새로 읽는다 · 잡 파드는 base 를 hostPath 로 받는다 · 비 root
                   잡의 도구는 요청자 uid 로 base 를 통과한다(preflight artifact_base_not_traversable)
-                  · 3홉의 소유자·o+w 검사와 허용 접두(routes_artifact_base). */}
+                  · 3홉의 소유자·o+w·g+w·POSIX ACL·o+x 검사와 허용 접두(artifact_base.roundtrip_artifact_base,
+                  routes_artifact_base). g+w·ACL 금지는 잡이 LDAP 보조 그룹을 달고 돌기 때문(2026-10-07 D6),
+                  o+x 필수는 launcher 가 보조 그룹 없이 base 를 지나기 때문(D12) -- 그룹으로 여는 750/710 도 거부. */}
               <WarnTooltip label="변경 전 주의">
                 <p className="font-semibold text-bad mb-1">아티팩트 경로를 바꾸기 전에 확인하세요</p>
                 <ul className="list-disc space-y-1 pl-4">
                   <li>기존 잡의 로그(stdout·stderr)·스캔 리포트는 <strong>옮겨지지 않습니다</strong> — 열람은 새 경로를 보므로 이전 잡의 기록이 보이지 않게 됩니다(참조 잡이 있으면 강제 확인).</li>
                   <li>진행 중인 잡이 없을 때 바꾸세요 — 실행 중인 잡은 이후 단계의 기록을 새 경로에 써서 기록이 두 곳으로 흩어집니다.</li>
                   <li>새 경로는 <strong>모든 노드에 같은 경로로 마운트된 공유 스토리지</strong>여야 합니다(잡 파드가 노드의 그 경로를 그대로 씁니다) — 저장 후 3홉 검증에서 노드별 존재·쓰기를 확인하세요.</li>
-                  <li>디렉토리는 root 소유·world-writable 금지, 그리고 <strong>다른 사용자 실행(x) 권한 필수(711 또는 755)</strong> — 700/750/770 이면 일반 사용자 작업이 artifact_base_not_traversable 로 거부됩니다.</li>
+                  <li>디렉토리는 root 소유·world-writable 금지, 그리고 <strong>그룹 쓰기(g+w)·POSIX ACL 쓰기 항목·기본 ACL 금지</strong> — 작업이 실행 계정의 LDAP 보조 그룹으로도 돌기 때문에 그룹 쓰기는 그 그룹 사용자에게 경로 쓰기를 엽니다(artifact_base_group_writable).</li>
+                  <li><strong>다른 사용자 실행(x) 권한 필수(711 또는 755)</strong> — 없으면 3홉 검증과 저장이 artifact_base_not_traversable 로 거부합니다(예전 안내가 허용하던 750/710 도 이제 거부).</li>
                   <li>허용 접두(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES) 밖 경로는 저장되지 않습니다.</li>
                 </ul>
               </WarnTooltip>
