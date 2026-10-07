@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -562,4 +562,93 @@ test("단건(배치 아님) ConfirmPending 잡은 종전대로 컨펌할 수 있
   await screen.findByText("j9");
   expect(screen.queryByRole("link", { name: "배치 상세" })).toBeNull();
   expect(screen.getAllByRole("button").length).toBeGreaterThan(0);   // ConfirmDialog 트리거가 있다
+});
+
+// ---- 보조 그룹(gid) 행(2026-10-07 D15): 계획 시점 스냅숏(worker_pool.identity 4키)을 그대로 -------------------
+
+const IDENT = { username: "alice", uid: 10003, gid: 10000, privileged: false };
+const GENERIC_CAVEAT = "실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다(등록된 스토리지 종류 기준 안내).";
+const NFS_CAVEAT = "NFS 스토리지(등록 종류 기준): 보조 그룹은 최대 16개까지만 전달되거나, 서버가 그룹을 자체 조회하면 인정되지 않을 수 있습니다.";
+const LUSTRE_CAVEAT = "Lustre(등록 종류 기준): 서버(MDS) 설정에 따라 서버가 그룹을 다시 판정하므로 보조 그룹이 인정되지 않을 수 있습니다.";
+
+function renderGroupJob(job: object, storages: object[] = []) {
+  server.use(
+    http.get("/api/user/storages", () => HttpResponse.json(storages)),
+    http.get("/api/user/requests/r1", () => HttpResponse.json(REQUEST)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([{ ...JOBS[0], ...job }])),
+  );
+  return renderAt();
+}
+// 행의 값 칸(dd) -- dt "보조 그룹(gid)" 바로 다음 형제.
+const groupsCell = async () => (await screen.findByText("보조 그룹(gid)")).nextElementSibling as HTMLElement;
+
+test("applied: gid 목록과 소스·목적지 스토리지 종류별 주의문(문구 기준 중복 없이)", async () => {
+  renderGroupJob({ source_storage: "nas", destination_storage: "exa", storage_name: null,
+    worker_pool: { node_count: 1, identity: { ...IDENT, supplementary_gids: [10010, 20001],
+      supplementary_gids_status: "applied", supplementary_gids_excluded: [], supplementary_gids_found: 2 } } },
+  [{ storage_name: "nas", backend_type: "netapp", status: "Ready" },
+   { storage_name: "exa", backend_type: "lustre", status: "Ready" }]);
+  const dd = await groupsCell();
+  expect(dd).toHaveTextContent("10010, 20001");
+  await waitFor(() => expect(within(dd).getByText(NFS_CAVEAT)).toBeInTheDocument());
+  expect(within(dd).getByText(LUSTRE_CAVEAT)).toBeInTheDocument();
+  expect(within(dd).queryByText(GENERIC_CAVEAT)).toBeNull();
+});
+
+test("applied + 같은 종류 스토리지·맵에 없는 이름: 일반 주의문 한 줄", async () => {
+  // 비관리자 응답엔 관리자 전용 스토리지가 없다 -- 그 이름은 모름 → 일반 주의문
+  renderGroupJob({ source_storage: "ceph-a", destination_storage: "adm-only",
+    worker_pool: { identity: { ...IDENT, supplementary_gids: [10010], supplementary_gids_status: "applied",
+      supplementary_gids_excluded: [], supplementary_gids_found: 1 } } },
+  [{ storage_name: "ceph-a", backend_type: "cephfs", status: "Ready" }]);
+  const dd = await groupsCell();
+  expect(dd).toHaveTextContent("10010");
+  await waitFor(() => expect(within(dd).getAllByText(GENERIC_CAVEAT)).toHaveLength(1));
+});
+
+test("rm·scan 잡은 storage_name 의 종류로 주의문을 고른다", async () => {
+  renderGroupJob({ operation: "rm", storage_name: "nas", source_storage: null, destination_storage: null,
+    worker_pool: { identity: { ...IDENT, supplementary_gids: [10010], supplementary_gids_status: "applied",
+      supplementary_gids_excluded: [], supplementary_gids_found: 1 } } },
+  [{ storage_name: "nas", backend_type: "purestorage", status: "Ready" }]);
+  const dd = await groupsCell();
+  await waitFor(() => expect(within(dd).getByText(NFS_CAVEAT)).toBeInTheDocument());
+});
+
+test("none·over_limit·privileged·disabled: 값만 보이고 주의문은 없다(그룹이 실리지 않았다)", async () => {
+  const cases: [object, string][] = [
+    [{ supplementary_gids: [], supplementary_gids_status: "none", supplementary_gids_excluded: [],
+       supplementary_gids_found: 0 }, "없음"],
+    [{ supplementary_gids: [], supplementary_gids_status: "over_limit", supplementary_gids_excluded: [],
+       supplementary_gids_found: 300 }, "적용 안 됨 — 그룹 300개가 상한 256개를 넘음"],
+    [{ supplementary_gids: [], supplementary_gids_status: "privileged", supplementary_gids_excluded: [],
+       supplementary_gids_found: null, privileged: true, uid: 0, gid: 0 }, "root 실행 — 해당 없음"],
+    [{ supplementary_gids: [], supplementary_gids_status: "disabled", supplementary_gids_excluded: [],
+       supplementary_gids_found: null }, "적용 안 됨 — 운영자가 기능을 꺼 둠(계획 시점)"],
+  ];
+  for (const [ident, text] of cases) {
+    const view = renderGroupJob({ source_storage: "nas", destination_storage: "nas",
+      worker_pool: { identity: { ...IDENT, ...ident } } },
+    [{ storage_name: "nas", backend_type: "netapp", status: "Ready" }]);
+    const dd = await groupsCell();
+    // 스토리지 목록이 도착한 뒤에도 주의문 꼬리가 붙지 않는다(applied 일 때만)
+    await waitFor(() => expect(dd.textContent).toBe(text));
+    expect(screen.queryByText(NFS_CAVEAT)).toBeNull();
+    view.unmount();
+  }
+});
+
+test("제외된 gid 는 값 끝에 꼬리로 보인다", async () => {
+  renderGroupJob({ worker_pool: { identity: { ...IDENT, supplementary_gids: [], supplementary_gids_status: "none",
+    supplementary_gids_excluded: [-1], supplementary_gids_found: 0 } } });
+  expect(await groupsCell()).toHaveTextContent("없음 (제외: -1 — 유효하지 않은 gid)");
+});
+
+test("키 부재(기능 배포 전에 계획된 잡)·identity 없음·worker_pool 없음은 행 자체가 없다 — 모름 ≠ 없음", async () => {
+  for (const wp of [{ node_count: 1, identity: IDENT }, { node_count: 1 }, null]) {
+    const view = renderGroupJob({ worker_pool: wp });
+    expect(await screen.findByText("j1")).toBeInTheDocument();
+    expect(screen.queryByText("보조 그룹(gid)")).toBeNull();
+    view.unmount();
+  }
 });

@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { ConfirmDialog, previewSummaryText } from "./ConfirmDialog";
+import { ConfirmDialog, groupDeleteWarning, previewSummaryText } from "./ConfirmDialog";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -85,4 +85,44 @@ test("rm job shows rm-specific dialog title", async () => {
   wrap(<ConfirmDialog job={rmJob as any} />);
   await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
   expect(await screen.findByText("rm 작업 컨펌")).toBeInTheDocument();
+});
+
+// ---- 보조 그룹 삭제 경고(2026-10-07 D15): 그룹이 실렸고(applied) 삭제가 일어나는 실행(rm · sync --delete)만 -------
+const WARN = "보조 그룹으로 쓰기 권한을 받은 디렉토리에서는 다른 사용자의 파일도 지워질 수 있습니다.";
+const ident = (status: string | undefined) => ({ worker_pool: { identity: status === undefined
+  ? { username: "alice", uid: 10003, gid: 10000, privileged: false }
+  : { username: "alice", uid: 10003, gid: 10000, privileged: false,
+      supplementary_gids: status === "applied" ? [10010] : [], supplementary_gids_status: status,
+      supplementary_gids_excluded: [], supplementary_gids_found: status === "applied" ? 1 : 0 } } });
+
+test("삭제 경고: applied 이고 rm 이거나 sync delete 일 때만 창에 한 줄", async () => {
+  const view = wrap(<ConfirmDialog job={{ ...job, operation: "rm", ...ident("applied") } as any} />);
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  expect(await screen.findByText(WARN)).toBeInTheDocument();
+  view.unmount();
+
+  wrap(<ConfirmDialog job={{ ...job, options: { delete: true }, ...ident("applied") } as any} />);
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  expect(await screen.findByText(WARN)).toBeInTheDocument();
+});
+
+test("삭제 경고: 삭제 없는 sync·그룹 없음·배포 전 잡(키 부재)·root 실행엔 없다", async () => {
+  wrap(<ConfirmDialog job={{ ...job, options: { delete: false }, ...ident("applied") } as any} />);
+  await userEvent.click(screen.getByRole("button", { name: "작업 컨펌" }));
+  expect(await screen.findByText("sync 작업 컨펌")).toBeInTheDocument();
+  expect(screen.queryByText(WARN)).toBeNull();
+
+  // 판정 함수로 나머지 조합을 고정한다(창을 열 필요 없는 순수 규칙)
+  const rm = { operation: "rm" };
+  expect(groupDeleteWarning({ ...rm, ...ident("applied") } as any)).toBe(true);
+  expect(groupDeleteWarning({ operation: "sync", options: { delete: true }, ...ident("applied") } as any)).toBe(true);
+  expect(groupDeleteWarning({ operation: "sync", options: { delete: "true" }, ...ident("applied") } as any)).toBe(false);
+  expect(groupDeleteWarning({ operation: "sync", options: null, ...ident("applied") } as any)).toBe(false);
+  expect(groupDeleteWarning({ ...rm, ...ident("none") } as any)).toBe(false);
+  expect(groupDeleteWarning({ ...rm, ...ident("over_limit") } as any)).toBe(false);
+  expect(groupDeleteWarning({ ...rm, ...ident("disabled") } as any)).toBe(false);
+  expect(groupDeleteWarning({ ...rm, ...ident("privileged") } as any)).toBe(false);
+  expect(groupDeleteWarning({ ...rm, ...ident(undefined) } as any)).toBe(false);   // 배포 전 잡
+  expect(groupDeleteWarning({ ...rm, worker_pool: null } as any)).toBe(false);
+  expect(groupDeleteWarning({ ...rm } as any)).toBe(false);
 });
