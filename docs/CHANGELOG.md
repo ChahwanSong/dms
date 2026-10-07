@@ -95,6 +95,53 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ LDAP 보조 그룹 인정 — **완료·실증**(2026-10-08, d163)
+
+사용자 요청: "sync 목적지 권한 체크의 '보조 그룹으로 받은 권한은 인정되지 않습니다'를 근본적으로 인정하게" → 설계 검토(D1–D18)
+→ 사용자 결정(권장안 + D2 보류 후 3번 재시도·D3 gid 범위 제한 없음·D9 켜진 채 출하·D11/D12/D16 안 함·D18 사전 점검 없음).
+구현 C1~C5 → 적대적 리뷰(확정 11) → 반영 → 검증(신규 6) → 반영.
+- **계획 시점 숫자 스냅숏**(`identity.py`): LDAP gidNumber 만(posixGroup, 이름·DN 은 어디로도 안 흐른다) worker_pool.identity
+  4키(`supplementary_gids`·`_status` applied/none/over_limit/disabled/privileged·`_excluded`·`_found`). 256개 초과 = 미적용(D4),
+  root 잡 = 빈 목록, 키 부재(배포 전 계획) = [](더 좁은 권한). 비특권 주 gid 0 거부(D5), owner_username 자격 planner 재확인
+  (API 와 같은 술어), 명시 chown 의 gid 는 주 그룹 ∪ 적용된 보조 그룹만(`chown_group_not_member`, D7).
+- **적용 지점**(`execution_manifests`): preflight 파드 **pod 수준** supplementalGroups + 자기 검증(`id -G` 같은 집합), 워커는
+  `/etc/group` 의 `dmsg<gid>` 줄(sshd initgroups)을 가드 밖에서 항상·목록 검증 먼저·기존 계정 uid+gid 대조·`id -G` 검증(D13,
+  `identity_groups_not_applied`). preflight·워커 목록은 같은 스냅숏에서 파생(계약 테스트).
+- **재확인**(`stepper`): 4개 제출 직전 + 큐 대기(PENDING 2패스) — 스냅숏 ⊆ 최신 LDAP·uid/gid 그대로여야 제출(D1,
+  `identity_changed_at_step`), 모양 위반은 `identity_missing_at_step`. LDAP 불가는 보류 후 재시도 3번(간격 ≥60s, strict 이벤트 계수,
+  4번째에 `ldap_unavailable`, D2), 틱 서킷 + LDAP 예산 10s(루프 리스 30s 보호, 예산 경계는 미계수 보류).
+- **LDAP 리졸버**(D14): 사용자 엔트리 중복·결과 코드 4/11·그룹 페이지 상한은 fail-closed, 페이징 500×20, resolve 마감 10s,
+  시작 URI 기억(죽은 앞쪽 URI 를 매번 내지 않고, 검색만 실패하는 URI 에서도 벗어남), bind 뒤 스키마 읽기 끔(get_info=NONE).
+- **artifact base**(D6·D12 대체): g+w(gid 무관)·POSIX ACL(access 쓰기 항목·default 존재) 거부, other-x 강제, 보조 그룹 잡은
+  제출 전 컨트롤러 정적 관문도. 공유 부모는 root:root 750(gid 0 LDAP 그룹이 있으면 700) — 711 은 base 에만.
+- **포탈**(D15): 요청 상세 잡 카드 '보조 그룹(gid)' 행 + 스토리지 종류별 주의문(NFS 16개·Lustre MDS 재판정), 조건부 문구.
+- **운영**: 스위치 `DMS_IDENTITY_SUPPLEMENTARY_GROUPS`(기본 켬, 계획 시점 전용 — prod `values.env` 배관), README §2c(스위치 범위표·
+  스토리지별 조건·배포 직후 확인·롤백 절차), ARCHITECTURE 불변식 5·7·8·9·10·§4 틱 시간.
+- 남는 위험(문서화): gid 0 LDAP 그룹 멤버는 root 그룹 권한(D3 수용), StartTLS 인증서 미검증(D16), NFSv4/GPFS 상속 ACE 는 검사 밖,
+  그룹 없는 비 root 잡은 잡 단위로 default POSIX ACL 을 보지 않음(3홉 화면만 빨강), 중첩 그룹 미해석(D10).
+
+배포: d163(빌드 c19e1e9f / 커밋 827e49a) — dms 이미지만(워커 셸은 매니페스트 인라인). 릴리스 dms-api·dms-controller, 오버레이 dms newTag.
+testbed 저장소: dmsproj(gid 10010, alice — bob 은 비소속 대조) ansible 편입(304865d, 라이브 엔트리는 그대로).
+
+실증(테스트베드, D17):
+- 양성: `dms_test/suppgrp/ro`(root:dmsproj 0750) scan(mason, 실행 신원 alice, 비 root) → Succeeded files 2 — d162 까지는
+  target_not_readable. preflight 파드 `spec.securityContext.supplementalGroups=[10010]`(컨테이너 SC 엔 없음), 커널 적용
+  `status...user.linux.supplementalGroups=[10000,10010]`, 워커 env `DMS_JR_SUPP_GIDS=10010`, 4단계 재확인 통과 이벤트.
+  alice sync `ldap-e2e/proj-shared` → `rw`(2770) Succeeded files 2(소유 10001:10000 — 자동 chown 주 그룹), chown `10001:10010`
+  → 그룹 10010(예전 EPERM), chown `10001:10020` → `chown_group_not_member`(잡 없음), 그룹 쓰기 디렉터리 안 rm Succeeded.
+- 대조: bob → target_not_readable·status none·preflight 파드에 securityContext·env 없음(종전과 같은 매니페스트); root scan → privileged.
+- 회수(D1): alice sync ConfirmPending → LDAP 에서 dmsproj 제거 → 확인 → exec_preflight 제출 전 `identity_changed_at_step`
+  (missing [10010]) Failed, 목적지 미생성 → 멤버십 원복.
+- 위조(drain 중 DB 수정): [10010,10010] → identity_missing_at_step, bob [10010]+applied → identity_changed_at_step,
+  bob [10010]+none → identity_missing_at_step(상태 결속), alice [0]+applied → identity_changed_at_step, 직접 INSERT 요청 행
+  (alice → owner bob) → privileged_not_authorized, owner "" → invalid_owner_username.
+- LDAP 장애(컨트롤러 노드 → pkg-01:389 DROP): 그룹 잡 보류 1/4·2/4·3/4(≥60s 간격) → 4번째 `ldap_unavailable`(+197s), 그룹 없는
+  잡은 LDAP 없이 진행, stepper 틱 최대 5.1s(ldap 5.0s/10s, circuit open) — 리스 30s 안. 차단 해제 후 컨트롤러 LDAP 정상.
+- 실 Chrome(alice): 요청 상세 '보조 그룹(gid) 10010' + 스토리지 주의문, 콘솔 오류 0(캡처 d163-alice-sync-request-detail.png).
+- 정리: 픽스처 root rm, dms_test 원복, LDAP 기준선, drain off, 미종단 요청 0.
+
+테스트: 백엔드 전체 2580 passed, 프런트 892 passed + tsc + 빌드(외부 URL 0), e2e 9 passed.
+
 ### ✅ LDAP 연결 강화 — 컨트롤러 영구 정지 결함 수리 — **완료·실증**(2026-10-07, d162)
 
 보조 그룹 설계 검토에서 찾은 기존 결함을 사용자 결정으로 보조 그룹과 분리해 먼저 출하했다. LDAP 호출에 타임아웃이 없고 다중
