@@ -209,10 +209,13 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
      라 base **자체**에 걸린 NFSv4/GPFS ACL 까지 반영하지만 **상속은 못 본다** — base 엔 쓰기가
      없고 default POSIX ACL·NFSv4/GPFS inheritable ACE 만 있으면 통과하고, 러너가 root 로 만드는
      `<job_id>/<phase>` 가 그것을 물려받아 그 그룹의 다른 사용자가 남의 rank.sh 를 바꿔치기할 수
-     있다. POSIX default ACL 은 위 컨트롤러 관문이 막고, **NFSv4/GPFS 상속 ACE 는 남는 위험**이다
-     (그런 스토리지에 base 를 두면 상속 ACE 가 없는지 직접 확인할 것).
-   고치는 법: `chown root:root <base>; chmod 755 <base>`(g+w 제거), POSIX ACL 은
-   `setfacl -b -k <base>`. 상속 default ACL(POSIX/GPFS/NFSv4)이 `<job_id>`·`<phase>` 를 좁히면
+     있다. POSIX default ACL 은 **보조 그룹이 실린 잡에 한해** 위 컨트롤러 관문이 제출 전에 막는다.
+     보조 그룹이 없는 비 root 잡(그룹 없는 사용자·스위치 off·256개 초과)은 잡 단위로 default ACL 을 보지
+     않고(3홉 화면만 빨개진다), **NFSv4/GPFS 상속 ACE 는 어느 잡에도 남는 위험**이다(그런 스토리지에 base 를
+     두면 상속 ACE 가 없는지 직접 확인할 것).
+   고치는 법: `chown root:root <base>; chmod 755 <base>`(g+w 제거), POSIX ACL 은 **재귀로**
+   `setfacl -R -b -k <base>` — base 만 지우면 그 사이 만들어진 `<job_id>` 디렉터리에 상속된 ACL 이 남는다
+   (`getfacl -R -s <base>` 로 남은 항목이 없는지 확인). 상속 default ACL(POSIX/GPFS/NFSv4)이 `<job_id>`·`<phase>` 를 좁히면
    요청자 통과와 제어면의 other 읽기가 함께 깨지므로 확인할 것. base 가 쓰기 가능하면
    요청자가 `<job_id>` 를 미리 만들어 봉쇄 기준을 옮길 수 있다(위 제어면 판정이 그 강제다).
    (테스트베드 base 는 65532 시절의 777 을 d128 에서 755 로 정정했다.)
@@ -398,7 +401,8 @@ resolve 는 못 가 본 URI 부터 시작한다. 틱 예산의 남은 몫에 걸
   주입할 수 있고 재확인도 같은 채널이다.
 - NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖이다. preflight `test -w` 는 base **자체**의 쓰기만
   잡 단위로 막고, 그런 ACL 의 **상속**(inheritable ACE 가 `<job_id>/<phase>` 에 주는 쓰기)은 어디서도
-  보지 않는다(§2b-1 — POSIX default ACL 은 컨트롤러 관문이 막는다).
+  보지 않는다. POSIX default ACL 은 보조 그룹이 실린 잡만 컨트롤러 관문이 막고, 그룹 없는 비 root 잡은
+  잡 단위로 보지 않는다(3홉 화면만 빨갛다 — §2b-1).
 - LDAP 사용자가 스스로 그룹에 가입할 수 있는 selfwrite ACL 은 점검하지 않았다.
 - 큐 대기 재확인이 LDAP 장애로 건너뛴 사이 탈퇴하고 그대로 RUNNING 이 되면 반영되지 않는다(실행
   중 잡은 재확인하지 않는다). nsync 의 preflight 파드 쌍 대기는 큐 재확인 대상이 아니다.

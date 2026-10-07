@@ -623,10 +623,10 @@ def test_sticky_start_reaches_third_uri_when_two_front_uris_are_dead():
     r = _failover_resolver(clock, uris, {"ldap://p1", "ldap://r3"}, rotation=rotation, tried=tried)
     with pytest.raises(IdentityUnavailable):
         r.resolve("alice")                                          # 첫 resolve 는 자체 마감 -- 진짜 판정
-    assert tried == ["ldap://p1", "ldap://r3"] and rotation == {"start": 2}
+    assert tried == ["ldap://p1", "ldap://r3"] and rotation["start"] == 2
     tried.clear()
     assert r.resolve("alice").uid == 10001                          # 다음은 ldaps 부터 -- 성공
-    assert tried == ["ldap://ldaps"] and rotation == {"start": 2}
+    assert tried == ["ldap://ldaps"] and rotation["start"] == 2
     tried.clear()
     assert r.resolve("alice").uid == 10001                          # 붙은 URI 를 계속 쓴다(앞쪽 타임아웃 없음)
     assert tried == ["ldap://ldaps"]
@@ -638,7 +638,7 @@ def test_sticky_start_when_timeout_exceeds_own_deadline():
     r = _failover_resolver(clock, ["ldap://a", "ldap://b"], {"ldap://a"}, rotation=rotation, t=10.0, tried=tried)
     with pytest.raises(IdentityUnavailable):
         r.resolve("alice")
-    assert tried == ["ldap://a"] and rotation == {"start": 1}
+    assert tried == ["ldap://a"] and rotation["start"] == 1
     tried.clear()
     assert r.resolve("alice").uid == 10001 and tried == ["ldap://b"]
 
@@ -652,13 +652,13 @@ def test_sticky_start_wraps_around_and_keeps_position_when_all_fail():
             raise OSError("refused")
         return "conn"
     assert connect_first(["ldap://a", "ldap://b", "ldap://c"], open_one, rotation=rotation) == "conn"
-    assert tried == ["ldap://c", "ldap://a"] and rotation == {"start": 0}   # c 부터 돌아 a 에서 붙는다
+    assert tried == ["ldap://c", "ldap://a"] and rotation["start"] == 0   # c 부터 돌아 a 에서 붙는다
 
     def all_down(uri):
         raise OSError("refused")
     with pytest.raises(IdentityUnavailable):
         connect_first(["ldap://a", "ldap://b"], all_down, rotation=rotation)
-    assert rotation == {"start": 0}                                 # 전부 실패면 위치를 그대로 둔다
+    assert rotation["start"] == 0                                 # 전부 실패면 위치를 그대로 둔다
 
 
 def test_tick_resolve_deadline_only_when_budget_binds():
@@ -718,3 +718,69 @@ def test_ldap3_missing_attribute_keyerror_tolerated():
             return found
     out = _paged_resolver(_Conn()).resolve("alice")
     assert out.groups == ("appgroup", "proj") and out.group_gids == (20001,)
+
+
+def test_rotation_leaves_a_uri_that_binds_but_fails_searches(monkeypatch):
+    # 2026-10-08 검증: 연결 성공만 기억하던 sticky 는, 한 번 페일오버한 뒤 그 URI 가 "연결·bind 는 되는데 검색이 실패"하는
+    # 상태(과부하 레플리카의 receive 타임아웃·busy)가 되면 1차가 살아나도 계속 그 URI 로만 갔다. 이제 붙은 URI 의 검색이
+    # 전송 오류로 실패하면 다음 resolve 는 그다음 URI 부터 돈다.
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import ldap3
+    tried = []
+    state = {"a_down": True}
+
+    class _Server:
+        def __init__(self, uri, tls=None, connect_timeout=None, get_info=None):
+            self.uri = uri
+
+    class _Conn:
+        def __init__(self, server, user=None, password=None, auto_bind=None, receive_timeout=None):
+            tried.append(server.uri)
+            if server.uri == "ldap://a" and state["a_down"]:
+                raise OSError("a down")
+            self.uri, self.entries, self.result = server.uri, [], {"result": 0, "description": "success"}
+
+        def search(self, base, filt, attributes=None, **kwargs):
+            if self.uri == "ldap://b":
+                raise TimeoutError("receive timeout")      # b 는 bind 는 되지만 검색이 막힌다
+            self.entries = []
+            return False
+
+        def unbind(self):
+            pass
+    monkeypatch.setattr(ldap3, "Server", _Server)
+    monkeypatch.setattr(ldap3, "Connection", _Conn)
+    settings = SimpleNamespace(ldap_uri="ldap://a/, ldap://b/", ldap_user_base="ou=u,dc=x",
+                               ldap_group_base="ou=g,dc=x", ldap_use_start_tls=False,
+                               ldap_bind_dn="", ldap_bind_pw="", ldap_group_member_attr="uniqueMember",
+                               ldap_timeout_seconds=2)
+    resolver = build_ldap_resolver(settings)
+    with pytest.raises(IdentityUnavailable):
+        resolver.resolve("nobody")                 # a 연결 실패 → b 연결 성공 → b 검색 실패
+    assert tried == ["ldap://a", "ldap://b"]
+    state["a_down"] = False                        # a 복구
+    tried.clear()
+    assert resolver.resolve("nobody") is None      # b 에 붙박이지 않고 a 부터
+    assert tried == ["ldap://a"]
+
+
+def test_search_failure_hook_is_not_called_for_per_user_data_problems():
+    # 중복 사용자 엔트리(IdentityLookupInvalid)는 서버 탓이 아니다 -- 시작 위치를 옮기지 않는다.
+    from dms.identity import IdentityLookupInvalid
+    calls = []
+    dup = _FakeConn({"alice": (10001, 10000)}, {"alice": []})
+
+    def search(base, filt, attributes=None, **kw):
+        dup.entries = [_FakeEntry({"uidNumber": 10001, "gidNumber": 10000})] * 2
+        return True
+    dup.search = search
+
+    def connect(deadline=None):
+        return dup
+    connect.search_failed = lambda: calls.append(1)
+    r = LdapIdentityResolver(connect=connect, user_base="ou=u", group_base="ou=g", group_member_attr="memberUid")
+    with pytest.raises(IdentityLookupInvalid):
+        r.resolve("alice")
+    assert calls == []

@@ -116,7 +116,8 @@ def _posix_acl_problem(path: str) -> "str | None":
     NFSv4/GPFS 고유 ACL 은 이 표현이 아니라 보지 못한다. preflight 의 `test -w` 는 access(2) 라 base **자체**에
     걸린 그런 ACL 은 요청자 관점에서 반영하지만, **상속**(default POSIX ACL·NFSv4/GPFS inheritable ACE)이
     <job_id>·<phase> 에 주는 쓰기는 보지 못한다(base 자체엔 쓰기가 없을 수 있다) -- POSIX default ACL 은 이 함수가
-    (컨트롤러 정적 관문 static_base_problem 으로 잡 단위에서도) 막고, NFSv4/GPFS 상속 ACE 는 남는 위험이다(README §2b-1)."""
+    막는다: 저장·3홉에서, 그리고 **보조 그룹이 실린 잡**은 컨트롤러 정적 관문(static_base_problem)으로 제출 전에도.
+    그룹 없는 비 root 잡은 잡 단위로 보지 않고, NFSv4/GPFS 상속 ACE 는 남는 위험이다(README §2b-1)."""
     try:
         os.getxattr(path, _ACL_DEFAULT)
         return "artifact_base_group_writable"      # 있다는 사실만으로 거부(내용 무관)
