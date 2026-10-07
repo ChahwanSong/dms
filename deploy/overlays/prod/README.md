@@ -50,6 +50,9 @@ PORTAL_DOMAIN=<도메인> CACERT=<사내CA> sh deploy/verify.sh
 요약: `REGISTRY` · `DMS_TAG`/`DMS_AGENT_TAG`/`MFU_TAG`(push 한 태그) · `SHARED_FS`
 (공유 FS 최상위) · `LDAP_HOST`/`LDAP_USER_BASE`/`LDAP_GROUP_BASE`/`LDAP_BIND_DN` ·
 `EMAIL_DOMAIN` · `LOCAL_ADMIN` · `PORTAL_DOMAIN` · `PORTAL_VIP`.
+선택 키(없어도 렌더된다): `IDENTITY_SUPPLEMENTARY_GROUPS`(`true`|`false`, 기본 `true`) — 보조 그룹
+(LDAP gidNumber) 인정의 비상 끄기. 계획 시점 전용이라 바꾼 뒤 `kubectl -n dms rollout restart
+deploy/dms-controller`, 이 스위치가 덮지 않는 변경은 `deploy/README.md` §2c 표.
 
 `render.sh` 가 이 값을 오버레이 템플릿에 넣어 `deploy/overlays/.prod-rendered/`
 (git 밖)를 만들고, `install.sh` 가 거기서 `kubectl apply -k` 한다. 오버레이

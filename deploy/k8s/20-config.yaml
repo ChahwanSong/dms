@@ -68,8 +68,13 @@ data:
   # 문서화를 위한 명시다. rfc2307-only·평문 사이트만 "memberUid"/"false"로 내린다.
   # URI 는 sssd ldap_uri 처럼 콤마 목록도 받는다(순서대로 하나씩 페일오버):
   #   예) "ldap://ldap_p1/, ldap://ldap_r3/, ldap://ldaps/"
-  # 연결·StartTLS·bind·검색 각각의 상한은 DMS_LDAP_TIMEOUT_SECONDS(기본 5초, 0.5~60) -- 전부 죽어도 조회 하나가
-  # 대략 URI 수 × 3 × 상한 안에 끝나고, planner 는 한 틱에 LDAP 불가를 한 번 보면 나머지를 다음 틱으로 미룬다.
+  # 연결·StartTLS·bind·검색 각각의 상한은 DMS_LDAP_TIMEOUT_SECONDS(기본 5초, 0.5~60) -- 조회 하나는 자체 마감
+  # 10초 안에서만 새 연산을 시작하고(넘으면 진행 중 한 URI 시도 = 3 × 상한까지), planner·stepper 는 한 틱에 LDAP
+  # 불가를 한 번 보거나 LDAP 시간 10초를 쓰면 나머지를 다음 틱으로 미룬다. 틱 최악 10 + 3 × 상한 < 루프 리스 30초라
+  # 상한은 6 이하를 권장한다(ARCHITECTURE §4 틱 LDAP 시간).
+  # 보조 그룹(2026-10-07): 플래너가 계획 시점에 LDAP posixGroup gidNumber 를 잡 스냅숏에 얼리고 preflight·워커가 같은 목록을
+  # 싣는다(deploy/README §2c). 스위치 DMS_IDENTITY_SUPPLEMENTARY_GROUPS 는 코드 기본 "true" 라 여기 키를 두지 않는다 --
+  # 끌 때만 사이트 오버레이에 "false" + dms-controller 재시작(계획 시점 전용, 진행 중 잡은 스냅숏대로 끝난다).
   DMS_LDAP_URI: "ldap://10.10.10.30:389"
   DMS_LDAP_USER_BASE: "ou=People,dc=dms,dc=local"
   DMS_LDAP_GROUP_BASE: "ou=Groups,dc=dms,dc=local"
