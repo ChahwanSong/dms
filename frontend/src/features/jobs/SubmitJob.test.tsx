@@ -335,7 +335,12 @@ test("sync 는 목적지 조건(없는 경우·있는 경우)과 소유권을 �
   expect(card).toHaveTextContent("목적지 조건과 소유권 — 요청자 본인 계정(uid/gid) 기준");
   expect(card).toHaveTextContent("요청자 본인 소유여야 합니다");
   // 보조 그룹 인정(2026-10-07 D15): 조건부 문구 -- 계획 시점 확정·gidNumber 그룹만·중첩 제외·스토리지에 따라 다름
-  expect(card).toHaveTextContent("권한은 본인 계정의 uid·LDAP 주 그룹·LDAP 보조 그룹 기준으로 판정됩니다");
+  expect(card).toHaveTextContent("권한은 본인 계정의 uid·LDAP 주 그룹·LDAP 보조 그룹(적용된 경우 — 운영자가 기능을 껐거나 "
+    + "그룹이 256개를 넘으면 주 그룹만) 기준으로 판정됩니다");
+  // G8(2026-10-08 리뷰): chown 칸은 관리자 전용 -- 사용자에겐 할 수 없는 "chown 에 지정하세요" 대신 관리자에게 요청
+  expect(card).not.toHaveTextContent("chown 에 uid:<그룹 gid> 를 지정하세요");
+  expect(card).toHaveTextContent("프로젝트(보조) 그룹 소유가 필요하면 관리자에게 chown uid:<그룹 gid> 지정을 요청하세요");
+  expect(screen.queryByLabelText("chown")).not.toBeInTheDocument();
   expect(card).toHaveTextContent("보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는 그룹만, 중첩 그룹 제외)");
   expect(card).toHaveTextContent("그 뒤 그룹에서 빠지면 실행 전에 중단되며 새로 들어간 그룹은 다시 신청해야 반영됩니다");
   expect(card).toHaveTextContent("실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.");
@@ -1086,7 +1091,7 @@ test("관리자 기본(root 실행): 소유권은 소스 그대로 -- 상위 디
   // root 는 최상위뿐 아니라 이미 있던 같은 경로 항목 전부를 소스 소유로(dsync 기본 비교) -- 범위를 축소하지 않는다
   expect(ownershipCard()).toHaveTextContent("그 안의 같은 경로 항목은 소스의 소유·권한·시각으로 다시 맞춰집니다(chown·chmod 를 지정하면 그 값)");
   expect(ownershipCard()).toHaveTextContent("목적지에 이미 있던 같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로");
-  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹 기준");
+  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹(적용된 경우");
   expect(ownershipCard()).toHaveTextContent("root 권한으로 실행하면 권한·소유 검사는 우회됩니다(아래 실행 설정에서 선택)");
   expect(screen.getByText("소스의 소유자·그룹 그대로(root 실행)")).toBeInTheDocument();
   expect(screen.getByText(/상위 디렉토리 .* 가 있어야 함\(root 실행 — 권한 검사 우회\)/)).toBeInTheDocument();
@@ -1099,7 +1104,10 @@ test("관리자가 root 를 끄면 카드가 그 자리에서 비 root 기준으
   // 같은 화면의 카드가 즉시 비 root 기준(쓰기 권한·실행 신원 소유)으로 바뀐다
   expect(ownershipCard()).toHaveTextContent("root 실행이 아니면 실행 신원 소유여야 합니다");
   expect(ownershipCard()).toHaveTextContent(/쓰기 권한이 있어야 합니다/);
-  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹 기준");
+  expect(ownershipCard()).toHaveTextContent("root 가 아닌 실행에서 권한은 실행 신원의 uid·LDAP 주 그룹·LDAP 보조 그룹(적용된 경우");
+  // G8: 관리자는 chown 칸이 있으니(고급 옵션) 직접 지정하라고 말한다
+  expect(ownershipCard()).toHaveTextContent("프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹).");
+  expect(ownershipCard()).not.toHaveTextContent("관리자에게 chown");
   expect(screen.getByText("요청자 본인(root)의 uid:gid(주 그룹)")).toBeInTheDocument();   // meAdmin.actor
   first.unmount();
 
@@ -1134,10 +1142,12 @@ test("비 root 에서 chown 을 지정하면 uid 는 본인, gid 는 소속 그�
   const help = screen.getByText(/비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown/);   // FieldRow 도움말 <p>
   expect(help).toHaveTextContent("비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다(지금 root 아님) — "
     + "프로젝트(보조) 그룹 소유로 남기려면 uid:<그룹 gid> 를 지정하세요.");
-  expect(help).toHaveTextContent("gid 가 실행 신원이 속한 그룹(주·보조)이 아니면 계획 단계에서 거부되고(chown_group_not_member)");
+  // G9: '소속' 이 아니라 '이 작업에 적용된' 그룹 -- 스위치 꺼짐·256 초과면 주 그룹만
+  expect(help).toHaveTextContent("gid 가 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이 아니면(보조 그룹이 적용되지 않으면 "
+    + "주 그룹만) 계획 단계에서 거부되고(chown_group_not_member)");
   expect(help).toHaveTextContent("uid 가 본인이 아니면 도구에 권한이 없어 dsync 는 데이터를 복사한 뒤 Failed 로 끝나고, nsync 는 소유 변경이 적용되지 않습니다");
   await userEvent.type(screen.getByLabelText("chown"), "10003:10000");
-  expect(screen.getByText("chown 지정값 10003:10000 — 비 root: uid 는 본인, gid 는 소속 그룹만(아니면 거부·실패)"))
+  expect(screen.getByText("chown 지정값 10003:10000 — 비 root: uid 는 본인, gid 는 주·적용된 보조 그룹만(아니면 거부·실패)"))
     .toBeInTheDocument();
 });
 

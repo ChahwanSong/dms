@@ -14,14 +14,14 @@ import posixpath
 import sys
 import time
 
-from .artifact_base import resolve_artifact_base
+from .artifact_base import resolve_artifact_base, static_base_problem, strip_scheme
 from .db import iso_epoch, iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import parse_execution_reason, parse_preflight_reason
-from .identity import (LDAP_TICK_BUDGET_SECONDS, PRIVILEGE_NEVER, IdentityLookupInvalid,
-                       IdentityUnavailable, privilege_policy, supplementary_gids_problem,
-                       valid_supplementary_gids)
+from .identity import (LDAP_TICK_BUDGET_SECONDS, PRIVILEGE_NEVER, IdentityDeadlineExceeded,
+                       IdentityLookupInvalid, IdentityUnavailable, privilege_policy,
+                       supplementary_gids_problem, tick_resolve_deadline, valid_supplementary_gids)
 from .placement import TOOL_TO_POLICY
 from .repositories.node_exclusions import blocked_nodes
 
@@ -141,6 +141,20 @@ class NodeBlockedAtStep(Exception):
         super().__init__(", ".join(f"{n}={r}" for n, r in sorted(blocked.items())))
 
 
+class ArtifactBaseUnsafeAtStep(Exception):
+    """보조 그룹이 실린 비 root 잡의 제출 직전 base 정적 관문(2026-10-08 리뷰, artifact_base.static_base_problem):
+    base 에 g+w·POSIX ACL 쓰기 항목·**default ACL**·other-x 없음이 있으면 제출 전에 끊는다. preflight 의
+    `test -w` 는 base **자체**의 쓰기만 보므로, base 엔 쓰기가 없고 default ACL 만 있는 경우(러너가 root 로 만드는
+    <job_id>/<phase> 가 그 ACL 을 상속)를 통과시켰다 -- 그 그룹의 다른 사용자가 남의 rank.sh 를 바꿔치기해 mpirun 이
+    피해자 신원으로 실행하는 교차 사용자 코드 실행이었다(불변식 5). 제어면 판정(3홉·PUT)은 표시·저장용이라 잡을
+    막지 않고, env 로 준 base·저장 뒤 바뀐 mode 도 있어 컨트롤러(root, base 마운트)가 직접 본다. problem 은 사유 코드
+    (artifact_base_group_writable·artifact_base_not_traversable) -- _step_one 이 키워드 리터럴로 종단한다."""
+
+    def __init__(self, problem):
+        self.problem = problem
+        super().__init__(f"artifact base {problem} at step time")
+
+
 class IdentityChangedAtStep(Exception):
     """계획 뒤 LDAP 가 바뀌었다(2026-10-07 D1): 스냅숏의 보조 gid 가 최신 유효 gid 에 없거나(탈퇴), uid·주 gid 가
     바뀌었거나, 계정이 삭제됐다. 스냅숏은 계획 시점에 얼린 권한이라 그대로 실행하면 이미 회수된 그룹 권한으로
@@ -155,7 +169,8 @@ class IdentityChangedAtStep(Exception):
 class IdentityRecheckHeld(Exception):
     """D2 보류: 상태를 바꾸지 않고 이번 틱을 넘긴다(_step_one 이 touch 로 claim 큐 뒤로만 보낸다). counted=True 만
     시도 횟수(identity_recheck_deferred 이벤트 -- 카운터)로 남는다. reason ∈ {"ldap_unavailable"(계수),
-    "spacing"·"circuit_open"·"ldap_budget"(미계수 -- LDAP 를 부르지 않았으니 시도가 아니다)}."""
+    "spacing"·"circuit_open"·"ldap_budget"(미계수 -- LDAP 를 부르지 않았으니 시도가 아니다; ldap_budget 은 틱 예산의
+    남은 몫이 resolve 를 멈춘 경우(IdentityDeadlineExceeded)도 포함 -- 예산 소진이지 LDAP 판정이 아니다)}."""
 
     def __init__(self, phase, *, counted: bool, reason: str, attempt: "int | None" = None,
                  attempted_at_epoch: "float | None" = None):
@@ -283,21 +298,33 @@ class JobStepper:
 
     def _resolve_fresh(self, username):
         """캐시 미스에서만 부른다(호출자가 _ldap_gate 를 먼저 본다). 남은 틱 예산을 deadline 으로 넘겨 리졸버가 그
-        시각 뒤엔 새 LDAP 연산을 시작하지 않게 한다. IdentityLookupInvalid(사용자별 데이터 문제 -- 중복 엔트리 등)는
-        캐시만 하고 서킷을 열지 않는다: 한 사용자의 디렉터리 문제가 그 틱 전원을 보류시키지 않게. 전송 오류·마감·
-        서버 전역 결과 코드(plain IdentityUnavailable)만 서킷을 연다."""
+        시각 뒤엔 새 LDAP 연산을 시작하지 않게 한다(남은 몫이 리졸버 자체 마감 이상이면 넘기지 않는다 --
+        identity.tick_resolve_deadline). IdentityLookupInvalid(사용자별 데이터 문제 -- 중복 엔트리 등)는 캐시만 하고
+        서킷을 열지 않는다: 한 사용자의 디렉터리 문제가 그 틱 전원을 보류시키지 않게. IdentityDeadlineExceeded(남은
+        몫이 resolve 를 멈췄다 -- LDAP 판정이 아니다)는 예산 소진으로 기록하고(이 틱 나머지는 _ldap_gate 가
+        ldap_budget 으로 보류) 캐시하지 않는다 -- 호출자가 미계수 보류로 바꾼다(2026-10-08 리뷰: 예전엔 D2 계수 실패라
+        LDAP 가 멀쩡해도 예산 경계에 4번 걸린 잡이 ldap_unavailable 로 종단될 수 있었다). 전송 오류·자체 마감·서버 전역
+        결과 코드(plain IdentityUnavailable)만 서킷을 연다."""
         t0 = self._monotonic()
+        remaining = LDAP_TICK_BUDGET_SECONDS - self._ldap_spent
+        budget_cut = False
         try:
-            fresh = self._resolver.resolve(
-                username, deadline=t0 + (LDAP_TICK_BUDGET_SECONDS - self._ldap_spent))
+            fresh = self._resolver.resolve(username, deadline=tick_resolve_deadline(t0, remaining))
         except IdentityLookupInvalid as exc:
             self._fresh_cache[username] = exc
+            raise
+        except IdentityDeadlineExceeded:
+            budget_cut = True
             raise
         except IdentityUnavailable:
             self._ldap_circuit_open = True
             raise
         finally:
             self._ldap_spent += self._monotonic() - t0
+            if budget_cut:
+                # 리졸버가 deadline 을 지난 뒤에 멈추므로 보통 이미 예산 이상이다 -- 시계가 덜 갔어도 이 틱의 남은
+                # resolve 를 막도록 명시한다(stderr 측정줄도 예산 소진으로 찍힌다).
+                self._ldap_spent = max(self._ldap_spent, LDAP_TICK_BUDGET_SECONDS)
         self._fresh_cache[username] = fresh       # None(계정 삭제)도 캐시 -- 같은 틱 같은 사용자는 한 번만
         return fresh
 
@@ -354,6 +381,9 @@ class JobStepper:
                 raise IdentityRecheckHeld(phase, counted=False, reason=gate)
             try:
                 fresh = self._resolve_fresh(username)
+            except IdentityDeadlineExceeded:
+                # 남은 예산이 멈춘 resolve = 예산 소진 -- LDAP 판정이 아니라 미계수 보류(게이트의 ldap_budget 과 같다).
+                raise IdentityRecheckHeld(phase, counted=False, reason="ldap_budget") from None
             except IdentityUnavailable as exc:
                 failure = exc
             else:
@@ -417,7 +447,7 @@ class JobStepper:
                 return
             try:
                 hit = self._resolve_fresh(ident["username"])
-            except IdentityUnavailable:
+            except IdentityUnavailable:      # IdentityDeadlineExceeded(예산 소진) 포함 -- 큐 재확인 실패는 전부 no-op
                 return
         if isinstance(hit, Exception):
             return
@@ -451,6 +481,19 @@ class JobStepper:
         # 스냅숏을 들고 있으면 base 변경이 컨트롤러 재시작 전까지 반영되지
         # 않는다(설계 §1-7).
         return resolve_artifact_base(self._repos.control, self._settings)
+
+    def _raise_if_base_unsafe_for_groups(self, job):
+        path = strip_scheme(self._artifact_base())
+        try:
+            problem = static_base_problem(path)
+        except OSError as exc:
+            # 컨트롤러가 base 를 못 봤다(마운트 없음 등) -- '모름' 을 통과로 접는 게 아니라 판정을 preflight 에 넘긴다:
+            # 잡 파드의 hostPath(type Directory)·test -x·other-x 비트·test -w 가 그대로 돈다. 여기서 종단하면 컨트롤러
+            # 쪽 마운트 문제 하나로 모든 그룹 잡이 끝난다(3홉 화면의 컨트롤러 홉이 그 사실을 따로 보인다).
+            logger.warning("artifact base static check skipped job=%s: %s", job["job_id"], exc)
+            return
+        if problem is not None:
+            raise ArtifactBaseUnsafeAtStep(problem)
 
     def _build_spec(self, job, phase, dryrun):
         # 비-dict worker_pool(변조 행)도 identity_missing 경로로 -- AttributeError 로
@@ -505,6 +548,9 @@ class JobStepper:
         v = wp["identity"].get("supplementary_gids")
         gids = [] if v is None else list(v)
         if gids:
+            # base 정적 관문(ArtifactBaseUnsafeAtStep docstring) -- stat·getxattr 라 LDAP 보다 싸다. 그룹이 없는 잡은
+            # 종전 그대로(그 잡의 쓰기 범위는 주 gid 뿐이라 기존 preflight 판정이 유지된다).
+            self._raise_if_base_unsafe_for_groups(job)
             self._recheck_groups_for_submit(job, wp["identity"], gids, phase)
         return JobSpec(
             job_id=job["job_id"], phase=phase, operation=op, tool=job["tool"],
@@ -743,6 +789,16 @@ class JobStepper:
                 message=f"privileged identity without run_as_root/batch job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="privilege_not_requested")
+        except ArtifactBaseUnsafeAtStep as exc:
+            # 그룹 잡의 base 정적 관문 -- 어느 판정이었는지는 사유 코드가 말한다(경로는 싣지 않는다: 관리자 설정).
+            self._repos.observability.record_event(
+                component="stepper", severity="error", event_type="artifact_base_unsafe_at_step",
+                message=f"{exc.problem} job={job['job_id']}",
+                payload={"job_id": job["job_id"], "problem": exc.problem},
+                request_id=job.get("request_id"))
+            if exc.problem == "artifact_base_not_traversable":
+                return self._fail_closed(job, reason_code="artifact_base_not_traversable")
+            return self._fail_closed(job, reason_code="artifact_base_group_writable")
         # ---- 보조 그룹 재확인(D1·D2). 이벤트 message·payload 에 LDAP 예외 원문을 싣지 않는다(로그에만) ----
         except IdentityChangedAtStep as exc:
             self._record_identity_changed(job, exc)

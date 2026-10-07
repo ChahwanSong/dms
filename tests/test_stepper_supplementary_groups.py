@@ -461,8 +461,9 @@ def test_deadline_passed_to_resolver(db):
     h.set_updated_at(b, "2000-01-01T00:00:01Z")
     start = h.mono.t
     h.tick()
-    # 남은 예산 = deadline - now: 첫 호출은 start+10, 3s 쓴 뒤 두 번째도 now(start+3) + 7 = start+10.
-    assert [d for _u, d in h.res.calls] == [start + LDAP_TICK_BUDGET_SECONDS] * 2
+    # 첫 호출은 남은 몫 = 예산 = 자체 마감이라 deadline 없음(identity.tick_resolve_deadline -- 그 마감의 중단은 진짜
+    # 판정), 3s 쓴 뒤 두 번째는 남은 몫 7s 가 묶는다: now(start+3) + 7 = start+10.
+    assert [d for _u, d in h.res.calls] == [None, start + LDAP_TICK_BUDGET_SECONDS]
 
 
 def test_tick_cache_one_resolve_per_user(db):
@@ -703,3 +704,235 @@ def test_genuine_preflight_failure_after_pass_keeps_fallback(db):
     assert h.tick()[jid] == "Rejected"
     assert h.reason(jid) == "preflight_failed"
     assert h.events(rid, "identity_recheck_failed") == []
+
+
+# ---- 2026-10-08 리뷰 G1/G3: 틱 예산의 남은 몫이 멈춘 resolve 는 미계수 보류 -- 실 LdapIdentityResolver + connect_first ----
+# 예전 _CountingResolver 는 deadline 을 무시해, 예산 경계에 걸친 resolve 가 plain IdentityUnavailable 로 D2 계수되던
+# 경로(LDAP 가 멀쩡해도 4번이면 ldap_unavailable 종단)를 보지 못했다.
+
+class _LV:
+    def __init__(self, v):
+        self.value = v
+
+
+class _LEntry:
+    def __init__(self, dn, attrs):
+        self.entry_dn, self._a = dn, attrs
+
+    def __getitem__(self, k):
+        return _LV(self._a[k])
+
+
+class _LConn:
+    """건강한 LDAP: 검색마다 monotonic 을 cost 초 전진. 사용자는 필터의 uid 로 찾는다(uid 표 uids)."""
+    def __init__(self, mono, cost, uids):
+        self.mono, self.cost, self.uids = mono, cost, uids
+        self.entries, self.result = [], {"result": 0}
+
+    def search(self, base, flt, attributes=None, paged_size=None, paged_cookie=None):
+        self.mono.t += self.cost
+        name = flt.split("=", 1)[1].rstrip(")")
+        if flt.startswith("(uid="):
+            self.entries = ([_LEntry(f"uid={name},ou=p", {"uidNumber": self.uids[name], "gidNumber": 10000})]
+                            if name in self.uids else [])
+        else:
+            self.entries = [_LEntry("cn=dmsproj,ou=g", {"cn": "dmsproj", "gidNumber": 10010,
+                                                         "objectClass": ["posixGroup"]})]
+        self.result = {"result": 0}
+
+    def unbind(self):
+        pass
+
+
+class _RealLdap:
+    """실 LdapIdentityResolver(+ 실 connect_first, 가짜 monotonic)를 감싸 호출을 센다(_CountingResolver.names 호환)."""
+    def __init__(self, mono, uids, *, uris=("ldap://b",), dead=(), connect_cost=0.05, search_cost=0.05,
+                 dead_cost=5.0, rotation=None, refuse=False):
+        from dms.identity_ldap import LdapIdentityResolver, connect_first
+        self.calls, self.tried = [], []
+
+        def open_one(uri):
+            self.tried.append(uri)
+            if refuse:
+                raise ConnectionRefusedError(f"{_SECRET} [Errno 111] Connection refused")
+            if uri in dead:
+                mono.t += dead_cost
+                raise OSError("timed out")
+            mono.t += connect_cost
+            return _LConn(mono, search_cost, uids)
+        self._real = LdapIdentityResolver(
+            connect=lambda deadline=None: connect_first(list(uris), open_one, deadline=deadline, monotonic=mono,
+                                                        rotation=rotation),
+            user_base="ou=p", group_base="ou=g", group_member_attr="memberUid", monotonic=mono)
+
+    def resolve(self, username, *, deadline=None):
+        self.calls.append((username, deadline))
+        return self._real.resolve(username, deadline=deadline)
+
+    def names(self):
+        return [u for u, _d in self.calls]
+
+
+def _many(h, n):
+    uids = {f"u{i}": 20000 + i for i in range(n)}
+    jobs = []
+    for i, name in enumerate(uids):
+        rid, jid = h.job(ident=_ident(name, uid=uids[name]))
+        h.set_updated_at(jid, f"2000-01-01T00:00:{i:02d}Z")
+        jobs.append((rid, jid))
+    return uids, jobs
+
+
+def test_budget_straddle_is_uncounted_hold_on_healthy_ldap(db):
+    # G1: 11 사용자, resolve 1.1s(연결 0.3 + 검색 0.4 × 2), 전부 성공할 LDAP. 9건 뒤 10번째는 남은 몫 0.1s 로 시작해
+    # 그 마감에 걸린다 -- 예전엔 identity_recheck_deferred 1/4(계수)·서킷 개방, 이제 미계수 예산 보류.
+    h = _H(db, resolver=None)
+    uids, jobs = _many(h, 11)
+    h.res = _RealLdap(h.mono, uids, connect_cost=0.3, search_cost=0.4)
+    h.tick()
+    assert [h.state(j) for _r, j in jobs[:9]] == ["Preflight"] * 9
+    assert [h.state(j) for _r, j in jobs[9:]] == ["Pending"] * 2
+    assert all(h.events(r, "identity_recheck_deferred") == [] for r, _j in jobs)   # 아무도 계수되지 않았다
+    assert len(h.res.calls) == 10                              # 11번째는 예산 게이트(ldap_budget) -- LDAP 미호출
+    _d, deadline = h.res.calls[9]
+    assert deadline is not None                                # 10번째만 남은 몫이 묶었다(첫 호출은 None)
+    assert h.res.calls[0][1] is None
+    # 같은 잡이 경계에 몇 번 걸려도 계수되지 않으니 종단되지 않는다 -- 다음 틱엔 먼저 클레임돼 통과한다.
+    for _r, j in jobs[:9]:
+        h.set_updated_at(j, "2099-01-01T00:00:00Z")
+    h.clock.advance(61)
+    h.tick()
+    assert [h.state(j) for _r, j in jobs[9:]] == ["Preflight"] * 2
+
+
+def test_first_resolve_outage_with_real_resolver_still_counts(db):
+    # 진행 보장의 반대쪽: 틱 첫 resolve 의 전송 장애는 여전히 D2 계수 실패(서킷 개방)다.
+    h = _H(db, resolver=None)
+    uids, jobs = _many(h, 2)
+    h.res = _RealLdap(h.mono, uids, refuse=True)
+    h.tick()
+    (rid_a, a), (rid_b, b) = jobs
+    assert [e["payload"]["attempt"] for e in h.events(rid_a, "identity_recheck_deferred")] == [1]
+    assert h.events(rid_b) == [] and h.res.names() == ["u0"]  # 서킷 -- 두 번째는 미호출·미계수
+
+
+def test_dead_primary_uri_with_sticky_start_never_holds(db):
+    # G4 형상(stepper): p1 타임아웃형 장애(5s), r3 정상, 시작 URI 기억 -- 첫 resolve 가 r3 에 붙은 뒤로 p1 을 다시
+    # 기다리지 않아 같은 틱의 잡이 전부 통과한다.
+    h = _H(db, resolver=None)
+    uids, jobs = _many(h, 4)
+    h.res = _RealLdap(h.mono, uids, uris=("ldap://p1", "ldap://r3"), dead={"ldap://p1"}, rotation={"start": 0})
+    h.tick()
+    assert [h.state(j) for _r, j in jobs] == ["Preflight"] * 4
+    assert h.res.tried == ["ldap://p1", "ldap://r3", "ldap://r3", "ldap://r3", "ldap://r3"]
+
+
+def test_dead_primary_without_sticky_start_is_uncounted_budget_hold(db):
+    # G3 (c): 기억 없이 매 resolve 가 p1 부터면 두 번째 잡은 남은 몫(~4.8s)이 p1 의 5s 에 먼저 끝나 r3 를 못 가 본다
+    # -- 호출자 마감의 중단 = 예산 보류(미계수·무이벤트), 계수 실패가 아니다.
+    h = _H(db, resolver=None)
+    uids, jobs = _many(h, 3)
+    h.res = _RealLdap(h.mono, uids, uris=("ldap://p1", "ldap://r3"), dead={"ldap://p1"})
+    h.tick()
+    assert [h.state(j) for _r, j in jobs] == ["Preflight", "Pending", "Pending"]
+    assert all(h.events(r, "identity_recheck_deferred") == [] for r, _j in jobs)
+    assert h.res.names() == ["u0", "u1"]                       # 세 번째는 예산 게이트 -- LDAP 미호출
+
+
+def test_deadline_exceeded_from_resolver_is_not_cached(db):
+    # 예산 보류는 캐시하지 않는다 -- 같은 틱 같은 사용자의 다음 잡도 예산 게이트로 보류될 뿐 '실패' 로 계수되지 않는다.
+    from dms.identity import IdentityDeadlineExceeded
+
+    class _Cut:
+        def __init__(self):
+            self.calls = []
+
+        def resolve(self, username, *, deadline=None):
+            self.calls.append(username)
+            raise IdentityDeadlineExceeded("deadline exceeded")
+    h = _H(db, resolver=None)
+    h.res = _Cut()
+    rid_a, a = h.job()
+    rid_b, b = h.job()
+    h.set_updated_at(a, "2000-01-01T00:00:00Z")
+    h.set_updated_at(b, "2000-01-01T00:00:01Z")
+    h.tick()
+    assert h.res.calls == ["alice"]                            # b 는 예산 게이트(ldap_budget) -- 재호출 없음
+    assert h.state(a) == "Pending" and h.state(b) == "Pending"
+    assert h.events(rid_a) == [] and h.events(rid_b) == []
+
+
+# ---- 2026-10-08 리뷰 G2: 그룹 잡의 artifact base 정적 관문(stepper._build_spec) ----
+
+import errno as _errno  # noqa: E402
+import os as _os  # noqa: E402
+
+
+def _base_at(h, path):
+    h.repos.control.set_artifact_base(f"file://{path}", actor="test")
+
+
+def _fake_default_acl(monkeypatch, path):
+    real = _os.getxattr
+
+    def fake(p, name, *a, **k):
+        if str(p) != str(path):
+            return real(p, name, *a, **k)
+        if name == "system.posix_acl_default":
+            return b"\x02\x00\x00\x00"                    # 있다는 사실만으로 거부(내용 무관)
+        raise OSError(_errno.ENODATA, "no data")
+    monkeypatch.setattr(_os, "getxattr", fake)
+
+
+def test_group_job_blocked_when_base_has_default_acl(db, artifact_base_dir, monkeypatch):
+    # base 755(preflight test -w 는 통과) + default ACL 만 -- 러너가 만드는 <job_id>/<phase> 가 상속해 그 그룹의 다른
+    # 사용자가 rank.sh 를 바꿔치기할 수 있었다. 컨트롤러가 제출 전에 끊는다(LDAP 재확인보다 먼저 -- 싼 검사).
+    h = _H(db)
+    _base_at(h, artifact_base_dir)
+    _fake_default_acl(monkeypatch, artifact_base_dir)
+    rid, jid = h.job()
+    assert h.tick()[jid] == "Rejected"
+    assert h.reason(jid) == "artifact_base_group_writable"
+    (ev,) = h.events(rid, "artifact_base_unsafe_at_step")
+    assert ev["payload"] == {"job_id": jid, "problem": "artifact_base_group_writable"}
+    assert str(artifact_base_dir) not in ev["message"]          # 관리자 설정 경로는 싣지 않는다
+    assert h.res.calls == [] and not h.repos.data_jobs.get_job(jid)["phase_refs"]   # 제출 0건
+
+
+@pytest.mark.parametrize("mode, reason", [(0o775, "artifact_base_group_writable"),
+                                          (0o750, "artifact_base_not_traversable")])
+def test_group_job_blocked_on_base_mode(db, artifact_base_dir, mode, reason):
+    h = _H(db)
+    _base_at(h, artifact_base_dir)
+    artifact_base_dir.chmod(mode)
+    _rid, jid = h.job()
+    h.tick()
+    assert (h.state(jid), h.reason(jid)) == ("Rejected", reason)
+
+
+def test_group_job_on_clean_base_proceeds(db, artifact_base_dir):
+    h = _H(db)
+    _base_at(h, artifact_base_dir)                              # 0755, ACL 없음
+    _rid, jid = h.job()
+    h.tick()
+    assert h.state(jid) == "Preflight"
+
+
+def test_job_without_groups_skips_the_static_gate(db, artifact_base_dir):
+    # 그룹이 없는 잡은 종전 그대로(기존 흐름 무변경) -- 그 잡의 쓰기 범위는 주 gid 뿐이고 preflight 가 본다.
+    h = _H(db)
+    _base_at(h, artifact_base_dir)
+    artifact_base_dir.chmod(0o775)
+    _rid, jid = h.job(ident=_ident(gids=(), status="none"))
+    h.tick()
+    assert h.state(jid) == "Preflight"
+
+
+def test_unreadable_base_defers_to_preflight(db, tmp_path):
+    # 컨트롤러가 base 를 stat 하지 못하면(마운트 없음 등) 통과로 치지도, 종단하지도 않는다 -- preflight 에 맡긴다.
+    h = _H(db)
+    _base_at(h, tmp_path / "missing")
+    rid, jid = h.job()
+    h.tick()
+    assert h.state(jid) == "Preflight"
+    assert h.events(rid, "artifact_base_unsafe_at_step") == []

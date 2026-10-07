@@ -27,8 +27,12 @@ SUPP_STATUSES = frozenset({SUPP_APPLIED, SUPP_NONE, SUPP_OVER_LIMIT, SUPP_DISABL
 # planner·stepper 공유: 한 틱에서 resolve 에 쓰는 누적 시간 상한(초). 넘으면 새 resolve 를 하지 않는다(서킷과 같은 보류).
 # 루프 리스 max(interval*3, 30)=30s 와 맞물린 내부 불변식이다 -- 틱 LDAP 시간 ≤ 예산 + 진행 중 한 단계(한 URI 의
 # 연결·StartTLS·bind = 3 × DMS_LDAP_TIMEOUT_SECONDS) = 10 + 15 < 30. 설정 키로 빼지 않는다(키우면 리스를 넘어 두 번째
-# 컨트롤러가 같은 루프를 동시에 돈다).
+# 컨트롤러가 같은 루프를 동시에 돈다). '3T' 는 bind 뒤 서버 정보(rootDSE·subschema 검색 2회)를 읽지 않을 때만 참이다
+# -- identity_ldap.build_ldap_resolver 가 ldap3.Server(get_info=NONE)로 끈다(기본 SCHEMA 면 5T 라 T=6 에서 40s).
 LDAP_TICK_BUDGET_SECONDS = 10
+# resolve 하나의 자체 마감(초) -- deadline 없는 호출자(API 로그인 예열 등)도 유한하게. planner·stepper 는 이 값과
+# 틱 예산의 남은 몫을 비교해 '누구의 마감이 묶나' 를 정한다(tick_resolve_deadline).
+LDAP_RESOLVE_DEADLINE_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -58,10 +62,31 @@ class IdentityLookupInvalid(IdentityUnavailable):
     사용자의 요청·잡이 같은 틱에 계속 진행). 상위 클래스라 resolve_job_identity 의 ldap_unavailable 의미는 그대로(D14)."""
 
 
+class IdentityDeadlineExceeded(IdentityUnavailable):
+    """**호출자의** deadline(틱 예산의 남은 몫)이 resolve 를 멈췄다 -- 리졸버 자체 마감(LDAP_RESOLVE_DEADLINE_SECONDS)
+    이 아니다. 시도하지 못한 URI 가 남은 채 연결 단계에서 멈춘 경우도 포함한다. LDAP 장애 판정이 아니라 예산 소진이라
+    planner 는 LdapCircuitOpen(요청 Pending, 다음 틱), stepper 는 미계수 보류(ldap_budget)로 받는다. 예전엔 plain
+    IdentityUnavailable 이라 LDAP 가 멀쩡해도 예산 경계에 걸친 요청이 ldap_unavailable 로 종단 거부(planner)되거나
+    D2 실패로 계수(stepper)됐다. 하위 클래스인 이유: 이 구분을 모르는 호출자에겐 종전대로 '불가'(fail-closed)다.
+    틱의 첫 resolve 는 남은 몫 = 예산 = 자체 마감이라 deadline 을 넘기지 않는다(tick_resolve_deadline) -- 그래서
+    진짜 장애·느림은 매 틱 첫 요청에서 여전히 ldap_unavailable 로 판정되고(진행 보장), 영구 Pending 이 생기지 않는다."""
+
+
 class LdapCircuitOpen(Exception):
-    """같은 틱에서 LDAP 불가가 이미 한 번 났다(또는 틱 LDAP 예산을 다 썼다) -- 이번 틱엔 LDAP 에 다시 가지 않는다
-    (planner 의 틱 서킷). IdentityUnavailable 의 하위가 **아니다**: resolve_job_identity 가 ldap_unavailable 로
-    거부하지 않고 그대로 올려, 호출자가 요청을 Pending 으로 두고 다음 틱에 다시 보게 한다."""
+    """같은 틱에서 LDAP 불가가 이미 한 번 났다(또는 틱 LDAP 예산을 다 썼다·남은 몫이 resolve 를 멈췄다) -- 이번 틱엔
+    LDAP 에 다시 가지 않는다(planner 의 틱 서킷). IdentityUnavailable 의 하위가 **아니다**: resolve_job_identity 가
+    ldap_unavailable 로 거부하지 않고 그대로 올려, 호출자가 요청을 Pending 으로 두고 다음 틱에 다시 보게 한다."""
+
+
+def tick_resolve_deadline(start: float, remaining: float) -> "float | None":
+    """틱 예산의 남은 몫 → 리졸버 deadline(planner _TickCircuit·stepper _resolve_fresh 공용). 남은 몫이 리졸버 자체
+    마감 이상이면 **None** -- 자체 마감이 묶으므로 그 마감에 걸린 중단은 진짜 판정(IdentityUnavailable)이다. 더 짧을
+    때만 start + remaining 을 넘겨, 그 시각에 걸린 중단이 IdentityDeadlineExceeded(예산 소진)가 된다. 실시간에서
+    '첫 resolve 의 deadline(t0+10) < 리졸버가 잰 자체 마감(t0+ε+10)' 이라는 ε 차이로 첫 resolve 까지 예산 소진으로
+    접히면(영구 Pending) 안 되므로, 비교를 리졸버 안의 시각 대신 여기서 남은 몫으로 한다."""
+    if remaining >= LDAP_RESOLVE_DEADLINE_SECONDS:
+        return None
+    return start + remaining
 
 
 class IdentityResolver(Protocol):

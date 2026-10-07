@@ -268,9 +268,12 @@ def test_build_resolver_passes_timeouts_and_tries_uris_one_by_one(monkeypatch):
         import ldap3.core.exceptions
     servers, conns = [], []
 
+    infos = []
+
     class _Server:
-        def __init__(self, uri, tls=None, connect_timeout=None):
+        def __init__(self, uri, tls=None, connect_timeout=None, get_info=None):
             servers.append((uri, connect_timeout))
+            infos.append(get_info)
             self.uri = uri
 
     class _Conn:
@@ -293,11 +296,23 @@ def test_build_resolver_passes_timeouts_and_tries_uris_one_by_one(monkeypatch):
                                ldap_group_base="ou=g,dc=x", ldap_use_start_tls=False,
                                ldap_bind_dn="", ldap_bind_pw="", ldap_group_member_attr="uniqueMember",
                                ldap_timeout_seconds=2.5)
-    assert build_ldap_resolver(settings).resolve("nobody") is None
+    resolver = build_ldap_resolver(settings)
+    assert resolver.resolve("nobody") is None
     assert servers == [("ldap://down", 2.5), ("ldap://up", 2.5)]
     # receive_timeout 은 정수(ldap3 가 SO_RCVTIMEO 로 pack -- 실수면 실 LDAP 에서 모든 연결이 실패했다), 올림.
     assert conns == [("ldap://down", 3), ("ldap://up", 3)]
     assert all(isinstance(t, int) for _, t in conns)
+    # bind 뒤 서버 정보(rootDSE·subschema 검색 2회)를 읽지 않는다 -- 한 URI 시도 = 3T 라는 틱 시간 불변식의
+    # 전제(identity.LDAP_TICK_BUDGET_SECONDS). 기본값(SCHEMA)으로 되돌아가면 여기서 빨간불.
+    assert infos == [ldap3.NONE, ldap3.NONE]
+    # 시작 URI 기억(sticky): 다음 resolve 는 방금 붙은 up 부터 -- 죽은 down 의 타임아웃을 다시 내지 않는다.
+    servers.clear()
+    assert resolver.resolve("nobody") is None
+    assert servers == [("ldap://up", 2.5)]
+    # 다른 리졸버(= 다른 프로세스)는 처음부터.
+    servers.clear()
+    assert build_ldap_resolver(settings).resolve("nobody") is None
+    assert [u for u, _t in servers] == ["ldap://down", "ldap://up"]
 
 
 class _UnbindConn(_FakeConn):
@@ -519,6 +534,166 @@ def test_connect_first_stops_at_deadline():
     with pytest.raises(IdentityUnavailable):
         connect_first(["ldap://a"], open_one, deadline=5.0, monotonic=lambda: 9.0)
     assert tried == []
+
+
+# ---- 2026-10-08 리뷰: 누구의 마감이 멈췄나(IdentityDeadlineExceeded)·시작 URI 기억(sticky)·스키마 없는 값 ----
+
+from dms.identity import IdentityDeadlineExceeded, LDAP_RESOLVE_DEADLINE_SECONDS, tick_resolve_deadline
+
+
+class _TimedConn:
+    """연결 뒤 검색마다 clock 을 step 초 전진시키는 건강한 LDAP(사용자 1건·posixGroup 1건)."""
+    def __init__(self, clock, step=0.05):
+        self._clock, self._step = clock, step
+        self.entries, self.result = [], {"result": 0}
+
+    def search(self, base, filt, attributes=None, **kwargs):
+        self._clock[0] += self._step
+        if filt.startswith("(uid="):
+            self.entries = [_FakeEntry({"uidNumber": 10001, "gidNumber": 10000})]
+        else:
+            self.entries = [_FakeEntry({"cn": "proj", "gidNumber": 20001, "objectClass": ["posixGroup"]})]
+        self.result = {"result": 0}
+        return True
+
+
+def _failover_resolver(clock, uris, dead, *, rotation=None, t=5.0, tried=None):
+    """실 LdapIdentityResolver + 실 connect_first + 가짜 시계. dead 의 URI 는 타임아웃형(연결에서 t 초 뒤 실패)."""
+    tried = [] if tried is None else tried
+
+    def open_one(uri):
+        tried.append(uri)
+        if uri in dead:
+            clock[0] += t
+            raise OSError("timed out")
+        clock[0] += 0.05
+        return _TimedConn(clock)
+    return LdapIdentityResolver(
+        connect=lambda deadline=None: connect_first(uris, open_one, deadline=deadline,
+                                                    monotonic=lambda: clock[0], rotation=rotation),
+        user_base="ou=u", group_base="ou=g", group_member_attr="memberUid", monotonic=lambda: clock[0])
+
+
+def test_caller_deadline_stop_is_deadline_exceeded_own_deadline_is_unavailable():
+    # 호출자 deadline(틱 예산의 남은 몫)이 묶고 그 시각에 멈췄다 = 예산 소진(IdentityDeadlineExceeded).
+    clock = [100.0]
+    conn = _PagedConn(pages=([_pg("a", 20001)], [_pg("b", 20002)]), clock=clock, advance=3.0)
+    with pytest.raises(IdentityDeadlineExceeded):
+        _paged_resolver(conn, monotonic=lambda: clock[0]).resolve("alice", deadline=102.0)
+    # 자체 마감(10s)에 걸린 중단은 진짜 판정 -- plain IdentityUnavailable(하위 클래스가 아니다).
+    clock[0] = 100.0
+    conn2 = _PagedConn(pages=([_pg("a", 20001)], [_pg("b", 20002)]), clock=clock, advance=11.0)
+    with pytest.raises(IdentityUnavailable) as e:
+        _paged_resolver(conn2, monotonic=lambda: clock[0]).resolve("alice")
+    assert type(e.value) is IdentityUnavailable
+    # 호출자 deadline 이 자체 마감보다 늦으면 자체 마감이 묶는다 -- 역시 진짜 판정.
+    clock[0] = 100.0
+    conn3 = _PagedConn(pages=([_pg("a", 20001)], [_pg("b", 20002)]), clock=clock, advance=11.0)
+    with pytest.raises(IdentityUnavailable) as e:
+        _paged_resolver(conn3, monotonic=lambda: clock[0]).resolve("alice", deadline=500.0)
+    assert type(e.value) is IdentityUnavailable
+
+
+def test_connect_stage_stop_on_caller_deadline_is_deadline_exceeded():
+    # 앞 URI 의 타임아웃(5s)이 남은 몫(3s)을 넘겨 뒤 URI 를 못 가 봤다 -- LDAP 판정이 아니다.
+    clock, tried = [0.0], []
+    r = _failover_resolver(clock, ["ldap://a", "ldap://b"], {"ldap://a"}, tried=tried)
+    with pytest.raises(IdentityDeadlineExceeded) as e:
+        r.resolve("alice", deadline=3.0)
+    assert tried == ["ldap://a"] and "deadline exceeded" in str(e.value)
+    # 같은 모양이라도 자체 마감(10s)이 멈췄으면 진짜 판정: a·b 가 죽어(5s+5s) c 를 못 가 봤다.
+    clock[0], tried[:] = 0.0, []
+    r = _failover_resolver(clock, ["ldap://a", "ldap://b", "ldap://c"], {"ldap://a", "ldap://b"}, tried=tried)
+    with pytest.raises(IdentityUnavailable) as e:
+        r.resolve("alice")
+    assert type(e.value) is IdentityUnavailable and tried == ["ldap://a", "ldap://b"]
+    # 모든 URI 를 시도하고 다 실패하면 deadline 이 지났어도 진짜 판정(장애).
+    clock[0], tried[:] = 0.0, []
+    r = _failover_resolver(clock, ["ldap://a"], {"ldap://a"}, tried=tried)
+    with pytest.raises(IdentityUnavailable) as e:
+        r.resolve("alice", deadline=3.0)
+    assert type(e.value) is IdentityUnavailable and tried == ["ldap://a"]
+
+
+def test_sticky_start_reaches_third_uri_when_two_front_uris_are_dead():
+    # G4: p1·r3 가 타임아웃형으로 죽으면 5s + 5s 로 자체 마감 10s 에 닿아 ldaps 를 시도조차 못 했다(매 resolve).
+    # 기억된 시작 위치로 첫 resolve 가 못 가 본 URI 에서 다음 resolve 가 시작해 반드시 닿는다.
+    clock, tried, rotation = [0.0], [], {"start": 0}
+    uris = ["ldap://p1", "ldap://r3", "ldap://ldaps"]
+    r = _failover_resolver(clock, uris, {"ldap://p1", "ldap://r3"}, rotation=rotation, tried=tried)
+    with pytest.raises(IdentityUnavailable):
+        r.resolve("alice")                                          # 첫 resolve 는 자체 마감 -- 진짜 판정
+    assert tried == ["ldap://p1", "ldap://r3"] and rotation == {"start": 2}
+    tried.clear()
+    assert r.resolve("alice").uid == 10001                          # 다음은 ldaps 부터 -- 성공
+    assert tried == ["ldap://ldaps"] and rotation == {"start": 2}
+    tried.clear()
+    assert r.resolve("alice").uid == 10001                          # 붙은 URI 를 계속 쓴다(앞쪽 타임아웃 없음)
+    assert tried == ["ldap://ldaps"]
+
+
+def test_sticky_start_when_timeout_exceeds_own_deadline():
+    # G4: DMS_LDAP_TIMEOUT_SECONDS ≥ 10 이면 첫 URI 하나만 시도돼 페일오버가 완전히 꺼졌다.
+    clock, tried, rotation = [0.0], [], {"start": 0}
+    r = _failover_resolver(clock, ["ldap://a", "ldap://b"], {"ldap://a"}, rotation=rotation, t=10.0, tried=tried)
+    with pytest.raises(IdentityUnavailable):
+        r.resolve("alice")
+    assert tried == ["ldap://a"] and rotation == {"start": 1}
+    tried.clear()
+    assert r.resolve("alice").uid == 10001 and tried == ["ldap://b"]
+
+
+def test_sticky_start_wraps_around_and_keeps_position_when_all_fail():
+    tried, rotation = [], {"start": 2}
+
+    def open_one(uri):
+        tried.append(uri)
+        if uri != "ldap://a":
+            raise OSError("refused")
+        return "conn"
+    assert connect_first(["ldap://a", "ldap://b", "ldap://c"], open_one, rotation=rotation) == "conn"
+    assert tried == ["ldap://c", "ldap://a"] and rotation == {"start": 0}   # c 부터 돌아 a 에서 붙는다
+
+    def all_down(uri):
+        raise OSError("refused")
+    with pytest.raises(IdentityUnavailable):
+        connect_first(["ldap://a", "ldap://b"], all_down, rotation=rotation)
+    assert rotation == {"start": 0}                                 # 전부 실패면 위치를 그대로 둔다
+
+
+def test_tick_resolve_deadline_only_when_budget_binds():
+    # 틱 첫 resolve(남은 몫 = 예산 = 자체 마감)는 deadline 을 넘기지 않는다 -- 실시간 ε 차이로 첫 resolve 까지 예산
+    # 소진(Pending)으로 접혀 진짜 장애가 영영 판정되지 않는 일이 없게.
+    assert tick_resolve_deadline(100.0, LDAP_RESOLVE_DEADLINE_SECONDS) is None
+    assert tick_resolve_deadline(100.0, LDAP_RESOLVE_DEADLINE_SECONDS + 5) is None
+    assert tick_resolve_deadline(100.0, 3.5) == 103.5
+
+
+def test_schemaless_ldap3_values_resolve_like_schema_values():
+    # get_info=NONE 이면 ldap3 는 스키마 없이 값을 str 로 준다(uidNumber·gidNumber·objectClass) -- 리졸버가 그대로
+    # 해석해야 한다(실 ldap3 MOCK_SYNC, 스키마 없는 Server).
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import ldap3
+    server = ldap3.Server("fake", get_info=ldap3.NONE)
+    conn = ldap3.Connection(server, user="cn=admin,dc=x", password="pw", client_strategy=ldap3.MOCK_SYNC)
+    conn.strategy.add_entry("cn=admin,dc=x", {"userPassword": "pw", "sn": "admin"})
+    conn.strategy.add_entry("uid=alice,ou=people,dc=x", {
+        "objectClass": ["posixAccount", "inetOrgPerson"], "uid": "alice", "cn": "alice", "sn": "a",
+        "uidNumber": 10001, "gidNumber": 10000, "homeDirectory": "/h"})
+    for i in range(3):
+        conn.strategy.add_entry(f"cn=g{i},ou=groups,dc=x", {
+            "objectClass": ["groupOfUniqueNames", "posixGroup"], "cn": f"g{i}",
+            "gidNumber": 20000 + i, "uniqueMember": "uid=alice,ou=people,dc=x"})
+    conn.strategy.add_entry("cn=app,ou=groups,dc=x", {
+        "objectClass": ["groupOfUniqueNames"], "cn": "app", "uniqueMember": "uid=alice,ou=people,dc=x"})
+    conn.bind()
+    out = LdapIdentityResolver(connect=lambda deadline=None: conn, user_base="ou=people,dc=x",
+                               group_base="ou=groups,dc=x").resolve("alice")
+    assert (out.uid, out.gid) == (10001, 10000)
+    assert out.group_gids == (20000, 20001, 20002)                 # posixGroup 만(app 은 이름만)
+    assert out.groups == ("app", "g0", "g1", "g2")
 
 
 def test_ldap3_missing_attribute_keyerror_tolerated():

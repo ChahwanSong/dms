@@ -365,3 +365,23 @@ def test_real_posix_acl_is_parsed(artifact_base_dir):
     assert roundtrip_artifact_base(str(base)) == "artifact_base_group_writable"
     assert _setfacl(base, "-k")
     assert roundtrip_artifact_base(str(base)) is None
+
+
+def test_static_base_problem_is_the_shared_mode_acl_rule(artifact_base_dir, monkeypatch):
+    # 2026-10-08 리뷰(G2): roundtrip(저장·3홉)과 stepper 의 그룹 잡 제출 관문이 같은 규칙을 쓴다 -- 쓰기 프로브 없이
+    # g+w → ACL(default 포함) → o+x 순서. stat 실패는 올린다('모름' 을 통과로 접지 않게 호출자가 정한다).
+    from dms.artifact_base import static_base_problem
+    base = artifact_base_dir
+    assert static_base_problem(str(base)) is None
+    assert list(base.iterdir()) == []                              # 프로브 파일을 만들지 않는다
+    base.chmod(0o775)
+    assert static_base_problem(str(base)) == "artifact_base_group_writable"
+    base.chmod(0o750)
+    assert static_base_problem(str(base)) == "artifact_base_not_traversable"
+    base.chmod(0o770)                                              # 둘 다 어기면 더 위험한 쪽(쓰기)
+    assert static_base_problem(str(base)) == "artifact_base_group_writable"
+    base.chmod(0o755)
+    _fake_xattrs(monkeypatch, base, {"system.posix_acl_default": _acl(*_MINIMAL)})
+    assert static_base_problem(str(base)) == "artifact_base_group_writable"
+    with pytest.raises(OSError):
+        static_base_problem(str(base / "missing"))

@@ -153,7 +153,8 @@ which produces (see the playbook header for the rationale, §2b for the rules):
 mkdir -p /cephfs/dms/artifacts /cephfs/managed
 chown root:root /cephfs/dms /cephfs/dms/artifacts /cephfs/managed
 chmod 770 /cephfs/dms            # DMS common dir -- requesters must NOT traverse it (§2b-3)
-                                 #   (testbed only: no gidNumber-0 LDAP group; elsewhere 750/711, §2b-3)
+                                 #   (testbed only: no gidNumber-0 LDAP group; elsewhere 750, or 700
+                                 #    with a gidNumber-0 LDAP group -- never 711/755, §2b-3)
 chmod 755 /cephfs/dms/artifacts  # artifact base -- 3-hop rejects o+w / non-root owner (§2b-1)
 chmod 755 /cephfs/managed        # data root (managed_root of cephfs-dms) -- OUTSIDE the common dir
 mkdir -p /cephfs-third/managed /cephfs-secondary/managed   # only with `make cephfs-nsync`
@@ -196,11 +197,20 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
      `g+w`(gid 무관)·POSIX ACL 의 named 쓰기 항목·default ACL 이 있으면
      `artifact_base_group_writable`, other-x 가 없으면 `artifact_base_not_traversable`.
      **예전 이 문서가 허용하던 750/710(및 770) base 도 이제 거부된다** — 저장이 막히고 3홉
-     화면이 빨갛다. 이 판정은 표시·저장용이라 잡 제출 자체를 막지는 않는다.
+     화면이 빨갛다. 이 판정 자체는 표시·저장용이라 잡 제출을 막지 않는다.
+   - **잡 단위(컨트롤러 정적 관문, 보조 그룹이 실린 비 root 잡)**: 매 제출 직전(stepper
+     `_build_spec`) 컨트롤러가 base 에 위와 같은 g+w·POSIX ACL(default ACL 포함)·other-x 판정
+     (`artifact_base.static_base_problem`)을 직접 적용해, 걸리면 `artifact_base_group_writable`·
+     `artifact_base_not_traversable` 로 종단한다(이벤트 `artifact_base_unsafe_at_step`). 컨트롤러가
+     base 를 stat 하지 못하면 이 판정은 preflight 에 맡긴다(통과로 치지 않는다).
    - **잡 단위(preflight)**: 모든 비 root 잡은 실행 신원으로 `test -x`
      (`artifact_base_not_traversable`), 보조 그룹이 있는 잡은 base 의 other-x **비트**와
      `test -w`(쓰기 가능하면 `artifact_base_group_writable`)까지 본다. `test -w` 는 access(2)
-     라 제어면이 못 읽는 NFSv4/GPFS ACL 까지 반영한다.
+     라 base **자체**에 걸린 NFSv4/GPFS ACL 까지 반영하지만 **상속은 못 본다** — base 엔 쓰기가
+     없고 default POSIX ACL·NFSv4/GPFS inheritable ACE 만 있으면 통과하고, 러너가 root 로 만드는
+     `<job_id>/<phase>` 가 그것을 물려받아 그 그룹의 다른 사용자가 남의 rank.sh 를 바꿔치기할 수
+     있다. POSIX default ACL 은 위 컨트롤러 관문이 막고, **NFSv4/GPFS 상속 ACE 는 남는 위험**이다
+     (그런 스토리지에 base 를 두면 상속 ACE 가 없는지 직접 확인할 것).
    고치는 법: `chown root:root <base>; chmod 755 <base>`(g+w 제거), POSIX ACL 은
    `setfacl -b -k <base>`. 상속 default ACL(POSIX/GPFS/NFSv4)이 `<job_id>`·`<phase>` 를 좁히면
    요청자 통과와 제어면의 other 읽기가 함께 깨지므로 확인할 것. base 가 쓰기 가능하면
@@ -213,9 +223,13 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
    본다. 확인: `sysctl fs.protected_hardlinks fs.protected_symlinks` (둘 다 1).
    코드는 nlink>1·남의 소유 파일을 404 로 거르지만(`src/dms/artifact_files.py`) 이
    sysctl 이 근본 방어다.
-3. **공용 디렉터리(base 의 부모, 예 `/cephfs/dms`)는 root:root 로 잠그되 그룹 쓰기는
-   금지 — `750` 또는 `711`**(2026-09-09 d129 에 "770 까지" 로 시작, 2026-10-07 보조 그룹으로
-   정정). 제어면·에이전트·러너(launcher)는 root 라 통과하고, 요청자 uid 로
+3. **공용 디렉터리(base 의 부모, 예 `/cephfs/dms`)는 root:root 로 잠그되 그룹 쓰기·other
+   통과는 금지 — `750`(gidNumber 0 LDAP 그룹이 있으면 `700`)**(2026-09-09 d129 에 "770 까지" 로
+   시작, 2026-10-07 보조 그룹으로 정정, 2026-10-08 리뷰로 711 제거). **요청자는 이 디렉터리를
+   통과하지 못해야 한다** — other-x(`711`·`755`)를 주면 모든 uid 가 base(755)를 지나 0755 잡
+   디렉터리와 0644 아티팩트(stdout/stderr 로그·rank.sh·summary.json·dscan 리포트 — 남의 데이터
+   경로·파일 통계)를 직접 읽어 API 의 소유자 검사(`artifact_files.open_artifact_fd`)를 우회한다
+   (711/755 는 base **자체**의 선택지다, 위 1). 제어면·에이전트·러너(launcher)는 root 라 통과하고, 요청자 uid 로
    도는 도구(dscan/dsync)·rank.sh 는 잡 파드가 base 를 **전용 hostPath 볼륨**
    (`/dms-artifact-base`, `artifact_base.ARTIFACT_MOUNT`)으로 받아 그 부모를 지나가지
    않는다. **770 은 더 이상 잠금이 아니다**: 보조 gid 0 을 인정하므로(§2c) gidNumber 0 인
@@ -352,19 +366,28 @@ sync·scan 이 된다. root 잡은 무관하다(root 는 그룹이 의미 없다
 - 느린 LDAP: 컨트롤러 stderr `stepper: tick …s ldap …s/10s circuit=…`(느린 틱·서킷·예산 소진만).
 
 **`DMS_LDAP_TIMEOUT_SECONDS` 는 6 이하 권장**(기본 5): 한 틱의 LDAP 시간 최악 = 예산 10s + 진행
-중 한 URI 시도(3 × 타임아웃)라 루프 리스 30s 안에 들어야 한다(ARCHITECTURE §4 틱 LDAP 시간).
-넘기면 리스가 넘어가 두 번째 컨트롤러가 같은 루프를 동시에 돌 수 있다.
+중 한 URI 시도(연결·StartTLS·bind = 3 × 타임아웃 — bind 뒤 서버 정보(스키마) 읽기는 끈다)라 루프
+리스 30s 안에 들어야 한다(ARCHITECTURE §4 틱 LDAP 시간). 넘기면 리스가 넘어가 두 번째 컨트롤러가
+같은 루프를 동시에 돌 수 있다. 다중 URI 는 sssd 처럼 **마지막으로 붙은 URI 부터** 시도한다(프로세스
+수명 동안 기억) — 앞쪽 URI 가 타임아웃형으로 죽어도 resolve 마다 그 타임아웃을 다시 내지 않는다.
+resolve 하나의 자체 마감(10s)에 걸려 뒤쪽 URI 를 못 가 본 resolve 는 `ldap_unavailable` 이지만, 다음
+resolve 는 못 가 본 URI 부터 시작한다. 틱 예산의 남은 몫에 걸려 멈춘 resolve 는 장애로 치지 않는다
+(planner 는 요청을 Pending 으로 다음 틱에, stepper 는 미계수 보류).
 
 **배포 직후 확인**(프로덕션 사전 점검을 하지 않기로 했으므로 사후 확인으로 대신):
 1. 릴리스 직후 몇 틱 동안 planner `ldap_unavailable` 거부·`identity_recheck_deferred`·
    `stepper: tick … ldap …` 줄이 급증하지 않는지(새 fail-closed: 중복 엔트리·비성공 결과 코드·
-   base DN 오구성 32·페이지 상한). 급증하면 스위치로는 안 꺼진다(위 표) → 원인 수정 또는 이미지 롤백.
+   base DN 오구성 32·페이지 상한). 원인은 컨트롤러 stderr 의 `planner: <rid> rejected
+   ldap_unavailable: <원인>` 줄로 가른다(`duplicate user entries: N`·`ldap user/group search result
+   <코드> …`·`ldap group search exceeded page cap`·URI 연결 오류 — LDAP 원문이라 요청 이벤트·결과엔
+   싣지 않는다; stepper 쪽은 `identity recheck failed job=… phase=…: <원인>` 경고 로그). 급증하면
+   스위치로는 안 꺼진다(위 표) → 원인 수정 또는 이미지 롤백.
 2. 프로젝트 그룹이 있는 대표 사용자로 비 root 요청 1건 → 잡 상세 '보조 그룹(gid)'
    (`/api/user/requests/{rid}/jobs` 의 `worker_pool.identity.supplementary_gids_status`).
    `none` 이면 그 그룹에 objectClass posixGroup 이 없을 가능성부터.
 3. 3홉 화면(포탈 관리 → 아티팩트 경로): API·컨트롤러 홉이 g+w/ACL/o+x 로 빨간지 — 775/770 만이
    아니라 **750/710 base 도 이제 빨간불**이다. 잡은 계속 돌지만 base 저장이 막히고 그룹이 실린
-   잡의 preflight 가 거부된다 → §2b-1 대로 chmod/setfacl.
+   잡은 제출 직전에 종단된다(컨트롤러 정적 관문·preflight) → §2b-1 대로 chmod/setfacl.
 
 **남는 위험**(의도적 범위 밖 — 상세는 BACKLOG):
 - **gidNumber 0 LDAP 그룹**은 인정된다(사용자 결정) — 그 멤버의 잡은 root 그룹 권한을 가져 root:root
@@ -373,7 +396,9 @@ sync·scan 이 된다. root 잡은 무관하다(root 는 그룹이 의미 없다
   **DMS 가 로그인 노드보다 넓게 준다**. 완화: 부모 디렉터리 그룹 쓰기 금지(§2b-3), warning 이벤트.
 - StartTLS 인증서 검증 안 함(sssd `ldap_tls_reqcert = never` 미러) — LDAP 중간자는 그룹 멤버십도
   주입할 수 있고 재확인도 같은 채널이다.
-- NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖이다(그룹 잡은 preflight `test -w` 가 잡 단위로 막는다).
+- NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖이다. preflight `test -w` 는 base **자체**의 쓰기만
+  잡 단위로 막고, 그런 ACL 의 **상속**(inheritable ACE 가 `<job_id>/<phase>` 에 주는 쓰기)은 어디서도
+  보지 않는다(§2b-1 — POSIX default ACL 은 컨트롤러 관문이 막는다).
 - LDAP 사용자가 스스로 그룹에 가입할 수 있는 selfwrite ACL 은 점검하지 않았다.
 - 큐 대기 재확인이 LDAP 장애로 건너뛴 사이 탈퇴하고 그대로 RUNNING 이 되면 반영되지 않는다(실행
   중 잡은 재확인하지 않는다). nsync 의 preflight 파드 쌍 대기는 큐 재확인 대상이 아니다.

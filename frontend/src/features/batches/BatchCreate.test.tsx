@@ -658,7 +658,8 @@ test("sync 배치: 목적지가 없는 경우·있는 경우와 root 소유권(�
   expect(note).toHaveTextContent("root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지");
   expect(note).toHaveTextContent("아래 실행 옵션의 고급 옵션 chown 에 숫자 uid:gid 를 지정하세요");
   // 보조 그룹 인정(2026-10-07 D15): 비 root 폴백의 권한 기준에 계획 시점 LDAP 보조 그룹이 들어간다
-  expect(note).toHaveTextContent("그룹 쓰기 권한만으로는 부족, 권한은 uid·주 그룹·계획 시점 LDAP 보조 그룹");
+  expect(note).toHaveTextContent("그룹 쓰기 권한만으로는 부족, 권한은 uid·주 그룹·계획 시점 LDAP 보조 그룹(적용된 경우 — "
+    + "운영자가 기능을 껐거나 그룹이 256개를 넘으면 주 그룹만)");
   expect(note).not.toHaveTextContent("보조 그룹 권한은 인정되지 않음");
   expect(note).toHaveTextContent("결과는 실행 신원의 uid:gid(주 그룹) 소유");      // 자격이 빠진 드문 경우
   expect(screen.getByText("소스의 소유자·그룹 그대로(root 실행)")).toBeInTheDocument();
@@ -674,7 +675,8 @@ test("sync 배치: chown 을 지정하면 소유 안내와 요약이 그 자리�
   const note = screen.getByRole("note", { name: "목적지 조건과 소유권" });
   expect(note).toHaveTextContent("chown 옵션으로 지정한 10003:10000 소유로 셋업됩니다");
   // D7: chown gid 는 계획 시점 멤버십 검증(chown_group_not_member) -- uid 는 도구 단계 EPERM
-  expect(note).toHaveTextContent("chown 의 gid 가 실행 신원이 속한 그룹(주·보조)이 아니면 계획 단계에서 거부되고, uid 가 본인이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)");
+  expect(note).toHaveTextContent("chown 의 gid 가 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이 아니면(보조 그룹이 적용되지 "
+    + "않으면 주 그룹만) 계획 단계에서 거부되고, uid 가 본인이 아니면 적용되지 않습니다(dsync 는 그 항목 실패, nsync 는 소유 변경이 적용되지 않음)");
   expect(note).not.toHaveTextContent("결과는 실행 신원의 uid:gid(주 그룹) 소유가 됩니다");
 });
 

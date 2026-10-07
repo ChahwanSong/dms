@@ -6,9 +6,9 @@ from dataclasses import asdict
 from .db import iso_plus, utc_now_iso
 from .domain import Operation, RequestState, valid_owner_username
 from .identity import (LDAP_TICK_BUDGET_SECONDS, MAX_SUPPLEMENTARY_GROUPS, SUPP_OVER_LIMIT,
-                       IdentityLookupInvalid, IdentityRejected, IdentityUnavailable, LdapCircuitOpen,
-                       check_chown_group, owner_override_allowed, privilege_policy,
-                       resolve_job_identity)
+                       IdentityDeadlineExceeded, IdentityLookupInvalid, IdentityRejected, IdentityUnavailable,
+                       LdapCircuitOpen, check_chown_group, owner_override_allowed, privilege_policy,
+                       resolve_job_identity, tick_resolve_deadline)
 from .repositories.storages import storage_open_to_users
 from .repositories.sync_pairs import sync_pair_allowed
 from .placement import (
@@ -67,6 +67,11 @@ class _TickCircuit:
     Pending, 다음 틱). 보조 그룹 페이징(D14)으로 resolve 하나의 최악이 검색 2회 → 최대 21회로 커져, 예산 없이는 틱당
     대기 50건 × resolve 가 루프 리스 30s 를 넘어 두 번째 컨트롤러(RollingUpdate surge·replicas>1)가 planner 를
     동시에 돌 수 있다. 남은 예산은 deadline 으로 리졸버에 넘겨 resolve 하나도 그 안에서만 새 연산을 시작한다.
+    남은 몫이 resolve 를 멈추면(IdentityDeadlineExceeded -- LDAP 가 멀쩡해도 예산 경계에 걸친 요청) 예산 소진과 같이
+    LdapCircuitOpen 으로 바꿔 그 요청도 Pending 으로 둔다(2026-10-08 리뷰: 예전엔 plain IdentityUnavailable 이라
+    ldap_unavailable 로 **종단 거부** -- 대기 요청이 많은 틱마다 정상 요청 하나가 영구히 거부됐다). 틱 첫 resolve 는
+    남은 몫 = 예산 = 자체 마감이라 deadline 을 넘기지 않아(identity.tick_resolve_deadline) 진짜 장애·느림은 그대로
+    첫 요청이 ldap_unavailable 로 거부된다 -- 매 틱 진행이 보장되고 영구 Pending 이 생기지 않는다.
     IdentityLookupInvalid(사용자 엔트리 중복 등 이 사용자의 데이터 문제)는 서킷을 열지 않는다 -- 그 요청만
     ldap_unavailable 로 거부되고 같은 틱의 다른 사용자 요청은 계속 계획된다."""
     def __init__(self, inner, *, monotonic=time.monotonic, budget=LDAP_TICK_BUDGET_SECONDS):
@@ -83,9 +88,12 @@ class _TickCircuit:
             raise LdapCircuitOpen(username)
         t0 = self._mono()
         try:
-            return self._inner.resolve(username, deadline=t0 + remaining)
+            return self._inner.resolve(username, deadline=tick_resolve_deadline(t0, remaining))
         except IdentityLookupInvalid:
             raise                            # 사용자별 데이터 오류 -- 그 요청만 ldap_unavailable, 서킷 유지
+        except IdentityDeadlineExceeded as exc:
+            self.open = True                 # 예산의 남은 몫이 멈췄다 = 예산 소진(요청 Pending, 다음 틱 온전한 예산)
+            raise LdapCircuitOpen(username) from exc
         except IdentityUnavailable:
             self.open = True
             raise
@@ -283,6 +291,11 @@ class Planner:
                 if isinstance(opts, dict) and "chown" in opts:
                     check_chown_group(opts["chown"], identity=identity)
         except IdentityRejected as exc:
+            if exc.reason_code == "ldap_unavailable":
+                # 운영자 추적(2026-10-08 리뷰): 같은 사유 코드로 접히는 원인(사용자 엔트리 중복·결과 코드 4/11/32·그룹
+                # 페이지 상한·URI 연결 오류)을 가를 근거 -- deploy/README §2c '배포 직후 확인'. LDAP 원문(URI·소켓
+                # 오류)은 stderr 에만 둔다: 요청 결과·이벤트는 비관리자 요청자에게도 반환된다(사유 코드만).
+                print(f"planner: {rid} rejected ldap_unavailable: {exc.detail}"[:500], file=sys.stderr)
             return self._reject(rid, exc.reason_code)
         # 5. tool + candidates
         fresh = self._repos.agents.fresh_reports(

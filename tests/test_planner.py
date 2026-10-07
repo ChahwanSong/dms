@@ -1178,7 +1178,9 @@ def test_tick_budget_defers_remaining_requests(db):
     assert result[rids[1]] == "deferred:ldap_circuit_open"    # 예산 소진 -- LDAP 를 부르지 않고 Pending
     assert len(slow.calls) == 1
     _, deadline, started = slow.calls[0]
-    assert deadline == started + LDAP_TICK_BUDGET_SECONDS     # 남은 예산이 deadline 으로 전달
+    # 틱 첫 resolve 는 남은 몫 = 예산 = 자체 마감이라 deadline 을 넘기지 않는다(identity.tick_resolve_deadline -- 그
+    # 마감의 중단은 진짜 판정). 남은 몫이 더 짧아진 뒤의 전달은 test_tick_budget_passes_remaining_as_deadline.
+    assert deadline is None
     assert repos.requests.get(rids[1])["state"] == "Pending"
     # 다음 틱은 새 예산으로 이어간다.
     result = Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_Settings()).run_once(now_iso=NOW)
@@ -1206,3 +1208,163 @@ def test_lookup_invalid_does_not_open_circuit(db):
     assert result[rid_dup] == "rejected:ldap_unavailable"     # 그 요청만(계획 시점 의미는 그대로)
     assert result[rid_ok] == "planned"                        # 같은 틱의 다른 사용자는 계속
     assert resolver.calls == ["dup", "alice"]
+
+
+def test_lookup_invalid_cause_goes_to_stderr_only(db, capsys):
+    # G6(2026-10-08 리뷰): 같은 ldap_unavailable 로 접히는 원인(중복 엔트리·결과 코드·페이지 상한·URI 오류)을 운영자가
+    # 가를 근거 -- stderr 한 줄. LDAP 원문은 요청 결과·이벤트에 싣지 않는다(비관리자 요청자에게도 반환된다).
+    from dms.identity import IdentityLookupInvalid
+
+    class _DupResolver:
+        def resolve(self, username, *, deadline=None):
+            raise IdentityLookupInvalid("duplicate user entries: 2")
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid_dup = _scan_request(repos, key="data.scan:s1:d:ff")
+    assert _planner(repos, resolver=_DupResolver()).run_once(now_iso=NOW)[rid_dup] == "rejected:ldap_unavailable"
+    err = capsys.readouterr().err
+    assert f"planner: {rid_dup} rejected ldap_unavailable: duplicate user entries: 2" in err
+    events = repos.observability.events_for_request(rid_dup)
+    assert all("duplicate" not in (e["message"] or "") and "duplicate" not in str(e["payload"]) for e in events)
+
+
+# ---- G0/G3/G4(2026-10-08 리뷰): 틱 예산 경계 -- 실 LdapIdentityResolver + 실 connect_first + 가짜 시계 ----
+# 예전 _ClockResolver 는 deadline 을 무시하는 페이크라, 예산에 '걸쳐 넘는' resolve 가 plain IdentityUnavailable 로
+# 종단 거부되던 경로를 보지 못했다.
+
+class _LAttr:
+    def __init__(self, v):
+        self.value = v
+
+
+class _LEntry:
+    def __init__(self, attrs):
+        self._a, self.entry_dn = attrs, "uid=alice,ou=p,dc=x"
+
+    def __getitem__(self, k):
+        return _LAttr(self._a[k])
+
+
+class _HealthyConn:
+    """건강한 LDAP: 검색마다 clock 을 search_cost 초 전진(사용자 alice 1건, posixGroup 1건)."""
+    def __init__(self, clock, search_cost):
+        self._clock, self._cost = clock, search_cost
+        self.entries, self.result = [], {"result": 0}
+
+    def search(self, base, flt, attributes=None, paged_size=None, paged_cookie=None):
+        self._clock[0] += self._cost
+        if flt.startswith("(uid="):
+            self.entries = [_LEntry({"uidNumber": 10001, "gidNumber": 10000})]
+        else:
+            self.entries = [_LEntry({"cn": "dmsusers", "gidNumber": 20000, "objectClass": ["posixGroup"]})]
+        self.result = {"result": 0}
+
+    def unbind(self):
+        pass
+
+
+def _real_ldap(clock, uris, *, dead=(), connect_cost=0.05, search_cost=0.05, dead_cost=5.0, rotation=None,
+               tried=None):
+    from dms.identity_ldap import LdapIdentityResolver, connect_first
+    tried = [] if tried is None else tried
+
+    def open_one(uri):
+        tried.append(uri)
+        if uri in dead:
+            clock[0] += dead_cost                 # 타임아웃형 장애(방화벽 drop): connect_timeout 만큼 기다린 뒤 실패
+            raise OSError("timed out")
+        clock[0] += connect_cost
+        return _HealthyConn(clock, search_cost)
+    return LdapIdentityResolver(
+        connect=lambda deadline=None: connect_first(uris, open_one, deadline=deadline,
+                                                    monotonic=lambda: clock[0], rotation=rotation),
+        user_base="ou=p", group_base="ou=g", group_member_attr="memberUid", monotonic=lambda: clock[0])
+
+
+def _states(repos, rids):
+    return [repos.requests.get(r)["state"] for r in rids]
+
+
+def test_budget_straddle_on_healthy_ldap_stays_pending(db):
+    # G0: 건강하지만 느린 LDAP(resolve 1.1s) + 대기 12건 -- 9건 계획 뒤 10번째는 남은 몫 0.1s 로 시작해 그 마감에 걸린다.
+    # 예전엔 rejected:ldap_unavailable(정상 요청의 종단 거부), 이제 Pending 으로 다음 틱.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:a{i}:ff") for i in range(12)]
+    clock = [1000.0]
+    res = _real_ldap(clock, ["ldap://b"], connect_cost=0.3, search_cost=0.4)
+    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert [result[r] for r in rids[:9]] == ["planned"] * 9
+    assert [result[r] for r in rids[9:]] == ["deferred:ldap_circuit_open"] * 3
+    assert "Rejected" not in _states(repos, rids)
+    # 다음 틱은 온전한 예산으로 이어 간다.
+    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert [result[r] for r in rids[9:]] == ["planned"] * 3
+
+
+def test_budget_straddle_many_requests_never_rejects(db):
+    # G3: 40건 × 0.4s -- 예전엔 틱마다 정확히 한 건이 ldap_unavailable 로 종단 거부됐다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:m{i}:ff") for i in range(40)]
+    clock = [1000.0]
+    res = _real_ldap(clock, ["ldap://b"], connect_cost=0.3, search_cost=0.05)
+    for _ in range(3):
+        Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert set(_states(repos, rids)) == {"Planned"}
+
+
+def test_dead_primary_uri_with_healthy_secondary_never_rejects(db):
+    # G3/G4 페일오버 형상: p1 이 타임아웃형으로 죽고(5s) r3 는 정상, 대기 3건. 예전 ['Planned','Rejected','Pending'].
+    # (a) 시작 URI 기억(운영 형상 -- build_ldap_resolver): 첫 resolve 가 r3 에 붙은 뒤로는 p1 을 다시 기다리지 않는다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:f{i}:ff") for i in range(3)]
+    clock, tried = [1000.0], []
+    res = _real_ldap(clock, ["ldap://p1", "ldap://r3"], dead={"ldap://p1"}, rotation={"start": 0}, tried=tried)
+    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert [result[r] for r in rids] == ["planned"] * 3
+    assert tried == ["ldap://p1", "ldap://r3", "ldap://r3", "ldap://r3"]
+
+
+def test_dead_primary_without_rotation_defers_instead_of_rejecting(db):
+    # G3 (b) 기억 없이(매 resolve 가 p1 부터): 두 번째 요청은 남은 몫 ~4.8s 로 p1 의 5s 타임아웃에 걸려 r3 를 못 가
+    # 본다 -- 호출자 마감의 중단이라 Pending(다음 틱 계획), 거부가 아니다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:g{i}:ff") for i in range(3)]
+    clock = [1000.0]
+    res = _real_ldap(clock, ["ldap://p1", "ldap://r3"], dead={"ldap://p1"})
+    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert [result[r] for r in rids] == ["planned", "deferred:ldap_circuit_open", "deferred:ldap_circuit_open"]
+    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert result[rids[1]] == "planned"
+    for _ in range(2):
+        Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert _states(repos, rids) == ["Planned"] * 3
+
+
+def test_first_resolve_of_tick_hitting_own_deadline_is_still_rejected(db):
+    # 진행 보장: 틱 첫 resolve 는 deadline 없이(자체 마감 10s) 돌아 그 마감의 중단은 진짜 판정 -- 느린 LDAP(검색 11s)
+    # 에서 첫 요청은 ldap_unavailable 로 거부되고 나머지는 서킷으로 Pending(예산 소진으로 영구 Pending 이 되지 않는다).
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:h{i}:ff") for i in range(3)]
+    clock = [1000.0]
+    res = _real_ldap(clock, ["ldap://b"], search_cost=11.0)
+    result = Planner(repos, res, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert result[rids[0]] == "rejected:ldap_unavailable"
+    assert [result[r] for r in rids[1:]] == ["deferred:ldap_circuit_open"] * 2
+
+
+def test_tick_budget_passes_remaining_as_deadline(db):
+    # 남은 몫이 자체 마감보다 짧아진 뒤의 resolve 는 그 몫을 deadline 으로 받는다(첫 resolve 는 None).
+    from dms.identity import LDAP_TICK_BUDGET_SECONDS
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:k{i}:ff") for i in range(2)]
+    clock = [1000.0]
+    slow = _ClockResolver({"alice": ALICE}, clock, step=3.0)
+    Planner(repos, slow, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert [d for _u, d, _t in slow.calls] == [None, 1000.0 + LDAP_TICK_BUDGET_SECONDS]
+    assert _states(repos, rids) == ["Planned", "Planned"]

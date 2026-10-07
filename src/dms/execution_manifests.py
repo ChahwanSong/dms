@@ -273,7 +273,7 @@ def _pod_volumes(volumes):
 def _artifact_dir(spec):
     # 파드 **안** 경로다(2026-09-09): base 는 execution_volcano._volumes 가 전용
     # hostPath 볼륨으로 ARTIFACT_MOUNT 에 마운트한다(artifact_base.ARTIFACT_MOUNT 주석
-    # -- 공용 디렉터리를 그룹 쓰기 금지(750/711)로 잠가도 되는 근거). 호스트 경로(<base>/<job>/<phase>)는 제어면
+    # -- 공용 디렉터리를 그룹 쓰기·other 통과 금지(750, gid 0 LDAP 그룹이 있으면 700)로 잠가도 되는 근거). 호스트 경로(<base>/<job>/<phase>)는 제어면
     # 읽기(execution_volcano.read_summary, api)와 artifact_uri 가 쓰고, 러너는 이
     # 경로로만 쓴다 -- 두 경로는 같은 디렉터리다(같은 hostPath).
     return f"{ARTIFACT_MOUNT}/{spec.job_id}/{spec.phase}"
@@ -390,15 +390,19 @@ _SUPP_GIDS_SELF_CHECK = (
 # D12 대체(잡 단위, 필수): launcher 의 mpirun 은 보조 그룹 없이 hostfile 을 읽는다 -- 그룹을 가진 preflight 의
 # `test -x` 가 그룹 x 로 거짓 통과하지 않도록 base 의 other-x 비트(퍼미션 문자열 10번째: x 또는 sticky t)를 직접
 # 본다. 제어면 강제(artifact_base, D12)는 PUT/validate 422·3홉 표시뿐이고 stepper·planner 는 artifact_base_check_ok
-# 를 읽지 않는다 -- env 로 준 base·저장 뒤 디스크에서 바뀐 mode 는 여기서만 막힌다. stat 실패(빈 출력)도 마커다.
+# 를 읽지 않는다 -- env 로 준 base·저장 뒤 디스크에서 바뀐 mode 는 여기와 컨트롤러의 제출 직전 정적 관문(그룹 잡만,
+# stepper.ArtifactBaseUnsafeAtStep -- 컨트롤러가 base 를 못 보면 여기에 맡긴다)에서 막힌다. stat 실패(빈 출력)도 마커다.
 _ARTIFACT_BASE_OTHER_X_CHECK = (
     f'case "$(stat -L -c %A {ARTIFACT_MOUNT} 2>/dev/null)" in ?????????[xt]) ;; '
     '*) echo DMS_PREFLIGHT_REASON=artifact_base_not_traversable; exit 1;; esac; ')
 
 # D6 잡 단위: '<base> 는 요청자 쓰기 불가'(ARCHITECTURE §7)를 보조 그룹 아래에서 직접 확인한다. test -w 는 access(2)
-# 라 실제 그룹 목록과 모든 ACL 종류(POSIX·NFSv4·GPFS)를 반영한다 -- 제어면의 POSIX ACL 파서
-# (artifact_base._posix_acl_problem)가 못 보는 ACL 도 여기서 닫힌다. 쓰기 가능하면 요청자가 다른 잡의
-# <job_id> 디렉터리를 만들거나 바꿔치기할 수 있다(러너는 root 로 그 아래에 쓴다).
+# 라 실제 그룹 목록과 base **자체**에 걸린 모든 ACL 종류(POSIX·NFSv4·GPFS)를 반영한다. 쓰기 가능하면 요청자가 다른
+# 잡의 <job_id> 디렉터리를 만들거나 바꿔치기할 수 있다(러너는 root 로 그 아래에 쓴다). **상속은 보지 못한다**: base
+# 엔 쓰기가 없고 default POSIX ACL·NFSv4/GPFS inheritable ACE 만 있으면 통과하는데, 러너가 root 로 만드는
+# <job_id>/<phase> 가 그것을 물려받아 그 그룹의 다른 사용자가 rank.sh 를 바꿔치기할 수 있다 -- POSIX default ACL 은
+# 컨트롤러의 제출 직전 정적 관문(stepper.ArtifactBaseUnsafeAtStep, artifact_base.static_base_problem)이 그룹 잡에서
+# 막고, NFSv4/GPFS 상속 ACE 는 남는 위험이다(deploy/README §2b-1).
 _ARTIFACT_BASE_NOT_WRITABLE_CHECK = (
     f'if [ -w {ARTIFACT_MOUNT} ]; then echo DMS_PREFLIGHT_REASON=artifact_base_group_writable; exit 1; fi; ')
 
