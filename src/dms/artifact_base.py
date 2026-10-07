@@ -6,8 +6,10 @@
 - resolve_artifact_base: DB(control_state.artifact_base_uri)가 있으면 그것, 없으면
   env(settings.artifact_base_uri). 모든 소비자가 이 함수만 통과한다(설계 §2.1).
 """
+import errno
 import os
 import stat
+import struct
 import uuid
 
 from .domain import DomainValidationError
@@ -85,6 +87,52 @@ def allowlist_reason(path: str, prefixes) -> "str | None":
     return "artifact_base_outside_allowlist"
 
 
+# POSIX ACL 의 리눅스 xattr 표현(include/uapi/linux/posix_acl_xattr.h): 헤더 <I version(=2)
+# 다음 8바이트 엔트리 <HHI(tag, perm, id) 의 나열. 태그·권한 비트는 커널 상수 그대로다.
+_ACL_ACCESS, _ACL_DEFAULT = "system.posix_acl_access", "system.posix_acl_default"
+_ACL_XATTR_VERSION = 2
+_ACL_USER, _ACL_GROUP, _ACL_PERM_WRITE = 0x02, 0x08, 0x02
+# "ACL 이 없다" 로 읽는 errno 들 -- 그 밖의 실패(EACCES·EIO…)는 모름이라 fail-closed 다.
+_NO_ACL_ERRNOS = frozenset({errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP})
+
+
+def _posix_acl_problem(path: str) -> "str | None":
+    """base 의 POSIX ACL 이 요청자에게 쓰기를 줄 수 있으면 artifact_base_group_writable.
+
+    root 로 os.getxattr 를 **읽기만** 한다(불변식 7 이 금지하는 셸·os.access·chown·chmod
+    밖 -- 파일을 열지도 않는다). 판정은 보수적이다:
+    - default ACL 이 **있으면**(내용 무관) 거부 -- 러너가 만드는 <job_id> 가 상속해 그 아래를
+      요청자에게 여는 통로가 된다.
+    - access ACL 에서 named(ACL_USER·ACL_GROUP) 항목이 쓰기 비트를 가지면 mask 와 무관하게
+      거부 -- mask 는 chmod 한 번으로 넓어지는 값이라 지금의 유효 권한만 보면 다음 chmod 에
+      조용히 열린다. group_obj 의 쓰기는 mask 를 통해 st_mode 의 S_IWGRP 로 드러나 호출자의
+      검사가 이미 잡는다.
+    - ENODATA/ENOTSUP/EOPNOTSUPP = ACL 없음(통과). 그 밖의 OSError·형식 오류(버전·길이)는
+      모름 -- 모름을 통과로 접으면 이 검사가 있으나 마나라 같은 사유로 fail-closed 한다.
+    NFSv4/GPFS 고유 ACL 은 이 표현이 아니라 보지 못한다 -- 잡 단위 차단은 preflight 가 요청자
+    관점에서 한다(access(2) 는 모든 ACL 종류를 반영한다)."""
+    try:
+        os.getxattr(path, _ACL_DEFAULT)
+        return "artifact_base_group_writable"      # 있다는 사실만으로 거부(내용 무관)
+    except OSError as exc:
+        if exc.errno not in _NO_ACL_ERRNOS:
+            return "artifact_base_group_writable"
+    try:
+        raw = os.getxattr(path, _ACL_ACCESS)
+    except OSError as exc:
+        return None if exc.errno in _NO_ACL_ERRNOS else "artifact_base_group_writable"
+    if len(raw) < 4 or (len(raw) - 4) % 8:
+        return "artifact_base_group_writable"
+    (version,) = struct.unpack_from("<I", raw, 0)
+    if version != _ACL_XATTR_VERSION:
+        return "artifact_base_group_writable"
+    for offset in range(4, len(raw), 8):
+        tag, perm, _ident = struct.unpack_from("<HHI", raw, offset)
+        if tag in (_ACL_USER, _ACL_GROUP) and perm & _ACL_PERM_WRITE:
+            return "artifact_base_group_writable"
+    return None
+
+
 def roundtrip_artifact_base(path: str) -> "str | None":
     """즉석 검증(설계 §2.4a): 존재·디렉터리 확인에 그치지 않고 임시 파일
     생성→쓰기→읽기→삭제를 **실제로** 한다. hostPath type: Directory 는 존재만
@@ -96,18 +144,29 @@ def roundtrip_artifact_base(path: str) -> "str | None":
     않음 + EROFS/ENOSPC/EDQUOT 아님. cap 이 없으므로 root 도 **소유자 mode 비트**
     의 지배를 받는다(root 소유 0400 은 root 도 못 쓴다; 남의 0600 은 EACCES) --
     운영 base 는 root:root 0755 라 소유자로서 쓴다. 어떤 비root uid 의 쓰기 권한도
-    증명하지 않는다 -- 노드 홉(에이전트 os.access, root)도 마찬가지다. 잡 파드의
-    요청자 관점 중 base 에 대해 preflight 가 보는 것은 **통과(x)** 하나다
-    (execution_manifests._ARTIFACT_BASE_CHECK, artifact_base_not_traversable) -- 그 아래
-    <job_id>(root 0755)·<phase>(요청자로 chown)는 러너가 만들므로 x 만 있으면 된다.
-    base 가 700/750/770 이면 여기선 초록인데 비 root 잡은 전부 실패한다(deploy/README §2b).
+    증명하지 않는다 -- 노드 홉(에이전트 os.access, root)도 마찬가지다. 그래서 요청자
+    관점의 조건은 mode 비트·ACL 로 **직접** 본다(아래): g+w·POSIX ACL 쓰기 항목·default
+    ACL·other-x 없음은 여기서 빨간불이다. 이 함수는 저장(PUT/validate 422)과 3홉 표시용 --
+    잡 제출을 막지 않는다(stepper·planner 는 artifact_base_check_ok 를 읽지 않는다). 잡
+    단위 차단은 preflight 가 요청자 uid 로 base 를 직접 시험해서 한다(execution_manifests).
 
     소유권·mode 전제(2026-09-09 리뷰): base 는 **이 프로세스의 euid 소유**(운영은
     root)이고 world-writable 이 아니어야 한다 -- artifact_files.assert_contained 의
     봉쇄 기준(realpath(<base>/<job_id>))이 그 전제 위에 선다. root 면 존재하는 모든
     디렉터리에 프로브를 쓸 수 있어 allowlist 만으론 "/cephfs/scratch(777)" 가 그대로
     통과하므로 여기서 거른다. 개발·테스트(비root)에선 tmp 디렉터리가 자기 소유라
-    같은 규칙이 그대로 성립한다."""
+    같은 규칙이 그대로 성립한다.
+
+    그룹 쓰기 금지(2026-10-07, 보조 그룹 D6): 잡 파드가 LDAP 보조 그룹을 달고 돌면 base 의
+    g+w 는 **그 그룹의 모든 요청자**에게 base 쓰기를 준다 -- <job_id> 를 미리 만들어 봉쇄
+    기준을 옮기는 world-writable 과 같은 공격이다. 보조 gid 0 도 인정하므로(D3) root 그룹
+    g+w 도 안전하지 않아 gid 와 무관하게 거부하고, mode 비트에 드러나지 않는 POSIX ACL
+    쓰기 항목·default ACL 도 같은 사유로 거부한다(_posix_acl_problem).
+
+    other-x 필수(2026-10-07, D12 대체): 러너(launcher)의 mpirun 은 보조 그룹 없이 base 아래의
+    hostfile 을 읽는다 -- 그룹으로 여는 750/710 은 그룹을 가진 preflight 는 통과하고
+    launcher 쪽에서 "unable to open the hostfile" 로 죽는다. 그래서 base 는 other 실행(x)이
+    있어야 하고(755 또는 711), 없으면 artifact_base_not_traversable(preflight 와 같은 코드)."""
     if not os.path.exists(path):
         return "artifact_base_missing"
     if not os.path.isdir(path):
@@ -120,6 +179,15 @@ def roundtrip_artifact_base(path: str) -> "str | None":
         return "artifact_base_not_owned"
     if st.st_mode & stat.S_IWOTH:
         return "artifact_base_world_writable"
+    # 순서: 쓰기 노출(g+w → ACL) 먼저, 통과(o+x) 다음 -- 둘 다 어기면 더 위험한 쪽(요청자
+    # 쓰기)을 보여 준다. 모두 프로브 **앞**이라 거부된 경로에는 프로브 파일을 만들지 않는다.
+    if st.st_mode & stat.S_IWGRP:
+        return "artifact_base_group_writable"
+    acl = _posix_acl_problem(path)
+    if acl is not None:
+        return acl
+    if not st.st_mode & stat.S_IXOTH:
+        return "artifact_base_not_traversable"
     # 고유 이름: 동시 검증(포탈 폴링 + 컨트롤러 루프)이 서로의 probe 를 지우지
     # 않도록 한다.
     probe = os.path.join(path, f".dms-base-check-{uuid.uuid4().hex}")

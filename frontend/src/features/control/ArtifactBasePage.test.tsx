@@ -184,6 +184,11 @@ test("경로 변경 주의점은 경고 툴팁 -- 트리거가 aria-describedby 
   // 실제 동작에 근거한 주의점 -- 기존 기록 비이동, other x 필수, 공유 마운트, 허용 접두.
   expect(tip).toHaveTextContent("옮겨지지 않습니다");
   expect(tip).toHaveTextContent("다른 사용자 실행(x) 권한 필수(711 또는 755)");
+  // 보조 그룹(2026-10-07 D6/D12): 그룹 쓰기·ACL 금지와, 그룹으로 여는 750/710 도 거부된다는 정정.
+  expect(tip).toHaveTextContent("그룹 쓰기(g+w)·POSIX ACL 쓰기 항목·기본 ACL 금지");
+  expect(tip).toHaveTextContent("artifact_base_group_writable");
+  expect(tip).toHaveTextContent("750/710 도 이제 거부");
+  expect(tip).not.toHaveTextContent("700/750/770");
   expect(tip).toHaveTextContent("모든 노드에 같은 경로로 마운트된 공유 스토리지");
   expect(tip).toHaveTextContent("DMS_ARTIFACT_BASE_ALLOWED_PREFIXES");
   await userEvent.click(trigger);                                // 터치·클릭으로 열림

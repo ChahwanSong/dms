@@ -287,6 +287,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   artifact_base_outside_allowlist: "허용된 공유 FS 경로(DMS_ARTIFACT_BASE_ALLOWED_PREFIXES) 밖입니다",
   artifact_base_not_owned: "아티팩트 경로의 소유자가 제어면 프로세스(root)가 아닙니다 — chown root:root",
   artifact_base_world_writable: "아티팩트 경로가 world-writable 입니다 — chmod 755 (요청자가 잡 디렉터리를 바꿔치기할 수 있음)",
+  // 보조 그룹(2026-10-07 D6): 잡이 LDAP 보조 그룹을 달고 돌므로 g+w·ACL 쓰기 항목은 world-writable 과
+  // 같은 위험이다(gid 와 무관 -- 보조 gid 0 도 인정). 3홉 검증·저장에서 나오는 코드라 처방을 관리자 몫으로 적는다.
+  artifact_base_group_writable: "아티팩트 경로(base)에 그룹 쓰기 권한(또는 ACL 쓰기 항목·기본 ACL)이 있어 작업 계정이 쓸 수 있습니다 — 관리자: chmod g-w, setfacl -b -k (root:root 755 또는 711)",
   // 빌드 실패 세분화(슬라이스 21 잔여). 지금까지 전부 build_failed 로 뭉개져
   // 운영자가 로그 단절만 보고 OOM 을 추측해야 했다 — 대응이 서로 다르다.
   build_oom_killed: "빌드가 메모리 한도를 넘어 종료됐습니다 — 빌드 봉투를 늘리거나 빌드를 줄이세요",
