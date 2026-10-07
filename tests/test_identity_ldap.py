@@ -216,3 +216,116 @@ def test_injection_attempt_is_escaped():
     r.resolve("evil)(uid=*")
     assert "*" not in captured[0] and ")" not in captured[0].replace("(uid=", "").rstrip(")")
     assert r"\2a" in captured[0]  # * 이스케이프됨
+
+
+# --- 연결 강화(2026-10-07): 타임아웃·순차 페일오버·unbind·다중값 cn ------------------------------------
+
+from dms.identity_ldap import connect_first
+
+
+def test_connect_first_falls_over_to_the_next_uri_in_order():
+    tried = []
+
+    def open_one(uri):
+        tried.append(uri)
+        if uri == "ldap://a":
+            raise OSError("connection refused")
+        return f"conn:{uri}"
+    assert connect_first(["ldap://a", "ldap://b", "ldap://c"], open_one) == "conn:ldap://b"
+    assert tried == ["ldap://a", "ldap://b"]
+
+
+def test_connect_first_raises_unavailable_with_every_reason_when_all_fail():
+    def open_one(uri):
+        raise TimeoutError(f"timed out {uri}")
+    with pytest.raises(IdentityUnavailable) as e:
+        connect_first(["ldap://a", "ldap://b"], open_one)
+    assert "ldap://a" in str(e.value) and "ldap://b" in str(e.value)
+
+
+def test_connect_first_retries_a_previously_failed_uri_on_the_next_call():
+    # 예전 ServerPool(exhaust=True)은 한 번 실패한 서버를 영구히 건너뛰어, LDAP 가 돌아와도 connect() 가 끝나지
+    # 않았다. 순차 시도는 호출마다 처음부터 다시 본다.
+    state = {"down": True}
+
+    def open_one(uri):
+        if state["down"]:
+            raise OSError("down")
+        return "conn"
+    with pytest.raises(IdentityUnavailable):
+        connect_first(["ldap://a"], open_one)
+    state["down"] = False
+    assert connect_first(["ldap://a"], open_one) == "conn"
+
+
+def test_build_resolver_passes_timeouts_and_tries_uris_one_by_one(monkeypatch):
+    import warnings
+    with warnings.catch_warnings():       # pyasn1 의 tagMap DeprecationWarning(설정상 오류) -- 첫 import 만 낸다
+        warnings.simplefilter("ignore")
+        import ldap3
+        import ldap3.core.exceptions
+    servers, conns = [], []
+
+    class _Server:
+        def __init__(self, uri, tls=None, connect_timeout=None):
+            servers.append((uri, connect_timeout))
+            self.uri = uri
+
+    class _Conn:
+        def __init__(self, server, user=None, password=None, auto_bind=None, receive_timeout=None):
+            conns.append((server.uri, receive_timeout))
+            if server.uri == "ldap://down":
+                raise ldap3.core.exceptions.LDAPSocketOpenError("socket open failed")
+            self.entries, self.unbound = [], False
+
+        def search(self, base, filt, attributes=None):
+            self.entries = []
+            return False
+
+        def unbind(self):
+            self.unbound = True
+    monkeypatch.setattr(ldap3, "Server", _Server)
+    monkeypatch.setattr(ldap3, "Connection", _Conn)
+    monkeypatch.setattr(ldap3, "ServerPool", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no ServerPool")))
+    settings = SimpleNamespace(ldap_uri="ldap://down/, ldap://up/", ldap_user_base="ou=u,dc=x",
+                               ldap_group_base="ou=g,dc=x", ldap_use_start_tls=False,
+                               ldap_bind_dn="", ldap_bind_pw="", ldap_group_member_attr="uniqueMember",
+                               ldap_timeout_seconds=2.5)
+    assert build_ldap_resolver(settings).resolve("nobody") is None
+    assert servers == [("ldap://down", 2.5), ("ldap://up", 2.5)]
+    # receive_timeout 은 정수(ldap3 가 SO_RCVTIMEO 로 pack -- 실수면 실 LDAP 에서 모든 연결이 실패했다), 올림.
+    assert conns == [("ldap://down", 3), ("ldap://up", 3)]
+    assert all(isinstance(t, int) for _, t in conns)
+
+
+class _UnbindConn(_FakeConn):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.unbound = 0
+
+    def unbind(self):
+        self.unbound += 1
+
+
+def test_connection_is_unbound_after_success_miss_and_failure():
+    for users, broken, expect in (({"alice": (10001, 10000)}, False, "hit"), ({}, False, "miss"),
+                                  ({}, True, "fail")):
+        conn = _UnbindConn(users, {"alice": []}, broken=broken)
+        r = LdapIdentityResolver(connect=lambda: conn, user_base="ou=u", group_base="ou=g",
+                                 group_member_attr="memberUid")
+        if expect == "fail":
+            with pytest.raises(IdentityUnavailable):
+                r.resolve("alice")
+        else:
+            r.resolve("alice")
+        assert conn.unbound == 1, expect
+
+
+def test_multi_valued_group_cn_is_flattened():
+    # 다중값 cn(예: ["proj-a", "projA"])이 리스트 그대로 흘러 정렬 TypeError·denylist AttributeError 로 요청이
+    # 매 틱 plan_error 를 남기며 Pending 에 갇혔다 -- 값을 모두 이름으로 펼친다(denylist 거부가 느는 안전한 쪽).
+    conn = _FakeConn({"alice": (10001, 10000)},
+                     {"alice": [["proj-a", "projA"], "users", None]})
+    r = LdapIdentityResolver(connect=lambda: conn, user_base="ou=u", group_base="ou=g",
+                             group_member_attr="memberUid")
+    assert r.resolve("alice").groups == ("proj-a", "projA", "users")

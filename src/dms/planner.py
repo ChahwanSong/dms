@@ -4,7 +4,8 @@ from dataclasses import asdict
 
 from .db import iso_plus, utc_now_iso
 from .domain import Operation, RequestState
-from .identity import IdentityRejected, privilege_policy, resolve_job_identity
+from .identity import (IdentityRejected, IdentityUnavailable, LdapCircuitOpen, privilege_policy,
+                       resolve_job_identity)
 from .repositories.storages import storage_open_to_users
 from .repositories.sync_pairs import sync_pair_allowed
 from .placement import (
@@ -49,6 +50,29 @@ def _required_storages(operation, payload):
     return [payload["storage"]]
 
 
+# _plan_one 의 resolver 인자 기본값 표식(= self._resolver). None 은 "미구성" 이라는 뜻이 따로 있어 쓸 수 없다.
+_SELF = object()
+
+
+class _TickCircuit:
+    """틱 단위 LDAP 서킷(2026-10-07): 한 틱에서 LDAP 불가가 한 번 나면 같은 틱의 나머지 조회는 LDAP 에 가지 않고
+    LdapCircuitOpen 을 올린다 -- 요청은 Pending 으로 남아 다음 틱에 다시 본다. 없으면 틱마다 대기 요청(최대 50)이
+    각자 타임아웃 × URI 수만큼 기다려, 단일 스레드 컨트롤러의 stepper·pod-gc·rollout 이 몇 분씩 멈춘다. 서킷을
+    연 첫 요청은 지금처럼 ldap_unavailable 로 거부된다(계획 시점 실패의 기존 의미)."""
+    def __init__(self, inner):
+        self._inner = inner
+        self.open = False
+
+    def resolve(self, username):
+        if self.open:
+            raise LdapCircuitOpen(username)
+        try:
+            return self._inner.resolve(username)
+        except IdentityUnavailable:
+            self.open = True
+            raise
+
+
 class Planner:
     def __init__(self, repos, resolver, *, settings):
         self._repos = repos
@@ -58,10 +82,16 @@ class Planner:
     def run_once(self, limit: int = 50, *, now_iso=None) -> dict:
         pending = self._repos.requests.list_pending(limit)
         results = {}
+        # 틱마다 새 서킷 -- 다음 틱은 다시 LDAP 를 시도한다(LDAP 가 돌아오면 바로 이어진다).
+        circuit = None if self._resolver is None else _TickCircuit(self._resolver)
+        deferred = 0
         for row in pending:
             rid = row["request_id"]
             try:
-                results[rid] = self._plan_one(rid, now_iso)
+                results[rid] = self._plan_one(rid, now_iso, resolver=circuit)
+            except LdapCircuitOpen:
+                results[rid] = "deferred:ldap_circuit_open"
+                deferred += 1
             except Exception as exc:  # 한 요청 실패가 다음을 막지 않는다
                 print(f"planner error on {rid}: {type(exc).__name__}: {exc}",
                       file=sys.stderr)
@@ -70,6 +100,9 @@ class Planner:
                 self._repos.observability.record_event(
                     component="planner", severity="error", event_type="plan_error",
                     message=f"{type(exc).__name__}: {exc}"[:500], request_id=rid)
+        if deferred:
+            print(f"planner: ldap circuit open -- {deferred} request(s) left Pending for the next tick",
+                  file=sys.stderr)
         return results
 
     def _reject(self, rid, reason):
@@ -129,7 +162,7 @@ class Planner:
             rid, "identity_propagating", f"identity not ready on: {nodes}",
             {"rejections": exc.rejections})
 
-    def _plan_one(self, rid, now_iso):
+    def _plan_one(self, rid, now_iso, *, resolver=_SELF):
         req = self._repos.requests.get(rid)
         # 멱등: 이미 emit된 잡이 있으면(크래시 복구) 상태만 정리
         if self._repos.data_jobs.list_jobs(request_id=rid):
@@ -195,7 +228,7 @@ class Planner:
         privilege = privilege_policy(req)
         try:
             identity = resolve_job_identity(
-                self._repos.control, self._resolver,
+                self._repos.control, self._resolver if resolver is _SELF else resolver,
                 requester_id=req["requester_id"],
                 owner_username=payload.get("owner_username"),
                 allow_privileged=self._settings.allow_privileged_requesters,

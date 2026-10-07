@@ -885,3 +885,30 @@ def test_conflict_crash_between_writes_leaves_request_pending(db):
                        " WHERE request_id = :r", {"r": second})
     assert (row["terminal_state"], row["reason_code"]) == ("Conflict",
                                                            "resource_conflict")
+
+
+class _CountingDownResolver:
+    def __init__(self):
+        self.calls = 0
+
+    def resolve(self, username):
+        from dms.identity import IdentityUnavailable
+        self.calls += 1
+        raise IdentityUnavailable("ldap down")
+
+
+def test_ldap_outage_trips_the_tick_circuit_and_leaves_the_rest_pending(db):
+    # LDAP 가 죽은 틱: 첫 요청만 LDAP 에 가서 ldap_unavailable 로 거부되고(기존 의미), 나머지는 LDAP 에 다시 가지
+    # 않고 Pending 으로 남는다 -- 틱마다 대기 요청 수 × 타임아웃만큼 단일 스레드 컨트롤러가 멈추던 것을 막는다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:a{i}:ff") for i in range(3)]
+    down = _CountingDownResolver()
+    result = _planner(repos, resolver=down).run_once(now_iso=NOW)
+    assert down.calls == 1
+    assert result[rids[0]] == "rejected:ldap_unavailable"
+    assert [result[r] for r in rids[1:]] == ["deferred:ldap_circuit_open"] * 2
+    assert [repos.requests.get(r)["state"] for r in rids[1:]] == ["Pending", "Pending"]
+    # 다음 틱은 다시 LDAP 를 시도한다(LDAP 가 돌아오면 바로 이어진다).
+    result = _planner(repos).run_once(now_iso=NOW)
+    assert [result[r] for r in rids[1:]] == ["planned", "planned"]

@@ -131,27 +131,31 @@ def test_resolver_connects_with_exactly_the_values_the_agent_gets(settings, monk
     # 리뷰 G: "같은 추출점" 을 구조가 아니라 **실제 connect 인자**로 고정한다 -- 리졸버가
     # 설정을 다른 길로 읽기 시작하면(예: getattr 로 되돌아가기, start_tls 반전) 플래너와
     # 노드가 갈라진다(2026-09-29 사고 유형). ldap3 는 가짜로 바꿔 인자만 기록한다.
+    # 2026-10-07: URI 를 순서대로 하나씩 연다(connect_first) -- 마지막 URI 만 성공하게 해 시도한 순서 전체를 본다.
     import ssl
-    seen = {}
+    tried = []
+
+    def _conn(server, user=None, password=None, auto_bind=None, receive_timeout=None):
+        tried.append(dict(server=server, user=user, password=password, auto_bind=auto_bind))
+        if server[1] != payload["uris"][-1]:
+            raise OSError("down")
+        return "conn"
     fake = types.SimpleNamespace(
         Tls=lambda validate=None: ("tls", validate),
-        Server=lambda u, tls=None: ("server", u, tls),
-        ServerPool=lambda servers, strategy, active=True, exhaust=True: ("pool", list(servers)),
-        FIRST="FIRST", AUTO_BIND_TLS_BEFORE_BIND="TLS_BEFORE_BIND",
-        Connection=lambda server, user=None, password=None, auto_bind=None: seen.update(
-            server=server, user=user, password=password, auto_bind=auto_bind) or "conn")
+        Server=lambda u, tls=None, connect_timeout=None: ("server", u, tls),
+        AUTO_BIND_TLS_BEFORE_BIND="TLS_BEFORE_BIND", Connection=_conn)
     monkeypatch.setitem(sys.modules, "ldap3", fake)
     s = _with_ldap(settings, **override)
     payload = directory_payload(s)
-    build_ldap_resolver(s)._connect()
-    servers = seen["server"][1] if seen["server"][0] == "pool" else [seen["server"]]
+    assert build_ldap_resolver(s)._connect() == "conn"
+    servers = [t["server"] for t in tried]
     assert [srv[1] for srv in servers] == payload["uris"]
-    assert seen["user"] == payload["bind_dn"] and seen["password"] == payload["bind_pw"]
+    assert all(t["user"] == payload["bind_dn"] and t["password"] == payload["bind_pw"] for t in tried)
     if payload["start_tls"]:
-        assert seen["auto_bind"] == "TLS_BEFORE_BIND"            # bind 전에 TLS
+        assert all(t["auto_bind"] == "TLS_BEFORE_BIND" for t in tried)            # bind 전에 TLS
         assert all(srv[2] == ("tls", ssl.CERT_NONE) for srv in servers)
     else:
-        assert seen["auto_bind"] is True and all(srv[2] is None for srv in servers)
+        assert all(t["auto_bind"] is True for t in tried) and all(srv[2] is None for srv in servers)
 
 
 def test_persisted_report_holds_only_the_status(client, db):
