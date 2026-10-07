@@ -28,6 +28,29 @@
 - 🔧 **러너 카운트 확장**(§러너) — dscan 총바이트 없음(리포트 스키마에 크기 히스토그램뿐,
   `bytes_total` 은 sync 전용), 슬라이스 15 이전 잡 소급 백필 없음, 프리뷰 카운트 DB
   미승격, 파일별 상세·에러 카운트·전송률 없음.
+- 🔧 **보조 그룹(2026-10-07) 후속 — 포탈 chown 그룹 선택·자동 chown 그룹 정책**(D7 범위 밖).
+  자동 chown 은 uid:**주 gid** 고정(`execution_manifests._auto_chown`)이고, 프로젝트 그룹 소유는 명시
+  chown `uid:<gid>` 뿐인데 포탈의 chown 칸은 관리자 전용 고급 옵션이다 — 비관리자에게 보이는 안내
+  (`frontend/src/lib/syncOwnership.ts` "chown 에 uid:<그룹 gid> 를 지정하세요")는 지금은 API 로만
+  실행할 수 있다. 처방: 실행 신원의 적용된 보조 gid(잡 스냅숏과 같은 계산) 중에서 고르는 UI, 또는
+  "목적지 부모 디렉터리의 그룹을 따른다" 같은 자동 정책(계획 시점 멤버십 검증 `chown_group_not_member`
+  는 그대로 둔다).
+- 🔧 **진행 중 잡 kill switch**(보조 그룹) — `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 는 계획 시점
+  전용이라 이미 스냅숏이 있는 잡의 재확인·적용은 끄지 못한다(`deploy/README.md` §2c 스위치 범위표).
+  지금은 drain 후 취소 또는 이미지 롤백뿐이다. 처방 후보: stepper 가 읽는 control_state 플래그로
+  "보조 그룹 잡은 제출 보류" 또는 "목록을 비워 주 gid 로" (후자는 단계 사이 drift 를 만들지 않도록
+  preflight 부터 다시 돌려야 한다).
+- 🔧 **워커 계정 충돌 전용 사유 코드** — 잡 이미지에 같은 이름의 계정이 다른 uid/gid 로 있으면 워커
+  셸이 stderr `dms: account … exists with a different uid/gid` + exit 1 로 끝나고 화면엔 사유 없는
+  preview_failed/execution_failed 만 보인다(`execution_manifests._identity_materialize_stmt` (2)).
+  `DMS_EXEC_REASON=` 마커 + EXECUTION_REASONS·reasonCodes 등록으로 승격하면 운영자가 로그를 안 봐도 된다.
+- 🔧 **3홉 '경고' 등급** — 3홉 검증은 base 자체만 본다. base 의 **부모**(공용 디렉터리)가 g+w·o+w 이면
+  (보조 gid 0 인정으로 770 도 잠금이 아니다 — `deploy/README.md` §2b-3) 잡이 base 옆에 디렉터리를 만들 수
+  있는데 화면엔 초록이다. 처방: 부모 mode 를 읽어 빨강이 아닌 '경고'로 표시(저장은 막지 않음).
+- 🔧 **보조 그룹 없는 잡의 preflight 그룹 자기검증** — `_SUPP_GIDS_SELF_CHECK` 는 그룹이 실린 파드에만
+  붙는다(빈 목록 잡의 매니페스트를 이 기능 이전과 바이트 단위로 같게 두려는 결정). 어드미션 웹훅이
+  그룹 없는 잡에 supplementalGroups·fsGroup 을 더하면 preflight 만 그 그룹으로 통과할 수 있다(기존
+  성질). 처방: 모든 비 root preflight 에 `id -G == {주 gid}` 검사(매니페스트 바이트 동일성 포기).
 
 ## 2. 의도적 보류 (결정 — "미구현"이 아님)
 
@@ -41,6 +64,15 @@
 - ⏸ **빌드 레이어 캐시·멀티아치** — 슬라이스 11 비목표.
 - ⏸ **`DMS_JOB_IMAGE` 포탈 롤아웃** — ConfigMap 갱신 + 소비자 재시작이라 슬라이스 13
   범위 밖. `20-config.yaml` 수기 편집.
+- ⏸ **보조 그룹의 중첩 그룹 해석**(D10, 2026-10-07) — DMS 리졸버는 1단계 멤버십만 본다
+  (`identity_ldap.py` 모듈 docstring). 노드 SSSD(`ldap_group_nesting_level` 기본 2)보다 덜 줄 수
+  있다(안전한 방향 — "로그인 노드 `id` ⊋ DMS 그룹"). 필요해지면 깊이 상한·순환 방지와 함께.
+- ⏸ **launcher /etc/group 대칭**(D12) — launcher 의 mpirun 은 보조 그룹 없이 hostfile 을 읽는다.
+  대칭(launcher 에도 dmsg<gid> 물질화) 대신 base other-x 강제(제어면 `roundtrip_artifact_base` +
+  preflight `_ARTIFACT_BASE_OTHER_X_CHECK`)로 막았다 — 그래서 750/710 base 는 거부된다.
+- ⏸ **LDAP StartTLS 인증서 검증**(D16 — 안 함, 기록만) — 제어면 리졸버·에이전트 nslcd 모두 sssd
+  `ldap_tls_reqcert = never` 미러(`identity_ldap.py` 모듈 docstring). 보조 그룹 이후엔 LDAP 중간자가
+  그룹 멤버십까지 주입할 수 있고 제출 전 재확인도 같은 채널이다. 사내 CA 번들 + verify 옵션이 처방.
 - ⏸ **react-router 의존성 권고 보류**(`frontend/README.md`) — `GHSA-qwww-vcr4-c8h2` high,
   현재 어떤 `react-router-dom` 버전도 두 취약 범위를 동시에 못 피한다. 재검토 조건:
   `react-router-dom@8.3.0` 이상. **`npm audit fix --force` 금지.**
@@ -79,7 +111,8 @@
   검사를 하지 않고 dsync 는 소스 최상위 메타데이터를 기존 목적지에 적용한다 — 'root 권한으로
   실행' 체크박스(기본 켜짐)·확인 스텝·배치 캡션이 이를 경고한다. 실행 신원에 다른 사용자를
   적으면 기본은 그 사용자 권한이라 사고 경로(남의 700 목적지 소유 덮어쓰기)는 기본값이 아니다. 비 root 실행의
-  자동 `--chown uid:gid` 는 본인 디렉터리의 그룹을 실행 신원의 주 gid 로 바꿀 수 있다.
+  자동 `--chown uid:gid` 는 본인 디렉터리의 그룹을 실행 신원의 주 gid 로 바꿀 수 있다(보조 그룹이
+  실려도 자동은 주 gid — 프로젝트 그룹 소유는 명시 chown, 위 §1 포탈 chown 그룹 선택 항목).
 
 - 📝 **에이전트↔API 채널이 클러스터 내부 평문 HTTP**(`http://dms-api:8080`, 2026-09-29 기록).
   관리자급 공유 토큰이 매 보고 주기마다, LDAP 검색 계정 비밀번호가 (`agent_directory` 해시
@@ -91,10 +124,22 @@
   즉시 보이는 쪽을 택함).
 - 📝 **nslcd 그룹 멤버 속성 미러 안 함** — 에이전트 nslcd 는 기본(memberUid + member)으로
   그룹을 푼다. 제어면은 `DMS_LDAP_GROUP_MEMBER_ATTR`(기본 uniqueMember)로 푼다. 신원 준비
-  판정은 **이름 해석만** 보고(`placement._identity_ready`) 잡 파드의 보조 그룹은 플래너
-  리졸버 값이라 실행에는 영향이 없지만, 노드 화면이 보여주는 그룹은 uniqueMember 전용
-  디렉터리에서 비어 보일 수 있다. 필요하면 `map group member uniqueMember` 를 렌더러·
-  하달 블록에 함께 추가.
+  판정은 **이름 해석만** 보고(`placement._identity_ready`), 잡 파드의 보조 그룹(2026-10-07~)은
+  **플래너 리졸버의 posixGroup gidNumber 값**(계획 시점 스냅숏 → preflight supplementalGroups·
+  워커 /etc/group `dmsg<gid>`)이라 노드 NSS 와 무관하다 — nslcd 불일치는 **노드 화면이 보여주는
+  그룹 한정**(uniqueMember 전용 디렉터리에서 비어 보일 수 있다). 필요하면 `map group member
+  uniqueMember` 를 렌더러·하달 블록에 함께 추가.
+- 📝 **NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖**(보조 그룹 D6) — `artifact_base._posix_acl_problem`
+  은 POSIX ACL xattr 만 읽는다. 그런 ACL 이 base 에 쓰기를 주면 3홉은 초록이고, 보조 그룹이 실린
+  잡만 preflight `test -w`(`_ARTIFACT_BASE_NOT_WRITABLE_CHECK`, access(2) 라 모든 ACL 반영)가 잡
+  단위로 막는다. 그룹 없는 비 root 잡은 그 ACL 로 쓰기를 얻는 경우에만 노출(드묾 — 운영 base 는
+  root:root 755, `deploy/README.md` §2b-1).
+- 📝 **nsync 복합 preflight 는 PENDING 을 보고하지 않는다**(`execution_volcano.poll` 의 `pods/a,b`
+  결합 — 한쪽이 대기 중이면 RUNNING). 그래서 stepper 의 PENDING 분기(`_raise_if_blocked` — 계획 뒤
+  배치 제외·cordon 된 노드의 대기 단계 종단)가 nsync preflight 파드 쌍에는 걸리지 않는다 — 스케줄 전
+  파드는 activeDeadlineSeconds 도 발화하지 않아(스케줄 뒤에만) cordon 된 노드의 쪽은 그대로 멈춘다. 보조 그룹 큐 대기 재확인은 파드 단계를 의도적으로 제외하므로(바로 뒤 제출 재확인)
+  지금은 영향이 없지만, 재확인을 파드 단계로 넓히면 같은 구멍에 빠진다. 처방: 복합 결합에
+  "하나라도 PENDING 이면 PENDING"(RUNNING 보다 낮은 우선) 추가.
 
 - 📝 **`by_storage` 가 `COALESCE(storage_name, destination_storage)`** — sync 를 도착지
   기준으로 센다. 설계가 기준을 명시하지 않은 침묵의 해석(`repositories/metrics.py`).

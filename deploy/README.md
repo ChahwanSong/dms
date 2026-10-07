@@ -153,6 +153,7 @@ which produces (see the playbook header for the rationale, §2b for the rules):
 mkdir -p /cephfs/dms/artifacts /cephfs/managed
 chown root:root /cephfs/dms /cephfs/dms/artifacts /cephfs/managed
 chmod 770 /cephfs/dms            # DMS common dir -- requesters must NOT traverse it (§2b-3)
+                                 #   (testbed only: no gidNumber-0 LDAP group; elsewhere 750/711, §2b-3)
 chmod 755 /cephfs/dms/artifacts  # artifact base -- 3-hop rejects o+w / non-root owner (§2b-1)
 chmod 755 /cephfs/managed        # data root (managed_root of cephfs-dms) -- OUTSIDE the common dir
 mkdir -p /cephfs-third/managed /cephfs-secondary/managed   # only with `make cephfs-nsync`
@@ -176,20 +177,34 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
 운영 아티팩트 base(`/cephfs/dms/artifacts`)가 `root:root` 라 65532 로는 3홉 쓰기
 왕복 검증이 항상 실패했기 때문이다. 이 결정에 따라오는 **배포 전제** 네 가지:
 
-1. **base 와 `<base>/<job_id>` 는 root:root · 비-world-writable, 단 base 는 other 실행(x)
-   필수** (`chmod 755` 또는 `711`; **700/750/770 금지** — 2026-09-30 감사 정정, 예전
-   "권장 700" 은 틀렸다). 러너가 `<job_id>` 를 root 로 만들고 `<phase>` 만 요청자에게 chown 하며,
-   도구는 요청자 uid·**주 gid 만**(보조 그룹 없음)으로 `<phase>` 의 mpi-hostfile·rank.sh 를
-   읽고 dscan 리포트를 쓴다 — base 를 x 로 통과하지 못하면 비 root 잡(일반 사용자 전부,
-   실행 신원을 지정한 관리자 잡)이 preview/execution 에서 "unable to open the hostfile" 로
-   죽는다. 잡 파드는 base 를 전용 마운트하므로 base 의 **부모**(공용 디렉터리)는 770 으로
-   잠가도 된다. preflight 가 실행 신원 uid 로 `test -x` 해 `artifact_base_not_traversable`
-   로 먼저 거부한다(3홉 검증은 root 관점이라 이 조건을 못 본다). 그룹으로 여는 750/770 은
-   그룹이 **모든 요청자의 주 gid** 일 때만 통한다. 상속 default ACL(POSIX/GPFS/NFSv4)이
-   `<job_id>`·`<phase>` 를 좁히면 요청자 통과와 제어면의 other 읽기가 함께 깨지므로 확인할 것.
-   base 가 world-writable 이면 요청자가 `<job_id>` 를 미리 만들어 봉쇄 기준을 옮길 수
-   있다. 3홉 검증이 이를 **강제**한다: 소유자가 제어면 euid(root)가 아니면
-   `artifact_base_not_owned`, `o+w` 면 `artifact_base_world_writable` (sticky 여도).
+1. **base 와 `<base>/<job_id>` 는 root:root · 요청자 쓰기 불가(비-world-writable ·
+   비-group-writable · POSIX ACL 쓰기 항목/default ACL 없음), 단 base 는 other 실행(x)
+   필수** (`chmod 755` 또는 `711`; **700/710/750/770 · g+w · ACL 금지** — 2026-09-30 감사
+   정정(예전 "권장 700" 은 틀렸다) + 2026-10-07 보조 그룹(§2c)). 러너가 `<job_id>` 를 root 로
+   만들고 `<phase>` 만 요청자에게 chown 한다. 비 root 잡의 도구(preflight·워커 rank)는 요청자
+   uid·주 gid **와 계획 시점 LDAP 보조 그룹**으로 돌지만, launcher 의 mpirun 은 **보조 그룹
+   없이** `<phase>` 의 mpi-hostfile 을 읽는다 — base 를 other-x 로 통과하지 못하면 비 root
+   잡(일반 사용자 전부, 실행 신원을 지정한 관리자 잡)이 preview/execution 에서 "unable to
+   open the hostfile" 로 죽는다. 그래서 그룹으로 여는 750/710 은 이제 통하지 않는다(그룹을
+   가진 preflight 는 통과하고 launcher 가 죽는다). 또 잡이 보조 그룹을 달고 돌므로 base 의
+   `g+w` 는 그 그룹의 **모든 요청자**에게 base 쓰기를 준다 — 보조 gid 0 도 인정하므로(§2c)
+   root 그룹 `g+w` 도 마찬가지다.
+   **강제 위치 두 곳**:
+   - **제어면**(3홉 API·컨트롤러 홉 + base 저장 PUT/validate 422,
+     `artifact_base.roundtrip_artifact_base`): 소유자가 제어면 euid(root)가 아니면
+     `artifact_base_not_owned`, `o+w` 면 `artifact_base_world_writable`(sticky 여도),
+     `g+w`(gid 무관)·POSIX ACL 의 named 쓰기 항목·default ACL 이 있으면
+     `artifact_base_group_writable`, other-x 가 없으면 `artifact_base_not_traversable`.
+     **예전 이 문서가 허용하던 750/710(및 770) base 도 이제 거부된다** — 저장이 막히고 3홉
+     화면이 빨갛다. 이 판정은 표시·저장용이라 잡 제출 자체를 막지는 않는다.
+   - **잡 단위(preflight)**: 모든 비 root 잡은 실행 신원으로 `test -x`
+     (`artifact_base_not_traversable`), 보조 그룹이 있는 잡은 base 의 other-x **비트**와
+     `test -w`(쓰기 가능하면 `artifact_base_group_writable`)까지 본다. `test -w` 는 access(2)
+     라 제어면이 못 읽는 NFSv4/GPFS ACL 까지 반영한다.
+   고치는 법: `chown root:root <base>; chmod 755 <base>`(g+w 제거), POSIX ACL 은
+   `setfacl -b -k <base>`. 상속 default ACL(POSIX/GPFS/NFSv4)이 `<job_id>`·`<phase>` 를 좁히면
+   요청자 통과와 제어면의 other 읽기가 함께 깨지므로 확인할 것. base 가 쓰기 가능하면
+   요청자가 `<job_id>` 를 미리 만들어 봉쇄 기준을 옮길 수 있다(위 제어면 판정이 그 강제다).
    (테스트베드 base 는 65532 시절의 777 을 d128 에서 755 로 정정했다.)
 2. **`fs.protected_hardlinks=1` · `fs.protected_symlinks=1`** — 공유 FS 를 마운트하고
    사용자가 `link(2)` 를 부를 수 있는 **모든** 호스트(k8s 워커뿐 아니라 로그인·계산
@@ -198,11 +213,17 @@ readable -- see `DMS_ARTIFACT_BASE_URI`.)
    본다. 확인: `sysctl fs.protected_hardlinks fs.protected_symlinks` (둘 다 1).
    코드는 nlink>1·남의 소유 파일을 404 로 거르지만(`src/dms/artifact_files.py`) 이
    sysctl 이 근본 방어다.
-3. **공용 디렉터리(base 의 부모, 예 `/cephfs/dms`)는 root:root `770` 까지 잠글 수 있다**
-   (2026-09-09, d129). 제어면·에이전트·러너(launcher)는 root 라 통과하고, 요청자 uid 로
+3. **공용 디렉터리(base 의 부모, 예 `/cephfs/dms`)는 root:root 로 잠그되 그룹 쓰기는
+   금지 — `750` 또는 `711`**(2026-09-09 d129 에 "770 까지" 로 시작, 2026-10-07 보조 그룹으로
+   정정). 제어면·에이전트·러너(launcher)는 root 라 통과하고, 요청자 uid 로
    도는 도구(dscan/dsync)·rank.sh 는 잡 파드가 base 를 **전용 hostPath 볼륨**
    (`/dms-artifact-base`, `artifact_base.ARTIFACT_MOUNT`)으로 받아 그 부모를 지나가지
-   않는다. 단 **스토리지의 `managed_root`(사용자 데이터 root)는 공용 디렉터리 아래에
+   않는다. **770 은 더 이상 잠금이 아니다**: 보조 gid 0 을 인정하므로(§2c) gidNumber 0 인
+   LDAP posixGroup 의 멤버는 잡 안에서 root 그룹 권한을 가져 770 부모 아래에 base 옆
+   디렉터리를 만들 수 있다 — 그런 그룹이 있는 사이트는 `700`(planner 가 그런 잡에 warning
+   이벤트 `identity_groups_root_group` 을 남긴다). 테스트베드 `/cephfs/dms` 는 770 그대로다
+   (테스트베드 LDAP 에 gidNumber 0 그룹이 없다 — 750 으로 조일지는 사용자 결정 사항).
+   단 **스토리지의 `managed_root`(사용자 데이터 root)는 공용 디렉터리 아래에
    두지 마라** -- preflight 가 요청자 uid 로 `test -r/-w` 하므로 `source_not_readable`
    류로 거부된다(테스트베드는 §6 시드대로 `cephfs-dms` 의 managed_root 가
    `/cephfs/managed` 여야 한다; `/cephfs/dms` 로 드리프트해 있던 것을 d129 실증에서
@@ -237,6 +258,126 @@ kubectl -n dms get pod -l app.kubernetes.io/name=dms-api \
 되돌리기(비root 로): 운영 노드에서 `chown 65532 <artifact_base>` 로 base 소유자를
 바꾸고 40/41 의 컨테이너 securityContext 를 제거한다(계약 테스트도 함께 뒤집어야
 한다). 그 상태에선 root:root base 마다 `artifact_base_not_writable` 이 난다.
+
+## 2c. 보조 그룹(LDAP gidNumber) 인정 (2026-10-07)
+
+비 root 잡(일반 사용자 전부, 실행 신원을 지정한 관리자 잡)은 실행 신원의 **LDAP 보조 그룹**
+(posixGroup 의 gidNumber)을 달고 돈다 — "프로젝트 그룹에 쓰기 권한이 있는 디렉터리" 로의
+sync·scan 이 된다. root 잡은 무관하다(root 는 그룹이 의미 없다). 규칙의 진실은
+`src/dms/identity.py`·`identity_ldap.py`·`stepper.py` 모듈 docstring 과 `docs/ARCHITECTURE.md`
+(§4 보조 그룹 재확인, §6, §7 불변식 5·9·10, §8)이다. 운영자가 알아야 할 것만:
+
+**동작 요약**
+- **계획 시점에 확정된다**: planner 가 요청을 계획할 때 LDAP 에서 그룹을 읽어 잡에 얼린다
+  (`worker_pool.identity` 의 `supplementary_gids`·`_status`·`_excluded`·`_found`, 잡 상세의
+  '보조 그룹(gid)' 행). 그 뒤 LDAP 에 새로 들어간 그룹은 그 잡에 **늘지 않는다**(재신청).
+- **무엇이 실리나**: objectClass `posixGroup` 이고 gidNumber 가 숫자 하나인 그룹의 gid 만.
+  gidNumber 가 없는 그룹(앱 그룹 등)·중첩 그룹(그룹 안의 그룹)은 제외한다. 그룹 이름은 실행에
+  쓰지 않는다(denylist 이름 매칭 전용). 그룹 검색 멤버 속성은 `DMS_LDAP_GROUP_MEMBER_ATTR`
+  (기본 uniqueMember) 그대로다.
+- **범위**: 하한 없음(gid 0·65534 도 인정 — 사용자 결정). gid > 2147483647 은 k8s 가 파드를
+  거부하므로 **제외**(화면·이벤트 `identity_groups_filtered` 에 보인다). 주 gid 와 같은 값은 뺀다.
+- **256개 초과면 통째로 미적용**(status `over_limit` — 주 gid 만, 이 기능 이전과 같음) + 잡 상세·
+  이벤트 표시.
+- **실행 직전 재확인**: 그룹이 실린 잡은 매 제출 직전(preflight·preview·exec_preflight·execution)
+  과 Volcano 큐 대기(PENDING) 중에 LDAP 를 다시 본다. 스냅숏의 그룹에서 탈퇴했거나 uid/gid 가
+  바뀌었거나 계정이 지워졌으면 `identity_changed_at_step` 으로 종단(이벤트에 빠진 gid).
+  LDAP 장애면 **상태를 바꾸지 않고 보류**해 60초 이상 간격으로 **3번 재시도**하고(이벤트
+  `identity_recheck_deferred` 가 시도 횟수), 그래도 안 되면 `ldap_unavailable` 로 종단한다.
+- **자동 chown 은 여전히 uid:주 gid**. 결과를 프로젝트 그룹 소유로 남기려면 sync 옵션에 chown
+  `uid:<프로젝트 gid>` 를 명시한다 — 그 gid 가 실행 신원의 주 gid 또는 적용된 보조 gid 가
+  아니면 계획 시점에 `chown_group_not_member`(예전엔 복사 뒤 EPERM 실패).
+- **같이 들어간 fail-closed**(스위치로 안 꺼진다 — 아래 표): LDAP 주 gid 가 0 인 비 root 실행
+  거부(`identity_root_group_without_privilege`), LDAP 사용자 엔트리 중복·비성공 결과 코드
+  (sizelimit·noSuchObject(32, base DN 오구성 포함) 등)·그룹 1만 개 초과는 `ldap_unavailable`
+  (예전엔 첫 엔트리·부분 결과를 조용히 썼다), 실행 신원 지정 자격의 계획 시점 재확인.
+
+**스위치 범위표** — `DMS_IDENTITY_SUPPLEMENTARY_GROUPS`(코드 기본 `true`, 오타는 꺼짐 쪽):
+
+| 변경 | `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 로 꺼지나 | 되돌리는 법 |
+|---|---|---|
+| 새 계획의 보조 gid 스냅숏(status disabled, 목록 []) | **예**(계획 시점만; 진행 중 잡은 스냅숏대로) | 스위치 |
+| 진행 중 잡의 재확인·적용(스냅숏이 이미 있는 잡) | 아니오 | drain 후 취소 또는 이미지 롤백 |
+| 리졸버 fail-closed(중복 엔트리·비성공 결과 코드·base 오구성 32·페이지 상한·posixGroup 만) | 아니오 | 이미지 롤백 |
+| 비특권 주 gid 0 거부 | 아니오 | 이미지 롤백 |
+| planner owner_username 선검사·자격 재확인 | 아니오 | 이미지 롤백 |
+| chown_group_not_member(스위치 off 면 주 gid 만 허용) | 아니오(더 좁아짐) | 이미지 롤백 |
+| artifact base 3홉·PUT 판정(g+w·ACL·o+x, §2b-1) | 아니오 | base 를 고치거나 이미지 롤백 |
+| resolve 마감·틱 LDAP 예산 | 아니오 | 이미지 롤백 |
+
+**비상 끄기**(이미지 유지): 테스트베드는 `deploy/overlays/testbed/patch-config.yaml` 에
+`DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "false"` 를 넣고 `kubectl apply -k deploy/overlays/testbed`(§4 의 가드·migrate
+순서대로), 프로덕션은 `values.env` 의
+`IDENTITY_SUPPLEMENTARY_GROUPS=false` → `sh deploy/install.sh`(render.sh 렌더 + apply; 미리보기는
+`sh deploy/overlays/prod/render.sh`) — 그다음 `kubectl -n dms rollout restart deploy/dms-controller`(planner 만 읽는다). 이미 계획된
+잡을 멈추는 kill switch 는 없다(BACKLOG) — 멈추려면 그 잡을 취소한다.
+
+**이미지 롤백 절차**(이 기능 이전 이미지로): 옛 controller 는 스냅숏 키를 무시해 주 gid 로만
+돈다 — 새 controller 가 그룹을 실어 preflight 를 통과시킨 잡을 옛 controller 가 그룹 없이
+실행하면 단계 사이가 갈라진다. 그래서 ① 포탈 관리 → 컨트롤 상태에서 **drain** 켬 ② 위험군 잡을
+취소(또는 완료 대기) — (a) 보조 gid ≠ [] 이고 `exec_preflight` ref 는 있으나 `execution` ref 가
+없는 Executing sync/rm, (b) 보조 gid ≠ [] 인 Preflight scan ③ 이미지 롤백(포탈 릴리스) ④ 새
+파드로 완전히 교체됐는지 확인 ⑤ drain 끔. ConfirmPending 잡은 옛 exec_preflight 가 그룹 없이
+다시 검사하므로 안전하다.
+
+**스토리지별 조건** — DMS 가 그룹을 실어도 **인정 여부는 스토리지가 정한다**(포탈은 등록
+`backend_type` 라벨 기준 주의문만 보인다). preflight 의 `test -r/-w` 는 access(2) 라 도구와
+같은 판정을 받으므로, 스토리지가 그룹을 무시하면 대개 preflight 가 `source_not_readable`·
+`target_not_readable`·`destination_*` 로 먼저 거부한다(조용한 실행 실패가 아니다).
+
+| 스토리지 | 확인할 것 |
+|---|---|
+| CephFS | 커널 클라이언트는 클라이언트 커널이 판정(테스트베드 caps `rwp`). caps 에 `uid=`/`gids=` 제한이 있으면 MDS 가 gid 목록을 검사한다. ceph-fuse 면 `client_permissions`·`fuse_set_user_groups` 확인 |
+| GPFS(Spectrum Scale) | 클라이언트가 프로세스 자격으로 판정. NFSv4 ACL 모드, 멀티클러스터 원격 마운트의 uid/gid 재매핑 확인 |
+| WekaFS | **미검증** — 판정 위치(클라이언트/백엔드)·그룹 수 상한을 벤더 문서·실측으로 확인 |
+| DDN Lustre | MDS 가 그룹을 다시 계산할 수 있다: `lctl get_param mdt.*.identity_upcall` — `l_getidentity` 면 MDS 의 NSS(같은 LDAP 를 보면 그 멤버십, 모르면 그룹 소실), `NONE` 이면 RPC suppgid 만. nodemap squash/idmap 도 영향 |
+| NFS(Pure Storage·NetApp) | AUTH_SYS 는 보조 gid 를 **16개까지만** 싣는다(넘치면 조용히 잘림). 서버 측 확장 그룹(ONTAP `-auth-sys-extended-groups`, knfsd `manage-gids`)이 켜져 있으면 클라이언트 목록을 버리고 서버 name-service 가 정한다(서버가 같은 LDAP 를 못 보면 그룹 전부 소실). `sec=krb5`·볼륨 security style(ntfs/mixed)도 결과를 바꾼다. 음성 사례: 테스트베드 luminous(manage-gids=y, 서버에서 `getent passwd alice` 실패) |
+
+**진단**
+- 잡 상세 '보조 그룹(gid)' 행 / 요청 이벤트 `identity_groups_filtered`(제외·초과),
+  `identity_groups_root_group`(gid 0 포함 — warning), `identity_recheck_deferred`·
+  `identity_recheck_failed`·`identity_changed_at_step`(재확인).
+- **DMS 가 실었나**: preflight 파드 `kubectl -n dms get pod <dms-preflight-…> -o
+  jsonpath='{.spec.securityContext.supplementalGroups}{"\n"}{.status.containerStatuses[0].user.linux.supplementalGroups}'`
+  (k8s 가 실제 적용한 목록), 워커 로그의 `dms: groups=…` 줄.
+- `identity_groups_not_applied`: 컨테이너의 실제 그룹(`id -G`)이 {주 gid} ∪ 스냅숏과 **같은
+  집합**이 아니다 — 어드미션 웹훅(Kyverno 류)이 supplementalGroups·fsGroup·runAsUser 를 바꿨거나,
+  사이트 커스텀 잡 이미지의 계정이 이미지 그룹에 속해 있다(그 이미지는 정리 필요).
+- 워커 stderr `dms: account <user> exists with a different uid/gid` + exit 1(→ preview_failed/
+  execution_failed, 전용 사유 코드 없음): 잡 이미지에 같은 이름의 계정이 다른 uid/gid 로 있다 —
+  예전엔 조용히 **이미지 계정의 신원**으로 돌았다. 이미지에서 그 계정을 지우거나 이름을 바꾼다.
+  root 잡이어도 owner 이름이 겹치면 같다.
+- 스토리지가 그룹을 무시: preflight 가 그룹을 실었는데(위 jsonpath) `*_not_readable`/
+  `destination_*` 면 위 스토리지 표를 본다.
+- 느린 LDAP: 컨트롤러 stderr `stepper: tick …s ldap …s/10s circuit=…`(느린 틱·서킷·예산 소진만).
+
+**`DMS_LDAP_TIMEOUT_SECONDS` 는 6 이하 권장**(기본 5): 한 틱의 LDAP 시간 최악 = 예산 10s + 진행
+중 한 URI 시도(3 × 타임아웃)라 루프 리스 30s 안에 들어야 한다(ARCHITECTURE §4 틱 LDAP 시간).
+넘기면 리스가 넘어가 두 번째 컨트롤러가 같은 루프를 동시에 돌 수 있다.
+
+**배포 직후 확인**(프로덕션 사전 점검을 하지 않기로 했으므로 사후 확인으로 대신):
+1. 릴리스 직후 몇 틱 동안 planner `ldap_unavailable` 거부·`identity_recheck_deferred`·
+   `stepper: tick … ldap …` 줄이 급증하지 않는지(새 fail-closed: 중복 엔트리·비성공 결과 코드·
+   base DN 오구성 32·페이지 상한). 급증하면 스위치로는 안 꺼진다(위 표) → 원인 수정 또는 이미지 롤백.
+2. 프로젝트 그룹이 있는 대표 사용자로 비 root 요청 1건 → 잡 상세 '보조 그룹(gid)'
+   (`/api/user/requests/{rid}/jobs` 의 `worker_pool.identity.supplementary_gids_status`).
+   `none` 이면 그 그룹에 objectClass posixGroup 이 없을 가능성부터.
+3. 3홉 화면(포탈 관리 → 아티팩트 경로): API·컨트롤러 홉이 g+w/ACL/o+x 로 빨간지 — 775/770 만이
+   아니라 **750/710 base 도 이제 빨간불**이다. 잡은 계속 돌지만 base 저장이 막히고 그룹이 실린
+   잡의 preflight 가 거부된다 → §2b-1 대로 chmod/setfacl.
+
+**남는 위험**(의도적 범위 밖 — 상세는 BACKLOG):
+- **gidNumber 0 LDAP 그룹**은 인정된다(사용자 결정) — 그 멤버의 잡은 root 그룹 권한을 가져 root:root
+  770 디렉터리(예: 테스트베드 `/cephfs/dms`)가 열리고, 스토리지 mount_path 아래면 사용자 심링크를
+  거쳐 닿을 수 있다. 로그인 노드 SSSD 는 기본(min_id=1, filter_groups=root)으로 gid 0 을 주지 않아
+  **DMS 가 로그인 노드보다 넓게 준다**. 완화: 부모 디렉터리 그룹 쓰기 금지(§2b-3), warning 이벤트.
+- StartTLS 인증서 검증 안 함(sssd `ldap_tls_reqcert = never` 미러) — LDAP 중간자는 그룹 멤버십도
+  주입할 수 있고 재확인도 같은 채널이다.
+- NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖이다(그룹 잡은 preflight `test -w` 가 잡 단위로 막는다).
+- LDAP 사용자가 스스로 그룹에 가입할 수 있는 selfwrite ACL 은 점검하지 않았다.
+- 큐 대기 재확인이 LDAP 장애로 건너뛴 사이 탈퇴하고 그대로 RUNNING 이 되면 반영되지 않는다(실행
+  중 잡은 재확인하지 않는다). nsync 의 preflight 파드 쌍 대기는 큐 재확인 대상이 아니다.
+- dscan/dsync 출력의 그룹 이름이 `dmsg<gid>` 로 보일 수 있다(사소).
 
 ## 3. Apply manifests, in order
 
