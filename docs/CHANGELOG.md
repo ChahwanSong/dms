@@ -95,6 +95,47 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 배치 sync 확인 강화 + 공유 토큰의 계정·배포 경로 차단 — **완료·실증**(2026-10-07, d161)
+
+사용자 요청: "운영자가 배치작업으로 sync 할 때, 컨펌이 필요한지 체크" → 점검 결과(배치당 1회 확인은 동작하지만 우회
+경로가 있음)를 보고 "고치는 방향으로 구현". 적대적 리뷰 3회(확정 26 → 9 → 5건)를 반영했다.
+- 우회 경로였던 것: Running·PreviewReady 배치에 항목 추가·재실행 → 새 미리보기가 사람 확인 없이 자동 컨펌돼 root 실행;
+  공유 토큰(모든 노드 에이전트 보유)·특권 목록 밖 관리자의 항목 추가·재실행·확인; 배치 자식의 단건 컨펌; 토큰으로 계정을
+  지우고 다시 만들어 특권 세션 획득; 토큰 릴리스로 수정 전 이미지 롤백; 목록 밖 관리자의 "root" 계정 생성·셀프 재설정.
+- 배치 확인 계약: 새 Queued 는 커밋 뒤 CAS 로 Previewing 복귀, 확인 회차(`batches.preview_round`)·Queued 없음 CAS,
+  확인 트랜잭션의 **확인 도장**(confirmed_fingerprint) — orchestrator 는 도장이 지금 지문과 같은 자식만 실행하고 도장 없는
+  미리보기가 보이면 Previewing 으로(업그레이드 전 옛 행 포함). 실행 중 자식은 확인 대기를 막지 않고, 확인 대기 배치도
+  루프가 기록만 하러 돈다. 상태 전이 전부 CAS, 자식 생성은 요청 INSERT + 항목 claim 한 트랜잭션, 확인 감사 행.
+- 경계: 계정 변경(403 `accounts_session_required`)·배포 경로(`require_session_admin`, 403 `admin_session_required`)는
+  세션 관리자만, 특권 목록 이름 계정은 특권 세션 관리자만(403 `privileged_account_protected`, 셀프 재설정 불가).
+- 포탈: 「배치 확인」 대화상자(실행할·실행 중·완료·실행 안 됨+원인·복사 대상·동시 실행 상한·만료·delete·소유권, 연 회차
+  고정), 「확인 대기」 배지(주의색), 단계별 배너·항목 추가 안내, 409 헤더 표시.
+- 동작 변화(운영 공지 대상): 배포 직후 Running sync 배치에 옛 코드가 만든 미확인 미리보기가 있으면 한 번 다시 확인을
+  요구한다. 토큰으로 계정·빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 를 바꾸던 자동화는 403(포탈 세션으로).
+  :confirm 은 본문 `{"preview_round": N}` 필수(옛 스크립트는 422). 특권 목록 이름 계정은 셀프 비밀번호 재설정 불가.
+- 남은 것(범위 밖, 리뷰 기각 사유 기록): 공유 토큰이 남의 단건 run_as_root 잡을 컨펌할 수 있음(지문 일치 필요, 사전
+  존재), 세션 관리자는 누구나 빌드·릴리스 가능(관리자 사이 경계는 심층 방어).
+
+배포: d161(빌드 81c58b8a / 커밋 275ad21) — dms 이미지만. 릴리스 dms-api·dms-controller, 오버레이 dms newTag d161
+(에이전트·잡 이미지 d158 유지). `batches.preview_round` 컬럼은 기동 마이그레이션(_ensure_columns)이 붙였다.
+
+실증(테스트베드 https://dms.local):
+- 토큰: 계정 생성·역할·비활성화·삭제 403 accounts_session_required, 배치 항목 추가·rescan 403 privileged_not_authorized,
+  릴리스·빌드 403 admin_session_required, 조회(GET)는 200, alice 계정·배치 불변.
+- 배치 2a5f6937(1항목): PreviewReady(회차 1·files 4) → 자식 단건 컨펌 409 batch_child_confirm_via_batch(잡 그대로
+  ConfirmPending) → 실 Chrome: 「확인 대기」 배지 text-attn/bg-attnbg(title PreviewReady)·배너·대화상자(1/1·복사 대상 4개·
+  상한 1·만료 KST·소유권 root 문구) → 「실행 확인」 POST `{"preview_round":1}` 200, 콘솔 오류 0(캡처 d161-1007b-*.png)
+  → Completed → 완료 배치에 추가 = Previewing → PreviewReady(회차 2), 30초 자동 실행 없음 → 회차 없는 확인 422
+  preview_round_required, 옛 회차 409 batch_preview_changed, 회차 2 확인 200 → Completed. 감사 행 2건(회차 1·2, stamped 1).
+- 배치 9ad866b6(3항목, 상한 1): 확인(회차 1) 뒤 #0 실행 중·#1·#2 확인받고 대기 중에 항목 추가 → 응답 Previewing →
+  #0 은 끝까지 돌아 Previewing 중에 기록(Succeeded), #1·#2 는 재확인 전까지 시작 안 됨 → #3 미리보기 → PreviewReady
+  (회차 2) → 옛 회차 409 → 회차 2 확인 → #1→#2→#3 차례 실행 → Completed.
+- 정리: 실증 목적지 6개를 root rm 단건(잡별 컨펌)으로 삭제, dms_test 는 dst·dst_fail·dst_new·dst_root·src 로 원복.
+
+테스트: 백엔드 2280 passed(신규 tests/test_batch_confirm_gate.py 37 — 게이트·재검토·CAS 경합·확인 도장·회차·실행 중
+자식·확인 대기 기록·materialize claim, 계정·특권 이름·셀프 재설정 가드, 배포 경로 토큰 403), 프런트 874 passed + tsc +
+빌드(외부 URL 0), e2e 9 passed.
+
 ### ✅ 단일 작업·배치 생성 화면 단일 페이지화(시트 + 오른쪽 제출 요약) — **완료·실증**(2026-10-06, d159·d160)
 
 사용자 요청: "데스크탑 웹 환경의 dms 작업 제출하는 화면(사용자, 운영자 모두)의 UI layout 및 디자인이 모바일 환경처럼
