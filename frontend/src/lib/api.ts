@@ -191,6 +191,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 보조 그룹 인정(2026-10-07, identity.resolve_job_identity·check_chown_group). reasonCodes.json 과 같은 커밋.
   identity_root_group_without_privilege: "실행 계정의 LDAP 주 그룹이 root(gid 0)라 root 가 아닌 실행을 할 수 없습니다 — 관리자에게 문의하세요",
   chown_group_not_member: "chown 의 그룹(gid)이 실행 계정이 속한 그룹이 아닙니다 — 실행 계정의 주 그룹 또는 작업 계획 시점에 확인된 LDAP 보조 그룹의 gid 만 지정할 수 있습니다(프로젝트 그룹 소유로 남기려면 uid:<프로젝트 gid>)",
+  // 보조 그룹 적용 지점(2026-10-07): preflight·워커 셸의 그룹 자기검증 마커(execution_manifests PREFLIGHT_REASONS·
+  // EXECUTION_REASONS)와 stepper 의 제출 직전·큐 대기 LDAP 재확인. reasonCodes.json 과 같은 커밋.
+  identity_groups_not_applied: "작업 컨테이너의 그룹이 계획된 보조 그룹과 일치하지 않아 중단했습니다(클러스터 정책이 그룹을 바꾸거나 무시함, 또는 작업 컨테이너의 그룹 물질화 실패·값 변조) — 관리자에게 문의하세요",
+  identity_changed_at_step: "작업을 계획한 뒤 실행 계정의 LDAP 정보(uid·주 그룹 또는 보조 그룹 소속)가 바뀌어 실행 전에 중단했습니다 — 다시 신청하세요(새로 들어간 그룹도 다시 신청해야 반영됩니다)",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",
   request_not_found: "요청을 찾을 수 없습니다",
@@ -288,7 +292,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   artifact_base_not_owned: "아티팩트 경로의 소유자가 제어면 프로세스(root)가 아닙니다 — chown root:root",
   artifact_base_world_writable: "아티팩트 경로가 world-writable 입니다 — chmod 755 (요청자가 잡 디렉터리를 바꿔치기할 수 있음)",
   // 보조 그룹(2026-10-07 D6): 잡이 LDAP 보조 그룹을 달고 돌므로 g+w·ACL 쓰기 항목은 world-writable 과
-  // 같은 위험이다(gid 와 무관 -- 보조 gid 0 도 인정). 3홉 검증·저장에서 나오는 코드라 처방을 관리자 몫으로 적는다.
+  // 같은 위험이다(gid 와 무관 -- 보조 gid 0 도 인정). 3홉 검증·저장, 그리고 그룹이 실린 잡의 preflight(base 를 실행
+  // 계정이 쓸 수 있음 -- NFSv4/GPFS ACL 포함)에서 나온다. 어느 쪽이든 고칠 사람은 관리자라 처방을 관리자 몫으로 적는다.
   artifact_base_group_writable: "아티팩트 경로(base)에 그룹 쓰기 권한(또는 ACL 쓰기 항목·기본 ACL)이 있어 작업 계정이 쓸 수 있습니다 — 관리자: chmod g-w, setfacl -b -k (root:root 755 또는 711)",
   // 빌드 실패 세분화(슬라이스 21 잔여). 지금까지 전부 build_failed 로 뭉개져
   // 운영자가 로그 단절만 보고 OOM 을 추측해야 했다 — 대응이 서로 다르다.

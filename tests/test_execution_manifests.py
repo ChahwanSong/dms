@@ -528,6 +528,10 @@ def _emitted_markers():
     # traversable)도 긁힌다 -- execution_volcano._volumes 는 항상 그것을 붙인다.
     vols = _VOL + [{"name": "dms-artifact-base", "hostPath": {"path": "/cephfs/dms/artifacts"},
                     "mountPath": "/dms-artifact-base"}]
+    # 보조 그룹이 실린 spec(2026-10-07)이라야 자기검증(identity_groups_not_applied)·base 쓰기 불가
+    # (artifact_base_group_writable) 조각이 붙는다 -- 그룹 없는 spec 만 긁으면 두 마커가 그물 밖이다.
+    specs.append((_spec(operation="scan", tool="dscan", paths={"target": "/x"},
+                        identity=_GROUP_IDENT), None))
     found = set()
     for spec, role in specs:
         for chunk in _preflight_command(spec, role=role, volumes=vols)[2].split(
@@ -541,3 +545,192 @@ def test_whitelist_matches_the_markers_the_scripts_actually_emit():
     # 아니다) -- 새 검사를 넣고 등록을 빠뜨리면 그 사유는 조용히 preflight_failed 로
     # 뭉개져 아무도 모른다. 반대로 집합에만 남은 죽은 코드도 잡는다.
     assert _emitted_markers() == set(PREFLIGHT_REASONS)
+
+
+# ---- 보조 그룹 적용 지점(2026-10-07): preflight 는 pod 수준 supplementalGroups, 워커는 env → /etc/group ----
+
+_GROUP_IDENT = {"uid": 10001, "gid": 10000, "username": "alice", "groups": ["dmsproj"],
+                "privileged": False, "supplementary_gids": [10010, 20001],
+                "supplementary_gids_status": "applied", "supplementary_gids_excluded": [],
+                "supplementary_gids_found": 2}
+_BASE_VOL = {"name": "dms-artifact-base", "hostPath": {"path": "/cephfs/dms/artifacts"},
+             "mountPath": "/dms-artifact-base"}
+_NSYNC_PATHS = {"source": "/cephfs-third/a", "source_storage": "cephfs-third",
+                "destination": "/cephfs-secondary/b", "destination_storage": "cephfs-secondary"}
+
+
+def _pod(spec, role=None, volumes=None):
+    return build_preflight_pod(spec, job_image="i", namespace="dms",
+                               volumes=_VOL + [_BASE_VOL] if volumes is None else volumes,
+                               node="dms-w1", role=role)
+
+
+def _env_of(container):
+    return {e["name"]: e["value"] for e in container.get("env", [])}
+
+
+def _tasks(m):
+    return {t["name"]: t for t in m["spec"]["tasks"]}
+
+
+@pytest.mark.parametrize("identity", [
+    {"uid": 10001, "gid": 10000, "username": "alice"},                          # 배포 전 잡(키 없음)
+    {"uid": 10001, "gid": 10000, "username": "alice", "privileged": False,
+     "supplementary_gids": [], "supplementary_gids_status": "none",
+     "supplementary_gids_excluded": [], "supplementary_gids_found": 0},         # 그룹 없음 확정
+    {"uid": 10001, "gid": 10000, "username": "alice", "supplementary_gids": None},
+])
+def test_no_groups_preflight_and_worker_are_byte_identical(identity):
+    # 그룹이 없으면 이 기능 이전과 같은 매니페스트여야 한다 -- 배포만으로 기존 잡의 모양이 바뀌지 않는다.
+    from dms.execution_manifests import _ARTIFACT_BASE_CHECK, _preflight_script
+    spec = _spec(operation="scan", tool="dscan", phase="preflight", identity=identity,
+                 paths={"target": "/cephfs/dms/a"})
+    pod = _pod(spec)
+    assert "securityContext" not in pod["spec"]
+    (c,) = pod["spec"]["containers"]
+    assert set(c) == {"name", "image", "command", "securityContext", "volumeMounts"}   # env 키 부재
+    assert c["securityContext"] == {"runAsUser": 10001, "runAsGroup": 10000}
+    assert c["command"][2] == _ARTIFACT_BASE_CHECK + _preflight_script(spec)[0]
+    m = build_volcano_job(_spec(operation="scan", tool="dscan", identity=identity,
+                                paths={"target": "/cephfs/dms/a"}),
+                          job_image="i", namespace="dms", volumes=_VOL)
+    assert _env_of(_worker_container(m)) == {"DMS_JR_UID": "10001", "DMS_JR_GID": "10000",
+                                             "DMS_JR_USERNAME": "alice",
+                                             "DMS_JR_PROCESSES_PER_NODE": "8"}
+
+
+def test_groups_pod_level_only():
+    spec = _spec(operation="scan", tool="dscan", phase="preflight", identity=_GROUP_IDENT,
+                 paths={"target": "/cephfs/dms/a"})
+    pod = _pod(spec)
+    # PodSecurityContext 필드 -- 컨테이너 securityContext 에 두면 apiserver 가 조용히 버린다.
+    assert pod["spec"]["securityContext"] == {"supplementalGroups": [10010, 20001]}
+    (c,) = pod["spec"]["containers"]
+    assert c["securityContext"] == {"runAsUser": 10001, "runAsGroup": 10000}
+    assert "supplementalGroupsPolicy" not in pod["spec"]["securityContext"]   # D8: Merge 기본
+    assert c["env"] == [{"name": "DMS_JR_GID", "value": "10000"},
+                        {"name": "DMS_JR_SUPP_GIDS", "value": "10010,20001"}]
+
+
+def _gids_from_env(value):
+    return [int(g) for g in value.split(",")]
+
+
+def test_preflight_and_worker_lists_identical():
+    # 단계 간 동일성 계약: preflight 가 그 그룹으로 통과시킨 것을 워커 rank 도 같은 그룹으로 한다. 하나의 헬퍼
+    # (_supplementary_gids)에서 파생되므로 primary·nsync 소스/목적지 어디서든 같아야 한다.
+    want = _GROUP_IDENT["supplementary_gids"]
+    primary = _spec(operation="sync", tool="dsync", phase="preflight", identity=_GROUP_IDENT,
+                    paths={"source": "/cephfs/a", "source_storage": "s1",
+                           "destination": "/cephfs/b", "destination_storage": "s1"})
+    pod = _pod(primary)
+    assert pod["spec"]["securityContext"]["supplementalGroups"] == want
+    assert _gids_from_env(_env_of(pod["spec"]["containers"][0])["DMS_JR_SUPP_GIDS"]) == want
+    m = build_volcano_job(_spec(operation="sync", tool="dsync", identity=_GROUP_IDENT,
+                                paths=primary.paths), job_image="i", namespace="dms", volumes=_VOL)
+    assert _gids_from_env(_env_of(_worker_container(m))["DMS_JR_SUPP_GIDS"]) == want
+    nsync = _spec(operation="sync", tool="nsync", phase="preflight", identity=_GROUP_IDENT,
+                  candidates={"source": ["dms-w1"], "destination": ["dms-w4"]}, paths=_NSYNC_PATHS)
+    for role in ("source", "destination"):
+        p = _pod(nsync, role=role)
+        assert p["spec"]["securityContext"]["supplementalGroups"] == want
+        assert _gids_from_env(_env_of(p["spec"]["containers"][0])["DMS_JR_SUPP_GIDS"]) == want
+    m = build_volcano_job(_spec(operation="sync", tool="nsync", identity=_GROUP_IDENT,
+                                candidates=nsync.candidates, paths=_NSYNC_PATHS),
+                          job_image="i", namespace="dms", volumes=_VOL)
+    for name in ("source-worker", "destination-worker"):
+        assert _gids_from_env(_env_of(_worker_container(m, name))["DMS_JR_SUPP_GIDS"]) == want
+
+
+def test_worker_and_launcher_pods_have_no_supplemental_groups():
+    # sshd/runuser 의 initgroups 가 덮어써 rank 엔 무효다 -- 워커 그룹은 /etc/group 줄로만(_identity_materialize_stmt).
+    for tool, cands, paths in (("dscan", {"primary": ["dms-w1"]}, {"target": "/cephfs/x"}),
+                               ("nsync", {"source": ["dms-w1"], "destination": ["dms-w4"]}, _NSYNC_PATHS)):
+        op = "scan" if tool == "dscan" else "sync"
+        m = build_volcano_job(_spec(operation=op, tool=tool, identity=_GROUP_IDENT, candidates=cands,
+                                    paths=paths), job_image="i", namespace="dms", volumes=_VOL)
+        for task in m["spec"]["tasks"]:
+            pod_spec = task["template"]["spec"]
+            assert "securityContext" not in pod_spec
+            assert "supplementalGroups" not in str(pod_spec)
+
+
+def test_launcher_env_has_no_supp_gids():
+    # launcher(rank 0 의 mpirun)는 그룹 없이 돈다 -- env 가 그룹 유무와 무관하게 같아야 한다(러너·잡 이미지 무변경).
+    plain = {k: v for k, v in _GROUP_IDENT.items() if not k.startswith("supplementary_gids")}
+    with_groups = build_volcano_job(_spec(operation="scan", tool="dscan", identity=_GROUP_IDENT,
+                                          paths={"target": "/cephfs/x"}),
+                                    job_image="i", namespace="dms", volumes=_VOL)
+    without = build_volcano_job(_spec(operation="scan", tool="dscan", identity=plain,
+                                      paths={"target": "/cephfs/x"}),
+                                job_image="i", namespace="dms", volumes=_VOL)
+    env_g = _env_of(_tasks(with_groups)["launcher"]["template"]["spec"]["containers"][0])
+    env_p = _env_of(_tasks(without)["launcher"]["template"]["spec"]["containers"][0])
+    assert "DMS_JR_SUPP_GIDS" not in env_g and env_g == env_p
+
+
+def test_privileged_spec_with_gids_raises():
+    # root 는 DAC override 라 그룹이 무의미하다 -- 목록이 실린 privileged spec 은 변조 신호라 조용히 버리지 않는다.
+    ident = {"uid": 0, "gid": 0, "username": "root", "privileged": True, "supplementary_gids": [10010]}
+    spec = _spec(operation="scan", tool="dscan", phase="preflight", identity=ident,
+                 paths={"target": "/cephfs/x"})
+    with pytest.raises(ValueError, match="supplementary_gids_on_privileged"):
+        _pod(spec)
+    with pytest.raises(ValueError, match="supplementary_gids_on_privileged"):
+        build_volcano_job(_spec(operation="scan", tool="dscan", identity=ident,
+                                paths={"target": "/cephfs/x"}),
+                          job_image="i", namespace="dms", volumes=_VOL)
+
+
+def test_privileged_spec_without_gids_has_no_groups():
+    ident = {"uid": 0, "gid": 0, "username": "root", "privileged": True, "supplementary_gids": [],
+             "supplementary_gids_status": "privileged"}
+    pod = _pod(_spec(operation="scan", tool="dscan", phase="preflight", identity=ident,
+                     paths={"target": "/cephfs/x"}))
+    assert "securityContext" not in pod["spec"] and "env" not in pod["spec"]["containers"][0]
+    m = build_volcano_job(_spec(operation="scan", tool="dscan", identity=ident,
+                                paths={"target": "/cephfs/x"}), job_image="i", namespace="dms", volumes=_VOL)
+    assert "DMS_JR_SUPP_GIDS" not in _env_of(_worker_container(m))
+
+
+@pytest.mark.parametrize("gids", [[20001, 10010], [10010, 10010], [-1], [2147483648], ["10010"], [True],
+                                  [10000], "10010", list(range(1, 258))])
+def test_malformed_gids_in_spec_raise(gids):
+    # 빌더는 입력을 믿지 않는다(stepper 가 이미 걸렀어도) -- 어댑터가 ValueError 를 submit_failed 로 접는다.
+    ident = {"uid": 10001, "gid": 10000, "username": "alice", "supplementary_gids": gids}
+    with pytest.raises(ValueError, match="supplementary gids"):
+        _pod(_spec(operation="scan", tool="dscan", phase="preflight", identity=ident,
+                   paths={"target": "/cephfs/x"}))
+
+
+@pytest.mark.parametrize("gids, status", [([10010], "none"), ([], "applied"), ([10010], "bogus")])
+def test_status_mismatch_in_spec_raises(gids, status):
+    ident = {"uid": 10001, "gid": 10000, "username": "alice", "supplementary_gids": gids,
+             "supplementary_gids_status": status}
+    with pytest.raises(ValueError, match="supplementary_gids_status_mismatch"):
+        build_volcano_job(_spec(operation="scan", tool="dscan", identity=ident,
+                                paths={"target": "/cephfs/x"}), job_image="i", namespace="dms", volumes=_VOL)
+
+
+def test_group_prefix_order():
+    # 자기검증 → base x → base other-x → base 쓰기 불가 → 경로 검사. 자격이 먼저인 이유: 뒤의 base 판정이 그룹에
+    # 좌우된다. base 볼륨이 없으면 base 검사 셋 다 없다(검사할 대상이 없다).
+    from dms.execution_manifests import (_ARTIFACT_BASE_CHECK, _ARTIFACT_BASE_NOT_WRITABLE_CHECK,
+                                         _ARTIFACT_BASE_OTHER_X_CHECK, _SUPP_GIDS_SELF_CHECK,
+                                         _preflight_script)
+    spec = _spec(operation="scan", tool="dscan", phase="preflight", identity=_GROUP_IDENT,
+                 paths={"target": "/cephfs/x"})
+    script = _pod(spec)["spec"]["containers"][0]["command"][2]
+    assert script == (_SUPP_GIDS_SELF_CHECK + _ARTIFACT_BASE_CHECK + _ARTIFACT_BASE_OTHER_X_CHECK
+                      + _ARTIFACT_BASE_NOT_WRITABLE_CHECK + _preflight_script(spec)[0])
+    no_base = _pod(spec, volumes=_VOL)["spec"]["containers"][0]["command"][2]
+    assert no_base == _SUPP_GIDS_SELF_CHECK + _preflight_script(spec)[0]
+
+
+def test_worker_exec_markers_match_whitelist():
+    # preflight 의 _emitted_markers 대응: 워커 셸이 찍는 DMS_EXEC_REASON= 토큰이 화이트리스트 밖이면 스테퍼가
+    # 승격하지 못하고 execution_failed 로 뭉갠다.
+    from dms.execution_manifests import EXECUTION_REASONS, _worker_command_script
+    tokens = {c.split(";")[0].strip()
+              for c in _worker_command_script().split("DMS_EXEC_REASON=")[1:]}
+    assert tokens == {"identity_groups_not_applied"} and tokens <= EXECUTION_REASONS

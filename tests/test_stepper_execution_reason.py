@@ -143,8 +143,29 @@ def test_preview_failure_without_marker_keeps_preview_failed(db):
     assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "preview_failed"
 
 
+def test_failed_worker_pod_group_marker_becomes_the_reason(db):
+    # 2026-10-07 보조 그룹: 워커 셸(_identity_materialize_stmt)이 그룹 물질화·자기검증 실패에 마커를 찍고 exit 1
+    # → PodFailed AbortJob. 어댑터는 launcher 와 **실패 워커** 파드 로그를 함께 돌려준다 -- launcher 로그엔 마커가
+    # 없어도(워커가 안 떠 mpirun 자체가 실패) 워커 항목에서 승격돼야 한다.
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    adapter = StubExecutionAdapter()
+    stepper = JobStepper(repos, adapter, settings=_Settings())
+    stepper.run_once()                                   # Pending -> Preflight
+    stepper.run_once()                                   # Preflight ok -> Running(execution 제출)
+    ref = f"stub-execution-{jid}"
+    adapter.script(ref, [ExecStatus.FAILED])
+    adapter.set_log(ref, [("j-launcher-0", "ORTE was unable to reliably start one or more daemons\n", None),
+                          ("j-worker-0", "dms: groups= 10000  expected= 10000 10010 \n"
+                                         "DMS_EXEC_REASON=identity_groups_not_applied\n", None)])
+    stepper.run_once()
+    assert repos.data_jobs.get_job(jid)["state"] == "Failed"
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "identity_groups_not_applied"
+    assert repos.requests.last_reason_code(rid) == "identity_groups_not_applied"
+
+
 def test_parse_execution_reason_whitelist_and_shape():
-    assert EXECUTION_REASONS == frozenset({"workers_unreachable"})
+    assert EXECUTION_REASONS == frozenset({"workers_unreachable", "identity_groups_not_applied"})
     assert parse_execution_reason([("p", "x\n  DMS_EXEC_REASON=workers_unreachable  \n", None)]) == "workers_unreachable"
     assert parse_execution_reason([("p", None, "ImagePullBackOff"), ("w", "DMS_EXEC_REASON=workers_unreachable", None)]) \
         == "workers_unreachable"

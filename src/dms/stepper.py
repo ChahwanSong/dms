@@ -1,20 +1,39 @@
-"""job-stepper: 계획된 data_job을 비블로킹 스텝으로 전진시키는 루프 본체. 실행은 어댑터 뒤."""
+"""job-stepper: 계획된 data_job을 비블로킹 스텝으로 전진시키는 루프 본체. 실행은 어댑터 뒤.
+
+보조 그룹 재확인(2026-10-07 D1·D2): 계획 시점 스냅숏에 LDAP 보조 gid 가 실린 비 root 잡은 매 제출 직전
+(_build_spec -- preflight·preview·exec_preflight·execution 네 경로의 단일 관문)과 vcjob 큐 대기(PENDING) 중에 LDAP
+를 다시 보고, 스냅숏 ⊄ 최신(탈퇴)·uid/gid 변경·계정 삭제면 identity_changed_at_step 으로 종단한다. LDAP 장애는
+상태를 바꾸지 않는 보류(재시도 3번, 간격 ≥ 60s -- 시도 횟수는 events 가 카운터다, 스키마 변경 없음)이고, 한 틱 안
+에서는 서킷(한 번 불가를 보면 나머지는 LDAP 를 부르지 않는다)과 LDAP 시간 예산(identity.LDAP_TICK_BUDGET_SECONDS)
+이 루프 리스 30s 를 지킨다. JobStepper 는 틱마다 새로 만들어지므로 인스턴스 필드 = 틱 상태다(지속 상태는 DB).
+"""
 import hashlib
 import json
 import logging
 import posixpath
 import sys
+import time
 
 from .artifact_base import resolve_artifact_base
-from .db import iso_plus, utc_now_iso
+from .db import iso_epoch, iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import parse_execution_reason, parse_preflight_reason
-from .identity import PRIVILEGE_NEVER, privilege_policy
+from .identity import (LDAP_TICK_BUDGET_SECONDS, PRIVILEGE_NEVER, IdentityLookupInvalid,
+                       IdentityUnavailable, privilege_policy, supplementary_gids_problem,
+                       valid_supplementary_gids)
 from .placement import TOOL_TO_POLICY
 from .repositories.node_exclusions import blocked_nodes
 
 logger = logging.getLogger(__name__)
+
+# D2(사용자 지정 "재시도 3번만"): 첫 실패 뒤 재시도 횟수 -- streak 가 이 값에 이른 뒤 또 실패(= 4번째 시도)면 종단.
+_LDAP_RECHECK_RETRIES = 3
+# D2: 재시도 간격 하한(초). 마지막 계수 시도(이벤트 payload 의 attempted_at_epoch)로부터 이만큼 지나야 LDAP 를 다시
+# 부른다 -- 3번이 몇 초 안에 소진되지 않고 최소 ≈180s 동안 순간 장애를 흡수한다.
+_LDAP_RECHECK_SPACING_SECONDS = 60
+_MISS = object()            # 틱 캐시 표식(None 은 '계정 삭제'라는 정상 결과라 표식으로 못 쓴다)
+_SLOW_TICK_SECONDS = 20     # 이보다 긴 틱은 stderr 에 시간 줄을 남긴다(리스 30s 앞의 경고 -- 실증 측정점)
 
 
 def _summary_fingerprint(summary):
@@ -76,7 +95,10 @@ class IdentityMissingAtStep(Exception):
     를 uid 0 으로, mpirun 을 runuser root 로 돌린다. 정상 producer(planner)는
     항상 채우므로 도달 경로는 DB 직접 쓰기뿐이지만 unknown_tool/_abs 와 같은 위협
     클래스(DB 가 신뢰 경계)라 같은 층에서 종단시킨다. **uid 0 자체는 거부하지
-    않는다** -- 특권 요청자(identity.py, privileged=True)는 정당한 0 이다."""
+    않는다** -- 특권 요청자(identity.py, privileged=True)는 정당한 0 이다.
+    2026-10-07: 비특권 주 gid 0(D5 백스톱 -- 규칙 전에 계획된 잡·변조 행)과 보조 gid 스냅숏의 모양(하드 상수·
+    상태 키 결속, identity.supplementary_gids_problem)도 같은 사유로 끊는다 -- 위조된 목록이 pod
+    supplementalGroups·/etc/group 으로 흐르기 전에."""
 
     def __init__(self, problem):
         self.problem = problem
@@ -119,10 +141,52 @@ class NodeBlockedAtStep(Exception):
         super().__init__(", ".join(f"{n}={r}" for n, r in sorted(blocked.items())))
 
 
+class IdentityChangedAtStep(Exception):
+    """계획 뒤 LDAP 가 바뀌었다(2026-10-07 D1): 스냅숏의 보조 gid 가 최신 유효 gid 에 없거나(탈퇴), uid·주 gid 가
+    바뀌었거나, 계정이 삭제됐다. 스냅숏은 계획 시점에 얼린 권한이라 그대로 실행하면 이미 회수된 그룹 권한으로
+    파일을 만진다 -- 제출 전(또는 vcjob 큐 대기 중, 도구 시작 전)에 끊는다. 교집합으로 깎아 계속 가지 않는 이유:
+    preflight 가 본 권한과 실행 권한이 갈라진다(drift). payload 는 이벤트에 그대로 싣는다(LDAP 원문 없음)."""
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+        super().__init__(f"identity changed at step: {payload}")
+
+
+class IdentityRecheckHeld(Exception):
+    """D2 보류: 상태를 바꾸지 않고 이번 틱을 넘긴다(_step_one 이 touch 로 claim 큐 뒤로만 보낸다). counted=True 만
+    시도 횟수(identity_recheck_deferred 이벤트 -- 카운터)로 남는다. reason ∈ {"ldap_unavailable"(계수),
+    "spacing"·"circuit_open"·"ldap_budget"(미계수 -- LDAP 를 부르지 않았으니 시도가 아니다)}."""
+
+    def __init__(self, phase, *, counted: bool, reason: str, attempt: "int | None" = None,
+                 attempted_at_epoch: "float | None" = None):
+        self.phase = phase
+        self.counted = counted
+        self.reason = reason
+        self.attempt = attempt
+        self.attempted_at_epoch = attempted_at_epoch
+        super().__init__(f"identity recheck held ({reason}) at {phase}")
+
+
+class IdentityRecheckExhausted(Exception):
+    """D2: 첫 실패 + 재시도 3회가 모두 LDAP 불가 → ldap_unavailable 종단."""
+
+    def __init__(self, phase, *, attempts: int):
+        self.phase = phase
+        self.attempts = attempts
+        super().__init__(f"identity recheck exhausted after {attempts} attempts at {phase}")
+
+
+class LdapNotConfiguredAtStep(Exception):
+    """보조 gid 가 실린 잡인데 컨트롤러에 resolver 가 없다 -- 일시 장애가 아니라 설정 상태라 재시도 없이
+    ldap_not_configured 로 종단한다(재확인 없이 그룹을 싣는 길을 남기지 않는다)."""
+
+
 def identity_problem(ident) -> "str | None":
-    """실행 신원의 모양 검사. 정상 = planner 가 ResolvedIdentity 를 asdict 한 것:
+    """실행 신원의 모양 검사 -- 단일 장소. 정상 = planner 가 ResolvedIdentity 를 asdict 한 것:
     uid/gid 는 int(bool 제외), username 은 비어 있지 않은 str, privileged 는
-    uid == 0 과 일치. 문제가 있으면 짧은 설명(이벤트 메시지), 없으면 None."""
+    uid == 0 과 일치. 2026-10-07: 비특권 gid 0(D5 백스톱)과 보조 gid 모양(하드 상수·상태 키 결속,
+    identity.supplementary_gids_problem -- 키 부재·None 은 [] 로 통과)도 본다. 문제가 있으면 짧은 설명(이벤트
+    메시지), 없으면 None."""
     if not isinstance(ident, dict):
         return "identity_missing"
     for key in ("uid", "gid"):
@@ -136,19 +200,51 @@ def identity_problem(ident) -> "str | None":
         return "username_missing"
     if bool(ident.get("privileged")) != (ident["uid"] == 0):
         return "privileged_flag_mismatch"
+    if ident["gid"] == 0 and not ident.get("privileged"):
+        # D5 백스톱: planner 는 identity_root_group_without_privilege 로 거부하지만, 규칙 전에 계획된 잡·변조 행은
+        # 비 root 잡에 root 그룹 권한을 싣는다(runAsGroup 0).
+        return "root_group_without_privilege"
+    return supplementary_gids_problem(ident)
+
+
+def _identity_change(ident, gids, fresh) -> "dict | None":
+    """스냅숏 대 최신 LDAP 비교(제출 재확인·큐 대기 재확인 공용). None = 그대로 진행.
+    최신값은 valid_supplementary_gids 로 거른 **상한 적용 전** 유효 집합과 비교한다 -- '그룹이 늘어 256 을 넘었다'
+    는 이유로 종단되지 않게. 최신에만 있는 gid 는 무시한다(권한은 늘지 않는다 -- 새 그룹은 재신청해야 반영)."""
+    if fresh is None:
+        return {"user_missing": True, "missing_gids": list(gids), "uid_changed": None, "gid_changed": None}
+    valid, _excluded = valid_supplementary_gids(fresh.group_gids, primary_gid=fresh.gid)
+    missing = sorted(set(gids) - set(valid))
+    uid_changed, gid_changed = fresh.uid != ident["uid"], fresh.gid != ident["gid"]
+    if missing or uid_changed or gid_changed:
+        return {"user_missing": False, "missing_gids": missing,
+                "uid_changed": uid_changed, "gid_changed": gid_changed}
     return None
 
 
 class JobStepper:
-    def __init__(self, repos, execution_adapter, *, settings):
+    def __init__(self, repos, execution_adapter, *, settings, identity_resolver=None, clock=None,
+                 monotonic=None):
         self._repos = repos
         self._exec = execution_adapter
         self._settings = settings
+        # 보조 그룹 재확인(모듈 docstring). resolver 는 원시 LdapIdentityResolver 다 -- planner 의 _TickCircuit 은
+        # planner 전용이고, stepper 의 서킷·예산은 아래 틱 상태가 직접 든다.
+        self._resolver = identity_resolver
+        self._clock = clock or utc_now_iso             # D2 시도 시각(이벤트 payload attempted_at_epoch)
+        self._monotonic = monotonic or time.monotonic  # 틱 LDAP 예산 시계
+        # 틱 상태(JobStepper 는 틱마다 새로 만들어진다 -- controller._stepper_step). 틱을 넘는 메모리 상태는 두지
+        # 않는다(지속 상태는 DB): D2 시도 횟수·간격은 events 로 센다(_recheck_history).
+        self._fresh_cache: dict = {}     # username → ResolvedIdentity | None(계정 삭제) | IdentityLookupInvalid
+        self._ldap_circuit_open = False
+        self._ldap_spent = 0.0
+        self._queued_rechecks: list = []  # [(job, phase)] -- run_once 가 클레임 루프 뒤에 처리(2패스)
 
     def run_once(self) -> dict:
         control = self._repos.control.control_state()
         if control and control["drain"]:
             return {}
+        t0 = self._monotonic()
         results = {}
         for job in self._repos.data_jobs.claim_steppable():
             jid = job["job_id"]
@@ -163,7 +259,171 @@ class JobStepper:
                     component="stepper", severity="error", event_type="step_error",
                     message=f"{type(exc).__name__}: {exc}"[:500],
                     request_id=job.get("request_id"))
+        # 2패스: vcjob 큐 대기 재확인은 제출이 LDAP 예산을 먼저 쓴 **뒤에** 한다 -- 그 틱의 첫 LDAP 사용은 언제나
+        # 계수되는 제출 시도라 "한 번 불가를 보면 나머지는 보류"(D2)가 문언 그대로 성립하고 폴링 잡이 제출을 굶기지
+        # 않는다(폴링은 updated_at 을 갱신하지 않아 claim 앞쪽에 선다).
+        self._run_queued_rechecks(results)
+        elapsed = self._monotonic() - t0
+        if (elapsed > _SLOW_TICK_SECONDS or self._ldap_circuit_open
+                or self._ldap_spent >= LDAP_TICK_BUDGET_SECONDS):
+            # 틱 시간 불변식(예산 + 진행 중 한 단계 < 리스 30s)의 운영 측정점. 서킷·예산이 걸린 틱도 남긴다.
+            print(f"stepper: tick {elapsed:.1f}s ldap {self._ldap_spent:.1f}s/{LDAP_TICK_BUDGET_SECONDS}s "
+                  f"circuit={'open' if self._ldap_circuit_open else 'closed'}", file=sys.stderr)
         return results
+
+    # ---- 보조 그룹 LDAP 재확인(D1·D2) ----
+
+    def _ldap_gate(self) -> "str | None":
+        """같은 틱의 서킷·예산. None 이면 LDAP 를 불러도 된다."""
+        if self._ldap_circuit_open:
+            return "circuit_open"
+        if self._ldap_spent >= LDAP_TICK_BUDGET_SECONDS:
+            return "ldap_budget"
+        return None
+
+    def _resolve_fresh(self, username):
+        """캐시 미스에서만 부른다(호출자가 _ldap_gate 를 먼저 본다). 남은 틱 예산을 deadline 으로 넘겨 리졸버가 그
+        시각 뒤엔 새 LDAP 연산을 시작하지 않게 한다. IdentityLookupInvalid(사용자별 데이터 문제 -- 중복 엔트리 등)는
+        캐시만 하고 서킷을 열지 않는다: 한 사용자의 디렉터리 문제가 그 틱 전원을 보류시키지 않게. 전송 오류·마감·
+        서버 전역 결과 코드(plain IdentityUnavailable)만 서킷을 연다."""
+        t0 = self._monotonic()
+        try:
+            fresh = self._resolver.resolve(
+                username, deadline=t0 + (LDAP_TICK_BUDGET_SECONDS - self._ldap_spent))
+        except IdentityLookupInvalid as exc:
+            self._fresh_cache[username] = exc
+            raise
+        except IdentityUnavailable:
+            self._ldap_circuit_open = True
+            raise
+        finally:
+            self._ldap_spent += self._monotonic() - t0
+        self._fresh_cache[username] = fresh       # None(계정 삭제)도 캐시 -- 같은 틱 같은 사용자는 한 번만
+        return fresh
+
+    def _recheck_history(self, job) -> "tuple[int, float | None]":
+        """(streak, last_epoch) -- 이 잡의 연속 계수 실패 수와 마지막 계수 시도 시각. events 가 카운터다(스키마 변경
+        없음): identity_recheck_deferred 는 +1, identity_groups_checked(재확인 통과)는 0 으로 리셋. 시각은 행의 at 이
+        아니라 payload.attempted_at_epoch(주입 clock 기준 -- 실시간과 섞이지 않게). 같은 요청의 다른 잡 이벤트는
+        payload.job_id 로 거른다."""
+        streak, last = 0, None
+        events = self._repos.observability.events_of_types(
+            job["request_id"], ("identity_recheck_deferred", "identity_groups_checked"), limit=50)
+        for e in events:
+            payload = e.get("payload")
+            if not isinstance(payload, dict) or payload.get("job_id") != job["job_id"]:
+                continue
+            if e["event_type"] == "identity_groups_checked":
+                streak, last = 0, None
+            else:
+                streak += 1
+                at = payload.get("attempted_at_epoch")
+                last = at if isinstance(at, (int, float)) and not isinstance(at, bool) else None
+        return streak, last
+
+    def _judge(self, job, ident, gids, phase, fresh):
+        change = _identity_change(ident, gids, fresh)
+        if change is not None:
+            raise IdentityChangedAtStep({"job_id": job["job_id"], "phase": phase, "queued": False, **change})
+        # 통과 기록은 D2 streak 리셋 표식을 겸한다. 일반 record_event 인 이유: 기록이 실패하면 streak 가 리셋되지
+        # 않아 다음 단계의 장애 재시도가 줄어드는 쪽(보수적)이라 strict 로 막을 이유가 없다.
+        self._repos.observability.record_event(
+            component="stepper", severity="info", event_type="identity_groups_checked",
+            message=f"보조 그룹 재확인 통과 {phase} gids={gids}"[:500],
+            payload={"job_id": job["job_id"], "phase": phase, "gids": gids},
+            request_id=job.get("request_id"))
+
+    def _recheck_groups_for_submit(self, job, ident, gids, phase):
+        """D1 제출 직전 재확인 + D2 보류·재시도. 순서가 계약이다(값싼 판정 먼저, 쓸 수 있는 결과를 두고 기다리지 않음):
+        (1) 같은 틱 캐시 적중 → LDAP 호출 없이 판정(간격 보류보다 먼저 -- 이미 받은 최신값을 두고 60s 를 더 기다리지
+        않는다) (2) 간격(마지막 계수 시도 < 60s 면 미계수 보류) (3) 같은 틱 서킷·예산(미계수 보류) (4) resolve.
+        실패(같은 틱 같은 사용자의 IdentityLookupInvalid 캐시 포함)는 계수 보류, streak 3 에서 또 실패하면 종단."""
+        if self._resolver is None:
+            raise LdapNotConfiguredAtStep()
+        username = ident["username"]
+        hit = self._fresh_cache.get(username, _MISS)
+        if hit is not _MISS and not isinstance(hit, Exception):
+            return self._judge(job, ident, gids, phase, hit)
+        streak, last_epoch = self._recheck_history(job)
+        now_epoch = iso_epoch(self._clock())
+        if last_epoch is not None and now_epoch - last_epoch < _LDAP_RECHECK_SPACING_SECONDS:
+            raise IdentityRecheckHeld(phase, counted=False, reason="spacing")
+        if hit is _MISS:
+            gate = self._ldap_gate()
+            if gate is not None:
+                raise IdentityRecheckHeld(phase, counted=False, reason=gate)
+            try:
+                fresh = self._resolve_fresh(username)
+            except IdentityUnavailable as exc:
+                failure = exc
+            else:
+                return self._judge(job, ident, gids, phase, fresh)
+        else:
+            failure = hit      # 같은 틱 같은 사용자의 IdentityLookupInvalid -- 재호출 없이 이 잡의 시도로 센다
+        # LDAP 원문(URI·소켓 오류)은 로그에만 -- 요청 이벤트는 비관리자 요청자에게도 반환된다.
+        logger.warning("identity recheck failed job=%s phase=%s: %s", job["job_id"], phase, failure)
+        if streak >= _LDAP_RECHECK_RETRIES:
+            raise IdentityRecheckExhausted(phase, attempts=streak + 1)
+        raise IdentityRecheckHeld(phase, counted=True, reason="ldap_unavailable",
+                                  attempt=streak + 1, attempted_at_epoch=now_epoch)
+
+    def _record_identity_changed(self, job, exc):
+        self._repos.observability.record_event(
+            component="stepper", severity="warning", event_type="identity_changed_at_step",
+            message=f"LDAP 변경으로 중단 missing={exc.payload.get('missing_gids')} job={job['job_id']}"[:500],
+            payload=exc.payload, request_id=job.get("request_id"))
+
+    def _note_queued_recheck(self, job, phase):
+        """vcjob PENDING(preview·execution) 1패스: 모양은 즉시 검사하고(제출 뒤 변조 -- 도구 시작 전이라 종단해도
+        잃을 것이 없다), LDAP 비교는 2패스로 미룬다. 파드 단계(preflight·exec_preflight)는 넣지 않는다 -- 바로 뒤에
+        반드시 제출 재확인이 오므로 LDAP 부하만 더한다."""
+        wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
+        ident = wp.get("identity")
+        problem = identity_problem(ident)
+        if problem is not None:
+            raise IdentityMissingAtStep(problem)
+        if ident.get("privileged") or self._resolver is None:
+            return
+        v = ident.get("supplementary_gids")
+        if v is None or len(v) == 0:      # null ≠ 0: 부재·[] 만 '없음'(모양 검사를 통과했으니 v 는 list 또는 None)
+            return
+        self._queued_rechecks.append((job, phase))
+
+    def _run_queued_rechecks(self, results):
+        for job, phase in self._queued_rechecks:
+            jid = job["job_id"]
+            try:
+                self._queued_recheck_one(job, phase)
+            except IdentityChangedAtStep as exc:
+                self._record_identity_changed(job, exc)
+                results[jid] = self._fail_closed(job, reason_code="identity_changed_at_step")
+            except Exception as exc:     # 잡마다 격리(run_once 의 step_error 관례)
+                print(f"stepper queued recheck error on {jid}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+                results[jid] = f"error:{type(exc).__name__}"
+                self._repos.observability.record_event(
+                    component="stepper", severity="error", event_type="step_error",
+                    message=f"{type(exc).__name__}: {exc}"[:500], request_id=job.get("request_id"))
+
+    def _queued_recheck_one(self, job, phase):
+        """2패스 한 건. LDAP 불가·서킷·예산·사용자별 조회 오류는 **아무것도 하지 않는다**(미계수·무이벤트 -- 제출 때
+        이미 확인됐고, '3번' 계수는 제출 재확인만). 성공도 이벤트를 남기지 않는다(틱마다 남기면 요청 이벤트 목록을
+        덮는다). 줄었으면 종단."""
+        ident = job["worker_pool"]["identity"]      # 1패스가 모양을 검사했다
+        gids = list(ident["supplementary_gids"])
+        hit = self._fresh_cache.get(ident["username"], _MISS)
+        if hit is _MISS:
+            if self._ldap_gate() is not None:
+                return
+            try:
+                hit = self._resolve_fresh(ident["username"])
+            except IdentityUnavailable:
+                return
+        if isinstance(hit, Exception):
+            return
+        change = _identity_change(ident, gids, hit)
+        if change is not None:
+            raise IdentityChangedAtStep({"job_id": job["job_id"], "phase": phase, "queued": True, **change})
 
     def _abs(self, storage_name, rel):
         storage = self._repos.storages.get(storage_name)
@@ -198,7 +458,8 @@ class JobStepper:
         wp = job["worker_pool"] if isinstance(job["worker_pool"], dict) else {}
         # 신원 가드(IdentityMissingAtStep docstring): 어댑터가 uid/gid 를 0 으로
         # 기본값 처리하기 **전에** 끊는다. 모든 제출 경로(preflight/preview/
-        # exec_preflight/execution)가 이 함수를 지나므로 여기가 단일 관문이다.
+        # exec_preflight/execution)가 이 함수를 지나므로 여기가 단일 관문이다 --
+        # 보조 gid 가 있으면 LDAP 재확인(D1)도 여기서 한다(값싼 검사들 뒤, JobSpec 앞).
         problem = identity_problem(wp.get("identity"))
         if problem is not None:
             raise IdentityMissingAtStep(problem)
@@ -239,9 +500,16 @@ class JobStepper:
             timeout = policy["execution_timeout_seconds"]
         else:
             timeout = policy["preview_timeout_seconds"]
+        # 보조 그룹 재확인(D1, 모듈 docstring) -- 값싼 실패(모양·root 근거·노드·chown·경로)가 LDAP 보다 먼저다.
+        # 모양 검사를 통과했으니 v 는 None(배포 전 잡 = 없음) 또는 유효 list. 비교는 `is None`(null ≠ []).
+        v = wp["identity"].get("supplementary_gids")
+        gids = [] if v is None else list(v)
+        if gids:
+            self._recheck_groups_for_submit(job, wp["identity"], gids, phase)
         return JobSpec(
             job_id=job["job_id"], phase=phase, operation=op, tool=job["tool"],
-            dryrun=dryrun, identity=wp.get("identity", {}), paths=paths,
+            # 키를 항상 싣는 정규화 사본 -- 빌더는 재확인을 통과한 **스냅숏**(최신값이 아니라)만 본다.
+            dryrun=dryrun, identity={**wp["identity"], "supplementary_gids": gids}, paths=paths,
             options=job["options"] or {}, candidates=wp.get("candidates", {}),
             process_count=wp.get("process_count", 1), queue=wp.get("queue", "dms-data"),
             priority_class=wp.get("priority_class", "dms-mid"),
@@ -326,9 +594,22 @@ class JobStepper:
         넘어온 reason_code 로 접는다 -- 파드 로그는 신뢰 입력이 아니라(설계 §4)
         임의 문자열을 사유에 박으면 프론트 매핑이 없어 원문 코드가 그대로
         노출된다. 박제 순서는 그대로 유지된다: 여기서 박제한 뒤 _finalize 가
-        전이하므로 "박제 -> set_job_state" 계약이 깨지지 않는다."""
+        전이하므로 "박제 -> set_job_state" 계약이 깨지지 않는다.
+
+        LDAP 보류 중 사라진 파드(2026-10-07 D2): 보류는 preflight 가 **성공한 뒤** 다음 제출 직전에만 생기고, 그동안
+        Succeeded 파드가 남아 매 틱 다시 SUCCEEDED 로 폴링된다. 그 파드가 수동 삭제·kube terminated-pod GC 로
+        사라지면 폴링은 FAILED(마커 없음)라 폴백(preflight_failed/execution_recheck_failed)은 실제 원인과 다른
+        사유다. 마지막 재확인 이벤트가 deferred(streak > 0)면 그 경우로 보고 ldap_unavailable 로 접는다 -- 재확인
+        통과가 streak 를 리셋하므로 통과 뒤의 진짜 preflight 실패를 오판하지 않는다."""
         raw = self._archive_diag(job, phase, ref)
         promoted = parse_preflight_reason(raw)
+        if promoted is None and self._recheck_history(job)[0] > 0:
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="identity_recheck_failed",
+                message=f"LDAP 보류 중 {phase} 파드가 사라져 중단",
+                payload={"job_id": job["job_id"], "phase": phase, "reason": "held_pod_vanished"},
+                request_id=job.get("request_id"))
+            return "ldap_unavailable"
         return reason_code if promoted is None else promoted
 
     def _run_failure_reason(self, job, phase, ref, *, reason_code):
@@ -462,6 +743,47 @@ class JobStepper:
                 message=f"privileged identity without run_as_root/batch job={job['job_id']}",
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="privilege_not_requested")
+        # ---- 보조 그룹 재확인(D1·D2). 이벤트 message·payload 에 LDAP 예외 원문을 싣지 않는다(로그에만) ----
+        except IdentityChangedAtStep as exc:
+            self._record_identity_changed(job, exc)
+            return self._fail_closed(job, reason_code="identity_changed_at_step")
+        except IdentityRecheckHeld as exc:
+            if exc.counted:
+                try:
+                    # 이 이벤트가 곧 D2 카운터다 -- strict 기록(실패하면 예외).
+                    self._repos.observability.record_event_strict(
+                        component="stepper", severity="warning", event_type="identity_recheck_deferred",
+                        message=f"LDAP 재확인 불가 -- {exc.phase} 제출 보류 {exc.attempt}/{_LDAP_RECHECK_RETRIES + 1}",
+                        payload={"job_id": job["job_id"], "phase": exc.phase, "attempt": exc.attempt,
+                                 "max_attempts": _LDAP_RECHECK_RETRIES + 1,
+                                 "attempted_at_epoch": exc.attempted_at_epoch},
+                        request_id=job.get("request_id"))
+                except Exception as inner:  # noqa: BLE001 -- 카운터를 못 쓰면 "3번만"을 보장할 수 없다: fail-closed
+                    logger.warning("recheck counter write failed job=%s: %s", job["job_id"], inner)
+                    self._repos.observability.record_event(
+                        component="stepper", severity="error", event_type="identity_recheck_failed",
+                        message=f"LDAP 재확인 보류 기록 실패로 중단 -- {exc.phase}",
+                        payload={"job_id": job["job_id"], "phase": exc.phase, "reason": "counter_unwritable"},
+                        request_id=job.get("request_id"))
+                    return self._fail_closed(job, reason_code="ldap_unavailable")
+            # 보류: 상태 불변, claim 큐 뒤로만(다른 잡을 굶기지 않는다). 다음 틱에 같은 분기로 _build_spec 에 다시 온다.
+            self._repos.data_jobs.touch(job["job_id"], expected_state=job["state"])
+            return job["state"]
+        except IdentityRecheckExhausted as exc:
+            self._repos.observability.record_event(
+                component="stepper", severity="error", event_type="identity_recheck_failed",
+                message=f"LDAP 재확인 {exc.attempts}회 실패 -- {exc.phase} 종단",
+                payload={"job_id": job["job_id"], "phase": exc.phase, "attempts": exc.attempts,
+                         "reason": "ldap_unavailable"},
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="ldap_unavailable")
+        except LdapNotConfiguredAtStep:
+            self._repos.observability.record_event(
+                component="stepper", severity="error", event_type="identity_recheck_failed",
+                message=f"보조 그룹 재확인 불가(LDAP 미구성) job={job['job_id']}",
+                payload={"job_id": job["job_id"], "reason": "ldap_not_configured"},
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="ldap_not_configured")
 
     def _dispatch(self, job) -> str:
         state = job["state"]
@@ -558,6 +880,9 @@ class JobStepper:
             self._repos.data_jobs.record_sched_wait(job)
         if status == ExecStatus.PENDING:
             self._raise_if_blocked(job)
+            # vcjob 큐 대기 중 보조 그룹 재확인(D1) -- RUNNING 은 하지 않는다(프로세스 자격이 이미 고정, 노드 재검사와
+            # 같은 원칙). 모양은 즉시, LDAP 비교는 2패스(_run_queued_rechecks).
+            self._note_queued_recheck(job, "execution")
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return job["state"]
         if status == ExecStatus.SUCCEEDED:
@@ -612,6 +937,7 @@ class JobStepper:
         status = self._exec.poll(ref)
         if status == ExecStatus.PENDING:
             self._raise_if_blocked(job)
+            self._note_queued_recheck(job, "preview")   # _poll_execution 과 같은 큐 대기 재확인(D1)
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return "PreviewRunning"
         if status == ExecStatus.SUCCEEDED:

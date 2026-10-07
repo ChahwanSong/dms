@@ -76,3 +76,54 @@ def test_prune_events_exhausts_all_batches_in_a_single_call(repos):
                                          event_type=f"old{i}", request_id="r1")
     assert repos.observability.prune_events("2999-01-01T00:00:00Z", batch_size=2) == 5
     assert repos.observability.events_for_request("r1") == []
+
+
+# ---- 2026-10-07 D2: 카운터 이벤트(strict 기록)와 유형별 조회 ----
+
+def test_events_of_types_filters_and_returns_ascending(repos):
+    for t in ("a", "x", "b", "a", "y"):
+        repos.observability.record_event(component="stepper", severity="info",
+                                         event_type=t, payload={"t": t}, request_id="r1")
+    repos.observability.record_event(component="stepper", severity="info",
+                                     event_type="a", request_id="r2")
+    rows = repos.observability.events_of_types("r1", ("a", "b"))
+    assert [e["event_type"] for e in rows] == ["a", "b", "a"]
+    assert rows[0]["payload"] == {"t": "a"}                 # payload 디코드
+    assert repos.observability.events_of_types("r1", ()) == []
+
+
+def test_events_of_types_limit_keeps_the_newest_of_those_types_only(repos):
+    # events_for_request(최근 100건 전부)와 달리 다른 유형이 아무리 많아도 카운터 이벤트가 창 밖으로 밀리지 않는다.
+    for i in range(3):
+        repos.observability.record_event(component="stepper", severity="info",
+                                         event_type="counter", payload={"i": i}, request_id="r1")
+    for _ in range(120):
+        repos.observability.record_event(component="stepper", severity="info",
+                                         event_type="noise", request_id="r1")
+    assert all(e["event_type"] == "noise"
+               for e in repos.observability.events_for_request("r1"))
+    rows = repos.observability.events_of_types("r1", ("counter",), limit=2)
+    assert [e["payload"]["i"] for e in rows] == [1, 2]
+
+
+def test_record_event_strict_raises_while_record_event_still_swallows():
+    from dms.repositories.observability import ObservabilityRepository
+
+    class _Boom:
+        def execute(self, *a, **k): raise RuntimeError("db down")
+        def query(self, *a, **k): raise RuntimeError("db down")
+
+    repo = ObservabilityRepository(_Boom())
+    with pytest.raises(RuntimeError):
+        repo.record_event_strict(component="stepper", severity="warning",
+                                 event_type="identity_recheck_deferred")
+    repo.record_event(component="stepper", severity="warning", event_type="x")   # 삼킨다
+
+
+def test_record_event_strict_writes_like_record_event(repos):
+    repos.observability.record_event_strict(component="stepper", severity="warning",
+                                            event_type="identity_recheck_deferred",
+                                            message="m", payload={"attempt": 1}, request_id="r1")
+    (row,) = repos.observability.events_for_request("r1")
+    assert (row["event_type"], row["payload"], row["message"]) == (
+        "identity_recheck_deferred", {"attempt": 1}, "m")
