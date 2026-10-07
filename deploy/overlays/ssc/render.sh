@@ -61,6 +61,15 @@ for k in $KEYS; do
 done
 [ -z "$bad" ] || { echo "FAIL: values.env 미치환/빈 값 -->$bad"; exit 2; }
 
+# 선택 키(2026-10-08, prod 오버레이와 같은 규칙): KEYS(필수)에 넣지 않는다 -- 이 키가 생기기 전의 values.env 도 그대로
+# 렌더돼야 한다(생략 = 코드 기본과 같은 "true"). 값은 true|false 만: config 의 파서는 true/1 외 전부 꺼짐으로 읽어
+# "True"·"yes" 같은 오타가 조용히 기능을 끈다 -- 여기서 시끄럽게 실패시킨다.
+IDENTITY_SUPPLEMENTARY_GROUPS="${IDENTITY_SUPPLEMENTARY_GROUPS:-true}"
+case "$IDENTITY_SUPPLEMENTARY_GROUPS" in
+  true|false) ;;
+  *) echo "FAIL: IDENTITY_SUPPLEMENTARY_GROUPS 는 true|false (지금: '$IDENTITY_SUPPLEMENTARY_GROUPS')"; exit 2;;
+esac
+
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$HERE/kustomization.yaml" "$HERE/patch-config.yaml" "$HERE/patch-ingress.yaml" "$OUT/"
 for f in "$OUT"/kustomization.yaml "$OUT"/patch-config.yaml "$OUT"/patch-ingress.yaml; do
@@ -77,6 +86,7 @@ for f in "$OUT"/kustomization.yaml "$OUT"/patch-config.yaml "$OUT"/patch-ingress
     -e "s|REPLACE_EMAIL_DOMAIN|$EMAIL_DOMAIN|g" \
     -e "s|REPLACE_LOCAL_ADMIN|$LOCAL_ADMIN|g" \
     -e "s|REPLACE_PORTAL_DOMAIN|$PORTAL_DOMAIN|g" \
+    -e "s|REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS|$IDENTITY_SUPPLEMENTARY_GROUPS|g" \
     "$f"
 done
 

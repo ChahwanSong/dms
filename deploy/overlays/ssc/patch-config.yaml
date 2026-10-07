@@ -52,3 +52,7 @@ data:
   # 특권 요청자: 로컬 admin 계정(LDAP 밖)을 넣는다. 테스트베드의 mason 은 예시 --
   # 프로덕션 로컬 운영자 계정으로 교체(root/admin 은 관례상 유지).
   DMS_PRIVILEGED_REQUESTERS: "root,admin,REPLACE_LOCAL_ADMIN"
+
+  # 보조 그룹 인정 스위치(2026-10-08, values.env 의 선택 키 IDENTITY_SUPPLEMENTARY_GROUPS -- 생략이면 "true" =
+  # 코드 기본과 같다). 계획 시점 전용 -- 바꾸면 dms-controller 재시작. 덮는 범위는 deploy/README §2c 표.
+  DMS_IDENTITY_SUPPLEMENTARY_GROUPS: "REPLACE_IDENTITY_SUPPLEMENTARY_GROUPS"

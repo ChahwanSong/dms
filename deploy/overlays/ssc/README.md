@@ -37,6 +37,8 @@ kubectl label node <WEB_NODE> dms.io/web-node=true
 # 3) 값 채우기 — 파일 하나 (PORTAL_VIP 없음; WEB_NODE·PORTAL_PUBLIC_IP 추가, PORTAL_PORT 는 443 기본)
 cp deploy/overlays/ssc/values.env.example deploy/overlays/ssc/values.env
 $EDITOR deploy/overlays/ssc/values.env   # WEB_NODE=ion2110, PORTAL_PUBLIC_IP=<bond0 public IP>
+#    선택 키 IDENTITY_SUPPLEMENTARY_GROUPS(true|false, 기본 true) -- 보조 그룹(LDAP gidNumber) 인정의 비상 끄기.
+#    계획 시점 전용이라 바꾼 뒤 `kubectl -n dms rollout restart deploy/dms-controller`(덮는 범위는 deploy/README §2c 표).
 
 # 4) 이미지 4종(dms·dms-agent·dms-mpifileutils·buildah)을 이 호스트의 podman/docker 에 준비
 #    -- push 는 install.sh 1b 단계가 REGISTRY 로 자동 수행(실패·로컬 이미지 없음은 WARN:
