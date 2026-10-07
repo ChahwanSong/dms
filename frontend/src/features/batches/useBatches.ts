@@ -45,10 +45,10 @@ const _refresh = (qc: QueryClient, id: string) =>
   Promise.all([qc.invalidateQueries({ queryKey: ["batch", id] }),
                qc.invalidateQueries({ queryKey: ["batches"] })]);
 
-function _action(id: string, verb: string) {
+function _action<B = void>(id: string, verb: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => apiSend("POST", `/api/admin/batches/${id}:${verb}`),
+    mutationFn: (body: B) => apiSend("POST", `/api/admin/batches/${id}:${verb}`, body),
     onSettled: () => _refresh(qc, id),
   });
 }
@@ -208,7 +208,8 @@ export const useDeleteBatches = () => {
     onSettled: () => qc.invalidateQueries({ queryKey: ["batches"] }),
   });
 };
-export const useConfirmBatch = (id: string) => _action(id, "confirm");
+// 확인은 대화상자를 연 회차(preview_round)를 싣는다 -- 서버가 다른 회차면 409 batch_preview_changed(ABA 방지).
+export const useConfirmBatch = (id: string) => _action<{ preview_round: number }>(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");
 export const useRescanBatch = (id: string) => _action(id, "rescan");

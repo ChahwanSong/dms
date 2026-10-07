@@ -3,10 +3,26 @@ NULL 인 잡(Rejected 등)도 포함해야 한다 -- 그 잡들의 stdout/stderr
 유일한 진단 사본이라, NOT NULL 로 좁히면 정확히 그 증거를 버린다."""
 import json
 
+import pytest
+
 from dms.domain import DataJobState
 from dms.repositories import Repositories
 
 ADMIN = {"Authorization": "Bearer tok-shared"}
+
+
+def _login_session_admin(client):
+    # base 변경(PUT)은 세션 관리자만(admin_session_required, 2026-10-07) -- 공유 토큰은 모든 노드
+    # 에이전트가 쥔 자격이다. Bearer 헤더가 세션 쿠키보다 우선하므로 PUT 엔 헤더를 싣지 않고, 조회와
+    # 즉석 검증(POST validate, 저장 없음)은 토큰 그대로 둔다(토큰으로도 계속 된다).
+    client.app.state.repos.accounts.create("opadm", "p", "admin", actor="t")
+    assert client.post("/api/auth/login", json={"username": "opadm", "password": "p"}).status_code == 200
+    return client
+
+
+@pytest.fixture
+def session_admin(client):
+    _login_session_admin(client)
 
 
 def _make_rejected_job(repos):
@@ -44,9 +60,9 @@ def test_get_reports_env_source_when_db_null(client):
     assert body["checks"]["nodes"] == []
 
 
-def test_put_normalizes_validates_and_saves(client, db, tmp_path):
+def test_put_normalizes_validates_and_saves(client, db, tmp_path, session_admin):
     r = client.put("/api/admin/artifact-base",
-                   json={"uri": f"file://{tmp_path}/"}, headers=ADMIN)
+                   json={"uri": f"file://{tmp_path}/"})
     assert r.status_code == 200
     body = r.json()
     assert body["source"] == "db"
@@ -56,24 +72,24 @@ def test_put_normalizes_validates_and_saves(client, db, tmp_path):
     assert row["artifact_base_uri"] == f"file://{tmp_path}"
 
 
-def test_put_rejects_bad_input_with_reason_codes(client, db, tmp_path):
+def test_put_rejects_bad_input_with_reason_codes(client, db, tmp_path, session_admin):
     cases = [("relative/x", "artifact_base_not_absolute"),
              ("/a/../b", "artifact_base_traversal"),
              (f"{tmp_path}/file://x", "artifact_base_scheme_in_path"),
              (f"{tmp_path}/nope", "artifact_base_missing")]
     for uri, code in cases:
-        r = client.put("/api/admin/artifact-base", json={"uri": uri}, headers=ADMIN)
+        r = client.put("/api/admin/artifact-base", json={"uri": uri})
         assert (r.status_code, r.json()["detail"]) == (422, code), uri
     # 422 는 곧 "저장 안 됨"(설계 §2.4a) -- 어느 실패도 DB 를 만지지 않았다
     row = db.query_one("SELECT artifact_base_uri FROM control_state WHERE id = 1")
     assert row["artifact_base_uri"] is None
 
 
-def test_put_locked_when_any_job_exists_even_artifact_null(client, db, tmp_path):
+def test_put_locked_when_any_job_exists_even_artifact_null(client, db, tmp_path, session_admin):
     repos = Repositories(db)
     _make_rejected_job(repos)                  # artifact_uri NULL 인 잡 1건
     r = client.put("/api/admin/artifact-base",
-                   json={"uri": f"file://{tmp_path}"}, headers=ADMIN)
+                   json={"uri": f"file://{tmp_path}"})
     assert r.status_code == 409
     assert r.json()["detail"] == "artifact_base_locked"
     assert client.get("/api/admin/artifact-base",
@@ -83,11 +99,11 @@ def test_put_locked_when_any_job_exists_even_artifact_null(client, db, tmp_path)
     assert row["artifact_base_uri"] is None
 
 
-def test_put_force_passes_and_audits(client, db, tmp_path):
+def test_put_force_passes_and_audits(client, db, tmp_path, session_admin):
     repos = Repositories(db)
     _make_rejected_job(repos)
     r = client.put("/api/admin/artifact-base",
-                   json={"uri": f"file://{tmp_path}", "force": True}, headers=ADMIN)
+                   json={"uri": f"file://{tmp_path}", "force": True})
     assert r.status_code == 200
     entry = db.query(
         "SELECT * FROM audit_log WHERE mutation_class = 'artifact_base'")[-1]
@@ -107,13 +123,12 @@ def test_validate_does_not_save(client, db, tmp_path):
     assert r2.status_code == 422 and r2.json()["detail"] == "artifact_base_traversal"
 
 
-def test_node_hop_distinguishes_pending_from_failure(client, db, tmp_path):
+def test_node_hop_distinguishes_pending_from_failure(client, db, tmp_path, session_admin):
     # 설계 §4: null(모름)과 실패를 뭉개지 않는다. 옛 base 를 프로브한 노드와
     # 프로브 자체가 없는 노드는 "확인 대기 중"(pending)이지 실패가 아니다.
     repos = Repositories(db)
     path = str(tmp_path)
-    client.put("/api/admin/artifact-base", json={"uri": f"file://{path}"},
-               headers=ADMIN)
+    client.put("/api/admin/artifact-base", json={"uri": f"file://{path}"})
     repos.agents.ingest("w1", {"node_name": "w1",
                                "artifact_base": {"path": path, "exists": True,
                                                  "writable": False}})
@@ -134,10 +149,9 @@ def test_node_hop_distinguishes_pending_from_failure(client, db, tmp_path):
     assert nodes["w3"]["pending"] is True
 
 
-def test_controller_hop_pending_until_checked_for_current_base(client, db, tmp_path):
+def test_controller_hop_pending_until_checked_for_current_base(client, db, tmp_path, session_admin):
     repos = Repositories(db)
-    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}"},
-               headers=ADMIN)
+    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}"})
     body = client.get("/api/admin/artifact-base", headers=ADMIN).json()
     assert body["checks"]["controller"]["pending"] is True
     # 옛 base 의 검증 결과는 pending 을 풀지 못한다(오독 방지 -- check_uri 대조)
@@ -155,14 +169,13 @@ def test_controller_hop_pending_until_checked_for_current_base(client, db, tmp_p
         "checked_at": "2026-08-10T00:01:00Z"}
 
 
-def test_controller_loop_unblocks_api_controller_hop(client, db, tmp_path):
+def test_controller_loop_unblocks_api_controller_hop(client, db, tmp_path, session_admin):
     # 저장 직후 "확인 대기 중" -> 컨트롤러 한 틱 -> 정상, 의 수렴을 API 수준에서
     # 고정한다(설계 §2.4 닭-달걀 회피: 저장 전엔 (a)만 강제, (b)(c)는 저장 후
     # 폴링으로 수렴).
     from dms.artifact_base import controller_check_once
     repos = Repositories(db)
-    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}"},
-               headers=ADMIN)
+    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}"})
     assert client.get("/api/admin/artifact-base", headers=ADMIN).json()[
         "checks"]["controller"]["pending"] is True
     controller_check_once(repos, client.app.state.settings)
@@ -175,21 +188,20 @@ def test_history_requires_admin(client):
     assert client.get("/api/admin/artifact-base/history").status_code == 401
 
 
-def test_history_empty_then_records_change_and_force(client, db, tmp_path):
+def test_history_empty_then_records_change_and_force(client, db, tmp_path, session_admin):
     # 변경 전: 이력 없음(지어내지 않는다)
     assert client.get("/api/admin/artifact-base/history",
                       headers=ADMIN).json() == []
     # 1) 평시 변경: before 의 artifact_base_uri 는 NULL(당시 env 유효),
     #    after 는 정규화된 값 + forced=False/affected=0
-    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}/"},
-               headers=ADMIN)
+    client.put("/api/admin/artifact-base", json={"uri": f"file://{tmp_path}/"})
     # 2) 강제 변경: 잡 1건 존재 -> forced=True/affected=1 이 이력에 남는다
     repos = Repositories(db)
     _make_rejected_job(repos)
     sub = tmp_path / "next"
     sub.mkdir()
     client.put("/api/admin/artifact-base",
-               json={"uri": f"file://{sub}", "force": True}, headers=ADMIN)
+               json={"uri": f"file://{sub}", "force": True})
     hist = client.get("/api/admin/artifact-base/history", headers=ADMIN).json()
     assert len(hist) == 2                      # 최신 우선(DESC)
     forced, first = hist
@@ -202,12 +214,11 @@ def test_history_empty_then_records_change_and_force(client, db, tmp_path):
     assert all(e["actor"] and e["at"] for e in hist)
 
 
-def test_history_limit_bounds(client, db, tmp_path):
+def test_history_limit_bounds(client, db, tmp_path, session_admin):
     for i in range(3):
         d = tmp_path / f"d{i}"
         d.mkdir()
-        client.put("/api/admin/artifact-base", json={"uri": f"file://{d}"},
-                   headers=ADMIN)
+        client.put("/api/admin/artifact-base", json={"uri": f"file://{d}"})
     assert len(client.get("/api/admin/artifact-base/history?limit=2",
                           headers=ADMIN).json()) == 2
     # 경계 밖은 422(control-state/history 와 같은 계약)
@@ -226,7 +237,7 @@ def _allow_client(db, tmp_path, prefixes):
     settings = Settings(database_url="unused", shared_token="tok-shared",
                         admin_token="tok-admin", session_secret="sess-secret",
                         artifact_base_allowed_prefixes=tuple(prefixes))
-    return TestClient(create_app(settings, db))
+    return _login_session_admin(TestClient(create_app(settings, db)))
 
 
 def test_validate_and_put_reject_paths_outside_allowlist(db, tmp_path):
@@ -240,16 +251,14 @@ def test_validate_and_put_reject_paths_outside_allowlist(db, tmp_path):
     assert r.status_code == 422 and r.json()["detail"] == "artifact_base_outside_allowlist"
     # 허용 밖 경로에는 프로브 파일도 만들지 않는다(allowlist 가 왕복보다 먼저)
     assert not list(outside.glob(".dms-base-check-*"))
-    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{outside}"},
-                   headers=ADMIN)
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{outside}"})
     assert r.status_code == 422 and r.json()["detail"] == "artifact_base_outside_allowlist"
     assert db.query_one("SELECT artifact_base_uri FROM control_state WHERE id = 1"
                         )["artifact_base_uri"] is None
     # 허용 접두 아래는 그대로 통과한다
     inner = allowed / "dms" / "artifacts"
     inner.mkdir(parents=True)
-    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{inner}"},
-                   headers=ADMIN)
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{inner}"})
     assert r.status_code == 200 and r.json()["checks"]["api"] == {"ok": True, "reason": None}
 
 
@@ -262,11 +271,11 @@ def test_get_surfaces_allowlist_violation_of_the_effective_base(db, tmp_path):
     assert body["checks"]["api"] == {"ok": False, "reason": "artifact_base_outside_allowlist"}
 
 
-def test_put_rejects_world_writable_base(client, db, tmp_path):
+def test_put_rejects_world_writable_base(client, db, tmp_path, session_admin):
     loose = tmp_path / "loose"
     loose.mkdir()
     loose.chmod(0o777)
-    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{loose}"}, headers=ADMIN)
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{loose}"})
     assert r.status_code == 422 and r.json()["detail"] == "artifact_base_world_writable"
     assert db.query_one("SELECT artifact_base_uri FROM control_state WHERE id = 1"
                         )["artifact_base_uri"] is None

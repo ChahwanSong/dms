@@ -11,6 +11,9 @@ export interface RequestRow {
   priority: string; state: string; created_at: string; updated_at: string; payload: Record<string, unknown>;
   // 무한 스크롤 커서(슬라이스 39): 단조 증가. 다음 쪽은 ?before=<이 값>.
   commit_order: number;
+  // 배치 자식이면 그 배치 id(서버 requests.batch_id). 배치 자식은 단건 컨펌을 못 한다 -- 배치 확인으로만 실행된다
+  // (2026-10-07, 409 batch_child_confirm_via_batch). 옵션(?) = 구형 fixture 호환. null/부재 = 단건 요청.
+  batch_id?: string | null;
 }
 // events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
 // 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).
@@ -144,6 +147,9 @@ export interface Batch {
   // 생성 시 실은 연산 옵션(서버는 늘 보낸다 — SELECT * + load_json). 옵션(?)은
   // 기존 fixture 무수정 컴파일용일 뿐이다.
   options?: Record<string, unknown>;
+  // 확인 회차(2026-10-07): 확인 대기(PreviewReady)가 될 때마다 +1. 「배치 확인」은 대화상자를 연 회차를 실어 보낸다.
+  // 서버는 늘 정수로 보낸다(NULL 행은 0 으로 접는다) -- 옵션(?)은 기존 fixture 무수정 컴파일용, 부재는 0회차로 읽는다.
+  preview_round?: number;
 }
 export interface BatchItem {
   seq: number; payload: Record<string, unknown>; status: string;
@@ -155,6 +161,13 @@ export interface BatchItem {
   request_state?: string | null;
   files_count?: number | null;
   completed_at?: string | null;
+  // 미리보기 조인(2026-10-07, 배치 확인 대화상자): 자식 잡(최신 1개)의 상태·미리보기 요약·만료. null = 모름(잡 없음).
+  // job_state === "ConfirmPending" = 미리보기를 마치고 배치 확인을 기다리는 항목. preview_summary.files 는 단건
+  // ConfirmDialog 의 "복사 대상" 과 같은 값이다(같은 노드 dsync 는 dry-run 이 훑은 소스 항목 수, 노드 간 nsync 는 계획된
+  // 변경 수라 이미 맞는 항목은 빠진다). null = 모름(dsync dryrun 의 bytes 는 null -- 0 으로 뭉개지 않는다).
+  job_state?: string | null;
+  preview_summary?: { files?: number | null; bytes?: number | null; returncode?: number | null } | null;
+  preview_expires_at?: string | null;
 }
 export interface BatchDetail extends Batch { items: BatchItem[] }
 // 요청 단위 scan 리포트 통계(항목별 데이터 온도 — 배치 합산은 제거됐다). 서버가

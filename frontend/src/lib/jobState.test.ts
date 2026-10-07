@@ -1,4 +1,4 @@
-import { batchPillVariant, buildPillVariant, isTerminal, pillVariant,
+import { batchPillVariant, batchStatusLabel, buildPillVariant, isTerminal, pillVariant,
          storagePillVariant,
          REQUEST_TERMINAL_STATES, TERMINAL_STATES } from "./jobState";
 import { test, expect } from "vitest";
@@ -56,7 +56,8 @@ test("M5: batchPillVariant — 배치 상태 전용 매핑, 공유 pillVariant �
   expect(batchPillVariant("Completed")).toBe("ok");
   expect(batchPillVariant("Running")).toBe("busy");
   expect(batchPillVariant("Previewing")).toBe("busy");
-  expect(batchPillVariant("PreviewReady")).toBe("busy");
+  // 확인 대기(PreviewReady)는 운영자 행동이 필요한 유일한 상태 -- busy(진행 중)와 구별되는 action(2026-10-07).
+  expect(batchPillVariant("PreviewReady")).toBe("action");
   // Cancelled 는 운영자의 의도된 중지지 실패가 아니다 — bad(적색)는 "실패"라는
   // 거짓말이 된다(실패 수는 성공/실패 카운터가 따로 말한다). neutral.
   expect(batchPillVariant("Cancelled")).toBe("neutral");
@@ -73,4 +74,9 @@ test("잔여 상태 매핑(슬라이스 1~4 부채): PreviewExpired=bad, Plannin
   expect(pillVariant("PreviewExpired")).toBe("bad");
   expect(pillVariant("Planning")).toBe("busy");
   expect(pillVariant("Scheduled")).toBe("busy");
+});
+
+test("batchStatusLabel — 확인 대기만 한글 라벨, 나머지는 서버 상태 그대로", () => {
+  expect(batchStatusLabel("PreviewReady")).toBe("확인 대기");
+  for (const st of ["Previewing", "Running", "Completed", "Cancelled"]) expect(batchStatusLabel(st)).toBe(st);
 });

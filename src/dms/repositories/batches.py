@@ -2,9 +2,21 @@ import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
 
 _ACTIVE = ("Previewing", "Running")
+# batch_orchestrator._ITEM_TERMINAL 의 거울 -- 배치 완료 CAS(complete_if_all_terminal)의 판정.
+_ITEM_TERMINAL = ("Succeeded", "Failed", "Rejected", "Cancelled")
+_NO_QUEUED_ITEM = "NOT EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND status = 'Queued')"
 # 종단 배치에서 바꿀 수 있는 실행 설정(update_execution_settings). owner_username·operation·items·auth_method 는
 # 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫).
 _SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options")
+
+def _hydrate(row):
+    row["options"] = load_json(row["options"])
+    # 확인 회차 NULL = 업그레이드 전 행·아직 확인 대기가 된 적 없는 배치 = 0회차(모름이 아니라 정의된 시작값이다 --
+    # mark_preview_ready 와 confirm 의 SQL 도 COALESCE(preview_round, 0) 로 같은 규칙을 쓴다).
+    if row.get("preview_round") is None:
+        row["preview_round"] = 0
+    return row
+
 
 class BatchesRepository:
     def __init__(self, db: Database):
@@ -45,24 +57,25 @@ class BatchesRepository:
 
     def get(self, batch_id):
         row = self._db.query_one("SELECT * FROM batches WHERE batch_id = :b", {"b": batch_id})
-        if row is not None:
-            row["options"] = load_json(row["options"])
-        return row
+        return None if row is None else _hydrate(row)
 
     def list(self, limit=100):
         rows = self._db.query("SELECT * FROM batches ORDER BY created_at DESC LIMIT :n",
                               {"n": limit})
-        for r in rows:
-            r["options"] = load_json(r["options"])
-        return rows
+        return [_hydrate(r) for r in rows]
+
+    def list_awaiting_confirm(self):
+        """확인 대기(PreviewReady) 배치. orchestrator 가 **기록만** 하러 돈다(list_active 는 그대로 "굴리는" 상태 --
+        라우트가 그 뜻으로 쓴다): 이미 확인돼 실행 중이던 자식이 확인 대기 사이에 끝나면 그 결과를 항목에 남기고,
+        전부 끝났으면 완료한다. 새 자식 생성·컨펌·상태 변경은 하지 않는다."""
+        rows = self._db.query("SELECT * FROM batches WHERE status = 'PreviewReady' ORDER BY created_at")
+        return [_hydrate(r) for r in rows]
 
     def list_active(self):
         rows = self._db.query(
             "SELECT * FROM batches WHERE status = :a OR status = :b ORDER BY created_at",
             {"a": _ACTIVE[0], "b": _ACTIVE[1]})
-        for r in rows:
-            r["options"] = load_json(r["options"])
-        return rows
+        return [_hydrate(r) for r in rows]
 
     def list_items(self, batch_id):
         rows = self._db.query(
@@ -82,13 +95,30 @@ class BatchesRepository:
           전이와 원자적으로 남긴다). 비종단은 NULL. updated_at("마지막 전이")을
           완료 시각으로 쓰면 진행 중 요청에 거짓 완료 시각이 찍힌다
           (RecentRequestsSection 의 같은 취지 결정 미러).
-        배치 1개의 items 라 LEFT JOIN·서브쿼리 비용은 무리 없다."""
+        배치 1개의 items 라 LEFT JOIN·서브쿼리 비용은 무리 없다.
+        미리보기 조인(2026-10-07, 배치 확인 대화상자): 자식 잡(가장 최근 1개)의 상태·미리보기 요약·만료 시각.
+        - job_state: 잡 상태(ConfirmPending = 확인을 기다리는 미리보기 완료 항목). 잡 없음 = NULL.
+        - preview_summary: 미리보기 summary 사본(files/bytes/returncode) -- 운영자가 무엇을 확인하는지 보여 준다.
+          NULL = 모름(미리보기 전·구형 행). 값 안의 null(예: dsync dryrun 의 bytes)도 그대로 둔다(null≠0).
+        - preview_expires_at: 이 시각이 지나면 그 항목은 실행되지 않고 거부된다(stepper expire_previews)."""
         rows = self._db.query(
             """SELECT bi.*, r.state AS request_state,
                       (SELECT d.files_count FROM data_jobs d
                         WHERE d.request_id = bi.request_id
                         ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
                           AS files_count,
+                      (SELECT d.state FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS job_state,
+                      (SELECT d.preview_summary FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS preview_summary,
+                      (SELECT d.preview_expires_at FROM data_jobs d
+                        WHERE d.request_id = bi.request_id
+                        ORDER BY d.created_at DESC, d.job_id DESC LIMIT 1)
+                          AS preview_expires_at,
                       res.completed_at AS completed_at
                  FROM batch_items bi
                  LEFT JOIN requests r ON r.request_id = bi.request_id
@@ -96,6 +126,8 @@ class BatchesRepository:
                 WHERE bi.batch_id = :b ORDER BY bi.seq""", {"b": batch_id})
         for r in rows:
             r["payload"] = load_json(r["payload"])
+            r["preview_summary"] = (load_json(r["preview_summary"])
+                                    if r.get("preview_summary") is not None else None)
         return rows
 
     def get_item(self, batch_id, seq):
@@ -211,21 +243,55 @@ class BatchesRepository:
         params = {**fields, "b": batch_id, "s": seq}
         self._db.execute(f"UPDATE batch_items SET {sets} WHERE batch_id = :b AND seq = :s", params)
 
-    def set_item_materialized(self, batch_id, seq, request_id):
-        self._touch_item(batch_id, seq, status="Materialized", request_id=request_id)
+    def set_item_materialized(self, batch_id, seq, request_id) -> bool:
+        """Queued 항목 → Materialized(Queued 가드만). orchestrator 는 payload 까지 보는 claim_queued_item 을 쓴다 --
+        이건 payload 비교가 필요 없는 호출자(테스트 픽스처 등)용이다."""
+        return self._db.execute_count(
+            """UPDATE batch_items SET status = 'Materialized', request_id = :rid, updated_at = :now
+                  WHERE batch_id = :b AND seq = :s AND status = 'Queued'""",
+            {"rid": request_id, "now": utc_now_iso(), "b": batch_id, "s": seq}) == 1
+
+    def claim_queued_item(self, batch_id, seq, request_id, *, payload_raw) -> bool:
+        """Queued 항목을 자식 요청에 묶는다(→ Materialized) -- **호출자 트랜잭션 안에서**, 자식 요청 INSERT 와
+        같은 트랜잭션(orchestrator._materialize). 가드: 아직 Queued 이고 payload 가 orchestrator 가 자식을 만든
+        그 값(payload_raw = 같은 트랜잭션에서 읽은 저장 문자열)일 때만. 예전엔 무가드 갱신이라
+        스냅샷 뒤 관리자가 항목을 고치거나 지운 것을 덮었다 -- 화면엔 새 경로, 실제 자식은 옛 경로라 운영자가
+        본 것과 다른 미리보기를 확인하게 된다(2026-10-07 리뷰). 0 행이면 False -- 호출자가 롤백한다."""
+        return self._db.execute_count(
+            """UPDATE batch_items SET status = 'Materialized', request_id = :rid, updated_at = :now
+                  WHERE batch_id = :b AND seq = :s AND status = 'Queued' AND payload = :p""",
+            {"rid": request_id, "now": utc_now_iso(), "b": batch_id, "s": seq,
+             "p": payload_raw}) == 1
+
+    def queued_item_payload_raw(self, batch_id, seq) -> str | None:
+        """Queued 항목의 저장 payload 문자열(claim_queued_item 의 비교값). Queued 가 아니거나 없으면 None."""
+        row = self._db.query_one(
+            "SELECT payload FROM batch_items WHERE batch_id = :b AND seq = :s AND status = 'Queued'",
+            {"b": batch_id, "s": seq})
+        return None if row is None else row["payload"]
 
     def set_item_status(self, batch_id, seq, status, *, reason_code=None):
         self._touch_item(batch_id, seq, status=status, reason_code=reason_code)
 
-    def reject_queued_item(self, batch_id, seq, *, reason_code) -> bool:
+    def reject_queued_item(self, batch_id, seq, *, reason_code, expected_payload) -> bool:
         """자식을 만들기 전에 거부된 항목(orchestrator _materialize 의 재검증 실패) -> Rejected + 실패 1.
-        **아직 Queued 일 때만**(원자 가드): orchestrator 가 읽은 목록 뒤에 관리자가 항목을 지웠거나 바꿨으면
-        0행이고 집계도 하지 않는다 -- 무조건 bump 하면 지워진 항목 몫이 failed_count 에 남았다(2026-10-01 리뷰)."""
+        **아직 Queued 이고 payload 가 거부 판정에 쓴 그 값일 때만**(원자 가드): orchestrator 가 읽은 목록 뒤에 관리자가
+        항목을 지웠으면 0행, 고쳤으면(편집은 Queued 를 유지한다) 저장값이 달라 0행 -- 집계도 하지 않고 다음 틱이 새
+        payload 로 다시 판정한다. 무조건 bump 하면 지워진 항목 몫이 failed_count 에 남았고(2026-10-01 리뷰), payload
+        를 안 보면 고친 항목이 옛 경로의 사유로 거부됐다(2026-10-07 리뷰 -- claim_queued_item 과 같은 가드). UPDATE 에도
+        payload 를 거는 이유: Postgres READ COMMITTED 에서 SELECT 와 UPDATE 사이에 편집이 커밋되면 UPDATE 가 새 행
+        버전을 다시 평가해 0 행이 된다."""
+        changed = 0
         with self._db.transaction():
+            row = self._db.query_one(
+                "SELECT payload FROM batch_items WHERE batch_id = :b AND seq = :s AND status = 'Queued'",
+                {"b": batch_id, "s": seq})
+            if row is None or load_json(row["payload"]) != expected_payload:
+                return False
             changed = self._db.execute_count(
                 """UPDATE batch_items SET status = 'Rejected', reason_code = :r, updated_at = :now
-                   WHERE batch_id = :b AND seq = :s AND status = 'Queued'""",
-                {"r": reason_code, "now": utc_now_iso(), "b": batch_id, "s": seq})
+                   WHERE batch_id = :b AND seq = :s AND status = 'Queued' AND payload = :p""",
+                {"r": reason_code, "now": utc_now_iso(), "b": batch_id, "s": seq, "p": row["payload"]})
             if changed == 1:
                 self.bump_counts(batch_id, failed=1)
         return changed == 1
@@ -292,6 +358,89 @@ class BatchesRepository:
         self._db.execute(
             "UPDATE batches SET status = :s, updated_at = :now WHERE batch_id = :b",
             {"s": status, "now": utc_now_iso(), "b": batch_id})
+
+    def set_status_if(self, batch_id, status, *, from_states) -> bool:
+        """배치 상태 CAS: 지금 상태가 from_states 중 하나일 때만 status 로. 라우트는 요청 앞에서 읽은 배치 행으로
+        판단하는데, 그 사이 취소·확인·orchestrator 전이가 끼면 무조건 쓰기는 그것을 덮는다(취소된 배치 부활 등)."""
+        if not from_states:
+            return False
+        names = [f"f{i}" for i in range(len(from_states))]
+        return self._db.execute_count(
+            f"UPDATE batches SET status = :s, updated_at = :now "
+            f"WHERE batch_id = :b AND status IN ({', '.join(':' + n for n in names)})",
+            {"s": status, "now": utc_now_iso(), "b": batch_id,
+             **dict(zip(names, from_states))}) == 1
+
+    def reopen_if_queued(self, batch_id) -> bool:
+        """PreviewReady 인데 Queued 항목이 있으면 Previewing 으로(한 문장). 확인(confirm)이 Queued 때문에 거절된 배치가
+        확인 대기에 영영 갇히지 않게 하는 자가 치유 -- 정상 경로(라우트의 Previewing 복귀)를 놓친 경우에만 쓸모가 있다."""
+        return self._db.execute_count(
+            """UPDATE batches SET status = 'Previewing', updated_at = :now
+                  WHERE batch_id = :b AND status = 'PreviewReady'
+                    AND EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND status = 'Queued')""",
+            {"now": utc_now_iso(), "b": batch_id}) == 1
+
+    def mark_preview_ready(self, batch_id) -> bool:
+        """Previewing → PreviewReady, 단 **Queued 항목이 하나도 없을 때만**(한 문장). orchestrator 는 틱 스냅샷으로
+        "전원 미리보기 끝" 을 판정하는데, 그 뒤 API 가 항목을 추가·재실행했으면 미리보기 안 된 Queued 가 있는 채로
+        확인 대기가 되고, 확인하면 그 항목이 사람 확인 없이 root 로 돈다(2026-10-07 리뷰). 0 행이면 다음 틱이 판정한다."""
+        return self._db.execute_count(
+            f"""UPDATE batches SET status = 'PreviewReady', preview_round = COALESCE(preview_round, 0) + 1,
+                       updated_at = :now
+                  WHERE batch_id = :b AND status = 'Previewing' AND {_NO_QUEUED_ITEM}""",
+            {"now": utc_now_iso(), "b": batch_id}) == 1
+
+    def complete_if_all_terminal(self, batch_id, *, from_status) -> bool:
+        """from_status → Completed, 단 **모든 항목이 종단일 때만**(한 문장). 스냅샷 뒤 추가된 Queued 항목을 둔 채
+        완료로 덮으면 그 항목은 아무도 집지 않는다(종단 배치는 루프 밖)."""
+        ph = ", ".join(f"'{s}'" for s in _ITEM_TERMINAL)
+        return self._db.execute_count(
+            f"""UPDATE batches SET status = 'Completed', updated_at = :now
+                  WHERE batch_id = :b AND status = :cur
+                    AND NOT EXISTS (SELECT 1 FROM batch_items
+                                     WHERE batch_id = :b AND status NOT IN ({ph}))""",
+            {"now": utc_now_iso(), "b": batch_id, "cur": from_status}) == 1
+
+    def confirm(self, batch_id, *, actor, summary, expected_round) -> bool:
+        """sync 배치 확인(PreviewReady → Running) + 감사 행, 한 트랜잭션(2026-10-07).
+
+        가드는 SQL 한 문장(WHERE status = 'PreviewReady')이다 -- 라우트가 읽은 뒤 그 사이 항목 추가·재실행으로 배치가
+        Previewing 으로 되돌아갔으면 영향 행 0 = False(호출자 409). 읽고 나서 set_status 로 쓰면 운영자가 본 것과 다른
+        배치(사람이 보지 않은 새 항목 포함)를 확인하게 된다. 감사: 확인이 곧 root 실행 시작인데 자식 전이 actor 는
+        batch-orchestrator 뿐이라, 이 행이 없으면 누가 확인했는지가 어디에도 남지 않는다(실행 설정 변경과 같은
+        mutation_class 'batch'). after_state 에 확인 시점의 항목 수·미리보기 완료 수·옵션을 남긴다.
+        Queued 항목이 있으면 확인하지 않는다(같은 문장) -- 미리보기 안 된 항목이 확인에 묻어 root 로 도는 것을 막는
+        마지막 둑이다(mark_preview_ready 와 라우트의 Previewing 복귀가 앞 둑). 확인 회차(expected_round)도 같은 문장에서
+        본다 -- 운영자가 대화상자를 연 뒤 배치가 Previewing 을 거쳐 다시 확인 대기가 됐으면(ABA) 다른 회차라 0 행이다.
+
+        확인 도장(같은 트랜잭션): 지금 ConfirmPending 인 자식 잡에 confirmed_fingerprint = preview_fingerprint 를 찍는다.
+        orchestrator 는 Running 에서 **도장이 지금 미리보기와 같은 자식만** 실행한다 -- 도장 없는 미리보기(업그레이드 전
+        옛 코드가 Running 중에 만든 것, 다시 미리보기해 지문이 바뀐 것)가 보이면 배치를 Previewing 으로 되돌린다. 상태
+        수준의 둑만으로는 "운영자가 본 미리보기" 와 "본 적 없는 미리보기" 를 구별할 수 없었다(2026-10-07 리뷰)."""
+        now = utc_now_iso()
+        with self._db.transaction():
+            n = self._db.execute_count(
+                f"""UPDATE batches SET status = 'Running', updated_at = :now
+                      WHERE batch_id = :b AND status = 'PreviewReady' AND COALESCE(preview_round, 0) = :r
+                        AND {_NO_QUEUED_ITEM}""",
+                {"now": now, "b": batch_id, "r": expected_round})
+            if n == 0:
+                return False
+            stamped = self._db.execute_count(
+                """UPDATE data_jobs SET confirmed_fingerprint = preview_fingerprint, updated_at = :now
+                      WHERE state = 'ConfirmPending' AND preview_fingerprint IS NOT NULL
+                        AND request_id IN (SELECT request_id FROM batch_items
+                                            WHERE batch_id = :b AND status = 'Materialized'
+                                              AND request_id IS NOT NULL)""",
+                {"now": now, "b": batch_id})
+            summary = {**summary, "preview_round": expected_round, "stamped": stamped}
+            self._db.execute(
+                """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                       before_state, after_state, at)
+                   VALUES ('batch', 'confirm', :key, :actor, :b, :a, :at)""",
+                {"key": batch_id, "actor": actor, "b": dump_json({"status": "PreviewReady"}),
+                 "a": dump_json({"status": "Running", **summary}), "at": now})
+        return True
 
     def bump_counts(self, batch_id, *, succeeded=0, failed=0):
         self._db.execute(

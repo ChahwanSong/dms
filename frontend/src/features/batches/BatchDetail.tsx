@@ -18,10 +18,10 @@ import { reasonText, ApiError } from "../../lib/api";
 import { absSummary } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
 import { useStorageRoots } from "../storages/useUserStorages";
-import { batchPillVariant } from "../../lib/jobState";
+import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { chownHasName, syncOwnership } from "../../lib/syncOwnership";
 import { kstStampEpoch, kstStampOrDash } from "../../lib/datetime";
-import type { Batch, BatchItem, HistogramBucket } from "../../lib/types";
+import type { Batch, BatchDetail as BatchDetailData, BatchItem, HistogramBucket } from "../../lib/types";
 
 // NodesList/JobStats/NodeMetrics 의 humanBytes 국소 사본 관례 -- 값이 bytes 대
 // 전역(B~TiB)이라 KiB 단을 포함한다(NodeMetricsSection 판과 같은 단위 집합).
@@ -474,8 +474,8 @@ function SyncDestHint({ chown }: { chown: string }) {
 // 실행된다. 성공 시 팝업을 닫는다: 추가된 항목은 뒤의 목록에 나타나므로 화면에
 // 남아 있을 이유가 없다(invalidate 는 훅 onSettled 몫). 항목이 없으면 물려받을
 // 스토리지가 없어 호출측이 버튼 대신 안내를 보인다.
-function AddItemDialog({ batchId, isSync, firstPayload, chown }: {
-  batchId: string; isSync: boolean; firstPayload: Record<string, unknown>; chown: string;
+function AddItemDialog({ batchId, isSync, firstPayload, chown, status }: {
+  batchId: string; isSync: boolean; firstPayload: Record<string, unknown>; chown: string; status: string;
 }) {
   const [open, setOpen] = useState(false);
   const add = useAddBatchItem(batchId);
@@ -496,6 +496,21 @@ function AddItemDialog({ batchId, isSync, firstPayload, chown }: {
                    onChange={(e) => setDst(e.target.value)} />
           </label>
           <SyncDestHint chown={chown} />
+          {/* 서버 계약(2026-10-07): 진행 중·확인 대기 sync 배치에 추가하면 배치가 미리보기 단계로 돌아간다 --
+              새 경로가 사람 확인 없이 root 로 돌지 않게. 누르기 전에 그 결과를 말한다. */}
+          {status === "PreviewReady" && (
+            <p className="text-xs text-muted">
+              확인 대기 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다 — 새 항목의 미리보기가 끝나면
+              「배치 확인」을 다시 눌러야 실행됩니다.
+            </p>
+          )}
+          {status === "Running" && (
+            <p className="text-xs text-muted">
+              진행 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다 — 이미 실행 중인 항목은 끝까지
+              실행(root)되고, 실행을 기다리던 항목은 다시 확인할 때까지 시작되지 않습니다. 새 항목의 미리보기가 끝나면
+              「배치 확인」을 다시 눌러야 나머지가 실행되며, 그 사이 미리보기가 만료된 항목은 거부(실패로 집계)됩니다.
+            </p>
+          )}
         </>) : (
           <label className="text-sm block">추가할 대상 경로
             <input aria-label="추가할 대상 경로" className={field} value={path}
@@ -511,6 +526,139 @@ function AddItemDialog({ batchId, isSync, firstPayload, chown }: {
                   onClick={() => add.mutate(itemBody(isSync, firstPayload, path, dst),
                     { onSuccess: () => setOpen(false) })}>항목 추가</Button>
         </div>
+      </div>
+    </Dialog>
+  );
+}
+
+// 배치 확인(2026-10-07): 예전엔 한 번 클릭이 곧 :confirm 이었다 -- 운영자는 무엇을 승인하는지(몇 개 항목이 root 로
+// 도는지·delete 옵션·미리보기 만료)를 보지 못한 채 실행을 시작했다(원 설계 slice2 의 "집계 미리보기 + 확인"과도
+// 달랐다). 이제 대화상자가 확인의 범위를 먼저 보이고 「실행 확인」에서만 보낸다. 항목별 확인은 없다 -- 이 1회 확인이
+// 미리보기를 마친 항목 전부를 대표하고, 그 뒤 orchestrator 가 슬롯만큼씩 실행한다(서버 계약, 확인자는 감사 행).
+// 확인 회차(preview_round): 대화상자를 연 순간의 회차를 고정해 보낸다. 연 뒤 배치가 다시 미리보기를 거쳐 확인 대기가
+// 되면(항목 추가 등 -- 숨은 탭이라 폴링이 멈춰 그 사이를 못 봤어도) 회차가 달라 서버가 409 batch_preview_changed 로
+// 거절하고, 화면도 회차가 바뀌면 「실행 확인」을 잠그고 다시 열라고 말한다 -- 운영자가 본 적 없는 항목이 확인에 묻지 않게.
+// 항목 분류(행들이 전체 수와 맞아떨어지게): 실행할 것(ConfirmPending) / 실행 중(이미 확인됨) / 이미 성공 / 실행되지 않을 것.
+// 실행 중·이미 성공도 자식 요청·잡 상태로 센다 -- 확인 대기 사이에 끝난 자식은 다음 틱 기록 전까지 항목이 Materialized 다.
+// 실행되지 않을 것 = 항목 종단(거부·실패·취소) 또는 자식 요청 종단(성공 제외) 또는 미리보기 만료(잡 PreviewExpired).
+// PreviewReady 배치는 orchestrator 가 굴리지 않아(list_active 밖) 만료된 자식의 항목이 Materialized 로 남는다 -- 그래서
+// 항목 status 가 아니라 자식 요청·잡 상태로 세고, 원인도 항목별로 적는다(항목 행엔 사유가 아직 없다). 만료 판정은
+// 서버가 기록한 상태만 본다(브라우저 시계로 미리 빼면 시계가 빠를 때 root 로 돌 항목을 "실행 안 됨" 으로 덜 보였다 --
+// 만료와 stepper 틱 사이 몇 초는 "실행할 항목" 에 남아 더 보이는 안전한 쪽이고, 그 창은 만료 문구가 덮는다).
+// 옛 응답(job_state·request_state 부재)은 모름이라 세지 않는다.
+const ITEM_NOT_RUN = ["Rejected", "Failed", "Cancelled"];
+const REQUEST_NOT_RUN = ["Rejected", "Failed", "Cancelled", "Conflict"];
+const REQUEST_TERMINAL = ["Succeeded", ...REQUEST_NOT_RUN];
+// 자식 잡이 아직 미리보기 쪽인 상태(batch_orchestrator._PREVIEW_PHASE + 확인 대기·만료) -- 이 밖의 비종단은 실행 중이다.
+const JOB_PREVIEW_SIDE = ["Pending", "Preflight", "PreviewRunning", "ConfirmPending", "PreviewExpired"];
+const NOT_RUN_LIST_MAX = 10;
+
+function notRunCause(it: BatchItem): string | null {
+  if (it.status === "Succeeded") return null;
+  if (ITEM_NOT_RUN.includes(it.status)) return it.reason_code ? reasonText(it.reason_code) : it.status;
+  if (it.job_state === "PreviewExpired") return "미리보기 만료";
+  if (it.request_state != null && REQUEST_NOT_RUN.includes(it.request_state)) return `요청 ${it.request_state}`;
+  return null;
+}
+
+function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: ReturnType<typeof useConfirmBatch> }) {
+  const [open, setOpen] = useState(false);
+  const [round, setRound] = useState<number | null>(null);
+  const current = b.preview_round ?? 0;
+  const onOpenChange = (o: boolean) => { setOpen(o); if (o) setRound(current); };
+  const changed = open && round !== null && round !== current;
+  // 닫을 때(그리고 다시 확인 대기가 돼 새로 붙을 때) 지난 실패를 비운다(DeleteBatchButton 과 같은 이유 -- "취소"는
+  // Radix onOpenChange 를 거치지 않는다). 변이는 페이지(BatchDetail)가 가진다: 409 뒤 배치가 Previewing 으로 돌아가면
+  // 이 대화상자는 사라지는데, 그 거부 사유는 헤더가 이어서 보여야 하기 때문이다.
+  useEffect(() => { if (!open) confirm.reset(); }, [open]);
+  const items = b.items ?? [];
+  const runnable = items.filter((it) => it.job_state === "ConfirmPending");
+  const executing = items.filter((it) => it.status === "Materialized" && it.job_state != null
+    && !JOB_PREVIEW_SIDE.includes(it.job_state)
+    && !(it.request_state != null && REQUEST_TERMINAL.includes(it.request_state))).length;
+  const done = items.filter((it) => it.status === "Succeeded"
+    || (it.status === "Materialized" && it.request_state === "Succeeded")).length;
+  const notRunItems = items.map((it) => ({ it, cause: notRunCause(it) }))
+    .filter((x): x is { it: BatchItem; cause: string } => x.cause !== null);
+  const expired = items.filter((it) => it.job_state === "PreviewExpired").length;
+  // 복사 대상 합계(단건 ConfirmDialog 의 "복사 대상" 과 같은 값 -- 항목별 dry-run 요약의 files): 값을 아는 항목만
+  // 더하고 모르는 수는 따로 말한다. 전부 모르면 "모름" 이다(null≠0 -- 모름을 0개로 보이지 않는다).
+  const known = runnable.map((it) => it.preview_summary?.files)
+    .filter((n): n is number => typeof n === "number");
+  const unknownFiles = runnable.length - known.length;
+  const fileTotal = known.reduce((a, n) => a + n, 0);
+  const expiries = runnable.map((it) => it.preview_expires_at).filter((x): x is string => !!x).sort();
+  const earliest = expiries[0] ?? null;
+  const del = b.options?.delete === true;
+  // 소유권은 chown 지정 여부와 관계없이 늘 말한다: 비워 두면 root sync 가 목적지에 이미 있던 같은 경로 항목(최상위
+  // 포함)의 소유·권한·시각을 소스 것으로 바꾼다 -- 2026-09-30 프로덕션 사고와 같은 종류라 승인 화면이 침묵하면 안 된다.
+  const ownership = syncOwnership({ chown: String(b.options?.chown ?? ""), chmod: String(b.options?.chmod ?? ""),
+                                    root: true, runAs: null, self: true }).long;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange} title="배치 확인"
+            trigger={<Button>배치 확인</Button>}>
+      <p className="text-sm">
+        {`확인하면 미리보기를 마친 항목 ${runnable.length}개가 동시 실행 상한 ${b.max_concurrency}개씩 차례로 관리자 `
+          + "특권(root)으로 실행됩니다 — 항목별 확인은 없습니다."}
+      </p>
+      <dl className="mt-3 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
+        <dt className="text-muted">실행할 항목</dt>
+        <dd className="tabular-nums">{`${runnable.length} / 전체 ${items.length}`}</dd>
+        {executing > 0 && (<>
+          <dt className="text-muted">실행 중인 항목</dt>
+          <dd>{`${executing}개(이미 확인됨 — 이번 확인과 관계없이 끝까지 실행)`}</dd>
+        </>)}
+        {done > 0 && (<>
+          <dt className="text-muted">이미 완료된 항목</dt>
+          <dd>{`${done}개(이전 실행에서 성공 — 다시 실행하지 않음)`}</dd>
+        </>)}
+        <dt className="text-muted">실행되지 않는 항목</dt>
+        <dd>{notRunItems.length === 0 ? "없음" : (<>
+          {`${notRunItems.length}개`}
+          <ul aria-label="실행되지 않는 항목" className="mt-1 text-xs text-muted">
+            {notRunItems.slice(0, NOT_RUN_LIST_MAX).map(({ it, cause }) => (
+              <li key={it.seq}>{`#${it.seq} ${summarizeItem(b.operation, it.payload)}: ${cause}`}</li>
+            ))}
+            {notRunItems.length > NOT_RUN_LIST_MAX && <li>{`외 ${notRunItems.length - NOT_RUN_LIST_MAX}개`}</li>}
+          </ul>
+        </>)}</dd>
+        <dt className="text-muted">복사 대상</dt>
+        <dd>{runnable.length === 0 ? "—"
+          : known.length === 0 ? `모름(미리보기 ${runnable.length}개 항목 모두 수 미기록)`
+          : `${fileTotal.toLocaleString("ko-KR")}개(항목별 미리보기 합계${unknownFiles > 0 ? `, ${unknownFiles}개 항목은 모름` : ""})`}</dd>
+        <dt className="text-muted">동시 실행 상한</dt>
+        <dd className="tabular-nums">{b.max_concurrency}</dd>
+        <dt className="text-muted">미리보기 만료</dt>
+        <dd>{earliest ? `${kstStampOrDash(earliest)}(가장 이른 항목) — 확인 시각이 아니라 각 항목의 실행 시작 기준입니다. `
+          + "슬롯을 기다리다 만료된 항목은 실행되지 않고 거부(실패로 집계)됩니다." : "—"}</dd>
+      </dl>
+      {expired > 0 && (
+        <p className="mt-2 text-sm text-bad">
+          {`미리보기 만료 ${expired}개 — 확인해도 실행되지 않고 거부로 기록됩니다(항목 재실행으로 다시 미리보기).`}
+        </p>
+      )}
+      {del && (
+        <p className="mt-3 rounded-lg border border-bad/30 bg-badbg px-3 py-2 text-sm text-bad">
+          delete 옵션: 원본에 없는 파일·디렉토리를 목적지에서 지웁니다(미러 동기화).
+        </p>
+      )}
+      <p className="mt-2 text-sm" role="note" aria-label="목적지 소유">{`소유권: ${ownership}`}</p>
+      {changed && (
+        <p role="alert" className="mt-3 text-bad text-sm">
+          이 대화상자를 연 뒤 배치 내용이 바뀌었습니다(항목 추가·재실행으로 다시 미리보기됨) — 닫고 다시 열어 바뀐 내용을 검토하세요.
+        </p>
+      )}
+      {/* 회차 변경 경고가 이미 떠 있으면 같은 뜻의 409 batch_preview_changed 는 겹쳐 보이지 않는다(경고 하나). */}
+      {confirm.isError && !(changed && (confirm.error as ApiError).code === "batch_preview_changed") && (
+        <p role="alert" className="mt-3 text-bad text-sm">{(confirm.error as ApiError).message}</p>
+      )}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={() => setOpen(false)}>취소</Button>
+        {/* 미리보기 완료 0 으로 막지 않는다: 판정은 서버다(job_state 를 모르는 옛 응답이면 0 으로 보여 확인이 막힌다).
+            회차가 바뀌었으면 잠근다 -- 보낸다 해도 서버가 409 다. */}
+        <Button disabled={confirm.isPending || changed || round === null}
+                onClick={() => confirm.mutate({ preview_round: round ?? current },
+                  { onSuccess: () => setOpen(false) })}>실행 확인</Button>
       </div>
     </Dialog>
   );
@@ -545,10 +693,10 @@ function DeleteBatchButton({ batchId }: { batchId: string }) {
 export function BatchDetail() {
   const { batchId = "" } = useParams();
   const q = useBatch(batchId);
-  const confirm = useConfirmBatch(batchId);
   const rerun = useRerunFailed(batchId);
   const cancel = useCancelBatch(batchId);
   const rescan = useRescanBatch(batchId);
+  const confirm = useConfirmBatch(batchId);
   const update = useUpdateBatch(batchId);
   const b = q.data;
   // 이름·메모 인라인 편집: 열 때 현재값을 드래프트로 복사한다 — 폴링 리페치가
@@ -573,6 +721,9 @@ export function BatchDetail() {
   const terminal = b?.status === "Completed" || b?.status === "Cancelled";
   const canEditItem = (it: BatchItem) => terminal || it.status === "Queued";
   const isSync = b?.operation === "sync";
+  // 미리보기 단계로 돌아온 sync 배치에서도 이미 실행 중인 자식은 끝까지 돈다(서버 _reopen_after_new_queued) -- 배너가
+  // "아직 아무것도 안 돈다" 로 읽히지 않게 센다.
+  const executing = (b?.items ?? []).filter((it) => it.status === "Materialized" && it.job_state === "Executing").length;
   const updateItem = useUpdateBatchItem(batchId);
   const deleteItem = useDeleteBatchItem(batchId);
   // 드래프트는 서버 상태와 분리(이름·메모 편집과 같은 이유 — 폴링 리페치가 입력을
@@ -678,7 +829,8 @@ export function BatchDetail() {
                 Cancelled=neutral). 항목 pill 은 요청/잡 판정 축이라 기존 공유
                 pillVariant 를 그대로 쓴다(variant 미지정). */}
             <StatusPill state={b?.status ?? "…"}
-                        variant={b ? batchPillVariant(b.status) : undefined} />
+                        variant={b ? batchPillVariant(b.status) : undefined}
+                        label={b ? batchStatusLabel(b.status) : undefined} />
             <span className="text-muted text-sm">{b?.operation} · 성공 {b?.succeeded_count}/실패 {b?.failed_count}/전체 {b?.item_count}</span>
             {/* 특권 실행 문구는 로드되면 항상 -- 통일 게이트 후 배치는 전부 관리자
                 특권(root) 실행이다. 행별 auth_method/owner 유무로 재판정하지 않는다:
@@ -696,7 +848,7 @@ export function BatchDetail() {
                 이름까지 고치는데 메모만 말해 어색했고 "이름·메모 편집"은 길다.
                 PATCH {name, note} 계약·폼 구조는 무변경. */}
             {b && !editing && <Button variant="ghost" onClick={startEdit}>편집</Button>}
-            {b?.status === "PreviewReady" && <Button disabled={confirm.isPending} onClick={() => confirm.mutate()}>배치 확인</Button>}
+            {b?.status === "PreviewReady" && <ConfirmBatchDialog b={b} confirm={confirm} />}
             {b?.status === "Completed" && (b?.failed_count ?? 0) > 0 && <Button disabled={rerun.isPending} onClick={() => rerun.mutate()}>실패분 재실행</Button>}
             {/* 전체 재실행(:rescan): 종단 배치 한정(서버 가드 미러) — 성공 item 포함
                 전부 재큐잉(성장 모니터링). "실패분 재실행"(실패만)과 공존한다 */}
@@ -712,9 +864,11 @@ export function BatchDetail() {
             라벨("메모 ")은 붙이지 않는다(사용자 조정 2026-08-15): 헤더 카드에서
             이름 아래 한 줄은 문맥상 메모임이 자명한데, 접두어가 매번 내용 앞을
             가로막았다. 행이 아예 없으면 메모 없음이라는 사실도 그대로 읽힌다. */}
-        {/* 확인·실패분 재실행·전체 재실행의 거부(409·422)를 말한다 -- 말하지 않으면 버튼이 죽은 것처럼 보였다
-            (2026-10-01: 이름 chown 옛 배치는 이 셋이 모두 422 chown_name_not_supported). */}
-        {[confirm, rerun, rescan].filter((m) => m.isError).map((m, i) => (
+        {/* 실패분 재실행·전체 재실행의 거부(409·422)를 말한다 -- 말하지 않으면 버튼이 죽은 것처럼 보였다
+            (2026-10-01: 이름 chown 옛 배치는 모두 422 chown_name_not_supported). 배치 확인의 거부는 확인 대기
+            동안엔 대화상자가 말하고, 거부 뒤 배치가 Previewing 등으로 바뀌어 대화상자가 사라지면 여기서 이어 말한다
+            (409 batch_not_confirmable -- 말하지 않으면 확인이 조용히 사라진 것처럼 보였다). */}
+        {[rerun, rescan, ...(b?.status !== "PreviewReady" ? [confirm] : [])].filter((m) => m.isError).map((m, i) => (
           <p key={i} role="alert" className="text-bad text-sm mt-2">{(m.error as ApiError).message}</p>
         ))}
         {b?.operation === "sync" && chownHasName(String(b?.options?.chown ?? "")) && (
@@ -722,6 +876,29 @@ export function BatchDetail() {
             {`이 배치는 chown 에 이름(${String(b.options?.chown)})이 들어 있어 이대로는 실행할 수 없습니다 — 확인·재실행·`
               + "항목 추가와 남은 항목은 거부됩니다(이름은 작업 컨테이너에서 해석되지 않습니다). 배치를 취소(진행 중이면)한 뒤 "
               + "「실행 설정 변경」에서 chown 을 숫자 uid:gid 로 고치면 다시 실행할 수 있습니다."}
+          </p>
+        )}
+        {/* sync 확인 단계 안내(2026-10-07): 미리보기 중·확인 대기는 사람이 다음에 무엇을 해야 하는지가 상태 배지만으론
+            보이지 않았다. 확인 전에는 어떤 항목도 실행되지 않는다는 사실까지 말한다. */}
+        {b?.operation === "sync" && b.status === "Previewing" && (
+          <p className="mt-2 text-sm text-muted">
+            {executing > 0
+              ? `미리보기 단계입니다 — 이미 실행 중인 항목 ${executing}개는 끝까지 실행(root)되고, 나머지는 확인을 `
+                + "기다립니다. 미리보기가 끝나면 「배치 확인」을 눌러야 나머지가 실행됩니다."
+              : "항목별 미리보기(dry-run) 중입니다 — 끝나면 「배치 확인」을 눌러야 실행됩니다."}
+          </p>
+        )}
+        {b?.operation === "sync" && b.status === "Running" && (
+          <p className="mt-2 text-sm text-muted">
+            확인된 항목은 동시 실행 상한({b.max_concurrency})만큼씩 차례로 실행됩니다.
+          </p>
+        )}
+        {b?.status === "PreviewReady" && (
+          <p className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status">
+            {executing > 0
+              ? `미리보기가 끝났습니다 — 「배치 확인」을 눌러야 나머지가 실행됩니다. 이미 확인돼 실행 중인 항목 ${executing}개만 `
+                + "계속 돌고, 확인 전에는 다른 항목이 실행되지 않습니다."
+              : "미리보기가 끝났습니다 — 「배치 확인」을 눌러야 실행됩니다. 확인 전에는 어떤 항목도 실행되지 않습니다."}
           </p>
         )}
         {b?.note && !editing && <p className="text-muted text-sm mt-2">{b.note}</p>}
@@ -777,7 +954,7 @@ export function BatchDetail() {
                                      items={b.items ?? []} />
             )}
             {b && firstPayload && (
-              <AddItemDialog batchId={batchId} isSync={isSync}
+              <AddItemDialog batchId={batchId} isSync={isSync} status={b.status}
                              firstPayload={firstPayload} chown={String(b.options?.chown ?? "")} />
             )}
             {b && terminal && firstPayload && (

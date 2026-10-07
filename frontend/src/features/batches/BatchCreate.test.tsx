@@ -708,3 +708,9 @@ test("scan 배치 요약엔 목적지 소유 행이 없다", async () => {
   expect(createButton()).toBeEnabled();
   expect(screen.queryByText("목적지 소유")).not.toBeInTheDocument();
 });
+
+test("sync 를 고르면 만든 뒤 「배치 확인」을 눌러야 실행된다고 미리 말한다", async () => {
+  renderPage();
+  await userEvent.selectOptions(await screen.findByLabelText("연산"), "sync");
+  expect(screen.getByText(/항목별 미리보기가 끝나면 배치 상세에서 「배치 확인」을 눌러야 실행됩니다\./)).toBeInTheDocument();
+});

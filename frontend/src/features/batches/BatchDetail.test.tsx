@@ -30,13 +30,209 @@ function renderAt(state: string) {
   </MemoryRouter></QueryClientProvider>);
 }
 
-test("PreviewReady shows confirm button and posts confirm", async () => {
+test("PreviewReady: 「배치 확인」은 대화상자를 열고 「실행 확인」에서만 confirm 을 보낸다", async () => {
+  // 2026-10-07: 예전엔 한 번 클릭이 곧 :confirm 이었다(무엇을 승인하는지 못 봤다).
+  let confirmed: unknown = null;
+  server.use(http.post("/api/admin/batches/b1:confirm", async ({ request }) => {
+    confirmed = await request.json(); return HttpResponse.json({status:"Running"}); }));
+  renderAt("PreviewReady");
+  await userEvent.click(await screen.findByRole("button", { name: "배치 확인" }));
+  expect(await screen.findByRole("dialog", { name: "배치 확인" })).toBeInTheDocument();
+  expect(confirmed).toBeNull();                                    // 여는 것만으로는 보내지 않는다
+  await userEvent.click(screen.getByRole("button", { name: "실행 확인" }));
+  // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
+  // 대화상자를 연 확인 회차를 싣는다(fixture 엔 preview_round 가 없다 = 0회차).
+  await waitFor(() => expect(confirmed).toEqual({ preview_round: 0 }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "배치 확인" })).not.toBeInTheDocument());
+});
+
+test("배치 확인 대화상자: 실행할 항목 수·복사 대상 합계·동시 실행 상한·delete 경고·소유권·가장 이른 만료를 보인다", async () => {
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({
+    status: "PreviewReady", options: { delete: true, chown: "10003:10000" }, item_count: 3,
+    items: [
+      { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null,
+        job_state: "ConfirmPending", preview_summary: { files: 40, bytes: null, returncode: 0 },
+        preview_expires_at: "2099-10-08T03:00:00Z" },
+      { seq: 1, payload: { source: "b" }, status: "Materialized", request_id: "r2", reason_code: null,
+        job_state: "ConfirmPending", preview_summary: null, preview_expires_at: "2099-10-08T01:00:00Z" },
+      { seq: 2, payload: { source: "c" }, status: "Rejected", request_id: "r3", reason_code: "destination_not_writable",
+        job_state: "Rejected", preview_summary: null, preview_expires_at: null }] }))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  await userEvent.click(await screen.findByRole("button", { name: "배치 확인" }));
+  const dlg = await screen.findByRole("dialog", { name: "배치 확인" });
+  expect(dlg).toHaveTextContent("확인하면 미리보기를 마친 항목 2개가 동시 실행 상한 2개씩 차례로 관리자 특권(root)으로 "
+    + "실행됩니다 — 항목별 확인은 없습니다.");
+  expect(within(dlg).getByText("2 / 전체 3")).toBeInTheDocument();
+  // 실행되지 않는 항목은 수와 함께 항목별 원인을 적는다(항목 행엔 사유가 없을 수 있다 -- 리뷰)
+  const notRun = within(dlg).getByRole("list", { name: "실행되지 않는 항목" });
+  expect(within(notRun).getAllByRole("listitem")).toHaveLength(1);
+  expect(within(notRun).getByRole("listitem")).toHaveTextContent(/^#2 sync · —:c → —:—: /);
+  // 단건 ConfirmDialog 와 같은 이름(복사 대상). 모르는 항목(요약 null)을 0 으로 더하지 않고 따로 말한다(null≠0)
+  expect(within(dlg).getByText("40개(항목별 미리보기 합계, 1개 항목은 모름)")).toBeInTheDocument();
+  expect(within(dlg).queryByText(/소스 항목 수/)).toBeNull();
+  expect(within(dlg).getByText("동시 실행 상한").nextSibling).toHaveTextContent("2");
+  // 만료는 확인 마감이 아니다 -- 확인 뒤에도 슬롯을 기다리다 만료될 수 있다
+  expect(within(dlg).getByText(/^2099-10-08 10:00:00 KST\(가장 이른 항목\) — 확인 시각이 아니라 각 항목의 실행 시작 기준입니다/))
+    .toHaveTextContent("슬롯을 기다리다 만료된 항목은 실행되지 않고 거부(실패로 집계)됩니다.");
+  expect(dlg).toHaveTextContent("delete 옵션: 원본에 없는 파일·디렉토리를 목적지에서 지웁니다(미러 동기화).");
+  expect(within(dlg).getByRole("note", { name: "목적지 소유" }))
+    .toHaveTextContent("소유권: chown 옵션으로 지정한 10003:10000 소유로 셋업됩니다 — 목적지에 이미 있던 같은 경로의 항목도 이 소유로 바뀝니다.");
+});
+
+function renderItems(over: any) {
+  server.use(http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "PreviewReady", ...over }))));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  return render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+}
+
+async function openConfirmDialog() {
+  await userEvent.click(await screen.findByRole("button", { name: "배치 확인" }));
+  return await screen.findByRole("dialog", { name: "배치 확인" });
+}
+
+test("배치 확인 대화상자: chown 을 비운 root sync 도 목적지 소유가 소스 것으로 바뀐다고 말한다", async () => {
+  // 2026-09-30 프로덕션 사고와 같은 종류 -- 승인 화면이 침묵하면 안 된다(리뷰).
+  renderItems({ options: {} });
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByRole("note", { name: "목적지 소유" })).toHaveTextContent(
+    "소유권: root 실행이라 목적지와 복사된 파일·디렉토리는 소스의 소유자·그룹을 그대로 유지합니다 — 목적지에 이미 있던 "
+    + "같은 경로의 항목(최상위 디렉토리 포함)도 소유자·그룹·권한·시각이 소스 것으로 바뀝니다.");
+});
+
+test("배치 확인 대화상자: 만료된 미리보기·이미 성공한 항목을 따로 세어 행이 전체와 맞는다(만료는 서버 판정만)", async () => {
+  // PreviewReady 는 루프 밖이라 만료된 자식의 항목이 Materialized 로 남는다 -- 항목 status 만 보면 "없음" 이 거짓이 됐다.
+  // 만료는 서버가 기록한 상태(잡 PreviewExpired)로만 센다: 브라우저 시계로 미리 빼면 시계가 빠를 때 root 로 돌 항목을
+  // 덜 보인다(리뷰) -- 만료 시각이 지났어도 잡이 아직 ConfirmPending 이면 "실행할 항목" 이다.
+  renderItems({ item_count: 4, items: [
+    { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null,
+      job_state: "ConfirmPending", preview_summary: { files: 5, bytes: null, returncode: 0 },
+      preview_expires_at: "2099-01-01T00:00:00Z" },
+    { seq: 1, payload: { source: "b" }, status: "Succeeded", request_id: "r2", reason_code: null,
+      request_state: "Succeeded", job_state: "Succeeded" },
+    { seq: 2, payload: { source: "c" }, status: "Materialized", request_id: "r3", reason_code: null,
+      request_state: "Rejected", job_state: "PreviewExpired", preview_summary: { files: 7, bytes: null, returncode: 0 },
+      preview_expires_at: "2000-01-01T00:00:00Z" },
+    { seq: 3, payload: { source: "d" }, status: "Materialized", request_id: "r4", reason_code: null,
+      job_state: "ConfirmPending", preview_summary: { files: 9, bytes: null, returncode: 0 },
+      preview_expires_at: "2000-01-01T00:00:00Z" }] });     // stepper 가 아직 못 본 만료 -- 서버 판정 전엔 실행 대상
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByText("2 / 전체 4")).toBeInTheDocument();
+  expect(within(dlg).getByText("1개(이전 실행에서 성공 — 다시 실행하지 않음)")).toBeInTheDocument();
+  const notRun = within(dlg).getByRole("list", { name: "실행되지 않는 항목" });
+  expect(within(notRun).getAllByRole("listitem").map((li) => li.textContent))
+    .toEqual(["#2 sync · —:c → —:—: 미리보기 만료"]);
+  expect(within(dlg).getByText("14개(항목별 미리보기 합계)")).toBeInTheDocument();   // 만료된 항목(#2)의 수는 더하지 않는다
+  expect(dlg).toHaveTextContent("미리보기 만료 1개 — 확인해도 실행되지 않고 거부로 기록됩니다(항목 재실행으로 다시 미리보기).");
+  expect(dlg).toHaveTextContent("확인하면 미리보기를 마친 항목 2개가");
+});
+
+test("배치 확인 대화상자: 연 뒤 확인 회차가 바뀌면(다시 미리보기를 거친 확인 대기) 「실행 확인」을 잠그고 다시 열라고 말한다", async () => {
+  // 숨은 탭이라 폴링이 멈춘 사이 항목이 추가돼 Previewing → 다시 PreviewReady 가 됐다(ABA) -- 운영자가 본 적 없는
+  // 항목이 확인에 묻지 않게. 다시 열면 새 회차로 확인한다.
+  let round = 3;
+  const posted: unknown[] = [];
+  server.use(
+    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "PreviewReady", preview_round: round }))),
+    http.post("/api/admin/batches/b1:confirm", async ({ request }) => {
+      posted.push(await request.json()); return HttpResponse.json({ status: "Running" }); }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  let dlg = await openConfirmDialog();
+  round = 4;
+  await qc.invalidateQueries({ queryKey: ["batch", "b1"] });
+  expect(await within(dlg).findByText(/이 대화상자를 연 뒤 배치 내용이 바뀌었습니다/)).toBeInTheDocument();
+  expect(within(dlg).getByRole("button", { name: "실행 확인" })).toBeDisabled();
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  dlg = await openConfirmDialog();
+  expect(within(dlg).queryByText(/이 대화상자를 연 뒤 배치 내용이 바뀌었습니다/)).toBeNull();
+  await userEvent.click(within(dlg).getByRole("button", { name: "실행 확인" }));
+  await waitFor(() => expect(posted).toEqual([{ preview_round: 4 }]));
+});
+
+test("확인 대기인데 이미 확인돼 실행 중인 항목이 있으면: 배너·대화상자가 그 항목은 계속 돈다고 말한다", async () => {
+  renderItems({ items: [
+    { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null, job_state: "Executing" },
+    { seq: 1, payload: { source: "b" }, status: "Materialized", request_id: "r2", reason_code: null,
+      job_state: "ConfirmPending", preview_summary: { files: 3, bytes: null, returncode: 0 },
+      preview_expires_at: "2099-01-01T00:00:00Z" }] });
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "미리보기가 끝났습니다 — 「배치 확인」을 눌러야 나머지가 실행됩니다. 이미 확인돼 실행 중인 항목 1개만 계속 돌고, "
+    + "확인 전에는 다른 항목이 실행되지 않습니다.");
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByText("1 / 전체 2")).toBeInTheDocument();
+  expect(within(dlg).getByText("1개(이미 확인됨 — 이번 확인과 관계없이 끝까지 실행)")).toBeInTheDocument();
+});
+
+test("배치 확인 대화상자: 모든 항목의 수가 모름이면 0개가 아니라 모름", async () => {
+  renderItems({ items: [
+    { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null,
+      job_state: "ConfirmPending", preview_summary: { files: null, bytes: null, returncode: 0 },
+      preview_expires_at: "2099-01-01T00:00:00Z" }] });
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByText("모름(미리보기 1개 항목 모두 수 미기록)")).toBeInTheDocument();
+  expect(dlg).not.toHaveTextContent("0개(항목별 미리보기 합계");
+});
+
+test("배치 확인 409 뒤 배치가 미리보기로 돌아가 대화상자가 사라져도 거부 사유는 헤더에 남는다", async () => {
+  // 확인 대기 화면을 보고 누른 사이 항목이 추가돼 서버가 Previewing 으로 되돌렸다 -- 말하지 않으면 확인이 조용히 사라졌다.
+  let status = "PreviewReady";
+  server.use(
+    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status }))),
+    http.post("/api/admin/batches/b1:confirm", () => {
+      status = "Previewing";
+      return HttpResponse.json({ detail: "batch_not_confirmable" }, { status: 409 });
+    }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  const dlg = await openConfirmDialog();
+  await userEvent.click(within(dlg).getByRole("button", { name: "실행 확인" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "배치 확인" })).not.toBeInTheDocument());
+  expect(await screen.findByRole("alert")).toHaveTextContent("다시 미리보기 중일 수 있습니다");
+  expect(screen.queryByRole("button", { name: "배치 확인" })).toBeNull();
+});
+
+test("미리보기 단계로 돌아온 sync 배치: 실행 중인 항목이 있으면 끝까지 돈다고 말한다, Running 은 차례 실행을 말한다", async () => {
+  const { unmount } = renderItems({ status: "Previewing", items: [
+    { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null, job_state: "Executing" },
+    { seq: 1, payload: { source: "b" }, status: "Queued", request_id: null, reason_code: null }] });
+  expect(await screen.findByText(/미리보기 단계입니다 — 이미 실행 중인 항목 1개는 끝까지 실행\(root\)되고/)).toBeInTheDocument();
+  expect(screen.queryByText(/항목별 미리보기\(dry-run\) 중입니다/)).toBeNull();
+  unmount();
+  renderAt("Running");
+  expect(await screen.findByText("확인된 항목은 동시 실행 상한(2)만큼씩 차례로 실행됩니다.")).toBeInTheDocument();
+});
+
+test("배치 확인 대화상자의 「취소」는 confirm 을 보내지 않는다", async () => {
   let confirmed = false;
   server.use(http.post("/api/admin/batches/b1:confirm", () => { confirmed = true; return HttpResponse.json({status:"Running"}); }));
   renderAt("PreviewReady");
   await userEvent.click(await screen.findByRole("button", { name: "배치 확인" }));
-  // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
-  await waitFor(() => expect(confirmed).toBe(true));
+  const dlg = await screen.findByRole("dialog", { name: "배치 확인" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "배치 확인" })).not.toBeInTheDocument());
+  expect(confirmed).toBe(false);
+});
+
+test("확인 대기는 「확인 대기」 배지(주의색) + 확인 전엔 실행되지 않는다는 안내, 미리보기 중엔 다음 단계를 말한다", async () => {
+  const { unmount } = renderAt("PreviewReady");
+  const pill = await screen.findByText("확인 대기");
+  // 버튼 팔레트(accent)로 되돌아가면 배지가 눌리는 것처럼 보인다(확정값 ⑤) -- 그 회귀를 막는다.
+  expect(pill.className).toContain("bg-attnbg");
+  expect(pill.className).not.toContain("bg-accent");
+  expect(pill).toHaveAttribute("title", "PreviewReady");
+  expect(screen.getByRole("status")).toHaveTextContent("미리보기가 끝났습니다 — 「배치 확인」을 눌러야 실행됩니다. 확인 전에는 어떤 항목도 실행되지 않습니다.");
+  unmount();
+  renderAt("Previewing");
+  expect(await screen.findByText("항목별 미리보기(dry-run) 중입니다 — 끝나면 「배치 확인」을 눌러야 실행됩니다.")).toBeInTheDocument();
 });
 test("renders items list with status", async () => {
   renderAt("Running");
@@ -1154,6 +1350,8 @@ test("이름 chown 옛 배치: 헤더 안내 + 배치 확인 422 사유가 보�
   // 고칠 길을 말한다(2026-10-02 실행 설정 변경)
   expect(screen.getByRole("alert", { name: "이름 chown 배치" })).toHaveTextContent("「실행 설정 변경」에서 chown 을 숫자 uid:gid 로");
   await userEvent.click(screen.getByRole("button", { name: "배치 확인" }));
+  // 확인 거부 사유는 확인 대화상자 안에서 말한다(2026-10-07 대화상자화)
+  await userEvent.click(await screen.findByRole("button", { name: "실행 확인" }));
   await waitFor(() => expect(screen.getAllByRole("alert").some((a) =>
     /chown 은 숫자 uid:gid 만 지정할 수 있습니다\(예: 10003:10000\)/.test(a.textContent ?? ""))).toBe(true));
 });
@@ -1326,4 +1524,58 @@ test("실행 설정 변경: 서버 거부(409 그 사이 재실행 시작)는 �
   await userEvent.type(q.getByLabelText("노드당 프로세스 수"), "4");
   await userEvent.click(q.getByRole("button", { name: "저장" }));
   expect(await q.findByRole("alert")).toHaveTextContent("완료·취소된 배치만 가능합니다");
+});
+
+// --- 진행 중·확인 대기 sync 배치에 항목 추가 → 다시 확인(서버 계약 2026-10-07 미러) ---
+
+test("Running sync 배치의 항목 추가 대화상자는 다시 확인이 필요하다고 말한다(scan·종단엔 없음)", async () => {
+  const { unmount } = renderAt("Running");
+  await userEvent.click(await screen.findByRole("button", { name: "항목 추가" }));
+  // 실제로 일어나는 일: 실행 중인 항목은 끝까지, 기다리던 항목은 재확인까지 멈춘다(리뷰 -- 예전 문구는 이걸 말하지 않았다)
+  const note = await screen.findByText(/진행 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다/);
+  expect(note).toHaveTextContent("이미 실행 중인 항목은 끝까지 실행(root)되고, 실행을 기다리던 항목은 다시 확인할 때까지 시작되지 않습니다.");
+  expect(note).toHaveTextContent("새 항목의 미리보기가 끝나면 「배치 확인」을 다시 눌러야 나머지가 실행되며, 그 사이 미리보기가 만료된 항목은 거부(실패로 집계)됩니다.");
+  unmount();
+  const r2 = renderAt("PreviewReady");
+  await userEvent.click(await screen.findByRole("button", { name: "항목 추가" }));
+  expect(await screen.findByText(/확인 대기 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다/)).toBeInTheDocument();
+  r2.unmount();
+  renderAt("Completed");
+  await userEvent.click(await screen.findByRole("button", { name: "항목 추가" }));
+  await screen.findByRole("dialog", { name: "항목 추가" });
+  expect(screen.queryByText(/다시 미리보기 단계로 돌아갑니다/)).toBeNull();
+});
+
+
+test("배치 확인 대화상자: 확인 대기 중에 끝난(아직 기록 전) 자식도 행에 잡혀 합계가 전체와 맞는다", async () => {
+  // 실행 중이던 자식이 확인 대기 사이에 끝나면 다음 틱 기록 전까지 항목은 Materialized 다 -- 요청 상태로 센다.
+  renderItems({ items: [
+    { seq: 0, payload: { source: "a" }, status: "Materialized", request_id: "r1", reason_code: null,
+      request_state: "Succeeded", job_state: "Succeeded" },
+    { seq: 1, payload: { source: "b" }, status: "Materialized", request_id: "r2", reason_code: null,
+      job_state: "ConfirmPending", preview_summary: { files: 2, bytes: null, returncode: 0 },
+      preview_expires_at: "2099-01-01T00:00:00Z" }] });
+  const dlg = await openConfirmDialog();
+  expect(within(dlg).getByText("1 / 전체 2")).toBeInTheDocument();
+  expect(within(dlg).getByText("1개(이전 실행에서 성공 — 다시 실행하지 않음)")).toBeInTheDocument();
+  expect(within(dlg).getByText("실행되지 않는 항목").nextSibling).toHaveTextContent("없음");
+});
+
+test("409 batch_preview_changed 뒤에도 대화상자 경고는 하나다(회차 변경 경고와 겹치지 않는다)", async () => {
+  let round = 3;
+  server.use(
+    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({ status: "PreviewReady", preview_round: round }))),
+    http.post("/api/admin/batches/b1:confirm", () => {
+      round = 4;                                   // 그 사이 다시 미리보기를 거쳐 확인 대기가 됐다
+      return HttpResponse.json({ detail: "batch_preview_changed" }, { status: 409 });
+    }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  const dlg = await openConfirmDialog();
+  await userEvent.click(within(dlg).getByRole("button", { name: "실행 확인" }));
+  expect(await within(dlg).findByText(/이 대화상자를 연 뒤 배치 내용이 바뀌었습니다/)).toBeInTheDocument();
+  expect(within(dlg).getAllByRole("alert")).toHaveLength(1);
+  expect(within(dlg).getByRole("button", { name: "실행 확인" })).toBeDisabled();
 });

@@ -3,7 +3,7 @@ import config from "../tailwind.config";
 // 클래스를 조용히 생성하지 않아 화면이 무색으로 깨진다. 존재를 여기서 못 박는다.
 const colors = (config.theme?.extend?.colors ?? {}) as Record<string, string>;
 for (const key of ["accent", "accenthover", "navy", "infobg", "panel", "line",
-                   "ok", "okbg", "bad", "badbg", "busy", "busybg",
+                   "ok", "okbg", "bad", "badbg", "busy", "busybg", "attn", "attnbg",
                    "canvas", "surface", "ink", "muted"]) {
   test(`토큰 ${key} 가 팔레트에 있다`, () => expect(colors[key]).toBeTruthy());
 }

@@ -86,7 +86,7 @@ def test_legacy_name_batch_cannot_be_run_again(client):
     repos = client.app.state.repos
     _storages(repos)
     cases = [
-        (_legacy_batch(repos, status="PreviewReady"), ":confirm", None),
+        (_legacy_batch(repos, status="PreviewReady"), ":confirm", {"preview_round": 0}),
         (_legacy_batch(repos, status="Completed", item_status="Failed"), ":rerun-failed", None),
         (_legacy_batch(repos, status="Completed", item_status="Succeeded"), ":rescan", None),
         (_legacy_batch(repos, status="Completed", item_status="Failed"), "/items:rerun", {"seqs": [0]}),
@@ -198,5 +198,6 @@ def test_reject_only_while_queued_so_a_concurrent_delete_does_not_inflate_failed
     assert rows == {0: "Rejected"}
     b = repos.batches.get(bid)
     assert b["failed_count"] == 1 and b["item_count"] == 1                      # 지워진 항목 몫은 없다
-    assert repos.batches.reject_queued_item(bid, 0, reason_code="x") is False   # 이미 종단 -- 다시 세지 않는다
+    assert repos.batches.reject_queued_item(bid, 0, reason_code="x",
+                                           expected_payload=dict(SYNC_ITEM)) is False   # 이미 종단 -- 다시 세지 않는다
     assert repos.batches.get(bid)["failed_count"] == 1

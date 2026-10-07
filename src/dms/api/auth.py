@@ -114,3 +114,14 @@ def require_admin(request: Request) -> Identity:
     if identity.role != "admin":
         raise HTTPException(status_code=403, detail="admin_required")
     return identity
+
+
+def require_session_admin(request: Request) -> Identity:
+    """배포 경로(빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경)는 **세션으로 로그인한 관리자**만
+    (2026-10-07 리뷰). 공유 토큰은 모든 노드 에이전트가 가진 role admin 자격인데, 그것으로 릴리스를 내 수정 전
+    이미지로 롤백하거나(계정·배치 특권 게이트가 통째로 무효) 빌드 소스·노드를 바꿔 root 로 도는 제어면·잡 이미지를
+    갈아 끼울 수 있었다. 에이전트는 /api/agent/* 만 부르므로 영향이 없다. 조회(GET)는 토큰도 된다."""
+    identity = require_admin(request)
+    if identity.auth != "session":
+        raise HTTPException(status_code=403, detail="admin_session_required")
+    return identity

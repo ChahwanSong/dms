@@ -105,7 +105,12 @@ def _apply_migrations(db: Database) -> None:
             -- 재료다. 기계 고정 "token" 시절엔 LDAP 밖 로컬 admin 의 배치 자식이
             -- 전부 ldap_identity_not_found 로 즉시 거부됐다). NULL(구형 행)은
             -- orchestrator 가 token 으로 접는다 — 모름은 특권 쪽으로 읽지 않는다.
-            auth_method TEXT)""",
+            auth_method TEXT,
+            -- 확인 회차(2026-10-07): Previewing → PreviewReady 전이(mark_preview_ready)마다 +1. 운영자의
+            -- 「배치 확인」은 대화상자를 연 회차를 실어 보내고 확인 CAS 가 같은 회차일 때만 통과한다 --
+            -- 확인 대기 → 다시 미리보기 → 확인 대기(ABA) 사이에 생긴, 운영자가 보지 않은 항목까지 확인되지
+            -- 않게. NULL(구형 행·한 번도 확인 대기가 안 된 배치) = 0회차(repo 가 읽을 때 0 으로 접는다).
+            preview_round INTEGER)""",
         "CREATE INDEX IF NOT EXISTS idx_batches_status ON batches (status, created_at)",
         """CREATE TABLE IF NOT EXISTS batch_items (
             batch_id TEXT NOT NULL,
@@ -670,6 +675,8 @@ def _ensure_columns(db):
         # 배치 이름 -- 위와 같은 이중 경로 규약(슬라이스 14 교훈: CREATE 만 고치면
         # 기배포 DB 에서만 컬럼이 없다).
         ("batches", "name", "TEXT"),
+        # 확인 회차(2026-10-07) -- 이중 경로 규약. 기배포 행은 NULL = 0회차(BatchesRepository._hydrate).
+        ("batches", "preview_round", "INTEGER"),
         # 스토리지 사용자 공개(2026-09-30, 0 = 관리자 전용) -- 이중 경로 규약. 기배포 행은
         # ALTER 로 NULL 이 되므로 migrate 가 _backfill_storage_user_enabled 로 1(종전 동작:
         # 활성 스토리지는 누구나)을 채운다. 코드도 NULL 을 1 로 읽는다(모름 ≠ 거부).

@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from ..build_manifests import auto_no_proxy
-from .auth import Identity, audit_actor, require_admin
+from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_builds import validate_source_path
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ def get_control_state_history(request: Request,
 
 @router.put("/api/admin/control-state")
 def put_control_state(body: ControlStateBody, request: Request,
-                      identity: Identity = Depends(require_admin)):
+                      identity: Identity = Depends(require_session_admin)):
     repos = request.app.state.repos
     control = repos.control
     # build_node_name은 그대로 k8s nodeSelector로 흘러간다 -- 공백만 있는 값이

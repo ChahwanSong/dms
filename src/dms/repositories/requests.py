@@ -24,23 +24,33 @@ class RequestsRepository:
         # auth_method 기본값이 "token" 인 이유(슬라이스 19, 설계 §2.2-2): 이 값을
         # 빠뜨린 호출자는 특권 승격을 못 얻는다 -- 기본이 "session" 이면 새 생성
         # 지점이 하나 생길 때마다 조용히 uid 0 경로가 열린다. fail-closed 가 기본.
+        with self._db.transaction():
+            return self.insert_pending(
+                operation=operation, requester_id=requester_id, actor=actor,
+                resource_key=resource_key, payload=payload, priority=priority,
+                batch_id=batch_id, auth_method=auth_method)
+
+    def insert_pending(self, *, operation, requester_id, actor, resource_key,
+                       payload: dict, priority: str, batch_id=None,
+                       auth_method="token") -> str:
+        """create 의 본문 -- **호출자 트랜잭션 안에서만** 부른다(Database.transaction 은 중첩이 없다). 배치
+        orchestrator 가 자식 요청 INSERT 와 항목 claim 을 한 트랜잭션으로 묶으려고 나눴다(claim 실패 = 롤백)."""
         request_id = uuid.uuid4().hex
         now = utc_now_iso()
-        with self._db.transaction():
-            row = self._db.query_one("SELECT COALESCE(MAX(commit_order), 0) AS m FROM requests")
-            order = row["m"] + 1
-            self._db.execute(
-                """INSERT INTO requests (request_id, commit_order, operation, requester_id,
-                       actor, resource_key, priority, payload, state, created_at, updated_at,
-                       batch_id, auth_method)
-                   VALUES (:id, :o, :op, :req, :actor, :key, :pri, :payload, :state, :now, :now,
-                       :bid, :auth)""",
-                {"id": request_id, "o": order, "op": operation, "req": requester_id,
-                 "actor": actor, "key": resource_key, "pri": priority,
-                 "payload": dump_json(payload), "state": RequestState.PENDING.value,
-                 "now": now, "bid": batch_id, "auth": auth_method},
-            )
-            self._record_transition(request_id, None, RequestState.PENDING, None, actor, now)
+        row = self._db.query_one("SELECT COALESCE(MAX(commit_order), 0) AS m FROM requests")
+        order = row["m"] + 1
+        self._db.execute(
+            """INSERT INTO requests (request_id, commit_order, operation, requester_id,
+                   actor, resource_key, priority, payload, state, created_at, updated_at,
+                   batch_id, auth_method)
+               VALUES (:id, :o, :op, :req, :actor, :key, :pri, :payload, :state, :now, :now,
+                   :bid, :auth)""",
+            {"id": request_id, "o": order, "op": operation, "req": requester_id,
+             "actor": actor, "key": resource_key, "pri": priority,
+             "payload": dump_json(payload), "state": RequestState.PENDING.value,
+             "now": now, "bid": batch_id, "auth": auth_method},
+        )
+        self._record_transition(request_id, None, RequestState.PENDING, None, actor, now)
         return request_id
 
     def _record_transition(self, request_id, from_state, to_state, reason_code, actor, at):

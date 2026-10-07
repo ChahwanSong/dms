@@ -43,7 +43,9 @@ const cell = "w-full rounded-lg border border-line px-3 py-1.5 text-sm";
 
 const OPERATION_HELP: Record<"scan" | "sync", string> = {
   scan: "한 스토리지의 여러 경로를 scan 합니다. 행마다 잡 하나가 만들어집니다.",
-  sync: "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 만들어집니다.",
+  // 확인 단계(2026-10-07): sync 배치는 만들자마자 실행되지 않는다 -- 생성 화면 어디에도 이 사실이 없었다.
+  sync: "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 만들어지고, "
+    + "항목별 미리보기가 끝나면 배치 상세에서 「배치 확인」을 눌러야 실행됩니다.",
 };
 
 const initial = {

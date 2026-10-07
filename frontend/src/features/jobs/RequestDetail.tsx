@@ -1,4 +1,4 @@
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useRequest, useRequestJobs, useCancelJob, useCancelRequest } from "./useJobs";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -247,7 +247,14 @@ export function RequestDetail() {
               <p className="text-muted text-xs mt-1 break-all">아티팩트 {j.artifact_uri}</p>
             )}
             <ResultSummary summary={j.result_summary} />
-            {j.state === "ConfirmPending" && <div className="mt-2"><ConfirmDialog job={j} /></div>}
+            {/* 배치 자식은 단건 컨펌을 못 한다(서버 409 batch_child_confirm_via_batch, 2026-10-07) -- 배치 확인 1회가
+                자식 전부를 대표하고 특권 게이트도 그쪽에 있다. 컨펌 버튼 대신 어디서 확인하는지를 말한다. */}
+            {j.state === "ConfirmPending" && (data?.batch_id ? (
+              <p className="mt-2 text-sm text-muted">
+                배치 항목입니다 — 실행 확인은 항목별이 아니라 <Link className="text-accent underline" to={`/admin/batches/${data.batch_id}`}>배치 상세</Link>에서
+                배치 단위로 합니다. 배치가 「확인 대기」면 「배치 확인」으로 실행되고, 이미 확인된 배치면 동시 실행 상한만큼씩 차례로 실행됩니다.
+              </p>
+            ) : <div className="mt-2"><ConfirmDialog job={j} /></div>)}
             {j.state !== "ConfirmPending" && !isTerminal(j.state) && (
               <div className="mt-2">
                 <Button variant="ghost" disabled={cancel.isPending}

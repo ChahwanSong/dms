@@ -10,7 +10,8 @@ export const isTerminal = (s: string) => TERMINAL_STATES.has(s);
 // 합집합에 남아도 요청 상태 문자열과 겹치지 않아 무해하다.
 export const REQUEST_TERMINAL_STATES = new Set([...TERMINAL_STATES, "Conflict"]);
 
-export type PillVariant = "ok" | "bad" | "busy" | "neutral";
+// action = 운영자 행동이 필요한 상태(주의색 앰버 -- busy 의 연파랑·버튼의 accent 와 구별된다). 지금은 배치 「확인 대기」 하나.
+export type PillVariant = "ok" | "bad" | "busy" | "neutral" | "action";
 export function pillVariant(state: string): PillVariant {
   if (state === "Succeeded") return "ok";
   if (["Failed", "Rejected", "Cancelled", "PreviewExpired"].includes(state)) return "bad";
@@ -37,10 +38,19 @@ export function buildPillVariant(state: string): PillVariant {
 // 헤더의 성공/실패 카운터가 따로 말한다. 항목 상태(Queued/Materialized/Succeeded/
 // Failed/Cancelled — 요청/잡 판정 축)는 이 함수의 도메인이 아니다: 그쪽은 공유
 // pillVariant 를 그대로 쓴다(항목 Cancelled 는 실행이 끊긴 것이라 bad 가 정직).
+// PreviewReady 는 action(2026-10-07): 운영자가 「배치 확인」을 눌러야만 실행되는 유일한 상태인데, Running 과 같은
+// busy 연파랑에 영문 그대로라 "이미 도는 중"으로 읽혔다(적대적 조사). 라벨도 batchStatusLabel 이 한글로 바꾼다.
 export function batchPillVariant(status: string): PillVariant {
   if (status === "Completed") return "ok";
-  if (["Running", "Previewing", "PreviewReady"].includes(status)) return "busy";
+  if (status === "PreviewReady") return "action";
+  if (["Running", "Previewing"].includes(status)) return "busy";
   return "neutral";
+}
+
+// 배치 상태 표시 문자열. 행동이 필요한 PreviewReady 만 「확인 대기」로 바꾸고, 나머지는 서버 상태 그대로다(다른 화면의
+// 영문 상태 표기와 같은 축 -- 원문은 StatusPill 의 title 로 남는다).
+export function batchStatusLabel(status: string): string {
+  return status === "PreviewReady" ? "확인 대기" : status;
 }
 
 // 슬라이스 26: 스토리지 상태(Ready/Degraded/Unknown — reconciler.py:20-27)만을 위한

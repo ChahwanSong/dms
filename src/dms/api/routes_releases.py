@@ -8,7 +8,7 @@ from ..execution import ExecutionError
 from ..job_image import resolve_job_image
 from ..registry import fetch_repo_tags
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
-from .auth import Identity, audit_actor, require_admin
+from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_requests import reject_when_maintenance
 
 # 잡 이미지(슬라이스 35): 워크로드가 아니라 "다음 잡 파드가 쓸 이미지"의 DB
@@ -119,7 +119,7 @@ def release_targets(request: Request):
 
 @router.post("/api/admin/releases", status_code=202)
 def submit_releases(body: ReleaseBody, request: Request,
-                    identity: Identity = Depends(require_admin)):
+                    identity: Identity = Depends(require_session_admin)):
     reject_when_maintenance(request)
     repos = request.app.state.repos
     settings = request.app.state.settings
