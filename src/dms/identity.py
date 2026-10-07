@@ -16,6 +16,12 @@ class IdentityUnavailable(Exception):
     """resolver 백엔드(LDAP)가 조회 불가 — fail-closed 대상."""
 
 
+class LdapCircuitOpen(Exception):
+    """같은 틱에서 LDAP 불가가 이미 한 번 났다 -- 이번 틱엔 LDAP 에 다시 가지 않는다(planner 의 틱 서킷).
+    IdentityUnavailable 의 하위가 **아니다**: resolve_job_identity 가 ldap_unavailable 로 거부하지 않고 그대로
+    올려, 호출자가 요청을 Pending 으로 두고 다음 틱에 다시 보게 한다."""
+
+
 class IdentityResolver(Protocol):
     def resolve(self, username: str) -> "ResolvedIdentity | None":
         ...

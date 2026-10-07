@@ -195,6 +195,10 @@ class Settings:
     #   인증서 검증은 reqcert=never 미러로 생략). ldap_uri 는 콤마 목록(페일오버)도.
     ldap_group_member_attr: str = "uniqueMember"
     ldap_use_start_tls: bool = True
+    # LDAP 호출 하나(연결·StartTLS·bind·검색 각각)의 상한(초, 2026-10-07). 예전엔 타임아웃이 없고 다중 URI 를
+    # ServerPool(exhaust=True)로 묶어, 한 번 실패한 서버를 영구히 건너뛰다 전부 죽으면 connect() 가 영원히 돌아오지
+    # 않았다 -- 단일 스레드 컨트롤러(planner·stepper·rollout)가 통째로 멈췄다. URI 는 이제 순서대로 하나씩 시도한다.
+    ldap_timeout_seconds: float = 5.0
     # 프로덕션 노출(ingress+TLS) 대비: true 면 세션 쿠키에 Secure 플래그가 붙어
     # 평문 HTTP 로는 쿠키가 실리지 않는다. 기본 false 인 이유는 테스트베드의
     # HTTP 경로(NodePort 30080·port-forward)가 살아 있어야 하기 때문 -- TLS 를
@@ -276,6 +280,10 @@ class Settings:
         artifact_base_allowed_prefixes = _parse_path_prefixes(
             environ, "DMS_ARTIFACT_BASE_ALLOWED_PREFIXES", problems)
         # if problems 검사보다 앞에서 파싱해야 잘못된 값이 조용히 기본값으로 바뀌지 않는다.
+        ldap_timeout_seconds = _parse_float(environ, "DMS_LDAP_TIMEOUT_SECONDS", 5.0, problems)
+        if not (0.5 <= ldap_timeout_seconds <= 60):
+            problems.append("DMS_LDAP_TIMEOUT_SECONDS must be between 0.5 and 60 seconds: "
+                            f"{environ.get('DMS_LDAP_TIMEOUT_SECONDS')!r}")
         mail_relay_timeout_seconds = _parse_float(
             environ, "DMS_MAIL_RELAY_TIMEOUT_SECONDS", 20.0, problems)
         # 포탈 검증(mail_config.validate_timeout)과 같은 범위 -- nan·inf·음수가 urllib 에서 엉뚱하게 터지지 않게.
@@ -326,6 +334,7 @@ class Settings:
                 "DMS_LDAP_GROUP_MEMBER_ATTR", "uniqueMember"),
             ldap_use_start_tls=_parse_bool(environ, "DMS_LDAP_USE_START_TLS",
                                            default=True),
+            ldap_timeout_seconds=ldap_timeout_seconds,
             session_cookie_secure=_parse_bool(
                 environ, "DMS_SESSION_COOKIE_SECURE"),
             account_verification_required=_parse_bool(
