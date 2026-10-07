@@ -145,6 +145,34 @@ def test_login_succeeds_when_ldap_unavailable(client, db):
     assert db.query("SELECT username FROM identity_probe_targets") == []
 
 
+def test_login_succeeds_when_ldap_has_duplicate_user_entries(client, db):
+    # D14(2026-10-07): 사용자 엔트리 중복은 이제 IdentityLookupInvalid(fail-closed) -- 예전엔 조용히 첫 엔트리.
+    # 로그인 선등록은 예외를 전부 삼키므로 로그인은 그대로 200 이고, 쓸 수 없는 신원은 프로브에 등록하지 않는다.
+    from dms.identity_ldap import LdapIdentityResolver
+
+    class _Entry:
+        def __init__(self, uid):
+            self._uid = uid
+
+        def __getitem__(self, key):
+            return type("_A", (), {"value": self._uid if key == "uidNumber" else 10000})()
+
+    class _DupConn:
+        entries = []
+        result = {"result": 0, "description": "success", "controls": {}}
+
+        def search(self, base, filt, attributes=None, **kwargs):
+            self.entries = [_Entry(10001), _Entry(10009)]
+            return True
+    client.app.state.identity_resolver = LdapIdentityResolver(
+        connect=lambda deadline=None: _DupConn(), user_base="ou=u", group_base="ou=g",
+        group_member_attr="memberUid")
+    client.post("/api/auth/signup", json={"username": "alice", "password": "pw"})
+    r = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
+    assert r.status_code == 200
+    assert db.query("SELECT username FROM identity_probe_targets") == []
+
+
 def test_session_cookie_secure_flag_follows_settings(client, db, settings):
     # TLS 종단 뒤 배포(DMS_SESSION_COOKIE_SECURE=true)에서만 Secure 가 붙고,
     # 기본(테스트베드 HTTP 경로)에서는 붙지 않는다 -- 붙으면 NodePort/port-forward

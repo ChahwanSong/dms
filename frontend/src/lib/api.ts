@@ -188,6 +188,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   identity_missing_at_step: "잡의 실행 신원(uid/gid)이 없거나 올바르지 않습니다 — 관리자에게 문의하세요",
   privilege_not_requested: "root 로 계획됐지만 요청에 root 실행 근거가 없어 실행 전에 중단했습니다 — 규칙 변경 전에 계획된 잡일 수 있습니다. 필요하면 'root 권한으로 실행'을 명시해 다시 신청하세요",
   identity_root_without_privilege: "디렉터리가 이 사용자에게 uid 0 을 줍니다 — root 실행은 특권 요청자만 가능합니다",
+  // 보조 그룹 인정(2026-10-07, identity.resolve_job_identity·check_chown_group). reasonCodes.json 과 같은 커밋.
+  identity_root_group_without_privilege: "실행 계정의 LDAP 주 그룹이 root(gid 0)라 root 가 아닌 실행을 할 수 없습니다 — 관리자에게 문의하세요",
+  chown_group_not_member: "chown 의 그룹(gid)이 실행 계정이 속한 그룹이 아닙니다 — 실행 계정의 주 그룹 또는 작업 계획 시점에 확인된 LDAP 보조 그룹의 gid 만 지정할 수 있습니다(프로젝트 그룹 소유로 남기려면 uid:<프로젝트 gid>)",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",
   request_not_found: "요청을 찾을 수 없습니다",

@@ -103,8 +103,14 @@ def validate_rm_target(target: str, options: dict) -> str:
     return normalized
 
 
+def valid_owner_username(username) -> bool:
+    """owner_username 모양 판정(bool). API(validate_owner_username)와 planner 의 계획 시점 선검사가 같은 규칙을
+    쓴다 -- planner 는 API 를 거치지 않은 DB 직접 쓰기(신뢰 경계)도 보므로 비문자열이 올 수 있어 isinstance 먼저."""
+    return isinstance(username, str) and _USERNAME_RE.fullmatch(username) is not None
+
+
 def validate_owner_username(username: str) -> str:
-    if not _USERNAME_RE.fullmatch(username):
+    if not valid_owner_username(username):
         raise DomainValidationError("invalid_owner_username", repr(username))
     return username
 
@@ -137,6 +143,17 @@ def chown_problem(value) -> "str | None":
     if _CHOWN_NAMED_RE.fullmatch(value):
         return "chown_name_not_supported"
     return "invalid_option"
+
+
+def chown_gid_part(value) -> "int | None":
+    """정상 chown 값(chown_problem 이 None)의 gid 파트(":NNN") -> int. uid 만·이름·형식 오류는 None -- 그 거부는
+    chown_problem 경로의 몫이고, 여기는 계획 시점 그룹 멤버십 검사(identity.check_chown_group, D7)의 입력만 만든다."""
+    if chown_problem(value) is not None:
+        return None
+    m = _CHOWN_RE.fullmatch(value)
+    if m is None or m.group(2) is None:
+        return None
+    return int(m.group(2)[1:])
 
 _BOOL = ("bool",)
 _OPTION_SPECS: dict[Operation, dict[str, tuple]] = {

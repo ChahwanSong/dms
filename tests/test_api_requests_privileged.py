@@ -46,6 +46,17 @@ def test_user_cannot_submit_for_other_owner(db):
     assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized"
 
 
+def test_whitespace_owner_still_403_for_non_admin(db):
+    # 술어 단일화(identity.owner_override_allowed, 2026-10-07) 뒤에도 원문 비교 -- ' alice' 는 자신이 아니라
+    # 403(특권 게이트)이 먼저다. strip 비교였다면 422(모양)로 바뀌었을 것이다.
+    client = _client_with(db)
+    client.post("/api/auth/signup", json={"username": "alice", "password": "p"})
+    client.post("/api/auth/login", json={"username": "alice", "password": "p"})
+    for owner in (" alice", "alice ", ""):
+        r = client.post("/api/user/requests", json={**RM, "owner_username": owner})
+        assert r.status_code == 403 and r.json()["detail"] == "privileged_not_authorized", owner
+
+
 def test_admin_operator_with_flag_can_submit_for_other(db):
     client = _client_with(db, DMS_ALLOW_PRIVILEGED_REQUESTERS="true",
                           DMS_PRIVILEGED_REQUESTERS="ops")

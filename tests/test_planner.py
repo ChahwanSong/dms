@@ -816,6 +816,9 @@ def test_privileged_batch_child_plans_for_non_ldap_requester(db):
     _seed_storage(repos); _seed_policy(repos)
     # 신원 미전파 리포트(identities: []) -- 특권이 아니면 후보 0 이 되는 형상.
     _seed_identity_pending_report(repos)
+    # 배치는 관리자 전용 라우트에서만 생긴다 -- 생성자 admin 은 로컬 관리자 계정(LDAP 밖)이다. 자식의 실행 신원
+    # 지정(owner alice)은 planner 가 API 와 같은 술어(계정 역할 + 목록)로 다시 본다(2026-10-07).
+    repos.accounts.create("admin", "pw", "admin")
     bid = repos.batches.create(
         operation="scan", requester_id="admin", actor="admin", max_concurrency=1,
         options={}, note=None, items=[{"storage": "s1", "target": "a"}],
@@ -891,7 +894,7 @@ class _CountingDownResolver:
     def __init__(self):
         self.calls = 0
 
-    def resolve(self, username):
+    def resolve(self, username, *, deadline=None):
         from dms.identity import IdentityUnavailable
         self.calls += 1
         raise IdentityUnavailable("ldap down")
@@ -912,3 +915,294 @@ def test_ldap_outage_trips_the_tick_circuit_and_leaves_the_rest_pending(db):
     # 다음 틱은 다시 LDAP 를 시도한다(LDAP 가 돌아오면 바로 이어진다).
     result = _planner(repos).run_once(now_iso=NOW)
     assert [result[r] for r in rids[1:]] == ["planned", "planned"]
+
+
+# --- 보조 그룹(2026-10-07): 스냅숏 4키·D5·D7·이벤트·owner 자격 재확인·틱 예산 ------------------------------
+
+class _GroupSettings(_Settings):
+    identity_supplementary_groups = True
+
+
+def _alice_with(gids, gid=10000):
+    return ResolvedIdentity("alice", 10001, gid, ("dmsusers", "proj"), False, group_gids=tuple(gids))
+
+
+def _plan_scan_with(repos, ident, *, settings=None):
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _scan_request(repos)
+    result = Planner(repos, StubIdentityResolver({"alice": ident}),
+                     settings=settings or _GroupSettings()).run_once(now_iso=NOW)
+    return rid, result[rid]
+
+
+def _snapshot(repos, rid):
+    return repos.data_jobs.list_jobs(request_id=rid)[0]["worker_pool"]["identity"]
+
+
+def _events(repos, rid, event_type):
+    return [e for e in repos.observability.events_for_request(rid) if e["event_type"] == event_type]
+
+
+def test_snapshot_records_supplementary_groups(db):
+    repos = Repositories(db)
+    rid, outcome = _plan_scan_with(repos, _alice_with((10000, 20002, 20001)))
+    assert outcome == "planned"
+    ident = _snapshot(repos, rid)
+    # 4키 값과 **타입**(JSON 그대로의 list·str·int) -- stepper·매니페스트·포탈이 이 모양을 읽는다.
+    assert ident["supplementary_gids"] == [20001, 20002] and type(ident["supplementary_gids"]) is list
+    assert ident["supplementary_gids_status"] == "applied" and type(ident["supplementary_gids_status"]) is str
+    assert ident["supplementary_gids_excluded"] == [] and type(ident["supplementary_gids_excluded"]) is list
+    assert ident["supplementary_gids_found"] == 2 and type(ident["supplementary_gids_found"]) is int
+    assert "group_gids" not in ident                  # 리졸버 원시값은 싣지 않는다
+    assert (ident["uid"], ident["gid"], ident["groups"]) == (10001, 10000, ["dmsusers", "proj"])
+    assert _events(repos, rid, "identity_groups_filtered") == []
+
+
+def test_snapshot_without_groups_is_none(db):
+    repos = Repositories(db)
+    rid, _ = _plan_scan_with(repos, ALICE)
+    ident = _snapshot(repos, rid)
+    assert (ident["supplementary_gids"], ident["supplementary_gids_status"],
+            ident["supplementary_gids_excluded"], ident["supplementary_gids_found"]) == ([], "none", [], 0)
+
+
+def test_switch_off_records_disabled(db):
+    # 설정 스텁에 스위치가 없으면 꺼짐(fail-closed) -- 실 Settings 의 기본은 켬(D9).
+    repos = Repositories(db)
+    rid, _ = _plan_scan_with(repos, _alice_with((20001,)), settings=_Settings())
+    ident = _snapshot(repos, rid)
+    assert ident["supplementary_gids"] == [] and ident["supplementary_gids_status"] == "disabled"
+    assert ident["supplementary_gids_found"] is None   # 모름(보지 않았다) ≠ 0
+
+
+def test_over_limit_records_status_and_one_event(db):
+    from dms.identity import MAX_SUPPLEMENTARY_GROUPS
+    repos = Repositories(db)
+    rid, outcome = _plan_scan_with(repos, _alice_with(range(30000, 30000 + MAX_SUPPLEMENTARY_GROUPS + 1)))
+    assert outcome == "planned"                        # D4: 거부가 아니라 통째로 미적용(오늘 동작)
+    ident = _snapshot(repos, rid)
+    assert ident["supplementary_gids"] == [] and ident["supplementary_gids_status"] == "over_limit"
+    assert ident["supplementary_gids_found"] == MAX_SUPPLEMENTARY_GROUPS + 1
+    events = _events(repos, rid, "identity_groups_filtered")
+    assert len(events) == 1 and events[0]["severity"] == "info"
+    assert events[0]["payload"] == {"status": "over_limit", "found": MAX_SUPPLEMENTARY_GROUPS + 1,
+                                    "limit": MAX_SUPPLEMENTARY_GROUPS, "excluded": []}
+
+
+def test_excluded_gids_recorded_with_event(db):
+    repos = Repositories(db)
+    rid, _ = _plan_scan_with(repos, _alice_with((20001, -1, 2147483648)))
+    ident = _snapshot(repos, rid)
+    assert ident["supplementary_gids"] == [20001] and ident["supplementary_gids_status"] == "applied"
+    assert ident["supplementary_gids_excluded"] == [-1, 2147483648]
+    events = _events(repos, rid, "identity_groups_filtered")
+    assert len(events) == 1
+    assert events[0]["payload"]["excluded"] == [-1, 2147483648]
+    assert events[0]["payload"]["status"] == "applied"
+
+
+def test_gid_zero_group_emits_root_group_warning(db):
+    repos = Repositories(db)
+    rid, outcome = _plan_scan_with(repos, _alice_with((0, 20001)))
+    assert outcome == "planned"                        # D3: 인정(거부 안 함) -- 가시성만
+    assert _snapshot(repos, rid)["supplementary_gids"] == [0, 20001]
+    events = _events(repos, rid, "identity_groups_root_group")
+    assert len(events) == 1 and events[0]["severity"] == "warning"
+    assert events[0]["payload"] == {"gids": [0, 20001]}
+
+
+def test_filtered_event_not_emitted_on_grace_ticks(db):
+    from dms.identity import MAX_SUPPLEMENTARY_GROUPS
+    many = _alice_with(range(30000, 30000 + MAX_SUPPLEMENTARY_GROUPS + 1))
+    # (a) 신원 전파 유예(identity_propagating)
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_identity_pending_report(repos)
+    rid = _scan_request(repos)
+    _backdate(db, rid, "2026-08-02T09:58:00Z")
+    planner = Planner(repos, StubIdentityResolver({"alice": many}), settings=_GroupSettings())
+    for _ in range(2):
+        assert planner.run_once(now_iso=NOW)[rid] == "deferred:identity_propagating"
+    assert _events(repos, rid, "identity_groups_filtered") == []
+    _seed_report(repos)
+    assert planner.run_once(now_iso=NOW)[rid] == "planned"
+    assert len(_events(repos, rid, "identity_groups_filtered")) == 1
+    # (b) 요청 노드 수 대기(awaiting_requested_nodes)
+    rid2 = repos.requests.create(
+        operation="scan", requester_id="alice", actor="alice", resource_key="data.scan:s1:b:ff",
+        payload={"storage": "s1", "target": "b", "options": {}, "owner_username": None, "node_count": 2},
+        priority="mid")
+    _backdate(db, rid2, "2026-08-02T09:58:00Z")
+    _seed_identity_pending_report(repos, node="n2")
+    assert planner.run_once(now_iso=NOW)[rid2] == "deferred:awaiting_requested_nodes"
+    assert _events(repos, rid2, "identity_groups_filtered") == []
+    _seed_report(repos, node="n2")
+    assert planner.run_once(now_iso=NOW)[rid2] == "planned"
+    assert len(_events(repos, rid2, "identity_groups_filtered")) == 1
+
+
+def test_primary_gid_zero_rejected_at_plan(db):
+    repos = Repositories(db)
+    rid, outcome = _plan_scan_with(repos, _alice_with((20001,), gid=0))
+    assert outcome == "rejected:identity_root_group_without_privilege"
+    assert repos.data_jobs.list_jobs(request_id=rid) == []
+
+
+# owner_username 자격 재확인(API 와 같은 술어) -- DB 직접 쓰기 방어
+
+def _owner_request(repos, *, requester, owner, key="data.scan:s1:a:ff"):
+    return repos.requests.create(
+        operation="scan", requester_id=requester, actor=requester, resource_key=key,
+        payload={"storage": "s1", "target": "a", "options": {}, "owner_username": owner},
+        priority="mid", auth_method="session")
+
+
+class _OpsSettings(_Settings):
+    allow_privileged_requesters = True
+    privileged_requesters = frozenset({"ops"})
+
+
+def test_owner_override_by_non_privileged_requester_rejected(db):
+    # DB 직접 쓰기: bob 의 요청 payload 만 owner=alice -- alice 의 uid(이제 보조 그룹까지)를 얻지 못한다.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    repos.accounts.create("bob", "pw", ROLE_USER)
+    rid = _owner_request(repos, requester="bob", owner="alice")
+    result = Planner(repos, StubIdentityResolver({"alice": ALICE}),
+                     settings=_OpsSettings()).run_once(now_iso=NOW)
+    assert result[rid] == "rejected:privileged_not_authorized"
+    assert repos.requests.get(rid)["state"] == "Rejected"
+    assert repos.data_jobs.list_jobs(request_id=rid) == []
+
+
+def test_owner_override_by_eligible_admin_plans(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    repos.accounts.create("ops", "pw", "admin")
+    rid = _owner_request(repos, requester="ops", owner="alice")
+    result = Planner(repos, StubIdentityResolver({"alice": ALICE}),
+                     settings=_OpsSettings()).run_once(now_iso=NOW)
+    assert result[rid] == "planned"
+    assert _snapshot(repos, rid)["username"] == "alice"
+
+
+@pytest.mark.parametrize("owner", ["", " alice", 123, ["x"], "bad name"])
+def test_malformed_owner_rejected_invalid_owner_username(db, owner):
+    # 예전: "" 는 resolve 가 '본인'으로 읽었고, 비문자열은 .strip() AttributeError 로 매 틱 plan_error·영구 Pending.
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _owner_request(repos, requester="alice", owner=owner)
+    result = _planner(repos).run_once(now_iso=NOW)
+    assert result[rid] == "rejected:invalid_owner_username"
+
+
+# D7 chown gid 멤버십(계획 시점)
+
+def _sync_chown_request(repos, chown, *, run_as_root=False, requester="alice"):
+    payload = {"source_storage": "src", "source": "a", "destination_storage": "dst", "destination": "b",
+               "options": {"chown": chown}, "owner_username": None}
+    if run_as_root:
+        payload["run_as_root"] = True
+    return repos.requests.create(operation="sync", requester_id=requester, actor=requester,
+                                 resource_key="data.sync:src:a:dst:b:ff", payload=payload,
+                                 priority="mid", auth_method="session")
+
+
+def _seed_sync_ready(repos, user="alice"):
+    _seed_sync_storages(repos)
+    _seed_policy(repos, "dsync")
+    _seed_sync_reports(repos, [{"username": user, "status": "Ready"}])
+
+
+def test_chown_gid_not_member_rejected(db):
+    repos = Repositories(db)
+    _seed_sync_ready(repos)
+    rid = _sync_chown_request(repos, "10001:30000")
+    result = Planner(repos, StubIdentityResolver({"alice": _alice_with((20001,))}),
+                     settings=_GroupSettings()).run_once(now_iso=NOW)
+    assert result[rid] == "rejected:chown_group_not_member"
+    assert repos.data_jobs.list_jobs(request_id=rid) == []
+
+
+def test_chown_supplementary_gid_member_plans(db):
+    repos = Repositories(db)
+    _seed_sync_ready(repos)
+    rid = _sync_chown_request(repos, "10001:20001")
+    result = Planner(repos, StubIdentityResolver({"alice": _alice_with((20001,))}),
+                     settings=_GroupSettings()).run_once(now_iso=NOW)
+    assert result[rid] == "planned"
+    # 스위치가 꺼져 있으면 적용 목록이 비어 주 gid 만 -- 같은 gid 가 거부된다.
+    rid2 = repos.requests.create(
+        operation="sync", requester_id="alice", actor="alice", resource_key="data.sync:src:c:dst:d:ff",
+        payload={"source_storage": "src", "source": "c", "destination_storage": "dst", "destination": "d",
+                 "options": {"chown": ":20001"}, "owner_username": None},
+        priority="mid", auth_method="session")
+    result = Planner(repos, StubIdentityResolver({"alice": _alice_with((20001,))}),
+                     settings=_Settings()).run_once(now_iso=NOW)
+    assert result[rid2] == "rejected:chown_group_not_member"
+
+
+def test_chown_check_skipped_for_root(db):
+    repos = Repositories(db)
+    _seed_sync_ready(repos, user="root")
+    rid = _sync_chown_request(repos, "0:30000", run_as_root=True, requester="root")
+    result = Planner(repos, StubIdentityResolver({}), settings=_PrivSettings()).run_once(now_iso=NOW)
+    assert result[rid] == "planned"
+    assert _snapshot(repos, rid)["privileged"] is True
+
+
+# 틱 LDAP 예산·IdentityLookupInvalid(서킷 비개방)
+
+class _ClockResolver:
+    """resolve 마다 가짜 monotonic 을 step 초 전진시키고 받은 deadline 을 기록한다."""
+    def __init__(self, users, clock, step):
+        self._inner = StubIdentityResolver(users)
+        self._clock, self._step = clock, step
+        self.calls = []
+
+    def resolve(self, username, *, deadline=None):
+        self.calls.append((username, deadline, self._clock[0]))
+        self._clock[0] += self._step
+        return self._inner.resolve(username)
+
+
+def test_tick_budget_defers_remaining_requests(db):
+    from dms.identity import LDAP_TICK_BUDGET_SECONDS
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rids = [_scan_request(repos, key=f"data.scan:s1:a{i}:ff") for i in range(2)]
+    clock = [1000.0]
+    slow = _ClockResolver({"alice": ALICE}, clock, step=LDAP_TICK_BUDGET_SECONDS + 1)
+    result = Planner(repos, slow, settings=_Settings(),
+                     monotonic=lambda: clock[0]).run_once(now_iso=NOW)
+    assert result[rids[0]] == "planned"
+    assert result[rids[1]] == "deferred:ldap_circuit_open"    # 예산 소진 -- LDAP 를 부르지 않고 Pending
+    assert len(slow.calls) == 1
+    _, deadline, started = slow.calls[0]
+    assert deadline == started + LDAP_TICK_BUDGET_SECONDS     # 남은 예산이 deadline 으로 전달
+    assert repos.requests.get(rids[1])["state"] == "Pending"
+    # 다음 틱은 새 예산으로 이어간다.
+    result = Planner(repos, StubIdentityResolver({"alice": ALICE}), settings=_Settings()).run_once(now_iso=NOW)
+    assert result[rids[1]] == "planned"
+
+
+def test_lookup_invalid_does_not_open_circuit(db):
+    from dms.identity import IdentityLookupInvalid
+
+    class _DupResolver:
+        def __init__(self):
+            self.calls = []
+
+        def resolve(self, username, *, deadline=None):
+            self.calls.append(username)
+            if username == "dup":
+                raise IdentityLookupInvalid("duplicate user entries: 2")
+            return StubIdentityResolver({"alice": ALICE}).resolve(username)
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid_dup = _scan_request(repos, requester="dup", key="data.scan:s1:d:ff")
+    rid_ok = _scan_request(repos, key="data.scan:s1:a:ff")
+    resolver = _DupResolver()
+    result = _planner(repos, resolver=resolver).run_once(now_iso=NOW)
+    assert result[rid_dup] == "rejected:ldap_unavailable"     # 그 요청만(계획 시점 의미는 그대로)
+    assert result[rid_ok] == "planned"                        # 같은 틱의 다른 사용자는 계속
+    assert resolver.calls == ["dup", "alice"]

@@ -241,6 +241,9 @@ def _plan(db, payload_extra=None, batch_id=None, key="k"):
     payload = {"storage": "s1", "target": "a", "options": {}, "owner_username": "alice",
                **(payload_extra or {})}
     kw = {"batch_id": batch_id} if batch_id else {}
+    # 요청자 ops 는 관리자 계정이다 -- 다른 실행 신원(alice) 지정은 planner 도 API 와 같은 술어(계정 역할 +
+    # 목록)로 다시 본다(2026-10-07). 계정 행이 없으면 비관리자로 보아 privileged_not_authorized 다.
+    repos.accounts.create("ops", "pw", "admin")
     rid = repos.requests.create(operation="scan", requester_id="ops", actor="ops",
                                 resource_key=key, payload=payload, priority="mid",
                                 auth_method="session", **kw)

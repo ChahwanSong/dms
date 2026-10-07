@@ -162,7 +162,7 @@ class _Settings:
 ALICE = ResolvedIdentity("alice", 10001, 10000, ("dmsusers",), False)
 
 
-def _plan_sync(db, *, requester, role, batch_id=None, allow=False):
+def _plan_sync(db, *, requester, role, batch_id=None, allow=False, owner="alice"):
     repos = Repositories(db)
     for n in ("src", "dst"):
         repos.storages.create(storage_name=n, mount_path=f"/mnt/{n}", managed_root=f"/mnt/{n}/dms",
@@ -189,7 +189,7 @@ def _plan_sync(db, *, requester, role, batch_id=None, allow=False):
                                 resource_key=f"k-{requester}",
                                 payload={"source_storage": "src", "source": "a",
                                          "destination_storage": "dst", "destination": "b",
-                                         "options": {}, "owner_username": "alice"},
+                                         "options": {}, "owner_username": owner},
                                 priority="mid", auth_method="session", **kw)
     Planner(repos, StubIdentityResolver({"alice": ALICE}),
             settings=_Settings()).run_once(now_iso="2026-08-02T10:00:00Z")
@@ -209,8 +209,15 @@ def test_planner_does_not_restrict_admins_or_batch_children(db):
 
 
 def test_planner_treats_batch_children_as_admin_requests(db):
-    # 배치는 관리자 전용 라우트에서만 생긴다 -- 생성자 계정 행이 없어도 사용자 규칙에 걸리지 않는다.
-    assert _plan_sync(db, requester="gone-admin", role=None, batch_id="b-1")[0] == "Planned"
+    # 배치는 관리자 전용 라우트에서만 생긴다 -- 생성자 계정 행이 없어도 사용자 규칙(허용 쌍)에 걸리지 않는다.
+    # 실행 신원이 생성자 자신이면(owner 생략) 그대로 계획된다.
+    assert _plan_sync(db, requester="alice", role=None, batch_id="b-1", owner=None)[0] == "Planned"
+
+
+def test_planner_batch_child_owner_override_needs_a_current_admin_creator(db):
+    # 쌍 게이트는 면제로 통과하지만(sync_pair_not_allowed 가 아니다), 다른 실행 신원 지정은 API 와 같은 술어로
+    # 다시 본다(2026-10-07) -- 계정 행이 없는(삭제·강등된) 생성자의 자식은 alice 로 돌지 못한다.
+    assert _plan_sync(db, requester="gone-admin", role=None, batch_id="b-1") ==         ("Rejected", "privileged_not_authorized")
 
 
 # --- 컨펌 게이트 ------------------------------------------------------------------------

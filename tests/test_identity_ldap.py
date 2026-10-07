@@ -26,9 +26,11 @@ class _FakeConn:
         self._broken = broken
         self.entries = []
 
-    def search(self, base, filt, attributes=None):
+    def search(self, base, filt, attributes=None, **kwargs):
         if self._broken:
             raise RuntimeError("ldap down")
+        # ldap3 처럼 성공 결과 코드(0)·빈 컨트롤 -- 페이징 쿠키 없음 = 한 쪽으로 끝.
+        self.result = {"result": 0, "description": "success", "controls": {}}
         if "memberUid" in filt:
             uid = filt.split("memberUid=")[1].rstrip(")")
             self.entries = [_FakeEntry({"cn": cn}) for cn in self._groups.get(uid, [])]
@@ -46,7 +48,7 @@ def _resolver(users, groups, *, broken=False):
     # rfc2307 경로를 고정하는 픽스처 -- 기본값은 uniqueMember(rfc2307bis)로
     # 승격됐으므로(2026-08-23) memberUid 는 명시적으로 지정한다.
     return LdapIdentityResolver(
-        connect=lambda: _FakeConn(users, groups, broken=broken),
+        connect=lambda deadline=None: _FakeConn(users, groups, broken=broken),
         user_base="ou=People,dc=dms,dc=local",
         group_base="ou=Groups,dc=dms,dc=local",
         group_member_attr="memberUid")
@@ -101,7 +103,7 @@ def test_escape_filter():
 
 def test_already_unavailable_not_double_wrapped():
     # connect가 IdentityUnavailable을 던지면 그대로 재전파(이중 래핑 없음)
-    def connect():
+    def connect(deadline=None):
         raise IdentityUnavailable("upstream")
     r = LdapIdentityResolver(connect=connect, user_base="ou=People", group_base="ou=Groups")
     with pytest.raises(IdentityUnavailable) as e:
@@ -119,7 +121,7 @@ class _BisConn:
         self.filters = []
         self.entries = []
 
-    def search(self, base, filt, attributes=None):
+    def search(self, base, filt, attributes=None, **kwargs):
         self.filters.append(filt)
         if filt.startswith("(uid="):
             entry = _FakeEntry({"uidNumber": 20001, "gidNumber": 20000})
@@ -135,7 +137,7 @@ class _BisConn:
 def test_rfc2307bis_group_search_uses_user_dn():
     dn = "uid=alice,ou=People,dc=dms,dc=local"
     conn = _BisConn(dn, {dn: ["bisgroup"]})
-    r = LdapIdentityResolver(connect=lambda: conn,
+    r = LdapIdentityResolver(connect=lambda deadline=None: conn,
         user_base="ou=People,dc=dms,dc=local",
         group_base="ou=Groups,dc=dms,dc=local",
         group_member_attr="uniqueMember")
@@ -148,7 +150,7 @@ def test_rfc2307bis_group_search_uses_user_dn():
 def test_rfc2307bis_dn_with_metachars_is_escaped():
     dn = r"uid=we(ird,ou=Peo*ple,dc=dms,dc=local"
     conn = _BisConn(dn, {})
-    r = LdapIdentityResolver(connect=lambda: conn,
+    r = LdapIdentityResolver(connect=lambda deadline=None: conn,
         user_base="ou=People", group_base="ou=Groups",
         group_member_attr="member")
     out = r.resolve("weird")
@@ -165,7 +167,7 @@ def test_member_uid_mode_never_touches_entry_dn():
 
 def test_constructor_default_is_unique_member():
     # 2026-08-23 사용자 결정: 기본값이 곧 프로덕션 sssd.conf 값(rfc2307bis).
-    r = LdapIdentityResolver(connect=lambda: None,
+    r = LdapIdentityResolver(connect=lambda deadline=None: None,
                              user_base="ou=People", group_base="ou=Groups")
     assert r._group_member_attr == "uniqueMember"
 
@@ -208,10 +210,10 @@ def test_injection_attempt_is_escaped():
 
     class _Conn:
         entries = []
-        def search(self, base, filt, attributes=None):
+        def search(self, base, filt, attributes=None, **kwargs):
             captured.append(filt)
             return False
-    r = LdapIdentityResolver(connect=lambda: _Conn(),
+    r = LdapIdentityResolver(connect=lambda deadline=None: _Conn(),
         user_base="ou=People", group_base="ou=Groups")
     r.resolve("evil)(uid=*")
     assert "*" not in captured[0] and ")" not in captured[0].replace("(uid=", "").rstrip(")")
@@ -278,7 +280,7 @@ def test_build_resolver_passes_timeouts_and_tries_uris_one_by_one(monkeypatch):
                 raise ldap3.core.exceptions.LDAPSocketOpenError("socket open failed")
             self.entries, self.unbound = [], False
 
-        def search(self, base, filt, attributes=None):
+        def search(self, base, filt, attributes=None, **kwargs):
             self.entries = []
             return False
 
@@ -311,7 +313,7 @@ def test_connection_is_unbound_after_success_miss_and_failure():
     for users, broken, expect in (({"alice": (10001, 10000)}, False, "hit"), ({}, False, "miss"),
                                   ({}, True, "fail")):
         conn = _UnbindConn(users, {"alice": []}, broken=broken)
-        r = LdapIdentityResolver(connect=lambda: conn, user_base="ou=u", group_base="ou=g",
+        r = LdapIdentityResolver(connect=lambda deadline=None: conn, user_base="ou=u", group_base="ou=g",
                                  group_member_attr="memberUid")
         if expect == "fail":
             with pytest.raises(IdentityUnavailable):
@@ -326,6 +328,218 @@ def test_multi_valued_group_cn_is_flattened():
     # 매 틱 plan_error 를 남기며 Pending 에 갇혔다 -- 값을 모두 이름으로 펼친다(denylist 거부가 느는 안전한 쪽).
     conn = _FakeConn({"alice": (10001, 10000)},
                      {"alice": [["proj-a", "projA"], "users", None]})
-    r = LdapIdentityResolver(connect=lambda: conn, user_base="ou=u", group_base="ou=g",
+    r = LdapIdentityResolver(connect=lambda deadline=None: conn, user_base="ou=u", group_base="ou=g",
                              group_member_attr="memberUid")
     assert r.resolve("alice").groups == ("proj-a", "projA", "users")
+
+
+# --- 보조 그룹(2026-10-07, D14): posixGroup gidNumber·fail-closed·페이징·resolve 마감 --------------------------
+
+from dms.identity import IdentityLookupInvalid
+from dms.identity_ldap import _MAX_GROUP_PAGES, _PAGED_RESULTS_OID, _RESOLVE_DEADLINE_SECONDS
+
+
+def _pg(cn, gid, classes=("top", "posixGroup")):
+    # 단일값 objectClass 는 ldap3 처럼 스칼라 그대로(.value 가 str) -- 목록으로 펼치지 않는다.
+    attrs = {"cn": cn, "objectClass": classes if isinstance(classes, str) else list(classes)}
+    if gid is not _ABSENT:
+        attrs["gidNumber"] = gid
+    return attrs
+
+
+_ABSENT = object()
+
+
+class _PagedConn:
+    """ldap3.Connection 흉내(새 경로): 사용자 검색은 지정 엔트리(중복 가능)를, 그룹 검색은 쪽(page) 목록을
+    paged_cookie 로 넘긴다. 결과 코드·controls 쿠키를 ldap3 의 conn.result 모양으로 싣는다. clock 이 있으면
+    그룹 검색마다 advance 초씩 전진한다(마감 테스트)."""
+    def __init__(self, *, users=({"uidNumber": 10001, "gidNumber": 10000},), pages=((),),
+                 user_result=0, group_result=0, endless=False, clock=None, advance=0.0):
+        self._users, self._pages = list(users), [list(p) for p in pages]
+        self._user_result, self._group_result = user_result, group_result
+        self._endless, self._clock, self._advance = endless, clock, advance
+        self.calls = []
+        self.entries = []
+        self.result = None
+
+    def search(self, base, filt, attributes=None, **kwargs):
+        self.calls.append({"filter": filt, "attributes": attributes, **kwargs})
+        if filt.startswith("(uid="):
+            self.entries = [_FakeEntry(a) for a in self._users]
+            self.result = {"result": self._user_result, "description": "x", "controls": {}}
+            return bool(self.entries)
+        if self._clock is not None:
+            self._clock[0] += self._advance
+        cookie = kwargs.get("paged_cookie")
+        idx = 0 if cookie is None else int(cookie.decode())
+        page = self._pages[min(idx, len(self._pages) - 1)]
+        self.entries = [_FakeEntry(a) for a in page]
+        nxt = idx + 1
+        more = self._endless or nxt < len(self._pages)
+        self.result = {"result": self._group_result, "description": "x",
+                       "controls": {_PAGED_RESULTS_OID: {"value": {
+                           "cookie": str(nxt).encode() if more else b"", "size": 0}}}}
+        return bool(self.entries)
+
+
+def _paged_resolver(conn, **kw):
+    return LdapIdentityResolver(connect=lambda deadline=None: conn, user_base="ou=u", group_base="ou=g",
+                                group_member_attr="memberUid", **kw)
+
+
+def test_group_search_requests_gid_and_objectclass_with_paging():
+    conn = _PagedConn(pages=([_pg("proj", 20001)],))
+    out = _paged_resolver(conn).resolve("alice")
+    group_call = conn.calls[1]
+    assert group_call["filter"] == "(memberUid=alice)"          # 필터 문자열은 그대로(denylist 의미 보존)
+    assert group_call["attributes"] == ["cn", "gidNumber", "objectClass"]
+    assert group_call["paged_size"] == 500 and group_call["paged_cookie"] is None
+    assert out.group_gids == (20001,) and out.groups == ("proj",)
+
+
+def test_group_gids_only_from_posixgroup_entries():
+    conn = _PagedConn(pages=([_pg("proj", 20001),
+                              _pg("samba", 20002, classes=("sambaGroupMapping", "groupOfUniqueNames")),
+                              _pg("PG", "20003", classes="PosixGroup"),           # 대소문자 무시·문자열 gid
+                              _pg("bytesy", b"20004", classes=(b"posixGroup",))],))
+    out = _paged_resolver(conn).resolve("alice")
+    assert out.group_gids == (20001, 20003, 20004)
+    assert out.groups == ("PG", "bytesy", "proj", "samba")        # 이름은 클래스와 무관하게 유지(denylist)
+
+
+def test_malformed_gidnumber_skipped_name_kept():
+    conn = _PagedConn(pages=([_pg("nogid", _ABSENT), _pg("multi", [1, 2]), _pg("abc", "abc"),
+                              _pg("boolish", True), _pg("ok", 20001)],))
+    out = _paged_resolver(conn).resolve("alice")
+    assert out.group_gids == (20001,)
+    assert out.groups == ("abc", "boolish", "multi", "nogid", "ok")
+
+
+def test_negative_and_huge_gid_passed_raw():
+    # 범위 판정은 identity.valid_supplementary_gids 몫 -- 리졸버는 원시값을 넘겨 화면에 '제외'로 보이게 한다.
+    conn = _PagedConn(pages=([_pg("neg", "-5"), _pg("huge", 4294967295), _pg("ok", 10000)],))
+    assert _paged_resolver(conn).resolve("alice").group_gids == (-5, 10000, 4294967295)
+
+
+def test_duplicate_user_entries_is_lookup_invalid():
+    conn = _PagedConn(users=({"uidNumber": 10001, "gidNumber": 10000},
+                             {"uidNumber": 10009, "gidNumber": 10000}))
+    with pytest.raises(IdentityLookupInvalid) as e:
+        _paged_resolver(conn).resolve("alice")
+    assert "duplicate" in str(e.value)
+    assert len(conn.calls) == 1                                    # 그룹 검색까지 가지 않는다
+
+
+@pytest.mark.parametrize("code", [4, 11])
+@pytest.mark.parametrize("where", ["user", "group"])
+def test_size_and_admin_limit_are_lookup_invalid(code, where):
+    conn = _PagedConn(pages=([_pg("proj", 20001)],),
+                      **({"user_result": code} if where == "user" else {"group_result": code}))
+    with pytest.raises(IdentityLookupInvalid):
+        _paged_resolver(conn).resolve("alice")
+
+
+@pytest.mark.parametrize("code", [3, 32, 51, 52])
+@pytest.mark.parametrize("where", ["user", "group"])
+def test_other_nonzero_results_are_plain_unavailable(code, where):
+    # 서버·설정 전역(timeLimit·noSuchObject(베이스 오구성)·busy·unavailable) -- 서킷을 여는 plain IdentityUnavailable.
+    conn = _PagedConn(pages=([_pg("proj", 20001)],),
+                      **({"user_result": code} if where == "user" else {"group_result": code}))
+    with pytest.raises(IdentityUnavailable) as e:
+        _paged_resolver(conn).resolve("alice")
+    assert not isinstance(e.value, IdentityLookupInvalid)
+
+
+def test_group_search_follows_paged_cookie():
+    conn = _PagedConn(pages=([_pg("a", 20001)], [_pg("b", 20002)]))
+    out = _paged_resolver(conn).resolve("alice")
+    assert out.group_gids == (20001, 20002) and out.groups == ("a", "b")
+    assert [c.get("paged_cookie") for c in conn.calls[1:]] == [None, b"1"]
+
+
+def test_group_search_page_cap_is_lookup_invalid():
+    conn = _PagedConn(pages=([_pg("a", 20001)],), endless=True)
+    with pytest.raises(IdentityLookupInvalid):
+        _paged_resolver(conn).resolve("alice")
+    assert len(conn.calls) == 1 + _MAX_GROUP_PAGES                 # 상한까지만 묻고 부분 결과로 판정하지 않는다
+
+
+def test_resolve_deadline_stops_before_next_page():
+    clock = [100.0]
+    conn = _PagedConn(pages=([_pg("a", 20001)], [_pg("b", 20002)]), clock=clock, advance=11.0)
+    r = _paged_resolver(conn, monotonic=lambda: clock[0])
+    with pytest.raises(IdentityUnavailable) as e:
+        r.resolve("alice")                                         # 자체 마감 10s -- 첫 쪽 뒤 11s 전진
+    assert not isinstance(e.value, IdentityLookupInvalid)          # 느림 = 장애(서킷 개방)
+    assert len(conn.calls) == 2                                    # 두 번째 쪽은 시작하지 않는다
+    # 호출자 deadline 이 자체 마감보다 이르면 그쪽이 이긴다(틱 예산의 남은 몫).
+    clock[0] = 100.0
+    conn2 = _PagedConn(pages=([_pg("a", 20001)], [_pg("b", 20002)]), clock=clock, advance=3.0)
+    with pytest.raises(IdentityUnavailable):
+        _paged_resolver(conn2, monotonic=lambda: clock[0]).resolve("alice", deadline=102.0)
+    assert len(conn2.calls) == 2
+    # 마감 안이면 그대로 끝난다.
+    clock[0] = 100.0
+    conn3 = _PagedConn(pages=([_pg("a", 20001)], [_pg("b", 20002)]), clock=clock, advance=1.0)
+    assert _paged_resolver(conn3, monotonic=lambda: clock[0]).resolve(
+        "alice", deadline=100.0 + _RESOLVE_DEADLINE_SECONDS * 5).group_gids == (20001, 20002)
+
+
+def test_resolve_passes_its_limit_to_connect():
+    seen = []
+    conn = _PagedConn()
+
+    def connect(deadline=None):
+        seen.append(deadline)
+        return conn
+    r = LdapIdentityResolver(connect=connect, user_base="ou=u", group_base="ou=g",
+                             group_member_attr="memberUid", monotonic=lambda: 50.0)
+    r.resolve("alice")
+    r.resolve("alice", deadline=53.0)
+    r.resolve("alice", deadline=500.0)
+    assert seen == [50.0 + _RESOLVE_DEADLINE_SECONDS, 53.0, 50.0 + _RESOLVE_DEADLINE_SECONDS]
+
+
+def test_connect_first_stops_at_deadline():
+    clock = [0.0]
+    tried = []
+
+    def open_one(uri):
+        tried.append(uri)
+        clock[0] += 6.0
+        raise OSError("connect timed out")
+    with pytest.raises(IdentityUnavailable) as e:
+        connect_first(["ldap://a", "ldap://b", "ldap://c"], open_one, deadline=5.0,
+                      monotonic=lambda: clock[0])
+    assert tried == ["ldap://a"]                                   # 남은 URI 는 시도하지 않는다
+    assert "deadline exceeded" in str(e.value)
+    # 이미 마감이 지났으면 첫 URI 도 시도하지 않는다.
+    tried.clear()
+    with pytest.raises(IdentityUnavailable):
+        connect_first(["ldap://a"], open_one, deadline=5.0, monotonic=lambda: 9.0)
+    assert tried == []
+
+
+def test_ldap3_missing_attribute_keyerror_tolerated():
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        from ldap3.core.exceptions import LDAPKeyError
+
+    class _StrictEntry(_FakeEntry):
+        def __getitem__(self, key):
+            if key not in self._attrs:
+                raise LDAPKeyError(f"key '{key}' not found")
+            return _FakeAttr(self._attrs[key])
+
+    class _Conn(_PagedConn):
+        def search(self, base, filt, attributes=None, **kwargs):
+            found = super().search(base, filt, attributes, **kwargs)
+            if not filt.startswith("(uid="):
+                self.entries = [_StrictEntry({"cn": "appgroup"}),
+                                _StrictEntry({"cn": "proj", "gidNumber": 20001,
+                                              "objectClass": ["posixGroup"]})]
+            return found
+    out = _paged_resolver(_Conn()).resolve("alice")
+    assert out.groups == ("appgroup", "proj") and out.group_gids == (20001,)
