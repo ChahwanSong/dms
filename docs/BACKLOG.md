@@ -133,10 +133,11 @@
   그룹 한정**(uniqueMember 전용 디렉터리에서 비어 보일 수 있다). 필요하면 `map group member
   uniqueMember` 를 렌더러·하달 블록에 함께 추가.
 - 📝 **NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖**(보조 그룹 D6) — `artifact_base._posix_acl_problem`
-  은 POSIX ACL xattr 만 읽는다. 그런 ACL 이 base 에 쓰기를 주면 3홉은 초록이고, 보조 그룹이 실린
-  잡만 preflight `test -w`(`_ARTIFACT_BASE_NOT_WRITABLE_CHECK`, access(2) 라 모든 ACL 반영)가 잡
-  단위로 막는다. 그룹 없는 비 root 잡은 그 ACL 로 쓰기를 얻는 경우에만 노출(드묾 — 운영 base 는
-  root:root 755, `deploy/README.md` §2b-1).
+  은 POSIX ACL xattr 만 읽는다. 그런 ACL 이 base **자체**에 쓰기를 주면 3홉은 초록이고, 보조 그룹이 실린
+  잡만 preflight `test -w`(`_ARTIFACT_BASE_NOT_WRITABLE_CHECK`)가 base 자체의 쓰기를 잡 단위로 막는다.
+  **상속**(NFSv4/GPFS inheritable ACE 가 `<job_id>/<phase>` 에 주는 쓰기)은 preflight `test -w` 도 컨트롤러
+  관문(static_base_problem — POSIX xattr 만)도 보지 못한다 — 남는 위험(운영 base 는 root:root 755 에 상속 ACE
+  없음을 직접 확인, `deploy/README.md` §2b-1). POSIX default ACL 도 그룹 없는 비 root 잡은 잡 단위로 보지 않는다.
 - 📝 **nsync 복합 preflight 는 PENDING 을 보고하지 않는다**(`execution_volcano.poll` 의 `pods/a,b`
   결합 — 한쪽이 대기 중이면 RUNNING). 그래서 stepper 의 PENDING 분기(`_raise_if_blocked` — 계획 뒤
   배치 제외·cordon 된 노드의 대기 단계 종단)가 nsync preflight 파드 쌍에는 걸리지 않는다 — 스케줄 전

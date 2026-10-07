@@ -81,7 +81,9 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   - 관리자가 주는 경로는 역할 게이트 + prefix allowlist(`DMS_ARTIFACT_BASE_ALLOWED_PREFIXES`,
     `artifact_base.allowlist_reason`) + realpath 검사 셋 다.
   - uid/gid 부재를 0 으로 기본값 처리하지 않는다 — 부재는 거부(`stepper.identity_problem`,
-    `identity_missing_at_step`). uid 0 자체는 privileged 짝이 맞으면 정당.
+    `identity_missing_at_step`). uid 0 자체는 privileged 짝이 맞으면 정당. **예외: 보조 gid 키 부재 = `[]`**
+    (2026-10-08 — 배포 전에 계획된 잡의 정상 모양이고 더 좁은 권한이다, ARCHITECTURE §7-9). 부재를 거부로
+    "강화" 하지 마라 — 진행 중 잡이 배포 순간 전부 끊긴다.
   - **잡의 root 여부는 제출 시점에 확정돼 payload `run_as_root` 로만 흐른다**(2026-09-30):
     planner·stepper 는 `identity.privilege_policy`(`run_as_root is True` 또는 배치 자식)만
     본다 — 특권 목록에 있다는 것만으로 root 가 되지 않는다. 서버(`routes_requests.submit`)는

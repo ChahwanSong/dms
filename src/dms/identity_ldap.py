@@ -186,8 +186,10 @@ class LdapIdentityResolver:
         caller_bound = deadline is not None and deadline < own
         limit = deadline if caller_bound else own
         conn = None
+        connected = False
         try:
             conn = self._connect(deadline=limit)
+            connected = True
             safe = _escape_filter(username)
             _check_deadline(self._monotonic, limit, "user search")
             conn.search(self._user_base, f"(uid={safe})",
@@ -230,13 +232,28 @@ class LdapIdentityResolver:
             if caller_bound:
                 raise IdentityDeadlineExceeded(str(exc)[:500]) from None
             raise IdentityUnavailable(str(exc)[:500]) from None
-        except IdentityUnavailable:
+        except IdentityUnavailable as exc:
+            # 붙은 URI 에서 검색이 전송 오류·서버 전역 결과 코드로 실패했다 -- 다음 resolve 는 다음 URI 부터(아래 _search_failed).
+            # 사용자별 데이터 문제(IdentityLookupInvalid)는 서버 탓이 아니라 시작 위치를 옮기지 않는다.
+            if connected and type(exc) is IdentityUnavailable:
+                _search_failed(self._connect)
             raise                       # IdentityLookupInvalid 포함 -- 하위 클래스 그대로 올린다(서킷 판정이 다르다)
         except Exception as exc:
+            if connected:
+                _search_failed(self._connect)
             raise IdentityUnavailable(str(exc)[:200])
         finally:
             _unbind(conn)
         return ResolvedIdentity(username, uid, gid, groups, False, group_gids=group_gids)
+
+
+def _search_failed(connect) -> None:
+    """연결·bind 는 되는데 검색이 실패하는 URI(과부하 레플리카의 receive 타임아웃, busy/unwilling 등)에 시작 위치가 붙박이지
+    않게 connect 에 다음 URI 로 넘기라고 알린다(build_ldap_resolver 의 connect.search_failed). 그런 훅이 없는 connect
+    (테스트 페이크·단일 URI)는 무시한다."""
+    hook = getattr(connect, "search_failed", None)
+    if hook is not None:
+        hook()
 
 
 def _unbind(conn) -> None:
@@ -288,7 +305,8 @@ def connect_first(uris, open_one, *, deadline=None, monotonic=None, rotation=Non
     deadline(time.monotonic 기준 절대 시각)을 넘었으면 남은 URI 를 시도하지 않고 _DeadlineStop(IdentityUnavailable
     의 하위 -- resolve 가 누구의 마감이었나로 바꿔 올린다)을 낸다 -- URI 수 × 3T 가 resolve 마감을 넘지 않게.
     rotation(dict, 선택): 시작 위치 기억(모듈 docstring 'sticky'). {"start": i} 의 i 번째 URI 부터 돌아가며 시도하고,
-    성공하면 그 위치를, 마감으로 멈추면 **시도하지 못한 첫 URI** 의 위치를 적는다(전부 실패면 그대로). 동시 호출의
+    성공하면 그 위치(start·last)를, 마감으로 멈추면 **시도하지 못한 첫 URI** 의 위치를 적는다(전부 실패면 그대로). 붙은 뒤
+    검색이 실패하면 resolve 가 connect.search_failed 로 last 다음 URI 를 시작 위치로 옮긴다(build_ldap_resolver). 동시 호출의
     경합은 시작 순서만 바꿀 뿐 결과의 정확성과 무관하다(dict 대입 하나)."""
     mono = monotonic or time.monotonic
     n = len(uris)
@@ -307,6 +325,7 @@ def connect_first(uris, open_one, *, deadline=None, monotonic=None, rotation=Non
             continue
         if rotation is not None:
             rotation["start"] = idx              # 붙은 URI 를 기억 -- 죽은 앞쪽 URI 의 타임아웃을 매번 내지 않는다
+            rotation["last"] = idx               # 이 연결의 검색이 실패하면 다음 resolve 를 그다음 URI 부터(search_failed)
         return conn
     raise IdentityUnavailable("; ".join(errors)[:500] or "no ldap uri")
 
@@ -343,6 +362,14 @@ def build_ldap_resolver(settings):
             ldap3.Server(uri, tls=tls, connect_timeout=timeout, get_info=ldap3.NONE),
             user=cfg["bind_dn"], password=cfg["bind_pw"], auto_bind=auto_bind,
             receive_timeout=receive_timeout), deadline=deadline, rotation=rotation)
+
+    def search_failed():
+        # 붙었지만 검색이 실패한 URI 에서 벗어난다 -- 예전엔 연결 성공만 기억해, 한 번 페일오버한 뒤 그 URI 가 검색만 실패하는
+        # 상태가 되면 1차가 살아나도 계속 그 URI 로만 갔다(2026-10-08 검증). 다음 resolve 는 last 다음 URI 부터 한 바퀴를 돈다.
+        n = len(cfg["uris"])
+        if n > 1 and "last" in rotation:
+            rotation["start"] = (rotation["last"] + 1) % n
+    connect.search_failed = search_failed
 
     return LdapIdentityResolver(connect=connect, user_base=user_base,
                                 group_base=group_base,
