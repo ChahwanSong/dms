@@ -146,6 +146,20 @@ def test_user_allowed_operations_default_and_override():
     assert s.user_allowed_operations == frozenset({"sync", "rm"})
 
 
+def test_identity_supplementary_groups_switch_defaults_on():
+    # D9(2026-10-07): 기본 켬(포탈 릴리스만으로 동작), values.env 로 끈다. true/1 외 전부 False -- 오타는
+    # 꺼지는 쪽(더 좁은 권한)이라 안전하다. dataclass 직접 생성도 True(실 Settings 의 기본이 곧 D9).
+    assert Settings.from_env(VALID).identity_supplementary_groups is True
+    for value in ("true", "1", "TRUE", " true "):
+        assert Settings.from_env({**VALID, "DMS_IDENTITY_SUPPLEMENTARY_GROUPS": value}
+                                 ).identity_supplementary_groups is True
+    for value in ("false", "0", "", "flase", "yes"):
+        assert Settings.from_env({**VALID, "DMS_IDENTITY_SUPPLEMENTARY_GROUPS": value}
+                                 ).identity_supplementary_groups is False
+    assert Settings(database_url="u", shared_token="s", admin_token="a",
+                    session_secret="x").identity_supplementary_groups is True
+
+
 def test_account_verification_env_defaults_on():
     # 운영 경로(from_env)는 fail-closed: 명시로 끄지 않는 한 인증번호 필수.
     # (dataclass 직접 생성 기본은 False -- 테스트 전용 관례, config.py 주석.)

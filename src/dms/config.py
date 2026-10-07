@@ -171,6 +171,10 @@ class Settings:
     artifact_base_allowed_prefixes: tuple = ()
     allow_privileged_requesters: bool = True
     privileged_requesters: frozenset = frozenset({"root", "admin"})
+    # 보조 그룹 인정(2026-10-07, D9 기본 켬 -- 포탈 릴리스만으로 동작): 비 root 잡에 실행 신원의 LDAP posixGroup
+    # gidNumber 를 보조 그룹으로 싣는다. **계획 시점 전용** -- planner 만 읽고, 진행 중 잡은 스냅숏대로 끝까지 간다.
+    # 끌 때는 env false + dms-controller 재시작. 이 스위치가 덮지 않는 변경(재확인·base 검사 등)은 deploy/README §2c 표.
+    identity_supplementary_groups: bool = True
     # 비운영자(role=user)가 제출할 수 있는 연산 allowlist(2026-08-20, 사용자 결정:
     # 사용자에겐 sync 만 열고 rm·scan 은 일단 잠근다). admin 은 이 목록과 무관하게
     # 전부 가능. "일단"이라 나중에 rm/scan 을 풀 때는 env 로 목록만 넓히면 된다
@@ -321,6 +325,9 @@ class Settings:
             privileged_requesters=_parse_csv_set(
                 environ, "DMS_PRIVILEGED_REQUESTERS",
                 default=frozenset({"root", "admin"})),
+            # true/1 외 전부 False -- 오타는 꺼지는 쪽(더 좁은 권한)이 안전하다.
+            identity_supplementary_groups=_parse_bool(
+                environ, "DMS_IDENTITY_SUPPLEMENTARY_GROUPS", default=True),
             user_allowed_operations=_parse_csv_set(
                 environ, "DMS_USER_ALLOWED_OPERATIONS",
                 default=frozenset({"sync"})),

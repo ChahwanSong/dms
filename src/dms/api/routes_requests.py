@@ -9,6 +9,7 @@ from ..domain import (
     resolve_priority, validate_owner_username,
 )
 from ..execution import ExecutionError
+from ..identity import owner_override_allowed
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
@@ -131,13 +132,14 @@ def submit(body: RequestBody, request: Request,
     # 특권 게이트 (스펙 §5): owner_username이 요청자와 다르면 특권 의도 → 인가 필요.
     # 다른 사용자로 실행하는 것 자체가 특권이다 -- 2026-09-30 부터 그 실행은 기본이
     # **그 사용자의 uid/gid** 다(run_as_root 를 명시해야 root -- 포탈은 이 경우 체크박스를 끈다).
+    # 술어는 identity.owner_override_allowed 하나 -- planner 가 계획 시점에 같은 함수로 다시 본다(DB 직접 쓰기
+    # 방어, 2026-10-07). 원문 비교라 ' alice' 같은 값은 여기서 403(모양 422 는 그 뒤 _validated_payload).
     owner = body.owner_username
-    if owner is not None and owner != identity.actor:
-        authorized = (identity.role == "admin"
-                      and settings.allow_privileged_requesters
-                      and identity.actor in settings.privileged_requesters)
-        if not authorized:
-            raise HTTPException(status_code=403, detail="privileged_not_authorized")
+    if not owner_override_allowed(owner_username=owner, requester_id=identity.actor,
+                                  requester_is_admin=(identity.role == "admin"),
+                                  allow_privileged=settings.allow_privileged_requesters,
+                                  privileged_requesters=settings.privileged_requesters):
+        raise HTTPException(status_code=403, detail="privileged_not_authorized")
     # root 실행 게이트: planner 와 같은 자격(세션 인증 포함)을 제출 시점에 즉시 확인한다
     # -- 통과 못 할 요청을 Pending 으로 받아 뒀다가 계획 때 거부하지 않는다. planner 도
     # 다시 확인한다(DB 가 신뢰 경계라 payload 변조·설정 변경을 막는 2차 방어).

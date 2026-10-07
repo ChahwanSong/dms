@@ -1,10 +1,13 @@
 """planner: Pending 요청을 어드미션 게이트를 거쳐 계획된 data_job으로 emit하는 루프 본체."""
 import sys
+import time
 from dataclasses import asdict
 
 from .db import iso_plus, utc_now_iso
-from .domain import Operation, RequestState
-from .identity import (IdentityRejected, IdentityUnavailable, LdapCircuitOpen, privilege_policy,
+from .domain import Operation, RequestState, valid_owner_username
+from .identity import (LDAP_TICK_BUDGET_SECONDS, MAX_SUPPLEMENTARY_GROUPS, SUPP_OVER_LIMIT,
+                       IdentityLookupInvalid, IdentityRejected, IdentityUnavailable, LdapCircuitOpen,
+                       check_chown_group, owner_override_allowed, privilege_policy,
                        resolve_job_identity)
 from .repositories.storages import storage_open_to_users
 from .repositories.sync_pairs import sync_pair_allowed
@@ -58,32 +61,51 @@ class _TickCircuit:
     """틱 단위 LDAP 서킷(2026-10-07): 한 틱에서 LDAP 불가가 한 번 나면 같은 틱의 나머지 조회는 LDAP 에 가지 않고
     LdapCircuitOpen 을 올린다 -- 요청은 Pending 으로 남아 다음 틱에 다시 본다. 없으면 틱마다 대기 요청(최대 50)이
     각자 타임아웃 × URI 수만큼 기다려, 단일 스레드 컨트롤러의 stepper·pod-gc·rollout 이 몇 분씩 멈춘다. 서킷을
-    연 첫 요청은 지금처럼 ldap_unavailable 로 거부된다(계획 시점 실패의 기존 의미)."""
-    def __init__(self, inner):
-        self._inner = inner
-        self.open = False
+    연 첫 요청은 지금처럼 ldap_unavailable 로 거부된다(계획 시점 실패의 기존 의미).
 
-    def resolve(self, username):
+    틱 예산(2026-10-07): 한 틱의 resolve 누적 시간이 LDAP_TICK_BUDGET_SECONDS 를 넘으면 서킷과 같이 연다(남은 요청은
+    Pending, 다음 틱). 보조 그룹 페이징(D14)으로 resolve 하나의 최악이 검색 2회 → 최대 21회로 커져, 예산 없이는 틱당
+    대기 50건 × resolve 가 루프 리스 30s 를 넘어 두 번째 컨트롤러(RollingUpdate surge·replicas>1)가 planner 를
+    동시에 돌 수 있다. 남은 예산은 deadline 으로 리졸버에 넘겨 resolve 하나도 그 안에서만 새 연산을 시작한다.
+    IdentityLookupInvalid(사용자 엔트리 중복 등 이 사용자의 데이터 문제)는 서킷을 열지 않는다 -- 그 요청만
+    ldap_unavailable 로 거부되고 같은 틱의 다른 사용자 요청은 계속 계획된다."""
+    def __init__(self, inner, *, monotonic=time.monotonic, budget=LDAP_TICK_BUDGET_SECONDS):
+        self._inner, self._mono, self._budget = inner, monotonic, budget
+        self.open = False
+        self._spent = 0.0
+
+    def resolve(self, username, *, deadline=None):
         if self.open:
             raise LdapCircuitOpen(username)
+        remaining = self._budget - self._spent
+        if remaining <= 0:
+            self.open = True                 # 예산 소진 = 서킷과 같은 처리(요청 Pending, 다음 틱)
+            raise LdapCircuitOpen(username)
+        t0 = self._mono()
         try:
-            return self._inner.resolve(username)
+            return self._inner.resolve(username, deadline=t0 + remaining)
+        except IdentityLookupInvalid:
+            raise                            # 사용자별 데이터 오류 -- 그 요청만 ldap_unavailable, 서킷 유지
         except IdentityUnavailable:
             self.open = True
             raise
+        finally:
+            self._spent += self._mono() - t0
 
 
 class Planner:
-    def __init__(self, repos, resolver, *, settings):
+    def __init__(self, repos, resolver, *, settings, monotonic=None):
         self._repos = repos
         self._resolver = resolver
         self._settings = settings
+        self._monotonic = monotonic or time.monotonic   # 틱 LDAP 예산 시계(테스트 주입용)
 
     def run_once(self, limit: int = 50, *, now_iso=None) -> dict:
         pending = self._repos.requests.list_pending(limit)
         results = {}
-        # 틱마다 새 서킷 -- 다음 틱은 다시 LDAP 를 시도한다(LDAP 가 돌아오면 바로 이어진다).
-        circuit = None if self._resolver is None else _TickCircuit(self._resolver)
+        # 틱마다 새 서킷·예산 -- 다음 틱은 다시 LDAP 를 시도한다(LDAP 가 돌아오면 바로 이어진다).
+        circuit = (None if self._resolver is None
+                   else _TickCircuit(self._resolver, monotonic=self._monotonic))
         deferred = 0
         for row in pending:
             rid = row["request_id"]
@@ -101,8 +123,8 @@ class Planner:
                     component="planner", severity="error", event_type="plan_error",
                     message=f"{type(exc).__name__}: {exc}"[:500], request_id=rid)
         if deferred:
-            print(f"planner: ldap circuit open -- {deferred} request(s) left Pending for the next tick",
-                  file=sys.stderr)
+            print(f"planner: ldap circuit open (outage or tick budget {LDAP_TICK_BUDGET_SECONDS}s spent) -- "
+                  f"{deferred} request(s) left Pending for the next tick", file=sys.stderr)
         return results
 
     def _reject(self, rid, reason):
@@ -217,6 +239,20 @@ class Planner:
                 and not sync_pair_allowed(self._repos, payload.get("source_storage"),
                                           payload.get("destination_storage"))):
             return self._reject(rid, "sync_pair_not_allowed")
+        # 3c. 실행 신원 지정(owner_username) -- API 를 거치지 않은 DB 직접 쓰기(신뢰 경계) 방어(2026-10-07).
+        #     모양 선검사: "" 는 resolve 가 '본인'으로 읽고, 비문자열은 .strip() AttributeError(매 틱 plan_error,
+        #     영구 Pending)로 새던 것을 정확한 사유로 끊는다. 그다음 API(routes_requests.submit)와 **같은 술어**로
+        #     자격을 다시 본다 -- 요청 행의 payload 만 owner=alice 로 바꾼 bob 의 요청이 alice 의 uid 와 이제 보조
+        #     그룹까지 얻는 경로를 막는다. 배치 자식은 생성자(관리자, 세션·목록 게이트 통과)가 요청자라 통과하고,
+        #     생성자가 강등·목록에서 빠지면 자식도 거부된다(storage_admin_only 와 같은 방향).
+        owner = payload.get("owner_username")
+        if owner is not None and not valid_owner_username(owner):
+            return self._reject(rid, "invalid_owner_username")
+        if not owner_override_allowed(owner_username=owner, requester_id=req["requester_id"],
+                                      requester_is_admin=requester_is_admin,
+                                      allow_privileged=self._settings.allow_privileged_requesters,
+                                      privileged_requesters=self._settings.privileged_requesters):
+            return self._reject(rid, "privileged_not_authorized")
         # 4. identity
         # (포탈의 "관리자 기본 root" 도 제출 바디의 명시 run_as_root: true 로 온다 -- 서버는 생략을
         #  root 로 읽지 않는다, routes_requests.submit.)
@@ -236,7 +272,16 @@ class Planner:
                 # 요청을 만든 인증 방식. token(또는 컬럼 미채움/NULL)은 특권을 못
                 # 얻는다 -- 기배포 DB 의 구형 행은 NULL 이라 자동으로 비특권이다.
                 session_authenticated=(req.get("auth_method") == "session"),
-                privilege=privilege)
+                privilege=privilege,
+                # 보조 그룹(D9, 계획 시점 전용 스위치). 설정 스텁에 필드가 없으면 꺼짐(fail-closed) -- 실
+                # Settings 의 기본은 켬이다.
+                supplementary_groups=getattr(self._settings, "identity_supplementary_groups", False))
+            # D7: 명시 chown 의 gid 는 실행 신원이 속한 그룹(주 gid ∪ 적용된 보조 gid)이어야 한다 -- 예전엔 비소속
+            # gid 면 dsync 가 데이터를 다 복사한 뒤 EPERM 으로 Failed 였다. 자동 chown(uid:주 gid)은 그대로다.
+            if req["operation"] == Operation.SYNC.value:
+                opts = payload.get("options")
+                if isinstance(opts, dict) and "chown" in opts:
+                    check_chown_group(opts["chown"], identity=identity)
         except IdentityRejected as exc:
             return self._reject(rid, exc.reason_code)
         # 5. tool + candidates
@@ -314,8 +359,12 @@ class Planner:
                     {"eligible": eligible, "target": target,
                      "not_ready_nodes": not_ready})
                 return "deferred:awaiting_requested_nodes"
-        # 7. emit
-        identity_dict = {**asdict(identity), "groups": list(identity.groups)}
+        # 7. emit -- 스냅숏 4키(supplementary_gids·_status·_excluded·_found)는 JSON 그대로의 모양(list·str·int|None)
+        #    으로 얼린다. 리졸버 원시값(group_gids)은 싣지 않는다(실행은 걸러진 목록만 본다).
+        identity_dict = {**asdict(identity), "groups": list(identity.groups),
+                         "supplementary_gids": list(identity.supplementary_gids),
+                         "supplementary_gids_excluded": list(identity.supplementary_gids_excluded)}
+        identity_dict.pop("group_gids", None)
         cand = placement["candidates"]
         if "primary" in cand:
             cand = {"primary": cand["primary"][:fanout["node_count"]]}
@@ -338,4 +387,27 @@ class Planner:
             tool=placement["tool"], worker_pool=worker_pool,
             precondition=precondition, actor="planner")
         self._repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+        self._record_group_events(rid, identity)
         return "planned"
+
+    def _record_group_events(self, rid, identity):
+        """보조 그룹 진단 이벤트 -- 계획 **성공 뒤 1회만**(유예 틱 identity_propagating·awaiting_requested_nodes 에는
+        남지 않는다: 그 틱들은 여기까지 오지 않는다). record_event 는 예외를 삼키므로 계획 결과를 바꾸지 않는다."""
+        if identity.supplementary_gids_status == SUPP_OVER_LIMIT or identity.supplementary_gids_excluded:
+            # D4: 통째로 미적용 / 기술적 무효 gidNumber 제외 -- 화면(잡 상세)과 같은 사실을 요청 이벤트로도 남긴다.
+            self._repos.observability.record_event(
+                component="planner", severity="info", event_type="identity_groups_filtered",
+                message=(f"보조 그룹 미적용: {identity.supplementary_gids_found}개 > 상한 {MAX_SUPPLEMENTARY_GROUPS}"
+                         if identity.supplementary_gids_status == SUPP_OVER_LIMIT
+                         else f"유효하지 않은 gidNumber 제외: {list(identity.supplementary_gids_excluded)}"),
+                payload={"status": identity.supplementary_gids_status,
+                         "found": identity.supplementary_gids_found,
+                         "limit": MAX_SUPPLEMENTARY_GROUPS,
+                         "excluded": list(identity.supplementary_gids_excluded)},
+                request_id=rid)
+        if 0 in identity.supplementary_gids:
+            # D3 로 인정(거부 안 함) -- 운영자 가시성만: root 그룹 권한이 비 root 잡에 실린다.
+            self._repos.observability.record_event(
+                component="planner", severity="warning", event_type="identity_groups_root_group",
+                message="보조 그룹에 gid 0(root 그룹)이 포함됨 -- root:root 770 디렉터리가 이 잡에 열린다",
+                payload={"gids": list(identity.supplementary_gids)}, request_id=rid)
