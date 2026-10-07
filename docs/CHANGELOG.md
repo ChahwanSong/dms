@@ -95,6 +95,21 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ LDAP 연결 강화 — 컨트롤러 영구 정지 결함 수리 — **완료·실증**(2026-10-07, d162)
+
+보조 그룹 설계 검토에서 찾은 기존 결함을 사용자 결정으로 보조 그룹과 분리해 먼저 출하했다. LDAP 호출에 타임아웃이 없고 다중
+URI 를 ServerPool(exhaust=True)로 묶어, 한 번 실패한 서버를 영구히 건너뛰다 전부 죽으면 connect() 가 영원히 돌아오지 않았다
+(단일 스레드 컨트롤러 전체 정지, livenessProbe 없음).
+- URI 를 순서대로 하나씩(`identity_ldap.connect_first`), 연결·StartTLS·bind·검색 각각 `DMS_LDAP_TIMEOUT_SECONDS`(기본 5,
+  0.5~60) 상한, 연결 매번 unbind. receive_timeout 은 정수 올림(ldap3 가 SO_RCVTIMEO 로 pack -- 실 LDAP 확인에서 발견).
+- 다중값 그룹 cn 펼침(요청이 plan_error 로 Pending 에 갇히던 크래시), planner 틱 서킷(한 틱에 LDAP 불가 1회면 나머지는
+  다음 틱으로 -- `LdapCircuitOpen`).
+
+배포: d162(빌드 695873ae / 커밋 69d3124) — dms 이미지만. 실증: 개발 호스트에서 실 LDAP 로 죽은 URI 를 앞에 두면 2초 뒤
+페일오버로 alice(uid 10001, dmsproj·dmsusers) 해석, URI 2개 전부 죽으면 4.0초에 IdentityUnavailable. 라이브 d162 에서
+alice 비특권 sync 제출 → planner 가 LDAP 로 신원 해석(worker_pool.identity uid 10001/gid 10000) → preflight 판정까지 정상,
+컨트롤러 로그 LDAP 오류 0. 테스트: 백엔드 전체 통과(connect_first·ldap3 인자·unbind·다중값 cn·틱 서킷·에이전트 디렉터리 계약).
+
 ### ✅ 배치 sync 확인 강화 + 공유 토큰의 계정·배포 경로 차단 — **완료·실증**(2026-10-07, d161)
 
 사용자 요청: "운영자가 배치작업으로 sync 할 때, 컨펌이 필요한지 체크" → 점검 결과(배치당 1회 확인은 동작하지만 우회
