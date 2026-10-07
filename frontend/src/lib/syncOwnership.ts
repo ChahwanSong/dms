@@ -5,9 +5,12 @@
 //   - 그 외엔 `--chown <실행 신원 uid>:<주 그룹 gid>` → 새로 만든 목적지·복사본 전부 실행 신원 소유
 // 실행 신원 = 운영자가 실행 신원(owner_username)을 지정했으면 그 사용자, 아니면 요청자 본인
 // (identity.resolve_job_identity). gid 는 LDAP 계정의 **주 그룹**이다(자동 chown 정책상 주 그룹 -- 잡은 보조
-// 그룹도 달고 돌지만 자동 지정은 주 그룹이고, 보조 그룹 소유는 명시 chown 으로만 -- 그 gid 는 계획 시점에 실행
-// 신원의 소속(주·보조)인지 검증된다: identity.check_chown_group, chown_group_not_member) --
+// 그룹도 달고 돌지만 자동 지정은 주 그룹이고, 보조 그룹 소유는 명시 chown 으로만 -- 그 gid 는 계획 시점에 주 그룹
+// 또는 **이 작업에 적용된** 보조 그룹인지 검증된다: identity.check_chown_group, chown_group_not_member. 보조 그룹이
+// 적용되지 않으면(운영자가 기능을 껐거나 256개 초과) 실제 멤버여도 주 그룹만 통과한다) --
 // 상위 디렉토리의 setgid 그룹을 물려받지 않는다.
+// chown 칸은 포탈에서 관리자 전용 고급 옵션이다(SubmitJob) -- 비관리자에게 "chown 에 지정하세요" 라고 하면 할 수 없는
+// 지시가 된다(2026-10-08 리뷰). chownEditable=false 면 관리자에게 요청하라는 문장으로 바꾼다.
 //
 // 2026-10-01 검증 워크플로 2회가 포크 소스(mpifileutils 1b93d54)와 테스트베드 실측으로 잡은 사실:
 //   - 권한 비트·수정 시각은 소스 그대로다(preserve) -- uid/gid 만 바뀌므로 소스의 **그룹 권한이 이 주 그룹에**
@@ -35,6 +38,7 @@ export interface OwnershipInput {
   root: boolean;          // 이 요청이 root 로 실행되는가(포탈이 확정해 싣는 값)
   runAs: string | null;   // 실행 신원 이름(모르면 null)
   self: boolean;          // 실행 신원이 요청자 본인인가
+  chownEditable?: boolean; // 이 화면에서 chown 을 직접 지정할 수 있나(기본 true -- 관리자 전용 화면들). 사용자 신청 화면은 false
 }
 
 /** chown 값에 이름(숫자가 아닌 파트)이 있나 -- 잡 컨테이너에서 해석되지 않아 서버가 거부한다(위 주석,
@@ -63,7 +67,7 @@ export const CHOWN_NAME_ERROR =
 const NON_ROOT_CHOWN_EPERM =
   "dsync(같은 노드) 는 데이터를 복사한 뒤 작업이 실패하고, nsync(노드 간) 는 소유 변경이 적용되지 않아 실행 신원 소유로 남습니다";
 
-export function syncOwnership({ chown, chmod = "", root, runAs, self }: OwnershipInput):
+export function syncOwnership({ chown, chmod = "", root, runAs, self, chownEditable = true }: OwnershipInput):
     { short: string; long: string } {
   const c = chown.trim();
   const m = chmod.trim();
@@ -76,9 +80,9 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self }: Ownershi
     const partial = chownIsPartial(c) ? " uid·gid 중 비워 둔 쪽은 소스 값이 유지됩니다." : "";
     const lead = `chown 옵션으로 지정한 ${c} 소유로 셋업됩니다${root ? "" : "(자동 소유 지정은 꺼집니다)"} — `
       + "목적지에 이미 있던 같은 경로의 항목도 이 소유로 바뀝니다.";
-    const nonRoot = root ? "" : ` root 실행이 아니면 gid 는 실행 신원이 속한 그룹(주·보조)이어야 하고(아니면 계획 단계에서 거부), uid 가 실행 신원 본인이 아니면 바꿀 권한이 없어 ${NON_ROOT_CHOWN_EPERM}.`;
+    const nonRoot = root ? "" : ` root 실행이 아니면 gid 는 실행 신원의 주 그룹 또는 이 작업에 적용된 보조 그룹이어야 하고(보조 그룹이 적용되지 않으면 주 그룹만 — 아니면 계획 단계에서 거부), uid 가 실행 신원 본인이 아니면 바꿀 권한이 없어 ${NON_ROOT_CHOWN_EPERM}.`;
     return {
-      short: `chown 지정값 ${c}${root ? "" : " — 비 root: uid 는 본인, gid 는 소속 그룹만(아니면 거부·실패)"}`,
+      short: `chown 지정값 ${c}${root ? "" : " — 비 root: uid 는 본인, gid 는 주·적용된 보조 그룹만(아니면 거부·실패)"}`,
       long: `${lead}${partial}${nonRoot} ${modeText}`,
     };
   }
@@ -94,5 +98,8 @@ export function syncOwnership({ chown, chmod = "", root, runAs, self }: Ownershi
                + (m !== "" ? modeText : "권한 비트·수정 시각은 소스 그대로라 소스의 그룹 권한이 이 주 그룹에 적용됩니다.")
                + " 목적지에 이미 있던 같은 경로의 항목도 이 소유로 다시 맞춰지므로, 그 안에 다른 사용자 소유 항목이 "
                + "있으면 작업이 실패하거나 일부 항목의 소유·권한이 바뀌지 않을 수 있습니다."
-               + " 프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹)." };
+               + (chownEditable
+                 ? " 프로젝트(보조) 그룹 소유로 남기려면 chown 에 uid:<그룹 gid> 를 지정하세요(자동 지정은 주 그룹)."
+                 : " 자동 지정은 주 그룹입니다 — 프로젝트(보조) 그룹 소유가 필요하면 관리자에게 chown uid:<그룹 gid> "
+                   + "지정을 요청하세요(uid 는 본인 것, gid 는 본인이 속하고 이 작업에 적용된 그룹이어야 합니다).") };
 }

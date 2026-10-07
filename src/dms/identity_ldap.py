@@ -28,25 +28,38 @@ LDAP 도 프로덕션 미러(rfc2307bis 이중 그룹·StartTLS·검색 계정)�
   남긴다(권한을 줄이는 쪽 -- 사용자 전체를 거부하지 않는다).
 - fail-closed: 사용자 엔트리 중복·결과 코드 sizeLimitExceeded(4)/adminLimitExceeded(11)·그룹 페이지 상한 초과는
   IdentityLookupInvalid(이 사용자의 데이터 문제 -- 틱 서킷을 열지 않는다), 그 밖의 비성공 결과 코드(3·32·51·52·53·80…,
-  베이스 오구성 32 포함)·전송 오류·마감 초과는 IdentityUnavailable(서버·설정 전역 -- 서킷을 연다). 예전엔 중복이면
+  베이스 오구성 32 포함)·전송 오류·자체 마감 초과는 IdentityUnavailable(서버·설정 전역 -- 서킷을 연다; 호출자 마감은
+  아래 IdentityDeadlineExceeded). 예전엔 중복이면
   조용히 첫 엔트리, 비성공 결과면 부분·빈 결과를 썼다.
 - 그룹 검색은 페이징(500 × 최대 20쪽, criticality False 라 미지원 서버는 전부를 준다).
 - resolve 하나는 자체 마감(_RESOLVE_DEADLINE_SECONDS)과 호출자 deadline(틱 예산의 남은 몫) 중 이른 시각 안에서만
   **새 연산을 시작**한다(URI 시도 전·사용자 검색 전·그룹 페이지마다 확인). 그 사이 최장 블록은 한 URI 시도(연결 +
-  StartTLS + bind = 3 × ldap_timeout_seconds)라 resolve 하나 ≤ 마감 + 3T.
+  StartTLS + bind = 3 × ldap_timeout_seconds)라 resolve 하나 ≤ 마감 + 3T. 3T 는 bind 뒤 서버 정보 읽기를 끈 값이다
+  (ldap3.Server get_info=NONE -- 기본 SCHEMA 는 bind 뒤 rootDSE·subschema 검색 2회를 더 해 5T 였고, resolve 마다 새
+  Server 라 매번 전체 스키마를 받았다). 리졸버는 스키마·DSA 정보를 쓰지 않는다: 스키마 없이 값은 str 로 오고
+  int()·_gid_number·_text 가 이미 str 을 처리한다.
+- 누구의 마감이 멈췄나(2026-10-08 리뷰): 호출자 deadline 이 자체 마감보다 이르고 그 시각에 걸려 멈췄으면
+  IdentityDeadlineExceeded(예산 소진 -- planner 는 Pending, stepper 는 미계수 보류), 자체 마감이면 plain
+  IdentityUnavailable(진짜 판정). 예전엔 둘 다 plain 이라 LDAP 가 멀쩡해도 틱 예산 경계에 걸친 요청이 종단 거부됐다.
+- 시작 URI 기억(sticky, 2026-10-08 리뷰 -- sssd 처럼): build_ldap_resolver 의 클로저가 마지막으로 붙은 URI(또는 마감으로
+  시도하지 못한 첫 URI)의 위치를 기억해 다음 resolve 를 거기서 시작한다. 없으면 타임아웃형으로 죽은 앞쪽 URI 의 비용
+  (T 씩)을 resolve 마다 다시 내고, 앞쪽 두 URI 가 죽으면(5s + 5s) 마감 10s 가 세 번째 URI 를 영영 시도하지 못했다
+  (T ≥ 10 이면 첫 URI 하나뿐 -- 페일오버가 완전히 꺼졌다). 마감으로 잘린 resolve 의 다음 시도는 시도하지 않았던 URI
+  부터라 건강한 URI 에 반드시 닿는다. 전부 실패면 위치를 그대로 둔다.
 """
 import math
 import re
 import time
 
-from .identity import IdentityLookupInvalid, IdentityUnavailable, ResolvedIdentity
+from .identity import (LDAP_RESOLVE_DEADLINE_SECONDS, IdentityDeadlineExceeded, IdentityLookupInvalid,
+                       IdentityUnavailable, ResolvedIdentity)
 
 
 _GID_RE = re.compile(r"-?[0-9]{1,20}")
 _GROUP_PAGE_SIZE = 500
 _MAX_GROUP_PAGES = 20                       # 10,000 그룹 -- 넘으면 IdentityLookupInvalid(부분 결과로 판정하지 않는다)
 _PAGED_RESULTS_OID = "1.2.840.113556.1.4.319"
-_RESOLVE_DEADLINE_SECONDS = 10              # resolve 하나의 자체 마감(API 로그인 등 deadline 없는 호출자도 유한)
+_RESOLVE_DEADLINE_SECONDS = LDAP_RESOLVE_DEADLINE_SECONDS   # resolve 하나의 자체 마감(identity.py -- planner·stepper 공유)
 _USER_SPECIFIC_RESULT_CODES = frozenset({4, 11})   # sizeLimitExceeded·adminLimitExceeded -- 이 사용자의 결과 집합 문제
 
 
@@ -143,10 +156,16 @@ def _paged_cookie(conn) -> "bytes | None":
     return cookie or None
 
 
+class _DeadlineStop(IdentityUnavailable):
+    """마감 때문에 새 연산(URI 시도·검색)을 시작하지 않았다 -- connect_first·_check_deadline 의 내부 표식. resolve 가
+    **누구의 마감이었나**에 따라 IdentityDeadlineExceeded(호출자 deadline) 또는 plain IdentityUnavailable(자체 마감)로
+    바꿔 올린다. IdentityUnavailable 의 하위라 connect_first 를 직접 부르는 호출자에겐 종전대로 '불가'다."""
+
+
 def _check_deadline(monotonic, limit, what) -> None:
     if monotonic() >= limit:
-        # 느림 = 장애로 본다(서킷 개방) -- 사용자별 데이터 문제가 아니다.
-        raise IdentityUnavailable(f"ldap resolve deadline exceeded before {what}")
+        # 사용자별 데이터 문제가 아니다. 장애(자체 마감)인지 예산 소진(호출자 마감)인지는 resolve 가 정한다.
+        raise _DeadlineStop(f"ldap resolve deadline exceeded before {what}")
 
 
 class LdapIdentityResolver:
@@ -160,9 +179,12 @@ class LdapIdentityResolver:
         self._monotonic = monotonic or time.monotonic
 
     def resolve(self, username: str, *, deadline: "float | None" = None):
-        limit = self._monotonic() + _RESOLVE_DEADLINE_SECONDS
-        if deadline is not None:
-            limit = min(limit, deadline)
+        own = self._monotonic() + _RESOLVE_DEADLINE_SECONDS
+        # 호출자 deadline 이 자체 마감보다 이를 때만 그쪽이 묶는다 -- 그 마감에 걸린 중단은 LDAP 판정이 아니라 호출자
+        # 예산 소진이다(IdentityDeadlineExceeded). planner·stepper 는 남은 몫이 자체 마감 이상이면 deadline 을 넘기지
+        # 않는다(identity.tick_resolve_deadline) -- 틱 첫 resolve 의 마감 중단은 진짜 판정으로 남는다.
+        caller_bound = deadline is not None and deadline < own
+        limit = deadline if caller_bound else own
         conn = None
         try:
             conn = self._connect(deadline=limit)
@@ -203,6 +225,11 @@ class LdapIdentityResolver:
                 raise IdentityLookupInvalid("ldap group search exceeded page cap")
             groups = tuple(sorted({str(cn) for e in group_entries for cn in _attr_values(e["cn"])}))
             group_gids = tuple(sorted({g for g in map(_gid_number, group_entries) if g is not None}))
+        except _DeadlineStop as exc:
+            # 마감 때문에 멈췄다(연결 단계에서 시도 못 한 URI 가 남은 경우 포함) -- 누구의 마감이었나로 의미가 갈린다.
+            if caller_bound:
+                raise IdentityDeadlineExceeded(str(exc)[:500]) from None
+            raise IdentityUnavailable(str(exc)[:500]) from None
         except IdentityUnavailable:
             raise                       # IdentityLookupInvalid 포함 -- 하위 클래스 그대로 올린다(서킷 판정이 다르다)
         except Exception as exc:
@@ -254,22 +281,33 @@ def ldap_directory_config(settings):
     }
 
 
-def connect_first(uris, open_one, *, deadline=None, monotonic=None):
+def connect_first(uris, open_one, *, deadline=None, monotonic=None, rotation=None):
     """URI 를 순서대로 하나씩 열어 처음 성공한 연결을 돌려준다(sssd ldap_uri 페일오버 미러). 전부 실패하면
     IdentityUnavailable -- 각 URI 의 실패 사유를 모아 남긴다. 한 URI 의 시도는 open_one 이 건 타임아웃(연결·
     StartTLS·bind 각각)으로 유한하다. ServerPool 을 쓰지 않는 이유는 모듈 docstring.
-    deadline(time.monotonic 기준 절대 시각)을 넘었으면 남은 URI 를 시도하지 않는다 -- URI 수 × 3T 가 resolve
-    마감(틱 예산의 남은 몫)을 넘지 않게."""
+    deadline(time.monotonic 기준 절대 시각)을 넘었으면 남은 URI 를 시도하지 않고 _DeadlineStop(IdentityUnavailable
+    의 하위 -- resolve 가 누구의 마감이었나로 바꿔 올린다)을 낸다 -- URI 수 × 3T 가 resolve 마감을 넘지 않게.
+    rotation(dict, 선택): 시작 위치 기억(모듈 docstring 'sticky'). {"start": i} 의 i 번째 URI 부터 돌아가며 시도하고,
+    성공하면 그 위치를, 마감으로 멈추면 **시도하지 못한 첫 URI** 의 위치를 적는다(전부 실패면 그대로). 동시 호출의
+    경합은 시작 순서만 바꿀 뿐 결과의 정확성과 무관하다(dict 대입 하나)."""
     mono = monotonic or time.monotonic
+    n = len(uris)
+    start = rotation.get("start", 0) % n if (rotation is not None and n) else 0
     errors = []
-    for uri in uris:
+    for idx in list(range(start, n)) + list(range(start)):
         if deadline is not None and mono() >= deadline:
+            if rotation is not None:
+                rotation["start"] = idx          # 다음 resolve 는 이번에 못 가 본 URI 부터
             errors.append("deadline exceeded")
-            break
+            raise _DeadlineStop("; ".join(errors)[:500])
         try:
-            return open_one(uri)
+            conn = open_one(uris[idx])
         except Exception as exc:
-            errors.append(f"{uri}: {type(exc).__name__}: {exc}"[:200])
+            errors.append(f"{uris[idx]}: {type(exc).__name__}: {exc}"[:200])
+            continue
+        if rotation is not None:
+            rotation["start"] = idx              # 붙은 URI 를 기억 -- 죽은 앞쪽 URI 의 타임아웃을 매번 내지 않는다
+        return conn
     raise IdentityUnavailable("; ".join(errors)[:500] or "no ldap uri")
 
 
@@ -285,6 +323,10 @@ def build_ldap_resolver(settings):
     # "required argument is not an integer" 로 모든 연결이 실패했다). 올림해 상한을 줄이지 않는다.
     receive_timeout = max(1, math.ceil(timeout))
 
+    # 시작 URI 기억(모듈 docstring 'sticky') -- 리졸버는 프로세스당 하나라(wiring.build_identity_resolver: 컨트롤러·
+    # API 기동 시 1회) 이 클로저의 수명 = 프로세스 수명이다.
+    rotation = {"start": 0}
+
     def connect(deadline=None):
         import ldap3
         tls = None
@@ -295,10 +337,12 @@ def build_ldap_resolver(settings):
         # StartTLS 는 bind **전에** 올라가야 자격증명이 평문으로 새지 않는다 --
         # ldap3 의 AUTO_BIND_TLS_BEFORE_BIND 가 그 순서를 보장한다.
         auto_bind = ldap3.AUTO_BIND_TLS_BEFORE_BIND if use_start_tls else True
+        # get_info=NONE: bind 뒤 rootDSE·subschema 검색 2회(각각 receive_timeout 까지 막힌다)를 하지 않는다 -- 한 URI
+        # 시도 = 연결·StartTLS·bind = 3T 라는 틱 시간 불변식(identity.LDAP_TICK_BUDGET_SECONDS)의 전제다(모듈 docstring).
         return connect_first(cfg["uris"], lambda uri: ldap3.Connection(
-            ldap3.Server(uri, tls=tls, connect_timeout=timeout),
+            ldap3.Server(uri, tls=tls, connect_timeout=timeout, get_info=ldap3.NONE),
             user=cfg["bind_dn"], password=cfg["bind_pw"], auto_bind=auto_bind,
-            receive_timeout=receive_timeout), deadline=deadline)
+            receive_timeout=receive_timeout), deadline=deadline, rotation=rotation)
 
     return LdapIdentityResolver(connect=connect, user_base=user_base,
                                 group_base=group_base,

@@ -142,14 +142,16 @@ def test_resolver_connects_with_exactly_the_values_the_agent_gets(settings, monk
         return "conn"
     fake = types.SimpleNamespace(
         Tls=lambda validate=None: ("tls", validate),
-        Server=lambda u, tls=None, connect_timeout=None: ("server", u, tls),
-        AUTO_BIND_TLS_BEFORE_BIND="TLS_BEFORE_BIND", Connection=_conn)
+        Server=lambda u, tls=None, connect_timeout=None, get_info=None: ("server", u, tls, get_info),
+        AUTO_BIND_TLS_BEFORE_BIND="TLS_BEFORE_BIND", NONE="NO_INFO", Connection=_conn)
     monkeypatch.setitem(sys.modules, "ldap3", fake)
     s = _with_ldap(settings, **override)
     payload = directory_payload(s)
     assert build_ldap_resolver(s)._connect() == "conn"
     servers = [t["server"] for t in tried]
     assert [srv[1] for srv in servers] == payload["uris"]
+    # bind 뒤 서버 정보 읽기 끔(get_info=NONE) -- 한 URI 시도 = 3T 틱 시간 불변식의 전제(identity_ldap 모듈 docstring).
+    assert all(srv[3] == "NO_INFO" for srv in servers)
     assert all(t["user"] == payload["bind_dn"] and t["password"] == payload["bind_pw"] for t in tried)
     if payload["start_tls"]:
         assert all(t["auto_bind"] == "TLS_BEFORE_BIND" for t in tried)            # bind 전에 TLS

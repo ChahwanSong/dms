@@ -361,6 +361,28 @@ def test_check_chown_group():
             check_chown_group(":20001", identity=ident)
 
 
+def test_chown_member_gid_rejected_when_groups_not_applied(db):
+    # G9(2026-10-08 리뷰): 실제 LDAP 멤버라도 보조 그룹이 **이 잡에 적용되지 않으면**(스위치 꺼짐·256 초과) 주 gid 만
+    # 허용된다 -- 화면 문구(chown_group_not_member·SubmitJob·syncOwnership)가 이 조건을 말한다.
+    control = _control(db)
+    member = ResolvedIdentity("bob", 10002, 10000, ("proj",), False, group_gids=(20001,))
+    off = resolve_job_identity(control, StubIdentityResolver({"bob": member}), requester_id="bob",
+                               owner_username=None, allow_privileged=False, privileged_requesters=frozenset(),
+                               supplementary_groups=False)
+    assert off.supplementary_gids_status == SUPP_DISABLED
+    many = ResolvedIdentity("bob", 10002, 10000, ("proj",), False,
+                            group_gids=tuple(range(20001, 20001 + MAX_SUPPLEMENTARY_GROUPS + 1)))
+    over = resolve_job_identity(control, StubIdentityResolver({"bob": many}), requester_id="bob",
+                                owner_username=None, allow_privileged=False, privileged_requesters=frozenset(),
+                                supplementary_groups=True)
+    assert over.supplementary_gids_status == SUPP_OVER_LIMIT
+    for ident in (off, over):
+        check_chown_group("10002:10000", identity=ident)               # 주 gid 는 통과
+        with pytest.raises(IdentityRejected) as e:
+            check_chown_group("10002:20001", identity=ident)           # LDAP 멤버지만 미적용
+        assert e.value.reason_code == "chown_group_not_member"
+
+
 def test_stub_resolver_accepts_deadline():
     r = StubIdentityResolver({"alice": ALICE})
     assert r.resolve("alice", deadline=0.0) is ALICE         # stub 은 마감을 무시한다

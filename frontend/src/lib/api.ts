@@ -4,7 +4,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   ldap_not_configured: "LDAP이 설정되지 않았습니다",
   // 보조 그룹 재확인(2026-10-07 D2): 제출 직전·큐 대기 재확인의 LDAP 장애는 상태를 바꾸지 않고 보류한 뒤 60초 이상
   // 간격으로 3번 더 시도하고, 그래도 안 되면 이 사유로 끝난다(stepper). 계획 단계 거부도 같은 코드라 괄호로만 덧붙인다.
-  ldap_unavailable: "LDAP에 연결할 수 없습니다(보조 그룹 재확인은 약 3분간 3번 재시도 뒤 중단)",
+  // '연결 불가' 만이 아니다(2026-10-08 리뷰): 같은 코드로 접히는 이 계정의 디렉터리 문제(같은 uid 엔트리 중복·결과 코드
+  // sizeLimit/adminLimit·그룹 페이지 상한 -- identity_ldap 의 IdentityLookupInvalid)는 LDAP 가 멀쩡해도 결정적으로
+  // 반복된다 -- 재신청으로 풀리지 않으니 관리자에게 보내야 한다. 원인 원문은 컨트롤러 stderr 에만 남는다(README §2c).
+  ldap_unavailable: "LDAP 조회에 실패했습니다 — 연결 불가, 또는 이 계정의 디렉터리 문제(같은 uid 항목 중복·조회 한도 초과·그룹 1만 개 초과 등 — 다시 신청해도 풀리지 않으니 관리자에게 문의하세요). 보조 그룹 재확인은 약 3분간 3번 재시도 뒤 중단",
   // 이 셋은 계획 단계 거부라 잡이 없다 -- 요청 상세의 「사유」가 생기기 전엔 화면
   // 어디에도 안 나왔다(2026-08-16). 이제 사용자가 직접 읽으므로 "무엇을 하면 되는가"
   // 까지 말한다: 코드 이름을 한국어로 옮기기만 한 문구는 운영자에게만 통한다.
@@ -192,7 +195,9 @@ export const REASON_MESSAGES: Record<string, string> = {
   identity_root_without_privilege: "디렉터리가 이 사용자에게 uid 0 을 줍니다 — root 실행은 특권 요청자만 가능합니다",
   // 보조 그룹 인정(2026-10-07, identity.resolve_job_identity·check_chown_group). reasonCodes.json 과 같은 커밋.
   identity_root_group_without_privilege: "실행 계정의 LDAP 주 그룹이 root(gid 0)라 root 가 아닌 실행을 할 수 없습니다 — 관리자에게 문의하세요",
-  chown_group_not_member: "chown 의 그룹(gid)이 실행 계정이 속한 그룹이 아닙니다 — 실행 계정의 주 그룹 또는 작업 계획 시점에 확인된 LDAP 보조 그룹의 gid 만 지정할 수 있습니다(프로젝트 그룹 소유로 남기려면 uid:<프로젝트 gid>)",
+  // 허용 집합은 '소속' 이 아니라 '이 작업에 적용된' 그룹이다(identity.check_chown_group: 주 gid ∪ 스냅숏의 적용 목록) --
+  // 운영자가 기능을 껐거나(disabled) 그룹이 256개를 넘으면(over_limit) 실제 멤버여도 주 그룹만 통과한다(2026-10-08 리뷰).
+  chown_group_not_member: "chown 의 그룹(gid)이 이 작업에 적용된 그룹이 아닙니다 — 실행 계정의 주 그룹 또는 작업 계획 시점에 이 작업에 실제로 적용된 LDAP 보조 그룹의 gid 만 지정할 수 있습니다. 보조 그룹이 적용되지 않은 경우(운영자가 기능을 꺼 두었거나 그룹이 256개를 넘음)에는 주 그룹만 가능합니다(프로젝트 그룹 소유로 남기려면 uid:<프로젝트 gid>)",
   // 보조 그룹 적용 지점(2026-10-07): preflight·워커 셸의 그룹 자기검증 마커(execution_manifests PREFLIGHT_REASONS·
   // EXECUTION_REASONS)와 stepper 의 제출 직전·큐 대기 LDAP 재확인. reasonCodes.json 과 같은 커밋.
   identity_groups_not_applied: "작업 컨테이너의 그룹이 계획된 보조 그룹과 일치하지 않아 중단했습니다(클러스터 정책이 그룹을 바꾸거나 무시함, 또는 작업 컨테이너의 그룹 물질화 실패·값 변조) — 관리자에게 문의하세요",

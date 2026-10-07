@@ -30,9 +30,10 @@
   미승격, 파일별 상세·에러 카운트·전송률 없음.
 - 🔧 **보조 그룹(2026-10-07) 후속 — 포탈 chown 그룹 선택·자동 chown 그룹 정책**(D7 범위 밖).
   자동 chown 은 uid:**주 gid** 고정(`execution_manifests._auto_chown`)이고, 프로젝트 그룹 소유는 명시
-  chown `uid:<gid>` 뿐인데 포탈의 chown 칸은 관리자 전용 고급 옵션이다 — 비관리자에게 보이는 안내
-  (`frontend/src/lib/syncOwnership.ts` "chown 에 uid:<그룹 gid> 를 지정하세요")는 지금은 API 로만
-  실행할 수 있다. 처방: 실행 신원의 적용된 보조 gid(잡 스냅숏과 같은 계산) 중에서 고르는 UI, 또는
+  chown `uid:<gid>` 뿐인데 포탈의 chown 칸은 관리자 전용 고급 옵션이다 — 비관리자 화면은 이제 "관리자에게
+  chown 지정을 요청하세요" 로 안내한다(`frontend/src/lib/syncOwnership.ts` chownEditable=false, 2026-10-08 리뷰;
+  예전엔 실행할 수 없는 "chown 에 uid:<그룹 gid> 를 지정하세요" 였다). 사용자가 직접 프로젝트 그룹 소유로
+  남기는 길은 아직 없다. 처방: 실행 신원의 적용된 보조 gid(잡 스냅숏과 같은 계산) 중에서 고르는 UI, 또는
   "목적지 부모 디렉터리의 그룹을 따른다" 같은 자동 정책(계획 시점 멤버십 검증 `chown_group_not_member`
   는 그대로 둔다).
 - 🔧 **진행 중 잡 kill switch**(보조 그룹) — `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 는 계획 시점
@@ -46,7 +47,9 @@
   `DMS_EXEC_REASON=` 마커 + EXECUTION_REASONS·reasonCodes 등록으로 승격하면 운영자가 로그를 안 봐도 된다.
 - 🔧 **3홉 '경고' 등급** — 3홉 검증은 base 자체만 본다. base 의 **부모**(공용 디렉터리)가 g+w·o+w 이면
   (보조 gid 0 인정으로 770 도 잠금이 아니다 — `deploy/README.md` §2b-3) 잡이 base 옆에 디렉터리를 만들 수
-  있는데 화면엔 초록이다. 처방: 부모 mode 를 읽어 빨강이 아닌 '경고'로 표시(저장은 막지 않음).
+  있는데 화면엔 초록이다. 부모에 o+x(711·755)가 있어도 초록인데, 그러면 모든 uid 가 base 아래 0644 아티팩트를
+  직접 읽는다(§2b-3, 2026-10-08 리뷰로 문서의 711 권고 제거). 처방: 부모 mode 를 읽어 빨강이 아닌 '경고'로
+  표시(저장은 막지 않음).
 - 🔧 **보조 그룹 없는 잡의 preflight 그룹 자기검증** — `_SUPP_GIDS_SELF_CHECK` 는 그룹이 실린 파드에만
   붙는다(빈 목록 잡의 매니페스트를 이 기능 이전과 바이트 단위로 같게 두려는 결정). 어드미션 웹훅이
   그룹 없는 잡에 supplementalGroups·fsGroup 을 더하면 preflight 만 그 그룹으로 통과할 수 있다(기존

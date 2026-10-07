@@ -142,10 +142,11 @@ export function SubmitJob() {
   const destRoot = rootOf(f.destStorage);
   const destParentAbs = f.destPath.trim() === "" ? null : destinationParent(destRoot, f.destPath.trim());
   // 결과(목적지) 소유권 안내 -- 바디와 같은 값(chown 옵션·rootEffective·실행 신원)에서 파생한다
-  // (lib/syncOwnership = 서버 _auto_chown 미러). 사용자는 언제나 "요청자 본인 uid:gid".
+  // (lib/syncOwnership = 서버 _auto_chown 미러). 사용자는 언제나 "요청자 본인 uid:gid". chown 칸은 관리자 전용
+  // 고급 옵션이라 비관리자에겐 "chown 에 지정하세요" 대신 관리자에게 요청하라고 말한다(chownEditable).
   const ownership = syncOwnership({
     chown: f.chown, chmod: f.chmod, root: rootEffective,
-    runAs: otherOwner ? ownerTrim : (me.data?.actor ?? null), self: !otherOwner });
+    runAs: otherOwner ? ownerTrim : (me.data?.actor ?? null), self: !otherOwner, chownEditable: isAdmin });
   // 사용자 sync 허용 쌍(2026-09-30 사용자 결정: 기본 전부 불가 + 관리자가 허용한 소스 → 목적지 쌍).
   // 관리자는 제한이 없어 조회하지 않는다. 선택지 필터는 표시일 뿐 -- 제출·계획·컨펌이 서버에서 다시
   // 본다(sync_pair_not_allowed). 신원·허용 목록을 알기 전에는 sync 선택지를 비운다: 거르기 전 목록이
@@ -433,7 +434,8 @@ export function SubmitJob() {
                     말하지 않는다 -- 계획 시점 확정·gidNumber 그룹만·중첩 제외·스토리지 서버가 최종 판정(D10·D1). */}
                 <li>
                   {canRoot ? "root 가 아닌 실행에서 권한은" : "권한은"} {isAdmin ? "실행 신원" : "본인 계정"}의 uid·LDAP 주
-                  그룹·LDAP 보조 그룹 기준으로 판정됩니다. 보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는
+                  그룹·LDAP 보조 그룹(적용된 경우 — 운영자가 기능을 껐거나 그룹이 256개를 넘으면 주 그룹만) 기준으로
+                  판정됩니다. 보조 그룹은 신청이 계획될 때 한 번 확정되고(gidNumber 가 있는
                   그룹만, 중첩 그룹 제외), 그 뒤 그룹에서 빠지면 실행 전에 중단되며 새로 들어간 그룹은 다시 신청해야
                   반영됩니다. 실제 인정 여부는 스토리지 설정에 따라 다를 수 있습니다.
                   {syncGroupCaveats.map((c) => <span key={c} className="block">{c}</span>)}
@@ -565,8 +567,9 @@ export function SubmitJob() {
                       {rootEffective
                         ? "비우면 원래(소스) 소유권을 보존합니다(지금 root 실행). chown 을 지정하면 목적지와 복사본이 그 값으로 셋업됩니다."
                         : <>비우면 실행 신원의 uid:주 그룹 gid 소유로 자동 chown 됩니다(지금 root 아님) — 프로젝트(보조)
-                            그룹 소유로 남기려면 uid:&lt;그룹 gid&gt; 를 지정하세요. gid 가 실행 신원이 속한 그룹(주·보조)이
-                            아니면 계획 단계에서 거부되고(chown_group_not_member), uid 가 본인이 아니면 도구에 권한이 없어{" "}
+                            그룹 소유로 남기려면 uid:&lt;그룹 gid&gt; 를 지정하세요. gid 가 실행 신원의 주 그룹 또는 이 작업에
+                            적용된 보조 그룹이 아니면(보조 그룹이 적용되지 않으면 주 그룹만) 계획 단계에서
+                            거부되고(chown_group_not_member), uid 가 본인이 아니면 도구에 권한이 없어{" "}
                             <strong>dsync 는 데이터를 복사한 뒤 Failed 로 끝나고, nsync 는 소유 변경이 적용되지 않습니다</strong>.</>}
                       {" "}uid·gid 는 둘 다 숫자로 적으세요 — 한쪽을 비우면 그쪽은 소스 값이 유지됩니다.
                     </>} />
