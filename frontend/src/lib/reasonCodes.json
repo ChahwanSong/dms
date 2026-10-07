@@ -44,6 +44,8 @@
   "privilege_not_requested",
   "identity_root_without_privilege",
   "identity_root_group_without_privilege",
+  "identity_groups_not_applied",
+  "identity_changed_at_step",
   "not_authenticated",
   "admin_required",
   "admin_token_required",

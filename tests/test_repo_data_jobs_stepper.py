@@ -77,3 +77,45 @@ def test_expire_previews(db):
     repos.data_jobs.set_preview(j2, fingerprint="f", expires_at="2026-08-02T11:00:00Z",
                                 artifact_uri=None)
     assert repos.data_jobs.expire_previews(now_iso="2026-08-02T10:00:00Z") == []
+
+
+# ---- touch(2026-10-07 D2): LDAP 재확인 보류는 상태를 바꾸지 않고 claim 큐 뒤로만 간다 ----
+
+def _set_updated_at(db, jid, at):
+    db.execute("UPDATE data_jobs SET updated_at = :a WHERE job_id = :j", {"a": at, "j": jid})
+
+
+def test_touch_bumps_updated_at_only_when_state_matches(db):
+    repos = Repositories(db)
+    jid = _job(repos, "Preflight")
+    _set_updated_at(db, jid, "2000-01-01T00:00:00Z")
+    before = len(repos.data_jobs.job_transitions(jid))
+    assert repos.data_jobs.touch(jid, expected_state="Preflight") is True
+    job = repos.data_jobs.get_job(jid)
+    assert job["state"] == "Preflight"                       # 상태 불변
+    assert job["updated_at"] > "2000-01-01T00:00:00Z"        # 큐 뒤로
+    assert len(repos.data_jobs.job_transitions(jid)) == before   # 일어나지 않은 전이 -- 행 없음
+    # 다른 상태를 기대하면(그 사이 전진·취소) no-op
+    _set_updated_at(db, jid, "2000-01-01T00:00:00Z")
+    assert repos.data_jobs.touch(jid, expected_state="Pending") is False
+    assert repos.data_jobs.get_job(jid)["updated_at"] == "2000-01-01T00:00:00Z"
+
+
+def test_touch_is_a_noop_on_terminal_jobs(db):
+    repos = Repositories(db)
+    jid = _job(repos, "Rejected")
+    _set_updated_at(db, jid, "2000-01-01T00:00:00Z")
+    assert repos.data_jobs.touch(jid, expected_state="Pending") is False
+    job = repos.data_jobs.get_job(jid)
+    assert (job["state"], job["updated_at"]) == ("Rejected", "2000-01-01T00:00:00Z")
+
+
+def test_touched_job_moves_behind_others_in_claim_order(db):
+    repos = Repositories(db)
+    a = _job(repos, "Pending")
+    b = _job(repos, "Pending")
+    _set_updated_at(db, a, "2000-01-01T00:00:00Z")
+    _set_updated_at(db, b, "2000-01-01T00:00:01Z")
+    assert [j["job_id"] for j in repos.data_jobs.claim_steppable()][:2] == [a, b]
+    repos.data_jobs.touch(a, expected_state="Pending")
+    assert [j["job_id"] for j in repos.data_jobs.claim_steppable()][:2] == [b, a]

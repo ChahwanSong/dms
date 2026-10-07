@@ -33,7 +33,10 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
 
     def _stepper_step():
-        JobStepper(repos, adapter, settings=settings).run_once()
+        # resolver 는 보조 그룹 재확인(stepper 모듈 docstring, D1)용 -- planner 와 같은 원시 리졸버를 넘긴다
+        # (stepper 의 틱 서킷·예산은 JobStepper 가 직접 든다).
+        JobStepper(repos, adapter, settings=settings,
+                   identity_resolver=identity_resolver).run_once()
         for job_id in repos.data_jobs.expire_previews(now_iso=utc_now_iso()):
             job = repos.data_jobs.get_job(job_id)
             repos.requests.finalize_from_job(

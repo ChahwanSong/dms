@@ -344,6 +344,16 @@ class DataJobsRepository:
                 "UPDATE data_jobs SET phase_refs = :p, updated_at = :now WHERE job_id = :j",
                 {"p": dump_json(refs), "now": now, "j": job_id})
 
+    def touch(self, job_id, *, expected_state) -> bool:
+        """LDAP 재확인 보류(stepper D2, 2026-10-07): 상태·전이는 그대로 두고 updated_at 만 now 로 민다 --
+        claim_steppable(ORDER BY updated_at LIMIT n)의 큐 뒤로 가서 보류 중인 잡이 매 틱 앞자리를 차지해 다른 잡을
+        굶기지 않게 한다. 조건부 UPDATE(state = expected_state)라 그 사이 취소·종단된 잡은 no-op 이다. state_transitions
+        행을 남기지 않는다 -- 일어나지 않은 전이다(보류 사실은 stepper 가 events 로 남긴다). 비종단 잡의 updated_at
+        소비자(metrics 수행시간·pod-gc·retention)는 종단 잡만 보므로 무해하다."""
+        return self._db.execute_count(
+            "UPDATE data_jobs SET updated_at = :now WHERE job_id = :j AND state = :s",
+            {"now": utc_now_iso(), "j": job_id, "s": expected_state}) == 1
+
     def mark_exec_submitted(self, job_id) -> None:
         """execution vcjob 제출 직후의 앵커 시각(슬라이스 20 설계 §2.2, 플랜 D1).
         write-once 는 SQL 술어(IS NULL)가 강제한다 -- 재제출·중복 호출이 앵커를

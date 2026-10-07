@@ -3,6 +3,7 @@
 import json
 
 from .artifact_base import ARTIFACT_MOUNT
+from .identity import supplementary_gids_problem
 
 _SCAN_BOOL_FLAGS = {"verbose": "--verbose", "quiet": "--quiet"}
 # dscan(1b93d54): --broken-limit은 롱네임뿐(-B는 optstring에 없다). top_k는
@@ -75,7 +76,12 @@ def _auto_chown(spec) -> list[str]:
     (실행 신원은 자기 uid·주 gid 로 chown 가능) 이를 없앤다. 특권(root)이면 root가 어떤 소유자로도
     chown 가능하므로 소스 소유권을 그대로 보존한다(개입 안 함). 사용자가 chown 옵션을
     명시했으면 그 값이 우선(중복 주입 안 함). 어느 경우든 dsync/nsync 의 기본 비교(UID·GID·PERM·
-    MTIME)가 목적지에 이미 있던 같은 경로 항목의 메타데이터도 이 값(root 면 소스 값)으로 다시 맞춘다."""
+    MTIME)가 목적지에 이미 있던 같은 경로 항목의 메타데이터도 이 값(root 면 소스 값)으로 다시 맞춘다.
+
+    보조 그룹(2026-10-07 D7 v1): 자동 주입은 여전히 uid:**주 gid** 다 -- 잡이 LDAP 보조 그룹을 달고 돌아도 결과
+    소유 그룹을 어느 보조 그룹으로 할지 정할 근거가 없다. 프로젝트 그룹 소유로 남기려면 사용자가 명시 chown
+    uid:<프로젝트 gid> 를 준다 -- 그 gid 는 계획 시점에 실행 신원의 {주 gid} ∪ 적용된 보조 gid 에 드는지 검증된다
+    (identity.check_chown_group, 아니면 chown_group_not_member). 비소속 gid 가 실행 단계에서야 EPERM 으로 터지지 않게."""
     ident = spec.identity or {}
     if ident.get("privileged") or "chown" in (spec.options or {}):
         return []
@@ -102,28 +108,86 @@ def _container(name, image, command, env, volumes, *, security_context=None):
     }
 
 
-def _identity_materialize_stmt():
-    """root가 요청자를 컨테이너 /etc/passwd에 idempotent 물질화. legacy
-    _identity_materialize_stmt() 이식 — 값은 case-guard로만 검증하고 전부
-    ${DMS_JR_*} 환경변수로 참조한다(f-string 보간 금지, 셸 인젝션 방지)."""
+_GROUPS_NOT_APPLIED = "echo DMS_EXEC_REASON=identity_groups_not_applied; "
+
+
+def _identity_materialize_stmt(passwd="/etc/passwd", group="/etc/group", home="/tmp/dms-home-"):
+    """root가 요청자를 컨테이너 /etc/passwd(+보조 그룹이면 /etc/group)에 idempotent 물질화. legacy
+    _identity_materialize_stmt() 이식 — 값은 case-guard로만 검증하고 전부 ${DMS_JR_*} 환경변수로 참조한다
+    (f-string 보간 금지, 셸 인젝션 방지). 인자(passwd·group·home)는 경로 **상수**다 -- 실 sh 테스트가 임시 파일로
+    바꿔 끼우는 자리일 뿐 신원 값은 절대 들어오지 않는다(스크립트는 신원과 무관한 고정 문자열).
+
+    보조 그룹(2026-10-07 D13): sshd 는 로그인 때 initgroups(user, 주 gid)로 /etc/group 을 읽어 rank 의 그룹을
+    정한다 -- 파드 securityContext.supplementalGroups 는 sshd·runuser 가 덮어써 무효라, 그룹은 여기서 /etc/group
+    줄로만 들어간다. 순서가 계약이다:
+      (1) DMS_JR_SUPP_GIDS 전체를 **아무것도 쓰기 전에** 검증(숫자·콤마만, 선행 0·11자리 이상·> 2147483647 거부 --
+          identity.GID_MAX 와 같은 k8s 상한. 단 "0" 자체는 D3 로 허용).
+      (2) 계정이 이미 있으면(사이트 커스텀 이미지·이미지 계정명 충돌) getent 의 uid·gid 가 둘 다 DMS_JR_UID/GID 와
+          같아야 한다 -- 예전엔 조용히 건너뛰어 sshd 가 **이미지 계정의 신원**으로 rank 를 돌렸다(잠복 결함).
+      (3) passwd 줄은 없을 때만.
+      (4) dmsg<gid> 줄은 (2)·(3)과 무관하게 항상, 중복 없이. 이름을 합성하는 이유: LDAP 그룹명을 싣지 않아 콜론·
+          개행 주입과 이미지 그룹명 충돌이 원천적으로 없다(dscan 출력의 그룹명이 dmsg<gid> 로 보이는 것은 사소).
+      (5) `id -G user`(sshd 의 initgroups 와 같은 NSS 경로)가 {주 gid} ∪ 목록과 **같은 집합**인지 양방향으로 본다 --
+          빠진 gid 는 권한 부족, 더 붙은 gid(이미지 /etc/group 의 기존 소속)는 preflight 가 보지 못한 권한이다.
+    바깥 가드가 거짓(웹훅이 runAsUser 를 바꿈 등)인데 목록이 있으면 elif 가 실패시킨다 -- preflight 는 그룹을 가진 채
+    통과했으니 조용히 진행하면 단계 사이 drift 다. 그룹 관련 실패는 DMS_EXEC_REASON=identity_groups_not_applied
+    (실패 워커 파드 로그를 러너 마커와 같은 경로로 읽어 승격), 계정 충돌은 새 사유 없이 stderr 진단 + exit 1."""
+    fail = _GROUPS_NOT_APPLIED
     return (
-        'if [ "$(id -u)" = 0 ] && [ -n "${DMS_JR_USERNAME:-}" ] && [ -n "${DMS_JR_UID:-}" ] '
-        '&& ! getent passwd "$DMS_JR_USERNAME" >/dev/null 2>&1; then '
+        'if [ "$(id -u)" = 0 ] && [ -n "${DMS_JR_USERNAME:-}" ] && [ -n "${DMS_JR_UID:-}" ]; then '
         'case "$DMS_JR_UID" in ""|*[!0-9]*) echo "dms: invalid DMS_JR_UID" >&2; exit 1;; esac; '
         'case "${DMS_JR_GID:-$DMS_JR_UID}" in ""|*[!0-9]*) echo "dms: invalid DMS_JR_GID" >&2; exit 1;; esac; '
         'case "$DMS_JR_USERNAME" in *[!A-Za-z0-9._-]*) echo "dms: invalid DMS_JR_USERNAME" >&2; exit 1;; esac; '
-        "printf '%s:x:%s:%s::/tmp/dms-home-%s:/bin/sh\\n' \"$DMS_JR_USERNAME\" \"$DMS_JR_UID\" "
-        '"${DMS_JR_GID:-$DMS_JR_UID}" "$DMS_JR_UID" >> /etc/passwd; '
-        'mkdir -p "/tmp/dms-home-$DMS_JR_UID" && '
-        'chown "$DMS_JR_UID:${DMS_JR_GID:-$DMS_JR_UID}" "/tmp/dms-home-$DMS_JR_UID" 2>/dev/null || true; '
-        "fi"
+        # (1) 목록 전체 검증 -- 아무것도 쓰기 전에
+        'case "${DMS_JR_SUPP_GIDS:-}" in *[!0-9,]*) ' + fail
+        + 'echo "dms: invalid DMS_JR_SUPP_GIDS" >&2; exit 1;; esac; '
+        'dms_gid="${DMS_JR_GID:-$DMS_JR_UID}"; '
+        'dms_gids=$(printf %s "${DMS_JR_SUPP_GIDS:-}" | tr , " "); '
+        'for dms_g in $dms_gids; do '
+        'case "$dms_g" in 0?*|???????????*) ' + fail
+        + 'echo "dms: invalid supplementary gid" >&2; exit 1;; esac; '
+        '[ "$dms_g" -le 2147483647 ] || { ' + fail
+        + 'echo "dms: supplementary gid out of range" >&2; exit 1; }; '
+        'done; '
+        # (2) 기존 계정은 uid·gid 둘 다 일치해야 / (3) passwd 는 없을 때만
+        'if dms_pw=$(getent passwd "$DMS_JR_USERNAME"); then '
+        '[ "$(printf %s "$dms_pw" | cut -d: -f3)" = "$DMS_JR_UID" ] && '
+        '[ "$(printf %s "$dms_pw" | cut -d: -f4)" = "$dms_gid" ] || '
+        '{ echo "dms: account $DMS_JR_USERNAME exists with a different uid/gid" >&2; exit 1; }; '
+        'else '
+        f"printf '%s:x:%s:%s::{home}%s:/bin/sh\\n' \"$DMS_JR_USERNAME\" \"$DMS_JR_UID\" "
+        f'"$dms_gid" "$DMS_JR_UID" >> {passwd}; '
+        f'mkdir -p "{home}$DMS_JR_UID" && '
+        f'chown "$DMS_JR_UID:$dms_gid" "{home}$DMS_JR_UID" 2>/dev/null || true; '
+        'fi; '
+        # (4) dmsg<gid> 줄 -- 가드 밖에서 항상, 중복 없이
+        'for dms_g in $dms_gids; do '
+        f'grep -q "^dmsg$dms_g:" {group} || '
+        f"printf 'dmsg%s:x:%s:%s\\n' \"$dms_g\" \"$dms_g\" \"$DMS_JR_USERNAME\" >> {group}; "
+        'done; '
+        # (5) 자기 검증 -- 같은 집합({주 gid} ∪ 목록, 양방향). `|| true` 는 set -e 아래 명령 치환 실패가 마커 없이
+        # 셸을 끝내지 않게(그 경우 have 가 비어 아래 비교가 마커를 찍는다).
+        'if [ -n "$dms_gids" ]; then '
+        'dms_want=" $dms_gid $dms_gids "; '
+        'dms_have=" $(id -G "$DMS_JR_USERNAME" 2>/dev/null || true) "; '
+        'for dms_g in $dms_want; do case "$dms_have" in *" $dms_g "*) ;; '
+        '*) ' + fail + 'echo "dms: groups=$dms_have expected=$dms_want" >&2; exit 1;; esac; done; '
+        'for dms_g in $dms_have; do case "$dms_want" in *" $dms_g "*) ;; '
+        '*) ' + fail + 'echo "dms: groups=$dms_have expected=$dms_want" >&2; exit 1;; esac; done; '
+        'echo "dms: groups=$(id -G "$DMS_JR_USERNAME")" >&2; '
+        'fi; '
+        'elif [ -n "${DMS_JR_SUPP_GIDS:-}" ]; then '
+        + fail + 'echo "dms: cannot materialize groups" >&2; exit 1; '
+        'fi'
     )
 
 
 def _worker_command_script():
     """worker(sshd) 컨테이너 command 본문. legacy _mpi_worker_command() 이식:
     물질화 -> ssh-keygen -A -> 요청자 home ~/.ssh에 authorized_keys 복사/chown ->
-    exec sshd. StrictModes=no(온디맨드 물질화 계정), UsePAM=no(shadow 엔트리 없음)."""
+    exec sshd. StrictModes=no(온디맨드 물질화 계정), UsePAM=no(shadow 엔트리 없음).
+    물질화는 계정 + 보조 그룹(/etc/group dmsg<gid> 줄, (1)–(5) 순서와 elif 실패는 _identity_materialize_stmt
+    docstring) -- 신원은 env 로만 들어오므로 이 스크립트는 잡과 무관한 고정 문자열이다."""
     return "\n".join([
         "set -eu",
         _identity_materialize_stmt(),
@@ -162,13 +226,37 @@ def _processes_per_node(spec):
     return max(1, spec.process_count // node_count)
 
 
+def _supplementary_gids(spec) -> list[int]:
+    """spec.identity 의 보조 gid(2026-10-07) -- preflight·워커가 **같은** 이 함수 하나에서 파생한다(단계 간 동일성:
+    preflight 가 그룹으로 통과시킨 것을 워커 rank 도 같은 그룹으로 한다). 빌더는 순수 함수라 입력을 믿지 않는다:
+    먼저 identity.supplementary_gids_problem 으로 다시 검사하고(목록이 실린 privileged spec 도
+    'supplementary_gids_on_privileged' 로 -- 조용히 버리지 않는다, 변조 신호), 문제가 있으면 ValueError(어댑터가
+    submit_failed 로 접는다). 그다음에 privileged 면 [](root 는 DAC override 라 그룹이 무의미). 키 부재·None 은 []
+    (배포 전에 계획된 잡 = 주 gid 만 -- 실패가 아니다)."""
+    ident = spec.identity or {}
+    problem = supplementary_gids_problem(ident)
+    if problem is not None:
+        raise ValueError(f"supplementary gids: {problem}")
+    if ident.get("privileged"):
+        return []
+    v = ident.get("supplementary_gids")
+    return [] if v is None else list(v)
+
+
 def _worker_env(spec):
     ident = spec.identity or {}
-    return {
+    env = {
         "DMS_JR_UID": str(ident.get("uid", 0)), "DMS_JR_GID": str(ident.get("gid", 0)),
         "DMS_JR_USERNAME": ident.get("username", "root"),
         "DMS_JR_PROCESSES_PER_NODE": str(_processes_per_node(spec)),
     }
+    # 보조 그룹은 워커 셸이 /etc/group 줄로 물질화한다(_identity_materialize_stmt). 워커·launcher **파드**에
+    # supplementalGroups 를 넣지 않는 이유: sshd/runuser 의 initgroups 가 덮어써 rank 엔 무효다. 목록이 비면 키
+    # 자체가 없다 -- 그룹 없는 잡의 매니페스트는 이 기능 이전과 바이트 단위로 같다.
+    gids = _supplementary_gids(spec)
+    if gids:
+        env["DMS_JR_SUPP_GIDS"] = ",".join(str(g) for g in gids)
+    return env
 
 
 def _worker_container(name, image, spec, volumes):
@@ -185,7 +273,7 @@ def _pod_volumes(volumes):
 def _artifact_dir(spec):
     # 파드 **안** 경로다(2026-09-09): base 는 execution_volcano._volumes 가 전용
     # hostPath 볼륨으로 ARTIFACT_MOUNT 에 마운트한다(artifact_base.ARTIFACT_MOUNT 주석
-    # -- 공용 디렉터리 770 허용의 근거). 호스트 경로(<base>/<job>/<phase>)는 제어면
+    # -- 공용 디렉터리를 그룹 쓰기 금지(750/711)로 잠가도 되는 근거). 호스트 경로(<base>/<job>/<phase>)는 제어면
     # 읽기(execution_volcano.read_summary, api)와 artifact_uri 가 쓰고, 러너는 이
     # 경로로만 쓴다 -- 두 경로는 같은 디렉터리다(같은 hostPath).
     return f"{ARTIFACT_MOUNT}/{spec.job_id}/{spec.phase}"
@@ -267,17 +355,52 @@ def _worker_affinity(spec, task_name, nodes):
 
 
 # 아티팩트 base 통과 검사(2026-09-30 아티팩트 쓰기 감사). 러너(launcher root)는 base 아래에
-# <job>(0755)·<phase>(요청자로 chown)를 만들고, 도구는 **요청자 uid·주 gid 만**(러너가
-# /etc/passwd 한 줄만 물질화 -- 보조 그룹 없음)으로 mpi-hostfile·rank.sh 를 읽고 dscan 리포트를
-# 쓴다. 전용 마운트(ARTIFACT_MOUNT)는 base 의 **부모** 권한을 건너뛰지만 마운트 루트인 base
-# 자체의 x 는 커널이 그대로 본다 -- base 가 root 700/750/770 이면 비 root 잡은 preview/execution
-# 에서야 "unable to open the hostfile" 로 죽고, 제어면 3홉 검사(artifact_base)는 root 관점이라
-# 못 본다. preflight 파드는 같은 uid·gid(보조 그룹 없음)로 돌므로 여기서 먼저 명확한 사유로
-# 거부한다. 경로는 상수라 인라인해도 안전하다(사용자 입력 아님). base 볼륨을 실제로 마운트한
-# 파드에만 붙인다(build_preflight_pod) -- 마운트가 없으면 검사할 대상이 없다.
+# <job>(0755)·<phase>(요청자로 chown)를 만들고, 도구는 요청자 uid·주 gid 로 mpi-hostfile·rank.sh 를
+# 읽고 dscan 리포트를 쓴다. 전용 마운트(ARTIFACT_MOUNT)는 base 의 **부모** 권한을 건너뛰지만
+# 마운트 루트인 base 자체의 x 는 커널이 그대로 본다 -- base 가 root 700/750/770 이면 비 root 잡은
+# preview/execution 에서야 "unable to open the hostfile" 로 죽는다. preflight 파드는 같은 uid·gid 로
+# 돌므로 여기서 먼저 명확한 사유로 거부한다. 경로는 상수라 인라인해도 안전하다(사용자 입력 아님).
+# base 볼륨을 실제로 마운트한 파드에만 붙인다(build_preflight_pod) -- 마운트가 없으면 검사할 대상이 없다.
+# 보조 그룹(2026-10-07): preflight·워커 rank 는 계획 시점 LDAP 보조 그룹을 갖지만 launcher 의 mpirun 은
+# 그룹 없이(root → 사용자 전환 전) hostfile 을 읽는다 -- base 는 other-x 가 필수다. 제어면이 저장·3홉
+# 표시로 강제하고(artifact_base.roundtrip_artifact_base, D12), 그룹이 실린 잡은 아래 두 조각
+# (_ARTIFACT_BASE_OTHER_X_CHECK·_ARTIFACT_BASE_NOT_WRITABLE_CHECK)이 잡 단위로 직접 본다 -- 그룹을 가진
+# preflight 의 `test -x` 는 그룹 x 로 거짓 통과할 수 있다.
 _ARTIFACT_BASE_CHECK = (
     f'test -x {ARTIFACT_MOUNT} || '
     '{ echo DMS_PREFLIGHT_REASON=artifact_base_not_traversable; exit 1; }; ')
+
+# D13·자기 자격 확인(2026-10-07): preflight 도 자기 그룹을 스스로 확인한다 -- '기대 gid ⊆ id -G'(부분집합)가
+# 아니라 **같은 집합**(양방향) + 주 gid(id -g). 어드미션 웹훅이 supplementalGroups·fsGroup 을 더하거나, LDAP uid
+# 가 이미지 계정과 겹쳐 CRI 의 Merge 정책이 이미지 /etc/group 그룹을 붙이면 preflight 만 추가 그룹으로 `test -w`
+# 를 통과하고 워커 rank 엔 그 그룹이 없다 -- dsync '부모 쓰기 불가 → 복사 0건 rc0 Succeeded'(_preflight_script
+# docstring) 함정이 다시 열린다. runAsGroup 이 바뀐 경우도 잡는다. 값은 env(DMS_JR_GID·DMS_JR_SUPP_GIDS)로만
+# 들어오고 숫자·콤마 외는 마커로 끊는다(set -f + case 가드 -- 글롭·주입 없음). 그룹이 실린 파드에만 붙고,
+# 뒤의 base 판정이 그룹에 좌우되므로 맨 앞이다.
+_SUPP_GIDS_SELF_CHECK = (
+    '( set -f; '
+    'case "${DMS_JR_SUPP_GIDS:-}" in ""|*[!0-9,]*) exit 1;; esac; '
+    'case "${DMS_JR_GID:-}" in ""|*[!0-9]*) exit 1;; esac; '
+    '[ "$(id -g)" = "$DMS_JR_GID" ] || exit 1; '
+    'have=" $(id -G) "; want=" $DMS_JR_GID $(printf %s "$DMS_JR_SUPP_GIDS" | tr , " ") "; '
+    'for g in $want; do case "$have" in *" $g "*) ;; *) exit 1;; esac; done; '
+    'for g in $have; do case "$want" in *" $g "*) ;; *) exit 1;; esac; done ) || '
+    '{ echo DMS_PREFLIGHT_REASON=identity_groups_not_applied; exit 1; }; ')
+
+# D12 대체(잡 단위, 필수): launcher 의 mpirun 은 보조 그룹 없이 hostfile 을 읽는다 -- 그룹을 가진 preflight 의
+# `test -x` 가 그룹 x 로 거짓 통과하지 않도록 base 의 other-x 비트(퍼미션 문자열 10번째: x 또는 sticky t)를 직접
+# 본다. 제어면 강제(artifact_base, D12)는 PUT/validate 422·3홉 표시뿐이고 stepper·planner 는 artifact_base_check_ok
+# 를 읽지 않는다 -- env 로 준 base·저장 뒤 디스크에서 바뀐 mode 는 여기서만 막힌다. stat 실패(빈 출력)도 마커다.
+_ARTIFACT_BASE_OTHER_X_CHECK = (
+    f'case "$(stat -L -c %A {ARTIFACT_MOUNT} 2>/dev/null)" in ?????????[xt]) ;; '
+    '*) echo DMS_PREFLIGHT_REASON=artifact_base_not_traversable; exit 1;; esac; ')
+
+# D6 잡 단위: '<base> 는 요청자 쓰기 불가'(ARCHITECTURE §7)를 보조 그룹 아래에서 직접 확인한다. test -w 는 access(2)
+# 라 실제 그룹 목록과 모든 ACL 종류(POSIX·NFSv4·GPFS)를 반영한다 -- 제어면의 POSIX ACL 파서
+# (artifact_base._posix_acl_problem)가 못 보는 ACL 도 여기서 닫힌다. 쓰기 가능하면 요청자가 다른 잡의
+# <job_id> 디렉터리를 만들거나 바꿔치기할 수 있다(러너는 root 로 그 아래에 쓴다).
+_ARTIFACT_BASE_NOT_WRITABLE_CHECK = (
+    f'if [ -w {ARTIFACT_MOUNT} ]; then echo DMS_PREFLIGHT_REASON=artifact_base_group_writable; exit 1; fi; ')
 
 
 # sync 목적지 검사 조각(_preflight_script docstring). $D = 목적지, $M = "user"|"root".
@@ -365,12 +488,15 @@ PREFLIGHT_REASON_MARKER = "DMS_PREFLIGHT_REASON="
 # 같은 파일에 두는 이유: 새 검사를 추가하면서 등록을 빠뜨리는 드리프트를 한 화면에서
 # 막는다(계약 테스트가 스크립트 실물에서 마커를 추출해 이 집합과 대조한다). 여기에
 # 코드를 추가하면 frontend/src/lib/reasonCodes.json 과 api.ts REASON_MESSAGES 도
-# 같이 갱신해야 한다(양방향 계약 테스트).
+# 같이 갱신해야 한다(양방향 계약 테스트). 2026-10-07 보조 그룹: identity_groups_not_applied
+# (_SUPP_GIDS_SELF_CHECK)·artifact_base_group_writable(_ARTIFACT_BASE_NOT_WRITABLE_CHECK -- 같은 코드를
+# 제어면 3홉·저장 검증도 낸다).
 PREFLIGHT_REASONS = frozenset({
     "source_not_readable", "destination_not_directory",
     "destination_parent_not_writable", "destination_not_writable",
     "destination_not_owned", "parent_not_writable",
-    "target_not_readable", "artifact_base_not_traversable"})
+    "target_not_readable", "artifact_base_not_traversable",
+    "identity_groups_not_applied", "artifact_base_group_writable"})
 
 
 # 실행·미리보기(mpirun 을 돌리는 launcher) 실패의 사유 마커(2026-10-02). 러너(dms_job_runner.runner)가 워커
@@ -379,8 +505,11 @@ PREFLIGHT_REASONS = frozenset({
 # preflight 마커와 같고(한 줄 접두), 승격은 화이트리스트로만(파드 로그는 신뢰 입력이 아니다). 러너는 dms 를
 # import 하지 않아 같은 값을 따로 정의한다 -- tests/test_job_runner_runner.py 의 계약 테스트가 둘을 잇는다.
 # 여기에 코드를 추가하면 frontend/src/lib/reasonCodes.json 과 api.ts REASON_MESSAGES 도 함께.
+# 2026-10-07 보조 그룹: identity_groups_not_applied 는 러너가 아니라 **워커 셸**(_identity_materialize_stmt)이
+# 찍는다 -- 실패 워커 파드 → PodFailed AbortJob → 어댑터가 launcher 와 Failed 파드 로그를 함께 읽어 승격한다.
+# 러너 계약(WORKERS_UNREACHABLE ∈ 이 집합)은 부분집합이라 러너·잡 이미지는 바뀌지 않는다.
 EXECUTION_REASON_MARKER = "DMS_EXEC_REASON="
-EXECUTION_REASONS = frozenset({"workers_unreachable"})
+EXECUTION_REASONS = frozenset({"workers_unreachable", "identity_groups_not_applied"})
 
 
 def _parse_marker(entries, marker, allowed):
@@ -421,23 +550,38 @@ _PREFLIGHT_ROLE_SEG = {"source": "-src", "destination": "-dst"}
 
 def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None):
     ident = spec.identity or {}
+    gids = _supplementary_gids(spec)
     script, path_args = _preflight_script(spec, role=role)
-    # 아티팩트 base 통과(_ARTIFACT_BASE_CHECK 주석)를 경로 검사보다 **먼저** -- base 가 막혀
-    # 있으면 경로를 고쳐도 모든 비 root 잡이 죽는다(운영 설정 문제를 먼저 드러낸다).
+    # 접두 순서: 자격 자기검증(그룹이 있을 때) → 아티팩트 base 통과(_ARTIFACT_BASE_CHECK 주석) → (그룹이 있으면)
+    # base other-x·쓰기 불가 → 경로 검사. base 검사가 경로 검사보다 **먼저**인 이유: base 가 막혀 있으면 경로를
+    # 고쳐도 모든 비 root 잡이 죽는다(운영 설정 문제를 먼저 드러낸다). 그룹이 없으면 접두는 이 기능 이전과 같다.
+    prefix = _SUPP_GIDS_SELF_CHECK if gids else ""
     if any(v.get("mountPath") == ARTIFACT_MOUNT for v in volumes):
-        script = _ARTIFACT_BASE_CHECK + script
+        prefix += _ARTIFACT_BASE_CHECK
+        if gids:
+            prefix += _ARTIFACT_BASE_OTHER_X_CHECK + _ARTIFACT_BASE_NOT_WRITABLE_CHECK
+    script = prefix + script
     role_seg = _PREFLIGHT_ROLE_SEG.get(role, "")
+    container = {"name": "preflight", "image": job_image,
+                 "command": ["sh", "-c", script, "sh", *path_args],
+                 "securityContext": {"runAsUser": ident.get("uid", 0),
+                                     "runAsGroup": ident.get("gid", 0)},
+                 "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],
+                                   "mountPropagation": "HostToContainer"}
+                                  for v in volumes]}
+    if gids:
+        # 자기검증용 기대값(셸은 env 로만 참조 -- 신원 값이 스크립트 문자열에 보간되지 않는다).
+        container["env"] = [{"name": "DMS_JR_GID", "value": str(ident["gid"])},
+                            {"name": "DMS_JR_SUPP_GIDS", "value": ",".join(str(g) for g in gids)}]
     pod_spec = {"restartPolicy": "Never",
                 "nodeSelector": {"kubernetes.io/hostname": node},
-                "containers": [{
-                    "name": "preflight", "image": job_image,
-                    "command": ["sh", "-c", script, "sh", *path_args],
-                    "securityContext": {"runAsUser": ident.get("uid", 0),
-                                        "runAsGroup": ident.get("gid", 0)},
-                    "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],
-                                      "mountPropagation": "HostToContainer"}
-                                     for v in volumes]}],
+                "containers": [container],
                 "volumes": _pod_volumes(volumes)}
+    if gids:
+        # **pod 수준만**: supplementalGroups 는 PodSecurityContext 필드라 컨테이너 securityContext 에 두면 apiserver
+        # 가 조용히 버린다(그룹 없이 돌아 거짓 '읽을 수 없음'). supplementalGroupsPolicy 는 넣지 않는다(D8 -- Merge
+        # 기본; 이미지 /etc/group 이 더하는 그룹은 위 자기검증이 같은 집합 비교로 잡는다).
+        pod_spec["securityContext"] = {"supplementalGroups": list(gids)}
     if spec.timeout_seconds:
         pod_spec["activeDeadlineSeconds"] = spec.timeout_seconds
     return {

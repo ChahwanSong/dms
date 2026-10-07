@@ -16,7 +16,9 @@ from .domain import DomainValidationError
 
 
 # 잡 파드 **안**에서 아티팩트 base 가 보이는 고정 경로(2026-09-09). 공용 디렉터리(base 의
-# 부모, 예 /cephfs/dms)를 root:root 770 으로 잠가도 잡이 돌아야 한다: 러너(launcher)는
+# 부모, 예 /cephfs/dms)를 root:root 로 잠가도 잡이 돌아야 한다 -- 잠금은 **그룹 쓰기 금지(750/711)**:
+# 2026-10-07 부터 잡이 LDAP 보조 그룹을 달고 돌고 보조 gid 0 도 인정하므로(D3), 770 은 gidNumber 0
+# 그룹 멤버의 잡에 root 그룹 쓰기를 연다(ARCHITECTURE §7). 러너(launcher)는
 # root 지만 도구(dscan/dsync)와 rank.sh 는 요청자 uid 로 돌아 <base>/<job>/<phase> 까지의
 # 모든 부모를 통과(x)해야 한다. base 를 **전용 hostPath 볼륨**으로 이 경로에 마운트하면
 # 커널은 마운트 루트 위의 호스트 부모(/cephfs/dms)를 검사하지 않는다 -- 요청자는 마운트

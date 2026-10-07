@@ -60,6 +60,32 @@ def test_stepper_loop_advances_pending_job(db):
     assert repos.data_jobs.get_job(jid)["state"] == "Preflight"
 
 
+def test_build_loops_passes_the_resolver_to_the_stepper(db):
+    # 보조 그룹 재확인(2026-10-07 D1): 컨트롤러가 리졸버를 JobStepper 에 넘기지 않으면 그룹 잡은 전부
+    # ldap_not_configured 로 종단된다. 리졸버가 닿되 LDAP 가 불가면 D2 보류(상태 불변 + 카운터 이벤트)여야 한다.
+    from dms.identity import StubIdentityResolver
+    repos = Repositories(db)
+    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
+        resource_key="k-groups", payload={"storage": "s1", "target": "a"}, priority="mid")
+    repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+    repos.requests.set_state(rid, RequestState.RUNNING, actor="planner")
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    _seed_storage(repos, "s1")
+    jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid",
+        storage_name="s1", target="a", options={}, tool="dscan",
+        worker_pool={"identity": {"uid": 10001, "gid": 10000, "username": "alice", "privileged": False,
+                                  "supplementary_gids": [10010], "supplementary_gids_status": "applied"},
+                     "candidates": {"primary": ["n1"]}, "process_count": 8, "queue": "dms-data",
+                     "priority_class": "dms-mid"},
+        precondition={}, actor="planner")
+    loops = build_loops(_Settings(), repos, identity_resolver=StubIdentityResolver({}, unavailable=True),
+                        execution_adapter=StubExecutionAdapter())
+    run_all_once(loops, repos, holder="h1")
+    assert repos.data_jobs.get_job(jid)["state"] == "Pending"
+    kinds = [e["event_type"] for e in repos.observability.events_for_request(rid)]
+    assert kinds == ["identity_recheck_deferred"]
+
+
 def test_expired_preview_sweep_finalizes_request(db):
     from dms.domain import DataJobState, RequestState
     from dms.execution import StubExecutionAdapter
