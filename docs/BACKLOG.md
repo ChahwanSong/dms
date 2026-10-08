@@ -38,8 +38,16 @@
   는 그대로 둔다).
 - 🔧 **요청 상세 재설계(2026-10-08) 범위 밖 후보** — 출력 뷰어 안 검색(n/m)·오류 줄 강조와 이동·「크게 보기」
   대화상자(지금은 브라우저 Ctrl+F — 2,000줄 상한 안에서 전부 DOM 에 있다), URL 딥링크(`?job=&stage=&view=`),
-  실행 신원 줄(worker_pool.identity 의 uid/gid/privileged 표시), ConfirmPending pill 한국어 라벨, 잡 취소 2단 확인,
+  ConfirmPending pill 한국어 라벨, 잡 취소 2단 확인,
   공용 `Button` 의 focus-visible 링(이번엔 이 화면의 새 요소에만 달았다 -- `features/jobs/ui.ts`).
+- 🔧 **요청 상세 「요청 내용」(2026-10-08) 범위 밖 후보** — 노드 탈락 사유(worker_pool.rejections) 표시 — 노드 사유
+  어휘(missing_target_mount·missing_tool:<t>·identity_not_ready_on_node…)를 reasonCodes 양쪽에 등록하는 일과 nsync
+  오독(rejections 는 dsync 판정) 해소가 먼저. 그 밖에 큐·우선순위 클래스 원문(worker_pool.queue·priority_class —
+  지금은 상한으로 깎였을 때만 「high 요청 → mid 적용(정책 상한)」), LDAP 그룹 이름(identity.groups — cn 과 gid 를
+  짝지을 수 없다)은 표시하지 않는다.
+- 🔧 **모바일(375) 사이드바 접기** — 좁은 폭에서 관리자 사이드바가 본문 위 블록(약 1,060px)이라 첫 화면이 전부 사이드바다.
+  요청 상세의 root 배지는 본문 첫 줄이지만 첫 화면 안은 아니다(2026-10-08 실측 y≈1127/667). 셸(`frontend/src/app/AppShell.tsx`)에서
+  햄버거·접힘으로 바꾸면 본문이 첫 화면에 온다 — 셸 전역 변경이라 요청 상세 작업 범위 밖.
 - 🔧 **앱 전역 의미 글자 대비(WCAG AA 4.5:1)** — 요청 상세는 의미 있는 글자를 `text-ink/70`(흰 바탕 4.94:1)으로
   올렸지만(2026-10-08), 다른 화면은 아직 `text-muted`(#888 — 흰 바탕 3.54:1, canvas 3.28:1)를 본문·표 머리·안내문에
   쓴다: `features/jobs/JobsList.tsx`(표 머리·경로 요약·시각·빈 목록 안내), `SubmitJob.tsx`(「실제 경로」·공백 안내·

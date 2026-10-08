@@ -6,11 +6,12 @@ import { Card } from "../../components/ui/Card";
 import { Skeleton } from "../../components/ui/Skeleton";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
-import { absSummary, pathSummary } from "../../lib/storagePaths";
 import { useStorageBackends, useStorageRoots } from "../storages/useUserStorages";
 import type { DataJob } from "../../lib/types";
 import { StageNavProvider } from "./stageNav";
 import { OutcomeCard } from "./OutcomeCard";
+import { deriveRequestSpec } from "./requestSpec";
+import { RequestSpecCard, RootBadge } from "./RequestSpecCard";
 import { JobCard } from "./JobCard";
 import { ActivitySection } from "./RequestActivity";
 import { deriveJobStages, stageAnnouncement, stageSnapshot, type StageSnapshot } from "./stageModel";
@@ -19,9 +20,10 @@ import { kstClock } from "./format";
 import { FOCUS_RING, SMALL_BTN } from "./ui";
 
 // 요청 상세(/jobs/:requestId) -- 2026-10-08 재설계(사용자 요청: preflight(preview)와 execution 의 출력·로그를
-// 분리해서 보이게 + 결과 화면 개선). 위에서 아래로: 머리말 → (재조회 실패 띠) → 결과 배너 → 데이터 작업(잡 카드:
+// 분리해서 보이게 + 결과 화면 개선). 위에서 아래로: 머리말(+ root 배지) → (재조회 실패 띠) → 결과 배너 → 요청 내용
+// (대상·옵션 / 실행 권한·자원 -- 같은 날 "옵션·root 실행 여부가 전부 빠져 있다" 요청) → 데이터 작업(잡 카드:
 // ① 사전 점검·미리보기 / 작업 컨펌 / ② 실행) → 활동(전이 이력·진단 이벤트). 이 파일은 조립만 한다 -- 판정은
-// stageModel·requestOutcome(순수), 그리기는 각 컴포넌트 파일.
+// stageModel·requestOutcome·requestSpec(순수), 그리기는 각 컴포넌트 파일.
 //
 // 폴링(useJobs): 요청 3초(비종단 동안), 잡 2초(요청 비종단 또는 비종단 잡이 있을 때 -- 잡 0개여도 돈다). 종단이면
 // 전부 멈춘다(e2e E6: 종단 뒤 /jobs 요청 0건). 잡 키를 무효화하는 새 코드는 넣지 않는다.
@@ -29,7 +31,7 @@ import { FOCUS_RING, SMALL_BTN } from "./ui";
 const ERROR_BOX = "flex flex-wrap items-start gap-2 rounded-card border border-bad/30 bg-badbg px-4 py-3 text-sm text-bad";
 
 function LoadingView({ requestId }: { requestId: string }) {
-  // 실제 높이와 비슷한 자리표시(배너 + KPI 4칸 + 잡 카드)로 데이터 도착 때 화면이 밀리지 않게(CLS).
+  // 실제 높이와 비슷한 자리표시(배너 + KPI 4칸 + 요청 내용 + 잡 카드)로 데이터 도착 때 화면이 밀리지 않게(CLS).
   return (
     <section className="max-w-6xl space-y-5" aria-busy="true">
       <div>
@@ -44,6 +46,11 @@ function LoadingView({ requestId }: { requestId: string }) {
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-16" />)}
         </div>
+      </Card>
+      <Card>
+        <Skeleton className="h-4 w-24" />
+        {/* 카드와 같은 중단점(xl) -- 1024–1279 에서 골격만 2열이면 도착 때 높이가 뛴다. */}
+        <div className="mt-3 grid gap-3 xl:grid-cols-2"><Skeleton className="h-24" /><Skeleton className="h-24" /></div>
       </Card>
       <Card>
         <Skeleton className="h-5 w-1/3" />
@@ -65,9 +72,10 @@ export function RequestDetail() {
   const jobs = useRequestJobs(requestId, true, { requestTerminal: reqTerminal });
   const cancel = useCancelJob(requestId);
   const cancelRequest = useCancelRequest(requestId);
-  // 스토리지 뿌리 맵(관리자 응답에만 managed_root 가 실린다 — 비관리자는 빈 맵)
+  // 스토리지 뿌리 맵. managed_root 는 역할 무관(2026-09-29~). 비관리자 응답엔 관리자 전용 스토리지가, 모두의 응답엔
+  // 비활성 스토리지가 빠져 그 경로는 모름(절대경로 행 생략)
   const roots = useStorageRoots();
-  // 이름 → backend_type(같은 쿼리 -- 요청 추가 없음). 보조 그룹 주의문용.
+  // 이름 → backend_type(같은 쿼리 -- 요청 추가 없음). 「요청 내용」의 보조 그룹 주의문용.
   const backends = useStorageBackends();
 
   // 잡 목록 방어적 정규화(배열이 아니면 모름 취급) + 단계 모델. 잡 조회 실패면 null(모름) -- 0개와 다르다.
@@ -128,8 +136,8 @@ export function RequestDetail() {
 
   const data = req.data;
   if (!data) return null;
-  const abs = absSummary(data.operation, data.payload, roots);
-  const target = pathSummary(data.operation, data.payload);
+  // 「요청 내용」 카드와 머리말 root 배지가 읽는 한 모델(훅이 아니다 -- 조기 return 뒤에 둬도 된다).
+  const spec = deriveRequestSpec(data, jobList, roots, backends);
   const live = !REQUEST_TERMINAL_STATES.has(data.state) || (jobList ?? []).some((j) => !isTerminal(j.state));
   // 폴링 중 한 번 실패했다고 화면 전체를 오류로 바꾸지 않는다 -- 보던 화면은 남기고 "언제 기준인지" 만 말한다.
   const refetchErr = req.isRefetchError || jobs.isRefetchError;
@@ -144,12 +152,18 @@ export function RequestDetail() {
       <section className="max-w-6xl space-y-5">
         <div className="flex flex-wrap items-start gap-x-4 gap-y-1">
           <div className="min-w-0 flex-1">
-            <h1 className="text-2xl font-bold">{`${data.operation} 요청`}</h1>
+            {/* 배지는 h1 **밖**(h1 이름 정확 일치 계약 「sync 요청」). root 일 때만 -- 비 root 는 정상 경우라 요소를 늘리지 않는다
+                (비 root 는 카드의 「실행 권한」이 「root 아님」으로 말한다). 본문의 첫 줄이라 카드(배너·KPI 아래)보다 먼저
+                보인다. 단 375 에서는 관리자 사이드바 블록(약 1,060px) 다음이라 첫 화면 안은 아니다 -- 모바일 사이드바 접기는
+                BACKLOG(셸 범위). */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="text-2xl font-bold">{`${data.operation} 요청`}</h1>
+              {spec.badge !== null && <RootBadge kind={spec.badge} />}
+            </div>
             <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-ink/70">
               <span className="select-all font-mono [overflow-wrap:anywhere]">{data.request_id}</span>
               <span aria-hidden>·</span><span>{`요청자 ${data.requester_id}`}</span>
               <span aria-hidden>·</span><span>{`제출 ${kstStamp(data.created_at)}`}</span>
-              <span aria-hidden>·</span><span>{`우선순위 ${data.priority}`}</span>
               {data.batch_id && (<>
                 <span aria-hidden>·</span>
                 <Link className={`text-accent underline ${FOCUS_RING}`} to={`/admin/batches/${data.batch_id}`}>
@@ -177,12 +191,13 @@ export function RequestDetail() {
             <RetryButton onClick={() => { void req.refetch(); void jobs.refetch(); }} />
           </div>
         )}
-        <OutcomeCard req={data} jobs={jobList} models={models} abs={abs} target={target} cancelRequest={cancelRequest}
-                     jobsLoading={jobsLoading} />
+        <OutcomeCard req={data} jobs={jobList} models={models} cancelRequest={cancelRequest} jobsLoading={jobsLoading} />
+        <RequestSpecCard spec={spec} />
         <section aria-labelledby="jobs-h" className="space-y-3">
           <h2 id="jobs-h" className="flex items-baseline gap-2 text-sm font-semibold">
             데이터 작업
-            {jobList !== null && jobList.length > 0 && (
+            {/* 개수는 여럿일 때만 -- 「1개」는 정보가 없다(planner 는 요청당 잡을 하나 만든다). */}
+            {jobList !== null && jobList.length > 1 && (
               <span className="text-xs font-normal text-ink/70 tabular-nums">{`${jobList.length}개`}</span>
             )}
           </h2>
@@ -216,7 +231,7 @@ export function RequestDetail() {
             </div>
           ) : (
             jobList.map((j, i) => (
-              <JobCard key={j.job_id} job={j} model={models[i]} backends={backends} cancel={cancel}
+              <JobCard key={j.job_id} job={j} model={models[i]} cancel={cancel}
                        events={data.events} requestTerminal={evTerminal} jobCount={jobList.length} refIso={data.created_at}
                        batchChild={batchChild} confirmOnGate={outcome.confirmOwner === "gate"} />
             ))

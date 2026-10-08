@@ -509,16 +509,18 @@ test("3차 대비: 잡 카드·결과 타일·컨펌 창의 의미 있는 글자
   serve({ ...REQ, state: "Planned", transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 2)] }, [done, cp]);
   renderAt();
   const jobs = await screen.findByRole("region", { name: /^데이터 작업/ });
+  // 보조 그룹 행은 2026-10-08 부터 「요청 내용」 카드에 있다(잡 2개라 도구 라벨은 잡 카드에 남는다).
+  const spec = screen.getByRole("region", { name: "요청 내용" });
   await within(jobs).findAllByText("dsync · 4 노드");
   await userEvent.click(within(jobs).getByRole("button", { name: "작업 컨펌" }));
   const dlg = await screen.findByRole("dialog", { name: "sync 작업 컨펌" });
-  const offenders = [jobs, dlg].flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>(".text-muted")))
+  const offenders = [jobs, spec, dlg].flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>(".text-muted")))
     .filter((el) => !(el.classList.contains("hidden") && el.classList.contains("sm:inline")))   // 장식 코드 라벨(§9)
     .filter((el) => (el.textContent ?? "").trim() !== "")
     .map((el) => el.textContent);
   expect(offenders).toEqual([]);
   expect(within(jobs).getAllByText("dsync · 4 노드")[0]).toHaveClass("text-ink/70");
-  expect(within(jobs).getAllByText("보조 그룹(gid)")[0]).toHaveClass("text-ink/70");
+  expect(within(spec).getByText("보조 그룹(gid)")).toHaveClass("text-ink/70");
   expect(within(jobs).getByText("bytes")).toHaveClass("text-ink/70");
   expect(within(dlg).getByText(/^지문\(fingerprint\)/)).toHaveClass("text-ink/70");
   expect(within(dlg).getByText(/^만료: /)).toHaveClass("text-ink/70");

@@ -76,3 +76,18 @@ export function intFieldError(label: string, raw: string, lo: number, hi: number
     return `${label}는 ${lo}..${hi} 범위의 정수여야 합니다`;
   return null;
 }
+
+// 제출 폼(SubmitJob·BatchCreate)과 요청 상세(requestSpec)가 같은 문구를 쓴다(한 곳) -- 화면마다 사본이면 같은 옵션이
+// 화면마다 다르게 설명된다. 바꾸면 SubmitJob.test·BatchCreate.test 의 정확 일치가 함께 깨져야 정상이다.
+export const SYNC_OPTION_HELP = {
+  delete: "원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화).",
+  contents: "크기·수정시각 대신 파일 내용을 바이트 단위로 비교합니다(더 느리지만 정확).",
+} as const;
+export const OPEN_NOATIME_NON_ROOT =
+  "open_noatime 은 root 실행에서만 적용됩니다 — 일반 실행 신원은 남의 파일을 O_NOATIME 으로 열 수 없어(EPERM) 복사가 실패합니다.";
+// 실행 권한 문구(제출 요약 「실행 권한」 ↔ 요청 상세 「요청 내용」의 「실행 권한」). root 의 어휘·색(text-bad)은 포탈 전체가 같다.
+// 요청 상세는 PRIV_ROOT_HEAD·PRIV_USER 만 쓴다 -- sync 의 소유 결과는 같은 카드의 「목적지 소유」 행이 말하므로
+// PRIV_ROOT_SYNC(소유 결과를 덧붙인 꼬리)는 제출 요약 전용이다(한 화면에서 같은 사실을 두 번 말하지 않는다).
+export const PRIV_ROOT_HEAD = "root(특권) — 권한 검사 우회";
+export const PRIV_ROOT_SYNC = `${PRIV_ROOT_HEAD}, sync 는 목적지 소유·권한을 소스에 맞춤(chown·chmod 지정 시 그 값)`;
+export const PRIV_USER = "실행 신원의 uid/gid(권한 그대로 적용)";

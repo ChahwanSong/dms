@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { ChevronDown, History } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
@@ -6,7 +6,6 @@ import { Button } from "../../components/ui/Button";
 import { isTerminal } from "../../lib/jobState";
 import { ApiError, reasonText } from "../../lib/api";
 import { toolSummary } from "../../lib/jobTool";
-import { groupCaveatsFor, supplementaryGroupsText } from "../../lib/groupCaveats";
 import type { DataJob } from "../../lib/types";
 import type { useCancelJob } from "./useJobs";
 import { Timeline } from "./Timeline";
@@ -26,43 +25,26 @@ export function ToolLabel({ job }: { job: DataJob }) {
   return <span className="text-xs text-ink/70">{text}</span>;
 }
 
-// 보조 그룹(gid) 행(2026-10-07 D15): 계획 시점에 얼린 스냅숏(worker_pool.identity 4키)을 그대로 보인다 --
-// 잡이 실제로 어떤 그룹을 달고 도는지(또는 왜 안 다는지)를 사용자가 볼 유일한 자리다. 상태 키가 없는 잡(기능
-// 배포 전에 계획됨)은 행을 그리지 않는다(모름 ≠ 없음 -- 사유 줄과 같은 "생략이 더 정직" 규약). 실렸을 때만
-// 스토리지 종류별 주의문을 붙인다(실제 인정은 스토리지 서버가 정한다 -- lib/groupCaveats).
-export function SupplementaryGroupsRow({ job, backends }: { job: DataJob; backends: Record<string, string> }) {
-  const ident = job.worker_pool?.identity;
-  const text = supplementaryGroupsText(ident);
-  if (text === null) return null;
-  const caveats = ident?.supplementary_gids_status === "applied"
-    ? groupCaveatsFor([job.storage_name, job.source_storage, job.destination_storage], backends) : [];
-  return (
-    <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-2">
-      <dt className="text-ink/70">보조 그룹(gid)</dt>
-      <dd>
-        {text}
-        {caveats.map((c) => <span key={c} className="block text-xs text-ink/70">{c}</span>)}
-      </dd>
-    </dl>
-  );
-}
-
 // 잡 자신의 상태 전이 목록은 기본으로 접는다 -- 단계 구획이 같은 사실(언제 어느 단계였나)을 이미 말하고, 펼친
 // 원문은 진단용이다. 제목(heading)이 아니라 버튼인 이유: 페이지의 「전이 이력」 heading 은 요청 Timeline 하나뿐
 // 이어야 한다(e2e 04 getByRole("heading",{name:"전이 이력"}) 은 부분 일치라 비슷한 heading 이 하나만 있어도 깨진다).
-function JobTransitionsDisclosure({ job }: { job: DataJob }) {
+// trailing = 버튼 옆에 붙는 잡별 사실(아티팩트 경로) -- 좁은 폭에선 버튼 아래 줄로 접힌다.
+function JobTransitionsDisclosure({ job, trailing = null }: { job: DataJob; trailing?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const n = normTransitions(job.transitions).length;
   return (
     <div className="mt-3">
-      <button type="button" aria-expanded={open} aria-controls={id} disabled={n === 0}
-              onClick={() => setOpen((v) => !v)}
-              className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs text-ink/70 hover:bg-panel hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent ${FOCUS_RING}`}>
-        <History className="h-3.5 w-3.5" aria-hidden />
-        {`상태 전이 ${n}건`}
-        <ChevronDown aria-hidden className={`h-3.5 w-3.5 motion-safe:transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <button type="button" aria-expanded={open} aria-controls={id} disabled={n === 0}
+                onClick={() => setOpen((v) => !v)}
+                className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs text-ink/70 hover:bg-panel hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent ${FOCUS_RING}`}>
+          <History className="h-3.5 w-3.5" aria-hidden />
+          {`상태 전이 ${n}건`}
+          <ChevronDown aria-hidden className={`h-3.5 w-3.5 motion-safe:transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+        {trailing}
+      </div>
       {/* 0건이면 Timeline 을 그리지 않는다 -- 「전이 이력이 없습니다」가 요청 Timeline 의 것과 겹치면 안 된다. */}
       <div id={id} hidden={!open}>
         {n > 0 && <div className="mt-2 pl-2"><Timeline transitions={job.transitions} /></div>}
@@ -71,9 +53,9 @@ function JobTransitionsDisclosure({ job }: { job: DataJob }) {
   );
 }
 
-export function JobCard({ job, model, backends, cancel, events, requestTerminal = false, jobCount, refIso, batchChild,
+export function JobCard({ job, model, cancel, events, requestTerminal = false, jobCount, refIso, batchChild,
                           confirmOnGate }: {
-  job: DataJob; model: JobStagesModel; backends: Record<string, string>;
+  job: DataJob; model: JobStagesModel;
   cancel: ReturnType<typeof useCancelJob>;
   events: unknown; requestTerminal?: boolean; jobCount: number; refIso?: string | null; batchChild: boolean;
   confirmOnGate: boolean;
@@ -83,7 +65,9 @@ export function JobCard({ job, model, backends, cancel, events, requestTerminal 
   const canCancel = job.state !== "ConfirmPending" && !isTerminal(job.state);
   return (
     <Card>
-      {/* 헤더 = 식별자 · 실행 도구 · 상태 pill · 취소. 32자 hex job_id 는 좁은 폭에서 어디서든 줄을 바꾼다(e2e L1).
+      {/* 헤더 = 식별자 · (잡 ≥2일 때만 실행 도구) · 상태 pill · 취소. 실행 도구·신원·보조 그룹은 위 「요청 내용」 카드가
+          말한다(잡이 하나면 같은 사실을 두 번 그리지 않는다 -- 여럿이면 잡마다 도구가 다를 수 있어 여기에 남긴다).
+          32자 hex job_id 는 좁은 폭에서 어디서든 줄을 바꾼다(e2e L1).
           job_id 는 이 span 한 곳에만 그린다(e2e E6 getByText(job_id, exact) 가 정확히 1개). 잡 Card 와 job_id 사이
           조상에 bg-surface 를 쓰지 않는다(RequestDetail.test 가 closest(".bg-surface") 로 카드를 찾는다). */}
       <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
@@ -92,7 +76,7 @@ export function JobCard({ job, model, backends, cancel, events, requestTerminal 
             <span className="sr-only">작업 </span>
             <span className="select-all font-mono [overflow-wrap:anywhere]">{job.job_id}</span>
           </h3>
-          <ToolLabel job={job} />
+          {jobCount > 1 && <ToolLabel job={job} />}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <StatusPill state={job.state} />
@@ -112,16 +96,17 @@ export function JobCard({ job, model, backends, cancel, events, requestTerminal 
       {!model.failure && job.reason_code && (
         <p className="text-bad text-sm mt-1">{reasonText(job.reason_code)}</p>
       )}
-      {job.artifact_uri && (
-        <p className="mt-1 text-xs text-ink/70 break-all">{`아티팩트 ${job.artifact_uri}`}</p>
-      )}
-      <SupplementaryGroupsRow job={job} backends={backends} />
       {!model.known && (
         <p className="mt-2 text-sm text-ink/70 break-keep">{`알 수 없는 상태 ${job.state} — 단계 표시는 대략적입니다.`}</p>
       )}
       <JobStages job={job} events={events} requestTerminal={requestTerminal} jobCount={jobCount} refIso={refIso}
                  batchChild={batchChild} confirmOnGate={confirmOnGate} />
-      <JobTransitionsDisclosure job={job} />
+      {/* 아티팩트 경로는 잡별 사실이라 잡 카드 맨 아래 줄에(스킴 없는 경로가 실 값이다 -- stepper). px-2 = 버튼의 안쪽
+          여백 -- 좁은 폭에서 버튼 아래로 접혀도 버튼 아이콘과 같은 세로선에서 시작한다. sm 이상은 왼쪽 구분선 -- 같은
+          크기·색의 글자가 버튼 옆에 붙으면 버튼의 일부로 읽힌다. */}
+      <JobTransitionsDisclosure job={job} trailing={job.artifact_uri
+        ? <p className="min-w-0 px-2 text-xs text-ink/70 break-all sm:border-l sm:border-line sm:pl-3">{`아티팩트 ${job.artifact_uri}`}</p>
+        : null} />
     </Card>
   );
 }

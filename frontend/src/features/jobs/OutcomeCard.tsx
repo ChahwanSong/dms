@@ -17,9 +17,10 @@ import type { JobStagesModel } from "./stageModel";
 import { deriveKpi, deriveOutcome, type KpiTile, type OutcomeIcon, type Tone } from "./requestOutcome";
 import { LINK_BTN } from "./ui";
 
-// 결과 배너(2026-10-08 재설계 -- 옛 「요청 정보」 카드를 대체). 첫 화면에서 네 가지를 답한다:
-// 무슨 일이 있었나(제목 + 요청 pill) · 왜(dl 첫 줄 「사유」) · 무엇을 대상으로(「대상」·「절대경로」) · 다음에
-// 무엇을 하나(「다음 할 일」 띠 + 버튼). 아래에 지표 4칸(KPI). 판정은 requestOutcome(순수)이 한다.
+// 결과 배너(2026-10-08 재설계 -- 옛 「요청 정보」 카드를 대체). 첫 화면에서 세 가지를 답한다:
+// 무슨 일이 있었나(제목 + 요청 pill) · 왜(「사유」 -- 있을 때만) · 다음에 무엇을 하나(「다음 할 일」 띠 + 버튼).
+// 아래에 지표 4칸(KPI). 무엇을·어떤 설정으로·누구 권한으로는 바로 아래 「요청 내용」 카드(RequestSpecCard)가 말한다.
+// 판정은 requestOutcome(순수)이 한다.
 
 const TONE_BORDER: Record<Tone, string> = {
   ok: "border-l-ok", bad: "border-l-bad", busy: "border-l-busy", action: "border-l-attn", neutral: "border-l-line",
@@ -71,9 +72,9 @@ function ExpiryLine({ job }: { job: DataJob }) {
   );
 }
 
-export function OutcomeCard({ req, jobs, models, abs, target, cancelRequest, jobsLoading = false }: {
+export function OutcomeCard({ req, jobs, models, cancelRequest, jobsLoading = false }: {
   req: RequestDetail; jobs: DataJob[] | null; models: JobStagesModel[];
-  abs: string | null; target: string; cancelRequest: ReturnType<typeof useCancelRequest>;
+  cancelRequest: ReturnType<typeof useCancelRequest>;
   jobsLoading?: boolean;
 }) {
   const outcome = deriveOutcome(req, jobs, models, { jobsLoading });
@@ -95,6 +96,7 @@ export function OutcomeCard({ req, jobs, models, abs, target, cancelRequest, job
         {/* 요청 pill 은 페이지에서 여기 한 번만(e2e E6: Succeeded 배지 = 요청 1 + 잡 N). */}
         <span className="ml-auto shrink-0"><StatusPill state={req.state} /></span>
       </div>
+      {req.reason_code && (
       <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-1 text-sm sm:grid-cols-[max-content_minmax(0,1fr)]">
         {/* 사유(사용자 보고 2026-08-16): 실패한 요청에서 사용자가 가장 먼저 찾는
             값이라 dl 의 첫 줄이다(상태 pill 바로 아래 = 상태→사유 순). 소스는
@@ -103,23 +105,11 @@ export function OutcomeCard({ req, jobs, models, abs, target, cancelRequest, job
             요청(플래너 어드미션)은 잡이 아예 없어 사유를 실을 곳이 없었다.
             없으면(비종단·사유 없는 종단·구버전 응답) 줄 자체를 그리지 않는다 --
             "—" 도 거짓 표시다. 「사유」 dt 는 페이지에서 여기 하나뿐이다(단계 행의 실패
-            문장엔 라벨을 달지 않는다). */}
-        {req.reason_code && (<>
-          <dt className="text-ink/70">사유</dt>
-          <dd className="text-bad break-keep">{reasonText(req.reason_code)}</dd>
-        </>)}
-        {/* 대상: payload 가 담은 그대로(스토리지:상대경로). 완료된 작업을 볼 때
-            화면 어디에도 무엇을 대상으로 돌았는지 없었다(사용자 보고). */}
-        <dt className="text-ink/70">대상</dt>
-        <dd className="font-mono text-xs break-all">{target}</dd>
-        {/* 절대경로는 **지금의** managed_root 로 조합한다 — payload 에 박아 두면
-            스토리지 경로가 바뀐 뒤 존재하지 않는 경로를 사실처럼 보인다. 뿌리를
-            모르면(비관리자·조회 실패) 줄 자체를 안 그린다(거짓 경로 금지). */}
-        {abs !== null && (<>
-          <dt className="text-ink/70">절대경로</dt>
-          <dd className="font-mono text-xs break-all text-ink/70">{abs}</dd>
-        </>)}
+            문장엔 라벨을 달지 않는다). 대상·절대경로는 「요청 내용」 카드로 옮겼다(한 사실은 한 곳에만). */}
+        <dt className="text-ink/70">사유</dt>
+        <dd className="text-bad break-keep">{reasonText(req.reason_code)}</dd>
       </dl>
+      )}
       {n && (
         <div className={`mt-4 rounded-lg px-4 py-3 text-sm ${TONE_STRIP[outcome.tone]}`}>
           <p className="text-xs font-semibold text-ink">다음 할 일</p>

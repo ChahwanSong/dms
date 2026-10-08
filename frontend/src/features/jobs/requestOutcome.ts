@@ -184,8 +184,8 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
     }
     case "Succeeded":
       return { ...o, tone: "ok", icon: "check", title: `작업이 완료되었습니다${tail}`,
-        subtitle: `${endAt ? `${kstStamp(endAt)} 완료 · ` : ""}${scan
-          ? "사전 점검 → 실행을 마쳤습니다" : "사전 점검 → 미리보기 → 컨펌 → 실행을 모두 마쳤습니다"}` };
+        // 단계 나열은 아래 단계 구획이 이미 말한다 -- 부제는 언제 끝났나만.
+        subtitle: endAt ? `${kstStamp(endAt)} 완료` : null };
     case "PreviewExpired":
       return { ...o, tone: "action", icon: "hourglass", title: `미리보기가 만료되어 실행되지 않았습니다${tail}`,
         next: next("같은 조건으로 다시 제출하세요 — 데이터는 변경되지 않았습니다.", ["newJob"]) };
