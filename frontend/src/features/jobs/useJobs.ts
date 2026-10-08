@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
-import { isTerminal } from "../../lib/jobState";
+import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import type { RequestRow, RequestDetail, DataJob } from "../../lib/types";
 
 export const useRequests = () =>
@@ -39,21 +39,37 @@ export const useInfiniteRequests = (filters: RequestFilters) =>
 // 「최근 작업」(대시보드) 전용이던 useRecentRequests 는 그 카드와 함께 제거됐다
 // (2026-08-23 사용자 결정 -- 전체 작업 화면과 중복).
 
+// 요청 자신도 비종단인 동안 3초마다 다시 읽는다(2026-10-08) -- 예전엔 한 번 읽고 끝이라, 잡은 2초 폴링으로
+// 끝났는데 요청 pill·전이 이력·사유는 들어올 때 모습 그대로 낡아 있었다. 종단이면 멈춘다(요청 종단 집합 --
+// Conflict 포함). 이 키(["request", id])의 폴링은 잡 키(["request", id, "jobs"])를 건드리지 않는다(e2e E6:
+// 종단 뒤 /jobs 요청 0건).
 export const useRequest = (id: string) =>
-  useQuery({ queryKey: ["request", id], queryFn: () => apiGet<RequestDetail>(`/api/user/requests/${id}`) });
+  useQuery({
+    queryKey: ["request", id],
+    queryFn: () => apiGet<RequestDetail>(`/api/user/requests/${id}`),
+    refetchInterval: (q) => {
+      const r = q.state.data as RequestDetail | undefined;
+      return r && !REQUEST_TERMINAL_STATES.has(r.state) ? 3000 : false;
+    },
+  });
 
 // enabled 기본 true(요청 상세는 늘 조회한다). 문을 연 이유: 배치 항목 펼침이
 // 실행 도구를 이 응답에서 읽는데(배치 API 에는 tool 이 없다) 펼치기 전엔 부르지
 // 않아야 한다(lazy — ItemScanStats 와 같은 계약). 쿼리키를 공유하므로 항목에서
 // 요청 상세로 이동하면 캐시가 이미 따뜻하다.
-export const useRequestJobs = (id: string, enabled = true) =>
+//
+// requestTerminal(요청 상세만 넘긴다): 잡이 0개여도 요청이 비종단이면 계속 돈다. `[].some()` 은 false 라, 제출
+// 직후(플래너가 잡을 만들기 전) 들어온 상세는 잡이 영영 안 나타났다. 모르면(undefined -- 요청이 아직 안 왔거나
+// 배치 호출부) 예전 규칙(비종단 잡이 있을 때만)이다.
+export const useRequestJobs = (id: string, enabled = true, opts?: { requestTerminal?: boolean }) =>
   useQuery({
     queryKey: ["request", id, "jobs"],
     queryFn: () => apiGet<DataJob[]>(`/api/user/requests/${id}/jobs`),
     enabled,
     refetchInterval: (q) => {
       const jobs = q.state.data as DataJob[] | undefined;
-      return jobs && jobs.some((j) => !isTerminal(j.state)) ? 2000 : false;
+      const anyLive = Array.isArray(jobs) && jobs.some((j) => !isTerminal(j.state));
+      return opts?.requestTerminal === false || anyLive ? 2000 : false;
     },
   });
 

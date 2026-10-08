@@ -26,9 +26,17 @@ export function toCsv(columns: string[], rows: Record<string, CsvCell>[]): strin
   return lines.join("\r\n") + "\r\n";
 }
 
-// 브라우저 다운로드(Blob + 임시 a). 런타임 외부 리소스 없음(airgap).
+// CSV 다운로드 = BOM + 본문(엑셀 한글 깨짐 방지, 위 머리 주석).
+const BOM = String.fromCharCode(0xfeff);
 export function downloadCsv(filename: string, text: string): void {
-  const blob = new Blob(["﻿", text], { type: "text/csv;charset=utf-8" });
+  downloadText(filename, BOM + text, "text/csv;charset=utf-8");
+}
+
+// 브라우저 다운로드(Blob + 임시 a). 런타임 외부 리소스 없음(airgap). 서버 라우트 없이 화면이 이미 받은 문자열을
+// 파일로 내릴 때 쓴다(요청 상세 「로그 저장」 -- 로그에는 다운로드 라우트가 없다). clipboard API 는 쓰지 않는다:
+// 포탈은 http(비보안 컨텍스트)로도 뜨므로 navigator.clipboard 가 없을 수 있다.
+export function downloadText(filename: string, text: string, type = "text/plain;charset=utf-8"): void {
+  const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

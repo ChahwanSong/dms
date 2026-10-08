@@ -36,6 +36,10 @@
   남기는 길은 아직 없다. 처방: 실행 신원의 적용된 보조 gid(잡 스냅숏과 같은 계산) 중에서 고르는 UI, 또는
   "목적지 부모 디렉터리의 그룹을 따른다" 같은 자동 정책(계획 시점 멤버십 검증 `chown_group_not_member`
   는 그대로 둔다).
+- 🔧 **요청 상세 재설계(2026-10-08) 범위 밖 후보** — 출력 뷰어 안 검색(n/m)·오류 줄 강조와 이동·「크게 보기」
+  대화상자(지금은 브라우저 Ctrl+F — 2,000줄 상한 안에서 전부 DOM 에 있다), URL 딥링크(`?job=&stage=&view=`),
+  실행 신원 줄(worker_pool.identity 의 uid/gid/privileged 표시), ConfirmPending pill 한국어 라벨, 잡 취소 2단 확인,
+  공용 `Button` 의 focus-visible 링(이번엔 이 화면의 새 요소에만 달았다 -- `features/jobs/ui.ts`).
 - 🔧 **진행 중 잡 kill switch**(보조 그룹) — `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 는 계획 시점
   전용이라 이미 스냅숏이 있는 잡의 재확인·적용은 끄지 못한다(`deploy/README.md` §2c 스위치 범위표).
   지금은 drain 후 취소 또는 이미지 롤백뿐이다. 처방 후보: stepper 가 읽는 control_state 플래그로
