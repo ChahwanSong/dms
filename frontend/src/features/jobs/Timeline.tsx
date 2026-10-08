@@ -1,6 +1,6 @@
 import { reasonText } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
-import { normTransitions } from "./jobStages";
+import { normTransitions } from "./stageModel";
 
 // 전이 목록(요청 「전이 이력」 카드 + 잡 카드의 「상태 전이 N건」 펼침). 받는 값은 unknown 이다 -- DB 가 신뢰
 // 경계라 transitions 가 배열이 아니거나 항목에 to_state 가 없을 수 있다(M5: 무방어 인덱싱 한 번이 화면 전체를

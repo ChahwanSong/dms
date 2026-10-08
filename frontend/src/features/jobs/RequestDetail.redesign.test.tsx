@@ -293,6 +293,77 @@ test("17 KPI: 결과 {files:120, bytes:456} → 「120개」·「456 B」, rm by
   expect(screen.queryByText("크기")).toBeNull();
 });
 
+test("V1 잡 첫 조회 실패(요청 비종단): 화면이 2초마다 로딩 골격으로 흔들리지 않고, 「다시 시도」 중에도 상자·문구가 남는다", async () => {
+  // 리뷰 exp5 이식: 데이터 없는 잡 쿼리가 2초마다 다시 돌며 pending 으로 돌아가 h1·배너·오류 상자가 통째로 사라졌다.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let jobCalls = 0;
+  let release: (() => void) | null = null;
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQ, state: "Planned",
+      transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 2)] })),
+    http.get("/api/user/requests/r1/jobs", async () => {
+      jobCalls += 1;
+      if (jobCalls >= 2) await new Promise<void>((r) => { release = r; });   // 재조회를 잠깐 붙잡아 둔다
+      return HttpResponse.json({ detail: "http_500" }, { status: 500 });
+    }),
+  );
+  renderAt();
+  expect(await screen.findByRole("heading", { level: 1, name: "sync 요청" })).toBeInTheDocument();
+  expect(screen.getByText("서버 오류가 발생했습니다")).toBeInTheDocument();
+  // 데이터 없이 실패한 잡 쿼리는 2초 폴링을 멈춘다(스펙 §5.2 잡 모름 = 요청 3s 만)
+  await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
+  expect(jobCalls).toBe(1);
+  expect(screen.getByRole("heading", { level: 1, name: "sync 요청" })).toBeInTheDocument();
+  // 상자의 「다시 시도」: 다시 읽는 동안에도 골격으로 바뀌지 않고 마지막 오류 문구가 남는다
+  await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+  await waitFor(() => expect(jobCalls).toBe(2));
+  expect(screen.queryByRole("heading", { level: 1, name: "요청 상세" })).toBeNull();
+  expect(screen.getByRole("heading", { level: 1, name: "sync 요청" })).toBeInTheDocument();
+  expect(screen.getByText("서버 오류가 발생했습니다")).toBeInTheDocument();
+  await act(async () => { release?.(); });
+  expect(await screen.findByText("서버 오류가 발생했습니다")).toBeInTheDocument();
+});
+
+test("V2 잡 2개(거부 + 비배치 컨펌 대기): 실패 잡이 배너 초점이어도 「작업 컨펌」 버튼은 정확히 1개(관문 줄)", async () => {
+  // 리뷰 exp1 이식: 예전엔 초점(실패)의 갈래가 컨펌 소유를 'none' 으로 정해 컨펌 대기 잡을 이 화면에서 컨펌할 수 없었다.
+  const failed = { ...JOB, job_id: "jA", state: "Rejected", reason_code: "destination_not_writable", result_summary: null,
+    preview_summary: null, phase_refs: { preflight: "pod/a" },
+    transitions: [tr(null, "Pending", 0), tr("Pending", "Preflight", 2), tr("Preflight", "Rejected", 5)] };
+  const confirm = { ...JOB, job_id: "jB", state: "ConfirmPending", result_summary: null, preview_fingerprint: "fp",
+    preview_expires_at: "2099-01-01T00:00:00Z", phase_refs: { preflight: "pod/b", preview: "pod/c" },
+    transitions: SYNC_OK_TR.slice(0, 4) };
+  server.use(http.get("/api/user/jobs/:jid/logs", () => HttpResponse.json({ source: "archived", entries: [] })));
+  serve({ ...REQ, state: "Planned" }, [failed, confirm]);
+  renderAt();
+  await screen.findByText("jB");
+  expect(screen.getAllByRole("button", { name: "작업 컨펌" })).toHaveLength(1);
+  expect(screen.getByText(/다른 작업 1개가 컨펌을 기다립니다/)).toBeInTheDocument();
+});
+
+test("V6 관문 거부(미리보기 제출 전): 배너는 다음 단계를 말하고 「실패 지점 로그 보기」·로그 자동 조회가 없다", async () => {
+  const asked: string[] = [];
+  server.use(http.get("/api/user/jobs/j1/logs", ({ request }) => {
+    asked.push(new URL(request.url).searchParams.get("phase") ?? "");
+    return HttpResponse.json({ phase: "preflight", ref: "pod/a", source: "live", entries: [] });
+  }));
+  serve({ ...REQ, state: "Rejected", reason_code: "identity_changed_at_step", events: [
+    { id: 1, component: "stepper", severity: "warning", event_type: "identity_changed_at_step",
+      message: "LDAP 변경으로 중단 missing=[10010] job=j1", at: at(30),
+      payload: { job_id: "j1", phase: "preview", queued: false, missing_gids: [10010] } },
+  ] }, [{ ...JOB, state: "Rejected", reason_code: "identity_changed_at_step", result_summary: null, preview_summary: null,
+    phase_refs: { preflight: "pod/a" }, transitions: [tr(null, "Pending", 0), tr("Pending", "Preflight", 2), tr("Preflight", "Rejected", 30)] }]);
+  renderAt();
+  expect(await screen.findByRole("heading", { level: 2, name: "미리보기를 시작하기 전에 거부되었습니다" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "실패 지점 로그 보기" })).toBeNull();
+  const { pre } = await regions();
+  const rows = within(within(pre).getByRole("list", { name: "사전 점검·미리보기 단계" })).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("사전 점검: 완료");
+  // 백엔드 이벤트가 붙는 행 = 거부로 칠한 행
+  expect(within(rows[1]).getByText(/^LDAP 변경으로 중단 missing=\[10010\] job=j1 · /)).toBeInTheDocument();
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(asked).toEqual([]);
+});
+
 test("18 배너 제목 표", async () => {
   const CP = { ...JOB, state: "ConfirmPending", result_summary: null, transitions: SYNC_OK_TR.slice(0, 4),
     phase_refs: { preflight: "a", preview: "b" } };

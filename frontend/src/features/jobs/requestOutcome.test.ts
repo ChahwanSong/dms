@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { DataJob, RequestDetail, Transition } from "../../lib/types";
-import { deriveJobStages } from "./jobStages";
+import { deriveJobStages } from "./stageModel";
 import { deriveKpi, deriveOutcome, focusJob } from "./requestOutcome";
 
 // 결과 배너·KPI 표 테스트(2026-10-08 요청 상세 재설계 §11.4). 「완료됐지만 0건」 주의는 넣지 않았다 -- 미리보기
@@ -25,9 +25,9 @@ const SYNC_OK_TR = [
   t("Executing", "Executing", 27), t("Executing", "Succeeded", 37),
 ];
 const outcome = (req: Partial<RequestDetail>, jobs: DataJob[] | null) =>
-  deriveOutcome({ ...REQ, ...req }, jobs, (jobs ?? []).map(deriveJobStages));
+  deriveOutcome({ ...REQ, ...req }, jobs, (jobs ?? []).map((j) => deriveJobStages(j, req.events)));
 const kpi = (req: Partial<RequestDetail>, jobs: DataJob[] | null, now = Date.parse("2026-10-08T03:16:00Z")) =>
-  deriveKpi({ ...REQ, ...req }, jobs, (jobs ?? []).map(deriveJobStages), now);
+  deriveKpi({ ...REQ, ...req }, jobs, (jobs ?? []).map((j) => deriveJobStages(j)), now);
 
 test("배너 제목·톤 표", () => {
   const cases: [Partial<RequestDetail>, DataJob[] | null, string, string][] = [
@@ -118,6 +118,93 @@ test("「작업 컨펌」 소유: 단건은 배너, 비배치 2개 이상은 관
   expect(batch.confirmOwner).toBe("none");
   expect(batch.next?.batchNotice).toBe(true);
   expect(batch.next?.actions).toEqual(["showPreview"]);
+});
+
+test("V2 「작업 컨펌」 소유는 초점이 아니라 비배치 ConfirmPending 수로 -- 실패 잡이 초점이어도 관문 줄이 갖는다", () => {
+  const rej = job({ job_id: "a", state: "Rejected", reason_code: "destination_not_writable", phase_refs: { preflight: "p" },
+    transitions: [t(null, "Pending", 0), t("Pending", "Preflight", 1), t("Preflight", "Rejected", 3)] });
+  const cp = job({ job_id: "b", state: "ConfirmPending" });
+  const o = outcome({ state: "Planned" }, [rej, cp]);
+  expect(o.focus).toBe(0);
+  expect(o.confirmOwner).toBe("gate");
+  expect(o.next?.actions).not.toContain("confirm");
+  expect(o.next?.text).toContain("다른 작업 1개가 컨펌을 기다립니다");
+  expect(outcome({ state: "Planned", batch_id: "b77" }, [rej, cp]).confirmOwner).toBe("none");
+  const failed = job({ job_id: "c", state: "Failed", reason_code: "execution_failed:x", phase_refs: { execution: "v" } });
+  expect(outcome({ state: "Planned" }, [failed, cp, { ...cp, job_id: "d" }]).confirmOwner).toBe("gate");
+});
+
+// ---- 리뷰 V6~V9: 관문·스케줄 대기·제출 보류의 배너는 통과한 단계를 탓하지 않고 없는 로그를 가리키지 않는다 ----------
+const PRE_TR = [t(null, "Pending", 0), t("Pending", "Preflight", 2)];
+const TO_EXEC = [...PRE_TR, t("Preflight", "PreviewRunning", 7), t("PreviewRunning", "ConfirmPending", 17),
+  t("ConfirmPending", "Executing", 18, { actor: "alice" })];
+const ALL_REFS = { preflight: "pod/a", preview: "vcjob/b", exec_preflight: "pod/c", execution: "vcjob/d" };
+
+test("V6·V7 관문(시작 전) 배너: 다음 단계 이름 + 사유·진단 이벤트, 로그 버튼 없음", () => {
+  const a = outcome({ state: "Rejected" }, [job({ state: "Rejected", reason_code: "identity_changed_at_step",
+    phase_refs: { preflight: "pod/p" }, transitions: [...PRE_TR, t("Preflight", "Rejected", 30)] })]);
+  expect(a.title).toBe("미리보기를 시작하기 전에 거부되었습니다");
+  expect(a.next?.text).toContain("「진단 이벤트」");
+  expect(a.next?.text).not.toContain("로그");
+  expect(a.next?.actions).toEqual(["newJob"]);
+  expect(a.failTarget).toBeNull();
+  const b = outcome({ state: "Failed" }, [job({ state: "Failed", reason_code: "identity_changed_at_step",
+    phase_refs: { preflight: "a", preview: "b", exec_preflight: "c" }, transitions: [...TO_EXEC, t("Executing", "Failed", 40)] })]);
+  expect(b.title).toBe("실행을 시작하기 전에 실패했습니다");
+  expect(b.next?.text).toContain("데이터는 변경되지 않았습니다");
+  const c = outcome({ state: "Failed" }, [job({ state: "Failed", reason_code: "privilege_not_requested",
+    phase_refs: { preflight: "a", preview: "b" }, transitions: [...TO_EXEC, t("Executing", "Failed", 22)] })]);
+  expect(c.title).toBe("실행 직전 재점검을 시작하기 전에 실패했습니다");
+  expect(c.next?.text).toContain("이 단계의 로그는 없습니다");
+  expect(c.next?.text).not.toContain("재점검 로그를 보고");
+  expect(c.next?.actions).toEqual(["newJob"]);
+  // 모호한 노드 제외는 단계를 단정하지 않는다
+  const amb = outcome({ state: "Rejected" }, [job({ state: "Rejected", reason_code: "node_excluded_at_step",
+    phase_refs: { preflight: "pod/p" }, transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] })]);
+  expect(amb.title).toBe("작업이 거부되었습니다");
+  expect(amb.next?.actions).toEqual(["newJob"]);
+  // 재점검 파드 전 취소
+  const cx = outcome({ state: "Cancelled" }, [job({ state: "Cancelled", reason_code: "cancelled_by_user",
+    phase_refs: { preflight: "a", preview: "b" }, transitions: [...TO_EXEC, t("Executing", "Cancelled", 19)] })]);
+  expect(cx.title).toBe("실행 직전 재점검 전에 취소되었습니다");
+  expect(cx.next?.text).toBe("실행 전에 취소되어 데이터는 변경되지 않았습니다.");
+});
+
+test("V8 스케줄 대기: 비종단은 「실행 대기열」, 대기 중 관문 종단은 데이터 변경 경고 없음, 대기 중 취소는 「시작됐다면」까지만", () => {
+  const queued = { sched_wait_seconds: null, exec_submitted_at: "2026-10-08T03:15:27Z", phase_refs: ALL_REFS };
+  const live = outcome({ state: "Planned" }, [job({ ...queued, state: "Executing", transitions: [...TO_EXEC, t("Executing", "Executing", 27)] })]);
+  expect(live.title).toBe("실행 대기열에서 기다리고 있습니다");
+  expect(live.next?.actions).toEqual([]);                  // 「진행 중인 로그 보기」 없음(실행 파드가 아직 없다)
+  const rm = outcome({ state: "Failed", operation: "rm" }, [job({ ...queued, operation: "rm", state: "Failed",
+    reason_code: "node_excluded_at_step", transitions: [...TO_EXEC, t("Executing", "Executing", 27), t("Executing", "Failed", 50)] })]);
+  expect(rm.title).toBe("실행 대기 중에 실패했습니다");
+  expect(rm.next?.text).not.toContain("삭제됐을 수");
+  expect(rm.next?.text).not.toContain("stderr.log");
+  expect(rm.next?.text).toContain("데이터는 변경되지 않았습니다");
+  expect(rm.next?.actions).toEqual(["newJob"]);
+  const cancel = outcome({ state: "Cancelled", operation: "rm" }, [job({ ...queued, operation: "rm", state: "Cancelled",
+    reason_code: "cancelled_by_user", transitions: [...TO_EXEC, t("Executing", "Executing", 27), t("Executing", "Cancelled", 29)] })]);
+  expect(cancel.title).toBe("실행 대기 중에 취소되었습니다");
+  expect(cancel.next?.text).toBe("스케줄 대기 중에 취소되었습니다 — 취소 직전에 실행이 시작됐다면 일부 파일이 이미 삭제됐을 수 있습니다.");
+  // 한 번이라도 RUNNING 이 관측됐으면 지금까지 그대로(실행 중 실패 문구)
+  const ran = outcome({ state: "Failed", operation: "rm" }, [job({ ...queued, sched_wait_seconds: 3, operation: "rm", state: "Failed",
+    reason_code: "node_excluded_at_step", transitions: [...TO_EXEC, t("Executing", "Executing", 27), t("Executing", "Failed", 50)] })]);
+  expect(ran.next?.text).toContain("이미 삭제됐을 수 있습니다");
+});
+
+test("V9 제출 보류 배너: 끝난 단계가 도는 것처럼 말하지 않고, 시도 횟수와 다음에 일어날 일을 말한다", () => {
+  const j = job({ state: "Preflight", phase_refs: { preflight: "pod/p" }, transitions: PRE_TR });
+  const events = [1, 2, 3].map((n) => ({ id: n, component: "stepper", severity: "warning", event_type: "identity_recheck_deferred",
+    message: `LDAP 재확인 불가 -- preview 제출 보류 ${n}/4`, at: `2026-10-08T03:16:0${n}Z`,
+    payload: { job_id: "j1", phase: "preview", attempt: n, max_attempts: 4 } }));
+  const o = outcome({ state: "Planned", events }, [j]);
+  expect(o.title).toBe("미리보기 제출을 보류하고 있습니다 (LDAP 재확인 불가 3/4)");
+  expect(o.tone).toBe("busy");
+  expect(o.liveTarget).toBeNull();
+  expect(o.next?.actions).toEqual([]);
+  expect(o.next?.text).toContain("모두 실패하면 작업이 중단됩니다");
+  // 보류 기록이 없으면 지금까지 그대로
+  expect(outcome({ state: "Planned" }, [j]).title).toBe("사전 점검 중입니다");
 });
 
 test("보조 그룹 삭제 경고는 applied + (rm 또는 delete) 일 때만", () => {

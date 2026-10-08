@@ -4,7 +4,7 @@ import { countText, finiteOrNull, humanBytes, isPlainObject } from "./format";
 
 // 단계 구획 맨 위의 결과 타일. 한 값은 **한 곳에만** 보인다 -- 미리보기 summary 는 ①, 실행 summary 는 ②.
 // 미리보기가 실패하면 stepper(_surface_failed_artifact)가 미리보기 summary 를 result_summary 에 싣는다 -- 그 값을
-// ②의 「실행 결과」로 그리면 "실행했다" 는 거짓이 되므로 ①의 「미리보기 결과 (실패 시점)」로만 보인다(jobStages
+// ②의 「실행 결과」로 그리면 "실행했다" 는 거짓이 되므로 ①의 「미리보기 결과 (실패 시점)」로만 보인다(stageModel
 // resultStage).
 
 const TILE = "min-w-0 rounded-lg border border-line px-3 py-2";

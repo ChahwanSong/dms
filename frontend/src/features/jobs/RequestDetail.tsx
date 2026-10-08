@@ -13,7 +13,7 @@ import { StageNavProvider } from "./stageNav";
 import { OutcomeCard } from "./OutcomeCard";
 import { JobCard } from "./JobCard";
 import { ActivitySection } from "./RequestActivity";
-import { deriveJobStages, stageAnnouncement, stageSnapshot, type StageSnapshot } from "./jobStages";
+import { deriveJobStages, stageAnnouncement, stageSnapshot, type StageSnapshot } from "./stageModel";
 import { deriveOutcome } from "./requestOutcome";
 import { kstClock } from "./format";
 import { FOCUS_RING, SMALL_BTN } from "./ui";
@@ -21,7 +21,7 @@ import { FOCUS_RING, SMALL_BTN } from "./ui";
 // 요청 상세(/jobs/:requestId) -- 2026-10-08 재설계(사용자 요청: preflight(preview)와 execution 의 출력·로그를
 // 분리해서 보이게 + 결과 화면 개선). 위에서 아래로: 머리말 → (재조회 실패 띠) → 결과 배너 → 데이터 작업(잡 카드:
 // ① 사전 점검·미리보기 / 작업 컨펌 / ② 실행) → 활동(전이 이력·진단 이벤트). 이 파일은 조립만 한다 -- 판정은
-// jobStages·requestOutcome(순수), 그리기는 각 컴포넌트 파일.
+// stageModel·requestOutcome(순수), 그리기는 각 컴포넌트 파일.
 //
 // 폴링(useJobs): 요청 3초(비종단 동안), 잡 2초(요청 비종단 또는 비종단 잡이 있을 때 -- 잡 0개여도 돈다). 종단이면
 // 전부 멈춘다(e2e E6: 종단 뒤 /jobs 요청 0건). 잡 키를 무효화하는 새 코드는 넣지 않는다.
@@ -73,7 +73,16 @@ export function RequestDetail() {
   // 잡 목록 방어적 정규화(배열이 아니면 모름 취급) + 단계 모델. 잡 조회 실패면 null(모름) -- 0개와 다르다.
   const jobList: DataJob[] | null = jobs.isError && !jobs.data ? null
     : Array.isArray(jobs.data) ? jobs.data : jobs.data === undefined ? null : [];
-  const models = useMemo(() => (jobList ?? []).map(deriveJobStages), [jobList]);
+  // 요청 이벤트도 모델에 넘긴다(제출 보류 판정) -- 잡 카드(JobStages)가 같은 입력으로 같은 모델을 만든다.
+  const events = req.data?.events;
+  const models = useMemo(() => (jobList ?? []).map((j) => deriveJobStages(j, events)), [jobList, events]);
+  // 잡 조회 실패를 한 번이라도 봤으면 그 뒤의 재조회(「다시 시도」)는 첫 로딩이 아니다 -- TanStack v5 는 데이터 없는
+  // 쿼리의 재조회마다 status 를 pending 으로 되돌려 isLoading 이 다시 참이 되는데, 그때 화면 전체를 골격으로 바꾸면
+  // 배너·오류 상자·「다시 시도」(포커스)가 통째로 사라졌다 나타난다(리뷰 V1). 재조회 중엔 error 가 null 이 되므로
+  // 마지막 오류 문구를 기억해 상자에 남긴다(훅 순서가 바뀌지 않게 조기 return 앞에서).
+  const lastJobsErr = useRef<string | null>(null);
+  if (jobs.error) lastJobsErr.current = (jobs.error as Error).message;
+  const jobsErrSeen = jobs.errorUpdateCount > 0;
 
   // 화면 낭독: 구획 상태가 **바뀔 때만** 한 줄 알린다(첫 로드는 조용히). 이전 값은 ref 에.
   const prevSnaps = useRef<Record<string, StageSnapshot> | null>(null);
@@ -94,7 +103,7 @@ export function RequestDetail() {
     if (msg !== null) setAnnounce(msg);
   }, [jobList, models]);
 
-  if (req.isLoading || jobs.isLoading) return <LoadingView requestId={requestId} />;
+  if (req.isLoading || (jobs.isLoading && !jobsErrSeen)) return <LoadingView requestId={requestId} />;
 
   if (req.isError && !req.data) {
     return (
@@ -171,9 +180,11 @@ export function RequestDetail() {
           </h2>
           {jobList === null ? (
             // 잡 조회 실패를 삼키면 "잡이 0개" 와 구별되지 않는다 -- 실패를 이 자리에서 말한다.
-            <div role="alert" className={ERROR_BOX}>
+            <div role="alert" aria-busy={jobs.isFetching} className={ERROR_BOX}>
               <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-              <p className="min-w-0 flex-1">{(jobs.error as Error).message}</p>
+              <p className="min-w-0 flex-1">
+                {jobs.error ? (jobs.error as Error).message : lastJobsErr.current ?? "작업 정보를 다시 불러오는 중…"}
+              </p>
               <RetryButton onClick={() => { void jobs.refetch(); }} />
             </div>
           ) : jobList.length === 0 ? (

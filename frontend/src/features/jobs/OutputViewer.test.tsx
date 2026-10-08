@@ -1,11 +1,11 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
 import { LINE_CAP, OutputViewer, logSaveText, splitLines } from "./OutputViewer";
-import type { OutputItem } from "./jobStages";
+import type { OutputItem } from "./stageModel";
 
 // 출력 뷰어 고유 동작(2026-10-08 재설계): 줄바꿈 토글·JSON 정렬·2,000줄 상한·로그 저장(Blob)·파드 섹션·빈 로그.
 const server = setupServer();
@@ -16,11 +16,11 @@ afterAll(() => server.close());
 const LOG: OutputItem = { kind: "log", key: "log:preflight", phase: "preflight" };
 const art = (name: string): OutputItem => ({ kind: "artifact", key: `artifact:execution/${name}`, phase: "execution", name, size: 10 });
 
-function renderViewer(item: OutputItem, entrySize: number | null = 10) {
+function renderViewer(item: OutputItem, entrySize: number | null = 10, live = false) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <OutputViewer jobId="0123456789abcdef" item={item} entrySize={entrySize} live={false} viewerId="v1" onClose={() => {}} />
+      <OutputViewer jobId="0123456789abcdef" item={item} entrySize={entrySize} live={live} viewerId="v1" onClose={() => {}} />
     </QueryClientProvider>,
   );
 }
@@ -127,6 +127,31 @@ test("파드가 여럿이면 파드마다 섹션(launcher·제출 실패 원문 
   expect(within(gone).getByText("파드 로그를 더 이상 조회할 수 없습니다")).toBeInTheDocument();
   expect(within(gone).queryByText(/빈 로그/)).toBeNull();
   expect(screen.getAllByText(/^빈 로그/)).toHaveLength(1);
+});
+
+test("라이브 로그 재조회가 502 로 한 번 실패해도 본문은 남고 「내용 갱신에 실패했습니다」 안내만 붙는다(리뷰 V3)", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    let n = 0;
+    server.use(http.get("/api/user/jobs/0123456789abcdef/logs", () => {
+      n += 1;
+      if (n === 2) return HttpResponse.json({ detail: "http_502" }, { status: 502 });
+      return HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "live", entries: [{ pod: "p1", log: `line v${n}` }] });
+    }));
+    renderViewer(LOG, 10, true);
+    expect(await screen.findByText("line v1")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    await waitFor(() => expect(n).toBe(2));
+    expect(await screen.findByText(/^내용 갱신에 실패했습니다 — \d{2}:\d{2}:\d{2} 기준입니다\.$/)).toBeInTheDocument();
+    expect(screen.getByText("line v1")).toBeInTheDocument();            // 오류 상자로 바뀌지 않았다
+    expect(screen.getAllByRole("button", { name: "다시 시도" })).toHaveLength(1);   // 안내 줄의 것 하나뿐
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    await waitFor(() => expect(n).toBe(3));
+    expect(await screen.findByText("line v3")).toBeInTheDocument();
+    expect(screen.queryByText(/^내용 갱신에 실패했습니다/)).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("splitLines·logSaveText: 끝 줄바꿈은 줄이 아니고, 빈 문자열은 0줄", () => {

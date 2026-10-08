@@ -88,7 +88,7 @@ export interface DataJob {
   source_storage?: string | null;
   destination_storage?: string | null;
   options?: Record<string, unknown> | null;
-  // 서버가 이미 보내는 시각·대기 컬럼(같은 _ROW_COLUMNS_SANS_DIAG). 요청 상세의 단계 시각(jobStages)이 읽는다.
+  // 서버가 이미 보내는 시각·대기 컬럼(같은 _ROW_COLUMNS_SANS_DIAG). 요청 상세의 단계 시각(stageModel)이 읽는다.
   // exec_submitted_at = 실행 vcjob 제출 시각(실행 단계 시작), sched_wait_seconds = 제출 → 첫 RUNNING 관측(Volcano
   // 대기 근사). null = 모름(구 잡·미도달) -- 0(대기 없음)과 다르다. 옵션(?)은 기존 fixture 무수정 컴파일용.
   created_at?: string;

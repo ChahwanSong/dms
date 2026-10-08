@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
-import { JobStages } from "./JobStages";
+import { JobStages, StageBadge } from "./JobStages";
 import type { DataJob } from "../../lib/types";
 
 // 옛 JobViewer.test(17건)를 하네스만 바꿔 옮겼다(2026-10-08 요청 상세 재설계). 칩의 접근성 이름은 옛 탭 이름 그대로
@@ -399,7 +399,7 @@ test("손대지 않은 채 폴링으로 실패가 되면 실패 단계 로그가
   expect(screen.getByRole("button", { name: "preflight 로그" })).toHaveAttribute("aria-pressed", "true");
 });
 
-test("라이브: 진행 중 단계의 로그를 열면 3초마다 다시 읽고, 끝나면 멈춘다", async () => {
+test("라이브: 진행 중 단계의 로그를 열면 3초마다 다시 읽고, 끝나면 마지막으로 한 번 더 읽은 뒤 멈춘다", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let calls = 0;
   server.use(
@@ -419,9 +419,161 @@ test("라이브: 진행 중 단계의 로그를 열면 3초마다 다시 읽고,
   rerenderJob({ state: "Succeeded",
     transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-10-08T00:00:00Z" },
                   { from_state: "Preflight", to_state: "Succeeded", at: "2026-10-08T00:00:09Z" }] });
+  // 단계가 끝나는 순간 한 번(마지막 꼬리·박제 사본), 그 뒤로는 멈춘다(리뷰 V0 -- 예전 단언 2 는 그 결함을 고정했다).
+  await waitFor(() => expect(calls).toBe(3));
   await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
-  expect(calls).toBe(2);
+  expect(calls).toBe(3);
   expect(screen.queryByText("실시간")).toBeNull();
+});
+
+test("V0 진행 중 로그를 연 채 단계가 끝나면(Preflight→Rejected) 마지막 마커 줄과 박제 캡션까지 다시 읽는다", async () => {
+  // 리뷰 exp2 이식: 쿼리 키가 그대로라 예전엔 끝나기 직전 스냅숏에 멈춰 DMS_PREFLIGHT_REASON 줄·「저장된 사본」이 안 왔다.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let n = 0;
+  let finished = false;
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", () => {
+      n += 1;
+      return HttpResponse.json(finished
+        ? { phase: "preflight", ref: "pod/p1", source: "archived",
+            entries: [{ pod: "p1", log: "line1\nDMS_PREFLIGHT_REASON=destination_not_writable", truncated: false }] }
+        : { phase: "preflight", ref: "pod/p1", source: "live", entries: [{ pod: "p1", log: "line1", truncated: false }] });
+    }),
+  );
+  const PREFLIGHT_TR = [{ from_state: null, to_state: "Pending", at: "2026-10-08T03:15:00Z" },
+    { from_state: "Pending", to_state: "Preflight", at: "2026-10-08T03:15:02Z" }];
+  const { rerenderJob } = renderStages({ state: "Preflight", transitions: PREFLIGHT_TR as never });
+  fireEvent.click(screen.getByRole("button", { name: "preflight 로그" }));
+  expect(await screen.findByText("line1")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  await waitFor(() => expect(n).toBeGreaterThanOrEqual(2));
+  finished = true;
+  const before = n;
+  rerenderJob({ state: "Rejected", reason_code: "destination_not_writable",
+    transitions: [...PREFLIGHT_TR, { from_state: "Preflight", to_state: "Rejected", at: "2026-10-08T03:15:05Z" }] as never });
+  expect(await screen.findByText("DMS_PREFLIGHT_REASON=destination_not_writable")).toBeInTheDocument();
+  expect(screen.getByText("잡 종료 시점에 저장된 사본 — 파드당 마지막 16KB")).toBeInTheDocument();
+  expect(n).toBe(before + 1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(n).toBe(before + 1);                          // 그 뒤로는 폴링이 멈춘다
+});
+
+test("V3 라이브 로그 재조회 한 번 실패해도 읽던 로그는 남고 작은 안내가 붙으며, 다음 폴링이 성공하면 안내가 사라진다", async () => {
+  // 리뷰 exp3 이식: 예전엔 502 한 번에 본문이 오류 상자로 바뀌어(스크롤·「모두 표시」 초기화) 'important line' 이 사라졌다.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let n = 0;
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", () => {
+      n += 1;
+      if (n === 2) return HttpResponse.json({ detail: "http_502" }, { status: 502 });
+      return HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "live", entries: [{ pod: "p1", log: "important line" }] });
+    }),
+  );
+  renderStages({ state: "Preflight", transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-10-08T00:00:00Z" }] });
+  fireEvent.click(screen.getByRole("button", { name: "preflight 로그" }));
+  expect(await screen.findByText("important line")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  await waitFor(() => expect(n).toBe(2));
+  expect(await screen.findByText(/^내용 갱신에 실패했습니다 — .* 기준입니다\.$/)).toBeInTheDocument();
+  expect(screen.getByText("important line")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  await waitFor(() => expect(n).toBe(3));
+  await waitFor(() => expect(screen.queryByText(/^내용 갱신에 실패했습니다/)).toBeNull());
+  expect(screen.getByText("important line")).toBeInTheDocument();
+});
+
+test("V4 상태 전이 뒤 목록 재조회가 실패해도 보이던 파일 칩·열어 둔 뷰어는 남고 실패 줄이 붙는다, 「다시 시도」로 회복", async () => {
+  // 리뷰 exp4 이식: refreshKey 가 쿼리 키에 있던 시절엔 새 키의 첫 조회 실패로 data 가 없어져 칩·뷰어가 통째로 사라졌다.
+  let n = 0;
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => {
+      n += 1;
+      if (n === 2) return HttpResponse.json({ detail: "http_502" }, { status: 502 });
+      return HttpResponse.json({ entries: [{ phase: "preview", name: "stdout.log", size: 5, modified_at: 1 }], truncated: false });
+    }),
+    http.get("/api/user/jobs/j1/artifacts/preview/stdout.log", () =>
+      HttpResponse.json({ phase: "preview", name: "stdout.log", size: 5, truncated: false, content: "dry-run plan" })),
+  );
+  const CP = { state: "ConfirmPending", preview_fingerprint: "fp", preview_expires_at: "2099-01-01T00:00:00Z",
+    phase_refs: { preflight: "pod/a", preview: "pod/b" } };
+  const { rerenderJob } = renderStages(CP);
+  await userEvent.click(await screen.findByRole("button", { name: "preview/stdout.log" }));
+  expect(await screen.findByText("dry-run plan")).toBeInTheDocument();
+  rerenderJob({ ...CP, state: "Executing", phase_refs: { preflight: "pod/a", preview: "pod/b", exec_preflight: "pod/c" } });
+  await waitFor(() => expect(n).toBe(2));
+  expect(await screen.findByText(/^출력 파일 목록을 불러오지 못했습니다 — /)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "preview/stdout.log" })).toBeInTheDocument();
+  expect(screen.getByText("dry-run plan")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
+  await waitFor(() => expect(n).toBe(3));
+  await waitFor(() => expect(screen.queryByText(/^출력 파일 목록을 불러오지 못했습니다/)).toBeNull());
+  expect(screen.getByRole("button", { name: "preview/stdout.log" })).toBeInTheDocument();
+});
+
+test("V5 흐린 상태(대기·실행 안 됨·모름) 배지 글자는 ink/70(AA), 아이콘은 ink/60 그대로", () => {
+  for (const status of ["waiting", "skipped", "unknown"] as const) {
+    const { container, unmount } = render(<StageBadge status={status} />);
+    const badge = container.firstElementChild as HTMLElement;
+    expect(badge.className).toContain("text-ink/70");
+    expect(badge.className).not.toContain("text-ink/60");
+    expect(badge.querySelector("svg")?.getAttribute("class")).toContain("text-ink/60");
+    unmount();
+  }
+});
+
+test("V6 관문 거부(앞 파드 통과 뒤 미리보기 제출 전): 사전 점검은 완료, 미리보기 행이 「시작 전 거부됨」 + 사유, 로그 자동 조회 없음", async () => {
+  const asked: string[] = [];
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", ({ request }) => {
+      asked.push(new URL(request.url).searchParams.get("phase") ?? "");
+      return HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "live", entries: [] });
+    }),
+  );
+  renderStages({ state: "Rejected", reason_code: "identity_changed_at_step",
+    transitions: [{ from_state: null, to_state: "Pending", at: "2026-10-08T03:15:00Z" },
+      { from_state: "Pending", to_state: "Preflight", at: "2026-10-08T03:15:02Z" },
+      { from_state: "Preflight", to_state: "Rejected", at: "2026-10-08T03:15:30Z" }] as never });
+  const pre = screen.getByRole("region", { name: "사전 점검·미리보기" });
+  const rows = within(within(pre).getByRole("list", { name: "사전 점검·미리보기 단계" })).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("사전 점검: 완료");
+  expect(rows[0]).not.toHaveTextContent("소요");
+  expect(rows[1]).toHaveTextContent("미리보기: 거부됨");
+  expect(rows[1]).toHaveTextContent(/시작 전 거부됨 · \d{2}:\d{2}:\d{2}/);
+  expect(rows[1]).not.toHaveTextContent("소요");
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(asked).toEqual([]);
+  expect(screen.getByRole("button", { name: "preflight 로그" })).toHaveAttribute("aria-pressed", "false");
+});
+
+test("V8 스케줄 대기 중인 실행: 실행 행은 「진행 중」이 아니라 「제출 · 스케줄 대기 중」, 라이브 점 없음", () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
+  renderStages({ state: "Executing", phase_refs: ALL_REFS, exec_submitted_at: "2026-10-08T03:15:27Z", sched_wait_seconds: null,
+    transitions: [{ from_state: "ConfirmPending", to_state: "Executing", at: "2026-10-08T03:15:18Z" },
+      { from_state: "Executing", to_state: "Executing", at: "2026-10-08T03:15:27Z" }] as never });
+  const exec = screen.getByRole("region", { name: "실행" });
+  const rows = within(within(exec).getByRole("list", { name: "실행 단계" })).getAllByRole("listitem");
+  expect(rows[1]).toHaveTextContent("실행: 대기");
+  expect(within(rows[1]).getByText(/제출 · 스케줄 대기 중/)).toBeInTheDocument();
+  expect(rows[1]).not.toHaveTextContent("시작 ·");
+});
+
+test("V9 제출 보류 중: 끝난 사전 점검은 완료, 미리보기 행이 「제출 보류 — LDAP 재확인 불가 2/4」, 라이브 로그 대상 없음", () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })));
+  const deferred = (attempt: number, sec: number) => ({ id: attempt, component: "stepper", severity: "warning",
+    event_type: "identity_recheck_deferred", message: `LDAP 재확인 불가 -- preview 제출 보류 ${attempt}/4`,
+    at: `2026-10-08T03:16:${sec}Z`, payload: { job_id: "j1", phase: "preview", attempt, max_attempts: 4 } });
+  renderStages({ state: "Preflight", transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-10-08T03:15:02Z" }] as never },
+    { events: [deferred(1, 10), deferred(2, 20)] });
+  const pre = screen.getByRole("region", { name: "사전 점검·미리보기" });
+  const rows = within(within(pre).getByRole("list", { name: "사전 점검·미리보기 단계" })).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("사전 점검: 완료");
+  expect(rows[1]).toHaveTextContent("제출 보류 — LDAP 재확인 불가 2/4");
+  // 끝난 사전 점검 행에 경과(「…째」)·진행 중 표시가 없다(구획 배지는 ① 전체가 아직 안 끝났다는 뜻이라 「진행 중」이다)
+  expect(rows[0]).not.toHaveTextContent("진행 중");
+  expect(rows[0]).not.toHaveTextContent("째");
 });
 
 test("주석: 이 잡의 phase 이벤트만 그 단계 행에(행마다 3건 + 「외 N건」), job_id 없는 이벤트는 잡이 1개일 때만", async () => {

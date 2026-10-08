@@ -14,7 +14,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Elapsed } from "./JobStages";
 import { useStageNav } from "./stageNav";
 import { msText } from "./format";
-import type { JobStagesModel } from "./jobStages";
+import type { JobStagesModel } from "./stageModel";
 import { deriveKpi, deriveOutcome, type KpiTile, type OutcomeIcon, type Tone } from "./requestOutcome";
 import { LINK_BTN } from "./ui";
 
