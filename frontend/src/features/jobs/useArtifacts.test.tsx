@@ -63,8 +63,27 @@ test("useArtifacts: refreshKey 가 바뀌면 목록을 다시 읽는다(러너�
   expect(calls).toBe(1);
   rerender({ k: "Succeeded|execution,preflight" });
   await waitFor(() => expect(calls).toBe(2));
-  // keepPreviousData: 키가 바뀌는 동안에도 이전 목록이 남는다(칩이 깜빡이지 않게)
+  // 쿼리 키가 고정이라 다시 읽는 동안에도 이전 목록이 남는다(칩이 깜빡이지 않게)
   expect(result.current.data).toEqual({ entries: [], truncated: false });
+  // 같은 refreshKey 로 다시 그려도 더 읽지 않는다(상태 전이가 곧 갱신 신호다 -- 폴링 아님)
+  rerender({ k: "Succeeded|execution,preflight" });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(calls).toBe(2);
+});
+
+test("useArtifacts: refreshKey 재조회가 실패해도 마지막 성공 목록은 남고 isError 만 켜진다(리뷰 V4)", async () => {
+  let calls = 0;
+  const ok = { entries: [{ phase: "preview", name: "stdout.log", size: 5, modified_at: 1 }], truncated: false };
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => {
+    calls += 1;
+    return calls === 2 ? HttpResponse.json({ detail: "http_502" }, { status: 502 }) : HttpResponse.json(ok);
+  }));
+  const { result, rerender } = renderHook(({ k }) => useArtifacts("j1", k), { wrapper, initialProps: { k: "ConfirmPending|preflight,preview" } });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  rerender({ k: "Executing|exec_preflight,preflight,preview" });
+  await waitFor(() => expect(result.current.isError).toBe(true));
+  expect(result.current.data).toEqual(ok);
+  expect(result.current.isLoading).toBe(false);          // 화면의 「불러오는 중」 골격도 다시 뜨지 않는다
 });
 
 test("useJobLogs live: 3초마다 다시 읽고, live 가 꺼지면 멈춘다", async () => {

@@ -14,16 +14,17 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { OutputViewer, outputIcon } from "./OutputViewer";
 import { ExecutionResult, PreviewResult } from "./StageResults";
 import {
-  FAILED_LIKE, STATUS_LABEL, STEP_COPY, annotationsFor, deriveJobStages, normTransitions, outputsByStep, stageCode,
-  stageTitle, stepDuration, type JobStagesModel, type OutputItem, type StageModel, type StepModel, type StepStatus,
-} from "./jobStages";
+  FAILED_LIKE, STATUS_LABEL, STEP_COPY, annotationsFor, deriveJobStages, isEstimated, normTransitions, outputsByStep,
+  stageCode, stageTitle, stepDuration, type JobStagesModel, type OutputItem, type StageModel, type StepModel,
+  type StepStatus,
+} from "./stageModel";
 import { humanBytes, kstClock, msText, spanText } from "./format";
 import { FOCUS_RING, SMALL_BTN } from "./ui";
 
 // 잡 카드 안의 두 단계 구획(2026-10-08 재설계, 사용자 요청: "preflight(preview)와 execution 으로 분리해서
 // 보여지게"). ① 사전 점검·미리보기 → (작업 컨펌 관문) → ② 실행 을 **항상 둘 다 펼쳐** 보이고, 출력(로그·파일)은
 // 자기 단계 행 아래 칩으로만 나온다 -- 옛 화면은 한 줄에 칩 15개가 섞여 어느 파일이 미리보기 것이고 어느 것이
-// 실행 것인지 이름(phase/) 접두로만 가려야 했다. 판정은 전부 jobStages(순수)가 하고 여기는 그리기만 한다.
+// 실행 것인지 이름(phase/) 접두로만 가려야 했다. 판정은 전부 stageModel(순수)이 하고 여기는 그리기만 한다.
 
 const STATUS_ICON: Record<StepStatus, { Icon: LucideIcon; tone: string; spin?: boolean }> = {
   waiting: { Icon: CircleDashed, tone: "text-ink/60" },
@@ -44,6 +45,11 @@ const BADGE_BG: Record<StepStatus, string> = {
   failed: "bg-badbg", rejected: "bg-badbg", timed_out: "bg-badbg", cancelled: "bg-panel",
   expired: "bg-attnbg", skipped: "bg-panel", unknown: "bg-panel",
 };
+// 배지 글자색. 흐린 상태(대기·실행 안 됨·모름)의 아이콘 톤 ink/60 은 bg-panel 위 12px 글자로 3.6:1 이라 AA(4.5:1)에
+// 못 미친다(리뷰 V5) -- 글자는 ink/70(약 4.75:1), 아이콘은 비텍스트 하한(3:1)을 넘는 ink/60 그대로 두어 흐린 느낌을 지킨다.
+const LABEL_TONE: Partial<Record<StepStatus, string>> = {
+  waiting: "text-ink/70", skipped: "text-ink/70", unknown: "text-ink/70",
+};
 
 function StatusIcon({ status, className = "h-4 w-4" }: { status: StepStatus; className?: string }) {
   const { Icon, tone, spin } = STATUS_ICON[status];
@@ -52,7 +58,7 @@ function StatusIcon({ status, className = "h-4 w-4" }: { status: StepStatus; cla
 
 export function StageBadge({ status }: { status: StepStatus }) {
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_ICON[status].tone} ${BADGE_BG[status]}`}>
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${LABEL_TONE[status] ?? STATUS_ICON[status].tone} ${BADGE_BG[status]}`}>
       <StatusIcon status={status} className="h-3.5 w-3.5" />{STATUS_LABEL[status]}
     </span>
   );
@@ -83,9 +89,17 @@ function joinParts(parts: (ReactNode | null)[]): ReactNode {
   return kept.map((x, i) => <Fragment key={i}>{i > 0 ? " · " : null}{x}</Fragment>);
 }
 
+// 「위치 추정」 꼬리표의 설명(근거마다 왜 추정인지가 다르다).
+const ESTIMATE_WHY: Partial<Record<string, string>> = {
+  gate_ambiguous: "실행 노드 점검은 이 단계 파드가 스케줄을 기다리는 동안에도, 다음 단계를 제출하기 직전에도 일어나 기록만으로는 어느 쪽인지 알 수 없습니다",
+};
+const ESTIMATE_DEFAULT = "전이 기록이 없어 마지막으로 시작된 단계로 추정했습니다";
+
 // 단계 행 메타(시각·소요·상태 단어). done 이 아닌 상태는 글자로도 상태를 말한다(색만으로 구분하지 않는다).
-function StepMeta({ step, refIso, hasRef, estimated }: {
-  step: StepModel; refIso?: string | null; hasRef: boolean; estimated: boolean;
+// estimate = 「위치 추정」 꼬리표의 설명(추정이 아니면 null). 추정 행에는 「소요」를 붙이지 않는다 -- 그 단계가 돈
+// 시간인지 알 수 없다.
+function StepMeta({ step, refIso, hasRef, estimate }: {
+  step: StepModel; refIso?: string | null; hasRef: boolean; estimate: string | null;
 }) {
   const time = (iso: string | null) => (iso ? <Time iso={iso} refIso={refIso} /> : null);
   const dur = stepDuration(step);
@@ -95,7 +109,11 @@ function StepMeta({ step, refIso, hasRef, estimated }: {
   const schedPart = sched !== null ? `스케줄 대기 ${sched}` : null;
   const cls = "text-xs text-ink/70 tabular-nums";
   let text: ReactNode = null;
-  switch (step.status) {
+  if (step.held) {
+    // 제출 보류(D2) -- 끝난 앞 단계의 경과를 세지 않고, 무엇을 왜 기다리는지 말한다. 횟수를 모르면 생략(지어내지 않는다).
+    const n = step.held.attempt !== null && step.held.max !== null ? ` ${step.held.attempt}/${step.held.max}` : "";
+    text = `제출 보류 — LDAP 재확인 불가${n}`;
+  } else switch (step.status) {
     case "done":
       text = joinParts([time(step.start), dur !== null ? `소요 ${dur}` : null, schedPart]);
       break;
@@ -107,7 +125,10 @@ function StepMeta({ step, refIso, hasRef, estimated }: {
         : "진행 중";
       break;
     case "waiting":
-      text = "대기";
+      // 스케줄 대기(실행 vcjob 제출 뒤 RUNNING 관측 전): 제출 시각부터의 대기 경과 -- 「시작 · N째」(실행 중)와 다른 말이다.
+      text = !step.queued ? "대기"
+        : step.start ? <Elapsed from={step.start} prefix={`${kstClock(step.start, refIso)} 제출 · 스케줄 대기 중 · `} />
+        : "스케줄 대기 중";
       break;
     case "skipped":
       text = "실행 안 됨";
@@ -117,16 +138,20 @@ function StepMeta({ step, refIso, hasRef, estimated }: {
       break;
     default: {
       const label = STATUS_LABEL[step.status];
-      const head = step.submitFailed ? "시작 못 함(제출 실패)" : step.notStarted ? `시작 전 ${label}` : label;
-      text = joinParts([head, time(step.end), dur !== null && !step.submitFailed ? `소요 ${dur}` : null]);
+      const head = step.submitFailed ? "시작 못 함(제출 실패)"
+        : step.queued ? `스케줄 대기 중 ${label}`
+        : step.notStarted ? `시작 전 ${label}` : label;
+      // 제출 실패·스케줄 대기 중 종단·추정 행은 「소요」가 실행 시간이 아니다(파드가 안 돌았거나 어느 단계인지 모른다).
+      const showDur = dur !== null && !step.submitFailed && !step.queued && estimate === null;
+      text = joinParts([head, time(step.end), showDur ? `소요 ${dur}` : null]);
     }
   }
   return (
     <>
       {text !== null && <span className={cls}>{text}</span>}
-      {estimated && (
+      {estimate !== null && (
         <span className="rounded border border-dashed border-line px-1.5 py-0.5 text-[11px] text-ink/70"
-              title="전이 기록이 없어 마지막으로 시작된 단계로 추정했습니다">위치 추정</span>
+              title={estimate}>위치 추정</span>
       )}
     </>
   );
@@ -211,7 +236,8 @@ function StepRow({ step, items, notes, last, ctx }: {
 }) {
   const { job, model } = ctx;
   const isFailure = model.failure?.step === step.id;
-  const estimated = isFailure && (model.failure?.evidence === "deepest_ref" || model.failure?.evidence === "none");
+  const estimate = isFailure && model.failure && isEstimated(model.failure.evidence)
+    ? ESTIMATE_WHY[model.failure.evidence] ?? ESTIMATE_DEFAULT : null;
   const live = !model.terminal && step.status === "running";
   const selected = items.find((i) => i.key === ctx.selectedKey) ?? null;
   const ended = step.status === "done" || FAILED_LIKE.has(step.status) || step.status === "cancelled";
@@ -225,7 +251,7 @@ function StepRow({ step, items, notes, last, ctx }: {
           <span className="sr-only">{`: ${STATUS_LABEL[step.status]}`}</span>
           {step.phase && <span className="hidden font-mono text-xs text-muted sm:inline">{step.phase}</span>}
           <StepMeta step={step} refIso={ctx.refIso} hasRef={step.phase !== null && step.phase in model.refs}
-                    estimated={estimated} />
+                    estimate={estimate} />
         </div>
         {/* 실패 행의 사유 문장. 「사유」 라벨은 배너 dl 에만 둔다(스펙 C5: "사유" 정확 일치는 한 곳). */}
         {isFailure && job.reason_code && (
@@ -287,7 +313,8 @@ function StageSection({ n, stage, model, op, children, titleId, refIso }: {
         <StageTime stage={stage} refIso={refIso} />
       </div>
       <div className="space-y-3 px-3 py-3 sm:px-4">
-        {stage.id === "exec" && stage.status === "waiting" && (
+        {/* 보류·스케줄 대기 행이 있으면 그 행이 무엇을 기다리는지 말한다 -- 「사전 점검이 끝나면…」은 이미 끝난 일이라 뺀다. */}
+        {stage.id === "exec" && stage.status === "waiting" && !stage.steps.some((s) => s.held || s.queued) && (
           <p className="text-sm text-ink/70 break-keep">{model.flow === "scan"
             ? "사전 점검이 끝나면 바로 실행됩니다." : "작업 컨펌 후 실행 직전 재점검을 거쳐 실행됩니다."}</p>
         )}
@@ -349,7 +376,9 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
   job: DataJob; events?: unknown; jobCount?: number; refIso?: string | null;
   batchChild?: boolean; confirmOnGate?: boolean;
 }) {
-  const model = useMemo(() => deriveJobStages(job), [job]);
+  // 이벤트도 넘긴다 -- 제출 보류(identity_recheck_deferred)·관문 모호성 해소가 이 잡의 이벤트를 본다(RequestDetail 의
+  // 배너용 모델과 같은 입력이라 둘이 같은 이야기를 한다).
+  const model = useMemo(() => deriveJobStages(job, events), [job, events]);
   // 러너는 phase 가 끝날 때 파일을 쓴다 -- 상태나 ref 가 바뀌면 목록을 다시 읽는다(폴링 없음).
   const refreshKey = `${job.state}|${Object.keys(model.refs).sort().join(",")}`;
   const artifacts = useArtifacts(job.job_id, refreshKey);

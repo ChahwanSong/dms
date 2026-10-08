@@ -2,9 +2,14 @@
 // 재설계). 화면(JobStages)은 이 모델만 그린다 -- 상태·시각·실패 지점 판정을 컴포넌트 곳곳에 흩으면 같은 잡이
 // 배너와 단계 행에서 서로 다른 이야기를 한다.
 //
-// 근거는 전부 **서버가 이미 보내는 값**이다: job.state·transitions·phase_refs·reason_code·exec_submitted_at.
-// 모르는 것은 null 로 둔다(시각을 지어내지 않는다, 0초를 지어내지 않는다 -- null≠0). DB 가 신뢰 경계라
-// transitions·phase_refs 는 배열·객체가 아닐 수도 있다는 전제로 정규화한다(옛 M5 사고: 무방어 인덱싱이 화면을 죽였다).
+// 근거는 전부 **서버가 이미 보내는 값**이다: job.state·transitions·phase_refs·reason_code·exec_submitted_at·
+// sched_wait_seconds, 그리고 요청 이벤트 중 이 잡의 것(payload.job_id). 모르는 것은 null 로 둔다(시각을 지어내지
+// 않는다, 0초를 지어내지 않는다 -- null≠0). DB 가 신뢰 경계라 transitions·phase_refs·events 는 배열·객체가 아닐 수도
+// 있다는 전제로 정규화한다(옛 M5 사고: 무방어 인덱싱이 화면을 죽였다).
+//
+// 파일 이름이 stageModel 인 이유(2026-10-08 리뷰): 예전 이름 jobStages.ts 는 컴포넌트 JobStages.tsx 와 대소문자만
+// 달라, 대소문자를 가리지 않는 파일시스템(macOS·Windows 기본)에서 `import "./JobStages"` 가 이 순수 모듈(.ts 가 .tsx
+// 보다 먼저 풀린다)로 잘못 풀렸다.
 import { isTerminal } from "../../lib/jobState";
 import type { ArtifactEntry, DataJob, DiagEvent, Transition } from "../../lib/types";
 import { finiteOrNull, isPlainObject, spanText } from "./format";
@@ -15,8 +20,12 @@ export type StepStatus =
   | "waiting" | "running" | "awaiting" | "done"
   | "failed" | "rejected" | "timed_out" | "cancelled" | "expired"
   | "skipped" | "unknown";
-// 실패 지점을 무엇으로 알았나. deepest_ref·none 은 **추정**이라 화면이 단계를 단정하지 않는다.
-export type Evidence = "submit_prefix" | "reason_prefix" | "from_state" | "state" | "deepest_ref" | "none";
+// 실패 지점을 무엇으로 알았나. deepest_ref·none·gate_ambiguous 는 **추정**이라 화면이 단계를 단정하지 않는다.
+// gate = 단계 사이 관문(stepper._build_spec 의 제출 전 검사, 스케줄 전 재검사)의 fail-closed 사유로 정한 지점이다 --
+// 그 단계의 파드는 돌지 않았으니 로그를 자동으로 열지 않는다(_fail_closed 가 ref 파드를 지우고 박제도 하지 않는다).
+export type Evidence =
+  | "submit_prefix" | "reason_prefix" | "gate" | "gate_ambiguous" | "from_state" | "state" | "deepest_ref" | "none";
+export const isEstimated = (e: Evidence): boolean => e === "deepest_ref" || e === "none" || e === "gate_ambiguous";
 export type Flow = "scan" | "previewed";
 
 export interface StepModel {
@@ -26,6 +35,11 @@ export interface StepModel {
   actor: string | null;                                             // confirm 만: 컨펌한 주체
   logAvailable: boolean;
   submitFailed: boolean; notStarted: boolean;
+  // 스케줄 대기: 제출됐지만 RUNNING 이 관측되기 전(비종단 실행), 또는 그 상태에서 끝났다(종단). 대기 시간을 실행
+  // 소요로 세지 않는다.
+  queued: boolean;
+  // 제출 보류(D2: LDAP 재확인 불가로 이 단계 제출을 미루는 중). attempt·max 는 모르면 null(지어내지 않는다).
+  held: { attempt: number | null; max: number | null } | null;
   schedWaitSec: number | null;                                      // execution 만. null=모름, 0=정상값
 }
 export interface StageModel {
@@ -34,13 +48,19 @@ export interface StageModel {
 }
 export interface FailurePoint {
   step: StepId; stage: StageId | "gate"; evidence: Evidence; submitFailed: boolean; notStarted: boolean;
+  // 그 단계의 파드·vcjob 이 스케줄 전(PENDING)에 멈췄다. 관문 사유(evidence gate)면 확정이고, 취소면 "서버가 마지막으로
+  // 본 상태" 일 뿐이다(폴링 사이에 시작됐을 수 있다) -- 배너 문구가 둘을 가른다.
+  queued: boolean;
 }
+// 다음 단계 제출 보류(stepper IdentityRecheckHeld). phase = 제출하려던 phase.
+export interface SubmitHold { phase: Phase; attempt: number | null; max: number | null }
 export interface JobStagesModel {
   flow: Flow;
   steps: StepModel[];
   pre: StageModel; gate: StepModel | null; exec: StageModel;        // scan 이면 gate = null
   terminal: boolean; known: boolean;
   failure: FailurePoint | null;
+  hold: SubmitHold | null;
   executionStarted: boolean;
   resultStage: StageId | null;
   autoOpen: { stage: StageId; key: string } | null;                 // key = "log:<phase>"
@@ -106,6 +126,21 @@ const REASON_PREFIX_STEP: Record<string, StepId> = {
   preview_expired: "confirm",
 };
 
+// 단계 사이 관문의 fail-closed 사유(stepper._step_one 의 except 들 → _fail_closed). 전부 _build_spec 이 **다음 단계를
+// 제출하기 직전**에 던진다 -- 그때 마지막 종단 전이의 from_state 단계(그 파드)는 이미 SUCCEEDED 였다. from_state 를
+// 그대로 쓰면 통과한 단계를 실패로 칠하고 그 단계 로그를 실패 로그로 연다(2026-10-08 리뷰 V6). ldap_unavailable 도
+// 여기다: 재확인 소진(IdentityRecheckExhausted)·카운터 기록 실패·보류 중 파드 소실(_preflight_reason 의
+// held_pod_vanished) 모두 "앞 파드 통과 → 다음 제출 보류" 끝에서만 나온다. unknown_tool 은 넣지 않는다(어느 상태에서나
+// 단계와 무관하게 끊는 변조 행 가드라 from_state 그대로가 맞다).
+const SUBMIT_GATE = new Set([
+  "identity_changed_at_step", "identity_missing_at_step", "ldap_unavailable", "ldap_not_configured",
+  "privilege_not_requested", "chown_name_not_supported", "storage_missing_at_step",
+  "artifact_base_not_traversable", "artifact_base_group_writable", "node_excluded_at_step",
+]);
+// 제출된 파드·vcjob 이 아직 스케줄 전(PENDING)일 때 폴링이 던지는 사유(_raise_if_blocked·_note_queued_recheck·
+// _run_queued_rechecks). node_excluded_at_step 은 제출 전 관문과 둘 다라, from_state 만으로는 어느 쪽인지 모른다.
+const QUEUE_GATE = new Set(["node_excluded_at_step", "identity_changed_at_step", "identity_missing_at_step"]);
+
 const KNOWN_STATES = new Set([
   "Pending", "Preflight", "PreviewRunning", "ConfirmPending", "Executing", "Running",
   "Succeeded", "Failed", "TimedOut", "Cancelled", "Rejected", "PreviewExpired",
@@ -144,11 +179,17 @@ function stageOfStep(id: StepId): StageId | "gate" {
   return id === "confirm" ? "gate" : STAGE_OF_PHASE[id];
 }
 
+interface LocateCtx {
+  execQueued: boolean;               // 실행 vcjob 이 제출됐지만 RUNNING 관측 전(sched_wait_seconds 가 아직 null)
+  deferred: ReadonlySet<string>;     // 이 잡에 identity_recheck_deferred(제출 보류)가 남은 phase
+}
+
 // 종단 실패의 실패 지점(위에서부터 처음 걸리는 규칙).
-function locateFailure(job: DataJob, tr: Transition[], refs: Record<string, string>, flow: Flow): FailurePoint {
+function locateFailure(job: DataJob, tr: Transition[], refs: Record<string, string>, flow: Flow,
+                       ctx: LocateCtx): FailurePoint {
   const mk = (step: StepId, evidence: Evidence, extra: Partial<FailurePoint> = {}): FailurePoint => {
     const s = fold(step, flow);
-    return { step: s, stage: stageOfStep(s), evidence, submitFailed: false, notStarted: false, ...extra };
+    return { step: s, stage: stageOfStep(s), evidence, submitFailed: false, notStarted: false, queued: false, ...extra };
   };
   if (job.state === "PreviewExpired") return mk("confirm", "state");
   // 제출 접두가 먼저다: preview 제출 실패는 Preflight→Failed 전이로 남고 scan 의 execution 제출 실패도 from_state 가
@@ -158,13 +199,42 @@ function locateFailure(job: DataJob, tr: Transition[], refs: Record<string, stri
   const prefix = typeof job.reason_code === "string" ? job.reason_code.split(":")[0] : "";
   if (REASON_PREFIX_STEP[prefix]) return mk(REASON_PREFIX_STEP[prefix], "reason_prefix");
   const terminalT = [...tr].reverse().find((t) => isTerminal(t.to_state)) ?? null;
-  switch (terminalT?.from_state) {
+  const from = terminalT?.from_state;
+  // 단계 사이 관문(SUBMIT_GATE)은 from_state 보다 먼저다(리뷰 V6·V7·V8): 앞 단계 파드는 통과했고 막힌 것은 다음 제출이다.
+  if (SUBMIT_GATE.has(prefix)) {
+    // node_excluded_at_step 만 모호하다 -- 앞 단계 파드의 스케줄 대기(PENDING) 재검사도 같은 사유를 던진다. 다음 제출의
+    // 보류 기록(identity_recheck_deferred)이 있으면 앞 파드는 이미 SUCCEEDED 였으니 모호하지 않다(보류는 그 뒤에만 생긴다).
+    const queueOrSubmit = (next: StepId) => prefix === "node_excluded_at_step" && !ctx.deferred.has(next);
+    if (from === "Preflight") {
+      const next: StepId = flow === "scan" ? "execution" : "preview";
+      return queueOrSubmit(next) ? mk("preflight", "gate_ambiguous") : mk(next, "gate", { notStarted: true });
+    }
+    if (from === "PreviewRunning" && QUEUE_GATE.has(prefix)) return mk("preview", "gate", { queued: true });
+    if (from === "Executing" && !has(refs, "execution")) {
+      // 재점검 파드 ref 도 없으면 컨펌 직후 그 파드를 만들기 전에 막혔다.
+      if (!has(refs, "exec_preflight")) return mk("exec_preflight", "gate", { notStarted: true });
+      return queueOrSubmit("execution") ? mk("exec_preflight", "gate_ambiguous") : mk("execution", "gate", { notStarted: true });
+    }
+    // 실행 vcjob 큐 대기 중 재검사가 끊었다 -- 앵커(exec_submitted_at)가 있고 RUNNING 관측(sched_wait_seconds)이 아직
+    // 없을 때만 "대기 중" 이라고 단정한다. 앵커가 없는 옛 잡·한 번이라도 RUNNING 이었던 잡은 아래 from_state 그대로.
+    if ((from === "Executing" || from === "Running") && has(refs, "execution") && QUEUE_GATE.has(prefix) && ctx.execQueued) {
+      return mk("execution", "gate", { queued: true });
+    }
+  }
+  switch (from) {
     case "Pending": return mk("preflight", "from_state", { notStarted: true });
     case "Preflight": return mk("preflight", "from_state");
     case "PreviewRunning": return mk("preview", "from_state");
     case "ConfirmPending": return mk("confirm", "from_state");
-    case "Executing": return mk(has(refs, "execution") ? "execution" : "exec_preflight", "from_state");
-    case "Running": return mk("execution", "from_state");
+    case "Executing":
+    case "Running":
+      // 스케줄 대기 중의 취소는 queued 로 표시하되 확정하지 않는다(배너가 "시작됐다면…" 으로 말한다).
+      if (from === "Running" || has(refs, "execution")) {
+        return mk("execution", "from_state", { queued: job.state === "Cancelled" && ctx.execQueued });
+      }
+      // 재점검 파드 ref 도 없으면 파드가 만들어지기 전에 끝났다(Pending 규칙의 짝, 리뷰 V7) -- 「소요」·로그를 지어내지 않게.
+      return has(refs, "exec_preflight") ? mk("exec_preflight", "from_state")
+        : mk("exec_preflight", "from_state", { notStarted: true });
   }
   for (const p of ["execution", "exec_preflight", "preview", "preflight"] as const) {
     if (has(refs, p)) return mk(p, "deepest_ref");
@@ -184,6 +254,46 @@ function currentStep(state: string, refs: Record<string, string>): StepId | null
   }
 }
 
+// 요청 이벤트 중 이 잡의 것(payload.job_id 로 한정 -- 같은 요청의 다른 잡 이벤트를 섞지 않는다). 서버는 오름차순이다.
+interface JobEvent { event_type: string; at: unknown; payload: Record<string, unknown> }
+function jobEvents(events: unknown, jobId: string): JobEvent[] {
+  if (!Array.isArray(events)) return [];
+  return events.filter((e): e is JobEvent =>
+    isPlainObject(e) && typeof e.event_type === "string" && isPlainObject(e.payload) && e.payload.job_id === jobId);
+}
+
+// 상태별 다음 제출 phase(stepper._dispatch). 제출 보류(D2)는 이 제출의 _build_spec 에서만 생긴다.
+function nextSubmit(state: string, refs: Record<string, string>, flow: Flow): Phase | null {
+  switch (state) {
+    case "Pending": return "preflight";
+    case "Preflight": return flow === "scan" ? "execution" : "preview";
+    case "Executing": return has(refs, "execution") ? null : has(refs, "exec_preflight") ? "execution" : "exec_preflight";
+    default: return null;
+  }
+}
+
+// 지금 다음 단계 제출을 보류 중인가(리뷰 V9). 보류(IdentityRecheckHeld)는 상태를 바꾸지 않아(touch 만) 전이만 보면
+// 끝난 파드가 계속 "진행 중" 으로 보인다. 서버가 이미 보내는 이벤트로 판정한다(best-effort -- 계수하지 않는 보류
+// (spacing·circuit·budget)는 이벤트가 없어 지금까지처럼 보인다):
+//   - 이 잡의 identity_recheck_deferred / identity_groups_checked 중 마지막이 deferred 이고(통과 기록은 _judge 가
+//     제출 직전에 남긴다 -- 그 뒤면 보류가 끝났다),
+//   - 그 시각이 마지막 전이 이후이며(전이가 나중이면 낡은 기록이다),
+//   - 그 phase 가 지금 상태의 다음 제출 phase 일 때.
+function submitHold(state: string, tr: Transition[], refs: Record<string, string>, flow: Flow,
+                    evs: JobEvent[]): SubmitHold | null {
+  const want = nextSubmit(state, refs, flow);
+  if (want === null) return null;
+  const last = [...evs].reverse()
+    .find((e) => e.event_type === "identity_recheck_deferred" || e.event_type === "identity_groups_checked");
+  if (!last || last.event_type !== "identity_recheck_deferred" || last.payload.phase !== want) return null;
+  const evAt = typeof last.at === "string" ? Date.parse(last.at) : NaN;
+  if (Number.isNaN(evAt)) return null;
+  const trAt = tr.map((t) => (typeof t.at === "string" ? Date.parse(t.at) : NaN)).filter((x) => !Number.isNaN(x));
+  if (trAt.length > 0 && evAt < Math.max(...trAt)) return null;
+  // 시도 횟수·상한은 서버 payload 그대로(상한을 4 로 박지 않는다 -- _LDAP_RECHECK_RETRIES 가 바뀌어도 맞게).
+  return { phase: want, attempt: finiteOrNull(last.payload.attempt), max: finiteOrNull(last.payload.max_attempts) };
+}
+
 function aggregate(statuses: StepStatus[]): StepStatus {
   if (statuses.includes("unknown")) return "unknown";
   for (const s of ["failed", "rejected", "timed_out"] as const) if (statuses.includes(s)) return s;
@@ -198,18 +308,36 @@ function aggregate(statuses: StepStatus[]): StepStatus {
 }
 const ENDED: ReadonlySet<StepStatus> = new Set(["done", "failed", "rejected", "timed_out", "cancelled", "expired"]);
 
-export function deriveJobStages(job: DataJob): JobStagesModel {
+// events = 요청 상세 응답의 events(요청 단위, 최신 100건 오름차순). 이 잡의 것만 쓴다(제출 보류·관문 모호성 해소).
+export function deriveJobStages(job: DataJob, events?: unknown): JobStagesModel {
   const flow: Flow = job.operation === "scan" ? "scan" : "previewed";
   const order = orderOf(flow);
   const tr = normTransitions(job.transitions);
   const refs = normRefs(job.phase_refs);
   const terminal = isTerminal(job.state);
   const known = KNOWN_STATES.has(job.state);
-  const failure = terminal && job.state !== "Succeeded" ? locateFailure(job, tr, refs, flow) : null;
+  const evs = jobEvents(events, job.job_id);
+  const execSubmitted = typeof job.exec_submitted_at === "string" && job.exec_submitted_at !== ""
+    ? job.exec_submitted_at : null;
+  // 실행 vcjob 이 제출됐지만 RUNNING 이 아직 한 번도 관측되지 않았다(sched_wait_seconds 는 _poll_execution 의 첫 RUNNING
+  // 관측에서만 쓰인다 -- data_jobs.record_sched_wait). Volcano 큐·gang 대기는 길 수 있어 이 시간을 "실행 중" 으로 세면
+  // 거짓이다(리뷰 V8). 앵커(exec_submitted_at)가 없는 옛 잡은 sched_wait 가 영영 null 이라 모른다 -- 지금까지처럼 다룬다.
+  // 비교는 finiteOrNull === null(0 은 "같은 틱에 스케줄됨" 이라는 정상값이다).
+  const execQueued = has(refs, "execution") && execSubmitted !== null && finiteOrNull(job.sched_wait_seconds) === null;
+  const deferred = new Set<string>(evs.filter((e) => e.event_type === "identity_recheck_deferred")
+    .map((e) => e.payload.phase).filter(isPhase));
+  const failure = terminal && job.state !== "Succeeded"
+    ? locateFailure(job, tr, refs, flow, { execQueued, deferred }) : null;
+  const hold = !terminal && known ? submitHold(job.state, tr, refs, flow, evs) : null;
   const idx = (id: StepId) => order.indexOf(id);
 
   const cur = !terminal && known ? currentStep(job.state, refs) : null;
   const curFolded = cur === null ? null : fold(cur, flow);
+  const queuedNow = curFolded === "execution" && execQueued;
+  // 보류 중인 제출이 지금 단계 다음이면 지금 단계는 끝났다(보류는 앞 파드가 SUCCEEDED 한 뒤에만 생긴다) -- 끝난 파드를
+  // "진행 중" 으로 그리고 3초 라이브 로그를 돌리지 않게(리뷰 V9).
+  const heldStep = hold === null ? null : fold(hold.phase, flow);
+  const heldAfterCur = heldStep !== null && curFolded !== null && idx(heldStep) === idx(curFolded) + 1;
   const statusOf = (id: StepId): StepStatus => {
     if (job.state === "Succeeded") return "done";
     if (failure) {
@@ -218,8 +346,11 @@ export function deriveJobStages(job: DataJob): JobStagesModel {
     }
     if (!known) return "unknown";
     if (curFolded === null) return "waiting";
-    const d = idx(id) - idx(curFolded);
-    return d < 0 ? "done" : d > 0 ? "waiting" : id === "confirm" ? "awaiting" : "running";
+    const d = idx(id) - idx(heldAfterCur ? heldStep! : curFolded);
+    if (d < 0) return "done";
+    if (d > 0 || heldAfterCur) return "waiting";
+    if (id === "confirm") return "awaiting";
+    return queuedNow ? "waiting" : "running";
   };
 
   // 시각(§4.5). 자기 전이(Executing→Executing)는 "재점검 통과 → 실행 vcjob 제출" 의 흔적이다.
@@ -228,11 +359,12 @@ export function deriveJobStages(job: DataJob): JobStagesModel {
   const selfExec = atOf(tr.find((t) => t.from_state === "Executing" && t.to_state === "Executing"));
   const confirmT = tr.find((t) => t.from_state === "ConfirmPending" && t.to_state === "Executing") ?? null;
   const terminalT = [...tr].reverse().find((t) => isTerminal(t.to_state)) ?? null;
-  const execSubmitted = typeof job.exec_submitted_at === "string" && job.exec_submitted_at !== ""
-    ? job.exec_submitted_at : null;
   const execStart = execSubmitted ?? (flow === "scan" ? firstTo("Running") : selfExec);
   const endIfFailedHere = (id: StepId) => (failure?.step === id ? atOf(terminalT) : null);
   const sfp = submitFailedPhase(job.reason_code);
+  // 관문이 다음 제출을 막았으면(gate·시작 전) 앞 파드 단계가 언제 끝났는지 모른다 -- 그 상태를 떠난 시각은 종단
+  // 전이라 보류 시간(≥180초일 수 있다)까지 소요에 섞인다. 사람 관문(confirm)은 파드가 아니라 그대로 둔다.
+  const gatedPrev = failure?.evidence === "gate" && failure.notStarted ? order[idx(failure.step) - 1] ?? null : null;
 
   const steps: StepModel[] = order.map((id) => {
     const status = statusOf(id);
@@ -244,7 +376,7 @@ export function deriveJobStages(job: DataJob): JobStagesModel {
     switch (id) {
       case "preflight":
         start = isNotStarted ? null : firstTo("Preflight");
-        end = firstFrom("Preflight") ?? endIfFailedHere(id);
+        end = gatedPrev === id ? null : firstFrom("Preflight") ?? endIfFailedHere(id);
         break;
       case "preview":
         start = firstTo("PreviewRunning");
@@ -257,15 +389,16 @@ export function deriveJobStages(job: DataJob): JobStagesModel {
         break;
       case "exec_preflight":
         start = atOf(confirmT);
-        end = execStart ?? endIfFailedHere(id);
+        end = gatedPrev === id ? null : execStart ?? endIfFailedHere(id);
         break;
       case "execution":
         start = execStart;
         end = ENDED.has(status) ? atOf(terminalT) : null;
         break;
     }
-    // 제출 실패 단계는 파드가 없었다 -- 시작 시각은 모름, 끝은 종단 전이.
-    if (isSubmitFailed) { start = null; end = atOf(terminalT); }
+    // 파드가 없었던 단계(제출 실패·시작 전 종단) -- 시작 시각은 모름, 끝은 종단 전이. 「소요」를 지어내지 않는다
+    // (리뷰 V7: 컨펌 시각 → 종단 시각을 재점검 소요로 그렸다).
+    if (isSubmitFailed || isNotStarted) { start = null; end = atOf(terminalT); }
     // 아직 끝나지 않은 단계의 끝 시각은 그리지 않는다(다음 단계로 넘어간 흔적만으로 "끝" 을 단정하지 않게).
     if (!ENDED.has(status)) end = null;
     return {
@@ -273,6 +406,8 @@ export function deriveJobStages(job: DataJob): JobStagesModel {
       status, start, end, actor,
       logAvailable: id !== "confirm" && (has(refs, id) || sfp === id),
       submitFailed: isSubmitFailed, notStarted: isNotStarted,
+      queued: (id === "execution" && queuedNow) || (failure?.queued === true && failure.step === id),
+      held: hold !== null && heldStep === id ? { attempt: hold.attempt, max: hold.max } : null,
       schedWaitSec: id === "execution" ? finiteOrNull(job.sched_wait_seconds) : null,
     };
   });
@@ -290,11 +425,16 @@ export function deriveJobStages(job: DataJob): JobStagesModel {
     };
   };
 
-  const executionStarted = job.state === "Succeeded" || has(refs, "execution") || execSubmitted !== null
-    || selfExec !== null || (flow === "scan" && firstTo("Running") !== null);
+  // "실행이 데이터를 만졌을 수 있다" 의 근거. 스케줄 대기 중(비종단)이거나 대기 중 관문이 끊었으면(확정) 실행 파드가
+  // 돈 적이 없다. 대기 중 **취소**는 확정이 아니라(폴링 사이에 시작됐을 수 있다) 시작한 쪽으로 둔다.
+  const neverRan = queuedNow || (failure?.queued === true && failure.evidence === "gate");
+  const executionStarted = !neverRan && (job.state === "Succeeded" || has(refs, "execution") || execSubmitted !== null
+    || selfExec !== null || (flow === "scan" && firstTo("Running") !== null));
   const resultStage: StageId | null = job.result_summary == null ? null
     : failure && failure.stage === "pre" ? "pre" : "exec";
   const failStep = failure ? steps.find((s) => s.id === failure.step) : undefined;
+  // gate 근거는 화이트리스트 밖이다 -- 그 단계 파드는 돌지 않았고(통과한 앞 파드는 실패 지점이 아니다), _fail_closed 는
+  // ref 파드를 지우면서 박제하지 않아 열어도 보일 로그가 없다.
   const autoOpen = failure && failStep && failStep.phase !== null && failStep.logAvailable
     && (failure.evidence === "submit_prefix" || failure.evidence === "reason_prefix" || failure.evidence === "from_state")
     && (job.state === "Failed" || job.state === "Rejected" || job.state === "TimedOut")
@@ -304,7 +444,7 @@ export function deriveJobStages(job: DataJob): JobStagesModel {
   return {
     flow, steps,
     pre: stage("pre"), gate: steps.find((s) => s.id === "confirm") ?? null, exec: stage("exec"),
-    terminal, known, failure, executionStarted, resultStage, autoOpen, refs,
+    terminal, known, failure, hold, executionStarted, resultStage, autoOpen, refs,
   };
 }
 

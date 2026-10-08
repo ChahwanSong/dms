@@ -61,6 +61,11 @@ export const useRequest = (id: string) =>
 // requestTerminal(요청 상세만 넘긴다): 잡이 0개여도 요청이 비종단이면 계속 돈다. `[].some()` 은 false 라, 제출
 // 직후(플래너가 잡을 만들기 전) 들어온 상세는 잡이 영영 안 나타났다. 모르면(undefined -- 요청이 아직 안 왔거나
 // 배치 호출부) 예전 규칙(비종단 잡이 있을 때만)이다.
+//
+// 데이터 없이 실패한 상태(잡 모름)면 2초 폴링을 멈춘다(2026-10-08 리뷰 V1, 스펙 §5.2 「잡 모름」 = 요청 3s 만) --
+// 데이터 없는 쿼리는 재조회마다 pending 으로 돌아가 화면이 2초마다 로딩으로 흔들리고, 고장 난 행(500)을 2초마다
+// 두드려도 나아지지 않는다. 다시 읽는 길은 오류 상자의 「다시 시도」다(옵저버가 상태가 바뀔 때마다 interval 을 다시
+// 계산하므로 재시도가 pending 으로 바꾸면 폴링이 돌아오고, 또 실패하면 다시 멈춘다).
 export const useRequestJobs = (id: string, enabled = true, opts?: { requestTerminal?: boolean }) =>
   useQuery({
     queryKey: ["request", id, "jobs"],
@@ -68,6 +73,7 @@ export const useRequestJobs = (id: string, enabled = true, opts?: { requestTermi
     enabled,
     refetchInterval: (q) => {
       const jobs = q.state.data as DataJob[] | undefined;
+      if (jobs === undefined && q.state.status === "error") return false;
       const anyLive = Array.isArray(jobs) && jobs.some((j) => !isTerminal(j.state));
       return opts?.requestTerminal === false || anyLive ? 2000 : false;
     },

@@ -1,13 +1,13 @@
 // 요청 상세 맨 위 결과 배너(OutcomeCard)와 지표 4칸(KPI)의 순수 판정(2026-10-08 재설계). 배너는 첫 화면에서
 // "무슨 일이 있었나 · 왜 · 무엇을 대상으로 · 다음에 무엇을 하나" 를 답한다 -- 그 문장을 컴포넌트에 흩지 않고 여기
-// 한 곳에서 정한다(잡 카드의 단계 모델 jobStages 와 같은 근거를 읽어 둘이 서로 다른 이야기를 하지 않게).
+// 한 곳에서 정한다(잡 카드의 단계 모델 stageModel 과 같은 근거를 읽어 둘이 서로 다른 이야기를 하지 않게).
 //
 // 제목·문장은 한국어만 쓴다. 영문 상태 문자열은 StatusPill 의 몫이다(e2e E6 의 Succeeded 배지 개수 계약, 스펙 C1).
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
 import type { DataJob, RequestDetail } from "../../lib/types";
 import { countText, finiteOrNull, humanBytes, isPlainObject, msText, spanText } from "./format";
-import { STEP_COPY, normTransitions, type JobStagesModel, type StageId, type StepId } from "./jobStages";
+import { STEP_COPY, isEstimated, normTransitions, type JobStagesModel, type StageId, type StepId } from "./stageModel";
 
 export type Tone = "ok" | "bad" | "busy" | "action" | "neutral";
 export type OutcomeIcon = "check" | "x" | "clock" | "loader" | "bell" | "ban" | "hourglass" | "help";
@@ -24,7 +24,8 @@ export interface Outcome {
     groupWarning: boolean;    // 보조 그룹 삭제 경고(ConfirmDialog.groupDeleteWarning 과 같은 판정)
     actions: NextAction[];
   } | null;
-  // 「작업 컨펌」 버튼을 누가 갖나: 단건이면 배너, 비배치 2개 이상이면 각 관문 줄, 배치 자식이면 아무도(서버 409
+  // 「작업 컨펌」 버튼을 누가 갖나: 비배치 ConfirmPending 이 하나이고 그 잡이 배너 초점이면 배너, 그 밖에 하나라도
+  // 있으면 각 관문 줄(실패 잡이 초점을 가져가도 컨펌 버튼이 사라지지 않게), 배치 자식이면 아무도(서버 409
   // batch_child_confirm_via_batch -- 배치 확인 1회가 자식 전부를 대표한다).
   confirmOwner: "banner" | "gate" | "none";
   liveTarget: NavTarget | null;
@@ -122,10 +123,23 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
     : "미리보기가 끝나면 컨펌을 요청합니다 — 이 화면은 자동으로 갱신됩니다.";
   const execText = "실행이 끝나면 결과가 여기에 표시됩니다 — 이 화면은 자동으로 갱신됩니다.";
   const withLive = (acts: NextAction[]) => (liveTarget ? ["liveLog" as const, ...acts] : acts);
-  const o = { ...base, focus: fi, liveTarget, failTarget };
+  // 「작업 컨펌」 소유는 초점 잡의 갈래가 아니라 비배치 ConfirmPending 잡 수로 한 번에 정한다(리뷰 V2) -- 실패 > 컨펌
+  // 대기 순이라 실패 잡이 초점이면, 예전엔 컨펌을 기다리는 잡이 페이지 어디에서도 컨펌할 수 없었다.
+  const pendingConfirm = req.batch_id ? 0 : jobs.filter((j) => j.state === "ConfirmPending").length;
+  const confirmOwner: Outcome["confirmOwner"] = pendingConfirm === 0 ? "none"
+    : pendingConfirm === 1 && job.state === "ConfirmPending" ? "banner" : "gate";
+  const o = { ...base, focus: fi, liveTarget, failTarget, confirmOwner };
 
   if (!m.known) {
     return { ...o, tone: "neutral", icon: "help", title: `알 수 없는 상태입니다${tail}` };
+  }
+  // 다음 단계 제출 보류(D2, LDAP 재확인 불가). 상태는 그대로라 "사전 점검 중" 처럼 끝난 단계가 도는 것으로 말하면
+  // 거짓이다(리뷰 V9). 진행 중인 로그도 없다(앞 파드는 끝났고 다음 파드는 아직 없다).
+  if (m.hold) {
+    const n = m.hold.attempt !== null && m.hold.max !== null ? ` (LDAP 재확인 불가 ${m.hold.attempt}/${m.hold.max})` : "";
+    return { ...o, tone: "busy", icon: "clock", title: `${STEP_COPY[m.hold.phase]} 제출을 보류하고 있습니다${n}${tail}`,
+      next: next("LDAP 에 연결되지 않아 보조 그룹 권한을 다시 확인하지 못했습니다 — 약 1분 간격으로 다시 시도하며, "
+        + "모두 실패하면 작업이 중단됩니다. 이 화면은 자동으로 갱신됩니다.", []) };
   }
   switch (job.state) {
     case "Pending":
@@ -137,6 +151,12 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
         next: next(waitText, withLive([])) };
     case "Executing":
     case "Running": {
+      // 실행 vcjob 이 Volcano 큐·gang 대기 중(RUNNING 관측 전) -- 「실행 중」이라고 하면 큐 시간이 실행 시간처럼 읽힌다(리뷰 V8).
+      if (m.steps.find((s) => s.id === "execution")?.queued) {
+        return { ...o, tone: "busy", icon: "clock", title: `실행 대기열에서 기다리고 있습니다${tail}`,
+          next: next("실행 파드들이 함께 배치될 자원을 기다리고 있습니다(스케줄 대기) — 배치되면 실행이 시작되고, "
+            + "이 화면은 자동으로 갱신됩니다.", []) };
+      }
       const recheck = m.steps.find((s) => s.id === "exec_preflight")?.status === "running";
       return { ...o, tone: "busy", icon: "loader",
         title: `${recheck ? "실행 직전 재점검 중입니다" : "실행 중입니다"}${tail}`, next: next(execText, withLive([])) };
@@ -148,9 +168,9 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
       }
       if (sameCat >= 2) {
         return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리는 작업이 ${sameCat}개 있습니다`,
-          confirmOwner: "gate", next: next("각 작업의 「작업 컨펌」 줄에서 진행하세요.", []) };
+          next: next("각 작업의 「작업 컨펌」 줄에서 진행하세요.", []) };
       }
-      return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리고 있습니다${tail}`, confirmOwner: "banner",
+      return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리고 있습니다${tail}`,
         next: next("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다.", ["confirm", "showPreview"],
           { expiry: true, groupWarning: groupWarningOf(job) }) };
     }
@@ -166,10 +186,15 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   const f = m.failure;
   if (job.state === "Cancelled") {
     const where = !f ? "작업이 취소되었습니다"
-      : f.notStarted ? "시작 전에 취소되었습니다"
+      : f.queued ? `${STEP_COPY[f.step]} 대기 중에 취소되었습니다`
+      : f.notStarted ? (f.step === "preflight" ? "시작 전에 취소되었습니다" : `${STEP_COPY[f.step]} 전에 취소되었습니다`)
       : f.step === "confirm" ? "컨펌 전에 취소되었습니다"
       : `${STEP_COPY[f.step]} 중에 취소되었습니다`;
-    const text = m.executionStarted
+    // 스케줄 대기 중 취소: 서버가 마지막으로 본 것은 대기였지만 폴링 사이에 시작됐을 수 있다 -- "시작됐다면" 까지만 말한다.
+    const text = f?.queued
+      ? (op === "scan" ? "스케줄 대기 중에 취소되었습니다 — scan 은 데이터를 바꾸지 않습니다."
+        : `스케줄 대기 중에 취소되었습니다 — 취소 직전에 실행이 시작됐다면 일부 파일이 이미 ${op === "rm" ? "삭제" : "복사"}됐을 수 있습니다.`)
+      : m.executionStarted
       ? (op === "rm" ? "실행 중에 취소되어 일부 파일이 이미 삭제됐을 수 있습니다."
         : op === "sync" ? "실행 중에 취소되어 일부 파일이 이미 복사됐을 수 있습니다."
         : "실행 중에 취소되었습니다 — scan 은 데이터를 바꾸지 않습니다.")
@@ -179,9 +204,19 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   // 실패류(Failed·Rejected·TimedOut).
   const verb = VERB[job.state] ?? "실패했습니다";
   const failLog: NextAction[] = failTarget ? ["failLog"] : [];
+  // 실패 잡이 초점을 가져가도 다른 잡이 컨펌을 기다리면 그 일을 배너에서 놓치지 않게 덧붙인다(버튼은 각 관문 줄).
+  const others = confirmOwner === "gate" && job.state !== "ConfirmPending"
+    ? ` 다른 작업 ${pendingConfirm}개가 컨펌을 기다립니다 — 각 작업의 「작업 컨펌」 줄에서 진행하세요.` : "";
   const bad = (title: string, text: string, actions: NextAction[]): Outcome =>
-    ({ ...o, tone: "bad", icon: "x", title: `${title}${tail}`, subtitle: ended, next: next(text, actions) });
-  if (!f || f.evidence === "deepest_ref" || f.evidence === "none") {
+    ({ ...o, tone: "bad", icon: "x", title: `${title}${tail}`, subtitle: ended, next: next(`${text}${others}`, actions) });
+  // 관문 문구는 파드 로그가 아니라 사유와 진단 이벤트를 가리킨다 -- 그 단계 파드는 돌지 않았고(_fail_closed 는 박제하지
+  // 않는다) 막힌 이유(노드·신원·권한)는 이벤트에 남는다.
+  const gateNext = "사유와 아래 「진단 이벤트」를 확인한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.";
+  if (f?.evidence === "gate_ambiguous") {
+    // 노드 제외는 앞 파드의 스케줄 대기 재검사에서도, 다음 제출 직전에서도 나온다 -- 단계를 단정하지 않는다.
+    return bad(`작업이 ${verb}`, `실행 노드 점검에서 막혀 중단되었습니다 — ${gateNext}`, ["newJob"]);
+  }
+  if (!f || isEstimated(f.evidence)) {
     // 추정이면 단계를 단정하지 않는다(전이 기록이 없어 "OO 단계에서 중단" 이 거짓일 수 있다).
     return bad(`작업이 ${verb}`, "아래 단계별 로그에서 원인을 찾으세요.", []);
   }
@@ -190,8 +225,22 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
       `작업 파드를 만들지 못했습니다 — 「${f.step} 로그」의 거부 원문을 관리자에게 전달하세요. 데이터는 변경되지 않았습니다.`,
       failLog);
   }
+  if (f.queued) {
+    // 스케줄 대기 중 관문(노드 제외·신원 변경)이 끊었다 -- 파드가 돈 적이 없어 「실행 로그·stderr.log」도, "이미
+    // 복사/삭제됐을 수 있다" 도 거짓이다(리뷰 V8).
+    return bad(`${STEP_COPY[f.step]} 대기 중에 ${verb}`,
+      `${STEP_COPY[f.step]} 파드가 스케줄되기 전에 점검에서 막혀 중단되었습니다 — ${gateNext}`, ["newJob"]);
+  }
   if (f.notStarted) {
-    return bad(`시작 전에 ${verb}`, "사유를 해소한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.", ["newJob"]);
+    if (f.step === "preflight") {
+      return bad(`시작 전에 ${verb}`, "사유를 해소한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.", ["newJob"]);
+    }
+    // 앞 단계 파드는 통과했고(또는 컨펌 직후) 다음 파드를 만들기 전에 막혔다 -- 통과한 단계를 탓하지 않고, 없는 로그를
+    // 가리키지 않는다(리뷰 V6·V7).
+    const why = f.step === "exec_preflight"
+      ? "컨펌 뒤 재점검 파드를 만들기 전에 중단되어 이 단계의 로그는 없습니다"
+      : "앞 단계는 통과했지만 다음 단계를 제출하기 전 점검에서 막혔습니다";
+    return bad(`${START_OBJ[f.step]} 시작하기 전에 ${verb}`, `${why} — ${gateNext}`, ["newJob"]);
   }
   switch (f.step) {
     case "preflight":

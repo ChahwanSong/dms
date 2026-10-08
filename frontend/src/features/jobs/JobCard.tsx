@@ -11,7 +11,7 @@ import type { DataJob } from "../../lib/types";
 import type { useCancelJob } from "./useJobs";
 import { Timeline } from "./Timeline";
 import { JobStages } from "./JobStages";
-import { normTransitions, type JobStagesModel } from "./jobStages";
+import { normTransitions, type JobStagesModel } from "./stageModel";
 import { FOCUS_RING } from "./ui";
 
 // 실행 도구 라벨(잡 카드 헤더). **배지가 아니라 중립 텍스트**인 이유: 이 카드의

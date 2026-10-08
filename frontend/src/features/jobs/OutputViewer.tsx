@@ -1,15 +1,15 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowDownToLine, CircleAlert, CircleDashed, Download, File, FileCode, FileDown, FileJson, FileText,
-  History, Info, ScrollText, Server, WrapText, X, type LucideIcon,
+  History, Info, ScrollText, Server, TriangleAlert, WrapText, X, type LucideIcon,
 } from "lucide-react";
 import { useArtifactFile, useJobLogs } from "./useArtifacts";
 import { ApiError } from "../../lib/api";
 import { downloadText } from "../../lib/csvExport";
 import { Skeleton } from "../../components/ui/Skeleton";
 import type { JobLogs } from "../../lib/types";
-import type { OutputItem } from "./jobStages";
-import { humanBytes } from "./format";
+import type { OutputItem } from "./stageModel";
+import { humanBytes, kstClock } from "./format";
 import { BADGE, FOCUS_RING, ICON_BTN, SMALL_BTN } from "./ui";
 
 // 단계 행 아래에 열리는 출력 뷰어(로그 1개 또는 아티팩트 파일 1개). 옛 JobViewer 본문을 대체한다.
@@ -270,14 +270,27 @@ export function OutputViewer({ jobId, item, entrySize, live, viewerId, onClose }
   const logs = useJobLogs(jobId, isLog ? item.phase : "", isLog, { live: isLog && live });
   const file = useArtifactFile(jobId, item.phase, item.kind === "artifact" ? item.name : "", item.kind === "artifact");
   const q = isLog ? logs : file;
+  // 단계가 끝나는 순간(live true→false) 한 번 더 읽는다(2026-10-08 리뷰 V0) -- 마지막 3초 폴링 뒤에 찍힌 꼬리
+  // (DMS_PREFLIGHT_REASON 마커 등)와 종단 박제 사본(stepper._finalize 는 종단 전이 **전에** 박제한다)을 받기 위해.
+  // 쿼리 키가 그대로라 이게 없으면 뷰어는 끝나기 최대 3초 전 모습에 멈춘다. 그 뒤로는 interval 이 꺼져 멈춘다.
+  // ref 의 첫 값이 live 라 마운트 때는 읽지 않는다(칩을 누르기 전 조회 0건 계약 그대로).
+  const wasLive = useRef(live);
+  const refetchLogs = logs.refetch;
+  useEffect(() => {
+    if (wasLive.current && !live && isLog) void refetchLogs();
+    wasLive.current = live;
+  }, [live, isLog, refetchLogs]);
   const title = isLog ? `${item.phase} 로그` : `${item.phase}/${item.name}`;
   const Icon = iconFor(item);
   const archived = isLog && logs.data?.source === "archived";
   const truncatedFile = item.kind === "artifact" && file.data?.truncated === true;
+  // 재조회 한 번 실패로 읽던 내용을 오류 상자로 바꾸지 않는다(리뷰 V3) -- 본문을 그대로 두면 스크롤 위치·바닥 붙기·
+  // 「모두 표시」도 산다. 오류 상자는 보일 데이터가 없을 때만.
+  const hasData = isLog ? logs.data !== undefined : file.data !== undefined;
 
   let body: ReactNode = null;
   if (q.isLoading) body = <LoadingBody />;
-  else if (q.isError) body = <ErrorBody error={q.error} onRetry={() => { void q.refetch(); }} />;
+  else if (q.isError && !hasData) body = <ErrorBody error={q.error} onRetry={() => { void q.refetch(); }} />;
   else if (isLog && logs.data) body = <LogBody data={logs.data} label={title} wrap={wrap} live={live} />;
   else if (item.kind === "artifact" && file.data) {
     body = <ArtifactBody name={item.name} content={typeof file.data.content === "string" ? file.data.content : ""}
@@ -331,6 +344,17 @@ export function OutputViewer({ jobId, item, entrySize, live, viewerId, onClose }
         <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5 text-xs text-ink/70">
           <span className={BADGE}>뒷부분만 표시</span>
           <span>전체는 다운로드로 받으세요</span>
+        </div>
+      )}
+      {q.isRefetchError && hasData && (
+        // 페이지 띠(「자동 갱신에 실패했습니다」)와 다른 문구 -- 같은 글자면 정확 일치 단언이 겹친다. 다음 폴링이
+        // 성공하면 isRefetchError 가 꺼져 저절로 사라진다.
+        <div role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-attnbg/60 px-3 py-1.5 text-xs text-ink">
+          <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-attn" aria-hidden />
+          <span className="min-w-0 break-keep">
+            {`내용 갱신에 실패했습니다 — ${q.dataUpdatedAt > 0 ? kstClock(new Date(q.dataUpdatedAt).toISOString()) : "—"} 기준입니다.`}
+          </span>
+          <button type="button" className={SMALL_BTN} onClick={() => { void q.refetch(); }}>다시 시도</button>
         </div>
       )}
       {body}
