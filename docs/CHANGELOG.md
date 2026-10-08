@@ -95,7 +95,7 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
-### ✅ 작업(요청) 선택 삭제 — DB·결과 파일·파드·로그 일관 삭제 — **완료 — 미배포**(2026-10-09)
+### ✅ 작업(요청) 선택 삭제 — DB·결과 파일·파드·로그 일관 삭제 — **완료·실증**(2026-10-09, d169)
 
 사용자 요청: "포탈에서, 작업 목록에서 선택적으로 삭제하는 기능을 추가하고 싶어. 상태가 완료된 작업만 삭제를 허용할 예정이고,
 삭제할때 시스템 전체적으로 일관되게 삭제하는게 중요해. 예를 들면 해당 작업과 관련된 아티팩트 및 로그들도 db정보와 함께
@@ -242,7 +242,31 @@ UI 삭제 → 행·상세 소멸 → 정리 대기 0 수렴, 공유 토큰 403·
 복귀 2건 — 옛 코드에서 빨간불 확인, 정리 자리 구조), 빌드 외부 URL 0, e2e 14 passed(E7 에 정리 대기 0·1·200건 툴바 높이
 (360·375·393·1280)·두 버튼 한 행). 검증자 탐침 2건(직렬 회복 — 이제 파드 1개·2틱, 장애 중 500 — 이제 200)이 재현되지 않는다.
 
-배포: **미배포**(테스트베드 실증 전).
+화면 다듬기(마지막 검증 낮음·미세): 정리 상태 줄을 모든 폭에서 자기 행(1024~1150px 에서 선택 시 툴바가 두 행으로 접혀 28px
+튀던 것), 제외 사유는 사유별 한 줄(「사유 (N개: 앞 3개 id 외 K개)」 — 대부분 제외되면 표가 한두 화면 밀렸다), 하나도 안 지워지면
+「삭제된 작업 없음 · N개 제외」, 확인 창 진행 문구는 보조기기 전용(「삭제 중…」 두 번 보이던 것)·미리보기 목록 높이 상한(375px 에서
+경고 문구가 화면 밖). 최종: 백엔드 2882, vitest 1150(router 플레이크 1건 단독 재실행 통과), 빌드 외부 URL 0, e2e 14 passed.
+
+배포: d169(빌드 / 커밋 359a856) — dms 이미지만(정리 파드는 기존 잡 이미지 사용). 릴리스 dms-api·dms-controller(migrate
+initContainer 가 request_purges 테이블·인덱스 생성), 오버레이 dms newTag d169(가드 통과).
+
+실증(테스트베드, 일회용 요청만 — 기존 데이터 무접촉):
+- 사전: 결과 폴더 `<job_id>` 173개 전부 0:0 755, `.dms-trash` 없음, k8s 기준선(파드 105·vcjob 56) 기록.
+- 케이스: A scan(mason → 실행 신원 alice, 비 root — phase 가 alice 10001 소유), B scan(root, 전부 0:0), C sync(alice, 미리보기 →
+  컨펌 → 성공, preview·execution 둘 다 alice 소유), D rm(미리보기 후 취소), E sync(목적지 부모 쓰기 불가로 거부 — 결과 폴더 없음,
+  Error preflight 파드), F rm(ConfirmPending — 진행 중). 일반 사용자의 scan·rm 은 원래대로 403 operation_admin_only.
+- 권한: 공유 Bearer 토큰 → 403 `admin_session_required`, alice 세션 → 403 `admin_required`, 행 무변화.
+- 실 Chrome(/jobs, mason): F·기존 배치 항목 체크박스 disabled + 이유 title, 「5개 선택됨(성공 scan 2개)」, 확인 창(5개, sync 2 ·
+  scan 2 · rm 1, 성공 scan 2개 사용량 경고, 스토리지 데이터 무접촉, 되돌릴 수 없음 확인) → POST 200 deleted 5·skipped 0 → 「5개
+  삭제됨」, 5행 목록에서 사라짐, 지운 요청 상세는 「요청을 찾을 수 없습니다 — 삭제됐거나 볼 수 없는 요청입니다」.
+- 커밋 직후 DB(api 파드 읽기 전용 SELECT): 5건 모두 requests·results·plans·data_jobs·events·전이·digest 0, audit_log
+  ('delete') 1건씩(actor mason, 스냅숏에 요청 payload·run_as_root·잡별 identity(username·uid·gid·privileged)·전이 actor).
+- 수렴(1~2분): request-purges pending 0, 지운 잡 `<job_id>` 와 `.dms-trash/<job_id>` 전부 부재(alice 소유 phase 포함),
+  `.dms-trash` root 0700 비어 있음, 지운 잡의 preflight 파드·vcjob·Error 파드 0, purge 파드 0. `request_purged` 이벤트 5건
+  (request_id NULL, outcomes deleted 4·absent 1(E), k8s_deleted 3·3·6·1·0). 사용량: `dms_test/src` scan 5 → 3건, 최신이 이전 scan.
+- 정지 창: F 를 취소 직후 삭제 → skipped `request_recently_finished`, 70초 뒤 → deleted, 수렴 후 결과 폴더 수 173(기준선).
+- 무관 객체 무접촉: 기준선 대비 사라진 다른 잡의 vcjob·launcher 는 Volcano TTL(86400s) 회수, api·controller·빌드 파드는 롤아웃·
+  빌드 정리 — 지운 잡 외 요청(예: 92ce91b8)과 그 결과 폴더는 그대로.
 
 ### ✅ 릴리스 태그 목록 결함 6건(레지스트리 404·tags null·페이지 나눔·익명 토큰·새로고침·순서) — **완료·실증**(2026-10-08, d168)
 
