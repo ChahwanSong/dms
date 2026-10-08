@@ -4,7 +4,7 @@ import { Button } from "../../components/ui/Button";
 import { Table } from "../../components/ui/Table";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { ApiError, reasonText } from "../../lib/api";
-import { kstStampOrDash } from "../../lib/datetime";
+import { kstStamp, kstStampOrDash } from "../../lib/datetime";
 import type { Release, ReleaseTarget } from "../../lib/types";
 import { RELEASE_ACTIVE_STATES, releasePillVariant, useRefreshTargetsOnSettle,
          useReleases, useReleaseTargets, useSubmitReleases } from "./useReleases";
@@ -32,6 +32,17 @@ function currentTagOf(image: string | null): string | null {
   const tag = sep > 0 ? image.slice(sep + 1) : "";
   // 태그 없이 리포만 있는 참조(":" 뒤가 비었거나 슬래시가 섞였으면 포트다)
   return tag && !tag.includes("/") ? tag : null;
+}
+
+/** 드롭다운 항목 글자: 태그 + 「(현재)」 + 이 리포를 push 한 최근 성공 빌드면 「· 최근 빌드 MM-DD HH:MM」(KST).
+ *  값(value)은 늘 태그 그대로다. 빌드 시각을 못 읽으면 날짜 없이 「· 최근 빌드」만(지어내지 않는다). */
+export function optionLabel(tag: string, curTag: string | null, built: Record<string, string> | undefined): string {
+  const base = tag === curTag ? `${tag} (현재)` : tag;
+  // 페이로드가 어긋나도(null·배열) 화면 전체가 죽지 않게 -- 렌더 전에 모양을 확인한다.
+  const ok = built !== null && typeof built === "object" && !Array.isArray(built);
+  const at = ok && Object.prototype.hasOwnProperty.call(built, tag) ? built[tag] : undefined;
+  if (typeof at !== "string") return base;
+  return Number.isNaN(Date.parse(at)) ? `${base} · 최근 빌드` : `${base} · 최근 빌드 ${kstStamp(at).slice(5, 16)}`;
 }
 
 export function ReleasesPage() {
@@ -105,6 +116,14 @@ export function ReleasesPage() {
           {targetsQ.data && targetsQ.data.registry_ok === false && (
             <p className="text-bad">{reasonText("registry_unreachable")}</p>
           )}
+          {/* 태그 목록은 비싼 조회라 자동으로 자주 읽지 않는다 -- 빌드 직후 새 태그를 바로 보려면
+              여기서 다시 읽는다(2026-10-08 리뷰 R3). */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <Button variant="ghost" onClick={() => void targetsQ.refetch()} disabled={targetsQ.isFetching}>
+              태그 목록 새로고침
+            </Button>
+            {targetsQ.isFetching && <span className="text-xs text-ink/70" role="status">다시 읽는 중…</span>}
+          </div>
 
           {targetsQ.isError ? (
             <p className="text-bad">{(targetsQ.error as ApiError).message}</p>
@@ -135,11 +154,17 @@ export function ReleasesPage() {
                             // 현재 태그를 막지는 않는다(서버가 same_tag로 거절한다)
                             // -- 프론트는 build_registry를 몰라 이미지 동일성을
                             // 단정할 수 없다. 대신 눈에 보이게 표시만 한다.
+                            // 순서는 서버가 정한다(최근 빌드 → 숫자 고려 내림차순) -- 다시 정렬하지 않는다.
                             <option key={tag} value={tag}>
-                              {tag === curTag ? `${tag} (현재)` : tag}
+                              {optionLabel(tag, curTag, t.built)}
                             </option>
                           ))}
                         </select>
+                        {t.tags_truncated === true && (
+                          <p className="mt-1 text-xs text-ink/70">
+                            레지스트리 태그가 많아 목록 일부만 보입니다 — 최근 빌드 태그는 맨 위에 있고, 태그 존재 확인은 건너뜁니다.
+                          </p>
+                        )}
                       </td>
                       <td>
                         {cur ? (

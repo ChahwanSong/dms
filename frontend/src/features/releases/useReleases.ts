@@ -19,14 +19,19 @@ export function releasePillVariant(state: string): PillVariant {
 }
 
 // targets는 워크로드를 apiserver에서 직접 읽어(컴포넌트 3종 × 10초 타임아웃) 최악
-// 30초가 걸린다 -- 절대 짧게 폴링하지 않는다. 화면 진입, 제출 직후, 그리고 롤아웃이
-// 끝나는 순간(useRefreshTargetsOnSettle)에만 다시 읽는다. 진행 상태는 값싼
-// /api/admin/releases 쪽에서 본다.
+// 30초가 걸린다 -- 절대 짧게 폴링하지 않는다. 화면 진입, 제출 직후, 롤아웃이 끝나는
+// 순간(useRefreshTargetsOnSettle), 「태그 목록 새로고침」에만 다시 읽는다(빌드 성공 때의 무효화는 캐시
+// 안전망 -- useBuilds 주석). 창 포커스는 데이터가 30초 넘게 묵었을 때만(2026-10-08 리뷰 R3 --
+// 다른 탭에서 빌드를 끝내고 돌아와도 새 태그가 안 보였다; 탭을 오갈 때마다 비싼 조회를
+// 내지 않게 staleTime 으로 묶는다). 진행 상태는 값싼 /api/admin/releases 쪽에서 본다.
+export const RELEASE_TARGETS_KEY = ["release-targets"] as const;
 export const useReleaseTargets = () =>
   useQuery({
-    queryKey: ["release-targets"],
+    queryKey: RELEASE_TARGETS_KEY,
     queryFn: () => apiGet<ReleaseTargets>("/api/admin/releases/targets"),
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true,
+    staleTime: 30_000,
+    refetchOnMount: "always",   // 화면 진입은 지금까지처럼 늘 다시 읽는다(staleTime 은 포커스에만)
   });
 
 export const RELEASE_POLL_MS = 5000;
@@ -60,7 +65,7 @@ export const useRefreshTargetsOnSettle = (active: boolean, ready: boolean) => {
   useEffect(() => {
     if (!ready) return;   // 아직 이력을 못 읽었으면 active=false는 "모른다"는 뜻이다
     if (wasActive.current && !active) {
-      qc.invalidateQueries({ queryKey: ["release-targets"] });
+      qc.invalidateQueries({ queryKey: RELEASE_TARGETS_KEY });
     }
     wasActive.current = active;
   }, [active, ready, qc]);
@@ -78,7 +83,7 @@ export const useSubmitReleases = () => {
       apiSend<SubmitReleasesResult>("POST", "/api/admin/releases", b),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["releases"] });
-      qc.invalidateQueries({ queryKey: ["release-targets"] });
+      qc.invalidateQueries({ queryKey: RELEASE_TARGETS_KEY });
     },
   });
 };

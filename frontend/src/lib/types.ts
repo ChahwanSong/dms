@@ -407,7 +407,12 @@ export interface ReleaseTarget {
   // 워크로드 읽기(observe)가 실패하면 서버가 null을 준다 -- 화면 전체를 죽이지
   // 않는 강등이므로 프론트도 "—"로 살려 보여준다.
   current_image: string | null;
+  // 서버가 정한 화면 순서(최근 빌드 → 숫자 고려 내림차순, 2026-10-08) -- 프론트는 다시 정렬하지 않는다.
   tags: string[];
+  // 이 리포를 push 한 최근 성공 빌드의 태그 → 빌드 완료 시각(ISO). 옵셔널 = 구 서버 호환.
+  built?: Record<string, string>;
+  // 레지스트리 페이지 상한에 걸려 목록이 잘렸다(여기 없는 태그도 제출은 검증 안 됨으로 통과).
+  tags_truncated?: boolean;
 }
 // registry_ok=false면 tags가 전부 비어 있고 서버의 태그 존재 검증도 꺼진 상태다.
 export interface ReleaseTargets { targets: ReleaseTarget[]; registry_ok: boolean }

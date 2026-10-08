@@ -231,3 +231,47 @@ describe("ReleasesPage", () => {
     expect(screen.queryByText(/태그 존재를 확인하지 못한 채/)).toBeNull();
   });
 });
+
+// 2026-10-08 리뷰 R3·R4: 새로 빌드한 태그가 목록 중간에 묻히거나(문자열 순서) 빌드 전에 읽은 목록이
+// 남아 안 보였다. 순서는 서버가 정하고(최근 빌드 → 숫자 고려 내림차순) 화면은 그대로 그린다.
+describe("태그 목록 순서·최근 빌드·새로고침", () => {
+  const ordered = {
+    registry_ok: true,
+    targets: TARGETS.targets.map((t) => t.component !== "dms-api" ? t : {
+      ...t, tags: ["b1a2b3c4d", "d100", "d99", "d22"],
+      built: { b1a2b3c4d: "2026-10-08T04:42:00Z" }, tags_truncated: true,
+    }),
+  };
+
+  it("서버 순서 그대로, 최근 빌드 태그엔 KST 빌드 시각, 잘린 목록 안내", async () => {
+    server.use(http.get("/api/admin/releases/targets", () => HttpResponse.json(ordered)));
+    wrap(<ReleasesPage />);
+    const select = await screen.findByLabelText("dms-api");
+    const labels = Array.from((select as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(labels).toEqual(["변경 없음", "b1a2b3c4d · 최근 빌드 10-08 13:42", "d100", "d99", "d22 (현재)"]);
+    expect(Array.from((select as HTMLSelectElement).options).map((o) => o.value))
+      .toEqual(["", "b1a2b3c4d", "d100", "d99", "d22"]);   // 값은 태그 그대로
+    expect(screen.getByText(/레지스트리 태그가 많아 목록 일부만 보입니다/)).toBeInTheDocument();
+  });
+
+  it("「태그 목록 새로고침」은 태그 목록을 다시 읽는다", async () => {
+    let calls = 0;
+    server.use(http.get("/api/admin/releases/targets", () => { calls += 1; return HttpResponse.json(TARGETS); }));
+    wrap(<ReleasesPage />);
+    await screen.findByLabelText("dms-api");
+    const before = calls;
+    await userEvent.click(screen.getByRole("button", { name: "태그 목록 새로고침" }));
+    await waitFor(() => expect(calls).toBe(before + 1));
+  });
+
+  it("optionLabel: 현재·최근 빌드 표시, 빌드 시각을 못 읽으면 날짜 없이", async () => {
+    const { optionLabel } = await import("./ReleasesPage");
+    expect(optionLabel("d1", "d1", { d1: "2026-10-08T04:42:00Z" })).toBe("d1 (현재) · 최근 빌드 10-08 13:42");
+    expect(optionLabel("d1", null, { d1: "bogus" })).toBe("d1 · 최근 빌드");
+    expect(optionLabel("d1", null, undefined)).toBe("d1");
+    expect(optionLabel("toString", null, {})).toBe("toString");   // 프로토타입 키를 빌드로 오인하지 않는다
+    // 어긋난 페이로드(null·배열)에도 화면이 죽지 않는다
+    expect(optionLabel("d1", null, null as unknown as Record<string, string>)).toBe("d1");
+    expect(optionLabel("0", null, ["x"] as unknown as Record<string, string>)).toBe("0");
+  });
+});

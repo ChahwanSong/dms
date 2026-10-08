@@ -72,7 +72,8 @@ def test_targets_include_job_image_row(client, monkeypatch):
     # current 는 유효값(DB 미설정이면 env). conftest 는 env 가 비어 있어 None 으로
     # 접힌다 -- 빈 문자열을 그대로 내보내면 "비교 불가"와 섞인다.
     assert row["current_image"] is None
-    assert row["tags"] == ["d53", "d80"]
+    # 화면 순서: 최근 빌드 → 숫자를 고려한 내림차순(2026-10-08 리뷰 R4 -- 새 태그가 위에)
+    assert row["tags"] == ["d80", "d53"]
 
 
 def test_release_job_image_applies_immediately(client, monkeypatch, session_admin):

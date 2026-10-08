@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiGet, apiSend } from "../../lib/api";
 import { isTerminal } from "../../lib/jobState";
 import type { Build } from "../../lib/types";
+import { RELEASE_TARGETS_KEY } from "../releases/useReleases";
 
 // 빌드 상태는 Pending/Running/Succeeded/Failed 뿐이라 jobState.ts의 종단 집합
 // (Succeeded/Failed/...)과 그대로 맞아떨어진다 — useJobs.ts의 useRequestJobs와
@@ -12,8 +13,13 @@ import type { Build } from "../../lib/types";
 // 진행 중인 항목이 하나도 없으면 상태가 더 바뀔 일이 없어 폴링을 멈춘다. 새 빌드를
 // 제출하면 useSubmitBuild가 이 쿼리를 무효화해 즉시 다시 읽고, 그 결과에 진행 중인
 // 항목이 생기면 폴링이 자동으로 재개된다.
-export const useBuilds = () =>
-  useQuery({
+// 빌드가 성공하는 순간 새 태그가 레지스트리에 생긴다 -- 릴리스 태그 목록 캐시를 무효화한다(2026-10-08
+// 리뷰 R3). 안전망이다: 빌드·릴리스는 다른 화면이라 무효화 순간 그 쿼리를 보는 화면은 보통 없고(즉시 재조회
+// 없음), 릴리스 화면은 진입할 때 늘 다시 읽는다(useReleaseTargets refetchOnMount). 캐시를 공유하는 다른 화면이
+// 생겨도 빌드 전 목록을 신선한 것으로 믿지 않게 한다.
+export const useBuilds = () => {
+  const qc = useQueryClient();
+  const q = useQuery({
     queryKey: ["builds"],
     queryFn: () => apiGet<Build[]>("/api/admin/builds"),
     refetchInterval: (q) => {
@@ -21,6 +27,20 @@ export const useBuilds = () =>
       return Array.isArray(builds) && builds.some((b) => !isTerminal(b.state)) ? 5000 : false;
     },
   });
+  // 직전 목록에서 비종단이던 빌드가 이번 목록에서 Succeeded 면 무효화(첫 로드는 비교 대상이 없어 하지 않는다).
+  const prevStates = useRef<Map<string, string> | null>(null);
+  useEffect(() => {
+    const builds = q.data;
+    if (!Array.isArray(builds)) return;
+    const prev = prevStates.current;
+    if (prev !== null && builds.some((b) => b.state === "Succeeded"
+        && prev.has(b.build_id) && !isTerminal(prev.get(b.build_id) as string))) {
+      qc.invalidateQueries({ queryKey: RELEASE_TARGETS_KEY });
+    }
+    prevStates.current = new Map(builds.map((b) => [b.build_id, b.state]));
+  }, [q.data, qc]);
+  return q;
+};
 
 export const useBuild = (id: string | null) => {
   const qc = useQueryClient();
@@ -53,6 +73,8 @@ export const useBuild = (id: string | null) => {
     const terminalNow = isTerminal(state);
     if (terminalNow && !prev.current.wasTerminal) {
       qc.invalidateQueries({ queryKey: ["build-log", id] });
+      // 성공이면 새 태그가 레지스트리에 생겼다 -- 릴리스 태그 목록도(useBuilds 와 같은 이유).
+      if (state === "Succeeded") qc.invalidateQueries({ queryKey: RELEASE_TARGETS_KEY });
     }
     prev.current.wasTerminal = terminalNow;
   }, [id, q.data?.state, qc]);
