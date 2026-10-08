@@ -16,7 +16,8 @@ unknown_tag 검증이 조용히 fail-open 이 되거나 반대로 잘못 차단�
 
 토큰 인증(2026-10-08): 401 + WWW-Authenticate: Bearer realm=... 이면 그 realm 에서
 **익명** 토큰을 받아 한 번 재시도한다(자격 증명은 다루지 않는다 -- 빌드 push 가 익명으로
-되는 레지스트리면 조회도 익명 토큰으로 된다). 토큰은 로그에 남기지 않는다.
+되는 레지스트리면 조회도 익명 토큰으로 된다). 토큰은 로그에 남기지 않는다. realm 은 레지스트리와 같은
+호스트일 때만 따른다(응답이 정한 주소로 api 파드가 요청을 보내는 요청 위조 방지 -- _anonymous_token).
 
 캐시를 두지 않는다: 방금 끝난 빌드의 태그가 드롭다운에 바로 보여야 하고, 무엇보다
 제출 경로의 unknown_tag 검증이 낡은 목록을 보면 실제로 존재하는 태그를 잘못
@@ -66,9 +67,19 @@ _CHALLENGE_PARAM = re.compile(r'(\w+)\s*=\s*(?:"([^"]*)"|([^,\s"]+))')
 _TOKEN_SAFE = re.compile(r"[\x21-\x7e]+")
 
 
-def _anonymous_token(challenge: str) -> "str | None":
+def _same_host(a: str, b: str) -> bool:
+    try:
+        return (httpx.URL(a).host or "").lower() == (httpx.URL(b).host or "").lower() != ""
+    except Exception:
+        return False
+
+
+def _anonymous_token(challenge: str, origin: str) -> "str | None":
     """WWW-Authenticate: Bearer realm="...",service="...",scope="..." → 익명 토큰(없으면 None).
-    realm 은 http(s) URL 만 받는다. 실패는 None(호출자가 원래 401 을 실패로 다룬다)."""
+    realm 은 http(s) URL 이고 **요청한 레지스트리와 같은 호스트**(포트·스킴은 달라도 된다)일 때만 따른다
+    -- 레지스트리 응답이 정하는 주소로 api 파드가 요청을 보내므로, 평문 HTTP 중간자나 이상한 레지스트리가
+    realm 을 내부 주소(메타데이터·클러스터 서비스)로 바꿔 요청 위조(SSRF)에 쓸 수 없게. 다른 호스트의
+    토큰 서버(GitLab 형태)는 지원하지 않는다(BACKLOG). 실패는 None(호출자가 원래 401 을 실패로 다룬다)."""
     m = _BEARER.search(challenge or "")
     if m is None:
         return None
@@ -77,6 +88,9 @@ def _anonymous_token(challenge: str) -> "str | None":
         params.setdefault(key.lower(), quoted or bare)
     realm = params.get("realm", "")
     if not (realm.startswith("http://") or realm.startswith("https://")):
+        return None
+    if not _same_host(realm, origin):
+        logger.warning("registry token realm on another host refused (realm must be on the registry host)")
         return None
     query = {k: params[k] for k in ("service", "scope") if params.get(k)}
     try:
@@ -100,7 +114,7 @@ def _send(method: str, url: str, headers=None, auth: "str | None" = None):
         base["Authorization"] = auth
     response = _request(method, url, base or None)
     if response.status_code == 401:
-        token = _anonymous_token(response.headers.get("WWW-Authenticate", ""))
+        token = _anonymous_token(response.headers.get("WWW-Authenticate", ""), url)
         if token is not None:
             auth = f"Bearer {token}"
             response = _request(method, url, {**base, "Authorization": auth})

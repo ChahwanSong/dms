@@ -59,6 +59,10 @@
   Cancelled 가 Planned 로 덮이고(전이 이력엔 Cancelled→Planned) 그 뒤 만든 잡이 살아남을 수 있다. 잡 쪽
   `data_jobs.set_job_state` 도 잠금 없는 SELECT→UPDATE 라 동시 쓰기에서 나중 커밋이 이긴다. 처방 후보: 조건부 UPDATE
   (`WHERE state = :expected`)·종단 상태에서의 전이 거부, 재현 테스트부터.
+- 🔧 **레지스트리 인증 확장**(2026-10-08 릴리스 태그 목록 결함 수정의 범위 밖) — 태그 조회·digest·삭제는 익명 Bearer
+  토큰까지만 한다(`registry._anonymous_token`). (a) 다른 호스트의 토큰 서버(GitLab `…/jwt/auth` 형태)는 요청 위조 방지로
+  realm 을 레지스트리와 같은 호스트로 묶어 거부된다 — 필요하면 운영자 허용 목록(설정)으로 연다. (b) Basic·로봇 계정 자격
+  증명은 다루지 않는다(비밀 저장·전달 경로가 필요 — 평문 금지 규약).
 - 🔧 **진행 중 잡 kill switch**(보조 그룹) — `DMS_IDENTITY_SUPPLEMENTARY_GROUPS=false` 는 계획 시점
   전용이라 이미 스냅숏이 있는 잡의 재확인·적용은 끄지 못한다(`deploy/README.md` §2c 스위치 범위표).
   지금은 drain 후 취소 또는 이미지 롤백뿐이다. 처방 후보: stepper 가 읽는 control_state 플래그로
