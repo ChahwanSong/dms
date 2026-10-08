@@ -586,11 +586,13 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
     # verification_failures(2026-10-01): 인증번호 누적 실패(재발급으로 초기화되지 않는 무차별 대입 상한).
     # scan_report_digests(2026-10-02): 사용량 분석의 scan 리포트 요약 캐시(잡 단위, 불변 리포트의 투영).
     # node_exclusions(2026-10-02): 관리자 노드 배치 제외 목록(행 = 제외 중).
+    # request_purges(2026-10-08): 요청 삭제의 정리 아웃박스(행 = k8s·아티팩트 정리 대기).
     assert actual == set(ALL_TABLES) | {"batches", "batch_items",
                                         "schema_migrations",
                                         "verification_codes", "sync_pairs",
                                         "mail_settings", "verification_failures",
-                                        "scan_report_digests", "node_exclusions"}
+                                        "scan_report_digests", "node_exclusions",
+                                        "request_purges"}
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
@@ -598,7 +600,7 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
     # 되는데 어떤 테스트도 단언하지 않았다 -- 인덱스명 단언은 idx_data_jobs_created
     # 계열 2건뿐(전 테스트 실측). 인덱스는 지워져도 기능 테스트가 전부 초록인 채
     # (풀스캔) 성능만 조용히 침몰하는 부류라 존재 단언이 유일한 그물이고, 개별
-    # 이름 추가는 두더지잡기라 테이블 전수와 같은 등식으로 16개 전부를 고정한다.
+    # 이름 추가는 두더지잡기라 테이블 전수와 같은 등식으로 전부(슬라이스 30 의 16개, 2026-10-08 19개)를 고정한다.
     # sqlite_autoindex_* 는 PK/UNIQUE 의 내부 산물이라 제외한다.
     db = Database.connect(f"sqlite:///{tmp_path}/t.db")
     migrate(db)
@@ -611,6 +613,8 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         "idx_data_jobs_created_sched", "idx_agent_reports_node",
         "idx_agent_reports_at", "idx_releases_component", "idx_audit_target",
         "idx_events_request", "idx_events_at",
+        # 요청 삭제(2026-10-08): 삭제 트랜잭션이 요청마다 request_id 로 잡·plan 을 잠그고 지우고, 배치 항목 참조를 묻는다.
+        "idx_data_jobs_request", "idx_plans_request", "idx_batch_items_request",
     }
 
 

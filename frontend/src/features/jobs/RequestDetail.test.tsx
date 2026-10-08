@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -124,12 +124,78 @@ test("renders a null result_summary value as — instead of the literal \"null\"
 });
 
 test("shows an inline error message when the request fails to load", async () => {
+  // 404 가 아닌 실패(서버 오류)는 오류 상자 + 「다시 시도」다 -- 404(없는 요청)는 아래 전용 화면.
   server.use(
-    http.get("/api/user/requests/r1", () => HttpResponse.json({ detail: "http_404" }, { status: 404 })),
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ detail: "db_glitch" }, { status: 500 })),
     http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([])),
   );
   renderAt();
-  expect(await screen.findByText("http_404")).toBeInTheDocument();
+  expect(await screen.findByText("db_glitch")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
+});
+
+// --- 없는 요청(404 -- 삭제됐거나 볼 수 없는 요청, 2026-10-08 작업 삭제) -----------------------------------------
+const NOT_FOUND_TEXT = "요청을 찾을 수 없습니다 — 삭제됐거나 볼 수 없는 요청입니다";
+
+test("첫 로드 404: 「없는 요청」 화면 — 재시도 버튼 없음, 전체 작업 링크, 잡 조회는 마운트 병렬 1회 뒤 꺼진다", async () => {
+  let jobCalls = 0;
+  server.use(
+    http.get("/api/user/requests/r1", () =>
+      HttpResponse.json({ detail: "request_not_found" }, { status: 404 })),
+    http.get("/api/user/requests/r1/jobs", () => {
+      jobCalls += 1;
+      return HttpResponse.json({ detail: "request_not_found" }, { status: 404 });
+    }),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/jobs/r1"]}>
+        <Routes><Route path="/jobs/:requestId" element={<RequestDetail />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>);
+  expect(await screen.findByText(NOT_FOUND_TEXT)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "다시 시도" })).toBeNull();
+  expect(screen.getByRole("link", { name: "전체 작업으로" })).toHaveAttribute("href", "/jobs");
+  // 요청과 잡은 마운트 때 병렬로 나간다(요청을 기다렸다 잡을 부르면 모든 상세가 한 왕복 늦어진다) -- 그 1회 뒤에는
+  // 잡 쿼리가 꺼져 있다(옵저버 비활성 = 폴링·포커스 재조회 없음).
+  expect(jobCalls).toBeLessThanOrEqual(1);
+  expect(qc.getQueryCache().find({ queryKey: ["request", "r1", "jobs"] })?.isDisabled()).toBe(true);
+});
+
+test("데이터를 보던 중 재조회가 404 면 낡은 화면 대신 「없는 요청」 화면으로 바뀌고 잡 폴링을 멈춘다", async () => {
+  let gone = false;
+  // 비종단 요청 + 비종단 잡 -- 404 전이 없으면 요청 3초·잡 2초 폴링이 계속 도는 모양.
+  const LIVE = { ...REQUEST, state: "Running" };
+  const LIVE_JOBS = [{ ...JOBS[0], state: "Executing", reason_code: null }];
+  server.use(
+    http.get("/api/user/requests/r1", () => gone
+      ? HttpResponse.json({ detail: "request_not_found" }, { status: 404 })
+      : HttpResponse.json(LIVE)),
+    http.get("/api/user/requests/r1/jobs", () => gone
+      ? HttpResponse.json({ detail: "request_not_found" }, { status: 404 })
+      : HttpResponse.json(LIVE_JOBS)),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/jobs/r1"]}>
+        <Routes><Route path="/jobs/:requestId" element={<RequestDetail />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>);
+  expect(await screen.findByRole("heading", { name: "sync 요청" })).toBeInTheDocument();
+  gone = true;   // 다른 관리자가 이 요청을 지웠다
+  await act(async () => { await qc.refetchQueries({ queryKey: ["request", "r1"], exact: true }); });
+  expect(await screen.findByText(NOT_FOUND_TEXT)).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "sync 요청" })).toBeNull();
+  expect(screen.queryByText(/자동 갱신에 실패했습니다/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "다시 시도" })).toBeNull();
+  // 404 뒤에는 요청·잡 둘 다 더 읽지 않는다(지워진 요청은 돌아오지 않는다).
+  const cache = qc.getQueryCache();
+  expect(cache.find({ queryKey: ["request", "r1", "jobs"] })?.isDisabled()).toBe(true);
+  const reqQuery = cache.find({ queryKey: ["request", "r1"], exact: true })!;
+  const opts = reqQuery.options as { refetchInterval?: (q: unknown) => unknown };
+  expect(opts.refetchInterval?.(reqQuery)).toBe(false);
 });
 
 test("shows an inline error message when the jobs list fails to load", async () => {

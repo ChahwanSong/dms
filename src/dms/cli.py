@@ -55,7 +55,8 @@ def main(argv=None) -> int:
         from .repositories import Repositories
         from . import wiring
         from .wiring import (build_build_runner, build_execution_adapter,
-                             build_identity_resolver, build_rollout_runner)
+                             build_identity_resolver, build_purge_runner,
+                             build_rollout_runner)
         repos = Repositories(db)
         # 슬라이스 22 §2.6: 컨트롤러도 재연결 흔적을 남긴다(api 와 같은 훅).
         # 모듈 속성으로 호출한다 -- 테스트가 monkeypatch 로 배선을 스파이할 수
@@ -66,17 +67,21 @@ def main(argv=None) -> int:
         execution_adapter = build_execution_adapter(settings, repos)
         build_runner = build_build_runner(settings, repos)
         rollout_runner = build_rollout_runner(settings)
+        # 요청 삭제 정리(2026-10-08): 이 배선이 빠지면 request-purge 루프가 등록되지 않아 삭제한 요청의 파드·
+        # 결과 파일이 영원히 남는다(test_cli 가 request-purge=ok 로 고정).
+        purge_runner = build_purge_runner(settings, repos)
         if args.once:
             loops = build_loops(settings, repos, identity_resolver=identity_resolver,
                                 execution_adapter=execution_adapter,
                                 build_runner=build_runner,
-                                rollout_runner=rollout_runner)
+                                rollout_runner=rollout_runner,
+                                purge_runner=purge_runner)
             results = run_all_once(loops, repos, holder)
             print(" ".join(f"{k}={v}" for k, v in results.items()))
             return 0
         run_forever(settings, repos, holder, identity_resolver=identity_resolver,
                     execution_adapter=execution_adapter, build_runner=build_runner,
-                    rollout_runner=rollout_runner)
+                    rollout_runner=rollout_runner, purge_runner=purge_runner)
         return 0
 
     return 2

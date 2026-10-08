@@ -89,6 +89,27 @@ def test_artifact_download_max_bytes_env_override():
     assert s.artifact_download_max_bytes == 1048576
 
 
+def test_request_delete_settings_defaults_and_env_override():
+    # 요청 삭제(2026-10-08): 조용한 창(api)·정리 루프 간격(controller). 튜플·필드 양쪽 배선을 고정한다(빌드 프리플라이트
+    # 선례) -- 필드만 넣으면 env 가 조용히 무시되고, 튜플만 넣으면 **extra 가 기동을 깬다.
+    s = Settings.from_env(VALID)
+    assert (s.request_delete_quiet_seconds, s.request_purge_interval_seconds) == (60, 15)
+    s = Settings.from_env({**VALID, "DMS_REQUEST_DELETE_QUIET_SECONDS": "0",
+                           "DMS_REQUEST_PURGE_INTERVAL_SECONDS": "1"})
+    assert (s.request_delete_quiet_seconds, s.request_purge_interval_seconds) == (0, 1)
+    d = Settings(database_url="u", shared_token="t", admin_token="a", session_secret="s")
+    assert (d.request_delete_quiet_seconds, d.request_purge_interval_seconds) == (60, 15)
+
+
+@pytest.mark.parametrize("env", [{"DMS_REQUEST_DELETE_QUIET_SECONDS": "-1"},
+                                 {"DMS_REQUEST_PURGE_INTERVAL_SECONDS": "0"},
+                                 {"DMS_REQUEST_PURGE_INTERVAL_SECONDS": "soon"}])
+def test_request_delete_settings_reject_bad_values(env):
+    with pytest.raises(SettingsError) as e:
+        Settings.from_env({**VALID, **env})
+    assert next(iter(env)) in str(e.value)
+
+
 def test_require_auth_bind_refuses_startup_without_credentials():
     # 슬라이스 28(BACKLOG §2.3): 인증 바인드를 의도(플래그 true)했는데 자격증명이
     # 없으면 익명으로 조용히 떨어지는 대신 기동을 거부한다 -- 운영자가 "인증

@@ -214,9 +214,10 @@ class _FakeApps:
 
 
 def _pod(name, node, containers, phase, waiting_reasons):
-    """실 클라이언트 파드 객체 흉내 -- list_pod_briefs 는 dict 가 아니라 속성으로 읽는다."""
+    """실 클라이언트 파드 객체 흉내 -- list_pod_briefs 는 dict 가 아니라 속성으로 읽는다. 실 V1ObjectMeta 는
+    deletion_timestamp 속성을 늘 가진다(삭제 요청 전이면 None -- list_pod_briefs 의 "deleting", 2026-10-08)."""
     return SimpleNamespace(
-        metadata=SimpleNamespace(name=name),
+        metadata=SimpleNamespace(name=name, deletion_timestamp=None),
         spec=SimpleNamespace(
             node_name=node,
             containers=[SimpleNamespace(name=n, image=i) for n, i in containers]),

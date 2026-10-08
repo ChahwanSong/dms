@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dms.domain import DataJobState
+from dms.domain import DataJobState, RequestState
 from dms.repositories import Repositories
 
 ADMIN = {"Authorization": "Bearer tok-shared"}
@@ -111,6 +111,32 @@ def test_put_force_passes_and_audits(client, db, artifact_base_dir, session_admi
         "SELECT * FROM audit_log WHERE mutation_class = 'artifact_base'")[-1]
     after = json.loads(entry["after_state"])
     assert after["forced"] is True and after["affected_jobs"] == 1
+
+
+def _pending_purge(repos):
+    """삭제된 요청의 정리 대기 1건(request_purges 행만 남고 data_jobs 는 0) -- 잠금이 이것도 세어야 한다: 그 잡의 결과
+    파일은 정리 루프가 지울 때까지 지금 base 아래에 있다(2026-10-08)."""
+    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice", resource_key="k1",
+                                payload={"storage": "s1", "target": "a"}, priority="mid")
+    repos.requests.set_state_with_result(rid, RequestState.REJECTED, reason_code="missing_policy", actor="planner")
+    r = repos.request_purges.delete_terminal(rid, actor="opadm", artifact_base="/old/base", quiet_seconds=0)
+    assert r["deleted"] is True
+    assert repos.db.query_one("SELECT COUNT(*) AS n FROM data_jobs")["n"] == 0
+
+
+def test_pending_purge_locks_the_base_and_counts_in_force(client, db, artifact_base_dir, session_admin):
+    repos = Repositories(db)
+    _pending_purge(repos)
+    assert client.get("/api/admin/artifact-base", headers=ADMIN).json()["locked_by_jobs"] == 1
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{artifact_base_dir}"})
+    assert (r.status_code, r.json()["detail"]) == (409, "artifact_base_locked")
+    _make_rejected_job(repos)                                     # 잡 1 + 정리 대기 1
+    assert client.get("/api/admin/artifact-base", headers=ADMIN).json()["locked_by_jobs"] == 2
+    r = client.put("/api/admin/artifact-base", json={"uri": f"file://{artifact_base_dir}", "force": True})
+    assert r.status_code == 200
+    after = json.loads(db.query(
+        "SELECT * FROM audit_log WHERE mutation_class = 'artifact_base'")[-1]["after_state"])
+    assert after["forced"] is True and after["affected_jobs"] == 2
 
 
 def test_validate_does_not_save(client, db, artifact_base_dir):

@@ -115,7 +115,9 @@ export function ArtifactBasePage() {
               {d.locked_by_jobs > 0 ? (
                 <>
                   <span className="font-medium">잡 {d.locked_by_jobs}건</span>
-                  <span className="text-muted">이 이 경로를 참조합니다 — 변경하면 그 잡들의 아티팩트·로그 열람이 깨지므로 강제 확인을 거칩니다</span>
+                  {/* 서버 locked_by_jobs = 잡 + 삭제한 작업의 결과 파일 정리 대기(request_purges) — 정리 대기 중 base 가
+                      바뀌면 그 파일은 옛 경로에 남는다(routes_artifact_base._job_count). */}
+                  <span className="text-muted">이 이 경로를 참조합니다(삭제한 작업의 결과 파일 정리 대기 포함) — 변경하면 그 잡들의 아티팩트·로그 열람이 깨지고 정리 대기 중인 결과 파일은 옛 경로에 남으므로 강제 확인을 거칩니다</span>
                 </>
               ) : (
                 <span className="text-muted">참조하는 잡이 없어 잠금 없이 변경할 수 있습니다</span>
@@ -256,7 +258,7 @@ export function ArtifactBasePage() {
               {/* 설계 §2.3: 잠금은 실패 잡의 stdout/stderr(디스크의 유일한 진단
                   사본)까지 지키는 장치다 -- 강제 변경의 대가를 그대로 보여주고
                   확인시킨 뒤에만 force=true 를 보낸다. */}
-              <p>{`기존 잡 ${d.locked_by_jobs}건이 있습니다. 경로를 바꾸면 이 잡들의 아티팩트·로그 열람이 깨집니다.`}</p>
+              <p>{`기존 잡 ${d.locked_by_jobs}건이 있습니다(삭제한 작업의 결과 파일 정리 대기 포함). 경로를 바꾸면 이 잡들의 아티팩트·로그 열람이 깨집니다. 정리 대기 중인 결과 파일은 지워지지 않고 옛 경로에 남습니다.`}</p>
               <div className="flex justify-end gap-2">
                 <Button type="button" onClick={() => setConfirmOpen(false)}>취소</Button>
                 <Button type="button" disabled={setBase.isPending}

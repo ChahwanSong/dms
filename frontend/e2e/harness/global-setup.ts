@@ -98,6 +98,14 @@ export default async function globalSetup(): Promise<void> {
   // 머신의 실제 마운트 상태에 의존하지 않아 오히려 결정적이다.
   fs.writeFileSync(mountinfoPath,
     `36 25 0:32 / ${storageDir} rw,relatime shared:1 - tmpfs tmpfs rw\n`);
+  // 결과 폴더(artifact base). 작업 삭제(E7)의 정리 루프는 이 경로를 실제로 연다 -- 기본값(/artifacts/dms)은 이
+  // 머신에 없어 정리가 purge_base_unavailable 로 영영 대기에 머문다(모름 ≠ 지울 것 없음). 하네스 사용자 소유
+  // 0755(g+w·o+w 없음 = artifact_trash 의 base 검사, o+x = artifact_base 통과 조건). api·controller 가 같은 값을
+  // 봐야 삭제 시점 base(아웃박스)와 정리 시점 base 가 일치한다.
+  const artifactBase = path.join(tmpDir, "artifacts");
+  fs.mkdirSync(artifactBase);
+  fs.chmodSync(artifactBase, 0o755);
+  const artifactBaseUri = `file://${artifactBase}`;
 
   const children: ChildProcess[] = [];
   const spawnLongLived = (label: string, args: string[],
@@ -131,11 +139,15 @@ export default async function globalSetup(): Promise<void> {
 
     // 2) API(장수). dist 서빙 + 리포트 신선도 1시간(agent --once 는 setup 에서
     //    딱 한 번이라 기본 300s 로는 긴 스위트 도중 후보가 사라진다).
+    //    조용한 창 0(E7): 방금 끝난 요청도 바로 지울 수 있게 한다 -- 기본 60초면 시나리오가 1분을 기다린다.
+    //    조용한 창 자체의 판정은 백엔드 테스트(test_api_request_delete)가 진다.
     const api = spawnLongLived("api", ["api"], {
       DMS_API_HOST: "127.0.0.1",
       DMS_API_PORT: String(PORT),
       DMS_STATIC_DIR: distDir,
       DMS_AGENT_REPORT_STALE_SECONDS: "3600",
+      DMS_ARTIFACT_BASE_URI: artifactBaseUri,
+      DMS_REQUEST_DELETE_QUIET_SECONDS: "0",
     });
     const apiLog = path.join(tmpDir, "api.log");
     await pollUntil("/readyz", READYZ_TIMEOUT_MS,
@@ -212,12 +224,15 @@ export default async function globalSetup(): Promise<void> {
     //    controller-<pid> 라 매번 pid 가 달라져 서로의 리스에 막힌다.
     //    1s 로 줄이는 것은 **잡 전진에 관여하는 루프만**이다(pod-gc·build-watcher·
     //    rollout·retention 은 기본값 -- 1s 로 돌려봐야 무의미한 쿼리만 는다).
+    //    request-purge 도 1s(E7 이 삭제 뒤 정리 대기 0 수렴을 기다린다 -- 기본 15s 면 단계 3개에 수십 초).
     const controller = spawnLongLived("controller", ["controller"], {
       DMS_PLANNER_INTERVAL_SECONDS: "1",
       DMS_STEPPER_INTERVAL_SECONDS: "1",
       DMS_RECONCILE_INTERVAL_SECONDS: "1",
       DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS: "1",
+      DMS_REQUEST_PURGE_INTERVAL_SECONDS: "1",
       DMS_AGENT_REPORT_STALE_SECONDS: "3600",
+      DMS_ARTIFACT_BASE_URI: artifactBaseUri,
     });
 
     // 6) 부팅 스모크 마감: 스토리지가 Ready 가 되려면 (a) 에이전트 리포트가 실렸고

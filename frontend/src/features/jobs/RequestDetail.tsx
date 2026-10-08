@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { CircleAlert, LoaderCircle, TriangleAlert } from "lucide-react";
-import { useRequest, useRequestJobs, useCancelJob, useCancelRequest } from "./useJobs";
+import { CircleAlert, FileX, LoaderCircle, TriangleAlert } from "lucide-react";
+import { requestGone, useRequest, useRequestJobs, useCancelJob, useCancelRequest } from "./useJobs";
+import { reasonText } from "../../lib/api";
 import { Card } from "../../components/ui/Card";
 import { Skeleton } from "../../components/ui/Skeleton";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
@@ -17,7 +18,7 @@ import { ActivitySection } from "./RequestActivity";
 import { deriveJobStages, stageAnnouncement, stageSnapshot, type StageSnapshot } from "./stageModel";
 import { deriveOutcome } from "./requestOutcome";
 import { kstClock } from "./format";
-import { FOCUS_RING, SMALL_BTN } from "./ui";
+import { FOCUS_RING, LINK_BTN, SMALL_BTN } from "./ui";
 
 // 요청 상세(/jobs/:requestId) -- 2026-10-08 재설계(사용자 요청: preflight(preview)와 execution 의 출력·로그를
 // 분리해서 보이게 + 결과 화면 개선). 위에서 아래로: 머리말(+ root 배지) → (재조회 실패 띠) → 결과 배너 → 요청 내용
@@ -65,11 +66,35 @@ function RetryButton({ onClick }: { onClick: () => void }) {
   return <button type="button" className={SMALL_BTN} onClick={onClick}>다시 시도</button>;
 }
 
+// 「없는 요청」(404 -- 삭제됐거나 볼 수 없는 요청, 2026-10-08 작업 삭제). 오류가 아니라 **상태**라 붉은 경보 대신
+// 중립 상자이고, 「다시 시도」를 두지 않는다(지워진 요청은 다시 읽어도 404 다 -- 그 버튼이 첫 404 에도 나오던 결함).
+// 문구는 사유 코드 request_not_found 의 것 하나다 -- 남의 요청 404 와 같은 문구라 존재 오라클이 없다.
+function NotFoundView({ requestId }: { requestId: string }) {
+  return (
+    <section className="max-w-6xl space-y-5">
+      <div>
+        <h1 className="text-2xl font-bold">요청 상세</h1>
+        <p className="mt-1 font-mono text-xs text-ink/70 [overflow-wrap:anywhere]">{requestId}</p>
+      </div>
+      <div role="status" className="flex flex-wrap items-center gap-3 rounded-card border border-line bg-surface px-4 py-4 text-sm text-ink">
+        <FileX className="h-5 w-5 shrink-0 text-ink/70" aria-hidden />
+        <p className="min-w-0 flex-1 break-keep">{reasonText("request_not_found")}</p>
+        <Link className={LINK_BTN} to="/jobs">전체 작업으로</Link>
+      </div>
+    </section>
+  );
+}
+
 export function RequestDetail() {
   const { requestId = "" } = useParams();
   const req = useRequest(requestId);
+  // 404 = 삭제됐거나 볼 수 없는 요청. **데이터 유무와 관계없이**(캐시된 화면을 보다가 재조회가 404 여도) 「없는
+  // 요청」 화면이다 -- 낡은 화면에 「자동 갱신 실패」 띠만 뜨면 지워진 요청을 살아 있는 것처럼 보인다. 그동안 잡
+  // 조회는 끈다(지워진 요청의 잡은 404 뿐이고, 비종단 잡 캐시가 있으면 2초 폴링이 계속 404 를 두드린다). 요청 쿼리
+  // 쪽 폴링·포커스 재조회도 404 뒤에 멈춘다(useRequest).
+  const notFound = requestGone(req.error);
   const reqTerminal = req.data ? REQUEST_TERMINAL_STATES.has(req.data.state) : undefined;
-  const jobs = useRequestJobs(requestId, true, { requestTerminal: reqTerminal });
+  const jobs = useRequestJobs(requestId, !notFound, { requestTerminal: reqTerminal });
   const cancel = useCancelJob(requestId);
   const cancelRequest = useCancelRequest(requestId);
   // 스토리지 뿌리 맵. managed_root 는 역할 무관(2026-09-29~). 비관리자 응답엔 관리자 전용 스토리지가, 모두의 응답엔
@@ -116,6 +141,7 @@ export function RequestDetail() {
     if (msg !== null) setAnnounce(msg);
   }, [jobList, models]);
 
+  if (notFound) return <NotFoundView requestId={requestId} />;
   if (req.isLoading || (jobs.isLoading && !jobsErrSeen)) return <LoadingView requestId={requestId} />;
 
   if (req.isError && !req.data) {

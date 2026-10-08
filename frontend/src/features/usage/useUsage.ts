@@ -33,10 +33,11 @@ export const fetchUsageExport = (f: TargetFilter) =>
   apiGet<UsageExport>(`/api/admin/usage/export?${targetQuery(f)}`);
 
 // 이력: 선택된 타깃에서만 나간다(enabled). 아티팩트 읽기(포인트당 최대 256KiB
-// I/O)가 뒤에 있으므로 staleTime 을 길게 -- 성공 종단 잡의 리포트는 불변이고,
+// I/O)가 뒤에 있으므로 staleTime 을 길게 -- 성공 종단 잡의 리포트는 **삭제되기 전까지** 불변이고,
 // 새 스캔이 끝나 목록의 last_scan_at 이 변하면 사용자가 타깃을 다시 고르는
-// 동선에서 자연히 재조회된다. limit(표시 창)은 쿼리키에 들어가 창별로 캐시된다
-// -- 30→60→30 왕복이 재조회 없이 즉시다.
+// 동선에서 자연히 재조회된다. 관리자가 작업(요청)을 지우면 그 지점이 사라지므로 useDeleteRequests 가
+// usage-targets·usage-scan-storages·usage-history 를 무효화한다(2026-10-08). limit(표시 창)은 쿼리키에 들어가
+// 창별로 캐시된다 -- 30→60→30 왕복이 재조회 없이 즉시다.
 export const useScanHistory = (storage: string | null, target: string | null,
                                limit = 30) =>
   useQuery({

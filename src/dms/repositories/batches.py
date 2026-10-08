@@ -347,7 +347,13 @@ class BatchesRepository:
         requests/data_jobs/results 는 **보존**한다 — 실행 감사 이력이고,
         requests.batch_id 는 역사적 표식으로 남는다(배치 역참조가 404 가 되는
         것은 수용 — 화면 소비처 실측상 요청→배치 링크는 없다). 종단 배치 한정
-        가드는 라우트 몫(batch_not_deletable)."""
+        가드는 라우트 몫(batch_not_deletable).
+
+        자식 요청은 관리자의 작업(요청) 선택 삭제(request_purges.delete_terminal,
+        2026-10-08) 대상도 아니다 — batch_id 가 NULL 이 아니면 batch_child_not_deletable
+        로 거부한다(배치 행이 살아 있으면 자식을 지울 때 orchestrator 집계가 영구
+        정체한다). 그래서 이 메서드로 배치를 지운 뒤 남는 자식(배치 행이 없는 batch_id)은
+        지금 규칙상 영구히 개별 삭제할 수 없다 — 의도된 보류(BACKLOG §1)."""
         with self._db.transaction():
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})

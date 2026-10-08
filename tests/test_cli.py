@@ -46,6 +46,9 @@ def test_controller_once(tmp_path, monkeypatch, capsys):
     # build_loops에 넘기지 않으면 rollout-watcher 루프가 등록되지 않아 포탈이
     # 만든 릴리스가 영원히 Pending에 남는다.
     assert "rollout-watcher=ok" in out
+    # 요청 삭제 정리(2026-10-08): cli.py 가 build_purge_runner 를 build_loops 에 넘기지 않으면 request-purge 루프가
+    # 없어 삭제한 요청의 파드·결과 파일이 영원히 남는다.
+    assert "request-purge=ok" in out
 
 
 def test_agent_once_uses_agent_settings(monkeypatch):

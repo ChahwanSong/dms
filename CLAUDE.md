@@ -44,12 +44,17 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   `passwordTransport.ts` 가 바이트 단위로 같아야 한다(대조 테스트 있음).
 - **공유 토큰은 계정·배포 경로를 못 만진다**(2026-10-07). 모든 노드 에이전트가 가진 Bearer 토큰(role admin,
   auth=token)으로 계정을 다시 만들거나 릴리스로 옛 이미지에 롤백하면 특권 게이트가 통째로 무효가 된다 — 계정 변경은
-  `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경은 `auth.require_session_admin`
-  (`admin_session_required`). 그런 새 변경 라우트를 만들면 `require_admin` 이 아니라 이 의존성을 쓴다. 특권 목록 이름
-  계정은 특권 세션 관리자만 관리(`guard_privileged_account`). 배치 sync 자식은 배치 확인 도장이 있는 미리보기만
-  실행된다(`docs/ARCHITECTURE.md` 「배치 재검토·확인 게이트」).
+  `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제는
+  `auth.require_session_admin`(`admin_session_required`). 그런 새 변경 라우트를 만들면 `require_admin` 이 아니라
+  이 의존성을 쓴다. 특권 목록 이름 계정은 특권 세션 관리자만 관리(`guard_privileged_account`). 배치 sync 자식은 배치
+  확인 도장이 있는 미리보기만 실행된다(`docs/ARCHITECTURE.md` 「배치 재검토·확인 게이트」).
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
+- **요청·잡을 가리키는 새 테이블·컬럼은 요청 삭제 목록에도**(2026-10-08). FK 가 0건이라 빠지면 지운 요청의 행이 조용히
+  고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `delete_terminal`(늦게 들어올 수 있으면 `finish` 의
+  scrub 도)에 DELETE 를 넣거나, 지우지 않는 이유와 함께 `PURGE_EXEMPT_TABLES` 에. 그물
+  (`test_request_delete_covers_every_reference_table`)은 `request_id`·`job_id`·`entity_id` 이름의 컬럼만 본다 — 다른 이름으로
+  요청·잡 id 를 담으면 그물 밖이다.
 - **base 매니페스트는 사이트 중립, 실 태그는 오버레이에**(2026-09-14). `deploy/k8s` 의
   `image:`·`DMS_JOB_IMAGE` 는 자리표시자(`set-by-overlay.invalid/<img>:set-by-overlay`)뿐이고 계약 테스트가
   고정한다 — 여기에 실 레지스트리·태그를 커밋하면 git pull 한 다른 사이트가 그 값을

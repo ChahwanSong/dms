@@ -29,7 +29,12 @@ def _job_count(repos) -> int:
     # summary 유실)과 §1-6(COALESCE 덮어쓰기로 preview 위치 유실)도 구조적으로
     # 닫는다: 잡이 존재하는 한 base 가 안 바뀌므로 두 함정의 전제가 성립하지
     # 않는다.
-    return repos.db.query_one("SELECT COUNT(*) AS n FROM data_jobs")["n"]
+    # 요청 삭제의 정리 대기(request_purges, 2026-10-08)도 센다: 행은 지워졌어도 그 잡의 결과 파일은 정리 루프가
+    # 지울 때까지 **이 base 아래**에 있다. force 없이 base 가 바뀌면 루프는 옛 base 의 파일을 지우지 않고 남긴다
+    # (artifact_left_at_old_base 경고 -- DB 값만 믿고 다른 경로를 지우지 않는다). force 의 의미("옛 산출물을 옛
+    # base 에 남김을 수용")는 그대로이고 affected_jobs 에 이 건수도 들어간다.
+    jobs = repos.db.query_one("SELECT COUNT(*) AS n FROM data_jobs")["n"]
+    return jobs + repos.request_purges.pending_count()
 
 
 def _controller_check(row, effective) -> dict:

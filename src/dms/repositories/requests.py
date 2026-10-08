@@ -75,8 +75,10 @@ class RequestsRepository:
         """요청 목록(commit_order DESC). 필터·커서(슬라이스 39): operation·state·
         requester_id 는 AND 로 좁히고, before(commit_order)면 그보다 오래된 것만
         -- 무한 스크롤이 마지막 행의 commit_order 를 before 로 넘겨 다음 쪽을
-        받는다. commit_order 는 단조 증가라 페이지 경계가 안정적이다(offset 과
-        달리 새 행이 끼어도 중복·누락이 없다)."""
+        받는다. commit_order 는 **현존 행 기준** 단조 증가라(MAX+1 -- 요청 삭제
+        (2026-10-08)로 최신 행이 지워지면 다음 제출이 그 번호를 다시 받는다, UNIQUE
+        위반 없음) 페이지 경계가 안정적이다(offset 과 달리 새 행이 끼어도 중복·누락이
+        없다)."""
         where = []
         params: dict = {"n": limit}
         if requester_id is not None:
@@ -107,17 +109,42 @@ class RequestsRepository:
         (autocommit)는 경고만 낸 채 안쪽 COMMIT 이 바깥 트랜잭션을 조기 커밋해
         **조용히** 비원자가 된다. 그래서 set_state 를 다른 트랜잭션 안에서
         재사용하려면 경계(누가 BEGIN 하나)와 몸통(무슨 문장인가)을 분리하는
-        수밖에 없다(슬라이스 27 -- finalize_from_job 이 두 번째 소유자다)."""
+        수밖에 없다(슬라이스 27 -- finalize_from_job 이 두 번째 소유자다).
+
+        요청 삭제(2026-10-08)와의 경합: 읽기를 PG 행 잠금(FOR UPDATE)으로 하고 UPDATE 영향 행 수를 확인한다 -- 잠금
+        없이 읽은 뒤 삭제 트랜잭션이 커밋되면 UPDATE 는 0행인데 전이·results INSERT 가 커밋돼 지운 요청의 고아 행이
+        영구히 남았다(results 는 PK 충돌로도 막히지 않는다 -- 삭제가 옛 결과 행을 이미 지웠다, 2026-10-09 검증 지적).
+        0행이면 KeyError -- 호출자 트랜잭션 전체(전이·results)가 롤백된다(행 없음과 같은 신호)."""
         now = utc_now_iso()
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         current = self._db.query_one(
-            "SELECT state FROM requests WHERE request_id = :id", {"id": request_id})
+            f"SELECT state FROM requests WHERE request_id = :id{lock}", {"id": request_id})
         if current is None:
             raise KeyError(request_id)
-        self._db.execute(
+        moved = self._db.execute_count(
             "UPDATE requests SET state = :s, updated_at = :now WHERE request_id = :id",
             {"s": to_state.value, "now": now, "id": request_id})
+        if moved != 1:
+            raise KeyError(request_id)
         self._record_transition(request_id, RequestState(current["state"]),
                                 to_state, reason_code, actor, now)
+
+    def mark_planned_if_pending(self, request_id, *, actor) -> bool:
+        """조건부 Pending→Planned(planner 멱등 분기 전용, 2026-10-08). 영향 0 = 그 사이 취소·삭제됐다 -- 되살리지
+        않고 False. set_state 는 종단 가드가 없어(_apply_state) 취소된 요청을 Planned 로 덮는다. 정상 emit 은
+        DataJobsRepository.create_plan_and_job 이 같은 CAS 를 plan·job INSERT 와 한 트랜잭션으로 한다."""
+        now = utc_now_iso()
+        with self._db.transaction():
+            moved = self._db.execute_count(
+                """UPDATE requests SET state = :planned, updated_at = :now
+                   WHERE request_id = :id AND state = :pending""",
+                {"planned": RequestState.PLANNED.value, "pending": RequestState.PENDING.value,
+                 "now": now, "id": request_id})
+            if moved != 1:
+                return False
+            self._record_transition(request_id, RequestState.PENDING, RequestState.PLANNED,
+                                    None, actor, now)
+        return True
 
     def list_pending(self, limit: int = 50) -> list[dict]:
         rows = self._db.query(

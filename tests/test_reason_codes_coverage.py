@@ -18,7 +18,7 @@ reasonCodes.test.ts의 결함이었다. 파일을 하나로 만들면 그 어긋
   - set_state/set_job_state/set_item_status(..., reason_code="...")
   - f"prefix:{...}" 형태의 복합 reason_code -- 접두만 추출한다
   - 예외 생성자 리터럴: IdentityRejected("..."), DomainValidationError("..."),
-    ExecutionError("..."), PlacementError("...")
+    ExecutionError("..."), PlacementError("..."), PurgeError("..."), TrashError("...")
 
 정적 추출은 변수를 경유하는 코드(예: 헬퍼 함수에 리터럴을 넘기고 그 헬퍼가
 raise하는 경우)까지는 못 잡는다 -- 그건 이 테스트의 목적이 아니다(완전한 정적
@@ -33,8 +33,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src" / "dms"
 REASON_CODES_FILE = REPO_ROOT / "frontend" / "src" / "lib" / "reasonCodes.json"
 
+# PurgeError·TrashError(2026-10-08): 요청 삭제 정리 루프(request_purger·artifact_trash)의 사유 코드 예외.
 _EXCEPTION_CTORS = {"IdentityRejected", "DomainValidationError", "ExecutionError",
-                    "PlacementError"}
+                    "PlacementError", "PurgeError", "TrashError"}
 _LITERAL_KEYWORDS = {"detail", "reason_code"}
 
 

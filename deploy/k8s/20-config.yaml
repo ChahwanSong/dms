@@ -145,6 +145,12 @@ data:
   # 열람은 여전히 이 창에 산다.
   DMS_POD_GC_AFTER_SECONDS: "86400"
   DMS_POD_GC_INTERVAL_SECONDS: "600"
+  # 작업(요청) 삭제(2026-10-08). QUIET: 요청·잡의 마지막 갱신 후 이 시간(초)이 지나야 지울 수 있다
+  # (request_recently_finished) -- 방금 끝난·취소된 작업의 늦은 stepper·planner 스냅숏과 종료 중 파드에 대한
+  # 심층 방어(api). PURGE_INTERVAL: 삭제한 요청의 남은 파드·결과 파일을 정리하는 컨트롤러 request-purge 루프
+  # 간격(초, 실패 백오프의 기준 단위 -- 상한 900초). 둘 다 기본값과 같다.
+  DMS_REQUEST_DELETE_QUIET_SECONDS: "60"
+  DMS_REQUEST_PURGE_INTERVAL_SECONDS: "15"
 
   # --- agent report cadence (AgentSettings.from_env; consumed via
   #     configMapKeyRef in 50-agent-daemonset.yaml, NOT envFrom, since the

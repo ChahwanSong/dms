@@ -277,6 +277,28 @@ def test_cached_digest_is_reprojected_on_read(tmp_path):
     assert latest["generated_at_epoch"] is None and latest["report_readable"] is True
 
 
+def test_digest_put_is_noop_for_a_deleted_job(tmp_path, monkeypatch):
+    # 2026-10-08 요청 삭제 선행 보강: 사용량 화면이 잡 목록을 읽은 뒤 요청 삭제가 커밋되면 put 이 지워진 잡의 요약을
+    # 다시 넣던 경합 -- 잡 행이 없으면 no-op 이다(있는 잡은 지금처럼 캐시된다 -- test_report_digest_is_cached_per_job).
+    import dms.api.routes_usage as routes_usage
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    jid, _ = _scan_job(client, target="team", art_base=art)
+    repos = client.app.state.repos
+    repos.scan_digests.put("0" * 32, {"summary": {"total_files": 1}})       # 없는 잡
+    assert _digest_rows(client) == []
+    real = routes_usage._read_digest
+
+    def read_then_delete(base, job):
+        digest = real(base, job)                                            # 목록은 이미 읽혔다
+        repos.data_jobs._db.execute("DELETE FROM data_jobs WHERE job_id = :j", {"j": job["job_id"]})
+        return digest
+    monkeypatch.setattr(routes_usage, "_read_digest", read_then_delete)
+    assert client.get("/api/admin/usage/scan-targets").status_code == 200
+    assert _digest_rows(client) == []
+
+
 def test_targets_storage_and_path_filters_combine(tmp_path):
     art = tmp_path / "artifacts"
     client = _client(tmp_path, art)

@@ -47,6 +47,10 @@ class _TxTrackingDB:
             self.violations.append(sql)
         self._inner.execute(sql, params)
 
+    def execute_count(self, sql: str, params: dict | None = None) -> int:
+        # 조건부 갱신(set_phase_ref·create_plan_and_job 의 CAS)이 쓴다 -- events INSERT 는 이 경로로 오지 않는다.
+        return self._inner.execute_count(sql, params)
+
     def query(self, sql: str, params: dict | None = None):
         return self._inner.query(sql, params)
 
