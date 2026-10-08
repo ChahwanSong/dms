@@ -17,13 +17,13 @@ import { FOCUS_RING } from "./ui";
 // 실행 도구 라벨(잡 카드 헤더). **배지가 아니라 중립 텍스트**인 이유: 이 카드의
 // 배지 자리는 StatusPill 하나뿐이고 그 색은 상태 판정(ok/bad/busy) 계약이다 —
 // 도구에 배지를 하나 더 달면 색이 없는 판정을 만들고(어떤 도구가 "좋은" 도구인가?)
-// 두 배지가 서로 상태처럼 읽힌다. 요청 카드의 operation 라벨·배치 헤더의 메타
-// 문구와 같은 관례(text-muted 작은 라벨)로 식별자 옆에 붙인다.
+// 두 배지가 서로 상태처럼 읽힌다. 식별자 옆의 작은 중립 라벨로 붙인다 -- 글자색은 ink/70(흰 카드 4.94:1, AA).
+// 예전 관례였던 text-muted(#888, 3.54:1)는 장식 전용이다(스펙 §9, 리뷰 3차: 도구 이름은 의미 있는 글자다).
 // 모름(계획 전)이면 아무것도 그리지 않는다 — "—" 도 거짓 표시다(null≠0).
 export function ToolLabel({ job }: { job: DataJob }) {
   const text = toolSummary(job);
   if (text === null) return null;
-  return <span className="text-muted text-xs">{text}</span>;
+  return <span className="text-xs text-ink/70">{text}</span>;
 }
 
 // 보조 그룹(gid) 행(2026-10-07 D15): 계획 시점에 얼린 스냅숏(worker_pool.identity 4키)을 그대로 보인다 --
@@ -38,10 +38,10 @@ export function SupplementaryGroupsRow({ job, backends }: { job: DataJob; backen
     ? groupCaveatsFor([job.storage_name, job.source_storage, job.destination_storage], backends) : [];
   return (
     <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-2">
-      <dt className="text-muted">보조 그룹(gid)</dt>
+      <dt className="text-ink/70">보조 그룹(gid)</dt>
       <dd>
         {text}
-        {caveats.map((c) => <span key={c} className="block text-muted text-xs">{c}</span>)}
+        {caveats.map((c) => <span key={c} className="block text-xs text-ink/70">{c}</span>)}
       </dd>
     </dl>
   );
@@ -71,10 +71,12 @@ function JobTransitionsDisclosure({ job }: { job: DataJob }) {
   );
 }
 
-export function JobCard({ job, model, backends, cancel, events, jobCount, refIso, batchChild, confirmOnGate }: {
+export function JobCard({ job, model, backends, cancel, events, requestTerminal = false, jobCount, refIso, batchChild,
+                          confirmOnGate }: {
   job: DataJob; model: JobStagesModel; backends: Record<string, string>;
   cancel: ReturnType<typeof useCancelJob>;
-  events: unknown; jobCount: number; refIso?: string | null; batchChild: boolean; confirmOnGate: boolean;
+  events: unknown; requestTerminal?: boolean; jobCount: number; refIso?: string | null; batchChild: boolean;
+  confirmOnGate: boolean;
 }) {
   // 컨펌 대기는 「취소」 대신 컨펌 흐름이 다음 행동이다(종전 규칙 그대로). TimedOut 이 종단이 되면서(2026-10-08)
   // 시간 초과 잡에 남던 「취소」도 사라진다.
@@ -117,8 +119,8 @@ export function JobCard({ job, model, backends, cancel, events, jobCount, refIso
       {!model.known && (
         <p className="mt-2 text-sm text-ink/70 break-keep">{`알 수 없는 상태 ${job.state} — 단계 표시는 대략적입니다.`}</p>
       )}
-      <JobStages job={job} events={events} jobCount={jobCount} refIso={refIso} batchChild={batchChild}
-                 confirmOnGate={confirmOnGate} />
+      <JobStages job={job} events={events} requestTerminal={requestTerminal} jobCount={jobCount} refIso={refIso}
+                 batchChild={batchChild} confirmOnGate={confirmOnGate} />
       <JobTransitionsDisclosure job={job} />
     </Card>
   );

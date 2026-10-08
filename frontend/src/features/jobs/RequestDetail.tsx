@@ -74,8 +74,11 @@ export function RequestDetail() {
   const jobList: DataJob[] | null = jobs.isError && !jobs.data ? null
     : Array.isArray(jobs.data) ? jobs.data : jobs.data === undefined ? null : [];
   // 요청 이벤트도 모델에 넘긴다(제출 보류 판정) -- 잡 카드(JobStages)가 같은 입력으로 같은 모델을 만든다.
+  // requestTerminal 은 이벤트와 **같은 응답**의 요청 상태다(관문 이벤트 부재를 믿는 조건 -- stageModel ALSO_POD_MARKER).
   const events = req.data?.events;
-  const models = useMemo(() => (jobList ?? []).map((j) => deriveJobStages(j, events)), [jobList, events]);
+  const evTerminal = reqTerminal === true;
+  const models = useMemo(() => (jobList ?? []).map((j) => deriveJobStages(j, events, { requestTerminal: evTerminal })),
+    [jobList, events, evTerminal]);
   // 잡 조회 실패를 한 번이라도 봤으면 그 뒤의 재조회(「다시 시도」)는 첫 로딩이 아니다 -- TanStack v5 는 데이터 없는
   // 쿼리의 재조회마다 status 를 pending 으로 되돌려 isLoading 이 다시 참이 되는데, 그때 화면 전체를 골격으로 바꾸면
   // 배너·오류 상자·「다시 시도」(포커스)가 통째로 사라졌다 나타난다(리뷰 V1). 재조회 중엔 error 가 null 이 되므로
@@ -83,6 +86,8 @@ export function RequestDetail() {
   const lastJobsErr = useRef<string | null>(null);
   if (jobs.error) lastJobsErr.current = (jobs.error as Error).message;
   const jobsErrSeen = jobs.errorUpdateCount > 0;
+  // 상자에 보일 오류 문구. null 이면 이 인스턴스는 실패 문구를 모른다(아래 잡 구획이 경보 대신 골격을 그린다).
+  const jobsErrMsg = jobs.error ? (jobs.error as Error).message : lastJobsErr.current;
 
   // 화면 낭독: 구획 상태가 **바뀔 때만** 한 줄 알린다(첫 로드는 조용히). 이전 값은 ref 에.
   const prevSnaps = useRef<Record<string, StageSnapshot> | null>(null);
@@ -129,7 +134,9 @@ export function RequestDetail() {
   // 폴링 중 한 번 실패했다고 화면 전체를 오류로 바꾸지 않는다 -- 보던 화면은 남기고 "언제 기준인지" 만 말한다.
   const refetchErr = req.isRefetchError || jobs.isRefetchError;
   const staleAt = Math.min(...[req.dataUpdatedAt, jobs.dataUpdatedAt].filter((t) => t > 0));
-  const outcome = deriveOutcome(data, jobList, models);
+  // 잡을 모르는데 실패 문구도 없으면 아래 잡 구획은 중립 골격(재조회 중)이다 -- 배너도 같은 이야기를 하게 넘긴다.
+  const jobsLoading = jobList === null && jobsErrMsg === null;
+  const outcome = deriveOutcome(data, jobList, models, { jobsLoading });
   const batchChild = Boolean(data.batch_id);
 
   return (
@@ -170,7 +177,8 @@ export function RequestDetail() {
             <RetryButton onClick={() => { void req.refetch(); void jobs.refetch(); }} />
           </div>
         )}
-        <OutcomeCard req={data} jobs={jobList} models={models} abs={abs} target={target} cancelRequest={cancelRequest} />
+        <OutcomeCard req={data} jobs={jobList} models={models} abs={abs} target={target} cancelRequest={cancelRequest}
+                     jobsLoading={jobsLoading} />
         <section aria-labelledby="jobs-h" className="space-y-3">
           <h2 id="jobs-h" className="flex items-baseline gap-2 text-sm font-semibold">
             데이터 작업
@@ -178,14 +186,24 @@ export function RequestDetail() {
               <span className="text-xs font-normal text-ink/70 tabular-nums">{`${jobList.length}개`}</span>
             )}
           </h2>
-          {jobList === null ? (
+          {jobList === null && jobsErrMsg !== null ? (
             // 잡 조회 실패를 삼키면 "잡이 0개" 와 구별되지 않는다 -- 실패를 이 자리에서 말한다.
             <div role="alert" aria-busy={jobs.isFetching} className={ERROR_BOX}>
               <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-              <p className="min-w-0 flex-1">
-                {jobs.error ? (jobs.error as Error).message : lastJobsErr.current ?? "작업 정보를 다시 불러오는 중…"}
-              </p>
+              <p className="min-w-0 flex-1">{jobsErrMsg}</p>
               <RetryButton onClick={() => { void jobs.refetch(); }} />
+            </div>
+          ) : jobList === null ? (
+            // 오류를 본 적은 있지만 이 화면 인스턴스는 그 문구를 모른다(캐시에 실패가 남은 채 다시 들어와 재조회 중 --
+            // 재조회가 error 를 비운다). 오류가 아니라 로딩이다: 붉은 경보(role=alert)로 "불러오는 중" 을 알리지 않고 잡
+            // 카드 자리에 중립 골격을 둔다(리뷰 N2). 재조회가 또 실패하면 위 상자가 그 문구로 뜬다.
+            <div aria-busy="true">
+              <p className="sr-only" role="status">작업 정보를 불러오는 중…</p>
+              <Card>
+                <Skeleton className="h-5 w-1/3" />
+                <Skeleton className="mt-4 h-24" />
+                <Skeleton className="mt-3 h-24" />
+              </Card>
             </div>
           ) : jobList.length === 0 ? (
             <div className="flex items-center justify-center gap-2 rounded-card border border-dashed border-line px-4 py-6 text-center text-sm text-ink/70">
@@ -199,7 +217,7 @@ export function RequestDetail() {
           ) : (
             jobList.map((j, i) => (
               <JobCard key={j.job_id} job={j} model={models[i]} backends={backends} cancel={cancel}
-                       events={data.events} jobCount={jobList.length} refIso={data.created_at}
+                       events={data.events} requestTerminal={evTerminal} jobCount={jobList.length} refIso={data.created_at}
                        batchChild={batchChild} confirmOnGate={outcome.confirmOwner === "gate"} />
             ))
           )}

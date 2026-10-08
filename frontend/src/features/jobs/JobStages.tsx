@@ -92,6 +92,7 @@ function joinParts(parts: (ReactNode | null)[]): ReactNode {
 // 「위치 추정」 꼬리표의 설명(근거마다 왜 추정인지가 다르다).
 const ESTIMATE_WHY: Partial<Record<string, string>> = {
   gate_ambiguous: "실행 노드 점검은 이 단계 파드가 스케줄을 기다리는 동안에도, 다음 단계를 제출하기 직전에도 일어나 기록만으로는 어느 쪽인지 알 수 없습니다",
+  base_ambiguous: "작업 기록(artifact) 저장소 권한 점검은 사전 점검 파드 안에서도, 다음 단계를 제출하기 직전에도 일어나 기록만으로는 어느 쪽인지 알 수 없습니다",
 };
 const ESTIMATE_DEFAULT = "전이 기록이 없어 마지막으로 시작된 단계로 추정했습니다";
 
@@ -209,7 +210,9 @@ function OutputChips({ label, items, slot, selectedKey, live, onSelect, chipRef,
             <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
             <span className="min-w-0 truncate">{item.kind === "log" ? "로그" : item.name}</span>
             {item.kind === "artifact" && item.size !== null && (
-              <span className="shrink-0 tabular-nums text-ink/60">{humanBytes(item.size)}</span>
+              // 크기는 의미 있는 보조 글자라 ink/70(흰 4.94:1·hover panel 4.75:1·눌림 infobg 4.70:1 -- AA). ink/60 은
+              // 셋 다 3.6~3.7:1 이었다(리뷰 N7, 배지 V5 와 같은 결함).
+              <span className="shrink-0 tabular-nums text-ink/70">{humanBytes(item.size)}</span>
             )}
             {live && item.kind === "log" && (
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-busy motion-safe:animate-pulse" aria-hidden />
@@ -330,8 +333,11 @@ function StageSection({ n, stage, model, op, children, titleId, refIso }: {
 }
 
 // 컨펌 관문 줄(sync·rm). 사람이 기다린 시간은 여기서만 말한다(기계 소요에 섞지 않는다).
-function GateRow({ job, model, refIso, batchChild, showConfirm }: {
-  job: DataJob; model: JobStagesModel; refIso?: string | null; batchChild: boolean; showConfirm: boolean;
+// 컨펌 창(ConfirmDialog)은 컨펌 대기 중인 비배치 잡의 **이 줄에만** 있다(리뷰 N5) -- 다른 잡의 상태(배너 초점)가 바뀌어도
+// 자리가 옮겨 가지 않아 열어 둔 창이 폴링 중에 사라지지 않는다. 배너 「컨펌하러 가기」는 id 로 이 줄을 찾아
+// data-confirm-trigger 안의 버튼에 포커스한다.
+function GateRow({ job, model, refIso, batchChild, showConfirm, rowId }: {
+  job: DataJob; model: JobStagesModel; refIso?: string | null; batchChild: boolean; showConfirm: boolean; rowId: string;
 }) {
   const gate = model.gate!;
   const now = useNow(30_000, gate.status === "awaiting");
@@ -363,22 +369,25 @@ function GateRow({ job, model, refIso, batchChild, showConfirm }: {
     default: text = `작업 컨펌 · ${STATUS_LABEL[gate.status]}`;
   }
   return (
-    <div className="ml-3 flex flex-wrap items-start gap-2 border-l-2 border-dotted border-line py-2 pl-4 text-sm">
+    <div id={rowId} className="ml-3 flex scroll-mt-4 flex-wrap items-start gap-2 border-l-2 border-dotted border-line py-2 pl-4 text-sm">
       <StatusIcon status={gate.status} className="mt-0.5 h-4 w-4" />
       <span className="sr-only">{`작업 컨펌: ${STATUS_LABEL[gate.status]}`}</span>
       <span className={`min-w-0 flex-1 break-keep ${gate.status === "awaiting" ? "font-medium text-attn" : "text-ink/70"}`}>{text}</span>
-      {showConfirm && gate.status === "awaiting" && <ConfirmDialog job={job} />}
+      {showConfirm && gate.status === "awaiting" && (
+        <span data-confirm-trigger className="shrink-0"><ConfirmDialog job={job} /></span>
+      )}
     </div>
   );
 }
 
-export function JobStages({ job, events, jobCount = 1, refIso, batchChild = false, confirmOnGate = false }: {
-  job: DataJob; events?: unknown; jobCount?: number; refIso?: string | null;
+export function JobStages({ job, events, requestTerminal = false, jobCount = 1, refIso, batchChild = false,
+                            confirmOnGate = false }: {
+  job: DataJob; events?: unknown; requestTerminal?: boolean; jobCount?: number; refIso?: string | null;
   batchChild?: boolean; confirmOnGate?: boolean;
 }) {
   // 이벤트도 넘긴다 -- 제출 보류(identity_recheck_deferred)·관문 모호성 해소가 이 잡의 이벤트를 본다(RequestDetail 의
   // 배너용 모델과 같은 입력이라 둘이 같은 이야기를 한다).
-  const model = useMemo(() => deriveJobStages(job, events), [job, events]);
+  const model = useMemo(() => deriveJobStages(job, events, { requestTerminal }), [job, events, requestTerminal]);
   // 러너는 phase 가 끝날 때 파일을 쓴다 -- 상태나 ref 가 바뀌면 목록을 다시 읽는다(폴링 없음).
   const refreshKey = `${job.state}|${Object.keys(model.refs).sort().join(",")}`;
   const artifacts = useArtifacts(job.job_id, refreshKey);
@@ -391,28 +400,34 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
   };
   const viewerId = (slot: NavSlot) => `viewer-${job.job_id}-${slot}`;
   const previewHeadingId = `preview-result-${job.job_id}`;
+  const gateRowId = `gate-${job.job_id}`;
 
-  // 자동 열림(종단 실패의 실패 단계 로그 1건). 사용자가 한 번이라도 고르거나 닫았으면 덮어쓰지 않는다.
+  // 자동 열림(종단 실패의 실패 단계 로그 1건). 사용자가 한 번이라도 고르거나 닫았으면 덮어쓰지 않는다. 손대지 않은 동안은
+  // 모델을 따른다(리뷰 3차): 모델이 판정을 고쳐 자동 열림을 거두거나 바꾸면 자동으로 연 뷰어도 닫거나 바꾼다
+  // (stageNav.syncAuto -- 잡·요청 폴링이 따로 돌아 이벤트가 늦게 오면 통과한 단계 로그가 「완료」 행 아래에 남았다).
   const auto = model.autoOpen;
-  const { autoSelect, touched, selected } = nav;
+  const { syncAuto, touched } = nav;
   useEffect(() => {
-    if (auto && !touched && selected[auto.stage] === null) autoSelect(auto.stage, auto.key);
-  }, [auto?.stage, auto?.key, touched, selected, autoSelect]);
+    if (!touched) syncAuto(auto ? { slot: auto.stage, key: auto.key } : null);
+  }, [auto?.stage, auto?.key, touched, syncAuto]);
 
   // 배너 CTA(「실패 지점 로그 보기」 등)의 이동 요청: 선택이 그려진 다음 프레임에 뷰어로 스크롤 + 포커스.
+  // 「컨펌하러 가기」는 관문 줄로 스크롤하고 그 줄의 「작업 컨펌」 버튼에 포커스한다(줄 자체는 포커스 대상이 아니다).
   const lastReveal = useRef(0);
   const reveal = nav.reveal;
   useEffect(() => {
     if (!reveal || reveal.token === lastReveal.current) return;
     lastReveal.current = reveal.token;
-    const id = reveal.target === "previewResult" ? previewHeadingId : viewerId(reveal.target);
+    const target = reveal.target;
+    const id = target === "previewResult" ? previewHeadingId : target === "confirm" ? gateRowId : viewerId(target);
     const reduced = typeof window.matchMedia === "function"
       && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const raf = requestAnimationFrame(() => {
       const el = document.getElementById(id);
       if (!el) return;
-      el.scrollIntoView?.({ block: "start", behavior: reduced ? "auto" : "smooth" });
-      el.focus({ preventScroll: true });
+      el.scrollIntoView?.({ block: target === "confirm" ? "center" : "start", behavior: reduced ? "auto" : "smooth" });
+      const focusEl = target === "confirm" ? el.querySelector<HTMLElement>("[data-confirm-trigger] button") : el;
+      focusEl?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(raf);
   }, [reveal?.token]);
@@ -477,7 +492,7 @@ export function JobStages({ job, events, jobCount = 1, refIso, batchChild = fals
       </StageSection>
       {model.flow === "previewed" && model.gate ? (
         <GateRow job={job} model={model} refIso={refIso} batchChild={batchChild}
-                 showConfirm={confirmOnGate && !batchChild} />
+                 showConfirm={confirmOnGate && !batchChild} rowId={gateRowId} />
       ) : (
         <div className="ml-3 border-l-2 border-dotted border-line py-2 pl-4 text-xs text-ink/70">
           미리보기·컨펌 없이 바로 실행됩니다

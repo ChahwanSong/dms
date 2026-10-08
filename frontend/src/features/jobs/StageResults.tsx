@@ -36,7 +36,8 @@ export function ExecutionResult({ summary, headingId }: { summary: unknown; head
       <dl className={GRID}>
         {entries.map(([k, v]) => (
           <div key={k} className={TILE}>
-            <dt className="font-mono text-xs text-muted [overflow-wrap:anywhere]">{k}</dt>
+            {/* 원 키는 그 값의 유일한 라벨이라 장식이 아니다 -- ink/70(AA). text-muted 는 3.54:1 이었다(리뷰 3차). */}
+            <dt className="font-mono text-xs text-ink/70 [overflow-wrap:anywhere]">{k}</dt>
             <dd className="text-sm font-semibold tabular-nums break-all">{valueText(k, v)}</dd>
           </div>
         ))}

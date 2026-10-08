@@ -86,6 +86,35 @@ test("useArtifacts: refreshKey 재조회가 실패해도 마지막 성공 목록
   expect(result.current.isLoading).toBe(false);          // 화면의 「불러오는 중」 골격도 다시 뜨지 않는다
 });
 
+test("N0 useArtifacts: 첫 조회(데이터 없음)가 진행 중일 때 refreshKey 가 바뀌면 그 조회에 합류하지 않고 새로 읽는다", async () => {
+  // TanStack 5 의 refetch 는 데이터가 없으면 진행 중 조회에 합류한다 -- 전이 전에 떠난 요청의 낡은 목록(새 파일 없음)이
+  // 마지막 목록이 됐다(리뷰 N0, fixcheck/logs/edge.test.tsx H). 여기 qc 는 고정이다(공용 wrapper 는 그릴 때마다 새로 만든다).
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const stable = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  let calls = 0;
+  let written = false;
+  let releaseFirst: (() => void) | null = null;
+  const fresh = { entries: [{ phase: "preview", name: "stdout.log", size: 5, modified_at: 1 }], truncated: false };
+  server.use(http.get("/api/user/jobs/j1/artifacts", async () => {
+    calls += 1;
+    const snap = written;
+    if (calls === 1) await new Promise<void>((r) => { releaseFirst = r; });   // 전이 전에 떠난 첫 조회를 붙잡아 둔다
+    return HttpResponse.json(snap ? fresh : { entries: [], truncated: false });
+  }));
+  const { result, rerender } = renderHook(({ k }) => useArtifacts("j1", k),
+    { wrapper: stable, initialProps: { k: "PreviewRunning|preflight,preview" } });
+  // 결과는 추적(tracked) 객체라 data 를 한 번 읽어 두어야 그 변화로 다시 그린다(화면 컴포넌트는 렌더 중에 읽는다).
+  expect(result.current.data).toBeUndefined();
+  await waitFor(() => expect(calls).toBe(1));
+  written = true;                                   // 러너가 파일을 쓰고 잡이 전이했다
+  rerender({ k: "ConfirmPending|preflight,preview" });
+  await waitFor(() => expect(calls).toBe(2));       // 합류했다면 1 에 머문다
+  await waitFor(() => expect(result.current.data).toEqual(fresh));
+  await act(async () => { releaseFirst?.(); await new Promise((r) => setTimeout(r, 20)); });
+  expect(result.current.data).toEqual(fresh);       // 취소된 첫 조회의 낡은 응답이 덮어쓰지 않는다
+  expect(calls).toBe(2);
+});
+
 test("useJobLogs live: 3초마다 다시 읽고, live 가 꺼지면 멈춘다", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
