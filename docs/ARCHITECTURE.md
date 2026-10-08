@@ -414,7 +414,7 @@ FastAPI 앱(create_app) 하나가 세션 쿠키·공유 토큰 이중 인증 뒤
 | `frontend/src/lib/api.ts` | REASON_MESSAGES 한국어 매핑+reasonText(prefix:suffix 복합 코드 번역), request(): 오류 파싱 한 벌·비JSON이면 http_<status> 합성·401에만 dms:unauthorized 발화, ApiError(status,code) |
 | `frontend/src/lib/reasonCodes.json` | 백엔드가 낼 수 있는 사유 코드의 단일 목록 — 프론트 reasonCodes.test.ts와 백엔드 tests/test_reason_codes_coverage.py가 같은 파일을 읽는 양방향 계약의 축 |
 | `frontend/src/app/ (AuthContext.tsx, RequireRole.tsx, router.tsx, queryClient.ts, AppShell.tsx, ErrorBoundary.tsx)` | dms:unauthorized→me invalidate(clear 금지), 역할 게이트 라우팅(/admin/* 15개+user 4개), retry:false·staleTime 5000, ErrorBoundary key={pathname} |
-| `frontend/src/features/*/use*.ts` | react-query 폴링 훅: requests 3s, request jobs 2s(전 잡 종단이면 중지), dashboard/metrics 5s, batches 4s/상세 2.5s(종단 중지), nodes·artifact-base 10s, builds/releases는 진행 중일 때만 |
+| `frontend/src/features/*/use*.ts` | react-query 폴링 훅: requests 3s, 요청 상세 3s(요청 비종단 동안) + request jobs 2s(요청 비종단 또는 비종단 잡이 있을 때 — 잡 0개여도 돈다, 전부 종단이면 중지 · e2e E6), 열어 둔 진행 중 단계 로그 3s(그 외 로그·아티팩트 목록은 폴링 없음 — 목록은 잡 상태 전이 때 다시 읽는다), dashboard/metrics 5s, batches 4s/상세 2.5s(종단 중지), nodes·artifact-base 10s, builds/releases는 진행 중일 때만 |
 | `frontend/e2e/ + frontend/playwright.config.ts` | 풀스택 e2e 5개(01-boot-session~05-polling): global-setup이 migrate/api/controller/agent 부팅·시드(실패=throw, skip 금지), :8093 선점 거부, workers:1(단일 sqlite), 시스템 크롬, forbidOnly |
 
 ### 불변식 (위반하면 깨진다)

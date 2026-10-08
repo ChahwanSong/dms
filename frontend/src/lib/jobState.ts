@@ -1,5 +1,7 @@
+// 잡 종단 = domain.TERMINAL_DATA_JOB_STATES 6종. TimedOut 이 빠져 있던 동안(2026-10-08 까지) 시간 초과 잡은 상세
+// 화면에서 영영 비종단으로 읽혀 잡 폴링이 멈추지 않고 이미 끝난 잡에 「취소」 버튼이 남았다.
 export const TERMINAL_STATES = new Set([
-  "Succeeded", "Failed", "Rejected", "Cancelled", "PreviewExpired",
+  "Succeeded", "Failed", "TimedOut", "Rejected", "Cancelled", "PreviewExpired",
 ]);
 export const isTerminal = (s: string) => TERMINAL_STATES.has(s);
 
@@ -14,7 +16,7 @@ export const REQUEST_TERMINAL_STATES = new Set([...TERMINAL_STATES, "Conflict"])
 export type PillVariant = "ok" | "bad" | "busy" | "neutral" | "action";
 export function pillVariant(state: string): PillVariant {
   if (state === "Succeeded") return "ok";
-  if (["Failed", "Rejected", "Cancelled", "PreviewExpired"].includes(state)) return "bad";
+  if (["Failed", "TimedOut", "Rejected", "Cancelled", "PreviewExpired"].includes(state)) return "bad";
   if (["Executing", "ConfirmPending", "Planning", "Scheduled"].includes(state)) return "busy";
   return "neutral";
 }

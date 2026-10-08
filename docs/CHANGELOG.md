@@ -95,6 +95,32 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 요청 상세: 단계 분리(사전 점검·미리보기 / 실행) + 결과 배너 — **완료**(2026-10-08, 프런트 전용·미배포)
+
+사용자 요청: "요청 결과 화면 아래쪽의 preflight(preview)와 execution 의 output/log 를 분리해서 보이게 + 결과 화면 개선".
+세 안(CI 파이프라인형·진단 우선형·차분한 탭형) → 두 심사 모두 진단 우선형 1위 → 단일 구현 스펙으로 합쳐 구현.
+- **배치**(`/jobs/:requestId`): 머리말(h1 `{operation} 요청`·id·요청자·제출·우선순위·배치 링크·「자동 갱신 중」) → 결과 배너
+  (`OutcomeCard` — 제목·요청 pill / 사유·대상·절대경로 / 「다음 할 일」 + CTA / KPI 4칸) → 잡 카드(① 사전 점검·미리보기 →
+  작업 컨펌 관문 줄 → ② 실행, scan 은 ① → 연결 문구 → ②) → 활동(전이 이력·진단 이벤트, xl 2열). 옛 「요청 정보」 카드 대체.
+- **판정은 순수 모듈 둘**: `jobStages.ts`(단계 상태·시각·실패 지점 — 제출 접두 → 사유 접두 → 마지막 종단 전이 from_state →
+  가장 깊은 ref → 흐름 첫 단계, 뒤 둘은 "위치 추정"이라 단정 안 함), `requestOutcome.ts`(배너 문장·초점 잡·KPI). 미리보기 실패의
+  result_summary 는 미리보기 summary 라(stepper `_surface_failed_artifact`) ①의 「미리보기 결과 (실패 시점)」으로만 그린다.
+- **출력**: 단계 행마다 칩(로그 + 그 phase 파일) → 구획 안 인라인 뷰어(구획마다 선택 하나 — 미리보기·실행 stdout 동시 비교).
+  뷰어: CSS counter 줄번호·줄바꿈 토글(localStorage, try/catch)·2,000줄 상한·꼬리부터 열기·진행 중 로그 3s 라이브 + 바닥 붙기·
+  「로그 저장」(Blob, clipboard 아님)·JSON 정렬. 종단 실패는 실패 단계 로그 1건만 자동으로 연다(사용자가 고르거나 닫으면 끝).
+  phase 범위 진단 이벤트(payload job_id·phase)는 단계 행 주석으로(행마다 3건). 칩 접근성 이름은 옛 탭 이름 그대로.
+- **결함 수리**: TimedOut 이 잡 종단 집합에 없어(폴링 무한·「취소」 잔존) 추가, 요청 상세 3s 폴링(요청 pill·전이 이력이 낡았다),
+  잡 0개 + 요청 비종단에서도 잡 폴링(`[].some()` 함정 — 제출 직후 들어온 상세가 영영 안 갱신), 상태 전이 때 아티팩트 목록 재조회
+  (`refreshKey` + keepPreviousData), 목록 실패가 로그 칩을 가리지 않음, 재조회 실패는 화면을 지우지 않고 띠만, transitions·
+  phase_refs·events 방어 정규화, 375 에서 32자 id `overflow-wrap:anywhere`.
+- **뺀 것**: 「완료됐지만 0건」 주의 — 미리보기·실행 summary 의 files 가 같은 뜻이 아니다(dsync dry-run 훑은 수 / nsync 계획 변경 수 /
+  실행 처리 수) — 비교하면 거짓 경보. 범위 밖 후보는 BACKLOG §1.
+- 새 의존성·색 토큰·외부 URL 0, 공용 Button·StatusPill·ConfirmDialog·tailwind 설정 무변경, 백엔드 무변경.
+
+테스트: 프런트 963 passed(기존 RequestDetail.test 42건 무수정 통과 · JobViewer.test 17건 → JobStages.test 이식 + 신규) + tsc +
+빌드(외부 URL 0), e2e 9 passed(E4 에 375 순회 추가, E5·E6 무수정). 픽스처 라우팅 실 Chrome 캡처 1440/1280/375 8개 시나리오
+(가로 넘침 0·콘솔 오류 0).
+
 ### ✅ LDAP 보조 그룹 인정 — **완료·실증**(2026-10-08, d163)
 
 사용자 요청: "sync 목적지 권한 체크의 '보조 그룹으로 받은 권한은 인정되지 않습니다'를 근본적으로 인정하게" → 설계 검토(D1–D18)

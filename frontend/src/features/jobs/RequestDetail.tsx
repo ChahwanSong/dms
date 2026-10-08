@@ -1,162 +1,68 @@
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { CircleAlert, LoaderCircle, TriangleAlert } from "lucide-react";
 import { useRequest, useRequestJobs, useCancelJob, useCancelRequest } from "./useJobs";
 import { Card } from "../../components/ui/Card";
-import { StatusPill } from "../../components/ui/StatusPill";
-import { Button } from "../../components/ui/Button";
-import { isTerminal } from "../../lib/jobState";
+import { Skeleton } from "../../components/ui/Skeleton";
+import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
 import { kstStamp } from "../../lib/datetime";
-import { ConfirmDialog } from "./ConfirmDialog";
-import { Timeline } from "./Timeline";
-import { JobViewer } from "./JobViewer";
-import { ApiError, reasonText } from "../../lib/api";
 import { absSummary, pathSummary } from "../../lib/storagePaths";
-import { toolSummary } from "../../lib/jobTool";
 import { useStorageBackends, useStorageRoots } from "../storages/useUserStorages";
-import { groupCaveatsFor, supplementaryGroupsText } from "../../lib/groupCaveats";
-import type { DataJob, RequestDetail as RequestDetailType } from "../../lib/types";
+import type { DataJob } from "../../lib/types";
+import { StageNavProvider } from "./stageNav";
+import { OutcomeCard } from "./OutcomeCard";
+import { JobCard } from "./JobCard";
+import { ActivitySection } from "./RequestActivity";
+import { deriveJobStages, stageAnnouncement, stageSnapshot, type StageSnapshot } from "./jobStages";
+import { deriveOutcome } from "./requestOutcome";
+import { kstClock } from "./format";
+import { FOCUS_RING, SMALL_BTN } from "./ui";
 
-// 요청 상태의 종단 집합은 잡 상태(jobState.ts의 isTerminal)와 다르다 —
-// "Conflict"를 포함하고 "PreviewExpired"는 포함하지 않는다.
-const TERMINAL_REQUEST_STATES = new Set(["Succeeded", "Failed", "Rejected", "Conflict", "Cancelled"]);
-const isRequestTerminal = (s: string) => TERMINAL_REQUEST_STATES.has(s);
+// 요청 상세(/jobs/:requestId) -- 2026-10-08 재설계(사용자 요청: preflight(preview)와 execution 의 출력·로그를
+// 분리해서 보이게 + 결과 화면 개선). 위에서 아래로: 머리말 → (재조회 실패 띠) → 결과 배너 → 데이터 작업(잡 카드:
+// ① 사전 점검·미리보기 / 작업 컨펌 / ② 실행) → 활동(전이 이력·진단 이벤트). 이 파일은 조립만 한다 -- 판정은
+// jobStages·requestOutcome(순수), 그리기는 각 컴포넌트 파일.
+//
+// 폴링(useJobs): 요청 3초(비종단 동안), 잡 2초(요청 비종단 또는 비종단 잡이 있을 때 -- 잡 0개여도 돈다). 종단이면
+// 전부 멈춘다(e2e E6: 종단 뒤 /jobs 요청 0건). 잡 키를 무효화하는 새 코드는 넣지 않는다.
 
-function durationText(from?: string, to?: string): string {
-  if (!from || !to) return "—";
-  const ms = new Date(to).getTime() - new Date(from).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}초`;
-  const m = Math.floor(s / 60);
-  return s % 60 === 0 ? `${m}분` : `${m}분 ${s % 60}초`;
-}
+const ERROR_BOX = "flex flex-wrap items-start gap-2 rounded-card border border-bad/30 bg-badbg px-4 py-3 text-sm text-bad";
 
-// severity별로 text-bad/text-muted만 쓴다(다른 색 유틸은 이 카드의 몫이 아니다) --
-// error만 눈에 띄게, warning/info는 muted로 뭉뚱그린다.
-function eventSeverityClass(severity: string): string {
-  return severity === "error" ? "text-bad" : "text-muted";
-}
-
-// I3: stepper.py의 summary_unreadable은 message가 아예 없이 payload={"ref": ref}만
-// 있고, terminate_failed는 message=exc.reason_code가 event_type과 완전히 중복돼서
-// 실질적으로 payload의 ref가 운영자가 얻을 수 있는 유일한 단서다. payload를 렌더하지
-// 않으면 화면에는 event_type 하나만 뜨고 아무 단서도 없다 -- JSON.stringify를 코드
-// 블록으로 보여주는 것으로 충분하다(구조를 안다고 가정하지 않는다: dict/array/스칼라/
-// null 어떤 모양이 와도 죽지 않아야 한다).
-function EventPayload({ payload }: { payload: unknown }) {
-  if (payload === null || payload === undefined) return null;
-  let text: string;
-  try {
-    text = JSON.stringify(payload);
-  } catch {
-    text = String(payload); // 순환 참조 등 JSON.stringify가 던지는 극단적인 경우의 방어
-  }
-  if (!text) return null;
+function LoadingView({ requestId }: { requestId: string }) {
+  // 실제 높이와 비슷한 자리표시(배너 + KPI 4칸 + 잡 카드)로 데이터 도착 때 화면이 밀리지 않게(CLS).
   return (
-    <pre className="mt-0.5 text-xs text-muted whitespace-pre-wrap break-all">{text}</pre>
+    <section className="max-w-6xl space-y-5" aria-busy="true">
+      <div>
+        <h1 className="text-2xl font-bold">요청 상세</h1>
+        <p className="mt-1 font-mono text-xs text-ink/70 [overflow-wrap:anywhere]">{requestId}</p>
+      </div>
+      <p className="sr-only" role="status">불러오는 중…</p>
+      <Card>
+        <Skeleton className="h-6 w-1/2" />
+        <Skeleton className="mt-3 h-4 w-2/3" />
+        <Skeleton className="mt-2 h-4 w-1/3" />
+        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-16" />)}
+        </div>
+      </Card>
+      <Card>
+        <Skeleton className="h-5 w-1/3" />
+        <Skeleton className="mt-4 h-24" />
+        <Skeleton className="mt-3 h-24" />
+      </Card>
+    </section>
   );
 }
 
-function DiagnosticEvents({ req }: { req: RequestDetailType }) {
-  // 방어적 정규화: events가 배열이 아니거나(백엔드 오응답) 아예 없으면 빈 배열로
-  // 취급한다 -- 배열 아닌 페이로드 하나가 SPA 전체를 흰 화면으로 만든 사고가 있었다.
-  const events = Array.isArray(req.events) ? req.events : [];
-  if (events.length === 0) return null; // 정상 요청에 빈 카드가 뜨면 노이즈다
-  return (
-    <Card>
-      <h2 className="text-sm font-semibold mb-2">진단 이벤트</h2>
-      {req.events_truncated && (
-        <p className="text-muted text-xs mb-2">
-          최근 100건만 표시됩니다 — 그 이전 이벤트는 보이지 않습니다.
-        </p>
-      )}
-      <ul className="space-y-2 text-sm">
-        {events.map((e) => (
-          <li key={e.id}>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-muted tabular-nums">{kstStamp(e.at)}</span>
-              <span className={eventSeverityClass(e.severity)}>{e.event_type}</span>
-              <span className="text-muted text-xs">({e.component})</span>
-            </div>
-            {e.message && <p className="mt-0.5">{e.message}</p>}
-            <EventPayload payload={e.payload} />
-          </li>
-        ))}
-      </ul>
-    </Card>
-  );
-}
-
-// 실행 도구 라벨(잡 카드 헤더). **배지가 아니라 중립 텍스트**인 이유: 이 카드의
-// 배지 자리는 StatusPill 하나뿐이고 그 색은 상태 판정(ok/bad/busy) 계약이다 —
-// 도구에 배지를 하나 더 달면 색이 없는 판정을 만들고(어떤 도구가 "좋은" 도구인가?)
-// 두 배지가 서로 상태처럼 읽힌다. 요청 카드의 operation 라벨·배치 헤더의 메타
-// 문구와 같은 관례(text-muted 작은 라벨)로 식별자 옆에 붙인다.
-// 모름(계획 전)이면 아무것도 그리지 않는다 — "—" 도 거짓 표시다(null≠0).
-function ToolLabel({ job }: { job: DataJob }) {
-  const text = toolSummary(job);
-  if (text === null) return null;
-  return <span className="text-muted text-xs">{text}</span>;
-}
-
-// NodesList/JobStats 관례의 국소 사본(공용 모듈은 이르다) — 요약의 bytes 를
-// 사람 표기로. scan 도 이제 bytes(실 사용량)를 낸다(2026-08-23 파서 확장).
-function humanBytes(bytes: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-  let v = bytes, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
-  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
-}
-
-// 보조 그룹(gid) 행(2026-10-07 D15): 계획 시점에 얼린 스냅숏(worker_pool.identity 4키)을 그대로 보인다 --
-// 잡이 실제로 어떤 그룹을 달고 도는지(또는 왜 안 다는지)를 사용자가 볼 유일한 자리다. 상태 키가 없는 잡(기능
-// 배포 전에 계획됨)은 행을 그리지 않는다(모름 ≠ 없음 -- 사유 줄과 같은 "생략이 더 정직" 규약). 실렸을 때만
-// 스토리지 종류별 주의문을 붙인다(실제 인정은 스토리지 서버가 정한다 -- lib/groupCaveats).
-function SupplementaryGroupsRow({ job, backends }: { job: DataJob; backends: Record<string, string> }) {
-  const ident = job.worker_pool?.identity;
-  const text = supplementaryGroupsText(ident);
-  if (text === null) return null;
-  const caveats = ident?.supplementary_gids_status === "applied"
-    ? groupCaveatsFor([job.storage_name, job.source_storage, job.destination_storage], backends) : [];
-  return (
-    <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-2">
-      <dt className="text-muted">보조 그룹(gid)</dt>
-      <dd>
-        {text}
-        {caveats.map((c) => <span key={c} className="block text-muted text-xs">{c}</span>)}
-      </dd>
-    </dl>
-  );
-}
-
-function ResultSummary({ summary }: { summary: unknown }) {
-  if (summary == null) return null;
-  if (typeof summary === "object") {
-    const entries = Object.entries(summary as Record<string, unknown>);
-    if (!entries.length) return null;
-    return (
-      <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 mt-1">
-        {entries.map(([k, v]) => (
-          <div key={k} className="contents">
-            <dt className="text-muted">{k}</dt>
-            {/* String(null)은 "null" -- rm 은 설계상 bytes 가 없어(도구가 미보고)
-                null 이 정상이다. 대시보드와 같은 "—" 규약으로 비운다. bytes 는
-                사람 표기 + 원값(정밀도 손실 없이 검증 가능하게). */}
-            <dd>{v === null ? "—"
-              : k === "bytes" && typeof v === "number"
-                ? `${humanBytes(v)} (${v} B)`
-                : String(v)}</dd>
-          </div>
-        ))}
-      </dl>
-    );
-  }
-  return <p className="text-sm mt-1">{String(summary)}</p>;
+function RetryButton({ onClick }: { onClick: () => void }) {
+  return <button type="button" className={SMALL_BTN} onClick={onClick}>다시 시도</button>;
 }
 
 export function RequestDetail() {
   const { requestId = "" } = useParams();
   const req = useRequest(requestId);
-  const jobs = useRequestJobs(requestId);
+  const reqTerminal = req.data ? REQUEST_TERMINAL_STATES.has(req.data.state) : undefined;
+  const jobs = useRequestJobs(requestId, true, { requestTerminal: reqTerminal });
   const cancel = useCancelJob(requestId);
   const cancelRequest = useCancelRequest(requestId);
   // 스토리지 뿌리 맵(관리자 응답에만 managed_root 가 실린다 — 비관리자는 빈 맵)
@@ -164,22 +70,44 @@ export function RequestDetail() {
   // 이름 → backend_type(같은 쿼리 -- 요청 추가 없음). 보조 그룹 주의문용.
   const backends = useStorageBackends();
 
-  if (req.isLoading || jobs.isLoading) {
-    return (
-      <section className="space-y-4">
-        <h1 className="text-2xl font-bold">요청 {requestId}</h1>
-        <p className="text-muted">불러오는 중…</p>
-      </section>
-    );
-  }
+  // 잡 목록 방어적 정규화(배열이 아니면 모름 취급) + 단계 모델. 잡 조회 실패면 null(모름) -- 0개와 다르다.
+  const jobList: DataJob[] | null = jobs.isError && !jobs.data ? null
+    : Array.isArray(jobs.data) ? jobs.data : jobs.data === undefined ? null : [];
+  const models = useMemo(() => (jobList ?? []).map(deriveJobStages), [jobList]);
 
-  // 잡 조회 실패를 삼키면 "잡이 0개"와 구별되지 않는다 — 요청 조회 실패와 같게 보여준다.
-  if (req.isError || jobs.isError) {
-    const err = (req.isError ? req.error : jobs.error) as ApiError;
+  // 화면 낭독: 구획 상태가 **바뀔 때만** 한 줄 알린다(첫 로드는 조용히). 이전 값은 ref 에.
+  const prevSnaps = useRef<Record<string, StageSnapshot> | null>(null);
+  const [announce, setAnnounce] = useState("");
+  useEffect(() => {
+    if (!jobList) return;
+    const next: Record<string, StageSnapshot> = {};
+    let msg: string | null = null;
+    jobList.forEach((j, i) => {
+      const snap = stageSnapshot(models[i]);
+      next[j.job_id] = snap;
+      if (msg === null && prevSnaps.current !== null) {
+        const m = stageAnnouncement(prevSnaps.current[j.job_id], snap, models[i].flow);
+        if (m !== null) msg = jobList.length > 1 ? `작업 ${i + 1} ${m}` : m;
+      }
+    });
+    prevSnaps.current = next;
+    if (msg !== null) setAnnounce(msg);
+  }, [jobList, models]);
+
+  if (req.isLoading || jobs.isLoading) return <LoadingView requestId={requestId} />;
+
+  if (req.isError && !req.data) {
     return (
-      <section className="space-y-4">
-        <h1 className="text-2xl font-bold">요청 {requestId}</h1>
-        <p className="text-bad">{err.message}</p>
+      <section className="max-w-6xl space-y-5">
+        <div>
+          <h1 className="text-2xl font-bold">요청 상세</h1>
+          <p className="mt-1 font-mono text-xs text-ink/70 [overflow-wrap:anywhere]">{requestId}</p>
+        </div>
+        <div role="alert" className={ERROR_BOX}>
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <p className="min-w-0 flex-1">{(req.error as Error).message}</p>
+          <RetryButton onClick={() => { void req.refetch(); void jobs.refetch(); }} />
+        </div>
       </section>
     );
   }
@@ -187,118 +115,87 @@ export function RequestDetail() {
   const data = req.data;
   if (!data) return null;
   const abs = absSummary(data.operation, data.payload, roots);
-  // M5: 방어적 정규화 -- 배열이 아닌(또는 없는) transitions 페이로드 하나가 화면
-  // 전체를 무방어 인덱싱(`transitions[len-1]`)으로 죽인 적이 있다. ErrorBoundary가
-  // 있어도 애초에 안 죽는 편이 낫다(경계는 최후의 방어선이지 정상 경로가 아니다).
-  const transitions = Array.isArray(data.transitions) ? data.transitions : [];
-  // 제출 대기(슬라이스 17이 슬라이스 14의 「큐 대기」 라벨을 정정 -- 설계 §2.4):
-  // 이 값은 요청 Pending -> 첫 비-Pending 전이(플래너 픽업)의 지연이지 Volcano 큐
-  // 대기가 아니다. 진짜 Volcano 대기는 대시보드 큐 카드(라이브 PodGroup)에만 있다.
-  const firstPickup = transitions.find((t) => t.to_state !== "Pending");
-  const end = transitions[transitions.length - 1]?.at ?? data.updated_at;
-  // 잡이 하나도 없을 때만 요청 단위 취소를 보여준다 — 잡이 있으면 잡 단위 취소가 그 역할을 한다.
-  const canCancelRequest = !isRequestTerminal(data.state) && (jobs.data ?? []).length === 0;
+  const target = pathSummary(data.operation, data.payload);
+  const live = !REQUEST_TERMINAL_STATES.has(data.state) || (jobList ?? []).some((j) => !isTerminal(j.state));
+  // 폴링 중 한 번 실패했다고 화면 전체를 오류로 바꾸지 않는다 -- 보던 화면은 남기고 "언제 기준인지" 만 말한다.
+  const refetchErr = req.isRefetchError || jobs.isRefetchError;
+  const staleAt = Math.min(...[req.dataUpdatedAt, jobs.dataUpdatedAt].filter((t) => t > 0));
+  const outcome = deriveOutcome(data, jobList, models);
+  const batchChild = Boolean(data.batch_id);
 
   return (
-    <section className="space-y-4">
-      <h1 className="text-2xl font-bold">요청 {requestId}</h1>
-      <Card>
-        <div className="flex items-center gap-3">
-          <StatusPill state={data.state} />
-          <span className="text-muted text-sm">{data.operation}</span>
+    <StageNavProvider>
+      <section className="max-w-6xl space-y-5">
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-1">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-2xl font-bold">{`${data.operation} 요청`}</h1>
+            <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-ink/70">
+              <span className="select-all font-mono [overflow-wrap:anywhere]">{data.request_id}</span>
+              <span aria-hidden>·</span><span>{`요청자 ${data.requester_id}`}</span>
+              <span aria-hidden>·</span><span>{`제출 ${kstStamp(data.created_at)}`}</span>
+              <span aria-hidden>·</span><span>{`우선순위 ${data.priority}`}</span>
+              {data.batch_id && (<>
+                <span aria-hidden>·</span>
+                <Link className={`text-accent underline ${FOCUS_RING}`} to={`/admin/batches/${data.batch_id}`}>
+                  {`배치 ${data.batch_id.slice(0, 8)}`}
+                </Link>
+              </>)}
+            </div>
+          </div>
+          {live && (
+            <span className="inline-flex items-center gap-1.5 pt-1 text-xs text-ink/70">
+              <span className="relative inline-flex h-2 w-2" aria-hidden>
+                <span className="absolute inline-flex h-full w-full rounded-full bg-busy/60 motion-safe:animate-ping" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-busy" />
+              </span>
+              자동 갱신 중
+            </span>
+          )}
         </div>
-        <dl className="text-sm grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 mt-3">
-          {/* 사유(사용자 보고 2026-08-16): 실패한 요청에서 사용자가 가장 먼저 찾는
-              값이라 dl 의 첫 줄이다(상태 pill 바로 아래 = 상태→사유 순). 소스는
-              **요청 자신의** 종단 사유(백엔드가 results 행에서, 없으면 마지막 전이
-              에서 싣는다) — 잡의 reason_code 가 아니다: 잡이 만들어지기 전에 거부된
-              요청(플래너 어드미션)은 잡이 아예 없어 사유를 실을 곳이 없었다.
-              없으면(비종단·사유 없는 종단·구버전 응답) 줄 자체를 그리지 않는다 --
-              "—" 도 거짓 표시다(BatchDetail 항목 패널은 표 정렬 때문에 "—" 를 쓰지만
-              여기 dl 은 줄 수가 가변이라 생략이 더 정직하다). */}
-          {data.reason_code && (<>
-            <dt className="text-muted">사유</dt>
-            <dd className="text-bad">{reasonText(data.reason_code)}</dd>
-          </>)}
-          {/* 대상: payload 가 담은 그대로(스토리지:상대경로). 완료된 작업을 볼 때
-              화면 어디에도 무엇을 대상으로 돌았는지 없었다(사용자 보고). */}
-          <dt className="text-muted">대상</dt>
-          <dd className="font-mono text-xs break-all">
-            {pathSummary(data.operation, data.payload)}
-          </dd>
-          {/* 절대경로는 **지금의** managed_root 로 조합한다 — payload 에 박아 두면
-              스토리지 경로가 바뀐 뒤 존재하지 않는 경로를 사실처럼 보인다. 뿌리를
-              모르면(비관리자·조회 실패) 줄 자체를 안 그린다(거짓 경로 금지). */}
-          {abs !== null && (<>
-            <dt className="text-muted">절대경로</dt>
-            <dd className="font-mono text-xs break-all text-muted">{abs}</dd>
-          </>)}
-          <dt className="text-muted">요청자</dt><dd>{data.requester_id}</dd>
-          <dt className="text-muted">제출 대기</dt>
-          <dd>{durationText(data.created_at, firstPickup?.at)}</dd>
-          <dt className="text-muted">수행시간</dt><dd>{durationText(data.created_at, end)}</dd>
-        </dl>
-        {canCancelRequest && (
-          <div className="mt-3">
-            <Button variant="ghost" disabled={cancelRequest.isPending}
-                    onClick={() => cancelRequest.mutate()}>요청 취소</Button>
-            {cancelRequest.isError && (
-              <p className="text-bad text-sm mt-1">{(cancelRequest.error as ApiError).message}</p>
-            )}
+        {refetchErr && (
+          <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-attn/30 bg-attnbg/60 px-3 py-2 text-xs text-ink">
+            <TriangleAlert className="h-4 w-4 shrink-0 text-attn" aria-hidden />
+            <p className="min-w-0 flex-1 break-keep">
+              {`자동 갱신에 실패했습니다 — ${Number.isFinite(staleAt) ? kstClock(new Date(staleAt).toISOString()) : "—"} 기준 화면입니다.`}
+            </p>
+            <RetryButton onClick={() => { void req.refetch(); void jobs.refetch(); }} />
           </div>
         )}
-      </Card>
-      <Card>
-        <h2 className="text-sm font-semibold mb-2">전이 이력</h2>
-        <Timeline transitions={transitions} />
-      </Card>
-      <DiagnosticEvents req={data} />
-      <div className="space-y-2">
-        {(jobs.data ?? []).map((j) => (
-          <Card key={j.job_id}>
-            {/* 헤더 = 식별자 · 실행 도구 · 상태pill. 도구·식별자 묶음은 flex-wrap
-                이다 — job_id(UUID)와 도구 문구가 좁은 폭에서 한 줄을 넘기면 문서
-                가로 스크롤(e2e L1)이 되므로 줄바꿈으로 흡수한다. */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                <span className="text-sm">{j.job_id}</span>
-                <ToolLabel job={j} />
-              </div>
-              <StatusPill state={j.state} />
-            </div>
-            {j.reason_code && <p className="text-bad text-sm mt-1">{reasonText(j.reason_code)}</p>}
-            {j.artifact_uri && (
-              <p className="text-muted text-xs mt-1 break-all">아티팩트 {j.artifact_uri}</p>
+        <OutcomeCard req={data} jobs={jobList} models={models} abs={abs} target={target} cancelRequest={cancelRequest} />
+        <section aria-labelledby="jobs-h" className="space-y-3">
+          <h2 id="jobs-h" className="flex items-baseline gap-2 text-sm font-semibold">
+            데이터 작업
+            {jobList !== null && jobList.length > 0 && (
+              <span className="text-xs font-normal text-ink/70 tabular-nums">{`${jobList.length}개`}</span>
             )}
-            <SupplementaryGroupsRow job={j} backends={backends} />
-            <ResultSummary summary={j.result_summary} />
-            {/* 배치 자식은 단건 컨펌을 못 한다(서버 409 batch_child_confirm_via_batch, 2026-10-07) -- 배치 확인 1회가
-                자식 전부를 대표하고 특권 게이트도 그쪽에 있다. 컨펌 버튼 대신 어디서 확인하는지를 말한다. */}
-            {j.state === "ConfirmPending" && (data?.batch_id ? (
-              <p className="mt-2 text-sm text-muted">
-                배치 항목입니다 — 실행 확인은 항목별이 아니라 <Link className="text-accent underline" to={`/admin/batches/${data.batch_id}`}>배치 상세</Link>에서
-                배치 단위로 합니다. 배치가 「확인 대기」면 「배치 확인」으로 실행되고, 이미 확인된 배치면 동시 실행 상한만큼씩 차례로 실행됩니다.
-              </p>
-            ) : <div className="mt-2"><ConfirmDialog job={j} /></div>)}
-            {j.state !== "ConfirmPending" && !isTerminal(j.state) && (
-              <div className="mt-2">
-                <Button variant="ghost" disabled={cancel.isPending}
-                        onClick={() => cancel.mutate(j.job_id)}>취소</Button>
-                {/* useCancelJob 은 요청 단위 훅 하나를 모든 잡 카드가 공유한다 --
-                    variables(마지막 mutate 인자 = jobId)로 한정하지 않으면 한 잡의
-                    취소 실패가 모든 카드에 도배된다. */}
-                {cancel.isError && cancel.variables === j.job_id && (
-                  <p className="text-bad text-sm mt-1">{(cancel.error as ApiError).message}</p>
-                )}
-              </div>
-            )}
-            <div className="mt-3">
-              <Timeline transitions={j.transitions} />
+          </h2>
+          {jobList === null ? (
+            // 잡 조회 실패를 삼키면 "잡이 0개" 와 구별되지 않는다 -- 실패를 이 자리에서 말한다.
+            <div role="alert" className={ERROR_BOX}>
+              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+              <p className="min-w-0 flex-1">{(jobs.error as Error).message}</p>
+              <RetryButton onClick={() => { void jobs.refetch(); }} />
             </div>
-            <JobViewer jobId={j.job_id} phaseRefs={j.phase_refs} reasonCode={j.reason_code} />
-          </Card>
-        ))}
-      </div>
-    </section>
+          ) : jobList.length === 0 ? (
+            <div className="flex items-center justify-center gap-2 rounded-card border border-dashed border-line px-4 py-6 text-center text-sm text-ink/70">
+              {!REQUEST_TERMINAL_STATES.has(data.state) ? (<>
+                <LoaderCircle className="h-4 w-4 shrink-0 motion-safe:animate-spin" aria-hidden />
+                <span className="break-keep">작업을 계획하는 중입니다 — 실행 노드가 정해지면 단계가 여기에 나타납니다.</span>
+              </>) : (
+                <span className="break-keep">만들어진 작업이 없습니다 — 계획 단계에서 끝나 로그·출력이 없습니다.</span>
+              )}
+            </div>
+          ) : (
+            jobList.map((j, i) => (
+              <JobCard key={j.job_id} job={j} model={models[i]} backends={backends} cancel={cancel}
+                       events={data.events} jobCount={jobList.length} refIso={data.created_at}
+                       batchChild={batchChild} confirmOnGate={outcome.confirmOwner === "gate"} />
+            ))
+          )}
+        </section>
+        <ActivitySection req={data} />
+        <p className="sr-only" role="status" aria-live="polite">{announce}</p>
+      </section>
+    </StageNavProvider>
   );
 }

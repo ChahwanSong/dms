@@ -1,9 +1,9 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
-import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { useArtifacts, useArtifactFile } from "./useArtifacts";
+import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
+import { useArtifacts, useArtifactFile, useJobLogs } from "./useArtifacts";
 
 const server = setupServer();
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
@@ -48,4 +48,42 @@ test("useArtifactFile with enabled: true requests the correct URL and returns th
   const { result } = renderHook(() => useArtifactFile("j1", "preflight", "stdout.log", true), { wrapper });
   await waitFor(() => expect(result.current.data).toEqual(file));
   expect(requestedUrl).toContain("/api/user/jobs/j1/artifacts/preflight/stdout.log");
+});
+
+// --- 2026-10-08 요청 상세 재설계: 상태 전이 때 목록 다시 읽기 + 진행 중 로그 라이브 ----------------------------------
+
+test("useArtifacts: refreshKey 가 바뀌면 목록을 다시 읽는다(러너는 phase 가 끝날 때 파일을 쓴다)", async () => {
+  let calls = 0;
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => {
+    calls += 1;
+    return HttpResponse.json({ entries: [], truncated: false });
+  }));
+  const { result, rerender } = renderHook(({ k }) => useArtifacts("j1", k), { wrapper, initialProps: { k: "Executing|preflight" } });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(calls).toBe(1);
+  rerender({ k: "Succeeded|execution,preflight" });
+  await waitFor(() => expect(calls).toBe(2));
+  // keepPreviousData: 키가 바뀌는 동안에도 이전 목록이 남는다(칩이 깜빡이지 않게)
+  expect(result.current.data).toEqual({ entries: [], truncated: false });
+});
+
+test("useJobLogs live: 3초마다 다시 읽고, live 가 꺼지면 멈춘다", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    let calls = 0;
+    server.use(http.get("/api/user/jobs/j1/logs", () => {
+      calls += 1;
+      return HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "live", entries: [] });
+    }));
+    const { rerender } = renderHook(({ live }) => useJobLogs("j1", "preflight", true, { live }),
+      { wrapper, initialProps: { live: true } });
+    await waitFor(() => expect(calls).toBe(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    await waitFor(() => expect(calls).toBe(2));
+    rerender({ live: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
+    expect(calls).toBe(2);
+  } finally {
+    vi.useRealTimers();
+  }
 });

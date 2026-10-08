@@ -9,8 +9,9 @@ import type { BreakdownRow, JobMetrics, SecondsSummary, StateCount } from "../..
 
 const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
 
-// 종단 집합은 domain.TERMINAL_DATA_JOB_STATES와 동일한 6종. jobState.ts의
-// TERMINAL_STATES는 요청 화면용 옛 집합이라 TimedOut이 빠져 있어 쓰지 않는다.
+// 종단 집합은 domain.TERMINAL_DATA_JOB_STATES와 동일한 6종. jobState.ts의 TERMINAL_STATES 도 2026-10-08 부터
+// 같은 6종이지만, 이 카드는 서버 집계(by_state)의 축을 그대로 따라가야 해서 국소 사본을 유지한다(화면 판정이
+// 바뀌어도 통계 분모가 따라 움직이지 않게).
 const TERMINAL = new Set(
   ["Succeeded", "Failed", "TimedOut", "Cancelled", "Rejected", "PreviewExpired"]);
 

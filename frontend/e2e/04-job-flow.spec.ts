@@ -64,6 +64,11 @@ test.describe("E4 잡 종단 흐름", () => {
     // 요청이 하나도 없는 시점이라 상세를 돌 수 없다(교차 파일 상태 공유보다 이 배치가
     // 결정적이다). 상세엔 표가 없으므로 minTableCells 는 기본 0 이고 L1/L3/L4 가 진다.
     await assertLayoutSane(page);
+    // 요청 상세의 375 순회(2026-10-08 재설계 후 두 단계 구획·칩·배너가 좁은 폭에서 문서를 넘기지 않는지). 32자
+    // hex id·경로·KPI 칸이 375 에서 가로 스크롤을 만들던 회귀를 여기서 잡는다. md 아래라 사이드바는 위쪽 블록(L3 끔).
+    await page.setViewportSize({ width: 375, height: 667 });
+    await assertLayoutSane(page, { sidebarFixed: false });
+    await page.setViewportSize({ width: 1280, height: 800 });
 
     // 「새로고침 없이」의 증거를 심는다: window 는 문서 내비게이션에서 통째로
     // 교체되므로, 이 표식이 끝까지 살아 있다는 것은 하드 리로드가 **한 번도**

@@ -4,7 +4,7 @@ import { batchPillVariant, batchStatusLabel, buildPillVariant, isTerminal, pillV
 import { test, expect } from "vitest";
 
 test("terminal states", () => {
-  ["Succeeded", "Failed", "Rejected", "Cancelled", "PreviewExpired"]
+  ["Succeeded", "Failed", "TimedOut", "Rejected", "Cancelled", "PreviewExpired"]
     .forEach((s) => expect(isTerminal(s)).toBe(true));
   expect(isTerminal("Executing")).toBe(false);
   expect(TERMINAL_STATES.has("Succeeded")).toBe(true);
@@ -20,6 +20,8 @@ test("pill variant mapping: green=ok, red=bad, violet=busy", () => {
   expect(pillVariant("Failed")).toBe("bad");
   expect(pillVariant("Rejected")).toBe("bad");
   expect(pillVariant("Cancelled")).toBe("bad");
+  // TimedOut 은 실패 종단이다(domain.TERMINAL_DATA_JOB_STATES) -- 빠져 있으면 neutral 회색으로 "진행 중" 처럼 읽혔다.
+  expect(pillVariant("TimedOut")).toBe("bad");
   expect(pillVariant("Executing")).toBe("busy");
   expect(pillVariant("ConfirmPending")).toBe("busy");
   expect(pillVariant("Pending")).toBe("neutral");
