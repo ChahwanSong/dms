@@ -92,8 +92,9 @@ test("renders the job's result_summary as key/value pairs", async () => {
   expect(await screen.findByText("files")).toBeInTheDocument();
   expect(screen.getByText("120")).toBeInTheDocument();
   expect(screen.getByText("bytes")).toBeInTheDocument();
-  // bytes 는 사람 표기 + 원값(2026-08-23, scan 실 사용량도 이 칸으로 온다)
-  expect(screen.getByText("456 B (456 B)")).toBeInTheDocument();
+  // bytes 는 사람 표기 + 원값(2026-08-23, scan 실 사용량도 이 칸으로 온다). 1 KiB 미만은 사람 표기가 곧 원값이라
+  // 괄호 없이 한 번만(2026-10-08 — 「456 B (456 B)」 중복 제거; 1 KiB 이상은 아래 테스트가 괄호를 고정한다).
+  expect(screen.getByText("bytes").nextElementSibling?.textContent).toBe("456 B");
 });
 
 test("humanizes result_summary bytes above 1 KiB", async () => {

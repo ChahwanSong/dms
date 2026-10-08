@@ -13,9 +13,13 @@ const H5 = "mb-2 text-xs font-semibold text-ink/70";
 
 function valueText(k: string, v: unknown): string {
   // String(null) 은 "null" -- rm 은 설계상 bytes 가 없어(도구 미보고) null 이 정상이다. 대시보드와 같은 "—" 규약.
-  // bytes 는 사람 표기 + 원값(정밀도 손실 없이 검증 가능하게).
+  // bytes 는 사람 표기 + 원값(정밀도 손실 없이 검증 가능하게). 1 KiB 미만은 사람 표기가 곧 원값이라 괄호를 붙이지
+  // 않는다(「10 B (10 B)」 중복, d164 실 화면).
   if (v === null || v === undefined) return "—";
-  if (k === "bytes" && typeof v === "number") return `${humanBytes(v)} (${v} B)`;
+  if (k === "bytes" && typeof v === "number") {
+    const human = humanBytes(v);
+    return human === `${v} B` ? human : `${human} (${v} B)`;
+  }
   if (typeof v === "object") {
     try { return JSON.stringify(v); } catch { return String(v); }
   }
