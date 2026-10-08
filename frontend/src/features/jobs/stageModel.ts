@@ -20,12 +20,16 @@ export type StepStatus =
   | "waiting" | "running" | "awaiting" | "done"
   | "failed" | "rejected" | "timed_out" | "cancelled" | "expired"
   | "skipped" | "unknown";
-// 실패 지점을 무엇으로 알았나. deepest_ref·none·gate_ambiguous 는 **추정**이라 화면이 단계를 단정하지 않는다.
-// gate = 단계 사이 관문(stepper._build_spec 의 제출 전 검사, 스케줄 전 재검사)의 fail-closed 사유로 정한 지점이다 --
-// 그 단계의 파드는 돌지 않았으니 로그를 자동으로 열지 않는다(_fail_closed 가 ref 파드를 지우고 박제도 하지 않는다).
+// 실패 지점을 무엇으로 알았나. deepest_ref·none·gate_ambiguous·base_ambiguous 는 **추정**이라 화면이 단계를 단정하지
+// 않는다. gate = 단계 사이 관문(stepper._build_spec 의 제출 전 검사, 스케줄 전 재검사)의 fail-closed 사유로 정한 지점이다
+// -- 그 단계의 파드는 돌지 않았으니 로그를 자동으로 열지 않는다(_fail_closed 가 ref 파드를 지우고 박제도 하지 않는다).
+// base_ambiguous = 그룹 잡의 artifact_base_* 거부가 사전 점검 파드 마커인지 다음 제출 직전 관문인지 기록만으로 모른다
+// (ALSO_POD_MARKER 주석).
 export type Evidence =
-  | "submit_prefix" | "reason_prefix" | "gate" | "gate_ambiguous" | "from_state" | "state" | "deepest_ref" | "none";
-export const isEstimated = (e: Evidence): boolean => e === "deepest_ref" || e === "none" || e === "gate_ambiguous";
+  | "submit_prefix" | "reason_prefix" | "gate" | "gate_ambiguous" | "base_ambiguous" | "from_state" | "state"
+  | "deepest_ref" | "none";
+export const isEstimated = (e: Evidence): boolean =>
+  e === "deepest_ref" || e === "none" || e === "gate_ambiguous" || e === "base_ambiguous";
 export type Flow = "scan" | "previewed";
 
 export interface StepModel {
@@ -137,6 +141,32 @@ const SUBMIT_GATE = new Set([
   "privilege_not_requested", "chown_name_not_supported", "storage_missing_at_step",
   "artifact_base_not_traversable", "artifact_base_group_writable", "node_excluded_at_step",
 ]);
+// 관문 사유이면서 preflight·exec_preflight 파드 스크립트의 마커(DMS_PREFLIGHT_REASON=, execution_manifests.PREFLIGHT_REASONS)
+// 이기도 한 둘(2026-10-08 리뷰 N3). 마커 길은 그 파드가 **실패한** 것이라(_preflight_reason → _finalize(REJECTED)) 실패
+// 지점은 from_state 그 단계이고 그 로그(박제 사본)에 마커가 있다. 관문 길(_step_one 의 ArtifactBaseUnsafeAtStep →
+// _fail_closed)만 artifact_base_unsafe_at_step 이벤트(payload.job_id)를 남긴다 -- 그 이벤트가 있으면 관문이다.
+// Executing 에선 대상 상태도 둘을 가른다: _fail_closed 는 실행 상태에서 Failed, 마커 길은 늘 Rejected(이벤트가
+// 요청 이벤트 창(최신 100건) 밖으로 밀려도 Failed 면 관문이다).
+// Preflight→Rejected 에서 이벤트가 없을 때(리뷰 3차): 관문은 _build_spec 이 **보조 gid 가 실린 잡에서만**
+// (_raise_if_base_unsafe_for_groups) 돌린다 -- 그룹 없는 잡(키 부재·null·[])이면 마커 길이 확실하다. 그룹 잡이면 모른다:
+// 이벤트가 아직 안 왔거나(잡 2초·요청 3초 폴링이 따로 돌아 잡 종단이 먼저 보인다) 보존 기한(DMS_EVENT_RETENTION_DAYS,
+// 기본 30일)에 지워졌거나 창 밖으로 밀렸을 수 있다 -- 단계를 단정하지 않고 로그도 자동으로 열지 않는다(base_ambiguous).
+// 단 둘이 다 맞으면 마커 길로 확정한다(markerSure, 리뷰 4차): (1) 요청 상세 응답의 요청이 종단이다 -- get_request 는
+// 요청 행을 먼저 읽고 이벤트를 나중에 읽고, stepper 는 관문 이벤트를 _fail_closed(→ 요청 종단)보다 먼저 남긴다. 그러니
+// 종단 요청 응답엔 관문 이벤트가 이미 커밋돼 있다(실시간 틈이 닫힌다). (2) 이 잡의 identity_groups_checked
+// phase=preflight 가 응답에 있다 -- 그룹 잡의 사전 점검 제출 때 남고 관문 이벤트보다 **오래됐다**. 보존 삭제(나이순)·
+// 최신 100건 창(오래된 쪽부터 버림) 모두 오래된 것부터 지우니, 그것이 남았으면 그보다 새 관문 이벤트도 남았다.
+// 남는 한계(수용): observability.record_event 는 예외를 삼킨다 -- 관문 이벤트 INSERT 만 조용히 실패하고 바로 뒤 종단
+// UPDATE 는 성공한 드문 경우엔 관문을 마커로 단정한다(통과한 사전 점검 로그가 열린다; 사유 문구는 같다).
+const ALSO_POD_MARKER = new Set(["artifact_base_not_traversable", "artifact_base_group_writable"]);
+// 이 잡에 보조 gid 가 실렸나(stepper._build_spec 의 `if gids:` 와 같은 판정 -- None·[] 은 없음). DB 가 신뢰 경계라 모양을
+// 가정하지 않는다(배열이 아니면 없음 -- 백엔드는 모양이 틀린 신원을 base 관문 전에 identity_missing_at_step 으로 끊는다).
+function hasSupplementaryGids(job: DataJob): boolean {
+  const wp: unknown = job.worker_pool;
+  if (!isPlainObject(wp) || !isPlainObject(wp.identity)) return false;
+  const gids = wp.identity.supplementary_gids;
+  return Array.isArray(gids) && gids.length > 0;
+}
 // 제출된 파드·vcjob 이 아직 스케줄 전(PENDING)일 때 폴링이 던지는 사유(_raise_if_blocked·_note_queued_recheck·
 // _run_queued_rechecks). node_excluded_at_step 은 제출 전 관문과 둘 다라, from_state 만으로는 어느 쪽인지 모른다.
 const QUEUE_GATE = new Set(["node_excluded_at_step", "identity_changed_at_step", "identity_missing_at_step"]);
@@ -182,6 +212,9 @@ function stageOfStep(id: StepId): StageId | "gate" {
 interface LocateCtx {
   execQueued: boolean;               // 실행 vcjob 이 제출됐지만 RUNNING 관측 전(sched_wait_seconds 가 아직 null)
   deferred: ReadonlySet<string>;     // 이 잡에 identity_recheck_deferred(제출 보류)가 남은 phase
+  baseGate: boolean;                 // 이 잡에 artifact_base_unsafe_at_step(제출 전 base 정적 관문)이 남았다
+  groups: boolean;                   // 보조 gid 가 실린 잡(base 정적 관문이 도는 잡)
+  markerSure: boolean;               // 관문 이벤트가 없다는 사실을 믿을 수 있다(ALSO_POD_MARKER 주석)
 }
 
 // 종단 실패의 실패 지점(위에서부터 처음 걸리는 규칙).
@@ -200,8 +233,19 @@ function locateFailure(job: DataJob, tr: Transition[], refs: Record<string, stri
   if (REASON_PREFIX_STEP[prefix]) return mk(REASON_PREFIX_STEP[prefix], "reason_prefix");
   const terminalT = [...tr].reverse().find((t) => isTerminal(t.to_state)) ?? null;
   const from = terminalT?.from_state;
+  // 파드 마커와 겹치는 base 사유는 관문 이벤트(또는 실행 상태의 Failed)가 있을 때만 관문이다(리뷰 N3) -- 아니면 그
+  // 파드가 실패한 것이라 아래 from_state 로 간다(그 단계가 실패, 마커가 든 로그 자동 열림).
+  // 다음 제출의 보류 기록(identity_recheck_deferred)이 있으면 앞 파드는 이미 SUCCEEDED 였다(보류는 그 뒤에만 생긴다) --
+  // 그 파드의 마커일 수 없으니 관문이다(base 관문은 보류 중에도 매 틱 재확인보다 먼저 돈다).
+  const preNextHeld = from === "Preflight" && ctx.deferred.has(flow === "scan" ? "execution" : "preview");
+  const isGate = SUBMIT_GATE.has(prefix) && (!ALSO_POD_MARKER.has(prefix) || ctx.baseGate || preNextHeld
+    || ((from === "Executing" || from === "Running") && job.state === "Failed"));
+  // 그룹 잡의 Preflight→Rejected 는 이벤트 없이는 마커인지 관문인지 모른다(ALSO_POD_MARKER 주석) -- 사전 점검 행에 추정으로.
+  if (ALSO_POD_MARKER.has(prefix) && !isGate && from === "Preflight" && ctx.groups && !ctx.markerSure) {
+    return mk("preflight", "base_ambiguous");
+  }
   // 단계 사이 관문(SUBMIT_GATE)은 from_state 보다 먼저다(리뷰 V6·V7·V8): 앞 단계 파드는 통과했고 막힌 것은 다음 제출이다.
-  if (SUBMIT_GATE.has(prefix)) {
+  if (isGate) {
     // node_excluded_at_step 만 모호하다 -- 앞 단계 파드의 스케줄 대기(PENDING) 재검사도 같은 사유를 던진다. 다음 제출의
     // 보류 기록(identity_recheck_deferred)이 있으면 앞 파드는 이미 SUCCEEDED 였으니 모호하지 않다(보류는 그 뒤에만 생긴다).
     const queueOrSubmit = (next: StepId) => prefix === "node_excluded_at_step" && !ctx.deferred.has(next);
@@ -221,9 +265,21 @@ function locateFailure(job: DataJob, tr: Transition[], refs: Record<string, stri
       return mk("execution", "gate", { queued: true });
     }
   }
+  // 다음 제출 보류(identity_recheck_deferred) 중의 취소(리뷰 N4): 보류는 앞 파드가 SUCCEEDED 한 뒤 다음 제출 직전에만
+  // 생기므로, from_state 단계를 「취소됨」으로 칠하면 통과한 파드를 탓하고 보류 시간(분 단위)을 그 소요로 센다. 취소된
+  // 것은 아직 제출되지 않은 다음 단계다(시작 전).
+  const cancelledInHold = (next: StepId) => job.state === "Cancelled" && ctx.deferred.has(next);
   switch (from) {
     case "Pending": return mk("preflight", "from_state", { notStarted: true });
-    case "Preflight": return mk("preflight", "from_state");
+    case "Preflight": {
+      const next: StepId = flow === "scan" ? "execution" : "preview";
+      // 다음 단계 ref 가 이미 있으면 그 제출은 끝났다(_submit_* 가 set_phase_ref 뒤에 상태를 옮긴다 -- 그 틈에 취소가
+      // 끼면 Preflight→Cancelled 에 ref 가 남는다, 리뷰 4차). 시작 전이라 말하면 executionStarted 와 배너가 엇갈린다.
+      if (has(refs, next)) {
+        return mk(next, "from_state", { queued: next === "execution" && job.state === "Cancelled" && ctx.execQueued });
+      }
+      return cancelledInHold(next) ? mk(next, "from_state", { notStarted: true }) : mk("preflight", "from_state");
+    }
     case "PreviewRunning": return mk("preview", "from_state");
     case "ConfirmPending": return mk("confirm", "from_state");
     case "Executing":
@@ -233,8 +289,9 @@ function locateFailure(job: DataJob, tr: Transition[], refs: Record<string, stri
         return mk("execution", "from_state", { queued: job.state === "Cancelled" && ctx.execQueued });
       }
       // 재점검 파드 ref 도 없으면 파드가 만들어지기 전에 끝났다(Pending 규칙의 짝, 리뷰 V7) -- 「소요」·로그를 지어내지 않게.
-      return has(refs, "exec_preflight") ? mk("exec_preflight", "from_state")
-        : mk("exec_preflight", "from_state", { notStarted: true });
+      if (!has(refs, "exec_preflight")) return mk("exec_preflight", "from_state", { notStarted: true });
+      return cancelledInHold("execution") ? mk("execution", "from_state", { notStarted: true })
+        : mk("exec_preflight", "from_state");
   }
   for (const p of ["execution", "exec_preflight", "preview", "preflight"] as const) {
     if (has(refs, p)) return mk(p, "deepest_ref");
@@ -309,7 +366,9 @@ function aggregate(statuses: StepStatus[]): StepStatus {
 const ENDED: ReadonlySet<StepStatus> = new Set(["done", "failed", "rejected", "timed_out", "cancelled", "expired"]);
 
 // events = 요청 상세 응답의 events(요청 단위, 최신 100건 오름차순). 이 잡의 것만 쓴다(제출 보류·관문 모호성 해소).
-export function deriveJobStages(job: DataJob, events?: unknown): JobStagesModel {
+// opts.requestTerminal = **같은 응답**의 요청 상태가 종단인가(관문 이벤트 부재를 믿는 조건 -- ALSO_POD_MARKER 주석).
+export function deriveJobStages(job: DataJob, events?: unknown,
+                                opts: { requestTerminal?: boolean } = {}): JobStagesModel {
   const flow: Flow = job.operation === "scan" ? "scan" : "previewed";
   const order = orderOf(flow);
   const tr = normTransitions(job.transitions);
@@ -326,8 +385,13 @@ export function deriveJobStages(job: DataJob, events?: unknown): JobStagesModel 
   const execQueued = has(refs, "execution") && execSubmitted !== null && finiteOrNull(job.sched_wait_seconds) === null;
   const deferred = new Set<string>(evs.filter((e) => e.event_type === "identity_recheck_deferred")
     .map((e) => e.payload.phase).filter(isPhase));
+  const baseGate = evs.some((e) => e.event_type === "artifact_base_unsafe_at_step");
   const failure = terminal && job.state !== "Succeeded"
-    ? locateFailure(job, tr, refs, flow, { execQueued, deferred }) : null;
+    ? locateFailure(job, tr, refs, flow, {
+      execQueued, deferred, baseGate, groups: hasSupplementaryGids(job),
+      markerSure: opts.requestTerminal === true && evs.some((e) =>
+        e.event_type === "identity_groups_checked" && e.payload.phase === "preflight"),
+    }) : null;
   const hold = !terminal && known ? submitHold(job.state, tr, refs, flow, evs) : null;
   const idx = (id: StepId) => order.indexOf(id);
 
@@ -362,9 +426,20 @@ export function deriveJobStages(job: DataJob, events?: unknown): JobStagesModel 
   const execStart = execSubmitted ?? (flow === "scan" ? firstTo("Running") : selfExec);
   const endIfFailedHere = (id: StepId) => (failure?.step === id ? atOf(terminalT) : null);
   const sfp = submitFailedPhase(job.reason_code);
-  // 관문이 다음 제출을 막았으면(gate·시작 전) 앞 파드 단계가 언제 끝났는지 모른다 -- 그 상태를 떠난 시각은 종단
-  // 전이라 보류 시간(≥180초일 수 있다)까지 소요에 섞인다. 사람 관문(confirm)은 파드가 아니라 그대로 둔다.
-  const gatedPrev = failure?.evidence === "gate" && failure.notStarted ? order[idx(failure.step) - 1] ?? null : null;
+  // 다음 단계가 시작 전에 끝났으면(관문이 제출을 막았거나 제출 보류 중 취소됐으면 -- notStarted) 앞 파드 단계가 언제
+  // 끝났는지 모른다 -- 그 상태를 떠난 시각은 종단 전이라 보류 시간(≥180초일 수 있다)까지 소요에 섞인다(리뷰 V6·N4).
+  // 사람 관문(confirm)은 파드가 아니라 그대로 둔다(confirm 의 끝은 gatedPrev 를 보지 않는다).
+  const gatedPrev = failure?.notStarted === true ? order[idx(failure.step) - 1] ?? null : null;
+  // 다음 제출이 보류됐던 적이 있으면(identity_recheck_deferred -- 보류가 풀려 다음 단계가 돌았어도) 앞 파드 단계의 끝을
+  // 모른다(리뷰 3차, N4·V6·V9 의 형제): 그 상태를 떠난 시각은 보류가 풀린 뒤의 제출 시각이라 「소요」에 보류(분 단위)가
+  // 섞이고, 보류 주석은 다음 단계 행에 붙는다 -- 카드가 기다린 시간을 통과한 파드의 기계 시간으로 탓한다. 같은 이유로
+  // 재점검 파드 제출이 보류됐으면 재점검의 시작(파드 제출 시각은 기록되지 않는다)도 모른다. 구획 범위·「실행 단계 소요」
+  // 는 벽시계 그대로다(보류는 그 구획 안의 일이다 -- 아래 stage()).
+  // 그 파드 단계가 실패 지점이면(보류 뒤에는 생기지 않는 모양이지만) 끝은 종단 시각 그대로 둔다.
+  const preNext: Phase = flow === "scan" ? "execution" : "preview";
+  const preflightEndHeld = deferred.has(preNext) && failure?.step !== "preflight";
+  const execPreflightStartHeld = flow === "previewed" && deferred.has("exec_preflight");
+  const execPreflightEndHeld = flow === "previewed" && deferred.has("execution") && failure?.step !== "exec_preflight";
 
   const steps: StepModel[] = order.map((id) => {
     const status = statusOf(id);
@@ -376,7 +451,7 @@ export function deriveJobStages(job: DataJob, events?: unknown): JobStagesModel 
     switch (id) {
       case "preflight":
         start = isNotStarted ? null : firstTo("Preflight");
-        end = gatedPrev === id ? null : firstFrom("Preflight") ?? endIfFailedHere(id);
+        end = gatedPrev === id || preflightEndHeld ? null : firstFrom("Preflight") ?? endIfFailedHere(id);
         break;
       case "preview":
         start = firstTo("PreviewRunning");
@@ -388,8 +463,8 @@ export function deriveJobStages(job: DataJob, events?: unknown): JobStagesModel 
         actor = confirmT && typeof confirmT.actor === "string" ? confirmT.actor : null;
         break;
       case "exec_preflight":
-        start = atOf(confirmT);
-        end = gatedPrev === id ? null : execStart ?? endIfFailedHere(id);
+        start = execPreflightStartHeld ? null : atOf(confirmT);
+        end = gatedPrev === id || execPreflightEndHeld ? null : execStart ?? endIfFailedHere(id);
         break;
       case "execution":
         start = execStart;
@@ -416,11 +491,13 @@ export function deriveJobStages(job: DataJob, events?: unknown): JobStagesModel 
     const ss = steps.filter((s) => s.stage === sid);
     const status = aggregate(ss.map((s) => s.status));
     // 구획 범위: 첫 단계의 시작 → 실제로 돈 마지막 단계의 끝. 사람이 컨펌을 기다린 시간은 관문에 있어 빠진다.
+    // ② 의 시작은 컨펌 시각 그대로다 -- 재점검 제출 보류로 재점검 행의 시작만 지웠을 때도(보류는 ② 안의 일이다).
     const ran = ss.filter((s) => ENDED.has(s.status));
     const endStep = ran.length ? ran[ran.length - 1] : null;
+    const first = ss[0]?.start ?? null;
     return {
       id: sid, steps: ss, status,
-      start: ss[0]?.start ?? null,
+      start: first === null && sid === "exec" && execPreflightStartHeld && !ss[0]?.notStarted ? atOf(confirmT) : first,
       end: ENDED.has(status) || status === "skipped" ? endStep?.end ?? null : null,
     };
   };

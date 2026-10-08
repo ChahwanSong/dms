@@ -10,7 +10,6 @@ import { kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import type { DataJob, RequestDetail } from "../../lib/types";
 import type { useCancelRequest } from "./useJobs";
-import { ConfirmDialog } from "./ConfirmDialog";
 import { Elapsed } from "./JobStages";
 import { useStageNav } from "./stageNav";
 import { msText } from "./format";
@@ -72,11 +71,12 @@ function ExpiryLine({ job }: { job: DataJob }) {
   );
 }
 
-export function OutcomeCard({ req, jobs, models, abs, target, cancelRequest }: {
+export function OutcomeCard({ req, jobs, models, abs, target, cancelRequest, jobsLoading = false }: {
   req: RequestDetail; jobs: DataJob[] | null; models: JobStagesModel[];
   abs: string | null; target: string; cancelRequest: ReturnType<typeof useCancelRequest>;
+  jobsLoading?: boolean;
 }) {
-  const outcome = deriveOutcome(req, jobs, models);
+  const outcome = deriveOutcome(req, jobs, models, { jobsLoading });
   const tiles = deriveKpi(req, jobs, models, Date.now());
   const focus = outcome.focus !== null && jobs ? jobs[outcome.focus] : null;
   const nav = useStageNav(focus?.job_id ?? "");
@@ -144,8 +144,13 @@ export function OutcomeCard({ req, jobs, models, abs, target, cancelRequest }: {
                 const variant = a === primary ? "primary" : "ghost";
                 switch (a) {
                   case "confirm":
-                    // ConfirmDialog 무변경(트리거 「작업 컨펌」). 이 이름의 버튼은 페이지에 하나뿐이다(관문 줄은 2개 이상일 때만).
-                    return focus ? <ConfirmDialog key={a} job={focus} /> : null;
+                    // 컨펌 창(ConfirmDialog, 트리거 「작업 컨펌」)은 **늘 그 잡의 관문 줄**에 있다 -- 컨펌 대기 잡마다 그
+                    // 이름의 버튼은 정확히 하나다(requestOutcome.confirmOwner). 배너는 그리로 스크롤·포커스만 한다(리뷰 N5:
+                    // 창을 배너에 두면 폴링으로 다른 잡이 실패해 초점이 바뀔 때 열어 둔 창이 통째로 사라졌다). 이름이
+                    // 「작업 컨펌」과 달라야 한다(정확 일치 단언·e2e 가 그 버튼을 하나로 센다).
+                    return focus ? (
+                      <Button key={a} variant={variant} onClick={() => nav.requestReveal("confirm")}>컨펌하러 가기</Button>
+                    ) : null;
                   case "showPreview":
                     return <Button key={a} variant={variant} onClick={() => nav.requestReveal("previewResult")}>미리보기 결과 보기</Button>;
                   case "liveLog":

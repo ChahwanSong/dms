@@ -154,6 +154,40 @@ test("라이브 로그 재조회가 502 로 한 번 실패해도 본문은 남�
   }
 });
 
+test("N1 연 직후 첫 로그 조회(데이터 없음)가 진행 중에 단계가 끝나도(live→false) 그 조회에 합류하지 않고 새로 읽는다", async () => {
+  // 리뷰 N1(fixcheck/logs/edge.test.tsx C): 데이터가 없으면 refetch 가 진행 중 조회에 합류해, 끝나기 전에 떠난 요청의
+  // 스냅숏(마커 줄·박제 캡션 없음)이 마지막 모습이 됐다 -- interval 은 이미 꺼져 다시 읽지 않는다.
+  let n = 0;
+  let finished = false;
+  let releaseFirst: (() => void) | null = null;
+  server.use(http.get("/api/user/jobs/0123456789abcdef/logs", async () => {
+    n += 1;
+    const snap = finished;
+    if (n === 1) await new Promise<void>((r) => { releaseFirst = r; });   // 단계가 끝나기 전에 떠난 첫 조회
+    return HttpResponse.json(snap
+      ? { phase: "preflight", ref: "pod/p1", source: "archived",
+          entries: [{ pod: "p1", log: "line1\nDMS_PREFLIGHT_REASON=destination_not_writable" }] }
+      : { phase: "preflight", ref: "pod/p1", source: "live", entries: [{ pod: "p1", log: "line1" }] });
+  }));
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const ui = (live: boolean) => (
+    <QueryClientProvider client={qc}>
+      <OutputViewer jobId="0123456789abcdef" item={LOG} entrySize={null} live={live} viewerId="v1" onClose={() => {}} />
+    </QueryClientProvider>
+  );
+  const view = render(ui(true));
+  await waitFor(() => expect(n).toBe(1));
+  finished = true;
+  view.rerender(ui(false));
+  await waitFor(() => expect(n).toBe(2));             // 합류했다면 1 에 머문다
+  expect(await screen.findByText("DMS_PREFLIGHT_REASON=destination_not_writable")).toBeInTheDocument();
+  expect(screen.getByText("잡 종료 시점에 저장된 사본 — 파드당 마지막 16KB")).toBeInTheDocument();
+  await act(async () => { releaseFirst?.(); await new Promise((r) => setTimeout(r, 30)); });
+  // 취소된 첫 조회의 낡은 응답이 덮어쓰지 않는다
+  expect(screen.getByText("DMS_PREFLIGHT_REASON=destination_not_writable")).toBeInTheDocument();
+  expect(n).toBe(2);
+});
+
 test("splitLines·logSaveText: 끝 줄바꿈은 줄이 아니고, 빈 문자열은 0줄", () => {
   expect(splitLines("")).toEqual([]);
   expect(splitLines("a\nb\n")).toEqual(["a", "b"]);

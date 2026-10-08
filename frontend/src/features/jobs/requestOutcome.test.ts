@@ -104,10 +104,11 @@ test("초점 잡 우선순위: 실패 > 컨펌 대기 > 진행 > 취소 > 만료
   expect(outcome({ state: "Failed" }, [ok, bad, { ...bad, job_id: "f" }]).title).toBe("실행 단계에서 실패했습니다 (작업 3개 중 2개)");
 });
 
-test("「작업 컨펌」 소유: 단건은 배너, 비배치 2개 이상은 관문 줄, 배치 자식은 아무도", () => {
+test("「작업 컨펌」 소유: 비배치 컨펌 대기가 있으면 늘 관문 줄(단건도 -- 배너는 「컨펌하러 가기」만), 배치 자식은 아무도", () => {
   const cp = job({ state: "ConfirmPending" });
   const single = outcome({ state: "Planned" }, [cp]);
-  expect(single.confirmOwner).toBe("banner");
+  // 리뷰 N5: 단건이 초점이어도 창은 관문 줄에 있다(초점이 바뀌어도 열린 창이 옮겨 가지 않게). "confirm" 은 이동 버튼이다.
+  expect(single.confirmOwner).toBe("gate");
   expect(single.next?.actions).toEqual(["confirm", "showPreview"]);
   expect(single.next?.expiry).toBe(true);
   const many = outcome({ state: "Planned" }, [cp, { ...cp, job_id: "j2" }]);
@@ -205,6 +206,76 @@ test("V9 제출 보류 배너: 끝난 단계가 도는 것처럼 말하지 않�
   expect(o.next?.text).toContain("모두 실패하면 작업이 중단됩니다");
   // 보류 기록이 없으면 지금까지 그대로
   expect(outcome({ state: "Planned" }, [j]).title).toBe("사전 점검 중입니다");
+});
+
+test("N3 artifact_base_* 파드 마커 거부는 그 파드 단계를 탓하고 로그로 데려간다, 관문 이벤트가 있으면 지금까지처럼 다음 단계 시작 전", () => {
+  const pre = job({ state: "Rejected", reason_code: "artifact_base_not_traversable", phase_refs: { preflight: "pod/p" },
+    transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] });
+  const marker = outcome({ state: "Rejected", events: [] }, [pre]);
+  expect(marker.title).toBe("사전 점검 단계에서 거부되었습니다");
+  expect(marker.next?.actions).toEqual(["failLog", "newJob"]);
+  expect(marker.failTarget).toEqual({ jobId: "j1", stage: "pre", key: "log:preflight" });
+  expect(marker.next?.text).not.toContain("「진단 이벤트」");
+  const ex = job({ state: "Rejected", reason_code: "artifact_base_group_writable",
+    phase_refs: { preflight: "a", preview: "b", exec_preflight: "c" }, transitions: [...TO_EXEC, t("Executing", "Rejected", 25)] });
+  const exo = outcome({ state: "Rejected", events: [] }, [ex]);
+  expect(exo.title).toBe("실행 직전 재점검 단계에서 거부되었습니다");
+  expect(exo.failTarget).toEqual({ jobId: "j1", stage: "exec", key: "log:exec_preflight" });
+  const gateEvents = [{ id: 1, component: "stepper", severity: "error", event_type: "artifact_base_unsafe_at_step",
+    message: "artifact_base_not_traversable job=j1", at: "2026-10-08T03:15:09Z",
+    payload: { job_id: "j1", problem: "artifact_base_not_traversable" } }];
+  const gate = outcome({ state: "Rejected", events: gateEvents }, [pre]);
+  expect(gate.title).toBe("미리보기를 시작하기 전에 거부되었습니다");
+  expect(gate.next?.text).toContain("「진단 이벤트」");
+  expect(gate.failTarget).toBeNull();
+});
+
+test("3차 N3 그룹 잡의 artifact_base_* 거부에 관문 이벤트가 없으면: 단계·로그를 단정하지 않고 관리자에게 전달하라고 말한다", () => {
+  const pre = job({ state: "Rejected", reason_code: "artifact_base_not_traversable", phase_refs: { preflight: "pod/p" },
+    worker_pool: { identity: { supplementary_gids: [10010], supplementary_gids_status: "applied" } },
+    transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] });
+  const amb = outcome({ state: "Rejected", events: [] }, [pre]);
+  expect(amb.title).toBe("작업이 거부되었습니다");
+  expect(amb.next?.text).toBe("작업 기록(artifact) 저장소 권한 점검에서 막혀 중단되었습니다 — 사유를 관리자에게 전달한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.");
+  expect(amb.next?.actions).toEqual(["newJob"]);
+  expect(amb.failTarget).toBeNull();
+  // 관문 이벤트가 오면 지금까지처럼 「미리보기를 시작하기 전에 거부되었습니다」
+  const gateEvents = [{ id: 1, component: "stepper", severity: "error", event_type: "artifact_base_unsafe_at_step",
+    message: "artifact_base_not_traversable job=j1", at: "2026-10-08T03:15:09Z",
+    payload: { job_id: "j1", problem: "artifact_base_not_traversable" } }];
+  expect(outcome({ state: "Rejected", events: gateEvents }, [pre]).title).toBe("미리보기를 시작하기 전에 거부되었습니다");
+});
+
+test("3차 잡 모름 배너 부제: 실패 문구 없이 재조회 중이면(잡 구획이 중립 골격) 「불러오는 중」, 실패면 「불러오지 못해」", () => {
+  const fail = "작업 정보를 불러오지 못해 단계별 결과를 보일 수 없습니다";
+  expect(outcome({ state: "Planned" }, null).subtitle).toBe(fail);
+  const loading = deriveOutcome({ ...REQ, state: "Planned" }, null, [], { jobsLoading: true });
+  expect([loading.title, loading.subtitle]).toEqual(["요청을 처리하고 있습니다", "작업 정보를 불러오는 중입니다"]);
+  expect(deriveOutcome({ ...REQ, state: "Failed" }, null, [], { jobsLoading: true }).subtitle).toBe("작업 정보를 불러오는 중입니다");
+  // 잡을 알면 무관하다
+  expect(deriveOutcome(REQ, [job({ state: "Succeeded", transitions: SYNC_OK_TR })], [deriveJobStages(job({ state: "Succeeded", transitions: SYNC_OK_TR }))],
+    { jobsLoading: true }).title).toBe("작업이 완료되었습니다");
+});
+
+test("N4 다음 제출 보류 중 취소: 통과한 단계 중이 아니라 다음 단계 전에 취소, 데이터 변경 없음", () => {
+  const deferred = (phase: string, n: number) => ({ id: n, component: "stepper", severity: "warning",
+    event_type: "identity_recheck_deferred", message: null, at: `2026-10-08T03:15:${20 + n}Z`,
+    payload: { job_id: "j1", phase, attempt: n, max_attempts: 4 } });
+  const pre = job({ state: "Cancelled", reason_code: "cancelled_by_user", phase_refs: { preflight: "pod/p" },
+    transitions: [...PRE_TR, t("Preflight", "Cancelled", 58)] });
+  const a = outcome({ state: "Cancelled", events: [deferred("preview", 1), deferred("preview", 2)] }, [pre]);
+  expect(a.title).toBe("미리보기 전에 취소되었습니다");
+  expect(a.next?.text).toBe("실행 전에 취소되어 데이터는 변경되지 않았습니다.");
+  const scan = outcome({ state: "Cancelled", operation: "scan", events: [deferred("execution", 1)] }, [{ ...pre, operation: "scan" }]);
+  expect(scan.title).toBe("실행 전에 취소되었습니다");
+  const ex = job({ state: "Cancelled", reason_code: "cancelled_by_user", phase_refs: { preflight: "a", preview: "b", exec_preflight: "c" },
+    transitions: [...TO_EXEC, t("Executing", "Cancelled", 59)] });
+  const b = outcome({ state: "Cancelled", events: [deferred("execution", 1)] }, [ex]);
+  expect(b.title).toBe("실행 전에 취소되었습니다");
+  expect(b.next?.text).toBe("실행 전에 취소되어 데이터는 변경되지 않았습니다.");
+  // 보류 기록이 없으면 지금까지 그대로
+  expect(outcome({ state: "Cancelled", events: [] }, [pre]).title).toBe("사전 점검 중에 취소되었습니다");
+  expect(outcome({ state: "Cancelled", events: [] }, [ex]).title).toBe("실행 직전 재점검 중에 취소되었습니다");
 });
 
 test("보조 그룹 삭제 경고는 applied + (rm 또는 delete) 일 때만", () => {

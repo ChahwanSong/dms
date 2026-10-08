@@ -11,6 +11,7 @@ import { STEP_COPY, isEstimated, normTransitions, type JobStagesModel, type Stag
 
 export type Tone = "ok" | "bad" | "busy" | "action" | "neutral";
 export type OutcomeIcon = "check" | "x" | "clock" | "loader" | "bell" | "ban" | "hourglass" | "help";
+// confirm = 배너의 「컨펌하러 가기」(그 잡 관문 줄의 「작업 컨펌」으로 스크롤·포커스). 컨펌 창 자체는 배너에 없다.
 export type NextAction = "confirm" | "showPreview" | "liveLog" | "failLog" | "newJob" | "cancelRequest";
 export interface NavTarget { jobId: string; stage: StageId; key: string }
 
@@ -24,10 +25,12 @@ export interface Outcome {
     groupWarning: boolean;    // 보조 그룹 삭제 경고(ConfirmDialog.groupDeleteWarning 과 같은 판정)
     actions: NextAction[];
   } | null;
-  // 「작업 컨펌」 버튼을 누가 갖나: 비배치 ConfirmPending 이 하나이고 그 잡이 배너 초점이면 배너, 그 밖에 하나라도
-  // 있으면 각 관문 줄(실패 잡이 초점을 가져가도 컨펌 버튼이 사라지지 않게), 배치 자식이면 아무도(서버 409
-  // batch_child_confirm_via_batch -- 배치 확인 1회가 자식 전부를 대표한다).
-  confirmOwner: "banner" | "gate" | "none";
+  // 「작업 컨펌」 버튼(ConfirmDialog)을 누가 갖나: 비배치 ConfirmPending 잡이 하나라도 있으면 **늘 각 잡의 관문 줄**
+  // (잡마다 정확히 하나), 배치 자식이거나 컨펌 대기 잡이 없으면 아무도(서버 409 batch_child_confirm_via_batch -- 배치
+  // 확인 1회가 자식 전부를 대표한다). 배너는 컨펌 창을 갖지 않는다(리뷰 N5): 예전엔 초점(다른 잡의 상태)에 따라 창이
+  // 배너↔관문 줄로 옮겨 다녀, 폴링으로 다른 잡이 실패하면 열어 둔 컨펌 창이 사라졌다. 단건 초점이면 배너는 그 관문
+  // 줄로 데려가는 「컨펌하러 가기」(NextAction "confirm")만 둔다.
+  confirmOwner: "gate" | "none";
   liveTarget: NavTarget | null;
   failTarget: NavTarget | null;
 }
@@ -73,11 +76,16 @@ function groupWarningOf(job: DataJob): boolean {
   return job.operation === "rm" || job.options?.delete === true;
 }
 
-export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models: JobStagesModel[]): Outcome {
+// jobsLoading: 잡 목록을 아직 모르는데 실패 문구도 없다(캐시에 데이터 없는 실패가 남은 채 다시 들어와 재조회 중 --
+// RequestDetail 의 잡 구획이 중립 골격 「작업 정보를 불러오는 중…」을 그리는 바로 그 경우). 이때 배너가 「불러오지
+// 못해…」라고 하면 한 화면이 실패와 로딩을 동시에 말한다(리뷰 3차) -- 중립 문구로 바꾼다.
+export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models: JobStagesModel[],
+                              opts: { jobsLoading?: boolean } = {}): Outcome {
   const base = { focus: null, next: null, confirmOwner: "none" as const, liveTarget: null, failTarget: null, subtitle: null };
-  // 잡 모름(잡 조회 실패): 요청 상태만으로 말하고 단계 이야기는 하지 않는다.
+  // 잡 모름(잡 조회 실패·재조회 중): 요청 상태만으로 말하고 단계 이야기는 하지 않는다.
   if (jobs === null) {
-    const subtitle = "작업 정보를 불러오지 못해 단계별 결과를 보일 수 없습니다";
+    const subtitle = opts.jobsLoading === true ? "작업 정보를 불러오는 중입니다"
+      : "작업 정보를 불러오지 못해 단계별 결과를 보일 수 없습니다";
     if (!isRequestTerminal(req.state)) return { ...base, tone: "busy", icon: "clock", title: "요청을 처리하고 있습니다", subtitle };
     if (req.state === "Succeeded") return { ...base, tone: "ok", icon: "check", title: "요청이 완료되었습니다", subtitle };
     if (req.state === "Cancelled") return { ...base, tone: "neutral", icon: "ban", title: "요청이 취소되었습니다", subtitle };
@@ -123,11 +131,10 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
     : "미리보기가 끝나면 컨펌을 요청합니다 — 이 화면은 자동으로 갱신됩니다.";
   const execText = "실행이 끝나면 결과가 여기에 표시됩니다 — 이 화면은 자동으로 갱신됩니다.";
   const withLive = (acts: NextAction[]) => (liveTarget ? ["liveLog" as const, ...acts] : acts);
-  // 「작업 컨펌」 소유는 초점 잡의 갈래가 아니라 비배치 ConfirmPending 잡 수로 한 번에 정한다(리뷰 V2) -- 실패 > 컨펌
-  // 대기 순이라 실패 잡이 초점이면, 예전엔 컨펌을 기다리는 잡이 페이지 어디에서도 컨펌할 수 없었다.
+  // 「작업 컨펌」 소유는 초점 잡의 갈래와 무관하다(리뷰 V2·N5) -- 실패 > 컨펌 대기 순이라 실패 잡이 초점이어도 컨펌을
+  // 기다리는 잡은 자기 관문 줄에서 컨펌할 수 있어야 하고, 초점이 바뀌어도 그 버튼(과 열린 창)이 옮겨 가면 안 된다.
   const pendingConfirm = req.batch_id ? 0 : jobs.filter((j) => j.state === "ConfirmPending").length;
-  const confirmOwner: Outcome["confirmOwner"] = pendingConfirm === 0 ? "none"
-    : pendingConfirm === 1 && job.state === "ConfirmPending" ? "banner" : "gate";
+  const confirmOwner: Outcome["confirmOwner"] = pendingConfirm === 0 ? "none" : "gate";
   const o = { ...base, focus: fi, liveTarget, failTarget, confirmOwner };
 
   if (!m.known) {
@@ -170,6 +177,7 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
         return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리는 작업이 ${sameCat}개 있습니다`,
           next: next("각 작업의 「작업 컨펌」 줄에서 진행하세요.", []) };
       }
+      // "confirm" = 「컨펌하러 가기」(관문 줄의 「작업 컨펌」으로 이동). 창은 관문 줄에만 있다(confirmOwner 참고).
       return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리고 있습니다${tail}`,
         next: next("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다.", ["confirm", "showPreview"],
           { expiry: true, groupWarning: groupWarningOf(job) }) };
@@ -215,6 +223,13 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   if (f?.evidence === "gate_ambiguous") {
     // 노드 제외는 앞 파드의 스케줄 대기 재검사에서도, 다음 제출 직전에서도 나온다 -- 단계를 단정하지 않는다.
     return bad(`작업이 ${verb}`, `실행 노드 점검에서 막혀 중단되었습니다 — ${gateNext}`, ["newJob"]);
+  }
+  if (f?.evidence === "base_ambiguous") {
+    // 그룹 잡의 작업 기록 저장소(base) 권한 거부 -- 사전 점검 파드 마커인지 다음 제출 직전 관문인지 기록만으로 모른다
+    // (관문 이벤트가 아직 안 왔거나 보존 기한에 지워졌다). 단계·로그를 가리키지 않고, 고칠 사람(관리자)을 말한다.
+    return bad(`작업이 ${verb}`,
+      "작업 기록(artifact) 저장소 권한 점검에서 막혀 중단되었습니다 — 사유를 관리자에게 전달한 뒤 다시 제출하세요. 데이터는 변경되지 않았습니다.",
+      ["newJob"]);
   }
   if (!f || isEstimated(f.evidence)) {
     // 추정이면 단계를 단정하지 않는다(전이 기록이 없어 "OO 단계에서 중단" 이 거짓일 수 있다).

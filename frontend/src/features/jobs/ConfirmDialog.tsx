@@ -49,16 +49,18 @@ export function ConfirmDialog({ job }: { job: DataJob }) {
   useEffect(() => { if (!open) confirm.reset(); }, [open]);
   // 문구(사용자 결정 2026-09-17): "미리보기 확인" 은 "미리보기를 열어 본다" 로 읽혀
   // 애매했다 — 이 버튼은 dry-run 결과를 보고 **실행을 승인**하는 행위라 "작업 컨펌".
+  // 본문 글자색은 ink/70(흰 4.94:1, AA). text-muted(#888, 3.54:1)는 장식 전용이다(요청 상세 스펙 §9) -- 이 창은
+  // 컨펌하는 유일한 자리라 안내·지문·만료는 읽혀야 하는 글자다(2026-10-08 리뷰 3차, 스펙의 「무변경」 예외).
   return (
     <Dialog open={open} onOpenChange={setOpen} title={`${job.operation} 작업 컨펌`}
             trigger={<Button>작업 컨펌</Button>}>
       <div className="space-y-2 text-sm">
-        <p className="text-muted">
+        <p className="text-ink/70">
           미리보기(dry-run)가 끝났습니다. 아래 결과를 확인하고 컨펌하면 실제 실행이 시작됩니다.
         </p>
         <pre className="bg-canvas rounded-lg p-3 whitespace-pre-wrap">{previewSummaryText(job)}</pre>
-        <p className="text-muted">지문(fingerprint): <code>{job.preview_fingerprint}</code></p>
-        <p className="text-muted">만료: {kstStampOrDash(job.preview_expires_at)}</p>
+        <p className="text-ink/70">지문(fingerprint): <code>{job.preview_fingerprint}</code></p>
+        <p className="text-ink/70">만료: {kstStampOrDash(job.preview_expires_at)}</p>
         {groupDeleteWarning(job) && (
           <p className="text-bad">보조 그룹으로 쓰기 권한을 받은 디렉토리에서는 다른 사용자의 파일도 지워질 수 있습니다.</p>
         )}

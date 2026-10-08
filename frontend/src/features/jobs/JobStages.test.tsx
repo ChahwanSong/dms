@@ -399,6 +399,82 @@ test("손대지 않은 채 폴링으로 실패가 되면 실패 단계 로그가
   expect(screen.getByRole("button", { name: "preflight 로그" })).toHaveAttribute("aria-pressed", "true");
 });
 
+test("3차 자동 열림은 손대지 않은 동안 모델을 따른다: 판정이 고쳐져 자동 열림이 거둬지면 자동으로 연 뷰어도 닫힌다", async () => {
+  // round3/stage/skew.test.tsx: 잡 폴링이 base 거부를 먼저 보면 마커(사전 점검 실패)로 읽어 로그를 자동으로 열고, 요청 폴링이
+  // 관문 이벤트를 가져와 판정이 「사전 점검 완료 → 미리보기 시작 전 거부」로 고쳐진 뒤에도 그 뷰어가 「완료」 행 아래 남았다.
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json({ entries: [], truncated: false })),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "archived",
+      entries: [{ pod: "p1", log: "preflight ok" }] })),
+  );
+  const job: DataJob = { ...BASE, state: "Rejected", reason_code: "artifact_base_not_traversable", phase_refs: { preflight: "pod/p1" },
+    transitions: [{ from_state: "Pending", to_state: "Preflight", at: "2026-10-08T00:00:00Z" },
+                  { from_state: "Preflight", to_state: "Rejected", at: "2026-10-08T00:00:30Z" }] };
+  const GATE = [{ id: 7, component: "stepper", severity: "error", event_type: "artifact_base_unsafe_at_step",
+    message: "artifact_base_not_traversable job=j1", at: "2026-10-08T00:00:30Z",
+    payload: { job_id: "j1", problem: "artifact_base_not_traversable" } }];
+  const NONE: unknown[] = [];
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const ui = (events: unknown) => (
+    <QueryClientProvider client={qc}><JobStages job={job} events={events} /></QueryClientProvider>
+  );
+  const view = render(ui(NONE));
+  expect(await screen.findByText("preflight ok")).toBeInTheDocument();          // 마커 판정 → 자동 열림
+  const chip = screen.getByRole("button", { name: "preflight 로그" });
+  expect(chip).toHaveAttribute("aria-pressed", "true");
+  view.rerender(ui(GATE));                                                     // 관문 이벤트 도착 → 판정 수정
+  await waitFor(() => expect(screen.queryByText("preflight ok")).toBeNull());
+  expect(screen.getByRole("button", { name: "preflight 로그" })).toHaveAttribute("aria-pressed", "false");
+  expect(screen.queryByRole("region", { name: "preflight 로그 내용" })).toBeNull();
+  view.unmount();
+
+  // 사용자가 직접 연 것은 판정이 바뀌어도 닫지 않는다(touched)
+  const view2 = render(ui(NONE));
+  expect(await screen.findByText("preflight ok")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "출력 닫기" }));
+  await userEvent.click(screen.getByRole("button", { name: "preflight 로그" }));
+  expect(await screen.findByText("preflight ok")).toBeInTheDocument();
+  view2.rerender(ui(GATE));
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(screen.getByText("preflight ok")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "preflight 로그" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("3차 목록 재조회: 첫 목록 조회 중 실패로 바뀌어 자동 열림이 같은 커밋에 끼어도 「불러오는 중」 골격이 한 번도 끊기지 않는다", async () => {
+  // round3/query/n0h.test.tsx: 취소의 동기 되돌림(pending/idle) 뒤 `.then(refetch)` 를 기다리는 사이 커밋된 렌더가 골격을
+  // 떨어뜨렸다(같은 flush 의 자동 열림 setState, act 안). 취소 바로 뒤 같은 틱에서 다시 읽으면 틈이 없다.
+  let lists = 0;
+  const holds: (() => void)[] = [];
+  server.use(
+    http.get("/api/user/jobs/j1/artifacts", async () => {
+      lists += 1;
+      await new Promise<void>((r) => { holds.push(r); });
+      return HttpResponse.json({ entries: [], truncated: false });
+    }),
+    http.get("/api/user/jobs/j1/logs", () => HttpResponse.json({ phase: "preflight", ref: "pod/p1", source: "archived",
+      entries: [{ pod: "p1", log: "DMS_PREFLIGHT_REASON=destination_not_writable" }] })),
+  );
+  const PRE = [{ from_state: "Pending", to_state: "Preflight", at: "2026-10-08T00:00:00Z" }];
+  const { rerenderJob, container } = renderStages({ state: "Preflight", transitions: PRE });
+  await waitFor(() => expect(lists).toBe(1));
+  const seen: string[] = [];
+  const mo = new MutationObserver(() => {
+    const t = container.textContent ?? "";
+    seen.push(`${t.includes("출력 목록을 불러오는 중…") ? "SKEL" : "NOSKEL"}${t.includes("출력 없음") ? "+출력없음" : ""}`);
+  });
+  mo.observe(container, { subtree: true, childList: true, characterData: true });
+  rerenderJob({ state: "Rejected", reason_code: "destination_not_writable",
+    transitions: [...PRE, { from_state: "Preflight", to_state: "Rejected", at: "2026-10-08T00:00:05Z" }] });
+  await waitFor(() => expect(lists).toBe(2));
+  expect(await screen.findByText("DMS_PREFLIGHT_REASON=destination_not_writable")).toBeInTheDocument();
+  await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+  const before = seen.slice();
+  await act(async () => { holds[1]?.(); holds[0]?.(); await new Promise((r) => setTimeout(r, 50)); });
+  mo.disconnect();
+  expect(before.filter((s) => s.startsWith("NOSKEL"))).toEqual([]);
+  expect(lists).toBe(2);
+});
+
 test("라이브: 진행 중 단계의 로그를 열면 3초마다 다시 읽고, 끝나면 마지막으로 한 번 더 읽은 뒤 멈춘다", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   let calls = 0;
@@ -521,6 +597,15 @@ test("V5 흐린 상태(대기·실행 안 됨·모름) 배지 글자는 ink/70(A
     expect(badge.querySelector("svg")?.getAttribute("class")).toContain("text-ink/60");
     unmount();
   }
+});
+
+test("N7 출력 칩의 파일 크기 글자는 ink/70(AA -- 흰·hover panel·눌림 infobg 모두 4.5:1 이상), ink/60 아님", async () => {
+  server.use(http.get("/api/user/jobs/j1/artifacts", () => HttpResponse.json(ARTIFACTS)));
+  renderStages();
+  const chip = await screen.findByRole("button", { name: "execution/stdout.log" });
+  const size = within(chip).getByText("120 B");
+  expect(size.className).toContain("text-ink/70");
+  expect(size.className).not.toContain("text-ink/60");
 });
 
 test("V6 관문 거부(앞 파드 통과 뒤 미리보기 제출 전): 사전 점검은 완료, 미리보기 행이 「시작 전 거부됨」 + 사유, 로그 자동 조회 없음", async () => {

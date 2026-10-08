@@ -138,14 +138,19 @@ test("6 미리보기 실패의 result_summary 는 ①의 「미리보기 결과 
   expect(screen.queryByText("returncode")).toBeNull();     // 원 키 타일(실행 결과)로 그리지 않았다
 });
 
-test("7 단건 컨펌 대기: 「작업 컨펌」 버튼은 정확히 1개, 「미리보기 결과 보기」는 ①의 제목으로 포커스", async () => {
+test("7 단건 컨펌 대기: 「작업 컨펌」 버튼은 정확히 1개(관문 줄), 배너 「컨펌하러 가기」는 그 버튼으로 포커스, 「미리보기 결과 보기」는 ①의 제목으로 포커스", async () => {
   serve({ ...REQ, state: "Planned" }, [{ ...JOB, state: "ConfirmPending", result_summary: null,
     preview_fingerprint: "sha256:fp", preview_expires_at: "2099-01-01T00:00:00Z",
     preview_summary: { files: 1204, bytes: 3435973837, returncode: 0 }, phase_refs: { preflight: "a", preview: "b" },
     transitions: SYNC_OK_TR.slice(0, 4) }]);
   renderAt();
   await screen.findByRole("heading", { level: 2, name: "컨펌을 기다리고 있습니다" });
-  expect(screen.getAllByRole("button", { name: "작업 컨펌" })).toHaveLength(1);
+  const confirmBtns = screen.getAllByRole("button", { name: "작업 컨펌" });
+  expect(confirmBtns).toHaveLength(1);
+  // 리뷰 N5: 창은 배너가 아니라 잡 카드의 관문 줄에 산다(「데이터 작업」 구획 안)
+  expect(confirmBtns[0].closest('section[aria-labelledby="jobs-h"]')).not.toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "컨펌하러 가기" }));
+  await waitFor(() => expect(confirmBtns[0]).toHaveFocus());
   await userEvent.click(screen.getByRole("button", { name: "미리보기 결과 보기" }));
   await waitFor(() => expect(screen.getByText("미리보기 결과")).toHaveFocus());
   expect(screen.getByText(/^유효기간 2099-01-01 09:00:00 KST · /)).toBeInTheDocument();
@@ -340,6 +345,183 @@ test("V2 잡 2개(거부 + 비배치 컨펌 대기): 실패 잡이 배너 초점
   expect(screen.getByText(/다른 작업 1개가 컨펌을 기다립니다/)).toBeInTheDocument();
 });
 
+test("N5 열어 둔 컨펌 창은 폴링으로 다른 잡이 실패해 배너 초점이 바뀌어도 닫히지 않는다(창은 관문 줄에만)", async () => {
+  // 리뷰 N5(fixcheck/v2flip.test.tsx): 예전엔 단건 초점이면 창이 배너에 있다가, 다른 잡이 실패해 초점이 옮겨 가면
+  // 배너의 창이 언마운트되고 관문 줄에 닫힌 새 창이 생겼다 -- 컨펌하던 사람의 창이 눈앞에서 사라졌다.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const TO_CP = SYNC_OK_TR.slice(0, 4);
+  const cp = { ...JOB, job_id: "jCP", state: "ConfirmPending", result_summary: null, preview_fingerprint: "fp",
+    preview_expires_at: "2099-01-01T00:00:00Z", phase_refs: { preflight: "a", preview: "b" }, transitions: TO_CP };
+  const pre = { ...JOB, job_id: "jPF", state: "Preflight", result_summary: null, preview_summary: null,
+    phase_refs: { preflight: "c" }, transitions: [tr(null, "Pending", 0), tr("Pending", "Preflight", 2)] };
+  const preFailed = { ...pre, state: "Rejected", reason_code: "destination_not_writable",
+    transitions: [...pre.transitions, tr("Preflight", "Rejected", 30)] };
+  let jobs: object[] = [pre, cp];
+  server.use(http.get("/api/user/jobs/:jid/logs", () => HttpResponse.json({ source: "archived", entries: [] })));
+  serve({ ...REQ, state: "Planned", transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 2)] }, () => jobs);
+  renderAt();
+  await screen.findByText("jCP");
+  const btns = screen.getAllByRole("button", { name: "작업 컨펌" });
+  expect(btns).toHaveLength(1);
+  await userEvent.click(btns[0]);
+  expect(await screen.findByRole("dialog", { name: "sync 작업 컨펌" })).toBeInTheDocument();
+  jobs = [preFailed, cp];                                   // 다음 2초 폴링에서 다른 잡이 거부된다 → 배너 초점이 그 잡으로
+  await act(async () => { await vi.advanceTimersByTimeAsync(2200); });
+  await waitFor(() => expect(screen.getByText(/다른 작업 1개가 컨펌을 기다립니다/)).toBeInTheDocument());
+  expect(screen.getByRole("dialog", { name: "sync 작업 컨펌" })).toBeInTheDocument();
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+});
+
+test("N2 잡 조회 실패가 캐시에 남은 채 다시 들어오면: 재조회 동안 붉은 경보 대신 중립 골격, 다시 실패하면 그 문구로 경보", async () => {
+  // 리뷰 N2(fixcheck/logs/v1edge.test.tsx G): 새 인스턴스는 오류 문구를 기억하지 못하고 재조회가 error 를 비워, 붉은
+  // role=alert 상자가 「작업 정보를 다시 불러오는 중…」을 경보로 읽혔다.
+  let jobCalls = 0;
+  let hold: (() => void) | null = null;
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQ, state: "Planned",
+      transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 2)] })),
+    http.get("/api/user/requests/r1/jobs", async () => {
+      jobCalls += 1;
+      if (jobCalls >= 2) await new Promise<void>((r) => { hold = r; });
+      return HttpResponse.json({ detail: "http_500" }, { status: 500 });
+    }),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const tree = (show: boolean) => (
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/jobs/r1"]}>
+        <Routes><Route path="/jobs/:requestId" element={show ? <RequestDetail /> : <p>다른 화면</p>} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
+  const view = render(tree(true));
+  expect(await screen.findByRole("alert")).toHaveTextContent("서버 오류가 발생했습니다");
+  view.rerender(tree(false));
+  await screen.findByText("다른 화면");
+  view.rerender(tree(true));                               // gcTime 안에 돌아온다 -- 캐시엔 데이터 없는 실패가 남아 있다
+  await waitFor(() => expect(jobCalls).toBe(2));
+  expect(screen.getByRole("heading", { level: 1, name: "sync 요청" })).toBeInTheDocument();   // 페이지 골격 아님
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByText("작업 정보를 불러오는 중…")).toHaveAttribute("role", "status");
+  // 리뷰 3차(round3/query/n2.test.tsx N2-2): 배너도 같은 이야기를 한다 -- 한 화면이 「불러오지 못해」와 「불러오는 중」을
+  // 동시에 말하지 않는다.
+  expect(screen.getByText("작업 정보를 불러오는 중입니다")).toBeInTheDocument();
+  expect(screen.queryByText("작업 정보를 불러오지 못해 단계별 결과를 보일 수 없습니다")).toBeNull();
+  await act(async () => { hold?.(); });
+  expect(await screen.findByRole("alert")).toHaveTextContent("서버 오류가 발생했습니다");
+  expect(screen.queryByText("작업 정보를 불러오는 중…")).toBeNull();
+  expect(screen.getByText("작업 정보를 불러오지 못해 단계별 결과를 보일 수 없습니다")).toBeInTheDocument();
+  expect(screen.queryByText("작업 정보를 불러오는 중입니다")).toBeNull();
+});
+
+test("3차 N3 그룹 잡의 base 거부를 잡 폴링이 먼저 보면(관문 이벤트 전): 사전 점검 로그를 열지 않고, 이벤트가 오면 관문으로", async () => {
+  // round3/stage/skew.test.tsx: stepper 는 이벤트 → 잡·요청 종단을 한 틱에 남기지만 화면은 잡(2초)·요청(3초)을 따로 읽는다.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const asked: string[] = [];
+  server.use(http.get("/api/user/jobs/j1/logs", ({ request }) => {
+    asked.push(new URL(request.url).searchParams.get("phase") ?? "");
+    return HttpResponse.json({ phase: "preflight", ref: "pod/a", source: "live", entries: [{ pod: "p", log: "ok\n" }] });
+  }));
+  const PRE = [tr(null, "Pending", 0), tr("Pending", "Preflight", 2)];
+  const running = { ...JOB, state: "Preflight", result_summary: null, preview_summary: null, phase_refs: { preflight: "pod/a" },
+    transitions: PRE, worker_pool: { identity: { username: "alice", uid: 1000, gid: 1000, supplementary_gids: [10010],
+      supplementary_gids_status: "applied" } } };
+  const gated = { ...running, state: "Rejected", reason_code: "artifact_base_not_traversable",
+    transitions: [...PRE, tr("Preflight", "Rejected", 30)] };
+  const reqRow = (state: string, events: object[]) => ({ ...REQ, state, events,
+    transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 1)] });
+  const GATE_EV = { id: 7, component: "stepper", severity: "error", event_type: "artifact_base_unsafe_at_step",
+    message: "artifact_base_not_traversable job=j1", at: at(30), payload: { job_id: "j1", problem: "artifact_base_not_traversable" } };
+  let job: object = running;
+  let req: object = reqRow("Planned", []);
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json(req)),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([job])),
+  );
+  renderAt();
+  expect(await screen.findByRole("heading", { level: 2, name: "사전 점검 중입니다" })).toBeInTheDocument();
+  job = gated;                                               // 잡 폴링(2초)이 먼저 종단을 본다
+  await act(async () => { await vi.advanceTimersByTimeAsync(2200); });
+  expect(await screen.findByRole("heading", { level: 2, name: "작업이 거부되었습니다" })).toBeInTheDocument();
+  const { pre } = await regions();
+  expect(within(pre).getByText("위치 추정")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "실패 지점 로그 보기" })).toBeNull();
+  req = reqRow("Rejected", [GATE_EV]);                       // 요청 폴링(3초)이 이벤트를 가져온다
+  await act(async () => { await vi.advanceTimersByTimeAsync(3200); });
+  expect(await screen.findByRole("heading", { level: 2, name: "미리보기를 시작하기 전에 거부되었습니다" })).toBeInTheDocument();
+  const rows = within(within(pre).getByRole("list", { name: "사전 점검·미리보기 단계" })).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("사전 점검: 완료");
+  expect(pre.querySelector("[id^='viewer-j1-']")).toBeNull();      // 통과한 단계 로그가 열린 채 남지 않는다
+  expect(asked).toEqual([]);                                 // 한 번도 자동으로 열지 않았다
+});
+
+test("3차 라이브 로그의 마지막 읽기: 첫 조회 중에 단계가 끝나도 뷰어 본문이 빈 채로 커밋되지 않는다(「불러오는 중」 → 마지막 내용)", async () => {
+  // round3/query: 취소의 동기 되돌림(pending/idle) 뒤 `.then(refetch)` 를 기다리는 사이, 같은 flush 의 다른 setState(구획
+  // 상태 낭독 announce)가 그린 렌더에서 뷰어 본문이 비었다(isLoading false · 데이터 없음). 취소 바로 뒤 같은 틱에 다시 읽는다.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let logCalls = 0;
+  const holds: (() => void)[] = [];
+  server.use(http.get("/api/user/jobs/j1/logs", async () => {
+    const n = ++logCalls;
+    if (n === 1) await new Promise<void>((r) => { holds.push(r); });
+    return HttpResponse.json({ phase: "preflight", ref: "pod/a", source: n === 1 ? "live" : "archived",
+      entries: [{ pod: "p", log: n === 1 ? "낡은 라이브 조각" : "DMS_PREFLIGHT_REASON=destination_not_writable" }] });
+  }));
+  const PRE = [tr(null, "Pending", 0), tr("Pending", "Preflight", 2)];
+  const running = { ...JOB, state: "Preflight", result_summary: null, preview_summary: null, phase_refs: { preflight: "pod/a" },
+    transitions: PRE };
+  let job: object = running;
+  serve({ ...REQ, state: "Planned", transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 1)] }, () => [job]);
+  renderAt();
+  const { pre } = await regions();
+  await userEvent.click(within(pre).getByRole("button", { name: "preflight 로그" }));
+  const viewer = await within(pre).findByRole("region", { name: "preflight 로그 내용" });
+  expect(within(viewer).getByText("내용을 불러오는 중…")).toBeInTheDocument();
+  await waitFor(() => expect(logCalls).toBe(1));
+  const blanks: string[] = [];
+  const mo = new MutationObserver(() => {
+    const v = document.getElementById("viewer-j1-pre");
+    const t = v?.textContent ?? "";
+    if (v && !t.includes("내용을 불러오는 중…") && !t.includes("DMS_PREFLIGHT_REASON") && !t.includes("낡은 라이브 조각")) blanks.push(t);
+  });
+  mo.observe(document.body, { subtree: true, childList: true, characterData: true });
+  job = { ...running, state: "Rejected", reason_code: "destination_not_writable",
+    transitions: [...PRE, tr("Preflight", "Rejected", 5)] };
+  await act(async () => { await vi.advanceTimersByTimeAsync(2200); });
+  expect(await within(pre).findByText("DMS_PREFLIGHT_REASON=destination_not_writable")).toBeInTheDocument();
+  await act(async () => { holds[0]?.(); await vi.advanceTimersByTimeAsync(50); });
+  mo.disconnect();
+  expect(blanks).toEqual([]);
+  expect(logCalls).toBe(2);
+  expect(within(pre).queryByText("낡은 라이브 조각")).toBeNull();   // 취소된 첫 조회의 낡은 응답은 버려진다
+});
+
+test("3차 대비: 잡 카드·결과 타일·컨펌 창의 의미 있는 글자는 text-muted(#888, 3.54:1)를 쓰지 않는다(장식 코드 라벨만 예외)", async () => {
+  // round3/a11y/contrast-sweep.mjs: ToolLabel·「보조 그룹(gid)」 dt·스토리지 주의문·「실행 결과」 원 키 dt·컨펌 창 본문이
+  // 흰 카드 위 3.54:1 이었다(스펙 §9: muted 는 장식 전용). 요청 pill(StatusPill neutral)은 이 화면 범위 밖이라 보지 않는다.
+  const ident = { username: "alice", uid: 1000, gid: 1000, supplementary_gids: [10010], supplementary_gids_status: "applied" };
+  const done = { ...JOB, tool: "dsync", worker_pool: { node_count: 4, identity: ident }, source_storage: "s1",
+    destination_storage: "s2" };
+  const cp = { ...done, job_id: "j2", state: "ConfirmPending", result_summary: null, preview_fingerprint: "sha256:abc",
+    preview_expires_at: "2099-01-01T00:00:00Z", phase_refs: { preflight: "a", preview: "b" }, transitions: SYNC_OK_TR.slice(0, 4) };
+  serve({ ...REQ, state: "Planned", transitions: [tr(null, "Pending", 0), tr("Pending", "Planned", 2)] }, [done, cp]);
+  renderAt();
+  const jobs = await screen.findByRole("region", { name: /^데이터 작업/ });
+  await within(jobs).findAllByText("dsync · 4 노드");
+  await userEvent.click(within(jobs).getByRole("button", { name: "작업 컨펌" }));
+  const dlg = await screen.findByRole("dialog", { name: "sync 작업 컨펌" });
+  const offenders = [jobs, dlg].flatMap((root) => Array.from(root.querySelectorAll<HTMLElement>(".text-muted")))
+    .filter((el) => !(el.classList.contains("hidden") && el.classList.contains("sm:inline")))   // 장식 코드 라벨(§9)
+    .filter((el) => (el.textContent ?? "").trim() !== "")
+    .map((el) => el.textContent);
+  expect(offenders).toEqual([]);
+  expect(within(jobs).getAllByText("dsync · 4 노드")[0]).toHaveClass("text-ink/70");
+  expect(within(jobs).getAllByText("보조 그룹(gid)")[0]).toHaveClass("text-ink/70");
+  expect(within(jobs).getByText("bytes")).toHaveClass("text-ink/70");
+  expect(within(dlg).getByText(/^지문\(fingerprint\)/)).toHaveClass("text-ink/70");
+  expect(within(dlg).getByText(/^만료: /)).toHaveClass("text-ink/70");
+});
+
 test("V6 관문 거부(미리보기 제출 전): 배너는 다음 단계를 말하고 「실패 지점 로그 보기」·로그 자동 조회가 없다", async () => {
   const asked: string[] = [];
   server.use(http.get("/api/user/jobs/j1/logs", ({ request }) => {
@@ -387,4 +569,34 @@ test("18 배너 제목 표", async () => {
     expect(await screen.findByRole("heading", { level: 2, name: title })).toBeInTheDocument();
     view.unmount();
   }
+});
+
+test("리뷰 4차: 그룹 잡의 artifact_base_* 마커 거부는 종단 요청 응답이면 사전 점검 실패로 확정하고 그 로그를 연다", async () => {
+  // requestTerminal 이 RequestDetail → JobCard → JobStages 까지 같은 값으로 흘러야 배너와 단계 카드가 같은 말을 한다.
+  const asked: string[] = [];
+  server.use(http.get("/api/user/jobs/j1/logs", ({ request }) => {
+    asked.push(new URL(request.url).searchParams.get("phase") ?? "");
+    return HttpResponse.json({ phase: "preflight", ref: "pod/a", source: "archived",
+      entries: [{ pod: "p-preflight", log: "DMS_PREFLIGHT_REASON=artifact_base_group_writable" }] });
+  }));
+  const groupJob = { ...JOB, state: "Rejected", reason_code: "artifact_base_group_writable", result_summary: null,
+    preview_summary: null, phase_refs: { preflight: "pod/a" },
+    worker_pool: { identity: { username: "alice", uid: 10001, gid: 10000, supplementary_gids: [10010],
+      supplementary_gids_status: "applied" } },
+    transitions: [tr(null, "Pending", 0), tr("Pending", "Preflight", 2), tr("Preflight", "Rejected", 9)] };
+  const events = [{ id: 1, component: "stepper", severity: "info", event_type: "identity_groups_checked", message: null,
+    at: at(2), payload: { job_id: "j1", gids: [10010], phase: "preflight" } }];
+  // 요청 응답이 아직 비종단(잡 폴링이 먼저 종단을 봤다) -- 추정, 로그를 열지 않는다
+  serve({ ...REQ, state: "Planned", events }, [groupJob]);
+  const first = renderAt();
+  expect(await screen.findByRole("heading", { level: 2, name: "작업이 거부되었습니다" })).toBeInTheDocument();
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(asked).toEqual([]);
+  first.unmount();
+  // 종단 응답 -- 확정
+  serve({ ...REQ, state: "Rejected", reason_code: "artifact_base_group_writable", events }, [groupJob]);
+  renderAt();
+  expect(await screen.findByText("DMS_PREFLIGHT_REASON=artifact_base_group_writable")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 2, name: "사전 점검 단계에서 거부되었습니다" })).toBeInTheDocument();
+  expect(asked).toEqual(["preflight"]);
 });

@@ -3,7 +3,8 @@ import {
   ArrowDownToLine, CircleAlert, CircleDashed, Download, File, FileCode, FileDown, FileJson, FileText,
   History, Info, ScrollText, Server, TriangleAlert, WrapText, X, type LucideIcon,
 } from "lucide-react";
-import { useArtifactFile, useJobLogs } from "./useArtifacts";
+import { useQueryClient } from "@tanstack/react-query";
+import { jobLogsKey, useArtifactFile, useJobLogs } from "./useArtifacts";
 import { ApiError } from "../../lib/api";
 import { downloadText } from "../../lib/csvExport";
 import { Skeleton } from "../../components/ui/Skeleton";
@@ -274,12 +275,20 @@ export function OutputViewer({ jobId, item, entrySize, live, viewerId, onClose }
   // (DMS_PREFLIGHT_REASON 마커 등)와 종단 박제 사본(stepper._finalize 는 종단 전이 **전에** 박제한다)을 받기 위해.
   // 쿼리 키가 그대로라 이게 없으면 뷰어는 끝나기 최대 3초 전 모습에 멈춘다. 그 뒤로는 interval 이 꺼져 멈춘다.
   // ref 의 첫 값이 live 라 마운트 때는 읽지 않는다(칩을 누르기 전 조회 0건 계약 그대로).
+  // 진행 중 조회는 먼저 취소한다(리뷰 N1): 데이터가 아직 없을 때(연 직후 첫 조회 중) refetch 는 그 조회에 합류해, 끝나기
+  // 전에 떠난 요청의 스냅숏(꼬리 마커·박제 캡션 없음)이 마지막 모습이 된다 -- interval 은 이미 꺼져 다시 읽지 않는다.
+  // 취소 바로 뒤에 같은 틱에서 다시 읽는다(useArtifacts 와 같은 이유 -- 되돌림과 새 조회 사이에 idle 틈을 두지 않는다).
+  const qc = useQueryClient();
   const wasLive = useRef(live);
   const refetchLogs = logs.refetch;
+  const logPhase = item.phase;
   useEffect(() => {
-    if (wasLive.current && !live && isLog) void refetchLogs();
+    if (wasLive.current && !live && isLog) {
+      void qc.cancelQueries({ queryKey: jobLogsKey(jobId, logPhase), exact: true });
+      void refetchLogs();
+    }
     wasLive.current = live;
-  }, [live, isLog, refetchLogs]);
+  }, [live, isLog, refetchLogs, qc, jobId, logPhase]);
   const title = isLog ? `${item.phase} 로그` : `${item.phase}/${item.name}`;
   const Icon = iconFor(item);
   const archived = isLog && logs.data?.source === "archived";

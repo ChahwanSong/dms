@@ -454,3 +454,271 @@ test("V9 제출 보류: 재점검 통과 뒤 실행 제출 · 재점검 파드 �
   // 종단 잡에는 보류가 없다
   expect(deriveJobStages({ ...exec, state: "Succeeded" }, [deferredEv("execution", 1, 40)]).hold).toBeNull();
 });
+
+// ---- 2026-10-08 리뷰 2차 N3·N4 --------------------------------------------------------------------------------------
+
+test("N3 artifact_base_* 사유가 preflight·exec_preflight 파드 마커로 왔으면(관문 이벤트 없음) 그 파드 단계가 실패, 로그 자동 열림", () => {
+  // execution_manifests 의 preflight 스크립트가 DMS_PREFLIGHT_REASON=artifact_base_* 를 찍는다 → stepper._preflight_reason
+  // 승격 → _finalize(REJECTED). 관문(_step_one → _fail_closed)이 아니라 이벤트 artifact_base_unsafe_at_step 이 없다.
+  for (const code of ["artifact_base_not_traversable", "artifact_base_group_writable"]) {
+    const pre = job({ state: "Rejected", reason_code: code, phase_refs: { preflight: "pod/p" },
+      transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] });
+    const m = deriveJobStages(pre, []);
+    expect(m.failure, code).toMatchObject({ step: "preflight", evidence: "from_state", notStarted: false });
+    expect(statuses(pre)).toMatchObject({ preflight: "rejected", preview: "skipped" });
+    expect(m.autoOpen).toEqual({ stage: "pre", key: "log:preflight" });
+    expect(step(pre, "preflight").end).toBe("2026-10-08T03:15:09Z");
+    // 다른 잡의 관문 이벤트는 근거가 아니다
+    const other = deriveJobStages(pre, [ev("artifact_base_unsafe_at_step", { job_id: "j9", problem: code }, 9)]);
+    expect(other.failure).toMatchObject({ step: "preflight", evidence: "from_state" });
+    // scan 도 같다(사전 점검 파드 실패)
+    const scan = job({ ...pre, operation: "scan" });
+    expect(deriveJobStages(scan, []).failure).toMatchObject({ step: "preflight", evidence: "from_state" });
+
+    const exec = job({ state: "Rejected", reason_code: code, phase_refs: { preflight: "a", preview: "vcjob/b", exec_preflight: "pod/c" },
+      transitions: [...TO_EXEC, t("Executing", "Rejected", 25)] });
+    const me = deriveJobStages(exec, []);
+    expect(me.failure, code).toMatchObject({ step: "exec_preflight", evidence: "from_state", notStarted: false });
+    expect(statuses(exec)).toMatchObject({ exec_preflight: "rejected", execution: "skipped" });
+    expect(me.autoOpen).toEqual({ stage: "exec", key: "log:exec_preflight" });
+  }
+});
+
+test("N3 artifact_base_* 에 이 잡의 관문 이벤트가 있으면(또는 실행 상태에서 Failed 면) 지금까지처럼 다음 단계 시작 전 관문", () => {
+  for (const code of ["artifact_base_not_traversable", "artifact_base_group_writable"]) {
+    const gateEv = [ev("artifact_base_unsafe_at_step", { job_id: "j1", problem: code }, 30)];
+    const pre = job({ state: "Rejected", reason_code: code, phase_refs: { preflight: "pod/p" },
+      transitions: [...PRE_TR, t("Preflight", "Rejected", 30)] });
+    const m = deriveJobStages(pre, gateEv);
+    expect(m.failure, code).toMatchObject({ step: "preview", evidence: "gate", notStarted: true });
+    expect(m.autoOpen).toBeNull();
+    expect(m.steps.find((s) => s.id === "preflight")).toMatchObject({ status: "done", end: null });
+    expect(deriveJobStages({ ...pre, operation: "scan" }, gateEv).failure).toMatchObject({ step: "execution", evidence: "gate" });
+
+    // _fail_closed 는 Executing 에서 Failed -- 이벤트와 함께
+    const exec = job({ state: "Failed", reason_code: code, phase_refs: { preflight: "a", preview: "vcjob/b", exec_preflight: "pod/c" },
+      transitions: [...TO_EXEC, t("Executing", "Failed", 40)] });
+    const me = deriveJobStages(exec, [ev("artifact_base_unsafe_at_step", { job_id: "j1", problem: code }, 40)]);
+    expect(me.failure, code).toMatchObject({ step: "execution", evidence: "gate", notStarted: true });
+    expect(me.autoOpen).toBeNull();
+    // 이벤트가 요청 이벤트 창(최신 100건) 밖으로 밀려도 Executing→Failed 는 마커 길(늘 Rejected)일 수 없다 -- 관문
+    expect(deriveJobStages(exec, []).failure).toMatchObject({ step: "execution", evidence: "gate", notStarted: true });
+    // 컨펌 직후 재점검 파드를 만들기 전 관문
+    const before = job({ ...exec, phase_refs: { preflight: "a", preview: "vcjob/b" } });
+    expect(deriveJobStages(before, []).failure).toMatchObject({ step: "exec_preflight", evidence: "gate", notStarted: true });
+  }
+});
+
+test("N4 다음 제출 보류 중 취소(Preflight→Cancelled): 통과한 사전 점검은 완료(소요 없음), 미리보기가 시작 전 취소", () => {
+  const evs = [deferredEv("preview", 1, 20), deferredEv("preview", 2, 40), deferredEv("preview", 3, 55)];
+  const j = job({ state: "Cancelled", reason_code: "cancelled_by_user", phase_refs: { preflight: "pod/p" },
+    transitions: [...PRE_TR, t("Preflight", "Cancelled", 58)] });
+  const m = deriveJobStages(j, evs);
+  expect(m.failure).toMatchObject({ step: "preview", evidence: "from_state", notStarted: true, queued: false });
+  expect(m.steps.map((s) => [s.id, s.status])).toEqual([
+    ["preflight", "done"], ["preview", "cancelled"], ["confirm", "skipped"], ["exec_preflight", "skipped"], ["execution", "skipped"],
+  ]);
+  const pf = m.steps[0];
+  expect([pf.start, pf.end]).toEqual(["2026-10-08T03:15:02Z", null]);   // 보류 시간을 사전 점검 소요로 세지 않는다
+  expect(stepDuration(pf)).toBeNull();
+  const pv = m.steps[1];
+  expect([pv.start, pv.end, pv.notStarted]).toEqual([null, "2026-10-08T03:15:58Z", true]);
+  expect(m.executionStarted).toBe(false);
+  expect(m.autoOpen).toBeNull();
+  // 보류 기록이 주석으로 붙는 행 = 취소로 칠한 행(카드가 스스로 모순되지 않는다)
+  expect(Object.keys(annotationsFor(evs, j, 1, m.flow))).toEqual(["preview"]);
+  // scan: 다음 제출은 실행
+  const scan = job({ ...j, operation: "scan" });
+  const ms = deriveJobStages(scan, [deferredEv("execution", 1, 30)]);
+  expect(ms.steps.map((s) => [s.id, s.status])).toEqual([["preflight", "done"], ["execution", "cancelled"]]);
+  expect(ms.failure).toMatchObject({ step: "execution", notStarted: true });
+  expect(ms.steps[0].end).toBeNull();
+  // 보류 기록이 없으면(또는 다른 잡·다른 phase 것이면) 지금까지처럼 사전 점검 중 취소
+  for (const other of [[], [ev("identity_recheck_deferred", { job_id: "j9", phase: "preview" }, 30)], [deferredEv("execution", 1, 30)]]) {
+    const mo = deriveJobStages(j, other);
+    expect(mo.failure).toMatchObject({ step: "preflight", evidence: "from_state", notStarted: false });
+    expect(mo.steps[0].end).toBe("2026-10-08T03:15:58Z");
+  }
+});
+
+test("N4 재점검 통과 뒤 실행 제출 보류 중 취소(Executing→Cancelled, execution ref 없음): 재점검 완료, 실행이 시작 전 취소", () => {
+  const j = job({ state: "Cancelled", reason_code: "cancelled_by_user",
+    phase_refs: { preflight: "a", preview: "vcjob/b", exec_preflight: "pod/c" },
+    transitions: [...TO_EXEC, t("Executing", "Cancelled", 59)] });
+  const m = deriveJobStages(j, [deferredEv("execution", 1, 30), deferredEv("execution", 2, 45)]);
+  expect(m.failure).toMatchObject({ step: "execution", evidence: "from_state", notStarted: true, queued: false });
+  expect(m.steps.filter((s) => s.stage === "exec").map((s) => [s.id, s.status])).toEqual([
+    ["exec_preflight", "done"], ["execution", "cancelled"],
+  ]);
+  const ep = m.steps.find((s) => s.id === "exec_preflight")!;
+  expect([ep.start, ep.end]).toEqual(["2026-10-08T03:15:18Z", null]);
+  expect(stepDuration(ep)).toBeNull();
+  expect(m.steps.find((s) => s.id === "execution")).toMatchObject({ start: null, end: "2026-10-08T03:15:59Z" });
+  expect(m.executionStarted).toBe(false);
+  // 보류 기록이 없으면 지금까지처럼 재점검 중 취소
+  expect(deriveJobStages(j, []).failure).toMatchObject({ step: "exec_preflight", evidence: "from_state", notStarted: false });
+});
+
+// ---- 2026-10-08 리뷰 3차 -------------------------------------------------------------------------------------------
+
+test("3차 N3: 그룹 잡의 Preflight→Rejected artifact_base_* 는 관문 이벤트가 없으면 추정(base_ambiguous) -- 자동 열림 없음", () => {
+  // stage/skew.test.tsx(잡 폴링이 요청 폴링보다 먼저 종단을 본다)·model.exp.ts A1(이벤트가 보존 기한에 지워졌다).
+  // 관문(_raise_if_base_unsafe_for_groups)은 _build_spec 이 보조 gid 가 실린 잡에서만 돌린다.
+  const groups = { identity: { username: "alice", uid: 1000, gid: 1000, supplementary_gids: [10010],
+    supplementary_gids_status: "applied" } };
+  for (const code of ["artifact_base_not_traversable", "artifact_base_group_writable"]) {
+    const g = job({ state: "Rejected", reason_code: code, phase_refs: { preflight: "pod/p" }, worker_pool: groups,
+      transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] });
+    const m = deriveJobStages(g, []);
+    expect(m.failure, code).toMatchObject({ step: "preflight", evidence: "base_ambiguous", notStarted: false });
+    expect(m.autoOpen).toBeNull();                       // 통과했을 수도 있는 파드 로그를 실패 로그로 열지 않는다
+    expect(statuses(g)).toMatchObject({ preflight: "rejected", preview: "skipped" });
+    // 이 잡의 관문 이벤트가 오면 확정(관문) -- 다른 잡의 이벤트는 근거가 아니다
+    expect(deriveJobStages(g, [ev("artifact_base_unsafe_at_step", { job_id: "j1", problem: code }, 9)]).failure)
+      .toMatchObject({ step: "preview", evidence: "gate", notStarted: true });
+    expect(deriveJobStages(g, [ev("artifact_base_unsafe_at_step", { job_id: "j9", problem: code }, 9)]).failure?.evidence)
+      .toBe("base_ambiguous");
+    // 다음 제출의 보류 기록이 있으면 사전 점검 파드는 이미 통과했다 -- 마커일 수 없으니 관문(이벤트가 아직 안 와도)
+    const held = deriveJobStages(g, [deferredEv("preview", 1, 5)]);
+    expect(held.failure).toMatchObject({ step: "preview", evidence: "gate", notStarted: true });
+    expect(held.steps[0]).toMatchObject({ status: "done", end: null });
+    // scan 도 같다
+    expect(deriveJobStages({ ...g, operation: "scan" }, []).failure).toMatchObject({ step: "preflight", evidence: "base_ambiguous" });
+    // 그룹 없는 잡(키 부재·null·[]·모양이 틀림)은 관문이 돌지 않는다 -- 마커 확정, 로그 자동 열림(2차 N3 그대로)
+    for (const wp of [undefined, null, { identity: { supplementary_gids: [] } }, { identity: { supplementary_gids: null } },
+      { identity: {} }, { identity: { supplementary_gids: "10010" } }, "junk"]) {
+      const n = deriveJobStages({ ...g, worker_pool: wp as never }, []);
+      expect(n.failure, JSON.stringify(wp)).toMatchObject({ step: "preflight", evidence: "from_state" });
+      expect(n.autoOpen).toEqual({ stage: "pre", key: "log:preflight" });
+    }
+    // 실행 상태는 대상 상태가 가른다(그룹이어도): Rejected = 재점검 파드 마커, Failed = 관문
+    const ex = job({ state: "Rejected", reason_code: code, worker_pool: groups,
+      phase_refs: { preflight: "a", preview: "vcjob/b", exec_preflight: "pod/c" }, transitions: [...TO_EXEC, t("Executing", "Rejected", 25)] });
+    expect(deriveJobStages(ex, []).failure).toMatchObject({ step: "exec_preflight", evidence: "from_state" });
+    expect(deriveJobStages({ ...ex, state: "Failed", transitions: [...TO_EXEC, t("Executing", "Failed", 25)] }, []).failure)
+      .toMatchObject({ step: "execution", evidence: "gate", notStarted: true });
+  }
+  // 다른 관문 사유는 그룹 여부와 무관하게 지금까지 그대로
+  const other = job({ state: "Rejected", reason_code: "identity_changed_at_step", phase_refs: { preflight: "pod/p" }, worker_pool: groups,
+    transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] });
+  expect(deriveJobStages(other, []).failure).toMatchObject({ step: "preview", evidence: "gate" });
+});
+
+// ---- 2026-10-08 리뷰 4차 -------------------------------------------------------------------------------------------
+
+test("4차: 그룹 잡의 마커 길 artifact_base_* 는 종단 요청 응답 + 이 잡의 사전 점검 확인 이벤트가 있으면 확정(로그 자동 열림)", () => {
+  // get_request 는 요청 행 → 이벤트 순으로 읽고 stepper 는 관문 이벤트를 요청 종단보다 먼저 남긴다. 사전 점검 확인 이벤트는
+  // 관문 이벤트보다 오래돼 그것이 남았으면 관문 이벤트도 남았다(보존 삭제·100건 창 모두 오래된 것부터).
+  const groups = { identity: { username: "alice", uid: 1000, gid: 1000, supplementary_gids: [10010],
+    supplementary_gids_status: "applied" } };
+  const checked = (phase: string, jobId = "j1") => ev("identity_groups_checked", { job_id: jobId, gids: [10010], phase }, 3);
+  for (const code of ["artifact_base_not_traversable", "artifact_base_group_writable"]) {
+    const g = job({ state: "Rejected", reason_code: code, phase_refs: { preflight: "pod/p" }, worker_pool: groups,
+      transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] });
+    const sure = deriveJobStages(g, [checked("preflight")], { requestTerminal: true });
+    expect(sure.failure, code).toMatchObject({ step: "preflight", evidence: "from_state", notStarted: false });
+    expect(sure.autoOpen).toEqual({ stage: "pre", key: "log:preflight" });
+    // 하나라도 모자라면 지금까지처럼 추정
+    expect(deriveJobStages(g, [checked("preflight")]).failure?.evidence, "요청 응답이 아직 비종단").toBe("base_ambiguous");
+    expect(deriveJobStages(g, [checked("preflight")], { requestTerminal: false }).failure?.evidence).toBe("base_ambiguous");
+    expect(deriveJobStages(g, [], { requestTerminal: true }).failure?.evidence, "이벤트가 지워짐").toBe("base_ambiguous");
+    expect(deriveJobStages(g, [checked("preflight", "j9")], { requestTerminal: true }).failure?.evidence, "다른 잡")
+      .toBe("base_ambiguous");
+    expect(deriveJobStages(g, [checked("preview")], { requestTerminal: true }).failure?.evidence, "다른 phase")
+      .toBe("base_ambiguous");
+    // 관문 이벤트가 같이 있으면 관문(확정 규칙이 관문을 덮지 않는다)
+    expect(deriveJobStages(g, [checked("preflight"), ev("artifact_base_unsafe_at_step", { job_id: "j1", problem: code }, 9)],
+      { requestTerminal: true }).failure).toMatchObject({ step: "preview", evidence: "gate", notStarted: true });
+    // scan 도 같다
+    expect(deriveJobStages({ ...g, operation: "scan" }, [checked("preflight")], { requestTerminal: true }).failure)
+      .toMatchObject({ step: "preflight", evidence: "from_state" });
+  }
+});
+
+test("4차: 다음 단계 ref 가 남은 Preflight→Cancelled(제출과 상태 이동 사이 취소)는 그 단계가 제출된 것 -- 시작 전이라 하지 않는다", () => {
+  // _submit_execution 이 set_phase_ref·mark_exec_submitted 뒤 상태를 옮기기 전에 취소가 끼면(보류가 막 풀린 틱) 전이는
+  // Preflight→Cancelled 인데 execution ref 가 있다 -- 배너 「실행 전에 취소」와 executionStarted 가 엇갈리면 안 된다.
+  const scan = job({ operation: "scan", state: "Cancelled", phase_refs: { preflight: "pod/a", execution: "vcjob/j1" },
+    exec_submitted_at: "2026-10-08T03:15:20Z", sched_wait_seconds: null,
+    transitions: [...PRE_TR, t("Preflight", "Cancelled", 21)] });
+  const evs = [deferredEv("execution", 1, 8), ev("identity_groups_checked", { job_id: "j1", phase: "execution" }, 19)];
+  const m = deriveJobStages(scan, evs);
+  expect(m.failure).toMatchObject({ step: "execution", evidence: "from_state", notStarted: false, queued: true });
+  expect(m.executionStarted).toBe(true);
+  // RUNNING 을 본 적이 있으면 대기 중이라 하지 않는다
+  expect(deriveJobStages({ ...scan, sched_wait_seconds: 3 }, evs).failure).toMatchObject({ step: "execution", queued: false });
+  // sync 의 미리보기도 같다(미리보기 파드 ref 가 있으면 제출됐다)
+  const sync = job({ state: "Cancelled", phase_refs: { preflight: "pod/a", preview: "pod/b" },
+    transitions: [...PRE_TR, t("Preflight", "Cancelled", 21)] });
+  expect(deriveJobStages(sync, [deferredEv("preview", 1, 8)]).failure)
+    .toMatchObject({ step: "preview", evidence: "from_state", notStarted: false });
+  // ref 가 없으면 4차 이전 그대로(보류 중 취소 = 시작 전, 보류 없음 = 사전 점검 취소)
+  const noRef = { ...sync, phase_refs: { preflight: "pod/a" } };
+  expect(deriveJobStages(noRef, [deferredEv("preview", 1, 8)]).failure).toMatchObject({ step: "preview", notStarted: true });
+  expect(deriveJobStages(noRef, []).failure).toMatchObject({ step: "preflight", evidence: "from_state" });
+});
+
+// 분 단위 전이(보류는 분 단위다). model.exp.ts C1·C2·C3·B6 이식.
+const tm = (from: string | null, to: string, min: number, sec: number, extra: Partial<Transition> = {}): Transition =>
+  ({ from_state: from, to_state: to, at: `2026-10-08T03:${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}Z`, ...extra });
+const evm = (event_type: string, payload: object, min: number, sec: number) => ({
+  id: min * 100 + sec, component: "stepper", severity: "warning", event_type, message: null, payload,
+  at: `2026-10-08T03:${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}Z`,
+});
+const deferredM = (phase: string, n: number, min: number, sec: number) =>
+  evm("identity_recheck_deferred", { job_id: "j1", phase, attempt: n, max_attempts: 4 }, min, sec);
+const checkedM = (phase: string, min: number, sec: number) => evm("identity_groups_checked", { job_id: "j1", phase }, min, sec);
+
+test("3차 보류 소요: 다음 제출 보류가 풀린 뒤 성공해도 앞 파드 단계의 「소요」에 보류가 섞이지 않는다(끝 모름)", () => {
+  const PRE = [tm(null, "Pending", 15, 0), tm("Pending", "Preflight", 15, 2)];
+  // C1: preflight 파드는 몇 초 만에 통과, 미리보기 제출이 2분 넘게 보류됐다가 풀렸다
+  const c1 = job({ state: "Succeeded", exec_submitted_at: "2026-10-08T03:18:30Z", sched_wait_seconds: 2,
+    phase_refs: { preflight: "pod/a", preview: "vcjob/b", exec_preflight: "pod/c", execution: "vcjob/d" },
+    transitions: [...PRE, tm("Preflight", "PreviewRunning", 17, 20), tm("PreviewRunning", "ConfirmPending", 17, 30),
+      tm("ConfirmPending", "Executing", 18, 0, { actor: "alice" }), tm("Executing", "Executing", 18, 30), tm("Executing", "Succeeded", 18, 50)] });
+  const evs1 = [deferredM("preview", 1, 15, 10), deferredM("preview", 2, 16, 12), checkedM("preview", 17, 19)];
+  const m1 = deriveJobStages(c1, evs1);
+  const pf = m1.steps.find((s) => s.id === "preflight")!;
+  expect([pf.status, pf.start, pf.end]).toEqual(["done", "2026-10-08T03:15:02Z", null]);   // 예전: → 17:20 「소요 2분 18초」
+  expect(stepDuration(pf)).toBeNull();
+  expect(m1.steps.find((s) => s.id === "preview")).toMatchObject({ start: "2026-10-08T03:17:20Z", end: "2026-10-08T03:17:30Z" });
+  // 구획 범위는 벽시계 그대로(보류는 ① 안의 일이고 주석도 ① 미리보기 행에 있다)
+  expect([m1.pre.start, m1.pre.end]).toEqual(["2026-10-08T03:15:02Z", "2026-10-08T03:17:30Z"]);
+  // 보류 기록이 없으면 지금까지 그대로
+  expect(deriveJobStages(c1, []).steps[0].end).toBe("2026-10-08T03:17:20Z");
+
+  // C2: 재점검 파드 통과 뒤 실행 제출이 보류됐다가 풀렸다 -- 재점검의 끝을 모른다, ② 범위는 그대로
+  const c2 = job({ ...c1, transitions: [...PRE, tm("Preflight", "PreviewRunning", 15, 7), tm("PreviewRunning", "ConfirmPending", 15, 17),
+    tm("ConfirmPending", "Executing", 15, 30, { actor: "alice" }), tm("Executing", "Executing", 18, 30), tm("Executing", "Succeeded", 18, 50)] });
+  const m2 = deriveJobStages(c2, [deferredM("execution", 1, 15, 40), deferredM("execution", 2, 16, 45), checkedM("execution", 18, 29)]);
+  const ep = m2.steps.find((s) => s.id === "exec_preflight")!;
+  expect([ep.start, ep.end]).toEqual(["2026-10-08T03:15:30Z", null]);                       // 예전: → 18:30 「소요 3분」
+  expect(m2.steps.find((s) => s.id === "execution")).toMatchObject({ start: "2026-10-08T03:18:30Z", end: "2026-10-08T03:18:50Z" });
+  expect([m2.exec.start, m2.exec.end]).toEqual(["2026-10-08T03:15:30Z", "2026-10-08T03:18:50Z"]);
+  expect(m2.steps[0].end).toBe("2026-10-08T03:15:07Z");                                     // 다른 phase 보류는 무관
+
+  // B6: 재점검 파드 제출이 보류됐다가 풀린 뒤 재점검 중 취소 -- 시작(파드 제출 시각)을 모른다, ② 시작은 컨펌 시각 그대로
+  const b6 = job({ state: "Cancelled", reason_code: "cancelled_by_user",
+    phase_refs: { preflight: "pod/a", preview: "vcjob/b", exec_preflight: "pod/c" },
+    transitions: [...PRE, tm("Preflight", "PreviewRunning", 15, 7), tm("PreviewRunning", "ConfirmPending", 15, 17),
+      tm("ConfirmPending", "Executing", 15, 30, { actor: "alice" }), tm("Executing", "Cancelled", 18, 0)] });
+  const m6 = deriveJobStages(b6, [deferredM("exec_preflight", 1, 15, 35), checkedM("exec_preflight", 16, 40)]);
+  const ep6 = m6.steps.find((s) => s.id === "exec_preflight")!;
+  expect([ep6.status, ep6.start, ep6.end]).toEqual(["cancelled", null, "2026-10-08T03:18:00Z"]);  // 예전: 컨펌부터 「소요 2분 30초」
+  expect(stepDuration(ep6)).toBeNull();
+  expect(m6.exec.start).toBe("2026-10-08T03:15:30Z");
+  expect(deriveJobStages(b6, []).steps.find((s) => s.id === "exec_preflight")?.start).toBe("2026-10-08T03:15:30Z");
+
+  // C3: 보류 뒤 미리보기 실패 -- 사전 점검 소요 없음, 실패 단계(미리보기)의 시각은 그대로
+  const c3 = job({ state: "Failed", reason_code: "preview_failed", phase_refs: { preflight: "pod/a", preview: "vcjob/b" },
+    transitions: [...PRE, tm("Preflight", "PreviewRunning", 17, 20), tm("PreviewRunning", "Failed", 17, 50)] });
+  const m3 = deriveJobStages(c3, [deferredM("preview", 1, 15, 10), checkedM("preview", 17, 19)]);
+  expect(m3.steps[0].end).toBeNull();
+  expect(stepDuration(m3.steps[1])).toBe("30초");
+  // scan: 실행 제출 보류 뒤 → 사전 점검의 끝 모름
+  const scan = job({ operation: "scan", state: "Succeeded", exec_submitted_at: "2026-10-08T03:17:20Z", sched_wait_seconds: 0,
+    phase_refs: { preflight: "pod/a", execution: "vcjob/d" },
+    transitions: [...PRE, tm("Preflight", "Running", 17, 20), tm("Running", "Succeeded", 18, 0)] });
+  expect(deriveJobStages(scan, [deferredM("execution", 1, 15, 10), checkedM("execution", 17, 19)]).steps[0].end).toBeNull();
+  expect(deriveJobStages(scan, []).steps[0].end).toBe("2026-10-08T03:17:20Z");
+});
