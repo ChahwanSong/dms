@@ -7,8 +7,9 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
 import { RequestDetail } from "./RequestDetail";
 
-// 요청 상세 재설계(2026-10-08) 추가 테스트(스펙 §11.1 추가 1~18). 기존 RequestDetail.test.tsx(42건)는 한 글자도
-// 바꾸지 않고 그대로 통과해야 한다는 것이 이 재설계의 계약이라, 추가분은 같은 MSW 하네스를 복제한 이 파일에 둔다.
+// 요청 상세 재설계(2026-10-08) 추가 테스트(스펙 §11.1 추가 1~18). 기존 RequestDetail.test.tsx(42건)는 그대로 통과해야
+// 한다는 것이 이 재설계의 계약이라(예외는 d165 의 bytes 괄호 중복 제거 1건 — 의도한 표기 변경), 추가분은 같은 MSW 하네스를
+// 복제한 이 파일에 둔다.
 
 const server = setupServer(
   http.get("/api/user/storages", () => HttpResponse.json([])),
