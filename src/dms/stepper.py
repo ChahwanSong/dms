@@ -269,11 +269,16 @@ class JobStepper:
                 print(f"stepper error on {jid}: {type(exc).__name__}: {exc}",
                       file=sys.stderr)
                 results[jid] = f"error:{type(exc).__name__}"
-                # 전이를 남기지 못한 실패 -- stderr로만 새면 파드 재시작에 사라진다.
+                # 전이를 남기지 못한 실패 -- stderr로만 새면 파드 재시작에 사라진다. claim 스냅숏 뒤 행이 사라진
+                # 잡(요청 삭제 -- 종단 전이의 KeyError 등)은 request_id=NULL 로 남긴다: 지워진 id 로 쓰면 어디서도
+                # 안 보이는 고아 이벤트다(id 는 payload 에 둔다).
+                gone = self._job_gone(jid)
                 self._repos.observability.record_event(
                     component="stepper", severity="error", event_type="step_error",
                     message=f"{type(exc).__name__}: {exc}"[:500],
-                    request_id=job.get("request_id"))
+                    payload=({"job_id": jid, "request_id": job.get("request_id"), "job_deleted": True}
+                             if gone else None),
+                    request_id=None if gone else job.get("request_id"))
         # 2패스: vcjob 큐 대기 재확인은 제출이 LDAP 예산을 먼저 쓴 **뒤에** 한다 -- 그 틱의 첫 LDAP 사용은 언제나
         # 계수되는 제출 시도라 "한 번 불가를 보면 나머지는 보류"(D2)가 문언 그대로 성립하고 폴링 잡이 제출을 굶기지
         # 않는다(폴링은 updated_at 을 갱신하지 않아 claim 앞쪽에 선다).
@@ -687,6 +692,40 @@ class JobStepper:
                 artifact_uri=f"{self._artifact_base()}/{job['job_id']}",
                 result_summary=summary)
 
+    def _job_gone(self, job_id) -> bool:
+        """잡 행이 없는가(요청 삭제). 조회 실패는 False(모름 -- 지금처럼 request_id 를 단 채 남긴다)."""
+        try:
+            return self._repos.data_jobs.get_job(job_id) is None
+        except Exception:  # noqa: BLE001 -- 진단 보강용 조회가 step_error 기록을 막으면 안 된다
+            return False
+
+    def _record_ref(self, job, phase, ref) -> bool:
+        """제출 직후 ref 를 행에 남긴다(2026-10-08, 요청 삭제 선행 보강). False = 잡 행이 없다 -- claim 스냅숏 뒤
+        관리자가 요청을 지웠다. 방금 만든 Pod/vcjob 은 여기서 이미 회수했으니 호출자는 "gone" 을 돌려준다(진행하면
+        요청 없는 실제 rm/sync 가 고아로 돈다)."""
+        if self._repos.data_jobs.set_phase_ref(job["job_id"], phase, ref):
+            return True
+        self._reclaim_deleted(job, ref)
+        return False
+
+    def _reclaim_deleted(self, job, ref):
+        """행이 사라진 잡에 방금 제출한 ref 를 회수한다. 이벤트는 request_id=NULL 로 남긴다 -- 지워진 id 로 쓰면
+        어디서도 안 보이는 고아가 된다(job·request id 는 payload 에). terminate 실패도 같은 이벤트에 싣고 severity 를
+        error 로 올린다: 요청 없는 잡이 클러스터에서 돌고 있을 수 있다(조용히 두지 않는다)."""
+        error = None
+        try:
+            self._exec.terminate(ref)
+        except ExecutionError as exc:
+            error = exc.reason_code
+        self._repos.observability.record_event(
+            component="stepper", severity="warning" if error is None else "error",
+            event_type="submitted_for_deleted_job",
+            message=(f"job {job['job_id']} deleted after claim -- reclaimed {ref}" if error is None
+                     else f"job {job['job_id']} deleted after claim -- terminate {ref} failed: {error}")[:500],
+            payload={"job_id": job["job_id"], "request_id": job.get("request_id"), "ref": ref,
+                     "terminate_error": error},
+            request_id=None)
+
     def _reclaim_if_terminal(self, job, ref):
         """제출 직후 잡이 이미 종단이면(= claim과 제출 사이에 취소가 들어왔다) 방금 만든
         Pod/vcjob을 즉시 회수하고 현재 상태를 돌려준다. None이면 계속 진행해도 된다.
@@ -695,9 +734,16 @@ class JobStepper:
         FOR UPDATE SKIP LOCKED가 곧바로 풀린다. 그 창에서 취소된 잡도 _step_one이
         그대로 제출해 버리고, 뒤따르는 set_job_state는 종단 가드가 삼키므로 클러스터에만
         고아가 남는다. 그 고아는 아무도 못 치운다 — cancel_job은 종단 잡에 409,
-        terminate_job은 종단 잡에 no-op이기 때문. 그래서 여기서 한 번 더 읽는다."""
+        terminate_job은 종단 잡에 no-op이기 때문. 그래서 여기서 한 번 더 읽는다.
+
+        행이 아예 없으면(set_phase_ref 뒤에 요청이 지워졌다 -- 삭제 게이트의 조용한 창이 방금 updated_at 이 찍힌
+        잡을 거르므로 좁은 창이다) 스냅숏 상태로 폴백하지 않고 같은 회수 후 "gone" 이다(예전 폴백은 스냅숏의 비종단을
+        읽어 계속 진행했다)."""
         current = self._repos.data_jobs.get_job(job["job_id"])
-        state = (current or job)["state"]
+        if current is None:
+            self._reclaim_deleted(job, ref)
+            return "gone"
+        state = current["state"]
         if DataJobState(state) not in TERMINAL_DATA_JOB_STATES:
             return None
         try:
@@ -864,7 +910,8 @@ class JobStepper:
             self._finalize(job, DataJobState.REJECTED,
                            reason_code=f"preflight_submit_failed:{exc.reason_code}")
             return "Rejected"
-        self._repos.data_jobs.set_phase_ref(jid, "preflight", ref)
+        if not self._record_ref(job, "preflight", ref):
+            return "gone"
         reclaimed = self._reclaim_if_terminal(job, ref)
         if reclaimed is not None:
             return reclaimed
@@ -909,7 +956,8 @@ class JobStepper:
             self._finalize(job, DataJobState.FAILED,
                            reason_code=f"execution_submit_failed:{exc.reason_code}")
             return "Failed"
-        self._repos.data_jobs.set_phase_ref(jid, "execution", ref)
+        if not self._record_ref(job, "execution", ref):
+            return "gone"
         # 슬라이스 20(설계 §2.2, 플랜 D1): 스케줄 대기의 앵커 = "execution vcjob
         # 제출 직후". 전이 행(Preflight→Running/Executing→Executing)의 at 을 나중에
         # 해석하는 대신 여기서 컬럼에 직접 남긴다 -- 세 모듈 교차 불변식(자기 전이
@@ -979,7 +1027,8 @@ class JobStepper:
             self._finalize(job, DataJobState.FAILED,
                            reason_code=f"preview_submit_failed:{exc.reason_code}")
             return "Failed"
-        self._repos.data_jobs.set_phase_ref(jid, "preview", ref)
+        if not self._record_ref(job, "preview", ref):
+            return "gone"
         reclaimed = self._reclaim_if_terminal(job, ref)
         if reclaimed is not None:
             return reclaimed
@@ -1040,7 +1089,8 @@ class JobStepper:
                 self._finalize(job, DataJobState.FAILED,
                                reason_code=f"execution_recheck_submit_failed:{exc.reason_code}")
                 return "Failed"
-            self._repos.data_jobs.set_phase_ref(jid, "exec_preflight", ref)
+            if not self._record_ref(job, "exec_preflight", ref):
+                return "gone"
             reclaimed = self._reclaim_if_terminal(job, ref)
             if reclaimed is not None:
                 return reclaimed

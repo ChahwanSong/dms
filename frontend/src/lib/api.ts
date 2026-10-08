@@ -56,7 +56,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   verification_invalid: "인증번호가 일치하지 않습니다",
   verification_too_many_attempts: "시도 횟수를 초과했습니다 — 인증번호를 다시 받으세요",
   // job / batch
-  job_not_found: "잡을 찾을 수 없습니다",
+  job_not_found: "잡을 찾을 수 없습니다 — 삭제됐거나 볼 수 없는 잡입니다",
   batch_not_found: "배치를 찾을 수 없습니다",
   batch_not_confirmable: "확인할 수 없는 상태의 배치입니다 — 그 사이 항목이 바뀌어 다시 미리보기 중일 수 있습니다(새로고침 후 확인)",
   batch_child_confirm_via_batch: "배치 항목은 따로 확인할 수 없습니다 — 배치 상세에서 「배치 확인」으로 실행하세요",
@@ -113,7 +113,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   storage_exists: "이미 존재하는 스토리지입니다",
   storage_in_use: "사용 중인 스토리지는 삭제할 수 없습니다 (비활성화하세요)",
   storage_not_found: "스토리지를 찾을 수 없습니다",
-  maintenance_mode: "유지보수 중입니다 — 새 작업 제출이 일시 중단되었습니다",
+  // 제출만이 아니다 -- 작업 삭제·배치 생성/확인/취소·빌드·릴리스도 같은 503 을 받는다(reject_when_maintenance 호출처).
+  maintenance_mode: "유지보수 중입니다 — 작업 제출·삭제·빌드 같은 변경이 일시 중단되었습니다",
   http_422: "입력값이 올바르지 않습니다",
   invalid_policy: "정책 값이 올바르지 않습니다",
   invalid_priority: "우선순위 값이 올바르지 않습니다",
@@ -175,7 +176,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   mail_settings_session_required: "메일 설정 변경·연결 확인·테스트 메일은 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   accounts_session_required: "계정 생성·삭제·역할·비활성화 변경은 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   privileged_account_protected: "특권 실행 목록에 있는 이름의 계정은 특권 실행 자격이 있는 관리자만 관리합니다(만들기·역할·비활성화·삭제) — 이 계정은 셀프 비밀번호 재설정도 쓸 수 없으니 특권 관리자에게 요청하세요",
-  admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경은 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
+  admin_session_required: "빌드·릴리스·컨트롤 상태·레지스트리 삭제·결과 폴더(artifact base) 변경·작업 삭제는 포탈에 로그인한 관리자만 할 수 있습니다(토큰 인증 불가)",
   preview_round_required: "배치 확인에는 확인한 미리보기 회차가 필요합니다 — 화면을 새로고침한 뒤 「배치 확인」을 다시 여세요",
   batch_preview_changed: "확인 대화상자를 연 뒤 배치 내용이 바뀌었습니다(항목 추가·재실행으로 다시 미리보기됨) — 대화상자를 닫고 다시 열어 바뀐 내용을 검토하세요",
   mail_relay_token_required: "릴레이 주소를 바꾸려면 인증 키도 함께 다시 입력해야 합니다(저장된 키가 새 주소로 새지 않게)",
@@ -204,7 +205,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   identity_changed_at_step: "작업을 계획한 뒤 실행 계정의 LDAP 정보(uid·주 그룹 또는 보조 그룹 소속)가 바뀌어 실행 전에 중단했습니다 — 다시 신청하세요(새로 들어간 그룹도 다시 신청해야 반영됩니다)",
   cancel_failed: "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다",
   batch_not_cancelable: "취소할 수 없는 상태의 배치입니다",
-  request_not_found: "요청을 찾을 수 없습니다",
+  // 남의 요청에도 쓰이는 404 라 「삭제됐거나 볼 수 없는」 둘 다 말한다 — 두 경우 문구가 같아 존재 오라클이 없다.
+  request_not_found: "요청을 찾을 수 없습니다 — 삭제됐거나 볼 수 없는 요청입니다",
   cancelled_by_user: "사용자가 취소했습니다",
   cancelled_by_batch: "배치 취소로 종료되었습니다",
   scan_path_exists: "이미 등록된 경로입니다",
@@ -314,6 +316,31 @@ export const REASON_MESSAGES: Record<string, string> = {
   build_proxy_ca_missing: "빌드 노드에서 프록시 CA 파일을 읽을 수 없거나 PEM 이 아닙니다 — 컨트롤 상태의 CA 경로와 파일을 확인하세요",
   build_proxy_tls_failed: "프록시 너머 TLS 검증에 실패했습니다 — 가로채기 프록시의 CA 가 맞는지(컨트롤 상태의 프록시 CA 경로) 확인하세요",
   build_evicted: "빌드가 노드에서 축출됐습니다 — 빌드 노드의 디스크·메모리를 확인하세요",
+  // 작업(요청) 선택 삭제(2026-10-08). 앞 다섯은 POST /api/admin/requests:delete 의 **부분 성공 본문** skipped 사유
+  // (items:rerun 관례 — 전체 실패가 아니다), 다음 하나는 422, purge_* 와 artifact_dir_unexpected 는 정리 상태(GET
+  // /api/admin/request-purges 의 last_error) — 컨트롤러 request-purge 루프가 낸다. reasonCodes.json 과 같은 커밋.
+  // request_recently_finished 에 숫자를 쓰지 않는다 — 조용한 창은 DMS_REQUEST_DELETE_QUIET_SECONDS 로 바뀐다.
+  // batch_child_not_deletable 은 「배치 화면에서 관리」로 보내지 않는다 — 배치를 지워도 자식 작업 기록은 남고 그 뒤로도
+  // 개별 삭제 경로가 없다(repositories/batches.py delete docstring, 2026-10-09 검증 지적).
+  request_not_deletable: "끝나지 않은 작업은 삭제할 수 없습니다 — 끝난 뒤에 삭제하세요(필요하면 상세에서 먼저 취소)",
+  request_job_active: "요청은 끝났지만 아직 끝나지 않은 잡이 있어 삭제할 수 없습니다 — 잠시 뒤 다시 시도하세요",
+  request_recently_finished: "방금 끝난 작업입니다 — 잠시 뒤에 삭제할 수 있습니다",
+  batch_child_not_deletable: "배치 항목의 작업은 삭제할 수 없습니다 — 배치를 지워도 작업 기록은 남습니다",
+  request_delete_failed: "삭제 중 오류가 나 이 작업은 지우지 못했습니다(변경 없음) — 다시 시도하세요",
+  delete_selection_too_large: "한 번에 200개까지 삭제할 수 있습니다",
+  purge_k8s_failed: "남은 파드·잡 정리에 실패했습니다 — 자동으로 다시 시도합니다",
+  purge_waiting_pods: "잡 파드가 아직 종료 중입니다 — 종료되면 결과 파일을 정리합니다(오래 걸리면 노드 상태를 확인하세요)",
+  purge_base_unavailable: "결과 폴더를 열 수 없습니다 — 결과 폴더 설정·마운트를 확인하세요",
+  purge_base_unsafe: "결과 폴더(또는 정리 폴더)의 소유자·권한이 안전하지 않아 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
+  artifact_dir_unexpected: "결과 폴더 모양이 예상과 달라 정리하지 않았습니다 — 운영자 확인이 필요합니다",
+  purge_detach_failed: "결과 폴더를 정리 폴더로 옮기지 못했습니다 — 자동으로 다시 시도합니다",
+  purge_no_node: "결과 파일을 지울 노드가 없습니다 — 에이전트 보고·결과 폴더 마운트를 확인하세요",
+  purge_pod_failed: "결과 파일 정리 파드가 실패했거나 파일이 남았습니다 — 자동으로 다시 시도합니다",
+  purge_entry_failed: "한 요청의 결과 파일이 지워지지 않고 남았습니다 — 그 요청만 따로 다시 시도합니다(계속되면 정리 폴더의 그 항목을 확인하세요)",
+  purge_pod_stuck: "결과 파일 정리 파드가 끝나지 않고 있습니다 — 그 파드의 노드 상태를 확인하세요",
+  purge_target_still_present: "삭제한 요청의 기록이 DB 에 다시 있어 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
+  purge_row_invalid: "정리 대기 기록의 내용이 올바르지 않아 정리를 멈췄습니다 — 운영자 확인이 필요합니다",
+  purge_failed: "결과 정리 중 예기치 못한 오류가 났습니다 — 자동으로 다시 시도합니다",
 };
 
 /** 사유 코드를 사용자에게 보일 문구로. 매핑이 없으면 원시 코드를 그대로 돌려준다

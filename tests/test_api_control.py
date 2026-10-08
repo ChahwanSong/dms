@@ -287,7 +287,7 @@ def test_invalid_no_proxy_is_rejected(client, bad, session_admin):
 def test_shared_token_cannot_drive_deploy_routes(client, db, tmp_path, monkeypatch):
     # 공유 토큰은 모든 노드 에이전트가 쥔 role admin 자격이다 -- 그것으로 릴리스를 수정 전 이미지로
     # 롤백하거나 빌드 소스·노드를 바꿔 root 로 도는 제어면·잡 이미지를 갈아 끼울 수 있으면 계정·배치 특권
-    # 게이트가 통째로 무효가 된다. 여섯 변경 경로는 토큰(에이전트의 node:* actor 포함)이면 403 이고 아무것도
+    # 게이트가 통째로 무효가 된다. 변경 경로(작업 삭제 포함 일곱)는 토큰(에이전트의 node:* actor 포함)이면 403 이고 아무것도
     # 바뀌지 않는다. 조회는 토큰도 그대로 된다(포탈 밖 스크립트·모니터링).
     repos = client.app.state.repos
     repos.agents.ingest("dms-w1", {})                       # 세션이었다면 통과했을 조건을 갖춰 둔다
@@ -312,6 +312,8 @@ def test_shared_token_cannot_drive_deploy_routes(client, db, tmp_path, monkeypat
                                                    {"component": "job-image", "tag": "d23"}]}),
         ("DELETE", "/api/admin/registry/images/dms/d23", None),
         ("PUT", "/api/admin/artifact-base", {"uri": f"file://{tmp_path}", "force": True}),
+        # 작업(요청) 삭제(2026-10-08): 컨펌·취소 기록과 root 실행 산출물을 없애는 증거 삭제 -- 같은 세션 전용 경계.
+        ("POST", "/api/admin/requests:delete", {"request_ids": ["0" * 32]}),
     )
     for headers in (ADMIN, {**ADMIN, "x-dms-actor": "node:storage-01"}):
         for method, path, body in calls:
@@ -323,7 +325,8 @@ def test_shared_token_cannot_drive_deploy_routes(client, db, tmp_path, monkeypat
     assert touched == []
     assert db.query("SELECT COUNT(*) AS n FROM audit_log")[0]["n"] == audits_before
     for path in ("/api/admin/control-state", "/api/admin/control-state/history",
-                 "/api/admin/builds", "/api/admin/releases", "/api/admin/artifact-base"):
+                 "/api/admin/builds", "/api/admin/releases", "/api/admin/artifact-base",
+                 "/api/admin/request-purges"):
         assert client.get(path, headers=ADMIN).status_code == 200, path
     # 같은 변경이 세션 관리자에겐 열려 있다 -- 403 은 경로 고장이 아니라 인증 방식 때문이다.
     client.app.state.repos.accounts.create("opadm", "p", "admin", actor="t")

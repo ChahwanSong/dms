@@ -5,8 +5,9 @@ from dms.execution_volcano import VolcanoExecutionAdapter
 from dms.queue_reader import StubQueueReader, VolcanoQueueReader
 from dms.repositories import Repositories
 from dms.rollout_runner import RolloutRunner, StubRolloutRunner
+from dms.purge_runner import PurgeRunner, StubPurgeRunner
 from dms.wiring import (build_build_runner, build_execution_adapter,
-                        build_identity_resolver, build_queue_reader,
+                        build_identity_resolver, build_purge_runner, build_queue_reader,
                         build_rollout_runner)
 
 BASE = {"DMS_DATABASE_URL": "sqlite:///tmp/x.db", "DMS_SHARED_TOKEN": "t",
@@ -124,3 +125,21 @@ def test_volcano_adapter_summary_symlink_is_none_and_regular_file_is_parsed(db, 
     victim.write_text('{"secret": "TOP-SECRET"}')
     os.symlink(victim, d / "summary.json")
     assert adapter.read_summary("vcjob/x") is None
+
+
+def test_purge_runner_is_stub_when_backend_is_not_volcano(db):
+    settings = Settings.from_env(BASE)
+    assert isinstance(build_purge_runner(settings, Repositories(db)), StubPurgeRunner)
+
+
+def test_purge_runner_resolves_the_job_image_at_call_time(db):
+    # 요청 삭제 정리(2026-10-08): purge 파드 이미지는 잡 이미지 -- 포탈 릴리스의 job-image(DB)가 재시작 없이 반영돼야
+    # 한다(생성자 캡처 금지, 빌드 프로브와 같은 이유).
+    settings = Settings.from_env({**BASE, "DMS_EXECUTION_BACKEND": "volcano",
+                                  "DMS_JOB_IMAGE": "reg/img:1"})
+    repos = Repositories(db)
+    runner = build_purge_runner(settings, repos)
+    assert isinstance(runner, PurgeRunner)
+    assert runner._job_image_fn() == "reg/img:1"
+    db.execute("UPDATE control_state SET job_image = 'reg/img:2' WHERE id = 1")
+    assert runner._job_image_fn() == "reg/img:2"

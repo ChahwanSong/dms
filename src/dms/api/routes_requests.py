@@ -184,9 +184,18 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
     # 비운영자는 requester 를 자기 자신으로 **강제**한다 -- requester 파라미터로
     # 남의 작업을 넓혀 볼 수 없다(격리). 운영자만 requester 필터를 존중한다.
     req = (requester or None) if identity.role == "admin" else identity.actor
-    return request.app.state.repos.requests.list(
+    repos = request.app.state.repos
+    rows = repos.requests.list(
         requester_id=req, operation=operation, state=state,
         before=before, limit=limit)
+    # 사용량 분석 지점(성공 scan 잡)을 가진 요청인가(2026-10-09) -- 작업 삭제 확인 창의 사용량 경고가 쓴다. 요청
+    # 상태로는 판정할 수 없다: 취소 경합으로 「요청 Cancelled · 잡 Succeeded」가 생기고 사용량 분석은 잡 상태를 본다.
+    # 비 scan 은 false(모름이 아니라 「지점 없음」이 확정값이다).
+    hits = repos.data_jobs.usage_scan_request_ids(
+        [r["request_id"] for r in rows if r["operation"] == "scan"])
+    for row in rows:
+        row["has_succeeded_scan"] = row["request_id"] in hits
+    return rows
 
 
 # 요청 상태 문자열의 종단 집합. RequestState(...) 로 열거형을 거치지 않는 이유:

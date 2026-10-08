@@ -15,6 +15,7 @@ from .planner import Planner
 from .pod_gc import PodGarbageCollector
 from .reconciler import reconcile_storages_once
 from .repositories import Repositories
+from .request_purger import RequestPurger
 from .retention import prune_agent_reports_once, prune_events_once
 from .rollout_watcher import RolloutWatcher
 from .stepper import JobStepper
@@ -29,7 +30,7 @@ class Loop:
 
 def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=None,
                 execution_adapter=None, build_runner=None,
-                rollout_runner=None) -> list[Loop]:
+                rollout_runner=None, purge_runner=None) -> list[Loop]:
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
 
     def _stepper_step():
@@ -63,8 +64,9 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                     request_id=orphan["request_id"])
 
     def _retention_step():
-        # events는 state_transitions처럼 영구 보관하지 않는다 -- 같은 성격의 배치
-        # 삭제이니 agent_reports 정리와 같은 루프에 묶는다(새 루프를 만들지 않는다).
+        # events는 보존일로 지운다(state_transitions 는 시간으로 지우지 않고 요청 삭제 때만 함께 지워진다 --
+        # repositories/request_purges.py) -- 같은 성격의 배치 삭제이니 agent_reports 정리와 같은 루프에 묶는다
+        # (새 루프를 만들지 않는다).
         prune_agent_reports_once(repos, retention_days=settings.agent_report_retention_days)
         prune_events_once(repos, retention_days=settings.event_retention_days)
 
@@ -108,6 +110,11 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                               repos, rollout_runner,
                               timeout_seconds=settings.rollout_timeout_seconds
                           ).run_once()))
+    # 요청 삭제 정리(2026-10-08, request_purger.py): 삭제한 요청의 남은 파드·결과 파일. purge_runner 가 없으면
+    # (기존 호출자) 넣지 않는다 -- build-watcher 와 같은 하위호환 규칙. 틱 예산 20s < 리스 max(15*3, 30)=45s.
+    if purge_runner is not None:
+        loops.append(Loop("request-purge", settings.request_purge_interval_seconds,
+                          lambda: RequestPurger(repos, purge_runner, settings=settings).run_once()))
     return loops
 
 
@@ -140,10 +147,10 @@ def run_all_once(loops: list[Loop], repos: Repositories, holder: str) -> dict[st
 
 def run_forever(settings: Settings, repos: Repositories, holder: str,
                 *, sleep=time.sleep, identity_resolver=None, execution_adapter=None,
-                build_runner=None, rollout_runner=None) -> None:
+                build_runner=None, rollout_runner=None, purge_runner=None) -> None:
     loops = build_loops(settings, repos, identity_resolver=identity_resolver,
                         execution_adapter=execution_adapter, build_runner=build_runner,
-                        rollout_runner=rollout_runner)
+                        rollout_runner=rollout_runner, purge_runner=purge_runner)
     next_due = {loop.name: 0.0 for loop in loops}
     while True:
         now = time.monotonic()

@@ -193,12 +193,17 @@ class Planner:
             {"rejections": exc.rejections})
 
     def _plan_one(self, rid, now_iso, *, resolver=_SELF):
+        # "gone" = 요청이 계획 도중 Pending 을 떠났다(취소·관리자 삭제) -- 아무것도 남기지 않았고 이벤트도 쓰지 않는다
+        # (삭제된 id 로 쓴 이벤트는 어디서도 안 보이는 고아다).
         req = self._repos.requests.get(rid)
-        # 멱등: 이미 emit된 잡이 있으면(크래시 복구) 상태만 정리
+        if req is None:
+            return "gone"                   # list_pending 뒤에 지워졌다
+        # 멱등: 이미 emit된 잡이 있으면(옛 비원자 emit 의 크래시 잔재) 상태만 정리 -- 조건부(Pending 일 때만)라 그 사이
+        # 취소된 요청을 Planned 로 되살리지 않는다.
         if self._repos.data_jobs.list_jobs(request_id=rid):
-            if req["state"] != "Planned":
-                self._repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
-            return "planned"
+            if self._repos.requests.mark_planned_if_pending(rid, actor="planner"):
+                return "planned"
+            return "gone"
         payload = req["payload"]
         # 1. conflict: 앞선 비터미널 동일 resource_key
         prior = self._repos.requests.find_active(req["resource_key"])
@@ -389,9 +394,10 @@ class Planner:
                        "rejections": placement["rejections"], **fanout}
         precondition = {"requester_id": req["requester_id"],
                         "owner": identity.username, "operation": req["operation"]}
-        plan_id = self._repos.data_jobs.create_plan(rid, actor="planner")
-        self._repos.data_jobs.create_job(
-            rid, plan_id, operation=req["operation"], priority=req["priority"],
+        # plan·job INSERT + Pending→Planned 를 한 트랜잭션 + CAS 로(data_jobs.create_plan_and_job docstring): LDAP
+        # 해석 중 취소·삭제된 요청에 잡을 만들거나 Cancelled 를 Planned 로 되살리지 않는다.
+        job_id = self._repos.data_jobs.create_plan_and_job(
+            rid, operation=req["operation"], priority=req["priority"],
             storage_name=payload.get("storage"),
             source_storage=payload.get("source_storage"),
             destination_storage=payload.get("destination_storage"),
@@ -399,7 +405,8 @@ class Planner:
             target=payload.get("target"), options=payload.get("options", {}),
             tool=placement["tool"], worker_pool=worker_pool,
             precondition=precondition, actor="planner")
-        self._repos.requests.set_state(rid, RequestState.PLANNED, actor="planner")
+        if job_id is None:
+            return "gone"
         self._record_group_events(rid, identity)
         return "planned"
 

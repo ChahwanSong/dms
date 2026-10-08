@@ -1368,3 +1368,150 @@ def test_tick_budget_passes_remaining_as_deadline(db):
     Planner(repos, slow, settings=_Settings(), monotonic=lambda: clock[0]).run_once(now_iso=NOW)
     assert [d for _u, d, _t in slow.calls] == [None, 1000.0 + LDAP_TICK_BUDGET_SECONDS]
     assert _states(repos, rids) == ["Planned", "Planned"]
+
+
+# ---- 2026-10-08 요청 삭제 선행 보강(작업 삭제 스펙 §6.2): emit = 한 트랜잭션 + 조건부 Pending→Planned ----
+# planner 는 Pending 요청을 읽은 뒤 LDAP 해석을 거쳐 emit 한다. 그 창에서 취소된 요청을 Planned 로 되살리거나(예전
+# set_state 에 종단 가드 없음), 지워진 요청에 실행될 Pending 잡을 남기면 안 된다.
+
+_EMIT = dict(operation="scan", priority="mid", storage_name="s1", target="a", options={},
+             tool="dscan", worker_pool={}, precondition={}, actor="planner")
+
+
+class _HookResolver:
+    """첫 resolve 도중에 hook 을 한 번 부른다 -- planner 가 요청을 읽은 뒤 emit 하기 전의 창(LDAP 해석)을 흉내."""
+    def __init__(self, hook):
+        self._inner = StubIdentityResolver({"alice": ALICE})
+        self._hook = hook
+
+    def resolve(self, username, *, deadline=None):
+        hook, self._hook = self._hook, None
+        if hook is not None:
+            hook()
+        return self._inner.resolve(username, deadline=deadline)
+
+
+def _rows(db, table, rid):
+    return db.query(f"SELECT * FROM {table} WHERE request_id = :r", {"r": rid})
+
+
+def _cancel(repos, rid):
+    from dms.domain import DataJobState
+    repos.requests.finalize_from_job(rid, DataJobState.CANCELLED, reason_code="cancelled_by_user",
+                                     actor="alice")
+
+
+def test_cancel_during_ldap_resolution_neither_resurrects_nor_emits(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _scan_request(repos)
+    result = Planner(repos, _HookResolver(lambda: _cancel(repos, rid)),
+                     settings=_Settings()).run_once(now_iso=NOW)
+    assert result[rid] == "gone"
+    assert repos.requests.get(rid)["state"] == "Cancelled"                 # 부활 없음
+    assert [t["to_state"] for t in repos.requests.transitions(rid)] == ["Pending", "Cancelled"]
+    assert _rows(db, "plans", rid) == [] and _rows(db, "data_jobs", rid) == []
+    assert repos.observability.events_for_request(rid) == []               # plan_error 없음
+    assert _rows(db, "results", rid)[0]["terminal_state"] == "Cancelled"
+
+
+def test_delete_during_ldap_resolution_leaves_no_runnable_job(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _scan_request(repos)
+
+    def cancel_then_delete():
+        _cancel(repos, rid)
+        with db.transaction():
+            db.execute("DELETE FROM state_transitions WHERE entity_kind = 'request' AND entity_id = :r",
+                       {"r": rid})
+            for table in ("results", "requests"):
+                db.execute(f"DELETE FROM {table} WHERE request_id = :r", {"r": rid})
+
+    result = Planner(repos, _HookResolver(cancel_then_delete), settings=_Settings()).run_once(now_iso=NOW)
+    assert result[rid] == "gone"
+    for table in ("requests", "plans", "data_jobs", "results", "events"):
+        assert _rows(db, table, rid) == [], table
+    assert db.query("SELECT 1 AS x FROM state_transitions") == []
+    assert repos.data_jobs.claim_steppable() == []                         # stepper 가 실행할 고아 잡이 없다
+
+
+def test_request_deleted_after_listing_is_gone_without_plan_error(db):
+    # list_pending 이 집은 뒤 행이 사라졌다 -- 예전엔 req["payload"] TypeError 로 지워진 id 의 plan_error 를 남겼다.
+    repos = Repositories(db)
+    rid = _scan_request(repos)
+    stale = repos.requests.list_pending()
+    db.execute("DELETE FROM requests WHERE request_id = :r", {"r": rid})
+    repos.requests.list_pending = lambda limit=50: stale
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "gone"
+    assert db.query("SELECT 1 AS x FROM events") == []
+
+
+def test_idempotent_branch_does_not_resurrect_a_cancelled_request(db):
+    # 옛 비원자 emit 의 크래시 잔재(잡은 있고 요청은 Pending)를 낡은 목록이 집었는데 그 사이 취소됐다.
+    repos = Repositories(db)
+    rid = _scan_request(repos)
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    repos.data_jobs.create_job(rid, plan_id, **_EMIT)
+    _cancel(repos, rid)
+    assert _planner(repos)._plan_one(rid, NOW) == "gone"
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+    assert [t["to_state"] for t in repos.requests.transitions(rid)] == ["Pending", "Cancelled"]
+
+
+def test_emit_keeps_transition_order_and_actor(db):
+    repos = Repositories(db)
+    _seed_storage(repos); _seed_policy(repos); _seed_report(repos)
+    rid = _scan_request(repos)
+    assert _planner(repos).run_once(now_iso=NOW)[rid] == "planned"
+    rows = db.query("SELECT entity_kind, from_state, to_state, actor FROM state_transitions ORDER BY id")
+    assert [(r["entity_kind"], r["from_state"], r["to_state"], r["actor"]) for r in rows] == [
+        ("request", None, "Pending", "alice"),
+        ("plan", None, "Planned", "planner"),
+        ("data_job", None, "Pending", "planner"),
+        ("request", "Pending", "Planned", "planner")]
+    [job] = repos.data_jobs.list_jobs(request_id=rid)
+    assert [p["job_id"] for p in _rows(db, "plans", rid)] == [job["job_id"]]
+
+
+def test_create_plan_and_job_requires_a_pending_request(db):
+    repos = Repositories(db)
+    assert repos.data_jobs.create_plan_and_job("0" * 32, **_EMIT) is None   # 행 없음
+    rid = _scan_request(repos)
+    _cancel(repos, rid)
+    assert repos.data_jobs.create_plan_and_job(rid, **_EMIT) is None        # 종단
+    assert db.query("SELECT 1 AS x FROM plans") == [] and db.query("SELECT 1 AS x FROM data_jobs") == []
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+
+
+def test_create_plan_and_job_rolls_back_when_the_cas_loses(db):
+    # sqlite 에는 행 잠금이 없다 -- SELECT 와 조건부 UPDATE 사이의 경쟁 커밋을 같은 트랜잭션 안의 UPDATE 로 흉내 낸다.
+    # 조건부 UPDATE 영향 0 이면 plan·job INSERT 까지 전부 롤백(흉내 낸 상태 변경도 같은 트랜잭션이라 함께 되돌아간다).
+    repos = Repositories(db)
+    rid = _scan_request(repos)
+    real = repos.data_jobs._insert_job
+
+    def insert_then_lose(*a, **k):
+        real(*a, **k)
+        db.execute("UPDATE requests SET state = 'Cancelled' WHERE request_id = :r", {"r": rid})
+    repos.data_jobs._insert_job = insert_then_lose
+    assert repos.data_jobs.create_plan_and_job(rid, **_EMIT) is None
+    assert _rows(db, "plans", rid) == [] and _rows(db, "data_jobs", rid) == []
+    assert db.query("SELECT 1 AS x FROM state_transitions WHERE entity_kind IN ('plan', 'data_job')") == []
+
+
+def test_create_plan_and_job_is_all_or_nothing_on_crash(db):
+    repos = Repositories(db)
+    rid = _scan_request(repos)
+    real = repos.data_jobs._record_transition
+
+    def crash_on_request(kind, *a, **k):
+        if kind == "request":
+            raise RuntimeError("crash before the request transition")
+        return real(kind, *a, **k)
+    repos.data_jobs._record_transition = crash_on_request
+    with pytest.raises(RuntimeError):
+        repos.data_jobs.create_plan_and_job(rid, **_EMIT)
+    del repos.data_jobs._record_transition
+    assert repos.requests.get(rid)["state"] == "Pending"
+    assert _rows(db, "plans", rid) == [] and _rows(db, "data_jobs", rid) == []

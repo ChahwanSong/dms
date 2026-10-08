@@ -15,6 +15,7 @@ from .sync_pairs import SyncPairsRepository
 from .mail_settings import MailSettingsRepository
 from .scan_digests import ScanDigestsRepository
 from .node_exclusions import NodeExclusionsRepository
+from .request_purges import RequestPurgesRepository
 
 
 class Repositories:
@@ -37,3 +38,4 @@ class Repositories:
         self.mail_settings = MailSettingsRepository(db)
         self.scan_digests = ScanDigestsRepository(db)
         self.node_exclusions = NodeExclusionsRepository(db)
+        self.request_purges = RequestPurgesRepository(db)

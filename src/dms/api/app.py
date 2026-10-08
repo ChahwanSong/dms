@@ -27,6 +27,7 @@ from .routes_storages import router as storages_router, user_router as user_stor
 from .routes_scan_paths import router as scan_paths_router
 from .routes_sync_pairs import router as sync_pairs_router, user_router as user_sync_pairs_router
 from .routes_requests import router as requests_router
+from .routes_request_purge import router as request_purge_router
 from .routes_jobs import router as jobs_router
 from .routes_artifacts import router as artifacts_router
 from .routes_agent import router as agent_router
@@ -148,6 +149,7 @@ def create_app(settings: Settings, db: Database, exit_fn=None) -> FastAPI:
     app.include_router(portal_router)
     app.include_router(user_sync_pairs_router)
     app.include_router(requests_router)
+    app.include_router(request_purge_router)
     app.include_router(jobs_router)
     app.include_router(artifacts_router)
     app.include_router(agent_router)

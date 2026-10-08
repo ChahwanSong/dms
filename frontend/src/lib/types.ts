@@ -9,7 +9,8 @@ export interface Transition {
 export interface RequestRow {
   request_id: string; operation: string; requester_id: string; resource_key: string;
   priority: string; state: string; created_at: string; updated_at: string; payload: Record<string, unknown>;
-  // 무한 스크롤 커서(슬라이스 39): 단조 증가. 다음 쪽은 ?before=<이 값>.
+  // 무한 스크롤 커서(슬라이스 39): 현존 행 기준 단조 증가(최신 요청을 삭제하면 다음 제출이 그 번호를 다시 받는다).
+  // 다음 쪽은 ?before=<이 값>.
   commit_order: number;
   // 배치 자식이면 그 배치 id(서버 requests.batch_id). 배치 자식은 단건 컨펌을 못 한다 -- 배치 확인으로만 실행된다
   // (2026-10-07, 409 batch_child_confirm_via_batch). 옵션(?) = 구형 fixture 호환. null/부재 = 단건 요청.
@@ -17,6 +18,10 @@ export interface RequestRow {
   // 요청을 만든 인증 방식(requests.auth_method): "session" | "token" | null(옛 행). token 은 root 자격이 없다
   // (identity.privilege_eligible). 요청 상세 「요청 내용」이 배치 자식의 root 여부를 설명할 때만 읽는다.
   auth_method?: string | null;
+  // 사용량 분석의 지점(성공 scan **잡**)을 가진 요청인가(목록 API, 2026-10-09). 작업 삭제 확인 창의 사용량 경고가 쓴다 --
+  // 요청 상태로는 판정할 수 없다(취소 경합으로 「요청 Cancelled · scan 잡 Succeeded」가 생기고 사용량 분석은 잡 상태를
+  // 본다). 옵션(?) = 상세 응답·구형 fixture 에는 없다 -- 없으면 요청 상태로 근사한다(isSucceededScan).
+  has_succeeded_scan?: boolean;
 }
 // events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
 // 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).
@@ -39,6 +44,25 @@ export interface RequestDetail extends RequestRow {
   reason_message?: string | null;
   terminal_state?: string | null;
   completed_at?: string | null;
+}
+// 작업(요청) 선택 삭제(2026-10-08) -- POST /api/admin/requests:delete 의 **부분 성공** 본문(items:rerun 관례).
+// 전부 skipped 여도 200 이다(전체 실패 403·422·503 은 ApiError). job_ids 는 지운 요청의 잡 id -- 화면이 잡 키
+// 캐시(아티팩트·로그)를 지우는 데 쓴다. purge_pending = 응답 시점의 정리 대기 행 수(결과 파일·파드 정리는 컨트롤러가
+// 비동기로 한다). null = 세지 못함(삭제 도중 DB 장애 -- 지운·제외 목록은 그래도 온다). 화면은 이 값 대신 정리 현황
+// (GET /api/admin/request-purges)을 본다.
+export interface DeleteRequestsResult {
+  deleted: { request_id: string; job_ids: string[] }[];
+  skipped: { request_id: string; reason: string }[];
+  purge_pending: number | null;
+}
+// GET /api/admin/request-purges -- 정리 대기 현황(유일한 운영 표면). stalled = last_error 가 있는 행 수(실패 백오프
+// 중이거나 오래 대기). items 는 오래된 순 최대 50건. last_error null = 지연 사유 없음(정상 대기).
+export interface PurgeStatusItem {
+  request_id: string; stage: string; attempts: number; last_error: string | null;
+  requested_at: string; requested_by: string; next_attempt_at: string;
+}
+export interface PurgeStatus {
+  pending: number; stalled: number; oldest_requested_at: string | null; items: PurgeStatusItem[];
 }
 // 플래너가 배치 시점에 확정한 워커 배치(planner.py: resolve_fanout 결과 + 후보·
 // 신원). 화면이 읽는 건 수치 몇 개와 identity(요청 상세 「요청 내용」의 실행 권한·신원·

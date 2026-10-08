@@ -3,9 +3,15 @@ import { X } from "lucide-react";
 // size: 기본 md(폼 다이얼로그). 표·요약이 여럿인 상세 창(노드 상세 등)은 xl 로 넓힌다 --
 // md 폭에선 표가 가로 스크롤로 잘린다(2026-09-30 노드 상세 모달화).
 const SIZES = { md: "max-w-md", lg: "max-w-2xl", xl: "max-w-5xl" } as const;
-export function Dialog({ trigger, title, children, open, onOpenChange, size = "md" }: {
+// onCloseAutoFocus(선택): 닫힐 때 Radix 는 트리거로 포커스를 돌려준다 -- 닫히는 동작이 트리거를 disabled 로 만들면
+// (작업 삭제: 성공하면 선택이 비어 「선택 삭제」가 잠긴다) 포커스가 <body> 로 떨어진다. 그런 창은 e.preventDefault() 후
+// 늘 있는 다른 자리로 직접 옮긴다(2026-10-09).
+// busy(선택): 창이 서버 응답을 기다리는 동안 aria-busy -- 진행 중 Esc·X 를 무시하는 창(작업 삭제)이 보조기기에
+// 「반응 없이 안 닫히는 창」으로만 보이지 않게(2026-10-09 검증 지적). 진행 문구(role=status)는 창 내용이 직접 그린다.
+export function Dialog({ trigger, title, children, open, onOpenChange, size = "md", onCloseAutoFocus, busy }: {
   trigger: React.ReactNode; title: string; children: React.ReactNode;
   open?: boolean; onOpenChange?: (o: boolean) => void; size?: keyof typeof SIZES;
+  onCloseAutoFocus?: (e: Event) => void; busy?: boolean;
 }) {
   return (
     <D.Root open={open} onOpenChange={onOpenChange}>
@@ -14,7 +20,7 @@ export function Dialog({ trigger, title, children, open, onOpenChange, size = "m
         <D.Overlay className="fixed inset-0 bg-black/30" />
         {/* max-h+overflow: 필드가 많은 다이얼로그(정책 9필드)가 낮은 화면에서
             제목·저장 버튼째 뷰포트 밖으로 잘리던 결함 — 넘치면 내부 스크롤로 */}
-        <D.Content aria-describedby={undefined}
+        <D.Content aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus} aria-busy={busy || undefined}
                    className={`fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-surface rounded-card shadow-soft p-5 w-[calc(100%-2rem)] ${SIZES[size]} max-h-[85vh] overflow-y-auto`}>
           <D.Title className="text-base font-semibold mb-3 pr-8">{title}</D.Title>
           {children}

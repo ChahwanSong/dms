@@ -18,8 +18,33 @@
 
 포탈 기능면에서 슬라이스 26 이 범위를 자른 것들. 결함이 아니라 아직 안 만든 기능이다.
 
-- 🔧 **아티팩트 삭제·보존 UI** — 다운로드(슬라이스 26)의 자연스러운 짝. 삭제 코드는
-  현재 `src/dms/` 전체에서 0건(`artifact_base.py:78` 의 자기 프로브 unlink 뿐).
+- 🔧 **아티팩트 보존 정책(자동 만료)** — 결과 파일 **삭제**는 작업(요청) 선택 삭제(2026-10-08, CHANGELOG)로
+  해소됐다: 관리자가 종단 요청을 지우면 DB 행과 함께 결과 파일·남은 파드·로그까지 정리된다. 남은 것은 시간
+  기반 자동 만료(N일 지난 종단 잡의 산출물). 넣으면 같은 길이어야 한다 — 컨트롤러는 `<base>/<job_id>` 떼어냄
+  (`artifact_trash.detach`, renameat)까지, 실제 삭제는 purge 파드(`purge_runner.build_purge_pod`, ARCHITECTURE
+  §7 규칙 13). 정할 것: DB 행을 남기고 파일만 만료할지(그러면 아티팩트 열람 404 를 「만료됨」으로 보일 문구와
+  `artifact_uri` 처리 필요), 아웃박스(`request_purges`)를 잡 단위로 넓힐지.
+- 🔧 **작업(요청) 삭제 후속**(2026-10-08 범위 밖):
+  - **단건 삭제 버튼(요청 상세)** — 지금은 작업 목록의 일괄 선택뿐(`POST /api/admin/requests:delete`). 같은
+    저장소 메서드(`RequestPurgesRepository.delete_terminal`)를 쓰므로 버튼 + 같은 엔드포인트에 id 1개면 된다.
+  - **삭제된 배치의 자식**(사용자 결정 2026-10-09: 이번엔 규칙 유지) — 배치 삭제(`repositories/batches.py`
+    `delete`)는 자식 요청을 보존하고, 요청 삭제는 `batch_id` 가 있으면 `batch_child_not_deletable` 로 거부한다
+    (`repositories/request_purges.py` `delete_terminal`). 그래서 배치 행이 없는 자식(dangling batch_id)은 영구히
+    지울 수 없다. 후보: 「부모 배치 행이 없고 batch_items 참조도 없으면 개별 삭제 허용」 — batch_items 게이트는
+    그대로 두고 batch_id 조건만 완화(살아 있는 배치의 자식을 지우면 orchestrator `_child_state` 가 영구 정체하고
+    배치 취소가 500 이다 — 그 경로는 계속 막아야 한다).
+  - **지표 박제** — 잡 통계·처리량·수행시간·요청자별 집계·plan_rejected 가 전부 행 기반이라(`repositories/metrics.py`)
+    요청을 지우면 지난 창의 값이 소급해 줄어든다(수용, 확인 창이 안내). 필요하면 일 단위 집계 테이블.
+  - **purge 파드 데드라인을 넘는 trash 항목**(2026-10-09 검증 중 확인) — purge 파드는 activeDeadlineSeconds 3600 이라
+    한 시간 안에 못 지우는 거대 트리(수천만 파일)는 매번 중간에 죽는다. rm 이 지운 만큼은 남으므로 재시도(백오프 최대
+    15분 간격)마다 줄어 결국 끝나지만, 그동안 그 행은 지연으로 보이고 그 파드가 도는 한 시간 동안 다른 요청의 파드는
+    기다린다(파드는 언제나 1개). 끊길 때 앞 이름이 하나라도 지워졌으면 그 항목은 `purge_entry_failed` 로 다음부터 혼자
+    실리지만, **정렬상 첫 이름**이면 지워진 것이 없어 근거가 없다(`purge_pod_failed` — 파드 수준 실패와 구별 불가) — 그
+    항목이 끝날 때까지 함께 실린 행이 매번 같이 기다린다. 실측 필요. 후보: 파드 종료 사유(DeadlineExceeded) 노출로 귀속,
+    실패 행에 한해 데드라인 연장, 파드 2개(새 행 전용) 허용.
+  - **정리 이벤트 뷰어** — 정리 실패의 상세(`purge_failed`·`purge_ref_rejected`·`artifact_left_at_old_base`·
+    `request_purged`, 전부 request_id=NULL)는 events 에만 있고 포탈엔 전역 이벤트 화면이 없다. 지금 표면은
+    작업 목록 툴바의 정리 현황(`GET /api/admin/request-purges` — 대기·지연 건수와 첫 지연 사유)뿐이다.
 - 🔧 **배치 CSV 업로드/내보내기·템플릿·rm 배치** — 현재 배치는 scan|sync 만
   (`domain.py::validate_batch`), CSV 는 프론트 파싱. 백엔드화·rm 배치는 미착수.
 - 🔧 **배치 생성 폼의 스토리지 드롭다운** — 현재 자유 입력.
@@ -53,12 +78,14 @@
   쓴다: `features/jobs/JobsList.tsx`(표 머리·경로 요약·시각·빈 목록 안내), `SubmitJob.tsx`(「실제 경로」·공백 안내·
   허용 스토리지 조합 note), `formFields.tsx`, 공용 `StatusPill` neutral(「Planned」 3.28:1), 레이아웃 브레드크럼 「>」.
   처방: 화면별로 `text-ink/70` 으로 올리되(장식용 코드 라벨·아이콘은 그대로), 클래스를 단언하는 테스트가 있는지 먼저 본다.
-- 🔍 **요청 취소 ↔ planner 경합(검증 필요 — 코드 읽기로만 발견, 2026-10-08 요청 상세 리뷰 중)** —
-  `repositories/requests._apply_state` 는 현재 상태를 읽고 **종단 가드 없이** UPDATE 하고, planner 는 계획 끝에
-  `set_state(PLANNED)`(planner.py 200·402)를 무조건 부른다. 사용자 취소가 planner 의 읽기와 그 쓰기 사이에 끼면
-  Cancelled 가 Planned 로 덮이고(전이 이력엔 Cancelled→Planned) 그 뒤 만든 잡이 살아남을 수 있다. 잡 쪽
-  `data_jobs.set_job_state` 도 잠금 없는 SELECT→UPDATE 라 동시 쓰기에서 나중 커밋이 이긴다. 처방 후보: 조건부 UPDATE
-  (`WHERE state = :expected`)·종단 상태에서의 전이 거부, 재현 테스트부터.
+- 🔍 **상태 전이의 일반 종단 가드(검증 필요 — 코드 읽기로만 발견, 2026-10-08 요청 상세 리뷰 중)** — planner 쪽
+  경합(취소가 planner 의 읽기와 Planned 쓰기 사이에 끼면 Cancelled 가 Planned 로 되살아나고 잡이 남던 것)은
+  2026-10-08 작업 삭제의 선행 보강으로 **닫혔다**: emit 이 `data_jobs.create_plan_and_job`(요청 행 잠금 + plan·job
+  INSERT + 조건부 Pending→Planned 한 트랜잭션, 지면 전부 롤백)이고 멱등 분기도 `requests.mark_planned_if_pending`
+  (CAS)이다(`tests/test_planner.py` 경합 테스트). 남은 것: `repositories/requests._apply_state` 자체엔 여전히 종단
+  가드가 없어 다른 호출자가 같은 모양의 경합을 만들 수 있고, 잡 쪽 `data_jobs.set_job_state` 도 잠금 없는
+  SELECT→UPDATE 라 동시 쓰기에서 나중 커밋이 이긴다. 처방 후보: 조건부 UPDATE(`WHERE state = :expected`)·종단
+  상태에서의 전이 거부, 재현 테스트부터.
 - 🔧 **레지스트리 인증 확장**(2026-10-08 릴리스 태그 목록 결함 수정의 범위 밖) — 태그 조회·digest·삭제는 익명 Bearer
   토큰까지만 한다(`registry._anonymous_token`). (a) 다른 호스트의 토큰 서버(GitLab `…/jwt/auth` 형태)는 요청 위조 방지로
   realm 을 레지스트리와 같은 호스트로 묶어 거부된다 — 필요하면 운영자 허용 목록(설정)으로 연다. (b) Basic·로봇 계정 자격
@@ -103,6 +130,14 @@
 - ⏸ **LDAP StartTLS 인증서 검증**(D16 — 안 함, 기록만) — 제어면 리졸버·에이전트 nslcd 모두 sssd
   `ldap_tls_reqcert = never` 미러(`identity_ldap.py` 모듈 docstring). 보조 그룹 이후엔 LDAP 중간자가
   그룹 멤버십까지 주입할 수 있고 제출 전 재확인도 같은 채널이다. 사내 CA 번들 + verify 옵션이 처방.
+- ⏸ **요청 삭제의 옛 base 사본은 지우지 않는다**(사용자 결정 2026-10-09) — 삭제 시점 base 와 지금 base 가 다르거나
+  (그 사이 force 변경) 잡의 `artifact_uri` 가 다른 base 를 가리키면 request-purge 는 그 경로를 열지도 지우지도 않고
+  `artifact_left_at_old_base` 경고(옛 base·job_id·경로 표시용)만 남긴다 — DB 값(신뢰 경계)만 믿고 다른 경로를 지우지
+  않는다. 테스트베드 실례: `5df671da…` 의 산출물이 `artifacts-slice18` 에 있다. 지우려면 운영자가 경고의 경로를
+  확인하고 손으로.
+- ⏸ **root 실행 잡의 삭제에 특권 세션을 더 요구하지 않는다**(사용자 결정 2026-10-09) — 요청 삭제는 세션 관리자
+  (`require_session_admin`)면 되고 `can_run_as_root` 자격은 보지 않는다. admin 은 신뢰 앵커이고(ARCHITECTURE §7 규칙
+  14), 감사 스냅숏(`audit_log` 'request'/'delete' before_state)이 run_as_root·실행 신원·전이 actor 를 보존한다.
 - ⏸ **react-router 의존성 권고 보류**(`frontend/README.md`) — `GHSA-qwww-vcr4-c8h2` high,
   현재 어떤 `react-router-dom` 버전도 두 취약 범위를 동시에 못 피한다. 재검토 조건:
   `react-router-dom@8.3.0` 이상. **`npm audit fix --force` 금지.**
@@ -211,6 +246,36 @@
   디렉터리에 들여오면(드묾) 읽힌다. 위 러너 항목이 닫히면 함께 닫힌다.
 - 📝 **pod GC 86400s** — 성공·진행 중 잡의 프리플라이트/실행 파드 로그 라이브 열람 창.
   실패 잡은 슬라이스 25 가 `diag_logs` 로 박제해 시한부가 아니다(부분 완화).
+- 🔧 **pod-gc 200건 창 고착**(2026-10-08 테스트베드 실측, 요청 삭제 조사 중 발견) — `PodGarbageCollector.run_once`
+  는 `data_jobs.terminal_jobs_older_than`(오래된순 LIMIT 200, `repositories/data_jobs.py` 548행)의 잡만 보는데,
+  파드를 지워도 그 잡의 updated_at·상태가 안 바뀌어 **같은 가장 오래된 200건이 영원히 창을 차지한다**(고아 스윕과
+  달리 처리한 행이 술어에서 빠지지 않는다). 실측: 201번째 이후 종단 잡(2026-10-07T11:4x~)의 preflight·exec-preflight
+  파드가 GC 창(86400s)을 25시간 넘겨도 남아 있었다. 처방 후보: 처리한 잡을 술어에서 빼는 표식(예: `pods_gc_at`
+  컬럼 — CREATE + `_ensure_columns` + `_ROW_COLUMNS_SANS_DIAG`) 또는 updated_at 커서. 그 사이 관리자가 오래된
+  요청을 지우면(request-purge 가 그 잡의 파드를 직접 회수) 창이 앞으로 움직인다.
+- 🔧 **Aborted vcjob 은 TTL 로 회수되지 않는다 + TTL 도입 이전 vcjob 37건**(2026-10-08 실측) — Volcano v1.15.0 의
+  `ttlSecondsAfterFinished`(`execution_manifests.py` 324행, `DMS_VCJOB_TTL_SECONDS`)는 Completed 는 지우지만
+  **Aborted** 는 남긴다(24h 넘은 Aborted 5건: 2026-08-15·09-09×2·09-30×2). TTL 을 싣기 전(≤2026-08-05) 만든 vcjob 37건과
+  그 launcher 파드(dms 라벨 없음)도 그대로다. pod-gc 는 `pod/`·`pods/` ref 만 보므로 vcjob 은 아무도 안 치운다.
+  처방 후보: pod-gc 가 종단 잡의 `vcjob/` ref 도 (TTL 창 뒤) 지우기 — 단 그 잡의 실행 로그 라이브 열람 창이 같이
+  닫힌다(실패 잡은 diag_logs 박제가 있다). 옛 37건은 일회성 운영 정리(그 요청을 지우면 request-purge 가 회수한다).
+- 🔧 **빌드 삭제 docstring 의 거짓 전제** — `BuildsRepository.delete`(`repositories/builds.py` 156행)는 「파드는
+  pod-gc 가 따로 수거하므로 DB 행만 지운다」고 하지만 pod-gc 는 `builds.terminal_older_than` 의 **행**으로 파드 이름을
+  만든다(`pod_gc.py` 46-56행) — 행을 지우면 그 빌드·프로브 파드는 pod-gc 시야 밖으로 영영 남는다. 처방: 삭제
+  라우트가 파드를 먼저 terminate(빌드 러너, 404 삼킴)하거나 빌드 삭제에도 아웃박스.
+- 🔧 **pod-gc·취소의 ref 미검증 terminate**(DB 신뢰 경계) — 요청 삭제 정리는 ref 가 **그 잡의 DMS 명명**일 때만
+  지운다(`purge_runner.parse_ref` — `pod/dms-preflight-<job12>-…`·`vcjob/dms-<op>-<phase>-<job12>`, 거른 ref 는
+  `purge_ref_rejected`). 그러나 pod-gc(`pod_gc.py` 34행)와 취소(`api/cancel.py` `terminate_job`)는 phase_refs 값을
+  그대로 terminate 한다 — 변조 행이 `pod/dms-api-…` 를 가리키면 제어면 파드를 지운다(같은 네임스페이스 — api·
+  컨트롤러 Role 둘 다 pods delete, `deploy/k8s/10-rbac.yaml`). 처방: 두 경로도 `parse_ref` 를 거치게(스텁 ref
+  모양 포함 — `StubPurgeRunner.ref_belongs_to_job`).
+- 📝 **요청 삭제의 잔여 위험**(2026-10-08, 수용·문서화) —
+  (a) 노드가 분할된 채 운영자가 Terminating 파드를 `--force` 로 지우면, 그 노드에서 실제로 아직 도는 launcher 가
+  정리 **뒤에** `<base>/<job_id>/<phase>` 를 다시 만들 수 있다. 정리가 끝나기 전이면 `artifact_reappeared` 로 k8s
+  단계부터 다시 하지만, 끝난 뒤면 **행 없는 디렉터리**가 남고 DMS 는 그것을 지우지 않는다(「DB 에 없는 디렉터리 =
+  고아」 추론 금지) — 운영자 판단(deploy/README §12). (b) 정리 대기 중 이미지를 이 기능 이전으로 롤백하면 옛 컨트롤러는
+  아웃박스를 모른다 — 다시 올리면 재개. (c) 최종 scrub 뒤에 늦게 들어온 그 id 의 이벤트는 retention(30일)이 지운다.
+  (d) `requests.commit_order` 는 현존 행 기준 단조라 최신 요청을 지우면 번호가 재사용된다(UNIQUE·커서 안전).
 - 📝 **로그인 감속은 프로세스 메모리**(2026-09-07, `api/login_limiter.py`) — dms-api
   레플리카가 N 이면 실효 상한이 10×N/분, 파드 재시작이 창을 비운다. replicas 1 전제
   (40-api.yaml 의 빌드 락 제약과 같은 전제)라 지금은 정확하다. 레플리카를 늘리면

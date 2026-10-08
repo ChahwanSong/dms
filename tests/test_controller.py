@@ -59,6 +59,15 @@ def test_rollout_watcher_loop_is_absent_when_rollout_runner_is_none(db, settings
     assert "rollout-watcher" not in [l.name for l in loops]
 
 
+def test_build_loops_includes_request_purge_only_when_purge_runner_is_given(db, settings):
+    # build-watcher 와 같은 하위호환 규칙 -- 행동(한 틱이 아웃박스를 비우는지)은 tests/test_request_purger.py.
+    from dms.purge_runner import StubPurgeRunner
+    loops = build_loops(settings, Repositories(db), purge_runner=StubPurgeRunner())
+    assert ("request-purge", settings.request_purge_interval_seconds) in [
+        (l.name, l.interval_seconds) for l in loops]
+    assert "request-purge" not in [l.name for l in build_loops(settings, Repositories(db))]
+
+
 def test_rollout_watcher_loop_actually_applies_a_release(db, settings):
     # 배선 회귀 가드: 루프 "이름"만 보는 위 테스트는 lambda 안이 잘못돼도(예: 다른
     # repos/runner를 넘기거나 run_once를 안 부르거나) 초록불이다. 여기선 실제로

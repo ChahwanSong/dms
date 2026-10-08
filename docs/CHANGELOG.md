@@ -95,6 +95,155 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 작업(요청) 선택 삭제 — DB·결과 파일·파드·로그 일관 삭제 — **완료 — 미배포**(2026-10-09)
+
+사용자 요청: "포탈에서, 작업 목록에서 선택적으로 삭제하는 기능을 추가하고 싶어. 상태가 완료된 작업만 삭제를 허용할 예정이고,
+삭제할때 시스템 전체적으로 일관되게 삭제하는게 중요해. 예를 들면 해당 작업과 관련된 아티팩트 및 로그들도 db정보와 함께
+삭제되어야겠지." 사용자 결정: 종단 요청 전부(Succeeded·Failed·Rejected·Conflict·Cancelled — 진행 중·ConfirmPending 불가),
+**관리자만**, scan 도 삭제 가능(확인 창에 사용량 분석 경고), **배치 자식은 개별 삭제 불가**. 설계 열린 질문 5개는 권장안으로
+확정: 삭제된 배치의 자식은 계속 불가(BACKLOG), 조용한 창 60초, root 잡에 특권 세션 추가 요구 없음, 기존 누수(pod-gc 창·
+Aborted vcjob·빌드 삭제 docstring)는 BACKLOG, 옛 base 사본은 경고만.
+
+- **DB 는 API 가 한 트랜잭션으로 즉시**(`repositories/request_purges.py` `delete_terminal`, 설계 D1): 게이트(요청 종단 ∧
+  `batch_id IS NULL` ∧ batch_items 비참조 ∧ 잡 전부 종단 ∧ 요청·잡 마지막 갱신 후 `DMS_REQUEST_DELETE_QUIET_SECONDS`) →
+  requests → data_jobs 행 잠금(PG FOR UPDATE) → 7개 테이블(requests·results·plans(job_id NULL plan 포함)·data_jobs·
+  state_transitions 3종·events·scan_report_digests) DELETE → 마지막 CAS DELETE(지면 전부 롤백, `request_not_deletable`) →
+  **정리 아웃박스** `request_purges`(잡 id·phase_refs·artifact_uri·삭제 시점 base) + `audit_log('request','delete')` 1행
+  (32 KiB 상한 스냅숏 — 요청·결과·전이 actor·잡 실행 신원 4키·run_as_root, diag_logs·요약 원문 제외, 넘치면 전이부터
+  자르고 끝내 뼈대·id 만). 커밋 한 번으로 목록·상세·잡·아티팩트·로그·사용량·지표가 동시에 일관된다 — 읽기 경로에 「삭제
+  중」 필터 0. FK 가 0건이라 삭제 목록이 곧 일관성의 전부다 — `PURGED_TABLES`/`PURGE_EXEMPT_TABLES` 와 스키마 전수 열거
+  테스트(`test_request_delete_covers_every_reference_table`)가 새 테이블의 누락을 잡는다.
+- **API**(`api/routes_request_purge.py`): `POST /api/admin/requests:delete` — **세션 관리자만**(공유 토큰 403
+  `admin_session_required` — 컨펌·취소 기록과 root 산출물을 없애는 증거 삭제라 빌드·레지스트리 삭제와 같은 경계), 유지보수 503,
+  1..200건(422 `empty_selection`·`delete_selection_too_large`), 중복 접기, 형식 오류 id 는 `request_not_found`(존재 오라클
+  없음), **부분 성공**(deleted[].job_ids / skipped[].reason / purge_pending, 전부 skipped 여도 200). `GET
+  /api/admin/request-purges`(조회 — 토큰도 됨): pending·stalled·oldest·items 50 — 정리의 유일한 운영 표면. api 는 FS·k8s 무접촉.
+  artifact base 잠금 = 잡 + 정리 대기(force 없이 정리 중 base 가 바뀌지 않게).
+- **컨트롤러 `request-purge` 루프**(`request_purger.py`·`purge_runner.py`·`artifact_trash.py`, 기본 15초): 아웃박스 행을
+  `k8s` → `files` → `purging` → finish 로 멱등 수렴. k8s: **전체 job_id 로 확인된 객체만** 지운다 — 라벨 `dms.io/job-id`
+  Pod·vcjob + launcher(`volcano.sh/job-name in (ref·라벨 vcjob ∪ 결정적 이름 6개)` 로 찾되 소유 vcjob(ownerReference uid)이
+  이 잡의 라벨 vcjob 이거나 이미 없는 고아일 때만 — launcher 엔 dms 라벨이 없다). 기록된 ref 는 그 잡의 DMS 명명일 때만
+  받아(`parse_ref` — 변조 행이 제어면 파드를 가리키는 것을 거른다, 거른 ref 는 `purge_ref_rejected`) launcher 를 찾을 이름
+  후보로만 쓴다. 삭제 후 다시 세어 **Terminating 포함 0** 이 아니면 파일로 넘어가지 않는다(종료 중 launcher 가 디렉터리를
+  다시 만든다; 10분 넘으면 `purge_waiting_pods`).
+  files: cap 없는 제어면 root 는 요청자 소유 0755 phase 를 못 지우므로(실측 EACCES) `<base>/<job_id>` 를 `<base>/.dms-trash/
+  <job_id>`(root 0700, 같은 FS) 로 **renameat 만** 한다(base fd·fstat 검사, phase 안으로 들어가지 않음). purging: 전역 1개의
+  단명 **purge 파드**(root + DAC_OVERRIDE·FOWNER 만, base 볼륨 하나, SA 토큰 없음, 읽기 전용 루트 fs, 고정 스크립트 + positional
+  이름 — 이름을 전부 먼저 검사하고 하나라도 틀리면 아무것도 지우지 않음, `rm -rf --one-file-system` 은 이름마다 끝까지 시도
+  하고 하나라도 실패면 마지막에 exit 1, 앞선 파드가 못 지운 행은 다음부터 혼자 실림, 노드 = 지금 base 를
+  writable 로 보고한 신선 노드 − 배치 제외·cordon·스케줄 불가)가 trash 를 비운다. 완료는 파드 상태가 아니라 FS 재확인(base·
+  trash 둘 다 없음) → finish(늦게 들어온 events·digest·전이 최종 scrub + 행 삭제, 원 행이 되살아났으면 no-op) + `request_purged`.
+  포기 없음 — 백오프(min(15s×2^n, 900s)) + last_error 로 지연 표면화. **「DB 에 없는 디렉터리 = 고아」 추론 금지**(아웃박스가
+  가리키는 job_id 만), 옛 base 는 열지도 지우지도 않고 `artifact_left_at_old_base`, 지운 id 가 DB 에 다시 있으면
+  `purge_target_still_present`(k8s·FS 무접촉). 모든 purge 이벤트는 request_id=NULL. RBAC 변경 없음.
+- **ARCHITECTURE §7 root 제어면 규칙 13 개정**: 컨트롤러의 유일한 FS 변경은 `.dms-trash` mkdirat 과 `<job_id>` renameat 이고
+  실제 삭제는 purge 파드(규칙 12 — 제어면이 아니고, 이미 도는 잡 launcher 보다 엄격히 약하다). `src/dms` 의 셸·subprocess·
+  shutil·os.access·chown·chmod 0건과 정리 모듈의 unlink·rmdir 0건을 `tests/test_control_plane_static.py` 가 AST 로 고정.
+- **선행 보강**(삭제가 새로 여는 경합을 구조적으로 닫음, 설계 D9): stepper — `set_phase_ref` 가 행 부재면 False(PG 행 FOR UPDATE
+  로 삭제 트랜잭션과 직렬화), 네 제출 경로가 그때 방금 만든 ref 를 terminate + `submitted_for_deleted_job`(terminate 실패면
+  error), `_reclaim_if_terminal` 도 행 부재면 회수, 행 없는 잡의 `step_error` 는 request_id=NULL. planner — emit 을
+  `data_jobs.create_plan_and_job`(요청 행 잠금 + plan·job INSERT + 조건부 Pending→Planned 한 트랜잭션, 지면 전부 롤백)으로,
+  멱등 분기는 `requests.mark_planned_if_pending` — 삭제된 요청에 잡을 만들어 실행하던 길과 함께 **취소↔planner 경합(Cancelled
+  → Planned 부활)도 닫혔다**(BACKLOG 🔍 항목 갱신). 사용량 digest `put` 은 잡 행이 있을 때만.
+- **포탈**: 작업 목록(관리자만) 체크 열 — 종단·단건만 활성(진행 중·배치 항목은 disabled + 이유 title), 전체 선택(불러온 쪽 전부,
+  indeterminate), 필터 변경·폴링으로 사라진 행은 선택에서 빠짐, 200개 초과면 잠금. 툴바(자리 예약 — 표가 뛰지 않음)에
+  「N개 선택됨(성공 scan M개)」/「N개 삭제됨 · M개 제외」+ 항목별 사유, 정리 현황 「결과 파일·파드 정리 중 N건 · 지연 M건」
+  (+ 바 아래 「정리 지연: 사유」). 확인 창(`DeleteRequestsDialog`): 연 순간 선택을 스냅숏, 개수·연산별·앞 10건, 함께 지워지는 것, **스토리지의 실제
+  데이터는 건드리지 않음(실행 취소가 아님)**, 성공 scan 이 있으면 사용량 분석 경고, 「되돌릴 수 없음을 확인」 체크 뒤에만
+  「N개 영구 삭제」. 요청 상세는 404 면 「요청을 찾을 수 없습니다 — 삭제됐거나 볼 수 없는 요청입니다」 화면(재시도 없음, 요청
+  폴링·포커스 재조회·잡 조회 중지). 삭제 성공 시 지운 요청·잡 캐시 제거 + 목록·정리 현황·사용량·잡 통계·감사·artifact-base
+  무효화를 기다린 뒤 결과 표시. 덤: 상태 필터에서 요청 상태가 아닌 Previewing·ConfirmPending 제거(고르면 늘 0건이던 결함).
+- 사유 코드(양쪽 등록): `request_not_deletable`·`request_job_active`·`request_recently_finished`·`batch_child_not_deletable`·
+  `delete_selection_too_large`·`purge_k8s_failed`·`purge_waiting_pods`·`purge_base_unavailable`·`purge_base_unsafe`·
+  `artifact_dir_unexpected`·`purge_detach_failed`·`purge_no_node`·`purge_pod_failed`·`purge_target_still_present`·
+  `purge_row_invalid`·`purge_failed`(2차 반영으로 `request_delete_failed`·`purge_pod_stuck`, 3차로 `purge_entry_failed` 추가), `request_not_found`·
+  `job_not_found`·`admin_session_required` 문구 갱신.
+- 스키마·설정: 새 테이블 `request_purges`(새 테이블이라 `_ensure_columns` 불필요) + 인덱스 `idx_data_jobs_request`·
+  `idx_plans_request`·`idx_batch_items_request`(전수 열거 그물 갱신). env `DMS_REQUEST_DELETE_QUIET_SECONDS`(60, api, 음수 기동 거부)·
+  `DMS_REQUEST_PURGE_INTERVAL_SECONDS`(15, controller, 1 미만 기동 거부) — `deploy/k8s/20-config.yaml` 에 기본값 그대로.
+  운영 runbook 은 `deploy/README.md` §12(지연 사유별 조치, Terminating 파드 강제 삭제 판단, `.dms-trash`, 정리 대기 중 롤백 금지).
+- **구현 중 설계에서 바뀐 것**: (1) 정리 루프는 실행 어댑터 대신 purge_runner 의 자기 클라이언트로 지운다(먼저 나열해야
+  `k8s_deleted` 를 정확히 센다) — `KubernetesClient.list_vcjob_briefs`(Terminating 표시·uid, CRD 404 는 빈 목록이 아니라
+  예외)와 `list_pod_briefs` 의 `deleting`. (2) 틱 순서는
+  끝난 purge 파드 수거·실패 귀속 → 행 단계 → 새 파드·완료 판정(반대면 pending_trash 가 풀린 새 사본을 「파드가 못 지운 것」으로
+  오인 — 테스트가 잡음). (3) 새 사유 `purge_row_invalid`(깨진 아웃박스 행 — 진행하면 위험)와 경고 `artifact_reappeared`(떼어낸 뒤
+  base 에 다시 생기면 k8s 단계부터). (4) purge 파드 Pending 600초·이미지 pull 실패 등은 즉시 실패로 접는다(activeDeadlineSeconds
+  는 스케줄 전 파드엔 발화하지 않는다). (5) `finish` 는 원 행 재출현을 트랜잭션 안에서 다시 보고, 같은 id 재삭제(DB 복원 뒤)는
+  아웃박스 행을 갱신(잡 열쇠 합집합 — PK 충돌 500 대신). (6) planner 경합 테스트는 `tests/test_planner.py` 에 둔다.
+- **검증 지적 반영(1차, 2026-10-09)** — 13건(fs-k8s 2·db-api 2·ui 9): (a) purge 스크립트가 `set -e` 로 첫 rm 실패에서
+  멈춰 정렬상 뒤 이름이 시도조차 안 되고, FS 기반 귀속이 같은 파드의 무고한 행까지 같은 백오프로 영영 묶었다 → 이름마다 끝까지
+  시도 + 마지막 exit 1, `purge_pod_failed` 행은 다음부터 혼자 실림(실 sh 로 재현·고정). (b) k8s 스윕이 결정적 이름·ref 이름
+  (job_id[:12])으로 지워, 접두가 같은 변조·복원 아웃박스 행이 살아 있는 다른 잡의 launcher·worker·vcjob 을 죽일 수 있었다
+  (target_still_present 는 전체 id 비교) → 전체 id 확인(라벨, launcher 는 소유 vcjob 의 라벨·uid — 파드 나열 **뒤** 조회라
+  살아 있는 주인을 놓치지 않는다), 이름으로는 아무것도 지우지 않음. DB 쪽 접두 가드(`substr(job_id,1,12)`)는 넣지 않았다
+  — 인덱스를 못 타는 전체 스캔이 행·틱마다 돌고, k8s 확인이 이미 정확하다. (c) `batch_items.request_id` 인덱스 누락(게이트가
+  행 잠금을 쥔 채 요청마다 전체 스캔) → `idx_batch_items_request`. (d) 확인 창 사용량 경고가 요청 **상태**로 판정해 취소 경합의
+  「요청 Cancelled · scan 잡 Succeeded」(사용량 분석은 잡 상태를 본다)를 놓쳤다 → 목록 API 에 `has_succeeded_scan`
+  (`data_jobs.usage_scan_request_ids` — 사용량 분석과 같은 조건). (e) 포탈: 진행 중 주 버튼 disabled 로 포커스가 <body> 로
+  떨어짐 → aria-disabled + 가드, 성공해 닫히면 트리거가 잠겨 <body> → 툴바 결과 줄(tabIndex -1)로 / 같은 틱 두 번 클릭이 POST
+  2회 + 「0개 삭제됨」 → 동기 ref 가드 / 새 제출에 밀려 선택이 말없이 줄던 것 → 「N개는 목록에서 사라져 선택에서 뺐습니다」 /
+  선택 불가 사유가 hover title 뿐 → 미선택 안내가 두 규칙을 다 말함(ink/70 — text-muted 3.54:1 대비 미달도 함께) / 폴링 오류
+  복구 뒤 전체 선택 칸 indeterminate 소실 → 콜백 ref / 한국어 낱말 중간 줄바꿈 → break-keep, 지연 사유는 바 아래 한 줄
+  (넓은 화면에서 툴바가 두 줄로 접히던 것) / `maintenance_mode` 문구가 「새 작업 제출」만 말함 → 「작업 제출·삭제·빌드 같은
+  변경」. CLAUDE.md 의 공유 토큰 목록·참조 테이블 규칙 한 줄은 서브에이전트가 고칠 수 없는 파일이라 오케스트레이터 몫으로 남겼다.
+- **검증 지적 반영(2차, 2026-10-09)** — 10건(fs-k8s 2·db-api 2·ui 6): (a) 끝나지 않는 purge 파드(죽은 노드의 Running·
+  Terminating 고착, D 상태 rm 으로 데드라인 미집행)가 「진행 중」으로만 보여 그 뒤의 모든 정리가 last_error 없이(stalled 0·
+  이벤트 0) 멈췄다 → `list_purge_pods` 가 모든 파드의 나이를 보고 데드라인 + 유예(3600 + 600초)를 넘긴 미종료 파드를 stuck
+  으로, 그 뒤에 막힌 행(trash 항목이 있는 due 행)을 새 사유 `purge_pod_stuck` 으로 defer(이벤트 행마다 1회). 파드는 지우지도
+  하나 더 띄우지도 않는다(운영자가 노드 확인 후 force — runbook 행 추가), 파드가 사라지면 표시를 거둔다. (b) `due()` 가 삭제 순이라
+  k8s 단계에서 오래 기다리는 행 20개가 매 틱 상한을 채워 새 삭제가 시작조차 못 했다 → 재시도 시각 순 + 지연이 된 대기 행의
+  재확인 간격 = 기다린 시간의 1/10(상한 300초). (c) 잠금 없이 상태를 읽은 종단 전이(finalize_from_job·set_state_with_result)가
+  삭제 커밋 뒤에 쓰면 0행 UPDATE 위에 전이·results 가 커밋돼 영구 고아(지표 plan_rejected 가 읽음)가 됐다(조용한 창이 유일한
+  가드, 창 0 이면 무작위 경합 3,664회 중 66건) → `_apply_state`·`set_job_state` 가 PG 행 잠금 + UPDATE 영향 행 수 확인(0 이면
+  KeyError 로 전부 롤백), `finish` 가 results 도 scrub. (d) 일괄 삭제 중 한 항목의 DB 오류가 응답 전체를 500 으로 만들어 이미
+  지운 항목을 숨기고 뒤 항목을 건너뛰었다 → 그 항목만 새 사유 `request_delete_failed` 로 제외하고 계속, 깊게 중첩된 변조 JSON 의
+  RecursionError 도 깨진 JSON 으로. (e) 포탈: 부분 성공 때 목록 재조회 렌더가 onDeleted 의 선택 비우기를 덮어 결과 요약 대신
+  「2개 선택됨 · 1개는 목록에서 사라져…」가 뜨고 제외된 행이 체크된 채 남았다(실 브라우저에서만 재현) → 유령 정리 함수형 갱신 +
+  삭제 결과가 떠 있는 동안 「사라짐」을 세지 않음(e2e 로 고정 — jsdom 은 재현 못 함) / 414~768px 에서 긴 미선택 안내가 두 줄로
+  접혀 첫 체크에 툴바가 104→56px 로 줄며 표가 튐 → 상태 줄은 lg 미만에서 늘 자기 행 + 두 줄 높이 예약, 선택 규칙은 늘 있는 별도
+  줄 / 배치 자식 안내가 없는 삭제 경로(「배치 화면에서 관리」)를 가리킴 → 「배치를 지워도 작업 기록은 남습니다」(배치 삭제 창도
+  같은 사실을 말함) / 삭제 POST 진행 표시 없음 → 「삭제 중…」(버튼·role=status) + 창 aria-busy / 문구: 조용한 창 숫자 제거(「잠시
+  뒤에」), 「실패 로그 박제」→「실패 시 보관한 로그」, 툴바 이름 「작업 일괄 처리」 / 375px 에서 대상 열이 두 글자 폭 → 최소
+  8rem(넘치면 표 가로 스크롤). CLAUDE.md 두 줄(공유 토큰 목록에 작업 삭제, 요청·잡 참조 테이블은 삭제 목록에도)은 이번에도
+  서브에이전트 권한 밖이라 적용할 패치만 준비했다.
+- **검증 지적 반영(3차, 2026-10-09)** — 4건(backend 2·ui 2): (a) 파드 수준 실패(레지스트리 순단의 ImagePullBackOff·
+  Pending 상한·생성 실패)가 실린 행 전부를 `purge_pod_failed` 로 몰고, 1차의 「실패 행은 혼자」 규칙이 그 행들을 한 행씩
+  직렬로 되돌렸다(20행 = 파드 21개·42틱, 새 삭제도 그 뒤에 섬) → 귀속을 둘로: 근거가 있을 때만 새 사유 `purge_entry_failed`
+  (끝난 상태로 끝난 파드에서 마지막으로 지워진 이름보다 앞에 남은 이름 + 그 바로 뒤 첫 남은 이름 — 스크립트가 순서대로
+  지우고 실패해도 계속하므로, 끊긴 파드의 시도조차 못 한 뒷이름은 근거가 아니다), 그 밖은 `purge_pod_failed` 로 표시·이벤트만
+  남기고 계속 묶어 싣는다. 혼자 갈 행은 묶을 행이 없을 때 가고(맨 앞이라고 새 삭제 묶음을 세우지 않는다) due 5분이 넘으면
+  먼저(굶김 상한), 혼자 간 파드에서 또 남으면 혼자 남는다. runbook 의 `purge_pod_failed` 행(「다른 요청은 끝나고 이 요청만
+  혼자」가 이미지 pull·Pending 에선 거짓)을 고치고 `purge_entry_failed` 행 추가, BACKLOG 의 거대 트리 항목에 「정렬상 첫
+  이름이면 근거가 없다」 한계를 적었다. (b) 일괄 삭제 응답의 정리 대기 건수(`pending_count`)가 항목별 격리 밖이라 DB 가
+  도중에 끊기면(재연결 실패) 이미 지운 항목을 500 뒤에 숨겼다 → 세지 못하면 `purge_pending: null`(모름 — 포탈은 이 값을
+  읽지 않는다, 타입 `number | null`). (c) 포탈: 360~393px 에서 삭제마다 나타나는 「결과 파일·파드 정리 중 N건」이 버튼 행에
+  끼어 「선택 해제」가 다음 줄로 밀려 툴바가 128↔174px 를 오가며 표가 손가락 밑에서 튐 → 정리 자리를 늘 렌더(lg 미만은
+  맨 아래 자기 행·한 줄 예약, lg 이상은 버튼 앞) + 두 버튼을 줄바꿈 없는 한 덩어리로(320~768px 툴바 152px 고정, lg 이상
+  80px 고정 — 드문 「정리 지연: 사유」 줄만 알림으로 늘어난다). (d) 창이 열린 동안 폴링이 선택한 행을 모두 목록에서 지워
+  「선택 삭제」가 잠긴 뒤 닫기·Esc 로 닫으면 포커스가 <body> 로 떨어짐 → 트리거가 잠겨 있으면 성공 때처럼 툴바 결과 줄로.
+- 남은 일(BACKLOG): 보존 정책(자동 만료), 단건 삭제 버튼, 삭제된 배치의 자식, 지표 박제, 정리 이벤트 뷰어, pod-gc 200건 창 고착,
+  Aborted vcjob TTL 비회수, 빌드 삭제 docstring 거짓 전제, pod-gc·취소의 ref 미검증 terminate, 요청 삭제 잔여 위험(노드 분할 +
+  force 삭제 → 행 없는 디렉터리 등).
+
+테스트: 백엔드 전체 2858 passed(새 파일 9개 241건 — 라우트·원자성·전수 열거 그물·trash FS·purge 파드 계약·실 sh 스크립트·
+k8s 스윕·루프·stepper 삭제 경합, 그리고 planner 경합·digest·base 잠금·설정·배선·마이그레이션 계약 확장; `test_rollout_runner`
+의 파드 흉내에 `deletion_timestamp=None` 보강 — 실 V1ObjectMeta 는 늘 가진 속성), 프런트 vitest 1136
+(알려진 부하 플레이크 router 로그아웃 1건은 단독 재실행 통과) + tsc + 빌드(`dist/index.html` 외부 URL 0), e2e 11 passed(새 E7 2건 —
+UI 삭제 → 행·상세 소멸 → 정리 대기 0 수렴, 공유 토큰 403·무변화). 검증 지적 반영(1차) 뒤: 백엔드 2866 passed(실 sh
+스크립트의 실패 이후 계속·혼자 싣기·접두 형제 잡 무접촉·소유 uid 경합·목록 has_succeeded_scan 회귀 테스트), vitest 1141
+(포커스·같은 틱 두 번 클릭·선택 빠짐 알림·indeterminate 복구·잡 상태 기준 경고), 빌드 외부 URL 0, e2e 11 passed(E7 에
+「삭제 후 포커스 = 결과 줄」 실 브라우저 단언 추가). 검증자 탐침 3건(무고한 행 정체·접두 형제 파드·접두 형제 vcjob)이
+이제 재현되지 않는다. 검증 지적 반영(2차) 뒤: 백엔드 2877 passed(stuck 파드 표면화·굶김·재시도 순서·대기 간격 상한·경합 상태
+쓰기 롤백·PG 행 잠금 문장·finish 의 results scrub·항목별 DB 오류·깊은 중첩 JSON — 각각 옛 코드에서 빨간불 확인), vitest
+1145(진행 표시·문구·상태 줄 구조), 빌드 외부 URL 0, e2e 13 passed(E7 에 부분 성공 경합·툴바 높이(414·768·1280)·375 대상 열
+— 옛 코드에서 둘 다 검증자 증상 그대로 실패). 검증자 PG 탐침: 종단 전이↔삭제 경합 결정적 재현 PASS(results 0), 무작위
+스트레스 60초(조용한 창 0) 3,291건 삭제에 고아 0(이전 results 66건). 검증 지적 반영(3차) 뒤: 백엔드 2882 passed(파드 수준
+실패의 묶음 유지·끊긴 파드의 귀속·근거 판정 단위·혼자 갈 행의 굶김 상한·DB 장애 중 응답 200), vitest 1148(잠긴 트리거의 포커스
+복귀 2건 — 옛 코드에서 빨간불 확인, 정리 자리 구조), 빌드 외부 URL 0, e2e 14 passed(E7 에 정리 대기 0·1·200건 툴바 높이
+(360·375·393·1280)·두 버튼 한 행). 검증자 탐침 2건(직렬 회복 — 이제 파드 1개·2틱, 장애 중 500 — 이제 200)이 재현되지 않는다.
+
+배포: **미배포**(테스트베드 실증 전).
+
 ### ✅ 릴리스 태그 목록 결함 6건(레지스트리 404·tags null·페이지 나눔·익명 토큰·새로고침·순서) — **완료·실증**(2026-10-08, d168)
 
 사용자 보고: "프로덕션에서 포탈에서 이미지 빌드했는데 릴리즈에 해당 이미지 버전이 목록에서 안보여" → 점검(3갈래 조사 +

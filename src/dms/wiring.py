@@ -82,6 +82,20 @@ def build_build_runner(settings, repos):
                        proxy=lambda: repos.control.build_proxy())
 
 
+def build_purge_runner(settings, repos):
+    """요청 삭제 정리의 k8s I/O(2026-10-08, purge_runner.py). 스텁 백엔드는 StubPurgeRunner(회수할 객체 0, 파일은
+    지우지 않음) -- 로컬·CI·e2e 에서도 루프가 돌아 아웃박스가 수렴한다. purge 파드 이미지는 잡 이미지(resolve 클로저 --
+    포탈 릴리스의 job-image 가 재시작 없이 반영, 빌드 프로브와 같은 이유)."""
+    if settings.execution_backend != "volcano":
+        from .purge_runner import StubPurgeRunner
+        return StubPurgeRunner()
+    from .execution_volcano import KubernetesClient
+    from .purge_runner import PurgeRunner
+    return PurgeRunner(KubernetesClient(settings.k8s_namespace),
+                       namespace=settings.k8s_namespace,
+                       job_image=lambda: resolve_job_image(repos.control, settings))
+
+
 def build_rollout_runner(settings):
     if settings.execution_backend != "volcano":
         from .rollout_runner import StubRolloutRunner

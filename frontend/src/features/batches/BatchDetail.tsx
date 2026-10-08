@@ -667,7 +667,9 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
 // 배치 삭제(종단 배치만 노출 — 진짜 가드는 서버 batch_not_deletable). 확인
 // 다이얼로그 필수: 배치 행·항목 행이 사라지는 비가역 동작이다(자식 요청·잡은
 // 감사 이력으로 보존 — repo.delete 주석). 성공 시 목록으로 이동 — 삭제된
-// 배치의 상세는 404 라 머무를 곳이 아니다.
+// 배치의 상세는 404 라 머무를 곳이 아니다. 남은 자식 작업은 작업 목록에서도 개별
+// 삭제할 수 없다(batch_child_not_deletable — 배치 자식 판정은 batch_id 이고 배치
+// 삭제가 지우지 않는다, BACKLOG) — 지우기 전에 그 사실을 말한다(2026-10-09 검증 지적).
 function DeleteBatchButton({ batchId }: { batchId: string }) {
   const [open, setOpen] = useState(false);
   const del = useDeleteBatch(batchId);
@@ -678,7 +680,7 @@ function DeleteBatchButton({ batchId }: { batchId: string }) {
   return (
     <Dialog open={open} onOpenChange={setOpen} title="배치 삭제"
             trigger={<Button variant="ghost">배치 삭제</Button>}>
-      <p className="text-sm text-muted mb-3">배치와 항목 목록이 삭제됩니다. 자식 요청·잡 이력은 남습니다.</p>
+      <p className="text-sm text-muted mb-3">배치와 항목 목록이 삭제됩니다. 자식 요청·잡 이력은 남고, 그 뒤로도 작업 목록에서 개별 삭제할 수 없습니다.</p>
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={() => setOpen(false)}>취소</Button>

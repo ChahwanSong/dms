@@ -23,8 +23,9 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 def _window(request: Request, window: int) -> "tuple[int, str, str]":
     settings = request.app.state.settings
-    # 잡 통계도 같은 상한을 쓴다 -- data_jobs는 purge되지 않지만 "대시보드 창은
-    # 최대 30일"이라는 하나의 규칙이 두 개의 규칙보다 낫다(설계 §3 기간 규약).
+    # 잡 통계도 같은 상한을 쓴다 -- data_jobs는 보존일로 지우지 않지만(관리자의 작업(요청) 삭제 때만 함께
+    # 지워진다 -- 그래서 지난 창의 잡 통계는 소급해 줄 수 있다, 2026-10-08) "대시보드 창은 최대 30일"이라는
+    # 하나의 규칙이 두 개의 규칙보다 낫다(설계 §3 기간 규약).
     hours = clamp_window_hours(
         window, retention_days=settings.agent_report_retention_days)
     end = utc_now_iso()

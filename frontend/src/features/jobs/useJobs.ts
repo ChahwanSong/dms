@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
-import { apiGet, apiSend } from "../../lib/api";
+import { ApiError, apiGet, apiSend } from "../../lib/api";
 import { REQUEST_TERMINAL_STATES, isTerminal } from "../../lib/jobState";
-import type { RequestRow, RequestDetail, DataJob } from "../../lib/types";
+import type { RequestRow, RequestDetail, DataJob, DeleteRequestsResult, PurgeStatus } from "../../lib/types";
 
 export const useRequests = () =>
   useQuery({ queryKey: ["requests"], queryFn: () => apiGet<RequestRow[]>("/api/user/requests"),
@@ -43,14 +43,23 @@ export const useInfiniteRequests = (filters: RequestFilters) =>
 // 끝났는데 요청 pill·전이 이력·사유는 들어올 때 모습 그대로 낡아 있었다. 종단이면 멈춘다(요청 종단 집합 --
 // Conflict 포함). 이 키(["request", id])의 폴링은 잡 키(["request", id, "jobs"])를 건드리지 않는다(e2e E6:
 // 종단 뒤 /jobs 요청 0건).
+//
+// 404(삭제됐거나 볼 수 없는 요청, 2026-10-08 작업 삭제)를 본 뒤에는 다시 읽지 않는다 -- 폴링·창 포커스·재연결 모두.
+// 지워진 요청은 돌아오지 않고, 데이터 없는 쿼리의 재조회는 status 를 pending 으로 되돌려 「없는 요청」 화면이 로딩
+// 골격으로 깜빡이고 그 틈에 잡 조회가 다시 켜진다(RequestDetail 은 404 동안 잡 조회를 끈다).
+export const requestGone = (error: unknown): boolean => error instanceof ApiError && error.status === 404;
+const goneQuery = (q: { state: { error: unknown } }) => requestGone(q.state.error);
 export const useRequest = (id: string) =>
   useQuery({
     queryKey: ["request", id],
     queryFn: () => apiGet<RequestDetail>(`/api/user/requests/${id}`),
     refetchInterval: (q) => {
+      if (goneQuery(q)) return false;
       const r = q.state.data as RequestDetail | undefined;
       return r && !REQUEST_TERMINAL_STATES.has(r.state) ? 3000 : false;
     },
+    refetchOnWindowFocus: (q) => !goneQuery(q),
+    refetchOnReconnect: (q) => !goneQuery(q),
   });
 
 // enabled 기본 true(요청 상세는 늘 조회한다). 문을 연 이유: 배치 항목 펼침이
@@ -133,3 +142,47 @@ export function useCancelRequest(requestId: string) {
     },
   });
 }
+
+// 작업(요청) 선택 삭제(2026-10-08, 관리자 전용 -- 서버는 세션 관리자만: 공유 토큰 403 admin_session_required).
+// 일괄 1회 POST 의 **부분 성공** 모델(items:rerun 관례): 전체 실패(403·422·503)는 isError, 항목별 제외는
+// data.skipped(사유 코드)다 -- 판정은 서버만 정확히 한다(화면은 3초 낡은 스냅숏을 본다).
+//
+// 성공 시 지운 요청·잡의 캐시는 invalidate 가 아니라 **제거**한다(useDeleteBatches 와 같은 이유): 다시 읽으면
+// 404 만 새로 받는다. ["request", id] 는 접두 매칭이라 ["request", id, "jobs"] 도 함께 지운다.
+//
+// onSettled 는 무효화 프라미스를 **돌려준다** -- 훅의 onSettled 가 끝나야 mutation 이 성공으로 바뀌므로, 결과 문구
+// (「N개 삭제됨」)가 뜰 때 표에서 그 행은 이미 사라져 있다(useDeleteBatches 관례, 2026-08-15 사용자 보고).
+// 사용량 분석·대시보드 잡 통계·감사 로그는 지운 행에서 계산되므로 함께 무효화한다(지운 scan 의 사용량 지점이
+// 빠지고 기간 통계가 소급해 줄며 감사에 삭제 행이 생긴다). artifact-base 의 잠금 건수(잡 + 정리 대기)도 바뀐다.
+export const DELETE_REQUESTS_INVALIDATES: readonly (readonly string[])[] = [
+  ["requests"], ["request-purges"], ["usage-targets"], ["usage-scan-storages"], ["usage-history"],
+  ["metrics", "jobs"], ["audit"], ["artifact-base"],
+];
+export function useDeleteRequests() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) =>
+      apiSend<DeleteRequestsResult>("POST", "/api/admin/requests:delete", { request_ids: ids }),
+    onSuccess: (r) => {
+      for (const d of r.deleted) {
+        qc.removeQueries({ queryKey: ["request", d.request_id] });
+        qc.removeQueries({ queryKey: ["request-scan-stats", d.request_id] });
+        for (const jid of d.job_ids) {
+          for (const k of ["artifacts", "artifact", "joblogs"]) qc.removeQueries({ queryKey: [k, jid] });
+        }
+      }
+    },
+    onSettled: () => Promise.all(
+      DELETE_REQUESTS_INVALIDATES.map((k) => qc.invalidateQueries({ queryKey: [...k] }))),
+  });
+}
+
+// 정리 대기 현황(결과 파일·파드 정리, 컨트롤러 request-purge 루프). 대기가 있으면 5초, 없으면 30초 -- 삭제 직후의
+// 진행을 따라가되 평소엔 거의 쉰다. enabled = 관리자 화면에서만(일반 사용자는 403 이라 부르지 않는다).
+export const usePurgeStatus = (enabled: boolean) =>
+  useQuery({
+    queryKey: ["request-purges"],
+    queryFn: () => apiGet<PurgeStatus>("/api/admin/request-purges"),
+    enabled,
+    refetchInterval: (q) => ((q.state.data as PurgeStatus | undefined)?.pending ?? 0) > 0 ? 5000 : 30000,
+  });

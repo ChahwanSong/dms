@@ -89,8 +89,15 @@ class K8sClient(Protocol):
         ...
     def read_pod_log(self, name: str, namespace: str) -> str: ...
     # 슬라이스 25: vcjob 파드는 이름을 모르므로 라벨로 찾는다. 구현은 이미 있었지만
-    # Protocol 에 없어 계약 문서가 실제 의존을 숨기고 있었다(설계 §1-4).
+    # Protocol 에 없어 계약 문서가 실제 의존을 숨기고 있었다(설계 §1-4). 각 항목의
+    # "deleting"(2026-10-08) = deletionTimestamp 있음(Terminating) -- 요청 삭제 정리
+    # (purge_runner)가 「아직 남은 객체」에 Terminating 도 세려고 쓴다.
     def list_pod_briefs(self, namespace: str, label_selector: str) -> list: ...
+    # 요청 삭제 정리(2026-10-08, purge_runner.sweep): 라벨로 vcjob 을 찾는다 --
+    # [{"name", "deleting", "uid"}]. phase_refs 에 없는 vcjob(제출 직후 크래시)도 회수해야 한다.
+    # uid 는 launcher 파드의 ownerReference 와 대조해 「이 잡의 vcjob 의 launcher」를 전체
+    # job_id 로 확인하는 데 쓴다(이름은 job_id[:12] 만 담는다 -- 2026-10-09 검증 지적).
+    def list_vcjob_briefs(self, namespace: str, label_selector: str) -> list: ...
 
 
 _CONTROL_PLANE_LABELS = ("node-role.kubernetes.io/control-plane",
@@ -519,8 +526,27 @@ class KubernetesClient:  # pragma: no cover - 실증 대상
                 "images": {c.name: c.image for c in pod.spec.containers},
                 "phase": pod.status.phase or "",
                 "waiting_reason": reason,
+                # Terminating(삭제 요청됨, 아직 존재) -- 요청 삭제 정리가 「남은 객체」로 센다.
+                "deleting": pod.metadata.deletion_timestamp is not None,
             })
         return briefs
+
+    def list_vcjob_briefs(self, namespace, label_selector):
+        """라벨로 Volcano Job 을 나열한다 -- [{"name", "deleting", "uid"}](요청 삭제 정리, purge_runner.sweep). custom
+        objects API 는 원시 JSON(camelCase)이라 deletionTimestamp 를 그대로 본다. 404(CRD 부재)는 빈 목록이 아니라
+        예외다 -- 「vcjob 없음」으로 접으면 Volcano 가 빠진 클러스터에서 정리가 남은 객체를 못 본 채 파일로 넘어간다."""
+        self._ensure()
+        resp = self._custom.list_namespaced_custom_object(
+            self._VC["group"], self._VC["version"], namespace, self._VC["plural"],
+            label_selector=label_selector,
+            _request_timeout=ROLLOUT_REQUEST_TIMEOUT_SECONDS)
+        out = []
+        for item in (resp or {}).get("items") or []:
+            meta = item.get("metadata") or {}
+            out.append({"name": meta.get("name"),
+                        "deleting": meta.get("deletionTimestamp") is not None,
+                        "uid": meta.get("uid")})
+        return out
 
     # 슬라이스 17(큐 가시성): scheduling.volcano.sh 는 잡 제출용 _VC(batch.volcano.sh)
     # 와 다른 그룹이다. queues 는 cluster-scoped, podgroups 는 namespaced.

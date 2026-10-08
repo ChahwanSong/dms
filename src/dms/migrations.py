@@ -123,6 +123,11 @@ def _apply_migrations(db: Database) -> None:
             updated_at TEXT NOT NULL,
             PRIMARY KEY (batch_id, seq))""",
         "CREATE INDEX IF NOT EXISTS idx_batch_items_status ON batch_items (batch_id, status)",
+        # 요청 삭제 게이트(2026-10-09, request_purges.delete_terminal)가 요청마다 「이 요청을 가리키는 배치 항목이
+        # 있나」를 requests 행 잠금을 쥔 채 묻는다 -- 위 두 인덱스는 batch_id 가 앞이라 쓸 수 없어 200건 일괄 삭제가
+        # 전체 스캔 200회가 된다(idx_data_jobs_request·idx_plans_request 와 같은 이유). batch_items.request_id 는
+        # 테이블 첫 판부터 있던 컬럼이라 CREATE 목록에 바로 둔다.
+        "CREATE INDEX IF NOT EXISTS idx_batch_items_request ON batch_items (request_id)",
         """CREATE TABLE IF NOT EXISTS plans (
             plan_id TEXT PRIMARY KEY,
             request_id TEXT NOT NULL,
@@ -130,6 +135,9 @@ def _apply_migrations(db: Database) -> None:
             state TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
+        # 요청 삭제(2026-10-08, repositories/request_purges.py)가 요청마다 request_id 로 plans 를 지운다 -- job_id 가
+        # NULL 인 plan 도 있어 job_id 로는 못 찾는다. plans.request_id 는 v1 컬럼이라 CREATE 목록에 바로 둔다.
+        "CREATE INDEX IF NOT EXISTS idx_plans_request ON plans (request_id)",
         """CREATE TABLE IF NOT EXISTS results (
             request_id TEXT PRIMARY KEY,
             terminal_state TEXT NOT NULL,
@@ -235,6 +243,10 @@ def _apply_migrations(db: Database) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
+        # 요청 삭제 트랜잭션(request_purges.delete_terminal)이 요청마다 request_id 로 잡을 잠그고 지운다 -- 인덱스가 없으면
+        # 200건 일괄 삭제가 행 잠금을 쥔 채 전체 스캔을 수백 번 한다. 상세 화면·오케스트레이터의 list_jobs(request_id=)도
+        # 같은 이득을 본다. data_jobs.request_id 는 v1 컬럼이라 CREATE 목록에 바로 둔다(_ensure_columns 뒤일 필요 없음).
+        "CREATE INDEX IF NOT EXISTS idx_data_jobs_request ON data_jobs (request_id)",
         """CREATE TABLE IF NOT EXISTS storages (
             storage_name TEXT PRIMARY KEY,
             mount_path TEXT NOT NULL,
@@ -344,6 +356,29 @@ def _apply_migrations(db: Database) -> None:
             job_id TEXT PRIMARY KEY,
             digest TEXT NOT NULL,
             created_at TEXT NOT NULL)""",
+        # 요청 삭제의 정리 아웃박스(2026-10-08, repositories/request_purges.py). API 가 요청·잡 행을 지우는 **같은
+        # 트랜잭션**에서 넣고, 컨트롤러 request-purge 루프가 k8s 객체·아티팩트를 정리한 뒤 지운다. 행 = 정리 대기. DB 밖
+        # 잔재를 찾는 열쇠(job_id·phase_refs·base)가 원 행과 함께 사라지지 않게 여기로 옮긴다. 인덱스 없음(대기 행만
+        # 담기는 작은 테이블). 새 테이블이라 _ensure_columns 불필요.
+        #   jobs          JSON [{"job_id", "phase_refs": {..}|null, "artifact_uri": str|null}]
+        #   artifact_base 삭제 시점 strip_scheme(resolve_artifact_base). NULL = 모름(→ 파일 단계 보류, null≠"")
+        #   stage         'k8s' | 'files' | 'purging' (완료 = 행 삭제)
+        #   outcomes      JSON {"jobs": {job_id: 'deleted'|'absent'|'left_old_base'}, "k8s_deleted": int} -- 정보용,
+        #                 진행 판정에 안 쓴다(request_purger 가 쓰고 request_purged 이벤트에 싣는다)
+        #   last_error    마지막 실패·지연 사유 코드(진행하면 NULL 로 리셋) -- NOT NULL 이면 「지연」으로 보인다
+        #   requested_by  audit_actor(identity)
+        """CREATE TABLE IF NOT EXISTS request_purges (
+            request_id TEXT PRIMARY KEY,
+            jobs TEXT NOT NULL,
+            artifact_base TEXT,
+            stage TEXT NOT NULL,
+            outcomes TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            next_attempt_at TEXT NOT NULL,
+            requested_by TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""",
         # 노드 배치 제외(2026-10-02, repositories/node_exclusions.py): 관리자가 고른 노드를 DMS 잡 배치 후보에서 뺀다.
         # 행 = 제외 중. 빈 테이블 = 제외 없음(업그레이드 무해 -- sync_pairs 의 "빈 테이블 = 전부 거부"와 반대 방향).
         # agent_nodes 에 플래그를 두지 않는 이유: 그 행은 보고마다 지우고 다시 넣는다(agents.ingest). 새 테이블이라

@@ -39,6 +39,10 @@ def _guard_component(actor: str) -> str:
     return actor if actor in _KNOWN_COMPONENTS else "api"
 
 
+class _PlanLost(Exception):
+    """create_plan_and_job 의 조건부 Pending→Planned 가 졌다 -- 트랜잭션을 롤백시키려고 던진다(밖으로 새지 않는다)."""
+
+
 def _as_count(value) -> "int | None":
     # result_summary는 신뢰 경계 밖(runner 산출물)이다. bool은 int의 서브클래스라
     # 명시적으로 제외하고, 음수는 계수로서 의미가 없어 버린다 -- 잘못된 값이
@@ -62,44 +66,101 @@ class DataJobsRepository:
              "f": from_state.value if from_state is not None else None,
              "t": to_state.value, "r": reason_code, "actor": actor, "at": at})
 
+    def _insert_plan(self, plan_id, request_id, *, actor, now):
+        """plan 행 + 전이의 문장 몸통 -- 트랜잭션은 호출자가 소유한다(Database.transaction 은 중첩이 없다)."""
+        self._db.execute(
+            """INSERT INTO plans (plan_id, request_id, job_id, state,
+                   created_at, updated_at)
+               VALUES (:p, :r, NULL, 'Planned', :now, :now)""",
+            {"p": plan_id, "r": request_id, "now": now})
+        self._record_transition("plan", plan_id, None,
+                                RequestState.PLANNED, None, actor, now)
+
+    def _insert_job(self, job_id, request_id, plan_id, *, operation, priority, storage_name,
+                    source_storage, destination_storage, source, destination, target, options,
+                    tool, worker_pool, precondition, actor, now):
+        """job 행 + plans.job_id + 전이의 문장 몸통 -- 트랜잭션은 호출자가 소유한다."""
+        self._db.execute(
+            """INSERT INTO data_jobs (job_id, request_id, operation, tool,
+                   storage_name, source_storage, destination_storage, source,
+                   destination, target, options, priority, state, worker_pool,
+                   precondition, created_at, updated_at)
+               VALUES (:j, :r, :op, :tool, :sn, :ss, :ds, :src, :dst, :tgt,
+                   :opts, :pri, :state, :wp, :pre, :now, :now)""",
+            {"j": job_id, "r": request_id, "op": operation, "tool": tool,
+             "sn": storage_name, "ss": source_storage, "ds": destination_storage,
+             "src": source, "dst": destination, "tgt": target,
+             "opts": dump_json(options), "pri": priority,
+             "state": DataJobState.PENDING.value, "wp": dump_json(worker_pool),
+             "pre": dump_json(precondition), "now": now})
+        self._db.execute(
+            "UPDATE plans SET job_id = :j, updated_at = :now WHERE plan_id = :p",
+            {"j": job_id, "now": now, "p": plan_id})
+        self._record_transition("data_job", job_id, None,
+                                DataJobState.PENDING, None, actor, now)
+
     def create_plan(self, request_id, *, actor) -> str:
+        # 테스트 픽스처용 단독 경로(무검증 INSERT). planner 는 create_plan_and_job 만 쓴다.
         plan_id = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
-            self._db.execute(
-                """INSERT INTO plans (plan_id, request_id, job_id, state,
-                       created_at, updated_at)
-                   VALUES (:p, :r, NULL, 'Planned', :now, :now)""",
-                {"p": plan_id, "r": request_id, "now": now})
-            self._record_transition("plan", plan_id, None,
-                                    RequestState.PLANNED, None, actor, now)
+            self._insert_plan(plan_id, request_id, actor=actor, now=now)
         return plan_id
 
     def create_job(self, request_id, plan_id, *, operation, priority,
                    storage_name=None, source_storage=None, destination_storage=None,
                    source=None, destination=None, target=None, options: dict, tool,
                    worker_pool: dict, precondition: dict, actor) -> str:
+        # 테스트 픽스처용 단독 경로(무검증 INSERT -- 요청 상태를 보지 않는다). planner 는 create_plan_and_job 만 쓴다.
         job_id = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
-            self._db.execute(
-                """INSERT INTO data_jobs (job_id, request_id, operation, tool,
-                       storage_name, source_storage, destination_storage, source,
-                       destination, target, options, priority, state, worker_pool,
-                       precondition, created_at, updated_at)
-                   VALUES (:j, :r, :op, :tool, :sn, :ss, :ds, :src, :dst, :tgt,
-                       :opts, :pri, :state, :wp, :pre, :now, :now)""",
-                {"j": job_id, "r": request_id, "op": operation, "tool": tool,
-                 "sn": storage_name, "ss": source_storage, "ds": destination_storage,
-                 "src": source, "dst": destination, "tgt": target,
-                 "opts": dump_json(options), "pri": priority,
-                 "state": DataJobState.PENDING.value, "wp": dump_json(worker_pool),
-                 "pre": dump_json(precondition), "now": now})
-            self._db.execute(
-                "UPDATE plans SET job_id = :j, updated_at = :now WHERE plan_id = :p",
-                {"j": job_id, "now": now, "p": plan_id})
-            self._record_transition("data_job", job_id, None,
-                                    DataJobState.PENDING, None, actor, now)
+            self._insert_job(job_id, request_id, plan_id, operation=operation, priority=priority,
+                             storage_name=storage_name, source_storage=source_storage,
+                             destination_storage=destination_storage, source=source,
+                             destination=destination, target=target, options=options, tool=tool,
+                             worker_pool=worker_pool, precondition=precondition, actor=actor, now=now)
+        return job_id
+
+    def create_plan_and_job(self, request_id, *, operation, priority,
+                            storage_name=None, source_storage=None, destination_storage=None,
+                            source=None, destination=None, target=None, options: dict, tool,
+                            worker_pool: dict, precondition: dict, actor) -> "str | None":
+        """planner 의 emit -- plan·job INSERT 와 요청 Pending→Planned 를 **한 트랜잭션 + CAS** 로 묶는다(2026-10-08,
+        요청 삭제 선행 보강). 반환 = job_id, 또는 None(요청이 없거나 더는 Pending 이 아니다 -- 아무것도 남기지 않았다).
+
+        왜: planner 는 Pending 요청을 읽은 뒤 LDAP 해석(틱 예산까지)을 거쳐 emit 한다. 그 사이 사용자가 취소하면
+        예전의 create_plan + create_job(무검증 INSERT) + set_state(PLANNED)(_apply_state 에 종단 가드 없음)는
+        Cancelled → Planned 로 요청을 **되살리고**(results PK 가 이미 있어 영구 Planned + 매 틱 orphan_recovery 실패),
+        관리자가 그 사이 요청을 지웠으면 요청 없는 Pending 잡을 남겨 stepper 가 **실행**했다. 여기서는 요청 행을 먼저
+        잠그고(PG FOR UPDATE -- 요청 삭제 트랜잭션과 같은 requests → data_jobs 순서라 교착이 없다) 조건부 UPDATE 의
+        영향이 1 이 아니면 전부 롤백한다. 전이 순서·actor 는 예전 세 호출과 같다(plan → data_job → request)."""
+        plan_id, job_id = uuid.uuid4().hex, uuid.uuid4().hex
+        now = utc_now_iso()
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+        try:
+            with self._db.transaction():
+                req = self._db.query_one(
+                    f"SELECT state FROM requests WHERE request_id = :r{lock}", {"r": request_id})
+                if req is None or req["state"] != RequestState.PENDING.value:
+                    return None                  # 읽기만 한 트랜잭션의 커밋 -- 무해
+                self._insert_plan(plan_id, request_id, actor=actor, now=now)
+                self._insert_job(job_id, request_id, plan_id, operation=operation, priority=priority,
+                                 storage_name=storage_name, source_storage=source_storage,
+                                 destination_storage=destination_storage, source=source,
+                                 destination=destination, target=target, options=options, tool=tool,
+                                 worker_pool=worker_pool, precondition=precondition, actor=actor, now=now)
+                moved = self._db.execute_count(
+                    """UPDATE requests SET state = :planned, updated_at = :now
+                       WHERE request_id = :r AND state = :pending""",
+                    {"planned": RequestState.PLANNED.value, "pending": RequestState.PENDING.value,
+                     "now": now, "r": request_id})
+                if moved != 1:
+                    raise _PlanLost()            # sqlite(잠금 없음)·잠금 누락 대비 이중 가드 -- 전부 롤백
+                self._record_transition("request", request_id, RequestState.PENDING,
+                                        RequestState.PLANNED, None, actor, now)
+        except _PlanLost:
+            return None
         return job_id
 
     def _hydrate(self, row):
@@ -178,6 +239,24 @@ class DataJobsRepository:
                 GROUP BY storage_name, target
                 ORDER BY last_scan_at {direction}, storage_name, target{tail}""",
             params)
+
+    def usage_scan_request_ids(self, request_ids) -> set:
+        """이 요청들 중 사용량 분석의 지점이 되는 잡(성공 scan -- _scan_target_where 의 기본 조건 그대로)을 가진 것.
+        요청 목록의 has_succeeded_scan(작업 삭제 확인 창의 사용량 경고, 2026-10-09)이 쓴다 -- 요청 **상태**로 판정하면
+        취소 경합(취소가 잡 목록을 읽은 뒤 stepper 가 잡을 Succeeded 로 끝냄 → 잡 Succeeded·요청 Cancelled)의 지점을
+        놓친다. 사용량 분석은 잡 상태를 본다. 묶음(500)마다 한 번, idx_data_jobs_request 를 탄다."""
+        ids = [r for r in dict.fromkeys(request_ids) if isinstance(r, str)]
+        found = set()
+        for i in range(0, len(ids), 500):
+            chunk = {f"i{n}": v for n, v in enumerate(ids[i:i + 500])}
+            params = dict(chunk)
+            where = self._scan_target_where(params)
+            rows = self._db.query(
+                f"""SELECT DISTINCT request_id FROM data_jobs
+                    WHERE {where} AND request_id IN ({", ".join(":" + k for k in chunk)})""",
+                params)
+            found.update(r["request_id"] for r in rows)
+        return found
 
     def scan_storage_names(self) -> list[str]:
         """성공 scan 기록이 있는 storage_name 전부(사용량 분석 스토리지 필터의 선택지 -- 등록이 지워진 이름 포함)."""
@@ -261,10 +340,14 @@ class DataJobsRepository:
     def set_job_state(self, job_id, to_state: DataJobState, *, reason_code=None, actor):
         now = utc_now_iso()
         guard_tripped = False
+        # 요청 삭제(2026-10-08)와의 경합: PG 행 잠금으로 읽고 UPDATE 영향 행 수를 확인한다 -- 잠금 없이 읽은 뒤 삭제가
+        # 커밋되면 0행 UPDATE 위에 전이만 커밋돼 지운 잡의 고아 전이가 남는다(RequestsRepository._apply_state 와 같은
+        # 처방). 0행이면 KeyError -- 트랜잭션이 롤백된다(행 없음과 같은 신호).
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
             current = self._db.query_one(
-                """SELECT state, request_id, created_at, submit_wait_seconds
-                   FROM data_jobs WHERE job_id = :j""", {"j": job_id})
+                f"""SELECT state, request_id, created_at, submit_wait_seconds
+                   FROM data_jobs WHERE job_id = :j{lock}""", {"j": job_id})
             if current is None:
                 raise KeyError(job_id)
             if DataJobState(current["state"]) in TERMINAL_DATA_JOB_STATES:
@@ -291,12 +374,14 @@ class DataJobsRepository:
                             0, int(iso_epoch(now) - iso_epoch(current["created_at"])))
                     except (TypeError, ValueError):
                         submit_wait = None  # 시각이 깨졌으면 지어내지 않는다(NULL)
-                self._db.execute(
+                moved = self._db.execute_count(
                     """UPDATE data_jobs SET state = :s, reason_code = :rc,
                            updated_at = :now, submit_wait_seconds = :sw
                        WHERE job_id = :j""",
                     {"s": to_state.value, "rc": reason_code, "now": now,
                      "sw": submit_wait, "j": job_id})
+                if moved != 1:
+                    raise KeyError(job_id)
                 self._record_transition("data_job", job_id, DataJobState(current["state"]),
                                         to_state, reason_code, actor, now)
         if guard_tripped:
@@ -333,16 +418,27 @@ class DataJobsRepository:
                 ORDER BY updated_at LIMIT :n{suffix}""", params)
         return [self._hydrate(r) for r in rows]
 
-    def set_phase_ref(self, job_id, phase, ref):
+    def set_phase_ref(self, job_id, phase, ref) -> bool:
+        """제출한 단계의 ref 를 phase_refs 에 합친다. 반환 False = 잡 행이 없다(2026-10-08, 요청 삭제 선행 보강).
+
+        stepper 는 잠금 없는 claim 스냅숏으로 제출하므로, 그 사이 관리자가 요청을 지우면 방금 만든 Pod/vcjob 의 ref 를
+        남길 행이 없다 -- 예전엔 row["phase_refs"] 의 TypeError 로 끝나 회수 경로(_reclaim_if_terminal)에 닿지 못했고 실제
+        rm/sync 가 고아로 돌았다. 호출자(stepper)는 False 면 그 ref 를 즉시 terminate 한다. PG 는 행을 FOR UPDATE 로 잠가
+        요청 삭제 트랜잭션(requests → data_jobs FOR UPDATE)과 직렬화한다: 삭제가 먼저면 여기서 행이 없고, 여기가 먼저면
+        삭제가 새 ref 와 새 updated_at(조용한 창)을 본다."""
         now = utc_now_iso()
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
             row = self._db.query_one(
-                "SELECT phase_refs FROM data_jobs WHERE job_id = :j", {"j": job_id})
+                f"SELECT phase_refs FROM data_jobs WHERE job_id = :j{lock}", {"j": job_id})
+            if row is None:
+                return False
             refs = load_json(row["phase_refs"]) or {}
             refs[phase] = ref
-            self._db.execute(
+            changed = self._db.execute_count(
                 "UPDATE data_jobs SET phase_refs = :p, updated_at = :now WHERE job_id = :j",
                 {"p": dump_json(refs), "now": now, "j": job_id})
+        return changed == 1
 
     def touch(self, job_id, *, expected_state) -> bool:
         """LDAP 재확인 보류(stepper D2, 2026-10-07): 상태·전이는 그대로 두고 updated_at 만 now 로 민다 --
