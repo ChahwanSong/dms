@@ -22,8 +22,8 @@ import { groupCaveat, groupCaveatsFor } from "../../lib/groupCaveats";
 // 옵션 미러(CHMOD_RE·chownFieldError·intFieldError, sync 숫자 범위·프리필 SYNC_INT_FIELDS)는
 // optionRules.ts 로 이사(슬라이스 32 T8) -- BatchCreate 옵션과 공유한다
 // (사본이면 미러가 발산한다).
-import { CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS,
-         scanIntFieldError, syncIntFieldError } from "./optionRules";
+import { CHMOD_RE, chownFieldError, OPEN_NOATIME_NON_ROOT, PRIV_ROOT_SYNC, PRIV_USER, SCAN_INT_FIELDS,
+         SYNC_INT_FIELDS, SYNC_OPTION_HELP, scanIntFieldError, syncIntFieldError } from "./optionRules";
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
@@ -472,12 +472,12 @@ export function SubmitJob() {
               control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="delete" checked={f.delete} onChange={on("delete")} /> delete
               </label>}
-              help="원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화)." />
+              help={SYNC_OPTION_HELP.delete} />
             <FieldRow align="check"
               control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="contents" checked={f.contents} onChange={on("contents")} /> contents
               </label>}
-              help="크기·수정시각 대신 파일 내용을 바이트 단위로 비교합니다(더 느리지만 정확)." />
+              help={SYNC_OPTION_HELP.contents} />
             {/* direct·quiet·고급옵션·우선순위는 운영자 전용(2026-08-20, 사용자
                 결정): 사용자 sync 폼은 delete·contents 만 남긴다. 숨겨도 제출
                 payload 는 동일하다 -- checkedOptions 가 기본값(false)을 이미
@@ -513,10 +513,7 @@ export function SubmitJob() {
                              checked={rootEffective && f.openNoatime} disabled={!rootEffective}
                              onChange={on("openNoatime")} /> open_noatime
                     </label>}
-                    help={!rootEffective && <>
-                      open_noatime 은 root 실행에서만 적용됩니다 — 일반 실행 신원은
-                      남의 파일을 O_NOATIME 으로 열 수 없어(EPERM) 복사가 실패합니다.
-                    </>} />
+                    help={!rootEffective && OPEN_NOATIME_NON_ROOT} />
                   {/* 프리필 계약(2026-09-17): 값이 미리 채워져 있고(placeholder 가
                       아니다) 그 값이 곧 서버 기본이라 비워도 같은 값이 적용된다 —
                       배칭을 끄는 유일한 표현은 0 명시. placeholder 는 "비웠을 때
@@ -742,8 +739,7 @@ export function SubmitJob() {
         )}
         {isAdmin && (
           <SummaryRow label="실행 권한" className={rootEffective ? "text-bad" : ""}>
-            {rootEffective ? "root(특권) — 권한 검사 우회, sync 는 목적지 소유·권한을 소스에 맞춤(chown·chmod 지정 시 그 값)"
-              : "실행 신원의 uid/gid(권한 그대로 적용)"}
+            {rootEffective ? PRIV_ROOT_SYNC : PRIV_USER}
           </SummaryRow>
         )}
       </SummaryList>

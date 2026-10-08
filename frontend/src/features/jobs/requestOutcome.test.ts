@@ -351,3 +351,12 @@ test("KPI 실행되지 않은 종단·잡 없음·미리보기 실패의 result_
   expect(kpi({ state: "Pending", transitions: [t(null, "Pending", 0)] }, [])
     .find((x) => x.key === "submit_wait")?.value).toBe("—");
 });
+
+test("Succeeded 부제는 끝난 시각만(단계 나열은 단계 구획이 말한다) -- 끝난 시각을 모르면 null", () => {
+  // 잡의 마지막 종단 전이 시각 → 없으면 요청 completed_at → 그것도 없으면 부제 없음.
+  expect(outcome({}, [job({ state: "Succeeded", transitions: [...SYNC_OK_TR.slice(0, 6), t("Executing", "Succeeded", 40)] })])
+    .subtitle).toBe("2026-10-08 12:15:40 KST 완료");
+  expect(outcome({ completed_at: "2026-10-08T03:15:40Z" }, [job({ state: "Succeeded" })]).subtitle)
+    .toBe("2026-10-08 12:15:40 KST 완료");
+  expect(outcome({}, [job({ state: "Succeeded" })]).subtitle).toBeNull();
+});

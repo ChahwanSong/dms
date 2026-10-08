@@ -14,6 +14,9 @@ export interface RequestRow {
   // 배치 자식이면 그 배치 id(서버 requests.batch_id). 배치 자식은 단건 컨펌을 못 한다 -- 배치 확인으로만 실행된다
   // (2026-10-07, 409 batch_child_confirm_via_batch). 옵션(?) = 구형 fixture 호환. null/부재 = 단건 요청.
   batch_id?: string | null;
+  // 요청을 만든 인증 방식(requests.auth_method): "session" | "token" | null(옛 행). token 은 root 자격이 없다
+  // (identity.privilege_eligible). 요청 상세 「요청 내용」이 배치 자식의 root 여부를 설명할 때만 읽는다.
+  auth_method?: string | null;
 }
 // events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
 // 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).
@@ -38,9 +41,9 @@ export interface RequestDetail extends RequestRow {
   completed_at?: string | null;
 }
 // 플래너가 배치 시점에 확정한 워커 배치(planner.py: resolve_fanout 결과 + 후보·
-// 신원). 화면이 읽는 건 **수치 몇 개**와 identity 의 보조 그룹 4키(잡 상세 '보조
-// 그룹(gid)' 행)뿐이라 그것만 선언한다(identity 의 나머지·candidates·rejections 는
-// 화면 계약이 아니다 — 필요해지면 그때 넓힌다).
+// 신원). 화면이 읽는 건 수치 몇 개와 identity(요청 상세 「요청 내용」의 실행 권한·신원·
+// 보조 그룹)다. candidates·priority_class 는 요청 내용 카드가 읽는다(requestSpec 이 정규화 --
+// 모양을 믿지 않아 unknown). rejections·queue 는 표시하지 않는다(BACKLOG).
 // node_count 는 전 도구 공통(총 노드), source_count/destination_count 는 양면
 // 배치(nsync)에서만 실린다 — resolve_fanout 의 두 분기가 그대로 모양이 된다.
 // 전부 옵셔널: 구버전 응답·미기록에서 키가 없을 수 있고, 없음(모름)과 0(정상값)은
@@ -51,6 +54,8 @@ export interface WorkerPool {
   source_count?: number | null;
   destination_count?: number | null;
   identity?: WorkerPoolIdentity | null;
+  priority_class?: unknown;
+  candidates?: unknown;
 }
 // 계획 시점 보조 그룹 판정(identity.resolve_job_identity 의 SUPP_* -- 서버 어휘 그대로).
 // string 도 받는 이유: 서버가 어휘를 넓혀도 화면이 타입 오류로 죽지 않게(모르는 값은 행을 숨긴다).
@@ -88,6 +93,8 @@ export interface DataJob {
   source_storage?: string | null;
   destination_storage?: string | null;
   options?: Record<string, unknown> | null;
+  // 계획 시점 전제(planner: {requester_id, owner, operation}). 요청 상세가 실행 신원 이름의 두 번째 출처로 읽는다.
+  precondition?: unknown;
   // 서버가 이미 보내는 시각·대기 컬럼(같은 _ROW_COLUMNS_SANS_DIAG). 요청 상세의 단계 시각(stageModel)이 읽는다.
   // exec_submitted_at = 실행 vcjob 제출 시각(실행 단계 시작), sched_wait_seconds = 제출 → 첫 RUNNING 관측(Volcano
   // 대기 근사). null = 모름(구 잡·미도달) -- 0(대기 없음)과 다르다. 옵션(?)은 기존 fixture 무수정 컴파일용.

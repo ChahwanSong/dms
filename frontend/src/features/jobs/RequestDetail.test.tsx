@@ -372,8 +372,8 @@ test("잡 취소 성공 후 잡 목록이 즉시 갱신된다(무효화 접두 �
 
 // --- 대상·절대경로(사용자 보고 2026-08-15): "완료된 작업을 볼 때도 관리 디렉토리가
 // 안 보여서 정확한 path 를 알 수 없다". payload 는 상대경로만 담으므로(서버 계약
-// 무변경) 화면이 **지금의** managed_root 로 조합해 보여준다. 뿌리는 관리자 응답에만
-// 실려 오므로(routes_storages) 비관리자에겐 그 줄이 아예 없다.
+// 무변경) 화면이 **지금의** managed_root 로 조합해 보여준다. 뿌리를 모르면(관리자 전용·
+// 비활성 스토리지·조회 실패) 그 줄이 아예 없다(2026-10-08 부터 「요청 내용」 카드에 있다).
 const SYNC_PAYLOAD = { source_storage: "cephfs", source: "team",
                        destination_storage: "gpfs", destination: "backup" };
 function renderWithStorages(rows: object[], payload: object = SYNC_PAYLOAD) {
@@ -392,7 +392,7 @@ test("대상과 절대경로: 상대경로 표기 옆에 지금의 managed_root 
   expect(await screen.findByText("/cephfs/dms/team → /gpfs/dms/backup")).toBeInTheDocument();
 });
 
-test("managed_root 를 못 읽으면(비관리자) 절대경로 줄 자체가 없다 — 거짓 경로 금지", async () => {
+test("managed_root 를 못 읽으면(뿌리를 모르면 — 관리자 전용·비활성 스토리지·조회 실패) 절대경로 줄 자체가 없다 — 거짓 경로 금지", async () => {
   renderWithStorages([
     { storage_name: "cephfs", backend_type: "cephfs", status: "Ready" },
     { storage_name: "gpfs", backend_type: "gpfs", status: "Ready" }]);
@@ -616,14 +616,14 @@ test("rm·scan 잡은 storage_name 의 종류로 주의문을 고른다", async 
   await waitFor(() => expect(within(dd).getByText(NFS_CAVEAT)).toBeInTheDocument());
 });
 
-test("none·over_limit·privileged·disabled: 값만 보이고 주의문은 없다(그룹이 실리지 않았다)", async () => {
+// privileged(root) 튜플은 뺐다(2026-10-08): root 실행에는 보조 그룹 행 자체가 없다 -- RequestSpecCard.test 의 root 잡
+// 테스트가 그 부재를 대신 고정한다.
+test("none·over_limit·disabled: 값만 보이고 주의문은 없다(그룹이 실리지 않았다)", async () => {
   const cases: [object, string][] = [
     [{ supplementary_gids: [], supplementary_gids_status: "none", supplementary_gids_excluded: [],
        supplementary_gids_found: 0 }, "없음"],
     [{ supplementary_gids: [], supplementary_gids_status: "over_limit", supplementary_gids_excluded: [],
        supplementary_gids_found: 300 }, "적용 안 됨 — 그룹 300개가 상한 256개를 넘음"],
-    [{ supplementary_gids: [], supplementary_gids_status: "privileged", supplementary_gids_excluded: [],
-       supplementary_gids_found: null, privileged: true, uid: 0, gid: 0 }, "root 실행 — 해당 없음"],
     [{ supplementary_gids: [], supplementary_gids_status: "disabled", supplementary_gids_excluded: [],
        supplementary_gids_found: null }, "적용 안 됨 — 운영자가 기능을 꺼 둠(계획 시점)"],
   ];

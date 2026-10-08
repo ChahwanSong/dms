@@ -8,10 +8,11 @@
 // 가리키는 곳"을 말한다 — 과거 기록은 payload 그대로 남고(불변), 해석만 현재
 // 진실을 따른다.
 //
-// **모르면 생략한다**: managed_root 는 관리자 응답에만 실린다(routes_storages
-// list_user_storages). 비관리자·조회 실패·구형 서버에서는 null 을 돌려주고 화면은
-// 그 줄 자체를 안 그린다 — "undefined/team" 같은 거짓 경로나 빈 문자열로 뭉개면
-// 없는 사실을 지어내는 것이다(null≠빈값 규약).
+// **모르면 생략한다**: managed_root 는 역할 무관(2026-09-29~, routes_storages
+// list_user_storages)이지만 비관리자 응답엔 관리자 전용(user_enabled=0) 스토리지가, 모두의
+// 응답엔 비활성(enabled≠1) 스토리지가 빠진다 -- 그 이름·조회 실패·구형 서버에서는 null 을
+// 돌려주고 화면은 그 줄 자체를 안 그린다 — "undefined/team" 같은 거짓 경로나 빈 문자열로
+// 뭉개면 없는 사실을 지어내는 것이다(null≠빈값 규약).
 
 /** managed_root + 상대경로 → 절대경로. 뿌리를 모르거나 경로가 문자열이 아니면 null.
  *  빈 상대경로("")는 **뿌리 자신**이다(정상값 — "모름"으로 뭉개지 않는다). */
@@ -67,12 +68,20 @@ const _root = (roots: StorageRoots, storage: unknown) =>
  *  요약과 같은 문법이되 operation 접두는 붙이지 않는다(호출측이 이미 말한다). */
 export function pathSummary(operation: string | undefined,
                             payload: Record<string, unknown> | undefined): string {
+  return pathParts(operation, payload).join(" → ");
+}
+
+/** pathSummary 의 조각(sync = [출발, 도착], 그 밖 = [대상]). 화면이 출발·도착 사이에서 줄을 바꿀 때 **구조로**
+ *  가른다 -- 합친 문자열에서 " → " 를 찾으면 경로 이름에 든 " → " 에서 갈린다(validate_relative_path 는 그 문자를
+ *  막지 않는다). 문자열이 아닌 값(DB 변조)은 "?" -- String({}) 의 "[object Object]" 를 화면에 내지 않는다. */
+export function pathParts(operation: string | undefined,
+                          payload: Record<string, unknown> | undefined): string[] {
   const p = payload ?? {};
-  // ?? 로만 접는다 — truthy 검사는 ""(빈 경로 = 뿌리)를 "모름"으로 뭉갠다.
-  const part = (v: unknown) => String(v ?? "—");
+  // null·undefined 만 「—」로 접는다 — truthy 검사는 ""(빈 경로 = 뿌리)를 "모름"으로 뭉갠다.
+  const part = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "—" : "?");
   return operation === "sync"
-    ? `${part(p.source_storage)}:${part(p.source)} → ${part(p.destination_storage)}:${part(p.destination)}`
-    : `${part(p.storage)}:${part(p.target)}`;
+    ? [`${part(p.source_storage)}:${part(p.source)}`, `${part(p.destination_storage)}:${part(p.destination)}`]
+    : [`${part(p.storage)}:${part(p.target)}`];
 }
 
 /** 절대경로 표기. 하나라도 조합할 수 없으면 null(그 줄을 안 그린다) — sync 는
@@ -81,11 +90,20 @@ export function pathSummary(operation: string | undefined,
 export function absSummary(operation: string | undefined,
                            payload: Record<string, unknown> | undefined,
                            roots: StorageRoots): string | null {
+  const parts = absParts(operation, payload, roots);
+  return parts === null ? null : parts.join(" → ");
+}
+
+/** absSummary 의 조각(pathParts 와 같은 모양). null = 조합 불가(행 생략). */
+export function absParts(operation: string | undefined,
+                         payload: Record<string, unknown> | undefined,
+                         roots: StorageRoots): string[] | null {
   const p = payload ?? {};
   if (operation === "sync") {
     const s = absolutePath(_root(roots, p.source_storage), p.source);
     const d = absolutePath(_root(roots, p.destination_storage), p.destination);
-    return s !== null && d !== null ? `${s} → ${d}` : null;
+    return s !== null && d !== null ? [s, d] : null;
   }
-  return absolutePath(_root(roots, p.storage), p.target);
+  const t = absolutePath(_root(roots, p.storage), p.target);
+  return t === null ? null : [t];
 }

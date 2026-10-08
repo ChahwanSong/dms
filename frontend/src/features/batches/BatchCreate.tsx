@@ -10,7 +10,7 @@ import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
 import { StoragePicker, field } from "../jobs/formFields";
 import {
-  CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, intFieldError,
+  CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, intFieldError,
   scanIntFieldError, syncIntFieldError,
 } from "../jobs/optionRules";
 import { Button } from "../../components/ui/Button";
@@ -540,13 +540,13 @@ export function BatchCreate() {
                 <input type="checkbox" aria-label="delete" checked={f.delete}
                        onChange={on("delete")} /> delete
               </label>}
-              help="원본에 없는 파일을 대상에서도 삭제해 완전히 동일하게 맞춥니다(미러 동기화)." />
+              help={SYNC_OPTION_HELP.delete} />
             <FieldRow align="check"
               control={<label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="contents" checked={f.contents}
                        onChange={on("contents")} /> contents
               </label>}
-              help="크기·수정시각 대신 파일 내용을 바이트 단위로 비교합니다(더 느리지만 정확)." />
+              help={SYNC_OPTION_HELP.contents} />
             <div className="flex flex-wrap gap-x-6 gap-y-2">
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="direct" checked={f.direct}

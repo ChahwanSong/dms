@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { absolutePath, absSummary, destinationParent, pathSummary, relativePathProblem } from "./storagePaths";
+import { absolutePath, absParts, absSummary, destinationParent, pathParts, pathSummary, relativePathProblem } from "./storagePaths";
 
 test("destinationParent: sync 목적지의 상위 디렉토리 절대경로(쓰기 권한이 필요한 곳)", () => {
   expect(destinationParent("/cephfs/managed", "dms_test/dst")).toBe("/cephfs/managed/dms_test");
@@ -47,6 +47,21 @@ test("sync 요약: 출발 → 도착, 둘 다 알 때만 절대경로", () => {
   expect(pathSummary("sync", p)).toBe("cephfs-dms:team → gpfs-dms:backup");
   expect(absSummary("sync", p, ROOTS)).toBe("/cephfs/dms/team → /gpfs/dms/backup");
   expect(absSummary("sync", { ...p, destination_storage: "other" }, ROOTS)).toBeNull();
+});
+
+test("조각(pathParts·absParts)은 구조로 가른다 -- 경로 이름의 「 → 」에서 갈리지 않는다", () => {
+  const p = { source_storage: "cephfs-dms", source: "dir → x", destination_storage: "gpfs-dms", destination: "b" };
+  expect(pathParts("sync", p)).toEqual(["cephfs-dms:dir → x", "gpfs-dms:b"]);
+  expect(absParts("sync", p, ROOTS)).toEqual(["/cephfs/dms/dir → x", "/gpfs/dms/b"]);
+  expect(pathParts("scan", { storage: "cephfs-dms", target: "a → b" })).toEqual(["cephfs-dms:a → b"]);
+  expect(absParts("scan", { storage: "other", target: "t" }, ROOTS)).toBeNull();
+});
+
+test("문자열이 아닌 경로 값(DB 변조)은 「?」 -- [object Object]·a,b 를 내지 않는다, null·부재는 「—」", () => {
+  expect(pathSummary("sync", { source_storage: { a: 1 }, source: ["x", "y"], destination_storage: 5, destination: null }))
+    .toBe("?:? → ?:—");
+  expect(pathSummary("scan", {})).toBe("—:—");
+  expect(pathSummary("scan", { storage: "s", target: "" })).toBe("s:");   // 빈 경로 = 뿌리(정상값)
 });
 
 test("빈 맵(비관리자·조회 실패)에선 절대경로가 아예 없다", () => {

@@ -60,6 +60,11 @@ test.describe("E4 잡 종단 흐름", () => {
     // 상세가 데이터를 받은 뒤에 기하를 잰다("불러오는 중…" 상태의 h1 은 로딩
     // 중에도 이미 보여서 안정화 신호가 못 된다).
     await expect(page.getByRole("heading", { name: "전이 이력" })).toBeVisible();
+    // 「요청 내용」 카드 + 머리말 root 배지(2026-10-08): root 실행 요청은 첫 화면 머리말에서 root 임을 말한다. 계획 전에는
+    // 「root(특권) 요청」이라 계획 스냅숏(identity.privileged)이 실릴 때까지 기다린다(잡 2초 폴링). 아래 1280·375 기하
+    // 순회가 이 카드까지 돈다(접힘이 없어 클릭 불필요).
+    await expect(page.getByText("root(특권) 실행", { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("region", { name: "요청 내용" })).toBeVisible();
     // 설계 §3 화면 목록의 "요청 상세" 순회 몫을 여기서 갚는다 -- E3 은 파일 순서상
     // 요청이 하나도 없는 시점이라 상세를 돌 수 없다(교차 파일 상태 공유보다 이 배치가
     // 결정적이다). 상세엔 표가 없으므로 minTableCells 는 기본 0 이고 L1/L3/L4 가 진다.
