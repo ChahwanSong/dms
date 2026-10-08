@@ -323,8 +323,12 @@ test("KPI 실행 전 단건: 라벨이 「복사 대상」·「대상 크기」(
   ]);
   const rmTiles = kpi({ state: "Planned", operation: "rm" }, [{ ...cp, operation: "rm", preview_summary: { files: 5, bytes: null } }]);
   expect(rmTiles.map((x) => x.label)).toEqual(["삭제 대상", "수행시간", "제출 대기"]);
-  // 비종단 수행시간은 "째" + 1초 틱용 기준 시각
-  expect(tiles[2]).toMatchObject({ label: "수행시간", value: "1분째", sub: "진행 중", elapsedFrom: "2026-10-08T03:15:00Z" });
+  // 비종단 수행시간은 "째" + 1초 틱용 기준 시각. 컨펌 대기 중이면 사람이 기다린 시간이 섞였다고 말한다.
+  expect(tiles[2]).toMatchObject({ label: "수행시간", value: "1분째", sub: "컨펌 대기 중 (대기 시간 포함)",
+    elapsedFrom: "2026-10-08T03:15:00Z" });
+  // 기계가 도는 중이면 「진행 중」
+  const pv = job({ state: "PreviewRunning", phase_refs: { preflight: "a", preview: "b" } });
+  expect(kpi({ state: "Planned" }, [pv]).find((x) => x.key === "duration")?.sub).toBe("진행 중");
 });
 
 test("KPI rm: 도구가 바이트를 보고하지 않으면(null) 크기 칸 자체가 없다, 숫자면 「크기」", () => {

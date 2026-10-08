@@ -340,7 +340,10 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
   const terminal = isRequestTerminal(req.state);
   const single = list.length === 1 ? models[0] : null;
   const execSpan = single ? spanText(single.exec.start, single.exec.end) : null;
-  const durSub = execSpan !== null ? `실행 단계 소요 ${execSpan}` : terminal ? null : "진행 중";
+  // 컨펌 대기 중엔 기계가 돌지 않는다 -- 「진행 중」이라 하면 사람이 기다린 시간을 실행 시간처럼 읽힌다(d164 실 화면).
+  const awaitingHuman = list.some((j) => j.state === "ConfirmPending");
+  const durSub = execSpan !== null ? `실행 단계 소요 ${execSpan}` : terminal ? null
+    : awaitingHuman ? "컨펌 대기 중 (대기 시간 포함)" : "진행 중";
   if (terminal) {
     const end = tr.length ? tr[tr.length - 1].at : req.updated_at;
     tiles.push({ key: "duration", label: "수행시간", value: spanText(req.created_at, end) ?? "—", sub: durSub });

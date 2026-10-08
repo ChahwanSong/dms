@@ -43,8 +43,8 @@ function KpiDl({ tiles }: { tiles: KpiTile[] }) {
         // 홀수 개면 좁은 화면에서 마지막 칸이 두 칸을 차지한다(회색 빈칸이 남지 않게).
         <div key={t.key} className={`min-w-0 bg-surface px-4 py-3 ${tiles.length % 2 === 1 && i === tiles.length - 1 ? "col-span-2 sm:col-span-1" : ""}`}>
           <dt className="text-xs text-ink/70">{t.label}</dt>
-          {/* 값은 「120개」·「456 B」처럼 단위를 붙인다 -- 아래 「실행 결과」 타일의 원값("120"·"456 B (456 B)")과
-              같은 글자가 되면 정확 일치 단언이 겹친다(스펙 C7). */}
+          {/* 값은 「120개」·「456 B」처럼 단위를 붙인다. 아래 「실행 결과」 타일의 원값은 "120" 이고, bytes 는 1 KiB
+              미만이면 같은 「456 B」다(괄호 원값은 1 KiB 이상에서만) -- 테스트는 칸(dt 다음 dd)으로 집어 단언한다. */}
           <dd className="mt-0.5 text-lg font-semibold tabular-nums [overflow-wrap:anywhere]">
             {t.elapsedFrom ? <Elapsed from={t.elapsedFrom} fallback="—" /> : t.value}
           </dd>

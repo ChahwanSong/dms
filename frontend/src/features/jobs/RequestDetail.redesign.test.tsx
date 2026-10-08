@@ -288,7 +288,8 @@ test("17 KPI: 결과 {files:120, bytes:456} → 「120개」·「456 B」, rm by
   serve({ ...REQ, state: "Failed" }, [{ ...JOB, state: "Succeeded", result_summary: { files: 120, bytes: 456 } }]);
   const v1 = renderAt();
   expect(await screen.findByText("120개")).toBeInTheDocument();
-  expect(screen.getByText("456 B")).toBeInTheDocument();
+  // KPI 칸으로 집는다 -- 1 KiB 미만이면 아래 「실행 결과」 bytes 타일도 같은 「456 B」다.
+  expect(screen.getByText("복사한 크기").nextElementSibling?.textContent).toBe("456 B");
   v1.unmount();
   // 미리보기 타일에도 「크기」가 있으니 미리보기 요약을 비워 KPI 칸만 본다.
   serve({ ...REQ, operation: "rm" }, [{ ...JOB, operation: "rm", result_summary: { files: 0, bytes: null }, preview_summary: null }]);
