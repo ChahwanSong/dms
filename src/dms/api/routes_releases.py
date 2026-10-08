@@ -7,6 +7,7 @@ from ..domain import DomainValidationError
 from ..execution import ExecutionError
 from ..job_image import resolve_job_image
 from ..registry import fetch_repo_tags
+from ..repositories.builds import effective_tag
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
 from .auth import Identity, audit_actor, require_admin, require_session_admin
 from .routes_requests import reject_when_maintenance
@@ -71,6 +72,65 @@ def _tags_for(cache: dict, registry: str, repository: str) -> "list[str] | None"
     return cache[repository]
 
 
+def _unverifiable(tags, tag: str) -> bool:
+    """레지스트리 목록으로 존재를 확인할 수 없는가: 응답 불가(None)거나, 목록이 잘렸고
+    (registry.TagList.truncated -- 페이지 상한) 그 안에 없다. 잘린 목록에 없다고 "없다"고
+    단정하면 실제로 있는 태그를 잘못 막는다(설계 §7: 잘못된 차단이 잘못된 통과보다 나쁘다)."""
+    return tags is None or (tag not in tags and getattr(tags, "truncated", False) is True)
+
+
+# 「최근 빌드」 표시 상한(행마다) -- 빌드 기록에서 이 리포를 push 한 성공 빌드의 태그.
+_BUILT_MAX = 20
+_DIGITS = re.compile(r"([0-9]+)")
+
+
+def _natural_key(tag: str):
+    # 숫자 덩어리는 수로 비교한다(d99 < d100 < d166) -- 문자열 순서면 새 태그가 목록 중간에
+    # 묻힌다(2026-10-08 리뷰 R4). int() 로 바꾸지 않는다: ASCII 숫자만 숫자로 보고(유니코드 숫자
+    # 「²」는 글자), 앞 0 을 뗀 길이 → 글자 순으로 비교한다 -- 자릿수 상한(4300)·변환 오류로 화면
+    # 전체가 500 이 될 수 없다. 숫자·글자 덩어리가 같은 자리에서 만나도 비교되게 (종류, 길이, 글자).
+    key = []
+    for p in _DIGITS.split(tag):
+        if p == "":
+            continue
+        if p.isascii() and p.isdigit():
+            n = p.lstrip("0") or "0"
+            key.append((0, len(n), n))
+        else:
+            key.append((1, 0, p))
+    return key
+
+
+def _recent_builds(repos) -> list:
+    """성공한 최근 빌드(최신 먼저). 요청 하나에 한 번만 읽는다(행마다 다시 읽지 않는다)."""
+    try:
+        rows = repos.builds.list(limit=200)
+    except Exception:
+        return []
+    return [b for b in rows if b.get("state") == "Succeeded" and isinstance(b.get("finished_at"), str)]
+
+
+def _order_tags(tags: list, repository: str, builds: list,
+                truncated: bool = False) -> "tuple[list, dict]":
+    """화면 순서: 이 리포를 push 한 최근 성공 빌드의 태그(빌드 완료 시각 최신 먼저) → 나머지는
+    숫자를 고려한 내림차순. built = {태그: 빌드 완료 시각} -- 레지스트리에 실제로 있는 태그만
+    (지운 태그를 「최근 빌드」로 내밀지 않는다). 단 목록이 잘렸으면(truncated) 없다는 것을 모르므로
+    빌드 태그를 남긴다 -- 드롭다운이 고르기 전용이라 빠지면 방금 빌드한 태그를 고를 길이 없다(제출은
+    _unverifiable 로 검증 안 됨 통과). 제출 검증은 집합 소속이라 순서와 무관하다."""
+    present = set(tags)
+    built: dict = {}
+    for b in sorted(builds, key=lambda r: r["finished_at"], reverse=True):
+        if repository not in (b.get("images") or []):
+            continue
+        tag = effective_tag(b)
+        if (tag in present or truncated) and tag not in built:
+            built[tag] = b["finished_at"]
+            if len(built) >= _BUILT_MAX:
+                break
+    rest = sorted((t for t in tags if t not in built), key=_natural_key, reverse=True)
+    return list(built) + rest, built
+
+
 @router.get("/api/admin/releases")
 def list_releases(request: Request, limit: int = Query(default=50, ge=1, le=200)):
     repos = request.app.state.repos
@@ -85,6 +145,7 @@ def release_targets(request: Request):
     registry_ok = True
     tags_cache: dict = {}
     targets = []
+    builds = _recent_builds(request.app.state.repos)
     for component in ROLLOUT_ORDER:
         spec = COMPONENTS[component]
         tags = _tags_for(tags_cache, settings.build_registry, spec["repository"])
@@ -92,18 +153,23 @@ def release_targets(request: Request):
             # 화면은 살리되 "태그 목록이 비어 보이는 것"이 레지스트리 장애 때문임을
             # 운영자가 알 수 있어야 한다 -- 빈 목록만 주면 선택지가 없는 것과 구분이 안 된다.
             registry_ok = False
+        ordered, built = _order_tags(tags or [], spec["repository"], builds,
+                                     truncated=getattr(tags, "truncated", False) is True)
         targets.append({
             "component": component, "kind": spec["kind"],
             "workload": spec["workload"], "container": spec["container"],
             "repository": spec["repository"],
             "current_image": _current_image(runner, spec),
-            "tags": tags or [],
+            "tags": ordered, "built": built,
+            "tags_truncated": getattr(tags, "truncated", False) is True,
         })
     # 넷째 행: 잡 이미지(슬라이스 35). current 는 유효값(DB→env) -- 화면의 "현재"가
     # 실제 다음 잡이 쓸 이미지와 갈리면 same_tag 검사가 거짓말을 한다.
     ji_tags = _tags_for(tags_cache, settings.build_registry, _JOB_IMAGE_REPO)
     if ji_tags is None:
         registry_ok = False
+    ji_ordered, ji_built = _order_tags(ji_tags or [], _JOB_IMAGE_REPO, builds,
+                                       truncated=getattr(ji_tags, "truncated", False) is True)
     targets.append({
         "component": JOB_IMAGE_COMPONENT, "kind": "ConfigOverride",
         "workload": "control_state", "container": "-",
@@ -112,7 +178,8 @@ def release_targets(request: Request):
         # job_image.live 와 같은 규칙("비교 불가"와 "빈 값"을 섞지 않는다).
         "current_image": resolve_job_image(request.app.state.repos.control,
                                            settings) or None,
-        "tags": ji_tags or [],
+        "tags": ji_ordered, "built": ji_built,
+        "tags_truncated": getattr(ji_tags, "truncated", False) is True,
     })
     return {"targets": targets, "registry_ok": registry_ok}
 
@@ -146,6 +213,8 @@ def submit_releases(body: ReleaseBody, request: Request,
         raise HTTPException(status_code=409, detail="rollout_in_progress")
     tags_cache: dict = {}
     unverified: list[str] = []
+    # 건너뛴 이유(이벤트 문구) -- 레지스트리 무응답과 잘린 목록(페이지 상한)은 운영자가 할 일이 다르다.
+    skipped_because: set = set()
     # --- 잡 이미지 검증(워크로드와 같은 규칙: 태그 형식·레지스트리 존재·same_tag) ---
     job_image_records = []
     for item in job_image_items:
@@ -153,8 +222,9 @@ def submit_releases(body: ReleaseBody, request: Request,
         if not _TAG_RE.fullmatch(tag):
             raise HTTPException(status_code=422, detail="unknown_tag")
         tags = _tags_for(tags_cache, settings.build_registry, _JOB_IMAGE_REPO)
-        if tags is None:
+        if _unverifiable(tags, tag):
             unverified.append(JOB_IMAGE_COMPONENT)
+            skipped_because.add("registry silent" if tags is None else "tag list truncated")
         elif tag not in tags:
             raise HTTPException(status_code=422, detail="unknown_tag")
         image = f"{settings.build_registry}/{_JOB_IMAGE_REPO}:{tag}"
@@ -175,8 +245,10 @@ def submit_releases(body: ReleaseBody, request: Request,
         # 슬라이스 28: tradeoff 는 유지하되 침묵은 걷어낸다 -- 건너뛴 사실을
         # 추적해 응답 플래그와 이벤트로 운영자에게 알린다(조용한 fail-open 은
         # "검증됐다"와 구분이 안 된다는 것이 BACKLOG §2.3 항목의 실체다).
-        if tags is None:
+        # 잘린 목록(페이지 상한)에 없는 태그도 같은 길이다(_unverifiable).
+        if _unverifiable(tags, tag):
             unverified.append(item.component)
+            skipped_because.add("registry silent" if tags is None else "tag list truncated")
         elif tag not in tags:
             raise HTTPException(status_code=422, detail="unknown_tag")
         image = f"{settings.build_registry}/{spec['repository']}:{tag}"
@@ -208,9 +280,10 @@ def submit_releases(body: ReleaseBody, request: Request,
         # 것이 없으므로 "건너뛰고 통과시켰다"는 사실이 성립하지 않는다. 이벤트는
         # 포탈에 안 뜨는 영속 흔적(관리자 이벤트 화면 없음 -- db_reconnected 와
         # 같은 계층)이고, 즉시 가시 채널은 아래 tag_verified 플래그 + 포탈 배너다.
+        unverified_reason = " + ".join(sorted(skipped_because))
         repos.observability.record_event(
             component="api", severity="warning",
             event_type="release_tag_unverified",
-            message=f"registry silent; unverified={','.join(unverified)}",
-            payload={"components": unverified})
+            message=f"{unverified_reason}; unverified={','.join(unverified)}",
+            payload={"components": unverified, "reason": unverified_reason})
     return {"items": [_public(r) for r in rows], "tag_verified": not unverified}

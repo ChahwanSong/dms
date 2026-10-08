@@ -55,8 +55,80 @@ def test_targets_expose_current_image_and_tags(rollout_client):
     # 넷째 행 job-image(슬라이스 35): 워크로드 뒤에 온다.
     assert list(by_comp) == ["dms-agent", "dms-api", "dms-controller", "job-image"]
     assert by_comp["dms-agent"]["current_image"] == "pkg-01:5000/dms-agent:dev5"
-    assert by_comp["dms-agent"]["tags"] == ["dev5", "dev6"]
+    # 화면 순서: 최근 빌드 → 숫자를 고려한 내림차순(2026-10-08 리뷰 R4 -- 새 태그가 위에)
+    assert by_comp["dms-agent"]["tags"] == ["dev6", "dev5"]
+    assert by_comp["dms-agent"]["built"] == {} and by_comp["dms-agent"]["tags_truncated"] is False
     assert by_comp["dms-controller"]["container"] == "controller"
+
+
+def _succeeded_build(client, *, images, tag, finished_at):
+    repo = client.app.state.repos.builds
+    bid = repo.create(source_path="/src", images=images, node_name="n1", actor="t", tag=tag)
+    repo.finish(bid, state="Succeeded")
+    client.app.state.repos.db.execute("UPDATE builds SET finished_at = :f WHERE build_id = :id",
+                                      {"f": finished_at, "id": bid})
+    return bid
+
+
+def test_targets_order_recent_builds_first_then_natural_descending(rollout_client, monkeypatch):
+    # 2026-10-08 리뷰 R4: 문자열 순서(d100 < d98)면 새 태그가 목록 중간에 묻혔다. 이 리포를 push 한
+    # 최근 성공 빌드의 태그가 맨 위(빌드 완료 최신 먼저, built 에 완료 시각), 나머지는 숫자 고려 내림차순.
+    monkeypatch.setattr("dms.api.routes_releases.fetch_repo_tags",
+                        lambda registry, repo: {"dms": ["d100", "d98", "d99", "b1a2b3c4d", "px1"],
+                                                "dms-agent": ["d98"], "dms-mpifileutils": []}.get(repo))
+    _succeeded_build(rollout_client, images=["dms"], tag="d98", finished_at="2026-10-08T01:00:00Z")
+    _succeeded_build(rollout_client, images=["dms", "dms-agent"], tag="b1a2b3c4d", finished_at="2026-10-08T02:00:00Z")
+    # 레지스트리에 없는 태그(지운 빌드)는 「최근 빌드」로 내밀지 않는다
+    _succeeded_build(rollout_client, images=["dms"], tag="d200", finished_at="2026-10-08T03:00:00Z")
+    by = {t["component"]: t for t in rollout_client.get("/api/admin/releases/targets", headers=ADMIN).json()["targets"]}
+    assert by["dms-api"]["tags"] == ["b1a2b3c4d", "d98", "px1", "d100", "d99"]
+    assert by["dms-api"]["built"] == {"b1a2b3c4d": "2026-10-08T02:00:00Z", "d98": "2026-10-08T01:00:00Z"}
+    # dms-agent 행엔 dms-agent 를 push 한 빌드만
+    assert by["dms-agent"]["built"] == {} and by["job-image"]["built"] == {}
+
+
+def test_truncated_tag_list_does_not_block_a_tag_beyond_the_page_cap(rollout_client, monkeypatch):
+    # 2026-10-08 리뷰 R5: 페이지 상한에 걸려 잘린 목록에 없다고 "없다"고 단정하면 실제로 있는
+    # 태그를 잘못 막는다 -- 검증 안 됨으로 통과(tag_verified false). 잘리지 않은 목록은 그대로 422.
+    from dms.registry import TagList
+
+    def truncated(registry, repo):
+        out = TagList(["d22", "d23"])
+        out.truncated = True
+        return out
+    monkeypatch.setattr("dms.api.routes_releases.fetch_repo_tags", truncated)
+    body = rollout_client.get("/api/admin/releases/targets", headers=ADMIN).json()
+    assert body["registry_ok"] is True and body["targets"][1]["tags_truncated"] is True
+    r = rollout_client.post("/api/admin/releases", json={"items": [{"component": "dms-api", "tag": "d999"}]})
+    assert r.status_code == 202 and r.json()["tag_verified"] is False
+    import json
+    rows = rollout_client.app.state.repos.db.query(
+        "SELECT message, payload FROM events WHERE event_type = 'release_tag_unverified'")
+    assert rows and json.loads(rows[-1]["payload"])["reason"] == "tag list truncated"   # 레지스트리 무응답과 구분
+    assert rows[-1]["message"].startswith("tag list truncated;")
+
+
+def test_truncated_list_keeps_recent_build_tags_selectable(rollout_client, monkeypatch):
+    # 잘린 목록에 없다고 「최근 빌드」에서 빼면 고르기 전용 드롭다운에서 방금 빌드한 태그를 고를 길이 없다.
+    from dms.registry import TagList
+
+    def truncated(registry, repo):
+        out = TagList(["d1"])
+        out.truncated = True
+        return out
+    monkeypatch.setattr("dms.api.routes_releases.fetch_repo_tags", truncated)
+    _succeeded_build(rollout_client, images=["dms"], tag="d999", finished_at="2026-10-08T02:00:00Z")
+    row = [t for t in rollout_client.get("/api/admin/releases/targets", headers=ADMIN).json()["targets"]
+           if t["component"] == "dms-api"][0]
+    assert row["tags"][0] == "d999" and row["built"] == {"d999": "2026-10-08T02:00:00Z"}
+
+
+def test_natural_key_never_raises_on_odd_tags():
+    from dms.api.routes_releases import _natural_key
+    tags = ["²", "1²", "①", "9" * 5000, "١٢", "", "-", "..", "d007", "d7", "d10"]
+    ordered = sorted(tags, key=_natural_key, reverse=True)     # 예외 없이 정렬된다
+    assert ordered.index("d10") < ordered.index("d7")
+    assert _natural_key("d007") == _natural_key("d7")          # 앞 0 은 같은 수
 
 
 def test_targets_query_registry_once_per_repository(rollout_client, monkeypatch):

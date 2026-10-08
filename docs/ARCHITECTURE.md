@@ -573,7 +573,7 @@ env를 기동 시점에 전수 검증해 frozen Settings/AgentSettings로 만들
 | `src/dms/wiring.py` | execution_backend(stub/volcano)에 따른 어댑터 선택: build_execution_adapter·build_build_runner·build_rollout_runner·build_queue_reader 4개 팩토리 + build_identity_resolver(LDAP) + wire_reconnect_event(DB 재연결 이벤트 훅, api·controller 공용) + build_summary_reader(컨트롤러 summary.json 읽기 — 어댑터가 조립한 <base>/<job_id>/<phase>/summary.json 을 조각으로 되돌려 artifact_files.read_contained_text 로, 소유자 uid 는 잡 행에서) |
 | `src/dms/cli.py` | argparse 진입점: agent(서버 Settings 없이 AgentSettings만) / migrate / api(uvicorn+create_app) / controller(Repositories+4팩토리 조립, --once는 run_all_once, 아니면 run_forever). SettingsError는 stderr 출력 후 exit 2 |
 | `src/dms/artifact_base.py` | 아티팩트 base 단일 진실 원천: strip_scheme(접두사만), resolve_artifact_base(DB 우선→env), normalize_artifact_base(정규형 file:///abs, 422용 DomainValidationError), allowlist_reason(prefix allowlist, realpath 기준, artifact_base_outside_allowlist), static_base_problem(요청자 관점 g+w·POSIX ACL·o+x 판정 — 3홉·PUT 과 stepper 의 그룹 잡 제출 관문 공용), roundtrip_artifact_base(실제 쓰기 왕복 프로브 — uid 0 관점), controller_check_once(allowlist→왕복 순으로 주기 검증 결과를 control_state에 기록) |
-| `src/dms/registry.py` | 레지스트리 v2 태그 조회 fetch_repo_tags: 모든 실패를 None으로 접는 fail-soft(registry.py:39-48), 캐시 없음, 정렬 반환, 타임아웃 3s/connect 2s |
+| `src/dms/registry.py` | 레지스트리 v2 태그 조회 fetch_repo_tags: 모든 실패를 None으로 접는 fail-soft, 캐시 없음, 정렬 반환(화면 순서는 routes_releases._order_tags — 최근 빌드 → 숫자 고려 내림차순), 타임아웃 3s/connect 2s. 2026-10-08: Link rel=next 페이지 나눔을 같은 레지스트리 안에서만 따라가고 페이지 상한(_MAX_PAGES)·둘째 페이지부터의 시간 예산(_PAGES_BUDGET_SECONDS)·같은 주소 반복·다른 호스트/읽을 수 없는 next·둘째 페이지 이후 실패면 그때까지의 목록을 TagList.truncated 로, 401 Bearer 면 익명 토큰 1회 재시도(받은 토큰은 다음 페이지에 재사용, digest·삭제도). 조회 주소는 http:// 고정(사용자 지시 — 건드리지 않는다) |
 | `src/dms/metrics_series.py` | DB/HTTP 없는 순수 시계열 조립: build_node_points(샘플 단위 fail-soft, 네트워크 카운터 차분), clamp_window_hours, bucket_chars_for(SUBSTR 접두 절단), duration_histogram + DURATION_BUCKETS/SUBMIT_WAIT_BUCKETS |
 
 ### 불변식 (위반하면 깨진다)
@@ -583,8 +583,8 @@ env를 기동 시점에 전수 검증해 frozen Settings/AgentSettings로 만들
 - DMS_LDAP_REQUIRE_AUTH_BIND=true면 bind DN/PW 결측·자리표시자 시 기동 거부(config.py:181-190) — 익명 바인드 침묵 강등 차단, 발화 시점이 배포(기동)이어야 운영자가 알아챈다
 - 아티팩트 base는 모든 소비자가 resolve_artifact_base 하나만 통과(artifact_base.py:22-30) — DB(control_state.artifact_base_uri) 우선, NULL이면 env. wiring.py:27-29는 이를 생성자 캡처가 아닌 lambda로 넘겨 호출 시점 DB값 사용을 보장
 - file:// 제거는 strip_scheme(접두사만, artifact_base.py:15-19)으로 저장소 전체 통일 — str.replace 전체 치환은 경로 중간 file://까지 지워 다른 경로를 만든다. normalize_artifact_base는 그런 값의 저장 자체를 422로 거부(artifact_base.py:40-44)
-- registry.fetch_repo_tags에서 None(응답 불가)과 [](태그 0개)는 다른 값(registry.py 모듈 docstring) — 구분이 무너지면 unknown_tag 검증이 조용히 fail-open 되거나 존재하는 태그를 잘못 차단. {"tags": null}도 None으로 접는다(registry.py:44-48)
-- registry는 캐시 금지(registry.py:8-12) — 제출 경로 unknown_tag 검증이 낡은 목록으로 실존 태그를 차단하는 것이 설계 §7이 금지한 방향
+- registry.fetch_repo_tags에서 None(응답 불가)과 [](태그 0개)는 다른 값(registry.py 모듈 docstring) — 구분이 무너지면 unknown_tag 검증이 조용히 fail-open 되거나 존재하는 태그를 잘못 차단. []는 레지스트리가 그렇게 말할 때만: 레지스트리의 「리포 없음」 404(Docker-Distribution-Api-Version 헤더 또는 NAME_UNKNOWN/NOT_FOUND 오류 본문)와 200 {"tags": null}(2026-10-08) — 레지스트리가 아닌 서버의 404 는 None. 잘린 목록(truncated)에 없는 태그는 "없다"가 아니라 검증 안 됨(routes_releases._unverifiable — 제출은 tag_verified:false 로 통과)
+- registry는 캐시 금지(registry.py 모듈 docstring) — 제출 경로 unknown_tag 검증이 낡은 목록으로 실존 태그를 차단하는 것이 설계 §7이 금지한 방향
 - wire_reconnect_event는 api(create_app)와 controller(cli.py:63)가 같은 함수를 공유(wiring.py:72-82) — 두 곳이 각자 훅을 만들면 이벤트 모양이 갈라져 SQL 집계가 깨진다. record_event는 절대 예외를 올리지 않는 계약
 - DMS_READYZ_EXIT_FAILURES=0은 명시적 비활성(config.py:42-47 주석) — 관찰 전용 탈출구
 - Settings는 frozen dataclass — 런타임 재읽기 경로가 없어 재시작 없이 반영돼야 하는 값(artifact base)은 DB 조회로 우회한다(artifact_base.py:23-26)
@@ -614,7 +614,7 @@ env를 기동 시점에 전수 검증해 frozen Settings/AgentSettings로 만들
 - wiring → execution.StubExecutionAdapter / execution_volcano.{KubernetesClient,VolcanoExecutionAdapter} / build_runner.{Stub,}BuildRunner / rollout_runner.{Stub,}RolloutRunner / queue_reader.{Stub,Volcano}QueueReader / identity_ldap.build_ldap_resolver
 - wiring.build_execution_adapter → repos.storages.get(스토리지 lookup) + artifact_base.resolve_artifact_base(호출 시점 DB 조회 lambda)
 - artifact_base → repos.control(control_state 읽기, set_artifact_base_check 쓰기), domain.DomainValidationError(라우트가 422로 운반), api/artifacts.py가 strip_scheme 재수출
-- registry.fetch_repo_tags 소비처: 롤아웃 targets 화면(빈 목록+경고 강등)과 제출 경로 unknown_tag 검증(None이면 검증 스킵)
+- registry.fetch_repo_tags 소비처: 롤아웃 targets 화면(빈 목록+경고 강등)과 제출 경로 unknown_tag 검증(None 이거나 잘린 목록에 없으면 검증 스킵 — routes_releases._unverifiable, 이벤트 release_tag_unverified 의 payload.reason 이 registry silent / tag list truncated 를 가른다)
 - metrics_series ← db.iso_epoch(별칭 _epoch), MetricsRepository.node_series 출력을 소비, /api/admin/metrics 계열 라우트가 사용
 - wire_reconnect_event → repos.observability.record_event + db.on_reconnect 훅(db.py의 dialect/reconnect_count)
 
