@@ -815,6 +815,12 @@ function renderWithList(over: any) {
   </MemoryRouter></QueryClientProvider>);
 }
 
+test("머리줄에 「전체 작업에서 이 배치의 작업 보기」 -- 그 배치만 거른 작업 목록 링크", async () => {
+  renderAt("Completed");
+  const link = await screen.findByRole("link", { name: "전체 작업에서 이 배치의 작업 보기" });
+  expect(link).toHaveAttribute("href", "/jobs?batch=b1");
+});
+
 test("종단 배치: 배치 삭제 버튼 → 확인 다이얼로그 → DELETE + 목록으로 이동", async () => {
   let deleted = false;
   server.use(http.delete("/api/admin/batches/b1", () => {
@@ -824,6 +830,21 @@ test("종단 배치: 배치 삭제 버튼 → 확인 다이얼로그 → DELETE 
   await userEvent.click(await screen.findByRole("button", { name: "배치 삭제" }));
   // 트리거만으로는 안 쏜다 — 다이얼로그의 확인이 실제 발사다
   expect(deleted).toBe(false);
+  // 이 삭제는 배치 기록만 지운다 — 작업까지 지우는 길(전체 작업의 배치 단위 삭제)을 지우기 전에 말한다(2026-10-10).
+  const dlg = await screen.findByRole("dialog");
+  expect(within(dlg).getByText(/^배치 기록\(항목 목록·이름·메모·실행 설정\)만 삭제됩니다\. 작업 기록은 남습니다/))
+    .toBeInTheDocument();
+  expect(dlg).toHaveTextContent("전체 작업에서 이 배치의 작업을 골라 배치 단위로 삭제하세요");
+  expect(dlg).not.toHaveTextContent("개별 삭제할 수 없습니다");
+  // 「전체 작업에서 이 배치의 작업」은 그 배치만 거른 목록으로 가는 링크다(2026-10-11 검증 지적: 말로만 보내면 오래된
+  // 배치의 작업은 무한 스크롤 수십 쪽 아래라 찾을 길이 없었다).
+  expect(within(dlg).getByRole("link", { name: "전체 작업에서 이 배치의 작업" })).toHaveAttribute("href", "/jobs?batch=b1");
+  // 기록을 먼저 지우면 이름이 사라져 남은 작업이 무엇으로 보이는지(작업 목록 배치 열과 같은 표기 -- id 12자)도 말한다.
+  expect(dlg).toHaveTextContent("배치 이름 없이 「기록 없음 b1」로 표시됩니다");
+  // 읽혀야 하는 안내 -- text-muted(장식 전용)가 아니다.
+  const note = within(dlg).getByText(/^배치 기록\(항목 목록/).parentElement!;
+  expect(note.className).toContain("text-ink/70");
+  expect(note.className).not.toContain("text-muted");
   await userEvent.click(await screen.findByRole("button", { name: "삭제 확인" }));
   await waitFor(() => expect(deleted).toBe(true));
   // 삭제된 배치 상세는 404 화면이 될 뿐 — 목록으로 보낸다

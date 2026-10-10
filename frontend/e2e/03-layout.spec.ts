@@ -42,9 +42,9 @@ async function assertTextContained(page: Page): Promise<void> {
 
 // 각 화면의 minTableCells 는 **소스 실측치**다(완화가 아니라 실측으로 정한다):
 //   /admin/accounts  th 6 + (admin 1 + e2ewide 3)행 × td 6 = 30 >= 24
-//   /jobs            th 9(관리자 선택 열 1 + 요청·요청자·작업·대상·우선순위·상태·생성·갱신 8) + 0행(이 파일
-//                    시점엔 요청이 없다) = 9. 하한은 4 로 둔다 -- 선택 열은 me 도착 뒤에 생겨(그 전엔 8) 바닥만
-//                    건다. 체크 열이 있는 표의 셀 불변식은 E7(06-request-delete)이 행과 함께 잰다.
+//   /jobs            th 10(관리자 선택 열 1 + 관리자 배치 열 1 + 요청·요청자·작업·대상·우선순위·상태·생성·갱신 8)
+//                    + 0행(이 파일 시점엔 요청이 없다) = 10. 하한은 4 로 둔다 -- 선택·배치 열은 me 도착 뒤에 생겨(그
+//                    전엔 8) 바닥만 건다. 체크·배치 열이 있는 표의 셀 불변식은 E7(06-request-delete)이 행과 함께 잰다.
 //   /admin/storages  th 6 + e2e-store 1행 × td 6 = 12
 //   /admin/builds    빌드하기(폼 전용) -- 표가 없다 -> 하한 0. L1/L3/L4 가 진다.
 //   /admin/builds/history

@@ -51,7 +51,7 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
 - **새 DB 컬럼은 CREATE TABLE 과 `_ensure_columns` 양쪽**(구형 DB 업그레이드 경로).
   전수 열거 그물(`test_migrations.py`)이 테이블·인덱스 추가·삭제를 잡는다.
 - **요청·잡을 가리키는 새 테이블·컬럼은 요청 삭제 목록에도**(2026-10-08). FK 가 0건이라 빠지면 지운 요청의 행이 조용히
-  고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `delete_terminal`(늦게 들어올 수 있으면 `finish` 의
+  고아가 된다 — `repositories/request_purges.py` 의 `PURGED_TABLES` + `_purge_locked`(delete_terminal·delete_batch 공용 몸통, 늦게 들어올 수 있으면 `finish` 의
   scrub 도)에 DELETE 를 넣거나, 지우지 않는 이유와 함께 `PURGE_EXEMPT_TABLES` 에. 그물
   (`test_request_delete_covers_every_reference_table`)은 `request_id`·`job_id`·`entity_id` 이름의 컬럼만 본다 — 다른 이름으로
   요청·잡 id 를 담으면 그물 밖이다.

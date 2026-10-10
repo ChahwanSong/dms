@@ -73,7 +73,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   // (reasonCodes.test.ts / test_reason_codes_coverage.py) 조건이다.
   batch_item_not_found: "배치 항목을 찾을 수 없습니다",
   batch_item_not_editable: "수정할 수 없는 항목입니다 — 이미 실행됐거나 실행 중입니다",
-  batch_not_deletable: "삭제할 수 없는 상태의 배치입니다 — 먼저 취소하세요",
+  batch_not_deletable: "진행 중인 배치는 삭제할 수 없습니다 — 끝난 뒤에(필요하면 배치 상세에서 먼저 취소) 삭제하세요",
   batch_items_not_replaceable: "항목을 교체할 수 없는 상태의 배치입니다 — 완료·취소된 배치만 가능합니다",
   batch_settings_locked: "실행 설정을 바꿀 수 없는 상태의 배치입니다 — 완료·취소된 배치만 가능합니다(진행 중이면 먼저 취소하세요)",
   // 선택 재실행. batch_item_not_rerunnable 은 오류 detail 이 아니라 **부분 성공
@@ -320,14 +320,28 @@ export const REASON_MESSAGES: Record<string, string> = {
   // (items:rerun 관례 — 전체 실패가 아니다), 다음 하나는 422, purge_* 와 artifact_dir_unexpected 는 정리 상태(GET
   // /api/admin/request-purges 의 last_error) — 컨트롤러 request-purge 루프가 낸다. reasonCodes.json 과 같은 커밋.
   // request_recently_finished 에 숫자를 쓰지 않는다 — 조용한 창은 DMS_REQUEST_DELETE_QUIET_SECONDS 로 바뀐다.
-  // batch_child_not_deletable 은 「배치 화면에서 관리」로 보내지 않는다 — 배치를 지워도 자식 작업 기록은 남고 그 뒤로도
-  // 개별 삭제 경로가 없다(repositories/batches.py delete docstring, 2026-10-09 검증 지적).
+  // batch_child_not_deletable 은 「배치 화면에서 관리」로 보내지 않는다 — 배치 화면의 「배치 삭제」는 배치 기록만 지우고
+  // 작업은 남긴다. 배치의 작업은 전체 작업에서 **배치 단위**로 지운다(2026-10-10, request_purges.delete_batch — 배치
+  // 기록만 지워진 묶음도 배치 칸 「기록 없음 xxxxxxxxxxxx」 묶음으로 배치 단위 삭제된다). 배치 단위 삭제(본문 batches)의
+  // skipped_batches 사유는
+  // batch_* 넷과 위 자식 사유(request_*)를 재사용한다 — 자식 사유엔 화면이 「배치 X: …(작업 abc…)」를 붙인다.
   request_not_deletable: "끝나지 않은 작업은 삭제할 수 없습니다 — 끝난 뒤에 삭제하세요(필요하면 상세에서 먼저 취소)",
   request_job_active: "요청은 끝났지만 아직 끝나지 않은 잡이 있어 삭제할 수 없습니다 — 잠시 뒤 다시 시도하세요",
   request_recently_finished: "방금 끝난 작업입니다 — 잠시 뒤에 삭제할 수 있습니다",
-  batch_child_not_deletable: "배치 항목의 작업은 삭제할 수 없습니다 — 배치를 지워도 작업 기록은 남습니다",
+  batch_child_not_deletable: "배치 항목의 작업은 개별 삭제할 수 없습니다 — 배치 단위로 선택해 삭제하세요",
   request_delete_failed: "삭제 중 오류가 나 이 작업은 지우지 못했습니다(변경 없음) — 다시 시도하세요",
   delete_selection_too_large: "한 번에 200개까지 삭제할 수 있습니다",
+  // 「한 번에」는 나눠 지울 길이 있는 듯 읽혔다(자식 개별 삭제 불가·청크 삭제는 BACKLOG -- 2026-10-10 검증 지적).
+  // 항목 상한(10000)도 같은 사유다(2026-10-11 -- 큰 CSV 배치를 일찍 취소하면 작업은 적고 항목만 많다).
+  batch_delete_too_large: "작업이 1000개 또는 항목이 10000개를 넘는 배치는 아직 삭제할 수 없습니다",
+  batch_changed: "확인 창을 연 뒤 배치의 작업이 바뀌었습니다(재실행 등) — 목록을 다시 보고 다시 시도하세요",
+  batch_delete_failed: "삭제 중 오류가 나 이 배치는 지우지 못했습니다(변경 없음) — 다시 시도하세요",
+  delete_batch_selection_too_large: "한 번에 배치 10개까지 삭제할 수 있습니다",
+  // 배치 단위 삭제에서 자식을 **다른** 배치의 항목이 가리킨다(비정상 DB). batch_child_not_deletable(「배치 단위로 선택해
+  // 삭제하세요」)은 이미 배치 단위로 고른 사람에게 같은 말을 돌려줬다(2026-10-11 검증 지적) -- 처방(그 배치 먼저)을 말한다.
+  // 그 배치를 같은 호출에서 함께 골랐으면 서버가 그 배치를 지운 뒤 이 배치를 한 번 더 시도한다(routes_request_purge) --
+  // 그래서 이 사유가 보이는 것은 그 배치를 고르지 않았거나 그 배치도 지워지지 않은 경우다.
+  batch_child_shared: "이 배치의 작업을 다른 배치의 항목도 가리키고 있어 삭제할 수 없습니다(비정상 데이터) — 그 항목을 가진 배치를 먼저(또는 함께 골라) 삭제해야 합니다",
   purge_k8s_failed: "남은 파드·잡 정리에 실패했습니다 — 자동으로 다시 시도합니다",
   purge_waiting_pods: "잡 파드가 아직 종료 중입니다 — 종료되면 결과 파일을 정리합니다(오래 걸리면 노드 상태를 확인하세요)",
   purge_base_unavailable: "결과 폴더를 열 수 없습니다 — 결과 폴더 설정·마운트를 확인하세요",

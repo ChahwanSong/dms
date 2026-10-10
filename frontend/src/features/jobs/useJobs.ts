@@ -11,14 +11,20 @@ export const useRequests = () =>
 // 다음 쪽은 마지막 행의 commit_order 를 before 로 넘긴다. refetchInterval 3s 는
 // 구 useRequests 의 목록 폴링 계약을 잇는다(e2e E5) -- 첫 쪽이 재조회되어 새
 // 제출이 위에 나타난다. 필터는 쿼리 키에 들어가 바뀌면 캐시가 갈린다.
-export interface RequestFilters { operation?: string; state?: string; requester?: string }
+// batch = 한 배치의 작업만(2026-10-11, 서버 batch_id 필터) -- 화면 주소의 ?batch=<id> 가 정한다(batchJobsPath).
+export interface RequestFilters { operation?: string; state?: string; requester?: string; batch?: string }
 export const REQUESTS_PAGE_SIZE = 50;
+
+/** 한 배치의 작업만 거른 전체 작업 목록 주소 -- 배치 상세·배치 기록만 지워진 묶음 칸이 쓴다. 오래된 배치의 작업은
+ *  무한 스크롤 수십 쪽 아래라 이 길이 없으면 배치 단위 삭제를 시작할 행을 찾을 수 없었다(2026-10-11 검증 지적). */
+export const batchJobsPath = (batchId: string): string => `/jobs?batch=${encodeURIComponent(batchId)}`;
 
 function requestsUrl(f: RequestFilters, before?: number): string {
   const p = new URLSearchParams({ limit: String(REQUESTS_PAGE_SIZE) });
   if (f.operation) p.set("operation", f.operation);
   if (f.state) p.set("state", f.state);
   if (f.requester && f.requester.trim() !== "") p.set("requester", f.requester.trim());
+  if (f.batch) p.set("batch_id", f.batch);
   if (before !== undefined) p.set("before", String(before));
   return `/api/user/requests?${p.toString()}`;
 }
@@ -145,7 +151,8 @@ export function useCancelRequest(requestId: string) {
 
 // 작업(요청) 선택 삭제(2026-10-08, 관리자 전용 -- 서버는 세션 관리자만: 공유 토큰 403 admin_session_required).
 // 일괄 1회 POST 의 **부분 성공** 모델(items:rerun 관례): 전체 실패(403·422·503)는 isError, 항목별 제외는
-// data.skipped(사유 코드)다 -- 판정은 서버만 정확히 한다(화면은 3초 낡은 스냅숏을 본다).
+// data.skipped(사유 코드)다 -- 판정은 서버만 정확히 한다(화면은 3초 낡은 스냅숏을 본다). 배치 단위(2026-10-10)는
+// 같은 POST 의 batches 로 보내고 결과는 data.deleted_batches·skipped_batches 다(배치 하나는 전부 아니면 전무).
 //
 // 성공 시 지운 요청·잡의 캐시는 invalidate 가 아니라 **제거**한다(useDeleteBatches 와 같은 이유): 다시 읽으면
 // 404 만 새로 받는다. ["request", id] 는 접두 매칭이라 ["request", id, "jobs"] 도 함께 지운다.
@@ -154,22 +161,40 @@ export function useCancelRequest(requestId: string) {
 // (「N개 삭제됨」)가 뜰 때 표에서 그 행은 이미 사라져 있다(useDeleteBatches 관례, 2026-08-15 사용자 보고).
 // 사용량 분석·대시보드 잡 통계·감사 로그는 지운 행에서 계산되므로 함께 무효화한다(지운 scan 의 사용량 지점이
 // 빠지고 기간 통계가 소급해 줄며 감사에 삭제 행이 생긴다). artifact-base 의 잠금 건수(잡 + 정리 대기)도 바뀐다.
+// 배치 목록(["batches"])은 배치 단위 삭제가 배치 행까지 지우므로(2026-10-10) 함께 무효화한다.
 export const DELETE_REQUESTS_INVALIDATES: readonly (readonly string[])[] = [
   ["requests"], ["request-purges"], ["usage-targets"], ["usage-scan-storages"], ["usage-history"],
-  ["metrics", "jobs"], ["audit"], ["artifact-base"],
+  ["metrics", "jobs"], ["audit"], ["artifact-base"], ["batches"],
 ];
+// 한 번의 POST 에 단건과 배치 단위를 함께 싣는다(2026-10-10). expected_request_count = 확인 창을 연 순간 서버가 센
+// 그 배치의 자식 수 -- 삭제 CAS(다르면 batch_changed: 창을 연 뒤 재실행이 늘린 자식은 지우지 않는다).
+export interface DeleteSelection {
+  request_ids: string[];
+  batches: { batch_id: string; expected_request_count: number }[];
+}
 export function useDeleteRequests() {
   const qc = useQueryClient();
+  // 지운 요청 하나의 캐시(상세·잡 목록·scan 통계)와 그 잡들의 캐시(아티팩트 목록·파일·로그)를 제거한다.
+  const dropRequest = (rid: string) => {
+    qc.removeQueries({ queryKey: ["request", rid] });
+    qc.removeQueries({ queryKey: ["request-scan-stats", rid] });
+  };
+  const dropJob = (jid: string) => {
+    for (const k of ["artifacts", "artifact", "joblogs"]) qc.removeQueries({ queryKey: [k, jid] });
+  };
   return useMutation({
-    mutationFn: (ids: string[]) =>
-      apiSend<DeleteRequestsResult>("POST", "/api/admin/requests:delete", { request_ids: ids }),
+    mutationFn: (sel: DeleteSelection) =>
+      apiSend<DeleteRequestsResult>("POST", "/api/admin/requests:delete", sel),
     onSuccess: (r) => {
       for (const d of r.deleted) {
-        qc.removeQueries({ queryKey: ["request", d.request_id] });
-        qc.removeQueries({ queryKey: ["request-scan-stats", d.request_id] });
-        for (const jid of d.job_ids) {
-          for (const k of ["artifacts", "artifact", "joblogs"]) qc.removeQueries({ queryKey: [k, jid] });
-        }
+        dropRequest(d.request_id);
+        d.job_ids.forEach(dropJob);
+      }
+      // 배치 단위: 배치 상세(지워져 404)와 자식 전부의 요청·잡 캐시. 옛 응답(키 없음)은 빈 목록이다.
+      for (const b of r.deleted_batches ?? []) {
+        qc.removeQueries({ queryKey: ["batch", b.batch_id] });
+        b.request_ids.forEach(dropRequest);
+        b.job_ids.forEach(dropJob);
       }
     },
     onSettled: () => Promise.all(

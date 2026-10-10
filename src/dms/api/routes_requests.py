@@ -10,6 +10,7 @@ from ..domain import (
 )
 from ..execution import ExecutionError
 from ..identity import owner_override_allowed
+from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
@@ -180,13 +181,18 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
                   operation: str | None = Query(None),
                   state: str | None = Query(None),
                   requester: str | None = Query(None),
+                  # 한 배치의 작업만(2026-10-11) -- 배치 상세의 「전체 작업에서 이 배치의 작업 보기」와 배치 기록만
+                  # 지워진 묶음 칸이 여기로 온다. 오래된 배치의 작업은 무한 스크롤 수십 쪽 아래라, 배치 단위 삭제가
+                  # 불러온 행에서만 시작되는 화면에선 찾을 길이 없었다(검증 지적). 좁히기만 하므로 누구에게나 열어도
+                  # 격리는 그대로다(비운영자는 아래에서 requester 가 자기 자신으로 강제된다). 빈 값은 필터 없음.
+                  batch_id: str | None = Query(None),
                   before: int | None = Query(None, ge=1)):
     # 비운영자는 requester 를 자기 자신으로 **강제**한다 -- requester 파라미터로
     # 남의 작업을 넓혀 볼 수 없다(격리). 운영자만 requester 필터를 존중한다.
     req = (requester or None) if identity.role == "admin" else identity.actor
     repos = request.app.state.repos
     rows = repos.requests.list(
-        requester_id=req, operation=operation, state=state,
+        requester_id=req, operation=operation, state=state, batch_id=batch_id or None,
         before=before, limit=limit)
     # 사용량 분석 지점(성공 scan 잡)을 가진 요청인가(2026-10-09) -- 작업 삭제 확인 창의 사용량 경고가 쓴다. 요청
     # 상태로는 판정할 수 없다: 취소 경합으로 「요청 Cancelled · 잡 Succeeded」가 생기고 사용량 분석은 잡 상태를 본다.
@@ -195,6 +201,19 @@ def list_requests(request: Request, identity: Identity = Depends(require_user),
         [r["request_id"] for r in rows if r["operation"] == "scan"])
     for row in rows:
         row["has_succeeded_scan"] = row["request_id"] in hits
+    # 배치 자식 행의 배치 요약(2026-10-10, **관리자 응답만**) -- 작업 목록의 「배치」 열과 배치 단위 삭제(선택·확인 창의
+    # 자식 수 = 삭제 CAS 의 expected_request_count)가 쓴다. 서버가 세는 이유는 BatchesRepository.list_summaries.
+    # 단건 행(batch_id NULL)과 비관리자 응답엔 키가 없다. batch_id "" 도 열쇠다(is not None -- truthy 검사 금지).
+    # 자식 수는 배치 단위 삭제의 상한 + 1 에서 세기를 멈춘다(폴링마다 큰 배치의 자식 전부를 세지 않는다 --
+    # list_summaries docstring).
+    if identity.role == "admin":
+        bids = list(dict.fromkeys(r["batch_id"] for r in rows if r["batch_id"] is not None))
+        if bids:
+            summaries = repos.batches.list_summaries(bids, cap=MAX_BATCH_DELETE_CHILDREN)
+            for row in rows:
+                s = summaries.get(row["batch_id"]) if row["batch_id"] is not None else None
+                if s is not None:
+                    row.update(s)
     return rows
 
 

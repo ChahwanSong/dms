@@ -88,11 +88,20 @@ class ObservabilityRepository:
         # purge가 영원히 못 따라잡는다 -- 이 테이블에 증가 제한을 두겠다는
         # 목적 자체가 무너진다. 배치마다 독립 트랜잭션으로 커밋해 한 트랜잭션이
         # 테이블을 오래 잠그지 않게 한다.
+        #
+        # PG 는 지울 행을 먼저 `FOR UPDATE SKIP LOCKED` 로 잠근다(2026-10-11 검증 지적): 요청 삭제(특히 배치 단위
+        # 삭제 -- 자식마다 events 를 request_id 순으로 지운다)가 같은 오래된 이벤트를 다른 순서로 잠그고 있으면, 잠금
+        # 없이 DELETE 하던 예전엔 두 트랜잭션이 서로의 행을 기다려 PG 가 한쪽을 deadlock 으로 끊었다(삭제가 지면 배치
+        # 삭제 전체가 batch_delete_failed, 지는 동안 API RLock 이 deadlock_timeout 만큼 멈춤). 이제 prune 은 남이 쥔
+        # 행을 건너뛰고(다음 틱에 지운다 -- 삭제가 이기면 어차피 사라진다) 자기가 잠근 행만 지우므로 **아무것도 기다리지
+        # 않는다** -- 대기 그래프에 들어가지 않으니 교착의 한쪽이 될 수 없다. sqlite 는 단일 커넥션 RLock 이 이미
+        # 직렬화한다(FOR UPDATE 문법 없음).
+        lock = " FOR UPDATE SKIP LOCKED" if self._db.dialect == "postgresql" else ""
         total = 0
         while True:
             with self._db.transaction():
                 rows = self._db.query(
-                    "SELECT id FROM events WHERE at < :c ORDER BY id ASC LIMIT :n",
+                    f"SELECT id FROM events WHERE at < :c ORDER BY id ASC LIMIT :n{lock}",
                     {"c": cutoff, "n": batch_size})
                 if not rows:
                     return total

@@ -425,3 +425,73 @@ def test_connect_timeout_is_not_overridden_when_the_url_sets_one(monkeypatch):
     monkeypatch.setitem(sys.modules, "psycopg.rows", mod.rows)
     Database._open("postgresql://u@h/db?connect_timeout=30")
     assert "connect_timeout" not in seen
+
+
+# ---- 세션 JIT 끄기: 추정 비용이 부푼 OLTP 문장이 JIT 컴파일로 수 초를 쓰지 않게 ----
+
+def _open_with(monkeypatch, url, conn=None):
+    seen = {"conn": conn or _FakePgConn()}
+    mod = _fake_psycopg_module()
+    mod.connect = lambda u, **kw: (seen.update(url=u, kw=kw), seen["conn"])[1]
+    mod.rows = types.SimpleNamespace(dict_row=object())
+    monkeypatch.setitem(sys.modules, "psycopg", mod)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", mod.rows)
+    Database._open(url)
+    return seen
+
+
+def test_postgres_connect_turns_session_jit_off(monkeypatch):
+    # 2026-10-11 검증 지적: PG 기본 jit=on 에서 작업 목록의 배치 요약(배치당 UNION ALL 갈래 하나)이 한 쪽에 큰 배치 50개가
+    # 섞이자 추정 비용이 jit_inline/optimize_above_cost(500k)를 넘어 GET 한 번이 5.7초였고(끄면 222ms), 단일 커넥션 RLock
+    # 뒤의 /readyz 가 5.5초를 기다려 readinessProbe(1초)가 실패했다. 연결 직후 SET 으로 끈다(autocommit 세션 유지).
+    seen = _open_with(monkeypatch, "postgresql://u@h/db")
+    assert seen["conn"].executed == ["SET jit = off"]
+    # 시작 옵션은 쓰지 않는다 -- PG 10 이하·풀러에서 모든 연결을 FATAL 로 실패시킨다(성능 조정이 제어면을 세우면 안 된다).
+    assert "options" not in seen["kw"]
+    assert seen["url"] == "postgresql://u@h/db"          # URL 은 건드리지 않는다
+
+
+def test_session_jit_set_failure_keeps_the_connection(monkeypatch):
+    # jit GUC 가 없는 서버(PostgreSQL 10 이하: unrecognized configuration parameter)나 풀러·권한으로 SET 이 실패해도
+    # 연결은 그대로 쓴다(best-effort) -- 예외가 _open 밖으로 새지 않는다.
+    conn = _FakePgConn(fail_on=["SET jit"], mark_closed=False)
+    seen = _open_with(monkeypatch, "postgresql://u@h/db", conn=conn)
+    assert seen["conn"] is conn and conn.closed is False and len(conn.raised) == 1
+
+
+def test_session_jit_off_is_reapplied_on_reconnect(monkeypatch):
+    # 재연결은 _open 을 다시 탄다 -- 새 커넥션만 JIT 가 켜진 채로 남지 않는다.
+    conns = []
+
+    def connect(u, **kw):
+        conns.append(_FakePgConn(fail_on=["boom"] if not conns else []))
+        return conns[-1]
+    mod = _fake_psycopg_module()
+    mod.connect = connect
+    mod.rows = types.SimpleNamespace(dict_row=object())
+    monkeypatch.setitem(sys.modules, "psycopg", mod)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", mod.rows)
+    db = Database.connect("postgresql://u@h/db")
+    db.execute("SELECT boom")                            # 죽음 → 재연결 → 1회 재시도
+    assert db.reconnect_count == 1
+    assert [c.executed[0] for c in conns] == ["SET jit = off", "SET jit = off"]
+
+
+def test_url_jit_setting_wins_and_other_options_are_untouched(monkeypatch):
+    # 운영자가 URL options 로 jit 를 직접 정했으면(켜기·튜닝 포함) 그 값이 이긴다 -- SET 으로 덮지 않는다.
+    for url in ("postgresql://u@h/db?options=-c%20jit%3Don",
+                "postgresql://u@h/db?options=-c%20jit_above_cost%3D1000000"):
+        seen = _open_with(monkeypatch, url)
+        assert seen["conn"].executed == [] and "options" not in seen["kw"], url
+    # 다른 options 는 libpq 가 URL 그대로 쓴다(kwargs 로 덮지 않는다) + JIT 는 SET 으로 끈다.
+    for url in ("postgresql://u@h/db?sslmode=require&options=-c%20search_path%3Ddms",
+                "postgresql://u@h/db?options=-c%20application_name%3Dmyjit%3D1",
+                "postgresql://u@h/db?options="):
+        seen = _open_with(monkeypatch, url)
+        assert seen["conn"].executed == ["SET jit = off"] and "options" not in seen["kw"], url
+
+
+def test_sqlite_connect_is_untouched_by_the_session_jit_option(tmp_path):
+    db = Database.connect(f"sqlite:///{tmp_path / 'x.db'}")
+    assert db.dialect == "sqlite"
+    assert db.query_one("SELECT 1 AS one") == {"one": 1}

@@ -4,8 +4,9 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse, delay } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect, vi } from "vitest";
-import { DeleteRequestsDialog, isSucceededScan, opCountLine } from "./DeleteRequestsDialog";
+import { DeleteRequestsDialog, deleteHeadline, isSucceededScan, opCountLine } from "./DeleteRequestsDialog";
 import { useDeleteRequests } from "./useJobs";
+import type { BatchSummary } from "./batchGroups";
 import type { RequestRow } from "../../lib/types";
 
 const server = setupServer();
@@ -23,21 +24,27 @@ function req(n: number, over: Partial<RequestRow> = {}): RequestRow {
 const scan = (n: number, state = "Succeeded") =>
   req(n, { operation: "scan", state, payload: { storage: "s1", target: `t${n}` } });
 
-function Harness({ rows, onDeleted = () => {}, focusAfterDelete }: {
-  rows: RequestRow[]; onDeleted?: () => void; focusAfterDelete?: () => void;
+function Harness({ rows, batches = [], onDeleted = () => {}, focusAfterDelete }: {
+  rows: RequestRow[]; batches?: BatchSummary[]; onDeleted?: () => void; focusAfterDelete?: () => void;
 }) {
   const del = useDeleteRequests();
-  return <DeleteRequestsDialog rows={rows} disabled={rows.length === 0} del={del} onDeleted={onDeleted}
-                               focusAfterDelete={focusAfterDelete} />;
+  return <DeleteRequestsDialog rows={rows} batches={batches} disabled={rows.length + batches.length === 0} del={del}
+                               onDeleted={onDeleted} focusAfterDelete={focusAfterDelete} />;
 }
-function renderDialog(rows: RequestRow[], onDeleted?: () => void, focusAfterDelete?: () => void) {
+function renderDialog(rows: RequestRow[], onDeleted?: () => void, focusAfterDelete?: () => void,
+                      batches: BatchSummary[] = []) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const ui = (r: RequestRow[]) => (
+  const ui = (r: RequestRow[], b: BatchSummary[]) => (
     <QueryClientProvider client={qc}>
-      <Harness rows={r} onDeleted={onDeleted} focusAfterDelete={focusAfterDelete} />
+      <Harness rows={r} batches={b} onDeleted={onDeleted} focusAfterDelete={focusAfterDelete} />
     </QueryClientProvider>);
-  const view = render(ui(rows));
-  return { ...view, rerenderRows: (r: RequestRow[]) => view.rerender(ui(r)) };
+  const view = render(ui(rows, batches));
+  return { ...view, rerenderRows: (r: RequestRow[], b: BatchSummary[] = batches) => view.rerender(ui(r, b)) };
+}
+/** 배치 묶음(목록이 만든 서버 요약). 기본 = 종단 scan 배치, 이름 「주간 스캔」, 자식 4개 중 성공 scan 4. */
+function batch(n: number, over: Partial<BatchSummary> = {}): BatchSummary {
+  return { batch_id: `${String(n).padStart(2, "0")}${"e".repeat(30)}`, label: "주간 스캔", named: true,
+           operation: "scan", exists: true, status: "Completed", request_count: 4, live: 0, scans: 4, ...over };
 }
 async function open() {
   await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
@@ -115,7 +122,7 @@ test("POST 본문 = 연 순간의 스냅숏 — 열린 뒤 선택(폴링)이 바
   expect(within(dlg).getByText("선택한 작업 2개를 영구 삭제합니다. 되돌릴 수 없습니다.")).toBeInTheDocument();
   await userEvent.click(within(dlg).getByLabelText(ACK));
   await userEvent.click(within(dlg).getByRole("button", { name: "2개 영구 삭제" }));
-  await waitFor(() => expect(body).toEqual({ request_ids: [hex(1), hex(2)] }));
+  await waitFor(() => expect(body).toEqual({ request_ids: [hex(1), hex(2)], batches: [] }));
   await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());   // 성공이면 닫힌다
 });
@@ -253,4 +260,103 @@ test("열린 창 뒤에서 선택이 비어 트리거가 잠기면 닫기·Esc �
   } finally {
     target.remove();
   }
+});
+
+// --- 배치 단위(2026-10-10) ------------------------------------------------------------------------------------------
+
+test("순수 함수: 첫 줄 세 변형 · 연산별 줄은 배치 자식 수(가중치)까지 센다", () => {
+  expect(deleteHeadline(3, 0, 0)).toBe("선택한 작업 3개를 영구 삭제합니다. 되돌릴 수 없습니다.");
+  expect(deleteHeadline(0, 2, 9)).toBe("선택한 배치 2개의 작업 9개를 영구 삭제합니다. 되돌릴 수 없습니다.");
+  expect(deleteHeadline(1, 1, 4)).toBe("선택한 작업 1개와 배치 1개의 작업 4개를 영구 삭제합니다. 되돌릴 수 없습니다.");
+  expect(opCountLine([req(1), { operation: "scan", count: 4 }, { operation: "sync", count: 2 }]))
+    .toBe("sync 3 · scan 4");
+});
+
+test("배치만: 첫 줄·배치 목록(이름·연산·상태·수)·안내 두 줄·사용량 경고(서버의 성공 scan 수) · 단건 목록 없음 · 주 버튼은 자식 수", async () => {
+  renderDialog([], undefined, undefined, [
+    batch(1),
+    batch(2, { label: "02eeeeeeeeee", named: false, operation: "sync", status: "Cancelled", request_count: 3, scans: 0 }),
+    batch(3, { label: "03eeeeeeeeee", named: false, exists: false, status: null, request_count: 2, scans: 1 }),
+  ]);
+  const dlg = await open();
+  expect(within(dlg).getByText("선택한 배치 3개의 작업 9개를 영구 삭제합니다. 되돌릴 수 없습니다.")).toBeInTheDocument();
+  expect(within(dlg).getByText("연산별: sync 3 · scan 6")).toBeInTheDocument();
+  expect(within(dlg).queryByRole("list", { name: "삭제할 작업" })).toBeNull();
+  const list = within(dlg).getByRole("list", { name: "삭제할 배치" });
+  expect(list.className).toContain("max-h-40");
+  const items = within(list).getAllByRole("listitem");
+  expect(items).toHaveLength(3);
+  expect(items[0]).toHaveTextContent("주간 스캔");
+  expect(items[0]).toHaveTextContent("scan");
+  expect(items[0]).toHaveTextContent("Completed");
+  expect(items[0]).toHaveTextContent("작업 4개");
+  expect(within(items[1]).getByText("02eeeeeeeeee").className).toContain("font-mono");   // 이름 없음 = id 12자
+  expect(items[1]).toHaveTextContent("Cancelled");
+  // 배치 행 없음 -- 상태를 짓지 않는다. 「삭제된 배치」는 「이미 지워져 처리할 것이 없다」로 읽혔다(2026-10-10 검증 지적).
+  expect(items[2]).toHaveTextContent("배치 기록 없음");
+  expect(items[2]).not.toHaveTextContent("삭제된 배치");
+  expect(items[2]).toHaveTextContent("작업 2개");
+  expect(within(dlg).getByText("배치의 작업은 목록에 보이는 행·필터와 관계없이 전부(재실행 이력 포함) 지워집니다."))
+    .toBeInTheDocument();
+  expect(within(dlg).getByText(
+    "배치 기록(항목 목록·이름·메모·실행 설정)도 함께 지워져 배치 작업 화면에서 사라지고, 다시 스캔·재실행할 수 없습니다."))
+    .toBeInTheDocument();
+  expect(within(dlg).getByRole("note")).toHaveTextContent("성공한 scan 5개 포함 — 사용량 분석");
+  expect(within(dlg).getByRole("button", { name: "9개 영구 삭제" })).toBeDisabled();       // 확인 전
+});
+
+test("섞임: 첫 줄·두 목록·연산별 합·성공 scan 합(단건 + 배치) · 주 버튼 n + M", async () => {
+  renderDialog([scan(1), req(2)], undefined, undefined, [batch(1, { request_count: 4, scans: 3 })]);
+  const dlg = await open();
+  expect(within(dlg).getByText("선택한 작업 2개와 배치 1개의 작업 4개를 영구 삭제합니다. 되돌릴 수 없습니다."))
+    .toBeInTheDocument();
+  expect(within(dlg).getByText("연산별: sync 1 · scan 5")).toBeInTheDocument();
+  expect(within(dlg).getByRole("list", { name: "삭제할 배치" })).toBeInTheDocument();
+  expect(within(within(dlg).getByRole("list", { name: "삭제할 작업" })).getAllByRole("listitem")).toHaveLength(2);
+  expect(within(dlg).getByRole("note")).toHaveTextContent("성공한 scan 4개 포함");
+  expect(within(dlg).getByRole("button", { name: "6개 영구 삭제" })).toBeInTheDocument();
+  // 같은 모양의 두 상자 -- 어느 쪽이 배치인지 **보이는** 머리말이 말한다(2026-10-11 검증 지적: aria-label 만 있었다).
+  const batchCap = within(dlg).getByText("삭제할 배치 1개");
+  const jobCap = within(dlg).getByText("삭제할 작업 2개");
+  expect(batchCap.nextElementSibling).toBe(within(dlg).getByRole("list", { name: "삭제할 배치" }));
+  expect(jobCap.nextElementSibling).toBe(within(dlg).getByRole("list", { name: "삭제할 작업" }));
+});
+
+test("배치 기록이 없는 묶음만 고르면 「배치 기록도 함께 지워져…」를 말하지 않는다(이미 일어난 일)", async () => {
+  // 2026-10-11 검증 지적: 같은 창의 목록 항목이 「배치 기록 없음」인데 안내는 기록이 지워져 화면에서 사라진다고 했다.
+  renderDialog([], undefined, undefined, [
+    batch(1, { label: "01eeeeeeeeee", named: false, exists: false, status: null, request_count: 2, scans: 0 })]);
+  const dlg = await open();
+  expect(within(dlg).getByText("삭제할 배치 1개")).toBeInTheDocument();
+  expect(within(dlg).queryByText("삭제할 작업", { exact: false })).toBeNull();     // 단일 작업이 없으면 그 상자도 없다
+  expect(within(dlg).getByText("배치의 작업은 목록에 보이는 행·필터와 관계없이 전부(재실행 이력 포함) 지워집니다."))
+    .toBeInTheDocument();
+  expect(within(dlg).queryByText(/배치 기록\(항목 목록/)).toBeNull();
+});
+
+test("단건만이면 배치 안내·배치 목록이 없다(기존 창 그대로)", async () => {
+  renderDialog([req(1)]);
+  const dlg = await open();
+  expect(within(dlg).queryByRole("list", { name: "삭제할 배치" })).toBeNull();
+  expect(within(dlg).queryByText(/배치 기록/)).toBeNull();
+  expect(within(dlg).getByRole("button", { name: "1개 영구 삭제" })).toBeInTheDocument();
+});
+
+test("POST 본문의 expected_request_count = 창을 연 순간의 수 — 열린 뒤 폴링이 수를 바꿔도 그대로 보낸다(삭제 CAS)", async () => {
+  let body: unknown = null;
+  server.use(http.post("/api/admin/requests:delete", async ({ request }) => {
+    body = await request.json();
+    return HttpResponse.json({ deleted: [], skipped: [], purge_pending: 0, deleted_batches: [], skipped_batches: [] });
+  }));
+  const b1 = batch(1, { request_count: 4 });
+  const { rerenderRows } = renderDialog([req(1)], undefined, undefined, [b1]);
+  const dlg = await open();
+  // 열린 창 뒤에서 재실행이 자식을 늘렸고(4 → 6) 다른 배치가 선택에 들어왔다 -- 사용자가 본 것은 4개짜리 하나다.
+  rerenderRows([req(1)], [{ ...b1, request_count: 6 }, batch(2)]);
+  expect(within(dlg).getByText("선택한 작업 1개와 배치 1개의 작업 4개를 영구 삭제합니다. 되돌릴 수 없습니다."))
+    .toBeInTheDocument();
+  await userEvent.click(within(dlg).getByLabelText(ACK));
+  await userEvent.click(within(dlg).getByRole("button", { name: "5개 영구 삭제" }));
+  await waitFor(() => expect(body).toEqual({
+    request_ids: [hex(1)], batches: [{ batch_id: b1.batch_id, expected_request_count: 4 }] }));
 });

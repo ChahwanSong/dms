@@ -314,6 +314,8 @@ def test_shared_token_cannot_drive_deploy_routes(client, db, tmp_path, monkeypat
         ("PUT", "/api/admin/artifact-base", {"uri": f"file://{tmp_path}", "force": True}),
         # 작업(요청) 삭제(2026-10-08): 컨펌·취소 기록과 root 실행 산출물을 없애는 증거 삭제 -- 같은 세션 전용 경계.
         ("POST", "/api/admin/requests:delete", {"request_ids": ["0" * 32]}),
+        # 배치 단위 삭제(2026-10-10): 같은 엔드포인트의 batches 본문 -- 같은 경계.
+        ("POST", "/api/admin/requests:delete", {"batches": [{"batch_id": "0" * 32, "expected_request_count": 0}]}),
     )
     for headers in (ADMIN, {**ADMIN, "x-dms-actor": "node:storage-01"}):
         for method, path, body in calls:

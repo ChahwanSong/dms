@@ -13,7 +13,7 @@ import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
 import { BatchExecutionSettingsDialog } from "./BatchExecutionSettingsDialog";
-import { useRequestJobs } from "../jobs/useJobs";
+import { batchJobsPath, useRequestJobs } from "../jobs/useJobs";
 import { reasonText, ApiError } from "../../lib/api";
 import { absSummary } from "../../lib/storagePaths";
 import { toolSummary } from "../../lib/jobTool";
@@ -667,9 +667,16 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
 // 배치 삭제(종단 배치만 노출 — 진짜 가드는 서버 batch_not_deletable). 확인
 // 다이얼로그 필수: 배치 행·항목 행이 사라지는 비가역 동작이다(자식 요청·잡은
 // 감사 이력으로 보존 — repo.delete 주석). 성공 시 목록으로 이동 — 삭제된
-// 배치의 상세는 404 라 머무를 곳이 아니다. 남은 자식 작업은 작업 목록에서도 개별
-// 삭제할 수 없다(batch_child_not_deletable — 배치 자식 판정은 batch_id 이고 배치
-// 삭제가 지우지 않는다, BACKLOG) — 지우기 전에 그 사실을 말한다(2026-10-09 검증 지적).
+// 배치의 상세는 404 라 머무를 곳이 아니다. 이 버튼은 **배치 기록만** 지운다(2026-10-10
+// 결정 유지 — 배치 목록 정리 + 실행 이력 보존이라는 쓰임새). 작업까지 지우는 길은
+// 전체 작업의 배치 단위 삭제(request_purges.delete_batch — 배치 기록도 함께 지운다)이고,
+// 여기서 기록만 지운 뒤 남은 작업도 그 목록에서 「기록 없음」 묶음으로 같은 방식으로
+// 지울 수 있다 — 두 화면의 「삭제」 뜻이 다르므로 지우기 전에 그 차이를 말한다.
+// 기록을 먼저 지우면 배치 이름도 사라져 남은 작업은 「기록 없음 + id 12자」로만 보인다는
+// 것도 말한다(2026-10-10 검증 지적). 「전체 작업에서」는 그 배치의 작업만 거른 목록
+// (/jobs?batch=<id>)으로 가는 **링크**다(2026-10-11 검증 지적 — 오래된 배치의 작업은 무한
+// 스크롤 수십 쪽 아래라 말로만 보내면 찾을 길이 없었다). 안내는 읽혀야 하는 글자라
+// text-muted(장식 전용, 3.54:1)가 아니라 ink/70(4.94:1, AA).
 function DeleteBatchButton({ batchId }: { batchId: string }) {
   const [open, setOpen] = useState(false);
   const del = useDeleteBatch(batchId);
@@ -680,7 +687,14 @@ function DeleteBatchButton({ batchId }: { batchId: string }) {
   return (
     <Dialog open={open} onOpenChange={setOpen} title="배치 삭제"
             trigger={<Button variant="ghost">배치 삭제</Button>}>
-      <p className="text-sm text-muted mb-3">배치와 항목 목록이 삭제됩니다. 자식 요청·잡 이력은 남고, 그 뒤로도 작업 목록에서 개별 삭제할 수 없습니다.</p>
+      <div className="text-sm text-ink/70 mb-3 space-y-1 break-keep">
+        <p>
+          배치 기록(항목 목록·이름·메모·실행 설정)만 삭제됩니다. 작업 기록은 남습니다 — 작업까지 지우려면{" "}
+          <Link className="text-accent underline" to={batchJobsPath(batchId)}>전체 작업에서 이 배치의 작업</Link>을 골라
+          배치 단위로 삭제하세요(배치 기록도 함께 지워집니다).
+        </p>
+        <p>기록을 먼저 지우면 남은 작업은 전체 작업에서 배치 이름 없이 「기록 없음 {batchId.slice(0, 12)}」로 표시됩니다.</p>
+      </div>
       {del.isError && <p className="text-bad text-sm mb-2">{(del.error as ApiError).message}</p>}
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={() => setOpen(false)}>취소</Button>
@@ -820,9 +834,12 @@ export function BatchDetail() {
     <section className="space-y-4">
       {/* 이름이 있으면 이름이 헤더 — 축약 batch_id 는 식별자로 병기한다(사라지면
           운영자가 로그·API 와 대조할 열쇠를 잃는다). 없으면 기존 헤더 유지. */}
-      <div className="flex items-baseline gap-3">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h1 className="text-2xl font-bold">{b?.name ?? `배치 ${batchId.slice(0,12)}`}</h1>
         {b?.name && <span className="text-muted text-sm font-mono">{batchId.slice(0,12)}</span>}
+        {/* 이 배치의 작업(재실행 이력 포함)만 거른 전체 작업 목록 -- 작업까지 지우는 배치 단위 삭제는 거기서 시작한다
+            (2026-10-11 검증 지적: 작업 목록에 배치 필터·링크가 없어 오래된 배치의 작업을 찾을 수 없었다). */}
+        <Link className="text-accent text-sm" to={batchJobsPath(batchId)}>전체 작업에서 이 배치의 작업 보기</Link>
       </div>
       <Card>
         <div className="flex items-center justify-between">

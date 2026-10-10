@@ -22,6 +22,15 @@ export function kstStamp(iso: string): string {
   return kstIso(ms).replace("T", " ").slice(0, 19) + " KST";
 }
 
+// kstStamp 와 같은 값에서 " KST" 접미사만 뺀 "YYYY-MM-DD HH:MM:SS". 시각 열이 둘인 좁은 표(전체 작업)가 쓴다 --
+// 시간대는 머리줄(「생성(KST)」)이 한 번 말하고, 칸마다 붙던 4글자를 다른 열(배치, 2026-10-10)에 돌려준다.
+// 파싱 불가면 원문 그대로(kstStamp 와 같은 규칙).
+export function kstStampBare(iso: string): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return iso;
+  return kstIso(ms).replace("T", " ").slice(0, 19);
+}
+
 // null/빈 값이면 "—", 아니면 kstStamp. 원시 ISO 를 `?? "—"` 로 뿌리던 표들의 교체용.
 export function kstStampOrDash(iso: string | null | undefined): string {
   return iso ? kstStamp(iso) : "—";

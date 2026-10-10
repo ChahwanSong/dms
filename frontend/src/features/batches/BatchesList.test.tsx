@@ -135,6 +135,20 @@ test("액션 바는 미선택에도 자리를 지킨다 — 체크해도 표가 
   expect(screen.getByRole("button", { name: "선택 삭제" })).toBeEnabled();
 });
 
+test("이 화면의 삭제는 배치 기록만 지운다는 것을 늘 있는 줄이 말한다(작업까지 지우는 길은 전체 작업)", async () => {
+  // 2026-10-10 검증 지적: 전체 작업에 「배치 단위 삭제 = 작업까지 삭제」가 생긴 뒤, 같은 「선택 삭제」가 여기서는 기록만
+  // 지운다는 안내가 없었다. 무장 상태에만 붙이면 바가 늘어 확인 버튼이 밀리므로 늘 있는 줄이다.
+  renderList(mixed());
+  await screen.findByLabelText(`배치 ${ID1.slice(0, 12)} 선택`);
+  const hint = within(bar()).getByText(
+    "여기서는 배치 기록만 삭제됩니다 — 작업은 전체 작업에 남습니다(작업까지 지우려면 전체 작업에서 배치 단위로 삭제)");
+  expect(hint.className).toContain("text-ink/70");
+  await userEvent.click(box(ID1));
+  await userEvent.click(screen.getByRole("button", { name: "선택 삭제" }));
+  expect(screen.getByRole("button", { name: "1개 삭제 확인" })).toBeInTheDocument();
+  expect(within(bar()).getByText(/^여기서는 배치 기록만 삭제됩니다/)).toBe(hint);       // 같은 줄 그대로(높이 무변)
+});
+
 test("삭제 결과는 예약된 바 **안에서** 교체된다 — 결과가 떠도 추가 점프가 없다", async () => {
   server.use(http.delete("/api/admin/batches/:id",
     () => new HttpResponse(null, { status: 204 })));
@@ -183,7 +197,7 @@ test("부분 실패는 정직하게: 성공 n·실패 m 과 사유(409 batch_not
   await userEvent.click(screen.getByRole("button", { name: "2개 삭제 확인" }));
   expect(await screen.findByText("1개 삭제됨 · 1개 실패")).toBeInTheDocument();
   // 사유는 reasonText 매핑(api.ts REASON_MESSAGES) — 어느 배치가 실패했는지도 함께.
-  expect(screen.getByText(new RegExp(`${ID2.slice(0, 12)}.*삭제할 수 없는 상태의 배치`)))
+  expect(screen.getByText(new RegExp(`${ID2.slice(0, 12)}.*진행 중인 배치는 삭제할 수 없습니다`)))
     .toBeInTheDocument();
 });
 

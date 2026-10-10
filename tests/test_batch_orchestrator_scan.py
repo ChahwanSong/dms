@@ -167,3 +167,30 @@ def test_orchestrator_tolerates_seq_gap_from_deleted_item(db):
     _orch(db).run_once()
     b = repos.batches.get(bid)
     assert b["status"] == "Completed" and b["succeeded_count"] == 2
+
+
+def test_deleted_batch_is_never_rematerialized_from_a_stale_snapshot(db):
+    # 배치 단위 삭제(request_purges.delete_batch, 2026-10-10) 뒤 낡은 틱 스냅숏(배치 행·Queued 항목)으로 오케스트레이터가
+    # 돌아도 지운 배치의 자식이 다시 생기지 않는다 -- 자식을 만드는 곳은 _materialize 하나이고, 트랜잭션 안에서 항목
+    # 저장값을 다시 읽어(없으면 return) claim 에 CAS 를 건다. _drive 는 굴리기 직전에 배치 행을 다시 읽는다.
+    repos = Repositories(db)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin",
+        max_concurrency=1, options={}, note=None,
+        items=[{"storage": "cephfs-dms", "target": t} for t in ("a", "b")], status="Running")
+    orch = _orch(db)
+    orch.run_once()                                           # 슬롯 1 → seq 0 만 자식
+    child = repos.batches.list_items(bid)[0]["request_id"]
+    repos.requests.set_state(child, RequestState.CANCELLED, actor="t")
+    stale_batch = repos.batches.get(bid)
+    stale_item = repos.batches.list_items(bid)[1]
+    assert stale_item["status"] == "Queued"
+    repos.batches.set_status(bid, "Cancelled")                # 종단 배치에 Queued 항목이 남은 정상 모양
+    db.execute("UPDATE requests SET updated_at = '2026-01-01T00:00:00Z' WHERE request_id = :r", {"r": child})
+    r = repos.request_purges.delete_batch(bid, expected_request_count=1, actor="opadm", artifact_base=None,
+                                          quiet_seconds=60, max_children=1000)
+    assert r["deleted"] is True and r["request_ids"] == [child]
+    orch._materialize(stale_batch, stale_item)
+    orch._drive(stale_batch)
+    orch.run_once()
+    assert db.query_one("SELECT COUNT(*) AS n FROM requests WHERE batch_id = :b", {"b": bid})["n"] == 0
+    assert repos.batches.get(bid) is None and repos.batches.list_items(bid) == []

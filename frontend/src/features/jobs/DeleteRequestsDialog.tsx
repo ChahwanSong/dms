@@ -2,16 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import { TriangleAlert } from "lucide-react";
 import type { RequestRow } from "../../lib/types";
 import type { useDeleteRequests } from "./useJobs";
+import type { BatchSummary } from "./batchGroups";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { pathSummary } from "../../lib/storagePaths";
+import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 
 // 작업(요청) 선택 삭제 확인 창(2026-10-08, 관리자 전용). 트리거(「선택 삭제」)를 이 컴포넌트가 함께 그린다 -- 툴바에
 // 늘 렌더되는 버튼이 곧 창의 트리거다(자리 예약, BatchesList 관례).
 //
 // **연 순간 선택을 스냅숏한다**: 3초 목록 폴링이 열린 창 뒤에서 선택을 바꿔도(유령 선택 정리 등) 보내는 집합은
 // 사용자가 이 창에서 확인한 목록 그대로다(배치 confirm 의 preview_round 와 같은 정신 -- 확인한 것만 실행한다).
+//
+// 배치 단위(2026-10-10): 배치 묶음도 연 순간 스냅숏한다 -- 이름·상태와 함께 **서버가 센 자식 수**까지. 그 수가 곧
+// 삭제 CAS(expected_request_count)다: 창을 연 뒤 재실행이 자식을 늘렸으면 서버가 batch_changed 로 그 배치를 통째로
+// 거부한다(사용자가 이 창에서 보지 않은 작업은 지우지 않는다). 폴링이 열린 창 뒤에서 수를 바꿔도 보내는 수는 그대로다.
+// 배치의 작업은 목록에 보이는 행·필터와 관계없이 전부 지워지므로 창이 그 사실과 배치 기록까지 지워진다는 것을 말한다.
 //
 // 본문 글자색은 ink/70(흰 4.94:1, AA) -- text-muted 는 장식 전용이다(ConfirmDialog 주석). 이 창은 되돌릴 수 없는
 // 삭제를 확인하는 유일한 자리라 모든 안내가 읽혀야 하는 글자다. 한국어 문단은 break-keep(어절 단위 줄바꿈 -- 「없습/
@@ -38,18 +45,28 @@ export const isSucceededScan = (r: Pick<RequestRow, "operation" | "state" | "has
   typeof r.has_succeeded_scan === "boolean" ? r.has_succeeded_scan
     : r.operation === "scan" && r.state === "Succeeded";
 
-/** 「sync 2 · scan 1」 -- 0개 연산은 빼고, 알려진 연산 순서 뒤에 모르는 연산을 붙인다. */
-export function opCountLine(rows: Pick<RequestRow, "operation">[]): string {
+/** 「sync 2 · scan 1」 -- 0개 연산은 빼고, 알려진 연산 순서 뒤에 모르는 연산을 붙인다. count 는 가중치(배치 묶음 =
+ *  그 배치의 자식 수), 없으면 1(단건 행). */
+export function opCountLine(rows: { operation: string; count?: number }[]): string {
   const c = new Map<string, number>();
-  for (const r of rows) c.set(r.operation, (c.get(r.operation) ?? 0) + 1);
+  for (const r of rows) c.set(r.operation, (c.get(r.operation) ?? 0) + (r.count ?? 1));
   const keys = [...OP_ORDER.filter((o) => c.has(o)), ...[...c.keys()].filter((o) => !OP_ORDER.includes(o))];
-  return keys.map((o) => `${o} ${c.get(o)}`).join(" · ");
+  return keys.filter((o) => c.get(o) !== 0).map((o) => `${o} ${c.get(o)}`).join(" · ");
 }
 
-export function DeleteRequestsDialog({ rows, disabled, del, onDeleted, focusAfterDelete }: {
-  /** 지금 선택된 행(연 순간 스냅숏한다). */
+/** 첫 줄(무엇을 몇 개). 단건만이면 기존 문구 그대로(e2e 06). */
+export function deleteHeadline(n: number, batches: number, children: number): string {
+  if (batches === 0) return `선택한 작업 ${n}개를 영구 삭제합니다. 되돌릴 수 없습니다.`;
+  if (n === 0) return `선택한 배치 ${batches}개의 작업 ${children}개를 영구 삭제합니다. 되돌릴 수 없습니다.`;
+  return `선택한 작업 ${n}개와 배치 ${batches}개의 작업 ${children}개를 영구 삭제합니다. 되돌릴 수 없습니다.`;
+}
+
+export function DeleteRequestsDialog({ rows, batches = [], disabled, del, onDeleted, focusAfterDelete }: {
+  /** 지금 선택된 단건 행(연 순간 스냅숏한다). */
   rows: RequestRow[];
-  /** 트리거 잠금(선택 없음·200개 초과·진행 중). 닫힐 때 잠겨 있으면 포커스를 focusAfterDelete 로 옮긴다. */
+  /** 지금 선택된 배치 묶음(연 순간 스냅숏한다 -- 수는 서버 요약). */
+  batches?: BatchSummary[];
+  /** 트리거 잠금(선택 없음·200개·배치 10개 초과·진행 중). 닫힐 때 잠겨 있으면 포커스를 focusAfterDelete 로 옮긴다. */
   disabled: boolean;
   /** 목록이 소유한 삭제 mutation -- 결과(부분 성공)는 목록 툴바가 그린다. */
   del: ReturnType<typeof useDeleteRequests>;
@@ -61,6 +78,7 @@ export function DeleteRequestsDialog({ rows, disabled, del, onDeleted, focusAfte
 }) {
   const [open, setOpen] = useState(false);
   const [snap, setSnap] = useState<RequestRow[]>([]);
+  const [snapBatches, setSnapBatches] = useState<BatchSummary[]>([]);
   const [ack, setAck] = useState(false);
   // 같은 틱 두 번 클릭(튀는 스위치·dblclick) 가드: isPending 은 mutation 관찰자의 **예약된** 재렌더 뒤에야 보인다 --
   // 그 사이 두 번째 클릭이 POST 를 한 번 더 보내고, mutate 단위 콜백은 마지막 호출 것만 돌아 툴바가 두 번째 응답
@@ -74,16 +92,23 @@ export function DeleteRequestsDialog({ rows, disabled, del, onDeleted, focusAfte
   const onOpenChange = (o: boolean) => {
     // 진행 중엔 닫지 않는다(Esc·바깥 클릭) -- 닫힌 뒤 전체 실패가 오면 보일 자리가 없다.
     if (!o && del.isPending) return;
-    if (o) { setSnap(rows); setAck(false); succeeded.current = false; }
+    if (o) { setSnap(rows); setSnapBatches(batches); setAck(false); succeeded.current = false; }
     setOpen(o);
   };
   const n = snap.length;
-  const scans = snap.filter(isSucceededScan).length;
+  const nb = snapBatches.length;
+  const children = snapBatches.reduce((a, b) => a + b.request_count, 0);
+  const total = n + children;
+  // 사용량 경고의 개수 = 단건 성공 scan + 배치마다 서버가 센 성공 scan 자식 수.
+  const scans = snap.filter(isSucceededScan).length + snapBatches.reduce((a, b) => a + b.scans, 0);
   const rest = n - PREVIEW_N;
   const confirm = () => {
     if (sending.current || del.isPending) return;
     sending.current = true;
-    del.mutate(snap.map((r) => r.request_id), {
+    del.mutate({
+      request_ids: snap.map((r) => r.request_id),
+      batches: snapBatches.map((b) => ({ batch_id: b.batch_id, expected_request_count: b.request_count })),
+    }, {
       onSuccess: () => { succeeded.current = true; setOpen(false); onDeleted(); },
       onSettled: () => { sending.current = false; },
     });
@@ -97,25 +122,63 @@ export function DeleteRequestsDialog({ rows, disabled, del, onDeleted, focusAfte
             busy={del.isPending}
             trigger={<Button variant="outline" disabled={disabled}>선택 삭제</Button>}>
       <div className="space-y-3 text-sm text-ink/70 break-keep">
-        <p className="font-medium text-ink">{`선택한 작업 ${n}개를 영구 삭제합니다. 되돌릴 수 없습니다.`}</p>
-        <p>{`연산별: ${opCountLine(snap)}`}</p>
+        <p className="font-medium text-ink">{deleteHeadline(n, nb, children)}</p>
+        {/* 연산별 수는 배치 자식까지 함께 센다(배치 묶음 = 그 배치의 연산 × 서버가 센 자식 수). */}
+        <p>{`연산별: ${opCountLine([...snap, ...snapBatches.map((b) => ({ operation: b.operation, count: b.request_count }))])}`}</p>
+        {/* 배치 목록(배치가 있을 때만) -- 단건 목록 위. 최대 10개(서버 상한)라 줄이지 않고 높이만 묶는다. 두 목록은 같은
+            모양의 테두리 상자라 섞인 선택에서 어느 상자가 배치인지 보이지 않았다(이름 없는 배치의 id 12자와 작업 id 12자가
+            나란히 -- 2026-10-11 검증 지적) -- 상자마다 **보이는** 머리말을 단다(배치가 있을 때만: 단일 작업만이면 상자가
+            하나라 예전 그대로). */}
+        {nb > 0 && <p className="text-xs font-medium text-ink">{`삭제할 배치 ${nb}개`}</p>}
+        {nb > 0 && (
+          <ul aria-label="삭제할 배치" className="max-h-40 space-y-1 overflow-y-auto rounded-lg border border-line px-3 py-2">
+            {snapBatches.map((b) => (
+              <li key={b.batch_id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className={`min-w-0 text-ink [overflow-wrap:anywhere] ${b.named ? "" : "font-mono text-xs"}`}>{b.label}</span>
+                <span aria-hidden>·</span><span>{b.operation}</span>
+                {/* 배치 행이 없는 묶음(배치 기록만 지워진 것)은 상태가 없다 -- 지어내지 않고 그 사실을 말한다. 「삭제된
+                    배치」는 「이미 지워져 처리할 것이 없다」로 읽혔다(2026-10-10 검증 지적) -- 지울 작업은 남아 있다. */}
+                {b.exists && b.status !== null
+                  ? <StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)} />
+                  : <span className="text-xs">배치 기록 없음</span>}
+                <span aria-hidden>·</span><span>{`작업 ${b.request_count}개`}</span>
+              </li>
+            ))}
+          </ul>
+        )}
         {/* 높이 상한 -- 375px 에서 경로 10줄이 1200px 가까이 차지해 scan 경고·「스토리지 데이터는 그대로」 문구를 화면
-            밖으로 밀었다(2026-10-09 검증 지적). 넘치면 목록 안에서 스크롤한다. */}
-        <ul aria-label="삭제할 작업" className="max-h-60 space-y-1 overflow-y-auto rounded-lg border border-line px-3 py-2">
-          {snap.slice(0, PREVIEW_N).map((r) => (
-            <li key={r.request_id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-              <span className="font-mono text-xs text-ink">{r.request_id.slice(0, 12)}</span>
-              <span aria-hidden>·</span><span>{r.operation}</span>
-              <span aria-hidden>·</span>
-              <span className="min-w-0 [overflow-wrap:anywhere]">{pathSummary(r.operation, r.payload)}</span>
-              <StatusPill state={r.state} />
-            </li>
-          ))}
-          {rest > 0 && <li>{`외 ${rest}개`}</li>}
-        </ul>
+            밖으로 밀었다(2026-10-09 검증 지적). 넘치면 목록 안에서 스크롤한다. 단건이 없으면(배치만) 그리지 않는다. */}
+        {n > 0 && nb > 0 && <p className="text-xs font-medium text-ink">{`삭제할 작업 ${n}개`}</p>}
+        {n > 0 && (
+          <ul aria-label="삭제할 작업" className="max-h-60 space-y-1 overflow-y-auto rounded-lg border border-line px-3 py-2">
+            {snap.slice(0, PREVIEW_N).map((r) => (
+              <li key={r.request_id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="font-mono text-xs text-ink">{r.request_id.slice(0, 12)}</span>
+                <span aria-hidden>·</span><span>{r.operation}</span>
+                <span aria-hidden>·</span>
+                <span className="min-w-0 [overflow-wrap:anywhere]">{pathSummary(r.operation, r.payload)}</span>
+                <StatusPill state={r.state} />
+              </li>
+            ))}
+            {rest > 0 && <li>{`외 ${rest}개`}</li>}
+          </ul>
+        )}
+        {/* 배치 단위의 두 사실(배치가 있을 때만): 화면에 보이는 행만이 아니라 전부 지워진다 · 배치 기록도 지워져 다시
+            돌릴 수 없다(scan 배치면 성장 모니터링 정의가 사라진다). 배치 화면의 「배치 삭제」(기록만)와 다른 점이다.
+            둘째 줄은 배치 기록이 **있는** 묶음이 있을 때만 -- 기록이 이미 없는 묶음만 골랐으면 일어날 일이 아니라 이미
+            일어난 일이다(같은 창의 목록 항목이 「배치 기록 없음」이라 말한다, 2026-10-11 검증 지적). */}
+        {nb > 0 && (
+          <div className="space-y-1">
+            <p className="font-medium text-ink">배치의 작업은 목록에 보이는 행·필터와 관계없이 전부(재실행 이력 포함) 지워집니다.</p>
+            {snapBatches.some((b) => b.exists) && (
+              <p>배치 기록(항목 목록·이름·메모·실행 설정)도 함께 지워져 배치 작업 화면에서 사라지고, 다시 스캔·재실행할 수 없습니다.</p>
+            )}
+          </div>
+        )}
         {/* 성공 scan 잡 = 사용량 분석의 지점(사용자 결정 2026-10-08: scan 도 지울 수 있되 확인 창에서 경고). 성공 scan
             잡이 없는 요청(실패 scan 등)은 사용량에 쓰이지 않아 개수에서 뺀다 -- 판정은 isSucceededScan(서버의 잡 상태
-            기준 has_succeeded_scan -- 취소 경합의 「Cancelled 인데 잡은 성공」도 센다). 해당 없으면 상자를 그리지 않는다. */}
+            기준 has_succeeded_scan -- 취소 경합의 「Cancelled 인데 잡은 성공」도 센다). 배치 묶음은 서버가 센 성공 scan
+            자식 수(batch_succeeded_scan_count)를 더한다. 해당 없으면 상자를 그리지 않는다. */}
         {scans > 0 && (
           <div role="note" className="flex items-start gap-2 rounded-lg border border-attn/30 bg-attnbg px-3 py-2 text-ink">
             <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-attn" aria-hidden />
@@ -154,9 +217,10 @@ export function DeleteRequestsDialog({ rows, disabled, del, onDeleted, focusAfte
           <span aria-hidden className="mr-auto" />
           <Button variant="ghost" disabled={del.isPending} onClick={() => setOpen(false)}>닫기</Button>
           {/* 진행 중엔 aria-disabled(포커스 유지 -- 위 주석) + confirm 가드. 확인 전·빈 선택은 진짜 disabled. */}
-          <Button disabled={!ack || n === 0} aria-disabled={del.isPending || undefined}
+          {/* 수 = 단건 + 배치 자식(서버 수) -- 단건만이면 기존 글자 그대로(e2e 06). */}
+          <Button disabled={!ack || total === 0} aria-disabled={del.isPending || undefined}
                   className={del.isPending ? "cursor-not-allowed opacity-50" : ""} onClick={confirm}>
-            {del.isPending ? "삭제 중…" : `${n}개 영구 삭제`}
+            {del.isPending ? "삭제 중…" : `${total}개 영구 삭제`}
           </Button>
         </div>
       </div>

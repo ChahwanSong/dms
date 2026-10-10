@@ -5,6 +5,17 @@ from ..db import Database, dump_json, load_json, utc_now_iso
 from ..domain import DataJobState, RequestState, TERMINAL_REQUEST_STATES
 
 
+def batch_match(param: str) -> str:
+    """「batch_id 가 :param 과 같다」의 범위 표기(`batch_id >= :p AND batch_id <= :p` -- 결정적 정렬 규칙에서 둘 다 참 ⇔
+    같다). 정렬 키 `batch_id, commit_order` 와 짝으로 쓰면 idx_requests_batch_order 만 그 순서를 낼 수 있어 PG 가 배치 크기·
+    테이블 크기와 무관하게 그 인덱스를 LIMIT 만큼만 읽는다 -- `batch_id = :p` 면 PG 가 batch_id 정렬 키를 상수로 지우고,
+    큰 배치(테이블의 몇 %)에서 자식이 commit_order·물리 위치 전체에 고르게 퍼졌다고 가정해 UNIQUE(commit_order) 역방향
+    스캔이나 Seq Scan + LIMIT 를 골랐다. 실제 자식은 한데 몰려 있어 그 배치보다 새로운(또는 앞에 놓인) 행 전부를 방문했다
+    (PG16, 32만 행·자식 2만 배치: 목록 23ms·LIMIT 세기 6ms → 둘 다 0.3ms 미만, 2026-10-11 검증 지적). 쓰는 곳:
+    RequestsRepository.list(?batch_id=), BatchesRepository.list_summaries(배치 요약), request_purges.delete_batch(상한 세기)."""
+    return f"batch_id >= :{param} AND batch_id <= :{param}"
+
+
 class RequestsRepository:
     _JOB_TO_REQUEST = {
         DataJobState.SUCCEEDED: RequestState.SUCCEEDED,
@@ -70,28 +81,39 @@ class RequestsRepository:
             row["payload"] = load_json(row["payload"])
         return row
 
-    def list(self, requester_id=None, *, operation=None, state=None,
+    def list(self, requester_id=None, *, operation=None, state=None, batch_id=None,
              before=None, limit: int = 50) -> list[dict]:
         """요청 목록(commit_order DESC). 필터·커서(슬라이스 39): operation·state·
-        requester_id 는 AND 로 좁히고, before(commit_order)면 그보다 오래된 것만
+        requester_id·batch_id(2026-10-11 -- 한 배치의 작업만) 는
+        AND 로 좁히고, before(commit_order)면 그보다 오래된 것만
         -- 무한 스크롤이 마지막 행의 commit_order 를 before 로 넘겨 다음 쪽을
         받는다. commit_order 는 **현존 행 기준** 단조 증가라(MAX+1 -- 요청 삭제
         (2026-10-08)로 최신 행이 지워지면 다음 제출이 그 번호를 다시 받는다, UNIQUE
         위반 없음) 페이지 경계가 안정적이다(offset 과 달리 새 행이 끼어도 중복·누락이
-        없다)."""
+        없다).
+
+        batch_id 필터의 모양(2026-10-11 검증 지적): `batch_id = :bid ORDER BY commit_order DESC` 로 쓰면 PG 가 큰 배치
+        (테이블의 몇 %)에서 UNIQUE(commit_order) 역방향 스캔 + batch_id 필터를 고른다 -- 오래된 배치면 그보다 새로운 요청
+        전부(32만 행 중 25만)를 방문했다. 그래서 batch_match(범위 표기) + `ORDER BY batch_id DESC, commit_order DESC` 로
+        쓴다(이유는 batch_match docstring): idx_requests_batch_order 를 LIMIT 만큼만 거꾸로 읽는다(PG16 실측: 자식 2만 배치
+        23ms → 0.02ms, 일반 계획(prepare)도 같다). sqlite 도 같은 인덱스로 정렬 없이 읽는다."""
         where = []
         params: dict = {"n": limit}
+        order = "commit_order DESC"
         if requester_id is not None:
             where.append("requester_id = :req"); params["req"] = requester_id
         if operation is not None:
             where.append("operation = :op"); params["op"] = operation
         if state is not None:
             where.append("state = :st"); params["st"] = state
+        if batch_id is not None:
+            where.append(batch_match("bid")); params["bid"] = batch_id
+            order = "batch_id DESC, commit_order DESC"
         if before is not None:
             where.append("commit_order < :before"); params["before"] = before
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         rows = self._db.query(
-            f"SELECT * FROM requests{clause} ORDER BY commit_order DESC LIMIT :n",
+            f"SELECT * FROM requests{clause} ORDER BY {order} LIMIT :n",
             params)
         for row in rows:
             row["payload"] = load_json(row["payload"])

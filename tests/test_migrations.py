@@ -596,7 +596,7 @@ def test_migrate_creates_exactly_the_expected_tables(tmp_path):
 
 
 def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
-    # 슬라이스 30(BACKLOG §2.5 슬라이스 1~4 부채): idx_requests_batch 가 CREATE
+    # 슬라이스 30(BACKLOG §2.5 슬라이스 1~4 부채): idx_requests_batch(지금은 idx_requests_batch_order) 가 CREATE
     # 되는데 어떤 테스트도 단언하지 않았다 -- 인덱스명 단언은 idx_data_jobs_created
     # 계열 2건뿐(전 테스트 실측). 인덱스는 지워져도 기능 테스트가 전부 초록인 채
     # (풀스캔) 성능만 조용히 침몰하는 부류라 존재 단언이 유일한 그물이고, 개별
@@ -608,7 +608,9 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
     actual = {r["name"] for r in rows if not r["name"].startswith("sqlite_")}
     assert actual == {
         "idx_requests_resource", "idx_requests_requester", "idx_requests_state",
-        "idx_requests_batch", "idx_batches_status", "idx_batch_items_status",
+        # 2026-10-11: idx_requests_batch(batch_id) → (batch_id, commit_order) 복합으로 바꿨다(옛 이름은 DROP --
+        # 아래 test_old_single_batch_index_is_replaced_by_the_composite_one).
+        "idx_requests_batch_order", "idx_batches_status", "idx_batch_items_status",
         "idx_transitions_entity", "idx_data_jobs_state", "idx_data_jobs_created",
         "idx_data_jobs_created_sched", "idx_agent_reports_node",
         "idx_agent_reports_at", "idx_releases_component", "idx_audit_target",
@@ -616,6 +618,46 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         # 요청 삭제(2026-10-08): 삭제 트랜잭션이 요청마다 request_id 로 잡·plan 을 잠그고 지우고, 배치 항목 참조를 묻는다.
         "idx_data_jobs_request", "idx_plans_request", "idx_batch_items_request",
     }
+
+
+def test_old_single_batch_index_is_replaced_by_the_composite_one(tmp_path):
+    # 기배포 DB 경로(2026-10-11): 옛 migrate 가 만든 idx_requests_batch(batch_id) 가 있는 DB 를 다시 migrate 하면 복합
+    # 인덱스가 생기고 옛 것은 지워진다(접두라 중복 -- 쓰기마다 두 벌 유지할 이유가 없다). 재실행해도 멱등이다.
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    db.execute("DROP INDEX idx_requests_batch_order")
+    db.execute("CREATE INDEX idx_requests_batch ON requests (batch_id)")          # 옛 migrate 가 남긴 모양
+    migrate(db)
+    migrate(db)
+    names = {r["name"] for r in db.query("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "idx_requests_batch_order" in names and "idx_requests_batch" not in names
+    cols = [r["name"] for r in db.query("PRAGMA index_info(idx_requests_batch_order)")]
+    assert cols == ["batch_id", "commit_order"]
+
+
+def test_batch_filtered_list_reads_the_composite_index_without_a_sort(tmp_path):
+    # 작업 목록의 한 배치 필터(?batch_id=, 3초 폴링)는 (batch_id, commit_order) 인덱스를 순서대로 읽어야 한다 -- PG 에서
+    # UNIQUE(commit_order) 역방향 스캔 + batch_id 필터로 풀리면 오래된 배치는 그보다 새로운 요청 전부를 방문했다
+    # (2026-10-11 검증 지적, RequestsRepository.list docstring). sqlite 의 계획으로 쿼리 모양을 고정한다: 그 인덱스를
+    # 쓰고, 정렬용 임시 B-tree 가 없다(= 인덱스 순서가 곧 결과 순서라 LIMIT 만큼만 읽는다).
+    from dms.repositories import Repositories
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    captured = []
+    orig = db.query
+
+    def spy(sql, params=None):
+        if "FROM requests" in sql and "batch_id >=" in sql:
+            captured.append((sql, params))
+        return orig(sql, params)
+
+    db.query = spy
+    Repositories(db).requests.list(batch_id="b" * 32, before=10, limit=50)
+    db.query = orig
+    ((sql, params),) = captured
+    plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + sql, params))
+    assert "idx_requests_batch_order" in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
 
 
 def _ensure_pairs():

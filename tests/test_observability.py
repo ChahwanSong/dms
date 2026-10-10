@@ -78,6 +78,39 @@ def test_prune_events_exhausts_all_batches_in_a_single_call(repos):
     assert repos.observability.events_for_request("r1") == []
 
 
+def test_prune_events_skips_rows_locked_by_others_on_postgres(repos):
+    # PG 에선 지울 행을 FOR UPDATE SKIP LOCKED 로 먼저 잠근다 -- 요청(배치 단위) 삭제가 같은 오래된 이벤트를 다른 순서로
+    # 잠그고 있어도 prune 은 기다리지 않아 교착의 한쪽이 될 수 없다(2026-10-11 검증 지적: 배치 삭제와 prune 이
+    # deadlock detected). 지우는 것은 자기가 잠근 행뿐이다(SELECT 결과의 id).
+    from dms.repositories.observability import ObservabilityRepository
+    db = repos.observability._db
+
+    class _Pg:
+        dialect = "postgresql"
+
+        def __init__(self):
+            self.sql = []
+
+        def __getattr__(self, name):
+            return getattr(db, name)
+
+        def query(self, sql, params=None):
+            self.sql.append(sql)
+            return db.query(sql.replace(" FOR UPDATE SKIP LOCKED", ""), params)
+
+        def execute(self, sql, params=None):
+            self.sql.append(sql)
+            return db.execute(sql, params)
+    for i in range(3):
+        repos.observability.record_event(component="planner", severity="error",
+                                         event_type=f"old{i}", request_id="r1")
+    spy = _Pg()
+    assert ObservabilityRepository(spy).prune_events("2999-01-01T00:00:00Z", batch_size=2) == 3
+    selects = [s for s in spy.sql if s.startswith("SELECT id FROM events")]
+    assert selects and all(s.endswith("LIMIT :n FOR UPDATE SKIP LOCKED") for s in selects)
+    assert all(s.startswith("DELETE FROM events WHERE id IN (") for s in spy.sql if s.startswith("DELETE"))
+
+
 # ---- 2026-10-07 D2: 카운터 이벤트(strict 기록)와 유형별 조회 ----
 
 def test_events_of_types_filters_and_returns_ascending(repos):

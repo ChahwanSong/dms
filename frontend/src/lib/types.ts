@@ -22,6 +22,22 @@ export interface RequestRow {
   // 요청 상태로는 판정할 수 없다(취소 경합으로 「요청 Cancelled · scan 잡 Succeeded」가 생기고 사용량 분석은 잡 상태를
   // 본다). 옵션(?) = 상세 응답·구형 fixture 에는 없다 -- 없으면 요청 상태로 근사한다(isSucceededScan).
   has_succeeded_scan?: boolean;
+  // 배치 요약(목록 API, 2026-10-10) -- **관리자 응답의 배치 자식 행에만** 실린다(BatchesRepository.list_summaries).
+  // 작업 목록의 「배치」 열과 배치 단위 삭제(묶음 선택·확인 창의 수 = 삭제 CAS 의 expected_request_count)가 쓴다.
+  // 전부 옵션(?) = 비관리자·단건 행·구형 응답·기존 fixture 에는 없다. batch_exists 가 boolean 이 아니면 「요약 없음」 --
+  // 묶음 선택 불가(fail-closed, JobsList batchBlock). 수는 서버가 센다(목록 한 쪽엔 배치의 자식이 일부만 있다).
+  batch_exists?: boolean;                 // false = 배치 기록만 지워진 묶음(dangling batch_id)
+  batch_name?: string | null;             // null = 이름 없음(또는 배치 행 없음)
+  batch_status?: string | null;           // 배치 행이 없으면 null
+  batch_request_count?: number;           // 재실행 이력을 포함한 전체 자식 수(capped 면 상한 + 1 에서 멈춘 값)
+  // 자식이 배치 단위 삭제 상한(1000)을 넘어 서버가 세기를 멈췄다(2026-10-11 -- 폴링마다 큰 배치 전부를 세지 않는다).
+  // 그 배치는 고를 수 없고(too_large) 아래 두 수는 null(세지 않았다 -- 모름).
+  batch_request_count_capped?: boolean;
+  batch_live_request_count?: number | null;     // 비종단 자식 수 -- 0 은 정상값(모름이 아니다). null = capped
+  batch_succeeded_scan_count?: number | null;   // 성공 scan 잡을 가진 자식 수(비 scan 배치는 0 -- 확정값). null = capped
+  // 배치 항목 수(2026-10-11) -- 배치 단위 삭제는 항목 수에도 상한(10000)이 있어 넘으면 고를 수 없다(too_large). null = 모름
+  // (배치 행이 없는 묶음·변조된 값) -- 모르면 막지 않고 서버가 판정한다(자식 수 상한이 주 게이트다).
+  batch_item_count?: number | null;
 }
 // events는 state_transitions가 담지 못하는 것 -- 일어나지 않은 전이 -- 를 담는
 // 진단 이벤트다(plan_error/step_error/terminate_failed/terminal_guard_skip/summary_unreadable).
@@ -50,10 +66,17 @@ export interface RequestDetail extends RequestRow {
 // 캐시(아티팩트·로그)를 지우는 데 쓴다. purge_pending = 응답 시점의 정리 대기 행 수(결과 파일·파드 정리는 컨트롤러가
 // 비동기로 한다). null = 세지 못함(삭제 도중 DB 장애 -- 지운·제외 목록은 그래도 온다). 화면은 이 값 대신 정리 현황
 // (GET /api/admin/request-purges)을 본다.
+//
+// 배치 단위(2026-10-10): 본문에 batches 를 실은 호출이면 deleted_batches·skipped_batches 가 온다(빈 목록이어도). 옵션(?) =
+// batches 를 싣지 않은 옛 호출·가로채 만든 응답(e2e 06)에는 없다. 배치 하나 = 트랜잭션 하나(전부 아니면 전무) --
+// request_ids·job_ids 는 그 배치에서 지운 자식 요청·잡 전부(캐시 제거용), dangling = 배치 행 없이 자식만 남은 묶음이었다.
+// skipped_batches.request_id = 문제가 된 자식(자식 게이트 사유일 때), 배치 수준 사유면 null.
 export interface DeleteRequestsResult {
   deleted: { request_id: string; job_ids: string[] }[];
   skipped: { request_id: string; reason: string }[];
   purge_pending: number | null;
+  deleted_batches?: { batch_id: string; request_ids: string[]; job_ids: string[]; dangling: boolean }[];
+  skipped_batches?: { batch_id: string; reason: string; request_id: string | null }[];
 }
 // GET /api/admin/request-purges -- 정리 대기 현황(유일한 운영 표면). stalled = last_error 가 있는 행 수(실패 백오프
 // 중이거나 오래 대기). items 는 오래된 순 최대 50건. last_error null = 지연 사유 없음(정상 대기).
