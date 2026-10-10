@@ -580,6 +580,25 @@ def test_post_item_rejects_bad_payload(client):
     assert r.status_code == 422
 
 
+def test_post_item_racing_a_batch_delete_is_404_and_leaves_no_orphan_item(client, monkeypatch):
+    # 2026-10-10: 라우트가 배치를 읽은 뒤 INSERT 전에 배치가 지워지면(배치 단위 삭제·배치 기록 삭제) 배치 없는 고아
+    # 항목이 생겼다 -- repo.add_item 이 트랜잭션 첫 문장에서 배치 행을 다시 본다.
+    from dms.api import routes_batches
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    repo = client.app.state.repos.batches
+    real = routes_batches._get_batch_or_404
+
+    def then_deleted(request, batch_id):
+        b = real(request, batch_id)
+        repo.delete(batch_id)                                  # 읽은 직후 다른 관리자가 지웠다
+        return b
+    monkeypatch.setattr(routes_batches, "_get_batch_or_404", then_deleted)
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "late"})
+    assert (r.status_code, r.json()["detail"]) == (404, "batch_not_found")
+    assert repo.list_items(bid) == [] and repo.get(bid) is None
+
+
 def test_post_item_404_and_maintenance(client):
     _admin(client)
     r = client.post("/api/admin/batches/nope/items", json={"storage": "s1", "target": "a"})
@@ -700,6 +719,47 @@ def test_replace_items_404_and_maintenance(client):
     r = client.put(f"/api/admin/batches/{bid}/items",
                    json={"items": [{"storage": "s1", "target": "a"}]})
     assert r.status_code == 503 and r.json()["detail"] == "maintenance_mode"
+
+
+def test_replace_items_racing_a_batch_delete_is_404_and_leaves_no_orphan_items(client, monkeypatch):
+    # 2026-10-10 검증 지적: 라우트가 배치를 읽고 CSV 전체를 검증하는 동안 배치가 지워지면(배치 단위 삭제·배치 기록
+    # 삭제) 배치 없는 고아 항목 N개를 INSERT 하고 200 {replaced: N} 을 냈다 -- 그 묶음엔 자식이 없어 배치 단위 삭제도
+    # batch_not_found 라 영영 지울 길이 없었다. add_item 과 같은 경합이다.
+    from dms.api import routes_batches
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    repo = client.app.state.repos.batches
+    real = routes_batches.validate_batch
+
+    def then_deleted(*a, **kw):
+        out = real(*a, **kw)
+        repo.delete(bid)                                       # 검증하는 사이 다른 관리자가 지웠다
+        return out
+    monkeypatch.setattr(routes_batches, "validate_batch", then_deleted)
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [
+        {"storage": "s1", "target": "n0"}, {"storage": "s1", "target": "n1"}, {"storage": "s1", "target": "n2"}]})
+    assert (r.status_code, r.json()["detail"]) == (404, "batch_not_found")
+    assert repo.get(bid) is None and repo.list_items(bid) == []
+
+
+def test_replace_items_racing_a_rescan_is_409_and_keeps_the_items(client, monkeypatch):
+    # 라우트의 종단 판정 뒤 쓰기 전에 :rescan·항목 추가가 배치를 다시 돌리기 시작했으면 전량 교체는 Materialized·실행 중
+    # 항목의 기록을 지우는 위조다 -- repo 가 같은 트랜잭션에서 상태를 다시 본다.
+    from dms.api import routes_batches
+    _admin(client)
+    bid = _completed_scan_batch(client)
+    repo = client.app.state.repos.batches
+    before = [(it["seq"], it["status"], it["payload"]) for it in repo.list_items(bid)]
+    real = routes_batches.validate_batch
+
+    def then_rescanned(*a, **kw):
+        out = real(*a, **kw)
+        repo.set_status(bid, "Running")
+        return out
+    monkeypatch.setattr(routes_batches, "validate_batch", then_rescanned)
+    r = client.put(f"/api/admin/batches/{bid}/items", json={"items": [{"storage": "s1", "target": "n0"}]})
+    assert (r.status_code, r.json()["detail"]) == (409, "batch_items_not_replaceable")
+    assert [(it["seq"], it["status"], it["payload"]) for it in repo.list_items(bid)] == before
 
 
 def test_replace_items_route_does_not_shadow_single_item_put(client):

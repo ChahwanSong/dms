@@ -544,9 +544,17 @@ def _apply_migrations(db: Database) -> None:
     _widen_count_columns(db)
     # requests.batch_id는 CREATE TABLE(신규 DB) 또는 _ensure_columns의 ALTER(구형 DB)로
     # 보강된 뒤에만 존재가 보장되므로, 이 인덱스는 그 이후에 생성한다.
-    db.execute("CREATE INDEX IF NOT EXISTS idx_requests_batch ON requests (batch_id)")
+    # (batch_id, commit_order) 복합(2026-10-11): 작업 목록의 한 배치 필터(?batch_id=, 3초 폴링)가 commit_order DESC 로
+    # 쪽을 넘긴다 -- batch_id 단일 인덱스뿐이면 PG 가 UNIQUE(commit_order) 를 역방향으로 훑으며 batch_id 를 걸러, 오래된
+    # 배치는 그보다 새로운 요청 전부를 방문했다(32만 행 30ms+, 100만 행 130ms+ -- API 단일 커넥션 RLock 을 쥔 채). 선두
+    # 열(batch_id)만 쓰는 다른 조회(배치 요약·배치 단위 삭제·배치 상세)는 이 인덱스의 접두로 그대로 탄다.
+    db.execute("CREATE INDEX IF NOT EXISTS idx_requests_batch_order ON requests (batch_id, commit_order)")
+    # 옛 단일 인덱스는 위 복합의 접두라 중복이다(쓰기마다 두 벌 유지) -- 지운다. 복합을 **먼저** 만든 뒤 지운다(배치 조회가
+    # 인덱스 없이 도는 순간이 없게). IF EXISTS 라 신규·기배포 DB 모두 멱등이고, 옛 이미지로 되돌리면 그 migrate 가 다시
+    # 만들 뿐이다(데이터 무관).
+    db.execute("DROP INDEX IF EXISTS idx_requests_batch")
     # submit_wait_seconds 는 CREATE(신규) 또는 _ensure_columns(구형)로 보강된 뒤에만
-    # 존재하므로 이 인덱스도 그 이후다(idx_requests_batch 와 같은 이유).
+    # 존재하므로 이 인덱스도 그 이후다(idx_requests_batch_order 와 같은 이유).
     # (created_at, submit_wait_seconds) 커버링: 제출 대기 집계 2쿼리가 인덱스만 읽고,
     # 덤으로 기존 created_at BETWEEN 집계 7개(repositories/metrics.py)가 풀스캔에서
     # 레인지 스캔이 된다 -- 이 슬라이스는 읽기 비용의 순증이 아니라 순감이다(설계 §2.3).

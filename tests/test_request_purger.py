@@ -235,17 +235,19 @@ def test_terminating_pods_block_files_and_surface_after_ten_minutes(env):
     vc = f"dms-scan-execution-{jid[:12]}"
     e.k8s.linger.add(("Pod", f"{vc}-launcher-0"))
     e.tick()
-    assert _row(e, rid)["last_error"] is None
-    # 10분이 지났다(requested_at 을 과거로) -- 계속 기다리되 지연으로 보인다
-    e.db.execute("UPDATE request_purges SET requested_at = :t WHERE request_id = :r",
-                 {"t": iso_plus(utc_now_iso(), -WAITING_PODS_STALL_SECONDS - 5), "r": rid})
-    _later(e)
+    first = _row(e, rid)
+    assert first["last_error"] is None
+    # 대기는 k8s 단계의 첫 스윕부터 잰다(outcomes 의 스탬프 -- requested_at 이 아니다, 2026-10-10).
+    assert first["outcomes"]["k8s_waiting_since"] == first["updated_at"]
+    # 첫 스윕부터 10분이 지났다 -- 계속 기다리되 지연으로 보인다
+    _later(e, WAITING_PODS_STALL_SECONDS + 5)
     e.tick()
     row = _row(e, rid)
     assert row["stage"] == "k8s" and row["last_error"] == "purge_waiting_pods" and row["attempts"] == 0
+    assert row["outcomes"]["k8s_waiting_since"] == first["outcomes"]["k8s_waiting_since"]    # 스윕마다 새로 찍지 않는다
     assert (e.base / jid).is_dir()
     # 지연이 된 대기 행은 매 틱 k8s 를 두드리지 않는다 -- 재확인 간격 = 기다린 시간의 1/10(상한 300초, 2026-10-09)
-    waited = iso_epoch(e.clock()) - iso_epoch(row["requested_at"])
+    waited = iso_epoch(e.clock()) - iso_epoch(first["outcomes"]["k8s_waiting_since"])
     assert iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock()) == min(int(waited) // 10,
                                                                            WAITING_BACKOFF_MAX_SECONDS)
     calls = len(e.k8s.calls)
@@ -258,18 +260,72 @@ def test_terminating_pods_block_files_and_surface_after_ten_minutes(env):
     _later(e, WAITING_BACKOFF_MAX_SECONDS)
     e.tick()
     assert _row(e, rid)["stage"] == "purging" and _row(e, rid)["last_error"] is None
+    assert "k8s_waiting_since" not in _row(e, rid)["outcomes"]          # 단계를 떠나면 지운다
 
 
 def test_waiting_backoff_is_capped(env):
     e = env
     rid, (jid,) = _deleted(e)
     e.k8s.linger.add(("Pod", f"dms-scan-execution-{jid[:12]}-launcher-0"))
-    e.db.execute("UPDATE request_purges SET requested_at = :t WHERE request_id = :r",
-                 {"t": iso_plus(utc_now_iso(), -86400), "r": rid})          # 하루째 Terminating
+    e.tick()
+    _later(e, 86400)                                                     # 하루째 Terminating
     e.tick()
     row = _row(e, rid)
     assert row["last_error"] == "purge_waiting_pods"
     assert iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock()) == WAITING_BACKOFF_MAX_SECONDS
+
+
+def test_a_row_that_queued_long_is_not_a_false_stall_on_its_first_sweep(env):
+    # 2026-10-10 검증 지적: 큰 배치 삭제는 아웃박스 행을 수천 개 만들고 루프는 틱당 ROW_LIMIT 행만 진행한다. 대기를
+    # requested_at 부터 재면 10분 넘게 줄 선 행이 첫 스윕(방금 지운 파드가 아직 Terminating)에 곧장 purge_waiting_pods
+    # 로 찍혀 툴바가 「지연 N건 -- 노드 상태를 확인하세요」를 보였다(1000자식 배치에서 260건, 파드는 한 틱 안에 끝났다).
+    e = env
+    rid, (jid,) = _deleted(e)
+    e.k8s.linger.add(("Pod", f"dms-scan-execution-{jid[:12]}-launcher-0"))
+    e.db.execute("UPDATE request_purges SET requested_at = :t, next_attempt_at = :t WHERE request_id = :r",
+                 {"t": iso_plus(utc_now_iso(), -3600), "r": rid})          # 한 시간 동안 줄을 섰다
+    e.tick()
+    row = _row(e, rid)
+    assert row["stage"] == "k8s" and row["last_error"] is None              # 지연이 아니다 -- 정상 대기
+    assert _events(e, "purge_failed") == []
+    assert iso_epoch(row["next_attempt_at"]) - iso_epoch(e.clock()) == INTERVAL
+    e.k8s.release()
+    _later(e)
+    e.tick()
+    assert _row(e, rid)["stage"] == "purging" and _row(e, rid)["last_error"] is None
+    assert e.repos.request_purges.status()["stalled"] == 0
+
+
+def test_returning_to_k8s_restarts_the_waiting_clock(env):
+    # 파일 단계에서 k8s 로 되돌아가면(artifact_reappeared) 대기는 새로 잰다 -- 처음 k8s 단계의 스탬프(또는 변조로 남은
+    # 낡은 값)로 재면 되돌아온 첫 스윕이 거짓 지연이 된다.
+    e = env
+    rid, (jid,) = _deleted(e, k8s=False)
+    e.tick()
+    assert _row(e, rid)["stage"] == "purging"
+    e.db.execute("UPDATE request_purges SET outcomes = :o WHERE request_id = :r",
+                 {"o": json.dumps({"k8s_waiting_since": OLD}), "r": rid})      # 낡은 스탬프(변조)
+    _artifact(e.base, jid)
+    e.tick()
+    assert _row(e, rid)["stage"] == "k8s"
+    assert "k8s_waiting_since" not in _row(e, rid)["outcomes"]
+    _seed_k8s(e.k8s, jid)
+    e.k8s.linger.add(("Pod", f"dms-scan-execution-{jid[:12]}-launcher-0"))
+    _later(e)
+    e.tick()
+    row = _row(e, rid)
+    assert row["stage"] == "k8s" and row["last_error"] is None, row
+
+
+def test_a_tampered_waiting_stamp_counts_as_the_first_sweep(env):
+    e = env
+    rid, (jid,) = _deleted(e)
+    e.k8s.linger.add(("Pod", f"dms-scan-execution-{jid[:12]}-launcher-0"))
+    e.db.execute("UPDATE request_purges SET outcomes = :o WHERE request_id = :r",
+                 {"o": json.dumps({"k8s_waiting_since": "not-a-time"}), "r": rid})
+    e.tick()
+    row = _row(e, rid)
+    assert row["last_error"] is None and row["outcomes"]["k8s_waiting_since"] == row["updated_at"]
 
 
 def test_rows_stuck_waiting_on_k8s_do_not_starve_newer_deletions(env, monkeypatch):
@@ -370,6 +426,32 @@ def test_target_still_present_touches_nothing(env):
     assert row["stage"] == "k8s" and row["last_error"] == "purge_target_still_present"
     (ev,) = _events(e, "purge_failed")
     assert ev["severity"] == "error"
+
+
+def test_global_stage_rechecks_the_whole_backlog_in_bounded_statements(env):
+    # 2026-10-11 검증 지적: 전역 단계(_live_rows -- _reap·_settle 에서 틱마다 두 번)가 purging·files 행마다 원 행 재등장을
+    # 두 문장씩 확인해, 큰 배치 삭제가 남긴 대기열(파드를 못 띄우는 동안 purging 에 쌓임)에서 틱이 행 수에 비례해
+    # 느려졌다(PG 실측 5000행 1.2초). 확인은 묶음 한 번이다 -- 행이 늘어도 문장 수는 그대로다.
+    e = env
+    counts = []
+    for n in (3, 12):
+        rows = [_deleted(e, k8s=False) for _ in range(n)]
+        for rid, _ in rows:
+            e.repos.request_purges.advance(rid, "purging", now=OLD)
+        seen = []
+        real = e.db.query
+
+        def spy(sql, params=None, _real=real, _seen=seen):
+            _seen.append(sql)
+            return _real(sql, params)
+        e.db.query = spy
+        try:
+            purging, files = e.purger()._live_rows(str(e.base), report=False)
+        finally:
+            e.db.query = real
+        assert {r["request_id"] for r in purging} >= {rid for rid, _ in rows}
+        counts.append(len(seen))
+    assert counts[0] == counts[1], counts
 
 
 @pytest.mark.parametrize("jobs", ['not json', '[{"job_id": "../etc"}]', '[{"job_id": 7}]', '["x"]', '{}'])

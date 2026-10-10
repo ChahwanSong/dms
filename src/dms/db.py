@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote, urlsplit
 
 _NAMED = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -28,6 +29,37 @@ def _is_stale_plan_error(psycopg, exc) -> bool:
 # 35회). 5초는 프로브 주기(10s)보다 짧아 매 프로브가 반드시 503 으로 끝나게
 # 만드는 값이다 -- 이 값을 10 이상으로 올리면 그 성질이 깨진다.
 DB_CONNECT_TIMEOUT_SECONDS = 5
+
+# PostgreSQL 세션의 JIT 를 끈다(2026-10-11 검증 지적). PG 기본값은 jit=on 이고(테스트베드 PGDG 17), 문장의 추정 비용이
+# jit_above_cost(100k)를 넘으면 실행 전에 LLVM 컴파일이, jit_inline/optimize_above_cost(500k)를 넘으면 인라인·최적화까지
+# 붙어 **문장 하나에 수 초**가 든다. DMS 쿼리는 전부 OLTP(짧은 인덱스 조회)라 JIT 가 이득인 곳이 없는데, 추정 비용은 실제
+# 크기와 무관하게 부푼다 -- 실측: 작업 목록의 배치 요약(BatchesRepository.list_summaries, 배치당 UNION ALL 갈래 하나 ~11k)이
+# 한 쪽에 큰 배치 50개가 섞이자 JIT 로 GET 한 번이 5.7초(끄면 222ms), 그동안 단일 커넥션 RLock 뒤의 /readyz 가 5.5초를
+# 기다려 readinessProbe(1초)가 실패했다. 연결을 연 **직후 SET** 으로 끈다(autocommit 세션이라 세션 내내 유지): 재연결
+# (_open 공용)에도 다시 걸리고, API·컨트롤러가 같은 Database 를 쓰므로 둘 다 적용된다. 시작 옵션(-c jit=off)이 아니라 SET
+# 인 이유: 시작 옵션은 jit GUC 가 없는 서버(PostgreSQL 10 이하)나 시작 파라미터를 거부하는 풀러(PgBouncer)에서 **모든
+# 연결**을 FATAL 로 실패시킨다 -- 성능 조정 하나가 제어면 전체를 세우면 안 된다. SET 은 실패해도 삼키고 그 연결을 그대로
+# 쓴다(best-effort; autocommit 이라 실패한 SET 이 세션을 오염시키지 않는다). URL 의 options 가 jit 를 이미 말하면 건드리지
+# 않는다(connect_timeout 과 같은 규칙 -- 운영자 튜닝을 조용히 덮지 않는다).
+_SESSION_JIT_OFF_SQL = "SET jit = off"
+
+
+def _url_sets_jit(url: str) -> bool:
+    """URL 의 options 에 jit 관련 설정(jit·jit_*)이 있는가 -- 있으면 운영자 값이 이긴다(SET 하지 않는다)."""
+    for pair in urlsplit(url).query.split("&"):
+        key, sep, value = pair.partition("=")
+        # libpq URI 는 퍼센트 인코딩만 푼다('+' 는 그대로 -- unquote_plus 가 아니다)
+        if sep and unquote(key) == "options" and re.search(r"(?:^|[\s-])-?(?:c\s*)?jit(?:_[a-z_]+)?\s*=", unquote(value)):
+            return True
+    return False
+
+
+def _disable_jit(conn) -> None:
+    """세션 JIT 끄기(위 주석). 실패(PG 10 이하·풀러·권한)는 조용히 넘긴다 -- 연결 자체는 정상이다."""
+    try:
+        conn.execute(_SESSION_JIT_OFF_SQL)
+    except Exception:
+        pass
 
 
 def utc_now_iso() -> str:
@@ -94,7 +126,10 @@ class Database:
             # 걸러내면 명시값이 무시된다.
             if "connect_timeout=" not in url:
                 kwargs["connect_timeout"] = DB_CONNECT_TIMEOUT_SECONDS
-            return psycopg.connect(url, **kwargs), "postgresql"
+            conn = psycopg.connect(url, **kwargs)
+            if not _url_sets_jit(url):
+                _disable_jit(conn)
+            return conn, "postgresql"
         raise ValueError(f"unsupported database url: {url}")
 
     def _adapt(self, sql: str) -> str:

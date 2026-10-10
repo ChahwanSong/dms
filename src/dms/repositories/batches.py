@@ -1,7 +1,16 @@
 import uuid
 from ..db import Database, dump_json, load_json, utc_now_iso
+from ..domain import TERMINAL_REQUEST_STATES
+from .data_jobs import DataJobsRepository
+from .requests import batch_match
 
 _ACTIVE = ("Previewing", "Running")
+# 요청 종단 상태 문자열(list_summaries 의 「살아 있는 자식」 판정). 집합 밖 = 비종단(fail-closed -- 모르는 상태는 살아
+# 있다고 센다).
+_TERMINAL_REQUEST_VALUES = tuple(sorted(s.value for s in TERMINAL_REQUEST_STATES))
+# list_summaries 의 UNION ALL 갈래 수 상한(배치 하나 = 갈래 하나). sqlite 의 복합 SELECT 항 상한(SQLITE_MAX_COMPOUND_SELECT,
+# 기본 500)보다 작게 -- 목록 한 쪽은 최대 200행이라 보통 한 묶음이다.
+_UNION_CHUNK = 100
 # batch_orchestrator._ITEM_TERMINAL 의 거울 -- 배치 완료 CAS(complete_if_all_terminal)의 판정.
 _ITEM_TERMINAL = ("Succeeded", "Failed", "Rejected", "Cancelled")
 _NO_QUEUED_ITEM = "NOT EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND status = 'Queued')"
@@ -63,6 +72,107 @@ class BatchesRepository:
         rows = self._db.query("SELECT * FROM batches ORDER BY created_at DESC LIMIT :n",
                               {"n": limit})
         return [_hydrate(r) for r in rows]
+
+    def list_summaries(self, batch_ids, *, cap: int) -> dict:
+        """작업 목록(GET /api/user/requests, 관리자 응답)의 배치 자식 행에 붙이는 배치 요약 -- {batch_id: 요약}.
+        화면이 /api/admin/batches(최신 100건)와 조인하면 「오래된 배치」와 「배치 기록이 없는 묶음」을 구별하지 못하고, 목록 한
+        쪽(50건)엔 배치 자식이 일부만 있어 수를 셀 수 없다 -- 그래서 서버가 센다(배치 단위 삭제의 확인 창이 보이는 수 =
+        delete_batch 의 expected_request_count).
+
+        넘어온 모든 batch_id(빈 문자열 포함 -- 열쇠로 쓴 값 전부)에 대해:
+          batch_exists               배치 행이 있는가(False = 배치 기록만 지운 dangling 묶음)
+          batch_name                 None = 이름 없음(또는 행 없음)
+          batch_status               행이 없으면 None
+          batch_request_count        재실행 이력을 포함한 전체 자식 수(requests.batch_id -- 항목 참조가 아니다). **cap 을
+                                     넘으면 cap + 1 에서 멈춘다**(아래 batch_request_count_capped)
+          batch_request_count_capped 자식이 cap 을 넘어 세기를 멈췄다 -- 그 배치는 어차피 배치 단위로 지울 수 없다
+                                     (delete_batch 의 batch_delete_too_large). 화면은 「1000개 초과」로 보인다
+          batch_live_request_count   비종단 자식 수(0 은 정상값). capped 면 None(세지 않았다 -- 모름)
+          batch_succeeded_scan_count 성공 scan 잡(사용량 분석 지점 -- data_jobs._scan_target_where)을 가진 자식 수.
+                                     비 scan 배치는 0(모름이 아니라 확정값). capped 면 None(세지 않았다)
+          batch_item_count           배치 항목 수(batches.item_count -- 항목을 바꾸는 모든 경로가 _recount 로 절대값을
+                                     유지한다). 배치 단위 삭제는 항목 수에도 상한이 있어(request_purges
+                                     MAX_BATCH_DELETE_ITEMS) 화면이 미리 「고를 수 없음」을 보이려고 싣는다(2026-10-11
+                                     검증 지적 -- 자식 1개·항목 1만+ 의 일찍 취소한 CSV 배치가 선택 가능으로 보였다가 서버
+                                     에서만 batch_delete_too_large 였다). None = 모름: 배치 행이 없는 묶음(항목은 옛 경합의
+                                     잔재뿐이라 세지 않는다), 또는 정수가 아닌·음수 값(DB 신뢰 경계). 0 은 정상값이다
+
+        **세기는 배치마다 cap + 1 에서 멈춘다**(2026-10-11 검증 지적): 이 요약은 관리자 목록의 3초 폴링마다, 불러온 쪽마다
+        돈다. 예전엔 화면에 자식 행이 하나라도 보이는 배치의 자식 **전부**를 세고 그 전부로 성공 scan 세미조인을 돌아,
+        재스캔이 쌓인 큰 성장 모니터링 배치(자식 2만)에서 PG 가 data_jobs 전체 Seq Scan + Hash Semi Join 으로 계획을 바꿨다
+        -- 비용이 그 배치가 아니라 시스템 전체의 성공 scan 수에 비례했고, 문장 하나가 API 단일 커넥션 RLock 을 쥐는 동안
+        /readyz 까지 기다렸다. 그래서 배치마다 `LIMIT cap + 1` 서브쿼리로 센다(UNION ALL -- 배치 하나 = 갈래 하나, 갈래의
+        추정 행 수가 cap + 1 이하라 성공 scan 판정이 data_jobs(request_id) 인덱스 nested loop 로 묶인다). 성공 scan 은 cap
+        이하인 배치만 센다 -- 넘는 배치는 지울 수 없어 경고에 쓸 일이 없다.
+
+        갈래의 자식 읽기는 batch_match(범위 표기) + `ORDER BY batch_id, commit_order` 다 -- `batch_id = :k LIMIT` 로 쓰면 PG
+        가 큰 배치(테이블의 몇 %)에서 Seq Scan + LIMIT 를 골라 그 배치의 물리 위치 앞의 행 전부를 읽었다(자식 2만·32만 행에서
+        갈래 하나 6ms, 표가 클수록 선형 -- 2026-10-11 검증 지적). 이 모양이면 idx_requests_batch_order 를 cap + 1 만큼만 읽는다.
+
+        **JIT 꺼진 세션 전제**(db._SESSION_JIT_OFF, 2026-10-11 검증 지적): 갈래 하나의 추정 비용은 PG 가 그 배치 자식을
+        ~1000행으로 볼 때 ~11k 이고(실제 크기와 무관 -- 큰 배치가 많은 DB 에선 10자식 배치도 그렇게 추정한다), 갈래 100개
+        문장의 합이 jit_above_cost(100k)·jit_inline/optimize_above_cost(500k)를 넘는다. PG 기본 jit=on 이면 한 쪽에 큰 배치
+        50개가 섞인 목록 GET 이 JIT 컴파일로 5.7초였다(끄면 222ms) -- 그래서 Database 가 세션 JIT 를 끈다. 꺼도 비용은 **쪽에
+        보이는 배치 수에 비례**한다(큰 배치 갈래마다 인덱스 cap + 1 행 -- 50배치 ~0.2초, 100배치 ~0.5초, 폴링마다 RLock 을 그만큼
+        쥔다). 운영형 분포(작은 배치 위주, 쪽당 17–18배치)는 수 ms 다.
+
+        묶음(_UNION_CHUNK)마다 문장 셋. SELECT * + LEFT JOIN 을 쓰지 않는 이유: requester_id·
+        created_at·priority·auth_method·batch_id 같은 열 이름이 두 테이블에서 겹친다. 성공 scan 판정은 data_jobs 단독
+        EXISTS 서브쿼리다 -- _scan_target_where 의 열 이름엔 접두가 없는데, 바깥 갈래(파생 테이블)는 batch_id·request_id 만
+        내보내므로 operation·state·target 이 data_jobs 열로만 풀린다."""
+        ids = [b for b in dict.fromkeys(batch_ids) if isinstance(b, str)]
+        out = {b: {"batch_exists": False, "batch_name": None, "batch_status": None, "batch_request_count": 0,
+                   "batch_request_count_capped": False, "batch_live_request_count": 0,
+                   "batch_succeeded_scan_count": 0, "batch_item_count": None} for b in ids}
+        terminal = {f"t{i}": s for i, s in enumerate(_TERMINAL_REQUEST_VALUES)}
+        terminal_in = ", ".join(":" + k for k in terminal)
+        stop = int(cap) + 1
+        for i in range(0, len(ids), _UNION_CHUNK):
+            names = {f"i{n}": v for n, v in enumerate(ids[i:i + _UNION_CHUNK])}
+            in_list = ", ".join(":" + k for k in names)
+            for row in self._db.query(
+                    f"SELECT batch_id, name, status, item_count FROM batches WHERE batch_id IN ({in_list})", names):
+                s = out[row["batch_id"]]
+                s["batch_exists"] = True
+                # bool 은 int 의 하위형이라 따로 막는다(DB 신뢰 경계 -- 모르는 값은 None, 0 은 정상값).
+                ic = row["item_count"]
+                s["batch_item_count"] = ic if isinstance(ic, int) and not isinstance(ic, bool) and ic >= 0 else None
+                # 이름 없음의 표현은 None 하나다(라우트가 trim·빈값을 NULL 로 접는다) -- DB 가 신뢰 경계라 빈 이름이
+                # 들어와도 None 으로 접는다(화면에 빈 링크가 생기지 않게).
+                name = row["name"]
+                s["batch_name"] = name if isinstance(name, str) and name.strip() != "" else None
+                s["batch_status"] = row["status"]
+            arms = " UNION ALL ".join(
+                f"""SELECT batch_id, COUNT(*) AS n,
+                           SUM(CASE WHEN state IN ({terminal_in}) THEN 0 ELSE 1 END) AS live
+                      FROM (SELECT batch_id, state FROM requests WHERE {batch_match(k)}
+                             ORDER BY batch_id, commit_order LIMIT :stop) c{n}
+                     GROUP BY batch_id""" for n, k in enumerate(names))
+            small = []
+            for row in self._db.query(arms, {**names, **terminal, "stop": stop}):
+                s = out[row["batch_id"]]
+                n = int(row["n"])
+                if n > cap:
+                    s.update(batch_request_count=stop, batch_request_count_capped=True,
+                             batch_live_request_count=None, batch_succeeded_scan_count=None)
+                    continue
+                s["batch_request_count"] = n
+                # SUM 의 NULL 은 「행 없음」이다(GROUP BY 라 실제로는 생기지 않는다) -- 모름이 아니라 0.
+                s["batch_live_request_count"] = 0 if row["live"] is None else int(row["live"])
+                small.append(row["batch_id"])
+            if not small:
+                continue
+            params = {f"j{n}": b for n, b in enumerate(small)}
+            where = DataJobsRepository._scan_target_where(params)
+            arms = " UNION ALL ".join(
+                f"""SELECT batch_id, COUNT(*) AS n
+                      FROM (SELECT batch_id, request_id FROM requests WHERE {batch_match('j' + str(n))}
+                             ORDER BY batch_id, commit_order LIMIT :stop) c{n}
+                     WHERE EXISTS (SELECT 1 FROM data_jobs WHERE data_jobs.request_id = c{n}.request_id AND {where})
+                     GROUP BY batch_id""" for n in range(len(small)))
+            for row in self._db.query(arms, {**params, "stop": stop}):
+                out[row["batch_id"]]["batch_succeeded_scan_count"] = int(row["n"])
+        return out
 
     def list_awaiting_confirm(self):
         """확인 대기(PreviewReady) 배치. orchestrator 가 **기록만** 하러 돈다(list_active 는 그대로 "굴리는" 상태 --
@@ -196,14 +306,22 @@ class BatchesRepository:
             self._recount(batch_id)
         return True
 
-    def add_item(self, batch_id, payload) -> int:
+    def add_item(self, batch_id, payload) -> "int | None":
         """항목 추가: seq = MAX(seq)+1(빈 배치는 0). COUNT 가 아닌 이유: 중간
         삭제로 구멍이 있으면 COUNT 는 살아있는 꼬리 seq 와 PK 충돌하거나 구멍을
         재사용해 "seq = 등록 순서" 의미가 흐려진다(releases.seq 의 MAX+1 관례와
         같은 결정). MAX 조회와 INSERT 는 한 트랜잭션 — 동시 추가가 같은 seq 를
-        받으면 PK(batch_id, seq) 충돌로 한쪽이 죽는 fail-closed."""
+        받으면 PK(batch_id, seq) 충돌로 한쪽이 죽는 fail-closed.
+
+        배치 행이 없으면 None(아무것도 쓰지 않는다 -- 라우트가 404 batch_not_found). 라우트가 배치를 읽은 뒤 INSERT 전에
+        배치가 지워지면(배치 단위 삭제·배치 기록 삭제) 배치 없는 고아 항목이 생겼다(2026-10-10) -- 트랜잭션 첫 문장에서
+        배치 행을 다시 본다(PG 는 행 잠금). 잠금 순서가 batches → batch_items 지만 이 경로는 API 프로세스 안이라 RLock 으로
+        직렬화되고, 다른 프로세스(오케스트레이터)는 배치 행을 잠그지 않고 짧은 UPDATE 만 해서 교착이 없다."""
         now = utc_now_iso()
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
+            if self._db.query_one(f"SELECT 1 AS x FROM batches WHERE batch_id = :b{lock}", {"b": batch_id}) is None:
+                return None
             row = self._db.query_one(
                 "SELECT COALESCE(MAX(seq) + 1, 0) AS next_seq FROM batch_items "
                 "WHERE batch_id = :b", {"b": batch_id})
@@ -216,17 +334,34 @@ class BatchesRepository:
             self._recount(batch_id)
         return seq
 
-    def replace_items(self, batch_id, items) -> None:
+    def replace_items(self, batch_id, items) -> "bool | None":
         """항목 전량 교체(CSV 재업로드 동선): 기존 batch_items 전량 DELETE + 신규
         INSERT(seq 0..n-1 재부여) + 카운터 절대값 재계산 — 한 트랜잭션. 단건
         삭제(delete_item)는 seq 구멍을 유지하지만(남은 항목의 이력 사칭 방지)
         여기는 **전량 신규**라 지킬 이력이 없다 — 0..n-1 재부여가 "CSV 행 순서 =
         seq" 라는 생성(create)과 같은 계약을 복원한다. 전량 Queued 신규 ⇒ 종단
         항목 0 ⇒ _recount 가 succeeded/failed 를 0 으로 되돌린다(절대값 정직 —
-        감산 분기 없음). 종단 배치 한정 가드는 라우트 몫(batch_items_not_replaceable).
-        배치 status 는 무접촉 — 교체가 곧 실행은 아니다(라우트 주석)."""
+        감산 분기 없음). 배치 status 는 무접촉 — 교체가 곧 실행은 아니다(라우트 주석).
+
+        반환 True = 교체함, None = 배치 행이 없다(아무것도 쓰지 않았다 -- 라우트 404 batch_not_found), False = 배치가
+        종단(Completed/Cancelled)이 아니다(아무것도 쓰지 않았다 -- 라우트 409 batch_items_not_replaceable). 라우트가
+        배치를 읽고 CSV 전체를 검증하는 동안 배치가 지워지면(배치 단위 삭제·배치 기록 삭제) 예전엔 배치 없는 고아 항목
+        N개를 INSERT 하고 200 을 냈다 -- 그 묶음엔 자식이 없어 delete_batch 도 batch_not_found 라 영영 지울 길이 없었다
+        (2026-10-10 검증 지적, add_item 과 같은 경합). 그래서 트랜잭션 안에서 배치 행과 상태를 다시 본다 -- 라우트의 종단
+        판정과 이 쓰기 사이에 :rescan·항목 추가가 배치를 되살린 경합도 같은 자리에서 닫힌다. 잠금 순서는 batch_items →
+        batches(PG): 오케스트레이터 _record_terminal(batch_items UPDATE → batches UPDATE, 다른 프로세스)과 같은 방향이다
+        -- 배치 행을 먼저 쥐고 항목을 DELETE 하면 그 경로와 역순이라 교착이다(add_item 은 기존 항목을 잠그지 않아 해당
+        없다)."""
         now = utc_now_iso()
+        lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
         with self._db.transaction():
+            if lock:
+                self._db.query(f"SELECT seq FROM batch_items WHERE batch_id = :b{lock}", {"b": batch_id})
+            row = self._db.query_one(f"SELECT status FROM batches WHERE batch_id = :b{lock}", {"b": batch_id})
+            if row is None:
+                return None
+            if row["status"] not in ("Completed", "Cancelled"):
+                return False
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})
             for seq, item in enumerate(items):
@@ -236,6 +371,7 @@ class BatchesRepository:
                        VALUES (:b,:s,:p,'Queued',NULL,NULL,:now,:now)""",
                     {"b": batch_id, "s": seq, "p": dump_json(item), "now": now})
             self._recount(batch_id)
+        return True
 
     def _touch_item(self, batch_id, seq, **fields):
         fields["updated_at"] = utc_now_iso()
@@ -349,11 +485,13 @@ class BatchesRepository:
         것은 수용 — 화면 소비처 실측상 요청→배치 링크는 없다). 종단 배치 한정
         가드는 라우트 몫(batch_not_deletable).
 
-        자식 요청은 관리자의 작업(요청) 선택 삭제(request_purges.delete_terminal,
-        2026-10-08) 대상도 아니다 — batch_id 가 NULL 이 아니면 batch_child_not_deletable
+        자식 요청은 관리자의 작업(요청) **개별** 삭제(request_purges.delete_terminal,
+        2026-10-08) 대상이 아니다 — batch_id 가 NULL 이 아니면 batch_child_not_deletable
         로 거부한다(배치 행이 살아 있으면 자식을 지울 때 orchestrator 집계가 영구
-        정체한다). 그래서 이 메서드로 배치를 지운 뒤 남는 자식(배치 행이 없는 batch_id)은
-        지금 규칙상 영구히 개별 삭제할 수 없다 — 의도된 보류(BACKLOG §1)."""
+        정체한다). 이 메서드로 배치 기록을 지운 뒤 남는 자식(배치 행이 없는 batch_id)은
+        작업 목록의 배치 기록 없는 묶음(배치 칸 「기록 없음 xxxxxxxxxxxx」)으로 **배치 단위** 삭제할 수 있다
+        (request_purges.delete_batch, 2026-10-10 -- 자식 전부 + 남은 항목을 한 트랜잭션).
+        그래서 이 메서드는 「배치 기록만 정리하고 실행 이력은 남긴다」는 쓰임새로 남는다."""
         with self._db.transaction():
             self._db.execute("DELETE FROM batch_items WHERE batch_id = :b",
                              {"b": batch_id})

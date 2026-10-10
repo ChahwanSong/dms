@@ -27,12 +27,43 @@
 - 🔧 **작업(요청) 삭제 후속**(2026-10-08 범위 밖):
   - **단건 삭제 버튼(요청 상세)** — 지금은 작업 목록의 일괄 선택뿐(`POST /api/admin/requests:delete`). 같은
     저장소 메서드(`RequestPurgesRepository.delete_terminal`)를 쓰므로 버튼 + 같은 엔드포인트에 id 1개면 된다.
-  - **삭제된 배치의 자식**(사용자 결정 2026-10-09: 이번엔 규칙 유지) — 배치 삭제(`repositories/batches.py`
-    `delete`)는 자식 요청을 보존하고, 요청 삭제는 `batch_id` 가 있으면 `batch_child_not_deletable` 로 거부한다
-    (`repositories/request_purges.py` `delete_terminal`). 그래서 배치 행이 없는 자식(dangling batch_id)은 영구히
-    지울 수 없다. 후보: 「부모 배치 행이 없고 batch_items 참조도 없으면 개별 삭제 허용」 — batch_items 게이트는
-    그대로 두고 batch_id 조건만 완화(살아 있는 배치의 자식을 지우면 orchestrator `_child_state` 가 영구 정체하고
-    배치 취소가 500 이다 — 그 경로는 계속 막아야 한다).
+  - ~~**삭제된 배치의 자식**~~ — **해소**(2026-10-10, CHANGELOG 「전체 작업: 배치 단위 삭제 + 배치 열」): 배치 행이
+    없는 자식 묶음(dangling batch_id)도 작업 목록에서 「기록 없음 xxxxxxxxxxxx」 묶음으로 **배치 단위** 삭제된다
+    (`request_purges.delete_batch`). 개별 삭제 거부(`batch_child_not_deletable`)는 그대로다. 배치 행·자식 없이 **항목만**
+    남은 묶음(옛 add_item·replace_items 경합, 롤링 업데이트 겹침 동안 옛 api 파드의 add_item 잔재)도 같은 메서드가
+    expected 0 으로 지운다(2026-10-11) — 다만 화면엔 보이지 않으므로(자식 행이 없다) API 로 batch_id 를 지정해야 한다.
+  - **작업 1000개(또는 항목 10000개)를 넘는 배치의 삭제**(2026-10-10 범위 밖) — 배치 하나 = 트랜잭션 하나이고 그동안 api
+    전체가 DB RLock 으로 멈춰(replicas 1·커넥션 1) 상한 `MAX_BATCH_DELETE_CHILDREN = 1000`·`MAX_BATCH_DELETE_ITEMS = 10000`
+    (`repositories/request_purges.py`)을 넘는 배치는 `batch_delete_too_large` 로 거부한다(목록 요약도 자식 수를 1001 에서
+    멈추고, 항목 수는 batches.item_count 로 실어 포탈은 둘 다 「삭제 상한 초과」로 보인다 — 거부 판정은 상한 + 1 행까지만
+    읽는다). 운영 배치 규모(항목 수 × 재스캔 횟수) 확인 필요. 후보: 묘비 상태 `Deleting`
+    (배치를 먼저 그 상태로 CAS — 재실행·항목 추가가 되살리지 못하게) + 자식 청크 트랜잭션 + 마지막에 배치 행 삭제, 재개
+    의미(중간에 api 가 죽으면 다음 호출이 이어서). 함께: `:rescan` 의 무조건 `set_status`(`api/routes_batches.py`
+    `rescan_batch`)를 상태 CAS 로(지금은 삭제 직후 거짓 200 이 가능 — `update_meta` 도 같은 성질), 포탈 상태 라벨.
+  - **배치 기록 삭제(배치 화면)의 감사·CAS** — `DELETE /api/admin/batches/{id}`(`repositories/batches.py` `delete`)는
+    읽고-지우기라 CAS 가 없고, 감사 행이 없고, 공유 토큰으로도 된다(require_admin). 배치 기록만 지우므로 증거 손실은
+    적지만(자식의 감사는 배치 단위 삭제 때 남는다) 일관성을 위해 `('batch','delete_record')` 감사 행 검토.
+  - ~~**작업 목록의 배치 필터 / 배치 상세의 「이 배치의 작업 보기」**~~ — **해소**(2026-10-11 검증 2차 수정): 목록 API
+    `GET /api/user/requests?batch_id=`(좁히기만 -- 비관리자는 여전히 자기 작업만), 포탈 `/jobs?batch=<id>`(필터 표시 +
+    「필터 해제」), 배치 상세 머리줄·「배치 삭제」 창의 링크, 「기록 없음」 칸의 링크. 배치 열의 긴 이름은 끝(가르는 부분)을
+    늘 보인다(앞 조각 말줄임 + 뒤 조각).
+  - **요청 상세·결과 카드의 배치 링크** — `features/jobs/RequestDetail.tsx` 의 「배치 xxxxxxxx」 링크는 역할 검사가
+    없고(비관리자에겐 403 화면), 배치 기록이 지워졌으면 404 로 가는 죽은 링크이며, 8자 표기라 작업 목록 배치 열(이름 또는
+    12자)과 다르다. `OutcomeCard.tsx` 의 배치 상세 링크도 dangling 이면 죽는다. 목록 API 와 같은 배치 요약(존재·이름)을
+    상세 응답에도 실어 같은 규칙(작업 목록 `BatchCell`)으로 그리면 된다.
+  - **정리 루프 처리량** — 틱(15초)당 20행(`request_purger.py` `ROW_LIMIT`)이고, 파드가 남은 행은 첫 스윕(삭제 →
+    Terminating)과 둘째 스윕(사라짐 확인) 두 번이 필요해 실처리량은 틱당 ~10행이다 — 작업 1000개 배치는 ~27분(2026-10-10
+    검증 실측, 가짜 k8s), 한 호출의 최대(배치 10 × 1000)는 4~5시간이고 그동안 다른 삭제의 정리도 같은 줄(재시도 시각 순)에
+    선다. 순서를 바꿔도(스윕한 행 먼저) 총 스윕 수가 같아 총 시간은 그대로다 — 줄이려면 상한을 올리거나(50, 틱 예산
+    `TICK_BUDGET_SECONDS` 안에서 실 apiserver 지연 실측 후) 같은 틱 끝에 방금 스윕한 행을 한 번 더 세는 것. 거짓 지연은
+    해소됐다(대기를 첫 k8s 스윕부터 잰다 — 예전엔 requested_at 부터 재서 줄 선 시간이 `purge_waiting_pods` 로 찍혔다).
+  - **정리 루프 틱 비용이 대기열 크기에 비례**(2026-10-11 검증 지적, 일부 해소) — purge 파드를 못 띄우는 동안(purge_no_node
+    등) 큰 배치 삭제의 행이 purging 에 쌓이면 전역 단계(`_reap`·`_settle` 의 `_live_rows`)가 틱마다 두 번 purging·files 행
+    **전부**를 읽고, `_complete` 가 purging 행마다 FS stat(`artifact_trash.entry_states`)을 한다. 이 시간은
+    `TICK_BUDGET_SECONDS` 에 들지 않고, 컨트롤러는 루프를 한 프로세스에서 차례로 돌려 planner·stepper 틱까지 밀린다.
+    원 행 재등장 확인은 묶음 한 번으로 바꿨다(`present_targets` — 로컬 PG 1만 행 1.3초 → 0.37초). 남은 선형 비용:
+    `in_stage` 전량 읽기 + 행마다 FS stat(CephFS 에선 로컬보다 몇 배 느릴 것). 후보: 백오프 중인 행(next_attempt_at > now)은
+    `_complete` 를 건너뛰기, 틱당 완료 판정 행 수 상한(오래된 것부터 돌림차례), 또는 전역 단계도 틱 예산에 넣기.
   - **지표 박제** — 잡 통계·처리량·수행시간·요청자별 집계·plan_rejected 가 전부 행 기반이라(`repositories/metrics.py`)
     요청을 지우면 지난 창의 값이 소급해 줄어든다(수용, 확인 창이 안내). 필요하면 일 단위 집계 테이블.
   - **purge 파드 데드라인을 넘는 trash 항목**(2026-10-09 검증 중 확인) — purge 파드는 activeDeadlineSeconds 3600 이라
@@ -157,6 +188,13 @@
   했다. 근본 해결은 인프라 작업.
 
 ## 4. 알려진 해석·잔여 리스크 (문서)
+
+- 🔧 **배치 취소 경합으로 Pending 자식이 남는다**(2026-10-10 배치 단위 삭제 조사 중 재현, probe 2). 오케스트레이터의
+  항목 claim(자식 요청 INSERT + 항목 Materialized)과 `:cancel` 의 항목 Cancelled 덮어쓰기(`repositories/batches.py`
+  `set_item_status` — 상태 조건 없음)가 겹치면 배치는 Cancelled 인데 자식 요청은 Pending 으로 남아 planner 가 그것을
+  실행한다. 배치 단위 삭제는 이 상태를 `request_not_deletable`(+ 그 자식 id)로 안전하게 거부한다(운영자가 그 작업 상세에서
+  취소한 뒤 다시 지운다). 수정 후보: `set_item_status` 에 `WHERE status IN ('Queued','Materialized')`, 갱신된 항목의
+  request_id 를 다시 읽어 그 자식을 함께 취소·종단화.
 
 - 📝 **dsync 가 "목적지 부모 쓰기 불가" 에서 종료 코드 0**(2026-09-30 d139 실증에서 발견).
   포크 `dsync.c`(MPIFILEUTILS_REF 1b93d54) 는 목적지 존재와 무관하게 부모 W_OK 를 요구하고,

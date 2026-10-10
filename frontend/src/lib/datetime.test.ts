@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { kstStamp, kstStampOrDash, kstStampEpoch, kstDay } from "./datetime";
+import { kstStamp, kstStampBare, kstStampOrDash, kstStampEpoch, kstDay } from "./datetime";
 
 test("kstStamp: UTC ISO -> KST 벽시계(+9h) + KST 라벨", () => {
   expect(kstStamp("2026-08-04T01:12:42Z")).toBe("2026-08-04 10:12:42 KST");
@@ -13,6 +13,14 @@ test("kstStamp: UTC 15:00 이후는 KST 다음날로 날짜 경계가 넘어간�
 
 test("kstStamp: 파싱 불가면 원문 그대로(지어내지 않는다)", () => {
   expect(kstStamp("nonsense")).toBe("nonsense");
+});
+
+test("kstStampBare: kstStamp 와 같은 벽시계에서 「 KST」 접미사만 없다(시간대는 표 머리줄이 말한다)", () => {
+  for (const iso of ["2026-08-04T01:12:42Z", "2026-08-05T15:00:00Z", "2026-08-05T22:00:00Z"]) {
+    expect(kstStampBare(iso)).toBe(kstStamp(iso).replace(/ KST$/, ""));
+  }
+  expect(kstStampBare("2026-08-05T15:00:00Z")).toBe("2026-08-06 00:00:00");
+  expect(kstStampBare("nonsense")).toBe("nonsense");      // 지어내지 않는다
 });
 
 test("kstStampOrDash: null/undefined/빈 문자열은 —", () => {

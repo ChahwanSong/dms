@@ -199,7 +199,10 @@ def delete_batch(batch_id: str, request: Request,
     정리 없는 삭제는 살아있는 자식(요청·잡)을 고아로 만들고 orchestrator 가
     사라진 배치의 자식을 계속 굴리게 된다 — "취소 먼저"가 동선이다(cancel 이
     실행면을 먼저 종료하고 종단화한다). 자식 요청·잡·results 는 보존(감사
-    이력 — repo.delete 주석). 유지보수 거부는 patch(메타 수정)와 같은 배치
+    이력 — repo.delete 주석) — 이 라우트는 **배치 기록만** 지운다. 남은 자식은
+    작업 목록의 배치 기록 없는 묶음(배치 칸 「기록 없음 xxxxxxxxxxxx」)으로 배치 단위 삭제할 수 있다(POST
+    /api/admin/requests:delete 의 batches, 세션 관리자 — request_purges.delete_batch).
+    유지보수 거부는 patch(메타 수정)와 같은 배치
     mutation 관례를 미러한다(cancel 만 예외 — 취소는 언제나 가능해야 한다)."""
     reject_when_maintenance(request)
     repo = request.app.state.repos.batches
@@ -389,7 +392,13 @@ def replace_batch_items(batch_id: str, body: ReplaceItemsBody, request: Request,
             build_data_payload(b["operation"], options=b["options"], **item)
     except (DomainValidationError, TypeError) as e:
         raise HTTPException(status_code=422, detail=getattr(e, "reason_code", "invalid_batch"))
-    repo.replace_items(batch_id, body.items)
+    # 위의 읽기·검증과 쓰기 사이에 배치가 지워졌거나(None) 다시 돌기 시작했으면(False) repo 가 아무것도 쓰지 않았다 --
+    # 거짓 200 으로 배치 없는 고아 항목·활성 배치의 전량 교체를 숨기지 않는다(repo docstring, 2026-10-10).
+    done = repo.replace_items(batch_id, body.items)
+    if done is None:
+        raise HTTPException(status_code=404, detail="batch_not_found")
+    if done is False:
+        raise HTTPException(status_code=409, detail="batch_items_not_replaceable")
     return {"replaced": len(body.items)}
 
 
@@ -402,6 +411,9 @@ def add_batch_item(batch_id: str, body: dict, request: Request,
     b = _get_batch_or_404(request, batch_id)
     _validated_item(b, repo.list_items(batch_id), body)
     seq = repo.add_item(batch_id, body)
+    if seq is None:
+        # 위에서 읽은 뒤 INSERT 전에 배치가 지워졌다(배치 단위 삭제·배치 기록 삭제) -- repo 가 아무것도 쓰지 않았다.
+        raise HTTPException(status_code=404, detail="batch_not_found")
     # 종단 배치에 추가 = 재활성화. 기존 종단 항목은 무접촉이라 orchestrator 는 신규 Queued 항목만 materialize
     # 한다(_drive 는 종단 항목을 건너뛴다 — 재실행이 아니라 증분 실행). scan 활성 배치는 상태 그대로(도는 루프가
     # 집는다). sync 는 Running·PreviewReady 여도 Previewing 으로 -- 새 경로의 미리보기를 다시 확인받는다.

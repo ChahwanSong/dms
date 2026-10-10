@@ -6,7 +6,8 @@ API 는 요청·잡 행을 한 트랜잭션으로 지우면서 정리 열쇠(job
 단계(설계 §5.7):
   k8s      기록된 ref(그 잡의 DMS 명명일 때만 -- purge_runner.parse_ref) + 라벨 스윕(Pod·vcjob·launcher)을 지우고 다시
            센다. **남은 객체가 0(Terminating 포함)이 되기 전에는 파일로 넘어가지 않는다**(안전 > 진행 -- 종료 중 launcher 가
-           `<job_id>/<phase>` 를 다시 만든다). 10분이 지나도 남으면 purge_waiting_pods 로 지연 표면화(계속 기다린다).
+           `<job_id>/<phase>` 를 다시 만든다). 이 단계의 첫 스윕부터 10분이 지나도 남으면 purge_waiting_pods 로 지연
+           표면화(계속 기다린다 -- 삭제 시각부터 재면 큰 배치 삭제의 대기열 시간이 거짓 지연으로 찍힌다).
   files    base 검사 → `<base>/<job_id>` 를 `.dms-trash/<job_id>` 로 renameat(artifact_trash.detach). 행의 base 가 지금
            base 와 다르면(그 사이 force 변경) **지우지 않고** left_old_base + artifact_left_at_old_base 경고(설계 D11 --
            DB 값만 믿고 다른 경로를 지우지 않는다).
@@ -44,7 +45,9 @@ from .repositories.request_purges import STAGES
 COMPONENT = "request-purge"
 TICK_BUDGET_SECONDS = 20           # 리스 = max(15*3, 30) = 45s(controller.run_all_once) 안에서 끝난다
 ROW_LIMIT = 20                     # 한 틱에 k8s·파일 단계를 진행하는 행 상한
-WAITING_PODS_STALL_SECONDS = 600   # k8s 단계 대기가 이보다 길면 purge_waiting_pods 로 지연 표면화
+WAITING_PODS_STALL_SECONDS = 600   # k8s 단계 대기(첫 스윕부터)가 이보다 길면 purge_waiting_pods 로 지연 표면화
+# outcomes 안의 k8s 단계 첫 스윕 시각(대기 시간의 기준 -- _step_k8s). 단계를 떠나면 지운다.
+K8S_SINCE = "k8s_waiting_since"
 # 지연(purge_waiting_pods)이 된 대기 행의 재확인 간격 상한. 간격 = 기다린 시간의 1/10(최소 루프 간격) -- 죽은 노드의
 # Terminating 파드는 몇 시간씩 남는데, 그 행마다 매 틱 k8s 호출 ~8회를 반복하지 않게(2026-10-09 검증 지적).
 WAITING_BACKOFF_MAX_SECONDS = 300
@@ -191,7 +194,21 @@ class RequestPurger:
         outcomes["k8s_deleted"] = (prior if isinstance(prior, int) and not isinstance(prior, bool) else 0) + deleted
         outcomes["jobs"] = jobs_out
         now = self._clock()
+        # 기다림은 이 단계의 **첫 스윕**부터 잰다(requested_at 이 아니다). 큰 배치 삭제는 아웃박스 행을 수백~수천 개
+        # 만드는데 루프는 틱당 ROW_LIMIT 행만 진행해서, 대기열에서 10분 넘게 기다린 행은 첫 스윕(방금 지운 파드가 아직
+        # Terminating)에 곧장 purge_waiting_pods 로 찍혔다 -- 파드는 한 틱 안에 다 끝났는데 툴바엔 「지연 N건」·「노드 상태를
+        # 확인하세요」가 떴다(2026-10-10 검증 지적: 1000자식 배치에서 260건). 스탬프가 없거나 깨졌으면(변조) 지금을 첫
+        # 스윕으로 본다. 파일 단계에서 k8s 로 되돌아갈 때(_complete 의 artifact_reappeared)는 스탬프를 지운다.
+        since = outcomes.get(K8S_SINCE)
+        try:
+            waited = iso_epoch(now) - iso_epoch(since) if isinstance(since, str) else None
+        except (TypeError, ValueError):
+            waited = None
+        if waited is None:
+            outcomes[K8S_SINCE] = now
+            waited = 0
         if remaining == 0:
+            outcomes.pop(K8S_SINCE, None)  # 스탬프는 k8s 단계에 있는 동안만 -- 다시 k8s 로 오면 새로 잰다
             if rejected:
                 # 진행할 때 한 번만 남긴다(대기 틱마다 같은 ref 를 반복 기록하지 않는다). 거른 ref 는 무접촉이고, 같은 잡의
                 # 실제 객체는 라벨 스윕이 회수했다.
@@ -201,11 +218,7 @@ class RequestPurger:
             self._purges.advance(rid, "files", outcomes=outcomes, now=now)
             row["outcomes"] = outcomes     # 같은 틱의 파일 단계가 k8s_deleted 를 덮어쓰지 않게
             return "files"
-        try:
-            waited = iso_epoch(now) - iso_epoch(row["requested_at"])
-        except (TypeError, ValueError):
-            waited = None                  # 모름 -- 지연으로 단정하지 않는다(계속 기다린다)
-        if waited is not None and waited > WAITING_PODS_STALL_SECONDS:
+        if waited > WAITING_PODS_STALL_SECONDS:
             seconds = min(max(self._interval, int(waited) // 10), WAITING_BACKOFF_MAX_SECONDS)
             changed = self._purges.defer(rid, seconds=seconds, reason_code="purge_waiting_pods",
                                          outcomes=outcomes, now=now)
@@ -282,7 +295,11 @@ class RequestPurger:
         것을 실패로 기록한다(틱당 한 번 -- _settle). files 행은 due 루프가 이미 검증·기록한다(여기선 거르기만)."""
         now = self._clock()
         purging = []
-        for row in self._purges.in_stage("purging"):
+        in_purging, in_files = self._purges.in_stage("purging"), self._purges.in_stage("files")
+        # 원 행 재등장 확인은 묶음 한 번(present_targets) -- 행마다 두 문장이면 큰 배치 삭제의 대기열(수천 행)에서 틱이
+        # 행 수에 비례해 느려져 같은 프로세스의 다른 루프 틱까지 밀렸다(2026-10-11 검증 지적).
+        present = self._purges.present_targets([*in_purging, *in_files])
+        for row in in_purging:
             due = row["next_attempt_at"] <= now
             problem = self._row_problem(row)
             if problem is not None:
@@ -294,13 +311,12 @@ class RequestPurger:
                 if report and due:
                     self._fail(row, reason_code="purge_base_unavailable")
                 continue
-            if self._purges.target_still_present(row["request_id"], row["job_ids"]):
+            if row["request_id"] in present:
                 if report and due:
                     self._fail(row, reason_code="purge_target_still_present")
                 continue
             purging.append(row)
-        files = [r for r in self._purges.in_stage("files") if self._row_problem(r) is None
-                 and not self._purges.target_still_present(r["request_id"], r["job_ids"])]
+        files = [r for r in in_files if self._row_problem(r) is None and r["request_id"] not in present]
         return purging, files
 
     @staticmethod
@@ -552,7 +568,9 @@ class RequestPurger:
                 self._event("artifact_reappeared", "warning",
                             f"request {rid}: job dir reappeared under the base after detach -- re-running k8s stage",
                             {"request_id": rid, "job_ids": [j for j, (b, _) in states.items() if b]})
-                self._purges.advance(rid, "k8s", now=self._clock())
+                # 대기 시계는 새로 잰다(단계를 떠날 때 지운 스탬프 -- 변조로 남았어도 여기서 뺀다).
+                self._purges.advance(rid, "k8s", outcomes={k: v for k, v in outcomes.items() if k != K8S_SINCE},
+                                     now=self._clock())
                 return "k8s"
             if any(in_trash for _, in_trash in states.values()):
                 return None                # purge 파드 대기
