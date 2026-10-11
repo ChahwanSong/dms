@@ -3,7 +3,8 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBatch, useConfirmBatch, useRerunFailed, useRequestScanStats,
          useCancelBatch, useRescanBatch, useUpdateBatch, useDeleteBatch,
          useUpdateBatchItem, useDeleteBatchItem, useDeleteBatchItems,
-         useAddBatchItem, useReplaceBatchItems, useRerunBatchItems } from "./useBatches";
+         useAddBatchItem, useReplaceBatchItems, useRerunBatchItems,
+         useDisableAutoConfirm } from "./useBatches";
 import { parseItemsCsv, serializeItemsCsv,
          type ScanRow, type SyncRow } from "../../lib/csv";
 import { Card } from "../../components/ui/Card";
@@ -196,6 +197,13 @@ function BatchSettings({ b }: { b: Batch }) {
         {b.owner_username && (<>
           <dt className="text-muted">실행 신원</dt>
           <dd>{b.owner_username}</dd>
+        </>)}
+        {/* sync 실행 확인 방식(2026-10-11 자동 확인) — scan 은 확인 단계가 없어 행 생략. */}
+        {b.operation === "sync" && (<>
+          <dt className="text-muted">실행 확인</dt>
+          <dd>{b.auto_confirm === true
+            ? `자동 — 미리보기가 끝나면 바로 실행${b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`
+            : "직접 — 미리보기 후 「배치 확인」"}</dd>
         </>)}
       </dl>
       {/* 2026-10-02 부터 종단 배치는 실행 설정을 바꿀 수 있어(실행 설정 변경) 이 값이 이미 끝난 항목이 실제로 돈 값과
@@ -474,8 +482,10 @@ function SyncDestHint({ chown }: { chown: string }) {
 // 실행된다. 성공 시 팝업을 닫는다: 추가된 항목은 뒤의 목록에 나타나므로 화면에
 // 남아 있을 이유가 없다(invalidate 는 훅 onSettled 몫). 항목이 없으면 물려받을
 // 스토리지가 없어 호출측이 버튼 대신 안내를 보인다.
-function AddItemDialog({ batchId, isSync, firstPayload, chown, status }: {
+function AddItemDialog({ batchId, isSync, firstPayload, chown, status, auto }: {
   batchId: string; isSync: boolean; firstPayload: Record<string, unknown>; chown: string; status: string;
+  // 자동 확인이 켜져 있고 **보류되지 않은** 배치만 true -- 보류 중이면 종전처럼 사람이 확인한다(문구도 그 말).
+  auto: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const add = useAddBatchItem(batchId);
@@ -498,13 +508,20 @@ function AddItemDialog({ batchId, isSync, firstPayload, chown, status }: {
           <SyncDestHint chown={chown} />
           {/* 서버 계약(2026-10-07): 진행 중·확인 대기 sync 배치에 추가하면 배치가 미리보기 단계로 돌아간다 --
               새 경로가 사람 확인 없이 root 로 돌지 않게. 누르기 전에 그 결과를 말한다. */}
-          {status === "PreviewReady" && (
+          {/* 자동 확인(2026-10-11)이 켜진 배치는 새 항목도 미리보기가 끝나면 확인 없이 실행된다 -- 아래 「다시 눌러야」
+              문구가 거짓이 되므로 대신 이 사실을 말한다. */}
+          {auto && (
+            <p className="text-xs text-muted">
+              자동 실행이 켜진 배치입니다 — 추가한 항목도 미리보기가 끝나면 「배치 확인」 없이 실행(root)됩니다.
+            </p>
+          )}
+          {!auto && status === "PreviewReady" && (
             <p className="text-xs text-muted">
               확인 대기 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다 — 새 항목의 미리보기가 끝나면
               「배치 확인」을 다시 눌러야 실행됩니다.
             </p>
           )}
-          {status === "Running" && (
+          {!auto && status === "Running" && (
             <p className="text-xs text-muted">
               진행 중인 배치에 추가하면 배치가 다시 미리보기 단계로 돌아갑니다 — 이미 실행 중인 항목은 끝까지
               실행(root)되고, 실행을 기다리던 항목은 다시 확인할 때까지 시작되지 않습니다. 새 항목의 미리보기가 끝나면
@@ -601,6 +618,13 @@ function ConfirmBatchDialog({ b, confirm }: { b: BatchDetailData; confirm: Retur
         {`확인하면 미리보기를 마친 항목 ${runnable.length}개가 동시 실행 상한 ${b.max_concurrency}개씩 차례로 관리자 `
           + "특권(root)으로 실행됩니다 — 항목별 확인은 없습니다."}
       </p>
+      {/* 자동 확인(2026-10-11)이 곧 같은 확인을 할 수 있다 -- 먼저 누르면 사람 확인으로 남고, 시스템이 먼저면 이 확인은
+          거부되지만 배치는 이미 실행 중이다(헤더가 그렇게 말한다). */}
+      {b.auto_confirm === true && !b.auto_confirm_hold && (
+        <p className="mt-2 text-sm text-muted">
+          자동 실행이 켜져 있어 시스템이 곧 같은 확인을 합니다 — 먼저 누르면 직접 확인으로 기록됩니다.
+        </p>
+      )}
       <dl className="mt-3 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
         <dt className="text-muted">실행할 항목</dt>
         <dd className="tabular-nums">{`${runnable.length} / 전체 ${items.length}`}</dd>
@@ -713,6 +737,7 @@ export function BatchDetail() {
   const cancel = useCancelBatch(batchId);
   const rescan = useRescanBatch(batchId);
   const confirm = useConfirmBatch(batchId);
+  const autoOff = useDisableAutoConfirm(batchId);
   const update = useUpdateBatch(batchId);
   const b = q.data;
   // 이름·메모 인라인 편집: 열 때 현재값을 드래프트로 복사한다 — 폴링 리페치가
@@ -860,6 +885,13 @@ export function BatchDetail() {
             {b?.owner_username && (
               <span className="text-muted text-sm">{`실행 신원 ${b.owner_username}`}</span>
             )}
+            {/* 자동 확인(2026-10-11)은 어느 상태에서나 보인다 -- 끝난 배치에서도 재실행이 확인 없이 root 로 돈다는 뜻이라
+                접힌 「실행 설정」 안에만 두면 모른 채 재실행을 누른다(리뷰). */}
+            {b?.operation === "sync" && b.auto_confirm === true && (
+              <span className="text-accent text-sm" title="미리보기가 끝나면 「배치 확인」 없이 실행">
+                {`자동 실행${b.auto_confirm_by ? ` (켠 사람 ${b.auto_confirm_by})` : ""}`}
+              </span>
+            )}
           </div>
           <div className="flex gap-2">
             {/* 라벨은 짧게 「편집」 — 무엇을 편집하는지는 폼 안 입력 라벨("배치
@@ -876,6 +908,10 @@ export function BatchDetail() {
                 취소·완료 뒤 노드·프로세스 수·옵션을 바꾸고 다시 돌리는 동선 */}
             {b && terminal && <BatchExecutionSettingsDialog b={b} />}
             {(b?.status === "Completed" || b?.status === "Cancelled") && <DeleteBatchButton batchId={batchId} />}
+            {/* 자동 실행 끄기(2026-10-11): 진행 중 브레이크 — 미리보기를 보고 직접 확인하겠다. 종단 배치는 「실행 설정 변경」. */}
+            {b?.operation === "sync" && b.auto_confirm === true && !terminal && (
+              <Button variant="ghost" disabled={autoOff.isPending} onClick={() => autoOff.mutate()}>자동 실행 끄기</Button>
+            )}
             {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <Button variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</Button>}
           </div>
         </div>
@@ -887,9 +923,20 @@ export function BatchDetail() {
             (2026-10-01: 이름 chown 옛 배치는 모두 422 chown_name_not_supported). 배치 확인의 거부는 확인 대기
             동안엔 대화상자가 말하고, 거부 뒤 배치가 Previewing 등으로 바뀌어 대화상자가 사라지면 여기서 이어 말한다
             (409 batch_not_confirmable -- 말하지 않으면 확인이 조용히 사라진 것처럼 보였다). */}
-        {[rerun, rescan, ...(b?.status !== "PreviewReady" ? [confirm] : [])].filter((m) => m.isError).map((m, i) => (
-          <p key={i} role="alert" className="text-bad text-sm mt-2">{(m.error as ApiError).message}</p>
+        {[rerun, rescan, autoOff, ...(b?.status !== "PreviewReady" ? [confirm] : [])].filter((m) => m.isError).map((m, i) => (
+          // 자동 확인이 먼저 확인해 사람 확인이 409 로 진 경우(배치는 이미 실행 중) -- 「확인할 수 없는 상태」는 거짓 경보다.
+          m === confirm && b?.auto_confirm === true && b.status === "Running"
+            && (m.error as ApiError).code === "batch_not_confirmable"
+            ? <p key={i} role="status" className="text-sm text-muted mt-2">이미 자동 확인돼 실행 중입니다.</p>
+            : <p key={i} role="alert" className="text-bad text-sm mt-2">{(m.error as ApiError).message}</p>
         ))}
+        {/* 끝난 자동 배치: 재실행·항목 추가는 미리보기 뒤 확인 없이 root 로 돈다 -- 누르기 전에 말한다(리뷰). */}
+        {b?.operation === "sync" && b.auto_confirm === true && terminal && (
+          <p className="mt-2 text-sm text-muted">
+            자동 실행이 켜져 있어 재실행하거나 항목을 추가하면 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다 —
+            끄려면 「실행 설정 변경」에서 끄세요.
+          </p>
+        )}
         {b?.operation === "sync" && chownHasName(String(b?.options?.chown ?? "")) && (
           <p role="alert" aria-label="이름 chown 배치" className="mt-2 rounded-lg border border-bad px-3 py-2 text-sm text-bad">
             {`이 배치는 chown 에 이름(${String(b.options?.chown)})이 들어 있어 이대로는 실행할 수 없습니다 — 확인·재실행·`
@@ -899,7 +946,17 @@ export function BatchDetail() {
         )}
         {/* sync 확인 단계 안내(2026-10-07): 미리보기 중·확인 대기는 사람이 다음에 무엇을 해야 하는지가 상태 배지만으론
             보이지 않았다. 확인 전에는 어떤 항목도 실행되지 않는다는 사실까지 말한다. */}
-        {b?.operation === "sync" && b.status === "Previewing" && (
+        {b?.operation === "sync" && b.status === "Previewing" && b.auto_confirm === true && (
+          <p className="mt-2 text-sm text-muted">
+            {b.auto_confirm_hold
+              ? `항목별 미리보기(dry-run) 중입니다 — 자동 실행이 켜져 있지만 지금은 보류될 상태라, 끝나면 「배치 확인」을 `
+                + `눌러야 실행됩니다: ${reasonText(b.auto_confirm_hold)}`
+              : "항목별 미리보기(dry-run) 중입니다 — 자동 실행이 켜져 있어 끝나면 「배치 확인」 없이 바로 실행(root)됩니다. "
+                + "미리보기를 보고 직접 확인하려면 「자동 실행 끄기」를 누르세요."}
+            {executing > 0 && ` 이미 실행 중인 항목 ${executing}개는 끝까지 실행(root)됩니다.`}
+          </p>
+        )}
+        {b?.operation === "sync" && b.status === "Previewing" && b.auto_confirm !== true && (
           <p className="mt-2 text-sm text-muted">
             {executing > 0
               ? `미리보기 단계입니다 — 이미 실행 중인 항목 ${executing}개는 끝까지 실행(root)되고, 나머지는 확인을 `
@@ -912,7 +969,14 @@ export function BatchDetail() {
             확인된 항목은 동시 실행 상한({b.max_concurrency})만큼씩 차례로 실행됩니다.
           </p>
         )}
-        {b?.status === "PreviewReady" && (
+        {b?.status === "PreviewReady" && b.auto_confirm === true && (
+          <p className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status">
+            {b.auto_confirm_hold
+              ? `자동 실행이 보류됐습니다 — ${reasonText(b.auto_confirm_hold)}`
+              : "미리보기가 끝났습니다 — 자동 실행이 켜져 있어 곧 「배치 확인」 없이 실행됩니다."}
+          </p>
+        )}
+        {b?.status === "PreviewReady" && b.auto_confirm !== true && (
           <p className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status">
             {executing > 0
               ? `미리보기가 끝났습니다 — 「배치 확인」을 눌러야 나머지가 실행됩니다. 이미 확인돼 실행 중인 항목 ${executing}개만 `
@@ -974,6 +1038,7 @@ export function BatchDetail() {
             )}
             {b && firstPayload && (
               <AddItemDialog batchId={batchId} isSync={isSync} status={b.status}
+                             auto={b.auto_confirm === true && !b.auto_confirm_hold}
                              firstPayload={firstPayload} chown={String(b.options?.chown ?? "")} />
             )}
             {b && terminal && firstPayload && (

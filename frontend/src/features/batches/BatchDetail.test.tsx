@@ -1600,3 +1600,141 @@ test("409 batch_preview_changed 뒤에도 대화상자 경고는 하나다(회�
   expect(within(dlg).getAllByRole("alert")).toHaveLength(1);
   expect(within(dlg).getByRole("button", { name: "실행 확인" })).toBeDisabled();
 });
+
+// ---- sync 자동 확인(2026-10-11 — 옵션, 기본 꺼짐) ---------------------------------------------------------
+
+test("자동 실행 켜진 Previewing: 「확인 없이 바로 실행」 안내 + 「자동 실행 끄기」가 :auto-confirm-off 를 보낸다", async () => {
+  let off = 0;
+  server.use(http.post("/api/admin/batches/b1:auto-confirm-off", () => {
+    off += 1; return HttpResponse.json(batch({ status: "Previewing", auto_confirm: false, auto_confirm_by: null })); }));
+  renderBatch({ status: "Previewing", auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null });
+  expect(await screen.findByText(/자동 실행이 켜져 있어 끝나면 「배치 확인」 없이 바로 실행\(root\)됩니다/))
+    .toBeInTheDocument();
+  expect(screen.queryByText(/끝나면 「배치 확인」을 눌러야 실행됩니다/)).toBeNull();     // 거짓이 된 옛 문장은 없다
+  await userEvent.click(screen.getByRole("button", { name: "자동 실행 끄기" }));
+  await waitFor(() => expect(off).toBe(1));
+});
+
+test("자동 실행 켜진 PreviewReady: 보류가 없으면 「곧 실행」, 확인 버튼은 그대로 남는다", async () => {
+  renderBatch({ status: "PreviewReady", auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null });
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "미리보기가 끝났습니다 — 자동 실행이 켜져 있어 곧 「배치 확인」 없이 실행됩니다.");
+  expect(screen.getByRole("button", { name: "배치 확인" })).toBeInTheDocument();    // 사람이 먼저 눌러도 된다
+});
+
+test("자동 실행 보류: 사유 문구를 보이고 직접 확인하라고 말한다", async () => {
+  renderBatch({ status: "PreviewReady", auto_confirm: true, auto_confirm_by: "mason",
+                auto_confirm_hold: "auto_confirm_not_privileged" });
+  const st = await screen.findByRole("status");
+  expect(st).toHaveTextContent("자동 실행이 보류됐습니다");
+  expect(st).toHaveTextContent("특권 실행 목록에 없어");
+  expect(st).toHaveTextContent("「배치 확인」을 눌러 주세요");
+});
+
+test("자동 실행 꺼진 배치는 종전 안내 그대로 + 「자동 실행 끄기」 없음", async () => {
+  renderBatch({ status: "PreviewReady" });
+  expect(await screen.findByRole("status")).toHaveTextContent("「배치 확인」을 눌러야 실행됩니다");
+  expect(screen.queryByRole("button", { name: "자동 실행 끄기" })).toBeNull();
+});
+
+test("실행 설정에 「실행 확인」 행 — 자동이면 켠 사람, 아니면 직접(scan 은 행 없음)", async () => {
+  const view = renderBatch({ status: "Running", auto_confirm: true, auto_confirm_by: "mason" });
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect(screen.getByText("실행 확인").nextElementSibling).toHaveTextContent(
+    "자동 — 미리보기가 끝나면 바로 실행 (켠 사람 mason)");
+  view.unmount();
+  renderBatch({ status: "Running", operation: "scan" });
+  await userEvent.click(await screen.findByText("실행 설정"));
+  expect(screen.queryByText("실행 확인")).toBeNull();
+});
+
+test("끝난 자동 배치에는 「자동 실행 끄기」 대신 실행 설정 변경에서 끈다 — 바꿨을 때만 auto_confirm 을 싣는다", async () => {
+  let body: any = null;
+  server.use(http.patch("/api/admin/batches/b1/execution", async ({ request }) => {
+    body = await request.json(); return HttpResponse.json(batch({ status: "Completed" })); }));
+  renderBatch({ status: "Completed", auto_confirm: true, auto_confirm_by: "mason", options: {} });
+  await screen.findByRole("button", { name: "실행 설정 변경" });
+  expect(screen.queryByRole("button", { name: "자동 실행 끄기" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "실행 설정 변경" }));
+  const dlg = await screen.findByRole("dialog", { name: "실행 설정 변경" });
+  const box = within(dlg).getByLabelText("미리보기 후 자동 실행");
+  expect(box).toBeChecked();
+  expect(within(dlg).getByRole("button", { name: "변경 없음" })).toBeDisabled();   // 손대지 않으면 저장 잠금
+  await userEvent.click(box);
+  await userEvent.click(within(dlg).getByRole("button", { name: "저장" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body.auto_confirm).toBe(false);
+});
+
+test("항목 추가: 자동 실행 배치는 「다시 눌러야」 대신 「확인 없이 실행」을 말한다", async () => {
+  renderBatch({ status: "Running", auto_confirm: true, auto_confirm_by: "mason",
+                items: [{ seq: 0, payload: { source_storage: "s1", source: "a", destination_storage: "s2",
+                                             destination: "b" }, status: "Materialized", request_id: "r1",
+                          reason_code: null }] });
+  await userEvent.click(await screen.findByRole("button", { name: "항목 추가" }));
+  const dlg = await screen.findByRole("dialog", { name: "항목 추가" });
+  expect(dlg).toHaveTextContent("자동 실행이 켜진 배치입니다 — 추가한 항목도 미리보기가 끝나면 「배치 확인」 없이 실행(root)됩니다.");
+  expect(dlg).not.toHaveTextContent("「배치 확인」을 다시 눌러야");
+});
+
+test("헤더는 어느 상태에서나 「자동 실행(켠 사람)」 — 끝난 배치는 재실행이 확인 없이 돈다고 미리 말한다", async () => {
+  renderBatch({ status: "Completed", auto_confirm: true, auto_confirm_by: "mason", options: {} });
+  expect(await screen.findByText("자동 실행 (켠 사람 mason)")).toBeInTheDocument();
+  expect(screen.getByText(/재실행하거나 항목을 추가하면 미리보기가 끝나는 즉시 「배치 확인」 없이 실행\(root\)됩니다/))
+    .toBeInTheDocument();
+});
+
+test("보류될 상태의 Previewing: 「바로 실행」 대신 「확인을 눌러야」 + 사유, 항목 추가도 종전 문구", async () => {
+  renderBatch({ status: "Previewing", auto_confirm: true, auto_confirm_by: "mason",
+                auto_confirm_hold: "auto_confirm_not_admin",
+                items: [{ seq: 0, payload: { source_storage: "s1", source: "a", destination_storage: "s2",
+                                             destination: "b" }, status: "Queued", request_id: null,
+                          reason_code: null }] });
+  const p = await screen.findByText(/자동 실행이 켜져 있지만 지금은 보류될 상태라/);
+  expect(p).toHaveTextContent("「배치 확인」을 눌러야 실행됩니다");
+  expect(p).toHaveTextContent("관리자가 아니거나 비활성");
+  expect(p).not.toHaveTextContent("바로 실행(root)됩니다");
+  await userEvent.click(screen.getByRole("button", { name: "항목 추가" }));
+  const dlg = await screen.findByRole("dialog", { name: "항목 추가" });
+  expect(dlg).not.toHaveTextContent("자동 실행이 켜진 배치입니다");
+});
+
+test("확인 대화상자: 자동 실행이 곧 확인한다고 말한다(보류가 없을 때만)", async () => {
+  renderBatch({ status: "PreviewReady", auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null });
+  await userEvent.click(await screen.findByRole("button", { name: "배치 확인" }));
+  const dlg = await screen.findByRole("dialog", { name: "배치 확인" });
+  expect(dlg).toHaveTextContent("자동 실행이 켜져 있어 시스템이 곧 같은 확인을 합니다 — 먼저 누르면 직접 확인으로 기록됩니다.");
+});
+
+test("사람 확인이 자동 확인에 지면(409) 거짓 경보 대신 「이미 자동 확인돼 실행 중」", async () => {
+  let status = "PreviewReady";
+  server.use(
+    http.get("/api/admin/batches/b1", () => HttpResponse.json(batch({
+      status, auto_confirm: true, auto_confirm_by: "mason", auto_confirm_hold: null }))),
+    http.post("/api/admin/batches/b1:confirm", () => {
+      status = "Running";                                   // 그 사이 시스템이 먼저 확인했다
+      return HttpResponse.json({ detail: "batch_not_confirmable" }, { status: 409 });
+    }));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches/b1"]}>
+    <Routes><Route path="/admin/batches/:batchId" element={<BatchDetail/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  await userEvent.click(await screen.findByRole("button", { name: "배치 확인" }));
+  const dlg = await screen.findByRole("dialog", { name: "배치 확인" });
+  await userEvent.click(within(dlg).getByRole("button", { name: "실행 확인" }));
+  expect(await screen.findByText("이미 자동 확인돼 실행 중입니다.")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("배치 목록: 자동 실행 sync 배치는 작업 칸에 「자동」", async () => {
+  server.use(http.get("/api/admin/batches", () => HttpResponse.json([
+    { ...batch({ status: "Previewing", auto_confirm: true, auto_confirm_by: "mason" }), batch_id: "b1" },
+    { ...batch({ status: "Previewing" }), batch_id: "b2" }])));
+  const qc = new QueryClient({ defaultOptions:{ queries:{ retry:false }}});
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/admin/batches"]}>
+    <Routes><Route path="/admin/batches" element={<BatchesList/>} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  const marks = await screen.findAllByTitle("미리보기가 끝나면 「배치 확인」 없이 실행");
+  expect(marks).toHaveLength(1);
+  expect(marks[0]).toHaveTextContent("자동");
+});

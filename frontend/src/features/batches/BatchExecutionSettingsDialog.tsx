@@ -31,6 +31,8 @@ const knownKeys = (op: Op): string[] => [...BOOLS[op], ...INTS[op], ...STRS[op]]
 interface Form {
   mc: string; priority: string; nodeCount: string; procsPerNode: string;
   bools: Record<string, boolean>; ints: Record<string, string>; strs: Record<string, string>;
+  // sync 자동 확인(2026-10-11) — 지금 배치 값에서 시작한다(부재 = 꺼짐).
+  auto: boolean;
 }
 
 // 폼 초기값 = 지금 배치 행. 키가 없는 정수 옵션은 "" (= 서버 기본) — 생성 폼처럼 기본값을 프리필하지 않는다: 그
@@ -45,6 +47,7 @@ function initialForm(b: Batch): Form {
     bools: Object.fromEntries(BOOLS[op].map((k) => [k, o[k] === true])),
     ints: Object.fromEntries(INTS[op].map((k) => [k, str(o[k])])),
     strs: Object.fromEntries(STRS[op].map((k) => [k, str(o[k])])),
+    auto: b.auto_confirm === true,
   };
 }
 
@@ -63,6 +66,9 @@ function buildBody(b: Batch, f: Form): BatchExecutionBody {
   return {
     max_concurrency: Number(f.mc.trim()), priority: f.priority === "" ? null : f.priority,
     node_count: intOrNull(f.nodeCount), procs_per_node: intOrNull(f.procsPerNode), options,
+    // 자동 확인은 sync 에서 **바꿨을 때만** 싣는다 — 켜면 저장한 관리자가 켠 사람으로 남으므로, 손대지 않은 저장이
+    // 다른 설정과 함께 켠 사람을 바꾸지 않게(서버도 같은 값이면 쓰지 않는다).
+    ...(op === "sync" && f.auto !== (b.auto_confirm === true) && { auto_confirm: f.auto }),
   };
 }
 
@@ -108,7 +114,8 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
   const unchanged = body !== null
     && body.max_concurrency === b.max_concurrency && body.priority === (b.priority ?? null)
     && body.node_count === (b.node_count ?? null) && body.procs_per_node === (b.procs_per_node ?? null)
-    && stable(body.options) === stable(b.options ?? {});
+    && stable(body.options) === stable(b.options ?? {})
+    && body.auto_confirm === undefined;
 
   const setBool = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setF({ ...f, bools: { ...f.bools, [k]: e.target.checked } });
@@ -158,6 +165,19 @@ export function BatchExecutionSettingsDialog({ b }: { b: Batch }) {
           </label>
         </div>
         <p className="text-muted text-xs">요청 값은 정책 상한을 넘지 못합니다(정책보다 줄이기만 가능).</p>
+
+        {op === "sync" && (
+          <div className="space-y-1">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" aria-label="미리보기 후 자동 실행" checked={f.auto}
+                     onChange={(e) => setF({ ...f, auto: e.target.checked })} /> 미리보기 후 자동 실행
+            </label>
+            <p className="text-muted text-xs">
+              켜면 다음 재실행부터 모든 항목의 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다. 끄면 미리보기를
+              보고 직접 확인합니다.
+            </p>
+          </div>
+        )}
 
         <fieldset className="rounded-lg border border-line p-3 space-y-2">
           <legend className="px-1 text-sm font-medium">{`${op} 옵션`}</legend>

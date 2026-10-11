@@ -110,7 +110,11 @@ def _apply_migrations(db: Database) -> None:
             -- 「배치 확인」은 대화상자를 연 회차를 실어 보내고 확인 CAS 가 같은 회차일 때만 통과한다 --
             -- 확인 대기 → 다시 미리보기 → 확인 대기(ABA) 사이에 생긴, 운영자가 보지 않은 항목까지 확인되지
             -- 않게. NULL(구형 행·한 번도 확인 대기가 안 된 배치) = 0회차(repo 가 읽을 때 0 으로 접는다).
-            preview_round INTEGER)""",
+            preview_round INTEGER,
+            -- sync 배치 자동 확인(2026-10-11): 켠 특권 세션 관리자 이름. NULL = 꺼짐(기본, 사람이 「배치 확인」).
+            -- 켜져 있으면 PreviewReady 에서 orchestrator 가 사람 대신 같은 확인(회차 CAS + 도장 + 감사)을 한다 --
+            -- 그 직전에 이 사람의 자격을 다시 본다(batch_orchestrator.auto_confirm_hold).
+            auto_confirm_by TEXT)""",
         "CREATE INDEX IF NOT EXISTS idx_batches_status ON batches (status, created_at)",
         """CREATE TABLE IF NOT EXISTS batch_items (
             batch_id TEXT NOT NULL,
@@ -720,6 +724,8 @@ def _ensure_columns(db):
         ("batches", "name", "TEXT"),
         # 확인 회차(2026-10-07) -- 이중 경로 규약. 기배포 행은 NULL = 0회차(BatchesRepository._hydrate).
         ("batches", "preview_round", "INTEGER"),
+        # sync 배치 자동 확인(2026-10-11) -- 이중 경로 규약. 기배포 행은 NULL = 꺼짐(종전 동작: 사람이 확인).
+        ("batches", "auto_confirm_by", "TEXT"),
         # 스토리지 사용자 공개(2026-09-30, 0 = 관리자 전용) -- 이중 경로 규약. 기배포 행은
         # ALTER 로 NULL 이 되므로 migrate 가 _backfill_storage_user_enabled 로 1(종전 동작:
         # 활성 스토리지는 누구나)을 채운다. 코드도 NULL 을 1 로 읽는다(모름 ≠ 거부).

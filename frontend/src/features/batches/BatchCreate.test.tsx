@@ -719,3 +719,48 @@ test("sync 를 고르면 만든 뒤 「배치 확인」을 눌러야 실행된�
   await userEvent.selectOptions(await screen.findByLabelText("연산"), "sync");
   expect(screen.getByText(/항목별 미리보기가 끝나면 배치 상세에서 「배치 확인」을 눌러야 실행됩니다\./)).toBeInTheDocument();
 });
+
+// ---- sync 자동 확인(2026-10-11 — 옵션, 기본 꺼짐) ---------------------------------------------------------
+
+test("자동 실행: sync 에만 보이고 기본 꺼짐 — 끈 채로 만들면 auto_confirm 키 부재, 요약은 「직접」", async () => {
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  expect(screen.queryByLabelText("미리보기 후 자동 실행")).toBeNull();          // scan 에는 없다
+  const captured = captureCreate();
+  await fillSync();
+  const box = screen.getByLabelText("미리보기 후 자동 실행");
+  expect(box).not.toBeChecked();
+  expect(screen.getByText("실행 확인").closest("div")).toHaveTextContent("직접 — 미리보기 후 「배치 확인」");
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body).not.toHaveProperty("auto_confirm");
+});
+
+test("자동 실행을 켜면 바디에 auto_confirm: true, 요약은 「자동」, 연산 안내도 「확인 없이 바로 실행」", async () => {
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  const captured = captureCreate();
+  await fillSync();
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  expect(screen.getByText("실행 확인").closest("div")).toHaveTextContent("자동 — 미리보기가 끝나면 바로 실행");
+  expect(screen.getByText(/확인하는 단계를 건너뜁니다/)).toBeInTheDocument();
+  expect(screen.getByText(/「배치 확인」 없이 바로 실행됩니다\(자동 실행 켜짐\)/)).toBeInTheDocument();
+  expect(screen.queryByText(/「배치 확인」을 눌러야 실행됩니다/)).toBeNull();
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body.auto_confirm).toBe(true);
+});
+
+test("자동 실행을 켠 뒤 scan 으로 바꾸면 싣지 않는다(서버 422 auto_confirm_sync_only 를 미리 피한다)", async () => {
+  renderPage();
+  await screen.findByLabelText("스토리지");
+  const captured = captureCreate();
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "sync");
+  await userEvent.click(screen.getByLabelText("미리보기 후 자동 실행"));
+  await userEvent.selectOptions(screen.getByLabelText("연산"), "scan");
+  expect(screen.queryByText("실행 확인")).toBeNull();
+  await fillScan();
+  await userEvent.click(createButton());
+  await screen.findByRole("heading", { name: "배치 b9" });
+  expect(captured.body).not.toHaveProperty("auto_confirm");
+});

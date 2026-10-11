@@ -26,6 +26,8 @@ export interface CreateBatchBody {
   // 실행 신원(기록용 이름): 빈값은 키 생략 = 서버 NULL(생성자 본인). 특권 스위치가 아니다 --
   // 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행이다.
   owner_username?: string;
+  // sync 자동 확인(2026-10-11, 기본 꺼짐): 켰을 때만 true 를 싣는다 -- 서버는 명시 true 만 켠다(생략 = 사람이 확인).
+  auto_confirm?: true;
 }
 export const useCreateBatch = () =>
   useMutation({ mutationFn: (b: CreateBatchBody) =>
@@ -80,6 +82,8 @@ export const useUpdateBatch = (id: string) => {
 export interface BatchExecutionBody {
   max_concurrency: number; priority: string | null; node_count: number | null;
   procs_per_node: number | null; options: Record<string, unknown>;
+  // sync 만, 바꿀 때만 싣는다(서버: 켜면 이 관리자가 켠 사람으로 남고, 이미 켜져 있으면 처음 켠 사람 그대로).
+  auto_confirm?: boolean;
 }
 export const useUpdateBatchExecution = (id: string) => {
   const qc = useQueryClient();
@@ -212,4 +216,6 @@ export const useDeleteBatches = () => {
 export const useConfirmBatch = (id: string) => _action<{ preview_round: number }>(id, "confirm");
 export const useRerunFailed = (id: string) => _action(id, "rerun-failed");
 export const useCancelBatch = (id: string) => _action(id, "cancel");
+// sync 자동 확인 끄기(어느 상태에서나 -- 진행 중 브레이크). 켜기는 생성·실행 설정 변경(특권 게이트)뿐이다.
+export const useDisableAutoConfirm = (id: string) => _action(id, "auto-confirm-off");
 export const useRescanBatch = (id: string) => _action(id, "rescan");
