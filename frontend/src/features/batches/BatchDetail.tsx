@@ -867,8 +867,10 @@ export function BatchDetail() {
         <Link className="text-accent text-sm" to={batchJobsPath(batchId)}>전체 작업에서 이 배치의 작업 보기</Link>
       </div>
       <Card>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        {/* 헤더 세 줄은 줄바꿈된다(2026-10-11 375 실측): 끝난 배치의 버튼 넷(편집·전체 재실행·실행 설정 변경·배치 삭제)이
+            한 줄로 12~19px 넘쳤고, 자동 실행 표시가 붙으면 80px 까지 넘쳤다. */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {/* 배치 상태 전용 색(batchPillVariant — Completed=초록·진행=busy·
                 Cancelled=neutral). 항목 pill 은 요청/잡 판정 축이라 기존 공유
                 pillVariant 를 그대로 쓴다(variant 미지정). */}
@@ -893,7 +895,7 @@ export function BatchDetail() {
               </span>
             )}
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {/* 라벨은 짧게 「편집」 — 무엇을 편집하는지는 폼 안 입력 라벨("배치
                 이름"/"메모")이 말한다(사용자 조정 2026-08-15). "메모 편집"은 폼이
                 이름까지 고치는데 메모만 말해 어색했고 "이름·메모 편집"은 길다.

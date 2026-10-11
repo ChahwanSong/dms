@@ -47,6 +47,14 @@ test.describe("E8 — sync 배치 자동 확인", () => {
     await page.reload();
     await page.getByText("실행 설정", { exact: true }).click();
     await expect(page.getByText("자동 — 미리보기가 끝나면 바로 실행 (켠 사람 admin)")).toBeVisible();
+    // 375 폭: 끝난 자동 배치 = 헤더가 가장 넓은 경우(버튼 넷 + 「자동 실행 (켠 사람)」) -- 헤더 줄이 줄바꿈되지 않으면
+    // 문서가 가로로 넘쳤다(테스트베드 실측 455/375, 자동 아닌 끝난 배치도 387~394).
+    await page.setViewportSize({ width: 375, height: 800 });
+    await page.reload();
+    await expect(page.getByText("자동 실행 (켠 사람 admin)")).toBeVisible();
+    const [scroll, client] = await page.evaluate(() =>
+      [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+    expect(scroll, `375 에서 문서가 가로로 넘친다(${scroll} > ${client})`).toBeLessThanOrEqual(client);
   });
 
   test("끈 채로 만든 sync 배치는 확인 대기에서 멈춘다 — 사람이 「배치 확인」을 눌러야 실행된다", async ({ page }) => {
