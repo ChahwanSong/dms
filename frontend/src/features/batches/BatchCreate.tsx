@@ -47,6 +47,9 @@ const OPERATION_HELP: Record<"scan" | "sync", string> = {
   sync: "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 만들어지고, "
     + "항목별 미리보기가 끝나면 배치 상세에서 「배치 확인」을 눌러야 실행됩니다.",
 };
+// 자동 실행(2026-10-11)을 켠 sync 는 위 「눌러야 실행」이 거짓이 된다 -- 켠 동안은 이 문장으로 바꿔 말한다.
+const SYNC_AUTO_HELP = "소스 스토리지 → 목적지 스토리지 한 쌍 안에서 여러 경로를 sync 합니다. 행마다 잡 하나가 "
+  + "만들어지고, 항목별 미리보기가 끝나면 「배치 확인」 없이 바로 실행됩니다(자동 실행 켜짐).";
 
 const initial = {
   op: "scan" as "scan" | "sync",
@@ -79,6 +82,9 @@ const initial = {
   // 실행 신원: 빈값 = 바디에서 생략 = 서버 NULL(기본: 생성자 본인). 특권 여부와
   // 무관하다 — 배치는 통일 게이트(routes_batches)로 항상 특권(root) 실행.
   ownerUsername: "",
+  // sync 자동 확인(사용자 결정 2026-10-11 — 옵션, 기본 꺼짐): 켜면 미리보기가 끝나는 순간 「배치 확인」 없이 실행된다.
+  // sync 에서 켰을 때만 바디에 true 를 싣는다(서버는 명시 true 만 켠다 — 생략 = 사람이 확인).
+  autoConfirm: false,
 };
 
 export function BatchCreate() {
@@ -262,6 +268,8 @@ export function BatchCreate() {
       // 실행 신원: 빈값은 키 생략 = 서버 NULL(기본: 생성자 본인) — 특권 게이트는
       // owner 유무와 무관하게 항상 발동한다(통일 게이트).
       ...(f.ownerUsername.trim() !== "" && { owner_username: f.ownerUsername.trim() }),
+      // 자동 확인은 sync 만(scan 은 확인 단계가 없어 서버 422) — 연산을 scan 으로 바꾸면 체크가 남아 있어도 싣지 않는다.
+      ...(f.op === "sync" && f.autoConfirm && { auto_confirm: true as const }),
     };
   }
 
@@ -345,7 +353,9 @@ export function BatchCreate() {
               <option value="sync">sync</option>
             </select>
           </label>
-          <p className="text-sm text-muted sm:pt-8">{OPERATION_HELP[f.op]}</p>
+          <p className="text-sm text-muted sm:pt-8">
+            {f.op === "sync" && f.autoConfirm ? SYNC_AUTO_HELP : OPERATION_HELP[f.op]}
+          </p>
         </div>
       </FormSection>
 
@@ -698,6 +708,19 @@ export function BatchCreate() {
             {mcError && <p className="mt-1 text-bad text-sm">{mcError}</p>}
           </>}
           help="동시에 실행할 배치 항목(잡) 수 — 잡 하나가 쓰는 노드 수와 무관합니다." />
+        {/* sync 자동 확인(2026-10-11): 기본 꺼짐. 켜면 운영자가 미리보기를 보고 누르던 「배치 확인」을 시스템이 대신
+            누른다(서버 orchestrator — 같은 확인 함수라 확인 회차·도장 규칙은 그대로). 실행은 root 라 무엇을 생략하는지를
+            도움말이 그대로 말한다. 진행 중에도 배치 화면의 「자동 실행 끄기」로 되돌릴 수 있다. */}
+        {f.op === "sync" && (
+          <FieldRow align="check"
+            control={<label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" aria-label="미리보기 후 자동 실행" checked={f.autoConfirm}
+                     onChange={on("autoConfirm")} /> 미리보기 후 자동 실행
+            </label>}
+            help={"켜면 모든 항목의 미리보기가 끝나는 즉시 「배치 확인」 없이 실행(root)됩니다 — 미리보기 결과를 보고 "
+              + "확인하는 단계를 건너뜁니다. 미리보기는 그대로 돌고 항목별로 남습니다. 진행 중에도 배치 화면에서 끌 수 "
+              + "있습니다."} />
+        )}
       </FormSection>
 
       {/* 이름은 목록·상세 헤더에 얹히는 식별자, 메모는 자유 기록 — 역할이
@@ -756,6 +779,12 @@ export function BatchCreate() {
           </SummaryRow>
         )}
         {body.owner_username && <SummaryRow label="실행 신원">{body.owner_username}</SummaryRow>}
+        {/* 실행 확인 방식(sync 만 — scan 은 확인 단계가 없다). 바디에서 파생(화면 거짓말 금지). */}
+        {body.operation === "sync" && (
+          <SummaryRow label="실행 확인">
+            {body.auto_confirm === true ? "자동 — 미리보기가 끝나면 바로 실행" : "직접 — 미리보기 후 「배치 확인」"}
+          </SummaryRow>
+        )}
         {/* 비운 동시 상한은 Number("")=0 이 아니라 "—"(제출은 그 상태로 막힌다) */}
         <SummaryRow label="동시 상한">{f.mc.trim() === "" ? "—" : body.max_concurrency}</SummaryRow>
         {body.name && <SummaryRow label="이름">{body.name}</SummaryRow>}

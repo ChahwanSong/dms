@@ -251,5 +251,9 @@
   "purge_pod_stuck",
   "purge_target_still_present",
   "purge_row_invalid",
-  "purge_failed"
+  "purge_failed",
+  "auto_confirm_sync_only",
+  "auto_confirm_not_privileged",
+  "auto_confirm_not_admin",
+  "auto_confirm_privileged_disabled"
 ]

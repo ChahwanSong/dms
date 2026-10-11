@@ -24,10 +24,19 @@ confirm(`_confirm_child`)한다 -- 새 미리보기는 하나도 만들지 않�
 끝내고, 다음 틱 _record_terminal 이 항목을 Rejected·실패 1 로 센다(Previewing·PreviewReady·Running 모두 --
 stepper 가 같은 컨트롤러 패스에서 먼저 돈다). 다시 미리보기는 자동으로 하지 않는다: 재실행은 :rerun-failed
 → Previewing → 재확인. Running 에선 만료된 미리보기를 컨펌하지 않는다(슬롯도 차지하지 않는다).
+
+자동 확인(2026-10-11 사용자 결정 -- "배치 sync 의 경우 자동 승인을 옵션으로, 기본 false"): 특권 세션 관리자가 생성
+(또는 종단 배치의 실행 설정 변경)에서 켠 sync 배치(batches.auto_confirm_by)는 PreviewReady 에서 루프가 **사람의 「배치
+확인」과 같은 저장소 함수**(BatchesRepository.confirm -- 회차·Queued 없음 CAS + 그 순간 ConfirmPending 자식 도장 +
+감사 행)를 대신 부른다. 새 경로는 없다: 도장·회차·Queued 둑과 Running 분기의 「도장 없는 미리보기면 Previewing 복귀」는
+그대로라, 확인은 여전히 한 회차의 미리보기 전부를 대표한다 -- 바뀐 것은 누르는 주체(켠 사람의 사전 동의)뿐이다. 확인
+직전에 켠 사람의 자격을 다시 보고(auto_confirm_hold), 안 되면 확인 대기에 남겨 사람이 누르게 한다(보류). 단건 sync 는
+여전히 사람이 컨펌한다(이 경로 밖 -- 배치 자식만 여기서 실행된다).
 """
 from .db import load_json, utc_now_iso
 from .domain import (DomainValidationError, Operation, RequestState, TERMINAL_REQUEST_STATES,
-                     DataJobState, build_data_payload, resolve_priority)
+                     DataJobState, build_data_payload, resolve_priority, validate_options)
+from .identity import privilege_eligible
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
 # repositories.batches._ACTIVE(list_active 가 고르는 상태) + 확인 대기(기록만) -- _drive 의 재확인용.
@@ -50,6 +59,53 @@ def _preview_expired(job, now) -> bool:
 def _stamped(job) -> bool:
     """배치 확인 도장이 지금 미리보기 지문과 같은가(None 은 도장 없음 -- 확인 전이거나 옛 코드가 만든 미리보기)."""
     return job.get("confirmed_fingerprint") is not None and job["confirmed_fingerprint"] == job.get("preview_fingerprint")
+
+
+# 자동 확인 감사 행의 actor. 계정 이름 규칙(repositories/accounts._USERNAME_RE -- [a-z0-9][a-z0-9._-]*)에 없는 ':' 를
+# 넣어, 같은 이름의 사람 계정이 확인한 기록이 「자동 확인」으로 읽히는 일이 없게 한다. 켠 사람은 after_state 에 남는다.
+AUTO_CONFIRM_ACTOR = "system:auto-confirm"
+
+
+# 보류 경고를 남긴 회차(배치 id → 회차). 확인 대기는 사람이 누를 때까지 매 틱 다시 판정되므로 회차마다 한 번만 남긴다.
+# **모듈 수준**이다: 컨트롤러는 틱마다 BatchOrchestrator 를 새로 만든다(controller.py 의 Loop 람다) -- 인스턴스 속성이면
+# 매 틱 비어 5초마다 같은 경고가 쌓였다(2026-10-11 리뷰). 프로세스 메모리라 컨트롤러 재시작 뒤 한 번 더 남을 수 있다 --
+# 무해하다. 확인되면 그 배치 키를 지운다(크기는 보류된 적 있는 배치 수로 묶인다).
+_HELD_ROUND: dict[str, int] = {}
+
+
+def _hold(*, reason_code: str) -> str:
+    """보류 사유 코드. 사유 코드 커버리지 추출기는 `reason_code=` 키워드 리터럴만 읽는다 -- 반환 리터럴로만 쓰면 포탈
+    문구 목록(reasonCodes.json) 계약 밖으로 샌다."""
+    return reason_code
+
+
+def auto_confirm_hold(repos, settings, batch) -> str | None:
+    """자동 확인이 켜진 sync 배치를 지금 사람 대신 확인해도 되나 -- None 이면 된다, 아니면 보류 사유(확인 대기에 남고
+    사람이 「배치 확인」을 누른다). orchestrator(확인 직전)와 배치 상세 GET(화면 안내)이 같은 술어를 쓴다 -- 두 곳이
+    규칙을 따로 들면 한쪽만 바뀌는 순간 화면과 동작이 어긋난다.
+
+    DB 가 신뢰 경계라 켜 둔 값을 그대로 믿지 않고 확인하는 순간 다시 본다(생성·확인 라우트의 특권 3중 게이트와 같은 결):
+    켠 사람이 지금도 특권 목록에 있고(허용 설정 포함), 계정이 활성 관리자다. 세션 조건은 켜는 라우트(생성·실행 설정
+    변경 -- _require_batch_privilege)가 그 순간 봤다 -- 토큰은 켤 수 없다. 옵션도 지금 규칙으로 다시 검증한다(사람의
+    확인 라우트 _reject_stale_options 와 같은 이유 -- 규칙이 바뀐 옛 배치를 실행 단계에서 하나씩 거부하지 않게)."""
+    by = batch.get("auto_confirm_by")
+    if batch.get("operation") != Operation.SYNC.value:
+        return _hold(reason_code="auto_confirm_sync_only")
+    if not settings.allow_privileged_requesters:
+        # 사이트 전체 특권(root) 실행이 꺼졌다 -- 켠 사람 탓이 아니라 사람이 확인해도 root 로 돌지 못한다(문구가 다르다).
+        return _hold(reason_code="auto_confirm_privileged_disabled")
+    if not privilege_eligible(requester_id=by, allow_privileged=settings.allow_privileged_requesters,
+                              privileged_requesters=settings.privileged_requesters,
+                              session_authenticated=True):
+        return _hold(reason_code="auto_confirm_not_privileged")
+    account = repos.accounts.get(by)
+    if account is None or account["disabled"] or account["role"] != "admin":
+        return _hold(reason_code="auto_confirm_not_admin")
+    try:
+        validate_options(batch["operation"], batch["options"])
+    except DomainValidationError as exc:
+        return exc.reason_code
+    return None
 
 
 class BatchOrchestrator:
@@ -195,7 +251,10 @@ class BatchOrchestrator:
             self._repos.batches.complete_if_all_terminal(bid, from_status=batch["status"])
             return
         if batch["status"] == "PreviewReady":
-            return                                    # 확인 대기: 위 기록·완료만(만들기·컨펌·전이 없음)
+            # 확인 대기: 위 기록·완료만(만들기·컨펌·전이 없음). 자동 확인이 켜진 sync 배치만 사람 대신 확인한다.
+            if batch.get("auto_confirm") is True and batch["operation"] == Operation.SYNC.value:
+                self._auto_confirm(batch, total=total, previewed=len(previewed))
+            return
         now = utc_now_iso()
         if batch["status"] == "Previewing":
             if not queued and not previewing:         # 전원 previewed·실행 중(또는 종단)
@@ -228,6 +287,34 @@ class BatchOrchestrator:
             slots = batch["max_concurrency"] - busy
             for item in queued[:max(0, slots)]:
                 self._materialize(batch, item)
+
+    def _auto_confirm(self, batch, *, total, previewed):
+        """사람의 「배치 확인」(routes_batches.confirm_batch)을 대신한다 -- 같은 저장소 함수, 같은 회차 CAS. 회차는 이 틱에
+        다시 읽은 배치 행의 것이다: 그 뒤 항목 추가·재실행으로 Previewing 을 거쳐 회차가 바뀌었으면 0 행이고, 새 회차는
+        다음 틱이 판정한다. 0 행이면 라우트처럼 Queued 가 남은 확인 대기를 Previewing 으로 돌린다(자가 치유).
+        확인은 이 틱이 본 동의(켠 사람)에 묶는다(expected_auto_confirm_by -- 같은 UPDATE 문장): 읽은 뒤 「자동 실행 끄기」가
+        커밋됐거나 켠 사람이 강등·비활성화됐으면 0 행이라 사람 확인을 기다린다."""
+        bid, rnd = batch["batch_id"], batch["preview_round"]
+        hold = auto_confirm_hold(self._repos, self._settings, batch)
+        if hold is not None:
+            if _HELD_ROUND.get(bid) != rnd:
+                _HELD_ROUND[bid] = rnd
+                self._repos.observability.record_event(
+                    component="batch-orchestrator", severity="warning", event_type="batch_auto_confirm_held",
+                    message=(f"batch {bid} round {rnd}: auto-confirm held ({hold}) -- "
+                             f"enabled by {batch.get('auto_confirm_by')}, waiting for a manual batch confirm")[:500])
+            return
+        summary = {"previewed": previewed, "items": total, "options": batch["options"],
+                   "auto_confirm_by": batch["auto_confirm_by"]}
+        if self._repos.batches.confirm(bid, actor=AUTO_CONFIRM_ACTOR, summary=summary, expected_round=rnd,
+                                       expected_auto_confirm_by=batch["auto_confirm_by"]):
+            _HELD_ROUND.pop(bid, None)
+            self._repos.observability.record_event(
+                component="batch-orchestrator", severity="info", event_type="batch_auto_confirmed",
+                message=(f"batch {bid} round {rnd}: auto-confirmed {previewed}/{total} previewed items "
+                         f"(enabled by {batch['auto_confirm_by']})")[:500])
+        else:
+            self._repos.batches.reopen_if_queued(bid)
 
     def _confirm_child(self, item, job, now):
         # 운영자의 배치 확인이 찍은 도장(BatchesRepository.confirm)이 지금 미리보기와 같은 자식만 실행한다 -- 지문을

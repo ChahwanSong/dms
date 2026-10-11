@@ -15,11 +15,14 @@ _UNION_CHUNK = 100
 _ITEM_TERMINAL = ("Succeeded", "Failed", "Rejected", "Cancelled")
 _NO_QUEUED_ITEM = "NOT EXISTS (SELECT 1 FROM batch_items WHERE batch_id = :b AND status = 'Queued')"
 # 종단 배치에서 바꿀 수 있는 실행 설정(update_execution_settings). owner_username·operation·items·auth_method 는
-# 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫).
-_SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options")
+# 밖이다 -- 실행 신원·특권 재료와 대상은 생성 시점 사실이다(항목은 항목 편집 라우트 몫). auto_confirm_by(sync 자동
+# 확인을 켠 사람, NULL = 꺼짐)는 라우트가 본문 auto_confirm(bool)을 이 값으로 바꿔 넘긴다.
+_SETTINGS_COLUMNS = ("max_concurrency", "priority", "node_count", "procs_per_node", "options", "auto_confirm_by")
 
 def _hydrate(row):
     row["options"] = load_json(row["options"])
+    # 자동 확인 여부는 켠 사람이 있느냐다(NULL = 꺼짐 -- 구형 행·기본). 화면·API 는 bool 로 읽는다.
+    row["auto_confirm"] = row.get("auto_confirm_by") is not None
     # 확인 회차 NULL = 업그레이드 전 행·아직 확인 대기가 된 적 없는 배치 = 0회차(모름이 아니라 정의된 시작값이다 --
     # mark_preview_ready 와 confirm 의 SQL 도 COALESCE(preview_round, 0) 로 같은 규칙을 쓴다).
     if row.get("preview_round") is None:
@@ -34,13 +37,14 @@ class BatchesRepository:
     def create(self, *, operation, requester_id, actor, max_concurrency, options,
                note, items, status, priority=None, node_count=None,
                procs_per_node=None, owner_username=None, auth_method=None,
-               name=None) -> str:
+               name=None, auto_confirm_by=None) -> str:
         # priority/node_count/procs_per_node NULL = 미지정(정책 기본) — null≠0
         # (0은 유효값이 아님).
         # owner_username NULL = 비특권 현행. auth_method 기본 None(모름) — 라우트가
         # 늘 실값을 명시하고, 빠뜨린 새 호출자의 배치는 orchestrator 가 token 으로
         # 접는다(requests.create 의 "token" 기본과 같은 fail-closed 방향).
         # name NULL = 이름 없음 — 라우트가 trim·빈값 접기를 끝낸 값만 넘긴다.
+        # auto_confirm_by NULL = 자동 확인 꺼짐(기본) — 라우트가 특권 게이트를 통과한 sync 배치에만 켠 사람을 넘긴다.
         bid = uuid.uuid4().hex
         now = utc_now_iso()
         with self._db.transaction():
@@ -48,14 +52,15 @@ class BatchesRepository:
                 """INSERT INTO batches (batch_id, operation, requester_id, actor, status,
                        max_concurrency, options, note, item_count, succeeded_count,
                        failed_count, created_at, updated_at, priority, node_count,
-                       procs_per_node, owner_username, auth_method, name)
+                       procs_per_node, owner_username, auth_method, name, auto_confirm_by)
                    VALUES (:id,:op,:req,:actor,:st,:mc,:opt,:note,:n,0,0,:now,:now,:pri,:nc,
-                       :ppn,:own,:auth,:name)""",
+                       :ppn,:own,:auth,:name,:acb)""",
                 {"id": bid, "op": operation, "req": requester_id, "actor": actor,
                  "st": status, "mc": max_concurrency, "opt": dump_json(options),
                  "note": note, "n": len(items), "now": now,
                  "pri": priority, "nc": node_count, "ppn": procs_per_node,
-                 "own": owner_username, "auth": auth_method, "name": name})
+                 "own": owner_username, "auth": auth_method, "name": name,
+                 "acb": auto_confirm_by})
             for seq, item in enumerate(items):
                 self._db.execute(
                     """INSERT INTO batch_items (batch_id, seq, payload, status, request_id,
@@ -478,6 +483,33 @@ class BatchesRepository:
                  "a": dump_json(fields), "at": now})
         return True
 
+    def disable_auto_confirm(self, batch_id, *, actor) -> bool:
+        """sync 자동 확인 끄기 -- **어느 상태에서나**(실행 설정 변경과 달리 종단 한정이 아니다), 감사 행과 한 트랜잭션.
+
+        끄기는 실행을 줄이기만 한다(다음 확인을 사람이 한다) -- 미리보기 중에 "결과를 보고 직접 확인하겠다" 는 운영자의
+        브레이크라 진행 중에 쓸 수 있어야 한다. 켜기는 여기 없다: 생성·실행 설정 변경(특권 게이트, 종단 한정)뿐이다.
+        켠 사람(before)을 같은 문장의 조건으로 쓴다 -- 읽은 뒤 그 사이 다른 쓰기가 바꿨으면 0 행이라 감사 행이 거짓
+        before 를 남기지 않는다. 이미 꺼져 있으면 False(쓰지 않는다 -- updated_at 만 튀는 것도 거짓 변경 기록)."""
+        now = utc_now_iso()
+        with self._db.transaction():
+            row = self._db.query_one("SELECT auto_confirm_by FROM batches WHERE batch_id = :b", {"b": batch_id})
+            if row is None or row["auto_confirm_by"] is None:
+                return False
+            n = self._db.execute_count(
+                """UPDATE batches SET auto_confirm_by = NULL, updated_at = :now
+                      WHERE batch_id = :b AND auto_confirm_by = :was""",
+                {"now": now, "b": batch_id, "was": row["auto_confirm_by"]})
+            if n == 0:
+                return False
+            self._db.execute(
+                """INSERT INTO audit_log (mutation_class, operation, target_key, actor,
+                       before_state, after_state, at)
+                   VALUES ('batch', 'auto_confirm_off', :key, :actor, :b, :a, :at)""",
+                {"key": batch_id, "actor": actor,
+                 "b": dump_json({"auto_confirm_by": row["auto_confirm_by"]}),
+                 "a": dump_json({"auto_confirm_by": None}), "at": now})
+        return True
+
     def delete(self, batch_id):
         """배치 삭제: batches 행 + batch_items 행만, 한 트랜잭션. 자식
         requests/data_jobs/results 는 **보존**한다 — 실행 감사 이력이고,
@@ -545,7 +577,7 @@ class BatchesRepository:
                                      WHERE batch_id = :b AND status NOT IN ({ph}))""",
             {"now": utc_now_iso(), "b": batch_id, "cur": from_status}) == 1
 
-    def confirm(self, batch_id, *, actor, summary, expected_round) -> bool:
+    def confirm(self, batch_id, *, actor, summary, expected_round, expected_auto_confirm_by=None) -> bool:
         """sync 배치 확인(PreviewReady → Running) + 감사 행, 한 트랜잭션(2026-10-07).
 
         가드는 SQL 한 문장(WHERE status = 'PreviewReady')이다 -- 라우트가 읽은 뒤 그 사이 항목 추가·재실행으로 배치가
@@ -560,14 +592,26 @@ class BatchesRepository:
         확인 도장(같은 트랜잭션): 지금 ConfirmPending 인 자식 잡에 confirmed_fingerprint = preview_fingerprint 를 찍는다.
         orchestrator 는 Running 에서 **도장이 지금 미리보기와 같은 자식만** 실행한다 -- 도장 없는 미리보기(업그레이드 전
         옛 코드가 Running 중에 만든 것, 다시 미리보기해 지문이 바뀐 것)가 보이면 배치를 Previewing 으로 되돌린다. 상태
-        수준의 둑만으로는 "운영자가 본 미리보기" 와 "본 적 없는 미리보기" 를 구별할 수 없었다(2026-10-07 리뷰)."""
+        수준의 둑만으로는 "운영자가 본 미리보기" 와 "본 적 없는 미리보기" 를 구별할 수 없었다(2026-10-07 리뷰).
+
+        자동 확인(expected_auto_confirm_by, 2026-10-11 -- orchestrator 만 넘긴다): 확인을 **그 동의**에 묶는다 -- 같은
+        문장에서 켠 사람이 아직 그 사람이고(그 사이 :auto-confirm-off 가 커밋됐으면 NULL 이라 0 행) 그 계정이 지금도
+        활성 관리자일 때만 통과한다. 틱이 배치를 읽은 뒤 운영자가 「자동 실행 끄기」를 눌러 200 을 받았는데 루프가 옛
+        읽기로 확인해 root 로 돌던 창(2026-10-11 리뷰 재현)을 닫는다. 특권 목록(설정)은 SQL 밖이라 호출자가 직전에
+        본다(batch_orchestrator.auto_confirm_hold). 사람의 확인 라우트는 None(조건 없음)."""
         now = utc_now_iso()
+        consent = ""
+        params = {"now": now, "b": batch_id, "r": expected_round}
+        if expected_auto_confirm_by is not None:
+            consent = """ AND auto_confirm_by = :by
+                        AND EXISTS (SELECT 1 FROM accounts WHERE username = :by AND role = 'admin' AND disabled = 0)"""
+            params["by"] = expected_auto_confirm_by
         with self._db.transaction():
             n = self._db.execute_count(
                 f"""UPDATE batches SET status = 'Running', updated_at = :now
                       WHERE batch_id = :b AND status = 'PreviewReady' AND COALESCE(preview_round, 0) = :r
-                        AND {_NO_QUEUED_ITEM}""",
-                {"now": now, "b": batch_id, "r": expected_round})
+                        AND {_NO_QUEUED_ITEM}{consent}""",
+                params)
             if n == 0:
                 return False
             stamped = self._db.execute_count(
