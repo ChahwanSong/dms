@@ -188,7 +188,7 @@ export const REASON_MESSAGES: Record<string, string> = {
   missing_storage: "스토리지를 선택하세요",
   missing_source_storage: "소스 스토리지를 선택하세요",
   missing_destination_storage: "목적지 스토리지를 선택하세요",
-  sync_destination_inside_source: "목적지가 소스 하위 경로일 수 없습니다",
+  sync_destination_inside_source: "목적지가 소스와 같거나 그 하위 경로일 수 없습니다(스토리지 경로를 붙인 실제 경로 기준)",
   invalid_owner_username: "사용자명이 올바르지 않습니다",
   invalid_operation: "지원하지 않는 연산입니다",
   // 슬라이스 24 파괴적 경로 fail-closed. reasonCodes.json 과 같은 커밋 -- 양방향

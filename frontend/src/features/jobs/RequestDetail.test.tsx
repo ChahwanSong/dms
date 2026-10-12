@@ -436,6 +436,56 @@ test("잡 취소 성공 후 잡 목록이 즉시 갱신된다(무효화 접두 �
   expect(await screen.findByText("Cancelled")).toBeInTheDocument();
 });
 
+// --- Pending·ConfirmPending 취소(2026-10-12 사용자 요청 「Pending 과 confirm pending 에 취소 버튼이 필요해」) ---
+test("컨펌 대기 단건: 잡 카드 「취소」 + 배너 「컨펌하지 않고 취소」 -- 배너 버튼이 잡 취소를 보내고 갱신된다", async () => {
+  let cancelled = false;
+  let posted = 0;
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, operation: "rm",
+      state: cancelled ? "Cancelled" : "Planned" })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([
+      { ...JOBS[0], operation: "rm", state: cancelled ? "Cancelled" : "ConfirmPending", reason_code: null,
+        preview_fingerprint: "sha256:x", preview_expires_at: "2099-01-01T00:00:00Z",
+        preview_summary: { returncode: 0, files: 3, bytes: null } },
+    ])),
+    http.post("/api/user/jobs/j1:cancel", () => { posted += 1; cancelled = true; return HttpResponse.json({ state: "Cancelled" }); }),
+  );
+  renderAt();
+  const j1card = (await screen.findByText("j1")).closest(".bg-surface") as HTMLElement;
+  expect(within(j1card).getByRole("button", { name: "취소" })).toBeInTheDocument();   // 예전엔 컨펌 대기에서 숨겼다
+  await userEvent.click(screen.getByRole("button", { name: "컨펌하지 않고 취소" }));
+  await waitFor(() => expect(posted).toBe(1));
+  expect(await screen.findAllByText("Cancelled")).not.toHaveLength(0);
+});
+
+test("잡 Pending 단건: 배너 「작업 취소」, 실패 문구는 배너에만(카드에는 없다)", async () => {
+  const MSG = "취소에 실패했습니다 — 실행 중인 작업을 종료하지 못했습니다";
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Planned" })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([{ ...JOBS[0], state: "Pending", reason_code: null,
+                                                                     phase_refs: {} }])),
+    http.post("/api/user/jobs/j1:cancel", () => HttpResponse.json({ detail: "cancel_failed" }, { status: 409 })),
+  );
+  renderAt();
+  await userEvent.click(await screen.findByRole("button", { name: "작업 취소" }));
+  expect(await screen.findByText(MSG)).toBeInTheDocument();
+  const j1card = screen.getByText("j1").closest(".bg-surface") as HTMLElement;
+  expect(within(j1card).queryByText(MSG)).toBeNull();
+});
+
+test("배치 자식 컨펌 대기: 카드 「취소」는 있고 「작업 컨펌」·배너 취소는 없다", async () => {
+  server.use(
+    http.get("/api/user/requests/r1", () => HttpResponse.json({ ...REQUEST, state: "Planned", batch_id: "b77" })),
+    http.get("/api/user/requests/r1/jobs", () => HttpResponse.json([{ ...JOBS[0], state: "ConfirmPending", reason_code: null,
+      preview_fingerprint: "sha256:x", preview_expires_at: "2099-01-01T00:00:00Z" }])),
+  );
+  renderAt();
+  const j1card = (await screen.findByText("j1")).closest(".bg-surface") as HTMLElement;
+  expect(within(j1card).getByRole("button", { name: "취소" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "작업 컨펌" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "컨펌하지 않고 취소" })).toBeNull();
+});
+
 // --- 대상·절대경로(사용자 보고 2026-08-15): "완료된 작업을 볼 때도 관리 디렉토리가
 // 안 보여서 정확한 path 를 알 수 없다". payload 는 상대경로만 담으므로(서버 계약
 // 무변경) 화면이 **지금의** managed_root 로 조합해 보여준다. 뿌리를 모르면(관리자 전용·
@@ -617,7 +667,9 @@ test("배치 자식의 ConfirmPending 잡: 컨펌 버튼 대신 배치 상세의
   // 배치 상태와 관계없이 참인 문구(확인 대기·이미 확인됨 두 경우를 모두 말한다 -- 리뷰: Running 배치엔 확인 버튼이 없다).
   expect(link.closest("p")).toHaveTextContent("배치 항목입니다 — 실행 확인은 항목별이 아니라 배치 상세에서 배치 단위로 합니다.");
   expect(link.closest("p")).toHaveTextContent("이미 확인된 배치면 동시 실행 상한만큼씩 차례로 실행됩니다.");
-  expect(screen.queryByRole("button", { name: /컨펌|확인/ })).toBeNull();
+  // 실행을 시작하는 버튼이 없어야 한다(단계 설명 버튼 「… 설명」은 실행 버튼이 아니다 -- 2026-10-12).
+  expect(screen.queryByRole("button", { name: /^(작업 컨펌|컨펌하러 가기|배치 확인|실행 확인)$/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "작업 컨펌 단계 설명" })).toHaveAccessibleDescription(/배치 확인/);
 });
 
 test("단건(배치 아님) ConfirmPending 잡은 종전대로 컨펌할 수 있다", async () => {

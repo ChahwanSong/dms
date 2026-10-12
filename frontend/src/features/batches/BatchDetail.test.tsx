@@ -228,7 +228,11 @@ test("확인 대기는 「확인 대기」 배지(주의색) + 확인 전엔 실
   // 버튼 팔레트(accent)로 되돌아가면 배지가 눌리는 것처럼 보인다(확정값 ⑤) -- 그 회귀를 막는다.
   expect(pill.className).toContain("bg-attnbg");
   expect(pill.className).not.toContain("bg-accent");
-  expect(pill).toHaveAttribute("title", "PreviewReady");
+  // 상태 원문은 설명 툴팁 첫 줄이 말한다(2026-10-12 -- 예전엔 title). 포커스(키보드)로 열린다.
+  pill.focus();
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("상태 코드 PreviewReady");
+  expect(pill).toHaveAccessibleDescription(/「배치 확인」 전에는 실행되지 않습니다/);
+  pill.blur();
   expect(screen.getByRole("status")).toHaveTextContent("미리보기가 끝났습니다 — 「배치 확인」을 눌러야 실행됩니다. 확인 전에는 어떤 항목도 실행되지 않습니다.");
   unmount();
   renderAt("Previewing");

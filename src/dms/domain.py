@@ -7,6 +7,7 @@ import re
 from enum import StrEnum
 
 
+# 새 상태를 더하면 포탈 설명(frontend/src/lib/stateHelp.json)에도 -- test_state_help_contract 가 키를 대조한다.
 class RequestState(StrEnum):
     PENDING = "Pending"
     PLANNED = "Planned"
@@ -86,12 +87,41 @@ def validate_relative_path(path: str) -> str:
     return normalized
 
 
-def validate_sync_paths(source: str, destination: str) -> tuple[str, str]:
+def validate_sync_paths(source: str, destination: str, *, same_storage: bool = True) -> tuple[str, str]:
+    """두 상대경로의 형식 검증 + (같은 스토리지일 때만) 「목적지가 소스와 같거나 그 아래」 거부.
+
+    다른 스토리지끼리는 상대경로를 비교하지 않는다(2026-10-12 사용자 보고: /home/gpu1 의 cocoa.song → /mirr24/gpu1 의
+    cocoa.song 이 「목적지가 소스 하위 경로일 수 없습니다」로 막혔다 -- 실제 경로는 겹치지 않는다). 다른 스토리지의 겹침은
+    실제 경로(managed_root + 상대경로)로만, 그것도 두 스토리지가 한 노드의 같은 이름 공간일 때만 판정할 수 있어 planner 가
+    도구를 정한 뒤 dsync 에서 sync_overlap_problem 으로 본다(루트가 포개진 두 스토리지 /c/m 의 t/x 와 /c/m/t 의 x 를 막는다;
+    nsync 는 소스·목적지가 서로 다른 노드의 다른 파일시스템이라 비교하지 않는다)."""
     src = validate_relative_path(source)
     dst = validate_relative_path(destination)
-    if dst == src or dst.startswith(src + "/"):
+    if same_storage and (dst == src or dst.startswith(src + "/")):
         raise DomainValidationError("sync_destination_inside_source", f"{src} -> {dst}")
     return src, dst
+
+
+def managed_abs_path(root: str, rel: str) -> str:
+    """스토리지 managed_root 아래 실제 경로 -- stepper._abs 와 같은 조합 규칙(join + lstrip, 그 docstring 참고)."""
+    return posixpath.join(root, rel.lstrip("/"))
+
+
+def sync_overlap_problem(source_root, source, destination_root, destination) -> "str | None":
+    """sync 의 실제 경로 겹침 판정(스토리지가 같든 다르든) -- None 이면 괜찮다, 아니면 사유 코드. 순수 함수(DB 모름).
+
+    막는 것은 지금까지와 같은 방향 하나: 목적지가 소스와 같거나 소스 아래(같은 스토리지의 상대경로 규칙을 실제 경로로
+    넓힌 것). 두 경로가 한 파일시스템 트리에 있을 때만 뜻이 있다 -- planner 는 dsync(두 스토리지를 함께 마운트한 노드)에서만
+    부른다. 소스가 목적지 아래인 방향은 같은 스토리지에서도 허용해 왔으므로 그대로 둔다. 문자열 판정이라 bind mount·
+    심링크로 같은 곳을 가리키는 두 경로는 잡지 못한다(경계가 아니라 입력 실수 방지다 -- managed_root 밖으로 못 나가게 하는
+    보안 경계는 stepper._abs 몫). DB 값이 문자열이 아니면(변조 행) unsafe_path."""
+    if not all(isinstance(v, str) for v in (source_root, source, destination_root, destination)):
+        return "unsafe_path"
+    s = posixpath.normpath(managed_abs_path(source_root, source))
+    d = posixpath.normpath(managed_abs_path(destination_root, destination))
+    if d == s or d.startswith(s.rstrip("/") + "/"):
+        return "sync_destination_inside_source"
+    return None
 
 
 def validate_rm_target(target: str, options: dict) -> str:
@@ -278,7 +308,9 @@ def build_data_payload(operation, *, storage=None, target=None, source_storage=N
     opts = validate_options(op, options)
     fp = option_fingerprint(opts)
     if op is Operation.SYNC:
-        src, dst = validate_sync_paths(source or "", destination or "")
+        # 상대경로 포함 검사는 같은 스토리지일 때만 -- 다른 스토리지는 실제 경로로 sync_overlap_problem 이 본다.
+        src, dst = validate_sync_paths(source or "", destination or "",
+                                       same_storage=source_storage == destination_storage)
         if not source_storage or not destination_storage:
             raise DomainValidationError("missing_storage")
         payload = {"source_storage": source_storage, "source": src,

@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { HelpTip } from "../../components/ui/HelpTip";
+import { stageHelp } from "../../lib/stateHelp";
 import {
   Ban, CircleAlert, CircleCheck, CircleDashed, CircleHelp, CircleMinus, CirclePause, CircleX, Hourglass,
   Info, LoaderCircle, OctagonAlert, TimerOff, TriangleAlert, type LucideIcon,
@@ -311,6 +313,8 @@ function StageSection({ n, stage, model, op, children, titleId, refIso }: {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-3 py-2.5 sm:px-4">
         <span aria-hidden className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-infobg text-xs font-bold text-accent">{n}</span>
         <h4 className="text-sm font-semibold"><span id={titleId}>{title}</span></h4>
+        {/* 단계 설명(2026-10-12 사용자 요청) -- h4 **밖** 형제(안에 두면 heading 이름이 바뀐다). */}
+        <HelpTip label={`${title} 설명`} head={title} help={stageHelp(stage.id, model.flow)} className="-ml-2" />
         <span className="hidden font-mono text-xs text-muted sm:inline">{stageCode(stage.id, model.flow)}</span>
         <StageBadge status={stage.status} />
         <StageTime stage={stage} refIso={refIso} />
@@ -373,6 +377,7 @@ function GateRow({ job, model, refIso, batchChild, showConfirm, rowId }: {
       <StatusIcon status={gate.status} className="mt-0.5 h-4 w-4" />
       <span className="sr-only">{`작업 컨펌: ${STATUS_LABEL[gate.status]}`}</span>
       <span className={`min-w-0 flex-1 break-keep ${gate.status === "awaiting" ? "font-medium text-attn" : "text-ink/70"}`}>{text}</span>
+      <HelpTip label="작업 컨펌 단계 설명" head="작업 컨펌" help={stageHelp("gate", model.flow, { batchChild })} />
       {showConfirm && gate.status === "awaiting" && (
         <span data-confirm-trigger className="shrink-0"><ConfirmDialog job={job} /></span>
       )}

@@ -7,7 +7,7 @@ from ..repositories.node_exclusions import blocked_nodes
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
 from .auth import Identity, require_user
-from .cancel import terminate_job
+from .cancel import sweep_after_cancel, terminate_job
 
 router = APIRouter()
 
@@ -118,6 +118,16 @@ def cancel_job(job_id: str, request: Request,
         raise HTTPException(status_code=500, detail="cancel_failed")
     repos.data_jobs.set_job_state(job_id, DataJobState.CANCELLED,
                                   reason_code="cancelled_by_user", actor=identity.actor)
+    # 커밋 뒤 회수 + 정직한 응답(2026-10-12, cancel.sweep_after_cancel): 취소 도중 제출된 단계를 끝내고, stepper 가 먼저
+    # 종단시켰으면(종단 가드가 Cancelled 쓰기를 삼켰다) 실제 결과로 요청을 맞추고 409 -- 예전엔 잡·요청이 Succeeded 인데도
+    # 200 Cancelled 를 돌려줬다.
+    state = sweep_after_cancel(repos, request.app.state.execution_adapter, job)
+    if state is None:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    if state != DataJobState.CANCELLED.value:
+        repos.requests.finalize_from_job(job["request_id"], DataJobState(state),
+                                         reason_code="orphan_recovery", actor=identity.actor)
+        raise HTTPException(status_code=409, detail="already_terminal")
     repos.requests.finalize_from_job(job["request_id"], DataJobState.CANCELLED,
                                      reason_code="cancelled_by_user", actor=identity.actor)
     return {"state": "Cancelled"}

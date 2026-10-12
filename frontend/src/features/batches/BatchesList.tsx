@@ -4,6 +4,7 @@ import { isBatchTerminal, useBatches, useDeleteBatches } from "./useBatches";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
+import { batchStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
 import { batchPillVariant, batchStatusLabel } from "../../lib/jobState";
 import { kstStampOrDash } from "../../lib/datetime";
@@ -228,7 +229,8 @@ export function BatchesList() {
                 {/* 자동 확인 sync 배치(2026-10-11)는 같은 줄에 짧게 표시 — 확인 대기 없이 실행될 배치를 목록에서 가린다. */}
                 <td>{b.operation}{b.auto_confirm === true && (
                   <span className="ml-1 text-xs text-accent" title="미리보기가 끝나면 「배치 확인」 없이 실행">자동</span>
-                )}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)} /></td>
+                )}</td><td><StatusPill state={b.status} variant={batchPillVariant(b.status)} label={batchStatusLabel(b.status)}
+                                 help={batchStateHelp(b.status)} /></td>
                 <td className="text-muted">{b.succeeded_count}/{b.failed_count}/{b.item_count}</td>
                 {/* 시각은 저장소 관례대로 ISO 원문 그대로(AccountsList·JobsList·
                     구 최근 작업 카드와 같은 표기). 값 없음은 "—". */}

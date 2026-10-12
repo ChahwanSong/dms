@@ -97,6 +97,8 @@ export function RequestDetail() {
   const jobs = useRequestJobs(requestId, !notFound, { requestTerminal: reqTerminal });
   const cancel = useCancelJob(requestId);
   const cancelRequest = useCancelRequest(requestId);
+  // 배너의 「작업 취소」/「컨펌하지 않고 취소」 전용(잡 카드 훅과 나눈다 -- 실패 문구가 누른 쪽에만, 2026-10-12).
+  const cancelFocus = useCancelJob(requestId);
   // 스토리지 뿌리 맵. managed_root 는 역할 무관(2026-09-29~). 비관리자 응답엔 관리자 전용 스토리지가, 모두의 응답엔
   // 비활성 스토리지가 빠져 그 경로는 모름(절대경로 행 생략)
   const roots = useStorageRoots();
@@ -217,7 +219,8 @@ export function RequestDetail() {
             <RetryButton onClick={() => { void req.refetch(); void jobs.refetch(); }} />
           </div>
         )}
-        <OutcomeCard req={data} jobs={jobList} models={models} cancelRequest={cancelRequest} jobsLoading={jobsLoading} />
+        <OutcomeCard req={data} jobs={jobList} models={models} cancelRequest={cancelRequest} cancelJob={cancelFocus}
+                     jobsLoading={jobsLoading} />
         <RequestSpecCard spec={spec} />
         <section aria-labelledby="jobs-h" className="space-y-3">
           <h2 id="jobs-h" className="flex items-baseline gap-2 text-sm font-semibold">
