@@ -20,6 +20,15 @@ export const useSetRole = () => {
     apiSend("PUT", `/api/admin/accounts/${v.username}/role`, { role: v.role }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }) });
 };
+// root 실행 자격 부여/회수(2026-10-12) -- 서버가 「이미 root 자격이 있는 세션 관리자만」을 다시 강제한다(403
+// root_grant_privileged_only). 받은 계정의 me(can_run_as_root)는 그 계정의 다음 조회에 바로 반영된다(역할·자격은 요청마다
+// DB 에서 읽는다 -- 다시 로그인할 필요 없음).
+export const useSetRootGrant = () => {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (v: { username: string; granted: boolean }) =>
+    apiSend("PUT", `/api/admin/accounts/${v.username}/root`, { granted: v.granted }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }) });
+};
 export const useSetDisabled = () => {
   const qc = useQueryClient();
   return useMutation({ mutationFn: (v: { username: string; disabled: boolean }) =>

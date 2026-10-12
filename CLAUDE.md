@@ -46,7 +46,10 @@ PostgreSQL(제어면) + React 포탈 + 노드 에이전트 + Volcano gang-schedu
   auth=token)으로 계정을 다시 만들거나 릴리스로 옛 이미지에 롤백하면 특권 게이트가 통째로 무효가 된다 — 계정 변경은
   `accounts_session_required`, 빌드·릴리스·컨트롤 상태·레지스트리 삭제·artifact base 변경·작업(요청) 삭제는
   `auth.require_session_admin`(`admin_session_required`). 그런 새 변경 라우트를 만들면 `require_admin` 이 아니라
-  이 의존성을 쓴다. 특권 목록 이름 계정은 특권 세션 관리자만 관리(`guard_privileged_account`). 배치 sync 자식은 배치
+  이 의존성을 쓴다. 특권 목록(env `DMS_PRIVILEGED_REQUESTERS` ∪ 계정 화면 부여, 2026-10-12 — 자격 판정은 `privileged.privileged_names`,
+  계정 보호는 `privileged.protected_names`(비활성 부여 계정 포함)를 거친다) 이름 계정은 특권 세션 관리자만
+  관리(`guard_privileged_account`). admin 역할만으로
+  root 자격을 주지 마라 — 자격 부여는 특권 세션 관리자만(`routes_accounts.set_root_grant`). 배치 sync 자식은 배치
   확인 도장이 있는 미리보기만 실행된다(`docs/ARCHITECTURE.md` 「배치 재검토·확인 게이트」). 자동 확인을 켠 배치
   (`batches.auto_confirm_by`, 2026-10-11 — 기본 꺼짐, 켜기는 특권 세션 관리자만)도 orchestrator 가 **같은**
   `BatchesRepository.confirm` 을 부를 뿐이다 — 도장·회차 CAS 를 건너뛰는 지름길을 만들지 말고, 단건 sync 에 자동

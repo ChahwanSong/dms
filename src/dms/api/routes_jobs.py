@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
 from ..db import utc_now_iso
 from ..execution import ExecutionError
+from ..identity import PRIVILEGE_REQUESTED, privilege_eligible, privilege_policy
+from ..privileged import privileged_names
 from ..repositories.node_exclusions import blocked_nodes
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
@@ -84,6 +86,23 @@ def confirm_job(job_id: str, body: ConfirmBody, request: Request,
         repos.requests.finalize_from_job(job["request_id"], DataJobState.REJECTED,
                                          reason_code="node_excluded_at_step", actor=identity.actor)
         raise HTTPException(status_code=409, detail="node_excluded")
+    # root 실행 자격을 그 사이 잃었으면(2026-10-12 -- 계정 화면 「자격 빼기」·강등, env 목록에서 빠짐) root 로 계획돼 컨펌을
+    # 기다리던 단건 잡을 실행으로 넘기지 않는다: 신원은 계획 때 worker_pool 에 얼어 stepper 는 근거(privilege_policy)만
+    # 다시 볼 뿐 자격은 보지 않는다 -- 여기서 안 막으면 회수된 관리자가 미리보기 유효기간(최대 24h) 동안 uid 0 실행을
+    # 시작할 수 있다(리뷰). 배치 자식은 위에서 배치 확인으로 보냈다(_require_batch_privilege·auto_confirm_hold 가 같은 집합을
+    # 다시 본다). 모양은 node_excluded 와 같다(이 자리에서 종단 + 요청 화해 + 409).
+    ident = wp.get("identity") if isinstance(wp.get("identity"), dict) else {}
+    if ident.get("privileged") is True and privilege_policy(req) == PRIVILEGE_REQUESTED:
+        settings = request.app.state.settings
+        if not privilege_eligible(requester_id=req["requester_id"],
+                                  allow_privileged=settings.allow_privileged_requesters,
+                                  privileged_requesters=privileged_names(settings, repos),
+                                  session_authenticated=(req.get("auth_method") == "session")):
+            repos.data_jobs.set_job_state(job_id, DataJobState.REJECTED,
+                                          reason_code="privileged_not_authorized", actor=identity.actor)
+            repos.requests.finalize_from_job(job["request_id"], DataJobState.REJECTED,
+                                             reason_code="privileged_not_authorized", actor=identity.actor)
+            raise HTTPException(status_code=409, detail="privileged_not_authorized")
     # 관리자 전용 스토리지(2026-09-30 사용 범위): 미리보기까지 끝난 사용자 잡이 그 사이 관리자
     # 전용으로 바뀐 스토리지를 쓰면 컨펌(= 실행 시작)을 막는다 -- 제출 게이트·planner 만으로는
     # ConfirmPending(최대 preview TTL) 동안 남은 잡이 사용자 손으로 실행된다(리뷰 발견).

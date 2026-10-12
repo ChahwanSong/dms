@@ -169,6 +169,14 @@
 - ⏸ **root 실행 잡의 삭제에 특권 세션을 더 요구하지 않는다**(사용자 결정 2026-10-09) — 요청 삭제는 세션 관리자
   (`require_session_admin`)면 되고 `can_run_as_root` 자격은 보지 않는다. admin 은 신뢰 앵커이고(ARCHITECTURE §7 규칙
   14), 감사 스냅숏(`audit_log` 'request'/'delete' before_state)이 run_as_root·실행 신원·전이 actor 를 보존한다.
+- ⏸ **보호 계정의 셀프 비밀번호 변경 없음**(2026-10-12 root 자격 부여 리뷰) — 특권 목록(env ∪ 계정 화면 부여) 계정은
+  메일 재설정이 막히고(`_refuse_privileged_reset`) 로그인 상태의 비밀번호 변경 라우트도 없다 — 바꾸려면 특권 관리자가
+  지우고 다시 만든다(부여도 사라져 다시 줘야 한다). 그래서 부여 확인 창이 「비밀번호를 아는 사람은 모두 root」를 말한다.
+  처방: 세션 인증 셀프 변경(현재 비밀번호 확인 + 봉인 통로 `postWithSealedPassword`/`_password_from`).
+- ⏸ **자격을 잃은 생성자의 진행 중 배치는 남은 자식을 비 root 로 계획한다**(2026-10-12 리뷰, 종전 의미 유지) — 배치
+  자식은 `PRIVILEGE_IF_ELIGIBLE`(생성자가 자격 있으면 root, 없으면 실행 신원의 LDAP uid/gid)이라, 「자격 빼기」·강등 뒤
+  계획되는 자식은 거부되지 않고 비 root 로 돈다(권한은 줄어드는 방향). 한 배치 안에서 root·비 root 결과가 섞일 수 있다 —
+  필요하면 그 배치를 취소한다. 세션으로 만든 배치 자식을 거부로 바꾸는 것은 옛(토큰·NULL) 배치의 동작까지 바꿔 보류.
 - ⏸ **react-router 의존성 권고 보류**(`frontend/README.md`) — `GHSA-qwww-vcr4-c8h2` high,
   현재 어떤 `react-router-dom` 버전도 두 취약 범위를 동시에 못 피한다. 재검토 조건:
   `react-router-dom@8.3.0` 이상. **`npm audit fix --force` 금지.**

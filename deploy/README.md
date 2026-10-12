@@ -1232,6 +1232,18 @@ positional 인자(32자 hex 가 아니면 아무것도 지우지 않고 exit 2),
   minimal. To disable entirely: `DMS_ALLOW_PRIVILEGED_REQUESTERS: "false"`
   (or `DMS_PRIVILEGED_REQUESTERS: ""` -- an explicit empty string overrides
   the default to no privileged requesters).
+  **Granting eligibility without a redeploy (2026-10-12)**: the admin role
+  alone never grants root (the list is the boundary between admins -- an
+  unlisted admin must not be able to promote any account and get root). An
+  admin who is already eligible (session) can grant/revoke root eligibility
+  to another **active admin** account in 관리 → 계정 (「root 실행」 column,
+  `PUT /api/admin/accounts/{u}/root`, audited as `account/root_grant` and
+  `root_revoke`). The effective list is env ∪ granted accounts
+  (`src/dms/privileged.py`); granted accounts get the same protection as
+  listed names (only eligible admins can change/disable/delete them, no
+  self password reset). Demoting the account to user drops the grant;
+  re-creating a deleted account does not inherit it. Names in the env list
+  are shown as 「배포 설정」 and can only be changed via the ConfigMap.
 - **`DMS_JOB_IMAGE` / image tags**: manifests hardcode tags across three
   independent lineages -- `pkg-01:5000/dms:<tag>` (api/controller/migrate,
   currently `d23`), `pkg-01:5000/dms-agent:<tag>` (agent DaemonSet, `dev5`),

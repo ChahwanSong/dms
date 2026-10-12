@@ -4,6 +4,7 @@ from collections import namedtuple
 from fastapi import HTTPException, Request
 
 from ..identity import privilege_eligible
+from ..privileged import privileged_names
 
 # 예약 접두 -- audit_actor()가 토큰 인증 actor 앞에 붙이는 표식과 동일하다. 호출자가
 # x-dms-actor에 이 접두를 직접 넣으면 감사 로그에서 서버가 붙인 표식과 구분이 안 돼
@@ -93,15 +94,16 @@ def current_identity(request: Request) -> Identity:
     raise HTTPException(status_code=401, detail="not_authenticated")
 
 
-def can_run_as_root(identity: Identity, settings) -> bool:
+def can_run_as_root(identity: Identity, settings, repos) -> bool:
     """이 로그인이 잡을 root 로 낼 수 있나(2026-09-30): 관리자 역할 + identity.
     privilege_eligible(허용 설정·세션 인증·특권 목록). 제출 게이트(routes_requests)의
     판정이자 /api/auth/me 가 포탈에 알려 주는 값 -- 포탈은 이걸로 'root 권한으로 실행'
-    을 보여 주고 기본으로 켤지 정하지만, 표시일 뿐 서버가 제출 때 다시 본다."""
+    을 보여 주고 기본으로 켤지 정하지만, 표시일 뿐 서버가 제출 때 다시 본다. 특권 목록 =
+    env ∪ 계정 화면 부여(privileged.privileged_names, 2026-10-12)."""
     return identity.role == "admin" and privilege_eligible(
         requester_id=identity.actor,
         allow_privileged=settings.allow_privileged_requesters,
-        privileged_requesters=settings.privileged_requesters,
+        privileged_requesters=privileged_names(settings, repos),
         session_authenticated=(identity.auth == "session"))
 
 

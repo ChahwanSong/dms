@@ -236,6 +236,64 @@ class AccountsRepository:
                              {"r": role, "u": username})
             self._audit_account("role", username, before, self.get(username),
                                 actor, utc_now_iso())
+            # 강등은 root 실행 자격 부여도 지운다(privileged.py) -- 다시 admin 으로 올려도 저절로 되살아나지 않게(부여는
+            # 특권 관리자의 별도 결정이다). 감사는 회수 행을 따로 남긴다. **승격**(admin 아님 → admin)도 남은 플래그를 지운다
+            # (2026-10-12 리뷰: 부여와 강등이 겹쳐 user 행에 플래그가 남는 경합 -- 어느 경로로 남았든 승격이 되살리지 않게).
+            if role != ROLE_ADMIN or before["role"] != ROLE_ADMIN:
+                flag = self._db.query_one("SELECT root_granted FROM accounts WHERE username = :u", {"u": username})
+                if flag is not None and flag["root_granted"] is not None:
+                    self._db.execute("UPDATE accounts SET root_granted = NULL WHERE username = :u", {"u": username})
+                    self._audit_account("root_revoke", username, {"root_granted": flag["root_granted"] == 1},
+                                        {"root_granted": False,
+                                         "reason": "demoted" if role != ROLE_ADMIN else "promoted_stale_flag"},
+                                        actor, utc_now_iso())
+
+    # 부여할 수 없는 이름(2026-10-12 리뷰): 공유 Bearer 토큰의 actor 와 같은 이름의 계정에 자격을 주면, 토큰(모든 노드 에이전트
+    # 보유)이 세션 요구가 없는 실행 신원 지정(identity.owner_override_allowed)을 얻는다. 효력 집합에서도 늘 뺀다(DB 변조 방어).
+    RESERVED_GRANT_NAMES = frozenset({"shared-token"})
+
+    def root_granted_names(self) -> frozenset:
+        """계정 화면에서 root 실행 자격을 받은 **활성 admin** 계정 이름(privileged.privileged_names 가 env 목록과
+        합친다). 역할·활성은 읽을 때마다 다시 본다 -- 강등은 부여도 지우지만(set_role), 비활성화는 지우지 않는다(다시
+        켜면 그대로) -- 꺼진 계정은 로그인도 못 한다. 1 만 부여다(NULL·0·변조 값은 없음 -- fail-closed)."""
+        rows = self._db.query(
+            "SELECT username FROM accounts WHERE root_granted = 1 AND role = :r AND disabled = 0",
+            {"r": ROLE_ADMIN})
+        return frozenset(r["username"] for r in rows) - self.RESERVED_GRANT_NAMES
+
+    def root_grant_flagged_names(self) -> frozenset:
+        """부여 플래그가 서 있는 **모든** 계정(역할·활성 무관) -- 계정 보호(privileged.protected_names)용. 효력(root_granted_
+        names)과 나눈 이유: 비활성화된 부여 계정이 보호에서 빠지면 목록 밖 관리자가 그 계정을 다시 켜 자격을 되살렸다(보안
+        리뷰 2026-10-12)."""
+        rows = self._db.query("SELECT username FROM accounts WHERE root_granted = 1")
+        return frozenset(r["username"] for r in rows)
+
+    def root_granted_flags(self) -> dict:
+        """username -> 부여 플래그 원값(1 이면 True) -- 계정 목록 표시용(역할·활성과 무관한 저장값)."""
+        rows = self._db.query("SELECT username, root_granted FROM accounts")
+        return {r["username"]: r["root_granted"] == 1 for r in rows}
+
+    def set_root_granted(self, username, granted, *, actor):
+        """root 실행 자격 부여/회수 + 감사('account', 'root_grant'|'root_revoke'). 호출자 판정(특권 세션 관리자·env 목록
+        아님·자기 자신 아님)은 라우트가 한다(routes_accounts.set_root_grant). **부여의 admin 역할 조건은 쓰기 문장에 있다**
+        (2026-10-12 리뷰): 라우트가 읽은 역할과 이 쓰기 사이에 다른 관리자가 강등하면(대상은 아직 보호 밖) user 행에 플래그가
+        남아 나중의 승격이 자격을 몰래 되살렸다 -- 0행이면 DomainValidationError("root_grant_requires_admin")."""
+        if granted and username in self.RESERVED_GRANT_NAMES:
+            raise DomainValidationError("root_grant_reserved_name", username)
+        with self._db.transaction():
+            row = self._db.query_one("SELECT root_granted FROM accounts WHERE username = :u", {"u": username})
+            if row is None:
+                raise KeyError(username)
+            before = {"root_granted": row["root_granted"] == 1}
+            if granted:
+                if self._db.execute_count(
+                        "UPDATE accounts SET root_granted = 1 WHERE username = :u AND role = :r",
+                        {"u": username, "r": ROLE_ADMIN}) != 1:
+                    raise DomainValidationError("root_grant_requires_admin", username)
+            else:
+                self._db.execute("UPDATE accounts SET root_granted = NULL WHERE username = :u", {"u": username})
+            self._audit_account("root_grant" if granted else "root_revoke", username, before,
+                                {"root_granted": bool(granted)}, actor, utc_now_iso())
 
     def set_disabled(self, username, disabled, *, actor):
         with self._db.transaction():

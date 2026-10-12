@@ -10,6 +10,7 @@ from .identity import (LDAP_TICK_BUDGET_SECONDS, MAX_SUPPLEMENTARY_GROUPS, SUPP_
                        LdapCircuitOpen, check_chown_group, owner_override_allowed, privilege_policy,
                        resolve_job_identity, tick_resolve_deadline)
 from .repositories.storages import storage_open_to_users
+from .privileged import privileged_names
 from .repositories.sync_pairs import sync_pair_allowed
 from .placement import (
     PlacementError, TOOL_TO_POLICY, resolve_fanout, select_tool_and_candidates)
@@ -266,7 +267,7 @@ class Planner:
         if not owner_override_allowed(owner_username=owner, requester_id=req["requester_id"],
                                       requester_is_admin=requester_is_admin,
                                       allow_privileged=self._settings.allow_privileged_requesters,
-                                      privileged_requesters=self._settings.privileged_requesters):
+                                      privileged_requesters=privileged_names(self._settings, self._repos)):
             return self._reject(rid, "privileged_not_authorized")
         # 4. identity
         # (포탈의 "관리자 기본 root" 도 제출 바디의 명시 run_as_root: true 로 온다 -- 서버는 생략을
@@ -283,7 +284,7 @@ class Planner:
                 requester_id=req["requester_id"],
                 owner_username=payload.get("owner_username"),
                 allow_privileged=self._settings.allow_privileged_requesters,
-                privileged_requesters=self._settings.privileged_requesters,
+                privileged_requesters=privileged_names(self._settings, self._repos),
                 # 요청을 만든 인증 방식. token(또는 컬럼 미채움/NULL)은 특권을 못
                 # 얻는다 -- 기배포 DB 의 구형 행은 NULL 이라 자동으로 비특권이다.
                 session_authenticated=(req.get("auth_method") == "session"),
