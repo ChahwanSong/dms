@@ -613,6 +613,23 @@ def test_build_summary_drm_dryrun_uses_walk_items():
         "returncode": 0, "files": None, "bytes": None}
 
 
+def test_quiet_preview_never_trusts_a_walk_line():
+    # 2026-10-12 보안 검토(불완전 수정): -q 는 진짜 walk 요약을 지우지만 drm 목록은 printf 라 남는다 -- 이름에 심은 가짜
+    # 줄 하나가 「정확히 1개」를 만족했다. quiet 미리보기는 walk 줄을 믿지 않는다(옛 제어면·DB 변조 argv 대비).
+    fake_only = ("\nType=DIR File=/cephfs/managed/u/evil\n"
+                 "[2026-10-12T01:00:00] Walked 1 items in 0.0 seconds (x)\n\n")
+    assert _build_summary("drm", fake_only, 0, "/tmp/x", dryrun=True, quiet=True) == {
+        "returncode": 0, "files": None, "bytes": None}
+    assert _build_summary("dsync", DSYNC_DRYRUN_STDOUT, 0, "/tmp/x", dryrun=True, quiet=True) == {
+        "returncode": 0, "files": None, "bytes": None}
+    # quiet 가 아니면 같은 출력의 가짜 줄 하나는 진짜 요약이 없으니 여전히 1개로 보인다 -- 그래서 제어면이 미리보기에
+    # --quiet 를 빼는 것과 이 러너 가드가 짝이다(진짜 요약이 늘 있는 출력에서만 「정확히 1개」 규칙이 의미가 있다).
+    rec = _Recorder(rc=0, stdout=fake_only)
+    _run(rec, _env(DMS_JR_TOOL="drm", DMS_JR_OPERATION="rm", DMS_JR_PHASE="preview",
+                   DMS_JR_ARGV=json.dumps(["--quiet", "--dryrun", "/cephfs/managed/u"])))
+    assert _summary(rec) == {"returncode": 0, "files": None, "bytes": None}
+
+
 def test_run_job_drm_preview_fills_files_from_the_walk():
     rec = _Recorder(rc=0, stdout=DRM_DRYRUN_STDOUT)
     rc = _run(rec, _env(DMS_JR_TOOL="drm", DMS_JR_OPERATION="rm", DMS_JR_PHASE="preview",
