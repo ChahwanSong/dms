@@ -13,7 +13,8 @@ import { downloadCsv } from "../../lib/csvExport";
 vi.mock("../../lib/csvExport", async (orig) => ({
   ...(await orig<typeof import("../../lib/csvExport")>()), downloadCsv: vi.fn() }));
 
-const server = setupServer();
+// 미등록 스토리지 패널(2026-10-12)의 목록 -- 기본은 없음(패널이 그려지지 않는다). 시험마다 server.use 로 덮는다.
+const server = setupServer(http.get("/api/admin/usage/unregistered-storages", () => HttpResponse.json([])));
 beforeAll(() => server.listen()); afterEach(() => server.resetHandlers()); afterAll(() => server.close());
 
 // ---- 순수 헬퍼 ----
@@ -432,6 +433,37 @@ test("스토리지 선택지 = 등록 ∪ 스캔 기록 이름(삭제된 스토�
   const sel = screen.getByLabelText("스토리지 필터");
   await waitFor(() => expect(within(sel).getByRole("option", { name: "old-gpfs (미등록)" })).toBeInTheDocument());
   expect(within(sel).getByRole("option", { name: "cephfs-dms" })).toBeInTheDocument();
+});
+
+test("목록 행: 삭제된(미등록) 스토리지 행에 「미등록」 표시, 등록 스토리지 행엔 없다", async () => {
+  renderList([...LIST.slice(0, 1), { storage_name: "old-gpfs", target: "proj", scan_count: 1, last_scan_at: isoAgo(200),
+                                     latest: null }], undefined, undefined, ["cephfs-dms", "old-gpfs"]);
+  const oldRow = (await screen.findByRole("button", { name: "proj" })).closest("tr")!;
+  await waitFor(() => expect(within(oldRow).getByText("미등록")).toBeInTheDocument());
+  expect(within(screen.getByRole("button", { name: "fresh" }).closest("tr")!).queryByText("미등록")).toBeNull();
+});
+
+test("고른 스토리지가 선택지에서 사라지면(미등록 기록 정리) 필터를 풀어 전체 목록으로 돌아간다", async () => {
+  let names = ["cephfs-dms", "old-gpfs"];
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  server.use(
+    http.get("/api/admin/storages", () => HttpResponse.json(STORAGES)),
+    http.get("/api/admin/usage/scan-storages", () => HttpResponse.json(names)),
+    // old-gpfs 로 거르면 비었다(정리 뒤) -- 거르지 않으면 등록 스토리지 행들
+    http.get("/api/admin/usage/scan-targets", ({ request }) =>
+      HttpResponse.json(new URL(request.url).searchParams.get("storage") === "old-gpfs" ? [] : LIST)),
+  );
+  render(<QueryClientProvider client={qc}><MemoryRouter><UsageAnalysis /></MemoryRouter></QueryClientProvider>);
+  await screen.findByRole("button", { name: "fresh" });
+  const sel = screen.getByLabelText("스토리지 필터") as HTMLSelectElement;
+  await waitFor(() => expect(within(sel).getByRole("option", { name: "old-gpfs (미등록)" })).toBeInTheDocument());
+  await userEvent.selectOptions(sel, "old-gpfs");
+  expect(await screen.findByText("검색과 일치하는 scan 타깃이 없습니다")).toBeInTheDocument();
+  names = ["cephfs-dms"];                                        // 정리로 그 이름의 scan 기록이 사라졌다
+  await qc.invalidateQueries({ queryKey: ["usage-scan-storages"] });
+  await waitFor(() => expect(sel.value).toBe(""));
+  // 화면이 「전체 스토리지」라고 말하는 그대로 등록 스토리지 행이 다시 보인다(빈 목록에 갇히지 않는다)
+  expect(await screen.findByRole("button", { name: "fresh" })).toBeInTheDocument();
 });
 
 test("최신 리포트를 못 읽은 행: 용량은 DB 기록값임을 표시, 파일 수·hot 은 —", async () => {

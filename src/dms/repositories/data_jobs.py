@@ -268,6 +268,23 @@ class DataJobsRepository:
             {"s": DataJobState.SUCCEEDED.value})
         return [r["storage_name"] for r in rows]
 
+    def unregistered_scan_storages(self) -> list[dict]:
+        """사용량 분석에 남은 **미등록** 스토리지(등록 목록 storages 에 없는 이름 -- 삭제된 스토리지의 이력)와 그 규모
+        (2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean up」). 기준은 사용량 분석과 같다
+        (_scan_target_where 의 기본 조건 = 성공 scan) -- 이 목록에 있다 = 사용량 화면에 그 이름의 행이 있다. 행:
+        storage_name, target_count(대상 경로 수), succeeded_scan_count, last_scan_at. 등록 여부는 질의 시점의 storages
+        행이 판정한다(화면의 「(미등록)」 표시와 같은 정확 일치)."""
+        params: dict = {}
+        where = self._scan_target_where(params)
+        return self._db.query(
+            f"""SELECT storage_name, COUNT(DISTINCT target) AS target_count,
+                       COUNT(*) AS succeeded_scan_count, MAX(updated_at) AS last_scan_at
+                FROM data_jobs
+                WHERE {where} AND storage_name IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM storages s WHERE s.storage_name = data_jobs.storage_name)
+                GROUP BY storage_name ORDER BY storage_name""",
+            params)
+
     def recent_scans_by_target(self, *, per_target: int = 1, q: "str | None" = None,
                                storage: "str | None" = None, path: "str | None" = None,
                                pairs: "list[tuple[str, str]] | None" = None) -> dict:

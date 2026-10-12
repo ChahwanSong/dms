@@ -1,6 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
-import { apiGet } from "../../lib/api";
-import type { ScanTargetRow, UsageExport, UsageHistory } from "../../lib/types";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiGet, apiSend } from "../../lib/api";
+import type { PurgeStorageHistoryResult, ScanTargetRow, UnregisteredStorage, UsageExport,
+              UsageHistory } from "../../lib/types";
+import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
 // 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, path = 경로 부분 문자열 -- 둘이 함께 걸린다.
 // order = 최근 스캔 정렬(서버가 limit 전에 정렬 -- 화면이 뒤집으면 "최근 N개 중 오래된 것"이 된다).
@@ -48,3 +50,87 @@ export const useScanHistory = (storage: string | null, target: string | null,
     enabled: storage !== null && target !== null,
     staleTime: 60_000,
   });
+
+// 미등록 스토리지(2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean up」). 판정·규모는 서버가
+// 한다(등록 목록 로딩 여부와 무관). 목록과 같은 저빈도 데이터라 staleTime 30s.
+export const useUnregisteredStorages = () =>
+  useQuery({ queryKey: ["usage-unregistered"],
+             queryFn: () => apiGet<UnregisteredStorage[]>("/api/admin/usage/unregistered-storages"),
+             staleTime: 30_000 });
+
+// 정리 한 번 = 서버 회차(배치 10·단건 200)를 시도할 것이 남는 동안 반복. 건너뛴 항목은 다음 회차의 exclude_* 로 보내
+// 빠지게 한다(서버 라우트 주석 -- 앞쪽의 영구 거부가 회차 상한을 매번 차지하지 않게). 멈춤: 이번 회차에 시도한 것이
+// 없거나, 서버가 센 「다음 회차가 시도할 것」(remaining_untried)이 0 이거나 모름(null)이거나, 회차 상한. 건너뛴 id 의
+// **개수**와 remaining 을 비교하지 않는다 -- 건너뛴 뒤 다른 곳에서 지워진 id 만큼 시도하지 않은 기록을 남긴 채 멈췄다(리뷰).
+// 회차 상한 x 회차 단건 상한(200) = 서버 exclude_request_ids 상한(20000) -- 같이 바꾼다.
+export const PURGE_MAX_ROUNDS = 100;
+export interface StorageHistoryPurgeSummary {
+  storage_name: string;
+  deletedRequests: number;          // 단건 + 배치 자식
+  deletedBatches: number;
+  skipped: { id: string; kind: "request" | "batch"; reason: string; request_id: string | null }[];
+  remaining: { requests: number; batches: number } | null;
+  // 멈춘 때 아직 시도하지 않은 수(회차 상한·중간 오류로 멈췄을 때만 0 이 아니다). null = 모름.
+  untried: number | null;
+  requestIds: string[]; jobIds: string[]; batchIds: string[];
+  // 첫 회차 뒤에 난 오류(앞 회차의 삭제는 이미 커밋됐다 -- 그 수를 오류 뒤에 숨기지 않는다). 첫 회차 오류는 그대로 던진다.
+  error: string | null;
+}
+export async function purgeStorageHistory(storage_name: string,
+                                          onProgress?: (deleted: number) => void): Promise<StorageHistoryPurgeSummary> {
+  const out: StorageHistoryPurgeSummary = { storage_name, deletedRequests: 0, deletedBatches: 0, skipped: [],
+                                            remaining: null, untried: null, requestIds: [], jobIds: [], batchIds: [],
+                                            error: null };
+  const exR = new Set<string>(), exB = new Set<string>();
+  for (let round = 0; round < PURGE_MAX_ROUNDS; round++) {
+    let r: PurgeStorageHistoryResult;
+    try {
+      r = await apiSend<PurgeStorageHistoryResult>("POST", "/api/admin/usage/unregistered-storages:purge",
+        { storage_name, exclude_request_ids: [...exR], exclude_batch_ids: [...exB] });
+    } catch (e) {
+      if (round === 0) throw e;
+      out.error = (e as Error).message ?? "정리 중 오류가 났습니다";
+      break;
+    }
+    for (const d of r.deleted) { out.requestIds.push(d.request_id); out.jobIds.push(...d.job_ids); }
+    for (const b of r.deleted_batches) {
+      out.batchIds.push(b.batch_id); out.requestIds.push(...b.request_ids); out.jobIds.push(...b.job_ids);
+    }
+    out.deletedRequests += r.deleted.length + r.deleted_batches.reduce((a, b) => a + b.request_ids.length, 0);
+    out.deletedBatches += r.deleted_batches.length;
+    for (const s of r.skipped) {
+      exR.add(s.request_id);
+      out.skipped.push({ id: s.request_id, kind: "request", reason: s.reason, request_id: s.request_id });
+    }
+    for (const s of r.skipped_batches) {
+      exB.add(s.batch_id);
+      out.skipped.push({ id: s.batch_id, kind: "batch", reason: s.reason, request_id: s.request_id });
+    }
+    out.remaining = r.remaining;
+    // 구형 응답(키 없음)은 모름 -- 멈춘다.
+    const u = r.remaining_untried ?? null;
+    out.untried = u === null ? null : u.requests + u.batches;
+    onProgress?.(out.deletedRequests);
+    const tried = r.deleted.length + r.deleted_batches.length + r.skipped.length + r.skipped_batches.length;
+    if (tried === 0 || out.untried === null || out.untried === 0) break;
+  }
+  return out;
+}
+
+export function usePurgeUnregisteredStorage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { storage_name: string; onProgress?: (n: number) => void }) =>
+      purgeStorageHistory(v.storage_name, v.onProgress),
+    // 지운 요청·잡·배치의 캐시 제거 + 작업 삭제와 같은 무효화(사용량·이 목록·대시보드·감사·정리 대기·배치).
+    onSuccess: (r) => {
+      for (const rid of r.requestIds) {
+        qc.removeQueries({ queryKey: ["request", rid] });
+        qc.removeQueries({ queryKey: ["request-scan-stats", rid] });
+      }
+      for (const jid of r.jobIds) for (const k of ["artifacts", "artifact", "joblogs"]) qc.removeQueries({ queryKey: [k, jid] });
+      for (const bid of r.batchIds) qc.removeQueries({ queryKey: ["batch", bid] });
+    },
+    onSettled: () => Promise.all(DELETE_REQUESTS_INVALIDATES.map((k) => qc.invalidateQueries({ queryKey: [...k] }))),
+  });
+}

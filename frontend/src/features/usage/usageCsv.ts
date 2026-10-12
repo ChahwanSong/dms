@@ -1,11 +1,17 @@
 // 사용량 분석 전체 CSV(2026-10-02 사용자 요청: "모든 정보를 csv 로, 각 항목당 한 줄, 가능한 한 모든 데이터").
-// 원천은 GET /api/admin/usage/export(타깃마다 최신·직전 성공 scan 포인트) + 관리자 스토리지 목록(백엔드 종류·
-// 마운트·관리 디렉토리 -> 절대경로). hot 비율·구간 키는 화면과 같은 usageStats 한 벌.
+// 원천은 GET /api/admin/usage/export(타깃마다 최신·직전 성공 scan 포인트 + 행의 스토리지 정보). hot 비율·구간 키는
+// 화면과 같은 usageStats 한 벌.
+//
+// 스토리지 열(backend_type·mount_path·managed_root → abs_path, 2026-10-12 사용자 보고: 「두번째 행부터는 backend type,
+// mount path 등이 누락」): 예전엔 **지금 등록된** 스토리지 목록에서 이름으로만 찾아, 삭제된(미등록) 스토리지의 행 --
+// 화면의 「(미등록)」 -- 은 그 네 열이 비었다(최근 스캔 순 정렬이라 첫 행만 등록 스토리지였다). 이제 서버가 행마다 싣는
+// storage(등록이면 지금 값, 아니면 감사 기록의 마지막 설정)를 먼저 쓰고, 구형 서버 응답(storage 없음)만 등록 목록으로
+// 대신한다. storage_registered(등록 여부)·storage_info_source(registered | last_known | 빈 칸=모름)가 그 값의 출처를 말한다.
 //
 // 열 이름은 영문 snake_case(스크립트·피벗에서 그대로 쓰게), 시각은 KST 표기 열(_kst), 바이트는 원값(정수) +
 // 사람용 크기 한 열. 모름은 빈 칸(null≠0). 히스토그램은 축(atime/mtime/ctime)×구간마다 바이트 열, 파일 크기
 // 분포는 구간마다 개수(+바이트가 있으면 바이트) 열 -- 구간 집합은 전 행의 합집합(행마다 버킷이 달라도 열이 맞는다).
-import type { HistogramBucket, Storage, UsageExportRow, UsagePoint } from "../../lib/types";
+import type { HistogramBucket, Storage, UsageExportRow, UsagePoint, UsageStorageInfo } from "../../lib/types";
 import { absolutePath } from "../../lib/storagePaths";
 import { ageDays, kstStamp, kstStampEpoch } from "../../lib/datetime";
 import type { CsvCell } from "../../lib/csvExport";
@@ -32,6 +38,18 @@ function unionKeys(lists: (HistogramBucket[] | undefined)[]): string[] {
   return out;
 }
 
+// 행의 스토리지 정보: 서버 값이 있으면 그것, 없으면(구형 서버) 등록 목록에서. 등록 목록도 모르면(undefined) 등록 여부도 모름.
+function storageInfoOf(r: UsageExportRow, byName: Map<string, Storage>, listKnown: boolean): UsageStorageInfo | null {
+  if (r.storage !== undefined) return r.storage;
+  const st = byName.get(r.storage_name);
+  if (st !== undefined) {
+    return { registered: true, source: "registered", backend_type: st.backend_type, mount_path: st.mount_path,
+             managed_root: st.managed_root };
+  }
+  return listKnown ? { registered: false, source: null, backend_type: null, mount_path: null, managed_root: null }
+    : null;
+}
+
 export function buildUsageCsv(rows: UsageExportRow[], storages: Storage[] | undefined, nowMs: number):
     { columns: string[]; records: Record<string, CsvCell>[] } {
   const byName = new Map((storages ?? []).map((s) => [s.storage_name, s]));
@@ -43,28 +61,35 @@ export function buildUsageCsv(rows: UsageExportRow[], storages: Storage[] | unde
   const sizeHasBytes = latest.some((p) => (p.file_size_histogram ?? []).some((b) => typeof b.bytes === "number"));
 
   const base = [
-    "storage_name", "backend_type", "mount_path", "managed_root", "abs_path", "target",
+    "storage_name", "storage_registered", "backend_type", "mount_path", "managed_root", "storage_info_source",
+    "abs_path", "target",
     "scan_count", "first_scan_at_kst", "last_scan_at_kst", "days_since_last_scan",
     "latest_request_id", "latest_job_id", "latest_requester", "latest_report_generated_at_kst",
     "latest_report_readable", "total_bytes", "total_size",
     "previous_scan_at_kst", "previous_total_bytes", "delta_bytes_vs_previous", "delta_pct_vs_previous",
     ...AXES_FIRST.map((a) => `hot_ratio_${a}_180d_pct`),
   ];
-  const summaryCols = summaryKeys.map((k) => (base.includes(k) ? `summary_${k}` : k));
+  const broken = ["broken_paths_total", "broken_paths_limit"];
   const histCols = axes.flatMap((a) => axisKeys.get(a)!.map((k) => `${a}_bytes_${k}`));
   const sizeCols = sizeKeys.flatMap((k) => (sizeHasBytes
     ? [`size_count_${k}`, `size_bytes_${k}`] : [`size_count_${k}`]));
-  const columns = [...base, ...summaryCols, "broken_paths_total", "broken_paths_limit", ...histCols, ...sizeCols];
+  // 요약 키가 다른 고정 열 이름과 겹치면 summary_ 접두 -- 겹친 채 두면 머리줄에 같은 열이 둘 생기고 레코드 값이 서로
+  // 덮인다(broken_paths_*·히스토그램 열도 고정 열이다).
+  const fixed = new Set([...base, ...broken, ...histCols, ...sizeCols]);
+  const summaryCols = summaryKeys.map((k) => (fixed.has(k) ? `summary_${k}` : k));
+  const columns = [...base, ...summaryCols, ...broken, ...histCols, ...sizeCols];
 
+  const listKnown = storages !== undefined;
   const records = rows.map((r) => {
-    const st = byName.get(r.storage_name);
+    const st = storageInfoOf(r, byName, listKnown);
     const p = r.latest ?? null, prev = r.previous ?? null;
     const total = p?.total_bytes ?? null, prevTotal = prev?.total_bytes ?? null;
     const delta = total !== null && prevTotal !== null ? total - prevTotal : null;
     const age = ageDays(r.last_scan_at, nowMs);
     const rec: Record<string, CsvCell> = {
-      storage_name: r.storage_name, backend_type: st?.backend_type ?? null,
-      mount_path: st?.mount_path ?? null, managed_root: st?.managed_root ?? null,
+      storage_name: r.storage_name, storage_registered: st?.registered ?? null,
+      backend_type: st?.backend_type ?? null, mount_path: st?.mount_path ?? null,
+      managed_root: st?.managed_root ?? null, storage_info_source: st?.source ?? null,
       abs_path: absolutePath(st?.managed_root, r.target), target: r.target,
       scan_count: r.scan_count, first_scan_at_kst: kst(r.first_scan_at),
       last_scan_at_kst: kst(r.last_scan_at), days_since_last_scan: age === null ? null : Math.floor(age),

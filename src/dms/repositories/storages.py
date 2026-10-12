@@ -1,7 +1,7 @@
 import posixpath
 import re
 from ..artifact_base import ARTIFACT_MOUNT
-from ..db import Database, dump_json, utc_now_iso
+from ..db import Database, dump_json, load_json, utc_now_iso
 from ..domain import DomainValidationError
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}$")
@@ -144,6 +144,33 @@ class StoragesRepository:
     def get(self, storage_name):
         return self._db.query_one(
             "SELECT * FROM storages WHERE storage_name = :n", {"n": storage_name})
+
+    def last_known_config(self, storage_name) -> "dict | None":
+        """등록 목록에 없는 스토리지(삭제됨)의 마지막 설정(backend_type·mount_path·managed_root) -- 사용량 CSV 가 미등록
+        스토리지 행의 그 열을 비우지 않게(2026-10-12 사용자 보고: 「두번째 행부터는 backend type, mount path 등이 누락」).
+        잡·요청은 스토리지 설정을 스냅숏하지 않는다(절대경로는 stepper 가 단계마다 현재 행으로 짓는다) -- 그래서 원천은
+        이 저장소가 생성·수정·삭제마다 남기는 감사 행이다(_audit: 행 전체 JSON). 가장 최근 행 하나: delete 면
+        before_state, create·update 면 after_state. 감사 행이 없으면(감사 이전 시대·DB 직접 삽입) None = 모름.
+
+        「마지막으로 알려진」 값이지 그 scan 이 돌던 때의 값이라는 보장은 없다(그 사이 수정됐을 수 있다) -- 호출자가 출처를
+        함께 말한다. DB 가 신뢰 경계라 문자열 값만 싣는다(모양 투영)."""
+        row = self._db.query_one(
+            """SELECT operation, before_state, after_state FROM audit_log
+               WHERE mutation_class = 'storage' AND target_key = :n
+                     AND operation IN ('create', 'update', 'delete')
+               ORDER BY id DESC LIMIT 1""", {"n": storage_name})
+        if row is None:
+            return None
+        raw = row["before_state"] if row["operation"] == "delete" else row["after_state"]
+        try:
+            state = load_json(raw) if isinstance(raw, str) else None
+        except (ValueError, TypeError, RecursionError):
+            state = None
+        if not isinstance(state, dict):
+            return None
+        out = {k: (state.get(k) if isinstance(state.get(k), str) else None)
+               for k in ("backend_type", "mount_path", "managed_root")}
+        return out if any(v is not None for v in out.values()) else None
 
     def list(self):
         return self._db.query("SELECT * FROM storages ORDER BY storage_name")
