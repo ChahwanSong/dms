@@ -7,6 +7,7 @@ import { useMe } from "../auth/useAuth";
 import { Table } from "../../components/ui/Table";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
+import { requestStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
 import { ApiError, reasonText } from "../../lib/api";
 import { kstStampBare } from "../../lib/datetime";
@@ -445,7 +446,7 @@ export function JobsList() {
                       넘었다(2026-10-09 검증 지적) -- 최소 폭을 지키고 넘치는 만큼은 표의 가로 스크롤(Table)에 맡긴다. */}
                   <td className="text-muted break-all min-w-[8rem]">{pathSummary(r.operation, r.payload)}</td>
                   <td className="text-muted">{r.priority}</td>
-                  <td><StatusPill state={r.state} /></td>
+                  <td><StatusPill state={r.state} help={requestStateHelp(r.state)} /></td>
                   <td className="text-muted whitespace-nowrap pr-2">{kstStampBare(r.created_at)}</td>
                   <td className="text-muted whitespace-nowrap">{kstStampBare(r.updated_at)}</td>
                 </tr>

@@ -12,7 +12,9 @@ import { STEP_COPY, isEstimated, normTransitions, type JobStagesModel, type Stag
 export type Tone = "ok" | "bad" | "busy" | "action" | "neutral";
 export type OutcomeIcon = "check" | "x" | "clock" | "loader" | "bell" | "ban" | "hourglass" | "help";
 // confirm = 배너의 「컨펌하러 가기」(그 잡 관문 줄의 「작업 컨펌」으로 스크롤·포커스). 컨펌 창 자체는 배너에 없다.
-export type NextAction = "confirm" | "showPreview" | "liveLog" | "failLog" | "newJob" | "cancelRequest";
+// cancelJob = 배너의 「작업 취소」/「컨펌하지 않고 취소」(2026-10-12 사용자 요청 -- Pending·ConfirmPending 에 취소 버튼): 초점 잡을
+// 취소한다(잡 카드의 「취소」와 같은 API). 단건만 -- 배치 자식은 배너가 배치 안내를 한다(잡 카드에는 「취소」가 있다).
+export type NextAction = "confirm" | "showPreview" | "liveLog" | "failLog" | "newJob" | "cancelRequest" | "cancelJob";
 export interface NavTarget { jobId: string; stage: StageId; key: string }
 
 export interface Outcome {
@@ -150,7 +152,8 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
   }
   switch (job.state) {
     case "Pending":
-      return { ...o, tone: "busy", icon: "loader", title: `작업이 실행을 기다리고 있습니다${tail}`, next: next(waitText, []) };
+      return { ...o, tone: "busy", icon: "loader", title: `작업이 실행을 기다리고 있습니다${tail}`,
+        next: next(waitText, req.batch_id ? [] : ["cancelJob"]) };
     case "Preflight":
       return { ...o, tone: "busy", icon: "loader", title: `사전 점검 중입니다${tail}`, next: next(waitText, withLive([])) };
     case "PreviewRunning":
@@ -179,8 +182,8 @@ export function deriveOutcome(req: RequestDetail, jobs: DataJob[] | null, models
       }
       // "confirm" = 「컨펌하러 가기」(관문 줄의 「작업 컨펌」으로 이동). 창은 관문 줄에만 있다(confirmOwner 참고).
       return { ...o, tone: "action", icon: "bell", title: `컨펌을 기다리고 있습니다${tail}`,
-        next: next("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다.", ["confirm", "showPreview"],
-          { expiry: true, groupWarning: groupWarningOf(job) }) };
+        next: next("미리보기 결과를 검토한 뒤 컨펌하면 실제 실행이 시작됩니다. 실행하지 않으려면 컨펌하지 않고 취소하세요.",
+          ["confirm", "showPreview", "cancelJob"], { expiry: true, groupWarning: groupWarningOf(job) }) };
     }
     case "Succeeded":
       return { ...o, tone: "ok", icon: "check", title: `작업이 완료되었습니다${tail}`,

@@ -10,6 +10,7 @@ import { parseItemsCsv, serializeItemsCsv,
 import { Card } from "../../components/ui/Card";
 import { Dialog } from "../../components/ui/Dialog";
 import { StatusPill } from "../../components/ui/StatusPill";
+import { batchStateHelp } from "../../lib/stateHelp";
 import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
 import { field } from "../jobs/formFields";
@@ -876,7 +877,8 @@ export function BatchDetail() {
                 pillVariant 를 그대로 쓴다(variant 미지정). */}
             <StatusPill state={b?.status ?? "…"}
                         variant={b ? batchPillVariant(b.status) : undefined}
-                        label={b ? batchStatusLabel(b.status) : undefined} />
+                        label={b ? batchStatusLabel(b.status) : undefined}
+                        help={b ? batchStateHelp(b.status) : null} />
             <span className="text-muted text-sm">{b?.operation} · 성공 {b?.succeeded_count}/실패 {b?.failed_count}/전체 {b?.item_count}</span>
             {/* 특권 실행 문구는 로드되면 항상 -- 통일 게이트 후 배치는 전부 관리자
                 특권(root) 실행이다. 행별 auth_method/owner 유무로 재판정하지 않는다:

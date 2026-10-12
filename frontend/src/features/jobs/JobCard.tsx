@@ -2,6 +2,7 @@ import { useId, useState, type ReactNode } from "react";
 import { ChevronDown, History } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
+import { jobStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
 import { isTerminal } from "../../lib/jobState";
 import { ApiError, reasonText } from "../../lib/api";
@@ -60,9 +61,11 @@ export function JobCard({ job, model, cancel, events, requestTerminal = false, j
   events: unknown; requestTerminal?: boolean; jobCount: number; refIso?: string | null; batchChild: boolean;
   confirmOnGate: boolean;
 }) {
-  // 컨펌 대기는 「취소」 대신 컨펌 흐름이 다음 행동이다(종전 규칙 그대로). TimedOut 이 종단이 되면서(2026-10-08)
-  // 시간 초과 잡에 남던 「취소」도 사라진다.
-  const canCancel = job.state !== "ConfirmPending" && !isTerminal(job.state);
+  // 끝나지 않은 잡은 모두 「취소」(2026-10-12 사용자 요청 -- 「Pending 과 ConfirmPending 에 취소 버튼이 필요해」): 예전엔
+  // 컨펌 대기를 숨겨 미리보기를 보고 「안 하겠다」를 화면에서 할 길이 없었다(만료 24시간 동안 같은 대상은 Conflict). 서버는
+  // 처음부터 허용했다. 배치 자식도 같다 -- 단건 컨펌은 막혀 있지만 취소는 실행을 줄이기만 한다(서버 cancel_job 동일).
+  // TimedOut 이 종단이 되면서(2026-10-08) 시간 초과 잡에 남던 「취소」도 사라진다.
+  const canCancel = !isTerminal(job.state);
   return (
     <Card>
       {/* 헤더 = 식별자 · (잡 ≥2일 때만 실행 도구) · 상태 pill · 취소. 실행 도구·신원·보조 그룹은 위 「요청 내용」 카드가
@@ -79,7 +82,7 @@ export function JobCard({ job, model, cancel, events, requestTerminal = false, j
           {jobCount > 1 && <ToolLabel job={job} />}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <StatusPill state={job.state} />
+          <StatusPill state={job.state} help={jobStateHelp(job.state, { batchChild })} />
           {canCancel && (
             <Button variant="ghost" disabled={cancel.isPending}
                     onClick={() => cancel.mutate(job.job_id)}>취소</Button>

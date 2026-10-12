@@ -15,7 +15,7 @@ from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
 from .auth import Identity, can_run_as_root, require_admin, require_user
-from .cancel import terminate_job
+from .cancel import sweep_after_cancel, terminate_job
 from .routes_jobs import _owned_request
 # 모양 투영은 scan_path_stats 와 **한 벌**을 공유한다(routes_scan_paths.py:19-73 의
 # 「왜」: 키 화이트리스트만으로는 리포트 값 안의 경로 유출을 못 막는다 — 숫자와
@@ -155,6 +155,8 @@ def submit(body: RequestBody, request: Request,
     repos = request.app.state.repos
     priority = resolve_priority(repos, body.operation, body.priority)
     try:
+        # sync 경로 겹침: 같은 스토리지는 여기서(build_data_payload, 상대경로), 다른 스토리지는 실제 경로로 planner 가 도구를
+        # 정한 뒤 본다(dsync -- 두 스토리지가 한 노드의 같은 이름 공간일 때만 뜻이 있다, 2026-10-12).
         payload, resource_key = _validated_payload(body, priority, run_as_root)
     except (DomainValidationError, ValueError) as e:
         reason = getattr(e, "reason_code", "invalid_operation")
@@ -352,6 +354,19 @@ def cancel_request(request_id: str, request: Request,
     # planner 경쟁: 요청을 종결하기 전에 잡을 먼저 조회·종료해야 고아가 남지 않는다.
     adapter = request.app.state.execution_adapter
     jobs = repos.data_jobs.list_jobs(request_id=request_id)
+    if not jobs:
+        # 잡이 아직 없는 요청(2026-10-12): 「아직 Pending 일 때만」 한 문장 CAS 로 취소한다 -- planner 의 잡 생성
+        # (create_plan_and_job: Pending→Planned CAS + plan·job INSERT 한 트랜잭션)과 직렬화된다. 예전엔 빈 잡 목록을 읽은
+        # 직후 planner 가 잡을 커밋하면 요청만 Cancelled 로 덮이고 잡은 Pending 으로 남아 실제로 실행됐다(stepper 는 요청
+        # 상태를 보지 않는다). CAS 가 지면 planner 가 이겼다 -- 다시 읽어 잡 경로로 취소한다.
+        if repos.requests.cancel_if_pending(request_id, reason_code="cancelled_by_user", actor=identity.actor):
+            return {"state": "Cancelled"}
+        fresh = repos.requests.get(request_id)
+        if fresh is None:
+            raise HTTPException(status_code=404, detail="request_not_found")
+        if RequestState(fresh["state"]) in TERMINAL_REQUEST_STATES:
+            raise HTTPException(status_code=409, detail="already_terminal")
+        jobs = repos.data_jobs.list_jobs(request_id=request_id)
     # 잡은 이미 전부 종단인데 요청만 아직 비종단인 창이 있다 — stepper의 finalize가
     # 누락된 고아(data_jobs.terminal_jobs_with_live_request()가 복구하려는 바로 그 상태,
     # 컨트롤러 크래시 후엔 재시작까지 지속된다). 여기서 취소를 기록하면 실제 결과
@@ -372,6 +387,15 @@ def cancel_request(request_id: str, request: Request,
     for job in jobs:
         repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
                                       reason_code="cancelled_by_user", actor=identity.actor)
+    # 커밋 뒤 회수(cancel.sweep_after_cancel): 취소 도중 제출된 단계를 끝낸다. 잡이 전부 stepper 손에 먼저 끝났으면(아무도
+    # Cancelled 가 아니다) 거짓 취소 대신 실제 결과로 맞추고 409 -- 위 「이미 전부 종단」 분기와 같은 처리.
+    states = [sweep_after_cancel(repos, adapter, job) for job in jobs]
+    if jobs and not any(s == DataJobState.CANCELLED.value for s in states):
+        for s in states:
+            if s is not None:
+                repos.requests.finalize_from_job(request_id, DataJobState(s), reason_code="orphan_recovery",
+                                                 actor=identity.actor)   # 멱등 — 첫 잡이 이긴다
+        raise HTTPException(status_code=409, detail="already_terminal")
     # set_state가 아니라 finalize_from_job — 다른 모든 종단 전이와 동일하게 results 행을
     # 남긴다(set_state는 상태만 바꾸고 결과를 기록하지 않는다).
     repos.requests.finalize_from_job(request_id, DataJobState.CANCELLED,

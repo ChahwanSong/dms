@@ -16,7 +16,7 @@ import time
 
 from .artifact_base import resolve_artifact_base, static_base_problem, strip_scheme
 from .db import iso_epoch, iso_plus, utc_now_iso
-from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem
+from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, managed_abs_path
 from .execution import ExecStatus, ExecutionError, JobSpec
 from .execution_manifests import parse_execution_reason, parse_preflight_reason
 from .identity import (LDAP_TICK_BUDGET_SECONDS, PRIVILEGE_NEVER, IdentityDeadlineExceeded,
@@ -478,7 +478,8 @@ class JobStepper:
         # 신뢰 경계다(§1-1) -- 변조된 절대 target 이 그대로 실리면 drm 이
         # managed_root 밖을 지운다. 기존 f-string 은 "/cephfs/dms//etc" 로 안에
         # 가뒀었고, 그 봉쇄를 join 치환의 부수효과로 잃을 수는 없다.
-        return posixpath.join(root, rel.lstrip("/"))
+        # 조합 규칙은 domain.managed_abs_path 한 곳(2026-10-12 -- sync 겹침 판정이 같은 실제 경로를 본다).
+        return managed_abs_path(root, rel)
 
     def _artifact_base(self):
         # 슬라이스 18: DB 가 env 를 이긴다(설계 §2.1). JobStepper 는 매 틱

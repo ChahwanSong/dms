@@ -109,7 +109,8 @@ test("「작업 컨펌」 소유: 비배치 컨펌 대기가 있으면 늘 관�
   const single = outcome({ state: "Planned" }, [cp]);
   // 리뷰 N5: 단건이 초점이어도 창은 관문 줄에 있다(초점이 바뀌어도 열린 창이 옮겨 가지 않게). "confirm" 은 이동 버튼이다.
   expect(single.confirmOwner).toBe("gate");
-  expect(single.next?.actions).toEqual(["confirm", "showPreview"]);
+  // 2026-10-12 사용자 요청: 컨펌 대기에도 취소 -- 「컨펌하지 않고 취소」(cancelJob, 배치 자식은 아래처럼 없음)
+  expect(single.next?.actions).toEqual(["confirm", "showPreview", "cancelJob"]);
   expect(single.next?.expiry).toBe(true);
   const many = outcome({ state: "Planned" }, [cp, { ...cp, job_id: "j2" }]);
   expect(many.confirmOwner).toBe("gate");
@@ -119,6 +120,15 @@ test("「작업 컨펌」 소유: 비배치 컨펌 대기가 있으면 늘 관�
   expect(batch.confirmOwner).toBe("none");
   expect(batch.next?.batchNotice).toBe(true);
   expect(batch.next?.actions).toEqual(["showPreview"]);
+});
+
+test("잡 Pending 배너: 단건은 「작업 취소」(cancelJob), 배치 자식은 없음(2026-10-12 사용자 요청)", () => {
+  const pending = job({ state: "Pending" });
+  expect(outcome({ state: "Planned" }, [pending]).next?.actions).toEqual(["cancelJob"]);
+  expect(outcome({ state: "Planned", batch_id: "b77" }, [pending]).next?.actions).toEqual([]);
+  // 진행 중 단계는 종전 그대로(잡 카드에 「취소」가 있다)
+  expect(outcome({ state: "Planned" }, [job({ state: "Preflight", phase_refs: { preflight: "p" } })]).next?.actions)
+    .not.toContain("cancelJob");
 });
 
 test("V2 「작업 컨펌」 소유는 초점이 아니라 비배치 ConfirmPending 수로 -- 실패 잡이 초점이어도 관문 줄이 갖는다", () => {

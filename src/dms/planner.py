@@ -4,7 +4,7 @@ import time
 from dataclasses import asdict
 
 from .db import iso_plus, utc_now_iso
-from .domain import Operation, RequestState, valid_owner_username
+from .domain import Operation, RequestState, sync_overlap_problem, valid_owner_username
 from .identity import (LDAP_TICK_BUDGET_SECONDS, MAX_SUPPLEMENTARY_GROUPS, SUPP_OVER_LIMIT,
                        IdentityDeadlineExceeded, IdentityLookupInvalid, IdentityRejected, IdentityUnavailable,
                        LdapCircuitOpen, check_chown_group, owner_override_allowed, privilege_policy,
@@ -233,8 +233,10 @@ class Planner:
         # 이 면제를 쓰지 않는다(d142 불변식: 계정 역할 기준 -- 강등된 생성자의 배치는 거부).
         pair_exempt = requester_is_admin or bool(req.get("batch_id"))
         # 3. storage admission
+        storage_rows = {}
         for name in _required_storages(req["operation"], payload):
             storage = self._repos.storages.get(name)
+            storage_rows[name] = storage
             if storage is None:
                 return self._reject(rid, "storage_missing")
             if not storage["enabled"]:
@@ -323,6 +325,20 @@ class Planner:
                 self._record_identity_defer(rid, exc)
                 return "deferred:identity_propagating"
             return self._reject(rid, exc.reason_code)
+        # 5b. sync 실제 경로 겹침(2026-10-12): 목적지가 소스와 같거나 그 아래면 거부 -- managed_root 를 붙인 **실제 경로**로 본다
+        #     (다른 스토리지끼리 같은 상대경로를 막던 사용자 보고의 수정, 루트가 포개진 두 스토리지는 막는다). 같은 이름 공간일
+        #     때만 뜻이 있다: dsync 는 두 스토리지를 함께 마운트한 노드에서 돌아 두 경로가 한 파일시스템 트리에 있지만, nsync
+        #     (함께 마운트한 노드가 없을 때)는 소스·목적지가 서로 다른 노드의 다른 파일시스템이라 문자열이 같아도 다른 곳이다
+        #     (검증 지적 -- CPU 노드의 /home 과 GPU 노드의 /home/gpu1). 그래서 도구가 정해진 **뒤**, dsync 에서만 본다. 같은
+        #     스토리지의 상대경로 검사는 제출 시점(build_data_payload)이 이미 했다.
+        if req["operation"] == Operation.SYNC.value and placement["tool"] == "dsync":
+            src_row = storage_rows.get(payload.get("source_storage"))
+            dst_row = storage_rows.get(payload.get("destination_storage"))
+            if src_row is not None and dst_row is not None:
+                problem = sync_overlap_problem(src_row.get("managed_root"), payload.get("source"),
+                                               dst_row.get("managed_root"), payload.get("destination"))
+                if problem is not None:
+                    return self._reject(rid, problem)
         # 6. policy fan-out
         policy = self._repos.control.get_policy(TOOL_TO_POLICY[placement["tool"]])
         # payload 는 신뢰 경계 밖(DB 무검증 INSERT 전제) — node_count 가 **있는데**

@@ -4,12 +4,13 @@ import {
 } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
+import { requestStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
 import { ApiError, reasonText } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
 import type { DataJob, RequestDetail } from "../../lib/types";
-import type { useCancelRequest } from "./useJobs";
+import type { useCancelJob, useCancelRequest } from "./useJobs";
 import { Elapsed } from "./JobStages";
 import { useStageNav } from "./stageNav";
 import { msText } from "./format";
@@ -72,9 +73,11 @@ function ExpiryLine({ job }: { job: DataJob }) {
   );
 }
 
-export function OutcomeCard({ req, jobs, models, cancelRequest, jobsLoading = false }: {
+export function OutcomeCard({ req, jobs, models, cancelRequest, cancelJob, jobsLoading = false }: {
   req: RequestDetail; jobs: DataJob[] | null; models: JobStagesModel[];
   cancelRequest: ReturnType<typeof useCancelRequest>;
+  // 배너 전용 잡 취소 훅(잡 카드의 훅과 나눈다 -- 실패 문구가 누른 쪽에만 뜨게, JobCard 와 같은 원칙).
+  cancelJob: ReturnType<typeof useCancelJob>;
   jobsLoading?: boolean;
 }) {
   const outcome = deriveOutcome(req, jobs, models, { jobsLoading });
@@ -94,7 +97,7 @@ export function OutcomeCard({ req, jobs, models, cancelRequest, jobsLoading = fa
           {outcome.subtitle && <p className="mt-0.5 text-sm text-ink/70 break-keep">{outcome.subtitle}</p>}
         </div>
         {/* 요청 pill 은 페이지에서 여기 한 번만(e2e E6: Succeeded 배지 = 요청 1 + 잡 N). */}
-        <span className="ml-auto shrink-0"><StatusPill state={req.state} /></span>
+        <span className="ml-auto shrink-0"><StatusPill state={req.state} help={requestStateHelp(req.state)} /></span>
       </div>
       {req.reason_code && (
       <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-1 text-sm sm:grid-cols-[max-content_minmax(0,1fr)]">
@@ -155,6 +158,14 @@ export function OutcomeCard({ req, jobs, models, cancelRequest, jobsLoading = fa
                     ) : null;
                   case "newJob":
                     return <Link key={a} to="/jobs/new" className={LINK_BTN}>새 작업 제출</Link>;
+                  case "cancelJob":
+                    // 초점 잡 취소(2026-10-12). 파괴적 동작이라 첫 행동이어도 primary 로 칠하지 않는다(cancelRequest 와 같다).
+                    return focus ? (
+                      <Button key={a} variant="ghost" disabled={cancelJob.isPending}
+                              onClick={() => cancelJob.mutate(focus.job_id)}>
+                        {focus.state === "ConfirmPending" ? "컨펌하지 않고 취소" : "작업 취소"}
+                      </Button>
+                    ) : null;
                   case "cancelRequest":
                     return (
                       // 잡이 하나도 없을 때만 요청 단위 취소를 보여준다 — 잡이 있으면 잡 단위 취소가 그 역할을 한다.
@@ -167,6 +178,9 @@ export function OutcomeCard({ req, jobs, models, cancelRequest, jobsLoading = fa
           )}
           {cancelRequest.isError && (
             <p className="text-bad text-sm mt-1">{(cancelRequest.error as ApiError).message}</p>
+          )}
+          {cancelJob.isError && focus && cancelJob.variables === focus.job_id && (
+            <p className="text-bad text-sm mt-1">{(cancelJob.error as ApiError).message}</p>
           )}
         </div>
       )}

@@ -168,6 +168,25 @@ class RequestsRepository:
                                     None, actor, now)
         return True
 
+    def cancel_if_pending(self, request_id, *, reason_code, actor) -> bool:
+        """잡이 아직 없는 요청의 취소(2026-10-12): **아직 Pending 일 때만** Cancelled + 전이 + results 를 한 트랜잭션으로.
+        planner 의 잡 생성(DataJobsRepository.create_plan_and_job -- 같은 행의 Pending→Planned CAS)과 직렬화된다: 영향 0 =
+        planner 가 먼저 잡을 만들었거나(Planned) 이미 끝났다 -- 아무것도 쓰지 않고 False(호출자가 다시 읽어 잡 경로로 간다).
+        mark_planned_if_pending 의 거울이다."""
+        now = utc_now_iso()
+        with self._db.transaction():
+            moved = self._db.execute_count(
+                """UPDATE requests SET state = :cancelled, updated_at = :now
+                   WHERE request_id = :id AND state = :pending""",
+                {"cancelled": RequestState.CANCELLED.value, "pending": RequestState.PENDING.value,
+                 "now": now, "id": request_id})
+            if moved != 1:
+                return False
+            self._record_transition(request_id, RequestState.PENDING, RequestState.CANCELLED,
+                                    reason_code, actor, now)
+            self.record_result(request_id, RequestState.CANCELLED, reason_code=reason_code)
+        return True
+
     def list_pending(self, limit: int = 50) -> list[dict]:
         rows = self._db.query(
             """SELECT request_id FROM requests WHERE state = :s

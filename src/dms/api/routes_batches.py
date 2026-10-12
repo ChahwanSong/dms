@@ -6,7 +6,7 @@ from ..domain import (DataJobState, DomainValidationError, Operation,
                       validate_batch_controls, validate_options, validate_owner_username)
 from ..execution import ExecutionError
 from .auth import Identity, require_admin
-from .cancel import terminate_job
+from .cancel import sweep_after_cancel, terminate_job
 from .routes_requests import reject_when_maintenance
 
 router = APIRouter()
@@ -667,6 +667,11 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
             continue
         repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
                                       reason_code="cancelled_by_batch", actor=identity.actor)
+    # 커밋 뒤 회수(2026-10-12, cancel.sweep_after_cancel -- 단건·요청 취소와 같은 규칙): 배치는 자식마다 k8s 삭제를 하므로
+    # 스냅숏 → Cancelled 커밋 사이 창이 가장 길다. 그 사이 stepper 가 제출한 단계(예: 확인된 sync 자식의 root 실행 vcjob)를
+    # 끝낸다 -- 예전엔 Cancelled 배치 밑에서 끝까지 돌았다(검증 지적). 잡의 지금 상태는 아래 요청 마무리에 쓴다.
+    for _, job in child_jobs:
+        sweep_after_cancel(repos, adapter, job)
     # 자식 요청은 잡 루프가 아니라 item에서 돈다. materialize는 됐지만 planner가 아직
     # 도달하지 못한 item은 잡 행이 하나도 없어 위 루프에 등장하지 않는다 —
     # 그 요청을 종결하지 않으면 Pending인 채 list_pending()에 남아 planner가 곧바로
@@ -675,8 +680,27 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
         rid = it.get("request_id")
         if not rid:
             continue
-        jobs = jobs_by_seq.get(it["seq"], [])
-        if jobs and all(DataJobState(j["state"]) in TERMINAL_DATA_JOB_STATES for j in jobs):
+        if not jobs_by_seq.get(it["seq"]):
+            # 잡 없는 자식(2026-10-12): Pending CAS(requests.cancel_if_pending -- planner 의 잡 생성과 직렬화). 지면 planner 가
+            # 그 사이 잡을 만들었다 -- 예전엔 요청만 Cancelled 로 덮여 그 잡이 Pending 으로 남아 실행됐다. 다시 읽어 끝낸다.
+            if repos.requests.cancel_if_pending(rid, reason_code="cancelled_by_batch", actor=identity.actor):
+                continue
+            for job in repos.data_jobs.list_jobs(request_id=rid):
+                try:
+                    terminate_job(adapter, job)
+                except ExecutionError as exc:
+                    # 이미 다른 자식의 취소를 기록했다 -- 되돌릴 수 없어 숨기지 않고 남긴다(sweep 과 같은 이벤트).
+                    repos.observability.record_event(
+                        component="api", severity="error", event_type="terminate_failed",
+                        message=f"{exc.reason_code}: batch cancel late child {job['job_id']}"[:500],
+                        payload={"job_id": job["job_id"], "after_cancel": True}, request_id=rid)
+                repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
+                                              reason_code="cancelled_by_batch", actor=identity.actor)
+                sweep_after_cancel(repos, adapter, job)
+        # 요청 마무리는 **지금** 잡 상태로(스냅숏이 아니다 -- 그 사이 stepper 가 성공시킨 자식을 Cancelled 로 덮지 않는다).
+        jobs = repos.data_jobs.list_jobs(request_id=rid)
+        if jobs and not any(j["state"] == DataJobState.CANCELLED.value for j in jobs) \
+                and all(DataJobState(j["state"]) in TERMINAL_DATA_JOB_STATES for j in jobs):
             # 잡이 이미 종단이면 취소가 아니라 그 실제 결과로 요청을 화해시킨다.
             state, reason = DataJobState(jobs[0]["state"]), "orphan_recovery"
         else:
