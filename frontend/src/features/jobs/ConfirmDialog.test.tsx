@@ -46,7 +46,13 @@ test("요약 문구: null(모름)과 0 을 구분하고, 요약이 없는 옛 �
   expect(previewSummaryText({ operation: "sync", preview_summary: { returncode: 0, files: null, bytes: null } }))
     .toBe("복사 대상 모름 · 크기 모름");
   expect(previewSummaryText({ operation: "rm", preview_summary: { returncode: 0, files: 12, bytes: null } }))
-    .toBe("삭제 대상 12개");
+    .toBe("삭제 대상 12개(대상 경로 포함, 파일·디렉터리 합계)");
+  // 개수를 못 읽은 옛 rm 미리보기(2026-10-12 이전)는 모름 + 목록이 있는 곳
+  expect(previewSummaryText({ operation: "rm", preview_summary: { returncode: 0, files: null, bytes: null } }))
+    .toBe("삭제 대상 모름 — 미리보기 출력(stdout.log)의 'Walked N items' 줄이 지울 항목 수입니다(목록은 앞·뒤 10개만 찍힙니다)");
+  // 0 = 대상 경로를 찾지 못함(drm walk 는 빈 디렉터리도 대상 자신을 세 1) -- 「빈 대상」으로 읽히면 안 된다
+  expect(previewSummaryText({ operation: "rm", preview_summary: { returncode: 0, files: 0, bytes: null } }))
+    .toBe("삭제 대상 0개 — 대상 경로를 찾지 못했습니다(오타·이미 삭제·권한 — 미리보기 출력의 'Failed to stat' 확인)");
   expect(previewSummaryText({ operation: "sync", preview_summary: { returncode: 2, files: 1, bytes: 10 } }))
     .toBe("복사 대상 1개 · 10 B · dry-run 종료코드 2");
   expect(previewSummaryText({ operation: "sync", preview_summary: null }))

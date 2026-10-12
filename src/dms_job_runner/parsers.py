@@ -4,7 +4,7 @@
 않는다(설계 §4 fail-soft: 파싱이 잡을 죽이는 경로는 없다). files의 의미는
 "항목(items)"으로 통일한다(설계 §2.2): dsync = 최종 Items(디렉터리+파일+링크),
 nsync = Planned actions 합계(설계 부록 A -- 같은 트리에서 dsync Items와 일치),
-drm = Removed N items, dscan = summary.total_entries -- drm이 파일/디렉터리 구분
+drm = Removed N items(미리보기는 walk 항목 수 -- parse_rm_dryrun_counts), dscan = summary.total_entries -- drm이 파일/디렉터리 구분
 없이 items만 내므로 도구 교차 일관성이 가장 좋다. parse_scan_counts만 파일을
 읽는다(읽기 전용) -- 나머지는 문자열 입력만 받는 순수 함수다."""
 import json
@@ -25,8 +25,17 @@ _SYNC_BYTES = re.compile(r"\((\d+) bytes\)\s*$", re.MULTILINE)
 # (...)" 뒤에 목적지 "Walked 0 items ..."). 그래서 미리보기 files/bytes 가 항상 null
 # 이었고 지문(summary 해시)이 사실상 상수였다. 최종 walk 줄("seconds", 진행 줄의
 # "secs ..."는 배제)의 **첫** 매치 = 소스 항목 수. 바이트는 walk 가 찍지 않아 null.
-_SYNC_WALKED = re.compile(r"Walked (\d+) items in [\d.]+ seconds \(", re.MULTILINE)
+# 줄 머리를 MFU INFO 로그 접두사("[YYYY-MM-DDTHH:MM:SS] ", mfu_util.h)에 고정한다(2026-10-12 리뷰): 앵커가 없으면 walk
+# 요약보다 **먼저** 찍히는 "[ts] Walking <대상 경로>" 줄이나 walk 오류 줄("[ts] [rank] [file:line] ERROR: ... '<경로>'")의
+# 경로 텍스트에 이 문구가 들어 있을 때 그 숫자가 첫 매치가 됐다(경로는 공백·괄호를 허용한다). 항목 목록
+# (mfu_flist_print)은 walk 줄 **뒤**에 오므로 첫 매치를 앞지르지 못한다.
+_SYNC_WALKED = re.compile(r"^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\] Walked (\d+) items in [\d.]+ seconds \(",
+                          re.MULTILINE)
 _RM_ITEMS = re.compile(r"Removed (\d+) items")
+# drm --dryrun(미리보기)도 "Removed N items" 를 찍지 않는다(2026-10-12 실측: walk 요약 뒤에 지울 항목 목록
+# "Type=DIR File=..." 만) -- drm.c 가 dryrun 이면 mfu_flist_unlink 대신 mfu_flist_print 만 부르고, 그 목록은 앞 10개·뒤
+# 10개만 찍고 중간을 "<snip>" 으로 자른다(mfu_flist.c, --stat 이면 ls 형식) -- 줄 수로는 셀 수 없다. 그래서 rm 미리보기
+# files 가 늘 null(컨펌 창 「삭제 대상 모름」)이었다. walk 요약이 유일한 개수 출처이고, dsync 미리보기와 같은 정규식이다.
 
 # nsync는 stock mpifileutils가 아니라 역할 기반(src/dst rank) 별도 도구라 Items:/
 # (N bytes)를 전혀 찍지 않는다 -- 실측 출력과 결정 근거는 설계 부록 A.
@@ -108,6 +117,25 @@ def _nsync_bytes(stdout: str) -> "int | None":
 def parse_rm_counts(stdout: str) -> "tuple[int | None, None]":
     """drm stdout -> (removed items, None). drm은 바이트를 보고하지 않는다(설계 §1)."""
     return _last_int(_RM_ITEMS, stdout), None
+
+
+def parse_rm_dryrun_counts(stdout: str) -> "tuple[int | None, None]":
+    """drm --dryrun stdout -> (지울 항목 수, None) = walk 요약의 첫 최종 줄(drm 은 경로 하나를 한 번 walk 한다 -- 진행 줄
+    "secs ..." 는 배제). 삭제 요약("Removed N items")은 보지 않는다: dry-run 은 mfu_flist_unlink 를 부르지 않아 그 줄이
+    절대 나오지 않고(drm.c, mfu_flist_remove.c), 앵커 없는 _RM_ITEMS 는 목록에 찍힌 파일 이름("Removed 1 items.txt")만
+    잡아 walk 수를 덮어썼다(2026-10-12 리뷰 -- 「삭제 대상 1개」인데 실행은 25만 개).
+
+    walk 개수 = 지울 개수인 근거: DMS 는 drm 에 regex 필터(--match/--exclude/--name)를 싣지 않는다(rm 옵션은
+    recursive·stat·lite·quiet -- domain._OPTION_SPECS, execution_manifests._RM_BOOL_FLAGS) -- 그래서 walk 한 목록 전체가
+    지울 대상이고(drm.c: 필터가 없으면 srclist = flist), 실행의 "Removed N" 과 같은 값이다(대상 경로 자신과 하위
+    디렉터리·파일·링크 합계 -- 실측 Walked 6 → Removed 6). 필터 옵션을 싣게 되면 이 등식이 깨진다 -- 그때는 이 파서를
+    다시 봐라. 실행 단계에는 쓰지 않는다: 실행의 개수는 실제로 지운 수여야 한다(walk 수로 지어내지 않는다).
+
+    0 의 뜻: walk 는 대상이 있으면 대상 자신을 센다(빈 디렉터리도 1 -- mfu_flist_walk.c walk_create) -- 0 은 대상의
+    lstat 이 실패했다는 뜻(경로 없음·권한)이고 drm 은 그래도 rc 0 으로 끝난다(drm.c 가 walk 결과를 버린다). 값은 사실
+    그대로 0(지울 것이 없다)으로 두고, 포탈이 rm 의 0 을 「대상 경로를 찾지 못함」으로 따로 말한다."""
+    matches = _SYNC_WALKED.findall(stdout or "")
+    return (int(matches[0]) if matches else None), None
 
 
 def parse_scan_counts(report_path: str) -> "tuple[int | None, int | None]":

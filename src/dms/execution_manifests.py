@@ -51,6 +51,13 @@ def tool_argv(spec, *, abs_paths: dict) -> list[str]:
         return ["--directory", abs_paths["target"], *flags, *tail]
     flags = render_tool_flags(spec.tool, spec.options)
     dry = ["--dryrun"] if spec.dryrun else []
+    if spec.dryrun:
+        # 미리보기에는 --quiet 를 싣지 않는다(2026-10-12): 세 도구 모두 -q 가 로그 수준을 NONE 으로 내려
+        # 미리보기 개수의 유일한 출처를 지운다 -- drm·dsync 는 walk 요약("Walked N items in X seconds",
+        # mfu_flist_walk.c 가 VERBOSE 일 때만), nsync 는 "Planned actions:"(MFU_LOG_INFO). 그러면 컨펌 창이 늘
+        # 「삭제·복사 대상 모름」이고 지문(요약 해시)도 상수가 된다. quiet 는 로그 양만 바꾸고 무엇을 지우거나
+        # 복사하는지는 바꾸지 않으므로, 사용자가 고른 quiet 는 실행 단계에 그대로 적용된다.
+        flags = [f for f in flags if f != "--quiet"]
     if spec.tool in ("dsync", "nsync"):
         return [*flags, *_auto_chown(spec), *dry,
                 abs_paths["source"], abs_paths["destination"]]

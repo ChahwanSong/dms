@@ -488,7 +488,7 @@ export function SubmitJob() {
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" aria-label="direct" checked={f.direct} onChange={on("direct")} /> direct
                 </label>
-                <label className="flex items-center gap-2 text-sm">
+                <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목·복사한 파일)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
                   <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
                 </label>
               </div>
@@ -623,7 +623,7 @@ export function SubmitJob() {
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" aria-label="lite" checked={f.lite} onChange={on("lite")} /> lite
               </label>
-              <label className="flex items-center gap-2 text-sm">
+              <label className="flex items-center gap-2 text-sm" title="실행 로그를 줄입니다 — 실행 결과 개수(삭제한 항목·복사한 파일)도 「—」가 됩니다. 미리보기(dry-run)에는 적용하지 않습니다(대상 수를 세는 줄이 사라지므로)">
                 <input type="checkbox" aria-label="quiet" checked={f.quiet} onChange={on("quiet")} /> quiet
               </label>
             </div>

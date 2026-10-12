@@ -231,6 +231,83 @@ def test_rm_empty_and_walked_only():
     assert parse_rm_counts("[ts] Walked 10 items in 0.001 seconds\n") == (None, None)
 
 
+# ---- parse_rm_dryrun_counts (2026-10-12) ----
+# 실측 캡처(테스트베드, 잡 adb1ce59 preview/stdout.log, `drm --dryrun /cephfs/managed/dms_test/suppgrp`): 삭제 요약
+# ("Removed N items")이 없고 walk 요약 + 지울 항목 목록(mfu_flist_print)뿐이다. 같은 잡 실행은 "Removed 6 items" --
+# walk 6 과 같다. 예전 파서는 이 출력에서 null 이라 rm 미리보기가 늘 「삭제 대상 모름」이었다.
+DRM_DRYRUN_STDOUT = """\
+[2026-10-07T18:43:25] Walking /cephfs/managed/dms_test/suppgrp
+[2026-10-07T18:43:25] Walked 6 items in 0.004 secs (1523.069 items/sec) ...
+[2026-10-07T18:43:25] Walked 6 items in 0.006 seconds (1050.294 items/sec)
+
+Type=DIR File=/cephfs/managed/dms_test/suppgrp
+Type=DIR File=/cephfs/managed/dms_test/suppgrp/ro
+Type=DIR File=/cephfs/managed/dms_test/suppgrp/rw
+Type=DIR File=/cephfs/managed/dms_test/suppgrp/rw/alice-revoke-1008b
+Type=REG File=/cephfs/managed/dms_test/suppgrp/rw/alice-revoke-1008b/p1.txt
+Type=REG File=/cephfs/managed/dms_test/suppgrp/ro/p.txt
+
+"""
+
+
+def test_rm_dryrun_real_capture_uses_walk_items_and_null_bytes():
+    from dms_job_runner.parsers import parse_rm_dryrun_counts
+    assert parse_rm_counts(DRM_DRYRUN_STDOUT) == (None, None)          # 실행 파서는 여전히 모름(지어내지 않는다)
+    assert parse_rm_dryrun_counts(DRM_DRYRUN_STDOUT) == (6, None)      # walk 6 = 실행의 Removed 6
+
+
+def test_rm_dryrun_counts_the_walk_not_the_truncated_list():
+    # 큰 트리: mfu_flist_print 는 앞 10개·뒤 10개만 찍고 "<snip>" -- 목록 줄 수(20)가 아니라 walk 수다.
+    from dms_job_runner.parsers import parse_rm_dryrun_counts
+    listing = "\n".join(f"Type=REG File=/t/f{i}" for i in range(10))
+    out = ("[2026-10-12T01:00:00] Walked 12345 items in 1.000 seconds (12345.000 items/sec)\n\n"
+           f"{listing}\n\n<snip>\n\n{listing}\n\n")
+    assert parse_rm_dryrun_counts(out) == (12345, None)
+
+
+def test_rm_dryrun_ignores_progress_and_quiet_output():
+    from dms_job_runner.parsers import parse_rm_dryrun_counts
+    # 진행 줄("secs ...")만 있으면 최종 walk 가 아니다 -- 모름
+    assert parse_rm_dryrun_counts("[2026-10-12T01:00:00] Walked 5 items in 0.1 secs (50 items/sec) ...\n") == (None, None)
+    # quiet(-q) 출력: walk 요약이 통째로 없고 목록만 -- 지어내지 않는다(그래서 미리보기는 --quiet 를 싣지 않는다)
+    assert parse_rm_dryrun_counts("\nType=REG File=/t/a\n\n") == (None, None)
+    assert parse_rm_dryrun_counts("") == (None, None)
+    assert parse_rm_dryrun_counts(None) == (None, None)
+
+
+def test_rm_dryrun_never_reads_a_removal_summary_from_file_names():
+    # 리뷰 재현(2026-10-12): dry-run 은 "Removed N items" 를 절대 찍지 않는다(mfu_flist_unlink 를 부르지 않는다) --
+    # 예전 「삭제 요약 우선」 분기는 목록에 찍힌 파일 이름만 잡아 walk 25만을 1 로 덮었다.
+    from dms_job_runner.parsers import parse_rm_dryrun_counts
+    out = ("[2026-10-12T01:00:00] Walked 250000 items in 20.006 seconds (12496.251 items/sec)\n\n"
+           "Type=REG File=/c/u/logs/Removed 1 items.txt\n\n")
+    assert parse_rm_dryrun_counts(out) == (250000, None)
+
+
+def test_walk_count_is_anchored_to_the_log_prefix_not_path_text():
+    # 리뷰 재현(2026-10-12): walk 요약보다 먼저 찍히는 "Walking <경로>" 줄과 walk 오류 줄의 경로에 같은 문구가 있으면
+    # 그 숫자가 첫 매치였다(경로는 공백·괄호 허용). dsync 미리보기도 같은 정규식이라 함께 막힌다.
+    from dms_job_runner.parsers import parse_rm_dryrun_counts, parse_sync_dryrun_counts
+    walking = "[2026-10-12T01:00:00] Walking /cephfs/managed/u/Walked 1 items in 0.0 seconds (old)\n"
+    error = ("[2026-10-12T01:00:00] [0] [mfu_flist_walk.c:314] ERROR: Failed to open directory with opendir: "
+             "'/cephfs/managed/u/Walked 2 items in 1.0 seconds (a)' (errno=13 Permission denied)\n")
+    real = "[2026-10-12T01:00:20] Walked 250000 items in 20.006 seconds (12496.251 items/sec)\n"
+    assert parse_rm_dryrun_counts(walking + error + real) == (250000, None)
+    assert parse_sync_dryrun_counts(walking + error + real) == (250000, None)
+
+
+def test_rm_dryrun_zero_means_the_target_was_not_found_not_an_empty_dir():
+    # walk 는 대상이 있으면 대상 자신을 센다 -- 빈 디렉터리는 1, 0 은 대상 lstat 실패(경로 없음·권한)다. 값은 사실 그대로
+    # 0(지울 것 없음)이고 포탈이 rm 의 0 을 「대상 경로를 찾지 못함」으로 따로 말한다(null 모름과도 다르다).
+    from dms_job_runner.parsers import parse_rm_dryrun_counts
+    missing = ("[2026-10-12T01:00:00] [0] [mfu_flist_walk.c:402] ERROR: Failed to stat: '/cephfs/managed/x' "
+               "(errno=2 No such file or directory)\n"
+               "[2026-10-12T01:00:00] Walked 0 items in 0.001 seconds (0.000 items/sec)\n")
+    empty_dir = "[2026-10-12T01:00:00] Walked 1 items in 0.001 seconds (1000.000 items/sec)\n\nType=DIR File=/t\n\n"
+    assert parse_rm_dryrun_counts(missing) == (0, None)
+    assert parse_rm_dryrun_counts(empty_dir) == (1, None)
+
+
 # ---- parse_scan_counts ----
 
 def _write_report(tmp_path, payload) -> str:
@@ -362,4 +439,4 @@ def test_sync_dryrun_without_any_walk_line_is_null():
     from dms_job_runner.parsers import parse_sync_dryrun_counts
     assert parse_sync_dryrun_counts("[ts] Completed sync\n") == (None, None)
     # 진행 줄("secs ...")만 있고 최종 줄이 없으면 매치하지 않는다
-    assert parse_sync_dryrun_counts("[ts] Walked 5 items in 0.1 secs (50 items/sec) ...\n") == (None, None)
+    assert parse_sync_dryrun_counts("[2026-10-12T01:00:00] Walked 5 items in 0.1 secs (50 items/sec) ...\n") == (None, None)

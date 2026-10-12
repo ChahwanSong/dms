@@ -7,7 +7,7 @@ import sys
 from .commands import (
     getent_hosts_command, mpirun_command, nsync_role_map, passwd_line,
     ssh_key_copy_command, ssh_probe_command)
-from .parsers import (parse_nsync_counts, parse_rm_counts, parse_scan_counts,
+from .parsers import (parse_nsync_counts, parse_rm_counts, parse_rm_dryrun_counts, parse_scan_counts,
                       parse_sync_counts, parse_sync_dryrun_counts)
 
 # 워커 준비 대기(2026-10-02 프로덕션 간헐 실패 수리): 모든 워커가 "IP 로 풀리고 + 그 IP 로 ssh 가 되는" 상태가
@@ -126,8 +126,8 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     write_text(f"{artifact_dir}/stderr.log", proc.stderr or "")
 
     # 8. summary — 도구별 파싱(설계 §3). preview/execution 공통 계약(3키)이되,
-    #    dsync --dryrun 은 복사 요약을 찍지 않아 walk 항목 수로 대신한다(parsers
-    #    .parse_sync_dryrun_counts). 제어면은 이 사본을 preview_summary 로 저장하고
+    #    dsync·drm --dryrun 은 복사·삭제 요약을 찍지 않아 walk 항목 수로 대신한다(parsers
+    #    .parse_sync_dryrun_counts·parse_rm_dryrun_counts). 제어면은 이 사본을 preview_summary 로 저장하고
     #    지문도 이 객체의 해시다(2026-09-17) -- null 이면 지문이 상수가 된다.
     summary = _build_summary(tool, proc.stdout, proc.returncode, artifact_dir,
                              dryrun="--dryrun" in argv)
@@ -224,6 +224,9 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False):
             # nsync는 mpifileutils가 아니라 역할 기반 별도 도구라 출력 형식이
             # 완전히 다르다 -- dsync 파서로 보내면 항상 null이었다(설계 부록 A).
             files, nbytes = parse_nsync_counts(stdout or "")
+        elif tool == "drm" and dryrun:
+            # 미리보기: 삭제 요약이 없으므로 walk 항목 수(= 지울 수, 2026-10-12 -- 늘 「삭제 대상 모름」이던 것).
+            files, nbytes = parse_rm_dryrun_counts(stdout or "")
         elif tool == "drm":
             files, nbytes = parse_rm_counts(stdout or "")
         elif tool == "dscan":
