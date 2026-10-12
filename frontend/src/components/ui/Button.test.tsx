@@ -20,4 +20,13 @@ test("variant 3종이 서로 다른 계층 클래스로 분기된다", () => {
   rerender(<Button variant="ghost">확인</Button>);
   expect(btn.className).toContain("border-line");
   expect(btn.className).not.toContain("accent");
+  expect(btn.className).not.toContain("bad");
+
+  // danger = 빨강 아웃라인(2026-10-12, 실행을 멈추는 취소) -- 솔리드가 아니다(주 동작보다 앞서 보이면 오클릭).
+  rerender(<Button variant="danger">확인</Button>);
+  expect(btn.className).toContain("text-bad");
+  expect(btn.className).toContain("border-bad");
+  expect(btn.className).toContain("bg-surface");
+  expect(btn.className).not.toMatch(/(^|\s)bg-bad(\s|$)/);
+  expect(btn.className).not.toContain("accent");
 });

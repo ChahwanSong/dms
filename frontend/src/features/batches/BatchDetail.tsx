@@ -13,6 +13,7 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { batchStateHelp } from "../../lib/stateHelp";
 import { BarChart } from "../../components/ui/BarChart";
 import { Button } from "../../components/ui/Button";
+import { CancelButton } from "../../components/ui/CancelButton";
 import { field } from "../jobs/formFields";
 import { BatchExecutionSettingsDialog } from "./BatchExecutionSettingsDialog";
 import { batchJobsPath, useRequestJobs } from "../jobs/useJobs";
@@ -916,7 +917,7 @@ export function BatchDetail() {
             {b?.operation === "sync" && b.auto_confirm === true && !terminal && (
               <Button variant="ghost" disabled={autoOff.isPending} onClick={() => autoOff.mutate()}>자동 실행 끄기</Button>
             )}
-            {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <Button variant="ghost" disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</Button>}
+            {(b?.status === "Running" || b?.status === "Previewing" || b?.status === "PreviewReady") && <CancelButton disabled={cancel.isPending} onClick={() => cancel.mutate()}>취소</CancelButton>}
           </div>
         </div>
         {/* 메모는 편집 밖에서도 보인다 — 없으면 행 자체 생략(빈칸 소음 방지).

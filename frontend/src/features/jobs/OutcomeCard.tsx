@@ -6,6 +6,7 @@ import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { requestStateHelp } from "../../lib/stateHelp";
 import { Button } from "../../components/ui/Button";
+import { CancelButton } from "../../components/ui/CancelButton";
 import { ApiError, reasonText } from "../../lib/api";
 import { kstStamp } from "../../lib/datetime";
 import { useNow } from "../../lib/useNow";
@@ -159,18 +160,19 @@ export function OutcomeCard({ req, jobs, models, cancelRequest, cancelJob, jobsL
                   case "newJob":
                     return <Link key={a} to="/jobs/new" className={LINK_BTN}>새 작업 제출</Link>;
                   case "cancelJob":
-                    // 초점 잡 취소(2026-10-12). 파괴적 동작이라 첫 행동이어도 primary 로 칠하지 않는다(cancelRequest 와 같다).
+                    // 초점 잡 취소(2026-10-12). 파괴적 동작이라 첫 행동이어도 primary 로 칠하지 않는다(cancelRequest 와 같다) --
+                    // 빨강 아웃라인(CancelButton)으로 눈에 띄게만 한다.
                     return focus ? (
-                      <Button key={a} variant="ghost" disabled={cancelJob.isPending}
-                              onClick={() => cancelJob.mutate(focus.job_id)}>
+                      <CancelButton key={a} disabled={cancelJob.isPending}
+                                    onClick={() => cancelJob.mutate(focus.job_id)}>
                         {focus.state === "ConfirmPending" ? "컨펌하지 않고 취소" : "작업 취소"}
-                      </Button>
+                      </CancelButton>
                     ) : null;
                   case "cancelRequest":
                     return (
                       // 잡이 하나도 없을 때만 요청 단위 취소를 보여준다 — 잡이 있으면 잡 단위 취소가 그 역할을 한다.
-                      <Button key={a} variant="ghost" disabled={cancelRequest.isPending}
-                              onClick={() => cancelRequest.mutate()}>요청 취소</Button>
+                      <CancelButton key={a} disabled={cancelRequest.isPending}
+                                    onClick={() => cancelRequest.mutate()}>요청 취소</CancelButton>
                     );
                 }
               })}

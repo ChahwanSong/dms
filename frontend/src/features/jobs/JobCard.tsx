@@ -3,7 +3,7 @@ import { ChevronDown, History } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { jobStateHelp } from "../../lib/stateHelp";
-import { Button } from "../../components/ui/Button";
+import { CancelButton } from "../../components/ui/CancelButton";
 import { isTerminal } from "../../lib/jobState";
 import { ApiError, reasonText } from "../../lib/api";
 import { toolSummary } from "../../lib/jobTool";
@@ -84,8 +84,8 @@ export function JobCard({ job, model, cancel, events, requestTerminal = false, j
         <div className="flex shrink-0 items-center gap-2">
           <StatusPill state={job.state} help={jobStateHelp(job.state, { batchChild })} />
           {canCancel && (
-            <Button variant="ghost" disabled={cancel.isPending}
-                    onClick={() => cancel.mutate(job.job_id)}>취소</Button>
+            <CancelButton disabled={cancel.isPending}
+                          onClick={() => cancel.mutate(job.job_id)}>취소</CancelButton>
           )}
         </div>
       </div>
