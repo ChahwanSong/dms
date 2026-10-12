@@ -296,6 +296,23 @@ def test_walk_count_is_anchored_to_the_log_prefix_not_path_text():
     assert parse_sync_dryrun_counts(walking + error + real) == (250000, None)
 
 
+def test_newline_in_a_name_cannot_inject_a_walk_count():
+    # 2026-10-12 보안 검토: 경로 이름에는 줄바꿈이 들어갈 수 있어, 이름에 "\n[ts] Walked 1 items in 0.0 seconds (" 를
+    # 심으면 줄 머리부터 맞는 가짜 줄이 진짜 요약 앞(「Walking」·walk 오류 줄)이나 뒤(drm 목록)에 생긴다. 가짜는 더할 수만
+    # 있으므로 walk 횟수보다 많이 보이면 모름 -- drm 은 정확히 1, dsync 는 2 이하.
+    from dms_job_runner.parsers import parse_rm_dryrun_counts, parse_sync_dryrun_counts
+    fake = "[2026-10-12T01:00:00] Walked 1 items in 0.0 seconds (x)"
+    real = "[2026-10-12T01:00:20] Walked 250000 items in 20.006 seconds (12496.251 items/sec)\n"
+    before = f"[2026-10-12T01:00:00] Walking /cephfs/managed/u/evil\n{fake}\n"          # 대상 이름에 심은 것
+    after = f"\nType=DIR File=/cephfs/managed/u/evil\n{fake}\n\n"                         # 목록의 하위 이름에 심은 것
+    assert parse_rm_dryrun_counts(before + real) == (None, None)
+    assert parse_rm_dryrun_counts(real + after) == (None, None)
+    assert parse_rm_dryrun_counts(real) == (250000, None)                                 # 깨끗하면 그대로
+    dst = "[2026-10-12T01:00:21] Walked 0 items in 0.001 seconds (0.000 items/sec)\n"
+    assert parse_sync_dryrun_counts(before + real + dst) == (None, None)                  # 소스 앞 주입 → 3개 → 모름
+    assert parse_sync_dryrun_counts(real + dst) == (250000, None)
+
+
 def test_rm_dryrun_zero_means_the_target_was_not_found_not_an_empty_dir():
     # walk 는 대상이 있으면 대상 자신을 센다 -- 빈 디렉터리는 1, 0 은 대상 lstat 실패(경로 없음·권한)다. 값은 사실 그대로
     # 0(지울 것 없음)이고 포탈이 rm 의 0 을 「대상 경로를 찾지 못함」으로 따로 말한다(null 모름과도 다르다).

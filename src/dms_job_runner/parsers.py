@@ -31,6 +31,13 @@ _SYNC_BYTES = re.compile(r"\((\d+) bytes\)\s*$", re.MULTILINE)
 # (mfu_flist_print)은 walk 줄 **뒤**에 오므로 첫 매치를 앞지르지 못한다.
 _SYNC_WALKED = re.compile(r"^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\] Walked (\d+) items in [\d.]+ seconds \(",
                           re.MULTILINE)
+# 그래도 경로 이름에는 줄바꿈이 들어갈 수 있다(validate_relative_path 도, 파일시스템도 막지 않는다) -- 대상 트리 안의 이름에
+# "\n[ts] Walked 1 items in 0.0 seconds (" 를 넣으면 「Walking」·walk 오류 줄(진짜 요약 **앞**)이나 drm 목록(진짜 요약 **뒤**)에
+# 줄 머리부터 맞는 가짜 줄이 생긴다(2026-10-12 보안 검토 -- 컨펌 창에 「삭제 대상 1개」, 실제 삭제 25만). 가짜 줄은 **더할** 수만
+# 있고 진짜 줄을 지울 수는 없으므로 「walk 횟수보다 많이 보이면 모름」으로 막는다: drm 은 경로 하나를 한 번(정확히 1),
+# dsync 는 소스·목적지 두 번(DMS 는 link-dest 를 싣지 않는다 -- 2 이하). 넘치면 null(모름, 지어내지 않는다).
+_DRM_WALKS = 1
+_DSYNC_MAX_WALKS = 2
 _RM_ITEMS = re.compile(r"Removed (\d+) items")
 # drm --dryrun(미리보기)도 "Removed N items" 를 찍지 않는다(2026-10-12 실측: walk 요약 뒤에 지울 항목 목록
 # "Type=DIR File=..." 만) -- drm.c 가 dryrun 이면 mfu_flist_unlink 대신 mfu_flist_print 만 부르고, 그 목록은 앞 10개·뒤
@@ -72,7 +79,8 @@ def parse_sync_dryrun_counts(stdout: str) -> "tuple[int | None, int | None]":
     files, nbytes = parse_sync_counts(stdout)
     if files is None:
         matches = _SYNC_WALKED.findall(stdout or "")
-        files = int(matches[0]) if matches else None
+        # walk 횟수보다 많으면 이름에 심은 가짜 줄이 섞였다 -- 어느 것이 소스인지 믿을 수 없다(위 주석).
+        files = int(matches[0]) if 0 < len(matches) <= _DSYNC_MAX_WALKS else None
     return files, nbytes
 
 
@@ -135,7 +143,8 @@ def parse_rm_dryrun_counts(stdout: str) -> "tuple[int | None, None]":
     lstat 이 실패했다는 뜻(경로 없음·권한)이고 drm 은 그래도 rc 0 으로 끝난다(drm.c 가 walk 결과를 버린다). 값은 사실
     그대로 0(지울 것이 없다)으로 두고, 포탈이 rm 의 0 을 「대상 경로를 찾지 못함」으로 따로 말한다."""
     matches = _SYNC_WALKED.findall(stdout or "")
-    return (int(matches[0]) if matches else None), None
+    # drm 은 정확히 한 번 walk 한다 -- 둘 이상이면 경로 이름에 심은 가짜 줄이 섞였다(위 _DRM_WALKS 주석), 모름.
+    return (int(matches[0]) if len(matches) == _DRM_WALKS else None), None
 
 
 def parse_scan_counts(report_path: str) -> "tuple[int | None, int | None]":
