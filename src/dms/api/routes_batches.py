@@ -5,6 +5,7 @@ from ..domain import (DataJobState, DomainValidationError, Operation,
                       TERMINAL_DATA_JOB_STATES, build_data_payload, validate_batch,
                       validate_batch_controls, validate_options, validate_owner_username)
 from ..execution import ExecutionError
+from ..privileged import privileged_names
 from .auth import Identity, require_admin
 from .cancel import sweep_after_cancel, terminate_job
 from .routes_requests import reject_when_maintenance
@@ -63,7 +64,7 @@ def _require_batch_privilege(request: Request, identity: Identity) -> None:
     생성 게이트를 통과하지 못하는 관리자가 바꿀 수 있으면 생성 게이트를 우회하는 셈이다."""
     settings = request.app.state.settings
     authorized = (settings.allow_privileged_requesters
-                  and identity.actor in settings.privileged_requesters
+                  and identity.actor in privileged_names(settings, request.app.state.repos)
                   and identity.auth == "session")
     if not authorized:
         raise HTTPException(status_code=403, detail="privileged_not_authorized")

@@ -33,7 +33,7 @@ def test_list_accounts_excludes_password_hash(client):
     rows = resp.json()
     assert len(rows) >= 1
     for row in rows:
-        assert set(row.keys()) == {"username", "role", "email", "disabled", "created_at"}
+        assert set(row.keys()) == {"username", "role", "email", "disabled", "created_at", "root_source", "root_eligible", "root_granted"}
 
 
 def test_set_role_updates_account(client):
@@ -41,7 +41,7 @@ def test_set_role_updates_account(client):
     resp = _op(client).put("/api/admin/accounts/u1/role", json={"role": "admin"})
     assert resp.status_code == 200
     assert resp.json()["role"] == "admin"
-    assert set(resp.json().keys()) == {"username", "role", "email", "disabled", "created_at"}
+    assert set(resp.json().keys()) == {"username", "role", "email", "disabled", "created_at", "root_source", "root_eligible", "root_granted"}
 
 
 def test_set_disabled_updates_account(client):
@@ -49,7 +49,7 @@ def test_set_disabled_updates_account(client):
     resp = _op(client).put("/api/admin/accounts/u1/disabled", json={"disabled": True})
     assert resp.status_code == 200
     assert resp.json()["disabled"] == 1
-    assert set(resp.json().keys()) == {"username", "role", "email", "disabled", "created_at"}
+    assert set(resp.json().keys()) == {"username", "role", "email", "disabled", "created_at", "root_source", "root_eligible", "root_granted"}
 
 
 def test_set_role_missing_account_404(client):

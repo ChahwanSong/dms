@@ -37,6 +37,7 @@ from .db import load_json, utc_now_iso
 from .domain import (DomainValidationError, Operation, RequestState, TERMINAL_REQUEST_STATES,
                      DataJobState, build_data_payload, resolve_priority, validate_options)
 from .identity import privilege_eligible
+from .privileged import privileged_names
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
 # repositories.batches._ACTIVE(list_active 가 고르는 상태) + 확인 대기(기록만) -- _drive 의 재확인용.
@@ -95,7 +96,7 @@ def auto_confirm_hold(repos, settings, batch) -> str | None:
         # 사이트 전체 특권(root) 실행이 꺼졌다 -- 켠 사람 탓이 아니라 사람이 확인해도 root 로 돌지 못한다(문구가 다르다).
         return _hold(reason_code="auto_confirm_privileged_disabled")
     if not privilege_eligible(requester_id=by, allow_privileged=settings.allow_privileged_requesters,
-                              privileged_requesters=settings.privileged_requesters,
+                              privileged_requesters=privileged_names(settings, repos),
                               session_authenticated=True):
         return _hold(reason_code="auto_confirm_not_privileged")
     account = repos.accounts.get(by)

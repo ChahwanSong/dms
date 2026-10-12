@@ -10,6 +10,7 @@ from ..domain import (
 )
 from ..execution import ExecutionError
 from ..identity import owner_override_allowed
+from ..privileged import privileged_names
 from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN
 from ..repositories.storages import storage_open_to_users
 from ..repositories.sync_pairs import sync_pair_allowed
@@ -139,7 +140,7 @@ def submit(body: RequestBody, request: Request,
     if not owner_override_allowed(owner_username=owner, requester_id=identity.actor,
                                   requester_is_admin=(identity.role == "admin"),
                                   allow_privileged=settings.allow_privileged_requesters,
-                                  privileged_requesters=settings.privileged_requesters):
+                                  privileged_requesters=privileged_names(settings, request.app.state.repos)):
         raise HTTPException(status_code=403, detail="privileged_not_authorized")
     # root 실행 게이트: planner 와 같은 자격(세션 인증 포함)을 제출 시점에 즉시 확인한다
     # -- 통과 못 할 요청을 Pending 으로 받아 뒀다가 계획 때 거부하지 않는다. planner 도
@@ -149,7 +150,7 @@ def submit(body: RequestBody, request: Request,
     # 정해 확정값을 명시로 싣는다(SubmitJob rootEffective). 생략을 root 로 읽으면 옛 포탈 탭·
     # 판정이 어긋난 화면이 "비 root" 라고 표시한 채 root 로 돈다.
     run_as_root = body.run_as_root is True
-    if run_as_root and not can_run_as_root(identity, settings):
+    if run_as_root and not can_run_as_root(identity, settings, request.app.state.repos):
         raise HTTPException(status_code=403, detail="privileged_not_authorized")
 
     repos = request.app.state.repos

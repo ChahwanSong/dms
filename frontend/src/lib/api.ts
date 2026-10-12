@@ -352,6 +352,12 @@ export const REASON_MESSAGES: Record<string, string> = {
   storage_registered: "이 스토리지는 지금 등록돼 있어 여기서 기록을 정리하지 않습니다 — 등록된 스토리지의 기록은 전체 작업에서 지우세요",
   storage_history_mismatch: "이 스토리지의 scan 이 아닌 작업이 섞여 있어 건너뛰었습니다 — 전체 작업에서 확인한 뒤 지우세요",
   storage_history_batch_mixed: "다른 스토리지 항목이나 다른 작업이 섞인 배치라 배치째 지우지 않았습니다 — 배치 상세에서 확인한 뒤 전체 작업에서 배치 단위로 지우세요",
+  // root 실행 자격 부여(2026-10-12, PUT /api/admin/accounts/{u}/root -- 계정 화면). 자격은 관리자 사이의 경계라 이미 root
+  // 자격이 있는 세션 관리자만 줄 수 있다. env 목록(DMS_PRIVILEGED_REQUESTERS) 이름은 배포 설정으로만 바뀐다.
+  root_grant_privileged_only: "root 실행 자격은 이미 root 실행 자격이 있는 관리자만 주거나 뺄 수 있습니다",
+  root_grant_config_managed: "이 계정의 root 실행 자격은 배포 설정(DMS_PRIVILEGED_REQUESTERS)으로 정해져 화면에서 바꿀 수 없습니다",
+  root_grant_requires_admin: "root 실행 자격은 관리자(admin) 역할 계정에만 줄 수 있습니다 — 먼저 역할을 admin 으로 바꾸세요",
+  root_grant_reserved_name: "이 이름은 공유 토큰이 쓰는 이름이라 root 실행 자격을 줄 수 없습니다",
   purge_k8s_failed: "남은 파드·잡 정리에 실패했습니다 — 자동으로 다시 시도합니다",
   purge_waiting_pods: "잡 파드가 아직 종료 중입니다 — 종료되면 결과 파일을 정리합니다(오래 걸리면 노드 상태를 확인하세요)",
   purge_base_unavailable: "결과 폴더를 열 수 없습니다 — 결과 폴더 설정·마운트를 확인하세요",

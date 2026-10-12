@@ -940,6 +940,8 @@ test("root 자격 없는 관리자에겐 체크박스 대신 안내 — run_as_r
   renderPage();
   await fillSyncTarget();
   expect(await screen.findByText(/이 계정은 root 실행 자격이 없습니다/)).toBeInTheDocument();
+  // admin 역할만으로는 안 되고 어디서 받는지를 말한다(2026-10-12 사용자 보고 -- 역할을 올렸는데 체크박스가 없었다)
+  expect(screen.getByText(/「관리 → 계정」의 root 실행에서 줄 수 있습니다/)).toBeInTheDocument();
   expect(screen.queryByLabelText("root 권한으로 실행")).not.toBeInTheDocument();
   expect(screen.getByText("실행 신원의 uid/gid(권한 그대로 적용)")).toBeInTheDocument();
   await userEvent.click(submitButton());

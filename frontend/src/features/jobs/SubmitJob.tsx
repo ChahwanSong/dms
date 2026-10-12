@@ -687,8 +687,8 @@ export function SubmitJob() {
           )}
           {!canRoot && (
             <p className="text-muted text-xs">
-              이 계정은 root 실행 자격이 없습니다(특권 요청자 목록 밖이거나 세션 로그인이 아님) —
-              실행 신원의 권한으로 실행됩니다.
+              이 계정은 root 실행 자격이 없습니다 — 실행 신원의 권한으로 실행됩니다. admin 역할만으로는 생기지 않으며,
+              root 자격이 있는 관리자가 「관리 → 계정」의 root 실행에서 줄 수 있습니다(세션 로그인 필요).
             </p>
           )}
         </FormSection>

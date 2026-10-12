@@ -184,6 +184,13 @@ export interface Node { node_name: string; reported_at: string; fresh: boolean; 
 export interface Account {
   username: string; role: string; email: string | null;
   disabled: number; created_at: string;
+  // root 실행 자격(2026-10-12, routes_accounts._with_root). root_source: config = 배포 설정(DMS_PRIVILEGED_REQUESTERS --
+  // 화면에서 못 바꾼다), granted = 계정 화면에서 부여, null = 없음. root_eligible = 지금 효력(허용 설정 + admin + 활성 +
+  // 출처). 옵션(?) = 구형 서버.
+  root_source?: "config" | "granted" | null;
+  root_eligible?: boolean;
+  // 저장된 부여 플래그 -- env 와 겹쳐도 보인다(env 에서 빠지면 부여로 효력이 남는다 -- 화면이 말하고 뺄 수 있게).
+  root_granted?: boolean;
 }
 export interface NodeMount {
   storage_name: string; mount_path: string; status: string;

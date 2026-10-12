@@ -302,7 +302,10 @@ def _apply_migrations(db: Database) -> None:
             role TEXT NOT NULL,
             email TEXT,
             disabled INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL)""",
+            created_at TEXT NOT NULL,
+            -- root 실행 자격 부여(2026-10-12, privileged.py): 1 = 특권 세션 관리자가 계정 화면에서 줬다. NULL/0 = 없음
+            -- (env 목록 DMS_PRIVILEGED_REQUESTERS 는 따로). 역할 admin · 활성일 때만 효력, 강등이 지운다.
+            root_granted INTEGER)""",
         # 계정 셀프서비스 인증번호(2026-08-20): 4자리·5분 TTL. (username, purpose)
         # 당 최신 1개만 유효(발급이 upsert). attempts 는 4자리 무차별 대입을 막는
         # 시도 카운터(상한 초과 시 코드 무효). 새 테이블이라 _ensure_columns 보강은
@@ -730,6 +733,8 @@ def _ensure_columns(db):
         # ALTER 로 NULL 이 되므로 migrate 가 _backfill_storage_user_enabled 로 1(종전 동작:
         # 활성 스토리지는 누구나)을 채운다. 코드도 NULL 을 1 로 읽는다(모름 ≠ 거부).
         ("storages", "user_enabled", "INTEGER"),
+        # root 실행 자격 부여(2026-10-12) -- 이중 경로 규약. 기배포 행은 NULL = 부여 없음(종전 동작: env 목록만).
+        ("accounts", "root_granted", "INTEGER"),
     ):
         if not _column_exists(db, table, column):
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")

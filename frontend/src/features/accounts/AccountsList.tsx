@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { useAccounts, useCreateAccount, useSetRole, useSetDisabled } from "./useAccounts";
+import { useAccounts, useCreateAccount, useSetRole, useSetDisabled, useSetRootGrant } from "./useAccounts";
+import { RootGrantCell } from "./RootGrantCell";
 import { useMe } from "../auth/useAuth";
 import { useMailInfo } from "../mail/useMailSettings";
 import { Table } from "../../components/ui/Table";
@@ -67,6 +68,9 @@ export function AccountsList() {
   const me = useMe();
   const setRole = useSetRole();
   const setDisabled = useSetDisabled();
+  const rootGrant = useSetRootGrant();
+  // root 실행 자격을 줄 수 있는 관리자인가(이미 root 자격이 있는 세션 관리자 -- 서버가 다시 강제한다).
+  const canGrant = me.data?.can_run_as_root === true;
   // 아이디 검색(사용자 요청 2026-08-19): 서버가 전체 목록을 주므로(페이징 없음)
   // 클라이언트 필터가 맞다 — 즉답이고 API 무변경. 대소문자 무시 부분 일치.
   const [search, setSearch] = useState("");
@@ -75,6 +79,9 @@ export function AccountsList() {
     ? (setRole.error as ApiError).message
     : setDisabled.isError
     ? (setDisabled.error as ApiError).message
+    // 자격 빼기(바로 하는 동작)의 실패 -- 주기의 실패는 확인 창이 말한다.
+    : rootGrant.isError && rootGrant.variables?.granted === false
+    ? (rootGrant.error as ApiError).message
     : null;
 
   const toggle = (a: Account) => setDisabled.mutate({ username: a.username, disabled: a.disabled !== 1 });
@@ -114,7 +121,7 @@ export function AccountsList() {
         <Table>
           <thead>
             <tr className="text-muted whitespace-nowrap">
-              <th className="py-2">사용자명</th><th>역할</th><th>이메일</th><th>상태</th><th>등록일</th><th>작업</th>
+              <th className="py-2">사용자명</th><th>역할</th><th>root 실행</th><th>이메일</th><th>상태</th><th>등록일</th><th>작업</th>
             </tr>
           </thead>
           <tbody>
@@ -135,6 +142,9 @@ export function AccountsList() {
                       <option value="user">user</option>
                       <option value="admin">admin</option>
                     </select>
+                  </td>
+                  <td className="pr-3">
+                    <RootGrantCell a={a} canGrant={canGrant} isSelf={isSelf} grant={rootGrant} />
                   </td>
                   <td className="text-muted">{a.email ?? "—"}</td>
                   <td className="whitespace-nowrap">{a.disabled === 1 ? "비활성" : "활성"}</td>
@@ -169,6 +179,12 @@ export function AccountsList() {
         </Table>
       )}
       {mutationError && <p className="text-bad text-sm mt-2">{mutationError}</p>}
+      {/* admin 역할 ≠ root 실행 자격(2026-10-12 사용자 보고) -- 역할을 올린 뒤 무엇을 더 해야 하는지 표 아래에서 말한다. */}
+      <p className="mt-3 text-xs text-ink/70 break-keep">
+        {canGrant
+          ? "root 실행 자격은 admin 역할과 따로입니다 — admin 계정의 「자격 주기」로 줍니다(배포 설정 계정은 화면에서 바꿀 수 없습니다)."
+          : "root 실행 자격은 admin 역할과 따로이며, root 자격이 있는 관리자만 주거나 뺄 수 있습니다."}
+      </p>
       </Card>
     </section>
   );

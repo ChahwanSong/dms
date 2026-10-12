@@ -13,6 +13,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from ..domain import DomainValidationError, ROLE_ADMIN, ROLE_USER
+from ..privileged import protected_names
 from ..repositories.accounts import (VERIFICATION_FAILURE_LIMIT, VERIFICATION_FAILURE_WINDOW_SECONDS,
                                      VERIFICATION_PURPOSES, VERIFICATION_TTL_SECONDS,
                                      new_verification_code, valid_username)
@@ -162,7 +163,7 @@ def request_verification_code(body: VerificationBody, request: Request):
     if not valid_username(body.username):
         raise HTTPException(status_code=422, detail="invalid_username")
     if body.purpose == "password_reset":
-        _refuse_privileged_reset(request.app.state.settings, body.username)
+        _refuse_privileged_reset(request, body.username)
     exists = repos.accounts.get(body.username) is not None
     # 존재 여부를 발급 시점에 정직하게 알린다(사내 포탈 -- 계정 열거 방어보다
     # "왜 안 되는지"가 우선): signup 은 이미 있으면 409, reset 은 없으면 404.
@@ -338,13 +339,14 @@ def signup(body: SignupBody, request: Request):
     return {"username": body.username}
 
 
-def _refuse_privileged_reset(settings, username: str) -> None:
+def _refuse_privileged_reset(request: Request, username: str) -> None:
     """특권 목록 이름의 계정은 셀프 비밀번호 재설정(메일 인증번호)을 쓰지 않는다(2026-10-07 리뷰). 비밀번호 변경도
     특권 계정의 변경인데(guard_privileged_account 는 생성·역할·비활성화·삭제), 메일 경로는 아무 세션 관리자나
     바꿀 수 있어(메일 설정 stub·릴레이 주소) 목록 밖 관리자가 "root" 의 재설정 코드를 받아 그 세션으로 root 자격을
     얻었다. 이 계정의 비밀번호는 특권 세션 관리자가 계정을 지우고 다시 만들어 바꾼다. 특권 실행이 꺼져 있으면 보통
-    계정과 같다."""
-    if settings.allow_privileged_requesters and username in settings.privileged_requesters:
+    계정과 같다. 특권 목록 = env ∪ 계정 화면 부여(privileged.privileged_names) -- 부여된 계정도 같은 보호를 받는다."""
+    settings = request.app.state.settings
+    if settings.allow_privileged_requesters and username in protected_names(settings, request.app.state.repos):
         raise HTTPException(status_code=403, detail="privileged_account_protected")
 
 
@@ -354,7 +356,7 @@ def password_reset(body: PasswordResetBody, request: Request):
     자체가 코드 기반이라 verification_required 게이트와 무관하다."""
     repos = request.app.state.repos
     # 발급 전에 막았어도 업그레이드 전에 발급된 코드가 있을 수 있다 -- 소비·추측 카운터보다 먼저 거부한다.
-    _refuse_privileged_reset(request.app.state.settings, body.username)
+    _refuse_privileged_reset(request, body.username)
     # signup 과 같은 순서 이유: 코드 소비 전에 봉인을 연다.
     password = _password_from(request, body, purpose="password_reset")
     _consume_code(request, body.username, "password_reset", body.code)
@@ -421,7 +423,7 @@ def me(request: Request, identity: Identity = Depends(require_user)):
     # can_run_as_root: 포탈이 'root 권한으로 실행' 을 보여 주고 관리자 기본값(root)을 켤지
     # 정하는 근거(2026-09-30). 자격 없는 관리자에게 기본 root 를 켜 두면 제출이 403 이 된다.
     return {"actor": identity.actor, "role": identity.role,
-            "can_run_as_root": can_run_as_root(identity, request.app.state.settings)}
+            "can_run_as_root": can_run_as_root(identity, request.app.state.settings, request.app.state.repos)}
 
 
 class AdminCreateBody(_PasswordBody):
