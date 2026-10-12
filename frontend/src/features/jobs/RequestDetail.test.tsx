@@ -237,6 +237,7 @@ test("shows a request-cancel button for a job-less non-terminal request and post
   );
   renderAt();
   const button = await screen.findByRole("button", { name: "요청 취소" });
+  expect(button.className).toContain("border-bad");
   await userEvent.click(button);
   expect(cancelCalled).toBe(true);
 });
@@ -453,6 +454,12 @@ test("컨펌 대기 단건: 잡 카드 「취소」 + 배너 「컨펌하지 않
   renderAt();
   const j1card = (await screen.findByText("j1")).closest(".bg-surface") as HTMLElement;
   expect(within(j1card).getByRole("button", { name: "취소" })).toBeInTheDocument();   // 예전엔 컨펌 대기에서 숨겼다
+  // 둘 다 빨강 아웃라인으로 눈에 띈다(2026-10-12 사용자 요청) -- 회색 ghost 로 되돌아가면 다시 묻힌다.
+  for (const b of [within(j1card).getByRole("button", { name: "취소" }),
+                   screen.getByRole("button", { name: "컨펌하지 않고 취소" })]) {
+    expect(b.className).toContain("border-bad");
+    expect(b.className).not.toContain("border-line");
+  }
   await userEvent.click(screen.getByRole("button", { name: "컨펌하지 않고 취소" }));
   await waitFor(() => expect(posted).toBe(1));
   expect(await screen.findAllByText("Cancelled")).not.toHaveLength(0);

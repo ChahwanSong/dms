@@ -149,6 +149,8 @@ test("배치 확인 대화상자: 연 뒤 확인 회차가 바뀌면(다시 미�
   await qc.invalidateQueries({ queryKey: ["batch", "b1"] });
   expect(await within(dlg).findByText(/이 대화상자를 연 뒤 배치 내용이 바뀌었습니다/)).toBeInTheDocument();
   expect(within(dlg).getByRole("button", { name: "실행 확인" })).toBeDisabled();
+  // 대화상자 닫기 「취소」는 회색 그대로다 -- 빨강은 실행을 멈추는 취소에만(신호가 흐려지지 않게).
+  expect(within(dlg).getByRole("button", { name: "취소" }).className).not.toContain("border-bad");
   await userEvent.click(within(dlg).getByRole("button", { name: "취소" }));
   dlg = await openConfirmDialog();
   expect(within(dlg).queryByText(/이 대화상자를 연 뒤 배치 내용이 바뀌었습니다/)).toBeNull();
@@ -1349,7 +1351,9 @@ test("PreviewReady also shows cancel button and posts cancel", async () => {
   let cancelled = false;
   server.use(http.post("/api/admin/batches/b1:cancel", () => { cancelled = true; return HttpResponse.json({status:"Cancelled"}); }));
   renderAt("PreviewReady");
-  await userEvent.click(await screen.findByRole("button", { name: "취소" }));
+  const btn = await screen.findByRole("button", { name: "취소" });
+  expect(btn.className).toContain("border-bad");   // 배치 취소는 빨강 아웃라인(2026-10-12 사용자 요청)
+  await userEvent.click(btn);
   // userEvent.click 은 fetch 착지를 보장하지 않는다 -- 단언을 waitFor 로 감싸 플레이키를 없앤다.
   await waitFor(() => expect(cancelled).toBe(true));
 });
