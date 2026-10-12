@@ -95,6 +95,30 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 사용량 분석: 미등록 스토리지 기록 스토리지별 정리 + CSV 스토리지 열 누락 수정 — **완료·실증**(2026-10-12, d176)
+
+사용자 요청: 「사용량 분석에 "미등록 스토리지" 에 대한 항목들은 스토리지 항목별로 전체 clean up 할수있도록 해줘. 그리고 사용량
+csv로 추출하니까 두번째 행부터는 backend type, mount path등 몇몇 column 들이 누락되어서 저장되는데 이슈 확인하고 해결해줘.」
+
+- **CSV 원인**: 포탈이 backend_type·mount_path·managed_root(→ abs_path)를 **지금 등록된** 스토리지 목록에서만 찾아, 삭제된
+  (미등록) 스토리지의 행은 네 열이 비었다(최근 스캔 순이라 첫 행만 등록 스토리지). 잡·요청은 스토리지 설정을 스냅숏하지 않아
+  지운 스토리지의 원천은 스토리지 감사 기록뿐이다 → 내보내기 행마다 `storage`(등록 = 지금 값, 미등록 =
+  `StoragesRepository.last_known_config`, 없으면 null) + CSV 열 `storage_registered`·`storage_info_source`. 요약 키가 파손·
+  히스토그램 열과 겹치면 `summary_` 접두.
+- **정리**: `GET /api/admin/usage/unregistered-storages`(이름·사용량 규모·정리할 작업·섞인 배치·마지막 설정, 묶음 질의) +
+  `POST …:purge`(세션 관리자, 회차 단건 ≤ 200·배치 ≤ 10, 일반 작업 삭제와 **같은 몸통**에 `scan_storage=` — 트랜잭션 안
+  재판정 `storage_registered`·`storage_history_mismatch`·`storage_history_batch_mixed`, 회차 감사 `storage_history/purge`,
+  `exclude_*`·`remaining_untried` 로 회차를 잇는다). 대상 = 그 스토리지의 scan 요청 전부(성공·실패·취소·잡 없는 거부) —
+  rm·sync 와 스토리지 데이터는 그대로. 포탈: 사용량 분석 「미등록 스토리지」 칸(스토리지별 빨강 「기록 정리」 → 수·범위
+  안내 + 확인 → 회차 반복 → 결과 줄), 목록 행 「미등록」, 사라진 스토리지 필터 해제, 경로 버튼 한 줄.
+- 리뷰 워크플로(4관점 + 반박 검증) 확인 11건 반영(멈춤 조건, 실패 scan 만 남은 행, 섞인 배치 이중 계산, 필터 고착, 첫 회차
+  오류, 포커스 반복, 재조회 실패, 이름마다 전체 훑기).
+- 실증(d176, 실 Chrome, 일회용 스토리지 `usageproof-*`(cephfs-dms 와 같은 마운트)·대상 `dms_test/usageproof-*` 정리): 등록 →
+  Ready → scan 단건 2·배치 1 성공 → 스토리지 삭제 → 「미등록 스토리지」 칸(마지막 설정 gpfs · /cephfs, 대상 3·정리할 작업 3)·
+  행 「미등록」·375 넘침 0 → CSV 미등록 3행이 `last_known`(gpfs·/cephfs·/cephfs/managed·절대경로)으로 채워짐, 등록 9행
+  `registered` → 끝난 지 60초 안의 정리는 3건 모두 「방금 끝난 작업」으로 건너뛰고 행이 남음(설계대로) → 다시 「기록 정리」 →
+  3개 삭제(배치 포함)·목록·칸에서 사라짐·배치·요청 404·결과 줄 포커스, 정리 대기 0, 콘솔 오류 0.
+
 ### ✅ 실행을 멈추는 취소 버튼 강조 — **완료·실증**(2026-10-12, d175)
 
 사용자 요청: "화면 버튼에 취소버튼을 조금 눈에띄게 강조해줘."
