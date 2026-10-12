@@ -130,7 +130,7 @@ def run_job(env, *, run, write_text, read_text, sleep, wait_hostfile,
     #    .parse_sync_dryrun_counts·parse_rm_dryrun_counts). 제어면은 이 사본을 preview_summary 로 저장하고
     #    지문도 이 객체의 해시다(2026-09-17) -- null 이면 지문이 상수가 된다.
     summary = _build_summary(tool, proc.stdout, proc.returncode, artifact_dir,
-                             dryrun="--dryrun" in argv)
+                             dryrun="--dryrun" in argv, quiet=("--quiet" in argv or "-q" in argv))
     write_text(f"{artifact_dir}/summary.json", json.dumps(summary))
     return proc.returncode
 
@@ -207,7 +207,7 @@ def _wait_workers_ready(hosts, *, run, sleep, clock, timeout):
     return ips, None
 
 
-def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False):
+def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False, quiet=False):
     """summary.json은 항상 정확히 3키 {"returncode", "files", "bytes"} -- 모르면
     null(설계 §2.3). 기존 "마지막 줄 JSON" 계약은 실 mpifileutils가 JSON을 찍지
     않아 사문이라 제거했다. 파싱이 잡을 죽이는 경로는 없다(설계 §4): 어떤 예외든
@@ -215,6 +215,11 @@ def _build_summary(tool, stdout, returncode, artifact_dir, dryrun=False):
     _as_count(bool·비int·음수 거부)가 2차 방어로 이미 배포되어 있다(d24)."""
     files = nbytes = None
     try:
+        if dryrun and quiet and tool in ("dsync", "drm"):
+            # quiet 미리보기(2026-10-12 보안 검토 -- 불완전 수정 보강): -q 는 진짜 walk 요약을 지우지만 drm 목록(printf)은
+            # 그대로 찍혀, 이름에 심은 가짜 walk 줄 하나가 「정확히 1개」를 만족했다. 제어면은 미리보기에 --quiet 를 싣지
+            # 않지만(execution_manifests.tool_argv) 옛 제어면(롤링 업그레이드)·DB 변조 argv 에 대비해 여기서도 믿지 않는다.
+            return {"returncode": returncode, "files": None, "bytes": None}
         if tool == "dsync" and dryrun:
             # 미리보기: 복사 요약이 없으므로 소스 walk 항목 수(바이트는 null).
             files, nbytes = parse_sync_dryrun_counts(stdout or "")
