@@ -574,14 +574,14 @@ def test_runner_allowlist_matches_the_control_plane_tool_names():
 # null 이었다(컨펌 창 "(요약 없음)" 조사에서 발견) -- 지문이 이 요약의 해시라 사실상
 # 상수였다. dryrun 이면 소스 walk 항목 수를 files 로, bytes 는 정직하게 null.
 DSYNC_DRYRUN_STDOUT = """\
-[ts] Walking source path
-[ts] Walked 2 items in 0.003 secs (780.071 items/sec) ...
-[ts] Walked 2 items in 0.004 seconds (453.712 items/sec)
-[ts] Walking destination path
-[ts] Walked 0 items in 0.001 secs (0.000 items/sec) ...
-[ts] Walked 0 items in 0.001 seconds (0.000 items/sec)
-[ts] Items     : 0
-[ts] Completed sync
+[2026-09-16T23:00:22] Walking source path
+[2026-09-16T23:00:22] Walked 2 items in 0.003 secs (780.071 items/sec) ...
+[2026-09-16T23:00:22] Walked 2 items in 0.004 seconds (453.712 items/sec)
+[2026-09-16T23:00:22] Walking destination path
+[2026-09-16T23:00:22] Walked 0 items in 0.001 secs (0.000 items/sec) ...
+[2026-09-16T23:00:22] Walked 0 items in 0.001 seconds (0.000 items/sec)
+[2026-09-16T23:00:22] Items     : 0
+[2026-09-16T23:00:22] Completed sync
 """
 
 
@@ -591,6 +591,34 @@ def test_build_summary_dsync_dryrun_uses_source_walk_items():
     # dryrun 이 아니면(실행) 같은 출력은 여전히 모름 -- 복사 요약이 없으니 지어내지 않는다
     assert _build_summary("dsync", DSYNC_DRYRUN_STDOUT, 0, "/tmp/x") == {
         "returncode": 0, "files": None, "bytes": None}
+
+
+DRM_DRYRUN_STDOUT = """\
+[2026-10-07T18:43:25] Walking /cephfs/managed/dms_test/suppgrp
+[2026-10-07T18:43:25] Walked 6 items in 0.004 secs (1523.069 items/sec) ...
+[2026-10-07T18:43:25] Walked 6 items in 0.006 seconds (1050.294 items/sec)
+
+Type=DIR File=/cephfs/managed/dms_test/suppgrp
+Type=REG File=/cephfs/managed/dms_test/suppgrp/ro/p.txt
+
+"""
+
+
+def test_build_summary_drm_dryrun_uses_walk_items():
+    # 2026-10-12: rm 미리보기가 늘 files null(「삭제 대상 모름」)이었다 -- drm --dryrun 은 삭제 요약을 찍지 않는다.
+    assert _build_summary("drm", DRM_DRYRUN_STDOUT, 0, "/tmp/x", dryrun=True) == {
+        "returncode": 0, "files": 6, "bytes": None}
+    # 실행(dryrun 아님)은 같은 출력이면 여전히 모름 -- 실제로 지운 수를 walk 로 지어내지 않는다
+    assert _build_summary("drm", DRM_DRYRUN_STDOUT, 0, "/tmp/x") == {
+        "returncode": 0, "files": None, "bytes": None}
+
+
+def test_run_job_drm_preview_fills_files_from_the_walk():
+    rec = _Recorder(rc=0, stdout=DRM_DRYRUN_STDOUT)
+    rc = _run(rec, _env(DMS_JR_TOOL="drm", DMS_JR_OPERATION="rm", DMS_JR_PHASE="preview",
+                        DMS_JR_ARGV=json.dumps(["--dryrun", "/cephfs/managed/dms_test/suppgrp"])))
+    assert rc == 0
+    assert _summary(rec) == {"returncode": 0, "files": 6, "bytes": None}
 
 
 def test_run_job_detects_dryrun_from_argv_and_fills_preview_files():

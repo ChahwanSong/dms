@@ -409,6 +409,30 @@ def test_drm_dryrun_argv_is_unchanged_by_the_explicit_branch():
         "--dryrun", "/cephfs/junk"]
 
 
+# ---- 미리보기에는 --quiet 를 싣지 않는다(2026-10-12) ----
+# -q 는 세 도구 모두 로그 수준을 NONE 으로 내려 미리보기 개수의 유일한 출처(drm·dsync walk 요약, nsync
+# "Planned actions:")를 지운다 -- quiet 미리보기는 늘 「대상 모름」이었다. 실행에는 그대로 싣는다.
+
+def test_preview_drops_quiet_but_execution_keeps_it_for_drm():
+    opts = {"recursive": True, "quiet": True, "stat": True}
+    prev = tool_argv(_spec(operation="rm", tool="drm", dryrun=True, options=opts),
+                     abs_paths={"target": "/cephfs/junk"})
+    run = tool_argv(_spec(operation="rm", tool="drm", dryrun=False, options=opts),
+                    abs_paths={"target": "/cephfs/junk"})
+    assert prev == ["--stat", "--dryrun", "/cephfs/junk"]               # 다른 옵션은 그대로
+    assert run == ["--stat", "--quiet", "/cephfs/junk"]
+
+
+def test_preview_drops_quiet_but_execution_keeps_it_for_dsync_and_nsync():
+    for tool in ("dsync", "nsync"):
+        opts = {"quiet": True, "delete": True}
+        paths = {"source": "/s", "destination": "/d"}
+        prev = tool_argv(_spec(operation="sync", tool=tool, dryrun=True, options=opts), abs_paths=paths)
+        run = tool_argv(_spec(operation="sync", tool=tool, dryrun=False, options=opts), abs_paths=paths)
+        assert "--quiet" not in prev and "--dryrun" in prev and "--delete" in prev, tool
+        assert "--quiet" in run and "--dryrun" not in run, tool
+
+
 # ---- sync 목적지 타입 검사: 기존 일반 파일 위로 sync 하면 데이터가 사라진다 ----
 #
 # 실증(d65): 목적지가 기존 **일반 파일**인 sync 는 preflight 를 통과했다 -- 부모

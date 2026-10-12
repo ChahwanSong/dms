@@ -323,6 +323,10 @@ test("KPI 실행 전 단건: 라벨이 「복사 대상」·「대상 크기」(
   ]);
   const rmTiles = kpi({ state: "Planned", operation: "rm" }, [{ ...cp, operation: "rm", preview_summary: { files: 5, bytes: null } }]);
   expect(rmTiles.map((x) => x.label)).toEqual(["삭제 대상", "수행시간", "제출 대기"]);
+  expect(rmTiles[0]).toMatchObject({ value: "5개", sub: "미리보기 기준 · 실행 전" });
+  // rm 미리보기 0 = 대상 경로를 찾지 못함(drm walk 는 빈 디렉터리도 대상 자신을 세 1, 2026-10-12)
+  const rm0 = kpi({ state: "Planned", operation: "rm" }, [{ ...cp, operation: "rm", preview_summary: { files: 0, bytes: null } }]);
+  expect(rm0[0]).toMatchObject({ label: "삭제 대상", value: "0개", sub: "미리보기: 대상 경로를 찾지 못함" });
   // 비종단 수행시간은 "째" + 1초 틱용 기준 시각. 컨펌 대기 중이면 사람이 기다린 시간이 섞였다고 말한다.
   expect(tiles[2]).toMatchObject({ label: "수행시간", value: "1분째", sub: "컨펌 대기 중 (대기 시간 포함)",
     elapsedFrom: "2026-10-08T03:15:00Z" });

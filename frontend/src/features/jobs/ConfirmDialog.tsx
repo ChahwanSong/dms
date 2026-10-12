@@ -26,7 +26,16 @@ export function previewSummaryText(job: Pick<DataJob, "preview_summary" | "opera
   if (s == null) return "(요약 없음 — 이 잡은 미리보기 요약이 저장되지 않았습니다)";
   const files = s.files == null ? "모름" : `${s.files.toLocaleString()}개`;
   const bytes = s.bytes == null ? null : humanBytes(s.bytes);
-  const head = job.operation === "rm" ? `삭제 대상 ${files}` : `복사 대상 ${files}`;
+  // rm 의 수는 drm walk 항목 수다(2026-10-12 -- 예전엔 dry-run 이 삭제 요약을 찍지 않아 늘 「모름」이었다): 대상 경로
+  // 자신과 그 아래 파일·디렉터리·링크의 합계라 「파일 수」보다 크다 -- 그 뜻을 같이 말한다. 모름(옛 잡)이면 목록이 있는 곳을.
+  // 0 은 「빈 대상」이 아니다: drm walk 는 대상이 있으면 대상 자신을 세므로(빈 디렉터리도 1) 0 = 대상 경로를 찾지
+  // 못했다(오타·이미 삭제·권한) -- 지울 것이 없다는 사실과 그 이유를 함께 말한다(2026-10-12 리뷰).
+  // 모름(옛 잡)이면 개수가 있는 곳: 미리보기 출력의 walk 요약 줄(목록은 앞·뒤 10개만 찍혀 셀 수 없다).
+  const rmNote = s.files == null
+    ? " — 미리보기 출력(stdout.log)의 'Walked N items' 줄이 지울 항목 수입니다(목록은 앞·뒤 10개만 찍힙니다)"
+    : s.files === 0 ? " — 대상 경로를 찾지 못했습니다(오타·이미 삭제·권한 — 미리보기 출력의 'Failed to stat' 확인)"
+    : "(대상 경로 포함, 파일·디렉터리 합계)";
+  const head = job.operation === "rm" ? `삭제 대상 ${files}${rmNote}` : `복사 대상 ${files}`;
   const tail = bytes === null ? (job.operation === "rm" ? "" : " · 크기 모름") : ` · ${bytes}`;
   const rc = s.returncode == null ? "" : s.returncode === 0 ? "" : ` · dry-run 종료코드 ${s.returncode}`;
   return `${head}${tail}${rc}`;

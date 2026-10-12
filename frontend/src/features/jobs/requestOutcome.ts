@@ -324,7 +324,10 @@ export function deriveKpi(req: RequestDetail, jobs: DataJob[] | null, models: Jo
       }
       // 실행 전 단건: 미리보기 값을 "대상" 라벨로(실행 결과인 척하지 않는다).
       if (single && op !== "scan" && !isTerminal(list[0].state) && !models[0].executionStarted && pvals[0] !== null) {
-        tiles.push({ key, label: preLabels[key], value: fmt[key](pvals[0]!), sub: "미리보기 기준 · 실행 전" });
+        // rm 의 0 은 「빈 대상」이 아니라 대상 경로를 찾지 못한 것(drm walk 는 대상 자신을 센다 -- 빈 디렉터리도 1, 2026-10-12).
+        const notFound = op === "rm" && key === "files" && pvals[0] === 0;
+        tiles.push({ key, label: preLabels[key], value: fmt[key](pvals[0]!),
+                     sub: notFound ? "미리보기: 대상 경로를 찾지 못함" : "미리보기 기준 · 실행 전" });
         continue;
       }
       // rm 은 도구가 바이트를 보고하지 않아(bytes: null 이 정상) 모르는 크기 칸을 아예 두지 않는다.
