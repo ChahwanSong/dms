@@ -27,6 +27,8 @@ batch_id) + 배치마다 ('batch','delete') 행 1개(_batch_bounded -- 배치 �
 (PURGED_TABLES·_purge_locked·finish)에 넣지 않으면 그 행은 조용히 고아가 된다. tests/test_repo_request_purges.py 가
 스키마의 request_id/job_id/entity_id 컬럼 전수를 열거해 PURGED_TABLES ∪ PURGE_EXEMPT_TABLES 와 대조한다.
 """
+import re
+
 from ..db import Database, dump_json, iso_plus, load_json, utc_now_iso
 from ..domain import TERMINAL_DATA_JOB_STATES, TERMINAL_REQUEST_STATES
 from .requests import batch_match
@@ -86,6 +88,8 @@ _BATCH_KEYS = ("batch_id", "name", "note", "operation", "status", "requester_id"
 _BATCH_SKELETON_KEYS = ("batch_id", "name", "operation", "status", "requester_id", "actor", "owner_username",
                         "auth_method", "created_at")
 _ID_MAX = 64
+# 배치 id 형식(uuid4().hex, BatchesRepository.create -- routes_request_purge._BID_RE 와 같은 모양).
+_BATCH_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
 class _Lost(Exception):
@@ -142,6 +146,44 @@ def _fits(snapshot) -> "str | None":
     return text if len(text.encode("utf-8")) <= SNAPSHOT_MAX_BYTES else None
 
 
+def _only_scan_of(req, jobs, storage_name) -> bool:
+    """미등록 스토리지 scan 이력 정리(scan_storage=)의 단건 판정: 요청이 scan 이고, 잡이 있으면 잡 전부가 그 스토리지의
+    scan, 잡이 없으면(계획 전 거부·취소 -- 지운 스토리지로 낸 scan 은 planner 가 storage_missing 으로 거부한다) payload
+    storage 가 그 이름이다. 다른 연산·다른 스토리지가 하나라도 섞이면 False(그 요청은 이 정리의 대상이 아니다). 배치
+    판정(_batch_scan_mixed)의 자식 규칙과 같다."""
+    if req.get("operation") != "scan":
+        return False
+    if jobs:
+        return all(j["operation"] == "scan" and j["storage_name"] == storage_name for j in jobs)
+    return _payload_storage(req.get("payload")) == storage_name
+
+
+def _payload_storage(text) -> "str | None":
+    p = _parse(text)
+    return p.get("storage") if isinstance(p, dict) else None
+
+
+def _batch_scan_mixed(batch, items, reqs, jobs_by_rid, storage_name) -> "tuple[bool, str | None]":
+    """배치 판정(scan_storage=): 배치째 지워도 그 스토리지의 scan 기록**만** 사라지는가. (섞임 여부, 문제 자식 id).
+    배치 행이 있으면 scan 이어야 하고, 남은 항목 전부의 payload storage 가 그 이름이어야 한다(종단 배치의 항목 교체는 새
+    항목끼리만 단일 스토리지를 본다 -- 옛 자식은 X, 지금 항목은 Y 인 배치가 있을 수 있다: 지우면 Y 의 배치 정의가 함께
+    사라진다). 자식은 scan 이고, 잡이 있으면 잡 전부가 그 스토리지의 scan, 잡이 없으면(계획 전 거부·취소) payload storage
+    가 그 이름이어야 한다. 깨진 payload 는 섞임(fail-closed)."""
+    if batch is not None and batch.get("operation") != "scan":
+        return True, None
+    for it in items:
+        if _payload_storage(it["payload"]) != storage_name:
+            return True, it.get("request_id")
+    for r in reqs:
+        jobs = jobs_by_rid.get(r["request_id"], [])
+        ok = (r.get("operation") == "scan"
+              and (all(j["operation"] == "scan" and j["storage_name"] == storage_name for j in jobs) if jobs
+                   else _payload_storage(r["payload"]) == storage_name))
+        if not ok:
+            return True, r["request_id"]
+    return False, None
+
+
 class RequestPurgesRepository:
     def __init__(self, db: Database):
         self._db = db
@@ -173,7 +215,118 @@ class RequestPurgesRepository:
 
     # ---- 삭제(API) ----
 
-    def delete_terminal(self, request_id, *, actor, artifact_base, quiet_seconds, now=None) -> dict:
+    def _storage_registered(self, storage_name) -> bool:
+        return self._db.query_one(
+            "SELECT 1 AS x FROM storages WHERE storage_name = :n", {"n": storage_name}) is not None
+
+    def scan_storage_selection(self, storage_name) -> dict:
+        """미등록 스토리지 scan 이력 정리(2026-10-12)의 대상: 그 스토리지의 scan 요청 전부 -- 그 스토리지의 scan 잡을 가진
+        요청(잡 상태 무관: 사용량 분석의 지점인 성공 scan 과 같은 대상의 실패·취소 scan 을 함께) + 잡 없이 끝난 scan 요청
+        중 payload storage 가 그 이름인 것(계획 전 거부·취소). rm·sync 는 사용량과 무관해 넣지 않는다.
+        반환 {"singles": [request_id, ...](batch_id NULL, 제출 순), "batches": {batch_id: 지금 자식 수}(첫 등장 순)}.
+
+        **판정은 하지 않는다** -- 읽은 순간의 목록일 뿐이다. 삭제는 delete_terminal·delete_batch(scan_storage=)가 잠근
+        행으로 미등록·순수성을 다시 판정한다. batch_id 가 배치 id 형식(32 hex)이 아닌 행("" 등 비정상)은 단건 쪽에 둔다 --
+        delete_terminal 이 batch_child_not_deletable 로 거부해 그 사실이 응답에 남는다(배치 경로로 보내 지어낸 배치 id 로
+        묶지 않는다). data_jobs.storage_name 에는 인덱스가 없다 -- 관리자의 드문 정리라 전체 훑기를 받아들인다."""
+        return self._scan_history(storage_name=storage_name).get(storage_name, {"singles": [], "batches": {}})
+
+    def unregistered_scan_history(self) -> dict:
+        """등록 목록에 없는 스토리지 이름마다의 scan_storage_selection 모양 + 섞인 배치(mixed_batches: {batch_id: 자식
+        수}) -- 사용량 분석의 미등록 스토리지 목록(GET …/unregistered-storages)용. **이름은 그 스토리지의 scan 잡이 있는
+        것만** 싣는다(잡 없는 거부 요청만 있는 이름 -- 등록된 적 없는 오타 이름 등 -- 은 사용량 분석에 나온 적이 없다); 그
+        이름의 잡 없는 scan 요청은 정리 대상으로 함께 센다. 질의는 이름 수와 무관한 묶음 몇 개다(화면을 열 때마다 돈다 --
+        이름마다 전체 훑기를 하지 않는다).
+
+        섞인 배치 = delete_batch(scan_storage=) 가 storage_history_batch_mixed 로 거부할 배치(_batch_scan_mixed 를 잠그지
+        않은 행으로 미리 돌린다) -- 목록이 「지울 수 있는 수」를 부풀리지 않게(다른 스토리지 자식이 섞인 배치는 두 이름
+        아래에 같은 자식 수로 세어졌다). 진짜 판정은 여전히 삭제 트랜잭션이 한다."""
+        hist = self._scan_history(unregistered_only=True)
+        bids = [b for h in hist.values() for b in h["batches"]]
+        owner = {b: name for name, h in hist.items() for b in h["batches"]}
+        mixed = self._mixed_batches(owner) if bids else set()
+        for h in hist.values():
+            h["mixed_batches"] = {b: n for b, n in h["batches"].items() if b in mixed}
+            h["batches"] = {b: n for b, n in h["batches"].items() if b not in mixed}
+        return hist
+
+    def _scan_history(self, *, storage_name=None, unregistered_only=False) -> dict:
+        """scan_storage_selection·unregistered_scan_history 의 공용 몸통 -- 이름 -> {"singles", "batches"}."""
+        params: dict = {}
+        where = "j.operation = 'scan' AND j.storage_name IS NOT NULL"
+        if storage_name is not None:
+            where += " AND j.storage_name = :x"
+            params["x"] = storage_name
+        if unregistered_only:
+            where += " AND NOT EXISTS (SELECT 1 FROM storages s WHERE s.storage_name = j.storage_name)"
+        found: list[tuple] = []             # (commit_order, name, request_id, batch_id)
+        for r in self._db.query(
+                f"""SELECT DISTINCT j.storage_name AS name, r.request_id, r.batch_id, r.commit_order
+                    FROM data_jobs j JOIN requests r ON r.request_id = j.request_id WHERE {where}""", params):
+            found.append((r["commit_order"], r["name"], r["request_id"], r["batch_id"]))
+        # 한 이름을 고를 때(정리 회차)는 잡이 다 지워져도 그 이름의 잡 없는 요청을 계속 찾는다 -- 마지막 잡 보유 요청을
+        # 지운 다음 회차가 잡 없는 나머지를 놓치지 않게. 목록(전 이름)은 잡이 있는 이름만(위 docstring).
+        names = {storage_name} if storage_name is not None else {f[1] for f in found}
+        if names:
+            # 잡 없는 scan 요청 -- payload storage 로만 스토리지를 안다(JSON 이라 SQL 로 거르지 않는다: 방언마다 다르다).
+            for r in self._db.query(
+                    """SELECT r.request_id, r.batch_id, r.commit_order, r.payload FROM requests r
+                       WHERE r.operation = 'scan'
+                             AND NOT EXISTS (SELECT 1 FROM data_jobs j WHERE j.request_id = r.request_id)"""):
+                name = _payload_storage(r["payload"])
+                if name in names:
+                    found.append((r["commit_order"], name, r["request_id"], r["batch_id"]))
+        found.sort(key=lambda f: (f[0], f[2]))
+        out: dict = {}
+        for _, name, rid, b in found:
+            h = out.setdefault(name, {"singles": [], "batches": {}})
+            if isinstance(b, str) and _BATCH_ID_RE.fullmatch(b):
+                h["batches"].setdefault(b, 0)
+            else:
+                h["singles"].append(rid)
+        counts = {r["batch_id"]: int(r["n"]) for r in self._query_in(
+            "SELECT batch_id, COUNT(*) AS n FROM requests WHERE batch_id IN ({}) GROUP BY batch_id",
+            [b for h in out.values() for b in h["batches"]])}
+        for h in out.values():
+            h["batches"] = {b: counts.get(b, 0) for b in h["batches"]}
+        return out
+
+    def _mixed_batches(self, owner: dict) -> set:
+        """owner(batch_id -> 그 배치를 고른 스토리지 이름) 중 _batch_scan_mixed 가 섞였다고 할 배치 -- 잠그지 않은 읽기
+        (목록 표시용 예측). 배치 행·항목·자식·잡을 묶음 질의로 읽는다."""
+        bids = list(owner)
+        batches = {r["batch_id"]: r for r in self._query_in(
+            "SELECT batch_id, operation FROM batches WHERE batch_id IN ({})", bids)}
+        items: dict = {}
+        for r in self._query_in("SELECT batch_id, request_id, payload FROM batch_items WHERE batch_id IN ({})", bids):
+            items.setdefault(r["batch_id"], []).append(r)
+        kids: dict = {}
+        for r in self._query_in(
+                "SELECT batch_id, request_id, operation, payload FROM requests WHERE batch_id IN ({})", bids):
+            kids.setdefault(r["batch_id"], []).append(r)
+        jobs_by_rid: dict = {}
+        for j in self._query_in("SELECT request_id, operation, storage_name FROM data_jobs WHERE request_id IN ({})",
+                                [k["request_id"] for ks in kids.values() for k in ks]):
+            jobs_by_rid.setdefault(j["request_id"], []).append(j)
+        return {b for b in bids
+                if _batch_scan_mixed(batches.get(b), items.get(b, []), kids.get(b, []), jobs_by_rid, owner[b])[0]}
+
+    def audit_scan_history_purge(self, storage_name, *, actor, summary, now=None) -> None:
+        """미등록 스토리지 정리 한 회차의 묶음 감사 1행(누가 어느 스토리지를 정리했나). 지운 요청·배치마다의 감사
+        ('request'·'batch', 'delete')는 _purge_locked·delete_batch 가 이미 남긴다 -- 이 행은 그것들을 「스토리지 정리」로
+        묶는 색인이다. mutation_class 를 'storage' 로 두지 않는다: StoragesRepository.last_known_config 가 그 부류의 최근
+        행을 스토리지 설정으로 읽는다. summary 는 회차 상한(단건 200·배치 10)으로 이미 작다 -- 그래도 32 KiB 를 넘으면
+        id 목록을 빼고 수만 남긴다."""
+        text = _fits(summary)
+        if text is None:
+            text = dump_json({k: v for k, v in summary.items() if not isinstance(v, list)} | {"truncated": True})
+        self._db.execute(
+            """INSERT INTO audit_log (mutation_class, operation, target_key, actor, before_state, after_state, at)
+               VALUES ('storage_history', 'purge', :k, :actor, :b, NULL, :at)""",
+            {"k": storage_name, "actor": actor, "b": text, "at": now or utc_now_iso()})
+
+    def delete_terminal(self, request_id, *, actor, artifact_base, quiet_seconds, now=None,
+                        scan_storage=None) -> dict:
         """종단 요청 1건을 한 트랜잭션으로 지운다. 반환 {"deleted": True, "job_ids": [...]} 또는
         {"deleted": False, "reason": <사유 코드>}(판정 순서 = 화면 문구 순서, 첫 해당).
 
@@ -196,7 +349,13 @@ class RequestPurgesRepository:
         create_plan_and_job) 교착이 없다.
 
         artifact_base 는 삭제 시점 strip_scheme(resolve_artifact_base) -- None 은 「모름」(정리 루프가 파일 단계를
-        보류한다). 빈 문자열을 넘기지 말 것(라우트가 None 으로 접는다)."""
+        보류한다). 빈 문자열을 넘기지 말 것(라우트가 None 으로 접는다).
+
+        scan_storage(선택, 미등록 스토리지 scan 이력 정리 2026-10-12): 주면 같은 트랜잭션 안에서 두 판정을 더한다 --
+          storage_registered         그 이름이 지금 storages 에 있다(정리 대상을 고른 뒤 같은 이름으로 다시 등록됨 --
+                                     등록된 스토리지의 이력은 이 경로로 지우지 않는다)
+          storage_history_mismatch   요청이 scan 이 아니거나 잡이 없거나 잡 하나라도 그 스토리지의 scan 이 아니다
+        나머지 게이트·삭제 몸통은 그대로다(일반 작업 삭제와 같은 감사·아웃박스)."""
         now = now or utc_now_iso()
         lock = self._lock()
         try:
@@ -205,6 +364,8 @@ class RequestPurgesRepository:
                     f"SELECT * FROM requests WHERE request_id = :r{lock}", {"r": request_id})
                 if req is None:
                     return _skip(reason_code="request_not_found")
+                if scan_storage is not None and self._storage_registered(scan_storage):
+                    return _skip(reason_code="storage_registered")
                 if req["batch_id"] is not None:
                     return _skip(reason_code="batch_child_not_deletable")
                 if self._db.query_one(
@@ -216,6 +377,8 @@ class RequestPurgesRepository:
                 jobs = self._db.query(
                     f"SELECT {_JOB_COLUMNS} FROM data_jobs WHERE request_id = :r "
                     f"ORDER BY created_at, job_id{lock}", {"r": request_id})
+                if scan_storage is not None and not _only_scan_of(req, jobs, scan_storage):
+                    return _skip(reason_code="storage_history_mismatch")
                 if any(j["state"] not in _TERMINAL_JOB for j in jobs):
                     return _skip(reason_code="request_job_active")
                 if self._recently_touched(req, jobs, now=now, quiet_seconds=quiet_seconds):
@@ -282,7 +445,7 @@ class RequestPurgesRepository:
         return job_ids
 
     def delete_batch(self, batch_id, *, expected_request_count, actor, artifact_base, quiet_seconds,
-                     max_children, max_items=MAX_BATCH_DELETE_ITEMS, now=None) -> dict:
+                     max_children, max_items=MAX_BATCH_DELETE_ITEMS, now=None, scan_storage=None) -> dict:
         """배치 하나(또는 배치 행이 없는 자식 묶음 -- dangling)를 한 트랜잭션으로 지운다(모듈 docstring 「배치 단위
         삭제」). 반환 {"deleted": True, "request_ids": [...], "job_ids": [...], "dangling": bool} 또는
         {"deleted": False, "reason": <사유>, "request_id": <문제 자식 id | None>}.
@@ -323,7 +486,13 @@ class RequestPurgesRepository:
         자식은 다시 생기지 않는다. 마지막의 유령 재확인(SELECT … WHERE batch_id = :b)은 PG READ COMMITTED 의 FOR UPDATE 가
         동시에 INSERT 된 행을 보지 못하는 틈을 문장마다 새 스냅숏으로 막는다. 종단 배치에 Queued 항목이 남은 것은 정상
         모양이라(항목 수정·CSV 교체는 종단 배치를 되살리지 않는다) 항목 상태 게이트는 두지 않는다 -- 그런 항목엔 자식이
-        없다."""
+        없다.
+
+        scan_storage(선택, 미등록 스토리지 scan 이력 정리 2026-10-12): 주면 판정 둘을 더한다 -- 배치 상태 다음에
+        storage_registered(그 이름이 지금 등록돼 있다), 잡을 잠근 뒤 storage_history_batch_mixed(배치 행·남은 항목·자식·잡
+        중 하나라도 그 스토리지의 scan 이 아니다 -- _batch_scan_mixed. 문제 자식 id 를 함께). 이 경로의
+        expected_request_count 는 사용자가 본 수가 아니라 라우트가 직전에 센 수다 -- 「본 것만 지운다」는 CAS 의 몫을 순수성
+        판정이 대신한다(섞이지 않은 배치는 지워도 그 스토리지의 scan 기록만 사라진다)."""
         now = now or utc_now_iso()
         lock = self._lock()
         try:
@@ -336,6 +505,8 @@ class RequestPurgesRepository:
                 batch = self._db.query_one(f"SELECT * FROM batches WHERE batch_id = :b{lock}", {"b": batch_id})
                 if batch is not None and batch["status"] not in _TERMINAL_BATCH:
                     return _batch_skip(reason_code="batch_not_deletable")
+                if scan_storage is not None and self._storage_registered(scan_storage):
+                    return _batch_skip(reason_code="storage_registered")
                 # 자식 수를 상한 + 1 까지만 센다(인덱스만, 잠그지 않는다) -- 넘는 배치의 자식 전부를 읽고 잠그지 않게.
                 # 모양은 batch_match + 인덱스 순서(requests.batch_match docstring) -- `batch_id = :b LIMIT` 면 PG 가 큰 배치에서
                 # Seq Scan + LIMIT 를 골라 그 배치의 물리 위치 앞의 행 전부를 읽는다.
@@ -369,6 +540,10 @@ class RequestPurgesRepository:
                         f"SELECT {_JOB_COLUMNS} FROM data_jobs WHERE request_id IN ({{}}) "
                         f"ORDER BY request_id, created_at, job_id{lock}", rids):
                     jobs_by_rid.setdefault(j["request_id"], []).append(j)
+                if scan_storage is not None:
+                    mixed, culprit = _batch_scan_mixed(batch, items, reqs, jobs_by_rid, scan_storage)
+                    if mixed:
+                        return _batch_skip(reason_code="storage_history_batch_mixed", request_id=culprit)
                 for r in reqs:
                     if any(j["state"] not in _TERMINAL_JOB for j in jobs_by_rid.get(r["request_id"], [])):
                         return _batch_skip(reason_code="request_job_active", request_id=r["request_id"])

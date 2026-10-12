@@ -14,8 +14,10 @@ export interface StorageUpdateBody {
 }
 export const useCreateStorage = () => {
   const qc = useQueryClient();
+  // 등록하면 같은 이름의 옛 scan 기록이 더는 「미등록」이 아니다(사용량 분석 미등록 스토리지 목록, 2026-10-12).
   return useMutation({ mutationFn: (b: StorageCreateBody) => apiSend("POST", "/api/admin/storages", b),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["storages"] }) });
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: ["storages"] }),
+                                  qc.invalidateQueries({ queryKey: ["usage-unregistered"] })]) });
 };
 export const useUpdateStorage = () => {
   const qc = useQueryClient();
@@ -32,5 +34,6 @@ export const useDeleteStorage = () => {
       qc.invalidateQueries({ queryKey: ["storages"] }),
       qc.invalidateQueries({ queryKey: ["sync-pairs"] }),
       qc.invalidateQueries({ queryKey: ["user-sync-pairs"] }),
+      qc.invalidateQueries({ queryKey: ["usage-unregistered"] }),   // 지운 스토리지의 scan 기록이 「미등록」이 된다
     ]) });
 };

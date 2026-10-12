@@ -17,6 +17,7 @@ import {
   AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
 import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
+import { UnregisteredStoragesPanel } from "./UnregisteredStorages";
 
 // 순수 규칙은 usageStats(화면·CSV 공용 한 벌, 2026-10-02 분리) -- 기존 import 경로 호환을 위해 다시 내보낸다.
 export { HOT_AGE_MAX_DAYS, hotRatio, pointEpoch, stackLayout } from "./usageStats";
@@ -377,6 +378,13 @@ export function UsageAnalysis() {
   // 선택지 = 등록 스토리지 ∪ 스캔 기록이 남은 이름(삭제·개명된 스토리지의 이력도 좁힐 수 있게, 리뷰). 미등록은 표시.
   const registered = new Set((storagesQ.data ?? []).map((s) => s.storage_name));
   const storageOptions = [...new Set([...registered, ...(scanStoragesQ.data ?? [])])].sort();
+  // 고른 스토리지가 선택지에서 사라지면(위 「미등록 스토리지」 칸에서 그 기록을 정리 -- 2026-10-12) 필터를 푼다: 그대로
+  // 두면 select 는 「전체 스토리지」를 보이는데 목록은 사라진 이름으로 걸러져 비어, 정리가 모든 사용량을 지운 것처럼
+  // 읽혔다(리뷰). 두 목록이 다 도착한 뒤에만 판정한다(로딩 중의 빈 선택지로 풀지 않게).
+  useEffect(() => {
+    if (storageFilter !== "" && storagesQ.data !== undefined && scanStoragesQ.data !== undefined
+        && !storageOptions.includes(storageFilter)) setStorageFilter("");
+  }, [storageFilter, storagesQ.data, scanStoragesQ.data]);  // eslint-disable-line react-hooks/exhaustive-deps
   const rows = targets.data ?? [];
   const now = Date.now();
   const activeKey = storage !== null && target !== null ? `${storage}:${target}` : null;
@@ -419,6 +427,8 @@ export function UsageAnalysis() {
         디렉터리별 scan 이력의 실 사용량·데이터 온도 변화 — 요청자와 무관하게
         모든 성공 scan 을 모아 봅니다. 경로를 클릭하면 그 아래에 상세가 펼쳐집니다.
       </p>
+      {/* 미등록(삭제된) 스토리지의 남은 기록 -- 있을 때만, 스토리지별 「기록 정리」(2026-10-12 사용자 요청). */}
+      <UnregisteredStoragesPanel />
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <select aria-label="스토리지 필터" value={storageFilter}
@@ -486,13 +496,23 @@ export function UsageAnalysis() {
                 return (
                   <Fragment key={key}>
                     <tr className={`border-t border-black/5 ${active ? "bg-accent/5" : ""}`}>
-                      <td className="py-2 text-muted">{r.storage_name}</td>
+                      <td className="py-2 text-muted">
+                        {r.storage_name}
+                        {/* 삭제된 스토리지의 기록(선택지 「(미등록)」과 같은 판정 -- 등록 목록을 모르면 표시하지 않는다). 정리는
+                            위 「미등록 스토리지」 칸. */}
+                        {storagesQ.data !== undefined && !registered.has(r.storage_name) && (
+                          <span className="ml-1.5 whitespace-nowrap rounded border border-line px-1 py-px text-[11px] text-ink/70">
+                            미등록</span>
+                        )}
+                      </td>
                       {/* 선택은 버튼이다 -- 행 onClick 만 두면 키보드로 못 고른다.
-                          aria-expanded/controls 로 "펼침 버튼"임을 보조기기에 알린다. */}
+                          aria-expanded/controls 로 "펼침 버튼"임을 보조기기에 알린다. 경로는 한 줄(whitespace-nowrap,
+                          2026-10-12): 좁은 폭에서 긴 스토리지 이름·「미등록」 표시가 열을 밀면 경로가 하이픈마다 쪼개졌다
+                          (e2e E10 L4) -- 표는 Table 의 가로 스크롤로 넘친다. */}
                       <td><button type="button"
                                   aria-expanded={active}
                                   aria-controls={active ? DETAIL_ID : undefined}
-                                  className={`inline-flex items-center gap-1 text-left ${
+                                  className={`inline-flex items-center gap-1 whitespace-nowrap text-left ${
                                     active ? "text-accent font-medium" : "text-accent"}`}
                                   onClick={() => toggle(r.storage_name, r.target)}>
                         <ChevronRight aria-hidden="true"

@@ -14,13 +14,18 @@
   하나가 전체 이력을 죽이면 안 되고, 숨기면 "그날 스캔이 없었다"는 거짓이 된다.
 """
 import json
+import sys
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from ..artifact_base import resolve_artifact_base
 from ..db import utc_now_iso
+from ..repositories.request_purges import MAX_BATCH_DELETE_CHILDREN, MAX_BATCH_DELETE_ITEMS
 from .artifacts import ArtifactError, job_owner_uid, read_artifact, strip_scheme
-from .auth import require_admin
+from .auth import Identity, audit_actor, require_admin, require_session_admin
+from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
+from .routes_requests import reject_when_maintenance
 from .routes_scan_paths import (_buckets, _is_number, _numbers, _time_histograms,
                                 _total_bytes)
 
@@ -156,6 +161,26 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
     return rows
 
 
+def _storage_infos(repos, names) -> dict:
+    """스토리지 이름 -> 내보내기 행의 스토리지 정보(2026-10-12 사용자 보고: CSV 「두번째 행부터는 backend type, mount
+    path 등이 누락」). 예전엔 포탈이 **지금 등록된** 목록에서만 찾아, 삭제된(미등록) 스토리지의 행은 그 열이 비었다 --
+    잡·요청은 스토리지 설정을 스냅숏하지 않는다. 등록돼 있으면 지금 값(source "registered"), 아니면 감사 기록의 마지막
+    설정(source "last_known" -- StoragesRepository.last_known_config), 그것도 없으면 값 null·source null(모름). 등록 여부는
+    따로 싣는다(registered) -- 빈 칸이 「모름」인지 「등록돼 있지 않음」인지 CSV 가 말하게."""
+    registered = {s["storage_name"]: s for s in repos.storages.list()}
+    out = {}
+    for n in names:
+        s = registered.get(n)
+        if s is not None:
+            out[n] = {"registered": True, "source": "registered", "backend_type": s["backend_type"],
+                      "mount_path": s["mount_path"], "managed_root": s["managed_root"]}
+            continue
+        known = repos.storages.last_known_config(n)
+        out[n] = {"registered": False, "source": "last_known" if known else None,
+                  **(known or {"backend_type": None, "mount_path": None, "managed_root": None})}
+    return out
+
+
 def _previous(job: dict, cached: "dict | None") -> dict:
     """직전 스캔은 증감(실 사용량 차이)만 쓴다 -- 시각·용량만 싣는다(행 크기 절반, 리뷰). 리포트를 새로 읽지 않는다:
     캐시에 있으면 그 총량, 없으면 러너가 같은 규칙으로 DB 에 남긴 bytes_count(_point 의 대체와 같은 근거)."""
@@ -189,10 +214,12 @@ def export_usage(request: Request, q: "str | None" = Query(None, max_length=512)
     latest_jobs = [js[0] for js in recent.values()]
     digests = _digests(repos, _base(request), latest_jobs)
     prev_cached = repos.scan_digests.get_many([js[1]["job_id"] for js in recent.values() if len(js) > 1])
+    infos = _storage_infos(repos, dict.fromkeys(t["storage_name"] for t in targets))
     rows = []
     for t in targets:
         js = recent.get((t["storage_name"], t["target"])) or []
         rows.append({**t,
+                     "storage": infos.get(t["storage_name"]),
                      "latest": _point(js[0], digests.get(js[0]["job_id"])) if js else None,
                      "previous": _previous(js[1], prev_cached.get(js[1]["job_id"])) if len(js) > 1 else None})
     body = {"generated_at": utc_now_iso(), "count": len(rows), "truncated": truncated, "rows": rows}
@@ -204,6 +231,139 @@ def scan_storages(request: Request):
     """성공 scan 기록이 있는 스토리지 이름(필터 선택지). 등록 스토리지 목록만으로는 삭제·개명된 스토리지 이름으로
     남은 이력을 좁힐 수 없다(리뷰) -- 화면이 등록 목록과 합친다."""
     return request.app.state.repos.data_jobs.scan_storage_names()
+
+
+@router.get("/api/admin/usage/unregistered-storages")
+def unregistered_storages(request: Request):
+    """사용량 분석에 남은 미등록 스토리지(등록 목록에 없는 이름 -- 삭제된 스토리지의 scan 기록)와 정리 규모(2026-10-12
+    사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean up」). 이름 = 그 스토리지의 scan 잡이 있는 이름
+    (성공이 아니어도 -- 정리가 실패·취소 scan 도 지우므로, 일시적 사유로 남은 것이 있으면 행이 남아 다시 정리할 수
+    있다). 행: storage_name, target_count·succeeded_scan_count·last_scan_at(사용량 화면 기준 = 성공 scan, 없으면 0·null),
+    single_count(배치 밖 scan 요청 수), batches([{batch_id, request_count}] -- 배치째 지울 수 있는 배치와 지금 자식 수),
+    mixed_batches(같은 모양 -- 다른 스토리지·다른 작업이 섞여 정리가 건너뛸 배치), request_count(정리하면 지워질 작업 수
+    = 단건 + batches 의 자식), last_known(감사 기록의 마지막 설정 | null). 미등록 판정은 서버가 한다 -- 화면의 판정(등록
+    목록 로딩 여부)에 기대지 않는다. 질의는 이름 수와 무관한 묶음 몇 개다(request_purges.unregistered_scan_history)."""
+    repos = request.app.state.repos
+    usage = {r["storage_name"]: r for r in repos.data_jobs.unregistered_scan_storages()}
+    hist = repos.request_purges.unregistered_scan_history()
+    out = []
+    for name in sorted(set(usage) | set(hist)):
+        u = usage.get(name) or {"target_count": 0, "succeeded_scan_count": 0, "last_scan_at": None}
+        h = hist.get(name) or {"singles": [], "batches": {}, "mixed_batches": {}}
+        batches = [{"batch_id": b, "request_count": n} for b, n in h["batches"].items()]
+        mixed = [{"batch_id": b, "request_count": n} for b, n in h["mixed_batches"].items()]
+        out.append({"storage_name": name, "target_count": u["target_count"],
+                    "succeeded_scan_count": u["succeeded_scan_count"], "last_scan_at": u["last_scan_at"],
+                    "single_count": len(h["singles"]), "batches": batches, "mixed_batches": mixed,
+                    "request_count": len(h["singles"]) + sum(b["request_count"] for b in batches),
+                    "last_known": repos.storages.last_known_config(name)})
+    return out
+
+
+class PurgeScanHistoryBody(BaseModel):
+    # 이름은 경로가 아니라 본문으로 -- 옛 스토리지 이름이 지금의 이름 규칙(storages._NAME_RE)에 맞는다는 보장이 없다.
+    storage_name: str = Field(min_length=1, max_length=512)
+    # 앞 회차에서 건너뛴 항목(포탈이 모아 보낸다) -- 이번 회차는 그 다음 것들을 시도한다. 없으면 대상 목록 앞쪽의 영구
+    # 거부(섞인 배치·비정상 행)가 회차 상한(배치 10·단건 200)을 매번 차지해 뒤의 지울 수 있는 기록에 영영 닿지 못한다.
+    # 상한 = 포탈 회차 상한(useUsage.PURGE_MAX_ROUNDS 100) x 회차 상한(단건 200·배치 10) -- 한 번의 정리에서 건너뛴 것을
+    # 전부 실을 수 있어야 마지막 회차가 422 로 끊기지 않는다.
+    exclude_request_ids: list[str] = Field(default_factory=list, max_length=20000)
+    exclude_batch_ids: list[str] = Field(default_factory=list, max_length=1000)
+
+
+@router.post("/api/admin/usage/unregistered-storages:purge")
+def purge_unregistered_storage(body: PurgeScanHistoryBody, request: Request,
+                               identity: Identity = Depends(require_session_admin)):
+    """미등록 스토리지 하나의 scan 작업 기록 정리 **한 회차**(2026-10-12). **세션 관리자만**(작업 삭제와 같은 경계 --
+    CLAUDE.md 「작업(요청) 삭제는 세션 관리자」, 공유 토큰 403 admin_session_required). 유지보수 중 503.
+
+    - 대상: 그 스토리지의 scan 잡을 가진 요청 전부(request_purges.scan_storage_selection -- 성공·실패·취소). 배치 자식은
+      배치째(그 스토리지의 scan 만 담은 배치일 때만), 나머지는 단건. rm·sync 기록과 스토리지의 실제 데이터는 건드리지 않는다.
+    - 삭제는 일반 작업 삭제와 **같은 몸통**(delete_terminal·delete_batch)을 scan_storage= 로 부른다 -- 같은 게이트(종단·
+      조용한 창·상한), 같은 감사·정리 아웃박스에 더해 잠근 행으로 미등록(storage_registered)·순수성
+      (storage_history_mismatch·storage_history_batch_mixed)을 다시 판정한다. 여기서 먼저 등록 여부를 보는 409 는 빠른
+      거절일 뿐이다(진짜 판정은 트랜잭션 안).
+    - 회차 상한 = 작업 삭제 API 와 같다(배치 10·단건 200) -- 한 HTTP 요청이 RLock 을 쥐는 시간을 묶는다. 응답의
+      remaining(남은 단건·배치 수 -- 건너뛴 것 포함)을 보고 포탈이 다시 부른다. 건너뛴 항목은 다음 회차의
+      exclude_request_ids·exclude_batch_ids 로 돌아와 빠진다(본문 주석) -- 포탈은 시도할 것이 없는 회차에서 멈춘다.
+    - 회차마다 묶음 감사 1행(storage_history/purge) -- 지운 요청·배치마다의 감사는 삭제 몸통이 남긴다.
+    응답: {storage_name, deleted:[{request_id, job_ids}], deleted_batches:[{batch_id, request_ids, job_ids, dangling}],
+    skipped:[{request_id, reason}], skipped_batches:[{batch_id, reason, request_id}], remaining:{requests, batches}(남은
+    전부 -- 건너뛴 것 포함), remaining_untried:{requests, batches}(남은 것 중 이번 본문의 exclude_* 와 이번 회차에 건너뛴
+    것을 뺀 수 = 다음 회차가 시도할 것 -- 포탈은 이것이 0 이면 멈춘다. 건너뛴 id 의 **개수**와 remaining 을 비교하면, 건너뛴
+    뒤 다른 곳에서 지워진 id 만큼 아직 시도하지 않은 기록을 남긴 채 멈췄다), purge_pending}."""
+    reject_when_maintenance(request)
+    repos, settings = request.app.state.repos, request.app.state.settings
+    name = body.storage_name
+    if repos.storages.get(name) is not None:
+        raise HTTPException(status_code=409, detail="storage_registered")
+    base = strip_scheme(resolve_artifact_base(repos.control, settings) or "") or None
+    actor = audit_actor(identity)
+    sel = repos.request_purges.scan_storage_selection(name)
+    skip_r, skip_b = set(body.exclude_request_ids), set(body.exclude_batch_ids)
+    batches = [(b, n) for b, n in sel["batches"].items() if b not in skip_b][:MAX_DELETE_BATCHES]
+    singles = [r for r in sel["singles"] if r not in skip_r][:MAX_DELETE]
+    deleted, deleted_batches, skipped, skipped_batches = [], [], [], []
+    for bid, count in batches:
+        try:
+            r = repos.request_purges.delete_batch(
+                bid, expected_request_count=count, actor=actor, artifact_base=base,
+                quiet_seconds=settings.request_delete_quiet_seconds, max_children=MAX_BATCH_DELETE_CHILDREN,
+                max_items=MAX_BATCH_DELETE_ITEMS, scan_storage=name)
+        except Exception as exc:       # 한 배치가 회차 전체를 500 으로 만들지 않는다(작업 삭제 API 와 같은 이유)
+            print(f"storage history purge: batch {bid} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            skipped_batches.append({"batch_id": bid, "reason": "batch_delete_failed", "request_id": None})
+            continue
+        if r["deleted"]:
+            deleted_batches.append({"batch_id": bid, "request_ids": r["request_ids"], "job_ids": r["job_ids"],
+                                    "dangling": r["dangling"]})
+        else:
+            skipped_batches.append({"batch_id": bid, "reason": r["reason"], "request_id": r["request_id"]})
+    for rid in singles:
+        try:
+            r = repos.request_purges.delete_terminal(
+                rid, actor=actor, artifact_base=base,
+                quiet_seconds=settings.request_delete_quiet_seconds, scan_storage=name)
+        except Exception as exc:
+            print(f"storage history purge: request {rid} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            skipped.append({"request_id": rid, "reason": "request_delete_failed"})
+            continue
+        if r["deleted"]:
+            deleted.append({"request_id": rid, "job_ids": r["job_ids"]})
+        else:
+            skipped.append({"request_id": rid, "reason": r["reason"]})
+    # 아래는 덤이다 -- 무엇을 지웠는지(이미 커밋)가 응답의 본체라, 세다가·감사를 쓰다가 DB 가 끊겨도 500 으로 그것을
+    # 숨기지 않는다(작업 삭제 API 의 pending_count 와 같은 이유). remaining None = 모름(포탈은 멈춘다).
+    if deleted or deleted_batches or skipped or skipped_batches:
+        reasons: dict = {}
+        for s in skipped + skipped_batches:
+            reasons[s["reason"]] = reasons.get(s["reason"], 0) + 1
+        try:
+            repos.request_purges.audit_scan_history_purge(name, actor=actor, summary={
+                "deleted_request_ids": [d["request_id"] for d in deleted],
+                "deleted_batch_ids": [d["batch_id"] for d in deleted_batches],
+                "deleted_batch_request_count": sum(len(d["request_ids"]) for d in deleted_batches),
+                "skipped_reasons": reasons})
+        except Exception as exc:
+            print(f"storage history purge: audit failed for {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    try:
+        after = repos.request_purges.scan_storage_selection(name)
+        remaining = {"requests": len(after["singles"]), "batches": len(after["batches"])}
+        tried_r = skip_r | {x["request_id"] for x in skipped}
+        tried_b = skip_b | {x["batch_id"] for x in skipped_batches}
+        untried = {"requests": sum(1 for r in after["singles"] if r not in tried_r),
+                   "batches": sum(1 for b in after["batches"] if b not in tried_b)}
+    except Exception as exc:
+        print(f"storage history purge: remaining count failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        remaining = untried = None
+    try:
+        pending = repos.request_purges.pending_count()
+    except Exception as exc:
+        print(f"storage history purge: pending_count failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        pending = None
+    return {"storage_name": name, "deleted": deleted, "deleted_batches": deleted_batches, "skipped": skipped,
+            "skipped_batches": skipped_batches, "remaining": remaining, "remaining_untried": untried,
+            "purge_pending": pending}
 
 
 @router.get("/api/admin/usage/scan-history")

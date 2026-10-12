@@ -346,6 +346,12 @@ export const REASON_MESSAGES: Record<string, string> = {
   // 그 배치를 같은 호출에서 함께 골랐으면 서버가 그 배치를 지운 뒤 이 배치를 한 번 더 시도한다(routes_request_purge) --
   // 그래서 이 사유가 보이는 것은 그 배치를 고르지 않았거나 그 배치도 지워지지 않은 경우다.
   batch_child_shared: "이 배치의 작업을 다른 배치의 항목도 가리키고 있어 삭제할 수 없습니다(비정상 데이터) — 그 항목을 가진 배치를 먼저(또는 함께 골라) 삭제해야 합니다",
+  // 사용량 분석 「미등록 스토리지 기록 정리」(2026-10-12, POST /api/admin/usage/unregistered-storages:purge). storage_registered 는
+  // 409(빠른 거절)이자 회차 안의 항목 사유(정리 대상을 고른 뒤 같은 이름으로 다시 등록됨 -- 트랜잭션 안 재판정). 나머지 둘은
+  // 부분 성공 본문의 skipped 사유. 같은 회차의 다른 사유는 작업 삭제(request_*·batch_*)를 그대로 쓴다.
+  storage_registered: "이 스토리지는 지금 등록돼 있어 여기서 기록을 정리하지 않습니다 — 등록된 스토리지의 기록은 전체 작업에서 지우세요",
+  storage_history_mismatch: "이 스토리지의 scan 이 아닌 작업이 섞여 있어 건너뛰었습니다 — 전체 작업에서 확인한 뒤 지우세요",
+  storage_history_batch_mixed: "다른 스토리지 항목이나 다른 작업이 섞인 배치라 배치째 지우지 않았습니다 — 배치 상세에서 확인한 뒤 전체 작업에서 배치 단위로 지우세요",
   purge_k8s_failed: "남은 파드·잡 정리에 실패했습니다 — 자동으로 다시 시도합니다",
   purge_waiting_pods: "잡 파드가 아직 종료 중입니다 — 종료되면 결과 파일을 정리합니다(오래 걸리면 노드 상태를 확인하세요)",
   purge_base_unavailable: "결과 폴더를 열 수 없습니다 — 결과 폴더 설정·마운트를 확인하세요",

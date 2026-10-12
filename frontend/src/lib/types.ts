@@ -290,6 +290,35 @@ export interface UsageExportRow extends ScanTargetRow {
   latest: UsagePoint | null;
   // 직전 성공 scan -- 증감용 값만(서버가 행 크기를 줄인다). total_bytes null = 모름.
   previous: { job_id: string; request_id: string; finished_at: string | null; total_bytes: number | null } | null;
+  // 2026-10-12: 행의 스토리지 정보(서버 routes_usage._storage_infos). 옵션(?) = 구형 서버 -- 포탈이 등록 목록으로 대신한다.
+  storage?: UsageStorageInfo | null;
+}
+// 내보내기 행의 스토리지 정보. source: registered = 지금 등록된 값, last_known = 감사 기록의 마지막 설정(삭제된 스토리지),
+// null = 모름(값도 null).
+export interface UsageStorageInfo {
+  registered: boolean; source: "registered" | "last_known" | null;
+  backend_type: string | null; mount_path: string | null; managed_root: string | null;
+}
+// 사용량 분석의 미등록 스토리지(GET /api/admin/usage/unregistered-storages, 2026-10-12). target_count·succeeded_scan_count·
+// last_scan_at = 사용량 화면 기준(성공 scan -- 실패 scan 만 남은 이름은 0·null), request_count = 정리하면 지워질 작업 수
+// (단건 + batches 의 자식). mixed_batches = 다른 스토리지·다른 작업이 섞여 정리가 건너뛸 배치(수에 넣지 않는다).
+export interface UnregisteredStorage {
+  storage_name: string; target_count: number; succeeded_scan_count: number; last_scan_at: string | null;
+  single_count: number; batches: { batch_id: string; request_count: number }[]; request_count: number;
+  mixed_batches: { batch_id: string; request_count: number }[];
+  last_known: { backend_type: string | null; mount_path: string | null; managed_root: string | null } | null;
+}
+// POST /api/admin/usage/unregistered-storages:purge 한 회차의 응답(부분 성공 모델 -- 작업 삭제와 같은 줄 모양).
+export interface PurgeStorageHistoryResult {
+  storage_name: string;
+  deleted: { request_id: string; job_ids: string[] }[];
+  deleted_batches: { batch_id: string; request_ids: string[]; job_ids: string[]; dangling: boolean }[];
+  skipped: { request_id: string; reason: string }[];
+  skipped_batches: { batch_id: string; reason: string; request_id: string | null }[];
+  remaining: { requests: number; batches: number } | null;
+  // 남은 것 중 다음 회차가 시도할 것(이번 본문의 exclude_* 와 이번 회차에 건너뛴 것을 뺀 수). null = 모름.
+  remaining_untried: { requests: number; batches: number } | null;
+  purge_pending: number | null;
 }
 export interface UsageExport {
   generated_at: string; count: number; truncated: boolean; rows: UsageExportRow[];

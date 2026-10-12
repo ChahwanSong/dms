@@ -77,6 +77,47 @@ test("buildUsageCsv: 요약 키가 기본 열 이름과 겹치면 summary_ 접�
   expect(columns).toContain("summary_total_bytes");
 });
 
+// 2026-10-12 사용자 보고: 「사용량 csv 로 추출하니까 두번째 행부터는 backend type, mount path 등 몇몇 column 들이 누락」 --
+// 첫 행만 등록 스토리지, 다음 행들은 삭제된(미등록) 스토리지였다(최근 스캔 순). 서버가 행마다 싣는 storage 를 쓴다.
+test("buildUsageCsv: 미등록 스토리지 행도 서버의 마지막 설정으로 채우고 출처·등록 여부를 말한다", () => {
+  const { columns, records } = buildUsageCsv([
+    row({ storage: { registered: true, source: "registered", backend_type: "gpfs", mount_path: "/mnt/s1",
+                     managed_root: "/mnt/s1/managed" } }),
+    row({ storage_name: "old-gpfs", target: "proj", storage: { registered: false, source: "last_known",
+          backend_type: "wekafs", mount_path: "/old", managed_root: "/old/managed" } }),
+    row({ storage_name: "ghost", target: "x", storage: { registered: false, source: null, backend_type: null,
+          mount_path: null, managed_root: null } }),
+  ], ST, NOW);
+  expect(columns.slice(0, 8)).toEqual(["storage_name", "storage_registered", "backend_type", "mount_path",
+                                       "managed_root", "storage_info_source", "abs_path", "target"]);
+  expect(records[1]).toMatchObject({ storage_registered: false, backend_type: "wekafs", mount_path: "/old",
+                                     managed_root: "/old/managed", storage_info_source: "last_known",
+                                     abs_path: "/old/managed/proj" });
+  expect(records[0]).toMatchObject({ storage_registered: true, storage_info_source: "registered" });
+  // 모름은 빈 칸 -- 등록 여부는 안다(false)
+  expect(records[2]).toMatchObject({ storage_registered: false, backend_type: null, storage_info_source: null,
+                                     abs_path: null });
+});
+
+test("buildUsageCsv: 서버가 storage 를 싣지 않으면(구형) 등록 목록으로 대신한다 -- 목록도 모르면 등록 여부도 모름", () => {
+  const known = buildUsageCsv([row({}), row({ storage_name: "gone" })], ST, NOW).records;
+  expect(known[0]).toMatchObject({ storage_registered: true, storage_info_source: "registered", backend_type: "gpfs" });
+  expect(known[1]).toMatchObject({ storage_registered: false, storage_info_source: null, backend_type: null });
+  const unknown = buildUsageCsv([row({})], undefined, NOW).records;
+  expect(unknown[0]).toMatchObject({ storage_registered: null, backend_type: null, abs_path: null });
+});
+
+test("buildUsageCsv: 요약 키가 파손·히스토그램 열 이름과 겹쳐도 열이 둘 생기지 않는다", () => {
+  const { columns, records } = buildUsageCsv([row({ latest: pt({
+    summary: { broken_paths_total: 9, "atime_bytes_0d-1d": 1 }, broken_paths_total: 3 }) })], ST, NOW);
+  expect(columns.filter((c) => c === "broken_paths_total")).toHaveLength(1);
+  expect(columns.filter((c) => c === "atime_bytes_0d-1d")).toHaveLength(1);
+  expect(records[0].broken_paths_total).toBe(3);
+  expect(records[0].summary_broken_paths_total).toBe(9);
+  expect(records[0]["atime_bytes_0d-1d"]).toBe(50);
+  expect(records[0]["summary_atime_bytes_0d-1d"]).toBe(1);
+});
+
 test("usageCsvFilename: KST 날짜·시각", () => {
   expect(usageCsvFilename(Date.parse("2026-10-02T03:04:00Z"))).toBe("dms-usage-20261002-1204.csv");
 });
