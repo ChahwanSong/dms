@@ -374,8 +374,8 @@ def _read_node_incluster(node_name: str) -> dict:
 def probe_k8s_node(node_name: str, *, read_node=None, environ=os.environ) -> dict:
     """자기 노드의 k8s 스케줄 가능 여부 + CPU allocatable/capacity(밀리코어). 모르면 schedulable=None(클러스터 밖·권한
     없음·API 오류) -- planner 는 None 을 막지 않는다(fail-open: 조회 문제가 전 노드를 배치 불가로 만들면 안 된다). 그때는
-    CPU 키도 없다(모름 -- 키 부재와 None 은 같은 뜻으로 읽힌다, node_cpu.node_cpu_cap). 권한은 dms-agent 의
-    ClusterRole nodes get(deploy/k8s/10-rbac.yaml)."""
+    CPU 키도 없다(모름 -- 키 부재와 None 은 같은 뜻으로 읽힌다, node_cpu.node_cpu_cap) -- 러너가 마지막으로 읽은 값을 이어
+    싣는다(runner.carry_node_cpu, allocatable_stale). 권한은 dms-agent 의 ClusterRole nodes get(deploy/k8s/10-rbac.yaml)."""
     if read_node is None:
         if not environ.get("KUBERNETES_SERVICE_HOST"):
             return {"schedulable": None, "reason": "not_in_cluster"}

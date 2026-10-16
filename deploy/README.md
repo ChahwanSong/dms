@@ -511,9 +511,13 @@ curl -sf -X POST "$API/api/admin/storages" "${AUTH[@]}" -H 'content-type: applic
 # ("scan", "dsync", "nsync", "rm")  (note: "dsync", not "sync")
 # 주의(2026-10-16): 워커는 procs_per_node 만큼 CPU 코어를 **실제로 요청**한다(limits 없음, launcher 100m). planner·stepper 가
 # 노드당 프로세스를 floor((노드 allocatable − 100m − DMS_NODE_CPU_RESERVE_MILLICORES) / 1000) 코어로 줄이므로(그 노드가 1코어도
-# 못 담으면 후보에서 빠지고, 다 빠지면 node_cpu_insufficient 로 거부) 값이 커도 잡이 영구 Pending 이 되지는 않지만, 화면엔
-# 「요청 N → 노드 CPU 상한 M」으로 줄어든 값이 보인다. 의도대로 돌리려면 procs_per_node ≤ 그 상한으로 둔다 --
-# 테스트베드(allocatable 1800m, 예비 500)는 상한 1 이다.
+# 못 담으면 후보에서 빠지고, 다 빠지면 node_cpu_insufficient 로 거부) 상한을 아는 동안엔 값이 커도 잡이 영구 Pending 이 되지
+# 않고, 화면엔 「요청 N → 노드 CPU 상한 M」으로 줄어든 값이 보인다. 상한을 모르는 창(에이전트 롤아웃 중 옛 에이전트 보고가
+# 남은 노드·에이전트 재시작 직후 첫 Node 읽기 실패 -- 그 뒤의 읽기 실패는 에이전트가 마지막 값을 이어 싣는다)에 제출된
+# 미리보기·실행은 줄지 않고 나가 Volcano 에서 기다리다, 상한이 알려지는 순간 stepper 가 회수하고
+# node_cpu_insufficient_at_step 으로 끝낸다(자동으로 줄여 다시 내지 않는다 -- 다시 제출). 의도대로 돌리려면
+# procs_per_node ≤ 그 상한으로 둔다 -- 테스트베드(allocatable 1800m, 예비 500)는 상한 1 이다. procs_per_node 상한은
+# 1024(워커당 rank 위생 상한, 그 위는 저장 422).
 for tool in scan dsync nsync rm; do
   curl -sf -X PUT "$API/api/admin/policies/$tool" "${AUTH[@]}" -H 'content-type: application/json' -d '{
     "max_nodes": 3, "procs_per_node": 2, "queue": "dms-data",

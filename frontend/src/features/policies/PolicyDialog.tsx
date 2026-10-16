@@ -6,14 +6,20 @@ import { useUpsertPolicy } from "./usePolicies";
 import type { Policy } from "../../lib/types";
 const field = "mt-1 w-full rounded-lg border border-line px-3 py-2";
 
-/** 필수 정수(≥1) 검증. 서버 계약(pydantic ge=1)의 미러 — 상한은 지어내지
-    않는다(정책이 곧 캡이라 서버에 상한이 없다). 빈 값은 intFieldError(선택
-    필드용)와 달리 여기선 오류다 — 이 필드들은 생략 불가. */
-export function requiredIntError(label: string, raw: string): string | null {
+/** 노드당 프로세스 상한 — 서버 PolicyBody(le=execution_manifests.MAX_PROCESSES_PER_WORKER)의 미러(2026-10-16 리뷰). 워커
+    빌더가 워커당 1024 rank 를 넘으면 제출을 거부하므로 정책이 그 위를 저장하면 잡이 사전 점검 뒤에야 실패했다. */
+export const MAX_PROCS_PER_NODE = 1024;
+
+/** 필수 정수(≥1) 검증. 서버 계약(pydantic ge=1)의 미러 — 상한(max)은 서버에
+    상한이 있는 필드(노드당 프로세스)에만 준다. 다른 필드는 지어내지 않는다(정책이
+    곧 캡이다). 빈 값은 intFieldError(선택 필드용)와 달리 여기선 오류다 — 이
+    필드들은 생략 불가. */
+export function requiredIntError(label: string, raw: string, max?: number): string | null {
   const v = raw.trim();
   if (v === "") return `${label}: 값을 입력하세요`;
   const n = Number(v);
   if (!Number.isInteger(n) || n < 1) return `${label}: 1 이상의 정수여야 합니다`;
+  if (max !== undefined && n > max) return `${label}: ${max} 이하여야 합니다`;
   return null;
 }
 
@@ -72,7 +78,7 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
   // 왜 틀렸는지 한국어로 필드 밑에 보여준다.
   const errors = {
     maxNodes: requiredIntError("최대 노드", maxNodes),
-    procsPerNode: requiredIntError("노드당 프로세스", procsPerNode),
+    procsPerNode: requiredIntError("노드당 프로세스", procsPerNode, MAX_PROCS_PER_NODE),
     previewTimeout: optionalIntError("미리보기 타임아웃", previewTimeout),
     executionTimeout: requiredIntError("실행 타임아웃", executionTimeout),
   };
@@ -106,7 +112,8 @@ export function PolicyDialog({ policy, trigger }: { policy: Policy; trigger: Rea
                      onChange={(e) => setMaxNodes(e.target.value)} />
               {errors.maxNodes && <span className="block text-bad mt-1">{errors.maxNodes}</span>}</label>
             <label className="block">노드당 프로세스
-              <input aria-label="노드당 프로세스" type="number" min={1} className={field} value={procsPerNode}
+              <input aria-label="노드당 프로세스" type="number" min={1} max={MAX_PROCS_PER_NODE} className={field}
+                     value={procsPerNode}
                      onChange={(e) => setProcsPerNode(e.target.value)} />
               {errors.procsPerNode && <span className="block text-bad mt-1">{errors.procsPerNode}</span>}</label>
           </div>

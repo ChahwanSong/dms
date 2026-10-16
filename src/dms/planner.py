@@ -14,7 +14,7 @@ from .privileged import privileged_names
 from .repositories.sync_pairs import sync_pair_allowed
 from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES
 from .placement import (
-    PlacementError, TOOL_TO_POLICY, resolve_fanout, select_tool_and_candidates)
+    PlacementError, TOOL_TO_POLICY, dms_node_load, resolve_fanout, select_tool_and_candidates)
 
 
 _IDENTITY_PENDING = "identity_not_ready_on_node"
@@ -109,10 +109,33 @@ class Planner:
         self._resolver = resolver
         self._settings = settings
         self._monotonic = monotonic or time.monotonic   # 틱 LDAP 예산 시계(테스트 주입용)
+        # 노드별 DMS 예약 코어(placement.dms_node_load) -- 틱마다 처음 필요할 때 한 번 읽고, 이 틱에 계획한 잡을 더해 간다
+        # (_node_load·_account_load). None = 아직 안 읽음.
+        self._load = None
+
+    def _node_load(self) -> dict:
+        """노드 선택 순서의 입력(placement.resolve_fanout docstring). 계획할 요청이 실제로 노드 선택까지 온 틱에만 읽는다
+        (비종단 잡의 worker_pool 만 -- data_jobs.active_worker_pools). 읽기 실패는 순서를 이름순으로 되돌릴 뿐 계획을
+        막지 않는다(어림값이다)."""
+        if self._load is None:
+            try:
+                self._load = dms_node_load(self._repos.data_jobs.active_worker_pools())
+            except Exception as exc:  # noqa: BLE001 -- 순서 어림값 읽기 실패가 계획을 막으면 안 된다
+                print(f"planner: node load read failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+                self._load = {}
+        return self._load
+
+    def _account_load(self, fanout):
+        """방금 계획한 잡의 몫을 이 틱의 부하에 더한다 -- 같은 틱에 계획되는 다음 요청이 같은 노드로 몰리지 않게."""
+        load = self._node_load()
+        for nodes in fanout["candidates"].values():
+            for n in nodes:
+                load[n] = load.get(n, 0) + fanout["procs_per_node"]
 
     def run_once(self, limit: int = 50, *, now_iso=None) -> dict:
         pending = self._repos.requests.list_pending(limit)
         results = {}
+        self._load = None            # 틱마다 새로 읽는다(그 사이 끝난 잡·다른 경로로 생긴 잡)
         # 틱마다 새 서킷·예산 -- 다음 틱은 다시 LDAP 를 시도한다(LDAP 가 돌아오면 바로 이어진다).
         circuit = (None if self._resolver is None
                    else _TickCircuit(self._resolver, monotonic=self._monotonic))
@@ -376,7 +399,9 @@ class Planner:
                                     priority=req["priority"],
                                     requested_node_count=requested,
                                     requested_procs_per_node=requested_ppn,
-                                    node_cpu_caps=placement["node_cpu_caps"])
+                                    node_cpu_caps=placement["node_cpu_caps"],
+                                    # 노드 선택 순서: 상한 충족 → DMS 예약 코어 적은 순 → 이름(placement._pick_nodes)
+                                    node_load=self._node_load())
         except PlacementError as exc:
             return self._reject(rid, exc.reason_code)
         # 6b. 요청 노드 수 유예 내 대기(A'): planner 는 적격 >= 1 이면 즉시 계획하는데,
@@ -416,8 +441,9 @@ class Planner:
                          "supplementary_gids": list(identity.supplementary_gids),
                          "supplementary_gids_excluded": list(identity.supplementary_gids_excluded)}
         identity_dict.pop("group_gids", None)
-        # candidates 는 fanout 이 자른 노드(이름순 앞 N대)다 -- CPU 상한을 본 노드 집합과 굳히는 노드 집합이 같은 한 곳
-        # (placement.resolve_fanout docstring). procs_per_node·procs_per_node_requested·node_cpu_caps·cpu_cap_known 도 함께.
+        # candidates 는 fanout 이 고른 노드다(상한 충족 → DMS 예약 적은 순 → 이름) -- CPU 상한을 본 노드 집합과 굳히는 노드
+        # 집합이 같은 한 곳(placement.resolve_fanout docstring). procs_per_node·procs_per_node_requested·node_cpu_caps·
+        # cpu_cap_known 도 함께.
         worker_pool = {"tool": placement["tool"], "identity": identity_dict,
                        "rejections": placement["rejections"], **fanout}
         precondition = {"requester_id": req["requester_id"],
@@ -435,6 +461,7 @@ class Planner:
             precondition=precondition, actor="planner")
         if job_id is None:
             return "gone"
+        self._account_load(fanout)
         self._record_group_events(rid, identity)
         self._record_cpu_clamp_event(rid, fanout)
         return "planned"

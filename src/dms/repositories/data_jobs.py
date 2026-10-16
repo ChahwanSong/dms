@@ -435,6 +435,28 @@ class DataJobsRepository:
                 ORDER BY updated_at LIMIT :n{suffix}""", params)
         return [self._hydrate(r) for r in rows]
 
+    # 비종단 = 지금 노드 CPU 를 예약했거나(실행·미리보기 vcjob) 곧 예약할(Pending·ConfirmPending 등) 잡.
+    _ACTIVE_STATES = tuple(s.value for s in DataJobState if s not in TERMINAL_DATA_JOB_STATES)
+
+    def active_worker_pools(self, *, limit: int = 2000) -> list:
+        """비종단 잡의 worker_pool 만(다른 컬럼·diag_logs 없음) 최근 갱신순 최대 limit 건(2026-10-16 리뷰). planner 의 노드
+        선택 순서(placement.dms_node_load)가 노드별 DMS 예약 코어를 센다. idx_data_jobs_state(state, updated_at) 로 읽어
+        종단 잡이 쌓여도 비용이 늘지 않는다(비종단 수는 배치 max_concurrency 가 묶는다). 상한을 넘으면 최근분만 센다 --
+        순서를 정하는 어림값일 뿐 배정의 정확성은 stepper·빌더가 지킨다. 깨진 JSON 행은 건너뛴다(DB 신뢰 경계)."""
+        placeholders = ", ".join(f":s{i}" for i in range(len(self._ACTIVE_STATES)))
+        params = {f"s{i}": v for i, v in enumerate(self._ACTIVE_STATES)}
+        params["n"] = limit
+        rows = self._db.query(
+            f"""SELECT worker_pool FROM data_jobs WHERE state IN ({placeholders})
+                ORDER BY updated_at DESC, job_id DESC LIMIT :n""", params)
+        out = []
+        for r in rows:
+            try:
+                out.append(load_json(r["worker_pool"]))
+            except (ValueError, TypeError):
+                continue
+        return out
+
     def set_phase_ref(self, job_id, phase, ref) -> bool:
         """제출한 단계의 ref 를 phase_refs 에 합친다. 반환 False = 잡 행이 없다(2026-10-08, 요청 삭제 선행 보강).
 

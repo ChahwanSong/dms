@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from ..domain import DomainValidationError, PRIORITIES
+from ..execution_manifests import MAX_PROCESSES_PER_WORKER
 from ..repositories.control import POLICY_TOOLS
 from .auth import Identity, audit_actor, require_admin
 
@@ -9,7 +10,10 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 class PolicyBody(BaseModel):
     max_nodes: int = Field(ge=1)
-    procs_per_node: int = Field(ge=1)
+    # 상한 = 워커 빌더의 위생 상한(execution_manifests.MAX_PROCESSES_PER_WORKER, 2026-10-16 리뷰) -- 저장 시점에 422 로 막는다.
+    # 상한이 없으면 저장은 되고, 노드 CPU 상한을 모르는 동안 계획된 잡이 사전 점검까지 돈 뒤 빌더 ValueError →
+    # submit_failed 로 불투명하게 끝났다.
+    procs_per_node: int = Field(ge=1, le=MAX_PROCESSES_PER_WORKER)
     queue: str = "dms-data"
     default_priority: str = "mid"
     max_priority: str = "high"

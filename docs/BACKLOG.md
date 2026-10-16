@@ -339,8 +339,11 @@
   배치의 미리보기 자식들이 노드 단위로 줄을 서고(테스트베드는 노드당 워커 1개), Previewing 배치는 미리보기
   단계 자식이 하나라도 남으면 PreviewReady 로 넘어가지 않는다(`batch_orchestrator.py` 미리보기 집계) —
   그동안 먼저 끝난 형제의 `preview_ttl`(24h, 미리보기 성공부터)이 흘러 `preview_expired` 로 Rejected 될 수
-  있다. Running 배치에서 슬롯을 기다리는 확인된 자식도 같다. 큰 배치는 max_concurrency 를 노드 수에 맞추거나
-  나눠 내라. 근본 해법(배치 안 TTL 시작을 「배치 PreviewReady」로 미루기 등)은 결정 대기.
+  있다. Running 배치에서 슬롯을 기다리는 확인된 자식도 같다. planner 는 자식을 DMS 예약이 적은 노드로 흩지만
+  (2026-10-16 리뷰, `placement._pick_nodes` — 그 전엔 이름순 앞 N대 고정이라 max_concurrency 를 줄여도 자식이 같은
+  노드에 줄을 섰다), 적격 노드들이 동시에 담는 자식 수(≈ 노드 수 × 노드 상한 ÷ (자식의 노드 수 × 노드당 프로세스))를
+  넘는 max_concurrency 는 그만큼 줄을 세운다 — 큰 배치는 max_concurrency 를 그 수 이하로 두거나 나눠 내라(테스트베드:
+  노드 3·상한 1·자식당 1노드×1프로세스면 3). 근본 해법(배치 안 TTL 시작을 「배치 PreviewReady」로 미루기 등)은 결정 대기.
 
 ---
 

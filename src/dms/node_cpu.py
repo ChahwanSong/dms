@@ -1,11 +1,12 @@
 """노드 CPU 상한(2026-10-16 사용자 결정 「워커가 프로세스 개수만큼 코어를 실제로 요청 -- 옵션이 아니라 항상」).
 
 워커 컨테이너는 resources.requests.cpu = 그 워커의 rank 수를 요청한다(execution_manifests._processes_per_node -- hostfile
-slots 와 같은 단일 원천). 그런데 DMS 잡의 노드는 k8s 스케줄러가 아니라 planner 가 에이전트 보고로 골라 앞에서 N대를 굳히고
-(required nodeAffinity + 노드당 워커 1개), Volcano gang 은 전원이 놓여야 선다 -- 한 노드라도 요청을 담지 못하면 잡이
-Pending 에 영원히 멈춘다(데이터 잡엔 Pending 상한이 없고, 그 잡의 Inqueue 예약이 뒤 잡의 enqueue 까지 막는다). 그래서
-planner(placement)·stepper 가 노드별 상한으로 노드당 프로세스 수를 **줄이고**(클램프), 1코어도 못 담는 노드는 후보에서
-뺀다(0대면 node_cpu_insufficient 거부).
+slots 와 같은 단일 원천). 그런데 DMS 잡의 노드는 k8s 스케줄러가 아니라 planner 가 에이전트 보고로 골라 N대를 굳히고
+(required nodeAffinity + 노드당 워커 1개 -- 고르는 순서는 placement.resolve_fanout), Volcano gang 은 전원이 놓여야 선다 --
+한 노드라도 요청을 담지 못하면 잡이 Pending 에 영원히 멈춘다(데이터 잡엔 Pending 상한이 없고, 그 잡의 Inqueue 예약이 뒤
+잡의 enqueue 까지 막는다). 그래서 planner(placement)·stepper 가 노드별 상한으로 노드당 프로세스 수를 **줄이고**(클램프),
+1코어도 못 담는 노드는 후보에서 뺀다(0대면 node_cpu_insufficient 거부). 제출 뒤 상한이 알려졌는데 PENDING vcjob 의 노드당
+프로세스보다 작으면 stepper 가 node_cpu_insufficient_at_step 으로 끊는다(stepper._raise_if_cpu_short).
 
 상한 = floor((allocatable − launcher 요청 − 예비) / 1000) 코어.
 - allocatable 은 에이전트가 자기 Node 에서 읽어 보고한다(report.k8s_node.allocatable_cpu_m, agent/probes.probe_k8s_node).
@@ -15,9 +16,11 @@ planner(placement)·stepper 가 노드별 상한으로 노드당 프로세스 �
 - 예비(DMS_NODE_CPU_RESERVE_MILLICORES, 기본 500)는 DaemonSet·제어면·빌드 파드 몫이다. 컨트롤러·에이전트는 다른 파드의
   requests 를 볼 수 없다(클러스터 전역 pods list 권한이 필요 -- 보안 범위를 넓히는 결정이라 하지 않았다, BACKLOG).
 
-모름(옛 에이전트·Node 읽기 실패·클러스터 밖) = None = 클램프하지 않는다(fail-open, k8s_node 관례 -- 조회 문제가 전 노드를
-배치 불가로 만들면 안 된다). os.cpu_count 로 대신하지 않는다: 호스트 코어 수는 allocatable 보다 커서(테스트베드 2 > 1.8)
-바로 그 영구 Pending 을 못 막는다. 이 모듈은 표준 라이브러리만 쓴다(에이전트 이미지도 import 한다).
+모름(옛 에이전트·재시작 뒤 첫 Node 읽기 전·클러스터 밖) = None = 클램프하지 않는다(fail-open, k8s_node 관례 -- 조회 문제가
+전 노드를 배치 불가로 만들면 안 된다). Node 읽기가 한 번 실패한 보고는 모름이 아니다: 에이전트가 마지막으로 읽은 값을
+allocatable_stale=True 와 함께 이어 싣는다(agent.runner.carry_node_cpu -- allocatable 은 정적인 값이다). os.cpu_count 로
+대신하지 않는다: 호스트 코어 수는 allocatable 보다 커서(테스트베드 2 > 1.8) 바로 그 영구 Pending 을 못 막는다. 이 모듈은
+표준 라이브러리만 쓴다(에이전트 이미지도 import 한다).
 """
 import re
 from decimal import Decimal, InvalidOperation

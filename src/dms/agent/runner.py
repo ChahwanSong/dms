@@ -61,6 +61,28 @@ def cpu_utilisation(prev, cur) -> dict:
     return out
 
 
+_NODE_CPU_KEYS = ("allocatable_cpu_m", "capacity_cpu_m")
+
+
+def carry_node_cpu(last, k8s_node) -> tuple:
+    """(직전에 읽은 노드 CPU | None, 이번 보고의 k8s_node) -> (실을 k8s_node, 다음에 기억할 노드 CPU). 순수 함수.
+
+    2026-10-16 리뷰: 노드 CPU 상한(node_cpu)은 보고의 allocatable 만 보고, 서버는 노드의 **최신** 보고 하나만 읽는다
+    (agent_nodes 를 통째로 바꾼다). Node GET 이 한 번 실패하면(probe_failed -- CPU 키 없음) 그 보고 주기 동안 상한이
+    「모름」이 되고, 그 창에 제출된 vcjob 은 클램프 없이 나가 gang 이 영원히 서지 않았다. allocatable 은 정적인 값이라
+    마지막으로 읽은 값이 「모름」보다 낫다 -- 이번에 allocatable 을 모르면(GET 실패·이상한 수량) 기억한 값을 싣고
+    allocatable_stale=True 로 표시한다. 스케줄 판정(schedulable·reason)은 손대지 않는다(모름은 모름 -- cordon 을 지어내지
+    않는다). 기억은 프로세스 메모리뿐이다(재시작 직후 첫 읽기 전은 여전히 모름 -- fail-open)."""
+    if not isinstance(k8s_node, dict):
+        return k8s_node, last
+    alloc = k8s_node.get("allocatable_cpu_m")
+    if isinstance(alloc, int) and not isinstance(alloc, bool):
+        return k8s_node, {k: k8s_node.get(k) for k in _NODE_CPU_KEYS}
+    if last is None:
+        return k8s_node, None
+    return {**k8s_node, **last, "allocatable_stale": True}, last
+
+
 def build_report(node_name, storages, probe_targets, *, mountinfo_text,
                  tool_names=AGENT_TOOL_NAMES, mounts_fn=None, tools_fn=None,
                  identities_fn=None, os_fn=None, read_text=None,
@@ -118,6 +140,8 @@ class AgentRunner:
         # 사용률 None(모름)이고 다음 보고부터 채워진다. state(응답에서 다시 짓는 설정 묶음)에 섞지 않는 이유:
         # 보고 실패 시 run_once 가 옛 state 를 그대로 돌려주므로 거기 두면 표본이 갱신되지 않는다.
         self._cpu_prev: Optional[dict] = None
+        # 마지막으로 읽은 노드 allocatable/capacity(carry_node_cpu). 프로세스 메모리 -- _cpu_prev 와 같은 이유로 state 밖.
+        self._node_cpu_last: Optional[dict] = None
 
     def _attach_cpu_utilisation(self, report: dict) -> None:
         """보고 os 블록에 cpu_used_pct·cpu_iowait_pct 를 싣고 이번 카운터를 다음 차분의 기준으로 기억한다.
@@ -152,6 +176,7 @@ class AgentRunner:
                               self_mountinfo_text=self_mountinfo_text,
                               directory_status=self._directory.report())
         self._attach_cpu_utilisation(report)
+        report["k8s_node"], self._node_cpu_last = carry_node_cpu(self._node_cpu_last, report.get("k8s_node"))
         try:
             response = self._client.post(
                 "/api/agent/report", json=report,

@@ -2,11 +2,12 @@
 
 노드 CPU 상한(2026-10-16, node_cpu 모듈 docstring): 워커는 노드당 프로세스 수만큼 CPU 코어를 요청한다. 1코어도 못 담는
 노드는 후보에서 빠지고(노드별 사유 insufficient_cpu, 0대면 node_cpu_insufficient 거부), resolve_fanout 이 **실제로 고른
-노드**(이름순 앞 N대 -- 자르기도 여기서 한다)의 상한으로 노드당 프로세스 수를 줄인다."""
+노드**(자르기도 여기서 한다 -- 순서는 resolve_fanout docstring)의 상한으로 노드당 프로세스 수를 줄인다."""
 
 from .domain import PRIORITIES, PRIORITY_CLASS
+from .execution_manifests import MAX_PROCESSES_PER_WORKER, processes_per_node
 from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES, node_cpu_cap, per_node_limit
-from .repositories.node_exclusions import NODE_EXCLUDED, NODE_UNSCHEDULABLE, k8s_unschedulable
+from .repositories.node_exclusions import NODE_EXCLUDED, NODE_UNSCHEDULABLE, candidate_nodes, k8s_unschedulable
 
 # 노드별 탈락 사유(rejections -- 화면 계약 아님, node_exclusions.NODE_EXCLUDED 와 같은 급).
 INSUFFICIENT_CPU = "insufficient_cpu"
@@ -192,15 +193,61 @@ def _clamp_priority(requested, policy_max):
     return policy_max
 
 
+def dms_node_load(worker_pools) -> dict:
+    """비종단 잡들의 worker_pool -> {노드: DMS 가 그 노드에 예약한(또는 곧 예약할) 코어 수}. resolve_fanout 의 노드 순서
+    입력이다(2026-10-16 리뷰 -- 아래 docstring). 노드당 값 = 그 잡의 procs_per_node(워커 CPU 요청과 같은 값), 키가 없거나
+    깨졌으면 process_count // 워커 수(execution_manifests.processes_per_node -- 이 기능 전에 계획된 잡). nsync 의 양면에 같은
+    노드가 있으면 워커가 둘이라 두 번 센다(node_cpu.per_node_limit 과 같은 규칙). launcher(100m)는 어느 후보에 앉을지
+    몰라 세지 않는다.
+
+    worker_pool 은 DB 신뢰 경계 밖이다 -- 모양이 깨진 행(비 dict·후보 없음·process_count 변조·워커당 1024 초과)은 **조용히
+    건너뛴다**: 순서를 정하는 어림값일 뿐이라 한 행의 변조가 계획 전체를 막으면 안 된다(배정 자체의 방어는 stepper·빌더)."""
+    load: dict = {}
+    for wp in worker_pools:
+        if not isinstance(wp, dict):
+            continue
+        cand = wp.get("candidates")
+        names = candidate_nodes(cand)
+        if not names:
+            continue
+        ppn = wp.get("procs_per_node")
+        if not isinstance(ppn, int) or isinstance(ppn, bool) or not 1 <= ppn <= MAX_PROCESSES_PER_WORKER:
+            try:
+                ppn = processes_per_node(wp.get("process_count"), cand)
+            except (ValueError, TypeError, AttributeError):
+                continue
+        for n in names:
+            load[n] = load.get(n, 0) + ppn
+    return load
+
+
+def _pick_nodes(nodes, count, *, per_node, caps, load):
+    """후보에서 count 대를 고른다(2026-10-16 리뷰). 키 = (상한이 요청 노드당 프로세스를 다 못 담으면 1·담거나 모르면 0,
+    DMS 예약 코어, 이름) -- 결정적이다(같은 DB 상태면 같은 선택). 고른 집합은 이름순으로 돌려준다(worker_pool 표현 그대로).
+    - 상한 미달 노드를 뒤로: 상한은 고른 노드의 최솟값이라(hostfile slots 는 전 워커 같은 값) 작은 노드 하나가 잡 전체의
+      rank 수를 끌어내린다(이질 클러스터의 작은 인프라 노드). 담을 노드가 충분하면 그 노드를 쓰지 않는다.
+    - 예약이 적은 노드부터: 워커가 CPU 를 실제로 요청하고 required nodeAffinity 로 노드가 굳으므로, 이름순 앞 N대 고정이면
+      다른 노드가 놀아도 같은 노드 집합에 줄을 선다(Volcano 는 affinity 밖으로 옮기지 못한다).
+    - 모름(None)은 0 쪽 -- fail-open 관례(모르는 노드를 벌하지 않는다)."""
+    def key(n):
+        cap = caps.get(n)
+        short = 0 if cap is None or cap >= per_node else 1
+        return (short, load.get(n, 0), n)
+    return sorted(sorted(nodes, key=key)[:count])
+
+
 def resolve_fanout(policy, candidates, *, priority, requested_node_count=None,
-                   requested_procs_per_node=None, node_cpu_caps=None):
-    """정책·요청 -> 큐·우선순위·노드 수·프로세스 수 + **실제로 쓸 노드**(candidates -- 이름순 앞 N대).
+                   requested_procs_per_node=None, node_cpu_caps=None, node_load=None):
+    """정책·요청 -> 큐·우선순위·노드 수·프로세스 수 + **실제로 쓸 노드**(candidates).
 
     자르기를 여기서 하는 이유(2026-10-16): 노드당 프로세스의 CPU 상한은 실제로 고른 노드들의 최솟값이어야 한다(슬롯은
     전 워커가 같은 값 -- hostfile slots). planner 가 따로 자르면 상한을 본 노드 집합과 굳힌 노드 집합이 갈라질 수 있다.
+    고르는 순서는 _pick_nodes(상한 충족 → DMS 예약 코어 적은 순 → 이름) -- 예전의 이름순 앞 N대 고정은 워커 CPU 요청과
+    겹쳐 노드가 놀아도 같은 노드에 줄을 세웠다(2026-10-16 리뷰). nsync 는 면마다 따로 고른다.
     node_cpu_caps: {노드: 상한 | None}(select_tool_and_candidates). None·키 부재 = 모름 = 클램프 안 함(fail-open) --
-    worker_pool 에 cpu_cap_known=False 로 남는다. 반환의 procs_per_node(실제)·procs_per_node_requested(정책·요청 min,
-    클램프 전)·node_cpu_caps(고른 노드만)는 worker_pool 에 그대로 실린다(화면 jobTool.toolSummary)."""
+    worker_pool 에 cpu_cap_known=False 로 남는다. node_load: {노드: DMS 예약 코어}(dms_node_load) -- None·키 부재 = 0.
+    반환의 procs_per_node(실제)·procs_per_node_requested(정책·요청 min, 클램프 전)·node_cpu_caps(고른 노드만)는
+    worker_pool 에 그대로 실린다(화면 jobTool.toolSummary)."""
     if policy is None:
         raise PlacementError("missing_policy")
     if not policy.get("enabled"):
@@ -218,19 +265,22 @@ def resolve_fanout(policy, candidates, *, priority, requested_node_count=None,
         per_node = min(per_node, requested_procs_per_node)
     clamped = _clamp_priority(priority, policy["max_priority"])
     common = {"queue": policy["queue"], "priority_class": PRIORITY_CLASS[clamped]}
+    all_caps = node_cpu_caps or {}
+    pick = {"per_node": per_node, "caps": all_caps, "load": node_load or {}}
     if "primary" in candidates:
         node_count = min(len(candidates["primary"]), max_nodes)
-        chosen = {"primary": list(candidates["primary"][:node_count])}
+        chosen = {"primary": _pick_nodes(candidates["primary"], node_count, **pick)}
         counts = {"node_count": node_count}
     else:
         source_count = min(len(candidates["source"]), max_nodes)
         destination_count = min(len(candidates["destination"]), max_nodes)
-        chosen = {"source": list(candidates["source"][:source_count]),
-                  "destination": list(candidates["destination"][:destination_count])}
+        chosen = {"source": _pick_nodes(candidates["source"], source_count, **pick),
+                  "destination": _pick_nodes(candidates["destination"], destination_count, **pick)}
         counts = {"source_count": source_count, "destination_count": destination_count,
                   "node_count": source_count + destination_count}
+    # 상한을 보는 집합 == 굳히는 집합(chosen) -- 이 아래는 chosen 만 본다.
     workers = [n for nodes in chosen.values() for n in nodes]
-    caps = {n: (node_cpu_caps or {}).get(n) for n in workers}
+    caps = {n: all_caps.get(n) for n in workers}
     requested_per_node = per_node
     limit = per_node_limit(workers, caps)
     if limit is not None:

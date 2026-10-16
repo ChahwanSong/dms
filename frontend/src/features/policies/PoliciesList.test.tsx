@@ -111,6 +111,30 @@ test("0·음수는 서버까지 가기 전에 인라인 오류로 막는다(pyda
   expect(calls).toEqual([]);   // 저장이 비활성이라 PUT 이 나가지 않았다
 });
 
+test("노드당 프로세스 1024 초과는 인라인 오류로 막는다(서버 PolicyBody le=1024 미러)", async () => {
+  // 2026-10-16 리뷰: 서버가 1025 이상을 422 로 거절한다(워커 빌더의 워커당 rank 상한) — 서버의 원시 pydantic 문구 대신
+  // 필드 밑에 한국어로 말하고 저장을 막는다.
+  const calls: string[] = [];
+  server.use(
+    http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),
+    http.put("/api/admin/policies/:tool", () => { calls.push("put"); return HttpResponse.json(POLICIES[0]); }));
+  wrap();
+  const row = (await screen.findByText("scan")).closest("article")!;
+  await userEvent.click(within(row).getByRole("button", { name: "수정" }));
+  const ppn = await screen.findByRole("spinbutton", { name: "노드당 프로세스" });
+  expect(ppn).toHaveAttribute("max", "1024");
+  await userEvent.clear(ppn);
+  await userEvent.type(ppn, "1025");
+  expect(screen.getByText("노드당 프로세스: 1024 이하여야 합니다")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "저장" }));
+  expect(calls).toEqual([]);
+  await userEvent.clear(ppn);
+  await userEvent.type(ppn, "1024");                 // 상한 자체는 허용
+  expect(screen.queryByText("노드당 프로세스: 1024 이하여야 합니다")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "저장" })).toBeEnabled();
+});
+
 test("shows an inline message when the PUT returns 422 invalid_priority", async () => {
   server.use(
     http.get("/api/admin/policies", () => HttpResponse.json(POLICIES)),

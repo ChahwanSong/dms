@@ -42,3 +42,16 @@ def test_preview_timeout_must_be_positive_or_null(client, value):
     assert client.put("/api/admin/policies/scan",
                       json={**BODY, "preview_timeout_seconds": None},
                       headers=ADMIN).status_code == 200
+
+
+def test_procs_per_node_is_capped_at_the_worker_builder_limit(client):
+    # 2026-10-16 리뷰: 빌더(execution_manifests.processes_per_node)는 워커당 1024 rank 를 넘으면 ValueError 다 -- 정책이
+    # 그 위를 저장하면, 노드 CPU 상한을 모르는 동안 계획된 잡이 사전 점검까지 돈 뒤 submit_failed 로 불투명하게 끝났다.
+    # 상한은 같은 상수를 import 한다(두 벌로 갈라지지 않게).
+    from dms.execution_manifests import MAX_PROCESSES_PER_WORKER
+    assert MAX_PROCESSES_PER_WORKER == 1024
+    assert client.put("/api/admin/policies/scan", json={**BODY, "procs_per_node": 1025},
+                      headers=ADMIN).status_code == 422
+    assert client.get("/api/admin/policies/scan", headers=ADMIN).json()["procs_per_node"] != 1025
+    assert client.put("/api/admin/policies/scan", json={**BODY, "procs_per_node": 1024},
+                      headers=ADMIN).status_code == 200
