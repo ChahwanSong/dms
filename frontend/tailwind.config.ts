@@ -86,10 +86,13 @@ export default {
           "70%, 100%": { transform: "scale(1.5)", opacity: "0" },
         },
         // 확인 관문 고리의 점선이 흐름 방향(실행 중 → 확인 대기 → 사전 점검)으로 걷는다 -- 한 주기 = 점선 한 마디(16).
+        // stroke-dashoffset 은 합성(컴포지터)되지 않아 도는 동안 매 프레임 스타일·페인트를 부른다(2026-10-16 리뷰 실측) --
+        // 화면은 그 다리에 실제 흐름(최근 창 처리량 > 0)이 있을 때만 이 클래스를 붙인다.
         "dash-flow": { from: { "stroke-dashoffset": "16" }, to: { "stroke-dashoffset": "0" } },
-        // 고리 줄기(HTML 배경 점선 -- 마디 16px)의 같은 흐름. 실행 중 줄기는 아래로, 사전 점검 줄기는 위로.
-        "dash-down": { from: { "background-position": "0 0" }, to: { "background-position": "0 16px" } },
-        "dash-up": { from: { "background-position": "0 16px" }, to: { "background-position": "0 0" } },
+        // 고리 줄기(HTML 배경 점선 -- 마디 16px)의 같은 흐름. 실행 중 줄기는 아래로, 사전 점검 줄기는 위로. 리본처럼 한 마디
+        // 더 긴 점선 층을 transform 으로 민다(background-position 은 합성되지 않는다) -- 한 마디를 밀면 처음 무늬와 같다.
+        "dash-down": { from: { transform: "translateY(0)" }, to: { transform: "translateY(16px)" } },
+        "dash-up": { from: { transform: "translateY(16px)" }, to: { transform: "translateY(0)" } },
       },
       animation: {
         "flow-x": "flow-x 7s linear infinite",
