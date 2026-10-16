@@ -750,6 +750,116 @@ def test_metrics_queue_assembly_bug_degrades_new_keys_only(client, monkeypatch):
     assert body["control"] == {"drain": False, "maintenance": False, "reason": None}
 
 
+# ---- 큐 흐름(2026-10-16, 사용자 지시 「큐 대기가 일종의 파이프라인 이잖아? … 흐름 형식으로 애니메이션화해서」) -- 최근 5분의
+# 단계 사이 이동. 실제 작성자(requests.create · create_plan_and_job · set_job_state)가 남기는 전이 모양 그대로 지나가게 한다:
+# 매핑이 작성자의 사본 행(plan·잡 None→Pending)까지 세면 계획 한 번이 엣지 셋이 된다.
+
+_FLOW_EDGES0 = dict.fromkeys(("submit>planning", "batch>planning", "planning>pickup", "pickup>preflight",
+                              "preflight>volcano_wait", "running>confirm", "running>batch", "confirm>preflight",
+                              "batch>preflight", "running>done"), 0)
+_FLOW_EXITS0 = dict.fromkeys(("planning", "pickup", "preflight", "running", "confirm", "batch"), 0)
+
+
+def _tr(db, kind, entity_id, f, t, *, at, actor="stepper", reason=None):
+    # 작성자 경로가 없는 전이(이탈·특정 actor·reason)만 직접 넣는다 -- 모양은 _record_transition 과 같다.
+    db.execute("""INSERT INTO state_transitions (entity_kind, entity_id, from_state, to_state, reason_code, actor, at)
+                  VALUES (:k, :id, :f, :t, :r, :a, :at)""",
+               {"k": kind, "id": entity_id, "f": f, "t": t, "r": reason, "a": actor, "at": at})
+
+
+def _flow_job(repos, *, batch_id=None, operation="sync"):
+    rid = repos.requests.create(operation=operation, requester_id="alice", actor="alice",
+                                resource_key=f"f:{next(_PIPELINE_SEQ)}", payload={}, priority="mid",
+                                batch_id=batch_id)
+    jid = repos.data_jobs.create_plan_and_job(rid, operation=operation, priority="mid", options={}, tool="dsync",
+                                              worker_pool={}, precondition={}, actor="planner")
+    return rid, jid
+
+
+def test_metrics_queue_flow_maps_recent_transitions_to_pipeline_edges(client, db):
+    repos = client.app.state.repos
+    now = utc_now_iso()
+    _q_request(db, repos, created_at=now)                                  # 직접 제출 → submit>planning
+    _q_request(db, repos, created_at=now, batch_id="b" * 32)              # 배치 materialize → batch>planning
+    # 단건 sync 한 바퀴: 계획 → 픽업 → 미리보기 제출 → 확인 대기 → 사람의 컨펌 → 실행 제출(자기 전이) → 성공
+    _, single = _flow_job(repos)
+    for state, actor in (("Preflight", "stepper"), ("PreviewRunning", "stepper"), ("ConfirmPending", "stepper"),
+                         ("Executing", "alice"), ("Executing", "stepper"), ("Succeeded", "stepper")):
+        repos.data_jobs.set_job_state(single, DataJobState(state), actor=actor)
+    # 배치 자식: 미리보기 끝 → held(배치 대기) → 오케스트레이터의 컨펌 → 사전 점검(재점검)
+    _, child = _flow_job(repos, batch_id="c" * 32)
+    for state, actor in (("Preflight", "stepper"), ("PreviewRunning", "stepper"), ("ConfirmPending", "stepper"),
+                         ("Executing", "batch-orchestrator")):
+        repos.data_jobs.set_job_state(child, DataJobState(state), actor=actor)
+    # scan: 사전 점검 → 실행 제출(Preflight→Running) → 실행 중 실패(이탈: 실행 중)
+    _, scan = _flow_job(repos, operation="scan")
+    for state in ("Preflight", "Running", "Failed"):
+        repos.data_jobs.set_job_state(scan, DataJobState(state), actor="stepper")
+    # 이탈: 계획 거부 · 재점검 거부(Executing 이지만 사전 점검 칸) · 실행 실패 · 배치 자식 만료 · 단건 취소
+    _tr(db, "request", "r-rejected", "Pending", "Rejected", at=now, actor="planner", reason="no_eligible_nodes")
+    _tr(db, "data_job", "x-recheck", "Executing", "Rejected", at=now, reason="execution_recheck_failed")
+    _tr(db, "data_job", "x-submit", "Executing", "Failed", at=now, reason="execution_submit_failed:submit_failed")
+    _tr(db, "data_job", "x-exec", "Executing", "Failed", at=now, reason="execution_failed")
+    _tr(db, "data_job", child, "ConfirmPending", "PreviewExpired", at=now, reason="preview_expired")
+    _tr(db, "data_job", single, "ConfirmPending", "Cancelled", at=now, actor="alice")
+    # 창 밖(10분 전)은 세지 않는다 -- 같은 엣지라도
+    _tr(db, "data_job", "x-old", "Pending", "Preflight", at=iso_plus(now, -600))
+
+    flow = _queue(client)["flow"]
+    assert flow["window_seconds"] == 300 and flow["saturated"] is False
+    # 직접 제출 = _q_request 1 + 단건·scan 의 요청 2(배치 자식 요청은 batch>planning 으로 간다)
+    assert flow["edges"] == {**_FLOW_EDGES0, "submit>planning": 3, "batch>planning": 2, "planning>pickup": 3,
+                             "pickup>preflight": 3, "preflight>volcano_wait": 4, "running>confirm": 1,
+                             "running>batch": 1, "confirm>preflight": 1, "batch>preflight": 1, "running>done": 1}
+    assert flow["exits"] == {**_FLOW_EXITS0, "planning": 1, "preflight": 2, "running": 2, "confirm": 1, "batch": 1}
+    assert flow["done"] == 1
+    # Volcano 대기 → 실행 중은 전이로 남지 않는다 -- 키 자체가 없다(0 으로 지어내지 않는다)
+    assert "volcano_wait>running" not in flow["edges"]
+
+
+def test_metrics_queue_flow_saturation_marks_counts_as_a_lower_bound(client, db):
+    repos = client.app.state.repos
+    now = utc_now_iso()
+    for i in range(3):
+        _tr(db, "data_job", f"j{i}", "Pending", "Preflight", at=now)
+    # 상한(3)을 다 채웠고 가장 오래된 것도 창 안이다 -- 창 안에 더 있을 수 있다(수치는 하한)
+    raw = repos.metrics.queue_flow(cap=3)
+    assert raw["saturated"] is True and sum(r["n"] for r in raw["rows"]) == 3
+    # 상한 안에 창 밖 행이 보이면 창 전체를 본 것이다 -- 포화 아님
+    _tr(db, "data_job", "old", "Pending", "Preflight", at=iso_plus(now, -900))
+    _tr(db, "data_job", "j9", "Pending", "Preflight", at=now)
+    raw = repos.metrics.queue_flow(cap=3)
+    assert raw["saturated"] is False
+    assert sum(r["n"] for r in raw["rows"]) == 2                 # 상한 3 = j9·old·j2 -- 창 안은 j9·j2
+    # 상한을 못 채우면(행이 적으면) 포화일 수 없다
+    assert repos.metrics.queue_flow(cap=100)["saturated"] is False
+
+
+def test_metrics_queue_flow_empty_db_is_zero_not_null(client):
+    # 읽었고 아무 이동도 없었다 -- 전 엣지 0(null 이 아니다). 화면은 이것을 「입자 없음 · 완료 0」으로 그린다.
+    assert _queue(client)["flow"] == {"window_seconds": 300, "saturated": False, "edges": _FLOW_EDGES0,
+                                      "exits": _FLOW_EXITS0, "done": 0}
+
+
+def test_metrics_queue_flow_failure_nulls_only_flow(client, db, monkeypatch):
+    import dms.api.routes_metrics as rm
+    repos = client.app.state.repos
+    _q_request(db, repos, created_at=utc_now_iso())
+
+    def boom(*_, **__):
+        raise RuntimeError("db hiccup")
+    monkeypatch.setattr(repos.metrics, "queue_flow", boom)
+    body = _queue(client)
+    assert body["flow"] is None                                    # 모름 -- 0 으로 접지 않는다
+    assert body["pipeline"]["planning"]["count"] == 1              # 다른 축은 그대로
+    monkeypatch.undo()
+    # 조립(순수 함수)의 결함도 flow 만 모름이다 -- 띠·표는 흐름 없이도 참이다
+    monkeypatch.setattr(rm, "build_flow", boom)
+    body = _queue(client)
+    assert body["flow"] is None and body["pipeline"]["planning"]["count"] == 1
+    assert _legacy(body) == {"queue": {"name": "dms-data", "state": "Open"}, "podgroups": []}
+
+
 def test_metrics_jobs_submit_wait_distribution_and_counts(client, db):
     repos = Repositories(db)
     now = utc_now_iso()

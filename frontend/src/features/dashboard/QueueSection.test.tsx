@@ -264,3 +264,67 @@ test("waitText는 초를 사람이 읽는 단위로 접는다", () => {
   expect(waitText(125)).toBe("2분 5초");
   expect(waitText(3660)).toBe("1시간 1분");
 });
+
+// ---- 흐름 히어로(2026-10-16, 사용자 지시 「이 흐름을 … 시각적으로 흐름 형식으로 애니메이션화해서」) -- 움직임 자체는 jsdom 이
+// 돌리지 않는다. 여기서는 그림이 말하는 사실(역 순서·완료 수·이탈·요약)과 「모름을 움직임으로 꾸미지 않는다」를 고정한다.
+const FLOW = {
+  window_seconds: 300, saturated: false,
+  edges: { "submit>planning": 2, "batch>planning": 12, "planning>pickup": 9, "pickup>preflight": 3,
+           "preflight>volcano_wait": 1, "running>confirm": 1, "running>batch": 0, "confirm>preflight": 0,
+           "batch>preflight": 0, "running>done": 7 },
+  exits: { planning: 0, pickup: 0, preflight: 2, running: 0, confirm: 0, batch: 0 },
+  done: 7,
+};
+const particles = (root: Element) => root.querySelectorAll('[class*="animate-travel"]');
+
+test("흐름 히어로: 역이 흐름 순서대로, 완료 역은 최근 창의 완료 수, 머리줄 요약은 한 줄", async () => {
+  const { container } = renderQueue({ ...FULL, flow: FLOW });
+  const list = await screen.findByRole("list", { name: "요청 처리 흐름" });
+  // DOM(=읽는) 순서: 배치 유입 → 본선 → 실행 중 아래 확인 관문 가지 → 완료
+  expect(within(list).getAllByRole("listitem").map((li) => li.dataset.testid)).toEqual([
+    "queue-stage-batch", "queue-stage-planning", "queue-stage-pickup", "queue-stage-preflight",
+    "queue-stage-volcano_wait", "queue-stage-running", "queue-stage-confirm", "queue-stage-done"]);
+  const done = screen.getByTestId("queue-stage-done");
+  expect(within(done).getByText("완료")).toBeInTheDocument();
+  expect(within(done).getByText("7")).toBeInTheDocument();
+  expect(within(done).getByText("최근 5분")).toBeInTheDocument();
+  expect(done.dataset.tone).toBe("none");
+  // 이탈은 떠난 단계에 -- 0 이면 줄을 내지 않는다
+  expect(within(screen.getByTestId("queue-stage-preflight")).getByText("최근 5분 이탈 2")).toBeInTheDocument();
+  expect(screen.queryByText(/이탈 0/)).toBeNull();
+  // 대기 = 대기 단계 합(1+0+1+1+4+30), 실행 = Volcano 실행 중 -- 정확 일치 「대기」·「실행 중」 KPI 타일과 겹치지 않는 한 노드
+  expect(screen.getByText("대기 37 · 실행 3 · 최근 5분 완료 7")).toBeInTheDocument();
+  expect(particles(container).length).toBeGreaterThan(0);
+  // 5초 폴링이 낭독 폭주가 되지 않게 -- 흐름 영역에 aria-live 를 두지 않는다
+  expect(container.querySelector("[aria-live]")).toBeNull();
+  // 움직이는 것은 전부 aria-hidden 장식 안이다(역·HelpTip 자체에 무한 transform 금지 -- Playwright stable)
+  const animated = [...container.querySelectorAll('[class*="animate-"]')];
+  expect(animated.length).toBeGreaterThan(0);
+  for (const el of animated) expect(el.closest('[aria-hidden="true"]')).not.toBeNull();
+});
+
+test("흐름을 모르면(옛 응답·축 실패) 입자를 그리지 않고 완료 역은 「—」·「읽지 못함」, 요약에서 완료를 뺀다", async () => {
+  const { container } = renderQueue({ ...FULL, flow: null });
+  const done = await screen.findByTestId("queue-stage-done");
+  expect(within(done).getByText("—")).toBeInTheDocument();
+  expect(within(done).getByText("읽지 못함")).toBeInTheDocument();
+  expect(particles(container)).toHaveLength(0);
+  // 리본도 멈춘다(그라데이션 방향만 남는다)
+  expect(container.querySelector('[class*="animate-flow"]')).toBeNull();
+  expect(screen.getByText("대기 37 · 실행 3")).toBeInTheDocument();
+  expect(screen.queryByText(/알 수 없/)).toBeNull();          // 단계는 다 읽었다 -- 「모름」 문구는 단계 칸의 것만
+});
+
+test("모르는 단계가 섞이면 대기 합은 하한(+), 상한에 찬 흐름은 완료도 하한이다", async () => {
+  renderQueue({ ...FULL, pipeline: { ...PIPE, volcano_wait: null }, flow: { ...FLOW, saturated: true } });
+  expect(await screen.findByText("대기 36+ · 실행 3 · 최근 5분 완료 7+")).toBeInTheDocument();
+  expect(within(screen.getByTestId("queue-stage-done")).getByText("최근 5분 · 하한값")).toBeInTheDocument();
+});
+
+test("드레인이면 stepper 가 움직이는 구간의 입자가 멈춘다 -- planner 구간은 그대로 흐른다", async () => {
+  renderQueue({ ...FULL, flow: FLOW, control: { drain: true, maintenance: false, reason: null } });
+  const pickup = await screen.findByTestId("queue-stage-pickup");     // 픽업 → 사전 점검: stepper
+  expect(particles(pickup)).toHaveLength(0);
+  expect(particles(screen.getByTestId("queue-stage-planning")).length).toBeGreaterThan(0);   // 계획 → 픽업: planner
+  expect(particles(screen.getByTestId("queue-stage-running"))).toHaveLength(0);              // 실행 중 → 완료: stepper
+});

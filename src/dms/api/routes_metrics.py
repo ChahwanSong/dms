@@ -12,7 +12,7 @@ from ..metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
                               bucket_chars_for, build_node_points,
                               clamp_window_hours, duration_histogram,
                               summarize_seconds)
-from ..queue_pipeline import WAITING_PER_STAGE, build_queue_view
+from ..queue_pipeline import WAITING_PER_STAGE, build_flow, build_queue_view
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
 from ..rollout_status import assess_daemonset, assess_deployment
 from .auth import require_admin
@@ -219,7 +219,11 @@ def metrics_queue(request: Request):
     queue_pipeline 모듈 docstring 이 권위다. DB 축(계획·잡·배치·control)도 k8s 축과 같은
     규칙이다: 축마다 독립 try 로 그 축에 기대는 단계만 null(모름) -- DB 한 쿼리의 실패가
     PodGroup 표를, PodGroup 403 이 DB 단계를 지우지 않는다. DB 읽기는 k8s 호출을 기다리는
-    동안 이 스레드에서 한다(Database 는 RLock 직렬화라 스레드를 더 늘려도 이득이 없다)."""
+    동안 이 스레드에서 한다(Database 는 RLock 직렬화라 스레드를 더 늘려도 이득이 없다).
+
+    같은 날 흐름 히어로(사용자 지시 「이 흐름을 … 시각적으로 흐름 형식으로 애니메이션화해서」): flow(최근 창의 단계
+    사이 이동·이탈·완료 수 -- queue_pipeline.build_flow 주석이 매핑의 권위)를 더한다. 다섯 번째 DB 축이라 같은
+    규칙이다 -- 읽기·조립 실패는 flow 만 null(모름)이고, 화면은 모르는 흐름을 움직임으로 꾸미지 않는다."""
     reader = request.app.state.queue_reader
     repos = request.app.state.repos
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -231,6 +235,7 @@ def metrics_queue(request: Request):
             "jobs": _db_axis("jobs", lambda: repos.metrics.queue_jobs(limit=WAITING_PER_STAGE)),
             "batches": _db_axis("batches", repos.metrics.queue_batches),
             "control": _db_axis("control", lambda: _control_flags(repos.control.control_state())),
+            "flow": _db_axis("flow", repos.metrics.queue_flow),
         }
     results = {}
     for axis, future in futures.items():
@@ -274,7 +279,13 @@ def metrics_queue(request: Request):
         # 가지 않는다. 대시보드 자체 버그가 여기로 새므로 로그를 남긴다(metrics_infra assess 와 같은 이유).
         logger.warning("metrics/queue pipeline assembly failed: %s", exc)
         view = {"pipeline": None, "waiting": None, "waiting_truncated": None}
-    return {"queue": results["queue"], "podgroups": pods, "control": db_axes["control"], **view}
+    try:
+        flow = build_flow(db_axes["flow"])
+    except Exception as exc:
+        # 흐름 조립의 결함은 flow 만 모름으로 접는다 -- 띠·표(지금 어디에 몇 건)는 흐름(최근 어디서 어디로) 없이도 참이다.
+        logger.warning("metrics/queue flow assembly failed: %s", exc)
+        flow = None
+    return {"queue": results["queue"], "podgroups": pods, "control": db_axes["control"], **view, "flow": flow}
 
 
 def _db_axis(axis, read):

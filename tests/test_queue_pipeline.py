@@ -3,8 +3,8 @@
 라우트 테스트(test_api_metrics 의 metrics_queue_*)가 sqlite 위 전 경로를 보고, 여기는 대조 규칙·시각 강등·정렬처럼
 경계값이 많은 조각만 못박는다."""
 from dms.db import iso_epoch
-from dms.queue_pipeline import (STAGES, age_seconds, build_queue_view, match_podgroup,
-                                until_seconds, vcjob_index)
+from dms.queue_pipeline import (FLOW_EDGES, FLOW_EXIT_STAGES, STAGES, age_seconds, build_flow,
+                                build_queue_view, match_podgroup, until_seconds, vcjob_index)
 
 NOW = iso_epoch("2026-10-16T12:00:00Z")
 
@@ -107,3 +107,61 @@ def test_children_of_batches_nobody_drives_are_neither_confirm_nor_batch_waits()
     assert view["pipeline"]["confirm"]["count"] == 0
     assert (view["pipeline"]["batch"]["count"], view["pipeline"]["batch"]["held"]) == (5, 5)
     assert [e["detail"]["batch_status"] for e in view["waiting"] if e["stage"] == "batch"] == ["Running"]
+
+
+def _row(kind, f, t, n=1, *, by_orch=0, in_batch=None, pre=0):
+    return {"kind": kind, "f": f, "t": t, "by_orch": by_orch, "in_batch": in_batch, "pre": pre, "n": n}
+
+
+def test_build_flow_unknown_axis_is_null_and_empty_window_is_zero():
+    # 못 읽었으면 None(모름) -- 화면은 모르는 흐름을 입자로 꾸미지 않는다. 창 안에 전이가 없으면 전 엣지 0(읽었고 0).
+    assert build_flow(None) is None
+    flow = build_flow({"window_seconds": 300, "saturated": False, "rows": []})
+    assert flow == {"window_seconds": 300, "saturated": False, "edges": dict.fromkeys(FLOW_EDGES, 0),
+                    "exits": dict.fromkeys(FLOW_EXIT_STAGES, 0), "done": 0}
+    assert "volcano_wait>running" not in FLOW_EDGES       # 전이로 남지 않는 엣지 -- 키를 만들지 않는다
+
+
+def test_build_flow_splits_gates_by_batch_and_actor_and_drops_copies():
+    flow = build_flow({"window_seconds": 300, "saturated": True, "rows": [
+        _row("request", None, "Pending", 5, in_batch=0),
+        _row("request", None, "Pending", 2, in_batch=1),
+        _row("request", None, "Pending", 1, in_batch=None),          # 요청 행이 사라졌다 -- 직접 제출로 접는다
+        _row("request", "Pending", "Planned", 4),
+        _row("data_job", None, "Pending", 4),                        # 계획 트랜잭션의 사본 -- 버린다
+        _row("plan", None, "Planned", 4),                            # 저장소가 거르지만 매핑도 모른다
+        _row("request", "Planned", "Succeeded", 3),                  # 잡 종단의 사본 -- 버린다
+        _row("data_job", "Pending", "Preflight", 4),
+        _row("data_job", "Preflight", "PreviewRunning", 2),
+        _row("data_job", "Preflight", "Running", 1),
+        _row("data_job", "Executing", "Executing", 1),               # 재점검 뒤 실행 제출(자기 전이)
+        _row("data_job", "PreviewRunning", "ConfirmPending", 1, in_batch=0),
+        _row("data_job", "PreviewRunning", "ConfirmPending", 3, in_batch=1),
+        _row("data_job", "ConfirmPending", "Executing", 1, by_orch=0),
+        _row("data_job", "ConfirmPending", "Executing", 2, by_orch=1),
+        _row("data_job", "Executing", "Succeeded", 2),
+        _row("data_job", "Running", "Succeeded", 1),
+    ]})
+    assert flow["saturated"] is True
+    assert flow["edges"] == {"submit>planning": 6, "batch>planning": 2, "planning>pickup": 4, "pickup>preflight": 4,
+                             "preflight>volcano_wait": 4, "running>confirm": 1, "running>batch": 3,
+                             "confirm>preflight": 1, "batch>preflight": 2, "running>done": 3}
+    assert flow["done"] == 3
+    assert flow["exits"] == dict.fromkeys(FLOW_EXIT_STAGES, 0)
+
+
+def test_build_flow_counts_exits_at_the_stage_they_left():
+    flow = build_flow({"window_seconds": 300, "saturated": False, "rows": [
+        _row("request", "Pending", "Rejected", 2), _row("request", "Pending", "Conflict"),
+        _row("request", "Pending", "Cancelled"),
+        _row("data_job", "Pending", "Cancelled"),
+        _row("data_job", "Preflight", "Rejected", 3),
+        _row("data_job", "Executing", "Rejected", 1, pre=1),         # 재점검 거부 -- 사전 점검 칸에서 떨어졌다
+        _row("data_job", "Executing", "Failed", 2, pre=0),           # 실행 실패
+        _row("data_job", "PreviewRunning", "Rejected"), _row("data_job", "Running", "TimedOut"),
+        _row("data_job", "ConfirmPending", "PreviewExpired", 4, in_batch=0),
+        _row("data_job", "ConfirmPending", "Cancelled", 6, in_batch=1),
+        _row("data_job", "Pending", "Running"),                      # 상태 기계 밖(변조 행) -- 아무 데도 세지 않는다
+    ]})
+    assert flow["exits"] == {"planning": 4, "pickup": 1, "preflight": 4, "running": 4, "confirm": 4, "batch": 6}
+    assert flow["edges"] == dict.fromkeys(FLOW_EDGES, 0) and flow["done"] == 0

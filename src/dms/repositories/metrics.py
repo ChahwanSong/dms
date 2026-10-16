@@ -2,7 +2,7 @@
 agent_reports(JSON blob 시계열 -- 앱측 파싱)와 data_jobs(typed 컬럼 -- SQL GROUP BY).
 blob은 dual-dialect(SQLite/PostgreSQL)라 json_extract에 기댈 수 없어 여기서 파싱하고,
 GROUP BY는 typed 컬럼에만 건다."""
-from ..db import Database, load_json
+from ..db import Database, iso_plus, load_json, utc_now_iso
 # metrics_series 와 같은 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
 from ..db import iso_epoch as _epoch
 from ..domain import DataJobState, TERMINAL_DATA_JOB_STATES
@@ -40,6 +40,15 @@ _ENTERED_AT = """COALESCE((SELECT MAX(t.at) FROM state_transitions t
 # 제출된 잡 행의 안전 상한(PodGroup 대조용 전량 조회). 동시에 Volcano 에 올라 있는 잡 수는 클러스터 용량에 묶여 이
 # 값보다 훨씬 작다 -- 넘으면 가장 오래된 것부터 담아 「실행 중」의 가장 긴 나이는 정확히 유지된다.
 _SUBMITTED_ROWS_MAX = 2000
+# 큐 흐름(queue_flow) -- 「최근 몇 초」의 단계 사이 이동을 세는 창과, 그 창을 찾으려고 거꾸로 읽는 전이 행 상한.
+# 시간 조건만으로 읽으면 state_transitions 전체 순차 스캔이다(at 인덱스가 없고 이 테이블은 시간으로 지우지 않아 계속
+# 자란다 -- PG 16 실측 2.96M 행에서 144ms, 5초 폴링에 단일 커넥션 락을 쥔다). PK 역순 상한 읽기는 테이블 크기와 무관하게
+# 일정하다(같은 실측 ~4ms). 상한을 다 채웠는데 가장 오래된 행도 창 안이면 창 안에 더 있을 수 있다 -- saturated 로
+# 알리고 수치는 하한이 된다(지어내지 않는다).
+FLOW_WINDOW_SECONDS = 300
+FLOW_SCAN_CAP = 5000
+# 배치 오케스트레이터의 자식 컨펌(batch_orchestrator._confirm_child) actor -- 사람의 컨펌(사용자 이름)과 가른다.
+_ORCHESTRATOR_ACTOR = "batch-orchestrator"
 
 
 def _in(prefix, values):
@@ -381,3 +390,52 @@ class MetricsRepository:
             g["queued"] = int(g["queued"])
         ready = self._db.query_one("SELECT COUNT(*) AS n FROM batches WHERE status = 'PreviewReady'")
         return {"groups": groups, "preview_ready": int(ready["n"])}
+
+    def queue_flow(self, *, window_seconds: int = FLOW_WINDOW_SECONDS, cap: int = FLOW_SCAN_CAP,
+                   now: "str | None" = None) -> dict:
+        """최근 window_seconds 동안의 단계 사이 이동 -- 전이 행(state_transitions)을 (종류, from, to, 오케스트레이터
+        actor 여부, 배치 자식 여부, 재점검 쪽 이탈 여부)로 묶은 건수. 단계 엣지로 옮기는 매핑은 queue_pipeline.build_flow
+        (순수)가 한다 -- 여기는 행과 집계만 낸다.
+
+        PK 역순 상한(cap) 안에서만 창(at >= since)으로 거른다(FLOW_SCAN_CAP 주석의 비용 근거). 배치 자식 여부는 두 가지
+        전이에서만 묻는다: 요청 생성(None→Pending -- 직접 제출과 배치 materialize 를 가른다) · ConfirmPending 진입/이탈(단건
+        확인 대기와 배치 held 를 가른다). 스칼라 서브쿼리라 창 안 그 행 수만큼 PK 조회다. 요청 행이 없으면(FK 가 없다)
+        NULL -- 「직접 제출」·「단건」 쪽으로 접힌다(조립이 정한다). 재점검 쪽(pre)은 Executing 에서의 이탈 중 실행 전
+        재점검·실행 제출 실패(stepper 의 execution_recheck_* · execution_submit_failed 사유, 재점검 거부 Rejected)다 --
+        같은 Executing 이라도 사전 점검 칸에서 떨어진 것이다.
+
+        두 방언 공통: 묶음은 파생 테이블의 평범한 열로만 한다(스칼라 서브쿼리 식을 GROUP BY 위치 참조로 묶지 않는다)."""
+        since = iso_plus(now or utc_now_iso(), -window_seconds)
+        rows = self._db.query(
+            f"""SELECT kind, f, t, by_orch, in_batch, pre, COUNT(*) AS n
+                FROM (SELECT x.entity_kind AS kind, x.from_state AS f, x.to_state AS t,
+                             CASE WHEN x.actor = '{_ORCHESTRATOR_ACTOR}' THEN 1 ELSE 0 END AS by_orch,
+                             CASE WHEN x.entity_kind = 'request' AND x.from_state IS NULL
+                                    THEN (SELECT CASE WHEN r.batch_id IS NULL THEN 0 ELSE 1 END
+                                          FROM requests r WHERE r.request_id = x.entity_id)
+                                  WHEN x.entity_kind = 'data_job'
+                                       AND (x.to_state = '{_CONFIRM}' OR x.from_state = '{_CONFIRM}')
+                                    THEN (SELECT CASE WHEN r.batch_id IS NULL THEN 0 ELSE 1 END
+                                          FROM data_jobs j JOIN requests r ON r.request_id = j.request_id
+                                          WHERE j.job_id = x.entity_id)
+                             END AS in_batch,
+                             CASE WHEN x.entity_kind = 'data_job' AND x.from_state = 'Executing'
+                                       AND (x.to_state = 'Rejected' OR x.reason_code LIKE :recheck
+                                            OR x.reason_code LIKE :exec_submit)
+                                  THEN 1 ELSE 0 END AS pre
+                      FROM (SELECT entity_kind, entity_id, from_state, to_state, reason_code, actor, at
+                            FROM state_transitions ORDER BY id DESC LIMIT :cap) x
+                      WHERE x.at >= :since AND x.entity_kind IN ('request', 'data_job')) y
+                GROUP BY kind, f, t, by_orch, in_batch, pre""",
+            # LIKE 패턴은 파라미터로 -- SQL 본문의 '%' 는 PG(psycopg pyformat)에서 자리표시자로 읽혀 깨진다.
+            {"cap": cap, "since": since, "recheck": "execution_recheck%",
+             "exec_submit": "execution_submit_failed%"})
+        for r in rows:
+            r["n"] = int(r["n"])
+        probe = self._db.query_one(
+            """SELECT COUNT(*) AS n, MIN(at) AS oldest_at
+               FROM (SELECT at FROM state_transitions ORDER BY id DESC LIMIT :cap) x""", {"cap": cap})
+        # 시각은 고정 포맷 ISO-8601 UTC 라 문자열 비교 = 시각 비교(queue_pipeline._min_iso 와 같은 규칙).
+        saturated = (int(probe["n"]) >= cap and probe["oldest_at"] is not None
+                     and probe["oldest_at"] >= since)
+        return {"window_seconds": window_seconds, "saturated": saturated, "rows": rows}
