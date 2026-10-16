@@ -509,6 +509,11 @@ curl -sf -X POST "$API/api/admin/storages" "${AUTH[@]}" -H 'content-type: applic
 
 # policies -- tool names per repositories/control.py POLICY_TOOLS =
 # ("scan", "dsync", "nsync", "rm")  (note: "dsync", not "sync")
+# 주의(2026-10-16): 워커는 procs_per_node 만큼 CPU 코어를 **실제로 요청**한다(limits 없음, launcher 100m). planner·stepper 가
+# 노드당 프로세스를 floor((노드 allocatable − 100m − DMS_NODE_CPU_RESERVE_MILLICORES) / 1000) 코어로 줄이므로(그 노드가 1코어도
+# 못 담으면 후보에서 빠지고, 다 빠지면 node_cpu_insufficient 로 거부) 값이 커도 잡이 영구 Pending 이 되지는 않지만, 화면엔
+# 「요청 N → 노드 CPU 상한 M」으로 줄어든 값이 보인다. 의도대로 돌리려면 procs_per_node ≤ 그 상한으로 둔다 --
+# 테스트베드(allocatable 1800m, 예비 500)는 상한 1 이다.
 for tool in scan dsync nsync rm; do
   curl -sf -X PUT "$API/api/admin/policies/$tool" "${AUTH[@]}" -H 'content-type: application/json' -d '{
     "max_nodes": 3, "procs_per_node": 2, "queue": "dms-data",
@@ -768,7 +773,13 @@ ClusterFirstWithHostNet` + `buildah bud --network=host`. 셋이 한 스위치인
 PriorityClass `dms-build`(10 < `dms-low` 50)를 달고 돈다 — cpu limit 이 실질
 보호막이고(allocatable 1800m 중 최소 800m 이 남는다), 노드가 압박받으면 **빌드가
 먼저 죽는다**. 실증: 빌드 중 scan 잡이 평시와 동일한 대기(`sched_wait=5`)로 완료,
-잡 파드 축출 0건.
+잡 파드 축출 0건. **2026-10-16 부터 잡 워커가 CPU 를 요청한다**(노드당 프로세스 수만큼 코어,
+launcher 100m — 그 전 실증은 잡이 전부 BestEffort 이던 때다). 이제 CPU **예약**이 겹친다: 워커가
+노드의 코어를 예약 중이면 빌드 파드(250m 요청)가 그 노드에서 스케줄을 기다릴 수 있고, 반대로 빌드가
+돌면 그 노드의 워커가 Volcano 대기에 걸릴 수 있다(둘 다 기다릴 뿐 실패하지 않는다 — 빌드는 build_watcher
+타임아웃 안에서). 노드 CPU 상한은 allocatable 에서 launcher 100m 와 예비(`DMS_NODE_CPU_RESERVE_MILLICORES`, 기본
+500m — DaemonSet·제어면·빌드 몫)를 빼고 코어 단위로 내린 값이라, 테스트베드(1800m)는 워커 1000m + launcher 100m 를
+예약해도 700m 가 남는다(DMS 외 requests 최악 425m + 빌드 250m). 노드의 DMS 외 requests 가 그보다 크면 예비를 올린다.
 
 **4) 만들어진 태그를 실제로 쓰려면 매니페스트를 손으로 바꿔 apply해야 한다.**
 빌드 성공은 레지스트리에 새 태그를 push하는 것으로 끝난다 — 그 태그로의 자동

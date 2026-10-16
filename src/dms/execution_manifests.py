@@ -4,6 +4,7 @@ import json
 
 from .artifact_base import ARTIFACT_MOUNT
 from .identity import supplementary_gids_problem
+from .node_cpu import LAUNCHER_CPU_REQUEST_MILLICORES
 
 _SCAN_BOOL_FLAGS = {"verbose": "--verbose", "quiet": "--quiet"}
 # dscan(1b93d54): --broken-limit은 롱네임뿐(-B는 optstring에 없다). top_k는
@@ -105,14 +106,20 @@ def _abs_paths(spec):
     return spec.paths
 
 
-def _container(name, image, command, env, volumes, *, security_context=None):
-    return {
+def _container(name, image, command, env, volumes, *, security_context=None, resources=None):
+    c = {
         "name": name, "image": image, "command": command,
         "securityContext": security_context or {"runAsUser": 0},
         "env": [{"name": k, "value": v} for k, v in env.items()],
         "volumeMounts": [{"name": v["name"], "mountPath": v["mountPath"],
                           "mountPropagation": "HostToContainer"} for v in volumes],
     }
+    # resources 는 워커·launcher 만 싣는다(아래 _worker_resources·_launcher_resources). preflight 맨 Pod 는 키 자체가 없다
+    # (BestEffort) -- 워커가 코어를 다 예약한 노드에서도 다음 잡의 점검이 서야 한다(activeDeadline 은 바인딩 뒤부터라
+    # 스케줄 못 된 점검은 영원히 기다린다).
+    if resources is not None:
+        c["resources"] = resources
+    return c
 
 
 _GROUPS_NOT_APPLIED = "echo DMS_EXEC_REASON=identity_groups_not_applied; "
@@ -224,13 +231,52 @@ def _worker_security_context():
     return {"runAsUser": 0, "capabilities": {"add": ["SYS_CHROOT"]}}
 
 
+# 워커 한 파드가 돌리는 rank 수의 위생 상한(2026-10-16). domain._validate_batch_overrides 의 1024 와 같은 값 -- 설정을
+# 보지 않는 하드 상수다(identity.GID_MAX 관례). 실제 「노드에 들어가는가」는 이 상한이 아니라 노드 CPU 상한이 정한다
+# (placement·stepper 가 node_cpu 로 줄인다).
+MAX_PROCESSES_PER_WORKER = 1024
+
+
+def _launcher_resources():
+    """launcher 는 rank 를 돌리지 않아 작게 요청한다(node_cpu.LAUNCHER_CPU_REQUEST_MILLICORES -- 노드 CPU 상한 계산과 같은
+    원천). limits 없음. 매번 새 dict(매니페스트끼리 공유하지 않는다)."""
+    return {"requests": {"cpu": f"{LAUNCHER_CPU_REQUEST_MILLICORES}m"}}
+
+
+def worker_pod_count(candidates) -> int:
+    """워커 파드 수 -- primary 는 후보 수, nsync 는 출발 + 목적지(같은 노드가 양면이면 그 노드에 워커가 둘)."""
+    if "primary" in candidates:
+        return max(1, len(candidates.get("primary", [])))
+    return max(1, len(candidates.get("source", [])) + len(candidates.get("destination", [])))
+
+
+def processes_per_node(process_count, candidates) -> int:
+    """워커 파드 하나의 rank 수 -- hostfile slots(DMS_JR_PROCESSES_PER_NODE)·워커 CPU 요청의 **단일 원천**(stepper 의 노드
+    CPU 재클램프도 이 함수로 현재 값을 읽는다). worker_pool 은 DB 신뢰 경계 밖이라 다시 본다: process_count 가 int(bool
+    제외)·≥ 1 이 아니거나 결과가 MAX_PROCESSES_PER_WORKER 를 넘으면 ValueError(어댑터가 submit_failed 로 접는다). 예전엔
+    0·음수를 1 로 조용히 접고, True 를 1 로 통과시키고, 실수 8.0 은 "8.0" 으로 러너 int() 에서 터졌다 -- 10**9 는 rank
+    폭주(지금은 CPU 요청이라 영구 Pending). 나누어떨어지지 않는 값(옛 행·변조)은 내림이다(기존 동작 -- -np 가 slot 합보다
+    커서 mpirun 이 실패한다; 요청 코어와 slots 는 여전히 같다)."""
+    pc = process_count
+    if not isinstance(pc, int) or isinstance(pc, bool) or pc < 1:
+        raise ValueError(f"process_count: {pc!r}")
+    ppn = max(1, pc // worker_pod_count(candidates))
+    if ppn > MAX_PROCESSES_PER_WORKER:
+        raise ValueError(f"processes per worker {ppn} > {MAX_PROCESSES_PER_WORKER}")
+    return ppn
+
+
 def _processes_per_node(spec):
-    if "primary" in spec.candidates:
-        node_count = max(1, len(spec.candidates.get("primary", [])))
-    else:
-        node_count = max(1, len(spec.candidates.get("source", []))
-                         + len(spec.candidates.get("destination", [])))
-    return max(1, spec.process_count // node_count)
+    return processes_per_node(spec.process_count, spec.candidates)
+
+
+def _worker_resources(spec):
+    """워커 CPU 요청 = 그 워커의 rank 수(2026-10-16 사용자 결정 「프로세스 개수만큼 코어」, 옵션 없음). 정수 코어 문자열
+    ("2") -- CRD 는 int-or-string 이지만 문자열로 고정한다. limits 는 두지 않는다: CFS quota 는 sshd·orted·busy-poll 하는
+    rank(Open MPI ob1/tcp)·libcircle 작업 훔치기를 합쳐 100ms 창마다 끊어 MPI 전체를 가장 느린 rank 에 묶는다(실행
+    타임아웃까지 늘어진다). requests 만으로 경합 시 cpu.weight 몫이 보장되고 남는 코어는 쓴다. memory 는 요청하지 않는다
+    (QoS Burstable -- 메모리 축출 순위는 BestEffort 와 같은 ①그룹, 05-volcano-queue-priorityclass.yaml dms-build 주석)."""
+    return {"requests": {"cpu": str(_processes_per_node(spec))}}
 
 
 def _supplementary_gids(spec) -> list[int]:
@@ -269,7 +315,8 @@ def _worker_env(spec):
 def _worker_container(name, image, spec, volumes):
     return _container(name, image, ["sh", "-c", _worker_command_script()],
                       _worker_env(spec), volumes,
-                      security_context=_worker_security_context())
+                      security_context=_worker_security_context(),
+                      resources=_worker_resources(spec))
 
 
 def _pod_volumes(volumes):
@@ -639,7 +686,7 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
         "restartPolicy": "Never",
         "affinity": _node_affinity(launcher_nodes) if launcher_nodes else {},
         "containers": [_container("launcher", job_image,
-            ["/usr/local/bin/dms-job-runner"], env, volumes)],
+            ["/usr/local/bin/dms-job-runner"], env, volumes, resources=_launcher_resources())],
         "volumes": _pod_volumes(volumes)}}}
     src_worker = {"name": "source-worker", "replicas": len(src_nodes),
         "template": {
@@ -685,7 +732,8 @@ def build_volcano_job(spec, *, job_image, namespace, volumes):
             "restartPolicy": "Never",
             "affinity": _node_affinity(nodes) if nodes else {},
             "containers": [_container("launcher", job_image,
-                ["/usr/local/bin/dms-job-runner"], _launcher_env(spec), volumes)],
+                ["/usr/local/bin/dms-job-runner"], _launcher_env(spec), volumes,
+                resources=_launcher_resources())],
             "volumes": _pod_volumes(volumes)}}}
     worker = {
         "name": "worker", "replicas": workers,

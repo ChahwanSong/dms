@@ -136,6 +136,8 @@ test("도구별 카드: 용도 설명·병렬도(노드×프로세스=최대)·�
   expect(within(scan).getByText("4노드 × 8프로세스")).toBeInTheDocument();
   expect(within(scan).getByText("최대 32개 프로세스")).toBeInTheDocument();
   expect(within(scan).getByText("없음")).toBeInTheDocument();          // 미리보기 타임아웃 null
+  // 노드당 프로세스 = 워커 CPU 요청 코어, 노드 CPU 상한에서 줄어든다(2026-10-16) -- 머리 설명 한 번
+  expect(screen.getByText(/워커는 노드당 프로세스 수만큼 CPU 코어를 요청합니다/)).toBeInTheDocument();
   // dsync 와 nsync 의 차이가 화면에 있다(같은 노드 공존 vs 노드 간).
   const nsync = screen.getByRole("article", { name: "nsync 정책" });
   expect(within(nsync).getByText(/함께 마운트한 노드가 없을 때/)).toBeInTheDocument();

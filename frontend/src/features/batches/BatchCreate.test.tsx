@@ -10,6 +10,7 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { BatchCreate } from "./BatchCreate";
 import { SYNC_INT_FIELDS } from "../jobs/optionRules";
+import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 
 // sync 고급 숫자 옵션의 프리필 기본값(사용자 조정 2026-08-16) — 단건 폼과 **같은**
 // 단일 출처(optionRules)를 읽는다. 프리필이라 sync 배치 바디엔 항상 실린다.
@@ -360,6 +361,8 @@ test("정책 캡션(scan): scan 정책 실값이 노드 수 아래에 뜬다", a
   await fillScan();
   expect(await screen.findByText(
     "정책 기본: 최대 4노드 · 노드당 8프로세스")).toBeInTheDocument();
+  // 노드 CPU 상한(2026-10-16): 정책·입력값은 노드가 담을 수 있는 만큼까지만 -- 정책 캡션 옆 한 줄(SubmitJob 과 같은 문장)
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeInTheDocument();
 });
 
 test("정책 캡션(sync): dsync 실값 + nsync 폴백 실값 병기", async () => {

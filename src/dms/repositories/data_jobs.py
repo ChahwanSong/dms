@@ -467,6 +467,15 @@ class DataJobsRepository:
             "UPDATE data_jobs SET updated_at = :now WHERE job_id = :j AND state = :s",
             {"now": utc_now_iso(), "j": job_id, "s": expected_state}) == 1
 
+    def set_worker_pool(self, job_id, worker_pool: dict, *, expected_state) -> bool:
+        """stepper 의 노드 CPU 재클램프(2026-10-16, stepper._clamp_to_node_cpu)가 줄인 worker_pool 을 다시 쓴다. 조건부
+        UPDATE(state = expected_state)라 그 사이 취소·종단된 잡은 no-op(False). updated_at 은 건드리지 않는다
+        (mark_exec_submitted 선례 -- 같은 틱의 뒤따르는 전이가 시각을 찍고, 재클램프가 클레임 순서에 끼어들 이유가 없다).
+        state_transitions 행도 남기지 않는다(전이가 아니다 -- 사실은 stepper 가 events 로 남긴다)."""
+        return self._db.execute_count(
+            "UPDATE data_jobs SET worker_pool = :wp WHERE job_id = :j AND state = :s",
+            {"wp": dump_json(worker_pool), "j": job_id, "s": expected_state}) == 1
+
     def mark_exec_submitted(self, job_id) -> None:
         """execution vcjob 제출 직후의 앵커 시각(슬라이스 20 설계 §2.2, 플랜 D1).
         write-once 는 SQL 술어(IS NULL)가 강제한다 -- 재제출·중복 호출이 앵커를

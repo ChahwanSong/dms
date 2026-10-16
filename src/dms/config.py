@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Mapping
 
+from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES
+
 
 AGENT_TOOL_NAMES = ("dscan", "dsync", "nsync", "drm")
 
@@ -19,6 +21,9 @@ _SERVER_INT_KEYS = (
     # 남짓. 늘리기 전에: 같은 resource_key 후속 요청이 Conflict 로 죽는 시간도 같이
     # 늘어난다(planner 의 find_active 게이트).
     ("DMS_PLANNER_IDENTITY_GRACE_SECONDS", "planner_identity_grace_seconds", 300),
+    # 노드 CPU 상한의 예비 몫(밀리코어, 2026-10-16 -- node_cpu 모듈 docstring): 상한 = floor((allocatable − launcher 100m −
+    # 이 값) / 1000) 코어. DaemonSet·제어면·빌드 파드 몫이다(컨트롤러는 다른 파드의 requests 를 볼 수 없다). 음수는 기동 거부.
+    ("DMS_NODE_CPU_RESERVE_MILLICORES", "node_cpu_reserve_millicores", DEFAULT_NODE_CPU_RESERVE_MILLICORES),
     ("DMS_STEPPER_INTERVAL_SECONDS", "stepper_interval_seconds", 5),
     ("DMS_PREVIEW_TTL_SECONDS", "preview_ttl_seconds", 86400),
     ("DMS_BATCH_ORCHESTRATOR_INTERVAL_SECONDS", "batch_orchestrator_interval_seconds", 5),
@@ -165,6 +170,7 @@ class Settings:
     identity_probe_ttl_seconds: int = 3600
     planner_interval_seconds: int = 10
     planner_identity_grace_seconds: int = 300
+    node_cpu_reserve_millicores: int = DEFAULT_NODE_CPU_RESERVE_MILLICORES
     stepper_interval_seconds: int = 5
     preview_ttl_seconds: int = 86400
     artifact_base_uri: str = "file:///artifacts/dms"
@@ -291,6 +297,9 @@ class Settings:
         if extra["request_delete_quiet_seconds"] < 0:
             problems.append("DMS_REQUEST_DELETE_QUIET_SECONDS must be >= 0: "
                             f"{environ.get('DMS_REQUEST_DELETE_QUIET_SECONDS')!r}")
+        if extra["node_cpu_reserve_millicores"] < 0:
+            problems.append("DMS_NODE_CPU_RESERVE_MILLICORES must be >= 0: "
+                            f"{environ.get('DMS_NODE_CPU_RESERVE_MILLICORES')!r}")
         if extra["request_purge_interval_seconds"] < 1:
             problems.append("DMS_REQUEST_PURGE_INTERVAL_SECONDS must be >= 1: "
                             f"{environ.get('DMS_REQUEST_PURGE_INTERVAL_SECONDS')!r}")

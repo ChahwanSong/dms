@@ -12,6 +12,7 @@ from .identity import (LDAP_TICK_BUDGET_SECONDS, MAX_SUPPLEMENTARY_GROUPS, SUPP_
 from .repositories.storages import storage_open_to_users
 from .privileged import privileged_names
 from .repositories.sync_pairs import sync_pair_allowed
+from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES
 from .placement import (
     PlacementError, TOOL_TO_POLICY, resolve_fanout, select_tool_and_candidates)
 
@@ -327,7 +328,11 @@ class Planner:
                 source_storage=payload.get("source_storage"),
                 destination_storage=payload.get("destination_storage"),
                 owner=identity.username, privileged=identity.privileged,
-                excluded_nodes=self._repos.node_exclusions.excluded_names())
+                excluded_nodes=self._repos.node_exclusions.excluded_names(),
+                # 노드 CPU 상한(node_cpu): 1코어도 못 담는 노드는 빠지고, 0대면 node_cpu_insufficient 로 즉시 거부한다
+                # (유예하지 않는다 -- allocatable 은 기다려도 늘지 않는다). 설정 스텁에 필드가 없으면 코드 기본값.
+                cpu_reserve_m=getattr(self._settings, "node_cpu_reserve_millicores",
+                                      DEFAULT_NODE_CPU_RESERVE_MILLICORES))
         except PlacementError as exc:
             # 신원 전파를 기다리면 적격이 될 노드가 있고 grace 안이면 아무 상태도
             # 바꾸지 않는다 -- 요청은 Pending 으로 남아 다음 틱(list_pending)에
@@ -370,7 +375,8 @@ class Planner:
             fanout = resolve_fanout(policy, placement["candidates"],
                                     priority=req["priority"],
                                     requested_node_count=requested,
-                                    requested_procs_per_node=requested_ppn)
+                                    requested_procs_per_node=requested_ppn,
+                                    node_cpu_caps=placement["node_cpu_caps"])
         except PlacementError as exc:
             return self._reject(rid, exc.reason_code)
         # 6b. 요청 노드 수 유예 내 대기(A'): planner 는 적격 >= 1 이면 즉시 계획하는데,
@@ -410,14 +416,9 @@ class Planner:
                          "supplementary_gids": list(identity.supplementary_gids),
                          "supplementary_gids_excluded": list(identity.supplementary_gids_excluded)}
         identity_dict.pop("group_gids", None)
-        cand = placement["candidates"]
-        if "primary" in cand:
-            cand = {"primary": cand["primary"][:fanout["node_count"]]}
-        else:
-            cand = {"source": cand["source"][:fanout["source_count"]],
-                    "destination": cand["destination"][:fanout["destination_count"]]}
+        # candidates 는 fanout 이 자른 노드(이름순 앞 N대)다 -- CPU 상한을 본 노드 집합과 굳히는 노드 집합이 같은 한 곳
+        # (placement.resolve_fanout docstring). procs_per_node·procs_per_node_requested·node_cpu_caps·cpu_cap_known 도 함께.
         worker_pool = {"tool": placement["tool"], "identity": identity_dict,
-                       "candidates": cand,
                        "rejections": placement["rejections"], **fanout}
         precondition = {"requester_id": req["requester_id"],
                         "owner": identity.username, "operation": req["operation"]}
@@ -435,7 +436,21 @@ class Planner:
         if job_id is None:
             return "gone"
         self._record_group_events(rid, identity)
+        self._record_cpu_clamp_event(rid, fanout)
         return "planned"
+
+    def _record_cpu_clamp_event(self, rid, fanout):
+        """노드 CPU 상한으로 노드당 프로세스를 줄였으면 계획 성공 뒤 1회 남긴다(조용히 줄이지 않는다 -- 화면은 worker_pool 의
+        procs_per_node_requested → procs_per_node 를 그린다). record_event 는 예외를 삼키므로 계획 결과를 바꾸지 않는다."""
+        if fanout["procs_per_node"] >= fanout["procs_per_node_requested"]:
+            return
+        self._repos.observability.record_event(
+            component="planner", severity="info", event_type="procs_clamped_to_node_cpu",
+            message=(f"노드당 프로세스 {fanout['procs_per_node_requested']} → {fanout['procs_per_node']}"
+                     f" (노드 CPU 상한)"),
+            payload={"requested": fanout["procs_per_node_requested"], "applied": fanout["procs_per_node"],
+                     "node_cpu_caps": fanout["node_cpu_caps"]},
+            request_id=rid)
 
     def _record_group_events(self, rid, identity):
         """보조 그룹 진단 이벤트 -- 계획 **성공 뒤 1회만**(유예 틱 identity_propagating·awaiting_requested_nodes 에는

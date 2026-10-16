@@ -1,7 +1,8 @@
 """슬라이스 21 §2.3: PriorityClass dms-build(10, Never).
 
 kubelet 축출 순서는 ①사용량이 requests 를 초과하는가 ②pod priority ③초과량이다.
-BestEffort 데이터 잡은 요청 0 이라 항상 ①그룹이고, 빌드도 memory requests 128Mi
+데이터 잡은 memory 요청이 0 이라 항상 ①그룹이고(2026-10-16 부터 워커는 CPU 만 요청 --
+Burstable 이지만 메모리 축출 순위는 BestEffort 시절과 같다), 빌드도 memory requests 128Mi
 (§2.2)를 실압박에선 초과해 같은 그룹 -- ②priority 가 방향을 가른다. 값 10 <
 dms-low 50 이므로 "빌드가 항상 먼저 죽는다"가 명문화되고, Never 라 빌드는 아무도
 선점하지 않는다.

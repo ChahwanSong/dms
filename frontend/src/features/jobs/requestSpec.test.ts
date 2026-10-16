@@ -317,6 +317,12 @@ describe("실행 도구", () => {
     expect(nodesText(t?.nodes ?? [])).toBe("실행 노드 dms-w2, dms-w3, dms-w4, dms-w5");
   });
 
+  test("노드 CPU 상한(2026-10-16): 요약이 노드당 값·클램프를 말하면 꼬리는 총 프로세스 수만", () => {
+    const t = spec({}, [JOB({ worker_pool: { node_count: 4, process_count: 4, procs_per_node: 1, procs_per_node_requested: 2,
+      candidates: { primary: ["a", "b", "c", "d"] } } })]).tool;
+    expect([t?.summary, t?.tail]).toEqual(["dsync · 4 노드 × 1 프로세스 (요청 2 → 노드 CPU 상한 1)", "프로세스 4개"]);
+  });
+
   test("나누어떨어지지 않으면 (노드당 …) 없음, nsync 는 소스·목적지 노드", () => {
     expect(spec({}, [JOB({ worker_pool: { node_count: 4, process_count: 30 } })]).tool?.tail).toBe("프로세스 30개");
     const ns = spec({}, [JOB({ tool: "nsync", worker_pool: { source_count: 2, destination_count: 1, node_count: 3, process_count: 12,

@@ -50,8 +50,10 @@ description: "DMS data jobs -- operator-expedited priority."
 ---
 # 슬라이스 21(포탈 빌드): 빌드 파드·프리플라이트 프로브 파드 전용. value 10 <
 # dms-low 50 -- kubelet 축출 랭킹(①requests 초과 여부 ②priority ③초과량)에서
-# 빌드가 어떤 데이터 잡보다도 먼저 죽는 방향을 명문화한다(잡은 전부 BestEffort 라
-# ①그룹, 빌드도 requests 128Mi 를 실압박에선 초과해 같은 그룹 -- ②가 가른다).
+# 빌드가 어떤 데이터 잡보다도 먼저 죽는 방향을 명문화한다(잡은 memory requests 가
+# 없어 ①그룹 -- 2026-10-16 부터 워커는 CPU 만 요청하고(노드당 프로세스 수만큼 코어,
+# launcher 100m) preflight 는 BestEffort 그대로라 메모리 축출 순위는 전과 같다. 빌드도
+# requests 128Mi 를 실압박에선 초과해 같은 그룹 -- ②가 가른다).
 # preemptionPolicy Never: 빌드는 아무도 선점하지 않는다(요구사항: 잡 축출 금지).
 # 이 클래스가 클러스터에 없으면 참조하는 파드 생성이 admission 거절되므로(위 머리
 # 주석의 그 규칙), 슬라이스 21 컨트롤러 이미지 배포 **전에** 반드시 apply 한다.

@@ -111,6 +111,8 @@
   "node_excluded_at_step",
   "node_excluded",
   "node_exclusion_not_found",
+  "node_cpu_insufficient",
+  "node_cpu_insufficient_at_step",
   "invalid_exclusion_reason",
   "build_node_not_set",
   "build_in_progress",

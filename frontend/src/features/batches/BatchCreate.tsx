@@ -8,6 +8,7 @@ import type { ScanRow, SyncRow } from "../../lib/csv";
 import { useUserStorages } from "../storages/useUserStorages";
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
+import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import { StoragePicker, field } from "../jobs/formFields";
 import {
   CHMOD_RE, chownFieldError, SCAN_INT_FIELDS, SYNC_INT_FIELDS, SYNC_OPTION_HELP, intFieldError,
@@ -685,6 +686,8 @@ export function BatchCreate() {
           {nodeCountError && <p className="text-bad text-sm">{nodeCountError}</p>}
           {procsPerNodeError && <p className="text-bad text-sm">{procsPerNodeError}</p>}
           <p className="text-muted text-xs">{policyCaption}</p>
+          {/* 노드 CPU 상한(2026-10-16): 위 두 칸의 값은 노드가 담을 수 있는 만큼까지만 적용된다(src/dms/node_cpu.py). */}
+          <p className="text-muted text-xs">{NODE_CPU_CAP_NOTE}</p>
           {f.op === "sync" && (
             // nsync 면당 캡(placement.py:121-122): resolve_fanout 은 nsync
             // (공존 노드 없음 폴백)에서 max_nodes·요청 node_count 를 출발·
