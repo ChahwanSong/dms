@@ -63,6 +63,8 @@ test("M5: batchPillVariant — 배치 상태 전용 매핑, 공유 pillVariant �
   // Cancelled 는 운영자의 의도된 중지지 실패가 아니다 — bad(적색)는 "실패"라는
   // 거짓말이 된다(실패 수는 성공/실패 카운터가 따로 말한다). neutral.
   expect(batchPillVariant("Cancelled")).toBe("neutral");
+  // 취소 처리 중(2026-10-16)은 아직 끝나지 않았다 -- busy.
+  expect(batchPillVariant("Cancelling")).toBe("busy");
   expect(batchPillVariant("NotAStatus")).toBe("neutral");
   // 공유 pillVariant 는 불변(잡/요청 배지 회귀 없음) — 겹치는 문자열 재확인.
   expect(pillVariant("Running")).toBe("neutral");
@@ -78,7 +80,8 @@ test("잔여 상태 매핑(슬라이스 1~4 부채): PreviewExpired=bad, Plannin
   expect(pillVariant("Scheduled")).toBe("busy");
 });
 
-test("batchStatusLabel — 확인 대기만 한글 라벨, 나머지는 서버 상태 그대로", () => {
+test("batchStatusLabel — 확인 대기·취소 중만 한글 라벨, 나머지는 서버 상태 그대로", () => {
   expect(batchStatusLabel("PreviewReady")).toBe("확인 대기");
+  expect(batchStatusLabel("Cancelling")).toBe("취소 중");
   for (const st of ["Previewing", "Running", "Completed", "Cancelled"]) expect(batchStatusLabel(st)).toBe(st);
 });

@@ -575,11 +575,24 @@ class JobStepper:
         # 종단 잡은 다시 스텝되지 않아 박제 기회가 영영 사라진다.
         if diag is not None:
             self._archive_diag(job, *diag)
+        # 취소 중·취소된 배치의 자식이 실패·시간 초과로 끝나면 그것은 취소가 지운 vcjob·파드를 실패로 본 것이다 -- Cancelled 로
+        # 기록한다(2026-10-16 검증 지적: 취소가 죽인 자식이 Failed·execution_failed 로 실패 수에 들어가 「실패분 재실행」
+        # 대상이 됐다). 진단 박제는 위에서 그대로 했다.
+        if job_state in (DataJobState.FAILED, DataJobState.TIMED_OUT) and self._batch_cancelling(job):
+            job_state, reason_code = DataJobState.CANCELLED, "cancelled_by_batch"
         self._repos.data_jobs.set_job_state(job["job_id"], job_state,
                                             reason_code=reason_code, actor="stepper")
         self._repos.requests.finalize_from_job(
             job["request_id"], job_state, reason_code=reason_code, summary=summary,
             actor="stepper")
+
+    def _batch_cancelling(self, job) -> bool:
+        req = self._repos.requests.get(job["request_id"])
+        bid = req.get("batch_id") if req is not None else None
+        if not bid:
+            return False
+        batch = self._repos.batches.get(bid)
+        return batch is not None and batch["status"] in ("Cancelling", "Cancelled")
 
     def _record_submit_failure(self, job, phase, exc):
         """제출 실패 원문 보존(2026-09-15 프로덕션 사고: apiserver 422 의 causes --

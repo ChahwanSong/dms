@@ -315,6 +315,14 @@ def _get_batch_or_404(request, batch_id):
     return b
 
 
+def _reject_cancelling(b) -> None:
+    """취소 중(Cancelling, 2026-10-16) 배치에 항목을 다시 Queued 로 만드는 변경(추가·항목 재실행·실패분 재실행)은 받지 않는다 --
+    orchestrator 가 굴리지 않는 상태라 그 항목은 영영 돌지 않고, 배치도 Cancelled 로 넘어가지 못한다(남은 Queued). 취소가
+    끝난(Cancelled) 뒤에는 종전대로 재활성화가 된다. 그 사이 경합으로 끼어든 Queued 는 컨트롤러 그물이 다시 막는다."""
+    if b["status"] == "Cancelling":
+        raise HTTPException(status_code=409, detail="batch_cancelling")
+
+
 def _reopen_after_new_queued(repo, batch, *, reactivate: bool = True) -> str:
     """Queued 항목을 새로 만든 변경(추가·수정·재실행)이 **커밋된 뒤** 배치 상태를 맞추고, 지금 상태를 돌려준다.
 
@@ -461,6 +469,7 @@ def add_batch_item(batch_id: str, body: dict, request: Request,
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_cancelling(b)
     _validated_item(b, repo.list_items(batch_id), body)
     seq = repo.add_item(batch_id, body)
     if seq is None:
@@ -511,6 +520,7 @@ def rerun_batch_items(batch_id: str, body: RerunItemsBody, request: Request,
     _require_batch_privilege(request, identity)
     repo = request.app.state.repos.batches
     b = _get_batch_or_404(request, batch_id)
+    _reject_cancelling(b)
     _reject_stale_options(b)
     # 빈 선택은 422 — empty_batch("배치에 항목이 없습니다")를 재사용하지 않는 이유:
     # 배치엔 항목이 있고 비어 있는 건 **선택**이라, 그 문구는 화면에서 거짓이 된다.
@@ -600,6 +610,7 @@ def rerun_failed(batch_id: str, request: Request, identity: Identity = Depends(r
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
+    _reject_cancelling(b)
     _reject_stale_options(b)
     n = repo.reset_failed_items(batch_id)
     if n == 0:
@@ -639,16 +650,18 @@ _CANCELABLE = ("Previewing", "PreviewReady", "Running")
 
 @router.post("/api/admin/batches/{batch_id}:cancel")
 def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
-    """배치 취소. 순서가 계약이다(2026-10-16 사용자 보고: 「배치작업 Cancel 했는데 몇분 후에 ... 아직 돌아가고 있는
-    launcher/worker pod 들이 보여」 -- batch_cancel 모듈 docstring 의 경합):
-      0) 장벽: Queued 항목을 먼저 Cancelled 로(bar_queued_items -- orchestrator 의 claim 이 0 행) + 배치를 Cancelled 로
-         (CAS -- orchestrator 는 Cancelled 배치를 굴리지 않고 planner 는 그 Pending 자식을 계획하지 않는다). 예전엔 k8s
-         삭제를 다 한 뒤에야 썼고, 그 사이 빈 슬롯에 새 자식이 생겨 취소 뒤에도 끝까지 돌았다.
-      1) 장벽 **뒤에** 항목을 다시 읽어 자식 잡을 모두 종료한다. 하나라도 실패하면 장벽과 배치 상태를 되돌리고 500 --
-         거짓 취소 금지(상위 스펙 §5). (이미 지운 자식은 되돌릴 수 없다 -- 그 자식은 stepper 가 실패로 끝낸다.)
-      2) 자식마다 기록(batch_cancel.settle_child -- 잡 Cancelled·커밋 뒤 회수·지금 잡 상태로 요청 마무리)하고, 항목은
-         자식의 실제 결과로 CAS 기록한다(record_item_terminal -- 그 사이 성공한 형제를 Cancelled 로 덮지 않는다).
-    컨트롤러가 매 틱 Cancelled 배치 밑의 살아 있는 자식을 다시 본다(batch_cancel.sweep_cancelled -- 그물)."""
+    """배치 취소(2026-10-16 사용자 보고: 「배치작업 Cancel 했는데 몇분 후에 ... 아직 돌아가고 있는 launcher/worker pod 들이
+    보여」 -- batch_cancel 모듈 docstring). 순서가 계약이다:
+      0) 한 트랜잭션으로 Queued 항목 장벽 + 배치 Cancelling(begin_cancel) -- 새 자식이 생기지 않고, orchestrator 는 굴리지
+         않으며, 종단 전용 경로(기록 삭제·재실행 등)는 받지 않는다. 예전엔 k8s 삭제를 다 한 뒤에야 썼고, 그 사이 빈 슬롯에
+         새 자식이 생겨 취소 뒤에도 끝까지 돌았다.
+      1) 장벽 **뒤에** 항목을 다시 읽어 자식마다 k8s 를 끝낸다. 종료가 실패한 자식은 기록하지 않는다(파드가 돌 수 있는데
+         Cancelled 로 쓰면 거짓 취소 -- 상위 스펙 §5) -- 배치는 Cancelling 에 머물고 컨트롤러 그물(sweep_cancelled)이 유예 뒤
+         다시 시도한다. 예전처럼 장벽을 되돌리지 않는다: 이미 지운 자식은 되돌릴 수 없고, 되돌리면 「아무것도 안 바뀜」이라는
+         500 이 거짓이 됐다(검증 지적).
+      2) 끝낸 자식마다 기록(settle_child)하고 항목은 자식의 결과로 CAS 기록(record_item_terminal -- 취소 전에 성공한 형제는
+         Succeeded, 취소가 죽인 자식은 Cancelled). 남은 게 없으면 Cancelled 로(finish_cancel_if_settled).
+    응답 status: Cancelled(다 끝남) | Cancelling(종료 실패 자식이 남아 그물이 마저 끝낸다 -- pending 수)."""
     repos = request.app.state.repos
     repo = repos.batches
     b = repo.get(batch_id)
@@ -657,37 +670,28 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     if b["status"] not in _CANCELABLE:
         raise HTTPException(status_code=409, detail="batch_not_cancelable")
     adapter = request.app.state.execution_adapter
-    # 0) 장벽 -- 새 자식이 생기지 않게 한 다음에 지금 자식을 본다.
-    barred = repo.bar_queued_items(batch_id)
-    if not repo.set_status_if(batch_id, "Cancelled", from_states=_CANCELABLE):
-        repo.requeue_barred_items(batch_id, barred)       # 그 사이 종단(완료·다른 취소) -- 아무것도 바꾸지 않는다
-        raise HTTPException(status_code=409, detail="batch_not_cancelable")
+    if not repo.begin_cancel(batch_id, from_states=_CANCELABLE):
+        raise HTTPException(status_code=409, detail="batch_not_cancelable")    # 그 사이 종단(완료·다른 취소)
     items = repo.list_items(batch_id)
-    # 1) 먼저 종료한다. 하나라도 실패하면 장벽·상태를 되돌리고 실패를 보고한다(거짓 취소 금지 — 상위 스펙 §5).
-    child_jobs = []
+    pending = 0
     for it in items:
         rid = it.get("request_id")
-        if not rid:
+        if not rid or it["status"] != "Materialized":     # 이미 기록된 항목(종단 자식)은 손대지 않는다
             continue
-        for job in repos.data_jobs.list_jobs(request_id=rid):
-            child_jobs.append((it, job))
-    try:
-        for _, job in child_jobs:
-            terminate_job(adapter, job)
-    except ExecutionError:
-        repo.set_status_if(batch_id, b["status"], from_states=("Cancelled",))
-        repo.requeue_barred_items(batch_id, barred)
-        raise HTTPException(status_code=500, detail="cancel_failed")
-    # 2) 종료가 전부 성공한 뒤에만 기록한다 -- 자식마다(잡 없는 자식 포함, 잡 행이 없으면 planner 가 곧 집을 Pending 이다).
-    jobs_by_seq: dict = {}
-    for it, job in child_jobs:
-        jobs_by_seq.setdefault(it["seq"], []).append(job)
-    for it in items:
-        rid = it.get("request_id")
-        if not rid:
+        jobs = repos.data_jobs.list_jobs(request_id=rid)
+        try:
+            for job in jobs:
+                terminate_job(adapter, job)
+        except ExecutionError as exc:
+            pending += 1
+            repos.observability.record_event(
+                component="api", severity="error", event_type="terminate_failed",
+                message=f"{exc.reason_code}: batch cancel child {rid} -- left to the controller sweep"[:500],
+                payload={"batch_id": batch_id, "after_cancel": True}, request_id=rid)
             continue
-        state = settle_child(repos, adapter, rid, jobs_by_seq.get(it["seq"], []),
-                             actor=identity.actor, component="api")
+        state, why = settle_child(repos, adapter, rid, jobs, actor=identity.actor, component="api")
         if state is not None:
-            record_item_terminal(repos, batch_id, it["seq"], rid, state)
-    return {"status": "Cancelled"}
+            record_item_terminal(repos, batch_id, it["seq"], rid, state, reason_code=why)
+    if repo.finish_cancel_if_settled(batch_id):
+        return {"status": "Cancelled"}
+    return {"status": "Cancelling", "pending": pending}

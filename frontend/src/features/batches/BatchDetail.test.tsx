@@ -316,6 +316,21 @@ test("Cancelled 도 전체 재실행 버튼 노출", async () => {
   renderAt("Cancelled");
   expect(await screen.findByRole("button", { name: "전체 재실행" })).toBeInTheDocument();
 });
+test("취소 중(Cancelling): 「취소 중」 배지·무엇을 기다리는지 안내, 취소·재실행·삭제 버튼 없음", async () => {
+  renderAt("Cancelling");
+  expect(await screen.findByText("취소 중")).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("취소하는 중입니다 — 새 항목은 시작되지 않고");
+  expect(screen.queryByRole("button", { name: "취소" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "전체 재실행" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /삭제/ })).toBeNull();
+});
+test("배치 취소의 거부는 헤더에 사유로 남는다", async () => {
+  server.use(http.post("/api/admin/batches/b1:cancel", () =>
+    HttpResponse.json({ detail: "batch_not_cancelable" }, { status: 409 })));
+  renderAt("Running");
+  await userEvent.click(await screen.findByRole("button", { name: "취소" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+});
 test("Running 에선 전체 재실행 버튼 부재", async () => {
   renderAt("Running");
   await screen.findByText("Materialized");   // 렌더 완료 대기 후 부재 단언

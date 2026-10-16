@@ -4,12 +4,17 @@
 예전 경로(조사 때 스크래치 시험으로 재현): 취소가 자식 k8s 삭제·요청 마무리를 하는 동안 배치가 아직 활성이라 orchestrator
 틱이 빈 슬롯에 Queued 항목의 새 자식을 만들고, 취소가 그 항목을 스냅숏 기준으로 Cancelled 로 덮어 자식 요청이 Pending 으로
 남았다 -- planner·stepper 가 취소 뒤에 vcjob 을 만들어 끝까지 돌렸다. 여기서 고정하는 것:
-  1) 취소 도중 틱이 와도 Cancelled 배치 밑에 비종단 자식이 없다(장벽 + 배치 Cancelled 먼저).
+  1) 취소 도중 틱이 와도 취소된 배치 밑에 비종단 자식이 없다(한 트랜잭션의 장벽 + 배치 Cancelling 먼저).
   2) 취소 직전 자연 종료한 형제는 Succeeded 로 기록된다(덮지 않는다) -- 집계도 한 번.
-  3) planner 는 Cancelled 배치의 Pending 자식을 계획하지 않고 끝낸다.
-  4) 컨트롤러 그물(sweep_cancelled)이 Cancelled 배치 밑의 살아 있는 자식을 끝낸다 -- k8s 종료 실패면 기록하지 않고 다음 틱.
+  3) planner 는 취소 중·취소된 배치의 Pending 자식을 계획하지 않고 끝낸다. stepper 는 그 자식의 실패(지워진 vcjob)를
+     Cancelled 로 기록한다.
+  4) 컨트롤러 그물(sweep_cancelled)이 유예 뒤 남은 자식을 끝낸다 -- k8s 종료 실패면 기록하지 않고 다음 틱, 자식마다 격리,
+     기록 안 된 항목도 마저 기록하고 배치를 Cancelled 로.
   5) 잡 파드의 종료 유예가 짧다(launcher PID 1 이 SIGTERM 을 무시해 30초 Terminating 이던 것)."""
-from dms.batch_cancel import record_item_terminal, sweep_cancelled
+import pytest
+
+from dms.batch_cancel import CANCEL_SWEEP_GRACE_SECONDS, record_item_terminal, settle_child, sweep_cancelled
+from dms.db import iso_plus, utc_now_iso
 from dms.batch_orchestrator import BatchOrchestrator
 from dms.domain import DataJobState, RequestState
 from dms.execution import JobSpec
@@ -124,26 +129,187 @@ def test_tick_during_terminate_keeps_the_finished_sibling_and_makes_no_new_child
     assert (b["succeeded_count"], b["failed_count"]) == (1, 0)
 
 
-def test_failed_terminate_rolls_back_the_barrier(client, db):
-    """종료 실패(500)면 장벽·상태를 되돌린다 -- 아무것도 바꾸지 않은 것으로(거짓 취소 금지)."""
+def _later(seconds=CANCEL_SWEEP_GRACE_SECONDS + 5):
+    return iso_plus(utc_now_iso(), seconds)
+
+
+def test_failed_terminate_leaves_cancelling_and_the_sweep_finishes_after_the_grace(client, db):
+    """종료 실패면 그 자식은 기록하지 않고(거짓 취소 금지) 배치는 Cancelling -- 그물이 유예 뒤 마저 끝낸다. 예전엔 장벽·
+    상태를 되돌리고 500 이었는데, 이미 지운 형제는 되돌릴 수 없어 「아무것도 안 바뀜」이 거짓이었다."""
     _admin(client)
     repos, adapter = client.app.state.repos, client.app.state.execution_adapter
     bid = _scan_batch(client, ["a", "b"], conc=1)
     BatchOrchestrator(repos, settings=_S()).run_once()
     it0 = [i for i in repos.batches.list_items(bid) if i["status"] == "Materialized"][0]
-    _, ref = _executing_child(repos, adapter, it0["request_id"], "a")
+    jid, ref = _executing_child(repos, adapter, it0["request_id"], "a")
     adapter._fail_terminate_refs.add(ref)
     r = client.post(f"/api/admin/batches/{bid}:cancel")
-    assert (r.status_code, r.json()["detail"]) == (500, "cancel_failed")
+    assert r.json() == {"status": "Cancelling", "pending": 1}
+    assert sorted(i["status"] for i in repos.batches.list_items(bid)) == ["Cancelled", "Materialized"]
+
+    BatchOrchestrator(repos, settings=_S(), execution_adapter=adapter).run_once()   # 유예 안 -- 손대지 않는다
+    assert repos.data_jobs.get_job(jid)["state"] == "Executing"
+    assert repos.batches.get(bid)["status"] == "Cancelling"
+    assert sweep_cancelled(repos, adapter, now=_later()) == 0                         # 여전히 종료 실패
+    assert repos.batches.get(bid)["status"] == "Cancelling"
+
+    adapter._fail_terminate_refs.discard(ref)
+    assert sweep_cancelled(repos, adapter, now=_later()) == 1
+    assert repos.data_jobs.get_job(jid)["state"] == "Cancelled"
+    assert {i["status"] for i in repos.batches.list_items(bid)} == {"Cancelled"}
+    b = repos.batches.get(bid)
+    assert (b["status"], b["succeeded_count"], b["failed_count"]) == ("Cancelled", 0, 0)
+    assert len(_children(db, bid)) == 1
+
+
+def test_begin_cancel_is_all_or_nothing(client, db):
+    """CAS 패배(그 사이 완료)면 장벽까지 롤백 -- 장벽만 커밋되고 배치가 끝나 Queued 항목이 영영 안 도는 창이 없다."""
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _scan_batch(client, ["a", "b"], conc=1)
+    assert repos.batches.begin_cancel(bid, from_states=("Previewing",)) is False      # scan 배치는 Running
+    assert sorted(i["status"] for i in repos.batches.list_items(bid)) == ["Queued", "Queued"]
     assert repos.batches.get(bid)["status"] == "Running"
-    assert sorted(i["status"] for i in repos.batches.list_items(bid)) == ["Materialized", "Queued"]
+    assert repos.batches.begin_cancel(bid, from_states=("Running",)) is True
+    assert repos.batches.get(bid)["status"] == "Cancelling"
+    assert {(i["status"], i["reason_code"]) for i in repos.batches.list_items(bid)} == {
+        ("Cancelled", "cancelled_by_batch")}
 
 
-def test_planner_ends_pending_children_of_a_cancelled_batch(db):
+def _cancelling(client, targets=("a", "b")):
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _scan_batch(client, list(targets), conc=1)
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    assert repos.batches.begin_cancel(bid, from_states=("Running",))
+    return repos, bid
+
+
+def test_cancelling_batch_rejects_requeue_and_terminal_only_routes(client, db):
+    repos, bid = _cancelling(client)
+    assert client.post(f"/api/admin/batches/{bid}:cancel").json()["detail"] == "batch_not_cancelable"
+    r = client.post(f"/api/admin/batches/{bid}/items", json={"storage": "s1", "target": "c"})
+    assert (r.status_code, r.json()["detail"]) == (409, "batch_cancelling")
+    r = client.post(f"/api/admin/batches/{bid}/items:rerun", json={"seqs": [1]})
+    assert (r.status_code, r.json()["detail"]) == (409, "batch_cancelling")
+    r = client.post(f"/api/admin/batches/{bid}:rerun-failed")
+    assert (r.status_code, r.json()["detail"]) == (409, "batch_cancelling")
+    # 종단 전용 경로: 기록 삭제(남은 자식이 그물 밖으로 빠진다)·실행 설정 변경
+    assert client.delete(f"/api/admin/batches/{bid}").json()["detail"] == "batch_not_deletable"
+    assert client.patch(f"/api/admin/batches/{bid}/execution",
+                        json={"max_concurrency": 2}).json()["detail"] == "batch_settings_locked"
+    BatchOrchestrator(repos, settings=_S()).run_once()                # 굴리지 않는다(list_active 밖)
+    assert repos.batches.get(bid)["status"] == "Cancelling"
+    assert len(_children(db, bid)) == 1
+
+
+def test_sweep_bars_a_queued_item_that_slipped_into_a_cancelling_batch(client, db):
+    repos, bid = _cancelling(client)
+    db.execute("UPDATE batch_items SET status = 'Queued', reason_code = NULL WHERE batch_id = :b AND seq = 1",
+               {"b": bid})                                            # 경합으로 끼어든 Queued(가정)
+    it0 = repos.batches.get_item(bid, 0)
+    repos.requests.cancel_if_pending(it0["request_id"], reason_code="cancelled_by_batch", actor="t")
+    sweep_cancelled(repos, client.app.state.execution_adapter, now=_later())
+    assert repos.batches.get_item(bid, 1)["status"] == "Cancelled"
+    assert repos.batches.get(bid)["status"] == "Cancelled"
+
+
+def test_sweep_records_leftover_materialized_items_by_the_child_result(client, db):
+    """라우트가 중간에 멈춘 취소(API 재시작): 항목이 Materialized 로 남고 자식은 이미 끝났다 -- 그물이 그 결과로 기록한다."""
+    repos, bid = _cancelling(client, targets=("a",))
+    it0 = repos.batches.get_item(bid, 0)
+    repos.requests.set_state(it0["request_id"], RequestState.PLANNED, actor="t")
+    repos.requests.set_state(it0["request_id"], RequestState.RUNNING, actor="t")
+    repos.requests.finalize_from_job(it0["request_id"], DataJobState.SUCCEEDED, actor="stepper")
+    assert repos.batches.get_item(bid, 0)["status"] == "Materialized"
+    sweep_cancelled(repos, client.app.state.execution_adapter, now=_later())
+    b = repos.batches.get(bid)
+    assert (repos.batches.get_item(bid, 0)["status"], b["status"], b["succeeded_count"]) == (
+        "Succeeded", "Cancelled", 1)
+
+
+def test_sweep_isolates_a_poison_row(client, db, monkeypatch):
+    """한 자식의 예외가 그물 전체를 멈추지 않는다(LIMIT 의 맨 앞 독 행)."""
+    _admin(client)
+    repos, adapter = client.app.state.repos, client.app.state.execution_adapter
+    rids = []
+    for t in ("a", "b"):
+        bid = _scan_batch(client, [t], conc=1)
+        BatchOrchestrator(repos, settings=_S()).run_once()
+        it = repos.batches.list_items(bid)[0]
+        _executing_child(repos, adapter, it["request_id"], t)
+        repos.batches.set_status(bid, "Cancelled")
+        rids.append(it["request_id"])
+    real = repos.data_jobs.list_jobs
+
+    def poisoned(*a, **kw):
+        if kw.get("request_id") == rids[0]:
+            raise ValueError("corrupt row")
+        return real(*a, **kw)
+    monkeypatch.setattr(repos.data_jobs, "list_jobs", poisoned)
+    assert sweep_cancelled(repos, adapter) == 1
+    assert repos.requests.get(rids[1])["state"] == "Cancelled"
+    assert repos.requests.get(rids[0])["state"] != "Cancelled"
+    assert db.query("SELECT 1 AS x FROM events WHERE event_type = 'cancel_sweep_failed' AND request_id = :r",
+                    {"r": rids[0]})
+    sweep_cancelled(repos, adapter)                                    # 쿨다운 -- 이벤트가 틱마다 쌓이지 않는다
+    assert len(db.query("SELECT 1 AS x FROM events WHERE event_type = 'cancel_sweep_failed'")) == 1
+
+
+def test_child_killed_by_the_cancel_is_a_cancelled_item_not_a_failure(client, db, monkeypatch):
+    """종료 도중 stepper 가 (취소 전 읽은 배치 상태로) 지워진 vcjob 을 FAILED 로 마무리한 경합 -- 항목은 Cancelled·
+    cancelled_by_batch, 실패 수 0(「실패분 재실행」 대상이 아니다)."""
+    _admin(client)
+    repos, adapter = client.app.state.repos, client.app.state.execution_adapter
+    bid = _scan_batch(client, ["a"], conc=1)
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    it0 = repos.batches.list_items(bid)[0]
+    jid, ref = _executing_child(repos, adapter, it0["request_id"], "a")
+    real_term = adapter.terminate
+
+    def terminate_then_stepper_fails_it(r):
+        real_term(r)
+        repos.data_jobs.set_job_state(jid, DataJobState.FAILED, reason_code="execution_failed", actor="stepper")
+        repos.requests.finalize_from_job(it0["request_id"], DataJobState.FAILED, reason_code="execution_failed",
+                                         actor="stepper")
+    monkeypatch.setattr(adapter, "terminate", terminate_then_stepper_fails_it)
+    assert client.post(f"/api/admin/batches/{bid}:cancel").json() == {"status": "Cancelled"}
+    item = repos.batches.list_items(bid)[0]
+    assert (item["status"], item["reason_code"]) == ("Cancelled", "cancelled_by_batch")
+    assert repos.batches.get(bid)["failed_count"] == 0
+
+
+def test_finalize_from_job_is_idempotent_under_a_second_caller(client, db):
+    """취소 라우트와 그물·stepper 가 같은 요청을 함께 마무리해도 results PK 충돌이 없다(잠근 행으로 다시 본다)."""
+    _admin(client)
+    repos = client.app.state.repos
+    bid = _scan_batch(client, ["a"], conc=1)
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    rid = repos.batches.list_items(bid)[0]["request_id"]
+    repos.requests.set_state(rid, RequestState.PLANNED, actor="t")
+    repos.requests.set_state(rid, RequestState.RUNNING, actor="t")
+    repos.requests.finalize_from_job(rid, DataJobState.CANCELLED, reason_code="cancelled_by_batch", actor="api")
+    repos.requests.finalize_from_job(rid, DataJobState.FAILED, reason_code="execution_failed", actor="stepper")
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+    assert len(db.query("SELECT 1 AS x FROM results WHERE request_id = :r", {"r": rid})) == 1
+
+
+def test_settle_child_without_jobs_cancels_a_pending_child(client, db):
+    _admin(client)
+    repos, adapter = client.app.state.repos, client.app.state.execution_adapter
+    bid = _scan_batch(client, ["a"], conc=1)
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    rid = repos.batches.list_items(bid)[0]["request_id"]
+    assert settle_child(repos, adapter, rid, [], actor="t", component="api") == ("Cancelled", None)
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+
+
+@pytest.mark.parametrize("status", ["Cancelling", "Cancelled"])
+def test_planner_ends_pending_children_of_a_cancelled_batch(db, status):
     from dms.repositories import Repositories
     repos = Repositories(db)
     bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin", max_concurrency=1,
-                               options={}, note=None, items=[{"storage": "s1", "target": "a"}], status="Cancelled",
+                               options={}, note=None, items=[{"storage": "s1", "target": "a"}], status=status,
                                name="c", auth_method="session")
     rid = repos.requests.create(operation="scan", requester_id="admin", actor="admin", resource_key="k:pl",
                                 payload={"storage": "s1", "target": "a"}, priority="mid", batch_id=bid,

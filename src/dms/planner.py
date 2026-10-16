@@ -205,7 +205,7 @@ class Planner:
         # 다른 경로(취소 라우트)가 먼저 끝냈으면 아무것도 하지 않는다.
         if req.get("batch_id"):
             batch = self._repos.batches.get(req["batch_id"])
-            if batch is not None and batch["status"] == "Cancelled":
+            if batch is not None and batch["status"] in ("Cancelling", "Cancelled"):
                 if self._repos.requests.cancel_if_pending(rid, reason_code="cancelled_by_batch", actor="planner"):
                     return "cancelled:cancelled_by_batch"
                 return "gone"

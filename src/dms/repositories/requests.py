@@ -285,6 +285,15 @@ class RequestsRepository:
         # 비종단"도 구조적으로 불가능해져, 재시도가 results PK 중복
         # (UniqueViolation -- 슬라이스 24 관측)에 걸릴 창도 함께 닫힌다.
         with self._db.transaction():
+            # 잠근 행으로 다시 본다(2026-10-16 검증 지적): 위 읽기는 잠금 없이라, 두 호출자(배치 취소 라우트와 컨트롤러 그물,
+            # stepper 와 취소)가 함께 통과하면 둘째가 전이·results 를 한 번 더 써 results PK 충돌(UniqueViolation)로 실패했다.
+            lock = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+            locked = self._db.query_one(
+                f"SELECT state FROM requests WHERE request_id = :id{lock}", {"id": request_id})
+            if locked is None:
+                raise KeyError(request_id)
+            if RequestState(locked["state"]) in TERMINAL_REQUEST_STATES:
+                return
             self._apply_state(request_id, target, reason_code=reason_code,
                               actor=actor)
             self.record_result(request_id, target, reason_code=reason_code,
