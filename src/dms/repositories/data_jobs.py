@@ -587,7 +587,7 @@ class DataJobsRepository:
         return expired
 
     def terminal_jobs_older_than(self, after_seconds: int, *, limit: int = 200,
-                                  now_iso: str | None = None) -> list[dict]:
+                                  now_iso: str | None = None, after_key=None) -> list[dict]:
         """종단 상태이고 updated_at이 (now - after_seconds)보다 오래된 잡을
         **오래된 순**으로 최대 limit건. GC는 반드시 오래된 것부터 비워야 한다 —
         대상이 limit을 넘으면(예: 컨트롤러가 오래 멈췄다 돌아온 경우) 최신순으로
@@ -604,9 +604,14 @@ class DataJobsRepository:
         params = {f"s{i}": v for i, v in enumerate(states)}
         params["threshold"] = threshold
         params["n"] = limit
+        # after_key=(updated_at, job_id): 그 뒤부터(pod_gc 의 커서 -- 같은 앞쪽 묶음만 되풀이하지 않게, 2026-10-16).
+        tail = ""
+        if after_key is not None:
+            tail = " AND (updated_at > :cu OR (updated_at = :cu AND job_id > :cj))"
+            params["cu"], params["cj"] = after_key
         rows = self._db.query(
             f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
-                WHERE state IN ({placeholders}) AND updated_at < :threshold
+                WHERE state IN ({placeholders}) AND updated_at < :threshold{tail}
                 ORDER BY updated_at ASC, job_id ASC LIMIT :n""", params)
         return [self._hydrate(r) for r in rows]
 

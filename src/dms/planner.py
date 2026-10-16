@@ -199,6 +199,16 @@ class Planner:
         req = self._repos.requests.get(rid)
         if req is None:
             return "gone"                   # list_pending 뒤에 지워졌다
+        # 취소된 배치의 자식은 계획하지 않고 끝낸다(2026-10-16 사용자 보고: 「배치작업 Cancel 했는데 몇분 후에 ... 아직
+        # 돌아가고 있는 launcher/worker pod」 -- batch_cancel 모듈 docstring). 예전엔 planner 가 배치 상태를 보지 않아 취소
+        # 경합으로 남은 Pending 자식을 계획했고 stepper 가 취소 뒤에 vcjob 을 만들어 끝까지 돌렸다. Pending CAS 라 그 사이
+        # 다른 경로(취소 라우트)가 먼저 끝냈으면 아무것도 하지 않는다.
+        if req.get("batch_id"):
+            batch = self._repos.batches.get(req["batch_id"])
+            if batch is not None and batch["status"] == "Cancelled":
+                if self._repos.requests.cancel_if_pending(rid, reason_code="cancelled_by_batch", actor="planner"):
+                    return "cancelled:cancelled_by_batch"
+                return "gone"
         # 멱등: 이미 emit된 잡이 있으면(옛 비원자 emit 의 크래시 잔재) 상태만 정리 -- 조건부(Pending 일 때만)라 그 사이
         # 취소된 요청을 Planned 로 되살리지 않는다.
         if self._repos.data_jobs.list_jobs(request_id=rid):

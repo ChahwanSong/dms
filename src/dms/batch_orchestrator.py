@@ -34,9 +34,10 @@ stepper 가 같은 컨트롤러 패스에서 먼저 돈다). 다시 미리보기
 여전히 사람이 컨펌한다(이 경로 밖 -- 배치 자식만 여기서 실행된다).
 """
 from .db import load_json, utc_now_iso
-from .domain import (DomainValidationError, Operation, RequestState, TERMINAL_REQUEST_STATES,
+from .domain import (DomainValidationError, Operation, TERMINAL_REQUEST_STATES,
                      DataJobState, build_data_payload, resolve_priority, validate_options)
 from .identity import privilege_eligible
+from .batch_cancel import record_item_terminal, sweep_cancelled
 from .privileged import privileged_names
 
 _ITEM_TERMINAL = {"Succeeded", "Failed", "Rejected", "Cancelled"}
@@ -110,13 +111,20 @@ def auto_confirm_hold(repos, settings, batch) -> str | None:
 
 
 class BatchOrchestrator:
-    def __init__(self, repos, *, settings):
+    def __init__(self, repos, *, settings, execution_adapter=None):
         self._repos = repos
         self._settings = settings
+        # 취소된 배치의 살아 있는 자식을 끝내는 그물(batch_cancel.sweep_cancelled, 2026-10-16)에만 쓴다 -- 컨트롤러가 준다.
+        # None(단위 시험의 좁은 생성)이면 그물을 건너뛴다.
+        self._exec = execution_adapter
 
     def run_once(self):
         for batch in self._repos.batches.list_active() + self._repos.batches.list_awaiting_confirm():
             self._drive(batch)
+        if self._exec is not None:
+            # 취소 라우트가 정상 경로에서 다 끝내므로 보통 0건이다 -- 부분 실패·경합의 그물(batch_cancel 모듈 docstring).
+            # 한 자식의 실패는 그 안에서 격리되고, 질의 자체의 예외는 루프 래퍼(error:<Type>)가 다음 틱으로 넘긴다.
+            sweep_cancelled(self._repos, self._exec)
 
     def _child_state(self, request_id):
         """("terminal", 요청 상태) | ("previewed", 잡) | ("previewing", 잡|None) | ("executing", 잡).
@@ -136,23 +144,10 @@ class BatchOrchestrator:
         return ("executing", job)
 
     def _record_terminal(self, batch_id, item, req_state):
-        with self._repos.db.transaction():
-            if req_state == RequestState.SUCCEEDED.value:
-                self._repos.batches.set_item_status(batch_id, item["seq"], "Succeeded")
-                self._repos.batches.bump_counts(batch_id, succeeded=1)
-            elif req_state == RequestState.CANCELLED.value:
-                # 취소는 성공도 실패도 아니다 — 카운터를 올리지 않는다.
-                # reason_code 는 상태값을 되풀이하지 않고 요청의 실제 종단 사유를 옮긴다
-                # (없으면 NULL — 바로 옆 StatusPill과 중복 표시하지 않는다).
-                self._repos.batches.set_item_status(
-                    batch_id, item["seq"], "Cancelled",
-                    reason_code=self._repos.requests.last_reason_code(item["request_id"]))
-            else:
-                status = "Rejected" if req_state == RequestState.REJECTED.value else "Failed"
-                self._repos.batches.set_item_status(
-                    batch_id, item["seq"], status,
-                    reason_code=self._repos.requests.last_reason_code(item["request_id"]))
-                self._repos.batches.bump_counts(batch_id, failed=1)
+        # 항목 CAS(Materialized 일 때만) + 바꾼 쪽만 집계 -- 취소 라우트·컨트롤러 그물과 같은 함수(batch_cancel.
+        # record_item_terminal). 취소는 성공도 실패도 아니다(집계 없음). 사유는 요청의 실제 종단 사유를 옮긴다(없으면
+        # NULL -- 바로 옆 StatusPill 과 중복 표시하지 않는다).
+        record_item_terminal(self._repos, batch_id, item["seq"], item["request_id"], req_state)
 
     def _materialize(self, batch, item):
         # 자식 생성 시점의 재검증 실패(규칙이 바뀐 뒤 남은 옛 배치 -- 2026-10-01 chown 이름 거부가 첫 사례)는

@@ -105,20 +105,43 @@ def test_terminal_job_younger_than_after_seconds_not_yet_targeted(db):
     assert adapter.terminated == []
 
 
-def test_vcjob_ref_is_not_a_target(db):
-    """4. vcjob/ ref는 대상이 아니다 — Volcano의 ttlSecondsAfterFinished가 처리한다."""
+def test_vcjob_ref_of_a_terminal_job_is_a_target(db):
+    """4. vcjob/ ref 도 대상이다(2026-10-16): Volcano 의 ttlSecondsAfterFinished 는 Completed 만 치워, Aborted vcjob 과 그
+    Error 파드가 61일째 남아 있었다(테스트베드). 같은 창(after_seconds)이 지난 종단 잡의 vcjob 을 지운다(404 는 무해)."""
     repos = Repositories(db)
     adapter = _TerminateRecordingAdapter()
     jid = _make_job(repos, resource_key="k4", refs={"execution": "vcjob/j1"})
-    repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
+    repos.data_jobs.set_job_state(jid, DataJobState.FAILED, actor="stepper")
     updated_at = repos.data_jobs.get_job(jid)["updated_at"]
     now = iso_plus(updated_at, 3601)
 
     gc = PodGarbageCollector(repos, adapter, after_seconds=3600)
     result = gc.run_once(now_iso=now)
 
-    assert result == {"deleted": 0}
-    assert adapter.terminated == []
+    assert result == {"deleted": 1}
+    assert adapter.terminated == ["vcjob/j1"]
+
+
+def test_cursor_reaches_jobs_beyond_the_first_batch(db):
+    """커서(2026-10-16): 질의는 오래된 순 LIMIT 이고 지운 잡을 표시하지 않는다 -- 예전엔 매 틱 같은 앞쪽 묶음만 다시 지워
+    그 뒤의 잡에 영영 닿지 못했다. 같은 인스턴스가 다음 묶음으로 넘어가고, 끝에 닿으면 처음부터 다시 돈다."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+    jids = []
+    for i in range(3):
+        jid = _make_job(repos, resource_key=f"kc{i}", refs={"preflight": f"pod/p{i}"})
+        repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
+        db.execute("UPDATE data_jobs SET updated_at = :t WHERE job_id = :j",
+                   {"t": f"2026-01-0{i + 1}T00:00:00Z", "j": jid})
+        jids.append(jid)
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600, limit=2)
+    now = "2026-02-01T00:00:00Z"
+    gc.run_once(now_iso=now)
+    assert adapter.terminated == ["pod/p0", "pod/p1"]
+    gc.run_once(now_iso=now)
+    assert adapter.terminated[2:] == ["pod/p2"]           # 다음 묶음(예전엔 p0·p1 만 되풀이)
+    gc.run_once(now_iso=now)
+    assert adapter.terminated[3:] == ["pod/p0", "pod/p1"]  # 끝에 닿은 뒤 처음부터
 
 
 def test_terminate_exception_does_not_kill_the_loop(db):
