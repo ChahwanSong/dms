@@ -9,7 +9,8 @@ import pytest
 
 from dms.execution_volcano import (KubernetesClient,
                                    ROLLOUT_REQUEST_TIMEOUT_SECONDS)
-from dms.queue_reader import DMS_QUEUE, StubQueueReader, VolcanoQueueReader
+from dms.queue_reader import (CONDITION_MESSAGE_MAX, DMS_QUEUE, StubQueueReader,
+                              VolcanoQueueReader)
 
 
 class _FakeK8s:
@@ -53,11 +54,18 @@ def test_read_queue_without_status_has_null_state():
 def test_read_podgroups_filters_by_queue_and_normalizes():
     # PodGroup 에는 DMS 라벨이 없고 이름 접미(-<uid>)는 문서화된 계약이 아니다 --
     # 네임스페이스 list 후 spec.queue 필터가 유일하게 안전한 경로다(설계 §2.1).
+    # 모양은 2026-10-16 에 의도적으로 넓혔다(큐 현황 상세화): 왜 기다리는지(가장 최근
+    # condition 의 reason/message), priorityClassName, 소유 vcjob 이름 -- 없는 것은 None.
     k8s = _FakeK8s(podgroups={"items": [
         {"metadata": {"name": "job-a-uid1",
-                      "creationTimestamp": "2026-08-10T00:00:00Z"},
-         "spec": {"queue": "dms-data", "minMember": 3},
-         "status": {"phase": "Pending"}},
+                      "creationTimestamp": "2026-08-10T00:00:00Z",
+                      "ownerReferences": [{"apiVersion": "batch.volcano.sh/v1alpha1",
+                                           "kind": "Job", "name": "job-a"}]},
+         "spec": {"queue": "dms-data", "minMember": 3, "priorityClassName": "dms-mid"},
+         "status": {"phase": "Pending", "conditions": [
+             {"type": "Unschedulable", "reason": "NotEnoughResources",
+              "message": "3/3 tasks in gang unschedulable",
+              "lastTransitionTime": "2026-08-10T00:00:05Z"}]}},
         {"metadata": {"name": "other-uid2"},
          "spec": {"queue": "default", "minMember": 1},
          "status": {"phase": "Running"}},                # 다른 큐 -- 제외
@@ -67,11 +75,66 @@ def test_read_podgroups_filters_by_queue_and_normalizes():
     reader = VolcanoQueueReader(k8s, namespace="dms")
     assert reader.read_podgroups() == [
         {"name": "job-a-uid1", "phase": "Pending", "min_member": 3,
-         "created_at": "2026-08-10T00:00:00Z"},
+         "created_at": "2026-08-10T00:00:00Z", "priority_class": "dms-mid",
+         "reason": "NotEnoughResources", "message": "3/3 tasks in gang unschedulable",
+         "vcjob": "job-a"},
         {"name": "job-c-uid3", "phase": None, "min_member": None,
-         "created_at": None},
+         "created_at": None, "priority_class": None, "reason": None, "message": None,
+         "vcjob": None},
     ]
     assert k8s.listed == "dms"
+
+
+def _one_pg(**over):
+    item = {"metadata": {"name": "pg-1"}, "spec": {"queue": "dms-data"}, "status": {}}
+    for key, value in over.items():
+        item[key] = {**item[key], **value}
+    return VolcanoQueueReader(_FakeK8s(podgroups={"items": [item]}),
+                              namespace="dms").read_podgroups()[0]
+
+
+def test_read_podgroups_takes_newest_condition_not_list_order():
+    # "왜 기다리나"는 가장 최근 condition 의 것이다 -- 목록 순서가 아니라 lastTransitionTime.
+    # 시각이 같으면 뒤에 있는 것. 시각 없는 항목은 시각 있는 항목을 이기지 못한다.
+    pg = _one_pg(status={"conditions": [
+        {"reason": "new", "message": "m-new", "lastTransitionTime": "2026-08-10T00:00:09Z"},
+        {"reason": "old", "message": "m-old", "lastTransitionTime": "2026-08-10T00:00:01Z"},
+        {"reason": "no-ts", "message": "m-no-ts"},
+    ]})
+    assert (pg["reason"], pg["message"]) == ("new", "m-new")
+    tie = _one_pg(status={"conditions": [
+        {"reason": "first", "lastTransitionTime": "2026-08-10T00:00:01Z"},
+        {"reason": "second", "lastTransitionTime": "2026-08-10T00:00:01Z"},
+    ]})
+    assert tie["reason"] == "second"
+
+
+def test_read_podgroups_degrades_malformed_fields_per_item():
+    # k8s 오브젝트는 신뢰 입력이 아니다 -- 모양이 깨진 필드는 그 필드만 None, 항목은 남는다(설계 §4).
+    pg = _one_pg(metadata={"ownerReferences": "not-a-list"},
+                 spec={"priorityClassName": 7},
+                 status={"conditions": [None, "x", {"reason": "", "message": 3}]})
+    assert (pg["vcjob"], pg["priority_class"], pg["reason"], pg["message"]) == (
+        None, None, None, None)
+    assert pg["name"] == "pg-1"
+
+
+def test_read_podgroups_owner_must_be_volcano_job():
+    # 같은 kind 이름(Job)이라도 batch/v1 소유자는 DMS vcjob 이 아니다 -- 대조 열쇠로 쓰지 않는다.
+    pg = _one_pg(metadata={"ownerReferences": [
+        {"apiVersion": "batch/v1", "kind": "Job", "name": "k8s-job"},
+        {"apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job", "name": "dms-sync-preview-abc"}]})
+    assert pg["vcjob"] == "dms-sync-preview-abc"
+    assert _one_pg(metadata={"ownerReferences": [
+        {"apiVersion": "batch/v1", "kind": "Job", "name": "k8s-job"}]})["vcjob"] is None
+
+
+def test_read_podgroups_clips_long_condition_message():
+    # Unschedulable message 는 노드마다 사유를 나열해 클러스터 크기만큼 길어진다 -- 5초 폴링
+    # 응답이 PodGroup 수 x 노드 수로 부풀지 않게 상한에서 자른다(말줄임표로 잘림 표시).
+    pg = _one_pg(status={"conditions": [{"message": "x" * (CONDITION_MESSAGE_MAX + 50)}]})
+    assert len(pg["message"]) == CONDITION_MESSAGE_MAX
+    assert pg["message"].endswith("…")
 
 
 def test_read_podgroups_distinguishes_absent_from_empty():

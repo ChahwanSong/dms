@@ -13,6 +13,39 @@ _FAILED_STATES = tuple(sorted(
     s.value for s in TERMINAL_DATA_JOB_STATES if s is not DataJobState.SUCCEEDED))
 _TERMINAL_STATES = tuple(sorted(s.value for s in TERMINAL_DATA_JOB_STATES))
 
+# ---- 큐 현황 파이프라인(2026-10-16, 사용자 요청 「대시보드에서 큐 현황에 대해 조금만 더 자세히 그리고 개선해서 보여주면
+# 좋겠어.」) -- 아래 queue_* 읽기 셋. 시간 창이 없는 라이브 스냅숏이다: 24h created_at 창이면 하루 넘게 확인을 기다린 잡이
+# 화면에서 사라진다(실측 ConfirmPending p95 7.3h -- 긴 대기일수록 창 밖으로 먼저 빠진다).
+# 비종단 잡 상태(정렬 고정 -- 플레이스홀더 이름이 실행마다 흔들리지 않게).
+_LIVE_JOB_STATES = tuple(sorted(
+    s.value for s in DataJobState if s not in TERMINAL_DATA_JOB_STATES))
+# Volcano 에 제출된 단계(vcjob 이 있다) -- PodGroup 대조와 「실행 중」 단계의 재료.
+_CONFIRM = DataJobState.CONFIRM_PENDING.value
+_SUBMITTED_JOB_STATES = tuple(sorted((
+    DataJobState.PREVIEW_RUNNING.value, DataJobState.EXECUTING.value, DataJobState.RUNNING.value)))
+# 배치 오케스트레이터가 굴리는(또는 기록하러 도는) 배치 상태 = batch_orchestrator._BATCH_DRIVEN 의 거울. 취소·완료된 배치에
+# 남은 Queued 항목은 아무도 집지 않으므로 「기다리는」 것이 아니다 -- 세지 않는다.
+_DRIVEN_BATCH_STATES = ("PreviewReady", "Previewing", "Running")
+# 계획 유예·오류 이벤트(planner._record_defer_event · run_once 의 plan_error) -- 요청이 Pending 에 머무는 이유를 남기는 유일한
+# 흔적이다. 고르는 것은 요청마다 가장 최근 하나(MAX(id)).
+_PLANNING_NOTE_EVENTS = ("awaiting_requested_nodes", "identity_propagating", "plan_error")
+# 「지금 상태에 들어온 시각」. updated_at 은 상태 밖의 쓰기(set_phase_ref·LDAP 보류 touch·배치 확인 도장)로도 움직여 대기
+# 시작점이 될 수 없다 -- 그 상태로의 마지막 전이 시각이 정답이다(Executing 의 실행 제출 자기 전이도 그대로 따른다:
+# 「실행 중」의 나이는 실행 vcjob 제출부터다). 전이 행이 없는 행(직접 INSERT·옛 데이터)만 updated_at 으로 접는다.
+# idx_transitions_entity (entity_kind, entity_id, id) 가 잡마다의 탐색을 인덱스 범위로 만든다.
+_ENTERED_AT = """COALESCE((SELECT MAX(t.at) FROM state_transitions t
+                           WHERE t.entity_kind = 'data_job' AND t.entity_id = j.job_id
+                             AND t.to_state = j.state), j.updated_at)"""
+# 제출된 잡 행의 안전 상한(PodGroup 대조용 전량 조회). 동시에 Volcano 에 올라 있는 잡 수는 클러스터 용량에 묶여 이
+# 값보다 훨씬 작다 -- 넘으면 가장 오래된 것부터 담아 「실행 중」의 가장 긴 나이는 정확히 유지된다.
+_SUBMITTED_ROWS_MAX = 2000
+
+
+def _in(prefix, values):
+    """IN (...) 자리표시자와 파라미터. 두 방언 공통(ANY(:list)는 PG 전용)."""
+    ph = ", ".join(f":{prefix}{i}" for i in range(len(values)))
+    return ph, {f"{prefix}{i}": v for i, v in enumerate(values)}
+
 
 class MetricsRepository:
     def __init__(self, db: Database):
@@ -238,3 +271,112 @@ class MetricsRepository:
             "files_total": sums["files_total"],
             "bytes_total": sums["bytes_total"],
         }
+
+    # ---- 큐 현황 파이프라인(2026-10-16) -- 라우트(metrics_queue)가 축마다 독립 try 로 부른다. 조립은
+    # queue_pipeline(순수)이 한다: 여기는 행과 집계만 낸다. 카운트는 COUNT(*) 정수 그대로(0 은 정상값), 시각은
+    # 원문 ISO -- 나이 계산은 서버 한 곳(조립 단계)에서 한다.
+
+    def queue_planning(self, *, limit: int) -> dict:
+        """계획 대기(requests Pending). rows 는 오래된 순 limit 건(+ 각 요청의 가장 최근 계획 유예·오류 이벤트)."""
+        agg = self._db.query_one(
+            "SELECT COUNT(*) AS n, MIN(created_at) AS oldest_at FROM requests WHERE state = 'Pending'")
+        # commit_order 순 = 접수 순이다(idx_requests_state (state, commit_order) 가 범위 + 정렬을 함께 덮는다).
+        rows = self._db.query(
+            """SELECT request_id, operation, requester_id, priority, batch_id, created_at
+               FROM requests WHERE state = 'Pending' ORDER BY commit_order LIMIT :n""", {"n": limit})
+        notes = {}
+        if rows:
+            rph, rparams = _in("r", [r["request_id"] for r in rows])
+            eph, eparams = _in("e", _PLANNING_NOTE_EVENTS)
+            # 요청마다 가장 최근 하나 -- plan_error 는 틱마다(10s) 쌓이므로 전부 읽지 않는다.
+            for ev in self._db.query(
+                    f"""SELECT request_id, event_type, message FROM events
+                        WHERE id IN (SELECT MAX(id) FROM events
+                                     WHERE request_id IN ({rph}) AND event_type IN ({eph})
+                                     GROUP BY request_id)""", {**rparams, **eparams}):
+                notes[ev["request_id"]] = {"event_type": ev["event_type"], "message": ev["message"]}
+        for r in rows:
+            r["note"] = notes.get(r["request_id"])
+        return {"count": int(agg["n"]), "oldest_at": agg["oldest_at"], "rows": rows}
+
+    def queue_jobs(self, *, limit: int) -> dict:
+        """비종단 잡의 상태별 집계 + 대기 단계(Pending·Preflight·ConfirmPending 단건)의 오래된 순 limit 건 + 배치 자식
+        ConfirmPending 의 배치별 묶음 + Volcano 에 제출된 잡 전량(phase_refs -- PodGroup 대조용).
+
+        배치 자식의 확인 대기는 배치 단위로 묶는다: sync 배치 하나가 자식 수백 건을 한꺼번에 ConfirmPending 으로 만들므로
+        건별로 늘어놓으면 표가 한 배치로 덮여 사람이 확인해야 할 단건 sync 가 묻힌다 -- 배치 확인도 원래 배치 단위다.
+
+        비용: 대기 시작점(_ENTERED_AT)은 잡마다 전이 인덱스 탐색 한 번이다(PG 16 실측 행당 ~4µs). 확인 대기는 사람이
+        누를 때까지 쌓이는 유일한 상태라 그 집계는 배치별 묶음 한 번으로 끝낸다(묶음의 NULL 배치 = 단건) -- 상태별
+        집계에 다시 넣어 같은 행을 두 번 계산하지 않는다. 확인 대기 3천 + 실행 300 에서 이 메서드 전체 ~30ms(PG 16)."""
+        sph, sparams = _in("s", tuple(s for s in _LIVE_JOB_STATES if s != _CONFIRM))
+        by_state = {}
+        for r in self._db.query(
+                f"""SELECT state, COUNT(*) AS n, MIN(entered_at) AS oldest_at
+                    FROM (SELECT j.state, {_ENTERED_AT} AS entered_at
+                          FROM data_jobs j WHERE j.state IN ({sph})) x
+                    GROUP BY state""", sparams):
+            by_state[r["state"]] = {"count": int(r["n"]), "oldest_at": r["oldest_at"]}
+        # LEFT JOIN requests: 요청 행이 없는 잡(있어선 안 되지만 FK 가 없다)도 세고 목록에 남긴다 -- 요청자만 모름이 된다.
+        groups = self._db.query(
+            f"""SELECT x.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority,
+                       COUNT(*) AS n, MIN(x.entered_at) AS oldest_at, MIN(x.preview_expires_at) AS soonest_expiry
+                FROM (SELECT r.batch_id, j.preview_expires_at, {_ENTERED_AT} AS entered_at
+                      FROM data_jobs j LEFT JOIN requests r ON r.request_id = j.request_id
+                      WHERE j.state = '{_CONFIRM}') x
+                LEFT JOIN batches b ON b.batch_id = x.batch_id
+                GROUP BY x.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority""")
+        for g in groups:
+            g["n"] = int(g["n"])
+        if groups:
+            # 시각은 고정 포맷 ISO-8601 UTC 라 문자열 최솟값 = 가장 이른 시각(SQL MIN 과 같은 비교).
+            olds = [g["oldest_at"] for g in groups if g["oldest_at"] is not None]
+            exps = [g["soonest_expiry"] for g in groups if g["soonest_expiry"] is not None]
+            by_state[_CONFIRM] = {"count": sum(g["n"] for g in groups),
+                                  "oldest_at": min(olds) if olds else None,
+                                  "soonest_expiry": min(exps) if exps else None}
+        cols = f"""j.job_id, j.request_id, j.operation, j.priority, j.state, j.preview_expires_at,
+                   r.requester_id, r.batch_id, {_ENTERED_AT} AS entered_at"""
+        waiting = {}
+        singles = sum(g["n"] for g in groups if g["batch_id"] is None)
+        for state, extra, count in (
+                ("Pending", "", (by_state.get("Pending") or {}).get("count", 0)),
+                ("Preflight", "", (by_state.get("Preflight") or {}).get("count", 0)),
+                (_CONFIRM, " AND r.batch_id IS NULL", singles)):
+            # 0 건이면 묻지 않는다(5초 폴링의 왕복 절약) -- 빈 목록은 집계가 이미 증명했다.
+            waiting[state] = [] if count == 0 else self._db.query(
+                f"""SELECT {cols} FROM data_jobs j LEFT JOIN requests r ON r.request_id = j.request_id
+                    WHERE j.state = :st{extra} ORDER BY entered_at, j.job_id LIMIT :n""",
+                {"st": state, "n": limit})
+        bph, bparams = _in("b", _SUBMITTED_JOB_STATES)
+        submitted = self._db.query(
+            f"""SELECT {cols}, j.phase_refs FROM data_jobs j LEFT JOIN requests r ON r.request_id = j.request_id
+                WHERE j.state IN ({bph}) ORDER BY entered_at, j.job_id LIMIT :n""",
+            {**bparams, "n": _SUBMITTED_ROWS_MAX})
+        for row in submitted:
+            # DB 가 신뢰 경계다(CLAUDE.md) -- phase_refs 도 변조·손상될 수 있다. 깨진 JSON 은 그 행의 대조만 포기한다.
+            try:
+                row["phase_refs"] = load_json(row["phase_refs"])
+            except (TypeError, ValueError):
+                row["phase_refs"] = None
+        return {"by_state": by_state, "waiting": waiting,
+                "confirm_batches": [g for g in groups if g["batch_id"] is not None],
+                "submitted": submitted}
+
+    def queue_batches(self) -> dict:
+        """배치 대기: 굴러가는 배치(_DRIVEN_BATCH_STATES)마다 아직 자식 요청이 안 된(Queued) 항목 수와 가장 오래 기다린
+        항목의 시각 + 확인 대기(PreviewReady) 배치 수. 항목의 updated_at 이 대기 시작점이다 -- Queued 로 다시 들어오는
+        재실행이 updated_at 을 새로 찍는다(생성 시각을 쓰면 재실행 항목이 며칠을 기다린 것처럼 보인다). Queued 상태의
+        항목 편집도 찍으므로 그만큼은 짧게 보인다(과대가 아니라 과소 쪽 오차)."""
+        dph, dparams = _in("d", _DRIVEN_BATCH_STATES)
+        groups = self._db.query(
+            f"""SELECT b.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority, b.max_concurrency,
+                       COUNT(*) AS queued, MIN(i.updated_at) AS oldest_at
+                FROM batches b JOIN batch_items i ON i.batch_id = b.batch_id
+                WHERE b.status IN ({dph}) AND i.status = 'Queued'
+                GROUP BY b.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority,
+                         b.max_concurrency""", dparams)
+        for g in groups:
+            g["queued"] = int(g["queued"])
+        ready = self._db.query_one("SELECT COUNT(*) AS n FROM batches WHERE status = 'PreviewReady'")
+        return {"groups": groups, "preview_ready": int(ready["n"])}

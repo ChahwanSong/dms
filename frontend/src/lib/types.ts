@@ -606,13 +606,63 @@ export interface RegistryImages { registry: string; repositories: RegistryRepo[]
 // name 은 리더가 "" 로 채워 늘 문자열이고, phase/min_member/created_at 은 k8s
 // 오브젝트에서 그대로 온 값이라 결측이면 null. wait_seconds 는 라우트가 계산해
 // 넣는다(시각이 깨진 항목만 null).
+// 2026-10-16(큐 현황 상세화): reason/message(가장 최근 condition -- 표시만, 분기 금지), priority_class,
+// vcjob(소유 Volcano Job 이름)이 더해졌다. 옛 서버 응답엔 키가 없어 선택 필드다.
 export interface QueuePodgroup {
   name: string; phase: string | null; min_member: number | null;
   created_at: string | null; wait_seconds: number | null;
+  reason?: string | null; message?: string | null; priority_class?: string | null; vcjob?: string | null;
 }
+
+// 큐 현황 파이프라인(2026-10-16, routes_metrics.metrics_queue · queue_pipeline 모듈 docstring 이 권위). 단계 값 null =
+// 그 단계의 재료 축을 못 읽음(모름) -- {count: 0} 과 다르다. oldest_seconds null 은 0 건(없음)이거나 시각이 깨진 것.
+export type QueueStage =
+  "planning" | "pickup" | "preflight" | "volcano_wait" | "running" | "confirm" | "batch";
+export type QueueWaitStage = Exclude<QueueStage, "running">;
+export interface QueueStageStat { count: number; oldest_seconds: number | null; }
+export interface QueuePipeline {
+  planning: QueueStageStat | null;
+  pickup: QueueStageStat | null;
+  preflight: QueueStageStat | null;
+  volcano_wait: QueueStageStat | null;
+  // includes_volcano_wait: PodGroup 을 못 읽어 Volcano 대기를 빼지 못한 수(화면이 그 사실을 표기한다)
+  running: (QueueStageStat & { includes_volcano_wait: boolean }) | null;
+  confirm: (QueueStageStat & {
+    soonest_expiry: string | null; soonest_expiry_seconds: number | null;
+  }) | null;
+  // count = 대기(Queued) 항목 수, batches = 그 항목을 가진 배치 수, preview_ready_batches = 배치 확인 대기 배치 수
+  batch: (QueueStageStat & { batches: number; preview_ready_batches: number }) | null;
+}
+// 단계마다 쓰는 키가 다르다(서버 queue_pipeline 이 단계별로 채운다) -- 없는 키는 그 단계의 것이 아니다.
+export interface QueueWaitDetail {
+  note?: string | null;                 // planning: 가장 최근 계획 유예·오류 이벤트 종류
+  message?: string | null;              // planning: 그 이벤트 message / volcano_wait: condition message
+  podgroup?: string | null; phase?: string | null; min_member?: number | null;   // volcano_wait
+  reason?: string | null; priority_class?: string | null; phase_ref?: string | null;
+  expires_at?: string | null; expires_in_seconds?: number | null;              // confirm
+  jobs?: number;                        // confirm(배치 묶음): 확인 대기 자식 수
+  batch_status?: string | null; batch_name?: string | null;                    // confirm(배치 묶음)·batch
+  queued?: number; max_concurrency?: number | null;                             // batch
+}
+export interface QueueWaitEntry {
+  stage: QueueWaitStage;
+  request_id: string | null;   // 배치 묶음·비대조 PodGroup 은 null
+  job_id: string | null;
+  operation: string | null; requester: string | null;
+  priority: string | null;     // 배치의 null = 정책 기본
+  batch_id: string | null;
+  since: string | null; wait_seconds: number | null;
+  detail: QueueWaitDetail;
+}
+export interface QueueControl { drain: boolean; maintenance: boolean; reason: string | null; }
 export interface QueueMetrics {
   queue: { name: string; state: string | null } | null;
   podgroups: QueuePodgroup[] | null;
+  // 2026-10-16 -- 옛 서버(키 부재 = undefined)는 화면이 null(모름)과 똑같이 다룬다.
+  control?: QueueControl | null;
+  pipeline?: QueuePipeline | null;
+  waiting?: QueueWaitEntry[] | null;
+  waiting_truncated?: QueueWaitStage[] | null;
 }
 
 // 포탈 메일 설정(2026-10-01, GET /api/admin/mail-settings). 적용값 = 포탈 > env > 기본값(칸별).
