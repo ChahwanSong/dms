@@ -470,10 +470,18 @@ class BatchesRepository:
 
     def cancelling_batch_ids(self, *, before) -> "list[str]":
         """Cancelling 에 before(ISO) 전부터 머문 배치 -- 라우트가 끝내지 못한(종료 실패·API 재시작) 취소. 컨트롤러 그물이 마저
-        끝낸다. 진행 중인 라우트와 겹치지 않게 유예를 둔다(updated_at 기준 -- 라우트의 기록이 갱신을 민다)."""
+        끝낸다. 진행 중인 라우트와 겹치지 않게 유예를 둔다(updated_at 기준 -- 라우트가 자식마다 touch_cancelling 으로 민다)."""
         return [r["batch_id"] for r in self._db.query(
             "SELECT batch_id FROM batches WHERE status = 'Cancelling' AND updated_at < :t ORDER BY updated_at",
             {"t": before})]
+
+    def touch_cancelling(self, batch_id) -> None:
+        """취소 라우트의 생존 신호(자식마다): Cancelling 배치의 updated_at 을 민다 -- 큰 배치·느린 apiserver 로 라우트가 그물
+        유예(batch_cancel.CANCEL_SWEEP_GRACE_SECONDS)보다 오래 걸려도 그물이 아직 라우트가 닿지 않은 자식을 겹쳐 끝내지 않게
+        (검증 지적: Cancelled 항목 기록은 batches 를 건드리지 않아 유예가 begin_cancel 시각에 묶여 있었다)."""
+        self._db.execute(
+            "UPDATE batches SET updated_at = :now WHERE batch_id = :b AND status = 'Cancelling'",
+            {"now": utc_now_iso(), "b": batch_id})
 
     def bar_queued_if_cancelling(self, batch_id) -> int:
         """Cancelling 배치에 경합으로 끼어든 Queued 항목을 다시 막는다(컨트롤러 그물 -- 자가 치유). 배치가 지금 Cancelling 일
@@ -492,7 +500,10 @@ class BatchesRepository:
     def live_children_of_cancelled(self, *, before, limit: int = 50) -> "list[dict]":
         """취소된 배치 밑에 아직 끝나지 않은 자식 요청(2026-10-16 -- 컨트롤러 그물). (batch_id, request_id, seq).
         대상 배치: Cancelling 이고 before 전부터 머문 것(라우트가 끝내지 못한 취소 -- 진행 중 라우트와 겹치지 않게 유예),
-        또는 Cancelled 인데 살아 있는 자식이 남은 것(이 수정 이전 경합의 잔재). requests 의 상태 인덱스로 비종단만 훑는다."""
+        또는 Cancelled 인데 살아 있는 자식이 남은 것(이 수정 이전 경합의 잔재). requests 의 상태 인덱스로 비종단만 훑는다.
+        순서는 **무작위**다(검증 지적): commit_order 순 LIMIT 이면 종료가 계속 실패하는(웹훅 거부·변조된 ref) 자식 limit 개가
+        매 틱 같은 칸을 차지해, 뒤에 취소된 다른 배치의 자식이 영영 끝나지 않았다. 대상은 취소된 배치의 비종단 자식뿐이라
+        정렬 비용은 작다(정상 경로에선 0 행)."""
         return self._db.query(
             """SELECT r.batch_id, r.request_id, i.seq
                  FROM requests r
@@ -500,7 +511,7 @@ class BatchesRepository:
                  LEFT JOIN batch_items i ON i.batch_id = r.batch_id AND i.request_id = r.request_id
                 WHERE r.state IN ('Pending', 'Planned', 'Running')
                   AND (b.status = 'Cancelled' OR (b.status = 'Cancelling' AND b.updated_at < :t))
-                ORDER BY r.commit_order LIMIT :n""", {"t": before, "n": limit})
+                ORDER BY RANDOM() LIMIT :n""", {"t": before, "n": limit})
 
     def reject_queued_item(self, batch_id, seq, *, reason_code, expected_payload) -> bool:
         """자식을 만들기 전에 거부된 항목(orchestrator _materialize 의 재검증 실패) -> Rejected + 실패 1.

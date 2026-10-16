@@ -381,3 +381,50 @@ def test_job_pods_have_a_short_termination_grace():
                               node="n1")
     assert pod["spec"]["terminationGracePeriodSeconds"] == TASK_TERMINATION_GRACE_SECONDS
     assert TASK_TERMINATION_GRACE_SECONDS <= 10
+
+
+def test_sweep_is_not_starved_by_children_that_keep_failing(client, db):
+    """종료가 계속 실패하는 자식이 limit 칸을 늘 차지하지 않는다(무작위 순서, 검증 지적) -- 뒤에 취소된 다른 배치의 자식도
+    끝난다."""
+    _admin(client)
+    repos, adapter = client.app.state.repos, client.app.state.execution_adapter
+    bad = _scan_batch(client, ["a", "b", "c"], conc=3)
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    for it in repos.batches.list_items(bad):
+        _, ref = _executing_child(repos, adapter, it["request_id"], it["payload"]["target"])
+        adapter._fail_terminate_refs.add(ref)
+    repos.batches.set_status(bad, "Cancelled")
+    good = _scan_batch(client, ["d"], conc=1)
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    git = repos.batches.list_items(good)[0]
+    _executing_child(repos, adapter, git["request_id"], "d")
+    repos.batches.set_status(good, "Cancelled")
+    for _ in range(30):
+        sweep_cancelled(repos, adapter, limit=2)
+        if repos.requests.get(git["request_id"])["state"] == "Cancelled":
+            break
+    assert repos.requests.get(git["request_id"])["state"] == "Cancelled"
+
+
+def test_route_keeps_the_sweep_grace_alive_and_reports_the_real_status(client, db, monkeypatch):
+    """라우트가 자식마다 updated_at 을 밀어(touch_cancelling) 그물 유예가 begin_cancel 시각에 묶이지 않는다. 그물이 그 사이
+    마저 끝냈으면 응답은 실제 상태(Cancelled)다."""
+    _admin(client)
+    repos, adapter = client.app.state.repos, client.app.state.execution_adapter
+    bid = _scan_batch(client, ["a", "b"], conc=2)
+    BatchOrchestrator(repos, settings=_S()).run_once()
+    for it in repos.batches.list_items(bid):
+        _executing_child(repos, adapter, it["request_id"], it["payload"]["target"])
+    seen = []
+    real_term = adapter.terminate
+
+    def spy(ref):
+        seen.append(repos.batches.get(bid)["updated_at"])
+        db.execute("UPDATE batches SET updated_at = '2000-01-01T00:00:00Z' WHERE batch_id = :b", {"b": bid})
+        real_term(ref)
+    monkeypatch.setattr(adapter, "terminate", spy)
+    assert client.post(f"/api/admin/batches/{bid}:cancel").json() == {"status": "Cancelled"}
+    assert len(seen) == 2 and seen[1] != "2000-01-01T00:00:00Z"     # 둘째 자식 전에 다시 밀었다
+    # 이벤트 증거: 취소가 지우러 온 자식마다 하나
+    assert len(db.query("SELECT 1 AS x FROM events WHERE event_type = 'batch_cancel_terminate'")) == 2
+

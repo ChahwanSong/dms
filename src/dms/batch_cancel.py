@@ -9,8 +9,10 @@ launcher/worker pod 들이 보여」).
 돌렸다. 그래서:
   1) 취소 라우트가 먼저 한 트랜잭션으로 Queued 항목을 막고 배치를 **Cancelling**(비종단 -- orchestrator 가 굴리지 않고 종단
      전용 경로가 받지 않는다)으로 쓴 뒤 k8s 를 끝낸다(BatchesRepository.begin_cancel). 자식이 다 끝나면 Cancelled.
-  2) planner 는 Cancelling·Cancelled 배치의 Pending 자식을 계획하지 않고 끝낸다. stepper 는 그 배치 자식의 실패(지워진
-     vcjob 을 FAILED 로 본 것)를 Cancelled 로 기록한다 -- 취소가 죽인 자식이 실패 수에 들어가지 않게.
+  2) planner 는 Cancelling·Cancelled 배치의 Pending 자식을 계획하지 않고 끝낸다. stepper 는 그 배치 자식의 다음 단계를
+     제출하지 않고 끝내며, 취소가 지우러 온(CANCEL_MARK_EVENT -- 지우기 **전에** 남긴다) 자식의 실패(지워진 vcjob·파드를
+     FAILED·REJECTED 로 본 것)를 Cancelled 로 기록한다 -- 취소가 죽인 자식이 실패 수에 들어가지 않게, 취소가 닿기 전의 진짜
+     실패는 그대로.
   3) 컨트롤러(orchestrator 틱)가 유예(CANCEL_SWEEP_GRACE_SECONDS) 뒤에도 Cancelling 에 머문 배치(라우트가 끝내지 못한 취소 --
      종료 실패·API 재시작)와 살아 있는 자식이 남은 Cancelled 배치를 마저 끝낸다(sweep_cancelled). 자식마다 격리한다.
 """
@@ -20,16 +22,29 @@ from .domain import DataJobState, RequestState, TERMINAL_DATA_JOB_STATES, TERMIN
 from .execution import ExecutionError
 
 CANCEL_REASON = "cancelled_by_batch"
+# 취소가 이 자식의 k8s 객체를 지우러 왔다는 증거(요청 단위 이벤트, 지우기 전에 남긴다) -- stepper 가 그 자식의 실패를 취소로
+# 기록할지 가르는 유일한 근거다(모듈 docstring 2).
+CANCEL_MARK_EVENT = "batch_cancel_terminate"
 # 진행 중인 취소 라우트와 그물이 겹치지 않게(검증 지적: 라우트가 Cancelling 을 쓴 뒤 k8s 삭제에 몇 초를 쓰는 동안 그물이 같은
 # 자식을 다시 끝내며 경고를 남겼다) -- 배치의 마지막 갱신 뒤 이만큼 지나야 그물이 손댄다.
 CANCEL_SWEEP_GRACE_SECONDS = 60
 # 같은 자식의 실패 이벤트는 이 간격에 한 번만(5초 틱마다 쌓이지 않게).
 _EVENT_COOLDOWN_SECONDS = 600
 _TERMINAL_REQ = frozenset(s.value for s in TERMINAL_REQUEST_STATES)
-_KILLED_BY_CANCEL = frozenset({DataJobState.FAILED.value, DataJobState.TIMED_OUT.value})
+_KILLED_BY_CANCEL = frozenset({DataJobState.FAILED.value, DataJobState.TIMED_OUT.value,
+                               DataJobState.REJECTED.value})
 
 
-def settle_child(repos, adapter, request_id, snapshot_jobs, *, actor, component) -> "tuple[str | None, str | None]":
+def mark_cancel_reached(repos, request_id, batch_id, *, component) -> None:
+    """자식의 객체를 지우기 **전에** 남긴다(CANCEL_MARK_EVENT). 기록 실패는 지우기를 막지 않는다(record_event 는 예외를 올리지
+    않는다) -- 그때 그 자식의 실패는 실패로 남을 뿐(정확도 손실, 거짓 취소 아님)."""
+    repos.observability.record_event(component=component, severity="info", event_type=CANCEL_MARK_EVENT,
+                                     message=f"batch {batch_id}: terminating child for cancel"[:500],
+                                     payload={"batch_id": batch_id}, request_id=request_id)
+
+
+def settle_child(repos, adapter, request_id, snapshot_jobs, *, actor, component,
+                 batch_id=None) -> "tuple[str | None, str | None]":
     """k8s 종료(terminate_job)를 마친 자식 요청 하나를 DB 에 기록하고 **항목에 옮길 (상태, 사유)** 를 돌려준다(상태 None =
     요청 행 없음, 사유 None = 요청의 마지막 사유를 쓴다 -- record_item_terminal).
 
@@ -51,7 +66,10 @@ def settle_child(repos, adapter, request_id, snapshot_jobs, *, actor, component)
     if not snapshot_jobs:
         if repos.requests.cancel_if_pending(request_id, reason_code=CANCEL_REASON, actor=actor):
             return RequestState.CANCELLED.value, None
-        for job in repos.data_jobs.list_jobs(request_id=request_id):
+        late = repos.data_jobs.list_jobs(request_id=request_id)
+        if late:
+            mark_cancel_reached(repos, request_id, batch_id, component=component)
+        for job in late:
             live_at_start = live_at_start or DataJobState(job["state"]) not in TERMINAL_DATA_JOB_STATES
             try:
                 terminate_job(adapter, job)
@@ -119,7 +137,8 @@ def sweep_cancelled(repos, adapter, *, grace_seconds: int = CANCEL_SWEEP_GRACE_S
 
     1) 살아 있는 자식(유예 뒤의 Cancelling 배치, 또는 Cancelled 배치에 남은 것): 자식마다 격리 -- k8s 종료가 실패한 자식은
        기록하지 않고(파드가 돌 수 있는데 Cancelled 로 쓰면 거짓 취소) 다음 틱이 다시 시도한다. 그 밖의 예외(변조된 행 등)도
-       그 자식만 건너뛴다 -- 독 행 하나가 LIMIT 의 맨 앞에서 그물 전체를 멈추지 않게(검증 지적, 고아 스윕과 같은 규약).
+       그 자식만 건너뛴다 -- 독 행 하나가 그물 전체를 멈추지 않게(검증 지적, 고아 스윕과 같은 규약). 고르는 순서는 무작위다
+       (live_children_of_cancelled) -- 계속 실패하는 자식이 limit 칸을 늘 차지해 다른 배치의 자식이 굶지 않게.
     2) 유예 뒤의 Cancelling 배치마다 아직 Materialized 인 항목을 자식의 결과로 기록하고(라우트가 중간에 멈춘 경우 -- 검증 지적:
        항목이 영원히 Materialized 로 남았다), 남은 게 없으면 Cancelled 로 넘긴다(finish_cancel_if_settled)."""
     now = now or utc_now_iso()
@@ -129,6 +148,8 @@ def sweep_cancelled(repos, adapter, *, grace_seconds: int = CANCEL_SWEEP_GRACE_S
         rid = row["request_id"]
         try:
             jobs = repos.data_jobs.list_jobs(request_id=rid)
+            if jobs:
+                mark_cancel_reached(repos, rid, row["batch_id"], component="batch-orchestrator")
             try:
                 for job in jobs:
                     terminate_job(adapter, job)
@@ -137,7 +158,8 @@ def sweep_cancelled(repos, adapter, *, grace_seconds: int = CANCEL_SWEEP_GRACE_S
                        message=f"{exc.reason_code}: cancelled batch {row['batch_id']} child {rid}",
                        payload={"batch_id": row["batch_id"], "after_cancel": True}, now=now)
                 continue
-            state, why = settle_child(repos, adapter, rid, jobs, actor=actor, component="batch-orchestrator")
+            state, why = settle_child(repos, adapter, rid, jobs, actor=actor, component="batch-orchestrator",
+                                      batch_id=row["batch_id"])
             if state is not None and row.get("seq") is not None:
                 record_item_terminal(repos, row["batch_id"], row["seq"], rid, state, reason_code=why)
             repos.observability.record_event(

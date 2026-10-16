@@ -173,20 +173,89 @@ def test_parse_execution_reason_whitelist_and_shape():
     assert parse_execution_reason(None) is None and parse_execution_reason([]) is None
 
 
-@pytest.mark.parametrize("batch_status,expected", [("Cancelling", "Cancelled"), ("Cancelled", "Cancelled"),
-                                                   ("Running", "Failed")])
-def test_failure_of_a_cancelled_batch_child_is_recorded_as_cancelled(db, batch_status, expected):
-    """배치 취소가 지운 vcjob 을 stepper 가 FAILED 로 본 것 -- 취소 중·취소된 배치의 자식이면 Cancelled·cancelled_by_batch
-    (2026-10-16: 실패 수·「실패분 재실행」에 들어가지 않게). 진단 박제는 그대로 한다. 활성 배치의 실패는 실패 그대로."""
-    repos = Repositories(db)
-    rid, jid = _scan_job(repos)
+def _batch_child(repos, db, rid, status):
     bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin", max_concurrency=1,
                                options={}, note=None, items=[{"storage": "s1", "target": "a"}],
-                               status=batch_status, name="c", auth_method="session")
+                               status=status, name="c", auth_method="session")
     db.execute("UPDATE requests SET batch_id = :b WHERE request_id = :r", {"b": bid, "r": rid})
-    job = _fail_execution(repos, StubExecutionAdapter(), jid, ExecStatus.FAILED, LAUNCHER_LOG)
+    return bid
+
+
+def _mark(repos, rid, bid):
+    from dms.batch_cancel import mark_cancel_reached
+    mark_cancel_reached(repos, rid, bid, component="api")
+
+
+@pytest.mark.parametrize("batch_status,marked,expected", [
+    ("Cancelling", True, "Cancelled"), ("Cancelled", True, "Cancelled"),
+    ("Cancelling", False, "Failed"),          # 취소가 아직 닿지 않은 자식의 진짜 실패(거짓 취소 금지)
+    ("Running", True, "Failed")])
+def test_failure_of_a_cancelled_batch_child_is_recorded_as_cancelled(db, batch_status, marked, expected):
+    """배치 취소가 지운 vcjob 을 stepper 가 FAILED 로 본 것 -- 취소 중·취소된 배치의 자식이고 취소가 그 자식을 지우러 왔다는
+    증거(batch_cancel.CANCEL_MARK_EVENT)가 있으면 Cancelled·cancelled_by_batch(2026-10-16: 실패 수·「실패분 재실행」에 들어가지
+    않게). 증거가 없으면 진짜 실패 그대로. 진단 박제는 그대로 한다. 활성 배치의 실패는 실패 그대로."""
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    bid = _batch_child(repos, db, rid, "Running")
+    adapter = StubExecutionAdapter()
+    stepper = JobStepper(repos, adapter, settings=_Settings())
+    stepper.run_once()                                   # Pending -> Preflight
+    stepper.run_once()                                   # Preflight ok -> Running(execution 제출 -- 배치가 굴러갈 때)
+    repos.batches.set_status(bid, batch_status)          # 그 뒤 취소
+    if marked:
+        _mark(repos, rid, bid)
+    ref = f"stub-execution-{jid}"
+    adapter.script(ref, [ExecStatus.FAILED])
+    adapter.set_log(ref, [("j-launcher-0", LAUNCHER_LOG, None)])
+    stepper.run_once()
+    job = repos.data_jobs.get_job(jid)
     assert job["state"] == expected
     assert repos.requests.get(rid)["state"] == expected
     want = "cancelled_by_batch" if expected == "Cancelled" else "workers_unreachable"
     assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == want
     assert json.loads(repos.data_jobs.get_job(jid)["diag_logs"])["phase"] == "execution"
+
+
+def test_preflight_pod_vanished_by_the_cancel_is_cancelled_not_rejected(db):
+    # 사전 점검 파드를 취소가 지우면 폴링이 FAILED -> REJECTED(preflight_failed) 다. 증거가 있으면 Cancelled.
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    bid = _batch_child(repos, db, rid, "Cancelling")
+    adapter = StubExecutionAdapter()
+    stepper = JobStepper(repos, adapter, settings=_Settings())
+    repos.batches.set_status(bid, "Running")
+    stepper.run_once()                                   # Pending -> Preflight(제출은 배치가 굴러갈 때)
+    repos.batches.set_status(bid, "Cancelling")
+    _mark(repos, rid, bid)
+    adapter.script(f"stub-preflight-{jid}", [ExecStatus.FAILED])
+    stepper.run_once()
+    assert repos.data_jobs.get_job(jid)["state"] == "Cancelled"
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+
+
+@pytest.mark.parametrize("operation", ["scan", "sync"])
+def test_cancelling_batch_child_does_not_submit_the_next_phase(db, operation):
+    """취소 중 배치의 자식은 사전 점검을 마쳐도 다음 단계(scan 실행·sync 미리보기)를 제출하지 않고 Cancelled 로 끝난다
+    (2026-10-16 검증 지적: 종료가 실패해 Cancelling 에 머문 배치의 자식이 실행 vcjob 을 제출했다 -- 보고 증상의 재현)."""
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos) if operation == "scan" else _sync_job(repos)
+    bid = _batch_child(repos, db, rid, "Running")
+    adapter = StubExecutionAdapter()
+    stepper = JobStepper(repos, adapter, settings=_Settings())
+    stepper.run_once()                                   # Pending -> Preflight
+    repos.batches.set_status(bid, "Cancelling")
+    stepper.run_once()                                   # 사전 점검 성공 -- 다음 단계를 내지 않는다
+    assert [sp.phase for sp in adapter.submitted_specs()] == ["preflight"]
+    assert repos.data_jobs.get_job(jid)["state"] == "Cancelled"
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == "cancelled_by_batch"
+    assert repos.requests.get(rid)["state"] == "Cancelled"
+
+
+def test_cancelled_batch_child_pending_job_is_not_submitted(db):
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    _batch_child(repos, db, rid, "Cancelling")
+    adapter = StubExecutionAdapter()
+    JobStepper(repos, adapter, settings=_Settings()).run_once()
+    assert adapter.submitted_specs() == []
+    assert repos.data_jobs.get_job(jid)["state"] == "Cancelled"

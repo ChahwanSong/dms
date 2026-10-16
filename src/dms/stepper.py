@@ -15,6 +15,7 @@ import sys
 import time
 
 from .artifact_base import resolve_artifact_base, static_base_problem, strip_scheme
+from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_epoch, iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, managed_abs_path
 from .execution import ExecStatus, ExecutionError, JobSpec
@@ -568,23 +569,41 @@ class JobStepper:
             artifact_base=self._artifact_base(), timeout_seconds=timeout,
             ttl_seconds=self._settings.vcjob_ttl_seconds)
 
-    def _finalize(self, job, job_state, *, reason_code=None, summary=None, diag=None):
+    def _finalize(self, job, job_state, *, reason_code=None, summary=None, diag=None, polled=False):
         # 슬라이스 25 §2.2: diag=(phase, ref) 가 오면 종단 전이 **전에** 박제한다.
         # 순서가 계약이다 -- 박제 후 크래시하면 잡이 비종단으로 남아 다음 틱이
         # finalize 를 재시도하고(archive 는 IS NULL 이 중복을 막는다), 역순이면
         # 종단 잡은 다시 스텝되지 않아 박제 기회가 영영 사라진다.
         if diag is not None:
             self._archive_diag(job, *diag)
-        # 취소 중·취소된 배치의 자식이 실패·시간 초과로 끝나면 그것은 취소가 지운 vcjob·파드를 실패로 본 것이다 -- Cancelled 로
-        # 기록한다(2026-10-16 검증 지적: 취소가 죽인 자식이 Failed·execution_failed 로 실패 수에 들어가 「실패분 재실행」
-        # 대상이 됐다). 진단 박제는 위에서 그대로 했다.
-        if job_state in (DataJobState.FAILED, DataJobState.TIMED_OUT) and self._batch_cancelling(job):
-            job_state, reason_code = DataJobState.CANCELLED, "cancelled_by_batch"
+        # 배치 취소가 지운 vcjob·파드를 실패로 본 것이면 Cancelled 로 기록한다(2026-10-16 검증 지적: 취소가 죽인 자식이
+        # Failed·Rejected 로 실패 수에 들어가 「실패분 재실행」 대상이 됐다). **증거**가 있을 때만: 배치가 취소 중·취소됐고
+        # 취소가 이 자식의 객체를 지우러 왔다(CANCEL_MARK_EVENT -- 라우트·그물이 지우기 **전에** 남긴다). 취소가 아직 닿지 않은
+        # 자식의 진짜 실패는 그대로 실패다(거짓 취소 금지). Rejected 는 폴링 결과(사전 점검·실행 전 재점검 파드가 사라짐)만 --
+        # 제출 시 검증·fail-closed 거부는 취소와 무관하다. 진단 박제는 위에서 그대로 했다.
+        if ((job_state in (DataJobState.FAILED, DataJobState.TIMED_OUT)
+             or (job_state == DataJobState.REJECTED and polled))
+                and self._batch_cancelling(job) and self._cancel_reached(job)):
+            job_state, reason_code = DataJobState.CANCELLED, CANCEL_REASON
         self._repos.data_jobs.set_job_state(job["job_id"], job_state,
                                             reason_code=reason_code, actor="stepper")
         self._repos.requests.finalize_from_job(
             job["request_id"], job_state, reason_code=reason_code, summary=summary,
             actor="stepper")
+
+    def _stop_for_batch_cancel(self, job) -> bool:
+        """취소 중·취소된 배치의 자식은 다음 단계(사전 점검·미리보기·실행 전 재점검·실행)를 제출하지 않고 Cancelled 로 끝낸다
+        (2026-10-16 검증 지적: 종료가 실패해 Cancelling 에 머문 배치의 자식이 사전 점검을 마치자 실행 vcjob 을 제출했다 --
+        사용자 보고 증상 「Cancel 했는데 launcher/worker pod 가 돈다」의 재현). 지금 단계는 끝났으므로 지울 객체가 없다."""
+        if not self._batch_cancelling(job):
+            return False
+        self._finalize(job, DataJobState.CANCELLED, reason_code=CANCEL_REASON)
+        return True
+
+    def _cancel_reached(self, job) -> bool:
+        return self._repos.db.query_one(
+            "SELECT 1 AS x FROM events WHERE request_id = :r AND event_type = :t LIMIT 1",
+            {"r": job["request_id"], "t": CANCEL_MARK_EVENT}) is not None
 
     def _batch_cancelling(self, job) -> bool:
         req = self._repos.requests.get(job["request_id"])
@@ -917,6 +936,8 @@ class JobStepper:
 
     def _submit_preflight(self, job):
         jid = job["job_id"]
+        if self._stop_for_batch_cancel(job):
+            return "Cancelled"
         try:
             ref = self._exec.submit(self._build_spec(job, "preflight", dryrun=False))
         except ExecutionError as exc:
@@ -951,6 +972,8 @@ class JobStepper:
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return "Preflight"
         if status == ExecStatus.SUCCEEDED:
+            if self._stop_for_batch_cancel(job):
+                return "Cancelled"
             # scan: 바로 execution. (sync/rm preview는 Task 7)
             if job["operation"] == "scan":
                 return self._submit_execution(job, DataJobState.RUNNING)
@@ -958,7 +981,7 @@ class JobStepper:
         # diag= 를 넘기지 않는 이유: _preflight_reason 이 이미 박제했다(전이 전).
         reason = self._preflight_reason(job, "preflight", ref,
                                         reason_code="preflight_failed")
-        self._finalize(job, DataJobState.REJECTED, reason_code=reason)
+        self._finalize(job, DataJobState.REJECTED, reason_code=reason, polled=True)
         return "Rejected"
 
     def _submit_execution(self, job, running_state):
@@ -1096,6 +1119,8 @@ class JobStepper:
         # 파드 이름이 phase를 포함하므로, 초기 preflight 파드가 아직 남아 있어도 이름이
         # 충돌하지 않는다(안 그러면 create가 AlreadyExists→submit_failed로 실패).
         if "exec_preflight" not in refs:
+            if self._stop_for_batch_cancel(job):
+                return "Cancelled"
             try:
                 ref = self._exec.submit(self._build_spec(job, "exec_preflight", dryrun=False))
             except ExecutionError as exc:
@@ -1115,10 +1140,12 @@ class JobStepper:
         if status in (ExecStatus.PENDING, ExecStatus.RUNNING):
             return "Executing"
         if status == ExecStatus.SUCCEEDED:
+            if self._stop_for_batch_cancel(job):
+                return "Cancelled"
             return self._submit_execution(job, DataJobState.EXECUTING)
         # 재검증도 같은 preflight 스크립트다 -- 미리보기와 confirm 사이에 목적지가
         # 파일로 바뀌는 TOCTOU 가 여기서 잡히므로 사유를 뭉개지 않는다.
         reason = self._preflight_reason(job, "exec_preflight", refs["exec_preflight"],
                                         reason_code="execution_recheck_failed")
-        self._finalize(job, DataJobState.REJECTED, reason_code=reason)
+        self._finalize(job, DataJobState.REJECTED, reason_code=reason, polled=True)
         return "Rejected"
