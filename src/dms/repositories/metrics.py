@@ -19,7 +19,8 @@ _TERMINAL_STATES = tuple(sorted(s.value for s in TERMINAL_DATA_JOB_STATES))
 # 비종단 잡 상태(정렬 고정 -- 플레이스홀더 이름이 실행마다 흔들리지 않게).
 _LIVE_JOB_STATES = tuple(sorted(
     s.value for s in DataJobState if s not in TERMINAL_DATA_JOB_STATES))
-# Volcano 에 제출된 단계(vcjob 이 있다) -- PodGroup 대조와 「실행 중」 단계의 재료.
+# Volcano 에 제출됐거나 제출될 단계 -- PodGroup 대조와 「실행 중」 단계의 재료. Executing 의 앞부분(확인 직후 실행 전
+# 재점검 exec_preflight 파드 -- vcjob 이 아직 없다)은 queue_pipeline 이 phase_refs 로 갈라 사전 점검으로 센다.
 _CONFIRM = DataJobState.CONFIRM_PENDING.value
 _SUBMITTED_JOB_STATES = tuple(sorted((
     DataJobState.PREVIEW_RUNNING.value, DataJobState.EXECUTING.value, DataJobState.RUNNING.value)))
@@ -284,19 +285,17 @@ class MetricsRepository:
         rows = self._db.query(
             """SELECT request_id, operation, requester_id, priority, batch_id, created_at
                FROM requests WHERE state = 'Pending' ORDER BY commit_order LIMIT :n""", {"n": limit})
-        notes = {}
-        if rows:
-            rph, rparams = _in("r", [r["request_id"] for r in rows])
-            eph, eparams = _in("e", _PLANNING_NOTE_EVENTS)
-            # 요청마다 가장 최근 하나 -- plan_error 는 틱마다(10s) 쌓이므로 전부 읽지 않는다.
-            for ev in self._db.query(
-                    f"""SELECT request_id, event_type, message FROM events
-                        WHERE id IN (SELECT MAX(id) FROM events
-                                     WHERE request_id IN ({rph}) AND event_type IN ({eph})
-                                     GROUP BY request_id)""", {**rparams, **eparams}):
-                notes[ev["request_id"]] = {"event_type": ev["event_type"], "message": ev["message"]}
+        eph, eparams = _in("e", _PLANNING_NOTE_EVENTS)
         for r in rows:
-            r["note"] = notes.get(r["request_id"])
+            # 요청마다 가장 최근 하나 -- 요청별 ORDER BY id DESC LIMIT 1 이라 idx_events_request (request_id, id) 를
+            # 역방향으로 타고 첫 일치에서 멈춘다. plan_error 는 틱마다(10s) 억제 없이 쌓인다: 예전의 MAX(id) GROUP BY 는
+            # 막힌 요청의 이벤트를 전부 읽었다(검증 실측 PG 16: 막힌 요청 20건 x 1주 ≈ 100ms, 5초 폴링마다 -- 이 방식은
+            # 20건 합계 ~1ms).
+            ev = self._db.query_one(
+                f"""SELECT event_type, message FROM events
+                    WHERE request_id = :r AND event_type IN ({eph}) ORDER BY id DESC LIMIT 1""",
+                {"r": r["request_id"], **eparams})
+            r["note"] = {"event_type": ev["event_type"], "message": ev["message"]} if ev else None
         return {"count": int(agg["n"]), "oldest_at": agg["oldest_at"], "rows": rows}
 
     def queue_jobs(self, *, limit: int) -> dict:
@@ -319,13 +318,14 @@ class MetricsRepository:
             by_state[r["state"]] = {"count": int(r["n"]), "oldest_at": r["oldest_at"]}
         # LEFT JOIN requests: 요청 행이 없는 잡(있어선 안 되지만 FK 가 없다)도 세고 목록에 남긴다 -- 요청자만 모름이 된다.
         groups = self._db.query(
-            f"""SELECT x.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority,
+            f"""SELECT x.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority, b.max_concurrency,
                        COUNT(*) AS n, MIN(x.entered_at) AS oldest_at, MIN(x.preview_expires_at) AS soonest_expiry
                 FROM (SELECT r.batch_id, j.preview_expires_at, {_ENTERED_AT} AS entered_at
                       FROM data_jobs j LEFT JOIN requests r ON r.request_id = j.request_id
                       WHERE j.state = '{_CONFIRM}') x
                 LEFT JOIN batches b ON b.batch_id = x.batch_id
-                GROUP BY x.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority""")
+                GROUP BY x.batch_id, b.name, b.status, b.operation, b.requester_id, b.priority,
+                         b.max_concurrency""")
         for g in groups:
             g["n"] = int(g["n"])
         if groups:
@@ -360,6 +360,7 @@ class MetricsRepository:
             except (TypeError, ValueError):
                 row["phase_refs"] = None
         return {"by_state": by_state, "waiting": waiting,
+                "confirm_singles": next((g for g in groups if g["batch_id"] is None), None),
                 "confirm_batches": [g for g in groups if g["batch_id"] is not None],
                 "submitted": submitted}
 

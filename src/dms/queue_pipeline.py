@@ -8,11 +8,17 @@
 단계(STAGES -- 화면 띠의 순서이자 대기 목록 동률 정렬의 순서):
   planning     요청 Pending -- planner(기본 10s 주기)가 도구·노드를 정하기 전. 신원 전파 유예(기본 300s)도 여기다.
   pickup       잡 Pending -- 계획됐고 stepper(기본 5s 주기)가 집기 전. 드레인(control_state.drain)이면 여기서 멈춘다.
-  preflight    잡 Preflight -- 노드 사전 점검 파드.
+  preflight    잡 Preflight -- 노드 사전 점검 파드. 확인 뒤 실행 전 재점검(Executing 인데 execution ref 가 아직 없는 잡 --
+               exec_preflight 파드, vcjob 이 없다)도 여기다(detail.exec_preflight). 예전엔 「Volcano 실행 중」에 들어가
+               재점검 파드가 Pending 에 멈춰도 대기로 보이지 않았다(검증 지적).
   volcano_wait PodGroup Pending/Inqueue -- Volcano 가 gang 을 아직 못 올렸다(유일하게 k8s 에서 오는 단계).
-  running      잡 PreviewRunning/Executing/Running 중 Volcano 대기가 아닌 것 -- 대기가 아니라 띠에만 있다.
-  confirm      잡 ConfirmPending -- 단건은 사람의 컨펌, 배치 자식은 배치 확인(배치별 한 줄로 묶는다).
-  batch        배치 항목 Queued -- 배치 동시 실행 상한(max_concurrency)이 풀리기를 기다린다(배치별 한 줄).
+  running      잡 PreviewRunning/Executing/Running 중 Volcano 대기·실행 전 재점검이 아닌 것 -- 대기가 아니라 띠에만 있다.
+  confirm      잡 ConfirmPending 중 **사람이 지금 확인할 수 있는 것** -- 단건의 컨펌, 확인 대기(PreviewReady) 배치의 자식
+               (배치별 한 줄로 묶는다).
+  batch        배치가 차례를 쥔 항목 -- 아직 요청이 안 된 Queued 항목(동시 실행 상한) + 확인 대기가 아닌 배치의
+               ConfirmPending 자식(held: 이미 확인된 Running 배치에서 실행 슬롯을 기다리거나, Previewing 배치에서 형제
+               미리보기를 기다린다). 배치별 한 줄. held 를 확인 대기에 세면 사람이 할 일이 없는데 「확인 대기 996 · 12시간」
+               이 적색으로 떴다(검증 지적).
 
 null(모름) ≠ 0: 재료 축이 읽히지 않은 단계는 None 이다({"count": 0} 이 아니다). 0 건 단계의 oldest_seconds 는 None 이고
 count 0 이 「없음」을 말한다. 대기 목록(waiting)은 읽힌 단계의 항목만 담는다 -- 어느 단계가 빠졌는지는 pipeline 의 None
@@ -68,6 +74,12 @@ def _clip(text, limit):
     if not isinstance(text, str):
         return None
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _min_iso(values):
+    # 시각은 고정 포맷 ISO-8601 UTC 라 문자열 최솟값 = 가장 이른 시각(SQL MIN 과 같은 비교). 없으면 None.
+    vals = [v for v in values if isinstance(v, str)]
+    return min(vals) if vals else None
 
 
 def _stat(count: int, oldest_at, now: float) -> dict:
@@ -181,32 +193,48 @@ def build_queue_view(now: float, *, pods, planning, jobs, batches,
         pipeline["volcano_wait"] = {"count": len(waiting_pg), "oldest_seconds": max(ages) if ages else None}
         lists["volcano_wait"], totals["volcano_wait"] = rows, len(waiting_pg)
 
+    held_groups = None
     if jobs is not None:
         by_state = jobs["by_state"]
 
         def state_stat(state):
             s = by_state.get(state) or {}
-            return s.get("count", 0), s.get("oldest_at"), s.get("soonest_expiry")
+            return s.get("count", 0), s.get("oldest_at")
 
-        for stage, state in (("pickup", "Pending"), ("preflight", "Preflight")):
-            count, oldest, _ = state_stat(state)
-            pipeline[stage] = _stat(count, oldest, now)
-            lists[stage] = [_job_entry(stage, r, now) for r in jobs["waiting"].get(state, [])]
-            totals[stage] = count
+        count, oldest = state_stat("Pending")
+        pipeline["pickup"] = _stat(count, oldest, now)
+        lists["pickup"] = [_job_entry("pickup", r, now) for r in jobs["waiting"].get("Pending", [])]
+        totals["pickup"] = count
 
-        count, oldest, soonest = state_stat("ConfirmPending")
-        confirm = _stat(count, oldest, now)
-        soonest = soonest if count > 0 else None
-        confirm["soonest_expiry"] = soonest if isinstance(soonest, str) else None
+        # 실행 전 재점검: Executing 인데 실행 ref 가 아직 없다(exec_preflight 파드만). Volcano 대기로 대조된 잡은 제외 --
+        # 같은 잡을 두 칸에 세지 않는다. phase_refs 가 깨진 행(None)은 가르지 못한다 -- 실행 중에 남긴다.
+        exec_pf = [r for r in jobs["submitted"]
+                   if r.get("state") == "Executing" and isinstance(r.get("phase_refs"), dict)
+                   and not r["phase_refs"].get("execution") and r.get("job_id") not in queued_job_ids]
+        exec_pf_ids = {r.get("job_id") for r in exec_pf}
+        count, oldest = state_stat("Preflight")
+        pipeline["preflight"] = _stat(count + len(exec_pf),
+                                      _min_iso([oldest] + [r.get("entered_at") for r in exec_pf]), now)
+        lists["preflight"] = ([_job_entry("preflight", r, now) for r in jobs["waiting"].get("Preflight", [])]
+                              + [_job_entry("preflight", r, now, detail={"exec_preflight": True}) for r in exec_pf])
+        totals["preflight"] = count + len(exec_pf)
+
+        # 확인 대기 = 사람이 지금 누를 수 있는 것만(모듈 docstring 의 confirm·batch).
+        singles = jobs.get("confirm_singles")
+        ready = [g for g in jobs["confirm_batches"] if g.get("status") == "PreviewReady"]
+        held_groups = [g for g in jobs["confirm_batches"] if g.get("status") != "PreviewReady"]
+        actionable = ([singles] if singles else []) + ready
+        count = sum(g["n"] for g in actionable)
+        confirm = _stat(count, _min_iso(g.get("oldest_at") for g in actionable), now)
+        soonest = _min_iso(g.get("soonest_expiry") for g in actionable) if count > 0 else None
+        confirm["soonest_expiry"] = soonest
         confirm["soonest_expiry_seconds"] = until_seconds(now, soonest)
         pipeline["confirm"] = confirm
         rows = [_job_entry("confirm", r, now, detail={
                     "expires_at": r.get("preview_expires_at"),
                     "expires_in_seconds": until_seconds(now, r.get("preview_expires_at"))})
                 for r in jobs["waiting"].get("ConfirmPending", [])]
-        grouped = 0
-        for g in jobs["confirm_batches"]:
-            grouped += g["n"]
+        for g in ready:
             rows.append(_entry("confirm", now, since=g.get("oldest_at"), operation=g.get("operation"),
                                requester=g.get("requester_id"), priority=g.get("priority"),
                                batch_id=g.get("batch_id"), detail={
@@ -215,29 +243,49 @@ def build_queue_view(now: float, *, pods, planning, jobs, batches,
                                    "expires_at": g.get("soonest_expiry"),
                                    "expires_in_seconds": until_seconds(now, g.get("soonest_expiry"))}))
         lists["confirm"] = rows
-        # 단건 총수 = 전체 - 배치 자식(두 쿼리 사이 전이로 음수가 될 수 있어 0 하한) + 배치 묶음 수.
-        totals["confirm"] = max(0, count - grouped) + len(jobs["confirm_batches"])
+        totals["confirm"] = (singles["n"] if singles else 0) + len(ready)
 
         run_count = sum(state_stat(s)[0] for s in RUNNING_JOB_STATES)
         # PodGroup 을 읽었으면 Volcano 대기로 대조된 잡은 「실행 중」에서 뺀다 -- 같은 잡을 두 칸에 세지 않는다.
         # 못 읽었으면 뺄 수 없다: includes_volcano_wait 가 그 사실을 말한다(화면이 「Volcano 대기 포함」 표기).
-        rest = [r for r in jobs["submitted"] if r.get("job_id") not in queued_job_ids]
-        running = _stat(max(0, run_count - len(queued_job_ids)), rest[0].get("entered_at") if rest else None, now)
+        rest = [r for r in jobs["submitted"]
+                if r.get("job_id") not in queued_job_ids and r.get("job_id") not in exec_pf_ids]
+        running = _stat(max(0, run_count - len(queued_job_ids) - len(exec_pf)),
+                        rest[0].get("entered_at") if rest else None, now)
         running["includes_volcano_wait"] = pods is None
         pipeline["running"] = running
 
     if batches is not None:
-        groups = batches["groups"]
-        rows = [_entry("batch", now, since=g.get("oldest_at"), operation=g.get("operation"),
-                       requester=g.get("requester_id"), priority=g.get("priority"), batch_id=g.get("batch_id"),
-                       detail={"queued": g["queued"], "max_concurrency": g.get("max_concurrency"),
-                               "batch_status": g.get("status"), "batch_name": g.get("name")})
-                for g in groups]
+        by_batch = {g["batch_id"]: {**g, "held": 0, "held_oldest_at": None, "held_expiry": None}
+                    for g in batches["groups"]}
+        for g in held_groups or []:
+            row = by_batch.get(g["batch_id"])
+            if row is None:
+                row = by_batch[g["batch_id"]] = {
+                    "batch_id": g["batch_id"], "name": g.get("name"), "status": g.get("status"),
+                    "operation": g.get("operation"), "requester_id": g.get("requester_id"),
+                    "priority": g.get("priority"), "max_concurrency": g.get("max_concurrency"),
+                    "queued": 0, "oldest_at": None}
+            row.update(held=g["n"], held_oldest_at=g.get("oldest_at"), held_expiry=g.get("soonest_expiry"))
+        rows = []
+        for g in by_batch.values():
+            rows.append(_entry("batch", now, since=_min_iso([g.get("oldest_at"), g.get("held_oldest_at")]),
+                               operation=g.get("operation"), requester=g.get("requester_id"),
+                               priority=g.get("priority"), batch_id=g.get("batch_id"), detail={
+                                   "queued": g["queued"], "held": g["held"] if held_groups is not None else None,
+                                   "max_concurrency": g.get("max_concurrency"),
+                                   "batch_status": g.get("status"), "batch_name": g.get("name"),
+                                   "expires_at": g.get("held_expiry"),
+                                   "expires_in_seconds": until_seconds(now, g.get("held_expiry"))}))
         ages = [e["wait_seconds"] for e in rows if e["wait_seconds"] is not None]
-        total = sum(g["queued"] for g in groups)
+        queued = sum(g["queued"] for g in by_batch.values())
+        # held 는 잡 축을 못 읽었으면 모름(None) -- 0 으로 접지 않는다(배치 대기 수는 Queued 만으로 낸다).
+        held = None if held_groups is None else sum(g["n"] for g in held_groups)
+        total = queued + (held or 0)
         pipeline["batch"] = {"count": total, "oldest_seconds": max(ages) if total > 0 and ages else None,
-                             "batches": len(groups), "preview_ready_batches": batches["preview_ready"]}
-        lists["batch"], totals["batch"] = rows, len(groups)
+                             "queued": queued, "held": held,
+                             "batches": len(rows), "preview_ready_batches": batches["preview_ready"]}
+        lists["batch"], totals["batch"] = rows, len(rows)
 
     if not lists:
         return {"pipeline": pipeline, "waiting": None, "waiting_truncated": None}
