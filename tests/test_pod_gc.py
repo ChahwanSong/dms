@@ -169,33 +169,35 @@ def test_collected_jobs_drop_out_so_later_jobs_are_reached(db):
     assert repos.data_jobs.get_job(jids[0])["pods_gc_at"] == now
 
 
-def test_transient_failure_is_retried_but_a_bad_ref_is_not(db):
-    """일시 실패(ExecutionError)는 표시하지 않고 다음 틱에 다시, 다시 해도 같은 예외(변조된 ref)는 표시하고 넘어간다 --
-    독 행이 묶음 앞자리를 영영 차지하지 않게."""
+def test_failed_jobs_back_off_and_do_not_hold_the_window(db):
+    """지우기가 실패한 잡은 표시하지 않고 RETRY_BACKOFF_SECONDS 뒤에 다시 -- 그 사이 묶음에서 건너뛰고 더 읽어 뒤의 잡에
+    닿는다. 실 어댑터는 실패를 전부 ExecutionError 로 접어 일시·영구를 가를 수 없다(검증 지적: 「영구 실패는 표시」 분기는
+    실 어댑터로는 도달 불가였고, 계속 실패하는 잡 limit 개가 창을 다시 막았다)."""
+    from dms.pod_gc import RETRY_BACKOFF_SECONDS
     repos = Repositories(db)
-
-    class _Adapter(_TerminateRecordingAdapter):
-        def terminate(self, ref):
-            if ref == "pod/garbage":
-                self.terminated.append(ref)
-                raise ValueError("bad ref")
-            super().terminate(ref)
-    adapter = _Adapter()
-    j_flaky = _make_job(repos, resource_key="kt1", refs={"preflight": "pod/flaky"})
-    j_bad = _make_job(repos, resource_key="kt2", refs={"preflight": "pod/garbage"})
-    for jid in (j_flaky, j_bad):
+    adapter = _TerminateRecordingAdapter()
+    jids = []
+    for i in range(3):
+        jid = _make_job(repos, resource_key=f"kb{i}", refs={"preflight": f"pod/b{i}"})
         repos.data_jobs.set_job_state(jid, DataJobState.FAILED, actor="stepper")
-    adapter.fail_terminate("pod/flaky")
-    gc = PodGarbageCollector(repos, adapter, after_seconds=3600)
-    now = _aged(repos, j_bad, 3601)
+        db.execute("UPDATE data_jobs SET updated_at = :t WHERE job_id = :j",
+                   {"t": f"2026-01-0{i + 1}T00:00:00Z", "j": jid})
+        jids.append(jid)
+    adapter.fail_terminate("pod/b0")
+    adapter.fail_terminate("pod/b1")
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600, limit=2)
+    now = "2026-02-01T00:00:00Z"
     gc.run_once(now_iso=now)
-    assert repos.data_jobs.get_job(j_flaky)["pods_gc_at"] is None
-    assert repos.data_jobs.get_job(j_bad)["pods_gc_at"] == now
-    adapter._fail_terminate_refs.discard("pod/flaky")
-    adapter.terminated.clear()
-    gc.run_once(now_iso=now)
-    assert adapter.terminated == ["pod/flaky"]
-    assert repos.data_jobs.get_job(j_flaky)["pods_gc_at"] == now
+    assert adapter.terminated == ["pod/b0", "pod/b1"]
+    gc.run_once(now_iso=now)                                  # 둘 다 재시도 대기 -- 건너뛰고 뒤의 잡
+    assert adapter.terminated[2:] == ["pod/b2"]
+    assert repos.data_jobs.get_job(jids[2])["pods_gc_at"] == now
+    assert [repos.data_jobs.get_job(j)["pods_gc_at"] for j in jids[:2]] == [None, None]
+    adapter._fail_terminate_refs.clear()
+    later = iso_plus(now, RETRY_BACKOFF_SECONDS + 1)
+    gc.run_once(now_iso=later)                                # 대기가 끝나면 다시 -- 이번엔 성공해 표시
+    assert adapter.terminated[3:] == ["pod/b0", "pod/b1"]
+    assert [repos.data_jobs.get_job(j)["pods_gc_at"] for j in jids[:2]] == [later, later]
 
 
 def test_terminate_exception_does_not_kill_the_loop(db):
