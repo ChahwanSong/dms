@@ -12,6 +12,7 @@ from ..metrics_series import (SUBMIT_WAIT_BUCKETS, SUBMIT_WAIT_OVERFLOW,
                               bucket_chars_for, build_node_points,
                               clamp_window_hours, duration_histogram,
                               summarize_seconds)
+from ..queue_pipeline import WAITING_PER_STAGE, build_queue_view
 from ..repositories.releases import COMPONENTS, ROLLOUT_ORDER
 from ..rollout_status import assess_daemonset, assess_deployment
 from .auth import require_admin
@@ -209,11 +210,28 @@ def metrics_queue(request: Request):
 
     metrics_infra 와 같은 이유로 동기 def + ThreadPoolExecutor 병렬이다: 각 k8s
     호출엔 _request_timeout(10s)이 걸려 있지만 순차면 최악 2x10초가 5초 폴링에
-    쌓여 threadpool 을 고갈시킨다."""
+    쌓여 threadpool 을 고갈시킨다.
+
+    2026-10-16(사용자 요청 「대시보드에서 큐 현황에 대해 조금만 더 자세히 그리고 개선해서
+    보여주면 좋겠어.」): 기존 두 키(queue·podgroups)의 모양·뜻은 그대로 두고 DMS 안쪽의
+    대기를 더한다 -- control(드레인·유지보수), pipeline(단계별 건수·가장 오래 기다린 초),
+    waiting(기다리는 항목 표), waiting_truncated(단계별 상한에 잘린 단계). 조립 규칙은
+    queue_pipeline 모듈 docstring 이 권위다. DB 축(계획·잡·배치·control)도 k8s 축과 같은
+    규칙이다: 축마다 독립 try 로 그 축에 기대는 단계만 null(모름) -- DB 한 쿼리의 실패가
+    PodGroup 표를, PodGroup 403 이 DB 단계를 지우지 않는다. DB 읽기는 k8s 호출을 기다리는
+    동안 이 스레드에서 한다(Database 는 RLock 직렬화라 스레드를 더 늘려도 이득이 없다)."""
     reader = request.app.state.queue_reader
+    repos = request.app.state.repos
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         futures = {"queue": pool.submit(reader.read_queue),
                    "podgroups": pool.submit(reader.read_podgroups)}
+        db_axes = {
+            "planning": _db_axis("planning",
+                                 lambda: repos.metrics.queue_planning(limit=WAITING_PER_STAGE)),
+            "jobs": _db_axis("jobs", lambda: repos.metrics.queue_jobs(limit=WAITING_PER_STAGE)),
+            "batches": _db_axis("batches", repos.metrics.queue_batches),
+            "control": _db_axis("control", lambda: _control_flags(repos.control.control_state())),
+        }
     results = {}
     for axis, future in futures.items():
         try:
@@ -248,4 +266,31 @@ def metrics_queue(request: Request):
                 pg["wait_seconds"] = None
         # 오래 기다린 잡이 위로 -- 표의 목적이 "무엇이 막혀 있나"이므로.
         pods.sort(key=lambda p: -(p["wait_seconds"] or 0))
-    return {"queue": results["queue"], "podgroups": pods}
+    try:
+        view = build_queue_view(iso_epoch(utc_now_iso()), pods=pods, planning=db_axes["planning"],
+                                jobs=db_axes["jobs"], batches=db_axes["batches"])
+    except Exception as exc:
+        # 조립(순수 함수)의 결함은 새 세 키만 모름으로 접는다 -- 옛 두 키(queue·podgroups)까지 500 으로 끌고
+        # 가지 않는다. 대시보드 자체 버그가 여기로 새므로 로그를 남긴다(metrics_infra assess 와 같은 이유).
+        logger.warning("metrics/queue pipeline assembly failed: %s", exc)
+        view = {"pipeline": None, "waiting": None, "waiting_truncated": None}
+    return {"queue": results["queue"], "podgroups": pods, "control": db_axes["control"], **view}
+
+
+def _db_axis(axis, read):
+    """DB 축 하나를 읽는다 -- 실패는 그 축만 None(모름) + 로그(k8s 축의 except 와 같은 규칙·같은 로그 모양)."""
+    try:
+        return read()
+    except Exception as exc:
+        logger.warning("metrics/queue read failed axis=%s: %s", axis, exc)
+        return None
+
+
+def _control_flags(row):
+    """드레인(stepper 정지 -- 잡이 픽업·전진하지 않는다)·유지보수(신규 제출 503) 스위치. 행이 없으면 둘 다 꺼짐이다 --
+    stepper(`control and control["drain"]`)와 제출 게이트(reject_when_maintenance)가 실제로 그렇게 동작하므로 화면도
+    같은 진실을 말한다(모름이 아니라 「꺼져 있어서 막지 않음」)."""
+    if row is None:
+        return {"drain": False, "maintenance": False, "reason": None}
+    return {"drain": bool(row["drain"]), "maintenance": bool(row["maintenance"]),
+            "reason": row.get("reason")}

@@ -1,4 +1,6 @@
-from dms.db import iso_plus, utc_now_iso
+from dms.db import dump_json, iso_plus, utc_now_iso
+from dms.domain import DataJobState
+from dms.queue_pipeline import WAITING_PER_STAGE
 from dms.repositories import Repositories
 
 ADMIN = {"Authorization": "Bearer tok-shared"}
@@ -317,12 +319,24 @@ class _FakeQueueReader:
         return self._resolve(self._podgroups)
 
 
+def _legacy(body):
+    """슬라이스 17 의 두 키만. 2026-10-16 에 새 키(control·pipeline·waiting·waiting_truncated)가 더해졌다 --
+    옛 단언은 옛 키의 모양·뜻이 그대로인지만 본다(새 키는 아래 파이프라인 테스트들이 본다)."""
+    return {"queue": body["queue"], "podgroups": body["podgroups"]}
+
+
 def test_metrics_queue_stub_pair_serves_without_cluster(client):
     # 주입 없이 그대로 -- conftest 기본 백엔드(stub)의 wiring 이 StubQueueReader 를
     # 꽂는다. 이 스텁 페어가 없으면 모든 로컬·CI 가 여기서 500 이다(설계 §2.5).
     body = client.get("/api/admin/metrics/queue", headers=ADMIN).json()
-    assert body == {"queue": {"name": "dms-data", "state": "Open"},
-                    "podgroups": []}
+    assert _legacy(body) == {"queue": {"name": "dms-data", "state": "Open"},
+                             "podgroups": []}
+    # 빈 DB 는 「모름」이 아니라 「없음」이다 -- 전 단계 count 0(oldest null), 빈 목록.
+    assert body["control"] == {"drain": False, "maintenance": False, "reason": None}
+    assert body["waiting"] == [] and body["waiting_truncated"] == []
+    for stage in ("planning", "pickup", "preflight", "volcano_wait", "running", "confirm", "batch"):
+        assert body["pipeline"][stage]["count"] == 0, stage
+        assert body["pipeline"][stage]["oldest_seconds"] is None, stage
 
 
 def test_metrics_queue_admin_only(client):
@@ -379,15 +393,21 @@ def test_metrics_queue_unknown_axes_stay_null_not_empty(client):
         queue=RuntimeError("forbidden 403"), podgroups=None)
     r = client.get("/api/admin/metrics/queue", headers=ADMIN)
     assert r.status_code == 200
-    assert r.json() == {"queue": None, "podgroups": None}
+    assert _legacy(r.json()) == {"queue": None, "podgroups": None}
+    # PodGroup 을 못 읽으면 Volcano 대기 단계도 모름이다 -- 0 이 아니다. 「실행 중」은 DB 로 세되
+    # Volcano 대기를 뺄 수 없었다는 사실을 함께 싣는다.
+    pipeline = r.json()["pipeline"]
+    assert pipeline["volcano_wait"] is None
+    assert pipeline["running"]["includes_volcano_wait"] is True
 
 
 def test_metrics_queue_empty_list_is_not_null(client):
     # 반대 방향도 고정: 정말 빈 큐([])가 null 로 승격되면 "알 수 없음" 경고가
     # 정상 상태에 뜬다.
     client.app.state.queue_reader = _FakeQueueReader(queue=None, podgroups=[])
-    assert client.get("/api/admin/metrics/queue", headers=ADMIN).json() == {
-        "queue": None, "podgroups": []}
+    body = client.get("/api/admin/metrics/queue", headers=ADMIN).json()
+    assert _legacy(body) == {"queue": None, "podgroups": []}
+    assert body["pipeline"]["volcano_wait"] == {"count": 0, "oldest_seconds": None}
 
 
 def test_metrics_queue_403_on_queue_axis_keeps_podgroups(client):
@@ -415,8 +435,254 @@ def test_metrics_queue_403_on_podgroups_axis_keeps_queue(client):
         podgroups=RuntimeError("podgroups.scheduling.volcano.sh is forbidden 403"))
     r = client.get("/api/admin/metrics/queue", headers=ADMIN)
     assert r.status_code == 200
-    assert r.json() == {"queue": {"name": "dms-data", "state": "Closed"},
-                        "podgroups": None}
+    assert _legacy(r.json()) == {"queue": {"name": "dms-data", "state": "Closed"},
+                                 "podgroups": None}
+
+
+# ---- 큐 현황 파이프라인(2026-10-16, 사용자 요청 「대시보드에서 큐 현황에 대해 조금만 더 자세히 그리고 개선해서
+# 보여주면 좋겠어.」) -- DMS 안쪽의 대기 단계(계획·픽업·사전 점검·확인·배치)와 Volcano 대기를 한 응답에. 시각은
+# 전이 행(state_transitions.at)을 뒤로 돌려 만든다 -- 대기 시작점이 「그 상태로의 마지막 전이」라는 계약을 그대로 쓴다.
+
+_PIPELINE_SEQ = iter(range(10_000))
+
+
+def _q_request(db, repos, *, created_at, batch_id=None, requester="alice", operation="sync"):
+    rid = repos.requests.create(
+        operation=operation, requester_id=requester, actor=requester,
+        resource_key=f"q:{next(_PIPELINE_SEQ)}", payload={}, priority="mid", batch_id=batch_id)
+    db.execute("UPDATE requests SET created_at = :c WHERE request_id = :r", {"c": created_at, "r": rid})
+    return rid
+
+
+def _q_job(db, repos, *, state, entered_at, batch_id=None, phase_refs=None, expires_at=None,
+           requester="alice"):
+    rid = _q_request(db, repos, created_at=entered_at, batch_id=batch_id, requester=requester)
+    jid = repos.data_jobs.create_plan_and_job(
+        rid, operation="sync", priority="mid", options={}, tool="dsync", worker_pool={},
+        precondition={}, actor="planner")
+    if state != "Pending":
+        repos.data_jobs.set_job_state(jid, DataJobState(state), actor="stepper")
+    db.execute("""UPDATE state_transitions SET at = :t
+                  WHERE entity_kind = 'data_job' AND entity_id = :j AND to_state = :s""",
+               {"t": entered_at, "j": jid, "s": state})
+    db.execute("UPDATE data_jobs SET phase_refs = :p, preview_expires_at = :e WHERE job_id = :j",
+               {"p": dump_json(phase_refs) if phase_refs is not None else None,
+                "e": expires_at, "j": jid})
+    return rid, jid
+
+
+def _q_batch(db, repos, *, status, items, oldest_at, name=None):
+    bid = repos.batches.create(operation="scan", requester_id="ops", actor="ops", max_concurrency=2,
+                               options={}, note=None,
+                               items=[{"storage": "s1", "target": f"t{i}"} for i in range(items)],
+                               status=status, name=name)
+    db.execute("UPDATE batch_items SET updated_at = :t WHERE batch_id = :b", {"t": oldest_at, "b": bid})
+    return bid
+
+
+def _queue(client):
+    r = client.get("/api/admin/metrics/queue", headers=ADMIN)
+    assert r.status_code == 200
+    return r.json()
+
+
+def _near(value, expected, slack=3):
+    # 1초 해상도 + 호출 지연 여유(기존 wait_seconds 테스트와 같은 폭)
+    return value is not None and expected <= value <= expected + slack
+
+
+def test_metrics_queue_pipeline_counts_and_oldest_ages(client, db):
+    repos = Repositories(db)
+    now = utc_now_iso()
+    _q_request(db, repos, created_at=iso_plus(now, -600))                      # 계획 대기 2(가장 오래 600s)
+    _q_request(db, repos, created_at=iso_plus(now, -60))
+    _q_job(db, repos, state="Pending", entered_at=iso_plus(now, -120))          # 픽업
+    _q_job(db, repos, state="Preflight", entered_at=iso_plus(now, -45))         # 사전 점검
+    _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -7 * 3600),
+           expires_at=iso_plus(now, 7200))                                      # 확인 대기 단건 7시간
+    # 제출된 잡 둘: 하나는 PodGroup 이 Inqueue(= Volcano 대기), 하나는 실제로 도는 중
+    _q_job(db, repos, state="PreviewRunning", entered_at=iso_plus(now, -30),
+           phase_refs={"preflight": "pod/dms-sync-preflight-aaaaaaaaaaaa",
+                       "preview": "vcjob/dms-sync-preview-aaaaaaaaaaaa"})
+    _q_job(db, repos, state="Executing", entered_at=iso_plus(now, -900),
+           phase_refs={"preview": "vcjob/dms-sync-preview-bbbbbbbbbbbb",
+                       "execution": "vcjob/dms-sync-execution-bbbbbbbbbbbb"})
+    _q_batch(db, repos, status="Running", items=3, oldest_at=iso_plus(now, -1800))
+    _q_batch(db, repos, status="Cancelled", items=5, oldest_at=iso_plus(now, -9000))  # 아무도 안 집는다 -- 안 셈
+    client.app.state.queue_reader = _FakeQueueReader(podgroups=[
+        {"name": "dms-sync-preview-aaaaaaaaaaaa-0d1e", "phase": "Inqueue", "min_member": 2,
+         "created_at": iso_plus(now, -25), "vcjob": "dms-sync-preview-aaaaaaaaaaaa",
+         "reason": "NotEnoughResources", "message": "2/2 tasks in gang unschedulable",
+         "priority_class": "dms-mid"},
+        {"name": "dms-sync-execution-bbbbbbbbbbbb-9f00", "phase": "Running", "min_member": 2,
+         "created_at": iso_plus(now, -880), "vcjob": "dms-sync-execution-bbbbbbbbbbbb"},
+    ])
+    p = _queue(client)["pipeline"]
+    assert p["planning"]["count"] == 2 and _near(p["planning"]["oldest_seconds"], 600)
+    assert p["pickup"]["count"] == 1 and _near(p["pickup"]["oldest_seconds"], 120)
+    assert p["preflight"]["count"] == 1 and _near(p["preflight"]["oldest_seconds"], 45)
+    assert p["volcano_wait"]["count"] == 1 and _near(p["volcano_wait"]["oldest_seconds"], 25)
+    # Volcano 대기로 대조된 잡은 「실행 중」에서 빠진다 -- 같은 잡을 두 칸에 세지 않는다
+    assert p["running"]["count"] == 1 and _near(p["running"]["oldest_seconds"], 900)
+    assert p["running"]["includes_volcano_wait"] is False
+    assert p["confirm"]["count"] == 1 and _near(p["confirm"]["oldest_seconds"], 7 * 3600)
+    assert p["confirm"]["soonest_expiry"] == iso_plus(now, 7200)
+    assert 7197 <= p["confirm"]["soonest_expiry_seconds"] <= 7200
+    assert p["batch"]["count"] == 3 and _near(p["batch"]["oldest_seconds"], 1800)
+    assert (p["batch"]["batches"], p["batch"]["preview_ready_batches"]) == (1, 0)
+
+
+def test_metrics_queue_waiting_lists_stages_with_request_links(client, db):
+    repos = Repositories(db)
+    now = utc_now_iso()
+    plan_rid = _q_request(db, repos, created_at=iso_plus(now, -100), requester="bob")
+    repos.observability.record_event(component="planner", severity="info",
+                                     event_type="identity_propagating",
+                                     message="identity not ready on: n1", request_id=plan_rid)
+    conf_rid, conf_jid = _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -5000),
+                                expires_at=iso_plus(now, 600))
+    vol_rid, vol_jid = _q_job(db, repos, state="Executing", entered_at=iso_plus(now, -50),
+                              phase_refs={"execution": "vcjob/dms-sync-execution-cccccccccccc"})
+    bid = _q_batch(db, repos, status="Previewing", items=4, oldest_at=iso_plus(now, -300), name="야간")
+    client.app.state.queue_reader = _FakeQueueReader(podgroups=[
+        # ownerReferences 가 없는 PodGroup -- 이름 접두(<vcjob>-<uid>)로 대조된다
+        {"name": "dms-sync-execution-cccccccccccc-5a7b-11ef", "phase": "Pending", "min_member": 3,
+         "created_at": iso_plus(now, -40), "vcjob": None, "reason": None, "message": None},
+        # DMS 잡에 대조되지 않는 PodGroup 도 큐를 막고 있으면 대기다
+        {"name": "someone-else-uid", "phase": "Pending", "min_member": 1,
+         "created_at": iso_plus(now, -10), "priority_class": "dms-high"},
+    ])
+    body = _queue(client)
+    waiting = body["waiting"]
+    # 오래 기다린 순(단계를 가로질러)
+    assert [e["stage"] for e in waiting] == [
+        "confirm", "batch", "planning", "volcano_wait", "volcano_wait"]
+    confirm, batch, planning, vol, stranger = waiting
+    assert (confirm["request_id"], confirm["job_id"], confirm["requester"]) == (
+        conf_rid, conf_jid, "alice")
+    assert confirm["detail"]["expires_at"] == iso_plus(now, 600)
+    assert 597 <= confirm["detail"]["expires_in_seconds"] <= 600
+    assert _near(confirm["wait_seconds"], 5000)
+    assert (batch["request_id"], batch["batch_id"]) == (None, bid)
+    assert batch["detail"] == {"queued": 4, "max_concurrency": 2, "batch_status": "Previewing",
+                               "batch_name": "야간"}
+    assert (planning["request_id"], planning["job_id"], planning["requester"]) == (
+        plan_rid, None, "bob")
+    assert planning["detail"] == {"note": "identity_propagating",
+                                  "message": "identity not ready on: n1"}
+    assert (vol["request_id"], vol["job_id"]) == (vol_rid, vol_jid)
+    assert vol["detail"]["podgroup"] == "dms-sync-execution-cccccccccccc-5a7b-11ef"
+    assert vol["detail"]["phase_ref"] == "execution" and vol["detail"]["min_member"] == 3
+    assert _near(vol["wait_seconds"], 40)                       # 대기 시작 = PodGroup 생성
+    assert (stranger["request_id"], stranger["job_id"], stranger["priority"]) == (None, None, "high")
+    assert body["waiting_truncated"] == []
+    # 대조된 잡은 「실행 중」 0 -- Volcano 대기 2(대조 1 + 비대조 1)
+    assert body["pipeline"]["running"]["count"] == 0
+    assert body["pipeline"]["volcano_wait"]["count"] == 2
+
+
+def test_metrics_queue_groups_batch_children_awaiting_confirm(client, db):
+    # sync 배치 하나가 자식 수백 건을 한꺼번에 확인 대기로 만든다 -- 건별로 늘어놓으면 표가 한 배치로 덮여
+    # 사람이 컨펌해야 할 단건이 묻힌다. 배치별 한 줄(자식 수·가장 빠른 만료)로 묶는다. 띠의 count 는 잡 수 그대로.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    bid = _q_batch(db, repos, status="PreviewReady", items=0, oldest_at=now, name="월간 이관")
+    for age, exp in ((4000, 9000), (3000, 500)):
+        _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -age), batch_id=bid,
+               expires_at=iso_plus(now, exp))
+    single_rid, _ = _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -100),
+                           expires_at=iso_plus(now, 80000))
+    body = _queue(client)
+    assert body["pipeline"]["confirm"]["count"] == 3
+    assert body["pipeline"]["batch"]["preview_ready_batches"] == 1
+    confirm = [e for e in body["waiting"] if e["stage"] == "confirm"]
+    assert [(e["batch_id"], e["request_id"]) for e in confirm] == [(bid, None), (None, single_rid)]
+    group = confirm[0]["detail"]
+    assert (group["jobs"], group["batch_status"], group["batch_name"]) == (
+        2, "PreviewReady", "월간 이관")
+    assert group["expires_at"] == iso_plus(now, 500)            # 묶음의 가장 빠른 만료
+    assert _near(confirm[0]["wait_seconds"], 4000)              # 묶음의 가장 오래된 자식
+
+
+def test_metrics_queue_waiting_is_capped_per_stage_not_overall(client, db):
+    # 상한은 단계마다다: 전체 오래된 순으로 자르면 몇 시간짜리 확인 대기가 상한을 다 채워 막 쌓이는 계획 대기가
+    # 목록에서 사라진다(필터를 눌러도 띠의 숫자와 다른 「없음」). 잘린 단계는 이름으로 알린다.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    for i in range(WAITING_PER_STAGE + 3):
+        _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -10_000 - i),
+               expires_at=iso_plus(now, 3600))
+    newest_plan = _q_request(db, repos, created_at=iso_plus(now, -5))
+    body = _queue(client)
+    stages = [e["stage"] for e in body["waiting"]]
+    assert stages.count("confirm") == WAITING_PER_STAGE
+    assert stages[-1] == "planning" and body["waiting"][-1]["request_id"] == newest_plan
+    assert body["waiting_truncated"] == ["confirm"]
+    assert body["pipeline"]["confirm"]["count"] == WAITING_PER_STAGE + 3   # 띠는 잘리지 않은 총수
+    confirm_waits = [e["wait_seconds"] for e in body["waiting"] if e["stage"] == "confirm"]
+    # 잘린 것은 가장 최근 셋이다 -- 가장 오래 기다린 20건이 남는다
+    assert min(confirm_waits) >= 10_003
+    waits = [e["wait_seconds"] for e in body["waiting"]]
+    assert waits == sorted(waits, reverse=True)                # 오래 기다린 것이 위
+
+
+def test_metrics_queue_db_axis_failure_nulls_only_its_stages(client, db, monkeypatch):
+    # DB 축도 k8s 축과 같은 규칙: 한 축의 실패는 그 축에 기대는 단계만 모름(null). 잡 축이 죽어도 계획·배치·
+    # Volcano 단계와 옛 두 키는 그대로다.
+    repos = client.app.state.repos
+    now = utc_now_iso()
+    _q_request(db, repos, created_at=iso_plus(now, -30))
+    _q_batch(db, repos, status="Running", items=2, oldest_at=iso_plus(now, -60))
+
+    def boom(**_):
+        raise RuntimeError("db hiccup")
+    monkeypatch.setattr(repos.metrics, "queue_jobs", boom)
+    client.app.state.queue_reader = _FakeQueueReader(podgroups=[
+        {"name": "dms-sync-preview-dddddddddddd-1", "phase": "Pending", "min_member": 1,
+         "created_at": iso_plus(now, -20), "vcjob": "dms-sync-preview-dddddddddddd"}])
+    body = _queue(client)
+    p = body["pipeline"]
+    for stage in ("pickup", "preflight", "running", "confirm"):
+        assert p[stage] is None, stage                       # 모름 -- 0 으로 접지 않는다
+    assert p["planning"]["count"] == 1 and p["batch"]["count"] == 2
+    assert p["volcano_wait"]["count"] == 1
+    # 잡 축 없이도 PodGroup 은 대기 목록에 남는다(대조만 못 한다)
+    assert {e["stage"] for e in body["waiting"]} == {"planning", "batch", "volcano_wait"}
+    vol = next(e for e in body["waiting"] if e["stage"] == "volcano_wait")
+    assert vol["request_id"] is None and vol["detail"]["phase_ref"] is None
+    assert body["queue"] == {"name": "dms-data", "state": "Open"} and len(body["podgroups"]) == 1
+
+
+def test_metrics_queue_control_axis_and_all_db_failure(client, monkeypatch):
+    repos = client.app.state.repos
+    repos.control.set_control_state(maintenance=True, drain=True, reason="스토리지 점검", actor="admin")
+    assert _queue(client)["control"] == {"drain": True, "maintenance": True, "reason": "스토리지 점검"}
+
+    def boom(*_, **__):
+        raise RuntimeError("db down")
+    for name in ("queue_planning", "queue_jobs", "queue_batches"):
+        monkeypatch.setattr(repos.metrics, name, boom)
+    monkeypatch.setattr(repos.control, "control_state", boom)
+    client.app.state.queue_reader = _FakeQueueReader(podgroups=RuntimeError("forbidden 403"))
+    body = _queue(client)
+    # 아무 대기 단계도 못 읽었다 -- 목록은 []("없음")가 아니라 null("모름")이다
+    assert body["waiting"] is None and body["waiting_truncated"] is None
+    assert body["control"] is None
+    assert all(v is None for v in body["pipeline"].values())
+    assert body["queue"] == {"name": "dms-data", "state": "Open"}   # 산 축은 그대로
+
+
+def test_metrics_queue_assembly_bug_degrades_new_keys_only(client, monkeypatch):
+    # 조립(순수 함수)의 결함은 새 키만 모름으로 접는다 -- 옛 두 키까지 500 으로 끌고 가지 않는다.
+    import dms.api.routes_metrics as rm
+
+    def broken(*_, **__):
+        raise KeyError("oops")
+    monkeypatch.setattr(rm, "build_queue_view", broken)
+    body = _queue(client)
+    assert _legacy(body) == {"queue": {"name": "dms-data", "state": "Open"}, "podgroups": []}
+    assert (body["pipeline"], body["waiting"], body["waiting_truncated"]) == (None, None, None)
+    assert body["control"] == {"drain": False, "maintenance": False, "reason": None}
 
 
 def test_metrics_jobs_submit_wait_distribution_and_counts(client, db):
