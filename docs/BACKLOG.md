@@ -287,9 +287,6 @@
   아닌 잡의 vcjob ref 도 max(이 창, DMS_VCJOB_TTL_SECONDS) 뒤에 지운다 -- Aborted vcjob 은 Volcano TTL 이 치우지 않았다.
   TTL 0 이면 vcjob 은 두고 Pod 만).
   실패 잡은 슬라이스 25 가 `diag_logs` 로 박제해 시한부가 아니다(부분 완화).
-- 📝 **TTL 도입 이전 vcjob 37건**(2026-10-08 실측, ≤2026-08-05 생성) — 그 launcher 파드(dms 라벨 없음)도 남아 있다.
-  2026-10-16 부터 pod-gc 가 성공이 아닌 종단 잡의 vcjob ref 를 지우므로 그런 잡의 것은 수거된다. 성공 잡의 것(TTL 필드가
-  없어 Volcano 도 안 지운다)과 잡 행이 없는 것은 일회성 운영 정리(그 요청을 지우면 request-purge 가 회수한다).
 - 🔧 **빌드 파드 GC 도 200건 창 고착**(2026-10-16 검토 지적, 기존 결함) — 잡 파드는 `data_jobs.pods_gc_at` 완료 표시로
   고쳤지만 빌드 쪽(`pod_gc.py` 의 `builds.terminal_older_than`, seq 오래된 순 LIMIT 200)은 표시가 없어 종단 빌드가 200건을
   넘으면 같은 앞쪽 200건의 빌드·프로브 파드만 매 틱 다시 지우고 그 뒤 빌드의 파드는 남는다. 처방: builds 에도 완료 표시
