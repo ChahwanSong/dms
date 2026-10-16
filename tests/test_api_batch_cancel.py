@@ -1,7 +1,7 @@
-"""배치 취소가 실제로 종료하는지 검증한다. 상위 스펙 §5: 종료가 전부 성공한
-뒤에만 DB를 Cancelled로 기록한다 — 거짓 취소 금지. terminate가 하나라도
-ExecutionError면 500 cancel_failed이고 배치·item·자식 잡·자식 요청 상태는
-호출 전과 동일해야 한다."""
+"""배치 취소가 실제로 종료하는지 검증한다. 상위 스펙 §5: 거짓 취소 금지 — k8s 종료가
+실패한 자식은 Cancelled 로 기록하지 않는다. 2026-10-16 부터 그 경우 배치는 Cancelling
+(비종단)에 머물고 컨트롤러 그물이 유예 뒤 마저 끝낸다(batch_cancel 모듈 docstring) —
+예전처럼 500 으로 전부 되돌리지 않는다(이미 지운 자식은 되돌릴 수 없다)."""
 from dms.batch_orchestrator import BatchOrchestrator
 from dms.domain import DataJobState
 from dms.execution import ExecStatus, JobSpec
@@ -151,27 +151,29 @@ def test_cancel_leaves_already_terminal_child_job_alone(client):
     assert repos.requests.get(rid)["state"] == "Failed"
 
 
-def test_cancel_failed_terminate_leaves_everything_unchanged(client):
+def test_cancel_failed_terminate_leaves_the_child_alone_and_the_batch_cancelling(client):
     bid, item, queued_item, jid, rid, ref = _make_batch_with_one_executing_child(client)
     repos = client.app.state.repos
     adapter = client.app.state.execution_adapter
     adapter.fail_terminate(ref)
-
-    # 호출 전 스냅샷
-    before_batch = repos.batches.get(bid)
-    before_items = repos.batches.list_items(bid)
     before_job = repos.data_jobs.get_job(jid)
     before_req = repos.requests.get(rid)
 
     r = client.post(f"/api/admin/batches/{bid}:cancel")
 
-    assert r.status_code == 500
-    assert r.json()["detail"] == "cancel_failed"
-    # 거짓 취소 금지 — 배치·item·자식 잡·자식 요청 전부 호출 전과 동일해야 한다
-    assert repos.batches.get(bid) == before_batch
-    assert repos.batches.list_items(bid) == before_items
+    assert r.status_code == 200
+    assert r.json() == {"status": "Cancelling", "pending": 1}
+    assert repos.batches.get(bid)["status"] == "Cancelling"
+    # 거짓 취소 금지 — 종료가 실패한 자식(파드가 돌 수 있다)은 그대로
     assert repos.data_jobs.get_job(jid) == before_job
     assert repos.requests.get(rid) == before_req
+    items = {it["seq"]: it for it in repos.batches.list_items(bid)}
+    assert items[item["seq"]]["status"] == "Materialized"
+    # 새 자식은 생기지 않는다 — Queued 항목은 장벽으로 막혔다
+    assert (items[queued_item["seq"]]["status"], items[queued_item["seq"]]["reason_code"]) == (
+        "Cancelled", "cancelled_by_batch")
+    assert repos.db.query(
+        "SELECT 1 AS x FROM events WHERE event_type = 'terminate_failed' AND request_id = :r", {"r": rid})
 
 
 def _make_batch_with_one_confirm_pending_child(client):

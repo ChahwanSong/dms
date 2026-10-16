@@ -246,6 +246,7 @@
   "root_grant_config_managed",
   "root_grant_requires_admin",
   "root_grant_reserved_name",
+  "batch_cancelling",
   "purge_k8s_failed",
   "purge_waiting_pods",
   "purge_base_unavailable",

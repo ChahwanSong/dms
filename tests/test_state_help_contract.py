@@ -17,7 +17,8 @@ def test_request_and_job_help_cover_every_server_state():
 
 
 def test_batch_help_covers_every_batch_state():
-    assert set(HELP["batch"]) == set(_BATCH_DRIVEN) | set(_TERMINAL_BATCH)
+    # Cancelling(2026-10-16): 취소 라우트가 쓰는 비종단 상태 -- orchestrator 가 굴리지 않고 종단도 아니라 위 두 목록 밖이다.
+    assert set(HELP["batch"]) == set(_BATCH_DRIVEN) | set(_TERMINAL_BATCH) | {"Cancelling"}
 
 
 def test_stage_help_keys():

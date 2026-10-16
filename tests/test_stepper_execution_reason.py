@@ -171,3 +171,22 @@ def test_parse_execution_reason_whitelist_and_shape():
         == "workers_unreachable"
     assert parse_execution_reason([("p", "DMS_PREFLIGHT_REASON=target_not_readable", None)]) is None
     assert parse_execution_reason(None) is None and parse_execution_reason([]) is None
+
+
+@pytest.mark.parametrize("batch_status,expected", [("Cancelling", "Cancelled"), ("Cancelled", "Cancelled"),
+                                                   ("Running", "Failed")])
+def test_failure_of_a_cancelled_batch_child_is_recorded_as_cancelled(db, batch_status, expected):
+    """배치 취소가 지운 vcjob 을 stepper 가 FAILED 로 본 것 -- 취소 중·취소된 배치의 자식이면 Cancelled·cancelled_by_batch
+    (2026-10-16: 실패 수·「실패분 재실행」에 들어가지 않게). 진단 박제는 그대로 한다. 활성 배치의 실패는 실패 그대로."""
+    repos = Repositories(db)
+    rid, jid = _scan_job(repos)
+    bid = repos.batches.create(operation="scan", requester_id="admin", actor="admin", max_concurrency=1,
+                               options={}, note=None, items=[{"storage": "s1", "target": "a"}],
+                               status=batch_status, name="c", auth_method="session")
+    db.execute("UPDATE requests SET batch_id = :b WHERE request_id = :r", {"b": bid, "r": rid})
+    job = _fail_execution(repos, StubExecutionAdapter(), jid, ExecStatus.FAILED, LAUNCHER_LOG)
+    assert job["state"] == expected
+    assert repos.requests.get(rid)["state"] == expected
+    want = "cancelled_by_batch" if expected == "Cancelled" else "workers_unreachable"
+    assert repos.data_jobs.job_transitions(jid)[-1]["reason_code"] == want
+    assert json.loads(repos.data_jobs.get_job(jid)["diag_logs"])["phase"] == "execution"

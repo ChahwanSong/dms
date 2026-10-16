@@ -928,7 +928,7 @@ export function BatchDetail() {
             (2026-10-01: 이름 chown 옛 배치는 모두 422 chown_name_not_supported). 배치 확인의 거부는 확인 대기
             동안엔 대화상자가 말하고, 거부 뒤 배치가 Previewing 등으로 바뀌어 대화상자가 사라지면 여기서 이어 말한다
             (409 batch_not_confirmable -- 말하지 않으면 확인이 조용히 사라진 것처럼 보였다). */}
-        {[rerun, rescan, autoOff, ...(b?.status !== "PreviewReady" ? [confirm] : [])].filter((m) => m.isError).map((m, i) => (
+        {[rerun, rescan, autoOff, cancel, ...(b?.status !== "PreviewReady" ? [confirm] : [])].filter((m) => m.isError).map((m, i) => (
           // 자동 확인이 먼저 확인해 사람 확인이 409 로 진 경우(배치는 이미 실행 중) -- 「확인할 수 없는 상태」는 거짓 경보다.
           m === confirm && b?.auto_confirm === true && b.status === "Running"
             && (m.error as ApiError).code === "batch_not_confirmable"
@@ -972,6 +972,14 @@ export function BatchDetail() {
         {b?.operation === "sync" && b.status === "Running" && (
           <p className="mt-2 text-sm text-muted">
             확인된 항목은 동시 실행 상한({b.max_concurrency})만큼씩 차례로 실행됩니다.
+          </p>
+        )}
+        {/* 취소 처리 중(2026-10-16): 라우트가 자식마다 k8s 를 끝내는 동안, 또는 종료가 실패한 자식을 컨트롤러가 다시
+            시도하는 동안. 버튼은 없다(이미 취소했다) -- 무엇을 기다리는지만 말한다. */}
+        {b?.status === "Cancelling" && (
+          <p className="mt-2 rounded-lg bg-infobg px-3 py-2 text-sm" role="status">
+            취소하는 중입니다 — 새 항목은 시작되지 않고, 실행 중이던 항목의 작업을 종료하고 있습니다. 종료하지 못한 작업은
+            컨트롤러가 1분쯤 뒤 다시 종료하고, 다 끝나면 「Cancelled」가 됩니다.
           </p>
         )}
         {b?.status === "PreviewReady" && b.auto_confirm === true && (

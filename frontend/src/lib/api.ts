@@ -358,6 +358,8 @@ export const REASON_MESSAGES: Record<string, string> = {
   root_grant_config_managed: "이 계정의 root 실행 자격은 배포 설정(DMS_PRIVILEGED_REQUESTERS)으로 정해져 화면에서 바꿀 수 없습니다",
   root_grant_requires_admin: "root 실행 자격은 관리자(admin) 역할 계정에만 줄 수 있습니다 — 먼저 역할을 admin 으로 바꾸세요",
   root_grant_reserved_name: "이 이름은 공유 토큰이 쓰는 이름이라 root 실행 자격을 줄 수 없습니다",
+  // 배치 취소 중(Cancelling, 2026-10-16): 항목 추가·재실행은 취소가 끝난 뒤에(취소 중엔 그 항목이 돌지 않는다).
+  batch_cancelling: "배치를 취소하는 중입니다 — 남은 작업 종료가 끝난 뒤(취소됨) 다시 시도하세요",
   purge_k8s_failed: "남은 파드·잡 정리에 실패했습니다 — 자동으로 다시 시도합니다",
   purge_waiting_pods: "잡 파드가 아직 종료 중입니다 — 종료되면 결과 파일을 정리합니다(오래 걸리면 노드 상태를 확인하세요)",
   purge_base_unavailable: "결과 폴더를 열 수 없습니다 — 결과 폴더 설정·마운트를 확인하세요",

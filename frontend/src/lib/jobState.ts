@@ -45,14 +45,18 @@ export function buildPillVariant(state: string): PillVariant {
 export function batchPillVariant(status: string): PillVariant {
   if (status === "Completed") return "ok";
   if (status === "PreviewReady") return "action";
-  if (["Running", "Previewing"].includes(status)) return "busy";
+  // Cancelling(2026-10-16): 취소를 받아 남은 작업을 종료하는 중 -- 아직 끝나지 않았다(비종단).
+  if (["Running", "Previewing", "Cancelling"].includes(status)) return "busy";
   return "neutral";
 }
 
-// 배치 상태 표시 문자열. 행동이 필요한 PreviewReady 만 「확인 대기」로 바꾸고, 나머지는 서버 상태 그대로다(다른 화면의
-// 영문 상태 표기와 같은 축 -- 원문은 StatusPill 의 title 로 남는다).
+// 배치 상태 표시 문자열. 행동이 필요한 PreviewReady 는 「확인 대기」, 취소 처리 중(Cancelling -- 잠깐 지나가는 상태라
+// 영문 그대로면 Cancelled 와 헷갈린다)은 「취소 중」으로 바꾸고, 나머지는 서버 상태 그대로다(다른 화면의 영문 상태 표기와
+// 같은 축 -- 원문은 StatusPill 의 title 로 남는다).
 export function batchStatusLabel(status: string): string {
-  return status === "PreviewReady" ? "확인 대기" : status;
+  if (status === "PreviewReady") return "확인 대기";
+  if (status === "Cancelling") return "취소 중";
+  return status;
 }
 
 // 슬라이스 26: 스토리지 상태(Ready/Degraded/Unknown — reconciler.py:20-27)만을 위한
