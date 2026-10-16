@@ -244,6 +244,9 @@ def _apply_migrations(db: Database) -> None:
             -- 컬럼을 절대 싣지 않는다 -- 5초 폴링에 최대 50x64KB 가 실리는 builds
             -- I2 의 그 문제를 재발시키지 않기 위해서다.
             diag_logs TEXT,
+            -- 2026-10-16 pod-gc 완료 시각: 종단 잡의 preflight Pod·(실패) vcjob 을 지운 뒤 찍는다(pod_gc). NULL = 아직
+            -- (또는 이 컬럼 이전 잡 -- 첫 패스가 한 번 훑고 찍는다). 예전엔 표시가 없어 GC 가 같은 앞쪽 200건만 되풀이했다.
+            pods_gc_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_state ON data_jobs (state, updated_at)",
@@ -578,6 +581,10 @@ def _apply_migrations(db: Database) -> None:
     # NULL 로 두고 화면이 제외 건수로 표면화한다(tests 가 이 부재를 계약으로 고정).
     db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_created_sched"
                " ON data_jobs (created_at, sched_wait_seconds)")
+    # 2026-10-16 pod-gc: 아직 치우지 않은 잡만 담는 부분 인덱스 -- 질의(terminal_jobs_older_than)가 치운 이력 전체를
+    # 훑지 않는다. pods_gc_at 이 _ensure_columns 로 보강된 뒤라 여기다(위 인덱스들과 같은 순서 규칙).
+    db.execute("CREATE INDEX IF NOT EXISTS idx_data_jobs_gc"
+               " ON data_jobs (updated_at) WHERE pods_gc_at IS NULL")
     db.execute(
         """INSERT INTO schema_migrations (version, applied_at)
            SELECT :v, :at WHERE NOT EXISTS
@@ -679,6 +686,8 @@ def _ensure_columns(db):
         # 슬라이스 25 진단 로그 박제 -- 기배포 DB 는 CREATE 를 다시 안 탄다(슬라이스
         # 14 의 실 500 교훈: 양쪽에 넣지 않으면 라이브에서만 컬럼이 없다).
         ("data_jobs", "diag_logs", "TEXT"),
+        # 2026-10-16 pod-gc 완료 표시 -- 이중 경로 규약(기배포 DB 는 CREATE 를 다시 안 탄다).
+        ("data_jobs", "pods_gc_at", "TEXT"),
         # 2026-09-17 미리보기 요약 사본 -- 같은 이유로 양쪽 선언.
         ("data_jobs", "preview_summary", "TEXT"),
         ("requests", "batch_id", "TEXT"),

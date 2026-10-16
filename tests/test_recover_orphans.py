@@ -17,6 +17,7 @@ class _Settings:
     privileged_requesters = frozenset()
     batch_orchestrator_interval_seconds = 5
     pod_gc_after_seconds = 3600
+    vcjob_ttl_seconds = 86400
     pod_gc_interval_seconds = 600
 
 

@@ -33,7 +33,7 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
                 rollout_runner=None, purge_runner=None) -> list[Loop]:
     adapter = execution_adapter if execution_adapter is not None else StubExecutionAdapter()
     pod_gc = PodGarbageCollector(repos, adapter, after_seconds=settings.pod_gc_after_seconds,
-                                 build_runner=build_runner)
+                                 build_runner=build_runner, vcjob_ttl_seconds=settings.vcjob_ttl_seconds)
 
     def _stepper_step():
         # resolver 는 보조 그룹 재확인(stepper 모듈 docstring, D1)용 -- planner 와 같은 원시 리졸버를 넘긴다
@@ -82,7 +82,6 @@ def build_loops(settings: Settings, repos: Repositories, *, identity_resolver=No
         Loop("retention", settings.retention_interval_seconds, _retention_step),
         Loop("batch-orchestrator", settings.batch_orchestrator_interval_seconds,
              lambda: BatchOrchestrator(repos, settings=settings, execution_adapter=adapter).run_once()),
-        # 인스턴스 하나를 계속 쓴다 -- 커서(pod_gc 모듈 docstring)가 틱 사이에 살아 있어야 앞쪽 묶음만 되풀이하지 않는다.
         Loop("pod-gc", settings.pod_gc_interval_seconds, pod_gc.run_once),
         # 슬라이스 18(설계 §2.4c): 컨트롤러 관점의 아티팩트 base 검증. 간격은 새
         # 설정 키를 만들지 않고 storage-reconciler 와 같은 값을 쓴다 -- 같은

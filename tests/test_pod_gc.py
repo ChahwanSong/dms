@@ -1,4 +1,4 @@
-"""PodGarbageCollector: 종단 잡이 남긴 preflight Pod(pod/, pods/) 정리.
+"""PodGarbageCollector: 종단 잡이 남긴 preflight Pod(pod/, pods/)와 실패 vcjob(vcjob/) 정리.
 
 가장 중요한 단언(behavior 2): **비종단 잡은 절대 대상이 아니다** — 대상 잡이면 stepper가
 아직 진행 중으로 보는 잡의 파드가 사라져 stepper가 그 잡을 실패로 오인한다.
@@ -105,26 +105,49 @@ def test_terminal_job_younger_than_after_seconds_not_yet_targeted(db):
     assert adapter.terminated == []
 
 
-def test_vcjob_ref_of_a_terminal_job_is_a_target(db):
-    """4. vcjob/ ref 도 대상이다(2026-10-16): Volcano 의 ttlSecondsAfterFinished 는 Completed 만 치워, Aborted vcjob 과 그
-    Error 파드가 61일째 남아 있었다(테스트베드). 같은 창(after_seconds)이 지난 종단 잡의 vcjob 을 지운다(404 는 무해)."""
+def _aged(repos, jid, seconds):
+    return iso_plus(repos.data_jobs.get_job(jid)["updated_at"], seconds)
+
+
+def test_vcjob_ref_of_a_failed_job_is_a_target(db):
+    """4. 실패 잡의 vcjob/ ref 는 대상이다(2026-10-16): Volcano 의 ttlSecondsAfterFinished 는 Completed 만 치워, Aborted
+    vcjob 과 그 Error 파드가 61일째 남아 있었다(테스트베드). 창은 max(after_seconds, vcjob TTL)."""
     repos = Repositories(db)
     adapter = _TerminateRecordingAdapter()
-    jid = _make_job(repos, resource_key="k4", refs={"execution": "vcjob/j1"})
+    jid = _make_job(repos, resource_key="k4", refs={"preflight": "pod/p1", "execution": "vcjob/j1"})
     repos.data_jobs.set_job_state(jid, DataJobState.FAILED, actor="stepper")
-    updated_at = repos.data_jobs.get_job(jid)["updated_at"]
-    now = iso_plus(updated_at, 3601)
 
-    gc = PodGarbageCollector(repos, adapter, after_seconds=3600)
-    result = gc.run_once(now_iso=now)
-
-    assert result == {"deleted": 1}
-    assert adapter.terminated == ["vcjob/j1"]
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600, vcjob_ttl_seconds=7200)
+    assert gc.run_once(now_iso=_aged(repos, jid, 3601)) == {"deleted": 0}     # TTL(7200) 전 -- Pod 도 함께 기다린다
+    assert gc.run_once(now_iso=_aged(repos, jid, 7201)) == {"deleted": 2}
+    assert sorted(adapter.terminated) == ["pod/p1", "vcjob/j1"]
 
 
-def test_cursor_reaches_jobs_beyond_the_first_batch(db):
-    """커서(2026-10-16): 질의는 오래된 순 LIMIT 이고 지운 잡을 표시하지 않는다 -- 예전엔 매 틱 같은 앞쪽 묶음만 다시 지워
-    그 뒤의 잡에 영영 닿지 못했다. 같은 인스턴스가 다음 묶음으로 넘어가고, 끝에 닿으면 처음부터 다시 돈다."""
+def test_vcjob_of_a_succeeded_job_is_left_to_the_volcano_ttl(db):
+    """Completed vcjob 은 Volcano TTL 의 몫 -- 운영자가 TTL 을 늘려 로그를 오래 두는 것을 pod-gc 가 앞질러 지우지 않는다."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+    jid = _make_job(repos, resource_key="k4s", refs={"preflight": "pod/p1", "execution": "vcjob/j1"})
+    repos.data_jobs.set_job_state(jid, DataJobState.SUCCEEDED, actor="stepper")
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600, vcjob_ttl_seconds=7 * 86400)
+    assert gc.run_once(now_iso=_aged(repos, jid, 3601)) == {"deleted": 1}
+    assert adapter.terminated == ["pod/p1"]
+
+
+def test_vcjob_ttl_zero_keeps_every_vcjob(db):
+    """TTL 0 = 「vcjob 을 지우지 않는다」(_apply_ttl 이 ttlSecondsAfterFinished 를 뺀다) -- 실패 vcjob 도 둔다."""
+    repos = Repositories(db)
+    adapter = _TerminateRecordingAdapter()
+    jid = _make_job(repos, resource_key="k4z", refs={"preflight": "pod/p1", "execution": "vcjob/j1"})
+    repos.data_jobs.set_job_state(jid, DataJobState.FAILED, actor="stepper")
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600, vcjob_ttl_seconds=0)
+    assert gc.run_once(now_iso=_aged(repos, jid, 3601)) == {"deleted": 1}
+    assert adapter.terminated == ["pod/p1"]
+
+
+def test_collected_jobs_drop_out_so_later_jobs_are_reached(db):
+    """완료 표시(pods_gc_at, 2026-10-16): 예전엔 표시가 없어 오래된 순 LIMIT 이 매 틱 같은 앞쪽 묶음만 다시 지우고 그 뒤의
+    잡에 영영 닿지 못했다. 치운 잡은 빠지고, 다음 틱이 다음 잡을 본다. updated_at 은 그대로다."""
     repos = Repositories(db)
     adapter = _TerminateRecordingAdapter()
     jids = []
@@ -139,9 +162,40 @@ def test_cursor_reaches_jobs_beyond_the_first_batch(db):
     gc.run_once(now_iso=now)
     assert adapter.terminated == ["pod/p0", "pod/p1"]
     gc.run_once(now_iso=now)
-    assert adapter.terminated[2:] == ["pod/p2"]           # 다음 묶음(예전엔 p0·p1 만 되풀이)
+    assert adapter.terminated[2:] == ["pod/p2"]           # 예전엔 p0·p1 만 되풀이
     gc.run_once(now_iso=now)
-    assert adapter.terminated[3:] == ["pod/p0", "pod/p1"]  # 끝에 닿은 뒤 처음부터
+    assert adapter.terminated[3:] == []                    # 다 치웠다 -- 다시 지우지 않는다
+    assert repos.data_jobs.get_job(jids[0])["updated_at"] == "2026-01-01T00:00:00Z"
+    assert repos.data_jobs.get_job(jids[0])["pods_gc_at"] == now
+
+
+def test_transient_failure_is_retried_but_a_bad_ref_is_not(db):
+    """일시 실패(ExecutionError)는 표시하지 않고 다음 틱에 다시, 다시 해도 같은 예외(변조된 ref)는 표시하고 넘어간다 --
+    독 행이 묶음 앞자리를 영영 차지하지 않게."""
+    repos = Repositories(db)
+
+    class _Adapter(_TerminateRecordingAdapter):
+        def terminate(self, ref):
+            if ref == "pod/garbage":
+                self.terminated.append(ref)
+                raise ValueError("bad ref")
+            super().terminate(ref)
+    adapter = _Adapter()
+    j_flaky = _make_job(repos, resource_key="kt1", refs={"preflight": "pod/flaky"})
+    j_bad = _make_job(repos, resource_key="kt2", refs={"preflight": "pod/garbage"})
+    for jid in (j_flaky, j_bad):
+        repos.data_jobs.set_job_state(jid, DataJobState.FAILED, actor="stepper")
+    adapter.fail_terminate("pod/flaky")
+    gc = PodGarbageCollector(repos, adapter, after_seconds=3600)
+    now = _aged(repos, j_bad, 3601)
+    gc.run_once(now_iso=now)
+    assert repos.data_jobs.get_job(j_flaky)["pods_gc_at"] is None
+    assert repos.data_jobs.get_job(j_bad)["pods_gc_at"] == now
+    adapter._fail_terminate_refs.discard("pod/flaky")
+    adapter.terminated.clear()
+    gc.run_once(now_iso=now)
+    assert adapter.terminated == ["pod/flaky"]
+    assert repos.data_jobs.get_job(j_flaky)["pods_gc_at"] == now
 
 
 def test_terminate_exception_does_not_kill_the_loop(db):

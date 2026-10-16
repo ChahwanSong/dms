@@ -28,7 +28,7 @@ _ROW_COLUMNS_SANS_DIAG = (
     "reason_code, preview_fingerprint, preview_expires_at, preview_summary, volcano_job_ref, "
     "artifact_uri, result_summary, files_count, bytes_count, worker_pool, "
     "precondition, confirmed_fingerprint, phase_refs, submit_wait_seconds, "
-    "exec_submitted_at, sched_wait_seconds, created_at, updated_at")
+    "exec_submitted_at, sched_wait_seconds, pods_gc_at, created_at, updated_at")
 
 
 # recent_scans_by_target 의 (storage, target) 쌍 묶음 크기 -- 한 문장의 자리표시자 600 개.
@@ -587,7 +587,7 @@ class DataJobsRepository:
         return expired
 
     def terminal_jobs_older_than(self, after_seconds: int, *, limit: int = 200,
-                                  now_iso: str | None = None, after_key=None) -> list[dict]:
+                                  now_iso: str | None = None, vcjob_after_seconds: int | None = None) -> list[dict]:
         """종단 상태이고 updated_at이 (now - after_seconds)보다 오래된 잡을
         **오래된 순**으로 최대 limit건. GC는 반드시 오래된 것부터 비워야 한다 —
         대상이 limit을 넘으면(예: 컨트롤러가 오래 멈췄다 돌아온 경우) 최신순으로
@@ -597,23 +597,36 @@ class DataJobsRepository:
         updated_at을 찍을 수 있지만, 모든 갱신이 시각을 **앞으로만** 미므로 이
         나이 필터는 GC를 늦출 뿐 일찍 발동시키지는 않는다. Pod GC(preflight pod
         정리)가 진행 중인 잡을 절대 건드리지 않도록 state 필터를 두는 게 이
-        메서드의 핵심."""
-        threshold = iso_plus(now_iso or utc_now_iso(), -after_seconds)
+        메서드의 핵심.
+
+        **이미 치운 잡은 빠진다**(pods_gc_at IS NULL, 2026-10-16): 예전엔 표시가 없어 매 틱 같은 앞쪽 묶음만 다시 지웠다
+        (테스트베드 8일 된 preflight Pod 82개). vcjob_after_seconds(None = 기다리지 않음): Succeeded 가 아닌 잡 중 vcjob/
+        참조가 있는 것은 이만큼 지나야 나온다 -- pod_gc 가 그 vcjob 도 지우므로 운영자가 늘린 Volcano TTL(로그 보존)보다
+        먼저 지우지 않게(pod_gc 모듈 docstring)."""
+        now = now_iso or utc_now_iso()
+        threshold = iso_plus(now, -after_seconds)
         states = tuple(s.value for s in TERMINAL_DATA_JOB_STATES)
         placeholders = ", ".join(f":s{i}" for i in range(len(states)))
         params = {f"s{i}": v for i, v in enumerate(states)}
         params["threshold"] = threshold
         params["n"] = limit
-        # after_key=(updated_at, job_id): 그 뒤부터(pod_gc 의 커서 -- 같은 앞쪽 묶음만 되풀이하지 않게, 2026-10-16).
         tail = ""
-        if after_key is not None:
-            tail = " AND (updated_at > :cu OR (updated_at = :cu AND job_id > :cj))"
-            params["cu"], params["cj"] = after_key
+        if vcjob_after_seconds is not None and vcjob_after_seconds > after_seconds:
+            tail = (" AND (state = :ok OR phase_refs IS NULL OR phase_refs NOT LIKE :vc"
+                    " OR updated_at < :vthreshold)")
+            params.update(ok=DataJobState.SUCCEEDED.value, vc='%"vcjob/%',
+                          vthreshold=iso_plus(now, -vcjob_after_seconds))
         rows = self._db.query(
             f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
-                WHERE state IN ({placeholders}) AND updated_at < :threshold{tail}
+                WHERE pods_gc_at IS NULL AND state IN ({placeholders}) AND updated_at < :threshold{tail}
                 ORDER BY updated_at ASC, job_id ASC LIMIT :n""", params)
         return [self._hydrate(r) for r in rows]
+
+    def mark_pods_gc(self, job_id, *, now_iso: str | None = None) -> None:
+        """pod_gc 가 이 잡의 파드·vcjob 정리를 마쳤다(다시 보지 않는다). updated_at 은 건드리지 않는다 -- 그 축은 다른 집계·
+        GC 창이 쓴다."""
+        self._db.execute("UPDATE data_jobs SET pods_gc_at = :t WHERE job_id = :j",
+                         {"t": now_iso or utc_now_iso(), "j": job_id})
 
     def terminal_jobs_with_live_request(self, *, limit: int = 200):
         """잡은 터미널인데 그 request가 아직 비터미널인 (job_id, request_id, state)
