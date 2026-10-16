@@ -95,6 +95,39 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 배치 취소 뒤 남는 launcher/worker 파드 · 실제 CPU 사용률 · 큐 현황 상세화 — **완료·실증**(2026-10-16, d178)
+
+사용자 보고·요청: 「배치작업 Cancel 했는데 몇분 후에 k8s 을 직접 확인해보니 아직 돌아가고 있는 launcher/worker pod 들이
+보여. 이거 개선해 줘.」 · 「대시보드의 cpu 사용량은 어떻게 집계하는거야? 코어수가 128이어도 200이 넘어가고 막 그러던데.」 ·
+「대시보드에서 큐 현황에 대해 조금만 더 자세히 그리고 개선해서 보여주면 좋겠어.」
+
+- **배치 취소 원인(재현)**: 취소가 자식마다 k8s 를 지운 **뒤에야** 항목·배치를 썼다 — 그 사이 stepper 가 지워진 vcjob 을
+  실패로 보고 슬롯이 비면 orchestrator 가 Queued 항목에서 **새 자식**을 만들었고, 그 자식은 Pending 으로 남아 취소 뒤에
+  끝까지 돌았다. 그 밖에 종료 부분 실패 시 500·launcher PID 1 이 SIGTERM 을 무시해 30초 Terminating·컨트롤러 그물 없음.
+- **해결**: 한 트랜잭션으로 Queued 장벽 + 배치 **Cancelling**(비종단 — orchestrator 가 굴리지 않고 종단 전용·재큐 경로가
+  받지 않는다, 409 `batch_cancelling`) → 자식마다 종료(실패한 자식은 기록하지 않음 — 거짓 취소 금지) → 다 끝나면 Cancelled.
+  stepper 는 그 배치 자식의 다음 단계를 내지 않고, 취소가 지우러 온 증거(`batch_cancel_terminate` 이벤트)가 있을 때만 실패를
+  Cancelled 로 기록(실패 수·「실패분 재실행」 밖). planner 는 Pending 자식을 계획하지 않고, 컨트롤러 그물(`sweep_cancelled`,
+  유예 60초·무작위 순서·자식마다 격리)이 남은 자식을 마저 끝낸다. 잡 파드 종료 유예 5초. 포탈 상태 「취소 중」.
+- **pod-gc**: 치운 잡에 `data_jobs.pods_gc_at`(+ 부분 인덱스) — 같은 앞쪽 200건만 되풀이하던 고착 해소. 성공이 아닌 종단
+  잡의 vcjob 도 max(창, vcjob TTL) 뒤에 지운다(Aborted vcjob 은 Volcano TTL 이 안 치운다, TTL 0 이면 Pod 만). 실패한 잡은
+  1시간 뒤 재시도.
+- **CPU**: 대시보드 값은 CPU 사용률이 아니라 `/proc/loadavg` 의 load1(실행 중 + 실행 대기 + I/O 대기(D) 스레드 수의 평균)이라
+  코어 수를 넘을 수 있었다(CephFS·GPFS I/O 대기). 에이전트가 `/proc/stat` 차분으로 실제 사용률(0–100%, I/O 대기 별도)을 보내고
+  화면은 「CPU 사용률」과 「부하(load 1분)」를 나눠 보인다(노드 화면 「42.3% · 부하 213.45 / 128코어」).
+- **큐 현황**: Volcano PodGroup 만 보이던 카드를 DMS 대기 단계 띠(계획·픽업·사전 점검·Volcano 대기·실행 중·확인 대기·배치
+  대기) + 대기 항목 표(단계 필터, 단계마다 20건)로. 확인 대기는 사람이 누를 수 있는 것만(확인된 배치의 차례 대기는 배치
+  대기 held), 실행 전 재점검은 사전 점검으로, 드레인·유지보수 배지는 사유를 툴팁으로.
+- 리뷰: 리뷰 워크플로 2회(확인 19건 + 재검토 14건, 전부 반영 — 빌드 파드 GC 창은 BACKLOG). 이 과정에서 7ccf4c6 이 BACKLOG
+  미해결 항목 ~17건을 잘못 지운 것을 되살렸다(0c940b5).
+- 배포: dms-mpifileutils·dms·dms-agent d178(agent 빌드는 같은 태그의 mpifileutils 가 필요해 셋을 함께), 잡 이미지 d178(러너
+  무변경), guard-images 통과.
+- 실증(d178, 실 Chrome, 일회용 데이터 `/cephfs/managed/cancelproof-1016`·배치·요청 삭제): 6항목 scan 배치(동시 2)가 워커 파드
+  Running 일 때 화면 「취소」 → 응답 Cancelled, 파드 +0.2s Terminating·+4.5s 0개, vcjob 0, 81초 동안 새 자식 없음(2개 그대로),
+  배치 Cancelled·성공 0·실패 0·항목 6 전부 Cancelled(cancelled_by_batch). 배포 뒤 첫 pod-gc 로 8일 된 preflight 파드·Aborted
+  vcjob 0 개(남은 24 개는 TTL 이전 Completed — 일회성 정리 대상). 노드 CPU 사용률 3–6%(노드에서 직접 잰 /proc/stat 4.2% 와
+  일치), 큐 현황 확인 대기 1·표 행, 1280·375 넘침 0, 콘솔 오류 0.
+
 ### ✅ 계정 화면에서 root 실행 자격 부여(재배포 없이) — **완료·실증**(2026-10-12, d177)
 
 사용자 보고: 「관리 -> 계정 에서 일반 사용자명에게 admin 역할을 줬어. 근데 root로 실행 체크 옵션이 작업 등록할때 안뜨네.
