@@ -130,13 +130,14 @@ data:
   DMS_STEPPER_INTERVAL_SECONDS: "5"
   DMS_PREVIEW_TTL_SECONDS: "86400"
   # Volcano Job.spec.ttlSecondsAfterFinished -- Volcano가 완료된 vcjob을 GC하는
-  # 시점(초). execution_manifests.py::_apply_ttl -- Task 5의 preflight Pod GC 루프와는
-  # 별개(파드에는 이 필드가 존재하지 않는다).
+  # 시점(초). execution_manifests.py::_apply_ttl. 0 = vcjob 을 지우지 않는다(필드 생략).
+  # Volcano TTL 은 Completed vcjob 만 치운다 -- 실패(Aborted) vcjob 은 아래 pod GC 가
+  # max(이 값, AFTER_SECONDS) 뒤에 지운다(2026-10-16). 0 이면 pod GC 도 vcjob 을 두고 Pod 만.
   DMS_VCJOB_TTL_SECONDS: "86400"
-  # preflight Pod GC(pod_gc.py) -- 종단(Terminal) 잡이 남긴 pod/pods 참조 중
-  # updated_at이 AFTER_SECONDS보다 오래된 것만 매 INTERVAL_SECONDS마다 정리한다.
-  # vcjob/은 대상이 아니다(위 TTL이 처리) -- 진행 중인 잡의 파드는 이 게이트로
-  # 인해 절대 삭제되지 않는다(stepper 오인 방지).
+  # pod GC(pod_gc.py) -- 종단(Terminal) 잡이 남긴 pod/pods 참조(preflight)와
+  # Succeeded 가 아닌 잡의 vcjob/ 참조 중 updated_at 이 창보다 오래된 것을 매
+  # INTERVAL_SECONDS마다 정리하고 잡에 완료 표시(data_jobs.pods_gc_at)를 남긴다.
+  # 진행 중인 잡의 파드는 이 게이트로 인해 절대 삭제되지 않는다(stepper 오인 방지).
   # AFTER_SECONDS는 위 DMS_VCJOB_TTL_SECONDS와 같은 86400으로 맞춘다. 슬라이스 25
   # 부터 실패 종단 잡의 파드 로그(DMS_PREFLIGHT_REASON 마커·러너 트레이스백)는
   # 스테퍼가 data_jobs.diag_logs 에 박제하므로(파드당 16KB·총 64KB) 이 창은 더는
