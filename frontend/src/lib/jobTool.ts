@@ -9,7 +9,8 @@ import type { WorkerPool } from "./types";
  *  「면당 상한」 캡션과 짝을 이루는 사후 확인이다).
  *
  *  요청 상세 잡 카드와 배치 항목 펼침이 이 한 함수를 공유한다 — 두 벌로 갈라지면
- *  같은 사실이 화면마다 다르게 읽힌다.
+ *  같은 사실이 화면마다 다르게 읽힌다. 노드당 프로세스(× N 프로세스)와 노드 CPU 상한 클램프도
+ *  여기서 함께 말한다(procsText).
  */
 export function toolSummary(
   job?: { tool?: string | null; worker_pool?: WorkerPool | null } | null,
@@ -29,7 +30,23 @@ export function toolSummary(
   // resolve_fanout(placement.py)이 양면 분기에서만 source/destination_count 를
   // 싣기 때문이다(실질적으로 nsync 한 벌). 이름으로 분기하면 서버가 실은 값과
   // 화면의 가정이 어긋나는 순간 없는 사실을 그린다.
-  if (src !== null && dst !== null) return `${tool} · 소스 ${src} + 목적지 ${dst} 노드`;
+  const procs = procsText(num(wp?.procs_per_node), num(wp?.procs_per_node_requested));
+  if (src !== null && dst !== null) return `${tool} · 소스 ${src} + 목적지 ${dst} 노드${procs}`;
   const n = num(wp?.node_count);
-  return n === null ? tool : `${tool} · ${n} 노드`;
+  return n === null ? tool : `${tool} · ${n} 노드${procs}`;
 }
+
+/** 노드당 프로세스 꼬리(2026-10-16 노드 CPU 상한). 워커는 프로세스 수만큼 CPU 코어를 요청하고, planner·stepper 가 노드가
+ *  담을 수 있는 만큼으로 **줄인다**(placement.resolve_fanout·stepper._clamp_to_node_cpu) — 줄었으면 요청값을 함께 말한다
+ *  (조용히 줄이지 않는다). procs_per_node 키가 없으면(이 기능 전에 계획된 잡) 꼬리를 생략한다: process_count ÷ 노드 수로
+ *  지어내지 않는다(나누어떨어지지 않는 옛 행이 있다 — 요청 상세의 「프로세스 N개」 꼬리가 그 수를 따로 말한다). */
+function procsText(ppn: number | null, requested: number | null): string {
+  if (ppn === null) return "";
+  const clamped = requested !== null && requested > ppn ? ` (요청 ${requested} → 노드 CPU 상한 ${ppn})` : "";
+  return ` × ${ppn} 프로세스${clamped}`;
+}
+
+/** 정책 캡션 옆 한 줄(작업 제출·배치 생성 — 같은 사실을 같은 문장으로). 노드당 프로세스는 정책·요청값이 아니라 노드가
+ *  담을 수 있는 만큼까지만 적용된다(src/dms/node_cpu.py). */
+export const NODE_CPU_CAP_NOTE =
+  "노드당 프로세스는 노드 CPU 상한 안에서 적용됩니다 — 워커가 프로세스 수만큼 CPU 코어를 요청하므로, 노드가 담지 못하면 계획 때 줄어듭니다.";

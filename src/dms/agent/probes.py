@@ -4,6 +4,8 @@ import os
 import pwd
 import shutil
 
+from ..node_cpu import parse_cpu_millicores
+
 _OCTAL_ESCAPES = {"\\040": " ", "\\011": "\t", "\\012": "\n", "\\134": "\\"}
 
 
@@ -346,25 +348,40 @@ def k8s_schedulability(node: dict) -> dict:
     return {"schedulable": True, "reason": None, "transient": False}
 
 
+def k8s_node_cpu(node: dict) -> dict:
+    """{"allocatable_cpu": "1800m", "capacity_cpu": "2"} -> {"allocatable_cpu_m": 1800, "capacity_cpu_m": 2000}. 순수 함수.
+    파싱 못 하면(키 없음·이상한 수량) 그 값만 None(모름) -- 노드 CPU 상한(node_cpu)은 None 을 클램프하지 않는다(fail-open).
+    capacity 는 표시·진단용이고 상한은 allocatable 만 본다(kubelet 이 system/kube-reserved 를 뺀 값)."""
+    return {"allocatable_cpu_m": parse_cpu_millicores(node.get("allocatable_cpu")),
+            "capacity_cpu_m": parse_cpu_millicores(node.get("capacity_cpu"))}
+
+
 def _read_node_incluster(node_name: str) -> dict:
     # 지연 import: kubernetes 클라이언트는 dms 이미지에 있다(Dockerfile.dms '.[kubernetes]', 에이전트 이미지는 그 위).
     import kubernetes
     kubernetes.config.load_incluster_config()
     node = kubernetes.client.CoreV1Api().read_node(node_name, _request_timeout=_K8S_TIMEOUT_SECONDS)
     spec = node.spec
+    # status.allocatable/capacity 는 {"cpu": "1800m", ...} 문자열 사전(2026-10-16 노드 CPU 상한) -- 같은 GET 이라 권한·호출이
+    # 늘지 않는다. status 가 비면(드묾) 키가 None 이고 k8s_node_cpu 가 모름으로 접는다.
+    status = node.status
     return {"unschedulable": bool(spec.unschedulable),
-            "taints": [{"key": t.key, "value": t.value, "effect": t.effect} for t in (spec.taints or [])]}
+            "taints": [{"key": t.key, "value": t.value, "effect": t.effect} for t in (spec.taints or [])],
+            "allocatable_cpu": ((status.allocatable if status is not None else None) or {}).get("cpu"),
+            "capacity_cpu": ((status.capacity if status is not None else None) or {}).get("cpu")}
 
 
 def probe_k8s_node(node_name: str, *, read_node=None, environ=os.environ) -> dict:
-    """자기 노드의 k8s 스케줄 가능 여부. 모르면 schedulable=None(클러스터 밖·권한 없음·API 오류) -- planner 는
-    None 을 막지 않는다(fail-open: 조회 문제가 전 노드를 배치 불가로 만들면 안 된다). 권한은 dms-agent 의
+    """자기 노드의 k8s 스케줄 가능 여부 + CPU allocatable/capacity(밀리코어). 모르면 schedulable=None(클러스터 밖·권한
+    없음·API 오류) -- planner 는 None 을 막지 않는다(fail-open: 조회 문제가 전 노드를 배치 불가로 만들면 안 된다). 그때는
+    CPU 키도 없다(모름 -- 키 부재와 None 은 같은 뜻으로 읽힌다, node_cpu.node_cpu_cap). 권한은 dms-agent 의
     ClusterRole nodes get(deploy/k8s/10-rbac.yaml)."""
     if read_node is None:
         if not environ.get("KUBERNETES_SERVICE_HOST"):
             return {"schedulable": None, "reason": "not_in_cluster"}
         read_node = _read_node_incluster
     try:
-        return k8s_schedulability(read_node(node_name))
+        node = read_node(node_name)
+        return {**k8s_schedulability(node), **k8s_node_cpu(node)}
     except Exception as exc:  # noqa: BLE001 -- 프로브는 보고를 막지 않는다(다른 프로브와 같은 계약)
         return {"schedulable": None, "reason": f"probe_failed:{type(exc).__name__}"}

@@ -100,6 +100,12 @@ export interface WorkerPool {
   process_count?: number | null;
   source_count?: number | null;
   destination_count?: number | null;
+  // 노드 CPU 상한(2026-10-16, placement.resolve_fanout·stepper 재클램프): 실제 노드당 프로세스 / 정책·요청 min(클램프 전) /
+  // 고른 노드별 상한(코어, null = 모름) / 상한을 전부 알았나. 이 기능 전에 계획된 잡은 키가 없다(모름 -- 표시 생략).
+  procs_per_node?: number | null;
+  procs_per_node_requested?: number | null;
+  node_cpu_caps?: Record<string, number | null> | null;
+  cpu_cap_known?: boolean | null;
   identity?: WorkerPoolIdentity | null;
   priority_class?: unknown;
   candidates?: unknown;

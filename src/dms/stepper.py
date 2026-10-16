@@ -19,12 +19,14 @@ from .batch_cancel import CANCEL_MARK_EVENT, CANCEL_REASON
 from .db import iso_epoch, iso_plus, utc_now_iso
 from .domain import DataJobState, TERMINAL_DATA_JOB_STATES, chown_problem, managed_abs_path
 from .execution import ExecStatus, ExecutionError, JobSpec
-from .execution_manifests import parse_execution_reason, parse_preflight_reason
+from .execution_manifests import (parse_execution_reason, parse_preflight_reason, processes_per_node,
+                                  worker_pod_count)
 from .identity import (LDAP_TICK_BUDGET_SECONDS, PRIVILEGE_NEVER, IdentityDeadlineExceeded,
                        IdentityLookupInvalid, IdentityUnavailable, privilege_policy,
                        supplementary_gids_problem, tick_resolve_deadline, valid_supplementary_gids)
+from .node_cpu import DEFAULT_NODE_CPU_RESERVE_MILLICORES, node_cpu_cap, per_node_limit
 from .placement import TOOL_TO_POLICY
-from .repositories.node_exclusions import blocked_nodes
+from .repositories.node_exclusions import blocked_nodes, candidate_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +142,17 @@ class NodeBlockedAtStep(Exception):
     def __init__(self, blocked: dict):
         self.blocked = blocked
         super().__init__(", ".join(f"{n}={r}" for n, r in sorted(blocked.items())))
+
+
+class NodeCpuInsufficientAtStep(Exception):
+    """계획 뒤 배정 노드가 워커 1개(1코어) + launcher 몫도 담지 못한다(2026-10-16, node_cpu 모듈 docstring) -- 그대로
+    제출하면 gang 이 서지 않아 vcjob 이 Pending 에 영원히 멈춘다(데이터 잡엔 Pending 상한이 없다). 남은 노드로 다시 계획하지
+    않는다(node_excluded_at_step 과 같은 이유 -- 노드 수·프로세스 수·신원이 worker_pool 에 함께 굳어 있다). caps 는
+    {노드: 상한 | None} -- 이벤트에 싣는다."""
+
+    def __init__(self, caps: dict):
+        self.caps = caps
+        super().__init__(", ".join(f"{n}={c}" for n, c in sorted(caps.items())))
 
 
 class ArtifactBaseUnsafeAtStep(Exception):
@@ -523,6 +536,8 @@ class JobStepper:
         # 노드 배치 제외·k8s 스케줄 불가(NodeBlockedAtStep docstring) -- 모든 제출 경로가 여기를 지난다. 제출 뒤
         # 아직 스케줄 전(PENDING)인 단계는 폴링이 다시 본다(_raise_if_blocked).
         self._raise_if_blocked(job)
+        # 노드 CPU 상한 재클램프(_clamp_to_node_cpu docstring) -- 줄이기만, 1코어도 못 담으면 fail-closed.
+        wp = self._clamp_to_node_cpu(job, wp, phase)
         options = job["options"] if isinstance(job["options"], dict) else {}
         if job["tool"] in ("dsync", "nsync") and "chown" in options:
             problem = chown_problem(options["chown"])
@@ -568,6 +583,53 @@ class JobStepper:
             priority_class=wp.get("priority_class", "dms-mid"),
             artifact_base=self._artifact_base(), timeout_seconds=timeout,
             ttl_seconds=self._settings.vcjob_ttl_seconds)
+
+    def _clamp_to_node_cpu(self, job, wp, phase):
+        """이미 계획된 잡의 노드당 프로세스를 배정 노드의 **최신** CPU 상한으로 다시 줄인다(2026-10-16). 이 기능 전에 계획된
+        잡(배포 순간 Pending·ConfirmPending·Executing 등)은 worker_pool 에 정책값 그대로 굳어 있어, 워커가 그만큼 CPU 를
+        요청하면 노드에 안 들어가 영원히 Pending 이다 -- 그래서 모든 제출 경로(preflight·preview·exec_preflight·execution)가
+        지나는 여기서 본다. 에이전트 보고가 계획 뒤 바뀐 창(allocatable 변화·옛 에이전트의 첫 새 보고)도 같은 장치가 덮는다.
+        - **줄이기만** 한다(늘리지 않는다 -- 계획 시점의 정책·요청 min 이 상한이다). 줄였으면 worker_pool(process_count·
+          procs_per_node·procs_per_node_requested·node_cpu_caps·cpu_cap_known)을 다시 쓰고 이벤트를 남긴다 -- 다음 단계는
+          줄어든 값을 그대로 읽어 다시 줄일 것이 없다(멱등).
+        - 상한 < 1 이면 NodeCpuInsufficientAtStep(fail-closed). 일괄 거부로 "강화"하지 마라 -- 배포 순간 진행 중 잡이 전부
+          끊긴다(보조 gid 키 부재 = [] 와 같은 이유, CLAUDE.md).
+        - 모르면(보고에 allocatable 없음) 그대로 둔다(fail-open). process_count·candidates 가 깨진 행(변조)도 그대로 둔다 --
+          빌더(execution_manifests.processes_per_node)가 ValueError 로 submit_failed 로 접는 기존 경로다.
+        노드 상태는 마지막 보고 기준(신선도 무관 -- blocked_nodes 관례)."""
+        cand = wp.get("candidates")
+        names = candidate_nodes(cand)
+        if not names:
+            return wp
+        try:
+            current = processes_per_node(wp.get("process_count"), cand)
+        except (ValueError, TypeError, AttributeError):
+            return wp
+        reserve = getattr(self._settings, "node_cpu_reserve_millicores", DEFAULT_NODE_CPU_RESERVE_MILLICORES)
+        latest = {n["node_name"]: n.get("report") for n in self._repos.agents.latest_reports(sorted(set(names)))}
+        caps = {n: node_cpu_cap(latest.get(n), reserve) for n in dict.fromkeys(names)}
+        limit = per_node_limit(names, caps)
+        if limit is None or limit >= current:
+            return wp
+        if limit < 1:
+            raise NodeCpuInsufficientAtStep(caps)
+        requested = wp.get("procs_per_node_requested")
+        if not isinstance(requested, int) or isinstance(requested, bool) or requested < current:
+            requested = current        # 이 기능 전에 계획된 잡(키 없음)·변조 값 -- 줄이기 직전 값이 「요청」이다
+        new_wp = {**wp, "process_count": worker_pod_count(cand) * limit, "procs_per_node": limit,
+                  "procs_per_node_requested": requested, "node_cpu_caps": caps,
+                  "cpu_cap_known": all(c is not None for c in caps.values())}
+        # 기록 실패(그 사이 취소·종단 -- 조건부 UPDATE no-op)여도 이번 제출은 줄인 값으로 간다: 제출 뒤 종단 회수는 기존
+        # 경로(_record_ref·_reclaim_if_terminal)가 하고, 다음 단계는 여기서 같은 상한으로 다시 줄인다.
+        self._repos.data_jobs.set_worker_pool(job["job_id"], new_wp, expected_state=job["state"])
+        job["worker_pool"] = new_wp
+        self._repos.observability.record_event(
+            component="stepper", severity="info", event_type="procs_clamped_to_node_cpu",
+            message=f"노드당 프로세스 {current} → {limit} (노드 CPU 상한, {phase} 제출 직전)",
+            payload={"job_id": job["job_id"], "phase": phase, "requested": requested, "from": current,
+                     "applied": limit, "node_cpu_caps": caps},
+            request_id=job.get("request_id"))
+        return new_wp
 
     def _finalize(self, job, job_state, *, reason_code=None, summary=None, diag=None, polled=False):
         # 슬라이스 25 §2.2: diag=(phase, ref) 가 오면 종단 전이 **전에** 박제한다.
@@ -859,6 +921,13 @@ class JobStepper:
                 message=f"{exc} job={job['job_id']}", payload={"blocked": exc.blocked},
                 request_id=job.get("request_id"))
             return self._fail_closed(job, reason_code="node_excluded_at_step")
+        except NodeCpuInsufficientAtStep as exc:
+            # 배정 노드가 워커 1개도 못 담는다(노드 CPU 상한 < 1) -- 어느 노드의 상한이 얼마였는지는 이벤트로 남긴다.
+            self._repos.observability.record_event(
+                component="stepper", severity="warning", event_type="node_cpu_insufficient_at_step",
+                message=f"{exc} job={job['job_id']}", payload={"job_id": job["job_id"], "node_cpu_caps": exc.caps},
+                request_id=job.get("request_id"))
+            return self._fail_closed(job, reason_code="node_cpu_insufficient_at_step")
         except PrivilegeNotRequestedAtStep:
             # 규칙 변경 전에 얼린 root 신원·변조 행 -- root 로 한 번이라도 제출되기 전에
             # 끊는다(재계획은 하지 않는다: 요청자가 의도를 다시 정해 새로 내야 한다).

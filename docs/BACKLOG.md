@@ -327,6 +327,20 @@
 - 📝 **인증번호 발급·비밀번호 변경 엔드포인트는 감속 밖** — 코드 추측은 코드당 5회
   상한으로 막히지만, 발급 요청 자체(메일 폭주)는 제한이 없다(메일러가 stub 인 동안
   실해가 없어 보류).
+- 📝 **노드 CPU 상한은 다른 파드의 requests 를 보지 않는다**(2026-10-16, `src/dms/node_cpu.py`
+  docstring). 상한 = floor((allocatable − launcher 100m − `DMS_NODE_CPU_RESERVE_MILLICORES`) / 1000)
+  의 예비는 **설정값**이다 — 컨트롤러·에이전트는 DaemonSet·제어면·빌드 파드의 실제 requests 를 볼 수
+  없다(클러스터 전역 pods list 권한이 필요해 보안 범위를 넓히는 결정이라 하지 않았다). 노드의 DMS
+  외 requests 합이 예비 + 내림 여유를 넘으면 워커가 그 노드에 안 들어가 Volcano 대기(Pending 상한
+  없음)에 머문다 — 운영자가 `kubectl describe node` 의 Allocated resources 를 보고 예비를 올린다.
+  정확히 하려면 에이전트가 자기 노드의 파드 requests 합을 보고하는 경로(노드 범위 pods list)가 먼저다.
+- 📝 **워커 CPU 요청으로 배치 미리보기가 Volcano 에서 줄을 선다 — 먼저 끝난 형제의 미리보기 TTL(24h)
+  위험**(2026-10-16). 예전엔 잡이 전부 BestEffort 라 Volcano 대기가 5~10초였다. 이제 노드 코어를 예약하므로
+  배치의 미리보기 자식들이 노드 단위로 줄을 서고(테스트베드는 노드당 워커 1개), Previewing 배치는 미리보기
+  단계 자식이 하나라도 남으면 PreviewReady 로 넘어가지 않는다(`batch_orchestrator.py` 미리보기 집계) —
+  그동안 먼저 끝난 형제의 `preview_ttl`(24h, 미리보기 성공부터)이 흘러 `preview_expired` 로 Rejected 될 수
+  있다. Running 배치에서 슬롯을 기다리는 확인된 자식도 같다. 큰 배치는 max_concurrency 를 노드 수에 맞추거나
+  나눠 내라. 근본 해법(배치 안 TTL 시작을 「배치 PreviewReady」로 미루기 등)은 결정 대기.
 
 ---
 

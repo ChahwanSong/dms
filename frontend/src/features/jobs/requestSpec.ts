@@ -413,7 +413,12 @@ export function deriveRequestSpec(req: RequestDetail, jobs: DataJob[] | null,
     if (summary !== null) {
       const pc = int(wp?.process_count);
       const n = posInt(wp?.node_count);
-      if (pc !== null) toolTail = `프로세스 ${countText(pc)}${n !== null && pc % n === 0 ? `(노드당 ${pc / n})` : ""}`;
+      // 노드당 값을 요약이 이미 말했으면(worker_pool.procs_per_node -- 2026-10-16 노드 CPU 상한, toolSummary 의 「× N 프로세스」)
+      // 꼬리에서 되풀이하지 않는다. 그 키가 없는 옛 잡만 나눗셈으로 (노드당 …)을 붙인다.
+      const ppnInSummary = typeof wp?.procs_per_node === "number" && Number.isFinite(wp.procs_per_node);
+      if (pc !== null) {
+        toolTail = `프로세스 ${countText(pc)}${!ppnInSummary && n !== null && pc % n === 0 ? `(노드당 ${pc / n})` : ""}`;
+      }
       const cand = obj(wp?.candidates);
       const primary = strs(cand?.primary);
       const source = strs(cand?.source);

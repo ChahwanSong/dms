@@ -307,6 +307,17 @@ test("V6 A2·A3: ldap_unavailable(보류 소진)·scan 실행 제출 관문, Pen
   expect(deriveJobStages(pend).failure).toMatchObject({ step: "preflight", evidence: "from_state", notStarted: true });
 });
 
+test("노드 CPU 상한 관문(node_cpu_insufficient_at_step, 2026-10-16)은 제출 직전 관문 -- 통과한 앞 단계를 실패로 칠하지 않는다", () => {
+  // stepper._build_spec → _clamp_to_node_cpu → NodeCpuInsufficientAtStep → _fail_closed. 폴링 재검사엔 없어 모호하지 않다.
+  const j = job({ state: "Rejected", reason_code: "node_cpu_insufficient_at_step", phase_refs: { preflight: "pod/p" },
+    transitions: [...PRE_TR, t("Preflight", "Rejected", 30)] });
+  expect(deriveJobStages(j).failure).toMatchObject({ step: "preview", evidence: "gate", notStarted: true });
+  expect(statuses(j)).toMatchObject({ preflight: "done", preview: "rejected" });
+  const pend = job({ state: "Rejected", reason_code: "node_cpu_insufficient_at_step",
+    transitions: [t(null, "Pending", 0), t("Pending", "Rejected", 3)] });
+  expect(deriveJobStages(pend).failure).toMatchObject({ step: "preflight", notStarted: true });
+});
+
 test("V6 node_excluded(from Preflight)는 모호 -- 추정, 다음 제출 보류 기록이 있으면 미리보기 시작 전으로 확정", () => {
   const base = { state: "Rejected", reason_code: "node_excluded_at_step", phase_refs: { preflight: "pod/p" },
     transitions: [...PRE_TR, t("Preflight", "Rejected", 9)] };

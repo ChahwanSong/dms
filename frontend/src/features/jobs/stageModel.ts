@@ -140,6 +140,8 @@ const SUBMIT_GATE = new Set([
   "identity_changed_at_step", "identity_missing_at_step", "ldap_unavailable", "ldap_not_configured",
   "privilege_not_requested", "chown_name_not_supported", "storage_missing_at_step",
   "artifact_base_not_traversable", "artifact_base_group_writable", "node_excluded_at_step",
+  // 노드 CPU 상한(2026-10-16): stepper._clamp_to_node_cpu 가 _build_spec 에서 던진다(제출 직전 관문만 -- 폴링엔 없다).
+  "node_cpu_insufficient_at_step",
 ]);
 // 관문 사유이면서 preflight·exec_preflight 파드 스크립트의 마커(DMS_PREFLIGHT_REASON=, execution_manifests.PREFLIGHT_REASONS)
 // 이기도 한 둘(2026-10-08 리뷰 N3). 마커 길은 그 파드가 **실패한** 것이라(_preflight_reason → _finalize(REJECTED)) 실패

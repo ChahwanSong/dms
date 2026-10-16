@@ -7,6 +7,7 @@ import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
 import { SubmitJob } from "./SubmitJob";
 import { SCAN_INT_FIELDS, SYNC_INT_FIELDS } from "./optionRules";
+import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 import type { UserStorage } from "../../lib/types";
 import type { Me } from "../../lib/types";
 
@@ -164,6 +165,8 @@ test("관리자 화면은 정책을 조회해 우선순위 기본값 실값을 �
   renderPage();
   expect(await screen.findByRole("option", { name: "(정책 기본: high)" })).toBeInTheDocument();
   expect(asked).toBeGreaterThan(0);
+  // 실행 설정 캡션의 노드 CPU 상한 한 줄(2026-10-16, 배치 생성과 같은 문장)
+  expect(screen.getByText(NODE_CPU_CAP_NOTE)).toBeInTheDocument();
 });
 
 test("입력 칸에서 Enter 를 눌러도 제출되지 않는다(요약을 보기 전 조기 제출 방지)", async () => {

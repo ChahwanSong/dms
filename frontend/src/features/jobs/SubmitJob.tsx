@@ -27,6 +27,7 @@ import { CHMOD_RE, chownFieldError, OPEN_NOATIME_NON_ROOT, PRIV_ROOT_SYNC, PRIV_
 // 정책 기본값 캡션(슬라이스 37: 배치 생성과 같은 표시 배선 — 백엔드 무변경).
 import { usePolicies } from "../policies/usePolicies";
 import type { Policy } from "../../lib/types";
+import { NODE_CPU_CAP_NOTE } from "../../lib/jobTool";
 
 // 슬라이스 37: 단일 작업(구 「작업 제출」) — 배치 작업과 같은 성격의 단일 항목
 // 제출이다. 운영자는 scan 까지 세 연산 전부(서버 게이트 미러: scan 제출은 admin
@@ -636,7 +637,8 @@ export function SubmitJob() {
       {/* 실행 설정은 운영자 전용(2026-08-20, 사용자 결정): 사용자 폼에선 우선순위를 정책 기본에
           맡긴다(생략 = resolve_priority 가 정책값으로 해석). 노드 수·프로세스 수도 정책이 정한다. */}
       {isAdmin && (
-        <FormSection step={4} title="실행 설정" caption={policyCaption}>
+        <FormSection step={4} title="실행 설정"
+                     caption={<>{policyCaption}<span className="block">{NODE_CPU_CAP_NOTE}</span></>}>
           <FieldRow
             control={<label className="text-sm block">우선순위
               <select aria-label="우선순위" className={field} value={f.priority} onChange={on("priority")}>
