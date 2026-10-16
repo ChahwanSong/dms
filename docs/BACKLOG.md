@@ -197,9 +197,99 @@
 
 ## 4. 알려진 해석·잔여 리스크 (문서)
 
-- 📝 **pod GC 86400s** — 성공·진행 중 잡의 프리플라이트/실행 파드 로그 라이브 열람 창(2026-10-16 부터 종단 잡의 vcjob
-  ref 도 같은 창 뒤에 지운다 -- Aborted vcjob 은 Volcano TTL 이 치우지 않았다).
+- 📝 **dsync 가 "목적지 부모 쓰기 불가" 에서 종료 코드 0**(2026-09-30 d139 실증에서 발견).
+  포크 `dsync.c`(MPIFILEUTILS_REF 1b93d54) 는 목적지 존재와 무관하게 부모 W_OK 를 요구하고,
+  실패하면 `MFU_LOG(ERR)` 후 `goto ERROR` 인데 `rc` 가 초기값 0 이라 **아무것도 복사하지 않고
+  0 으로 끝난다**(dry-run 은 경고만이라 미리보기도 정상처럼 보인다) → DMS 는 Succeeded. 지금은
+  preflight 가 목적지가 있어도 부모 쓰기를 먼저 거부해(`destination_parent_not_writable`)
+  정상 흐름에선 닿지 않지만, preflight 와 실행 사이에 부모 권한이 바뀌는 경합·root-squash
+  류 스토리지에선 여전히 조용한 무동작 성공이다. 근본 해법: 포크에서 그 경로 `rc = 1`(또는
+  목적지가 이미 있으면 부모 검사 생략 — 그러면 "root 755 부모 아래 본인 디렉터리" sync 도 가능),
+  또는 러너가 `ERROR:` 줄을 종료 코드와 함께 판정. 잡 이미지 재빌드가 필요해 보류.
+- 📝 **러너가 `<phase>` 의 `chown -R` 반환코드를 보지 않는다**(`src/dms_job_runner/runner.py`,
+  2026-09-30 아티팩트 쓰기 감사). mkdir 은 되고 chown 만 거부되는 드문 FS(NFSv4 idmap 등)에서
+  비 root scan 이 원인 표시 없이 dscan "Failed to write output file" 로 죽는다(root_squash 면 그
+  전에 makedirs 가 실패). 진단성 문제 — 반환코드 검사 + 마커. 잡 이미지 재빌드가 필요해 보류.
+- 📝 **root 실행(관리자 포탈 기본 — 실행 신원 미지정 시)은 기존 목적지의 소유·권한을 소스에
+  맞춘다**(2026-09-30 사용자 결정 "관리자는 기본 root", 의도·경고됨). root preflight 는 소유
+  검사를 하지 않고 dsync 는 소스 최상위 메타데이터를 기존 목적지에 적용한다 — 'root 권한으로
+  실행' 체크박스(기본 켜짐)·확인 스텝·배치 캡션이 이를 경고한다. 실행 신원에 다른 사용자를
+  적으면 기본은 그 사용자 권한이라 사고 경로(남의 700 목적지 소유 덮어쓰기)는 기본값이 아니다. 비 root 실행의
+  자동 `--chown uid:gid` 는 본인 디렉터리의 그룹을 실행 신원의 주 gid 로 바꿀 수 있다(보조 그룹이
+  실려도 자동은 주 gid — 프로젝트 그룹 소유는 명시 chown, 위 §1 포탈 chown 그룹 선택 항목).
+
+- 📝 **에이전트↔API 채널이 클러스터 내부 평문 HTTP**(`http://dms-api:8080`, 2026-09-29 기록).
+  관리자급 공유 토큰이 매 보고 주기마다, LDAP 검색 계정 비밀번호가 (`agent_directory` 해시
+  게이트로 줄였지만) 노드마다 에이전트 (재)시작 시 1회·설정/session_secret 변경 시·적용이 계속
+  실패하는 동안 매 주기 평문으로 지난다. 파드 네트워크 스니핑이 가능한 공격자는 이미 공유 토큰을
+  얻으므로 방안 A 가 경계를 넓히진 않았지만, 채널 TLS(또는 CNI 암호화)는 둘 다에 대한 근본
+  해법이다. 실패 지속 시 재전송을 줄이려면 에이전트가 받은 블록을 메모리에 들고 로컬 백오프로
+  재시도하고 서버엔 "보류 해시" 만 알리는 방식이 있다(현재는 실패가 로그·directory.error 로
+  즉시 보이는 쪽을 택함).
+- 📝 **nslcd 그룹 멤버 속성 미러 안 함** — 에이전트 nslcd 는 기본(memberUid + member)으로
+  그룹을 푼다. 제어면은 `DMS_LDAP_GROUP_MEMBER_ATTR`(기본 uniqueMember)로 푼다. 신원 준비
+  판정은 **이름 해석만** 보고(`placement._identity_ready`), 잡 파드의 보조 그룹(2026-10-07~)은
+  **플래너 리졸버의 posixGroup gidNumber 값**(계획 시점 스냅숏 → preflight supplementalGroups·
+  워커 /etc/group `dmsg<gid>`)이라 노드 NSS 와 무관하다 — nslcd 불일치는 **노드 화면이 보여주는
+  그룹 한정**(uniqueMember 전용 디렉터리에서 비어 보일 수 있다). 필요하면 `map group member
+  uniqueMember` 를 렌더러·하달 블록에 함께 추가.
+- 📝 **NFSv4/GPFS 고유 ACL 은 제어면 base 검사 밖**(보조 그룹 D6) — `artifact_base._posix_acl_problem`
+  은 POSIX ACL xattr 만 읽는다. 그런 ACL 이 base **자체**에 쓰기를 주면 3홉은 초록이고, 보조 그룹이 실린
+  잡만 preflight `test -w`(`_ARTIFACT_BASE_NOT_WRITABLE_CHECK`)가 base 자체의 쓰기를 잡 단위로 막는다.
+  **상속**(NFSv4/GPFS inheritable ACE 가 `<job_id>/<phase>` 에 주는 쓰기)은 preflight `test -w` 도 컨트롤러
+  관문(static_base_problem — POSIX xattr 만)도 보지 못한다 — 남는 위험(운영 base 는 root:root 755 에 상속 ACE
+  없음을 직접 확인, `deploy/README.md` §2b-1). POSIX default ACL 도 그룹 없는 비 root 잡은 잡 단위로 보지 않는다.
+- 📝 **nsync 복합 preflight 는 PENDING 을 보고하지 않는다**(`execution_volcano.poll` 의 `pods/a,b`
+  결합 — 한쪽이 대기 중이면 RUNNING). 그래서 stepper 의 PENDING 분기(`_raise_if_blocked` — 계획 뒤
+  배치 제외·cordon 된 노드의 대기 단계 종단)가 nsync preflight 파드 쌍에는 걸리지 않는다 — 스케줄 전
+  파드는 activeDeadlineSeconds 도 발화하지 않아(스케줄 뒤에만) cordon 된 노드의 쪽은 그대로 멈춘다. 보조 그룹 큐 대기 재확인은 파드 단계를 의도적으로 제외하므로(바로 뒤 제출 재확인)
+  지금은 영향이 없지만, 재확인을 파드 단계로 넓히면 같은 구멍에 빠진다. 처방: 복합 결합에
+  "하나라도 PENDING 이면 PENDING"(RUNNING 보다 낮은 우선) 추가.
+
+- 📝 **`by_storage` 가 `COALESCE(storage_name, destination_storage)`** — sync 를 도착지
+  기준으로 센다. 설계가 기준을 명시하지 않은 침묵의 해석(`repositories/metrics.py`).
+- 📝 **KPI 의미 변화** — 요청 50건 즉석 계산 → 창 내 잡 집계. 옛 화면과 숫자가 다르다.
+- 📝 **CI 없음** — e2e(슬라이스 23)·전체 스위트는 **수기 게이트**다(`deploy/README` 의
+  "이미지 빌드 전" 단계). 기술적 강제 수단 부재 — 러너 상주·브라우저 캐시·시크릿 관리가
+  얽힌 별도 작업.
+- 📝 **`imagePullPolicy: IfNotPresent` + 태그 재사용 = 노드 캐시 stale** — 고유 태그
+  관례(dNN 단조 증가)로만 완화. 같은 태그 재빌드는 노드가 옛 이미지를 쓸 수 있다.
+- 📝 **`/cephfs` hostPath `type: Directory`** — 비-cephfs 노드가 스케줄 풀에 들어오면
+  파드 admission 실패.
+- 🔧 **러너 root 쓰기가 심링크를 따라간다**(`src/dms_job_runner/runner.py` `main().write_text`
+  → `open(path, "w")`; 2026-09-09 root 전환 검토에서 확인, 전환과 무관한 기존 결함) —
+  요청자가 chown 이후 자기 phase 디렉터리에 `stdout.log`/`summary.json` 심링크를 심으면
+  root 가 그 잡의 스토리지 마운트·artifact base 아래 임의 경로를 truncate/덮어쓴다(내용은
+  도구 stdout). 처방: chown 전에 phase dirfd 를 잡아 `os.open(name, O_WRONLY|O_CREAT|O_EXCL|
+  O_NOFOLLOW, dir_fd=dfd)` 로 쓰고, 마지막 쓰기 뒤 그 세 파일을 요청자로 chown. 그러면 API
+  소유자 검사(`artifact_files.inode_allowed`, 현재 `{0, 요청자}`)를 `== 요청자` 로 좁힐 수
+  있다. **잡 이미지(dms-mpifileutils) 재빌드가 필요**해 제어면 root 전환(d128)과 분리했다.
+  같은 계열: `parsers.py` 의 dscan-report.json following open(카운트만 파싱, fail-soft).
+- 📝 **컨트롤러 롤아웃 겹침 창** — Deployment 롤아웃 직후 옛 파드가 종료 유예(30s) 안에
+  마지막 틱을 마치며 옛 코드로 잡을 스텝할 수 있다(2026-09-09 d129 실증: 새 파드의
+  preflight 파드 2초 뒤 옛 파드가 preview vcjob 을 구 마운트로 제출 → 그 잡만 실패,
+  재실행 성공). 리스는 틱 시작에만 확인되고 TTL 30s 라 구조적으로 남는 창이다. 처방
+  후보: 컨트롤러 preStop 에서 루프 중단 후 대기, 또는 리스 재확인 뒤 제출. 파드 스펙을
+  바꾸는 릴리스 직후 첫 잡은 재실행이 필요할 수 있음을 운영 절차에 적어 둔다.
+- 🔧 **securityContext 드리프트는 배지가 못 본다** — 포탈 롤아웃(`rollout_runner.
+  image_patch_body`)은 name/image 만 patch 하고 드리프트 배지(`manifest_tags.manifest_images`
+  ↔ `rollout_status._images`)도 이미지만 비교한다. 40/41 을 `kubectl apply` 하지 않은
+  사이트는 d128 이미지를 65532 로 굴리게 되고(3홉 `artifact_base_not_writable` 로만 드러남)
+  아무 배지도 안 뜬다. 처방: rollout_status 가 dms-api/dms-controller 의
+  `containers[].securityContext.runAsUser` 를 관측해 매니페스트 값과 다르면 배지.
+- 📝 **하드링크는 코드로 못 막는 부분이 있다** — `fs.protected_hardlinks=1`(+symlinks)은
+  공유 FS 를 마운트하고 사용자가 link(2) 를 부를 수 있는 **모든** 호스트의 배포 전제
+  (`deploy/README.md` §2b). 코드 측(nlink>1·남의 소유 거부)은 보완일 뿐이다.
+- 📝 **아티팩트 소유자 검사의 `0` 허용** — 러너가 chown 뒤 root 로 쓰는 세 파일 때문.
+  요청자가 w+x 를 가진 비-sticky 디렉터리의 **root 소유** 0600 파일을 `mv` 로 자기 phase
+  디렉터리에 들여오면(드묾) 읽힌다. 위 러너 항목이 닫히면 함께 닫힌다.
+- 📝 **pod GC 86400s** — 성공·진행 중 잡의 프리플라이트/실행 파드 로그 라이브 열람 창(2026-10-16 부터 종단 잡 중 성공이
+  아닌 잡의 vcjob ref 도 max(이 창, DMS_VCJOB_TTL_SECONDS) 뒤에 지운다 -- Aborted vcjob 은 Volcano TTL 이 치우지 않았다.
+  TTL 0 이면 vcjob 은 두고 Pod 만).
   실패 잡은 슬라이스 25 가 `diag_logs` 로 박제해 시한부가 아니다(부분 완화).
+- 📝 **TTL 도입 이전 vcjob 37건**(2026-10-08 실측, ≤2026-08-05 생성) — 그 launcher 파드(dms 라벨 없음)도 남아 있다.
+  2026-10-16 부터 pod-gc 가 성공이 아닌 종단 잡의 vcjob ref 를 지우므로 그런 잡의 것은 수거된다. 성공 잡의 것(TTL 필드가
+  없어 Volcano 도 안 지운다)과 잡 행이 없는 것은 일회성 운영 정리(그 요청을 지우면 request-purge 가 회수한다).
 - 🔧 **빌드 삭제 docstring 의 거짓 전제** — `BuildsRepository.delete`(`repositories/builds.py` 156행)는 「파드는
   pod-gc 가 따로 수거하므로 DB 행만 지운다」고 하지만 pod-gc 는 `builds.terminal_older_than` 의 **행**으로 파드 이름을
   만든다(`pod_gc.py` 46-56행) — 행을 지우면 그 빌드·프로브 파드는 pod-gc 시야 밖으로 영영 남는다. 처방: 삭제
