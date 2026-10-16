@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StrictBool
 from ..batch_orchestrator import auto_confirm_hold
+from ..batch_cancel import record_item_terminal, settle_child
 from ..domain import (DataJobState, DomainValidationError, Operation,
-                      TERMINAL_DATA_JOB_STATES, build_data_payload, validate_batch,
+                      build_data_payload, validate_batch,
                       validate_batch_controls, validate_options, validate_owner_username)
 from ..execution import ExecutionError
 from ..privileged import privileged_names
 from .auth import Identity, require_admin
-from .cancel import sweep_after_cancel, terminate_job
+from .cancel import terminate_job
 from .routes_requests import reject_when_maintenance
 
 router = APIRouter()
@@ -633,19 +634,36 @@ def rescan_batch(batch_id: str, request: Request, identity: Identity = Depends(r
     return {"status": status, "requeued": n}
 
 
+_CANCELABLE = ("Previewing", "PreviewReady", "Running")
+
+
 @router.post("/api/admin/batches/{batch_id}:cancel")
 def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(require_admin)):
+    """배치 취소. 순서가 계약이다(2026-10-16 사용자 보고: 「배치작업 Cancel 했는데 몇분 후에 ... 아직 돌아가고 있는
+    launcher/worker pod 들이 보여」 -- batch_cancel 모듈 docstring 의 경합):
+      0) 장벽: Queued 항목을 먼저 Cancelled 로(bar_queued_items -- orchestrator 의 claim 이 0 행) + 배치를 Cancelled 로
+         (CAS -- orchestrator 는 Cancelled 배치를 굴리지 않고 planner 는 그 Pending 자식을 계획하지 않는다). 예전엔 k8s
+         삭제를 다 한 뒤에야 썼고, 그 사이 빈 슬롯에 새 자식이 생겨 취소 뒤에도 끝까지 돌았다.
+      1) 장벽 **뒤에** 항목을 다시 읽어 자식 잡을 모두 종료한다. 하나라도 실패하면 장벽과 배치 상태를 되돌리고 500 --
+         거짓 취소 금지(상위 스펙 §5). (이미 지운 자식은 되돌릴 수 없다 -- 그 자식은 stepper 가 실패로 끝낸다.)
+      2) 자식마다 기록(batch_cancel.settle_child -- 잡 Cancelled·커밋 뒤 회수·지금 잡 상태로 요청 마무리)하고, 항목은
+         자식의 실제 결과로 CAS 기록한다(record_item_terminal -- 그 사이 성공한 형제를 Cancelled 로 덮지 않는다).
+    컨트롤러가 매 틱 Cancelled 배치 밑의 살아 있는 자식을 다시 본다(batch_cancel.sweep_cancelled -- 그물)."""
     repos = request.app.state.repos
     repo = repos.batches
     b = repo.get(batch_id)
     if b is None:
         raise HTTPException(status_code=404, detail="batch_not_found")
-    if b["status"] not in ("Previewing", "PreviewReady", "Running"):
+    if b["status"] not in _CANCELABLE:
         raise HTTPException(status_code=409, detail="batch_not_cancelable")
     adapter = request.app.state.execution_adapter
+    # 0) 장벽 -- 새 자식이 생기지 않게 한 다음에 지금 자식을 본다.
+    barred = repo.bar_queued_items(batch_id)
+    if not repo.set_status_if(batch_id, "Cancelled", from_states=_CANCELABLE):
+        repo.requeue_barred_items(batch_id, barred)       # 그 사이 종단(완료·다른 취소) -- 아무것도 바꾸지 않는다
+        raise HTTPException(status_code=409, detail="batch_not_cancelable")
     items = repo.list_items(batch_id)
-    # 1) 먼저 종료한다. 하나라도 실패하면 DB는 건드리지 않고 실패를 보고한다
-    #    (거짓 취소 금지 — 상위 스펙 §5).
+    # 1) 먼저 종료한다. 하나라도 실패하면 장벽·상태를 되돌리고 실패를 보고한다(거짓 취소 금지 — 상위 스펙 §5).
     child_jobs = []
     for it in items:
         rid = it.get("request_id")
@@ -657,60 +675,19 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
         for _, job in child_jobs:
             terminate_job(adapter, job)
     except ExecutionError:
+        repo.set_status_if(batch_id, b["status"], from_states=("Cancelled",))
+        repo.requeue_barred_items(batch_id, barred)
         raise HTTPException(status_code=500, detail="cancel_failed")
-    # 2) 종료가 전부 성공한 뒤에만 기록한다.
-    jobs_by_seq = {}
+    # 2) 종료가 전부 성공한 뒤에만 기록한다 -- 자식마다(잡 없는 자식 포함, 잡 행이 없으면 planner 가 곧 집을 Pending 이다).
+    jobs_by_seq: dict = {}
     for it, job in child_jobs:
         jobs_by_seq.setdefault(it["seq"], []).append(job)
-        if DataJobState(job["state"]) in TERMINAL_DATA_JOB_STATES:
-            # 이미 실제 결과가 난 잡은 Cancelled로 덮어쓰지 않는다 — Succeeded인 rm을
-            # "취소됨"으로 보고하는 건 거짓 취소다(상위 스펙 §5).
-            continue
-        repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
-                                      reason_code="cancelled_by_batch", actor=identity.actor)
-    # 커밋 뒤 회수(2026-10-12, cancel.sweep_after_cancel -- 단건·요청 취소와 같은 규칙): 배치는 자식마다 k8s 삭제를 하므로
-    # 스냅숏 → Cancelled 커밋 사이 창이 가장 길다. 그 사이 stepper 가 제출한 단계(예: 확인된 sync 자식의 root 실행 vcjob)를
-    # 끝낸다 -- 예전엔 Cancelled 배치 밑에서 끝까지 돌았다(검증 지적). 잡의 지금 상태는 아래 요청 마무리에 쓴다.
-    for _, job in child_jobs:
-        sweep_after_cancel(repos, adapter, job)
-    # 자식 요청은 잡 루프가 아니라 item에서 돈다. materialize는 됐지만 planner가 아직
-    # 도달하지 못한 item은 잡 행이 하나도 없어 위 루프에 등장하지 않는다 —
-    # 그 요청을 종결하지 않으면 Pending인 채 list_pending()에 남아 planner가 곧바로
-    # 집어 실행해 버린다(거짓 취소). orchestrator 5s / planner 10s 주기라 가장 흔한 창이다.
     for it in items:
         rid = it.get("request_id")
         if not rid:
             continue
-        if not jobs_by_seq.get(it["seq"]):
-            # 잡 없는 자식(2026-10-12): Pending CAS(requests.cancel_if_pending -- planner 의 잡 생성과 직렬화). 지면 planner 가
-            # 그 사이 잡을 만들었다 -- 예전엔 요청만 Cancelled 로 덮여 그 잡이 Pending 으로 남아 실행됐다. 다시 읽어 끝낸다.
-            if repos.requests.cancel_if_pending(rid, reason_code="cancelled_by_batch", actor=identity.actor):
-                continue
-            for job in repos.data_jobs.list_jobs(request_id=rid):
-                try:
-                    terminate_job(adapter, job)
-                except ExecutionError as exc:
-                    # 이미 다른 자식의 취소를 기록했다 -- 되돌릴 수 없어 숨기지 않고 남긴다(sweep 과 같은 이벤트).
-                    repos.observability.record_event(
-                        component="api", severity="error", event_type="terminate_failed",
-                        message=f"{exc.reason_code}: batch cancel late child {job['job_id']}"[:500],
-                        payload={"job_id": job["job_id"], "after_cancel": True}, request_id=rid)
-                repos.data_jobs.set_job_state(job["job_id"], DataJobState.CANCELLED,
-                                              reason_code="cancelled_by_batch", actor=identity.actor)
-                sweep_after_cancel(repos, adapter, job)
-        # 요청 마무리는 **지금** 잡 상태로(스냅숏이 아니다 -- 그 사이 stepper 가 성공시킨 자식을 Cancelled 로 덮지 않는다).
-        jobs = repos.data_jobs.list_jobs(request_id=rid)
-        if jobs and not any(j["state"] == DataJobState.CANCELLED.value for j in jobs) \
-                and all(DataJobState(j["state"]) in TERMINAL_DATA_JOB_STATES for j in jobs):
-            # 잡이 이미 종단이면 취소가 아니라 그 실제 결과로 요청을 화해시킨다.
-            state, reason = DataJobState(jobs[0]["state"]), "orphan_recovery"
-        else:
-            state, reason = DataJobState.CANCELLED, "cancelled_by_batch"
-        # finalize_from_job은 멱등(종단 요청은 건드리지 않는다) + results 행을 남긴다.
-        repos.requests.finalize_from_job(rid, state, reason_code=reason,
-                                         actor=identity.actor)
-    for it in items:
-        if it["status"] in ("Queued", "Materialized"):
-            repo.set_item_status(batch_id, it["seq"], "Cancelled")
-    repo.set_status(batch_id, "Cancelled")
+        state = settle_child(repos, adapter, rid, jobs_by_seq.get(it["seq"], []),
+                             actor=identity.actor, component="api")
+        if state is not None:
+            record_item_terminal(repos, batch_id, it["seq"], rid, state)
     return {"status": "Cancelled"}

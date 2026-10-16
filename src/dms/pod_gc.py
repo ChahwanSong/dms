@@ -1,5 +1,12 @@
-"""종단 잡이 남긴 preflight Pod 을 지운다. Volcano Job 은 ttlSecondsAfterFinished 가
-처리하지만 베어 Pod 에는 TTL 이 없다.
+"""종단 잡이 남긴 preflight Pod 과 vcjob 을 지운다. 베어 Pod 에는 TTL 이 없고, Volcano Job 의 ttlSecondsAfterFinished
+는 Completed 만 치운다 -- Aborted(PodFailed → AbortJob) vcjob 과 그 Error 파드는 테스트베드에서 61일째 남아 있었다
+(2026-10-16 사용자 보고 「몇분 후에 k8s 을 직접 확인해보니 아직 ... pod 들이 보여」 조사). 그래서 종단 잡의 vcjob ref 도
+같은 창(after_seconds, 기본 24h -- Volcano TTL 과 같은 값)이 지나면 지운다.
+
+**커서**(2026-10-16): 질의는 오래된 순 LIMIT 이고 이미 지운 잡을 표시하지 않으므로, 예전엔 같은 앞쪽 200건을 매 틱 다시
+지우고(404 무시) 그 뒤의 잡에 영영 닿지 못했다(테스트베드 8일 된 preflight Pod 82개). 인스턴스가 (updated_at, job_id) 커서를
+들고 다음 묶음으로 넘어가고, 끝에 닿으면(묶음 < limit) 처음부터 다시 돈다 -- 컨트롤러는 이 인스턴스를 하나 만들어 계속
+쓴다(재시작하면 처음부터 -- 404 라 무해).
 
 **종단 잡만** 대상으로 한다 — 비종단 잡의 파드를 지우면 stepper 가 그것을 실패로 오인한다.
 빌드 파드·프리플라이트 프로브 파드도 같은 이유로 **종단 빌드만** 대상이다 --
@@ -22,13 +29,18 @@ class PodGarbageCollector:
         self._after = after_seconds
         self._limit = limit
         self._build_runner = build_runner
+        self._cursor = None          # (updated_at, job_id) -- 모듈 docstring 「커서」
 
     def run_once(self, *, now_iso: str | None = None) -> dict:
         deleted = 0
-        for job in self._repos.data_jobs.terminal_jobs_older_than(
-                self._after, limit=self._limit, now_iso=now_iso):
+        jobs = self._repos.data_jobs.terminal_jobs_older_than(
+            self._after, limit=self._limit, now_iso=now_iso, after_key=self._cursor)
+        # 끝에 닿았으면(묶음 < limit) 다음 틱은 처음부터 -- 그 사이 새로 오래된 잡이 생겼을 수 있다.
+        self._cursor = ((jobs[-1]["updated_at"], jobs[-1]["job_id"])
+                        if len(jobs) >= self._limit else None)
+        for job in jobs:
             for ref in (job.get("phase_refs") or {}).values():
-                if not ref or not str(ref).startswith(("pod/", "pods/")):
+                if not ref or not str(ref).startswith(("pod/", "pods/", "vcjob/")):
                     continue
                 try:
                     self._exec.terminate(ref)

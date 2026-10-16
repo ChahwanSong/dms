@@ -414,6 +414,59 @@ class BatchesRepository:
     def set_item_status(self, batch_id, seq, status, *, reason_code=None):
         self._touch_item(batch_id, seq, status=status, reason_code=reason_code)
 
+    def finish_item_if_materialized(self, batch_id, seq, status, *, reason_code=None) -> bool:
+        """Materialized 항목 → 종단(status) CAS(2026-10-16). 자식 결과를 항목에 옮기는 세 곳 -- orchestrator 의 기록, 배치
+        취소 라우트, 컨트롤러의 취소 그물 -- 이 같은 항목을 동시에 기록할 수 있다: 무조건 쓰기면 늦은 쪽이 앞의 결과를
+        덮고 집계(bump_counts)가 두 번 오른다. True 를 받은 쪽만 집계한다."""
+        return self._db.execute_count(
+            """UPDATE batch_items SET status = :st, reason_code = :rc, updated_at = :now
+                  WHERE batch_id = :b AND seq = :s AND status = 'Materialized'""",
+            {"st": status, "rc": reason_code, "now": utc_now_iso(), "b": batch_id, "s": seq}) == 1
+
+    def bar_queued_items(self, batch_id) -> "list[int]":
+        """배치 취소의 장벽(2026-10-16): 아직 Queued 인 항목을 전부 Cancelled 로 -- orchestrator 의 claim_queued_item(Queued
+        가드)이 0 행이 되어 자식 요청 INSERT 까지 롤백된다. 예전엔 취소가 k8s 삭제를 끝낸 **뒤에야** 항목을 덮어, 그 사이
+        빈 슬롯에 orchestrator 가 새 자식을 만들어 취소 뒤에도 끝까지 돌았다(사용자 보고). 바꾼 seq 를 돌려준다 -- 종료
+        실패(500)면 호출자가 그것만 되돌린다(requeue_barred_items)."""
+        with self._db.transaction():
+            seqs = [r["seq"] for r in self._db.query(
+                "SELECT seq FROM batch_items WHERE batch_id = :b AND status = 'Queued' ORDER BY seq", {"b": batch_id})]
+            changed = []
+            now = utc_now_iso()
+            for s in seqs:
+                if self._db.execute_count(
+                        """UPDATE batch_items SET status = 'Cancelled', reason_code = 'cancelled_by_batch', updated_at = :now
+                              WHERE batch_id = :b AND seq = :s AND status = 'Queued'""",
+                        {"now": now, "b": batch_id, "s": s}) == 1:
+                    changed.append(s)
+        return changed
+
+    def requeue_barred_items(self, batch_id, seqs) -> int:
+        """bar_queued_items 가 바꾼 항목을 Queued 로 되돌린다(취소 종료 실패 -- 거짓 취소 금지, 아무것도 바꾸지 않은 것으로)."""
+        n = 0
+        now = utc_now_iso()
+        with self._db.transaction():
+            for s in seqs:
+                n += self._db.execute_count(
+                    """UPDATE batch_items SET status = 'Queued', reason_code = NULL, updated_at = :now
+                          WHERE batch_id = :b AND seq = :s AND status = 'Cancelled'
+                                AND reason_code = 'cancelled_by_batch' AND request_id IS NULL""",
+                    {"now": now, "b": batch_id, "s": s})
+        return n
+
+    def live_children_of_cancelled(self, *, limit: int = 50) -> "list[dict]":
+        """Cancelled 배치 밑에 아직 끝나지 않은 자식 요청(2026-10-16 -- 컨트롤러 그물). (batch_id, request_id, seq).
+        정상 경로에선 0 행이다: 취소 라우트가 장벽·Cancelled 를 먼저 쓰고 자식을 끝낸다. 남는 것은 부분 실패(종료 500 뒤
+        되돌린 경우가 아닌 늦은 단계)·앞으로 생길 경합 -- 그 자식의 파드가 취소된 배치 밑에서 끝까지 돌지 않게 매 틱 본다.
+        requests 의 상태 인덱스(idx_requests_state)로 비종단만 훑고 배치 행과 잇는다."""
+        return self._db.query(
+            """SELECT r.batch_id, r.request_id, i.seq
+                 FROM requests r
+                 JOIN batches b ON b.batch_id = r.batch_id
+                 LEFT JOIN batch_items i ON i.batch_id = r.batch_id AND i.request_id = r.request_id
+                WHERE b.status = 'Cancelled' AND r.state IN ('Pending', 'Planned', 'Running')
+                ORDER BY r.commit_order LIMIT :n""", {"n": limit})
+
     def reject_queued_item(self, batch_id, seq, *, reason_code, expected_payload) -> bool:
         """자식을 만들기 전에 거부된 항목(orchestrator _materialize 의 재검증 실패) -> Rejected + 실패 1.
         **아직 Queued 이고 payload 가 거부 판정에 쓴 그 값일 때만**(원자 가드): orchestrator 가 읽은 목록 뒤에 관리자가

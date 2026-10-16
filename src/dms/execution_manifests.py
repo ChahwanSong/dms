@@ -322,6 +322,18 @@ def _apply_task_deadlines(spec, tasks):
         task["template"]["spec"]["activeDeadlineSeconds"] = spec.timeout_seconds
 
 
+# 잡 파드의 종료 유예(2026-10-16 사용자 보고: 「배치작업 Cancel 했는데 몇분 후에 ... 아직 돌아가고 있는 launcher/worker
+# pod」). 기본 30초면 취소(vcjob 삭제) 뒤 launcher 가 30초 Terminating 으로 남는다 -- PID 1 인 dms-job-runner(Python)는
+# SIGTERM 처리기가 없어 신호를 무시하고 SIGKILL 을 기다린다(preflight 셸도 같다). 이 파드들은 정리할 상태가 없다(산출물은
+# 단계마다 이미 base 에 쓴 파일이고, 지우는 쪽은 취소·요청 삭제·Volcano 완료 처리뿐이다) -- 짧게 둔다.
+TASK_TERMINATION_GRACE_SECONDS = 5
+
+
+def _apply_termination_grace(tasks):
+    for task in tasks:
+        task["template"]["spec"]["terminationGracePeriodSeconds"] = TASK_TERMINATION_GRACE_SECONDS
+
+
 def _apply_ttl(spec, job_spec):
     """ttlSecondsAfterFinished는 activeDeadlineSeconds와 달리 Volcano v1.15.0 CRD의
     Job.spec 허용 필드 목록에 실제로 포함돼 있다(maxRetry/.../ttlSecondsAfterFinished/
@@ -585,6 +597,7 @@ def build_preflight_pod(spec, *, job_image, namespace, volumes, node, role=None)
         container["env"] = [{"name": "DMS_JR_GID", "value": str(ident["gid"])},
                             {"name": "DMS_JR_SUPP_GIDS", "value": ",".join(str(g) for g in gids)}]
     pod_spec = {"restartPolicy": "Never",
+                "terminationGracePeriodSeconds": TASK_TERMINATION_GRACE_SECONDS,
                 "nodeSelector": {"kubernetes.io/hostname": node},
                 "containers": [container],
                 "volumes": _pod_volumes(volumes)}
@@ -650,6 +663,7 @@ def _build_nsync_job(spec, *, job_image, namespace, volumes):
                              {"event": "PodFailed", "action": "AbortJob"}],
                 "tasks": [launcher, src_worker, dst_worker]}
     _apply_task_deadlines(spec, job_spec["tasks"])
+    _apply_termination_grace(job_spec["tasks"])
     _apply_ttl(spec, job_spec)
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
@@ -690,6 +704,7 @@ def build_volcano_job(spec, *, job_image, namespace, volumes):
                              {"event": "PodFailed", "action": "AbortJob"}],
                 "tasks": [launcher, worker]}
     _apply_task_deadlines(spec, job_spec["tasks"])
+    _apply_termination_grace(job_spec["tasks"])
     _apply_ttl(spec, job_spec)
     return {
         "apiVersion": "batch.volcano.sh/v1alpha1", "kind": "Job",
