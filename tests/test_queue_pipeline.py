@@ -83,12 +83,27 @@ def test_waiting_sort_puts_unknown_ages_last_and_zero_is_a_real_age():
     assert view["pipeline"]["running"] is None
 
 
-def test_batch_held_is_unknown_when_the_jobs_axis_is_unknown():
-    # 잡 축을 못 읽으면 배치 대기의 held(확인 대기가 아닌 배치 자식)는 모름 -- 0 으로 접지 않는다(null ≠ 0).
+def test_batch_stage_is_unknown_when_the_jobs_axis_is_unknown():
+    # 배치 대기의 held(굴러가는 배치의 ConfirmPending 자식)는 잡 축에서 온다 -- 잡 축을 못 읽으면 배치 대기 칸 전체가 모름
+    # (None)이다. Queued 만으로 「대기 없음」을 내면 확인된 배치의 자식 수백 건이 없다고 말한다(검증 지적, null ≠ 0).
     view = build_queue_view(NOW, pods=None, planning=None, jobs=None, batches={"groups": [{
         "batch_id": "b" * 32, "name": None, "status": "Running", "operation": "scan", "requester_id": "ops",
         "priority": "mid", "max_concurrency": 2, "queued": 3, "oldest_at": "2026-10-16T11:00:00Z"}],
         "preview_ready": 0})
-    assert view["pipeline"]["batch"] == {"count": 3, "oldest_seconds": 3600, "queued": 3, "held": None,
-                                         "batches": 1, "preview_ready_batches": 0}
-    assert view["waiting"][0]["detail"]["held"] is None
+    assert view["pipeline"]["batch"] is None
+    assert view["waiting"] is None
+
+
+def test_children_of_batches_nobody_drives_are_neither_confirm_nor_batch_waits():
+    # 취소 중·취소됨·완료·행 없는 배치의 ConfirmPending 자식은 기다리는 것이 아니다(취소 정리 대기) -- 어느 칸에도 없다.
+    def grp(status, n):
+        return {"batch_id": (status or "none")[:1] * 32, "name": None, "status": status, "operation": "sync",
+                "requester_id": "ops", "priority": "mid", "max_concurrency": 2, "n": n,
+                "oldest_at": "2026-10-16T00:00:00Z", "soonest_expiry": None}
+    jobs = {"by_state": {}, "waiting": {}, "confirm_singles": None, "submitted": [],
+            "confirm_batches": [grp("Cancelling", 3), grp("Cancelled", 2), grp("Completed", 1), grp(None, 4),
+                                grp("Running", 5)]}
+    view = build_queue_view(NOW, pods=[], planning=None, jobs=jobs, batches={"groups": [], "preview_ready": 0})
+    assert view["pipeline"]["confirm"]["count"] == 0
+    assert (view["pipeline"]["batch"]["count"], view["pipeline"]["batch"]["held"]) == (5, 5)
+    assert [e["detail"]["batch_status"] for e in view["waiting"] if e["stage"] == "batch"] == ["Running"]

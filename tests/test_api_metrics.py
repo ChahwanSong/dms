@@ -691,7 +691,7 @@ def test_metrics_queue_waiting_is_capped_per_stage_not_overall(client, db):
 
 
 def test_metrics_queue_db_axis_failure_nulls_only_its_stages(client, db, monkeypatch):
-    # DB 축도 k8s 축과 같은 규칙: 한 축의 실패는 그 축에 기대는 단계만 모름(null). 잡 축이 죽어도 계획·배치·
+    # DB 축도 k8s 축과 같은 규칙: 한 축의 실패는 그 축에 기대는 단계만 모름(null). 잡 축이 죽어도 계획·
     # Volcano 단계와 옛 두 키는 그대로다.
     repos = client.app.state.repos
     now = utc_now_iso()
@@ -706,12 +706,13 @@ def test_metrics_queue_db_axis_failure_nulls_only_its_stages(client, db, monkeyp
          "created_at": iso_plus(now, -20), "vcjob": "dms-sync-preview-dddddddddddd"}])
     body = _queue(client)
     p = body["pipeline"]
-    for stage in ("pickup", "preflight", "running", "confirm"):
+    # 배치 대기도 모름: held(굴러가는 배치의 ConfirmPending 자식)가 잡 축에서 온다 -- Queued 만으로 「대기 없음」을 내지 않는다.
+    for stage in ("pickup", "preflight", "running", "confirm", "batch"):
         assert p[stage] is None, stage                       # 모름 -- 0 으로 접지 않는다
-    assert p["planning"]["count"] == 1 and p["batch"]["count"] == 2
+    assert p["planning"]["count"] == 1
     assert p["volcano_wait"]["count"] == 1
     # 잡 축 없이도 PodGroup 은 대기 목록에 남는다(대조만 못 한다)
-    assert {e["stage"] for e in body["waiting"]} == {"planning", "batch", "volcano_wait"}
+    assert {e["stage"] for e in body["waiting"]} == {"planning", "volcano_wait"}
     vol = next(e for e in body["waiting"] if e["stage"] == "volcano_wait")
     assert vol["request_id"] is None and vol["detail"]["phase_ref"] is None
     assert body["queue"] == {"name": "dms-data", "state": "Open"} and len(body["podgroups"]) == 1

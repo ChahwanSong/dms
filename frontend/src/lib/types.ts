@@ -630,9 +630,9 @@ export interface QueuePipeline {
   confirm: (QueueStageStat & {
     soonest_expiry: string | null; soonest_expiry_seconds: number | null;
   }) | null;
-  // count = queued(아직 요청이 안 된 Queued 항목) + held(확인 대기가 아닌 배치의 미리보기 마친 자식 -- 확인된 배치의 실행
-  // 슬롯·형제 미리보기를 기다린다; null = 잡 축을 못 읽어 모름), batches = 행(배치) 수, preview_ready_batches = 배치 확인
-  // 대기 배치 수. queued·held 는 2026-10-16 이후 서버만 보낸다(옛 응답은 undefined).
+  // count = queued(아직 요청이 안 된 Queued 항목) + held(굴러가는 배치의 미리보기 마친 자식 -- 확인된 배치의 실행 슬롯·형제
+  // 미리보기를 기다린다), batches = 행(배치) 수, preview_ready_batches = 배치 확인 대기 배치 수. 서버는 잡 축을 못 읽으면
+  // 이 칸 전체를 null 로 낸다. queued·held 는 2026-10-16 이후 서버만 보낸다(옛 응답은 undefined).
   batch: (QueueStageStat & {
     batches: number; preview_ready_batches: number; queued?: number; held?: number | null;
   }) | null;
@@ -647,7 +647,7 @@ export interface QueueWaitDetail {
   jobs?: number;                        // confirm(배치 묶음): 확인 대기 자식 수
   batch_status?: string | null; batch_name?: string | null;                    // confirm(배치 묶음)·batch
   queued?: number; max_concurrency?: number | null;                             // batch
-  held?: number | null;                 // batch: 확인 대기가 아닌 배치의 미리보기 마친 자식 수(null = 모름)
+  held?: number | null;                 // batch: 굴러가는 배치의 미리보기 마친 자식 수
   exec_preflight?: boolean;             // preflight: 확인 뒤 실행 전 재점검(실행 vcjob 제출 전)
 }
 export interface QueueWaitEntry {
