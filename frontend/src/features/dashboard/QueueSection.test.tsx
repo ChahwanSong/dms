@@ -107,6 +107,10 @@ test("waitTone: 확인 대기는 긴 문턱, 배치 대기는 적색 없음, 실
   expect(waitTone("batch", 10 * 3600)).toBe("attn");             // 큰 배치는 정상적으로 오래 돈다
   expect(waitTone("running", 10 * 3600)).toBe("none");
   expect(waitTone("planning", null)).toBe("none");                 // 모름은 색을 지어내지 않는다
+  // Volcano 대기: 워커 CPU 요청 뒤로는 앞 잡이 노드를 쓰는 동안 줄을 서는 것이 정상이다 -- 30분은 무색, 1시간부터 주의만(적색 없음)
+  expect(waitTone("volcano_wait", 1800)).toBe("none");
+  expect(waitTone("volcano_wait", 3600)).toBe("attn");
+  expect(waitTone("volcano_wait", 24 * 3600)).toBe("attn");
 });
 
 test("대기 표: 요청 상세·배치 링크, 만료 카운트다운, 계획 유예 사유, PodGroup 사유", async () => {
@@ -230,6 +234,8 @@ test("podgroups 축만 null 이면 Volcano 대기만 알 수 없음이고 DMS �
   expect(screen.getByRole("button", { name: "Volcano 대기 —" })).toBeInTheDocument();
   expect(screen.getByText("노드 신원 전파 대기")).toBeInTheDocument();
   expect(within(screen.getByTestId("queue-stage-running")).getByText("Volcano 대기 포함")).toBeInTheDocument();
+  // 맨 위 요약의 실행 수도 같은 사실을 말한다 -- 과대값을 확정값처럼 내지 않는다
+  expect(screen.getByText("대기 36+ · 실행 3(Volcano 대기 포함)")).toBeInTheDocument();
   expect(screen.queryByText(/Volcano PodGroup —/)).toBeNull();   // 모르는 카운터는 줄째 숨긴다
   expect(screen.queryByText(/대기 정보를 알 수 없습니다/)).toBeNull();
 });
@@ -309,8 +315,9 @@ test("흐름을 모르면(옛 응답·축 실패) 입자를 그리지 않고 완
   expect(within(done).getByText("—")).toBeInTheDocument();
   expect(within(done).getByText("읽지 못함")).toBeInTheDocument();
   expect(particles(container)).toHaveLength(0);
-  // 리본도 멈춘다(그라데이션 방향만 남는다)
+  // 리본도, 확인 관문 고리의 점선(줄기·가지)도 멈춘다(그라데이션 방향만 남는다)
   expect(container.querySelector('[class*="animate-flow"]')).toBeNull();
+  expect(container.querySelector('[class*="animate-dash"]')).toBeNull();
   expect(screen.getByText("대기 37 · 실행 3")).toBeInTheDocument();
   expect(screen.queryByText(/알 수 없/)).toBeNull();          // 단계는 다 읽었다 -- 「모름」 문구는 단계 칸의 것만
 });
@@ -318,7 +325,13 @@ test("흐름을 모르면(옛 응답·축 실패) 입자를 그리지 않고 완
 test("모르는 단계가 섞이면 대기 합은 하한(+), 상한에 찬 흐름은 완료도 하한이다", async () => {
   renderQueue({ ...FULL, pipeline: { ...PIPE, volcano_wait: null }, flow: { ...FLOW, saturated: true } });
   expect(await screen.findByText("대기 36+ · 실행 3 · 최근 5분 완료 7+")).toBeInTheDocument();
-  expect(within(screen.getByTestId("queue-stage-done")).getByText("최근 5분 · 하한값")).toBeInTheDocument();
+  const done = screen.getByTestId("queue-stage-done");
+  expect(within(done).getByText("최근 5분 · 하한값")).toBeInTheDocument();
+  // 흐름에서 나온 숫자는 전부 하한이다 -- 완료 역의 수와 역마다의 이탈도 「+」
+  expect(within(done).getByText("7+")).toBeInTheDocument();
+  expect(within(done).queryByText("7")).toBeNull();
+  expect(within(screen.getByTestId("queue-stage-preflight")).getByText("최근 5분 이탈 2+")).toBeInTheDocument();
+  expect(screen.queryByText("최근 5분 이탈 2")).toBeNull();
 });
 
 test("드레인이면 stepper 가 움직이는 구간의 입자가 멈춘다 -- planner 구간은 그대로 흐른다", async () => {
@@ -327,4 +340,28 @@ test("드레인이면 stepper 가 움직이는 구간의 입자가 멈춘다 -- 
   expect(particles(pickup)).toHaveLength(0);
   expect(particles(screen.getByTestId("queue-stage-planning")).length).toBeGreaterThan(0);   // 계획 → 픽업: planner
   expect(particles(screen.getByTestId("queue-stage-running"))).toHaveLength(0);              // 실행 중 → 완료: stepper
+});
+
+// 고리 점선(줄기·가지·SVG)의 키프레임은 흐름이 있는 다리에서만 돈다 -- stroke-dashoffset 은 합성되지 않아 조건 없이 돌면
+// 대시보드가 떠 있는 내내 메인 스레드를 60fps 로 돌렸다(2026-10-16 리뷰). 한 다리의 줄기·점선·입자는 함께 서고 함께 움직인다.
+const dash = (root: Element) => root.querySelectorAll('[class*="animate-dash"]');
+
+test("고리 점선은 그 다리에 흐름이 있을 때만 흐른다 -- 내려가는 다리는 드레인이면 멈추고 올라가는 다리(컨펌)는 그대로", async () => {
+  // FLOW: 실행 중 → 확인 1, 확인 → 사전 점검 0 -- 내려가는 다리만 흐른다
+  const { unmount } = renderQueue({ ...FULL, flow: FLOW });
+  const running = await screen.findByTestId("queue-stage-running");
+  expect(running.querySelector('[class*="animate-dash-down"]')).not.toBeNull();
+  expect(dash(screen.getByTestId("queue-stage-preflight"))).toHaveLength(0);
+  expect(screen.getByTestId("queue-stage-confirm").querySelector('[class*="animate-dash-flow"]')).not.toBeNull();
+  unmount();
+
+  // 드레인 + 컨펌 흐름: 내려가는 다리(stepper)는 줄기·가지·입자 모두 멈추고, 올라가는 다리는 흐른다
+  const up = { ...FLOW, edges: { ...FLOW.edges, "confirm>preflight": 2, "batch>preflight": 1 } };
+  renderQueue({ ...FULL, flow: up, control: { drain: true, maintenance: false, reason: null } });
+  const preflight = await screen.findByTestId("queue-stage-preflight");
+  expect(preflight.querySelector('[class*="animate-dash-up"]')).not.toBeNull();
+  expect(dash(screen.getByTestId("queue-stage-running"))).toHaveLength(0);
+  const confirm = screen.getByTestId("queue-stage-confirm");
+  expect(dash(confirm)).toHaveLength(0);
+  expect(particles(confirm)).toHaveLength(0);
 });

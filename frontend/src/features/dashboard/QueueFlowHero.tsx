@@ -23,8 +23,14 @@ import { STAGE_HELP, STAGE_LABEL, waitText, waitTone, type Tone } from "./queueS
 //
 // 움직임 규칙: 모든 키프레임은 motion-safe 변형(움직임 줄이기면 정지 -- 그라데이션 방향·화살표가 흐름을 말한다). 움직이는 것은
 // 전부 aria-hidden 장식 자식뿐이다 -- 역·HelpTip 자체에 무한 transform 을 걸면 Playwright 의 stable 판정이 끝나지 않는다.
+// 한 구간(리본 구간 · 고리의 내려가는/올라가는 다리)의 리본·점선·입자는 한 규칙으로 함께 서고 함께 움직인다: 흐름(flow)을
+// 모르면 전부 정지, 드레인이면 stepper 구간만 정지, 고리 점선·입자는 그 다리에 최근 창 흐름이 있을 때만 움직인다(리본은
+// 단계 순서 장식이라 흐름을 알면 늘 흐른다). 대시보드가 떠 있는 내내 도는 것은 합성(컴포지터)되는 transform·opacity
+// 키프레임뿐이다 -- 합성되지 않는 stroke-dashoffset(고리 점선)·offset-distance(곡선 입자)는 흐름이 있는 다리에만 붙는다
+// (2026-10-16 리뷰 실측: 조건 없이 돌던 점선이 메인 스레드를 60fps 로 돌렸다).
 // 5초 폴링 리렌더에도 키(역·구간·입자 순번)가 고정이라 DOM 이 유지되고 애니메이션이 처음부터 다시 돌지 않는다. aria-live 없음
 // (5초마다 낭독 폭주). 숫자는 역마다 정확히 한 요소(QueueSection.test 의 within(역).getByText 고정점) -- 단계 번호 배지 금지.
+// 상한에 찬 흐름(flow.saturated)은 하한이다 -- 흐름에서 나온 숫자(이탈·완료·요약)는 전부 「+」를 붙인다.
 
 type FlowStage = QueueStage | "done";
 type LineStage = Exclude<FlowStage, "confirm">;
@@ -81,6 +87,13 @@ const SEGMENT: Partial<Record<LineStage, { grad: string; edges: QueueFlowEdge[] 
 };
 const LOOP_DOWN: QueueFlowEdge[] = ["running>confirm", "running>batch"];
 const LOOP_UP: QueueFlowEdge[] = ["confirm>preflight", "batch>preflight"];
+
+// 확인 관문 고리의 두 다리의 처리량(움직임의 재료). 내려가는 다리(실행 중 → 확인: 미리보기 끝을 stepper 가 기록한다)는
+// 드레인이면 0, 올라가는 다리(확인 → 사전 점검: 사람·오케스트레이터의 컨펌 -- 드레인이 멈추지 않는다)는 그대로. 흐름을
+// 모르면 둘 다 0 이다(edgeSum). 줄기·점선·입자가 모두 이 값 하나를 본다 -- 한 다리의 반쪽만 멈춘 그림이 생기지 않게.
+function loopLegs(flow: QueueFlow | null, paused: boolean): { down: number; up: number } {
+  return { down: paused ? 0 : edgeSum(flow, LOOP_DOWN), up: edgeSum(flow, LOOP_UP) };
+}
 const EXIT_STAGES = new Set<string>(["planning", "pickup", "preflight", "running", "confirm", "batch"]);
 const WAIT_STAGES: QueueStage[] = ["batch", "planning", "pickup", "preflight", "volcano_wait", "confirm"];
 
@@ -112,9 +125,12 @@ const TONE_RING: Record<Tone, string> = {
 };
 const SUB_TONE: Record<Tone, string> = { none: "text-ink/70", attn: "text-attn", bad: "text-bad" };
 
-function Disc({ stage, count, tone }: { stage: FlowStage; count: number | null; tone: Tone }) {
+// atLeast = 하한(상한에 찬 흐름에서 온 수) -- 「7+」.
+function Disc({ stage, count, tone, atLeast = false }: {
+  stage: FlowStage; count: number | null; tone: Tone; atLeast?: boolean;
+}) {
   const skin = SKIN[stage];
-  const text = count === null ? "—" : String(count);
+  const text = count === null ? "—" : `${count}${atLeast ? "+" : ""}`;
   return (
     <span className="relative z-10 col-start-1 row-span-2 row-start-1 grid h-11 w-11 shrink-0 place-items-center
                      xl:mt-2 xl:h-14 xl:w-14">
@@ -132,11 +148,16 @@ function Disc({ stage, count, tone }: { stage: FlowStage; count: number | null; 
   );
 }
 
+// xl 라벨 줄은 원·리본·고리의 높이 기준(SEG_POS·LOOP_Y 의 24px)이라 늘 한 줄이어야 한다 -- 줄바꿈을 막고(nowrap) 물음표
+// 버튼 오른쪽의 투명 여백(아이콘 16 둘레 4px)을 음수 여백으로 접어 가로 몫을 줄인다. 가장 좁은 xl(뷰포트 1280 + 일반
+// 스크롤바 15px = 안쪽 1265, 칸 129px · 라벨 줄 117px)에서 가장 긴 「Volcano 실행 중」(글자 93 + 틈 2 + 버튼 24)이 두 줄로
+// 접혀 24px 줄을 넘치고 원 링에 붙었다(2026-10-16 리뷰). 지금은 그 폭에서 115px 로 줄 안이고, 더 좁은 글꼴 대체가 와도
+// 한 줄로 남아 칸 자신의 좌우 여백(px-1.5) 쪽으로 고르게 넘칠 뿐이다.
 function StationLabel({ label, help }: { label: string; help: string }) {
   return (
     <div className="col-start-2 row-start-1 flex min-h-[1.5rem] min-w-0 items-center gap-0.5 xl:h-6 xl:justify-center">
-      <span className="text-[13px] font-medium leading-tight text-ink break-keep">{label}</span>
-      <HelpTip label={`${label} 설명`} head={label} help={help} />
+      <span className="text-[13px] font-medium leading-tight text-ink break-keep xl:whitespace-nowrap">{label}</span>
+      <HelpTip label={`${label} 설명`} head={label} help={help} className="xl:-mr-1" />
     </div>
   );
 }
@@ -147,7 +168,7 @@ function StationLabel({ label, help }: { label: string; help: string }) {
 function Segment({ grad, rate, paused, still, pos, round = "rounded-full" }: {
   grad: string; rate: number; paused: boolean; still: boolean; pos: string; round?: string;
 }) {
-  const { n, dur } = paused ? { n: 0, dur: 0 } : particlesFor(rate);
+  const { n, dur } = paused || still ? { n: 0, dur: 0 } : particlesFor(rate);
   return (
     <span aria-hidden className={`pointer-events-none absolute ${pos}`}>
       <span className={`absolute inset-0 overflow-hidden ${round} ${paused ? "opacity-50 saturate-50" : ""}`}>
@@ -179,9 +200,10 @@ function Segment({ grad, rate, paused, still, pos, round = "rounded-full" }: {
 }
 
 // 곡선 위 입자(확인 관문 고리) -- 곡선은 그 자리에서 잰 좌표의 path() 다. 입자는 컨테이너 왼쪽 위(0,0)에 두어 path 좌표의
-// 원점이 컨테이너와 같게 한다.
-function PathParticles({ path, rate, paused }: { path: string; rate: number; paused: boolean }) {
-  const { n, dur } = paused ? { n: 0, dur: 0 } : particlesFor(rate);
+// 원점이 컨테이너와 같게 한다. rate 는 loopLegs 가 드레인·모름을 이미 접은 값이다 -- 0 이면 입자 자체가 없다(offset-distance
+// 키프레임은 합성되지 않으므로 흐름 없는 다리에서 돌지 않게).
+function PathParticles({ path, rate }: { path: string; rate: number }) {
+  const { n, dur } = particlesFor(rate);
   return (
     <>
       {Array.from({ length: n }, (_, i) => (
@@ -250,7 +272,7 @@ function TextLines({ stage, lines, flow }: { stage: QueueStage; lines: Lines; fl
       ))}
       {exits > 0 && flow !== null && (
         <p className="col-start-2 text-[11px] leading-snug text-ink/70 break-keep xl:mt-0.5 xl:text-center">
-          {`최근 ${waitText(flow.window_seconds)} 이탈 ${exits}`}
+          {`최근 ${waitText(flow.window_seconds)} 이탈 ${exits}${flow.saturated ? "+" : ""}`}
         </p>
       )}
     </>
@@ -266,15 +288,18 @@ const SEG_POS = "left-[15px] top-[22px] h-[calc(100%+1rem)] w-3.5 xl:left-1/2 xl
 
 // 고리 줄기(xl): 사전 점검·실행 중 칸의 글자 밑에서 칸 바닥(+ 줄 간격)까지 -- 아래 줄 확인 관문 고리의 다리가 여기서 이어진다
 // (윗줄 높이는 가장 긴 칸이 정하므로 다리를 고리 쪽에서만 그리면 짧은 칸 밑에 빈틈이 남았다). 실행 중 줄기는 내려가고(시작 점),
-// 사전 점검 줄기는 올라간다(화살촉). 점선은 고리 SVG 와 같은 마디(6 + 10)를 배경으로 그려 같은 빠르기로 흐른다.
-function LoopStub({ dir, paused }: { dir: "up" | "down"; paused: boolean }) {
+// 사전 점검 줄기는 올라간다(화살촉). 점선은 고리 SVG 와 같은 마디(6 + 10)를 배경으로 그려 같은 빠르기로 흐른다 -- 한 마디(16px)
+// 더 긴 점선 층을 잘라 낸 창 안에서 transform 으로 민다(합성된다). moving = 그 다리에 흐름이 있다(loopLegs).
+function LoopStub({ dir, moving }: { dir: "up" | "down"; moving: boolean }) {
   return (
     <span aria-hidden className="pointer-events-none relative hidden xl:-mb-3 xl:mt-2 xl:block xl:min-h-[14px] xl:w-2
                                  xl:flex-1">
       <span className="absolute inset-0 rounded-t-full bg-stage-confirm" />
-      <span className={`absolute inset-y-0 left-1/2 w-[1.75px] -translate-x-1/2 bg-gradient-to-b
-                        from-stage-confirm-ink/45 from-[37.5%] to-transparent to-[37.5%] bg-[length:100%_16px] bg-repeat-y
-                        ${paused ? "" : dir === "down" ? "motion-safe:animate-dash-down" : "motion-safe:animate-dash-up"}`} />
+      <span className="absolute inset-y-0 left-1/2 w-[1.75px] -translate-x-1/2 overflow-hidden">
+        <span className={`absolute inset-x-0 -top-4 bottom-0 bg-gradient-to-b from-stage-confirm-ink/45 from-[37.5%]
+                          to-transparent to-[37.5%] bg-[length:100%_16px] bg-repeat-y
+                          ${!moving ? "" : dir === "down" ? "motion-safe:animate-dash-down" : "motion-safe:animate-dash-up"}`} />
+      </span>
       {dir === "down"
         ? <span className="absolute -top-0.5 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-stage-confirm-ink/50" />
         : <ChevronUp className="absolute -top-2 left-1/2 h-3.5 w-3.5 -translate-x-1/2 text-stage-confirm-ink/80"
@@ -300,8 +325,8 @@ function LineStation({ stage, pipeline, flow, paused }: {
       <StationLabel label={STAGE_LABEL[stage]} help={STAGE_HELP[stage]} />
       <Disc stage={stage} count={lines.stat === null ? null : lines.stat.count} tone={lines.tone} />
       <TextLines stage={stage} lines={lines} flow={flow} />
-      {stage === "running" && <LoopStub dir="down" paused={paused} />}
-      {stage === "preflight" && <LoopStub dir="up" paused={false} />}
+      {stage === "running" && <LoopStub dir="down" moving={loopLegs(flow, paused).down > 0} />}
+      {stage === "preflight" && <LoopStub dir="up" moving={loopLegs(flow, paused).up > 0} />}
     </li>
   );
 }
@@ -316,11 +341,11 @@ function ConfirmStation({ pipeline, flow, paused }: {
 }) {
   const lines = stationLines("confirm", pipeline);
   const [ref, w] = useWidth<HTMLLIElement>();
-  const down = edgeSum(flow, LOOP_DOWN);
-  const up = edgeSum(flow, LOOP_UP);
+  const { down, up } = loopLegs(flow, paused);
   const xl = w / 6, xr = (5 * w) / 6, xc = w / 2, y = LOOP_Y, r = LOOP_R;
   // 다리 위끝(y 0)은 위 줄 사전 점검·실행 중 칸의 고리 줄기(LoopStub)에 이어진다.
   const loop = `M ${xr} 0 V ${y - r} Q ${xr} ${y} ${xr - r} ${y} H ${xl + r} Q ${xl} ${y} ${xl} ${y - r} V 0`;
+  // 두 다리는 따로 움직이므로(loopLegs) 점선도 두 path 다. 이음매(xc)는 확인 역 원 밑이라 보이지 않는다.
   const legDown = `M ${xr} 0 V ${y - r} Q ${xr} ${y} ${xr - r} ${y} H ${xc}`;
   const legUp = `M ${xc} ${y} H ${xl + r} Q ${xl} ${y} ${xl} ${y - r} V 0`;
   // 좁은 폭의 가지: 실행 중 원 밑(본선 오른쪽 가장자리 x 29, 이 행 위 20px -- 줄 간격 16 + 실행 중 칸의 원 아래 여백)에서
@@ -339,10 +364,11 @@ function ConfirmStation({ pipeline, flow, paused }: {
       <span aria-hidden className="pointer-events-none absolute left-0 top-0 xl:hidden">
         <svg className="absolute -top-5 left-0 overflow-visible" width="52" height="44" viewBox="0 -20 52 44">
           <path d={branch} fill="none" className="stroke-stage-confirm" strokeWidth="6" strokeLinecap="round" />
-          <path d={branch} fill="none" className="stroke-stage-confirm-ink/50 motion-safe:animate-dash-flow"
+          <path d={branch} fill="none"
+                className={`stroke-stage-confirm-ink/50 ${down > 0 ? "motion-safe:animate-dash-flow" : ""}`}
                 strokeWidth="1.5" strokeDasharray="4 4" strokeLinecap="round" />
         </svg>
-        <PathParticles path={branch} rate={down} paused={paused} />
+        <PathParticles path={branch} rate={down} />
       </span>
       {/* xl: 실행 중에서 내려와 확인 역을 지나 사전 점검으로 올라가는 고리. 너비를 재기 전(0)엔 그리지 않는다. */}
       {w > 0 && (
@@ -351,11 +377,14 @@ function ConfirmStation({ pipeline, flow, paused }: {
           <svg className="absolute inset-0 overflow-visible" width={w} height={y + 4}>
             <path d={loop} fill="none" className="stroke-stage-confirm" strokeWidth="8" strokeLinecap="round"
                   strokeLinejoin="round" />
-            <path d={loop} fill="none" className="stroke-stage-confirm-ink/45 motion-safe:animate-dash-flow"
-                  strokeWidth="1.75" strokeDasharray="6 10" strokeLinecap="round" />
+            {([[legDown, down], [legUp, up]] as const).map(([d, rate], i) => (
+              <path key={i} d={d} fill="none"
+                    className={`stroke-stage-confirm-ink/45 ${rate > 0 ? "motion-safe:animate-dash-flow" : ""}`}
+                    strokeWidth="1.75" strokeDasharray="6 10" strokeLinecap="round" />
+            ))}
           </svg>
-          <PathParticles path={legDown} rate={down} paused={paused} />
-          <PathParticles path={legUp} rate={up} paused={false} />
+          <PathParticles path={legDown} rate={down} />
+          <PathParticles path={legUp} rate={up} />
         </span>
       )}
       <StationLabel label={STAGE_LABEL.confirm} help={STAGE_HELP.confirm} />
@@ -381,14 +410,16 @@ function DoneStation({ flow }: { flow: QueueFlow | null }) {
   return (
     <li data-testid="queue-stage-done" data-tone="none" className={`${LI} xl:col-start-7 xl:row-start-1`}>
       <StationLabel label={DONE_LABEL} help={DONE_HELP} />
-      <Disc stage="done" count={flow === null ? null : flow.done} tone="none" />
+      <Disc stage="done" count={flow === null ? null : flow.done} tone="none" atLeast={flow?.saturated === true} />
       <p className="col-start-2 text-xs leading-snug text-ink/70 break-keep xl:mt-2.5 xl:text-center">{sub}</p>
     </li>
   );
 }
 
 /** 머리줄 요약 「대기 N · 실행 M · 최근 5분 완료 K」 -- 한 텍스트 노드(대시보드의 정확 일치 「대기」·「실행 중」 타일과 겹치지
- *  않게). 모르는 단계가 섞이면 대기는 하한(+), 흐름을 모르면 완료를 뺀다. 아무것도 모르면 null. */
+ *  않게). 모르는 단계가 섞이면 대기는 하한(+), 흐름을 모르면 완료를 뺀다. 아무것도 모르면 null. PodGroup 을 못 읽어 실행 수에
+ *  Volcano 대기가 섞였으면(includes_volcano_wait) 그 사실을 실행 수 옆에 적는다 -- 역 안의 같은 표기만으로는 맨 위 요약이
+ *  과대값을 확정값처럼 말했다(2026-10-16 리뷰). */
 export function flowSummary(pipeline: QueuePipeline | null, flow: QueueFlow | null): string | null {
   const parts: string[] = [];
   const known = WAIT_STAGES.map((s) => pipeline?.[s] ?? null).filter((s) => s !== null);
@@ -396,9 +427,13 @@ export function flowSummary(pipeline: QueuePipeline | null, flow: QueueFlow | nu
     const n = known.reduce((a, s) => a + s.count, 0);
     parts.push(`대기 ${n}${known.length < WAIT_STAGES.length ? "+" : ""}`);
   }
-  if (pipeline?.running) parts.push(`실행 ${pipeline.running.count}`);
+  if (pipeline?.running) {
+    parts.push(`실행 ${pipeline.running.count}${pipeline.running.includes_volcano_wait ? "(Volcano 대기 포함)" : ""}`);
+  }
   if (flow !== null) parts.push(`최근 ${waitText(flow.window_seconds)} 완료 ${flow.done}${flow.saturated ? "+" : ""}`);
-  return parts.length > 0 ? parts.join(" · ") : null;
+  // 좁은 폭에서 줄은 「 · 」 뒤에서만 바뀐다 -- 마디 안은 줄바꿈 없는 공백(375 에서 「(Volcano 대기 포」/「함)」으로 갈렸다).
+  // 한 텍스트 노드는 그대로다(정확 일치 단언의 공백 정규화가 줄바꿈 없는 공백도 보통 공백으로 읽는다).
+  return parts.length > 0 ? parts.map((p) => p.replace(/ /g, "\u00a0")).join("\u00a0· ") : null;
 }
 
 export function FlowLegend() {

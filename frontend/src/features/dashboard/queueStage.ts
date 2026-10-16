@@ -29,7 +29,8 @@ export const STAGE_HELP: Record<QueueStage, string> = {
   planning: "요청이 접수돼 planner 가 도구·노드를 정하기를 기다립니다(10초 주기, 노드 신원 전파 유예 최대 5분).",
   pickup: "계획된 잡을 stepper 가 집기를 기다립니다(5초 주기). 운영자가 잡 진행을 멈춰 두면 여기서 멈춥니다.",
   preflight: "노드 사전 점검 파드가 도는 중입니다. 확인 뒤 실행 직전의 재점검도 여기로 다시 들어옵니다.",
-  volcano_wait: "Volcano 가 gang(필요한 파드 전부)을 아직 올리지 못했습니다(PodGroup Pending·Inqueue).",
+  volcano_wait: "Volcano 가 gang(필요한 파드 전부)을 아직 올리지 못했습니다(PodGroup Pending·Inqueue). 워커가 프로세스 "
+    + "수만큼 CPU 를 예약하므로 앞선 잡이 노드 CPU 를 쓰는 동안 여기서 차례를 기다리는 것은 정상입니다.",
   running: "Volcano 에서 실행 중인 미리보기·실행 잡입니다(대기가 아닙니다).",
   confirm: "미리보기가 끝나 사람의 컨펌(단건) 또는 확인 대기 배치의 「배치 확인」을 기다립니다. 승인되면 실행 직전 재점검을 "
     + "위해 사전 점검으로 돌아갑니다. 유효기간이 지나면 거부됩니다.",
@@ -37,14 +38,17 @@ export const STAGE_HELP: Record<QueueStage, string> = {
     + "실행 슬롯이나 다른 항목의 미리보기를 기다리는 항목입니다(사람이 할 일은 없습니다).",
 };
 
-// 색 문턱(초) -- 가장 오래 기다린 시간이 attn 이상이면 주의(앰버), bad 이상이면 경고(적색). 기계 단계는 주기가 초 단위라
+// 색 문턱(초) -- 가장 오래 기다린 시간이 attn 이상이면 주의(앰버), bad 이상이면 경고(적색). DMS 기계 단계는 주기가 초 단위라
 // 5분이면 이미 이상하다(planner 신원 전파 유예 상한도 5분). 확인 대기는 사람이 누르는 단계라 길다: 유효기간(기본 24시간)의
-// 1/6·1/2. 배치 대기는 큰 배치가 상한만큼씩 도는 정상 상태라 적색을 쓰지 않는다(알람 피로). 실행 중은 대기가 아니라 색이 없다.
+// 1/6·1/2. 배치 대기는 큰 배치가 상한만큼씩 도는 정상 상태라 적색을 쓰지 않는다(알람 피로). Volcano 대기도 같다(2026-10-16
+// 리뷰): 워커가 프로세스 수만큼 CPU 를 요청한 뒤로는 앞선 잡이 노드를 다 쓰는 동안 다음 잡이 줄을 서는 것이 정상이라, 앞
+// 잡이 30분 넘게 돌면 정상 대기가 맨 위 히어로에 적색 「경고」로 떴다 -- 실행 시간 규모인 1시간에 주의만 낸다(멈춘 PodGroup
+// 은 대기 표의 사유·메시지가 말한다). 실행 중은 대기가 아니라 색이 없다.
 const TONE_LIMITS: Record<QueueStage, { attn: number; bad: number | null } | null> = {
   planning: { attn: 300, bad: 1800 },
   pickup: { attn: 300, bad: 1800 },
   preflight: { attn: 300, bad: 1800 },
-  volcano_wait: { attn: 300, bad: 1800 },
+  volcano_wait: { attn: 3600, bad: null },
   running: null,
   confirm: { attn: 4 * 3600, bad: 12 * 3600 },
   batch: { attn: 3600, bad: null },

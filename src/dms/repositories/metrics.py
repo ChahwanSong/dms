@@ -49,6 +49,10 @@ FLOW_WINDOW_SECONDS = 300
 FLOW_SCAN_CAP = 5000
 # 배치 오케스트레이터의 자식 컨펌(batch_orchestrator._confirm_child) actor -- 사람의 컨펌(사용자 이름)과 가른다.
 _ORCHESTRATOR_ACTOR = "batch-orchestrator"
+# 흐름을 떠나는 잡 종단(성공 밖) -- Executing 이탈의 재점검 쪽 판정(pre)이 이 행에만 잡 행을 조회한다.
+_FLOW_EXIT_STATES = tuple(sorted(s.value for s in TERMINAL_DATA_JOB_STATES if s != DataJobState.SUCCEEDED))
+# 확인 대기 배치 -- 그 자식의 ConfirmPending 이탈은 확인 대기 칸의 것이다(queue_pipeline 모듈 docstring 의 confirm).
+_PREVIEW_READY = "PreviewReady"
 
 
 def _in(prefix, values):
@@ -400,12 +404,21 @@ class MetricsRepository:
         PK 역순 상한(cap) 안에서만 창(at >= since)으로 거른다(FLOW_SCAN_CAP 주석의 비용 근거). 배치 자식 여부는 두 가지
         전이에서만 묻는다: 요청 생성(None→Pending -- 직접 제출과 배치 materialize 를 가른다) · ConfirmPending 진입/이탈(단건
         확인 대기와 배치 held 를 가른다). 스칼라 서브쿼리라 창 안 그 행 수만큼 PK 조회다. 요청 행이 없으면(FK 가 없다)
-        NULL -- 「직접 제출」·「단건」 쪽으로 접힌다(조립이 정한다). 재점검 쪽(pre)은 Executing 에서의 이탈 중 실행 전
-        재점검·실행 제출 실패(stepper 의 execution_recheck_* · execution_submit_failed 사유, 재점검 거부 Rejected)다 --
-        같은 Executing 이라도 사전 점검 칸에서 떨어진 것이다.
+        NULL -- 「직접 제출」·「단건」 쪽으로 접힌다(조립이 정한다). ConfirmPending **이탈**이면 배치 상태도 본다: 지금
+        확인 대기(PreviewReady)인 배치의 자식은 2 -- 화면(build_queue_view)이 그 자식을 배치 대기가 아니라 확인 대기 칸에
+        세므로 이탈도 그 칸의 것이다(배치 행은 PK 조회 하나 더). 상태는 **조회 시점**의 것이다 -- 배치는 전이 행을 남기지
+        않아 이탈 순간의 상태를 되돌려 읽을 길이 없다(근사의 범위는 queue_pipeline.build_flow docstring).
+
+        재점검 쪽(pre)은 Executing 에서의 **이탈** 중 실행 vcjob 을 내기 전에 떨어진 것이다 -- 같은 Executing 이라도 화면은
+        실행 ref 가 없는 잡을 사전 점검 칸(실행 전 재점검)에 센다. 판정은 실행 제출 앵커(data_jobs.exec_submitted_at --
+        stepper._submit_execution 이 vcjob 제출 직후 write-once 로 남긴다)다: 이탈한 잡은 종단이라 앵커가 더는 바뀌지 않고,
+        비어 있으면 제출 전에 떨어졌다(재점검 실패·노드 CPU 부족·노드 제외·제출 실패·재점검 중 취소 -- 사유를 하나하나
+        열거하면 새 사유가 생길 때마다 실행 중으로 샌다). 잡 행이 없으면(요청 삭제) 앵커를 모른다 -- 사유로만 가른다
+        (재점검 거부 Rejected · execution_recheck_* · execution_submit_failed). 이탈 행에만 도는 PK 조회 하나다.
 
         두 방언 공통: 묶음은 파생 테이블의 평범한 열로만 한다(스칼라 서브쿼리 식을 GROUP BY 위치 참조로 묶지 않는다)."""
         since = iso_plus(now or utc_now_iso(), -window_seconds)
+        xph, xparams = _in("x", _FLOW_EXIT_STATES)
         rows = self._db.query(
             f"""SELECT kind, f, t, by_orch, in_batch, pre, COUNT(*) AS n
                 FROM (SELECT x.entity_kind AS kind, x.from_state AS f, x.to_state AS t,
@@ -415,21 +428,30 @@ class MetricsRepository:
                                           FROM requests r WHERE r.request_id = x.entity_id)
                                   WHEN x.entity_kind = 'data_job'
                                        AND (x.to_state = '{_CONFIRM}' OR x.from_state = '{_CONFIRM}')
-                                    THEN (SELECT CASE WHEN r.batch_id IS NULL THEN 0 ELSE 1 END
+                                    THEN (SELECT CASE WHEN r.batch_id IS NULL THEN 0
+                                                      WHEN x.from_state = '{_CONFIRM}'
+                                                           AND b.status = '{_PREVIEW_READY}' THEN 2
+                                                      ELSE 1 END
                                           FROM data_jobs j JOIN requests r ON r.request_id = j.request_id
+                                               LEFT JOIN batches b ON b.batch_id = r.batch_id
                                           WHERE j.job_id = x.entity_id)
                              END AS in_batch,
                              CASE WHEN x.entity_kind = 'data_job' AND x.from_state = 'Executing'
-                                       AND (x.to_state = 'Rejected' OR x.reason_code LIKE :recheck
-                                            OR x.reason_code LIKE :exec_submit)
-                                  THEN 1 ELSE 0 END AS pre
+                                       AND x.to_state IN ({xph})
+                                  THEN CASE WHEN x.to_state = 'Rejected' OR x.reason_code LIKE :recheck
+                                                 OR x.reason_code LIKE :exec_submit
+                                                 OR EXISTS (SELECT 1 FROM data_jobs j
+                                                            WHERE j.job_id = x.entity_id
+                                                              AND j.exec_submitted_at IS NULL)
+                                            THEN 1 ELSE 0 END
+                                  ELSE 0 END AS pre
                       FROM (SELECT entity_kind, entity_id, from_state, to_state, reason_code, actor, at
                             FROM state_transitions ORDER BY id DESC LIMIT :cap) x
                       WHERE x.at >= :since AND x.entity_kind IN ('request', 'data_job')) y
                 GROUP BY kind, f, t, by_orch, in_batch, pre""",
             # LIKE 패턴은 파라미터로 -- SQL 본문의 '%' 는 PG(psycopg pyformat)에서 자리표시자로 읽혀 깨진다.
             {"cap": cap, "since": since, "recheck": "execution_recheck%",
-             "exec_submit": "execution_submit_failed%"})
+             "exec_submit": "execution_submit_failed%", **xparams})
         for r in rows:
             r["n"] = int(r["n"])
         probe = self._db.query_one(

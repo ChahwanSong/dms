@@ -326,9 +326,10 @@ def build_queue_view(now: float, *, pods, planning, jobs, batches,
 # 트랜잭션) · 요청 Planned→종단(잡 종단·고아 복구의 사본).
 #
 # 이탈(exits) = 종단 실패·거부·취소·만료로 흐름을 떠난 수를 **떠난 단계**로 센다. 갈래가 상태만으로 갈리지 않는 곳:
-#   Executing 에서의 이탈은 재점검·실행 제출 실패면 사전 점검(저장소의 pre), 아니면 실행 중. PreviewRunning·Running 에서의
-#   이탈은 Volcano 대기 중 차단과 실행 중 실패가 사유로만 갈려 실행 중으로 접는다(volcano_wait 이탈 키가 없는 이유).
-#   ConfirmPending 에서의 이탈은 배치 자식이면 배치 대기, 아니면 확인 대기.
+#   Executing 에서의 이탈은 실행 vcjob 을 내기 전이면 사전 점검(저장소의 pre -- 실행 제출 앵커), 아니면 실행 중.
+#   PreviewRunning·Running 에서의 이탈은 Volcano 대기 중 차단과 실행 중 실패가 사유로만 갈려 실행 중으로 접는다
+#   (volcano_wait 이탈 키가 없는 이유). ConfirmPending 에서의 이탈은 단건·확인 대기(PreviewReady) 배치의 자식이면 확인
+#   대기, 그 밖의 배치 자식(held)이면 배치 대기 -- build_queue_view 가 같은 잡을 세는 칸과 맞춘다.
 FLOW_EDGES = ("submit>planning", "batch>planning", "planning>pickup", "pickup>preflight",
               "preflight>volcano_wait", "running>confirm", "running>batch", "confirm>preflight",
               "batch>preflight", "running>done")
@@ -339,9 +340,11 @@ _JOB_EXIT_STAGE = {"Pending": "pickup", "Preflight": "preflight", "PreviewRunnin
 
 
 def _flow_target(row):
-    """전이 묶음 한 행 → ("edge", 키) · ("exit", 단계) · None(버림). row 는 MetricsRepository.queue_flow 의 rows 모양."""
+    """전이 묶음 한 행 → ("edge", 키) · ("exit", 단계) · None(버림). row 는 MetricsRepository.queue_flow 의 rows 모양.
+    in_batch: 0·None = 단건(또는 요청 행 없음), 1 = 배치 자식, 2 = 지금 확인 대기(PreviewReady)인 배치의 자식(ConfirmPending
+    이탈 행에만 온다)."""
     kind, f, t = row.get("kind"), row.get("f"), row.get("t")
-    in_batch = row.get("in_batch") == 1
+    in_batch = row.get("in_batch") in (1, 2)
     if kind == "request":
         if f is None and t == "Pending":
             return ("edge", "batch>planning" if in_batch else "submit>planning")
@@ -365,7 +368,8 @@ def _flow_target(row):
     if t not in _EXIT_STATES:
         return None
     if f == "ConfirmPending":
-        return ("exit", "batch" if in_batch else "confirm")
+        # 확인 대기 배치의 자식은 화면이 확인 대기 칸에 센다(build_queue_view 의 ready) -- 만료·취소도 그 칸에서 떠난다.
+        return ("exit", "batch" if row.get("in_batch") == 1 else "confirm")
     if f == "Executing":
         return ("exit", "preflight" if row.get("pre") == 1 else "running")
     stage = _JOB_EXIT_STAGE.get(f)
@@ -375,7 +379,18 @@ def _flow_target(row):
 def build_flow(raw) -> "dict | None":
     """{"window_seconds", "saturated", "edges", "exits", "done"} 또는 None(재료 축을 못 읽음 -- 모름). raw 는
     MetricsRepository.queue_flow 의 반환 모양. 창 안에 전이가 하나도 없으면 전 엣지 0 이다(읽었고 0 이었다 -- None 과
-    다르다). saturated 면 수치는 하한이다(저장소 docstring)."""
+    다르다). saturated 면 수치는 하한이다(저장소 docstring) -- 화면은 엣지·이탈·완료 전부에 하한 표기를 붙인다.
+
+    남는 근사(전이 행만으로는 갈리지 않는 곳 -- 표시용이라 싼 신호로 맞추고 한계를 여기 적는다):
+      - Executing 이탈의 사전 점검/실행 중 갈래는 잡의 실행 제출 앵커(exec_submitted_at)로 가른다. 앵커는 vcjob 제출
+        **직후** 따로 쓰여, 제출과 앵커 사이에 컨트롤러가 죽으면 이미 제출된 잡도 앵커가 비어 그 뒤 실행 중 실패가
+        사전 점검 이탈로 접힌다(찰나의 창). 잡 행이 지워졌으면(요청 삭제) 사유 접두(재점검·제출 실패·재점검 거부)로만
+        가른다 -- 그 밖의 제출 전 이탈(노드 CPU 부족·노드 제외·재점검 중 취소)은 그때만 실행 중으로 접힌다.
+      - 배치 자식의 ConfirmPending 이탈은 **조회 시점**의 배치 상태로 가른다(배치는 전이 행을 남기지 않는다). 확인 대기
+        배치의 자식이 전부 만료·취소되면 다음 오케스트레이터 틱에 배치가 완료·취소로 바뀌고, 그 뒤 창이 끝날 때까지의
+        조회는 같은 이탈을 배치 대기로 접는다. 일부만 떠났으면(배치가 아직 확인 대기) 확인 대기에 맞게 남는다.
+      - 확인 관문의 진입(PreviewRunning→ConfirmPending)은 배치 상태를 보지 않는다 -- 배치 자식은 미리보기가 끝난 순간
+        형제를 기다리는 held(배치 대기)이고, 배치가 확인 대기로 넘어가는 것은 그 뒤 오케스트레이터 틱이다."""
     if raw is None:
         return None
     edges = dict.fromkeys(FLOW_EDGES, 0)

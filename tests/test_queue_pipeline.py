@@ -165,3 +165,17 @@ def test_build_flow_counts_exits_at_the_stage_they_left():
     ]})
     assert flow["exits"] == {"planning": 4, "pickup": 1, "preflight": 4, "running": 4, "confirm": 4, "batch": 6}
     assert flow["edges"] == dict.fromkeys(FLOW_EDGES, 0) and flow["done"] == 0
+
+
+def test_build_flow_confirm_exits_of_a_preview_ready_batch_leave_the_confirm_stage():
+    # in_batch 2 = 지금 확인 대기(PreviewReady)인 배치의 자식 -- 화면은 그 자식을 확인 대기 칸에 센다(build_queue_view 의
+    # ready). 만료·취소도 그 칸에서 떠난다. held(1)만 배치 대기다. 진입 쪽은 2 가 와도 배치 자식(held 가지)이다.
+    flow = build_flow({"window_seconds": 300, "saturated": False, "rows": [
+        _row("data_job", "ConfirmPending", "PreviewExpired", 3, in_batch=2),
+        _row("data_job", "ConfirmPending", "Cancelled", 1, in_batch=2),
+        _row("data_job", "ConfirmPending", "PreviewExpired", 2, in_batch=1),
+        _row("data_job", "ConfirmPending", "PreviewExpired", 5, in_batch=None),   # 요청 행이 없다 -- 단건으로 접는다
+        _row("data_job", "PreviewRunning", "ConfirmPending", 4, in_batch=2),
+    ]})
+    assert flow["exits"] == {**dict.fromkeys(FLOW_EXIT_STAGES, 0), "confirm": 9, "batch": 2}
+    assert flow["edges"]["running>batch"] == 4 and flow["edges"]["running>confirm"] == 0

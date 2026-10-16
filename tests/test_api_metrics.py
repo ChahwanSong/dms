@@ -817,6 +817,57 @@ def test_metrics_queue_flow_maps_recent_transitions_to_pipeline_edges(client, db
     assert "volcano_wait>running" not in flow["edges"]
 
 
+def test_metrics_queue_flow_exits_land_on_the_stage_the_screen_counted(client, db):
+    # 리뷰 지적 두 갈래(2026-10-16): ① 실행 vcjob 을 내기 전(실행 전 재점검 중)의 Executing 이탈은 화면이 사전 점검 칸에
+    # 세던 잡이다 -- 사유를 열거하지 않고 실행 제출 앵커로 가른다(노드 CPU 부족·노드 제외·배치 취소는 재점검 사유가 아니라
+    # 예전엔 실행 중 이탈로 샜다). ② 확인 대기(PreviewReady) 배치 자식의 만료는 확인 대기 칸에서 떠난 것이다(held 가 아니다).
+    # 실제 작성자(set_job_state · mark_exec_submitted · expire_previews)로 만든다.
+    repos = client.app.state.repos
+    now = utc_now_iso()
+
+    def walk(jid, states, actor="stepper"):
+        for state in states:
+            repos.data_jobs.set_job_state(jid, DataJobState(state), actor=actor)
+
+    def to_executing(batch_id=None):
+        _, jid = _flow_job(repos, batch_id=batch_id)
+        walk(jid, ("Preflight", "PreviewRunning", "ConfirmPending"))
+        walk(jid, ("Executing",), actor="alice")
+        return jid
+
+    for reason in ("node_cpu_insufficient_at_step", "node_excluded_at_step"):
+        repos.data_jobs.set_job_state(to_executing(), DataJobState.FAILED, reason_code=reason, actor="stepper")
+    repos.data_jobs.set_job_state(to_executing(batch_id="d" * 32), DataJobState.CANCELLED,
+                                  reason_code="cancelled_by_batch", actor="stepper")
+    ran = to_executing()                                       # 실행 vcjob 제출 뒤(앵커 있음)의 실패 -- 실행 중
+    repos.data_jobs.mark_exec_submitted(ran)
+    walk(ran, ("Executing",))
+    repos.data_jobs.set_job_state(ran, DataJobState.FAILED, reason_code="execution_failed", actor="stepper")
+
+    def batch(status):
+        return repos.batches.create(operation="sync", requester_id="ops", actor="ops", max_concurrency=2,
+                                    options={}, note=None, items=[], status=status)
+
+    def previewed(batch_id=None):
+        _, jid = _flow_job(repos, batch_id=batch_id)
+        walk(jid, ("Preflight", "PreviewRunning", "ConfirmPending"))
+        db.execute("UPDATE data_jobs SET preview_expires_at = :e WHERE job_id = :j",
+                   {"e": iso_plus(now, -1), "j": jid})
+        return jid
+
+    ready, previewing = batch("PreviewReady"), batch("Previewing")
+    for _ in range(2):
+        previewed(ready)
+    previewed(previewing)                                      # 형제 미리보기를 기다리는 held -- 배치 대기
+    previewed()                                                # 단건 컨펌 대기
+    pipe = _queue(client)["pipeline"]
+    assert (pipe["confirm"]["count"], pipe["batch"]["held"]) == (3, 1)      # 화면이 센 칸(만료 전)
+    assert len(repos.data_jobs.expire_previews(now_iso=utc_now_iso())) == 4
+
+    flow = _queue(client)["flow"]
+    assert flow["exits"] == {**_FLOW_EXITS0, "preflight": 3, "running": 1, "confirm": 3, "batch": 1}
+
+
 def test_metrics_queue_flow_saturation_marks_counts_as_a_lower_bound(client, db):
     repos = client.app.state.repos
     now = utc_now_iso()
