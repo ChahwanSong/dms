@@ -817,6 +817,21 @@ def test_metrics_queue_flow_maps_recent_transitions_to_pipeline_edges(client, db
     assert "volcano_wait>running" not in flow["edges"]
 
 
+def test_metrics_queue_flow_cancelled_preview_ready_batch_children_fold_into_batch(client, db):
+    # 알려진 근사(build_flow docstring, 재검토 지적): 배치 취소는 begin_cancel 이 배치를 먼저 Cancelling 으로 쓰고 자식을
+    # 끝낸다 -- 확인 대기(PreviewReady) 배치 자식의 취소 이탈은 조회 시점 배치 상태로 늘 배치 대기에 접힌다. 이 동작을 고정한다.
+    repos = client.app.state.repos
+    bid = repos.batches.create(operation="sync", requester_id="ops", actor="ops", max_concurrency=2,
+                               options={}, note=None, items=[], status="PreviewReady")
+    _, jid = _flow_job(repos, batch_id=bid)
+    for state in ("Preflight", "PreviewRunning", "ConfirmPending"):
+        repos.data_jobs.set_job_state(jid, DataJobState(state), actor="stepper")
+    assert repos.batches.begin_cancel(bid, from_states=("PreviewReady",))
+    repos.data_jobs.set_job_state(jid, DataJobState.CANCELLED, reason_code="cancelled_by_batch", actor="api")
+    exits = _queue(client)["flow"]["exits"]
+    assert (exits["batch"], exits["confirm"]) == (1, 0)
+
+
 def test_metrics_queue_flow_exits_land_on_the_stage_the_screen_counted(client, db):
     # 리뷰 지적 두 갈래(2026-10-16): ① 실행 vcjob 을 내기 전(실행 전 재점검 중)의 Executing 이탈은 화면이 사전 점검 칸에
     # 세던 잡이다 -- 사유를 열거하지 않고 실행 제출 앵커로 가른다(노드 CPU 부족·노드 제외·배치 취소는 재점검 사유가 아니라

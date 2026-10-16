@@ -136,9 +136,10 @@ export const REASON_MESSAGES: Record<string, string> = {
   node_excluded: "이 작업이 배정된 노드가 배치에서 제외(또는 cordon)되어 실행할 수 없어 종료했습니다 — 다시 제출하세요",
   node_exclusion_not_found: "배치에서 제외된 노드가 아닙니다",
   // 노드 CPU 상한(2026-10-16, src/dms/node_cpu.py): 워커는 노드당 프로세스 수만큼 CPU 코어를 요청한다. node_cpu_insufficient
-  // = 계획 거부(쓸 수 있는 노드가 전부 워커 1개도 못 담음), node_cpu_insufficient_at_step = 계획 뒤 배정 노드가 그렇게 되어 종단.
+  // = 계획 거부(쓸 수 있는 노드가 전부 워커 1개도 못 담음), node_cpu_insufficient_at_step = 계획 뒤 배정 노드의 상한이 이 잡의
+  // 노드당 프로세스보다 작아 종단(제출 직전 재클램프의 상한 0, 또는 Volcano 대기 중 재검사 stepper._raise_if_cpu_short).
   node_cpu_insufficient: "실행할 수 있는 노드에 CPU 가 부족합니다 — 워커 1개(1코어)도 담을 수 있는 노드가 없습니다. 관리자에게 노드 CPU 를 확인하세요",
-  node_cpu_insufficient_at_step: "이 작업이 배정된 노드의 CPU 가 부족해(워커 1개도 담을 수 없음) 종료했습니다 — 다시 제출하면 CPU 가 충분한 노드로 계획됩니다",
+  node_cpu_insufficient_at_step: "배정된 노드의 CPU 상한이 이 작업의 노드당 프로세스 수보다 작아(워커가 노드에 들어가지 않아) 종료했습니다 — 다시 제출하면 노드 CPU 상한에 맞춰 계획됩니다",
   invalid_exclusion_reason: "제외 사유는 500자 이하여야 합니다",
   requester_disabled: "요청자 계정이 비활성화되었습니다",
   // 브리프 BACKEND_CODES 목록에는 없지만 src/dms/ grep으로 확인한, 현재도 실제로

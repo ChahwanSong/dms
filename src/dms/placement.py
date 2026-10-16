@@ -223,7 +223,10 @@ def dms_node_load(worker_pools) -> dict:
 
 def _pick_nodes(nodes, count, *, per_node, caps, load):
     """후보에서 count 대를 고른다(2026-10-16 리뷰). 키 = (상한이 요청 노드당 프로세스를 다 못 담으면 1·담거나 모르면 0,
-    DMS 예약 코어, 이름) -- 결정적이다(같은 DB 상태면 같은 선택). 고른 집합은 이름순으로 돌려준다(worker_pool 표현 그대로).
+    남은 여유(상한 − DMS 예약 코어)가 노드당 프로세스를 못 담으면 1·담거나 모르면 0, DMS 예약 코어, 이름) -- 결정적이다
+    (같은 DB 상태면 같은 선택). 고른 집합은 이름순으로 돌려준다(worker_pool 표현 그대로).
+    - 남은 여유를 따로 본다(재검토 지적): 예약 코어는 절대값이라, 크기가 섞인 클러스터에서 작은 노드(상한 3)가 큰 노드
+      (상한 126)와 같은 예약을 가지면 이름순으로 번갈아 뽑혀 작은 노드에 줄을 섰다(그 노드는 워커 하나만 담는다).
     - 상한 미달 노드를 뒤로: 상한은 고른 노드의 최솟값이라(hostfile slots 는 전 워커 같은 값) 작은 노드 하나가 잡 전체의
       rank 수를 끌어내린다(이질 클러스터의 작은 인프라 노드). 담을 노드가 충분하면 그 노드를 쓰지 않는다.
     - 예약이 적은 노드부터: 워커가 CPU 를 실제로 요청하고 required nodeAffinity 로 노드가 굳으므로, 이름순 앞 N대 고정이면
@@ -231,8 +234,10 @@ def _pick_nodes(nodes, count, *, per_node, caps, load):
     - 모름(None)은 0 쪽 -- fail-open 관례(모르는 노드를 벌하지 않는다)."""
     def key(n):
         cap = caps.get(n)
+        used = load.get(n, 0)
         short = 0 if cap is None or cap >= per_node else 1
-        return (short, load.get(n, 0), n)
+        full = 0 if cap is None or cap - used >= per_node else 1
+        return (short, full, used, n)
     return sorted(sorted(nodes, key=key)[:count])
 
 
@@ -242,7 +247,7 @@ def resolve_fanout(policy, candidates, *, priority, requested_node_count=None,
 
     자르기를 여기서 하는 이유(2026-10-16): 노드당 프로세스의 CPU 상한은 실제로 고른 노드들의 최솟값이어야 한다(슬롯은
     전 워커가 같은 값 -- hostfile slots). planner 가 따로 자르면 상한을 본 노드 집합과 굳힌 노드 집합이 갈라질 수 있다.
-    고르는 순서는 _pick_nodes(상한 충족 → DMS 예약 코어 적은 순 → 이름) -- 예전의 이름순 앞 N대 고정은 워커 CPU 요청과
+    고르는 순서는 _pick_nodes(상한 충족 → 남은 여유 충족 → DMS 예약 코어 적은 순 → 이름) -- 예전의 이름순 앞 N대 고정은 워커 CPU 요청과
     겹쳐 노드가 놀아도 같은 노드에 줄을 세웠다(2026-10-16 리뷰). nsync 는 면마다 따로 고른다.
     node_cpu_caps: {노드: 상한 | None}(select_tool_and_candidates). None·키 부재 = 모름 = 클램프 안 함(fail-open) --
     worker_pool 에 cpu_cap_known=False 로 남는다. node_load: {노드: DMS 예약 코어}(dms_node_load) -- None·키 부재 = 0.

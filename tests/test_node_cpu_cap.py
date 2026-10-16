@@ -868,3 +868,20 @@ def test_reserve_setting_default_override_and_validation():
     for bad in ("-1", "half"):
         with pytest.raises(SettingsError):
             Settings.from_env({**_VALID, "DMS_NODE_CPU_RESERVE_MILLICORES": bad})
+
+
+def test_pick_nodes_prefers_nodes_whose_remaining_room_fits_on_mixed_size_clusters():
+    """크기가 섞인 클러스터(재검토 지적): 작은 노드(상한 3)는 워커(노드당 2) 하나만 담는다 -- 예약이 같다는 이유로 큰 노드와
+    번갈아 뽑히면 둘째 잡부터 작은 노드에 줄을 섰다. 남은 여유가 노드당 프로세스를 못 담는 노드는 뒤로."""
+    from dms.placement import _pick_nodes
+    caps = {"a-infra": 3, "c01": 126}
+    load = {}
+    picks = []
+    for _ in range(4):
+        [node] = _pick_nodes(["a-infra", "c01"], 1, per_node=2, caps=caps, load=load)
+        picks.append(node)
+        load[node] = load.get(node, 0) + 2
+    assert picks == ["a-infra", "c01", "c01", "c01"]       # 작은 노드는 하나만, 나머지는 큰 노드
+    # 모름(None)은 fail-open -- 다 담는 쪽으로 본다. 동률은 이름순(결정적).
+    assert _pick_nodes(["n2", "n1"], 1, per_node=2, caps={}, load={}) == ["n1"]
+
