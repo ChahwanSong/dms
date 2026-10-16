@@ -8,10 +8,11 @@ ttlSecondsAfterFinished 는 Completed 만 치운다 -- Aborted(PodFailed → Abo
 않는다」(_apply_ttl 이 ttlSecondsAfterFinished 를 빼는 값) -- 그때는 실패 vcjob 도 두고 Pod 만 지운다.
 
 **완료 표시**(pods_gc_at): 한 잡의 정리가 끝나면 찍어 질의에서 빠진다. 예전엔 표시가 없어 오래된 순 LIMIT 200 이 매 틱
-같은 앞쪽 묶음만 다시 지우고(404 무시) 그 뒤의 잡에 영영 닿지 못했다(테스트베드 8일 된 preflight Pod 82개). 일시 실패
-(ExecutionError -- API 서버 장애 등)가 하나라도 있으면 찍지 않고 다음 틱에 다시 본다. 그 밖의 예외(변조된 ref 등 다시 해도
-같은 결과)는 기록하고 찍는다 -- 독 행이 묶음 앞자리를 영영 차지하지 않게. 배포 직후 첫 패스는 표시 없는 옛 종단 잡을 한
-번 훑는다(틱당 limit 건).
+같은 앞쪽 묶음만 다시 지우고(404 무시) 그 뒤의 잡에 영영 닿지 못했다(테스트베드 8일 된 preflight Pod 82개). 지우기가
+하나라도 실패한 잡은 찍지 않고 **RETRY_BACKOFF_SECONDS 뒤에** 다시 본다(인스턴스 메모리 -- 컨트롤러가 하나를 계속 쓴다,
+재시작하면 곧바로 다시). 실 어댑터는 실패를 전부 ExecutionError 로 접어 일시·영구를 가를 수 없다(검증 지적) -- 그래서
+가르지 않고, 실패한 잡은 그 사이 묶음에서 건너뛰고 그만큼 더 읽어 뒤의 잡에 닿는다(독 행이 앞자리를 차지하지 않게).
+배포 직후 첫 패스는 표시 없는 옛 종단 잡을 한 번 훑는다(틱당 limit 건).
 
 **종단 잡만** 대상으로 한다 — 비종단 잡의 파드를 지우면 stepper 가 그것을 실패로 오인한다.
 빌드 파드·프리플라이트 프로브 파드도 같은 이유로 **종단 빌드만** 대상이다 --
@@ -19,13 +20,18 @@ ttlSecondsAfterFinished 는 Completed 만 치운다 -- Aborted(PodFailed → Abo
 오인하고, 프로브 파드가 사라지면 BuildWatcher pending 루프가 멀쩡한 빌드를
 build_preflight_failed 로 오기록한다."""
 import logging
+import time
 
 from .build_runner import BUILD_REF_PREFIX
+from .db import iso_epoch
 from .domain import DataJobState
-from .execution import ExecutionError
 from .repositories.builds import build_pod_name, build_probe_pod_name
 
 logger = logging.getLogger(__name__)
+
+RETRY_BACKOFF_SECONDS = 3600
+# 재시도 대기 중인 잡 기억 상한 -- 넘치면 가장 먼저 다시 볼 것부터 잊는다(그 잡은 곧바로 다시 시도될 뿐).
+_RETRY_MAX = 1000
 
 
 class PodGarbageCollector:
@@ -37,6 +43,7 @@ class PodGarbageCollector:
         self._limit = limit
         self._build_runner = build_runner
         self._vcjob_ttl = vcjob_ttl_seconds        # 0 = vcjob 을 지우지 않는다(모듈 docstring)
+        self._retry_at = {}                        # job_id -> 다시 볼 epoch 초(모듈 docstring 「완료 표시」)
 
     def _targets(self, job) -> list[str]:
         out = []
@@ -51,22 +58,35 @@ class PodGarbageCollector:
 
     def run_once(self, *, now_iso: str | None = None) -> dict:
         deleted = 0
+        now = iso_epoch(now_iso) if now_iso else time.time()
+        waiting = {j for j, t in self._retry_at.items() if t > now}
         vc_after = max(self._after, self._vcjob_ttl) if self._vcjob_ttl > 0 else None
+        # 재시도 대기 중인 잡은 건너뛰므로 그만큼 더 읽는다 -- 실패한 잡이 limit 칸을 차지해 뒤의 잡이 굶지 않게.
         jobs = self._repos.data_jobs.terminal_jobs_older_than(
-            self._after, limit=self._limit, now_iso=now_iso, vcjob_after_seconds=vc_after)
+            self._after, limit=self._limit + len(waiting), now_iso=now_iso, vcjob_after_seconds=vc_after)
+        done = 0
         for job in jobs:
-            transient = False
+            jid = job["job_id"]
+            if jid in waiting:
+                continue
+            if done >= self._limit:
+                break
+            done += 1
+            failed = False
             for ref in self._targets(job):
                 try:
                     self._exec.terminate(ref)
                     deleted += 1
-                except ExecutionError as exc:
-                    transient = True          # 다음 틱에 다시(완료 표시 안 함)
+                except Exception as exc:      # ref 별 격리 -- 나머지 ref·잡은 계속(일시·영구를 가를 수 없다)
+                    failed = True
                     logger.warning("pod gc failed ref=%s: %s", ref, exc)
-                except Exception as exc:      # 다시 해도 같은 결과(변조된 ref 등) -- 표시하고 넘어간다
-                    logger.warning("pod gc skipped ref=%s: %s", ref, exc)
-            if not transient:
-                self._repos.data_jobs.mark_pods_gc(job["job_id"], now_iso=now_iso)
+            if failed:
+                self._retry_at[jid] = now + RETRY_BACKOFF_SECONDS
+                if len(self._retry_at) > _RETRY_MAX:
+                    del self._retry_at[min(self._retry_at, key=self._retry_at.get)]
+            else:
+                self._retry_at.pop(jid, None)
+                self._repos.data_jobs.mark_pods_gc(jid, now_iso=now_iso)
 
         # 종단 빌드가 남긴 빌드 파드 + 프리플라이트 프로브 파드(슬라이스 21)를
         # 같은 창(after_seconds)으로 수거한다. 비종단 빌드는 절대 건드리지 않는다:
