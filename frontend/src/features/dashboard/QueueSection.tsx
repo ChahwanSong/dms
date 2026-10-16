@@ -45,11 +45,12 @@ const DB_STAGES = new Set<QueueStage>(["planning", "pickup", "preflight", "runni
 const STAGE_HELP: Record<QueueStage, string> = {
   planning: "요청이 접수돼 planner 가 도구·노드를 정하기를 기다립니다(10초 주기, 노드 신원 전파 유예 최대 5분).",
   pickup: "계획된 잡을 stepper 가 집기를 기다립니다(5초 주기). 드레인 중이면 여기서 멈춥니다.",
-  preflight: "노드 사전 점검 파드가 도는 중입니다.",
+  preflight: "노드 사전 점검 파드가 도는 중입니다(확인 뒤 실행 직전의 재점검 포함).",
   volcano_wait: "Volcano 가 gang(필요한 파드 전부)을 아직 올리지 못했습니다(PodGroup Pending·Inqueue).",
   running: "Volcano 에서 실행 중인 미리보기·실행 잡입니다(대기가 아닙니다).",
-  confirm: "미리보기가 끝나 사람의 컨펌(단건) 또는 배치 확인을 기다립니다. 유효기간이 지나면 거부됩니다.",
-  batch: "배치 항목이 동시 실행 상한이 풀리기를 기다립니다(아직 요청이 되지 않았습니다).",
+  confirm: "미리보기가 끝나 사람의 컨펌(단건) 또는 확인 대기 배치의 「배치 확인」을 기다립니다. 유효기간이 지나면 거부됩니다.",
+  batch: "배치 항목이 차례를 기다립니다 — 동시 실행 상한이 풀리기를 기다리는 항목과, 미리보기를 마쳤지만 이미 확인된 배치의 "
+    + "실행 슬롯이나 다른 항목의 미리보기를 기다리는 항목입니다(사람이 할 일은 없습니다).",
 };
 
 // 색 문턱(초) -- 가장 오래 기다린 시간이 attn 이상이면 주의(앰버), bad 이상이면 경고(적색). 기계 단계는 주기가 초 단위라
@@ -103,6 +104,9 @@ function StageCell({ stage, pipeline }: { stage: QueueStage; pipeline: QueuePipe
     const sec = pipeline.confirm.soonest_expiry_seconds;
     if (sec !== null) extra.push(sec === 0 ? "곧 만료" : `다음 만료 ${waitText(sec)} 후`);
   }
+  if (pipeline?.batch && stage === "batch" && typeof pipeline.batch.held === "number" && pipeline.batch.held > 0) {
+    extra.push(`미리보기 마친 항목 ${pipeline.batch.held}`);
+  }
   if (pipeline?.batch && stage === "batch" && pipeline.batch.preview_ready_batches > 0) {
     extra.push(`확인 대기 배치 ${pipeline.batch.preview_ready_batches}`);
   }
@@ -150,9 +154,8 @@ function noteFor(e: QueueWaitEntry, control: QueueControl | null): { text: strin
         : { text: "—", tone: "none" };
     case "pickup":
     case "preflight":
-      return control?.drain
-        ? { text: "드레인 중 — 잡이 진행하지 않습니다", tone: "bad" }
-        : { text: "—", tone: "none" };
+      if (control?.drain) return { text: "드레인 중 — 잡이 진행하지 않습니다", tone: "bad" };
+      return d.exec_preflight ? { text: "실행 전 재점검", tone: "none" } : { text: "—", tone: "none" };
     case "volcano_wait": {
       const head = [
         d.phase_ref ? `${PHASE_REF_LABEL[d.phase_ref] ?? d.phase_ref} vcjob` : null,
@@ -171,12 +174,25 @@ function noteFor(e: QueueWaitEntry, control: QueueControl | null): { text: strin
       return { text: [head, `자식 ${d.jobs ?? 0}건`, exp].filter(Boolean).join(" · "), tone: expTone };
     }
     case "batch": {
-      const parts = [`대기 항목 ${d.queued ?? 0}건`];
+      const parts: string[] = [];
+      if ((d.queued ?? 0) > 0 || !d.held) parts.push(`대기 항목 ${d.queued ?? 0}건`);
+      // 미리보기 마친 자식(held) -- 확인된 배치는 실행 슬롯을, 미리보기 중인 배치는 나머지 미리보기를 기다린다.
+      if (typeof d.held === "number" && d.held > 0) {
+        parts.push(d.batch_status === "Running" ? `확인됨 · 실행 차례 ${d.held}건`
+          : d.batch_status === "Previewing" ? `미리보기 마침 ${d.held}건(나머지 미리보기 대기)`
+          : `미리보기 마침 ${d.held}건`);
+      }
       if (d.max_concurrency != null) parts.push(`동시 실행 상한 ${d.max_concurrency}`);
       if (d.batch_status === "PreviewReady") parts.push("배치 확인 대기 중");
+      const exp = expiryText(d.expires_in_seconds);
+      if (exp) parts.push(exp);
       return { text: parts.join(" · "), tone: "none" };
     }
   }
+}
+
+function controlHelp(what: string, reason: string | null): string {
+  return reason ? `${what} 사유: ${reason}` : `${what} 사유는 적혀 있지 않습니다.`;
 }
 
 // 일부 단계만 못 읽었을 때의 안내 -- 원인 축이 다르다(Volcano 대기는 k8s 권한·CRD, 나머지는 DMS DB).
@@ -234,16 +250,15 @@ export function QueueSection() {
                       variant={QUEUE_STATE_VARIANT[state] ?? "neutral"} />
         )}
         {/* 드레인 = stepper 정지(잡이 픽업·전진하지 않는다), 유지보수 = 신규 제출 503. 켜졌을 때만 -- 꺼짐은 정상이라
-            배지를 내지 않는다. 사유는 운영자가 적은 문장이라 title 로 둔다. */}
+            배지를 내지 않는다. 운영자가 적은 사유는 배지의 설명 툴팁(help -- 마우스·포커스)으로 -- 바깥 span 의 title 은
+            배지 자신의 title(상태 코드)에 가려 거의 보이지 않았다(검증 지적). */}
         {control?.drain && (
-          <span title={control.reason ?? undefined}>
-            <StatusPill state="drain" label="드레인 — 잡 진행 멈춤" variant="bad" />
-          </span>
+          <StatusPill state="drain" label="드레인 — 잡 진행 멈춤" variant="bad"
+                      help={controlHelp("stepper 가 잡을 픽업·전진시키지 않습니다.", control.reason)} />
         )}
         {control?.maintenance && (
-          <span title={control.reason ?? undefined}>
-            <StatusPill state="maintenance" label="유지보수 — 신규 제출 차단" variant="action" />
-          </span>
+          <StatusPill state="maintenance" label="유지보수 — 신규 제출 차단" variant="action"
+                      help={controlHelp("새 요청 제출을 받지 않습니다(진행 중인 잡은 계속 돕니다).", control.reason)} />
         )}
       </div>
       {/* 첫 응답 전에도 data 는 undefined 라 아래 「알 수 없음」과 모양이 같다.

@@ -156,9 +156,31 @@ test("단계 필터: 칩이 그 단계 행만 남기고 aria-pressed 로 선택�
 test("드레인·유지보수가 켜지면 머리 배지를 내고, 드레인은 픽업·사전 점검 행의 사유가 된다", async () => {
   renderQueue({ ...FULL, control: { drain: true, maintenance: true, reason: "스토리지 점검" } });
   const drain = await screen.findByText("드레인 — 잡 진행 멈춤");
-  expect(drain.parentElement).toHaveAttribute("title", "스토리지 점검");
-  expect(screen.getByText("유지보수 — 신규 제출 차단")).toBeInTheDocument();
+  // 사유는 사용자가 실제로 보는 배지 자신의 설명(툴팁·aria-describedby)이다 -- 예전엔 바깥 span 의 title 이라 배지의
+  // title(상태 코드)에 가려 거의 보이지 않았다(검증 지적).
+  expect(drain).toHaveAccessibleDescription("stepper 가 잡을 픽업·전진시키지 않습니다. 사유: 스토리지 점검");
+  expect(screen.getByText("유지보수 — 신규 제출 차단"))
+    .toHaveAccessibleDescription("새 요청 제출을 받지 않습니다(진행 중인 잡은 계속 돕니다). 사유: 스토리지 점검");
   expect(screen.getByText("드레인 중 — 잡이 진행하지 않습니다")).toBeInTheDocument();   // preflight 행
+});
+
+test("배치 대기의 미리보기 마친 자식(held)·실행 전 재점검을 사람이 할 일과 섞지 않고 말한다", async () => {
+  // 2026-10-16 검증 지적: 이미 확인된 배치의 자식이 확인 대기에 섞여 「확인 대기 · 12시간」이 적색으로 떴다.
+  renderQueue({ ...FULL,
+    pipeline: { ...PIPE, batch: { count: 1001, oldest_seconds: 13 * 3600, batches: 1, preview_ready_batches: 0,
+                                  queued: 5, held: 996 } },
+    waiting: [
+      entry({ stage: "batch", batch_id: "batch-0000000000cc", operation: "sync", priority: null,
+              wait_seconds: 13 * 3600,
+              detail: { queued: 0, held: 996, max_concurrency: 4, batch_status: "Running", batch_name: "이관",
+                        expires_at: "2026-10-17T00:00:00Z", expires_in_seconds: 3000 } }),
+      entry({ stage: "preflight", request_id: "req-xpf-000000000004", job_id: "j4", wait_seconds: 120,
+              detail: { exec_preflight: true } }),
+    ] });
+  const strip = await screen.findByTestId("queue-stage-batch");
+  expect(within(strip).getByText("미리보기 마친 항목 996")).toBeInTheDocument();
+  expect(screen.getByText("확인됨 · 실행 차례 996건 · 동시 실행 상한 4 · 만료까지 50분")).toBeInTheDocument();
+  expect(screen.getByText("실행 전 재점검")).toBeInTheDocument();
 });
 
 test("드레인·유지보수가 꺼져 있으면(또는 모르면) 배지를 내지 않는다", async () => {

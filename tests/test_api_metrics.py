@@ -564,8 +564,8 @@ def test_metrics_queue_waiting_lists_stages_with_request_links(client, db):
     assert 597 <= confirm["detail"]["expires_in_seconds"] <= 600
     assert _near(confirm["wait_seconds"], 5000)
     assert (batch["request_id"], batch["batch_id"]) == (None, bid)
-    assert batch["detail"] == {"queued": 4, "max_concurrency": 2, "batch_status": "Previewing",
-                               "batch_name": "야간"}
+    assert batch["detail"] == {"queued": 4, "held": 0, "max_concurrency": 2, "batch_status": "Previewing",
+                               "batch_name": "야간", "expires_at": None, "expires_in_seconds": None}
     assert (planning["request_id"], planning["job_id"], planning["requester"]) == (
         plan_rid, None, "bob")
     assert planning["detail"] == {"note": "identity_propagating",
@@ -602,6 +602,70 @@ def test_metrics_queue_groups_batch_children_awaiting_confirm(client, db):
         2, "PreviewReady", "월간 이관")
     assert group["expires_at"] == iso_plus(now, 500)            # 묶음의 가장 빠른 만료
     assert _near(confirm[0]["wait_seconds"], 4000)              # 묶음의 가장 오래된 자식
+
+
+def test_metrics_queue_held_batch_children_wait_in_batch_not_confirm(client, db):
+    """확인 대기 = 사람이 지금 누를 수 있는 것만(2026-10-16 검증 지적): 이미 확인된 Running 배치의 자식은 실행 슬롯을,
+    Previewing 배치의 자식은 형제 미리보기를 기다린다 -- 확인 대기에 세면 사람이 할 일이 없는데 「확인 대기 · 13시간」이
+    적색으로 떴다. 배치 대기(held)로 센다."""
+    repos = Repositories(db)
+    now = utc_now_iso()
+    running = _q_batch(db, repos, status="Running", items=0, oldest_at=now, name="확인됨")
+    for _ in range(3):
+        _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -13 * 3600), batch_id=running,
+               expires_at=iso_plus(now, 3600))
+    previewing = _q_batch(db, repos, status="Previewing", items=2, oldest_at=iso_plus(now, -60))
+    _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -600), batch_id=previewing)
+    ready = _q_batch(db, repos, status="PreviewReady", items=0, oldest_at=now)
+    _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -1200), batch_id=ready,
+           expires_at=iso_plus(now, 50000))
+    _q_job(db, repos, state="ConfirmPending", entered_at=iso_plus(now, -300), expires_at=iso_plus(now, 70000))
+    body = _queue(client)
+    p = body["pipeline"]
+    assert p["confirm"]["count"] == 2 and _near(p["confirm"]["oldest_seconds"], 1200)
+    assert p["confirm"]["soonest_expiry"] == iso_plus(now, 50000)
+    assert (p["batch"]["count"], p["batch"]["queued"], p["batch"]["held"]) == (2 + 4, 2, 4)
+    assert _near(p["batch"]["oldest_seconds"], 13 * 3600)
+    rows = {e["batch_id"]: e for e in body["waiting"] if e["stage"] == "batch"}
+    assert rows[running]["detail"]["held"] == 3 and rows[running]["detail"]["queued"] == 0
+    assert rows[running]["detail"]["batch_status"] == "Running"
+    assert rows[running]["detail"]["max_concurrency"] == 2
+    assert rows[running]["detail"]["expires_at"] == iso_plus(now, 3600)
+    assert (rows[previewing]["detail"]["queued"], rows[previewing]["detail"]["held"]) == (2, 1)
+    assert [e["batch_id"] for e in body["waiting"] if e["stage"] == "confirm"] == [ready, None]
+
+
+def test_metrics_queue_exec_preflight_counts_as_preflight_not_running(client, db):
+    """확인 뒤 실행 전 재점검(Executing 인데 execution ref 가 없다 -- exec_preflight 파드, vcjob 없음)은 사전 점검이다.
+    예전엔 「Volcano 실행 중」에 들어가 재점검 파드가 Pending 에 멈춰도 대기로 보이지 않았다(검증 지적)."""
+    repos = Repositories(db)
+    now = utc_now_iso()
+    _, jid = _q_job(db, repos, state="Executing", entered_at=iso_plus(now, -1800),
+                    phase_refs={"preflight": "pod/dms-sync-preflight-dddddddddddd",
+                                "preview": "vcjob/dms-sync-preview-dddddddddddd",
+                                "exec_preflight": "pod/dms-sync-exec-preflight-dddddddddddd"})
+    _q_job(db, repos, state="Executing", entered_at=iso_plus(now, -60),
+           phase_refs={"execution": "vcjob/dms-sync-execution-eeeeeeeeeeee"})
+    client.app.state.queue_reader = _FakeQueueReader(podgroups=[])
+    body = _queue(client)
+    p = body["pipeline"]
+    assert p["preflight"]["count"] == 1 and _near(p["preflight"]["oldest_seconds"], 1800)
+    assert p["running"]["count"] == 1 and _near(p["running"]["oldest_seconds"], 60)
+    [pf] = [e for e in body["waiting"] if e["stage"] == "preflight"]
+    assert pf["job_id"] == jid and pf["detail"] == {"exec_preflight": True}
+
+
+def test_metrics_queue_planning_note_is_the_latest_event(client, db):
+    # 요청마다 가장 최근 하나(ORDER BY id DESC LIMIT 1 -- 막힌 요청의 이벤트 전체를 읽지 않는다).
+    repos = Repositories(db)
+    rid = _q_request(db, repos, created_at=iso_plus(utc_now_iso(), -100))
+    for et, msg in (("identity_propagating", "old"), ("plan_error", "boom 1"), ("plan_error", "boom 2")):
+        repos.observability.record_event(component="planner", severity="error", event_type=et, message=msg,
+                                         request_id=rid)
+    repos.observability.record_event(component="planner", severity="info", event_type="something_else",
+                                     message="not a note", request_id=rid)
+    [e] = [e for e in _queue(client)["waiting"] if e["stage"] == "planning"]
+    assert e["detail"] == {"note": "plan_error", "message": "boom 2"}
 
 
 def test_metrics_queue_waiting_is_capped_per_stage_not_overall(client, db):

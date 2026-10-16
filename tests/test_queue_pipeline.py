@@ -60,7 +60,7 @@ def test_build_view_unknown_axes_stay_null_and_empty_axes_are_zero():
     assert view == {"pipeline": dict.fromkeys(STAGES), "waiting": None, "waiting_truncated": None}
     empty = build_queue_view(
         NOW, pods=[], planning={"count": 0, "oldest_at": None, "rows": []},
-        jobs={"by_state": {}, "waiting": {}, "confirm_batches": [], "submitted": []},
+        jobs={"by_state": {}, "waiting": {}, "confirm_singles": None, "confirm_batches": [], "submitted": []},
         batches={"groups": [], "preview_ready": 0})
     assert empty["waiting"] == [] and empty["waiting_truncated"] == []
     assert empty["pipeline"]["confirm"] == {"count": 0, "oldest_seconds": None, "soonest_expiry": None,
@@ -81,3 +81,14 @@ def test_waiting_sort_puts_unknown_ages_last_and_zero_is_a_real_age():
     assert view["pipeline"]["volcano_wait"] == {"count": 3, "oldest_seconds": 3600}
     # 잡 축을 못 읽었으니 「실행 중」은 모름(Volcano 만 읽힘)
     assert view["pipeline"]["running"] is None
+
+
+def test_batch_held_is_unknown_when_the_jobs_axis_is_unknown():
+    # 잡 축을 못 읽으면 배치 대기의 held(확인 대기가 아닌 배치 자식)는 모름 -- 0 으로 접지 않는다(null ≠ 0).
+    view = build_queue_view(NOW, pods=None, planning=None, jobs=None, batches={"groups": [{
+        "batch_id": "b" * 32, "name": None, "status": "Running", "operation": "scan", "requester_id": "ops",
+        "priority": "mid", "max_concurrency": 2, "queued": 3, "oldest_at": "2026-10-16T11:00:00Z"}],
+        "preview_ready": 0})
+    assert view["pipeline"]["batch"] == {"count": 3, "oldest_seconds": 3600, "queued": 3, "held": None,
+                                         "batches": 1, "preview_ready_batches": 0}
+    assert view["waiting"][0]["detail"]["held"] is None
