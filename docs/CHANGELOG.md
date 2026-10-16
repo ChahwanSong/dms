@@ -95,6 +95,38 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 워커가 프로세스 수만큼 CPU 를 항상 요청 + 큐 흐름 히어로(흐르는 파스텔 리본) — **완료·실증**(2026-10-16, d179)
+
+사용자 지시: 「기본으로 worker가 cpu를 실제로 요청하게 해. 프로세스 개수만큼 코어 사용하도록. 옵션이 아니라 항상 그렇도록
+해줘.」 · 「큐 대기가 일종의 파이프라인 이잖아? … 시각적으로 흐름 형식으로 애니메이션화해서 예쁘고 직관적으로 보여줬으면
+좋겠어. 최신 UI 트랜드를 참고해서 구현해줘.」 · 「3번의 내용이 대시보드의 제일 위에 대표적으로 보여지게 해줘. 애니메이션 색깔
+파스텔 흐르는 느낌으로 각 단계별로!」
+
+- **워커 CPU 요청(항상)**: 모든 워커 컨테이너(primary·nsync 양면, 미리보기·실행)가 `requests.cpu = 노드당 프로세스 수`
+  (`execution_manifests.processes_per_node` — hostfile slots 와 같은 단일 원천, limits 없음 — CFS 스로틀이 MPI 를 늦춘다),
+  launcher 100m, preflight·exec_preflight 맨 Pod 는 BestEffort 그대로. slice21 의 「BestEffort 유지」 결정을 번복한다.
+  이제 Volcano 큐가 실제로 줄을 선다(예전엔 전부 BestEffort 라 8개 잡이 128코어를 한꺼번에 나눠 썼다).
+- **노드 CPU 상한(영구 Pending 방지)**: 에이전트가 Node allocatable 을 보고(실패하면 마지막 값을 stale 로 이어 싣는다),
+  상한 = floor((allocatable − 100m − `DMS_NODE_CPU_RESERVE_MILLICORES`(500)) / 1000). planner 는 상한 < 1 노드를 빼고(0대면
+  `node_cpu_insufficient`), 고른 노드의 최소 상한으로 노드당 프로세스를 줄인다(「요청 2 → 노드 CPU 상한 1」 표시·이벤트).
+  노드는 (상한 충족, 남은 여유 충족, DMS 예약 코어, 이름) 순으로 골라 잡이 한 노드에 몰려 줄 서지 않는다. stepper 는 제출
+  직전 다시 줄이고, Volcano 대기 중 상한이 더 작아지면 `node_cpu_insufficient_at_step` 으로 끝낸다. 정책 노드당 프로세스 ≤ 1024.
+- **큐 흐름 히어로**: 대시보드 맨 위. 배치 대기 → 계획 대기 → 잡 픽업 → 사전 점검 → Volcano 대기 → 실행 중 → 완료가 단계별
+  파스텔(버터·피치·코랄·라벤더·페리윙클·아쿠아·민트)을 잇는 리본 위 역으로 서고, 리본이 천천히 흐르며 최근 5분 실제 단계
+  이동량(`flow` 축 — state_transitions PK 역순 5000행, 새 인덱스 없음)만큼 빛 입자가 구간을 흐른다. 확인 대기(오키드)는 실행
+  중에서 사전 점검으로 돌아가는 고리. 붐비는 역은 숨쉬는 후광, 오래 기다리면 링 색(주의·경고), 모르면 점선·「—」. 375 는 세로
+  레일, 움직임 줄이기면 전부 정지. 라이브러리 없이 CSS·SVG(에어갭).
+- 리뷰: 리뷰 워크플로 3회(확인 15 + 재검토 3, 전부 반영 — 1024–1279px 은 세로 배치로 남김). 덤으로 로그아웃 직후 셸의 me 401
+  재조회 경합을 고쳤다(router.test 가 렌더 타이밍에 따라 빨갛던 원인).
+- 배포: dms-mpifileutils·dms·dms-agent d179, 에이전트를 **먼저** 릴리스해 allocatable 보고가 깔린 뒤 api·controller(상한을
+  모르는 창 없음), 잡 이미지 d179, guard-images 통과.
+- 실증(d179, 실 Chrome, 일회용 데이터 `/cephfs/managed/cpuproof-1016`·배치 2개·자식 12개 삭제): 테스트베드(노드 allocatable
+  1800m, 정책 노드당 2) 6항목 scan 배치(동시 6) → 자식 worker_pool `procs_per_node 1 (요청 2, 노드 상한 1, cpu_cap_known)`,
+  vcjob 6개 모두 worker `requests.cpu: "1"` ×4 · launcher `100m` → 대시보드 히어로 「Volcano 대기 5 · 실행 중 1」, 대기 표에
+  Volcano 사유 「Inqueue · gang 5 · NotEnoughResources … Insufficient cpu」 → 차례로 실행돼 6개 전부 성공·실패 0.
+  1280·375 가로 넘침 0, 콘솔 오류 0, 움직임 줄이기에서 애니메이션 26 → 0. 첫 시도는 컨트롤러 롤아웃 겹침(옛 파드가 종료
+  유예 30초 동안 루프를 계속 돌아 5개를 옛 코드로 계획·제출 — BACKLOG 「롤아웃 겹침 창」)으로 무효, 다시 돌려 확인.
+
 ### ✅ 배치 취소 뒤 남는 launcher/worker 파드 · 실제 CPU 사용률 · 큐 현황 상세화 — **완료·실증**(2026-10-16, d178)
 
 사용자 보고·요청: 「배치작업 Cancel 했는데 몇분 후에 k8s 을 직접 확인해보니 아직 돌아가고 있는 launcher/worker pod 들이
