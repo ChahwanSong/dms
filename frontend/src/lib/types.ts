@@ -667,6 +667,21 @@ export interface QueueWaitEntry {
   detail: QueueWaitDetail;
 }
 export interface QueueControl { drain: boolean; maintenance: boolean; reason: string | null; }
+// 큐 흐름(2026-10-16, queue_pipeline.build_flow 주석이 매핑의 권위) -- 최근 window_seconds 동안 단계 사이를 지나간 수.
+// 키 = "<from>><to>". submit(직접 제출 유입)·done(성공 종단)은 흐름에만 있는 단계다. volcano_wait>running 은 전이로 남지 않아
+// 키 자체가 없다(측정 없음 -- 0 이 아니다). exits = 실패·거부·취소·만료로 그 단계에서 떠난 수(volcano_wait 이탈은 실행 중에
+// 접힌다). saturated 면 수치는 하한이다. 흐름 null = 못 읽음 -- 화면은 모르는 흐름을 움직임으로 꾸미지 않는다.
+export type QueueFlowEdge =
+  | "submit>planning" | "batch>planning" | "planning>pickup" | "pickup>preflight" | "preflight>volcano_wait"
+  | "running>confirm" | "running>batch" | "confirm>preflight" | "batch>preflight" | "running>done";
+export type QueueFlowExitStage = "planning" | "pickup" | "preflight" | "running" | "confirm" | "batch";
+export interface QueueFlow {
+  window_seconds: number;
+  saturated: boolean;
+  edges: Partial<Record<QueueFlowEdge, number>>;
+  exits: Partial<Record<QueueFlowExitStage, number>>;
+  done: number;
+}
 export interface QueueMetrics {
   queue: { name: string; state: string | null } | null;
   podgroups: QueuePodgroup[] | null;
@@ -675,6 +690,7 @@ export interface QueueMetrics {
   pipeline?: QueuePipeline | null;
   waiting?: QueueWaitEntry[] | null;
   waiting_truncated?: QueueWaitStage[] | null;
+  flow?: QueueFlow | null;
 }
 
 // 포탈 메일 설정(2026-10-01, GET /api/admin/mail-settings). 적용값 = 포탈 > env > 기본값(칸별).

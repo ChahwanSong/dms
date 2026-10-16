@@ -48,6 +48,9 @@ export function Dashboard() {
   return (
     <section className="space-y-5">
       <h1 className="text-2xl font-bold">대시보드</h1>
+      {/* 큐 흐름이 맨 위 대표 카드다(2026-10-16 사용자 지시 「3번의 내용이 대시보드의 제일 위에 대표적으로 보여지게
+          해줘」) -- KPI 타일보다 먼저. 잡 통계와 달리 DB 집계 창이 아니라 라이브 단계·PodGroup 을 본다(설계 §3). */}
+      <QueueSection />
       {/* 5타일: md 폭에서 5열은 타일당 ~130px -- MetricTile(라벨 한 줄 + 숫자)이
           충분히 읽힌다(실측). 좁은 폭은 2열 그대로. */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -105,9 +108,6 @@ export function Dashboard() {
         )}
       </Card>
       <NodeMetricsSection />
-      {/* 설계 §3: 「잡 통계」 앞 자립형 카드 -- 잡 통계와 달리 DB 가 아니라
-          라이브 PodGroup 을 본다 */}
-      <QueueSection />
       <JobStatsSection />
       {/* 「최근 작업」 카드는 제거됐다(2026-08-23 사용자 결정): 작업 메뉴의
           「전체 작업」 화면(요청자 열·필터·무한 스크롤)과 중복이었다 -- 대시보드는

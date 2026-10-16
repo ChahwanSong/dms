@@ -302,3 +302,91 @@ def build_queue_view(now: float, *, pods, planning, jobs, batches,
             truncated.append(stage)
     waiting.sort(key=_sort_key)
     return {"pipeline": pipeline, "waiting": waiting, "waiting_truncated": truncated}
+
+
+# ---- 흐름(2026-10-16, 사용자 지시 「큐 대기가 일종의 파이프라인 이잖아? … 이 흐름을 단순히 숫자만 카드형태로 보여쥬는게
+# 아니라, 시각적으로 흐름 형식으로 애니메이션화해서」) -- 대시보드 히어로의 입자(구간마다 최근 처리량)·「완료」 역의 재료.
+# 위 build_queue_view 가 「지금 어디에 몇 건」이라면 이것은 「최근 창 동안 어디서 어디로 몇 건」이다.
+#
+# 엣지 = "<from 단계>><to 단계>". 단계는 STAGES 에 화면 전용 둘을 더한다: submit(직접 제출 유입), done(성공 종단).
+# 실제 흐름은 직선이 아니다(모듈 docstring): 미리보기를 마친 잡은 확인 관문(단건 confirm · 배치 held)을 거쳐 실행 전
+# 재점검으로 사전 점검에 **되돌아온다** -- 그래서 confirm>preflight·batch>preflight 가 있다.
+#   submit>planning      요청 None→Pending, 배치 아님          batch>planning   같은 전이, 배치 자식(materialize)
+#   planning>pickup      요청 Pending→Planned                   pickup>preflight 잡 Pending→Preflight
+#   preflight>volcano_wait  Preflight→Running(scan 실행 제출) · Preflight→PreviewRunning(미리보기 제출) ·
+#                        Executing→Executing(재점검 뒤 실행 제출 -- 상태는 그대로인 자기 전이)
+#   running>confirm      PreviewRunning→ConfirmPending, 단건    running>batch    같은 전이, 배치 자식(held)
+#   confirm>preflight    ConfirmPending→Executing, 사람의 컨펌  batch>preflight  같은 전이, actor batch-orchestrator
+#   running>done         잡 →Succeeded(= done)
+# volcano_wait>running 은 키가 없다: PodGroup 이 스케줄되는 순간은 전이로 남지 않는다(k8s 에서만 보인다) -- 들어온
+# 수와 같다고 지어내지 않는다(화면이 「측정 없음」으로 그린다).
+#
+# 버리는 행(같은 사건의 사본): plan 행 전부(저장소가 이미 거른다) · 잡 None→Pending(요청 Pending→Planned 와 같은 계획
+# 트랜잭션) · 요청 Planned→종단(잡 종단·고아 복구의 사본).
+#
+# 이탈(exits) = 종단 실패·거부·취소·만료로 흐름을 떠난 수를 **떠난 단계**로 센다. 갈래가 상태만으로 갈리지 않는 곳:
+#   Executing 에서의 이탈은 재점검·실행 제출 실패면 사전 점검(저장소의 pre), 아니면 실행 중. PreviewRunning·Running 에서의
+#   이탈은 Volcano 대기 중 차단과 실행 중 실패가 사유로만 갈려 실행 중으로 접는다(volcano_wait 이탈 키가 없는 이유).
+#   ConfirmPending 에서의 이탈은 배치 자식이면 배치 대기, 아니면 확인 대기.
+FLOW_EDGES = ("submit>planning", "batch>planning", "planning>pickup", "pickup>preflight",
+              "preflight>volcano_wait", "running>confirm", "running>batch", "confirm>preflight",
+              "batch>preflight", "running>done")
+FLOW_EXIT_STAGES = ("planning", "pickup", "preflight", "running", "confirm", "batch")
+_EXIT_STATES = frozenset({"Rejected", "Failed", "TimedOut", "Cancelled", "PreviewExpired", "Conflict"})
+_TO_VOLCANO = {("Preflight", "Running"), ("Preflight", "PreviewRunning"), ("Executing", "Executing")}
+_JOB_EXIT_STAGE = {"Pending": "pickup", "Preflight": "preflight", "PreviewRunning": "running", "Running": "running"}
+
+
+def _flow_target(row):
+    """전이 묶음 한 행 → ("edge", 키) · ("exit", 단계) · None(버림). row 는 MetricsRepository.queue_flow 의 rows 모양."""
+    kind, f, t = row.get("kind"), row.get("f"), row.get("t")
+    in_batch = row.get("in_batch") == 1
+    if kind == "request":
+        if f is None and t == "Pending":
+            return ("edge", "batch>planning" if in_batch else "submit>planning")
+        if f == "Pending" and t == "Planned":
+            return ("edge", "planning>pickup")
+        if f == "Pending" and t in _EXIT_STATES:
+            return ("exit", "planning")
+        return None
+    if kind != "data_job" or f is None:
+        return None
+    if t == "Succeeded":
+        return ("edge", "running>done")
+    if f == "Pending" and t == "Preflight":
+        return ("edge", "pickup>preflight")
+    if (f, t) in _TO_VOLCANO:
+        return ("edge", "preflight>volcano_wait")
+    if f == "PreviewRunning" and t == "ConfirmPending":
+        return ("edge", "running>batch" if in_batch else "running>confirm")
+    if f == "ConfirmPending" and t == "Executing":
+        return ("edge", "batch>preflight" if row.get("by_orch") == 1 else "confirm>preflight")
+    if t not in _EXIT_STATES:
+        return None
+    if f == "ConfirmPending":
+        return ("exit", "batch" if in_batch else "confirm")
+    if f == "Executing":
+        return ("exit", "preflight" if row.get("pre") == 1 else "running")
+    stage = _JOB_EXIT_STAGE.get(f)
+    return ("exit", stage) if stage is not None else None
+
+
+def build_flow(raw) -> "dict | None":
+    """{"window_seconds", "saturated", "edges", "exits", "done"} 또는 None(재료 축을 못 읽음 -- 모름). raw 는
+    MetricsRepository.queue_flow 의 반환 모양. 창 안에 전이가 하나도 없으면 전 엣지 0 이다(읽었고 0 이었다 -- None 과
+    다르다). saturated 면 수치는 하한이다(저장소 docstring)."""
+    if raw is None:
+        return None
+    edges = dict.fromkeys(FLOW_EDGES, 0)
+    exits = dict.fromkeys(FLOW_EXIT_STAGES, 0)
+    for row in raw["rows"]:
+        target = _flow_target(row)
+        if target is None:
+            continue
+        n = int(row["n"])
+        if target[0] == "edge":
+            edges[target[1]] += n
+        else:
+            exits[target[1]] += n
+    return {"window_seconds": raw["window_seconds"], "saturated": bool(raw["saturated"]),
+            "edges": edges, "exits": exits, "done": edges["running>done"]}

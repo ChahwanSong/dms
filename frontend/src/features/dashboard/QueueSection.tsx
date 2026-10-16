@@ -5,77 +5,29 @@ import { Card } from "../../components/ui/Card";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { Table } from "../../components/ui/Table";
 import type {
-  QueueControl, QueuePipeline, QueuePodgroup, QueueStage, QueueWaitEntry, QueueWaitStage,
+  QueueControl, QueueFlow, QueuePipeline, QueuePodgroup, QueueStage, QueueWaitEntry, QueueWaitStage,
 } from "../../lib/types";
+import { FlowLegend, QueueFlowHero, flowSummary } from "./QueueFlowHero";
+import { STAGE_LABEL, TEXT_TONE, waitText, waitTone, type Tone } from "./queueStage";
+
+// 단계 어휘·색 문턱은 queueStage 로 옮겼다(흐름 히어로와 함께 쓴다) -- 옛 import 경로를 그대로 둔다.
+export { STAGE_LABEL, waitText, waitTone };
 
 // 큐 현황(2026-10-16 재설계, 사용자 요청 「대시보드에서 큐 현황에 대해 조금만 더 자세히 그리고 개선해서 보여주면
 // 좋겠어.」). 옛 카드는 Volcano PodGroup 만 보여 DMS 안쪽의 대기(계획·픽업·사전 점검·확인·배치)가 통째로 안 보였다 --
 // 테스트베드 실측으로 Volcano 대기는 늘 5~10초이고 정말 긴 대기는 사람의 확인(p95 7.3h)이다. 그래서 ① 요청이 지나가는
-// 단계 띠(건수 + 가장 오래 기다린 시간), ② 기다리는 항목 표(단계 필터)를 그린다. 판정·나이 계산은 전부 서버
+// 단계(건수 + 가장 오래 기다린 시간), ② 기다리는 항목 표(단계 필터)를 그린다. 판정·나이 계산은 전부 서버
 // (queue_pipeline)가 했다 -- 여기는 그리기와 색 문턱만 정한다.
-
-// 초 -> "n초"/"n분 n초"/"n시간 n분". RequestDetail 의 durationText 는 시각 2개를
-// 받는 다른 시그니처라 재사용 불가(서버가 이미 초를 계산해 준다).
-export function waitText(seconds: number | null): string {
-  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "—";
-  if (seconds < 60) return `${seconds}초`;
-  const m = Math.floor(seconds / 60);
-  if (m < 60) return seconds % 60 === 0 ? `${m}분` : `${m}분 ${seconds % 60}초`;
-  const h = Math.floor(m / 60);
-  return m % 60 === 0 ? `${h}시간` : `${h}시간 ${m % 60}분`;
-}
+// 같은 날 ①은 숫자 띠에서 흐름 히어로(QueueFlowHero -- 「흐르는 파스텔 리본」)로 바뀌었고 이 카드는 대시보드 맨 위로
+// 올라갔다(사용자 지시 「3번의 내용이 대시보드의 제일 위에 대표적으로 보여지게 해줘」). 표·칩은 그대로다.
 
 const QUEUE_STATE_VARIANT: Record<string, "ok" | "bad"> = {
   Open: "ok", Closed: "bad",
 };
 
-// running 을 그냥 「실행 중」이라 부르지 않는다: 같은 화면 KPI 타일 「실행 중」은 24h 창 잡 집계이고 확인 대기
-// (ConfirmPending)까지 센다 -- 같은 이름에 다른 숫자가 나란히 서면 어느 쪽도 못 믿게 된다. 이 칸은 Volcano 에서
-// 실제로 도는 잡이라 「Volcano 대기」와 짝을 맞춘다.
-export const STAGE_LABEL: Record<QueueStage, string> = {
-  planning: "계획 대기", pickup: "잡 픽업", preflight: "사전 점검", volcano_wait: "Volcano 대기",
-  running: "Volcano 실행 중", confirm: "확인 대기", batch: "배치 대기",
-};
-const STRIP: QueueStage[] = ["planning", "pickup", "preflight", "volcano_wait", "running", "confirm", "batch"];
 const WAIT_STAGES: QueueWaitStage[] = ["planning", "pickup", "preflight", "volcano_wait", "confirm", "batch"];
 // DMS DB 에서 오는 단계(Volcano 대기만 k8s 에서 온다) -- 「알 수 없음」 안내 문구를 원인별로 가른다.
 const DB_STAGES = new Set<QueueStage>(["planning", "pickup", "preflight", "running", "confirm", "batch"]);
-
-// 단계 설명(칸의 title). 주기·유예 값은 기본 설정(config.py)이다.
-const STAGE_HELP: Record<QueueStage, string> = {
-  planning: "요청이 접수돼 planner 가 도구·노드를 정하기를 기다립니다(10초 주기, 노드 신원 전파 유예 최대 5분).",
-  pickup: "계획된 잡을 stepper 가 집기를 기다립니다(5초 주기). 드레인 중이면 여기서 멈춥니다.",
-  preflight: "노드 사전 점검 파드가 도는 중입니다(확인 뒤 실행 직전의 재점검 포함).",
-  volcano_wait: "Volcano 가 gang(필요한 파드 전부)을 아직 올리지 못했습니다(PodGroup Pending·Inqueue).",
-  running: "Volcano 에서 실행 중인 미리보기·실행 잡입니다(대기가 아닙니다).",
-  confirm: "미리보기가 끝나 사람의 컨펌(단건) 또는 확인 대기 배치의 「배치 확인」을 기다립니다. 유효기간이 지나면 거부됩니다.",
-  batch: "배치 항목이 차례를 기다립니다 — 동시 실행 상한이 풀리기를 기다리는 항목과, 미리보기를 마쳤지만 이미 확인된 배치의 "
-    + "실행 슬롯이나 다른 항목의 미리보기를 기다리는 항목입니다(사람이 할 일은 없습니다).",
-};
-
-// 색 문턱(초) -- 가장 오래 기다린 시간이 attn 이상이면 주의(앰버), bad 이상이면 경고(적색). 기계 단계는 주기가 초 단위라
-// 5분이면 이미 이상하다(planner 신원 전파 유예 상한도 5분). 확인 대기는 사람이 누르는 단계라 길다: 유효기간(기본 24시간)의
-// 1/6·1/2. 배치 대기는 큰 배치가 상한만큼씩 도는 정상 상태라 적색을 쓰지 않는다(알람 피로). 실행 중은 대기가 아니라 색이 없다.
-const TONE_LIMITS: Record<QueueStage, { attn: number; bad: number | null } | null> = {
-  planning: { attn: 300, bad: 1800 },
-  pickup: { attn: 300, bad: 1800 },
-  preflight: { attn: 300, bad: 1800 },
-  volcano_wait: { attn: 300, bad: 1800 },
-  running: null,
-  confirm: { attn: 4 * 3600, bad: 12 * 3600 },
-  batch: { attn: 3600, bad: null },
-};
-type Tone = "none" | "attn" | "bad";
-export function waitTone(stage: QueueStage, seconds: number | null): Tone {
-  const lim = TONE_LIMITS[stage];
-  if (lim === null || seconds === null) return "none";
-  if (lim.bad !== null && seconds >= lim.bad) return "bad";
-  return seconds >= lim.attn ? "attn" : "none";
-}
-const CELL_TONE: Record<Tone, string> = {
-  none: "border-line bg-surface", attn: "border-attn/40 bg-attnbg", bad: "border-bad/40 bg-badbg",
-};
-const TEXT_TONE: Record<Tone, string> = { none: "text-muted", attn: "text-attn", bad: "text-bad" };
 
 // 계획 유예·오류 이벤트(planner) -- 원문 event_type 은 title 로 남는다.
 const PLANNING_NOTE: Record<string, string> = {
@@ -88,40 +40,6 @@ const PHASE_REF_LABEL: Record<string, string> = { preview: "미리보기", execu
 function expiryText(sec: number | null | undefined): string | null {
   if (sec === null || sec === undefined) return null;
   return sec === 0 ? "곧 만료" : `만료까지 ${waitText(sec)}`;
-}
-
-function StageCell({ stage, pipeline }: { stage: QueueStage; pipeline: QueuePipeline | null }) {
-  const stat = pipeline?.[stage] ?? null;
-  const tone = stat && stat.count > 0 ? waitTone(stage, stat.oldest_seconds) : "none";
-  // 0 건이면 「없음」, 모르면 「알 수 없음」 -- 둘을 같은 「—」로 접지 않는다(null ≠ 0).
-  let sub: string;
-  if (stat === null) sub = "알 수 없음";
-  else if (stat.count === 0) sub = stage === "running" ? "없음" : "대기 없음";
-  else sub = `${stage === "running" ? "가장 긴" : "가장 오래"} ${waitText(stat.oldest_seconds)}`;
-  const extra: string[] = [];
-  if (pipeline?.confirm && stage === "confirm" && pipeline.confirm.count > 0) {
-    // 띠 칸은 좁다(375 에선 2열) -- 「가장 빠른 만료까지 …」는 세 줄로 접혔다. 칸 안에서는 「다음 만료」가 같은 뜻이다.
-    const sec = pipeline.confirm.soonest_expiry_seconds;
-    if (sec !== null) extra.push(sec === 0 ? "곧 만료" : `다음 만료 ${waitText(sec)} 후`);
-  }
-  if (pipeline?.batch && stage === "batch" && typeof pipeline.batch.held === "number" && pipeline.batch.held > 0) {
-    extra.push(`미리보기 마친 항목 ${pipeline.batch.held}`);
-  }
-  if (pipeline?.batch && stage === "batch" && pipeline.batch.preview_ready_batches > 0) {
-    extra.push(`확인 대기 배치 ${pipeline.batch.preview_ready_batches}`);
-  }
-  if (pipeline?.running && stage === "running" && pipeline.running.includes_volcano_wait) {
-    extra.push("Volcano 대기 포함");
-  }
-  return (
-    <div data-testid={`queue-stage-${stage}`} data-tone={tone} title={STAGE_HELP[stage]}
-         className={`min-w-0 rounded-lg border px-3 py-2 ${CELL_TONE[tone]}`}>
-      <div className="text-xs text-muted break-keep">{STAGE_LABEL[stage]}</div>
-      <div className="text-xl font-semibold tabular-nums">{stat === null ? "—" : stat.count}</div>
-      <div className={`text-xs break-keep ${TEXT_TONE[tone]}`}>{sub}</div>
-      {extra.map((t) => <div key={t} className="text-xs text-muted break-keep">{t}</div>)}
-    </div>
-  );
 }
 
 function RequestCell({ e }: { e: QueueWaitEntry }) {
@@ -225,6 +143,10 @@ export function QueueSection() {
   const pipeline: QueuePipeline | null =
     q.data?.pipeline && typeof q.data.pipeline === "object" ? q.data.pipeline : null;
   const control: QueueControl | null = q.data?.control ?? null;
+  // 흐름(최근 창의 단계 사이 이동) -- 키 없는 옛 응답·null 은 모름: 입자를 그리지 않는다.
+  const flow: QueueFlow | null = q.data?.flow && typeof q.data.flow === "object" && typeof q.data.flow.done === "number"
+    && typeof q.data.flow.window_seconds === "number" ? q.data.flow : null;
+  const summary = flowSummary(pipeline, flow);
   const truncated = new Set(Array.isArray(q.data?.waiting_truncated) ? q.data.waiting_truncated : []);
   const state = q.data?.queue?.state ?? null;
 
@@ -239,9 +161,9 @@ export function QueueSection() {
 
   return (
     <Card>
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <h2 className="font-medium">큐 현황</h2>
-        <span className="text-muted text-xs">{q.data?.queue?.name ?? "dms-data"}</span>
+      <div className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        <h2 className="text-lg font-bold">큐 현황</h2>
+        <span className="text-xs text-ink/60">{q.data?.queue?.name ?? "dms-data"}</span>
         {/* 알 수 없으면(큐 null·state null) 배지를 내지 않는다 -- Open 을
             추측하지 않는다(설계 §3). 용량 게이지도 없다: dms-data 큐엔
             capability/deserved 가 없어 표시할 진실이 없다(설계 §2.2). */}
@@ -260,6 +182,13 @@ export function QueueSection() {
           <StatusPill state="maintenance" label="유지보수 — 신규 제출 차단" variant="action"
                       help={controlHelp("새 요청 제출을 받지 않습니다(진행 중인 잡은 계속 돕니다).", control.reason)} />
         )}
+        {/* 요약은 한 텍스트 노드 -- 대시보드 KPI 타일의 정확 일치 「대기」·「실행 중」과 겹치지 않는다. */}
+        {!q.isLoading && summary !== null && (
+          <span className="flex items-center gap-0.5 text-sm text-ink/70 tabular-nums xl:ml-auto">
+            {summary}
+            <FlowLegend />
+          </span>
+        )}
       </div>
       {/* 첫 응답 전에도 data 는 undefined 라 아래 「알 수 없음」과 모양이 같다.
           구분하지 않으면 매 첫 페인트가 "권한(RBAC)을 확인하세요"로 깜빡이며
@@ -268,13 +197,11 @@ export function QueueSection() {
         <p className="text-muted text-sm">불러오는 중…</p>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-            {STRIP.map((s) => <StageCell key={s} stage={s} pipeline={pipeline} />)}
-          </div>
-          {/* PodGroup phase 카운터(슬라이스 17)는 띠 아래 한 줄로 남긴다 -- Running 은 실제로 스케줄된 gang 수다.
+          <QueueFlowHero pipeline={pipeline} flow={flow} control={control} />
+          {/* PodGroup phase 카운터(슬라이스 17)는 흐름 아래 한 줄로 남긴다 -- Running 은 실제로 스케줄된 gang 수다.
               모르면(403/CRD 부재) 줄 자체를 내지 않는다: "Pending 0" 은 우리가 모르는 주장이다. */}
           {pods !== null && (
-            <p className="mt-2 text-xs text-muted tabular-nums">
+            <p className="mt-2.5 text-xs text-muted tabular-nums">
               {`Volcano PodGroup — Pending ${counts.Pending} · Inqueue ${counts.Inqueue} · Running ${counts.Running}`}
             </p>
           )}
