@@ -15,10 +15,12 @@
   running      잡 PreviewRunning/Executing/Running 중 Volcano 대기·실행 전 재점검이 아닌 것 -- 대기가 아니라 띠에만 있다.
   confirm      잡 ConfirmPending 중 **사람이 지금 확인할 수 있는 것** -- 단건의 컨펌, 확인 대기(PreviewReady) 배치의 자식
                (배치별 한 줄로 묶는다).
-  batch        배치가 차례를 쥔 항목 -- 아직 요청이 안 된 Queued 항목(동시 실행 상한) + 확인 대기가 아닌 배치의
-               ConfirmPending 자식(held: 이미 확인된 Running 배치에서 실행 슬롯을 기다리거나, Previewing 배치에서 형제
-               미리보기를 기다린다). 배치별 한 줄. held 를 확인 대기에 세면 사람이 할 일이 없는데 「확인 대기 996 · 12시간」
-               이 적색으로 떴다(검증 지적).
+  batch        배치가 차례를 쥔 항목 -- 아직 요청이 안 된 Queued 항목(동시 실행 상한) + 굴러가는 배치의 ConfirmPending
+               자식(held: 이미 확인된 Running 배치에서 실행 슬롯을 기다리거나, Previewing 배치에서 형제 미리보기를
+               기다린다). 배치별 한 줄. held 를 확인 대기에 세면 사람이 할 일이 없는데 「확인 대기 996 · 12시간」이 적색으로
+               떴다(검증 지적). 아무도 굴리지 않는 배치(취소 중·취소됨·완료·행 없음)의 자식은 어느 칸에도 세지 않는다 --
+               기다리는 것이 아니라 취소 정리를 기다린다(queue_batches 의 Queued 규칙과 같다). held 는 잡 축에서 오므로
+               이 단계는 배치·잡 두 축을 다 읽었을 때만 낸다(하나라도 모르면 None -- 「대기 없음」으로 접지 않는다).
 
 null(모름) ≠ 0: 재료 축이 읽히지 않은 단계는 None 이다({"count": 0} 이 아니다). 0 건 단계의 oldest_seconds 는 None 이고
 count 0 이 「없음」을 말한다. 대기 목록(waiting)은 읽힌 단계의 항목만 담는다 -- 어느 단계가 빠졌는지는 pipeline 의 None
@@ -41,6 +43,8 @@ WAITING_PER_STAGE = 20
 # Volcano PodGroup phase 중 「아직 스케줄 전」. Running·Completed 는 대기가 아니다(옛 카드의 표 규칙 그대로).
 PODGROUP_WAITING_PHASES = frozenset({"Pending", "Inqueue"})
 RUNNING_JOB_STATES = ("PreviewRunning", "Executing", "Running")
+# held(배치 대기로 세는 ConfirmPending 자식)의 배치 상태 -- orchestrator 가 실행 쪽으로 굴리는 것만(모듈 docstring 의 batch).
+_HELD_BATCH_STATES = ("Previewing", "Running")
 # 계획 유예·오류 이벤트 message 상한 -- plan_error 는 예외 문자열이라 길이가 정해져 있지 않다.
 NOTE_MESSAGE_MAX = 200
 
@@ -222,7 +226,7 @@ def build_queue_view(now: float, *, pods, planning, jobs, batches,
         # 확인 대기 = 사람이 지금 누를 수 있는 것만(모듈 docstring 의 confirm·batch).
         singles = jobs.get("confirm_singles")
         ready = [g for g in jobs["confirm_batches"] if g.get("status") == "PreviewReady"]
-        held_groups = [g for g in jobs["confirm_batches"] if g.get("status") != "PreviewReady"]
+        held_groups = [g for g in jobs["confirm_batches"] if g.get("status") in _HELD_BATCH_STATES]
         actionable = ([singles] if singles else []) + ready
         count = sum(g["n"] for g in actionable)
         confirm = _stat(count, _min_iso(g.get("oldest_at") for g in actionable), now)
@@ -255,10 +259,10 @@ def build_queue_view(now: float, *, pods, planning, jobs, batches,
         running["includes_volcano_wait"] = pods is None
         pipeline["running"] = running
 
-    if batches is not None:
+    if batches is not None and held_groups is not None:
         by_batch = {g["batch_id"]: {**g, "held": 0, "held_oldest_at": None, "held_expiry": None}
                     for g in batches["groups"]}
-        for g in held_groups or []:
+        for g in held_groups:
             row = by_batch.get(g["batch_id"])
             if row is None:
                 row = by_batch[g["batch_id"]] = {
@@ -272,16 +276,15 @@ def build_queue_view(now: float, *, pods, planning, jobs, batches,
             rows.append(_entry("batch", now, since=_min_iso([g.get("oldest_at"), g.get("held_oldest_at")]),
                                operation=g.get("operation"), requester=g.get("requester_id"),
                                priority=g.get("priority"), batch_id=g.get("batch_id"), detail={
-                                   "queued": g["queued"], "held": g["held"] if held_groups is not None else None,
+                                   "queued": g["queued"], "held": g["held"],
                                    "max_concurrency": g.get("max_concurrency"),
                                    "batch_status": g.get("status"), "batch_name": g.get("name"),
                                    "expires_at": g.get("held_expiry"),
                                    "expires_in_seconds": until_seconds(now, g.get("held_expiry"))}))
         ages = [e["wait_seconds"] for e in rows if e["wait_seconds"] is not None]
         queued = sum(g["queued"] for g in by_batch.values())
-        # held 는 잡 축을 못 읽었으면 모름(None) -- 0 으로 접지 않는다(배치 대기 수는 Queued 만으로 낸다).
-        held = None if held_groups is None else sum(g["n"] for g in held_groups)
-        total = queued + (held or 0)
+        held = sum(g["n"] for g in held_groups)
+        total = queued + held
         pipeline["batch"] = {"count": total, "oldest_seconds": max(ages) if total > 0 and ages else None,
                              "queued": queued, "held": held,
                              "batches": len(rows), "preview_ready_batches": batches["preview_ready"]}
