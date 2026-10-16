@@ -42,7 +42,8 @@ const LEGEND_HELP = "역의 숫자는 지금 그 단계에 있는 건수입니�
   + "때만 느린 점 하나로 그립니다. 아래 고리는 미리보기를 마친 잡이 확인(승인)을 거쳐 실행 전 재점검으로 돌아가는 길입니다.";
 
 // 본선(왼쪽 → 오른쪽, 좁은 폭에선 위 → 아래) 중 완료 앞까지. 그 뒤 DOM 순서는 확인 관문(실행 중 아래 가지) → 완료다 --
-// 좁은 폭의 세로 순서가 곧 DOM 순서이고, xl 에선 격자 자리(확인 = 둘째 줄, 완료 = 첫 줄 끝)로 옮긴다.
+// 좁은 폭의 세로 순서가 곧 DOM 순서이고, lg(1024) 이상에선 격자 자리(확인 = 둘째 줄, 완료 = 첫 줄 끝)로 옮긴다. 가로 배치는
+// 원래 xl(1280) 부터였다 -- 1024–1279 에선 세로 레일이 카드 오른쪽을 비워 두어(2026-10-17 사용자 지시로 정리) lg 로 내렸다.
 const MAIN: Exclude<LineStage, "done">[] = ["batch", "planning", "pickup", "preflight", "volcano_wait", "running"];
 
 // 정적 클래스 문자열만(purge 가 조합 문자열을 만들지 않는다). quiet = 0 건 역(읽었고 비었다) -- 같은 파스텔을 옅게 해 건이 있는
@@ -113,13 +114,23 @@ function travelStyle(dur: number, i: number, n: number): CSSProperties {
   return { "--travel-dur": `${dur}s`, "--travel-delay": `${-(dur * i) / n}s` } as CSSProperties;
 }
 
-// 역 숫자 크기 -- 원 안에 들어가게 자릿수로 줄인다(작은 원 = 좁은 폭, 큰 원 = xl).
+// 역 숫자 크기 -- 원 안에 들어가게 자릿수로 줄인다(작은 원 = 좁은 폭, 큰 원 = lg 이상).
 function countSize(text: string): string {
-  if (text.length <= 2) return "text-lg xl:text-[22px]";
-  if (text.length === 3) return "text-base xl:text-lg";
-  if (text.length === 4) return "text-sm xl:text-base";
-  return "text-xs xl:text-sm";
+  if (text.length <= 2) return "text-lg lg:text-[22px]";
+  if (text.length === 3) return "text-base lg:text-lg";
+  if (text.length === 4) return "text-sm lg:text-base";
+  return "text-xs lg:text-sm";
 }
+// 좁은 칸(lg 의 ≈96–130px)에서 끝 마디만 홀로 다음 줄로 넘어가지 않게(「…33분」/「20초」, 「확인 대기 배치」/「1」,
+// 「Volcano 실행」/「중」) 마지막 공백을 줄바꿈 없는 공백으로 바꾼다. 숫자로 시작하는 끝 마디(시간·건수)와, 낱말이 셋 이상인
+// 라벨의 끝 낱말에만. 한 텍스트 노드는 그대로다(정확 일치 단언의 공백 정규화가 줄바꿈 없는 공백도 보통 공백으로 읽는다).
+function glueNumberTail(text: string): string {
+  return text.replace(/ (\d[^ ]*)$/, "\u00a0$1");
+}
+function glueLastWord(label: string): string {
+  return (label.match(/ /g) ?? []).length >= 2 ? label.replace(/ ([^ ]+)$/, "\u00a0$1") : label;
+}
+
 const TONE_RING: Record<Tone, string> = {
   none: "", attn: "outline outline-2 outline-offset-4 outline-attn", bad: "outline outline-2 outline-offset-4 outline-bad",
 };
@@ -133,7 +144,7 @@ function Disc({ stage, count, tone, atLeast = false }: {
   const text = count === null ? "—" : `${count}${atLeast ? "+" : ""}`;
   return (
     <span className="relative z-10 col-start-1 row-span-2 row-start-1 grid h-11 w-11 shrink-0 place-items-center
-                     xl:mt-2 xl:h-14 xl:w-14">
+                     lg:mt-2 lg:h-14 lg:w-14">
       {count !== null && count > 0 && (
         <span aria-hidden
               className={`absolute inset-0 rounded-full ${skin.fill} scale-125 opacity-40 motion-safe:animate-breathe`} />
@@ -148,21 +159,27 @@ function Disc({ stage, count, tone, atLeast = false }: {
   );
 }
 
+// lg(1024–1279)의 칸은 ≈96–130px 라 「Volcano 실행 중」이 한 줄에 못 든다 -- 그 폭의 본선 라벨 줄은 두 줄 자리(40px, 아래 정렬)로
+// 높이를 고정해 원·리본(SEG_POS 의 lg 값)이 라벨 줄 수와 상관없이 같은 높이에 선다. 확인 관문 라벨(짧다)은 lg 에서도 한 줄
+// (single) -- 고리 바닥(LOOP_Y)이 그 줄 높이에 묶여 있다.
 // xl 라벨 줄은 원·리본·고리의 높이 기준(SEG_POS·LOOP_Y 의 24px)이라 늘 한 줄이어야 한다 -- 줄바꿈을 막고(nowrap) 물음표
 // 버튼 오른쪽의 투명 여백(아이콘 16 둘레 4px)을 음수 여백으로 접어 가로 몫을 줄인다. 가장 좁은 xl(뷰포트 1280 + 일반
 // 스크롤바 15px = 안쪽 1265, 칸 129px · 라벨 줄 117px)에서 가장 긴 「Volcano 실행 중」(글자 93 + 틈 2 + 버튼 24)이 두 줄로
 // 접혀 24px 줄을 넘치고 원 링에 붙었다(2026-10-16 리뷰). 지금은 그 폭에서 115px 로 줄 안이고, 더 좁은 글꼴 대체가 와도
 // 한 줄로 남아 칸 자신의 좌우 여백(px-1.5) 쪽으로 고르게 넘칠 뿐이다.
-function StationLabel({ label, help }: { label: string; help: string }) {
+function StationLabel({ label, help, single = false }: { label: string; help: string; single?: boolean }) {
   return (
-    <div className="col-start-2 row-start-1 flex min-h-[1.5rem] min-w-0 items-center gap-0.5 xl:h-6 xl:justify-center">
-      <span className="text-[13px] font-medium leading-tight text-ink break-keep xl:whitespace-nowrap">{label}</span>
-      <HelpTip label={`${label} 설명`} head={label} help={help} className="xl:-mr-1" />
+    <div className={`col-start-2 row-start-1 flex min-h-[1.5rem] min-w-0 items-center gap-0.5 lg:justify-center
+                     ${single ? "lg:h-6" : "lg:h-10 lg:items-end xl:h-6 xl:items-center"}`}>
+      <span className="text-[13px] font-medium leading-tight text-ink break-keep lg:text-center xl:whitespace-nowrap">
+        {glueLastWord(label)}
+      </span>
+      <HelpTip label={`${label} 설명`} head={label} help={help} className="lg:-mr-1" />
     </div>
   );
 }
 
-// 리본 한 구간(역 중심 → 다음 역 중심). pos = 자리 클래스(좁은 폭 세로 / xl 가로), round = 끝 모양(이어 붙이는 통과
+// 리본 한 구간(역 중심 → 다음 역 중심). pos = 자리 클래스(좁은 폭 세로 / lg 이상 가로), round = 끝 모양(이어 붙이는 통과
 // 리본은 위끝이 각져야 앞 구간의 둥근 끝을 덮어 잘록한 이음매가 생기지 않는다).
 // still = 흐름(flow)을 모른다 -- 리본도 멈춘다(모르는 흐름을 움직임으로 꾸미지 않는다). 그라데이션 방향은 그대로 남는다.
 function Segment({ grad, rate, paused, still, pos, round = "rounded-full" }: {
@@ -173,8 +190,8 @@ function Segment({ grad, rate, paused, still, pos, round = "rounded-full" }: {
     <span aria-hidden className={`pointer-events-none absolute ${pos}`}>
       <span className={`absolute inset-0 overflow-hidden ${round} ${paused ? "opacity-50 saturate-50" : ""}`}>
         <span className={`absolute left-0 top-0 h-[300%] w-full bg-gradient-to-b bg-[length:100%_66.6667%] bg-repeat-y
-                          xl:h-full xl:w-[300%] xl:bg-gradient-to-r xl:bg-[length:66.6667%_100%] xl:bg-repeat-x ${grad}
-                          ${paused || still ? "" : "motion-safe:animate-flow-y xl:motion-safe:animate-flow-x"}`} />
+                          lg:h-full lg:w-[300%] lg:bg-gradient-to-r lg:bg-[length:66.6667%_100%] lg:bg-repeat-x ${grad}
+                          ${paused || still ? "" : "motion-safe:animate-flow-y lg:motion-safe:animate-flow-x"}`} />
         <span className={`absolute inset-0 ${round} shadow-ribbon`} />
       </span>
       {paused ? (
@@ -183,16 +200,16 @@ function Segment({ grad, rate, paused, still, pos, round = "rounded-full" }: {
         </span>
       ) : (
         <span className="absolute inset-0 grid place-items-center motion-safe:hidden">
-          <ChevronDown className="h-3 w-3 text-ink/40 xl:hidden" strokeWidth={3} />
-          <ChevronRight className="hidden h-3 w-3 text-ink/40 xl:block" strokeWidth={3} />
+          <ChevronDown className="h-3 w-3 text-ink/40 lg:hidden" strokeWidth={3} />
+          <ChevronRight className="hidden h-3 w-3 text-ink/40 lg:block" strokeWidth={3} />
         </span>
       )}
       {Array.from({ length: n }, (_, i) => (
         <span key={i} style={travelStyle(dur, i, n)}
               className="absolute inset-0 hidden motion-safe:block motion-safe:animate-travel-y
-                         xl:motion-safe:animate-travel-x">
+                         lg:motion-safe:animate-travel-x">
           <span className="absolute left-1/2 top-0 h-[7px] w-[7px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white
-                           shadow-glow xl:left-0 xl:top-1/2" />
+                           shadow-glow lg:left-0 lg:top-1/2" />
         </span>
       ))}
     </span>
@@ -262,16 +279,16 @@ function TextLines({ stage, lines, flow }: { stage: QueueStage; lines: Lines; fl
   const exits = flow !== null && EXIT_STAGES.has(stage) ? flow.exits?.[stage as QueueFlowExitStage] ?? 0 : 0;
   return (
     <>
-      <p className={`col-start-2 text-xs leading-snug break-keep xl:mt-2.5 xl:text-center ${SUB_TONE[lines.tone]}`}>
-        {lines.sub}
+      <p className={`col-start-2 text-xs leading-snug break-keep lg:mt-2.5 lg:text-center ${SUB_TONE[lines.tone]}`}>
+        {glueNumberTail(lines.sub)}
       </p>
       {lines.extra.map((t) => (
-        <p key={t} className={`col-start-2 text-xs leading-snug break-keep xl:mt-0.5 xl:text-center ${SKIN[stage].ink}`}>
-          {t}
+        <p key={t} className={`col-start-2 text-xs leading-snug break-keep lg:mt-0.5 lg:text-center ${SKIN[stage].ink}`}>
+          {glueNumberTail(t)}
         </p>
       ))}
       {exits > 0 && flow !== null && (
-        <p className="col-start-2 text-[11px] leading-snug text-ink/70 break-keep xl:mt-0.5 xl:text-center">
+        <p className="col-start-2 text-[11px] leading-snug text-ink/70 break-keep lg:mt-0.5 lg:text-center">
           {`최근 ${waitText(flow.window_seconds)} 이탈 ${exits}${flow.saturated ? "+" : ""}`}
         </p>
       )}
@@ -279,21 +296,22 @@ function TextLines({ stage, lines, flow }: { stage: QueueStage; lines: Lines; fl
   );
 }
 
-// 역 li 공통 -- 좁은 폭: [원 | 글자] 격자(원이 라벨·sub 두 줄에 걸친다), xl: 세로로 쌓인 가운데 정렬(라벨 → 원 → 글자).
-const LI = "relative grid grid-cols-[2.75rem_minmax(0,1fr)] content-start gap-x-3 xl:flex xl:flex-col xl:items-center "
-  + "xl:gap-0 xl:px-1.5";
-// 리본 자리: 좁은 폭은 원 중심(22px)에서 다음 li 원 중심까지(li 높이 + ol gap 1rem) 세로, xl 은 원 중심(라벨 24 + 여백 8 +
-// 반지름 28 - 리본 반폭 7 = 53px)에서 오른쪽 이웃 칸 중심까지(칸 너비 = 100%) 가로.
-const SEG_POS = "left-[15px] top-[22px] h-[calc(100%+1rem)] w-3.5 xl:left-1/2 xl:top-[53px] xl:h-3.5 xl:w-full";
+// 역 li 공통 -- 좁은 폭: [원 | 글자] 격자(원이 라벨·sub 두 줄에 걸친다), lg 이상: 세로로 쌓인 가운데 정렬(라벨 → 원 → 글자).
+const LI = "relative grid grid-cols-[2.75rem_minmax(0,1fr)] content-start gap-x-3 lg:flex lg:flex-col lg:items-center "
+  + "lg:gap-0 lg:px-1.5";
+// 리본 자리: 좁은 폭은 원 중심(22px)에서 다음 li 원 중심까지(li 높이 + ol gap 1rem) 세로, lg 이상은 원 중심(라벨 줄 + 여백 8 +
+// 반지름 28 - 리본 반폭 7 = lg 69px · xl 53px -- 라벨 줄이 lg 40 · xl 24)에서 오른쪽 이웃 칸 중심까지(칸 너비 = 100%) 가로.
+const SEG_POS = "left-[15px] top-[22px] h-[calc(100%+1rem)] w-3.5 lg:left-1/2 lg:top-[69px] lg:h-3.5 lg:w-full "
+  + "xl:top-[53px]";
 
-// 고리 줄기(xl): 사전 점검·실행 중 칸의 글자 밑에서 칸 바닥(+ 줄 간격)까지 -- 아래 줄 확인 관문 고리의 다리가 여기서 이어진다
+// 고리 줄기(lg 이상): 사전 점검·실행 중 칸의 글자 밑에서 칸 바닥(+ 줄 간격)까지 -- 아래 줄 확인 관문 고리의 다리가 여기서 이어진다
 // (윗줄 높이는 가장 긴 칸이 정하므로 다리를 고리 쪽에서만 그리면 짧은 칸 밑에 빈틈이 남았다). 실행 중 줄기는 내려가고(시작 점),
 // 사전 점검 줄기는 올라간다(화살촉). 점선은 고리 SVG 와 같은 마디(6 + 10)를 배경으로 그려 같은 빠르기로 흐른다 -- 한 마디(16px)
 // 더 긴 점선 층을 잘라 낸 창 안에서 transform 으로 민다(합성된다). moving = 그 다리에 흐름이 있다(loopLegs).
 function LoopStub({ dir, moving }: { dir: "up" | "down"; moving: boolean }) {
   return (
-    <span aria-hidden className="pointer-events-none relative hidden xl:-mb-3 xl:mt-2 xl:block xl:min-h-[14px] xl:w-2
-                                 xl:flex-1">
+    <span aria-hidden className="pointer-events-none relative hidden lg:-mb-3 lg:mt-2 lg:block lg:min-h-[14px] lg:w-2
+                                 lg:flex-1">
       <span className="absolute inset-0 rounded-t-full bg-stage-confirm" />
       <span className="absolute inset-y-0 left-1/2 w-[1.75px] -translate-x-1/2 overflow-hidden">
         <span className={`absolute inset-x-0 -top-4 bottom-0 bg-gradient-to-b from-stage-confirm-ink/45 from-[37.5%]
@@ -331,8 +349,8 @@ function LineStation({ stage, pipeline, flow, paused }: {
   );
 }
 
-// 고리 기하(xl): 확인 관문 li 는 사전 점검·Volcano 대기·실행 중 세 칸에 걸친다 -- 다리는 칸 중심(1/6·5/6), 바닥은 확인 역
-// 중심 높이(위 여백 4 + 라벨 24 + 여백 8 + 반지름 28).
+// 고리 기하(lg 이상): 확인 관문 li 는 사전 점검·Volcano 대기·실행 중 세 칸에 걸친다 -- 다리는 칸 중심(1/6·5/6), 바닥은 확인 역
+// 중심 높이(위 여백 4 + 라벨 24(lg 에서도 한 줄 -- StationLabel single) + 여백 8 + 반지름 28).
 const LOOP_Y = 64;
 const LOOP_R = 20;
 
@@ -354,14 +372,14 @@ function ConfirmStation({ pipeline, flow, paused }: {
   const branch = "M 29 -20 C 33 2 34 22 48 22";
   return (
     <li ref={ref} data-testid="queue-stage-confirm" data-tone={lines.tone}
-        className={`${LI} pl-12 xl:col-span-3 xl:col-start-4 xl:row-start-2 xl:pl-0 xl:pt-1`}>
+        className={`${LI} pl-12 lg:col-span-3 lg:col-start-4 lg:row-start-2 lg:pl-0 lg:pt-1`}>
       {/* 좁은 폭: 본선은 이 가지 행 옆을 지나 완료로 이어진다(실행 중 → 완료 구간의 나머지). */}
       {/* 실행 중 구간(위 li)은 이 행의 원 중심 높이(22)에서 둥글게 끝난다 -- 통과 리본은 그 둥근 끝(15~22)부터 각진 위끝으로
           덮고 완료 역 중심까지 간다. 색은 완료 쪽(민트) 한 가지라 멈춘 그림에서도 앞 구간의 끝색(민트)과 이어진다. */}
       <Segment grad="from-stage-done via-stage-done to-stage-done" rate={edgeSum(flow, ["running>done"])}
                paused={paused} still={flow === null} round="rounded-b-full"
-               pos="left-[15px] top-[15px] h-[calc(100%+1rem+7px)] w-3.5 xl:hidden" />
-      <span aria-hidden className="pointer-events-none absolute left-0 top-0 xl:hidden">
+               pos="left-[15px] top-[15px] h-[calc(100%+1rem+7px)] w-3.5 lg:hidden" />
+      <span aria-hidden className="pointer-events-none absolute left-0 top-0 lg:hidden">
         <svg className="absolute -top-5 left-0 overflow-visible" width="52" height="44" viewBox="0 -20 52 44">
           <path d={branch} fill="none" className="stroke-stage-confirm" strokeWidth="6" strokeLinecap="round" />
           <path d={branch} fill="none"
@@ -370,9 +388,9 @@ function ConfirmStation({ pipeline, flow, paused }: {
         </svg>
         <PathParticles path={branch} rate={down} />
       </span>
-      {/* xl: 실행 중에서 내려와 확인 역을 지나 사전 점검으로 올라가는 고리. 너비를 재기 전(0)엔 그리지 않는다. */}
+      {/* lg 이상: 실행 중에서 내려와 확인 역을 지나 사전 점검으로 올라가는 고리. 너비를 재기 전(0)엔 그리지 않는다. */}
       {w > 0 && (
-        <span aria-hidden className="pointer-events-none absolute left-0 top-0 hidden xl:block"
+        <span aria-hidden className="pointer-events-none absolute left-0 top-0 hidden lg:block"
               style={{ width: w, height: y + 4 }}>
           <svg className="absolute inset-0 overflow-visible" width={w} height={y + 4}>
             <path d={loop} fill="none" className="stroke-stage-confirm" strokeWidth="8" strokeLinecap="round"
@@ -387,16 +405,17 @@ function ConfirmStation({ pipeline, flow, paused }: {
           <PathParticles path={legUp} rate={up} />
         </span>
       )}
-      <StationLabel label={STAGE_LABEL.confirm} help={STAGE_HELP.confirm} />
+      <StationLabel label={STAGE_LABEL.confirm} help={STAGE_HELP.confirm} single />
       <Disc stage="confirm" count={lines.stat === null ? null : lines.stat.count} tone={lines.tone} />
       <TextLines stage="confirm" lines={lines} flow={flow} />
       <p className="col-start-2 mt-0.5 flex items-center gap-1 text-xs leading-snug text-stage-confirm-ink break-keep
-                    xl:absolute xl:left-[calc(16.667%+12px)] xl:top-[26px] xl:mt-0 xl:block xl:w-[calc(33.333%-46px)]
-                    xl:text-center xl:text-[11px]">
-        <CornerUpLeft aria-hidden className="h-3.5 w-3.5 shrink-0 xl:hidden" />
-        {/* xl 에선 고리 안 좁은 자리라 두 줄(낱말 사이에서) -- 좁은 폭에선 한 줄. */}
-        <span className="xl:block">승인되면</span>
-        <span className="xl:block">사전 점검으로</span>
+                    lg:absolute lg:left-[calc(16.667%+6px)] lg:top-[24px] lg:mt-0 lg:block lg:w-[calc(33.333%-34px)]
+                    lg:text-center lg:text-[10px] xl:left-[calc(16.667%+12px)] xl:top-[26px] xl:w-[calc(33.333%-46px)]
+                    xl:text-[11px]">
+        <CornerUpLeft aria-hidden className="h-3.5 w-3.5 shrink-0 lg:hidden" />
+        {/* lg 이상에선 고리 안 좁은 자리라 두 줄(낱말 사이에서) -- 좁은 폭에선 한 줄. */}
+        <span className="lg:block">승인되면</span>
+        <span className="lg:block">사전 점검으로</span>
       </p>
     </li>
   );
@@ -408,10 +427,10 @@ function DoneStation({ flow }: { flow: QueueFlow | null }) {
   const sub = flow === null ? "읽지 못함"
     : `최근 ${waitText(flow.window_seconds)}${flow.saturated ? " · 하한값" : ""}`;
   return (
-    <li data-testid="queue-stage-done" data-tone="none" className={`${LI} xl:col-start-7 xl:row-start-1`}>
+    <li data-testid="queue-stage-done" data-tone="none" className={`${LI} lg:col-start-7 lg:row-start-1`}>
       <StationLabel label={DONE_LABEL} help={DONE_HELP} />
       <Disc stage="done" count={flow === null ? null : flow.done} tone="none" atLeast={flow?.saturated === true} />
-      <p className="col-start-2 text-xs leading-snug text-ink/70 break-keep xl:mt-2.5 xl:text-center">{sub}</p>
+      <p className="col-start-2 text-xs leading-snug text-ink/70 break-keep lg:mt-2.5 lg:text-center">{sub}</p>
     </li>
   );
 }
@@ -446,9 +465,9 @@ export function QueueFlowHero({ pipeline, flow, control }: {
   const paused = control?.drain === true;
   return (
     <div className="relative overflow-hidden rounded-xl bg-aurora px-4 py-5 ring-1 ring-inset ring-line/70
-                    xl:px-5 xl:pb-6 xl:pt-6">
+                    lg:px-5 lg:pb-6 lg:pt-6">
       <ol aria-label="요청 처리 흐름"
-          className="relative flex flex-col gap-4 xl:grid xl:grid-cols-7 xl:gap-x-0 xl:gap-y-3">
+          className="relative flex flex-col gap-4 lg:grid lg:grid-cols-7 lg:gap-x-0 lg:gap-y-3">
         {MAIN.map((s) => <LineStation key={s} stage={s} pipeline={pipeline} flow={flow} paused={paused} />)}
         <ConfirmStation key="confirm" pipeline={pipeline} flow={flow} paused={paused} />
         <DoneStation key="done" flow={flow} />

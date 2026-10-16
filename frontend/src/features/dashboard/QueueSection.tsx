@@ -186,7 +186,7 @@ export function QueueSection() {
         {/* 요약은 한 텍스트 노드 -- 대시보드 KPI 타일의 정확 일치 「대기」·「실행 중」과 겹치지 않는다. break-keep: 한글은
             음절 사이에서도 줄이 바뀐다 -- 마디 안의 줄바꿈 없는 공백(flowSummary)과 함께 「 · 」 뒤에서만 바뀌게. */}
         {!q.isLoading && summary !== null && (
-          <span className="flex items-center gap-0.5 text-sm text-ink/70 tabular-nums break-keep xl:ml-auto">
+          <span className="flex items-center gap-0.5 text-sm text-ink/70 tabular-nums break-keep lg:ml-auto">
             {summary}
             <FlowLegend />
           </span>
