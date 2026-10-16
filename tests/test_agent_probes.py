@@ -1,5 +1,6 @@
 import os
-from dms.agent.probes import parse_mountinfo, probe_mounts, probe_identities, probe_os_metrics, probe_tools
+from dms.agent.probes import (parse_mountinfo, parse_proc_stat_cpu, probe_mounts, probe_identities,
+                              probe_os_metrics, probe_tools)
 
 MOUNTINFO = """\
 22 1 0:20 / / rw,relatime - ext4 /dev/root rw
@@ -288,6 +289,8 @@ def test_probe_os_metrics_with_failures_are_soft():
     assert out["network_rx_bytes"] is None and out["disks"] == []
     # cpuinfo 도 같은 fail-soft: 못 읽으면 0 이 아니라 None(모름)
     assert out["cpu_count"] is None
+    # /proc/stat 도 같다(2026-10-16) -- 못 읽으면 누적 카운터 3종 모두 None, 키 자체는 있다
+    assert (out["cpu_total_jiffies"], out["cpu_idle_jiffies"], out["cpu_iowait_jiffies"]) == (None, None, None)
 
 
 # x86 /proc/cpuinfo 실물 축약(테스트베드 워커 2코어 형상): 코어마다 "processor" 로
@@ -346,3 +349,55 @@ def test_probe_artifact_base_reports_exists_and_writable():
     assert r == {"path": "/nope", "exists": False, "writable": False}
     assert probe_artifact_base(None) is None
     assert probe_artifact_base("") is None
+
+
+# ---- CPU 사용률 원재료: /proc/stat 집계 행(2026-10-16 사용자 보고 「코어수가 128이어도 200이 넘어가고」) ----------
+# 실물 서식: "cpu" 뒤에 공백 두 칸, user nice system idle iowait irq softirq steal guest guest_nice. 아래 줄이
+# 코어별(cpu0..)이라 첫 줄만 집계다.
+PROC_STAT = """\
+cpu  1000 50 300 8000 400 20 30 5 700 70
+cpu0 500 25 150 4000 200 10 15 2 350 35
+cpu1 500 25 150 4000 200 10 15 3 350 35
+intr 123456 0 0
+ctxt 987654
+btime 1760000000
+"""
+
+
+def test_parse_proc_stat_cpu_sums_first_eight_fields_without_guest():
+    # guest(700)·guest_nice(70)는 커널이 이미 user·nice 에 포함해 센다 -- 더하면 이중 계산이다.
+    out = parse_proc_stat_cpu(PROC_STAT)
+    assert out == {"cpu_total_jiffies": 1000 + 50 + 300 + 8000 + 400 + 20 + 30 + 5,   # 9805, guest 제외
+                   "cpu_idle_jiffies": 8000 + 400,                                  # idle + iowait
+                   "cpu_iowait_jiffies": 400}
+
+
+def test_parse_proc_stat_cpu_unknown_shapes_are_none_not_zero():
+    # 형식이 예상 밖이면 0 으로 지어내지 않는다(null ≠ 0): 집계 행이 아님, steal 이전 커널(필드 7개),
+    # 비정수, 음수, 빈 텍스트, 비문자열.
+    for bad in ("cpu0 1 2 3 4 5 6 7 8\n",
+                "cpu  1 2 3 4 5 6 7\n",
+                "cpu  1 2 x 4 5 6 7 8\n",
+                "cpu  1 2 -3 4 5 6 7 8\n",
+                "", None):
+        assert parse_proc_stat_cpu(bad) is None, bad
+
+
+def test_parse_proc_stat_cpu_accepts_kernel_without_guest_fields():
+    # guest 필드가 없는(2.6.24 이전) 8필드 행도 total 계산에 필요한 것은 다 있다
+    assert parse_proc_stat_cpu("cpu  1 2 3 4 5 6 7 8\n") == {
+        "cpu_total_jiffies": 36, "cpu_idle_jiffies": 9, "cpu_iowait_jiffies": 5}
+
+
+def test_probe_os_metrics_reads_proc_stat_counters():
+    files = {"/proc/loadavg": LOADAVG, "/proc/meminfo": MEMINFO,
+             "/proc/net/dev": NETDEV, "/proc/stat": PROC_STAT}
+    out = probe_os_metrics([], read_text=lambda p: files[p], statvfs=lambda p: None)
+    assert out["cpu_total_jiffies"] == 9805 and out["cpu_idle_jiffies"] == 8400
+    assert out["cpu_iowait_jiffies"] == 400
+    # 사용률은 무상태 프로브가 아니라 러너가 차분으로 계산한다 -- 여기엔 없다
+    assert "cpu_used_pct" not in out
+    # 형식이 깨진 /proc/stat 은 카운터만 None, 다른 지표는 그대로(fail-soft)
+    files["/proc/stat"] = "garbage\n"
+    out = probe_os_metrics([], read_text=lambda p: files[p], statvfs=lambda p: None)
+    assert out["cpu_total_jiffies"] is None and out["load1"] == 1.50

@@ -4,7 +4,7 @@ import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { setupServer } from "msw/node";
 import { http, HttpResponse } from "msw";
 import { beforeAll, afterAll, afterEach, test, expect } from "vitest";
-import { NodesList, toolStatusText, ageText, clockSkewSeconds } from "./NodesList";
+import { NodesList, toolStatusText, ageText, clockSkewSeconds, cpuLoadText } from "./NodesList";
 
 const server = setupServer();
 beforeAll(() => server.listen());
@@ -194,7 +194,7 @@ test("마지막 리포트는 맨 끝 열이고, 상세는 표 아래가 아니�
   await screen.findByText("node-a");
   const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
   expect(headers[headers.length - 1]).toBe("마지막 리포트");
-  expect(headers).toEqual(["노드", "상태", "배치", "마운트", "도구", "CPU · 부하", "메모리", "상세", "마지막 리포트"]);
+  expect(headers).toEqual(["노드", "상태", "배치", "마운트", "도구", "CPU 사용률 · 부하", "메모리", "상세", "마지막 리포트"]);
   const rowA = screen.getByText("node-a").closest("tr")!;
   const listTable = rowA.closest("table")!;
   await userEvent.click(within(rowA).getByRole("button", { name: "상세" }));
@@ -324,4 +324,69 @@ test("cordon 된 노드를 다시 포함할 때는 uncordon 전까지 배치되�
   renderPlacement(both);
   await userEvent.click(await screen.findByRole("button", { name: "node-a 다시 포함" }));
   expect(await screen.findByRole("dialog", { name: "node-a 다시 포함" })).toHaveTextContent("uncordon 전까지는");
+});
+
+
+// ---- 2026-10-16 사용자 보고 「대시보드의 cpu 사용량은 어떻게 집계하는거야? 코어수가 128이어도 200이 넘어가고」 ----
+// 예전 칸 "128코어 · 213.45" 는 load1 이 사용률처럼 읽혔다 -- 사용률(%)과 부하(load / 코어)를 나눠 이름 붙인다.
+
+test("cpuLoadText: 사용률과 부하를 따로 이름 붙이고, 모르면 0 이 아니라 —", () => {
+  expect(cpuLoadText({ cpu_used_pct: 42.3, load1: 213.45, cpu_count: 128 }))
+    .toEqual({ usage: "42.3%", load: "부하 213.45 / 128코어" });
+  // 구형 에이전트(키 없음): 사용률 —, 부하는 그대로
+  expect(cpuLoadText({ load1: 213.45, cpu_count: 128 })).toEqual({ usage: "—", load: "부하 213.45 / 128코어" });
+  // 재시작 직후 첫 보고(null)·범위 밖·문자열 오염도 모름
+  for (const bad of [null, 120, -1, "42"])
+    expect(cpuLoadText({ cpu_used_pct: bad, load1: 1 }).usage).toBe("—");
+  // 0 은 유휴 노드의 정상값
+  expect(cpuLoadText({ cpu_used_pct: 0 }).usage).toBe("0.0%");
+  expect(cpuLoadText({})).toEqual({ usage: "—", load: "부하 —" });
+});
+
+const CPU_NODES = [
+  { ...NODES[0], node_name: "busy",
+    report: { ...NODES[0].report,
+              os: { ...NODES[0].report.os, cpu_used_pct: 42.3, cpu_iowait_pct: 3.1, cpu_count: 128,
+                    load1: 213.45, load5: 200.1, load15: 190.0 } } },
+  { ...NODES[0], node_name: "old-agent",
+    report: { ...NODES[0].report,
+              os: { ...NODES[0].report.os, cpu_count: 128, load1: 213.45 } } },
+];
+
+test("목록 칸: 사용률 % 와 부하 / 코어가 분리돼 보이고, 구형 에이전트는 사용률 —", async () => {
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(CPU_NODES)));
+  wrap();
+  const busy = (await screen.findByText("busy")).closest("tr")!;
+  expect(within(busy).getByText("42.3%", { exact: false })).toBeInTheDocument();
+  expect(within(busy).getByText("· 부하 213.45 / 128코어", { exact: false })).toBeInTheDocument();
+  const old = screen.getByText("old-agent").closest("tr")!;
+  const cell = within(old).getByText(/부하 213\.45 \/ 128코어/).closest("td")!;
+  expect(cell.textContent).toBe("— · 부하 213.45 / 128코어");
+  expect(cell.textContent).not.toMatch(/0(\.0)?%/);
+});
+
+test("상세 타일: CPU 사용률(I/O 대기·코어)과 부하(load)는 다른 타일, 부하는 사용률이 아니라는 설명", async () => {
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(CPU_NODES)));
+  wrap();
+  const busy = (await screen.findByText("busy")).closest("tr")!;
+  await userEvent.click(within(busy).getByRole("button", { name: "상세" }));
+  const dialog = await screen.findByRole("dialog", { name: "busy 상세" });
+  const cpuTile = within(dialog).getByText("CPU 사용률").parentElement!;
+  expect(within(cpuTile).getByText("42.3%")).toBeInTheDocument();
+  expect(within(cpuTile).getByText("I/O 대기 3.1% · 128코어")).toBeInTheDocument();
+  const loadTile = within(dialog).getByText("부하(load 1·5·15분)").parentElement!;
+  expect(within(loadTile).getByText("213.45")).toBeInTheDocument();
+  expect(within(dialog).getByText(/코어 수를 넘을 수 있으며 CPU 사용률이 아닙니다/)).toBeInTheDocument();
+});
+
+test("상세 타일: 구형 에이전트는 CPU 사용률 — (0% 아님), 보조 줄은 아는 것(코어)만", async () => {
+  server.use(http.get("/api/admin/nodes", () => HttpResponse.json(CPU_NODES)));
+  wrap();
+  const old = (await screen.findByText("old-agent")).closest("tr")!;
+  await userEvent.click(within(old).getByRole("button", { name: "상세" }));
+  const dialog = await screen.findByRole("dialog", { name: "old-agent 상세" });
+  const cpuTile = within(dialog).getByText("CPU 사용률").parentElement!;
+  expect(within(cpuTile).getByText("—")).toBeInTheDocument();
+  expect(within(cpuTile).getByText("128코어")).toBeInTheDocument();
+  expect(within(cpuTile).queryByText(/I\/O 대기/)).toBeNull();
 });

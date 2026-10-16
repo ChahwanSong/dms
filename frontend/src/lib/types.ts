@@ -510,7 +510,11 @@ export interface Releases { current: Record<string, Release>; history: Release[]
 
 export interface NodeMetricDisk { storage_name: string; used_pct: number | null }
 export interface NodeMetricPoint {
-  at: string; load1: number | null; load5: number | null; load15: number | null;
+  at: string;
+  // CPU 사용률·I/O 대기 %(2026-10-16): 에이전트가 /proc/stat 차분으로 계산, 서버가 0..100 검증. null = 모름(구형
+  // 에이전트·재시작 후 첫 보고) -- 0 아님. 옵션(?) = 구 서버·fixture 호환. load1 은 사용률이 아니다(코어 수를 넘는다).
+  cpu_used_pct?: number | null; cpu_iowait_pct?: number | null;
+  load1: number | null; load5: number | null; load15: number | null;
   mem_used_pct: number | null; net_rx_bps: number | null; net_tx_bps: number | null;
   disks: NodeMetricDisk[];
 }

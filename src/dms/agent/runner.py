@@ -8,13 +8,57 @@ import httpx
 from ..config import AGENT_TOOL_NAMES, AgentSettings
 from ..db import utc_now_iso
 from .directory import NslcdDirectory
-from .probes import (probe_artifact_base, probe_identities, probe_k8s_node, probe_mounts,
-                     probe_os_metrics, probe_tools)
+from .probes import (CPU_COUNTER_KEYS, probe_artifact_base, probe_identities, probe_k8s_node,
+                     probe_mounts, probe_os_metrics, probe_tools)
 
 
 def _read_text(path: str) -> str:
     with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
+
+
+def _counter(block, key):
+    # bool 은 int 의 서브클래스 -- True 가 1 jiffy 로 새면 안 된다(metrics_series._num 과 같은 가드)
+    value = block.get(key) if isinstance(block, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _share(prev, cur, d_total):
+    """구간 비율(%) -- 카운터가 없거나 줄었거나 결과가 0..100 밖이면 None(모름). 0 은 정상값이다."""
+    if prev is None or cur is None or cur < prev:
+        return None
+    pct = (cur - prev) / d_total * 100
+    return round(pct, 1) if 0 <= pct <= 100 else None
+
+
+def cpu_utilisation(prev, cur) -> dict:
+    """직전 표본(prev)과 이번 표본(cur)의 /proc/stat 누적 카운터(probes.CPU_COUNTER_KEYS) -> 구간 CPU 사용률.
+
+    2026-10-16(사용자 보고 「코어수가 128이어도 200이 넘어가고」): 대시보드의 "CPU" 는 load1 이었다 -- 사용률은
+    누적 카운터의 **차분**이라 표본 사이 상태가 필요하고, 그 상태를 가진 것이 러너다. 서버가 시계열 인접
+    차분으로 계산하지 않는 이유: 노드 화면(/api/admin/nodes)은 최신 보고 1건만 보므로 보고 안에 값이 있어야
+    시계열·최신값 화면이 같은 숫자를 낸다.
+
+    - cpu_used_pct = (Δtotal - Δidle) / Δtotal, cpu_iowait_pct = Δiowait / Δtotal (×100, 소수 1자리).
+    - None(모름): 첫 표본(prev 없음), Δtotal <= 0(같은 틱 안의 두 표본), total 감소(재부팅 리셋 -- 음수 사용률을
+      그리느니 빈 칸이 정직하다, metrics_series._rate 와 같은 규칙), 카운터 결측·비정수.
+    - 감소 판정은 지표별이다: total 이 줄면 둘 다 None, idle(idle+iowait) 이 줄면 사용률만, iowait 만 줄면
+      I/O 대기만 None. iowait 단독 감소는 nohz 커널의 알려진 흔들림(proc(5))이라 그 때문에 주 지표인 사용률
+      칸까지 비우지 않는다 -- idle+iowait 합은 그 흔들림에도 단조다."""
+    out = {"cpu_used_pct": None, "cpu_iowait_pct": None}
+    t0, t1 = _counter(prev, "cpu_total_jiffies"), _counter(cur, "cpu_total_jiffies")
+    if t0 is None or t1 is None or t1 <= t0:
+        return out
+    d_total = t1 - t0
+    i0, i1 = _counter(prev, "cpu_idle_jiffies"), _counter(cur, "cpu_idle_jiffies")
+    if i0 is not None and i1 is not None and i1 >= i0:
+        used = (d_total - (i1 - i0)) / d_total * 100
+        # Δidle > Δtotal(다른 성분이 줄어든 오염)은 음수 사용률이다 -- 범위 밖은 모름
+        if 0 <= used <= 100:
+            out["cpu_used_pct"] = round(used, 1)
+    out["cpu_iowait_pct"] = _share(_counter(prev, "cpu_iowait_jiffies"),
+                                   _counter(cur, "cpu_iowait_jiffies"), d_total)
+    return out
 
 
 def build_report(node_name, storages, probe_targets, *, mountinfo_text,
@@ -70,6 +114,21 @@ class AgentRunner:
         self._settings = settings
         self._client = client
         self._directory = directory or NslcdDirectory(managed=settings.nslcd_managed)
+        # 직전 /proc/stat 카운터(cpu_utilisation 의 prev). 프로세스 메모리에만 둔다 -- 재시작 직후 첫 보고는
+        # 사용률 None(모름)이고 다음 보고부터 채워진다. state(응답에서 다시 짓는 설정 묶음)에 섞지 않는 이유:
+        # 보고 실패 시 run_once 가 옛 state 를 그대로 돌려주므로 거기 두면 표본이 갱신되지 않는다.
+        self._cpu_prev: Optional[dict] = None
+
+    def _attach_cpu_utilisation(self, report: dict) -> None:
+        """보고 os 블록에 cpu_used_pct·cpu_iowait_pct 를 싣고 이번 카운터를 다음 차분의 기준으로 기억한다.
+        POST 성패와 무관하게 기준을 옮긴다 -- 다음 보고의 값이 "직전 보고 주기"의 사용률이 되게(실패가 길게
+        이어진 뒤 첫 성공 보고가 그 긴 구간의 평균을 내지 않게)."""
+        os_block = report.get("os")
+        if not isinstance(os_block, dict):
+            return
+        os_block.update(cpu_utilisation(self._cpu_prev, os_block))
+        # 카운터가 None 인 표본을 지나면 기준도 None -- 다음 한 번은 모름(metrics_series 의 네트워크 차분과 같은 관례)
+        self._cpu_prev = {key: os_block.get(key) for key in CPU_COUNTER_KEYS}
 
     def run_once(self, state: dict) -> dict:
         try:
@@ -92,6 +151,7 @@ class AgentRunner:
                               host_root=self._settings.host_root,
                               self_mountinfo_text=self_mountinfo_text,
                               directory_status=self._directory.report())
+        self._attach_cpu_utilisation(report)
         try:
             response = self._client.post(
                 "/api/agent/report", json=report,

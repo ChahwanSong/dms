@@ -194,15 +194,58 @@ def probe_artifact_base(path, *, isdir=os.path.isdir, access=os.access,
     return {"path": path, "exists": exists, "writable": writable}
 
 
+CPU_COUNTER_KEYS = ("cpu_total_jiffies", "cpu_idle_jiffies", "cpu_iowait_jiffies")
+
+
+def parse_proc_stat_cpu(text) -> "dict | None":
+    """/proc/stat 첫 줄(집계 "cpu" 행) -> 부팅 이후 누적 jiffies 3종. 형식이 예상 밖이면 None(모름).
+
+    왜(2026-10-16 사용자 보고 「대시보드의 cpu 사용량은 어떻게 집계하는거야? 코어수가 128이어도 200이 넘어가고
+    막 그러던데.」): 그때까지 "CPU" 로 보이던 값은 /proc/loadavg 의 load1 이었다 -- 실행 중 + 실행 대기 +
+    D 상태(I/O 대기) 스레드 수의 평균이라 코어 수를 정당하게 넘는다. 사용률은 이 누적 카운터 두 표본의 차분
+    (러너 runner.cpu_utilisation)으로만 나온다.
+
+    필드: user nice system idle iowait irq softirq steal guest guest_nice. total 은 앞 8개 합이고 guest·
+    guest_nice 는 **더하지 않는다** -- 커널이 이미 user·nice 에 포함해 센다(kernel/sched/cputime.c
+    account_guest_time), 더하면 게스트 시간이 이중 계산된다. idle 은 idle+iowait: iowait 는 CPU 가 놀고 있는
+    시간이고, 둘 사이에서 값이 오가는(nohz 에서 iowait 가 줄어드는, proc(5)) 흔들림도 합에선 상쇄된다.
+    필드가 8개 미만(steal 이전 커널)·음수·비정수면 None -- 0 으로 지어내지 않는다(null ≠ 0)."""
+    try:
+        fields = text.splitlines()[0].split()
+    except (AttributeError, IndexError):
+        return None
+    if len(fields) < 9 or fields[0] != "cpu":
+        return None
+    try:
+        values = [int(v) for v in fields[1:9]]
+    except ValueError:
+        return None
+    if any(v < 0 for v in values):
+        return None
+    _user, _nice, _system, idle, iowait, _irq, _softirq, _steal = values
+    return {"cpu_total_jiffies": sum(values), "cpu_idle_jiffies": idle + iowait,
+            "cpu_iowait_jiffies": iowait}
+
+
 def probe_os_metrics(storages, *, read_text, statvfs=os.statvfs,
                      net_dev_path="/proc/net/dev", virtual_net_path="", host_root=""):
     metrics = {"load1": None, "load5": None, "load15": None, "cpu_count": None,
+               **{key: None for key in CPU_COUNTER_KEYS},
                "memory_total_kb": None, "memory_available_kb": None,
                "disks": [], "network_rx_bytes": None, "network_tx_bytes": None}
     try:
         parts = read_text("/proc/loadavg").split()
         metrics["load1"], metrics["load5"], metrics["load15"] = (
             float(parts[0]), float(parts[1]), float(parts[2]))
+    except Exception:
+        pass
+    try:
+        # CPU 사용률의 원재료(2026-10-16, parse_proc_stat_cpu docstring). /proc/stat 도 loadavg·meminfo 처럼
+        # 네임스페이스되지 않는 호스트 값이라 파드 안 기본 경로 그대로 읽는다. 사용률(차분)은 표본 사이 상태가
+        # 필요해 여기(무상태 프로브)가 아니라 러너가 계산한다 -- 여기는 누적 카운터만 싣는다.
+        counters = parse_proc_stat_cpu(read_text("/proc/stat"))
+        if counters is not None:
+            metrics.update(counters)
     except Exception:
         pass
     try:

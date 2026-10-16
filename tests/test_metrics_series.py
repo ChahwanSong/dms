@@ -25,10 +25,34 @@ def test_points_carry_load_mem_and_disks():
         "2026-08-09T00:00:00Z", load1=0.5, load5=0.4, load15=0.3,
         memory_total_kb=100, memory_available_kb=25,
         disks=[{"storage_name": "s1", "total_bytes": 200, "used_bytes": 50}])])
+    # cpu_used_pct·cpu_iowait_pct(2026-10-16) 가 없는 구형 에이전트 보고 -- 0 이 아니라 None(모름)
     assert pts == [{
-        "at": "2026-08-09T00:00:00Z", "load1": 0.5, "load5": 0.4, "load15": 0.3,
+        "at": "2026-08-09T00:00:00Z", "cpu_used_pct": None, "cpu_iowait_pct": None,
+        "load1": 0.5, "load5": 0.4, "load15": 0.3,
         "mem_used_pct": 75.0, "net_rx_bps": None, "net_tx_bps": None,
         "disks": [{"storage_name": "s1", "used_pct": 25.0}]}]
+
+
+def test_points_pass_cpu_utilisation_through():
+    # CPU 사용률은 에이전트 러너가 /proc/stat 차분으로 계산해 싣는다(runner.cpu_utilisation) -- 여기는 통과만.
+    # load(213) 는 코어 수를 넘을 수 있는 별개 지표라 사용률과 섞이지 않는다.
+    pts = build_node_points([
+        _sample("2026-08-09T00:00:00Z", cpu_used_pct=42.5, cpu_iowait_pct=3.1, load1=213.0),
+        _sample("2026-08-09T00:01:00Z", cpu_used_pct=0, cpu_iowait_pct=0.0),
+    ])
+    assert (pts[0]["cpu_used_pct"], pts[0]["cpu_iowait_pct"], pts[0]["load1"]) == (42.5, 3.1, 213.0)
+    # 0 은 정상값(유휴 노드) -- None 으로 뭉개지 않는다
+    assert pts[1]["cpu_used_pct"] == 0.0 and pts[1]["cpu_iowait_pct"] == 0.0
+
+
+def test_cpu_utilisation_outside_0_100_or_non_numeric_is_none():
+    # DB 가 신뢰 경계: 범위 밖·문자열·bool·NaN 은 모름. 100 과 0 경계값은 통과.
+    for bad in (100.1, -0.1, "42", True, float("nan"), float("inf"), None):
+        pt = build_node_points([_sample("2026-08-09T00:00:00Z",
+                                        cpu_used_pct=bad, cpu_iowait_pct=bad)])[0]
+        assert pt["cpu_used_pct"] is None and pt["cpu_iowait_pct"] is None, bad
+    pt = build_node_points([_sample("2026-08-09T00:00:00Z", cpu_used_pct=100, cpu_iowait_pct=0)])[0]
+    assert (pt["cpu_used_pct"], pt["cpu_iowait_pct"]) == (100.0, 0.0)
 
 
 def test_network_throughput_is_adjacent_diff():

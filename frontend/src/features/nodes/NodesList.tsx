@@ -16,6 +16,29 @@ const asArray = <T,>(v: unknown): T[] => (Array.isArray(v) ? v : []);
 const asObject = (v: unknown): Record<string, unknown> =>
   (v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {});
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+// CPU 사용률·I/O 대기%(2026-10-16, 에이전트가 /proc/stat 차분으로 계산): 최신 보고 원본이 그대로 오므로(/api/admin/
+// nodes 는 검증 없이 report 를 싣는다) 여기서 0..100 만 받는다. 구형 에이전트(키 없음)·재시작 후 첫 보고(null)는
+// null(모름) -- "—" 로 보이고 0% 로 뭉개지 않는다.
+const pct = (v: unknown): number | null => {
+  const n = num(v);
+  return n !== null && n >= 0 && n <= 100 ? n : null;
+};
+
+/** 목록 칸 "CPU 사용률 · 부하"(2026-10-16 사용자 보고 「코어수가 128이어도 200이 넘어가고」): 예전 "128코어 · 213.45"
+    는 load1 이 사용률처럼 읽혔다 -- 사용률을 앞에, 부하는 "부하 213.45 / 128코어" 로 따로 이름 붙인다. */
+export function cpuLoadText(os: Record<string, unknown>): { usage: string; load: string } {
+  const used = pct(os.cpu_used_pct);
+  const load1 = num(os.load1);
+  const cores = num(os.cpu_count);
+  const coreText = cores !== null ? ` / ${cores}코어` : "";
+  return {
+    usage: used !== null ? `${used.toFixed(1)}%` : "—",
+    load: `부하 ${load1 !== null ? load1.toFixed(2) : "—"}${coreText}`,
+  };
+}
+
+// 부하(load)의 뜻 -- 상세 타일·목록 각주가 같은 문장을 쓴다(대시보드 NodeMetricsSection 의 LOAD_HELP 와 같은 취지).
+const LOAD_HELP = "부하(load) = 실행 중·실행 대기·I/O 대기 스레드 수의 평균이라 코어 수를 넘을 수 있으며 CPU 사용률이 아닙니다.";
 
 // 노드 도구는 **존재 확인만** 표시한다(2026-08-30 사용자 결정). 도구는 노드가
 // 아니라 잡 파드(dms-mpifileutils 이미지)에서 실행되므로, 노드에선 바이너리가
@@ -181,6 +204,11 @@ function NodeDetail({ node }: { node: NodeInfo }) {
   const probeMode = (report as Record<string, unknown>).probe_mode;
   const nowMs = Date.now();
   const memPct = memoryPct(os);
+  const cpu = cpuLoadText(os);
+  const iowait = pct(os.cpu_iowait_pct);
+  const cpuSub = [iowait !== null ? `I/O 대기 ${iowait.toFixed(1)}%` : null,
+                  num(os.cpu_count) !== null ? `${os.cpu_count}코어` : null]
+    .filter((x): x is string => x !== null).join(" · ");
   const yesNo = (v: unknown) => (v === true ? "예" : v === false ? "아니오" : "—");
 
   return (
@@ -205,18 +233,23 @@ function NodeDetail({ node }: { node: NodeInfo }) {
           })()}`}
       </p>
 
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
-        <Tile label="CPU" value={num(os.cpu_count) !== null ? `${os.cpu_count}코어` : "—"} />
-        <Tile label="부하(1·5·15분)"
-              value={num(os.load1) !== null ? `${num(os.load1)!.toFixed(2)}` : "—"}
-              sub={num(os.load5) !== null && num(os.load15) !== null
-                ? `${num(os.load5)!.toFixed(2)} · ${num(os.load15)!.toFixed(2)}` : undefined} />
-        <Tile label="메모리 사용" value={memPct !== null ? `${memPct.toFixed(1)}%` : "—"}
-              sub={num(os.memory_total_kb) !== null
-                ? `전체 ${humanBytes(num(os.memory_total_kb)! * 1024)}` : undefined} />
-        <Tile label="네트워크 누적(수신/송신)"
-              value={num(os.network_rx_bytes) !== null ? humanBytes(os.network_rx_bytes) : "—"}
-              sub={num(os.network_tx_bytes) !== null ? `송신 ${humanBytes(os.network_tx_bytes)}` : undefined} />
+      <div>
+        <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+          {/* CPU 사용률과 부하는 다른 타일(2026-10-16): 사용률은 직전 보고 대비 %, 부하는 스레드 수 평균이라
+              코어 수를 넘는다. 코어 수는 사용률 쪽 보조 줄에 둔다. */}
+          <Tile label="CPU 사용률" value={cpu.usage} sub={cpuSub || undefined} />
+          <Tile label="부하(load 1·5·15분)"
+                value={num(os.load1) !== null ? `${num(os.load1)!.toFixed(2)}` : "—"}
+                sub={num(os.load5) !== null && num(os.load15) !== null
+                  ? `${num(os.load5)!.toFixed(2)} · ${num(os.load15)!.toFixed(2)}` : undefined} />
+          <Tile label="메모리 사용" value={memPct !== null ? `${memPct.toFixed(1)}%` : "—"}
+                sub={num(os.memory_total_kb) !== null
+                  ? `전체 ${humanBytes(num(os.memory_total_kb)! * 1024)}` : undefined} />
+          <Tile label="네트워크 누적(수신/송신)"
+                value={num(os.network_rx_bytes) !== null ? humanBytes(os.network_rx_bytes) : "—"}
+                sub={num(os.network_tx_bytes) !== null ? `송신 ${humanBytes(os.network_tx_bytes)}` : undefined} />
+        </div>
+        <p className="mt-2 text-xs text-muted">{LOAD_HELP}</p>
       </div>
 
       <Section title="마운트" caption="스토리지 마운트 상태 — Ready 가 아니면 그 노드엔 해당 스토리지 작업이 배치되지 않습니다.">
@@ -378,12 +411,13 @@ export function NodesList() {
           <thead>
             <tr className="text-muted">
               <th className="py-2">노드</th><th>상태</th><th>배치</th><th>마운트</th><th>도구</th>
-              <th>CPU · 부하</th><th>메모리</th><th>상세</th><th>마지막 리포트</th>
+              <th>CPU 사용률 · 부하</th><th>메모리</th><th>상세</th><th>마지막 리포트</th>
             </tr>
           </thead>
           <tbody>
             {nodes.map((n) => {
               const os = asObject(asObject(n.report).os);
+              const cpu = cpuLoadText(os);
               return (
                 <tr key={n.node_name} className={`border-t border-line ${n.fresh ? "" : "bg-badbg/40"}`}>
                   <td className="py-2 font-medium">{n.node_name}</td>
@@ -394,9 +428,9 @@ export function NodesList() {
                   <td className="pr-3"><PlacementCell node={n} /></td>
                   <td><ReadyRatio items={asObject(n.report).mounts} /></td>
                   <td><ReadyRatio items={asObject(n.report).tools} /></td>
-                  <td className="whitespace-nowrap tabular-nums">
-                    {num(os.cpu_count) !== null ? `${os.cpu_count}코어` : "—"}
-                    {num(os.load1) !== null && <span className="text-muted">{` · ${num(os.load1)!.toFixed(2)}`}</span>}
+                  <td className="whitespace-nowrap tabular-nums pr-3">
+                    {cpu.usage}
+                    <span className="text-muted">{` · ${cpu.load}`}</span>
                   </td>
                   <td className="pr-6"><UsageBar pct={memoryPct(os)} /></td>
                   <td className="py-2">
@@ -421,6 +455,9 @@ export function NodesList() {
           노드(kubectl uncordon 으로 해제). 둘 다 새 작업이 배치되지 않고, 이미 그 노드로 계획됐거나 대기 중인 작업은
           종료되며, 그 노드에서 이미 실행 중인 작업은 그대로 둡니다. 일시 불가 = 노드 압박·준비 안 됨 같은 k8s 일시
           상태 — 새 작업만 다른 노드로 보내고 이미 계획된 작업은 기다립니다.
+        </p>
+        <p className="mt-1 text-xs text-muted">
+          {`CPU 사용률 = 직전 보고 대비 CPU 가 일한 시간 비율(에이전트 재시작 직후·구형 에이전트는 —). ${LOAD_HELP}`}
         </p>
         </>
       )}

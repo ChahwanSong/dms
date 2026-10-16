@@ -4,7 +4,8 @@ agent_reports의 report blob에서 노드 메트릭 포인트를 만든다. 계�
 - fail-soft: 샘플 하나가 깨져도(비 dict, os 없음, 시각 파싱 불가) 그 샘플만 버린다.
 - 네트워크는 부팅 이후 누적 카운터다 -- throughput은 인접 샘플 차분으로 여기서
   계산해 프론트가 카운터 의미를 몰라도 되게 한다(설계 §3). 카운터가 감소하면
-  (리부팅 리셋) 그 구간은 null -- 음수 대역폭을 그리는 것보다 빈 구간이 정직하다."""
+  (리부팅 리셋) 그 구간은 null -- 음수 대역폭을 그리는 것보다 빈 구간이 정직하다.
+- CPU 사용률은 예외로 에이전트가 차분까지 계산해 싣는다(2026-10-16) -- 여기는 0..100 검증만 하고 통과시킨다."""
 import math
 
 # 사본이던 _epoch 를 db.iso_epoch 로 승격(슬라이스 17) -- 별칭 유지로 호출부 무변경.
@@ -31,6 +32,13 @@ def _num(value):
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return None
+
+
+def _pct(value):
+    """에이전트가 계산해 실은 백분율(cpu_used_pct·cpu_iowait_pct, 2026-10-16) -- DB 가 신뢰 경계라 수치 0..100 만
+    통과시키고 나머지(비수치·bool·NaN·범위 밖)는 None(모름). 0 은 정상값(유휴 노드)이라 그대로 둔다."""
+    v = _num(value)
+    return v if v is not None and 0 <= v <= 100 else None
 
 
 def _mem_used_pct(os_block):
@@ -97,8 +105,14 @@ def build_node_points(samples: list[dict]) -> list[dict]:
         # os.cpu_count 는 여기 싣지 않는다: 코어 수는 사실상 불변이라 프론트가
         # 최신 리포트(/api/admin/nodes 의 report.os.cpu_count)에서 읽으면 충분하고,
         # 포인트마다 실으면 시계열 응답 폭만 는다.
+        # CPU 사용률(2026-10-16 사용자 보고 「코어수가 128이어도 200이 넘어가고」 -- 그때까지 "CPU" 는 load1
+        # 이었다): /proc/stat 누적 카운터의 차분을 **에이전트 러너**가 계산해 싣는다(runner.cpu_utilisation).
+        # 네트워크처럼 여기서 인접 차분하지 않는 이유: 최신값만 보는 노드 화면도 같은 숫자를 내야 해서다.
+        # 구형 에이전트(필드 없음)·첫 보고는 None -- 0 으로 뭉개지 않는다.
         points.append({
             "at": sample["reported_at"],
+            "cpu_used_pct": _pct(os_block.get("cpu_used_pct")),
+            "cpu_iowait_pct": _pct(os_block.get("cpu_iowait_pct")),
             "load1": _num(os_block.get("load1")),
             "load5": _num(os_block.get("load5")),
             "load15": _num(os_block.get("load15")),
