@@ -35,10 +35,14 @@ export function UserPanel() {
           시에도 -- 박제됨) 관리자 화면 잔류가 최악이다 -- 떠나려는 의도대로
           보낸다. /login 은 쿼리 관찰자 0 이라 재조회 루프가 성립하지 않는다.
           접근성 이름 "로그아웃"은 e2e 01·router.test 와 삼중 계약 -- 위치를
-          옮겨도 이름은 불변이다. */}
+          옮겨도 이름은 불변이다.
+          2026-10-16: nav 를 **먼저**(클릭 즉시) 한다. 예전엔 훅 onSettled 의 qc.clear() 가 mutate onSettled 의 nav 보다
+          먼저 돌아, 그 사이 렌더에서 아직 붙어 있던 셸의 me 관찰자가 빈 캐시를 보고 401 재조회를 한 번 냈다(router.test
+          「me 재조회 루프 없이」가 렌더 타이밍에 따라 빨갛던 원인). /login 으로 먼저 떠나면 관찰자가 0 이 된 뒤에 clear 가
+          돈다 -- 훅 단위 onSettled 는 컴포넌트가 사라져도 실행된다(TanStack Mutation 옵션). POST 실패여도 떠나는 것은
+          예전과 같다. */}
       <button className="shrink-0 text-sm leading-6 text-accent border border-accent rounded-full px-3 py-1 hover:bg-infobg"
-              onClick={() => logout.mutate(undefined,
-                { onSettled: () => nav("/login", { replace: true }) })}>로그아웃</button>
+              onClick={() => { logout.mutate(); nav("/login", { replace: true }); }}>로그아웃</button>
     </div>
   );
 }
