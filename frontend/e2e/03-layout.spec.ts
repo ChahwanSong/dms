@@ -60,6 +60,8 @@ test.describe("E3 레이아웃 불변식", () => {
     await apiLogin(page);
 
     await visit(page, "/admin/dashboard", "대시보드");
+    // 노드 칸(2026-10-16 CPU 사용률 추가로 노드당 5칸)이 그려진 뒤에 잰다 -- 시계열은 heading 보다 늦게 온다.
+    await expect(page.getByRole("group", { name: / CPU 사용률$/ }).first()).toBeVisible();
     await assertLayoutSane(page, { minTableCells: 0 });
 
     // 계정 화면이 두 결함이 실제로 터졌던 자리다. 전제 단언을 **먼저** 건다 --
@@ -125,5 +127,10 @@ test.describe("E3 레이아웃 불변식", () => {
         >= 2 * parseFloat(getComputedStyle(b).lineHeight) + 1)
       .map((b) => b.textContent));
     expect(wrapped, "입력 방식 세그먼트 라벨이 두 줄로 접혔다").toEqual([]);
+
+    // 대시보드 노드 칸(2026-10-16 CPU 사용률 추가로 5칸): md 아래는 2열로 쌓여 375 에서 넘치지 않아야 한다.
+    await visit(page, "/admin/dashboard", "대시보드");
+    await expect(page.getByRole("group", { name: / CPU 사용률$/ }).first()).toBeVisible();
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
   });
 });

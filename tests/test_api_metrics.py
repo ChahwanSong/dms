@@ -4,10 +4,10 @@ from dms.repositories import Repositories
 ADMIN = {"Authorization": "Bearer tok-shared"}
 
 
-def _report(*, load1=0.5, mem_total=100, mem_avail=50, rx=0, tx=0):
-    # build_report(agent/runner.py)와 같은 모양 -- os 키 아래에 probe_os_metrics 반환
+def _report(*, load1=0.5, mem_total=100, mem_avail=50, rx=0, tx=0, cpu_used=None):
+    # build_report(agent/runner.py)와 같은 모양 -- os 키 아래에 probe_os_metrics 반환(+ 러너의 cpu_used_pct)
     return {"mounts": [], "tools": [], "identities": [],
-            "os": {"load1": load1, "load5": 0.4, "load15": 0.3,
+            "os": {"load1": load1, "load5": 0.4, "load15": 0.3, "cpu_used_pct": cpu_used,
                    "memory_total_kb": mem_total, "memory_available_kb": mem_avail,
                    "disks": [{"storage_name": "s1", "total_bytes": 100,
                               "used_bytes": 40}],
@@ -52,6 +52,20 @@ def test_metrics_nodes_series_with_backend_computed_throughput(client, db):
     assert [p["net_rx_bps"] for p in node["points"]] == [None, 100.0]
     assert node["points"][0]["mem_used_pct"] == 50.0
     assert node["points"][0]["disks"] == [{"storage_name": "s1", "used_pct": 40.0}]
+
+
+def test_metrics_nodes_series_and_node_list_carry_cpu_utilisation(client, db):
+    # 2026-10-16: 시계열(/metrics/nodes)과 최신값(/nodes) 둘 다 에이전트가 계산한 사용률을 낸다. 첫 보고(None)는
+    # 0 이 아니라 null, load(코어 수를 넘을 수 있는 별개 지표)는 그대로.
+    repos = Repositories(db)
+    now = utc_now_iso()
+    repos.agents.ingest("n1", _report(load1=213.45), reported_at=iso_plus(now, -120))
+    repos.agents.ingest("n1", _report(load1=213.45, cpu_used=42.5), reported_at=iso_plus(now, -60))
+    points = client.get("/api/admin/metrics/nodes?window=24", headers=ADMIN).json()["nodes"][0]["points"]
+    assert [p["cpu_used_pct"] for p in points] == [None, 42.5]
+    assert [p["load1"] for p in points] == [213.45, 213.45]
+    nodes = client.get("/api/admin/nodes", headers=ADMIN).json()
+    assert nodes[0]["report"]["os"]["cpu_used_pct"] == 42.5
 
 
 def test_metrics_nodes_window_clamps_to_retention(client, db):

@@ -29,8 +29,22 @@ const fmtPct = (v: number) => `${Math.round(v)}%`;
 const fmtLoad = (v: number) => String(Math.round(v * 100) / 100);
 const fmtBps = (v: number) => `${humanBytes(v)}/s`;
 
-// 메모리·디스크 사용%의 자연 상한 -- 차트가 창과 무관한 절대 스케일로 그려진다
+// 메모리·디스크·CPU 사용%의 자연 상한 -- 차트가 창과 무관한 절대 스케일로 그려진다
 const PCT_DOMAIN: SparklineDomain = { min: 0, max: 100 };
+
+// CPU 사용률·I/O 대기%(2026-10-16): 서버(metrics_series._pct)가 이미 0..100 만 통과시키지만 구 서버 응답엔 키
+// 자체가 없다(undefined) -- 같은 범위 검사로 null(모름)로 접는다. 0 은 유휴 노드의 정상값이라 그대로 둔다.
+const pctOf = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100 ? v : null;
+
+// 창 안의 마지막 유효값(Metric 의 "현재값"과 같은 규칙) -- CPU 칸 캡션의 I/O 대기%
+function lastValid(values: (number | null)[]): number | null {
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    const v = values[i];
+    if (v !== null) return v;
+  }
+  return null;
+}
 
 // 리포트는 스키마 검증 없이 저장된다(위 asArray 와 같은 방어) -- cpu_count 는
 // 양의 유한수일 때만 신뢰한다. 구형 에이전트 리포트엔 필드 자체가 없다: null
@@ -41,6 +55,9 @@ function cpuCountOf(report: unknown): number | null {
   const v = os?.cpu_count;
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
 }
+
+// 부하(load) 칸의 뜻 -- 칸 제목의 툴팁과 카드 아래 각주가 같은 문장을 쓴다(2026-10-16).
+const LOAD_HELP = "부하(load) = 실행 중·실행 대기·I/O 대기 스레드 수의 평균이라 코어 수를 넘을 수 있으며 CPU 사용률이 아닙니다.";
 
 function ageText(reportedAt: string): string {
   const ms = Date.now() - Date.parse(reportedAt);
@@ -64,9 +81,12 @@ function Metric({ title, values, label, fmt, domain, capLabel }: {
   // 않는다. 상대값 스케일에서 절대 수치가 사라지는 것을 이 병기가 보상한다.
   const valid = values.filter((v): v is number => v !== null && Number.isFinite(v));
   const cur = valid.length > 0 ? valid[valid.length - 1] : null;
+  // role=group + 이름: 칸이 다섯이 되며(2026-10-16) "어느 칸의 —인가"를 화면 낭독기·테스트가 구분하게.
+  // 머리줄 flex-wrap: md 의 5칸(칸당 ~80px)에서 제목·캡션이 서로를 짓눌러 글자 단위로 깨지지 않고 캡션이
+  // 다음 줄로 내려가게 -- 노드당 한 줄(2026-10-01)은 격자 행 기준이라 칸 안 줄바꿈과 무관하다.
   return (
-    <div>
-      <div className="flex items-center justify-between text-muted text-xs">
+    <div role="group" aria-label={label}>
+      <div className="flex flex-wrap items-center justify-between gap-x-1 text-muted text-xs">
         <span>{title}</span>
         {/* 상한 라벨은 SVG 밖 캡션 -- preserveAspectRatio="none" 아래 SVG 텍스트는
             가로로 왜곡된다(Sparkline 주석 참조) */}
@@ -80,9 +100,13 @@ function Metric({ title, values, label, fmt, domain, capLabel }: {
   );
 }
 
-// 노드당 한 줄: Load(1분평균)·메모리·수신·송신(2026-10-01 사용자 요청 -- 펼침(load5/load15·스토리지 사용%·
-// 마운트/도구/계정 요약)을 없앴다. 스토리지 사용%는 공유 FS 라 노드마다 같은 값이었고, 마운트·도구·계정 상세는
+// 노드당 한 줄: CPU 사용률·부하(load 1분)·메모리·수신·송신(2026-10-01 사용자 요청 -- 펼침(load5/load15·스토리지
+// 사용%·마운트/도구/계정 요약)을 없앴다. 스토리지 사용%는 공유 FS 라 노드마다 같은 값이었고, 마운트·도구·계정 상세는
 // 노드 화면(/admin/nodes)에 있다).
+// CPU 사용률 칸(2026-10-16 사용자 보고 「대시보드의 cpu 사용량은 어떻게 집계하는거야? 코어수가 128이어도 200이
+// 넘어가고 막 그러던데.」): 그때까지 CPU 처럼 읽히던 칸은 load1(실행·실행 대기·I/O 대기 스레드 수의 1분 평균)이라
+// 코어 수를 정당하게 넘었다. 실제 사용률(/proc/stat 차분, 에이전트 계산)을 첫 칸에 두고 load 칸은 이름부터
+// "부하"로 바꿔 사용률이 아님을 밝힌다. 5칸이라 md 이상은 5열(한 행 유지), 모바일은 2열로 쌓인다.
 export function NodeMetricsSection() {
   const [windowH, setWindowH] = useState(24);
   const metricsQ = useNodeMetrics(windowH);
@@ -125,7 +149,8 @@ export function NodeMetricsSection() {
         // 늘려 초과를 자르지 않는다.
         const cpu = cpuCountOf(report);
         const loadDomain: SparklineDomain = { min: 0, max: cpu };
-        const loadCap = cpu !== null ? `코어 ${cpu}` : undefined;
+        const loadCap = cpu !== null ? `코어 ${cpu} 기준` : undefined;
+        const iowait = lastValid(pick(points, (p) => pctOf(p.cpu_iowait_pct)));
         return (
           <div key={n.node_name} className="border-t border-black/5 py-3">
             <div className="flex items-center justify-between">
@@ -137,8 +162,15 @@ export function NodeMetricsSection() {
                 {n.fresh ? "정상" : "지연"} · {ageText(n.reported_at)}
               </span>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
-              <Metric title="Load (1분평균)" label={`${n.node_name} Load (1분평균)`} fmt={fmtLoad}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-2">
+              {/* 구형 에이전트(필드 없음)·재시작 후 첫 보고는 null -- 칸은 "—"(0% 아님). I/O 대기는 알 때만 캡션 */}
+              <Metric title="CPU 사용률" label={`${n.node_name} CPU 사용률`} fmt={fmtPct}
+                      domain={PCT_DOMAIN}
+                      capLabel={iowait !== null ? `I/O 대기 ${fmtPct(iowait)}` : undefined}
+                      values={pick(points, (p) => pctOf(p.cpu_used_pct))} />
+              {/* load 는 코어 수를 넘을 수 있으므로 코어 수는 상한이 아니라 기준선이다(위 주석) */}
+              <Metric title={<span title={LOAD_HELP}>부하(load 1분)</span>}
+                      label={`${n.node_name} 부하(load 1분)`} fmt={fmtLoad}
                       domain={loadDomain} capLabel={loadCap}
                       values={pick(points, (p) => p.load1)} />
               <Metric title="메모리 사용%" label={`${n.node_name} 메모리`} fmt={fmtPct}
@@ -154,6 +186,9 @@ export function NodeMetricsSection() {
           </div>
         );
       })}
+      {series.length > 0 && (
+        <p className="mt-2 text-xs text-muted">{`CPU 사용률 = 직전 보고 대비 CPU 가 일한 시간 비율(0–100%). ${LOAD_HELP}`}</p>
+      )}
     </Card>
   );
 }
