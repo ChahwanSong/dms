@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StrictBool
 from ..batch_orchestrator import auto_confirm_hold
-from ..batch_cancel import record_item_terminal, settle_child
+from ..batch_cancel import mark_cancel_reached, record_item_terminal, settle_child
 from ..domain import (DataJobState, DomainValidationError, Operation,
                       build_data_payload, validate_batch,
                       validate_batch_controls, validate_options, validate_owner_username)
@@ -678,7 +678,10 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
         rid = it.get("request_id")
         if not rid or it["status"] != "Materialized":     # 이미 기록된 항목(종단 자식)은 손대지 않는다
             continue
+        repo.touch_cancelling(batch_id)                   # 생존 신호 -- 그물이 유예 안에서 겹치지 않게
         jobs = repos.data_jobs.list_jobs(request_id=rid)
+        if jobs:
+            mark_cancel_reached(repos, rid, batch_id, component="api")
         try:
             for job in jobs:
                 terminate_job(adapter, job)
@@ -689,9 +692,14 @@ def cancel_batch(batch_id: str, request: Request, identity: Identity = Depends(r
                 message=f"{exc.reason_code}: batch cancel child {rid} -- left to the controller sweep"[:500],
                 payload={"batch_id": batch_id, "after_cancel": True}, request_id=rid)
             continue
-        state, why = settle_child(repos, adapter, rid, jobs, actor=identity.actor, component="api")
+        state, why = settle_child(repos, adapter, rid, jobs, actor=identity.actor, component="api",
+                                  batch_id=batch_id)
         if state is not None:
             record_item_terminal(repos, batch_id, it["seq"], rid, state, reason_code=why)
     if repo.finish_cancel_if_settled(batch_id):
+        return {"status": "Cancelled"}
+    # CAS 를 졌으면 다시 읽는다 -- 그 사이 그물이 마저 끝냈으면(오래 걸린 취소) 실제 상태를 말한다.
+    now_b = repo.get(batch_id)
+    if now_b is not None and now_b["status"] == "Cancelled":
         return {"status": "Cancelled"}
     return {"status": "Cancelling", "pending": pending}
