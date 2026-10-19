@@ -43,8 +43,8 @@ test("useDeleteRequests: POST {request_ids, batches} — 지운 요청·잡의 �
   for (const k of gone) expect(qc.getQueryData(k), JSON.stringify(k)).toBeUndefined();
   for (const k of kept) expect(qc.getQueryData(k), JSON.stringify(k)).toEqual({ x: 1 });
   expect(invalidated).toEqual(DELETE_REQUESTS_INVALIDATES.map((k) => [...k]));
-  for (const k of [["requests"], ["request-purges"], ["usage-targets"], ["usage-scan-storages"], ["usage-history"],
-                   ["metrics", "jobs"], ["audit"], ["batches"]]) {
+  for (const k of [["requests"], ["request-purges"], ["usage-targets"], ["usage-storages"], ["usage-scan-storages"],
+                   ["usage-history"], ["metrics", "jobs"], ["audit"], ["batches"]]) {
     expect(invalidated).toContainEqual(k);
   }
   expect(result.current.data?.skipped).toEqual([{ request_id: OTHER, reason: "request_job_active" }]);

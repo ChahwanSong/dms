@@ -312,6 +312,16 @@ export interface UsageStorageInfo {
   registered: boolean; source: "registered" | "last_known" | null;
   backend_type: string | null; mount_path: string | null; managed_root: string | null;
 }
+// 사용량 분석의 스토리지 탭 요약(GET /api/admin/usage/storages, 2026-10-20). storages = 등록 스토리지 ∪ 성공 scan 이
+// 있는 이름(등록 이름순 → 미등록 이름순). 등록인데 기록이 없으면 target_count·succeeded_scan_count 0 · last_scan_at null
+// (진짜 0). 미등록이면 backend_type·mount_path 는 감사 기록의 마지막 설정(source last_known, 모르면 null).
+// window_limit = 지표 정렬(실 사용량·파일 수·hot)이 값을 계산하는 창(최근 스캔 순) -- 대상 수가 이걸 넘을 때만 화면이 말한다.
+export interface UsageStorageSummary {
+  storage_name: string; registered: boolean; source: "registered" | "last_known" | null;
+  backend_type: string | null; mount_path: string | null;
+  target_count: number; succeeded_scan_count: number; last_scan_at: string | null;
+}
+export interface UsageStorages { window_limit: number; storages: UsageStorageSummary[] }
 // 사용량 분석의 미등록 스토리지(GET /api/admin/usage/unregistered-storages, 2026-10-12). target_count·succeeded_scan_count·
 // last_scan_at = 사용량 화면 기준(성공 scan -- 실패 scan 만 남은 이름은 0·null), request_count = 정리하면 지워질 작업 수
 // (단건 + batches 의 자식). mixed_batches = 다른 스토리지·다른 작업이 섞여 정리가 건너뛸 배치(수에 넣지 않는다).

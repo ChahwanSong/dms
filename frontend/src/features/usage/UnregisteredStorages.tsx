@@ -1,33 +1,33 @@
-import { useEffect, useRef, useState } from "react";
-import { Trash2, TriangleAlert } from "lucide-react";
-import { Card } from "../../components/ui/Card";
+import { useRef, useState } from "react";
+import { Trash2, TriangleAlert, X } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { Dialog } from "../../components/ui/Dialog";
 import { reasonText, type ApiError } from "../../lib/api";
 import { agoText, kstStampOrDash } from "../../lib/datetime";
-import type { UnregisteredStorage } from "../../lib/types";
-import { useUnregisteredStorages, usePurgeUnregisteredStorage, type StorageHistoryPurgeSummary } from "./useUsage";
+import type { UnregisteredStorage, UsageStorageSummary } from "../../lib/types";
+import { usePurgeUnregisteredStorage, type StorageHistoryPurgeSummary } from "./useUsage";
 
 // 사용량 분석의 미등록 스토리지 정리(2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean
 // up 할수있도록」). 미등록 = 등록 목록에 없는(삭제된) 스토리지 이름으로 남은 scan 기록 -- 판정·규모는 서버
 // (GET /api/admin/usage/unregistered-storages)가 한다. 정리는 그 스토리지의 scan 작업 기록 전부(성공·실패·취소, 그
 // 스토리지만 담은 scan 배치는 배치째)를 일반 작업 삭제와 같은 몸통으로 지운다(서버가 회차마다 미등록·순수성을 다시 판정).
 //
-// 정리 mutation 은 **패널이 소유한다**: 다 지우면 그 스토리지 행(과 행 안의 확인 창)이 목록 재조회로 사라진다 -- 창이
-// 소유하면 결과를 말할 자리도 함께 사라진다. 결과 줄(role=status)은 패널에 남고, 창이 사라져 포커스가 <body> 로 떨어지면
-// 결과 줄로 옮긴다(작업 삭제 창의 focusAfterDelete 와 같은 정신).
+// 2026-10-20: 따로 뜨던 「미등록 스토리지」 칸을 없애고 그 스토리지의 **탭**(「미등록」 표시) 맨 위 경고 띠로 옮겼다 -- 정리
+// 버튼이 그 기록(아래 표·CSV) 바로 위에 있다. 정리 mutation·결과 줄·포커스는 **페이지가 소유한다**(UsageAnalysis): 다 지우면
+// 그 탭과 띠(와 띠 안의 확인 창)가 재조회로 사라진다 -- 띠가 소유하면 결과를 말할 자리도 함께 사라진다. 결과 줄(role=status)은
+// 탭 줄 위에 남고, 창이 사라져 포커스가 <body> 로 떨어지면 결과 줄로 옮긴다(작업 삭제 창의 focusAfterDelete 와 같은 정신).
 //
 // 본문 글자는 ink/70(AA) · 한국어 문단 break-keep · 이름·경로는 overflow-wrap:anywhere(작업 삭제 창 관례).
 
 const SKIP_PREVIEW = 10;
 
-function lastKnownLine(row: UnregisteredStorage): string {
+export function lastKnownLine(row: UnregisteredStorage): string {
   const k = row.last_known;
   if (k === null) return "마지막 설정 기록 없음";
   return `마지막 설정 ${[k.backend_type, k.mount_path].filter((v) => v !== null).join(" · ") || "—"}`;
 }
 
-function scaleLine(row: UnregisteredStorage): string {
+export function scaleLine(row: UnregisteredStorage): string {
   const nb = row.batches.length;
   const nm = row.mixed_batches.length;
   return `대상 ${row.target_count}개 · 성공 scan ${row.succeeded_scan_count}개 · 정리할 작업 ${row.request_count}개`
@@ -35,12 +35,22 @@ function scaleLine(row: UnregisteredStorage): string {
     + (nm > 0 ? ` · 섞인 배치 ${nm}개는 정리하지 않음` : "");
 }
 
-function PurgeResult({ r, innerRef }: { r: StorageHistoryPurgeSummary; innerRef: React.RefObject<HTMLDivElement> }) {
+// 결과 줄은 페이지 바탕(탭 줄 위)에 뜨므로 흰 면 + 테두리. onDismiss 가 있으면 닫기(×) -- 다음 정리 전까지 남는 줄이라 다
+// 읽은 뒤 치울 수 있게(2026-10-20).
+export function PurgeResult({ r, innerRef, onDismiss }: {
+  r: StorageHistoryPurgeSummary; innerRef: React.RefObject<HTMLDivElement>; onDismiss?: () => void;
+}) {
   const rest = r.skipped.length - SKIP_PREVIEW;
   return (
     <div ref={innerRef} tabIndex={-1} role="status" aria-label="정리 결과"
-         className="space-y-1 rounded-lg border border-line bg-panel px-3 py-2 text-sm text-ink/70 break-keep outline-none focus-visible:ring-2 focus-visible:ring-accent">
-      <p className="font-medium text-ink [overflow-wrap:anywhere]">
+         className="relative space-y-1 rounded-lg border border-line bg-surface px-4 py-3 text-sm text-ink/70 break-keep outline-none focus-visible:ring-2 focus-visible:ring-accent">
+      {onDismiss && (
+        <button type="button" onClick={onDismiss} aria-label="정리 결과 닫기"
+                className="absolute right-2 top-2 inline-grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-panel hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+          <X aria-hidden className="h-4 w-4" />
+        </button>
+      )}
+      <p className={`font-medium text-ink [overflow-wrap:anywhere] ${onDismiss ? "pr-8" : ""}`}>
         {`${r.storage_name}: 작업 기록 ${r.deletedRequests}개 삭제됨`
           + (r.deletedBatches > 0 ? `(배치 ${r.deletedBatches}개 포함)` : "")
           + (r.skipped.length > 0 ? ` · ${r.skipped.length}건 제외` : "")}
@@ -61,7 +71,7 @@ function PurgeResult({ r, innerRef }: { r: StorageHistoryPurgeSummary; innerRef:
       )}
       {r.error !== null && <p className="text-bad">{`중간에 멈췄습니다 — ${r.error}. 다시 정리하면 남은 기록을 이어서 지웁니다.`}</p>}
       {/* 아직 시도하지 않은 기록(서버가 센 remaining_untried -- 회차 상한에 닿아 멈춘 경우). 건너뛴 것은 위 목록이 사유와
-          함께 말한다(그 스토리지 행은 기록이 남는 동안 목록에 남아 다시 정리할 수 있다). */}
+          함께 말한다(그 스토리지 탭은 기록이 남는 동안 남아 다시 정리할 수 있다). */}
       {r.error === null && r.untried !== null && r.untried > 0 && (
         <p>{`아직 정리하지 않은 기록 ${r.untried}개 — 다시 정리하면 이어서 지웁니다.`}</p>
       )}
@@ -70,7 +80,7 @@ function PurgeResult({ r, innerRef }: { r: StorageHistoryPurgeSummary; innerRef:
   );
 }
 
-function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }: {
+export function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }: {
   row: UnregisteredStorage;
   purge: ReturnType<typeof usePurgeUnregisteredStorage>;
   progress: number | null;
@@ -164,76 +174,48 @@ function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }: {
   );
 }
 
-export function UnregisteredStoragesPanel() {
-  const q = useUnregisteredStorages();
-  const purge = usePurgeUnregisteredStorage();
-  const [progress, setProgress] = useState<number | null>(null);
-  const resultRef = useRef<HTMLDivElement>(null);
-  const focusResult = () => resultRef.current?.focus();
-  // 다 지워 그 행(과 열린 확인 창)이 목록 재조회로 사라지면 포커스가 <body> 로 떨어진다 -- 결과 줄로 옮긴다. 창이 살아
-  // 있으면(일부 제외 등) 창이 닫히며 onCloseAutoFocus 가 같은 일을 한다. **정리 한 번에 한 번만**(submittedAt): 뒤의
-  // 재조회(창 포커스·다른 관리자의 변경)마다 결과 줄로 끌어올려 읽던 표에서 화면이 튀지 않게(리뷰).
-  const focusedFor = useRef<number | null>(null);
-  useEffect(() => {
-    if (!purge.isSuccess || focusedFor.current === purge.submittedAt) return;
-    focusedFor.current = purge.submittedAt;
-    if (document.activeElement === null || document.activeElement === document.body) focusResult();
-  }, [purge.isSuccess, purge.submittedAt]);  // eslint-disable-line react-hooks/exhaustive-deps
-  const rows = q.data ?? [];
-  if (q.isLoading) return null;
-  // 목록을 한 번도 못 받았을 때만 칸 전체를 오류로 -- 받은 뒤의 재조회 실패는 마지막 목록과 결과를 그대로 두고 한 줄로
-  // 말한다(정리 결과·열린 확인 창이 재조회 실패 한 번에 사라지지 않게, 리뷰).
-  if (q.data === undefined) {
-    return (
-      <Card>
-        <p className="text-sm text-bad">{`미등록 스토리지 목록을 불러오지 못했습니다 — ${(q.error as ApiError | null)?.message ?? ""}`}</p>
-      </Card>
-    );
-  }
-  // 첫 회차 전체 실패(409 storage_registered·503 등)인데 그 행이 재조회로 이미 사라졌으면 창 안 오류가 보일 자리가 없다 --
-  // 칸이 말한다(행이 있으면 창이 말한다). 예: 다른 관리자가 같은 이름을 다시 등록해 목록에서 빠졌다.
-  const failedName = purge.isError ? purge.variables?.storage_name ?? null : null;
-  const orphanError = failedName !== null && !rows.some((r) => r.storage_name === failedName);
-  if (rows.length === 0 && !purge.data && !orphanError) return null;
-  const now = Date.now();
+// 미등록 탭 맨 위의 경고 띠(2026-10-20): 무엇의 기록인지(삭제된 스토리지 · 마지막 설정)·규모·「기록 정리」. row(미등록 목록의
+// 행)가 아직 없거나 못 받았으면 요약(summary)의 마지막 설정만으로 띠를 그리고 정리 버튼은 두지 않는다 -- 규모를 모르는 채로
+// 지우게 하지 않는다. 확인 창 안 경고와 같은 주의색(attn) 면.
+export function UnregisteredBanner({ row, summary, purge, progress, setProgress, onResultFocus, now }: {
+  row: UnregisteredStorage | null;
+  summary: UsageStorageSummary | null;
+  purge: ReturnType<typeof usePurgeUnregisteredStorage>;
+  progress: number | null;
+  setProgress: (n: number | null) => void;
+  onResultFocus: () => void;
+  now: number;
+}) {
+  const config = row !== null ? lastKnownLine(row)
+    : summary !== null && (summary.backend_type !== null || summary.mount_path !== null)
+      ? `마지막 설정 ${[summary.backend_type, summary.mount_path].filter((v) => v !== null).join(" · ")}`
+      : null;
+  const lastScan = row?.last_scan_at ?? summary?.last_scan_at ?? null;
   return (
-    <Card>
-      <section aria-labelledby="unregistered-storages-title" className="space-y-3">
-        <div>
-          <h2 id="unregistered-storages-title" className="text-base font-semibold">미등록 스토리지</h2>
-          <p className="mt-1 text-sm text-ink/70 break-keep">
-            스토리지 목록에서 삭제된 스토리지의 scan 기록이 사용량 분석에 남아 있습니다. 스토리지별로 기록을 한 번에
-            정리할 수 있습니다.
-          </p>
+    <div role="note" aria-label="미등록 스토리지"
+         className="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-lg border border-attn/30 bg-attnbg px-4 py-3">
+      <div className="flex min-w-0 flex-1 basis-64 items-start gap-2.5">
+        <TriangleAlert aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-attn" />
+        <div className="min-w-0 space-y-0.5">
+          <p className="text-sm font-medium text-ink break-keep">스토리지 목록에서 삭제된 스토리지의 기록입니다</p>
+          {config !== null && <p className="text-sm text-ink/70 [overflow-wrap:anywhere]">{config}</p>}
+          {row !== null && (
+            <p className="text-xs text-ink/70 break-keep">
+              {scaleLine(row)}
+              {lastScan !== null && (
+                <span title={kstStampOrDash(lastScan)}>{` · 최근 스캔 ${agoText(lastScan, now)}`}</span>
+              )}
+            </p>
+          )}
         </div>
-        {q.isError && (
-          <p className="text-sm text-bad">{`목록을 새로 고치지 못했습니다 — ${(q.error as ApiError).message}`}</p>
-        )}
-        {orphanError && (
-          <p role="alert" className="text-sm text-bad [overflow-wrap:anywhere]">
-            {`${failedName}: ${(purge.error as ApiError).message}`}</p>
-        )}
-        {purge.data && <PurgeResult r={purge.data} innerRef={resultRef} />}
-        {rows.length > 0 && (
-          <ul aria-label="미등록 스토리지 목록" className="divide-y divide-line rounded-lg border border-line">
-            {rows.map((row) => (
-              <li key={row.storage_name} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5">
-                <div className="min-w-0 flex-1 space-y-0.5">
-                  <p className="font-medium text-ink [overflow-wrap:anywhere]">{row.storage_name}</p>
-                  <p className="text-xs text-ink/70 [overflow-wrap:anywhere]">{lastKnownLine(row)}</p>
-                  <p className="text-xs text-ink/70 break-keep">
-                    {scaleLine(row)}
-                    <span className="ml-2" title={kstStampOrDash(row.last_scan_at)}>
-                      {`최근 스캔 ${agoText(row.last_scan_at, now)}`}</span>
-                  </p>
-                </div>
-                <PurgeDialog row={row} purge={purge} progress={progress} setProgress={setProgress}
-                             onResultFocus={focusResult} />
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </Card>
+      </div>
+      {/* 좁은 폭(sm 아래)에서 버튼이 다음 줄로 내려가면 글자 열(아이콘 다음)에 맞춘다. */}
+      {row !== null && (
+        <div className="ml-[1.625rem] sm:ml-0">
+          <PurgeDialog row={row} purge={purge} progress={progress} setProgress={setProgress}
+                       onResultFocus={onResultFocus} />
+        </div>
+      )}
+    </div>
   );
 }

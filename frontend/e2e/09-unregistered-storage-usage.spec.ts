@@ -7,13 +7,15 @@ import { BASE_URL, STORAGE_NAME, backendEnv, fakeBinDir, findDmsBin } from "./ha
 import { apiLogin } from "./helpers/session";
 import { assertLayoutSane } from "./helpers/layout";
 
-// E10 — 사용량 분석의 미등록 스토리지(2026-10-12 사용자 요청 두 가지). 단위 테스트가 못 보는 것: 실 서버·실 컨트롤러로
-// 끝까지 간 scan(단건 + 배치)이 **스토리지를 지운 뒤** 사용량 화면에 「미등록」으로 남고 —
-//   1) CSV 내보내기의 그 행들이 감사 기록의 마지막 설정으로 backend_type·mount_path·managed_root·abs_path 를 채우는가
-//      (예전엔 지금 등록된 목록에서만 찾아 미등록 행의 그 열이 비었다 — 사용자 보고 「두번째 행부터 누락」),
-//   2) 「미등록 스토리지」 칸의 「기록 정리」가 실 서버 한 회차 정리(단건 delete_terminal + 배치째 delete_batch)로 그
-//      스토리지의 scan 기록을 지우고, 사용량 목록에서 그 행들이 사라지며, 시드 스토리지의 기록은 남는가,
-//   3) 칸이 보이는 채로 1280·375 레이아웃 불변식(L1~L4)이 지켜지는가.
+// E10 — 사용량 분석의 미등록 스토리지(2026-10-12 사용자 요청 두 가지 → 2026-10-20 스토리지 탭). 단위 테스트가 못 보는 것:
+// 실 서버·실 컨트롤러로 끝까지 간 scan(단건 + 배치)이 **스토리지를 지운 뒤** 사용량 화면에 「미등록」 탭으로 남고 —
+//   1) 그 탭의 CSV 내보내기 행들이 감사 기록의 마지막 설정으로 backend_type·mount_path·managed_root·abs_path 를 채우는가
+//      (예전엔 지금 등록된 목록에서만 찾아 미등록 행의 그 열이 비었다 — 사용자 보고 「두번째 행부터 누락」). CSV 는 탭
+//      하나씩이라 시드 행(등록)은 시드 탭에서 따로 받는다,
+//   2) 그 탭 경고 띠의 「기록 정리」가 실 서버 한 회차 정리(단건 delete_terminal + 배치째 delete_batch)로 그 스토리지의
+//      scan 기록을 지우고, 탭이 사라져 기본 탭(시드)으로 돌아가며, 시드 스토리지의 기록은 남는가,
+//   3) 띠·표가 보이는 채로 1280·375 레이아웃 불변식(L1~L4)이 지켜지고, 375 에서 펼친 상세가 표 래퍼의 보이는 폭 안에
+//      들어오는가(표 폭 771px 을 따라가 가로로 밀어야 보이던 결함의 그물).
 // 하네스 전제(global-setup): 조용한 창 0초, 시드 스토리지의 mount 는 가짜 mountinfo 의 tmpfs. 에이전트는 부팅 때 한 번만
 // 보고하므로(스토리지별 마운트 증거) 새 스토리지는 그대로면 Unknown 이다 — 같은 노드 이름·같은 마운트·같은 가짜 도구로
 // `dms agent --once` 를 한 번 더 돌려 Ready 증거를 싣는다(global-setup 4) 와 같은 호출).
@@ -93,41 +95,70 @@ test.describe("E10 — 사용량 분석 미등록 스토리지", () => {
     const del = await page.request.delete(`/api/admin/storages/${OLD}`);
     expect(del.status(), await del.text()).toBe(200);
 
-    // 4) 사용량 화면: 「미등록 스토리지」 칸과 행 표시, 칸이 보이는 채로 레이아웃 불변식.
+    // 4) 사용량 화면: 「미등록」 탭(구분선 뒤)과 그 패널 맨 위 경고 띠, 탭 안의 행. 띠·표가 보이는 채로 레이아웃 불변식.
     await page.goto("/admin/usage");
-    const panel = page.getByRole("region", { name: "미등록 스토리지" });
-    await expect(panel.getByRole("listitem").filter({ hasText: OLD })).toContainText(
-      "대상 3개 · 성공 scan 3개 · 정리할 작업 3개(배치 1개 포함)");
-    await expect(panel.getByRole("listitem").filter({ hasText: OLD })).toContainText(`마지막 설정 gpfs · ${mount}`);
-    const oldRow = page.locator("main table tbody tr").filter({ hasText: `e10-a-${RUN}` });
-    await expect(oldRow).toContainText("미등록");
+    const oldTab = page.getByRole("tab", { name: new RegExp(`^${OLD} 미등록`) });
+    await oldTab.click();
+    await expect(oldTab).toHaveAttribute("aria-selected", "true");
+    await expect(oldTab).toHaveAccessibleName(`${OLD} 미등록 대상 3개`);
+    const panel = page.getByRole("tabpanel");
+    const note = panel.getByRole("note", { name: "미등록 스토리지" });
+    await expect(note).toContainText("대상 3개 · 성공 scan 3개 · 정리할 작업 3개(배치 1개 포함)");
+    await expect(note).toContainText(`마지막 설정 gpfs · ${mount}`);
+    await expect(panel.locator("table tbody tr").filter({ hasText: `e10-a-${RUN}` })).toHaveCount(1);
     for (const width of [1280, 375]) {
       await page.setViewportSize({ width, height: 900 });
       await assertLayoutSane(page, { sidebarFixed: width >= 768, minTableCells: 4 });
     }
+    // 375: 펼친 상세는 표 폭이 아니라 래퍼의 보이는 폭(clientWidth)에 맞는다 -- 표를 가로로 밀지 않아도 한눈에.
+    await panel.getByRole("button", { name: `e10-a-${RUN}` }).click();
+    const detail = page.getByRole("region", { name: `${OLD}:e10-a-${RUN} 상세` });
+    // 하네스의 가짜 dscan 리포트는 읽히지 않아(행은 DB 용량) 상세는 「표시할 이력 없음」 한 줄일 수 있다 -- 폭은 상세 칸 자체를
+    // 잰다(고정 칸의 폭이 래퍼에 맞춰지는지가 검사 대상이다).
+    await expect(detail.getByText(/최신 실 사용량|표시할 이력이 없습니다|성공 scan 이 없습니다/).first()).toBeVisible();
+    const fit = await page.evaluate(() => {
+      const wrap = document.querySelector("[role=tabpanel] table")!.parentElement!;
+      const d = document.getElementById("usage-target-detail")!;
+      return { wrap: wrap.clientWidth, table: wrap.scrollWidth, detail: d.getBoundingClientRect().width };
+    });
+    expect(fit.table, "375 에서 표가 래퍼보다 넓지 않다 -- 이 검사의 전제(넘칠 때만 결함이 보인다)").toBeGreaterThan(fit.wrap);
+    expect(fit.detail, `펼친 상세(${fit.detail}px)가 래퍼의 보이는 폭(${fit.wrap}px)을 넘는다`).toBeLessThanOrEqual(fit.wrap + 1);
+    await panel.getByRole("button", { name: `e10-a-${RUN}` }).click();
+    await expect(detail).toHaveCount(0);
     await page.setViewportSize({ width: 1280, height: 900 });
 
-    // 5) CSV: 미등록 행도 마지막 설정으로 채워진다(출처 last_known), 시드 행은 registered.
-    const [download] = await Promise.all([
-      page.waitForEvent("download"), page.getByRole("button", { name: "CSV 내보내기" }).click()]);
-    const text = fs.readFileSync((await download.path())!, "utf8").replace(/^﻿/, "");
-    const [header, ...lines] = text.split("\r\n").filter(Boolean);
-    const cols = header.split(",");
-    const cell = (line: string, c: string) => line.split(",")[cols.indexOf(c)];
-    const oldLines = lines.filter((l) => cell(l, "storage_name") === OLD);
-    expect(oldLines).toHaveLength(3);
-    for (const l of oldLines) {
-      expect(cell(l, "storage_registered")).toBe("false");
-      expect(cell(l, "storage_info_source")).toBe("last_known");
-      expect(cell(l, "backend_type")).toBe("gpfs");
-      expect(cell(l, "mount_path")).toBe(mount);
-      expect(cell(l, "abs_path")).toBe(`${mount}/${cell(l, "target")}`);
+    // 5) CSV(탭 하나씩): 미등록 탭의 행은 마지막 설정으로 채워진다(출처 last_known). 파일 이름에 스토리지.
+    const exportCsv = async () => {
+      const [download] = await Promise.all([
+        page.waitForEvent("download"), page.getByRole("tabpanel").getByRole("button", { name: "CSV 내보내기" }).click()]);
+      const text = fs.readFileSync((await download.path())!, "utf8").replace(/^\uFEFF/, "");
+      const [header, ...lines] = text.split("\r\n").filter(Boolean);
+      return { name: download.suggestedFilename(), cols: header.split(","), lines };
+    };
+    const oldCsv = await exportCsv();
+    expect(oldCsv.name).toMatch(new RegExp(`^dms-usage-${OLD}-\\d{8}-\\d{4}\\.csv$`));
+    const cell = (cols: string[], line: string, c: string) => line.split(",")[cols.indexOf(c)];
+    expect(oldCsv.lines).toHaveLength(3);
+    for (const l of oldCsv.lines) {
+      expect(cell(oldCsv.cols, l, "storage_name")).toBe(OLD);
+      expect(cell(oldCsv.cols, l, "storage_registered")).toBe("false");
+      expect(cell(oldCsv.cols, l, "storage_info_source")).toBe("last_known");
+      expect(cell(oldCsv.cols, l, "backend_type")).toBe("gpfs");
+      expect(cell(oldCsv.cols, l, "mount_path")).toBe(mount);
+      expect(cell(oldCsv.cols, l, "abs_path")).toBe(`${mount}/${cell(oldCsv.cols, l, "target")}`);
     }
-    const keep = lines.find((l) => cell(l, "target") === `e10-keep-${RUN}`)!;
-    expect(cell(keep, "storage_info_source")).toBe("registered");
+    // 시드 행(등록)은 시드 탭의 CSV 에 -- 한 파일에 스토리지가 섞이지 않는다.
+    await page.getByRole("tab", { name: new RegExp(`^${STORAGE_NAME}`) }).click();
+    await expect(page.getByRole("tabpanel").locator("table tbody tr").filter({ hasText: `e10-keep-${RUN}` })).toHaveCount(1);
+    const seedCsv = await exportCsv();
+    expect(seedCsv.lines.every((l) => cell(seedCsv.cols, l, "storage_name") === STORAGE_NAME)).toBe(true);
+    const keep = seedCsv.lines.find((l) => cell(seedCsv.cols, l, "target") === `e10-keep-${RUN}`)!;
+    expect(cell(seedCsv.cols, keep, "storage_info_source")).toBe("registered");
 
-    // 6) 「기록 정리」 → 확인 창 → 3개 영구 삭제 → 결과 줄, 사용량 목록에서 그 스토리지 행이 사라지고 시드 행은 남는다.
-    await panel.getByRole("button", { name: `${OLD} 기록 정리` }).click();
+    // 6) 미등록 탭 띠의 「기록 정리」 → 확인 창 → 3개 영구 삭제 → 결과 줄(탭 줄 위), 그 탭이 사라지고 기본 탭(시드)의
+    //    행은 남는다.
+    await oldTab.click();
+    await note.getByRole("button", { name: `${OLD} 기록 정리` }).click();
     const dialog = page.getByRole("dialog", { name: "미등록 스토리지 기록 정리" });
     await expect(dialog).toContainText(`${OLD} 의 scan 작업 기록 3개를 영구 삭제합니다`);
     await dialog.getByLabel("되돌릴 수 없음을 확인했습니다").check();
@@ -135,9 +166,12 @@ test.describe("E10 — 사용량 분석 미등록 스토리지", () => {
     await expect(page.getByRole("status", { name: "정리 결과" })).toContainText(
       `${OLD}: 작업 기록 3개 삭제됨(배치 1개 포함)`);
     await expect(page.getByRole("status", { name: "정리 결과" })).toBeFocused();
-    await expect(page.locator("main table tbody tr").filter({ hasText: `e10-a-${RUN}` })).toHaveCount(0);
-    await expect(page.locator("main table tbody tr").filter({ hasText: `e10-keep-${RUN}` })).toHaveCount(1);
-    await expect(panel.getByRole("listitem").filter({ hasText: OLD })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: new RegExp(`^${OLD}`) })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: new RegExp(`^${STORAGE_NAME}`) })).toHaveAttribute("aria-selected", "true");
+    // 방금 정리해 사라진 탭이라 「기록이 없습니다」 안내는 띄우지 않는다(결과 줄이 말한다) -- 탭은 정리가 끝나기 전(무효화
+    // 재조회 중)에 사라지므로 실 브라우저의 순서로 확인한다.
+    await expect(page.getByText(/스토리지의 사용량 기록이 없습니다/)).toHaveCount(0);
+    await expect(page.getByRole("tabpanel").locator("table tbody tr").filter({ hasText: `e10-keep-${RUN}` })).toHaveCount(1);
     expect((await page.request.get(`/api/admin/batches/${bid}`)).status()).toBe(404);
     // 정리 대기가 비어야 뒤 시나리오가 깨끗하다(결과 파일·파드 정리, 컨트롤러 1초 틱).
     await expect.poll(async () => ((await (await page.request.get("/api/admin/request-purges")).json()) as

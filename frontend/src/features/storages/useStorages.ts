@@ -14,16 +14,20 @@ export interface StorageUpdateBody {
 }
 export const useCreateStorage = () => {
   const qc = useQueryClient();
-  // 등록하면 같은 이름의 옛 scan 기록이 더는 「미등록」이 아니다(사용량 분석 미등록 스토리지 목록, 2026-10-12).
+  // 등록하면 같은 이름의 옛 scan 기록이 더는 「미등록」이 아니다(사용량 분석 미등록 스토리지 목록, 2026-10-12) -- 사용량
+  // 분석의 스토리지 탭(["usage-storages"], 2026-10-20)도 새 이름의 빈 탭이 생기거나 미등록 탭이 등록 탭으로 옮겨 간다.
   return useMutation({ mutationFn: (b: StorageCreateBody) => apiSend("POST", "/api/admin/storages", b),
     onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: ["storages"] }),
-                                  qc.invalidateQueries({ queryKey: ["usage-unregistered"] })]) });
+                                  qc.invalidateQueries({ queryKey: ["usage-unregistered"] }),
+                                  qc.invalidateQueries({ queryKey: ["usage-storages"] })]) });
 };
 export const useUpdateStorage = () => {
   const qc = useQueryClient();
   return useMutation({ mutationFn: (v: { name: string; body: StorageUpdateBody }) =>
     apiSend("PUT", `/api/admin/storages/${v.name}`, v.body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["storages"] }) });
+    // 사용량 분석 탭의 메타 줄(마운트·타입)도 요약에서 읽는다.
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: ["storages"] }),
+                                  qc.invalidateQueries({ queryKey: ["usage-storages"] })]) });
 };
 export const useDeleteStorage = () => {
   const qc = useQueryClient();
@@ -35,5 +39,6 @@ export const useDeleteStorage = () => {
       qc.invalidateQueries({ queryKey: ["sync-pairs"] }),
       qc.invalidateQueries({ queryKey: ["user-sync-pairs"] }),
       qc.invalidateQueries({ queryKey: ["usage-unregistered"] }),   // 지운 스토리지의 scan 기록이 「미등록」이 된다
+      qc.invalidateQueries({ queryKey: ["usage-storages"] }),       // 그 탭이 미등록 탭으로 옮겨 가거나(기록 있음) 사라진다
     ]) });
 };

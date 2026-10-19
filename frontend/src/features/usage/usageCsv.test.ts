@@ -118,6 +118,11 @@ test("buildUsageCsv: 요약 키가 파손·히스토그램 열 이름과 겹쳐�
   expect(records[0]["summary_atime_bytes_0d-1d"]).toBe(1);
 });
 
-test("usageCsvFilename: KST 날짜·시각", () => {
-  expect(usageCsvFilename(Date.parse("2026-10-02T03:04:00Z"))).toBe("dms-usage-20261002-1204.csv");
+test("usageCsvFilename: 스토리지 이름 + KST 날짜·시각 -- 파일 이름에 못 쓰는 글자는 _, 길이 64자까지", () => {
+  const at = Date.parse("2026-10-02T03:04:00Z");
+  expect(usageCsvFilename(at, "cephfs-dms")).toBe("dms-usage-cephfs-dms-20261002-1204.csv");
+  // 미등록 옛 이름은 등록 규칙([a-z0-9-])을 지킨다는 보장이 없다
+  expect(usageCsvFilename(at, "Old GPFS/../x.v2")).toBe("dms-usage-Old_GPFS_.._x.v2-20261002-1204.csv");
+  expect(usageCsvFilename(at, "한글")).toBe("dms-usage-__-20261002-1204.csv");
+  expect(usageCsvFilename(at, "a".repeat(100))).toBe(`dms-usage-${"a".repeat(64)}-20261002-1204.csv`);
 });
