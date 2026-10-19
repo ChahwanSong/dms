@@ -457,3 +457,15 @@ def test_sync_dryrun_without_any_walk_line_is_null():
     assert parse_sync_dryrun_counts("[ts] Completed sync\n") == (None, None)
     # 진행 줄("secs ...")만 있고 최종 줄이 없으면 매치하지 않는다
     assert parse_sync_dryrun_counts("[2026-10-12T01:00:00] Walked 5 items in 0.1 secs (50 items/sec) ...\n") == (None, None)
+
+
+def test_scan_counts_survive_non_utf8_report_path(tmp_path):
+    # 2026-10-20 프로덕션: dscan 은 이름 바이트를 그대로 JSON 에 쓴다 -- CP949 「다운로드」가 broken_paths 에 들면 strict
+    # 디코드가 터져 files/bytes 가 조용히 null 이었다. 쓰는 값은 숫자뿐이라 replace 로 읽어 값을 지킨다.
+    hist = [{"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "bytes": 123}]
+    head = json.dumps({"summary": {"total_entries": 510971}, "time_histograms": {"mtime": hist},
+                       "broken_paths_total": 1})[:-1]
+    p = tmp_path / "dscan-report.json"
+    p.write_bytes(head.encode() + b', "broken_paths": [{"path": "/x/\xb4\xd9\xbf\xee/a.exe",'
+                  b' "reasons": ["abnormal_time"]}]}')
+    assert parse_scan_counts(str(p)) == (510971, 123)

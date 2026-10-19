@@ -247,17 +247,31 @@ def _shquote(s):
     return shlex.quote(str(s))
 
 
-def main():  # pragma: no cover - 실증에서 실행
+def _subprocess_run(command):
+    """자식 프로세스 출력의 유일한 디코드 지점(main 의 run). 도구는 파일 이름 바이트를 그대로 찍는다 -- dscan --print 의
+    broken 목록, drm --dryrun 의 항목 목록, 오류·경고 줄. 2026-10-20 프로덕션: CP949 이름(「다운로드」 b4 d9 …) 하나가
+    strict 디코드에서 UnicodeDecodeError 를 던져, 도구는 전부 처리하고 rc 0 으로 끝났는데 러너가 죽어 잡이 Failed 였다
+    (rm 은 미리보기에서 죽어 컨펌조차 못 했다). errors="replace" 인 이유: 결과 str 은 로그 파일(_write_text)·summary·
+    제어면 DB/JSON 으로 흐르는데 surrogateescape 의 서로게이트는 그 셋 모두에서 UnicodeEncodeError 다. replace 는
+    ASCII(줄바꿈·따옴표)를 삼키지 않아 파서의 줄 머리 앵커·walk 줄 개수 방어가 그대로다. text 모드(줄바꿈 정규화)도
+    그대로. 정확한 원래 이름 바이트는 리포트 다운로드에 남는다."""
     import subprocess
+    return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _write_text(path, content, *, append=False):
+    """main 의 write_text. encoding 명시(로케일과 무관하게 UTF-8). 내용은 _subprocess_run(replace)·json.dumps(ASCII)
+    산출이라 strict 로 인코드된다 -- 여기서 errors 를 느슨하게 하지 않는다(서로게이트가 섞였다면 위 디코드의 회귀다)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True) if "/" in path[1:] else None
+    with open(path, "a" if append else "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def main():  # pragma: no cover - 실증에서 실행
     import time
 
-    def run(command):
-        return subprocess.run(command, capture_output=True, text=True)
-
-    def write_text(path, content, *, append=False):
-        os.makedirs(os.path.dirname(path), exist_ok=True) if "/" in path[1:] else None
-        with open(path, "a" if append else "w") as f:
-            f.write(content)
+    run = _subprocess_run
+    write_text = _write_text
 
     def read_text(path):
         try:
