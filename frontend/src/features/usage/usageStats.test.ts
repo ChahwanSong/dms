@@ -1,5 +1,7 @@
 import { expect, test } from "vitest";
-import { ageLabel, bucketKey, hotRatio } from "./usageStats";
+import { HOT_AGE_MAX_DAYS, ageLabel, bucketKey, hotRatio } from "./usageStats";
+import type { HistogramBucket } from "../../lib/types";
+import hotRatioCases from "./hotRatioCases.json";
 import { agoText, ageDays } from "../../lib/datetime";
 
 // dscan 실측 나이 버킷(9개) -- 툴팁 범례가 사람 말로 읽혀야 한다(2026-10-02 "빨강/초록/파랑이 뭔지")
@@ -47,4 +49,15 @@ test("hotRatio: dscan 마지막 구간 [3651d,INF](max_age_days 없음)은 확�
                    { bucket: "[3651d,INF]", min_age_days: 3651, bytes: 70 }])).toBeCloseTo(0.3);
   // 하한이 180일 이하인데 상한이 없으면 여전히 모름(그 바이트가 hot 일 수도 있다)
   expect(hotRatio([{ bucket: "x", min_age_days: 100, bytes: 5 }])).toBeNull();
+});
+
+// 공용 예제(2026-10-19): 서버 목록 정렬(dms.usage_metrics.hot_ratio)이 같은 파일로 같은 값을 단언한다 -- 두 벌이 갈라지면
+// 화면 열의 숫자와 정렬 순서가 어긋난다.
+test("hotRatio: 서버 정렬과 공용 예제(hotRatioCases.json)", () => {
+  expect(HOT_AGE_MAX_DAYS).toBe(hotRatioCases.hot_age_max_days);
+  for (const c of hotRatioCases.cases) {
+    const got = hotRatio(c.buckets as unknown as HistogramBucket[]);
+    if (c.expected === null) expect(got, c.name).toBeNull();
+    else expect(got, c.name).toBeCloseTo(c.expected);
+  }
 });

@@ -347,7 +347,8 @@ test("목록 컬럼: 실 사용량·파일 수·hot 비율(최신 scan) -- 모�
     const r = screen.getByRole("button", { name: t }).closest("tr")!;
     expect(within(r).getAllByText("—")).toHaveLength(3);         // 용량·파일 수·hot 모두 모름(0 아님)
   }
-  expect(screen.getByRole("columnheader", { name: "hot 비율(180일)" })).toBeInTheDocument();
+  // 머리글은 정렬 버튼이다(2026-10-19).
+  expect(screen.getByRole("button", { name: "hot 비율(180일) 정렬" }).closest("th")).toBeInTheDocument();
 });
 
 test("최근 스캔 경과: N일 전 + 30일 주황 · 90일 빨강", async () => {
@@ -377,6 +378,41 @@ test("최근 스캔 정렬 토글: 서버 order 파라미터(desc ↔ asc) + ari
   expect(screen.getByRole("button", { name: "최근 스캔 정렬: 오래된순" }).closest("th"))
     .toHaveAttribute("aria-sort", "ascending");
   expect(orders[0]).toBe("desc");
+});
+
+test("열 정렬(2026-10-19): 실 사용량·파일 수·hot 비율·스캔 횟수 머리글 -- 서버 sort·order, 같은 열 재클릭 = 방향 전환", async () => {
+  const seen: { sort: string | null; order: string | null; limit: string | null }[] = [];
+  renderList(LIST, (u) => seen.push({ sort: u.searchParams.get("sort"), order: u.searchParams.get("order"),
+                                      limit: u.searchParams.get("limit") }));
+  await screen.findByRole("button", { name: "최근 스캔 정렬: 최신순" });
+  expect(seen[0]).toEqual({ sort: "last_scan", order: "desc", limit: "100" });
+  // 다른 열은 내림차순(큰 것 위)부터 -- 지금 정렬 중인 열에만 aria-sort
+  await userEvent.click(screen.getByRole("button", { name: "실 사용량 정렬" }));
+  await waitFor(() => expect(seen[seen.length - 1]).toMatchObject({ sort: "bytes", order: "desc" }));
+  const bytesBtn = screen.getByRole("button", { name: "실 사용량 정렬: 큰 순" });
+  expect(bytesBtn.closest("th")).toHaveAttribute("aria-sort", "descending");
+  expect(screen.getByRole("button", { name: "최근 스캔 정렬" }).closest("th")).not.toHaveAttribute("aria-sort");
+  expect(screen.getByText(/값을 모르는 항목\(—\)은 방향과 상관없이 맨 뒤/)).toBeInTheDocument();
+  await userEvent.click(bytesBtn);
+  await waitFor(() => expect(seen[seen.length - 1]).toMatchObject({ sort: "bytes", order: "asc" }));
+  expect(screen.getByRole("button", { name: "실 사용량 정렬: 작은 순" }).closest("th"))
+    .toHaveAttribute("aria-sort", "ascending");
+  for (const [label, sort, word] of [["파일 수", "files", "많은 순"], ["hot 비율(180일)", "hot", "높은 순"],
+                                     ["스캔 횟수", "scans", "많은 순"]] as const) {
+    await userEvent.click(screen.getByRole("button", { name: `${label} 정렬` }));
+    await waitFor(() => expect(seen[seen.length - 1]).toMatchObject({ sort, order: "desc" }));
+    expect(screen.getByRole("button", { name: `${label} 정렬: ${word}` })).toBeInTheDocument();
+  }
+  // 최근 스캔 열로 돌아오면 모름 안내는 사라진다(SQL 정렬 -- 모든 행에 값이 있다). 같은 조합은 30초 캐시가 답한다.
+  await userEvent.click(screen.getByRole("button", { name: "최근 스캔 정렬" }));
+  expect(await screen.findByRole("button", { name: "최근 스캔 정렬: 최신순" })).toBeInTheDocument();
+  expect(screen.queryByText(/값을 모르는 항목/)).toBeNull();
+});
+
+test("목록이 상한(100)을 채우면 상위 N개만이라고 말한다", async () => {
+  const many = Array.from({ length: 100 }, (_, i) => ({ ...(LIST[0] as object), target: `t${i}` }));
+  renderList(many);
+  expect(await screen.findByText(/정렬 기준 상위 100개만 표시합니다/)).toBeInTheDocument();
 });
 
 test("스토리지 필터와 경로 검색이 함께 걸린다", async () => {
@@ -483,4 +519,15 @@ test("온도 툴팁: mtime 축이면 그 축의 180일 이내 비중과 atime ho
   const tip = screen.getByRole("tooltip");
   expect(tip).toHaveTextContent("hot 비율(atime 180일)100%");   // atime [1024, 0]
   expect(tip).toHaveTextContent("mtime 180일 이내100%");         // mtime [512, 512] 둘 다 ≤2일
+});
+
+test("CSV 내보내기는 지금 열 정렬(sort·order)을 그대로 싣는다", async () => {
+  const exportUrls: URL[] = [];
+  renderList(LIST, undefined, (u) => { exportUrls.push(u); return undefined; });
+  await screen.findByRole("button", { name: "fresh" });
+  await userEvent.click(screen.getByRole("button", { name: "hot 비율(180일) 정렬" }));
+  await userEvent.click(screen.getByRole("button", { name: /CSV 내보내기/ }));
+  await waitFor(() => expect(exportUrls).toHaveLength(1));
+  expect(exportUrls[0].searchParams.get("sort")).toBe("hot");
+  expect(exportUrls[0].searchParams.get("order")).toBe("desc");
 });

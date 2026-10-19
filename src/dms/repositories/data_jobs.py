@@ -216,17 +216,21 @@ class DataJobsRepository:
 
     def scan_targets(self, *, q: "str | None" = None, storage: "str | None" = None,
                      path: "str | None" = None, order: str = "desc",
-                     limit: "int | None" = 100) -> list[dict]:
+                     limit: "int | None" = 100, sort: str = "last_scan") -> list[dict]:
         """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
         분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). 필터는
         _scan_target_where. 정렬은 최근 스캔 기준 — 기본 내림차순(화면의 기본 질문이
         "요즘 뭘 스캔했나"), order="asc" 면 오래된 것부터(2026-10-02: 오래 안 본
         타깃 찾기). 정렬은 반드시 SQL 에서 한다 -- limit 뒤에 화면이 뒤집으면 "최근 N개
         중 가장 오래된 것"이 되어 진짜 오래된 타깃이 안 보인다. limit=None 은 전부
-        (CSV 내보내기). first_scan_at = 최초 성공 스캔 완료 시각."""
+        (CSV 내보내기). first_scan_at = 최초 성공 스캔 완료 시각. sort="scans" 면 스캔 횟수 기준(2026-10-19 목록 열
+        정렬 -- 동률은 최근 스캔 늦은 것부터). 실 사용량·파일 수·hot 비율 정렬은 SQL 열이 아니라 리포트 요약 값이라
+        라우트가 한다(usage_metrics)."""
         params: dict = {}
         where = self._scan_target_where(params, q=q, storage=storage, path=path)
         direction = "ASC" if order == "asc" else "DESC"
+        order_by = (f"scan_count {direction}, last_scan_at DESC" if sort == "scans"
+                    else f"last_scan_at {direction}")
         tail = ""
         if limit is not None:
             tail = " LIMIT :n"
@@ -237,7 +241,7 @@ class DataJobsRepository:
                        MAX(updated_at) AS last_scan_at
                 FROM data_jobs WHERE {where}
                 GROUP BY storage_name, target
-                ORDER BY last_scan_at {direction}, storage_name, target{tail}""",
+                ORDER BY {order_by}, storage_name, target{tail}""",
             params)
 
     def usage_scan_request_ids(self, request_ids) -> set:
