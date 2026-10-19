@@ -6,9 +6,13 @@ const BOXED = [
   "[&_td]:px-3 [&_td]:py-1.5 [&_tbody_tr]:border-t [&_tbody_tr]:border-line",
 ].join(" ");
 
-export function Table({ children, boxed = false }: { children: React.ReactNode; boxed?: boolean }) {
+// wrapRef(2026-10-20): 가로 스크롤 래퍼를 호출측이 잰다 -- 사용량 분석의 펼침 상세가 표 폭(넘침)이 아니라 **보이는 폭**
+// (래퍼 clientWidth)에 맞춰 375 에서도 한눈에 들어오게.
+export function Table({ children, boxed = false, wrapRef }: {
+  children: React.ReactNode; boxed?: boolean; wrapRef?: React.Ref<HTMLDivElement>;
+}) {
   return (
-    <div className={boxed ? "overflow-x-auto rounded-lg border border-line" : "overflow-x-auto"}>
+    <div ref={wrapRef} className={boxed ? "overflow-x-auto rounded-lg border border-line" : "overflow-x-auto"}>
       <table className={`w-full text-sm text-left ${boxed ? BOXED : ""}`}>{children}</table>
     </div>
   );

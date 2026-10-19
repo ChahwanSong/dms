@@ -14,6 +14,15 @@ async function visit(page: Page, path: string, heading: string): Promise<void> {
   await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
 }
 
+// 사용량 분석(2026-10-20 스토리지 탭): 탭 줄과 고른 탭의 패널(표·빈 상태 어느 쪽이든)이 그려진 뒤에 잰다 -- 탭은 등록
+// 목록이 오면 바로 그려지지만 패널은 요약(기본 탭 판정)을 기다린다.
+async function visitUsage(page: Page): Promise<void> {
+  await visit(page, "/admin/usage", "사용량 분석");
+  await expect(page.getByRole("tab", { name: new RegExp(`^${STORAGE_NAME}`) })).toHaveAttribute("aria-selected", "true");
+  const panel = page.getByRole("tabpanel");
+  await expect(panel.locator("table").first().or(panel.getByText("이 스토리지에는 아직 성공한 scan 이 없습니다"))).toBeVisible();
+}
+
 // 단일 작업 화면에 200자 무공백 경로를 넣는다(제출하지 않음 -- resource_key·검증과 무관).
 // 긴 토큰이 1fr 열을 밀어내던 유형(6bc2ecb)의 재현 재료다: minmax(0,1fr) 이 빠지면 문서가 넘치고(L1),
 // 요약 dd·"실제 경로" 줄의 overflow-wrap 이 빠지면 그 칸만 넘친다 -- xl 의 요약 본문은 자기 스크롤
@@ -55,6 +64,9 @@ async function assertTextContained(page: Page): Promise<void> {
 //                    "빌드 화면"이 아니라 **표가 실제로 있는 화면**에 건다.
 //   /admin/dashboard 표는 잡 통계·큐 데이터가 있을 때만 그려진다 -> 하한 불가(0).
 //                    이 화면은 L1/L3/L4 가 진다.
+//   /admin/usage     표는 고른 스토리지 탭에 성공 scan 이 있을 때만 그려진다(이 파일 시점엔 보통 없다) -> 하한 0.
+//                    2026-10-20 스토리지 탭 줄(가로 스크롤)이 새 L1 위험이라 순회에 넣는다 -- 탭 안 sr-only 노드가 화면
+//                    밖으로 문서를 넓히던 유형(StatusPill 619/375). 행·펼침 상세의 375 불변식은 E10(09)이 기록과 함께 잰다.
 test.describe("E3 레이아웃 불변식", () => {
   test("1280x800 주요 화면 순회", async ({ page }) => {
     await apiLogin(page);
@@ -97,6 +109,9 @@ test.describe("E3 레이아웃 불변식", () => {
 
     await visit(page, "/admin/batches/new", "배치 생성");
     await assertLayoutSane(page, { minTableCells: 0 });
+
+    await visitUsage(page);
+    await assertLayoutSane(page, { minTableCells: 0 });
   });
 
   test("375x667 모바일 spot check", async ({ page }) => {
@@ -127,6 +142,10 @@ test.describe("E3 레이아웃 불변식", () => {
         >= 2 * parseFloat(getComputedStyle(b).lineHeight) + 1)
       .map((b) => b.textContent));
     expect(wrapped, "입력 방식 세그먼트 라벨이 두 줄로 접혔다").toEqual([]);
+
+    // 사용량 분석 스토리지 탭 줄은 375 에서 줄바꿈 없이 가로 스크롤한다 -- 줄 자체만 넘치고 문서는 넘치지 않아야 한다(L1).
+    await visitUsage(page);
+    await assertLayoutSane(page, { sidebarFixed: false, minTableCells: 0 });
 
     // 대시보드 노드 칸(2026-10-16 CPU 사용률 추가로 5칸): md 아래는 2열로 쌓여 375 에서 넘치지 않아야 한다.
     await visit(page, "/admin/dashboard", "대시보드");

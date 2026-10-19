@@ -121,8 +121,12 @@ export function buildUsageCsv(rows: UsageExportRow[], storages: Storage[] | unde
   return { columns, records };
 }
 
-// 파일 이름: dms-usage-YYYYMMDD-HHMM.csv(KST)
-export function usageCsvFilename(nowMs: number): string {
+// 파일 이름: dms-usage-<storage>-YYYYMMDD-HHMM.csv(KST). 2026-10-20 부터 CSV 는 탭(스토리지) 하나씩이라 이름에 스토리지를
+// 넣는다 -- 여러 스토리지 파일을 한 폴더에 받아도 구별된다(파일 안의 storage_name 열은 그대로 -- 합칠 때 쓴다. 단 요약 키·
+// 구간 열은 파일마다의 합집합이라 이어 붙이면 열이 어긋날 수 있다). 등록 이름은 [a-z0-9-] 이지만 미등록 옛 이름은 그 규칙을
+// 지킨다는 보장이 없다 -- [A-Za-z0-9._-] 밖의 글자는 _ 로, 길이는 64자까지.
+export function usageCsvFilename(nowMs: number, storage: string): string {
   const s = kstStampEpoch(Math.floor(nowMs / 1000));          // "YYYY-MM-DD HH:MM:SS KST"
-  return `dms-usage-${s.slice(0, 10).replace(/-/g, "")}-${s.slice(11, 16).replace(":", "")}.csv`;
+  const name = storage.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+  return `dms-usage-${name}-${s.slice(0, 10).replace(/-/g, "")}-${s.slice(11, 16).replace(":", "")}.csv`;
 }

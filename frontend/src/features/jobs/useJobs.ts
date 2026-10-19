@@ -162,9 +162,10 @@ export function useCancelRequest(requestId: string) {
 // 사용량 분석·대시보드 잡 통계·감사 로그는 지운 행에서 계산되므로 함께 무효화한다(지운 scan 의 사용량 지점이
 // 빠지고 기간 통계가 소급해 줄며 감사에 삭제 행이 생긴다). artifact-base 의 잠금 건수(잡 + 정리 대기)도 바뀐다.
 // 배치 목록(["batches"])은 배치 단위 삭제가 배치 행까지 지우므로(2026-10-10) 함께 무효화한다. 사용량 분석의 미등록
-// 스토리지 목록(["usage-unregistered"], 2026-10-12)도 지운 scan 에서 센다.
+// 스토리지 목록(["usage-unregistered"], 2026-10-12)과 스토리지 탭 요약(["usage-storages"], 2026-10-20 -- 탭의 대상 수·미등록
+// 탭 자체)도 지운 scan 에서 센다.
 export const DELETE_REQUESTS_INVALIDATES: readonly (readonly string[])[] = [
-  ["requests"], ["request-purges"], ["usage-targets"], ["usage-scan-storages"], ["usage-history"],
+  ["requests"], ["request-purges"], ["usage-targets"], ["usage-storages"], ["usage-scan-storages"], ["usage-history"],
   ["usage-unregistered"], ["metrics", "jobs"], ["audit"], ["artifact-base"], ["batches"],
 ];
 // 한 번의 POST 에 단건과 배치 단위를 함께 싣는다(2026-10-10). expected_request_count = 확인 창을 연 순간 서버가 센

@@ -1,22 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../../lib/api";
 import type { PurgeStorageHistoryResult, ScanTargetRow, UnregisteredStorage, UsageExport,
-              UsageHistory } from "../../lib/types";
+              UsageHistory, UsageStorages } from "../../lib/types";
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
 // 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, path = 경로 부분 문자열 -- 둘이 함께 걸린다.
 // sort·order = 정렬 열과 방향(서버가 limit 전에 정렬 -- 화면이 받은 묶음만 뒤집거나 정렬하면 "최근 N개 안의 순위"가 된다).
 // sort(2026-10-19 사용자 요청 「실사용량, 파일수, hot비율 등을 오름/내림차순 정렬」): last_scan(최근 스캔, 기본)·scans(스캔
 // 횟수)·bytes(실 사용량)·files(파일 수)·hot(hot 비율) -- 서버 routes_usage.scan_targets·usage_metrics.
+// storage 는 2026-10-20 부터 **늘 실린다**(화면이 처음부터 스토리지 탭 -- 사용자 요청 「필터 및 서버의 스캔도 각 스토리지
+// 별로」): 빠지면 서버는 옛 탭 호환으로 전 스토리지를 보고, 지표 정렬 창(최근 스캔 순 상한)도 전 스토리지에서 만든다.
+// 빈 문자열 = 아직 탭을 모름 -- 요청을 보내지 않는다(useScanTargets enabled).
 export type UsageSort = "last_scan" | "scans" | "bytes" | "files" | "hot";
 export interface TargetFilter { storage: string; path: string; order: "desc" | "asc"; sort: UsageSort }
 
-// 목록 한 번에 받는 행 수(서버 기본 100과 같다) -- 다 차면 화면이 「상위 N개만」이라고 말한다.
+// 목록 한 번에 받는 행 수(서버 기본 100과 같다) -- 다 차면 화면이 「상위 N개 표시 · 전체 M개」라고 말한다.
 export const LIST_LIMIT = 100;
 
 export function targetQuery(f: TargetFilter): string {
   const p = new URLSearchParams();
-  if (f.storage) p.set("storage", f.storage);
+  p.set("storage", f.storage);
   if (f.path) p.set("path", f.path);
   p.set("order", f.order);
   p.set("sort", f.sort);
@@ -25,19 +28,30 @@ export function targetQuery(f: TargetFilter): string {
 
 // 타깃 목록: 필터가 쿼리키에 들어가 조합별로 캐시된다. 4s 폴링은 불필요 --
 // scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다.
+// 같은 스토리지 안에서 정렬·검색을 바꿀 때만 이전 행을 자리표시로 남긴다(표가 「불러오는 중」으로 깜빡이지 않게) --
+// 다른 스토리지의 행을 새 탭 아래 잠깐이라도 보이면 「이 스토리지에 그 경로가 있다」는 거짓이 된다.
 export const useScanTargets = (f: TargetFilter) =>
   useQuery({
     queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort],
     queryFn: () => apiGet<ScanTargetRow[]>(`/api/admin/usage/scan-targets?${targetQuery(f)}&limit=${LIST_LIMIT}`),
+    enabled: f.storage !== "",
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === f.storage ? prev : undefined),
     staleTime: 30_000,
   });
 
-// 스토리지 필터 선택지 보강: 성공 scan 기록이 있는 스토리지 이름(등록이 지워진 이름 포함 -- 화면이 등록 목록과 합친다).
-export const useScanStorages = () =>
-  useQuery({ queryKey: ["usage-scan-storages"],
-             queryFn: () => apiGet<string[]>("/api/admin/usage/scan-storages"), staleTime: 60_000 });
+// 스토리지 탭 요약(2026-10-20): 탭 집합·대상 수·메타 줄·지표 정렬 창 상한의 원천 하나(서버 집계 한 번). 스토리지
+// 생성·수정·삭제(useStorages)와 작업 삭제·미등록 정리(DELETE_REQUESTS_INVALIDATES)가 이 키를 무효화한다.
+export const useUsageStorages = () =>
+  useQuery({ queryKey: ["usage-storages"],
+             queryFn: () => apiGet<UsageStorages>("/api/admin/usage/storages"), staleTime: 30_000 });
 
-// 전체 내보내기(CSV 버튼): 화면 상태가 아니라 버튼을 누를 때 한 번 -- 필터·정렬은 목록과 같다.
+// 성공 scan 기록이 있는 스토리지 이름 -- 요약(useUsageStorages)을 못 받았을 때만 쓰는 대체 원천(enabled): 탭은 등록
+// 목록 ∪ 이 이름들로 그리고 대상 수는 모름으로 둔다.
+export const useScanStorages = (enabled = true) =>
+  useQuery({ queryKey: ["usage-scan-storages"],
+             queryFn: () => apiGet<string[]>("/api/admin/usage/scan-storages"), staleTime: 60_000, enabled });
+
+// 전체 내보내기(CSV 버튼): 화면 상태가 아니라 버튼을 누를 때 한 번 -- 필터·정렬은 목록과 같다(지금 탭의 스토리지만).
 export const fetchUsageExport = (f: TargetFilter) =>
   apiGet<UsageExport>(`/api/admin/usage/export?${targetQuery(f)}`);
 
@@ -45,8 +59,9 @@ export const fetchUsageExport = (f: TargetFilter) =>
 // I/O)가 뒤에 있으므로 staleTime 을 길게 -- 성공 종단 잡의 리포트는 **삭제되기 전까지** 불변이고,
 // 새 스캔이 끝나 목록의 last_scan_at 이 변하면 사용자가 타깃을 다시 고르는
 // 동선에서 자연히 재조회된다. 관리자가 작업(요청)을 지우면 그 지점이 사라지므로 useDeleteRequests 가
-// usage-targets·usage-scan-storages·usage-history 를 무효화한다(2026-10-08). limit(표시 창)은 쿼리키에 들어가
-// 창별로 캐시된다 -- 30→60→30 왕복이 재조회 없이 즉시다.
+// usage-targets·usage-storages·usage-history 를 무효화한다(2026-10-08). limit(표시 창)은 쿼리키에 들어가
+// 창별로 캐시된다 -- 30→60→30 왕복이 재조회 없이 즉시다. 창을 처음 넓힐 때는 같은 타깃의 이전 창을 자리표시로 남긴다
+// (2026-10-20 -- 상세 전체가 「불러오는 중」 한 줄로 접혔다 펴지며 화면이 튀지 않게). 다른 타깃의 이력은 남기지 않는다.
 export const useScanHistory = (storage: string | null, target: string | null,
                                limit = 30) =>
   useQuery({
@@ -55,6 +70,8 @@ export const useScanHistory = (storage: string | null, target: string | null,
       `/api/admin/usage/scan-history?storage=${encodeURIComponent(storage as string)}`
       + `&target=${encodeURIComponent(target as string)}&limit=${limit}`),
     enabled: storage !== null && target !== null,
+    placeholderData: (prev, prevQuery) =>
+      (prevQuery?.queryKey[1] === storage && prevQuery?.queryKey[2] === target ? prev : undefined),
     staleTime: 60_000,
   });
 
