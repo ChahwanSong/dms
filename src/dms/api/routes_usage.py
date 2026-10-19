@@ -12,12 +12,21 @@
   상한(_MAX_POINTS)으로 묶는다. 못 읽는 리포트는 포인트를 지어내는 대신
   skipped 로 센다 — 단일 리포트 라우트(503 scan_report_too_large)와 달리 시계열
   하나가 전체 이력을 죽이면 안 되고, 숨기면 "그날 스캔이 없었다"는 거짓이 된다.
+- 스토리지별(2026-10-20 사용자 요청: 「각 스토리지 별로 처음부터 나뉘어져서 보이게끔 하고 필터 및 서버의 스캔도 각
+  스토리지 별로」, 창 상한 1만): 포탈은 스토리지 탭마다 storage 를 싣는다 -- 목록·지표 정렬 창·내보내기가 그 스토리지
+  안에서만 돈다. 서버의 storage 는 **선택 인자로 남긴다**(롤링 배포 중 열려 있던 옛 탭이 storage 없이 「전체」를 부른다 --
+  422 로 거절하면 그 탭이 깨지고, 서버가 기본 스토리지를 고르면 「전체」라고 적힌 화면에 한 스토리지만 나온다). 탭의
+  이름·규모·창 상한은 GET /api/admin/usage/storages 가 준다.
+- 메모리(같은 날): 창이 1만이 되면서 창 전체의 latest 포인트를 세우는 옛 구조는 1만 내보내기 한 건이 +~465MiB, 동시
+  3건이면 api 한도 1Gi 를 넘었다(PG 실측). 그래서 지표 정렬은 창의 정렬 **값만** _CHUNK 묶음으로 계산하고(요약은 값을 뽑은
+  뒤 버린다) 반환할 행만 포인트를 만들며, 내보내기는 _CHUNK 타깃 묶음씩 흘려보낸다(StreamingResponse).
 """
 import json
 import sys
+from typing import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from ..artifact_base import resolve_artifact_base
 from ..db import utc_now_iso
@@ -28,7 +37,7 @@ from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
 from .routes_requests import reject_when_maintenance
 from .routes_scan_paths import (_buckets, _is_number, _numbers, _time_histograms,
                                 _total_bytes)
-from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, sort_by_metric
+from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, metric_value, sort_keyed
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -36,10 +45,17 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 # 차트에 정직하게 그릴 수 있는 밀도의 상한(그 이상은 어차피 겹쳐 안 보인다).
 _MAX_POINTS = 60
 _TARGET_LIMIT = 200
-# 내보내기 타깃 상한: 전 타깃이 계약이지만 무한은 아니다 -- 넘으면 잘라 내고 truncated 로 말한다(조용한 절단 금지).
-# 5000 = 응답 전체가 메모리에 한 번에 서는 구조의 실측 예산(리뷰 2026-10-02: 1만 행 x 두 포인트 전량이면 응답
-# 113MiB·RSS ~1GiB 로 api 컨테이너 한도 1Gi 에 닿았다). 행을 줄인(previous 는 증감용 값만) 뒤 5000 행은 수십 MiB 다.
-_EXPORT_LIMIT = 5000
+# 창 상한(2026-10-20 사용자 요청: 「서버의 스캔 상한선도 5천개에서 1만개로」) -- 지표 정렬(bytes·files·hot)의 대상 창과
+# 내보내기 상한에 함께 쓴다. 전 타깃이 계약이지만 무한은 아니다 -- 내보내기는 넘으면 잘라 내고 truncated 로 말한다(조용한
+# 절단 금지), 포탈은 스토리지의 target_count 가 이 값을 넘을 때만 「최근 스캔된 N개 안에서 정렬」을 알린다(/storages 의
+# window_limit). 메모리 근거(2026-10-20 실측, 1만 타깃 한 스토리지 + 6.5만 잡, 요약 평균 3.6KB): 창 전체의 포인트를 세우고
+# 응답을 통째로 만들던 옛 구조는 1만 내보내기 한 건이 +~465MiB(PG·sqlite 같음), PG 동시 3건이면 HWM 1.3GiB 로 api 한도 1Gi
+# 를 넘었다. 값만 뽑는 목록은 +18~29MiB, 묶음 스트리밍 내보내기는 +37~53MiB(첫 호출; 반복 +4~13MiB, PG 동시 2건 +~60MiB),
+# 시간은 sqlite 내보내기 16.5초 → 2.8초·지표 정렬 목록 15초 → 1.3초다(인덱스 포함) -- 이 값을 올리기 전에 같은 측정을 다시 하라.
+_WINDOW_LIMIT = 10000
+# 창·내보내기의 묶음 크기 -- 캐시 조회(get_many)·잡 조회(target IN·job_id IN)·캐시 쓰기(put_many)가 한 번에 다루는 상한.
+# 메모리는 묶음 하나(요약·잡 행 500개)만큼만 든다.
+_CHUNK = 500
 _ORDER = "^(asc|desc)$"
 
 
@@ -91,19 +107,31 @@ def _read_digest(base: str, job: dict) -> "dict | None":
     return _project_report(report)
 
 
-def _digests(repos, base: str, jobs: list) -> dict:
-    """job_id -> digest. 캐시에 있으면 그것(재투영), 없으면 리포트를 읽어 투영하고 캐시에 둔다. 못 읽은 잡은 결과에
-    없다(캐시에도 두지 않는다 -- 일시 오류를 영구 "모름"으로 굳히지 않게)."""
-    cached = {jid: _project_report(d)
-              for jid, d in repos.scan_digests.get_many([j["job_id"] for j in jobs]).items()}
+def _cached_digests(repos, job_ids) -> dict:
+    """job_id -> 캐시의 요약(재투영). 캐시에 없는 잡은 결과에 없다."""
+    return {jid: _project_report(d) for jid, d in repos.scan_digests.get_many(job_ids).items()}
+
+
+def _read_and_cache(repos, base: str, jobs: list) -> dict:
+    """캐시에 없던 잡들의 리포트를 읽어 투영하고 한 번에(put_many) 캐시에 둔다. job_id -> 요약, 못 읽은 잡은 결과에 없다
+    (캐시에도 두지 않는다 -- 일시 오류를 영구 "모름"으로 굳히지 않게)."""
+    fresh = {}
     for job in jobs:
-        if job["job_id"] in cached:
-            continue
         digest = _read_digest(base, job)
-        if digest is None:
-            continue
-        repos.scan_digests.put(job["job_id"], digest)
-        cached[job["job_id"]] = digest
+        if digest is not None:
+            fresh[job["job_id"]] = digest
+    if fresh:
+        repos.scan_digests.put_many(fresh)
+    return fresh
+
+
+def _digests(repos, base: str, jobs: list, *, skip=frozenset()) -> dict:
+    """job_id -> digest. 캐시에 있으면 그것(재투영), 없으면 리포트를 읽어 투영하고 캐시에 둔다. 못 읽은 잡은 결과에
+    없다. skip = 같은 요청의 앞 단계(지표 정렬 값 계산)가 이미 읽다 실패한 잡 -- 다시 열지 않는다(한 응답 안에서 정렬 값과
+    보이는 값이 같은 읽기에서 나오게, 크기 초과 리포트를 두 번 256KiB 씩 읽지 않게)."""
+    cached = _cached_digests(repos, [j["job_id"] for j in jobs])
+    cached.update(_read_and_cache(repos, base, [j for j in jobs
+                                                if j["job_id"] not in cached and j["job_id"] not in skip]))
     return cached
 
 
@@ -139,17 +167,62 @@ def _base(request: Request) -> str:
                                               request.app.state.settings))
 
 
-def _with_latest(request: Request, rows: list) -> list:
-    """행마다 latest(최신 성공 scan 1건의 포인트)를 붙인다. 리포트 요약은 캐시에서 오고, 캐시에 없는 잡만 아티팩트를 연다."""
-    repos = request.app.state.repos
-    recent = repos.data_jobs.recent_scans_by_target(
-        per_target=1, pairs=[(r["storage_name"], r["target"]) for r in rows])
-    latest_jobs = [jobs[0] for jobs in recent.values()]
-    digests = _digests(repos, _base(request), latest_jobs)
-    for r in rows:
-        jobs = recent.get((r["storage_name"], r["target"])) or []
-        r["latest"] = _point(jobs[0], digests.get(jobs[0]["job_id"])) if jobs else None
-    return rows
+def _public(head: dict) -> dict:
+    """머리 행(DataJobsRepository.scan_target_heads) -> 목록·내보내기 행의 공개 열. 열과 순서는 옛 GROUP BY 질의 그대로다
+    (응답 바이트가 같게 -- tests/test_usage_equivalence.py). job_id·bytes_count 같은 정렬 재료는 싣지 않는다."""
+    return {"storage_name": head["storage_name"], "target": head["target"], "scan_count": head["scan_count"],
+            "first_scan_at": head["first_scan_at"], "last_scan_at": head["last_scan_at"]}
+
+
+def _recent_jobs(repos, heads: list, per_target: int) -> dict:
+    """(storage_name, target) -> 최근 성공 scan 잡 행(최신순, 최대 per_target). 스토리지별로 `target IN (…)` 한 묶음씩
+    묻는다 -- 포탈의 스토리지 탭은 한 스토리지라 한 문장이고, storage 없는 옛 탭의 「전체」만 스토리지 수만큼 나뉜다."""
+    by_storage: dict = {}
+    for h in heads:
+        by_storage.setdefault(h["storage_name"], []).append(h["target"])
+    out: dict = {}
+    for name, targets in by_storage.items():
+        for target, jobs in repos.data_jobs.recent_scans_for_targets(name, targets, per_target=per_target).items():
+            out[(name, target)] = jobs
+    return out
+
+
+def _with_latest(repos, base: str, heads: list, *, skip=frozenset()) -> list:
+    """반환할 행마다 latest(최신 성공 scan 1건의 포인트)를 붙인다. 리포트 요약은 캐시에서 오고, 캐시에 없는 잡만
+    아티팩트를 연다. 호출자는 limit(≤ _TARGET_LIMIT) 뒤의 행만 넘긴다 -- 한 묶음이다."""
+    recent = _recent_jobs(repos, heads, 1)
+    digests = _digests(repos, base, [jobs[0] for jobs in recent.values()], skip=skip)
+    out = []
+    for h in heads:
+        jobs = recent.get((h["storage_name"], h["target"])) or []
+        out.append({**_public(h),
+                    "latest": _point(jobs[0], digests.get(jobs[0]["job_id"])) if jobs else None})
+    return out
+
+
+def _metric_order(repos, base: str, heads: list, sort: str, order: str, unreadable: set) -> list:
+    """창(머리 행들)을 지표 값(bytes·files·hot)으로 정렬한다 -- 화면과 같은 값(usage_metrics.metric_value 를 latest 포인트에
+    거는 것과 같은 결과)이지만 포인트는 남기지 않는다. _CHUNK 묶음마다: 최신 잡 job_id 로 캐시를 묻고, 없는 잡만 전체 행
+    (요청자 uid)을 읽어 리포트를 열고 한 번에 캐시에 넣은 뒤(put_many), 값만 남기고 요약은 버린다. 못 읽은 잡은
+    unreadable 에 모은다(반환할 행·내보낼 행이 다시 열지 않게 -- _digests 의 skip).
+
+    storage_name 이 NULL 인 머리는 값이 없다(모름 -- 리포트도 열지 않는다): 반환 행의 latest 는 (storage, target) 으로 잡을
+    찾는데 NULL 은 아무것도 맞지 않는다(recent_scans_for_targets). 정렬 값과 보이는 값이 한 판정이어야 「모름은 맨 뒤」가
+    화면과 맞는다."""
+    keys = []
+    for i in range(0, len(heads), _CHUNK):
+        chunk = heads[i:i + _CHUNK]
+        ids = [h["job_id"] for h in chunk if h["storage_name"] is not None]
+        digests = _cached_digests(repos, ids)
+        missing = [jid for jid in ids if jid not in digests]
+        if missing:
+            fresh = _read_and_cache(repos, base, list(repos.data_jobs.jobs_by_ids(missing).values()))
+            unreadable.update(jid for jid in missing if jid not in fresh)
+            digests.update(fresh)
+        for h in chunk:
+            keys.append(None if h["storage_name"] is None
+                        else metric_value({"latest": _point(h, digests.get(h["job_id"]))}, sort))
+    return sort_keyed(list(zip(heads, keys)), order)
 
 
 @router.get("/api/admin/usage/scan-targets")
@@ -162,20 +235,24 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
     """성공 scan 이 있는 (storage, target) 목록 + 필터(storage 정확 일치·path 부분 문자열, 함께 걸림; q 는 구
     단일 검색) + 정렬(sort·order). 응답 행: storage_name/target/scan_count/first_scan_at/last_scan_at +
     latest(최신 성공 scan 1건의 포인트 -- 실 사용량·요약 수치·온도 히스토그램, 2026-10-02 목록 컬럼용).
+    storage 는 포탈의 스토리지 탭이 늘 싣는다(2026-10-20) -- 없으면 전 스토리지(옛 탭 호환, 모듈 docstring).
 
     정렬(2026-10-19 사용자 요청: 「실사용량, 파일수, hot비율 등을 오름/내림차순 정렬」): last_scan(기본)·scans 는 SQL 이
-    limit 전에 정렬한다. bytes·files·hot 은 리포트 요약 값이라 SQL 열이 아니다 -- 필터에 맞는 대상 창(최근 스캔 순 상한
-    _EXPORT_LIMIT, 내보내기와 같은 창)의 latest 를 만들어 화면과 같은 값으로 정렬한 뒤 limit 만큼 자른다(usage_metrics).
-    받은 묶음만 화면이 정렬하면 「최근 N개 안의 순위」라 그 밖의 큰 디렉터리가 상위에 안 나온다. 창의 latest 는 리포트
-    요약 캐시로 만든다(캐시에 없는 잡만 아티팩트를 연다 -- 첫 정렬만 느리고 그 뒤는 DB 한 번)."""
+    limit 전에 정렬하고, 반환 행만 latest 를 만든다. bytes·files·hot 은 리포트 요약 값이라 SQL 열이 아니다 -- 필터에 맞는
+    대상 창(최근 스캔 순 상한 _WINDOW_LIMIT, 내보내기와 같은 창)의 정렬 값을 화면과 같은 규칙으로 계산해 정렬한 뒤
+    (_metric_order -- 값만, 포인트는 반환 행만) limit 만큼 자른다(usage_metrics). 받은 묶음만 화면이 정렬하면 「최근 N개
+    안의 순위」라 그 밖의 큰 디렉터리가 상위에 안 나온다. 값은 리포트 요약 캐시로 만든다(캐시에 없는 잡만 아티팩트를 연다
+    -- 첫 정렬만 느리고 그 뒤는 DB 몇 번)."""
     repos = request.app.state.repos
+    flt = {"q": q or None, "storage": storage or None, "path": path or None}
+    base = _base(request)
+    unreadable: set = set()
     if sort in METRIC_SORTS:
-        window = repos.data_jobs.scan_targets(q=q or None, storage=storage or None, path=path or None,
-                                              order="desc", limit=_EXPORT_LIMIT)
-        return sort_by_metric(_with_latest(request, window), sort, order)[:limit]
-    rows = repos.data_jobs.scan_targets(q=q or None, storage=storage or None,
-                                        path=path or None, order=order, limit=limit, sort=sort)
-    return _with_latest(request, rows)
+        window = repos.data_jobs.scan_target_heads(**flt, order="desc", limit=_WINDOW_LIMIT)
+        page = _metric_order(repos, base, window, sort, order, unreadable)[:limit]
+    else:
+        page = repos.data_jobs.scan_target_heads(**flt, order=order, limit=limit, sort=sort)
+    return _with_latest(repos, base, page, skip=unreadable)
 
 
 def _storage_infos(repos, names) -> dict:
@@ -208,6 +285,35 @@ def _previous(job: dict, cached: "dict | None") -> dict:
             "finished_at": job.get("updated_at"), "total_bytes": total}
 
 
+def _export_body(repos, base: str, heads: list, infos: dict, opening: bytes, skip) -> Iterator[bytes]:
+    """내보내기 본문을 _CHUNK 타깃 묶음씩 흘린다. 묶음마다 최근 두 잡(최신 + 직전)·최신의 요약(캐시, 없으면 읽고 put_many)·
+    직전의 캐시 요약만 읽어 행 JSON 을 만들고 버린다 -- 피크 메모리가 묶음 하나다. 행의 바이트는 옛 통짜 본문의 그 행과
+    같다(json.dumps 같은 인자 -- 목록 안 객체의 인코딩은 단독 인코딩과 같다).
+
+    도중 실패(DB 끊김 등)는 삼키지 않는다 -- 예외가 그대로 올라가 연결이 끊기고 본문은 닫히지 않은 JSON 이 된다. 포탈
+    파서가 그걸 실패로 보여야 한다(조용히 잘린 CSV 가 「전부」인 척하면 안 된다). 묶음 사이에 스냅숏은 없다: 그 사이 지워진
+    타깃의 행은 latest·previous 가 null 이다(행 자체는 머리 질의 시점의 것)."""
+    yield opening
+    n = 0
+    for i in range(0, len(heads), _CHUNK):
+        chunk = heads[i:i + _CHUNK]
+        recent = _recent_jobs(repos, chunk, 2)
+        digests = _digests(repos, base, [js[0] for js in recent.values()], skip=skip)
+        prev_cached = repos.scan_digests.get_many([js[1]["job_id"] for js in recent.values() if len(js) > 1])
+        parts = []
+        for h in chunk:
+            js = recent.get((h["storage_name"], h["target"])) or []
+            parts.append(json.dumps({
+                **_public(h),
+                "storage": infos.get(h["storage_name"]),
+                "latest": _point(js[0], digests.get(js[0]["job_id"])) if js else None,
+                "previous": _previous(js[1], prev_cached.get(js[1]["job_id"])) if len(js) > 1 else None},
+                separators=(",", ":")))
+        yield (("," if n else "") + ",".join(parts)).encode()
+        n += len(chunk)
+    yield f'],"count":{n}}}'.encode()
+
+
 @router.get("/api/admin/usage/export")
 def export_usage(request: Request, q: "str | None" = Query(None, max_length=512),
                  storage: "str | None" = Query(None, max_length=512),
@@ -215,46 +321,83 @@ def export_usage(request: Request, q: "str | None" = Query(None, max_length=512)
                  order: str = Query("desc", pattern=_ORDER),
                  sort: str = Query("last_scan", pattern=SORT_PATTERN)):
     """사용량 분석 전체 내보내기(2026-10-02 사용자 요청: "모든 정보를 csv 로, 항목당 한 줄"). 필터·정렬은 목록과
-    같고 행 상한만 넉넉하다(_EXPORT_LIMIT, 넘으면 truncated). 행마다 latest(최신 성공 scan 의 전체 요약)·previous
+    같고 행 상한만 넉넉하다(_WINDOW_LIMIT, 넘으면 truncated). 행마다 latest(최신 성공 scan 의 전체 요약)·previous
     (그 직전 -- 증감용 시각·용량만)를 싣는다. CSV 조립은 포탈이 한다 -- hot 비율·구간 라벨 같은 화면 규칙을 한
-    벌로 두려고.
+    벌로 두려고. 포탈은 지금 탭의 storage 를 싣는다(2026-10-20 -- 한 파일 = 한 스토리지).
 
-    응답은 이 동기 핸들러(스레드풀) 안에서 JSON 바이트로 만들어 돌려준다 -- dict 를 그대로 돌려주면 FastAPI 가
-    jsonable_encoder·직렬화를 **이벤트 루프 위에서** 돌려, 큰 내보내기 동안 /healthz 를 포함한 모든 요청이 멈춘다
-    (리뷰 실측: 1만 행에 6초).
+    본문 모양은 {generated_at, truncated, rows, count} 이고 _CHUNK 타깃 묶음씩 흘려보낸다(2026-10-20 -- 1만 행을 통째로
+    세우면 한 건이 +~465MiB 였다, _WINDOW_LIMIT 주석). count 가 맨 뒤인 이유: 다 흘린 뒤에야 확정된다(포탈 파서는 키
+    순서를 보지 않는다). truncated 는 첫 바이트 전에 정한다(머리를 상한 + 1 개 읽는다). 첫 바이트 전의 일(머리 질의·지표
+    정렬 값·스토리지 정보)은 이 동기 핸들러(스레드풀) 안에서 한다 -- 거기서 난 실패는 평범한 500 이다. 묶음은 starlette 가
+    동기 제너레이터를 청크마다 스레드풀로 돌린다(이벤트 루프를 막지 않는다 -- 옛 「dict 를 돌려주면 직렬화가 루프 위에서
+    돈다(1만 행에 6초 동안 /healthz 까지 멈춤)」 문제를 같은 이유로 피한다).
 
-    정렬(sort·order)은 목록과 같다: bytes·files·hot 은 창(최근 스캔 순 _EXPORT_LIMIT)을 만든 뒤 행을 그 값으로 정렬한다."""
+    정렬(sort·order)은 목록과 같다: bytes·files·hot 은 창(최근 스캔 순 _WINDOW_LIMIT)의 정렬 값을 먼저 계산해(_metric_order)
+    그 순서로 흘린다."""
     repos = request.app.state.repos
     metric = sort in METRIC_SORTS
-    targets = repos.data_jobs.scan_targets(q=q or None, storage=storage or None, path=path or None,
-                                           order="desc" if metric else order, limit=_EXPORT_LIMIT + 1,
-                                           sort="last_scan" if metric else sort)
-    truncated = len(targets) > _EXPORT_LIMIT
-    targets = targets[:_EXPORT_LIMIT]
-    recent = repos.data_jobs.recent_scans_by_target(
-        per_target=2, pairs=[(t["storage_name"], t["target"]) for t in targets])
-    latest_jobs = [js[0] for js in recent.values()]
-    digests = _digests(repos, _base(request), latest_jobs)
-    prev_cached = repos.scan_digests.get_many([js[1]["job_id"] for js in recent.values() if len(js) > 1])
-    infos = _storage_infos(repos, dict.fromkeys(t["storage_name"] for t in targets))
-    rows = []
-    for t in targets:
-        js = recent.get((t["storage_name"], t["target"])) or []
-        rows.append({**t,
-                     "storage": infos.get(t["storage_name"]),
-                     "latest": _point(js[0], digests.get(js[0]["job_id"])) if js else None,
-                     "previous": _previous(js[1], prev_cached.get(js[1]["job_id"])) if len(js) > 1 else None})
+    heads = repos.data_jobs.scan_target_heads(q=q or None, storage=storage or None, path=path or None,
+                                              order="desc" if metric else order, limit=_WINDOW_LIMIT + 1,
+                                              sort="last_scan" if metric else sort)
+    truncated = len(heads) > _WINDOW_LIMIT
+    heads = heads[:_WINDOW_LIMIT]
+    base = _base(request)
+    unreadable: set = set()
     if metric:
-        rows = sort_by_metric(rows, sort, order)
-    body = {"generated_at": utc_now_iso(), "count": len(rows), "truncated": truncated, "rows": rows}
-    return Response(content=json.dumps(body, separators=(",", ":")).encode(), media_type="application/json")
+        heads = _metric_order(repos, base, heads, sort, order, unreadable)
+    infos = _storage_infos(repos, dict.fromkeys(h["storage_name"] for h in heads))
+    opening = (f'{{"generated_at":{json.dumps(utc_now_iso())},"truncated":{json.dumps(truncated)},'
+               f'"rows":[').encode()
+    return StreamingResponse(_export_body(repos, base, heads, infos, opening, unreadable),
+                             media_type="application/json")
 
 
 @router.get("/api/admin/usage/scan-storages")
 def scan_storages(request: Request):
     """성공 scan 기록이 있는 스토리지 이름(필터 선택지). 등록 스토리지 목록만으로는 삭제·개명된 스토리지 이름으로
-    남은 이력을 좁힐 수 없다(리뷰) -- 화면이 등록 목록과 합친다."""
+    남은 이력을 좁힐 수 없다(리뷰) -- 화면이 등록 목록과 합친다. 2026-10-20 부터 포탈은 /storages 를 쓰고(실패하면 이것으로
+    탭만 그린다), 모양(string[])은 옛 탭의 JS 호환으로 그대로 둔다."""
     return request.app.state.repos.data_jobs.scan_storage_names()
+
+
+def _storage_summary_row(name: str, usage: "dict | None", *, registered: bool, source: "str | None",
+                         backend_type, mount_path) -> dict:
+    u = usage or {"target_count": 0, "succeeded_scan_count": 0, "last_scan_at": None}
+    return {"storage_name": name, "registered": registered, "source": source, "backend_type": backend_type,
+            "mount_path": mount_path, "target_count": u["target_count"],
+            "succeeded_scan_count": u["succeeded_scan_count"], "last_scan_at": u["last_scan_at"]}
+
+
+@router.get("/api/admin/usage/storages")
+def usage_storages(request: Request):
+    """사용량 분석의 스토리지 탭(2026-10-20 사용자 요청: 「각 스토리지 별로 처음부터 나뉘어져서 보이게끔」). 응답:
+    {window_limit(_WINDOW_LIMIT -- 포탈이 「최근 스캔된 N개 안에서 정렬」의 N 을 하드코딩하지 않게), storages: [{storage_name,
+    registered, source, backend_type, mount_path, target_count, succeeded_scan_count, last_scan_at}]}.
+
+    - 대상 = 등록 스토리지 ∪ 성공 scan 기록이 있는 이름(삭제된 스토리지의 이력). 등록인데 기록이 없으면 0·0·null(0 은
+      정상값이다 -- 탭이 숨지 않고 「0」으로 서야 첫 스캔이 끝날 때 탭이 갑자기 생기지 않는다).
+    - 등록이면 지금 설정(source "registered"), 미등록이면 감사 기록의 마지막 값(StoragesRepository.last_known_config,
+      source "last_known"), 그것도 없으면 null·source null(모름) -- 내보내기 행의 storage 와 같은 규칙(_storage_infos).
+    - 순서: 등록 이름순 → 미등록 이름순(파이썬 문자열 순 -- 방언의 콜레이션과 무관하게, unregistered-storages 와 같은 순).
+      최근 스캔순이 아닌 이유: 스캔이 끝날 때마다 탭이 움직인다.
+    - 총 사용량은 싣지 않는다: 타깃 경로가 겹쳐(team ⊃ team/sub) 합이 이중 계산이고, 잡 행 bytes_count 의 SQL 합은 화면
+      규칙(리포트 요약의 total_bytes)과 다르다 -- 러너가 용량을 기록하기 전 잡은 NULL 이라 조용히 빠진다(null≠0).
+    - 실패 scan 만 남은 미등록 이름은 여기 없다(사용량 기준 = 성공 scan) -- 정리할 거리는 unregistered-storages 가 말한다.
+    집계는 GROUP BY 한 번(DataJobsRepository.scan_storage_summary) + 미등록 이름마다 감사 기록 한 번."""
+    repos = request.app.state.repos
+    usage = {r["storage_name"]: r for r in repos.data_jobs.scan_storage_summary()}
+    registered = sorted(repos.storages.list(), key=lambda s: s["storage_name"])
+    names = {s["storage_name"] for s in registered}
+    out = [_storage_summary_row(s["storage_name"], usage.get(s["storage_name"]), registered=True,
+                                source="registered", backend_type=s["backend_type"], mount_path=s["mount_path"])
+           for s in registered]
+    for name in sorted(n for n in usage if n not in names):
+        known = repos.storages.last_known_config(name)
+        out.append(_storage_summary_row(name, usage[name], registered=False,
+                                        source="last_known" if known is not None else None,
+                                        backend_type=(known or {}).get("backend_type"),
+                                        mount_path=(known or {}).get("mount_path")))
+    return {"window_limit": _WINDOW_LIMIT, "storages": out}
 
 
 @router.get("/api/admin/usage/unregistered-storages")

@@ -4,8 +4,9 @@
 정렬은 **서버**가 한다: 목록은 limit(기본 100)으로 잘려 오므로 화면이 받은 묶음만 정렬하면 「최근 스캔된 N개 안에서의
 순위」가 되어, 그 밖의 큰 디렉터리가 상위에 나오지 않는다. 그런데 정렬 값은 SQL 열이 아니다 -- 화면의 「파일 수」는
 리포트 요약의 total_files(잡 행의 files_count 는 디렉터리까지 센 항목 수라 다르다), hot 비율은 리포트의 atime 히스토그램에서
-나온다. 그래서 routes_usage 가 필터에 맞는 대상 창(최근 스캔 순 상한 _EXPORT_LIMIT)의 최신 스캔 포인트를 리포트 요약
-캐시(scan_digests)로 만들고, 여기서 화면과 **같은 값**으로 정렬한 뒤 limit 만큼 자른다.
+나온다. 그래서 routes_usage 가 필터에 맞는 대상 창(최근 스캔 순 상한 _WINDOW_LIMIT = 1만 -- 포탈은 스토리지 탭마다
+storage 를 실어 창도 그 스토리지 안이다, 2026-10-20)의 최신 스캔마다 리포트 요약 캐시(scan_digests)로 정렬 **값만** 만들고,
+여기서 화면과 **같은 값**으로 정렬한 뒤 limit 만큼 자른다(sort_keyed -- 창 전체의 포인트를 메모리에 세우지 않는다).
 
 hot 비율 규칙은 포탈 usageStats.hotRatio 의 거울이다(목록·타일·CSV 가 쓰는 화면 규칙). 두 벌이 갈라지지 않게 같은 예제
 파일(frontend/src/features/usage/hotRatioCases.json)을 양쪽 테스트가 함께 읽는다.
@@ -15,7 +16,7 @@ hot 비율 규칙은 포탈 usageStats.hotRatio 의 거울이다(목록·타일�
 """
 
 HOT_AGE_MAX_DAYS = 180
-# 화면 열과 같은 이름(목록 sort 파라미터). last_scan·scans 는 SQL 이 정렬한다(repositories.data_jobs.scan_targets).
+# 화면 열과 같은 이름(목록 sort 파라미터). last_scan·scans 는 SQL 이 정렬한다(repositories.data_jobs.scan_target_heads).
 METRIC_SORTS = ("bytes", "files", "hot")
 SQL_SORTS = ("last_scan", "scans")
 SORT_PATTERN = "^(" + "|".join(SQL_SORTS + METRIC_SORTS) + ")$"
@@ -59,13 +60,20 @@ def metric_value(row: dict, sort: str) -> "float | None":
     return v if _num(v) else None
 
 
-def sort_by_metric(rows: list, sort: str, order: str) -> list:
-    """지표 정렬(모름은 맨 뒤, 동률은 최근 스캔 늦은 것 → 이름). 안정 정렬을 두 번 건다: 먼저 동률 키, 다음에 값."""
-    known = [r for r in rows if metric_value(r, sort) is not None]
-    unknown = [r for r in rows if metric_value(r, sort) is None]
-    tie = lambda r: (r.get("storage_name") or "", r.get("target") or "")   # noqa: E731
+def sort_keyed(pairs: list, order: str) -> list:
+    """(행, 정렬 값) 쌍 -> 정렬된 행(모름 None 은 맨 뒤, 동률은 최근 스캔 늦은 것 → 이름). 안정 정렬을 두 번 건다: 먼저
+    동률 키, 다음에 값. 값을 따로 받는 이유(2026-10-20): 라우트는 창(최대 1만 타깃)의 latest 포인트를 만들지 않고 값만
+    계산한다 -- 행은 storage_name·target·last_scan_at 만 있으면 된다."""
+    known = [p for p in pairs if p[1] is not None]
+    unknown = [p for p in pairs if p[1] is None]
+    tie = lambda p: (p[0].get("storage_name") or "", p[0].get("target") or "")   # noqa: E731
     for group in (known, unknown):
         group.sort(key=tie)
-        group.sort(key=lambda r: r.get("last_scan_at") or "", reverse=True)
-    known.sort(key=lambda r: metric_value(r, sort), reverse=(order == "desc"))
-    return known + unknown
+        group.sort(key=lambda p: p[0].get("last_scan_at") or "", reverse=True)
+    known.sort(key=lambda p: p[1], reverse=(order == "desc"))
+    return [p[0] for p in known + unknown]
+
+
+def sort_by_metric(rows: list, sort: str, order: str) -> list:
+    """latest 를 실은 행의 지표 정렬 -- sort_keyed 에 화면 값(metric_value)을 붙여 넘긴다(규칙은 한 벌)."""
+    return sort_keyed([(r, metric_value(r, sort)) for r in rows], order)

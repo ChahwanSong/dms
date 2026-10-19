@@ -1,3 +1,5 @@
+import uuid
+
 from dms.domain import DataJobState
 from dms.repositories import Repositories
 
@@ -295,3 +297,68 @@ def test_record_sched_wait_without_anchor_or_broken_anchor_stays_null(db):
                "WHERE job_id = :j", {"j": job_id})
     repos.data_jobs.record_sched_wait(repos.data_jobs.get_job(job_id))
     assert repos.data_jobs.get_job(job_id)["sched_wait_seconds"] is None
+
+
+# ---- 사용량 분석 스토리지별 조회(2026-10-20) ----
+
+def _usage_scan(repos, db, *, storage, target, at, state=DataJobState.SUCCEEDED):
+    rid = repos.requests.create(operation="scan", requester_id="alice", actor="alice",
+                                resource_key=f"k:{uuid.uuid4().hex}", payload={"storage": storage, "target": target},
+                                priority="mid")
+    plan_id = repos.data_jobs.create_plan(rid, actor="planner")
+    jid = repos.data_jobs.create_job(rid, plan_id, operation="scan", priority="mid", storage_name=storage,
+                                     target=target, options={}, tool="dscan", worker_pool={}, precondition={},
+                                     actor="planner")
+    repos.data_jobs.set_job_state(jid, state, actor="stepper")
+    db.execute("UPDATE data_jobs SET updated_at = :t WHERE job_id = :j", {"t": at, "j": jid})
+    return jid
+
+
+def test_recent_scans_for_targets_is_per_storage_chunked_and_newest_first(db, monkeypatch):
+    # 저장소가 스스로 _IN_CHUNK 로 자른다(호출자가 묶음을 잊어도) -- 경계에서 빠지거나 겹치는 타깃이 없고, 타깃마다 최신순
+    # per_target 개, 다른 스토리지의 같은 이름 타깃은 섞이지 않는다. 실패 scan 은 사용량 밖이다.
+    from dms.repositories import data_jobs
+    monkeypatch.setattr(data_jobs, "_IN_CHUNK", 2)
+    repos = _repos(db)
+    jobs = {}
+    for t in ("a", "b", "c", "d", "e"):
+        jobs[t] = [_usage_scan(repos, db, storage="s1", target=t, at=f"2026-09-0{d}T00:00:00Z") for d in (1, 2, 3)]
+    _usage_scan(repos, db, storage="s1", target="a", at="2026-09-09T00:00:00Z", state=DataJobState.FAILED)
+    other = _usage_scan(repos, db, storage="s2", target="a", at="2026-09-08T00:00:00Z")
+    got = repos.data_jobs.recent_scans_for_targets("s1", ["a", "b", "c", "d", "e", "a", "zz"], per_target=2)
+    assert set(got) == {"a", "b", "c", "d", "e"}
+    assert all([j["job_id"] for j in got[t]] == [jobs[t][2], jobs[t][1]] for t in got)
+    assert got["a"][0]["worker_pool"] == {} and "diag_logs" not in got["a"][0]       # 수화된 행, diag 제외
+    assert repos.data_jobs.recent_scans_for_targets("s2", ["a"])["a"][0]["job_id"] == other
+    assert repos.data_jobs.recent_scans_for_targets(None, ["a"]) == {}               # NULL 은 아무것도 맞지 않는다
+    assert repos.data_jobs.recent_scans_for_targets("s1", []) == {}
+    # 빈 이름은 「필터 없음」이 아니라 빈 이름이다(truthy 로 접지 않는다)
+    assert repos.data_jobs.recent_scans_for_targets("", ["a"]) == {}
+    db.execute("UPDATE data_jobs SET storage_name = '' WHERE job_id = :j", {"j": other})
+    assert repos.data_jobs.recent_scans_for_targets("", ["a"])["a"][0]["job_id"] == other
+
+
+def test_jobs_by_ids_chunks_and_skips_missing(db, monkeypatch):
+    from dms.repositories import data_jobs
+    monkeypatch.setattr(data_jobs, "_IN_CHUNK", 2)
+    repos = _repos(db)
+    ids = [_usage_scan(repos, db, storage="s1", target=t, at="2026-09-01T00:00:00Z") for t in "abcde"]
+    got = repos.data_jobs.jobs_by_ids(ids + ["0" * 32, ids[0]])
+    assert set(got) == set(ids) and got[ids[0]]["target"] == "a"
+    assert repos.data_jobs.jobs_by_ids([]) == {}
+
+
+def test_scan_target_heads_carry_the_latest_job_and_old_group_by_values(db):
+    # 머리 = 옛 GROUP BY 의 값(scan_count·first·last) + 최신 성공 scan 의 job_id. 같은 시각이면 job_id 가 큰 쪽이 최신
+    # (succeeded_scans_for_target 과 같은 근거). 필터(path)가 걸려도 파티션은 잘리지 않는다.
+    repos = _repos(db)
+    j1 = _usage_scan(repos, db, storage="s1", target="team", at="2026-09-01T00:00:00Z")
+    j2 = _usage_scan(repos, db, storage="s1", target="team", at="2026-09-05T00:00:00Z")
+    j3 = _usage_scan(repos, db, storage="s1", target="team", at="2026-09-05T00:00:00Z")
+    _usage_scan(repos, db, storage="s1", target="team", at="2026-09-09T00:00:00Z", state=DataJobState.FAILED)
+    _usage_scan(repos, db, storage="s2", target="team", at="2026-09-07T00:00:00Z")
+    [head] = repos.data_jobs.scan_target_heads(storage="s1", path="tea")
+    assert (head["scan_count"], head["first_scan_at"], head["last_scan_at"]) == (
+        3, "2026-09-01T00:00:00Z", "2026-09-05T00:00:00Z")
+    assert head["job_id"] == max(j2, j3) and head["job_id"] != j1
+    assert [h["storage_name"] for h in repos.data_jobs.scan_target_heads()] == ["s2", "s1"]   # 최근 스캔 내림차순

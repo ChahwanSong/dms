@@ -62,3 +62,17 @@ def test_ties_break_by_latest_scan_then_name():
 def test_hot_sort_uses_the_atime_ratio():
     rows = [_row("cold", atime=COLD), _row("hot", atime=HOT), _row("half", atime=HALF), _row("unknown")]
     assert [r["target"] for r in sort_by_metric(rows, "hot", "desc")] == ["hot", "half", "cold", "unknown"]
+
+
+@pytest.mark.parametrize("order", ["desc", "asc"])
+def test_sort_keyed_is_the_same_rule_with_precomputed_values(order):
+    # 2026-10-20: 라우트는 창의 latest 포인트를 세우지 않고 값만 계산해 sort_keyed 에 넘긴다 -- 행에 latest 가 없어도
+    # sort_by_metric 과 같은 순서여야 한다(모름 맨 뒤, 동률은 최근 스캔 → 이름). 0 은 값이다(모름이 아니다).
+    from dms.usage_metrics import sort_keyed
+    rows = [_row("b", total=5), _row("a", total=5), _row("c", total=5, last="2026-10-05T00:00:00Z"),
+            _row("none"), _row("zero", total=0), _row("big", total=100), _row("x", storage="s0")]
+    expected = [r["target"] for r in sort_by_metric(rows, "bytes", order)]
+    heads = [{k: r[k] for k in ("storage_name", "target", "last_scan_at")} for r in rows]
+    got = sort_keyed([(h, metric_value(r, "bytes")) for h, r in zip(heads, rows)], order)
+    assert [h["target"] for h in got] == expected
+    assert [h["target"] for h in got[-2:]] == ["x", "none"]          # 모름 둘은 맨 뒤 -- 같은 시각이면 이름(s0 < s1)
