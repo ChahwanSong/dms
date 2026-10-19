@@ -235,7 +235,9 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
     """성공 scan 이 있는 (storage, target) 목록 + 필터(storage 정확 일치·path 부분 문자열, 함께 걸림; q 는 구
     단일 검색) + 정렬(sort·order). 응답 행: storage_name/target/scan_count/first_scan_at/last_scan_at +
     latest(최신 성공 scan 1건의 포인트 -- 실 사용량·요약 수치·온도 히스토그램, 2026-10-02 목록 컬럼용).
-    storage 는 포탈의 스토리지 탭이 늘 싣는다(2026-10-20) -- 없으면 전 스토리지(옛 탭 호환, 모듈 docstring).
+    storage 는 포탈의 스토리지 탭이 늘 싣는다(2026-10-20) -- 없으면 전 스토리지(옛 탭 호환, 모듈 docstring). 실렸으면
+    빈 문자열도 그 이름 하나다(정확 일치 -- /storages 가 변조·구형 행의 빈 이름도 탭으로 내므로, 「필터 없음」으로 접으면
+    그 탭의 목록·CSV 가 전 스토리지가 됐다, 리뷰). 옛 포탈은 값이 있을 때만 storage 를 실어 이 차이를 밟지 않는다.
 
     정렬(2026-10-19 사용자 요청: 「실사용량, 파일수, hot비율 등을 오름/내림차순 정렬」): last_scan(기본)·scans 는 SQL 이
     limit 전에 정렬하고, 반환 행만 latest 를 만든다. bytes·files·hot 은 리포트 요약 값이라 SQL 열이 아니다 -- 필터에 맞는
@@ -244,7 +246,7 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
     안의 순위」라 그 밖의 큰 디렉터리가 상위에 안 나온다. 값은 리포트 요약 캐시로 만든다(캐시에 없는 잡만 아티팩트를 연다
     -- 첫 정렬만 느리고 그 뒤는 DB 몇 번)."""
     repos = request.app.state.repos
-    flt = {"q": q or None, "storage": storage or None, "path": path or None}
+    flt = {"q": q or None, "storage": storage, "path": path or None}
     base = _base(request)
     unreadable: set = set()
     if sort in METRIC_SORTS:
@@ -336,7 +338,7 @@ def export_usage(request: Request, q: "str | None" = Query(None, max_length=512)
     그 순서로 흘린다."""
     repos = request.app.state.repos
     metric = sort in METRIC_SORTS
-    heads = repos.data_jobs.scan_target_heads(q=q or None, storage=storage or None, path=path or None,
+    heads = repos.data_jobs.scan_target_heads(q=q or None, storage=storage, path=path or None,
                                               order="desc" if metric else order, limit=_WINDOW_LIMIT + 1,
                                               sort="last_scan" if metric else sort)
     truncated = len(heads) > _WINDOW_LIMIT

@@ -6,6 +6,7 @@ import { reasonText, type ApiError } from "../../lib/api";
 import { agoText, kstStampOrDash } from "../../lib/datetime";
 import type { UnregisteredStorage, UsageStorageSummary } from "../../lib/types";
 import { usePurgeUnregisteredStorage, type StorageHistoryPurgeSummary } from "./useUsage";
+import { storageLabel } from "./usageTabs";
 
 // 사용량 분석의 미등록 스토리지 정리(2026-10-12 사용자 요청: 「미등록 스토리지 항목들은 스토리지 항목별로 전체 clean
 // up 할수있도록」). 미등록 = 등록 목록에 없는(삭제된) 스토리지 이름으로 남은 scan 기록 -- 판정·규모는 서버
@@ -177,7 +178,8 @@ export function PurgeDialog({ row, purge, progress, setProgress, onResultFocus }
 // 미등록 탭 맨 위의 경고 띠(2026-10-20): 무엇의 기록인지(삭제된 스토리지 · 마지막 설정)·규모·「기록 정리」. row(미등록 목록의
 // 행)가 아직 없거나 못 받았으면 요약(summary)의 마지막 설정만으로 띠를 그리고 정리 버튼은 두지 않는다 -- 규모를 모르는 채로
 // 지우게 하지 않는다. 확인 창 안 경고와 같은 주의색(attn) 면.
-export function UnregisteredBanner({ row, summary, purge, progress, setProgress, onResultFocus, now }: {
+export function UnregisteredBanner({ name, row, summary, purge, progress, setProgress, onResultFocus, now }: {
+  name: string;
   row: UnregisteredStorage | null;
   summary: UsageStorageSummary | null;
   purge: ReturnType<typeof usePurgeUnregisteredStorage>;
@@ -197,7 +199,10 @@ export function UnregisteredBanner({ row, summary, purge, progress, setProgress,
       <div className="flex min-w-0 flex-1 basis-64 items-start gap-2.5">
         <TriangleAlert aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-attn" />
         <div className="min-w-0 space-y-0.5">
-          <p className="text-sm font-medium text-ink break-keep">스토리지 목록에서 삭제된 스토리지의 기록입니다</p>
+          {/* 이름을 띠 머리에(탭은 긴 이름을 말줄임한다 -- MetaLine 과 같은 이유). */}
+          <p className={`text-sm font-semibold text-ink [overflow-wrap:anywhere] ${name === "" ? "italic" : ""}`}>
+            {storageLabel(name)}</p>
+          <p className="text-sm text-ink break-keep">스토리지 목록에서 삭제된 스토리지의 기록입니다</p>
           {config !== null && <p className="text-sm text-ink/70 [overflow-wrap:anywhere]">{config}</p>}
           {row !== null && (
             <p className="text-xs text-ink/70 break-keep">

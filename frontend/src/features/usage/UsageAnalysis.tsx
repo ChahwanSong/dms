@@ -9,7 +9,7 @@ import { useStorages } from "../storages/useStorages";
 import {
   usePurgeUnregisteredStorage, useScanStorages, useUnregisteredStorages, useUsageStorages, type UsageSort,
 } from "./useUsage";
-import { buildStorageTabs, defaultStorage, type StorageTab } from "./usageTabs";
+import { buildStorageTabs, defaultStorage, storageLabel, type StorageTab } from "./usageTabs";
 import { StoragePanel } from "./StoragePanel";
 import { PurgeResult } from "./UnregisteredStorages";
 
@@ -27,8 +27,9 @@ export { staleClass } from "./TargetTable";
 //
 // URL 이 진실이다: ?storage= = 탭, &target= = 그 탭 안에서 펼친 행 -- 새로고침·딥링크에서 같은 화면이 나온다(옛 링크
 // ?storage=&target= 의 뜻 그대로). storage 가 없으면 기본 탭(usageTabs.defaultStorage)을 **파생**한다 -- URL 에 쓰지 않아
-// effect 도 히스토리 항목도 없다. 탭을 바꾸면 target 은 버린다(다른 스토리지로 펼침이 따라가지 않게). 행을 접어도 storage 는
-// 남긴다(빈 URL 로 돌리면 기본 탭으로 튄다).
+// effect 도 히스토리 항목도 없다. 한 번 고른 기본 탭은 그 탭이 남아 있는 동안 붙잡는다(리뷰: 요약 재조회로 대상 수가 바뀌면
+// 다시 계산된 기본 탭이 보던 스토리지를 바꿔 버렸다). 탭을 바꾸면 target 은 버린다(다른 스토리지로 펼침이 따라가지 않게).
+// 행을 접어도 storage 는 남긴다(빈 URL 로 돌리면 기본 탭으로 튄다).
 
 const PANEL_ID_PREFIX = "usage-storage";
 
@@ -43,7 +44,8 @@ function TabLabel({ tab, selected }: { tab: StorageTab; selected: boolean }) {
     : "bg-line/70 text-ink/70";
   return (
     <>
-      <span className="max-w-[14rem] truncate" title={tab.name}>{tab.name}</span>
+      <span className={`max-w-[14rem] truncate ${tab.name === "" ? "italic" : ""}`} title={storageLabel(tab.name)}>
+        {storageLabel(tab.name)}</span>
       {!tab.registered && (<>{" "}
         <span className="rounded border border-attn/30 bg-attnbg px-1 text-[11px] leading-4 text-attn">미등록</span>
       </>)}
@@ -77,23 +79,31 @@ export function UsageAnalysis() {
     return () => clearTimeout(t);
   }, [input]);
 
-  // 탭 원천 셋(usageTabs 머리 주석). 요약을 못 받으면 scan 기록 이름으로 탭만 그린다(대상 수 모름).
+  // 탭 원천 셋(usageTabs 머리 주석). 요약을 한 번도 못 받았으면 scan 기록 이름으로 탭만 그린다(대상 수 모름). 받아 둔 요약이
+  // 있으면 재조회가 실패해도 그것을 쓴다 -- isError 만 보면 백그라운드 재조회 한 번의 실패에 패널이 자리표시로 돌아갔다(리뷰).
   const storagesQ = useStorages();
   const summaryQ = useUsageStorages();
   const unregQ = useUnregisteredStorages();
-  const scanQ = useScanStorages(summaryQ.isError);
+  const summaryMissing = summaryQ.isError && summaryQ.data === undefined;
+  const scanQ = useScanStorages(summaryMissing);
   const tabs = buildStorageTabs({
     registered: storagesQ.data, summary: summaryQ.data?.storages, unregistered: unregQ.data,
-    scanNames: summaryQ.isError ? scanQ.data : undefined,
+    scanNames: summaryMissing ? scanQ.data : undefined,
   });
   // 기본 탭은 「기록이 있는가」를 알아야 고를 수 있다 -- 요약(또는 그 대체 원천)이 올 때까지 패널은 자리표시다.
-  const ready = summaryQ.isSuccess || (summaryQ.isError && !scanQ.isPending && !storagesQ.isPending);
+  const ready = summaryQ.data !== undefined || (summaryMissing && !scanQ.isPending && !storagesQ.isPending);
   // URL 의 storage 가 탭에 없다는 판정은 미등록 목록까지 온 뒤에만(실패 기록만 남은 미등록 이름은 거기에만 있다) --
   // 로딩 중의 빈 목록으로 딥링크 탭에서 튕겨 나가지 않게.
   const judgeable = ready && !unregQ.isPending;
   const inTabs = storageParam !== null && tabs.some((t) => t.name === storageParam);
-  const active = storageParam !== null && (inTabs || !judgeable) ? storageParam
-    : ready ? defaultStorage(tabs) : null;
+  // 붙잡은 기본 탭(머리 주석): 탭 목록에 남아 있으면 그대로, 사라졌으면(정리·삭제) 다시 고른다. 렌더 중 상태 조정이다 --
+  // effect 로 하면 다른 탭이 한 번 그려진 뒤 바뀐다.
+  const [heldDefault, setHeldDefault] = useState<string | null>(null);
+  const fallbackTab = !ready ? null
+    : heldDefault !== null && tabs.some((t) => t.name === heldDefault) ? heldDefault
+    : defaultStorage(tabs);
+  if (fallbackTab !== null && fallbackTab !== heldDefault) setHeldDefault(fallbackTab);
+  const active = storageParam !== null && (inTabs || !judgeable) ? storageParam : fallbackTab;
   const activeTab: StorageTab | null = active === null ? null
     : tabs.find((t) => t.name === active)
       // 딥링크가 원천보다 먼저 왔다 -- 목록 요청은 바로 병렬로 보낸다(메타 줄·띠는 원천이 오면 채워진다).
@@ -132,7 +142,8 @@ export function UsageAnalysis() {
   }, [storageParam, judgeable, inTabs]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectTab = (name: string) => {
-    if (name === active) return;
+    // 기본 탭(URL 에 없음)을 눌렀으면 URL 에 적는다 -- 그 뒤로는 그 탭이 링크·새로고침에도 남는다.
+    if (name === active && storageParam !== null) return;
     setNotice(null);
     setParams({ storage: name });
   };
@@ -167,9 +178,20 @@ export function UsageAnalysis() {
             <p role="alert" className="text-sm text-bad [overflow-wrap:anywhere]">
               {`${failedName}: ${(purge.error as ApiError).message}`}</p>
           )}
-          {summaryQ.isError && (
+          {/* 요약을 못 받아도 탭은 대체 원천(scan 기록 이름)으로 그려진다 -- 그 동안엔 흐린 한 줄로 「건수 모름」만 말한다(배포
+              중 옛 API 는 이 경로에 SPA index.html 을 200 으로 줘서, 원문 오류가 「Unexpected token '<'」 같은 파서 문장이었다).
+              대체 원천까지 실패하면 그때 오류다. 받아 둔 요약이 있는데 재조회만 실패했으면 그 사실만. */}
+          {summaryMissing && !scanQ.isError && (
+            <p className="flex items-center gap-1.5 text-sm text-muted">
+              <Info aria-hidden className="h-4 w-4 shrink-0" />스토리지별 대상 수를 불러오지 못해 건수 없이 표시합니다</p>
+          )}
+          {summaryMissing && scanQ.isError && (
             <p className="text-sm text-bad">
-              {`스토리지별 요약을 불러오지 못했습니다 — ${(summaryQ.error as ApiError).message}`}</p>
+              {`스토리지별 요약을 불러오지 못했습니다 — ${(scanQ.error as ApiError).message}`}</p>
+          )}
+          {summaryQ.isError && !summaryMissing && (
+            <p className="text-sm text-bad">
+              {`스토리지별 요약을 새로 고치지 못했습니다 — ${(summaryQ.error as ApiError).message}`}</p>
           )}
           {unregQ.isError && (
             <p className="text-sm text-bad">
@@ -203,7 +225,7 @@ export function UsageAnalysis() {
           {notice !== null && (
             <p role="status" className="flex items-center gap-1.5 text-sm text-muted [overflow-wrap:anywhere]">
               <Info aria-hidden className="h-4 w-4 shrink-0" />
-              {`‘${notice}’ 스토리지의 사용량 기록이 없습니다 — 기본 탭을 보여 줍니다`}
+              {`‘${storageLabel(notice)}’ 스토리지의 사용량 기록이 없습니다 — 기본 탭을 보여 줍니다`}
             </p>
           )}
           <Card>

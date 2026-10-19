@@ -72,3 +72,13 @@ test("Segmented: aria-pressed 그룹 -- 누르면 onChange, 선택은 하나", a
   await userEvent.click(screen.getByRole("button", { name: "60건" }));
   expect(onChange).toHaveBeenCalledWith(60);
 });
+
+test("앞쪽에 탭이 생겨도 뒤 탭 버튼은 그대로라 포커스가 남는다(탭 id 로 묶음 key)", async () => {
+  const items = (ids: string[]): TabItem[] => ids.map((id) => ({ id, content: id }));
+  const { rerender } = render(
+    <Tabs label="보기" items={items(["b", "c"])} value="b" idPrefix="t" onSelect={() => {}}><p /></Tabs>);
+  screen.getByRole("tab", { name: "c" }).focus();
+  rerender(<Tabs label="보기" items={[{ id: "a", content: "a", separatorBefore: false }, ...items(["b", "c"])]} value="b"
+                 idPrefix="t" onSelect={() => {}}><p /></Tabs>);
+  expect(screen.getByRole("tab", { name: "c" })).toHaveFocus();
+});

@@ -13,7 +13,7 @@ import { buildUsageCsv, usageCsvFilename } from "./usageCsv";
 import { DETAIL_ID, TargetTable } from "./TargetTable";
 import { TargetDetail } from "./TargetDetail";
 import { UnregisteredBanner } from "./UnregisteredStorages";
-import type { StorageTab } from "./usageTabs";
+import { storageLabel, type StorageTab } from "./usageTabs";
 
 // 스토리지 하나의 패널(2026-10-20, 탭 패널 = 카드 하나). 위에서 아래로: 메타 한 줄(마운트 · 타입 · 대상 수 · 최근 스캔) 또는
 // 미등록 경고 띠 → 툴바(경로 검색 · 건수 · CSV) → 6열 표(행 아래 펼침 상세) → 각주 한 줄 → 목록 밖 딥링크 폴백. 페이지가
@@ -23,8 +23,9 @@ import type { StorageTab } from "./usageTabs";
 const METRIC_SORTS: UsageSort[] = ["bytes", "files", "hot"];
 const SEP = "\u00a0· ";
 
-// 메타 한 줄: 마운트 · 타입 · 대상 수 · 최근 스캔. 항목마다 작은 아이콘 + 글자, 구분 기호 없이 간격만 -- 좁은 폭에서 줄이 바뀔
-// 때 「· 최근 스캔」처럼 구분 기호로 시작하는 줄이 생기지 않는다.
+// 메타 한 줄: 이름 · 마운트 · 타입 · 대상 수 · 최근 스캔. 항목마다 작은 아이콘 + 글자, 구분 기호 없이 간격만 -- 좁은 폭에서
+// 줄이 바뀔 때 「· 최근 스캔」처럼 구분 기호로 시작하는 줄이 생기지 않는다. 이름을 맨 앞에 다시 쓰는 이유: 탭은 긴 이름을
+// 말줄임하고(title 은 터치에서 못 본다) 앞부분이 같은 이름끼리는 탭만으로 구별이 안 된다(리뷰).
 function MetaLine({ tab, now }: { tab: StorageTab; now: number }) {
   const mount = tab.summary?.mount_path ?? tab.info?.mount_path ?? null;
   const type = tab.summary?.backend_type ?? tab.info?.backend_type ?? null;
@@ -37,13 +38,14 @@ function MetaLine({ tab, now }: { tab: StorageTab; now: number }) {
   );
   const ico = "h-3.5 w-3.5";
   const parts = [
+    <span key="n" className={`font-medium text-ink [overflow-wrap:anywhere] ${tab.name === "" ? "italic" : ""}`}>
+      {storageLabel(tab.name)}</span>,
     mount !== null && item("m", <HardDrive className={ico} />, mount, "마운트 경로"),
     type !== null && item("t", <Layers className={ico} />, type, "스토리지 타입"),
     // 대상 수는 요약이 왔을 때만(모름 ≠ 0). 최근 스캔은 기록이 있을 때만.
     tab.targetCount !== null && item("c", <FolderTree className={ico} />, `대상 ${tab.targetCount.toLocaleString("ko-KR")}개`),
     last !== null && item("l", <Clock className={ico} />, `최근 스캔 ${agoText(last, now)}`, kstStampOrDash(last)),
   ].filter(Boolean);
-  if (parts.length === 0) return null;
   return <p className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm text-ink/70">{parts}</p>;
 }
 
@@ -115,7 +117,14 @@ export function StoragePanel({
   const listed = activeTarget !== null && rows.some((r) => r.target === activeTarget);
   const fallback = activeTarget !== null && targets.data !== undefined && !targets.isPlaceholderData && !listed;
   const metricSort = METRIC_SORTS.includes(sort);
-  const windowed = windowLimit !== null && total !== null && total > windowLimit;
+  // 창 안 정렬 각주: 서버는 경로 검색을 건 **뒤의** 대상에서 창을 만든다. 검색이 없으면 스토리지 대상 수로 확정할 수 있고,
+  // 검색 중엔 결과가 목록 상한(100)보다 적으면 창에 닿지 않은 게 확실하다 -- 그 밖(검색 결과가 많음)은 조건부로 말한다(리뷰:
+  // 검색으로 좁힌 결과에도 「최근 스캔된 N개 안에서」라고 단정했다).
+  const overWindow = windowLimit !== null && total !== null && total > windowLimit;
+  const windowNote = !overWindow ? null
+    : pathQ === "" ? `최근 스캔된 ${windowLimit!.toLocaleString("ko-KR")}개 안에서 정렬`
+    : full ? `검색 결과가 ${windowLimit!.toLocaleString("ko-KR")}개를 넘으면 최근 스캔된 ${windowLimit!.toLocaleString("ko-KR")}개 안에서 정렬`
+    : null;
   const failedOnly = tab.unregistered !== null && tab.unregistered.target_count === 0;
   const noRecords = targets.data !== undefined && !targets.isPlaceholderData && rows.length === 0
     && pathQ === "" && input === "";
@@ -123,7 +132,7 @@ export function StoragePanel({
   return (
     <div className="space-y-4">
       {tab.registered ? <MetaLine tab={tab} now={now} /> : (
-        <UnregisteredBanner row={tab.unregistered} summary={tab.summary} purge={purge} progress={progress}
+        <UnregisteredBanner name={tab.name} row={tab.unregistered} summary={tab.summary} purge={purge} progress={progress}
                             setProgress={setProgress} onResultFocus={onResultFocus} now={now} />
       )}
 
@@ -163,7 +172,7 @@ export function StoragePanel({
         <p className="text-sm text-bad">{(targets.error as ApiError).message}</p>
       ) : rows.length === 0 ? (
         pathQ !== "" ? (
-          <Empty icon={<SearchX className="h-5 w-5" />} title={`‘${pathQ}’ 와 일치하는 경로가 없습니다`}
+          <Empty icon={<SearchX className="h-5 w-5" />} title={`‘${pathQ}’ 검색 결과가 없습니다`}
                  action={<Button type="button" variant="ghost" className="mt-1 py-1.5"
                                  onClick={() => setInput("")}>검색 지우기</Button>} />
         ) : failedOnly ? (
@@ -190,9 +199,7 @@ export function StoragePanel({
           최근 성공 scan 기준{SEP}최근 스캔 <span className="font-medium text-attn">30일↑</span>
           {SEP}<span className="font-medium text-bad">90일↑</span>
           {metricSort && <>{SEP}<span>값 모름(—)은 맨 뒤</span></>}
-          {metricSort && windowed && (
-            <>{SEP}<span>{`최근 스캔된 ${windowLimit!.toLocaleString("ko-KR")}개 안에서 정렬`}</span></>
-          )}
+          {metricSort && windowNote !== null && <>{SEP}<span>{windowNote}</span></>}
         </p>
       )}
 

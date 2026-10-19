@@ -127,6 +127,6 @@ export function buildUsageCsv(rows: UsageExportRow[], storages: Storage[] | unde
 // 지킨다는 보장이 없다 -- [A-Za-z0-9._-] 밖의 글자는 _ 로, 길이는 64자까지.
 export function usageCsvFilename(nowMs: number, storage: string): string {
   const s = kstStampEpoch(Math.floor(nowMs / 1000));          // "YYYY-MM-DD HH:MM:SS KST"
-  const name = storage.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+  const name = storage.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "_";
   return `dms-usage-${name}-${s.slice(0, 10).replace(/-/g, "")}-${s.slice(11, 16).replace(":", "")}.csv`;
 }

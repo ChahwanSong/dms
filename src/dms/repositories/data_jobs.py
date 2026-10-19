@@ -198,7 +198,8 @@ class DataJobsRepository:
         """사용량 분석 타깃 필터(목록·내보내기·최근 잡 조회가 같은 한 벌). q = 경로·스토리지 어느 쪽이든 부분 문자열
         (구 단일 검색), storage = 스토리지 **정확히 일치**, path = 경로 부분 문자열 -- storage 와 path 는 함께 걸린다
         (2026-10-02 사용자 요청: "두 개 다 필터"). LIKE 와일드카드는 리터럴로 이스케이프한다(검색어 '100%' 가 전부
-        매치로 새면 검색이 거짓말이 된다)."""
+        매치로 새면 검색이 거짓말이 된다). storage 는 None 일 때만 「필터 없음」이다 -- 빈 문자열도 이름이다(2026-10-20
+        리뷰: 사용량 탭 요약이 변조·구형 행의 빈 이름을 탭으로 내는데 truthy 검사가 그 탭을 전 스토리지로 접었다)."""
         params["s"] = DataJobState.SUCCEEDED.value
         where = "operation = 'scan' AND state = :s AND target IS NOT NULL"
 
@@ -207,7 +208,7 @@ class DataJobsRepository:
         if q:
             where += r" AND (target LIKE :q ESCAPE '\' OR storage_name LIKE :q ESCAPE '\')"
             params["q"] = like(q)
-        if storage:
+        if storage is not None:
             where += " AND storage_name = :sn"
             params["sn"] = storage
         if path:
@@ -336,10 +337,9 @@ class DataJobsRepository:
         out: dict = {}
         for i in range(0, len(names), _IN_CHUNK):
             chunk = {f"t{n}": v for n, v in enumerate(names[i:i + _IN_CHUNK])}
-            params: dict = {"k": per_target, "sn": storage_name, **chunk}
-            # storage 조건은 _scan_target_where(storage=) 가 아니라 직접 건다 -- 그 필터는 빈 문자열을 「필터 없음」으로
-            # 접는다(truthy). 여기선 그 이름 하나가 계약이다(빈 이름이면 빈 이름의 잡만).
-            where = self._scan_target_where(params) + " AND storage_name = :sn"
+            params: dict = {"k": per_target, **chunk}
+            # 빈 이름이면 빈 이름의 잡만(_scan_target_where 의 storage 는 None 만 「필터 없음」).
+            where = self._scan_target_where(params, storage=storage_name)
             rows = self._db.query(
                 f"""SELECT * FROM (
                         SELECT {_ROW_COLUMNS_SANS_DIAG},
