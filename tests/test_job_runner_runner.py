@@ -420,6 +420,8 @@ def test_main_passes_the_real_monotonic_clock(monkeypatch):
         runner.main()
     assert e.value.code == 0
     assert seen["clock"] is time.monotonic and seen["sleep"] is time.sleep
+    # 디코드·쓰기는 테스트되는 모듈 함수다 -- main 이 다시 strict 헬퍼를 품으면 아래 비 UTF-8 테스트가 못 잡는다
+    assert seen["run"] is runner._subprocess_run and seen["write_text"] is runner._write_text
 
 
 def test_real_clock_counts_time_spent_inside_probes():
@@ -665,3 +667,87 @@ def test_nsync_hostfile_keeps_source_then_destination_order_as_ips():
     rc = _run(rec, _nsync_env(), wait_hostfile=wait_hostfile)
     assert rc == 0
     assert _hostfile(rec) == "10.0.1.9 slots=2\n10.0.1.3 slots=2\n10.0.1.7 slots=2\n"
+
+
+# ---- 비 UTF-8 파일 이름(2026-10-20 프로덕션: 스캔이 다 끝났는데 러너의 strict 디코드가 죽어 Failed) ----
+# 가짜 run 은 str 을 돌려주므로 디코드 경로를 한 번도 안 지난다 -- 여기는 **실제 자식 프로세스**가 원시 바이트를 찍는다.
+
+import sys  # noqa: E402
+
+# 실 사고 이름: CP949 「다운로드」(b4 d9 bf ee b7 ce b5 e5) -- replace 하면 포탈 화면과 같은 "�ٿ�ε�".
+CP949_NAME = b"\xb4\xd9\xbf\xee\xb7\xce\xb5\xe5"
+BROKEN_PATH = b"/mirr24/gpu1/sy924.lee/tc_summary/" + CP949_NAME + b"/BCompare-3.3.5.15075.exe"
+PRINT_STDOUT = (b"\ndscan report\ndirectory: /mirr24/gpu1/sy924.lee\n\nbroken paths\n  count: 1\n"
+                b"  - " + BROKEN_PATH + b" [abnormal_time]\n\n")
+
+
+def _report_bytes():
+    hist = [{"bucket": "[0d,1d]", "min_age_days": 0, "max_age_days": 1, "bytes": 123}]
+    head = json.dumps({
+        "directory": "/mirr24/gpu1/sy924.lee", "generated_at_epoch": 1,
+        "summary": {"total_entries": 510971, "total_files": 1, "total_directories": 0,
+                    "total_symlinks": 0, "total_other": 0, "scan_errors": 0},
+        "time_histograms": {"atime": hist, "mtime": hist, "ctime": hist},
+        "broken_paths_total": 1, "broken_paths_limit": 100,
+    })[:-1]
+    # dscan 의 JSON 쓰기는 0x80 이상 바이트를 그대로 쓴다 -- 원시 바이트 리포트.
+    return (head.encode() + b', "broken_paths": [{"path": "' + BROKEN_PATH
+            + b'", "reasons": ["abnormal_time"]}]}')
+
+
+def _py(code):
+    return [sys.executable, "-c", code]
+
+
+def test_subprocess_run_survives_non_utf8_output():
+    from dms_job_runner import runner
+    proc = runner._subprocess_run(_py(
+        "import sys; sys.stdout.buffer.write(%r); sys.stderr.buffer.write(b'E\\xe5\\n')" % PRINT_STDOUT))
+    assert proc.returncode == 0
+    assert "�" in proc.stdout and "abnormal_time" in proc.stdout
+    # surrogateescape 로 바꾸면 이 둘이 깨진다: 로그 파일·psycopg·JSON 응답이 서로게이트를 못 쓴다.
+    proc.stdout.encode("utf-8")
+    proc.stderr.encode("utf-8")
+
+
+def test_subprocess_run_keeps_line_structure_for_parsers():
+    # 깨진 바이트가 줄바꿈을 삼키면 walk 줄 개수 방어(parsers._DRM_WALKS)가 흔들린다 -- replace 는 ASCII 를 삼키지 않고
+    # text 모드의 \r\n 정규화도 그대로다.
+    from dms_job_runner import runner
+    from dms_job_runner.parsers import parse_rm_dryrun_counts
+    out = runner._subprocess_run(_py(
+        "import sys; sys.stdout.buffer.write(b'Type=FILE File=/a/\\xe5\\n"
+        "[2026-10-20T00:00:00] Walked 7 items in 0.1 seconds (1 items/sec)\\r\\n')")).stdout
+    assert parse_rm_dryrun_counts(out) == (7, None)
+
+
+def test_run_job_scan_with_non_utf8_name_succeeds_end_to_end(tmp_path):
+    # 사고 모양 그대로: dscan --print 가 원시 바이트 경로를 찍고 rc 0 -- 잡은 성공, 개수는 리포트에서, 로그는 UTF-8.
+    from dms_job_runner import runner
+    (tmp_path / "dscan-report.json").write_bytes(_report_bytes())
+
+    def run(cmd):
+        if cmd[0] == "getent":
+            return runner._subprocess_run(_py("print('10.0.0.1   w0')"))
+        if cmd[0] in ("ssh", "sh", "chown"):
+            return runner._subprocess_run(_py("pass"))
+        return runner._subprocess_run(_py("import sys; sys.stdout.buffer.write(%r)" % PRINT_STDOUT))
+
+    def write_text(path, content, *, append=False):
+        if path == "/etc/passwd":
+            return
+        runner._write_text(path, content, append=append)
+
+    env = {"DMS_JR_TOOL": "dscan", "DMS_JR_PROCESS_COUNT": "1", "DMS_JR_UID": "10001",
+           "DMS_JR_GID": "10000", "DMS_JR_USERNAME": "alice", "DMS_JR_PROCESSES_PER_NODE": "1",
+           "DMS_JR_ARTIFACT_DIR": str(tmp_path),
+           "DMS_JR_ARGV": json.dumps(["--directory", "/mirr24/gpu1/sy924.lee",
+                                      "--output", "$DMS_SCAN_REPORT", "--print"])}
+    rc = run_job(env, run=run, write_text=write_text, read_text=lambda p: "", sleep=lambda s: None,
+                 wait_hostfile=lambda: (["w0"], "/tmp/hostfile"))
+    assert rc == 0
+    summary = (tmp_path / "summary.json").read_bytes()
+    assert summary.isascii()                                   # 제어면 read_contained_text 는 strict UTF-8
+    assert json.loads(summary) == {"returncode": 0, "files": 510971, "bytes": 123}
+    log = (tmp_path / "stdout.log").read_bytes().decode("utf-8")  # strict 로 읽힌다
+    assert "BCompare-3.3.5.15075.exe [abnormal_time]" in log and "�" in log

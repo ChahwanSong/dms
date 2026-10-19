@@ -163,7 +163,10 @@ def parse_scan_counts(report_path: str) -> "tuple[int | None, int | None]":
     try:
         # encoding 명시: 로케일 기본 인코딩(비 UTF-8 컨테이너)에서 한글 경로가
         # 든 리포트가 UnicodeDecodeError로 터지면 fail-soft가 삼켜 조용히 NULL이 된다.
-        with open(report_path, encoding="utf-8") as f:
+        # errors="replace"(2026-10-20 프로덕션): dscan 은 파일 이름 바이트를 그대로 JSON 에 쓴다(0x80 이상을
+        # 이스케이프하지 않는다) -- CP949 이름 하나가 broken_paths 에 들면 strict 디코드가 터져 files/bytes 가
+        # 조용히 null 이었다. 쓰는 값은 숫자뿐이고 replace 는 ASCII(따옴표·괄호)를 삼키지 않아 JSON 구조가 남는다.
+        with open(report_path, encoding="utf-8", errors="replace") as f:
             report = json.load(f)
     except Exception:  # noqa: BLE001 -- 계약이 "절대 예외 없음"(설계 §4)이라 문자 그대로 지킨다
         return None, None
