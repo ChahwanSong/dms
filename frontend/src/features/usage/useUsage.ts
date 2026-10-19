@@ -5,14 +5,21 @@ import type { PurgeStorageHistoryResult, ScanTargetRow, UnregisteredStorage, Usa
 import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 
 // 타깃 필터(2026-10-02): storage = 스토리지 정확히 일치, path = 경로 부분 문자열 -- 둘이 함께 걸린다.
-// order = 최근 스캔 정렬(서버가 limit 전에 정렬 -- 화면이 뒤집으면 "최근 N개 중 오래된 것"이 된다).
-export interface TargetFilter { storage: string; path: string; order: "desc" | "asc" }
+// sort·order = 정렬 열과 방향(서버가 limit 전에 정렬 -- 화면이 받은 묶음만 뒤집거나 정렬하면 "최근 N개 안의 순위"가 된다).
+// sort(2026-10-19 사용자 요청 「실사용량, 파일수, hot비율 등을 오름/내림차순 정렬」): last_scan(최근 스캔, 기본)·scans(스캔
+// 횟수)·bytes(실 사용량)·files(파일 수)·hot(hot 비율) -- 서버 routes_usage.scan_targets·usage_metrics.
+export type UsageSort = "last_scan" | "scans" | "bytes" | "files" | "hot";
+export interface TargetFilter { storage: string; path: string; order: "desc" | "asc"; sort: UsageSort }
+
+// 목록 한 번에 받는 행 수(서버 기본 100과 같다) -- 다 차면 화면이 「상위 N개만」이라고 말한다.
+export const LIST_LIMIT = 100;
 
 export function targetQuery(f: TargetFilter): string {
   const p = new URLSearchParams();
   if (f.storage) p.set("storage", f.storage);
   if (f.path) p.set("path", f.path);
   p.set("order", f.order);
+  p.set("sort", f.sort);
   return p.toString();
 }
 
@@ -20,8 +27,8 @@ export function targetQuery(f: TargetFilter): string {
 // scan 이 끝나야 목록이 변하는 저빈도 데이터라 staleTime 30s 로 왕복을 줄인다.
 export const useScanTargets = (f: TargetFilter) =>
   useQuery({
-    queryKey: ["usage-targets", f.storage, f.path, f.order],
-    queryFn: () => apiGet<ScanTargetRow[]>(`/api/admin/usage/scan-targets?${targetQuery(f)}`),
+    queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort],
+    queryFn: () => apiGet<ScanTargetRow[]>(`/api/admin/usage/scan-targets?${targetQuery(f)}&limit=${LIST_LIMIT}`),
     staleTime: 30_000,
   });
 

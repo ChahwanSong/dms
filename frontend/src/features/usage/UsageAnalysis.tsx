@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowDown, ArrowUp, ChevronRight, Download } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronRight, Download } from "lucide-react";
 import { Card } from "../../components/ui/Card";
 import { MetricTile } from "../../components/ui/MetricTile";
 import { Table } from "../../components/ui/Table";
@@ -12,7 +12,9 @@ import type { HistogramBucket, UsagePoint } from "../../lib/types";
 import { agoText, ageDays, kstStampEpoch, kstDay, kstStampOrDash } from "../../lib/datetime";
 import { downloadCsv, toCsv } from "../../lib/csvExport";
 import { useStorages } from "../storages/useStorages";
-import { fetchUsageExport, useScanHistory, useScanStorages, useScanTargets, type TargetFilter } from "./useUsage";
+import {
+  LIST_LIMIT, fetchUsageExport, useScanHistory, useScanStorages, useScanTargets, type TargetFilter, type UsageSort,
+} from "./useUsage";
 import {
   AXIS_MEANING, HOT_AGE_MAX_DAYS, ageLabel, hotRatio, humanBytes, pointEpoch, stackLayout, tempColorOf,
 } from "./usageStats";
@@ -354,6 +356,36 @@ function TargetDetail({ storage, target, showTitle }: {
 
 const DETAIL_ID = "usage-target-detail";
 
+// 정렬 머리글(2026-10-19). 방향 이름은 열 뜻으로(크기·개수·비율·시각) -- 「오름차순」보다 무엇이 위인지 바로 읽힌다.
+// aria-sort 는 지금 정렬 중인 열에만(나머지는 생략 -- 보조기기가 「정렬 안 됨」 열을 하나하나 읽지 않게).
+const SORT_WORDS: Record<UsageSort, { desc: string; asc: string }> = {
+  bytes: { desc: "큰 순", asc: "작은 순" },
+  files: { desc: "많은 순", asc: "적은 순" },
+  hot: { desc: "높은 순", asc: "낮은 순" },
+  scans: { desc: "많은 순", asc: "적은 순" },
+  last_scan: { desc: "최신순", asc: "오래된순" },
+};
+function SortHeader({ col, label, sort, order, onSort, title, align = "right" }: {
+  col: UsageSort; label: string; sort: UsageSort; order: "desc" | "asc"; onSort: (c: UsageSort) => void;
+  title?: string; align?: "left" | "right";
+}) {
+  const active = sort === col;
+  return (
+    <th className={`whitespace-nowrap ${align === "right" ? "text-right" : "pl-6"}`} title={title}
+        aria-sort={active ? (order === "desc" ? "descending" : "ascending") : undefined}>
+      <button type="button" onClick={() => onSort(col)}
+              aria-label={active ? `${label} 정렬: ${SORT_WORDS[col][order]}` : `${label} 정렬`}
+              className={`inline-flex items-center gap-1 hover:text-ink ${active ? "font-semibold text-ink" : ""}`}>
+        {label}
+        {active
+          ? (order === "desc" ? <ArrowDown aria-hidden className="h-3.5 w-3.5" />
+                              : <ArrowUp aria-hidden className="h-3.5 w-3.5" />)
+          : <ArrowUpDown aria-hidden className="h-3.5 w-3.5 opacity-40" />}
+      </button>
+    </th>
+  );
+}
+
 export function UsageAnalysis() {
   // 선택 타깃은 URL 이 진실이다 -- 새로고침·딥링크에서 같은 화면이 나온다.
   const [params, setParams] = useSearchParams();
@@ -364,13 +396,19 @@ export function UsageAnalysis() {
   const [storageFilter, setStorageFilter] = useState("");
   const [input, setInput] = useState("");
   const [pathQ, setPathQ] = useState("");
-  // 최근 스캔 정렬(2026-10-02): 기본 내림차순(최근 것 위). 서버가 limit 전에 정렬한다(useUsage 주석).
+  // 정렬(2026-10-02 최근 스캔 → 2026-10-19 열 정렬): 기본 최근 스캔 내림차순(최근 것 위). 서버가 limit 전에 정렬한다
+  // (useUsage 주석). 같은 열을 다시 누르면 방향만 바뀌고, 다른 열은 내림차순(큰·많은·최근 것 위)부터 시작한다.
+  const [sort, setSort] = useState<UsageSort>("last_scan");
   const [order, setOrder] = useState<"desc" | "asc">("desc");
+  const sortBy = (col: UsageSort) => {
+    if (col === sort) setOrder((o) => (o === "desc" ? "asc" : "desc"));
+    else { setSort(col); setOrder("desc"); }
+  };
   useEffect(() => {
     const t = setTimeout(() => setPathQ(input.trim()), 300);
     return () => clearTimeout(t);
   }, [input]);
-  const filter: TargetFilter = { storage: storageFilter, path: pathQ, order };
+  const filter: TargetFilter = { storage: storageFilter, path: pathQ, order, sort };
 
   const targets = useScanTargets(filter);
   const storagesQ = useStorages();
@@ -465,25 +503,16 @@ export function UsageAnalysis() {
           <Table>
             <thead><tr className="text-muted">
               <th className="py-2">스토리지</th><th>경로</th>
-              {/* 2026-10-02 목록 컬럼: 최신 성공 scan 기준(서버 latest). 모름은 "—"(null≠0). */}
-              <th className="whitespace-nowrap text-right">실 사용량</th>
-              <th className="whitespace-nowrap text-right">파일 수</th>
-              <th className="whitespace-nowrap text-right" title={`atime 기준 ${HOT_AGE_MAX_DAYS}일 이내 용량 비중`}>
-                {`hot 비율(${HOT_AGE_MAX_DAYS}일)`}</th>
-              <th className="whitespace-nowrap text-right">스캔 횟수</th>
+              {/* 2026-10-02 목록 컬럼: 최신 성공 scan 기준(서버 latest). 모름은 "—"(null≠0). 2026-10-19: 머리글이 정렬
+                  버튼(서버 정렬 -- 받은 100개만 정렬하지 않는다). */}
+              <SortHeader col="bytes" label="실 사용량" sort={sort} order={order} onSort={sortBy} />
+              <SortHeader col="files" label="파일 수" sort={sort} order={order} onSort={sortBy} />
+              <SortHeader col="hot" label={`hot 비율(${HOT_AGE_MAX_DAYS}일)`} sort={sort} order={order}
+                          onSort={sortBy} title={`atime 기준 ${HOT_AGE_MAX_DAYS}일 이내 용량 비중`} />
+              <SortHeader col="scans" label="스캔 횟수" sort={sort} order={order} onSort={sortBy} />
               {/* pl-6: 바로 왼쪽 「스캔 횟수」가 오른쪽 정렬이라 여백 없이 붙으면 "4"+"1시간 전"이 "41시간 전"으로
-                  읽혔다(실 Chrome 확인 d156). */}
-              <th className="whitespace-nowrap pl-6" aria-sort={order === "desc" ? "descending" : "ascending"}>
-                {/* 정렬 토글(오름·내림). 서버가 정렬하므로 limit 밖의 오래된 타깃도 오름차순에서 보인다. */}
-                <button type="button" aria-label={`최근 스캔 정렬: ${order === "desc" ? "최신순" : "오래된순"}`}
-                        onClick={() => setOrder((o) => (o === "desc" ? "asc" : "desc"))}
-                        className="inline-flex items-center gap-1 hover:text-ink">
-                  최근 스캔
-                  {order === "desc"
-                    ? <ArrowDown aria-hidden className="h-3.5 w-3.5" />
-                    : <ArrowUp aria-hidden className="h-3.5 w-3.5" />}
-                </button>
-              </th>
+                  읽혔다(실 Chrome 확인 d156). 서버가 정렬하므로 limit 밖의 오래된 타깃도 오름차순에서 보인다. */}
+              <SortHeader col="last_scan" label="최근 스캔" sort={sort} order={order} onSort={sortBy} align="left" />
             </tr></thead>
             <tbody>
               {rows.map((r) => {
@@ -567,8 +596,15 @@ export function UsageAnalysis() {
         )}
         <p className="mt-2 text-xs text-muted">
           {`실 사용량·파일 수·hot 비율 = 최근 성공 scan 기준(hot = atime ${HOT_AGE_MAX_DAYS}일 이내 용량 비중). `
-            + "최근 스캔이 30일 지나면 주황, 90일 지나면 빨강."}
+            + "최근 스캔이 30일 지나면 주황, 90일 지나면 빨강. 머리글을 누르면 정렬합니다(다시 누르면 방향이 바뀝니다)."}
+          {(sort === "bytes" || sort === "files" || sort === "hot")
+            && " 값을 모르는 항목(—)은 방향과 상관없이 맨 뒤 · 최근 스캔된 대상 최대 5,000개 안에서 정렬합니다."}
         </p>
+        {rows.length >= LIST_LIMIT && (
+          <p className="mt-1 text-xs text-muted">
+            {`정렬 기준 상위 ${LIST_LIMIT}개만 표시합니다 — 스토리지·경로 필터로 범위를 좁히거나 CSV 로 전체를 받으세요.`}
+          </p>
+        )}
       </Card>
 
       {fallback && storage !== null && target !== null && (

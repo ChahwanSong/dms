@@ -432,3 +432,68 @@ def test_scan_storages_lists_names_with_scan_history(tmp_path):
     _scan_job(client, storage="s2", target="a", art_base=art)
     _scan_job(client, storage="gone", target="b", art_base=art)
     assert client.get("/api/admin/usage/scan-storages").json() == ["gone", "s2"]
+
+
+# ---- 2026-10-19: 목록 지표 정렬(실 사용량·파일 수·hot 비율·스캔 횟수) ----
+
+def _metric_report(*, total, files, hot_bytes, cold_bytes):
+    """실 사용량(mtime 합) = total, 파일 수 = files, atime 은 hot(≤180일)/cold(>180일) 바이트로 hot 비율을 정한다."""
+    r = _report(mtime_bytes=(total,), files=files)
+    r["time_histograms"]["atime"] = [
+        {"bucket": "[0d,7d]", "min_age_days": 0, "max_age_days": 7, "bytes": hot_bytes},
+        {"bucket": "[181d,365d]", "min_age_days": 181, "max_age_days": 365, "bytes": cold_bytes}]
+    return r
+
+
+def _metric_client(tmp_path):
+    """대상 넷: 가장 큰 「old」 는 가장 오래전에 스캔됐다 -- limit 이 정렬 **전에** 걸리면(받은 묶음만 정렬) 안 보인다.
+    「broken」 은 리포트를 못 읽어(작성 안 함) 파일 수·hot 이 모름이고, 실 사용량도 DB 값이 없어 모름이다."""
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    spec = [("old", "2026-09-01", dict(total=900, files=5, hot_bytes=10, cold_bytes=90)),
+            ("mid", "2026-09-05", dict(total=300, files=50, hot_bytes=50, cold_bytes=50)),
+            ("new", "2026-09-09", dict(total=100, files=20, hot_bytes=90, cold_bytes=10))]
+    for target, day, m in spec:
+        jid, _ = _scan_job(client, target=target, art_base=art, report=_metric_report(**m))
+        _at(client, jid, f"{day}T00:00:00Z")
+    jid, _ = _scan_job(client, target="broken", art_base=art, write_report=False)
+    _at(client, jid, "2026-09-10T00:00:00Z")
+    return client
+
+
+def test_metric_sort_ranks_the_whole_window_before_the_limit(tmp_path):
+    client = _metric_client(tmp_path)
+    get = lambda **p: [r["target"] for r in client.get("/api/admin/usage/scan-targets", params=p).json()]  # noqa: E731
+    # 가장 큰 「old」 는 최근 스캔 순으로는 맨 뒤지만, 실 사용량 정렬에선 limit 안 맨 위다
+    assert get(sort="bytes", order="desc", limit=2) == ["old", "mid"]
+    assert get(sort="bytes", order="asc") == ["new", "mid", "old", "broken"]       # 모름은 방향과 상관없이 맨 뒤
+    assert get(sort="files", order="desc") == ["mid", "new", "old", "broken"]
+    assert get(sort="hot", order="desc") == ["new", "mid", "old", "broken"]
+    assert get(sort="hot", order="asc") == ["old", "mid", "new", "broken"]
+    # 응답 모양은 그대로다(latest 를 실은 행 배열)
+    [top] = client.get("/api/admin/usage/scan-targets", params={"sort": "bytes", "limit": 1}).json()
+    assert top["latest"]["total_bytes"] == 900 and top["latest"]["summary"]["total_files"] == 5
+
+
+def test_scan_count_sort_is_sql_and_invalid_sort_is_rejected(tmp_path):
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for target, n, day in (("once", 1, "2026-09-09"), ("thrice", 3, "2026-09-01"), ("twice", 2, "2026-09-05")):
+        for i in range(n):
+            jid, _ = _scan_job(client, target=target, art_base=art)
+            _at(client, jid, f"{day}T0{i}:00:00Z")
+    get = lambda **p: [r["target"] for r in client.get("/api/admin/usage/scan-targets", params=p).json()]  # noqa: E731
+    assert get(sort="scans", order="desc", limit=2) == ["thrice", "twice"]
+    assert get(sort="scans", order="asc") == ["once", "twice", "thrice"]
+    assert client.get("/api/admin/usage/scan-targets", params={"sort": "size"}).status_code == 422
+    assert client.get("/api/admin/usage/export", params={"sort": "size"}).status_code == 422
+
+
+def test_export_follows_the_same_sort(tmp_path):
+    client = _metric_client(tmp_path)
+    rows = client.get("/api/admin/usage/export", params={"sort": "bytes", "order": "desc"}).json()["rows"]
+    assert [r["target"] for r in rows] == ["old", "mid", "new", "broken"]
+    rows = client.get("/api/admin/usage/export", params={"sort": "hot", "order": "asc"}).json()["rows"]
+    assert [r["target"] for r in rows] == ["old", "mid", "new", "broken"]

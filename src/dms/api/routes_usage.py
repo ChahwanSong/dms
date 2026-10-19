@@ -28,6 +28,7 @@ from .routes_request_purge import MAX_DELETE, MAX_DELETE_BATCHES
 from .routes_requests import reject_when_maintenance
 from .routes_scan_paths import (_buckets, _is_number, _numbers, _time_histograms,
                                 _total_bytes)
+from ..usage_metrics import METRIC_SORTS, SORT_PATTERN, sort_by_metric
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -138,19 +139,9 @@ def _base(request: Request) -> str:
                                               request.app.state.settings))
 
 
-@router.get("/api/admin/usage/scan-targets")
-def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512),
-                 storage: "str | None" = Query(None, max_length=512),
-                 path: "str | None" = Query(None, max_length=512),
-                 order: str = Query("desc", pattern=_ORDER),
-                 limit: int = Query(100, ge=1, le=_TARGET_LIMIT)):
-    """성공 scan 이 있는 (storage, target) 목록 + 필터(storage 정확 일치·path 부분 문자열, 함께 걸림; q 는 구
-    단일 검색) + 최근 스캔 정렬(order). 응답 행: storage_name/target/scan_count/first_scan_at/last_scan_at +
-    latest(최신 성공 scan 1건의 포인트 -- 실 사용량·요약 수치·온도 히스토그램, 2026-10-02 목록 컬럼용). 리포트
-    요약은 캐시에서 오고, 캐시에 없는 잡만 아티팩트를 연다(보이는 행의 최신 1건뿐)."""
+def _with_latest(request: Request, rows: list) -> list:
+    """행마다 latest(최신 성공 scan 1건의 포인트)를 붙인다. 리포트 요약은 캐시에서 오고, 캐시에 없는 잡만 아티팩트를 연다."""
     repos = request.app.state.repos
-    rows = repos.data_jobs.scan_targets(q=q or None, storage=storage or None,
-                                        path=path or None, order=order, limit=limit)
     recent = repos.data_jobs.recent_scans_by_target(
         per_target=1, pairs=[(r["storage_name"], r["target"]) for r in rows])
     latest_jobs = [jobs[0] for jobs in recent.values()]
@@ -159,6 +150,32 @@ def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512)
         jobs = recent.get((r["storage_name"], r["target"])) or []
         r["latest"] = _point(jobs[0], digests.get(jobs[0]["job_id"])) if jobs else None
     return rows
+
+
+@router.get("/api/admin/usage/scan-targets")
+def scan_targets(request: Request, q: "str | None" = Query(None, max_length=512),
+                 storage: "str | None" = Query(None, max_length=512),
+                 path: "str | None" = Query(None, max_length=512),
+                 order: str = Query("desc", pattern=_ORDER),
+                 limit: int = Query(100, ge=1, le=_TARGET_LIMIT),
+                 sort: str = Query("last_scan", pattern=SORT_PATTERN)):
+    """성공 scan 이 있는 (storage, target) 목록 + 필터(storage 정확 일치·path 부분 문자열, 함께 걸림; q 는 구
+    단일 검색) + 정렬(sort·order). 응답 행: storage_name/target/scan_count/first_scan_at/last_scan_at +
+    latest(최신 성공 scan 1건의 포인트 -- 실 사용량·요약 수치·온도 히스토그램, 2026-10-02 목록 컬럼용).
+
+    정렬(2026-10-19 사용자 요청: 「실사용량, 파일수, hot비율 등을 오름/내림차순 정렬」): last_scan(기본)·scans 는 SQL 이
+    limit 전에 정렬한다. bytes·files·hot 은 리포트 요약 값이라 SQL 열이 아니다 -- 필터에 맞는 대상 창(최근 스캔 순 상한
+    _EXPORT_LIMIT, 내보내기와 같은 창)의 latest 를 만들어 화면과 같은 값으로 정렬한 뒤 limit 만큼 자른다(usage_metrics).
+    받은 묶음만 화면이 정렬하면 「최근 N개 안의 순위」라 그 밖의 큰 디렉터리가 상위에 안 나온다. 창의 latest 는 리포트
+    요약 캐시로 만든다(캐시에 없는 잡만 아티팩트를 연다 -- 첫 정렬만 느리고 그 뒤는 DB 한 번)."""
+    repos = request.app.state.repos
+    if sort in METRIC_SORTS:
+        window = repos.data_jobs.scan_targets(q=q or None, storage=storage or None, path=path or None,
+                                              order="desc", limit=_EXPORT_LIMIT)
+        return sort_by_metric(_with_latest(request, window), sort, order)[:limit]
+    rows = repos.data_jobs.scan_targets(q=q or None, storage=storage or None,
+                                        path=path or None, order=order, limit=limit, sort=sort)
+    return _with_latest(request, rows)
 
 
 def _storage_infos(repos, names) -> dict:
@@ -195,7 +212,8 @@ def _previous(job: dict, cached: "dict | None") -> dict:
 def export_usage(request: Request, q: "str | None" = Query(None, max_length=512),
                  storage: "str | None" = Query(None, max_length=512),
                  path: "str | None" = Query(None, max_length=512),
-                 order: str = Query("desc", pattern=_ORDER)):
+                 order: str = Query("desc", pattern=_ORDER),
+                 sort: str = Query("last_scan", pattern=SORT_PATTERN)):
     """사용량 분석 전체 내보내기(2026-10-02 사용자 요청: "모든 정보를 csv 로, 항목당 한 줄"). 필터·정렬은 목록과
     같고 행 상한만 넉넉하다(_EXPORT_LIMIT, 넘으면 truncated). 행마다 latest(최신 성공 scan 의 전체 요약)·previous
     (그 직전 -- 증감용 시각·용량만)를 싣는다. CSV 조립은 포탈이 한다 -- hot 비율·구간 라벨 같은 화면 규칙을 한
@@ -203,10 +221,14 @@ def export_usage(request: Request, q: "str | None" = Query(None, max_length=512)
 
     응답은 이 동기 핸들러(스레드풀) 안에서 JSON 바이트로 만들어 돌려준다 -- dict 를 그대로 돌려주면 FastAPI 가
     jsonable_encoder·직렬화를 **이벤트 루프 위에서** 돌려, 큰 내보내기 동안 /healthz 를 포함한 모든 요청이 멈춘다
-    (리뷰 실측: 1만 행에 6초)."""
+    (리뷰 실측: 1만 행에 6초).
+
+    정렬(sort·order)은 목록과 같다: bytes·files·hot 은 창(최근 스캔 순 _EXPORT_LIMIT)을 만든 뒤 행을 그 값으로 정렬한다."""
     repos = request.app.state.repos
+    metric = sort in METRIC_SORTS
     targets = repos.data_jobs.scan_targets(q=q or None, storage=storage or None, path=path or None,
-                                           order=order, limit=_EXPORT_LIMIT + 1)
+                                           order="desc" if metric else order, limit=_EXPORT_LIMIT + 1,
+                                           sort="last_scan" if metric else sort)
     truncated = len(targets) > _EXPORT_LIMIT
     targets = targets[:_EXPORT_LIMIT]
     recent = repos.data_jobs.recent_scans_by_target(
@@ -222,6 +244,8 @@ def export_usage(request: Request, q: "str | None" = Query(None, max_length=512)
                      "storage": infos.get(t["storage_name"]),
                      "latest": _point(js[0], digests.get(js[0]["job_id"])) if js else None,
                      "previous": _previous(js[1], prev_cached.get(js[1]["job_id"])) if len(js) > 1 else None})
+    if metric:
+        rows = sort_by_metric(rows, sort, order)
     body = {"generated_at": utc_now_iso(), "count": len(rows), "truncated": truncated, "rows": rows}
     return Response(content=json.dumps(body, separators=(",", ":")).encode(), media_type="application/json")
 
