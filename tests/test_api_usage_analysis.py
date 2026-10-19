@@ -561,6 +561,29 @@ def test_storage_scope_keeps_other_storages_out_of_the_window_and_the_response(t
     assert [(r["storage_name"], r["target"]) for r in rows] == [("s1", "c"), ("s1", "b")]
 
 
+@pytest.mark.parametrize("sort", ["last_scan", "bytes"])
+def test_every_summary_tab_name_scopes_the_list_and_export_to_itself(tmp_path, sort):
+    # 탭 이름(/storages)은 그대로 storage 로 되돌아온다 -- 변조·구형 행의 빈 이름도. 예전엔 storage= 를 「필터 없음」으로
+    # 접어 빈 이름 탭의 목록·CSV 가 전 스토리지였다(리뷰 2026-10-20: 한 파일 = 한 스토리지가 깨짐).
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    _scan_job(client, storage="s1", target="a", art_base=art)
+    _scan_job(client, storage="s2", target="b", art_base=art)
+    blank, _ = _scan_job(client, storage="s1", target="c", art_base=art)
+    client.app.state.repos.db.execute("UPDATE data_jobs SET storage_name = '' WHERE job_id = :j", {"j": blank})
+    names = [s["storage_name"] for s in client.get("/api/admin/usage/storages").json()["storages"]]
+    assert "" in names and {"s1", "s2"} <= set(names)
+    for name in names:
+        q = {"storage": name, "sort": sort}
+        rows = client.get("/api/admin/usage/scan-targets", params=q).json()
+        exp = client.get("/api/admin/usage/export", params=q).json()
+        assert {r["storage_name"] for r in rows} == {name}
+        assert {r["storage_name"] for r in exp["rows"]} == {name} and exp["count"] == len(exp["rows"]) == 1
+    # storage 를 아예 싣지 않는 옛 탭만 전체다.
+    assert len(client.get("/api/admin/usage/scan-targets").json()) == 3
+
+
 def _drain_export(client, **params):
     """export 라우트를 직접 불러 StreamingResponse 의 본문 조각을 starlette 와 같은 길(스레드풀 반복자)로 하나씩 받는다.
     (parts, 도중 예외)."""

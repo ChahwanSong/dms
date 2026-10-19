@@ -17,7 +17,12 @@ import { TargetDetail } from "./TargetDetail";
 // 예전엔 colSpan 셀을 따라 표 폭이 되어, 375 에서 요약 4칸 중 2칸·차트 오른쪽 절반을 보려면 표 전체를 가로로 밀어야 했다.
 // 셀을 display:none 으로 숨겨 좁히지 않는다(e2e L2 -- 셀은 table-cell 이어야 한다). 반응형 숨김은 셀 안 span 에만.
 // 고정 칸에 z-index 를 주지 않는다: 위치 지정(sticky)만으로 흐름 속 숫자 칸 위에 그려지고, z-index 를 주면 z 없는 확인 창
-// (Dialog 의 fixed 오버레이)보다 위로 올라와 창을 뚫고 보였다(실 Chrome 확인).
+// (Dialog 의 fixed 오버레이)보다 위로 올라와 창을 뚫고 보였다(실 Chrome 확인). 그래서 숫자 칸 쪽에 쌓임 맥락(opacity·transform
+// 등)을 만들지 않는다 -- 만들면 그 칸이 DOM 순서상 뒤라 고정 칸 위로 올라온다(흐린 정렬 아이콘을 opacity 로 흐렸을 때 밀린
+// 열의 ⇅ 가 경로 머리 위에 보였다, 리뷰). 흐림은 색의 알파로.
+//
+// 넓은 화면(lg+)에선 경로 칸이 **남는 폭만** 가진다(w-full + max-w-0 -- 표 칸 말줄임의 표준 기법): 긴 경로 하나가 칸 상한까지
+// 표를 넓혀 기본 정렬 열(최근 스캔)을 화면 밖으로 밀었다(리뷰, 1280 실측). 좁은 화면은 그대로 칸 상한 + 가로 스크롤.
 
 export const DETAIL_ID = "usage-target-detail";
 
@@ -58,7 +63,7 @@ function SortHeader({ col, label, sort, order, onSort, align = "right", help }: 
           {active
             ? (order === "desc" ? <ArrowDown aria-hidden className="h-3.5 w-3.5" />
                                 : <ArrowUp aria-hidden className="h-3.5 w-3.5" />)
-            : <ArrowUpDown aria-hidden className="h-3.5 w-3.5 opacity-40" />}
+            : <ArrowUpDown aria-hidden className="h-3.5 w-3.5 text-muted/50" />}
         </button>
         {help && <HelpTip label={`${label} 설명`} head={label} help={help} className="-my-1" />}
       </span>
@@ -127,14 +132,14 @@ export function TargetTable({ storage, rows, activeTarget, onToggle, sort, order
                 {/* 선택은 버튼이다 -- 행 onClick 만 두면 키보드로 못 고른다. aria-expanded/controls 로 "펼침 버튼"임을
                     보조기기에 알린다. 경로는 한 줄(whitespace-nowrap, 2026-10-12 -- 좁은 폭에서 하이픈마다 쪼개졌다, e2e
                     E10 L4)이고, 좁은 폭에선 칸 상한까지만 보이고 말줄임(전체는 title·버튼 이름·상세 이름에). */}
-                <td className={`sticky left-0 py-2 pl-2 pr-3 ${bg} ${stickyEdge}`}>
+                <td className={`sticky left-0 py-2 pl-2 pr-3 lg:w-full lg:max-w-0 ${bg} ${stickyEdge}`}>
                   <button type="button"
                           aria-expanded={active}
                           aria-controls={active ? DETAIL_ID : undefined}
                           title={r.target}
                           className={`inline-flex max-w-[11rem] items-center gap-1 whitespace-nowrap rounded text-left
                                       text-accent hover:underline focus-visible:outline-none focus-visible:ring-2
-                                      focus-visible:ring-accent sm:max-w-[22rem] lg:max-w-[36rem] ${
+                                      focus-visible:ring-accent sm:max-w-[22rem] lg:max-w-full ${
                                         active ? "font-medium" : ""}`}
                           onClick={() => onToggle(r.target)}>
                     <ChevronRight aria-hidden="true"

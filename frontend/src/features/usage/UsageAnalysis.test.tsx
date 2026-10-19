@@ -112,7 +112,7 @@ const loc = () => new URLSearchParams(screen.getByTestId("loc").textContent ?? "
 interface Setup {
   path?: string;
   storages?: Storage[];
-  summary?: UsageStorageSummary[] | "error" | "slow";
+  summary?: UsageStorageSummary[] | "error" | "slow" | "html";
   windowLimit?: number;
   unregistered?: UnregisteredStorage[];
   scanStorages?: string[];
@@ -133,6 +133,10 @@ function setup(o: Setup = {}) {
     http.get("/api/admin/usage/storages", async () => {
       if (summary === "error") return HttpResponse.json({ detail: "internal" }, { status: 500 });
       if (summary === "slow") { await delay("infinite"); return HttpResponse.json({}); }
+      // 옛 API 파드(경로 없음)는 SPA 폴백으로 index.html 을 200 으로 준다
+      if (summary === "html") {
+        return new HttpResponse("<!doctype html><html></html>", { status: 200, headers: { "content-type": "text/html" } });
+      }
       return HttpResponse.json({ window_limit: o.windowLimit ?? 10000, storages: summary });
     }),
     http.get("/api/admin/usage/unregistered-storages", () => HttpResponse.json(o.unregistered ?? [])),
@@ -190,7 +194,7 @@ test("처음부터 스토리지 탭: 기본 탭이 골라지고 목록 요청에
     expect(heads[i].textContent).toMatch(new RegExp(`^${label}`)));
   // 패널: tabpanel 이 선택 탭으로 이름 붙는다 + 메타 한 줄(마운트 · 타입 · 대상 수 · 최근 스캔)
   const panel = screen.getByRole("tabpanel", { name: /cephfs-dms/ });
-  expect(panel).toHaveTextContent("/cephfscephfs대상 2개최근 스캔 3일 전");
+  expect(panel).toHaveTextContent("cephfs-dms/cephfscephfs대상 2개최근 스캔 3일 전");
   // 기본 탭은 파생값이다 -- URL 에 쓰지 않는다
   expect(loc().get("storage")).toBeNull();
 });
@@ -251,12 +255,59 @@ test("요약 도착 전엔 대상 수를 그리지 않는다(모름 ≠ 0) -- �
 test("요약을 못 받으면 등록 목록 ∪ scan 기록 이름으로 탭만 그린다(대상 수 모름) + 한 줄 알림", async () => {
   setup({ summary: "error", storages: [st("a-empty"), st("cephfs-dms")], scanStorages: ["cephfs-dms", "old-gpfs"],
           unregistered: [unreg("old-gpfs")] });
-  expect(await screen.findByText(/스토리지별 요약을 불러오지 못했습니다/)).toBeInTheDocument();
+  // 대체 원천으로 탭이 그려지면 흐린 한 줄로 「건수 모름」만 -- 원문 오류(옛 API 의 SPA index.html 이면 파서 문장)는 안 보인다
+  expect(await screen.findByText("스토리지별 대상 수를 불러오지 못해 건수 없이 표시합니다")).toBeInTheDocument();
+  expect(screen.queryByText(/internal/)).toBeNull();
   // 기록 있는 등록 탭이 기본(scan 기록 이름으로 판정)
   await waitFor(() => expect(screen.getByRole("tab", { name: "cephfs-dms" })).toHaveAttribute("aria-selected", "true"));
   expect(screen.getByRole("tab", { name: "a-empty" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "old-gpfs 미등록 대상 1개" })).toBeInTheDocument();  // 미등록 목록은 규모를 안다
   expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+});
+
+test("옛 API(요약 경로가 SPA index.html 200)여도 대체 탭 + 흐린 한 줄 -- 파서 문장을 그대로 띄우지 않는다", async () => {
+  setup({ summary: "html", storages: [st("cephfs-dms")], scanStorages: ["cephfs-dms"] });
+  expect(await screen.findByText("스토리지별 대상 수를 불러오지 못해 건수 없이 표시합니다")).toBeInTheDocument();
+  expect(screen.queryByText(/Unexpected token|JSON/)).toBeNull();
+  expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+});
+
+test("요약 재조회로 대상 수가 바뀌어도 보던 기본 탭은 그대로(붙잡은 기본 탭)", async () => {
+  const qc = setup({ storages: [st("a"), st("b")],
+                     summary: [sum("a", { target_count: 0 }), sum("b")],
+                     targets: { b: [{ ...TARGETS[0], storage_name: "b", target: "b-row" }] } });
+  expect(await screen.findByRole("button", { name: "b-row" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: /^b/ })).toHaveAttribute("aria-selected", "true");
+  // 이제 a 에도 기록이 생겼다 -- 다시 계산하면 이름순 첫째(a)가 기본이지만 보던 b 를 바꾸지 않는다
+  server.use(http.get("/api/admin/usage/storages", () =>
+    HttpResponse.json({ window_limit: 10000, storages: [sum("a", { target_count: 3 }), sum("b")] })));
+  await qc.invalidateQueries({ queryKey: ["usage-storages"] });
+  await waitFor(() => expect(screen.getByRole("tab", { name: "a 대상 3개" })).toBeInTheDocument());
+  expect(screen.getByRole("tab", { name: /^b/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("button", { name: "b-row" })).toBeInTheDocument();
+});
+
+test("받아 둔 요약이 있으면 재조회 실패에도 패널을 그대로 두고 그 사실만 말한다", async () => {
+  const qc = setup();
+  expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+  server.use(http.get("/api/admin/usage/storages", () => HttpResponse.json({ detail: "boom" }, { status: 500 })));
+  await qc.invalidateQueries({ queryKey: ["usage-storages"] });
+  expect(await screen.findByText(/스토리지별 요약을 새로 고치지 못했습니다/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "artifacts" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "cephfs-dms 대상 2개" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("빈 이름(변조·구형 행) 탭: 「(이름 없음)」으로 보이고, 목록 요청은 storage= (빈 이름)로 나간다", async () => {
+  const seen: (string | null)[] = [];
+  setup({ storages: [st("cephfs-dms")],
+          summary: [sum("cephfs-dms"), sum("", { registered: false, source: null, backend_type: null, mount_path: null,
+                                                 target_count: 1 })],
+          targets: { "cephfs-dms": TARGETS, "": [{ ...TARGETS[0], storage_name: "", target: "blank-row" }] },
+          onTargets: (u) => seen.push(u.searchParams.get("storage")) });
+  await userEvent.click(await screen.findByRole("tab", { name: "(이름 없음) 미등록 대상 1개" }));
+  expect(await screen.findByRole("button", { name: "blank-row" })).toBeInTheDocument();
+  expect(seen).toContain("");
+  expect(loc().get("storage")).toBe("");
 });
 
 test("?storage 딥링크는 그 탭을 고르고 목록을 바로 그 스토리지로 부른다", async () => {
@@ -309,10 +360,9 @@ test("URL 의 storage 가 탭에 없으면(데이터 도착 후) 기본 탭 + �
   await waitFor(() => expect(loc().get("storage")).toBeNull());
   expect(loc().get("target")).toBeNull();
   expect(await screen.findByRole("button", { name: "artifacts" })).toBeInTheDocument();
+  // 기본 탭(URL 에 없음)을 누르면 URL 에 적힌다 -- 고른 것이니 안내도 거둔다
   await userEvent.click(screen.getByRole("tab", { name: /^cephfs-dms/ }));
-  expect(screen.getByText(/typo-name/)).toBeInTheDocument();      // 같은 탭 재클릭은 아무것도 안 한다
-  // 다른 탭을 고르면 안내는 사라진다
-  await userEvent.click(screen.getByRole("tab", { name: /^other/ }));
+  expect(loc().get("storage")).toBe("cephfs-dms");
   expect(screen.queryByText(/typo-name/)).toBeNull();
 });
 
@@ -547,7 +597,7 @@ test("경로 검색: storage 와 path 가 함께 나가고(디바운스 후), �
   await userEvent.type(screen.getByLabelText("경로 검색"), "zzz");
   await waitFor(() => expect(last!.searchParams.get("path")).toBe("zzz"));
   expect(last!.searchParams.get("storage")).toBe("cephfs-dms");
-  expect(await screen.findByText("‘zzz’ 와 일치하는 경로가 없습니다")).toBeInTheDocument();
+  expect(await screen.findByText("‘zzz’ 검색 결과가 없습니다")).toBeInTheDocument();
   // 검색 중의 빈 결과는 검색창을 남긴다(기록이 없는 스토리지의 빈 상태와 다르다)
   expect(screen.getByLabelText("경로 검색")).toHaveValue("zzz");
   await userEvent.click(screen.getByRole("button", { name: "검색 지우기" }));
@@ -659,6 +709,20 @@ test("지표 정렬 창 안내: 그 스토리지의 대상 수가 서버 window_
   expect(screen.queryByText(/개 안에서 정렬/)).toBeNull();          // 최근 스캔 정렬(SQL)엔 창이 없다
   await userEvent.click(screen.getByRole("button", { name: "hot 비율 정렬" }));
   expect(await screen.findByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
+});
+
+test("지표 정렬 창 안내 + 경로 검색: 결과가 목록 상한보다 적으면 안내 없음, 많으면 조건부로 말한다", async () => {
+  const many = Array.from({ length: 100 }, (_, i) => ({ ...(LIST[0] as object), target: `t${i}` }));
+  list([...many, { ...(LIST[0] as object), target: "solo" }],
+       { summary: [sum("cephfs-dms", { target_count: 12345 })], windowLimit: 10000, filterPath: true });
+  await userEvent.click(await screen.findByRole("button", { name: "hot 비율 정렬" }));
+  expect(await screen.findByText("최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("경로 검색"), "solo");
+  expect(await screen.findByRole("button", { name: "solo" })).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText(/개 안에서 정렬/)).toBeNull());
+  await userEvent.clear(screen.getByLabelText("경로 검색"));
+  await userEvent.type(screen.getByLabelText("경로 검색"), "t");
+  expect(await screen.findByText("검색 결과가 10,000개를 넘으면 최근 스캔된 10,000개 안에서 정렬")).toBeInTheDocument();
 });
 
 test("목록이 상한(100)을 채우면 「상위 100개 표시 · 전체 N개」(전체 = 요약의 대상 수)", async () => {

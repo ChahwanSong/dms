@@ -57,9 +57,14 @@ export function buildStorageTabs(src: TabSources): StorageTab[] {
 }
 
 // 기본 탭(URL 에 storage 가 없을 때): 기록이 있는 등록 스토리지 중 이름순 첫째 → 기록이 있는 미등록 → 첫 탭. 파생값이다 --
-// URL 에 쓰지 않으므로 effect 도 히스토리 항목도 생기지 않는다.
+// URL 에 쓰지 않으므로 effect 도 히스토리 항목도 생기지 않는다. 한 번 고른 기본 탭은 그 탭이 남아 있는 동안 페이지가 붙잡는다
+// (UsageAnalysis -- 요약 재조회로 대상 수가 바뀌어도 보던 스토리지가 바뀌지 않게).
 export function defaultStorage(tabs: StorageTab[]): string | null {
   return (tabs.find((t) => t.registered && t.hasTargets === true)
     ?? tabs.find((t) => !t.registered && t.hasTargets === true)
     ?? tabs[0])?.name ?? null;
 }
+
+// 화면에 보일 이름. 빈 이름(변조·구형 행 -- 서버는 그것도 이름으로 센다)은 글자가 없어 탭이 빈 칸이 된다 -- 자리 표시로
+// 그린다. 요청·URL 에는 원래 이름(빈 문자열)이 실린다.
+export const storageLabel = (name: string) => (name === "" ? "(이름 없음)" : name);

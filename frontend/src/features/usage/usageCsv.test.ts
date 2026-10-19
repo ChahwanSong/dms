@@ -124,5 +124,6 @@ test("usageCsvFilename: 스토리지 이름 + KST 날짜·시각 -- 파일 이�
   // 미등록 옛 이름은 등록 규칙([a-z0-9-])을 지킨다는 보장이 없다
   expect(usageCsvFilename(at, "Old GPFS/../x.v2")).toBe("dms-usage-Old_GPFS_.._x.v2-20261002-1204.csv");
   expect(usageCsvFilename(at, "한글")).toBe("dms-usage-__-20261002-1204.csv");
+  expect(usageCsvFilename(at, "")).toBe("dms-usage-_-20261002-1204.csv");          // 빈 이름(변조·구형 행) 탭
   expect(usageCsvFilename(at, "a".repeat(100))).toBe(`dms-usage-${"a".repeat(64)}-20261002-1204.csv`);
 });

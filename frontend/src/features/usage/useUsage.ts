@@ -10,7 +10,8 @@ import { DELETE_REQUESTS_INVALIDATES } from "../jobs/useJobs";
 // 횟수)·bytes(실 사용량)·files(파일 수)·hot(hot 비율) -- 서버 routes_usage.scan_targets·usage_metrics.
 // storage 는 2026-10-20 부터 **늘 실린다**(화면이 처음부터 스토리지 탭 -- 사용자 요청 「필터 및 서버의 스캔도 각 스토리지
 // 별로」): 빠지면 서버는 옛 탭 호환으로 전 스토리지를 보고, 지표 정렬 창(최근 스캔 순 상한)도 전 스토리지에서 만든다.
-// 빈 문자열 = 아직 탭을 모름 -- 요청을 보내지 않는다(useScanTargets enabled).
+// 빈 문자열도 이름이다(변조·구형 행의 빈 이름 탭 -- 서버도 실린 storage 는 빈 값이라도 정확히 일치로 본다). 탭을 모르는
+// 동안엔 패널(StoragePanel)이 아예 그려지지 않으니 「아직 모름」 표시를 이 값에 싣지 않는다.
 export type UsageSort = "last_scan" | "scans" | "bytes" | "files" | "hot";
 export interface TargetFilter { storage: string; path: string; order: "desc" | "asc"; sort: UsageSort }
 
@@ -34,7 +35,6 @@ export const useScanTargets = (f: TargetFilter) =>
   useQuery({
     queryKey: ["usage-targets", f.storage, f.path, f.order, f.sort],
     queryFn: () => apiGet<ScanTargetRow[]>(`/api/admin/usage/scan-targets?${targetQuery(f)}&limit=${LIST_LIMIT}`),
-    enabled: f.storage !== "",
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === f.storage ? prev : undefined),
     staleTime: 30_000,
   });
