@@ -254,6 +254,14 @@ def _apply_migrations(db: Database) -> None:
         # 200건 일괄 삭제가 행 잠금을 쥔 채 전체 스캔을 수백 번 한다. 상세 화면·오케스트레이터의 list_jobs(request_id=)도
         # 같은 이득을 본다. data_jobs.request_id 는 v1 컬럼이라 CREATE 목록에 바로 둔다(_ensure_columns 뒤일 필요 없음).
         "CREATE INDEX IF NOT EXISTS idx_data_jobs_request ON data_jobs (request_id)",
+        # 사용량 분석의 스토리지별 조회(2026-10-20 -- 스토리지 탭 목록·지표 정렬 창 1만·내보내기 묶음의 storage_name =
+        # :sn AND target IN (…)·한 타깃 이력·탭 요약 GROUP BY). 없으면 전부 성공 잡 전체를 훑는다(PG 실측 6.5만 잡: IN 500
+        # 묶음 95ms→4ms, 이력 9ms→0.1ms, 요약 64ms→9ms). 부분 인덱스(WHERE operation='scan' AND state='Succeeded')를
+        # 쓰지 않는 이유: 질의가 state 를 바인딩(:s)으로 넘겨 psycopg 자동 prepare 뒤의 generic plan 에서 그 술어를 증명하지
+        # 못하고 Seq Scan 으로 떨어진다(실측; sqlite 는 바인딩 값을 보고 써서 테스트로 못 잡는다). 모두 v1 컬럼이라 CREATE
+        # 목록에 바로 둔다(_ensure_columns 뒤일 필요 없음).
+        "CREATE INDEX IF NOT EXISTS idx_data_jobs_scan_target"
+        " ON data_jobs (storage_name, state, operation, target, updated_at)",
         """CREATE TABLE IF NOT EXISTS storages (
             storage_name TEXT PRIMARY KEY,
             mount_path TEXT NOT NULL,

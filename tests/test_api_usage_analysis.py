@@ -5,6 +5,7 @@ execution/dscan-report.json 직접 기록)."""
 import os
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from dms.config import Settings
@@ -362,7 +363,7 @@ def test_export_rows_carry_latest_and_previous_for_every_target(tmp_path):
 
 def test_export_truncation_is_told(tmp_path, monkeypatch):
     from dms.api import routes_usage
-    monkeypatch.setattr(routes_usage, "_EXPORT_LIMIT", 1)
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 1)
     art = tmp_path / "artifacts"
     client = _client(tmp_path, art)
     _login(client, "admin", "admin")
@@ -411,17 +412,23 @@ def test_deeply_nested_report_is_unreadable_not_a_500(tmp_path):
     assert h["points"] == [] and h["skipped_unreadable"] == 1
 
 
-def test_export_reads_jobs_of_selected_targets_in_chunks(tmp_path, monkeypatch):
-    # 수천 타깃 내보내기는 (storage, target) 쌍을 묶음으로 나눠 묻는다 -- 묶음 경계에서 빠지는 타깃이 없어야 한다
+@pytest.mark.parametrize("sort", ["last_scan", "bytes"])
+def test_export_reads_jobs_of_selected_targets_in_chunks(tmp_path, monkeypatch, sort):
+    # 수천 타깃 내보내기는 타깃을 묶음으로 나눠 묻고 흘린다(2026-10-20 _CHUNK) -- 묶음 경계에서 빠지거나 겹치는 타깃이
+    # 없어야 한다(지표 정렬은 값 계산도 묶음이다). 스토리지가 섞인 「전체」(storage 없는 옛 탭)도 스토리지별로 나뉘어 묻는다.
+    from dms.api import routes_usage
     from dms.repositories import data_jobs
-    monkeypatch.setattr(data_jobs, "_PAIR_CHUNK", 2)
+    monkeypatch.setattr(routes_usage, "_CHUNK", 2)
+    monkeypatch.setattr(data_jobs, "_IN_CHUNK", 2)
     art = tmp_path / "artifacts"
     client = _client(tmp_path, art)
     _login(client, "admin", "admin")
-    for t in ["a", "b", "c", "d", "e"]:
-        _scan_job(client, target=t, art_base=art)
-    rows = client.get("/api/admin/usage/export").json()["rows"]
-    assert len(rows) == 5 and all(r["latest"]["total_bytes"] == 50 for r in rows)
+    for storage, t in [("s1", "a"), ("s2", "b"), ("s1", "c"), ("s2", "d"), ("s1", "e")]:
+        _scan_job(client, storage=storage, target=t, art_base=art)
+    rows = client.get("/api/admin/usage/export", params={"sort": sort}).json()["rows"]
+    assert sorted((r["storage_name"], r["target"]) for r in rows) == [
+        ("s1", "a"), ("s1", "c"), ("s1", "e"), ("s2", "b"), ("s2", "d")]
+    assert all(r["latest"]["total_bytes"] == 50 for r in rows)
 
 
 def test_scan_storages_lists_names_with_scan_history(tmp_path):
@@ -497,3 +504,257 @@ def test_export_follows_the_same_sort(tmp_path):
     assert [r["target"] for r in rows] == ["old", "mid", "new", "broken"]
     rows = client.get("/api/admin/usage/export", params={"sort": "hot", "order": "asc"}).json()["rows"]
     assert [r["target"] for r in rows] == ["old", "mid", "new", "broken"]
+
+
+# ---- 2026-10-20: 스토리지별 분할·창 1만·묶음 스트리밍 내보내기·탭 요약 ----
+# 옛 구현과의 응답 동일성(바이트)과 두 방언의 새 SQL 은 tests/test_usage_equivalence.py 가 본다.
+
+def test_window_limit_is_ten_thousand_and_told_by_the_storages_summary(tmp_path):
+    from dms.api import routes_usage
+    assert routes_usage._WINDOW_LIMIT == 10000 and routes_usage._CHUNK == 500
+    client = _client(tmp_path, tmp_path / "artifacts")
+    _login(client, "admin", "admin")
+    assert client.get("/api/admin/usage/storages").json() == {"window_limit": 10000, "storages": []}
+
+
+def _spy(monkeypatch, obj, name, calls):
+    real = getattr(obj, name)
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(obj, name, spy)
+
+
+def test_storage_scope_keeps_other_storages_out_of_the_window_and_the_response(tmp_path, monkeypatch):
+    # 「필터 및 서버의 스캔도 각 스토리지 별로」: storage 를 주면 지표 정렬 창이 그 스토리지의 최근 N개다 -- 다른 스토리지의
+    # 최근 스캔이 창을 채워 이 스토리지의 오래된 큰 디렉터리를 밀어내지 않는다. 다른 스토리지의 잡은 캐시·잡 조회 어디에도
+    # 실리지 않는다(스캔도 스토리지별).
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 2)
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    s1_jobs = set()
+    for i, t in enumerate(["a", "b", "c"]):
+        jid, _ = _scan_job(client, storage="s1", target=t, art_base=art, report=_report(mtime_bytes=(10 + i,)))
+        _at(client, jid, f"2026-09-0{i + 1}T00:00:00Z")
+        s1_jobs.add(jid)
+    big, _ = _scan_job(client, storage="s2", target="huge", art_base=art, report=_report(mtime_bytes=(9999,)))
+    _at(client, big, "2026-08-01T00:00:00Z")
+    small, _ = _scan_job(client, storage="s2", target="tiny", art_base=art, report=_report(mtime_bytes=(1,)))
+    _at(client, small, "2026-08-02T00:00:00Z")
+    repos = client.app.state.repos
+    gets, recents, byids = [], [], []
+    _spy(monkeypatch, repos.scan_digests, "get_many", gets)
+    _spy(monkeypatch, repos.data_jobs, "recent_scans_for_targets", recents)
+    _spy(monkeypatch, repos.data_jobs, "jobs_by_ids", byids)
+    rows = client.get("/api/admin/usage/scan-targets", params={"storage": "s2", "sort": "bytes"}).json()
+    assert [(r["storage_name"], r["target"]) for r in rows] == [("s2", "huge"), ("s2", "tiny")]
+    exp = client.get("/api/admin/usage/export", params={"storage": "s2", "sort": "bytes"}).json()
+    assert [r["target"] for r in exp["rows"]] == ["huge", "tiny"] and exp["count"] == 2
+    assert {args[0] for args, _ in recents} == {"s2"}
+    touched = {j for args, _ in gets + byids for j in args[0]}
+    assert touched and not (touched & s1_jobs)
+    # 대조: storage 없는 옛 「전체」는 전 스토리지의 최근 2개가 창이라 큰 s2 디렉터리가 창 밖이다(그래서 탭이 storage 를 싣는다)
+    rows = client.get("/api/admin/usage/scan-targets", params={"sort": "bytes"}).json()
+    assert [(r["storage_name"], r["target"]) for r in rows] == [("s1", "c"), ("s1", "b")]
+
+
+def _drain_export(client, **params):
+    """export 라우트를 직접 불러 StreamingResponse 의 본문 조각을 starlette 와 같은 길(스레드풀 반복자)로 하나씩 받는다.
+    (parts, 도중 예외)."""
+    import asyncio
+    from types import SimpleNamespace
+    from dms.api import routes_usage
+    args = {"q": None, "storage": None, "path": None, "order": "desc", "sort": "last_scan", **params}
+    resp = routes_usage.export_usage(SimpleNamespace(app=client.app), **args)
+    assert resp.media_type == "application/json"
+
+    async def drain():
+        parts = []
+        try:
+            async for part in resp.body_iterator:
+                parts.append(part)
+        except Exception as exc:          # noqa: BLE001 -- 도중 실패를 그대로 돌려준다
+            return parts, exc
+        return parts, None
+    return asyncio.run(drain())
+
+
+@pytest.mark.parametrize("sort", ["last_scan", "hot"])
+def test_export_streams_one_part_per_chunk_with_count_last(tmp_path, monkeypatch, sort):
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_CHUNK", 2)
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for t in ["a", "b", "c", "d", "e"]:
+        _scan_job(client, target=t, art_base=art)
+    parts, err = _drain_export(client, sort=sort)
+    assert err is None
+    assert len(parts) == 1 + 3 + 1                        # 머리(generated_at·truncated) + 묶음 3 + 꼬리(count)
+    assert parts[0].startswith(b'{"generated_at":') and parts[0].endswith(b'"truncated":false,"rows":[')
+    assert parts[-1] == b'],"count":5}'
+    body = json.loads(b"".join(parts))
+    assert list(body) == ["generated_at", "truncated", "rows", "count"]
+    assert body["count"] == 5 and sorted(r["target"] for r in body["rows"]) == ["a", "b", "c", "d", "e"]
+    # HTTP 로도 같은 모양(포탈 apiGet 은 키 순서를 보지 않는다)
+    r = client.get("/api/admin/usage/export", params={"sort": sort})
+    assert r.headers["content-type"] == "application/json" and r.json()["count"] == 5
+
+
+def test_export_truncated_is_decided_before_the_first_byte(tmp_path, monkeypatch):
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 2)
+    monkeypatch.setattr(routes_usage, "_CHUNK", 1)
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for t in ["a", "b", "c"]:
+        _scan_job(client, target=t, art_base=art)
+    parts, err = _drain_export(client, sort="bytes")
+    assert err is None and b'"truncated":true' in parts[0] and parts[-1] == b'],"count":2}'
+
+
+def test_export_failure_mid_stream_is_broken_json_not_a_short_file(tmp_path, monkeypatch):
+    # 흘리는 도중 실패(DB 끊김 등)는 삼키지 않는다 -- 닫히지 않은 JSON 이라 포탈 파서가 실패로 보인다. 잘 닫힌 짧은 본문이면
+    # 「전부」인 척하는 잘린 CSV 가 조용히 내려간다.
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_CHUNK", 2)
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for t in ["a", "b", "c", "d", "e"]:
+        _scan_job(client, target=t, art_base=art)
+    repos = client.app.state.repos
+    real = repos.data_jobs.recent_scans_for_targets
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("db gone")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(repos.data_jobs, "recent_scans_for_targets", flaky)
+    parts, err = _drain_export(client)
+    assert isinstance(err, RuntimeError) and len(parts) == 2          # 머리 + 첫 묶음까지 나갔다
+    with pytest.raises(ValueError):
+        json.loads(b"".join(parts))
+    calls.clear()
+    with pytest.raises(RuntimeError):
+        client.get("/api/admin/usage/export")
+
+
+def _bulk_jobs(db, n, *, storage="s1", reports_for=0, art=None):
+    """성공 scan 잡 n 개(요청 없이 -- 사용량 질의는 data_jobs 만 본다). 가장 최근 reports_for 개는 리포트를 쓴다."""
+    import uuid
+    from dms.db import dump_json
+    wp = dump_json({"identity": {"username": "alice", "uid": os.getuid(), "gid": os.getgid()}})
+    ids = []
+    db.execute("PRAGMA synchronous = OFF")
+    with db.transaction():
+        for i in range(n):
+            jid = uuid.uuid4().hex
+            at = f"2026-09-01T{i // 3600:02d}:{i // 60 % 60:02d}:{i % 60:02d}Z"
+            db.execute("""INSERT INTO data_jobs (job_id, request_id, operation, tool, storage_name, target, options,
+                                                 priority, state, worker_pool, bytes_count, created_at, updated_at)
+                          VALUES (:j, :r, 'scan', 'dscan', :sn, :t, '{}', 'mid', 'Succeeded', :wp, :b, :at, :at)""",
+                       {"j": jid, "r": uuid.uuid4().hex, "sn": storage, "t": f"t{i:05d}", "wp": wp, "b": i, "at": at})
+            ids.append(jid)
+    for jid in ids[len(ids) - reports_for:]:
+        d = art / jid / "execution"
+        d.mkdir(parents=True)
+        (d / "dscan-report.json").write_text(json.dumps(_report()))
+    return ids
+
+
+def test_real_chunk_bounds_every_id_list_of_the_window_and_the_stream(tmp_path, monkeypatch):
+    # 실제 상수(500)로: 1,100 타깃 창에서 캐시 조회(get_many)·잡 조회(target IN·job_id IN)·캐시 쓰기(put_many)가 한 번에
+    # 500 개를 넘게 받지 않는다 -- 호출 단위와 문장 단위(자리표시자 수) 둘 다. 캐시가 빈 리포트 520 개는 묶음마다 나뉘어 들어간다.
+    import re
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    repos = client.app.state.repos
+    _bulk_jobs(repos.db, 1100, reports_for=520, art=art)
+    calls = {"get_many": [], "recent_scans_for_targets": [], "jobs_by_ids": [], "put_many": []}
+    _spy(monkeypatch, repos.scan_digests, "get_many", calls["get_many"])
+    _spy(monkeypatch, repos.scan_digests, "put_many", calls["put_many"])
+    _spy(monkeypatch, repos.data_jobs, "recent_scans_for_targets", calls["recent_scans_for_targets"])
+    _spy(monkeypatch, repos.data_jobs, "jobs_by_ids", calls["jobs_by_ids"])
+    widest = []
+    real_query, real_execute = repos.db.query, repos.db.execute
+
+    def width(sql):
+        return max([len(set(re.findall(rf":{p}\d+", sql))) for p in ("j", "t", "d")])
+
+    def query(sql, params=None):
+        widest.append(width(sql))
+        return real_query(sql, params)
+
+    def execute(sql, params=None):
+        widest.append(width(sql))
+        return real_execute(sql, params)
+    monkeypatch.setattr(repos.db, "query", query)
+    monkeypatch.setattr(repos.db, "execute", execute)
+
+    body = client.get("/api/admin/usage/export", params={"sort": "bytes", "storage": "s1"}).json()
+    assert body["count"] == 1100 and body["truncated"] is False
+    assert len({r["target"] for r in body["rows"]}) == 1100
+    assert real_query("SELECT COUNT(*) AS n FROM scan_report_digests")[0]["n"] == 520
+    rows = client.get("/api/admin/usage/scan-targets", params={"sort": "hot", "limit": 200}).json()
+    assert len(rows) == 200
+    assert client.get("/api/admin/usage/export", params={"storage": "s1"}).json()["count"] == 1100
+
+    sizes = {name: [len(list(c[0][1] if name in ("recent_scans_for_targets",) else c[0][0])) for c in cs]
+             for name, cs in calls.items()}
+    assert sizes["get_many"] and max(sizes["get_many"]) == 500
+    assert max(sizes["recent_scans_for_targets"]) == 500
+    assert max(sizes["jobs_by_ids"]) == 500 and max(sizes["put_many"]) == 500
+    assert sum(sizes["put_many"]) == 520                    # 캐시가 빈 리포트는 한 번만 읽혀 들어간다
+    assert max(widest) == 500
+
+
+def test_storages_summary_lists_registered_then_unregistered_with_counts(tmp_path):
+    # 탭 = 등록 ∪ 성공 scan 기록이 있는 이름. 등록인데 기록이 없으면 0·null(0 은 정상값 -- 탭이 「0」으로 선다). 미등록은
+    # 감사 기록의 마지막 설정(없으면 모름). 실패 scan 만 남은 이름은 사용량 기준(성공 scan) 밖이다.
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    repos = client.app.state.repos
+    for name, backend in (("zeta", "gpfs"), ("alpha", "cephfs"), ("gone", "wekafs")):
+        repos.storages.create(storage_name=name, mount_path=f"/{name}", managed_root=f"/{name}/m",
+                              backend_type=backend, actor="t")
+    repos.storages.delete("gone", actor="t")
+    j1, _ = _scan_job(client, storage="alpha", target="a", art_base=art)
+    j2, _ = _scan_job(client, storage="alpha", target="a", art_base=art)
+    j3, _ = _scan_job(client, storage="alpha", target="b", art_base=art)
+    _at(client, j1, "2026-09-01T00:00:00Z")
+    _at(client, j2, "2026-09-03T00:00:00Z")
+    _at(client, j3, "2026-09-02T00:00:00Z")
+    _scan_job(client, storage="gone", target="x", art_base=art)
+    _scan_job(client, storage="bygone", target="y", art_base=art)
+    failed, _ = _scan_job(client, storage="failonly", target="z", art_base=art)
+    repos.db.execute("UPDATE data_jobs SET state = 'Failed' WHERE job_id = :j", {"j": failed})
+    body = client.get("/api/admin/usage/storages").json()
+    assert body["window_limit"] == 10000
+    st = body["storages"]
+    assert [s["storage_name"] for s in st] == ["alpha", "zeta", "bygone", "gone"]
+    assert st[0] == {"storage_name": "alpha", "registered": True, "source": "registered", "backend_type": "cephfs",
+                     "mount_path": "/alpha", "target_count": 2, "succeeded_scan_count": 3,
+                     "last_scan_at": "2026-09-03T00:00:00Z"}
+    assert st[1] == {"storage_name": "zeta", "registered": True, "source": "registered", "backend_type": "gpfs",
+                     "mount_path": "/zeta", "target_count": 0, "succeeded_scan_count": 0, "last_scan_at": None}
+    assert (st[2]["registered"], st[2]["source"], st[2]["backend_type"], st[2]["mount_path"]) == (False, None, None, None)
+    assert (st[3]["registered"], st[3]["source"], st[3]["backend_type"], st[3]["mount_path"]) == (
+        False, "last_known", "wekafs", "/gone")
+    assert (st[3]["target_count"], st[3]["succeeded_scan_count"]) == (1, 1)
+    # 옛 탭 호환: scan-storages 의 모양(string[])은 그대로다
+    assert client.get("/api/admin/usage/scan-storages").json() == ["alpha", "bygone", "gone"]
+
+
+def test_storages_summary_requires_admin(tmp_path):
+    client = _client(tmp_path, tmp_path / "artifacts")
+    _login(client, "user1", "user")
+    assert client.get("/api/admin/usage/storages").status_code == 403

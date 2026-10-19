@@ -12,6 +12,8 @@
   다시 시도한다). 부재는 open 실패라 싸다.
 - 동시 채우기: 두 요청이 같은 잡을 동시에 놓쳐도 INSERT ... ON CONFLICT DO NOTHING 이라 먼저 쓴 값이 남는다(같은
   리포트의 같은 투영이라 어느 쪽이든 같은 값).
+- 묶음 쓰기(2026-10-20 put_many): 창이 1만 타깃이 되면서 캐시가 빈 스토리지의 첫 지표 정렬·내보내기가 잡마다 한 문장
+  (단일 커넥션 RLock 을 한 번씩)이면 put 만 ~39초였다(PG 실측 3.9ms/건). _CHUNK 개를 한 문장으로 넣는다(0.09ms/건).
 """
 from ..db import Database, dump_json, load_json, utc_now_iso
 
@@ -40,11 +42,26 @@ class ScanDigestsRepository:
         return out
 
     def put(self, job_id: str, digest: dict) -> None:
-        # 잡 행이 없으면 no-op(모듈 docstring). INSERT ... SELECT ... ON CONFLICT 의 sqlite 구문 모호성(ON 이 조인
-        # 절로 읽힘)은 SELECT 의 WHERE 절이 해소한다. 같은 꼴(INSERT ... SELECT :v WHERE [NOT] EXISTS)은 migrations 의
-        # schema_migrations 시드가 PG 에서 이미 쓴다.
-        self._db.execute(
-            """INSERT INTO scan_report_digests (job_id, digest, created_at)
-               SELECT :j, :d, :now WHERE EXISTS (SELECT 1 FROM data_jobs WHERE job_id = :j)
-               ON CONFLICT (job_id) DO NOTHING""",
-            {"j": job_id, "d": dump_json(digest), "now": utc_now_iso()})
+        self.put_many({job_id: digest})
+
+    def put_many(self, digests: dict) -> None:
+        """job_id -> digest 를 _CHUNK 개씩 한 문장으로 넣는다. 규칙은 한 건과 같다: 잡 행이 있을 때만(모듈 docstring --
+        요청 삭제 경합의 재삽입 방지), 이미 있으면 먼저 쓴 값이 남는다(ON CONFLICT DO NOTHING).
+
+        INSERT ... SELECT ... ON CONFLICT 의 sqlite 구문 모호성(FROM 뒤의 ON 이 조인 절로 읽힘)은 SELECT 의 WHERE 절이
+        해소한다. VALUES 의 열 이름 column1·column2 는 sqlite·PostgreSQL 공통이다(두 방언 실측, 2026-10-20). 같은 꼴
+        (INSERT ... SELECT ... WHERE [NOT] EXISTS)은 migrations 의 schema_migrations 시드가 PG 에서 이미 쓴다."""
+        items = list(digests.items())
+        now = utc_now_iso()
+        for i in range(0, len(items), _CHUNK):
+            params: dict = {"now": now}
+            values = []
+            for n, (job_id, digest) in enumerate(items[i:i + _CHUNK]):
+                params[f"j{n}"], params[f"d{n}"] = job_id, dump_json(digest)
+                values.append(f"(:j{n}, :d{n})")
+            self._db.execute(
+                f"""INSERT INTO scan_report_digests (job_id, digest, created_at)
+                    SELECT v.column1, v.column2, :now FROM (VALUES {", ".join(values)}) AS v
+                    WHERE EXISTS (SELECT 1 FROM data_jobs j WHERE j.job_id = v.column1)
+                    ON CONFLICT (job_id) DO NOTHING""",
+                params)

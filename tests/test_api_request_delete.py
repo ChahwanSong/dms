@@ -370,7 +370,8 @@ def test_list_flags_requests_that_hold_a_usage_point(client, db, session_admin):
         ok: True, raced: True, failed: False, rm: False, no_target: False}
     assert rows[raced]["state"] == "Cancelled"
     # 사용량 분석 목록의 판정과 같은 한 벌이다.
-    assert {(t["storage_name"], t["target"]) for t in repos.data_jobs.scan_targets()} == {("s1", "a"), ("s1", "b")}
+    assert {(t["storage_name"], t["target"]) for t in repos.data_jobs.scan_target_heads(limit=None)} == {
+        ("s1", "a"), ("s1", "b")}
 
 
 # ---- 배치 단위 삭제(본문 batches, 2026-10-10) ----

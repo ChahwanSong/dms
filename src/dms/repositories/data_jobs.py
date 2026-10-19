@@ -31,8 +31,9 @@ _ROW_COLUMNS_SANS_DIAG = (
     "exec_submitted_at, sched_wait_seconds, pods_gc_at, created_at, updated_at")
 
 
-# recent_scans_by_target 의 (storage, target) 쌍 묶음 크기 -- 한 문장의 자리표시자 600 개.
-_PAIR_CHUNK = 300
+# 사용량 분석의 IN 목록 한 문장 상한(recent_scans_for_targets·jobs_by_ids) -- scan_digests._CHUNK 와 같은 값. 라우트도
+# 이 크기 묶음으로 부르지만, 저장소가 다시 자른다(호출자가 묶음을 잊어도 한 문장에 수천 자리표시자가 실리지 않게).
+_IN_CHUNK = 500
 
 
 def _guard_component(actor: str) -> str:
@@ -214,18 +215,27 @@ class DataJobsRepository:
             params["p"] = like(path)
         return where
 
-    def scan_targets(self, *, q: "str | None" = None, storage: "str | None" = None,
-                     path: "str | None" = None, order: str = "desc",
-                     limit: "int | None" = 100, sort: str = "last_scan") -> list[dict]:
+    def scan_target_heads(self, *, q: "str | None" = None, storage: "str | None" = None,
+                          path: "str | None" = None, order: str = "desc",
+                          limit: "int | None" = 100, sort: str = "last_scan") -> list[dict]:
         """성공 scan 이 있는 (storage, target) 목록 — **전 요청자 통합**(사용량
         분석, 2026-08-23 사용자 요청: "요청자에 관계없이 모든 작업"). 필터는
         _scan_target_where. 정렬은 최근 스캔 기준 — 기본 내림차순(화면의 기본 질문이
         "요즘 뭘 스캔했나"), order="asc" 면 오래된 것부터(2026-10-02: 오래 안 본
         타깃 찾기). 정렬은 반드시 SQL 에서 한다 -- limit 뒤에 화면이 뒤집으면 "최근 N개
-        중 가장 오래된 것"이 되어 진짜 오래된 타깃이 안 보인다. limit=None 은 전부
-        (CSV 내보내기). first_scan_at = 최초 성공 스캔 완료 시각. sort="scans" 면 스캔 횟수 기준(2026-10-19 목록 열
+        중 가장 오래된 것"이 되어 진짜 오래된 타깃이 안 보인다. limit=None 은 전부.
+        first_scan_at = 최초 성공 스캔 완료 시각. sort="scans" 면 스캔 횟수 기준(2026-10-19 목록 열
         정렬 -- 동률은 최근 스캔 늦은 것부터). 실 사용량·파일 수·hot 비율 정렬은 SQL 열이 아니라 리포트 요약 값이라
-        라우트가 한다(usage_metrics)."""
+        라우트가 한다(usage_metrics).
+
+        행 = 타깃의 **머리**(2026-10-20 스토리지별 분할·창 1만): storage_name·target·scan_count·first_scan_at·
+        last_scan_at(옛 GROUP BY 와 같은 값 -- COUNT/MIN OVER, 최신 행의 updated_at = MAX) + 그 최신 성공 scan 의
+        job_id·request_id·bytes_count. 최신 판정은 succeeded_scans_for_target 과 같은 근거(updated_at DESC, job_id
+        DESC). 왜 한 문장인가: 지표 정렬은 창(최대 1만 타깃)마다 최신 잡의 리포트 요약을 봐야 하는데, 옛 구조는 창의 쌍
+        전부를 OR 300쌍 묶음으로 다시 물어(1만이면 34문장, 문장마다 성공 잡 전체를 훑음) 전체 잡 행을 메모리에 세웠다
+        -- 머리에 job_id 가 있으면 라우트가 캐시를 job_id 로 바로 묻고 전체 행은 반환할 쪽만 읽는다. 필터가 target·
+        storage_name 에만 걸리므로 파티션(같은 storage·target 의 잡 전부)은 필터에 잘리지 않는다 -- 최신 판정이 필터와
+        무관하다."""
         params: dict = {}
         where = self._scan_target_where(params, q=q, storage=storage, path=path)
         direction = "ASC" if order == "asc" else "DESC"
@@ -236,11 +246,16 @@ class DataJobsRepository:
             tail = " LIMIT :n"
             params["n"] = limit
         return self._db.query(
-            f"""SELECT storage_name, target, COUNT(*) AS scan_count,
-                       MIN(updated_at) AS first_scan_at,
-                       MAX(updated_at) AS last_scan_at
-                FROM data_jobs WHERE {where}
-                GROUP BY storage_name, target
+            f"""SELECT storage_name, target, scan_count, first_scan_at, last_scan_at,
+                       job_id, request_id, bytes_count
+                FROM (SELECT storage_name, target, job_id, request_id, bytes_count,
+                             updated_at AS last_scan_at,
+                             ROW_NUMBER() OVER (PARTITION BY storage_name, target
+                                                ORDER BY updated_at DESC, job_id DESC) AS rn,
+                             COUNT(*) OVER (PARTITION BY storage_name, target) AS scan_count,
+                             MIN(updated_at) OVER (PARTITION BY storage_name, target) AS first_scan_at
+                      FROM data_jobs WHERE {where}) heads
+                WHERE rn = 1
                 ORDER BY {order_by}, storage_name, target{tail}""",
             params)
 
@@ -289,44 +304,70 @@ class DataJobsRepository:
                 GROUP BY storage_name ORDER BY storage_name""",
             params)
 
-    def recent_scans_by_target(self, *, per_target: int = 1, q: "str | None" = None,
-                               storage: "str | None" = None, path: "str | None" = None,
-                               pairs: "list[tuple[str, str]] | None" = None) -> dict:
-        """(storage_name, target) -> 그 타깃의 최근 성공 scan 잡 행 목록(최신순, 최대 per_target 개). 사용량 분석
-        목록(최신 1건의 용량·파일 수·hot 비율)과 내보내기(최신 + 직전 1건의 증감)가 쓴다. 최신 판정은
-        succeeded_scans_for_target 과 같은 근거(updated_at DESC, job_id DESC). pairs 를 주면 그 타깃만(목록이
-        보이는 행만 읽게) -- 빈 목록은 빈 결과."""
-        if pairs is not None:
-            # 큰 목록(내보내기 수천 타깃)은 묶음으로 나눠 묻는다 -- 한 문장에 자리표시자 수천 개를 싣지 않고, 필터에
-            # 걸린 전 타깃이 아니라 **고른** 타깃의 잡만 읽는다(잘린 내보내기가 상한 밖 타깃까지 끌어오지 않게, 리뷰).
-            out: dict = {}
-            for i in range(0, len(pairs), _PAIR_CHUNK):
-                out.update(self._recent_scans(per_target, pairs=pairs[i:i + _PAIR_CHUNK]))
-            return out
-        return self._recent_scans(per_target, q=q, storage=storage, path=path)
-
-    def _recent_scans(self, per_target, *, q=None, storage=None, path=None, pairs=None) -> dict:
-        params: dict = {"k": per_target}
-        where = self._scan_target_where(params, q=q, storage=storage, path=path)
-        if pairs is not None:
-            ors = []
-            for i, (sn, t) in enumerate(pairs):
-                ors.append(f"(storage_name = :ps{i} AND target = :pt{i})")
-                params[f"ps{i}"], params[f"pt{i}"] = sn, t
-            where += f" AND ({' OR '.join(ors)})"
-        rows = self._db.query(
-            f"""SELECT * FROM (
-                    SELECT {_ROW_COLUMNS_SANS_DIAG},
-                           ROW_NUMBER() OVER (PARTITION BY storage_name, target
-                                              ORDER BY updated_at DESC, job_id DESC) AS rn
-                    FROM data_jobs WHERE {where}) ranked
-                WHERE rn <= :k ORDER BY storage_name, target, rn""",
+    def scan_storage_summary(self) -> list[dict]:
+        """성공 scan 기록이 있는 스토리지 이름마다 사용량 분석 규모(2026-10-20 스토리지 탭 요약): storage_name,
+        target_count(대상 경로 수), succeeded_scan_count, last_scan_at. 기준은 목록과 같다(_scan_target_where 의 기본
+        조건). unregistered_scan_storages 에서 「등록 목록에 없는」 조건만 뺀 같은 집계다 -- 등록 여부와 설정은 라우트가
+        붙인다. GROUP BY 한 번(필요한 열이 idx_data_jobs_scan_target 에 다 있어 계획기가 인덱스만 읽을 수 있다 -- 고르는 건
+        계획기 몫이다; PG 실측 6.5만 잡 64ms→9ms)."""
+        params: dict = {}
+        where = self._scan_target_where(params)
+        return self._db.query(
+            f"""SELECT storage_name, COUNT(DISTINCT target) AS target_count,
+                       COUNT(*) AS succeeded_scan_count, MAX(updated_at) AS last_scan_at
+                FROM data_jobs WHERE {where} AND storage_name IS NOT NULL
+                GROUP BY storage_name ORDER BY storage_name""",
             params)
+
+    def recent_scans_for_targets(self, storage_name: "str | None", targets, *, per_target: int = 1) -> dict:
+        """한 스토리지의 고른 타깃들 -> target -> 그 타깃의 최근 성공 scan 잡 행 목록(최신순, 최대 per_target 개).
+        사용량 분석 목록(반환 행의 latest)과 내보내기(묶음마다 최신 + 직전 1건의 증감)가 쓴다. 최신 판정은
+        succeeded_scans_for_target 과 같은 근거(updated_at DESC, job_id DESC).
+
+        왜 스토리지 하나 + `target IN (…)` 인가(2026-10-20): 옛 조회는 (storage, target) 쌍을 OR 300쌍 묶음으로 물어
+        묶음마다 성공 잡 전체를 훑었다(1만 타깃이면 34문장 -- sqlite 실측 목록 15초 중 14초). 스토리지를 고정하면
+        idx_data_jobs_scan_target(storage_name, state, operation, target, updated_at)의 접두로 바로 내려간다. 여러
+        스토리지에 걸친 묶음(storage 없는 옛 탭의 「전체」)은 호출자가 스토리지별로 나눠 부른다. storage_name None 은
+        빈 결과다 -- SQL 의 `= NULL` 은 아무것도 맞지 않는다(옛 쌍 조회와 같은 판정: storage_name 이 NULL 인 변조·구형
+        행은 latest 가 없다). 빈 targets 도 빈 결과(문장 없음). 한 문장의 자리표시자는 _IN_CHUNK 개 이하로 자른다."""
+        names = [t for t in dict.fromkeys(targets) if t is not None]
+        if storage_name is None or not names:
+            return {}
         out: dict = {}
-        for r in rows:
-            r.pop("rn", None)
-            job = self._hydrate(r)
-            out.setdefault((job["storage_name"], job["target"]), []).append(job)
+        for i in range(0, len(names), _IN_CHUNK):
+            chunk = {f"t{n}": v for n, v in enumerate(names[i:i + _IN_CHUNK])}
+            params: dict = {"k": per_target, "sn": storage_name, **chunk}
+            # storage 조건은 _scan_target_where(storage=) 가 아니라 직접 건다 -- 그 필터는 빈 문자열을 「필터 없음」으로
+            # 접는다(truthy). 여기선 그 이름 하나가 계약이다(빈 이름이면 빈 이름의 잡만).
+            where = self._scan_target_where(params) + " AND storage_name = :sn"
+            rows = self._db.query(
+                f"""SELECT * FROM (
+                        SELECT {_ROW_COLUMNS_SANS_DIAG},
+                               ROW_NUMBER() OVER (PARTITION BY target
+                                                  ORDER BY updated_at DESC, job_id DESC) AS rn
+                        FROM data_jobs
+                        WHERE {where} AND target IN ({", ".join(":" + k for k in chunk)})) ranked
+                    WHERE rn <= :k ORDER BY target, rn""",
+                params)
+            for r in rows:
+                r.pop("rn", None)
+                job = self._hydrate(r)
+                out.setdefault(job["target"], []).append(job)
+        return out
+
+    def jobs_by_ids(self, job_ids) -> dict:
+        """job_id -> 잡 행(diag_logs 제외 -- _ROW_COLUMNS_SANS_DIAG). 없는 잡은 결과에 없다. 사용량 분석 지표 정렬이 캐시에
+        없는 최신 잡만 전체 행(리포트를 열 요청자 uid -- worker_pool.identity)으로 읽는 데 쓴다. _IN_CHUNK 개씩."""
+        ids = [j for j in dict.fromkeys(job_ids) if j is not None]
+        out: dict = {}
+        for i in range(0, len(ids), _IN_CHUNK):
+            chunk = {f"j{n}": v for n, v in enumerate(ids[i:i + _IN_CHUNK])}
+            rows = self._db.query(
+                f"""SELECT {_ROW_COLUMNS_SANS_DIAG} FROM data_jobs
+                    WHERE job_id IN ({", ".join(":" + k for k in chunk)})""",
+                chunk)
+            for r in rows:
+                out[r["job_id"]] = self._hydrate(r)
         return out
 
     def succeeded_scans_for_target(self, storage_name: str, target: str,

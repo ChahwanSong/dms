@@ -619,6 +619,8 @@ def test_migrate_creates_exactly_the_expected_indexes(tmp_path):
         "idx_data_jobs_request", "idx_plans_request", "idx_batch_items_request",
         # 2026-10-16 pod-gc 미완료 잡 부분 인덱스(pods_gc_at IS NULL).
         "idx_data_jobs_gc",
+        # 2026-10-20 사용량 분석 스토리지별 조회(storage_name, state, operation, target, updated_at).
+        "idx_data_jobs_scan_target",
     }
 
 
@@ -660,6 +662,37 @@ def test_batch_filtered_list_reads_the_composite_index_without_a_sort(tmp_path):
     plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + sql, params))
     assert "idx_requests_batch_order" in plan, plan
     assert "TEMP B-TREE" not in plan, plan
+
+
+def test_usage_storage_queries_read_the_scan_target_index(tmp_path):
+    # 2026-10-20 사용량 분석 스토리지별 조회: 탭 목록(머리)·묶음 최근 잡(storage = :sn AND target IN)·한 타깃 이력이
+    # idx_data_jobs_scan_target 을 탄다 -- 빠지면 전부 성공 잡 전체를 훑는다. 열 순서도 고정한다(선두 storage_name 이라
+    # 스토리지 하나로 좁히고, target 다음 updated_at 이라 한 타깃 이력이 정렬 없이 나온다). 탭 요약(전 스토리지 GROUP BY)은
+    # 계획기 몫이라 단언하지 않는다(덮는 인덱스라 PG 가 고를 수 있을 뿐 -- 통계 없는 sqlite 는 idx_data_jobs_state 를 고른다).
+    # PG 의 generic plan 함정(부분 인덱스 + 바인딩 state)은 sqlite 계획으로 못 잡는다 -- 그래서 부분 인덱스가 아니다
+    # (migrations 주석; PG16 EXPLAIN (GENERIC_PLAN) 으로 위 세 질의가 이 인덱스를 타는 것을 2026-10-20 에 확인).
+    from dms.repositories import Repositories
+    db = Database.connect(f"sqlite:///{tmp_path}/t.db")
+    migrate(db)
+    cols = [r["name"] for r in db.query("PRAGMA index_info(idx_data_jobs_scan_target)")]
+    assert cols == ["storage_name", "state", "operation", "target", "updated_at"]
+    repos = Repositories(db)
+    captured = []
+    orig = db.query
+
+    def spy(sql, params=None):
+        captured.append((sql, params))
+        return orig(sql, params)
+
+    db.query = spy
+    repos.data_jobs.scan_target_heads(storage="s1", limit=100)
+    repos.data_jobs.recent_scans_for_targets("s1", ["a", "b"], per_target=2)
+    repos.data_jobs.succeeded_scans_for_target("s1", "a", limit=30)
+    db.query = orig
+    assert len(captured) == 3
+    for sql, params in captured:
+        plan = " | ".join(r["detail"] for r in db.query("EXPLAIN QUERY PLAN " + sql, params))
+        assert "idx_data_jobs_scan_target" in plan, (sql, plan)
 
 
 def _ensure_pairs():
