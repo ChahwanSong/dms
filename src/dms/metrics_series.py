@@ -75,6 +75,55 @@ def _disks(os_block):
     return out
 
 
+def _byte_count(v) -> bool:
+    # statvfs 곱(f_frsize·f_blocks)은 정수다 -- float·bool·음수는 오염 보고(모름)
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _ready_mountpoint(report: dict, storage_name: str) -> bool:
+    mounts = report.get("mounts")
+    return isinstance(mounts, list) and any(
+        isinstance(m, dict) and m.get("storage_name") == storage_name and m.get("status") == "Ready"
+        and m.get("is_mountpoint") is True for m in mounts)
+
+
+def storage_filesystem(storage_name: str, nodes: list) -> "dict | None":
+    """agent_nodes 최신 보고들(AgentsRepository.list_nodes) -> 그 스토리지의 파일시스템 용량(statvfs), 없으면 None.
+
+    - **그 스토리지가 Ready 마운트포인트인 노드만** 본다: 에이전트는 마운트가 없어도 mount_path 에 statvfs 를 불러
+      (probes.probe_os_metrics -- probe_mounts 결과를 보지 않는다) 그 아래 노드 루트 fs 값을 싣는다(2026-10-20 테스트베드
+      실측: cephfs-secondary 가 Missing 인 w1~w3 이 노드마다 다른 40 GB 루트 디스크를 보고).
+    - 신선한 보고 우선 → 그 안에서 최신 보고(→ 노드 이름) 하나의 값. node_count·consistent 는 고른 값과 같은 신선도의
+      후보들 기준이다 -- 공유 파일시스템이면 total 이 노드마다 같고, 노드 로컬 스토리지면 다르다(consistent False -- 화면이
+      「노드마다 다름 — <node> 기준」으로 말한다). used 는 보고 시각마다 흔들리므로 비교하지 않는다.
+    - 스토리지끼리 더하지 않는다(호출자 몫도 아니다): 여러 스토리지가 한 파일시스템일 수 있다(테스트베드 cephfs 셋이 같은
+      total/used -- 에이전트가 f_fsid 를 싣지 않아 공유 여부를 확정할 수 없다).
+    - fail-soft: 비 dict 보고·mounts·disks, 비정수·음수·bool, total 0, used > total 은 그 노드를 후보에서 뺀다(500 없음)."""
+    cands = []
+    for n in nodes if isinstance(nodes, list) else []:
+        if (not isinstance(n, dict) or not isinstance(n.get("node_name"), str)
+                or not isinstance(n.get("reported_at"), str)):
+            continue
+        report = n.get("report")
+        if not isinstance(report, dict) or not _ready_mountpoint(report, storage_name):
+            continue
+        os_block = report.get("os") if isinstance(report.get("os"), dict) else {}
+        disks = os_block.get("disks")
+        for d in disks if isinstance(disks, list) else []:
+            if (isinstance(d, dict) and d.get("storage_name") == storage_name and _byte_count(d.get("total_bytes"))
+                    and _byte_count(d.get("used_bytes")) and 0 < d["total_bytes"]
+                    and d["used_bytes"] <= d["total_bytes"]):
+                cands.append((n.get("fresh") is True, n["reported_at"], n["node_name"],
+                              d["total_bytes"], d["used_bytes"]))
+                break
+    if not cands:
+        return None
+    fresh, at, node, total, used = max(cands)
+    same = [c for c in cands if c[0] == fresh]
+    return {"total_bytes": total, "used_bytes": used, "node_name": node, "reported_at": at,
+            "fresh": fresh, "node_count": len(same), "consistent": len({c[3] for c in same}) == 1}
+
+
 def _rate(prev, cur, dt):
     # 감소 = 카운터 리셋(리부팅)으로 간주 -- 그 구간은 null(설계 §3)
     if prev is None or cur is None or dt <= 0 or cur < prev:

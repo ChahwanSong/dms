@@ -76,3 +76,163 @@ def test_sort_keyed_is_the_same_rule_with_precomputed_values(order):
     got = sort_keyed([(h, metric_value(r, "bytes")) for h, r in zip(heads, rows)], order)
     assert [h["target"] for h in got] == expected
     assert [h["target"] for h in got[-2:]] == ["x", "none"]          # 모름 둘은 맨 뒤 -- 같은 시각이면 이름(s0 < s1)
+
+
+# ---- 2026-10-21: 스토리지 합계(hot_parts·maximal_targets·StorageTotals) ----
+
+@pytest.mark.parametrize("case", CASES["cases"], ids=[c["name"] for c in CASES["cases"]])
+def test_hot_parts_is_the_hot_ratio_rule_on_the_shared_cases(case):
+    # 합계의 hot 재료(hot_parts)와 목록의 hot 비율(hot_ratio)은 판정 한 벌이다 -- 공용 예제 전부에서 비율이 같다.
+    # 빈 트리(all_zero)는 재료가 (0, 0)(값)이고 비율만 정의되지 않는다.
+    from dms.usage_metrics import hot_parts
+    parts = hot_parts(case["buckets"])
+    ratio = None if parts is None or parts[1] == 0 else parts[0] / parts[1]
+    assert ratio == hot_ratio(case["buckets"])
+    if case["name"] == "all_zero_is_unknown":
+        assert parts == (0, 0)
+    if case["name"] in ("empty", "missing_bytes_is_unknown", "bool_bytes_is_unknown"):
+        assert parts is None
+
+
+def _heads(*targets):
+    return [{"target": t} for t in targets]
+
+
+def test_maximal_targets_compare_path_components_not_string_prefixes():
+    from dms.usage_metrics import maximal_targets
+    heads = _heads("team", "team/sub1", "team-x", "team-x/a", "teamb", "a/b", "a", "x/y/z", "x/y")
+    top, nested, invalid = maximal_targets(heads)
+    # 'team' 은 'team-x'·'teamb' 의 조상이 아니다(문자열 접두), 'a/b' 는 뒤에 나온 'a' 의 하위다(순서 무관)
+    assert [h["target"] for h in top] == ["team", "team-x", "teamb", "a", "x/y"]
+    assert (nested, invalid) == (4, 0)
+
+
+def test_maximal_targets_count_tampered_targets_without_using_them_as_ancestors():
+    # DB 가 신뢰 경계(create_job 은 무검증 INSERT) -- 모양이 틀린 target 은 세기만 하고 조상으로도 쓰지 않는다.
+    from dms.usage_metrics import maximal_targets
+    heads = _heads("", ".", "/abs", "a/../b", "c//d", "c/", None, "x\x00y", "c/d", 7)
+    top, nested, invalid = maximal_targets(heads)
+    assert [h["target"] for h in top] == ["c/d"]                        # 'c/' 는 조상이 아니다
+    assert (nested, invalid) == (0, 9)
+
+
+def _digest(*, files=None, atime=None, size=None, summary_extra=None, broken=None):
+    summary = {} if files is None else {"total_files": files}
+    summary.update(summary_extra or {})
+    d = {"summary": summary, "time_histograms": {} if atime is None else {"atime": atime}}
+    if size is not None:
+        d["file_size_histogram"] = size
+    if broken is not None:
+        d["broken_paths_total"] = broken
+    return d
+
+
+def test_storage_totals_null_is_not_zero():
+    from dms.usage_metrics import StorageTotals
+    empty = StorageTotals().result()
+    for k in ("total_bytes", "total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
+              "scan_errors", "broken_paths_total"):
+        assert empty[k] == {"sum": None, "known": 0, "unknown": 0}, k   # 기록 없음 ≠ 0 B
+    assert empty["hot_ratio"] == {"value": None, "hot_bytes": None, "total_bytes": None, "known": 0, "unknown": 0}
+    assert empty["file_size_histogram"] == {"buckets": [], "known": 0, "unknown": 0}
+    assert (empty["oldest_scan_at"], empty["newest_scan_at"]) == (None, None)
+
+    # 빈 트리: 0 은 값이다 -- known 에 들고 sum 0. hot 은 재료 (0, 0) 이라 known 이되 비율만 None.
+    z = StorageTotals()
+    z.add({"last_scan_at": "2026-01-01T00:00:00Z"}, 0,
+          _digest(files=0, broken=0, atime=[{"min_age_days": 0, "max_age_days": 1, "bytes": 0}]))
+    zr = z.result()
+    assert zr["total_bytes"] == {"sum": 0, "known": 1, "unknown": 0}
+    assert zr["total_files"] == {"sum": 0, "known": 1, "unknown": 0}
+    assert zr["broken_paths_total"] == {"sum": 0, "known": 1, "unknown": 0}
+    assert zr["hot_ratio"] == {"value": None, "hot_bytes": 0, "total_bytes": 0, "known": 1, "unknown": 0}
+
+    # 리포트 없음(못 읽음·지연): 리포트 유래 값은 전부 unknown +1, 실 사용량은 호출자가 넘긴 대체값(bytes_count)
+    u = StorageTotals()
+    u.add({}, None, None)
+    u.add({}, 10, _digest(files=3))
+    ur = u.result()
+    assert ur["total_bytes"] == {"sum": 10, "known": 1, "unknown": 1}
+    assert ur["total_files"] == {"sum": 3, "known": 1, "unknown": 1}
+    assert ur["total_directories"] == {"sum": None, "known": 0, "unknown": 2}       # 키 없는 구형 요약도 모름
+    assert ur["hot_ratio"]["unknown"] == 2 and ur["hot_ratio"]["value"] is None
+
+
+def test_storage_totals_reject_values_that_are_not_counts():
+    # 투영(_numbers)은 유한 float·음수도 통과시킨다 -- 합에는 정수 ≥0 만 든다(음수 하나가 합을 조용히 깎지 않게).
+    from dms.usage_metrics import StorageTotals
+    acc = StorageTotals()
+    acc.add({}, -5, _digest(files=1.5, summary_extra={"total_directories": -1, "scan_errors": True},
+                            atime=[{"min_age_days": 0, "max_age_days": 7, "bytes": 10},
+                                   {"min_age_days": 181, "max_age_days": 365, "bytes": -4}]))
+    r = acc.result()
+    for k in ("total_bytes", "total_files", "total_directories", "scan_errors"):
+        assert r[k] == {"sum": None, "known": 0, "unknown": 1}, k
+    assert r["hot_ratio"]["known"] == 0 and r["hot_ratio"]["unknown"] == 1
+
+
+HOT100 = [{"min_age_days": 0, "max_age_days": 7, "bytes": 100}]
+COLD900 = [{"min_age_days": 181, "max_age_days": 365, "bytes": 900}]
+
+
+def test_storage_totals_hot_ratio_is_bytes_weighted():
+    # A 100 B 전부 hot, B 900 B 전부 cold -> 0.1(비율의 평균이면 0.5 -- 1 TB 디렉터리와 1 B 디렉터리가 같은 무게가 된다)
+    from dms.usage_metrics import StorageTotals
+    acc = StorageTotals()
+    acc.add({}, 100, _digest(atime=HOT100))
+    acc.add({}, 900, _digest(atime=COLD900))
+    acc.add({}, 7, _digest(atime=[{"min_age_days": 30, "bytes": 5}]))            # 판정 불가 -> unknown, 합에서 빠짐
+    h = acc.result()["hot_ratio"]
+    assert h["value"] == pytest.approx(0.1)
+    assert (h["hot_bytes"], h["total_bytes"], h["known"], h["unknown"]) == (100, 1000, 2, 1)
+
+
+def _size(counts, *, lows=(0, 4097, 65537), label=True):
+    out = []
+    for i, (lo, c) in enumerate(zip(lows, counts)):
+        b = {"lower_inclusive": lo, "count": c}
+        if i + 1 < len(lows):
+            b["upper_inclusive"] = lows[i + 1] - 1
+        if label:
+            b["bucket"] = f"[{lo},{b.get('upper_inclusive', 'INF')}]"
+        out.append(b)
+    return out
+
+
+def test_storage_totals_size_histogram_sums_only_the_newest_signature():
+    from dms.usage_metrics import StorageTotals
+    acc = StorageTotals()
+    acc.add({}, 1, _digest(size=_size([1, 2, 3])))                 # 가장 최근(첫) 유효 리포트 = 기준 서명
+    acc.add({}, 1, _digest(size=_size([10, 20, 30], label=False)))  # 같은 서명(라벨 없음) -- 더한다
+    acc.add({}, 1, _digest(size=_size([5, 5, 5], lows=(0, 1025, 65537))))   # 경계가 다르다 -- 모름
+    acc.add({}, 1, _digest(size=_size([1, -1, 1])))                # 깨진 개수 -- 모름
+    acc.add({}, 1, _digest(size=[]))                               # 빈 히스토그램 -- 모름
+    acc.add({}, 1, _digest())                                      # 키 없음 -- 모름
+    fs = acc.result()["file_size_histogram"]
+    assert (fs["known"], fs["unknown"]) == (2, 4)
+    assert fs["buckets"] == [
+        {"bucket": "[0,4096]", "lower_inclusive": 0, "upper_inclusive": 4096, "count": 11},
+        {"bucket": "[4097,65536]", "lower_inclusive": 4097, "upper_inclusive": 65536, "count": 22},
+        {"bucket": "[65537,INF]", "lower_inclusive": 65537, "count": 33}]          # 마지막 열린 구간은 상한 키 없음
+    # 첫 리포트가 깨져 있으면 기준은 그다음 유효 리포트다(깨진 리포트가 기준을 정하지 않는다)
+    acc = StorageTotals()
+    acc.add({}, 1, _digest(size=[{"count": 1}]))
+    acc.add({}, 1, _digest(size=_size([4, 0, 0], label=False)))
+    fs = acc.result()["file_size_histogram"]
+    assert (fs["known"], fs["unknown"]) == (1, 1)
+    assert fs["buckets"][0] == {"lower_inclusive": 0, "upper_inclusive": 4096, "count": 4}   # 투영이 버린 라벨은 키 없음
+
+
+def test_storage_totals_scan_age_range_is_of_the_summed_set():
+    # 시점 범위는 더한 대상(호출자가 넘긴 최상위)들의 최신 스캔 시각이다 -- 하위 대상의 더 새 시각은 들어가지 않는다
+    from dms.usage_metrics import StorageTotals, maximal_targets
+    heads = [{"target": "team/sub1", "last_scan_at": "2026-10-06T00:00:00Z"},
+             {"target": "team", "last_scan_at": "2026-10-02T00:00:00Z"},
+             {"target": "other", "last_scan_at": "2026-08-16T00:00:00Z"}]
+    top, nested, _ = maximal_targets(heads)
+    acc = StorageTotals()
+    for h in top:
+        acc.add(h, 1, None)
+    r = acc.result()
+    assert nested == 1
+    assert (r["oldest_scan_at"], r["newest_scan_at"]) == ("2026-08-16T00:00:00Z", "2026-10-02T00:00:00Z")

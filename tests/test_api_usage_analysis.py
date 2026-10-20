@@ -729,6 +729,13 @@ def test_real_chunk_bounds_every_id_list_of_the_window_and_the_stream(tmp_path, 
     rows = client.get("/api/admin/usage/scan-targets", params={"sort": "hot", "limit": 200}).json()
     assert len(rows) == 200
     assert client.get("/api/admin/usage/export", params={"storage": "s1"}).json()["count"] == 1100
+    # 스토리지 합계(2026-10-21)도 같은 묶음 상한 안이다 -- 최상위 1,100 개 중 캐시에 없는 580 개는 읽기 예산(500)만큼만
+    # 열고(아티팩트가 없어 전부 못 읽음 -- 캐시에 넣지 않는다) 나머지는 pending 이다.
+    tot = client.get("/api/admin/usage/storage-totals", params={"storage": "s1"}).json()
+    assert (tot["target_count"], tot["summed_target_count"]) == (1100, 1100)
+    assert (tot["unreadable_count"], tot["pending_count"], tot["progressed"]) == (500, 80, False)
+    assert tot["total_files"] == {"sum": 520 * 7, "known": 520, "unknown": 580}
+    assert tot["total_bytes"]["known"] == 1100                 # 못 읽은·지연 대상도 실 사용량은 bytes_count(목록 열 규칙)
 
     sizes = {name: [len(list(c[0][1] if name in ("recent_scans_for_targets",) else c[0][0])) for c in cs]
              for name, cs in calls.items()}
@@ -781,3 +788,217 @@ def test_storages_summary_requires_admin(tmp_path):
     client = _client(tmp_path, tmp_path / "artifacts")
     _login(client, "user1", "user")
     assert client.get("/api/admin/usage/storages").status_code == 403
+
+
+# ---- 2026-10-21: 스토리지 합계(GET /api/admin/usage/storage-totals) ----
+
+TOTALS = "/api/admin/usage/storage-totals"
+_TOTAL_KEYS = ["storage_name", "computed_at", "truncated", "window_limit", "target_count", "summed_target_count",
+               "nested_target_count", "invalid_target_count", "unreadable_count", "pending_count", "progressed",
+               "total_bytes", "total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
+               "scan_errors", "broken_paths_total", "hot_ratio", "file_size_histogram", "oldest_scan_at",
+               "newest_scan_at", "filesystem"]
+
+
+def _totals(client, storage="s1"):
+    r = client.get(TOTALS, params={"storage": storage})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert list(body) == _TOTAL_KEYS                           # 계약 모양(포탈 타입과 한 벌)
+    return body
+
+
+def test_storage_totals_sum_only_maximal_targets_with_their_latest_scan(tmp_path):
+    # 대상 경로가 겹치면(team ⊃ team/sub1) 단순 합은 하위를 두 번 센다 -- 최상위 대상의 최신 scan 만 더한다. 'team-x' 는
+    # 'team' 의 하위가 아니다(문자열 접두가 아니라 경로 성분). 하위가 상위보다 새로 스캔돼도 상위 값이 들어가고, 시점 범위에
+    # 하위의 시각은 들어가지 않는다. 하위 대상의 리포트는 열지도 않는다.
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    spec = [("team", "2026-09-01", dict(total=10, files=1, hot_bytes=10, cold_bytes=0)),
+            ("team", "2026-09-20", dict(total=50, files=7, hot_bytes=50, cold_bytes=0)),
+            ("team/sub1", "2026-10-01", dict(total=5, files=2, hot_bytes=5, cold_bytes=0)),
+            ("team-x", "2026-09-10", dict(total=100, files=4, hot_bytes=100, cold_bytes=0)),
+            ("other", "2026-08-16", dict(total=1000, files=3, hot_bytes=0, cold_bytes=1000))]
+    jobs = {}
+    for target, day, m in spec:
+        jid, _ = _scan_job(client, target=target, art_base=art, report=_metric_report(**m))
+        _at(client, jid, f"{day}T00:00:00Z")
+        jobs[target] = jid
+    _scan_job(client, storage="s2", target="elsewhere", art_base=art)         # 다른 스토리지는 섞이지 않는다
+    t = _totals(client)
+    assert t["storage_name"] == "s1" and t["truncated"] is False and t["window_limit"] == 10000
+    assert (t["target_count"], t["summed_target_count"], t["nested_target_count"], t["invalid_target_count"]) == (
+        4, 3, 1, 0)
+    assert (t["unreadable_count"], t["pending_count"], t["progressed"]) == (0, 0, True)
+    assert t["total_bytes"] == {"sum": 50 + 100 + 1000, "known": 3, "unknown": 0}
+    assert t["total_files"] == {"sum": 14, "known": 3, "unknown": 0}
+    assert t["total_directories"] == {"sum": 9, "known": 3, "unknown": 0}
+    assert t["total_entries"] == {"sum": 30, "known": 3, "unknown": 0}
+    assert t["total_symlinks"] == t["total_other"] == t["scan_errors"] == t["broken_paths_total"] == {
+        "sum": 0, "known": 3, "unknown": 0}                                    # 0 은 값이다
+    # hot 은 bytes 가중: (50 + 100) / 1150 -- 비율의 평균((1 + 1 + 0) / 3)이 아니다
+    assert t["hot_ratio"] == {"value": pytest.approx(150 / 1150), "hot_bytes": 150, "total_bytes": 1150,
+                              "known": 3, "unknown": 0}
+    assert t["file_size_histogram"] == {"buckets": [{"bucket": "[0,4096]", "lower_inclusive": 0,
+                                                     "upper_inclusive": 4096, "count": 14}], "known": 3, "unknown": 0}
+    assert (t["oldest_scan_at"], t["newest_scan_at"]) == ("2026-08-16T00:00:00Z", "2026-09-20T00:00:00Z")
+    assert t["filesystem"] is None                             # 미등록 이름(에이전트 보고도 없다)
+    cached = {r["job_id"] for r in _digest_rows(client)}
+    assert cached == {jobs["team"], jobs["team-x"], jobs["other"]}            # 하위(team/sub1)는 열지 않았다
+    again = _totals(client)
+    assert again["progressed"] is False and again["total_bytes"] == t["total_bytes"]
+
+
+def test_storage_totals_unreadable_top_target_is_unknown_but_bytes_fall_back_to_db(tmp_path):
+    # 못 읽은 최상위 대상: 리포트 유래 값은 모름(unknown), 실 사용량만 러너가 남긴 bytes_count(목록 열과 같은 대체).
+    # 캐시에 넣지 않는다 -- 리포트가 나중에 생기면 다음 호출이 읽는다. 하위 대상으로 대체하지 않는다.
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    jid, _ = _scan_job(client, target="team", art_base=art, write_report=False)
+    client.app.state.repos.data_jobs.set_artifact(jid, artifact_uri="file:///x",
+                                                  result_summary={"files": 10, "bytes": 1234})
+    sub, _ = _scan_job(client, target="team/sub", art_base=art)
+    _at(client, jid, "2026-09-01T00:00:00Z")
+    _at(client, sub, "2026-09-02T00:00:00Z")
+    t = _totals(client)
+    assert (t["summed_target_count"], t["nested_target_count"]) == (1, 1)
+    assert (t["unreadable_count"], t["pending_count"], t["progressed"]) == (1, 0, False)
+    assert t["total_bytes"] == {"sum": 1234, "known": 1, "unknown": 0}
+    assert t["total_files"] == {"sum": None, "known": 0, "unknown": 1}        # 하위 값(7)으로 메우지 않는다
+    assert t["hot_ratio"]["value"] is None and t["hot_ratio"]["unknown"] == 1
+    assert t["file_size_histogram"] == {"buckets": [], "known": 0, "unknown": 1}
+    assert _digest_rows(client) == []
+    d = art / jid / "execution"
+    d.mkdir(parents=True)
+    (d / "dscan-report.json").write_text(json.dumps(_report()))
+    t = _totals(client)
+    assert (t["unreadable_count"], t["progressed"]) == (0, True)
+    assert t["total_bytes"] == {"sum": 50, "known": 1, "unknown": 0}          # 리포트를 읽으면 목록 열처럼 리포트 값
+    assert t["total_files"] == {"sum": 7, "known": 1, "unknown": 0}
+
+
+def test_storage_totals_read_budget_leaves_pending_and_next_call_progresses(tmp_path, monkeypatch):
+    # 한 호출이 여는 아티팩트는 예산만큼 -- 나머지는 pending(리포트 모름)이고 다음 호출이 캐시가 찬 만큼 이어 간다.
+    # 포탈은 pending > 0 && progressed 동안 다시 부른다 -- 다 읽은 뒤의 호출은 progressed False 다(멈춤 신호).
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_TOTALS_READ_BUDGET", 1)
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for i, t in enumerate(["a", "b", "c"]):
+        jid, _ = _scan_job(client, target=t, art_base=art)
+        _at(client, jid, f"2026-09-0{i + 1}T00:00:00Z")
+    seen = []
+    for _ in range(4):
+        t = _totals(client)
+        seen.append((t["pending_count"], t["progressed"], t["total_files"]["known"], t["total_files"]["unknown"]))
+    assert seen == [(2, True, 1, 2), (1, True, 2, 1), (0, True, 3, 0), (0, False, 3, 0)]
+    assert t["unreadable_count"] == 0 and t["total_files"]["sum"] == 21
+
+
+def test_storage_totals_empty_and_unknown_storage_is_null_not_zero(tmp_path):
+    # 기록이 없는 스토리지(등록만 됨)·없는 이름은 404 가 아니라 빈 합계 -- 모든 sum 은 null(0 B 가 아니다)
+    client = _client(tmp_path, tmp_path / "artifacts")
+    _login(client, "admin", "admin")
+    client.app.state.repos.storages.create(storage_name="alpha", mount_path="/alpha", managed_root="/alpha/m",
+                                           backend_type="cephfs", actor="t")
+    for name in ("alpha", "nope"):
+        t = _totals(client, name)
+        assert t["storage_name"] == name
+        assert (t["target_count"], t["summed_target_count"], t["nested_target_count"], t["invalid_target_count"],
+                t["unreadable_count"], t["pending_count"], t["progressed"], t["truncated"]) == (
+            0, 0, 0, 0, 0, 0, False, False)
+        for k in ("total_bytes", "total_files", "total_directories", "total_symlinks", "total_other", "total_entries",
+                  "scan_errors", "broken_paths_total"):
+            assert t[k] == {"sum": None, "known": 0, "unknown": 0}, k
+        assert t["hot_ratio"] == {"value": None, "hot_bytes": None, "total_bytes": None, "known": 0, "unknown": 0}
+        assert t["file_size_histogram"] == {"buckets": [], "known": 0, "unknown": 0}
+        assert t["oldest_scan_at"] is None and t["newest_scan_at"] is None and t["filesystem"] is None
+
+
+def test_storage_totals_empty_name_is_its_own_storage(tmp_path):
+    # 실린 storage 는 빈 문자열도 그 이름 하나다(scan-targets 와 같은 정확 일치 -- /storages 가 빈 이름도 탭으로 낸다).
+    # 「필터 없음」으로 접으면 빈 이름 탭의 합계가 전 스토리지가 된다. storage 자체가 없으면 422(필수).
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    _scan_job(client, storage="s1", target="a", art_base=art, report=_report(mtime_bytes=(10,)))
+    _scan_job(client, storage="s2", target="b", art_base=art, report=_report(mtime_bytes=(20,)))
+    blank, _ = _scan_job(client, storage="s1", target="c", art_base=art, report=_report(mtime_bytes=(40,)))
+    client.app.state.repos.db.execute("UPDATE data_jobs SET storage_name = '' WHERE job_id = :j", {"j": blank})
+    t = _totals(client, "")
+    assert t["storage_name"] == "" and t["target_count"] == 1
+    assert t["total_bytes"] == {"sum": 40, "known": 1, "unknown": 0}
+    assert _totals(client, "s1")["total_bytes"]["sum"] == 10
+    assert client.get(TOTALS).status_code == 422
+
+
+def test_storage_totals_requires_admin(tmp_path):
+    client = _client(tmp_path, tmp_path / "artifacts")
+    _login(client, "user1", "user")
+    assert client.get(TOTALS, params={"storage": "s1"}).status_code == 403
+
+
+def test_storage_totals_truncation_is_told(tmp_path, monkeypatch):
+    # 창(최근 스캔 순 _WINDOW_LIMIT)을 넘으면 부분 합이라고 말한다(조용한 절단 금지) -- 창 안의 대상만 센다.
+    from dms.api import routes_usage
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 2)
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for i, t in enumerate(["t1", "t2", "t3"]):
+        jid, _ = _scan_job(client, target=t, art_base=art)
+        _at(client, jid, f"2026-09-0{i + 1}T00:00:00Z")
+    t = _totals(client)
+    assert (t["truncated"], t["window_limit"], t["target_count"], t["summed_target_count"]) == (True, 2, 2, 2)
+    assert t["oldest_scan_at"] == "2026-09-02T00:00:00Z"              # 창 밖(t1)은 시점 범위에도 없다
+    monkeypatch.setattr(routes_usage, "_WINDOW_LIMIT", 3)
+    assert _totals(client)["truncated"] is False
+
+
+def test_storage_totals_tampered_target_rows_are_counted_not_summed(tmp_path):
+    # DB 가 신뢰 경계(create_job 은 무검증 INSERT): 모양이 틀린 target 은 invalid 로 세고 합에도 조상 판정에도 쓰지 않는다 --
+    # 'team/' 를 조상으로 믿으면 'team/x' 가 빠지고, '' 를 조상으로 믿으면 스토리지 전체가 빠진다.
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    for target in ("team/", "", "a/../b"):
+        _scan_job(client, target=target, art_base=art, report=_report(mtime_bytes=(999,)))
+    _scan_job(client, target="team/x", art_base=art, report=_report(mtime_bytes=(10,)))
+    t = _totals(client)
+    assert (t["target_count"], t["summed_target_count"], t["invalid_target_count"], t["nested_target_count"]) == (
+        4, 1, 3, 0)
+    assert t["total_bytes"] == {"sum": 10, "known": 1, "unknown": 0}
+
+
+def _agent_report(storage, *, status, is_mountpoint, total, used):
+    return {"mounts": [{"storage_name": storage, "mount_path": f"/{storage}", "exists": True,
+                        "is_mountpoint": is_mountpoint, "readable": True, "writable": True, "status": status,
+                        "reason": None if status == "Ready" else "not_a_mountpoint"}],
+            "os": {"disks": [{"storage_name": storage, "total_bytes": total, "used_bytes": used}]}}
+
+
+def test_storage_totals_filesystem_from_agent_reports(tmp_path):
+    # df 는 그 스토리지가 Ready 마운트포인트인 노드의 statvfs 만 -- 마운트가 없는 노드가 실은 노드 루트 디스크 값(실측:
+    # 노드마다 다른 40 GB)은 버린다. 미등록 이름은 옛 보고가 Ready 라도 null(지금 값이 아니다).
+    art = tmp_path / "artifacts"
+    client = _client(tmp_path, art)
+    _login(client, "admin", "admin")
+    repos = client.app.state.repos
+    repos.storages.create(storage_name="alpha", mount_path="/alpha", managed_root="/alpha/m",
+                          backend_type="cephfs", actor="t")
+    repos.agents.ingest("w1", _agent_report("alpha", status="Missing", is_mountpoint=False,
+                                            total=40483942400, used=15265992704))
+    repos.agents.ingest("w4", _agent_report("alpha", status="Ready", is_mountpoint=True,
+                                            total=24498929664, used=37748736))
+    repos.agents.ingest("w9", _agent_report("gone", status="Ready", is_mountpoint=True, total=100, used=1))
+    _scan_job(client, storage="alpha", target="a", art_base=art)
+    _scan_job(client, storage="gone", target="b", art_base=art)
+    fs = _totals(client, "alpha")["filesystem"]
+    assert {k: fs[k] for k in ("total_bytes", "used_bytes", "node_name", "fresh", "node_count", "consistent")} == {
+        "total_bytes": 24498929664, "used_bytes": 37748736, "node_name": "w4", "fresh": True, "node_count": 1,
+        "consistent": True}
+    assert isinstance(fs["reported_at"], str)
+    assert _totals(client, "gone")["filesystem"] is None
