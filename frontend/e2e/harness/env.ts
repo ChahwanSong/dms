@@ -29,6 +29,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(here, "..", "..", "..");
 export const distDir = path.join(repoRoot, "frontend", "dist");
 export const fakeBinDir = path.join(repoRoot, "frontend", "e2e", "fixtures", "bin");
+// e2e 컨트롤러 진입점(2026-10-21 E12): `dms controller` 와 같은 배선에 drm 잡만 가짜 drm 으로 실제로 돌리는 어댑터를
+// 끼운다 -- 배치 rm 의 「확인한 경로가 실제로 지워진다」를 stub 으로는 볼 수 없다(그 파일 docstring).
+export const e2eControllerPath = path.join(repoRoot, "frontend", "e2e", "fixtures", "e2e_controller.py");
 
 /**
  * dms CLI 실행 파일. 워크트리에는 venv 가 없어 본 저장소의 공용 venv 로 떨어진다
@@ -45,6 +48,15 @@ export function findDmsBin(): string {
   }
   throw new Error(
     `dms CLI 부재: ${candidates.join(", ")} 어디에도 없다. venv 를 만들고 편집 설치하라.`);
+}
+
+/** dms CLI 와 같은 venv 의 python -- e2e 컨트롤러 진입점을 같은 인터프리터·같은 PYTHONPATH 로 띄운다. */
+export function pythonBesideDms(dmsBin: string): string {
+  const candidate = path.join(path.dirname(dmsBin), "python");
+  if (!fs.existsSync(candidate)) {
+    throw new Error(`python 부재: ${candidate} -- dms CLI 옆 venv 인터프리터가 있어야 e2e 컨트롤러를 띄운다.`);
+  }
+  return candidate;
 }
 
 /**
