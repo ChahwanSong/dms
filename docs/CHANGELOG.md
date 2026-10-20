@@ -95,6 +95,53 @@ DMS 를 clean-slate 로 지은 과정의 **완료 기록**이다. 각 슬라이�
   10.10.10.11~15. 실 Chrome: 컨트롤 상태 화면 힌트 문구 동일 + 「권장 값 채우기」로
   입력이 그 목록으로 채워짐(캡처 d126-no-proxy-hint.png).
 
+### ✅ 사용량 분석 스토리지별 탭 + 창 상한 1만 + UI 정리 / 비 UTF-8 파일 이름에 잡이 Failed 되던 문제 — **완료·실증**(2026-10-20, d182)
+
+사용자 요청 1: 「사용자 분석 내용이 지금은 처음부터 전체 등록된 내용이 보여지고 필터를 걸면 전체의 5천개가 서버에서
+스캔되는거같아. 이 구현내용을 각 스토리지 별로 처음부터 나뉘어져서 보이게끔 하고 필터 및 서버의 스캔도 각 스토리지 별로
+진행되도록 구현 업데이트해줘. 서버의 스캔 상한선도 5천개에서 1만개로 상향 조정해줘. 마지막에 깔끔하고 심플하고 직관적으로
+보이게 UI 개선작업도 수행해.」
+
+- **처음부터 스토리지 탭**(「전체」 없음): 등록 이름순 | 미등록 이름순(「미등록」 표시, 정리 버튼은 그 탭의 경고 띠). 목록·
+  지표 정렬 창·CSV 요청에 늘 storage 가 실린다 — 서버의 창(최근 스캔 순 상한)도 그 스토리지 안에서 만든다. 기본 탭은
+  기록 있는 등록 스토리지 이름순 첫째(URL 에 쓰지 않고, 고른 뒤엔 붙잡는다). URL `?storage=` = 탭, `&target=` = 펼친 행.
+- **창 상한 1만**(`routes_usage._WINDOW_LIMIT`): 상수만 올리면 1만 행 CSV 동시 2~3건이 api 1Gi 를 넘었다(실측 +465MiB/건).
+  목록은 정렬 키만 500개 묶음으로 계산하고 반환 행만 전체 포인트, 내보내기는 500 타깃 묶음 스트리밍(JSON 모양 그대로, count
+  맨 뒤), 다이제스트 캐시 `put_many`. 1만 타깃 sqlite: 내보내기 16.5초·+469MiB → 2.8초·+53MiB, 지표 정렬 15초·+283MiB →
+  1.3초·+29MiB. 응답은 옛 구현과 바이트 비교 테스트로 고정(`tests/test_usage_equivalence.py`).
+- 인덱스 `idx_data_jobs_scan_target (storage_name, state, operation, target, updated_at)` — 스토리지별 조회가 DB 수준에서
+  그 스토리지만 읽는다(부분 인덱스는 PG generic plan 함정으로 쓰지 않는다). 탭 요약 API `GET /api/admin/usage/storages`
+  (window_limit + 스토리지별 대상 수·성공 scan 수·최근 스캔, 등록 ∪ 성공 scan 이름). 총 사용량은 싣지 않는다(타깃 경로가 겹쳐
+  합이 이중 계산). storage 는 서버에서 선택 인자(배포 중 옛 탭 호환), 실렸으면 빈 값이라도 정확 일치.
+- **UI 정리**: 스토리지 열·행 배지 제거(6열), 경로 열 고정(375 가로 스크롤 중에도 어느 경로인지), 넓은 화면에선 경로 칸이
+  남는 폭만(긴 경로가 최근 스캔 열을 밀지 않는다), 펼친 상세는 타일 4개 → 한 줄 수치 + 공용 Segmented + 스캔 이력 접기,
+  375 에서 상세 폭 = 보이는 표 폭(예전엔 표 전체를 밀어야 보였다), 각주 한 줄, CSV 는 탭 하나씩 `dms-usage-<storage>-…csv`.
+- 리뷰(5개 축 + 반박 검증) 13건 반영 — 빈 이름 탭이 전 스토리지로 새던 범위, 요약 재조회의 기본 탭 흔들림·자리표시 회귀,
+  경로 검색 중 「1만 개 안에서 정렬」 단정, 흐린 정렬 아이콘(opacity)이 고정 칸 위로 비침, 탭 key·화살표 포커스 노출 등.
+- 실증(d182, 실 Chrome): 탭 cephfs-dms(9)·cephfs-secondary(0)·cephfs-third(1), scan-targets·export 6건 모두 storage 실림,
+  실 사용량 내림 16.0 MiB → 6 B, CSV 두 파일이 각각 그 스토리지 행만(9·1), 화살표는 요청 0건·Enter 로 선택, 375 넘침 0·상세
+  293 = 래퍼 293, 행 접기 후 ?storage 유지, 콘솔 오류 0. PG 에 새 인덱스 생성 확인.
+
+사용자 요청 2: 「작업을 수행하다가 파일이름에 오류가 있으면 Failed 가 되고있어. Broken path로 분류된거 같긴한데, Failed 로
+종료가 안되고 나머지 파일/디렉토리들도 수행 완료되게 해줘.」
+
+- 원인: 러너가 도구 출력을 strict UTF-8 로 디코드했다(`subprocess.run(text=True)`). 도구(dscan·dsync·drm·nsync)는 이름을
+  바이트로 다뤄 **이미 전부 처리하고 rc 0** 인데, dscan --print 의 broken 표본·drm --dryrun 목록·오류 줄에 CP949 이름 바이트가
+  찍히면 러너가 UnicodeDecodeError 로 죽어 Failed(rm 은 미리보기에서 죽어 컨펌 불가). 그 경로가 broken 인 이유는 이름이 아니라
+  `abnormal_time`(시각이 10년보다 오래됨)이다.
+- 수정(잡 이미지만): `runner._subprocess_run` — UTF-8 `errors="replace"`(surrogateescape 금지: 로그·summary·DB·JSON 에서
+  터진다), `parsers.parse_scan_counts` 도 replace(크래시만 고치면 files/bytes 가 조용히 null 이었다). 실제 자식 프로세스로
+  원시 바이트를 찍는 회귀 테스트. ARCHITECTURE 불변식 「파일 이름은 바이트다」.
+- 재현·실증(테스트베드 cephfs-third, EUC-KR 「다운로드」 디렉터리 + 2009년 시각 파일 + Latin-1·깨진 바이트 이름, 264 항목):
+  수정 전(잡 이미지 d179) scan → `execution_failed`(launcher 의 같은 `UnicodeDecodeError … 0xb4`), rm 미리보기 →
+  `preview_failed`. 수정 뒤(d182) 같은 트리: scan Succeeded files 264·bytes 265,216(find 실측과 같다), stdout.log 의 broken
+  2줄은 U+FFFD 로; quiet scan 도 값 채움; rm 미리보기 6 → 컨펌 → Succeeded(실제로 지워짐); dsync 미리보기 264 → 컨펌 →
+  Succeeded, 소스·목적지 매니페스트(이름 바이트·종류·권한·크기)와 내용 해시 일치, 2009 mtime 보존, `ls -b` 이름 바이트 동일;
+  회귀 scan(d64-sync-a) 10/50 그대로. 백엔드 3334, vitest 1317+, e2e 23 통과. 배포: api·controller·잡 이미지 d182(에이전트 d179
+  그대로). 실증 요청·트리는 정리.
+- 후속(BACKLOG §4): 비 UTF-8 이름을 리포트에 드러낼지(dscan 사유·카운터 — 결정 대기), drm unlink 실패 rc 0, 제출 경계 lone
+  surrogate 500.
+
 ### ✅ 사용량 분석 목록 열 정렬(실 사용량·파일 수·hot 비율·스캔 횟수·최근 스캔) — **완료·실증**(2026-10-19, d181)
 
 사용자 요청: 「사용량 분석에서 실사용량, 파일수, hot비율 등을 오름/내림차순 정렬할수있게 기능 구현해줘.」

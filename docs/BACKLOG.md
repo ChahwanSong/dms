@@ -197,6 +197,19 @@
 
 ## 4. 알려진 해석·잔여 리스크 (문서)
 
+- 📝 **비 UTF-8 이름은 broken 사유가 아니다 — 보이게 할지는 결정 대기**(2026-10-20, d182 러너 수정과 함께 조사).
+  러너는 이제 그런 이름에 죽지 않지만(ARCHITECTURE 「파일 이름은 바이트다」), dscan(포크 1b93d54)에는 이름 인코딩 사유가
+  없어 운영자가 그런 이름이 있는지 리포트로 알 수 없다(사고 경로가 broken 이었던 건 `abnormal_time` — 10년보다 오래된
+  시각 — 때문이다). 선택지: 포크 `dscan.c` 에 `invalid_name_encoding`(d_name 만 엄격 UTF-8 검증 — 전체 경로를 보면
+  그 아래 자손이 전부 걸린다) + 요약 카운터 `invalid_name_entries`, 리포트·`--print` 를 유효 UTF-8(U+FFFD)로 쓰고 원래
+  바이트는 `path_hex` 로. 주의: 레거시 트리엔 그런 이름이 수천 개일 수 있어 `broken_paths_total` 의미가 커진다 —
+  broken 에 넣을지, 카운터만 둘지가 사용자 결정. 잡 이미지·에이전트 재빌드 필요.
+- 📝 **drm 은 unlink 실패에도 종료 코드 0**(포크 `drm.c` — `mfu_flist_unlink` 가 void). 일부만 지워졌는데 rm 이
+  Succeeded 로 끝날 수 있다(같은 조사에서 발견). 해법: 포크에서 실패 수를 rc 로, 또는 러너가 오류 줄을 판정.
+- 📝 **제출 경계의 lone surrogate 는 422 가 아니라 500**(같은 조사). JSON 본문 `"target":"a/\udcb4x"` 는 파이썬 json·
+  pydantic 을 통과해 DB INSERT 에서 UnicodeEncodeError → 500(요청 행은 안 생긴다). `domain.validate_relative_path` 에
+  `path.encode("utf-8")` 실패 → `unsafe_path`(이미 양쪽 등록된 코드)를 넣으면 422 가 된다. 경로를 받는 다른 입력도 같다.
+
 - 📝 **dsync 가 "목적지 부모 쓰기 불가" 에서 종료 코드 0**(2026-09-30 d139 실증에서 발견).
   포크 `dsync.c`(MPIFILEUTILS_REF 1b93d54) 는 목적지 존재와 무관하게 부모 W_OK 를 요구하고,
   실패하면 `MFU_LOG(ERR)` 후 `goto ERROR` 인데 `rc` 가 초기값 0 이라 **아무것도 복사하지 않고
